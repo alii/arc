@@ -1,21 +1,4 @@
-//// Packed lookup tables for the observation-based Temporal calendars.
-////
-//// Pure data, no arithmetic: `temporal_calendar.gleam` unpacks these and does
-//// the date math. Split out so the calendar arithmetic reads as one coherent
-//// module instead of ~1,800 lines of table.
-////
-//// * Islamic Umm al-Qura — packed month lengths + year-start corrections for
-////   AH 1300..1600, from ICU4C `islamcal.cpp`.
-//// * Chinese / Korean (dangi) lunisolar — packed year records for 1700..2300,
-////   from ICU4C `chnsecal.cpp` / `koreancal.cpp`.
-////
-//// Every table answers "is this year covered?" itself, with `Error(Nil)`
-//// outside its range — there is no separately-maintained range test that
-//// could drift out of step with the data.
-
-/// Packed month lengths for AH 1300..1600 (bit 11-(month-1) set → 30 days),
-/// from ICU4C islamcal.cpp UMALQURA_MONTHLENGTH. `Error(Nil)` outside the
-/// table — a year the ICU data does not cover, where the civil fallback runs.
+// ah 1300..1600 from icu islamcal.cpp, bit 11-(month-1) set = 30 days
 pub fn umalqura_month_length(y: Int) -> Result(Int, Nil) {
   case y {
     1300 -> Ok(2730)
@@ -323,9 +306,7 @@ pub fn umalqura_month_length(y: Int) -> Result(Int, Nil) {
   }
 }
 
-/// Corrections to the linear year-start estimate for AH 1300..1600, from
-/// ICU4C islamcal.cpp umAlQuraYrStartEstimateFix. `Error(Nil)` outside the
-/// table, exactly like `umalqura_month_length`.
+// year-start estimate fixes, ah 1300..1600, icu islamcal.cpp
 pub fn umalqura_year_start_fix(y: Int) -> Result(Int, Nil) {
   case y {
     1300 -> Ok(0)
@@ -633,10 +614,7 @@ pub fn umalqura_year_start_fix(y: Int) -> Result(Int, Nil) {
   }
 }
 
-/// Packed year records for the Chinese lunisolar calendar, 1700..2300:
-/// bits 0-12 month lengths, bits 13-16 leap month number (0 = none), bits 17+
-/// the new-year offset. `temporal_calendar` unpacks them; `Error(Nil)` outside
-/// the table selects the mean-motion fallback.
+// icu chnsecal.cpp 1700..2300: bits 0-12 months, 13-16 leap month, 17+ new year
 pub fn chinese_data(y: Int) -> Result(Int, Nil) {
   case y {
     1700 -> Ok(6_425_893)
@@ -1244,9 +1222,7 @@ pub fn chinese_data(y: Int) -> Result(Int, Nil) {
   }
 }
 
-/// Packed year records for the Korean (dangi) lunisolar calendar, same layout
-/// as `chinese_data` — the two differ only where the meridian used to compute
-/// the new moon puts a month boundary on a different day.
+// same layout as chinese_data, from icu koreancal.cpp
 pub fn dangi_data(y: Int) -> Result(Int, Nil) {
   case y {
     1700 -> Ok(6_425_893)

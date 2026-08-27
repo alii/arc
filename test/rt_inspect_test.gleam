@@ -1,6 +1,3 @@
-//// arc/rt/inspect renderings that console.log relies on: nested objects and
-//// arrays, holes, cycles, functions and the primitive forms.
-
 import arc/rt/builtins/console as b_console
 import arc/rt/inspect
 import arc/rt/obj as rt_obj

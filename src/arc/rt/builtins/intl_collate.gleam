@@ -1,14 +1,3 @@
-//// The Intl.Collator comparison algorithm (ECMA-402 §10.3.3 CompareStrings).
-////
-//// A pure `String -> String -> Int` function: no `Agent`, no heap, no JS
-//// values — `intl.gleam` reads the resolved options off a `CollatorState` and
-//// calls `collator_compare`, which is the only entry point.
-////
-//// The comparison is a simplified root-locale UCA: a *primary* level over base
-//// letters (accents and case folded away), then a *secondary* level over
-//// accents and a *tertiary* level over case, each enabled by the collator's
-//// `sensitivity` and, for the case level, ordered by `caseFirst`.
-
 import arc/rt/intl_data.{
   type CaseFirst, type CollatorSensitivity, type CollatorState, CaseFirstFalse,
   CaseFirstLower, CaseFirstUpper, SensAccent, SensBase, SensCase, SensVariant,
@@ -20,6 +9,7 @@ import gleam/order
 import gleam/result
 import gleam/string
 
+// ecma-402 §10.3.3, simplified root-locale uca
 pub fn collator_compare(c: CollatorState, a: String, b: String) -> Int {
   let sensitivity = c.sensitivity
   let numeric = c.numeric
@@ -32,7 +22,6 @@ pub fn collator_compare(c: CollatorState, a: String, b: String) -> Int {
   }
   let a = prep(a)
   let b = prep(b)
-  // Primary: base letters (case- and accent-folded).
   let pa = collation_primary(a)
   let pb = collation_primary(b)
   let levels = fn() { collator_levels(sensitivity, c.case_first, a, b) }
@@ -50,8 +39,6 @@ pub fn collator_compare(c: CollatorState, a: String, b: String) -> Int {
   }
 }
 
-/// Secondary (accents) and tertiary (case) comparisons per sensitivity.
-/// The tertiary (case) level honours `[[CaseFirst]]` (§10.1.2 `kf`).
 fn collator_levels(
   sensitivity: CollatorSensitivity,
   case_first: CaseFirst,
@@ -66,9 +53,7 @@ fn collator_levels(
   }
   let tertiary = fn() {
     case case_first {
-      // Uppercase first: compare as-is, so "A" (0x41) precedes "a" (0x61).
       CaseFirstUpper -> simple_compare(fold_combining(a), fold_combining(b))
-      // Lowercase first — also the `false` (en locale default) order.
       CaseFirstLower | CaseFirstFalse ->
         simple_compare(
           swap_case(fold_combining(a)),
@@ -103,7 +88,6 @@ fn strip_punctuation(s: String) -> String {
   |> string.from_utf_codepoints
 }
 
-/// Case-fold + strip accents to the primary collation key.
 fn collation_primary(s: String) -> String {
   string.lowercase(s)
   |> string.to_graphemes
@@ -111,8 +95,6 @@ fn collation_primary(s: String) -> String {
   |> string.join("")
 }
 
-/// Normalize combining sequences to precomposed forms (rough NFC for the
-/// Latin-1 accents the tests exercise), keeping accents.
 fn fold_combining(s: String) -> String {
   string.to_graphemes(s)
   |> list.map(compose_grapheme)
@@ -133,7 +115,6 @@ fn compose_grapheme(g: String) -> String {
   }
 }
 
-/// base codepoint + combining mark → precomposed character (Latin-1 subset).
 fn precomposed(base: Int, mark: Int) -> Option(String) {
   let b = case string.utf_codepoint(base) {
     Ok(cp) -> string.from_utf_codepoints([cp])
@@ -187,7 +168,6 @@ fn precomposed(base: Int, mark: Int) -> Option(String) {
 }
 
 fn deaccent(g: String) -> String {
-  // Graphemes may be base+combining; drop combining marks (U+0300-036F).
   let cps =
     string.to_utf_codepoints(g)
     |> list.filter(fn(cp) {
@@ -211,7 +191,6 @@ fn deaccent(g: String) -> String {
   }
 }
 
-/// Swap case so that lowercase sorts before uppercase under byte compare.
 fn swap_case(s: String) -> String {
   string.to_utf_codepoints(s)
   |> list.map(fn(cp) {
@@ -279,7 +258,6 @@ fn take_digits(gs: List(String), acc: String) -> #(String, List(String)) {
   }
 }
 
-/// ASCII digits only — the numeric collation level compares runs of `0`-`9`.
 fn is_digit_str(s: String) -> Bool {
   s != ""
   && string.to_utf_codepoints(s)

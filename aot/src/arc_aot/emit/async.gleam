@@ -1,40 +1,4 @@
-//// M18: compile-time coroutine state-machine transform (regenerator-style)
-//// for async / generator / async-generator bodies. SPEC.md §7.M18 + §9.
-//// Emits an outer `jsf_N` (calls host <kind>_start) + a `jsf_N__sm` state
-//// machine whose Return values are Step wire-tuples consumed by rt_js_async
-//// (M8). Per-arm ir.Try wrapper, loc-tuple hoisted-local restore/pack,
-//// self-looping yield*, try/finally-across-split via TryRegion+pending slot.
-////
-//// u-sig-seam: `emit_coroutine_fn` returns `Result(#(ir.Expr, Emitter2), _)`
-//// (state.gleam + func.gleam amended per R14 precedent) — the outer wrapper's
-//// closure-site is a Let-chain ir.Expr; ir.Value has no Expr-carrying variant.
-////
-//// u-func-seam / D13: SPEC.md:448's solid `func --> asyncE` edge is OVERRIDDEN
-//// by §19.2 "no emit module imports another emit module directly". func.gleam
-//// reaches this module via `e.dispatch.emit_async_body` ONLY; the func.gleam
-//// helpers this module needs (`cap_param_name`, `build_ir_params`,
-//// `emit_closure_site`, `expected_length`, `atom_bool`) are copied locally
-//// below — grep "D13" for each site. Neither module imports the other.
-////
-//// ── SCOPE-CURSOR INVARIANT (u-scope-cursor) ─────────────────────────────
-//// state.enter_scope / state.pop_child_fn (state.gleam:597-640) advance a
-//// SOURCE-PRE-ORDER cursor: each call pops the next block/fn child scope in
-//// the order the analyzer recorded them. Ordinary emission walks the AST in
-//// that same order so the cursor stays in sync. The state machine breaks
-//// that: arm bodies are AST FRAGMENTS emitted non-contiguously — a catch/
-//// finally/delegate arm's fragment sits later in source than the arm emitted
-//// before it, and a single source block can span several arms.
-////
-//// Reconciliation: split-analysis (which already walks the body in source
-//// pre-order) threads an `ArmCursor` shadow of the emitter's cursor state,
-//// advancing it via `cursor_enter_scope`/`cursor_pop_child_fn` exactly where
-//// stmt.gleam would call `state.enter_scope`/`state.pop_child_fn`. At each
-//// arm's fragment ENTRY it snapshots the shadow into `ArmSpec.entry_cursor`.
-//// `emit_arm_body` then `install_cursor`s that snapshot onto the Emitter2
-//// before delegating to `e.dispatch.emit_stmts`, so every arm — regardless
-//// of emission order — sees the cursor position its fragment would have had
-//// in a straight-line walk. Monotone fields (next_var/next_fn/fns_acc) are
-//// NOT snapshotted; only cur_scope/scope_cursor/child_fn_cursor are.
+//// regenerator-style state machine transform for async and generator bodies
 
 import arc/compiler/ast_util
 import arc/compiler/scope.{type ScopeId, type ScopeTree}
@@ -54,11 +18,7 @@ import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 
-// ── scope-cursor snapshot/restore (u-scope-cursor) ──────────────────────────
-
-/// Source-position snapshot of the emitter's scope-walk cursor. Captured
-/// per-arm during split-analysis; installed before each arm's fragment
-/// emission. See module docstring "SCOPE-CURSOR INVARIANT".
+// arms emit out of source order, so each snapshots its entry scope cursor
 pub type ArmCursor {
   ArmCursor(
     cur_scope: ScopeId,
@@ -67,9 +27,6 @@ pub type ArmCursor {
   )
 }
 
-/// Cursor at function-body entry. Mirrors state.enter_function's cursor
-/// reset (state.gleam:713-716) — the starting point for split-analysis's
-/// shadow walk.
 pub fn root_cursor(tree: ScopeTree, fn_scope: ScopeId) -> ArmCursor {
   ArmCursor(
     cur_scope: fn_scope,
@@ -78,12 +35,6 @@ pub fn root_cursor(tree: ScopeTree, fn_scope: ScopeId) -> ArmCursor {
   )
 }
 
-/// Shadow of state.enter_scope (state.gleam:607-640): descend into the next
-/// block-child scope. Returns `#(inner, resume)` where `inner` is the cursor
-/// inside the child and `resume` is the parent cursor AFTER the child (what
-/// state.leave_scope would restore). split-analysis recurses with `inner`
-/// and continues siblings with `resume`. child_fn_cursor is per-FUNCTION,
-/// so it threads through unchanged (matches ScopeSave2 not saving it).
 pub fn cursor_enter_scope(
   tree: ScopeTree,
   c: ArmCursor,
@@ -97,16 +48,10 @@ pub fn cursor_enter_scope(
       ),
       ArmCursor(..c, scope_cursor: rest),
     )
-    // empty-cursor → stay put (state.gleam:629-638 semantics).
     [] -> #(c, c)
   }
 }
 
-/// Shadow of state.pop_child_fn (state.gleam:597-601): advance past one
-/// nested FunctionExpression/Declaration/Arrow. split-analysis calls this
-/// at each fn-site so a fragment starting after that site sees the correct
-/// child_fn_cursor tail. Tolerates exhaustion (real pop asserts; the shadow
-/// walk over-approximates on already-consumed cursors).
 pub fn cursor_pop_child_fn(c: ArmCursor) -> ArmCursor {
   case c.child_fn_cursor {
     [_, ..rest] -> ArmCursor(..c, child_fn_cursor: rest)
@@ -114,10 +59,6 @@ pub fn cursor_pop_child_fn(c: ArmCursor) -> ArmCursor {
   }
 }
 
-/// Resume the parent cursor after a child block, carrying the child's
-/// child_fn_cursor forward (fn-cursor is function-scoped, not block-scoped).
-/// Use as `let resume = cursor_leave_scope(resume, inner_after)` when
-/// split-analysis returns from a recursed block.
 pub fn cursor_leave_scope(
   resume: ArmCursor,
   inner_after: ArmCursor,
@@ -125,9 +66,6 @@ pub fn cursor_leave_scope(
   ArmCursor(..resume, child_fn_cursor: inner_after.child_fn_cursor)
 }
 
-/// Install an arm's entry cursor onto the emitter before emitting its
-/// fragment via e.dispatch.emit_stmts. Only cursor fields; slot_vars is
-/// re-seeded per-arm from restore_locals, monotone fields thread through.
 pub fn install_cursor(e: Emitter2, c: ArmCursor) -> Emitter2 {
   state.Emitter2(
     ..e,
@@ -137,9 +75,6 @@ pub fn install_cursor(e: Emitter2, c: ArmCursor) -> Emitter2 {
   )
 }
 
-/// Snapshot the emitter's live cursor. Paired with install_cursor around
-/// each arm so a later arm never observes cursor mutations from an earlier
-/// (source-order-unrelated) arm.
 pub fn capture_cursor(e: Emitter2) -> ArmCursor {
   ArmCursor(
     cur_scope: e.cur_scope,
@@ -147,8 +82,6 @@ pub fn capture_cursor(e: Emitter2) -> ArmCursor {
     child_fn_cursor: e.child_fn_cursor,
   )
 }
-
-// ── shared internal types (types-and-skeleton) ──────────────────────────────
 
 pub type SplitKind {
   SkAwait
@@ -164,51 +97,31 @@ pub type SplitPoint {
 pub type TryEntry {
   TryEntry(
     id: Int,
-    /// TryEntry.id whose `pending` slot this entry shares. Equals `id` for a
-    /// real try; the catch-body view of a split-bearing try/catch/finally
-    /// gets its own id but routes into its parent's finally + pending slot.
+    // a catch-body view shares its parent try's pending slot
     pending_id: Int,
     catch_state: Option(Int),
     finally_state: Option(Int),
     after_state: Int,
     pending_loc_idx: Int,
     caught_loc_idx: Int,
-    /// Enclosing TryEntry.id (§18.5 nesting): a re-throw at finally-end
-    /// propagates to this region's catch/finally; None → step_throw/return.
     outer: Option(Int),
-    /// AST payloads for the catch/finally arms — split-analysis records these
-    /// so the orchestrator can hand them to emit_catch_arm / emit_finally_arm
-    /// without re-walking the body.
     handler: Option(ast.CatchClause),
     finalizer: Option(List(ast.StmtWithLine)),
-    /// Scope-cursor snapshots at catch/finally entry (SCOPE-CURSOR INVARIANT).
     catch_cursor: Option(ArmCursor),
     finally_cursor: Option(ArmCursor),
-    /// Split-spanning break/continue targets in scope AT this try — seeds
-    /// SmCtx.sm_labels for the catch/finally arm bodies (§18.4.5).
     sm_labels: List(SmLabel),
   )
 }
 
-/// One `yield*` self-looping arm (§18.6). loc indices are resolved from
-/// `layout.extras` at emit time; `region` routes the arm-try wrapper.
 pub type DelegateSpec {
   DelegateSpec(
     state_id: Int,
     next_state: Int,
     region: Option(Int),
-    /// Async generators only: the state resumed once the inner iterator's
-    /// result promise settles (§27.6.3.8 / yield* step 7.a.vi Await).
     await_state: Option(Int),
   )
 }
 
-/// One `for await (left of right) body` loop (u-for-await). Three states:
-/// `head` calls `async_iter_next` and `step_await`s → `check`; `check` reads
-/// the awaited iterresult, branches on `done` (→ `after`) or binds `value`
-/// to `left` and enters the body (whose tail loops to `head`); `after` is
-/// the continuation past the loop. `body_cursor` is the scope-cursor
-/// snapshot at loop-body entry (SCOPE-CURSOR INVARIANT).
 pub type ForAwaitSpec {
   ForAwaitSpec(
     head: Int,
@@ -226,68 +139,33 @@ pub type LocLayout {
     slot_to_idx: Dict(Int, Int),
     size: Int,
     extras: Dict(String, Int),
-    /// State-0 MakeTuple payload for the outer wrapper's `loc0` (§9:1752).
     initial_values: List(ir.Value),
   )
 }
 
-/// How execution reaches an arm. Drives §18.4.2 mode-dispatch: only
-/// `AeResume` arms consult `sent.{mode,value}`; entry/jump arms skip it.
 pub type ArmEntry {
-  /// State 0. SPEC invariant "state 0 ignores sent".
   AeInitial
-  /// Resumed after a split (rt_js_async re-invoked sm with fresh `sent`).
   AeResume(kind: SplitKind)
-  /// Reached via `Continue(Lresume,[N,loc'])` from another arm — a §18.4.5
-  /// control-flow join (if-merge, loop head, after-loop). No mode-dispatch.
   AeJump
 }
 
-/// How the fragment AFTER a split consumes sent_v — determined by the
-/// syntactic position the await/yield occupied. Recorded on the resume
-/// arm's `ArmSpec.resume` by split-analysis; consumed by fragment-emit.
 pub type ResumeWith {
-  /// `await p;` — result discarded.
   ResumeDiscard
-  /// `x = await p` / `let {a} = await p` — bind sent_v via emit_destructure.
   ResumeBind(pat: ast.Pattern, mode: state.BindMode)
-  /// `return await p` — resumed arm is `step_return(sent_v)`.
   ResumeReturn
-  /// `throw await p` — resumed arm re-raises sent_v via route_abrupt.
   ResumeThrow
-  /// `with (await p) { body }` — resumed arm wraps `body` in with(sent_v).
   ResumeWithScope(body: ast.Statement, line: Int)
-  /// First arm of a split-bearing catch body: bind `param` (if any) from
-  /// the try's caught loc slot before running the fragment.
   ResumeCatch(try_id: Int, param: Option(ast.Pattern))
 }
 
-/// How a segment (arm's `body_fragment`) terminates. `emit_arm_body`
-/// (u-fragment-emit) emits `body_fragment` via `e.dispatch.emit_stmts` then
-/// realizes this tail as the arm's terminal ir.Expr. §18.4.3-5.
 pub type SegTail {
-  /// Unconditional state transition: pack loc' → `Continue(Lresume,[to,loc'])`.
   FallTo(to: Int)
-  /// Normal completion of a try block / catch body into the try's finally
-  /// state: like FallTo but resets the try's `pending` slot to "normal".
   FallToFinally(try_id: Int, to: Int)
-  /// End of a split-bearing finally body: read the try's `pending` slot and
-  /// dispatch it (normal → after; throw/return/goto → outer regions).
   FinallyEnd(try_id: Int)
-  /// Split point: emit `arg`, pack loc', `Return([{kind,v,ns,loc'}])`. §18.4.4.
   SplitAt(kind: SplitKind, arg: Option(ast.Expression), ns: Int)
-  /// Eval `cond`, `If(truthy, Continue→then_s, Continue→else_s)`. Loop head/if.
-  /// `cond: None` = head expression WAS `await c` — this tail sits in the
-  /// resume arm; `ctx.sent_v` is the resolved value (§18.4.5 head-expr split).
   CondBranch(cond: Option(ast.Expression), then_s: Int, else_s: Int)
-  /// for(;;) update state: emit `update` (if any) then FallTo(head).
   ForUpdate(update: Option(ast.Expression), head: Int)
-  /// for-of/for-in setup: eval `right` → get_iterator(sync) → store handle at
-  /// loc[iter_key] → Continue→head. (u-ctrl-split: prior arm's tail; head arm
-  /// then reads the handle via ForOfStep.)
   ForOfSetup(right: ast.Expression, iter_key: String, head: Int)
-  /// for-of/for-in step: `next(iter)` (iter at loc extra `iter_key`); done →
-  /// after, else bind `left := value` → body_s.
   ForOfStep(
     left: ast.ForInit,
     iter_key: String,
@@ -295,43 +173,26 @@ pub type SegTail {
     after: Int,
     is_await: Bool,
   )
-  /// switch dispatch: chain `strict_eq(disc,testᵢ)` → stateᵢ; None=default:;
-  /// no default → unmatched falls to `after`.
-  /// `disc: None` = discriminant WAS `await d` — resume arm reads `ctx.sent_v`.
   SwitchDispatch(
     disc: Option(ast.Expression),
     tests: List(#(Option(ast.Expression), Int)),
     after: Int,
   )
-  /// for-await-of setup: eval `right` → get_iterator(async) → store handle at
-  /// loc[for_await_iter_key(head)] → Continue→head. Head/check arms are then
-  /// emitted from `plan.for_awaits` (u-for-await).
   ForAwaitSetup(right: ast.Expression, head: Int)
-  /// §18.7 async-gen intermediate arm's tail: `step_yield(sent_v, ns, loc')`.
-  /// The prior arm awaited the yield operand; sent_v is now the resolved value.
   AsyncGenYieldSent(ns: Int)
-  /// End of function body: `step_return(undef)`.
   BodyEnd
-  /// Fragment self-terminates (last stmt was Return/Throw/Break/Continue).
   SegDone
 }
 
-/// One state-machine switch arm's plan. `entry_cursor` is the scope-cursor
-/// snapshot at this arm's fragment entry — see SCOPE-CURSOR INVARIANT.
 pub type ArmSpec {
   ArmSpec(
     state_id: Int,
     region: Option(Int),
     entry_kind: ArmEntry,
     entry_cursor: ArmCursor,
-    /// How this arm binds `sent_v` on entry (only meaningful when
-    /// `entry_kind = AeResume(_)`). None → sent_v is unused/discarded.
     resume: Option(ResumeWith),
     body_fragment: List(ast.StmtWithLine),
     tail: SegTail,
-    /// §18.4.5: split-spanning break/continue targets in scope for this arm.
-    /// `emit_arm_body` seeds `SmCtx.sm_labels` from this so M13's resolver +
-    /// `on_goto` route break/continue to the right state.
     sm_labels: List(SmLabel),
   )
 }
@@ -339,8 +200,6 @@ pub type ArmSpec {
 pub type SplitPlan {
   SplitPlan(
     n_states: Int,
-    /// Scratch locals minted by the expression exploder (u-explode). They
-    /// take slots `local_count .. local_count+n_temps-1` in the loc tuple.
     n_temps: Int,
     arms: List(ArmSpec),
     try_entries: List(TryEntry),
@@ -349,15 +208,6 @@ pub type SplitPlan {
   )
 }
 
-/// A break/continue target (loop / labeled block / switch) whose body spans
-/// ≥1 split point, so it is compiled as SM STATES rather than an ir.Loop/
-/// ir.Block. Before delegating a split-free fragment, `with_abrupt_intercept`
-/// pushes a `state.Frame2` for each so M13's `find_break_target`/
-/// `find_continue_target` still resolve; the frame's `ir_break`/`ir_continue`
-/// are the *sentinel* strings held here, and the installed `on_goto` hook
-/// maps a resolved sentinel back to its SM target state. `enclosing_try` is
-/// the TryEntry.id of the split-spanning region DIRECTLY around this label —
-/// a goto to it walks `try_stack` only up to (exclusive) that id.
 pub type SmLabel {
   SmLoop(
     js_label: Option(String),
@@ -381,12 +231,6 @@ pub type SmLabel {
   )
 }
 
-/// Threaded emit context for the arm walker (u-emit-ctx). Immutable-record
-/// threading (Emitter2-style): every helper returns a fresh SmCtx. The arm
-/// walker carries ONE SmCtx per state; on return the orchestrator reads
-/// `finish_arms(ctx)`. `try_stack`/`sm_labels` are innermost-first — derived
-/// per-arm via `with_region` so `route_abrupt`/`sentinel_match` see the
-/// regions enclosing THAT arm's fragment, not the whole plan.
 pub type SmCtx {
   SmCtx(
     kind: state.CoroutineKind,
@@ -395,30 +239,14 @@ pub type SmCtx {
     mode_v: ir.Value,
     sent_v: ir.Value,
     loc_v: ir.Value,
-    /// TryEntry lookup by id — §18.5 outer-region propagation.
     try_entries: List(TryEntry),
-    /// Monotone state-id allocator for arms allocated at EMIT time (rare —
-    /// almost every state is pre-allocated by split-analysis into `Ana`).
-    /// Seeded from `plan.n_states` so late ids never collide.
     next_state: Int,
-    /// Accumulated ir.SwitchArm bodies, PREPENDED. `finish_arms` reverses.
     arms: List(ir.SwitchArm),
-    /// Split-spanning try regions enclosing the CURRENT fragment, innermost
-    /// first. `route_abrupt` walks it: the innermost entry with a
-    /// `finally_state` captures the completion into its `pending` loc slot.
     try_stack: List(TryEntry),
-    /// Split-spanning break/continue targets visible from the CURRENT
-    /// fragment, innermost first (mirrors frame_stack ordering).
     sm_labels: List(SmLabel),
   )
 }
 
-// ── SmCtx threading helpers (u-emit-ctx) ────────────────────────────────────
-
-/// Initial SmCtx at arm-walk entry. mode_v/sent_v/loc_v are the fixed Var
-/// names `emit_sm_function` binds (`_mode`/`_sv`/`_loc_i`). `next_state` is
-/// seeded from `plan.n_states` so any emit-time `sm_alloc_state` yields a
-/// fresh id past every analysis-allocated one.
 pub fn new_sm_ctx(
   kind: state.CoroutineKind,
   layout: LocLayout,
@@ -440,28 +268,18 @@ pub fn new_sm_ctx(
   )
 }
 
-/// Allocate a fresh emit-time state id (past every analysis-allocated one).
-/// Split-analysis's `Ana.alloc_state` covers the common case; this exists for
-/// helpers that need a scratch state during arm emission.
 pub fn sm_alloc_state(ctx: SmCtx) -> #(Int, SmCtx) {
   #(ctx.next_state, SmCtx(..ctx, next_state: ctx.next_state + 1))
 }
 
-/// Accumulate one emitted arm. Prepends — see `finish_arms`.
 pub fn push_arm(ctx: SmCtx, n: Int, body: ir.Expr) -> SmCtx {
   SmCtx(..ctx, arms: [ir.SwitchArm(n, body), ..ctx.arms])
 }
 
-/// Source-order arm list for `emit_sm_function`. ir.Switch dispatches by
-/// match-int so order is semantically irrelevant; reversed for dump legibility.
 pub fn finish_arms(ctx: SmCtx) -> List(ir.SwitchArm) {
   list.reverse(ctx.arms)
 }
 
-/// Enter a split-containing try region. Paired with `pop_try` — the arm
-/// walker pushes on TryStatement entry, pops after emitting catch/finally
-/// arms. While pushed, `route_abrupt` routes throw/return/goto to this
-/// region's states (§18.4 step 2, §18.5).
 pub fn push_try(ctx: SmCtx, region: TryEntry) -> SmCtx {
   SmCtx(..ctx, try_stack: [region, ..ctx.try_stack])
 }
@@ -469,13 +287,10 @@ pub fn push_try(ctx: SmCtx, region: TryEntry) -> SmCtx {
 pub fn pop_try(ctx: SmCtx) -> SmCtx {
   case ctx.try_stack {
     [_, ..rest] -> SmCtx(..ctx, try_stack: rest)
-    // Unbalanced pop is an M18 bug, not user-reachable.
     [] -> panic as "async.pop_try: try_stack empty"
   }
 }
 
-/// Innermost enclosing try region — `None` means throw/mode==1 escapes the
-/// sm as `step_throw`; `Some(r)` means it Continues to r's catch/finally.
 pub fn current_try(ctx: SmCtx) -> Option(TryEntry) {
   case ctx.try_stack {
     [top, ..] -> Some(top)
@@ -483,9 +298,6 @@ pub fn current_try(ctx: SmCtx) -> Option(TryEntry) {
   }
 }
 
-/// Enter a split-spanning break/continue target (loop/switch/labeled block).
-/// Paired with `pop_label`. While pushed, `sentinel_match` resolves M13's
-/// break/continue to this SmLabel's target state.
 pub fn push_label(ctx: SmCtx, label: SmLabel) -> SmCtx {
   SmCtx(..ctx, sm_labels: [label, ..ctx.sm_labels])
 }
@@ -497,20 +309,11 @@ pub fn pop_label(ctx: SmCtx) -> SmCtx {
   }
 }
 
-/// Derive the per-arm ctx: `try_stack` becomes the innermost-first chain of
-/// TryEntries enclosing `region` (walking `.outer` up to the root). Called by
-/// `build_switch_arms` for each ArmSpec/TryEntry/DelegateSpec so that
-/// `route_abrupt` inside that arm's fragment sees the correct enclosing
-/// regions (§18.5 nesting). Monotone fields (`next_state`/`arms`) thread
-/// through; `sm_labels` is left as-is (populated separately per fragment).
 pub fn with_region(ctx: SmCtx, region: Option(Int)) -> SmCtx {
   SmCtx(..ctx, try_stack: try_chain(ctx.try_entries, region))
 }
 
-/// Per-arm ctx for a CATCH body: a throw here must NOT re-enter this entry's
-/// catch (that would loop) — it goes to this entry's `finally_state` if any,
-/// else propagates to `entry.outer`. Built as chain(outer) with a finally-only
-/// view of `entry` pushed on top when it has a finalizer.
+// a throw in a catch body must not re-enter its own catch
 pub fn with_catch_body(ctx: SmCtx, entry: TryEntry) -> SmCtx {
   let outer = try_chain(ctx.try_entries, entry.outer)
   let stack = case entry.finally_state {
@@ -520,13 +323,10 @@ pub fn with_catch_body(ctx: SmCtx, entry: TryEntry) -> SmCtx {
   SmCtx(..ctx, try_stack: stack)
 }
 
-/// Per-arm ctx for a FINALLY body: throw/return/goto here propagate straight
-/// to `entry.outer` — a finally never intercepts itself.
 pub fn with_finally_body(ctx: SmCtx, entry: TryEntry) -> SmCtx {
   SmCtx(..ctx, try_stack: try_chain(ctx.try_entries, entry.outer))
 }
 
-/// Innermost-first TryEntry chain from `region` to the root, via `.outer`.
 fn try_chain(entries: List(TryEntry), region: Option(Int)) -> List(TryEntry) {
   case region {
     None -> []
@@ -538,33 +338,13 @@ fn try_chain(entries: List(TryEntry), region: Option(Int)) -> List(TryEntry) {
   }
 }
 
-// ── u-abrupt-intercept: return/break/continue routing in delegated segments ──
-//
-// A split-free stmt batch is delegated wholesale to `dispatch.emit_stmts`
-// (M13). Without this mechanism, `return v` inside it would emit a bare
-// `ir.Return([v])` (leaking `v` as the sm's Step) and `break`/`continue`
-// targeting a split-spanning loop would fail `find_break_target`. Fix:
-// (1) push sentinel `state.Frame2`s for each `SmLabel` so M13's resolver
-// walks past fragment-local frames and finds them; (2) install
-// `state.SmAbrupt` hooks on Emitter2 — `on_return` routes via `route_abrupt`
-// (step_return or pending+Continue-to-finally), `on_goto` checks the resolved
-// ir label against the sentinel set and, if matched, routes via
-// `route_abrupt`; unmatched (fragment-local) labels return None so M13
-// emits its normal `ir.Break`.
-
-/// A completion carried through a split-spanning `finally`'s pending slot
-/// (§18.5; regenerator's `context.completion`). Wire encoding matches
-/// rt_js_async's atom tags so `emit_finally_arm`'s pending-dispatch reads it.
 pub type PendingKind {
   PkReturn(ir.Value)
   PkThrow(ir.Value)
-  /// break/continue that resolved to SM state `target`.
   PkGoto(target: Int)
 }
 
-/// Kind tag of a `{kind, carry}` pending record. Integers, not atoms: the
-/// finally-end dispatch compares them with a native i32 test (a bare atom
-/// is not a JS value, so `strict_eq` cannot see it).
+// ints not atoms so the i32 test can compare them
 const pend_throw = 1
 
 const pend_return = 2
@@ -580,16 +360,10 @@ fn pending_tuple(pk: PendingKind) -> ir.Expr {
   }
 }
 
-/// SM `Continue(Lresume, [ConstI32(state), loc'])` — the ONLY way an arm
-/// hands control to another state without suspending (§18.4).
 fn sm_continue(ctx: SmCtx, target: Int, loc: ir.Value) -> ir.Expr {
   ir.Continue(ctx.lresume, [ir.ConstI32(target), loc])
 }
 
-/// Direct-CPS loc pack (u-step-and-loc-ir owns the anf.Build variant). Builds
-/// a fresh `loc'` where slot i = overrides[i] if present, else the CURRENT
-/// ssa var for a hoisted local (fragment may have reassigned it since
-/// restore_locals), else copy-forward via `TupleGet(i, loc_v)`.
 fn pack_loc_cps(
   e: Emitter2,
   ctx: SmCtx,
@@ -645,8 +419,6 @@ fn pack_loc_from(
 }
 
 fn slot_at_loc_idx(layout: LocLayout, idx: Int) -> Option(Int) {
-  // The layout maps slot i to idx i, so probe that first; the fold only
-  // runs for an idx past the hoisted block (an extra) or a non-identity map.
   case dict.get(layout.slot_to_idx, idx) {
     Ok(at) if at == idx -> Some(idx)
     _ ->
@@ -659,14 +431,6 @@ fn slot_at_loc_idx(layout: LocLayout, idx: Int) -> Option(Int) {
   }
 }
 
-/// Route an abrupt completion out of the current fragment (§18.5). Walks
-/// `try_stack` (innermost first): the FIRST entry with `finally_state=Some(fs)`
-/// captures the completion — pack `{kind,carry}` into its `pending` loc slot
-/// and Continue to `fs`. A catch-only entry catches PkThrow (Continue to
-/// catch_state with caught=v) but is transparent to return/goto. If nothing
-/// intercepts: PkReturn→step_return, PkThrow→step_throw, PkGoto(t)→
-/// pack_loc + Continue to t. `stop_at` bounds the walk for goto — only regions
-/// STRICTLY inside the target label intercept it.
 pub fn route_abrupt(
   e: Emitter2,
   ctx: SmCtx,
@@ -785,13 +549,6 @@ fn make_on_goto(
   }
 }
 
-/// Push sentinel Frame2s for every split-spanning target in `ctx.sm_labels`
-/// (so M13 resolves break/continue), install `state.SmAbrupt` hooks routing
-/// return + resolved sentinels through `route_abrupt`, then run `body`. `body`
-/// receives the prepared emitter and a `restore` fn that removes exactly what
-/// was installed (apply it to the emitter the fragment finished with). Frames
-/// are pushed OUTERMOST FIRST so frame_stack head is innermost (matching M13's
-/// walk order).
 pub fn with_abrupt_intercept(
   e: Emitter2,
   ctx: SmCtx,
@@ -810,8 +567,6 @@ pub fn with_abrupt_intercept(
 }
 
 fn push_sm_frames(e: Emitter2, labels: List(SmLabel)) -> #(Emitter2, Int) {
-  // sm_labels is innermost-first; push_frame prepends → fold from LIST TAIL
-  // (outermost) so frame_stack head ends up innermost.
   list.fold(list.reverse(labels), #(e, 0), fn(acc, lab) {
     let #(e, n) = acc
     let frame = case lab {
@@ -839,13 +594,6 @@ fn pop_n_frames(e: Emitter2, n: Int) -> Emitter2 {
   }
 }
 
-// ── §18.2 pass-1 leaf predicates (u-split-analysis) ─────────────────────────
-// Pure `has_split` over the FULL ast.Expression / ast.Statement variant set.
-// Nested function/class-method/static-block bodies are OPAQUE — an await
-// inside a nested async fn is that fn's split, not ours.
-
-/// True iff `e` (or any sub-expression NOT crossing a function boundary)
-/// contains an await/yield split point.
 pub fn expr_has_split(e: ast.Expression) -> Bool {
   case e {
     ast.AwaitExpression(..) | ast.YieldExpression(..) -> True
@@ -861,7 +609,6 @@ pub fn expr_has_split(e: ast.Expression) -> Bool {
     | ast.MetaProperty(..)
     | ast.RegExpLiteral(..)
     | ast.IntrinsicTemplateObject(..) -> False
-    // function boundaries — do NOT descend into body
     ast.FunctionExpression(..) | ast.ArrowFunctionExpression(..) -> False
     ast.UnaryExpression(argument: a, ..)
     | ast.UpdateExpression(argument: a, ..)
@@ -891,8 +638,6 @@ pub fn expr_has_split(e: ast.Expression) -> Bool {
       || list.any(ast.template_expressions(parts), expr_has_split)
     ast.ImportExpression(source: s, options: o, ..) ->
       expr_has_split(s) || opt_expr_has_split(o)
-    // class: computed keys / field inits / superclass are in the ENCLOSING
-    // coroutine's scope; method/accessor/static-block bodies are opaque.
     ast.ClassExpression(super_class: sc, body: elems, ..) ->
       opt_expr_has_split(sc) || list.any(elems, class_elem_has_split)
   }
@@ -936,9 +681,6 @@ fn key_has_split(k: ast.PropertyKey) -> Bool {
 fn class_elem_has_split(ce: ast.ClassElement) -> Bool {
   case ce {
     ast.ClassMethod(key: k, ..) -> key_has_split(k)
-    // ES §15.7: field initializers are wrapped in an implicit function
-    // ([~Await] context) — opaque to the ENCLOSING coroutine. Only the
-    // computed key is evaluated in this scope.
     ast.ClassField(key: k, ..) -> key_has_split(k)
     ast.StaticBlock(..) -> False
   }
@@ -981,8 +723,6 @@ fn declarator_has_split(d: ast.VariableDeclarator) -> Bool {
   pattern_has_split(d.id) || opt_expr_has_split(d.init)
 }
 
-/// True iff `s` (or any sub-statement/-expression NOT crossing a function
-/// boundary) contains an await/yield/for-await split point.
 pub fn stmt_has_split(s: ast.Statement) -> Bool {
   case s {
     ast.EmptyStatement
@@ -1054,30 +794,16 @@ fn stmts_have_split(ss: List(ast.StmtWithLine)) -> Bool {
   list.any(ss, fn(s: ast.StmtWithLine) { stmt_has_split(s.statement) })
 }
 
-// ── §18.2 pass-1: analyze_splits (u-split-analysis) ─────────────────────────
-
-/// Threaded accumulator for the source-pre-order walk. `cur` is the shadow
-/// scope-cursor (SCOPE-CURSOR INVARIANT) at the CURRENT source position.
-/// §18.4.5 (u-ctrl-split): the walk maintains an OPEN segment (`open_*` +
-/// `frag_rev`) — split-free stmts append to `frag_rev`; a split or a
-/// split-containing control-flow construct closes the open segment (→ arms)
-/// and opens the next one at the target state.
 type Ana {
   Ana(
     tree: ScopeTree,
     kind: state.CoroutineKind,
     next_state: Int,
     next_try: Int,
-    /// Unique-sentinel counter for SmLabel brk/cont sentinel strings.
     next_sentinel: Int,
     next_temp: Int,
-    /// True while shadow-walking a split-free statement purely for cursor
-    /// sync — `with_scope` must then leave the open segment untouched.
     cursor_only: Bool,
     try_stack: List(Int),
-    /// §18.4.5 loop_stack: split-spanning break/continue targets in scope at
-    /// the CURRENT source position (innermost first). Snapshotted into each
-    /// arm's `sm_labels` at close time.
     sm_labels: List(SmLabel),
     cur: ArmCursor,
     splits: List(SplitPoint),
@@ -1085,7 +811,6 @@ type Ana {
     arms: List(ArmSpec),
     delegates: List(DelegateSpec),
     for_awaits: List(ForAwaitSpec),
-    // ── open segment (u-ctrl-split) ──
     frag_rev: List(ast.StmtWithLine),
     open_state: Int,
     open_region: Option(Int),
@@ -1107,11 +832,6 @@ fn alloc_state(a: Ana) -> #(Int, Ana) {
   #(a.next_state, Ana(..a, next_state: a.next_state + 1))
 }
 
-// ── open-segment helpers (u-ctrl-split) ─────────────────────────────────────
-
-/// Mint a unique sentinel ir-label string for an SmLabel brk/cont target.
-/// Distinct namespace from state.fresh_label so plan-time sentinels never
-/// collide with emit-time labels.
 fn alloc_sentinel(a: Ana) -> #(String, Ana) {
   #(
     "_Lsm" <> int.to_string(a.next_sentinel),
@@ -1119,14 +839,10 @@ fn alloc_sentinel(a: Ana) -> #(String, Ana) {
   )
 }
 
-/// Append a split-free statement to the open segment's fragment.
 fn frag_push(a: Ana, sl: ast.StmtWithLine) -> Ana {
   Ana(..a, frag_rev: [sl, ..a.frag_rev])
 }
 
-/// Close the open segment with `tail`, push it to `arms`, and open a fresh
-/// empty segment at `new_state` with entry-cursor = the CURRENT live cursor
-/// and sm_labels snapshot = the CURRENT loop_stack.
 fn close_open(a: Ana, tail: SegTail, new_state: Int, entry: ArmEntry) -> Ana {
   let arm =
     ArmSpec(
@@ -1153,8 +869,7 @@ fn close_open(a: Ana, tail: SegTail, new_state: Int, entry: ArmEntry) -> Ana {
 }
 
 fn push_sm_label(a: Ana, l: SmLabel) -> Ana {
-  // Re-snapshot open_labels: every plan_ctrl_* opens the body's first segment
-  // via close_open BEFORE pushing this label, so the open segment must see it.
+  // the open segment was opened before this push and must see it
   let sm_labels = [l, ..a.sm_labels]
   Ana(..a, sm_labels:, open_labels: sm_labels)
 }
@@ -1166,12 +881,6 @@ fn pop_sm_label(a: Ana) -> Ana {
   }
 }
 
-/// Record one split of `kind` at the current source position: close the open
-/// segment with `SplitAt(kind, arg, ns)` and open the resume arm at `ns`
-/// (`entry_kind = AeResume(kind)`, entry_cursor = CURRENT shadow cursor).
-/// `arg` is the await/yield operand — threaded to `SplitAt.arg` so
-/// `emit_seg_tail` evaluates the REAL operand before suspending (§9).
-/// `resume` is stamped onto the OPENED arm's `open_resume`.
 fn record_split(
   a: Ana,
   kind: SplitKind,
@@ -1186,10 +895,6 @@ fn record_split(
   #(ns, Ana(..a, open_resume: resume))
 }
 
-/// §18.6 `yield*`: allocate self-looping delegate state Nd and follow-on
-/// state; close the pre-delegate segment with a setup tail targeting Nd;
-/// push a DelegateSpec; open the follow segment. Nd itself is NOT a fragment
-/// arm — build_switch_arms emits it from `plan.delegates`.
 fn record_delegate(
   a: Ana,
   arg: Option(ast.Expression),
@@ -1200,7 +905,6 @@ fn record_delegate(
   let region = ana_region(a)
   let sp = SplitPoint(id: nd, kind: SkYieldStar, enclosing_try: region)
   let a = Ana(..a, splits: [sp, ..a.splits])
-  // Setup tail evaluates `arg` and enters Nd; resume segment opens at follow.
   let a =
     close_open(
       a,
@@ -1219,16 +923,7 @@ fn record_delegate(
   Ana(..a, delegates: [d, ..a.delegates], open_resume: resume)
 }
 
-/// Shadow-enter one block-scope, run `f` with the inner cursor, then
-/// resume with the parent cursor (carrying child_fn_cursor forward).
-/// SCOPE-CURSOR × open-segment: if the currently-open segment is EMPTY,
-/// re-snapshot its `open_cursor` to `inner` so a fragment starting inside
-/// this scope emits with the right cur_scope; on exit, if `open_cursor`
-/// still points inside this scope, resync it to the resumed parent cursor
-/// (a `close_open(..., after)` inside `f` would otherwise leave the after-
-/// arm's entry_cursor pointing at the inner scope). Non-empty on entry ⇒
-/// the fragment spans two scopes; `close_open(FallTo)` a fresh state so each
-/// scope gets its own arm/entry_cursor.
+// keeps the open segment's cursor right when a fragment starts or ends in this scope
 fn with_scope(a: Ana, f: fn(Ana) -> Ana) -> Ana {
   let #(inner, resume) = cursor_enter_scope(a.tree, a.cur)
   use <- bool.lazy_guard(a.cursor_only, fn() {
@@ -1249,9 +944,6 @@ fn with_scope(a: Ana, f: fn(Ana) -> Ana) -> Ana {
     True ->
       case a_in.frag_rev, a_in.open_resume {
         [], None -> Ana(..a_in, cur: resumed, open_cursor: resumed)
-        // The open segment already holds statements (or a resume binding)
-        // that belong INSIDE this scope: close it here so what follows the
-        // scope gets its own arm with the parent cursor.
         _, _ -> {
           let #(fresh, a_in) = alloc_state(Ana(..a_in, cur: resumed))
           close_open(a_in, FallTo(fresh), fresh, AeJump)
@@ -1261,10 +953,7 @@ fn with_scope(a: Ana, f: fn(Ana) -> Ana) -> Ana {
   }
 }
 
-/// `with_scope` gated on `cond` — mirrors stmt.gleam's CONDITIONAL scope
-/// entry (block_has_declarations / for_classic_init_is_lex). When False the
-/// analyzer pruned the node (scope.gleam sb_close_block), so consuming a
-/// cursor entry here would steal the next sibling's scope id.
+// false means the analyzer pruned the scope; entering would steal a sibling's id
 fn with_scope_if(a: Ana, cond: Bool, f: fn(Ana) -> Ana) -> Ana {
   case cond {
     True -> with_scope(a, f)
@@ -1272,9 +961,6 @@ fn with_scope_if(a: Ana, cond: Bool, f: fn(Ana) -> Ana) -> Ana {
   }
 }
 
-/// Shadow-cursor walk of a catch clause — mirrors stmt.emit_catch_handler /
-/// exn.emit_catch_arm exactly: `catch(p){b}` enters the Catch scope then
-/// conditionally the body block; `catch{b}` enters NO Catch scope.
 fn walk_catch_cur(a: Ana, h: ast.CatchClause, f: fn(Ana) -> Ana) -> Ana {
   let body_has = ast_util.block_has_declarations(h.body)
   case h.param {
@@ -1290,9 +976,6 @@ fn ana_opt_expr(a: Ana, o: Option(ast.Expression), tail) -> Ana {
   }
 }
 
-/// Walk one expression subtree in evaluation order, recording every split.
-/// `tail` is the enclosing statement-list tail AFTER the statement holding
-/// this expression — it becomes the resume arm's body_fragment.
 fn ana_expr(a: Ana, e: ast.Expression, tail: List(ast.StmtWithLine)) -> Ana {
   case e {
     ast.AwaitExpression(argument: arg, ..) -> {
@@ -1303,14 +986,10 @@ fn ana_expr(a: Ana, e: ast.Expression, tail: List(ast.StmtWithLine)) -> Ana {
     ast.YieldExpression(argument: arg, is_delegate: del, ..) -> {
       let a = ana_opt_expr(a, arg, tail)
       case del {
-        // §18.6: self-looping delegate state Nd + follow-on done-state.
         True -> record_delegate(a, arg, None)
         False ->
           case a.kind {
             state.CorAsyncGen -> {
-              // §18.7: `yield x` = Await(x) THEN Yield(awaited). Await-phase
-              // arm carries `arg`; the intermediate arm (empty fragment) has
-              // tail AsyncGenYieldSent(ns2) → step_yield(sent_v, ns2, loc').
               let #(_, a) = record_split(a, SkAwait, arg, None)
               let #(ns2, a) = alloc_state(a)
               let sp =
@@ -1325,7 +1004,6 @@ fn ana_expr(a: Ana, e: ast.Expression, tail: List(ast.StmtWithLine)) -> Ana {
           }
       }
     }
-    // leaves
     ast.Identifier(..)
     | ast.NumberLiteral(..)
     | ast.BigIntLiteral(..)
@@ -1338,7 +1016,6 @@ fn ana_expr(a: Ana, e: ast.Expression, tail: List(ast.StmtWithLine)) -> Ana {
     | ast.MetaProperty(..)
     | ast.RegExpLiteral(..)
     | ast.IntrinsicTemplateObject(..) -> a
-    // function boundaries: opaque body, but DO advance child_fn_cursor.
     ast.FunctionExpression(..) | ast.ArrowFunctionExpression(..) ->
       Ana(..a, cur: cursor_pop_child_fn(a.cur))
     ast.UnaryExpression(argument: x, ..)
@@ -1373,7 +1050,6 @@ fn ana_expr(a: Ana, e: ast.Expression, tail: List(ast.StmtWithLine)) -> Ana {
           ast.InitProperty(key: k, value: v, ..) ->
             ana_expr(ana_key(a, k, tail), v, tail)
           ast.MethodProperty(key: k, ..) | ast.AccessorProperty(key: k, ..) -> {
-            // method body is opaque; still consumes a child_fn slot.
             let a = ana_key(a, k, tail)
             Ana(..a, cur: cursor_pop_child_fn(a.cur))
           }
@@ -1406,11 +1082,6 @@ fn ana_key(a: Ana, k: ast.PropertyKey, tail) -> Ana {
   }
 }
 
-/// Shadow of class.emit_class's cursor walk: enter the ClassBody scope, pop
-/// the field-init shell (if any) and the constructor, evaluate heritage then
-/// computed keys, pop each method, then the static-init shell. Field
-/// initializers and static blocks are bodies of those shells, so they are
-/// opaque here.
 fn ana_class(
   a: Ana,
   sc: Option(ast.Expression),
@@ -1489,21 +1160,13 @@ fn ana_stmts(a: Ana, ss: List(ast.StmtWithLine)) -> Ana {
   }
 }
 
-/// Wrap a bare Statement as a one-element StmtWithLine list so `ana_stmts`
-/// can recurse on `if`/loop bodies (which are `Statement`, not a list).
 fn one_stmt(line: Int, s: ast.Statement) -> List(ast.StmtWithLine) {
   [ast.StmtWithLine(line:, statement: s)]
 }
 
-/// Walk one statement. `tail` is the remaining stmts in the SAME list
-/// (threaded to `ana_expr` for its cursor walk). §18.4.5 (u-ctrl-split): a
-/// split-free stmt is `frag_push`ed verbatim; a split-containing control-flow
-/// construct is broken into states via the `plan_ctrl_*` helpers.
 fn ana_stmt(a: Ana, sl: ast.StmtWithLine, tail: List(ast.StmtWithLine)) -> Ana {
   let ast.StmtWithLine(statement: s, ..) = sl
   case stmt_has_split(s) {
-    // Split-free → append to open fragment; still shadow-walk for cursor sync
-    // (nested fns/classes advance child_fn_cursor; blocks consume scope slots).
     False -> frag_push(ana_stmt_cursor_only(a, s, tail), sl)
     True ->
       case explode_stmt(a, sl) {
@@ -1520,7 +1183,6 @@ fn ana_split_stmt(
 ) -> Ana {
   let ast.StmtWithLine(line:, statement: s) = sl
   case s {
-    // ── §18.4.5 control-flow constructs whose branch has_split ──────────
     ast.IfStatement(condition: c, consequent: t, alternate: f) ->
       plan_ctrl_if(a, line, c, t, f, tail)
     ast.BlockStatement(body: b) ->
@@ -1543,10 +1205,6 @@ fn ana_split_stmt(
       plan_ctrl_for_of(a, line, None, l, r, b, False, tail)
     ast.SwitchStatement(discriminant: d, cases: cs) ->
       plan_ctrl_switch(a, line, None, d, cs, tail)
-    // ── non-control-flow split-bearing stmts (u-split-analysis) ─────────
-    // hoist_one splits `sl` into HiSplit boundaries so the split's operand
-    // reaches SplitAt.arg AND the resume arm binds sent_v (§9 findings
-    // #1/#2/#5) — the split-bearing stmt is NEVER frag_push'd verbatim.
     ast.ExpressionStatement(..)
     | ast.ThrowStatement(..)
     | ast.ReturnStatement(..)
@@ -1554,11 +1212,6 @@ fn ana_split_stmt(
     ast.ClassDeclaration(super_class: sc, body: elems, ..) ->
       frag_push(ana_class(a, sc, elems, tail), sl)
     ast.WithStatement(object: o, body: b) ->
-      // finding #5: `with (await x) { body }` — the resume arm must wrap
-      // `body` in `with(sent_v)`, not run it bare. Recognise a top-level
-      // split object via `split_of` and record ResumeWithScope so
-      // fragment-emit re-wraps. Nested-split objects and split-in-body
-      // remain a v1 gap (with-scope-across-states requires loc-slot env).
       case split_of(o) {
         Some(#(kind, operand)) -> {
           let a = ana_opt_expr(a, operand, tail)
@@ -1577,7 +1230,6 @@ fn ana_split_stmt(
         }
       }
     ast.TryStatement(block: blk, tail: tt) -> ana_try(a, blk, tt, tail)
-    // Split-free by construction — unreachable in the True branch.
     ast.EmptyStatement
     | ast.DebuggerStatement
     | ast.BreakStatement(..)
@@ -1586,12 +1238,6 @@ fn ana_split_stmt(
   }
 }
 
-/// Fold `hoist_one` output for a split-bearing simple statement (§9 wiring
-/// for findings #1/#2/#5): each HiSplit becomes a `record_split` carrying its
-/// real operand + resume-binding — the stmt is NEVER frag_push'd verbatim, so
-/// the resume arm never re-emits the host("await") placeholder. HiStmt items
-/// (v1-gap deep-nesting shapes hoist_one didn't recognise) fall back to the
-/// old cursor-walk + frag_push path so any inner splits still get state ids.
 fn ana_hoisted(
   a: Ana,
   items: List(HoistedItem),
@@ -1601,15 +1247,12 @@ fn ana_hoisted(
     case item {
       HiStmt(s) -> frag_push(ana_stmt_cursor_only(a, s.statement, tail), s)
       HiSplit(_, kind, operand, resume) -> {
-        // Walk operand for cursor-sync + any nested splits (v1 gap: nested
-        // await inside operand still routes through the host placeholder).
         let a = ana_opt_expr(a, operand, tail)
         let rw = Some(resume)
         case kind {
           SkYieldStar -> record_delegate(a, operand, rw)
           SkYield ->
             case a.kind {
-              // §18.7: async-gen `yield x` = Await(x) THEN Yield(sent_v).
               state.CorAsyncGen -> {
                 let #(_, a) = record_split(a, SkAwait, operand, None)
                 let #(ns2, a) = alloc_state(a)
@@ -1644,9 +1287,6 @@ fn ana_hoisted(
   })
 }
 
-/// Shadow-cursor-only walk of a split-FREE statement: advances `cur` past any
-/// nested fn/class/block scopes it contains WITHOUT touching the segment.
-/// Keeps SCOPE-CURSOR INVARIANT for stmts appended verbatim to `frag_rev`.
 fn ana_stmt_cursor_only(
   a: Ana,
   s: ast.Statement,
@@ -1752,19 +1392,6 @@ fn cursor_only_walk(
   }
 }
 
-// ── §18.4.5 per-construct planners (u-ctrl-split) ───────────────────────────
-// Each: alloc after_state (+ head/test/update as needed); close current arm
-// with the entry-transition tail; push loop_stack (SmLabel) mapping label →
-// (continue_state = head/test/update, break_state = after); recurse into
-// branch bodies via ana_stmts (splits inside allocate their own states);
-// close each branch with FallTo(back-edge or after); pop; resume at after.
-
-/// Plan a construct's HEAD expression (if-cond / while-cond / for-cond /
-/// switch-disc). If `expr` IS a top-level `await x` / `yield x`, record the
-/// split (operand→SplitAt.arg) and return `None` — the SegTail then reads
-/// `ctx.sent_v` instead of re-emitting `await x` via the placeholder host op.
-/// Deep-expression splits (`x && await c`) fall through to `Some(expr)` (v1
-/// gap: emit_seg_tail re-emits via dispatch.emit_expr; expr.gleam:318 covers).
 fn plan_head_expr(
   a: Ana,
   expr: ast.Expression,
@@ -1773,9 +1400,6 @@ fn plan_head_expr(
   case split_of(expr) {
     Some(#(kind, operand)) ->
       case kind {
-        // §18.6 delegate + §18.7 async-gen two-phase: defer to ana_expr so
-        // record_delegate / Await-then-AsyncGenYieldSent run — record_split
-        // alone would drop the DelegateSpec / second phase.
         SkYieldStar -> #(Some(expr), ana_expr(a, expr, tail))
         SkYield ->
           case a.kind {
@@ -1792,13 +1416,10 @@ fn plan_head_expr(
           #(None, a)
         }
       }
-    // Always ana_expr (even split-free) — cursor-sync for nested fn/class.
     None -> #(Some(expr), ana_expr(a, expr, tail))
   }
 }
 
-/// If: alloc after; close with CondBranch(cond, then_s, else_s); each branch
-/// ends FallTo(after). No loop_stack entry (break/continue pass through).
 fn plan_ctrl_if(
   a: Ana,
   line: Int,
@@ -1807,8 +1428,6 @@ fn plan_ctrl_if(
   alt: Option(ast.Statement),
   tail: List(ast.StmtWithLine),
 ) -> Ana {
-  // If cond itself has a split (`if (await c)`), record it FIRST so the
-  // CondBranch tail sits in the resume arm and reads ctx.sent_v (§18.4.5).
   let #(cond, a) = plan_head_expr(a, cond, tail)
   let #(then_s, a) = alloc_state(a)
   let #(after, a) = alloc_state(a)
@@ -1828,8 +1447,6 @@ fn plan_ctrl_if(
   }
 }
 
-/// While: head evals cond → body_s | after; body ends FallTo(head).
-/// continue → head, break → after. §18.4.5 "loop back-edge crossing a split".
 fn plan_ctrl_while(
   a: Ana,
   line: Int,
@@ -1844,7 +1461,6 @@ fn plan_ctrl_while(
   let #(brk, a) = alloc_sentinel(a)
   let #(cont, a) = alloc_sentinel(a)
   let a = close_open(a, FallTo(head), head, AeJump)
-  // Head arm: cond may itself split (`while (await c)`).
   let #(cond, a) = plan_head_expr(a, cond, tail)
   let a =
     close_open(
@@ -1868,8 +1484,6 @@ fn plan_ctrl_while(
   close_open(a, FallTo(head), after, AeJump)
 }
 
-/// DoWhile: body_s runs body → test_s; test_s evals cond → body_s | after.
-/// continue → test_s (R15: continue re-tests, does NOT re-run body top).
 fn plan_ctrl_do_while(
   a: Ana,
   line: Int,
@@ -1901,8 +1515,6 @@ fn plan_ctrl_do_while(
   close_open(a, CondBranch(cond:, then_s: body_s, else_s: after), after, AeJump)
 }
 
-/// For(;;): init runs in prior arm; head=test; update_s runs update →
-/// FallTo(head). continue → update_s (R15: runs update+test).
 fn plan_ctrl_for(
   a: Ana,
   line: Int,
@@ -1914,7 +1526,6 @@ fn plan_ctrl_for(
   tail: List(ast.StmtWithLine),
 ) -> Ana {
   with_scope_if(a, ast_util.for_classic_init_is_lex(init), fn(a) {
-    // init: append to open fragment as an ordinary stmt (runs once).
     let a = case init {
       None -> a
       Some(fi) -> {
@@ -1936,6 +1547,7 @@ fn plan_ctrl_for(
                 statement: ast.VariableDeclaration(kind: vk, declarations:),
               ),
             )
+          // todo: lhs default splits would land in the wrong arm
           ast.ForInitPattern(_) -> a
         }
       }
@@ -1947,7 +1559,6 @@ fn plan_ctrl_for(
     let #(brk, a) = alloc_sentinel(a)
     let #(cont, a) = alloc_sentinel(a)
     let a = close_open(a, FallTo(head), head, AeJump)
-    // Head: cond → body_s | after (absent cond = unconditional body_s).
     let a = case cond {
       Some(c) -> {
         let #(c, a) = plan_head_expr(a, c, tail)
@@ -1973,7 +1584,6 @@ fn plan_ctrl_for(
     let a = ana_stmts(a, one_stmt(line, body))
     let a = pop_sm_label(a)
     let a = close_open(a, FallTo(update_s), update_s, AeJump)
-    // Update state (may itself split — `for(;; await u())`).
     let #(update, a) = case update {
       Some(u) -> plan_head_expr(a, u, tail)
       None -> #(None, a)
@@ -1982,10 +1592,6 @@ fn plan_ctrl_for(
   })
 }
 
-/// ForOf / ForIn / ForAwaitOf: prior arm evals `right` + get_iterator, stores
-/// handle at loc extra `iter_<head>`; head=step (ForOfStep tail); body ends
-/// FallTo(head). continue → head, break → after. `is_await:True` marks the
-/// step as a split (u-fragment-emit awaits the next() result).
 fn plan_ctrl_for_of(
   a: Ana,
   line: Int,
@@ -2006,8 +1612,6 @@ fn plan_ctrl_for_of(
         let #(brk, a) = alloc_sentinel(a)
         let #(cont, a) = alloc_sentinel(a)
         let ikey = iter_key(head)
-        // Prior arm evals `right` + get_iterator, stores handle at loc[ikey],
-        // Continues→head (u-ctrl-split #8).
         let a =
           close_open(a, ForOfSetup(right:, iter_key: ikey, head:), head, AeJump)
         let a =
@@ -2027,8 +1631,6 @@ fn plan_ctrl_for_of(
             enclosing_try: ana_region(a),
           )
         let a = push_sm_label(a, sm_label)
-        // u-ctrl-split #5: LHS destructure defaults with a split are a v1 gap;
-        // walking here would record the split in body_s (wrong arm).
         let a = ana_stmts(a, one_stmt(line, body))
         let a = pop_sm_label(a)
         close_open(a, FallTo(head), after, AeJump)
@@ -2037,12 +1639,6 @@ fn plan_ctrl_for_of(
   })
 }
 
-/// for-await-of (u-for-await): setup tail evals rhs → get_iterator(async) →
-/// stores handle → Continue(head). Head/check arms are emitted from
-/// `plan.for_awaits` (NOT plan.arms) so no ArmSpec is close_open'd for them
-/// here — the open segment jumps straight to body_s. body_s + after ARE
-/// ordinary plan.arms so body-internal splits work. §18.2 SkForAwait split
-/// is at `check` (the resume-after-await point).
 fn plan_ctrl_for_await(
   a: Ana,
   line: Int,
@@ -2072,8 +1668,6 @@ fn plan_ctrl_for_await(
       region:,
     )
   let a = Ana(..a, for_awaits: [spec, ..a.for_awaits])
-  // Close pre-loop with ForAwaitSetup; open body_s directly (head/check are
-  // emitted from plan.for_awaits in build_switch_arms, not plan.arms).
   let a = close_open(a, ForAwaitSetup(right:, head:), body_s, AeJump)
   let sm_label =
     SmLoop(
@@ -2091,9 +1685,6 @@ fn plan_ctrl_for_await(
   close_open(a, FallTo(head), after, AeJump)
 }
 
-/// Switch: alloc after + one state per case; prior arm SwitchDispatch; each
-/// case body ends FallTo(next case) implementing JS fall-through. break →
-/// after. Unlabeled `continue` walks past (SmSwitch has no continue target).
 fn plan_ctrl_switch(
   a: Ana,
   _line: Int,
@@ -2106,7 +1697,6 @@ fn plan_ctrl_switch(
   let #(after, a) = alloc_state(a)
   let #(brk, a) = alloc_sentinel(a)
   with_scope(a, fn(a) {
-    // Alloc one state per case, in source order.
     let #(case_states_rev, a) =
       list.fold(cases, #([], a), fn(acc, _c) {
         let #(sts, a) = acc
@@ -2119,8 +1709,6 @@ fn plan_ctrl_switch(
         let ast.SwitchCase(condition:, ..) = c
         #(condition, s)
       })
-    // §13.12.9: default is entered only after every non-default test misses;
-    // switch_chain treats #(None, _) as terminal, so re-order it LAST.
     let #(defs, non_defs) =
       list.partition(tests, fn(t) {
         case t {
@@ -2128,6 +1716,7 @@ fn plan_ctrl_switch(
           _ -> False
         }
       })
+    // §13.12.9 default is tested last
     let tests = list.append(non_defs, defs)
     let first = case case_states {
       [s, ..] -> s
@@ -2156,9 +1745,6 @@ fn plan_ctrl_switch_cases(
   case cases, states {
     [], [] -> a
     [ast.SwitchCase(consequent:, ..), ..cs], [_s, ..ss] -> {
-      // u-ctrl-split #13: test exprs are evaluated in the DISPATCH arm (already
-      // closed above); walking them here would record `case await x:` splits in
-      // the case-BODY arm. Splits in case tests are a v1 gap.
       let a = ana_stmts(a, consequent)
       let next = case ss {
         [n, ..] -> n
@@ -2171,9 +1757,6 @@ fn plan_ctrl_switch_cases(
   }
 }
 
-/// Labeled: label directly on a loop/switch → thread label into that
-/// construct's planner. Labeled non-iteration block → alloc after; push
-/// SmLabeled(break_state=after); recurse; body-end FallTo(after).
 fn plan_ctrl_labeled(
   a: Ana,
   line: Int,
@@ -2195,7 +1778,6 @@ fn plan_ctrl_labeled(
     ast.SwitchStatement(discriminant: d, cases: cs) ->
       plan_ctrl_switch(a, line, Some(label), d, cs, tail)
     ast.LabeledStatement(label: inner, body: b) -> {
-      // Stacked labels `a: b: while(…)` — both target the same construct.
       let #(after, a) = alloc_state(a)
       let #(brk, a) = alloc_sentinel(a)
       let alias =
@@ -2211,7 +1793,6 @@ fn plan_ctrl_labeled(
       close_open(a, FallTo(after), after, AeJump)
     }
     _ -> {
-      // Labeled non-iteration statement (`foo: { … break foo; … }`).
       let #(after, a) = alloc_state(a)
       let #(brk, a) = alloc_sentinel(a)
       let sm_label =
@@ -2252,7 +1833,6 @@ fn ana_try(
     }
   let block_has = ast_util.block_has_declarations(block)
   case contains_split {
-    // 0 splits → NOT a TryEntry (§18.2); walk children only for cursor sync.
     False -> {
       let a = with_scope_if(a, block_has, fn(a) { ana_stmts(a, block) })
       let a = case handler {
@@ -2268,32 +1848,20 @@ fn ana_try(
       }
     }
     True -> {
-      // Allocate TryEntry id; push region; walk block INSIDE the region so
-      // splits there record enclosing_try = this id (matches §9 example:
-      // block splits get ids 1..N, THEN catch/finally/after states).
       let try_id = a.next_try
       let outer = ana_region(a)
       let entry_sm_labels = a.sm_labels
       let a = Ana(..a, next_try: try_id + 1)
-      // u-ctrl-split #11: close the pre-try segment (region=outer) and open a
-      // fresh segment INSIDE the try region so a sync throw before the first
-      // split routes via wrap_arm_try(region=try_id) to this catch/finally.
       let #(block_entry, a) = alloc_state(a)
       let a = close_open(a, FallTo(block_entry), block_entry, AeJump)
       let a =
         Ana(..a, try_stack: [try_id, ..a.try_stack], open_region: Some(try_id))
       let a = with_scope_if(a, block_has, fn(a) { ana_stmts(a, block) })
-      // Pop region (catch/finally bodies are NOT inside this region for
-      // arm-catch routing — they're inside any OUTER region).
       let a =
         Ana(..a, try_stack: case a.try_stack {
           [_, ..rest] -> rest
           [] -> []
         })
-      // Allocate catch/finally/after states BEFORE closing the try-block tail
-      // so its FallTo target is known. (§9 finding #7: without close_open the
-      // catch/finally bodies frag_push into the block-tail arm and its normal-
-      // completion transition is never emitted.)
       let #(catch_state, catch_cursor, a) = case handler {
         Some(_) -> {
           let #(cs, a) = alloc_state(a)
@@ -2309,17 +1877,10 @@ fn ana_try(
         None -> #(None, a)
       }
       let #(after_state, a) = alloc_state(a)
-      // Normal completion of the try block (and of a catch body) enters the
-      // finally state with pending reset to "normal", else goes to after.
       let normal_tail = case finally_state {
         Some(fs) -> FallToFinally(try_id, fs)
         None -> FallTo(after_state)
       }
-      // A split-free catch/finally body is emitted whole by emit_catch_arm /
-      // emit_finally_arm from TryEntry.{handler,finalizer}; here it is only
-      // cursor-walked into a dead sink segment. A split-bearing body is
-      // planned as ordinary fragment arms starting at catch_state /
-      // finally_state, and the entry drops its AST payload.
       let catch_split = case handler {
         Some(h) -> catch_has_split(h)
         None -> False
@@ -2331,9 +1892,6 @@ fn ana_try(
       let #(a, catch_close_tail) = case handler, catch_state, catch_split {
         Some(h), Some(cs), True -> {
           let a = close_open(a, normal_tail, cs, AeJump)
-          // A throw in the catch body must reach this try's finally (never
-          // its own catch): the body's arms sit in a finally-only view of
-          // this entry when one exists, else directly in the outer region.
           let #(a, view) = case finally_state {
             Some(_) -> {
               let view_id = a.next_try
@@ -2410,12 +1968,9 @@ fn ana_try(
               })
             None -> a
           }
-          // Close the sink (dead) and open at after_state so the post-try
-          // tail frag_pushes into the correct segment.
           #(finally_cursor, close_open(a, SegDone, after_state, AeJump))
         }
       }
-      // loc indices are pass-2's job (u-loc-layout) — 0 sentinel here.
       let entry =
         TryEntry(
           id: try_id,
@@ -2443,11 +1998,6 @@ fn ana_try(
   }
 }
 
-/// §18.2 pass-1: walk `body` in source pre-order assigning monotone state
-/// ids 1..K (0=entry) at each Await / Yield / YieldDelegate / ForAwait-step,
-/// allocating a `TryEntry` per try-statement whose subtree contains ≥1 split.
-/// Threads the `ArmCursor` shadow (SCOPE-CURSOR INVARIANT) so each ArmSpec
-/// carries the scope-cursor snapshot at its resume point. Pure AST→data.
 fn analyze_splits(
   tree: ScopeTree,
   cur0: ArmCursor,
@@ -2471,7 +2021,6 @@ fn analyze_splits(
       arms: [],
       delegates: [],
       for_awaits: [],
-      // Open segment = state 0 (AeInitial) at function-body entry.
       frag_rev: [],
       open_state: 0,
       open_region: None,
@@ -2482,11 +2031,8 @@ fn analyze_splits(
     )
   let a = case body {
     state.StmtBody(ss) -> ana_stmts(init, ss)
-    // An arrow's expression body IS its return value.
     state.ExprBody(e) -> ana_stmts(init, func.body_stmts(state.ExprBody(e)))
   }
-  // Close the trailing open segment (BodyEnd → step_return(undef)). §18.4.5:
-  // arms accumulated by close_open + this final one form the complete plan.
   let a = close_open(a, BodyEnd, a.next_state, AeJump)
   SplitPlan(
     n_states: a.next_state,
@@ -2498,14 +2044,6 @@ fn analyze_splits(
   )
 }
 
-// ── stubs for sibling units (bodies land in loc-layout / step-and-loc-ir /
-// ── sm-skeleton-emit / outer-fn-emit / arm-shell / yield-star-arm /
-// ── finally-arm / fragment-emit) ────────────────────────────────────────────
-
-// ── §18.3 pass-2: loc-tuple layout (u-loc-layout) ───────────────────────────
-
-/// Extras-key builders — the string is the ONLY identity; every producer and
-/// consumer routes through these so the spelling is defined once.
 pub fn pending_key(try_id: Int) -> String {
   "pending_" <> int.to_string(try_id)
 }
@@ -2522,31 +2060,20 @@ pub fn inner_key(state_id: Int) -> String {
   "inner_" <> int.to_string(state_id)
 }
 
-/// Marker held in a delegate's result slot from `yield*` setup until the
-/// first inner call: not a JS value, so no sent value or mode collides.
+// not a js value, marks the result slot until the first inner call
 const delegate_start = "yield_star_start"
 
 pub fn delegate_result_key(state_id: Int) -> String {
   "delegate_result_" <> int.to_string(state_id)
 }
 
-/// u-for-await: loc slot for a `for await` async-iterator handle. Keyed by
-/// the head-state id so nested for-awaits get distinct slots.
 pub fn for_await_iter_key(head: Int) -> String {
   "iter_fa_" <> int.to_string(head)
 }
 
-/// §18.3: assign every local slot a stable loc-tuple index (the call-time
-/// prologue seeds them all into `loc0`), then reserve extra indices for
-/// try-region pending/caught and yield*-delegate bookkeeping. Precise
-/// live-across-split hoisting is a later optimisation the SPEC permits
-/// skipping.
 fn compute_loc_layout(info: scope.FunctionInfo, plan: SplitPlan) -> LocLayout {
   let hoist_count = info.local_count
   let slot_to_idx = index_identity_map(hoist_count)
-  // Extras laid out contiguously past the hoisted-locals block, in
-  // deterministic order (try pending → try caught → per-delegate iter/inner/
-  // result). Determinism matters — the layout is baked into every arm's IR.
   let #(extras, next) =
     alloc_try_extras(plan.try_entries, dict.new(), hoist_count)
   let #(extras, next) = alloc_delegate_extras(plan.delegates, extras, next)
@@ -2556,8 +2083,6 @@ fn compute_loc_layout(info: scope.FunctionInfo, plan: SplitPlan) -> LocLayout {
   LocLayout(slot_to_idx:, size:, extras:, initial_values:)
 }
 
-/// slot i → idx i for i ∈ [0, n). Identity mapping keeps §9's "loc[0] is x"
-/// intuition and makes restore/pack diffs readable.
 fn index_identity_map(n: Int) -> Dict(Int, Int) {
   identity_map_loop(0, n, dict.new())
 }
@@ -2569,8 +2094,6 @@ fn identity_map_loop(i: Int, n: Int, acc: Dict(Int, Int)) -> Dict(Int, Int) {
   }
 }
 
-/// One `pending_<id>` per finally-bearing region, one `caught_<id>` per
-/// catch-bearing region (§18.5). A try/catch/finally allocates both.
 fn alloc_try_extras(
   entries: List(TryEntry),
   extras: Dict(String, Int),
@@ -2593,8 +2116,6 @@ fn alloc_try_extras(
   }
 }
 
-/// Three slots per §18.6 self-looping delegate arm: the get_iterator handle,
-/// the inner iterator object, and the arm's result carry.
 fn alloc_delegate_extras(
   delegates: List(DelegateSpec),
   extras: Dict(String, Int),
@@ -2610,8 +2131,6 @@ fn alloc_delegate_extras(
   #(extras, next + 3)
 }
 
-/// One slot per for-await loop: the async-iterator handle, live from setup
-/// through every head/check iteration until `after` (u-for-await).
 fn alloc_for_await_extras(
   for_awaits: List(ForAwaitSpec),
   extras: Dict(String, Int),
@@ -2621,9 +2140,6 @@ fn alloc_for_await_extras(
   #(dict.insert(extras, for_await_iter_key(fap.head), next), next + 1)
 }
 
-/// One slot per split-bearing for-of/for-in head: the iterator handle at
-/// `iter_<head>` (ForOfStep.iter_key), live from setup through every step
-/// until `after`. Skips keys already allocated (delegates share `iter_<sid>`).
 fn alloc_for_of_extras(
   arms: List(ArmSpec),
   extras: Dict(String, Int),
@@ -2643,9 +2159,6 @@ fn alloc_for_of_extras(
   }
 }
 
-/// Loc indices holding a `pending` completion record — those alone start as
-/// ConstAtom("normal") so the finally-arm's IsAtom test (§9 SwitchArm 2)
-/// reads "normal" on the no-abrupt path. Every other slot starts undefined.
 fn pending_index_set(extras: Dict(String, Int), plan: SplitPlan) -> Set(Int) {
   use acc, entry <- list.fold(plan.try_entries, set.new())
   case entry.finally_state {
@@ -2680,9 +2193,6 @@ fn initial_loc_loop(
   }
 }
 
-/// Rewrite `entries` with `pending_loc_idx`/`caught_loc_idx` filled from
-/// `layout.extras`. analyze_splits leaves them 0; downstream arm emitters
-/// read them off the record. Fields with no matching key stay as-is.
 pub fn enrich_try_entries(
   entries: List(TryEntry),
   layout: LocLayout,
@@ -2736,10 +2246,6 @@ fn step_await(v: ir.Value, ns: Int, loc: ir.Value) -> ir.Expr {
   )
 }
 
-/// §18.4 loc pack (anf.Build variant): fresh MakeTuple of `layout.size` where
-/// slot i = `overrides[i]` if present, else copy-forward `TupleGet(i, loc_v)`.
-/// Plain copy-forward — the fragment-emit path uses `pack_loc_cps` which also
-/// picks up reassigned SSA vars for hoisted slots.
 fn pack_loc(ctx: SmCtx, overrides: Dict(Int, ir.Value)) -> anf.Build(ir.Value) {
   pack_loc_build(ctx, overrides, 0, [])
 }
@@ -2763,9 +2269,6 @@ fn pack_loc_build(
   }
 }
 
-/// §18.4.1 arm-entry local restore: bind `TupleGet(idx, loc_v)` for every
-/// hoisted slot; return slot→Var so the caller re-seeds `state.set_slot_var`.
-/// Bound in ascending slot order for reproducible IR.
 fn restore_locals(ctx: SmCtx) -> anf.Build(Dict(Int, ir.Value)) {
   let entries =
     ctx.layout.slot_to_idx
@@ -2788,24 +2291,15 @@ fn restore_locals_fold(
   }
 }
 
-/// §18.1 switch-default: `Return {throw, new_error("invalid gen state")}`.
-/// Uses anf.host (invariant #3) so returns the threaded Emitter2.
 fn sm_default_arm(e: Emitter2) -> #(ir.Expr, Emitter2) {
   let msg = ir.ConstBinary(bit_array.from_string("invalid gen state"))
   anf.run_to(anf.host("new_error", [msg]), e, fn(_e, err) { step_throw(err) })
 }
 
-// ── §18.1 state-machine ir.Function shell (u-sm-skeleton-emit) ──────────────
-
-/// The outer function and its state machine share one capture list, so both
-/// name capture param `i` through `state.cap_param_name` on an emitter that
-/// carries the same `cap_names` (the sm's emitter copies the outer's).
 fn cap_param_name(e: Emitter2, i: Int) -> String {
   state.cap_param_name(e, i)
 }
 
-/// Build the sm function's ir param list: `[cap_0..cap_{ncap-1}, _rs, _sent,
-/// _loc]` (SPEC §18.1 / M8 wire ABI). Mirrors func.gleam:284-288 shape.
 fn build_sm_params(e: Emitter2, i: Int, ncap: Int) -> List(ir.Local) {
   case i < ncap {
     True -> [
@@ -2820,23 +2314,7 @@ fn build_sm_params(e: Emitter2, i: Int, ncap: Int) -> List(ir.Local) {
   }
 }
 
-/// Build and register the `jsf_N__sm` ir.Function shell (SPEC §18.1). The
-/// caller generates `lresume` via `state.fresh_label` and threads it through
-/// `SmCtx` BEFORE building `arms`/`default` (arm bodies `ir.Continue` to it
-/// for state transitions), then passes it here so the Loop label matches.
-///
-/// Shape (ir.gleam:422-428/668/675-680/686-691/1296-1302):
-///   fn <sm_name>(cap_0..cap_{ncap-1}, _rs, _sent, _loc) -> [TTerm] {
-///     let [_mode] = TupleGet(0, _sent)
-///     let [_sv]   = TupleGet(1, _sent)
-///     loop <lresume>(_rs_i = _rs, _loc_i = _loc) -> [TTerm] {
-///       let [_rsi32] = Convert(UnboxInt(W32), _rs_i)
-///       switch _rsi32 -> [TTerm] { arms.. ; default }
-///     }
-///   }
-///
-/// `_mode`/`_sv`/`_loc_i` are the fixed names `SmCtx.mode_v`/`sent_v`/`loc_v`
-/// reference — do not fresh-var them.
+// binds fixed names _mode/_sv/_loc_i that smctx refers to
 fn emit_sm_function(
   e: Emitter2,
   sm_name: String,
@@ -2882,10 +2360,6 @@ fn emit_sm_function(
   )
 }
 
-// ── §18.1 outer wrapper + parent-frame closure site (u-outer-fn-emit) ───────
-
-/// D5 uniform IR-param shape: [cap_0.., _frame, _args]. Local copy of
-/// func.gleam:284-288 (D13: no cross-emit-module imports).
 fn build_outer_params(e: Emitter2, i: Int, n: Int) -> List(ir.Local) {
   case i < n {
     False -> [ir.Local("_frame", ir.TTerm), ir.Local("_args", ir.TTerm)]
@@ -2896,7 +2370,6 @@ fn build_outer_params(e: Emitter2, i: Int, n: Int) -> List(ir.Local) {
   }
 }
 
-/// The outer's own cap-param Values, forwarded verbatim as sm's captures.
 fn cap_vars(e: Emitter2, i: Int, n: Int) -> List(ir.Value) {
   case i < n {
     False -> []
@@ -2911,8 +2384,6 @@ fn atom_bool(rc: state.RealmConsts, b: Bool) -> ir.Value {
   }
 }
 
-/// §15.1.5 ExpectedArgumentCount — leading params before the first default.
-/// Local copy of func.gleam:788-797 (D13).
 fn expected_length(fixed: List(ast.Pattern)) -> Int {
   fixed
   |> list.take_while(fn(p) {
@@ -2946,10 +2417,6 @@ fn kind_is_gen(kind: state.CoroutineKind) -> Bool {
   }
 }
 
-/// The call-time `loc0`: each local slot's value as the prologue left it
-/// (params, `arguments`, hoisted functions, TDZ seeds, cells for boxed
-/// bindings; `undefined` for block-scoped slots not yet entered), then the
-/// layout's own initial extras.
 fn initial_loc_values(
   e: Emitter2,
   layout: LocLayout,
@@ -2963,9 +2430,6 @@ fn initial_loc_values(
   })
 }
 
-/// Closure site in the PARENT frame, as func.gleam's: FnFlags +
-/// MakeClosure(outer,captures,2) + host("fn_new",…). Coroutines are never
-/// constructors and get no simple-ABI variant.
 fn emit_closure_site(
   e: Emitter2,
   outer_name: String,
@@ -2977,9 +2441,8 @@ fn emit_closure_site(
   captures: List(ir.Value),
 ) -> #(ir.Expr, Emitter2) {
   let rc = e.consts
-  // FnFlags wire tuple — MUST match arc/rt/types.FnFlags field order exactly
-  // (ctor, class_ctor, derived, arrow, method, gen, async, strict).
   let flags = [
+    // must match arc/rt/types FnFlags field order
     ir.ConstAtom("fn_flags"),
     rc.false_,
     rc.false_,
@@ -3012,12 +2475,6 @@ fn emit_closure_site(
   )
 }
 
-// ── §18.4 per-arm shell (u-arm-shell) ───────────────────────────────────────
-
-/// CPS-build a fresh loc tuple where slot `i = overrides[i]` if present, else
-/// carried forward via `TupleGet(i, ctx.loc_v)`. Uses deterministic per-index
-/// names (`_pk<i>`, `_locp`) so it needs no Emitter2 — safe because callers
-/// place it inside a catch-handler / mode-dispatch branch (a fresh Let scope).
 fn pack_loc_expr(
   ctx: SmCtx,
   overrides: Dict(Int, ir.Value),
@@ -3044,6 +2501,7 @@ fn pack_loc_expr_go(
       case dict.get(overrides, i) {
         Ok(v) -> pack_loc_expr_go(ctx, overrides, i + 1, [v, ..acc], k)
         Error(_) -> {
+          // fixed names are safe, callers sit in a fresh let scope
           let name = "_pk" <> int.to_string(i)
           ir.Let(
             [name],
@@ -3055,10 +2513,6 @@ fn pack_loc_expr_go(
   }
 }
 
-/// §18.4 arm-catch route for a JS-thrown value `ev` while in `region`.
-/// catch_state → stash `ev` at caught_loc_idx and Continue there; else
-/// finally_state → stash pending={throw,ev} and Continue there; else no
-/// enclosing try-region → step_throw. Catch takes priority when both exist.
 fn route_throw(ctx: SmCtx, region: Option(TryEntry), ev: ir.Value) -> ir.Expr {
   case region {
     Some(TryEntry(catch_state: Some(cs), caught_loc_idx: ci, ..)) ->
@@ -3077,11 +2531,6 @@ fn route_throw(ctx: SmCtx, region: Option(TryEntry), ev: ir.Value) -> ir.Expr {
   }
 }
 
-/// §18.4 mode==2 route for injected `.return(v)`. Walks `region` outward via
-/// `.outer` (mirroring route_abrupt_walk's PkReturn arm): the FIRST enclosing
-/// entry with a `finally_state` captures pending={return,v}; catch-only
-/// regions are skipped (a return never routes to catch_state); no interceptor
-/// → step_return.
 fn route_return(ctx: SmCtx, region: Option(TryEntry), v: ir.Value) -> ir.Expr {
   case region {
     Some(TryEntry(finally_state: Some(fs), pending_loc_idx: pi, ..)) ->
@@ -3097,9 +2546,6 @@ fn route_return(ctx: SmCtx, region: Option(TryEntry), v: ir.Value) -> ir.Expr {
   }
 }
 
-/// §18.4 wrap: every SwitchArm body sits inside exactly one `ir.Try` whose
-/// handler catches the R2 `js_exn` tag and routes the caught value per
-/// `route_throw`. Non-split trys nest as ordinary M17 `ir.Try` under `inner`.
 fn wrap_arm_try(
   ctx: SmCtx,
   _n: Int,
@@ -3116,13 +2562,6 @@ fn wrap_arm_try(
   ])
 }
 
-/// §18.4 step 2: at the head of every AeResume arm, dispatch on `ctx.mode_v`
-/// (0=next, 1=throw, 2=return per rt_js_async sent_* consts). mode 1 →
-/// `route_throw(sent_v)`; mode 2 → `route_return(sent_v)`; else `normal`.
-/// AeInitial/AeJump skip dispatch: `_mode`/`_sv` are bound OUTSIDE the Loop
-/// so a Continue-entered arm sees STALE values from the last resume — re-
-/// dispatching would re-throw an already-handled injection. `ir.If` cond is a
-/// Value (gotcha #7) so each `IEq` is Let-bound first.
 fn emit_mode_dispatch(
   ctx: SmCtx,
   entry: ArmEntry,
@@ -3130,6 +2569,7 @@ fn emit_mode_dispatch(
   normal: ir.Expr,
 ) -> ir.Expr {
   case entry {
+    // jump-entered arms see stale mode/sent so only resume arms dispatch
     AeInitial | AeJump -> normal
     AeResume(_) ->
       ir.Let(
@@ -3158,16 +2598,10 @@ fn emit_mode_dispatch(
   }
 }
 
-// ── §18.6 yield* delegation (u-yield-star-arm) ──────────────────────────────
-
-/// Run a Build(ir.Expr) whose leaves are terminal (Return/Continue). anf.run
-/// only handles Build(ir.Value).
 fn run_terminal(b: anf.Build(ir.Expr), e: Emitter2) -> #(ir.Expr, Emitter2) {
   b(e, fn(ef, expr) { #(expr, ef) })
 }
 
-/// ir.If where both arms are terminal ir.Expr (Return/Continue). Threads
-/// Emitter2 through arms sequentially so fresh_var bumps do not collide.
 fn if_terminal(
   cond: ir.Value,
   t: anf.Build(ir.Expr),
@@ -3180,13 +2614,11 @@ fn if_terminal(
   }
 }
 
-/// Boxed state-id for `Continue(lresume, [rs_i, loc_i])` — LoopParam `_rs_i`
-/// is TTerm (emit_sm_function), so the raw ConstI32 must be BoxInt-wrapped.
+// _rs_i is a term so the state id must be boxed
 fn rs_box(n: Int) -> anf.Build(ir.Value) {
   anf.bind(ir.Convert(ir.BoxInt(ir.W32), ir.ConstI32(n)))
 }
 
-/// Static named-string wire key `{string_key, {named, <s>}}`.
 fn key_named(s: String) -> anf.Build(ir.Value) {
   use inner <- anf.then(
     anf.make_tuple([
@@ -3197,8 +2629,6 @@ fn key_named(s: String) -> anf.Build(ir.Value) {
   anf.make_tuple([ir.ConstAtom("string_key"), inner])
 }
 
-/// [[Get]] of a static string key through a fresh inline-cache site: the
-/// one-call `get_prop_site` kernel (IC probe, own-data fill, full read).
 fn get_named(obj: ir.Value, name: String) -> anf.Build(ir.Value) {
   use site <- anf.then(fn(e: Emitter2, k) {
     k(state.Emitter2(..e, next_site: e.next_site + 1), e.next_site)
@@ -3210,7 +2640,6 @@ fn get_named(obj: ir.Value, name: String) -> anf.Build(ir.Value) {
   ])
 }
 
-/// Dynamic named-string wire key from a runtime binary Value (mname).
 fn key_named_dyn(bin: ir.Value) -> anf.Build(ir.Value) {
   use inner <- anf.then(anf.make_tuple([ir.ConstAtom("named"), bin]))
   anf.make_tuple([ir.ConstAtom("string_key"), inner])
@@ -3223,10 +2652,6 @@ fn iter_hint(kind: state.CoroutineKind) -> ir.Value {
   }
 }
 
-/// §18.6(a) SETUP fragment — runs in the PRIOR state's arm at the `yield* e`
-/// site. Acquires the iterator record, stores `iter_h`/`inner` into `loc`,
-/// then `Continue`s to the self-looping delegate state `nd`. Entry into `nd`
-/// sees this invocation's (mode, sent), which the arm forwards verbatim.
 fn emit_delegate_setup(
   e: Emitter2,
   ctx: SmCtx,
@@ -3242,16 +2667,12 @@ fn emit_delegate_setup(
     )
     use k_iter <- anf.then(key_named("iterator"))
     use inner <- anf.then(anf.host("get_prop", [iter_h, k_iter]))
-    // The result slot doubles as the "received is still the initial
-    // NormalCompletion(undefined)" flag until the first inner call.
     let ov =
       dict.from_list([
         #(iter_idx, iter_h),
         #(inner_idx, inner),
         #(result_idx, ir.ConstAtom(delegate_start)),
       ])
-    // pack_loc_cps (not pack_loc): setup runs at seg-tail post-fragment, so
-    // hoisted-local reassignments must repack from current slot_vars (§18.4.4).
     use loc2 <- anf.then(fn(e, k) { pack_loc_cps(e, ctx, ov, k) })
     use rs <- anf.then(rs_box(nd))
     anf.pure(ir.Continue(ctx.lresume, [rs, loc2]))
@@ -3259,14 +2680,7 @@ fn emit_delegate_setup(
   run_terminal(b, e)
 }
 
-/// §18.6(b) self-looping delegate arm body for state `nd`. NOT gated by
-/// emit_mode_dispatch — this arm dispatches on `mode` itself to forward
-/// next/throw/return to the inner iterator. Every path is terminal
-/// (step_*/Continue), so the caller wraps only in `wrap_arm_try`.
-///
-/// Async generators await the inner result: this arm stashes the request
-/// mode in the result slot and `step_await`s into `d.await_state`, whose
-/// arm (`emit_delegate_await_arm`) does the done/value branching.
+// §27.5.3.8 yield* delegate arm, dispatches mode itself
 fn emit_delegate_arm(
   e: Emitter2,
   ctx: SmCtx,
@@ -3277,12 +2691,8 @@ fn emit_delegate_arm(
 ) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
   let undef = ir.ConstAtom("undefined")
   let b = {
-    // (1) restore iter_h / inner from loc.
     use iter_h <- anf.then(anf.bind(anf.tuple_get(ctx.loc_v, iter_idx)))
     use inner <- anf.then(anf.bind(anf.tuple_get(ctx.loc_v, inner_idx)))
-    // First entry (straight from setup): received is NormalCompletion(
-    // undefined) whatever resumed the outer generator (§27.5.3.8 step 5),
-    // so force mode next / sent undefined.
     use flag <- anf.then(anf.bind(anf.tuple_get(ctx.loc_v, result_idx)))
     use first <- anf.then(
       anf.bind(ir.NumTerm(ir.NEq, flag, ir.ConstAtom(delegate_start))),
@@ -3294,9 +2704,6 @@ fn emit_delegate_arm(
       anf.pure(ctx.sent_v),
     ))
     let ctx = SmCtx(..ctx, mode_v:, sent_v:)
-    // (2) mode 0 (next) calls the record's captured [[NextMethod]]
-    // (§27.5.3.8 step 7.a.i); throw/return re-resolve the method on the
-    // inner iterator by name (steps 7.b.i / 7.c.ii).
     use mode_i32 <- anf.then(
       anf.bind(ir.Convert(ir.UnboxInt(ir.W32), ctx.mode_v)),
     )
@@ -3320,8 +2727,6 @@ fn emit_delegate_arm(
       },
       get_named(iter_h, "next"),
     ))
-    // (5) missing = (mode≠0) ∧ (meth is undefined or null) (§7.3.11
-    // GetMethod step 2) — all i32.
     use is_undef <- anf.then(anf.bind(ir.NumTerm(ir.NEq, meth, undef)))
     use is_null <- anf.then(
       anf.bind(ir.NumTerm(ir.NEq, meth, ir.ConstAtom("null"))),
@@ -3333,13 +2738,9 @@ fn emit_delegate_arm(
     use is_throw <- anf.then(
       anf.bind(ir.Num(ir.IEq(ir.W32), [mode_i32, ir.ConstI32(1)])),
     )
-    // ── missing throw/return method ─────────────────────────────────────────
     let on_missing =
       if_terminal(
         is_throw,
-        // mode==1 (yield* step 7.b.iii): close inner, then a TypeError —
-        // thrown as a JS exception so the arm's try routes it to any
-        // enclosing catch/finally.
         {
           use _ <- anf.then(
             anf.host_unit("iter_close", [
@@ -3356,11 +2757,8 @@ fn emit_delegate_arm(
           )
           anf.pure(step_throw(ctx.sent_v))
         },
-        // mode==2 (yield* step 7.c.iii): the return completion propagates
-        // out of the generator, running enclosing finally blocks.
         anf.pure(route_return(ctx, current_try(ctx), ctx.sent_v)),
       )
-    // ── method present (or mode==0): call it, branch on {done, value} ───────
     let on_call = {
       use argl <- anf.then(anf.cons_list([ctx.sent_v]))
       use res <- anf.then(anf.host("call", [meth, inner, argl]))
@@ -3380,9 +2778,6 @@ fn emit_delegate_arm(
   Ok(run_terminal(b, e))
 }
 
-/// Async-generator delegate resume: `ctx.sent_v` is the settled inner
-/// result; the request mode was stashed in the result slot by
-/// `emit_delegate_arm`.
 fn emit_delegate_await_arm(
   e: Emitter2,
   ctx: SmCtx,
@@ -3393,16 +2788,11 @@ fn emit_delegate_await_arm(
   let b = {
     use mode_v <- anf.then(anf.bind(anf.tuple_get(ctx.loc_v, result_idx)))
     use mode_i32 <- anf.then(anf.bind(ir.Convert(ir.UnboxInt(ir.W32), mode_v)))
-    // The result slot holds the stashed mode here, never the start flag.
     delegate_result(ctx, d, ctx.sent_v, mode_i32, result_idx, ir.ConstI32(0))
   }
   Ok(run_terminal(b, e))
 }
 
-/// yield* step 7 tail on an inner result `res`: not an Object → TypeError;
-/// done → return-mode ends the generator with `value`, otherwise `value`
-/// becomes the yield* result and control continues past it; not done →
-/// yield `value` and re-enter the delegate state on resumption.
 fn delegate_result(
   ctx: SmCtx,
   d: DelegateSpec,
@@ -3436,7 +2826,6 @@ fn delegate_result(
           },
         ),
         {
-          // Re-entered on resumption: the start flag must be gone by then.
           use loc2 <- anf.then(anf.bind_if(
             first,
             pack_loc(
@@ -3462,17 +2851,6 @@ fn delegate_result(
   )
 }
 
-// ── §18.5 try/finally-across-split (u-finally-arm) ──────────────────────────
-//
-// A TryEntry allocates dedicated state ids for its catch handler and/or
-// finalizer. `emit_catch_arm` / `emit_finally_arm` build the *bodies* of
-// those SwitchArms — the per-arm ir.Try wrapper and mode-dispatch prefix are
-// applied by wrap_arm_try / emit_mode_dispatch (u-arm-shell) around what is
-// returned here. Outer nesting: a completion at finally-end propagates to
-// entry.outer's handler (throw → its catch_state else its finally_state;
-// return → its finally_state, walking further out past catch-only regions),
-// bottoming out at step_throw / step_return when no outer region remains.
-
 fn find_try_entry(ctx: SmCtx, id: Int) -> Option(TryEntry) {
   list.find(ctx.try_entries, fn(t) { t.id == id }) |> option.from_result
 }
@@ -3484,9 +2862,6 @@ fn outer_entry(ctx: SmCtx, entry: TryEntry) -> Option(TryEntry) {
   }
 }
 
-/// Restore every hoisted local from ctx.loc_v (Let-chain of TupleGet) and
-/// seed e.slot_vars so downstream e.dispatch.emit_stmts reads the loc-
-/// sourced Vars. `k` receives the seeded Emitter2 under the Let-chain.
 fn restore_and_seed(
   e: Emitter2,
   ctx: SmCtx,
@@ -3512,10 +2887,6 @@ fn restore_and_seed_go(
   }
 }
 
-/// Continue(lresume, [ConstI32(ns), loc']) with loc' packed via
-/// `pack_loc_cps`, so hoisted-local slots read the CURRENT
-/// `state.get_slot_var` (picking up reassignments made by the preceding
-/// emit_stmts) instead of copy-forwarding from arm-entry `loc_v`.
 fn jump_state_leaf(
   e: Emitter2,
   ctx: SmCtx,
@@ -3529,9 +2900,6 @@ fn jump_state_leaf(
   })
 }
 
-/// Throw-completion terminal for `carry`, respecting outer-region nesting:
-/// outer catch → jump there with caught=carry; else outer finally → jump
-/// there with pending={throw,carry}; else step_throw.
 fn dispatch_throw(
   e: Emitter2,
   ctx: SmCtx,
@@ -3564,16 +2932,12 @@ fn dispatch_throw(
                 ir.TermOp(ir.MakeTuple, [ir.ConstI32(pend_throw), carry])
               #(ir.Let([pn], pend, jump), e)
             }
-            // A TryEntry with neither handler is never allocated (§18.2);
-            // guard by walking further out rather than crashing.
             None -> dispatch_throw(e, ctx, outer_entry(ctx, o), carry)
           }
       }
   }
 }
 
-/// Return-completion terminal: only finalizers intercept it (a catch-only
-/// outer region is transparent — walk further out).
 fn dispatch_return(
   e: Emitter2,
   ctx: SmCtx,
@@ -3601,10 +2965,6 @@ fn dispatch_return(
   }
 }
 
-/// Goto-completion terminal (`{goto, ConstI32(target)}` deferred by an inner
-/// finally): only outer finalizers intercept it (catch-only regions are
-/// transparent). Bottoming out: unbox the boxed target int and Continue
-/// directly to that state (`carry` came from `pending_tuple(PkGoto(t))`).
 fn dispatch_goto(
   e: Emitter2,
   ctx: SmCtx,
@@ -3641,14 +3001,6 @@ fn dispatch_goto(
   }
 }
 
-/// Pending-dispatch tail placed after the finalizer body (SPEC §9:1782-1786).
-/// Built inside emit_finally_arm's k_tail with the LEAF emitter so every
-/// `pack_loc_cps` under it (via jump_state_leaf / dispatch_*) picks up
-/// hoisted-local reassignments the finalizer body made. Shape:
-///   If(TermTest(IsAtom, pend), Continue(after_state, loc'),
-///      Let kind=TupleGet(0,pend); Let carry=TupleGet(1,pend);
-///      If(kind=='goto', dispatch_goto,
-///         If(kind=='throw', dispatch_throw, dispatch_return)))
 fn build_pending_dispatch(
   e: Emitter2,
   ctx: SmCtx,
@@ -3699,7 +3051,6 @@ fn build_pending_dispatch(
   )
 }
 
-/// Run an Rk chain whose leaf calls `done(ef, tree)`.
 fn run_rk(
   e: Emitter2,
   body: fn(
@@ -3710,11 +3061,6 @@ fn run_rk(
   body(e, fn(ef, tree) { Ok(#(tree, ef)) })
 }
 
-/// §18.5 finally-state arm body: restore locals; pend=loc[pending_idx];
-/// with_abrupt_intercept so `return`/cross-state break in the finalizer route
-/// via `route_abrupt` (never bare ir.Return); emit finalizer via
-/// e.dispatch.emit_stmts; tail = build_pending_dispatch built INSIDE K with
-/// the LEAF emitter so its loc packs pick up finalizer-body reassignments.
 fn emit_finally_arm(
   e: Emitter2,
   ctx: SmCtx,
@@ -3749,13 +3095,6 @@ fn emit_finally_arm(
   })
 }
 
-/// §18.5 catch-state arm body: restore locals; caught=loc[caught_idx];
-/// [enter catch scope + destructure param]; with_abrupt_intercept so `return`
-/// and cross-state break in the handler route via `route_abrupt`; emit
-/// handler body; tail = Continue to this try's finally (pending="normal") if
-/// present, else to after_state — built INSIDE K with the LEAF emitter (via
-/// pack_loc_cps) so hoisted-local reassignments in the catch body carry
-/// forward. Mirrors stmt.emit_catch_handler:1584-1606 for scope entry.
 fn emit_catch_arm(
   e: Emitter2,
   ctx: SmCtx,
@@ -3819,35 +3158,15 @@ fn emit_catch_arm(
   })
 }
 
-// ── §18.4.1+3+4 core per-state fragment emitter (u-fragment-emit) ───────────
-
-/// Emit one "normal" arm's body (§18.4). FIRST installs `arm.entry_cursor`
-/// (SCOPE-CURSOR INVARIANT) so e.dispatch.emit_stmts pops the correct block/fn
-/// scopes. Then:
-///  1. `restore_and_seed`: `Let([xᵢ], TupleGet(idxᵢ, loc), …)` per hoisted
-///     slot + `state.set_slot_var` so downstream emit_expr/emit_stmts read the
-///     loc-sourced Vars (§18.4.1).
-///  2. `with_abrupt_intercept`: push sentinel Frame2s for `arm.sm_labels` and
-///     install SmAbrupt hooks so `return`/cross-state `break`/`continue` in
-///     the fragment route via `route_abrupt` (§18.4.5).
-///  3. `dispatch.emit_stmts(body_fragment, k_tail)` — fragment is split-free.
-///  4. `k_tail` builds `arm.tail` with the LEAF emitter so `pack_loc_cps`
-///     picks up any fragment reassignments (§18.4.4).
-/// Mode-dispatch (§18.4.2) and the arm-Try wrapper are layered by the caller
-/// (build_switch_arms) AROUND this result.
 fn emit_arm_body(
   e: Emitter2,
   ctx: SmCtx,
   arm: ArmSpec,
 ) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
   let e = install_cursor(e, arm.entry_cursor)
-  // Per-arm ctx: try_stack from arm.region; sm_labels from arm.sm_labels.
   let ctx = SmCtx(..with_region(ctx, arm.region), sm_labels: arm.sm_labels)
   use e <- restore_and_seed(e, ctx)
   with_abrupt_intercept(e, ctx, fn(e, restore) {
-    // §18.4.2: bind sent_v per `arm.resume` BEFORE emitting the fragment.
-    // ResumeReturn/Throw short-circuit — the fragment tail is dead code
-    // after `return await p` / `throw await p`.
     use #(tree, e2) <- result.map(case arm.resume {
       Some(ResumeReturn) -> Ok(route_abrupt(e, ctx, PkReturn(ctx.sent_v), None))
       Some(ResumeThrow) -> Ok(route_abrupt(e, ctx, PkThrow(ctx.sent_v), None))
@@ -3901,8 +3220,6 @@ fn emit_arm_body(
   })
 }
 
-/// Build the arm's terminal ir.Expr from its `SegTail` (§18.4.4). Runs with
-/// the LEAF emitter (post-fragment) so `pack_loc_cps` reads current slot_vars.
 fn emit_seg_tail(
   e: Emitter2,
   ctx: SmCtx,
@@ -3910,8 +3227,7 @@ fn emit_seg_tail(
 ) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
   case tail {
     BodyEnd -> Ok(#(step_return(e.consts.undef), e))
-    // Fragment self-terminated — k_tail is unreachable in practice; emit a
-    // safe fallback so the ir.Switch arm is well-typed if it IS reached.
+    // unreachable in practice, keeps the arm well-typed
     SegDone -> Ok(#(step_return(e.consts.undef), e))
     FallTo(to) ->
       Ok(
@@ -3955,9 +3271,6 @@ fn emit_seg_tail(
       })
       let #(v_n, e) = state.fresh_var(e)
       case kind {
-        // §18.6 setup: acquire iterator, stash iter_h/inner in loc extras,
-        // Continue→ns (== nd per record_delegate) so emit_delegate_arm's
-        // TupleGet(iter_idx/inner_idx) reads populated slots.
         SkYieldStar -> {
           let iter_idx = extra_idx(ctx.layout, iter_key(ns))
           let inner_idx = extra_idx(ctx.layout, inner_key(ns))
@@ -3986,16 +3299,12 @@ fn emit_seg_tail(
       }
     }
     CondBranch(cond, then_s, else_s) -> {
-      // cond=None: head expr WAS `await c` — this arm is its resume; the
-      // resolved value is ctx.sent_v.
       use #(cond_tree, e) <- result.try(case cond {
         Some(ex) -> e.dispatch.emit_expr(e, ex)
         None -> Ok(#(ir.Values([ctx.sent_v]), e))
       })
       let #(cv_n, e) = state.fresh_var(e)
       let #(ti_n, e) = state.fresh_var(e)
-      // Bind cond FIRST, pack loc INSIDE — so any hoisted-local reassignments
-      // in `cond` are in scope for pack_loc's slot_var reads (§18.4.4).
       Ok(
         cps_pair(e, fn(e, k) {
           anf.wrap(
@@ -4119,7 +3428,6 @@ fn emit_seg_tail(
   }
 }
 
-/// Run a CPS builder to its terminal tail and the final Emitter2.
 fn cps_pair(
   e: Emitter2,
   f: fn(Emitter2, fn(Emitter2, ir.Expr) -> #(ir.Expr, Emitter2)) ->
@@ -4128,10 +3436,6 @@ fn cps_pair(
   f(e, fn(ef, tail) { #(tail, ef) })
 }
 
-/// for-of/for-await step tail: `iter_h = loc[extras[iter_key]]`; `res =
-/// host("iter_next",[iter_h])` (or sent_v for the awaited resume);
-/// `done = truthy(get_prop(res,"done"))`; If(done, Continue→after,
-/// bind `left := get_prop(res,"value")` then Continue→body_s).
 fn emit_for_of_step(
   e: Emitter2,
   ctx: SmCtx,
@@ -4145,7 +3449,6 @@ fn emit_for_of_step(
   run_rk(e, fn(e, done) {
     let #(iter_n, e) = state.fresh_var(e)
     let #(res_n, e) = state.fresh_var(e)
-    // for-await: sent_v IS the awaited iter.next() result (§18.2 SkForAwait).
     let res_rhs = case is_await {
       True -> ir.Values([ctx.sent_v])
       False -> ir.CallHost("js", "iter_next", [ir.Var(iter_n)])
@@ -4155,8 +3458,6 @@ fn emit_for_of_step(
     let #(val_n, e) = state.fresh_var(e)
     let #(dk_n, e) = state.fresh_var(e)
     let #(vk_n, e) = state.fresh_var(e)
-    // for-await: `res` is an iterator result object; sync: host("iter_next")
-    // returns the `#(done, value)` pair.
     let done_rhs = case is_await {
       True -> ir.CallHost("js", "get_prop", [ir.Var(res_n), ir.Var(dk_n)])
       False -> ir.TermOp(ir.TupleGet(0), [ir.Var(res_n)])
@@ -4165,16 +3466,12 @@ fn emit_for_of_step(
       True -> ir.CallHost("js", "get_prop", [ir.Var(res_n), ir.Var(vk_n)])
       False -> ir.TermOp(ir.TupleGet(1), [ir.Var(res_n)])
     }
-    // DONE branch: pack loc with the PRE-bind emitter (loop var unchanged).
     let #(done_branch, e) =
       cps_pair(e, fn(e, k) {
         pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
           k(e, sm_continue(ctx, after, loc))
         })
       })
-    // NOT-DONE branch: bind `left := value` FIRST (mutates slot_vars for the
-    // loop var), pack loc INSIDE `bind_tree`'s Let so the packed slot references
-    // the freshly-bound SSA name and is in-scope in the emitted IR.
     use #(bind_tree, e) <- result.try(bind_for_lhs(e, left, ir.Var(val_n)))
     let #(tmp, e) = state.fresh_var(e)
     let #(body_branch, e) =
@@ -4208,7 +3505,6 @@ fn emit_for_of_step(
                 done_rhs,
                 ir.Let(
                   [done_i],
-                  // sync: a Gleam Bool atom; for-await: any JS value.
                   case is_await {
                     True -> ir.CallHost("js", "truthy", [ir.Var(done_t)])
                     False -> anf.is_true_expr(ir.Var(done_t))
@@ -4224,9 +3520,6 @@ fn emit_for_of_step(
   })
 }
 
-/// Wire `{string_key,{named,<s>}}` — inline (matches anf.object_key_lit.s
-/// output for KeyIdentifier) so ForOfStep needs no anf.Build threading.
-/// Let-name derived from `s` so multiple calls in one scope never collide.
 fn named_key_tuple(s: String) -> ir.Expr {
   let inner_n = "_nk_" <> s
   ir.Let(
@@ -4239,8 +3532,6 @@ fn named_key_tuple(s: String) -> ir.Expr {
   )
 }
 
-/// Bind a for-of/in LHS to `v` — mirrors stmt.gleam:1162-1200 shape locally
-/// (D13). Destructuring/member LHS route through dispatch.emit_destructure.
 fn bind_for_lhs(
   e: Emitter2,
   left: ast.ForInit,
@@ -4256,7 +3547,6 @@ fn bind_for_lhs(
     ast.ForInitExpression(ast.Identifier(span:, name:)) ->
       via(ast.IdentifierPattern(name:, span:), state.BindAssign)
     ast.ForInitExpression(_) ->
-      // Member-expression LHS — v1 gap (needs full lvalue path).
       Error(state.UnsupportedFeature("for-of member LHS in coroutine"))
   }
 }
@@ -4269,9 +3559,6 @@ fn bind_mode_of(kind: ast.VariableKind) -> state.BindMode {
   }
 }
 
-/// switch dispatch tail: eval `disc`, then chain `If(truthy(strict_eq(disc,
-/// testᵢ)), Continue→stateᵢ, …else…)`; a `None` test = `default:` (unconditional
-/// jump); no default → unmatched falls to `after`.
 fn emit_switch_dispatch(
   e: Emitter2,
   ctx: SmCtx,
@@ -4306,8 +3593,6 @@ fn switch_chain(
         }),
       )
     [#(None, target), ..] ->
-      // default: — unconditional (§13.12.9: default only reached after all
-      // non-default tests miss; split-analysis orders it last).
       Ok(
         cps_pair(e, fn(e, k) {
           pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
@@ -4347,23 +3632,8 @@ fn switch_chain(
   }
 }
 
-// ── hoist_splits_to_stmts: v1 "explode" pre-pass (u-fragment-emit) ──────────
-// Rewrite a flat statement list so every await/yield sits at a statement
-// boundary, yielding List(HoistedItem). split-analysis MAY use this to
-// simplify its walk: partition at each HiSplit into ArmSpec.{body_fragment,
-// tail:SplitAt, next-arm.entry}. v1 recognises the common statement-position
-// shapes; deeper expression-position nesting (`if (await p)`, `f(await p)`)
-// passes through as HiStmt — a documented gap (expr.gleam:318-342 emits the
-// host("await",…) placeholder for those; use expr_has_split to detect).
-
-/// One item in the hoisted stream.
 pub type HoistedItem {
-  /// A statement guaranteed split-free at TOP level (may still contain a
-  /// nested split in expression position — v1 gap; use expr_has_split to
-  /// detect). Emitted verbatim via dispatch.emit_stmts.
   HiStmt(ast.StmtWithLine)
-  /// A split boundary. `operand` = the await/yield's argument (None for bare
-  /// `yield`); `resume` = how the NEXT arm consumes sent_v.
   HiSplit(
     line: Int,
     kind: SplitKind,
@@ -4372,7 +3642,7 @@ pub type HoistedItem {
   )
 }
 
-/// Hoist every recognised await/yield in `stmts` to a HiSplit boundary.
+// rewrite so every recognised await/yield sits at a statement boundary
 pub fn hoist_splits_to_stmts(
   stmts: List(ast.StmtWithLine),
 ) -> List(HoistedItem) {
@@ -4387,7 +3657,6 @@ fn hoist_one(located: ast.StmtWithLine) -> List(HoistedItem) {
         Some(#(kind, operand)) -> [HiSplit(line, kind, operand, ResumeDiscard)]
         None ->
           case ex {
-            // `a, await b, c` → three statements, re-hoisted.
             ast.SequenceExpression(_, parts) ->
               list.flat_map(parts, fn(p) {
                 hoist_one(ast.StmtWithLine(
@@ -4395,7 +3664,6 @@ fn hoist_one(located: ast.StmtWithLine) -> List(HoistedItem) {
                   ast.ExpressionStatement(p, None),
                 ))
               })
-            // `x = await p` (simple assignment RHS is the split).
             ast.AssignmentExpression(_, ast.Assign, lhs, rhs) ->
               case split_of(rhs), lhs_to_pattern(lhs) {
                 Some(#(kind, operand)), Some(pat) -> [
@@ -4411,7 +3679,6 @@ fn hoist_one(located: ast.StmtWithLine) -> List(HoistedItem) {
             _ -> [HiStmt(located)]
           }
       }
-    // `let x = await p` (single declarator, split RHS).
     ast.VariableDeclaration(kind, [ast.VariableDeclarator(pat, Some(init))]) ->
       case split_of(init) {
         Some(#(skind, operand)) -> [
@@ -4419,7 +3686,6 @@ fn hoist_one(located: ast.StmtWithLine) -> List(HoistedItem) {
         ]
         None -> [HiStmt(located)]
       }
-    // Multiple declarators → split into singletons, re-hoist each.
     ast.VariableDeclaration(kind, decls) ->
       list.flat_map(decls, fn(d) {
         hoist_one(ast.StmtWithLine(line, ast.VariableDeclaration(kind, [d])))
@@ -4434,14 +3700,10 @@ fn hoist_one(located: ast.StmtWithLine) -> List(HoistedItem) {
         Some(#(kind, operand)) -> [HiSplit(line, kind, operand, ResumeThrow)]
         None -> [HiStmt(located)]
       }
-    // Everything else passes through — split-analysis recurses into nested
-    // stmt LISTS (BlockStatement/if/loop/try bodies) with a fresh hoist call.
     _ -> [HiStmt(located)]
   }
 }
 
-/// If `ex` IS an await/yield (optionally under parentheses), return its split
-/// kind + operand. Not recursive — only top-level match.
 fn split_of(
   ex: ast.Expression,
 ) -> Option(#(SplitKind, Option(ast.Expression))) {
@@ -4454,9 +3716,6 @@ fn split_of(
   }
 }
 
-/// AssignmentExpression LHS → Pattern for ResumeBind. Only simple identifier
-/// targets convert; MemberExpression / destructuring-as-expression are v1
-/// gaps (return None → passes through as HiStmt).
 fn lhs_to_pattern(lhs: ast.Expression) -> Option(ast.Pattern) {
   case lhs {
     ast.Identifier(span, name) -> Some(ast.IdentifierPattern(name:, span:))
@@ -4464,8 +3723,6 @@ fn lhs_to_pattern(lhs: ast.Expression) -> Option(ast.Pattern) {
     _ -> None
   }
 }
-
-// ── public entry (wired as EmitDispatch.emit_async_body) ────────────────────
 
 fn find_try(entries: List(TryEntry), region: Option(Int)) -> Option(TryEntry) {
   case region {
@@ -4481,28 +3738,16 @@ fn extra_idx(layout: LocLayout, key: String) -> Int {
   }
 }
 
-/// Step (6): build every ir.SwitchArm — fragment arms via emit_arm_body →
-/// emit_mode_dispatch → wrap_arm_try; then catch/finally arms per TryEntry;
-/// then yield*-delegate self-looping arms. SmCtx threads through (u-emit-ctx):
-/// arms accumulate via `push_arm`; per-arm `try_stack` is derived via
-/// `with_region`/`with_catch_body`/`with_finally_body` so `route_abrupt`
-/// inside each fragment sees the correct enclosing regions (§18.5 nesting).
 fn build_switch_arms(
   e: Emitter2,
   ctx: SmCtx,
   plan: SplitPlan,
 ) -> Result(#(List(ir.SwitchArm), Emitter2), state.EmitError) {
-  // fragment arms
   use #(ctx, e) <- result.try(
     list.try_fold(plan.arms, #(ctx, e), fn(st, arm) {
       let #(ctx, e) = st
       let ctx = with_region(ctx, arm.region)
       let region = current_try(ctx)
-      // The arm after a `yield*` is entered by Continue from the delegate
-      // arm with the inner return value in that delegate's result slot
-      // (§27.5.3.8 step 7.a.v / 7.b.ii.7 / 7.c.viii): it consumes that, not
-      // the last resumption's sent value, and skips mode dispatch (the
-      // delegate arm already forwarded the injected completion).
       let follow_of =
         list.find(plan.delegates, fn(d) { d.next_state == arm.state_id })
       use #(wrapped, e) <- result.map(case arm.entry_kind, follow_of {
@@ -4525,8 +3770,6 @@ fn build_switch_arms(
       #(push_arm(ctx, arm.state_id, wrapped), e)
     }),
   )
-  // catch/finally arms per split-bearing try — a throw in catch/finally routes
-  // to the OUTER region; entered via Continue so no mode dispatch.
   use #(ctx, e) <- result.try(
     list.try_fold(plan.try_entries, #(ctx, e), fn(st, entry) {
       let #(ctx, e) = st
@@ -4535,9 +3778,6 @@ fn build_switch_arms(
         Some(cs), Some(h) -> {
           let ctx =
             SmCtx(..with_catch_body(ctx, entry), sm_labels: entry.sm_labels)
-          // A sync throw in the catch body must still hit THIS entry's
-          // finalizer (if any) before propagating outward — with_catch_body
-          // pushes the finally-only view; wrap against that, not entry.outer.
           let catch_wrap_region = current_try(ctx)
           let e = case entry.catch_cursor {
             Some(c) -> install_cursor(e, c)
@@ -4565,8 +3805,6 @@ fn build_switch_arms(
       }
     }),
   )
-  // yield* delegate arms — mode dispatch is IN the arm body (§18.6 forwards
-  // mode/sent to the inner iterator), so no emit_mode_dispatch here.
   use #(ctx, e) <- result.try(
     list.try_fold(plan.delegates, #(ctx, e), fn(st, d) {
       let #(ctx, e) = st
@@ -4608,9 +3846,6 @@ fn build_switch_arms(
       }
     }),
   )
-  // for-await-of head+check arms (u-for-await). head is Continue-entered
-  // (AeJump — no mode-dispatch); check is post-await resume (mode-dispatch).
-  // body_s + after are emitted by the plan.arms fold above.
   use #(ctx, e) <- result.map(
     list.try_fold(plan.for_awaits, #(ctx, e), fn(st, fap) {
       let #(ctx, e) = st
@@ -4633,17 +3868,6 @@ fn build_switch_arms(
   #(finish_arms(ctx), e)
 }
 
-/// EmitDispatch.emit_async_body entry. Compiles a coroutine body into an
-/// outer `jsf_N` wrapper + `jsf_N__sm` state machine (both appended to
-/// `e.fns_acc`) and returns the parent-frame closure-site Let-chain.
-///
-/// The wrapper runs the ordinary function prologue at call time (§27.3.3.1
-/// EvaluateGeneratorBody: FunctionDeclarationInstantiation precedes
-/// GeneratorStart), packs the resulting locals into `loc0`, and hands
-/// `MakeClosure(sm)` + `loc0` to the runtime's `<kind>_start`. The state
-/// machine and its split analysis start from the scope cursor the prologue
-/// left, so parameter-default closures, hoisted declarations and the
-/// non-simple parameter body scope line up with the analyzer's order.
 pub fn emit_coroutine_fn(
   e: Emitter2,
   shape: state.FnShape,
@@ -4659,8 +3883,6 @@ pub fn emit_coroutine_fn(
   let ncap = list.length(captures)
   let stmts = func.body_stmts(body)
   let is_strict = e.strict || ast_util.has_use_strict_directive(stmts)
-  // The outer function takes the JS name; its state machine is `<name>__sm`
-  // (a derived name, reserved with the base by `fresh_fn_name`).
   let #(outer_name, e) = state.fresh_fn_name(e, js_name)
   let sm_name = outer_name <> "__sm"
   let enter = fn(e) {
@@ -4673,8 +3895,6 @@ pub fn emit_coroutine_fn(
       is_arrow: func.shape_is_arrow(shape),
     )
   }
-  // Outer wrapper frame: prologue, then (nested) the state machine, then
-  // loc0 + start.
   let #(e_outer, save) = enter(e)
   let e_outer = func.seed_capture_slots(e_outer, info)
   use #(body_expr, e_outer) <- result.try({
@@ -4692,18 +3912,12 @@ pub fn emit_coroutine_fn(
     let #(sm_tree, info) =
       add_temp_slots(e_pro.tree, fn_scope_id, info, plan.n_temps)
     let layout = compute_loc_layout(info, plan)
-    // analyze_splits leaves TryEntry.{pending,caught}_loc_idx as placeholder
-    // 0 — fill them from layout.extras before ctx/arm-emit read them.
     let plan =
       SplitPlan(
         ..plan,
         try_entries: enrich_try_entries(plan.try_entries, layout),
       )
-    // The state machine: a sibling function emitted from inside the wrapper
-    // frame so `fns_acc`/`next_var` keep threading; its cursor and the set
-    // of bindings already initialized are the post-prologue ones.
     let #(e_sm, sm_save) = enter(e_pro)
-    // The state machine takes the same captures as the outer function.
     let e_sm = state.Emitter2(..e_sm, cap_names: e_pro.cap_names)
     let e_sm =
       state.Emitter2(
@@ -4717,7 +3931,6 @@ pub fn emit_coroutine_fn(
     let #(default, e_sm) = sm_default_arm(e_sm)
     let e_sm = emit_sm_function(e_sm, sm_name, ncap, lresume, arms, default)
     let e_pro = state.leave_function(e_sm, sm_save)
-    // loc0 + start (SPEC.md:1490-1494 / §9:1752-1756). All caps forwarded.
     let #(tree, e_pro) =
       anf.run_to(
         {
@@ -4739,12 +3952,10 @@ pub fn emit_coroutine_fn(
       )
     Ok(#(tree, finish(e_pro)))
   })
-  // §27.7.5.1 / §15.9.3: an async function's FunctionDeclarationInstantiation
-  // (parameter defaults) throw rejects the result promise; generators and
-  // async generators throw synchronously (§27.5.3.1, §27.6.3.1).
   let #(ex, e_outer) = state.fresh_var(e_outer)
   let #(res, e_outer) = state.fresh_var(e_outer)
   let body_expr = case kind {
+    // §27.7.5.1 async param-default throw rejects; generators throw sync
     state.CorAsync ->
       ir.Try(result: [ir.TTerm], body: body_expr, handlers: [
         ir.CatchHandler(
@@ -4781,9 +3992,6 @@ pub fn emit_coroutine_fn(
   ))
 }
 
-/// u-explode-slots: give the exploder's scratch locals real slots in this
-/// function's scope so ordinary identifier resolution (and the loc layout)
-/// sees them. Slots follow the analyser's `local_count`.
 fn add_temp_slots(
   tree: ScopeTree,
   fn_scope_id: ScopeId,
@@ -4819,18 +4027,6 @@ fn add_temp_slots(
   }
 }
 
-// ── for-await-of + §18.7 async-gen yield emission (u-for-await) ─────────────
-// SPEC §18.2 lists ForAwait-step as a split kind; §18.7 pins async-gen
-// `yield x` = Await(x) then Yield (tc39/ecma262#2819) — TWO consecutive
-// splits. Owned by async.gleam's own AST walk (NOT stmt.gleam:349 todo —
-// for-await-of only appears inside coroutine bodies, which route here).
-// Setup + §18.7 are realised as SegTail variants (ForAwaitSetup /
-// AsyncGenYieldSent) so they flow through the plan.arms machinery; only the
-// head/check arms are emitted here (build_switch_arms's for_awaits fold).
-
-/// for-await HEAD arm body (state `fap.head`, entered via Continue only):
-/// read iter handle from loc; call `async_iter_next` (§8 op —
-/// Promise<IteratorResult>); pack loc unchanged; `step_await(p, check, loc')`.
 fn emit_for_await_head(
   e: Emitter2,
   ctx: SmCtx,
@@ -4846,11 +4042,6 @@ fn emit_for_await_head(
   run_terminal(b, e)
 }
 
-/// for-await CHECK arm body (state `fap.check`, entered post-await with
-/// `ctx.sent_v` = resolved IteratorResult): read `.done`/`.value`; if done →
-/// `Continue(after)`; else bind `value` to `left` (via `bind_for_lhs` —
-/// handles ForInitExpression identifier targets) then `Continue(body_s)`.
-/// The loop body itself is a plan.arms ArmSpec so body-internal splits work.
 fn emit_for_await_check(
   e: Emitter2,
   ctx: SmCtx,
@@ -4859,14 +4050,10 @@ fn emit_for_await_check(
   run_rk(e, fn(e, done) {
     use e <- restore_and_seed(e, ctx)
     let e = install_cursor(e, fap.body_cursor)
-    // done-branch: §14.7.5.7 step 6.d, exhaustion does not close; jump to
-    // `after`.
     let #(done_branch, e) =
       anf.run_to(pack_loc(ctx, dict.new()), e, fn(_e, loc2) {
         ir.Continue(ctx.lresume, [ir.ConstI32(fap.after), loc2])
       })
-    // not-done: bind `left := value` then Continue→body_s (body emitted via
-    // plan.arms; its tail loops FallTo(head)).
     let #(val_name, e) = state.fresh_var(e)
     use #(bind_tree, e) <- result.try(bind_for_lhs(
       e,
@@ -4874,11 +4061,8 @@ fn emit_for_await_check(
       ir.Var(val_name),
     ))
     let #(drop, e) = state.fresh_var(e)
-    // Leaf pack: the loop variable `bind_for_lhs` just (re)bound must reach
-    // the body state through loc, not the arm-entry copy.
     let #(body_jump, e) = jump_state_leaf(e, ctx, fap.body_s, dict.new())
     let not_done = state.splice_let(bind_tree, drop, body_jump)
-    // Outer chain: sent_v is the iterresult; project done/value; branch.
     let #(chain, e) =
       run_terminal(
         {
@@ -4897,16 +4081,6 @@ fn emit_for_await_check(
   })
 }
 
-// ── u-explode: expression-position splits → statement-position splits ───────
-// The split planner only understands await/yield at a few statement-level
-// positions (hoist_one, plan_ctrl_* heads). Anything deeper — `f(await p)`,
-// `a + (yield)`, `x.y = await p`, `c ? await a : b`, `while (g(await p))` —
-// is rewritten here, before planning, into a prefix of scratch assignments
-// (`%smN = …`) that pins evaluation order, followed by the statement with the
-// split replaced by the scratch local. Scratch locals are extra function
-// slots (u-explode-slots in emit_coroutine_fn) so they live in the loc tuple
-// like any other local.
-
 const temp_prefix = "%sm"
 
 fn temp_name(i: Int) -> String {
@@ -4921,8 +4095,6 @@ fn fresh_temp(a: Ana) -> #(String, Ana) {
   #(temp_name(a.next_temp), Ana(..a, next_temp: a.next_temp + 1))
 }
 
-/// A hoisted piece: the emitter state plus the statements that must run
-/// before the residual expression.
 type Lin =
   #(Ana, List(ast.StmtWithLine), ast.Expression)
 
@@ -4955,8 +4127,6 @@ fn block_of(line: Int, stmts: List(ast.StmtWithLine)) -> ast.Statement {
     _ -> ast.BlockStatement(stmts)
   }
   |> fn(s) {
-    // Always a block: keeps a lone `%t = await p` from being taken as the
-    // whole consequent when the caller re-wraps.
     case s {
       ast.BlockStatement(..) -> s
       _ -> ast.BlockStatement([ast.StmtWithLine(line:, statement: s)])
@@ -4964,9 +4134,6 @@ fn block_of(line: Int, stmts: List(ast.StmtWithLine)) -> ast.Statement {
   }
 }
 
-/// Values whose evaluation cannot be observed relative to a later split, so
-/// they need no scratch local. Function expressions stay put so
-/// NamedEvaluation is not disturbed by a scratch name.
 fn is_trivial(ex: ast.Expression) -> Bool {
   case ex {
     ast.NumberLiteral(..)
@@ -4977,13 +4144,11 @@ fn is_trivial(ex: ast.Expression) -> Bool {
     | ast.UndefinedExpression(..)
     | ast.ThisExpression(..)
     | ast.MetaProperty(..)
-    | ast.FunctionExpression(..)
+    | // functions stay put so NamedEvaluation is undisturbed
+      ast.FunctionExpression(..)
     | ast.ArrowFunctionExpression(..) -> True
-    // A class definition runs user code only through heritage, computed
-    // keys and static elements; without those it is as inert as a function.
     ast.ClassExpression(super_class: sc, body:, ..) ->
       option.is_none(sc) && !list.any(body, class_element_has_effects)
-    // Scratch locals and `#name in obj` private names never need pinning.
     ast.Identifier(name:, ..) ->
       is_temp_name(name) || string.starts_with(name, "#")
     ast.ParenthesizedExpression(_, inner) -> is_trivial(inner)
@@ -5001,7 +4166,6 @@ fn class_element_has_effects(el: ast.ClassElement) -> Bool {
   }
 }
 
-/// Pin `ex` (already split-free) into a scratch local unless trivial.
 fn pin(a: Ana, line: Int, ex: ast.Expression) -> Lin {
   case is_trivial(ex) {
     True -> #(a, [], ex)
@@ -5009,7 +4173,6 @@ fn pin(a: Ana, line: Int, ex: ast.Expression) -> Lin {
       let span = ast.expression_span(ex)
       let #(t, a) = fresh_temp(a)
       case ex {
-        // Iterate in place: `%t = [...arg]`, then spread the array.
         ast.SpreadElement(sspan, arg) -> {
           let arr =
             ast.ArrayExpression(span, [Some(ast.SpreadElement(sspan, arg))])
@@ -5019,7 +4182,6 @@ fn pin(a: Ana, line: Int, ex: ast.Expression) -> Lin {
             ast.SpreadElement(sspan, ident(span, t)),
           )
         }
-        // `%t = (0, class …)` keeps NamedEvaluation off the scratch name.
         ast.ClassExpression(..) -> {
           let zero = ast.NumberLiteral(span, ast.FiniteNumber(0.0))
           let seq = ast.SequenceExpression(span, [zero, ex])
@@ -5031,9 +4193,6 @@ fn pin(a: Ana, line: Int, ex: ast.Expression) -> Lin {
   }
 }
 
-/// True when a split-bearing `ex` is NOT one of the shapes hoist_one /
-/// plan_ctrl_* already take verbatim (a bare await/yield whose operand is
-/// itself split-free).
 fn needs_explode(ex: ast.Expression) -> Bool {
   case split_of(ex) {
     Some(#(_, Some(op))) -> expr_has_split(op)
@@ -5042,8 +4201,6 @@ fn needs_explode(ex: ast.Expression) -> Bool {
   }
 }
 
-/// Like `lin`, but a top-level await/yield with a split-free operand is left
-/// in place (the caller's statement shape supports it directly).
 fn top(a: Ana, line: Int, ex: ast.Expression) -> Lin {
   case split_of(ex) {
     Some(#(kind, Some(op))) ->
@@ -5066,8 +4223,6 @@ fn top(a: Ana, line: Int, ex: ast.Expression) -> Lin {
   }
 }
 
-/// Hoist every split out of `ex`: the result expression is split-free and
-/// the returned statements (in order) compute what it refers to.
 fn lin(a: Ana, line: Int, ex: ast.Expression) -> Lin {
   case expr_has_split(ex) {
     False -> #(a, [], ex)
@@ -5308,13 +4463,10 @@ fn lin_split(a: Ana, line: Int, ex: ast.Expression) -> Lin {
       let #(a, pre, super2, body2) = lin_class(a, line, super_class, body)
       #(a, pre, ast.ClassExpression(span, name, super2, body2))
     }
-    // Optional chains, dynamic import and everything split-free: no rewrite.
     _ -> #(a, [], ex)
   }
 }
 
-/// Class heritage + computed keys are evaluated in order before any element
-/// body runs (§15.7.14), so they hoist like a plain operand list.
 fn lin_class(
   a: Ana,
   line: Int,
@@ -5395,10 +4547,6 @@ fn logical_test(
   }
 }
 
-/// Hoist a list of sibling operands evaluated left to right: everything
-/// before the LAST split-bearing operand is pinned (evaluated before the
-/// suspension); the last split-bearing operand is linearised in place;
-/// operands after it are untouched.
 fn lin_list(
   a: Ana,
   line: Int,
@@ -5432,9 +4580,6 @@ fn lin_list(
   #(a, list.flatten(list.reverse(pre_rev)), xs2)
 }
 
-/// `obj.prop` / `obj[key]` reference: linearise object then key. When
-/// `later` (a split follows in the enclosing node) or the key itself splits,
-/// pin the object (and key) so they are evaluated before the suspension.
 fn lin_member(
   a: Ana,
   line: Int,
@@ -5478,9 +4623,6 @@ fn lin_prop(
   }
 }
 
-/// Callee of a call / tagged template. A member callee keeps its reference
-/// shape (so `this` is preserved) with the object pinned; any other callee
-/// is pinned as a value when an argument splits.
 fn lin_callee(
   a: Ana,
   line: Int,
@@ -5545,8 +4687,6 @@ fn lin_assign(
   lhs: ast.Expression,
   rhs: ast.Expression,
 ) -> Lin {
-  // Reference to assign through, with its object/key pinned when the RHS
-  // suspends. Identifier targets need no pinning.
   let target = case lhs {
     ast.Identifier(..) -> Some(#(a, [], lhs))
     ast.MemberExpression(mspan, obj, prop) ->
@@ -5560,7 +4700,6 @@ fn lin_assign(
     _ -> None
   }
   case target, op, compound_binop(op), logical_assign_op(op) {
-    // Destructuring / super targets: only the RHS can be linearised.
     None, _, _, _ ->
       case expr_has_split(lhs) {
         True -> #(a, [], ast.AssignmentExpression(span, op, lhs, rhs))
@@ -5578,7 +4717,6 @@ fn lin_assign(
       )
     }
     Some(#(a, pre_t, ref)), _, Some(bop), _ -> {
-      // `ref op= rhs`: read ref before the RHS suspends.
       let #(t, a) = fresh_temp(a)
       let #(a, pre_r, rhs2) = lin(a, line, rhs)
       #(
@@ -5593,7 +4731,6 @@ fn lin_assign(
       )
     }
     Some(#(a, pre_t, ref)), _, _, Some(lop) -> {
-      // `ref ??= rhs` and friends: RHS only runs when the test passes.
       let #(t, a) = fresh_temp(a)
       let #(a, pre_r, rhs2) = lin(a, line, rhs)
       let guard =
@@ -5630,16 +4767,13 @@ fn lin_assign(
   }
 }
 
-/// Statement-level driver. `None` = nothing to rewrite (the planner takes the
-/// statement as-is); `Some(stmts)` = re-plan these instead.
 fn explode_stmt(
   a: Ana,
   sl: ast.StmtWithLine,
 ) -> Option(#(Ana, List(ast.StmtWithLine))) {
   let ast.StmtWithLine(line:, statement: s) = sl
-  // A rewrite that changed nothing (an unsupported shape deep inside) must
-  // report None, or the planner would re-explode the same statement forever.
   let done = fn(a, pre, stmt) {
+    // unchanged rewrite must be None or the planner loops forever
     case pre, stmt == s {
       [], True -> None
       _, _ ->
@@ -5761,7 +4895,6 @@ fn explode_stmt(
       case update_split || { !init_split && !cond_split } {
         True -> None
         False -> {
-          // Hoist the init out in front (var / expression only).
           let hoisted = case i, init_split {
             Some(ast.ForInitExpression(e)), True ->
               Some(#(a, [expr_stmt(line, e)]))
@@ -5858,8 +4991,6 @@ fn explode_stmt(
   }
 }
 
-/// `while (true) { pre; if (!test) break; body }` — a loop whose head
-/// expression suspends re-evaluates the head each iteration inside the body.
 fn loop_with_test(
   line: Int,
   cond: ast.Expression,
@@ -5872,8 +5003,6 @@ fn loop_with_test(
   )
 }
 
-/// `{ pre; if (!test) break; body }` — the head test moved into the loop
-/// body, so `break` and `continue` still target the enclosing loop.
 fn head_test_block(
   line: Int,
   cond: ast.Expression,

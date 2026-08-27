@@ -1,11 +1,4 @@
-//// `rt_val` — ES2024 §7.1 value predicates + abstract-op coercions
-//// (SPEC §7.M3, D16, D17, R1).
-////
-//// Every threaded op returns `#(V, Agent)` — value FIRST (R1).
-//// `ToPrimitive`'s object case reaches rt_obj/rt_call ONLY through
-//// `store.ops.get_prop` / `.call` (D17 upcall — NO direct import cycle).
-//// arc's `Result(_, #(err, st))` error channel becomes 2core's diverging
-//// `t_throw_*` (D7), so threaded fns return a bare tuple.
+//// §7.1 type conversion and §7.2 comparison
 
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -24,9 +17,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
-// ── D17 upcall plumbing + error throwers (module-skeleton-errors) ───────────
-
-/// The seeded `JsOps` upcall table (D17).
 fn require_ops(st: Agent) -> JsOps(Agent) {
   st.store.ops
 }
@@ -36,29 +26,23 @@ fn t_throw_error(st: Agent, kind: ErrorKind, msg: String) -> a {
   rt_store.t_throw(st, err)
 }
 
-/// Allocate a native `TypeError` with `msg` and throw it (diverges — D7).
 pub fn t_throw_type_error(st: Agent, msg: String) -> a {
   t_throw_error(st, TypeErr, msg)
 }
 
-/// Allocate a native `RangeError` with `msg` and throw it (diverges — D7).
 pub fn t_throw_range_error(st: Agent, msg: String) -> a {
   t_throw_error(st, RangeErr, msg)
 }
 
-/// Allocate a native `ReferenceError` with `msg` and throw it (diverges — D7).
 pub fn t_throw_reference_error(st: Agent, msg: String) -> a {
   t_throw_error(st, ReferenceErr, msg)
 }
 
-/// Allocate a native `SyntaxError` with `msg` and throw it (diverges — D7).
 pub fn t_throw_syntax_error(st: Agent, msg: String) -> a {
   t_throw_error(st, SyntaxErr, msg)
 }
 
-/// SPEC§8 `tdz_check` — §9.1.1.1.5/6: a lexical binding read or written
-/// while `v` is still the TDZ sentinel throws a ReferenceError; else `st` is
-/// returned unchanged.
+// §9.1.1.1.5/6 tdz read throws referenceerror
 pub fn t_tdz_check(st: Agent, v: JsVal, name: BitArray) -> Agent {
   case classify(v) {
     KTdz -> {
@@ -72,8 +56,7 @@ pub fn t_tdz_check(st: Agent, v: JsVal, name: BitArray) -> Agent {
   }
 }
 
-/// §9.1.1.3.4 GetThisBinding: `this` in a derived constructor is unbound
-/// (the TDZ sentinel) until `super()` returns.
+// §9.1.1.3.4 this is tdz until super() returns
 pub fn t_check_this(st: Agent, v: JsVal) -> Agent {
   case classify(v) {
     KTdz ->
@@ -85,9 +68,6 @@ pub fn t_check_this(st: Agent, v: JsVal) -> Agent {
   }
 }
 
-// ── pure predicates (no state) ──────────────────────────────────────────────
-
-/// `v` is `undefined`. ES2024 §6.1.1 — the Undefined type's sole value.
 pub fn is_undef(v: JsVal) -> Bool {
   case classify(v) {
     KUndef -> True
@@ -95,7 +75,6 @@ pub fn is_undef(v: JsVal) -> Bool {
   }
 }
 
-/// `v` is `null`. ES2024 §6.1.2 — the Null type's sole value.
 pub fn is_null(v: JsVal) -> Bool {
   case classify(v) {
     KNull -> True
@@ -103,8 +82,6 @@ pub fn is_null(v: JsVal) -> Bool {
   }
 }
 
-/// `v` is `undefined` OR `null` — ES2024 §7.2.1 GetMethod's "if func is
-/// either undefined or null" test.
 pub fn is_nullish(v: JsVal) -> Bool {
   case classify(v) {
     KUndef | KNull -> True
@@ -112,8 +89,6 @@ pub fn is_nullish(v: JsVal) -> Bool {
   }
 }
 
-/// `v` is an Object (has a heap cell). ES2024 §7.1.1 step 2.d's
-/// "if result is not an Object" is `!is_object(result)`.
 pub fn is_object(v: JsVal) -> Bool {
   case classify(v) {
     KHandle(_) -> True
@@ -121,9 +96,7 @@ pub fn is_object(v: JsVal) -> Bool {
   }
 }
 
-/// ES2024 §7.1.2 ToBoolean(argument). Pure — never observes user code.
-/// Port of arc `value.gleam` `is_truthy` with the `Finite(Float)` →
-/// `JInt|JFloat` split.
+// §7.1.2 toboolean
 pub fn to_boolean(v: JsVal) -> Bool {
   case classify(v) {
     KUndef | KNull | KTdz -> False
@@ -139,8 +112,6 @@ pub fn to_boolean(v: JsVal) -> Bool {
   }
 }
 
-/// SPEC§8 op-table `truthy` — `to_boolean` as `Int` `1|0` so it drops
-/// straight into `ir.If`'s `Int`-condition slot without a compare.
 pub fn to_boolean_i32(v: JsVal) -> Int {
   case to_boolean(v) {
     True -> 1
@@ -148,36 +119,23 @@ pub fn to_boolean_i32(v: JsVal) -> Int {
   }
 }
 
-/// SPEC§8 op-table `empty_list` — the `[]` value arc's `anf.cons_list` folds
-/// onto (there is no `ir.ConstNil`). Typed `List(JsVal)` so `MakeCons` chains
-/// unify; call sites treat it as an opaque `TTerm`.
 pub fn empty_list() -> List(JsVal) {
   []
 }
 
-/// SPEC§8 op-table `list_append_one` — `[x, ..xs] |> reverse` avoidance for
-/// arc's left-to-right args accumulation. Pure list op; no state.
 pub fn list_append_one(xs: List(JsVal), x: JsVal) -> List(JsVal) {
   list.append(xs, [x])
 }
 
-/// SPEC§8 op-table `float_lit` — reconstruct a `JsVal` number from its raw
-/// IEEE-754 binary64 bit pattern (arc's `expr.number_literal` non-smi path,
-/// D5: `-0.0` and denormals stay bit-exact).
 pub fn float_from_bits(bits: Int) -> JsVal {
   let assert <<f:float-size(64)>> = <<bits:size(64)>>
   mk_number(JFloat(f))
 }
 
-/// SPEC§8 op-table `string_concat` — pure string concat for arc's
-/// TemplateLiteral / `+` fast path when both sides are already strings.
 pub fn string_concat(a: BitArray, b: BitArray) -> BitArray {
   <<a:bits, b:bits>>
 }
 
-/// `"null"` if `v` is null, else `"undefined"` — for TypeError messages that
-/// name which nullish value was rejected (ES2024 §7.2.1 note). Port of arc
-/// `value.gleam` `nullish_label`.
 pub fn nullish_label(v: JsVal) -> String {
   case classify(v) {
     KNull -> "null"
@@ -185,13 +143,7 @@ pub fn nullish_label(v: JsVal) -> String {
   }
 }
 
-// ── §7.2.3 IsCallable (threaded — reads the heap) ───────────────────────────
-
-/// ES2024 §7.2.3 IsCallable(argument). An Object is callable iff its
-/// `ObjKind` carries a [[Call]] slot: `KCompiled | KNative | KBound`, or a
-/// `ProxyObj` whose target is callable. 2core's `ProxyObj` stores no cached
-/// `callable` flag, so recurse on `target` (§10.5.14 step 9.a) — [[Call]]
-/// survives revocation, so do NOT gate on `revoked`.
+// §7.2.3 iscallable, call survives proxy revocation so ignore revoked
 pub fn t_is_callable(st: Agent, v: JsVal) -> #(Bool, Agent) {
   case classify(v) {
     KHandle(h) -> #(handle_is_callable(st, h), st)
@@ -210,10 +162,7 @@ fn handle_is_callable(st: Agent, h: Handle) -> Bool {
   }
 }
 
-// ── §13.5.3 typeof / §7.2.1 RequireObjectCoercible ──────────────────────────
-
-/// ES2024 §13.5.3 the `typeof` operator. Objects with a [[Call]] internal
-/// method are `"function"`; every other object is `"object"`. R1: `#(V, st)`.
+// §13.5.3 typeof
 pub fn t_type_of(st: Agent, v: JsVal) -> #(String, Agent) {
   case classify(v) {
     KUndef -> #("undefined", st)
@@ -228,14 +177,11 @@ pub fn t_type_of(st: Agent, v: JsVal) -> #(String, Agent) {
         True -> #("function", st)
         False -> #("object", st)
       }
-    // arc operators.gleam:606 — TDZ sentinel maps to "undefined" (compiler
-    // may emit typeof on an uninitialized binding as a defensive measure).
     KTdz -> #("undefined", st)
   }
 }
 
-/// ES2024 §7.2.1 RequireObjectCoercible(argument). null / undefined throw a
-/// TypeError; every other value passes through. R1: `#(V, st)`.
+// §7.2.1 requireobjectcoercible
 pub fn t_require_object_coercible(st: Agent, v: JsVal) -> #(JsVal, Agent) {
   case classify(v) {
     KNull -> t_throw_type_error(st, "Cannot convert null to object")
@@ -244,35 +190,22 @@ pub fn t_require_object_coercible(st: Agent, v: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-// ── §7.1.1 ToPrimitive (D17 upcall core) ────────────────────────────────────
-
-/// ES2024 §7.1.1 ToPrimitive(input, preferredType). Primitives pass through;
-/// objects call `@@toPrimitive` if present (via `ops.get_prop`/`ops.call` —
-/// D17), else fall back to `OrdinaryToPrimitive`. An object result from a
-/// user `@@toPrimitive` is a TypeError (§7.1.1 step 1.b.iv). Port of arc
-/// `coerce.gleam:47-106` with the D7 Result→diverging-throw rewrite.
+// §7.1.1 toprimitive
 pub fn t_to_primitive(
   st: Agent,
   v: JsVal,
   hint: ToPrimHint,
 ) -> #(JsVal, Agent) {
   case classify(v) {
-    // Primitives pass through as-is.
     KUndef | KNull | KBool(_) | KNum(_) | KStr(_) | KSym(_) | KBig(_) -> #(
       v,
       st,
     )
-    // The TDZ sentinel is not a JS value; every TDZ load throws
-    // ReferenceError before reaching an operand — arriving here is an
-    // engine bug (a leaked hole), not a recoverable error.
     KTdz -> panic as "ToPrimitive on the TDZ sentinel"
-    // Objects: try @@toPrimitive, then OrdinaryToPrimitive.
     KHandle(h) -> {
       let ops = require_ops(st)
-      // §7.1.1 step 1.a: exoticToPrim ← GetMethod(input, @@toPrimitive).
       let #(exotic, st) = ops.get_prop(st, v, SymbolKey(symbol_to_primitive))
       case is_nullish(exotic) {
-        // GetMethod treats undefined AND null as "not found" → ordinary.
         True -> t_ordinary_to_primitive(st, h, hint)
         False -> {
           let #(callable, st) = t_is_callable(st, exotic)
@@ -284,7 +217,7 @@ pub fn t_to_primitive(
                 HintDefault -> "default"
               }
               let #(result, st) = ops.call(st, exotic, v, [mk_string(hint_str)])
-              // §7.1.1 step 1.b.iv: an object result is a TypeError.
+              // §7.1.1 step 1.b.iv object result is a typeerror
               case is_object(result) {
                 False -> #(result, st)
                 True ->
@@ -302,9 +235,7 @@ pub fn t_to_primitive(
   }
 }
 
-/// ES2024 §7.1.1.1 OrdinaryToPrimitive(O, hint). Tries `toString`/`valueOf`
-/// (or `valueOf`/`toString` for a number/default hint); returns the first
-/// non-object result, else TypeError. Port of arc `coerce.gleam:120-166`.
+// §7.1.1.1 ordinarytoprimitive
 pub fn t_ordinary_to_primitive(
   st: Agent,
   h: Handle,
@@ -317,10 +248,6 @@ pub fn t_ordinary_to_primitive(
   try_primitive_methods(st, h, method_names)
 }
 
-/// Try each method name in order; return the first primitive result. §7.1.1.1's
-/// `O` is an Object, so the receiver for both the [[Get]] and the call is
-/// `mk_object(h)` — a caller cannot pass a `this` that isn't the object
-/// being coerced.
 fn try_primitive_methods(
   st: Agent,
   h: Handle,
@@ -336,7 +263,6 @@ fn try_primitive_methods(
       case callable {
         True -> {
           let #(result, st) = ops.call(st, method, receiver, [])
-          // §7.1.1.1 step 5.b.iii: a non-primitive result → next method.
           case is_object(result) {
             False -> #(result, st)
             True -> try_primitive_methods(st, h, rest)
@@ -348,57 +274,35 @@ fn try_primitive_methods(
   }
 }
 
-// ── §7.2 Testing and Comparison Operations: equality ────────────────────────
-
-/// ES2024 §7.2.14 IsStrictlyEqual (JS `===`). NaN !== NaN; +0 === -0.
-/// Numbers compare with arithmetic `==` (1 === 1.0, -0.0 == 0.0); every
-/// other row is exact wire-term identity.
+// §7.2.14 isstrictlyequal
 @external(erlang, "arc_rt_val_ffi", "strict_eq")
 pub fn strict_equal(left: JsVal, right: JsVal) -> Bool
 
-/// ES2024 §7.2.11 SameValue. Like `===`, except NaN equals NaN and +0 does NOT
-/// equal -0. Used by Proxy invariant checks and Object.defineProperty.
+// §7.2.11 samevalue
 pub fn same_value(left: JsVal, right: JsVal) -> Bool {
   case classify(left), classify(right) {
     KNum(JNan), KNum(JNan) -> True
-    // Erlang term equality (=:=) distinguishes -0.0 from +0.0 (OTP 27+) and
-    // compares floats exactly — precisely SameValue's number semantics.
+    // erlang =:= distinguishes -0.0 and compares floats exactly
     KNum(JFloat(a)), KNum(JFloat(b)) -> float_same_term(a, b)
     KNum(JInt(a)), KNum(JInt(b)) -> a == b
-    // JInt is never -0 (Erlang integers have no signed zero), so promote to
-    // Float and let =:= distinguish the JFloat side's sign of zero.
     KNum(JInt(a)), KNum(JFloat(b)) -> float_same_term(int.to_float(a), b)
     KNum(JFloat(a)), KNum(JInt(b)) -> float_same_term(a, int.to_float(b))
     _, _ -> strict_equal(left, right)
   }
 }
 
-/// ES2024 §7.2.12 SameValueZero. Like `===`, but NaN equals NaN. ±0 are still
-/// equal. Used by Array.prototype.includes and Map/Set key equality.
+// §7.2.12 samevaluezero
 @external(erlang, "arc_rt_val_ffi", "same_value_zero")
 pub fn same_value_zero(left: JsVal, right: JsVal) -> Bool
 
-/// Erlang `=:=` on floats: exact term equality, distinguishes -0.0 from +0.0.
-/// Exists solely for SameValue's ±0-distinguishing number compare above.
 @external(erlang, "arc_rt_val_ffi", "float_same_term")
 fn float_same_term(a: Float, b: Float) -> Bool
 
-/// True iff `x` is IEEE 754 negative zero (a zero whose sign bit is set).
-/// BEAM floats preserve the sign bit but Gleam has no `-0.0` literal, so the
-/// sign-bit test lives in the FFI.
 @external(erlang, "arc_rt_val_ffi", "is_neg_zero")
 pub fn is_neg_zero(x: Float) -> Bool
 
-// ── §7.1.5-7 pure JsNum → Int/String helpers (jsnum-pure-helpers) ───────────
-// Ports of arc `numeric.gleam:295-329` + `value.gleam:4419-4440` +
-// `coerce.gleam:259-266`. arc's single `Finite(Float)` splits into 2core's
-// `JInt|JFloat`; the `JInt` arm stays on Ints — never round-trips a Float.
-
-/// ES2024 §21.1.2.6 Number.MAX_SAFE_INTEGER = 2^53 - 1.
 pub const max_safe_integer: Int = 9_007_199_254_740_991
 
-/// Truncate a JS float toward zero to an Int (matches `Math.trunc` /
-/// ToIntegerOrInfinity's finite arm). Port of arc `value.gleam:4419-4424`.
 pub fn float_to_int(f: Float) -> Int {
   case f <. 0.0 {
     True -> 0 - float.truncate(float.negate(f))
@@ -406,10 +310,7 @@ pub fn float_to_int(f: Float) -> Int {
   }
 }
 
-/// `Some(i)` iff `f` is an integral Number (§7.2.6 IsIntegralNumber) whose
-/// value is `i`; `None` for a fractional `f`. ±0-safe: `+. 0.0` normalizes
-/// -0.0 before comparing (BEAM `=:=` treats `0.0 =:= -0.0` as False). Port
-/// of arc `value.gleam:4432-4440`.
+// +. 0.0 normalizes -0.0 before comparing
 pub fn integral_int(f: Float) -> Option(Int) {
   let i = float_to_int(f)
   case int.to_float(i) +. 0.0 == f +. 0.0 {
@@ -418,16 +319,11 @@ pub fn integral_int(f: Float) -> Option(Int) {
   }
 }
 
-/// Wrap an exact Int to an unsigned 32-bit value in [0, 2^32). Erlang's
-/// `band` on negatives uses infinite two's complement, so this is a true
-/// modulo-2^32 reduction for any sign. Port of arc `numeric.gleam:327-329`.
 pub fn wrap_uint32(i: Int) -> Int {
   int.bitwise_and(i, 0xFFFFFFFF)
 }
 
-/// Wrap an exact Int to a signed 32-bit value: reduce modulo 2^32 then sign
-/// extend. Int stays Int — never round-trip through a Float or the low 32
-/// bits get rounded away past 2^53. Port of arc `numeric.gleam:314-322`.
+// int stays int, a float round trip loses low bits past 2^53
 pub fn wrap_int32(i: Int) -> Int {
   let wrapped = wrap_uint32(i)
   case wrapped > 0x7FFFFFFF {
@@ -436,9 +332,7 @@ pub fn wrap_int32(i: Int) -> Int {
   }
 }
 
-/// §7.1.6 ToInt32 of an already-ToNumber'd value: NaN/±∞ → 0, finite →
-/// truncate toward zero then wrap modulo 2^32 with sign extension. `JInt`
-/// wraps directly (no float round-trip). Port of arc `numeric.gleam:295-300`.
+// §7.1.6 toint32 of a number
 pub fn num_to_int32(n: JsNum) -> Int {
   case n {
     JNan | JPosInf | JNegInf -> 0
@@ -447,9 +341,7 @@ pub fn num_to_int32(n: JsNum) -> Int {
   }
 }
 
-/// §7.1.7 ToUint32 of an already-ToNumber'd value: NaN/±∞ → 0, finite →
-/// truncate toward zero then reduce modulo 2^32 (result in [0, 2^32)).
-/// Port of arc `numeric.gleam:303-310`.
+// §7.1.7 touint32 of a number
 pub fn num_to_uint32(n: JsNum) -> Int {
   case n {
     JNan | JPosInf | JNegInf -> 0
@@ -458,10 +350,7 @@ pub fn num_to_uint32(n: JsNum) -> Int {
   }
 }
 
-/// §7.1.5 ToIntegerOrInfinity of an already-ToNumber'd value, saturating ±∞
-/// to ±`max_safe_integer` so downstream `int.clamp`/`int.min`/`int.max`
-/// behave like the spec's explicit "+∞ → len / -∞ → 0" branches. Port of
-/// arc `coerce.gleam:259-266`.
+// §7.1.5, infinities saturate to ±max_safe_integer
 pub fn jsnum_to_integer_or_infinity(n: JsNum) -> Int {
   case n {
     JNan -> 0
@@ -472,14 +361,12 @@ pub fn jsnum_to_integer_or_infinity(n: JsNum) -> Int {
   }
 }
 
-/// §7.1.20 ToLength: ToIntegerOrInfinity clamped to [0, 2^53-1].
+// §7.1.20 tolength
 pub fn jsnum_to_length(n: JsNum) -> Int {
   int.clamp(jsnum_to_integer_or_infinity(n), min: 0, max: max_safe_integer)
 }
 
-/// §6.1.6.1.20 Number::toString(x, 10) — the canonical JS decimal rendering.
-/// `JInt` uses `int.to_string` directly (exact); `JFloat` delegates to the
-/// FFI shortest-round-trip formatter.
+// §6.1.6.1.20 number::tostring
 pub fn jsnum_to_string(n: JsNum) -> String {
   case n {
     JNan -> "NaN"
@@ -490,37 +377,21 @@ pub fn jsnum_to_string(n: JsNum) -> String {
   }
 }
 
-/// Format a finite Float per ES2024 §6.1.6.1.20 Number::toString. Delegates
-/// to the FFI for JS-compatible output (1e21 → "1e+21", 1e-6 → "0.000001",
-/// -0 → "0"). Port of arc `value.js_format_number`.
 @external(erlang, "arc_rt_val_ffi", "js_number_to_string")
 pub fn js_format_float(f: Float) -> String
 
-/// Alias for `jsnum_to_string` — the SPEC §7.M3 name for the pure
-/// JsNum→String formatter used by `t_to_string`'s primitive table.
 pub fn format_jsnum(n: JsNum) -> String {
   jsnum_to_string(n)
 }
 
-// ── §7.1.4 ToNumber, primitive-only (prim-to-number) ────────────────────────
-
-/// Why the primitive-only `ToNumber` table can't just yield a `JsNum`: Symbol
-/// and BigInt are non-recoverable TypeErrors (§7.1.4 rows 7-8), and an Object
-/// means "run ToPrimitive first, then retry" — a signal, not a value.
 pub type CoerceError {
-  /// Input is an Object — caller must `t_to_primitive(HintNumber)` then retry.
+  // object input, caller runs toprimitive then retries
   NeedsToPrimitive
-  /// §7.1.4 row 8: "Cannot convert a Symbol value to a number".
   SymbolToNumber
-  /// §7.1.4 row 7: "Cannot convert a BigInt to a number".
   BigIntToNumber
 }
 
-/// ES2024 §7.1.4 ToNumber's primitive conversion table. Objects are NOT
-/// coerced here (that would need state for `ToPrimitive`); they yield
-/// `Error(NeedsToPrimitive)` so the threaded `t_to_number` can retry after
-/// the upcall. Port of arc `value.gleam:4543-4560` with arc's `Finite(0.0)`/
-/// `Finite(1.0)` mapped to 2core's `JInt(0)`/`JInt(1)`.
+// §7.1.4 tonumber, primitives only
 pub fn prim_to_number(v: JsVal) -> Result(JsNum, CoerceError) {
   case classify(v) {
     KNum(n) -> Ok(n)
@@ -536,12 +407,7 @@ pub fn prim_to_number(v: JsVal) -> Result(JsNum, CoerceError) {
   }
 }
 
-/// ES2024 §7.1.17 ToString's primitive conversion table. Objects yield
-/// `Error(NeedsToPrimitive)` (caller must `t_to_primitive(HintString)` first,
-/// then retry); a Symbol is `Error(SymbolToNumber)` — reused as the "Symbol
-/// cannot be a coerced" tag, thrown by the caller as "Cannot convert a Symbol
-/// value to a string". Port of arc `coerce.gleam:js_to_string`'s post-
-/// ToPrimitive match table.
+// §7.1.17 tostring, primitives only
 pub fn prim_to_string(v: JsVal) -> Result(String, CoerceError) {
   case classify(v) {
     KStr(s) -> Ok(s)
@@ -557,12 +423,7 @@ pub fn prim_to_string(v: JsVal) -> Result(String, CoerceError) {
   }
 }
 
-// ── §7.1.17 ToString (threaded — objects go through ToPrimitive) ────────────
-
-/// ES2024 §7.1.17 ToString(argument): a total match on §7.1.17's conversion
-/// table. Primitives convert directly; an object goes through ToPrimitive
-/// with hint "string" and re-enters once. Port of arc `coerce.gleam:168-190
-/// js_to_string` with the D7 Result→throw rewrite.
+// §7.1.17 tostring
 pub fn t_to_string(st: Agent, v: JsVal) -> #(String, Agent) {
   case classify(v) {
     KStr(s) -> #(s, st)
@@ -574,7 +435,7 @@ pub fn t_to_string(st: Agent, v: JsVal) -> #(String, Agent) {
     KBig(n) -> #(int.to_string(n), st)
     KSym(_) ->
       t_throw_type_error(st, "Cannot convert a Symbol value to a string")
-    // t_to_primitive never returns an object, so this recurs exactly once.
+    // toprimitive never returns an object so this recurs once
     KHandle(_) -> {
       let #(prim, st) = t_to_primitive(st, v, HintString)
       t_to_string(st, prim)
@@ -583,18 +444,9 @@ pub fn t_to_string(st: Agent, v: JsVal) -> #(String, Agent) {
   }
 }
 
-// ── §7.1.19 ToPropertyKey ───────────────────────────────────────────────────
-
-/// ES2024 §7.1.19 ToPropertyKey(argument). ToPrimitive with hint "string";
-/// a Symbol result becomes `SymbolKey`, everything else is `! ToString`
-/// canonicalized to a `StringKey`. The Symbol check runs on the *primitive*
-/// (post-ToPrimitive), so a `@@toPrimitive` returning a Symbol yields a
-/// `SymbolKey`, not a "Cannot convert a Symbol value to a string" TypeError.
-/// Port of arc `property.gleam:18-82`.
+// §7.1.19 topropertykey, symbol check runs after toprimitive
 pub fn t_to_property_key(st: Agent, v: JsVal) -> #(ObjectKey, Agent) {
   case classify(v) {
-    // Step 1: ToPrimitive is only observable on objects; re-dispatch on the
-    // result so step 2's Symbol check sees the primitive.
     KHandle(_) -> {
       let #(prim, st) = t_to_primitive(st, v, HintString)
       primitive_to_prop_key(st, prim)
@@ -603,9 +455,7 @@ pub fn t_to_property_key(st: Agent, v: JsVal) -> #(ObjectKey, Agent) {
   }
 }
 
-/// ToPropertyKey for a computed member key `base[v]`: §6.2.5.5 GetValue /
-/// §6.2.5.6 PutValue run ToObject(base) before the key is coerced, so a
-/// nullish base throws TypeError without ever calling the key's `toString`.
+// nullish base throws before the key's tostring runs
 pub fn t_to_property_key_of(
   st: Agent,
   base: JsVal,
@@ -621,30 +471,20 @@ pub fn t_to_property_key_of(
   }
 }
 
-/// Steps 2-3 of §7.1.19 for an already-primitive `v`. Numbers/strings take
-/// fast paths so downstream [[Get]]/[[Set]] don't re-stringify: array-index
-/// numbers → `Index(n)` (skip stringify), strings → `canonical_key`, else
-/// `t_to_string` → `canonical_key`.
+// §7.1.19 steps 2-3 for a primitive
 fn primitive_to_prop_key(st: Agent, v: JsVal) -> #(ObjectKey, Agent) {
   case classify(v) {
-    // Step 2: If key is a Symbol, return key.
     KSym(id) -> #(SymbolKey(id), st)
-    // `index_key` already applies the [0, 2^32-2] canonical-array-index check
-    // and falls back to `Named(int.to_string(n))` — the JInt-shape sibling of
-    // arc's Finite(n) → array_index_of_float / js_format_number split.
     KNum(JInt(n)) -> #(StringKey(index_key(n)), st)
     KNum(JFloat(f)) ->
       case array_index_of_float(f) {
-        // Valid array index — skip stringification entirely.
         Some(i) -> #(StringKey(Index(i)), st)
-        // Non-index number — stringify (e.g. 1.5 → "1.5", -1 → "-1").
         None -> #(StringKey(Named(js_format_float(f))), st)
       }
     KNum(JNan) -> #(StringKey(Named("NaN")), st)
     KNum(JPosInf) -> #(StringKey(Named("Infinity")), st)
     KNum(JNegInf) -> #(StringKey(Named("-Infinity")), st)
     KStr(s) -> #(StringKey(canonical_key(s)), st)
-    // Step 3: ToString(key) — key is a non-Symbol primitive, cannot re-enter.
     _ -> {
       let #(s, st) = t_to_string(st, v)
       #(StringKey(canonical_key(s)), st)
@@ -652,42 +492,27 @@ fn primitive_to_prop_key(st: Agent, v: JsVal) -> #(ObjectKey, Agent) {
   }
 }
 
-// ── §7.1.4.1.1 StringToNumber ───────────────────────────────────────────────
-
-/// A `parse_float` FFI failure: `OutOfRange` when the text is valid float
-/// syntax whose magnitude overflows a double; `Invalid` otherwise.
 pub type FloatParseError {
   OutOfRange
   Invalid
 }
 
-/// A JS decimal literal → Float, with a typed failure: `OutOfRange` when the
-/// text is valid float syntax whose magnitude overflows a double, `Invalid`
-/// otherwise. Port of arc `parser/number.parse_float` (arc_float_ffi).
 @external(erlang, "arc_rt_val_ffi", "parse_float")
 pub fn parse_float(s: String) -> Result(Float, FloatParseError)
 
-/// ES2024 §7.1.4.1.1 StringToNumber: trims whitespace, accepts leading + or -,
-/// Infinity, scientific notation, leading/trailing decimal point, and
-/// hex/oct/bin prefixes. Port of arc `value.gleam:string_to_number`.
+// §7.1.4.1.1 stringtonumber
 pub fn string_to_number(s: String) -> JsNum {
-  // Fast path: a plain run of ASCII digits (optional single leading '-').
-  // Such strings have no whitespace to trim and can't be float/hex literals,
-  // so the general path's failed float.parse attempts (caught badargs) and
-  // binary pattern compiles are pure overhead. Very hot via canonical numeric
-  // index conversion of array-like string keys ("0", "1", ...).
+  // fast path for plain digit strings, very hot for array keys
   case parse_plain_digits(s) {
     Ok(n) -> n
     Error(Nil) -> string_to_number_slow(s)
   }
 }
 
-/// Parse a string that is exactly an optional '-' followed by 1..15 ASCII
-/// digits. 15 digits keeps the value exactly representable as a float, so the
-/// result is identical to the general path. Anything else falls through.
+// max 15 digits keeps it exact as a float
 fn parse_plain_digits(s: String) -> Result(JsNum, Nil) {
   case bit_array.from_string(s) {
-    // "-0" is -0.0, which only the float shape can carry.
+    // -0 needs the float shape
     <<0x2d, rest:bytes>> -> {
       use n <- result.map(accumulate_digits(rest, 0, 0))
       case n {
@@ -715,15 +540,11 @@ fn accumulate_digits(
   }
 }
 
-/// Single-pass byte-walk over the string: hand-rolled StrWhiteSpace trim
-/// (no pattern compiles), grammar validated while scanning so float parsing
-/// runs at most once on a known-well-formed literal (no caught badargs).
 fn string_to_number_slow(s: String) -> JsNum {
   let bytes = trim_string_ws(bit_array.from_string(s))
   case bytes {
     <<>> -> JFloat(0.0)
-    // NonDecimalIntegerLiteral (§7.1.4.1 StringNumericLiteral): hex/octal/
-    // binary prefixes. No sign is permitted with these forms.
+    // no sign allowed with 0x 0o 0b
     <<"0x":utf8, digits:bytes>> | <<"0X":utf8, digits:bytes>> ->
       parse_radix_literal(digits, 16)
     <<"0o":utf8, digits:bytes>> | <<"0O":utf8, digits:bytes>> ->
@@ -759,9 +580,7 @@ fn negate_jsnum(n: JsNum) -> JsNum {
   }
 }
 
-/// Trim StrWhiteSpaceChar (§7.1.4.1: WhiteSpace ∪ LineTerminator) from both
-/// ends. Note this is NOT Unicode White_Space: U+0085 NEL is excluded and
-/// U+FEFF ZWNBSP included, matching the JS spec.
+// §7.1.4.1 strwhitespacechar, not unicode white_space
 fn trim_string_ws(bytes: BitArray) -> BitArray {
   let bytes = drop_leading_string_ws(bytes)
   let keep = content_length(bytes, 0, 0)
@@ -777,7 +596,7 @@ fn trim_string_ws(bytes: BitArray) -> BitArray {
 
 fn drop_leading_string_ws(bytes: BitArray) -> BitArray {
   case bytes {
-    // TAB LF VT FF CR SP
+    // tab lf vt ff cr sp
     <<b, rest:bytes>>
       if b == 0x09
       || b == 0x0a
@@ -786,27 +605,24 @@ fn drop_leading_string_ws(bytes: BitArray) -> BitArray {
       || b == 0x0d
       || b == 0x20
     -> drop_leading_string_ws(rest)
-    // U+00A0 NBSP
+    // u+00a0
     <<0xc2, 0xa0, rest:bytes>> -> drop_leading_string_ws(rest)
-    // U+1680 OGHAM SPACE MARK
+    // u+1680
     <<0xe1, 0x9a, 0x80, rest:bytes>> -> drop_leading_string_ws(rest)
-    // U+2000..U+200A spaces, U+2028 LS, U+2029 PS, U+202F NNBSP
+    // u+2000..200a u+2028 u+2029 u+202f
     <<0xe2, 0x80, b, rest:bytes>>
       if b >= 0x80 && b <= 0x8a || b == 0xa8 || b == 0xa9 || b == 0xaf
     -> drop_leading_string_ws(rest)
-    // U+205F MMSP
+    // u+205f
     <<0xe2, 0x81, 0x9f, rest:bytes>> -> drop_leading_string_ws(rest)
-    // U+3000 IDEOGRAPHIC SPACE
+    // u+3000
     <<0xe3, 0x80, 0x80, rest:bytes>> -> drop_leading_string_ws(rest)
-    // U+FEFF ZWNBSP
+    // u+feff
     <<0xef, 0xbb, 0xbf, rest:bytes>> -> drop_leading_string_ws(rest)
     _ -> bytes
   }
 }
 
-/// Byte length of `bytes` up to and including the last byte that is not part
-/// of a StrWhiteSpaceChar — i.e. the length after trimming trailing JS
-/// whitespace.
 fn content_length(bytes: BitArray, idx: Int, last: Int) -> Int {
   case bytes {
     <<>> -> last
@@ -831,15 +647,12 @@ fn content_length(bytes: BitArray, idx: Int, last: Int) -> Int {
   }
 }
 
-/// Parse a StrUnsignedDecimalLiteral (any sign already stripped by the
-/// caller): "Infinity", digits[.digits][exp], .digits[exp] or digits.[exp].
 fn parse_unsigned_literal(bytes: BitArray) -> Result(JsNum, Nil) {
   case bytes {
     <<"Infinity":utf8>> -> Ok(JPosInf)
     _ -> {
       let #(icount, after_int) = scan_ascii_digits(bytes, 0)
       case after_int {
-        // Entirely digits: an integer literal.
         <<>> if icount > 0 -> parse_integer_literal(bytes)
         <<".":utf8, after_dot:bytes>> -> {
           let #(fcount, after_frac) = scan_ascii_digits(after_dot, 0)
@@ -851,7 +664,6 @@ fn parse_unsigned_literal(bytes: BitArray) -> Result(JsNum, Nil) {
             }
           }
         }
-        // No dot, trailing bytes after the digits: must be an ExponentPart.
         _ if icount > 0 -> {
           use Nil <- result.try(check_exponent_part(after_int))
           parse_decimal_literal(bytes)
@@ -870,9 +682,6 @@ fn scan_ascii_digits(bytes: BitArray, count: Int) -> #(Int, BitArray) {
   }
 }
 
-/// Check that whatever trails the mantissa is a well-formed (possibly absent)
-/// ExponentPart, and nothing else. Only its validity matters here: the literal
-/// text is handed to `parse_float` verbatim, exponent included.
 fn check_exponent_part(bytes: BitArray) -> Result(Nil, Nil) {
   case bytes {
     <<>> -> Ok(Nil)
@@ -899,11 +708,7 @@ fn nonempty_all_digits(bytes: BitArray) -> Bool {
   }
 }
 
-/// Convert an already-validated decimal literal (mantissa + optional exponent,
-/// no sign) to a Number through the engine's one decimal→double normalizer.
-/// A magnitude past the double range is Infinity, not NaN: §7.1.4.1 rounds
-/// StringNumericLiteral to the nearest Number, and `Number("1e999")` is
-/// +Infinity. The caller re-applies any leading sign.
+// overflow is infinity not nan, e.g. number("1e999")
 fn parse_decimal_literal(bytes: BitArray) -> Result(JsNum, Nil) {
   use text <- result.try(bit_array.to_string(bytes))
   case parse_float(text) {
@@ -913,16 +718,12 @@ fn parse_decimal_literal(bytes: BitArray) -> Result(JsNum, Nil) {
   }
 }
 
-/// Parse an all-digits integer literal: exact while it fits 2^53 - 1, else
-/// the nearest double, which `num_from_int` saturates to Infinity beyond
-/// double range (~1e308, 309+ digits) per §7.1.4.1.
 fn parse_integer_literal(bytes: BitArray) -> Result(JsNum, Nil) {
   use digits <- result.try(bit_array.to_string(bytes))
   int.parse(digits) |> result.map(int_number)
 }
 
-/// Parse the digits of a NonDecimalIntegerLiteral ("0x.." / "0o.." / "0b..").
-/// Empty or signed digit sequences are NaN per §7.1.4.1.
+// empty or signed digits are nan
 fn parse_radix_literal(digits: BitArray, radix: Int) -> JsNum {
   case digits {
     <<>> | <<"-":utf8, _:bytes>> | <<"+":utf8, _:bytes>> -> JNan
@@ -942,8 +743,6 @@ const nf_two52 = 4_503_599_627_370_496
 
 const nf_two53 = 9_007_199_254_740_992
 
-/// Integer → Number keeping the exact `JInt` shape while |n| <= 2^53 - 1 (the
-/// shape number literals and integer arithmetic produce), else `num_from_int`.
 pub fn int_number(n: Int) -> JsNum {
   case n <= max_safe_integer && n >= -max_safe_integer {
     True -> JInt(n)
@@ -951,9 +750,7 @@ pub fn int_number(n: Int) -> JsNum {
   }
 }
 
-/// Integer → Number with correct rounding (round-to-nearest, ties-to-even).
-/// Erlang's float/1 mis-rounds integers wider than 53 bits, so reduce to a
-/// 53-bit mantissa ourselves and convert the (exactly representable) result.
+// erlang float/1 misrounds past 53 bits so round here
 pub fn num_from_int(n: Int) -> JsNum {
   let a = int.absolute_value(n)
   case a < nf_two53 {
@@ -996,8 +793,7 @@ fn nf_bit_length(n: Int, acc: Int) -> Int {
   }
 }
 
-/// ES2024 §7.1.14 StringToBigInt — decimal (with sign) or 0x/0o/0b prefixed;
-/// empty/whitespace-only → 0; anything else fails (None).
+// §7.1.14 stringtobigint, none on failure
 pub fn string_to_bigint(s: String) -> Option(Int) {
   let bytes = trim_string_ws(bit_array.from_string(s))
   case bit_array.to_string(bytes) {
@@ -1017,13 +813,7 @@ fn parse_bigint_radix_digits(digits: String, base: Int) -> Option(Int) {
   }
 }
 
-// ── §7.1.3-7 / §7.1.18 / §7.1.20 remaining threaded coercions ───────────────
-// Ports of arc `coerce.gleam:202-337`. Each = `t_to_primitive`/`t_to_number`
-// then a pure table.
-
-/// ES2024 §7.1.4 ToNumber with VM re-entry for ToPrimitive. BigInt and Symbol
-/// are TypeErrors (§7.1.4 conversion table). Port of arc
-/// `coerce.gleam:202-225 js_to_number` with the D7 Result→throw rewrite.
+// §7.1.4 tonumber
 pub fn t_to_number(st: Agent, v: JsVal) -> #(JsNum, Agent) {
   case classify(v) {
     KNum(n) -> #(n, st)
@@ -1042,8 +832,7 @@ pub fn t_to_number(st: Agent, v: JsVal) -> #(JsNum, Agent) {
   }
 }
 
-/// ES2024 §7.1.3 ToNumeric: ToPrimitive(number hint), then a BigInt is
-/// returned as-is; otherwise wrapped ToNumber. Result is always `KNum | KBig`.
+// §7.1.3 tonumeric
 pub fn t_to_numeric(st: Agent, v: JsVal) -> #(JsVal, Agent) {
   case classify(v) {
     KBig(_) -> #(v, st)
@@ -1062,10 +851,7 @@ pub fn t_to_numeric(st: Agent, v: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// ES2024 §7.1.13 ToBigInt(argument). ToPrimitive with hint "number", then
-/// the §7.1.13 conversion table: BigInt/Bool/String succeed; Number/Symbol/
-/// null/undefined → TypeError; a string StringToBigInt rejects → SyntaxError.
-/// Port of arc `coerce.gleam:377-405 to_bigint`.
+// §7.1.13 tobigint
 pub fn t_to_bigint(st: Agent, v: JsVal) -> #(Int, Agent) {
   let #(prim, st) = t_to_primitive(st, v, HintNumber)
   case classify(prim) {
@@ -1075,8 +861,7 @@ pub fn t_to_bigint(st: Agent, v: JsVal) -> #(Int, Agent) {
     KStr(s) ->
       case string_to_bigint(s) {
         Some(n) -> #(n, st)
-        // §7.1.13: StringToBigInt returning undefined throws a SyntaxError
-        // (not TypeError — that's for Number/Symbol/null/undefined).
+        // bad string is syntaxerror not typeerror
         None ->
           t_throw_syntax_error(st, "Cannot convert " <> s <> " to a BigInt")
       }
@@ -1088,8 +873,7 @@ pub fn t_to_bigint(st: Agent, v: JsVal) -> #(Int, Agent) {
   }
 }
 
-/// ES2024 §7.1.18 ToObject. `null`/`undefined` → TypeError; objects pass
-/// through; primitives box via `ops.to_object` upcall (D17).
+// §7.1.18 toobject
 pub fn t_to_object(st: Agent, v: JsVal) -> #(Handle, Agent) {
   case classify(v) {
     KHandle(h) -> #(h, st)
@@ -1100,37 +884,30 @@ pub fn t_to_object(st: Agent, v: JsVal) -> #(Handle, Agent) {
   }
 }
 
-/// ES2024 §7.1.6 ToInt32: full ToNumber (ToPrimitive on objects, TypeError on
-/// Symbol/BigInt), then modular reduction to [-2^31, 2^31).
+// §7.1.6 toint32
 pub fn t_to_int32(st: Agent, v: JsVal) -> #(Int, Agent) {
   let #(n, st) = t_to_number(st, v)
   #(num_to_int32(n), st)
 }
 
-/// ES2024 §7.1.7 ToUint32: full ToNumber, then modular reduction to [0, 2^32).
+// §7.1.7 touint32
 pub fn t_to_uint32(st: Agent, v: JsVal) -> #(Int, Agent) {
   let #(n, st) = t_to_number(st, v)
   #(num_to_uint32(n), st)
 }
 
-/// ES2024 §7.1.5 ToIntegerOrInfinity: full ToNumber then
-/// `jsnum_to_integer_or_infinity` (±∞ saturated to ±(2^53-1)).
+// §7.1.5 tointegerorinfinity
 pub fn t_to_integer_or_infinity(st: Agent, v: JsVal) -> #(Int, Agent) {
   let #(n, st) = t_to_number(st, v)
   #(jsnum_to_integer_or_infinity(n), st)
 }
 
-/// ES2024 §7.1.20 ToLength: full ToNumber then `jsnum_to_length`.
 pub fn t_to_length(st: Agent, v: JsVal) -> #(Int, Agent) {
   let #(n, st) = t_to_number(st, v)
   #(jsnum_to_length(n), st)
 }
 
-/// ES2024 §7.1.22 ToIndex(value). ToIntegerOrInfinity, then RangeError with
-/// caller-supplied `err_msg` if the result is outside [0, 2^53-1]. undefined
-/// short-circuits to 0 (ToNumber(undefined) is NaN, no observable steps).
-/// Port of arc `coerce.gleam:417-446 to_index` with the D7 Result→throw
-/// rewrite and the JInt|JFloat split.
+// §7.1.22 toindex, rangeerror outside [0, 2^53-1]
 pub fn t_to_index(st: Agent, v: JsVal, err_msg: String) -> #(Int, Agent) {
   case classify(v) {
     KUndef -> #(0, st)

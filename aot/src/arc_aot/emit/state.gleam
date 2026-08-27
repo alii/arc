@@ -1,7 +1,3 @@
-//// M10: Emitter2 threaded state, EmitDispatch (R13), Frame2/label stack,
-//// scope cursor, EmitError. Port of emit.gleam:125-310,1295-1475,2226-2314
-//// re-shaped for ir.Expr output. D2: NO St/state_var — emit_core owns that.
-
 import arc/bytecode/lexical
 import arc/compiler/scope.{type ScopeId, type ScopeTree}
 import arc/parser/ast
@@ -15,9 +11,6 @@ import gleam/order
 import gleam/set.{type Set}
 import gleam/string
 
-/// Compile-time ir.Value constants for JS sentinel atoms (SPEC §2.3 wire ABI).
-/// Built once by `realm_consts()`; carried on Emitter2 so emit_* sites write
-/// `e.consts.undef` instead of re-spelling `ir.ConstAtom("undefined")`.
 pub type RealmConsts {
   RealmConsts(
     undef: ir.Value,
@@ -29,7 +22,6 @@ pub type RealmConsts {
     neg_inf: ir.Value,
     tdz: ir.Value,
     empty_bin: ir.Value,
-    // ir.TagDecl name M17/M19 register for JS exceptions (RULINGS R2).
     js_tag: String,
   )
 }
@@ -49,52 +41,31 @@ pub fn realm_consts() -> RealmConsts {
   )
 }
 
-/// User-reachable emit failures (RULINGS R12: surface as Result, never panic).
-/// Subset of arc/compiler/emit.EmitError plus emit_2core-specific desync guard.
 pub type EmitError {
   BreakOutsideLoop
   ContinueOutsideLoop
   EarlySyntaxError(message: String)
   UnsupportedFeature(feature: String)
-  /// enter_scope popped a cursor id that didn't match the AST walk order.
   ScopeCursorDesync(at: ScopeId)
 }
 
-/// Where the synthetic field-initializer call is emitted.
-/// Verbatim port of arc/compiler/emit.gleam:314-321.
 pub type FieldInitMode {
-  /// No instance fields (or not in a constructor body).
   NoFieldInit
-  /// Base-class ctor: call init fn at start of body, after lexical declares.
   FieldInitAtStart
-  /// Derived-class ctor: call init fn after every `super()`.
   FieldInitAfterSuper
 }
 
-/// Per-class-body context threaded through emit_class → method/ctor bodies
-/// (SPEC.md:1186-1190). M16 constructs one per ClassExpression; M15/M18 read
-/// it via Emitter2.class_stack for `super`, private-name brand checks, and
-/// home-object cells.
 pub type ClassCtx {
   ClassCtx(
-    /// Private-name id → brand-cell IR var (D9: runtime-minted UID cell).
     brand_vars: Dict(String, ir.Value),
-    /// HomeObject cell for prototype methods' `super.x` (§10.2.1).
     proto_home_cell: ir.Value,
-    /// HomeObject cell for static methods' `super.x`.
     static_home_cell: ir.Value,
-    /// Constructor self-reference cell (derived-ctor `this` after super()).
     ctor_self_cell: ir.Value,
-    /// Class-body inner binding cell (NamedEvaluation §8.1.15), when named.
     inner_name_cell: Option(ir.Value),
-    /// True iff `extends` clause present — gates FieldInitAfterSuper.
     is_derived: Bool,
   )
 }
 
-/// Saved scope-cursor position captured at try-entry so a duplicated
-/// finally block can re-enter its own scope at each crossing site.
-/// Port of emit.gleam:1389-1391 ScopeSave, re-shaped for slot_vars.
 pub type ScopeSave2 {
   ScopeSave2(
     cur_scope: ScopeId,
@@ -104,29 +75,19 @@ pub type ScopeSave2 {
   )
 }
 
-/// Saved per-function-body state for the enter_function/leave_function
-/// round-trip (M10-M11.md:181-182). enter_function resets these to child
-/// defaults; leave_function restores the parent's. Module-monotone fields
-/// (next_var/next_label/next_fn/fns_acc) and constants (tree/dispatch/consts)
-/// are NOT saved — they thread straight through nested compilations so
-/// ir.Function names and fns_acc stay globally unique/flat (invariant #1).
 pub type FnSave {
   FnSave(
-    // scope cursor
     fn_scope: ScopeId,
     cur_scope: ScopeId,
     scope_cursor: List(ScopeId),
     child_fn_cursor: List(ScopeId),
     in_block: Bool,
-    // control-flow stack — a break never crosses a function boundary
     frame_stack: List(Frame2),
     pending_label: Option(String),
-    // per-body mode flags
     strict: Bool,
     is_async: Bool,
     is_generator: Bool,
     is_arrow: Bool,
-    // per-body context stacks
     with_stack: List(String),
     private_env: List(String),
     field_init: FieldInitMode,
@@ -134,24 +95,16 @@ pub type FnSave {
     default_ctor: Bool,
     this_tdz: Bool,
     class_stack: List(ClassCtx),
-    // per-function slot mapping (slot indices are function-scope-local)
     slot_vars: Dict(Int, String),
     cap_names: List(String),
     initialized: Set(Int),
     hoisted_kfn: Dict(Int, ir.Value),
-    // M18: nested non-coroutine fn must NOT inherit the parent's SM intercept
     sm_abrupt: Option(SmAbrupt),
     raw_args_var: Option(String),
   )
 }
 
-/// Break/continue/return unwind stack. Port of emit.gleam:125-160 Frame,
-/// re-shaped for string IR labels + finally-duplication (SPEC.md:1157-1164).
 pub type Frame2 {
-  /// Iteration statement. `ir_break` names the outer ir.Block; `ir_continue`
-  /// names the INNER ir.Block wrapping the body (R15: JS continue → ir.Break to
-  /// it, falling through to update/post-test). `carried` is the LoopParam slot
-  /// set. `iter_close` holds the iterator cell var for for-of/for-await-of.
   Loop2(
     ir_break: String,
     ir_continue: String,
@@ -159,15 +112,8 @@ pub type Frame2 {
     carried: List(Int),
     iter_close: Option(#(String, Escape)),
   )
-  /// switch: break target only; unlabeled `break` targets it, `continue` walks
-  /// past to the enclosing loop. Transparent when crossed.
   Switch2(ir_break: String, js_label: Option(String), carried: List(Int))
-  /// `foo: { … }` — labeled non-loop block. Only `break foo` targets it;
-  /// unlabeled break skips it (§14.8). Transparent when crossed.
   Labeled2(ir_break: String, js_label: String, carried: List(Int))
-  /// try/catch/finally or for-of body. Never a target — only crossed.
-  /// `finally_body` (when Some) is re-emitted inline at each crossing site
-  /// under the saved scope. `iter_close` names an iterator cell to close.
   Barrier2(
     finally_body: Option(#(List(ast.StmtWithLine), ScopeSave2)),
     iter_close: Option(String),
@@ -175,44 +121,23 @@ pub type Frame2 {
   )
 }
 
-/// The landing just outside a frame's ir.Try region. A cleanup inlined at a
-/// transfer site inside the region runs under its own ir.Try whose handler
-/// `Break`s here with the thrown value, so the region's handler never sees
-/// what its own finally block or iterator close threw; the landing rethrows
-/// outside. `arity` is how many carried values the landing block yields
-/// besides the flag and the exception. None for a marker barrier that owns
-/// no region.
 pub type Escape {
   Escape(label: String, arity: Int)
 }
 
-/// Cleanup a break/continue/return performs when CROSSING a barrier on its
-/// way to the target. find_break_target/find_continue_target return these as
-/// an ordered list; M13/M17 emit each entry inline (no gosub in structured IR).
 pub type BarrierCleanup {
-  /// Re-emit `body` at the crossing point, restoring `saved_scope` first so
-  /// the finally block sees its own bindings (M17 barrier-duplication).
   FinallyBlock(
     body: List(ast.StmtWithLine),
     saved_scope: ScopeSave2,
     escape: Option(Escape),
   )
-  /// for-of / for-await-of iterator to close on abrupt exit; `is_async`
-  /// selects the awaited variant (M18).
   IterClose(iter_var: String, is_async: Bool, escape: Option(Escape))
-  /// try-catch with no finally: nothing to emit — ir.Try is structured so
-  /// Break(label) is already valid; recorded only for completion semantics.
   CatchOnly
 }
 
-// ── EmitDispatch (defined here to break the emit_* import cycle) ─────────────
-
-/// Terminal continuation of a statement fold: builds the tail expression and
-/// hands back the emitter it finished with.
 pub type K =
   fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError)
 
-/// Rewrap the tree of a threaded `#(tree, e)` result, keeping the emitter.
 pub fn map_tree(
   r: Result(#(ir.Expr, Emitter2), EmitError),
   f: fn(ir.Expr) -> ir.Expr,
@@ -235,8 +160,6 @@ pub type FnShape {
   FnExpr(self_name: Option(String), is_gen: Bool, is_async: Bool)
   Arrow(is_async: Bool)
   Method(is_gen: Bool, is_async: Bool)
-  /// `default`: the synthesized constructor of a class with none, whose
-  /// derived form forwards its arguments to the parent unobservably.
   ClassCtor(derived: Bool, has_field_init: Bool, default: Bool)
   ClassInitFn
 }
@@ -246,9 +169,6 @@ pub type FnBody {
   ExprBody(ast.Expression)
 }
 
-/// A compiled function as a call site can reach it: straight into its
-/// simple-ABI variant `name(captures.., [this,] p0..p{arity-1})`, or through
-/// the closure-site tree that builds its function object.
 pub type FnSite {
   DirectFn(
     name: String,
@@ -266,13 +186,6 @@ pub type CoroutineKind {
   CorAsyncGen
 }
 
-/// M18 abrupt-completion intercept. Installed by async.gleam before delegating
-/// a split-free fragment to `dispatch.emit_stmts`, so `return`/`break`/
-/// `continue` inside it route to the state-machine (step_return / Continue to
-/// state N) instead of M13's bare `ir.Return`/`ir.Break`. `on_goto` is called
-/// with the resolved ir label; it returns None for non-SM (fragment-local)
-/// labels — M13 falls through to its normal `ir.Break` — and Some for sentinel
-/// labels async.gleam pushed for split-spanning loops/labeled/switch.
 pub type SmAbrupt {
   SmAbrupt(
     on_return: fn(Emitter2, ir.Value) -> Result(#(ir.Expr, Emitter2), EmitError),
@@ -281,14 +194,10 @@ pub type SmAbrupt {
   )
 }
 
-/// D13 mutual-recursion break. R12: every field is Result-wrapped so early
-/// errors surface as `Error(EarlySyntaxError(..))`, never `panic`.
 pub type EmitDispatch {
   EmitDispatch(
     emit_expr: fn(Emitter2, ast.Expression) ->
       Result(#(ir.Expr, Emitter2), EmitError),
-    /// `emit_expr` under NamedEvaluation (§8.4.5): the name an anonymous
-    /// function/class expression takes from its binding position.
     emit_expr_named: fn(Emitter2, ast.Expression, Option(String)) ->
       Result(#(ir.Expr, Emitter2), EmitError),
     emit_stmts: fn(Emitter2, List(ast.StmtWithLine), K) ->
@@ -303,8 +212,6 @@ pub type EmitDispatch {
       FnBody,
       ScopeId,
     ) -> Result(#(ir.Expr, Emitter2), EmitError),
-    /// `emit_function` for a site that calls the function once and drops
-    /// it: the simple-ABI variant to call directly when there is one.
     emit_function_site: fn(
       Emitter2,
       FnShape,
@@ -334,47 +241,26 @@ pub type EmitDispatch {
   )
 }
 
-// ── Emitter2 (reconciled union: SPEC.md §7.M10 ∪ M10-M11.md) ────────────────
-
-/// Threaded through every emit_* as `#(ir.Expr, Emitter2)`. Non-opaque so
-/// M12-M18 read `e.dispatch.*` / `e.consts.*` directly and M19 constructs it.
-/// D2 (Arch-A): NO state_var/st_cur — emit_core (M9) alone owns St threading.
 pub type Emitter2 {
   Emitter2(
-    // ── scope cursor (verbatim port emit.gleam:206-228,298-304) ──
     tree: ScopeTree,
     fn_scope: ScopeId,
     cur_scope: ScopeId,
     scope_cursor: List(ScopeId),
     child_fn_cursor: List(ScopeId),
     in_block: Bool,
-    /// JS name for each `#(function scope, slot)`, see `slot_names`.
     slot_names: Dict(#(ScopeId, Int), String),
-    /// IR names of the current function's capture params, in capture order
-    /// (`func.seed_capture_slots` sets it; the param builders read it).
     cap_names: List(String),
-    // ── name generation (ir.gleam:419-420 uniqueness) ──
     next_var: Int,
     next_label: Int,
-    /// module-monotone — survives enter_function
     next_fn: Int,
-    /// Every function base name minted so far (module-monotone).
     fn_names: Set(String),
-    /// module-monotone tagged-template site counter (§13.2.8.4 cache key)
     next_site: Int,
     module_name: String,
-    // ── control-flow stack (per-function; enter_function saves+clears) ──
     frame_stack: List(Frame2),
-    /// Set by LabeledStatement (via set_pending_label) before emitting its body.
-    /// Consumed by push_loop/push_switch/push_labeled; push_barrier is
-    /// transparent to it (M10-M11.md gotcha #6).
     pending_label: Option(String),
-    // ── module-wide function accumulator (survives enter_function) ──
     fns_acc: List(ir.Function),
-    /// Unsupported features met inside expression position, where the ANF
-    /// builder has no error channel. `compile` fails the unit if non-empty.
     unsupported: List(String),
-    // ── per-body mode flags (reset by enter_function) ──
     strict: Bool,
     is_async: Bool,
     is_generator: Bool,
@@ -382,59 +268,25 @@ pub type Emitter2 {
     with_stack: List(String),
     private_env: List(String),
     field_init: FieldInitMode,
-    /// This body is a derived class constructor: `return` yields `this`
-    /// for an undefined result (§10.2.2 steps 10-12).
     derived_ctor: Bool,
-    /// This body is a synthesized default constructor (§15.7.14 step 14.a):
-    /// `super` receives the incoming argument list as-is, with no spread.
     default_ctor: Bool,
-    /// `this` may still be unbound here (a derived constructor, or an arrow
-    /// nested in one), so reads of it are checked.
     this_tdz: Bool,
-    // ── slot mapping (unboxed-rebindable local → current IR var name) ──
     slot_vars: Dict(Int, String),
-    /// TDZ-elision (emit.gleam:1841)
     initialized: Set(Int),
-    /// IR var names statically known to hold a BEAM number term (int|float).
-    /// Seeded by anf.bind_number/mark_number; read by anf.guarded_binop/cmp
-    /// to elide `is_number` TermTests on the M0 sum hot path.
     known_numbers: Set(String),
-    /// IR vars known to hold a JS string (a `+` with a string operand, a
-    /// template literal, `typeof`); a `+`/`<` with one never takes the
-    /// integer fast path.
     known_strings: Set(String),
-    /// Unboxed-local slot → pre-computed `kfn_code` pair var, hoisted before a
-    /// loop so calls in the body reuse it. Per-function; cleared on enter.
     hoisted_kfn: Dict(Int, ir.Value),
-    /// Top-level `var NAME = <literal>` bindings NEVER reassigned in the
-    /// script — reads inline the literal instead of a global-object lookup.
-    /// Module-wide; computed once by expr.analyze_const_globals at compile
-    /// entry, never mutated.
     const_globals: Dict(String, ir.Value),
-    /// Optimization G: top-level `var`/`function` name → root-scope slot.
-    /// Module-wide; survives enter_function. Populated from the root scope's
-    /// VarBinding entries at compile entry (empty when the scope tree was
-    /// built without `module_slot_globals`, so the redirect self-disables).
     slotted_globals: Dict(String, Int),
-    // ── class context (M12 super/private/new.target) ──
     class_stack: List(ClassCtx),
-    // ── M18 SM intercept (per-function; None outside coroutine sm bodies) ──
     sm_abrupt: Option(SmAbrupt),
-    /// IR var name of this frame-ABI body's raw incoming args cons-list
-    /// (`_args`). Set by func.emit_body for non-arrows so `X.apply(Y,
-    /// arguments)` lowers to a direct call passing this list verbatim. None
-    /// in arrows (their `arguments` resolves via captures) and simple-ABI
-    /// bodies (no `_args` param). Per-function; reset by enter_function.
     raw_args_var: Option(String),
-    // ── D13/R13 mutual-recursion break ──
     dispatch: EmitDispatch,
     consts: RealmConsts,
   )
 }
 
-/// Record IR var `name` as holding a BEAM number term. Monotone: never
-/// cleared per-function (var names are module-unique via next_var so a stale
-/// mark on an out-of-scope name is unreachable, never a false positive).
+// never cleared; var names are module-unique
 pub fn mark_known_number(e: Emitter2, name: String) -> Emitter2 {
   Emitter2(..e, known_numbers: set.insert(e.known_numbers, name))
 }
@@ -459,9 +311,6 @@ pub fn set_slotted_globals(e: Emitter2, d: Dict(String, Int)) -> Emitter2 {
   Emitter2(..e, slotted_globals: d)
 }
 
-/// Boxed-cell slot for top-level global `name`, or None when `name` isn't
-/// slotted (true undeclared refs / const_globals / builtins still route to
-/// global_get).
 pub fn lookup_slotted_global(e: Emitter2, name: String) -> Option(Int) {
   case dict.get(e.slotted_globals, name) {
     Ok(slot) -> Some(slot)
@@ -473,8 +322,6 @@ pub fn fresh_var(e: Emitter2) -> #(String, Emitter2) {
   #("_t" <> int_to_string(e.next_var), Emitter2(..e, next_var: e.next_var + 1))
 }
 
-/// Tail Value of a straight `Let…Values([v])` chain (the shape `emit_expr`
-/// returns for identifiers/literals). None for If/Block/multi-Values tails.
 pub fn let_tail_value(rhs: ir.Expr) -> Option(ir.Value) {
   case rhs {
     ir.Values([v]) -> Some(v)
@@ -483,8 +330,6 @@ pub fn let_tail_value(rhs: ir.Expr) -> Option(ir.Value) {
   }
 }
 
-/// `rhs`'s Let-spine wrapped around `body` with the tail value discarded:
-/// the tree-level form of `let_` for callers that already hold the body.
 pub fn splice_let(rhs: ir.Expr, drop: String, body: ir.Expr) -> ir.Expr {
   case rhs {
     ir.Let(names, inner, rest) ->
@@ -494,13 +339,7 @@ pub fn splice_let(rhs: ir.Expr, drop: String, body: ir.Expr) -> ir.Expr {
   }
 }
 
-/// Bind the value of an `anf.run` tree and continue with `k`. The tree binds
-/// fresh names (write_slot's unboxed rebind, bind_if's join var, a
-/// destructuring store) that `e.slot_vars` leaks to `k`; wrapping the whole
-/// tree as one Let-RHS would scope those names to the RHS, where dead-let
-/// elimination erases them. So the tree's Let-spine is spliced into the
-/// outer chain instead: every top-level Let in `rhs` becomes an outer Let and
-/// its name stays in scope for `k`.
+// splices the let spine so rhs names stay in scope for k
 pub fn let_(
   e: Emitter2,
   rhs: ir.Expr,
@@ -514,8 +353,6 @@ pub fn let_(
     ir.Values([v]) -> k(e, v)
     _ -> {
       let #(n, e) = fresh_var(e)
-      // Propagate known-number through the alias so anf's marks survive the
-      // re-bind into the outer chain.
       let e = case let_tail_value(rhs) {
         Some(ir.Var(vn)) ->
           case is_known_number(e, vn) {
@@ -537,12 +374,6 @@ pub fn fresh_label(e: Emitter2) -> #(String, Emitter2) {
   )
 }
 
-/// A module-unique base name for a compiled function: the JS function's own
-/// name (`add`), `fn_<n>` when it has none, and `add_2`, `add_3`, ... for a
-/// second `add`. Derived names (`add_s`, `add_t`, `add_c3`, `add__sm`) are
-/// built by appending to the base, so a base is also refused when it would
-/// collide with a derived name of another base, or another base with its own
-/// derived name (JS `foo` and `foo_s`).
 pub fn fresh_fn_name(
   e: Emitter2,
   js_name: Option(String),
@@ -562,12 +393,6 @@ pub fn fresh_fn_name(
   )
 }
 
-/// A JS identifier as an Erlang-friendly function base: ASCII letters
-/// lowercased, digits and `_` kept, anything else (`$`, Unicode letters,
-/// escapes) becomes `_`. A name that is empty, all underscores, or starts
-/// with a digit is unusable and yields `None` (the caller falls back to
-/// `fn_<n>`); `js_main`/`instantiate`/`module_info` are the module's own
-/// entry points and are pushed aside.
 fn fn_base(js_name: String) -> Option(String) {
   let name =
     string.to_graphemes(js_name)
@@ -653,7 +478,6 @@ fn strip_suffix(s: String, suffix: String) -> Option(String) {
   }
 }
 
-/// `foo_c12` → `foo`.
 fn strip_chunk_suffix(s: String) -> Option(String) {
   case string.split(s, "_c") {
     [_, _, ..] -> {
@@ -667,29 +491,19 @@ fn strip_chunk_suffix(s: String) -> Option(String) {
   }
 }
 
-/// Prepend a lowered ir.Function (split into a tail-call chain when its
-/// body is long, see split.gleam) to the module accumulator. fns_acc is
-/// module-monotone (invariant #1): survives enter_function/leave_function.
 pub fn add_function(e: Emitter2, f: ir.Function) -> Emitter2 {
   let fs = list.reverse(split.function(f))
   Emitter2(..e, fns_acc: list.append(fs, e.fns_acc))
 }
 
-/// Drain the accumulated functions in emit order (M19 builds ir.Module from
-/// this). Reverses fns_acc since add_function prepends.
 pub fn take_functions(e: Emitter2) -> List(ir.Function) {
   list.reverse(e.fns_acc)
 }
 
-/// Record an unsupported feature seen in expression position.
 pub fn mark_unsupported(e: Emitter2, feature: String) -> Emitter2 {
   Emitter2(..e, unsupported: [feature, ..e.unsupported])
 }
 
-/// Canonical initial IR var name for scope slot `slot` of the current
-/// function: the JS binding's own name (`n`, `xs`; see `slot_names`), or
-/// `js_local_N` for a slot no binding names. The function prologue Let-binds
-/// this name; unboxed re-assignment rebinds via set_slot_var.
 pub fn slot_var_name(e: Emitter2, slot: Int) -> String {
   case dict.get(e.slot_names, #(e.fn_scope, slot)) {
     Ok(name) -> name
@@ -697,8 +511,6 @@ pub fn slot_var_name(e: Emitter2, slot: Int) -> String {
   }
 }
 
-/// Current IR var name bound to `slot` — its slot_var_name, or the fresh name
-/// of its most recent unboxed re-assignment (SPEC gotcha 1848 unboxed-rebind).
 pub fn get_slot_var(e: Emitter2, slot: Int) -> String {
   case dict.get(e.slot_vars, slot) {
     Ok(name) -> name
@@ -706,16 +518,7 @@ pub fn get_slot_var(e: Emitter2, slot: Int) -> String {
   }
 }
 
-/// The IR var name for every local binding in the tree, keyed by the owning
-/// function scope and slot. Names are the JS identifiers so the emitted code
-/// reads like the source; the emitter's own names start with `_` (`_t7`,
-/// `_p0`, `_L2`), so a JS name that starts with `_` gets a `u` in front to
-/// stay clear of them, and two bindings of one name in the same frame (sibling
-/// blocks) get `__2`, `__3`, ... which the Erlang printer turns back into a
-/// per-function suffix.
 fn slot_names(tree: ScopeTree) -> Dict(#(ScopeId, Int), String) {
-  // Every binding, grouped by the function frame that owns its slot, in slot
-  // order within the frame so the numbering is stable.
   let by_frame =
     dict.fold(tree.scopes, dict.new(), fn(acc, _id, sc) {
       dict.fold(sc.bindings, acc, fn(acc, js_name, b) {
@@ -738,8 +541,7 @@ fn slot_names(tree: ScopeTree) -> Dict(#(ScopeId, Int), String) {
         let #(slot, js_name) = entry
         let key = #(frame, slot)
         case dict.has_key(acc, key) {
-          // A capture re-declares the origin's binding in a child scope;
-          // the first name for the slot wins.
+          // capture redeclares the origin binding; first name wins
           True -> #(acc, taken)
           False -> {
             let name = unique_name(ir_name(js_name), taken, 2)
@@ -751,8 +553,6 @@ fn slot_names(tree: ScopeTree) -> Dict(#(ScopeId, Int), String) {
   })
 }
 
-/// A class private name `#x` binds as `priv_x`; a JS name starting with `_`
-/// gets a `u` in front (the emitter's own names all start with `_`).
 fn ir_name(js_name: String) -> String {
   case js_name {
     "#" <> rest -> "priv_" <> rest
@@ -761,8 +561,6 @@ fn ir_name(js_name: String) -> String {
   }
 }
 
-/// `fresh_slot_var` appends `_<counter>` for rebinds, so sibling duplicates
-/// use a double underscore (`y__2`) and the two can never coincide.
 fn unique_name(base: String, taken: Set(String), n: Int) -> String {
   case set.contains(taken, base) {
     False -> base
@@ -776,9 +574,6 @@ fn unique_name(base: String, taken: Set(String), n: Int) -> String {
   }
 }
 
-/// A fresh IR var for an unboxed re-assignment of `slot`, named after the
-/// slot (`t_12` for `t`) so the Erlang reads `T`, `T2`, `T3` for one JS
-/// variable. Same uniqueness as `fresh_var`: the counter is shared.
 pub fn fresh_slot_var(e: Emitter2, slot: Int) -> #(String, Emitter2) {
   #(
     slot_var_name(e, slot) <> "_" <> int_to_string(e.next_var),
@@ -786,9 +581,6 @@ pub fn fresh_slot_var(e: Emitter2, slot: Int) -> #(String, Emitter2) {
   )
 }
 
-/// IR name of capture param `i` of the current function: the captured JS
-/// binding's own name (set by `func.seed_capture_slots`), or `cap_<i>` when
-/// no name is recorded for that position.
 pub fn cap_param_name(e: Emitter2, i: Int) -> String {
   case list_at(e.cap_names, i) {
     Some(name) -> name
@@ -804,19 +596,14 @@ fn list_at(xs: List(a), i: Int) -> Option(a) {
   }
 }
 
-/// Record `name` as the current IR var for `slot`. M12/M13/M15 call this after
-/// every unboxed Let-rebind so later Identifier reads see the new SSA name.
 pub fn set_slot_var(e: Emitter2, slot: Int, name: String) -> Emitter2 {
   Emitter2(..e, slot_vars: dict.insert(e.slot_vars, slot, name))
 }
 
-/// Record `pair_var` as the hoisted `kfn_code` result for unboxed slot `slot`.
-/// M13 loop emitters call this before push_loop; expr.emit_call reads it back.
 pub fn set_hoisted_kfn(e: Emitter2, slot: Int, pair_var: ir.Value) -> Emitter2 {
   Emitter2(..e, hoisted_kfn: dict.insert(e.hoisted_kfn, slot, pair_var))
 }
 
-/// Hoisted `kfn_code` pair var for `slot`, or None when not loop-invariant.
 pub fn lookup_hoisted_kfn(e: Emitter2, slot: Int) -> Option(ir.Value) {
   case dict.get(e.hoisted_kfn, slot) {
     Ok(v) -> Some(v)
@@ -824,8 +611,6 @@ pub fn lookup_hoisted_kfn(e: Emitter2, slot: Int) -> Option(ir.Value) {
   }
 }
 
-/// Drop all hoisted kfn_code entries. M13 calls this after pop_frame so an
-/// inner-loop hoist never leaks to a sibling loop.
 pub fn clear_hoisted_kfn(e: Emitter2) -> Emitter2 {
   Emitter2(..e, hoisted_kfn: dict.new())
 }
@@ -833,15 +618,10 @@ pub fn clear_hoisted_kfn(e: Emitter2) -> Emitter2 {
 @external(erlang, "erlang", "integer_to_binary")
 fn int_to_string(i: Int) -> String
 
-// ── frame stack (port emit.gleam:2244-2314) ─────────────────────────────────
-
-/// Prepend a target frame and consume any pending label. Used by
-/// push_loop/push_switch/push_labeled — NOT push_barrier.
 pub fn push_frame(e: Emitter2, frame: Frame2) -> Emitter2 {
   Emitter2(..e, frame_stack: [frame, ..e.frame_stack], pending_label: None)
 }
 
-/// Iteration statement. Consumes pending_label into the frame's js_label.
 pub fn push_loop(
   e: Emitter2,
   ir_break: String,
@@ -861,7 +641,6 @@ pub fn push_loop(
   )
 }
 
-/// switch: break target only. Consumes pending_label.
 pub fn push_switch(
   e: Emitter2,
   ir_break: String,
@@ -870,8 +649,6 @@ pub fn push_switch(
   push_frame(e, Switch2(ir_break:, js_label: e.pending_label, carried:))
 }
 
-/// Labeled non-loop block. Takes the label explicitly (Labeled2.js_label is a
-/// required String) and clears pending_label.
 pub fn push_labeled(
   e: Emitter2,
   ir_break: String,
@@ -881,11 +658,7 @@ pub fn push_labeled(
   push_frame(e, Labeled2(ir_break:, js_label:, carried:))
 }
 
-/// Barrier frame for try/catch/finally and for-of bodies — never a target,
-/// only crossed. NOT routed through push_frame: barriers are transparent to
-/// label flow, so pending_label MUST survive so an inner push_loop (inside
-/// e.g. a for-of iterator barrier) still consumes the LabeledStatement's
-/// label. Port of emit.gleam:2295-2305; invariant: M10-M11.md gotcha #6.
+// not via push_frame: pending_label must survive a barrier
 pub fn push_barrier(
   e: Emitter2,
   finally_body: Option(#(List(ast.StmtWithLine), ScopeSave2)),
@@ -898,8 +671,6 @@ pub fn push_barrier(
   ])
 }
 
-/// A fresh landing label for a region about to be emitted, carrying `arity`
-/// values past the flag and exception.
 pub fn fresh_escape(e: Emitter2, arity: Int) -> #(Escape, Emitter2) {
   let #(label, e) = fresh_label(e)
   #(Escape(label:, arity:), e)
@@ -914,8 +685,6 @@ fn fresh_vars(e: Emitter2, n: Int) -> #(List(String), Emitter2) {
   #(list.reverse(names), e)
 }
 
-/// The handler a cleanup's own ir.Try uses to leave `esc`'s region with the
-/// thrown value.
 pub fn escape_handler(
   e: Emitter2,
   esc: Escape,
@@ -933,10 +702,6 @@ pub fn escape_handler(
   )
 }
 
-/// Wrap `region` (an ir.Try yielding `esc.arity` carried terms) in its landing
-/// block: a normal exit yields the carried values on through, an escape
-/// rethrows the carried exception outside the region. Yields the carried
-/// values.
 pub fn land_escapes(
   e: Emitter2,
   esc: Escape,
@@ -975,24 +740,15 @@ pub fn land_escapes(
   #(tree, e)
 }
 
-/// Pop the innermost frame. Every pop pairs with a push_* in the same emit
-/// function; empty stack here is a push/pop desync — crash at the desync.
 pub fn pop_frame(e: Emitter2) -> Emitter2 {
   let assert [_, ..rest] = e.frame_stack
   Emitter2(..e, frame_stack: rest)
 }
 
-/// LabeledStatement sets this before emitting its body; the next
-/// push_loop/push_switch/push_labeled consumes it.
 pub fn set_pending_label(e: Emitter2, label: String) -> Emitter2 {
   Emitter2(..e, pending_label: Some(label))
 }
 
-// ── break/continue target resolution (new; arc's is imperative op-emitting) ──
-
-/// The ir label a `break name` targets when `frame` IS the target, or None
-/// when `frame` must instead be crossed. Port of emit.gleam:2415-2455
-/// `frame_target` for `is_cont: False`.
 fn break_target_of(frame: Frame2, name: Option(String)) -> Option(String) {
   case frame {
     Loop2(ir_break:, js_label:, ..) | Switch2(ir_break:, js_label:, ..) ->
@@ -1005,7 +761,7 @@ fn break_target_of(frame: Frame2, name: Option(String)) -> Option(String) {
           }
       }
     Labeled2(ir_break:, js_label:, ..) ->
-      // §14.8: unlabeled break skips a labeled non-loop block.
+      // §14.8 unlabeled break skips a labeled block
       case name {
         Some(n) if n == js_label -> Some(ir_break)
         _ -> None
@@ -1014,7 +770,6 @@ fn break_target_of(frame: Frame2, name: Option(String)) -> Option(String) {
   }
 }
 
-/// `frame_target` for `is_cont: True` — only Loop2 ever answers.
 fn continue_target_of(frame: Frame2, name: Option(String)) -> Option(String) {
   case frame {
     Loop2(ir_continue:, js_label:, ..) ->
@@ -1030,10 +785,6 @@ fn continue_target_of(frame: Frame2, name: Option(String)) -> Option(String) {
   }
 }
 
-/// Cleanups a break/continue must perform when it *crosses* (does not target)
-/// `frame`. Port of emit.gleam:2460-2474 `emit_cross_frame`, data-returning.
-/// Innermost first — a Barrier2 with both iter_close and finally_body yields
-/// IterClose then FinallyBlock (close the iterator before running finally).
 fn cross_cleanups(frame: Frame2) -> List(BarrierCleanup) {
   case frame {
     Loop2(iter_close: Some(#(iv, esc)), ..) -> [IterClose(iv, False, Some(esc))]
@@ -1076,10 +827,6 @@ fn find_target(
   }
 }
 
-/// Resolve `break [name]` against the current frame stack. Returns the ir
-/// label to Break to and every barrier cleanup crossed on the way out,
-/// innermost first — the order M13/M17 must inline them before the Break.
-/// Port of emit.gleam:2503-2530 `emit_goto_loop`, data-returning.
 pub fn find_break_target(
   e: Emitter2,
   name: Option(String),
@@ -1087,8 +834,6 @@ pub fn find_break_target(
   find_target(e.frame_stack, name, break_target_of, BreakOutsideLoop, [])
 }
 
-/// Resolve `continue [name]`. Only Loop2 frames are targets; Switch2/Labeled2
-/// are crossed transparently, Barrier2 crossings collect their cleanup.
 pub fn find_continue_target(
   e: Emitter2,
   name: Option(String),
@@ -1096,18 +841,11 @@ pub fn find_continue_target(
   find_target(e.frame_stack, name, continue_target_of, ContinueOutsideLoop, [])
 }
 
-// ── scope cursor + constructor (port emit.gleam:1295-1369) ──────────────────
-
-/// Direct child scope ids of `id` that share THIS function's frame
-/// (Block/Catch/With/ClassBody). Port of emit.gleam:1366-1369 verbatim —
-/// function-kind children go through child_fn_cursor, not scope_cursor.
 pub fn block_child_scopes(tree: ScopeTree, id: ScopeId) -> List(ScopeId) {
   use c <- list.filter(scope.child_scopes(tree, id))
   !scope.is_function_kind(scope.get_scope(tree, c).kind)
 }
 
-/// Fresh emitter positioned at the function-kind scope `root`. Port of
-/// emit.gleam:1295-1329 with bytecode-specific fields dropped.
 pub fn new_emitter(
   tree: ScopeTree,
   root: ScopeId,
@@ -1159,17 +897,10 @@ pub fn new_emitter(
   )
 }
 
-/// This function body's FunctionInfo — local_count, fallthrough, lexical-slot
-/// layout for the function-kind scope this emitter is rooted at.
-/// Port of emit.gleam:1350-1352.
 pub fn fn_info(e: Emitter2) -> scope.FunctionInfo {
   scope.function_info(e.tree, e.fn_scope)
 }
 
-/// Whether this body's OWNED lexical slot for `ref` holds a cell: when an
-/// inner arrow captures it (the analyzer's `lexical_boxed`), and always for
-/// `this` in a derived constructor, whose `super()` may bind it inside any
-/// nested control structure.
 pub fn lexical_is_boxed(
   e: Emitter2,
   info: scope.FunctionInfo,
@@ -1179,17 +910,10 @@ pub fn lexical_is_boxed(
   || { ref == lexical.RefThis && e.derived_ctor }
 }
 
-/// Resolve `name` from the current scope. Delegates entirely to the analyzer
-/// tree — the emitter never re-walks bindings itself. Port of emit.gleam:2044.
 pub fn resolve(e: Emitter2, name: String) -> scope.Resolution {
   scope.lookup(e.tree, e.cur_scope, name)
 }
 
-/// True when `arguments` at cur_scope resolves to the fn-scope's implicit
-/// (parser-inserted) VarBinding — NOT a user param/let/const/catch/with
-/// shadow. Gates expr.emit_plain_call's `X.apply(Y, arguments)` → raw-`_args`
-/// fast-path: forwarding `_args` is only sound when the identifier IS the
-/// arguments object built from `_args`.
 pub fn arguments_is_implicit(e: Emitter2) -> Bool {
   case dict.get(scope.get_scope(e.tree, e.fn_scope).bindings, "arguments") {
     Ok(scope.Binding(slot: fs, kind: scope.VarBinding, ..)) ->
@@ -1202,21 +926,13 @@ pub fn arguments_is_implicit(e: Emitter2) -> Bool {
   }
 }
 
-/// Pop the next source-order child function scope id. Consumed by M15
-/// emit_function at each FunctionExpression/Declaration/Arrow site so the
-/// compiled body sees its analyzer-assigned ScopeId. An exhausted cursor is a
-/// walk-order desync — crash at the desync rather than miscompile against the
-/// wrong scope. Port of emit.gleam:3260-3261.
 pub fn pop_child_fn(e: Emitter2) -> #(ScopeId, Emitter2) {
   let assert [fn_id, ..rest] = e.child_fn_cursor
     as "emit_2core.pop_child_fn: cursor exhausted (analyzer/emit walk desync)"
   #(fn_id, Emitter2(..e, child_fn_cursor: rest))
 }
 
-/// Descend into the next source-order block-child scope. Empty-cursor case
-/// stays put (emit.gleam:1419-1430) — do NOT re-read the current scope's
-/// children (that would re-enter already-consumed siblings). No
-/// binding-prologue emission here; M13 owns TDZ seeding via anf helpers.
+// empty cursor stays put; never re-read consumed children
 pub fn enter_scope(
   e: Emitter2,
   in_block in_block: Bool,
@@ -1252,7 +968,6 @@ pub fn enter_scope(
   }
 }
 
-/// Restore the parent scope position saved by enter_scope.
 pub fn leave_scope(e: Emitter2, save: ScopeSave2) -> Emitter2 {
   Emitter2(
     ..e,
@@ -1263,13 +978,6 @@ pub fn leave_scope(e: Emitter2, save: ScopeSave2) -> Emitter2 {
   )
 }
 
-/// leave_scope for a body that may have ended in a transfer. A block whose
-/// last statement is return/throw/break/continue never reaches the
-/// continuation that leaves its scope, so the emitter it hands back is still
-/// positioned inside `entered`; whatever is emitted next in the enclosing
-/// scope (an else arm, a catch handler, the statement after a loop) would
-/// resolve names against the dead block. Restores `save` in that case and is
-/// a no-op when the body left normally.
 pub fn leave_scope_if_inside(
   e: Emitter2,
   entered: ScopeId,
@@ -1292,9 +1000,6 @@ fn scope_within(tree: ScopeTree, id: ScopeId, ancestor: ScopeId) -> Bool {
   }
 }
 
-/// Conditionally consume the for-head Block scope (only pushed for
-/// let/const/using heads). None → true no-op on both sides so a var/expr
-/// head does not rewind the cursor past the body's siblings.
 pub fn enter_for_scope(
   e: Emitter2,
   has_lex_head: Bool,
@@ -1315,12 +1020,7 @@ pub fn leave_for_scope(e: Emitter2, save: Option(ScopeSave2)) -> Emitter2 {
   }
 }
 
-/// Enter a nested function body. Saves every per-body field to FnSave and
-/// resets the emitter for the child function scope. next_var/next_label/
-/// next_fn/fns_acc are PRESERVED (module-monotone, invariant #1). frame_stack
-/// is per-function (a break never crosses a function boundary). private_env/
-/// class_stack inherit lexically (a nested closure inside a class body still
-/// sees `#x` and `super`); with_stack/field_init/slot_vars/initialized reset.
+// counters and fns_acc are module-wide and not saved
 pub fn enter_function(
   e: Emitter2,
   child_id: ScopeId,
@@ -1387,8 +1087,6 @@ pub fn enter_function(
   #(child, save)
 }
 
-/// Restore per-body fields from FnSave. Module-monotone fields (next_var/
-/// next_label/next_fn/fns_acc/tree/dispatch/consts) carry forward from `e`.
 pub fn leave_function(e: Emitter2, save: FnSave) -> Emitter2 {
   Emitter2(
     ..e,
@@ -1419,8 +1117,6 @@ pub fn leave_function(e: Emitter2, save: FnSave) -> Emitter2 {
   )
 }
 
-/// M18: install the SM abrupt-completion intercept before delegating a
-/// split-free fragment; `clear_sm_abrupt` removes it after.
 pub fn set_sm_abrupt(e: Emitter2, hooks: SmAbrupt) -> Emitter2 {
   Emitter2(..e, sm_abrupt: Some(hooks))
 }

@@ -1,8 +1,4 @@
-//// The fast loop's fused kernels must agree with the guarded slow path on
-//// every observable outcome: each program here drives an opcode through a
-//// shape its kernel answers for and one it must decline (`miss`), and
-//// checks the JS-visible result is the full MOP's.
-
+// fused kernels must agree with the slow path
 import arc/compiler
 import arc/interp/entry
 import arc/parser
@@ -29,8 +25,6 @@ fn run_string(source: String) -> String {
   }
 }
 
-// -- PutElem -------------------------------------------------------------------
-
 pub fn put_elem_overwrite_fill_append_test() {
   assert run_string(
       "var a = []; for (var i = 0; i < 5; i++) a[i] = i * i; a[2] = 'x'; a.join() + '/' + a.length",
@@ -46,8 +40,6 @@ pub fn put_elem_overwrite_fill_append_test() {
     == "2002/false/2"
 }
 
-/// §10.1.9.2 step 2: an inherited setter at the index takes the store, both
-/// for an append and for a hole fill.
 pub fn put_elem_inherited_setter_test() {
   assert run_string(
       "var hit = 'no';
@@ -65,7 +57,6 @@ pub fn put_elem_inherited_setter_test() {
     == "9,3,false"
 }
 
-/// An inherited read-only data property at the index rejects the store.
 pub fn put_elem_inherited_readonly_test() {
   assert run_string(
       "Object.defineProperty(Array.prototype, '2', { value: 7, writable: false, configurable: true });
@@ -82,8 +73,6 @@ pub fn put_elem_inherited_readonly_test() {
     == "TypeError"
 }
 
-/// §10.4.2.1 step 2.h: no growth past a non-writable length; no new
-/// element on a non-extensible array.
 pub fn put_elem_frozen_length_test() {
   assert run_string(
       "var a = [1,2]; Object.defineProperty(a, 'length', { writable: false });
@@ -102,7 +91,6 @@ pub fn put_elem_frozen_length_test() {
     == "3,false"
 }
 
-/// A defineProperty override at the index keeps its attributes.
 pub fn put_elem_index_override_test() {
   assert run_string(
       "var a = [1,2,3];
@@ -114,8 +102,6 @@ pub fn put_elem_index_override_test() {
     )
     == "ro,g,set"
 }
-
-// -- GetElem -------------------------------------------------------------------
 
 pub fn get_elem_holes_and_keys_test() {
   assert run_string(
@@ -132,8 +118,6 @@ pub fn get_elem_holes_and_keys_test() {
     )
     == "got"
 }
-
-// -- GetField / PutField -------------------------------------------------------
 
 pub fn get_field_chain_test() {
   assert run_string(
@@ -171,19 +155,15 @@ pub fn put_field_test() {
     == "1,1,3"
 }
 
-// -- DefineField ---------------------------------------------------------------
-
 pub fn define_field_test() {
   assert run_string("var o = { a: 1, b: 2, a: 3 }; Object.keys(o).join() + o.a")
     == "a,b3"
-  // §7.3.7 CreateDataPropertyOrThrow over a non-configurable own property.
   assert run_string(
       "class A { constructor() { Object.defineProperty(this, 'x', { value: 1, configurable: false }) } }
        class B extends A { x = 2 }
        try { String(new B().x) } catch (e) { e.constructor.name }",
     )
     == "TypeError"
-  // A configurable accessor is replaced by the data property outright.
   assert run_string(
       "class A { constructor() { Object.defineProperty(this, 'x', { get() { return 1 }, configurable: true }) } }
        class B extends A { x = 2 }
@@ -191,8 +171,6 @@ pub fn define_field_test() {
     )
     == "{\"value\":2,\"writable\":true,\"enumerable\":true,\"configurable\":true}"
 }
-
-// -- Arithmetic / compare kernels ---------------------------------------------
 
 pub fn add_kernel_test() {
   assert run_string(
@@ -241,8 +219,6 @@ pub fn bitwise_kernel_test() {
     == "1,7,6,-2147483648,4294967295,-4,-6,-2147483648,1,3,-1"
 }
 
-// -- Fused local superinstructions --------------------------------------------
-
 pub fn inc_dec_local_test() {
   assert run_string(
       "(function () {
@@ -255,7 +231,6 @@ pub fn inc_dec_local_test() {
 }
 
 pub fn cmp_local_jump_test() {
-  // Numbers, strings (lexicographic), and an object operand (valueOf runs).
   assert run_string(
       "(function () {
          var n = 0; for (var i = 0; i < 10; i++) n++;
@@ -267,16 +242,12 @@ pub fn cmp_local_jump_test() {
        })()",
     )
     == "10,3,3,4,3"
-  // A TDZ local read inside the fused compare is still a ReferenceError.
   assert run_string(
       "(function () { try { for (let i = 0; i < 1; i++) { let z = z < 1; } return 'nothrow' } catch (e) { return e.constructor.name } })()",
     )
     == "ReferenceError"
 }
 
-/// Equality compare-and-branch on locals fuses too: strict and loose kinds,
-/// object identity, ToPrimitive on a loose object/primitive pair, and the
-/// TDZ ReferenceError on either operand.
 pub fn cmp_local_equality_jump_test() {
   assert run_string(
       "(function () {
@@ -298,10 +269,6 @@ pub fn cmp_local_equality_jump_test() {
     == "abcdefgh2ReferenceErrorReferenceError"
 }
 
-/// `local.x`, `local.m(`, and statement `o.x = v;` fuse to GetLocalField /
-/// GetLocalField2 / PutFieldPop: getters, setters, proxies, primitive and
-/// nullish receivers, frozen targets, the derived-constructor `this` TDZ and
-/// the eval completion value all behave as the unfused pair.
 pub fn local_field_superinstruction_test() {
   assert run_string(
       "(function () {
@@ -327,8 +294,6 @@ pub fn local_field_superinstruction_test() {
     == "1,2,10,true,trap:q,pset3,set4,3,ABC,TypeError,TypeError,TypeError,strictTypeError,1,tdzReferenceError,5,7,9"
 }
 
-/// Prefix `++i`/`--i` on a plain local fuse to IncLocal/DecLocal (plus a
-/// read when the value is used): same coercions, same TDZ error.
 pub fn prefix_inc_dec_local_test() {
   assert run_string(
       "(function () {
@@ -341,9 +306,6 @@ pub fn prefix_inc_dec_local_test() {
     == "number,2,2,210,40,40,ReferenceError"
 }
 
-/// Conditions lowered in branch context (`!`, `&&`, `||`, `== null`,
-/// literal tests, inverted fused compares) keep evaluation order and
-/// short-circuiting.
 pub fn branch_lowering_test() {
   assert run_string(
       "(function () {
@@ -363,8 +325,6 @@ pub fn branch_lowering_test() {
     == "b,c,d,5,4,ok/10030null4null/2"
 }
 
-// -- typeof / truthiness --------------------------------------------------------
-
 pub fn typeof_kernel_test() {
   assert run_string(
       "[typeof class {}, typeof function () {}, typeof new Proxy(function () {}, {}), typeof new Proxy({}, {}), typeof null, typeof undefined, typeof 1n, typeof Symbol(), typeof 'a'.at, typeof Math].join()",
@@ -379,18 +339,13 @@ pub fn truthy_kernel_test() {
     == "000000001111111"
 }
 
-// -- Globals -------------------------------------------------------------------
-
 pub fn get_global_kernel_test() {
-  // Lexical (let/const), var, an accessor on the global object, a name
-  // resolved through the global's prototype chain, and typeof of each.
   assert run_string(
       "let lx = 1; const cx = 2; var vx = 3;
        Object.defineProperty(globalThis, 'acc', { get: function () { return 4 }, configurable: true });
        [lx + cx + vx + acc, typeof nope, typeof vx, typeof lx, typeof Math, toString === Object.prototype.toString].join()",
     )
     == "10,undefined,number,number,object,true"
-  // TDZ and unresolvable names still throw.
   assert run_string(
       "var out = [];
        try { tdz } catch (e) { out.push(e.constructor.name) }
@@ -403,8 +358,6 @@ pub fn get_global_kernel_test() {
 }
 
 pub fn put_global_kernel_test() {
-  // Sloppy creation, replacement of a var, a lexical let, a strict miss on
-  // an undeclared name, and a read-only global left alone.
   assert run_string(
       "var v = 1; let l = 2; v = 10; l = 20; fresh = 30;
        var d = Object.getOwnPropertyDescriptor(globalThis, 'fresh');
@@ -414,8 +367,6 @@ pub fn put_global_kernel_test() {
     )
     == "10,20,30,true,ReferenceError,1,false"
 }
-
-// -- new / constructor return ----------------------------------------------------
 
 pub fn construct_fast_path_test() {
   assert run_string(
@@ -435,8 +386,6 @@ pub fn construct_fast_path_test() {
     == "5,1,true,2,,1,true,3,true,TypeError,true"
 }
 
-// -- instanceof ---------------------------------------------------------------
-
 pub fn instanceof_kernel_test() {
   assert run_string(
       "function G() {} var g = new G(); var out = [];
@@ -455,8 +404,6 @@ pub fn instanceof_kernel_test() {
     == "true,false,false,true,true,true,true,true,false,true,true,true,TypeError,TypeError,true"
 }
 
-// -- Computed access on ordinary objects / arguments / string keys ------------
-
 pub fn elem_kernels_ordinary_and_arguments_test() {
   assert run_string(
       "var o = {}; o[3] = 'x'; o[4294967295] = 'big'; o['7'] = 's'; var k = 'name'; o[k] = 'n';
@@ -472,8 +419,6 @@ pub fn elem_kernels_ordinary_and_arguments_test() {
     )
     == "x,x,big,s,n,,3|7|4294967295|name,setter1,0,0,,9/2//2,3,3,1,,7,2"
 }
-
-// -- Object literal fields, closures, try, generators in the loop -------------
 
 pub fn literal_closure_try_yield_arms_test() {
   assert run_string(
@@ -492,11 +437,6 @@ pub fn literal_closure_try_yield_arms_test() {
     == "a|b,3,0|1|2,fin,2,6,0,done,true,undefined"
 }
 
-// -- Object literal head, CallNew, fused stores and method calls --------------
-
-/// NewObjectWith defines the leading static keys at once; a repeated key, an
-/// accessor, a computed key, a spread and `__proto__: v` end the head and
-/// keep their PropertyDefinitionEvaluation order and meaning.
 pub fn object_literal_head_test() {
   assert run_string(
       "var p = { z: 0 };
@@ -512,9 +452,6 @@ pub fn object_literal_head_test() {
     == "3|b|a|c|d|e|f,3,true,c,0,false,true,x,true,true,0,a0|a1|a2|a3|a4,3"
 }
 
-/// `new F(args)` reads F once as both constructor and newTarget; a spread
-/// argument list, a non-constructor and a settled or replaced `prototype`
-/// behave as [[Construct]] says.
 pub fn call_new_test() {
   assert run_string(
       "function F(a, b) { this.s = a + b } var out = [new F(1, 2).s, new F(...[3, 4]).s];
@@ -529,9 +466,6 @@ pub fn call_new_test() {
     == "3,7,true,true,swapped,TypeError,TypeError,2"
 }
 
-/// `local.k = local2` / `local.k = const` fuse to one op: same [[Set]]
-/// (setters, read-only, proxies, primitives), and a TDZ receiver or value
-/// throws in source order.
 pub fn fused_field_store_test() {
   assert run_string(
       "var out = [];
@@ -548,9 +482,6 @@ pub fn fused_field_store_test() {
     == "ReferenceError,ReferenceError,s1|s2,1,strictTypeError,s1|s2|pq9|pr0,true,a|b|c,7,,3"
 }
 
-/// `o.m()` / `local.m()` fuse the method read with the call: getters still
-/// run first, a missing or nullish base throws TypeError, primitives box,
-/// proxies trap, and `this` is the base.
 pub fn fused_method_call_test() {
   assert run_string(
       "var out = [];
@@ -573,12 +504,6 @@ pub fn fused_method_call_test() {
     == "get,4,true,TypeError,TypeError,1,traphi,AB,ABC,255,1|2|3,ReferenceError,bound,g1,7,8,-1,trapq,ReferenceError,read,ReferenceError"
 }
 
-// -- Folded operand / store superinstructions ------------------------------
-
-/// BinOpLocal*, BinOp*Put, PostIncLocal, GetElemLocals and BinOpLocalField
-/// read locals directly: a TDZ local still throws the ReferenceError, an
-/// object operand still runs ToPrimitive once per read in source order, and
-/// a getter / string / prototype element read still goes through [[Get]].
 pub fn folded_operand_ops_test() {
   assert run_string(
       "var out = [];
@@ -599,9 +524,6 @@ pub fn folded_operand_ops_test() {
     == "a|b|6|ReferenceError|ReferenceError|ReferenceError|gbP|6,5,8,7|a1,true,true|3|11|6|TypeError"
 }
 
-/// CmpJump / CmpConstJump / IncLocalJump / JumpIfNotNullish: comparisons
-/// with a non-local operand, the loop back edge, and `!= null` tests keep
-/// their coercions and branch targets.
 pub fn fused_branch_ops_test() {
   assert run_string(
       "var out = [], n = 0, calls = 0;
@@ -617,12 +539,6 @@ pub fn fused_branch_ops_test() {
     == "33|10|b|c|e|NaN"
 }
 
-/// `f.apply(t, arguments)` as the only use of `arguments` forwards the
-/// argument list (ApplyArguments) without building the object; a
-/// non-intrinsic or patched `apply` still receives a real arguments object
-/// (the same one each time within an activation, unmapped when strict), a
-/// non-callable target still throws, and any other use of `arguments`
-/// (including from an inner arrow) keeps the ordinary path.
 pub fn apply_arguments_forwarding_test() {
   assert run_string(
       "var log = [];

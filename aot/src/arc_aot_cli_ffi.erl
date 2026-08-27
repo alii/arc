@@ -1,4 +1,3 @@
-%% CLI-only FFI: argv. Bound exclusively by src/arc_aot.gleam.
 -module(arc_aot_cli_ffi).
 -export([get_script_args/0]).
 

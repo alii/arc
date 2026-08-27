@@ -1,7 +1,3 @@
-//// Multi-realm behaviour of arc/rt: the registry, `with_realm`, `$262`,
-//// and the realm-attributed natives (JSON, the Error.prototype.stack
-//// setter, tagged-template caching, ArraySpeciesCreate step 4).
-
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/lang as rt_lang
@@ -39,13 +35,11 @@ fn get(st: Agent, recv: JsVal, name: String) -> JsVal {
 pub fn create_realm_registers_a_distinct_realm_test() {
   let st0 = rt_helpers.agent()
   let #(other, st) = rt_builtins.create_realm(st0)
-  // The caller's realm is still current and both are registered.
   assert st.realm.id == 0
   assert other.id == 1
   assert dict.size(st.realms) == 2
   assert rt_call.realm_by_id(st, 1) == other
   assert rt_call.realm_by_id(st, 0) == st.realm
-  // Fresh intrinsics and global, wired to each other, not to realm 0's.
   assert other.object.prototype != st.realm.object.prototype
   assert other.global_object != st.realm.global_object
   let other_global = mk_object(other.global_object)
@@ -63,7 +57,6 @@ pub fn with_realm_swaps_and_restores_test() {
     rt_realm.with_realm(st, other.id, fn(st) { #(st.realm, st) })
   assert seen == other
   assert st.realm.id == 0
-  // A throw inside still restores the caller's realm before propagating.
   let #(thrower, st) =
     rt_helpers.func(st, fn(st, _args) {
       use st <- rt_realm.with_realm(st, other.id)
@@ -72,7 +65,6 @@ pub fn with_realm_swaps_and_restores_test() {
   let #(outcome, st) = rt_call.t_call(st, thrower, mk_undefined(), [])
   let assert ThrowCompletion(e) = outcome
   assert st.realm.id == 0
-  // The error was made while the other realm was current.
   assert proto_of(st, e) == other.type_error.prototype
 }
 
@@ -103,7 +95,6 @@ pub fn install_262_and_create_realm_test() {
   let #(g, st) = rt_helpers.global(st, "$262")
   assert g == dollar
   assert get(st, dollar, "global") == mk_object(st.realm.global_object)
-  // The harness hangs `agent` off $262; createRealm carries it over.
   let #(agent_obj, st) = rt_obj.t_new_object_literal(st)
   let #(_, st) =
     rt_obj.t_set_prop(st, dollar, StringKey(Named("agent")), agent_obj)
@@ -116,10 +107,8 @@ pub fn install_262_and_create_realm_test() {
   assert get(st, child_global, "$262") == child
   assert get(st, child, "agent") == agent_obj
   assert proto_of(st, child) == rt_call.realm_by_id(st, 1).object.prototype
-  // gc is callable and inert.
   let #(r, st) = rt_helpers.call_method(st, child, "gc", [])
   assert r == mk_undefined()
-  // detachArrayBuffer detaches.
   let #(ab_ctor, st) = rt_helpers.global(st, "ArrayBuffer")
   let #(buf, st) =
     rt_call.t_construct(st, ab_ctor, [mk_number(JInt(8))], ab_ctor)
@@ -130,7 +119,6 @@ pub fn install_262_and_create_realm_test() {
 
 pub fn eval_script_runs_in_its_realm_test() {
   let st = rt_helpers.agent()
-  // Stand-in for the interpreter's hook: report which realm is current.
   let hook = fn(st: Agent, source: String, kind) {
     assert kind == ScriptEval
     #(mk_string(source <> "@" <> int.to_string(st.realm.id)), st)
@@ -158,19 +146,16 @@ pub fn eval_script_runs_in_its_realm_test() {
 pub fn json_is_attributed_to_its_own_realm_test() {
   let #(other, st) = two_realms()
   let other_json = get(st, mk_object(other.global_object), "JSON")
-  // otherRealm.JSON.parse('{') throws otherRealm.SyntaxError ...
   let parse = get(st, other_json, "parse")
   let #(outcome, st) = rt_call.t_call(st, parse, other_json, [mk_string("{")])
   let assert ThrowCompletion(e) = outcome
   assert proto_of(st, e) == other.syntax_error.prototype
   assert st.realm.id == 0
-  // ... and builds otherRealm objects, however it is reached.
   let #(outcome, st) =
     rt_call.t_call(st, parse, mk_undefined(), [mk_string("{\"a\":[1]}")])
   let assert NormalCompletion(obj) = outcome
   assert proto_of(st, obj) == other.object.prototype
   assert proto_of(st, get(st, obj, "a")) == other.array.prototype
-  // The reviver runs back in the caller's realm.
   let #(reviver, st) =
     rt_helpers.func(st, fn(st, args) {
       let assert [_, v, ..] = args
@@ -181,7 +166,6 @@ pub fn json_is_attributed_to_its_own_realm_test() {
     rt_call.t_call(st, parse, mk_undefined(), [mk_string("[7]"), reviver])
   let assert NormalCompletion(_) = outcome
   assert rt_helpers.recorded() == [0, 0]
-  // This realm's JSON is unaffected.
   let #(json, st) = rt_helpers.global(st, "JSON")
   let #(outcome, st) =
     rt_call.t_call(st, get(st, json, "parse"), json, [mk_string("{")])
@@ -203,7 +187,6 @@ pub fn stack_setter_uses_its_own_realm_test() {
   let set_a = setter(st.realm)
   let set_b = setter(other)
   assert set_a != set_b
-  // (a) A's setter on a B Error instance installs an own data property.
   let b_error_ctor = mk_object(other.error.constructor)
   let #(err_b, st) =
     rt_call.t_construct(st, b_error_ctor, [mk_string("m")], b_error_ctor)
@@ -211,8 +194,6 @@ pub fn stack_setter_uses_its_own_realm_test() {
     rt_call.t_call(st, set_a, mk_object(err_b), [mk_string("sentinel")])
   let assert NormalCompletion(_) = outcome
   assert get(st, mk_object(err_b), "stack") == mk_string("sentinel")
-  // (d) A's setter on B's Error.prototype reaches B's setter through Set(),
-  // which throws B's TypeError.
   let #(outcome, st) =
     rt_call.t_call(st, set_a, mk_object(other.error.prototype), [
       mk_string("x"),
@@ -220,7 +201,6 @@ pub fn stack_setter_uses_its_own_realm_test() {
   let assert ThrowCompletion(e) = outcome
   assert proto_of(st, e) == other.type_error.prototype
   assert st.realm.id == 0
-  // (e) A's setter on A's own Error.prototype throws A's TypeError.
   let #(outcome, st) =
     rt_call.t_call(st, set_a, mk_object(st.realm.error.prototype), [
       mk_string("x"),
@@ -256,8 +236,6 @@ pub fn species_create_ignores_a_foreign_array_constructor_test() {
       #(v, st)
     })
   let #(mapped, st) = rt_helpers.call_method(st, arr, "map", [identity])
-  // Step 4: a foreign %Array% is dropped, so the result is a plain array of
-  // the running realm rather than `new otherRealm.Array(...)`.
   assert proto_of(st, mapped) == st.realm.array.prototype
   let #(concat, st) = rt_helpers.call_method(st, arr, "concat", [])
   assert proto_of(st, concat) == st.realm.array.prototype
@@ -265,8 +243,6 @@ pub fn species_create_ignores_a_foreign_array_constructor_test() {
 
 pub fn construct_defaults_to_the_new_target_realm_intrinsic_test() {
   let #(other, st) = two_realms()
-  // A bound function has no own `prototype`, and its realm is its target's:
-  // GetPrototypeFromConstructor falls to the intrinsic of `other`.
   let #(new_target, st) =
     rt_helpers.call_method(st, mk_object(other.array.constructor), "bind", [
       mk_undefined(),
@@ -289,7 +265,6 @@ pub fn construct_defaults_to_the_new_target_realm_intrinsic_test() {
   assert proto_of(st, d) == other.date.prototype
   let #(b, st) = construct(st, here.array_buffer, [mk_number(JInt(0))])
   assert proto_of(st, b) == other.array_buffer.prototype
-  // An object `prototype` on newTarget still wins over any intrinsic.
   let #(p, st) =
     rt_call.t_construct(
       st,

@@ -1,12 +1,3 @@
-//// `rt_builtins/realm_ops` — realm-aware allocators + the concrete `JsOps`
-//// bodies (SPEC §7.M6 common-and-scaffold(3)).
-////
-//// `make_error` / `to_object` / `alloc_array` / `create_iter_result` over the
-//// threaded `Agent` model. Realm access is via `st.realm` (R15).
-////
-//// **Return-tuple order is `#(V, St')` — value FIRST (R1).** Undefined/null
-//// paths in `t_box_primitive` RAISE via `rt_val.t_throw_type_error` (D7).
-
 import arc/rt/builtins/common
 import arc/rt/builtins/error as b_error
 import arc/rt/store as rt_store
@@ -21,10 +12,6 @@ import arc/rt/val as rt_val
 import gleam/dict
 import gleam/option.{Some}
 
-// ── error allocation (arc common.gleam:1044-1091) ───────────────────────────
-
-/// The prototype intrinsic + the `name` header for an ErrorKind. The single
-/// place the pairing exists so intrinsic and stack-trace name cannot disagree.
 pub fn error_kind_intrinsics(r: Realm, kind: ErrorKind) -> #(Handle, String) {
   case kind {
     TypeErr -> #(r.type_error.prototype, "TypeError")
@@ -34,11 +21,6 @@ pub fn error_kind_intrinsics(r: Realm, kind: ErrorKind) -> #(Handle, String) {
   }
 }
 
-/// §20.5.6.1.1 NativeError(message) — allocate a native error instance of
-/// `kind` with a `message` own property `{W:T, E:F, C:T}` and its
-/// `[[ErrorData]]` stack rendered from `Agent.frames`. The concrete body
-/// seeded into `JsOps.new_error` by M6 `init_realm`. arc `make_error` +
-/// `state.attach_stack`.
 pub fn t_new_error(
   st: Agent,
   kind: ErrorKind,
@@ -51,10 +33,6 @@ pub fn t_new_error(
   #(mk_object(h), st)
 }
 
-// ── ToObject / primitive boxing (arc common.gleam:1116-1171) ────────────────
-
-/// Allocate a wrapper object for a primitive: an ordinary object with `kind`
-/// carrying the type-specific internal slot. arc `alloc_wrapper`.
 pub fn alloc_wrapper(
   st: Agent,
   kind: ObjKind,
@@ -73,9 +51,7 @@ pub fn alloc_wrapper(
   )
 }
 
-/// §7.1.18 ToObject — the concrete body seeded into `JsOps.to_object`.
-/// Object → identity; primitive → wrapper cell with the realm's matching
-/// prototype; undefined/null → RAISE TypeError; TDZ → engine panic.
+// §7.1.18 toobject
 pub fn t_box_primitive(st: Agent, v: JsVal) -> #(Handle, Agent) {
   case classify(v) {
     KHandle(h) -> #(h, st)
@@ -93,10 +69,6 @@ pub fn t_box_primitive(st: Agent, v: JsVal) -> #(Handle, Agent) {
   }
 }
 
-// ── realm-aware convenience allocators ──────────────────────────────────────
-
-/// §7.4.11 CreateIterResultObject(value, done) — allocates `{value, done}`
-/// with the realm's `%Object.prototype%`. arc `create_iter_result`.
 pub fn alloc_iter_result(
   st: Agent,
   value: JsVal,
@@ -111,21 +83,15 @@ pub fn alloc_iter_result(
   #(mk_object(h), st)
 }
 
-/// §10.4.2.2 ArrayCreate — a fresh dense JS array holding `values` with the
-/// realm's `%Array.prototype%`. Thin wrapper on `common.alloc_array`.
 pub fn alloc_array(st: Agent, values: List(JsVal)) -> #(Handle, Agent) {
   common.alloc_array(st, values, st.realm.array.prototype)
 }
-
-// ── GC pinning enumeration ──────────────────────────────────────────────────
 
 fn pair(bt: BuiltinPair) -> List(Handle) {
   [bt.prototype, bt.constructor]
 }
 
-/// Every `Handle` reachable from a `Realm` record — a flat enumeration for M6
-/// `init_realm` to `t_pin_root` in one pass, and for M2 GC's realm-root walk.
-/// Exhaustive over the `Realm` record's fields (rt_types.gleam:860-906).
+// must stay exhaustive over the realm record fields
 pub fn realm_handles(r: Realm) -> List(Handle) {
   let ta =
     dict.fold(r.typed_arrays.by_kind, [], fn(acc, _k, bt) {

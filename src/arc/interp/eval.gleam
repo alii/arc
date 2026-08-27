@@ -1,18 +1,4 @@
-//// Runtime code evaluation for the bytecode interpreter: §19.2.1.1
-//// PerformEval in both flavours, §20.2.1.1.1 CreateDynamicFunction's
-//// evaluation step, and §16.1.6 ScriptEvaluation for `$262.evalScript`.
-////
-//// Direct eval sees the calling frame. Every function that syntactically
-//// contains `eval(...)` is compiled with all its locals boxed and carries an
-//// `EvalNameTable` (name → slot); the eval source is compiled with those
-//// names as pre-boxed captures in slots 0..N-1 (`compile_eval_direct`) and
-//// its locals are seeded with the caller's box cells, so reads and writes
-//// alias the caller's variables. Sloppy `var`s the eval introduces land in
-//// the frame's eval env object (`rt/env`), allocated on first use.
-////
-//// The loop driver lives above this module (it imports the step function,
-//// which imports this), so running a prepared activation to completion is
-//// the caller-supplied `Run`.
+// §19.2.1.1 performeval, direct eval aliases caller box cells
 
 import arc/bytecode/lexical
 import arc/compiler
@@ -40,13 +26,8 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-/// Runs a freshly prepared activation until its own call stack empties and
-/// reports how it completed: `Ok(value)` or `Error(thrown)`, with the agent
-/// it finished in. Supplied by the loop driver.
 pub type Run =
   fn(State) -> #(Result(JsVal, JsVal), Agent)
-
-// -- Compilation ---------------------------------------------------------------
 
 type Parse =
   fn(String) ->
@@ -56,9 +37,6 @@ type Compile =
   fn(List(ast.StmtWithLine), scope.ScopeBuilder) ->
     Result(FuncTemplate, compiler.CompileError)
 
-/// Parse and compile `source`, or hand back a SyntaxError allocated in the
-/// current realm. Big sources go through the heap-sized scratch process
-/// (`compile_task`): only the compact template or the message crosses back.
 fn compile_source(
   agent: Agent,
   source: String,
@@ -79,10 +57,6 @@ fn compile_source(
   })
 }
 
-// -- Activation set-up -----------------------------------------------------------
-
-/// Locals for a global-scope body: all `undefined` except the lexical `this`
-/// slot, which holds the global object (§9.1.1.4.11 GetThisBinding).
 fn top_level_locals(template: FuncTemplate, this: JsVal) -> TupleArray(JsVal) {
   let locals = tuple_array.repeat(mk_undefined(), template.local_count)
   case lexical.lexical_slot(template.lexical, lexical.RefThis) {
@@ -91,9 +65,6 @@ fn top_level_locals(template: FuncTemplate, this: JsVal) -> TupleArray(JsVal) {
   }
 }
 
-/// A root activation of `template` over `locals`: empty stacks, pc 0. Eval
-/// code and a dynamic function's body are each a fresh parse (§19.2.1.1
-/// step 11, §20.2.1.1.1), so the activation takes a new parse id.
 fn activation(
   agent: Agent,
   template: FuncTemplate,
@@ -122,8 +93,6 @@ fn activation(
   )
 }
 
-/// Run `template` as global code of the current realm: `this` is the global
-/// object, no eval env.
 fn run_global_code(
   agent: Agent,
   template: FuncTemplate,
@@ -139,16 +108,7 @@ fn run_global_code(
   ))
 }
 
-/// Run a nested activation entered straight from an opcode arm (direct
-/// eval), holding one unit of `call_depth` across it: the calling frame's
-/// registers are not among the collector's roots while the nested loop runs,
-/// and a positive depth is what keeps the turn-boundary safepoint shut. The
-/// same unit enforces `limits.max_call_depth` (RangeError, as a throw of the
-/// eval). Entries through `JsOps` already sit inside `t_call`'s bracket.
-///
-/// On the way out the frames and depth are put back to what they were on
-/// entry rather than decremented: a throw that unwinds out of the nested
-/// root frame leaves behind whatever the abandoned frames had pushed.
+// holds one call_depth unit, caller frame is not a gc root
 fn run_bracketed(
   agent: Agent,
   make: fn(Agent) -> State,
@@ -174,17 +134,6 @@ fn run_bracketed(
   }
 }
 
-// -- JsOps.eval_hook -------------------------------------------------------------
-
-/// The interpreter's `JsOps.eval_hook`: evaluate `source` in the current
-/// realm as `kind` says and return the completion value, raising a throw.
-///
-/// `IndirectEval` and `DynamicFunction` are eval code (`compile_eval`:
-/// configurable global declarations, §19.2.1.3); a dynamic function's
-/// closure additionally gets §20.2.1.1.1 step 29 SetFunctionName applied to
-/// its template so stack frames and `toString` say "anonymous". `ScriptEval`
-/// is script code (`compile`: non-configurable declarations) followed by a
-/// microtask checkpoint, as test262's `$262.evalScript` requires.
 pub fn eval_hook(
   agent: Agent,
   source: String,
@@ -219,9 +168,6 @@ pub fn eval_hook(
   }
 }
 
-/// §20.2.1.1.1 step 29 on the code template: the own `name` property is the
-/// constructor's business (`rt/builtins/function`), the template name is
-/// only reachable here.
 fn name_anonymous(agent: Agent, f: JsVal) -> Agent {
   case classify(f) {
     KHandle(h) ->
@@ -245,18 +191,6 @@ fn name_anonymous(agent: Agent, f: JsVal) -> Agent {
   }
 }
 
-// -- Direct eval -----------------------------------------------------------------
-
-/// §19.2.1.1 PerformEval for a DIRECT eval: the CallEval opcode found the
-/// callee to be %eval%. `caller` is the calling activation with the call's
-/// operands already popped; `args` are the call arguments and the three name
-/// lists come straight off the opcode (see `opcode.CallEval`). Returns the
-/// eval's outcome and the caller as it must continue: agent adopted, and
-/// `eval_env` set if this eval had to allocate the frame's var scope.
-///
-/// Step 2: a non-string argument is returned as is. A caller compiled
-/// without a name table (top-level code the compiler did not mark) gets
-/// indirect semantics, as before.
 pub fn direct_eval(
   caller: State,
   args: List(JsVal),
@@ -319,9 +253,6 @@ fn run_direct_eval(
   let EvalNameTable(var_env:, names: name_table) = names
   let func = caller.func
   let code_kind = func.code_kind
-  // Steps 6-11: the eval body may use exactly the syntax the caller's body
-  // may (new.target / super / arguments), sees the caller's private names,
-  // and is strict if the caller is.
   let eval_caller =
     compiler.DirectEvalCaller(
       names: list.map(name_table, fn(pair) { pair.0 }),
@@ -353,20 +284,11 @@ fn run_direct_eval(
         fn(body, sb) { compiler.compile_eval_direct(body, sb, eval_caller) },
       ),
     )
-    // Locals 0..N-1 alias the caller's boxed locals in name-table order,
-    // then the caller's lexical box cells in `all_lexical_refs` order: the
-    // order `compile_eval_direct` allocated capture slots in. The rest start
-    // undefined.
     use box_refs <- result.try(caller_box_refs(caller, name_table))
     let padding = template.local_count - list.length(box_refs)
     let locals =
       list.append(box_refs, list.repeat(mk_undefined(), padding))
       |> tuple_array.from_list
-    // §19.2.1.3: sloppy eval code declares its vars in the caller's
-    // VariableEnvironment. Function caller: the frame's eval env object,
-    // shared by every eval in the frame. Global caller: the global object
-    // itself (the body was compiled to fall through to it). Strict on
-    // either side: the eval body owns its vars as locals.
     let #(eval_env, agent) = case func.is_strict, var_env, caller.eval_env {
       True, _, _ | _, GlobalVarEnv, _ -> #(None, caller.agent)
       False, FrameVarEnv, Some(h) -> #(Some(h), caller.agent)
@@ -375,8 +297,6 @@ fn run_direct_eval(
         #(Some(h), agent)
       }
     }
-    // Step 16.a: direct eval keeps the caller's `this` (delivered through
-    // the captured lexical slot; the register copy is for frame readers).
     let #(res, agent) =
       run_bracketed(
         agent,
@@ -392,9 +312,6 @@ fn run_direct_eval(
   }
 }
 
-/// Fold an eval outcome back into the caller: adopt the agent either way,
-/// keep `eval_env`, and surface a pre-run failure (SyntaxError, missing
-/// slot) as the eval's thrown value.
 fn adopt(
   caller: State,
   outcome: Result(#(Result(JsVal, JsVal), Agent), #(JsVal, Agent)),
@@ -409,10 +326,6 @@ fn adopt(
   }
 }
 
-/// The caller's box cells for a direct eval, in capture-slot order. A slot
-/// the caller's locals do not have is a name-table/locals desync, an engine
-/// bug: it throws instead of seeding `undefined` into a boxed capture where
-/// it would silently read back as an undefined variable.
 fn caller_box_refs(
   caller: State,
   name_table: List(#(String, Int)),

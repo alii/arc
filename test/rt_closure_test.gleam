@@ -57,7 +57,6 @@ fn proto_of(st: Agent, h: Handle) -> Handle {
 pub fn plain_function_shape_test() {
   let #(f, st) = make("function Foo(a, b) {}", "Foo")
   assert proto_of(st, f) == st.realm.function.prototype
-  // The birth props are pending until first observed.
   let assert SObject(kind: KBytecode(birth: BirthPending(Some(parent)), ..), ..) =
     rt_store.t_cell_get(st, f)
   assert parent == st.realm.object.prototype

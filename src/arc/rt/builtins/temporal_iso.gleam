@@ -1,11 +1,3 @@
-//// Pure ISO-8601 core for Temporal — no `State`, no `Heap`, no `JsValue`.
-////
-//// Everything the Temporal builtins need to describe, parse, format, and do
-//// arithmetic on ISO calendar values lives here so it can be unit-tested
-//// without spinning up a heap. The `temporal_*` builtins import this
-//// unqualified (matching how they pull in `gregorian` and `int_math`) and
-//// layer the property-bag / options-object / brand-check machinery on top.
-
 import arc/internal/digits.{take_digits}
 import arc/internal/gregorian.{
   civil_from_days, days_from_year, days_in_month,
@@ -16,10 +8,6 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
-
-// ============================================================================
-// Constants
-// ============================================================================
 
 pub const ns_per_day = 86_400_000_000_000
 
@@ -33,20 +21,14 @@ pub const ns_per_ms = 1_000_000
 
 pub const ns_per_us = 1000
 
-/// nsMaxInstant = 8.64e21 (±100,000,000 days from epoch).
 pub const ns_max_instant = 8_640_000_000_000_000_000_000
 
-/// Maximum time duration in ns: 2^53 seconds − 1 ns.
+// 2^53 seconds minus 1 ns
 pub const max_time_duration_ns = 9_007_199_254_740_991_999_999_999
 
-/// ISODateWithinLimits bounds expressed in epoch days.
 pub const min_epoch_days = -100_000_001
 
 pub const max_epoch_days = 100_000_000
-
-// ============================================================================
-// Internal records
-// ============================================================================
 
 pub type IsoDate {
   IsoDate(year: Int, month: Int, day: Int)
@@ -75,22 +57,15 @@ pub const midnight = TimeRec(0, 0, 0, 0, 0, 0)
 
 pub const zero_dur = DurRec(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
-/// Internal error kind for pure helpers — converted to JS errors at the
-/// dispatch boundary.
 pub type TErr {
   RangeE(String)
   TypeE(String)
 }
 
-/// overflow option: how out-of-range calendar/time fields are handled.
 pub type Overflow {
   Constrain
   Reject
 }
-
-// ============================================================================
-// Pure calendar math (ISO 8601 proleptic Gregorian)
-// ============================================================================
 
 fn days_before_month(y: Int, m: Int) -> Int {
   sum_months(y, 1, m, 0)
@@ -112,7 +87,6 @@ pub fn iso_date_from_epoch_days(days: Int) -> IsoDate {
   IsoDate(year:, month:, day:)
 }
 
-/// ISO day of week: Monday = 1 .. Sunday = 7. Epoch day 0 = Thursday.
 pub fn day_of_week(d: IsoDate) -> Int {
   gregorian.iso_weekday_from_days(epoch_days(d))
 }
@@ -121,14 +95,12 @@ pub fn day_of_year(d: IsoDate) -> Int {
   days_before_month(d.year, d.month) + d.day
 }
 
-/// ISO 8601 week number + week-calendar year.
 pub fn week_of_year(d: IsoDate) -> #(Int, Int) {
   let doy = day_of_year(d)
   let dow = day_of_week(d)
   let week = { doy - dow + 10 } / 7
   case week < 1 {
     True -> {
-      // Belongs to the last week of the previous year.
       let py = d.year - 1
       let pdoy = doy + days_in_iso_year(py)
       #({ pdoy - dow + 10 } / 7, py)
@@ -136,7 +108,6 @@ pub fn week_of_year(d: IsoDate) -> #(Int, Int) {
     False -> {
       let weeks_in_year = case { days_in_iso_year(d.year) - doy < 4 - dow } {
         True -> {
-          // Might belong to week 1 of next year.
           let nyd = doy - days_in_iso_year(d.year)
           let nweek = { nyd - dow + 10 } / 7
           case nweek >= 1 {
@@ -190,7 +161,6 @@ pub fn time_to_ns(t: TimeRec) -> Int {
   + t.ns
 }
 
-/// Decompose non-negative day-local nanoseconds into a TimeRec.
 pub fn ns_to_time(total: Int) -> TimeRec {
   let hour = total / ns_per_hour
   let rem = total - hour * ns_per_hour
@@ -220,8 +190,6 @@ pub fn is_valid_time(t: TimeRec) -> Bool {
   && t.ns <= 999
 }
 
-/// RegulateISODate. Month must already be ≥ 1 when called from property
-/// bags (ToPositiveIntegerWithTruncation).
 pub fn regulate_iso_date(
   y: Int,
   m: Int,
@@ -249,22 +217,16 @@ pub fn check_date_limits(d: IsoDate) -> Result(IsoDate, TErr) {
   }
 }
 
-/// Epoch nanoseconds for an ISO date+time interpreted as UTC.
 pub fn utc_epoch_ns(d: IsoDate, t: TimeRec) -> Int {
   epoch_days(d) * ns_per_day + time_to_ns(t)
 }
 
-/// Split epoch nanoseconds (+ offset) into date and time.
 pub fn epoch_ns_to_iso(epoch_ns: Int, offset_ns: Int) -> #(IsoDate, TimeRec) {
   let local = epoch_ns + offset_ns
   let days = floor_div(local, ns_per_day)
   let rem = local - days * ns_per_day
   #(iso_date_from_epoch_days(days), ns_to_time(rem))
 }
-
-// ============================================================================
-// Formatting
-// ============================================================================
 
 pub fn pad2(n: Int) -> String {
   int.to_string(int.absolute_value(n)) |> string.pad_start(2, "0")
@@ -294,8 +256,6 @@ pub type Precision {
   MinutePrec
 }
 
-/// Format sub-second part per `precision`: "auto" trims trailing zeros,
-/// an Int 0..9 forces that many digits. Returns "" or ".ddd...".
 pub fn format_fraction(sub_ns: Int, precision: Precision) -> String {
   let digits9 = int.to_string(sub_ns) |> string.pad_start(9, "0")
   case precision {
@@ -326,7 +286,6 @@ pub fn format_iso_time(t: TimeRec, precision: Precision) -> String {
   }
 }
 
-/// Format a UTC offset from nanoseconds, minute precision ("+05:30").
 pub fn format_offset_minutes(offset_ns: Int) -> String {
   let sign = case offset_ns < 0 {
     True -> "-"
@@ -337,21 +296,9 @@ pub fn format_offset_minutes(offset_ns: Int) -> String {
   sign <> pad2(total_minutes / 60) <> ":" <> pad2(total_minutes % 60)
 }
 
-// ============================================================================
-// ISO 8601 string parsing
-// ============================================================================
-
-/// The UTC-offset portion of a parsed ISO string. Makes the impossible
-/// combinations (Z with a numeric value, sub-minute without a value)
-/// unconstructable.
 pub type ParsedOffset {
-  /// no offset syntax was present
   NoOffset
-  /// the Z designator (offset 0)
   Zulu
-  /// an explicit ±HH:MM[:SS[.fff]] value; `sub_minute` is True when a seconds
-  /// component was spelled out (even ":00"), which disqualifies it from use as
-  /// a time zone identifier
   NumericOffset(ns: Int, sub_minute: Bool)
 }
 
@@ -359,16 +306,12 @@ pub type ParsedIso {
   ParsedIso(
     date: IsoDate,
     time: Option(TimeRec),
-    /// parsed UTC offset (Z / numeric / none)
     offset: ParsedOffset,
-    /// time zone annotation [Etc/UTC] / [+01:00]
     tz: Option(String),
-    /// calendar annotation value
     calendar: Option(String),
   )
 }
 
-/// Take up to `max` digits (at least 1), returning value, count, rest.
 pub fn take_some_digits(s: String, max: Int) -> Option(#(Int, Int, String)) {
   take_some_digits_loop(s, max, 0, 0)
 }
@@ -402,8 +345,6 @@ fn take_some_digits_loop(
   }
 }
 
-/// Parse the date part: ±YYYYYY-MM-DD / ±YYYYYYMMDD / YYYY-MM-DD / YYYYMMDD.
-/// Returns y/m/d unvalidated (range-checked by caller) + rest.
 pub fn parse_date_part(s: String) -> Option(#(Int, Int, Int, String)) {
   use #(year, rest) <- option.then(parse_year_part(s))
   case rest {
@@ -425,7 +366,6 @@ pub fn parse_date_part(s: String) -> Option(#(Int, Int, Int, String)) {
   }
 }
 
-/// Year: 4 digits, or sign + 6 digits. "-000000" is rejected.
 pub fn parse_year_part(s: String) -> Option(#(Int, String)) {
   case s {
     "+" <> rest -> take_digits(rest, 6) |> option.map(fn(p) { #(p.0, p.1) })
@@ -435,12 +375,10 @@ pub fn parse_year_part(s: String) -> Option(#(Int, String)) {
         Some(#(y, r)) -> Some(#(0 - y, r))
         None -> None
       }
-    // U+2212 MINUS SIGN is NOT valid in ISO 8601 strings (only ASCII hyphen).
     _ -> take_digits(s, 4)
   }
 }
 
-/// Time: HH[:MM[:SS[.fffffffff]]] or HH[MM[SS[.fffffffff]]].
 pub fn parse_time_part(s: String) -> Option(#(TimeRec, String)) {
   use #(h, rest) <- option.then(take_digits(s, 2))
   let #(mi, sec, frac_ns, rest) = case rest {
@@ -473,13 +411,11 @@ pub fn parse_time_part(s: String) -> Option(#(TimeRec, String)) {
         None -> #(0, 0, 0, rest)
       }
   }
-  // Leap second: 60 → 59 per spec. Anything above 60 is a syntax error, so
-  // the range check below MUST see the raw parsed value — clamping first
-  // would silently accept "T00:00:61".
   let t =
     TimeRec(
       hour: h,
       minute: mi,
+      // clamp leap second only after the range check
       second: int.min(sec, 59),
       ms: frac_ns / ns_per_ms,
       us: { frac_ns % ns_per_ms } / ns_per_us,
@@ -491,7 +427,6 @@ pub fn parse_time_part(s: String) -> Option(#(TimeRec, String)) {
   }
 }
 
-/// Fraction after '.' or ',' — 1..9 digits → nanoseconds.
 pub fn parse_fraction(s: String) -> #(Int, String) {
   case s {
     "." <> r | "," <> r ->
@@ -510,8 +445,6 @@ pub fn pow10(n: Int) -> Int {
   }
 }
 
-/// UTC offset: Z / z / ±HH[:MM[:SS[.fff]]] / ±HH[MM[SS]].
-/// Returns None when no offset syntax is present at all.
 pub fn parse_offset_part(s: String) -> Option(#(ParsedOffset, String)) {
   case s {
     "Z" <> rest | "z" <> rest -> Some(#(Zulu, rest))
@@ -564,8 +497,6 @@ fn parse_offset_value(s: String, sign: Int) -> Option(#(ParsedOffset, String)) {
   }
 }
 
-/// Annotations: time zone bracket first (no '='), then key=value pairs.
-/// Returns #(tz, calendar, rest) or None on syntax/critical errors.
 pub fn parse_annotations(
   s: String,
   tz: Option(String),
@@ -587,8 +518,6 @@ pub fn parse_annotations(
               case key {
                 "u-ca" ->
                   case cal {
-                    // Duplicate calendar annotations are a RangeError when
-                    // ANY of them is critical; otherwise first one wins.
                     Some(_) ->
                       case critical || cal_critical {
                         True -> None
@@ -604,7 +533,6 @@ pub fn parse_annotations(
               }
           }
         Error(Nil) ->
-          // Time-zone annotation — only valid as the first bracket.
           case tz, cal, is_tz_annotation(body) {
             None, None, True ->
               parse_annotations(rest, Some(body), cal, cal_critical)
@@ -645,9 +573,6 @@ pub fn is_tz_annotation(s: String) -> Bool {
     _ ->
       s != ""
       && list.all(string.split(s, "/"), fn(part) {
-        // TimeZoneIANANameComponent: TZLeadingChar TZChar* — a leading
-        // digit is not a name (so date-time strings fall through to the
-        // ISO-string time zone extraction).
         case string.pop_grapheme(part) {
           Error(Nil) -> False
           Ok(#(first, rest)) ->
@@ -669,8 +594,6 @@ fn is_tz_char(c: String) -> Bool {
   is_tz_leading_char(c) || digits.digit_value(c) != None || c == "-" || c == "+"
 }
 
-/// Parse a full Temporal date-time string:
-///   date [T time [offset]] [annotations]
 pub fn parse_iso_datetime_string(s: String) -> Option(ParsedIso) {
   use #(y, m, d, rest) <- option.then(parse_date_part(s))
   case is_valid_iso_date(y, m, d) {
@@ -689,7 +612,6 @@ pub fn parse_iso_datetime_string(s: String) -> Option(ParsedIso) {
           }
         _ -> #(None, NoOffset, rest)
       }
-      // If a "T" was present but the time failed to parse, reject.
       case time == None && is_time_prefix(rest) {
         True -> None
         False -> {
@@ -716,10 +638,6 @@ fn is_time_prefix(s: String) -> Bool {
   }
 }
 
-// ============================================================================
-// Float64 rounding of arbitrary-precision integers/rationals
-// ============================================================================
-
 pub const two52 = 4_503_599_627_370_496
 
 pub const two53 = 9_007_199_254_740_992
@@ -735,10 +653,7 @@ pub fn int_sign(n: Int) -> Int {
   }
 }
 
-/// Each Duration field is a float64 Number in the spec (CreateTemporalDuration
-/// stores ℝ(𝔽(v))), so huge components lose precision on construction.
-/// Rounded in integer space via scale_ratio (ties-to-even) because erlang's
-/// float/1 mis-rounds integers wider than 53 bits.
+// integer-space rounding, erlang float/1 misrounds past 53 bits
 pub fn f64_int(n: Int) -> Int {
   case int.absolute_value(n) < two53 {
     True -> n
@@ -753,10 +668,7 @@ pub fn f64_int(n: Int) -> Int {
   }
 }
 
-/// Correctly-rounded integer ratio → double (round-to-nearest, ties-to-even).
-/// Computing `q + r/b` in floats double-rounds near representability
-/// boundaries; this scales the exact rational into [2^52, 2^53) and rounds
-/// once (DivideTimeDuration operates on exact mathematical values).
+// scale into [2^52, 2^53) and round once, no double rounding
 pub fn ns_div_float(a: Int, b: Int) -> Float {
   case b < 0 {
     True -> ns_div_float(0 - a, 0 - b)
@@ -780,9 +692,6 @@ pub fn ns_div_float(a: Int, b: Int) -> Float {
   }
 }
 
-/// Scale a/b (both positive) by a power of two so the rounded quotient lands
-/// in [2^52, 2^53), then round to nearest (ties to even).
-/// Returns #(mantissa, exponent) with a/b ≈ mantissa × 2^exponent.
 fn scale_ratio(a: Int, b: Int, s: Int) -> #(Int, Int) {
   case a >= b * two53 {
     True -> scale_ratio(a, b * 2, s + 1)

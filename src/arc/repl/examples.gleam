@@ -1,5 +1,3 @@
-/// REPL-runnable demos showcasing the Arc JavaScript engine.
-/// Each example is a self-contained JS snippet — run one with `/examples <n>`.
 import gleam/bool
 import gleam/int
 import gleam/io
@@ -15,15 +13,12 @@ pub fn all() -> List(Example) {
   [closures(), promises(), generators(), classes(), array_methods()]
 }
 
-/// Look up example `n` (1-based). `n < 1` is out of range — without this
-/// guard, `list.drop(_, n - 1)` treats 0 (and every negative n) as "drop
-/// nothing" and silently returns example 1.
 pub fn get(n: Int) -> Option(Example) {
+  // without this, n < 1 would return example 1
   use <- bool.guard(n < 1, option.None)
   all() |> list.drop(n - 1) |> list.first |> option.from_result
 }
 
-/// Print the `/examples` menu.
 pub fn print_list() -> Nil {
   io.println("")
   io.println("  Arc examples — run one with `/examples <n>`")
@@ -36,7 +31,6 @@ pub fn print_list() -> Nil {
   io.println("")
 }
 
-/// Print the source of an example before it runs.
 pub fn print_source(ex: Example) -> Nil {
   io.println("")
   io.println("── " <> ex.title <> " " <> string.repeat("─", 50))
@@ -46,8 +40,6 @@ pub fn print_source(ex: Example) -> Nil {
   io.println(string.repeat("─", 60))
   io.println("")
 }
-
-// -- 1. Closures -------------------------------------------------------------
 
 fn closures() -> Example {
   Example(
@@ -63,8 +55,6 @@ const b = makeCounter();
 console.log(a(), a(), a(), b());",
   )
 }
-
-// -- 2. Promises -------------------------------------------------------------
 
 fn promises() -> Example {
   Example(
@@ -83,8 +73,6 @@ main();
 console.log('sync runs first');",
   )
 }
-
-// -- 3. Generators -----------------------------------------------------------
 
 fn generators() -> Example {
   Example(
@@ -108,8 +96,6 @@ console.log(take(naturals(), 5));",
   )
 }
 
-// -- 4. Classes --------------------------------------------------------------
-
 fn classes() -> Example {
   Example(
     title: "Classes & inheritance",
@@ -127,8 +113,6 @@ class Circle extends Shape {
 console.log(new Circle(3).describe());",
   )
 }
-
-// -- 5. Array methods --------------------------------------------------------
 
 fn array_methods() -> Example {
   Example(

@@ -1,12 +1,3 @@
-//// Temporal.PlainDateTime (proposal-temporal §5): a calendar date plus a
-//// wall-clock time with no time zone, held as its ISO 8601 date, its time
-//// (nanosecond precision) and the calendar the date is expressed in.
-////
-//// Also owns ToTemporalDateTime and the date-time property bag conversion.
-//// The date pieces come from temporal_plain_date / temporal_fields, the time
-//// pieces from temporal_plain_time, exact-time resolution (toZonedDateTime)
-//// from temporal_zoned_ops and until/since from temporal_diff.
-
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
@@ -56,12 +47,6 @@ import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 
-// ============================================================================
-// Init — Temporal.PlainDateTime constructor + prototype
-// ============================================================================
-
-/// The getters, in prototype-registration order: the calendar/date fields
-/// and the six wall-clock fields interleaved as the spec lists them.
 const all_getters = [
   DtDate(types.DgCalendarId),
   DtDate(types.DgEra),
@@ -87,9 +72,6 @@ const all_getters = [
   DtDate(types.DgInLeapYear),
 ]
 
-/// Registration specs for `temporal.init_temporal_type`: the constructor
-/// token, `from`/`compare`, the getters and the prototype methods, in
-/// prototype-registration order.
 pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
   TemporalN(TemporalPlainDateTimeCtor(protos:))
 }
@@ -175,12 +157,6 @@ pub fn plain_date_time_method_name(m: PlainDateTimeMethod) -> String {
   }
 }
 
-// ============================================================================
-// Constructor and statics
-// ============================================================================
-
-/// new Temporal.PlainDateTime(y, mo, d, h, mi, s, ms, us, ns [, calendar]).
-/// The caller applies NewTarget's prototype (OrdinaryCreateFromConstructor).
 pub fn ctor(
   st: Agent,
   protos: TemporalProtos,
@@ -210,7 +186,6 @@ pub fn ctor(
   }
 }
 
-/// Temporal.PlainDateTime.from / compare.
 pub fn static(
   st: Agent,
   name: TemporalStaticName,
@@ -237,13 +212,6 @@ pub fn static(
   }
 }
 
-// ============================================================================
-// ToTemporalDateTime
-// ============================================================================
-
-/// ToTemporalDateTime(item [, options]) — returns the ISO date, the time and
-/// the calendar. Reads + validates options AFTER item conversion, per spec
-/// order.
 pub fn to_temporal_date_time(
   st: Agent,
   item: JsVal,
@@ -299,9 +267,6 @@ pub fn to_temporal_date_time(
   }
 }
 
-/// Property bag → date-time. Fields: calendar, then alphabetical (day, era,
-/// eraYear, hour, microsecond, millisecond, minute, month, monthCode,
-/// nanosecond, second, year).
 pub fn date_time_from_bag(
   st: Agent,
   h: Handle,
@@ -319,10 +284,6 @@ pub fn date_time_from_bag(
     False -> rt_val.t_throw_range_error(st, "date-time outside supported range")
   }
 }
-
-// ============================================================================
-// Getters
-// ============================================================================
 
 pub fn getter(
   st: Agent,
@@ -342,10 +303,6 @@ pub fn getter(
     DtDate(dg) -> #(date_field_cal(cal, d, dg), st)
   }
 }
-
-// ============================================================================
-// Methods
-// ============================================================================
 
 pub fn method(
   st: Agent,
@@ -407,7 +364,6 @@ pub fn method(
     }
     PdtAdd | PdtSubtract -> {
       let #(dur, overflow, st) = add_sub_args(st, args, m == PdtSubtract)
-      // Time first, carry days into the date addition.
       let #(carry, t2) = add_time(t, time_only_ns(dur))
       let date_dur =
         DurRec(
@@ -521,7 +477,6 @@ pub fn method(
   }
 }
 
-/// PlainDateTime.prototype.until/since: DifferenceTemporalPlainDateTime.
 fn date_time_until_since(
   st: Agent,
   protos: TemporalProtos,

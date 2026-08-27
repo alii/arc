@@ -1,11 +1,3 @@
-//// Temporal.PlainDate (proposal-temporal §3): a calendar date with no time
-//// or time zone, held as its ISO 8601 date plus the calendar it is expressed
-//// in.
-////
-//// Also owns the date abstract operations the other calendared types share:
-//// ToTemporalDate, the date property bag, and the calendar-aware date field
-//// getters (PlainDateTime and ZonedDateTime register the same sixteen).
-
 import arc/internal/gregorian.{
   days_in_month, days_in_year as days_in_iso_year, is_leap_year,
 }
@@ -52,13 +44,6 @@ import arc/rt/val as rt_val
 import gleam/list
 import gleam/option
 
-// ============================================================================
-// Init — Temporal.PlainDate constructor + prototype
-// ============================================================================
-
-/// The date getters, in prototype-registration order. Kept as values (never
-/// strings) so `date_getter_name` is the only place a JS-facing name is
-/// written down. PlainDateTime and ZonedDateTime register the same set.
 pub const all_date_getters = [
   DgCalendarId,
   DgEra,
@@ -78,9 +63,6 @@ pub const all_date_getters = [
   DgInLeapYear,
 ]
 
-/// Registration specs for `temporal.init_temporal_type`: the constructor
-/// token, `from`/`compare`, the sixteen getters and the prototype methods, in
-/// prototype-registration order.
 pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
   TemporalN(TemporalPlainDateCtor(protos:))
 }
@@ -133,8 +115,6 @@ fn static_name(s: TemporalStaticName) -> String {
   }
 }
 
-/// JS-facing name of a date getter — shared by PlainDateTime and
-/// ZonedDateTime, which register the same sixteen.
 pub fn date_getter_name(g: TemporalDateGetter) -> String {
   case g {
     DgCalendarId -> "calendarId"
@@ -176,12 +156,6 @@ pub fn plain_date_method_name(m: PlainDateMethod) -> String {
   }
 }
 
-// ============================================================================
-// Constructor and statics
-// ============================================================================
-
-/// new Temporal.PlainDate(year, month, day [, calendar]).
-/// The caller applies NewTarget's prototype (OrdinaryCreateFromConstructor).
 pub fn ctor(
   st: Agent,
   protos: TemporalProtos,
@@ -204,7 +178,6 @@ pub fn ctor(
   }
 }
 
-/// Temporal.PlainDate.from / compare.
 pub fn static(
   st: Agent,
   name: TemporalStaticName,
@@ -227,12 +200,6 @@ pub fn static(
   }
 }
 
-// ============================================================================
-// ToTemporalDate
-// ============================================================================
-
-/// ToTemporalDate(item [, options]) — returns the ISO date + calendar.
-/// Reads + validates options AFTER item conversion, per spec order.
 pub fn to_temporal_date(
   st: Agent,
   item: JsVal,
@@ -267,8 +234,6 @@ pub fn to_temporal_date(
   }
 }
 
-/// Property-bag → ISO date + calendar. Field read order: calendar, then
-/// alphabetical (day, era, eraYear, month, monthCode, year).
 pub fn date_from_bag(
   st: Agent,
   h: Handle,
@@ -283,10 +248,6 @@ pub fn date_from_bag(
     False -> rt_val.t_throw_range_error(st, "date outside of supported range")
   }
 }
-
-// ============================================================================
-// Getters
-// ============================================================================
 
 pub fn getter(
   st: Agent,
@@ -319,7 +280,6 @@ pub fn date_field(d: IsoDate, g: TemporalDateGetter) -> JsVal {
   }
 }
 
-/// Calendar-aware date field getter (ISO dates fall through to date_field).
 pub fn date_field_cal(
   cal: tcal.Calendar,
   d: IsoDate,
@@ -339,7 +299,6 @@ pub fn date_field_cal(
         DgDay -> int_val(cd.day)
         DgDayOfWeek -> int_val(day_of_week(d))
         DgDayOfYear -> int_val(tcal.day_of_year(cal, cd.year, cd.month, cd.day))
-        // weekOfYear/yearOfWeek are undefined for non-ISO calendars.
         DgWeekOfYear -> mk_undefined()
         DgYearOfWeek -> mk_undefined()
         DgDaysInWeek -> int_val(7)
@@ -351,10 +310,6 @@ pub fn date_field_cal(
     }
   }
 }
-
-// ============================================================================
-// Methods
-// ============================================================================
 
 pub fn method(
   st: Agent,
@@ -444,8 +399,6 @@ pub fn method(
         }
       }
     PdToZonedDateTime -> {
-      // Argument: a time zone string, or an object with a timeZone
-      // property (plus optional plainTime).
       let arg = helpers.arg_at(args, 0)
       case classify(arg) {
         KStr(tz_str) -> {
@@ -461,8 +414,6 @@ pub fn method(
               let tz = terr(st, parse_time_zone_id(tz_str))
               let #(pt_val, st) = get_named(st, oh, "plainTime")
               case classify(pt_val) {
-                // No plainTime: the day starts at GetStartOfDay, which is
-                // not necessarily midnight (DST gaps at 00:00).
                 KUndef -> {
                   let ns = terr(st, start_of_day_ns(tz, d))
                   make_zoned_cal(st, protos, ns, tz, cal)
@@ -495,8 +446,6 @@ pub fn method(
   }
 }
 
-/// toPlainDateTime's optional time argument: undefined → midnight, else
-/// ToTemporalTime.
 fn optional_time_arg(st: Agent, v: JsVal) -> #(temporal_iso.TimeRec, Agent) {
   case classify(v) {
     KUndef -> #(midnight, st)
@@ -504,7 +453,6 @@ fn optional_time_arg(st: Agent, v: JsVal) -> #(temporal_iso.TimeRec, Agent) {
   }
 }
 
-/// PlainDate.prototype.until/since.
 fn date_until_since(
   st: Agent,
   protos: TemporalProtos,

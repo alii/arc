@@ -1,10 +1,3 @@
-//// Pure formatting engines for the Intl builtins (root/English locale data).
-////
-//// No heap/state dependencies: every function maps plain Gleam values to
-//// lists of `#(type, value)` parts, mirroring the partitioning operations of
-//// ECMA-402 (PartitionNumberPattern, PartitionDateTimePattern, …). The
-//// builtins layer turns parts into strings or {type, value} part objects.
-
 import arc/internal/gregorian.{civil_from_days}
 import arc/internal/int_math.{floor_div}
 import arc/rt/intl_data.{
@@ -32,11 +25,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-/// The kind of a formatted part. Covers every part type ECMA-402 lets the
-/// number, date-time and list formatters emit; the spec-visible strings live
-/// in `part_type_to_js_string` and nowhere else.
 pub type PartType {
-  // Number parts (§15.5.x)
   PInteger
   PGroup
   PDecimal
@@ -52,9 +41,7 @@ pub type PartType {
   PExponentInteger
   PNaN
   PInfinity
-  /// The "~" emitted by formatRange when the two endpoints collapse (§15.5.6).
   PApproximatelySign
-  // Date-time parts (§11.5.x)
   PWeekday
   PEra
   PYear
@@ -66,14 +53,10 @@ pub type PartType {
   PFractionalSecond
   PDayPeriod
   PTimeZoneName
-  // List parts (§13.5.x)
   PElement
-  // Shared
   PLiteral
 }
 
-/// The spec-visible `type` string of a part. Only the JS boundary
-/// (`formatToParts` and friends) should call this.
 pub fn part_type_to_js_string(t: PartType) -> String {
   case t {
     PInteger -> "integer"
@@ -108,23 +91,13 @@ pub fn part_type_to_js_string(t: PartType) -> String {
   }
 }
 
-/// The behavioural class of a part type: the single place the 27 variants are
-/// bucketed. Every predicate over `PartType` is expressed over this class, so
-/// exhaustiveness is checked exactly once, in `part_class`.
 pub type PartClass {
-  /// Digits of the value itself (integer/fraction).
   NumberDigit
-  /// Digits of a scientific exponent — transliterated, but not value digits.
   NumberExponentDigit
-  /// Non-digit pieces of the numeric core (separators, NaN/Infinity, compact).
   NumberCore
-  /// Signs, currency and unit decoration around the numeric core.
   NumberAffix
-  /// Date-time fields written in digits.
   DateNumeric
-  /// Date-time fields written as words/symbols.
   DateText
-  /// Literals and list elements.
   OtherPart
 }
 
@@ -152,8 +125,6 @@ pub fn part_class(t: PartType) -> PartClass {
   }
 }
 
-/// Whether the numbering system's digits apply to this part of a formatted
-/// number.
 pub fn is_number_digit(t: PartType) -> Bool {
   case part_class(t) {
     NumberDigit | NumberExponentDigit -> True
@@ -161,8 +132,6 @@ pub fn is_number_digit(t: PartType) -> Bool {
   }
 }
 
-/// Whether the numbering system's digits apply to this part of a formatted
-/// date-time.
 pub fn is_date_numeric(t: PartType) -> Bool {
   case part_class(t) {
     DateNumeric -> True
@@ -175,12 +144,9 @@ pub fn is_date_numeric(t: PartType) -> Bool {
   }
 }
 
-/// A formatted part: #(type, value), e.g. #(PInteger, "1"), #(PGroup, ",").
 pub type Part =
   #(PartType, String)
 
-/// Which endpoint of a formatted range a part came from — the `source`
-/// property of `formatRangeToParts` (§15.5.6 / §11.5.7).
 pub type PartSource {
   SourceStart
   SourceEnd
@@ -195,13 +161,10 @@ pub fn part_source_to_js_string(s: PartSource) -> String {
   }
 }
 
-/// A part of a formatted *range*: `{ type, value, source }`.
 pub type RangePart {
   RangePart(type_: PartType, value: String, source: PartSource)
 }
 
-/// A part of a formatted relative time / duration: `{ type, value, unit? }`.
-/// `unit: None` means the part carries no `unit` property.
 pub type UnitPart {
   UnitPart(type_: PartType, value: String, unit: Option(String))
 }
@@ -214,11 +177,7 @@ pub fn unit_parts_to_string(parts: List(UnitPart)) -> String {
   parts |> list.map(fn(p) { p.value }) |> string.join("")
 }
 
-/// Combine two formatted endpoints into range parts. Implements the ICU
-/// collapse heuristic: identical affixes are emitted once when they amount to
-/// more than one code point ("+$2.90–3.10"), and the range separator is padded
-/// with spaces when an uncollapsed affix sits next to it ("$3 – $5" vs
-/// "987–988").
+// icu: shared affixes collapse unless exactly one code point
 pub fn format_range_combine(
   key: LocaleKey,
   x_parts: List(Part),
@@ -265,9 +224,6 @@ pub fn format_range_combine(
   }
 }
 
-/// Split formatted parts into (prefix affix, numeric core, suffix affix).
-/// The core spans from the first to the last digit-bearing part; signs and
-/// currency symbols outside that span are affixes for collapse purposes.
 fn split_range_affixes(
   parts: List(Part),
 ) -> #(List(Part), List(Part), List(Part)) {
@@ -283,8 +239,6 @@ fn split_range_affixes(
   #(pre, list.reverse(rev_core), list.reverse(rev_suf))
 }
 
-/// Locale range separator. `spaced` requests the space-padded variant used
-/// when an affix is adjacent to the separator.
 fn range_sep(key: LocaleKey, spaced: Bool) -> String {
   case loc_lang(key) {
     "pt" -> " - "
@@ -296,12 +250,6 @@ fn range_sep(key: LocaleKey, spaced: Bool) -> String {
   }
 }
 
-// ============================================================================
-// Number formatting — ECMA-402 §15.5 (root/en patterns)
-// ============================================================================
-
-/// A digit-precision request: minimum and maximum digits, always both or
-/// neither. `Precision(min: 2, max: 5)` reads "at least 2, at most 5".
 pub type Precision {
   Precision(min: Int, max: Int)
 }
@@ -311,11 +259,7 @@ pub type NumOpts {
     locale: LocaleKey,
     style: NumStyle,
     min_int: Int,
-    /// Fraction-digit precision (minimum/maximumFractionDigits), if requested.
     frac: Option(Precision),
-    /// Significant-digit precision (minimum/maximumSignificantDigits), if
-    /// requested. When both `frac` and `sig` are present, `rounding_priority`
-    /// picks between them.
     sig: Option(Precision),
     use_grouping: IntlUseGrouping,
     notation: Notation,
@@ -344,21 +288,10 @@ pub fn default_num_opts() -> NumOpts {
   )
 }
 
-// ============================================================================
-// Locale data (CLDR subset). The key is the resolved locale tag with any
-// "-u-…" extension stripped, e.g. "de", "zh-TW", "en-IN". Unknown locales
-// fall back to the en/root patterns, preserving the historical behavior.
-// ============================================================================
-
-/// A resolved locale tag with its "-u-…"/"-x-…" extension stripped — the shape
-/// every locale-data table below is keyed by. Opaque and constructible only
-/// through `locale_key`, so an unstripped tag ("de-u-nu-latn", which matches
-/// no table row) cannot reach a lookup.
 pub opaque type LocaleKey {
   LocaleKey(key: String)
 }
 
-/// Strip a "-u-…" (or any singleton) extension from a resolved locale tag.
 pub fn locale_key(tag: String) -> LocaleKey {
   case string.split_once(tag, "-u-") {
     Ok(#(base, _)) -> LocaleKey(base)
@@ -370,7 +303,6 @@ pub fn locale_key(tag: String) -> LocaleKey {
   }
 }
 
-/// Primary language subtag ("de-AT" → "de").
 fn loc_lang(key: LocaleKey) -> String {
   case string.split_once(key.key, "-") {
     Ok(#(lang, _)) -> lang
@@ -403,7 +335,6 @@ fn nan_str(key: LocaleKey) -> String {
   }
 }
 
-/// Indian digit grouping (last 3, then 2s): 1,00,000.
 fn indian_grouping(key: LocaleKey) -> Bool {
   case key.key {
     "en-IN" -> True
@@ -411,8 +342,6 @@ fn indian_grouping(key: LocaleKey) -> Bool {
   }
 }
 
-/// Currency placement: True → symbol suffixed after a NBSP ("987,00 $"),
-/// False → symbol prefixed ("$987.00").
 fn currency_suffixed(key: LocaleKey) -> Bool {
   case loc_lang(key) {
     "de" | "pt" -> True
@@ -420,22 +349,16 @@ fn currency_suffixed(key: LocaleKey) -> Bool {
   }
 }
 
-/// Whether currencySign:"accounting" wraps negatives in parentheses.
-/// CLDR de accounting pattern equals the standard pattern (minus sign).
 fn accounting_parens(key: LocaleKey) -> Bool {
   loc_lang(key) != "de"
 }
 
-/// Format a finite float per the options. `is_nan`/`is_inf` are handled by
-/// the caller. Returns the full part list including sign/affixes.
 pub fn format_number_parts(opts: NumOpts, x: Float) -> List(Part) {
   let negative = is_negative_float(x)
   let dec = decompose(float.absolute_value(x))
   format_dec_parts(opts, negative, dec)
 }
 
-/// Format an exact decimal string (e.g. "12.345", "-0.5") — used by
-/// DurationFormat for arbitrary-precision combined values.
 pub fn format_decimal_string_parts(opts: NumOpts, s: String) -> List(Part) {
   let #(negative, rest) = case string.pop_grapheme(s) {
     Ok(#("-", rest)) -> #(True, rest)
@@ -445,14 +368,11 @@ pub fn format_decimal_string_parts(opts: NumOpts, s: String) -> List(Part) {
 }
 
 fn format_dec_parts(opts: NumOpts, negative: Bool, dec: Dec) -> List(Part) {
-  // Compact notation defaults useGrouping "auto" to the min2 behavior
-  // (ECMA-402 §15.5.3 / CLDR compact patterns).
   let opts = case opts.notation, opts.use_grouping {
     NotationCompact(..), GroupingAuto ->
       NumOpts(..opts, use_grouping: GroupingMin2)
     _, _ -> opts
   }
-  // Percent scaling happens before rounding (ECMA-402 §15.5.1).
   let dec = case opts.style {
     StylePercent -> Dec(..dec, exp: dec.exp + 2)
     StyleDecimal | StyleCurrency(..) | StyleUnit(..) -> dec
@@ -514,9 +434,7 @@ fn format_dec_parts(opts: NumOpts, negative: Bool, dec: Dec) -> List(Part) {
   wrap_affixes(opts, digit_parts, negative, False)
 }
 
-/// Compact notation data (CLDR compact decimal patterns). `e` is the decimal
-/// exponent of the value (floor(log10 |x|)). Returns
-/// #(divisor_exponent, suffix parts for plural "one", suffix parts otherwise).
+// e is floor(log10 x); returns #(divisor exp, one suffix, other suffix)
 fn compact_entry(
   key: LocaleKey,
   display: CompactDisplay,
@@ -555,7 +473,6 @@ fn en_compact(
   #(3 * k, suffix, suffix)
 }
 
-/// en-IN compact data: thousand (K), lakh (10^5, L), crore (10^7, Cr).
 fn in_compact(
   e: Int,
   display: CompactDisplay,
@@ -575,8 +492,6 @@ fn in_compact(
   }
 }
 
-/// CJK myriad-based compact data: 10^4, 10^8, 10^12 (plus an optional 10^3
-/// form, used by Korean "천"). Suffixes attach without spacing.
 fn cjk_compact(
   e: Int,
   m4: String,
@@ -605,7 +520,6 @@ fn de_compact(
   let long = fn(s: String) { [#(PLiteral, " "), #(PCompact, s)] }
   case display {
     CompactShort ->
-      // CLDR de short compact has no abbreviation below one million.
       case e {
         _ if e >= 6 && e <= 8 -> #(6, short("Mio."), short("Mio."))
         _ if e >= 9 && e <= 11 -> #(9, short("Mrd."), short("Mrd."))
@@ -631,7 +545,6 @@ pub fn format_infinity_parts(opts: NumOpts, negative: Bool) -> List(Part) {
   wrap_affixes(opts, [#(PInfinity, "∞")], negative, False)
 }
 
-/// Add sign, currency/percent/unit affixes around the core digit parts.
 fn wrap_affixes(
   opts: NumOpts,
   core: List(Part),
@@ -654,8 +567,6 @@ fn wrap_affixes(
     SignExceptZero, True -> False
     SignAuto, _ | SignNever, _ | SignNegative, _ -> False
   }
-  // Accounting parentheses replace the minus sign when it would be shown —
-  // in locales whose accounting pattern uses parentheses at all (not de).
   let accounting = case opts.style {
     StyleCurrency(sign: CurAccounting, ..) ->
       show_minus && accounting_parens(key)
@@ -704,14 +615,12 @@ fn wrap_affixes(
     }
     StyleUnit(unit: u, display: u_display) -> {
       let #(u_pre, u_suf) = unit_affixes(key, u, u_display, is_one_parts(core))
-      // The sign sits between a unit prefix and the number ("時速 -987 …").
       list.flatten([u_pre, sign_parts, core, u_suf])
     }
     StyleDecimal -> list.append(sign_parts, core)
   }
 }
 
-/// Unit pattern as prefix/suffix part lists around the (signed) number.
 fn unit_affixes(
   key: LocaleKey,
   unit: String,
@@ -721,7 +630,6 @@ fn unit_affixes(
   let lang = loc_lang(key)
   let hant = key.key == "zh-TW" || key.key == "zh-Hant"
   case unit, lang {
-    // CLDR kilometer-per-hour patterns for the locales we carry data for.
     "kilometer-per-hour", "de" ->
       case display {
         UnitLong -> #([], [#(PLiteral, " "), #(PUnit, "Kilometer pro Stunde")])
@@ -752,7 +660,6 @@ fn unit_affixes(
         UnitNarrow -> #([], [#(PUnit, "公里/小時")])
         UnitShort -> #([], [#(PLiteral, " "), #(PUnit, "公里/小時")])
       }
-    // en/root fallback.
     "percent", _ ->
       case display {
         UnitLong -> #([], [#(PLiteral, " "), #(PUnit, "percent")])
@@ -773,10 +680,6 @@ fn unit_affixes(
   }
 }
 
-/// The plural operands of a formatted number: #(integer digits, fraction
-/// digits) as they were actually rendered (so digit options affect them, per
-/// spec). Group separators and every non-digit part are excluded. The single
-/// place operands are read off a `List(Part)`.
 pub fn plural_operands(parts: List(Part)) -> #(String, String) {
   let digits_of = fn(want: PartType) {
     parts
@@ -791,21 +694,17 @@ pub fn plural_operands(parts: List(Part)) -> #(String, String) {
   #(digits_of(PInteger), digits_of(PFraction))
 }
 
-/// Plural-relevant: formatted value is exactly "1" (i = 1, v = 0).
 fn is_one_parts(parts: List(Part)) -> Bool {
   let #(int_digits, frac_digits) = plural_operands(parts)
   int_digits == "1" && frac_digits == ""
 }
 
-/// Formatted value is zero: it has digits, and all of them are "0".
 fn is_zero_parts(parts: List(Part)) -> Bool {
   let #(int_digits, frac_digits) = plural_operands(parts)
   let digits = int_digits <> frac_digits
   digits != "" && string.to_graphemes(digits) |> list.all(fn(c) { c == "0" })
 }
 
-/// Currency display text. Mostly the en symbols; a handful of locales use a
-/// disambiguated USD symbol ("US$").
 fn currency_text(
   key: LocaleKey,
   code: String,
@@ -858,7 +757,6 @@ fn currency_name(code: String) -> String {
   }
 }
 
-/// Minor-unit count for a currency (ISO 4217). Used for fraction defaults.
 pub fn currency_digits(code: String) -> Int {
   case code {
     "BHD" | "IQD" | "JOD" | "KWD" | "LYD" | "OMR" | "TND" -> 3
@@ -883,7 +781,6 @@ pub fn currency_digits(code: String) -> Int {
   }
 }
 
-/// en-US long unit names: "{n} kilometers per hour".
 fn unit_name_long(unit: String, one: Bool) -> String {
   let singular = fn(u: String) -> String {
     case u {
@@ -922,8 +819,6 @@ fn unit_name_long(unit: String, one: Bool) -> String {
   }
 }
 
-/// en-US short/narrow unit display names (CLDR subset; falls back to the
-/// identifier). The long width is handled by `unit_name_long`.
 fn unit_name(unit: String, narrow narrow: Bool) -> String {
   let simple = fn(u: String) -> String {
     case u, narrow {
@@ -994,8 +889,6 @@ fn unit_name(unit: String, narrow narrow: Bool) -> String {
   }
   case string.split_once(unit, "-per-") {
     Ok(#(num, den)) -> {
-      // CLDR per-unit forms differ from the standalone short names:
-      // "{0}/h" (not "/hr"), "{0}/s" (not "/sec").
       let den_text = case den {
         "hour" -> "h"
         "second" -> "s"
@@ -1007,7 +900,6 @@ fn unit_name(unit: String, narrow narrow: Bool) -> String {
   }
 }
 
-/// The ECMA-402 sanctioned simple unit identifiers (§6.5.2, sorted).
 pub fn sanctioned_units() -> List(String) {
   [
     "acre", "bit", "byte", "celsius", "centimeter", "day", "degree",
@@ -1020,7 +912,6 @@ pub fn sanctioned_units() -> List(String) {
   ]
 }
 
-/// IsWellFormedUnitIdentifier (§6.5.1): sanctioned, or sanctioned-per-sanctioned.
 pub fn is_well_formed_unit(unit: String) -> Bool {
   let sanctioned = sanctioned_units()
   case list.contains(sanctioned, unit) {
@@ -1034,17 +925,11 @@ pub fn is_well_formed_unit(unit: String) -> Bool {
   }
 }
 
-// ============================================================================
-// Exact decimal core — digits are kept as strings, rounding is performed on
-// the shortest decimal representation of the float (matching engines).
-// ============================================================================
-
-/// value = 0.digits × 10^exp. digits == "" represents zero.
+// value = 0.digits * 10^exp, digits "" is zero
 pub type Dec {
   Dec(digits: String, exp: Int)
 }
 
-/// Parse the shortest JS decimal string of a non-negative float.
 fn decompose(x: Float) -> Dec {
   parse_decimal(js_format_number(x))
 }
@@ -1074,7 +959,6 @@ fn parse_exp(s: String) -> Int {
   }
 }
 
-/// Strip leading zeros (adjusting exp) and trailing zeros.
 fn normalize(dec: Dec) -> Dec {
   let #(digits, exp) = strip_leading(dec.digits, dec.exp)
   let digits = strip_trailing(digits)
@@ -1098,7 +982,6 @@ fn strip_trailing(digits: String) -> String {
   }
 }
 
-/// Round `dec` keeping `keep` leading digits (rest become remainder).
 fn round_dec(dec: Dec, keep: Int, mode: RoundingMode, negative: Bool) -> Dec {
   let n_digits = string.length(dec.digits)
   case dec.digits == "" || keep >= n_digits {
@@ -1131,10 +1014,7 @@ fn round_dec(dec: Dec, keep: Int, mode: RoundingMode, negative: Bool) -> Dec {
   }
 }
 
-/// Whether the truncated result must be bumped away from zero. `cmp` is the
-/// remainder vs half (-1 below, 0 tie, 1 above) and the remainder is known to
-/// be nonzero when this is called; `odd` is the parity of the truncated
-/// result, which only halfEven consults.
+// cmp: -1 below half, 0 tie, 1 above; odd only for halfeven
 fn round_up_cmp(
   mode: RoundingMode,
   negative: Bool,
@@ -1202,23 +1082,18 @@ fn half_cmp(rem: String, lead_zeros: Int) -> Int {
   }
 }
 
-/// Rebuild a Dec from the rounded integer of the kept digits.
 fn rebuild_rounded(dec: Dec, keep: Int, n2: Int) -> Dec {
   case n2 == 0 {
     True -> Dec(digits: "", exp: 0)
     False -> {
       let s = int.to_string(n2)
       let kept_len = int.max(keep, 0)
-      // Last kept digit sits at exponent dec.exp - kept_len; overflow
-      // (99 → 100) grows the digit count and bumps the exponent.
       let exp = dec.exp - kept_len + string.length(s)
       normalize(Dec(digits: s, exp:))
     }
   }
 }
 
-/// Round at fraction position f (value' = N × 10^-f) honoring the rounding
-/// increment.
 fn round_fraction(
   dec: Dec,
   f: Int,
@@ -1251,8 +1126,7 @@ fn round_fraction(
       let n2 = case r == 0 && !rem_nonzero {
         True -> n
         False -> {
-          // Position within the increment is r + frac where 0 <= frac < 1
-          // comes from the leftover digits. Compare 2(r + frac) with inc.
+          // compare 2 * (r + leftover fraction) against inc
           let doubled = 2 * r
           let cmp = case doubled > inc {
             True -> 1
@@ -1264,12 +1138,8 @@ fn round_fraction(
                     False -> 0
                   }
                 False ->
-                  // doubled < inc: 2r + 2*frac vs inc — only the boundary
-                  // 2r + 1 == inc can flip on the fractional part.
                   case doubled + 1 == inc {
-                    True ->
-                      // frac vs 0.5 decides.
-                      half_cmp(rem_digits_of(dec, keep), 0)
+                    True -> half_cmp(rem_digits_of(dec, keep), 0)
                     False ->
                       case doubled + 2 <= inc {
                         True -> -1
@@ -1300,7 +1170,6 @@ fn round_fraction(
   }
 }
 
-/// Digits beyond the keep position (used for increment tie-breaking).
 fn rem_digits_of(dec: Dec, keep: Int) -> String {
   let n = string.length(dec.digits)
   case keep >= n {
@@ -1327,8 +1196,6 @@ fn pow10_int(e: Int) -> Int {
   }
 }
 
-/// Render a rounded Dec to #(int_str, frac_str) padding the fraction to
-/// `frac_len` digits.
 fn render_dec(dec: Dec, frac_len: Int) -> #(String, String) {
   let n = string.length(dec.digits)
   let #(int_str, frac_str) = case dec.digits {
@@ -1354,7 +1221,6 @@ fn render_dec(dec: Dec, frac_len: Int) -> #(String, String) {
   #(int_str, frac_str)
 }
 
-/// Round + render the absolute value into integer/group/decimal/fraction parts.
 fn format_digits(opts: NumOpts, dec: Dec, negative: Bool) -> List(Part) {
   let mode = opts.rounding_mode
   let by_sig = fn(sig: Precision) { render_sig(dec, sig, mode, negative) }
@@ -1369,10 +1235,8 @@ fn format_digits(opts: NumOpts, dec: Dec, negative: Bool) -> List(Part) {
         False -> by_frac(frac)
       }
     None, Some(frac) -> by_frac(frac)
-    // Neither requested: the ECMA-402 defaults for a plain decimal.
     None, None -> by_frac(Precision(min: 0, max: 3))
   }
-  // stripIfInteger: drop fraction when it is all zeros.
   let frac_str = case opts.trailing_zero_display {
     TzdStripIfInteger ->
       case string.to_graphemes(frac_str) |> list.all(fn(c) { c == "0" }) {
@@ -1381,7 +1245,6 @@ fn format_digits(opts: NumOpts, dec: Dec, negative: Bool) -> List(Part) {
       }
     TzdAuto -> frac_str
   }
-  // Pad to minimumIntegerDigits.
   let key = opts.locale
   let int_str = string.pad_start(int_str, opts.min_int, "0")
   let int_parts = group_integer(opts, int_str)
@@ -1395,9 +1258,6 @@ fn format_digits(opts: NumOpts, dec: Dec, negative: Bool) -> List(Part) {
   }
 }
 
-/// When both precisions are requested, `roundingPriority` picks the winner
-/// (§15.1.6): "auto" always takes significant digits, otherwise the rounding
-/// magnitudes decide (lower magnitude = more precise).
 fn prefer_sig(
   priority: RoundingPriority,
   dec: Dec,
@@ -1420,7 +1280,7 @@ fn prefer_sig(
   }
 }
 
-/// ToRawPrecision (§15.1.3): render to significant digits.
+// §15.1.3 torawprecision
 fn render_sig(
   dec: Dec,
   sig: Precision,
@@ -1428,13 +1288,11 @@ fn render_sig(
   negative: Bool,
 ) -> #(String, String) {
   case dec.digits {
-    // Zero: "0" plus min-1 fraction zeros (ToRawPrecision step 5).
     "" -> #("0", string.repeat("0", sig.min - 1))
     _ -> {
       let rounded = round_dec(dec, sig.max, mode, negative)
       let frac_len = int.max(0, string.length(rounded.digits) - rounded.exp)
       let #(i, f) = render_dec(rounded, frac_len)
-      // Pad with zeros until `sig.min` significant digits.
       let count = count_sig(i, f)
       let f = case count < sig.min {
         True -> f <> string.repeat("0", sig.min - count)
@@ -1445,7 +1303,7 @@ fn render_sig(
   }
 }
 
-/// ToRawFixed (§15.1.4): render to fraction digits.
+// §15.1.4 torawfixed
 fn render_frac(
   dec: Dec,
   frac: Precision,
@@ -1456,7 +1314,6 @@ fn render_frac(
   let rounded =
     round_fraction(dec, frac.max, rounding_increment, mode, negative)
   let #(i, f) = render_dec(rounded, frac.max)
-  // Strip trailing zeros beyond `frac.min`.
   #(i, strip_frac_to_min(f, frac.min))
 }
 
@@ -1474,7 +1331,6 @@ fn strip_frac_to_min(frac: String, min: Int) -> String {
   }
 }
 
-/// Insert group separators (en: every 3 digits, ","; de: "."; en-IN: 3-then-2).
 fn group_integer(opts: NumOpts, int_str: String) -> List(Part) {
   let key = opts.locale
   let n = string.length(int_str)
@@ -1482,7 +1338,6 @@ fn group_integer(opts: NumOpts, int_str: String) -> List(Part) {
     GroupingNever -> False
     GroupingAlways -> n > 3
     GroupingMin2 -> n > 4
-    // auto — groups at 4+ digits
     GroupingAuto -> n > 3
   }
   case grouped {
@@ -1519,7 +1374,6 @@ fn split_groups_loop(s: String, acc: List(String)) -> List(String) {
   }
 }
 
-/// Indian grouping: rightmost group of 3, then groups of 2 ("1,00,000").
 fn split_groups_indian(s: String) -> List(String) {
   let n = string.length(s)
   case n <= 3 {
@@ -1555,12 +1409,6 @@ fn split_pairs_loop(s: String, acc: List(String)) -> List(String) {
   }
 }
 
-// ============================================================================
-// Plural rules — CLDR en
-// ============================================================================
-
-/// A CLDR plural category. The spec-visible strings live in
-/// `plural_category_to_js_string` and nowhere else.
 pub type PluralCategory {
   PcZero
   PcOne
@@ -1570,8 +1418,6 @@ pub type PluralCategory {
   PcOther
 }
 
-/// The spec-visible category string. Only the JS boundary (`select`,
-/// `resolvedOptions().pluralCategories`) should call this.
 pub fn plural_category_to_js_string(c: PluralCategory) -> String {
   case c {
     PcZero -> "zero"
@@ -1583,9 +1429,6 @@ pub fn plural_category_to_js_string(c: PluralCategory) -> String {
   }
 }
 
-/// Select the plural category for English. `int_digits`/`frac_digits` are the
-/// formatted digit strings (so digit options affect the operands, per spec) —
-/// see `plural_operands`.
 pub fn plural_select_en(
   type_: PluralType,
   int_digits: String,
@@ -1604,7 +1447,6 @@ pub fn plural_select_en(
         _, _ -> PcOther
       }
     }
-    // cardinal: one iff i = 1 and v = 0
     Cardinal ->
       case int_digits == "1" && frac_digits == "" {
         True -> PcOne
@@ -1620,11 +1462,6 @@ pub fn plural_categories_en(type_: PluralType) -> List(PluralCategory) {
   }
 }
 
-// ============================================================================
-// List formatting — CLDR en
-// ============================================================================
-
-/// CreatePartsFromList (§13.5.2) with en patterns.
 pub fn list_format_parts(
   type_: ListFormatType,
   style: ListFormatStyle,
@@ -1690,12 +1527,6 @@ fn build_list_parts(
   }
 }
 
-// ============================================================================
-// Relative time formatting — CLDR en
-// ============================================================================
-
-/// en relative-time formatting. `value_parts` is the pre-formatted absolute
-/// value (so digit/numbering options apply); `value` selects plural/special.
 pub fn rtf_parts_en(
   style: RtfStyle,
   numeric: RtfNumeric,
@@ -1707,11 +1538,9 @@ pub fn rtf_parts_en(
     RtfAuto -> True
     RtfAlways -> False
   }
-  // The unit property is only attached to numeric parts (never literals).
   let js3 = fn(p: Part, unit) { UnitPart(p.0, p.1, Some(unit)) }
   let literal3 = fn(text) { UnitPart(PLiteral, text, None) }
-  // -0 → +0 so `"second", 0.0 -> Some("now")` in rtf_auto_name matches on
-  // OTP≥27 (where a `0.0` literal pattern rejects -0.0).
+  // normalize -0.0 so the 0.0 patterns match
   let v = case is_neg_zero(value) {
     True -> 0.0
     False -> value
@@ -1725,7 +1554,6 @@ pub fn rtf_parts_en(
       }
       let unit_text = rtf_unit_en(style, unit, plural)
       let past = is_negative_float(value)
-      // Numeric parts carry the unit for formatToParts.
       let tagged =
         list.map(value_parts, fn(p: Part) {
           case p.0 {
@@ -1800,10 +1628,6 @@ fn rtf_unit_en(
   }
 }
 
-// ============================================================================
-// Date/time formatting — proleptic Gregorian, en-US patterns
-// ============================================================================
-
 pub type DateFields {
   DateFields(
     year: Int,
@@ -1817,7 +1641,6 @@ pub type DateFields {
   )
 }
 
-/// Convert epoch milliseconds (+ offset minutes) to civil fields.
 pub fn fields_from_epoch_ms(ms: Float, offset_minutes: Int) -> DateFields {
   let total_ms = float_to_int_trunc(ms) + offset_minutes * 60_000
   let days = floor_div(total_ms, 86_400_000)
@@ -1828,7 +1651,6 @@ pub fn fields_from_epoch_ms(ms: Float, offset_minutes: Int) -> DateFields {
   let minute = { total_seconds / 60 } % 60
   let hour = total_seconds / 3600
   let week_day = gregorian.weekday_from_days(days)
-  // days → civil date (proleptic Gregorian), epoch = 1970-01-01.
   let #(year, month, day) = civil_from_days(days)
   DateFields(
     year:,
@@ -1903,7 +1725,6 @@ pub fn era_name(year: Int, width: NameWidth) -> String {
   }
 }
 
-/// en flexible day periods (CLDR): used for the dayPeriod option.
 pub fn day_period_name(hour: Int, minute: Int, width: NameWidth) -> String {
   let mins = hour * 60 + minute
   let noon = case width {
@@ -1926,10 +1747,6 @@ pub fn day_period_name(hour: Int, minute: Int, width: NameWidth) -> String {
 pub fn pad2(n: Int) -> String {
   string.pad_start(int.to_string(n), 2, "0")
 }
-
-// ============================================================================
-// Display names — en subset
-// ============================================================================
 
 pub fn language_display_name(code: String) -> Option(String) {
   case code {
@@ -2010,11 +1827,6 @@ pub fn currency_display_name(code: String) -> Option(String) {
   }
 }
 
-// ============================================================================
-// Numbering systems (§9.2.x `nu`) — digit transliteration
-// ============================================================================
-
-/// Numbering systems we can render digits for (sorted).
 pub fn numbering_systems() -> List(String) {
   [
     "adlm", "ahom", "arab", "arabext", "bali", "beng", "bhks", "brah", "cakm",
@@ -2034,9 +1846,6 @@ pub fn is_numbering_system(s: String) -> Bool {
   list.contains(numbering_systems(), s)
 }
 
-/// Transliterate latn digits to the numbering system, in the parts selected by
-/// `translits` (`is_number_digit` for numbers, `is_date_numeric` for
-/// date-times).
 pub fn apply_numbering_system(
   parts: List(Part),
   nu: String,
@@ -2176,21 +1985,12 @@ fn numbering_base(nu: String) -> Option(Int) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Float sign / rendering primitives
-// ---------------------------------------------------------------------------
-
-/// True iff `x` is IEEE 754 negative zero. Gleam has no `-0.0` literal, so
-/// the sign-bit test lives in the FFI.
 @external(erlang, "arc_rt_val_ffi", "is_neg_zero")
 fn is_neg_zero(x: Float) -> Bool
 
-/// Whether a float is negative including -0.0 (its IEEE sign bit is set). A
-/// bare `x <. 0.0` is False for -0.0 and silently picks the +0 branch.
 fn is_negative_float(x: Float) -> Bool {
   x <. 0.0 || is_neg_zero(x)
 }
 
-/// A finite Float per §6.1.6.1.20 Number::toString (1e21 → "1e+21", -0 → "0").
 @external(erlang, "arc_rt_val_ffi", "js_number_to_string")
 fn js_format_number(n: Float) -> String

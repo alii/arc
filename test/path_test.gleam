@@ -1,14 +1,6 @@
 import arc/esm
 import arc/internal/path
 
-// ----------------------------------------------------------------------------
-// path.normalize — `.` / `..` resolution.
-//
-// The `..` arm must only pop a REAL directory segment. It must not consume a
-// preceding `..` (a leading run of `..`s escapes the base directory and has to
-// be preserved), and it must not climb above the root of an absolute path.
-// ----------------------------------------------------------------------------
-
 pub fn normalize_dotdot_does_not_consume_leading_dotdot_test() {
   assert path.normalize("../lib/../../x") == "../../x"
 }
@@ -29,11 +21,6 @@ pub fn normalize_dot_segments_are_dropped_test() {
   assert path.normalize("./a/./b") == "a/b"
 }
 
-// ----------------------------------------------------------------------------
-// path.normalize — a path that cancels down to no segments still denotes a
-// DIRECTORY, never the empty string (an empty module identity naming nothing).
-// ----------------------------------------------------------------------------
-
 pub fn normalize_dot_is_current_directory_test() {
   assert path.normalize(".") == "."
 }
@@ -50,8 +37,6 @@ pub fn normalize_dotdot_at_root_stays_root_test() {
   assert path.normalize("/..") == "/"
 }
 
-// A trailing slash also leaves an empty segment behind, so a RELATIVE path that
-// cancels to nothing must not be mistaken for the filesystem root.
 pub fn normalize_relative_trailing_slash_is_current_directory_test() {
   assert path.normalize("a/../") == "."
 }
@@ -64,12 +49,6 @@ pub fn normalize_empty_path_is_current_directory_test() {
   assert path.normalize("") == "."
 }
 
-// ----------------------------------------------------------------------------
-// path.resolve_specifier — path-shaped vs bare specifiers are different kinds
-// of thing, and the type says so.
-// ----------------------------------------------------------------------------
-
-/// A resolved specifier is a module identity, a raw one is source text.
 fn resolve(raw: String, parent: String) -> path.Specifier {
   path.resolve_specifier(esm.raw(raw), esm.resolved_unchecked(parent))
 }

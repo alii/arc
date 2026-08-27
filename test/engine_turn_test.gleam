@@ -1,9 +1,3 @@
-//// The engine's turn epilogue end to end: every entry point (`eval`,
-//// `call`, `eval_module`, `with_state`) collects and drains once after the
-//// top-level run, with the value it hands back rooted. Under a tiny GC
-//// threshold the drain collects between jobs many times over; the heap
-//// stays bounded, the microtasks all run, and the outcome is still live.
-
 import arc/engine.{type Engine, ModuleThrew, Returned, Threw}
 import arc/host.{State}
 import arc/module_host
@@ -19,8 +13,6 @@ import rt_helpers
 
 const threshold = 256
 
-/// A quiet engine collected once so the counter starts at zero, with a
-/// threshold small enough that a few hundred allocations trip it.
 fn small_engine() -> Engine(Nil) {
   let eng = engine.new() |> engine.with_host_hooks(rt_helpers.quiet_hooks())
   let #(eng, Nil) =
@@ -51,10 +43,6 @@ fn is_live_and_unpinned(eng: Engine(host), v: JsVal) -> Bool {
   rt_gc.t_is_live(st, h) && !set.contains(st.store.pinned_roots, h.id)
 }
 
-/// `eval`: an allocation-heavy loop sheds garbage at the root `Return`
-/// safepoint while it runs, the promise chain it queues runs in the turn's
-/// one drain (collecting between jobs), and the object only the completion
-/// value holds comes back live.
 pub fn eval_is_bounded_drains_and_keeps_its_value_test() {
   let eng = small_engine()
   let base = stats(eng).live
@@ -75,14 +63,9 @@ pub fn eval_is_bounded_drains_and_keeps_its_value_test() {
   assert show(eng, tag) == "'kept:7998000'"
   assert show(eng, seen) == "'undefined'"
   assert show(eng, global(eng, "done")) == "1000"
-  // Thousands of iterations and a thousand jobs at several cells each would
-  // be tens of thousands of live cells unswept; the safepoints keep it to
-  // about a threshold's worth of garbage.
   assert stats(eng).live <= base + 4 * threshold
 }
 
-/// `eval` of a script that throws after queuing allocating jobs: the error
-/// survives the collecting drain.
 pub fn eval_keeps_thrown_value_test() {
   let eng = small_engine()
   let source =
@@ -98,9 +81,6 @@ pub fn eval_keeps_thrown_value_test() {
   assert string.contains(engine.format_error(eng, e), "RangeError: kept")
 }
 
-/// `call`: many turns on one held function, each allocating past the
-/// threshold and queuing an allocating job; every return value survives its
-/// epilogue, every job runs, and the heap stays bounded across the lot.
 pub fn call_is_bounded_drains_and_keeps_its_value_test() {
   let eng = small_engine()
   let source =
@@ -137,8 +117,6 @@ fn call_many(eng: Engine(host), work: JsVal, left: Int) -> Engine(host) {
   }
 }
 
-/// `call` folds a throwing callee and a non-callable into `Threw` of a live
-/// error.
 pub fn call_folds_throws_test() {
   let eng = small_engine()
   let assert Ok(#(Returned(_), eng)) =
@@ -156,8 +134,6 @@ pub fn call_folds_throws_test() {
   assert string.contains(engine.format_error(eng, e), "TypeError")
 }
 
-/// `eval_module`: the error a body throws after queuing allocating jobs is
-/// held only in Gleam while the drain collects, and comes back live.
 pub fn eval_module_keeps_thrown_value_test() {
   let eng = small_engine()
   let source =
@@ -181,9 +157,6 @@ pub fn eval_module_keeps_thrown_value_test() {
   assert string.contains(engine.format_error(eng, e), "SyntaxError: kept 1")
 }
 
-/// The `_with` drivers run exactly once per turn, after the body: what they
-/// drain is what the body queued. A module bundle's driver runs once per
-/// module body and not again at the end.
 pub fn drivers_run_once_per_turn_test() {
   let eng = small_engine()
   let recording = fn(st) {

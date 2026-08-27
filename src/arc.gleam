@@ -18,11 +18,6 @@ import gleam/result
 import gleam/string
 import simplifile
 
-// -- FFI: read a line from stdin ---------------------------------------------
-
-/// One `read_line` outcome. `Eof` (Ctrl-D / closed stdin) is a normal way to
-/// leave the REPL; `ReadError` is a real I/O failure and is reported, not
-/// silently conflated with end-of-input.
 type ReadLine {
   Line(String)
   Eof
@@ -32,10 +27,6 @@ type ReadLine {
 @external(erlang, "arc_cli_ffi", "read_line")
 fn read_line(prompt: String) -> ReadLine
 
-// -- Eval one line -----------------------------------------------------------
-
-/// Render an `EvalError` for the terminal. Parse and compile failures get the
-/// prefix a JS user expects; everything else is the engine's own message.
 fn format_eval_error(err: engine.EvalError(host)) -> String {
   case err {
     engine.ParseError(parse_err) ->
@@ -47,9 +38,6 @@ fn format_eval_error(err: engine.EvalError(host)) -> String {
   }
 }
 
-/// Evaluate one REPL input. The session comes back on every path: advanced
-/// when the input ran (returned or threw), unchanged when it never made it
-/// to bytecode or the engine itself failed.
 fn eval(
   repl: Repl(host),
   source: String,
@@ -60,14 +48,10 @@ fn eval(
   }
 }
 
-/// `Uncaught <error>` for a value a run threw, rendered against the engine
-/// that produced it.
 fn format_uncaught(eng: Engine(host), thrown) -> String {
   "Uncaught " <> engine.format_error(eng, thrown)
 }
 
-/// Print whatever one REPL input produced: the inspected completion value,
-/// the uncaught error, or the reason it never ran.
 fn print_result(
   repl: Repl(host),
   result: Result(Outcome, engine.EvalError(host)),
@@ -80,8 +64,6 @@ fn print_result(
   }
 }
 
-// -- REPL loop ---------------------------------------------------------------
-
 fn clear() -> Nil {
   io.println("\u{1b}[2J\u{1b}[H")
 }
@@ -92,8 +74,6 @@ fn banner() -> Nil {
   io.println("")
 }
 
-/// What the REPL loop should do after one line: keep going with the (possibly
-/// updated) session, or stop because the user asked to leave.
 type ReplStep(host) {
   Continue(Repl(host))
   Quit
@@ -226,31 +206,15 @@ fn get_script_args() -> List(String)
 @external(erlang, "erlang", "halt")
 fn halt(code: Int) -> a
 
-/// Everything that can go wrong on a non-interactive CLI path (`arc <file>`,
-/// `arc -p <expr>`, `arc --dis <file>`), still carrying its original typed
-/// cause. The runners never print — they return one of these and `main`
-/// renders it once via `format_cli_error`. A thrown JS value is the one cause
-/// rendered where it happens: it only means anything against the engine that
-/// produced it, so the runner formats it there and carries the text.
 type CliError(host) {
-  /// argv did not name a runnable command.
   BadUsage(reason: UsageError)
-  /// The entry file could not be read from disk.
   ReadFailed(path: String, error: simplifile.FileError)
-  /// `arc --dis <file>`: the disassembly output file could not be written.
   WriteFailed(path: String, error: simplifile.FileError)
-  /// The parse → compile → run pipeline failed (or an ES module bundle
-  /// failed to link/evaluate).
   EvalFailed(error: engine.EvalError(host))
-  /// `arc --dis <file>`: the file did not parse/compile. Nothing ran.
   DisFailed(error: dis.SourceError)
-  /// The script, module or `-p` expression ran but threw an uncaught
-  /// exception; `report` is the rendered `Uncaught ...` line.
   ScriptThrew(report: String)
 }
 
-/// Render a `CliError` at the print site (in `main`, just before exiting
-/// non-zero).
 fn format_cli_error(err: CliError(host)) -> String {
   case err {
     BadUsage(reason) -> format_usage_error(reason)
@@ -264,9 +228,6 @@ fn format_cli_error(err: CliError(host)) -> String {
   }
 }
 
-/// Which goal symbol a file is parsed and compiled under. `.cjs` is a classic
-/// script; everything else is an ES module. Written ONCE, so `run_file` and
-/// `run_dis` cannot disagree about how a given path is treated.
 fn goal_symbol(path: String) -> dis.Goal {
   case string.ends_with(path, ".cjs") {
     True -> dis.Script
@@ -274,11 +235,6 @@ fn goal_symbol(path: String) -> dis.Goal {
   }
 }
 
-/// Run a JS source file. `Ok(Nil)` means it ran to completion with nothing
-/// uncaught; every failure is returned as a typed `CliError` for `main` to
-/// render and exit non-zero on. The engine boots with its default host hooks
-/// (`engine.new()`) and its default post-script driver, which drains
-/// microtasks after the top level returns.
 fn run_file(path: String) -> Result(Nil, CliError(host)) {
   use source <- result.try(
     simplifile.read(path)
@@ -290,15 +246,11 @@ fn run_file(path: String) -> Result(Nil, CliError(host)) {
   }
 }
 
-/// Run a file as an ES module using the bundle lifecycle.
 fn run_module_file(
   entry_path: String,
   source: String,
 ) -> Result(Nil, CliError(host)) {
   let eng = engine.new()
-  // The entry specifier is a module IDENTITY, and it comes straight from argv.
-  // Normalize it, or `arc ./a.js` names a different module than the `a.js` a
-  // dependency's `import "./a.js"` resolves to — one file, two module records.
   let entry = path.normalize(entry_path)
   case engine.eval_module(eng, entry, source, resolve_dep, load_dep) {
     Ok(#(ModuleReturned(..), _eng)) -> Ok(Nil)
@@ -308,13 +260,6 @@ fn run_module_file(
   }
 }
 
-/// Resolve a dependency specifier: relative paths (./foo, ../bar) against
-/// the parent module's directory. The CLI is a filesystem loader, so a bare
-/// specifier ("fs", a URL) has no path meaning here — it is rejected as such,
-/// never probed as if it were a file.
-///
-/// `module_host.ResolveFn` is a stringly host boundary; the Raw/Resolved
-/// distinction is put back on at this edge and taken off again on the way out.
 fn resolve_dep(
   raw_specifier: String,
   parent_specifier: String,
@@ -327,9 +272,6 @@ fn resolve_dep(
   }
 }
 
-/// Read a resolved dependency's source from disk. Only a genuinely absent
-/// file is `NotFound`; a directory, a permissions failure or an I/O error is a
-/// `ReadFailed` carrying simplifile's own description.
 fn load_dep(resolved: String) -> Result(String, LoadError) {
   case simplifile.read(resolved) {
     Ok(source) -> Ok(source)
@@ -338,7 +280,6 @@ fn load_dep(resolved: String) -> Result(String, LoadError) {
   }
 }
 
-/// Run a file as a script (only for .cjs files).
 fn run_script_file(source: String) -> Result(Nil, CliError(host)) {
   let eng = engine.new()
   case engine.eval(eng, source) {
@@ -349,10 +290,6 @@ fn run_script_file(source: String) -> Result(Nil, CliError(host)) {
   }
 }
 
-/// `arc --dis <file>`: parse and compile <file> WITHOUT running it, and write
-/// the disassembled bytecode next to it as `<file>.dis.txt`. The goal symbol
-/// (`.cjs` ⇒ script, else module) is the same one `run_file` picks its
-/// execution path with.
 fn run_dis(path: String) -> Result(Nil, CliError(host)) {
   use source <- result.try(
     simplifile.read(path)
@@ -369,9 +306,6 @@ fn run_dis(path: String) -> Result(Nil, CliError(host)) {
   io.println("wrote " <> out_path)
 }
 
-/// `arc -p <expr>`: evaluate one expression in a fresh REPL session and
-/// print the result. A failed eval comes back as a `CliError` for `main` to
-/// render.
 fn run_print(source: String) -> Result(Nil, CliError(host)) {
   case engine.repl_eval(new_repl(), source) {
     Ok(#(Returned(val), repl)) -> {
@@ -388,18 +322,12 @@ fn new_repl() -> Repl(host) {
   engine.repl(engine.new())
 }
 
-/// Why argv did not name a runnable command. Rendered once, by
-/// `format_usage_error`.
 pub type UsageError {
   MissingDisPath
   MissingPrintExpr
   UnknownFlag(String)
 }
 
-/// What argv asked arc to do. Parsing argv into one of these keeps the flag
-/// list in a single place, and makes `Usage(_)` a value the caller must handle
-/// — the old inline match printed usage and still returned `Ok(Nil)`, so a
-/// usage error exited 0.
 pub type Command {
   Repl
   RunFile(String)
@@ -408,7 +336,6 @@ pub type Command {
   Usage(reason: UsageError)
 }
 
-/// Pure argv → `Command`. No IO, no exits.
 fn parse_args(args: List(String)) -> Command {
   case args {
     [] -> Repl

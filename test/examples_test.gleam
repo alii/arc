@@ -1,12 +1,7 @@
 import arc/repl/examples
 import gleam/option.{None, Some}
 
-// ----------------------------------------------------------------------------
-// examples.get is 1-based. `n < 1` must be out of range: without the guard,
-// `list.drop(_, n - 1)` treats 0 (and every negative n) as "drop nothing" and
-// `/examples 0` silently runs example 1.
-// ----------------------------------------------------------------------------
-
+// examples.get is 1-based
 pub fn get_zero_is_out_of_range_test() {
   assert examples.get(0) == None
 }

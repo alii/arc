@@ -1,8 +1,3 @@
-//// The interpreter's GC safepoints: a collection triggered from a flat
-//// frame keeps what the frame holds and drops the rest, memory stays
-//// bounded under a small threshold, the turn-end drain keeps the completion
-//// value, and parked coroutine frames / closure environments are traced.
-
 import arc/bytecode/lexical
 import arc/internal/tuple_array
 import arc/interp/safepoint
@@ -26,8 +21,6 @@ import rt_helpers
 
 const threshold = 64
 
-/// A realm-initialised agent, collected once so the counter starts at zero,
-/// with a threshold small enough that a few dozen allocations trip it.
 fn small_agent() -> Agent {
   let st = rt_gc.t_collect(rt_helpers.agent(), [])
   Agent(..st, store: JsStore(..st.store, gc_threshold: threshold))
@@ -39,7 +32,6 @@ fn new_object(st: Agent) -> #(Handle, JsVal, Agent) {
   #(h, v, st)
 }
 
-/// Allocate `n` objects nothing refers to.
 fn churn(st: Agent, n: Int) -> Agent {
   case n {
     0 -> st
@@ -74,7 +66,6 @@ fn empty_template() -> FuncTemplate {
   )
 }
 
-/// A root activation over `agent` holding `locals` and `stack`.
 fn root_state(agent: Agent, locals: List(JsVal), stack: List(JsVal)) -> State {
   let func = empty_template()
   State(
@@ -118,7 +109,6 @@ pub fn below_threshold_does_not_collect_test() {
 }
 
 pub fn nested_activation_never_collects_test() {
-  // A native above us entered a call: its registers are invisible here.
   let st = rt_store.t_enter_call(small_agent())
   let #(dead_h, _, st) = new_object(st)
   let st = churn(st, threshold)
@@ -126,7 +116,6 @@ pub fn nested_activation_never_collects_test() {
   assert rt_gc.t_is_live(s.agent, dead_h)
 }
 
-/// `s` running as the callee of one flat frame that holds `held`.
 fn with_caller_frame(s: State, held: JsVal) -> State {
   let caller =
     SavedFrame(
@@ -185,8 +174,6 @@ pub fn allocation_loop_stays_bounded_test() {
   assert rt_gc.stats(s.agent).live <= base + 2 * threshold
 }
 
-/// `rounds` iterations of: allocate past the threshold, hit the safepoint,
-/// check the live set never exceeds the baseline by more than one round.
 fn stress(s: State, rounds: Int, base: Int) -> State {
   case rounds {
     0 -> s
@@ -214,7 +201,6 @@ pub fn end_turn_keeps_completion_value_across_drain_test() {
   assert rt_gc.t_is_live(st, kept_h)
   assert !rt_gc.t_is_live(st, dead_h)
   assert rt_gc.stats(st).live <= base + 2 * threshold
-  // The hold is scoped to the turn end: nothing stays pinned.
   assert !set.contains(st.store.pinned_roots, kept_h.id)
 }
 
@@ -259,7 +245,6 @@ pub fn parked_frame_roots_its_registers_test() {
   assert rt_gc.t_is_live(st, this_h)
   assert rt_gc.t_is_live(st, env_h)
   assert !rt_gc.t_is_live(st, dead_h)
-  // And once nothing holds the generator, the whole frame goes.
   let st = rt_gc.t_collect(st, [])
   assert !rt_gc.t_is_live(st, local_h)
   assert !rt_gc.t_is_live(st, gen_h)

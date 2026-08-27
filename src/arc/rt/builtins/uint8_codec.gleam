@@ -1,11 +1,3 @@
-/// Uint8Array base64/hex — proposal-arraybuffer-base64 (ES2026)
-///
-/// The six Uint8Array-only builtins (toBase64 / toHex / setFromBase64 /
-/// setFromHex / fromBase64 / fromHex) and the pure decoders that back them.
-/// Split out of typed_array so the ~740-line codec surface — its own type
-/// vocabulary, its own option-object grammar, its own decode loop — sits in
-/// one file a reader opens for "how does base64 work here", not buried at
-/// the tail of the general TypedArray prototype module.
 import arc/internal/digits
 import arc/rt/buffer
 import arc/rt/builtins/common
@@ -29,27 +21,22 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
-/// Hard cap on a typed array's backing byte length (matches the engine's
-/// practical allocation limit; over this → RangeError like real engines).
 const max_byte_length = 2_147_483_647
 
-/// 2^53 - 1 — MAX_SAFE_INTEGER, the ToIndex/ToLength upper bound.
+// 2^53 - 1
 const max_safe_integer = 9_007_199_254_740_991
 
-/// The "alphabet" option — proposal-arraybuffer-base64.
 type B64Alphabet {
   Base64
   Base64Url
 }
 
-/// The "lastChunkHandling" option — proposal-arraybuffer-base64.
 type LastChunkHandling {
   Loose
   Strict
   StopBeforePartial
 }
 
-/// Which decoder produced a DecodeResult — names the SyntaxError.
 type Codec {
   Base64Codec
   HexCodec
@@ -79,15 +66,6 @@ fn codec_name(codec: Codec) -> String {
   }
 }
 
-// ----------------------------------------------------------------------------
-// Uint8Array receiver helpers
-// ----------------------------------------------------------------------------
-
-/// The receiver's [[ViewedArrayBuffer]]/[[ByteOffset]]/[[ArrayLength]] slots
-/// when it is specifically a Uint8Array — the only element kind these six
-/// methods accept. Encodes the brand check in the type: a `U8Slot` never
-/// describes a non-Uint8 view, so `elem_kind` is not carried (it is always 1
-/// byte/element wherever this record flows).
 type U8Slot {
   U8Slot(buffer: Handle, byte_offset: Int, length: Option(Int))
 }
@@ -111,9 +89,6 @@ fn u8_slot(st: Agent, v: JsVal) -> Option(U8Slot) {
   }
 }
 
-/// ValidateUint8Array — RequireInternalSlot([[TypedArrayName]]) plus the
-/// Uint8Array brand check. Does NOT check buffer liveness (that happens
-/// later, after option coercion, per GetUint8ArrayBytes ordering).
 fn validate_u8(st: Agent, this: JsVal) -> Nil {
   case u8_slot(st, this) {
     Some(_) -> Nil
@@ -122,12 +97,7 @@ fn validate_u8(st: Agent, this: JsVal) -> Nil {
   }
 }
 
-/// Immutable ArrayBuffer proposal: the write direction of ValidateUint8Array
-/// — setFromBase64/setFromHex reject an immutable-backed target BEFORE any
-/// option getter runs (observable; toBase64/toHex stay read-only).
 fn u8_require_mutable(st: Agent, this: JsVal) -> Nil {
-  // Same predicate as `require_mutable` / the [[Set]] element path; only the
-  // prose differs (these methods are Uint8Array-only).
   let immutable = case u8_slot(st, this) {
     Some(U8Slot(buffer:, ..)) -> buffer.buffer_is_immutable(st, buffer)
     None -> False
@@ -142,25 +112,11 @@ fn u8_require_mutable(st: Agent, this: JsVal) -> Nil {
   }
 }
 
-/// The LIVE Uint8Array view a base64/hex method operates on: the buffer it
-/// writes back into, the bytes it just proved are there, and the byte range it
-/// covers. A record rather than a `#(Handle, BitArray, Int, Int)` — the last
-/// two fields were adjacent bare `Int`s, so `off` and `len` could be swapped
-/// at a call site and still type-check.
 type U8LiveView {
   U8LiveView(buffer: Handle, data: BitArray, byte_offset: Int, length: Int)
 }
 
-/// MakeTypedArrayWithBufferWitnessRecord + IsTypedArrayOutOfBounds: resolve
-/// the LIVE view right now (option getters may have detached/shrunk the
-/// buffer). The bounds proof is the same one every %TypedArray% method uses.
-///
-/// TypedArrayLength is resolved against the very bytes read to prove bounds,
-/// NEVER by re-reading the buffer: for a length-tracking view over a growable
-/// SharedArrayBuffer, a second read can see a longer buffer than the snapshot
-/// in `data`, and `length` would then run past the bytes it is supposed to
-/// describe. Resolving both from one read is what makes
-/// `byte_offset + length <= byte_size(data)` an invariant of this record.
+// resolve length from the same read as data, never re-read
 fn u8_live_view(st: Agent, this: JsVal) -> U8LiveView {
   case u8_slot(st, this) {
     Some(U8Slot(buffer:, byte_offset:, length:)) ->
@@ -172,7 +128,6 @@ fn u8_live_view(st: Agent, this: JsVal) -> U8LiveView {
           )
         Some(data) -> {
           let byte_size = bit_array.byte_size(data)
-          // Uint8 elem_size == 1, so the OOB check is in bytes directly.
           let oob = case length {
             Some(n) -> byte_offset + n > byte_size
             None -> byte_offset > byte_size
@@ -206,11 +161,6 @@ fn u8_live_view(st: Agent, this: JsVal) -> U8LiveView {
   }
 }
 
-// ----------------------------------------------------------------------------
-// Option-object grammar
-// ----------------------------------------------------------------------------
-
-/// GetOptionsObject: undefined → absent, object → Some(ref), else TypeError.
 fn get_opts_object(st: Agent, v: JsVal) -> Option(Handle) {
   case classify(v) {
     KUndef -> None
@@ -219,7 +169,6 @@ fn get_opts_object(st: Agent, v: JsVal) -> Option(Handle) {
   }
 }
 
-/// Get(opts, key) — observable property read on the options object.
 fn get_option_value(
   st: Agent,
   opts: Option(Handle),
@@ -231,11 +180,6 @@ fn get_option_value(
   }
 }
 
-/// String-enum option per the proposal: undefined → default; a non-String
-/// value or a String `parse` rejects → TypeError (NO ToString coercion). The
-/// accepted spellings live in `parse`, so the option's value can only ever
-/// leave here as one of the enum's variants — a downstream `== "base64url"`
-/// against a typo'd string is not expressible.
 fn get_enum_option(
   st: Agent,
   opts: Option(Handle),
@@ -263,14 +207,11 @@ fn get_enum_option(
   }
 }
 
-/// `typeof`-name a value for TypeError messages.
 fn type_of(st: Agent, v: JsVal) -> String {
   let #(ty, _) = rt_val.t_type_of(st, v)
   ty
 }
 
-/// Shared option reads of setFromBase64/fromBase64, in spec order:
-/// GetOptionsObject, then "alphabet", then "lastChunkHandling".
 fn read_b64_options(
   st: Agent,
   opt_arg: JsVal,
@@ -289,8 +230,6 @@ fn read_b64_options(
   #(alphabet, handling, st)
 }
 
-/// Step 3 of setFromBase64/setFromHex/fromBase64/fromHex: the input must
-/// already be a String — no coercion.
 fn require_string(st: Agent, v: JsVal) -> String {
   case classify(v) {
     KStr(s) -> s
@@ -302,11 +241,6 @@ fn require_string(st: Agent, v: JsVal) -> String {
   }
 }
 
-// ----------------------------------------------------------------------------
-// The six dispatch handlers
-// ----------------------------------------------------------------------------
-
-/// Uint8Array.prototype.toBase64 ( [ options ] )
 pub fn u8_to_base64(
   st: Agent,
   this: JsVal,
@@ -319,7 +253,6 @@ pub fn u8_to_base64(
   let #(omit_val, st) = get_option_value(st, opts, "omitPadding")
   let padding = !rt_val.to_boolean(omit_val)
   let view = u8_live_view(st, this)
-  // u8_live_view proved byte_offset + length <= byte_size(data).
   let assert Ok(bytes) =
     bit_array.slice(view.data, view.byte_offset, view.length)
   let out = case alphabet {
@@ -329,17 +262,14 @@ pub fn u8_to_base64(
   #(mk_string(out), st)
 }
 
-/// Uint8Array.prototype.toHex ( )
 pub fn u8_to_hex(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let Nil = validate_u8(st, this)
   let view = u8_live_view(st, this)
-  // u8_live_view proved byte_offset + length <= byte_size(data).
   let assert Ok(bytes) =
     bit_array.slice(view.data, view.byte_offset, view.length)
   #(mk_string(string.lowercase(bit_array.base16_encode(bytes))), st)
 }
 
-/// Uint8Array.prototype.setFromBase64 ( string [ , options ] )
 pub fn u8_set_from_base64(
   st: Agent,
   this: JsVal,
@@ -354,7 +284,6 @@ pub fn u8_set_from_base64(
   decode_into_view(st, view, res, Base64Codec)
 }
 
-/// Uint8Array.prototype.setFromHex ( string )
 pub fn u8_set_from_hex(
   st: Agent,
   this: JsVal,
@@ -368,7 +297,6 @@ pub fn u8_set_from_hex(
   decode_into_view(st, view, res, HexCodec)
 }
 
-/// Uint8Array.fromBase64 ( string [ , options ] )
 pub fn u8_from_base64(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let s = require_string(st, helpers.first_arg_or_undefined(args))
   let #(alphabet, handling, st) = read_b64_options(st, helpers.arg_at(args, 1))
@@ -376,18 +304,12 @@ pub fn u8_from_base64(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   decode_to_new_u8(st, res, Base64Codec)
 }
 
-/// Uint8Array.fromHex ( string )
 pub fn u8_from_hex(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let s = require_string(st, helpers.first_arg_or_undefined(args))
   let res = from_hex(s, max_safe_integer)
   decode_to_new_u8(st, res, HexCodec)
 }
 
-// ----------------------------------------------------------------------------
-// Shared write/alloc tails
-// ----------------------------------------------------------------------------
-
-/// Allocate the `{ read, written }` result object of setFromBase64/setFromHex.
 fn read_written_result(st: Agent, read: Int, written: Int) -> #(JsVal, Agent) {
   let #(ref, st) =
     common.alloc_pojo(st, st.realm.object.prototype, [
@@ -397,8 +319,6 @@ fn read_written_result(st: Agent, read: Int, written: Int) -> #(JsVal, Agent) {
   #(mk_object(ref), st)
 }
 
-/// SetUint8ArrayBytes — splice the decoded bytes into the buffer at the
-/// view's byte offset. Decoders never run user code, so `data` is current.
 fn u8_write_bytes(
   st: Agent,
   buffer: Handle,
@@ -420,8 +340,7 @@ fn decode_error(st: Agent, codec: Codec) -> a {
   )
 }
 
-/// Shared setFromBase64/setFromHex tail. Per spec, bytes decoded before an
-/// error ARE written, THEN the SyntaxError is thrown ("writes up to error").
+// partial bytes are written before the syntaxerror throws
 fn decode_into_view(
   st: Agent,
   view: U8LiveView,
@@ -439,9 +358,6 @@ fn decode_into_view(
   }
 }
 
-/// Shared fromBase64/fromHex tail: allocate a fresh Uint8Array on success.
-/// (No view to write into here, so a failed decode's partial bytes are
-/// dropped — only the SyntaxError surfaces.)
 fn decode_to_new_u8(
   st: Agent,
   res: DecodeResult,
@@ -453,10 +369,6 @@ fn decode_to_new_u8(
   }
 }
 
-/// Allocate a fresh Uint8Array holding exactly `bytes` — a fresh
-/// non-resizable ArrayBuffer with `bytes` as its data plus a fixed
-/// full-length Uint8 view over it. (No zeroed intermediate: the buffer is
-/// created directly around the decoded bytes.)
 fn u8_alloc_from_bytes(st: Agent, bytes: BitArray) -> #(JsVal, Agent) {
   let len = bit_array.byte_size(bytes)
   use <- bool.lazy_guard(len > max_byte_length, fn() {
@@ -483,9 +395,6 @@ fn u8_alloc_from_bytes(st: Agent, bytes: BitArray) -> #(JsVal, Agent) {
   #(mk_object(ta_ref), st)
 }
 
-/// The realm's intrinsic %Uint8Array.prototype% — the table is total over
-/// `all_typed_array_kinds`, so there is no "kind not installed" case once
-/// the TypedArray init has run.
 fn u8_prototype(st: Agent) -> Handle {
   let assert Ok(bt) =
     dict.get(st.realm.typed_arrays.by_kind, NumKind(Uint8Kind))
@@ -493,30 +402,15 @@ fn u8_prototype(st: Agent) -> Handle {
   bt.prototype
 }
 
-// ----------------------------------------------------------------------------
-// FromBase64 / FromHex — the decoders (no user code runs inside).
-// `read` is in string code units; positions it reports always fall inside an
-// all-ASCII prefix, so iterating the UTF-8 bytes keeps the counts exact (any
-// non-ASCII byte is an immediate decode error).
-// ----------------------------------------------------------------------------
-
-/// Result of FromBase64/FromHex. `Decoded` is a clean decode: `read` input
-/// code units consumed and the `bytes` they produced. `DecodeFailed` is the
-/// spec record that carried a SyntaxError; `partial` holds the bytes decoded
-/// BEFORE the error (setFromBase64/setFromHex still write those, then throw).
 type DecodeResult {
   Decoded(read: Int, bytes: BitArray)
   DecodeFailed(partial: BitArray)
 }
 
-/// Join decoded chunks (accumulated newest-first) into the final byte string.
-/// A single concat at the end keeps decoding O(n); appending to a growing
-/// BitArray per chunk copies the whole accumulator each time (O(n^2)).
 fn decode_bytes(acc: List(BitArray)) -> BitArray {
   bit_array.concat(list.reverse(acc))
 }
 
-/// FromBase64 ( string, alphabet, lastChunkHandling, maxLength )
 fn from_base64(
   s: String,
   alphabet: B64Alphabet,
@@ -538,7 +432,7 @@ fn from_base64(
   )
 }
 
-/// SkipAsciiWhitespace — TAB LF FF CR SPACE.
+// tab lf ff cr space
 fn b64_skip_ws(bin: BitArray, index: Int) -> #(BitArray, Int) {
   case bin {
     <<c, rest:bits>> if c == 9 || c == 10 || c == 12 || c == 13 || c == 32 ->
@@ -633,13 +527,10 @@ fn b64_loop(
           }
         }
       }
-    // Unreachable: the input is a UTF-8 binary, always whole bytes.
     _ -> DecodeFailed(decode_bytes(acc))
   }
 }
 
-/// The '=' branch of FromBase64: validate padding, decode the partial chunk.
-/// On entry `index` is the position just after the first '='.
 fn b64_padding(
   bin: BitArray,
   index: Int,
@@ -670,8 +561,6 @@ fn b64_padding(
   }
 }
 
-/// After padding: anything left in the string is an error; otherwise decode
-/// the 2- or 3-char chunk ("strict" rejects non-zero extra bits).
 fn b64_finish_padding(
   bin: BitArray,
   index: Int,
@@ -690,8 +579,6 @@ fn b64_finish_padding(
   }
 }
 
-/// DecodeBase64Chunk for 2- or 3-char chunks. None = non-zero extra bits
-/// rejected under `throw_on_extra_bits`.
 fn b64_decode_partial(
   chunk: Int,
   chunk_len: Int,
@@ -699,7 +586,7 @@ fn b64_decode_partial(
 ) -> Option(BitArray) {
   case chunk_len {
     2 -> {
-      // 12 bits: 1 byte + 4 extra bits.
+      // 12 bits: 1 byte + 4 extra
       let extra = int.bitwise_and(chunk, 0xF)
       case throw_on_extra_bits && extra != 0 {
         True -> None
@@ -707,7 +594,7 @@ fn b64_decode_partial(
       }
     }
     _ -> {
-      // 18 bits: 2 bytes + 2 extra bits.
+      // 18 bits: 2 bytes + 2 extra
       let extra = int.bitwise_and(chunk, 0x3)
       case throw_on_extra_bits && extra != 0 {
         True -> None
@@ -717,8 +604,6 @@ fn b64_decode_partial(
   }
 }
 
-/// Map a base64 character (as its code unit) to its 6-bit value. In the
-/// base64url alphabet '-'/'_' replace '+'/'/'.
 fn b64_value(c: Int, alphabet: B64Alphabet) -> Option(Int) {
   let url = alphabet == Base64Url
   case c {
@@ -733,10 +618,8 @@ fn b64_value(c: Int, alphabet: B64Alphabet) -> Option(Int) {
   }
 }
 
-/// FromHex ( string, maxLength )
 fn from_hex(s: String, max_len: Int) -> DecodeResult {
-  // The odd-length check is on the string's UTF-16 length, not its UTF-8
-  // byte count (they can differ when the bad char is non-ASCII).
+  // odd check is on utf-16 length, not bytes
   case js_string.length(s) % 2 != 0 {
     True -> DecodeFailed(<<>>)
     False -> hex_loop(bit_array.from_string(s), 0, [], 0, max_len)

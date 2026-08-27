@@ -1,11 +1,4 @@
-%%% arc_interp_prop_ffi — the interpreter's fused property, element and
-%%% global access kernels (`.x`, `.x = v`, `a[i]`, `a[i] = v`, field define,
-%%% global read/write). Same contract as arc_interp_ffi: match the raw JsVal
-%%% wire term and the store records directly, answer the hit value (reads) or
-%%% the rebuilt agent (writes), or the atom `miss` when the operands need
-%%% anything observable. TOTAL: no clause raises for any wire term. Shares
-%%% the proto-chain predicate `named_free` with the AOT fast paths in
-%%% arc_rt_obj_ffi.
+%% property fast paths: answer or miss, never raise
 -module(arc_interp_prop_ffi).
 -export([get_field/3, own_data/2, get_elem/3, get_elem2/3, put_field/5, put_elem/4,
          define_field/4, new_object/5, new_receiver/2, get_global/3,
@@ -13,22 +6,9 @@
 
 -include("../rt/arc_rt_layout.hrl").
 
-%% The Named "length" PropertyKey term.
 -define(LENGTH_KEY, {?KEY_NAMED, <<"length">>}).
 
-%% get_field(Agent, V, K) -> JsVal | miss
-%% §10.1.8.1 OrdinaryGet for a Named string key on an object cell, walking
-%% the prototype chain while every hop is an ordinary read: an own slot on
-%% an SShapedObject, or an own DataProperty in an SObject's props map for a
-%% kind whose named keys are not virtual. A string or number primitive
-%% starts the walk at its realm wrapper prototype (String "length" is
-%% answered directly, as is an Array cell's). Accessors, Proxy / module
-%% namespace / TypedArray cells, a String object's "length", a dangling
-%% handle, any other primitive, or more than 64 hops all miss. Absent on
-%% the whole chain is `undefined`, exactly as OrdinaryGet answers.
-%% K is the canonical `{named, KeyBin}` PropertyKey term the opcode carries
-%% (the compiler emits Index keys for array-index strings), used as the
-%% props-map key as is so no hop rebuilds it.
+%% §10.1.8.1 ordinary get, miss when anything observable
 get_field(Agent, {?HANDLE_TAG, Id}, K) ->
     cell_field(element(?AGENT_STORE, Agent), Id, K, undefined);
 get_field(_, Bin, ?LENGTH_KEY) when is_binary(Bin) ->
@@ -39,9 +19,6 @@ get_field(Agent, N, K) when is_number(N) ->
     proto_field(Agent, ?REALM_NUMBER, K);
 get_field(_, _, _) -> miss.
 
-%% own_data(Props, K) -> JsVal | miss
-%% The value of an own data property K in an SObject's props map; an
-%% accessor or an absent key miss.
 own_data(Props, K) ->
     case Props of
         #{K := Prop} when element(1, Prop) =:= ?DATAPROP_TAG ->
@@ -49,13 +26,7 @@ own_data(Props, K) ->
         _ -> miss
     end.
 
-%% get_global(Agent, Lex, NameBin) -> JsVal | miss
-%% §9.1.1.4.6 GetBindingValue on the global Environment Record for the
-%% plain case: an initialised lexical (let/const/class) binding from Lex
-%% (the realm's `lexical_globals` map of {let|const, V}), else an own or
-%% inherited plain data property of the global object, walked as get_field
-%% walks. A binding in its TDZ, an accessor, an exotic hop, or a name absent
-%% everywhere (ReferenceError, or "undefined" for typeof) miss.
+%% §9.1.1.4.6 global getbindingvalue, plain case
 get_global(Agent, Lex, Name) ->
     case Lex of
         #{Name := Binding} ->
@@ -68,30 +39,20 @@ get_global(Agent, Lex, Name) ->
             cell_field(element(?AGENT_STORE, Agent), G, {?KEY_NAMED, Name}, miss)
     end.
 
-%% put_global(Store, Lex, Global, NameBin, V, Strict) -> Store2 | miss
-%% §9.1.1.4.5 SetMutableBinding, object-record half, as put_field on the
-%% global object: an existing own writable data property is replaced; a
-%% sloppy frame may also create it (strict must see ReferenceError). A
-%% lexical binding of the name, or anything put_field misses on, miss.
+%% §9.1.1.4.5 setmutablebinding on the global object
 put_global(Store, Lex, Global, Name, V, Strict) ->
     case is_map_key(Name, Lex) of
         true -> miss;
         false -> put_field(Store, Global, {?KEY_NAMED, Name}, V, not Strict)
     end.
 
-%% A string / number primitive has no own named props besides String
-%% "length", so a read walks the realm's wrapper prototype. Only a data
-%% property answers here; a getter misses so the slow path can pass the
-%% primitive as `this`.
+%% getters miss so slow path passes primitive as this
 proto_field(Agent, Which, K) ->
     Pair = element(Which, element(?AGENT_REALM, Agent)),
     {?HANDLE_TAG, Id} = element(?PAIR_PROTO, Pair),
     cell_field(element(?AGENT_STORE, Agent), Id, K, undefined).
 
-%% The walk from cell Id. Absent is the answer when the whole chain lacks
-%% the key: `undefined` for OrdinaryGet, `miss` for a global binding lookup.
-%% The ordinary-kind own probe is spelled out here so the commonest read is
-%% no call past the arena read; every other slot takes the shared hop.
+%% 64 is max proto hops before miss
 cell_field(Store, Id, K, Absent) ->
     Data = element(?STORE_DATA, Store),
     case arc_rt_arena_ffi:get(Id, Data) of
@@ -108,7 +69,6 @@ cell_field(Store, Id, K, Absent) ->
             hop(Data, element(?STORE_SHAPES, Store), Slot, K, 64, Absent)
     end.
 
-%% One hop of the walk on the already-read Slot; Fuel more hops may follow.
 hop(Data, Shapes, Slot, K, Fuel, Absent) ->
     case Slot of
         {?SSHAPED_TAG, Sid, Proto, Slots} ->
@@ -147,17 +107,10 @@ field_next(Data, Shapes, {?SOME, {?HANDLE_TAG, P}}, K, Fuel, Absent)
     hop(Data, Shapes, arc_rt_arena_ffi:get(P, Data), K, Fuel - 1, Absent);
 field_next(_, _, _, _, _, _) -> miss.
 
-%% The one virtual named data property a read kernel synthesizes: an Array
-%% cell's "length" IS its kind payload (§10.4.2, always an own data
-%% property, so no chain walk). Every other non-plain named read misses.
 named_virtual({?ARRAYOBJ_TAG, Length}, ?LENGTH_KEY) -> Length;
 named_virtual(_, _) -> miss.
 
-%% Whether a Named key on this ObjKind is a plain props-map entry for both
-%% [[Get]] and [[Set]] (rt/obj own_property_of, get_from, set arms): Proxy,
-%% module namespace and TypedArray cells are exotic for string keys, Array /
-%% String objects synthesize "length", and a function's "length", "name"
-%% and "prototype" may not be in its props yet (rt/types FnBirth).
+%% false when named keys on this kind are exotic or virtual
 -compile({inline, [named_plain/2, named_virtual/2, birth_plain/2, cell_field/4,
                    hop/6, proto_field/3, put_prop/7, chain_free/4,
                    literal_props/3]}).
@@ -175,8 +128,7 @@ named_plain(Kind, K) ->
         _ -> true
     end.
 
-%% Pending birth props (rt/types FnBirth): "length" and "name" are not in
-%% the props map until settled, nor is "prototype" while its parent is Some.
+%% length/name/prototype not in props until birth settled
 birth_plain(?BIRTH_SETTLED, _) -> true;
 birth_plain(_, ?LENGTH_KEY) -> false;
 birth_plain(_, {?KEY_NAMED, <<"name">>}) -> false;
@@ -184,15 +136,7 @@ birth_plain(Birth, {?KEY_NAMED, <<"prototype">>}) ->
     element(?BIRTH_PROTOTYPE_PARENT, Birth) =:= ?NONE;
 birth_plain(_, _) -> true.
 
-%% get_elem(Store, V, Key) -> JsVal | miss
-%% `V[Key]` for the shapes a loop body produces: a non-negative integer
-%% index into an Array or Arguments cell (own element present, no
-%% {index,_} props override; holes miss so the full path does the proto
-%% walk), an array index on an ordinary props-only cell (an own data
-%% property, or `undefined` when the whole plain chain lacks it), or a
-%% string key, which canonicalizes and reads as get_field / an index.
-%% Anything else (float or negative index, symbol, object key, an exotic
-%% cell) misses.
+%% holes miss so the full path walks the proto chain
 -define(MAX_ARRAY_INDEX, 4294967294).
 get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
     Data = element(?STORE_DATA, Store),
@@ -243,21 +187,14 @@ get_elem(Store, {?HANDLE_TAG, _} = Obj, Key) when is_binary(Key) ->
     end;
 get_elem(_, _, _) -> miss.
 
-%% get_elem2(Store, V, Key) -> JsVal | miss
-%% get_elem for GetElem2, which also re-pushes the canonical key: only an
-%% integer key is its own canonical value, so any other key misses.
+%% only an integer key is its own canonical key
 get_elem2(Store, Obj, Idx) when is_integer(Idx) -> get_elem(Store, Obj, Idx);
 get_elem2(_, _, _) -> miss.
 
-%% An {index,Idx} props entry shadowing the elements store (a defineProperty'd
-%% element). An array's props map is nearly always empty, which map_size
-%% sees without building the key.
 -compile({inline, [index_overridden/2]}).
 index_overridden(Props, Idx) ->
     map_size(Props) =/= 0 andalso is_map_key({?KEY_INDEX, Idx}, Props).
 
-%% A dense store is a non-fixed `array`, so a read past its size is the
-%% default (a hole) rather than badarg.
 elem_read({?ELEMS_DENSE, A}, Idx) ->
     case array:get(Idx, A) of
         ?ELEMS_HOLE -> miss;
@@ -270,18 +207,7 @@ elem_read({?ELEMS_SPARSE, M}, Idx) ->
     end;
 elem_read(_, _) -> miss.
 
-%% put_field(Store, V, K, Val, Create) -> Store2 | miss
-%% §10.1.9.2 OrdinarySetWithOwnDescriptor for a kind whose named keys are
-%% ordinary. Step 2, an EXISTING own writable data property: overwrite the
-%% SShapedObject slot, or replace the value inside the DataProperty
-%% (attributes and creation seq kept, §10.1.11). Step 1 → 2.c-h, CREATION
-%% on an extensible SObject: only when the prototype chain holds nothing
-%% at the key but plain writable data (chain_free), so a setter or a
-%% read-only property up the chain still takes the slow path; the new
-%% {W,E,C} property is stamped with the store's prop_seq (t_next_prop_seq).
-%% Non-writable, accessors, non-extensible / shaped receivers for a new key
-%% and exotic receivers miss. Create: whether an absent key may be created
-%% (false: replace only). Returns the rebuilt store.
+%% §10.1.9.2 ordinary set, plain writable data only
 put_field(Store, {?HANDLE_TAG, Id}, K, V, Create)
   when tuple_size(Store) =:= ?STORE_ARITY ->
     Data = element(?STORE_DATA, Store),
@@ -308,14 +234,6 @@ put_field(Store, {?HANDLE_TAG, Id}, K, V, Create)
     end;
 put_field(_, _, _, _, _) -> miss.
 
-%% put_prop(Store, Data, Id, Slot, K, V, Create) -> Store2 | miss
-%% The props-map half of put_field / put_elem for an SObject whose lookup
-%% of K ({named,Bin} or {index,Idx}) is a plain props probe: replace the
-%% value of an existing own writable data property, or (Create) add a
-%% {W,E,C} one stamped with the store's prop_seq when the receiver is
-%% extensible and the chain above holds nothing but writable data at K.
-%% The SObject and DataProperty rows are matched and rebuilt whole (field
-%% order per arc_rt_layout.hrl) rather than through setelement.
 put_prop(Store, Data, Id, Slot, K, V, Create) ->
     {_, Kind, Proto, Props, Sym, Elems, Ext} = Slot,
     case Props of
@@ -341,13 +259,7 @@ put_prop(Store, Data, Id, Slot, K, V, Create) ->
         _ -> miss
     end.
 
-%% define_field(Store, V, K, Val) -> Store2 | miss
-%% §7.3.5 CreateDataProperty of a Named key on an ordinary, extensible
-%% SObject (the `{key: v}` literal field): a fresh {W,E,C} data property
-%% stamped with the store's prop_seq, or an in-place replacement of a
-%% configurable data property (creation order kept, §10.1.11). A
-%% non-configurable or accessor current property, and any other receiver,
-%% miss to the full [[DefineOwnProperty]].
+%% §7.3.5 createdataproperty on ordinary extensible object
 define_field(Store, {?HANDLE_TAG, Id}, K, V)
   when tuple_size(Store) =:= ?STORE_ARITY ->
     Data = element(?STORE_DATA, Store),
@@ -374,13 +286,7 @@ define_field(Store, {?HANDLE_TAG, Id}, K, V)
     end;
 define_field(_, _, _, _) -> miss.
 
-%% new_object(Store, Proto, Keys, N, Stack) -> {Obj, Stack2, Store2}
-%% The object literal head `{k1: v1, .., kn: vn}`: one fresh ordinary,
-%% extensible SObject on Proto whose own {W,E,C} data properties are the N
-%% distinct Named Keys (given last first) holding the top N values of Stack
-%% ([Vn, .., V1 | Stack2]), stamped prop_seq .. prop_seq+N-1 in source
-%% order. Allocated the way rt/store t_cell_new_with allocates: id `next`,
-%% alloc_since_gc bumped, never collects.
+%% keys given last first, values on top of stack
 new_object(Store, Proto, Keys, N, Stack) when tuple_size(Store) =:= ?STORE_ARITY ->
     Seq = element(?STORE_PROP_SEQ, Store),
     {Props, Stack2} = literal_props(Keys, Stack, Seq),
@@ -392,10 +298,7 @@ new_object(Store, Proto, Keys, N, Stack) when tuple_size(Store) =:= ?STORE_ARITY
     Store4 = setelement(?STORE_ALLOC, Store3, element(?STORE_ALLOC, Store) + 1),
     {{?HANDLE_TAG, Id}, Stack2, setelement(?STORE_PROP_SEQ, Store4, Seq + N)}.
 
-%% new_receiver(Agent, Proto) -> {Receiver, Agent2} | miss
-%% §10.1.13 OrdinaryCreateFromConstructor once `prototype` has been read: a
-%% fresh empty ordinary object on the object Proto, allocated as new_object
-%% allocates. A non-object Proto (the realm-intrinsic fallback) misses.
+%% §10.1.13 once prototype has been read
 new_receiver(Agent, {?HANDLE_TAG, _} = Proto)
   when tuple_size(Agent) =:= ?AGENT_ARITY ->
     case element(?AGENT_STORE, Agent) of
@@ -414,8 +317,6 @@ new_receiver(Agent, {?HANDLE_TAG, _} = Proto)
 new_receiver(_, _) -> miss.
 
 -define(WEC(V, Seq), {?DATAPROP_TAG, V, true, true, true, Seq}).
-%% The literal's props map and the stack beneath its values; up to two
-%% keys are map literals.
 literal_props([], Stack, _) -> {#{}, Stack};
 literal_props([K1], [V1 | Stack], Seq) ->
     {#{K1 => ?WEC(V1, Seq)}, Stack};
@@ -434,19 +335,7 @@ chain_free(Data, Shapes, Proto, {?KEY_NAMED, _} = K) ->
 chain_free(Data, Shapes, Proto, {?KEY_INDEX, Idx}) ->
     index_free(Data, Shapes, Proto, Idx, 64).
 
-%% put_elem(Store, V, Idx, Val) -> Store2 | miss
-%% `V[Idx] = Val` on an extensible Array cell for an array index Idx
-%% (0 =< Idx =< 2^32-2, rt_types.max_array_index) in [0, Length].
-%% Overwriting a present element is a write to an own writable data
-%% property. Filling a hole or appending at Idx == Length creates a
-%% property, so it first needs the prototype chain to hold nothing at Idx
-%% (a setter or read-only index up the chain takes the store, §10.1.9.2
-%% step 2) and, for the append, a writable "length" (§10.4.2.1 step 2.h).
-%% An ordinary props-only receiver takes the put_field write under the
-%% {index,Idx} key; a string key canonicalizes to one of the two. An
-%% {index,Idx} props override on an array, a non-extensible or exotic
-%% receiver, a key past the array-index range (2^32-1 is a Named key and
-%% never moves "length"), or a dense fill past the allocated size misses.
+%% creating an element needs free proto chain, writable length
 put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
   when is_integer(Idx), Idx >= 0, Idx =< ?MAX_ARRAY_INDEX,
        tuple_size(Store) =:= ?STORE_ARITY ->
@@ -508,18 +397,11 @@ put_elem(Store, {?HANDLE_TAG, _} = Obj, Key, V) when is_binary(Key) ->
     end;
 put_elem(_, _, _, _) -> miss.
 
-%% The Array "length" attribute override, when defineProperty made one;
-%% absent means the default writable length.
 length_writable(#{?LENGTH_KEY := Prop})
   when element(1, Prop) =:= ?DATAPROP_TAG ->
     element(?DATAPROP_WRITABLE, Prop) =:= true;
 length_writable(_) -> true.
 
-%% index_free(Data, Shapes, Proto, Idx, Fuel) -> boolean()
-%% No object on the prototype chain starting at Proto has an own property
-%% at Idx, along hops whose index lookup is a pure props/elements probe.
-%% A Proxy, String, TypedArray or namespace hop, a dangling handle, or more
-%% than Fuel hops answer false.
 index_free(_, _, ?NONE, _, _) -> true;
 index_free(_, _, _, _, 0) -> false;
 index_free(Data, Shapes, {?SOME, {?HANDLE_TAG, P}}, Idx, Fuel) ->
@@ -543,10 +425,6 @@ index_free(Data, Shapes, {?SOME, {?HANDLE_TAG, P}}, Idx, Fuel) ->
     end;
 index_free(_, _, _, _, _) -> false.
 
-%% Whether an Index key on this ObjKind is answered by the props map plus
-%% the elements store alone (rt/obj own_property_of): Proxy and namespace
-%% cells trap, String objects expose their code units, TypedArrays their
-%% buffer.
 index_is_plain(Kind) when is_atom(Kind) -> true;
 index_is_plain(Kind) ->
     case element(1, Kind) of
@@ -557,13 +435,10 @@ index_is_plain(Kind) ->
         _ -> true
     end.
 
-%% A present (non-hole) element at Idx.
 elem_has({?ELEMS_DENSE, A}, Idx) -> array:get(Idx, A) =/= ?ELEMS_HOLE;
 elem_has({?ELEMS_SPARSE, M}, Idx) -> is_map_key(Idx, M);
 elem_has(_, _) -> false.
 
-%% Replace a present element; `hole` when Idx holds none (a present dense
-%% element is always inside the allocated size).
 elem_overwrite({?ELEMS_DENSE, A}, Idx, V) ->
     case array:get(Idx, A) of
         ?ELEMS_HOLE -> hole;
@@ -584,10 +459,7 @@ elem_write({?ELEMS_DENSE, A}, Idx, V) ->
 elem_write({?ELEMS_SPARSE, M}, Idx, V) -> {?ELEMS_SPARSE, M#{Idx => V}};
 elem_write(_, _, _) -> miss.
 
-%% Append at Idx == Length. A dense array:set/3 extends past size(A) itself;
-%% the gap and size bounds are rt/elements' dense-promotion policy, past
-%% which the write belongs to the sparse representation (miss). An empty
-%% store starts dense the way rt/elements `set` does.
+%% bounds mirror rt/elements dense promotion policy
 -define(MAX_GAP, 1024).
 -define(MAX_DENSE_INDEX, 10000000).
 elem_write_grow({?ELEMS_DENSE, A}, Idx, V) ->

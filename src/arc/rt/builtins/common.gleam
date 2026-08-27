@@ -1,13 +1,3 @@
-//// `rt_builtins/common` — shared allocation substrate for realm bootstrap
-//// (SPEC §7.M6 common-and-scaffold(1)).
-////
-//// Alloc helpers over the threaded `Agent` model. Uses ONLY `rt_store` /
-//// `rt_types` / `rt_call.t_native_new` so per-module builtin files can
-//// import this without cycles.
-////
-//// **Return-tuple order is `#(V, St')` — value FIRST (R1).** Property-builder
-//// helpers thread `t_next_prop_seq` per-prop.
-
 import arc/internal/tree_array
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
@@ -22,9 +12,6 @@ import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-// ── property builders (port arc value.gleam:3824-3962; threaded seq) ────────
-
-/// `{value, W:F, E:F, C:F}` with a fresh threaded seq — arc `value.data`.
 pub fn data_prop(st: Agent, val: JsVal) -> #(Property, Agent) {
   let #(seq, st) = rt_store.t_next_prop_seq(st)
   #(
@@ -39,7 +26,6 @@ pub fn data_prop(st: Agent, val: JsVal) -> #(Property, Agent) {
   )
 }
 
-/// `{value, W:T, E:T, C:T}` with a fresh threaded seq — arc `value.data_property`.
 pub fn data_property(st: Agent, val: JsVal) -> #(Property, Agent) {
   let #(seq, st) = rt_store.t_next_prop_seq(st)
   #(
@@ -54,7 +40,6 @@ pub fn data_property(st: Agent, val: JsVal) -> #(Property, Agent) {
   )
 }
 
-/// Built-in method/prop: `{W:T, E:F, C:T}` — arc `value.builtin_property`.
 pub fn builtin_property(st: Agent, val: JsVal) -> #(Property, Agent) {
   let #(seq, st) = rt_store.t_next_prop_seq(st)
   #(
@@ -69,7 +54,6 @@ pub fn builtin_property(st: Agent, val: JsVal) -> #(Property, Agent) {
   )
 }
 
-/// Accessor property builder with fresh threaded seq — arc `value.accessor`.
 pub fn accessor_prop(
   st: Agent,
   get get: Option(JsVal),
@@ -81,7 +65,6 @@ pub fn accessor_prop(
   #(AccessorProperty(get:, set:, enumerable:, configurable:, seq:), st)
 }
 
-/// Set configurable to True on an existing prop — arc `value.configurable`.
 pub fn configurable(prop: Property) -> Property {
   case prop {
     DataProperty(value:, writable:, enumerable:, seq:, ..) ->
@@ -91,9 +74,6 @@ pub fn configurable(prop: Property) -> Property {
   }
 }
 
-/// Give an already-built descriptor a FRESH creation seq — arc `value.restamp`.
-/// Two distinct keys must never share a Property record (equal seqs are an
-/// enumeration-order tie).
 pub fn restamp(st: Agent, prop: Property) -> #(Property, Agent) {
   let #(seq, st) = rt_store.t_next_prop_seq(st)
   let prop = case prop {
@@ -105,9 +85,6 @@ pub fn restamp(st: Agent, prop: Property) -> #(Property, Agent) {
   #(prop, st)
 }
 
-/// §20.2.2 Function `name` property — `{W:F, E:F, C:T}`. Threaded seq (arc
-/// used constant seq 1 in a reserved band; 2core threads instead — see
-/// rt_call.gleam:637-644 birth-time seq note).
 pub fn fn_name_property(st: Agent, name: String) -> #(Property, Agent) {
   let #(seq, st) = rt_store.t_next_prop_seq(st)
   #(
@@ -122,7 +99,6 @@ pub fn fn_name_property(st: Agent, name: String) -> #(Property, Agent) {
   )
 }
 
-/// §20.2.2 Function `length` property — `{W:F, E:F, C:T}`.
 pub fn fn_length_property(st: Agent, arity: Int) -> #(Property, Agent) {
   let #(seq, st) = rt_store.t_next_prop_seq(st)
   #(
@@ -137,7 +113,6 @@ pub fn fn_length_property(st: Agent, arity: Int) -> #(Property, Agent) {
   )
 }
 
-/// A built-in constructor's "prototype" property — `{W:F, E:F, C:F}`.
 pub fn fn_prototype_property(st: Agent, proto: Handle) -> #(Property, Agent) {
   let #(seq, st) = rt_store.t_next_prop_seq(st)
   #(
@@ -152,10 +127,6 @@ pub fn fn_prototype_property(st: Agent, proto: Handle) -> #(Property, Agent) {
   )
 }
 
-// ── dict / cell allocation helpers (port arc common.gleam:291-495) ──────────
-
-/// Build a PropertyKey-keyed dict from String-keyed entries. Builtin init only
-/// ever uses named keys.
 pub fn named_props(
   props: List(#(String, Property)),
 ) -> Dict(PropertyKey, Property) {
@@ -163,7 +134,6 @@ pub fn named_props(
   dict.insert(acc, Named(k), v)
 }
 
-/// Allocate an ordinary prototype object, root it, return `#(ref, st)`.
 pub fn alloc_proto(
   st: Agent,
   proto: Option(Handle),
@@ -184,8 +154,6 @@ pub fn alloc_proto(
   #(h, rt_store.t_pin_root(st, h))
 }
 
-/// Allocate an ordinary object with `%Object.prototype%` and named data props
-/// `{W:T, E:T, C:T}` — arc `alloc_pojo`. Does NOT root.
 pub fn alloc_pojo(
   st: Agent,
   object_proto: Handle,
@@ -206,10 +174,6 @@ pub fn alloc_pojo(
   )
 }
 
-/// Allocate a native function ROOTED — thin wrapper on
-/// `rt_call.t_native_new` + `t_pin_root`. `constructible: False` (methods,
-/// getters, standalone functions). Spec name; alias of
-/// `alloc_rooted_native_fn`.
 pub fn alloc_native_fn(
   st: Agent,
   fn_proto: Handle,
@@ -220,9 +184,6 @@ pub fn alloc_native_fn(
   alloc_rooted_native_fn(st, fn_proto, tag, name, arity)
 }
 
-/// Allocate a native function ROOTED — thin wrapper on
-/// `rt_call.t_native_new` + `t_pin_root`. `constructible: False` (methods,
-/// getters, standalone functions).
 pub fn alloc_rooted_native_fn(
   st: Agent,
   fn_proto: Handle,
@@ -235,8 +196,6 @@ pub fn alloc_rooted_native_fn(
   #(h, rt_store.t_pin_root(st, h))
 }
 
-/// Batch-allocate native method function objects from `(name, tag, arity)`
-/// specs, returning `builtin_property` entries — arc `alloc_methods`.
 pub fn alloc_methods(
   st: Agent,
   fn_proto: Handle,
@@ -251,8 +210,6 @@ pub fn alloc_methods(
   })
 }
 
-/// Batch-allocate native getter functions returning get-only AccessorProperty
-/// entries `{E:F, C:T}` — arc `alloc_getters`.
 pub fn alloc_getters(
   st: Agent,
   fn_proto: Handle,
@@ -275,8 +232,6 @@ pub fn alloc_getters(
   })
 }
 
-/// Allocate a getter+setter native fn pair, return the AccessorProperty
-/// `{E:F, C:T}` — arc `alloc_get_set_accessor`.
 pub fn alloc_get_set_accessor(
   st: Agent,
   fn_proto: Handle,
@@ -297,9 +252,6 @@ pub fn alloc_get_set_accessor(
   )
 }
 
-// ── proto/ctor cycle scaffold (port arc common.gleam:672-1000) ──────────────
-
-/// Standard ctor properties list: `length` + `name` + `prototype` + extras.
 fn ctor_properties(
   st: Agent,
   proto: Handle,
@@ -310,8 +262,7 @@ fn ctor_properties(
   let #(len_p, st) = fn_length_property(st, arity)
   let #(name_p, st) = fn_name_property(st, name)
   let #(proto_p, st) = fn_prototype_property(st, proto)
-  // Restamp extras AFTER length/name/prototype so their seqs sort last —
-  // matches arc's reserved-band seq=0/1/2 (arc common.gleam:528-560).
+  // restamp extras so they sort after length/name/prototype
   let #(extras, st) =
     list.fold(extras, #([], st), fn(acc, kv) {
       let #(es, st) = acc
@@ -330,7 +281,6 @@ fn ctor_properties(
   )
 }
 
-/// Standard proto properties list: `constructor` + extras.
 fn proto_properties(
   st: Agent,
   ctor: Handle,
@@ -340,10 +290,6 @@ fn proto_properties(
   #([#("constructor", ctor_p), ..extras], st)
 }
 
-/// Full proto-ctor cycle for a NEW builtin type — arc `init_type`. Reserves
-/// the proto ref first, allocates ctor, then fills the proto (single write
-/// each). `parent_proto` = the prototype's [[Prototype]]; `ctor_parent` = the
-/// constructor's [[Prototype]] (§20.5.6.2 needs %Error% for NativeErrors).
 pub fn init_type(
   st: Agent,
   parent_proto: Handle,
@@ -354,9 +300,7 @@ pub fn init_type(
   arity: Int,
   ctor_props: List(#(String, Property)),
 ) -> #(BuiltinPair, Agent) {
-  // Reserve proto address (empty ordinary object, patched below).
   let #(proto_h, st) = alloc_proto(st, Some(parent_proto), dict.new())
-  // Allocate constructor with proto_h known.
   let #(ctor_all_props, st) =
     ctor_properties(st, proto_h, name, arity, ctor_props)
   let #(ctor_h, st) =
@@ -377,7 +321,6 @@ pub fn init_type(
       ),
     )
   let st = rt_store.t_pin_root(st, ctor_h)
-  // Fill proto with constructor + proto_props.
   let #(all_proto_props, st) = proto_properties(st, ctor_h, proto_props)
   let st =
     rt_store.t_cell_update(st, proto_h, fn(slot) {
@@ -387,11 +330,6 @@ pub fn init_type(
   #(BuiltinPair(prototype: proto_h, constructor: ctor_h), st)
 }
 
-/// A primitive-wrapper type (Boolean §20.3.3, Number §21.1.3, String §22.1.3).
-/// Identical to `init_type` except `proto_kind` names the internal data slot
-/// the spec puts on the PROTOTYPE object itself ([[BooleanData]] false,
-/// [[NumberData]] +0, [[StringData]] ""). Routing wrappers here makes
-/// "wrapper prototype without its data slot" a compile error. arc :775-798.
 pub fn init_wrapper_type(
   st: Agent,
   parent_proto: Handle,
@@ -422,9 +360,6 @@ pub fn init_wrapper_type(
   #(bt, st)
 }
 
-/// Allocate+root an ordinary object with `@@toStringTag = tag`. Covers
-/// namespace globals (Math/JSON/Reflect/console/Atomics) and tagged
-/// prototypes (Generator, Iterator Helper). arc `init_namespace` (:314-333).
 pub fn init_namespace(
   st: Agent,
   object_proto: Handle,
@@ -447,8 +382,6 @@ pub fn init_namespace(
   #(h, rt_store.t_pin_root(st, h))
 }
 
-/// Proto-ctor cycle for a PRE-ALLOCATED prototype (Object, Function bootstrap)
-/// — arc `init_type_on`. Read-modify-write merges proto_props onto existing.
 pub fn init_type_on(
   st: Agent,
   proto_h: Handle,
@@ -494,8 +427,6 @@ pub fn init_type_on(
   #(BuiltinPair(prototype: proto_h, constructor: ctor_h), st)
 }
 
-/// Add a named property to an existing object — arc `add_named_property`.
-/// `h` must be a live SObject (bootstrap invariant).
 pub fn add_named_property(
   st: Agent,
   h: Handle,
@@ -508,7 +439,6 @@ pub fn add_named_property(
   })
 }
 
-/// Add a symbol-keyed property to an existing object — arc `add_symbol_property`.
 pub fn add_symbol_property(
   st: Agent,
   h: Handle,
@@ -521,7 +451,6 @@ pub fn add_symbol_property(
   })
 }
 
-/// `@@toStringTag` symbol-property pair `{W:F, E:F, C:T}` — arc `to_string_tag`.
 pub fn to_string_tag(
   st: Agent,
   name: String,
@@ -530,16 +459,11 @@ pub fn to_string_tag(
   #(#(rt_types.symbol_to_string_tag, configurable(prop)), st)
 }
 
-/// Add `@@toStringTag = name` to an existing object — arc `add_to_string_tag`.
 pub fn add_to_string_tag(st: Agent, h: Handle, name: String) -> Agent {
   let #(#(sym, prop), st) = to_string_tag(st, name)
   add_symbol_property(st, h, sym, prop)
 }
 
-/// Add `get Constructor[@@species]` — an accessor whose getter returns `this`
-/// (§25.1.5.3 / §25.2.4.2 / §23.2.2.4 / §27.2.4.9 — all identical). Token
-/// parameterized (`return_this`) so this module needn't hardcode the concrete
-/// `ReturnThis` variant that the native-tokens unit lands. arc :911-935.
 pub fn add_species_accessor(
   st: Agent,
   fn_proto: Handle,
@@ -559,11 +483,7 @@ pub fn add_species_accessor(
   add_symbol_property(st, ctor_h, rt_types.symbol_species, prop)
 }
 
-/// Whether the reads SpeciesConstructor / ArraySpeciesCreate make on the
-/// intrinsic `pair` still yield its constructor without running anything: the
-/// prototype's `constructor` is a data property holding the constructor, whose
-/// own `@@species` is an accessor with a `ReturnThis` native getter
-/// (`add_species_accessor`), which returns its receiver.
+// species lookup on pair still yields its ctor without user code
 pub fn species_intact(st: Agent, pair: BuiltinPair) -> Bool {
   let BuiltinPair(prototype:, constructor:) = pair
   case
@@ -596,10 +516,6 @@ fn is_return_this(st: Agent, f: JsVal) -> Bool {
   }
 }
 
-// ── error / array allocation (port arc common.gleam:1012-1229) ──────────────
-
-/// Allocate an error instance slot (`kind: ErrorObj(stack:"")`, [[ErrorData]])
-/// — arc `alloc_error_slot`. The single [[ErrorData]] slot shape.
 pub fn alloc_error_slot(
   st: Agent,
   proto: Handle,
@@ -618,8 +534,6 @@ pub fn alloc_error_slot(
   )
 }
 
-/// Allocate a JS array from a list of values — arc `alloc_array` (§10.4.2.2
-/// ArrayCreate). Does NOT root.
 pub fn alloc_array(
   st: Agent,
   values: List(JsVal),

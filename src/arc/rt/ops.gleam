@@ -1,14 +1,3 @@
-//// `rt_ops` — ES2024 §13 operator surface (SPEC §7.M5, M5.md).
-////
-//// Arithmetic, comparison, equality, `typeof`/`instanceof`/`in` over the
-//// threaded `Agent` and `classify`-based value model. Every threaded op
-//// returns `#(V, Agent)` — value FIRST (R1).
-//// D7: throwing ops RAISE via `rt_val.t_throw_*` (never `Result`).
-//// D17: reaches `t_call_checked` ONLY via `js_ops(st).call` (no direct
-//// `rt_call` import — cycle). R8: `strict_eq`/`strict_ne` are JPure
-//// (no `St`, return `Bool`). M5.md's Erlang-@external facade is semantic
-//// reference only — this module is pure Gleam composing `rt_val`.
-
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -24,35 +13,22 @@ import gleam/option.{None, Some}
 import gleam/order
 import gleam/string
 
-/// The seeded `JsOps` upcall table (D17). Same posture as
-/// `rt_store.require_js`: unseeded → panic (engine bug).
 fn js_ops(st: Agent) -> JsOps(Agent) {
   st.store.ops
 }
 
-// ── §13.10.2 InstanceofOperator / §7.3.22 OrdinaryHasInstance ───────────────
-// Port of arc `instanceof.gleam:28-211`.
-
-/// ES2024 §13.10.2 InstanceofOperator ( V, target ). Returns `#(1|0, st')`.
-/// Port of arc `instanceof.gleam:28-91`. NO IntrinsicHandler shortcut:
-/// `NativeToken` has no `FunctionHasInstance` variant yet (M6 seeds it), so
-/// every callable @@hasInstance handler goes through `ops.call`.
+// §13.10.2 instanceof operator
 pub fn t_instance_of(st: Agent, v: JsVal, target: JsVal) -> #(Int, Agent) {
   case classify(target) {
-    // Step 1: If target is not an Object, throw a TypeError.
     KHandle(ctor_h) -> {
       let ops = js_ops(st)
-      // Step 2: instOfHandler ← ? GetMethod(target, @@hasInstance).
       let #(handler, st) =
         ops.get_prop(st, target, SymbolKey(symbol_has_instance))
       case rt_val.is_nullish(handler) {
-        // GetMethod §7.3.11 step 2: undefined/null → absent — steps 4-5.
         True -> {
           let #(callable, st) = rt_val.t_is_callable(st, target)
           case callable {
-            // Step 5: ? OrdinaryHasInstance(target, V).
             True -> t_ordinary_has_instance(st, ctor_h, v)
-            // Step 4: IsCallable(target) is false → TypeError.
             False ->
               rt_val.t_throw_type_error(
                 st,
@@ -63,12 +39,10 @@ pub fn t_instance_of(st: Agent, v: JsVal, target: JsVal) -> #(Int, Agent) {
         False -> {
           let #(callable, st) = rt_val.t_is_callable(st, handler)
           case callable {
-            // Step 3.a: ToBoolean(? Call(instOfHandler, target, « V »)).
             True -> {
               let #(res, st) = ops.call(st, handler, target, [v])
               #(bool_int(rt_val.to_boolean(res)), st)
             }
-            // GetMethod §7.3.11 step 3: present but not callable → TypeError.
             False ->
               rt_val.t_throw_type_error(
                 st,
@@ -86,24 +60,18 @@ pub fn t_instance_of(st: Agent, v: JsVal, target: JsVal) -> #(Int, Agent) {
   }
 }
 
-/// ES2024 §7.3.22 OrdinaryHasInstance ( C, O ), steps 2-7. Caller has already
-/// verified `ctor` is callable (step 1). Port of arc
-/// `instanceof.gleam:131-176`.
+// §7.3.22 steps 2-7, caller checked callable
 pub fn t_ordinary_has_instance(
   st: Agent,
   ctor: Handle,
   v: JsVal,
 ) -> #(Int, Agent) {
   case rt_store.t_cell_get(st, ctor) {
-    // Step 2: C has [[BoundTargetFunction]] → InstanceofOperator(O, BC).
     SObject(kind: KBound(target:, ..), ..) ->
       t_instance_of(st, v, mk_object(target))
     _ ->
-      // Step 3: If O is not an Object, return false — BEFORE the Get, so a
-      // throwing "prototype" getter does NOT fire for primitives.
       case classify(v) {
         KHandle(obj_h) -> {
-          // Step 4: P ← ? Get(C, "prototype").
           let #(proto_val, st) =
             js_ops(st).get_prop(
               st,
@@ -111,9 +79,7 @@ pub fn t_ordinary_has_instance(
               StringKey(Named("prototype")),
             )
           case classify(proto_val) {
-            // Step 7: prototype-chain walk.
             KHandle(proto_h) -> proto_walk(st, obj_h, proto_h, 10_000)
-            // Step 5: P is not an Object → TypeError.
             _ ->
               rt_val.t_throw_type_error(
                 st,
@@ -126,10 +92,7 @@ pub fn t_ordinary_has_instance(
   }
 }
 
-/// §7.3.22 step 7 prototype-chain walk. Bounded by `fuel`: a `getPrototypeOf`
-/// proxy trap that returns a fresh proxy every hop would spin forever without
-/// re-entering the JS call stack — same RangeError as V8's stack-limit check
-/// in `HasInPrototypeChain`. Port of arc `instanceof.gleam:186-211`.
+// fuel bounds proxy getprototypeof loops
 fn proto_walk(
   st: Agent,
   obj: Handle,
@@ -139,13 +102,10 @@ fn proto_walk(
   case fuel <= 0 {
     True -> rt_val.t_throw_range_error(st, "Maximum call stack size exceeded")
     False -> {
-      // Step 6a: O ← ? O.[[GetPrototypeOf]]().
       let #(next, st) = rt_obj.t_get_prototype_of(st, obj)
       case next {
-        // Step 6b: O is null → false.
         None -> #(0, st)
         Some(proto_h) ->
-          // Step 6c: SameValue(P, O) — Handle identity.
           case proto_h.id == target_proto.id {
             True -> #(1, st)
             False -> proto_walk(st, proto_h, target_proto, fuel - 1)
@@ -162,12 +122,6 @@ fn bool_int(b: Bool) -> Int {
   }
 }
 
-// ── ops-num-kernel: comparison primitives (arc numeric.gleam / ──────────────
-// operators.gleam:528-554, 2core rt_js_ffi.erl:299-312).
-
-/// Result of the §7.2.13 Abstract Relational Comparison — the four total-order
-/// outcomes plus `Undef` (any-NaN case). Local, not `gleam/order`, so `Undef`
-/// stays a first-class arm every mapper must handle.
 type Cmp {
   Lt
   Eq
@@ -192,10 +146,6 @@ fn cmp_negate(c: Cmp) -> Cmp {
   }
 }
 
-/// §6.1.6.1.14 Number::lessThan lifted to a total `Cmp`. NaN → `Undef`;
-/// ±0 compare `Eq` (neither `<.` nor `>.` holds). `JInt` promotes via
-/// `int.to_float` — matches `rt_val.strict_equal`'s cross-shape rule.
-/// Port of 2core rt_js_ffi.erl:299-312 `ncmp`.
 fn ncmp(a: JsNum, b: JsNum) -> Cmp {
   case a, b {
     JNan, _ | _, JNan -> Undef
@@ -215,16 +165,11 @@ fn fcmp(a: Float, b: Float) -> Cmp {
     False ->
       case a >. b {
         True -> Gt
-        // Neither `<` nor `>` — numerically equal (covers +0.0 vs -0.0).
         False -> Eq
       }
   }
 }
 
-/// §6.1.6.2.12 BigInt-vs-Number relational compare. `JFloat` arm is exact:
-/// compare against `⌊f⌋` as an arbitrary-precision Int (BEAM `trunc/1` on an
-/// integral float is exact for any magnitude), then let the fractional part
-/// decide the tie. Port of arc `operators.gleam:528-554`.
 fn compare_bigint_num(b: Int, n: JsNum) -> Cmp {
   case n {
     JNan -> Undef
@@ -236,7 +181,6 @@ fn compare_bigint_num(b: Int, n: JsNum) -> Cmp {
       case int.compare(b, float.truncate(fl)) {
         order.Lt -> Lt
         order.Gt -> Gt
-        // b == ⌊f⌋: equal iff f is itself integral, else b < f.
         order.Eq ->
           case fl == f {
             True -> Eq
@@ -247,24 +191,14 @@ fn compare_bigint_num(b: Int, n: JsNum) -> Cmp {
   }
 }
 
-// ── §7.2.13 Abstract Relational Comparison (ops-relational) ─────────────────
-// Port of arc `operators.gleam` relational ladder (M5.md:88-94).
-
-/// ES2024 §7.2.13 IsLessThan, expressed as a total `Cmp` on `(a, b)`.
-/// Operand ToPrimitive is ALWAYS left-first — `t_gt`/`t_ge` do NOT swap
-/// operands, they read the returned `Cmp` differently (arc semantics).
-/// D10: both-string arm compares UTF-8 BYTES via `gleam/string.compare` —
-/// deliberate divergence from spec's UTF-16 code-unit order (matches arc).
+// §7.2.13 islessthan, strings compare by utf-8 bytes
 fn t_relational_cmp(st: Agent, a: JsVal, b: JsVal) -> #(Cmp, Agent) {
   let #(pa, st) = rt_val.t_to_primitive(st, a, HintNumber)
   let #(pb, st) = rt_val.t_to_primitive(st, b, HintNumber)
   case classify(pa), classify(pb) {
-    // Step 3: both String — D10 byte-wise UTF-8 compare.
     KStr(sa), KStr(sb) -> #(order_to_cmp(string.compare(sa, sb)), st)
-    // Step 4.a-b: BigInt vs String — StringToBigInt; unparseable → undefined.
     KBig(x), KStr(sb) -> #(cmp_bigint_str(x, sb), st)
     KStr(sa), KBig(y) -> #(cmp_negate(cmp_bigint_str(y, sa)), st)
-    // Step 4.c-d: ToNumeric on both primitives.
     _, _ -> {
       let #(na, st) = rt_val.t_to_numeric(st, pa)
       let #(nb, st) = rt_val.t_to_numeric(st, pb)
@@ -273,7 +207,6 @@ fn t_relational_cmp(st: Agent, a: JsVal, b: JsVal) -> #(Cmp, Agent) {
         KBig(x), KNum(n) -> #(compare_bigint_num(x, n), st)
         KNum(n), KBig(y) -> #(cmp_negate(compare_bigint_num(y, n)), st)
         KNum(x), KNum(y) -> #(ncmp(x, y), st)
-        // t_to_numeric returns only KBig|KNum (rt_val.gleam:990).
         _, _ -> panic as "t_to_numeric returned non-numeric"
       }
     }
@@ -287,7 +220,6 @@ fn cmp_bigint_str(x: Int, s: String) -> Cmp {
   }
 }
 
-/// ES2024 §13.10.1 `<` — Abstract Relational; NaN-involving compare is `0`.
 pub fn t_lt(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   let #(c, st) = t_relational_cmp(st, a, b)
   case c {
@@ -296,7 +228,6 @@ pub fn t_lt(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   }
 }
 
-/// ES2024 §13.10.1 `<=` — `Undef` (any NaN) → `0`.
 pub fn t_le(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   let #(c, st) = t_relational_cmp(st, a, b)
   case c {
@@ -305,7 +236,6 @@ pub fn t_le(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   }
 }
 
-/// ES2024 §13.10.1 `>` — computed on `cmp(a, b)` (NO operand swap).
 pub fn t_gt(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   let #(c, st) = t_relational_cmp(st, a, b)
   case c {
@@ -314,7 +244,6 @@ pub fn t_gt(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   }
 }
 
-/// ES2024 §13.10.1 `>=` — `Undef` (any NaN) → `0`.
 pub fn t_ge(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   let #(c, st) = t_relational_cmp(st, a, b)
   case c {
@@ -322,12 +251,6 @@ pub fn t_ge(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
     Lt | Undef -> #(0, st)
   }
 }
-
-// ── §13.15.4 Bitwise / shift operators (ops-bitwise) ────────────────────────
-// Port of arc `operators.gleam:106-138, 284-298, 382-409`. Shared spine
-// (§13.15.3 ApplyStringOrNumericBinaryOperator steps 4-5): ToNumeric(lval)
-// completes — ToPrimitive and the Symbol TypeError — before ToNumeric(rval)
-// starts. Result is always `KBig | KNum` (rt_val.t_to_numeric guarantee).
 
 const bigint_mix_error = "Cannot mix BigInt and other types, use explicit conversions"
 
@@ -341,10 +264,6 @@ fn to_numeric_operands(
   #(an, bn, st)
 }
 
-/// Apply a signed 32-bit bitwise op: ToInt32 both, run `op` on the exact BEAM
-/// Ints, then wrap the RESULT back to int32 — the wrap belongs to the
-/// combinator so `(1 << 31) | 0` is -2147483648, not 2147483648. Port of arc
-/// `operators.gleam:390-398 int32_binop`.
 fn int32_binop(
   st: Agent,
   a: JsVal,
@@ -364,42 +283,30 @@ fn int32_binop(
   }
 }
 
-/// ES2024 §13.12 `a & b`. BigInt: infinite two's-complement `band`
-/// (§6.1.6.2.20); Number: ToInt32 both, `band`, wrap.
 pub fn t_bitand(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   int32_binop(st, a, b, int.bitwise_and, int.bitwise_and)
 }
 
-/// ES2024 §13.12 `a | b`.
 pub fn t_bitor(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   int32_binop(st, a, b, int.bitwise_or, int.bitwise_or)
 }
 
-/// ES2024 §13.12 `a ^ b`.
 pub fn t_bitxor(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   int32_binop(st, a, b, int.bitwise_exclusive_or, int.bitwise_exclusive_or)
 }
 
-/// ES2024 §13.9.1 `a << b`. BigInt: arbitrary-precision `bsl` — Erlang accepts
-/// negative counts (shifts other way), matching §6.1.6.2.9. Number: shift
-/// count is `ToInt32(b) & 31` (§6.1.6.1.9).
 pub fn t_shl(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   int32_binop(st, a, b, int.bitwise_shift_left, fn(x, y) {
     int.bitwise_shift_left(x, int.bitwise_and(y, 31))
   })
 }
 
-/// ES2024 §13.9.2 `a >> b` (arithmetic). Erlang `bsr` on a negative Int is
-/// sign-propagating — exactly §6.1.6.1.10.
 pub fn t_shr(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   int32_binop(st, a, b, int.bitwise_shift_right, fn(x, y) {
     int.bitwise_shift_right(x, int.bitwise_and(y, 31))
   })
 }
 
-/// ES2024 §13.9.3 `a >>> b`. The ONE bitwise op whose Number operand and
-/// result are ToUint32 (§6.1.6.1.11), and whose BigInt arm always throws
-/// (§6.1.6.2.11). Port of arc `operators.gleam:133-136, 296-297, 402-409`.
 pub fn t_ushr(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(an, bn, st) = to_numeric_operands(st, a, b)
   case classify(an), classify(bn) {
@@ -421,9 +328,6 @@ pub fn t_ushr(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// ES2024 §13.5.6 `~a`. BigInt: `-x - 1` (§6.1.6.2.2); Number: ToInt32 then
-/// `bnot` — result is already in [-2^31, 2^31) so no wrap needed. Port of arc
-/// `operators.gleam:211-216`.
 pub fn t_bitnot(st: Agent, a: JsVal) -> #(JsVal, Agent) {
   let #(an, st) = rt_val.t_to_numeric(st, a)
   case classify(an) {
@@ -433,17 +337,10 @@ pub fn t_bitnot(st: Agent, a: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-// ── §7.2.14 IsLooselyEqual / §7.2.15 IsStrictlyEqual ────────────────────────
-// Port of arc `operators.gleam:309-363`.
-
-/// ES2024 §7.2.15 IsStrictlyEqual (`===`). JPure per R8 — no `St` param;
-/// object equality is Handle identity, so the store is never read. Thin
-/// wrapper over `rt_val.strict_equal` (NaN≠NaN, +0===-0 already handled).
 pub fn strict_eq(a: JsVal, b: JsVal) -> Bool {
   rt_val.strict_equal(a, b)
 }
 
-/// ES2024 §7.2.15 IsStrictlyEqual, negated (`!==`). JPure per R8.
 pub fn strict_ne(a: JsVal, b: JsVal) -> Bool {
   case rt_val.strict_equal(a, b) {
     True -> False
@@ -451,13 +348,9 @@ pub fn strict_ne(a: JsVal, b: JsVal) -> Bool {
   }
 }
 
-/// ES2024 §7.2.14 IsLooselyEqual (`==`). Threaded — the Object arm's
-/// ToPrimitive re-enters JS (R1 tuple order). Port of arc
-/// `operators.gleam:309-358` with the object-vs-primitive arm folded IN
-/// (arc's caller-side `interpreter.is_eq_coercible` is inlined here).
+// §7.2.14 is loosely equal
 pub fn t_eq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   case classify(a), classify(b) {
-    // Step 1: same Type → IsStrictlyEqual. Steps 2-3: null == undefined.
     KUndef, KUndef | KNull, KNull | KNull, KUndef | KUndef, KNull -> #(1, st)
     KBool(_), KBool(_)
     | KNum(_), KNum(_)
@@ -466,15 +359,9 @@ pub fn t_eq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
     | KSym(_), KSym(_)
     | KHandle(_), KHandle(_)
     -> #(bool_int(rt_val.strict_equal(a, b)), st)
-    // Steps 9-10: a Boolean operand becomes ToNumber(bool), then redo. This
-    // MUST precede the Object arm — {Bool, Object} is not in step 11/12's
-    // operand set, so the bool coerces first and the recursion re-enters as
-    // {Number, Object}.
+    // bool arms must precede the object arms
     KBool(x), _ -> t_eq(st, mk_number(bool_to_jsnum(x)), b)
     _, KBool(y) -> t_eq(st, a, mk_number(bool_to_jsnum(y)))
-    // Steps 11-12: Object vs {Number, String, BigInt, Symbol} →
-    // ToPrimitive(object, default) then redo. null/undef vs Object falls
-    // through to the final False (step 14 — not in the primitive set).
     KHandle(_), KNum(_)
     | KHandle(_), KStr(_)
     | KHandle(_), KBig(_)
@@ -491,19 +378,15 @@ pub fn t_eq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
       let #(bp, st) = rt_val.t_to_primitive(st, b, HintDefault)
       t_eq(st, a, bp)
     }
-    // Steps 7-8: BigInt × String — StringToBigInt; unparseable → false.
     KBig(x), KStr(s) | KStr(s), KBig(x) ->
       case rt_val.string_to_bigint(s) {
         Some(y) -> #(bool_int(x == y), st)
         None -> #(0, st)
       }
-    // Step 13: BigInt × Number — ℝ(x) = ℝ(y); NaN/±Infinity → false.
     KBig(x), KNum(n) | KNum(n), KBig(x) -> #(
       bool_int(bigint_equals_number(x, n)),
       st,
     )
-    // Steps 5-6: Number × String — ToNumber(String) then Number strict-equal.
-    // string_to_number is total (unparseable → NaN, and NaN === nothing).
     KNum(_), KStr(s) -> #(
       bool_int(rt_val.strict_equal(a, mk_number(rt_val.string_to_number(s)))),
       st,
@@ -512,28 +395,20 @@ pub fn t_eq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
       bool_int(rt_val.strict_equal(mk_number(rt_val.string_to_number(s)), b)),
       st,
     )
-    // Step 14: everything else (null/undef vs primitive, Sym vs Str, …).
     _, _ -> #(0, st)
   }
 }
 
-/// ES2024 §7.2.14 IsLooselyEqual, negated (`!=`).
 pub fn t_neq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   let #(r, st) = t_eq(st, a, b)
   #(1 - r, st)
 }
 
-/// §7.2.14 step 13: ℝ(BigInt) = ℝ(Number)? False for NaN/±Infinity and any
-/// Number with a fractional part. Port of arc `operators.gleam:356-358` +
-/// `compare_bigint_num:528-549` restricted to the Eq case.
 fn bigint_equals_number(a: Int, n: JsNum) -> Bool {
   case n {
     JNan | JPosInf | JNegInf -> False
     JInt(i) -> a == i
     JFloat(f) ->
-      // integral_int(f) = Some(i) iff f is an integral Number (§7.2.6) with
-      // exact value i — floats ≥ 2^52 have no fractional bits so the Int
-      // round-trip is exact; smaller integral floats fit exactly too.
       case rt_val.integral_int(f) {
         Some(i) -> a == i
         None -> False
@@ -548,14 +423,6 @@ fn bool_to_jsnum(b: Bool) -> JsNum {
   }
 }
 
-// ── §13.5.4-6 unary +/- and §13.10.1 `in` (ops-unary-misc) ──────────────────
-// Port of arc `operators.gleam:194-219` / `interpreter.gleam:2895-2921`.
-// `typeof` is NOT re-exported here: SPEC.md:1676 dispatches `type_of` to
-// `rt_val.t_type_of` directly (D4 — reads cell for callable check).
-
-/// ES2024 §13.5.5 unary `-`. `? ToNumeric` (NOT ToNumber — a BigInt operand
-/// is legal), then §6.1.6.2.1 BigInt::unaryMinus / §6.1.6.1.1 Number negate.
-/// Port of arc `operators.gleam:200-204`.
 pub fn t_neg(st: Agent, a: JsVal) -> #(JsVal, Agent) {
   let #(n, st) = rt_val.t_to_numeric(st, a)
   case classify(n) {
@@ -565,20 +432,11 @@ pub fn t_neg(st: Agent, a: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// ES2024 §13.5.6 unary `+`. Exactly `? ToNumber(v)` — the ONE numeric
-/// operator that rejects BigInt (the §7.1.4 ToNumber table throws TypeError
-/// on it, produced inside `rt_val.t_to_number`). Port of arc
-/// `operators.gleam:207-210`.
 pub fn t_plus(st: Agent, a: JsVal) -> #(JsVal, Agent) {
   let #(n, st) = rt_val.t_to_number(st, a)
   #(mk_number(n), st)
 }
 
-/// ES2024 §13.10.1 RelationalExpression `key in obj`. Step 4: any non-Object
-/// RHS is a TypeError (unlike `t_has_prop`, which auto-boxes primitive
-/// receivers for `Reflect.has`-style callers). Step 5: `? ToPropertyKey`
-/// runs AFTER the object check, so a Symbol/throwing key never coerces on
-/// the error path. Port of arc `interpreter.gleam:2895-2921`.
 pub fn t_in(st: Agent, key: JsVal, obj: JsVal) -> #(Int, Agent) {
   case classify(obj) {
     KHandle(_) -> {
@@ -587,8 +445,6 @@ pub fn t_in(st: Agent, key: JsVal, obj: JsVal) -> #(Int, Agent) {
       #(bool_int(found), st)
     }
     _ -> {
-      // No `inspect` in 2core (frozen modules); name the RHS by its typeof
-      // tag — non-Handle `t_type_of` is a pure classify table.
       let #(tag, st) = rt_val.t_type_of(st, obj)
       rt_val.t_throw_type_error(
         st,
@@ -598,14 +454,6 @@ pub fn t_in(st: Agent, key: JsVal, obj: JsVal) -> #(Int, Agent) {
   }
 }
 
-// ── JsNum×JsNum arithmetic kernels (ops-num-kernel) ─────────────────────────
-// Port of arc `numeric.gleam:19-278` re-expressed over the five-way JsNum.
-// `JInt,JInt` arms stay on exact bignum arithmetic; mixed `JInt/JFloat`
-// widens the Int; every NaN/±Inf/±0 special case is an explicit arm. Only
-// pow/fmod need FFI (BEAM `math:pow`/`math:fmod` badarith catch).
-
-/// Sign of a `JsNum`, honouring the IEEE sign bit of a float zero (so
-/// `1 / -0` resolves to `-Infinity`). `JNan` is never passed here.
 fn zero_aware_sign(n: JsNum) -> Int {
   case n {
     JPosInf -> 1
@@ -646,7 +494,6 @@ fn is_zero(n: JsNum) -> Bool {
   }
 }
 
-/// Widen a known-finite `JsNum` (post NaN/Inf-arm dispatch) to a Float.
 fn finite_to_float(n: JsNum) -> Float {
   case n {
     JInt(i) -> int.to_float(i)
@@ -655,9 +502,7 @@ fn finite_to_float(n: JsNum) -> Float {
   }
 }
 
-/// An exact integer result as a Number: `JInt` holds only what a double
-/// holds exactly (|i| <= 2^53 - 1); anything wider rounds to the nearest
-/// double, so `2**53 + 1` loses the 1 exactly as IEEE arithmetic does.
+// past 2^53 round to nearest double
 fn int_result(i: Int) -> JsNum {
   case i > rt_val.max_safe_integer || i < -rt_val.max_safe_integer {
     True -> rt_val.num_from_int(i)
@@ -665,8 +510,6 @@ fn int_result(i: Int) -> JsNum {
   }
 }
 
-/// §6.1.6.1.1 Number::unaryMinus. `-0` is a double, so `JInt(0)` negates to
-/// `JFloat(-0.0)`. arc `numeric.gleam:123-130`.
 fn num_negate(n: JsNum) -> JsNum {
   case n {
     JNan -> JNan
@@ -678,7 +521,6 @@ fn num_negate(n: JsNum) -> JsNum {
   }
 }
 
-/// §6.1.6.1.7 Number::add. Port of arc `numeric.gleam:134-152`.
 fn num_add(a: JsNum, b: JsNum) -> JsNum {
   case a, b {
     JNan, _ | _, JNan -> JNan
@@ -692,8 +534,6 @@ fn num_add(a: JsNum, b: JsNum) -> JsNum {
   }
 }
 
-/// Finite `+ - * /` made total: the BEAM raises `badarith` where IEEE
-/// arithmetic overflows to ±Infinity, so these answer the infinity instead.
 @external(erlang, "arc_rt_ops_ffi", "fadd")
 fn fadd(a: Float, b: Float) -> JsNum
 
@@ -706,7 +546,6 @@ fn fmul(a: Float, b: Float) -> JsNum
 @external(erlang, "arc_rt_ops_ffi", "fdiv")
 fn fdiv(a: Float, b: Float) -> JsNum
 
-/// §6.1.6.1.8 Number::subtract. Port of arc `numeric.gleam:154-172`.
 fn num_sub(a: JsNum, b: JsNum) -> JsNum {
   case a, b {
     JNan, _ | _, JNan -> JNan
@@ -722,7 +561,6 @@ fn num_sub(a: JsNum, b: JsNum) -> JsNum {
   }
 }
 
-/// ±∞ × `b`: ∞×0 is NaN; otherwise the operands' signs multiply.
 fn inf_times(s: Int, b: JsNum) -> JsNum {
   case b {
     JNan -> JNan
@@ -737,8 +575,6 @@ fn inf_times(s: Int, b: JsNum) -> JsNum {
   }
 }
 
-/// §6.1.6.1.4 Number::multiply. Port of arc `numeric.gleam:174-198`. An
-/// integer zero product takes the operands' sign: `0 * -1` is -0.
 fn num_mul(a: JsNum, b: JsNum) -> JsNum {
   case a, b {
     JNan, _ | _, JNan -> JNan
@@ -755,7 +591,6 @@ fn num_mul(a: JsNum, b: JsNum) -> JsNum {
   }
 }
 
-/// §6.1.6.1.5 Number::divide. Port of arc `numeric.gleam:200-238`.
 fn num_div(a: JsNum, b: JsNum) -> JsNum {
   case a, b {
     JNan, _ | _, JNan -> JNan
@@ -772,7 +607,6 @@ fn num_div(a: JsNum, b: JsNum) -> JsNum {
             True -> JNan
             False -> signed_inf(zero_aware_sign(a) * zero_aware_sign(b))
           }
-        // JS `/` is always real division (7/2 → 3.5).
         False -> fdiv(finite_to_float(a), finite_to_float(b))
       }
   }
@@ -781,8 +615,6 @@ fn num_div(a: JsNum, b: JsNum) -> JsNum {
 @external(erlang, "arc_rt_ops_ffi", "fmod_total")
 fn fmod_total(a: Float, b: Float) -> JsNum
 
-/// §6.1.6.1.6 Number::remainder — dividend-signed, so a zero remainder of
-/// a negative dividend is -0. Port of arc `numeric.gleam:240-258`.
 fn num_mod(a: JsNum, b: JsNum) -> JsNum {
   case a, b {
     JNan, _ | _, JNan -> JNan
@@ -804,7 +636,6 @@ fn num_mod(a: JsNum, b: JsNum) -> JsNum {
 @external(erlang, "arc_rt_ops_ffi", "pow_total")
 fn pow_total(base: Float, exp: Float) -> JsNum
 
-/// True iff `n` is an odd integral Number (§6.1.6.1.3's -∞/-0 branches).
 fn is_odd_integer(n: JsNum) -> Bool {
   case n {
     JInt(i) -> int.is_odd(i)
@@ -817,7 +648,6 @@ fn is_odd_integer(n: JsNum) -> Bool {
   }
 }
 
-/// `|base|` (finite) vs 1 → the ±∞-exponent result: >1→+∞, ==1→NaN, <1→+0.
 fn abs_cmp_one(n: JsNum) -> JsNum {
   let af = float.absolute_value(finite_to_float(n))
   case af >. 1.0, af <. 1.0 {
@@ -827,7 +657,6 @@ fn abs_cmp_one(n: JsNum) -> JsNum {
   }
 }
 
-/// Nonzero-exponent sign (the ±0 arm ran first).
 fn exp_is_positive(exp: JsNum) -> Bool {
   case exp {
     JInt(e) -> e > 0
@@ -837,12 +666,10 @@ fn exp_is_positive(exp: JsNum) -> Bool {
   }
 }
 
-/// §6.1.6.1.3 Number::exponentiate — the full special-case ladder. Port of
-/// arc `numeric.gleam:260-278` + M5.md `npow`.
+// §6.1.6.1.3 number exponentiate
 fn num_exp(base: JsNum, exp: JsNum) -> JsNum {
   case exp {
     JNan -> JNan
-    // Any base (even NaN) to the ±0 is 1.
     JInt(0) -> JInt(1)
     JFloat(e) if e >=. 0.0 && e <=. 0.0 -> JInt(1)
     _ ->
@@ -875,8 +702,6 @@ fn num_exp(base: JsNum, exp: JsNum) -> JsNum {
   }
 }
 
-/// Both operands finite, `exp ≠ 0`. Handles the ±0 base and negative-base-
-/// non-integral-exponent arms, then delegates to `math:pow`.
 fn num_exp_finite(base: JsNum, exp: JsNum) -> JsNum {
   let bf = finite_to_float(base)
   let ef = finite_to_float(exp)
@@ -892,8 +717,6 @@ fn num_exp_finite(base: JsNum, exp: JsNum) -> JsNum {
     }
     False ->
       case bf <. 0.0 {
-        // base < 0, exp not integral → NaN. pow_total handles the integral
-        // case (including overflow → ±∞ by odd/even exponent parity).
         True ->
           case rt_val.integral_int(ef) {
             None -> JNan
@@ -904,8 +727,7 @@ fn num_exp_finite(base: JsNum, exp: JsNum) -> JsNum {
   }
 }
 
-/// BigInt exponentiation by squaring. Precondition: `exp >= 0` (caller
-/// throws RangeError on negative). Port of arc `operators.gleam:273-281`.
+// exp >= 0
 fn bigint_pow(base: Int, exp: Int) -> Int {
   bigint_pow_loop(base, exp, 1)
 }
@@ -923,15 +745,6 @@ fn bigint_pow_loop(base: Int, exp: Int, acc: Int) -> Int {
   }
 }
 
-// ── §13.15.4 arithmetic operators (ops-arith) ───────────────────────────────
-// ApplyStringOrNumericBinaryOperator. Shared spine per M5.md:47-54:
-// ToPrimitive both LEFT-first (R1), then ToNumeric both, then dispatch on
-// (KBig,KBig) / mixed → TypeError / (KNum,KNum). `t_add` alone has the
-// pre-numeric string branch and uses `HintDefault`; the rest reuse the
-// `to_numeric_operands` helper (HintNumber) shared with the bitwise ops.
-
-/// ES2024 §13.8.1 `+`: string-concat if either primitive is a String, else
-/// numeric addition. Port of arc `operators.gleam:24-70`.
 pub fn t_add(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(pa, st) = rt_val.t_to_primitive(st, a, HintDefault)
   let #(pb, st) = rt_val.t_to_primitive(st, b, HintDefault)
@@ -955,7 +768,6 @@ pub fn t_add(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// ES2024 §13.8.2 `-`. Port of arc `operators.gleam:72-96`.
 pub fn t_sub(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(na, nb, st) = to_numeric_operands(st, a, b)
   case classify(na), classify(nb) {
@@ -966,7 +778,6 @@ pub fn t_sub(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// ES2024 §13.7 `*`. Port of arc `operators.gleam:98-122`.
 pub fn t_mul(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(na, nb, st) = to_numeric_operands(st, a, b)
   case classify(na), classify(nb) {
@@ -977,8 +788,6 @@ pub fn t_mul(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// ES2024 §13.7 `/`. BigInt ÷ 0 → RangeError. Port of arc
-/// `operators.gleam:124-154`.
 pub fn t_div(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(na, nb, st) = to_numeric_operands(st, a, b)
   case classify(na), classify(nb) {
@@ -990,8 +799,6 @@ pub fn t_div(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// ES2024 §13.7 `%`. BigInt % 0 → RangeError. Port of arc
-/// `operators.gleam:156-186`.
 pub fn t_mod(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(na, nb, st) = to_numeric_operands(st, a, b)
   case classify(na), classify(nb) {
@@ -1003,8 +810,6 @@ pub fn t_mod(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// ES2024 §13.6 `**`. BigInt with negative exponent → RangeError. Port of
-/// arc `operators.gleam:188-222`.
 pub fn t_pow(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(na, nb, st) = to_numeric_operands(st, a, b)
   case classify(na), classify(nb) {

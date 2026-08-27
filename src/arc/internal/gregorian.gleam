@@ -1,12 +1,4 @@
-//// Shared proleptic-Gregorian calendar math.
-////
-//// Every date-shaped builtin (`Date`, `Temporal`, `Intl.DateTimeFormat`) needs
-//// the same handful of primitives: leap years, month lengths and Howard
-//// Hinnant's `days_from_civil`/`civil_from_days` pair. They live here so a fix
-//// lands once instead of drifting across five files.
-////
-//// Months are 1-based (January = 1). Callers with a 0-based month convention
-//// keep their own thin adapter.
+// months are 1-based
 
 import arc/internal/int_math.{floor_div, floor_mod}
 
@@ -21,7 +13,7 @@ pub fn days_in_year(y: Int) -> Int {
   }
 }
 
-/// ES2024 §21.4.1.3 DayFromYear. Days since 1970-01-01 to Jan 1 of year `y`.
+// §21.4.1.3 dayfromyear
 pub fn days_from_year(y: Int) -> Int {
   365
   * { y - 1970 }
@@ -30,12 +22,7 @@ pub fn days_from_year(y: Int) -> Int {
   + floor_div(y - 1601, 400)
 }
 
-/// Length of 1-based month `m` in year `y`.
-///
-/// Callers are expected to have already constrained `m` to 1..12; anything
-/// else falls into the 31-day arm. Do not "harden" this into returning 0 for
-/// out-of-range months without also fixing the month-scan loops that walk
-/// `m` upwards subtracting `days_in_month` — a 0 makes them spin forever.
+// never return 0 here, month scan loops would spin
 pub fn days_in_month(y: Int, m: Int) -> Int {
   case m {
     2 ->
@@ -48,19 +35,17 @@ pub fn days_in_month(y: Int, m: Int) -> Int {
   }
 }
 
-/// Day of the week for a day count since 1970-01-01: 0 = Sunday .. 6 =
-/// Saturday. Epoch day 0 (1970-01-01) was a Thursday, hence the `+ 4`.
+// 0 = sunday, epoch day 0 was a thursday
 pub fn weekday_from_days(z: Int) -> Int {
   floor_mod(z + 4, 7)
 }
 
-/// ISO day of the week for a day count since 1970-01-01: 1 = Monday .. 7 =
-/// Sunday.
+// 1 = monday .. 7 = sunday
 pub fn iso_weekday_from_days(z: Int) -> Int {
   floor_mod(z + 3, 7) + 1
 }
 
-/// Days since 1970-01-01 for a proleptic Gregorian date (1-based month).
+// hinnant days_from_civil
 pub fn days_from_civil(y: Int, m: Int, d: Int) -> Int {
   let y = case m <= 2 {
     True -> y - 1
@@ -74,8 +59,7 @@ pub fn days_from_civil(y: Int, m: Int, d: Int) -> Int {
   era * 146_097 + doe - 719_468
 }
 
-/// Proleptic Gregorian `#(year, month, day)` (1-based month) from days since
-/// 1970-01-01.
+// hinnant civil_from_days
 pub fn civil_from_days(z: Int) -> #(Int, Int, Int) {
   let z = z + 719_468
   let era = floor_div(z, 146_097)

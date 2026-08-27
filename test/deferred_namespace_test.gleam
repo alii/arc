@@ -15,8 +15,6 @@ fn no_source_loads(_resolved: String) {
   Error(load_error.LoadNotFound)
 }
 
-/// Link a bundle whose only dependency is an embedder host (synthetic) module,
-/// then ask it for `spec`'s Deferred Module Namespace.
 fn deferred_namespace_of(
   spec: String,
 ) -> Result(Handle, module.DeferredNamespaceError) {
@@ -48,15 +46,10 @@ fn deferred_namespace_of(
   out
 }
 
-/// A host (synthetic) module has export cells and a namespace object like any
-/// source module, so `import.defer()` of one yields a Deferred Module
-/// Namespace — never a "produced no deferred namespace" TypeError.
 pub fn deferred_namespace_over_host_module_test() {
   let assert Ok(_proxy) = deferred_namespace_of("dance")
 }
 
-/// A specifier the bundle does not contain is reported as such — distinct from
-/// "the box we allocated is not a namespace".
 pub fn deferred_namespace_of_unknown_specifier_test() {
   assert deferred_namespace_of("nope")
     == Error(module.DeferredSpecifierNotInBundle("nope"))

@@ -1,6 +1,3 @@
-//// JSON.rawJSON boxes carry an [[IsRawJSON]] brand: a look-alike frozen
-//// null-prototype `{rawJSON}` object is not one.
-
 import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
@@ -29,7 +26,6 @@ pub fn raw_json_is_a_brand_not_a_shape_test() {
   let #(raw, st) = json(st, "rawJSON", [mk_string("12")])
   let #(is_raw, st) = json(st, "isRawJSON", [raw])
   assert classify(is_raw) == KBool(True)
-  // The box: null prototype, frozen, one non-writable "rawJSON" property.
   let assert types.KHandle(raw_h) = classify(raw)
   let #(proto, st) = rt_obj.t_get_prototype_of(st, raw_h)
   assert proto == None
@@ -45,8 +41,6 @@ pub fn raw_json_is_a_brand_not_a_shape_test() {
   let #(object, st) = rt_obj.t_global_get(st, <<"Object">>)
   let #(frozen, st) = rt_call.t_call_method(st, object, key("isFrozen"), [raw])
   assert classify(frozen) == KBool(True)
-  // A structurally identical impostor is not raw JSON and stringifies as an
-  // ordinary object.
   let #(fake_h, st) = rt_obj.t_new_object(st, None)
   let #(_, st) =
     rt_obj.t_define_own_data(

@@ -1,17 +1,10 @@
-%%% call_time profiler for the emit_2core benches. Installs
-%%% erlang:trace_pattern call_time counters on every module the compiled
-%%% path can hit (arc@rt@* + the FFI shims + the compiled bench module),
-%%% runs the workload, then reads back {M,F,A} -> {Count, µs} for the
-%%% top-N by time.
 -module(emit_2core_profile_ffi).
 -export([trace_on/1, trace_off/0, reset/0, top_n/1, alloc_bytes/0,
          all_mods/0, module_total/1, count_of/3, bench_op/4,
          count_pdict_gets/2, probe_jsf/2, eprof_run/2]).
 
-%% Modules whose functions we want per-{M,F,A} timing for.
 mods() ->
     [
-     %% state-threaded runtime layer (Gleam)
      'arc@rt@store',
      'arc@rt@obj',
      'arc@rt@lang',
@@ -23,30 +16,23 @@ mods() ->
      'arc@rt@async',
      'arc@rt@types',
      'arc@vm@internal@ordered_entries',
-     %% hand FFI shims
      arc_rt_call_ffi,
      arc_rt_call_fast_ffi,
      arc_rt_store_ffi,
      arc_rt_ops_ffi,
      arc_rt_val_ffi,
      arc_rt_obj_ffi,
-     %% gleam stdlib the runtime touches
      'gleam@dict', 'gleam@list', 'gleam@option',
      gleam_stdlib
     ].
 
 all_mods() -> mods().
 
-%% Install call_time counters on every function in mods() plus the
-%% compiled bench module (passed in). Traces only the calling process.
 trace_on(BenchMod) ->
     _ = [code:ensure_loaded(M) || M <- [BenchMod | mods()]],
-    %% reset any prior counters
     erlang:trace_pattern({'_','_','_'}, false, [call_time, local]),
     erlang:trace_pattern({'_','_','_'}, false, [call_time]),
-    %% Runtime modules: trace local so intra-module helpers count.
-    %% Bench module: only global (its Core-Erlang letrecs are join points,
-    %% tracing them all is 100×+ overhead and they have no module_info anyway).
+    %% bench module global only, local tracing is 100x overhead
     _ = [erlang:trace_pattern({M,'_','_'}, true, [call_time, local])
          || M <- mods()],
     _ = erlang:trace_pattern({BenchMod,'_','_'}, true, [call_time]),
@@ -55,8 +41,6 @@ trace_on(BenchMod) ->
 
 trace_off() ->
     erlang:trace(self(), false, [call]),
-    %% keep counters (top_n reads them AFTER trace_off) but do drop patterns
-    %% before the next bench's untraced timing — done separately in reset/0.
     nil.
 
 reset() ->
@@ -64,15 +48,9 @@ reset() ->
     erlang:trace_pattern({'_','_','_'}, false, [call_time]),
     nil.
 
-%% Return the top-N {M,F,A} by total µs across mods() + any traced module.
-%% Each row: {ModBin, FnBin, Arity, Count, Micros}.
 top_n(N) ->
-    %% every {M,F,A} for every traced module
     All = lists:flatmap(
             fun(M) -> [{M, F, A} || {F, A} <- funs(M)] end,
-            %% pull traced-module list from the pattern registry: any module
-            %% with a call_time pattern installed. Simplest: reuse mods() +
-            %% compiled bench modules by convention (arc_prof_*).
             mods() ++ [M || M <- erlang:loaded(),
                             case atom_to_list(M) of
                                 "arc_prof_" ++ _ -> true;
@@ -86,7 +64,6 @@ top_n(N) ->
                                  atom_to_binary(F, utf8),
                                  A, Count, Sec * 1000000 + Usec}};
                      {call_time, L} when is_list(L), L =/= [] ->
-                         %% multiple pids/schedulers — sum
                          {C, U} = lists:foldl(
                                     fun({_P, Ct, S, Us}, {Ca, Ua}) ->
                                         {Ca + Ct, Ua + S * 1000000 + Us}
@@ -103,7 +80,6 @@ top_n(N) ->
     Sorted = lists:sort(fun({_,_,_,_,U1}, {_,_,_,_,U2}) -> U1 >= U2 end, Rows),
     lists:sublist(Sorted, N).
 
-%% Per-module total µs (sum over all its functions with nonzero count).
 module_total(M) ->
     lists:foldl(
       fun({F, A}, Acc) ->
@@ -114,11 +90,10 @@ module_total(M) ->
           end
       end, 0, funs(M)).
 
-%% Compiled-from-Core-Erlang bench modules don't export module_info/1.
+%% core erlang modules lack module_info
 funs(M) ->
     try M:module_info(functions) catch _:_ -> [] end.
 
-%% Call count for a single {M,F,A}.
 count_of(M, F, A) ->
     case erlang:trace_info({M, F, A}, call_time) of
         {call_time, L} when is_list(L) ->
@@ -126,8 +101,6 @@ count_of(M, F, A) ->
         _ -> 0
     end.
 
-%% Untraced tight-loop micro-bench of kfn_code / cell_get / t_get_prop_any /
-%% t_set_prop_any at N iterations against a seeded state. Returns µs.
 bench_op(Which, St, Arg, N) ->
     T0 = erlang:monotonic_time(microsecond),
     bench_op_loop(Which, St, Arg, N),
@@ -153,8 +126,6 @@ bench_op_loop(get_prop_own_data, St, {O, Kb}, N) ->
     _ = arc_rt_obj_ffi:t_get_prop_own_data(St, O, Kb),
     bench_op_loop(get_prop_own_data, St, {O, Kb}, N-1);
 bench_op_loop(get_prop_own_data_2k, St, {O, Kb1, Kb2}, N) ->
-    %% Second-key path: Kb1 warms the mono cache, Kb2 hits the `{_,_}` arm
-    %% (persistent-store peek, no install). Measures the multi-field read.
     _ = arc_rt_obj_ffi:t_get_prop_own_data(St, O, Kb1),
     _ = arc_rt_obj_ffi:t_get_prop_own_data(St, O, Kb2),
     bench_op_loop(get_prop_own_data_2k, St, {O, Kb1, Kb2}, N-1);
@@ -167,21 +138,15 @@ bench_op_loop(set_prop, St, {O, K}, N) ->
 bench_op_loop(nop, St, A, N) ->
     bench_op_loop(nop, St, A, N-1).
 
-%% Bytes allocated by this process (for a coarse heap-churn number).
 alloc_bytes() ->
     {garbage_collection_info, I} = process_info(self(), garbage_collection_info),
     proplists:get_value(heap_size, I, 0) * erlang:system_info(wordsize).
 
-%% Enumerate every function actually loaded for `Mod` via erlang:get_module_info
-%% (works on Core-Erlang-compiled modules where Mod:module_info/1 does not).
 mod_funs(Mod) ->
     try erlang:get_module_info(Mod, functions)
     catch _:_ -> []
     end.
 
-%% Per-jsf_N call_count + per-BIF call_count for one richards run.
-%% Core-Erlang-loaded modules lack module_info; enumerate jsf_0..80 in
-%% every ABI variant. Prints directly.
 eprof_run(Mod, St) ->
     _ = code:ensure_loaded(Mod),
     Jsf = [{list_to_atom("jsf_" ++ integer_to_list(N) ++ S), A}
@@ -195,7 +160,6 @@ eprof_run(Mod, St) ->
             {erlang, is_atom, 1}, {erlang, is_map, 1}, {erlang, '=:=', 2},
             {erlang, is_integer, 1}, {erlang, tuple_size, 1},
             {erlang, is_map_key, 2}, {erlang, map_get, 2}],
-    %% Also trace every non-jsf local function in Mod (letrec join points).
     AllFuns = mod_funs(Mod),
     Jn = [{F, A} || {F, A} <- AllFuns,
                     case atom_to_list(F) of
@@ -259,9 +223,6 @@ eprof_run(Mod, St) ->
     erlang:trace_pattern({'_','_','_'}, false, [call_time]),
     nil.
 
-%% Trace exported jsf_* of the compiled module + erlang:get/put; report
-%% per-jsf {count,µs} + total pdict get/put/element/setelement — the
-%% inline-path work the FFI-module trace can't see.
 probe_jsf(Mod, St) ->
     _ = code:ensure_loaded(Mod),
     Exports = try Mod:module_info(exports) catch _:_ -> [] end,
@@ -294,7 +255,6 @@ probe_jsf(Mod, St) ->
     erlang:trace_pattern({'_','_','_'}, false, [call_count]),
     {Gc, Pc, Ec, Sc, Sorted}.
 
-%% count_pdict_gets(BenchMod, St) -> {GetCount, PutCount, Us}
 count_pdict_gets(Mod, St) ->
     erlang:trace_pattern({erlang, get, 1}, true, [call_count]),
     erlang:trace_pattern({erlang, put, 2}, true, [call_count]),

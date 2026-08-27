@@ -1,14 +1,3 @@
-//// `rt_builtins/generator` — %Generator% / %AsyncGenerator% /
-//// %GeneratorFunction% / %AsyncGeneratorFunction% / %AsyncFunction% intrinsics
-//// (SPEC §7.M6 builtin-control).
-////
-//// `next`/`return`/`throw` bodies live in `rt_async` (`t_gen_next` /
-//// `t_gen_return` / `t_gen_throw` over the data cell `generator_data`
-//// brand-checks out of `this`, and `t_asyncgen_*`) — this module only
-//// installs the prototype method objects and routes dispatch.
-////
-//// **Return-tuple order is `#(V, St')` — value FIRST (R1).**
-
 import arc/rt/async as rt_async
 import arc/rt/builtins/common
 import arc/rt/builtins/function as b_function
@@ -25,11 +14,6 @@ import arc/rt/val as rt_val
 import gleam/dict
 import gleam/option.{type Option, None, Some}
 
-// ── init: %Generator% + %GeneratorFunction% (§27.3 / §27.5) ─────────────────
-
-/// Set up %GeneratorPrototype% (`.next`/`.return`/`.throw`, inherits
-/// %IteratorPrototype%) and the %GeneratorFunction% dynamic-constructor pair.
-/// Port of arc `builtins/generator.gleam:15-40`.
 pub fn init(
   st: Agent,
   iterator_proto: Handle,
@@ -63,9 +47,6 @@ pub fn init(
   )
 }
 
-/// Set up %AsyncGeneratorPrototype% (inherits %AsyncIteratorPrototype%) and
-/// the %AsyncGeneratorFunction% pair. Port of arc
-/// `builtins/async_generator.gleam:13-40`.
 pub fn init_async(
   st: Agent,
   async_iterator_proto: Handle,
@@ -99,9 +80,6 @@ pub fn init_async(
   )
 }
 
-/// §27.7 %AsyncFunction% + %AsyncFunction.prototype% (the [[Prototype]] of
-/// async function objects). No `prototype` on fn_proto — async functions are
-/// not constructors. Port of arc `common.init_async_function`.
 pub fn init_async_function(
   st: Agent,
   fn_proto: Handle,
@@ -118,14 +96,6 @@ pub fn init_async_function(
   )
 }
 
-/// Shared core of `init` / `init_async` / `init_async_function` — port of arc
-/// `common.gleam:113-193 init_function_intrinsic`. Builds a dynamic
-/// constructor + the fn_proto that FUNCTION objects use as [[Prototype]]:
-///   ctor.[[Prototype]] = %Function%; ctor.prototype = fn_proto {W:F,E:F,C:F}
-///   fn_proto.[[Prototype]] = Function.prototype
-///   fn_proto.constructor = ctor {W:F,E:F,C:T}; @@toStringTag = name
-/// `Some(gp)` additionally: fn_proto.prototype = gp {W:F,E:F,C:T} and
-/// gp.constructor is backpatched to fn_proto (§27.5.1.1 / §27.6.1.1).
 fn init_function_intrinsic(
   st: Agent,
   name: String,
@@ -134,9 +104,7 @@ fn init_function_intrinsic(
   fn_ctor: Handle,
   generator_proto: option.Option(Handle),
 ) -> #(BuiltinPair, Agent) {
-  // Reserve fn_proto address so ctor can point at it.
   let #(gfn_proto, st) = common.alloc_proto(st, Some(fn_proto), dict.new())
-  // Constructor: [[Prototype]] = %Function%, prototype = gfn_proto.
   let #(len_p, st) = common.fn_length_property(st, 1)
   let #(name_p, st) = common.fn_name_property(st, name)
   let #(proto_p, st) = common.fn_prototype_property(st, gfn_proto)
@@ -157,7 +125,6 @@ fn init_function_intrinsic(
       ),
     )
   let st = rt_store.t_pin_root(st, ctor_h)
-  // fn_proto body: constructor + optional prototype + @@toStringTag.
   let #(ctor_prop, st) = common.data_prop(st, mk_object(ctor_h))
   let ctor_prop = common.configurable(ctor_prop)
   let #(proto_props, st) = case generator_proto {
@@ -181,7 +148,6 @@ fn init_function_intrinsic(
         tag_pair,
       ])
     })
-  // §27.5.1.1 / §27.6.1.1: gp.constructor = fn_proto object {W:F,E:F,C:T}.
   let st = case generator_proto {
     Some(gp) -> {
       let #(bp, st) = common.data_prop(st, mk_object(gfn_proto))
@@ -192,10 +158,6 @@ fn init_function_intrinsic(
   #(BuiltinPair(prototype: gfn_proto, constructor: ctor_h), st)
 }
 
-// ── dispatch ────────────────────────────────────────────────────────────────
-
-/// Route a `GeneratorNative` token to its body. `next/return/throw` delegate
-/// to `rt_async.t_gen_*` (sync) / `t_asyncgen_*` (async).
 pub fn dispatch(
   st: Agent,
   n: GeneratorNative,
@@ -231,9 +193,6 @@ pub fn dispatch(
       let #(h, st) = rt_async.t_asyncgen_throw(st, this, arg)
       #(mk_object(h), st)
     }
-    // §27.3.1.1 GeneratorFunction / §27.7.1.1 AsyncFunction / §27.4.1.1
-    // AsyncGeneratorFunction ( ...parameterArgs, bodyArg ) under [[Call]]:
-    // CreateDynamicFunction with their own kind and NewTarget undefined.
     GeneratorFunctionCtor(realm:)
     | AsyncFunctionCtor(realm:)
     | AsyncGeneratorFunctionCtor(realm:) -> {
@@ -243,8 +202,6 @@ pub fn dispatch(
   }
 }
 
-/// [[Construct]] of %GeneratorFunction% / %AsyncFunction% /
-/// %AsyncGeneratorFunction% with the original `new.target`.
 pub fn dispatch_construct(
   st: Agent,
   n: GeneratorNative,
@@ -260,8 +217,6 @@ pub fn dispatch_construct(
   }
 }
 
-/// The CreateDynamicFunction kind of a constructor token; `None` for the
-/// prototype methods.
 fn constructor_kind(
   n: GeneratorNative,
 ) -> Option(b_function.DynamicFunctionKind) {

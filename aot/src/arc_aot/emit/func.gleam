@@ -1,9 +1,3 @@
-//// M14: emit_function — JS function/closure → ir.Function + MakeClosure +
-//// host("fn_new"). Port of emit.gleam:3190-3650, 5244; compiler.gleam:595-622.
-//// D5: uniform [caps…, _frame, _args] IR-param shape (arity 2 after captures).
-//// D11: NO fn-entry `maybe_collect` — GC safepoint is turn-boundary only.
-//// R7: _frame TupleGet indices 0-based (this=0, af=1, ho=2, nt=3).
-
 import arc/bytecode/lexical
 import arc/compiler/ast_util
 import arc/compiler/scope.{
@@ -27,22 +21,9 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
 
-// ── feature gates — see expr.gleam ───────────────────────────────────────────
-
-/// `_t` (needs_this) simple-ABI body emit → reject at is_simple_abi_eligible
-/// so only `_s` survives. Pair with expr.gleam's emit_call_with_pair
-/// needs_this arm.
 pub const perf5_code_t: Bool = True
 
-/// perf7 raytrace lever (z): gate `init_arguments` on needs_args_object_*
-/// (elides t_new_arguments when every `arguments` ref is
-/// `X.apply(Y, arguments)`). False → perf6's strict `refs_args_stmts`.
 pub const perf7_args_elide: Bool = True
-
-// ── Result-aware CPS (u-build-seam) — private Rk chain, mirrors anf.Build ───
-// anf.Build's tail-k (anf.gleam:17) with the R12 Result channel added. Second
-// sanctioned CallHost("js",..) site (host_) alongside anf.host — both are
-// single-purpose helpers so the "audit every host call" invariant holds.
 
 type Rk(a) =
   fn(Emitter2, a) -> Result(#(ir.Expr, Emitter2), EmitError)
@@ -74,7 +55,6 @@ fn host_unit_(
   k(e)
 }
 
-/// Rk-shaped anf.cons_list — right-fold `MakeCons` onto host("empty_list").
 fn cons_list_(
   e: Emitter2,
   vs: List(ir.Value),
@@ -89,8 +69,6 @@ fn cons_list_(
   }
 }
 
-/// Right-fold `step` over `items`, threading e, building nested Lets.
-/// `then` is labelled so `use e, x, next <- each_(…, then: k)` reads well.
 fn each_(
   e: Emitter2,
   items: List(a),
@@ -107,7 +85,6 @@ fn each_(
   }
 }
 
-/// Run an Rk chain whose leaf calls `done(ef, tree)`.
 fn run_rk(
   e: Emitter2,
   f: fn(
@@ -117,8 +94,6 @@ fn run_rk(
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   f(e, fn(ef, tree) { Ok(#(tree, ef)) })
 }
-
-// ── FnShape → flags (port emit.gleam:3229-3250) ─────────────────────────────
 
 type ShapeFlags {
   ShapeFlags(
@@ -177,7 +152,6 @@ fn coroutine_kind(sf: ShapeFlags) -> Option(state.CoroutineKind) {
   }
 }
 
-/// The coroutine kind of a generator/async shape, None for a plain body.
 pub fn shape_coroutine(shape: FnShape) -> Option(state.CoroutineKind) {
   coroutine_kind(derive_flags(shape))
 }
@@ -194,8 +168,6 @@ pub fn shape_self_name(shape: FnShape) -> Option(String) {
   derive_flags(shape).self_name
 }
 
-/// FieldInitMode for the child body. FieldInitAtStart is NOT set — base-ctor
-/// field-init is called by t_construct runtime (SPEC.md:782), not by M14.
 fn derive_field_init(
   shape: FnShape,
   parent: state.FieldInitMode,
@@ -211,9 +183,6 @@ fn derive_field_init(
   }
 }
 
-// ── captures (SPEC §3.1; compiler.gleam:595-622 canonical order) ────────────
-
-/// IR-param name for the i'th capture (D5: precedes `_frame`/`_args`).
 pub fn cap_param_name(e: Emitter2, i: Int) -> String {
   state.cap_param_name(e, i)
 }
@@ -222,10 +191,6 @@ fn capture_count(info: FunctionInfo) -> Int {
   list.length(info.captures) + dict.size(info.lexical_captures)
 }
 
-/// SPEC.md:1368/1390: In the PARENT frame, one ir.Value per child capture in
-/// canonical order — `info.captures` list-order (each `.1` = parent slot),
-/// then `all_lexical_refs`-order subset of `info.lexical_captures` (parent
-/// slot from parent's `FunctionInfo.lexical`). Boxed → the cell-handle Var.
 pub fn build_capture_values(
   e: Emitter2,
   child_info: FunctionInfo,
@@ -248,13 +213,7 @@ pub fn build_capture_values(
   list.append(named, lex)
 }
 
-/// Seed slot_vars in the CHILD frame so reads of a captured name resolve to
-/// the corresponding cap_i IR-param.
 pub fn seed_capture_slots(e: Emitter2, info: FunctionInfo) -> Emitter2 {
-  // Name each capture param after the binding it carries: the JS name for
-  // a variable capture (unique in this frame like every slot name), a fixed
-  // name for a lexical one. Recorded on the emitter first so the same names
-  // reach the function's param list.
   let names =
     list.map(info.captures, fn(c) {
       let assert Ok(child_slot) = dict.get(info.names, c.0)
@@ -282,7 +241,6 @@ fn lexical_capture_name(ref: lexical.LexicalRef) -> String {
   }
 }
 
-/// D5 uniform IR-param shape: `[cap_0.., _frame, _args]`.
 pub fn build_ir_params(e: Emitter2, i: Int, n: Int) -> List(ir.Local) {
   case i < n {
     False -> [ir.Local("_frame", ir.TTerm), ir.Local("_args", ir.TTerm)]
@@ -293,10 +251,6 @@ pub fn build_ir_params(e: Emitter2, i: Int, n: Int) -> List(ir.Local) {
   }
 }
 
-// ── prologue steps (Rk-CPS; port emit.gleam:1477-1543,3342-3623) ────────────
-
-/// Store `val` into `slot` per its binding: unboxed → Let-bind to the slot's
-/// canonical var name + set_slot_var; boxed → cell_set on the existing cell.
 fn store_slot(
   e: Emitter2,
   b: Binding,
@@ -314,9 +268,6 @@ fn store_slot(
   }
 }
 
-/// Non-arrow: destructure the R7 _frame 4-tuple into the four owned lexical
-/// slots; box each whose `lexical_boxed` bit is set (u-call-abi_1.md:70-76).
-/// Arrow: skip — its lexical reads resolve via cap_i (seed_capture_slots).
 pub fn unpack_frame(
   e: Emitter2,
   is_arrow: Bool,
@@ -347,10 +298,6 @@ pub fn unpack_frame(
   }
 }
 
-/// Port of emit_binding_prologue (emit.gleam:1523-1543) to Rk-CPS: for each
-/// binding of `scope_id` in slot order, seed by kind (Var→undef, Let/Const/
-/// FnName→tdz, Param/Catch/Capture→skip seed) then cell_new if boxed &&
-/// !Capture. Params are handled by unpack_args, captures by seed_capture_slots.
 pub fn binding_prologue(
   e: Emitter2,
   scope_id: ScopeId,
@@ -382,13 +329,7 @@ pub fn binding_prologue(
   }
 }
 
-/// §10.2.11 step 28.f.i.2 (port emit.gleam:3141-3179): after the body
-/// var-boundary scope's prologue seeds every body binding, copy the current
-/// value of each parameterBinding (params ∪ "arguments" for non-arrows) into
-/// the body VarBinding shadowing that name — unless the name is also a direct
-/// FunctionDeclaration in the body (step 28.f.i.1 wins). Source slot is
-/// resolved via the FUNCTION scope so we read the param, not the shadowing
-/// body var just seeded undefined.
+// §10.2.11 step 28.f.i.2, copy params into body vars
 fn body_param_copies(
   e: Emitter2,
   declared_param_names: List(String),
@@ -397,8 +338,6 @@ fn body_param_copies(
   k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let body_id = e.cur_scope
-  // enter_scope's empty-cursor fallback leaves cur_scope at fn_scope; iterating
-  // that would self-copy every param — analyzer/emit desync, emit nothing.
   case body_id == e.fn_scope {
     True -> k(e)
     False -> {
@@ -430,9 +369,6 @@ fn body_param_copies(
                 }
               }
             }
-            // Analyzer registered no fn-scope binding for this parameter name
-            // (only possible for `arguments` in exotic shapes) — nothing to
-            // copy; the prologue's undefined seed stands.
             scope.Plain(scope.Global(_))
             | scope.Plain(scope.EvalEnv(_))
             | scope.WithChain(..) -> next(e)
@@ -442,9 +378,7 @@ fn body_param_copies(
   }
 }
 
-/// §13.2.5.5 named-FnExpr self-binding: initialize the FnNameBinding slot
-/// with active_func (frame idx 1). Shadowing is the analyzer's job — if the
-/// fn-scope binding for `fname` is not a FnNameBinding, it was shadowed.
+// §13.2.5.5 named function self binding
 fn init_self_name(
   e: Emitter2,
   self_name: Option(String),
@@ -467,9 +401,6 @@ fn init_self_name(
   }
 }
 
-/// Unpack the _args cons-list per fixed param (SPEC.md:1373-1376). Simple:
-/// bind directly + box; non-simple: apply default + dispatch.emit_destructure.
-/// Returns the remaining tail for a rest-param.
 fn unpack_args(
   e: Emitter2,
   fixed: List(ast.Pattern),
@@ -489,7 +420,7 @@ fn unpack_args_loop(
   case params {
     [] -> k(e, tail)
     [p, ..rest] -> {
-      // hd/tl on [] traps — branch on IsEmptyList (i32) first.
+      // hd/tl on [] traps, test empty first
       use e, empty <- let_(e, ir.TermOp(ir.IsEmptyList, [tail]))
       use e, raw <- let_(
         e,
@@ -523,7 +454,6 @@ fn bind_one_param(
   k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   case non_simple {
-    // Simple list: every fixed param is IdentifierPattern (ast_util.all_simple_params).
     False -> {
       let assert ast.IdentifierPattern(name:, ..) = p
       let b = fn_scope_binding(e, name)
@@ -541,8 +471,6 @@ fn bind_one_param(
         }
       }
     }
-    // Non-simple: real names are LetBindings (tdz-seeded by
-    // binding_prologue); defaults and destructuring go through M15.
     True -> {
       use #(dtree, e) <- result.try(e.dispatch.emit_destructure(
         e,
@@ -583,13 +511,7 @@ fn bind_rest(
   }
 }
 
-// ── §8.6.3 ContainsArguments — AST walk (arrows transparent, non-arrows opaque)
-// The parser unconditionally sb_declares the synthetic `arguments` VarBinding
-// (parser.gleam:3042), so `dict.get(fn_scope.bindings,"arguments")` is never
-// Error for a non-arrow. Mirror emit.gleam:3591's `references_arguments` here
-// with a pre-emission walk so functions that never touch `arguments` skip the
-// per-call `host("new_arguments")` + mapped-cells build. Direct-eval calls
-// count as a reference (eval body may read `arguments` dynamically).
+// §8.6.3 contains arguments, arrows transparent, direct eval poisons
 
 fn refs_args_opt(oe: Option(ast.Expression)) -> Bool {
   case oe {
@@ -653,8 +575,6 @@ fn refs_args_for_init(fi: ast.ForInit) -> Bool {
 }
 
 fn refs_args_class_body(body: List(ast.ClassElement)) -> Bool {
-  // Computed keys evaluate in the enclosing scope; method/field-init/static
-  // block bodies own (or forbid — §15.7.1) their own `arguments`.
   list.any(body, fn(el) {
     case el {
       ast.ClassMethod(key:, ..) -> refs_args_key(key)
@@ -695,13 +615,9 @@ fn refs_args_expr(e: ast.Expression) -> Bool {
       || refs_args_expr(alternate)
     ast.SequenceExpression(expressions:, ..) ->
       list.any(expressions, refs_args_expr)
-    // Direct-eval poisons: `eval(…)` in this body/arrow can read `arguments`.
     ast.CallExpression(callee: ast.Identifier(name: "eval", ..), arguments:, ..) ->
       True || list.any(arguments, refs_args_expr)
-    // NOTE: `X.apply(Y, arguments)` is NOT elided here even though the
-    // emit-side fast-path forwards raw `_args` — this walker also gates
-    // is_simple_abi_eligible (must reject) and recurses into arrows (where
-    // the fast-path cannot fire). Eliding here desyncs scan and emit.
+    // never elide apply(_, arguments) here or scan and emit desync
     ast.CallExpression(callee:, arguments:, ..)
     | ast.OptionalCallExpression(callee:, arguments:, ..)
     | ast.NewExpression(callee:, arguments:, ..) ->
@@ -733,9 +649,7 @@ fn refs_args_expr(e: ast.Expression) -> Bool {
       || list.any(ast.template_expressions(parts), refs_args_expr)
     ast.ImportExpression(source:, options:, ..) ->
       refs_args_expr(source) || refs_args_opt(options)
-    // Non-arrow child owns its own `arguments` — opaque (params + body).
     ast.FunctionExpression(..) -> False
-    // Arrow inherits enclosing `arguments` — transparent.
     ast.ArrowFunctionExpression(params:, body:, ..) ->
       list.any(params, refs_args_pattern)
       || case body {
@@ -753,7 +667,6 @@ fn refs_args_stmt(s: ast.Statement) -> Bool {
     | ast.BreakStatement(..)
     | ast.ContinueStatement(..)
     | ast.DebuggerStatement -> False
-    // Non-arrow child — opaque.
     ast.FunctionDeclaration(..) -> False
     ast.ClassDeclaration(super_class:, body:, ..) ->
       refs_args_opt(super_class) || refs_args_class_body(body)
@@ -814,15 +727,7 @@ fn refs_args_stmts(stmts: List(ast.StmtWithLine)) -> Bool {
   list.any(stmts, fn(s) { refs_args_stmt(s.statement) })
 }
 
-// ── needs_args_object_* — refs_args_* minus the .apply(_,arguments) shape ───
-// Gates init_arguments ONLY (never is_simple_abi_eligible). Returns False for
-// a body whose every `arguments` ref is the second arg of an
-// `X.apply(Y, arguments)` CallExpression — expr.emit_apply_arguments forwards
-// raw `_args` for exactly that shape, so the materialized object is dead
-// (raytrace Class.create: 66k× t_new_arguments/run elided). Arrow bodies fall
-// back to the strict refs_args_* walker: an arrow's own `_args` param is NOT
-// what its inherited `arguments` resolves to (see raw_args_var comment in
-// emit_body), so the fast-path cannot cover a ref nested there.
+// gates init_arguments only, never simple abi eligibility
 
 fn needs_args_object_opt(oe: Option(ast.Expression)) -> Bool {
   case oe {
@@ -896,12 +801,7 @@ fn needs_args_object_expr(e: ast.Expression) -> Bool {
       || needs_args_object_expr(alternate)
     ast.SequenceExpression(expressions:, ..) ->
       list.any(expressions, needs_args_object_expr)
-    // Direct-eval poisons — eval body may read `arguments` dynamically.
     ast.CallExpression(callee: ast.Identifier(name: "eval", ..), ..) -> True
-    // The carve-out: `X.apply(Y, arguments)` — mirrors the EXACT reachability
-    // of expr.emit_plain_call's fast-path: super.apply routes to the earlier
-    // super-member arm; a `?.` in the callee chain routes to emit_chain_root.
-    // Either way emit evaluates Identifier("arguments") — no elision.
     ast.CallExpression(
       callee: ast.MemberExpression(
         object: inner,
@@ -952,10 +852,7 @@ fn needs_args_object_expr(e: ast.Expression) -> Bool {
       || list.any(ast.template_expressions(parts), needs_args_object_expr)
     ast.ImportExpression(source:, options:, ..) ->
       needs_args_object_expr(source) || needs_args_object_opt(options)
-    // Non-arrow child owns its own `arguments` — opaque.
     ast.FunctionExpression(..) -> False
-    // Arrow inherits enclosing `arguments`, but the raw-`_args` fast-path
-    // cannot fire for a ref inside it — strict walker, no carve-out.
     ast.ArrowFunctionExpression(..) -> refs_args_expr(e)
     ast.ClassExpression(super_class:, body:, ..) ->
       needs_args_object_opt(super_class) || refs_args_class_body(body)
@@ -989,8 +886,6 @@ fn needs_args_object_stmt(s: ast.Statement) -> Bool {
     ast.WhileStatement(condition:, body:)
     | ast.DoWhileStatement(condition:, body:) ->
       needs_args_object_expr(condition) || needs_args_object_stmt(body)
-    // with-body: arguments_is_implicit is False under a WithChain resolution,
-    // so the fast-path can never fire — strict walker, no carve-out.
     ast.WithStatement(object:, body:) ->
       needs_args_object_expr(object) || refs_args_stmt(body)
     ast.ForStatement(init:, condition:, update:, body:) ->
@@ -1034,14 +929,6 @@ fn needs_args_object_catch(h: ast.CatchClause) -> Bool {
 fn needs_args_object_stmts(stmts: List(ast.StmtWithLine)) -> Bool {
   list.any(stmts, fn(s) { needs_args_object_stmt(s.statement) })
 }
-
-// ── simple-ABI eligibility — refs_frame_* mirrors refs_args_* ───────────────
-// True when the walked tree reads any _frame slot (this / new.target / super /
-// home-object). `ct` (count-this) parameterizes ThisExpression: `ct=False` ⇒
-// only super/new.target/direct-eval trigger — used to gate the `_t` simple-ABI
-// variant that passes `this` positionally. Non-arrow child fns are opaque (own
-// this/new.target); arrows are transparent (inherit ours); direct-eval poisons.
-// import.meta is NOT a frame ref (module-level, resolved via captures).
 
 fn refs_frame_opt(oe: Option(ast.Expression), ct: Bool) -> Bool {
   case oe {
@@ -1108,8 +995,6 @@ fn refs_frame_for_init(fi: ast.ForInit, ct: Bool) -> Bool {
 }
 
 fn refs_frame_class_body(body: List(ast.ClassElement), ct: Bool) -> Bool {
-  // Computed keys evaluate in the enclosing scope; method/field-init/static-
-  // block bodies own their own this/super/new.target — opaque.
   list.any(body, fn(el) {
     case el {
       ast.ClassMethod(key:, ..) -> refs_frame_key(key, ct)
@@ -1151,7 +1036,6 @@ fn refs_frame_expr(e: ast.Expression, ct: Bool) -> Bool {
       || refs_frame_expr(alternate, ct)
     ast.SequenceExpression(expressions:, ..) ->
       list.any(expressions, refs_frame_expr(_, ct))
-    // Direct-eval poisons: `eval(…)` may read this/new.target dynamically.
     ast.CallExpression(callee: ast.Identifier(name: "eval", ..), ..) -> True
     ast.CallExpression(callee:, arguments:, ..)
     | ast.OptionalCallExpression(callee:, arguments:, ..)
@@ -1184,9 +1068,7 @@ fn refs_frame_expr(e: ast.Expression, ct: Bool) -> Bool {
       || list.any(ast.template_expressions(parts), refs_frame_expr(_, ct))
     ast.ImportExpression(source:, options:, ..) ->
       refs_frame_expr(source, ct) || refs_frame_opt(options, ct)
-    // Non-arrow child owns its own this/new.target — opaque.
     ast.FunctionExpression(..) -> False
-    // Arrow inherits enclosing this/new.target/super — transparent.
     ast.ArrowFunctionExpression(params:, body:, ..) ->
       list.any(params, refs_frame_pattern(_, ct))
       || case body {
@@ -1204,7 +1086,6 @@ fn refs_frame_stmt(s: ast.Statement, ct: Bool) -> Bool {
     | ast.BreakStatement(..)
     | ast.ContinueStatement(..)
     | ast.DebuggerStatement -> False
-    // Non-arrow child — opaque.
     ast.FunctionDeclaration(..) -> False
     ast.ClassDeclaration(super_class:, body:, ..) ->
       refs_frame_opt(super_class, ct) || refs_frame_class_body(body, ct)
@@ -1282,16 +1163,7 @@ fn refs_args_body(body: FnBody) -> Bool {
   }
 }
 
-/// Some(#(arity, needs_this)) when this function can also be compiled as a
-/// positional-args closure that skips _frame/_args entirely: plain FnDecl/
-/// FnExpr/Arrow/Method or base ClassCtor (non-gen, non-async), every param a
-/// bare identifier (no rest/default/destructure), and the body never reads
-/// `arguments`, `new.target`, or `super`. `needs_this=False` → `jsf_N_s([caps.., p0..pN-1])`;
-/// `needs_this=True` → `jsf_N_t([caps.., _this, p0..pN-1])` (body reads ONLY
-/// `this` from the frame — passed positionally, no 4-tuple). Over-rejection is
-/// a perf miss only — the full-ABI closure is always emitted alongside.
-/// Private: callers MUST also gate on `lexical_boxed == no_lexical_refs` (the
-/// caller owns FunctionInfo); a Some here alone is NOT sufficient to emit.
+// callers must also gate on lexical_boxed == no_lexical_refs
 fn is_simple_abi_eligible(
   shape: FnShape,
   params: List(ast.Pattern),
@@ -1299,12 +1171,8 @@ fn is_simple_abi_eligible(
 ) -> Option(#(Int, Bool)) {
   let #(shape_ok, is_arrow) = case shape {
     FnDecl(is_gen: False, is_async: False) -> #(True, False)
-    // Named FnExpr rejected: the FnNameBinding slot is seeded tdz and only
-    // overwritten via RefActiveFunc (=_frame[1]), which the simple-ABI skips.
     FnExpr(is_gen: False, is_async: False, self_name: None) -> #(True, False)
     Arrow(is_async: False) -> #(True, True)
-    // A method or base constructor reads the frame only for `super`
-    // (HomeObject) and `new.target`, both rejected below with `arguments`.
     Method(is_gen: False, is_async: False) -> #(True, False)
     ClassCtor(derived: False, has_field_init: False, ..) -> #(True, False)
     _ -> #(False, False)
@@ -1319,13 +1187,8 @@ fn is_simple_abi_eligible(
           case refs_args_body(body) || refs_frame_body(body, False) {
             True -> None
             False ->
-              // Arrow: `this` resolves via captures — the plain _s body would
-              // work, but only if the caller's lexical_boxed gate also holds.
-              // Keep arrows conservative (over-reject on `this`): the perf
-              // target (richards proto methods) is non-arrow.
               case is_arrow, refs_frame_body(body, True), perf5_code_t {
                 True, True, _ -> None
-                // needs_this but `_t` gate off → perf4 rejects (frame ABI).
                 _, True, False -> None
                 _, needs_this, _ -> Some(#(list.length(fixed), needs_this))
               }
@@ -1335,9 +1198,6 @@ fn is_simple_abi_eligible(
   }
 }
 
-/// Materialize `arguments` only when the body (or a nested arrow / param
-/// default) actually references it — the analyzer's fn-scope binding is
-/// unconditional so `dict.get` alone never elides. SPEC.md:1690 arity 2.
 fn init_arguments(
   e: Emitter2,
   is_arrow: Bool,
@@ -1353,7 +1213,7 @@ fn init_arguments(
       case dict.get(scope.get_scope(e.tree, e.fn_scope).bindings, "arguments") {
         Error(_) -> k(e)
         Ok(b) -> {
-          // Mapped only for sloppy simple param lists (§10.2.11 step 18).
+          // mapped only for sloppy simple params, §10.2.11 step 18
           use e, mapped <- build_mapped_cells(e, fixed, non_simple || has_rest)
           use e, callee <- let_(
             e,
@@ -1378,10 +1238,6 @@ fn build_mapped_cells(
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   case unmapped || e.strict {
     True -> k(e, e.consts.undef)
-    // Mapped: cons-list of the param-slot cell handles (port emit.gleam:3591-
-    // 3623). unpack_args ran already, so each simple-param slot_var holds the
-    // cell (boxed) or raw value (unboxed — analyzer boxes when aliasing
-    // matters; unboxed entries won't alias but the runtime tolerates them).
     False -> {
       let cells =
         list.map(fixed, fn(p) {
@@ -1393,9 +1249,6 @@ fn build_mapped_cells(
   }
 }
 
-/// Compile every direct FunctionDeclaration in `stmts` (analyzer's cursor is
-/// in fn-decls-first order, emit.gleam:3252-3258) and store the closure into
-/// its name's slot. M13 emits FunctionDeclaration as a no-op (SPEC.md:1344).
 fn hoist_fn_decls(
   e: Emitter2,
   stmts: List(ast.StmtWithLine),
@@ -1420,8 +1273,6 @@ fn hoist_fn_decls(
         child_id,
       ))
       use e, fn_h <- let_(e, ctree)
-      // The var-scope: the function scope, or the parameter-body scope of
-      // a non-simple parameter list (§10.2.11 step 28).
       let assert Ok(b) =
         dict.get(scope.get_scope(e.tree, e.cur_scope).bindings, name)
         as "emit_2core/fn: hoisted function missing from var-scope bindings"
@@ -1438,9 +1289,6 @@ fn fn_scope_binding(e: Emitter2, name: String) -> Binding {
   b
 }
 
-// ── body orchestration ──────────────────────────────────────────────────────
-
-/// Body statements of a function; an arrow's expression body returns it.
 pub fn body_stmts(body: FnBody) -> List(ast.StmtWithLine) {
   case body {
     StmtBody(s) -> s
@@ -1448,15 +1296,7 @@ pub fn body_stmts(body: FnBody) -> List(ast.StmtWithLine) {
   }
 }
 
-/// §10.2.11 FunctionDeclarationInstantiation for a frame-ABI body: unpack
-/// `_frame`, seed the function scope's bindings and the named-expression
-/// self binding, bind params/rest/`arguments`, enter the parameter-body var
-/// scope for a non-simple list, and hoist function declarations. `k`
-/// receives the emitter positioned for the body statements plus the step
-/// that undoes the var-scope entry on the body's final emitter. The
-/// coroutine wrapper runs this once at call time and snapshots the locals it
-/// leaves; `own_args` is False there since the resumed body has no `_args`
-/// list to forward, so every `arguments` reference materializes the object.
+// §10.2.11 function declaration instantiation
 pub fn emit_prologue(
   e: Emitter2,
   self_name: Option(String),
@@ -1470,10 +1310,6 @@ pub fn emit_prologue(
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let #(fixed, rest_param) = ast_util.split_trailing_rest(params)
   let non_simple = !ast_util.all_simple_params(fixed)
-  // needs_args_object_* (not refs_args_*): a body whose only `arguments` refs
-  // are `X.apply(Y, arguments)` never reads the materialized object — the
-  // emit-side fast-path forwards raw `_args`. Param defaults keep the strict
-  // walker (fast-path shape inside a default is exotic; over-reject is safe).
   let uses_args =
     !is_arrow
     && {
@@ -1483,10 +1319,6 @@ pub fn emit_prologue(
         False -> refs_args_stmts(stmts)
       }
     }
-  // Expose the raw incoming args cons-list to expr.gleam so
-  // `X.apply(Y, arguments)` lowers to a direct call passing `_args`
-  // verbatim. Arrows inherit `arguments` via captures — their own `_args`
-  // param is the arrow's args, not the value `arguments` resolves to.
   let e = case is_arrow || !own_args {
     True -> e
     False -> Emitter2(..e, raw_args_var: Some("_args"))
@@ -1494,9 +1326,7 @@ pub fn emit_prologue(
   use e <- unpack_frame(e, is_arrow, info)
   use e <- binding_prologue(e, e.fn_scope)
   use e <- init_self_name(e, self_name, info)
-  // §10.2.11 step 22 creates `arguments` before the formals are bound (a
-  // default may read it). Mapped arguments (simple sloppy lists) need the
-  // param cells, so only that shape waits for unpack_args.
+  // §10.2.11 step 22, arguments exists before formals bind
   let unmapped = non_simple || rest_param != None
   let init_args = fn(e, when: Bool, k) {
     case when {
@@ -1509,7 +1339,7 @@ pub fn emit_prologue(
   use e, tail <- unpack_args(e, fixed, non_simple)
   use e <- bind_rest(e, rest_param, tail, non_simple)
   use e <- init_args(e, !unmapped)
-  // §10.2.11 step 28: non-simple params get a body var-boundary Block scope.
+  // §10.2.11 step 28, non-simple params get a body scope
   case non_simple {
     False -> {
       use e <- hoist_fn_decls(e, stmts)
@@ -1558,17 +1388,10 @@ fn emit_body(
   #(tree, finish(ef))
 }
 
-// ── simple-ABI body: positional params, no _frame/_args ─────────────────────
-
 fn simple_param_name(i: Int) -> String {
   "_p" <> int.to_string(i)
 }
 
-/// IR name for positional param `i` of a simple-ABI body: the JS parameter's
-/// own name when it is a plain identifier (so the Erlang reads `Xs`, not
-/// `P0`), else the positional `_p{i}`. `fixed` is the function's parameter
-/// pattern list; both the function signature and the body's binding prologue
-/// derive the name from it, so they agree.
 fn simple_param_ir_name(
   e: Emitter2,
   fixed: List(ast.Pattern),
@@ -1577,9 +1400,6 @@ fn simple_param_ir_name(
   case list_at(fixed, i) {
     Some(ast.IdentifierPattern(name:, ..)) -> {
       let b = fn_scope_binding(e, name)
-      // The slot's own name; a param seeds its slot with itself so both
-      // sides read the same way. Any second parameter with the same name
-      // (sloppy `function f(a, a)`) shares the slot, so this is safe.
       state.slot_var_name(e, b.slot)
     }
     _ -> simple_param_name(i)
@@ -1594,7 +1414,6 @@ fn list_at(xs: List(a), i: Int) -> Option(a) {
   }
 }
 
-/// IR-param name for the positional `this` in a `_t`-variant simple body.
 pub const simple_this_param = "_this"
 
 fn build_simple_ir_params(
@@ -1635,8 +1454,6 @@ fn build_simple_pos_params(
   }
 }
 
-/// Bind each simple identifier param directly from its positional `_p{i}`
-/// IR-param (mirrors `bind_one_param`'s simple branch — cell_new if boxed).
 fn bind_simple_params(
   e: Emitter2,
   fixed_all: List(ast.Pattern),
@@ -1655,7 +1472,6 @@ fn bind_simple_params(
       let vn = state.slot_var_name(e, b.slot)
       let next = fn(e) { bind_simple_params(e, fixed_all, rest, i + 1, k) }
       case b.is_boxed {
-        // The IR param already carries the slot's name: no alias needed.
         False if pn == vn -> next(state.set_slot_var(e, b.slot, vn))
         False -> {
           use body <- state.map_tree(next(state.set_slot_var(e, b.slot, vn)))
@@ -1671,9 +1487,6 @@ fn bind_simple_params(
   }
 }
 
-/// Seed the OWNED lexical `this` slot from the positional `_this` IR param so
-/// `emit_lexical(RefThis)` resolves to `ir.Var("_this")` without any `_frame`
-/// TupleGet. `lexical_boxed == no_lexical_refs` gate guarantees unboxed.
 fn seed_simple_this(
   e: Emitter2,
   needs_this: Bool,
@@ -1689,10 +1502,6 @@ fn seed_simple_this(
   }
 }
 
-/// Simple-ABI body: `emit_body` minus `unpack_frame`/`unpack_args`/
-/// `init_arguments`/`init_self_name`. Eligibility (is_simple_abi_eligible +
-/// the guards in emit_function_tree) guarantees the elided steps are dead.
-/// `needs_this=True` → seeds the `this` lexical slot from the `_this` param.
 fn emit_simple_body(
   e: Emitter2,
   fixed: List(ast.Pattern),
@@ -1715,12 +1524,6 @@ fn emit_simple_body(
   })
 }
 
-/// Frame-ABI entry for a function whose body lives in its simple-ABI variant:
-/// bind `this` from `_frame` when the variant takes it, walk `_args` binding
-/// one positional param per cons cell, and tail-call the variant with the
-/// captures forwarded. Each level tests once for the end of the list; when
-/// the list ends early the remaining params are `undefined`, extras are
-/// dropped. No allocation, one branch per param.
 fn simple_shim_body(
   e: Emitter2,
   target: String,
@@ -1750,8 +1553,6 @@ fn simple_shim_body(
   }
 }
 
-/// `bound` holds the positional params bound so far, reversed; `tail` is the
-/// unconsumed rest of `_args`.
 fn shim_walk(
   target: String,
   i: Int,
@@ -1800,8 +1601,6 @@ fn shim_walk(
   }
 }
 
-// ── closure site (SPEC.md:1388; pure anf.* — dispatch-free) ─────────────────
-
 fn atom_bool(rc: state.RealmConsts, b: Bool) -> ir.Value {
   case b {
     True -> rc.true_
@@ -1820,8 +1619,7 @@ fn emit_closure_site(
   simple: Option(#(String, Int, Bool)),
 ) -> #(ir.Expr, Emitter2) {
   let rc = e.consts
-  // FnFlags wire tuple — MUST match arc/rt/types.FnFlags field order exactly
-  // (ctor, class_ctor, derived, arrow, method, gen, async, strict).
+  // must match arc/rt/types.FnFlags field order
   let flags = [
     ir.ConstAtom("fn_flags"),
     atom_bool(rc, sf.is_constructor),
@@ -1841,8 +1639,6 @@ fn emit_closure_site(
     {
       use fun <- anf.then(anf.bind(ir.MakeClosure(fn_name, capture_vals, 2)))
       use flags_t <- anf.then(anf.make_tuple(flags))
-      // 5th fn_new arg — Option(#(CompiledFn, Int, Bool)) wire term for
-      // KCompiled.simple. `needs_this` bumps closure arity by 1 (_this param).
       use simple_v <- anf.then(case simple {
         None -> anf.pure(ir.ConstAtom("none"))
         Some(#(sfn, arity, needs_this)) -> {
@@ -1875,7 +1671,7 @@ fn emit_closure_site(
   )
 }
 
-/// §15.1.5 ExpectedArgumentCount — leading params before the first default.
+// §15.1.5 expected argument count
 fn expected_length(fixed: List(ast.Pattern)) -> Int {
   fixed
   |> list.take_while(fn(p) {
@@ -1887,12 +1683,6 @@ fn expected_length(fixed: List(ast.Pattern)) -> Int {
   |> list.length
 }
 
-// ── entry point ─────────────────────────────────────────────────────────────
-
-/// Lower one JS function. Emits the ir.Function(s) to e.fns_acc; the
-/// PARENT-frame closure-site tree (Let-chain ending in the KCompiled handle)
-/// is built on demand by the returned `site`. Callers Let-bind that tree to
-/// obtain the fn_h Value (see hoist_fn_decls).
 fn compile_function(
   e: Emitter2,
   shape: FnShape,
@@ -1908,12 +1698,11 @@ fn compile_function(
   }
   let child_strict = e.strict || ast_util.has_use_strict_directive(stmts)
   let child_info = scope.function_info(e.tree, fn_scope_id)
-  // Capture values are read from the PARENT frame BEFORE enter_function.
+  // capture values read from parent before enter_function
   let capture_vals = build_capture_values(e, child_info)
   let #(fixed, _) = ast_util.split_trailing_rest(params)
   let exp_len = expected_length(fixed)
 
-  // gen|async → M18 owns the state-machine body; already tree-shaped (R14).
   case coroutine_kind(sf) {
     Some(_) -> {
       use #(tree, e) <- result.map(e.dispatch.emit_async_body(
@@ -1954,11 +1743,6 @@ fn compile_function(
         )
       let e_child = seed_capture_slots(e_child, child_info)
       let ncap = capture_count(child_info)
-      // Simple-ABI closure: the body is emitted ONCE with positional _p{i}
-      // params instead of _frame/_args, and the frame-ABI function becomes a
-      // shim that unpacks `_args` and tail-calls it. self_name/lexical_boxed
-      // are extra gates on top of is_simple_abi_eligible — both would read
-      // the elided _frame slots.
       let simple_arity = case
         sf.self_name,
         child_info.lexical_boxed == lexical.no_lexical_refs,
@@ -2076,8 +1860,6 @@ fn compile_function(
   }
 }
 
-/// What `compile_function` hands back: the closure-site builder, plus the
-/// direct entry when the body got a simple-ABI variant.
 type Compiled {
   Compiled(
     site: fn(Emitter2) -> #(ir.Expr, Emitter2),
@@ -2104,9 +1886,6 @@ fn emit_function_tree(
   compiled.site(e)
 }
 
-/// EmitDispatch.emit_function entry point (state.gleam:221-228). Returns the
-/// parent-frame closure-site tree; callers Let-bind it via `bridge_expr` to
-/// obtain the KCompiled handle Value (SPEC§7.M14:1388).
 pub fn emit_function(
   e: Emitter2,
   shape: FnShape,
@@ -2118,8 +1897,6 @@ pub fn emit_function(
   emit_function_tree(e, shape, js_name, params, body, fn_scope_id)
 }
 
-/// EmitDispatch.emit_function_site: compile the function; a body with a
-/// simple-ABI variant is reached directly and no function object is built.
 pub fn emit_function_site(
   e: Emitter2,
   shape: FnShape,

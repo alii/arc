@@ -1,8 +1,3 @@
-//// Module bodies running for real on the bytecode interpreter: live
-//// bindings, cyclic function imports, top-level await through the shared
-//// microtask drain, thrown bodies, and dynamic `import()` from a script
-//// end to end through the host hook and the registry.
-
 import arc/compiler
 import arc/interp/dynamic_import
 import arc/interp/entry
@@ -31,15 +26,11 @@ fn agent() -> Agent {
   rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
 }
 
-/// An agent that collects every 64 allocations, so a module body of any size
-/// crosses the root-activation safepoint many times while it runs.
 fn small_gc_agent() -> Agent {
   let st = agent() |> rt_gc.t_collect([])
   Agent(..st, store: JsStore(..st.store, gc_threshold: 64))
 }
 
-/// A module source whose body allocates well past the small threshold
-/// through bytecode calls, then exports `tag`.
 fn churning_module(tag: String) -> String {
   "function churn() { let a = []; for (let i = 0; i < 300; i++) a.push({ i }); return a.length }
    export const v = '"
@@ -51,7 +42,6 @@ fn no_drain(st: Agent) -> Agent {
   st
 }
 
-/// A loader over an in-memory file table; specifiers resolve to themselves.
 fn files(
   table: List(#(String, String)),
 ) -> #(module_host.ResolveFn, module_host.LoadFn) {
@@ -101,9 +91,6 @@ pub fn imported_binding_is_read_through_the_live_cell_test() {
   assert classify(export(st, evaluated, "y")) == KNum(JInt(42))
 }
 
-/// Each module body is its own parse: site 0 of `/dep.js` and site 0 of
-/// `/main.js` are different template objects, and a hoisted exported
-/// function (instantiated at link time) shares its module's sites.
 pub fn template_objects_are_per_module_test() {
   let assert #(st, Ok(evaluated)) =
     evaluate(
@@ -194,9 +181,6 @@ pub fn a_rejected_top_level_await_is_an_evaluation_error_test() {
     |> string.starts_with("RangeError: late")
 }
 
-/// With a non-draining driver (the dynamic-import path) a body parked on
-/// top-level await is pending, not failed: the [[TopLevelCapability]]
-/// promise comes back and settles once the host drains.
 pub fn top_level_await_without_a_drain_is_pending_test() {
   let #(resolve, load) = files([])
   let assert Ok(bundle) =
@@ -210,7 +194,6 @@ pub fn top_level_await_without_a_drain_is_pending_test() {
   let assert #(st, _, Error(module.EvaluationPending(promise))) =
     module.evaluate_linked_tracking(linked, st, no_drain, set.new())
   let assert #(_, PromisePending(_), _) = rt_async.promise_data(st, promise)
-  // Still mid-body: importers must not re-run it.
   assert registry.read_module_status(st, "/main.js")
     == Some(registry.Evaluating)
   let st = rt_async.drain(st)
@@ -226,8 +209,6 @@ pub fn a_never_settling_await_is_reported_test() {
   assert rt_inspect.format_error(st, thrown)
     |> string.contains("top-level await promise never settled")
 }
-
-// -- Dynamic import from a script ------------------------------------------------
 
 fn run_script(st: Agent, source: String) -> Agent {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
@@ -262,7 +243,6 @@ pub fn dynamic_import_from_a_script_test() {
          .catch(e => { out = 'rejected ' + e })",
     )
   assert global_string(st, "out") == "lib2:1:default,v"
-  // The registry served the record: a second import is the same namespace.
   let st =
     run_script(
       st,
@@ -301,7 +281,6 @@ pub fn dynamic_import_of_a_top_level_await_module_test() {
 }
 
 pub fn nested_dynamic_import_resolves_against_the_importing_module_test() {
-  // The resolver records the referrer each request was resolved against.
   let load = fn(resolved) {
     case resolved {
       "/dir/outer.js" -> Ok("export const inner = import('./inner.js');")
@@ -345,9 +324,6 @@ pub fn import_defer_links_without_evaluating_test() {
   assert global_string(st, "after") == "yes"
 }
 
-/// A statically imported module that dynamic-imports a relative specifier
-/// AFTER its first top-level await still resolves it against itself, not the
-/// entry (§16.2.1.8: the resumed execution context's ScriptOrModule).
 pub fn dynamic_import_after_top_level_await_keeps_the_module_referrer_test() {
   let load = fn(resolved) {
     case resolved {
@@ -382,8 +358,6 @@ pub fn dynamic_import_after_top_level_await_keeps_the_module_referrer_test() {
   assert list.contains(requests, #("./sib.js", "/dir/dep.js"))
 }
 
-/// The registry's hidden caches hang off the global object; a guest that
-/// froze or sealed `globalThis` first must not be able to break the loader.
 pub fn dynamic_import_survives_a_non_extensible_global_test() {
   let #(resolve, load) = files([#("/lib.js", "export const v = 'lib';")])
   let st = module_host.install_import_hook(agent(), "/main.js", resolve, load)
@@ -407,12 +381,7 @@ pub fn static_module_survives_a_frozen_global_test() {
   assert classify(export(st, evaluated, "v")) == KNum(JInt(1))
 }
 
-// -- Dynamic import under a collecting heap ----------------------------------------
-//
-// The import promise's capability is held only by the import job while the
-// imported bodies run; the bodies cross the root-activation safepoint, so the
-// job must keep the capability alive itself.
-
+// the import job must keep its capability alive across gc
 pub fn dynamic_import_survives_collection_during_the_body_test() {
   let #(resolve, load) = files([#("/lib.js", churning_module("lib"))])
   let st =

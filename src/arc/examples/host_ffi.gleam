@@ -1,6 +1,4 @@
-//// Embedding arc with host-provided native functions.
-////
-//// Run with: gleam run -m arc/examples/host_ffi
+// run with: gleam run -m arc/examples/host_ffi
 
 import arc/engine.{JsString, Returned}
 import arc/host

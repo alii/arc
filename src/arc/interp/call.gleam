@@ -1,18 +1,4 @@
-//// [[Call]] / [[Construct]] / Return for the bytecode interpreter.
-////
-//// A bytecode callee runs FLAT: the caller's registers are parked in a
-//// `SavedFrame`, the callee's locals tuple is built and the loop carries on
-//// in the same BEAM frame; `Return` pops the frame back. Bound functions
-//// whose target is bytecode and `Function.prototype.call/apply` /
-//// `Reflect.apply` are unwrapped here so they stay flat too. Every other
-//// callee (native, compiled, proxy) is ONE nested runtime call through
-//// `rt/call.t_call` / `t_construct`, which re-enters the interpreter via
-//// `JsOps.call_bytecode` if it calls back into bytecode.
-////
-//// Depth: a flat frame push bumps `Agent.call_depth` and pops it on
-//// Return/unwind, the same counter `t_enter_call` bumps for nested calls,
-//// so `limits.max_call_depth` bounds both. `Agent.frames` is pushed and
-//// popped in step so `Error.stack` names the live bytecode frames.
+//// flat bytecode calls; other callees nest via rt/call
 
 import arc/bytecode/lexical
 import arc/bytecode/opcode
@@ -43,12 +29,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
-// -- Raise adapter -------------------------------------------------------------
-
-/// Run a raise-capable runtime body against this state's agent, folding a
-/// JS throw into `Error(Threw(e, state'))` where `state'` has adopted the
-/// agent the throw carried. For composite slow-path bodies; single runtime
-/// calls use `ffi.guardN` with the function reference directly.
 pub fn guarded(
   state: State,
   body: fn(Agent) -> #(a, Agent),
@@ -56,7 +36,6 @@ pub fn guarded(
   ffi.guarded(ffi.guard1(body, state.agent), state)
 }
 
-/// `guarded` for a body that returns the bare agent.
 pub fn guarded_unit(
   state: State,
   body: fn(Agent) -> Agent,
@@ -68,24 +47,17 @@ pub fn guarded_unit(
   state
 }
 
-// -- Agent.frames / call depth ------------------------------------------
-
-/// Script label in `Error.stack` frames.
 pub const stack_source = "script"
 
-/// The `Error.stack` frame of an activation of `template` at `line`.
 pub fn frame_info_at(template: FuncTemplate, line: Int) -> types.FrameInfo {
   FrameInfo(name: option.unwrap(template.name, ""), script: stack_source, line:)
 }
 
-/// Push the `Error.stack` frame for an activation of `template` without
-/// touching the depth counter: for root activations, whose depth the
-/// enclosing `t_call` (or the script driver) already accounts for.
+/// no depth bump, caller already counted it
 pub fn push_frame_info(agent: Agent, template: FuncTemplate) -> Agent {
   Agent(..agent, frames: [frame_info_at(template, 0), ..agent.frames])
 }
 
-/// Pop the innermost `Error.stack` frame (root activation exit).
 pub fn pop_frame_info(agent: Agent) -> Agent {
   case agent.frames {
     [_, ..rest] -> Agent(..agent, frames: rest)
@@ -93,7 +65,6 @@ pub fn pop_frame_info(agent: Agent) -> Agent {
   }
 }
 
-/// Record the source line the innermost frame is executing.
 pub fn set_line(agent: Agent, line: Int) -> Agent {
   case agent.frames {
     [FrameInfo(line: l, ..), ..] if l == line -> agent
@@ -102,7 +73,6 @@ pub fn set_line(agent: Agent, line: Int) -> Agent {
   }
 }
 
-/// The line the innermost frame last recorded, 0 if none.
 pub fn current_line(agent: Agent) -> Int {
   case agent.frames {
     [FrameInfo(line:, ..), ..] -> line
@@ -110,7 +80,6 @@ pub fn current_line(agent: Agent) -> Int {
   }
 }
 
-/// Leave a flat bytecode frame: `--call_depth` and pop its stack frame.
 fn leave_frame(agent: Agent) -> Agent {
   let frames = case agent.frames {
     [_, ..rest] -> rest
@@ -119,16 +88,10 @@ fn leave_frame(agent: Agent) -> Agent {
   Agent(..agent, call_depth: agent.call_depth - 1, frames:)
 }
 
-// -- Coroutine hand-off ---------------------------------------------------
-
-/// A generator / async function / async generator call whose frame is
-/// already laid out (`this` bound, locals seeded). The coroutine driver
-/// turns it into a generator object or a promise and pushes that.
 pub type CoroutineCall {
   CoroutineCall(
     fn_h: Handle,
     template: FuncTemplate,
-    /// The closure's parse id, the body activation's `unit`.
     unit: Int,
     locals: TupleArray(JsVal),
     this: JsVal,
@@ -138,20 +101,12 @@ pub type CoroutineCall {
   )
 }
 
-/// Callbacks into the parts of the interpreter this module cannot import.
+/// callbacks into interpreter parts this module cannot import
 pub type Drive {
   Drive(start_coroutine: fn(State, CoroutineCall) -> Result(State, StepExit))
 }
 
-// -- Frame setup (§10.2.1.1 PrepareForOrdinaryCall) --------------------------
-
-/// Build the callee's locals tuple: bind `this` per §10.2.1.2
-/// OrdinaryCallBindThis (arrows and strict bodies take `this_arg` as given;
-/// a sloppy body sees null/undefined as the global object and a primitive
-/// wrapped, `rt/call.resolve_this` being the one allocating case), then lay
-/// out `[env.., lexical seeds.., args (fitted to arity).., undefined..]`.
-/// Returns the bound `this`. `enter_root` and `interpreter.fast_call`
-/// inline the same.
+/// §10.2.1.2 bind this, then lay out locals
 fn setup_frame(
   agent: Agent,
   env: EnvTuple,
@@ -194,13 +149,7 @@ fn setup_frame(
   )
 }
 
-// -- Flat bytecode call -------------------------------------------------------
-
-/// Enter a bytecode function in-loop. Shared by Call/CallMethod (plain
-/// [[Call]]: `constructor_this` None, `new_target` undefined) and the
-/// bytecode arm of [[Construct]]. Class constructors refuse a plain call
-/// (§10.2.1 step 2); coroutine bodies are handed to `drive`; everything else
-/// parks the caller in a `SavedFrame` and switches registers to the callee.
+/// §10.2.1 flat entry: park caller, switch to callee
 pub fn call_function(
   state: State,
   fn_h: Handle,
@@ -309,13 +258,7 @@ pub fn call_function(
   }
 }
 
-// -- §15.10 tail calls --------------------------------------------------------
-
-/// §15.10 IsInTailPosition for a Call/CallMethod: the next opcode is Return,
-/// the caller is strict, no try handler is active in the caller, the caller
-/// is a plain [[Call]] frame (constructor frames need Return's fixups) and
-/// there IS a caller frame to return to (coroutine bodies run at
-/// call_stack == [] and never elide, §15.10.1 steps 5-7).
+/// §15.10 isintailposition
 pub fn is_tail_call(state: State, pc: Int, callee: FuncTemplate) -> Bool {
   let frame_eligible = case state.try_stack, state.call_stack {
     [], [_, ..] ->
@@ -335,9 +278,7 @@ pub fn is_tail_call(state: State, pc: Int, callee: FuncTemplate) -> Bool {
   }
 }
 
-/// §15.10.3 PrepareForTailCall: the caller has just been parked; discard
-/// that frame (and its depth/stack-frame entry) so the callee returns
-/// straight to the caller's caller.
+/// §15.10.3 drop the just-parked caller frame
 pub fn elide_tail_frame(new_state: State) -> State {
   case new_state.call_stack {
     [_caller, ..rest_frames] -> {
@@ -356,11 +297,6 @@ pub fn elide_tail_frame(new_state: State) -> State {
   }
 }
 
-// -- [[Call]] dispatch (Call / CallMethod / CallApply / CallMethodApply) ------
-
-/// Call `callee` with `this` and `args`; the result lands on `rest_stack`.
-/// Bytecode callees, bound chains and call/apply/Reflect.apply stay in the
-/// loop; anything else is one nested `rt/call.t_call`.
 pub fn call(
   state: State,
   callee: JsVal,
@@ -383,7 +319,7 @@ pub fn call(
       )
     True ->
       case classify(callee) {
-        // A dangling handle: `t_cell_get` names the use-after-free.
+        // dangling handle: t_cell_get names the use-after-free
         KHandle(h) ->
           call_cell(
             state,
@@ -399,7 +335,6 @@ pub fn call(
   }
 }
 
-/// `call` for a callee handle whose cell the caller has already read.
 pub fn call_cell(
   state: State,
   h: Handle,
@@ -437,7 +372,7 @@ pub fn call_cell(
         False -> res
       }
     }
-    // §10.4.1.1: [[BoundThis]] replaces `this`; bound args prepend.
+    // §10.4.1.1 bound call
     SObject(kind: KBound(target:, bound_this:, bound_args:), ..) ->
       call(
         state,
@@ -447,8 +382,7 @@ pub fn call_cell(
         rest_stack,
         drive,
       )
-    // §20.2.3.3 Function.prototype.call(thisArg, ...args): `this` is
-    // the target function.
+    // §20.2.3.3 function.prototype.call
     SObject(kind: KNative(tag: FunctionN(FunctionCall), ..), ..) -> {
       let #(this_arg, call_args) = case args {
         [t, ..rest] -> #(t, rest)
@@ -456,24 +390,21 @@ pub fn call_cell(
       }
       call(state, this, this_arg, call_args, rest_stack, drive)
     }
-    // §20.2.3.1 Function.prototype.apply(thisArg, argArray).
+    // §20.2.3.1 function.prototype.apply
     SObject(kind: KNative(tag: FunctionN(FunctionApply), ..), ..) -> {
       let #(this_arg, arg_array) = case args {
         [t, a, ..] -> #(t, a)
         [t] -> #(t, mk_undefined())
         [] -> #(mk_undefined(), mk_undefined())
       }
-      // Step 1: If IsCallable(func) is false, throw a TypeError.
       use <- require_callable(state, this)
-      // Step 3: undefined/null argArray → no args. Step 4:
-      // ? CreateListFromArrayLike(argArray).
       use #(call_args, state) <- result.try(case classify(arg_array) {
         KUndef | KNull -> Ok(#([], state))
         _ -> list_from_array_like(state, arg_array, rest_stack)
       })
       call(state, this, this_arg, call_args, rest_stack, drive)
     }
-    // §28.1.1 Reflect.apply(target, thisArgument, argumentsList).
+    // §28.1.1 reflect.apply
     SObject(kind: KNative(tag: ReflectN(ReflectApply), ..), ..) -> {
       let #(target, this_arg, args_list) = case args {
         [t, a, l, ..] -> #(t, a, l)
@@ -489,9 +420,7 @@ pub fn call_cell(
       ))
       call(state, target, this_arg, call_args, rest_stack, drive)
     }
-    // A closure from another realm runs with that realm current
-    // (§10.2.1.1 PrepareForOrdinaryCall step 5): one nested root
-    // activation, which `entry.run_root` enters the realm around.
+    // other-realm closure runs as a nested root activation
     SObject(kind: KNative(tag:, ..), ..) ->
       call_native(state, tag, mk_object(h), this, args, rest_stack)
     SObject(kind: KBytecode(..), ..)
@@ -502,9 +431,7 @@ pub fn call_cell(
   }
 }
 
-/// §7.3.20 CreateListFromArrayLike: a plain Array / Arguments cell is read
-/// straight off the heap (`ffi.list_of`); anything else takes the
-/// observable `[[Get]]` walk, which may throw (leaving `rest_stack`).
+/// §7.3.20 createlistfromarraylike
 fn list_from_array_like(
   state: State,
   array_like: JsVal,
@@ -520,9 +447,7 @@ fn list_from_array_like(
   }
 }
 
-/// A native method straight from the loop: the depth bracket `t_call` would
-/// take, around one guarded `dispatch_native`. At the depth limit the
-/// nested `t_call` raises the RangeError.
+/// at the depth limit the nested t_call raises rangeerror
 fn call_native(
   state: State,
   tag: NativeToken,
@@ -570,9 +495,7 @@ fn require_callable(
   }
 }
 
-/// The not-callable TypeError. The operand stack is left as-is:
-/// `unwind_to_catch` truncates to the handler's recorded depth, and no
-/// handler records a depth above a call's operands.
+/// stack left as is; unwind truncates it
 fn not_a_function(state: State, callee: JsVal) -> Result(State, StepExit) {
   state.throw_type_error(
     state,
@@ -580,9 +503,6 @@ fn not_a_function(state: State, callee: JsVal) -> Result(State, StepExit) {
   )
 }
 
-/// One nested runtime call: natives, compiled functions, proxies (a revoked
-/// or non-callable proxy throws in there). `t_call` owns the depth bracket
-/// and the catch.
 fn call_nested(
   state: State,
   callee: JsVal,
@@ -598,9 +518,7 @@ fn call_nested(
   }
 }
 
-/// Elements `0..length-1` of an Array (or Arguments) cell as a list, holes
-/// as `undefined`. The spread-call opcodes build their argument array with
-/// ArrayFrom/ArraySpread, so this is a plain element read.
+/// holes as undefined
 pub fn array_values(agent: Agent, v: JsVal) -> List(JsVal) {
   case classify(v) {
     KHandle(h) ->
@@ -626,11 +544,7 @@ fn padded_elements(
   }
 }
 
-// -- [[Construct]] (CallConstructor / CallConstructorApply) --------------------
-
-/// §10.1.13 OrdinaryCreateFromConstructor(newTarget, %Object.prototype%):
-/// the fresh receiver for a base-class / plain-function [[Construct]].
-/// `? Get(newTarget, "prototype")` is observable and may raise.
+/// §10.1.13, reading prototype may raise
 fn new_base_this(agent: Agent, new_target: JsVal) -> #(Handle, Agent) {
   let #(proto, agent) =
     rt_call.get_prototype_from_constructor(
@@ -641,11 +555,7 @@ fn new_base_this(agent: Agent, new_target: JsVal) -> #(Handle, Agent) {
   rt_obj.t_new_object(agent, Some(proto))
 }
 
-/// §10.2.2 [[Construct]] of `ctor` with `new_target` (== `ctor` for plain
-/// `new X()`, the derived class for `super()`, argv[2] for
-/// Reflect.construct). Bytecode constructors run flat; bound constructors
-/// unwrap; natives, compiled functions and proxies are one nested
-/// `rt/call.t_construct`.
+/// §10.2.2 construct
 pub fn construct(
   state: State,
   ctor: JsVal,
@@ -654,8 +564,7 @@ pub fn construct(
   new_target: JsVal,
   drive: Drive,
 ) -> Result(State, StepExit) {
-  // §7.2.4 IsConstructor gate — after ArgumentListEvaluation (§13.3.7.2
-  // step 5), so `super(sideEffect())` on a non-ctor parent still ran args.
+  // §7.2.4 gate runs after argument evaluation
   case rt_call.is_constructor(state.agent, ctor), classify(ctor) {
     True, KHandle(ctor_h) ->
       construct_handle(state, ctor_h, args, rest_stack, new_target, drive)
@@ -683,8 +592,7 @@ fn construct_handle(
       if realm == state.agent.realm.id
     ->
       case template.is_derived_constructor {
-        // Derived: `this` starts in TDZ; `super()` writes it. No
-        // constructor_this signals derived mode to Return.
+        // derived: this starts in tdz, super() writes it
         True ->
           call_function(
             state,
@@ -701,8 +609,6 @@ fn construct_handle(
             new_target,
             drive,
           )
-        // Base: §10.1.13 OrdinaryCreateFromConstructor — proto comes from
-        // ? Get(newTarget, "prototype"), observable for proxy newTargets.
         False -> {
           use #(new_obj, state) <- result.try(ffi.guarded(
             ffi.guard2(new_base_this, state.agent, new_target),
@@ -726,8 +632,7 @@ fn construct_handle(
           )
         }
       }
-    // §10.4.1.2 BoundFunction [[Construct]]: prepend bound args; if
-    // SameValue(F, newTarget) then newTarget ← target.
+    // §10.4.1.2 bound construct
     SObject(kind: KBound(target:, bound_args:, ..), ..) -> {
       let nt = case classify(new_target) {
         KHandle(nt_h) if nt_h == ctor_h -> mk_object(target)
@@ -767,10 +672,6 @@ fn construct_handle(
   }
 }
 
-// -- Return -----------------------------------------------------------------
-
-/// Read one of the frame's lexical pseudo-bindings, unboxing a captured
-/// (boxed) slot. `undefined` when the body owns no such slot.
 fn read_lexical_local(state: State, ref: lexical.LexicalRef) -> JsVal {
   case lexical.lexical_slot(state.func.lexical, ref) {
     None -> mk_undefined()
@@ -788,25 +689,17 @@ fn read_lexical_local(state: State, ref: lexical.LexicalRef) -> JsVal {
   }
 }
 
-/// The frame's current `this` binding (after any `super()` write).
 fn read_this_local(state: State) -> JsVal {
   read_lexical_local(state, lexical.RefThis)
 }
 
-/// §10.2.2 steps 10-12 return override for a frame that is unwinding with
-/// `return_value`: what the caller receives, or the error to throw (with the
-/// state holding it). `constructor_this` is the base-constructor receiver
-/// (`Some`) or `None` for plain calls and derived constructors (told apart by
-/// the returning template).
+/// §10.2.2 steps 10-12 constructor return override
 fn resolve_return(
   state: State,
   return_value: JsVal,
   constructor_this: Option(JsVal),
 ) -> Result(JsVal, #(JsVal, State)) {
   case constructor_this {
-    // Base constructor: an object result overrides `this`; anything else
-    // yields the constructed object. §13.3.7.1 SuperCall step 8
-    // BindThisValue is done at the call site by the emitted code.
     Some(constructed) ->
       case classify(return_value) {
         KHandle(_) -> Ok(return_value)
@@ -841,11 +734,6 @@ fn resolve_return(
   }
 }
 
-/// The Return opcode. Top of stack (or `undefined`) is the completion
-/// value. With no caller frame this activation is done: `Returned` carries
-/// the raw value and the final state to the driver. Otherwise apply the
-/// constructor return rules, restore the caller, push the value, and give
-/// the collector its chance if this landed back in the root activation.
 pub fn return_op(state: State) -> Result(State, StepExit) {
   let return_value = case state.stack {
     [v, ..] -> v
@@ -868,10 +756,6 @@ pub fn return_op(state: State) -> Result(State, StepExit) {
   }
 }
 
-/// Return `value` from a plain-call frame to its parked caller `saved`
-/// (`constructor_this` None, callee not a derived constructor, so
-/// `resolve_return` is the identity), giving the collector its chance.
-/// The callee's frame is popped whole, so its line is never recorded.
 fn return_to(
   agent: Agent,
   outer_depth: Int,
@@ -888,9 +772,6 @@ fn return_to(
   ))
 }
 
-/// Reinstate `saved` as the running frame (registers, depth, stack frame)
-/// with `stack` as its operand stack, under `agent` (the callee's frame
-/// already left).
 fn restore_frame(
   agent: Agent,
   outer_depth: Int,
@@ -932,9 +813,7 @@ fn restore_frame(
   )
 }
 
-/// Throw unwinding ran out of try handlers in this frame: drop back into
-/// the caller frame (its own try_stack intact) so the search continues
-/// there. `None` at the root of the activation.
+/// out of handlers here; continue the search in the caller
 pub fn unwind_frame(state: State) -> Option(State) {
   case state.call_stack {
     [] -> None
@@ -949,18 +828,12 @@ pub fn unwind_frame(state: State) -> Option(State) {
   }
 }
 
-// -- arguments / rest ---------------------------------------------------------
-
-/// CreateArguments: §10.4.4.7 unmapped when strict or the parameter list is
-/// non-simple (callee = %ThrowTypeError% accessor), else the sloppy form
-/// with a data `callee`. Pushes the object.
+/// §10.4.4.7 unmapped when strict or non-simple params
 pub fn create_arguments(state: State, simple_params: Bool) -> State {
   let #(obj, agent) = arguments_object(state, simple_params)
   State(..state, agent:, stack: [obj, ..state.stack], pc: state.pc + 1)
 }
 
-/// The arguments object for the running activation (§10.2.11 steps 22-23):
-/// unmapped for a strict function or a non-simple parameter list.
 pub fn arguments_object(state: State, simple_params: Bool) -> #(JsVal, Agent) {
   let callee = read_lexical_local(state, lexical.RefActiveFunc)
   case state.func.is_strict || !simple_params {
@@ -978,28 +851,18 @@ pub fn arguments_object(state: State, simple_params: Bool) -> #(JsVal, Agent) {
   }
 }
 
-/// CreateRestArray(from): a plain Array of the call args from `from` on.
 pub fn create_rest_array(state: State, from_index: Int) -> State {
   let #(arr, agent) =
     rt_obj.t_new_array(state.agent, list.drop(state.call_args, from_index))
   State(..state, agent:, stack: [arr, ..state.stack], pc: state.pc + 1)
 }
 
-// -- Root activations (JsOps.call_bytecode / construct_bytecode) ---------------
-
-/// How a root [[Construct]] entered through `JsOps` must treat its
-/// completion value once its own call stack has emptied.
 pub type RootKind {
   RootBaseConstruct(this: Handle)
   RootDerivedConstruct
 }
 
-/// The receiver a root [[Construct]] of a bytecode function starts with: TDZ
-/// for a derived constructor, a fresh object for a base one. §10.2.2 steps
-/// 1-3 run in the CALLER's context, before PrepareForOrdinaryCall switches
-/// realms, so this is taken before `entry.run_construct` enters the callee's
-/// realm: `Error` carries a throwing `newTarget.prototype` with the agent to
-/// re-raise it under, its error created from the caller's intrinsics.
+/// §10.2.2 steps 1-3, taken in the caller's realm
 pub fn root_this(
   agent: Agent,
   template: FuncTemplate,
@@ -1015,8 +878,7 @@ pub fn root_this(
   }
 }
 
-/// What a root activation takes from its bytecode cell: the same for every
-/// call of that cell, so a caller making many can build it once.
+/// same per cell, so callers making many build it once
 pub type RootCallee {
   RootCallee(
     callee: JsVal,
@@ -1029,7 +891,6 @@ pub type RootCallee {
   )
 }
 
-/// The `RootCallee` of the bytecode cell `fn_h`, its fields already read.
 pub fn root_callee(
   fn_h: Handle,
   template: FuncTemplate,
@@ -1052,14 +913,7 @@ pub fn root_callee(
   )
 }
 
-/// Lay out a fresh root activation of a bytecode cell for a nested [[Call]]
-/// (`new_target` undefined) or [[Construct]] arriving from a builtin or
-/// compiled frame, over the receiver prepared for it, taking its unit of
-/// `call_depth` and pushing its stack frame (the caller has checked the
-/// depth limit). `Error` carries a throw raised before the body could start
-/// (class-ctor-without-new, created in the callee's realm as §10.2.1 step
-/// 2's calleeContext has it) with the agent to re-raise it under; nothing is
-/// taken then.
+/// caller has already checked the depth limit
 pub fn enter_root(
   agent: Agent,
   callee: RootCallee,
@@ -1084,8 +938,6 @@ pub fn enter_root(
   }
 }
 
-/// `enter_root` past its class-constructor check: the activation's first
-/// State, its depth unit taken and stack frame pushed.
 pub fn root_state(
   agent: Agent,
   callee: RootCallee,
@@ -1128,7 +980,6 @@ pub fn root_state(
   )
 }
 
-/// The coroutine hand-off for a root activation `enter_root` laid out.
 pub fn root_coroutine(state: State, fn_h: Handle) -> CoroutineCall {
   CoroutineCall(
     fn_h:,
@@ -1142,10 +993,7 @@ pub fn root_coroutine(state: State, fn_h: Handle) -> CoroutineCall {
   )
 }
 
-/// A root [[Construct]]'s `Returned(value, final_state)` folded through the
-/// constructor return rules for `kind` (§10.2.2 steps 10-13). `final_state`
-/// is the activation's last state over the agent the caller resumed with:
-/// its `Error.stack` frame already popped and the caller's realm current.
+/// §10.2.2 steps 10-13 for a root construct
 pub fn finish_root(
   kind: RootKind,
   value: JsVal,

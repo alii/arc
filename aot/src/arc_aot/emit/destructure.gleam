@@ -1,9 +1,3 @@
-//// M15: JS destructuring Pattern → twocore IR binding. Faithful port of
-//// arc/compiler/emit.gleam:6038-6290 into the anf.Build monad style (per expr.gleam).
-//// D2 (Arch-A): NO St threading — emit_core owns that. R12 Result channel.
-//// SPEC row 1409/1410: array via get_iterator/iter_next/iter_rest/iter_close;
-//// object via require_object_coercible/get_prop/copy_data_props.
-
 import arc/compiler/scope
 import arc/parser/ast
 import arc_aot/emit/anf.{type Build}
@@ -15,11 +9,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set
 
-// ── Entry point (EmitDispatch.emit_pattern / emit_destructure — SPEC:1562) ───
-
-/// Bind (or assign, when mode = BindAssign) `pat` from evaluated `source`.
-/// The returned Expr is the Let-chain of stores, terminating in Values([undef])
-/// — callers let-bind and discard. Port emit.gleam:6038-6099.
 pub fn emit_pattern(
   e: Emitter2,
   pat: ast.Pattern,
@@ -33,8 +22,6 @@ pub fn emit_pattern(
   )
 }
 
-/// Recursive Build(Nil) dispatcher over ast.Pattern. `source` is already
-/// evaluated and let-bound. Port emit.gleam:6038-6099 emit_destructuring_bind.
 fn go(pat: ast.Pattern, source: ir.Value, mode: BindMode) -> Build(Nil) {
   case pat {
     ast.IdentifierPattern(name:, ..) -> bind_identifier(name, source, mode)
@@ -42,8 +29,6 @@ fn go(pat: ast.Pattern, source: ir.Value, mode: BindMode) -> Build(Nil) {
     ast.ObjectPattern(properties:) ->
       emit_object_pattern(properties, source, mode)
     ast.AssignmentPattern(left:, right: default_expr) -> {
-      // §8.6.3 Initializer: evaluate default only when source === undefined;
-      // a single-name binding's default gets NamedEvaluation.
       let named = case left {
         ast.IdentifierPattern(name:, ..) -> Some(name)
         _ -> None
@@ -59,16 +44,11 @@ fn go(pat: ast.Pattern, source: ir.Value, mode: BindMode) -> Build(Nil) {
       ))
       go(left, v, mode)
     }
-    // Rest element outside its array/object context — arrives here only via
-    // parameter-rest recursion (`function f(...x)` param slot). Identity bind.
+    // bare rest only reaches here as a rest parameter
     ast.RestElement(argument:) -> go(argument, source, mode)
   }
 }
 
-/// Store `v` into the identifier binding for `name` under `mode`. Port of
-/// emit.gleam:6044-6066 (declare_lex/init_lex/emit_var_put) via the Build seam.
-/// BindLet/BindConst mark the slot initialized (ends TDZ); BindVar/BindAssign
-/// route through expr.emit_identifier_put (const-assign guard, TDZ check).
 fn bind_identifier(name: String, v: ir.Value, mode: BindMode) -> Build(Nil) {
   case mode {
     state.BindAssign ->
@@ -127,15 +107,7 @@ fn bind_identifier(name: String, v: ir.Value, mode: BindMode) -> Build(Nil) {
   }
 }
 
-// ── Array pattern (§8.6.2 / §13.15.5.2 — SPEC row 1409) ─────────────────────
-
-/// Port emit.gleam:6823-6912 with_iterator_scaffold + emit_array_elements.
-/// GetIterator once → per element left-to-right: elision steps and discards;
-/// RestElement drains via iter_rest and marks drained; other patterns step,
-/// project value (tuple_get 1, R7), and recurse. IteratorClose fires after
-/// the loop only when the iterator was NOT drained by a rest.
-/// §8.6.2 step 3 / §7.4.11: a throwing element bind IteratorCloses (abrupt)
-/// unless a rest element already drained the iterator.
+// §8.6.2 close the iterator on abrupt unless a rest drained it
 fn emit_array_pattern(
   elements: List(Option(ast.Pattern)),
   source: ir.Value,
@@ -162,10 +134,6 @@ fn emit_array_pattern(
   }
 }
 
-/// Element loop. Returns whether a rest element drained the iterator (True →
-/// caller skips iter_close). Port emit.gleam:6863-6912 emit_array_pattern_elements
-/// + emit_array_elements collapsed — the 2core generic-el indirection is unneeded
-/// (assignment-pattern arrays live in expr.emit_array_assign_elements).
 fn emit_array_elements(
   elements: List(Option(ast.Pattern)),
   iter: ir.Value,
@@ -173,22 +141,16 @@ fn emit_array_elements(
 ) -> Build(Bool) {
   case elements {
     [] -> anf.pure(False)
-    // Elision — step iterator, discard #(done, value) pair.
     [None, ..rest] -> {
       use _ <- anf.then(anf.host("iter_next", [iter]))
       emit_array_elements(rest, iter, mode)
     }
-    // Rest — [[Done]] becomes true the moment draining starts (§14.3.3.3),
-    // so no iter_close on ANY completion after this. Recurse on the drained
-    // array, then report drained=True. Trailing elements after rest are a
-    // parser early error (§14.3.3 grammar), so `..` tail is dead here.
+    // done is true once draining starts, so no close after this
     [Some(ast.RestElement(argument:)), ..] -> {
       use arr <- anf.then(anf.host("iter_rest", [iter]))
       use _ <- anf.then(go(argument, arr, mode))
       anf.pure(True)
     }
-    // Ordinary element — step, project value (SPEC §8 iter_next → #(done,
-    // value); tuple_get 1 per R7), recurse, continue.
     [Some(p), ..rest] -> {
       use pair <- anf.then(anf.host("iter_next", [iter]))
       use v <- anf.then(anf.bind(anf.tuple_get(pair, 1)))
@@ -198,14 +160,7 @@ fn emit_array_elements(
   }
 }
 
-// ── Object pattern (§8.6.2 — SPEC row 1410) ─────────────────────────────────
-
-/// Port emit.gleam:6135-6250 (emit_object_pattern + emit_single_object_prop +
-/// emit_computed_key_prop). §8.6.2 step 1 RequireObjectCoercible BEFORE any
-/// key is evaluated — `let {} = null` / `f({}){}; f(null)` throw TypeError even
-/// on an empty pattern. `seen` accumulates evaluated keys (only when a rest is
-/// present — emit.gleam:6180) so `copy_data_props` can exclude them; each key
-/// is evaluated exactly ONCE (§13.15.5.2 step 2).
+// §8.6.2 requireobjectcoercible first, then each key evaluated once
 fn emit_object_pattern(
   properties: List(ast.PatternProperty),
   source: ir.Value,
@@ -222,9 +177,6 @@ fn emit_object_pattern(
   emit_object_props(properties, source, mode, has_rest, [])
 }
 
-/// Left-to-right fold over properties. `seen` (reverse order) is threaded only
-/// when `has_rest` (emit.gleam:6180-6187 — the stack machine stashed the key
-/// beneath src; here it's just a Gleam list of already-bound ir.Values).
 fn emit_object_props(
   props: List(ast.PatternProperty),
   source: ir.Value,
@@ -234,22 +186,11 @@ fn emit_object_props(
 ) -> Build(Nil) {
   case props {
     [] -> anf.pure(Nil)
-    // {a, b, ...rest} — §13.15.5.3 RestBindingInitialization. Build the
-    // exclusion list from every previously-evaluated key (source order), copy
-    // remaining own-enumerable data properties into a fresh object, then bind
-    // that to the rest identifier. RestProperty is always a plain identifier
-    // (§13.3.3 grammar — no nested pattern). Trailing props after rest are a
-    // parser early error, so `..` tail is dead here.
     [ast.RestProperty(name:, span:), ..] -> {
       use excl <- anf.then(anf.cons_list(list.reverse(seen)))
       use rest <- anf.then(anf.host("object_rest", [source, excl]))
       go(ast.IdentifierPattern(name:, span:), rest, mode)
     }
-    // Static / numeric / bigint / computed key — expr.emit_key evaluates the
-    // key ONCE (KeyComputed → emit expr then to_property_key) and returns the
-    // canonical wire-tuple, so `k` is reused for both the get_prop and the
-    // rest-exclusion set (single evaluation per §13.15.5.2 step 2, port of
-    // emit.gleam:6223 GetElem2). KeyPrivate cannot appear here (§13.3.3).
     [ast.PatternProperty(key:, value:, ..), ..tail] -> {
       use k <- anf.then(expr.emit_key(key))
       use v <- anf.then(anf.host("get_prop", [source, k]))

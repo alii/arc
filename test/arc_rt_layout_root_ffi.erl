@@ -3,8 +3,6 @@
 
 -include("arc/rt/arc_rt_layout.hrl").
 
-%% Macro table keyed by name so the Gleam test asserts the header, not a
-%% second copy of the numbers.
 idx(<<"AGENT_ARITY">>) -> ?AGENT_ARITY;
 idx(<<"AGENT_STORE">>) -> ?AGENT_STORE;
 idx(<<"AGENT_REALM">>) -> ?AGENT_REALM;
@@ -147,6 +145,4 @@ tuple_size(_) -> 0.
 
 dyn(X) -> X.
 
-%% ShapeSlots wire: a plain tuple.
 slots(L) -> list_to_tuple(L).
-

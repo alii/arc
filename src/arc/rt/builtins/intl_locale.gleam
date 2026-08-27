@@ -1,20 +1,9 @@
-//// Unicode BCP 47 locale identifier parsing and canonicalization.
-////
-//// Implements the UTS 35 `unicode_locale_id` grammar used by ECMA-402:
-////   IsStructurallyValidLanguageTag  (ES Intl §6.2.2)
-////   CanonicalizeUnicodeLocaleId     (ES Intl §6.2.3, UTS 35 §3.2.1)
-////
-//// Pure module — no heap/state dependencies. Alias data is the subset of
-//// CLDR supplementalMetadata that ECMA-402 implementations commonly ship
-//// (language/region/variant aliases, u-extension value aliases).
-
 import arc/internal/digits
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-/// A parsed unicode_locale_id.
 pub type LocaleId {
   LocaleId(
     language: String,
@@ -27,17 +16,10 @@ pub type LocaleId {
 }
 
 pub type Extension {
-  /// -u- extension: attributes then key/value keywords. Empty type = "".
   UExt(attributes: List(String), keywords: List(#(String, String)))
-  /// -t- extension: optional tlang plus (tkey, tvalue) fields.
   TExt(tlang: Option(LocaleId), fields: List(#(String, String)))
-  /// Any other singleton (a-z except t/u/x).
   OtherExt(singleton: String, subtags: List(String))
 }
-
-// ============================================================================
-// Character class helpers (ASCII only — non-ASCII rejected up front)
-// ============================================================================
 
 pub fn all_codepoints(s: String, pred: fn(Int) -> Bool) -> Bool {
   string.to_utf_codepoints(s)
@@ -60,23 +42,19 @@ fn len(s: String) -> Int {
   string.length(s)
 }
 
-/// unicode_language_subtag = alpha{2,3} | alpha{5,8}
 pub fn is_language(s: String) -> Bool {
   let n = len(s)
   is_alpha(s) && { n == 2 || n == 3 || { n >= 5 && n <= 8 } }
 }
 
-/// unicode_script_subtag = alpha{4}
 pub fn is_script(s: String) -> Bool {
   is_alpha(s) && len(s) == 4
 }
 
-/// unicode_region_subtag = alpha{2} | digit{3}
 pub fn is_region(s: String) -> Bool {
   { is_alpha(s) && len(s) == 2 } || { is_digits(s) && len(s) == 3 }
 }
 
-/// unicode_variant_subtag = alphanum{5,8} | digit alphanum{3}
 pub fn is_variant(s: String) -> Bool {
   let n = len(s)
   case is_alnum(s) {
@@ -93,7 +71,6 @@ pub fn is_variant(s: String) -> Bool {
   }
 }
 
-/// key = alphanum alpha
 fn is_ukey(s: String) -> Bool {
   len(s) == 2
   && case string.to_utf_codepoints(s) {
@@ -104,7 +81,6 @@ fn is_ukey(s: String) -> Bool {
   }
 }
 
-/// tkey = alpha digit
 fn is_tkey(s: String) -> Bool {
   len(s) == 2
   && case string.to_utf_codepoints(s) {
@@ -115,7 +91,6 @@ fn is_tkey(s: String) -> Bool {
   }
 }
 
-/// type/attribute/tvalue piece = alphanum{3,8}
 fn is_type_subtag(s: String) -> Bool {
   let n = len(s)
   is_alnum(s) && n >= 3 && n <= 8
@@ -125,20 +100,12 @@ fn is_singleton(s: String) -> Bool {
   len(s) == 1 && is_alnum(s)
 }
 
-// ============================================================================
-// Parsing
-// ============================================================================
-
-/// Parse + structural validation of a language tag (any case).
-/// Error(Nil) means structurally invalid → callers throw RangeError.
 pub fn parse(tag: String) -> Result(LocaleId, Nil) {
   let lowered = string.lowercase(tag)
-  // Reject non-ASCII / control chars up front; split("-") handles structure.
   case is_tag_charset(tag) {
     False -> Error(Nil)
     True -> {
       let parts = string.split(lowered, "-")
-      // Empty parts mean leading/trailing/double "-".
       case list.any(parts, fn(p) { p == "" }) {
         True -> Error(Nil)
         False -> parse_language(parts)
@@ -147,7 +114,6 @@ pub fn parse(tag: String) -> Result(LocaleId, Nil) {
   }
 }
 
-/// Only a-z A-Z 0-9 and "-" may appear in a tag.
 fn is_tag_charset(s: String) -> Bool {
   all_codepoints(s, fn(c) { digits.is_ascii_alnum_code(c) || c == 0x2d })
 }
@@ -213,7 +179,6 @@ fn parse_variants(
       case is_variant(p) {
         True ->
           case list.contains(acc, p) {
-            // Duplicate variant → structurally invalid.
             True -> Error(Nil)
             False -> parse_variants(rest, [p, ..acc])
           }
@@ -231,7 +196,6 @@ fn parse_extensions(
   case parts {
     [] -> Ok(#(list.reverse(exts), []))
     ["x", ..rest] ->
-      // pu_extensions = "x" (sep alphanum{1,8})+ — must be last, non-empty.
       case rest != [] && list.all(rest, fn(s) { is_alnum(s) && len(s) <= 8 }) {
         True -> Ok(#(list.reverse(exts), rest))
         False -> Error(Nil)
@@ -241,7 +205,6 @@ fn parse_extensions(
         False -> Error(Nil)
         True ->
           case list.contains(seen, s) {
-            // Duplicate singleton → structurally invalid.
             True -> Error(Nil)
             False -> {
               let #(body, after) = take_until_singleton(rest, [])
@@ -249,7 +212,6 @@ fn parse_extensions(
                 "u" -> parse_u_ext(body)
                 "t" -> parse_t_ext(body)
                 _ ->
-                  // other_extensions = singleton (sep alphanum{2,8})+
                   case
                     body != []
                     && list.all(body, fn(p) {
@@ -267,7 +229,6 @@ fn parse_extensions(
   }
 }
 
-/// Collect subtags until the next singleton (1-char subtag) or end.
 fn take_until_singleton(
   parts: List(String),
   acc: List(String),
@@ -282,12 +243,10 @@ fn take_until_singleton(
   }
 }
 
-/// unicode_locale_extensions = "u" ((sep keyword)+ | (sep attribute)+ (sep keyword)*)
 fn parse_u_ext(body: List(String)) -> Result(Extension, Nil) {
   case body {
     [] -> Error(Nil)
     _ -> {
-      // Leading attributes: alphanum{3,8} before the first key.
       let #(attributes, rest) =
         list.split_while(body, fn(p) { is_type_subtag(p) })
       use keywords <- result.try(parse_u_keywords(rest, []))
@@ -308,7 +267,7 @@ fn parse_u_keywords(
         True -> {
           let #(type_parts, after) =
             list.split_while(rest, fn(p) { is_type_subtag(p) })
-          // Duplicate ukeys are valid; the first occurrence wins (UTS 35).
+          // duplicate keys are valid, first wins
           case list.any(acc, fn(kv) { kv.0 == key }) {
             True -> parse_u_keywords(after, acc)
             False ->
@@ -322,7 +281,6 @@ fn parse_u_keywords(
   }
 }
 
-/// transformed_extensions = "t" ((sep tlang (sep tfield)*) | (sep tfield)+)
 fn parse_t_ext(body: List(String)) -> Result(Extension, Nil) {
   case body {
     [] -> Error(Nil)
@@ -333,7 +291,6 @@ fn parse_t_ext(body: List(String)) -> Result(Extension, Nil) {
           Ok(TExt(tlang: None, fields:))
         }
         False -> {
-          // tlang = language (script)? (region)? (variant)* — no extensions.
           let #(lang_parts, field_parts) =
             list.split_while(body, fn(p) { !is_tkey(p) })
           use tlang <- result.try(parse_tlang(lang_parts))
@@ -346,7 +303,6 @@ fn parse_t_ext(body: List(String)) -> Result(Extension, Nil) {
 
 fn parse_tlang(parts: List(String)) -> Result(LocaleId, Nil) {
   use lid <- result.try(parse_language(parts))
-  // tlang cannot itself contain extensions or private use.
   case lid.extensions, lid.private_use {
     [], [] -> Ok(lid)
     _, _ -> Error(Nil)
@@ -364,12 +320,10 @@ fn parse_t_fields(
         False -> Error(Nil)
         True ->
           case list.any(acc, fn(kv) { kv.0 == key }) {
-            // Duplicate tkey → structurally invalid.
             True -> Error(Nil)
             False -> {
               let #(value_parts, after) =
                 list.split_while(rest, fn(p) { is_type_subtag(p) })
-              // tfield requires at least one tvalue.
               case value_parts {
                 [] -> Error(Nil)
                 _ ->
@@ -384,26 +338,9 @@ fn parse_t_fields(
   }
 }
 
-// ============================================================================
-// Canonicalization — UTS 35 §3.2.1
-// ============================================================================
-
-/// CLDR languageAlias subset. Keys are already written in the exact lookup form
-/// `apply_language_alias` builds its candidates in — lowercase, subtags in
-/// language-script-region-variant order, so a lookup is a single pattern match
-/// on the compiled table and only the replacement of the row that actually
-/// matched is ever parsed. This runs on every canonicalization (every `Intl.*`
-/// construction, every `localeCompare(x, locale)`), so nothing here may parse a
-/// tag it does not need — nor build the table itself, which is why every alias
-/// table in this module is a `case`, not a dict assembled per lookup.
-///
-/// Rows whose key cannot be produced by the lookup at all — legacy tags whose
-/// subtags are not valid script/region/variant subtags, e.g. `zh-min-nan`,
-/// `zh-gan`, `no-bok` — are therefore not listed: `parse` rejects those tags
-/// outright, so no locale could ever match them.
+// keys are lowercase lang-script-region-variant, matched as built
 fn language_alias(key: String) -> Option(String) {
   case key {
-    // Full-tag / variant-inclusive aliases (legacy tags)
     "art-lojban" -> Some("jbo")
     "cel-gaulish" -> Some("xtg")
     "zh-guoyu" -> Some("zh")
@@ -415,7 +352,6 @@ fn language_alias(key: String) -> Option(String) {
     "sgn-gr" -> Some("gss")
     "sgn-de" -> Some("gsg")
     "sgn-nl" -> Some("dse")
-    // Deprecated ISO 639-1 codes
     "in" -> Some("id")
     "iw" -> Some("he")
     "ji" -> Some("yi")
@@ -424,7 +360,6 @@ fn language_alias(key: String) -> Option(String) {
     "tl" -> Some("fil")
     "twi" -> Some("ak")
     "tw" -> Some("ak")
-    // ISO 639-2/3 → 639-1 canonical replacements
     "aar" -> Some("aa")
     "abk" -> Some("ab")
     "afr" -> Some("af")
@@ -498,14 +433,12 @@ fn language_alias(key: String) -> Option(String) {
     "uzb" -> Some("uz")
     "vie" -> Some("vi")
     "zho" -> Some("zh")
-    // Legacy macro-language replacements with extra subtags
     "sh" -> Some("sr-latn")
     "cnr" -> Some("sr-me")
     _ -> None
   }
 }
 
-/// CLDR territoryAlias subset — single-replacement entries.
 fn region_alias(region: String) -> Option(String) {
   case region {
     "dd" -> Some("DE")
@@ -516,7 +449,6 @@ fn region_alias(region: String) -> Option(String) {
     "tp" -> Some("TL")
     "uk" -> Some("GB")
     "an" -> Some("CW")
-    // Overlong numeric codes for current territories
     "020" -> Some("AD")
     "024" -> Some("AO")
     "028" -> Some("AG")
@@ -716,15 +648,11 @@ fn region_alias(region: String) -> Option(String) {
   }
 }
 
-/// The successor states of the Soviet Union, in CLDR order. A `const` so the
-/// list is a literal in the compiled module rather than rebuilt per lookup.
 const soviet_successors = [
   "RU", "AM", "AZ", "BY", "EE", "GE", "KZ", "KG", "LV", "LT", "MD", "TJ", "TM",
   "UA", "UZ",
 ]
 
-/// CLDR territoryAlias subset — multi-replacement entries. The right
-/// replacement is picked via likely subtags (UTS 35 §3.2.1).
 fn region_multi_alias(region: String) -> Option(List(String)) {
   case region {
     "su" | "810" -> Some(soviet_successors)
@@ -737,7 +665,6 @@ fn region_multi_alias(region: String) -> Option(List(String)) {
   }
 }
 
-/// CLDR variantAlias subset.
 fn variant_alias(variant: String) -> Option(String) {
   case variant {
     "heploc" -> Some("alalc97")
@@ -746,8 +673,6 @@ fn variant_alias(variant: String) -> Option(String) {
   }
 }
 
-/// Likely-subtags subset: language or und-script → likely region.
-/// Used only to disambiguate multi-replacement territory aliases.
 fn likely_region(language: String, script: Option(String)) -> Option(String) {
   case option.map(script, string.lowercase) {
     Some(sc) ->
@@ -799,13 +724,10 @@ fn likely_region_of_script(script: String) -> Option(String) {
   }
 }
 
-/// Canonicalize a u-extension value supplied as a constructor option.
 pub fn canonical_u_value(key: String, v: String) -> String {
   u_type_alias(key, v)
 }
 
-/// u-extension type-value aliases per key (CLDR bcp47 data subset).
-/// Applied after lowercasing; "yes" → "true" only for boolean-ish col keys.
 fn u_type_alias(key: String, value: String) -> String {
   case key, value {
     "ca", "islamicc" -> "islamic-civil"
@@ -829,7 +751,6 @@ fn u_type_alias(key: String, value: String) -> String {
   }
 }
 
-/// CLDR bcp47 transform field value aliases (subset).
 fn t_value_alias(key: String, v: String) -> String {
   case key, v {
     "m0", "names" -> "prprname"
@@ -849,13 +770,9 @@ fn subdivision_alias(v: String) -> String {
   }
 }
 
-/// CanonicalizeUnicodeLocaleId — assumes `lid` came from `parse`.
 pub fn canonicalize(lid: LocaleId) -> LocaleId {
-  // 1. Alias replacement on language/script/region/variants.
   let lid = apply_aliases(lid)
-  // 2. Variants sorted.
   let lid = LocaleId(..lid, variants: list.sort(lid.variants, string.compare))
-  // 3. Canonicalize extensions: sort by singleton; canonicalize contents.
   let exts =
     lid.extensions
     |> list.map(canonicalize_extension)
@@ -882,7 +799,7 @@ fn canonicalize_extension(ext: Extension) -> Extension {
         |> list.map(fn(kv) {
           let #(k, v) = kv
           let v = u_type_alias(k, v)
-          // Any type value "true" is removed (UTS 35 §3.2.1).
+          // uts 35: "true" values are dropped
           let v = case v {
             "true" -> ""
             _ -> v
@@ -907,21 +824,12 @@ fn canonicalize_extension(ext: Extension) -> Extension {
   }
 }
 
-/// Replace language/region/variant aliases (UTS 35 §3.2.1 step "Replace
-/// aliases in the unicode_language_id and tlang").
 fn apply_aliases(lid: LocaleId) -> LocaleId {
   let lid = apply_language_alias(lid)
   let lid = apply_region_alias(lid)
   apply_variant_alias(lid)
 }
 
-/// Try language-alias keys from most to least specific. Components included
-/// in a matched key are consumed (replaced by the replacement's components).
-/// One alias-lookup key plus which of the original locale's fields the key
-/// spelled out (and which the replacement therefore consumes). Named fields,
-/// not a tuple of three same-typed booleans: transposing "consumes region" and
-/// "consumes variants" would otherwise compile cleanly and silently produce a
-/// wrong canonical tag.
 type AliasCandidate {
   AliasCandidate(
     key: String,
@@ -1009,8 +917,6 @@ fn find_language_alias(
   case candidates {
     [] -> lid
     [candidate, ..rest] ->
-      // Only the matched row's replacement is parsed; a row that fails to parse
-      // is a data bug in the table and simply does not alias.
       case
         language_alias(candidate.key)
         |> option.to_result(Nil)
@@ -1018,8 +924,6 @@ fn find_language_alias(
       {
         Error(Nil) -> find_language_alias(lid, rest)
         Ok(rep) -> {
-          // Replacement components fill in; original components are kept only
-          // when the key did not consume them and the replacement is silent.
           let script = case candidate.consumes_script {
             True -> rep.script
             False -> option.or(lid.script, rep.script)
@@ -1049,8 +953,6 @@ fn apply_region_alias(lid: LocaleId) -> LocaleId {
           case region_multi_alias(region) {
             None -> lid
             Some([first, ..] as reps) -> {
-              // Pick the likely territory for language(+script) if it is in
-              // the replacement list; otherwise the first entry.
               let likely = likely_region(lid.language, lid.script)
               let chosen = case likely {
                 Some(r) ->
@@ -1075,17 +977,10 @@ fn apply_variant_alias(lid: LocaleId) -> LocaleId {
   LocaleId(..lid, variants:)
 }
 
-// ============================================================================
-// Serialization
-// ============================================================================
-
-/// Render in canonical case: language lowercase, script Titlecase,
-/// region UPPERCASE, everything else lowercase.
 pub fn to_string(lid: LocaleId) -> String {
   base_name(lid) <> extensions_suffix(lid)
 }
 
-/// unicode_language_id part only (language-script-region-variants).
 pub fn base_name(lid: LocaleId) -> String {
   let parts =
     list.flatten([
@@ -1146,18 +1041,11 @@ pub fn titlecase(s: String) -> String {
   }
 }
 
-/// Full pipeline: parse → canonicalize → serialize.
 pub fn canonicalize_tag(tag: String) -> Result(String, Nil) {
   use lid <- result.map(parse(tag))
   to_string(canonicalize(lid))
 }
 
-// ============================================================================
-// Lookup matching (ES Intl §9.2.2 BestAvailableLocale / LookupMatcher)
-// ============================================================================
-
-/// Locales this engine ships formatting behavior for. Kept deliberately
-/// small: the formatters implement root/English ("en"-family) patterns.
 pub fn available_locales() -> List(String) {
   [
     "ar", "bg", "cs", "da", "de", "de-AT", "de-CH", "el", "en", "en-AU", "en-CA",
@@ -1173,7 +1061,6 @@ pub fn default_locale() -> String {
   "en-US"
 }
 
-/// §9.2.2 BestAvailableLocale — truncate by removing trailing subtags.
 pub fn best_available_locale(candidate: String) -> Option(String) {
   case list.contains(available_locales(), candidate) {
     True -> Some(candidate)
@@ -1191,7 +1078,6 @@ pub fn best_available_locale(candidate: String) -> Option(String) {
   }
 }
 
-/// Strip all extensions/private use, keeping only the unicode_language_id.
 pub fn strip_extensions(tag: String) -> String {
   case parse(tag) {
     Ok(lid) -> base_name(lid)
@@ -1199,11 +1085,6 @@ pub fn strip_extensions(tag: String) -> String {
   }
 }
 
-// ============================================================================
-// Likely subtags (UTS 35 §4.3, CLDR subset) — maximize / minimize
-// ============================================================================
-
-/// language → #(script, region) likely subtags.
 fn likely_subtags(language: String) -> Option(#(String, String)) {
   case language {
     "en" -> Some(#("latn", "us"))
@@ -1264,10 +1145,8 @@ fn likely_subtags(language: String) -> Option(#(String, String)) {
   }
 }
 
-/// AddLikelySubtags. Extensions/private use are preserved.
 pub fn maximize(lid: LocaleId) -> LocaleId {
   let lid = canonicalize(lid)
-  // Script/region interplay special cases (CLDR likelySubtags).
   let special = case lid.language, lid.script, lid.region {
     "zh", None, Some("tw") -> Some(#("hant", "tw"))
     "zh", None, Some("hk") -> Some(#("hant", "hk"))
@@ -1341,7 +1220,6 @@ fn und_script_language(script: String) -> String {
   }
 }
 
-/// RemoveLikelySubtags.
 pub fn minimize(lid: LocaleId) -> LocaleId {
   let max = maximize(lid)
   let base = LocaleId(..max, script: None, region: None)

@@ -1,8 +1,3 @@
-//// Milestone programs run through the new interpreter's entry points:
-//// arithmetic, locals, globals, control flow, strings, literals, property
-//// access, template literals, console output through the host print hook,
-//// and native → bytecode re-entry through the linked `JsOps`.
-
 import arc/compiler
 import arc/host_hooks.{type ConsoleLevel, HostHooks}
 import arc/interp/entry
@@ -33,7 +28,6 @@ fn printed() -> List(#(ConsoleLevel, String)) {
   rt_helpers.recorded()
 }
 
-/// Parse, compile and run `source` as a script on a fresh linked agent.
 fn run(source: String) -> #(rt_call.Completion, Agent) {
   run_on(agent(), source)
 }
@@ -42,8 +36,6 @@ fn run_on(st: Agent, source: String) -> #(rt_call.Completion, Agent) {
   run_with(st, source, compiler.compile)
 }
 
-/// REPL-style: top-level `let`/`const` become lexical GLOBALS, so they are
-/// visible to later scripts run on the same agent.
 fn repl_on(st: Agent, source: String) -> #(rt_call.Completion, Agent) {
   run_with(st, source, compiler.compile_repl)
 }
@@ -60,8 +52,6 @@ fn run_with(
   entry.run_script(st, template)
 }
 
-/// Run and return the normal completion value; a throw fails the test with
-/// the thrown value rendered.
 fn eval(source: String) -> #(JsVal, Agent) {
   case run(source) {
     #(NormalCompletion(v), st) -> #(v, st)
@@ -135,20 +125,17 @@ pub fn globals_test() {
   assert eval_int("h = 41; h + 1") == 42
   assert eval_string("let l = 'lex'; typeof globalThis.l") == "undefined"
   assert eval_string("const c = 'C'; c + c") == "CC"
-  // A global read of an undeclared name is a ReferenceError.
   let #(comp, st) = run("nope + 1")
   let assert ThrowCompletion(e) = comp
   assert string.contains(rt_inspect.inspect(st, e), "ReferenceError")
 }
 
 pub fn globals_persist_across_scripts_test() {
-  // Object-record bindings (var, function, implicit) live on globalThis.
   let #(_, st) =
     run_on(agent(), "var counter = 1; function bump() { return ++counter }")
   let #(comp, st) = run_on(st, "bump(); bump(); counter")
   let assert NormalCompletion(v) = comp
   assert classify(v) == KNum(JInt(3))
-  // Declarative-record bindings (let/const) live on the realm.
   let #(_, st) = repl_on(st, "let step = 10; const base = counter")
   let #(comp, _) = repl_on(st, "step = step + base; step")
   let assert NormalCompletion(v) = comp
@@ -195,8 +182,6 @@ pub fn thrown_value_is_a_completion_test() {
 }
 
 pub fn native_calls_back_into_bytecode_test() {
-  // Array.prototype.map is a runtime native: each callback invocation goes
-  // rt/call → JsOps.call_bytecode → entry.call_bytecode.
   assert eval_string("[1, 2, 3].map(x => x * 2).join(',')") == "2,4,6"
   assert eval_int(
       "function add(a, b) { return a + b } [1, 2, 3, 4].reduce(add, 0)",
@@ -205,8 +190,6 @@ pub fn native_calls_back_into_bytecode_test() {
 }
 
 pub fn construct_through_the_runtime_test() {
-  // Reflect.construct is a native: it reaches the bytecode constructor via
-  // JsOps.construct_bytecode.
   assert eval_int("function P(x) { this.x = x } Reflect.construct(P, [9]).x")
     == 9
   assert eval_string(
@@ -226,8 +209,6 @@ pub fn indirect_eval_and_function_constructor_test() {
 }
 
 pub fn run_bytecode_from_gleam_test() {
-  // An embedder holding a bytecode function value calls it through the
-  // runtime's one call entry, which lands in run_bytecode.
   let #(_, st) = run_on(agent(), "function triple(n) { return n * 3 }")
   let #(f, st) = rt_helpers.global(st, "triple")
   let #(v, _) =
@@ -240,8 +221,6 @@ pub fn run_bytecode_from_gleam_test() {
   assert classify(t) == classify(f)
 }
 
-/// After a script's synchronous part, run the microtask checkpoint the
-/// engine epilogue would, then read `expr`.
 fn drained(source: String, expr: String) -> String {
   let #(comp, st) = run_on(agent(), source)
   let assert NormalCompletion(_) = comp
@@ -259,8 +238,6 @@ fn drained(source: String, expr: String) -> String {
 }
 
 pub fn generators_resume_parked_frames_test() {
-  // The runtime's generator driver resumes the parked body through
-  // JsOps.resume_frame: next / return-through-finally / throw-into-catch.
   assert eval_string(
       "function* g() { yield 1; yield 2; return 3 } const it = g(); [it.next().value, it.next().value, it.next().value, it.next().done].join()",
     )
@@ -281,8 +258,6 @@ pub fn generators_resume_parked_frames_test() {
       "function* inner() { yield 'a'; yield 'b' } function* outer() { yield* inner(); yield 'c' } [...outer()].join()",
     )
     == "a,b,c"
-  // A generator called from a native goes through run_bytecode's coroutine
-  // start rather than the in-loop one.
   assert eval_string(
       "function* g(n) { yield n; yield n + 1 } [10, 20].flatMap(n => [...Reflect.apply(g, null, [n])]).join()",
     )
@@ -313,9 +288,6 @@ pub fn async_functions_resume_parked_frames_test() {
 }
 
 pub fn async_bodies_see_their_arguments_test() {
-  // An async function parks before its prologue runs, so `arguments` and a
-  // rest parameter are built from the frame's saved argument list on the
-  // first turn: in-loop, as an arrow, and entered from a native.
   assert drained(
       "var out = []; async function f(a, ...rest) { return [arguments.length, rest.length, rest.join('')].join('/') } f(1, 2, 3).then(v => out.push(v)); (async function () { return arguments[0] })('x').then(v => out.push(v)); (async (...r) => r.length)(1, 2, 3, 4).then(v => out.push(v)); [0].map(async function (a, ...r) { return arguments.length + ':' + r.length })[0].then(v => out.push(v))",
       "out.join()",
@@ -323,8 +295,6 @@ pub fn async_bodies_see_their_arguments_test() {
     == "3/2/23,x,4,3:2"
 }
 
-/// One run of `source` on an agent whose collector trips after a few dozen
-/// allocations, so a safepoint inside the script really collects.
 fn eval_small_heap(source: String) -> String {
   let st = rt_gc.t_collect(agent(), [])
   let st = Agent(..st, store: JsStore(..st.store, gc_threshold: 64))
@@ -340,11 +310,6 @@ fn eval_small_heap(source: String) -> String {
 }
 
 pub fn nested_starts_keep_the_caller_rooted_test() {
-  // A generator prologue, an async function's first turn and a proxied
-  // constructor body all run as nested activations straight out of the
-  // top-level frame. Each allocates past the threshold and returns through
-  // its own root; the caller's locals (and the async result promise) must
-  // survive.
   let prelude =
     "let keep = {tag: 'kept'}; let onstack = {o: 1}; function churn() { for (let i = 0; i < 300; i++) { let x = {i, a: [i]} } } "
   assert eval_small_heap(
@@ -370,8 +335,6 @@ pub fn nested_starts_keep_the_caller_rooted_test() {
 }
 
 pub fn nested_starts_are_depth_bounded_test() {
-  // Recursion through a coroutine start or a proxied [[Construct]] counts
-  // against the call-depth limit like any other call.
   assert eval_string(
       "var out; function* g(x = g()) { yield 1 } try { g(); out = 'unbounded' } catch (e) { out = e.constructor.name } out",
     )
@@ -383,8 +346,6 @@ pub fn nested_starts_are_depth_bounded_test() {
 }
 
 pub fn coroutine_roots_push_one_stack_frame_test() {
-  // A generator / async body entered from a native names itself once in
-  // `Error.stack`, the same as when it is called in-loop.
   let count = fn(stack: String, name: String) {
     list.length(string.split(stack, "at " <> name <> " ")) - 1
   }

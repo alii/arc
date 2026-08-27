@@ -1,9 +1,3 @@
-//// The pure, runner-independent pieces of a test262 execution run: file
-//// listing and TEST262_FILTER / TEST262_SHARD selection, strictness
-//// variants, harness include order, the pass-list snapshot format and the
-//// summary/JSON rendering. Shared by the interpreter runner (test/) and the
-//// AOT runner (aot/test/).
-
 import gleam/int
 import gleam/list
 import gleam/option.{type Option}
@@ -18,8 +12,6 @@ pub type StrictnessVariant {
   Strict
 }
 
-/// The variants a test must pass in: onlyStrict → strict only; noStrict,
-/// raw and module tests → non-strict only; everything else → both.
 pub fn variants_for_test(metadata: TestMetadata) -> List(StrictnessVariant) {
   let has = fn(flag) { list.contains(metadata.flags, flag) }
   case has("onlyStrict") {
@@ -32,7 +24,6 @@ pub fn variants_for_test(metadata: TestMetadata) -> List(StrictnessVariant) {
   }
 }
 
-/// The test source for a variant: strict prepends a "use strict" directive.
 pub fn variant_source(source: String, variant: StrictnessVariant) -> String {
   case variant {
     Strict -> "\"use strict\";\n" <> source
@@ -47,8 +38,6 @@ pub fn variant_label(variant: StrictnessVariant) -> String {
   }
 }
 
-/// Harness files a (non-raw) test needs, in evaluation order: assert.js,
-/// sta.js, doneprintHandle.js when async, then the test's own includes.
 pub fn harness_files(metadata: TestMetadata, is_async: Bool) -> List(String) {
   let default_harness = ["assert.js", "sta.js"]
   let async_harness = case is_async {
@@ -62,14 +51,9 @@ pub fn harness_files(metadata: TestMetadata, is_async: Bool) -> List(String) {
   list.flatten([default_harness, async_harness, extra])
 }
 
-/// Every test file under `dir` (relative paths, sorted), fixtures excluded.
 @external(erlang, "test_runner_ffi", "list_test_files")
 pub fn list_test_files(dir: String) -> List(String)
 
-/// Apply TEST262_LIST (a file of relative paths, one per line),
-/// TEST262_FILTER (substring) and TEST262_SHARD=k/n (bucket k of a
-/// deterministic n-way hash partition; every file lands in exactly one
-/// bucket) from the environment.
 pub fn select_files(files: List(String)) -> List(String) {
   let listed = case test_runner.get_env("TEST262_LIST") {
     Ok("") | Error(Nil) -> files
@@ -109,8 +93,6 @@ fn parse_shard(spec: String) -> #(Int, Int) {
 @external(erlang, "erlang", "phash2")
 fn phash2(term: String, range: Int) -> Int
 
-/// The env var, if any, that restricts this run to a subset of test262 — a
-/// snapshot written from such a run must not be committed as the full baseline.
 pub fn partial_run_env() -> Option(String) {
   ["TEST262_SHARD", "TEST262_FILTER", "TEST262_LIST"]
   |> list.find(fn(name) {
@@ -123,7 +105,6 @@ pub fn partial_run_env() -> Option(String) {
   |> option.from_result
 }
 
-/// Read a pass list (one relative path per line). Missing file → empty.
 pub fn load_pass_list(path: String) -> Set(String) {
   case simplifile.read(path) {
     Ok(content) ->
@@ -144,7 +125,6 @@ pub fn write_pass_list(
   simplifile.write(to: path, contents: string.join(paths, "\n") <> "\n")
 }
 
-/// `pass / tested` as a percentage with two decimals.
 pub fn format_percent(pass: Int, tested: Int) -> String {
   case tested > 0 {
     True -> {
@@ -162,7 +142,6 @@ pub fn format_percent(pass: Int, tested: Int) -> String {
   }
 }
 
-/// The RESULTS_FILE payload.
 pub fn results_json(pass: Int, fail: Int, skip: Int) -> String {
   let tested = pass + fail
   "{\"pass\":"
@@ -180,7 +159,6 @@ pub fn results_json(pass: Int, fail: Int, skip: Int) -> String {
   <> "}"
 }
 
-/// One-line run summary.
 pub fn summary_line(label: String, pass: Int, fail: Int, skip: Int) -> String {
   let tested = pass + fail
   label

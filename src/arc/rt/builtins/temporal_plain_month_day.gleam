@@ -1,10 +1,3 @@
-//// Temporal.PlainMonthDay (proposal-temporal §10): constructor, from, the
-//// prototype getters and methods, and ToTemporalMonthDay.
-////
-//// The slot holds the ISO date of the reference day (in the ISO reference
-//// year 1972, or the latest year on or before it in which the calendar
-//// month-day exists) plus the calendar. PlainMonthDay has no `compare`.
-
 import arc/internal/gregorian.{days_in_month}
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
@@ -43,10 +36,6 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
 
-// ============================================================================
-// Registration tables — the only place the JS-facing names are written down
-// ============================================================================
-
 const all_getters = [MdCalendarId, MdMonthCode, MdDay]
 
 const all_methods = [
@@ -59,9 +48,6 @@ const all_methods = [
   #(PmdToPlainDate, 1),
 ]
 
-/// Registration specs for `temporal.init_temporal_type`: the constructor
-/// token, `from` (no `compare`), the getters and the prototype methods, in
-/// prototype-registration order.
 pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
   TemporalN(TemporalPlainMonthDayCtor(protos:))
 }
@@ -106,12 +92,6 @@ pub fn method_name(m: PlainMonthDayMethod) -> String {
   }
 }
 
-// ============================================================================
-// Constructor and statics
-// ============================================================================
-
-/// new Temporal.PlainMonthDay(month, day [, calendar [, referenceISOYear]])
-/// — allocated on the intrinsic prototype; the caller applies NewTarget's.
 pub fn ctor(
   st: Agent,
   protos: TemporalProtos,
@@ -127,7 +107,6 @@ pub fn ctor(
   }
 }
 
-/// Temporal.PlainMonthDay.from
 pub fn static(
   st: Agent,
   name: TemporalStaticName,
@@ -144,20 +123,12 @@ pub fn static(
         )
       make_month_day_cal(st, protos, m, d, ry, cal)
     }
-    // PlainMonthDay has no `compare` per spec; init never registers this
-    // pair, so this arm is structurally unreachable — kept only because
-    // `TemporalStaticName` is exhaustive here.
+    // unreachable, plainmonthday has no compare
     TsCompare ->
       rt_val.t_throw_type_error(st, "Temporal.PlainMonthDay has no compare")
   }
 }
 
-// ============================================================================
-// ToTemporalMonthDay
-// ============================================================================
-
-/// ToTemporalMonthDay(item [, options]) → #(iso_month, iso_day,
-/// reference_year, calendar).
 pub fn to_temporal_month_day(
   st: Agent,
   item: JsVal,
@@ -189,8 +160,6 @@ pub fn to_temporal_month_day(
   }
 }
 
-/// Property bag → month-day. Fields: calendar, then day, era, eraYear,
-/// month, monthCode, year.
 fn month_day_from_bag(
   st: Agent,
   h: types.Handle,
@@ -202,21 +171,16 @@ fn month_day_from_bag(
   #(terr(st, resolve_calendar_month_day(cal, fields, overflow)), st)
 }
 
-/// What pins the month-day reference-year search to a specific year: an
-/// explicit calendar year in the fields, or — when there is none — the bare
-/// month code, which is then the only thing that can identify the month.
 type MdAnchor {
   AnchorFromYear
   AnchorFromCode(tcal.MonthCode)
 }
 
-/// Resolve month-day fields to #(iso_month, iso_day, iso_ref_year, calendar).
 pub fn resolve_calendar_month_day(
   cal: tcal.Calendar,
   f: DateFields,
   overflow: Overflow,
 ) -> Result(#(Int, Int, Int, tcal.Calendar), TErr) {
-  // Required fields (TypeError) first.
   use day <- result.try(case f.day {
     None -> Error(TypeE("day is required"))
     Some(d) -> Ok(d)
@@ -234,28 +198,19 @@ pub fn resolve_calendar_month_day(
         None -> option.unwrap(f.year, 1972)
       }
       use date <- result.try(regulate_iso_date(ref_year, m, day, overflow))
-      // Clamp day to the leap reference year's month length.
       let d2 = int.min(date.day, days_in_month(1972, date.month))
       Ok(#(date.month, d2, 1972, cal))
     }
     _ -> {
-      // What pins down the reference-year search. Absent a year, only a bare
-      // month code can: producing it here is what makes it available below,
-      // rather than re-deriving it from `f.month_code` and asserting.
-      // (For iso8601 the month maps straight to a code, so this is non-ISO
-      // only.)
       use anchor <- result.try(case has_year, f.month_code {
         True, _ -> Ok(AnchorFromYear)
         False, Some(mc) -> Ok(AnchorFromCode(mc))
         False, None ->
           Error(TypeE("either year or monthCode required with month"))
       })
-      // Determine the month code (and day) to anchor the reference search.
       use #(mc, day) <- result.try(case anchor {
         AnchorFromYear -> {
           use y <- result.try(resolve_calendar_year(cal, f))
-          // Bail out before any month-info computation when no date in the
-          // calendar year is within the representable ISO range.
           let year_first = tcal.date_to_epoch_days(cal, y, 1, 1)
           let year_last = tcal.date_to_epoch_days(cal, y + 1, 1, 1) - 1
           use Nil <- result.try(
@@ -269,7 +224,6 @@ pub fn resolve_calendar_month_day(
           Ok(#(tcal.month_code_of(cal, y, m), d))
         }
         AnchorFromCode(mc) -> {
-          // Validate the code can ever occur in this calendar.
           use Nil <- result.try(
             case tcal.month_for_code(cal, md_probe_year(cal, mc.leap), mc) {
               Error(tcal.NeverValid) ->
@@ -285,9 +239,7 @@ pub fn resolve_calendar_month_day(
           }
         }
       })
-      // chinese/dangi leap month-day pairs with no ISO reference year in the
-      // spec's reference-year table throw under reject; constrain falls back
-      // to the non-leap month (keeping the day).
+      // no iso reference year: reject throws, constrain uses non-leap month
       use mc <- result.try(
         case
           { cal == tcal.Chinese || cal == tcal.Dangi }
@@ -308,9 +260,7 @@ pub fn resolve_calendar_month_day(
   }
 }
 
-/// chinese/dangi leap-month + day combinations that have no ISO reference
-/// year (the "—" cells of the spec's chinese/dangi reference-year table):
-/// such dates are not known to occur between ISO years 1900 and 2035.
+// chinese/dangi leap month-days with no iso reference year
 fn chinese_ref_year_missing(num: Int, day: Int) -> Bool {
   case num {
     1 | 12 -> True
@@ -319,8 +269,6 @@ fn chinese_ref_year_missing(num: Int, day: Int) -> Bool {
   }
 }
 
-/// A year in which a leap/normal month code can plausibly occur, used only
-/// for NeverValid validation of bare month codes.
 fn md_probe_year(cal: tcal.Calendar, leap: Bool) -> Int {
   case cal == tcal.Hebrew && leap {
     True -> 5779
@@ -330,10 +278,6 @@ fn md_probe_year(cal: tcal.Calendar, leap: Bool) -> Int {
     }
   }
 }
-
-// ============================================================================
-// Getters
-// ============================================================================
 
 pub fn getter(
   st: Agent,
@@ -351,7 +295,6 @@ pub fn getter(
   #(month_day_field_cal(cal, m, d, ry, g), st)
 }
 
-/// Calendar-aware month-day field getter. m/d/ry are the slot's ISO date.
 fn month_day_field_cal(
   cal: tcal.Calendar,
   m: Int,
@@ -379,10 +322,6 @@ fn month_day_field_cal(
       }
   }
 }
-
-// ============================================================================
-// Methods
-// ============================================================================
 
 pub fn method(
   st: Agent,
@@ -424,7 +363,6 @@ pub fn method(
   }
 }
 
-/// Temporal.PlainMonthDay.prototype.with ( temporalMonthDayLike [, options] )
 fn with(
   st: Agent,
   protos: TemporalProtos,
@@ -438,7 +376,6 @@ fn with(
   let #(fields, st) = read_date_fields(st, bag, cal)
   require_nonempty_fields(st, fields == no_date_fields)
   let #(overflow, st) = validated_overflow(st, helpers.arg_at(args, 1))
-  // Merge with the existing month-day's calendar fields.
   let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(ry, m, d)))
   let f = fields
   let f = case f.month != None || f.month_code != None {
@@ -457,7 +394,6 @@ fn with(
   make_month_day_cal(st, protos, md.0, md.1, md.2, md.3)
 }
 
-/// Temporal.PlainMonthDay.prototype.toPlainDate ( item )
 fn to_plain_date(
   st: Agent,
   protos: TemporalProtos,
@@ -471,9 +407,6 @@ fn to_plain_date(
     KHandle(h) -> {
       let #(era, era_year, st) = read_era_fields(st, h, cal)
       let #(year, st) = read_int_field(st, h, "year")
-      // iso8601 has no eras, so an explicit `year` is the only thing
-      // that can satisfy the "year is required" rule for it — matching
-      // on the pair produces the year rather than asserting it later.
       case cal, year {
         tcal.Iso8601, Some(y) -> {
           let date = terr(st, regulate_iso_date(y, m, d, Constrain))
@@ -508,8 +441,6 @@ fn to_plain_date(
   }
 }
 
-/// Format a PlainMonthDay: non-ISO calendars always include the reference
-/// year and the calendar annotation.
 fn format_md_cal(
   m: Int,
   d: Int,

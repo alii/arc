@@ -1,15 +1,3 @@
-//// proposal-shadowrealm: `ShadowRealm ( )`, `ShadowRealm.prototype.
-//// evaluate` / `importValue`, and the wrapped function exotic objects that
-//// carry callables across the realm boundary, over `Agent.realms`.
-////
-//// A ShadowRealm instance owns a fresh realm (`ShadowRealmObj(realm:)` is
-//// the [[ShadowRealm]] slot, as a realm id). `evaluate` runs eval code in
-//// that realm and returns the completion value through GetWrappedValue:
-//// primitives cross the boundary as-is, callables cross as wrapped
-//// functions, anything else is a TypeError. The methods are realm-attributed
-//// natives: the realm id in their token is the spec's callerRealm, whose
-//// intrinsics brand every error and wrapper a call produces.
-
 import arc/compiler
 import arc/parser
 import arc/rt/async as rt_async
@@ -33,9 +21,6 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
 
-// ── init ────────────────────────────────────────────────────────────────────
-
-/// %ShadowRealm% + %ShadowRealm.prototype% for realm `realm`.
 pub fn init(
   st: Agent,
   object_proto: Handle,
@@ -62,8 +47,6 @@ pub fn init(
   #(shadow_realm, st)
 }
 
-// ── dispatch ────────────────────────────────────────────────────────────────
-
 pub fn dispatch(
   st: Agent,
   n: ShadowRealmNative,
@@ -80,8 +63,7 @@ pub fn dispatch(
   }
 }
 
-/// `create_realm` is `arc/rt/builtins.create_realm`, passed in because that
-/// module imports this one.
+/// create_realm passed in to avoid an import cycle
 pub fn dispatch_construct(
   st: Agent,
   n: ShadowRealmNative,
@@ -98,28 +80,22 @@ pub fn dispatch_construct(
   }
 }
 
-// ── ShadowRealm ( ) — §3.2.1 ────────────────────────────────────────────────
-
+// §3.2.1 shadowrealm ( )
 fn construct(
   st: Agent,
   fallback_proto: Handle,
   new_target: JsVal,
   create_realm: fn(Agent) -> #(Realm, Agent),
 ) -> #(Handle, Agent) {
-  // Step 2: OrdinaryCreateFromConstructor(NewTarget, "%ShadowRealm.prototype%",
-  // « [[ShadowRealm]] »). The realm record has no %ShadowRealm% slot, so the
-  // intrinsic default is the constructor's own.
   let #(proto, st) =
     rt_call.get_prototype_from_constructor(st, new_target, fn(_realm) {
       fallback_proto
     })
-  // Steps 3-12: CreateRealm + SetRealmGlobalObject + SetDefaultGlobalBindings.
   let #(realm, st) = create_realm(st)
   realm_ops.alloc_wrapper(st, ShadowRealmObj(realm: realm.id), proto)
 }
 
-/// §3.1.1 ValidateShadowRealmObject: read the [[ShadowRealm]] slot off
-/// `this`, else a TypeError naming `method`.
+// §3.1.1 validateshadowrealmobject
 fn require_shadow_realm(st: Agent, this: JsVal, method: String) -> Int {
   let brand =
     helpers.brand_of(st, this, fn(kind) {
@@ -138,10 +114,6 @@ fn require_shadow_realm(st: Agent, this: JsVal, method: String) -> Int {
   }
 }
 
-// ── crossing the boundary ───────────────────────────────────────────────────
-
-/// `rt_call.Completion` widened over the normal value. Same wire shape the
-/// call ffi builds.
 type Outcome(a) {
   NormalCompletion(a)
   ThrowCompletion(JsVal)
@@ -150,8 +122,6 @@ type Outcome(a) {
 @external(erlang, "arc_rt_call_ffi", "t_apply_protected")
 fn protected(st: Agent, body: fn(Agent) -> #(a, Agent)) -> #(Outcome(a), Agent)
 
-/// Run `body` with realm `id` current and catch what it throws; the current
-/// realm is current again either way.
 fn protected_in_realm(
   st: Agent,
   id: Int,
@@ -161,9 +131,7 @@ fn protected_in_realm(
   rt_realm.with_realm(st, id, body)
 }
 
-/// §2.3 GetWrappedValue ( targetRealm, value ). `from` is the realm the value
-/// comes from, `into` the one it is passed into (the new wrapper's [[Realm]]).
-/// The TypeError belongs to the running realm.
+// §2.3 getwrappedvalue, from source realm into target realm
 fn get_wrapped_value(
   st: Agent,
   from: Int,
@@ -184,7 +152,6 @@ fn get_wrapped_value(
   }
 }
 
-/// GetWrappedValue over a list.
 fn wrap_all(
   st: Agent,
   from: Int,
@@ -200,18 +167,14 @@ fn wrap_all(
   #(list.reverse(wrapped), st)
 }
 
-/// §2.2 WrappedFunctionCreate ( callerRealm, Target ), including
-/// CopyNameAndLength (§2.4). `into` is callerRealm: it supplies the wrapper's
-/// %Function.prototype% and becomes its [[Realm]]. Any abrupt completion from
-/// the observable Gets on Target becomes a TypeError of the running realm.
+// §2.2 wrappedfunctioncreate, into is callerrealm
 fn wrapped_function_create(
   st: Agent,
   from: Int,
   into: Int,
   target: Handle,
 ) -> #(JsVal, Agent) {
-  // The name/length Gets are observable (accessors run) — execute them in
-  // the target's own realm so getter code resolves globals there.
+  // run the observable gets in the target's realm
   let #(copied, st) =
     protected_in_realm(st, from, copy_name_and_length(_, target))
   case copied {
@@ -241,31 +204,24 @@ fn wrapped_function_create(
   }
 }
 
-/// §2.4 CopyNameAndLength ( F, Target ), steps 2-7 (the reads). Returns the
-/// name string and the length value to define on the wrapper.
+// §2.4 copynameandlength steps 2-7
 fn copy_name_and_length(
   st: Agent,
   target: Handle,
 ) -> #(#(String, JsVal), Agent) {
   let target_v = mk_object(target)
-  // Step 3: targetHasLength = ? HasOwnProperty(Target, "length") — via
-  // [[GetOwnProperty]] so proxy getOwnPropertyDescriptor traps (and revoked
-  // proxies) are observable.
   let #(len_desc, st) =
     rt_obj.t_get_own_property(st, target, StringKey(Named("length")))
-  // Step 4: if present, targetLen = ? Get(Target, "length").
   let #(len_val, st) = case len_desc {
     Some(_) -> rt_obj.t_get_prop(st, target_v, StringKey(Named("length")))
     None -> #(mk_undefined(), st)
   }
   let length = case classify(len_val) {
     KNum(JPosInf) -> mk_number(JPosInf)
-    // ToIntegerOrInfinity then max(L, 0); NaN and -∞ come out as 0.
     KNum(n) ->
       mk_number(JInt(int.max(rt_val.jsnum_to_integer_or_infinity(n), 0)))
     _ -> mk_number(JInt(0))
   }
-  // Step 6: targetName = ? Get(Target, "name"); non-strings become "".
   let #(name_val, st) =
     rt_obj.t_get_prop(st, target_v, StringKey(Named("name")))
   let name = case classify(name_val) {
@@ -275,21 +231,16 @@ fn copy_name_and_length(
   #(#(name, length), st)
 }
 
-// ── ShadowRealm.prototype.evaluate ( sourceText ) — §3.4.1 ──────────────────
-
+// §3.4.1 shadowrealm.prototype.evaluate
 fn evaluate(
   st: Agent,
   own_realm: Int,
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  // The method's own realm is the spec's callerRealm: it brands every error
-  // and wrapper this call produces (a built-in runs in its own realm even
-  // when invoked from another one).
+  // own realm is callerrealm and brands errors
   use st <- rt_realm.with_realm(st, own_realm)
-  // Step 2: ValidateShadowRealmObject(O).
   let eval_realm = require_shadow_realm(st, this, "evaluate")
-  // Step 3: If sourceText is not a String, throw a TypeError (no coercion).
   case classify(first_arg_or_undefined(args)) {
     KStr(source) -> perform_shadow_realm_eval(st, source, own_realm, eval_realm)
     _ ->
@@ -300,18 +251,13 @@ fn evaluate(
   }
 }
 
-/// §3.1.3 PerformShadowRealmEval ( sourceText, callerRealm, evalRealm ), with
-/// callerRealm current. Parse in the caller context (early errors surface as
-/// the caller realm's SyntaxError), execute as eval code in the shadow realm,
-/// wrap the completion value for the caller.
+// §3.1.3 performshadowrealmeval with callerrealm current
 fn perform_shadow_realm_eval(
   st: Agent,
   source: String,
   caller_realm: Int,
   eval_realm: Int,
 ) -> #(JsVal, Agent) {
-  // Steps 2-3: the early-error pass, here, before any context switch (the
-  // eval hook repeats it in the shadow realm, where it can no longer fail).
   let early = {
     use #(body, sb) <- result.try(
       parser.parse_script(source)
@@ -323,17 +269,13 @@ fn perform_shadow_realm_eval(
     Ok(_template) -> st
     Error(message) -> rt_val.t_throw_syntax_error(st, message)
   }
-  // Steps 8-21: evaluate the body in evalRealm's global environment, then
-  // make callerRealm current again whatever the completion.
   let #(outcome, st) =
     protected_in_realm(st, eval_realm, fn(st) {
       st.store.ops.eval_hook(st, source, IndirectEval)
     })
   case outcome {
-    // Step 23: GetWrappedValue(callerRealm, result.[[Value]]).
     NormalCompletion(v) -> get_wrapped_value(st, eval_realm, caller_realm, v)
-    // Step 22: an abrupt completion becomes the caller realm's TypeError
-    // (the original error must not cross the boundary).
+    // original error must not cross the boundary
     ThrowCompletion(thrown) ->
       rt_val.t_throw_type_error(
         st,
@@ -343,8 +285,7 @@ fn perform_shadow_realm_eval(
   }
 }
 
-// ── wrapped function exotic object [[Call]] — §2.1 ──────────────────────────
-
+// §2.1 wrapped function [[call]]
 fn wrapped_function_call(
   st: Agent,
   target: Handle,
@@ -353,23 +294,16 @@ fn wrapped_function_call(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  // Steps 1-3: the callee context's Realm is F.[[Realm]] — every TypeError
-  // thrown here belongs to the caller realm.
   use st <- rt_realm.with_realm(st, caller_realm)
-  // Steps 6-7: wrap thisArgument and every argument into the target realm.
   let #(wrapped_args, st) = wrap_all(st, caller_realm, target_realm, args)
   let #(wrapped_this, st) =
     get_wrapped_value(st, caller_realm, target_realm, this)
-  // Step 8: Call(target, wrappedThisArgument, wrappedArgs) in the target
-  // function's realm.
   let #(outcome, st) =
     protected_in_realm(st, target_realm, fn(st) {
       rt_call.t_call_checked(st, mk_object(target), wrapped_this, wrapped_args)
     })
   case outcome {
-    // Step 9: GetWrappedValue(callerRealm, result).
     NormalCompletion(v) -> get_wrapped_value(st, target_realm, caller_realm, v)
-    // Step 10: any abrupt completion becomes the caller realm's TypeError.
     ThrowCompletion(thrown) ->
       rt_val.t_throw_type_error(
         st,
@@ -378,25 +312,17 @@ fn wrapped_function_call(
   }
 }
 
-// ── ShadowRealm.prototype.importValue ( specifier, exportName ) — §3.4.2 ───
-
-/// Validation is fully implemented; the module load itself rejects, as a host
-/// without a ShadowRealm module loader does (HostLoadImportedModule may fail:
-/// the returned promise rejects with a TypeError).
+// §3.4.2 importvalue: validates, then always rejects (no module loader)
 fn import_value(
   st: Agent,
   own_realm: Int,
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  // As in evaluate: the method's own realm brands errors and the promise.
   use st <- rt_realm.with_realm(st, own_realm)
-  // Step 2: ValidateShadowRealmObject(O).
   let _eval_realm = require_shadow_realm(st, this, "importValue")
   let #(specifier, export_name) = helpers.two_args_or_undefined(args)
-  // Step 3: ToString(specifier) — abrupt completions propagate as-is.
   let #(_specifier, st) = rt_val.t_to_string(st, specifier)
-  // Step 4: exportName must already be a String (no coercion).
   case classify(export_name) {
     KStr(_) -> {
       let #(err, st) =

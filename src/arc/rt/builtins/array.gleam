@@ -1,14 +1,3 @@
-//// `rt_builtins/array` — Array constructor + Array.prototype (SPEC §7.M6).
-////
-//// **Return-tuple order is `#(V, St')` — value FIRST (R1).** Errors RAISE via
-//// `rt_val.t_throw_type_error/t_throw_range_error` (D7 — never `Result`).
-////
-//// `init` builds Array.prototype + Array (constructor) via `common.init_type`;
-//// `dispatch` routes every `ArrayNative` token to its impl. Shared iteration
-//// / element helpers (SkipHoles/VisitHoles, `iterate_array`, `fold_array`,
-//// `move_range`, JsElements ops) are local and follow a fast-path bulk-mutate
-//// pattern: one heap read, one JsElements transform, one heap write.
-
 import arc/rt/builtins/array_from_async
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -55,11 +44,8 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
-/// V8's message for the iteration-budget RangeError and for a rejected
-/// array-length Set. Shared with the string-size cap.
 const iteration_budget_msg = "Invalid array length"
 
-/// Throw the iteration-budget RangeError when `exhausted`.
 fn check_budget(st: Agent, exhausted: Bool) -> Nil {
   case exhausted {
     True -> rt_val.t_throw_range_error(st, iteration_budget_msg)
@@ -67,16 +53,11 @@ fn check_budget(st: Agent, exhausted: Bool) -> Nil {
   }
 }
 
-/// V8's standard ToObject failure message.
 const cannot_convert = "Cannot convert undefined or null to object"
 
-/// A JS integer as `JsVal` — port of arc `value.from_int`.
 @external(erlang, "arc_rt_val_ffi", "mk_int")
 fn from_int(n: Int) -> JsVal
 
-// ────────────────────────────── init / dispatch ─────────────────────────────
-
-/// Set up Array.prototype and the Array constructor (ES2024 §23.1).
 pub fn init(
   st: Agent,
   object_proto: Handle,
@@ -141,8 +122,6 @@ pub fn init(
       1,
       static_methods,
     )
-  // §23.1.3 "The Array prototype object … is an Array exotic object" with a
-  // "length" property whose initial value is +0.
   let st =
     rt_store.t_cell_update(st, bt.prototype, fn(slot) {
       case slot {
@@ -150,16 +129,11 @@ pub fn init(
         other -> other
       }
     })
-  // §23.1.3.40 Array.prototype[@@iterator] — the SAME function object as
-  // Array.prototype.values, not a fresh one.
   let assert Ok(#(_, DataProperty(value: values_fn, ..))) =
     list.find(proto_methods, fn(entry) { entry.0 == "values" })
   let #(values_prop, st) = common.builtin_property(st, values_fn)
   let st =
     common.add_symbol_property(st, bt.prototype, symbol_iterator, values_prop)
-  // §23.1.3.41 Array.prototype[@@unscopables]: a null-prototype object whose
-  // true-valued properties hide the listed methods from `with` scoping. Each
-  // entry {W:T,E:T,C:T}; the @@unscopables property itself {W:F,E:F,C:T}.
   let unscopable_names = [
     "at", "copyWithin", "entries", "fill", "find", "findIndex", "findLast",
     "findLastIndex", "flat", "flatMap", "includes", "keys", "toReversed",
@@ -210,12 +184,10 @@ pub fn init(
         seq:,
       ),
     )
-  // §23.1.2.5 Array[@@species] — a getter returning `this`.
   let st = common.add_species_accessor(st, fn_proto, bt.constructor, ReturnThis)
   #(bt, st)
 }
 
-/// Route an `ArrayNative` token to its implementation.
 pub fn dispatch(
   st: Agent,
   native: ArrayNative,
@@ -279,17 +251,10 @@ pub fn dispatch(
   }
 }
 
-// ──────────────────────── Array constructor / Array.isArray ──────────────────
-
-/// §23.1.1.1 Array ( ...values ). Called as function or constructor (identical).
-/// NewTarget / subclassing not yet supported — proto is always
-/// %Array.prototype%.
 fn construct(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
   case args {
-    // numberOfArgs = 0 → ArrayCreate(0, proto).
     [] -> alloc_array(st, 0, elements.new(), array_proto)
-    // numberOfArgs = 1 and the arg IS a Number → length path (§23.1.1.1 step 5).
     [only] ->
       case classify(only) {
         KNum(num) ->
@@ -307,10 +272,8 @@ fn construct(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
             JNan | JPosInf | JNegInf ->
               rt_val.t_throw_range_error(st, "Invalid array length")
           }
-        // Single non-Number arg → items path.
         _ -> alloc_array(st, 1, elements.from_list([only]), array_proto)
       }
-    // numberOfArgs ≥ 2 → items path.
     _ -> {
       let count = list.length(args)
       alloc_array(st, count, elements.from_list(args), array_proto)
@@ -318,8 +281,6 @@ fn construct(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §23.1.1.1 step 5.b: `Some(intLen)` iff `f` is integral in [0, 2^32-1].
-/// SameValueZero(0, -0) is true so `Array(-0)` is length-0 (`+. 0.0` normalizes).
 fn array_length_of_float(f: Float) -> Option(Int) {
   case rt_val.integral_int(f +. 0.0) {
     Some(n) if n >= 0 && n <= max_array_length -> Some(n)
@@ -327,14 +288,11 @@ fn array_length_of_float(f: Float) -> Option(Int) {
   }
 }
 
-/// §23.1.2.1 Array.isArray(arg): Return ? IsArray(arg).
 fn is_array(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(b, st) = try_is_array(st, helpers.first_arg_or_undefined(args))
   #(mk_bool(b), st)
 }
 
-/// §7.2.2 IsArray — pierces Proxy exotic objects to their [[ProxyTarget]]
-/// (step 3) and throws TypeError on a revoked proxy (step 3.a).
 fn try_is_array(st: Agent, v: JsVal) -> #(Bool, Agent) {
   case classify(v) {
     KHandle(h) -> #(is_array_handle(st, h), st)
@@ -358,7 +316,6 @@ fn is_array_handle(st: Agent, h: Handle) -> Bool {
   }
 }
 
-/// ArrayCreate + element population as one alloc.
 fn alloc_array(
   st: Agent,
   length: Int,
@@ -380,19 +337,12 @@ fn alloc_array(
   #(mk_object(h), st)
 }
 
-/// Allocate a plain dense array from a value list.
 fn alloc_array_list(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
   alloc_array(st, list.length(values), elements.from_list(values), array_proto)
 }
 
-// ──────────────────── shared prologue (ToObject / LengthOfArrayLike) ─────────
-
-/// ToObject (§7.1.18) — hands `cont` the normalized `this` (spec's O) and its
-/// handle. A real wrapper IS allocated for primitives so observable uses of it
-/// (fill/copyWithin's return, callback third argument) see the wrapper object.
-/// Reads NO properties (§23.1.5.1 CreateArrayIterator must not fire
-/// Get("length")).
+// reads no properties, must not get length
 fn to_object_ref(
   st: Agent,
   this: JsVal,
@@ -407,8 +357,6 @@ fn to_object_ref(
   }
 }
 
-/// LengthOfArrayLike (§7.3.18) — `? ToLength(? Get(O, "length"))` clamped to
-/// [0, 2^53-1]. Getter/proxy trap and ToLength's valueOf may throw (D7).
 fn require_length(
   st: Agent,
   ref: Handle,
@@ -418,8 +366,6 @@ fn require_length(
   cont(st, length)
 }
 
-/// ToObject then LengthOfArrayLike — the "intentionally generic" §23.1.3
-/// prologue. Captures `length` once, passes `(st, O, ref, length)` to `cont`.
 fn require_array(
   st: Agent,
   this: JsVal,
@@ -430,9 +376,6 @@ fn require_array(
   cont(st, obj, ref, length)
 }
 
-/// §7.3.18 LengthOfArrayLike with slot fast paths. Array/String kinds answer
-/// from [[ArrayLength]]/[[StringData]] (non-configurable, unobservable
-/// shortcut); everything else takes the full [[Get]]("length") + ToLength.
 fn object_length(st: Agent, ref: Handle) -> #(Int, Agent) {
   case rt_store.t_cell_get(st, ref) {
     SObject(kind: ArrayObj(length:), ..) -> #(length, st)
@@ -453,10 +396,7 @@ fn length_of_properties(
   props: Dict(PropertyKey, Property),
 ) -> #(Int, Agent) {
   case dict.get(props, Named("length")) {
-    // Own data property fast path — ToLength may still call valueOf on an
-    // object-valued length.
     Ok(DataProperty(value: len_val, ..)) -> rt_val.t_to_length(st, len_val)
-    // Accessor or missing: full [[Get]] then ToLength.
     _ -> {
       let #(len_val, st) =
         rt_obj.t_get_prop(st, mk_object(ref), StringKey(Named("length")))
@@ -465,10 +405,6 @@ fn length_of_properties(
   }
 }
 
-/// IsCallable check + argument extraction shared by the callback-driven
-/// Array.prototype methods (§7.2.3 IsCallable → TypeError).
-/// IsCallable(callbackfn) or a TypeError, then `cont` with the callback
-/// bound to `thisArg`: `call(st, [element, index, array])`.
 fn require_callback(
   st: Agent,
   args: List(JsVal),
@@ -479,7 +415,6 @@ fn require_callback(
   cont(st, call)
 }
 
-/// IsCallable(cb) or a TypeError, then `cont` with `cb` bound to `this`.
 fn require_bound(
   st: Agent,
   cb: JsVal,
@@ -497,8 +432,6 @@ fn not_a_function(st: Agent, v: JsVal) -> String {
   ty <> " is not a function"
 }
 
-/// §23.1.3.x common relative-index step: `ToIntegerOrInfinity(val)`, then
-/// `-∞→0`, `<0→max(len+rel,0)`, `≥0→min(rel,len)`. `undefined` → `default`.
 fn relative_index(
   st: Agent,
   val: JsVal,
@@ -518,8 +451,6 @@ fn relative_index(
   }
 }
 
-/// Shared steps 7-10 of splice / step 7 of toSpliced: `actualDeleteCount` +
-/// trailing items, determined by argument COUNT.
 fn try_delete_count(
   st: Agent,
   args: List(JsVal),
@@ -536,8 +467,6 @@ fn try_delete_count(
   }
 }
 
-/// §23.1.3.22 step 4 / §23.1.3.33 step 4a / §23.1.3.31 step 11: throw
-/// TypeError when `n > 2^53 - 1`. CPS so it composes with `use <-`.
 fn guard_safe_length(
   st: Agent,
   n: Int,
@@ -550,10 +479,6 @@ fn guard_safe_length(
   }
 }
 
-// ────────────────── generic Set / Delete / Get / Has by key ─────────────────
-
-/// §7.3.4 Set(O, P, V, true) — every mutating Array.prototype method uses
-/// Throw=true.
 fn generic_set(st: Agent, ref: Handle, key: PropertyKey, val: JsVal) -> Agent {
   let #(ok, st) = rt_obj.t_set_prop(st, mk_object(ref), StringKey(key), val)
   case ok {
@@ -568,17 +493,14 @@ fn generic_set(st: Agent, ref: Handle, key: PropertyKey, val: JsVal) -> Agent {
   }
 }
 
-/// Set(O, ! ToString(𝔽(idx)), V, true).
 fn generic_set_index(st: Agent, ref: Handle, idx: Int, val: JsVal) -> Agent {
   generic_set(st, ref, index_key(idx), val)
 }
 
-/// Set(O, "length", 𝔽(len), true).
 fn generic_set_length(st: Agent, ref: Handle, len: Int) -> Agent {
   generic_set(st, ref, Named("length"), from_int(len))
 }
 
-/// §7.3.9 DeletePropertyOrThrow(O, P).
 fn generic_delete(st: Agent, ref: Handle, key: PropertyKey) -> Agent {
   let #(ok, st) = rt_obj.t_delete_prop(st, ref, StringKey(key))
   case ok {
@@ -595,19 +517,14 @@ fn generic_delete_index(st: Agent, ref: Handle, idx: Int) -> Agent {
   generic_delete(st, ref, index_key(idx))
 }
 
-/// §7.3.11 HasProperty(O, ! ToString(𝔽(idx))). Trap-aware via `t_has_prop`.
 fn generic_has_op(st: Agent, ref: Handle, idx: Int) -> #(Bool, Agent) {
   rt_obj.t_has_prop(st, mk_object(ref), StringKey(index_key(idx)))
 }
 
-/// §7.3.2 Get(O, ! ToString(𝔽(idx))).
 fn generic_get(st: Agent, ref: Handle, idx: Int) -> #(JsVal, Agent) {
   rt_obj.t_get_prop(st, mk_object(ref), StringKey(index_key(idx)))
 }
 
-/// Fused HasProperty + Get by integer index. `Some(val)` when present (own or
-/// inherited); `None` on a hole. Own probe is one heap read via
-/// `t_get_own_index`; only a miss walks the prototype chain.
 fn get_index_if_present(
   st: Agent,
   this: JsVal,
@@ -641,7 +558,6 @@ fn probe_index_if_present(
   }
 }
 
-/// HasProperty on `proto`, then Get on `this`.
 fn inherited_index(
   st: Agent,
   proto: Handle,
@@ -674,11 +590,7 @@ fn generic_index_if_present(
   }
 }
 
-// ───────────── snapshot / bulk-mutate fast-path helpers ─────────────────────
-
-/// Snapshot a plain Array's element storage for bulk iteration. `Some` only
-/// when `this` is an ArrayObj whose props dict has NO Index keys — reading it
-/// then can't invoke user code.
+// some only when reading elements cannot run user code
 fn dense_snapshot(
   st: Agent,
   this: JsVal,
@@ -697,8 +609,6 @@ fn dense_snapshot(
   }
 }
 
-/// True when `props` carries any Index-keyed entry (accessor / attribute
-/// override) — forces the generic per-element path.
 fn properties_have_index_keys(props: Dict(PropertyKey, Property)) -> Bool {
   !dict.is_empty(props) && any_index_key(dict.keys(props))
 }
@@ -711,10 +621,6 @@ fn any_index_key(keys: List(PropertyKey)) -> Bool {
   }
 }
 
-/// Bulk in-place mutator fast path — one heap read, one `transform` on the
-/// #(elements, length), one heap write. `None` when ineligible (see arc doc).
-/// `from`/`to` bound the indices the operation reads or writes, so the
-/// own-props / prototype-chain probe only looks there.
 fn try_elements_fast_path(
   st: Agent,
   ref: Handle,
@@ -759,9 +665,6 @@ fn try_elements_fast_path(
   }
 }
 
-/// Push-specific fast path — checks only the target index range instead of
-/// scanning every proto-chain dict key. `slot` is the receiver's cell as
-/// already read by the caller.
 fn try_push_fast_path(
   st: Agent,
   ref: Handle,
@@ -808,12 +711,6 @@ fn try_push_fast_path(
   }
 }
 
-/// Nothing intercepts a plain element read or write at the indices
-/// `[start, start+count)` of an object with own `props` and prototype
-/// `proto`: no own Index key there, and up the chain only ordinary cells with
-/// no such key and no element there (a Proxy or non-empty String wrapper on
-/// the chain fails it). A handful of indices are probed directly; a wider
-/// range asks the cheaper superset question (any Index key / element at all).
 @external(erlang, "arc_rt_array_ffi", "index_free")
 fn index_free(
   st: Agent,
@@ -823,10 +720,6 @@ fn index_free(
   count: Int,
 ) -> Bool
 
-/// True when a hole at `idx` is shadowed by an inherited property — reading it
-/// would invoke [[Get]] on the prototype chain (possibly user code). A proxy
-/// on the chain answers True (its traps are user code) — arc's
-/// `has_property |> or_when_proxy(True)`.
 fn hole_is_inherited(
   st: Agent,
   proto: Option(Handle),
@@ -843,9 +736,6 @@ fn hole_is_inherited(
   }
 }
 
-// ──────────────────────────── Array.prototype.join ───────────────────────────
-
-/// §23.1.3.18 Array.prototype.join(separator).
 fn array_join(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use st, this, _ref, length <- require_array(st, this)
   let sep_val = case args {
@@ -864,8 +754,6 @@ fn array_join(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   #(mk_string(joined), st)
 }
 
-/// Bounded terminal step for join: refuse to materialize a result over
-/// `limits.max_string_bytes` (V8's "Invalid string length" RangeError).
 fn finish_join(
   st: Agent,
   acc: List(String),
@@ -877,8 +765,6 @@ fn finish_join(
   }
 }
 
-/// §23.1.3.18 step 6: fast path when a snapshot is safe, else generic
-/// per-element Get.
 fn join_elements(
   st: Agent,
   this: JsVal,
@@ -910,7 +796,6 @@ fn join_elements_snapshot(
       case elements.get_option(els, idx) {
         Some(v) ->
           case classify(v) {
-            // undefined / null → "".
             KUndef | KNull ->
               join_elements_snapshot(
                 st,
@@ -922,10 +807,9 @@ fn join_elements_snapshot(
                 separator,
                 ["", ..acc],
               )
-            // Object ToString may run user code — bail to generic from here.
+            // object tostring may run user code, bail to generic
             KHandle(_) ->
               join_elements_generic(st, this, idx, length, separator, acc)
-            // Primitive — ToString runs no user code.
             _ -> {
               let #(s, st) = rt_val.t_to_string(st, v)
               join_elements_snapshot(
@@ -988,11 +872,6 @@ fn join_elements_generic(
   }
 }
 
-// ───────────────────────── Array.prototype.push / pop ───────────────────────
-
-/// §23.1.3.22 Array.prototype.push(...items). A real Array receiver goes
-/// straight to the fast path from one cell read; everything else (and any
-/// fast-path miss) takes the generic ToObject / LengthOfArrayLike route.
 fn array_push(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let fast = case classify(this), args {
     KHandle(ref), [_, ..] ->
@@ -1010,7 +889,6 @@ fn array_push(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §23.1.3.22 steps 5-7.
 fn push_generic(
   st: Agent,
   ref: Handle,
@@ -1019,7 +897,6 @@ fn push_generic(
 ) -> #(Int, Agent) {
   case args {
     [] -> {
-      // §10.4.2.4: real Array + len ≥ 2^32 → RangeError on Set("length").
       let is_real_array = case rt_store.t_cell_get(st, ref) {
         SObject(kind: ArrayObj(..), ..) -> True
         _ -> False
@@ -1037,7 +914,6 @@ fn push_generic(
   }
 }
 
-/// §23.1.3.21 Array.prototype.pop().
 fn array_pop(st: Agent, this: JsVal, _args: List(JsVal)) -> #(JsVal, Agent) {
   use st, _this, ref, length <- require_array(st, this)
   case length == 0 {
@@ -1060,9 +936,6 @@ fn array_pop(st: Agent, this: JsVal, _args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// ─────────────────────── Array.prototype.shift / unshift ────────────────────
-
-/// §23.1.3.25 Array.prototype.shift().
 fn array_shift(st: Agent, this: JsVal, _args: List(JsVal)) -> #(JsVal, Agent) {
   use st, _this, ref, length <- require_array(st, this)
   case length == 0 {
@@ -1089,7 +962,6 @@ fn array_shift(st: Agent, this: JsVal, _args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// Shared spec-faithful element-move loop for shift / unshift / splice.
 fn move_range(
   st: Agent,
   ref: Handle,
@@ -1122,12 +994,11 @@ fn move_range(
   }
 }
 
-/// §23.1.3.33 Array.prototype.unshift(...items).
 fn array_unshift(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use st, this, ref, length <- require_array(st, this)
   let arg_count = list.length(args)
   let new_len = length + arg_count
-  // Step 5 runs even when argCount = 0; observable on objects/strings.
+  // step 5 runs even with no args, observable
   use <- bool.lazy_guard(arg_count == 0, fn() {
     case classify(this) {
       KHandle(_) | KStr(_) -> #(
@@ -1164,7 +1035,6 @@ fn array_unshift(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §23.1.3.33 steps 4d-4e / splice item-write loop.
 fn write_list_at(st: Agent, ref: Handle, idx: Int, vals: List(JsVal)) -> Agent {
   case vals {
     [] -> st
@@ -1173,9 +1043,6 @@ fn write_list_at(st: Agent, ref: Handle, idx: Int, vals: List(JsVal)) -> Agent {
   }
 }
 
-// ──────────────────────── Array.prototype.slice / concat ─────────────────────
-
-/// §23.1.3.25 Array.prototype.slice(start, end).
 fn array_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
   use st, this, _ref, length <- require_array(st, this)
@@ -1193,7 +1060,6 @@ fn array_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// Holes-read-as-undefined copy loop (toSpliced / with — §23.1.3.35 step 15.b.ii).
 fn copy_range_dense(
   st: Agent,
   src: JsVal,
@@ -1219,8 +1085,6 @@ fn copy_range_dense(
   }
 }
 
-/// §23.1.3.25 step 14 / §23.1.3.1 step 5.c.iii — HasProperty-gated copy loop
-/// (holes preserved). Snapshot fast path when safe.
 fn copy_range(
   st: Agent,
   src: JsVal,
@@ -1366,7 +1230,6 @@ fn copy_range_generic(
   }
 }
 
-/// §23.1.3.1 Array.prototype.concat(...items).
 fn array_concat(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
   use st, this, _this_ref <- to_object_ref(st, this)
@@ -1401,7 +1264,6 @@ fn concat_items(
   }
 }
 
-/// One §23.1.3.1 step-5 iteration for the plain-Array target.
 fn concat_item(
   st: Agent,
   elems: JsElements,
@@ -1479,7 +1341,6 @@ fn concat_items_species(
   }
 }
 
-/// §7.2.18 IsConcatSpreadable.
 fn is_concat_spreadable(st: Agent, item: JsVal) -> #(Bool, Agent) {
   case classify(item) {
     KHandle(_) -> {
@@ -1494,11 +1355,6 @@ fn is_concat_spreadable(st: Agent, item: JsVal) -> #(Bool, Agent) {
   }
 }
 
-// ─────────────────────── ArraySpeciesCreate + species writes ────────────────
-
-/// §9.4.2.3 ArraySpeciesCreate. `None` → caller allocates a plain Array
-/// (ArrayCreate's 2^32 - 1 length check, §10.4.2.2 step 1, is done here);
-/// `Some(target)` → a custom species constructor was invoked.
 fn array_species_create(
   st: Agent,
   original: JsVal,
@@ -1519,12 +1375,6 @@ fn array_species_create(
   }
 }
 
-/// §9.4.2.3 steps 3-7 decided from heap state alone: `slot` is a plain Array
-/// with no own "constructor", its [[Prototype]] is this realm's
-/// %Array.prototype% whose "constructor" is still a data property holding
-/// %Array%, and %Array%[@@species] is still a `ReturnThis` native getter.
-/// Every Get the protocol would run then yields %Array% without user code,
-/// which is the `None` (plain ArrayCreate) outcome.
 fn intrinsic_species(st: Agent, slot: JsSlot) -> Bool {
   let array = st.realm.array
   case slot {
@@ -1536,7 +1386,6 @@ fn intrinsic_species(st: Agent, slot: JsSlot) -> Bool {
   }
 }
 
-/// The observable §9.4.2.3 protocol.
 fn species_protocol(
   st: Agent,
   original: JsVal,
@@ -1548,11 +1397,9 @@ fn species_protocol(
       case is_arr {
         False -> #(None, st)
         True -> {
-          // Step 3: C = ? Get(originalArray, "constructor").
           let #(ctor, st) =
             rt_obj.t_get_prop(st, original, StringKey(Named("constructor")))
-          // Step 4: C is the %Array% of ANOTHER realm → C = undefined, so
-          // @@species is never read (create-proto-from-ctor-realm-array.js).
+          // other realm %Array% gives undefined, species never read
           let ctor = case classify(ctor) {
             KHandle(ctor_ref) ->
               case is_foreign_array_ctor(st, ctor_ref) {
@@ -1561,7 +1408,6 @@ fn species_protocol(
               }
             _ -> ctor
           }
-          // Step 5: C = ? Get(C, @@species); null → undefined.
           let #(ctor, st) = case classify(ctor) {
             KHandle(_) -> {
               let #(species, st) =
@@ -1578,7 +1424,6 @@ fn species_protocol(
             KHandle(ctor_ref) -> {
               let realm_array_ctor = st.realm.array.constructor
               case ctor_ref == realm_array_ctor {
-                // Intrinsic Array constructor → identical to a plain array.
                 True -> #(None, st)
                 False -> species_construct(st, ctor, length)
               }
@@ -1592,9 +1437,6 @@ fn species_protocol(
   }
 }
 
-/// Step 4 of ArraySpeciesCreate: `ctor` is SameValue with the intrinsic
-/// %Array% of a realm other than the running one (GetFunctionRealm of an
-/// intrinsic constructor is the realm that owns it).
 fn is_foreign_array_ctor(st: Agent, ctor: Handle) -> Bool {
   ctor != st.realm.array.constructor
   && list.any(dict.values(st.realms), fn(r) { r.array.constructor == ctor })
@@ -1616,8 +1458,6 @@ fn species_construct(
   }
 }
 
-/// CreateDataPropertyOrThrow(A, ! ToString(𝔽(k)), v) for each present index in
-/// [0, length), then optionally Set(A, "length", 𝔽(n), true).
 fn write_species_result(
   st: Agent,
   target: Handle,
@@ -1655,10 +1495,6 @@ fn write_species_elements(
   }
 }
 
-/// §7.3.6 CreateDataPropertyOrThrow(A, ! ToString(𝔽(idx)), val) via
-/// `t_define_own_prop` with {value, W:T, E:T, C:T}. Proxy targets go through
-/// the same [[DefineOwnProperty]] internal method (`t_define_own_prop` is
-/// trap-aware once M6 wires ProxyObj dispatch).
 fn write_species_element(
   st: Agent,
   target: Handle,
@@ -1686,9 +1522,6 @@ fn write_species_element(
   }
 }
 
-/// Interleaved HasProperty → Get → CreateDataPropertyOrThrow copy loop for
-/// species targets (splice / concat). An abrupt completion from the target's
-/// [[DefineOwnProperty]] terminates huge-length loops at the failing index.
 fn copy_range_to_species(
   st: Agent,
   src: JsVal,
@@ -1720,9 +1553,6 @@ fn copy_range_to_species(
   }
 }
 
-// ─────────────────────── Array.prototype.reverse / fill / at ────────────────
-
-/// §23.1.3.24 Array.prototype.reverse().
 fn array_reverse(
   st: Agent,
   this: JsVal,
@@ -1792,7 +1622,6 @@ fn get_index_if(
   }
 }
 
-/// §23.1.3.7 Array.prototype.fill(value[, start[, end]]).
 fn array_fill(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use st, this, ref, length <- require_array(st, this)
   let fill_val = helpers.first_arg_or_undefined(args)
@@ -1825,7 +1654,6 @@ fn fill_generic(
   }
 }
 
-/// §23.1.3.1 Array.prototype.at(index).
 fn array_at(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use st, this, _ref, length <- require_array(st, this)
   let #(raw, st) = rt_val.t_to_integer_or_infinity(st, helpers.arg_at(args, 0))
@@ -1839,9 +1667,6 @@ fn array_at(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// ────────────────────── indexOf / lastIndexOf / includes ────────────────────
-
-/// §23.1.3.16 Array.prototype.indexOf(searchElement[, fromIndex]).
 fn array_index_of(
   st: Agent,
   this: JsVal,
@@ -1850,7 +1675,6 @@ fn array_index_of(
   forward_search_driver(st, this, args, Strict, SkipHoles, from_int)
 }
 
-/// §23.1.3.15 Array.prototype.includes(searchElement[, fromIndex]).
 fn array_includes(
   st: Agent,
   this: JsVal,
@@ -1861,7 +1685,6 @@ fn array_includes(
   })
 }
 
-/// Shared prologue + dispatch for indexOf / includes.
 fn forward_search_driver(
   st: Agent,
   this: JsVal,
@@ -1892,7 +1715,6 @@ fn forward_search_driver(
   #(wrap(found), st)
 }
 
-/// §23.1.3.19 Array.prototype.lastIndexOf(searchElement[, fromIndex]).
 fn array_last_index_of(
   st: Agent,
   this: JsVal,
@@ -1901,8 +1723,7 @@ fn array_last_index_of(
   use st, this, _ref, length <- require_array(st, this)
   use <- bool.guard(length == 0, #(from_int(-1), st))
   let search = helpers.first_arg_or_undefined(args)
-  // Step 4-5: fromIndex present → ToIntegerOrInfinity; absent → len - 1.
-  // Checked by arg COUNT (explicitly passing undefined yields 0).
+  // checked by arg count, explicit undefined gives 0
   let #(from, st) = case args {
     [_, f, ..] -> rt_val.t_to_integer_or_infinity(st, f)
     _ -> #(length - 1, st)
@@ -1916,8 +1737,6 @@ fn array_last_index_of(
   #(from_int(found), st)
 }
 
-/// Which equality a search uses: indexOf/lastIndexOf IsStrictlyEqual,
-/// includes SameValueZero. An atom the FFI scan dispatches on.
 type EqMode {
   Strict
   SameValueZero
@@ -1930,8 +1749,6 @@ fn eq_apply(eq: EqMode, a: JsVal, b: JsVal) -> Bool {
   }
 }
 
-/// Outcome of an FFI element scan: a match, the first hole met (the caller
-/// decides whether it is inherited / counts as undefined), or exhausted.
 type Scan {
   Match(Int)
   HoleAt(Int)
@@ -2148,16 +1965,12 @@ fn search_backward_generic(
   }
 }
 
-// ─────────────────── iteration methods (forEach/map/filter/…) ───────────────
-
-/// How a scan treats holes: SkipHoles = HasProperty-gated (indexOf, forEach,
-/// every, some, sort); VisitHoles = plain Get (includes, find*, toSorted).
+// skip = hasproperty gated, visit = plain get
 type HoleMode {
   SkipHoles
   VisitHoles
 }
 
-/// Bidirectional loop direction. `bounds` builds the (start,end,step) triple.
 type Direction {
   Ascending
   Descending
@@ -2177,14 +1990,11 @@ fn step_of(dir: Direction) -> Int {
   }
 }
 
-/// Outcome of a predicate-driven scan.
 type FoundAt {
   Found(element: JsVal, index: Int)
   NotFound
 }
 
-/// Shared driver for forEach / every / some / find* — the "call cb per element,
-/// stop when `stop_on(result)`" pattern.
 fn iterate_array(
   st: Agent,
   arr: JsVal,
@@ -2274,12 +2084,9 @@ fn iterate_loop(
   }
 }
 
-/// A callback bound once per builtin call (`rt/call.t_bind_call`): takes
-/// the argument list, raises the callback's throw.
 type ElementFn =
   fn(Agent, List(JsVal)) -> #(JsVal, Agent)
 
-/// RangeError for a walk longer than the iteration budget.
 fn within_budget(st: Agent, length: Int, k: fn() -> a) -> a {
   case length > limits.max_iteration {
     True -> rt_val.t_throw_range_error(st, iteration_budget_msg)
@@ -2287,9 +2094,6 @@ fn within_budget(st: Agent, length: Int, k: fn() -> a) -> a {
   }
 }
 
-/// map over a receiver with no hole met yet: the mapped values collect in a
-/// list (newest first) that becomes the result's dense elements in one go.
-/// The first hole hands the rest of the walk to `map_sparse`.
 fn map_dense(
   st: Agent,
   arr: JsVal,
@@ -2334,7 +2138,6 @@ fn map_dense_step(
   map_dense(st, arr, idx + 1, length, cb, [result, ..acc])
 }
 
-/// map past a hole: each mapped value is set at its own index.
 fn map_sparse(
   st: Agent,
   arr: JsVal,
@@ -2365,7 +2168,6 @@ fn map_sparse(
   }
 }
 
-/// filter: the kept elements, newest first.
 fn filter_loop(
   st: Agent,
   arr: JsVal,
@@ -2405,7 +2207,6 @@ fn filter_step(
   }
 }
 
-/// §23.1.3.13 Array.prototype.forEach(callbackfn[, thisArg]).
 fn array_for_each(
   st: Agent,
   this: JsVal,
@@ -2440,7 +2241,6 @@ fn for_each_loop(
   }
 }
 
-/// §23.1.3.19 Array.prototype.map(callbackfn[, thisArg]).
 fn array_map(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use st, this, _ref, length <- require_array(st, this)
   use st, call <- require_callback(st, args)
@@ -2456,7 +2256,6 @@ fn array_map(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// Plain-array "Return A" — build a fresh Array from collected elements.
 fn finish_array(
   st: Agent,
   elements: JsElements,
@@ -2466,7 +2265,6 @@ fn finish_array(
   alloc_array(st, length, elements, array_proto)
 }
 
-/// §23.1.3.8 Array.prototype.filter(callbackfn[, thisArg]).
 fn array_filter(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use st, this, _ref, length <- require_array(st, this)
   use st, call <- require_callback(st, args)
@@ -2490,12 +2288,10 @@ fn array_filter(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §23.1.3.5 Array.prototype.every(callbackfn[, thisArg]).
 fn array_every(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   every_some(st, this, args, match_on: False)
 }
 
-/// §23.1.3.27 Array.prototype.some(callbackfn[, thisArg]).
 fn array_some(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   every_some(st, this, args, match_on: True)
 }
@@ -2524,7 +2320,6 @@ fn every_some(
   #(mk_bool(stopped_early == match_on), st)
 }
 
-/// §23.1.3.9.1 FindViaPredicate driver.
 fn find_via_predicate(
   st: Agent,
   this: JsVal,
@@ -2546,7 +2341,6 @@ fn find_via_predicate(
   cont(st, found)
 }
 
-/// §23.1.3.9 Array.prototype.find.
 fn array_find(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use st, found <- find_via_predicate(st, this, args, Ascending)
   case found {
@@ -2555,7 +2349,6 @@ fn array_find(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §23.1.3.10 Array.prototype.findIndex.
 fn array_find_index(
   st: Agent,
   this: JsVal,
@@ -2568,7 +2361,6 @@ fn array_find_index(
   }
 }
 
-/// §23.1.3.11 Array.prototype.findLast.
 fn array_find_last(
   st: Agent,
   this: JsVal,
@@ -2581,7 +2373,6 @@ fn array_find_last(
   }
 }
 
-/// §23.1.3.12 Array.prototype.findLastIndex.
 fn array_find_last_index(
   st: Agent,
   this: JsVal,
@@ -2594,14 +2385,10 @@ fn array_find_last_index(
   }
 }
 
-// ─────────────────────────── reduce / reduceRight ───────────────────────────
-
-/// §23.1.3.23 Array.prototype.reduce(callbackfn[, initialValue]).
 fn array_reduce(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   reduce_impl(st, this, args, Ascending)
 }
 
-/// §23.1.3.24 Array.prototype.reduceRight(callbackfn[, initialValue]).
 fn array_reduce_right(
   st: Agent,
   this: JsVal,
@@ -2707,9 +2494,6 @@ fn reduce_loop(
   }
 }
 
-// ────────────────────────── sort / toSorted ─────────────────────────────────
-
-/// §23.1.3.30 Array.prototype.sort(comparefn).
 fn array_sort(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use st, comparefn <- with_comparefn(st, args)
   use st, this, ref, length <- require_array(st, this)
@@ -2722,7 +2506,6 @@ fn array_sort(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// Shared step-1 comparefn validation for sort / toSorted.
 fn with_comparefn(
   st: Agent,
   args: List(JsVal),
@@ -2770,8 +2553,6 @@ fn sort_with_comparefn(
   #(this, write_sort_result(st, ref, all_values, length, 0))
 }
 
-/// Collect defined elements + undefined-count. `hole_mode`: sort() SkipHoles;
-/// toSorted() VisitHoles (holes → trailing undefineds).
 fn collect_sort_elements(
   st: Agent,
   this: JsVal,
@@ -2952,8 +2733,6 @@ fn stringify_elements(
   }
 }
 
-/// Stable bottom-up merge sort with a state-threaded effectful comparator.
-/// `list.reverse(items)` followed by `tail`, in one pass.
 @external(erlang, "lists", "reverse")
 fn reverse_onto(items: List(a), tail: List(a)) -> List(a)
 
@@ -3016,7 +2795,6 @@ fn merge_two(
     _, [] -> #(reverse_onto(acc, left), st)
     [l, ..ls], [r, ..rs] -> {
       let #(res, st) = comparefn(st, [l, r])
-      // §23.1.3.30.2 step 6: v = ? ToNumber(v); step 7: NaN → +0.
       let #(num, st) = rt_val.t_to_number(st, res)
       let cmp = case num {
         JInt(n) -> int.to_float(n)
@@ -3033,7 +2811,6 @@ fn merge_two(
   }
 }
 
-/// §23.1.3.30 steps 7-8: write sorted values back, delete trailing holes.
 fn write_sort_result(
   st: Agent,
   ref: Handle,
@@ -3069,7 +2846,6 @@ fn delete_trailing(st: Agent, ref: Handle, idx: Int, length: Int) -> Agent {
   }
 }
 
-/// §23.1.3.34 Array.prototype.toSorted([comparefn]).
 fn array_to_sorted(
   st: Agent,
   this: JsVal,
@@ -3112,9 +2888,6 @@ fn sort_values_default(
   #(list.map(sorted, fn(pair) { pair.1 }), st)
 }
 
-// ─────────────────────────────── splice ──────────────────────────────────────
-
-/// §23.1.3.31 Array.prototype.splice(start, deleteCount, ...items).
 fn array_splice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
   use st, this, ref, length <- require_array(st, this)
@@ -3126,7 +2899,6 @@ fn array_splice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let new_length = length - actual_delete_count + item_count
   use <- guard_safe_length(st, new_length)
   let #(species, st) = array_species_create(st, this, actual_delete_count)
-  // Steps 12-13: build removed array A.
   let #(removed_arr, st) = case species {
     None -> {
       let #(removed_elements, st) =
@@ -3225,9 +2997,6 @@ fn splice_shift(
   }
 }
 
-// ────────────────────────── flat / flatMap ──────────────────────────────────
-
-/// §23.1.3.13 Array.prototype.flat([depth]).
 fn array_flat(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use st, this, _ref, length <- require_array(st, this)
   let #(depth, st) = case classify(helpers.first_arg_or_undefined(args)) {
@@ -3260,7 +3029,7 @@ fn finish_species_list(
   }
 }
 
-/// §23.1.3.13.1 FlattenIntoArray. Returns elements REVERSED (caller reverses).
+// returns elements reversed
 fn flatten_into(
   st: Agent,
   src: JsVal,
@@ -3314,7 +3083,6 @@ fn flatten_into_loop(
   }
 }
 
-/// §23.1.3.14 Array.prototype.flatMap(mapperFunction[, thisArg]).
 fn array_flat_map(
   st: Agent,
   this: JsVal,
@@ -3359,9 +3127,6 @@ fn flat_map_loop(
   }
 }
 
-// ─────────────────────────── copyWithin ─────────────────────────────────────
-
-/// §23.1.3.4 Array.prototype.copyWithin(target, start[, end]).
 fn array_copy_within(
   st: Agent,
   this: JsVal,
@@ -3432,21 +3197,11 @@ fn copy_within_step(
   }
 }
 
-// ───────────────────────── Array.from / Array.of ────────────────────────────
-
-/// Where Array.from / Array.of put their elements: a plain Array built at
-/// the end from the collected values, or an object obtained from
-/// Construct(C, ...) (§23.1.2.1 step 5.c / 7.b, §23.1.2.3 step 4.a) that
-/// receives each element via CreateDataPropertyOrThrow and a final
-/// Set(A, "length", len, true).
 type FromTarget {
   FreshArray(acc: List(JsVal))
   Constructed(target: Handle)
 }
 
-/// `this` is a constructor other than this realm's %Array% — the only case
-/// where the constructed-object path is observable. A non-constructor `this`
-/// falls into ArrayCreate, which is exactly the fresh-array path.
 fn from_target(
   st: Agent,
   ctor: JsVal,
@@ -3465,7 +3220,6 @@ fn from_target(
   }
 }
 
-/// CreateDataPropertyOrThrow(A, ! ToString(𝔽(idx)), v).
 fn from_put(
   st: Agent,
   t: FromTarget,
@@ -3478,7 +3232,6 @@ fn from_put(
   }
 }
 
-/// Set(A, "length", 𝔽(len), true), then A.
 fn from_finish(st: Agent, t: FromTarget, len: Int) -> #(JsVal, Agent) {
   case t {
     FreshArray(acc) -> {
@@ -3492,7 +3245,6 @@ fn from_finish(st: Agent, t: FromTarget, len: Int) -> #(JsVal, Agent) {
   }
 }
 
-/// §23.1.2.1 Array.from(items[, mapFn[, thisArg]]).
 fn array_from(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(items_val, map_fn, this_arg) = helpers.three_args_or_undefined(args)
   case classify(map_fn) {
@@ -3519,8 +3271,6 @@ fn array_from_array_like(
       rt_val.t_throw_type_error(st, "Cannot create array from " <> ty)
     }
     _ -> {
-      // §23.1.2.1 step 4: usingIterator = ? GetMethod(items, @@iterator) —
-      // GetV goes through the primitive's prototype for strings/etc.
       let #(iter_method, st) =
         rt_obj.t_get_prop(st, items, SymbolKey(symbol_iterator))
       case classify(iter_method) {
@@ -3531,7 +3281,6 @@ fn array_from_array_like(
           use <- bool.lazy_guard(length > limits.max_iteration, fn() {
             rt_val.t_throw_range_error(st, iteration_budget_msg)
           })
-          // Step 7.b: A = ? Construct(C, « 𝔽(len) »).
           let #(target, st) = from_target(st, ctor, [from_int(length)])
           array_from_loop(st, items, 0, length, map_fn, this_arg, target)
         }
@@ -3539,7 +3288,6 @@ fn array_from_array_like(
           use m <- helpers.require_callable(st, iter_method, fn() {
             not_a_function(st, iter_method)
           })
-          // Step 5.c: A = ? Construct(C).
           let #(target, st) = from_target(st, ctor, [])
           array_from_iterator(st, items, m, map_fn, this_arg, target)
         }
@@ -3574,7 +3322,6 @@ fn array_from_iterator_loop(
     None -> from_finish(st, target, k)
     Some(item) -> {
       let #(mapped, st) = case map_fn {
-        // §23.1.2.1 step 5.e.vi-vii: IfAbruptCloseIterator on mapFn.
         Some(mf) -> {
           use mapped, st <- iter_protocol.or_close(st, rec.iterator, fn(st) {
             rt_call.t_call_checked(st, mf, this_arg, [item, from_int(k)])
@@ -3583,7 +3330,6 @@ fn array_from_iterator_loop(
         }
         None -> #(item, st)
       }
-      // Step 5.e.viii-ix: IfAbruptCloseIterator on the define.
       let #(target, st) = case target {
         FreshArray(_) -> from_put(st, target, k, mapped)
         Constructed(t) -> {
@@ -3622,10 +3368,8 @@ fn array_from_loop(
   }
 }
 
-/// §23.1.2.3 Array.of(...items).
 fn array_of(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let len = list.length(args)
-  // Step 4.a: A = ? Construct(C, « 𝔽(len) »).
   let #(target, st) = from_target(st, this, [from_int(len)])
   let #(target, st) =
     list.index_fold(args, #(target, st), fn(acc, item, k) {
@@ -3635,9 +3379,6 @@ fn array_of(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   from_finish(st, target, len)
 }
 
-// ───────────────── change-array-by-copy: toSpliced / with / toReversed ──────
-
-/// §23.1.3.35 Array.prototype.toSpliced(start, skipCount, ...items).
 fn array_to_spliced(
   st: Agent,
   this: JsVal,
@@ -3663,7 +3404,6 @@ fn array_to_spliced(
   alloc_array(st, new_len, new_elements, array_proto)
 }
 
-/// §23.1.3.39 Array.prototype.with(index, value).
 fn array_with(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
   use st, this, _ref, length <- require_array(st, this)
@@ -3699,7 +3439,6 @@ fn array_with(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §23.1.3.33 Array.prototype.toReversed().
 fn array_to_reversed(
   st: Agent,
   this: JsVal,
@@ -3729,9 +3468,6 @@ fn collect_elements_descending(
   }
 }
 
-// ─────────────────── toString / toLocaleString / iterators ──────────────────
-
-/// §23.1.3.36 Array.prototype.toString().
 fn array_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   use st, array, ref <- to_object_ref(st, this)
   let #(func, st) =
@@ -3739,12 +3475,10 @@ fn array_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let #(callable, st) = rt_val.t_is_callable(st, func)
   case callable {
     True -> rt_call.t_call_checked(st, func, array, [])
-    // Step 3: non-callable join → the %Object.prototype.toString% INTRINSIC.
     False -> object_builtin.dispatch(st, ObjectPrototypeToString, array, [])
   }
 }
 
-/// §23.1.3.30 Array.prototype.toLocaleString().
 fn array_to_locale_string(
   st: Agent,
   this: JsVal,
@@ -3817,8 +3551,7 @@ fn to_locale_string_loop(
   }
 }
 
-/// §23.1.5.1 CreateArrayIterator(array, kind). ToObject only — must NOT read
-/// `length` (the iterator re-reads it lazily each step).
+// toobject only, must not read length
 fn create_array_iterator(
   st: Agent,
   this: JsVal,
@@ -3841,17 +3574,14 @@ fn create_array_iterator(
   #(mk_object(iter_ref), st)
 }
 
-/// §23.1.3.16 Array.prototype.keys().
 fn array_keys(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   create_array_iterator(st, this, ArrayIterKeys)
 }
 
-/// §23.1.3.37 Array.prototype.values().
 fn array_values(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   create_array_iterator(st, this, ArrayIterValues)
 }
 
-/// §23.1.3.4 Array.prototype.entries().
 fn array_entries(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   create_array_iterator(st, this, ArrayIterEntries)
 }

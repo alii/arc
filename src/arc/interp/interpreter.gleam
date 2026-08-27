@@ -1,15 +1,3 @@
-//// The interpreter's dispatch loop. `fast_loop` runs the two dozen common
-//// opcodes on bare registers (pc, stack, locals, agent) over the total
-//// `arc_interp_*_ffi` kernels; a kernel `miss`, an empty stack, or any other
-//// opcode materialises the full `State` once and goes through `step`, the
-//// one big instruction dispatcher. `step` is Result-based: `Ok(state)`
-//// continues, `Error(StepExit)` leaves the loop with a throw, the frame's
-//// return, a coroutine suspension, or a broken engine invariant. Runtime
-//// calls that can raise a JS exception go through the `guardN` shims so a
-//// raise comes back as `Error(Threw(..))` carrying the agent it raised
-//// with; throws the interpreter originates itself allocate the error with
-//// the non-raising `JsOps.new_error` and return `Error(Threw(..))` too.
-
 import arc/bytecode/binop
 import arc/bytecode/key
 import arc/bytecode/lexical
@@ -92,52 +80,23 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
-// ============================================================================
-// Outcome
-// ============================================================================
-
-/// How one run of the loop ended: the activation completed (normally or
-/// with an uncaught throw), or a coroutine body parked at `yield`/`await`.
-/// Only coroutine drivers may see `Suspended`; every other caller narrows
-/// through `execute_to_completion`.
 pub type Outcome {
   Completed(Completion)
   Suspended(state.SuspendKind, JsVal)
 }
 
-// ============================================================================
-// Wire-level probes for the fast loop
-// ============================================================================
-// The few tests `fast_loop` needs beyond the `arc_interp_*_ffi` kernels, kept
-// as total term probes so a hit never goes through `classify`.
-
-/// `v` is the Handle wire form `{js_cell, N}`.
 @external(erlang, "arc_rt_store_ffi", "is_handle")
 fn is_handle(v: JsVal) -> Bool
 
-/// A value already proven a handle by `is_handle` (the object wire form IS
-/// the Handle record).
 fn as_handle(v: JsVal) -> Handle {
   ffi.handle([v])
 }
 
-/// A classified binary operator on two primitives; `instanceof`, `in`,
-/// `**` and anything observable answer `miss`.
 @external(erlang, "arc_rt_ops_ffi", "binop")
 fn k_binop(kind: opcode.Classified, a: JsVal, b: JsVal) -> JsVal
 
-/// §13.5.8 `~` on an integer-valued Number (ToInt32 wrap inline); anything
-/// else answers `miss`.
 @external(erlang, "arc_rt_ops_ffi", "t_bitnot_fast")
 fn k_bitnot(a: JsVal) -> JsVal
-
-// ============================================================================
-// Guarded runtime calls
-// ============================================================================
-// `rtN(state, f, ..)` applies the raise-capable, value-first runtime function
-// `f(agent, ..) -> #(v, Agent)` under the `guardN` shim and adopts whichever
-// agent comes back. `f` is always a module function, so the shim receives a
-// literal remote fun and no closure is built per call.
 
 fn rt2(
   state: State,
@@ -238,11 +197,6 @@ fn rt_unit6(
   |> drop_nil
 }
 
-// ============================================================================
-// Small value helpers
-// ============================================================================
-
-/// The runtime key of a compile-time canonical key carried by an opcode.
 fn okey(k: key.PropertyKey) -> ObjectKey {
   case k {
     key.Named(name) -> StringKey(Named(name))
@@ -284,13 +238,6 @@ fn inspect(state: State, v: JsVal) -> String {
   rt_inspect.inspect(state.agent, v)
 }
 
-// ============================================================================
-// Closures
-// ============================================================================
-
-/// Allocate the function object for `template` closed over `captured`
-/// (gathered per the template's `env_descriptors`), created by code of parse
-/// `unit`. Shared by the MakeClosure opcode and module link-time hoisting.
 pub fn make_closure(
   agent: Agent,
   template: FuncTemplate,
@@ -305,8 +252,6 @@ pub fn make_closure(
   )
 }
 
-/// §15.4.4 MakeMethod(F, homeObject) on a function cell: bytecode and
-/// compiled closures carry [[HomeObject]] in their kind. No-op otherwise.
 fn set_home_object(agent: Agent, fn_h: Handle, home: Handle) -> Agent {
   rt_store.t_cell_update(agent, fn_h, fn(slot) {
     case slot {
@@ -319,8 +264,6 @@ fn set_home_object(agent: Agent, fn_h: Handle, home: Handle) -> Agent {
   })
 }
 
-/// MakeMethod when the function is a stack value: only object values can be
-/// closures.
 fn make_method(agent: Agent, func: JsVal, target: Handle) -> Agent {
   case classify(func) {
     KHandle(fn_h) -> set_home_object(agent, fn_h, target)
@@ -328,19 +271,6 @@ fn make_method(agent: Agent, func: JsVal, target: Handle) -> Agent {
   }
 }
 
-// ============================================================================
-// Explicit resource management (`using` / `await using`)
-// ============================================================================
-// The compiler lowers a using-scope to anonymous disposer slots plus an
-// inline DisposeResources sequence; the interpreter supplies
-// CreateDisposableResource. A disposer never reaches user code, so it is
-// whichever callable performs Dispose(V, hint, method) exactly.
-
-/// CreateDisposableResource(V, hint): undefined for a null/undefined
-/// resource, else the 0-argument callable the lowered dispose sequence
-/// invokes. GetDisposeMethod(V, hint) reads the method once, here, never
-/// again at dispose time. Raises TypeError for a primitive or method-less
-/// resource. `unit` is the running activation's, for the fallback closure.
 fn using_disposer(
   agent: Agent,
   val: JsVal,
@@ -348,11 +278,7 @@ fn using_disposer(
   unit: Int,
 ) -> #(JsVal, Agent) {
   case classify(val) {
-    // Step 1.a: V is null or undefined → method undefined.
     KUndef | KNull -> #(mk_undefined(), agent)
-    // GetDisposeMethod(V, hint): sync-dispose reads @@dispose; async-dispose
-    // reads @@asyncDispose, falling back to the step 1.b.ii wrapper around
-    // @@dispose. A missing method is a TypeError.
     KHandle(_) -> {
       let #(method, agent) =
         disposable_stack.get_dispose_method(agent, val, is_async:)
@@ -362,7 +288,6 @@ fn using_disposer(
           sync_fallback_disposer(agent, m, val, unit)
       }
     }
-    // Step 1.b.i: a primitive resource is a TypeError.
     _ ->
       rt_val.t_throw_type_error(
         agent,
@@ -371,9 +296,7 @@ fn using_disposer(
   }
 }
 
-/// Dispose(V, hint, method) is Call(method, V): a bound function of `method`
-/// with `this` = V and no arguments. Built directly rather than through
-/// Function.prototype.bind so the method's own `length`/`name` are not read.
+// built directly so the method's length/name are never read
 fn direct_disposer(
   agent: Agent,
   method: Handle,
@@ -394,11 +317,6 @@ fn direct_disposer(
   #(mk_object(h), agent)
 }
 
-/// GetDisposeMethod step 1.b.ii: the async-dispose fallback onto a sync
-/// @@dispose calls the method, discards its result and settles a fresh
-/// promise with undefined (rejecting it instead if the call threw). That is
-/// an async function whose body is `Call(method, V)`, so it is one: an
-/// async arrow closed over [method, V].
 fn sync_fallback_disposer(
   agent: Agent,
   method: Handle,
@@ -415,14 +333,12 @@ fn sync_fallback_disposer(
   #(mk_object(h), agent)
 }
 
-/// `async () => { Call(locals[0], locals[1]) }` over a two-value env.
 fn sync_fallback_template() -> FuncTemplate {
   bytecode.FuncTemplate(
     name: None,
     arity: 0,
     length: 0,
     local_count: 2,
-    // [V] → [method, V] → CallMethod(0) → drop → undefined → Return.
     bytecode: tuple_array.from_list([
       GetLocal(1),
       GetLocal(0),
@@ -448,13 +364,6 @@ fn sync_fallback_template() -> FuncTemplate {
   )
 }
 
-// ============================================================================
-// Global lexical bindings (§9.1.1.4 declarative half)
-// ============================================================================
-// A realm's global `let`/`const`/`class` bindings live on its Realm Record
-// (`Realm.lexical_globals`), never on the global object. A binding in its
-// temporal dead zone holds the TDZ sentinel.
-
 fn lex_lookup(agent: Agent, name: String) -> Option(LexicalGlobal) {
   dict.get(agent.realm.lexical_globals, name) |> option.from_result
 }
@@ -470,18 +379,10 @@ fn lex_write(agent: Agent, name: String, binding: LexicalGlobal) -> Agent {
   )
 }
 
-/// `v` is the TDZ sentinel.
 @external(erlang, "arc_interp_ffi", "is_tdz")
 fn is_tdz(v: JsVal) -> Bool
 
-// ============================================================================
-// Execution loop
-// ============================================================================
-
-/// Main execution loop. Tail-recursive. Returns the outcome (completion or
-/// suspension) and the final state. Every bytecode stream ends with a
-/// sentinel Return (appended by resolve.gleam), so fetch uses unchecked
-/// element/2. Termination flows through the Return handler.
+// every stream ends in a sentinel return, so fetch is unchecked
 pub fn execute_inner(
   state: State,
   drive: Drive,
@@ -498,10 +399,6 @@ pub fn execute_inner(
   )
 }
 
-/// Run the loop over a frame that cannot resume a suspension: top-level
-/// scripts, eval frames, re-entrant calls from natives. Narrows `Completed`
-/// to its `Completion`; a `Suspended` escaping such a frame is an engine bug
-/// reported as a `VmError` at `site`.
 pub fn execute_to_completion(
   state: State,
   drive: Drive,
@@ -514,15 +411,7 @@ pub fn execute_to_completion(
   }
 }
 
-/// Hot inner loop. Carries the per-instruction registers (pc, stack, locals,
-/// agent) as bare arguments so the common opcodes run without
-/// rebuilding the State record and an Ok box per step; code/constants are
-/// loop-invariant within a frame and ride along to save a field load. Every
-/// value test is a total FFI kernel over the wire term: no `classify`, no
-/// allocation on a hit. Anything not handled here, and every miss / throw /
-/// underflow path of what is, materialises the State once in `dispatch_slow`
-/// and re-executes the instruction through `step` (all fast paths are
-/// effect-free before they bail, so re-execution is safe).
+// fast paths do nothing observable before a miss, so step re-runs the op
 fn fast_loop(
   state: State,
   drive: Drive,
@@ -589,7 +478,6 @@ fn fast_loop(
 
     GetLocal(index) -> {
       let v = tuple_array.element(index + 1, locals)
-      // TDZ: the slow path rebuilds State and throws the ReferenceError.
       case ffi.is(v, ffi.JsTdz) {
         True -> dispatch_slow(state, drive, pc, stack, locals, agent)
         False ->
@@ -624,7 +512,6 @@ fn fast_loop(
 
     GetBoxed(index) -> {
       let v = ffi.box_get(agent, tuple_array.element(index + 1, locals))
-      // TDZ / not a box: the slow path throws.
       case ffi.is(v, ffi.Miss) {
         True -> dispatch_slow(state, drive, pc, stack, locals, agent)
         False ->
@@ -668,8 +555,6 @@ fn fast_loop(
 
     JumpIfFalse(Pc(target)) ->
       case stack {
-        // A boolean (what a compare leaves) is tested in place; anything
-        // else asks the ToBoolean kernel.
         [top, ..rest] ->
           case ffi.is_bool(top, True) {
             True ->
@@ -728,8 +613,6 @@ fn fast_loop(
 
     JumpIfTrue(Pc(target)) ->
       case stack {
-        // A boolean (what a compare leaves) is tested in place; anything
-        // else asks the ToBoolean kernel.
         [top, ..rest] ->
           case ffi.is_bool(top, True) {
             True ->
@@ -846,9 +729,6 @@ fn fast_loop(
         [] -> dispatch_slow(state, drive, pc, stack, locals, agent)
       }
 
-    // `kind` arrives already classified by the resolver. Objects
-    // (ToPrimitive), Symbols (TypeError), string relational compares and
-    // every other observable case make the kernel answer `miss`.
     BinOp(kind) ->
       case stack {
         [right, left, ..rest] -> {
@@ -874,8 +754,6 @@ fn fast_loop(
         _ -> dispatch_slow(state, drive, pc, stack, locals, agent)
       }
 
-    // The BinOp arm with one or both operand loads folded in. A TDZ local
-    // makes every kernel miss, so the step handler throws for it.
     BinOpConst(kind, const_index) ->
       case stack {
         [left, ..rest] -> {
@@ -1051,8 +929,6 @@ fn fast_loop(
         _ -> dispatch_slow(state, drive, pc, stack, locals, agent)
       }
 
-    // `.. OP local.key`: the plain data read GetLocalField makes, then the
-    // BinOp kernel; either missing re-runs the whole op through step.
     BinOpLocalField(kind, index, key.Named(_) as k) ->
       case stack {
         [left, ..rest] -> {
@@ -1136,10 +1012,6 @@ fn fast_loop(
         [] -> dispatch_slow(state, drive, pc, stack, locals, agent)
       }
 
-    // -- Fused superinstructions (resolver peephole) ---------------------
-    // Statement-position `i++` / `i--` on a numeric local: one locals write,
-    // no stack traffic. Non-numbers (objects, strings, BigInt, TDZ) take the
-    // slow path's full coercion chain.
     IncLocal(index) -> {
       let r = ffi.step(tuple_array.element(index + 1, locals), 1)
       case ffi.is(r, ffi.Miss) {
@@ -1308,8 +1180,6 @@ fn fast_loop(
       }
     }
 
-    // Value-position `i++` / `i--` on a numeric local: the old value is the
-    // result, the stepped one is stored.
     PostIncLocal(index) -> {
       let old = tuple_array.element(index + 1, locals)
       let r = ffi.step(old, 1)
@@ -1348,8 +1218,6 @@ fn fast_loop(
       }
     }
 
-    // Fused loop-condition compare-and-branch. Objects and TDZ sentinels
-    // miss (the compare kernels only answer for number/string/bigint pairs).
     CmpLocalLocalJump(left_idx, right_idx, kind, Pc(target), when) -> {
       let r =
         pure_binop_kernel(
@@ -1501,10 +1369,6 @@ fn fast_loop(
         _ -> dispatch_slow(state, drive, pc, stack, locals, agent)
       }
 
-    // -- Dense-array computed access -------------------------------------
-    // `a[i]` with an own element present on an Array cell (or a plain
-    // string key on an ordinary chain). Holes, accessors, exotic receivers
-    // and non-canonical keys miss to the full [[Get]].
     GetElem ->
       case stack {
         [k, recv, ..rest] -> {
@@ -1527,8 +1391,6 @@ fn fast_loop(
         _ -> dispatch_slow(state, drive, pc, stack, locals, agent)
       }
 
-    // Compound assignment head `a[i] op= ..`: the value over the key and
-    // receiver, integer keys only (the key is re-pushed canonicalized).
     GetElem2 ->
       case stack {
         [k, recv, ..] -> {
@@ -1551,8 +1413,6 @@ fn fast_loop(
         _ -> dispatch_slow(state, drive, pc, stack, locals, agent)
       }
 
-    // `a[i] = v` on an extensible Array cell: overwrite, hole-fill inside
-    // the allocated dense size, or append at `length`.
     PutElem ->
       case stack {
         [val, k, recv, ..rest] -> {
@@ -1620,12 +1480,6 @@ fn fast_loop(
         _ -> dispatch_slow(state, drive, pc, stack, locals, agent)
       }
 
-    // -- Named data property ------------------------------------------------
-    // `obj.x`: own or inherited plain data property along an all-ordinary
-    // chain (`undefined` when absent on the whole chain, as OrdinaryGet
-    // answers). A string or number receiver reads its wrapper prototype
-    // (String and Array "length" are answered directly). Accessors,
-    // proxies, namespaces miss.
     GetField(key.Named(_) as k) ->
       case stack {
         [recv, ..rest] -> {
@@ -1648,7 +1502,6 @@ fn fast_loop(
         [] -> dispatch_slow(state, drive, pc, stack, locals, agent)
       }
 
-    // Like GetField but keeps the receiver beneath the value for CallMethod.
     GetField2(key.Named(_) as k) ->
       case stack {
         [recv, ..rest] -> {
@@ -1671,12 +1524,6 @@ fn fast_loop(
         [] -> dispatch_slow(state, drive, pc, stack, locals, agent)
       }
 
-    // `obj.x = v` on an existing own writable data property replaces the
-    // value inside the descriptor, keeping attributes and creation order
-    // (§10.1.11); on an extensible ordinary receiver whose prototype chain
-    // holds nothing but writable data at the key it creates the property
-    // (fresh seq from the store). Setters and read-only props up the chain,
-    // non-writable, accessors and exotic receivers miss.
     PutField(key.Named(_) as k) ->
       case stack {
         [val, recv, ..rest] -> {
@@ -1721,8 +1568,6 @@ fn fast_loop(
         _ -> dispatch_slow(state, drive, pc, stack, locals, agent)
       }
 
-    // `local.x = local2`: a TDZ receiver is not an object and misses; a TDZ
-    // value is checked here so it is never stored.
     PutLocalLocalField(obj, value, k) -> {
       let val = tuple_array.element(value + 1, locals)
       case ffi.is(val, ffi.JsTdz) {
@@ -1779,8 +1624,6 @@ fn fast_loop(
       }
     }
 
-    // `local.x`: a TDZ local is not an object, so it misses like any other
-    // non-plain read and the step handler throws.
     GetLocalField(index, key.Named(_) as k) -> {
       let v = ffi.get_field(agent, tuple_array.element(index + 1, locals), k)
       case ffi.is(v, ffi.Miss) {
@@ -1818,10 +1661,6 @@ fn fast_loop(
       }
     }
 
-    // -- Global identifiers ---------------------------------------------------
-    // An initialised lexical global, or a plain data property along the
-    // global object's chain. TDZ, accessors, a proxy hop and an
-    // unresolvable name (ReferenceError / typeof "undefined") miss.
     GetGlobal(name) -> {
       let v = ffi.get_global(agent, agent.realm.lexical_globals, name)
       case ffi.is(v, ffi.Miss) {
@@ -1864,9 +1703,6 @@ fn fast_loop(
       }
     }
 
-    // The object-record half only: an existing own writable data property of
-    // the global object, created when absent in a sloppy frame. Lexical
-    // bindings, setters, read-only and strict creation miss.
     PutGlobal(name) ->
       case stack {
         [val, ..rest] -> {
@@ -1898,8 +1734,6 @@ fn fast_loop(
         [] -> dispatch_slow(state, drive, pc, stack, locals, agent)
       }
 
-    // -- Object literal construction ---------------------------------------
-    // `{}`: a plain allocation with %Object.prototype%, never observable.
     NewObject -> {
       let #(obj, stack, store) =
         ffi.new_object(agent.store, agent.realm.object.prototype, [], 0, stack)
@@ -1915,8 +1749,6 @@ fn fast_loop(
       )
     }
 
-    // `{k: v, ..}` with the values already pushed: one allocation holding
-    // every static-key data property, never observable.
     NewObjectWith(keys, count) -> {
       let #(obj, stack, store) =
         ffi.new_object(
@@ -1960,10 +1792,6 @@ fn fast_loop(
         [] -> dispatch_slow(state, drive, pc, stack, locals, agent)
       }
 
-    // `{name: v}` static-key definition on a fresh literal: an ordinary,
-    // extensible SObject takes a raw own insert (CreateDataProperty on such a
-    // target can neither trap nor fail). Anything else goes through step's
-    // full [[DefineOwnProperty]].
     DefineField(key.Named(_) as k) ->
       case stack {
         [val, obj, ..rest] -> {
@@ -2007,9 +1835,6 @@ fn fast_loop(
       )
     }
 
-    // for-of over a plain Array through the intrinsic iterator: the step
-    // reads the element straight off the cells. Generators, other
-    // iterables and holes take the protocol path in `step`.
     IteratorNext ->
       case stack {
         [rec, ..rest] ->
@@ -2044,8 +1869,6 @@ fn fast_loop(
                     constants,
                   )
                 }
-                // A generator or protocol step needs the State; hand it the
-                // record already taken apart instead of re-dispatching.
                 fast -> {
                   let state =
                     State(
@@ -2068,9 +1891,6 @@ fn fast_loop(
         [] -> dispatch_slow(state, drive, pc, stack, locals, agent)
       }
 
-    // -- Coroutine suspension ---------------------------------------------------
-    // The parked State is built once, already fixed up the way `after_step`
-    // fixes up a stepped Yield/Await (operand popped, pc past the op).
     Yield -> {
       let #(v, rest) = top_or_undefined(stack)
       let parked =
@@ -2118,7 +1938,6 @@ fn fast_loop(
         ),
       ))
 
-    // -- Frame bookkeeping that only touches State --------------------------
     PushTry(catch_target: Pc(catch_target), kind:) -> {
       let frame =
         TryFrame(catch_target:, stack_depth: list.length(stack), kind:)
@@ -2159,7 +1978,6 @@ fn fast_loop(
       fast_loop(s, drive, s.pc, s.stack, locals, s.agent, code, constants)
     }
 
-    // [arg_n, .., arg_1, callee, ..] → the callee's frame or [result, ..].
     Call(arity) ->
       case arity, stack {
         0, [callee, ..rest] ->
@@ -2240,7 +2058,6 @@ fn fast_loop(
           }
       }
 
-    // [arg_n, .., arg_1, method, receiver, ..]: this = receiver.
     CallMethod(arity) ->
       case arity, stack {
         0, [method, receiver, ..rest] ->
@@ -2321,7 +2138,6 @@ fn fast_loop(
           }
       }
 
-    // `o.m()`: the plain data read of GetField2, then CallMethod(0)'s call.
     GetFieldCall1(key.Named(_) as k, arg_idx) ->
       case stack {
         [recv, ..rest] -> {
@@ -2407,7 +2223,6 @@ fn fast_loop(
       }
     }
 
-    // [arg_n, .., arg_1, ctor, ..] → the constructor's frame.
     CallNew(arity) ->
       case pop_n(stack, arity) {
         Some(#(args, [ctor, ..rest])) ->
@@ -2456,7 +2271,6 @@ fn fast_loop(
         _ -> dispatch_slow(state, drive, pc, stack, locals, agent)
       }
 
-    // [arg_n, .., arg_1, new_target, ctor, ..] → the constructor's frame.
     CallConstructor(arity) ->
       case pop_n(stack, arity) {
         Some(#(args, [new_target, ctor, ..rest])) ->
@@ -2475,10 +2289,6 @@ fn fast_loop(
         _ -> dispatch_slow(state, drive, pc, stack, locals, agent)
       }
 
-    // Return to a parked caller straight from the registers. A plain call
-    // frame hands back the top of stack; a base-constructor frame its
-    // receiver unless the body returned an object. Derived-constructor
-    // frames (return override checks that may throw) take the general path.
     Return ->
       case state.call_stack {
         [saved, ..rest_frames] ->
@@ -2569,7 +2379,6 @@ fn fast_loop(
               )
             }
           }
-        // The activation root: its driver owns the frame bookkeeping.
         [] -> {
           let value = case stack {
             [v, ..] -> v
@@ -2586,22 +2395,7 @@ fn fast_loop(
   }
 }
 
-/// Call/CallMethod from the loop's registers, `slot` the callee's cell as
-/// `ffi.cell_of` read it. A plain native callee (not call/apply/
-/// Reflect.apply, which re-dispatch) runs under the loop's own guard and
-/// depth bracket and the loop continues with its result; the State is only
-/// materialised for a throw. A same-realm, non-coroutine bytecode callee
-/// has its frame built right here from the registers: the caller parked in
-/// a `SavedFrame` with the line it calls from recorded on its `Error.stack`
-/// frame, the callee's frame and depth unit pushed, and the loop entered on
-/// it without materialising the caller's State. Every other callee takes
-/// the general call path with the cell already read.
-///
-/// `fast_construct` enters a constructor's frame through here too, with the
-/// bytecode `slot` it has already vetted and the real `new_target` (never
-/// undefined, which is what tells the two apart): `this` the fresh receiver
-/// and `constructor_this` Some(it) for a base constructor, TDZ and None for
-/// a derived one. A plain [[Call]] passes None and undefined.
+// new_target undefined = plain call; otherwise entered from fast_construct
 fn fast_call(
   state: State,
   drive: Drive,
@@ -2619,7 +2413,6 @@ fn fast_call(
   constructor_this: Option(JsVal),
   new_target: JsVal,
 ) -> Result(#(Outcome, State), VmError) {
-  // The caller's source line at this call, for its `Error.stack` frame.
   let line = tuple_array.element(pc + 1, state.func.lines)
   case ffi.is(slot, ffi.Miss) {
     False ->
@@ -2773,8 +2566,7 @@ fn fast_call(
                   call_args: args,
                   eval_env: None,
                 )
-              // §15.10: a strict caller whose next opcode is Return may be
-              // elided; a constructor frame needs Return's receiver fixup.
+              // §15.10 tail call elision
               let new_state = case
                 same_op(tuple_array.element(pc + 2, code), Return)
                 && state.func.is_strict
@@ -2860,14 +2652,6 @@ fn fast_call(
   }
 }
 
-/// CallNew / CallConstructor from the loop's registers. A same-realm
-/// bytecode constructor has its frame entered like a plain call: a derived
-/// one with `this` in TDZ, a base one over a receiver allocated here
-/// (§10.1.13 OrdinaryCreateFromConstructor) when `newTarget.prototype` is a
-/// plain data read of an object. Every other constructor, and a `prototype`
-/// that needs the observable [[Get]] or the realm-intrinsic fallback, takes
-/// the general path. When newTarget is the constructor itself its own
-/// `prototype` is read off the slot already in hand.
 fn fast_construct(
   state: State,
   drive: Drive,
@@ -2887,8 +2671,6 @@ fn fast_construct(
       && agent.call_depth < limits.max_call_depth
     ->
       case template.is_derived_constructor {
-        // Derived: `this` starts in TDZ until `super()` binds it; Return's
-        // general path applies the §10.2.2 override checks.
         True ->
           fast_call(
             state,
@@ -2908,9 +2690,6 @@ fn fast_construct(
             new_target,
           )
         False -> {
-          // `new_target` is `ctor` itself or a derived constructor's own
-          // NewTarget, an object either way; a primitive here can only be
-          // a primitive `ctor`, which never reaches this arm.
           let proto = case ffi.same(new_target, ctor) {
             True -> ffi.own_data(props, prototype_key)
             False -> ffi.get_field(agent, new_target, prototype_key)
@@ -2941,20 +2720,17 @@ fn fast_construct(
           }
         }
       }
-    // Any other constructor, a non-object, or the kernel's miss.
     _ -> dispatch_slow(state, drive, pc, stack, locals, agent)
   }
 }
 
 const prototype_key = key.Named("prototype")
 
-/// `a =:= b` on opcodes, as the inlined compare BIF.
 @external(erlang, "erlang", "=:=")
 fn same_op(a: Op, b: Op) -> Bool
 
 const function_call = FunctionN(FunctionCall)
 
-/// `v` is %Function.prototype.apply% (of any realm).
 fn is_intrinsic_apply(agent: Agent, v: JsVal) -> Bool {
   case ffi.cell_of(agent, v) {
     SObject(kind: KNative(tag:, ..), ..) -> tag == function_apply
@@ -2966,19 +2742,13 @@ const function_apply = FunctionN(FunctionApply)
 
 const reflect_apply = ReflectN(ReflectApply)
 
-/// `instanceof` against an ordinary function with the default
-/// `Symbol.hasInstance`; bound functions, proxies and overrides miss.
 fn instance_of_kernel(agent: Agent, left: JsVal, right: JsVal) -> JsVal {
   ffi.instance_of(agent, left, right, rt_types.symbol_has_instance)
 }
 
-/// The kernel for a resolver-classified pure binary operator: the result
-/// value, or `miss` when the operands need coercion the kernel cannot see
-/// through.
 @external(erlang, "arc_rt_ops_ffi", "pure_binop")
 fn pure_binop_kernel(op: binop.PureBinOp, left: JsVal, right: JsVal) -> JsVal
 
-/// The operand a Yield/Await pops, `undefined` off an empty stack.
 fn top_or_undefined(stack: List(JsVal)) -> #(JsVal, List(JsVal)) {
   case stack {
     [v, ..rest] -> #(v, rest)
@@ -2986,9 +2756,6 @@ fn top_or_undefined(stack: List(JsVal)) -> #(JsVal, List(JsVal)) {
   }
 }
 
-/// Materialise the State from the fast loop's registers, record the current
-/// source line on the innermost `Agent.frames` entry, and run one instruction
-/// through the general `step` dispatcher.
 fn dispatch_slow(
   state: State,
   drive: Drive,
@@ -3012,9 +2779,6 @@ fn dispatch_slow(
   }
 }
 
-/// Continue the loop after one stepped instruction: re-enter it on the new
-/// State, finish on Return, park a coroutine, or unwind a throw to its
-/// handler.
 fn after_step(
   stepped: Result(State, StepExit),
   drive: Drive,
@@ -3026,15 +2790,9 @@ fn after_step(
       Ok(#(Completed(NormalCompletion(value)), post))
     Error(VmFailed(err, _)) -> Error(err)
     Error(Yielded(kind, yielded_value, post)) -> {
-      // Build the parked state. It MUST spread from `post`, not the
-      // pre-step `state`: user code run by the step (iter.next, a `done` /
-      // `value` getter) may have changed the agent. Yield/Await handlers
-      // keep pc and the caller's stack shape, so the fixups below are valid
-      // against `post`.
+      // must spread from post: the step may have run user code
       let parked = case kind {
-        // InitialYield: stack unchanged, just advance pc.
         InitialSuspend -> State(..post, pc: post.pc + 1)
-        // Yield: pop the yielded value, advance pc.
         PlainYield ->
           State(
             ..post,
@@ -3044,16 +2802,12 @@ fn after_step(
             },
             pc: post.pc + 1,
           )
-        // YieldStar: pop the arg (keep the iterator), keep pc here so the
-        // resume re-executes YieldStar with [resume_val, iter, ..].
+        // keep pc so the resume re-executes yieldstar
         DelegateYield ->
           State(..post, stack: case post.stack {
             [_arg, ..rest] -> rest
             [] -> []
           })
-        // AsyncYieldStarResume: [result_obj, iter, ..] with result_obj fully
-        // consumed. Drop it so the parked stack is [iter, ..]; the resume
-        // pushes the .next(v) arg and pc jumps back to Next.
         AsyncDelegateResume(next_pc:) ->
           State(..post, pc: next_pc, stack: case post.stack {
             [_result_obj, ..rest] -> rest
@@ -3063,7 +2817,6 @@ fn after_step(
       Ok(#(Suspended(state.Yield, yielded_value), parked))
     }
     Error(Awaited(awaited_value, post)) -> {
-      // Async body hit await: pop the operand, advance pc.
       let parked =
         State(
           ..post,
@@ -3076,9 +2829,6 @@ fn after_step(
       Ok(#(Suspended(state.Await, awaited_value), parked))
     }
     Error(Threw(thrown, post)) ->
-      // Try to land on a catch handler. The full post-step state (stack/pc
-      // included) is threaded so opcodes can mutate the stack before
-      // throwing (undef the iter slot, then propagate).
       case unwind_to_catch(post, thrown) {
         Some(caught) -> execute_inner(caught, drive)
         None -> Ok(#(Completed(ThrowCompletion(thrown)), post))
@@ -3086,8 +2836,6 @@ fn after_step(
   }
 }
 
-/// Truncate the operand stack down to `depth` elements: the try-frame
-/// unwinder's primitive (the depth was recorded at PushTry time).
 pub fn truncate_stack(stack: List(JsVal), depth: Int) -> List(JsVal) {
   let excess = list.length(stack) - depth
   case excess > 0 {
@@ -3096,14 +2844,9 @@ pub fn truncate_stack(stack: List(JsVal), depth: Int) -> List(JsVal) {
   }
 }
 
-/// Find a catch handler for a thrown value. Walks up the call stack when the
-/// current frame's try_stack is exhausted (restoring each caller frame and
-/// its depth / stack-frame bookkeeping through `call.unwind_frame`), so a
-/// throw from a callee can be caught by a try/catch in the caller.
+// walks up caller frames when this frame has no handler
 pub fn unwind_to_catch(state: State, thrown: JsVal) -> Option(State) {
   case state.try_stack {
-    // `kind` only matters to the return-completion unwinder; a *throw* lands
-    // at catch_target no matter what the frame guards.
     [TryFrame(catch_target:, stack_depth:, kind: _), ..rest_try] ->
       Some(
         State(
@@ -3121,8 +2864,6 @@ fn underflow(state: State, op: String) -> Result(a, StepExit) {
   Error(VmFailed(StackUnderflow(op), state))
 }
 
-/// Pop top of stack and jump to `target` if `condition(value)` holds,
-/// otherwise advance to the next instruction.
 fn conditional_jump(
   state: State,
   target: Int,
@@ -3138,18 +2879,8 @@ fn conditional_jump(
   }
 }
 
-// ============================================================================
-// Step — single instruction dispatch
-// ============================================================================
-
-/// Execute a single instruction. `Ok(new_state)` continues the loop; a
-/// `StepExit` leaves it: a thrown value (`Threw`), the frame's normal
-/// completion (`Returned`), a suspension (`Yielded` / `Awaited`), or a broken
-/// engine invariant (`VmFailed`). Every exit carries the state to resume or
-/// unwind from.
 fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
   case op {
-    // ---- Stack operations --------------------------------------------
     PushConst(index) -> {
       let value = tuple_array.get_unchecked(index, state.constants)
       Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
@@ -3175,7 +2906,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "Swap")
       }
 
-    // [a, b, c, ..] → [c, a, b, ..]: bring the 3rd element to the top.
     Rot3 ->
       case state.stack {
         [a, b, c, ..rest] ->
@@ -3183,7 +2913,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "Rot3")
       }
 
-    // [a, b, c, d, ..] → [b, c, d, a, ..]: bury the top under the next three.
     Unrot4 ->
       case state.stack {
         [a, b, c, d, ..rest] ->
@@ -3191,7 +2920,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "Unrot4")
       }
 
-    // ---- Local variable access ---------------------------------------
     GetLocal(index) -> {
       let value = tuple_array.get_unchecked(index, state.locals)
       case is_tdz(value) {
@@ -3210,7 +2938,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "PutLocal")
       }
 
-    // §9.1.1.3.1 BindThisValue: derived-ctor `this` may be bound exactly once.
+    // §9.1.1.3.1 bindthisvalue: bound exactly once
     PutLocalCheckInit(index) ->
       case state.stack {
         [value, ..rest] ->
@@ -3275,7 +3003,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "PutBoxed")
       }
 
-    // BindThisValue when `this` is captured by an arrow inside the ctor.
     PutBoxedCheckInit(index) ->
       case state.stack {
         [new_value, ..rest] -> {
@@ -3312,8 +3039,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "PutBoxedCheckInit")
       }
 
-    // ---- Global variable access --------------------------------------
-    // §9.1.1.4.4 GetBindingValue: declarative record, then object record.
+    // §9.1.1.4.4 getbindingvalue
     GetGlobal(name) ->
       case lex_lookup(state.agent, name) {
         Some(binding) -> {
@@ -3336,12 +3062,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         }
       }
 
-    // §9.1.1.4.5 SetMutableBinding: declarative record, then object record.
+    // §9.1.1.4.5 setmutablebinding
     PutGlobal(name) ->
       case state.stack {
         [value, ..rest] ->
           case lex_lookup(state.agent, name) {
-            // const → assignment rejected (even in TDZ, per spec ordering).
+            // const rejects assignment even in tdz
             Some(rt_types.Const(_)) ->
               state.throw_type_error(state, "Assignment to constant variable.")
             Some(rt_types.Let(current)) ->
@@ -3373,10 +3099,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "PutGlobal")
       }
 
-    // §9.1.1.4.7 DeleteBinding on the global record: the static fallback of
-    // a sloppy `delete identifier`. Lexical bindings are never deletable
-    // (false without touching the object record); otherwise a real
-    // [[Delete]] on the global object.
+    // §9.1.1.4.7 deletebinding, lexical bindings never deletable
     DeleteGlobalVar(name) ->
       case lex_lookup(state.agent, name) {
         Some(_) ->
@@ -3401,8 +3124,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         }
       }
 
-    // §9.1.1.4.17 CreateGlobalVarBinding(N, D). Scripts pass D = false
-    // (bindings survive `delete`); eval code passes D = true (§19.2.1.3).
+    // §9.1.1.4.17 createglobalvarbinding, d = true only for eval
     DeclareGlobalVar(name, deletable) -> {
       use state <- result.map(rt_unit3(
         state,
@@ -3423,7 +3145,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       State(..state, pc: state.pc + 1)
     }
 
-    // Sloppy direct-eval var access: the frame's eval scope, then globals.
     GetEvalVar(name) ->
       case lookup_eval_env(state, name) {
         Some(v) ->
@@ -3446,8 +3167,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         None -> step(state, drive, TypeofGlobal(name))
       }
 
-    // Sloppy direct-eval var write: the eval scope if it declares the name,
-    // else PutGlobal.
     PutEvalVar(name) ->
       case state.eval_env, state.stack {
         Some(env), [v, ..rest] ->
@@ -3466,10 +3185,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _, _ -> step(state, drive, PutGlobal(name))
       }
 
-    // Sloppy direct-eval var declaration: seed name = undefined into the
-    // eval scope. With no scope allocated for this frame the var falls
-    // through to the global object; §19.2.1.3 EvalDeclarationInstantiation
-    // uses D = true for eval code, so such globals ARE deletable.
+    // §19.2.1.3 no eval scope: global var, deletable
     DeclareEvalVar(name) ->
       case state.eval_env {
         None -> step(state, drive, DeclareGlobalVar(name, deletable: True))
@@ -3483,7 +3199,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           )
       }
 
-    // §7.1.17 ToString for template substitutions (string hint).
     opcode.ToStringVal ->
       case state.stack {
         [val, ..rest] ->
@@ -3497,10 +3212,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "ToStringVal")
       }
 
-    // §13.2.8.4 GetTemplateObject: the per-site cached frozen template
-    // array (with its frozen `raw`), created on first evaluation. The site
-    // key is `"<unit>#<site>"`, the shape compiled modules use with their
-    // module name as the unit.
+    // §13.2.8.4 gettemplateobject, cached per site
     opcode.GetTemplateObject(site, quasis) -> {
       let cooked =
         list.map(quasis, fn(q) {
@@ -3517,10 +3229,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       Ok(State(..state, agent:, stack: [tpl, ..state.stack], pc: state.pc + 1))
     }
 
-    // §7.1.19 ToPropertyKey: class-definition-time coercion of computed
-    // field names (§15.7.14 ClassFieldDefinitionEvaluation step 1).
-    // Symbols pass through, everything else is ToString'd via
-    // ToPrimitive(string).
+    // §7.1.19 topropertykey
     opcode.ToPropertyKey ->
       case state.stack {
         [val, ..rest] ->
@@ -3554,7 +3263,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "ToPropertyKey")
       }
 
-    // §7.1.18 ToObject for the `with (expr)` head.
     opcode.ToObject ->
       case state.stack {
         [val, ..rest] -> {
@@ -3564,20 +3272,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "ToObject")
       }
 
-    // §9.1.1.2.1 HasBinding + §9.1.1.2.6 GetBindingValue against a with
-    // object. Found: replace obj with the value and jump. Not found (or
-    // @@unscopables-blocked): pop obj, fall through.
     opcode.WithGetVar(name, Pc(target)) ->
       with_get_var(state, name, target, keep_this: False, op: "WithGetVar")
 
-    // Like WithGetVar, keeping the with object beneath the value as the call
-    // receiver (§13.3.6.2 EvaluateCall step 1.b.ii).
     opcode.WithGetVarThis(name, Pc(target)) ->
       with_get_var(state, name, target, keep_this: True, op: "WithGetVarThis")
 
-    // §9.1.1.2.5 SetMutableBinding against a with object. Stack:
-    // [obj, value, ..]. Found: Set(obj, name, value), pop both, jump.
-    // Not found: pop obj, fall through to the ordinary store.
     opcode.WithPutVar(name, Pc(target)) ->
       case state.stack {
         [obj, val, ..rest] ->
@@ -3610,8 +3310,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "WithPutVar")
       }
 
-    // §9.1.1.2.7 DeleteBinding against a with object. Found: replace obj
-    // with the [[Delete]] result and jump. Not found: pop obj, fall through.
     opcode.WithDeleteVar(name, Pc(target)) ->
       case state.stack {
         [obj, ..rest] ->
@@ -3641,8 +3339,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "WithDeleteVar")
       }
 
-    // §9.1.2.1 GetIdentifierReference at a with object: HasBinding only.
-    // Bound: KEEP obj (the reference base) and jump. Not bound: pop obj.
     opcode.WithMakeRef(name, Pc(target)) ->
       case state.stack {
         [obj, ..rest] ->
@@ -3664,8 +3360,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "WithMakeRef")
       }
 
-    // §9.1.1.2.6 GetBindingValue on a made reference base. Object base:
-    // HasProperty re-check then Get; undefined sentinel: pop, fall through.
     opcode.WithGetRefValue(name, Pc(target)) ->
       case state.stack {
         [obj, ..rest] ->
@@ -3685,9 +3379,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "WithGetRefValue")
       }
 
-    // §9.1.1.2.5 SetMutableBinding on a made reference base. Stack:
-    // [base, value, ..]. Object base: still-exists re-check then Set on the
-    // ORIGINAL base; undefined sentinel: pop, fall through.
     opcode.WithPutRefValue(name, Pc(target)) ->
       case state.stack {
         [obj, val, ..rest] ->
@@ -3708,7 +3399,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "WithPutRefValue")
       }
 
-    // §9.1.1.4.16 CreateGlobalLexBinding: a TDZ slot tagged const/let.
+    // §9.1.1.4.16 creategloballexbinding
     DeclareGlobalLex(name, is_const) ->
       Ok(
         State(
@@ -3721,11 +3412,9 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         ),
       )
 
-    // Initialise a lexical global (TDZ → value), keeping its const/let tag.
     InitGlobalLex(name) ->
       case state.stack {
         [val, ..rest] -> {
-          // No prior DeclareGlobalLex: default to let.
           let binding = case lex_lookup(state.agent, name) {
             Some(existing) -> rt_types.lexical_global_with_value(existing, val)
             None -> rt_types.Let(val)
@@ -3742,9 +3431,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "InitGlobalLex")
       }
 
-    // `using` / `await using` desugar: CreateDisposableResource(V, hint) —
-    // pop the resource value, push its disposer callable (or undefined for
-    // null/undefined). TypeError for non-disposable values.
     opcode.GetDisposer(is_async:) ->
       case state.stack {
         [val, ..rest] -> {
@@ -3761,8 +3447,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "GetDisposer")
       }
 
-    // `using` / `await using` desugar: DisposeResources error folding — pop
-    // suppressed, pop error, push new SuppressedError(error, suppressed).
     opcode.MakeSuppressed ->
       case state.stack {
         [suppressed, err, ..rest] -> {
@@ -3789,7 +3473,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "TypeOf")
       }
 
-    // §9.1.1.4: typeof on globals: TDZ throws, undeclared is "undefined".
+    // tdz throws, undeclared is "undefined"
     TypeofGlobal(name) ->
       case lex_lookup(state.agent, name) {
         Some(binding) -> {
@@ -3822,7 +3506,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         }
       }
 
-    // ---- Operators ---------------------------------------------------
     BinOp(kind) ->
       case state.stack {
         [right, left, ..rest] -> binop_step(state, kind, left, right, rest)
@@ -3926,7 +3609,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "UnaryOp")
       }
 
-    // ---- Fused superinstructions (resolver peephole) -------------------
     IncLocal(index) -> fused_update_local(state, index, True)
     DecLocal(index) -> fused_update_local(state, index, False)
     IncLocalJump(index, Pc(target)) -> {
@@ -4014,7 +3696,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "CmpConstJump")
       }
 
-    // ---- Control flow ------------------------------------------------
     Return -> call.return_op(state)
 
     Jump(Pc(target)) -> Ok(State(..state, pc: target))
@@ -4044,7 +3725,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       !ffi.nullish(v)
     }
 
-    // QuickJS OP_gosub: push return-PC as a number, jump to the finally body.
+    // quickjs op_gosub
     opcode.Gosub(Pc(target)) ->
       Ok(
         State(
@@ -4054,9 +3735,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         ),
       )
 
-    // QuickJS OP_ret: pop return-PC, jump back to it. A negative retpc is the
-    // sentinel pushed by generator .return() finally-unwinding: "the slot
-    // below me is a return value, complete the frame with it".
+    // quickjs op_ret; negative retpc: slot below is the return value
     opcode.Ret ->
       case state.stack {
         [ret_pc, ..rest] ->
@@ -4073,7 +3752,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "Ret")
       }
 
-    // -- Exception handling --
     PushTry(catch_target: Pc(catch_target), kind:) -> {
       let frame =
         TryFrame(catch_target:, stack_depth: list.length(state.stack), kind:)
@@ -4103,7 +3781,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         opcode.TypeErrorKind -> state.throw_type_error(state, msg)
       }
 
-    // ---- Object property access --------------------------------------
     NewObject -> {
       let #(h, agent) =
         rt_obj.t_new_object(
@@ -4149,7 +3826,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "GetField")
       }
 
-    // Like GetField but keeps the object beneath the value for CallMethod.
     GetField2(k) ->
       case state.stack {
         [receiver, ..rest] -> {
@@ -4218,8 +3894,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       }
     }
 
-    // Consumes [value, obj] and pushes value back (assignment is an
-    // expression).
     PutLocalLocalField(obj, value, k) -> {
       let receiver = tuple_array.get_unchecked(obj, state.locals)
       let val = tuple_array.get_unchecked(value, state.locals)
@@ -4258,14 +3932,13 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "PutFieldPop")
       }
 
-    // §15.7.14 step 5/6: mint a fresh PrivateName for this class evaluation.
-    // The minted storage-key text travels as a string value.
+    // §15.7.14 step 5/6 fresh privatename per class evaluation
     NewPrivateName(name) -> {
       let #(k, agent) = rt_class_new_private_name(state.agent, name)
       Ok(State(..state, agent:, stack: [k, ..state.stack], pc: state.pc + 1))
     }
 
-    // §7.3.30 PrivateGet: [key, obj, ..] → [val, ..]. Own-only lookup.
+    // §7.3.30 privateget
     GetPrivateFieldDyn ->
       case state.stack {
         [k, obj, ..rest] -> {
@@ -4275,7 +3948,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "GetPrivateFieldDyn")
       }
 
-    // As GetPrivateFieldDyn, keeping the receiver beneath the value.
     GetPrivateFieldDyn2 ->
       case state.stack {
         [k, obj, ..rest] -> {
@@ -4285,7 +3957,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "GetPrivateFieldDyn2")
       }
 
-    // §7.3.31 PrivateSet. [key, val, obj, ..] → [val, ..]. Own-only.
+    // §7.3.31 privateset
     PutPrivateFieldDyn ->
       case state.stack {
         [k, val, obj, ..rest] -> {
@@ -4295,7 +3967,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "PutPrivateFieldDyn")
       }
 
-    // §13.10.1 `#x in obj`. [key, obj, ..] → [bool, ..]. Own-only check.
+    // §13.10.1 #x in obj
     PrivateInDyn ->
       case state.stack {
         [k, obj, ..rest] -> {
@@ -4309,7 +3981,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "PrivateInDyn")
       }
 
-    // §7.3.28 PrivateFieldAdd. [val, key, obj, ..] → [obj, ..].
+    // §7.3.28 privatefieldadd
     DefinePrivateField ->
       case state.stack {
         [val, k, obj, ..rest] ->
@@ -4323,8 +3995,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "DefinePrivateField")
       }
 
-    // §7.3.29 PrivateMethodOrAccessorAdd (method). [fn, key, obj, ..] →
-    // [obj, ..]. Non-writable so PrivateSet's method check trips.
+    // §7.3.29; non-writable so privateset's method check trips
     DefinePrivateMethod ->
       case state.stack {
         [func, k, obj, ..rest] ->
@@ -4344,9 +4015,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "DefinePrivateMethod")
       }
 
-    // §7.3.29 for one accessor half. [fn, key, obj, ..] → [obj, ..]. The
-    // get and set halves of one class evaluation merge; a half already
-    // present is double initialisation → TypeError.
+    // §7.3.29 accessor half; a half already present is a typeerror
     DefinePrivateAccessor(kind) ->
       case state.stack {
         [func, k, obj, ..rest] ->
@@ -4370,11 +4039,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "DefinePrivateAccessor")
       }
 
-    // Like PutField but keeps the object on the stack (object literal
-    // construction, class fields). §7.3.7 CreateDataPropertyOrThrow: an OWN
-    // define that never walks the prototype chain or invokes inherited
-    // setters; a proxy receiver fires its defineProperty trap and a
-    // frozen / non-extensible receiver throws TypeError.
+    // §7.3.7 own define, never walks the chain
     DefineField(k) ->
       case state.stack {
         [value, obj, ..rest] ->
@@ -4388,14 +4053,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               ))
               State(..state, stack: [obj, ..rest], pc: state.pc + 1)
             }
-            // DefineField on non-object: no-op, keep object on stack.
             None -> Ok(State(..state, pc: state.pc + 1))
           }
         _ -> underflow(state, "DefineField")
       }
 
-    // Class method: a non-enumerable, writable, configurable data property
-    // with [[HomeObject]] = target (§15.4.4 MakeMethod).
     DefineMethod(k) ->
       case state.stack {
         [func, obj, ..rest] ->
@@ -4417,7 +4079,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "DefineMethod")
       }
 
-    // Computed class method: [fn, key, obj, ..] → [obj, ..].
     DefineMethodComputed ->
       case state.stack {
         [func, k, obj, ..rest] ->
@@ -4444,7 +4105,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "DefineMethodComputed")
       }
 
-    // Object literal / class getter or setter: [fn, obj, ..] → [obj, ..].
     DefineAccessor(k, kind, enumerable) ->
       case state.stack {
         [func, obj, ..rest] ->
@@ -4466,7 +4126,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "DefineAccessor")
       }
 
-    // Computed getter/setter: [fn, key, obj, ..] → [obj, ..].
     DefineAccessorComputed(kind, enumerable) ->
       case state.stack {
         [func, k, obj, ..rest] ->
@@ -4493,8 +4152,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "DefineAccessorComputed")
       }
 
-    // §15.4.4: set top-of-stack closure's [[HomeObject]] to the object
-    // directly beneath it. Stack-neutral; DefineField/Computed follows.
     MakeMethod ->
       case state.stack {
         [func, obj, ..] ->
@@ -4512,8 +4169,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "MakeMethod")
       }
 
-    // Object literal computed key {[key]: value}: [value, key, obj, ..] →
-    // [obj, ..]. ToPropertyKey, then CreateDataPropertyOrThrow.
     DefineFieldComputed ->
       case state.stack {
         [val, k, obj, ..rest] ->
@@ -4532,15 +4187,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               ))
               State(..state, stack: [obj, ..rest], pc: state.pc + 1)
             }
-            // Non-object target: pop and keep going.
             None -> Ok(State(..state, stack: rest, pc: state.pc + 1))
           }
         _ -> underflow(state, "DefineFieldComputed")
       }
 
-    // Annex B §B.3.1 `{__proto__: v}`: [val, obj, ..] → [obj, ..]. Object or
-    // null sets [[Prototype]]; anything else is ignored. The target is a
-    // fresh literal, so the set never fails.
+    // annex b §b.3.1 __proto__ literal
     SetProto ->
       case state.stack {
         [val, obj, ..rest] ->
@@ -4559,8 +4211,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "SetProto")
       }
 
-    // Object spread {...source}: [source, obj, ..] → [obj, ..].
-    // CopyDataProperties; null/undefined/primitives are a no-op.
     ObjectSpread ->
       case state.stack {
         [source, obj, ..rest] ->
@@ -4579,17 +4229,14 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "ObjectSpread")
       }
 
-    // Destructuring rest `let {a, b, ...rest} = src`: [src, key_n, ..,
-    // key_1, ..] → [rest_obj, ..]. §13.15.5.3: CopyDataProperties with
-    // excludedNames = the n keys already bound.
+    // §13.15.5.3 copydataproperties minus the bound keys
     ObjectRestCopy(excluded_count) ->
       case state.stack {
         [source, ..below] ->
           case pop_n(below, excluded_count) {
             Some(#(raw_keys, rest)) -> {
               let state = State(..state, stack: rest)
-              // §8.6.2 RequireObjectCoercible: unlike spread, `let {...x} =
-              // null` MUST throw.
+              // unlike spread, rest of null must throw
               case classify(source) {
                 KNull ->
                   state.throw_type_error(
@@ -4602,8 +4249,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                     "Cannot destructure 'undefined' as it is undefined.",
                   )
                 _ -> {
-                  // ToPropertyKey each excluded key (computed keys arrive as
-                  // raw values; static keys are already strings).
                   use #(keys, state) <- result.try(
                     to_property_keys(state, raw_keys, []),
                   )
@@ -4622,7 +4267,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "ObjectRestCopy")
       }
 
-    // -- Delete operator --
     DeleteField(k) ->
       case state.stack {
         [obj, ..rest] ->
@@ -4634,8 +4278,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 h,
                 okey(k),
               ))
-              // §13.5.1.2 step 5.b.i: strict delete of a non-configurable
-              // property throws TypeError.
+              // §13.5.1.2 step 5.b.i
               case deleted, state.func.is_strict {
                 False, True ->
                   state.throw_type_error(
@@ -4654,7 +4297,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                   )
               }
             }
-            // delete on non-object returns true.
             None ->
               Ok(
                 State(..state, stack: [mk_bool(True), ..rest], pc: state.pc + 1),
@@ -4700,11 +4342,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "DeleteElem")
       }
 
-    // -- Class inheritance --
-    // [ctor, parent, ..] → [ctor, ..]. §15.7.14 step 5: IsConstructor before
-    // Get(superclass, "prototype"); wire ctor.prototype.[[Prototype]] =
-    // protoParent, ctor.[[HomeObject]] = ctor.prototype and ctor.[[Prototype]]
-    // = parent (static inheritance).
+    // §15.7.14 step 5: isconstructor before reading .prototype
     SetupDerivedClass ->
       case state.stack {
         [ctor, parent, ..rest] ->
@@ -4748,7 +4386,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           )
       }
 
-    // ---- Array operations --------------------------------------------
     ArrayFrom(count) ->
       case pop_n(state.stack, count) {
         Some(#(items, rest)) -> {
@@ -4758,9 +4395,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         None -> underflow(state, "ArrayFrom")
       }
 
-    // Pop only the non-hole values, then lay them out at their non-hole
-    // indices. The emitter guarantees `holes` is non-empty, ascending, and
-    // within [0, count).
+    // emitter guarantees holes non-empty, ascending, within count
     ArrayFromWithHoles(count, holes) ->
       case pop_n(state.stack, count - list.length(holes)) {
         Some(#(values, rest)) -> {
@@ -4771,7 +4406,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         None -> underflow(state, "ArrayFromWithHoles")
       }
 
-    // -- Computed property access --
     GetElem ->
       case state.stack {
         [k, receiver, ..rest] -> get_elem_step(state, receiver, k, rest)
@@ -4784,10 +4418,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       get_elem_step(state, receiver, k, state.stack)
     }
 
-    // Like GetElem but keeps obj+key: [key, obj, ..] → [value, key, obj, ..]
-    // for compound assignment, where ToPropertyKey runs exactly ONCE
-    // (§13.15.2): the key left for the later PutElem is the converted key.
-    // RequireObjectCoercible on the base comes first.
+    // §13.15.2 topropertykey runs once; converted key is left for putelem
     GetElem2 ->
       case state.stack {
         [k, receiver, ..rest] ->
@@ -4819,7 +4450,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "GetElem2")
       }
 
-    // [value, key, obj, ..] → [value, ..].
     PutElem ->
       case state.stack {
         [val, k, receiver, ..rest] ->
@@ -4834,8 +4464,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "PutElemPop")
       }
 
-    // -- Spread element support (array literals + calls) --
-    // [val, arr] → [arr]; arr[arr.length] = val.
     ArrayPush ->
       case state.stack {
         [val, arr, ..rest] ->
@@ -4854,7 +4482,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "ArrayPush")
       }
 
-    // [arr] → [arr]; length++ without setting any element.
     ArrayPushHole ->
       case state.stack {
         [arr, ..rest] ->
@@ -4873,7 +4500,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "ArrayPushHole")
       }
 
-    // [iterable, arr] → [arr]; drain the iterable through the protocol.
     ArraySpread ->
       case state.stack {
         [iterable, arr, ..rest] ->
@@ -4893,10 +4519,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "ArraySpread")
       }
 
-    // ---- Function calls ----------------------------------------------
-    // Syntactic `eval(...)`. If the callee IS the intrinsic %eval%, run a
-    // DIRECT eval (sees the caller's locals through their boxes); if eval
-    // was shadowed or rebound, ordinary Call semantics.
+    // direct eval only if the callee is the intrinsic %eval%
     CallEval(arity, param_scope_names, with_names, private_names) ->
       case pop_n(state.stack, arity) {
         Some(#(args, [callee, ..rest_stack])) ->
@@ -4912,8 +4535,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                   private_names,
                   run_activation(_, drive),
                 )
-              // Continue (or unwind) from `new_state`: it carries the agent
-              // the eval ran with and any eval scope it had to allocate.
               case res {
                 Ok(val) ->
                   Ok(
@@ -4930,7 +4551,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> step(state, drive, Call(arity))
       }
 
-    // [arg_n, .., arg_1, callee, ..] → the callee's frame or [result, ..].
     Call(arity) ->
       case pop_n(state.stack, arity) {
         Some(#(args, [callee, ..rest_stack])) ->
@@ -4939,7 +4559,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         None -> underflow(state, "Call: not enough args")
       }
 
-    // [arg_n, .., arg_1, method, receiver, ..]: this = receiver.
     CallMethod(arity) ->
       case pop_n(state.stack, arity) {
         Some(#(args, [method, receiver, ..rest_stack])) ->
@@ -4948,7 +4567,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         None -> underflow(state, "CallMethod: not enough args")
       }
 
-    // [arg_n, .., arg_1, new_target, ctor, ..].
     CallNew(arity) ->
       case pop_n(state.stack, arity) {
         Some(#(args, [ctor, ..rest_stack])) ->
@@ -4965,9 +4583,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         None -> underflow(state, "CallConstructor: not enough args")
       }
 
-    // `f.apply(t, arguments)` with no arguments object built yet: the
-    // intrinsic apply forwards this activation's argument list; any other
-    // `apply` gets the object, built once into its slot.
     ApplyArguments(slot:, simple_params:) ->
       case state.stack {
         [this_arg, apply_fn, target, ..rest] -> {
@@ -5001,7 +4616,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "ApplyArguments")
       }
 
-    // [args_array, callee] → [result]; this = undefined.
     CallApply ->
       case state.stack {
         [args_arr, callee, ..rest] ->
@@ -5016,7 +4630,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "CallApply")
       }
 
-    // [args_array, method, receiver] → [result]; this = receiver.
     CallMethodApply ->
       case state.stack {
         [args_arr, method, receiver, ..rest] ->
@@ -5031,7 +4644,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "CallMethodApply")
       }
 
-    // [args_array, new_target, ctor] → [instance]. Spread-new path.
     CallConstructorApply ->
       case state.stack {
         [args_arr, new_target, ctor, ..rest] ->
@@ -5046,9 +4658,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "CallConstructorApply")
       }
 
-    // Ordinary [[GetPrototypeOf]] read: [obj] → [proto|null]. The second hop
-    // for both `super.x` (home_object → proto) and `super()` (active_func →
-    // parent ctor), whose bases are never proxies.
+    // bases here are never proxies, so no trap dispatch
     GetPrototypeOf ->
       case state.stack {
         [obj, ..rest] -> {
@@ -5064,15 +4674,10 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "GetPrototypeOf")
       }
 
-    // [key, base, this, ..] → [val, ..]. OrdinaryGet on base, receiver=this.
     GetSuperValue -> get_super_value(state, False, "GetSuperValue")
 
-    // [key, base, this, ..] → [val, pk, base, this, ..]: ToPropertyKey ONCE,
-    // Get with receiver = this, leaving the coerced key + base + this for
-    // the trailing PutSuperValue.
     GetSuperValue2 -> get_super_value(state, True, "GetSuperValue2")
 
-    // [val, key, base, this, ..] → [val, ..]. OrdinarySet, receiver = this.
     PutSuperValue ->
       case state.stack {
         [val, k, base, this_val, ..rest] ->
@@ -5091,8 +4696,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 val,
                 this_val,
               ))
-              // §6.2.5.6 PutValue step 5.c: gated on caller strictness so
-              // sloppy object-literal methods stay non-throwing.
+              // §6.2.5.6 putvalue step 5.c
               case ok, state.func.is_strict {
                 False, True ->
                   state.throw_type_error(
@@ -5112,9 +4716,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "PutSuperValue")
       }
 
-    // Capture values from the current frame according to env_descriptors.
-    // For boxed captured vars the local holds the box handle: copying it
-    // shares the cell.
     MakeClosure(func_index) -> {
       let template = tuple_array.get_unchecked(func_index, state.func.functions)
       let #(fn_h, agent) =
@@ -5134,11 +4735,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       )
     }
 
-    // ---- Iteration ---------------------------------------------------
-    // EnumerateObjectProperties (§14.7.5.6): the key list is computed up
-    // front (own keys, enumerability and each level's [[GetPrototypeOf]] all
-    // trap for proxies; a namespace TDZ export throws before iteration) and
-    // parked in a ForInIterator cell.
+    // §14.7.5.6 key list computed up front
     ForInStart ->
       case state.stack {
         [obj, ..rest] -> {
@@ -5172,7 +4769,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "ForInStart")
       }
 
-    // [iter, ..] → [done, key, iter, ..].
     ForInNext ->
       case state.stack {
         [iter, ..rest] ->
@@ -5212,8 +4808,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "ForInNext")
       }
 
-    // §7.4.1 GetIterator(obj, sync): look up and call @@iterator, cache
-    // `next` in an Iterator Record. [iterable] → [record].
+    // §7.4.1 getiterator sync
     GetIterator ->
       case state.stack {
         [iterable, ..rest] -> {
@@ -5228,10 +4823,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "GetIterator")
       }
 
-    // §7.4.3 GetIterator(obj, async): @@asyncIterator, else @@iterator
-    // wrapped by CreateAsyncFromSyncIterator. Pushes the ITERATOR object;
-    // `next` is read by what follows (IteratorRecord for `yield*`, each
-    // step of a for-await loop), not here.
+    // §7.4.3 getiterator async; next is read by what follows
     GetAsyncIterator ->
       case state.stack {
         [iterable, ..rest] -> {
@@ -5245,8 +4837,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "GetAsyncIterator")
       }
 
-    // §7.4.4 GetIteratorFromMethod step 4: cache the iterator's `next` in an
-    // Iterator Record. The Get is observable; abrupt completions propagate.
+    // §7.4.4 step 4
     IteratorRecord ->
       case state.stack {
         [iterator, ..rest] ->
@@ -5274,11 +4865,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "IteratorRecord")
       }
 
-    // [rec, ..] → [done, value, rec', ..]. [[Done]] tracking (QuickJS-
-    // style): on done OR an abrupt .next(), the record slot becomes
-    // undefined so later IteratorNext short-circuits and IteratorClose /
-    // CloseThrow no-op (§7.4.11 / §7.4.6). §7.4.8: `value` is not read
-    // when done.
+    // done or abrupt next: slot becomes undefined so later ops no-op
     IteratorNext ->
       case state.stack {
         [rec, ..rest] ->
@@ -5315,9 +4902,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "IteratorNext")
       }
 
-    // §7.4.11 normal-completion close. [rec, ..] → [..]. An undefined slot
-    // ([[Done]]) is a no-op. Only ever sees an Iterator Record: a for-await
-    // loop's bare async iterator is closed by open-coded bytecode.
+    // §7.4.11 normal close
     IteratorClose ->
       case state.stack {
         [rec, ..rest] -> {
@@ -5330,8 +4915,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "IteratorClose")
       }
 
-    // §7.4.11 throw-completion close. [thrown, rec, ..] → rethrows. The
-    // original error wins whatever .return() does.
+    // §7.4.11 throw close; the original error wins
     IteratorCloseThrow ->
       case state.stack {
         [thrown, rec, ..rest] -> {
@@ -5349,10 +4933,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "IteratorCloseThrow")
       }
 
-    // §13.15.5.3 / §14.3.3 rest element. [rec, ..] → [arr, ..]. Drains via
-    // .next() without re-GetIterator; the emitter popped the close guard so
-    // a .next() throw propagates without IteratorClose. An undefined slot
-    // ([[Done]]) yields an empty array.
+    // §13.15.5.3 rest element, drains without close
     IteratorRest ->
       case state.stack {
         [rec, ..rest] -> {
@@ -5375,8 +4956,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "IteratorRest")
       }
 
-    // §7.4.12 step 6 / §14.7.5.6 step 6.c: an awaited iterator result must
-    // be an Object. Peeks.
+    // §7.4.12 step 6
     IteratorCheckObject ->
       case state.stack {
         [v, ..] ->
@@ -5388,23 +4968,15 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "IteratorCheckObject")
       }
 
-    // ---- Generator/async ---------------------------------------------
-    // Suspend immediately at the start of a generator body; the driver
-    // advances pc past this op.
     InitialYield -> Error(Yielded(InitialSuspend, mk_undefined(), state))
 
-    // Pop the value and suspend; on resume the sent value is pushed.
     Yield ->
       case state.stack {
         [yielded, ..] -> Error(Yielded(PlainYield, yielded, state))
         [] -> Error(Yielded(PlainYield, mk_undefined(), state))
       }
 
-    // Self-looping delegate: [arg, rec, ..]. Calls the record's cached
-    // `next` (§27.5.3.8 step 7.a.i); done → push value, pc+1; !done → yield
-    // the value with pc kept HERE so the resume re-enters with
-    // [resume_val, rec, ..]. `.throw`/`.return` reach the delegate through
-    // `entry.resume_frame`, which finds the record on the parked stack.
+    // §27.5.3.8; pc kept here so the resume re-enters
     YieldStar ->
       case state.stack {
         [arg, slot, ..rest] -> {
@@ -5427,10 +4999,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "YieldStar")
       }
 
-    // [arg, rec, ..]: Call(rec.[[NextMethod]], rec.[[Iterator]], «arg»),
-    // replace arg with the result → [result, rec, ..], pc+1. The following
-    // Await suspends on it. A `.throw`/`.return` arriving while parked here
-    // is forwarded to the delegate by `entry.resume_frame`.
     AsyncYieldStarNext(after_pc: _) ->
       case state.stack {
         [arg, slot, ..rest] -> {
@@ -5446,7 +5014,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "AsyncYieldStarNext")
       }
 
-    // [result_obj, iter, ..]: done → push value, pc+1; else yield the value.
     AsyncYieldStarResume(next_pc: Pc(next_pc)) ->
       case state.stack {
         [res, _iter, ..rest] -> {
@@ -5463,20 +5030,18 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "AsyncYieldStarResume")
       }
 
-    // Pop the awaited value and suspend the async body.
     Await ->
       case state.stack {
         [awaited, ..] -> Error(Awaited(awaited, state))
         [] -> Error(Awaited(mk_undefined(), state))
       }
 
-    // ---- Special -----------------------------------------------------
     CreateArguments(simple_params:) ->
       Ok(call.create_arguments(state, simple_params))
 
     CreateRestArray(from_index) -> Ok(call.create_rest_array(state, from_index))
 
-    // §13.2.7.3: a fresh RegExp per evaluation of the literal.
+    // §13.2.7.3 fresh regexp per evaluation
     NewRegExp ->
       case state.stack {
         [flags, pattern, ..rest] ->
@@ -5495,9 +5060,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "NewRegExp")
       }
 
-    // -- Dynamic import (§13.3.10 ImportCall) --
-    // Every failure after argument evaluation rejects the returned promise;
-    // the guard only adopts the agent.
+    // §13.3.10 failures after arg evaluation reject the promise
     opcode.DynamicImport ->
       case state.stack {
         [options, specifier, ..rest] -> {
@@ -5540,12 +5103,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
   }
 }
 
-// ============================================================================
-// Step helpers
-// ============================================================================
-
-/// The runtime's class ops take a bare Agent and raise; bind them by name so
-/// the guard shims receive remote fun references.
 fn rt_class_new_private_name(agent: Agent, name: String) -> #(JsVal, Agent) {
   rt_class.t_new_private_name(agent, name)
 }
@@ -5558,16 +5115,12 @@ fn rt_class_define_method(
   kind: rt_types.MethodInstallKind,
   enumerable: Bool,
 ) -> Agent {
-  // MakeMethod for bytecode closures (the runtime op only knows compiled
-  // cells), then the shared define.
   let agent = set_home_object(agent, fn_h, target)
   let agent = set_fn_name_if_empty(agent, fn_h, kind, k)
   rt_class.t_define_method(agent, target, k, fn_h, kind, enumerable)
 }
 
-/// §10.2.9 SetFunctionName for a computed method/accessor key: the closure
-/// was compiled anonymous (its `name` is ""), so name it from the evaluated
-/// key with the accessor prefix, keeping the property's creation seq.
+// §10.2.9 setfunctionname from the computed key
 fn set_fn_name_if_empty(
   agent: Agent,
   fn_h: Handle,
@@ -5599,8 +5152,6 @@ fn accessor_install_kind(
   }
 }
 
-/// Same ReferenceError the GetLocal arm throws for a TDZ read; the fused
-/// ops fold a GetLocal, so their TDZ path must be indistinguishable.
 fn tdz_reference_error(state: State) -> Result(State, StepExit) {
   state.throw_reference_error(
     state,
@@ -5608,8 +5159,6 @@ fn tdz_reference_error(state: State) -> Result(State, StepExit) {
   )
 }
 
-/// The value inside a box cell held in a local, `None` if the local is not
-/// a box handle.
 fn read_box(state: State, slot: JsVal) -> Option(JsVal) {
   use h <- option.then(handle_of(slot))
   case rt_store.t_cell_get(state.agent, h) {
@@ -5622,8 +5171,7 @@ fn lookup_eval_env(state: State, name: String) -> Option(JsVal) {
   option.then(state.eval_env, rt_env.eval_env_lookup(state.agent, _, name))
 }
 
-/// PutField / PutFieldPop body: §6.2.5.6 PutValue on a property reference
-/// with a static key, leaving `stack` behind.
+// §6.2.5.6 putvalue, static key
 fn put_field_step(
   state: State,
   k: key.PropertyKey,
@@ -5640,8 +5188,6 @@ fn put_field_step(
         okey(k),
         value,
       ))
-      // §13.15.2 PutValue step 6.b.iv: a failed [[Set]] throws
-      // TypeError in strict mode; sloppy mode ignores the failure.
       case ok, state.func.is_strict {
         False, True ->
           state.throw_type_error(
@@ -5653,8 +5199,6 @@ fn put_field_step(
         _, _ -> Ok(State(..state, stack:, pc: state.pc + 1))
       }
     }
-    // §6.2.5.6 PutValue step 5.a: ToObject(undefined|null) throws in
-    // BOTH modes.
     KUndef | KNull ->
       state.throw_type_error(
         state,
@@ -5664,8 +5208,6 @@ fn put_field_step(
           <> key.key_display_string(k)
           <> "')",
       )
-    // Primitive base: §13.15.2 PutValue 6.b.iv, strict throws
-    // TypeError, sloppy silently ignores.
     _ ->
       case state.func.is_strict {
         True ->
@@ -5680,8 +5222,6 @@ fn put_field_step(
   }
 }
 
-/// GetField / GetField2 body: RequireObjectCoercible with the property name
-/// in the message, then [[Get]] (primitives box, accessors run).
 fn get_field(
   state: State,
   receiver: JsVal,
@@ -5701,9 +5241,7 @@ fn get_field(
   }
 }
 
-/// §9.1.1.4.4 object-record half of a global read: an own data property is
-/// a plain read; otherwise HasProperty (a proxy on the global's prototype
-/// chain runs its `has` trap) decides between Get and ReferenceError.
+// §9.1.1.4.4 object record half
 fn global_object_get(
   state: State,
   name: String,
@@ -5730,10 +5268,7 @@ fn global_object_get(
   }
 }
 
-/// §9.1.1.4.5 object-record half of a global write. Strict: the binding must
-/// exist (HasProperty, trap-aware) or ReferenceError, and a rejected [[Set]]
-/// is a TypeError. Sloppy: set on the global object (creates if needed;
-/// a rejected set is silently ignored).
+// §9.1.1.4.5 object record half
 fn global_object_put(
   state: State,
   name: String,
@@ -5780,10 +5315,7 @@ fn global_object_put(
   }
 }
 
-/// §9.1.1.2.1 HasBinding + §9.1.1.2.6 GetBindingValue against a with object,
-/// shared by WithGetVar and WithGetVarThis. Found: replace obj with the value
-/// (keeping obj beneath as the call receiver when `keep_this`) and jump. Not
-/// found (or @@unscopables-blocked): pop obj, fall through.
+// §9.1.1.2.1 + §9.1.1.2.6 against a with object
 fn with_get_var(
   state: State,
   name: String,
@@ -5825,9 +5357,6 @@ fn with_get_var(
   }
 }
 
-/// A resolver-classified pure operator on operands the kernel missed: the
-/// runtime op does ToPrimitive/ToNumeric (running user code) and throws
-/// the operator's TypeErrors itself.
 fn pure_binop_slow(
   state: State,
   op: binop.PureBinOp,
@@ -5863,8 +5392,6 @@ fn pure_binop_slow(
   }
 }
 
-/// ES2024 §13.5.4/5/6: numeric unary ops call ToNumber → ToPrimitive on
-/// object operands; LogicalNot/Void never coerce.
 fn unaryop_slow(
   state: State,
   kind: opcode.UnaryOpKind,
@@ -5879,10 +5406,7 @@ fn unaryop_slow(
   }
 }
 
-/// Fused statement-position postfix update (IncLocal/DecLocal): exactly the
-/// folded sequence GetLocal; UnaryOp(Pos); PushConst(1); BinOp(Add|Sub);
-/// PutLocal; Pop, through the same coercions so every ToPrimitive call and
-/// thrown error is identical.
+// must match the unfused sequence's coercions exactly
 fn fused_update_local(
   state: State,
   index: Int,
@@ -5905,7 +5429,6 @@ fn fused_update_local(
   }
 }
 
-/// `receiver[k]` pushed onto `rest`.
 fn get_elem_step(
   state: State,
   receiver: JsVal,
@@ -5931,7 +5454,6 @@ fn get_elem_step(
   }
 }
 
-/// `receiver[k] = val`; `stack` is the operand stack the op leaves.
 fn put_elem_step(
   state: State,
   val: JsVal,
@@ -5975,9 +5497,6 @@ fn put_elem_step(
   }
 }
 
-/// Value-position postfix update (PostIncLocal/PostDecLocal): the
-/// IncLocal/DecLocal sequence with the ToNumber'd old value left on the
-/// stack.
 fn fused_postfix_local(
   state: State,
   index: Int,
@@ -5995,8 +5514,6 @@ fn fused_postfix_local(
   State(..state, stack: [n, ..state.stack], locals:, pc: next_pc)
 }
 
-/// Read local `index` for a fused op, throwing the ReferenceError GetLocal
-/// throws for a binding in its temporal dead zone.
 fn local_or_tdz(
   state: State,
   index: Int,
@@ -6009,8 +5526,6 @@ fn local_or_tdz(
   }
 }
 
-/// One BinOp with its operands already taken off the stack; `rest` is the
-/// stack beneath them, which receives the result.
 fn binop_step(
   state: State,
   kind: opcode.Classified,
@@ -6022,8 +5537,6 @@ fn binop_step(
   State(..state, stack: [r, ..rest], pc: state.pc + 1)
 }
 
-/// `binop_step` storing the result in local `dst` instead; `rest` is the
-/// stack beneath the operands.
 fn binop_put_step(
   state: State,
   kind: opcode.Classified,
@@ -6037,8 +5550,6 @@ fn binop_put_step(
   State(..state, stack: rest, locals:, pc: state.pc + 1)
 }
 
-/// The value of one binary operator application, through the full
-/// coercions.
 fn binop_value(
   state: State,
   kind: opcode.Classified,
@@ -6055,8 +5566,6 @@ fn binop_value(
       ))
       #(mk_bool(r == 1), state)
     }
-    // left = key, right = object. §13.10.1: ToPropertyKey(lval), then
-    // HasProperty(rval, key); a non-object rval is a TypeError.
     opcode.InOp ->
       case is_object(right) {
         True -> {
@@ -6072,15 +5581,11 @@ fn binop_value(
               <> inspect(state, right),
           )
       }
-    // §13.15.3: ToPrimitive(default) both sides, then string-concat or
-    // numeric add.
     opcode.AddOp -> rt3(state, rt_ops.t_add, left, right)
     opcode.PureOp(op) -> pure_binop_slow(state, op, left, right)
   }
 }
 
-/// Fused compare-and-branch (CmpLocal*Jump): the folded sequence
-/// GetLocal(s)/PushConst; BinOp(kind); JumpIfFalse(target).
 fn fused_cmp_jump(
   state: State,
   kind: binop.PureBinOp,
@@ -6097,7 +5602,6 @@ fn fused_cmp_jump(
   }
 }
 
-/// §7.3.30 PrivateGet with a minted key.
 fn private_get(
   state: State,
   obj: JsVal,
@@ -6106,7 +5610,6 @@ fn private_get(
   rt3(state, rt_class.t_private_get, obj, k)
 }
 
-/// §7.3.31 PrivateSet with a minted key; returns the written value.
 fn private_set(
   state: State,
   obj: JsVal,
@@ -6139,9 +5642,7 @@ fn private_define_method(
   rt_unit5(state, rt_class.t_define_private, h, k, func, kind)
 }
 
-/// §7.3.7 CreateDataPropertyOrThrow through the real [[DefineOwnProperty]]:
-/// proxy traps fire; a false result (frozen / non-extensible receiver, trap
-/// refusal, an exotic array's failing length write) throws TypeError.
+// §7.3.7 via the real [[defineownproperty]]; false throws
 fn create_data_property_or_throw(
   state: State,
   h: Handle,
@@ -6175,7 +5676,6 @@ fn object_key_display(k: ObjectKey) -> String {
   }
 }
 
-/// ToPropertyKey every excluded key of an object-rest pattern, in order.
 fn to_property_keys(
   state: State,
   raw: List(JsVal),
@@ -6190,10 +5690,7 @@ fn to_property_keys(
   }
 }
 
-/// §15.7.14 steps 5.f-g for `class extends parent`: IsConstructor BEFORE
-/// Get(superclass, "prototype") (so an arrow/generator heritage throws
-/// without touching its possibly trapped .prototype); protoParent must be an
-/// object or null. `null` heritage is `extends null`.
+// §15.7.14 5.f-g: isconstructor before reading .prototype
 fn class_proto_parent(
   state: State,
   parent: JsVal,
@@ -6234,7 +5731,6 @@ fn class_proto_parent(
   }
 }
 
-/// The handle in an object's OWN `prototype` data property, if any.
 fn own_prototype_handle(agent: Agent, h: Handle) -> Option(Handle) {
   case rt_obj.t_ordinary_own_property(agent, h, named("prototype")) {
     Some(DataProperty(value:, ..)) -> handle_of(value)
@@ -6242,7 +5738,6 @@ fn own_prototype_handle(agent: Agent, h: Handle) -> Option(Handle) {
   }
 }
 
-/// The ordinary [[Prototype]] slot of a cell (no trap dispatch).
 fn slot_prototype(agent: Agent, h: Handle) -> Option(Handle) {
   case rt_store.t_cell_get(agent, h) {
     SObject(proto:, ..) | SShapedObject(proto:, ..) -> proto
@@ -6250,9 +5745,7 @@ fn slot_prototype(agent: Agent, h: Handle) -> Option(Handle) {
   }
 }
 
-/// Overwrite a cell's [[Prototype]] slot directly. Class setup targets are
-/// fresh closures / prototype objects: extensible and cycle-free, so the
-/// direct write is spec-equivalent to OrdinarySetPrototypeOf.
+// targets are fresh objects, so a direct write is safe
 fn set_slot_prototype(agent: Agent, h: Handle, proto: Option(Handle)) -> Agent {
   rt_store.t_cell_update(agent, h, fn(slot) {
     case slot {
@@ -6263,9 +5756,7 @@ fn set_slot_prototype(agent: Agent, h: Handle, proto: Option(Handle)) -> Agent {
   })
 }
 
-/// Append to an Array cell (or bump its length past a hole) during array
-/// literal construction. The array is a fresh literal: extensible, no
-/// index overrides, writable length.
+// fresh literal: extensible, writable length
 fn array_push(agent: Agent, h: Handle, value: Option(JsVal)) -> Agent {
   rt_store.t_cell_update(agent, h, fn(slot) {
     case slot {
@@ -6283,8 +5774,6 @@ fn array_push(agent: Agent, h: Handle, value: Option(JsVal)) -> Agent {
   })
 }
 
-/// Append every value of `items` to an Array cell in one write (spread into
-/// an array literal); same invariants as `array_push`.
 fn array_append(agent: Agent, h: Handle, items: List(JsVal)) -> Agent {
   rt_store.t_cell_update(agent, h, fn(slot) {
     case slot {
@@ -6299,8 +5788,6 @@ fn array_append(agent: Agent, h: Handle, items: List(JsVal)) -> Agent {
   })
 }
 
-/// Rebuild the full element list of an ArrayFromWithHoles literal: `values`
-/// are the non-hole items in order, `holes` the ascending hole indices.
 fn fill_holes(
   values: List(JsVal),
   holes: List(Int),
@@ -6331,8 +5818,6 @@ fn fill_holes(
   }
 }
 
-/// IteratorNext past the array fast path: step the generator or run the
-/// protocol call, then push `[done, value, slot]` over `rest`.
 fn iterator_next_slow(
   state: State,
   drive: Drive,
@@ -6363,11 +5848,6 @@ fn iterator_next_slow(
   }
 }
 
-/// IteratorNext for a record `fast_iter_step` did not step itself, as
-/// `#(done, value)`. A generator whose `next` is the intrinsic
-/// %GeneratorPrototype%.next is resumed for one turn and answers the pair
-/// itself: no `{value, done}` object is built per step only to be read
-/// straight back. Anything else runs the protocol call.
 fn iter_step(
   state: State,
   drive: Drive,
@@ -6380,13 +5860,7 @@ fn iter_step(
   }
 }
 
-/// §27.5.3.3 GeneratorResume of the generator behind `data` with `sent`, as
-/// `#(done, value)`. A body parked at a yield (or its InitialYield) in the
-/// running realm is resumed right here, on this loop's stack: the frame is
-/// unparked, run for one turn and parked again with one store write each
-/// way. Everything else (`.throw`/`.return` parks, a delegate mid-flight,
-/// another realm, a compiled body, the depth limit, running/completed
-/// states) takes the shared driver, which does the same in general form.
+// §27.5.3.3; same-realm parked body resumes on this stack
 fn gen_step(
   state: State,
   drive: Drive,
@@ -6417,12 +5891,6 @@ fn gen_step(
   }
 }
 
-/// One turn of the parked body `frame` of generator `data`, delivered
-/// `stack`. Marks the generator running and enters its depth and
-/// `Error.stack` frame in one agent, runs the body under this loop's guard,
-/// then trues the depth and frames back up and writes the generator's next
-/// state: parked at the yield, or completed. The body's own uncaught throw
-/// (and a fault, surfaced as one, as `entry` does) is this step's throw.
 fn resume_here(
   state: State,
   drive: Drive,
@@ -6511,8 +5979,6 @@ fn resume_here(
   }
 }
 
-/// True `agent` back up after a turn of generator `data`'s body: its depth
-/// and `Error.stack` frame gone, the generator now `gen`.
 fn settle_gen(
   agent: Agent,
   data: Handle,
@@ -6529,9 +5995,6 @@ fn settle_gen(
   )
 }
 
-/// The guarded body of `resume_here`: run the unparked activation for one
-/// turn and hand back the agent it ended in (the entry agent for a fault,
-/// which carries none).
 fn resumed_turn(
   body: State,
   drive: Drive,
@@ -6542,10 +6005,6 @@ fn resumed_turn(
   }
 }
 
-/// One `next(arg)` turn of a yield* delegate as `#(done, value)` (§27.5.3.8
-/// step 7.a: `value` IS read when done). A native generator is resumed
-/// directly, skipping the result object; any other iterator is called and
-/// its result read.
 fn delegate_step(
   state: State,
   drive: Drive,
@@ -6564,9 +6023,6 @@ fn delegate_step(
   }
 }
 
-/// The `SGenerator` data cell behind `iterator` when it is a generator
-/// object and `next_fn` the unmodified %GeneratorPrototype%.next, i.e. when
-/// calling `next_fn` could do nothing but resume that generator.
 fn native_generator(
   agent: Agent,
   iterator: JsVal,
@@ -6588,33 +6044,16 @@ fn native_generator(
   }
 }
 
-/// What IteratorNext learns from one read of a record's [[Iterator]] and
-/// [[NextMethod]] cells.
 type FastIter {
-  /// The step was taken here: the record was an unmodified Array values
-  /// iteration and `store` holds the advanced iterator.
   ArrayStep(done: Bool, value: JsVal, store: rt_types.JsStore(Agent))
-  /// A native generator to resume for one turn.
   GenStep(data: Handle)
-  /// Run the protocol call.
   Protocol
 }
 
-/// IteratorNext for the record of an unmodified Array values iteration
-/// (`for (x of array)`, spread of an array): the record's [[NextMethod]] IS
-/// %ArrayIteratorPrototype%.next and its [[Iterator]] an ArrayIterator over
-/// a plain Array cell, so §23.1.5.2.1 is stepped in the kernel without
-/// allocating the `{value, done}` object the native would build and this
-/// opcode would immediately take apart. Only the shapes whose element read
-/// observes nothing are handled (a present own element, no index override);
-/// a hole, an exhausted-but-not-yet-marked source of another kind, or
-/// anything else answers `Protocol` and the generic protocol call runs
-/// instead. The same cell reads spot a native generator (a generator object
-/// stepped by the unmodified %GeneratorPrototype%.next).
+// §23.1.5.2.1 in the kernel only when the read observes nothing
 @external(erlang, "arc_interp_ffi", "iter_step")
 fn fast_iter_step(store: rt_types.JsStore(Agent), rec: JsVal) -> FastIter
 
-/// The ForInIterator cell behind a for-in slot and its remaining keys.
 fn for_in_remaining(
   agent: Agent,
   iter: JsVal,
@@ -6626,11 +6065,7 @@ fn for_in_remaining(
   }
 }
 
-/// Re-materialise an already-converted key as a value whose re-conversion
-/// through ToPropertyKey is side-effect-free and yields the same key.
-/// GetElem2 / GetSuperValue2 leave this on the stack so the later PutElem /
-/// PutSuperValue does not re-run a user-observable ToPropertyKey (§13.15.2:
-/// ToPropertyKey once). Index keys round-trip as numbers.
+// §13.15.2 re-conversion must be side-effect free
 fn prop_key_value(pk: ObjectKey) -> JsVal {
   case pk {
     SymbolKey(sym) -> rt_types.mk_symbol(sym)
@@ -6639,9 +6074,6 @@ fn prop_key_value(pk: ObjectKey) -> JsVal {
   }
 }
 
-/// Shared body of GetSuperValue / GetSuperValue2: [key, base, this, ..] →
-/// ToPropertyKey, then OrdinaryGet on base with receiver = this. With
-/// `keep_base` the coerced key + base + this stay under the value.
 fn get_super_value(
   state: State,
   keep_base: Bool,
@@ -6665,8 +6097,7 @@ fn get_super_value(
           }
           State(..state, stack:, pc: state.pc + 1)
         }
-        // §12.3.5.3 step 5 RequireObjectCoercible: base is null when the
-        // home object's prototype is null (`class C extends null`).
+        // base is null for class extends null
         None ->
           state.throw_type_error(
             state,
@@ -6677,11 +6108,6 @@ fn get_super_value(
   }
 }
 
-/// §7.4.3 GetIterator(obj, async) up to the iterator OBJECT: the
-/// `@@asyncIterator` method's result (which must be an Object), or for a
-/// sync-only iterable the CreateAsyncFromSyncIterator wrapper (whose sync
-/// record does cache `next`, §7.4.3 step 1.b.ii). The async iterator's own
-/// `next` is left unread for the consumer.
 fn async_iterator_object(agent: Agent, iterable: JsVal) -> #(JsVal, Agent) {
   let #(method, agent) =
     rt_obj.t_get_prop(
@@ -6690,7 +6116,6 @@ fn async_iterator_object(agent: Agent, iterable: JsVal) -> #(JsVal, Agent) {
       SymbolKey(rt_types.symbol_async_iterator),
     )
   case classify(method) {
-    // Step 1.b: GetMethod(obj, @@iterator), GetIteratorFromMethod, wrap.
     KUndef | KNull -> {
       let #(sync_method, agent) =
         rt_obj.t_get_prop(agent, iterable, SymbolKey(rt_types.symbol_iterator))
@@ -6733,9 +6158,6 @@ fn async_iterator_object(agent: Agent, iterable: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// The iterator object and its `next` for a yield* delegation slot: the
-/// Iterator Record on the stack, or (defensively) a bare iterator whose
-/// `next` is read now.
 fn delegate_target(
   state: State,
   slot: JsVal,
@@ -6754,7 +6176,6 @@ fn delegate_target(
   }
 }
 
-/// Pop n items. Returns #(popped_in_order, remaining_stack).
 fn pop_n(stack: List(JsVal), n: Int) -> Option(#(List(JsVal), List(JsVal))) {
   case n, stack {
     0, _ -> Some(#([], stack))
@@ -6780,15 +6201,6 @@ fn pop_n_loop(
   }
 }
 
-// ============================================================================
-// Nested activations
-// ============================================================================
-
-/// Run a freshly prepared root activation (eval code) until its own call
-/// stack empties: `Ok(value)` / `Error(thrown)` and the agent it finished
-/// in, with its `Error.stack` frame pushed for the duration. This is the
-/// `Run` the eval machinery is handed from inside the loop; the engine's
-/// entry points supply their own, backstopped, equivalent.
 fn run_activation(
   activation: State,
   drive: Drive,
@@ -6804,8 +6216,6 @@ fn run_activation(
   #(res, call.pop_frame_info(s.agent))
 }
 
-/// An engine fault surfacing where only a JS completion fits: a thrown
-/// TypeError naming it.
 fn fault(s: State, err: VmError) -> #(Result(JsVal, JsVal), State) {
   let #(e, s) =
     state.new_error(

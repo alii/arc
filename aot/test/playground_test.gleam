@@ -1,8 +1,3 @@
-//// The website playground's inspection surface. `core_text` prints each
-//// definition in its own process and splices the pieces back together, so
-//// pin it to `core_printer.print_module`'s output byte-for-byte; and the
-//// Erlang text must be what `compile:forms` would accept.
-
 import arc_aot/compile
 import arc_aot/emit
 import arc_aot/playground

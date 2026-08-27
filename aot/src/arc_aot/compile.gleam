@@ -1,6 +1,3 @@
-//// JS source → 2core IR → BEAM binary: the one compile path the CLI and the
-//// test262 runner share.
-
 import arc/parser
 import arc_aot/emit
 import arc_aot/emit/state
@@ -10,8 +7,6 @@ import carder/pipeline
 import gleam/result
 
 pub type CompileError {
-  /// The source parses as an ES module (`import`/`export`), which the AOT
-  /// compiler does not handle yet.
   ModuleGoalUnsupported
   EmitFailed(emit.EmitError)
   PipelineFailed(pipeline.PipelineError)
@@ -36,9 +31,6 @@ pub fn describe_emit_error(error: emit.EmitError) -> String {
   }
 }
 
-/// Lower a script to IR under `module_name`. A source that fails to parse as
-/// a script but parses as a module is reported as `ModuleGoalUnsupported`
-/// rather than as its script-goal syntax error.
 pub fn to_ir(
   source: String,
   module_name: String,
@@ -54,7 +46,6 @@ pub fn to_ir(
   }
 }
 
-/// Lower a script to IR under `module_name`, no module-goal probe.
 pub fn script_to_ir(
   source: String,
   module_name: String,
@@ -74,7 +65,6 @@ pub fn ir_to_beam(module: ir.Module) -> Result(BitArray, CompileError) {
   |> result.map_error(PipelineFailed)
 }
 
-/// Source → loadable BEAM binary whose module atom is `module_name`.
 pub fn to_beam(
   source: String,
   module_name: String,
@@ -83,13 +73,11 @@ pub fn to_beam(
   ir_to_beam(module)
 }
 
-/// Core Erlang text for `module` (inspection only).
 pub fn ir_to_core(module: ir.Module) -> Result(String, CompileError) {
   pipeline.ir_to_core(module, emit.binding())
   |> result.map_error(PipelineFailed)
 }
 
-/// IR text for `module` (inspection only).
 pub fn ir_to_text(module: ir.Module) -> String {
   printer.print_module(module)
 }

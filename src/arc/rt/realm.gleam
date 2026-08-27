@@ -1,15 +1,3 @@
-//// Multi-realm support (§9.3 Realms): entering another realm for the
-//// duration of a native's body, and the test262 host-defined `$262` object
-//// whose `createRealm`/`evalScript` are the only way script code reaches a
-//// second realm.
-////
-//// Model: `Agent.realm` is the running execution context's Realm Record and
-//// `Agent.realms` holds every realm by `Realm.id` (read back with
-//// `rt_call.realm_by_id`; a function's realm with `rt_call.function_realm`).
-//// A realm-attributed native (JSON, the `$262` methods, the
-//// `Error.prototype.stack` setter) carries its realm id in its `NativeToken`
-//// and enters it with `with_realm`.
-
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
@@ -27,10 +15,6 @@ import gleam/dict
 import gleam/int
 import gleam/option.{type Option, None, Some}
 
-// ── entering a realm ────────────────────────────────────────────────────────
-
-/// `arc/rt/call.Completion` widened over the normal value, so `with_realm`
-/// bodies may return any type. Same wire shape the call ffi builds.
 type Outcome(a) {
   NormalCompletion(a)
   ThrowCompletion(JsVal)
@@ -39,12 +23,7 @@ type Outcome(a) {
 @external(erlang, "arc_rt_call_ffi", "t_apply_protected")
 fn protected(st: Agent, body: fn(Agent) -> #(a, Agent)) -> #(Outcome(a), Agent)
 
-/// Run `body` with realm `id` as the current realm (its intrinsics, global
-/// object and lexical globals), then make the caller's realm current again —
-/// also when `body` throws, before the throw continues. Both realms' records
-/// are written back to `realms` at each switch, so nested entries in either
-/// direction see each other's global mutations. Entering the realm that is
-/// already current is a plain call.
+// restores the caller's realm even when body throws
 pub fn with_realm(
   st: Agent,
   id: Int,
@@ -60,8 +39,6 @@ pub fn with_realm(
   }
 }
 
-/// Make realm `id` current: park the running realm's record in the registry
-/// and load `id`'s from it.
 fn enter(st: Agent, id: Int) -> Agent {
   let realms = dict.insert(st.realms, st.realm.id, st.realm)
   case dict.get(realms, id) {
@@ -71,13 +48,6 @@ fn enter(st: Agent, id: Int) -> Agent {
   }
 }
 
-// ── $262 (test262 INTERPRETING.md host-defined functions) ───────────────────
-
-/// Build `realm`'s `$262` object — `global`, `evalScript`, `createRealm`,
-/// `gc`, `detachArrayBuffer` — pin it, define it as `$262` on the realm's
-/// global object, and return it. The harness adds `agent` and anything else
-/// host-side to the returned object; `createRealm` carries `agent` over to
-/// the realms it makes.
 pub fn install_262(st: Agent, realm: Realm) -> #(Handle, Agent) {
   let fn_proto = realm.function.prototype
   let #(methods, st) =
@@ -115,8 +85,6 @@ pub fn install_262(st: Agent, realm: Realm) -> #(Handle, Agent) {
   #(h, st)
 }
 
-/// Dispatch a `$262` method. `create_realm` is `arc/rt/builtins.create_realm`,
-/// passed in because that module imports this one.
 pub fn dispatch_262(
   st: Agent,
   native: Test262Native,
@@ -127,15 +95,11 @@ pub fn dispatch_262(
   case native {
     Test262EvalScript(realm:) -> eval_script(st, realm, args)
     Test262CreateRealm(realm:) -> create_realm_262(st, realm, create_realm)
-    // Collection only runs at safepoints where every live value is rooted;
-    // a native call is not one, so this is a hint with nothing to do.
+    // gc only runs at safepoints, nothing to do here
     Test262Gc -> #(mk_undefined(), st)
   }
 }
 
-/// `$262.evalScript(source)`: ToString(source), then §16.1.6
-/// ScriptEvaluation in `realm` through the interpreter's eval hook (parse
-/// errors surface as that realm's SyntaxError). Returns the completion value.
 fn eval_script(st: Agent, realm: Int, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(source, st) =
     rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
@@ -143,9 +107,6 @@ fn eval_script(st: Agent, realm: Int, args: List(JsVal)) -> #(JsVal, Agent) {
   st.store.ops.eval_hook(st, source, ScriptEval)
 }
 
-/// `$262.createRealm()`: a fresh realm with its own `$262`, which is
-/// returned. The parent `$262`'s `agent` (the harness's per-agent API) is
-/// shared with the child, as arc's `extend_262` hook re-installed it there.
 fn create_realm_262(
   st: Agent,
   parent: Int,
@@ -168,7 +129,6 @@ fn create_realm_262(
   #(mk_object(dollar), st)
 }
 
-/// The value of `h`'s own DATA property `name`, without getters or traps.
 fn own_data(st: Agent, h: Handle, name: String) -> Option(JsVal) {
   case rt_obj.t_ordinary_own_property(st, h, StringKey(Named(name))) {
     Some(DataProperty(value:, ..)) -> Some(value)

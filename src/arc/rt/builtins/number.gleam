@@ -1,7 +1,3 @@
-//// `rt_builtins/number` — Number constructor + %Number.prototype% + the
-//// four coercing global functions parseInt/parseFloat/isNaN/isFinite
-//// (ES2024 §21.1 / §19.2) over the threaded `Agent` model (D7/R1).
-
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/store as rt_store
@@ -23,10 +19,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
-/// What `init` returns: the Number type plus the four global function
-/// objects it allocates (§21.1.2.12/.13 make parseInt/parseFloat SHARED
-/// between the constructor and the global object). Named record so swapping
-/// two structurally identical `Handle`s cannot typecheck.
 pub type NumberBuiltins {
   NumberBuiltins(
     pair: BuiltinPair,
@@ -37,15 +29,11 @@ pub type NumberBuiltins {
   )
 }
 
-/// Set up Number constructor + Number.prototype + the four globals.
 pub fn init(
   st: Agent,
   object_proto: Handle,
   fn_proto: Handle,
 ) -> #(NumberBuiltins, Agent) {
-  // Global utility functions. parseInt/parseFloat are allocated FIRST because
-  // §21.1.2.13/.12 require `Number.parseInt === parseInt` — the constructor
-  // installs these very refs rather than allocating twins.
   let #(parse_int_ref, st) =
     common.alloc_rooted_native_fn(
       st,
@@ -62,8 +50,6 @@ pub fn init(
       "parseFloat",
       1,
     )
-  // Number.isNaN / Number.isFinite are deliberately NOT the globals: they
-  // skip ToNumber coercion (§21.1.2.2/.4).
   let #(is_nan_ref, st) =
     common.alloc_rooted_native_fn(
       st,
@@ -80,7 +66,6 @@ pub fn init(
       "isFinite",
       1,
     )
-  // Static methods on Number constructor.
   let #(static_methods, st) =
     common.alloc_methods(st, fn_proto, [
       #("isNaN", NumberN(NumberIsNaN), 1),
@@ -88,11 +73,10 @@ pub fn init(
       #("isInteger", NumberN(NumberIsInteger), 1),
       #("isSafeInteger", NumberN(NumberIsSafeInteger), 1),
     ])
-  // Same shape alloc_methods produces, but pointing at the SHARED global refs.
+  // number.parseint must be === the global parseint
   let #(pi_p, st) = common.builtin_property(st, mk_object(parse_int_ref))
   let #(pf_p, st) = common.builtin_property(st, mk_object(parse_float_ref))
   let shared_globals = [#("parseInt", pi_p), #("parseFloat", pf_p)]
-  // Static constants {W:F, E:F, C:F}.
   let #(constants, st) =
     data_constants(st, [
       #("NaN", JNan),
@@ -104,7 +88,6 @@ pub fn init(
       #("MAX_VALUE", JFloat(1.7976931348623157e308)),
       #("MIN_VALUE", JFloat(5.0e-324)),
     ])
-  // Number.prototype methods.
   let #(proto_methods, st) =
     common.alloc_methods(st, fn_proto, [
       #("valueOf", NumberN(NumberPrototypeValueOf), 0),
@@ -116,8 +99,6 @@ pub fn init(
     ])
   let ctor_props =
     list.append(constants, list.append(static_methods, shared_globals))
-  // §21.1.3: the Number prototype object is itself a Number object with
-  // [[NumberData]] = +0.
   let #(bt, st) =
     common.init_wrapper_type(
       st,
@@ -156,7 +137,6 @@ fn data_constants(
   }
 }
 
-/// Per-module dispatch for Number native functions.
 pub fn dispatch(
   st: Agent,
   native: NumberNative,
@@ -178,15 +158,11 @@ pub fn dispatch(
   }
 }
 
-/// §21.1.3.4 Number.prototype.toLocaleString — no-Intl fallback: same as
-/// toString(10). Arguments (locales/options) ignored.
 fn number_to_locale_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let n = this_number_value(st, this, "toLocaleString")
   #(mk_string(rt_val.format_jsnum(n)), st)
 }
 
-/// §21.1.1.1 Number(value) called as a function. `new Number` is intercepted
-/// in `t_construct`. Step 1.a: n = ToNumeric(value); BigInt → 𝔽(ℝ(prim)).
 fn call_as_function(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   case args {
     [] -> #(mk_number(JInt(0)), st)
@@ -203,30 +179,21 @@ fn call_as_function(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// ── §19.2 global functions ──────────────────────────────────────────────────
-
-/// §19.2.5 parseInt(string, radix). Returns the JsNum so callers rendering it
-/// (Console %i) cannot mistake a non-Number for a parse result.
 pub fn parse_int_value(
   st: Agent,
   val: JsVal,
   radix_val: JsVal,
 ) -> #(JsNum, Agent) {
-  // Steps 1-2: inputString = ? ToString(string); TrimString(_, START).
   let #(s, st) = rt_val.t_to_string(st, val)
   let str = trim_leading_js_ws(s)
-  // Step 6: R = ToInt32(radix), NOT ToIntegerOrInfinity — NaN/±∞ → +0 (then
-  // step 8 turns 0 into default radix 10) and wraps modulo 2^32.
   let #(radix_num, st) = rt_val.t_to_number(st, radix_val)
+  // radix is toint32, not tointegerorinfinity
   let radix_int = rt_val.num_to_int32(radix_num)
-  // Steps 3-5: strip sign BEFORE prefix check so "-0x10" reaches "0x".
   let #(str, negative) = case string.first(str) {
     Ok("-") -> #(string.drop_start(str, 1), True)
     Ok("+") -> #(string.drop_start(str, 1), False)
     _ -> #(str, False)
   }
-  // Steps 7-9: R = 0 → default 10 WITH prefix detection; explicit 16 keeps
-  // prefix detection; any other explicit radix never strips "0x".
   let #(radix, strip_prefix) = case radix_int {
     0 -> #(10, True)
     16 -> #(16, True)
@@ -238,20 +205,17 @@ pub fn parse_int_value(
     True -> #(string.drop_start(str, 2), 16)
     False -> #(str, radix)
   }
-  // Step 8a: R < 2 or R > 36 → NaN. Steps 11-16: parse digit prefix.
   case radix >= 2 && radix <= 36 {
     False -> #(JNan, st)
     True -> #(parse_int_digits(str, radix, negative), st)
   }
 }
 
-/// §19.2.4 parseFloat(string).
 pub fn parse_float_value(st: Agent, val: JsVal) -> #(JsNum, Agent) {
   let #(s, st) = rt_val.t_to_string(st, val)
   #(parse_decimal_string(trim_leading_js_ws(s)), st)
 }
 
-/// §19.2.3 isNaN(number) — coerces via ToNumber first.
 pub fn js_is_nan(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(num, st) = rt_val.t_to_number(st, helpers.first_arg_or_undefined(args))
   case num {
@@ -260,7 +224,6 @@ pub fn js_is_nan(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §19.2.2 isFinite(number) — coerces via ToNumber first.
 pub fn js_is_finite(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(num, st) = rt_val.t_to_number(st, helpers.first_arg_or_undefined(args))
   case num {
@@ -269,9 +232,6 @@ pub fn js_is_finite(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// ── §21.1.2 Number static methods ───────────────────────────────────────────
-
-/// §21.1.2.4 Number.isNaN — no coercion.
 fn number_is_nan(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   case classify(helpers.first_arg_or_undefined(args)) {
     KNum(JNan) -> #(mk_bool(True), st)
@@ -279,7 +239,6 @@ fn number_is_nan(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §21.1.2.1 Number.isFinite — no coercion.
 fn number_is_finite(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   case classify(helpers.first_arg_or_undefined(args)) {
     KNum(JInt(_)) | KNum(JFloat(_)) -> #(mk_bool(True), st)
@@ -287,7 +246,6 @@ fn number_is_finite(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §21.1.2.3 Number.isInteger.
 fn number_is_integer(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   case classify(helpers.first_arg_or_undefined(args)) {
     KNum(JInt(_)) -> #(mk_bool(True), st)
@@ -296,7 +254,6 @@ fn number_is_integer(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §21.1.2.5 Number.isSafeInteger.
 fn number_is_safe_integer(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let is_safe = fn(i: Int) {
     i >= -9_007_199_254_740_991 && i <= 9_007_199_254_740_991
@@ -312,21 +269,16 @@ fn number_is_safe_integer(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// ── §21.1.3 Number.prototype methods ────────────────────────────────────────
-
-/// §21.1.3.7 Number.prototype.valueOf.
 fn number_value_of(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   #(mk_number(this_number_value(st, this, "valueOf")), st)
 }
 
-/// §21.1.3.6 Number.prototype.toString([radix]).
 fn number_to_string(
   st: Agent,
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let n = this_number_value(st, this, "toString")
-  // Steps 2-3: radix defaults to 10; ToIntegerOrInfinity otherwise.
   let #(radix, st) = case args {
     [] -> #(10, st)
     [r, ..] ->
@@ -345,7 +297,6 @@ fn number_to_string(
   }
 }
 
-/// §21.1.3.3 Number.prototype.toFixed(fractionDigits).
 fn number_to_fixed(
   st: Agent,
   this: JsVal,
@@ -361,7 +312,6 @@ fn number_to_fixed(
         "toFixed() digits argument must be between 0 and 100",
       )
     False -> {
-      // Step 10: |x| >= 1e21 → ToString(x), not fixed notation.
       let format = fn(x) {
         case float.absolute_value(x) >=. 1.0e21 {
           True -> rt_val.js_format_float(x)
@@ -373,7 +323,6 @@ fn number_to_fixed(
   }
 }
 
-/// §21.1.3.2 Number.prototype.toExponential(fractionDigits).
 fn number_to_exponential(
   st: Agent,
   this: JsVal,
@@ -382,12 +331,10 @@ fn number_to_exponential(
   let n = this_number_value(st, this, "toExponential")
   let arg = helpers.first_arg_or_undefined(args)
   case classify(arg) {
-    // Step 6.c: undefined → shortest round-trip digits.
     KUndef -> #(mk_string(format_non_finite(n, format_to_exponential_auto)), st)
     _ -> {
       let #(f, st) = rt_val.t_to_integer_or_infinity(st, arg)
-      // Step 4 BEFORE step 5's range check: non-finite `this` returns
-      // Number::toString(x, 10) even when fractionDigits is out of range.
+      // non-finite check runs before the range check
       case n {
         JInt(_) | JFloat(_) ->
           case f < 0 || f > 100 {
@@ -407,7 +354,6 @@ fn number_to_exponential(
   }
 }
 
-/// §21.1.3.5 Number.prototype.toPrecision(precision).
 fn number_to_precision(
   st: Agent,
   this: JsVal,
@@ -416,11 +362,10 @@ fn number_to_precision(
   let n = this_number_value(st, this, "toPrecision")
   let arg = helpers.first_arg_or_undefined(args)
   case classify(arg) {
-    // precision undefined → behave as toString.
     KUndef -> #(mk_string(rt_val.format_jsnum(n)), st)
     _ -> {
       let #(p, st) = rt_val.t_to_integer_or_infinity(st, arg)
-      // Step 4 BEFORE step 5's range check.
+      // non-finite check runs before the range check
       case n {
         JInt(_) | JFloat(_) ->
           case p < 1 || p > 100 {
@@ -440,7 +385,6 @@ fn number_to_precision(
   }
 }
 
-/// §21.1.3 thisNumberValue(value): Number primitive or [[NumberData]] slot.
 fn this_number_value(st: Agent, this: JsVal, method: String) -> JsNum {
   case classify(this) {
     KNum(n) -> n
@@ -460,10 +404,6 @@ fn not_a_number(st: Agent, method: String) -> a {
   )
 }
 
-// ── internal helpers ────────────────────────────────────────────────────────
-
-/// Number::toString(x, radix). Radix 10 → the canonical formatter; NaN/±∞
-/// use their canonical string forms regardless of radix.
 fn format_number_radix(n: JsNum, base: Int) -> String {
   case n, base {
     _, 10 -> rt_val.format_jsnum(n)
@@ -478,7 +418,6 @@ fn format_number_radix(n: JsNum, base: Int) -> String {
   }
 }
 
-/// Stringify NaN/±∞ canonically, else apply `f` to the finite float.
 fn format_non_finite(n: JsNum, f: fn(Float) -> String) -> String {
   case n {
     JNan -> "NaN"
@@ -489,10 +428,7 @@ fn format_non_finite(n: JsNum, f: fn(Float) -> String) -> String {
   }
 }
 
-/// parseFloat steps 3-6: longest StrDecimalLiteral prefix; NaN when none.
 fn parse_decimal_string(str: String) -> JsNum {
-  // Code points, NOT graphemes: every StrDecimalLiteral token is ASCII, so a
-  // combining mark must terminate the literal AFTER the digit.
   let chars = to_codepoint_chars(str)
   case scan_decimal_literal(chars) {
     0 -> JNan
@@ -500,13 +436,11 @@ fn parse_decimal_string(str: String) -> JsNum {
   }
 }
 
-/// Split into single-code-point strings (combining marks stay separate).
 fn to_codepoint_chars(s: String) -> List(String) {
   use cp <- list.map(string.to_utf_codepoints(s))
   string.from_utf_codepoints([cp])
 }
 
-/// Longest-prefix StrDecimalLiteral scanner (§19.2.4 steps 3-4).
 fn scan_decimal_literal(chars: List(String)) -> Int {
   let #(sign_len, rest) = case chars {
     ["+", ..r] | ["-", ..r] -> #(1, r)
@@ -522,7 +456,6 @@ fn scan_decimal_literal(chars: List(String)) -> Int {
   }
 }
 
-/// Length of the longest StrUnsignedDecimalLiteral (minus Infinity) prefix.
 fn scan_unsigned_decimal(gs: List(String)) -> Int {
   let #(icount, after_int) = scan_digit_run(gs, 0)
   let #(mantissa_len, after_mantissa) = case after_int {
@@ -568,13 +501,11 @@ fn scan_exponent_length(gs: List(String)) -> Int {
   }
 }
 
-/// parseInt steps 11-16: parse the longest digit prefix and apply sign.
 fn parse_int_digits(s: String, radix: Int, negative: Bool) -> JsNum {
   case parse_digits_loop(to_codepoint_chars(s), radix, 0, False) {
     None -> JNan
     Some(n) ->
       case negative {
-        // Step 15: sign = -1 and mathInt = 0 → -0.
         True if n == 0 -> JFloat(-0.0)
         True -> rt_val.num_from_int(-n)
         False -> rt_val.num_from_int(n)
@@ -607,7 +538,6 @@ fn parse_digits_loop(
   }
 }
 
-/// Value of an ASCII decimal digit (0-9).
 fn digit_value(ch: String) -> Option(Int) {
   case ch {
     "0" -> Some(0)
@@ -624,7 +554,6 @@ fn digit_value(ch: String) -> Option(Int) {
   }
 }
 
-/// Value of an ASCII alphanumeric (0-9, a-z, A-Z) as a base-36 digit.
 fn alnum_value(ch: String) -> Option(Int) {
   case ch {
     "0" -> Some(0)
@@ -666,8 +595,6 @@ fn alnum_value(ch: String) -> Option(Int) {
     _ -> None
   }
 }
-
-// ── FFI (port arc_number_ffi.erl) ───────────────────────────────────────────
 
 @external(erlang, "arc_string_ffi", "trim_leading_js_ws")
 fn trim_leading_js_ws(s: String) -> String

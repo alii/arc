@@ -1,12 +1,6 @@
-/// ASCII digit helpers shared by the parsers and the date/number builtins.
-///
-/// These are pure lookups over single-character strings; keeping one copy
-/// avoids the five near-identical tables that used to live in the parser and
-/// builtin modules.
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
-/// Value of an ASCII hex digit (0-9, a-f, A-F).
 pub fn hex_value(ch: String) -> Option(Int) {
   case ch {
     "0" -> Some(0)
@@ -29,46 +23,28 @@ pub fn hex_value(ch: String) -> Option(Int) {
   }
 }
 
-/// Value of an ASCII hex digit given as a code point (`0-9`, `A-F`, `a-f`).
-///
-/// The code-point form of `hex_value`, for callers scanning bytes or code
-/// units. Never reach for `int.base_parse` in its place: that is Erlang's
-/// `binary_to_integer/2`, which also accepts a leading sign, so `"%+4"`
-/// would decode as U+0004 instead of being rejected as a bad escape.
+// not int.base_parse, that accepts a leading sign
 pub fn hex_value_code(code: Int) -> Option(Int) {
   case code {
-    // 0-9
     _ if code >= 0x30 && code <= 0x39 -> Some(code - 0x30)
-    // A-F
     _ if code >= 0x41 && code <= 0x46 -> Some(code - 0x41 + 10)
-    // a-f
     _ if code >= 0x61 && code <= 0x66 -> Some(code - 0x61 + 10)
     _ -> None
   }
 }
 
-// The code-point predicates below are the single definition of the ASCII
-// character classes: callers scanning code points or code units use these
-// instead of re-inlining `c >= 0x30 && c <= 0x39` and friends. Note that Gleam
-// guards cannot call functions, so a `<<b, _:bytes>> if …` bit-array pattern
-// still has to spell the range out.
-
-/// `0-9`, as a code point.
 pub fn is_decimal_code(c: Int) -> Bool {
   c >= 0x30 && c <= 0x39
 }
 
-/// `A-Z` or `a-z`, as a code point.
 pub fn is_ascii_alpha_code(c: Int) -> Bool {
   { c >= 0x41 && c <= 0x5A } || { c >= 0x61 && c <= 0x7A }
 }
 
-/// `0-9`, `A-Z` or `a-z`, as a code point.
 pub fn is_ascii_alnum_code(c: Int) -> Bool {
   is_decimal_code(c) || is_ascii_alpha_code(c)
 }
 
-/// Value of an ASCII decimal digit.
 pub fn digit_value(ch: String) -> Option(Int) {
   case ch {
     "0" -> Some(0)
@@ -85,9 +61,7 @@ pub fn digit_value(ch: String) -> Option(Int) {
   }
 }
 
-/// Value of an ASCII alphanumeric digit in radix 36: `0-9` → 0..9 and
-/// `a-z`/`A-Z` → 10..35, covering every radix from 2 to 36. Callers pick a
-/// radix by rejecting values `>= radix`.
+// radix 36, callers reject values >= radix
 pub fn alnum_value(ch: String) -> Option(Int) {
   case ch {
     "0" -> Some(0)
@@ -130,11 +104,6 @@ pub fn alnum_value(ch: String) -> Option(Int) {
   }
 }
 
-// The four predicates below are the lexer's per-character digit scan, so they
-// match on the character directly rather than round-tripping through the
-// `Option`-returning tables above (which would allocate a `Some(_)` per char).
-
-/// `0-9`, `a-f`, `A-F`.
 pub fn is_hex_digit(ch: String) -> Bool {
   case ch {
     "0"
@@ -163,7 +132,6 @@ pub fn is_hex_digit(ch: String) -> Bool {
   }
 }
 
-/// `0-9`.
 pub fn is_decimal_digit(ch: String) -> Bool {
   case ch {
     "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> True
@@ -171,7 +139,6 @@ pub fn is_decimal_digit(ch: String) -> Bool {
   }
 }
 
-/// `0-7`.
 pub fn is_octal_digit(ch: String) -> Bool {
   case ch {
     "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" -> True
@@ -179,7 +146,6 @@ pub fn is_octal_digit(ch: String) -> Bool {
   }
 }
 
-/// `0` or `1`.
 pub fn is_binary_digit(ch: String) -> Bool {
   case ch {
     "0" | "1" -> True
@@ -187,8 +153,7 @@ pub fn is_binary_digit(ch: String) -> Bool {
   }
 }
 
-/// Consume exactly `n` ASCII digits, returning #(value, rest). None if fewer
-/// than `n` digits are available.
+// exactly n digits, none if fewer
 pub fn take_digits(s: String, n: Int) -> Option(#(Int, String)) {
   take_digits_loop(s, n, 0)
 }

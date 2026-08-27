@@ -1,9 +1,3 @@
-//// M13: JS Statement → structured twocore IR lowering. Faithful port of
-//// arc/compiler/emit.gleam:1100-2780, 3685-4130, 5080-6030 into the
-//// Result-aware Rk-CPS style targeting ir.Block/Loop/LoopParam/Break/
-//// Continue/If/Try. D2 (Arch-A): NO St threading — emit_core owns that.
-//// R12: user-reachable failures surface as Error(EmitError), never panic.
-
 import arc/compiler/ast_util
 import arc/compiler/scope.{
   type Binding, type ScopeId, CaptureBinding, CatchBinding, ConstBinding,
@@ -24,12 +18,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
-
-// ── Result-aware CPS (Rk chain) — mirrors func.gleam ────────────────────────
-// Rk returns the tree paired with the emitter the chain finished with.
-// Transfers (Break/Continue/Return/Throw) never call `next`; they return the
-// emitter they diverged at (see `keep_frames`). R12 Result channel; host_ is
-// a sanctioned CallHost("js",..) site.
 
 type Rk(a) =
   fn(Emitter2, a) -> Result(#(ir.Expr, Emitter2), EmitError)
@@ -61,8 +49,6 @@ fn host_unit_(
   k(e)
 }
 
-/// Right-fold `step` over `items`, threading e, building nested Lets.
-/// `then` is labelled so `use e, x, next <- each_(…, then: k)` reads well.
 fn each_(
   e: Emitter2,
   items: List(a),
@@ -79,11 +65,6 @@ fn each_(
   }
 }
 
-// ── carried-value plumbing (shared with loop/switch/if arms) ────────────────
-
-/// Carried slot list for the frame whose ir_break OR ir_continue label is
-/// `ir_label`. state.find_break_target/find_continue_target return only
-/// #(label, cleanups); the Break/Continue payload needs the slot set too.
 fn find_frame_carried(e: Emitter2, ir_label: String) -> List(Int) {
   frame_carried_walk(e.frame_stack, ir_label)
 }
@@ -107,27 +88,11 @@ fn frame_carried_walk(
   }
 }
 
-/// Current IR value for each carried slot — the ir.Break/ir.Continue payload,
-/// and the fall-through Values(..) tail of a Block/If/Try arm. Reads
-/// e.slot_vars, so MUST be called on the INNER emitter (before leave_scope) —
-/// see RULING on leave_scope_carrying / rebind_after_block.
 fn carried_values(e: Emitter2, slots: List(Int)) -> List(ir.Value) {
   list.map(slots, fn(slot) { ir.Var(state.get_slot_var(e, slot)) })
 }
 
-/// RULING slot-vars-scope-survival — state.leave_scope (state.gleam:648)
-/// restores slot_vars to the pre-enter snapshot, so a set_slot_var of an OUTER
-/// slot done inside the scope is dropped. Mitigation (option a, chosen for all
-/// of block/if/while/for/switch/try):
-///  • INLINE bodies (plain `{ }`, catch, for-head) call this instead of
-///    state.leave_scope: capture each carried slot's inner SSA name, restore
-///    the snapshot, then re-apply — the inner ir.Let names remain in IR-
-///    lexical scope across an inline leave, so re-pointing slot_vars suffices.
-///  • WRAPPED bodies (ir.Block/If/Loop/Try) end each arm in
-///    Values(carried_values(inner_e)) BEFORE leave_scope, then call
-///    rebind_after_block on the wrapper — the wrapper's result vars are the
-///    explicit bridge, since inner ir.Let names go out of IR scope at the
-///    wrapper boundary.
+// leave_scope drops inner slot_vars; re-apply the carried names
 fn leave_scope_carrying(
   e_inner: Emitter2,
   save: state.ScopeSave2,
@@ -139,8 +104,6 @@ fn leave_scope_carrying(
   state.set_slot_var(e, slot, name)
 }
 
-// ── inline_cleanup + transfer arms (port emit.gleam:2504-2530, 3860-3868) ───
-
 fn bool_atom(e: Emitter2, b: Bool) -> ir.Value {
   case b {
     True -> e.consts.true_
@@ -148,8 +111,6 @@ fn bool_atom(e: Emitter2, b: Bool) -> ir.Value {
   }
 }
 
-/// Emit one crossed-barrier cleanup inline before the transfer, then continue
-/// via `k`. Structured-IR replacement for emit.gleam's Gosub/PopTry sequence.
 fn inline_cleanup(
   e: Emitter2,
   cleanup: BarrierCleanup,
@@ -185,15 +146,10 @@ fn inline_cleanup(
       use tail <- state.map_tree(k(e))
       ir.Let([], region, tail)
     }
-    // Structured ir.Try makes a bare catch transparent — nothing to emit.
     state.CatchOnly -> k(e)
   }
 }
 
-/// A cleanup inlined inside `esc`'s region runs under its own ir.Try, so a
-/// throw out of it leaves the region through the landing instead of reaching
-/// the region's handler (which would run the finally block a second time, or
-/// let an inner catch see an iterator close it does not enclose).
 fn escaping(
   e: Emitter2,
   esc: state.Escape,
@@ -204,8 +160,6 @@ fn escaping(
   Ok(#(ir.Try(result: carried_types(carried), body:, handlers: [handler]), e))
 }
 
-/// Fold `cleanups` (innermost first, per state.find_*_target) through
-/// inline_cleanup, terminating in `k`.
 fn inline_cleanups(
   e: Emitter2,
   cleanups: List(BarrierCleanup),
@@ -217,9 +171,6 @@ fn inline_cleanups(
   }
 }
 
-/// Cleanups a `return` performs — it crosses EVERY frame on the way out
-/// (port emit.gleam:2482-2498 emit_return_cross_frame, data-returning).
-/// state.cross_cleanups is private, so re-derive from Frame2 shapes here.
 fn return_cleanups(frames: List(state.Frame2)) -> List(BarrierCleanup) {
   use frame <- list.flat_map(frames)
   case frame {
@@ -244,9 +195,6 @@ fn return_cleanups(frames: List(state.Frame2)) -> List(BarrierCleanup) {
   }
 }
 
-/// `break [label]`. Port of emit.gleam:2504-2530 emit_goto_loop (is_cont=False)
-/// → structured ir.Break carrying the target frame's LoopParam values.
-/// Transfer is leaf — `next` is not called.
 fn emit_break(
   e: Emitter2,
   label: Option(String),
@@ -265,11 +213,6 @@ fn emit_break(
   |> keep_frames(frames)
 }
 
-/// A transfer diverges (never calls `next`) and hands back the emitter it
-/// finished with, so module-monotone state (fns_acc grown by a FnExpr in a
-/// return argument, fresh names) survives; the frame stack, trimmed while
-/// crossed finally blocks were inlined, is put back for the statements that
-/// follow the transfer in source order.
 fn keep_frames(
   r: Result(#(ir.Expr, Emitter2), EmitError),
   frames: List(state.Frame2),
@@ -278,9 +221,6 @@ fn keep_frames(
   #(tree, state.Emitter2(..e, frame_stack: frames))
 }
 
-/// `continue [label]`. R15: `ir_continue` names an INNER ir.Block wrapping the
-/// loop body, so JS continue lowers to ir.Break — falling out of that Block
-/// reaches update/post-test, then the loop emitter ir.Continue's to the head.
 fn emit_continue(
   e: Emitter2,
   label: Option(String),
@@ -299,9 +239,6 @@ fn emit_continue(
   |> keep_frames(frames)
 }
 
-/// M18 seam: if the resolved ir label is an SM sentinel (split-spanning target
-/// pushed by async.gleam), delegate to the installed intercept. None = not an
-/// SM label (fragment-local loop) → M13 emits ir.Break as normal.
 fn sm_goto(
   e: Emitter2,
   ir_label: String,
@@ -312,8 +249,6 @@ fn sm_goto(
   }
 }
 
-/// In a derived constructor an `undefined` return value becomes `this`, read
-/// after the crossed `finally` blocks have run.
 fn derived_return(
   e: Emitter2,
   v: ir.Value,
@@ -328,17 +263,12 @@ fn derived_return(
   }
 }
 
-/// `return [arg]`. Port of emit.gleam:3860-3868. Evaluates `arg` (or undef),
-/// inlines every crossed cleanup, then ir.Return([v]) — bare 1-value per D2
-/// Arch-A (emit_core wraps {V, St'}).
 fn emit_return(
   e: Emitter2,
   arg: Option(ast.Expression),
   _next: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let with_value = fn(e: Emitter2, v: ir.Value) {
-    // M18: fragment-local (non-split-spanning) barriers are on frame_stack and
-    // inline first; the SM hook then owns split-spanning try routing.
     let frames = e.frame_stack
     use e <- inline_cleanups(e, return_cleanups(e.frame_stack))
     use e, v <- derived_return(e, v)
@@ -357,10 +287,6 @@ fn emit_return(
   }
 }
 
-// ── entry points: emit_stmts / emit_stmt dispatch ───────────────────────────
-
-/// Evaluate a JS expression via dispatch, let-bind its result tree, pass the
-/// bound ir.Value to `k`. Threads Emitter2 from the dispatch return.
 fn expr_(
   e: Emitter2,
   ex: ast.Expression,
@@ -370,7 +296,6 @@ fn expr_(
   let_(e, tree, k)
 }
 
-/// Run an Rk chain whose leaf calls `done(ef, tree)`.
 fn run_rk(
   e: Emitter2,
   f: fn(
@@ -381,9 +306,6 @@ fn run_rk(
   f(e, fn(ef, tree) { Ok(#(tree, ef)) })
 }
 
-/// state.EmitDispatch.emit_stmts adapter (state.gleam:218-219). Folds each
-/// statement through emit_stmt; the terminal continuation `k` builds the
-/// caller's tail ir.Expr from the leaf Emitter2.
 pub fn emit_stmts(
   e: Emitter2,
   ss: List(ast.StmtWithLine),
@@ -404,24 +326,17 @@ pub fn emit_stmts(
   }
 }
 
-/// Lower one Statement. `k` is the "rest of the block" continuation — trivial
-/// arms tail-call it directly; control-flow arms wrap it in structured IR.
 fn emit_stmt(
   e: Emitter2,
   s: ast.Statement,
   k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   case s {
-    // ── trivial arms ────────────────────────────────────────────────────────
     ast.EmptyStatement | ast.DebuggerStatement -> k(e)
     ast.ExpressionStatement(expression:, ..) ->
       expr_(e, expression, fn(e, _) { k(e) })
-    // D15: `with` is unsupported — surface as compile-time EmitError (R12).
     ast.WithStatement(..) -> Error(state.UnsupportedFeature("with"))
-    // Already hoisted by func.emit_prologue / the block prologue. The only
-    // runtime effect at the statement's position is Annex B §B.3.2.6: in
-    // sloppy mode a block-level plain function is copied into the enclosing
-    // var-scope binding of the same name.
+    // already hoisted; only annex b §B.3.2.6 sloppy copy runs here
     ast.FunctionDeclaration(
       name: Some(ast.NamedBinding(name:, ..)),
       is_generator: False,
@@ -438,12 +353,10 @@ fn emit_stmt(
     ast.FunctionDeclaration(..) -> k(e)
     ast.BlockStatement([]) -> k(e)
 
-    // ── transfer (already implemented above) ────────────────────────────────
     ast.BreakStatement(label:) -> emit_break(e, label, k)
     ast.ContinueStatement(label:) -> emit_continue(e, label, k)
     ast.ReturnStatement(argument:) -> emit_return(e, argument, k)
 
-    // ── owned by sibling M13 units ──────────────────────────────────────────
     ast.BlockStatement(body:) -> emit_block(e, body, k)
     ast.VariableDeclaration(kind:, declarations:) ->
       emit_var_decl(e, kind, declarations, k)
@@ -464,9 +377,7 @@ fn emit_stmt(
       }
     ast.SwitchStatement(discriminant:, cases:) ->
       emit_switch(e, discriminant, cases, k)
-    // ── throw / try / class (port emit.gleam:3870-3942, 4001-4021) ──────────
     ast.ThrowStatement(argument:) ->
-      // R2: tag exactly "js_exn", 1 IR arg (emit_core prepends St).
       expr_(e, argument, fn(ef, v) {
         Ok(#(ir.Throw(ef.consts.js_tag, [v]), ef))
       })
@@ -476,11 +387,6 @@ fn emit_stmt(
   }
 }
 
-// ── block-scope binding helpers (ports of func.gleam:295-310,349-378,656-684
-// re-scoped from fn_scope→cur_scope for BlockDeclarationInstantiation §14.2.3)
-
-/// Store `val` into `b`'s slot: unboxed → Let-bind to the slot's canonical var
-/// name + set_slot_var; boxed → cell_set on the existing cell. Verbatim port.
 fn store_slot(
   e: Emitter2,
   b: Binding,
@@ -498,10 +404,6 @@ fn store_slot(
   }
 }
 
-/// Seed every binding owned by `scope_id` (the just-entered block scope) in
-/// slot order: Var→undef, Let/Const/FnName→tdz, then cell_new if boxed.
-/// Param/Catch/Capture never appear in a Block-kind scope's own bindings but
-/// are matched to keep the case exhaustive. Port of func.binding_prologue.
 fn binding_prologue(
   e: Emitter2,
   scope_id: ScopeId,
@@ -533,10 +435,6 @@ fn binding_prologue(
   }
 }
 
-/// Compile every direct FunctionDeclaration in `stmts` and store the closure
-/// into its name's block-scope slot (BlockDeclarationInstantiation §14.2.3 —
-/// resolves against `e.cur_scope`, NOT `e.fn_scope`). Goes through
-/// `e.dispatch.emit_function` (R13). Port of func.hoist_fn_decls.
 fn hoist_fn_decls(
   e: Emitter2,
   stmts: List(ast.StmtWithLine),
@@ -574,10 +472,6 @@ fn cur_scope_binding(e: Emitter2, name: String) -> Binding {
   b
 }
 
-// ── BlockStatement arm (port emit.gleam:2878-2970) ──────────────────────────
-
-/// Fold a raw statement list through emit_stmt with `next` as the tail —
-/// the internal (Rk-typed) counterpart to the pub emit_stmts adapter.
 fn fold_body(
   e: Emitter2,
   body: List(ast.StmtWithLine),
@@ -588,9 +482,6 @@ fn fold_body(
   })
 }
 
-/// `{ ... }`. Port of emit.gleam:2878-2910. Elides the scope entirely when
-/// nothing block-scoped is declared; otherwise enter_scope → prologue-seed →
-/// hoist fn decls → body → leave_scope.
 fn emit_block(
   e: Emitter2,
   body: List(ast.StmtWithLine),
@@ -602,8 +493,6 @@ fn emit_block(
       case ast_util.block_has_declarations(body) {
         False -> fold_body(e, body, next)
         True -> {
-          // RULING slot-vars-scope-survival: compute carried at OUTER scope
-          // (before enter_scope) so only already-bound outer slots qualify.
           let carried = assigned_unboxed_slots(e, ast.BlockStatement(body))
           let #(e, save) = state.enter_scope(e, in_block: True)
           let entered = e.cur_scope
@@ -625,8 +514,7 @@ fn emit_block(
   }
 }
 
-/// Annex B §B.3.1: bare FunctionDeclaration as an if/else clause behaves as if
-/// wrapped in a Block; the normal block path handles the block-scoped binding.
+// annex b §B.3.1 function declaration as if clause
 pub fn block_wrap_fn_decl(stmt: ast.Statement) -> ast.Statement {
   case stmt {
     ast.FunctionDeclaration(..) ->
@@ -635,11 +523,7 @@ pub fn block_wrap_fn_decl(stmt: ast.Statement) -> ast.Statement {
   }
 }
 
-/// Annex B §B.3.2.6: copy the block-scoped function binding `name` into the
-/// enclosing var-scope binding. Source is the innermost binding on the chain;
-/// the target walk steps over catch parameters (§B.3.4), stops at a
-/// let/const/fn-name shadow, writes a var/param/capture binding, and falls
-/// through to the global object when the function root has no binding.
+// annex b §B.3.2.6 copy block function into var scope
 fn annexb_promote(
   e: Emitter2,
   name: String,
@@ -732,12 +616,6 @@ fn annexb_find_target(
   }
 }
 
-// ── VariableDeclaration (port emit.gleam:3727-3776) ─────────────────────────
-
-/// Initialize a declared name to `v`. Port of emit.gleam init_lex/emit_var_put:
-/// unboxed → fresh Let-bind + set_slot_var; boxed → cell_set. Lexical bindings
-/// mark the slot `initialized` so later writes (expr.emit_direct_put) skip the
-/// TDZ check. D15: WithChain / EvalEnv → UnsupportedFeature.
 fn store_declared(
   e: Emitter2,
   name: String,
@@ -757,8 +635,6 @@ fn store_declared(
           host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
         False -> {
           let #(n, e) = state.fresh_slot_var(e, slot)
-          // Propagate known-number through the alias so a for-init `let i=0`
-          // seed carries the mark.
           let e = case v {
             ir.Var(vn) ->
               case state.is_known_number(e, vn) {
@@ -790,11 +666,6 @@ fn store_declared(
   }
 }
 
-/// `var/let/const … = …`. Port of emit.gleam:3727-3776. Per declarator:
-/// IdentifierPattern + init → eval init under NamedEvaluation, store;
-/// IdentifierPattern no init → var skips (prologue
-/// seeded undef), lexical stores undef (§14.3.1.2 ends TDZ); other patterns →
-/// dispatch.emit_destructure with the kind's BindMode.
 fn emit_var_decl(
   e: Emitter2,
   kind: ast.VariableKind,
@@ -846,16 +717,6 @@ fn emit_var_decl(
   }
 }
 
-// ── carried-set: LoopParam machinery (no emit.gleam analogue) ───────────────
-// Imperative bytecode re-read slots in place; ir.Loop must thread every
-// mutated unboxed local as a LoopParam so Continue/Break carry the current
-// value across iterations. SPEC.md M10:1208.
-
-/// ir.LoopParam for each carried slot: a fresh loop-local name, TTerm-typed,
-/// seeded from the slot's current IR var. Paired with enter_loop_body which
-/// rebinds the slots to these names inside the body. Names go through
-/// fresh_var — ir.gleam:419 requires all binder names unique per function, so
-/// two loops carrying the same outer slot must not collide.
 fn carried_params(
   e: Emitter2,
   slots: List(Int),
@@ -869,13 +730,10 @@ fn carried_params(
   #(list.reverse(params), e)
 }
 
-/// ir.Block/If/Try result-type list for a carried slot set — one TTerm per slot.
 fn carried_types(slots: List(Int)) -> List(ir.ValType) {
   list.map(slots, fn(_) { ir.TTerm })
 }
 
-/// Rebind each carried slot to its LoopParam name so the loop body's reads and
-/// writes see the loop-local (Continue then carries the current value forward).
 fn enter_loop_body(
   e: Emitter2,
   slots: List(Int),
@@ -885,11 +743,6 @@ fn enter_loop_body(
   state.set_slot_var(e, slot, param.name)
 }
 
-/// Bind an n-carried ir.Block/If/Loop/Try result to fresh names and rebind
-/// each slot, so downstream reads see the post-construct values. Call AFTER
-/// leave_scope + pop_frame (RULING slot-vars-scope-survival: the wrapper's
-/// explicit result vars, not e.slot_vars, carry outer-slot mutations out).
-/// `slots == []` collapses to `Let([], rhs, k(e))` — sequencing with no rebind.
 fn rebind_after_block(
   e: Emitter2,
   slots: List(Int),
@@ -906,10 +759,6 @@ fn rebind_after_block(
   ir.Let(names, rhs, body)
 }
 
-/// Unboxed local slots that `s` may re-assign, filtered to slots already bound
-/// OUTSIDE (present in `e.slot_vars` at loop-emit time). Deduped, sorted.
-/// Nested function/class bodies are NOT descended — their assignments target
-/// the child frame, not this one.
 fn assigned_unboxed_slots(e: Emitter2, s: ast.Statement) -> List(Int) {
   let bound_unboxed = fn(slot, boxed) {
     case boxed, dict.has_key(e.slot_vars, slot) {
@@ -928,8 +777,6 @@ fn assigned_unboxed_slots(e: Emitter2, s: ast.Statement) -> List(Int) {
       scope.Plain(scope.Local(slot:, boxed:, ..)) -> bound_unboxed(slot, boxed)
       _ -> Error(Nil)
     }
-    // Annex B §B.3.2.6 writes the var-scope twin, which a same-named catch
-    // parameter on the chain hides from the plain resolution.
     let twin = case list.contains(annexb, name) {
       False -> Error(Nil)
       True ->
@@ -945,8 +792,6 @@ fn assigned_unboxed_slots(e: Emitter2, s: ast.Statement) -> List(Int) {
   |> list.sort(int.compare)
 }
 
-/// Union of assigned_unboxed_slots over a statement list — for switch cases,
-/// try blocks, and other multi-body constructs.
 fn assigned_unboxed_slots_all(
   e: Emitter2,
   ss: List(ast.Statement),
@@ -956,12 +801,6 @@ fn assigned_unboxed_slots_all(
   |> list.sort(int.compare)
 }
 
-/// Emit `kfn_code(f, undef)` once for each hoistable callee slot, let-bound
-/// BEFORE the caller's ir.Block/ir.Loop, and record each pair var in
-/// `e.hoisted_kfn` so `expr.emit_plain_call` reuses it inside the loop body.
-/// Slotted-global cells (`is_global: True`) read through `cell_get` first and
-/// key `hoisted_kfn` by `-1 - slot` so a nested function's local slot N never
-/// collides with js_main's slotted-global slot N.
 fn hoist_kfn_codes(
   e: Emitter2,
   slots: List(#(Int, Bool)),
@@ -987,19 +826,7 @@ fn hoist_kfn_codes(
   }
 }
 
-/// Callee slots whose `kfn_code` read is loop-invariant, as `#(slot,
-/// is_global)`. Unboxed locals: called as `f(..)` in body/cond/update, NOT
-/// re-bound by the loop (∉ `carried`), already bound outside (∈ `e.slot_vars`).
-/// Slotted globals (Optimization G): with `module_slot_globals: True` these
-/// resolve to `scope.Local(boxed: True)` (root VarBinding at js_main /
-/// CaptureBinding inside nested fns) — never `scope.Global`. Hoisted when the
-/// name is in `e.slotted_globals`, its cell var is bound outside the loop (∈
-/// `e.slot_vars`), and it isn't textually reassigned in body/cond/update.
-/// CAVEAT: loop-local `assigned` cannot see reassignment inside CALLED
-/// functions (a boxed cell can be `cell_set` by any callee). Full soundness
-/// wants a module-wide `∉ expr.stmt_assigned_globals` gate, which needs the
-/// set stored on Emitter2 (state.gleam) — deferred; no v8-v7 bench nor current
-/// test262 subset reassigns a top-level function it calls in a loop.
+// todo: misses reassignment inside called functions
 pub fn loop_invariant_callees(
   e: Emitter2,
   body: ast.Statement,
@@ -1022,8 +849,6 @@ pub fn loop_invariant_callees(
           True -> Ok(#(slot, False))
           False -> Error(Nil)
         }
-      // Slotted-global boxed cell (root VarBinding or its capture). `slot` is
-      // the CURRENT frame's slot — valid for `get_slot_var` in hoist_kfn_codes.
       scope.Plain(scope.Local(slot:, boxed: True, ..)) ->
         case
           dict.has_key(e.slotted_globals, name)
@@ -1040,15 +865,13 @@ pub fn loop_invariant_callees(
   |> list.sort(fn(a, b) { int.compare(a.0, b.0) })
 }
 
-// -- callee-identifier name collection (accumulator-passing walk) --
-
 fn stmt_callee_names(s: ast.Statement, acc: List(String)) -> List(String) {
   case s {
     ast.EmptyStatement
     | ast.DebuggerStatement
     | ast.BreakStatement(..)
     | ast.ContinueStatement(..)
-    | // do NOT descend into nested function bodies
+    | // skip nested function bodies
       ast.FunctionDeclaration(..) -> acc
     ast.ClassDeclaration(super_class:, ..) ->
       opt_expr_callee_names(super_class, acc)
@@ -1149,20 +972,15 @@ fn exprs_callee_names(
 
 fn expr_callee_names(ex: ast.Expression, acc: List(String)) -> List(String) {
   case ex {
-    // The target: a plain identifier call. Record the name; still recurse
-    // into arguments for nested calls. NOT OptionalCallExpression — `f?.()`
-    // is nullish-guarded so `kfn_code` on it isn't unconditionally safe.
     ast.CallExpression(callee: ast.Identifier(name:, ..), arguments:, ..) ->
       exprs_callee_names(arguments, [name, ..acc])
     ast.CallExpression(callee:, arguments:, ..)
     | ast.OptionalCallExpression(callee:, arguments:, ..)
     | ast.NewExpression(callee:, arguments:, ..) ->
       exprs_callee_names(arguments, expr_callee_names(callee, acc))
-    // do NOT descend into nested function bodies
     ast.FunctionExpression(..) | ast.ArrowFunctionExpression(..) -> acc
     ast.ClassExpression(super_class:, ..) ->
       opt_expr_callee_names(super_class, acc)
-    // leaves
     ast.Identifier(..)
     | ast.NumberLiteral(..)
     | ast.BigIntLiteral(..)
@@ -1175,7 +993,6 @@ fn expr_callee_names(ex: ast.Expression, acc: List(String)) -> List(String) {
     | ast.MetaProperty(..)
     | ast.RegExpLiteral(..)
     | ast.IntrinsicTemplateObject(..) -> acc
-    // recurse
     ast.AssignmentExpression(left:, right:, ..)
     | ast.BinaryExpression(left:, right:, ..)
     | ast.LogicalExpression(left:, right:, ..) ->
@@ -1262,17 +1079,12 @@ fn pattern_callee_names(p: ast.Pattern, acc: List(String)) -> List(String) {
   }
 }
 
-// -- assignment-target name collection (accumulator-passing walk) --
-
 fn stmt_assigned_names(s: ast.Statement, acc: List(String)) -> List(String) {
   case s {
     ast.EmptyStatement
     | ast.DebuggerStatement
     | ast.BreakStatement(..)
     | ast.ContinueStatement(..) -> acc
-    // Annex B §B.3.2.6: a sloppy block-level plain function is copied into
-    // the enclosing var binding when its declaration is evaluated. Do NOT
-    // descend into the body.
     ast.FunctionDeclaration(
       name: Some(ast.NamedBinding(name:, ..)),
       is_generator: False,
@@ -1280,7 +1092,6 @@ fn stmt_assigned_names(s: ast.Statement, acc: List(String)) -> List(String) {
       ..,
     ) -> [name, ..acc]
     ast.FunctionDeclaration(..) -> acc
-    // Class BODY is a nested scope, but the heritage clause evaluates here.
     ast.ClassDeclaration(super_class:, ..) ->
       opt_expr_assigned_names(super_class, acc)
     ast.ExpressionStatement(expression:, ..) ->
@@ -1353,11 +1164,7 @@ fn decls_assigned_names(
 ) -> List(String) {
   use acc, ast.VariableDeclarator(id:, init:) <- list.fold(decls, acc)
   let acc = opt_expr_assigned_names(init, acc)
-  // Defaults / computed keys inside the pattern evaluate in THIS scope for
-  // every kind (let/const too) — walk them for assignments.
   let acc = pattern_expr_assigned_names(id, acc)
-  // `var x = …` re-assigns the hoisted function-scope slot; let/const bind
-  // fresh block-scope slots (won't be in outer slot_vars, but harmless).
   case kind, init {
     ast.Var, Some(_) -> pattern_names(id, acc)
     _, _ -> acc
@@ -1369,7 +1176,6 @@ fn for_init_assigned_names(fi: ast.ForInit, acc: List(String)) -> List(String) {
     ast.ForInitExpression(ex) -> expr_assigned_names(ex, acc)
     ast.ForInitDeclaration(kind:, declarations:) -> {
       let acc = decls_assigned_names(kind, declarations, acc)
-      // for-in/for-of `var x` head is assigned each iteration even sans init.
       case kind {
         ast.Var -> {
           use acc, d <- list.fold(declarations, acc)
@@ -1405,9 +1211,6 @@ fn pattern_names(p: ast.Pattern, acc: List(String)) -> List(String) {
   }
 }
 
-/// Assigned-names from expressions EMBEDDED in a pattern (default initializers
-/// and computed property keys). `let {[y++]: a = (x=1)} = o` inside a loop
-/// mutates x and y in this scope; pattern_names alone only reports `a`.
 fn pattern_expr_assigned_names(
   p: ast.Pattern,
   acc: List(String),
@@ -1460,12 +1263,9 @@ fn expr_assigned_names(ex: ast.Expression, acc: List(String)) -> List(String) {
     }
     ast.UpdateExpression(argument:, ..) ->
       expr_assigned_names(argument, assign_target_names(argument, acc))
-    // do NOT descend into nested function bodies
     ast.FunctionExpression(..) | ast.ArrowFunctionExpression(..) -> acc
-    // Class BODY is a nested scope, but the heritage clause evaluates here.
     ast.ClassExpression(super_class:, ..) ->
       opt_expr_assigned_names(super_class, acc)
-    // leaves
     ast.Identifier(..)
     | ast.NumberLiteral(..)
     | ast.BigIntLiteral(..)
@@ -1478,7 +1278,6 @@ fn expr_assigned_names(ex: ast.Expression, acc: List(String)) -> List(String) {
     | ast.MetaProperty(..)
     | ast.RegExpLiteral(..)
     | ast.IntrinsicTemplateObject(..) -> acc
-    // recurse
     ast.BinaryExpression(left:, right:, ..)
     | ast.LogicalExpression(left:, right:, ..) ->
       expr_assigned_names(right, expr_assigned_names(left, acc))
@@ -1543,9 +1342,6 @@ fn prop_key_assigned_names(
   }
 }
 
-/// Identifier names an assignment/update LHS binds. Handles destructuring
-/// (`[a,{b}] = x`), defaults, rest, and parenthesized targets. Member
-/// expressions bind no local slot.
 fn assign_target_names(ex: ast.Expression, acc: List(String)) -> List(String) {
   case ex {
     ast.Identifier(name:, ..) -> [name, ..acc]
@@ -1572,15 +1368,6 @@ fn assign_target_names(ex: ast.Expression, acc: List(String)) -> List(String) {
   }
 }
 
-// ── §14.7.5 ForIn/OfStatement — port emit.gleam:5634-5847, 6000-6030 ────────
-// R15 shape: Block(brk) { Loop(head, params) { … Block(cont) { <body> } …
-// Continue(head, next_params) } }. `ir_continue` on the Loop2 frame names the
-// INNER Block, so a JS `continue` (emit_continue → ir.Break(cont, carried))
-// falls out of it into the per-iteration advance, then re-enters the head.
-
-/// Carried slot set for a for-in/of body: unboxed locals the body assigns,
-/// plus any names the head re-binds each iteration (var/pattern/expr LHS —
-/// let/const heads bind head-scoped slots that die at leave_for_scope).
 fn for_in_of_carried(
   e: Emitter2,
   left: ast.ForInit,
@@ -1593,7 +1380,6 @@ fn for_in_of_carried(
       case kind {
         ast.Var ->
           list.fold(declarations, [], fn(acc, d) { pattern_names(d.id, acc) })
-        // let/const/using head vars are head-scoped — not carried out.
         ast.Let | ast.Const | ast.Using | ast.AwaitUsing -> []
       }
   }
@@ -1614,10 +1400,7 @@ fn for_in_of_carried(
   |> list.sort(int.compare)
 }
 
-/// §14.7.5.7 step 6.g port of emit.gleam:5618 emit_for_per_iteration_env: a
-/// lexical head gets a FRESH iteration environment on every pass — re-run the
-/// head scope's binding prologue so captured names are re-boxed and TDZ is
-/// re-seeded before this iteration's LHS bind.
+// §14.7.5.7 fresh iteration env each pass
 fn per_iteration_env(
   e: Emitter2,
   left: ast.ForInit,
@@ -1630,11 +1413,7 @@ fn per_iteration_env(
   }
 }
 
-/// PutValue to identifier `name` — Rk-CPS port of expr.emit_direct_put
-/// (emit.gleam:6027 routes ForInitExpression through emit_destructuring_
-/// assign, so a bare-Identifier LHS is an ASSIGNMENT, not a declaration:
-/// const/fn-name write throws, let/capture TDZ-checks). store_declared is the
-/// wrong path here — it silently rebinds a const's slot.
+// an assignment, not a declaration: const throws, let tdz checks
 fn for_lhs_ident_assign(
   e: Emitter2,
   name: String,
@@ -1720,13 +1499,6 @@ fn for_lhs_ident_assign(
   }
 }
 
-/// Bind the current iteration value `v` to the for-in/of LHS. Port of
-/// emit.gleam:6000-6030 emit_for_lhs_bind → dispatch.emit_destructure for
-/// binding patterns; ForInitExpression assignment targets go through the
-/// resolve+store path (Identifier) or dispatch.emit_expr on a synthetic
-/// AssignmentExpression is not possible (v is IR-level), so the common
-/// Identifier case is handled directly and the general destructuring-assign
-/// case routes through emit_destructure with BindAssign.
 fn for_lhs_bind(
   e: Emitter2,
   left: ast.ForInit,
@@ -1743,35 +1515,21 @@ fn for_lhs_bind(
       let mode = case kind {
         ast.Var -> state.BindVar
         ast.Let -> state.BindLet
-        // Using/AwaitUsing bind as const here; the disposer registration
-        // (emit.gleam:1083 emit_for_of_using_body) is M17's dispose-resources.
         ast.Const | ast.Using | ast.AwaitUsing -> state.BindConst
       }
       case declarations {
         [ast.VariableDeclarator(id: pat, ..)] -> via_destructure(e, pat, mode)
-        // Grammar allows exactly one ForBinding in a for-in/of head; a second
-        // declarator forces the parser down the classic path (emit.gleam:6018).
         _ ->
           Error(state.EarlySyntaxError("multiple declarators in for-in/of head"))
       }
     }
     ast.ForInitPattern(pat) -> via_destructure(e, pat, state.BindVar)
-    // Assignment-target LHS (`for (x of …)`, `for (obj.k of …)`): common
-    // Identifier case writes the resolved binding directly; other targets
-    // (member/array/object destructuring) route through emit_destructure with
-    // BindAssign — Pattern has no MemberPattern so a member LHS is stored via
-    // a synthetic runtime error path here (matches R12: user-reachable).
     ast.ForInitExpression(target) ->
       case ast_util.unwrap_parens(target) {
         ast.Identifier(name:, ..) -> for_lhs_ident_assign(e, name, v, k)
         ast.MemberExpression(..) as m -> {
-          // `for (o.k of it)`: evaluate lref then PutValue. expr.emit_lvalue is
-          // Build-typed; bridge via a set_prop host call after evaluating base
-          // and key through dispatch.emit_expr.
           for_lhs_member_put(e, m, v, k)
         }
-        // Destructuring-assign target `for ([a.b, {c: d.e}] of it)` — the
-        // expression-shaped §13.15.5 path, since Pattern has no member target.
         ast.ArrayExpression(..) | ast.ObjectExpression(..) -> {
           let assign =
             anf.then(expr.emit_destructuring_assign(target, v), fn(_) {
@@ -1787,9 +1545,6 @@ fn for_lhs_bind(
   }
 }
 
-/// `for (obj[k] of …)` / `for (obj.p of …)` — evaluate base and key, then
-/// host("set_prop"). Key wire shape is anf.object_key_lit's `{string_key,
-/// {named, <<n>>}}` tuple built inline (Rk cannot call the Build combinator).
 fn for_lhs_member_put(
   e: Emitter2,
   m: ast.Expression,
@@ -1799,9 +1554,6 @@ fn for_lhs_member_put(
   let assert ast.MemberExpression(object:, property:, ..) = m
   use e, base <- expr_(e, object)
   case property {
-    // `#p` is a private field (ast.gleam:107) — resolve the class-minted
-    // private-key local (expr.gleam:651) and route through private_set, not a
-    // public string-key set_prop.
     ast.Dot(name: "#" <> _ as name, ..) ->
       case state.resolve(e, name) {
         scope.Plain(scope.Local(slot:, boxed: False, ..)) ->
@@ -1844,11 +1596,6 @@ fn for_lhs_member_put(
   }
 }
 
-/// `for (lhs in rhs) body`. Port of emit.gleam:5634-5690 → SPEC M13 row.
-/// host("for_in_keys") yields an eager cons-list of BitArray property names
-/// (D10: a BitArray IS a JS string value); the list tail is the Loop's first
-/// param and threads via ir.Continue to the head. R15: JS `continue` targets
-/// the inner ir.Block(cont) so the tail-advance sits between it and Continue.
 fn emit_for_in(
   e: Emitter2,
   left: ast.ForInit,
@@ -1877,22 +1624,17 @@ fn emit_for_in(
   let #(user_params, e) = carried_params(e, carried)
   let loop_params = [ir.LoopParam(tail_p, ir.TTerm, keys), ..user_params]
   let e = state.push_loop(e, brk, cont, carried, None)
-  // Build the Loop body with slot_vars pointing at the LoopParam names.
   use #(loop_body, e) <- result.try(
     run_rk(e, fn(e, done) {
       let e = enter_loop_body(e, carried, user_params)
       use e, empty <- let_(e, ir.TermOp(ir.IsEmptyList, [ir.Var(tail_p)]))
       let brk_payload = carried_values(e, carried)
-      // Nested run_rk (mirrors emit_while) so the not_empty arm's fresh_var
-      // bumps thread out to `done` — a bare `{}` block would drop them and
-      // the outer rebind_after_block would re-mint colliding names.
       use #(not_empty, e) <- result.try(
         run_rk(e, fn(e, done_ne) {
           use e, key <- let_(e, ir.TermOp(ir.ListHead, [ir.Var(tail_p)]))
           use e, rest <- let_(e, ir.TermOp(ir.ListTail, [ir.Var(tail_p)]))
           use e <- per_iteration_env(e, left, head_scope)
           use e <- for_lhs_bind(e, left, key)
-          // Inner Block(cont) — JS `continue` Breaks to it (R15).
           use #(cont_body, e) <- result.try(
             run_rk(e, fn(e, done_cb) {
               use e <- emit_stmt(e, body)
@@ -1917,15 +1659,6 @@ fn emit_for_in(
   rebind_after_block(e, carried, outer, next)
 }
 
-/// `for (lhs of rhs) body`. Port of emit.gleam:5750-5847 emit_for_of_common +
-/// emit_for_of → SPEC M13 row. host("get_iterator", [rhs, sync]) yields a
-/// stateful iterator handle; host("iter_next") returns #(done, value). A body
-/// throw is caught by the loop-local ir.Try to close the iterator (abrupt=
-/// true) then rethrow (§14.7.5.6 step 6.k IteratorClose). Normal-completion
-/// close (break/exhaustion) is emitted after the outer Block per SPEC — the
-/// runtime iterator record's [[Done]] flag makes the exhausted-case close a
-/// no-op (SPEC.md:727). Crossing this loop (labeled break/continue/return)
-/// inlines iter_close via Loop2.iter_close.
 fn emit_for_of(
   e: Emitter2,
   left: ast.ForInit,
@@ -1944,8 +1677,6 @@ fn emit_for_of(
   use e <- seed_head(e)
   let head_scope = e.cur_scope
   use e, rhs_v <- expr_(e, right)
-  // Bind iterator handle to a NAMED var so Loop2.iter_close and the catch
-  // handler can reference it by name.
   let #(it, e) = state.fresh_var(e)
   let after_iter = fn(e: Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError) {
     let carried = for_in_of_carried(e, left, body)
@@ -1962,17 +1693,11 @@ fn emit_for_of(
         let e = enter_loop_body(e, carried, user_params)
         use e, step <- host_(e, "iter_next", [ir.Var(it)])
         use e, done_v <- let_(e, ir.TermOp(ir.TupleGet(0), [step]))
-        // done_v is a Gleam Bool atom (t_iter_next → #(Bool, JsVal)).
         use e, done_i <- let_(e, anf.is_true_expr(done_v))
         let brk_payload = carried_values(e, carried)
-        // Nested run_rk so every sibling arm's fresh_var bumps reach `done` —
-        // ir.gleam:420 requires all Let names function-unique, and the catch
-        // handler + outer rebind_after_block both mint fresh vars.
         use #(not_done, e) <- result.try(
           run_rk(e, fn(e, done_nd) {
             use e, val <- let_(e, ir.TermOp(ir.TupleGet(1), [step]))
-            // §14.7.5.6 step 6.i-l: bind + body run under a try so an abrupt
-            // completion closes the iterator (abrupt=true) then rethrows.
             use #(try_body, e) <- result.try(
               run_rk(e, fn(e, done_tb) {
                 use e <- per_iteration_env(e, left, head_scope)
@@ -2024,7 +1749,6 @@ fn emit_for_of(
       ir.Block(brk, result_tys, ir.Loop(head, user_params, [], loop_body))
     let e = state.leave_for_scope(e, save)
     rebind_after_block(e, carried, outer, fn(e) {
-      // SPEC M13 row: close after loop. [[Done]]=true → runtime no-op.
       host_unit_(e, "iter_close", [ir.Var(it), e.consts.false_], next)
     })
   }
@@ -2035,8 +1759,6 @@ fn emit_for_of(
     body_tree,
   )
 }
-
-// ── §14.15 TryStatement (port emit.gleam:3875-3942, TryCatch only) ──────────
 
 fn emit_try(
   e: Emitter2,
@@ -2051,11 +1773,6 @@ fn emit_try(
           ast.BlockStatement(block),
           ast.BlockStatement(catch_body),
         ])
-      // try body: barrier so break/continue/return crossing it record
-      // CatchOnly (structured ir.Try — nothing to emit at the crossing).
-      // run_rk threads e out (state.gleam invariant #1: next_var/next_label/
-      // fns_acc are module-monotone) so the handler and rebind_after_block see
-      // vars/labels/fns allocated inside the try body.
       let branch_slots = e.slot_vars
       let #(esc, e) = state.fresh_escape(e, list.length(carried))
       let e = state.push_barrier(e, None, None, Some(esc))
@@ -2065,11 +1782,7 @@ fn emit_try(
           done(e, ir.Values(carried_values(e, carried)))
         }),
       )
-      // Popped on the emitter the body hands back: a body ending in a
-      // transfer never reaches the code after emit_block.
       let e = state.pop_frame(e)
-      // The try body's slot_vars name Let-bindings inside try_body; the
-      // handler must read the pre-try names (as emit_if does per arm).
       let e = state.Emitter2(..e, slot_vars: branch_slots)
       use #(handler, e) <- result.try(emit_catch_handler(
         e,
@@ -2092,14 +1805,7 @@ fn emit_try(
         )
       rebind_after_block(e, carried, region, next)
     }
-    // M17.md §3.4/§3.6 barrier-duplication (Gosub → inline). Bridge exn's
-    // state.K tail to Rk `next` via 0-arity Let-sequencing.
-    // RULING slot-vars-scope-survival: exn.wrap_with_finally hardcodes
-    // ir.Try(result: []) so cannot bridge carried slots — restore the pre-try
-    // slot_vars so next(e) never references names Let-bound inside `tree`
-    // (mirrors the emit_if branch_slots reset). Outer-slot writes made in
-    // try/finally are DROPPED until exn.gleam threads `carried` and this arm
-    // adopts the sibling TryCatch arm's rebind_after_block pattern.
+    // todo: outer slot writes inside try/finally are dropped here
     ast.TryFinally(finalizer) -> {
       let slot_vars0 = e.slot_vars
       use #(tree, e) <- result.try(
@@ -2125,12 +1831,7 @@ fn emit_try(
   }
 }
 
-/// Catch handler body — port of emit.gleam:3010-3026. `catch (p) Block`:
-/// enter the Catch scope (holds ONLY the param), bind `p`, then emit_block the
-/// body (which owns its own child scope). `catch Block` (no binding) creates
-/// NO catch scope — emit_block the body directly; entering a scope here would
-/// steal the next sibling's cursor id (emit.gleam:3006-3009). Returns the
-/// threaded Emitter2 so emit_try preserves monotone counters (invariant #1).
+// no catch scope without a binding; entering would steal a sibling id
 fn emit_catch_handler(
   e: Emitter2,
   param: Option(ast.Pattern),
@@ -2149,11 +1850,6 @@ fn emit_catch_handler(
         state.BindLet,
       ))
       use e, _ <- let_(e, dtree)
-      // RULING slot-vars-scope-survival: read carried_values from the INNER e
-      // before leave_scope drops outer-slot rebinds; the handler is a WRAPPED
-      // body so vals thread out via ir.Try.result → rebind_after_block. The
-      // scope is left on the emitter the body hands back, so a body ending in
-      // a transfer still leaves it.
       use #(body, e) <- result.try(
         run_rk(e, fn(e, done) {
           use e <- emit_block(e, catch_body)
@@ -2168,8 +1864,6 @@ fn emit_catch_handler(
     }
   }
 }
-
-// ── §15.7 ClassDeclaration (port emit.gleam:4001-4021) ──────────────────────
 
 fn emit_class_decl(
   e: Emitter2,
@@ -2188,21 +1882,14 @@ fn emit_class_decl(
         body,
       ))
       use e, ctor_h <- let_(e, tree)
-      // Class names are block-scoped (like let); resolve in the current
-      // scope and store the constructor handle into that binding's slot,
-      // which ends its TDZ.
       let b = cur_scope_binding(e, n)
       let e =
         state.Emitter2(..e, initialized: set.insert(e.initialized, b.slot))
       store_slot(e, b, ctor_h, next)
     }
-    // Statement-position `class` requires a name; anonymous
-    // `export default class {}` is a ClassExpression before it reaches here.
     None -> Error(state.EarlySyntaxError("anonymous class declaration"))
   }
 }
-
-// ── IfStatement — port emit.gleam:2981-3026 → structured ir.If ──────────────
 
 fn emit_if(
   e: Emitter2,
@@ -2218,8 +1905,6 @@ fn emit_if(
     None -> assigned_unboxed_slots(e, cons)
   }
   use e, ci <- emit_cond_i32(e, condition)
-  // Each branch: emit its statement, then yield the (possibly-updated) carried
-  // locals as the branch's result values so the join point rebinds them.
   let branch_slots = e.slot_vars
   use #(then_tree, e) <- result.try(
     run_rk(e, fn(e, done) {
@@ -2227,9 +1912,6 @@ fn emit_if(
       done(e, ir.Values(carried_values(e, carried)))
     }),
   )
-  // run_rk threads the then-leaf Emitter2 out; its slot_vars name Let-bindings
-  // INSIDE then_tree. Restore pre-branch slot_vars so else-arm reads resolve to
-  // outer names (ir.If arms lower to separate case clauses; expr.gleam:1415-21).
   let e = state.Emitter2(..e, slot_vars: branch_slots)
   use #(else_tree, e) <- result.try(case alt {
     Some(a) ->
@@ -2239,9 +1921,6 @@ fn emit_if(
       })
     None -> Ok(#(ir.Values(carried_values(e, carried)), e))
   })
-  // Restore pre-branch slot_vars — else's arm-local rebinds name Let-binders
-  // inside else_tree; the join re-binds `carried` freshly and nothing else
-  // may leak.
   let e = state.Emitter2(..e, slot_vars: branch_slots)
   rebind_after_block(
     e,
@@ -2251,8 +1930,6 @@ fn emit_if(
   )
 }
 
-// ── LabeledStatement — port emit.gleam:3953-3973 → set_pending / ir.Block ───
-
 fn emit_labeled(
   e: Emitter2,
   label: String,
@@ -2260,8 +1937,6 @@ fn emit_labeled(
   next: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   case body {
-    // Labeled loop: the loop's own push_loop consumes pending_label so the
-    // label targets both break AND continue on that loop — no separate frame.
     ast.WhileStatement(..)
     | ast.DoWhileStatement(..)
     | ast.ForStatement(..)
@@ -2270,8 +1945,6 @@ fn emit_labeled(
       let e = state.set_pending_label(e, label)
       emit_stmt(e, body, next)
     }
-    // Labeled non-loop: break-only target. Wrap body in ir.Block(ir_break, ..)
-    // so `break label` inside becomes Break(ir_break, carried).
     _ -> {
       let carried = assigned_unboxed_slots(e, body)
       let #(ir_break, e) = state.fresh_label(e)
@@ -2293,13 +1966,6 @@ fn emit_labeled(
   }
 }
 
-// ── §14.12 SwitchStatement — port emit.gleam:5080-5190 → nested ir.Block ────
-// Fallthrough encoding: each case body sits AFTER an ir.Block whose label the
-// test chain Breaks to; nesting is source-order-inside-out so falling off
-// case_i drops into case_{i+1}. Outer ir.Block(break_lbl) carries assigned
-// unboxed locals as its result values (emit_break yields them on `break`).
-
-/// One switch case with its body-entry ir label.
 type CaseEntry {
   CaseEntry(
     lbl: String,
@@ -2308,25 +1974,22 @@ type CaseEntry {
   )
 }
 
+// fallthrough: case bodies nest inside-out around the dispatch
 fn emit_switch(
   e: Emitter2,
   disc: ast.Expression,
   cases: List(ast.SwitchCase),
   next: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  // Discriminant is evaluated OUTSIDE the CaseBlock scope (§14.12.4 step 1).
   use e, d <- expr_(e, disc)
   let all_stmts = ast_util.switch_case_stmts(cases)
   let carried =
     assigned_unboxed_slots_all(e, list.map(all_stmts, fn(s) { s.statement }))
   let #(break_lbl, e) = state.fresh_label(e)
   let e = state.push_switch(e, break_lbl, carried)
-  // §14.12.4 step 3-5: CaseBlock is one block scope; instantiate its
-  // let/const/class + hoist function declarations before any test/body runs.
   let #(e, save) = state.enter_scope(e, in_block: True)
   use e <- binding_prologue(e, e.cur_scope)
   use e <- hoist_fn_decls(e, all_stmts)
-  // Allocate a body-entry label per case, in source order.
   let #(labelled_rev, e) =
     list.fold(cases, #([], e), fn(acc, c) {
       let #(out, e) = acc
@@ -2343,15 +2006,8 @@ fn emit_switch(
       }
     })
     |> option.from_result
-  // Snapshot slot_vars: test exprs and body_i emission retarget them at
-  // Let-bindings scoped INSIDE the dispatch/body_i tree; each body must start
-  // from names in scope at its wrapper Let (mirrors emit_if:1538-1548).
   let branch_slots = e.slot_vars
-  // Dispatch: strict_eq If-chain (R8 JPure) — faithful port of emit.gleam
-  // :5080-5190, which has no i32 fast path; UnboxInt on a non-int discriminant
-  // would trap where the reference just falls to default. On no-match, Break
-  // to default (if any) else break_lbl. Every Break carries assigned locals so
-  // each per-case Block yields them to its wrapper's rebind.
+  // no i32 fast path: a non-int discriminant must fall to default
   let miss_leaf = fn(e: Emitter2) {
     case default_lbl {
       Some(dl) -> ir.Break(dl, carried_values(e, carried))
@@ -2366,9 +2022,6 @@ fn emit_switch(
     miss_leaf,
   ))
   let e = state.Emitter2(..e, slot_vars: branch_slots)
-  // Nest bodies inside-out: innermost Block wraps the dispatch; each outer
-  // layer sequences the previous case's body so falling off case_i lands in
-  // case_{i+1}. Last body's tail Breaks to break_lbl carrying assigned locals.
   use #(nested, e) <- result.try(switch_nest_bodies(
     e,
     branch_slots,
@@ -2383,10 +2036,6 @@ fn emit_switch(
   rebind_after_block(e, carried, outer, next)
 }
 
-/// Build the strict_eq If-chain over cases with a test. R8: strict_eq is
-/// JPure — no St. Each match Breaks to that case's body label carrying the
-/// assigned-local slot values (per-case Block result); the terminal else is
-/// `miss` (default label or the outer break with carried values).
 fn switch_test_chain(
   e: Emitter2,
   d: ir.Value,
@@ -2397,11 +2046,8 @@ fn switch_test_chain(
   case labelled {
     [] -> Ok(#(miss(e), e))
     [CaseEntry(cond: None, ..), ..rest] ->
-      // default: not tested — its label is the miss target.
       switch_test_chain(e, d, rest, carried, miss)
     [CaseEntry(lbl:, cond: Some(test_expr), ..), ..rest] -> {
-      // §14.12.3 CaseClauseIsSelected: IsStrictlyEqual(input, selector) as
-      // the raw i32 (`===`'s inline literal arms / pure kernel).
       let #(eq_tree, e) = anf.run(expr.case_test_i32(d, test_expr), e)
       use e, eqi <- let_(e, eq_tree)
       use #(else_chain, e) <- result.map(switch_test_chain(
@@ -2417,11 +2063,6 @@ fn switch_test_chain(
   }
 }
 
-/// Fold case bodies in source order into the nested-Block fallthrough shape.
-/// `inner` starts as the dispatch chain; each step wraps it in
-/// `Block(case_i, carried_types, inner)` and rebinds carried slots to that
-/// Block's result — so body_i reads names bound by ITS wrapper Let, whether
-/// entry was direct (dispatch Break) or fallthrough (body_{i-1}'s Values).
 fn switch_nest_bodies(
   e: Emitter2,
   branch_slots: dict.Dict(Int, String),
@@ -2433,8 +2074,6 @@ fn switch_nest_bodies(
   case labelled {
     [] -> Ok(#(inner, e))
     [CaseEntry(lbl:, body:, ..), ..rest] -> {
-      // Reset slot_vars so rebind_after_block seeds from names in scope at the
-      // wrapper Let, not from inside the previous body's tree (emit_if:1548).
       let e = state.Emitter2(..e, slot_vars: branch_slots)
       use #(wrapped, e) <- result.try(
         rebind_after_block(
@@ -2457,10 +2096,6 @@ fn switch_nest_bodies(
   }
 }
 
-// ── §14.7.4 ForStatement — port emit.gleam:3832-3858, 1137-1170, 5618 ───────
-
-/// Resolve each `for (let …)` head name to its (slot, is_boxed) — declaration
-/// binds in the head scope so resolution never crosses a with-chain.
 fn resolve_per_iter(e: Emitter2, names: List(String)) -> List(#(Int, Bool)) {
   use name <- list.filter_map(names)
   case state.resolve(e, name) {
@@ -2469,9 +2104,7 @@ fn resolve_per_iter(e: Emitter2, names: List(String)) -> List(#(Int, Bool)) {
   }
 }
 
-/// §14.7.4.2 CreatePerIterationEnvironment. Port of emit_var_rebox
-/// (emit.gleam:2017-2029): only boxed head-`let` slots need re-boxing so
-/// closures created during iteration k keep iteration k's cell.
+// §14.7.4.2 rebox boxed head lets per iteration
 fn per_iter_rebox(
   e: Emitter2,
   per_iter: List(#(Int, Bool)),
@@ -2491,9 +2124,6 @@ fn per_iter_rebox(
   }
 }
 
-/// `for (init; cond; upd) body`. Port of emit.gleam:3832-3858 +
-/// emit_classic_loop:1137-1170. SPEC row: `enter_for_scope` if lex; init;
-/// `While(test, {body; upd})`; per-iteration rebind for head-`let` bindings.
 fn emit_for_classic(
   e: Emitter2,
   init: Option(ast.ForInit),
@@ -2504,7 +2134,6 @@ fn emit_for_classic(
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let has_lex = ast_util.for_classic_init_is_lex(init)
   let #(e, save) = state.enter_for_scope(e, has_lex)
-  // state.enter_scope does NOT seed bindings (state.gleam:606) — do it here.
   let seed_head = fn(e: Emitter2, k) {
     case has_lex {
       True -> binding_prologue(e, e.cur_scope, k)
@@ -2512,12 +2141,9 @@ fn emit_for_classic(
     }
   }
   use e <- seed_head(e)
-  // Emit the init clause; capture per-iteration `let` names.
   let after_init = fn(e: Emitter2, per_iter_names: List(String)) {
     let per_iter = resolve_per_iter(e, per_iter_names)
     let per_iter_slots = list.map(per_iter, fn(p) { p.0 })
-    // Cond and upd may assign (`for(; (x = f()); i++)`) — walk both alongside
-    // body so their targets thread out via LoopParam (matches emit_while).
     let head_stmts =
       list.filter_map([cond, upd], fn(x) {
         case x {
@@ -2534,21 +2160,13 @@ fn emit_for_classic(
     let #(brk, e) = state.fresh_label(e)
     let #(cont, e) = state.fresh_label(e)
     let #(head, e) = state.fresh_label(e)
-    // LoopParams read the PRE-loop slot vars as their `init`.
     let #(params, e) = carried_params(e, carried)
-    // Known-number LoopParam: a classic-for counter written ONLY by a bare
-    // `x++`/`x--` in `upd` (never in body/cond) stays a BEAM number iff its
-    // pre-loop init var was one — number±1 is a number, and every path into
-    // Block(cont) carries the untouched LoopParam. Mark it so guarded_binop /
-    // emit_update / emit_cond_i32 elide the `is_number` guard on it.
     let counter_known = for_counter_known(e, upd, body, cond, carried, params)
     let mark_counter = fn(e: Emitter2) {
       list.fold(counter_known, e, fn(e, slot) {
         state.mark_known_number(e, state.get_slot_var(e, slot))
       })
     }
-    // Hoist `kfn_code(f, undef)` before the loop for each identifier callee
-    // whose slot is loop-invariant; expr.emit_plain_call reads it back.
     let hoist_slots = loop_invariant_callees(e, body, cond, upd, carried)
     let prev_hoisted = e.hoisted_kfn
     use e <- hoist_kfn_codes(e, hoist_slots)
@@ -2559,9 +2177,6 @@ fn emit_for_classic(
         None -> k(e)
       }
     }
-    // R15 3-label shape. `then_part` builds Block(cont){body}; rebind; rebox;
-    // upd; Continue(head) via run_rk so the leaf Emitter2 threads out — the
-    // body's fresh_var/child_fn_cursor/fns_acc must survive past the loop.
     use #(loop_body, e) <- result.try(
       run_rk(e, fn(e, done) {
         let e = mark_counter(enter_loop_body(e, carried, params))
@@ -2578,18 +2193,13 @@ fn emit_for_classic(
               carried,
               ir.Block(cont, result_tys, cont_body),
             )
-            // Counter slot's Block(cont) result is its untouched LoopParam on
-            // every path (body/cond never write it) — re-mark the rebind var.
             let e = mark_counter(e)
-            // §14.7.4.3 3.e: rebox at the continue point — AFTER body,
-            // BEFORE upd (emit.gleam:1158-1164 loop_continue: rebox; upd).
+            // §14.7.4.3 rebox after body, before upd
             use e <- per_iter_rebox(e, per_iter)
             use e <- emit_upd(e)
             d2(e, ir.Continue(head, carried_values(e, carried)))
           })
         }
-        // §14.7.4.3 step 4.b: an absent condition is `true` — the loop runs
-        // until an inner break/return/throw transfers out.
         case cond {
           None -> {
             use #(tt, e) <- result.try(then_part(e))
@@ -2617,15 +2227,11 @@ fn emit_for_classic(
       emit_var_decl(e, kind, declarations, fn(e) {
         after_init(e, ast_util.for_let_names(kind, declarations))
       })
-    // ForInitPattern only appears in for-in/for-of heads (emit.gleam:3847).
     Some(ast.ForInitPattern(_)) | None -> after_init(e, [])
   }
 }
 
-/// Carried slots provably holding a BEAM number on EVERY iteration: written
-/// only by a bare `x++`/`x--` in `upd`, never by body/cond, with a known-
-/// number pre-loop init. Sound: base = init known; step = number±1 is a
-/// number; every path into Block(cont) carries the untouched LoopParam.
+// sound: init is a number, only upd ++/-- writes it
 fn for_counter_known(
   e: Emitter2,
   upd: Option(ast.Expression),
@@ -2672,7 +2278,6 @@ fn for_counter_known(
   }
 }
 
-/// If/loop condition → raw i32 truth value for `ir.If` (expr.cond_i32).
 fn emit_cond_i32(
   e: Emitter2,
   cond: ast.Expression,
@@ -2682,30 +2287,19 @@ fn emit_cond_i32(
   let_(e, tree, k)
 }
 
-// ── While / DoWhile (port emit.gleam:3781-3808 → R15 uniform loop shape) ────
-
-/// `while (cond) body`. Port of emit.gleam:3781-3793 → R15 shape:
-/// Block(brk,[TTerm×n], Loop(head, params, [], truthy_if(cond, {Block(cont,
-/// [TTerm×n], body); rebind; Continue(head, carried')}, Break(brk, carried))))
-/// then rebind_after_block. push_loop stores (brk, cont) — JS `continue` →
-/// ir.Break(cont) → falls into Continue(head) → cond re-checked.
 fn emit_while(
   e: Emitter2,
   cond: ast.Expression,
   body: ast.Statement,
   next: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  // Cond may assign (`while ((x = f()))`) — include it in the carried walk.
   let carried =
     assigned_unboxed_slots_all(e, [ast.ExpressionStatement(cond, None), body])
   let result_tys = carried_types(carried)
   let #(brk, e) = state.fresh_label(e)
   let #(cont, e) = state.fresh_label(e)
   let #(head, e) = state.fresh_label(e)
-  // LoopParam.init reads the PRE-loop slot vars.
   let #(params, e) = carried_params(e, carried)
-  // Hoist `kfn_code(f, undef)` before the loop for each identifier callee
-  // whose slot is loop-invariant; expr.emit_plain_call reads it back.
   let hoist_slots = loop_invariant_callees(e, body, Some(cond), None, carried)
   let prev_hoisted = e.hoisted_kfn
   use e <- hoist_kfn_codes(e, hoist_slots)
@@ -2714,11 +2308,7 @@ fn emit_while(
     run_rk(e, fn(e, done) {
       let e = enter_loop_body(e, carried, params)
       use e, t <- emit_cond_i32(e, cond)
-      // else-arm captured BEFORE body — the LoopParam names (plus any cond
-      // assignment rebinds threaded through expr_/host_).
       let brk_payload = carried_values(e, carried)
-      // Inner Block(cont) — JS `continue` Breaks to it (R15). run_rk (not a
-      // bare `{}` block) so the post-body Emitter2 threads to `done` below.
       use #(then_tree, e) <- result.try(
         run_rk(e, fn(e, done_t) {
           use #(cont_body, e) <- result.try(
@@ -2744,10 +2334,6 @@ fn emit_while(
   rebind_after_block(e, carried, outer, next)
 }
 
-/// `do body while (cond)`. Port of emit.gleam:3795-3808 → R15 shape: body
-/// first, cond check after — the inner Block(cont) sits BEFORE the test so JS
-/// `continue` (→ ir.Break(cont)) falls through to it (emit.gleam's `loop_cond`
-/// label semantics).
 fn emit_do_while(
   e: Emitter2,
   cond: ast.Expression,
@@ -2765,7 +2351,6 @@ fn emit_do_while(
   use #(loop_body, e) <- result.try(
     run_rk(e, fn(e, done) {
       let e = enter_loop_body(e, carried, params)
-      // Inner Block(cont) — JS `continue` Breaks to it (R15).
       use #(cont_body, e) <- result.try(
         run_rk(e, fn(e, done2) {
           use e <- emit_stmt(e, body)

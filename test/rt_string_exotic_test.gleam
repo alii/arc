@@ -1,7 +1,3 @@
-//// String exotic objects (§10.4.3) on the arc/rt runtime: the synthesized
-//// index and "length" own properties, their fixed attributes, and the
-//// [[OwnPropertyKeys]] order.
-
 import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
@@ -26,7 +22,6 @@ fn int(i: Int) -> JsVal {
   mk_number(JInt(i))
 }
 
-/// `new String(s)`.
 fn wrapper(st: Agent, s: String) -> #(JsVal, Agent) {
   let #(ctor, st) = rt_obj.t_global_get(st, <<"String">>)
   let #(h, st) = rt_call.t_construct(st, ctor, [mk_string(s)], ctor)
@@ -73,7 +68,6 @@ pub fn index_and_length_descriptors_test() {
     ..,
   )) = d
   assert classify(value) == KNum(JInt(3))
-  // [[Get]] / [[HasProperty]] agree.
   let #(v, st) = rt_obj.t_get_prop(st, s, key("2"))
   assert classify(v) == KStr("c")
   let #(v, st) = rt_obj.t_get_prop(st, s, key("3"))
@@ -94,13 +88,10 @@ pub fn synthesized_properties_are_read_only_test() {
   assert !ok
   let #(v, st) = rt_obj.t_get_prop(st, s, key("0"))
   assert classify(v) == KStr("a")
-  // Writing through a foreign object with the wrapper as Receiver also
-  // reaches the synthesized non-writable descriptor.
   let #(other, st) = rt_obj.t_new_object_literal(st)
   let #(ok, st) =
     rt_obj.t_set_prop_with_receiver(st, handle(other), key("1"), int(1), s)
   assert !ok
-  // Out-of-range indices are ordinary.
   let #(ok, st) = rt_obj.t_set_prop(st, s, key("5"), mk_string("x"))
   assert ok
   let #(ok, st) = rt_obj.t_delete_prop(st, sh, key("0"))
@@ -117,7 +108,6 @@ pub fn define_own_property_validates_against_fixed_descriptors_test() {
   let st = agent()
   let #(s, st) = wrapper(st, "abc")
   let sh = handle(s)
-  // Same value: a compatible no-op that must not materialize a dict entry.
   let #(ok, st) =
     rt_obj.t_define_own_prop(st, sh, key("0"), value_desc(mk_string("a")))
   assert ok
@@ -152,8 +142,6 @@ pub fn own_property_keys_order_test() {
   let sym = types.symbol_iterator
   let #(_, st) = rt_obj.t_set_prop(st, s, SymbolKey(sym), int(4))
   let #(keys, st) = rt_obj.t_own_keys(st, sh)
-  // Indices ascending (synthesized and dict-held merged), then the
-  // birth-time "length", then named keys in creation order, then symbols.
   assert keys
     == [
       StringKey(Index(0)),
@@ -165,7 +153,6 @@ pub fn own_property_keys_order_test() {
       StringKey(Named("bar")),
       SymbolKey(sym),
     ]
-  // for-in / Object.keys see the enumerable string keys only.
   let #(names, st) = rt_obj.t_for_in_keys(st, s)
   assert list.map(names, classify)
     == list.map(["0", "1", "2", "7", "foo", "bar"], KStr)
@@ -190,7 +177,6 @@ pub fn frozen_string_wrapper_test() {
   let #(_, st) = rt_call.t_call_method(st, object, key("freeze"), [s])
   let #(frozen, st) = rt_call.t_call_method(st, object, key("isFrozen"), [s])
   assert classify(frozen) == types.KBool(True)
-  // Indices stay readable after freezing.
   let #(v, _) = rt_obj.t_get_prop(st, s, key("1"))
   assert classify(v) == KStr("b")
 }

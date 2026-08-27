@@ -1,21 +1,9 @@
 -module(arc_aot_wasm_ffi).
 -export([start/0]).
 
-%% packbeam entry for the website's AtomVM bundle. Two registered endpoints:
-%%
-%%   main — the interpreter (arc_wasm_ffi's loop, in its own process)
-%%   aot  — the AOT compiler's inspection surface: JS source in, the three
-%%          emitted artefacts out (2core IR, Core Erlang, Erlang source),
-%%          joined by U+001E (record separator)
-%%
-%% Same invariant as arc_wasm_ffi: every message carrying a JS promise leaves
-%% the loop with that promise settled exactly once.
 start() ->
-    %% spawn/3, not spawn(fun M:F/0): an external-fun literal aborts AtomVM
-    %% 0.7.0-alpha at load.
+    %% external fun literal aborts atomvm 0.7 at load
     spawn(arc_wasm_ffi, start, []),
-    %% Erlang -> page-JavaScript round trips (RegExp lives on it). A website
-    %% shim; absent from other bundles, so its start is guarded.
     spawn(fun() ->
               try
                   arc_js_bridge:start()
@@ -53,18 +41,10 @@ handle(Promise, Src0) ->
             reject_quietly(Promise, fun() -> format_crash(C0, R0, St0) end)
     end.
 
-%% Run Work in a fresh process and wait for its result.
-%%
-%% Why: AtomVM's copying GC makes every allocation cost O(live heap). A
-%% request handled inside this long-lived loop leaves the loop's heap large,
-%% and every later request pays for it (measured: the same compile went from
-%% 17s to 29s across consecutive runs in-loop, and a stable 4s in a fresh
-%% worker). The worker's result is a tuple of binaries — refc, off-heap — so
-%% handing it back is cheap.
+%% fresh process per request keeps atomvm heap small
 in_worker(Work) ->
     Self = self(),
     Ref = make_ref(),
-    %% fibonacci growth: see arc_wasm_ffi:in_worker/1 for the measurements.
     _Pid = spawn_opt(fun() ->
                          Self ! {Ref, try Work()
                                       catch C:R:St -> {crash, C, R, St}

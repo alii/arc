@@ -1,14 +1,3 @@
-//// The Intl namespace (ECMA-402): Intl.getCanonicalLocales,
-//// Intl.supportedValuesOf, and the service constructors
-//// (Locale, Collator, NumberFormat, DateTimeFormat, PluralRules, ListFormat,
-//// RelativeTimeFormat, Segmenter, DisplayNames, DurationFormat), plus the
-//// §17-19 locale-sensitive overrides on the Number / BigInt / String / Date
-//// prototypes.
-////
-//// Locale data is root/English with per-language separators: formatters
-//// implement CLDR patterns in intl_format.gleam; tag parsing/
-//// canonicalization is in intl_locale.gleam.
-
 import arc/internal/gregorian.{days_from_civil}
 import arc/internal/int_math.{floor_div}
 import arc/internal/temporal_calendar as tcal
@@ -111,12 +100,6 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-// ============================================================================
-// Initialization
-// ============================================================================
-
-/// Build the Intl namespace and install the §17-19 overrides on the
-/// Number / BigInt / String / Date prototypes. Returns the namespace object.
 pub fn init(
   st: Agent,
   object_proto: Handle,
@@ -126,7 +109,6 @@ pub fn init(
   string_proto: Handle,
   date_proto: Handle,
 ) -> #(Handle, Agent) {
-  // --- Intl.Locale ---
   let #(locale_getters, st) =
     common.alloc_getters(
       st,
@@ -155,7 +137,6 @@ pub fn init(
       [],
     )
   let st = common.add_to_string_tag(st, locale.prototype, "Intl.Locale")
-  // Locale methods need the prototype handle for maximize/minimize results.
   let #(locale_methods, st) =
     common.alloc_methods(
       st,
@@ -177,7 +158,6 @@ pub fn init(
     )
   let st = add_named_properties(st, locale.prototype, locale_methods)
 
-  // --- Simple formatter services ---
   let #(collator, st) =
     init_service(st, object_proto, function_proto, CsCollator, [], [
       #("compare", IntlN(IntlBoundGetter(BgCollator))),
@@ -266,7 +246,6 @@ pub fn init(
       [],
     )
 
-  // --- Segmenter (needs %SegmentIteratorPrototype% / %SegmentsPrototype%) ---
   let #(seg_iter_next, st) =
     common.alloc_methods(st, function_proto, [
       service_method(IntlSegmentIterator, IntlSegmentIteratorNext, 0),
@@ -309,7 +288,6 @@ pub fn init(
     init_service(st, object_proto, function_proto, CsSegmenter, [], [])
   let st = add_named_properties(st, segmenter.prototype, segment_method)
 
-  // --- Namespace object ---
   let #(ns_methods, st) =
     common.alloc_methods(st, function_proto, [
       #("getCanonicalLocales", IntlN(IntlGetCanonicalLocales), 1),
@@ -345,7 +323,6 @@ pub fn init(
       list.append(ns_methods, list.reverse(ctor_props)),
     )
 
-  // ECMA-402 §17-19: locale-sensitive overrides on Number/BigInt/String/Date.
   let #(number_methods, st) =
     common.alloc_methods(st, function_proto, [
       #("toLocaleString", IntlN(IntlHostOverride(NumberToLocaleString)), 0),
@@ -390,8 +367,6 @@ pub fn init(
   #(namespace, st)
 }
 
-/// Build one formatter service: prototype methods + accessor getters +
-/// resolvedOptions + supportedLocalesOf static + @@toStringTag.
 fn init_service(
   st: Agent,
   object_proto: Handle,
@@ -404,8 +379,6 @@ fn init_service(
     CsDisplayNames -> 2
     _ -> 0
   }
-  // The brand instances of this service carry: `resolvedOptions` and
-  // `supportedLocalesOf` are shared by every service, constructible or not.
   let brand = intl_data.constructible_service(service)
   let name = service_name(brand)
   let #(proto_methods, st) =
@@ -434,8 +407,6 @@ fn init_service(
   #(bt, st)
 }
 
-/// A prototype-method registration triple: the JS property name is derived
-/// from the `IntlMethodName` variant so the two can never disagree.
 fn service_method(
   service: IntlService,
   method: IntlMethodName,
@@ -444,7 +415,6 @@ fn service_method(
   #(intl_method_js_name(method), IntlN(IntlMethod(service:, method:)), arity)
 }
 
-/// The JS property name an `IntlMethodName` is installed under.
 fn intl_method_js_name(method: IntlMethodName) -> String {
   case method {
     IntlFormat -> "format"
@@ -459,7 +429,6 @@ fn intl_method_js_name(method: IntlMethodName) -> String {
   }
 }
 
-/// The JS property name an Intl.Locale.prototype getter is installed under.
 fn locale_getter_js_name(getter: LocaleGetterName) -> String {
   case getter {
     LocaleBaseName -> "baseName"
@@ -477,7 +446,6 @@ fn locale_getter_js_name(getter: LocaleGetterName) -> String {
   }
 }
 
-/// The JS property name an Intl.Locale.prototype method is installed under.
 fn locale_method_js_name(method: LocaleMethodName) -> String {
   case method {
     LocaleToString -> "toString"
@@ -493,7 +461,6 @@ fn locale_method_js_name(method: LocaleMethodName) -> String {
   }
 }
 
-/// Insert named builtin properties into an existing object.
 fn add_named_properties(
   st: Agent,
   h: Handle,
@@ -502,12 +469,6 @@ fn add_named_properties(
   list.fold(props, st, fn(st, p) { common.add_named_property(st, h, p.0, p.1) })
 }
 
-// ============================================================================
-// Dispatch
-// ============================================================================
-
-/// Per-module [[Call]] dispatch. A service constructor reached here was
-/// called without `new` (NewTarget undefined).
 pub fn dispatch(
   st: Agent,
   native: IntlNative,
@@ -534,8 +495,6 @@ pub fn dispatch(
   }
 }
 
-/// Per-module [[Construct]] dispatch — only the service constructors are
-/// constructible.
 pub fn dispatch_construct(
   st: Agent,
   native: IntlNative,
@@ -554,12 +513,6 @@ pub fn dispatch_construct(
   }
 }
 
-// ============================================================================
-// Shared plumbing
-// ============================================================================
-
-/// Read the IntlObj state for `this`, throwing TypeError on brand mismatch.
-/// Yields the receiver handle, its state, and the bound-method cache.
 fn branded(
   st: Agent,
   this: JsVal,
@@ -573,13 +526,6 @@ fn branded(
   }
 }
 
-// --- `branded` narrowed to one service ------------------------------------
-//
-// Each extractor pattern-matches the receiver's `IntlData` variant directly,
-// so callers get the concrete state record instead of the sum plus a
-// hand-written "cannot happen" arm.
-
-/// The narrowing helper behind the service-specific `branded_*` extractors.
 fn branded_of(
   st: Agent,
   this: JsVal,
@@ -676,8 +622,6 @@ fn branded_date_time_format(
   }
 }
 
-/// Replace an Intl instance's per-service state in its cell, keeping every
-/// other object attribute (including the bound-method cache).
 fn write_intl_data(st: Agent, h: Handle, data: IntlData) -> Agent {
   rt_store.t_cell_update(st, h, fn(slot) {
     case slot {
@@ -688,7 +632,6 @@ fn write_intl_data(st: Agent, h: Handle, data: IntlData) -> Agent {
   })
 }
 
-/// Whether a DateTimeFormat formatting component is part of the format.
 fn has_component(c: DtfComponents, which: DtfComponent) -> Bool {
   case which {
     DtfWeekday -> option.is_some(c.weekday)
@@ -705,7 +648,6 @@ fn has_component(c: DtfComponents, which: DtfComponent) -> Bool {
   }
 }
 
-/// Keep a component's width only when the component is in `keep`.
 fn kept_width(
   keep: List(DtfComponent),
   which: DtfComponent,
@@ -717,7 +659,6 @@ fn kept_width(
   }
 }
 
-/// Drop every component not in `keep`, keeping the widths of the rest.
 fn keep_components(
   c: DtfComponents,
   keep: List(DtfComponent),
@@ -741,7 +682,6 @@ fn keep_components(
   )
 }
 
-/// Field-wise overlay: `base`'s component wins where present, else `fallback`.
 fn merge_components(
   base: DtfComponents,
   fallback: DtfComponents,
@@ -764,7 +704,6 @@ fn merge_components(
   )
 }
 
-/// Overlay a formatter's resolved digit options onto a `fmt.NumOpts` base.
 fn with_digits(o: fmt.NumOpts, dg: IntlDigitOptions) -> fmt.NumOpts {
   let precision = fn(p: #(Int, Int)) { fmt.Precision(min: p.0, max: p.1) }
   fmt.NumOpts(
@@ -789,7 +728,6 @@ fn alloc_pojo(st: Agent, props: List(#(String, JsVal))) -> #(JsVal, Agent) {
   #(mk_object(h), st)
 }
 
-/// Parts → JS array of `{ type, value }` objects.
 fn parts_to_js(st: Agent, parts: List(fmt.Part)) -> #(JsVal, Agent) {
   let #(objs, st) =
     list.fold(parts, #([], st), fn(acc, part) {
@@ -805,12 +743,10 @@ fn parts_to_js(st: Agent, parts: List(fmt.Part)) -> #(JsVal, Agent) {
   alloc_array(st, list.reverse(objs))
 }
 
-/// The formatted string a range's parts spell out (formatRange).
 fn range_parts_to_string(parts: List(fmt.RangePart)) -> String {
   parts |> list.map(fn(p: fmt.RangePart) { p.value }) |> string.join("")
 }
 
-/// Parts → JS array of `{ type, value, source }` objects (formatRangeToParts).
 fn parts_to_js_sourced(
   st: Agent,
   parts: List(fmt.RangePart),
@@ -829,8 +765,6 @@ fn parts_to_js_sourced(
   alloc_array(st, list.reverse(objs))
 }
 
-/// Parts → JS array of `{ type, value, unit? }` objects (DurationFormat
-/// formatToParts). `unit: None` means no unit property.
 fn parts_to_js_with_unit(
   st: Agent,
   parts: List(fmt.UnitPart),
@@ -852,11 +786,6 @@ fn parts_to_js_with_unit(
   alloc_array(st, list.reverse(objs))
 }
 
-// ============================================================================
-// Options helpers (ECMA-402 §9.2.10–9.2.17)
-// ============================================================================
-
-/// CoerceOptionsToObject: undefined → no options; else ToObject.
 fn coerce_options(st: Agent, v: JsVal) -> #(Option(Handle), Agent) {
   case classify(v) {
     KUndef -> #(None, st)
@@ -867,7 +796,6 @@ fn coerce_options(st: Agent, v: JsVal) -> #(Option(Handle), Agent) {
   }
 }
 
-/// GetOptionsObject: undefined → none; Object → it; else TypeError.
 fn strict_options(st: Agent, v: JsVal) -> #(Option(Handle), Agent) {
   case classify(v) {
     KUndef -> #(None, st)
@@ -883,7 +811,6 @@ fn opt_get(st: Agent, opts: Option(Handle), name: String) -> #(JsVal, Agent) {
   }
 }
 
-/// GetOption with type string. Empty `allowed` list = any string allowed.
 fn get_str_opt(
   st: Agent,
   opts: Option(Handle),
@@ -908,10 +835,6 @@ fn get_str_opt(
   }
 }
 
-/// GetOption for a closed string-enum option. `variants` is the full option
-/// set as #(spec spelling, variant) pairs: it is both the validation list and
-/// the (single) place the spelling is turned into its typed variant, so an
-/// out-of-set spelling always throws instead of silently defaulting.
 fn get_enum_opt(
   st: Agent,
   opts: Option(Handle),
@@ -936,7 +859,6 @@ fn get_enum_opt(
   }
 }
 
-/// GetOption with type boolean.
 fn get_bool_opt(
   st: Agent,
   opts: Option(Handle),
@@ -950,7 +872,6 @@ fn get_bool_opt(
   }
 }
 
-/// GetNumberOption/DefaultNumberOption (§9.2.16/9.2.17).
 fn get_num_opt(
   st: Agent,
   opts: Option(Handle),
@@ -982,7 +903,7 @@ fn default_number_option(
       }
       case f {
         Some(f) ->
-          // Range check happens on the unrounded value (§9.2.17).
+          // range check uses the unrounded value (§9.2.17)
           case f >=. int.to_float(min) && f <=. int.to_float(max) {
             True -> #(Some(float.truncate(float.floor(f))), st)
             False ->
@@ -997,7 +918,7 @@ fn default_number_option(
   }
 }
 
-/// "type" nonterminal check: (3*8alphanum) ("-" (3*8alphanum))*
+// (3*8alphanum) ("-" (3*8alphanum))*
 fn is_type_sequence(s: String) -> Bool {
   let parts = string.split(s, "-")
   parts != []
@@ -1006,10 +927,6 @@ fn is_type_sequence(s: String) -> Bool {
     n >= 3 && n <= 8 && tags.is_alnum(p)
   })
 }
-
-// ============================================================================
-// CanonicalizeLocaleList (§9.2.1)
-// ============================================================================
 
 fn canonicalize_locale_list(
   st: Agent,
@@ -1021,7 +938,6 @@ fn canonicalize_locale_list(
       let #(tag, st) = canonical_tag_or_throw(st, s)
       #([tag], st)
     }
-    // Step 4: an Intl.Locale object passes its [[Locale]] straight through.
     KHandle(h) ->
       case locale_of_handle(st, h) {
         Some(l) -> #([l.locale], st)
@@ -1034,7 +950,6 @@ fn canonicalize_locale_list(
   }
 }
 
-/// The [[Locale]] state of `h` when it is an Intl.Locale instance.
 fn locale_of_handle(st: Agent, h: Handle) -> Option(LocaleState) {
   case rt_store.t_cell_get(st, h) {
     SObject(kind: IntlObj(data: LocaleData(l), ..), ..) -> Some(l)
@@ -1072,15 +987,11 @@ fn locale_list_loop(
     True -> #(list.reverse(seen), st)
     False -> {
       let key = StringKey(Index(k))
-      // §9.2.1 step 7.b: HasProperty(O, Pk) — the list may be a proxy, whose
-      // `has` trap is user code and can throw.
       let #(has, st) = rt_obj.t_has_prop(st, o, key)
       case has {
         False -> locale_list_loop(st, o, k + 1, len, seen)
         True -> {
           let #(k_value, st) = rt_obj.t_get_prop(st, o, key)
-          // Step 7.c.ii-iii: String or Object only; a Locale object
-          // contributes its [[Locale]].
           let #(tag_str, st) = case classify(k_value) {
             KStr(s) -> #(s, st)
             KHandle(o) ->
@@ -1105,10 +1016,6 @@ fn locale_list_loop(
     }
   }
 }
-
-// ============================================================================
-// Intl.getCanonicalLocales
-// ============================================================================
 
 fn get_canonical_locales(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(tag_list, st) =
@@ -1137,7 +1044,7 @@ fn supported_values_of(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// Collation types we accept (sorted; excludes "standard"/"search").
+// keep sorted
 fn supported_collations() -> List(String) {
   [
     "big5han", "compat", "dict", "direct", "ducet", "emoji", "eor", "gb2312",
@@ -1146,7 +1053,7 @@ fn supported_collations() -> List(String) {
   ]
 }
 
-/// Calendars required by ECMA-402 era/monthCode support (sorted).
+// keep sorted
 fn supported_calendars() -> List(String) {
   [
     "buddhist", "chinese", "coptic", "dangi", "ethioaa", "ethiopic", "gregory",
@@ -1155,13 +1062,11 @@ fn supported_calendars() -> List(String) {
   ]
 }
 
-/// Calendar identifiers DateTimeFormat accepts (resolved; formatting data is
-/// Gregorian only).
 fn valid_dtf_calendar(v: String) -> Bool {
   list.contains(supported_calendars(), v)
 }
 
-/// Primary time zone identifiers we recognise (sorted).
+// keep sorted
 fn supported_time_zones() -> List(String) {
   list.sort(
     list.flatten([
@@ -1184,10 +1089,6 @@ fn supported_time_zones() -> List(String) {
   )
 }
 
-// ============================================================================
-// supportedLocalesOf (§9.2.8 LookupSupportedLocales)
-// ============================================================================
-
 fn supported_locales_of(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let locales = first_arg_or_undefined(args)
   let options_v = helpers.arg_at(args, 1)
@@ -1208,13 +1109,6 @@ fn supported_locales_of(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   alloc_array(st, list.map(supported, mk_string))
 }
 
-// ============================================================================
-// ResolveLocale (§9.2.7, lookup matcher against our available set)
-// ============================================================================
-
-/// Returns #(data_locale, extension_keywords). `extension_keywords` are the
-/// u-extension key/values from the matched requested tag (valid values only
-/// — callers overlay option values).
 fn resolve_locale(
   requested: List(String),
 ) -> #(String, List(#(String, String))) {
@@ -1245,8 +1139,6 @@ fn lid_u_keywords(lid: tags.LocaleId) -> List(#(String, String)) {
   |> list.flatten
 }
 
-/// Build the resolved [[Locale]] string: data locale + the u-keywords whose
-/// value actually came from the locale extension (the `Bool` in each entry).
 fn build_resolved_locale(
   data_locale: String,
   candidates: List(#(String, Bool, String)),
@@ -1276,10 +1168,6 @@ fn build_resolved_locale(
   }
 }
 
-// ============================================================================
-// Constructors
-// ============================================================================
-
 fn service_name(service: IntlService) -> String {
   intl_data.service_name(service)
 }
@@ -1304,10 +1192,7 @@ fn construct_service(
           <> " requires 'new'",
       )
     False -> {
-      // §10.1.13 OrdinaryCreateFromConstructor: resolve the prototype from
-      // NewTarget so `class Sub extends Intl.X` instances get Sub.prototype.
-      // The realm record has no Intl slots, so the intrinsic default (also
-      // taken when called without `new`) is the constructor's own `proto`.
+      // §10.1.13 prototype from newtarget so subclasses work
       let #(proto, st) =
         rt_call.get_prototype_from_constructor(st, new_target, fn(_realm) {
           proto
@@ -1363,14 +1248,11 @@ fn construct_service(
   }
 }
 
-// --- Intl.Locale ---
-
 fn locale_state(
   st: Agent,
   tag_v: JsVal,
   options_v: JsVal,
 ) -> #(LocaleState, Agent) {
-  // Step 7-9: tag must be String or Object; Locale objects pass [[Locale]].
   let #(tag_str, st) = case classify(tag_v) {
     KStr(s) -> #(s, st)
     KHandle(h) ->
@@ -1385,7 +1267,6 @@ fn locale_state(
       )
   }
   let #(opts, st) = coerce_options(st, options_v)
-  // ApplyOptionsToTag: structural validity first.
   let lid = case tags.parse(tag_str) {
     Ok(lid) -> lid
     Error(Nil) ->
@@ -1452,7 +1333,6 @@ fn locale_state(
       },
       variants: option.unwrap(variants_opt, lid.variants),
     )
-  // Keyword options (§14.1.2 steps 14-30).
   let #(calendar, st) = get_str_opt(st, opts, "calendar", [], None)
   let st = require_type_seq(st, calendar, "calendar")
   let #(collation, st) = get_str_opt(st, opts, "collation", [], None)
@@ -1504,8 +1384,6 @@ fn locale_state(
   #(LocaleState(locale: canonical), st)
 }
 
-/// WeekdayToString (Intl.Locale firstDayOfWeek): "0"-"7" map to day codes;
-/// any other well-formed value passes through (validated as a uvalue).
 fn weekday_string(fd: String) -> Option(String) {
   case fd {
     "0" | "sun" -> Some("sun")
@@ -1535,7 +1413,6 @@ fn require_type_seq(st: Agent, v: Option(String), name: String) -> Agent {
   }
 }
 
-/// Override/insert u-extension keywords on a parsed locale id.
 fn set_u_keywords(
   lid: tags.LocaleId,
   new_kws: List(#(String, String)),
@@ -1566,10 +1443,6 @@ fn set_u_keywords(
   }
 }
 
-/// Extension keyword or option value for a relevant key. `parse` both
-/// validates the (string) extension keyword and turns it into the option's own
-/// type. Returns the resolved value plus whether the (valid) value came from
-/// the locale's u-extension (those flow into the resolved locale string).
 fn resolve_typed_keyword(
   ext_kws: List(#(String, String)),
   key: String,
@@ -1577,15 +1450,13 @@ fn resolve_typed_keyword(
   parse: fn(String) -> Option(a),
   default: a,
 ) -> #(a, Bool) {
-  // Bare keywords ("-u-kn") mean "true" (UTS 35).
+  // bare keyword ("-u-kn") means "true"
   let from_ext = case list.key_find(ext_kws, key) {
     Ok("") -> parse("true")
     Ok(v) -> parse(v)
     Error(Nil) -> None
   }
   case option_value {
-    // §9.2.7 ResolveLocale step 9.h.ii.2: an options value that matches
-    // the requested extension keyword keeps the keyword in [[Locale]].
     Some(v) -> #(v, from_ext == Some(v))
     None ->
       case from_ext {
@@ -1595,8 +1466,6 @@ fn resolve_typed_keyword(
   }
 }
 
-/// `resolve_typed_keyword` for the string-valued keys (nu): an option value
-/// the host does not support falls back like an absent one.
 fn resolve_keyword(
   ext_kws: List(#(String, String)),
   key: String,
@@ -1613,15 +1482,13 @@ fn resolve_keyword(
   resolve_typed_keyword(
     ext_kws,
     key,
-    // An unsupported options value leaves the extension value in place.
     option.then(option_value, parse),
     parse,
     default,
   )
 }
 
-/// GetOption "localeMatcher" — validated then discarded (we only implement
-/// one matcher), but the read is observable so it must happen in spec order.
+// value unused but the read is observable
 fn read_locale_matcher(st: Agent, opts: Option(Handle)) -> Agent {
   let #(_matcher, st) =
     get_str_opt(
@@ -1634,9 +1501,6 @@ fn read_locale_matcher(st: Agent, opts: Option(Handle)) -> Agent {
   st
 }
 
-/// Shared *_state constructor prologue: CanonicalizeLocaleList, options
-/// coercion (GetOptionsObject when `strict`, else CoerceOptionsToObject),
-/// then the localeMatcher read.
 fn constructor_prologue(
   st: Agent,
   locales_v: JsVal,
@@ -1652,8 +1516,6 @@ fn constructor_prologue(
   #(requested, opts, st)
 }
 
-/// numberingSystem option read + ResolveLocale with only the "nu" relevant
-/// extension keyword. Returns #(numbering_system, resolved_locale, st).
 fn resolve_nu_locale(
   st: Agent,
   opts: Option(Handle),
@@ -1668,9 +1530,6 @@ fn resolve_nu_locale(
   #(nu, locale, st)
 }
 
-// --- Intl.Collator ---
-
-/// §10.1.2 InitializeCollator.
 fn collator_state(
   st: Agent,
   locales_v: JsVal,
@@ -1772,9 +1631,6 @@ fn collator_state(
   )
 }
 
-// --- Intl.NumberFormat ---
-
-/// §15.1.2 InitializeNumberFormat.
 fn number_format_state(
   st: Agent,
   locales_v: JsVal,
@@ -1783,7 +1639,6 @@ fn number_format_state(
   let #(requested, opts, st) =
     constructor_prologue(st, locales_v, options_v, strict: False)
   let #(nu, locale, st) = resolve_nu_locale(st, opts, requested)
-  // SetNumberFormatUnitOptions (§15.1.3)
   let #(style, st) = read_unit_options(st, opts)
   let #(mnfd_default, mxfd_default) = case style {
     StyleCurrency(currency:, ..) -> {
@@ -1798,8 +1653,6 @@ fn number_format_state(
   let #(digits, st) =
     digit_options(st, opts, mnfd_default, mxfd_default, notation_kind)
   let #(notation, st) = read_notation(st, opts, notation_kind)
-  // useGrouping: boolean or "min2"/"auto"/"always" (§15.1.6
-  // GetBooleanOrStringNumberFormatOption)
   let #(grouping_v, st) = opt_get(st, opts, "useGrouping")
   let #(use_grouping, st) = case classify(grouping_v) {
     KUndef -> #(
@@ -1818,7 +1671,6 @@ fn number_format_state(
         "min2" -> #(GroupingMin2, st)
         "auto" -> #(GroupingAuto, st)
         "always" -> #(GroupingAlways, st)
-        // Spec: any other string (including "true"/"false") is out of range.
         _ ->
           rt_val.t_throw_range_error(
             st,
@@ -1855,7 +1707,6 @@ fn number_format_state(
   )
 }
 
-/// The `style` option's tag, before its style-conditional slots are read.
 type NumStyleKind {
   KDecimal
   KPercent
@@ -1863,8 +1714,6 @@ type NumStyleKind {
   KUnit
 }
 
-/// `[[Style]]` after §15.1.3 steps 2-6: the currency style now carries its
-/// validated, uppercased code, so it can never lose it further down.
 type StyleWithCurrency {
   ScDecimal
   ScPercent
@@ -1872,10 +1721,6 @@ type StyleWithCurrency {
   ScUnit
 }
 
-/// SetNumberFormatUnitOptions (§15.1.3): reads `style` and its five
-/// style-conditional options in spec order, and returns the one `NumStyle`
-/// variant they select — a currency style always with its code, a unit style
-/// always with its identifier.
 fn read_unit_options(st: Agent, opts: Option(Handle)) -> #(NumStyle, Agent) {
   let #(kind, st) =
     get_enum_opt(
@@ -1944,7 +1789,6 @@ fn read_unit_options(st: Agent, opts: Option(Handle)) -> #(NumStyle, Agent) {
       }
     None -> st
   }
-  // Everything but the unit style's `unitDisplay` (read last) is now known.
   let build = case sc, unit {
     ScDecimal, _ -> fn(_ud) { StyleDecimal }
     ScPercent, _ -> fn(_ud) { StylePercent }
@@ -1966,7 +1810,6 @@ fn read_unit_options(st: Agent, opts: Option(Handle)) -> #(NumStyle, Agent) {
   #(build(unit_display), st)
 }
 
-/// The `notation` option's tag, before `compactDisplay` completes it.
 type NotationKind {
   NkStandard
   NkScientific
@@ -1974,7 +1817,6 @@ type NotationKind {
   NkCompact
 }
 
-/// The `notation` option's spellings.
 fn notation_variants() -> List(#(String, NotationKind)) {
   [
     #("standard", NkStandard),
@@ -1984,7 +1826,6 @@ fn notation_variants() -> List(#(String, NotationKind)) {
   ]
 }
 
-/// GetOption "compactDisplay", folded into the compact `Notation` variant.
 fn read_notation(
   st: Agent,
   opts: Option(Handle),
@@ -2009,7 +1850,6 @@ fn read_notation(
   )
 }
 
-/// SetNumberFormatDigitOptions (§15.1.6) — resolves the digit-related slots.
 fn digit_options(
   st: Agent,
   opts: Option(Handle),
@@ -2089,7 +1929,6 @@ fn digit_options(
     PriorityAuto -> !{ has_sd || { !has_fd && notation == NkCompact } }
     PriorityMorePrecision | PriorityLessPrecision -> True
   }
-  // sig / fd are #(min, max) when that rounding kind is in effect.
   let #(sig, st) = case need_sd {
     False -> #(None, st)
     True ->
@@ -2165,13 +2004,10 @@ fn digit_options(
         )
       }
   }
-  // Neither kind requested (compact notation default): more-precision
-  // rounding with mnfd/mxfd = 0 and mnsd/mxsd = 1..2 (§15.1.6 step 16).
   let #(sig, fd, rounding_priority) = case sig, fd {
     None, None -> #(Some(#(1, 2)), Some(#(0, 0)), PriorityMorePrecision)
     _, _ -> #(sig, fd, rounding_priority)
   }
-  // roundingIncrement constraints (§15.1.6 steps 24-26).
   let st = case rounding_increment != 1 {
     False -> st
     True ->
@@ -2207,8 +2043,6 @@ fn digit_options(
   )
 }
 
-// --- Intl.DateTimeFormat ---
-
 fn date_time_format_state(
   st: Agent,
   locales_v: JsVal,
@@ -2217,17 +2051,12 @@ fn date_time_format_state(
   dtf_state_required(st, locales_v, options_v, date_defaults(), DateAndTime)
 }
 
-/// Which group of date-time components a DateTimeFormat is required to
-/// produce (ToDateTimeOptions' `required` argument, §17):
-/// Date.prototype.toLocaleDateString needs date fields,
-/// toLocaleTimeString needs time fields, everything else accepts either.
 type DtfRequired {
   DateOnly
   TimeOnly
   DateAndTime
 }
 
-/// The date-group locale defaults (ToDateTimeOptions "date" defaults).
 fn date_defaults() -> DtfComponents {
   DtfComponents(
     ..intl_data.empty_dtf_components,
@@ -2237,7 +2066,6 @@ fn date_defaults() -> DtfComponents {
   )
 }
 
-/// The time-group locale defaults (ToDateTimeOptions "time" defaults).
 fn time_defaults() -> DtfComponents {
   DtfComponents(
     ..intl_data.empty_dtf_components,
@@ -2247,9 +2075,6 @@ fn time_defaults() -> DtfComponents {
   )
 }
 
-/// resolvedOptions' view of a component option: what the user asked for, or —
-/// with no dateStyle/timeStyle and no explicit component of the required
-/// group — the locale default. With a style set, only the styles are visible.
 fn public_component(
   user: Option(a),
   default: Option(a),
@@ -2263,19 +2088,14 @@ fn public_component(
   }
 }
 
-/// The name widths (weekday, era, dayPeriod) as GetOption variants.
 fn name_width_variants() -> List(#(String, NameWidth)) {
   [#("narrow", WNarrow), #("short", WShort), #("long", WLong)]
 }
 
-/// The numeric widths (year, day, hour, minute, second) as GetOption variants.
 fn numeric_width_variants() -> List(#(String, NumericWidth)) {
   [#("2-digit", WTwoDigit), #("numeric", WNumeric)]
 }
 
-/// CreateDateTimeFormat (§11.1.2). `defaults` are the locale default
-/// components applied when the user requested no component of the `required`
-/// group.
 fn dtf_state_required(
   st: Agent,
   locales_v: JsVal,
@@ -2292,7 +2112,6 @@ fn dtf_state_required(
   let #(hour12, st) = get_bool_opt(st, opts, "hour12", None)
   let #(hour_cycle_opt, st) =
     get_enum_opt(st, opts, "hourCycle", hour_cycle_variants(), None)
-  // hour12 overrides hourCycle (§11.1.2 step 6).
   let hour_cycle_opt = case hour12 {
     Some(_) -> None
     None -> hour_cycle_opt
@@ -2326,7 +2145,6 @@ fn dtf_state_required(
       parse_hour_cycle,
       hc_locale_default,
     )
-  // hour12 option resolution (hourCycle12 / hourCycle24 of the locale).
   let hc = case hour12 {
     Some(True) -> hc_locale_default
     Some(False) -> H23
@@ -2338,11 +2156,8 @@ fn dtf_state_required(
       #("nu", nu_from_ext, nu),
       #("hc", hc_from_ext && hour12 == None, hour_cycle_to_js_string(hc)),
     ])
-  // timeZone
   let #(tz_v, st) = opt_get(st, opts, "timeZone")
   let #(time_zone, st) = case classify(tz_v) {
-    // DefaultTimeZone: the host environment zone. Its offset (like every
-    // zone's) is resolved per formatted instant, not snapshotted here.
     KUndef -> #(HostZone(st.hooks.time_zone), st)
     _ -> {
       let #(s, st) = rt_val.t_to_string(st, tz_v)
@@ -2353,7 +2168,6 @@ fn dtf_state_required(
       }
     }
   }
-  // Component options (table order).
   let #(weekday, st) =
     get_enum_opt(
       st,
@@ -2470,7 +2284,6 @@ fn dtf_state_required(
       ]),
       None,
     )
-  // The user's component options as a component table.
   let user =
     DtfComponents(
       weekday:,
@@ -2485,15 +2298,8 @@ fn dtf_state_required(
       fractional_second_digits: fractional,
       time_zone_name: tz_name_opt,
     )
-  // ECMA-402 §11.1.2 InitializeDateTimeFormat's `hasExplicitFormatComponents`:
-  // ANY of the 11 Table-7 components (era and timeZoneName included). Used
-  // ONLY for the dateStyle/timeStyle-with-components TypeError below — never
-  // for defaulting.
   let explicit = list.any(dtf_component_order, fn(c) { has_component(user, c) })
-  // ToDateTimeOptions' `needDefaults`: cleared only by a component of the
-  // REQUIRED group — a narrower set than `explicit`, since era and
-  // timeZoneName clear nothing. `new Intl.DateTimeFormat("en", {timeZoneName:
-  // "short"})` must still default to numeric year/month/day.
+  // era and timeZoneName do not clear need_defaults
   let date_group = [DtfWeekday, DtfYear, DtfMonth, DtfDay]
   let time_group = [
     DtfDayPeriod, DtfHour, DtfMinute, DtfSecond, DtfFractionalSecondDigits,
@@ -2534,7 +2340,6 @@ fn dtf_state_required(
       )
     False -> st
   }
-  // Expand styles / apply defaults into the effective formatting components.
   let components = case styled, required_group_present {
     True, _ ->
       merge_components(
@@ -2545,9 +2350,6 @@ fn dtf_state_required(
     False, False -> merge_components(user, defaults)
   }
   let has_hour = option.is_some(components.hour)
-  // The component options that were explicitly provided — needed at format
-  // time to compute per-Temporal-type formats (GetDateTimeFormat with
-  // inherit = ~relevant~).
   let explicit_names =
     list.filter(
       [
@@ -2626,7 +2428,6 @@ fn dtf_state_required(
   )
 }
 
-/// The `hourCycle` option's spellings.
 fn hour_cycle_variants() -> List(#(String, Option(HourCycle))) {
   optional_variants([#("h11", H11), #("h12", H12), #("h23", H23), #("h24", H24)])
 }
@@ -2637,7 +2438,6 @@ fn parse_hour_cycle(s: String) -> Option(HourCycle) {
   |> option.flatten
 }
 
-/// The `month` option's spellings.
 fn month_width_variants() -> List(#(String, MonthWidth)) {
   [
     #("2-digit", MonthNum(WTwoDigit)),
@@ -2648,7 +2448,6 @@ fn month_width_variants() -> List(#(String, MonthWidth)) {
   ]
 }
 
-/// The `timeZoneName` option's spellings.
 fn tz_name_width_variants() -> List(#(String, TimeZoneNameWidth)) {
   [
     #("short", TzShort),
@@ -2660,7 +2459,6 @@ fn tz_name_width_variants() -> List(#(String, TimeZoneNameWidth)) {
   ]
 }
 
-/// Every DateTimeFormat component, in §11.1.2 table order.
 const dtf_component_order = [
   DtfWeekday,
   DtfEra,
@@ -2743,8 +2541,6 @@ fn time_style_components(style: Option(TimeStyle)) -> DtfComponents {
   }
 }
 
-// --- Intl.PluralRules ---
-
 fn plural_rules_state(
   st: Agent,
   locales_v: JsVal,
@@ -2776,8 +2572,6 @@ fn plural_rules_state(
   )
 }
 
-// --- Intl.ListFormat ---
-
 fn list_format_state(
   st: Agent,
   locales_v: JsVal,
@@ -2806,8 +2600,6 @@ fn list_format_state(
 fn list_format_style_variants() -> List(#(String, ListFormatStyle)) {
   [#("long", LLong), #("short", LShort), #("narrow", LNarrow)]
 }
-
-// --- Intl.RelativeTimeFormat ---
 
 fn rtf_state(
   st: Agent,
@@ -2839,8 +2631,6 @@ fn rtf_state(
   )
 }
 
-// --- Intl.Segmenter ---
-
 fn segmenter_state(
   st: Agent,
   locales_v: JsVal,
@@ -2859,8 +2649,6 @@ fn segmenter_state(
   let #(data_locale, _ext) = resolve_locale(requested)
   #(SegmenterState(locale: data_locale, granularity:), st)
 }
-
-// --- Intl.DisplayNames ---
 
 fn display_names_state(
   st: Agent,
@@ -2932,10 +2720,6 @@ fn display_names_state(
   )
 }
 
-// --- Intl.DurationFormat ---
-
-/// A duration unit. The one place the ten unit names are written down: option
-/// key, DurationRecord field, and singular unit tag all derive from it.
 type DurationUnit {
   DuYears
   DuMonths
@@ -2949,7 +2733,6 @@ type DurationUnit {
   DuNanoseconds
 }
 
-/// The duration units in canonical (largest-first) spec order.
 const duration_units = [
   DuYears,
   DuMonths,
@@ -2963,7 +2746,6 @@ const duration_units = [
   DuNanoseconds,
 ]
 
-/// The unit's JS property name (`Duration` field, DurationFormat option key).
 fn duration_unit_js_name(u: DurationUnit) -> String {
   case u {
     DuYears -> "years"
@@ -2979,7 +2761,6 @@ fn duration_unit_js_name(u: DurationUnit) -> String {
   }
 }
 
-/// The unit's singular NumberFormat unit identifier / part `unit` tag.
 fn duration_unit_singular(u: DurationUnit) -> String {
   case u {
     DuYears -> "year"
@@ -2995,7 +2776,6 @@ fn duration_unit_singular(u: DurationUnit) -> String {
   }
 }
 
-/// A duration's ten fields (ToDurationRecord / ParseTemporalDurationString).
 type DurationRecord {
   DurationRecord(
     years: Float,
@@ -3062,7 +2842,6 @@ fn duration_values(d: DurationRecord) -> List(Float) {
   list.map(duration_units, duration_field(d, _))
 }
 
-/// Intl.DurationFormat §1.2.1 InitializeDurationFormat.
 fn duration_format_state(
   st: Agent,
   locales_v: JsVal,
@@ -3084,9 +2863,6 @@ fn duration_format_state(
       ],
       BsShort,
     )
-  // GetDurationUnitOptions for each unit in spec order, threading the
-  // previous unit's INTERNAL style (`DurFractional` possible) — numeric
-  // chaining and sub-second fraction folding depend on it.
   let unit = fn(st, name, prev) {
     duration_unit_options(st, opts, base_style, name, prev)
   }
@@ -3122,7 +2898,6 @@ fn duration_format_state(
   )
 }
 
-/// The `[[<Unit>Style]]` values a unit's option accepts (its stylesList).
 fn duration_style_variants(
   u: DurationUnit,
 ) -> List(#(String, DurationUnitStyle)) {
@@ -3136,7 +2911,6 @@ fn duration_style_variants(
   }
 }
 
-/// Whether a style makes the *next* unit chain onto it numerically.
 fn is_numeric_style(s: DurationUnitStyle) -> Bool {
   case s {
     DurNumeric | DurTwoDigit | DurFractional -> True
@@ -3158,8 +2932,6 @@ fn optional_variants(
   list.map(variants, fn(kv) { #(kv.0, Some(kv.1)) })
 }
 
-/// GetDurationUnitOptions (Intl.DurationFormat §1.1.6): one unit's resolved
-/// style/display, plus the internal style to thread into the next unit.
 fn duration_unit_options(
   st: Agent,
   opts: Option(Handle),
@@ -3185,12 +2957,10 @@ fn duration_unit_options(
     DuMinutes | DuSeconds -> True
     _ -> False
   }
-  // Steps 2-3: default the style from baseStyle / the previous unit's style.
   let #(style, display_default) = case style_opt {
     Some(chosen) -> #(chosen, DisplayAlways)
     None ->
       case base_style {
-        // digitalBase: "short" for the calendar units, "numeric" for the rest.
         BsDigital ->
           case unit {
             DuYears | DuMonths | DuWeeks | DuDays -> #(DurShort, DisplayAuto)
@@ -3207,7 +2977,6 @@ fn duration_unit_options(
           }
       }
   }
-  // Step 4: a numeric sub-second unit always folds into a fraction.
   let #(style, display_default) = case style == DurNumeric && sub_second {
     True -> #(DurFractional, DisplayAuto)
     False -> #(style, display_default)
@@ -3220,7 +2989,6 @@ fn duration_unit_options(
       [#("auto", DisplayAuto), #("always", DisplayAlways)],
       display_default,
     )
-  // Step 7.
   let st = case display == DisplayAlways && style == DurFractional {
     True ->
       rt_val.t_throw_range_error(
@@ -3229,7 +2997,6 @@ fn duration_unit_options(
       )
     False -> st
   }
-  // Steps 8-9.
   let style = case prev_style {
     Some(DurFractional) ->
       case style {
@@ -3243,7 +3010,6 @@ fn duration_unit_options(
     Some(DurNumeric) | Some(DurTwoDigit) ->
       case style {
         DurFractional | DurNumeric | DurTwoDigit ->
-          // Step 9.b: minutes/seconds after a numeric unit are zero-padded.
           case two_digit_unit {
             True -> DurTwoDigit
             False -> style
@@ -3259,8 +3025,6 @@ fn duration_unit_options(
   #(DurationUnitOptions(style:, display:), style, st)
 }
 
-/// The base style as a per-unit style — `digital` has none of its own (each
-/// unit takes its digitalBase instead), so it is not accepted here.
 fn duration_base_unit_style(base: DurationBaseStyle) -> DurationUnitStyle {
   case base {
     BsLong -> DurLong
@@ -3269,8 +3033,6 @@ fn duration_base_unit_style(base: DurationBaseStyle) -> DurationUnitStyle {
   }
 }
 
-/// The ListFormat style the assembled duration groups are joined with —
-/// `digital` has no list style of its own and joins like `short`.
 fn duration_list_style(base: DurationBaseStyle) -> intl_data.ListFormatStyle {
   case base {
     BsDigital | BsShort -> LShort
@@ -3279,8 +3041,6 @@ fn duration_list_style(base: DurationBaseStyle) -> intl_data.ListFormatStyle {
   }
 }
 
-/// The DurationFormat per-unit options paired with their unit, in canonical
-/// spec order.
 fn duration_unit_list(
   d: DurationFormatState,
 ) -> List(#(DurationUnit, DurationUnitOptions)) {
@@ -3297,14 +3057,6 @@ fn duration_unit_list(
     #(DuNanoseconds, d.nanoseconds),
   ]
 }
-
-// ============================================================================
-// resolvedOptions
-// ============================================================================
-
-// The `*_to_js_string` renderers below produce the ECMA-402 spec spelling of
-// each closed option enum for `resolvedOptions()`. The enums themselves live
-// in `rt/intl_data`; the spellings live here alongside their sole consumer.
 
 fn collator_usage_to_js_string(v: CollatorUsage) -> String {
   case v {
@@ -3330,7 +3082,6 @@ fn case_first_to_js_string(v: CaseFirst) -> String {
   }
 }
 
-/// The `kf` u-extension / `caseFirst` option spellings.
 fn case_first_from_js_string(s: String) -> Option(CaseFirst) {
   case s {
     "upper" -> Some(CaseFirstUpper)
@@ -3559,8 +3310,6 @@ fn language_display_to_js_string(v: LanguageDisplay) -> String {
   }
 }
 
-/// The resolvedOptions spelling of a `[[<Unit>Style]]`. `DurFractional` is
-/// internal-only and surfaces as "numeric".
 fn duration_unit_style_to_js_string(v: DurationUnitStyle) -> String {
   case v {
     DurLong -> "long"
@@ -3588,7 +3337,6 @@ fn duration_base_style_to_js_string(v: DurationBaseStyle) -> String {
   }
 }
 
-/// `#(name, Some(value))` pairs, dropping the absent ones (order preserved).
 fn present_pairs(pairs: List(#(k, Option(a)))) -> List(#(k, a)) {
   list.filter_map(pairs, fn(p) {
     case p.1 {
@@ -3610,9 +3358,6 @@ fn resolved_options(
       service,
       "Intl." <> service_name(service) <> ".prototype.resolvedOptions",
     )
-  // Property order and presence are observable: each arm enumerates its
-  // state's fields in the spec's resolvedOptions order, skipping absent
-  // (None) internal slots.
   let #(props, st) = case data {
     LocaleData(l) -> #([#("locale", mk_string(l.locale))], st)
     CollatorData(c) -> #(
@@ -3632,8 +3377,6 @@ fn resolved_options(
     )
     NumberFormatData(nf) -> {
       let dg = nf.digits
-      // The style-conditional slots exist exactly for the style that
-      // selects them, so resolvedOptions omits the rest.
       let #(currency, currency_display, currency_sign) = case nf.style {
         StyleCurrency(currency:, display:, sign:) -> #(
           Some(mk_string(currency)),
@@ -3816,14 +3559,11 @@ fn resolved_options(
       ]),
       st,
     )
-    // %Segments%/%SegmentIterator% never expose resolvedOptions.
     SegmentsData(_) | SegmentIteratorData(_) -> #([], st)
   }
   alloc_pojo(st, props)
 }
 
-/// `[[UseGrouping]]` as its JS resolvedOptions value: never is the boolean
-/// `false`, everything else its string spelling.
 fn use_grouping_js(g: IntlUseGrouping) -> JsVal {
   case g {
     GroupingNever -> mk_bool(False)
@@ -3833,8 +3573,6 @@ fn use_grouping_js(g: IntlUseGrouping) -> JsVal {
   }
 }
 
-/// `[[CompactDisplay]]` as its resolvedOptions value — present only when the
-/// notation is compact.
 fn compact_display_of(n: Notation) -> Option(JsVal) {
   case n {
     NotationCompact(display:) ->
@@ -3859,8 +3597,6 @@ fn tz_name_width_js(v: TimeZoneNameWidth) -> JsVal {
   mk_string(time_zone_name_width_to_js_string(v))
 }
 
-/// The integer/fraction/significant digit resolvedOptions pairs shared by
-/// NumberFormat and PluralRules, prepended to `rest`.
 fn digit_option_pairs(
   dg: IntlDigitOptions,
   rest: List(#(String, Option(JsVal))),
@@ -3888,8 +3624,6 @@ fn digit_option_pairs(
   ]
 }
 
-/// The roundingIncrement/roundingMode/roundingPriority/trailingZeroDisplay
-/// resolvedOptions tail shared by NumberFormat and PluralRules.
 fn digit_rounding_pairs(
   dg: IntlDigitOptions,
 ) -> List(#(String, Option(JsVal))) {
@@ -3912,14 +3646,6 @@ fn digit_rounding_pairs(
   ]
 }
 
-// ============================================================================
-// Bound method getters (format / compare)
-// ============================================================================
-
-/// The `format` / `compare` accessor getters (§10.3.3, §15.3.3, §11.3.3): the
-/// bound function is created once and cached on the receiver, so the getter
-/// is idempotent. `BoundGetterService` has exactly the three services with
-/// such an accessor — no "service without a getter" arm.
 fn bound_getter(
   st: Agent,
   service: BoundGetterService,
@@ -3946,7 +3672,7 @@ fn bound_getter(
   case cached {
     Some(fn_h) -> #(mk_object(fn_h), st)
     None -> {
-      // Not rooted: the receiver's `bound` slot keeps it alive.
+      // not rooted: receiver's bound slot keeps it alive
       let #(fn_h, st) =
         rt_call.t_native_new(
           st,
@@ -3969,9 +3695,6 @@ fn bound_getter(
   }
 }
 
-/// The bound `format` / `compare` function itself: `target` is the receiver
-/// captured by `bound_getter`, and its brand is re-checked (the instance's
-/// state can only have been swapped by another Intl object of the same shape).
 fn bound_method(
   st: Agent,
   service: BoundGetterService,
@@ -4000,11 +3723,6 @@ fn bound_method(
   }
 }
 
-// ============================================================================
-// NumberFormat formatting glue
-// ============================================================================
-
-/// The `fmt.NumOpts` a NumberFormat instance formats with.
 fn num_opts_from_nf(nf: NumberFormatState) -> fmt.NumOpts {
   let d = fmt.default_num_opts()
   with_digits(
@@ -4020,8 +3738,6 @@ fn num_opts_from_nf(nf: NumberFormatState) -> fmt.NumOpts {
   )
 }
 
-/// The `fmt.NumOpts` a PluralRules instance derives its plural operands
-/// with — its own locale / notation / digit options over decimal defaults.
 fn num_opts_from_plural(p: PluralRulesState) -> fmt.NumOpts {
   let d = fmt.default_num_opts()
   with_digits(
@@ -4030,11 +3746,9 @@ fn num_opts_from_plural(p: PluralRulesState) -> fmt.NumOpts {
   )
 }
 
-/// ToIntlMathematicalValue, approximated with ToNumber (BigInt allowed).
 fn to_intl_number(st: Agent, v: JsVal) -> #(JsNum, Agent) {
   case classify(v) {
-    // num_from_int saturates out-of-range BigInts to ±Infinity; a bare
-    // int.to_float would badarg (and kill the VM) on e.g. 10n ** 400n.
+    // int.to_float would badarg on huge bigints
     KBig(n) -> #(rt_val.num_from_int(n), st)
     _ -> rt_val.t_to_number(st, v)
   }
@@ -4047,7 +3761,6 @@ fn nf_format_parts(
 ) -> #(List(fmt.Part), Agent) {
   let opts = num_opts_from_nf(nf)
   let nu = nf.numbering_system
-  // ToIntlMathematicalValue keeps decimal strings exact.
   case classify(x) {
     KStr(str) ->
       case is_plain_decimal(string.trim(str)) {
@@ -4124,8 +3837,7 @@ fn nf_range_parts(
       rt_val.t_throw_range_error(st, "Invalid range argument: NaN")
     _, _ -> st
   }
-  // Format the original values: decimal strings stay exact (they can exceed
-  // float precision), everything else uses the coerced number.
+  // decimal strings stay exact beyond float precision
   let x_fmt = case classify(x_v) {
     KStr(_) -> x_v
     _ -> mk_number(x)
@@ -4139,25 +3851,12 @@ fn nf_range_parts(
   #(fmt.format_range_combine(fmt.locale_key(nf.locale), x_parts, y_parts), st)
 }
 
-// ============================================================================
-// DateTimeFormat formatting glue
-// ============================================================================
-
-/// A Temporal object as seen by DateTimeFormat (ECMA-402 HandleDateTimeValue).
 type TemporalFormattable {
-  /// A wall-clock Temporal type: its fields ARE the fields to format.
   TfPlain(PlainTemporal)
-  /// Temporal.Instant — an exact time, rendered through the formatter's zone.
   TfInstant(epoch_ns: Int)
-  /// Temporal.ZonedDateTime — always a TypeError (`toLocaleString` instead).
   TfZoned
 }
 
-/// The Temporal types with no instant behind them, split out of
-/// `TemporalFormattable` so `plain_temporal_fields` / `plain_component_rules`
-/// are total: neither can be reached with an Instant or a ZonedDateTime, so
-/// neither needs a "cannot happen" fallback that would silently format the
-/// epoch.
 type PlainTemporal {
   PDate(year: Int, month: Int, day: Int, calendar: String)
   PYearMonth(year: Int, month: Int, day: Int, calendar: String)
@@ -4175,14 +3874,11 @@ type PlainTemporal {
   )
 }
 
-/// A Temporal value that DateTimeFormat accepted: ZonedDateTime has already
-/// thrown, so field extraction sees only these two shapes.
 type AcceptedTemporal {
   AtInstant(epoch_ns: Int)
   AtPlain(PlainTemporal)
 }
 
-/// HandleDateTimeValue's ZonedDateTime rejection.
 fn throw_zoned(st: Agent) -> a {
   rt_val.t_throw_type_error(
     st,
@@ -4198,7 +3894,6 @@ fn accept_temporal(st: Agent, t: TemporalFormattable) -> AcceptedTemporal {
   }
 }
 
-/// IsTemporalObject — recognize Temporal values handed to format methods.
 fn dtf_temporal_value(st: Agent, v: JsVal) -> Option(TemporalFormattable) {
   case classify(v) {
     KHandle(h) ->
@@ -4210,8 +3905,6 @@ fn dtf_temporal_value(st: Agent, v: JsVal) -> Option(TemporalFormattable) {
   }
 }
 
-/// The DateTimeFormat view of a Temporal object's slots. Duration is not a
-/// date-time value (it goes through ToNumber like any other object).
 fn temporal_formattable(data: TemporalData) -> Option(TemporalFormattable) {
   case data {
     TemporalInstant(epoch_ns:) -> Some(TfInstant(epoch_ns:))
@@ -4267,7 +3960,6 @@ fn temporal_formattable(data: TemporalData) -> Option(TemporalFormattable) {
   }
 }
 
-/// SameTemporalType — both values are the same Temporal type.
 fn same_temporal_kind(a: TemporalFormattable, b: TemporalFormattable) -> Bool {
   case a, b {
     TfPlain(a), TfPlain(b) -> same_plain_kind(a, b)
@@ -4288,9 +3980,6 @@ fn same_plain_kind(a: PlainTemporal, b: PlainTemporal) -> Bool {
   }
 }
 
-/// Allowed / required / default components per Temporal type, plus
-/// whether `era` / hour-cycle options carry over (GetDateTimeFormat's
-/// ~relevant~ inheritance).
 fn plain_component_rules(
   t: PlainTemporal,
 ) -> #(List(DtfComponent), List(DtfComponent), DtfComponents, Bool) {
@@ -4342,9 +4031,6 @@ fn plain_component_rules(
   }
 }
 
-/// HandleDateTimeValue: validate the Temporal value against the formatter
-/// (calendar compatibility, suitable format availability) and return the
-/// state with its formatting components adjusted to the per-type format.
 fn dtf_temporal_state(
   st: Agent,
   d: DateTimeFormatState,
@@ -4352,13 +4038,7 @@ fn dtf_temporal_state(
 ) -> DateTimeFormatState {
   case t {
     TfZoned -> throw_zoned(st)
-    // [[TemporalInstantFormat]] is GetDateTimeFormat(..., required = ~any~,
-    // defaults = ~all~): with no style and no explicit date/time component,
-    // an Instant defaults to date AND time — the constructor only defaulted
-    // the date half (defaults = ~date~). Repro:
-    //   new Intl.DateTimeFormat("en", { era: "narrow" })
-    //     .format(new Temporal.Instant(0n))
-    //     === new Date(0).toLocaleString("en", { era: "narrow" })
+    // instant defaults to date and time, ctor only date
     TfInstant(..) ->
       case
         d.explicit != []
@@ -4388,8 +4068,6 @@ fn dtf_temporal_state(
         option.is_some(d.date_style) || option.is_some(d.time_style)
       case has_styles {
         True -> {
-          // AdjustDateTimeStyleFormat: per-type formats exist only when the
-          // matching style was given; keep only the allowed components.
           let style_ok = case p {
             PDate(..) | PYearMonth(..) | PMonthDay(..) ->
               option.is_some(d.date_style)
@@ -4406,8 +4084,6 @@ fn dtf_temporal_state(
           }
         }
         False -> {
-          // GetDateTimeFormat with inherit = ~relevant~ over the explicitly
-          // provided component options.
           let in_required =
             list.filter(d.explicit, fn(name) { list.contains(required, name) })
           let era = case copy_era {
@@ -4441,7 +4117,6 @@ fn dtf_temporal_state(
   }
 }
 
-/// Replace the formatter's component table.
 fn with_components(
   d: DateTimeFormatState,
   components: DtfComponents,
@@ -4453,11 +4128,6 @@ fn civil_week_day(year: Int, month: Int, day: Int) -> Int {
   gregorian.weekday_from_days(days_from_civil(year, month, day))
 }
 
-/// Wall-clock fields for a Temporal value, and the zone offset that produced
-/// them (which a requested `timeZoneName` renders). Plain types format their
-/// fields directly (the formatter's time zone is ignored); Instant converts
-/// through the formatter's zone like a Number time value. `now_ms` is the
-/// host wall clock, read only for the plain types' zone-name offset.
 fn dtf_temporal_fields(
   d: DateTimeFormatState,
   t: AcceptedTemporal,
@@ -4469,8 +4139,6 @@ fn dtf_temporal_fields(
       let offset = tz.offset_at(d.time_zone, ms)
       #(fmt.fields_from_epoch_ms(int.to_float(ms), offset), offset)
     }
-    // Plain types carry no instant, so a requested timeZoneName can only show
-    // the zone's offset now.
     AtPlain(p) -> #(
       plain_temporal_fields(p),
       tz.offset_at(d.time_zone, now_ms()),
@@ -4594,7 +4262,6 @@ fn build_dtf_parts(
     Some(w) -> [#(PWeekday, fmt.weekday_name(fields.week_day, w))]
     None -> []
   }
-  // Date portion.
   let date_parts = case month {
     Some(MonthName(mw)) -> {
       let m_part = [#(PMonth, fmt.month_name(fields.month, mw))]
@@ -4615,8 +4282,6 @@ fn build_dtf_parts(
       }
       list.flatten([m_part, d_part, y_part])
     }
-    // Numeric month / partial combos. Most locales we ship use M/D/Y with
-    // "/"; German-style locales order D.M.Y with ".".
     Some(MonthNum(_)) | None -> {
       let month_num = case month {
         Some(MonthNum(mw)) -> Some(numeric_width_str(mw, fields.month))
@@ -4656,7 +4321,6 @@ fn build_dtf_parts(
       ])
     _, _ -> date_parts
   }
-  // Time portion.
   let #(display_hour, dp) = case hc {
     H11 -> #(fields.hour % 12, am_pm(fields.hour))
     H12 -> {
@@ -4741,7 +4405,6 @@ fn build_dtf_parts(
       }
     None, None -> []
   }
-  // Standalone dayPeriod (no hour): no leading space.
   let day_period_parts = case hour, day_period {
     None, Some(dpw) -> [
       #(PDayPeriod, fmt.day_period_name(fields.hour, fields.minute, dpw)),
@@ -4787,8 +4450,7 @@ fn am_pm(hour: Int) -> String {
   }
 }
 
-/// Render an integer under a `numeric`/`2-digit` width. `2-digit` truncates
-/// to the low two digits (per §11.5.8 for year/month/day).
+// 2-digit keeps the low two digits
 fn numeric_width_str(width: NumericWidth, n: Int) -> String {
   case width {
     WTwoDigit -> fmt.pad2(n % 100)
@@ -4815,9 +4477,6 @@ fn dtf_range_parts(
   use Nil <- helpers.guard(defined, fn() {
     rt_val.t_throw_type_error(st, "Invalid range arguments")
   })
-  // ToDateTimeFormattable runs on both arguments (in order) before the
-  // SameTemporalType check: Temporal objects pass through, everything else
-  // goes through ToNumber.
   let tx = dtf_temporal_value(st, x_v)
   let ty = dtf_temporal_value(st, y_v)
   let #(x_v, st) = case tx {
@@ -4846,8 +4505,6 @@ fn dtf_range_parts(
       case same_temporal_kind(a, b) {
         False -> same_type_error()
         True -> {
-          // Validates x (calendar / suitable format) and yields the
-          // per-type adjusted components; y is validated separately.
           let adjusted = dtf_temporal_state(st, d, a)
           let _d_y = dtf_temporal_state(st, d, b)
           adjusted
@@ -4877,8 +4534,6 @@ fn dtf_range_parts(
   }
 }
 
-/// "Jan 3 – 5, 2019": collapse a named-month date-only range that differs
-/// only in the day.
 fn dtf_collapsed_range(
   st: Agent,
   d: DateTimeFormatState,
@@ -4888,7 +4543,6 @@ fn dtf_collapsed_range(
   let c = d.components
   let date_only =
     c.hour == None && c.minute == None && c.second == None && c.weekday == None
-  // A named month with a year and a day is the only shape we collapse.
   case c.month, c.year, c.day, date_only {
     Some(MonthName(month_width)), Some(year_width), Some(day_width), True -> {
       let #(xf, st) = dtf_fields(st, d, x_v)
@@ -4957,7 +4611,6 @@ fn dtf_collapsed_range(
   }
 }
 
-/// Compute the civil fields a DTF instance would use for a value.
 fn dtf_fields(
   st: Agent,
   d: DateTimeFormatState,
@@ -4977,7 +4630,6 @@ fn dtf_fields(
   }
 }
 
-/// Civil fields for a Number time value, plus the zone offset used.
 fn dtf_fields_number(
   st: Agent,
   d: DateTimeFormatState,
@@ -4989,7 +4641,6 @@ fn dtf_fields_number(
   }
   let tv_f = case tv {
     JInt(i) -> time_clip(st, int.to_float(i))
-    // TimeClip truncates toward zero before the range check.
     JFloat(f) -> time_clip(st, int.to_float(float.truncate(f)))
     JNan | JPosInf | JNegInf ->
       rt_val.t_throw_range_error(st, "Invalid time value")
@@ -4998,17 +4649,12 @@ fn dtf_fields_number(
   #(fmt.fields_from_epoch_ms(tv_f, offset), offset, st)
 }
 
-/// TimeClip's range check on an already-integral time value.
 fn time_clip(st: Agent, f: Float) -> Float {
   case float.absolute_value(f) <=. 8.64e15 {
     True -> f
     False -> rt_val.t_throw_range_error(st, "Invalid time value")
   }
 }
-
-// ============================================================================
-// Prototype methods (IntlMethod dispatch)
-// ============================================================================
 
 fn run_method(
   st: Agent,
@@ -5064,7 +4710,6 @@ fn run_method(
       case x, y {
         JNan, _ | _, JNan ->
           rt_val.t_throw_range_error(st, "Invalid selectRange argument: NaN")
-        // CLDR en plural ranges resolve to "other" for all combinations.
         _, _ -> #(mk_string(fmt.plural_category_to_js_string(fmt.PcOther)), st)
       }
     }
@@ -5099,8 +4744,6 @@ fn run_method(
       segments_containing(st, sg, arg0)
     IntlSegmentIteratorNext, SegmentIteratorData(it) ->
       segment_iterator_next(st, h, it)
-    // `branded` guarantees data matches `service`, so these pairings are
-    // methods that were never registered on the receiver's prototype.
     IntlFormat, _
     | IntlFormatToParts, _
     | IntlFormatRange, _
@@ -5118,8 +4761,6 @@ fn run_method(
   }
 }
 
-/// The Number/BigInt/String/Date prototype locale-sensitive overrides
-/// (ECMA-402 §17-19) — installed by `init`, no Intl brand check.
 fn run_host_override(
   st: Agent,
   which: IntlHostOverrideName,
@@ -5145,7 +4786,6 @@ fn run_host_override(
   }
 }
 
-/// Number.prototype.toLocaleString (ECMA-402 §18.2.1).
 fn host_number_to_locale_string(
   st: Agent,
   this: JsVal,
@@ -5172,9 +4812,6 @@ fn host_number_to_locale_string(
   #(mk_string(fmt.parts_to_string(parts)), st)
 }
 
-/// BigInt.prototype.toLocaleString (ECMA-402 §18.3.1) — same NumberFormat path
-/// as Number.prototype.toLocaleString, but the value is handed over as its
-/// exact decimal string so arbitrarily large BigInts keep every digit.
 fn host_bigint_to_locale_string(
   st: Agent,
   this: JsVal,
@@ -5201,7 +4838,6 @@ fn host_bigint_to_locale_string(
   #(mk_string(fmt.parts_to_string(parts)), st)
 }
 
-/// String.prototype.localeCompare (ECMA-402 §19.1.1).
 fn host_locale_compare(
   st: Agent,
   this: JsVal,
@@ -5221,8 +4857,6 @@ fn host_locale_compare(
   #(mk_number(JInt(collator_compare(c, s, that))), st)
 }
 
-/// String.prototype.toLocale{Lower,Upper}Case — locale list is validated,
-/// casing uses the default (root) algorithm.
 fn host_locale_case(
   st: Agent,
   this: JsVal,
@@ -5242,11 +4876,7 @@ fn host_locale_case(
       }
     [] -> "en"
   }
-  // Apply locale special casing first, then run the same Unicode Default Case
-  // Conversion `String.prototype.toLowerCase` runs (final sigma etc. live in
-  // `builtins/string`). Deliberately NOT a [[Get]] + [[Call]] of
-  // `String.prototype.toLowerCase`: reassigning that property must not change
-  // what `toLocaleLowerCase` returns.
+  // deliberately not a lookup of String.prototype.toLowerCase
   let pre = case lang {
     "tr" | "az" -> turkic_case(s, upper)
     "lt" -> lithuanian_case(s, upper)
@@ -5259,12 +4889,10 @@ fn host_locale_case(
   #(mk_string(cased), st)
 }
 
-/// Turkish/Azeri dotted and dotless I special casing (pre-transform only —
-/// the generic case conversion runs afterwards).
 fn turkic_case(s: String, upper: Bool) -> String {
   case upper {
     True ->
-      // i → İ (U+0130); the rest is handled by the default algorithm.
+      // i → İ (U+0130)
       string.to_graphemes(s)
       |> list.map(fn(g) {
         case g {
@@ -5274,7 +4902,7 @@ fn turkic_case(s: String, upper: Bool) -> String {
       })
       |> string.join("")
     False -> {
-      // İ → i; I → ı (U+0131); I + U+0307 → i.
+      // İ → i, I → ı (U+0131), I + U+0307 → i
       let cps =
         string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
       lower_turkic_cps(cps, [])
@@ -5282,7 +4910,6 @@ fn turkic_case(s: String, upper: Bool) -> String {
   }
 }
 
-/// A single codepoint as a string; empty for a surrogate scalar value.
 fn codepoint_str(c: Int) -> String {
   case string.utf_codepoint(c) {
     Ok(cp) -> string.from_utf_codepoints([cp])
@@ -5300,11 +4927,10 @@ fn lower_turkic_cps(cps: List(Int), acc: List(String)) -> String {
   }
 }
 
-/// Lithuanian dot-above special casing.
 fn lithuanian_case(s: String, upper: Bool) -> String {
   let cps = string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
   case upper {
-    // Uppercasing removes U+0307 after i/j.
+    // uppercasing drops U+0307 after i/j
     True -> upper_lt_cps(cps, [])
     False -> lower_lt_cps(cps, [])
   }
@@ -5324,7 +4950,7 @@ fn lower_lt_cps(cps: List(Int), acc: List(String)) -> String {
   let is_mark = fn(c) { c >= 0x300 && c <= 0x36f && c != 0x307 }
   case cps {
     [] -> string.join(list.reverse(acc), "")
-    // I/J followed by a combining mark keep an explicit dot above.
+    // I/J before a combining mark keep a dot above
     [0x49, m, ..rest] ->
       case is_mark(m) {
         True -> lower_lt_cps(rest, [codepoint_str(m), "i\u{0307}", ..acc])
@@ -5342,7 +4968,6 @@ fn lower_lt_cps(cps: List(Int), acc: List(String)) -> String {
   }
 }
 
-/// Date.prototype.toLocale{,Date,Time}String (ECMA-402 §17).
 fn host_date_to_locale(
   st: Agent,
   this: JsVal,
@@ -5376,7 +5001,6 @@ fn host_date_to_locale(
   }
 }
 
-/// PluralRules select: operands come from the formatted digit strings.
 fn plural_select(p: PluralRulesState, n: JsNum) -> fmt.PluralCategory {
   let finite = fn(f) {
     let opts =
@@ -5393,12 +5017,10 @@ fn plural_select(p: PluralRulesState, n: JsNum) -> fmt.PluralCategory {
   case n {
     JInt(i) -> finite(int.to_float(i))
     JFloat(f) -> finite(f)
-    // NaN/Infinity have no operands.
     JNan | JPosInf | JNegInf -> fmt.PcOther
   }
 }
 
-/// RelativeTimeFormat format/formatToParts core.
 fn rtf_method_parts(
   st: Agent,
   r: RelativeTimeFormatState,
@@ -5445,14 +5067,12 @@ fn singular_unit(unit: String) -> Option(String) {
   }
 }
 
-/// StringListFromIterable (§13.5.1) — undefined → empty list.
 fn string_list_from_iterable(
   st: Agent,
   iterable: JsVal,
 ) -> #(List(String), Agent) {
   case classify(iterable) {
     KUndef -> #([], st)
-    // Strings iterate by code points (String.prototype[Symbol.iterator]).
     KStr(str) -> {
       let items =
         string.to_utf_codepoints(str)
@@ -5502,7 +5122,6 @@ fn iterate_strings(
   }
 }
 
-/// Intl.DisplayNames.prototype.of(code)
 fn display_names_of(
   st: Agent,
   dn: DisplayNamesState,
@@ -5515,7 +5134,6 @@ fn display_names_of(
     DnLanguage ->
       case tags.parse(code) {
         Ok(lid) ->
-          // Must match unicode_language_id: no extensions/private use.
           case lid.extensions, lid.private_use {
             [], [] -> {
               let tag = tags.to_string(tags.canonicalize(lid))
@@ -5597,17 +5215,12 @@ fn display_names_of(
   }
 }
 
-// ============================================================================
-// DurationFormat formatting
-// ============================================================================
-
 fn duration_parts(
   st: Agent,
   df: DurationFormatState,
   duration_v: JsVal,
 ) -> #(List(fmt.UnitPart), Agent) {
   let #(fields, st) = to_duration_record(st, duration_v)
-  // DurationSign consistency + IsValidDuration ranges.
   let values = duration_values(fields)
   let has_neg = list.any(values, fn(v) { v <. 0.0 })
   let has_pos = list.any(values, fn(v) { v >. 0.0 })
@@ -5627,7 +5240,6 @@ fn duration_parts(
   #(build_duration_parts(df, fields), st)
 }
 
-/// ToDurationRecord (object) / Temporal duration string parsing.
 fn to_duration_record(
   st: Agent,
   duration_v: JsVal,
@@ -5683,7 +5295,6 @@ fn to_duration_record(
   }
 }
 
-/// IsValidDuration: calendar units < 2^32; total time < 2^53 seconds.
 fn is_valid_duration(d: DurationRecord) -> Bool {
   let cal_ok =
     list.all([d.years, d.months, d.weeks], fn(v) {
@@ -5706,7 +5317,7 @@ fn is_valid_duration(d: DurationRecord) -> Bool {
   cal_ok && float.absolute_value(total_seconds) <. 9_007_199_254_740_992.0
 }
 
-/// Parse a Temporal ISO 8601 duration string: [+-]PnYnMnWnDTnHnMnS.
+// [+-]PnYnMnWnDTnHnMnS
 fn parse_iso_duration(str: String) -> Result(DurationRecord, Nil) {
   let trimmed = string.trim(str)
   let #(sign, rest) = case string.pop_grapheme(trimmed) {
@@ -5750,7 +5361,6 @@ fn parse_iso_duration(str: String) -> Result(DurationRecord, Nil) {
         list.fold(all, zero_duration, fn(acc, kv) {
           set_duration_field(acc, kv.0, kv.1)
         })
-      // Split fractional seconds into ms/us/ns.
       let whole = float.truncate(parsed.seconds) |> int.to_float
       let frac = parsed.seconds -. whole
       let ns_total = float.round(frac *. 1_000_000_000.0)
@@ -5774,7 +5384,6 @@ fn parse_iso_duration(str: String) -> Result(DurationRecord, Nil) {
   }
 }
 
-/// Parse "3Y2M..." style segments in designator order.
 fn parse_duration_section(
   part: String,
   designators: List(#(String, DurationUnit)),
@@ -5848,7 +5457,6 @@ fn parse_duration_loop(
   }
 }
 
-/// Designators must appear in order; consuming one drops the earlier ones.
 fn take_designator(
   designators: List(#(String, DurationUnit)),
   d: String,
@@ -5864,11 +5472,7 @@ fn take_designator(
 }
 
 fn parse_duration_number(s: String) -> Result(Float, Nil) {
-  // The integer fallback must go through num_from_int: a bare int.to_float
-  // on an arbitrary-precision int (e.g. a 400-digit duration component)
-  // raises an uncatchable erlang:float/1 badarg. Out-of-range values
-  // saturate to ±Infinity, which is not a valid duration field, so treat
-  // them as a parse failure (the caller surfaces a RangeError).
+  // int.to_float would badarg on huge ints
   float.parse(s)
   |> result.lazy_or(fn() {
     int.parse(s)
@@ -5882,7 +5486,6 @@ fn parse_duration_number(s: String) -> Result(Float, Nil) {
   })
 }
 
-/// PartitionDurationFormatPattern — mirrors ECMA-402 Intl.DurationFormat §1.1.7.
 fn build_duration_parts(
   df: DurationFormatState,
   fields: DurationRecord,
@@ -5891,8 +5494,6 @@ fn build_duration_parts(
   let base_style = df.style
   let frac_digits = df.fractional_digits
   let overall_negative = list.any(duration_values(fields), fn(v) { v <. 0.0 })
-  // The style of the next-smaller sub-second unit (seconds → ms → us → ns);
-  // `None` for the units that have no such successor.
   let next_style_of = fn(unit) {
     case unit {
       DuSeconds -> Some(df.milliseconds.style)
@@ -5901,7 +5502,6 @@ fn build_duration_parts(
       _other -> None
     }
   }
-  // Iterate units building groups; numeric units join via ":" separators.
   let init = #([], False, True, False)
   let #(groups_rev, _need_sep, _display_neg, _done) =
     list.fold(duration_unit_list(df), init, fn(acc, entry) {
@@ -5913,8 +5513,6 @@ fn build_duration_parts(
           let style = unit_opts.style
           let display = unit_opts.display
           let raw_value = duration_field(fields, unit) +. 0.0
-          // Combine sub-second units when the next unit is numeric — only
-          // seconds/milliseconds/microseconds have such a next unit at all.
           let combine = case next_style_of(unit) {
             Some(next_style) -> folds_into_fraction(next_style)
             None -> False
@@ -5935,7 +5533,6 @@ fn build_duration_parts(
                 True,
               )
             }
-            // Not folded into a fraction: an integral count of this unit.
             False -> #(
               FloatValue(raw_value),
               raw_value == 0.0,
@@ -5944,7 +5541,6 @@ fn build_duration_parts(
               False,
             )
           }
-          // Display zero numeric minutes when seconds follow.
           let display_required = case unit == DuMinutes && need_sep {
             True ->
               df.seconds.display == DisplayAlways
@@ -5958,7 +5554,6 @@ fn build_duration_parts(
           case show {
             False -> #(groups, need_sep, display_neg, this_done)
             True -> {
-              // Only the first displayed value carries the sign.
               let #(sign_display, value_repr, display_neg) = case display_neg {
                 True -> {
                   let value_repr = case is_zero && overall_negative {
@@ -5993,8 +5588,6 @@ fn build_duration_parts(
                   },
                   style: case numeric_style {
                     True -> StyleDecimal
-                    // DurationFormat unit styles are long/short/narrow here
-                    // (the numeric styles took the branch above).
                     False ->
                       StyleUnit(
                         unit: duration_unit_singular(unit),
@@ -6017,7 +5610,6 @@ fn build_duration_parts(
                 })
               case need_sep {
                 True ->
-                  // Join onto the previous numeric group with ":".
                   case groups {
                     [last, ..earlier] -> #(
                       [
@@ -6048,7 +5640,6 @@ fn build_duration_parts(
     })
   let groups = list.reverse(groups_rev)
   let strings = list.map(groups, fmt.unit_parts_to_string)
-  // Re-expand element parts so formatToParts keeps the numeric structure.
   let lf_parts =
     fmt.list_format_parts(UnitList, duration_list_style(base_style), strings)
   expand_list_elements(lf_parts, groups, [])
@@ -6059,9 +5650,6 @@ type DurationValue {
   DecValue(String)
 }
 
-/// Whether the *next* sub-second unit's style makes this unit fold its value
-/// into a fraction. `DurFractional` is the internal style GetDurationUnitOptions
-/// folds a numeric sub-second unit into; both spell "numeric" publicly.
 fn folds_into_fraction(style: DurationUnitStyle) -> Bool {
   case style {
     DurNumeric | DurFractional -> True
@@ -6069,8 +5657,6 @@ fn folds_into_fraction(style: DurationUnitStyle) -> Bool {
   }
 }
 
-/// A DurationFormat per-unit non-numeric style (long/short/narrow) as the
-/// NumberFormat unitDisplay it renders with.
 fn unit_display_from_duration_style(style: DurationUnitStyle) -> UnitDisplay {
   case style {
     DurLong -> UnitLong
@@ -6079,7 +5665,6 @@ fn unit_display_from_duration_style(style: DurationUnitStyle) -> UnitDisplay {
   }
 }
 
-/// durationToFractional: exact decimal string for combined sub-second units.
 fn duration_fractional_value(
   fields: DurationRecord,
   unit: DurationUnit,
@@ -6127,7 +5712,6 @@ fn pow10_i(e: Int) -> Int {
   }
 }
 
-/// Substitute "element" parts from ListFormat with the group's real parts.
 fn expand_list_elements(
   lf_parts: List(fmt.Part),
   groups: List(List(fmt.UnitPart)),
@@ -6144,10 +5728,6 @@ fn expand_list_elements(
       expand_list_elements(rest, groups, [[fmt.UnitPart(t, v, None)], ..acc])
   }
 }
-
-// ============================================================================
-// Segmenter methods
-// ============================================================================
 
 fn segmenter_segment(
   st: Agent,
@@ -6210,7 +5790,6 @@ fn segments_containing(
   let #(n, st) = rt_val.t_to_number(st, index_v)
   let segments = seg.segment_string(input, granularity)
   let total = seg.utf16_len(input)
-  // ToIntegerOrInfinity: NaN is 0; ±Infinity fall outside [0, total).
   let idx = case n {
     JInt(i) -> i
     JFloat(f) -> float.truncate(f)
@@ -6256,11 +5835,6 @@ fn segment_iterator_next(
   }
 }
 
-// ============================================================================
-// Intl.Locale getters & methods
-// ============================================================================
-
-/// Parse a Locale instance's canonical tag into its LocaleId, if well formed.
 fn locale_lid(l: LocaleState) -> Option(tags.LocaleId) {
   case tags.parse(l.locale) {
     Ok(lid) -> Some(lid)

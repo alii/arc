@@ -1,22 +1,6 @@
-%%% arc_rt_arena_ffi: the cell arena behind `rt/arena.gleam`.
-%%%
-%%% {arena, Shift, Root, HotIx, Hot}. Root is a persistent 16-way trie
-%%% indexed by cell id: a node at shift 0 is a leaf tuple of 16 slots,
-%%% above that a tuple of 16 child nodes, and Shift is 4 * (levels - 1).
-%%% The atom ?STORE_FREE_SLOT stands both for a free slot in a leaf and
-%%% for a wholly free subtree. Ids are dense from 0, so the trie is as
-%%% shallow as the highest id allows and grows by adding a root level.
-%%%
-%%% Hot is the last-written leaf (leaf index HotIx, ids HotIx*16 ..
-%%% HotIx*16+15) held outside the trie, whose own copy of that leaf is
-%%% stale: a write to it copies 16 slots instead of the whole path, which
-%%% is what a run of allocations and the field writes that follow them do.
-%%% A write to another leaf puts Hot back and takes that leaf out.
-%%%
-%%% get/2 is the hot read: the Hot check, then one clause per depth with no
-%%% bounds or default bookkeeping. It is only defined for an id whose leaf
-%%% exists (every minted, unswept id); anything else is a caller bug and
-%%% crashes. probe/2 is the total read.
+%% persistent 16-way trie by cell id, shift is 4 * (levels - 1)
+%% hot is the last written leaf held outside the trie, trie copy stale
+%% get/2 crashes on ids never minted, probe/2 is total
 -module(arc_rt_arena_ffi).
 -export([new/0, get/2, get_option/2, probe/2, set/3, reset/2, fold/3,
          from_descending/1, count/1]).
@@ -64,7 +48,6 @@ get(I, {arena, S, N, _, _}) ->
 walk(I, 0, N) -> element((I band ?M) + 1, N);
 walk(I, S, N) -> walk(I, S - ?B, element(((I bsr S) band ?M) + 1, N)).
 
-%% probe(I, Arena) -> Slot | ?STORE_FREE_SLOT, for any integer I.
 probe(I, {arena, _, _, HotIx, Hot}) when I bsr 4 =:= HotIx ->
     element((I band ?M) + 1, Hot);
 probe(I, {arena, S, N, _, _}) when I >= 0, I bsr S < ?W -> probe_1(I, S, N);
@@ -80,16 +63,12 @@ get_option(I, A) ->
         V -> {some, V}
     end.
 
-%% set(I, V, Arena), I >= 0.
 set(I, V, {arena, S, N, HotIx, Hot}) when I bsr 4 =:= HotIx ->
     {arena, S, N, HotIx, setelement((I band ?M) + 1, Hot, V)};
 set(I, V, {arena, S, N, HotIx, Hot}) when I >= 0 ->
     {S1, N1} = put_leaf(HotIx bsl ?B, Hot, S, N),
     {arena, S1, N1, I bsr 4, setelement((I band ?M) + 1, leaf(I, S1, N1), V)}.
 
-%% The trie with leaf L written at the leaf holding id I, grown to reach it.
-%% One clause per depth for a path that already exists; put_leaf_slow
-%% makes fresh nodes and levels.
 put_leaf(I, L, 4, N) when I bsr 4 < ?W ->
     {4, setelement((I bsr 4) + 1, N, L)};
 put_leaf(I, L, 8, N) when I bsr 8 < ?W ->
@@ -149,7 +128,6 @@ put_leaf_1(I, L, S, N) ->
     Ix = ((I bsr S) band ?M) + 1,
     setelement(Ix, N, put_leaf_1(I, L, S - ?B, element(Ix, N))).
 
-%% The trie's leaf holding id I, ?EMPTY when it has none.
 leaf(I, 4, N) when I bsr 4 < ?W ->
     full(element((I bsr 4) + 1, N));
 leaf(I, 8, N) when I bsr 8 < ?W ->
@@ -178,20 +156,16 @@ leaf_1(_, _, ?F) -> ?EMPTY;
 leaf_1(_, 0, N) -> N;
 leaf_1(I, S, N) -> leaf_1(I, S - ?B, element(((I bsr S) band ?M) + 1, N)).
 
-%% reset(I, Arena): free slot I; an id the arena never grew to is a no-op.
 reset(I, A) ->
     case probe(I, A) of
         ?F -> A;
         _ -> set(I, ?F, A)
     end.
 
-%% The arena with Hot written back, so the trie alone tells the truth.
 settle({arena, S, N, HotIx, Hot}) ->
     {S1, N1} = put_leaf(HotIx bsl ?B, Hot, S, N),
     {arena, S1, N1, HotIx, Hot}.
 
-%% fold(Fun, Acc, Arena): Fun(Id, Slot, Acc) over the taken slots in
-%% ascending id order.
 fold(Fun, Acc, A) ->
     {arena, S, N, _, _} = settle(A),
     fold_1(Fun, Acc, N, S, 0).
@@ -214,9 +188,6 @@ fold_node(_, Acc, _, _, _, _) -> Acc.
 
 count(A) -> fold(fun(_, _, K) -> K + 1 end, 0, A).
 
-%% from_descending([{Id, Slot}]) -> Arena holding exactly those slots, given
-%% highest id first. Each node is built once, bottom up; a subtree with no
-%% slot in it stays free. The highest leaf starts out hot.
 from_descending([]) -> new();
 from_descending([{Top, _} | _] = Cells) ->
     {arena, S, N} = build(level(lists:reverse(Cells), []), 0),
@@ -225,7 +196,6 @@ from_descending([{Top, _} | _] = Cells) ->
 build([{0, N}], S) -> {arena, S, N};
 build(Nodes, S) -> build(level(Nodes, []), S + ?B).
 
-%% level([{Ix, X}] ascending) -> [{Ix bsr 4, ParentTuple}] ascending.
 level([], Acc) -> lists:reverse(Acc);
 level([{Ix, _} | _] = L, Acc) ->
     P = Ix bsr ?B,

@@ -1,29 +1,20 @@
-/// JSON.parse reviver — §25.5.1.1 InternalizeJSONProperty — plus the ES2025
-/// json-parse-with-source proposal (reviver `context`, JSON.rawJSON,
-/// JSON.isRawJSON, verbatim rawJSON serialization).
 import arc/engine.{type JsValueKind, JsBool, JsString, Returned, Threw}
 
-/// Helper: eval source on a fresh engine, assert normal completion, return
-/// the completion value.
 fn eval(source: String) -> JsValueKind {
   let assert Ok(#(Returned(value:), _)) = engine.eval(engine.new(), source)
   engine.classify(value)
 }
 
-/// Helper: eval source, assert it threw, return the thrown value.
 fn eval_throw(source: String) -> JsValueKind {
   let assert Ok(#(Threw(error:), _)) = engine.eval(engine.new(), source)
   engine.classify(error)
 }
 
-/// Helper: eval an expression that is expected to throw, return the thrown
-/// error's constructor name (or "no throw" if it completed normally).
 fn eval_error_name(source: String) -> JsValueKind {
   eval("try { " <> source <> "; 'no throw'; } catch (e) { e.constructor.name }")
 }
 
 pub fn reviver_transforms_values_test() {
-  // The reviver visits every value bottom-up; numbers get doubled.
   assert eval(
       "JSON.stringify(JSON.parse('{\"a\":1,\"b\":{\"c\":2}}',
          function (k, v) { return typeof v === 'number' ? v * 2 : v; }))",
@@ -40,8 +31,6 @@ pub fn reviver_undefined_deletes_key_test() {
 }
 
 pub fn reviver_undefined_deletes_array_element_test() {
-  // A deleted array index becomes a hole — length is unchanged and the hole
-  // stringifies as null.
   assert eval(
       "var a = JSON.parse('[1,2,3]',
          function (k, v) { return v === 2 ? undefined : v; });
@@ -51,8 +40,6 @@ pub fn reviver_undefined_deletes_array_element_test() {
 }
 
 pub fn reviver_receives_holder_as_this_test() {
-  // The root call's holder is { "": parsedValue }; nested calls get the
-  // containing object/array.
   assert eval(
       "var seen = [];
        JSON.parse('{\"a\":1}', function (k, v) {
@@ -77,8 +64,6 @@ pub fn reviver_throw_propagates_test() {
 }
 
 pub fn non_callable_reviver_is_ignored_test() {
-  // §25.5.1 step 7 gates on IsCallable — a non-callable second argument is
-  // simply not a reviver.
   assert eval("JSON.stringify(JSON.parse('{\"a\":1}', 42))")
     == JsString("{\"a\":1}")
   assert eval("JSON.stringify(JSON.parse('{\"a\":1}', {}))")
@@ -94,9 +79,6 @@ pub fn reviver_can_replace_with_object_test() {
 }
 
 pub fn reviver_replace_of_non_configurable_key_does_not_throw_test() {
-  // §25.5.1.1 step 2.c.ii.3 is a bare `Perform ? CreateDataProperty(...)` —
-  // the Boolean is discarded, so a rejected define keeps the old value rather
-  // than throwing (test262 reviver-object-non-configurable-prop-create.js).
   assert eval(
       "JSON.stringify(JSON.parse('{\"a\":1,\"b\":2}', function (k, v) {
          if (k === 'a') Object.defineProperty(this, 'b', { configurable: false });
@@ -108,8 +90,6 @@ pub fn reviver_replace_of_non_configurable_key_does_not_throw_test() {
 }
 
 pub fn reviver_replace_of_non_configurable_index_does_not_throw_test() {
-  // Same for the array walk, §25.5.1.1 step 2.b.iii.4
-  // (test262 reviver-array-non-configurable-prop-create.js).
   assert eval(
       "JSON.stringify(JSON.parse('[1,2]', function (k, v) {
          if (k === '0') Object.defineProperty(this, '1', { configurable: false });
@@ -120,13 +100,7 @@ pub fn reviver_replace_of_non_configurable_index_does_not_throw_test() {
     == JsString("[1,2]")
 }
 
-// ---------------------------------------------------------------------------
-// ES2025 json-parse-with-source: reviver `context` third argument
-// ---------------------------------------------------------------------------
-
 pub fn reviver_context_source_at_nesting_depths_test() {
-  // `source` is present for every primitive literal, at every depth, and
-  // absent (undefined) for the object/array literals that contain them.
   assert eval(
       "var out = [];
        JSON.parse('{\"a\":1,\"b\":{\"c\":[true,\"x\"]}}', function (k, v, ctx) {
@@ -139,8 +113,6 @@ pub fn reviver_context_source_at_nesting_depths_test() {
 }
 
 pub fn reviver_context_source_is_verbatim_literal_test() {
-  // `source` is the exact source text of the literal — quotes and escape
-  // sequences preserved, number formatting not normalized.
   assert eval(
       "var out = [];
        JSON.parse('[1.1e+1,-0,\"a\\\\nb\",null,false]', function (k, v, ctx) {
@@ -153,8 +125,6 @@ pub fn reviver_context_source_is_verbatim_literal_test() {
 }
 
 pub fn reviver_context_is_empty_for_object_and_array_literals_test() {
-  // For an Array or Object the context object has no own properties at all;
-  // it is always an ordinary object with %Object.prototype% and no symbols.
   assert eval(
       "var out = [];
        JSON.parse('{\"a\":[1]}', function (k, v, ctx) {
@@ -170,7 +140,6 @@ pub fn reviver_context_is_empty_for_object_and_array_literals_test() {
 }
 
 pub fn reviver_context_source_property_descriptor_test() {
-  // `source` is a plain data property: writable, enumerable, configurable.
   assert eval(
       "var d;
        JSON.parse('1', function (k, v, ctx) {
@@ -183,8 +152,6 @@ pub fn reviver_context_source_property_descriptor_test() {
 }
 
 pub fn reviver_source_absent_after_forward_append_test() {
-  // Once a reviver mutates a not-yet-visited part of the tree, the values it
-  // finds there no longer correspond to a source literal — no `source`.
   assert eval(
       "var log = [];
        JSON.parse('[1,[]]', function (k, v, ctx) {
@@ -198,8 +165,6 @@ pub fn reviver_source_absent_after_forward_append_test() {
 }
 
 pub fn reviver_source_absent_after_forward_replacement_test() {
-  // A forward-modified primitive is no longer SameValue with what the parse
-  // node produced, so its context carries no `source`.
   assert eval(
       "var log = [];
        JSON.parse('{\"p\":1,\"q\":2}', function (k, v, ctx) {
@@ -213,9 +178,6 @@ pub fn reviver_source_absent_after_forward_replacement_test() {
 }
 
 pub fn reviver_source_absent_after_forward_array_replacement_test() {
-  // Replacing an array slot with a *structurally identical* array still drops
-  // the whole parse record: the record's [[Value]] is not the new array, so
-  // neither its `source` nor its element records reach the children.
   assert eval(
       "var log = [];
        JSON.parse('{\"a\":1,\"b\":[2]}', function (k, v, ctx) {
@@ -229,7 +191,6 @@ pub fn reviver_source_absent_after_forward_array_replacement_test() {
 }
 
 pub fn reviver_source_absent_for_replaced_array_elements_test() {
-  // Same for a nested array inside an array literal.
   assert eval(
       "var log = [];
        JSON.parse('[1,[5]]', function (k, v, ctx) {
@@ -243,7 +204,6 @@ pub fn reviver_source_absent_for_replaced_array_elements_test() {
 }
 
 pub fn reviver_source_absent_for_replaced_object_members_test() {
-  // And for an object slot replaced with an identical-looking object.
   assert eval(
       "var log = [];
        JSON.parse('{\"p\":1,\"q\":{\"x\":2}}', function (k, v, ctx) {
@@ -257,7 +217,6 @@ pub fn reviver_source_absent_for_replaced_object_members_test() {
 }
 
 pub fn reviver_source_absent_for_added_object_key_test() {
-  // A key the reviver adds has no parse node at all.
   assert eval(
       "var log = [];
        JSON.parse('{\"p\":1,\"q\":{}}', function (k, v, ctx) {
@@ -269,10 +228,6 @@ pub fn reviver_source_absent_for_added_object_key_test() {
     )
     == JsString("p:1|added:undefined|q:undefined|:undefined")
 }
-
-// ---------------------------------------------------------------------------
-// ES2025 json-parse-with-source: JSON.rawJSON / JSON.isRawJSON
-// ---------------------------------------------------------------------------
 
 pub fn raw_json_returns_frozen_null_prototype_object_test() {
   assert eval(
@@ -287,7 +242,6 @@ pub fn raw_json_returns_frozen_null_prototype_object_test() {
 }
 
 pub fn raw_json_stringify_round_trip_test() {
-  // A rawJSON box serializes verbatim, wherever it appears.
   assert eval("JSON.stringify(JSON.rawJSON(1.1))") == JsString("1.1")
   assert eval("JSON.stringify(JSON.rawJSON(null))") == JsString("null")
   assert eval("JSON.stringify(JSON.rawJSON('\"foo\"'))") == JsString("\"foo\"")
@@ -300,7 +254,6 @@ pub fn raw_json_stringify_round_trip_test() {
 }
 
 pub fn raw_json_stringify_preserves_precision_test() {
-  // The point of the proposal: bytes in, bytes out — no float round-trip.
   assert eval("JSON.stringify({ big: JSON.rawJSON('12345678901234567890') })")
     == JsString("{\"big\":12345678901234567890}")
 }
@@ -324,8 +277,6 @@ pub fn is_raw_json_true_only_for_boxes_test() {
 }
 
 pub fn raw_json_rejects_illegal_text_test() {
-  // Empty string, leading/trailing JSON whitespace, non-primitive outermost
-  // value, and plain garbage all throw SyntaxError.
   assert eval_error_name("JSON.rawJSON('')") == JsString("SyntaxError")
   assert eval_error_name("JSON.rawJSON(' 1')") == JsString("SyntaxError")
   assert eval_error_name("JSON.rawJSON('1 ')") == JsString("SyntaxError")
@@ -336,6 +287,5 @@ pub fn raw_json_rejects_illegal_text_test() {
   assert eval_error_name("JSON.rawJSON('[]')") == JsString("SyntaxError")
   assert eval_error_name("JSON.rawJSON('garbage')") == JsString("SyntaxError")
   assert eval_error_name("JSON.rawJSON(undefined)") == JsString("SyntaxError")
-  // ToString runs first, so a Symbol is a TypeError, not a SyntaxError.
   assert eval_error_name("JSON.rawJSON(Symbol('123'))") == JsString("TypeError")
 }

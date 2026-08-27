@@ -1,6 +1,3 @@
-//// Promise jobs, the microtask drain and unhandled-rejection reporting on
-//// the arc/rt runtime.
-
 import arc/host_hooks.{HostHooks}
 import arc/rt/async as rt_async
 import arc/rt/builtins as rt_builtins
@@ -16,7 +13,6 @@ import arc/rt/types.{
 import gleam/option.{None, Some}
 import rt_helpers
 
-/// An agent whose uncaught-report sink records into the test mailbox.
 fn recording_agent() -> Agent {
   let assert [] = reports()
   rt_builtins.new_agent(
@@ -39,7 +35,6 @@ fn new_error(st: Agent, msg: String) -> #(JsVal, Agent) {
   #(mk_object(h), st)
 }
 
-/// A function that records `label` when called and returns undefined.
 fn recorder(st: Agent, label: String) -> #(JsVal, Agent) {
   rt_helpers.func(st, fn(st, _args) {
     rt_helpers.record(label)
@@ -62,7 +57,6 @@ pub fn rejection_handled_later_in_same_drain_not_reported_test() {
   let st = recording_agent()
   let #(p, st) = promise_static(st, "reject", mk_string("late"))
   let #(noop, st) = rt_helpers.func(st, fn(st, _) { #(mk_undefined(), st) })
-  // A job that runs during the drain attaches the handler before the end.
   let st =
     rt_async.t_enqueue_job(
       st,
@@ -107,8 +101,6 @@ pub fn throwing_host_job_is_reported_test() {
   assert reports() == ["Uncaught (in promise job) Error: hj"]
 }
 
-// ── promises and generators are ordinary objects over a data cell ──────────
-
 fn is_extensible(st: Agent, v: JsVal) -> Bool {
   let #(object, st) = rt_helpers.global(st, "Object")
   let #(r, _) = rt_helpers.call_method(st, object, "isExtensible", [v])
@@ -128,13 +120,11 @@ pub fn promise_takes_own_properties_test() {
   assert keys == [StringKey(Named("tag"))]
 }
 
-/// `class P extends Promise {}`: instances get `P.prototype`, and `then`
-/// builds its result through the species constructor, so it is a `P` too.
 pub fn promise_subclass_test() {
   let st = rt_helpers.agent()
   let #(promise, st) = rt_helpers.global(st, "Promise")
-  // constructor(...args) { super(...args) }
   let ctor_code =
+    // constructor(...args) { super(...args) }
     rt_helpers.as_code(fn(st, frame, args) {
       let assert KHandle(active) = classify(rt_helpers.frame_at(2, frame))
       let new_target = rt_helpers.frame_at(4, frame)
@@ -170,7 +160,6 @@ pub fn promise_subclass_test() {
   let #(child, st) = rt_helpers.call_method(st, inst, "then", [noop])
   let assert KHandle(child_h) = classify(child)
   assert rt_obj.t_get_proto(st, child_h).0 == Some(p_proto_h)
-  // The subclass instance still settles like a promise.
   let #(seen, st) = recorder(st, "settled")
   let #(_, st) = rt_helpers.call_method(st, inst, "then", [seen])
   let _ = rt_async.drain(st)
@@ -212,7 +201,6 @@ pub fn generator_object_is_extensible_with_own_props_test() {
   assert v == KStr("b") && d == KBool(False)
   let #(v, d, st) = next_value(st)
   assert v == KStr("d") && d == KBool(True)
-  // Own property survives the state transitions on the data cell.
   let #(x, _) = rt_helpers.get(st, gen, "x")
   assert classify(x) == KNum(JInt(5))
 }

@@ -1,12 +1,3 @@
-//// `rt_builtins/function` — Function.prototype + Function constructor +
-//// %ThrowTypeError% (SPEC §7.M6 builtins-object-function-error).
-////
-//// Init + the Function-native dispatch arms (`call`/`apply`/`bind`/
-//// `toString`/`Symbol.hasInstance`, the `Function` constructor) over the
-//// threaded `Agent` model with D7 raise semantics (`t_throw`).
-////
-//// **Return-tuple order is `#(V, St')` — value FIRST (R1).**
-
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
@@ -29,22 +20,12 @@ import gleam/list
 import gleam/option.{Some}
 import gleam/string
 
-/// Set up Function.prototype and Function constructor. Also allocates
-/// %ThrowTypeError% (§10.2.4.1) and hands its Handle back to the caller: it
-/// is an intrinsic in its own right, referenced by the unmapped arguments
-/// object's `callee` and by the restricted `caller`/`arguments` accessors
-/// installed here.
-///
-/// Returns `#(#(BuiltinPair, throw_type_error_h), st)`.
 pub fn init(
   st: Agent,
   object_proto: Handle,
   realm: Int,
 ) -> #(#(BuiltinPair, Handle), Agent) {
-  // Allocate func_proto first (empty) so call/apply/bind can reference it as
-  // their [[Prototype]] from the start — no fix-up needed.
   let #(func_proto, st) = common.alloc_proto(st, Some(object_proto), dict.new())
-  // Allocate methods with the real func_proto as their prototype.
   let #(proto_methods, st) =
     common.alloc_methods(st, func_proto, [
       #("call", FunctionN(FunctionCall), 1),
@@ -52,8 +33,7 @@ pub fn init(
       #("bind", FunctionN(FunctionBind), 1),
       #("toString", FunctionN(FunctionToString), 0),
     ])
-  // §10.2.4.1: %ThrowTypeError% is unique — [[Extensible]] is false and its
-  // "length"/"name" are {W:F, E:F, C:F}, so the function is frozen.
+  // §10.2.4.1 %ThrowTypeError%, frozen
   let #(len_p, st) = common.data_prop(st, mk_number(JInt(0)))
   let #(name_p, st) = common.data_prop(st, mk_string(""))
   let #(thrower_h, st) =
@@ -74,10 +54,7 @@ pub fn init(
       ),
     )
   let st = rt_store.t_pin_root(st, thrower_h)
-  // §10.2.4 AddRestrictedFunctionProperties: "caller" and "arguments" on
-  // Function.prototype are accessors whose get AND set are the single
-  // %ThrowTypeError% intrinsic — same function identity for all four slots,
-  // {E:F, C:T}.
+  // §10.2.4 caller and arguments share the one thrower
   let #(restricted, st) =
     common.accessor_prop(
       st,
@@ -86,13 +63,11 @@ pub fn init(
       enumerable: False,
       configurable: True,
     )
-  // "caller" defined first (§10.2.4), so "arguments" gets the later seq.
   let #(restricted2, st) = common.restamp(st, restricted)
   let restricted_props = [
     #("caller", restricted),
     #("arguments", restricted2),
   ]
-  // §20.2.3.6 Function.prototype[@@hasInstance] — {W:F, E:F, C:F}.
   let #(has_instance_h, st) =
     common.alloc_rooted_native_fn(
       st,
@@ -109,10 +84,8 @@ pub fn init(
       rt_types.symbol_has_instance,
       has_instance_prop,
     )
-  // §20.2.3: Function.prototype has own "length" (0) and "name" ("").
   let #(proto_len, st) = common.fn_length_property(st, 0)
   let #(proto_name, st) = common.fn_name_property(st, "")
-  // Constructor's [[Prototype]] is also func_proto (self-referencing bootstrap).
   let #(bt, st) =
     common.init_type_on(
       st,
@@ -129,9 +102,7 @@ pub fn init(
       [],
       True,
     )
-  // §20.2.3: Function.prototype is itself a built-in function object that
-  // returns undefined when invoked. Flip its slot kind from Ordinary to
-  // KNative(FunctionPrototypeCall).
+  // function.prototype is itself callable, returns undefined
   let st =
     rt_store.t_cell_update(st, func_proto, fn(slot) {
       case slot {
@@ -151,8 +122,6 @@ pub fn init(
   #(#(bt, thrower_h), st)
 }
 
-/// Per-module dispatch for Function native functions. D7: an abrupt completion
-/// RAISES via `t_throw`; the return is always the normal result value.
 pub fn dispatch(
   st: Agent,
   native: FunctionNative,
@@ -160,7 +129,6 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case native {
-    // §20.2.3.3 Function.prototype.call(thisArg, ...args)
     FunctionCall -> {
       let #(this_arg, call_args) = case args {
         [t, ..rest] -> #(t, rest)
@@ -168,27 +136,21 @@ pub fn dispatch(
       }
       rt_call.t_call_checked(st, this, this_arg, call_args)
     }
-    // §20.2.3.1 Function.prototype.apply(thisArg, argArray)
     FunctionApply -> {
       let #(this_arg, arg_array) = helpers.two_args_or_undefined(args)
       let #(call_args, st) = case classify(arg_array) {
-        // Step 3: undefined/null argArray → no args.
         KUndef | KNull -> #([], st)
-        // Step 4: ? CreateListFromArrayLike(argArray).
         _ -> create_list_from_array_like(st, arg_array)
       }
       rt_call.t_call_checked(st, this, this_arg, call_args)
     }
-    // §20.2.3.2 Function.prototype.bind(thisArg, ...args)
     FunctionBind -> {
       let #(this_arg, bound_args) = case args {
         [t, ..rest] -> #(t, rest)
         [] -> #(mk_undefined(), [])
       }
-      // Step 2: If IsCallable(Target) is false, throw a TypeError.
       case rt_call.is_callable(st, this), classify(this) {
         True, KHandle(target_h) -> {
-          // Steps 3-10 delegate to t_bound_new (rt_call.gleam:777-828).
           let #(h, st) = rt_call.t_bound_new(st, target_h, this_arg, bound_args)
           #(mk_object(h), st)
         }
@@ -196,17 +158,13 @@ pub fn dispatch(
           rt_val.t_throw_type_error(st, "Bind must be called on a function")
       }
     }
-    // §20.2.3.5 Function.prototype.toString
     FunctionToString -> function_to_string(st, this)
-    // §20.2.3.6 Function.prototype[@@hasInstance](V)
     FunctionHasInstance -> {
       let v = helpers.first_arg_or_undefined(args)
-      // OrdinaryHasInstance step 1: If IsCallable(C) is false, return false.
       case classify(this) {
         KHandle(h) ->
           case rt_call.is_callable(st, this) {
             True -> {
-              // rt_ops returns a WASM i32 truth value (0/1).
               let #(b, st) = rt_ops.t_ordinary_has_instance(st, h, v)
               #(mk_bool(b != 0), st)
             }
@@ -215,18 +173,13 @@ pub fn dispatch(
         _ -> #(mk_bool(False), st)
       }
     }
-    // §10.2.4.1 %ThrowTypeError% — restricted "caller"/"arguments" accessor.
     ThrowTypeErrorFn -> restricted_function_property(st, this)
-    // §20.2.3 calling Function.prototype itself returns undefined.
     FunctionPrototypeCall -> #(mk_undefined(), st)
-    // §20.2.1.1 Function ( ...parameterArgs, bodyArg ) under [[Call]]:
-    // NewTarget is undefined.
     FunctionConstructor(realm:) ->
       create_dynamic_function(st, realm, args, DynamicNormal, mk_undefined())
   }
 }
 
-/// [[Construct]] of %Function%: §20.2.1.1 with the original `new.target`.
 pub fn dispatch_construct(
   st: Agent,
   native: FunctionNative,
@@ -247,7 +200,6 @@ pub fn dispatch_construct(
   }
 }
 
-/// §20.2.1.1.1 CreateDynamicFunction's `kind`.
 pub type DynamicFunctionKind {
   DynamicNormal
   DynamicGenerator
@@ -255,30 +207,9 @@ pub type DynamicFunctionKind {
   DynamicAsyncGenerator
 }
 
-/// §20.2.1.1.1 CreateDynamicFunction(constructor, newTarget, kind, args),
-/// shared by Function / GeneratorFunction / AsyncFunction /
-/// AsyncGeneratorFunction. The last argument is the body, the ones before it
-/// are parameter sources; all are ToString'd in order (steps 8-10) before
-/// anything is parsed.
-///
-/// Step 16 assembles "function anonymous(" P "\n) {\n" body "\n}", but the
-/// spec then calls OrdinaryFunctionCreate directly, so unlike a named
-/// function expression there is NO self-name binding: `anonymous` must not
-/// resolve inside the body (test262 staging/sm/Function/constructor-binding).
-/// The source handed to the eval hook is therefore an ANONYMOUS function
-/// expression, and step 29 SetFunctionName(F, "anonymous") is applied to the
-/// result. The newline before ")" matters: a trailing line comment in the
-/// last parameter must not swallow the ")" (test262
-/// Function/prototype/toString/Function).
-///
-/// Steps 18-19: the closure's [[Prototype]] is
-/// GetPrototypeFromConstructor(newTarget, fallbackProto). With NewTarget
-/// undefined, newTarget is the constructor itself, whose `prototype` is the
-/// intrinsic the eval hook already used; otherwise it is applied here.
-///
-/// The whole operation runs with the constructor's realm `realm` current
-/// (§10.3.1 steps 6-7): the argument coercions, the parse, and the closure,
-/// whose [[Realm]] and default [[Prototype]] are that realm's.
+// §20.2.1.1.1 createdynamicfunction
+// anonymous expression: the body must not see a self name
+// newline before ) so a param line comment can't eat it
 pub fn create_dynamic_function(
   st: Agent,
   realm: Int,
@@ -330,10 +261,6 @@ pub fn create_dynamic_function(
   }
 }
 
-/// §20.2.1.1.1 steps 18-19 for an object `new_target`: set the closure's
-/// [[Prototype]] to `? Get(newTarget, "prototype")` when that is an object,
-/// else to the `kind` intrinsic of newTarget's realm (§10.1.14
-/// GetPrototypeFromConstructor via §7.3.24 GetFunctionRealm).
 fn apply_new_target_prototype(
   st: Agent,
   h: Handle,
@@ -352,8 +279,6 @@ fn apply_new_target_prototype(
               rt_call.async_generator_fn_prototype(st, realm)
           }
         })
-      // A fresh, extensible ordinary function cell: OrdinarySetPrototypeOf
-      // cannot reject it.
       let #(_set, st) = rt_obj.t_set_prototype(st, h, Some(proto))
       st
     }
@@ -361,9 +286,6 @@ fn apply_new_target_prototype(
   }
 }
 
-/// §7.3.19 CreateListFromArrayLike(obj) — used by Function.prototype.apply
-/// and Reflect.apply/construct. Elements are read via `[[Get]]` for indices
-/// [0, ToLength(Get(obj, "length"))).
 pub fn create_list_from_array_like(
   st: Agent,
   arr: JsVal,
@@ -389,8 +311,6 @@ pub fn create_list_from_array_like(
   }
 }
 
-/// The whole argument list read straight off a plain Array or Arguments
-/// cell, or `ArgsSlow` when any index needs the full [[Get]].
 type ArgList {
   ArgsHit(List(JsVal))
   ArgsSlow
@@ -419,8 +339,6 @@ fn collect_array_like(
   }
 }
 
-/// §20.2.3.5 Function.prototype.toString. `"function NAME() { [native code] }"`
-/// for native/user functions and callable proxies; TypeError for non-callable.
 fn function_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
@@ -440,13 +358,10 @@ fn function_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
           }
           #(mk_string("function " <> name <> "() { [native code] }"), st)
         }
-        // §20.2.3.5 step 3: bound functions get an implementation-defined
-        // NativeFunction string. Like V8, omit the "bound f" name.
         SObject(kind: KBound(..), ..) -> #(
           mk_string("function () { [native code] }"),
           st,
         )
-        // §20.2.3.5 step 4: any other object with [[Call]] (callable proxies).
         SObject(kind: ProxyObj(target:, ..), ..) ->
           case rt_call.is_callable(st, mk_object(target)) {
             True -> #(mk_string("function () { [native code] }"), st)
@@ -465,13 +380,7 @@ fn to_string_type_error(st: Agent) -> a {
   )
 }
 
-/// §10.2.4.1 %ThrowTypeError%, with the V8/JSC legacy relaxation: reading
-/// "caller"/"arguments" through Function.prototype's restricted accessor on
-/// a NON-strict plain function yields undefined instead of throwing (V8
-/// returns null, JSC undefined; test262's features:[caller] tests accept
-/// undefined). Everything else still throws: strict functions, class
-/// constructors (always strict), arrows / generators / async functions /
-/// methods (not constructors), bound and native functions.
+// sloppy plain functions get undefined, v8/jsc legacy
 fn restricted_function_property(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let is_legacy = case classify(this) {
     KHandle(h) ->

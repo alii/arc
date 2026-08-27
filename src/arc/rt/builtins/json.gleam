@@ -1,20 +1,3 @@
-//// The `JSON` global namespace (ES2024 §25.5) plus
-//// proposal-json-parse-with-source: the `JSON.parse` reviver receives a
-//// third `context` argument whose `source` is the exact literal text of an
-//// unmodified primitive, and `JSON.rawJSON` / `JSON.isRawJSON` box verbatim
-//// JSON text for `JSON.stringify`.
-////
-//// Return-tuple order is `#(JsVal, Agent)` (R1).
-////
-//// Realms: everything a JSON builtin allocates — thrown errors, the parsed
-//// objects, the reviver's `context` — comes from the intrinsics of the realm
-//// the FUNCTION belongs to (the `realm` id its token carries), not the realm
-//// that happens to be running: `otherRealm.JSON.parse('{')` throws
-//// `otherRealm.SyntaxError`. `dispatch` enters that realm for the body. User
-//// callbacks the builtin re-enters — a reviver, a replacer, a `toJSON` — run
-//// back in the CALLER's realm (`call_in_caller_realm`), so what their code
-//// creates belongs to the running realm as it did before any realm handling.
-
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
@@ -41,13 +24,6 @@ import gleam/set.{type Set}
 import gleam/string
 import gleam/string_tree.{type StringTree}
 
-// ============================================================================
-// Init — set up the JSON global object
-// ============================================================================
-
-/// Set up the JSON global object of realm `realm`.
-/// JSON is NOT a constructor — it's a plain object with static methods
-/// (like Math), per ES2024 §25.5.
 pub fn init(
   st: Agent,
   object_proto: Handle,
@@ -65,14 +41,7 @@ pub fn init(
   common.init_namespace(st, object_proto, "JSON", methods)
 }
 
-// ============================================================================
-// Dispatch
-// ============================================================================
-
-/// Per-module dispatch for JSON native functions. The body runs in the
-/// function's own realm; `caller` (the realm running at entry) is threaded
-/// to every user-callback site. Attribution never looks at the receiver:
-/// `JSON.parse.call(otherRealm.JSON, '{}')` is still this realm's parse.
+// body runs in the function's realm, callbacks in the caller's
 pub fn dispatch(
   st: Agent,
   native: JsonNative,
@@ -89,9 +58,6 @@ pub fn dispatch(
   }
 }
 
-/// Re-enter user code (a reviver / replacer / toJSON) with realm `caller` —
-/// the realm that was running when the JSON builtin was invoked — current
-/// again, coming back to the JSON function's own realm afterwards.
 fn call_in_caller_realm(
   st: Agent,
   caller: Int,
@@ -103,41 +69,16 @@ fn call_in_caller_realm(
   rt_call.t_call_checked(st, callee, this, args)
 }
 
-// ============================================================================
-// JSON.parse(text [, reviver])
-// ============================================================================
-
-/// ES2024 §25.5.1 JSON.parse ( text [ , reviver ] )
-///
-/// Steps:
-///   1. Let jsonString be ? ToString(text).
-///   2. Parse jsonString as a JSON text as specified in ECMA-404.
-///   3. If the parse fails, throw a SyntaxError exception.
-///   4-6. Materialize the parse result as `unfiltered`.
-///   7-9. If IsCallable(reviver): root = OrdinaryObjectCreate(%Object.prototype%),
-///        CreateDataPropertyOrThrow(root, "", unfiltered), then return
-///        ? InternalizeJSONProperty(root, "", reviver, the root parse node).
-///   10. Otherwise return unfiltered.
+// §25.5.1
 fn json_parse(args: List(JsVal), caller: Int, st: Agent) -> #(JsVal, Agent) {
-  // Step 1: ToString(text).
   let #(json_str, st) =
     rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
-  // Step 2: Parse as JSON text — walk the UTF-8 bytes directly.
-  // On BEAM a String already is a binary, so this conversion is free, and
-  // byte pattern matching avoids per-character grapheme clustering (which
-  // goes through unicode_util:gc and allocates a cons cell + sub-binary
-  // per character).
   let bytes = bit_array.from_string(json_str)
   case parse_value(bytes) {
-    // Step 3: If parse fails, throw SyntaxError.
     Error(e) -> rt_val.t_throw_syntax_error(st, json_error_message(e))
     Ok(#(val, rest)) ->
-      // After parsing, skip trailing whitespace and ensure nothing else.
       case skip_whitespace(rest) {
         <<>> -> {
-          // Steps 7-10: with a callable reviver, materialize alongside the
-          // parse-record tree the reviver walk reads; without one (the
-          // common call) build the values alone.
           let reviver = helpers.arg_at(args, 1)
           case rt_call.is_callable(st, reviver) {
             False -> materialize_plain(st, val)
@@ -155,38 +96,7 @@ fn json_parse(args: List(JsVal), caller: Int, st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-/// InternalizeJSONProperty (§25.5.1.1) — the JSON.parse reviver walk.
-///
-/// Bottom-up, exactly as the spec: when `holder[name]` is an object its
-/// children are revived first (an `undefined` result deletes the child, any
-/// other result replaces it), and only then is the reviver called for
-/// `holder[name]` itself, with `holder` as `this`. Abrupt completions from any
-/// Get / Delete / CreateDataProperty / reviver call propagate out of
-/// JSON.parse.
-///
-/// The ES2025 json-parse-with-source amendment adds a third reviver argument
-/// and threads the parse tree alongside the walk (`node` here is the spec's
-/// JSON Parse Record for `holder[name]`, `empty` when there is none):
-///
-///   1. Let val be ? Get(holder, name).
-///   2. Let context be OrdinaryObjectCreate(%Object.prototype%).
-///   3. If node is not empty and node's [[Value]] is val (i.e. no earlier
-///      reviver call replaced it), then
-///      a. If val is a primitive that came from a literal, perform
-///         ! CreateDataPropertyOrThrow(context, "source", the literal's exact
-///         source text) — writable, enumerable, configurable.
-///      b. The child records of `node` are the ones handed to the recursion.
-///      Otherwise `context` gets NO own property and the children get no
-///      records: an object/array whose slot was overwritten no longer
-///      corresponds to the source text.
-///   4-5. Recurse over the elements/keys of `val` as before, passing each
-///        child's record (array children by index, object children by key,
-///        keys a reviver added get `empty`).
-///   6. Return ? Call(reviver, holder, « name, val, context »).
-///
-/// Recursion here is ordinary Gleam recursion; the re-entrant JS calls go
-/// through `call_in_caller_realm`, the same convention `serialize_property`
-/// uses to invoke `toJSON` and the replacer.
+// §25.5.1.1 internalizejsonproperty
 fn internalize_json_property(
   st: Agent,
   ctx: ReviveCtx,
@@ -194,29 +104,20 @@ fn internalize_json_property(
   name: String,
   node: Option(ParseRecord),
 ) -> #(JsVal, Agent) {
-  // Step 1: val = ? Get(holder, name).
   let #(val, st) =
     rt_obj.t_get_prop(
       st,
       mk_object(holder),
       StringKey(rt_types.canonical_key(name)),
     )
-  // Step 3: the parse record only describes `val` while `val` is still the very
-  // value that literal materialized into. An earlier reviver call that
-  // overwrote this slot leaves the record stale, and a stale record must leak
-  // neither a `source` nor its children's records — the replacement's children
-  // did not come from that source text.
   let node = fresh_record(node, val)
-  // Steps 4-5: if val is an Object, revive its children in place first.
   let st = case classify(val) {
     KHandle(h) ->
       case is_array_handle(st, h) {
-        // Step 5.b: indices 0..len-1, len from LengthOfArrayLike.
         True -> {
           let #(len, st) = length_of_array_like(st, h)
           internalize_elements(st, ctx, h, 0, len, record_elements(node))
         }
-        // Step 5.c: EnumerableOwnPropertyNames(val, key).
         False -> {
           let #(keys, st) = enumerable_string_keys(st, h)
           internalize_keys(st, ctx, h, keys, record_members(node))
@@ -224,11 +125,7 @@ fn internalize_json_property(
       }
     _ -> st
   }
-  // Steps 2-3: the `context` object, carrying `source` only for an unmodified
-  // primitive literal.
   let #(context, st) = alloc_context(st, record_source(node))
-  // Step 6: return ? Call(reviver, holder, « name, val, context »), back in
-  // the realm that was running when JSON.parse was invoked.
   call_in_caller_realm(st, ctx.caller, ctx.reviver, mk_object(holder), [
     mk_string(name),
     val,
@@ -236,17 +133,11 @@ fn internalize_json_property(
   ])
 }
 
-/// The reviver walk's fixed context: the reviver and the id of the realm
-/// JSON.parse was called from, which every reviver call re-enters.
 type ReviveCtx {
   ReviveCtx(reviver: JsVal, caller: Int)
 }
 
-/// Step 3: keep the parse record only if it is still the record for `val` —
-/// SameValue(record's [[Value]], val). For arrays and objects that is a heap
-/// handle identity check, so a reviver that swapped in a *different*
-/// array/object (`reviver-call-args-after-forward-modification.js`) drops the
-/// record, and with it both the `source` and every child record.
+// stale record must leak neither source nor children
 fn fresh_record(node: Option(ParseRecord), val: JsVal) -> Option(ParseRecord) {
   use record <- option.then(node)
   case rt_val.same_value(record_value(record), val) {
@@ -255,15 +146,6 @@ fn fresh_record(node: Option(ParseRecord), val: JsVal) -> Option(ParseRecord) {
   }
 }
 
-/// §25.5.1.1 step 5.b.iii: recurse over array indices 0..len-1 in order,
-/// handing each element the parse record it was scanned from (if any).
-///
-/// The remaining child records travel alongside the index rather than being
-/// looked up by it: the walk visits 0..len-1 in order, so popping the head each
-/// step is the same record an O(i) `list_at` would find, and the whole walk
-/// stays linear instead of quadratic in the array's length. Indices past the
-/// records (elements a reviver added, or a `length` larger than the literal)
-/// simply run out and get `None`.
 fn internalize_elements(
   st: Agent,
   ctx: ReviveCtx,
@@ -288,10 +170,6 @@ fn internalize_elements(
   }
 }
 
-/// §25.5.1.1 step 5.c.iii: recurse over the object's own enumerable string
-/// keys, handing each the parse record it was scanned from (a key a reviver
-/// added has none). `members` is built once per object (see `record_members`),
-/// so each key costs one dict lookup rather than a scan of every member.
 fn internalize_keys(
   st: Agent,
   ctx: ReviveCtx,
@@ -316,11 +194,7 @@ fn internalize_keys(
   }
 }
 
-/// §25.5.1.1 steps 2.b.ii.2-3 / 2.c.ii.2-3: an `undefined` result from the
-/// reviver deletes the child, anything else is CreateDataProperty'd back.
-/// Both spec steps are a bare `Perform ?`, so a `false` [[Delete]] /
-/// [[DefineOwnProperty]] result is DISCARDED — a reviver that makes a sibling
-/// key non-configurable must not turn the next replacement into a TypeError.
+// false delete/define results deliberately discarded per spec
 fn replace_or_delete(
   st: Agent,
   h: Handle,
@@ -353,55 +227,23 @@ fn replace_or_delete(
   }
 }
 
-/// The spec's root holder object: OrdinaryObjectCreate(%Object.prototype%)
-/// with CreateDataPropertyOrThrow(holder, "", val). Both JSON.parse
-/// (§25.5.1 steps 7-8) and JSON.stringify (§25.5.2 steps 9-11) start from one.
 fn alloc_holder(st: Agent, val: JsVal) -> #(Handle, Agent) {
-  // The JSON function's own realm is current (the `dispatch` swap).
   common.alloc_pojo(st, st.realm.object.prototype, [#("", val)])
 }
 
-/// InternalizeJSONProperty step 2 (+3.a): OrdinaryObjectCreate(%Object.prototype%),
-/// carrying a `source` own data property (writable, enumerable, configurable —
-/// what CreateDataPropertyOrThrow gives) when the value came from an unmodified
-/// primitive literal, and no own property at all otherwise.
-///
-/// This is the one place the recorded source bytes are decoded — reached only
-/// with a reviver in play, so a plain `JSON.parse` never pays for it.
 fn alloc_context(st: Agent, source: Option(BitArray)) -> #(Handle, Agent) {
   let props = case source {
     Some(raw) -> {
-      // The slice spans a whole literal of a document that came from a Gleam
-      // String, so it is valid UTF-8 by construction. Assert rather than fall
-      // back — a broken invariant must not silently hand the reviver a bogus
-      // `source`.
+      // valid utf-8 by construction
       let assert Ok(text) = bit_array.to_string(raw)
       [#("source", mk_string(text))]
     }
     None -> []
   }
-  // The JSON function's own realm is current (the `dispatch` swap).
   common.alloc_pojo(st, st.realm.object.prototype, props)
 }
 
-// ── §25.5.1 scanner ─────────────────────────────────────────────────────────
-
-/// Intermediate parsed JSON value — not yet materialized onto the JS heap.
-/// We parse into this first, then walk it to create JsVals/heap objects.
-///
-/// Primitive nodes carry `source`: the EXACT source text of the literal they
-/// were scanned from — `1.1`, `"foo"` (quotes kept, escapes left undecoded),
-/// `null`. That is what the ES2025 json-parse-with-source proposal hands the
-/// reviver as `context.source`; only primitives ever expose it, so arrays and
-/// objects carry no source of their own.
-///
-/// It is kept as raw BYTES, not a String, and stays that way until a reviver
-/// asks for it (`alloc_context`). `bit_array.slice` is a genuinely O(1)
-/// sub-binary, but `bit_array.to_string` validates the whole slice as UTF-8 —
-/// so decoding a string literal's source eagerly would re-scan every string in
-/// the document, on every JSON.parse, including the overwhelmingly common calls
-/// with no reviver at all, where the source is thrown away unread. Slicing here
-/// and decoding there costs the byte-scanning parser nothing.
+// source stays raw bytes until a reviver asks
 type JsonValue {
   JsonNull(source: BitArray)
   JsonBool(value: Bool, source: BitArray)
@@ -411,25 +253,12 @@ type JsonValue {
   JsonObject(List(#(String, JsonValue)))
 }
 
-/// The proposal's JSON Parse Record: a literal node paired with the exact
-/// `JsVal` it materialized into ([[Value]]) — the heap `Handle` for arrays and
-/// objects — plus its children's records.
-///
-/// InternalizeJSONProperty compares [[Value]] against whatever is actually
-/// sitting in the holder before it hands out either the `source` text or the
-/// child records, so a reviver that swaps a slot for a different value cannot
-/// make the source of the original literal describe the replacement.
 type ParseRecord {
-  /// A primitive literal: `[[Value]]` and its exact source text, still as the
-  /// undecoded bytes the scanner sliced out (see `JsonValue`).
   PrimRecord(value: JsVal, source: BitArray)
-  /// An array literal: the array object it produced, and its elements' records.
   ArrayRecord(value: JsVal, elements: List(ParseRecord))
-  /// An object literal: the object it produced, and its members' records.
   ObjectRecord(value: JsVal, entries: List(#(String, ParseRecord)))
 }
 
-/// The record's [[Value]]: what materializing this literal produced.
 fn record_value(record: ParseRecord) -> JsVal {
   case record {
     PrimRecord(value:, ..)
@@ -438,8 +267,6 @@ fn record_value(record: ParseRecord) -> JsVal {
   }
 }
 
-/// Step 3.a: the literal's exact source text — primitives only. Arrays and
-/// objects never expose a `source`, so their reviver `context` stays empty.
 fn record_source(record: Option(ParseRecord)) -> Option(BitArray) {
   case record {
     Some(PrimRecord(source:, ..)) -> Some(source)
@@ -447,10 +274,6 @@ fn record_source(record: Option(ParseRecord)) -> Option(BitArray) {
   }
 }
 
-/// The child records of an array literal, in index order — empty for anything
-/// else (a primitive, an object, or a slot with no live record at all).
-/// `internalize_elements` walks them in lockstep with the indices, so no child
-/// is ever looked up by index.
 fn record_elements(record: Option(ParseRecord)) -> List(ParseRecord) {
   case record {
     Some(ArrayRecord(elements:, ..)) -> elements
@@ -458,10 +281,6 @@ fn record_elements(record: Option(ParseRecord)) -> List(ParseRecord) {
   }
 }
 
-/// The child records of an object literal, keyed by member name and built once
-/// per object so `internalize_keys` pays one dict lookup per key instead of a
-/// fold over every member. Duplicate keys resolve to the LAST occurrence
-/// (later inserts win), matching how `materialize` resolves them.
 fn record_members(
   record: Option(ParseRecord),
 ) -> dict.Dict(String, ParseRecord) {
@@ -534,22 +353,14 @@ fn parse_value(
   let bytes = skip_whitespace(bytes)
   case bytes {
     <<>> -> Error(UnexpectedEnd)
-    // "null"
     <<0x6e, 0x75, 0x6c, 0x6c, rest:bytes>> ->
       Ok(#(JsonNull(source: <<"null":utf8>>), rest))
-    // "true"
     <<0x74, 0x72, 0x75, 0x65, rest:bytes>> ->
       Ok(#(JsonBool(value: True, source: <<"true":utf8>>), rest))
-    // "false"
     <<0x66, 0x61, 0x6c, 0x73, 0x65, rest:bytes>> ->
       Ok(#(JsonBool(value: False, source: <<"false":utf8>>), rest))
-    // '"'
     <<0x22, rest:bytes>> -> {
       use #(s, rest) <- result.try(parse_string(rest))
-      // The literal's source text is everything the string scanner consumed,
-      // opening quote included: `rest` is a sub-binary of `bytes`, so the byte
-      // lengths differ by exactly the span, and the slice is O(1). It stays
-      // undecoded — see `JsonValue`.
       let span = bit_array.byte_size(bytes) - bit_array.byte_size(rest)
       use raw <- result.map(take_bytes(bytes, span))
       #(JsonString(value: s, source: raw), rest)
@@ -716,13 +527,7 @@ type NumberSpan {
   NumberSpan(int_len: Int, frac_len: Int, exp_len: Int)
 }
 
-/// Parse a JSON number: scan the leading bytes against the ECMA-404 number
-/// grammar, slice the span out as a sub-binary (O(1)), and convert it.
-///
-/// `scan_number` has already validated the grammar, and an ECMA-404 number is
-/// a strict subset of StringNumericLiteral, so `rt_val.string_to_number` is
-/// total here: "-0" keeps its sign and magnitude overflow saturates to
-/// ±Infinity (§7.1.4.1) instead of being misreported as a syntax error.
+// grammar prevalidated, so string_to_number is total here
 fn parse_number(
   bytes: BitArray,
 ) -> Result(#(JsonValue, BitArray), JsonParseError) {
@@ -730,8 +535,6 @@ fn parse_number(
     Ok(span) -> {
       let len = span.int_len + span.frac_len + span.exp_len
       use num_str <- result.map(take_string(bytes, len))
-      // `num_str` already IS the literal's exact source text; on BEAM a String
-      // is a binary, so re-viewing it as bytes is free (no copy, no scan).
       #(
         JsonNumber(
           value: rt_val.string_to_number(num_str),
@@ -740,8 +543,6 @@ fn parse_number(
         drop_bytes(bytes, len),
       )
     }
-    // Report the whole number-looking span (e.g. "01", "1e", "-"), not just
-    // the prefix that scanned cleanly.
     Error(Nil) -> {
       use raw <- result.try(take_string(bytes, count_number_bytes(bytes, 0)))
       Error(InvalidNumber(raw:))
@@ -821,7 +622,6 @@ fn count_number_bytes(bytes: BitArray, n: Int) -> Int {
   }
 }
 
-/// Parse a JSON array (after the opening '[').
 fn parse_array(
   bytes: BitArray,
   acc: List(JsonValue),
@@ -846,7 +646,6 @@ fn parse_array(
   }
 }
 
-/// Parse a JSON object (after the opening '{').
 fn parse_object(
   bytes: BitArray,
   acc: List(#(String, JsonValue)),
@@ -880,10 +679,7 @@ fn parse_object(
   }
 }
 
-/// Slice the first `len` bytes off `bytes` as a String. O(1) on BEAM: a
-/// zero-copy sub-binary, viewed as the String it provably is — `bytes` came
-/// from a String and every cut the scanner makes is at an ASCII byte, so the
-/// slice is well-formed UTF-8 without `bit_array.to_string` re-walking it.
+// every cut is at an ascii byte, so the slice is valid utf-8
 fn take_string(bytes: BitArray, len: Int) -> Result(String, JsonParseError) {
   bit_array.slice(bytes, 0, len)
   |> result.map(utf8_slice_as_string)
@@ -893,14 +689,10 @@ fn take_string(bytes: BitArray, len: Int) -> Result(String, JsonParseError) {
 @external(erlang, "gleam_stdlib", "identity")
 fn utf8_slice_as_string(bytes: BitArray) -> String
 
-/// Slice the first `len` bytes off `bytes`, undecoded.
-/// Truly O(1) — a zero-copy sub-binary, with none of the UTF-8 validation
-/// `bit_array.to_string` (and hence `take_string`) walks the whole slice for.
 fn take_bytes(bytes: BitArray, len: Int) -> Result(BitArray, JsonParseError) {
   bit_array.slice(bytes, 0, len) |> result.replace_error(UnexpectedEnd)
 }
 
-/// Drop the first `n` bytes of `bytes` (O(1) sub-binary).
 fn drop_bytes(bytes: BitArray, n: Int) -> BitArray {
   case bit_array.slice(bytes, n, bit_array.byte_size(bytes) - n) {
     Ok(rest) -> rest
@@ -908,10 +700,6 @@ fn drop_bytes(bytes: BitArray, n: Int) -> BitArray {
   }
 }
 
-/// Materialize a parsed JsonValue onto the JS heap, returning its parse record:
-/// the JsVal produced (`record_value`) plus, for arrays and objects, the
-/// records of everything underneath it. The record tree is what feeds
-/// InternalizeJSONProperty's `context.source`.
 fn materialize(st: Agent, val: JsonValue) -> #(ParseRecord, Agent) {
   case val {
     JsonNull(source:) -> #(PrimRecord(value: mk_null(), source:), st)
@@ -926,8 +714,6 @@ fn materialize(st: Agent, val: JsonValue) -> #(ParseRecord, Agent) {
     )
     JsonArray(items) -> {
       let #(elements, st) = materialize_list(st, items, [])
-      // %Array.prototype% / %Object.prototype% of the JSON function's own
-      // realm, which `dispatch` made current.
       let #(h, st) = realm_ops.alloc_array(st, list.map(elements, record_value))
       #(ArrayRecord(value: mk_object(h), elements:), st)
     }
@@ -951,7 +737,6 @@ fn materialize(st: Agent, val: JsonValue) -> #(ParseRecord, Agent) {
   }
 }
 
-/// `materialize` without the parse-record tree: just the JS values.
 fn materialize_plain(st: Agent, val: JsonValue) -> #(JsVal, Agent) {
   case val {
     JsonNull(..) -> #(mk_null(), st)
@@ -1010,8 +795,6 @@ fn materialize_plain_entries(
   }
 }
 
-/// `props_from_entries` over plain values, numbering new keys from `seq`; a
-/// repeated key keeps its first occurrence's position.
 fn plain_props(
   entries: List(#(String, JsVal)),
   acc: dict.Dict(rt_types.PropertyKey, rt_types.Property),
@@ -1070,11 +853,7 @@ fn materialize_object_entries(
   }
 }
 
-/// The object literal's own properties, keyed by CanonicalNumericIndexString
-/// (`{"42":37}` is `Index(42)`, exactly what a later `Get(obj, "42")` looks
-/// up). Not `dict.from_list`: duplicate JSON keys must keep the FIRST
-/// occurrence's position (its `seq`) with the LAST occurrence's value, as
-/// repeated CreateDataProperty on one key would.
+// dup keys keep first position, last value
 fn props_from_entries(
   st: Agent,
   entries: List(#(String, ParseRecord)),
@@ -1106,20 +885,12 @@ fn props_from_entries(
   }
 }
 
-// ============================================================================
-// JSON.rawJSON / JSON.isRawJSON
-// ============================================================================
-
 fn json_raw_json(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   let #(json_str, st) =
     rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   case validate_raw_json_text(bit_array.from_string(json_str)) {
     Error(e) -> rt_val.t_throw_syntax_error(st, json_error_message(e))
     Ok(Nil) -> {
-      // Steps 5-8: OrdinaryObjectCreate(null, « [[IsRawJSON]] ») +
-      // CreateDataPropertyOrThrow + SetIntegrityLevel(frozen): a
-      // null-prototype, non-extensible object whose only own property is a
-      // non-writable, non-configurable "rawJSON" string.
       let #(seq, st) = rt_store.t_next_prop_seq(st)
       let prop =
         rt_types.DataProperty(
@@ -1188,13 +959,10 @@ fn json_is_raw_json(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   #(mk_bool(is_raw_json(st, helpers.arg_at(args, 0))), st)
 }
 
-/// §JSON.isRawJSON step 1: the [[IsRawJSON]] internal-slot brand check.
 fn is_raw_json(st: Agent, v: JsVal) -> Bool {
   option.is_some(raw_json_text(st, v))
 }
 
-/// The [[IsRawJSON]] slot's payload — the verbatim JSON source text a
-/// `JSON.rawJSON` box carries — or `None` for every other value.
 fn raw_json_text(st: Agent, v: JsVal) -> Option(String) {
   case classify(v) {
     KHandle(h) ->
@@ -1206,24 +974,19 @@ fn raw_json_text(st: Agent, v: JsVal) -> Option(String) {
   }
 }
 
-// ============================================================================
-// JSON.stringify(value [, replacer [, space]])
-// ============================================================================
-
 type Replacer {
   NoReplacer
   ReplacerFn(f: JsVal)
   PropertyList(names: List(String))
 }
 
-/// `caller` is not the spec's: it is the id of the realm running when
-/// JSON.stringify was invoked, re-entered for every `toJSON`/replacer call.
 type StringifyCtx {
   StringifyCtx(replacer: Replacer, gap: String, caller: Int)
 }
 
 const circular_msg = "Converting circular structure to JSON"
 
+// §25.5.2
 fn json_stringify(
   args: List(JsVal),
   caller: Int,
@@ -1232,14 +995,10 @@ fn json_stringify(
   let val = helpers.first_arg_or_undefined(args)
   let replacer_arg = helpers.arg_at(args, 1)
   let space = helpers.arg_at(args, 2)
-  // Step 4: ReplacerFunction / PropertyList.
   let #(replacer, st) = build_replacer(st, replacer_arg)
-  // Steps 5-8: gap.
   let #(gap, st) = compute_gap(st, space)
-  // Steps 9-11: wrapper = { "": value }.
   let #(wrapper, st) = alloc_holder(st, val)
   let ctx = StringifyCtx(replacer:, gap:, caller:)
-  // Step 12.
   case serialize_property(st, ctx, [], "", "", wrapper) {
     #(Some(s), st) -> #(mk_string(s), st)
     #(None, st) -> #(mk_undefined(), st)
@@ -1316,7 +1075,6 @@ fn replacer_item(st: Agent, v: JsVal) -> #(Option(String), Agent) {
 }
 
 fn compute_gap(st: Agent, space: JsVal) -> #(String, Agent) {
-  // Step 5: unwrap Number/String wrapper objects.
   let #(space, st) = case classify(space) {
     KHandle(h) ->
       case obj_kind(st, h) {
@@ -1350,7 +1108,7 @@ fn compute_gap(st: Agent, space: JsVal) -> #(String, Agent) {
   #(gap, st)
 }
 
-/// SerializeJSONProperty (§25.5.2.1).
+// §25.5.2.1 serializejsonproperty
 fn serialize_property(
   st: Agent,
   ctx: StringifyCtx,
@@ -1359,15 +1117,12 @@ fn serialize_property(
   key: String,
   holder: Handle,
 ) -> #(Option(String), Agent) {
-  // Step 1: value = ? Get(holder, key).
   let #(val, st) =
     rt_obj.t_get_prop(
       st,
       mk_object(holder),
       StringKey(rt_types.canonical_key(key)),
     )
-  // Step 2: toJSON — for Objects and BigInt. It and the replacer (step 3)
-  // are user code: they run back in the caller's realm.
   let #(val, st) = case classify(val) {
     KHandle(_) | KBig(_) -> {
       let #(to_json, st) =
@@ -1380,7 +1135,6 @@ fn serialize_property(
     }
     _ -> #(val, st)
   }
-  // Step 3: ReplacerFunction.
   let #(val, st) = case ctx.replacer {
     ReplacerFn(rf) ->
       call_in_caller_realm(st, ctx.caller, rf, mk_object(holder), [
@@ -1389,11 +1143,9 @@ fn serialize_property(
       ])
     NoReplacer | PropertyList(_) -> #(val, st)
   }
-  // Step 4.e: [[IsRawJSON]] box → verbatim.
   case raw_json_text(st, val) {
     Some(text) -> #(Some(text), st)
     None -> {
-      // Step 4: unwrap wrapper objects.
       let #(val, st) = case classify(val) {
         KHandle(h) ->
           case obj_kind(st, h) {
@@ -1411,7 +1163,6 @@ fn serialize_property(
           }
         _ -> #(val, st)
       }
-      // Steps 5-12: dispatch.
       case classify(val) {
         KNull -> #(Some("null"), st)
         KBool(True) -> #(Some("true"), st)
@@ -1561,8 +1312,6 @@ fn finalize_brackets(
   }
 }
 
-// ── QuoteJSONString (§25.5.2.3) ────────────────────────────────────────────
-
 type EscapeScan {
   FoundEscapable(n: Int, byte: Int, rest: BitArray)
   AllClean
@@ -1578,6 +1327,7 @@ fn scan_escapable(bytes: BitArray, n: Int) -> EscapeScan {
   }
 }
 
+// §25.5.2.3 quotejsonstring
 fn stringify_string(s: String) -> String {
   let bytes = <<s:utf8>>
   case scan_escapable(bytes, 0) {
@@ -1627,19 +1377,15 @@ fn unicode_escape(code: Int) -> String {
   "\\u" <> string.pad_start(string.lowercase(hex), to: 4, with: "0")
 }
 
-// ── inline §7.3 helpers not yet on rt_obj ────────────────────────────────
-
 fn obj_kind(st: Agent, h: Handle) -> Option(rt_types.ObjKind) {
   case rt_store.t_cell_get(st, h) {
     SObject(kind:, ..) -> Some(kind)
-    // h-shape-slowpath-compat: shaped objects are always Ordinary-kind.
     SShapedObject(..) -> Some(Ordinary)
     _ -> None
   }
 }
 
-/// §7.2.2 IsArray — pierces Proxy exotic objects to their [[ProxyTarget]]
-/// (step 3.b) and throws TypeError on a revoked proxy (step 3.a).
+// §7.2.2 isarray, pierces proxies
 fn is_array_handle(st: Agent, h: Handle) -> Bool {
   case obj_kind(st, h) {
     Some(ArrayObj(..)) -> True
@@ -1659,8 +1405,6 @@ fn length_of_array_like(st: Agent, h: Handle) -> #(Int, Agent) {
   rt_val.t_to_length(st, len_v)
 }
 
-/// EnumerableOwnProperties(obj, key) — string-keyed own enumerable props via
-/// [[OwnPropertyKeys]] + per-key [[GetOwnProperty]] (both trap on a proxy).
 fn enumerable_string_keys(st: Agent, h: Handle) -> #(List(String), Agent) {
   let #(keys, st) = rt_obj.t_enumerable_own_keys(st, h)
   #(list.map(keys, rt_types.key_to_text), st)

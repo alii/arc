@@ -1,6 +1,3 @@
-//// §26.1 WeakRef on arc/rt: deref while the target lives, and the GC
-//// contract — [[WeakRefTarget]] weak, emptied once the target is swept.
-
 import arc/rt/call as rt_call
 import arc/rt/gc as rt_gc
 import arc/rt/obj as rt_obj
@@ -32,13 +29,10 @@ pub fn target_is_weak_test() {
   let st = agent()
   let #(target, st) = rt_obj.t_new_object_literal(st)
   let #(ref, st) = new_weak_ref(st, target)
-  // Target reachable elsewhere: deref still answers it after a collection.
   let st = rt_gc.t_collect(st, [handle(ref), handle(target)])
   assert rt_gc.t_is_live(st, handle(target))
   let #(got, st) = call_method(st, ref, "deref", [])
   assert got == target
-  // Only the WeakRef holds it: the target is swept and the slot emptied,
-  // so a fresh object recycling the cell id is never handed out.
   let st = rt_gc.t_collect(st, [handle(ref)])
   assert !rt_gc.t_is_live(st, handle(target))
   let #(_fresh, st) = rt_obj.t_new_object_literal(st)

@@ -1,12 +1,3 @@
-//// The Temporal namespace (proposal-temporal, test262 feature "Temporal"):
-//// reserves the eight type prototypes, registers each type's constructor,
-//// statics, getters and methods, Temporal.Now, and fans dispatch out to the
-//// per-type modules. Temporal.Instant and Temporal.Now are implemented here.
-////
-//// Shared abstract operations live in temporal_common.gleam; ISO 8601
-//// parsing/formatting in temporal_iso.gleam; named IANA zones resolve through
-//// temporal_tz.gleam (system tzdata).
-
 import arc/internal/int_math.{floor_div}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -67,18 +58,11 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/order
 
-// ============================================================================
-// Init — Temporal namespace, the type constructors, Temporal.Now
-// ============================================================================
-
-/// Build the Temporal global. Returns the namespace object.
 pub fn init(
   st: Agent,
   object_proto: Handle,
   function_proto: Handle,
 ) -> #(Handle, Agent) {
-  // Reserve all eight prototypes up front so each native token can carry the
-  // handles of every sibling prototype.
   let #(pd_proto, st) = common.alloc_proto(st, Some(object_proto), dict.new())
   let #(pt_proto, st) = common.alloc_proto(st, Some(object_proto), dict.new())
   let #(pdt_proto, st) = common.alloc_proto(st, Some(object_proto), dict.new())
@@ -240,7 +224,6 @@ pub fn init(
       temporal_zoned_date_time.methods(protos),
     )
 
-  // Temporal.Now namespace
   let #(now_props, st) =
     common.alloc_methods(
       st,
@@ -260,9 +243,6 @@ pub fn init(
   let #(now_h, st) =
     common.init_namespace(st, object_proto, "Temporal.Now", now_props)
 
-  // Temporal namespace itself, in spec order: PlainDate, PlainTime,
-  // PlainDateTime, PlainYearMonth, PlainMonthDay, Duration, Instant,
-  // ZonedDateTime, Now.
   let #(pd_prop, st) = common.builtin_property(st, mk_object(pd_ctor))
   let #(pt_prop, st) = common.builtin_property(st, mk_object(pt_ctor))
   let #(pdt_prop, st) = common.builtin_property(st, mk_object(pdt_ctor))
@@ -285,9 +265,6 @@ pub fn init(
   ])
 }
 
-/// Build one Temporal type on its reserved prototype: constructor (with
-/// statics) + filled prototype (getters, methods, @@toStringTag, constructor
-/// backlink). Returns the constructor handle.
 pub fn init_temporal_type(
   st: Agent,
   function_proto: Handle,
@@ -361,10 +338,6 @@ fn now_name(n: TemporalNowName) -> String {
   }
 }
 
-// ============================================================================
-// Dispatch
-// ============================================================================
-
 pub fn dispatch(
   st: Agent,
   native: TemporalNative,
@@ -372,7 +345,6 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case native {
-    // All Temporal constructors throw TypeError when called without `new`.
     TemporalInstantCtor(..)
     | TemporalPlainTimeCtor(..)
     | TemporalPlainDateCtor(..) ->
@@ -479,16 +451,10 @@ pub fn dispatch_construct(
   }
 }
 
-// ============================================================================
-// Temporal.Instant — constructor and statics
-// ============================================================================
-
-/// RequireInternalSlot(this, [[InitializedTemporalInstant]]).
 fn require_instant(st: Agent, this: JsVal, name: String) -> Int {
   require_temporal(st, this, "Instant", name, instant_slot_of)
 }
 
-/// new Temporal.Instant(epochNanoseconds: BigInt)
 fn instant_ctor(
   st: Agent,
   protos: TemporalProtos,
@@ -519,7 +485,7 @@ fn instant_static(
     }
     InstantFromEpochMilliseconds -> {
       let #(n, st) = rt_val.t_to_number(st, helpers.arg_at(args, 0))
-      // -0 IS an integral Number, so this needs the ±0-safe predicate.
+      // -0 is integral, so use the ±0-safe check
       let i = case n {
         JInt(i) -> Some(i)
         JFloat(f) -> rt_val.integral_int(f)
@@ -557,10 +523,6 @@ fn order_to_int(o: order.Order) -> Int {
   }
 }
 
-// ============================================================================
-// Temporal.Instant — getters
-// ============================================================================
-
 fn instant_getter(
   st: Agent,
   g: InstantGetterName,
@@ -572,10 +534,6 @@ fn instant_getter(
     InstantEpochNanoseconds -> #(mk_bigint(ns), st)
   }
 }
-
-// ============================================================================
-// Temporal.Instant — methods
-// ============================================================================
 
 fn instant_method(
   st: Agent,
@@ -592,9 +550,6 @@ fn instant_method(
     )
     InstantToString -> {
       let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
-      // Read every option before any algorithmic validation:
-      // fractionalSecondDigits, roundingMode, smallestUnit, timeZone
-      // (alphabetical); only then resolve the precision (which may throw).
       let #(digits, st) = get_fractional_digits(st, opts)
       let #(mode, st) = get_rounding_mode_option(st, opts, Trunc)
       let #(su_opt, st) =
@@ -667,13 +622,11 @@ fn instant_method(
       let #(#(su, inc, mode), st) =
         round_options(st, helpers.arg_at(args, 0), allow_day: False)
       let u_ns = time_unit_ns(su)
-      // For Instant: increment*unit must divide 24h.
       let max = ns_per_day / u_ns
       case inc >= 1 && inc <= max && max % inc == 0 {
         False -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
         True -> {
-          // RoundTemporalInstant rounds as if positive: "down" is towards
-          // the Big Bang, not towards the epoch.
+          // rounds as if positive: down is toward the big bang
           let rounded =
             round_to_increment(ns, inc * u_ns, as_if_positive_mode(mode))
           case int.absolute_value(rounded) <= ns_max_instant {
@@ -700,8 +653,6 @@ fn format_instant(ns: Int, prec: Precision) -> String {
   format_iso_date(d) <> "T" <> format_iso_time(t, prec) <> "Z"
 }
 
-/// DifferenceTemporalInstant: until/since with time-unit rounding, balanced
-/// up to largestUnit (default "second", never above "hour").
 fn instant_until_since(
   st: Agent,
   protos: TemporalProtos,
@@ -732,11 +683,6 @@ fn instant_until_since(
   }
 }
 
-// ============================================================================
-// Temporal.Now
-// ============================================================================
-
-/// SystemUTCEpochNanoseconds, from the host's wall clock.
 fn now_epoch_ns(st: Agent) -> Int {
   st.hooks.wall_clock_ms() * ns_per_ms
 }
@@ -772,8 +718,6 @@ fn now_dispatch(
   }
 }
 
-/// The optional temporalTimeZoneLike argument of the Now functions: the
-/// system zone when undefined, else ToTemporalTimeZoneIdentifier.
 fn now_tz_arg(st: Agent, args: List(JsVal)) -> #(TimeZone, Agent) {
   let arg = helpers.arg_at(args, 0)
   case classify(arg) {

@@ -1,7 +1,3 @@
-//// Smoke test for the arc/rt runtime copy: bootstrap an Agent, call a
-//// builtin through the runtime's own call primitive, and round-trip a
-//// property through the object model.
-
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -74,9 +70,6 @@ pub fn type_error_is_caught_as_throw_completion_test() {
 @external(erlang, "arc_rt_layout_root_ffi", "slots")
 fn slots(vals: List(JsVal)) -> types.ShapeSlots
 
-/// A `new F()` object is born at the empty root shape; each new named key set
-/// through OrdinarySet moves it along a transition (shared by the next object
-/// that adds the same key) and an existing key is overwritten in place.
 pub fn shaped_set_transitions_test() {
   let st = agent()
   let proto = st.realm.object.prototype

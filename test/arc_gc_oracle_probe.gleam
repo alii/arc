@@ -1,11 +1,4 @@
-//// arc-oracle (rdr unit): does arc's `maybe_collect_at_toplevel` fire on
-//// >65K-alloc programs, and what does it cost in bytes/µs?
-////
-//// Instrumentation lives in `arc_gc_oracle_ffi.erl` (process-dict counters)
-//// and two @external hooks patched into `interpreter.gleam:maybe_collect_at_toplevel`.
-//// Revert both after the run.
-////
-////     cd arc && gleam run -m arc_gc_oracle_probe
+//// gc probe: gleam run -m arc_gc_oracle_probe
 
 import arc/engine
 import arc/rt/gc as rt_gc
@@ -33,32 +26,22 @@ type Prog {
   Prog(name: String, src: String)
 }
 
-/// Same shape as sibling `emit_2core_gc_mem_probe.sync_src`: N calls to a
-/// no-alloc closure. Tests whether *calling* alone drives arc GC.
 fn make_adder(n: Int) -> String {
   "function m(x){return function(y){return x+y}}let a=m(5);let s=0;for(let i=0;i<"
   <> int.to_string(n)
   <> ";i++)s+=a(i);s"
 }
 
-/// N object literals allocated inside a called function that returns to
-/// toplevel each iteration — the shape most likely to trip the 65536 gate
-/// AND reach the maybe_collect call site (fn return).
 fn obj_via_call(n: Int) -> String {
   "function f(i){return {x:i}} let r; for(let i=0;i<"
   <> int.to_string(n)
   <> ";i++){r=f(i)} r.x"
 }
 
-/// N object literals with NO function call — maybe_collect_at_toplevel is
-/// only reached on fn return (interpreter.gleam:3079), so this should show
-/// checks=0 fires=0 regardless of N.
 fn obj_no_call(n: Int) -> String {
   "let r; for(let i=0;i<" <> int.to_string(n) <> ";i++){r={x:i}} r.x"
 }
 
-/// N objects, all kept live in an array. GC should fire but reclaim ~nothing;
-/// final read proves mark-phase kept element 0 across a mid-run collect.
 fn obj_keep_all(n: Int) -> String {
   "function f(i){return {x:i}} let a=[]; for(let i=0;i<"
   <> int.to_string(n)
@@ -91,7 +74,6 @@ fn run_one(p: Prog) -> Nil {
   let r = engine.eval(eng, p.src)
   let t1 = now_us()
   let m1 = self_mem()
-  // Keep the returned engine live across self_mem so its heap is counted.
   let _ = keep(r)
   let #(checks, fires, max_grown) = stats()
   let #(result, hs) = case r {
@@ -137,7 +119,6 @@ pub fn main() {
     "threshold=65536  call-site=interpreter.gleam:3079 (fn return only)",
   )
   io.println("")
-  // Warmup: engine.new + eval once so first-row wall_us isn't JIT noise.
   let _ = engine.eval(engine.new(), "1+1")
   list.each(programs(), run_one)
 }

@@ -5,8 +5,6 @@ atom_count() -> erlang:system_info(atom_count).
 
 atom_limit() -> erlang:system_info(atom_limit).
 
-%% Map F over Items with one process per item, preserving order. A crash in
-%% F crashes the caller with the same reason.
 pmap(Items, F) ->
     Parent = self(),
     Ref = make_ref(),

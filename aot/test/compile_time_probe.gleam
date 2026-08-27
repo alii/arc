@@ -1,7 +1,4 @@
-//// Compile-time probe: JS source → IR → forms → BEAM, one stage at a time,
-//// with the abstract-forms size. Not a `_test` module — run standalone:
-////
-////     cd aot && gleam run -m compile_time_probe [path/to/file.js]
+// run: cd aot && gleam run -m compile_time_probe [file.js]
 
 import arc_aot/compile
 import arc_aot/emit

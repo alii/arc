@@ -1,6 +1,3 @@
-//// `arc/rt/snapshot` on the shared store: what survives a round trip, what
-//// is rebuilt, and what refuses to be written.
-
 import arc/rt/async as rt_async
 import arc/rt/builtins/regexp as b_regexp
 import arc/rt/obj as rt_obj
@@ -67,9 +64,6 @@ pub fn roundtrip_keeps_arrays_test() {
 }
 
 pub fn natives_work_after_roundtrip_test() {
-  // Built-ins are closure-free tokens and `JsOps` is re-seeded, so a native
-  // that re-enters the runtime (Math.max coerces, Array.isArray inspects a
-  // cell) runs on the restored agent.
   let st = roundtrip(rt_helpers.agent())
   let #(math, st) = rt_helpers.global(st, "Math")
   let #(max, st) =
@@ -137,7 +131,6 @@ pub fn deserialize_rebinds_hooks_and_drops_host_fns_test() {
 }
 
 pub fn same_agent_same_bytes_test() {
-  // No closures in the image, so the encoding is a function of the heap.
   let st = rt_helpers.agent()
   let assert Ok(a) = snapshot.serialize(st)
   let assert Ok(b) = snapshot.serialize(st)
@@ -163,7 +156,7 @@ pub fn garbage_is_malformed_test() {
   assert snapshot.deserialize(<<"definitely not a snapshot":utf8>>, hooks)
     == Error(MalformedBinary)
   assert snapshot.deserialize(<<1:size(3)>>, hooks) == Error(MalformedBinary)
-  // term_to_binary({1, 2, 3}) with no header.
+  // term_to_binary({1, 2, 3}) with no header
   assert snapshot.deserialize(<<131, 104, 3, 97, 1, 97, 2, 97, 3>>, hooks)
     == Error(MalformedBinary)
 }
@@ -180,10 +173,8 @@ pub fn other_version_is_incompatible_test() {
 pub fn corrupt_payload_behind_header_is_incompatible_test() {
   let hooks = rt_helpers.quiet_hooks()
   let v = snapshot.abi_version
-  // Not an external term at all.
   assert snapshot.deserialize(<<"arc-engine":utf8, v:32, 1, 2, 3>>, hooks)
     == Error(IncompatibleSnapshot)
-  // A valid term of the wrong shape: term_to_binary([]).
   assert snapshot.deserialize(<<"arc-engine":utf8, v:32, 131, 106>>, hooks)
     == Error(IncompatibleSnapshot)
 }

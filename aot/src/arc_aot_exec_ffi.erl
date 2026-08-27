@@ -1,12 +1,6 @@
-%%% Top-level protected apply of a compiled module's `js_main/3`, plus the
-%%% turn-end epilogue (drain microtasks, GC safepoint) the runner owns.
 -module(arc_aot_exec_ffi).
 -export([apply_js_main/2, unload/1]).
 
-%% apply_js_main(Mod, St) -> {JsExecOutcome, St'}
-%%   {js_returned, V} normal completion of js_main and the epilogue
-%%   {js_threw, E}    uncaught JS throw from js_main or from a microtask
-%%   {js_crashed, R}  any other error; St' is the input St
 apply_js_main(Mod, St) ->
     Frame = {undefined, undefined, undefined, undefined},
     try
@@ -33,8 +27,6 @@ render_reason(Class, Reason, Stk) ->
     unicode:characters_to_binary(
         io_lib:format("~0p:~0p at ~0p", [Class, Reason, Top])).
 
-%% Purge any old code, delete the current code, purge again so nothing of
-%% Mod stays resident. Idempotent for a module that was never loaded.
 unload(Mod) ->
     _ = code:purge(Mod),
     _ = code:delete(Mod),

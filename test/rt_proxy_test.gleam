@@ -1,8 +1,3 @@
-//// Proxy exotic objects (§10.5) on the arc/rt runtime: every internal
-//// method reaches its trap, forwards to the target when the trap is absent,
-//// enforces its invariants, and refuses to run once revoked. Handlers are
-//// built from Gleam closures minted as JS function objects.
-
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{type Frame, NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/lang as rt_lang
@@ -62,12 +57,10 @@ fn set(st: Agent, obj: JsVal, name: String, v: JsVal) -> Agent {
   st
 }
 
-/// A fresh `{}`.
 fn object(st: Agent) -> #(JsVal, Agent) {
   rt_obj.t_new_object_literal(st)
 }
 
-/// A fresh `{k0: v0, ...}`.
 fn record(st: Agent, entries: List(#(String, JsVal))) -> #(JsVal, Agent) {
   let #(o, st) = object(st)
   #(o, list.fold(entries, st, fn(st, e) { set(st, o, e.0, e.1) }))
@@ -78,7 +71,6 @@ fn handle(v: JsVal) {
   h
 }
 
-/// Mint a JS function object from a Gleam closure over `(st, args)`.
 fn func(
   st: Agent,
   body: fn(Agent, List(JsVal)) -> #(JsVal, Agent),
@@ -99,7 +91,6 @@ fn func(
   #(mk_object(h), st)
 }
 
-/// `Ns.name(...args)`.
 fn static(
   st: Agent,
   ns: String,
@@ -110,15 +101,12 @@ fn static(
   rt_call.t_call_checked(st, f, global(st, ns), args)
 }
 
-/// `new Proxy(target, handler)`.
 fn proxy(st: Agent, target: JsVal, handler: JsVal) -> #(JsVal, Agent) {
   let ctor = global(st, "Proxy")
   let #(h, st) = rt_call.t_construct(st, ctor, [target, handler], ctor)
   #(mk_object(h), st)
 }
 
-/// A handler whose every trap appends its name to `log` (a JS array) and
-/// then forwards to the matching `Reflect` method.
 fn logging_handler(st: Agent, log: JsVal) -> #(JsVal, Agent) {
   let names = [
     "getPrototypeOf", "setPrototypeOf", "isExtensible", "preventExtensions",
@@ -139,7 +127,6 @@ fn logging_handler(st: Agent, log: JsVal) -> #(JsVal, Agent) {
   #(h, st)
 }
 
-/// The logged trap names, joined, then the log cleared.
 fn drain(st: Agent, log: JsVal) -> #(String, Agent) {
   let #(joined, st) = rt_call.t_call_method(st, log, key("join"), [str(",")])
   let st = set(st, log, "length", int(0))
@@ -147,7 +134,6 @@ fn drain(st: Agent, log: JsVal) -> #(String, Agent) {
   #(s, st)
 }
 
-/// Run `body`, asserting it throws; the error-constructor name.
 fn throws(st: Agent, body: fn(Agent) -> #(a, Agent)) -> String {
   let #(c, st) =
     t_apply_protected(st, fn(st) {
@@ -165,8 +151,6 @@ fn as_string(v: JsVal) -> String {
   s
 }
 
-// ── every trap is observed, in spec order ───────────────────────────────────
-
 pub fn each_internal_method_reaches_its_trap_test() {
   let st = agent()
   let #(log, st) = rt_obj.t_new_array(st, [])
@@ -182,8 +166,6 @@ pub fn each_internal_method_reaches_its_trap_test() {
 
   let st = set(st, p, "b", int(2))
   let #(seen, st) = drain(st, log)
-  // [[Set]] forwards to Reflect.set(target, "b", 2, proxy): OrdinarySet on
-  // the target then defines on the RECEIVER (the proxy) through its traps.
   assert seen == "set,getOwnPropertyDescriptor,defineProperty"
   assert classify(get_(st, target, "b")) == KNum(JInt(2))
   let #(_, st) = drain(st, log)
@@ -241,7 +223,6 @@ pub fn call_and_construct_traps_test() {
   let st = agent()
   let #(log, st) = rt_obj.t_new_array(st, [])
   let #(handler, st) = logging_handler(st, log)
-  // apply: target(x) = x + 1.
   let #(target, st) =
     func(st, fn(st, args) {
       let assert [x, ..] = args
@@ -253,19 +234,15 @@ pub fn call_and_construct_traps_test() {
   assert classify(v) == KNum(JInt(42))
   let #(seen, st) = drain(st, log)
   assert seen == "apply"
-  // construct: over the Array constructor.
   let #(pa, st) = proxy(st, global(st, "Array"), handler)
   let #(arr_h, st) = rt_call.t_construct(st, pa, [int(3)], pa)
-  // `get` fires for GetPrototypeFromConstructor(newTarget = proxy).
   let #(seen, st) = drain(st, log)
   assert seen == "construct,get"
   assert classify(get_(st, mk_object(arr_h), "length")) == KNum(JInt(3))
-  // A construct trap returning a primitive is a TypeError.
   let #(bad, st) = handler_of(st, "construct", int(1))
   let #(pb, st) = proxy(st, global(st, "Array"), bad)
   assert throws(st, fn(st) { rt_call.t_construct(st, pb, [], pb) })
     == "TypeError"
-  // A non-callable target has no [[Call]].
   let #(plain, st) = object(st)
   let #(pp, st) = proxy(st, plain, handler)
   assert throws(st, fn(st) { rt_call.t_call(st, pp, mk_undefined(), []) |> ok })
@@ -306,13 +283,10 @@ pub fn non_callable_trap_is_type_error_test() {
   let #(handler, st) = record(st, [#("get", int(1))])
   let #(p, st) = proxy(st, target, handler)
   assert throws(st, get(_, p, "x")) == "TypeError"
-  // …but an explicitly-undefined / null trap forwards.
   let #(handler2, st) = record(st, [#("get", mk_null())])
   let #(p2, st) = proxy(st, target, handler2)
   assert classify(get_(st, p2, "x")) == KUndef
 }
-
-// ── the reflective builtins observe the traps ───────────────────────────────
 
 pub fn object_keys_uses_own_keys_then_descriptors_test() {
   let st = agent()
@@ -325,24 +299,19 @@ pub fn object_keys_uses_own_keys_then_descriptors_test() {
   assert as_string(joined) == "a,b"
   let #(seen, st) = drain(st, log)
   assert seen == "ownKeys,getOwnPropertyDescriptor,getOwnPropertyDescriptor"
-  // Object.entries interleaves descriptor and get per key.
   let #(_, st) = static(st, "Object", "entries", [p])
   let #(seen, st) = drain(st, log)
   assert seen
     == "ownKeys,getOwnPropertyDescriptor,get,getOwnPropertyDescriptor,get"
-  // Object.assign: ownKeys, then per key descriptor + get on the source.
   let #(dest, st) = object(st)
   let #(_, st) = static(st, "Object", "assign", [dest, p])
   let #(seen, st) = drain(st, log)
   assert seen
     == "ownKeys,getOwnPropertyDescriptor,get,getOwnPropertyDescriptor,get"
   assert classify(get_(st, dest, "b")) == KNum(JInt(2))
-  // Object.getOwnPropertyDescriptors: ownKeys then a descriptor per key.
   let #(_, st) = static(st, "Object", "getOwnPropertyDescriptors", [p])
   let #(seen, st) = drain(st, log)
   assert seen == "ownKeys,getOwnPropertyDescriptor,getOwnPropertyDescriptor"
-  // Object.freeze: preventExtensions, ownKeys, then per key a descriptor
-  // read and a define; isFrozen: isExtensible, ownKeys, descriptor per key.
   let #(_, st) = static(st, "Object", "freeze", [p])
   let #(seen, st) = drain(st, log)
   assert seen
@@ -365,7 +334,6 @@ pub fn for_in_and_spread_go_through_traps_test() {
   let #(seen, st) = drain(st, log)
   assert seen
     == "ownKeys,getOwnPropertyDescriptor,getOwnPropertyDescriptor,getPrototypeOf"
-  // `{...p}` — CopyDataProperties.
   let #(dest, st) = object(st)
   let #(_, st) = rt_lang.t_copy_data_props(st, dest, p)
   let #(seen, st) = drain(st, log)
@@ -383,13 +351,10 @@ pub fn json_stringify_through_proxy_test() {
   let #(out, st) = static(st, "JSON", "stringify", [p])
   assert as_string(out) == "{\"a\":1,\"b\":\"s\"}"
   let #(seen, st) = drain(st, log)
-  // SerializeJSONObject: EnumerableOwnProperties (ownKeys + gOPD per key),
-  // then Get(value, "toJSON") probes and Get(holder, key) per member.
   assert string.starts_with(
     seen,
     "get,ownKeys,getOwnPropertyDescriptor,getOwnPropertyDescriptor,get,get",
   )
-  // A proxy over an array serializes as an array (IsArray pierces proxies).
   let #(arr, st) = rt_obj.t_new_array(st, [int(1), int(2)])
   let #(empty, st) = object(st)
   let #(pa, st) = proxy(st, arr, empty)
@@ -408,7 +373,6 @@ pub fn is_array_sees_through_proxies_test() {
   let #(po, st) = proxy(st, empty, empty)
   let #(r, st) = static(st, "Array", "isArray", [po])
   assert classify(r) == KBool(False)
-  // Revoked → TypeError, from Array.isArray and from JSON.stringify.
   let #(rv, st) = static(st, "Proxy", "revocable", [arr, empty])
   let revocable_proxy = get_(st, rv, "proxy")
   let #(_, st) = rt_call.t_call_method(st, rv, key("revoke"), [])
@@ -428,7 +392,6 @@ pub fn instanceof_uses_get_prototype_of_trap_test() {
   assert r == 1
   let #(seen, st) = drain(st, log)
   assert seen == "getPrototypeOf"
-  // A trap that lies makes `p instanceof Array` true over a plain target.
   let array_proto = mk_object(st.realm.array.prototype)
   let #(liar, st) = handler_of(st, "getPrototypeOf", array_proto)
   let #(p2, st) = proxy(st, target, liar)
@@ -450,12 +413,8 @@ pub fn descriptor_argument_is_read_through_traps_test() {
   let #(_, st) = static(st, "Object", "defineProperty", [o, str("k"), pd])
   assert classify(get_(st, o, "k")) == KNum(JInt(7))
   let #(seen, _) = drain(st, log)
-  // ToPropertyDescriptor: has/get interleaved per PRESENT field, in the
-  // order enumerable, configurable, value, writable, get, set.
   assert seen == "has,get,has,has,get,has,has,has"
 }
-
-// ── revocation ──────────────────────────────────────────────────────────────
 
 pub fn revoked_proxy_throws_on_every_operation_test() {
   let st = agent()
@@ -465,7 +424,6 @@ pub fn revoked_proxy_throws_on_every_operation_test() {
   let p = get_(st, rv, "proxy")
   let ph = handle(p)
   let #(_, st) = rt_call.t_call_method(st, rv, key("revoke"), [])
-  // Revoking twice is a no-op.
   let #(_, st) = rt_call.t_call_method(st, rv, key("revoke"), [])
   assert throws(st, get(_, p, "x")) == "TypeError"
   assert throws(st, rt_obj.t_set_prop(_, p, key("x"), int(1))) == "TypeError"
@@ -486,15 +444,10 @@ pub fn revoked_proxy_throws_on_every_operation_test() {
   assert throws(st, rt_call.t_construct(_, p, [], p)) == "TypeError"
   assert throws(st, rt_obj.t_for_in_keys(_, p)) == "TypeError"
   assert throws(st, static(_, "Object", "keys", [p])) == "TypeError"
-  // typeof still answers from the target: [[Call]] survives revocation.
   let #(ty, _) = rt_val.t_type_of(st, p)
   assert ty == "function"
 }
 
-// ── invariants ──────────────────────────────────────────────────────────────
-
-/// A target with a non-configurable, non-writable `k: 1` and (optionally)
-/// extensions prevented.
 fn locked_target(st: Agent, sealed: Bool) -> #(JsVal, Agent) {
   let #(t, st) = object(st)
   let #(_, st) =
@@ -525,7 +478,6 @@ pub fn get_invariant_test() {
   let #(h, st) = handler_of(st, "get", int(2))
   let #(p, st) = proxy(st, t, h)
   assert throws(st, get(_, p, "k")) == "TypeError"
-  // Reporting the actual value is fine.
   let #(h, st) = handler_of(st, "get", int(1))
   let #(p, st) = proxy(st, t, h)
   assert classify(get_(st, p, "k")) == KNum(JInt(1))
@@ -537,7 +489,6 @@ pub fn set_invariant_test() {
   let #(h, st) = handler_of(st, "set", mk_bool(True))
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_set_prop(_, p, key("k"), int(2))) == "TypeError"
-  // Same value → allowed; a falsish trap result is just `false`.
   let #(ok, st) = rt_obj.t_set_prop(st, p, key("k"), int(1))
   assert ok
   let #(h, st) = handler_of(st, "set", mk_bool(False))
@@ -551,14 +502,11 @@ pub fn has_invariant_test() {
   let #(t, st) = locked_target(st, False)
   let #(h, st) = handler_of(st, "has", mk_bool(False))
   let #(p, st) = proxy(st, t, h)
-  // Hiding a non-configurable key.
   assert throws(st, rt_obj.t_has_prop(_, p, key("k"))) == "TypeError"
-  // Hiding any key of a non-extensible target.
   let #(t2, st) = record(st, [#("j", int(1))])
   let st = rt_obj.t_prevent_extensions(st, handle(t2)).1
   let #(p2, st) = proxy(st, t2, h)
   assert throws(st, rt_obj.t_has_prop(_, p2, key("j"))) == "TypeError"
-  // Hiding an absent key is fine.
   let #(has, _) = rt_obj.t_has_prop(st, p2, key("zz"))
   assert !has
 }
@@ -569,7 +517,6 @@ pub fn delete_invariant_test() {
   let #(h, st) = handler_of(st, "deleteProperty", mk_bool(True))
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_delete_prop(_, handle(p), key("k"))) == "TypeError"
-  // Reporting deletion of a configurable key on a non-extensible target.
   let #(t2, st) = record(st, [#("j", int(1))])
   let st = rt_obj.t_prevent_extensions(st, handle(t2)).1
   let #(p2, st) = proxy(st, t2, h)
@@ -580,30 +527,25 @@ pub fn delete_invariant_test() {
 pub fn get_own_property_descriptor_invariants_test() {
   let st = agent()
   let #(t, st) = locked_target(st, False)
-  // undefined for a non-configurable target key.
   let #(h, st) = handler_of(st, "getOwnPropertyDescriptor", mk_undefined())
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_get_own_property(_, handle(p), key("k")))
     == "TypeError"
-  // Neither object nor undefined.
   let #(h, st) = handler_of(st, "getOwnPropertyDescriptor", int(1))
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_get_own_property(_, handle(p), key("k")))
     == "TypeError"
-  // configurable:false for a key the target does not have.
   let #(fake, st) =
     record(st, [#("value", int(1)), #("configurable", mk_bool(False))])
   let #(h, st) = handler_of(st, "getOwnPropertyDescriptor", fake)
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_get_own_property(_, handle(p), key("nope")))
     == "TypeError"
-  // Incompatible with the target's non-configurable property (value 2 ≠ 1).
   let #(fake2, st) = record(st, [#("value", int(2))])
   let #(h, st) = handler_of(st, "getOwnPropertyDescriptor", fake2)
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_get_own_property(_, handle(p), key("k")))
     == "TypeError"
-  // A faithful descriptor comes back completed.
   let #(real, st) =
     record(st, [#("value", int(1)), #("enumerable", mk_bool(True))])
   let #(h, st) = handler_of(st, "getOwnPropertyDescriptor", real)
@@ -616,7 +558,6 @@ pub fn get_own_property_descriptor_invariants_test() {
 pub fn define_property_invariants_test() {
   let st = agent()
   let #(h, st) = handler_of(st, "defineProperty", mk_bool(True))
-  // Adding to a non-extensible target.
   let #(t, st) = locked_target(st, True)
   let #(p, st) = proxy(st, t, h)
   assert throws(st, fn(st) {
@@ -631,7 +572,6 @@ pub fn define_property_invariants_test() {
       )
     })
     == "TypeError"
-  // configurable:false for a key the target lacks.
   let #(t2, st) = object(st)
   let #(p2, st) = proxy(st, t2, h)
   assert throws(st, fn(st) {
@@ -646,8 +586,6 @@ pub fn define_property_invariants_test() {
       )
     })
     == "TypeError"
-  // A falsish trap result is `false` — TypeError from Object.defineProperty,
-  // plain false from Reflect.defineProperty.
   let #(hf, st) = handler_of(st, "defineProperty", mk_bool(False))
   let #(pf, st) = proxy(st, t2, hf)
   let #(desc, st) = record(st, [#("value", int(1))])
@@ -660,28 +598,23 @@ pub fn define_property_invariants_test() {
 pub fn own_keys_invariants_test() {
   let st = agent()
   let #(t, st) = locked_target(st, False)
-  // Omitting a non-configurable key.
   let #(empty_arr, st) = rt_obj.t_new_array(st, [])
   let #(h, st) = handler_of(st, "ownKeys", empty_arr)
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_own_keys(_, handle(p))) == "TypeError"
-  // Duplicates.
   let #(dups, st) = rt_obj.t_new_array(st, [str("k"), str("k")])
   let #(h, st) = handler_of(st, "ownKeys", dups)
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_own_keys(_, handle(p))) == "TypeError"
-  // Non-key element.
   let #(bad, st) = rt_obj.t_new_array(st, [str("k"), int(1)])
   let #(h, st) = handler_of(st, "ownKeys", bad)
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_own_keys(_, handle(p))) == "TypeError"
-  // Extra keys on a non-extensible target.
   let #(t2, st) = locked_target(st, True)
   let #(extra, st) = rt_obj.t_new_array(st, [str("k"), str("zz")])
   let #(h, st) = handler_of(st, "ownKeys", extra)
   let #(p, st) = proxy(st, t2, h)
   assert throws(st, rt_obj.t_own_keys(_, handle(p))) == "TypeError"
-  // An array-like trap result is read through Get.
   let #(like, st) = record(st, [#("length", int(1)), #("0", str("k"))])
   let #(h, st) = handler_of(st, "ownKeys", like)
   let #(p, st) = proxy(st, t2, h)
@@ -692,31 +625,24 @@ pub fn own_keys_invariants_test() {
 pub fn prototype_and_extensibility_invariants_test() {
   let st = agent()
   let #(t, st) = locked_target(st, True)
-  // getPrototypeOf must report the real proto of a non-extensible target…
   let #(h, st) = handler_of(st, "getPrototypeOf", mk_null())
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_get_prototype_of(_, handle(p))) == "TypeError"
-  // …and never a primitive.
   let #(h, st) = handler_of(st, "getPrototypeOf", int(1))
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_get_prototype_of(_, handle(p))) == "TypeError"
-  // setPrototypeOf truish for a different proto on a non-extensible target.
   let #(h, st) = handler_of(st, "setPrototypeOf", mk_bool(True))
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_set_prototype(_, handle(p), None)) == "TypeError"
   assert throws(st, static(_, "Object", "setPrototypeOf", [p, mk_null()]))
     == "TypeError"
-  // isExtensible must agree with the target.
   let #(h, st) = handler_of(st, "isExtensible", mk_bool(True))
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_is_extensible(_, handle(p))) == "TypeError"
-  // preventExtensions truish while the target is still extensible.
   let #(t2, st) = object(st)
   let #(h, st) = handler_of(st, "preventExtensions", mk_bool(True))
   let #(p, st) = proxy(st, t2, h)
   assert throws(st, rt_obj.t_prevent_extensions(_, handle(p))) == "TypeError"
-  // A falsish preventExtensions is TypeError from Object.preventExtensions,
-  // false from Reflect.preventExtensions.
   let #(h, st) = handler_of(st, "preventExtensions", mk_bool(False))
   let #(p, st) = proxy(st, t2, h)
   assert throws(st, static(_, "Object", "preventExtensions", [p]))
@@ -741,8 +667,6 @@ pub fn proxy_as_prototype_traps_on_inherited_access_test() {
   assert has
   let #(seen, st) = drain(st, log)
   assert seen == "has"
-  // Setting an inherited-through-proxy key: the proxy's `set` trap runs
-  // with the child as Receiver and the property lands on the child.
   let st = set(st, child, "fresh", int(1))
   let #(seen, st) = drain(st, log)
   assert seen == "set"

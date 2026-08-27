@@ -1,8 +1,3 @@
-//// proposal-json-parse-with-source on the arc/rt runtime: the JSON.parse
-//// reviver's third `context` argument carries `source` (the exact literal
-//// text) for unmodified primitives only. Arrays, objects, and any slot an
-//// earlier reviver call replaced or added get a context with no own property.
-
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
@@ -23,8 +18,6 @@ fn json(st: Agent, method: String, args: List(JsVal)) -> #(JsVal, Agent) {
   rt_call.t_call_method(st, ns, key(method), args)
 }
 
-/// A strict non-arrow function object over `(st, this, args)`, so the body
-/// sees the holder JSON.parse passes as `this`.
 fn reviver(
   st: Agent,
   body: fn(Agent, JsVal, List(JsVal)) -> #(JsVal, Agent),
@@ -48,10 +41,6 @@ fn reviver(
   #(types.mk_object(h), st)
 }
 
-/// Record `#(key, context.source)` for this reviver call, asserting the
-/// test262 shape of `context` on the way: a plain %Object.prototype% object
-/// whose only own property (if any) is a writable, enumerable, configurable
-/// `source` string.
 fn record_call(st: Agent, args: List(JsVal)) -> Agent {
   let assert [k, _v, context] = args
   let assert KStr(name) = classify(k)
@@ -80,7 +69,6 @@ fn record_call(st: Agent, args: List(JsVal)) -> Agent {
   st
 }
 
-/// The identity reviver, logging every call.
 fn logging_reviver(st: Agent) -> #(JsVal, Agent) {
   use st, _this, args <- reviver(st)
   let assert [_, v, _] = args
@@ -96,7 +84,6 @@ fn calls() -> List(#(String, Option(String))) {
   rt_helpers.recorded()
 }
 
-/// A JS Number as a Float, whichever wire shape it has.
 fn num(v: JsVal) -> Float {
   case classify(v) {
     KNum(JInt(n)) -> int.to_float(n)
@@ -113,8 +100,7 @@ fn is_one(v: JsVal) -> Bool {
   }
 }
 
-// -- reviver-context-source-primitive-literal.js -----------------------------
-
+// test262: reviver-context-source-primitive-literal.js
 pub fn primitive_literal_source_test() {
   let st = rt_helpers.agent()
   let st =
@@ -130,14 +116,12 @@ pub fn primitive_literal_source_test() {
         st
       },
     )
-  // The source is the literal as written, not the value re-serialized.
   let #(v, _) = parse_logged(st, " 1.1e1 ")
   assert num(v) == 11.0
   assert calls() == [#("", Some("1.1e1"))]
 }
 
-// -- reviver-context-source-array-literal.js ---------------------------------
-
+// test262: reviver-context-source-array-literal.js
 pub fn array_literal_source_test() {
   let st = rt_helpers.agent()
   let #(_, st) = parse_logged(st, "[1.0]")
@@ -172,13 +156,11 @@ pub fn array_literal_source_test() {
     ]
 }
 
-// -- reviver-context-source-object-literal.js --------------------------------
-
+// test262: reviver-context-source-object-literal.js
 pub fn object_literal_source_test() {
   let st = rt_helpers.agent()
   let #(_, st) = parse_logged(st, "{}")
   assert calls() == [#("", None)]
-  // A canonical-numeric key is revived under that key and readable as obj[42].
   let #(single, st) = parse_logged(st, "{\"42\":37}")
   assert calls() == [#("42", Some("37")), #("", None)]
   let #(v, st) = rt_obj.t_get_prop(st, single, key("42"))
@@ -201,7 +183,6 @@ pub fn object_literal_source_test() {
     == [#("x", Some("1")), #("y", Some("2")), #("x", None), #("", None)]
 }
 
-/// String sources keep their quotes and leave escapes undecoded.
 pub fn string_source_is_verbatim_test() {
   let st = rt_helpers.agent()
   let #(v, st) = parse_logged(st, "{\"s\": \"a\\u0041\\n\"}")
@@ -210,8 +191,6 @@ pub fn string_source_is_verbatim_test() {
   assert classify(s) == KStr("aA\n")
 }
 
-/// A duplicate key keeps its first position with its last value and record;
-/// numeric keys are canonical indices, so they enumerate first, ascending.
 pub fn duplicate_and_numeric_keys_test() {
   let st = rt_helpers.agent()
   let #(o, st) = parse_logged(st, "{\"a\":1,\"b\":2,\"a\":3,\"7\":4,\"05\":5}")
@@ -227,10 +206,6 @@ pub fn duplicate_and_numeric_keys_test() {
   assert classify(s) == KStr("{\"7\":4,\"a\":3,\"b\":2,\"05\":5}")
 }
 
-// -- reviver-forward-modifies-object.js ---------------------------------------
-
-/// A reviver that, while visiting `first`, overwrites sibling `later` with
-/// `replacement`, then returns `this[k]`. Every call is logged.
 fn forward_modifier(
   st: Agent,
   first: String,
@@ -248,15 +223,14 @@ fn forward_modifier(
   rt_obj.t_get_prop(st, this, key(name))
 }
 
+// test262: reviver-forward-modifies-object.js
 pub fn array_forward_modification_drops_source_test() {
   let st = rt_helpers.agent()
-  // Primitive replacement: element 1 no longer matches its record.
   let #(f, st) = forward_modifier(st, "0", "1", mk_number(JInt(42)))
   let #(o, st) = json(st, "parse", [mk_string("[1, 2]"), f])
   assert calls() == [#("0", Some("1")), #("1", None), #("", None)]
   let #(second, st) = rt_obj.t_get_prop(st, o, key("1"))
   assert num(second) == 42.0
-  // Object replacement: its own keys are walked (with no records) first.
   let #(repl, st) = rt_obj.t_new_object_literal(st)
   let #(_, st) = rt_obj.t_set_prop(st, repl, key("foo"), mk_string("bar"))
   let #(f, st) = forward_modifier(st, "0", "1", repl)
@@ -272,15 +246,12 @@ pub fn object_forward_modification_drops_source_test() {
   assert calls() == [#("p", Some("1")), #("q", None), #("", None)]
   let #(q, st) = rt_obj.t_get_prop(st, o, key("q"))
   assert classify(q) == KStr("foo")
-  // Array replacement.
   let #(repl, st) = rt_obj.t_new_array(st, [mk_string("foo")])
   let #(f, st) = forward_modifier(st, "p", "q", repl)
   let #(_, _) = json(st, "parse", [mk_string("{\"p\":1, \"q\":2}"), f])
   assert calls() == [#("p", Some("1")), #("0", None), #("q", None), #("", None)]
 }
 
-/// `{"a": 0, "b": 1, "c": [1, 2]}`: visiting `a` sets b = 2, visiting `b`
-/// sets c = 3. Only `a` still matches its literal.
 pub fn chained_forward_modifications_test() {
   let st = rt_helpers.agent()
   let #(f, st) =
@@ -307,10 +278,7 @@ pub fn chained_forward_modifications_test() {
   assert calls() == [#("a", Some("0")), #("b", None), #("c", None), #("", None)]
 }
 
-// -- reviver-call-args-after-forward-modification.js -------------------------
-
-/// `[1,[]]`: visiting 1 pushes into the (still record-fresh) inner array. The
-/// pushed element has no record, so no source; the inner array never had one.
+// test262: reviver-call-args-after-forward-modification.js
 pub fn appended_element_has_no_source_test() {
   let st = rt_helpers.agent()
   let #(f, st) =
@@ -355,8 +323,6 @@ pub fn added_property_has_no_source_test() {
   let #(s, _) = json(st, "stringify", [o])
   assert classify(s) == KStr("{\"p\":1,\"q\":{\"added\":\"barf\"}}")
 }
-
-// -- JSON.rawJSON / JSON.isRawJSON --------------------------------------------
 
 pub fn raw_json_stringifies_verbatim_test() {
   let st = rt_helpers.agent()

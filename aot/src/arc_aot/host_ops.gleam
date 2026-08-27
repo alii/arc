@@ -1,8 +1,3 @@
-//// The `"js"` direct-host op table: every `CallHost("js", op, args)` the
-//// emitter produces resolves here to a function in arc's runtime
-//// (`arc@rt@*` / `arc_rt_*_ffi`) or an `erlang` BIF, with the calling
-//// convention `emit_core` must use for it (`instance.OpKind`).
-
 import carder/runtime/instance.{
   type DirectHost, DirectHost, HostOp, Mut, MutMiss, MutUnit, Pure, Read,
   ReadMiss,
@@ -32,7 +27,6 @@ pub fn table() -> DirectHost {
   DirectHost(
     capability: "js",
     ops: dict.from_list([
-      // Boxed bindings are `SBox` cells (GC-traceable), not raw-value cells.
       #("cell_new", HostOp(store, "t_var_new", Mut)),
       #("cell_get", HostOp(store, "t_var_get", Read)),
       #("cell_set", HostOp(store, "t_var_set", MutUnit)),

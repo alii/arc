@@ -11,18 +11,8 @@ env_is_truthy(Name) ->
         _ -> false
     end.
 
-%% Identity cast: any Gleam value -> gleam/dynamic.Dynamic. On the Erlang
-%% target Dynamic is `term()`, so this is just identity.
 to_dynamic(X) -> X.
 
-%% Capture everything the thunk writes to stdout (io:put_chars / io:format,
-%% which gleam io.println routes through) by installing a collector process
-%% as this process's group_leader for the duration of the call.
-%% Returns {CapturedBytes :: binary(), ThunkResult}.
-%%
-%% Used by emit_2core_harness.run_interpreted so arc's console.log output
-%% (the default print hook -> io.println) can be diffed against the
-%% compiled path's captured console bytes.
 capture_stdout(Thunk) ->
     OldGL = erlang:group_leader(),
     Collector = spawn(fun() -> collector_loop(<<>>) end),
@@ -53,16 +43,9 @@ handle_io({put_chars, latin1, M, F, A}, Acc) ->
 handle_io({requests, Reqs}, Acc) ->
     lists:foldl(fun(R, {_, A}) -> handle_io(R, A) end, {ok, Acc}, Reqs);
 handle_io(_Other, Acc) ->
-    %% getopts / setopts / get_geometry etc — acknowledge, capture nothing.
     {ok, Acc}.
 
-%% ---------------------------------------------------------------------------
-%% Deterministic-hooks state (SPEC §20). Process-dictionary-backed: each
-%% test runs in its own BEAM process (arc_test_ffi:spawn_worker), so this
-%% state is per-test-isolated with no explicit cleanup.
-%% ---------------------------------------------------------------------------
-
-%% Seeded PRNG: xorshift64* → Float in [0,1). Backs `HostHooks.random`.
+%% xorshift64*, float in [0,1)
 seed_random(Seed) ->
     erlang:put(emit_2core_rand, Seed band 16#FFFFFFFFFFFFFFFF),
     nil.
@@ -77,12 +60,9 @@ next_random() ->
     S3 = (S2 bxor (S2 bsr 27)) band 16#FFFFFFFFFFFFFFFF,
     erlang:put(emit_2core_rand, S3),
     Mixed = (S3 * 16#2545F4914F6CDD1D) band 16#FFFFFFFFFFFFFFFF,
-    %% top 53 bits / 2^53 → uniform [0,1) with a full double mantissa
+    %% top 53 bits over 2^53
     (Mixed bsr 11) / 9007199254740992.0.
 
-%% Print buffers: reversed lists of utf8-binary lines. `emit_2core_buf`
-%% backs the stdout levels of `HostHooks.print`; `emit_2core_err` backs the
-%% stderr levels and `report_uncaught`.
 buf_reset() ->
     erlang:put(emit_2core_buf, []),
     erlang:put(emit_2core_err, []),
@@ -101,8 +81,6 @@ push(Key, Line) ->
         undefined -> [];
         V -> V
     end,
-    %% One trailing newline per call so the compiled path's captured bytes
-    %% match arc's io.println output byte-for-byte.
     erlang:put(Key, [<<Line/binary, "\n">> | Cur]),
     nil.
 

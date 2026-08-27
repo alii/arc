@@ -1,7 +1,3 @@
-//// A generator parked after a sloppy direct eval keeps its eval var object
-//// across collections: the object hangs off the parked frame alone, so a
-//// collect between resumptions must not free (or recycle) it.
-
 import arc/compiler
 import arc/interp/entry
 import arc/interp/safepoint
@@ -37,8 +33,6 @@ pub fn parked_generator_eval_env_survives_collect_test() {
     )
   let assert NormalCompletion(v) = first
   assert rt_inspect.inspect(st, v) == "1"
-  // Collect while parked, drain the turn, then churn the heap so a freed id
-  // would be handed out again before the resume.
   let st = rt_gc.t_collect(st, [])
   let st = safepoint.end_turn(st, [])
   let #(_, st) =

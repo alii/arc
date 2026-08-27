@@ -1,6 +1,3 @@
-//// Reachability through compiled-function closures on the arc/rt heap: the
-//// captures live only in the code's fun environment.
-
 import arc/rt/gc as rt_gc
 import arc/rt/obj as rt_obj
 import arc/rt/types.{KHandle, classify, mk_undefined}
@@ -14,7 +11,6 @@ pub fn closure_capture_keeps_object_alive_test() {
   let st = rt_obj.t_global_set(st, <<"keep">>, f)
   let st = rt_gc.t_collect(st, [])
   assert rt_gc.t_is_live(st, captured_h)
-  // Reachable only through the closure: dropping the function frees it.
   let st = rt_obj.t_global_set(st, <<"keep">>, mk_undefined())
   let st = rt_gc.t_collect(st, [])
   assert !rt_gc.t_is_live(st, captured_h)

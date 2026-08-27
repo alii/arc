@@ -1,11 +1,3 @@
-//// Abstract operations shared by every Temporal type: branding, allocation,
-//// TErr raising, integer coercions, options and unit handling, rounding,
-//// difference settings, duration records, time zones, ToTemporalInstant /
-//// ToTemporalDuration / ToTemporalTimeZone.
-////
-//// Pure ISO math is in temporal_iso.gleam; named zones resolve through
-//// temporal_tz.gleam; calendars through temporal_calendar.
-
 import arc/internal/host_time
 import arc/internal/int_math.{floor_div, floor_mod as math_mod}
 import arc/internal/temporal_calendar as tcal
@@ -41,11 +33,6 @@ import gleam/order
 import gleam/result
 import gleam/string
 
-// ============================================================================
-// Errors
-// ============================================================================
-
-/// Raise a pure helper's `TErr` as the matching JS error.
 pub fn throw_terr(st: Agent, e: TErr) -> a {
   case e {
     RangeE(msg) -> rt_val.t_throw_range_error(st, msg)
@@ -53,7 +40,6 @@ pub fn throw_terr(st: Agent, e: TErr) -> a {
   }
 }
 
-/// Unwrap a pure helper's Result, raising its `TErr`.
 pub fn terr(st: Agent, r: Result(a, TErr)) -> a {
   case r {
     Ok(v) -> v
@@ -61,13 +47,6 @@ pub fn terr(st: Agent, r: Result(a, TErr)) -> a {
   }
 }
 
-// ============================================================================
-// Branding helpers — extract internal slots from `this`
-// ============================================================================
-
-/// RequireInternalSlot for a Temporal receiver. `extract` is one of the
-/// `*_slot_of` functions below; the TypeError message is built only on the
-/// failure path.
 pub fn require_temporal(
   st: Agent,
   this: JsVal,
@@ -89,8 +68,6 @@ pub fn require_temporal(
   }
 }
 
-/// The Temporal internal slots of an arbitrary value, if it is a Temporal
-/// object.
 pub fn temporal_data_of(st: Agent, v: JsVal) -> Option(types.TemporalData) {
   case classify(v) {
     KHandle(h) ->
@@ -102,8 +79,6 @@ pub fn temporal_data_of(st: Agent, v: JsVal) -> Option(types.TemporalData) {
   }
 }
 
-/// [[InitializedTemporalDate]] extractor. Every calendared receiver hands its
-/// calendar back with its date.
 pub fn date_slot_of(kind: ObjKind) -> Option(#(IsoDate, tcal.Calendar)) {
   case kind {
     TemporalObj(data: TemporalDate(year:, month:, day:, calendar:)) ->
@@ -216,10 +191,6 @@ pub fn zoned_slot_of(kind: ObjKind) -> Option(#(Int, TimeZone, tcal.Calendar)) {
     _ -> None
   }
 }
-
-// ============================================================================
-// Allocation helpers
-// ============================================================================
 
 fn alloc_value(
   st: Agent,
@@ -367,7 +338,6 @@ pub fn make_duration(
   )
 }
 
-/// Validate then allocate a Temporal.Duration, or throw a RangeError.
 pub fn finish_duration(
   st: Agent,
   protos: TemporalProtos,
@@ -410,11 +380,6 @@ pub fn make_zoned_cal(
   )
 }
 
-/// OrdinaryCreateFromConstructor for a Temporal constructor whose `ctor`
-/// already allocated `v` on its intrinsic prototype: re-point it at
-/// GetPrototypeFromConstructor(newTarget). The realm record has no Temporal
-/// slots, so the intrinsic default is the prototype `v` already has; the
-/// observable Get lands after argument validation, where the spec puts it.
 pub fn apply_new_target_proto(
   st: Agent,
   new_target: JsVal,
@@ -438,11 +403,6 @@ pub fn apply_new_target_proto(
   #(obj, st)
 }
 
-// ============================================================================
-// Coercion helpers
-// ============================================================================
-
-/// ToIntegerWithTruncation: ToNumber, RangeError on NaN/±∞, truncate.
 pub fn to_integer_with_truncation(st: Agent, v: JsVal) -> #(Int, Agent) {
   let #(n, st) = rt_val.t_to_number(st, v)
   case n {
@@ -453,7 +413,6 @@ pub fn to_integer_with_truncation(st: Agent, v: JsVal) -> #(Int, Agent) {
   }
 }
 
-/// ToPositiveIntegerWithTruncation: like above but must be > 0.
 pub fn to_positive_integer_with_truncation(
   st: Agent,
   v: JsVal,
@@ -465,7 +424,6 @@ pub fn to_positive_integer_with_truncation(
   }
 }
 
-/// ToIntegerIfIntegral: ToNumber, RangeError unless an integral Number.
 pub fn to_integer_if_integral(st: Agent, v: JsVal) -> #(Int, Agent) {
   let #(n, st) = rt_val.t_to_number(st, v)
   case n {
@@ -473,7 +431,7 @@ pub fn to_integer_if_integral(st: Agent, v: JsVal) -> #(Int, Agent) {
     JFloat(f) -> {
       let i = rt_val.float_to_int(f)
       let fi = int.to_float(i)
-      // Arithmetic comparison: `==` is term equality, where -0.0 ≠ 0.0.
+      // arithmetic compare: term == treats -0.0 != 0.0
       case f >=. fi && f <=. fi {
         True -> #(i, st)
         False -> rt_val.t_throw_range_error(st, "expected an integral number")
@@ -484,7 +442,6 @@ pub fn to_integer_if_integral(st: Agent, v: JsVal) -> #(Int, Agent) {
   }
 }
 
-/// A missing positional argument is 0; anything else is ToIntegerIfIntegral.
 pub fn opt_integral_arg(
   st: Agent,
   args: List(JsVal),
@@ -497,12 +454,10 @@ pub fn opt_integral_arg(
   }
 }
 
-/// ToIntegerWithTruncation on the argument at `idx`.
 pub fn arg_trunc_int(st: Agent, args: List(JsVal), idx: Int) -> #(Int, Agent) {
   to_integer_with_truncation(st, helpers.arg_at(args, idx))
 }
 
-/// ToIntegerWithTruncation on the argument at `idx`, undefined → `default`.
 pub fn arg_trunc_int_or(
   st: Agent,
   args: List(JsVal),
@@ -516,16 +471,10 @@ pub fn arg_trunc_int_or(
   }
 }
 
-/// Optional integer argument: undefined → 0, else ToIntegerWithTruncation.
 pub fn opt_int_arg(st: Agent, args: List(JsVal), idx: Int) -> #(Int, Agent) {
   arg_trunc_int_or(st, args, idx, 0)
 }
 
-// ============================================================================
-// Options handling
-// ============================================================================
-
-/// GetOptionsObject: undefined → None, object → Some(handle), else TypeError.
 pub fn get_options_object(st: Agent, v: JsVal) -> #(Option(Handle), Agent) {
   case classify(v) {
     KUndef -> #(None, st)
@@ -534,7 +483,6 @@ pub fn get_options_object(st: Agent, v: JsVal) -> #(Option(Handle), Agent) {
   }
 }
 
-/// Get(options, key), or undefined when there is no options object.
 pub fn opt_get(
   st: Agent,
   opts: Option(Handle),
@@ -546,9 +494,6 @@ pub fn opt_get(
   }
 }
 
-/// GetOption for an enum-valued option: `allowed` maps each accepted string
-/// to its variant, so the allow-list and the parse are the same table and no
-/// consumer ever sees the raw string. Anything else is a RangeError here.
 pub fn get_enum_option(
   st: Agent,
   opts: Option(Handle),
@@ -573,8 +518,6 @@ pub fn get_enum_option(
   }
 }
 
-/// disambiguation option: which instant an ambiguous or skipped wall-clock
-/// time resolves to.
 pub type Disambiguation {
   Compatible
   Earlier
@@ -582,8 +525,6 @@ pub type Disambiguation {
   RejectDisambiguation
 }
 
-/// offset option: how a ZonedDateTime's offset field is reconciled with its
-/// time zone.
 pub type OffsetOption {
   PreferOffset
   UseOffset
@@ -591,7 +532,6 @@ pub type OffsetOption {
   RejectOffset
 }
 
-/// GetTemporalOverflowOption: "constrain" (default) or "reject".
 pub fn get_overflow_option(
   st: Agent,
   opts: Option(Handle),
@@ -605,8 +545,6 @@ pub fn get_overflow_option(
   )
 }
 
-/// GetTemporalDisambiguationOption: "compatible" (default) | "earlier" |
-/// "later" | "reject".
 pub fn get_disambiguation_option(
   st: Agent,
   opts: Option(Handle),
@@ -625,8 +563,6 @@ pub fn get_disambiguation_option(
   )
 }
 
-/// GetTemporalOffsetOption: "prefer" | "use" | "ignore" | "reject", with a
-/// per-caller default.
 pub fn get_offset_option(
   st: Agent,
   opts: Option(Handle),
@@ -646,7 +582,6 @@ pub fn get_offset_option(
   )
 }
 
-/// calendarName option: whether/how the [u-ca=] annotation is emitted.
 pub type CalendarNameMode {
   CalAuto
   CalAlways
@@ -654,24 +589,17 @@ pub type CalendarNameMode {
   CalCritical
 }
 
-/// offset option of ZonedDateTime.toString: whether the numeric UTC offset is
-/// emitted. (Distinct from `OffsetOption`, which reconciles a *parsed* offset
-/// against the zone.)
 pub type ShowOffset {
   OffsetShowAuto
   OffsetShowNever
 }
 
-/// timeZoneName option: whether/how the [tz] annotation is emitted.
 pub type TimeZoneNameMode {
   TzAuto
   TzNever
   TzCritical
 }
 
-/// GetOptionsObject + GetTemporalShowCalendarNameOption: reads the options
-/// argument and its "calendarName" option (`CalAuto` default). Also returns
-/// the options object for callers that read further options from it.
 pub fn get_calendar_name_option(
   st: Agent,
   options_arg: JsVal,
@@ -693,7 +621,6 @@ pub fn get_calendar_name_option(
   #(#(cal_name, opts), st)
 }
 
-/// GetTemporalShowOffsetOption: "auto" (default) or "never".
 pub fn get_show_offset_option(
   st: Agent,
   opts: Option(Handle),
@@ -707,7 +634,6 @@ pub fn get_show_offset_option(
   )
 }
 
-/// GetTemporalShowTimeZoneNameOption: "auto" (default) | "never" | "critical".
 pub fn get_time_zone_name_option(
   st: Agent,
   opts: Option(Handle),
@@ -721,7 +647,6 @@ pub fn get_time_zone_name_option(
   )
 }
 
-/// The calendar suffix of an ISO string per the calendarName option.
 pub fn calendar_suffix(mode: CalendarNameMode, cal: tcal.Calendar) -> String {
   let id = tcal.identifier(cal)
   case mode {
@@ -736,10 +661,6 @@ pub fn calendar_suffix(mode: CalendarNameMode, cal: tcal.Calendar) -> String {
   }
 }
 
-// ============================================================================
-// Units and rounding
-// ============================================================================
-
 pub type Unit {
   Year
   Month
@@ -753,7 +674,6 @@ pub type Unit {
   Nanosecond
 }
 
-/// roundingMode option values. Parsed once, in `get_rounding_mode_option`.
 pub type RoundingMode {
   Ceil
   Floor
@@ -766,8 +686,6 @@ pub type RoundingMode {
   HalfEven
 }
 
-/// GetUnsignedRoundingMode result: a rounding mode collapsed for a value of
-/// known sign (spec "zero"/"infinity"/"half-zero"/"half-infinity"/"half-even").
 pub type UnsignedRoundingMode {
   RZero
   RInfinity
@@ -776,15 +694,12 @@ pub type UnsignedRoundingMode {
   RHalfEven
 }
 
-/// A largestUnit/smallestUnit option value as read from an options bag:
-/// absent, an explicit "auto", or a concrete unit.
 pub type UnitOption {
   UnitAbsent
   UnitAuto
   UnitValue(Unit)
 }
 
-/// JS-facing singular name of a unit (error messages / option echoes).
 pub fn unit_to_string(u: Unit) -> String {
   case u {
     Year -> "year"
@@ -800,9 +715,6 @@ pub fn unit_to_string(u: Unit) -> String {
   }
 }
 
-/// GetTemporalUnitValuedOption's name table: the singular and plural forms
-/// map to the unit, anything else is rejected. The ONLY String → Unit
-/// conversion.
 pub fn singular_unit(u: String) -> Option(Unit) {
   case u {
     "year" | "years" -> Some(Year)
@@ -834,10 +746,6 @@ pub fn unit_rank(u: Unit) -> Int {
   }
 }
 
-/// The units that have a fixed nanosecond length: day and below. Year, month
-/// and week are deliberately absent — a calendar unit's length depends on the
-/// date it is measured from, so it cannot be turned into a nanosecond count.
-/// Anything measured in nanoseconds takes a `TimeUnit`, never a `Unit`.
 pub type TimeUnit {
   UDay
   UHour
@@ -848,7 +756,6 @@ pub type TimeUnit {
   UNanosecond
 }
 
-/// The fixed-length view of a unit, or None for a calendar unit.
 pub fn as_time_unit(u: Unit) -> Option(TimeUnit) {
   case u {
     Year | Month | Week -> None
@@ -862,8 +769,6 @@ pub fn as_time_unit(u: Unit) -> Option(TimeUnit) {
   }
 }
 
-/// `as_time_unit` where the surrounding spec step has already rejected
-/// calendar units; the RangeError restates that guard for the type checker.
 pub fn require_time_unit(u: Unit) -> Result(TimeUnit, TErr) {
   case as_time_unit(u) {
     Some(t) -> Ok(t)
@@ -874,7 +779,6 @@ pub fn require_time_unit(u: Unit) -> Result(TimeUnit, TErr) {
   }
 }
 
-/// Length of a fixed-length unit in nanoseconds. Total by construction.
 pub fn time_unit_ns(u: TimeUnit) -> Int {
   case u {
     UDay -> ns_per_day
@@ -887,8 +791,6 @@ pub fn time_unit_ns(u: TimeUnit) -> Int {
   }
 }
 
-/// Read a unit-valued option ("largestUnit"/"smallestUnit"/"unit"). Both an
-/// absent option and (when `allow_auto`) an explicit "auto" become None.
 pub fn get_unit_option(
   st: Agent,
   opts: Option(Handle),
@@ -902,8 +804,6 @@ pub fn get_unit_option(
   }
 }
 
-/// Like get_unit_option, but reports an explicit "auto" as UnitAuto instead
-/// of collapsing it to UnitAbsent, so callers can distinguish the two.
 pub fn get_unit_option_keep(
   st: Agent,
   opts: Option(Handle),
@@ -969,7 +869,6 @@ pub fn get_rounding_increment_option(
     KUndef -> #(1, st)
     _ -> {
       let #(n, st) = rt_val.t_to_number(st, v)
-      // ToIntegerWithTruncation: truncate, then bounds-check 1..1e9.
       let i = case n {
         JInt(i) -> Some(i)
         JFloat(f) -> Some(rt_val.float_to_int(f))
@@ -983,8 +882,6 @@ pub fn get_rounding_increment_option(
   }
 }
 
-/// RoundNumberToIncrementAsIfPositive — rounding modes act as if the value
-/// were positive (floor-family on the number line). Used for instants.
 pub fn as_if_positive_mode(mode: RoundingMode) -> RoundingMode {
   case mode {
     Trunc -> Floor
@@ -995,7 +892,6 @@ pub fn as_if_positive_mode(mode: RoundingMode) -> RoundingMode {
   }
 }
 
-/// RoundNumberToIncrement on integers: round `x` to a multiple of `inc`.
 pub fn round_to_increment(x: Int, inc: Int, mode: RoundingMode) -> Int {
   let q = floor_div(x, inc)
   let r = x - q * inc
@@ -1036,8 +932,6 @@ pub fn round_to_increment(x: Int, inc: Int, mode: RoundingMode) -> Int {
   }
 }
 
-/// The unsigned rounding mode for a value of the given sign
-/// (GetUnsignedRoundingMode).
 pub fn unsigned_rounding_mode(
   mode: RoundingMode,
   negative: Bool,
@@ -1059,9 +953,7 @@ pub fn unsigned_rounding_mode(
   }
 }
 
-/// ApplyUnsignedRoundingMode on an exact fraction: `num/den` in [0, 1] is how
-/// far x lies between r1 (0) and r2 (1); `r1_even` says whether r1 is the even
-/// candidate for half-even. Returns True to pick r2.
+// num/den in [0,1] is x between r1 and r2; true picks r2
 pub fn apply_unsigned_rounding(
   num: Int,
   den: Int,
@@ -1091,10 +983,7 @@ pub fn apply_unsigned_rounding(
   }
 }
 
-/// Shared until/since options prologue: largestUnit, roundingIncrement,
-/// roundingMode, smallestUnit (read alphabetically — observable order).
-/// Returns #(largest_opt, smallest_opt, inc, mode); callers apply their own
-/// per-type defaults and validation.
+// options read alphabetically, order is observable
 pub fn get_difference_settings(
   st: Agent,
   args: List(JsVal),
@@ -1111,14 +1000,10 @@ pub fn get_difference_settings(
 
 pub const largest_smaller_msg = "largestUnit must not be smaller than smallestUnit"
 
-/// The GetDifferenceSettings ordering check itself: True when largestUnit is
-/// finer than smallestUnit, i.e. the RangeError case.
 pub fn largest_smaller_than_smallest(largest: Unit, smallest: Unit) -> Bool {
   unit_rank(largest) < unit_rank(smallest)
 }
 
-/// GetDifferenceSettings tail: largestUnit must not be smaller than
-/// smallestUnit, else RangeError.
 pub fn require_largest_ge_smallest(
   st: Agent,
   largest: Unit,
@@ -1130,7 +1015,6 @@ pub fn require_largest_ge_smallest(
   }
 }
 
-/// since: negate the rounding mode per spec (difference computed two→one).
 pub fn apply_since_mode(mode: RoundingMode, is_since: Bool) -> RoundingMode {
   case is_since {
     True -> negate_rounding_mode(mode)
@@ -1138,7 +1022,6 @@ pub fn apply_since_mode(mode: RoundingMode, is_since: Bool) -> RoundingMode {
   }
 }
 
-/// since: negate the resulting duration per spec.
 pub fn apply_since_dur(dur: DurRec, is_since: Bool) -> DurRec {
   case is_since {
     True -> negate_dur(dur)
@@ -1146,7 +1029,6 @@ pub fn apply_since_dur(dur: DurRec, is_since: Bool) -> DurRec {
   }
 }
 
-/// since: negate a rounded ns total per spec.
 pub fn apply_since_ns(ns: Int, is_since: Bool) -> Int {
   case is_since {
     True -> 0 - ns
@@ -1171,9 +1053,6 @@ pub fn negate_rounding_mode(mode: RoundingMode) -> RoundingMode {
   }
 }
 
-/// round() options: positional string shorthand or object with smallestUnit
-/// (required), roundingIncrement, roundingMode. `allow_day` says whether the
-/// receiver has days (so a calendar unit can never reach the rounding).
 pub fn round_options(
   st: Agent,
   arg: JsVal,
@@ -1205,8 +1084,6 @@ pub fn round_options(
   }
 }
 
-/// A round() smallestUnit: a fixed-length unit, with `day` accepted only where
-/// the receiver has days.
 pub fn round_unit(u: Unit, allow_day: Bool) -> Option(TimeUnit) {
   case as_time_unit(u) {
     Some(UDay) if !allow_day -> None
@@ -1214,7 +1091,6 @@ pub fn round_unit(u: Unit, allow_day: Bool) -> Option(TimeUnit) {
   }
 }
 
-/// Increment must evenly divide the unit's span (and be < span).
 pub fn valid_time_increment(inc: Int, max: Int) -> Bool {
   inc >= 1
   && inc <= max
@@ -1223,8 +1099,6 @@ pub fn valid_time_increment(inc: Int, max: Int) -> Bool {
   || inc == 1
 }
 
-/// GetDifferenceSettings tail: largest must not be smaller than smallest, and
-/// for a time-unit smallest the increment must divide the unit's maximum.
 pub fn check_diff_setup(
   st: Agent,
   largest: Unit,
@@ -1249,7 +1123,6 @@ pub fn check_diff_setup(
   }
 }
 
-/// Balance a signed ns total into a Duration up to `largest` (time unit).
 pub fn balance_time_ns(total: Int, largest: Unit) -> DurRec {
   let sign = int_sign(total)
   let a = int.absolute_value(total)
@@ -1295,13 +1168,6 @@ pub fn balance_time_ns(total: Int, largest: Unit) -> DurRec {
   )
 }
 
-// ============================================================================
-// toString precision options
-// ============================================================================
-
-/// Time toString options: fractionalSecondDigits, roundingMode, smallestUnit
-/// (alphabetical). Returns the output precision, the rounding unit (None = no
-/// rounding), the increment and mode.
 pub fn to_string_time_options(
   st: Agent,
   opts: Option(Handle),
@@ -1312,15 +1178,11 @@ pub fn to_string_time_options(
   #(terr(st, seconds_string_precision(digits, su, mode)), st)
 }
 
-/// The fractionalSecondDigits option: "auto" or 0..9. Distinct from
-/// `Precision`, the *output* precision of a formatter, which additionally has
-/// a minute-truncated form that this option can never name.
 pub type FractionalDigits {
   DigitsAuto
   DigitsFixed(Int)
 }
 
-/// ToSecondsStringPrecisionRecord (pure part).
 pub fn seconds_string_precision(
   digits: FractionalDigits,
   su: Option(Unit),
@@ -1344,7 +1206,6 @@ pub fn seconds_string_precision(
   }
 }
 
-/// GetTemporalFractionalSecondDigitsOption.
 pub fn get_fractional_digits(
   st: Agent,
   opts: Option(Handle),
@@ -1359,7 +1220,6 @@ pub fn get_fractional_digits(
           rt_val.t_throw_range_error(st, "invalid fractionalSecondDigits")
       }
     KNum(JFloat(f)) -> {
-      // floor, then 0..9 bounds.
       let i = rt_val.float_to_int(float.floor(f))
       case i >= 0 && i <= 9 {
         True -> #(DigitsFixed(i), st)
@@ -1368,8 +1228,6 @@ pub fn get_fractional_digits(
       }
     }
     KNum(_) -> rt_val.t_throw_range_error(st, "invalid fractionalSecondDigits")
-    // Non-number: ToString it; only "auto" is accepted. Symbols raise
-    // TypeError from the string coercion.
     _ -> {
       let #(s, st) = rt_val.t_to_string(st, v)
       case s {
@@ -1379,10 +1237,6 @@ pub fn get_fractional_digits(
     }
   }
 }
-
-// ============================================================================
-// Duration records
-// ============================================================================
 
 pub fn duration_sign(d: DurRec) -> Int {
   let fields = [
@@ -1397,12 +1251,9 @@ pub fn duration_sign(d: DurRec) -> Int {
   })
 }
 
-/// IsValidDuration.
 pub fn is_valid_duration(d: DurRec) -> Bool {
   let sign = duration_sign(d)
-  // Components are observed as Numbers, so validity is determined on the
-  // float-rounded values ℝ(𝔽(x)) — rounding a large component up can push
-  // the total over the limit (CreateTemporalDuration → IsValidDuration).
+  // validity is checked on float-rounded components per spec
   let fr = f64_int
   let d =
     DurRec(
@@ -1434,7 +1285,6 @@ pub fn is_valid_duration(d: DurRec) -> Bool {
   consistent && cal_ok && int.absolute_value(total) <= max_time_duration_ns
 }
 
-/// Total nanoseconds of the day+time portion (days..nanoseconds).
 pub fn time_duration_ns(d: DurRec) -> Int {
   d.days
   * ns_per_day
@@ -1451,7 +1301,6 @@ pub fn time_duration_ns(d: DurRec) -> Int {
   + d.ns
 }
 
-/// Total nanoseconds of the time portion only (hours..nanoseconds).
 pub fn time_only_ns(d: DurRec) -> Int {
   d.hours
   * ns_per_hour
@@ -1466,7 +1315,6 @@ pub fn time_only_ns(d: DurRec) -> Int {
   + d.ns
 }
 
-/// TimeDuration range check: |ns| must not exceed maxTimeDuration.
 pub fn check_time_duration_range(ns: Int) -> Result(Nil, TErr) {
   case int.absolute_value(ns) > max_time_duration_ns {
     True -> Error(RangeE("duration time units out of range"))
@@ -1497,8 +1345,6 @@ pub fn negate_dur(d: DurRec) -> DurRec {
   apply_dur_sign(d, -1)
 }
 
-/// Read a field from a property bag, converting with `conv`. Missing fields
-/// yield None.
 pub fn read_bag_int_field(
   st: Agent,
   bag: Handle,
@@ -1515,7 +1361,6 @@ pub fn read_bag_int_field(
   }
 }
 
-/// `read_bag_int_field` with ToIntegerWithTruncation.
 pub fn read_int_field(
   st: Agent,
   bag: Handle,
@@ -1524,7 +1369,6 @@ pub fn read_int_field(
   read_bag_int_field(st, bag, key, to_integer_with_truncation)
 }
 
-/// `read_bag_int_field` with ToPositiveIntegerWithTruncation.
 pub fn read_pos_int_field(
   st: Agent,
   bag: Handle,
@@ -1533,7 +1377,6 @@ pub fn read_pos_int_field(
   read_bag_int_field(st, bag, key, to_positive_integer_with_truncation)
 }
 
-/// `read_bag_int_field` with ToIntegerIfIntegral.
 pub fn read_integral_int_field(
   st: Agent,
   bag: Handle,
@@ -1542,7 +1385,6 @@ pub fn read_integral_int_field(
   read_bag_int_field(st, bag, key, to_integer_if_integral)
 }
 
-/// ToTemporalDuration(item) → duration record.
 pub fn to_temporal_duration(st: Agent, item: JsVal) -> #(DurRec, Agent) {
   case classify(item) {
     KHandle(h) ->
@@ -1567,8 +1409,6 @@ pub fn to_temporal_duration(st: Agent, item: JsVal) -> #(DurRec, Agent) {
   }
 }
 
-/// ToTemporalPartialDurationRecord field reads — alphabetical order. Each
-/// entry is None when absent.
 pub fn read_duration_fields(
   st: Agent,
   bag: Handle,
@@ -1586,8 +1426,6 @@ pub fn read_duration_fields(
   #([years, months, weeks, days, hours, minutes, seconds, ms, us, ns], st)
 }
 
-/// Overlay partial duration fields (in `read_duration_fields` order) on a base
-/// record.
 pub fn apply_duration_fields(
   base: DurRec,
   fields: List(Option(Int)),
@@ -1610,7 +1448,6 @@ pub fn apply_duration_fields(
   }
 }
 
-/// Duration property bag — alphabetical field order; at least one required.
 pub fn duration_from_bag(st: Agent, bag: Handle) -> #(DurRec, Agent) {
   let #(fields, st) = read_duration_fields(st, bag)
   case list.all(fields, option.is_none) {
@@ -1629,8 +1466,6 @@ pub fn duration_from_bag(st: Agent, bag: Handle) -> #(DurRec, Agent) {
   }
 }
 
-/// ISO 8601 duration string: [+-]P[nY][nM][nW][nD][T[nH][nM][nS]] with an
-/// optional fraction on the smallest present time unit.
 pub fn parse_duration_string(s: String) -> Option(DurRec) {
   let #(sign, rest) = case s {
     "+" <> r -> #(1, r)
@@ -1691,8 +1526,6 @@ fn parse_duration_date_units(s: String, sign: Int) -> Option(DurRec) {
   }
 }
 
-/// Integer (no fraction) date unit: returns the value if `s` starts with
-/// digits followed by one of `designators`.
 fn parse_dur_unit(
   s: String,
   designators: List(String),
@@ -1707,13 +1540,10 @@ fn parse_dur_unit(
   }
 }
 
-/// Time units: hours/minutes/seconds; fraction allowed only on the last unit
-/// present. Returns total #(hours, minutes, seconds, sub_second_ns).
 fn parse_duration_time_units(s: String) -> Option(#(Int, Int, Int, Int)) {
   use #(h, h_frac, s1) <- option.then(parse_dur_time_unit(s, ["H", "h"]))
   case h_frac {
     Some(f) ->
-      // Fractional hours: nothing may follow; convert to mi/s/ns exactly.
       case s1 {
         "" -> {
           let total_ns = f * 3600
@@ -1765,7 +1595,6 @@ fn parse_duration_time_units(s: String) -> Option(#(Int, Int, Int, Int)) {
   }
 }
 
-/// One time unit with optional fraction → #(value, fraction_ns, rest).
 fn parse_dur_time_unit(
   s: String,
   designators: List(String),
@@ -1794,25 +1623,13 @@ fn parse_dur_time_unit(
               Some(#(Some(v), None, string.drop_start(rest2, string.length(d))))
           }
         Error(Nil) ->
-          // Designator mismatch → backtrack so the caller can try the next
-          // unit (e.g. "0.5S" probed by the hours parser). The "fraction must
-          // be on the last unit" rule is enforced by the caller: any
-          // non-empty remainder after a fractional unit is rejected.
+          // designator mismatch: backtrack so caller tries next unit
           Some(#(None, None, s))
       }
     }
   }
 }
 
-// ============================================================================
-// Time zone handling — named IANA zones (system tzdata via temporal_tz),
-// "UTC", and fixed numeric offsets
-// ============================================================================
-
-/// Parse + validate a time zone identifier into a resolved `TimeZone`.
-/// Accepts bare identifiers ("UTC", "+05:30") and ISO date-time strings that
-/// carry a [TimeZone] annotation, a Z designator, or a numeric offset
-/// (ParseTemporalTimeZoneString).
 pub fn parse_time_zone_id(id: String) -> Result(TimeZone, TErr) {
   case parse_time_zone_id_strict(id) {
     Ok(tz) -> Ok(tz)
@@ -1822,12 +1639,10 @@ pub fn parse_time_zone_id(id: String) -> Result(TimeZone, TErr) {
 }
 
 pub type StrictTzError {
-  /// Not a bare identifier; an ISO string fallback may still apply.
   StrictUnknown
   StrictInvalid(TErr)
 }
 
-/// ParseTimeZoneIdentifier: bare identifiers only (UTC, offsets, IANA names).
 pub fn parse_time_zone_id_strict(
   id: String,
 ) -> Result(TimeZone, StrictTzError) {
@@ -1849,8 +1664,6 @@ pub fn parse_time_zone_id_strict(
   }
 }
 
-/// Extract a time zone from an ISO date-time string: annotation wins, then
-/// the Z designator (-> "UTC"), then a minute-precision numeric offset.
 fn tz_from_datetime_string(s: String) -> Result(TimeZone, TErr) {
   case parse_iso_datetime_string(s) {
     None -> Error(RangeE("invalid time zone: " <> s))
@@ -1872,8 +1685,7 @@ fn tz_from_datetime_string(s: String) -> Result(TimeZone, TErr) {
           case p.offset {
             Zulu -> Ok(TzUtc)
             NumericOffset(off, sub_minute) ->
-              // The offset must be syntactically minute-precision: a
-              // seconds component (even ":00") is not a valid zone.
+              // seconds component not allowed, even ":00"
               case !sub_minute && off % ns_per_minute == 0 {
                 True -> Ok(TzOffset(ns: off))
                 False ->
@@ -1885,8 +1697,6 @@ fn tz_from_datetime_string(s: String) -> Result(TimeZone, TErr) {
   }
 }
 
-/// Offset time zone identifier: ±HH[:MM] (minute precision only).
-/// Returns the offset in nanoseconds.
 pub fn parse_offset_tz_id(id: String) -> Option(Int) {
   let signed = case id {
     "+" <> _ | "-" <> _ -> True
@@ -1896,8 +1706,7 @@ pub fn parse_offset_tz_id(id: String) -> Option(Int) {
     False -> None
     True ->
       case parse_offset_part(id) {
-        // A seconds component (sub-minute syntax) is not allowed in an
-        // offset time zone identifier, even when it is ":00".
+        // seconds component not allowed, even ":00"
         Some(#(NumericOffset(ns, False), "")) ->
           case ns % ns_per_minute == 0 && int.absolute_value(ns) < ns_per_day {
             True -> Some(ns)
@@ -1908,7 +1717,6 @@ pub fn parse_offset_tz_id(id: String) -> Option(Int) {
   }
 }
 
-/// The identifier for a resolved time zone.
 pub fn time_zone_id(tz: TimeZone) -> String {
   case tz {
     TzUtc -> "UTC"
@@ -1921,8 +1729,6 @@ pub fn unsupported_tz(tz: String) -> TErr {
   RangeE("time zone " <> tz <> " is not supported")
 }
 
-/// A zone whose name we accepted but whose tzdata will not load is a broken
-/// install, not an unknown identifier: same RangeError, but the reason says so.
 pub fn unloadable_tz(tz: TimeZone, error: temporal_tz.TzError) -> TErr {
   RangeE(
     "time zone "
@@ -1932,8 +1738,6 @@ pub fn unloadable_tz(tz: TimeZone, error: temporal_tz.TzError) -> TErr {
   )
 }
 
-/// GetOffsetNanosecondsFor — UTC offset of `tz` at an exact instant.
-/// RangeError when a named zone's TZif data cannot be loaded.
 pub fn tz_offset_ns_at(tz: TimeZone, epoch_ns: Int) -> Result(Int, TErr) {
   case tz {
     TzUtc -> Ok(0)
@@ -1944,8 +1748,6 @@ pub fn tz_offset_ns_at(tz: TimeZone, epoch_ns: Int) -> Result(Int, TErr) {
   }
 }
 
-/// Wall-clock date/time of `epoch_ns` in `tz`.
-/// RangeError when a named zone's TZif data cannot be loaded.
 pub fn epoch_ns_to_iso_in(
   tz: TimeZone,
   epoch_ns: Int,
@@ -1961,8 +1763,6 @@ pub fn validate_epoch_ns(ns: Int) -> Result(Int, TErr) {
   }
 }
 
-/// Full-precision offset string: ±HH:MM[:SS] (for the `offset` getter;
-/// some zones historically had sub-minute offsets).
 pub fn format_offset_full(offset_ns: Int) -> String {
   let sign = case offset_ns < 0 {
     True -> "-"
@@ -1977,15 +1777,10 @@ pub fn format_offset_full(offset_ns: Int) -> String {
   }
 }
 
-/// Offset rounded to the nearest minute, for ISO string display
-/// (FormatDateTimeUTCOffsetRounded).
 pub fn format_offset_rounded(offset_ns: Int) -> String {
   format_offset_minutes(round_to_increment(offset_ns, ns_per_minute, HalfExpand))
 }
 
-/// TimeZoneEquals — identical zones, or named zones resolving to the same
-/// canonical id (links like Asia/Calcutta -> Asia/Kolkata). Etc/UTC and its
-/// links canonicalize to "UTC", so a named zone can equal the UTC zone.
 pub fn time_zone_equals(a: TimeZone, b: TimeZone) -> Bool {
   a == b
   || case a, b {
@@ -1997,8 +1792,6 @@ pub fn time_zone_equals(a: TimeZone, b: TimeZone) -> Bool {
   }
 }
 
-/// ToTemporalTimeZoneIdentifier: a string identifier, or the [[TimeZone]] of
-/// a ZonedDateTime. Anything else is a TypeError.
 pub fn to_temporal_time_zone(st: Agent, v: JsVal) -> #(TimeZone, Agent) {
   case classify(v) {
     KStr(s) -> #(terr(st, parse_time_zone_id(s)), st)
@@ -2014,8 +1807,6 @@ pub fn to_temporal_time_zone(st: Agent, v: JsVal) -> #(TimeZone, Agent) {
   }
 }
 
-/// SystemTimeZoneIdentifier, resolved: the host's local zone from the agent's
-/// hooks when the tzdata knows it, else UTC.
 pub fn system_time_zone(st: Agent) -> TimeZone {
   case arc_host_time_zone_id(st) {
     Some(id) ->
@@ -2031,11 +1822,6 @@ fn arc_host_time_zone_id(st: Agent) -> Option(String) {
   host_time.time_zone_id(st.hooks.time_zone) |> option.from_result
 }
 
-// ============================================================================
-// ToTemporalInstant
-// ============================================================================
-
-/// ToTemporalInstant(item) → epoch ns.
 pub fn to_temporal_instant(st: Agent, item: JsVal) -> #(Int, Agent) {
   case classify(item) {
     KHandle(h) ->
@@ -2066,9 +1852,7 @@ pub fn to_temporal_instant(st: Agent, item: JsVal) -> #(Int, Agent) {
 }
 
 fn parse_instant_to_ns(st: Agent, s: String) -> #(Int, Agent) {
-  // Per ParseTemporalInstantString, a [u-ca=...] annotation is only
-  // syntax-checked (done by parse_iso_datetime_string); its value is
-  // IGNORED for Instant, so unknown calendars must not throw here.
+  // calendar annotation value is ignored for instant
   case parse_iso_datetime_string(s) {
     None -> rt_val.t_throw_range_error(st, "invalid instant string: " <> s)
     Some(p) ->
@@ -2100,8 +1884,6 @@ fn parse_instant_to_ns(st: Agent, s: String) -> #(Int, Agent) {
   }
 }
 
-/// A bracketed time zone annotation is only syntax-checked for Instant: an
-/// offset annotation must be a minute-precision ±HH:MM, a name is any name.
 fn valid_tz_annotation(tz: Option(String)) -> Bool {
   case tz {
     Some("+" <> _ as ann) | Some("-" <> _ as ann) ->

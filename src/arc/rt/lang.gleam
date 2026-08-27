@@ -1,9 +1,3 @@
-//// Language-level runtime ops that compiled code calls for syntax the core
-//// object model does not cover on its own: the iterator protocol behind
-//// for-of / spread / array destructuring, CopyDataProperties for object
-//// spread and rest, regexp and template literals, sloppy `delete x`.
-//// Sits above `arc/rt/builtins/*` so it can reuse their spec routines.
-
 import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as b_object
@@ -25,8 +19,6 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-/// Same try/catch as `t_call`; the wire shape is `arc/rt/call.Completion`
-/// with the step pair in the normal arm.
 type StepOutcome {
   NormalCompletion(#(Bool, JsVal))
   ThrowCompletion(JsVal)
@@ -41,20 +33,11 @@ fn protected_step(
 @external(erlang, "arc_rt_store_ffi", "as_object_key")
 fn as_object_key(key: k) -> ObjectKey
 
-/// TypeError with `message`, not thrown. The generator state machine's
-/// default arm wraps it in a throw completion itself.
 pub fn t_new_error(st: Agent, message: String) -> #(JsVal, Agent) {
   st.store.ops.new_error(st, TypeErr, message)
 }
 
-// ── §7.4 Iterator Records ───────────────────────────────────────────────────
-//
-// The record is an ordinary null-proto object with own data properties
-// `iterator`, `next` and `done`, so it is an ordinary traced heap value that
-// compiled code can keep in a local or a coroutine frame across suspension.
-// `done` is the spec's [[Done]]: once set, `t_iter_next` short-circuits and
-// `t_iter_close` is a no-op (QuickJS tracks the same bit on the stack slot).
-
+// iterator record is a null-proto object: iterator, next, done
 pub type IterHint {
   Sync
   Async
@@ -91,21 +74,14 @@ fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
   #(mk_object(h), st)
 }
 
-/// The record object for an iterator whose `next` is already fetched (the
-/// interpreter's IteratorRecord opcode, after GetAsyncIterator).
 pub fn t_alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
   alloc_record(st, rec)
 }
 
-/// The `[[Iterator]]`/`[[NextMethod]]` pair of a record object, `None` when
-/// `rec` is not one. yield* delegation reads them to call `next` itself and
-/// to forward `return`/`throw` to the underlying iterator.
 pub fn record_parts(st: Agent, rec: JsVal) -> Option(IteratorRecord) {
   record_props(st, rec) |> option.then(parts_of)
 }
 
-/// The own props of an engine-created record object (`alloc_record`), read
-/// straight off its cell.
 fn record_props(
   st: Agent,
   rec: JsVal,
@@ -131,9 +107,6 @@ fn parts_of(
   }
 }
 
-/// The record object is engine-created (`alloc_record`) and never reachable
-/// from user code, so its three fields are read straight off the cell; the
-/// generic [[Get]]s remain only as the total fallback.
 fn read_record(st: Agent, rec: JsVal) -> #(Bool, IteratorRecord, Agent) {
   case record_fields(st, rec) {
     Some(#(done, record)) -> #(done, record, st)
@@ -163,15 +136,8 @@ fn mark_done(st: Agent, rec: JsVal) -> Agent {
   st
 }
 
-/// What one read of the record's [[NextMethod]] and [[Iterator]] cells says
-/// the step can skip the protocol call for.
 type NativeIter {
-  /// An intrinsic iterator `next` over its built-in kind
-  /// (`iter_protocol.native_step`).
   NativeNext(next: IteratorNative, iter_h: Handle)
-  /// The unmodified %GeneratorPrototype%.next on a generator object: calling
-  /// it could do nothing but resume the `SGenerator` cell `data` (the
-  /// interpreter's `for..of` takes the same shortcut).
   NativeGenerator(data: Handle)
   NotNative
 }
@@ -193,9 +159,6 @@ fn native_iter(st: Agent, record: IteratorRecord) -> NativeIter {
   }
 }
 
-/// One GeneratorResume with no result object. A throwing body marks the
-/// record done before propagating, as `protocol_step` does, so a surrounding
-/// IteratorClose skips `.return()`.
 fn generator_step(
   st: Agent,
   rec: JsVal,
@@ -210,7 +173,7 @@ fn generator_step(
   }
 }
 
-/// §7.4.3 GetIterator(obj, hint). Returns the record object.
+// §7.4.3 getiterator, returns the record object
 pub fn t_get_iterator(
   st: Agent,
   obj: JsVal,
@@ -223,9 +186,7 @@ pub fn t_get_iterator(
   alloc_record(st, rec)
 }
 
-/// §7.4.8 IteratorStepValue as a `#(done, value)` pair. An abrupt completion
-/// from `next()`/`done`/`value` marks the record done before propagating so
-/// a surrounding IteratorClose skips `.return()` (§14.7.5.7 step 6.b).
+// §7.4.8 iteratorstepvalue; a throw marks the record done first
 pub fn t_iter_next(st: Agent, rec: JsVal) -> #(#(Bool, JsVal), Agent) {
   let #(done, record, st) = read_record(st, rec)
   use <- bool.guard(done, #(#(True, mk_undefined()), st))
@@ -264,10 +225,7 @@ fn protocol_step(
   }
 }
 
-/// §7.4.11 IteratorClose. `abrupt` selects the throw-completion rules
-/// (call `.return()`, swallow whatever it does; the caller rethrows the
-/// original) over the normal-completion rules (a throwing or non-object
-/// `.return()` result propagates). No-op once the record is done.
+// §7.4.11 iteratorclose; abrupt swallows what return() does
 pub fn t_iter_close(st: Agent, rec: JsVal, abrupt: Bool) -> Agent {
   let #(done, record, st) = read_record(st, rec)
   case done {
@@ -285,8 +243,7 @@ pub fn t_iter_close(st: Agent, rec: JsVal, abrupt: Bool) -> Agent {
   }
 }
 
-/// §14.3.3 rest element: drain what is left of the record into a new Array.
-/// [[Done]] is set first, so no completion after this closes the iterator.
+// §14.3.3 rest element
 pub fn t_iter_rest(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
   let #(done, record, st) = read_record(st, rec)
   case done {
@@ -299,8 +256,6 @@ pub fn t_iter_rest(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// Spread element in an array literal or argument list: append every value
-/// of `iterable` to the in-order list `acc`.
 pub fn t_spread_into_list(
   st: Agent,
   acc: List(JsVal),
@@ -311,17 +266,13 @@ pub fn t_spread_into_list(
   #(list.append(acc, values), st)
 }
 
-/// for-await step (§14.7.5.7 step 6.a): `Call(next, iterator)`, not awaited.
-/// The compiled state machine awaits the result and reads `done`/`value`.
+// §14.7.5.7 step 6.a, not awaited here
 pub fn t_async_iter_next(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
   let #(_done, record, st) = read_record(st, rec)
   t_call_checked(st, record.next_method, record.iterator, [])
 }
 
-// ── §7.3.25 CopyDataProperties ──────────────────────────────────────────────
-
-/// Object literal `{...source}`: copy own enumerable properties of `source`
-/// onto `target` with CreateDataProperty. Nullish `source` is a no-op.
+// §7.3.25 copydataproperties for {...source}
 pub fn t_copy_data_props(
   st: Agent,
   target: JsVal,
@@ -331,9 +282,7 @@ pub fn t_copy_data_props(
   #(target, copy_data_properties(st, target_h, source, []))
 }
 
-/// Object rest `{a, ...rest} = source`: a fresh %Object.prototype% object with
-/// every own enumerable property of `source` except `excluded` (wire keys, in
-/// source order). RequireObjectCoercible already ran at pattern entry.
+// object rest pattern, excluded keys skipped
 pub fn t_object_rest(
   st: Agent,
   source: JsVal,
@@ -373,9 +322,6 @@ fn copy_data_properties(
   }
 }
 
-// ── literals ────────────────────────────────────────────────────────────────
-
-/// §13.2.7.3 `/pattern/flags`: a fresh RegExp per evaluation.
 pub fn t_regexp_new(
   st: Agent,
   pattern: String,
@@ -384,13 +330,7 @@ pub fn t_regexp_new(
   b_regexp.regexp_create_literal(st, pattern, flags)
 }
 
-/// §13.2.8.4 GetTemplateObject. `site` is `"<unit>#<index>"`, unique per
-/// tagged-template source position: compiled code qualifies the index with
-/// its module name, the interpreter with the activation's parse id. The frozen
-/// template array (with its frozen `raw`) is built once per realm (the
-/// [[TemplateMap]] is a Realm Record field), pinned, and cached on the agent
-/// under the current realm's id. `cooked` holds `undefined` for quasis with
-/// invalid escapes.
+// §13.2.8.4 gettemplateobject, cached per realm and site
 pub fn t_get_template_object(
   st: Agent,
   site: String,
@@ -428,10 +368,7 @@ pub fn t_get_template_object(
   }
 }
 
-// ── references ──────────────────────────────────────────────────────────────
-
-/// Sloppy `delete x` where `x` resolved to the global object (§13.5.1.2 step
-/// 5): `globalThis.[[Delete]](x)`.
+// §13.5.1.2 step 5 sloppy delete on the global
 pub fn t_global_delete(st: Agent, name: String) -> #(Bool, Agent) {
   rt_obj.t_delete_prop(
     st,

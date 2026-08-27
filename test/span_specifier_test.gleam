@@ -1,14 +1,8 @@
-//// Unit tests for byte spans on import/export local-binding identifiers.
-//// Slicing the source by a specifier's `local_span` must reproduce the exact
-//// original identifier text (the local binding, not the imported/exported
-//// name or the `as` alias).
-
 import arc/parser
 import arc/parser/ast
 import gleam/bit_array
 import gleam/list
 
-/// Slice the original source by a half-open byte span and decode to text.
 fn slice_span(source: String, span: ast.Span) -> String {
   let bytes = bit_array.from_string(source)
   let assert Ok(slice) =
@@ -17,7 +11,6 @@ fn slice_span(source: String, span: ast.Span) -> String {
   text
 }
 
-/// The single import declaration's specifier list.
 fn import_specifiers(source: String) -> List(ast.ImportSpecifier) {
   let assert Ok(#(ast.Module(items), _sb)) = parser.parse(source, parser.Module)
   let assert Ok(specs) =
@@ -30,7 +23,6 @@ fn import_specifiers(source: String) -> List(ast.ImportSpecifier) {
   specs
 }
 
-/// The single export-named declaration's specifier list.
 fn export_specifiers(source: String) -> List(ast.ExportSpecifier) {
   let assert Ok(#(ast.Module(items), _sb)) = parser.parse(source, parser.Module)
   let assert Ok(specs) =
@@ -49,7 +41,6 @@ pub fn import_named_local_span_test() {
     import_specifiers(source)
   assert imported == "foo"
   assert local == "bar"
-  // The span covers the local binding `bar`, not `foo` or `foo as bar`.
   assert slice_span(source, local_span) == "bar"
 }
 
@@ -84,7 +75,6 @@ pub fn export_named_local_span_test() {
     export_specifiers(source)
   assert local == "local"
   assert exported == "exported"
-  // The span covers the local binding `local`, not the `exported` alias.
   assert slice_span(source, local_span) == "local"
 }
 

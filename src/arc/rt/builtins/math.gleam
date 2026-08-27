@@ -1,12 +1,3 @@
-//// The `Math` global namespace (ES2024 §21.3).
-////
-//// Works over the threaded Agent + JsNum shape
-//// (`JInt|JFloat|JNan|JPosInf|JNegInf`); every finite arm widens through
-//// `finite_to_float` so the arithmetic stays on Floats.
-//// Return-tuple order is `#(JsVal, Agent)` (R1); an argument's
-//// ToNumber TypeError (Symbol/BigInt) diverges via `t_throw` inside
-//// `t_to_number` (D7).
-
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/types.{
@@ -24,8 +15,6 @@ import gleam/int
 import gleam/list
 import gleam/option
 
-/// Set up the Math global object.
-/// Math is NOT a constructor — it's a plain object with static methods.
 pub fn init(
   st: Agent,
   object_proto: Handle,
@@ -99,7 +88,6 @@ pub fn init(
   )
 }
 
-/// Per-module dispatch for Math native functions.
 pub fn dispatch(
   st: Agent,
   native: MathNative,
@@ -145,22 +133,12 @@ pub fn dispatch(
   }
 }
 
-// ============================================================================
-// Math method implementations
-// ============================================================================
-
-/// Math.pow(base, exponent) — §6.1.6.1.3 Number::exponentiate.
 fn math_pow(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use a, b <- math_binary(args, st)
   num_exp(a, b)
 }
 
-/// Math.abs(x)
-///
-/// §21.3.2.1 step 4: "If x is -0𝔽, return +0𝔽". `float.absolute_value` gets
-/// this wrong — it is `case x >=. 0.0 { True -> x .. }`, and `-0.0 >=. 0.0`
-/// is True on the BEAM, so it hands -0.0 straight back. Use the canonical
-/// sign predicate instead: `0.0 -. -0.0` is +0.0, and `0.0 -. -5.0` is 5.0.
+// float.absolute_value gets -0.0 wrong
 fn math_abs(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use x <- math_unary(args, st)
   case x {
@@ -176,7 +154,6 @@ fn math_abs(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-/// Math.sqrt(x)
 fn math_sqrt(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use x <- math_unary(args, st)
   case x {
@@ -192,43 +169,33 @@ fn math_sqrt(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-/// Which end of the ordering `math_extremum` folds toward.
 type Extremum {
   Max
   Min
 }
 
-/// Math.max(a, b, ...) — returns -Infinity for no args.
 fn math_max(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   math_extremum(args, st, Max)
 }
 
-/// Math.min(a, b, ...) — returns +Infinity for no args.
 fn math_min(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   math_extremum(args, st, Min)
 }
 
-/// Math.max/min fold. The seed (loses to everything), the dominant value
-/// (beats everything) and the finite tie-break all come out of ONE `case
-/// which` — they must agree, so they cannot be chosen independently.
 fn math_extremum(
   args: List(JsVal),
   st: Agent,
   which: Extremum,
 ) -> #(JsVal, Agent) {
   let #(seed, dominant, keep_acc) = case which {
-    // Per spec: Math.max(+0, -0) → +0, so a -0 accumulator loses ties.
     Max -> #(JNegInf, JPosInf, fn(a: Float, b: Float) {
       a >=. b && { a >. b || !rt_val.is_neg_zero(a) }
     })
-    // Per spec: Math.min(+0, -0) → -0, so a -0 argument wins ties.
     Min -> #(JPosInf, JNegInf, fn(a: Float, b: Float) {
       a <=. b && { a <. b || !rt_val.is_neg_zero(b) }
     })
   }
-  // §21.3.2.24/25 step 1: ? ToNumber every argument (in order) BEFORE the
-  // fold — a later argument's valueOf must still run (and may throw) even
-  // when an earlier one was already NaN.
+  // tonumber every arg before folding, observable
   let #(nums, st) = coerce_args(args, st)
   let result =
     list.fold(nums, seed, fn(acc, num) {
@@ -265,7 +232,6 @@ fn math_extremum(
   #(mk_number(result), st)
 }
 
-/// Math.atan(x)
 fn math_atan(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use x <- math_unary(args, st)
   case x {
@@ -276,7 +242,6 @@ fn math_atan(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-/// Math.atan2(y, x)
 fn math_atan2(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use y, x <- math_binary(args, st)
   case y, x {
@@ -287,9 +252,7 @@ fn math_atan2(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
     JNegInf, JNegInf -> JFloat(ffi_math_atan2(-1.0, -1.0))
     JPosInf, _ -> JFloat(ffi_math_atan2(1.0, 0.0))
     JNegInf, _ -> JFloat(ffi_math_atan2(-1.0, 0.0))
-    // §21.3.2.8 steps 12-15: the result's sign is y's — and a -0 y is
-    // NEGATIVE. `yv >=. 0.0` is True for -0.0, so it would hand
-    // `Math.atan2(-0, Infinity)` a +0 and `Math.atan2(-0, -Infinity)` a +π.
+    // sign follows y and -0 counts as negative
     _, JPosInf ->
       case is_negative_float(finite_to_float(y)) {
         True -> JFloat(-0.0)
@@ -304,11 +267,9 @@ fn math_atan2(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-/// Math.exp(x)
 fn math_exp(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use x <- math_unary(args, st)
   case x {
-    // exp_total already yields JPosInf when e^n overflows a 64-bit float.
     JInt(_) | JFloat(_) -> exp_total(finite_to_float(x))
     JNan -> JNan
     JPosInf -> JPosInf
@@ -316,14 +277,10 @@ fn math_exp(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-/// Math.random() — a uniform Float in [0, 1) via `HostHooks.random`. Going
-/// through the host hook (never `rand:uniform` directly) is what lets the
-/// harness seed a deterministic PRNG.
 fn math_random(st: Agent) -> #(JsVal, Agent) {
   #(mk_number(JFloat(st.hooks.random())), st)
 }
 
-/// Math.sign(x) — returns -1, 0, or 1 (preserving ±0)
 fn math_sign(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use x <- math_unary(args, st)
   case x {
@@ -339,15 +296,12 @@ fn math_sign(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-/// Math.cbrt(x) — cube root
 fn math_cbrt(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use x <- math_unary(args, st)
   case x {
     JInt(_) | JFloat(_) -> {
       let n = finite_to_float(x)
       keep_neg_zero(n, case n <. 0.0 {
-        // |n|^(1/3) never overflows for a finite n, but pow_total is
-        // total so we get a JsNum back: negate it structurally.
         True -> num_negate(pow_total(float.absolute_value(n), 1.0 /. 3.0))
         False -> pow_total(n, 1.0 /. 3.0)
       })
@@ -358,11 +312,8 @@ fn math_cbrt(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-/// Math.hypot(a, b, ...) — sqrt(sum of squares). Per spec, ±∞ beats NaN.
 fn math_hypot(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  // §21.3.2.18 step 1: ? ToNumber every argument, in order.
   let #(nums, st) = coerce_args(args, st)
-  // Classify in one pass: presence of ±∞, of NaN, and the finite magnitudes.
   let #(inf, nan, finites) =
     list.fold(nums, #(False, False, []), fn(acc, n) {
       let #(i, na, vs) = acc
@@ -375,37 +326,25 @@ fn math_hypot(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   let result = case inf, nan {
     True, _ -> JPosInf
     _, True -> JNan
-    // hypot_total returns JPosInf when the true result overflows a 64-bit
-    // float; folding `sum +. v *. v` here instead would badarith (crashing
-    // the process, NOT throwing) on inputs as ordinary as
-    // `Math.hypot(1e200, 1e200)`, whose true result is finite.
     _, _ -> hypot_total(finites)
   }
   #(mk_number(result), st)
 }
 
-/// Math.clz32(x) — count leading zeros in 32-bit integer representation
 fn math_clz32(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use x <- math_unary(args, st)
-  // §7.1.7 ToUint32 (NaN/±∞ → 0).
   let n = rt_val.num_to_uint32(x)
   JInt(count_leading_zeros_32(n))
 }
 
-/// Math.imul(a, b) — 32-bit integer multiplication
 fn math_imul(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use a, b <- math_binary(args, st)
-  // §7.1.6 ToInt32 (NaN/±∞ → 0) on each operand.
   let a32 = rt_val.num_to_int32(a)
   let b32 = rt_val.num_to_int32(b)
-  // Wrap the exact Int product with wrap_int32. It must NOT be routed
-  // through a Float (e.g. `num_to_int32` of `int.to_float(a32 * b32)`): the
-  // product can need up to 62 bits, so the low 32 bits — the only ones imul
-  // keeps — get rounded away by the f64 conversion whenever |product| > 2^53.
+  // stay in ints, a float would drop low bits
   JInt(rt_val.wrap_int32(a32 * b32))
 }
 
-/// Math.expm1(x) — e^x - 1 (more precise for small x)
 fn math_expm1(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use x <- math_unary(args, st)
   case x {
@@ -419,31 +358,23 @@ fn math_expm1(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-/// e^n - 1 for a finite non-(-0) n. Erlang's `math` module has no `expm1`;
-/// Kahan's correction recovers full precision from `u = e^n`.
+// kahan's expm1 correction
 fn expm1_finite(n: Float) -> JsNum {
   case exp_total(n) {
-    // e^n rounded to exactly 1: n is tiny, and e^n - 1 == n to full precision.
     JFloat(u) if u >=. 1.0 && u <=. 1.0 -> JFloat(n)
     JFloat(u) -> {
       let um1 = u -. 1.0
       case um1 == -1.0 {
-        // e^n rounded to exactly 0 (n very negative): the answer is -1.
         True -> JFloat(-1.0)
-        // Divide FIRST: `n /. ln(u)` is ~1 (ln(u) is n to within a rounding),
-        // so multiplying by `um1` last cannot overflow. `Math.expm1(708)`
-        // would badarith on the BEAM in the other order.
+        // divide first or expm1(708) overflows
         False -> JFloat(um1 *. { n /. ffi_math_log(u) })
       }
     }
-    // e^n overflowed a 64-bit float, so e^n - 1 overflows to the same value.
     JPosInf -> JPosInf
-    // Unreachable from a finite n, but exp_total is total; pass through.
     other -> other
   }
 }
 
-/// Math.log1p(x) — log(1 + x) (more precise for small x)
 fn math_log1p(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use x <- math_unary(args, st)
   case x {
@@ -460,7 +391,6 @@ fn math_log1p(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-/// ln(1 + n) for a finite n > -1. Kahan's correction — see arc math.gleam.
 fn log1p_finite(n: Float) -> JsNum {
   let u = 1.0 +. n
   case u == 1.0 {
@@ -469,7 +399,6 @@ fn log1p_finite(n: Float) -> JsNum {
   }
 }
 
-/// Math.fround(x) — round to the nearest 32-bit float and widen back.
 fn math_fround(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use x <- math_unary(args, st)
   case x {
@@ -478,7 +407,6 @@ fn math_fround(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-/// Math.sinh(x)
 fn math_sinh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use x <- math_unary(args, st)
   case x {
@@ -490,7 +418,6 @@ fn math_sinh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-/// Math.cosh(x)
 fn math_cosh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use x <- math_unary(args, st)
   case x {
@@ -500,7 +427,6 @@ fn math_cosh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-/// Math.tanh(x)
 fn math_tanh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use x <- math_unary(args, st)
   case x {
@@ -514,7 +440,6 @@ fn math_tanh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-/// Math.acosh(x) — domain [1, +Infinity), NaN for < 1
 fn math_acosh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use x <- math_unary(args, st)
   case x {
@@ -530,7 +455,6 @@ fn math_acosh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-/// Math.atanh(x) — domain (-1, 1), NaN outside, ±Infinity at ±1
 fn math_atanh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use x <- math_unary(args, st)
   case x {
@@ -547,11 +471,6 @@ fn math_atanh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-// ============================================================================
-// Internal helpers
-// ============================================================================
-
-/// Apply a unary JsNum→JsNum function to the first arg (§7.1.4 ToNumber).
 fn math_unary(
   args: List(JsVal),
   st: Agent,
@@ -561,8 +480,6 @@ fn math_unary(
   #(mk_number(apply(x)), st)
 }
 
-/// Apply a binary JsNum op to the first two args, coercing each in argument
-/// order with §7.1.4 ToNumber.
 fn math_binary(
   args: List(JsVal),
   st: Agent,
@@ -574,7 +491,6 @@ fn math_binary(
   #(mk_number(apply(a, b)), st)
 }
 
-/// §7.1.4 ToNumber over a whole argument list, left to right, threading state.
 fn coerce_args(args: List(JsVal), st: Agent) -> #(List(JsNum), Agent) {
   coerce_args_loop(args, st, [])
 }
@@ -593,7 +509,6 @@ fn coerce_args_loop(
   }
 }
 
-/// Widen a known-finite JsNum (`JInt|JFloat`) to a Float.
 fn finite_to_float(n: JsNum) -> Float {
   case n {
     JInt(i) -> int.to_float(i)
@@ -603,12 +518,10 @@ fn finite_to_float(n: JsNum) -> Float {
   }
 }
 
-/// True iff `n` is IEEE-754 negative — `n < 0` OR `n == -0.0`.
 fn is_negative_float(n: Float) -> Bool {
   n <. 0.0 || rt_val.is_neg_zero(n)
 }
 
-/// -0 in, -0 out: the odd Math functions must return -0 for a -0 argument.
 fn keep_neg_zero(n: Float, result: JsNum) -> JsNum {
   case rt_val.is_neg_zero(n) {
     True -> JFloat(-0.0)
@@ -616,7 +529,6 @@ fn keep_neg_zero(n: Float, result: JsNum) -> JsNum {
   }
 }
 
-/// Like `finite_passthrough` but preserves -0.0 (for asinh).
 fn neg_zero_preserving(
   args: List(JsVal),
   st: Agent,
@@ -632,9 +544,6 @@ fn neg_zero_preserving(
   }
 }
 
-/// Rounding op (floor/ceil/round/trunc): a JInt is already its own result;
-/// an integral JFloat result in the safe range (not -0) comes back as JInt so
-/// `a[Math.floor(x)]` takes the integer index path. Non-finite passes through.
 fn rounding_passthrough(
   args: List(JsVal),
   st: Agent,
@@ -660,7 +569,6 @@ fn rounding_passthrough(
   }
 }
 
-/// Unary op where finite n → JFloat(f(n)) and anything else is NaN.
 fn finite_or_nan(
   args: List(JsVal),
   st: Agent,
@@ -673,7 +581,6 @@ fn finite_or_nan(
   }
 }
 
-/// Unary log-like op: domain [0, ∞), NaN for <0, -∞ at 0, ∞ passes through.
 fn log_domain(
   args: List(JsVal),
   st: Agent,
@@ -685,9 +592,7 @@ fn log_domain(
     JPosInf -> JPosInf
     JInt(_) | JFloat(_) -> {
       let n = finite_to_float(x)
-      // ±0 → -Infinity. Test with `>=. && <=.` NOT a `0.0` literal pattern:
-      // on OTP >= 27 that pattern only matches +0.0, so Math.log(-0) would
-      // fall through to `math:log(-0.0)` and crash the VM with badarith.
+      // a 0.0 pattern only matches +0.0 on otp 27+
       case n >=. 0.0 && n <=. 0.0, n <. 0.0 {
         True, _ -> JNegInf
         _, True -> JNan
@@ -697,7 +602,6 @@ fn log_domain(
   }
 }
 
-/// Unary op with domain [-1, 1]: NaN outside, JFloat(f(n)) inside.
 fn domain_unit(
   args: List(JsVal),
   st: Agent,
@@ -716,7 +620,6 @@ fn domain_unit(
   }
 }
 
-/// JS Math.round: round half toward +Infinity.
 fn js_round(n: Float) -> Float {
   let floored = ffi_math_floor(n)
   let rounded = case n -. floored >=. 0.5 {
@@ -742,7 +645,6 @@ fn js_trunc(n: Float) -> Float {
   }
 }
 
-/// Count leading zeros in a 32-bit integer.
 fn count_leading_zeros_32(n: Int) -> Int {
   count_leading_zeros_loop(n, 31, 0)
 }
@@ -760,11 +662,9 @@ fn count_leading_zeros_loop(n: Int, bit: Int, count: Int) -> Int {
   }
 }
 
-/// §6.1.6.1.3 Number::exponentiate — the shared kernel behind Math.pow.
 fn num_exp(base: JsNum, exp: JsNum) -> JsNum {
   case base, exp {
     _, JNan -> JNan
-    // Steps 2-3: exponent ±0 → 1, even for NaN base.
     _, JInt(0) -> JInt(1)
     _, JFloat(e) if e >=. 0.0 && e <=. 0.0 -> JInt(1)
     JNan, _ -> JNan
@@ -788,7 +688,6 @@ fn num_exp(base: JsNum, exp: JsNum) -> JsNum {
         _, _, _ -> JNan
       }
     }
-    // Delegate the finite×finite core to the total FFI wrapper.
     _, _ -> pow_total(finite_to_float(base), finite_to_float(exp))
   }
 }
@@ -824,11 +723,7 @@ fn num_negate(n: JsNum) -> JsNum {
   }
 }
 
-// ── FFI ─────────────────────────────────────────────────────────────────────
-// TOTAL wrappers (arc_rt_math_ffi): every `math` BIF that can OVERFLOW
-// a 64-bit float — exp, pow, cosh, sinh — raises `badarith` on the BEAM
-// instead of returning ±Infinity. Do not add a raw `@external(erlang, "math",
-// ...)` binding for an overflow-capable function; route it through the FFI.
+// overflow-capable math bifs badarith, keep them in the ffi
 
 @external(erlang, "arc_rt_math_ffi", "exp")
 fn exp_total(x: Float) -> JsNum

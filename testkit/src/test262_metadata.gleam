@@ -1,5 +1,3 @@
-/// Parse test262 YAML frontmatter from test files.
-/// Extracts negative phase/type and flags for test execution.
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
@@ -20,8 +18,6 @@ pub type TestMetadata {
   )
 }
 
-/// Parse metadata from a test262 source file.
-/// Returns default metadata if no frontmatter found.
 pub fn parse_metadata(source: String) -> TestMetadata {
   case string.split_once(source, "/*---") {
     Error(Nil) -> default_metadata()
@@ -43,7 +39,6 @@ fn default_metadata() -> TestMetadata {
   )
 }
 
-/// Which multi-line block we're currently inside.
 type BlockState {
   TopLevel
   InNegative
@@ -102,7 +97,7 @@ fn parse_yaml_lines(
                 }
                 _ -> parse_yaml_lines(rest, meta, block)
               }
-            // In a block but hit non-indented line — exit and reprocess.
+            // block ended, reprocess this line at top level
             _, False if block != TopLevel ->
               parse_yaml_lines([line, ..rest], meta, TopLevel)
             _, _ -> {
@@ -130,9 +125,6 @@ fn append_list_item(
   }
 }
 
-/// Parse a top-level YAML field. Returns updated meta and the next block
-/// state — `InList(field)` when the value is empty (YAML list follows),
-/// `InNegative` for `negative:`, `TopLevel` otherwise.
 fn parse_top_level_field(
   trimmed: String,
   meta: TestMetadata,
@@ -165,8 +157,6 @@ fn parse_array_field(
   }
 }
 
-/// Parse a YAML inline array from the value portion (after the colon).
-/// e.g. " [module, onlyStrict]" → ["module", "onlyStrict"]
 fn parse_inline_array(value: String) -> List(String) {
   case string.split_once(value, "[") {
     Error(_) -> []

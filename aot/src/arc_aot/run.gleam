@@ -1,7 +1,3 @@
-//// Run a compiled JS module on the BEAM against arc's runtime: seed an
-//// `Agent`, load the `.beam`, apply `js_main`, then drain microtasks and run
-//// the GC safepoint. Console output goes wherever `HostHooks.print` sends it.
-
 import arc/host_hooks.{type HostHooks}
 import arc/interp/entry
 import arc/rt/builtins as rt_builtins
@@ -11,42 +7,29 @@ import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
 import gleam/string
 
-/// How the top level completed: `Ok(v)` for a normal return,
-/// `Error(reason)` for a load failure, an uncaught throw (rendered with
-/// `string.inspect`) or a crash.
 pub type RunResult =
   Result(Dynamic, String)
 
-/// Wire terms from `arc_aot_exec_ffi:apply_js_main/2`.
 pub type JsExecOutcome {
   JsReturned(value: Dynamic)
-  /// The uncaught JS value.
   JsThrew(exn: JsVal)
   JsCrashed(reason: String)
 }
 
-/// A fresh agent with a full realm and the bytecode interpreter linked, so
-/// `eval`, `Function()` and `ShadowRealm.evaluate` run on the same heap as
-/// compiled code. Pure data, so one seed can be applied any number of times.
 pub fn seed(hooks: HostHooks) -> Agent {
   entry.link(rt_builtins.new_agent(hooks))
 }
 
-/// Load `beam` under the module atom `name`.
 pub fn load(beam: BitArray, name: String) -> Result(Atom, String) {
   build_beam.load_module(atom.create(name), name, beam)
 }
 
-/// Drop a loaded module (old and current code) from the code server.
 @external(erlang, "arc_aot_exec_ffi", "unload")
 pub fn unload(module: Atom) -> Nil
 
-/// Apply `module:js_main(st, frame, [])` under a protected try, then drain
-/// microtasks and run the GC safepoint. Never raises.
 @external(erlang, "arc_aot_exec_ffi", "apply_js_main")
 pub fn apply_main(module: Atom, st: Agent) -> #(JsExecOutcome, Agent)
 
-/// `apply_main` with the outcome folded into a `RunResult`.
 pub fn run_loaded(module: Atom, st: Agent) -> #(Agent, RunResult) {
   let #(outcome, st) = apply_main(module, st)
   let result = case outcome {
@@ -57,8 +40,6 @@ pub fn run_loaded(module: Atom, st: Agent) -> #(Agent, RunResult) {
   #(st, result)
 }
 
-/// Load and run in an already seeded agent. On a load failure the agent is
-/// returned unchanged.
 pub fn run_beam_in(
   st: Agent,
   beam: BitArray,
@@ -70,7 +51,6 @@ pub fn run_beam_in(
   }
 }
 
-/// Seed from `hooks`, then `run_beam_in`.
 pub fn run_beam(
   beam: BitArray,
   name: String,

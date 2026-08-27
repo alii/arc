@@ -1,15 +1,4 @@
-//// emit_2core end-to-end benchmark: JS source → emit_2core → 2core IR →
-//// Core Erlang → BEAM, timed against the arc tree-walking interpreter and
-//// the Milestone-0 hand-written-IR baselines. Unlike `emit_2core_harness.
-//// run_compiled`, this SEPARATES compile+load+realm-init (once) from the
-//// hot invoke loop (repeated), so the reported per-call number is the pure
-//// generated-code cost — directly comparable to `milestone0_test`'s
-//// `exec_beam` figure and to native Gleam.
-////
-//// Run standalone (NOT via `gleam test` — the arc runner is parallel and
-//// has a 10s per-test cap):
-////
-////     cd aot && gleam run -m emit_2core_bench
+// run: cd aot && gleam run -m emit_2core_bench
 
 import arc/engine
 import arc/rt/types.{type Agent}
@@ -33,18 +22,9 @@ fn monotonic_time(unit: TimeUnit) -> Int
 @external(erlang, "emit_2core_harness_ffi", "to_dynamic")
 fn to_dynamic(a: a) -> Dynamic
 
-// ───────────────────────────── configuration ─────────────────────────────
-
 const n = 1_000_000
 
-/// Per-bench wall-clock budget for the timed repeat loop. The repeat count
-/// is derived from a warm-up call so a slow kernel (makeAdder ≈1.2s) does
-/// not blow the run out to minutes.
 const budget_us = 3_000_000
-
-// ───────────────────────────── JS sources ─────────────────────────────
-// n is baked in — the compiled entry is a zero-arg Script whose completion
-// value is the final expression. The same text feeds qjs/bun/LLInt below.
 
 pub const sum_js = "let s=0;for(let i=0;i<1000000;i++)s+=i;s"
 
@@ -52,11 +32,6 @@ pub const adder_js = "function makeAdder(x){return function(y){return x+y}}let a
 
 pub const obj_js = "let o={x:0};for(let i=0;i<1000000;i++)o.x=o.x+i;let s=o.x;s"
 
-// ───────────────────────────── compiled path ─────────────────────────────
-
-/// A compiled+loaded JS script plus the seeded agent each apply starts
-/// from. `Agent` is a pure threaded record, so the SAME `seed` is passed to
-/// every `apply_main` and each run observes an identical fresh realm.
 type Loaded {
   Loaded(mod: Atom, seed: Agent)
 }
@@ -85,17 +60,11 @@ fn run_once(loaded: Loaded) -> Dynamic {
   to_dynamic(outcome)
 }
 
-// ───────────────────────────── interpreter path ─────────────────────────────
-// Full engine.eval each call (parse + tree-walk). Parse is negligible next
-// to a 1M-iteration walk, so this is a fair "interpreter run" number.
-
 fn interp_once(source: String) -> Dynamic {
   let eng: engine.Engine(Nil) = engine.new()
   let assert Ok(#(engine.Returned(value:), _)) = engine.eval(eng, source)
   to_dynamic(value)
 }
-
-// ───────────────────────────── native Gleam baselines ─────────────────────────────
 
 fn native_sum(i: Int, s: Int, lim: Int) -> Int {
   case i < lim {
@@ -110,8 +79,6 @@ fn native_adder(i: Int, s: Int, lim: Int, f: fn(Int) -> Int) -> Int {
     False -> s
   }
 }
-
-// ───────────────────────────── timing ─────────────────────────────
 
 fn time_us(f: fn() -> a) -> #(Int, a) {
   let t0 = monotonic_time(Microsecond)
@@ -130,8 +97,6 @@ fn per(us: Int, reps: Int) -> String {
   int.to_string(us / reps) <> " µs"
 }
 
-/// Pick a repeat count that keeps `f`'s total under `budget_us`, given a
-/// single warm-up timing. Minimum 3, maximum 200.
 fn reps_for(warm_us: Int) -> Int {
   let r = case warm_us {
     0 -> 200
@@ -139,8 +104,6 @@ fn reps_for(warm_us: Int) -> Int {
   }
   int.min(200, int.max(3, r))
 }
-
-// ───────────────────────────── one bench row ─────────────────────────────
 
 type Row {
   Row(
@@ -165,9 +128,6 @@ fn bench(
   let mod = "arc_emit2c_bench_" <> name
   let #(compile_us, realm_us, loaded) = compile_load(source, mod)
 
-  // correctness via console.log — the compiled Script's completion value is
-  // Undefined (emit_2core does not thread ExpressionStatement completions),
-  // so verify by stdout using the harness once, then time the print-free source.
   let logged = source <> ";console.log(s)"
   let want = <<{ int.to_string(expected) <> "\n" }:utf8>>
   let c = harness.run_compiled(logged)
@@ -187,7 +147,6 @@ fn bench(
       <> ")"
   }
 
-  // adaptive repeat, warm-up first
   let #(cw_us, _) = time_us(fn() { run_once(loaded) })
   let compiled_reps = reps_for(cw_us)
   let #(compiled_us, _) =
@@ -216,8 +175,6 @@ fn bench(
     correctness:,
   )
 }
-
-// ───────────────────────────── report ─────────────────────────────
 
 fn print_row(r: Row) {
   io.println("")
@@ -289,8 +246,6 @@ pub fn main() {
   print_row(adder)
   print_row(obj)
 
-  // Milestone-0 hand-IR figures (this machine, 2core `gleam test` — see
-  // carder/milestone0_test.gleam). Re-measure there if the host changes.
   let m0_sum_us = 994
   let m0_adder_us = 2405
 

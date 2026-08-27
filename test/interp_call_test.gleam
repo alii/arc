@@ -1,9 +1,3 @@
-//// Calls through the new interpreter: flat bytecode activation, native
-//// re-entry both ways, bound / call / apply unwrapping, spread and optional
-//// calls, tagged templates, `arguments`, rest and default parameters,
-//// closures, `this` binding, `new.target`, accessors, classes (fields,
-//// private names, super), the call-depth RangeError and `Error.stack` frames.
-
 import arc/compiler
 import arc/interp/entry
 import arc/parser
@@ -65,7 +59,6 @@ fn eval_bool(source: String) -> Bool {
   }
 }
 
-/// The thrown value of a script that must throw, rendered.
 fn thrown(source: String) -> String {
   case run(source) {
     #(ThrowCompletion(e), st) -> rt_inspect.inspect(st, e)
@@ -73,8 +66,6 @@ fn thrown(source: String) -> String {
       panic as { source <> " returned " <> rt_inspect.inspect(st, v) }
   }
 }
-
-// -- flat calls ------------------------------------------------------------------
 
 pub fn plain_calls_and_recursion_test() {
   assert eval_int("function sq(x) { return x * x } sq(7) + sq(2)") == 53
@@ -129,14 +120,11 @@ pub fn arguments_object_test() {
       "function f() { return arguments.length * 100 + arguments[1] } f(5, 6, 7)",
     )
     == 306
-  // Sloppy simple parameter list: `callee` is the function itself.
   assert eval_bool("function g() { return arguments.callee === g } g()")
-  // Strict: `callee` is the %ThrowTypeError% accessor.
   assert string.contains(
     thrown("function s() { 'use strict'; return arguments.callee } s()"),
     "TypeError",
   )
-  // Non-simple parameters also get the unmapped form.
   assert string.contains(
     thrown("function d(a = 1) { return arguments.callee } d()"),
     "TypeError",
@@ -151,9 +139,6 @@ pub fn arguments_object_test() {
     == "ab"
 }
 
-/// Coroutine bodies see their own argument list: a generator builds
-/// `arguments` / rest before `InitialYield`, an async function on its first
-/// (synchronous) turn from the parked frame.
 pub fn coroutine_arguments_and_rest_test() {
   assert eval_int(
       "var out = 0;\n"
@@ -181,15 +166,12 @@ pub fn coroutine_arguments_and_rest_test() {
 }
 
 pub fn this_binding_test() {
-  // Sloppy: undefined this → globalThis; primitives box.
   assert eval_bool("function f() { return this === globalThis } f()")
   assert eval_string("function t() { return typeof this } t.call(5)")
     == "object"
-  // Strict: passed through untouched.
   assert eval_string("function s() { 'use strict'; return typeof this } s()")
     == "undefined"
   assert eval_int("function s2() { 'use strict'; return this } s2.call(7)") == 7
-  // Method call binds the receiver; arrows keep the lexical this.
   assert eval_int(
       "let o = {v: 4, m() { return this.v }, a() { return (() => this.v)() } }; o.m() + o.a()",
     )
@@ -221,7 +203,6 @@ pub fn call_apply_bind_and_reflect_test() {
     )
     == 42
   assert eval_int("Reflect.apply(Math.max, undefined, [3, 9, 4])") == 9
-  // call/apply on a native target.
   assert eval_int("Math.max.apply(null, [1, 8, 2])") == 8
   assert eval_string("Array.prototype.join.call([1, 2], '+')") == "1+2"
   assert string.contains(thrown("Reflect.apply(1, null, [])"), "TypeError")
@@ -267,15 +248,12 @@ pub fn tagged_templates_test() {
       <> "tag`a${1}b${2}c`",
     )
     == "a|b|c#1,2"
-  // §13.2.8.4: one template object per site, reused across evaluations.
   assert eval_bool(
     "function id(s) { return s } function f() { return id`x` } f() === f()",
   )
   assert eval_bool(
     "function id(s) { return s } Object.isFrozen(id`q`) && Object.isFrozen(id`q`.raw)",
   )
-  // Distinct sites are distinct objects even with identical text; each
-  // eval / Function body is a fresh parse, so its sites are fresh too.
   assert eval_bool("function id(s) { return s } id`x` !== id`x`")
   assert eval_bool(
     "function id(s) { return s } eval('id`x`') !== eval('id`x`')",
@@ -288,9 +266,6 @@ pub fn tagged_templates_test() {
   )
 }
 
-/// Two scripts evaluated on one agent are two parses: their sites never
-/// share a template object, while a closure keeps its own script's sites
-/// wherever it is called from.
 pub fn template_objects_do_not_collide_across_scripts_test() {
   let #(_, st) =
     run_on(
@@ -308,7 +283,6 @@ pub fn template_objects_do_not_collide_across_scripts_test() {
   assert check("id`y`.raw[0] === 'y'")
   assert check("id`x` !== first")
   assert check("f() === first")
-  // The same compiled script run twice is evaluated twice: fresh sites.
   let source = "id`z`"
   let assert Ok(#(body, sb)) = parser.parse_script(source)
   let assert Ok(template) = compiler.compile(body, sb)
@@ -317,10 +291,7 @@ pub fn template_objects_do_not_collide_across_scripts_test() {
   assert z1 != z2
 }
 
-// -- native ⇄ bytecode re-entry --------------------------------------------------------
-
 pub fn mutual_recursion_through_natives_test() {
-  // interp → Array.prototype.map (native) → bytecode callback → map again …
   assert eval_string(
       "function deep(xs, d) { return d === 0 ? xs : xs.map(x => deep([x + 1], d - 1)[0]) }\n"
       <> "deep([1, 2, 3], 5).join(',')",
@@ -330,14 +301,11 @@ pub fn mutual_recursion_through_natives_test() {
       "[3, 1, 2].sort((a, b) => [a, b].reduce((x, y) => x - y)).reduce((a, b) => a * 10 + b, 0)",
     )
     == 123
-  // A throw inside the nested activation unwinds through the native and is
-  // caught by the outer bytecode frame.
   assert eval_string(
       "function boom() { throw new Error('inner') }\n"
       <> "try { [1].forEach(() => [2].forEach(boom)); 'no' } catch (e) { e.message }",
     )
     == "inner"
-  // And the other way: a native TypeError raised under a bytecode callback.
   assert eval_string(
       "try { [1].map(function () { return null.x }); 'no' } catch (e) { e.constructor.name }",
     )
@@ -350,7 +318,6 @@ pub fn accessors_run_bytecode_test() {
       "let o = { _x: 0, set x(v) { this._x = v + 1 }, get x() { return this._x } }; o.x = 4; o.x",
     )
     == 5
-  // A native reading the property invokes the bytecode getter.
   assert eval_string("JSON.stringify({ get a() { return [1, 2].length } })")
     == "{\"a\":2}"
   assert eval_int(
@@ -376,20 +343,16 @@ pub fn embedder_calls_bytecode_value_test() {
   assert classify(v) == KNum(JInt(42))
 }
 
-// -- depth -------------------------------------------------------------------------
-
 pub fn deep_recursion_is_a_catchable_range_error_test() {
   assert eval_string(
       "function dive(n) { return 1 + dive(n + 1) }\n"
       <> "try { dive(0); 'no' } catch (e) { (e instanceof RangeError) + ':' + e.message }",
     )
     == "true:Maximum call stack size exceeded"
-  // Through natives on every level too.
   assert eval_bool(
     "function viaNative() { return [0].map(viaNative) }\n"
     <> "let caught; try { viaNative() } catch (e) { caught = e } caught instanceof RangeError",
   )
-  // The interpreter is usable afterwards: depth was unwound with the frames.
   let #(_, st) =
     run_on(
       agent(),
@@ -408,8 +371,6 @@ pub fn strict_tail_calls_run_in_constant_depth_test() {
     )
     == 50_000
 }
-
-// -- constructors and classes ---------------------------------------------------------
 
 pub fn function_constructors_test() {
   assert eval_int("function P(x) { this.x = x } new P(5).x") == 5
@@ -489,7 +450,6 @@ pub fn derived_classes_test() {
   assert eval_bool(
     src <> "new B(1) instanceof A && Object.getPrototypeOf(B) === A",
   )
-  // this before super() is a ReferenceError; so is never calling it.
   assert string.contains(
     thrown(
       "class A {} class C extends A { constructor() { this.x = 1 } } new C()",
@@ -510,8 +470,6 @@ pub fn derived_classes_test() {
       "class A {} class F extends A { constructor() { return {n: 3} } } new F().n",
     )
     == 3
-  // new.target flows through super() so the base allocates from the derived
-  // prototype; extending builtins works through the runtime's construct.
   assert eval_bool(
     "class A { constructor() { this.nt = new.target } } class G extends A {} new G().nt === G",
   )
@@ -544,8 +502,6 @@ pub fn getters_setters_and_super_property_writes_test() {
     == 5
 }
 
-// -- Error.stack frames ---------------------------------------------------------------
-
 pub fn error_stack_names_bytecode_frames_test() {
   let s =
     eval_string(
@@ -556,14 +512,12 @@ pub fn error_stack_names_bytecode_frames_test() {
   assert string.starts_with(s, "Error: boom")
   assert string.contains(s, "at inner (script:1)")
   assert string.contains(s, "at outer (script:2)")
-  // Runtime-raised errors see the same frames.
   let t =
     eval_string(
       "function bad() {\n return null.x }\ntry { bad() } catch (e) { e.stack }",
     )
   assert string.starts_with(t, "TypeError")
   assert string.contains(t, "at bad (script:2)")
-  // Frames are popped again on return: a later error does not name `bad`.
   let u =
     eval_string(
       "function ok() { return 1 }\nok();\ntry { null.x } catch (e) { e.stack }",

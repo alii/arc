@@ -1,38 +1,20 @@
-%% Unicode ID_Start / ID_Continue membership for the lexer, backed by the
-%% SAME generated Unicode 17 range tables the regex engine uses
-%% (arc_regex_uni17_ffi:range_tuple/1), so the lexer and \p{ID_Start} in RegExp
-%% can never disagree about which identifiers are legal.
-%%
-%% Both predicates are total over the integers: surrogates (reachable from a
-%% `\uD800` identifier escape) and out-of-range codepoints answer `false`
-%% instead of crashing.
 -module(arc_unicode_ffi).
 -export([is_id_start/1, is_id_continue/1]).
 
-%% ID_Start (Unicode derived property: L, Nl + Other_ID_Start).
 is_id_start(CP) when CP >= 16#D800, CP =< 16#DFFF -> false;
 is_id_start(CP) when CP < 0; CP > 16#10FFFF -> false;
 is_id_start(CP) -> in_ranges(CP, table(<<"bin:ID_Start">>)).
 
-%% ID_Continue (ID_Start + Mn, Mc, Nd, Pc + Other_ID_Continue).
 is_id_continue(CP) when CP >= 16#D800, CP =< 16#DFFF -> false;
 is_id_continue(CP) when CP < 0; CP > 16#10FFFF -> false;
 is_id_continue(CP) -> in_ranges(CP, table(<<"bin:ID_Continue">>)).
 
-%% Tuple of {Lo, Hi} pairs (inclusive, sorted, disjoint): a module literal in
-%% the generated table, so fetching it is a constant-pool reference and the
-%% lookup is a pure O(log n) binary search.
-%%
-%% The generated table carrying these two properties is a hard build
-%% invariant: without it every identifier in every source file would be
-%% rejected. Crash on a missing key rather than answer `false` forever.
 table(Key) ->
     case arc_regex_uni17_ffi:range_tuple(Key) of
         none -> erlang:error({missing_unicode_table, Key});
         Ranges -> Ranges
     end.
 
-%% Binary search: is CP inside any {Lo, Hi} of the sorted, disjoint tuple?
 in_ranges(CP, Ranges) -> in_ranges(CP, Ranges, 1, tuple_size(Ranges)).
 
 in_ranges(_CP, _Ranges, Lo, Hi) when Lo > Hi ->

@@ -1,24 +1,9 @@
-%%% arc_rt_obj_fast_ffi — object fast paths only AOT-emitted code calls
-%%% (`aot/src/arc_aot/host_ops.gleam`). Like arc_rt_call_fast_ffi every entry
-%%% handles the common shape in place and hands anything else to the same
-%%% runtime path the emitter would otherwise have called, so the result is
-%%% what the unfused sequence yields. Record indices come from
-%%% arc_rt_layout.hrl (asserted by arc_rt_layout_test). Nothing here is bound
-%%% from Gleam except by tests.
+%% called only by aot emitted code
 -module(arc_rt_obj_fast_ffi).
 -export([t_set_props_named/5, t_new_object_props/3]).
 
 -include("arc_rt_layout.hrl").
 
-%% t_set_props_named(St, Obj, Keys, Vals, Strict) -> St'
-%% JMutUnit. A run of `obj.k1 = v1; obj.k2 = v2; ...` statements whose values
-%% are already evaluated, as ONE host op: the same as folding
-%% `arc_rt_obj_ffi:t_set_prop_named` over the pairs in order. While the
-%% receiver is an SShapedObject and each write is a slot overwrite or a step
-%% along an existing transition edge the proto chain cannot intercept
-%% (`named_free`), the slots are rebuilt locally and stored once; the first
-%% pair that needs anything else stores what was built and the rest of the
-%% run goes pair by pair through `t_set_prop_named`.
 t_set_props_named(St, Obj = {?HANDLE_TAG, Id}, Keys, Vals, Strict) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
@@ -81,14 +66,6 @@ each_named(St, Obj, [K | Ks], [V | Vs], Strict) ->
                Ks, Vs, Strict);
 each_named(St, _, _, _, _) -> St.
 
-%% t_new_object_props(St, Keys, Vals) -> {Obj, St'}
-%% JMut. The leading `key: value` members of an object literal, all plain
-%% data members under distinct static Named keys with their values already
-%% evaluated in source order, as ONE host op: what `t_new_object_literal`
-%% followed by one `t_create_data_prop` per member builds (an ordinary
-%% extensible SObject on %Object.prototype% whose props carry consecutive
-%% prop_seq stamps), allocated with a single store write as `t_cell_new`
-%% does it.
 t_new_object_props(St, Keys, Vals) ->
     Store = element(?AGENT_STORE, St),
     new_object_props(St, Store, Keys, Vals).

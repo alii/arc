@@ -1,16 +1,3 @@
-//// ES2024 §23.2 TypedArray Objects
-////
-//// %TypedArray% is an abstract intrinsic constructor: it has [[Construct]]
-//// (so it can appear in `extends` and Reflect.construct type checks) but
-//// throws TypeError when invoked. The 11 concrete constructors
-//// (Int8Array .. BigUint64Array) inherit from it (both the functions and
-//// their prototypes), and produce Integer-Indexed exotic objects backed by
-//// an ArrayBufferObj cell.
-////
-//// Element reads, element stores and bulk encoding live in arc/rt/buffer
-//// (next to the MOP arms in arc/rt/obj that need them); this module is the
-//// constructor and prototype surface.
-
 import arc/rt/buffer
 import arc/rt/builtins/array_buffer
 import arc/rt/builtins/common
@@ -60,15 +47,11 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
-/// Hard cap on a typed array's backing byte length (matches the engine's
-/// practical allocation limit; over this → RangeError like real engines).
+// max backing byte length, rangeerror above
 const max_byte_length = 2_147_483_647
 
-/// 2^53 - 1 — MAX_SAFE_INTEGER, the ToIndex/ToLength upper bound.
 const max_safe_integer = 9_007_199_254_740_991
 
-/// §23.2 [[ContentType]] agreement: a BigInt view and a Number view never
-/// mix (construct-from, set(), species-create all reject the pairing).
 fn same_content_type(a: TypedArrayKind, b: TypedArrayKind) -> Bool {
   case a, b {
     NumKind(_), NumKind(_) -> True
@@ -77,14 +60,9 @@ fn same_content_type(a: TypedArrayKind, b: TypedArrayKind) -> Bool {
   }
 }
 
-/// [[TypedArrayName]] — kept for `init_realm`'s global installation.
 pub fn kind_name(kind: TypedArrayKind) -> String {
   typed_array_name(kind)
 }
-
-// ============================================================================
-// Init — %TypedArray%, %TypedArray%.prototype, and the 11 concrete ctors
-// ============================================================================
 
 pub fn init(
   st: Agent,
@@ -92,7 +70,6 @@ pub fn init(
   function_proto: Handle,
   array: BuiltinPair,
 ) -> #(#(BuiltinPair, TypedArrays), Agent) {
-  // Accessor getters on %TypedArray%.prototype (§23.2.3.1-3, .18).
   let #(getters, st) =
     common.alloc_getters(st, function_proto, [
       #("buffer", TypedArrayN(TypedArrayGetBuffer)),
@@ -100,7 +77,7 @@ pub fn init(
       #("byteOffset", TypedArrayN(TypedArrayGetByteOffset)),
       #("length", TypedArrayN(TypedArrayGetLength)),
     ])
-  // values() doubles as [@@iterator] — must be the SAME function object.
+  // values doubles as @@iterator, same function object
   let #(values_h, st) =
     common.alloc_rooted_native_fn(
       st,
@@ -110,8 +87,7 @@ pub fn init(
       0,
     )
   let #(values_prop, st) = common.builtin_property(st, mk_object(values_h))
-  // §23.2.3.32 %TypedArray%.prototype.toString IS %Array.prototype.toString%
-  // — the same function object.
+  // tostring is the same object as array.prototype.tostring
   let #(array_to_string, st) =
     rt_obj.t_get_prop(
       st,
@@ -157,7 +133,6 @@ pub fn init(
       [#("values", values_prop), #("toString", to_string_prop)],
       methods,
     ])
-  // %TypedArray%.from / %TypedArray%.of — statics inherited by all 11 ctors.
   let #(statics, st) =
     common.alloc_methods(st, function_proto, [
       #("from", TypedArrayN(TypedArrayFrom), 1),
@@ -174,12 +149,9 @@ pub fn init(
       0,
       statics,
     )
-  // %TypedArray%.prototype[@@iterator] === %TypedArray%.prototype.values
   let #(iter_prop, st) = common.restamp(st, values_prop)
   let st =
     common.add_symbol_property(st, ta.prototype, symbol_iterator, iter_prop)
-  // get %TypedArray%.prototype[@@toStringTag] (§23.2.3.38) — an accessor that
-  // returns the [[TypedArrayName]] (undefined for non-TypedArray receivers).
   let #(tag_get, st) =
     common.alloc_rooted_native_fn(
       st,
@@ -198,12 +170,8 @@ pub fn init(
     )
   let st =
     common.add_symbol_property(st, ta.prototype, symbol_to_string_tag, tag_prop)
-  // get %TypedArray%[@@species] (§23.2.2.4) — returns `this`.
   let st =
     common.add_species_accessor(st, function_proto, ta.constructor, ReturnThis)
-  // The 11 concrete constructors, allocated in `all_typed_array_kinds` order.
-  // Each ctor's [[Prototype]] is %TypedArray% itself, and each prototype's
-  // [[Prototype]] is %TypedArray%.prototype (§23.2.5/§23.2.6/§23.2.7).
   let #(by_kind, st) =
     list.fold(all_typed_array_kinds, #(dict.new(), st), fn(acc, kind) {
       let #(d, st) = acc
@@ -213,8 +181,6 @@ pub fn init(
   #(#(ta, TypedArrays(by_kind:)), st)
 }
 
-/// One concrete TypedArray constructor + prototype. BYTES_PER_ELEMENT is
-/// {W:F, E:F, C:F} on both.
 fn init_ctor(
   st: Agent,
   ta: BuiltinPair,
@@ -224,8 +190,6 @@ fn init_ctor(
   let size = typed_array_ffi.elem_size(kind)
   let #(size_prop, st) = common.data_prop(st, mk_number(JInt(size)))
   let #(size_prop2, st) = common.restamp(st, size_prop)
-  // §23.2.6.2: the ctor's "prototype" property is {W:F, E:F, C:F} —
-  // installed that way by common.init_type.
   let #(bt, st) =
     common.init_type(
       st,
@@ -237,8 +201,7 @@ fn init_ctor(
       3,
       [#("BYTES_PER_ELEMENT", size_prop2)],
     )
-  // proposal-arraybuffer-base64: own methods of Uint8Array.prototype and
-  // statics of the Uint8Array constructor (NOT on %TypedArray%).
+  // proposal-arraybuffer-base64: uint8array only, not %TypedArray%
   let st = case kind {
     NumKind(Uint8Kind) -> {
       let #(u8_methods, st) =
@@ -261,7 +224,6 @@ fn init_ctor(
   #(bt, st)
 }
 
-/// Insert named properties into an existing object cell.
 fn add_named_props(
   st: Agent,
   ref: Handle,
@@ -271,12 +233,6 @@ fn add_named_props(
   common.add_named_property(st, ref, name, prop)
 }
 
-// ============================================================================
-// Dispatch
-// ============================================================================
-
-/// Per-module [[Call]] dispatch. All TypedArray constructors throw without
-/// `new` (§23.2.1.1 step 1 / §23.2.5.1 step 1).
 pub fn dispatch(
   st: Agent,
   native: TypedArrayNative,
@@ -284,7 +240,6 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case native {
-    // §23.2.1.1 %TypedArray%: always throws.
     TypedArrayIntrinsicConstructor ->
       rt_val.t_throw_type_error(
         st,
@@ -345,7 +300,6 @@ pub fn dispatch(
   }
 }
 
-/// Per-module [[Construct]] dispatch — §23.2.5.1.
 pub fn dispatch_construct(
   st: Agent,
   native: TypedArrayNative,
@@ -353,7 +307,6 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case native {
-    // §23.2.1.1 %TypedArray%: always throws.
     TypedArrayIntrinsicConstructor ->
       rt_val.t_throw_type_error(
         st,
@@ -364,17 +317,7 @@ pub fn dispatch_construct(
   }
 }
 
-// ============================================================================
-// %TypedArray%.from / %TypedArray%.of — §23.2.2.1 / §23.2.2.2
-// ============================================================================
-
-/// TypedArrayCreate (§23.2.4.2): Construct(ctor, [len]), then require the
-/// result to be a TypedArray of at least `len` elements.
-/// Every caller of this «len» form (of/from/slice/map/filter) WRITES into
-/// the result, so per the immutable-arraybuffer proposal's
-/// TypedArrayCreateFromConstructor(.., ~write~) an instance backed by an
-/// immutable buffer is a TypeError. (subarray — the only read-mode species
-/// creator — uses ta_create_with_args directly and skips this check.)
+// §23.2.4.2 typedarraycreate; immutable buffer throws (write mode)
 fn ta_create(st: Agent, ctor: JsVal, len: Int) -> #(JsVal, Handle, Agent) {
   let #(obj, obj_h, st) =
     ta_create_with_args(st, ctor, [mk_number(JInt(len))], Some(len))
@@ -392,8 +335,7 @@ fn ta_create(st: Agent, ctor: JsVal, len: Int) -> #(JsVal, Handle, Agent) {
   }
 }
 
-/// TypedArrayCreateFromConstructor (§23.2.4.2) with an arbitrary argument
-/// list. `min_len` enables the single-Number-argument length check.
+// §23.2.4.2 typedarraycreatefromconstructor
 fn ta_create_with_args(
   st: Agent,
   ctor: JsVal,
@@ -404,9 +346,6 @@ fn ta_create_with_args(
   let obj = mk_object(obj_h)
   case ta_slot_of(st, obj_h) {
     Some(view) ->
-      // Step 2: ValidateTypedArray(newTypedArray) — a constructor that
-      // returned a view over a detached buffer (or one that no longer
-      // fits its resizable buffer) throws TypeError.
       case view_witness_bytes(st, view) {
         Error(err) -> witness_type_error(st, err)
         Ok(_bytes) -> {
@@ -432,7 +371,7 @@ fn ta_create_with_args(
   }
 }
 
-/// §23.2.2.1 %TypedArray%.from ( source [ , mapfn [ , thisArg ] ] )
+// §23.2.2.1 from
 fn ta_from(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use <- bool.lazy_guard(!rt_call.is_constructor(st, this), fn() {
     rt_val.t_throw_type_error(st, "%TypedArray%.from called on non-constructor")
@@ -440,7 +379,6 @@ fn ta_from(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let source = helpers.first_arg_or_undefined(args)
   let mapfn = helpers.arg_at(args, 1)
   let this_arg = helpers.arg_at(args, 2)
-  // Step 3: mapping check.
   let mapping = case classify(mapfn) {
     KUndef -> None
     _ ->
@@ -452,7 +390,6 @@ fn ta_from(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use <- bool.lazy_guard(rt_val.is_nullish(source), fn() {
     rt_val.t_throw_type_error(st, "Cannot convert undefined or null to object")
   })
-  // Step 5: usingIterator = GetMethod(source, @@iterator).
   let #(iter_fn, st) = rt_obj.t_get_prop(st, source, SymbolKey(symbol_iterator))
   case rt_call.is_callable(st, iter_fn) {
     True -> {
@@ -471,7 +408,6 @@ fn ta_from(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
       }
     }
     False -> {
-      // Step 7: array-like path (works on primitives like strings too).
       let #(len_val, st) =
         rt_obj.t_get_prop(st, source, StringKey(Named("length")))
       let #(len, st) = rt_val.t_to_length(st, len_val)
@@ -547,7 +483,6 @@ fn from_array_like_loop(
   }
 }
 
-/// Shared from() element step: apply the optional mapfn, then store at k.
 fn map_and_store(
   st: Agent,
   target: JsVal,
@@ -564,7 +499,7 @@ fn map_and_store(
   set_index(st, target_h, target, k, mapped)
 }
 
-/// §23.2.2.2 %TypedArray%.of ( ...items )
+// §23.2.2.2 of
 fn ta_of(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use <- bool.lazy_guard(!rt_call.is_constructor(st, this), fn() {
     rt_val.t_throw_type_error(st, "%TypedArray%.of called on non-constructor")
@@ -576,14 +511,7 @@ fn ta_of(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// ============================================================================
-// Constructor — §23.2.5.1 TypedArray ( ...args )
-// ============================================================================
-
-/// AllocateTypedArray's GetPrototypeFromConstructor(NewTarget) is a real
-/// [[Get]] that may run user code, so it sits exactly where §23.2.5.1 puts
-/// AllocateTypedArray in each branch: first for the no-argument and Object
-/// branches, but AFTER `? ToIndex(firstArgument)` for a primitive length.
+// §23.2.5.1, allocate order per branch is observable
 fn ta_construct(
   st: Agent,
   kind: TypedArrayKind,
@@ -591,14 +519,12 @@ fn ta_construct(
   args: List(JsVal),
 ) -> #(Handle, Agent) {
   case args {
-    // Step 4: no args → AllocateTypedArray(0).
     [] -> {
       let #(proto, st) = proto_from_new_target(st, new_target, kind)
       fresh_handle(alloc_ta_with_length(st, kind, proto, 0))
     }
     [first, ..rest] ->
       case classify(first) {
-        // Step 6.a: firstArgument is an Object → AllocateTypedArray first.
         KHandle(ref) -> {
           let #(proto, st) = proto_from_new_target(st, new_target, kind)
           case rt_store.t_cell_get(st, ref) {
@@ -631,7 +557,6 @@ fn ta_construct(
             _ -> from_object(st, kind, proto, first, ref)
           }
         }
-        // Step 6.b-c: not an object → AllocateTypedArray(? ToIndex(arg)).
         _ -> {
           let #(len, st) = to_index(st, first)
           let #(proto, st) = proto_from_new_target(st, new_target, kind)
@@ -641,23 +566,16 @@ fn ta_construct(
   }
 }
 
-/// A TypedArray this module just allocated: the JS value handed back, plus
-/// the two handles the allocator created — the view object and its backing
-/// buffer. Callers that need either take it from here rather than
-/// re-deriving it out of the store (which forces an "impossible" miss branch).
 type FreshTa {
   FreshTa(value: JsVal, ta_ref: Handle, buffer: Handle)
 }
 
-/// Adapt an allocation to the "just the handle" shape the constructor paths
-/// hand back.
 fn fresh_handle(r: #(FreshTa, Agent)) -> #(Handle, Agent) {
   let #(fresh, st) = r
   #(fresh.ta_ref, st)
 }
 
-/// AllocateTypedArray + AllocateTypedArrayBuffer (§23.2.5.1.1/.6): fresh
-/// zeroed buffer of `len` elements viewed from offset 0.
+// §23.2.5.1.1 allocatetypedarray
 fn alloc_ta_with_length(
   st: Agent,
   kind: TypedArrayKind,
@@ -672,8 +590,6 @@ fn alloc_ta_with_length(
   alloc_fresh_ta(st, kind, proto, byte_len, len)
 }
 
-/// Allocate a fresh non-resizable ArrayBuffer of `byte_len` zero bytes plus
-/// a fixed `len`-element view over it from offset 0.
 fn alloc_fresh_ta(
   st: Agent,
   kind: TypedArrayKind,
@@ -697,7 +613,7 @@ fn alloc_fresh_ta(
   #(FreshTa(value: mk_object(ta_ref), ta_ref:, buffer: buf), st)
 }
 
-/// §23.2.5.1.3 InitializeTypedArrayFromArrayBuffer.
+// §23.2.5.1.3 initializetypedarrayfromarraybuffer
 fn from_buffer(
   st: Agent,
   kind: TypedArrayKind,
@@ -707,9 +623,7 @@ fn from_buffer(
 ) -> #(Handle, Agent) {
   let size = typed_array_ffi.elem_size(kind)
   let #(offset_arg, len_arg) = helpers.two_args_or_undefined(rest)
-  // Step 2: offset = ToIndex(byteOffset).
   let #(offset, st) = to_index(st, offset_arg)
-  // Step 3: offset modulo elementSize must be 0.
   use <- bool.lazy_guard(offset % size != 0, fn() {
     rt_val.t_throw_range_error(
       st,
@@ -719,7 +633,6 @@ fn from_buffer(
         <> int.to_string(size),
     )
   })
-  // Step 5: newLength = ToIndex(length) when present.
   let #(new_len, st) = case classify(len_arg) {
     KUndef -> #(None, st)
     _ -> {
@@ -727,7 +640,7 @@ fn from_buffer(
       #(Some(l), st)
     }
   }
-  // Step 6: detached check AFTER the (observable) conversions.
+  // detached check after the observable conversions
   case buffer.buffer_storage(st, buf_ref) |> option.then(types.buffer_bits) {
     None ->
       rt_val.t_throw_type_error(
@@ -742,15 +655,11 @@ fn from_buffer(
         |> option.then(types.buffer_max_byte_length)
         |> option.is_some
       case new_len {
-        // Step 7: length absent over a RESIZABLE buffer — length-tracking
-        // view ([[ArrayLength]] = AUTO); only the offset is validated, the
-        // buffer's byte length need not divide evenly.
         None if resizable ->
           case offset > buf_len {
             True -> range_err("Invalid typed array offset")
             False -> alloc_ta_view(st, kind, proto, buf_ref, offset, None)
           }
-        // Step 8.a: length auto-derived — buffer must divide evenly.
         None ->
           case buf_len % size != 0 {
             True ->
@@ -774,7 +683,6 @@ fn from_buffer(
                   )
               }
           }
-        // Step 9: explicit length — view must fit inside the buffer.
         Some(l) ->
           case offset + l * size > buf_len {
             True -> range_err("Invalid typed array length")
@@ -785,8 +693,6 @@ fn from_buffer(
   }
 }
 
-/// Allocate a TypedArray view over an EXISTING buffer. `len: None` is a
-/// length-tracking view ([[ArrayLength]] = AUTO) over a resizable buffer.
 fn alloc_ta_view(
   st: Agent,
   kind: TypedArrayKind,
@@ -802,7 +708,7 @@ fn alloc_ta_view(
   )
 }
 
-/// §23.2.5.1.2 InitializeTypedArrayFromTypedArray.
+// §23.2.5.1.2 initializetypedarrayfromtypedarray
 fn from_typed_array(
   st: Agent,
   kind: TypedArrayKind,
@@ -812,7 +718,6 @@ fn from_typed_array(
   src_off: Int,
   src_len: Int,
 ) -> #(Handle, Agent) {
-  // Step 6.c: BigInt and Number content types never mix.
   use <- bool.lazy_guard(!same_content_type(kind, src_kind), fn() {
     rt_val.t_throw_type_error(
       st,
@@ -834,9 +739,6 @@ fn from_typed_array(
       use <- bool.lazy_guard(byte_len > max_byte_length, fn() {
         rt_val.t_throw_range_error(st, "Invalid typed array length")
       })
-      // §23.2.5.1.2 step 5 (MakeTypedArrayWithBufferWitnessRecord +
-      // IsTypedArrayOutOfBounds): a source view whose resizable buffer has
-      // shrunk below it behaves like detached → TypeError.
       let src_size = typed_array_ffi.elem_size(src_kind)
       use <- bool.lazy_guard(
         src_off + src_len * src_size > bit_array.byte_size(src_data),
@@ -848,14 +750,11 @@ fn from_typed_array(
         },
       )
       let new_data = case kind == src_kind {
-        // Same element type: raw byte copy. The out-of-bounds guard above
-        // PROVED src_off + byte_len <= byte_size(src_data), so a failure here
-        // is a broken proof, not a shrunk buffer — crash, don't zero-fill.
+        // bounds proved above, crash rather than zero-fill
         True -> {
           let assert Ok(bytes) = bit_array.slice(src_data, src_off, byte_len)
           bytes
         }
-        // Different element type: element-wise convert (no user code runs).
         False ->
           convert_elements(st, src_buf, src_kind, src_off, src_len, kind, size)
       }
@@ -866,9 +765,6 @@ fn from_typed_array(
   }
 }
 
-/// Element-wise conversion into a fresh buffer — single pass: each element
-/// is encoded into its own small binary and the segments are concatenated
-/// ONCE at the end (O(n)).
 fn convert_elements(
   st: Agent,
   src_buf: Handle,
@@ -905,8 +801,6 @@ fn convert_elements_loop(
   case i >= src_len {
     True -> bit_array.concat(list.reverse(acc))
     False -> {
-      // Elements read back out of a typed array are always Number / BigInt;
-      // a missing element (out-of-bounds read) encodes as zero.
       let seg = case
         buffer.typed_array_element(st, src_buf, src_kind, src_off, src_len, i)
         |> option.then(buffer.decoded_element(dst_kind, _))
@@ -929,8 +823,7 @@ fn convert_elements_loop(
   }
 }
 
-/// §23.2.5.1.4/.5 InitializeTypedArrayFromList / FromArrayLike:
-/// use the @@iterator when callable, else the array-like protocol.
+// §23.2.5.1.4/.5 from list or array-like
 fn from_object(
   st: Agent,
   kind: TypedArrayKind,
@@ -953,7 +846,6 @@ fn from_object(
       }
     }
     False -> {
-      // Array-like: len = ToLength(Get(obj, "length")).
       let #(len_val, st) =
         rt_obj.t_get_prop(st, obj_val, StringKey(Named("length")))
       let #(len, st) = rt_val.t_to_length(st, len_val)
@@ -969,8 +861,6 @@ fn from_object(
   }
 }
 
-/// Store collected values into a fresh typed array via the exotic [[Set]]
-/// path (per-element coercion, may run user code).
 fn store_list(
   st: Agent,
   fresh: FreshTa,
@@ -1003,16 +893,11 @@ fn store_array_like(
   }
 }
 
-// ============================================================================
-// Conversions
-// ============================================================================
-
-/// §7.1.22 ToIndex with this module's RangeError message.
+// §7.1.22 toindex
 fn to_index(st: Agent, val: JsVal) -> #(Int, Agent) {
   rt_val.t_to_index(st, val, "Invalid typed array length")
 }
 
-/// ToIntegerOrInfinity, with infinities preserved as sentinels.
 type IntOrInf {
   IInt(Int)
   IPosInf
@@ -1031,8 +916,6 @@ fn to_int_or_inf(st: Agent, val: JsVal) -> #(IntOrInf, Agent) {
   #(i, st)
 }
 
-/// Relative start/end index resolution (§23.2.3.x shared steps):
-/// negative counts from the end, clamped to [0, length].
 fn relative_index(i: IntOrInf, length: Int) -> Int {
   case i {
     IPosInf -> length
@@ -1045,16 +928,7 @@ fn relative_index(i: IntOrInf, length: Int) -> Int {
   }
 }
 
-// ============================================================================
-// Receiver validation
-// ============================================================================
-
-/// A TypedArray's internal slots AS DECLARED on the object, plus the `ref`
-/// they were read from — carrying it means downstream code never has to
-/// re-match the receiver value to recover the object it just resolved:
-/// [[ViewedArrayBuffer]], the element kind ([[TypedArrayName]]),
-/// [[ByteOffset]], and the declared [[ArrayLength]] — `None` for
-/// length-tracking (AUTO) views, which follow the live buffer size.
+// declared slots; length None = length-tracking view
 type TaView {
   TaView(
     ref: Handle,
@@ -1065,17 +939,7 @@ type TaView {
   )
 }
 
-/// The view a require_ta / validate_ta caller receives: same slots, but
-/// with [[ArrayLength]] RESOLVED to the current element count (AUTO views
-/// included), so downstream bounds checks see a plain Int.
-///
-/// The record runs at TWO speeds, and callers must not confuse them:
-/// `length` (like the other slot copies) is a SNAPSHOT taken at validation
-/// time, whereas `ref` is a LIVE handle — re-reading the object through it
-/// (`ta_read`/`ta_get`) observes user code that detached or resized the
-/// buffer mid-method. That is exactly what the spec's per-element Get
-/// requires, so the loops below iterate up to the snapshot `length` but read
-/// each element through `ref`.
+// length is a snapshot, ref is live; element reads go through ref
 type TaWitness {
   TaWitness(
     ref: Handle,
@@ -1086,8 +950,6 @@ type TaWitness {
   )
 }
 
-/// `v`'s TypedArray internal slots when `v` is a TypedArray object, None
-/// otherwise.
 fn ta_slot(st: Agent, v: JsVal) -> Option(TaView) {
   case classify(v) {
     KHandle(ref) -> ta_slot_of(st, ref)
@@ -1095,7 +957,6 @@ fn ta_slot(st: Agent, v: JsVal) -> Option(TaView) {
   }
 }
 
-/// `ref`'s TypedArray internal slots when it points at a TypedArray object.
 fn ta_slot_of(st: Agent, ref: Handle) -> Option(TaView) {
   case rt_store.t_cell_get(st, ref) {
     SObject(kind: TypedArrayObj(buffer:, elem_kind:, byte_offset:, length:), ..) ->
@@ -1104,14 +965,7 @@ fn ta_slot_of(st: Agent, ref: Handle) -> Option(TaView) {
   }
 }
 
-/// Bulk element store: when every value converts to the element type without
-/// running user code (no objects, no throwing conversions), encode the whole
-/// run in one pass and rebuild the buffer binary ONCE — instead of one
-/// whole-buffer rebuild + store write per element, which is O(n²) in the
-/// buffer size. Returns None when any value needs the observable per-element
-/// path. Mirrors do_typed_store's live-buffer rules: detached buffer or an
-/// out-of-bounds view → the stores are silent no-ops; a partial fit writes
-/// only the in-bounds prefix.
+// fast path when no value runs user code; None = use per-element path
 fn try_bulk_store(
   st: Agent,
   ta_ref: Handle,
@@ -1122,7 +976,6 @@ fn try_bulk_store(
   let TaView(buffer: buf, kind:, byte_offset:, length:, ..) = view
   use region <- option.then(buffer.typed_array_encode_primitives(kind, values))
   case buffer.buffer_bytes(st, buf) {
-    // Detached → every per-element store is a silent no-op.
     None -> Some(st)
     Some(data) -> {
       let size = typed_array_ffi.elem_size(kind)
@@ -1131,12 +984,9 @@ fn try_bulk_store(
         Some(n) -> n
         None -> int.max(0, { byte_size - byte_offset } / size)
       }
-      // Fixed view that no longer fits the (shrunk) buffer → all no-ops.
       use <- bool.guard(byte_offset + len * size > byte_size, Some(st))
       let count = int.clamp(len - start, 0, bit_array.byte_size(region) / size)
       use <- bool.guard(count <= 0, Some(st))
-      // Whole ELEMENTS only; splice_clamped's byte clamp is just the backstop.
-      // `count` was clamped by byte_size(region) / size, so the slice fits.
       let region = case count * size == bit_array.byte_size(region) {
         True -> region
         False -> {
@@ -1151,14 +1001,9 @@ fn try_bulk_store(
   }
 }
 
-/// RequireInternalSlot(this, [[TypedArrayName]]): the resolved view (a
-/// TaWitness).
 fn require_ta(st: Agent, this: JsVal) -> TaWitness {
   case ta_slot(st, this) {
     Some(TaView(ref:, buffer: buf, kind:, byte_offset:, length:)) ->
-      // Resolve [[ArrayLength]] = AUTO (length-tracking views) to the
-      // CURRENT element count — downstream code sees a plain Int and
-      // its existing bounds checks behave identically for fixed views.
       TaWitness(
         ref:,
         buffer: buf,
@@ -1180,9 +1025,7 @@ fn require_ta(st: Agent, this: JsVal) -> TaWitness {
   }
 }
 
-/// §23.2.4.4 ValidateTypedArray ( O, seq-cst ): RequireInternalSlot plus the
-/// buffer-witness checks — detached buffer or an out-of-bounds view (a
-/// resizable ArrayBuffer that shrank below the view) throws TypeError.
+// §23.2.4.4 validatetypedarray
 fn validate_ta(st: Agent, this: JsVal) -> TaWitness {
   let view = require_ta(st, this)
   let TaWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) = view
@@ -1198,12 +1041,7 @@ fn validate_ta(st: Agent, this: JsVal) -> TaWitness {
   }
 }
 
-/// Immutable ArrayBuffer proposal — ValidateTypedArray step 4: accessMode
-/// ~write~ on a view over an immutable buffer is a TypeError, raised BEFORE
-/// any argument coercion (observable; test262 checks it). The predicate itself
-/// is `buffer.buffer_is_immutable` — the same one the [[Set]] element path
-/// consults, so a builtin and an element store can never disagree about
-/// whether a buffer accepts writes.
+// immutable buffer write check runs before argument coercion (observable)
 fn require_mutable(st: Agent, buf: Handle) -> Nil {
   case buffer.buffer_is_immutable(st, buf) {
     True ->
@@ -1215,20 +1053,11 @@ fn require_mutable(st: Agent, buf: Handle) -> Nil {
   }
 }
 
-// ============================================================================
-// Accessors — §23.2.3.1-3, .18, .38
-// ============================================================================
-
 fn get_buffer(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let view = require_ta(st, this)
   #(mk_object(view.buffer), st)
 }
 
-/// True when the view is fully backed by the LIVE buffer — detached buffers
-/// and views past the end of a shrunk resizable buffer are "out of bounds",
-/// and the byteLength/byteOffset/length accessors all answer 0 for them.
-/// Delegates to the ONE bounds check the engine has (§10.4.5.14, owned by
-/// arc/rt/buffer).
 fn witness_in_bounds(st: Agent, witness: TaWitness) -> Bool {
   let TaWitness(buffer: buf, kind:, byte_offset:, length:, ..) = witness
   let view =
@@ -1270,7 +1099,7 @@ fn get_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   #(mk_number(JInt(n)), st)
 }
 
-/// §23.2.3.38: NOT a TypeError on foreign receivers — returns undefined.
+// §23.2.3.38 undefined for foreign receivers, no throw
 fn get_to_string_tag(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case ta_slot(st, this) {
     Some(view) -> #(mk_string(typed_array_name(view.kind)), st)
@@ -1278,11 +1107,7 @@ fn get_to_string_tag(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-// ============================================================================
-// Prototype methods (initial subset)
-// ============================================================================
-
-/// §23.2.3.1 %TypedArray%.prototype.at ( index )
+// §23.2.3.1 at
 fn proto_at(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
   let TaWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) = view
@@ -1302,7 +1127,7 @@ fn proto_at(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   #(v, st)
 }
 
-/// §23.2.3.8 %TypedArray%.prototype.fill ( value [ , start [ , end ] ] )
+// §23.2.3.8 fill
 fn proto_fill(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
   let TaWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) = view
@@ -1310,7 +1135,6 @@ fn proto_fill(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let value_arg = helpers.first_arg_or_undefined(args)
   let start_arg = helpers.arg_at(args, 1)
   let end_arg = helpers.arg_at(args, 2)
-  // Step 3-4: convert the fill value per content type.
   let #(converted, st) = convert_for_kind(st, kind, value_arg)
   let #(s, st) = to_int_or_inf(st, start_arg)
   let #(e, st) = case classify(end_arg) {
@@ -1319,28 +1143,18 @@ fn proto_fill(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
   let start = relative_index(s, len)
   let end = relative_index(e, len)
-  // Steps 11-12: re-validate AFTER the observable value/start/end coercions
-  // — a detached buffer or an out-of-bounds view throws TypeError. (A
-  // shrunk length-tracking view stays in bounds; the clamp below handles
-  // it.)
+  // revalidate after the observable coercions
   let data = witness_bytes(st, this)
   let size = typed_array_ffi.elem_size(kind)
-  // Clamp to the LIVE buffer (a resizable buffer may have shrunk below
-  // the view) — out-of-bounds element writes are silent no-ops.
   let avail = int.max(0, { bit_array.byte_size(data) - off } / size)
   let start = int.min(start, avail)
   let end = int.min(end, avail)
-  // Single-pass fill: encode the element ONCE, then build the region
-  // with binary:copy + one splice (O(n), not O(n²)).
   let elem = buffer.typed_array_encode_value(ta_zeroed(size), 0, converted)
   let region_off = off + start * size
   let #(new_data, written) = fill_clamped(data, region_off, end - start, elem)
   #(this, buffer.store_region(st, buf, new_data, region_off, written))
 }
 
-/// Convert a JS value to the typed array's element domain ONCE — §7.1.13
-/// ToBigInt for the BigInt kinds, §7.1.4 ToNumber otherwise. Result is the
-/// TypedElement ready for typed_array_encode_value.
 fn convert_for_kind(
   st: Agent,
   kind: TypedArrayKind,
@@ -1358,11 +1172,9 @@ fn convert_for_kind(
   }
 }
 
-/// §23.2.3.26 %TypedArray%.prototype.set ( source [ , offset ] )
+// §23.2.3.26 set
 fn proto_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let view = require_ta(st, this)
-  // Immutable ArrayBuffer proposal: set() has accessMode ~write~ — checked
-  // before the offset/source coercions run any user code.
   require_mutable(st, view.buffer)
   let src = helpers.first_arg_or_undefined(args)
   let #(off_i, st) = to_int_or_inf(st, helpers.arg_at(args, 1))
@@ -1374,9 +1186,6 @@ fn proto_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use <- bool.lazy_guard(offset < 0, fn() {
     rt_val.t_throw_range_error(st, "offset is out of bounds")
   })
-  // SetTypedArrayFrom* step 2: target detached or out of bounds → TypeError
-  // (checked AFTER the observable offset coercion, which can detach/resize
-  // it). targetLength is the LIVE length, re-read for the same reason.
   let dst_data = witness_bytes(st, this)
   let len = ta_live_length(st, this)
   case classify(src) {
@@ -1390,8 +1199,6 @@ fn proto_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
             length: src_len,
             ..,
           ) = src_view
-          // §23.2.3.26.1 step 4: SOURCE detached or out of bounds →
-          // TypeError; srcLength is its live length.
           case view_witness_bytes(st, src_view) {
             Error(err) -> witness_type_error(st, err)
             Ok(_src_bytes) ->
@@ -1416,9 +1223,6 @@ fn proto_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
         }
         None -> set_from_array_like(st, view, offset, len, src)
       }
-    // §23.2.3.26.2 step 5: ToObject(source) — primitives get wrapped (a
-    // string source copies its characters; numbers/booleans/symbols have
-    // no "length" so nothing is copied); undefined/null throw TypeError.
     KUndef | KNull ->
       rt_val.t_throw_type_error(
         st,
@@ -1431,11 +1235,6 @@ fn proto_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// ValidateTypedArray keyed by the TypedArray value: throws TypeError when the
-/// view's buffer is detached or the view is out of bounds, otherwise hands
-/// back the live backing bytes it just proved exist. Callers therefore never
-/// re-read the buffer, and the "detached" case is structurally
-/// unrepresentable downstream.
 fn witness_bytes(st: Agent, this: JsVal) -> BitArray {
   case ta_witness_bytes(st, this) {
     Error(err) -> witness_type_error(st, err)
@@ -1455,7 +1254,6 @@ fn set_from_typed_array(
   src_len: Int,
 ) -> #(JsVal, Agent) {
   let TaWitness(buffer: dst_buf, kind:, byte_offset: dst_off, ..) = view
-  // §23.2.3.26.1 step 9: source buffer detached/out of bounds → TypeError.
   let src_live = option.is_some(buffer.buffer_bytes(st, src_buf))
   use <- bool.lazy_guard(!src_live, fn() {
     rt_val.t_throw_type_error(
@@ -1470,22 +1268,15 @@ fn set_from_typed_array(
     rt_val.t_throw_range_error(st, "offset is out of bounds")
   })
   let size = typed_array_ffi.elem_size(kind)
-  // Build the encoded source region in ONE pass (raw byte copy when kinds
-  // match, element-wise convert+concat otherwise — no user code runs)...
   let region = case kind == src_kind {
     True -> copy_region(st, src_buf, src_off, src_len * size)
     False ->
       convert_elements(st, src_buf, src_kind, src_off, src_len, kind, size)
   }
-  // ...then splice it into the destination buffer with ONE rebuild,
-  // clamped to the live buffer (out-of-bounds writes are silent no-ops,
-  // matching per-element store semantics). `data` is the caller's witness:
-  // nothing between the guard and here can run user code, so it is current.
   let start = dst_off + offset * size
   let avail =
     { int.clamp(bit_array.byte_size(data) - start, 0, src_len * size) / size }
     * size
-  // `region` is exactly src_len * size bytes and avail <= that.
   let region = case avail == src_len * size {
     True -> region
     False -> {
@@ -1548,16 +1339,12 @@ fn set_array_like_loop(
   }
 }
 
-/// §23.2.3.30 %TypedArray%.prototype.subarray ( begin, end ) — a view over
-/// the SAME buffer; works on detached arrays too.
+// §23.2.3.30 subarray, same buffer, works when detached
 fn proto_subarray(
   st: Agent,
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  // §23.2.3.30 step 2: RequireInternalSlot only — NOT ValidateTypedArray.
-  // A detached buffer / out-of-bounds view does not throw here; it just
-  // gives srcLength = 0 (the constructor call below may still throw).
   case ta_slot(st, this) {
     Some(view) -> do_subarray(st, this, args, view)
     None ->
@@ -1577,8 +1364,7 @@ fn do_subarray(
   let TaView(buffer: buf, kind:, byte_offset: off, length: declared, ..) = view
   let b_arg = helpers.first_arg_or_undefined(args)
   let e_arg = helpers.arg_at(args, 1)
-  // Steps 5-7: srcLength = 0 for an out-of-bounds view, else the CURRENT
-  // length — snapshotted BEFORE the (observable) start/end coercions.
+  // length snapshotted before observable start/end coercions
   let src_length = buffer.typed_array_live_count(st, buf, kind, off, declared)
   let #(b, st) = case classify(b_arg) {
     KUndef -> #(IInt(0), st)
@@ -1587,8 +1373,7 @@ fn do_subarray(
   let begin = relative_index(b, src_length)
   let size = typed_array_ffi.elem_size(kind)
   let new_off = off + begin * size
-  // Step 15: a length-tracking source with `end` undefined produces a
-  // length-tracking result — « buffer, beginByteOffset », NO length arg.
+  // tracking source with end undefined gives a tracking result
   let #(ctor_args, st) = case declared, classify(e_arg) {
     None, KUndef -> #([mk_object(buf), mk_number(JInt(new_off))], st)
     _, _ -> {
@@ -1604,9 +1389,6 @@ fn do_subarray(
       )
     }
   }
-  // Step 17: TypedArraySpeciesCreate(O, argumentsList) — same buffer, never
-  // a copy. The default path runs the real constructor steps (from_buffer)
-  // so detached buffers throw TypeError and out-of-range views RangeError.
   let #(maybe_ctor, st) = resolve_species_ctor(st, this, kind)
   case maybe_ctor {
     None -> {
@@ -1622,8 +1404,7 @@ fn do_subarray(
   }
 }
 
-/// §23.2.3.27 %TypedArray%.prototype.slice ( start, end ) — copies into a
-/// FRESH buffer (default species).
+// §23.2.3.27 slice, copies into a fresh buffer
 fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
   let TaWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) = view
@@ -1640,13 +1421,9 @@ fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let start = relative_index(s, len)
   let end = relative_index(e, len)
   let count = int.max(end - start, 0)
-  // Step 9: A = TypedArraySpeciesCreate(O, « count »).
   let #(#(target, target_ref), st) = ta_species_create(st, this, kind, count)
   use <- bool.guard(count == 0, #(target, st))
-  // Step 10.a-b: re-validate the SOURCE — the species constructor (or
-  // start/end valueOf) may have detached its buffer or shrunk it below a
-  // fixed view; both throw TypeError. (A shrunk length-tracking view stays
-  // in bounds — the copy below just reads fewer live bytes.)
+  // revalidate source, species ctor may have detached or shrunk it
   let _source_bytes = witness_bytes(st, this)
   case ta_slot(st, target) {
     Some(TaView(
@@ -1656,14 +1433,9 @@ fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
       ..,
     )) ->
       case target_kind == kind {
-        // Same element kind → single byte-region copy spliced into the
-        // target's buffer at its view offset.
         True -> {
           let size = typed_array_ffi.elem_size(kind)
-          // Step 14.c: endIndex = min(final, live TypedArrayLength) —
-          // only WHOLE live source elements are copied (a shrink
-          // "between elements" must not copy a partial element); the
-          // target keeps its own contents beyond them.
+          // copy only whole live source elements
           let copy_elems = int.clamp(ta_live_length(st, this) - start, 0, count)
           let src_byte = off + start * size
           case buffer.buffer_bytes(st, target_buf) {
@@ -1675,10 +1447,7 @@ fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
                   0,
                   copy_elems * size,
                 )
-              // Step 14.f copies byte-by-byte in ascending order: when
-              // a species constructor returned a view over the SAME
-              // buffer and the target range trails the source range,
-              // earlier writes feed later reads.
+              // same-buffer overlap: ascending byte order is observable
               let region = case target_buf == buf {
                 True -> seq_copy_region(tdata, src_byte, target_off, avail)
                 False -> copy_region(st, buf, src_byte, avail)
@@ -1698,8 +1467,6 @@ fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
             }
           }
         }
-        // Different (number) kind from a species constructor →
-        // element-wise convert via the ordinary Set path.
         False -> {
           let elements =
             join_collect(st, view, start, [])
@@ -1712,14 +1479,9 @@ fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// The result of copying `n` bytes from `src` to `dst` within ONE binary,
-/// byte-by-byte in ascending order (§23.2.3.27 step 14.f): when the target
-/// range starts inside the source range, each written byte is re-read by a
-/// later step, so the leading `dst - src` bytes repeat across the result.
+// ascending byte copy within one binary, overlap repeats leading bytes
 fn seq_copy_region(data: BitArray, src: Int, dst: Int, n: Int) -> BitArray {
   case dst > src && dst < src + n {
-    // `n` is clamped to the TARGET's remaining bytes, not the source's, so
-    // the source range may run past the live buffer: clamp.
     False -> slice_clamped(data, src, n)
     True -> repeat_to(slice_clamped(data, src, dst - src), n, <<>>)
   }
@@ -1736,12 +1498,7 @@ fn repeat_to(pattern: BitArray, n: Int, acc: BitArray) -> BitArray {
   }
 }
 
-/// The single answer to "bytes past the live buffer": the `len` bytes at
-/// `off`, clamped to whatever of `[off, off + len)` actually lies inside
-/// `data`. Total by construction — the slice below cannot fail. Where a
-/// preceding witness check PROVES the range in bounds, the call sites use
-/// `let assert Ok(..) = bit_array.slice(..)` instead, so a broken proof
-/// crashes rather than quietly returning the wrong bytes.
+// bytes at off clamped to what lies inside data, total
 fn slice_clamped(data: BitArray, off: Int, len: Int) -> BitArray {
   let size = bit_array.byte_size(data)
   let start = int.clamp(off, 0, size)
@@ -1750,10 +1507,7 @@ fn slice_clamped(data: BitArray, off: Int, len: Int) -> BitArray {
   bytes
 }
 
-/// Copy `byte_len` bytes starting at `byte_off` of a view's backing buffer
-/// into a fresh binary — ONE slice instead of per-element re-encoding.
-/// Bytes beyond the live buffer (detached, or a resizable buffer that has
-/// shrunk below the view) read as zero.
+// bytes past the live buffer read as zero
 fn copy_region(
   st: Agent,
   buf: Handle,
@@ -1773,7 +1527,6 @@ fn copy_region(
   }
 }
 
-/// §23.2.3.16 %TypedArray%.prototype.join ( separator )
 fn proto_join(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
   let sep_arg = helpers.first_arg_or_undefined(args)
@@ -1794,8 +1547,7 @@ fn join_parts(
   case i >= view.length {
     True -> acc
     False -> {
-      // Live read: ToString(separator) above may have shrunk the buffer;
-      // indices past the CURRENT length read as undefined → "".
+      // live read: separator tostring may have shrunk the buffer
       let s = case option.map(ta_read(st, view.ref, i), classify) {
         Some(KNum(n)) -> rt_val.jsnum_to_string(n)
         Some(KBig(b)) -> int.to_string(b)
@@ -1806,8 +1558,6 @@ fn join_parts(
   }
 }
 
-/// §23.2.3.16/.13 indexOf / includes. See search_loop for how the two
-/// differ on indices past the current (shrunk/detached) length.
 fn proto_index_of(
   st: Agent,
   this: JsVal,
@@ -1842,7 +1592,6 @@ fn proto_search(
   let #(n, st) = to_int_or_inf(st, helpers.arg_at(args, 1))
   let k = case n {
     INegInf -> 0
-    // A +Infinity start is past every index, so search_loop returns -1.
     IPosInf -> len
     IInt(i) ->
       case i >= 0 {
@@ -1854,9 +1603,7 @@ fn proto_search(
   #(done(found), st)
 }
 
-/// Scan [i, len) for `search` with live element reads. `missing_undefined`:
-/// True (includes) treats an invalid index as the undefined value Get
-/// returns; False (indexOf) skips it, per the HasProperty step.
+// includes treats an invalid index as undefined, indexof skips it
 fn search_loop(
   st: Agent,
   view: TaWitness,
@@ -1880,11 +1627,7 @@ fn search_loop(
   }
 }
 
-/// keys()/values()/entries() — §23.2.3.{19,35,7}: ValidateTypedArray, then
-/// CreateArrayIterator over the typed array itself. LAZY: each .next()
-/// re-validates the buffer witness and re-reads length/elements through the
-/// live backing store, so mutation (and resizable-buffer resizes) during
-/// iteration are observed per spec.
+// lazy: each next revalidates and reads live
 fn proto_iter(
   st: Agent,
   this: JsVal,
@@ -1900,12 +1643,7 @@ fn proto_iter(
   #(mk_object(iter_ref), st)
 }
 
-/// Collect elements [i, len) with live reads, REVERSED, stopping at the
-/// first invalid index — mirrors the spec's "endIndex = min(final,
-/// TypedArrayLength)" re-derivation in slice after user code (species
-/// constructor / valueOf) may have shrunk the buffer. For sort/toSorted no
-/// user code runs between validation and collection, so the stop never
-/// triggers there.
+// reversed, stops at first invalid index (user code shrunk buffer)
 fn join_collect(
   st: Agent,
   view: TaWitness,
@@ -1922,12 +1660,6 @@ fn join_collect(
   }
 }
 
-// ============================================================================
-// Callback-iterating prototype methods — §23.2.3
-// ============================================================================
-
-/// Step "If IsCallable(callbackfn) is false, throw TypeError" shared by all
-/// callback-taking methods; hands back (callback, thisArg).
 fn require_cb(st: Agent, args: List(JsVal)) -> #(JsVal, JsVal) {
   let cb = helpers.first_arg_or_undefined(args)
   let this_arg = helpers.arg_at(args, 1)
@@ -1938,13 +1670,11 @@ fn require_cb(st: Agent, args: List(JsVal)) -> #(JsVal, JsVal) {
   }
 }
 
-/// `typeof`-name a value for TypeError messages.
 fn describe(st: Agent, v: JsVal) -> String {
   let #(ty, _) = rt_val.t_type_of(st, v)
   ty
 }
 
-/// The `JsOps.call` upcall (`t_call_checked`): re-raises the callee's throw.
 fn call(
   st: Agent,
   f: JsVal,
@@ -1955,10 +1685,7 @@ fn call(
   js.ops.call(st, f, this, args)
 }
 
-/// Set(target, k, v) through the exotic [[Set]] path (per-element coercion,
-/// may run user code). The Bool result is dropped: an integer-indexed [[Set]]
-/// on the target itself never reports false except for an immutable buffer,
-/// which every caller has already rejected.
+// bool dropped: only false for immutable buffers, already rejected
 fn set_index(
   st: Agent,
   target_h: Handle,
@@ -1977,37 +1704,22 @@ fn set_index(
   st
 }
 
-/// §10.4.5.15 IntegerIndexedElementGet against the LIVE view: re-reads the
-/// TypedArray cell so user code that resized the backing buffer mid-method
-/// (callback / valueOf side effects) is observed. A length-tracking view
-/// follows the CURRENT buffer length; a fixed view that no longer fits is
-/// wholly out of bounds. None = invalid index (like a detached buffer).
+// §10.4.5.15 against the live view, None = invalid index
 fn ta_read(st: Agent, ta_ref: Handle, k: Int) -> Option(JsVal) {
   use view <- option.then(ta_slot_of(st, ta_ref))
   let TaView(buffer: buf, kind:, byte_offset:, length:, ..) = view
   buffer.typed_array_element_live(st, buf, kind, byte_offset, length, k)
 }
 
-/// Read element `k` as the spec's Get(O, Pk) does: out-of-bounds (shrunk
-/// resizable buffer / detached mid-iteration) reads as undefined.
 fn ta_get(st: Agent, ta_ref: Handle, k: Int) -> JsVal {
   ta_read(st, ta_ref, k) |> option.unwrap(mk_undefined())
 }
 
-/// Throw the TypeError a §23.2.4.4 ValidateTypedArray witness failure demands.
-/// The categories and their prose live in `buffer.ViewWitnessError` — the ONE
-/// witness error type — and this only adapts it to a builtin's return shape.
 fn witness_type_error(st: Agent, err: buffer.ViewWitnessError) -> a {
   rt_val.t_throw_type_error(st, buffer.view_witness_error_message(err))
 }
 
-/// §23.2.4.4 ValidateTypedArray buffer-witness checks against the LIVE
-/// buffer: Error(..) when the buffer is detached or the view is out of
-/// bounds (a fixed view past the end of a shrunk resizable buffer, or a
-/// length-tracking view whose byte offset is past the end).
-///
-/// On success it hands back the LIVE bytes it just read to prove all that:
-/// the bytes ARE the proof, so they travel with it.
+// §23.2.4.4 witness checks; ok carries the live bytes as proof
 fn view_witness_bytes(
   st: Agent,
   view: TaView,
@@ -2030,8 +1742,6 @@ fn view_witness_bytes(
   }
 }
 
-/// view_witness_bytes keyed by the TypedArray value itself (re-reads the
-/// cell so resizes since validation are observed).
 fn ta_witness_bytes(
   st: Agent,
   this: JsVal,
@@ -2042,9 +1752,7 @@ fn ta_witness_bytes(
   }
 }
 
-/// CURRENT number of valid indices of the view — 0 for a detached buffer or
-/// an out-of-bounds fixed view; the live tracked length for a
-/// length-tracking view. The §10.4.5.14 IsValidIntegerIndex bound.
+// §10.4.5.14 bound: current count of valid indices
 fn ta_live_length(st: Agent, this: JsVal) -> Int {
   case ta_slot(st, this) {
     Some(TaView(buffer: buf, kind:, byte_offset:, length:, ..)) ->
@@ -2053,8 +1761,6 @@ fn ta_live_length(st: Agent, this: JsVal) -> Int {
   }
 }
 
-/// Which way an index-visiting loop walks — nothing tied "step is negative"
-/// to "start at len - 1" when this was a bare Int step.
 type Direction {
   Ascending
   Descending
@@ -2074,9 +1780,6 @@ fn direction_start(dir: Direction, len: Int) -> Int {
   }
 }
 
-/// Generic callback loop: visits indices from `k` in `dir` while inside
-/// [0, len), calling cb(element, k, this). `decide` inspects the callback
-/// result and may stop the loop with a final value.
 fn iterate_calls(
   st: Agent,
   view: TaWitness,
@@ -2105,7 +1808,6 @@ fn iterate_calls(
   }
 }
 
-/// §23.2.3.7 every / §23.2.3.28 some.
 fn proto_every_some(
   st: Agent,
   this: JsVal,
@@ -2124,7 +1826,6 @@ fn proto_every_some(
   #(early |> option.unwrap(mk_bool(is_every)), st)
 }
 
-/// §23.2.3.15 forEach.
 fn proto_for_each(
   st: Agent,
   this: JsVal,
@@ -2139,8 +1840,6 @@ fn proto_for_each(
   #(mk_undefined(), st)
 }
 
-/// find/findIndex (§23.2.3.13/.14) ascending, findLast/findLastIndex
-/// (§23.2.3.11/.12) descending. Result is the element or its index.
 type FindMode {
   FindValue
   FindIdx
@@ -2174,8 +1873,6 @@ fn proto_find(
   #(early |> option.unwrap(default), st)
 }
 
-/// §23.2.3.22 map ( callbackfn [ , thisArg ] ) — result via
-/// TypedArraySpeciesCreate(O, « len »).
 fn proto_map(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
   let #(cb, this_arg) = require_cb(st, args)
@@ -2201,8 +1898,6 @@ fn map_loop(
   map_loop(st, view, k + 1, cb, this_arg, target, target_ref)
 }
 
-/// §23.2.3.10 filter ( callbackfn [ , thisArg ] ) — kept values collected
-/// first, then TypedArraySpeciesCreate(O, « captured ») and written out.
 fn proto_filter(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
   let #(cb, this_arg) = require_cb(st, args)
@@ -2232,8 +1927,6 @@ fn filter_collect(
   filter_collect(st, view, k + 1, cb, this_arg, acc)
 }
 
-/// Write a list of (already numeric) values into a TypedArray via the
-/// ordinary Set path, starting at index `k`.
 fn write_values(
   st: Agent,
   target: JsVal,
@@ -2250,7 +1943,6 @@ fn write_values(
   }
 }
 
-/// §23.2.3.23/.24 reduce (Ascending) / reduceRight (Descending).
 fn proto_reduce(
   st: Agent,
   this: JsVal,
@@ -2301,11 +1993,7 @@ fn reduce_loop(
   reduce_loop(st, view, k + direction_step(dir), dir, cb, res)
 }
 
-// ============================================================================
-// copyWithin / reverse / toReversed / with — byte-level methods
-// ============================================================================
-
-/// §23.2.3.5 copyWithin ( target, start [ , end ] ).
+// §23.2.3.5 copywithin
 fn proto_copy_within(
   st: Agent,
   this: JsVal,
@@ -2328,29 +2016,22 @@ fn proto_copy_within(
   let final = relative_index(e, len)
   let count = int.min(final - from, len - to)
   use <- bool.guard(count <= 0, #(this, st))
-  // Steps 12.c-d: re-validate against the live buffer — the coercions above
-  // can run user code that detaches the buffer or shrinks it below a FIXED
-  // view; both throw TypeError.
+  // revalidate, coercions may detach or shrink a fixed view
   let data = witness_bytes(st, this)
   let size = typed_array_ffi.elem_size(kind)
-  // Steps 12.e-f: len = min(len, TypedArrayLength) — a length-tracking
-  // view follows a SHRUNK buffer (clamp indices/count down), but a grow
-  // never raises the snapshot bounds.
+  // tracking view follows a shrink, never a grow
   let live_len = int.min(len, ta_live_length(st, this))
   let to = int.min(to, live_len)
   let from = int.min(from, live_len)
   let final = int.min(final, live_len)
   let count = int.min(final - from, live_len - to)
   use <- bool.guard(count <= 0, #(this, st))
-  // In range: the witness proved off + len * size fits `data`, and
-  // from + count <= live_len <= len.
   let assert Ok(region) = bit_array.slice(data, off + from * size, count * size)
   let target = off + to * size
   let #(new_data, written) = splice_clamped(data, target, region)
   #(this, buffer.store_region(st, buf, new_data, target, written))
 }
 
-/// Concatenation of a view's elements in reverse element order.
 fn reversed_bytes(data: BitArray, off: Int, len: Int, size: Int) -> BitArray {
   reversed_bytes_loop(data, off, len, size, 0, [])
 }
@@ -2366,14 +2047,12 @@ fn reversed_bytes_loop(
   case i >= len {
     True -> bit_array.concat(acc)
     False -> {
-      // Callers pass a range already proved to lie inside `data`.
       let assert Ok(elem) = bit_array.slice(data, off + i * size, size)
       reversed_bytes_loop(data, off, len, size, i + 1, [elem, ..acc])
     }
   }
 }
 
-/// §23.2.3.25 reverse ( ) — in place, returns this.
 fn proto_reverse(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
   let TaWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) = view
@@ -2389,8 +2068,7 @@ fn proto_reverse(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// TypedArrayCreateSameType (§23.2.4.3) — fresh array of the receiver's own
-/// kind with the intrinsic default prototype (species is NOT consulted).
+// §23.2.4.3 typedarraycreatesametype, species not consulted
 fn ta_same_type_create(
   st: Agent,
   kind: TypedArrayKind,
@@ -2399,8 +2077,6 @@ fn ta_same_type_create(
   alloc_ta_with_length(st, kind, default_proto_for(st, kind), len)
 }
 
-/// Commit `new_data` into a freshly allocated buffer this caller owns every
-/// byte of, and return the new typed array as the result.
 fn write_fresh_buffer(
   st: Agent,
   new_buf: Handle,
@@ -2413,7 +2089,6 @@ fn write_fresh_buffer(
   )
 }
 
-/// §23.2.3.32 toReversed ( ).
 fn proto_to_reversed(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
   let TaWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) = view
@@ -2425,7 +2100,7 @@ fn proto_to_reversed(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   write_fresh_buffer(st, new_buf, new_data, ta_val)
 }
 
-/// §23.2.3.36 with ( index, value ).
+// §23.2.3.36 with
 fn proto_with(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
   let TaWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) = view
@@ -2441,19 +2116,14 @@ fn proto_with(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     IPosInf -> max_safe_integer
     INegInf -> -1
   }
-  // Step 8: numeric conversion happens BEFORE the index range check — and
-  // its valueOf may RESIZE the buffer.
+  // conversion before range check, valueof may resize
   let #(converted, st) = convert_for_kind(st, kind, value_arg)
   let size = typed_array_ffi.elem_size(kind)
-  // Step 9: IsValidIntegerIndex(O, actualIndex) against the LIVE view — a
-  // grow during the conversion can make an initially out-of-bounds index
-  // valid (and vice versa).
   let valid = actual >= 0 && actual < ta_live_length(st, this)
   use <- bool.lazy_guard(!valid, fn() {
     rt_val.t_throw_range_error(st, "Invalid typed array index")
   })
-  // Step 10: A = TypedArrayCreateSameType(O, « len ») with the SNAPSHOT
-  // length; the replacement value only lands when actualIndex is inside it.
+  // snapshot length; value lands only if index inside it
   let #(fresh, st) = ta_same_type_create(st, kind, len)
   let FreshTa(value: ta_val, buffer: new_buf, ..) = fresh
   let data = copy_region(st, buf, off, len * size)
@@ -2464,10 +2134,6 @@ fn proto_with(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   write_fresh_buffer(st, new_buf, new_data, ta_val)
 }
 
-// ============================================================================
-// lastIndexOf — §23.2.3.20
-// ============================================================================
-
 fn proto_last_index_of(
   st: Agent,
   this: JsVal,
@@ -2477,8 +2143,7 @@ fn proto_last_index_of(
   let len = view.length
   use <- bool.guard(len == 0, #(mk_number(JInt(-1)), st))
   let search = helpers.first_arg_or_undefined(args)
-  // Step 4: fromIndex PRESENT (even as undefined) → ToIntegerOrInfinity;
-  // absent → len - 1.
+  // fromindex present (even undefined) differs from absent
   let #(n, st) = case helpers.list_at(args, 1) {
     None -> #(IInt(len - 1), st)
     Some(v) -> to_int_or_inf(st, v)
@@ -2500,8 +2165,7 @@ fn proto_last_index_of(
   }
 }
 
-/// Scan [0, k] downward with live reads; invalid indices (fromIndex valueOf
-/// shrank the buffer) are skipped per the HasProperty step.
+// invalid indices skipped per hasproperty
 fn search_down(st: Agent, ta_ref: Handle, k: Int, search: JsVal) -> Int {
   case k < 0 {
     True -> -1
@@ -2517,12 +2181,7 @@ fn search_down(st: Agent, ta_ref: Handle, k: Int, search: JsVal) -> Int {
   }
 }
 
-// ============================================================================
-// sort / toSorted — §23.2.3.29 / §23.2.3.33
-// ============================================================================
-
-/// §23.2.4.7 CompareTypedArrayElements with comparefn undefined:
-/// NaN sorts last (NaN vs NaN → 0), -0 before +0, otherwise numeric.
+// §23.2.4.7 default compare: nan last, -0 before +0
 fn default_ta_compare(x: JsVal, y: JsVal) -> Int {
   case classify(x), classify(y) {
     KNum(a), KNum(b) -> compare_numbers(a, b)
@@ -2567,9 +2226,6 @@ fn compare_numbers(a: JsNum, b: JsNum) -> Int {
   }
 }
 
-/// A finite element value as a Float for ordering. Elements are at most 64
-/// bits wide as integers only for BigInt kinds (handled apart), so every
-/// Number element here converts exactly enough for comparison.
 fn finite_to_float(n: JsNum) -> Float {
   case n {
     JInt(i) -> int.to_float(i)
@@ -2578,8 +2234,6 @@ fn finite_to_float(n: JsNum) -> Float {
   }
 }
 
-/// A comparator: -1/0/1, threading Agent (a user comparefn can run arbitrary
-/// JS).
 fn compare_with(st: Agent, cmp: JsVal, x: JsVal, y: JsVal) -> #(Int, Agent) {
   case classify(cmp) {
     KUndef -> #(default_ta_compare(x, y), st)
@@ -2608,8 +2262,7 @@ fn compare_with(st: Agent, cmp: JsVal, x: JsVal, y: JsVal) -> #(Int, Agent) {
   }
 }
 
-/// Stable merge sort over the snapshot list, threading Agent through the
-/// (possibly effectful) comparator.
+// stable merge sort, comparator may run js
 fn sort_values(
   st: Agent,
   items: List(JsVal),
@@ -2646,16 +2299,11 @@ fn merge_values(
   }
 }
 
-/// Encode a list of numeric values into one contiguous byte region — each
-/// value is encoded into its own elem-size binary and the segments are
-/// concatenated ONCE at the end (O(n)).
 fn encode_region(
   kind: TypedArrayKind,
   size: Int,
   values: List(JsVal),
 ) -> BitArray {
-  // The values are a snapshot READ from the typed array (sorted_snapshot),
-  // so each one is a Number / BigInt; anything else encodes as zero.
   list.map(values, fn(v) {
     case buffer.decoded_element(kind, v) {
       Some(el) -> buffer.typed_array_encode_value(ta_zeroed(size), 0, el)
@@ -2665,9 +2313,7 @@ fn encode_region(
   |> bit_array.concat
 }
 
-/// Shared sort/toSorted prologue: comparefn validated FIRST, then
-/// ValidateTypedArray; snapshots the elements and sorts them, handing back
-/// the validated view plus the sorted list.
+// comparefn validated before validatetypedarray
 fn sorted_snapshot(
   st: Agent,
   this: JsVal,
@@ -2689,12 +2335,8 @@ fn sorted_snapshot(
   #(view, sorted, st)
 }
 
-/// §23.2.3.29 sort ( comparefn ) — sorts a snapshot, writes back in place.
 fn proto_sort(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  // Immutable ArrayBuffer proposal: sort() has accessMode ~write~ — the
-  // comparator must never run against an immutable-backed receiver. (The
-  // spec checks comparator callability first, but both failures are
-  // TypeErrors, so the order is unobservable.)
+  // immutable check first; order vs callability check is unobservable
   let view_w = require_ta(st, this)
   require_mutable(st, view_w.buffer)
   let #(view, sorted, st) = sorted_snapshot(st, this, args)
@@ -2703,15 +2345,9 @@ fn proto_sort(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     None -> #(this, st)
     Some(data) -> {
       let size = typed_array_ffi.elem_size(kind)
-      // Build the sorted region in ONE pass, then splice it into the live
-      // buffer with ONE rebuild — clamped to the view's CURRENTLY VALID
-      // indices (the buffer may have shrunk during a user comparefn).
-      // Per-element Set semantics: a fixed view that no longer fits is
-      // wholly out of bounds — NO index is valid, so nothing is written —
-      // while a shrunk length-tracking view accepts its first live elements.
+      // clamp to currently valid indices, comparefn may have shrunk buffer
       let region = encode_region(kind, size, sorted)
       let avail = int.min(len, ta_live_length(st, this)) * size
-      // `region` is exactly len * size bytes and avail <= that.
       let region = case avail == len * size {
         True -> region
         False -> {
@@ -2728,7 +2364,6 @@ fn proto_sort(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §23.2.3.33 toSorted ( comparefn ).
 fn proto_to_sorted(
   st: Agent,
   this: JsVal,
@@ -2739,8 +2374,6 @@ fn proto_to_sorted(
   let #(fresh, st) = ta_same_type_create(st, kind, len)
   let FreshTa(value: ta_val, buffer: new_buf, ..) = fresh
   let size = typed_array_ffi.elem_size(kind)
-  // The fresh buffer is exactly len * size bytes, so the concatenated
-  // region IS the new buffer contents — no splice needed.
   let new_data = case buffer.buffer_bytes(st, new_buf) {
     Some(_fresh) -> encode_region(kind, size, sorted)
     None -> ta_zeroed(len * size)
@@ -2748,12 +2381,7 @@ fn proto_to_sorted(
   write_fresh_buffer(st, new_buf, new_data, ta_val)
 }
 
-// ============================================================================
-// toLocaleString — §23.2.3.31 / ECMA-402 §18.5.1
-// ============================================================================
-
-/// Same algorithm as the ECMA-402 Array.prototype.toLocaleString: each
-/// element's own `toLocaleString` is invoked with « locales, options ».
+// ecma-402 §18.5.1, calls each element's toLocaleString
 fn proto_to_locale_string(
   st: Agent,
   this: JsVal,
@@ -2795,26 +2423,18 @@ fn locale_loop(
   }
 }
 
-// ============================================================================
-// TypedArraySpeciesCreate — §23.2.4.1
-// ============================================================================
-
-/// SpeciesConstructor(exemplar, %Kind%Array%) — §7.3.22. None means "use
-/// the intrinsic default" (also chosen when @@species IS the intrinsic
-/// constructor, which is observably identical and far cheaper).
+// §7.3.22 speciesconstructor, None = intrinsic default
 fn resolve_species_ctor(
   st: Agent,
   exemplar: JsVal,
   kind: TypedArrayKind,
 ) -> #(Option(JsVal), Agent) {
   let default_ctor = typed_array_pair(st, kind).constructor
-  // C = Get(exemplar, "constructor").
   let #(ctor, st) =
     rt_obj.t_get_prop(st, exemplar, StringKey(Named("constructor")))
   case classify(ctor) {
     KUndef -> #(None, st)
     KHandle(_) -> {
-      // S = Get(C, @@species); null/undefined → default.
       let #(species, st) =
         rt_obj.t_get_prop(st, ctor, SymbolKey(symbol_species))
       case classify(species) {
@@ -2843,8 +2463,6 @@ fn resolve_species_ctor(
   }
 }
 
-/// TypedArraySpeciesCreate post-construct check: the result's content type
-/// (number vs bigint) must match the exemplar's.
 fn check_content_type(
   st: Agent,
   obj: JsVal,
@@ -2865,8 +2483,6 @@ fn check_content_type(
   }
 }
 
-/// SpeciesConstructor(exemplar, default %Kind%Array%) then
-/// TypedArrayCreateFromConstructor(« len »); content type must match.
 fn ta_species_create(
   st: Agent,
   exemplar: JsVal,
@@ -2886,13 +2502,6 @@ fn ta_species_create(
   }
 }
 
-// ============================================================================
-// Small shared helpers
-// ============================================================================
-
-/// The realm's constructor/prototype pair for a concrete kind — the table is
-/// total over `all_typed_array_kinds`, so there is no "kind not installed"
-/// case once `init` has run.
 fn typed_array_pair(st: Agent, kind: TypedArrayKind) -> BuiltinPair {
   pair_in(st.realm, kind)
 }
@@ -2903,13 +2512,11 @@ fn pair_in(realm: Realm, kind: TypedArrayKind) -> BuiltinPair {
   bt
 }
 
-/// The intrinsic default prototype for a concrete TypedArray kind.
 fn default_proto_for(st: Agent, kind: TypedArrayKind) -> Handle {
   typed_array_pair(st, kind).prototype
 }
 
-/// §23.2.5.1.1 AllocateTypedArray step 1: GetPrototypeFromConstructor with
-/// the `kind` intrinsic of newTarget's realm as the default.
+// §23.2.5.1.1 step 1 getprototypefromconstructor
 fn proto_from_new_target(
   st: Agent,
   new_target: JsVal,

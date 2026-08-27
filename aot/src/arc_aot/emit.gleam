@@ -1,6 +1,3 @@
-//// arc AST + scope tree -> twocore IR module. Façade over emit/{state,anf}
-//// and the M12-M18 emit_* passes; body is filled in by M19.
-
 import arc/bytecode/lexical
 import arc/compiler/ast_util
 import arc/compiler/scope
@@ -26,48 +23,28 @@ import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
 
-// ── SPEC §19.1 façade types ────────────────────────────────────────────────
-
-/// Goal symbol the source was parsed under. `AsModule` implies strict mode
-/// and top-level `import`/`export` (v1: single-unit only, imports rejected).
 pub type SourceKind {
   AsScript
   AsModule
 }
 
-/// Caller-supplied knobs for `compile_source` / `compile`.
 pub type CompileOpts {
-  CompileOpts(
-    /// BEAM module name the emitted `ir.Module` carries.
-    module_name: String,
-    source_kind: SourceKind,
-    /// Export name of the entry function (conventionally `"js_main"`).
-    entry_name: String,
-  )
+  CompileOpts(module_name: String, source_kind: SourceKind, entry_name: String)
 }
 
-/// Successful compile output: the IR module plus the finalized scope tree
-/// (kept for diagnostics / the differential harness) and the strict flag.
 pub type CompiledUnit {
   CompiledUnit(module: ir.Module, tree: scope.ScopeTree, is_strict: Bool)
 }
 
-/// Re-export so downstream (pipeline / harness) doesn't reach into `state`.
 pub type EmitError =
   state.EmitError
 
-/// R2: the single JS exception tag name. Source of truth is `exn.gleam`.
 pub const js_exn_tag = exn.js_exn_tag
 
-/// The 2core `Binding` every arc→BEAM compile uses: threaded state on the
-/// portable tiers, no metering, and arc's own runtime as the `"js"` host.
 pub fn binding() -> instance.Binding {
   profiles.direct(host_ops.table())
 }
 
-/// SPEC§19.2 / R13: wire the M12-M18 emit_* modules into the mutual-recursion
-/// dispatch table, then build the initial Emitter2 rooted at the script scope.
-/// `is_module` seeds strict mode (ESM top-level is always strict).
 fn init_emitter(
   tree: scope.ScopeTree,
   is_module: Bool,
@@ -88,12 +65,6 @@ fn init_emitter(
   state.new_emitter(tree, scope.root_scope_id, is_module, module_name, dispatch)
 }
 
-/// Optimization G: seed every root-scope local binding (top-level `var` /
-/// `function` when the tree was built with `module_slot_globals: True`, plus
-/// top-level `let`/`const`) — Var → boxed cell holding undef, Let/Const → tdz.
-/// Mirrors func.binding_prologue for the js_main frame, which had no prologue
-/// before. Also builds the name→slot map for `slotted_globals`. Returns a
-/// wrap so js_main's body is `let js_local_N = cell_new(undef) in …`.
 fn root_binding_prologue(
   e: state.Emitter2,
 ) -> #(fn(ir.Expr) -> ir.Expr, state.Emitter2) {
@@ -128,11 +99,7 @@ fn root_binding_prologue(
   })
 }
 
-/// §16.1.7 GlobalDeclarationInstantiation steps 17-18: every top-level
-/// `var` name, hoisted function name and (sloppy) Annex B function-in-block
-/// name that lives on the global object gets its `{undefined, W, E, C:false}`
-/// binding before the body runs, so a read ahead of the declaration sees
-/// `undefined` and eval code sees the binding as an existing var.
+// §16.1.7 steps 17-18
 fn global_var_prologue(
   e: state.Emitter2,
   body: List(ast.StmtWithLine),
@@ -169,10 +136,6 @@ fn global_var_prologue(
   })
 }
 
-/// A Script root owns the four lexical pseudo-bindings (scope.gleam
-/// `script_root_owns_lexical`): `this` is the global object (§9.1.1.4.11),
-/// the other three are `undefined`. Mirrors func.unpack_frame for js_main,
-/// whose `_frame` carries no caller context.
 fn root_lexical_prologue(
   e: state.Emitter2,
 ) -> #(fn(ir.Expr) -> ir.Expr, state.Emitter2) {
@@ -209,15 +172,7 @@ fn root_lexical_prologue(
   }
 }
 
-/// SPEC§19.5 step 3 — Script-top-level FunctionDeclaration hoisting
-/// (GlobalDeclarationInstantiation §16.1.7 step 16). For each direct fn decl
-/// in `prog_body`: pop its analyzer scope id, compile the closure via
-/// `dispatch.emit_function`, then store into the name's slotted-global cell
-/// (Optimization G) or the global object. Returns `#(wrap, e)` where `wrap`
-/// nests `tail` in the hoist Let-bindings and `e` has `child_fn_cursor`
-/// advanced past every fn-decl scope so the following `emit_stmts` — which
-/// no-ops each FunctionDeclaration (stmt.gleam:356) — pops only fn-expr
-/// scopes in source order.
+// §16.1.7 step 16, hoist top-level function declarations
 pub fn emit_hoists(
   e: state.Emitter2,
   prog_body: List(ast.StmtWithLine),
@@ -260,8 +215,6 @@ pub fn emit_hoists(
           #(w, e)
         }
         scope.Plain(scope.Local(slot:, boxed: False, ..)) -> {
-          // Unboxed root fn slot (no nested fn captures it): fresh Let-
-          // rebind + set_slot_var so later top-level reads see the closure.
           let #(t, e) = state.fresh_slot_var(e, slot)
           let e = state.set_slot_var(e, slot, t)
           let w = fn(tail) {
@@ -296,22 +249,12 @@ pub fn emit_hoists(
   }
 }
 
-/// Fresh-var budget per top-level chunk. erlc's beam_ssa passes are
-/// superlinear in function size, so js_main is cut into a chain of chunk
-/// functions once a chunk has consumed this many fresh vars (a proxy for
-/// emitted IR size).
+// erlc is superlinear in function size, so js_main is chunked
 const chunk_budget = 100
 
-/// Widest live set a chunk may take as parameters. BEAM caps a function at
-/// 255 arguments and the backend adds the store, so a cut whose live set is
-/// wider than this waits for a narrower point.
+// beam caps a function at 255 args
 const max_live = 250
 
-/// Emit the hoists (one `emit_hoists` per statement, in source order) and
-/// then the statements, cutting to a new chunk function whenever the current
-/// one has spent `chunk_budget` fresh vars since `start`. Each cut tail-calls
-/// the next chunk with every live slot var; the chunk rebinds them under the
-/// same names so `e.slot_vars` stays valid across the boundary.
 fn emit_top_level(
   e: state.Emitter2,
   hoists: List(ast.StmtWithLine),
@@ -326,9 +269,7 @@ fn emit_top_level(
       #(w(tail), e)
     }
     [], [] -> Ok(#(ir.Return([e.consts.undef]), e))
-    // The script's completion value when its last statement is an
-    // expression statement (§16.1.6 step 12 with UpdateEmpty): return it,
-    // as the interpreter does. Any other final statement returns undefined.
+    // §16.1.6 a trailing expression statement is the completion value
     [],
       [
         ast.StmtWithLine(
@@ -387,8 +328,6 @@ fn cut_or_continue(
   }
 }
 
-/// Parse `source`, finalize its scope tree, and lower to an `ir.Module`.
-/// Thin wrapper over `compile` for callers holding raw source text.
 pub fn compile_source(
   source: String,
   opts: CompileOpts,
@@ -407,12 +346,7 @@ pub fn compile_source(
         ..scope.default_analyze_opts(),
         strict: is_strict,
         top_lex: scope.LexLocal,
-        // Optimization G DISABLED (g-cell-get-regress): boxed-cell reads route
-        // through rt_store.t_cell_get (JsStore Dict lookup, 62-76ns).
-        // richards baseline had only 65/run global_get_fast (const-globals
-        // already inline the 41k), so G traded 55 cheap reads for +40,910
-        // cell_get/run ≈ +2.9ms. Re-enable only for a bench where profile
-        // shows >1k/run t_global_get_fast.
+        // slot globals measured slower on richards, keep off
         module_slot_globals: False,
         box_try_writes: True,
       ),
@@ -421,8 +355,6 @@ pub fn compile_source(
   CompiledUnit(module:, tree:, is_strict:)
 }
 
-/// SPEC§19.5 core driver: lower a parsed Program (with its finalized scope
-/// tree) into a flat `ir.Module` whose entry function is `js_main`.
 pub fn compile(
   program: ast.Program,
   tree: scope.ScopeTree,
@@ -430,33 +362,21 @@ pub fn compile(
 ) -> Result(ir.Module, state.EmitError) {
   let body = case program {
     ast.Script(body:) -> Ok(body)
-    // Q7: v1 is single-unit only; ImportDeclaration → Unsupported.
     ast.Module(..) ->
       Error(state.UnsupportedFeature("ESM module graph (SPEC Q7 v1)"))
   }
   use body <- result.try(body)
-  // (1) init emitter at root; strict iff Module goal or a top-level
-  // "use strict" directive (§11.2.2 Directive Prologue). Nested functions
-  // inherit it or scan their own prologue in func.emit_function.
   let strict =
     opts.source_kind == AsModule || ast_util.has_use_strict_directive(body)
   let e = init_emitter(tree, strict, opts.module_name)
   let e = state.set_const_globals(e, expr.analyze_const_globals(body))
-  // Optimization G: allocate boxed cells for every root-scope Local binding
-  // (top-level `var`/`function` under module_slot_globals) BEFORE hoists so
-  // fn-decl closures cell_set into a live cell. Also seeds slotted_globals.
   let #(prologue, e) = root_binding_prologue(e)
   let #(prologue, e) = global_var_prologue(e, body, strict, prologue)
-  // (2) hoist top-level FunctionDeclarations (§16.1.7 step 16), then (3)+(4)
-  // the statement fold, both cut into a chain of chunk functions. Terminal K
-  // is Return(undef); the runner drains microtasks and runs the GC safepoint
-  // after js_main returns.
   use #(top_tree, ef) <- result.try(emit_top_level(e, body, body, e.next_var, 0))
   use Nil <- result.map(case list.reverse(ef.unsupported) {
     [feature, ..] -> Error(state.UnsupportedFeature(feature))
     [] -> Ok(Nil)
   })
-  // (5) js_main params match the R7 call ABI (frame 4-tuple, args list).
   let js_main =
     ir.Function(
       name: "js_main",
@@ -465,8 +385,6 @@ pub fn compile(
       locals: [],
       body: prologue(top_tree),
     )
-  // (6) all 12 ir.Module fields. Invariant: js_main is NOT in fns_acc; tags
-  // has exactly one entry (R2 — every Throw/CatchTag names js_exn_tag).
   ir.Module(
     name: opts.module_name,
     uses_numerics: True,

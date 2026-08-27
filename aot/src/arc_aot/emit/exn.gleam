@@ -1,10 +1,3 @@
-//// M17: JS throw + try/catch/finally → structured ir.Try + barrier-
-//// duplication. Faithful port of arc/compiler/emit.gleam:2287-2510, 3875-3945
-//// into the Result-aware Rk-CPS style. §14.15.3 finally-overrides-completion
-//// realized STRUCTURALLY: inlined finally runs under Barrier2(None, None)
-//// (whose cross_cleanups → CatchOnly no-op) so a transfer inside F supersedes
-//// the pending one downstream. R2: js_exn tag. D2: NO St threading.
-
 import arc/compiler/ast_util
 import arc/compiler/scope.{
   type Binding, CaptureBinding, CatchBinding, ConstBinding, FnNameBinding,
@@ -19,14 +12,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
-/// R2: the single JS-exception ir.Throw/ir.Try tag.
 pub const js_exn_tag = "js_exn"
-
-// ── Result-aware CPS (Rk chain) — mirrors func.gleam ────────────────────────
-// Rk returns the tree paired with the emitter the chain finished with.
-// Transfers (Throw) never call `next`; they return the emitter they diverged
-// at. R12 Result channel; host_ is a sanctioned CallHost("js",..) site
-// alongside anf.host.
 
 type Rk(a) =
   fn(Emitter2, a) -> Result(#(ir.Expr, Emitter2), EmitError)
@@ -58,8 +44,6 @@ fn host_unit_(
   k(e)
 }
 
-/// Right-fold `step` over `items`, threading e, building nested Lets.
-/// `then` is labelled so `use e, x, next <- each_(…, then: k)` reads well.
 fn each_(
   e: Emitter2,
   items: List(a),
@@ -76,8 +60,6 @@ fn each_(
   }
 }
 
-/// Result-aware bind_if. Arm shape = dispatch return shape (#(Expr, E2)) so
-/// `e.dispatch.emit_expr` is a valid arm directly; pure arm = `pure_arm(v)`.
 fn if_(
   e: Emitter2,
   cond: ir.Value,
@@ -96,7 +78,6 @@ fn pure_arm(
   fn(e) { Ok(#(ir.Values([v]), e)) }
 }
 
-/// Run an Rk chain whose leaf calls `done(ef, tree)`.
 fn run_rk(
   e: Emitter2,
   f: fn(
@@ -107,10 +88,6 @@ fn run_rk(
   f(e, fn(ef, tree) { Ok(#(tree, ef)) })
 }
 
-// ── throw + finally-inline (port emit.gleam:2287-2310, 3875-3945) ───────────
-
-/// `throw arg;` — evaluate arg, raise under the R2 js_exn tag. 1 IR arg;
-/// emit_core (M9) prepends St. Transfers never call `next`.
 pub fn emit_throw_stmt(
   e: Emitter2,
   arg: ast.Expression,
@@ -121,29 +98,15 @@ pub fn emit_throw_stmt(
   done(e, ir.Throw(js_exn_tag, [v]))
 }
 
-/// Re-emit a finally block inline at a barrier crossing, then continue via
-/// `then` (the pending transfer or next cleanup). Port of M17.md §3.5
-/// cross_barrier Barrier2(Some) arm. §14.15.3 override: F runs under
-/// Barrier2(None, None) (cross_cleanups → CatchOnly no-op) so a transfer
-/// INSIDE F does not re-inline F, and — being upstream in the ANF chain —
-/// naturally supersedes the pending `then` transfer downstream.
+// §14.15.3 finally overrides the pending completion
 pub fn inline_finally(
   e: Emitter2,
   body: List(ast.StmtWithLine),
   saved: state.ScopeSave2,
   then: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  // RULING slot-vars-scope-survival (stmt.gleam:116-128): teleport ONLY the
-  // scope-cursor triple, NOT slot_vars. F must read the break-site SSA names
-  // (try-body writes visible in finally), and F's own writes must flow into
-  // `then(e)`'s carried_values — state.leave_scope would clobber both.
+  // move scope cursor only, slot_vars must survive
   let here = snapshot_scope(e)
-  // Port emit.gleam:2357-2388 pop-before-subroutine: drop everything up to and
-  // INCLUDING the Barrier2(Some(F)) being inlined so a transfer INSIDE F does
-  // not re-cross it (would infinite-recurse on `try{break}finally{break}`).
-  // The trimmed frame_stack rides out on the diverged transfer's emitter;
-  // statement emitters restore their own frames around each body, so the
-  // trim stays local to this cleanup chain.
   let e =
     state.Emitter2(
       ..e,
@@ -170,9 +133,6 @@ pub fn inline_finally(
   then(e)
 }
 
-/// Drop frames up to and including the innermost `Barrier2(Some(_))` — the
-/// barrier this inline_finally call is realising. Cleanups are innermost-first
-/// (state.find_*_target), so the first Some on the stack is always the one.
 fn drop_through_finally_barrier(
   frames: List(state.Frame2),
 ) -> List(state.Frame2) {
@@ -183,10 +143,6 @@ fn drop_through_finally_barrier(
   }
 }
 
-// ── try-finally / try-catch-finally scaffold (M17.md §3.4/§3.6) ─────────────
-
-/// Snapshot the scope-cursor position (state.gleam:93) — carried on Barrier2
-/// so `inline_finally` at each crossing can restore before re-emitting F.
 fn snapshot_scope(e: Emitter2) -> state.ScopeSave2 {
   state.ScopeSave2(
     cur_scope: e.cur_scope,
@@ -196,17 +152,10 @@ fn snapshot_scope(e: Emitter2) -> state.ScopeSave2 {
   )
 }
 
-/// Wrap a bare stmt-list as `[{ …body }]` so `dispatch.emit_stmts` routes it
-/// through stmt.emit_block (scope entry + prologue + fn-decl hoist) — the
-/// faithful equivalent of arc's `emit_block(_, body, tail: False)`.
 fn as_block(body: List(ast.StmtWithLine)) -> List(ast.StmtWithLine) {
   [ast.StmtWithLine(0, ast.BlockStatement(body))]
 }
 
-/// Emit `finalizer` as its own block, under `Barrier2(None, None)` — the
-/// in-finally-body marker: cross_cleanups → CatchOnly no-op so a transfer
-/// INSIDE F does not re-inline F, and structurally precedes the pending
-/// rethrow/tail downstream in the ANF chain (§14.15.3 override).
 fn emit_finalizer(
   e: Emitter2,
   finalizer: List(ast.StmtWithLine),
@@ -220,11 +169,6 @@ fn emit_finalizer(
   #(tree, state.pop_frame(e))
 }
 
-/// `try { B } finally { F }` — port of M17.md §3.4 + emit.gleam:3901-3923.
-/// Shape: push Barrier2(Some(#(F, saved))); emit B; pop; wrap in ir.Try with
-/// a rethrow-after-finally handler; normal-path F after; then k. Any
-/// break/continue/return inside B that CROSSES the barrier gets F inlined
-/// before the transfer (stmt.inline_cleanup → exn.inline_finally).
 pub fn emit_try_finally(
   e: Emitter2,
   block: List(ast.StmtWithLine),
@@ -232,15 +176,9 @@ pub fn emit_try_finally(
   k: state.K,
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   use e <- wrap_with_finally(e, finalizer, block_scope_count(block), k)
-  // B runs directly under the outer Barrier2(Some(F)) — one barrier,
-  // matching emit.gleam:3907-3909's single IrPushTry(Finally).
   e.dispatch.emit_stmts(e, as_block(block), fn(ef) { Ok(#(ir.Values([]), ef)) })
 }
 
-/// `try { B } catch(p?) { H } finally { F }` — port of M17.md §3.6 +
-/// emit.gleam:2372-2408. Two nested barriers: outer carries F (via
-/// wrap_with_finally); inner is catch-only. B runs under both, H under the
-/// outer only — so a break/return in H also inlines F before transferring.
 pub fn emit_try_catch_finally(
   e: Emitter2,
   block: List(ast.StmtWithLine),
@@ -252,7 +190,6 @@ pub fn emit_try_catch_finally(
   let scopes_before_fin =
     block_scope_count(block) + catch_scope_count(param, catch_body)
   use e <- wrap_with_finally(e, finalizer, scopes_before_fin, k)
-  // Inner catch-only barrier around B (port emit.gleam:2385-2389).
   let #(esc, e) = state.fresh_escape(e, 0)
   let e = state.push_barrier(e, None, None, Some(esc))
   use #(body_ir, e) <- result.try(
@@ -261,7 +198,6 @@ pub fn emit_try_catch_finally(
     }),
   )
   let e = state.pop_frame(e)
-  // Catch handler H — outer Barrier2(Some(F)) still on frame_stack.
   let #(ex, e) = state.fresh_var(e)
   use #(h_ir, e) <- result.map(emit_catch_arm(e, param, catch_body, ex))
   let inner =
@@ -276,8 +212,6 @@ pub fn emit_try_catch_finally(
   state.land_escapes(e, esc, inner)
 }
 
-/// scope_cursor entries `emit_stmts(as_block(body))` will consume: 1 iff the
-/// analyzer pushed a Block scope for it (kept in lockstep by sb_block_prunable).
 fn block_scope_count(body: List(ast.StmtWithLine)) -> Int {
   case ast_util.block_has_declarations(body) {
     True -> 1
@@ -285,9 +219,6 @@ fn block_scope_count(body: List(ast.StmtWithLine)) -> Int {
   }
 }
 
-/// scope_cursor entries `emit_catch_arm` consumes from the OUTER cursor:
-/// param=Some enters the (never-pruned) Catch scope — its body block is a
-/// child of that, not the outer cursor. param=None has no Catch scope.
 fn catch_scope_count(
   param: Option(ast.Pattern),
   catch_body: List(ast.StmtWithLine),
@@ -298,13 +229,6 @@ fn catch_scope_count(
   }
 }
 
-/// Shared scaffold: push outer `Barrier2(Some(#(as_block(F), fin_save)))`,
-/// emit the protected region via `build`, pop, then `ir.Try(protected,
-/// [catch ex → F; rethrow]) ; F_normal ; k`. F is emitted twice (throw +
-/// normal path); scope_cursor is snapshot/restored so both re-emits consume
-/// the SAME finally-block scope id. Port emit.gleam:2372-2408, Gosub → inline.
-/// `scopes_before_fin` = scope_cursor entries `build` consumes, so fin_save
-/// (stored on the barrier) positions inline_finally at F_scope, not B_scope.
 fn wrap_with_finally(
   e: Emitter2,
   finalizer: List(ast.StmtWithLine),
@@ -312,9 +236,6 @@ fn wrap_with_finally(
   k: state.K,
   protected build: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  // fin_save: scope position at F-entry (AFTER B/catch scopes) — the barrier
-  // stores THIS, not try-entry, so inline_finally's as_block(F) enters F_scope
-  // instead of stealing B_scope from the cursor. slot_vars unused there.
   let entry_save = snapshot_scope(e)
   let fin_save =
     state.ScopeSave2(
@@ -331,18 +252,12 @@ fn wrap_with_finally(
     )
   use #(protected_ir, e) <- result.try(build(e))
   let e = state.pop_frame(e)
-  // Post-protected position: F_block is next in scope_cursor. Snapshot so
-  // the second (normal-path) re-emit re-consumes the same scope id.
   let fin_pos = snapshot_scope(e)
-  // Throw path: catch ex → F ; rethrow ex.
   let #(ex, e) = state.fresh_var(e)
   use #(f_throw, e) <- result.try(emit_finalizer(e, finalizer))
   let throw_handler = ir.Let([], f_throw, ir.Throw(js_exn_tag, [ir.Var(ex)]))
-  // Restore cursor for normal-path re-emit.
   let e = state.leave_scope(e, fin_pos)
   use #(f_normal, e) <- result.try(emit_finalizer(e, finalizer))
-  // ir.Try wraps ONLY the protected region (F_normal outside — a throw from
-  // F_normal must NOT re-run F). Let([], _, _) is 0-arity sequencing.
   let #(region, e) =
     state.land_escapes(
       e,
@@ -356,21 +271,12 @@ fn wrap_with_finally(
         ),
       ]),
     )
-  // KNOWN GAP (M19 wiring): unboxed-slot rebinds inside B/H/F are Let-bound
-  // INSIDE region/f_normal so their fresh names are out of IR scope in k(e)
-  // and stmt.gleam:1606's `next(e)`. Carried threading needs stmt.gleam-side
-  // assigned_unboxed_slots + rebind_after_block; until then, restore
-  // entry slot_vars so downstream reads reference in-scope (pre-try) names.
+  // TODO: rebinds inside try are not threaded out yet
   let e = state.Emitter2(..e, slot_vars: entry_save.slot_vars)
   use tail <- state.map_tree(k(e))
   ir.Let([], region, ir.Let([], f_normal, tail))
 }
 
-/// Catch handler body — port of emit.gleam:3010-3027 / stmt.gleam:1602-1632.
-/// `catch (p) Block`: enter Catch scope (holds the param), seed it, bind `p`
-/// from the payload var, emit body block, leave. `catch Block` (no binding):
-/// NO catch scope — emit body directly (entering here would steal the next
-/// sibling's cursor id, emit.gleam:3006-3009).
 fn emit_catch_arm(
   e: Emitter2,
   param: Option(ast.Pattern),
@@ -407,10 +313,6 @@ fn emit_catch_arm(
   }
 }
 
-/// Seed the just-entered Catch scope's bindings. `catch(x)` → the parameter
-/// binding → undef-seeded (cell_new when captured); destructured
-/// `catch({a,b})` names are LetBinding → tdz-seeded so emit_destructure's
-/// stores land on live slots.
 pub fn catch_binding_prologue(
   e: Emitter2,
   scope_id: scope.ScopeId,
@@ -438,10 +340,6 @@ pub fn catch_binding_prologue(
   case b.kind {
     VarBinding -> seed(e, e.consts.undef)
     LetBinding | ConstBinding | FnNameBinding -> seed(e, e.consts.tdz)
-    // The catch parameter (recorded by the parser as ParamBinding) IS the
-    // Catch scope's own binding — must seed (cell_new when boxed) so
-    // emit_destructure's boxed IdentifierPattern arm has a live cell to
-    // cell_set into.
     CatchBinding | ParamBinding -> seed(e, e.consts.undef)
     CaptureBinding -> next(e)
   }

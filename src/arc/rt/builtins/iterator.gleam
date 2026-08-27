@@ -1,9 +1,3 @@
-//// `rt_builtins/iterator` — %IteratorPrototype% / %AsyncIteratorPrototype%
-//// + the per-kind iterator prototypes + %AsyncFromSyncIteratorPrototype%
-//// (SPEC §7.M6 builtin-control §27.1). Port of arc `builtins.gleam:99-220`
-//// iterator-proto bootstrap + arc `exec/promises.gleam:1791-2003`
-//// Async-from-Sync dispatch, re-expressed over threaded `Agent` (R1).
-
 import arc/rt/async as rt_async
 import arc/rt/buffer as rt_buffer
 import arc/rt/builtins/common
@@ -39,7 +33,6 @@ import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-/// The iterator-prototype set `init_realm` needs.
 pub type IteratorProtos {
   IteratorProtos(
     iterator_proto: Handle,
@@ -55,15 +48,11 @@ pub type IteratorProtos {
   )
 }
 
-/// Allocate %IteratorPrototype% (`[@@iterator]() { return this }`) plus the
-/// four kind-specific iterator prototypes and %AsyncIteratorPrototype%. Port
-/// of arc `builtins.gleam:99-199`.
 pub fn init(
   st: Agent,
   object_proto: Handle,
   fn_proto: Handle,
 ) -> #(IteratorProtos, Agent) {
-  // %IteratorPrototype% — [@@iterator]() { return this }.
   let #(iter_sym_fn, st) =
     common.alloc_rooted_native_fn(
       st,
@@ -74,7 +63,6 @@ pub fn init(
     )
   let #(iterator_proto, st) =
     alloc_proto_with_symbol(st, object_proto, symbol_iterator, iter_sym_fn)
-  // Per-kind iterator prototypes: proto → %IteratorPrototype%.
   let #(array_iter_proto, st) =
     alloc_iter_proto(
       st,
@@ -107,7 +95,6 @@ pub fn init(
       IteratorN(rt_types.SetIteratorNext),
       "Set Iterator",
     )
-  // %AsyncIteratorPrototype% — [@@asyncIterator]() { return this }.
   let #(async_sym_fn, st) =
     common.alloc_rooted_native_fn(
       st,
@@ -123,7 +110,6 @@ pub fn init(
       symbol_async_iterator,
       async_sym_fn,
     )
-  // %AsyncFromSyncIteratorPrototype% — §27.1.4.2 next/return/throw.
   let #(afs_methods, st) =
     common.alloc_methods(st, fn_proto, [
       #("next", IteratorN(AsyncFromSyncNext), 1),
@@ -136,8 +122,6 @@ pub fn init(
       Some(async_iterator_proto),
       common.named_props(afs_methods),
     )
-  // ── ES2025 §27.1 Iterator constructor + prototype helpers ─────────────────
-  // Iterator.prototype methods — eager consumers + lazy producers.
   let #(proto_methods, st) =
     common.alloc_methods(st, fn_proto, [
       #("map", IteratorN(rt_types.IteratorPrototypeMap), 1),
@@ -152,7 +136,6 @@ pub fn init(
       #("every", IteratorN(rt_types.IteratorPrototypeEvery), 1),
       #("find", IteratorN(rt_types.IteratorPrototypeFind), 1),
     ])
-  // Iterator.from / concat / zip / zipKeyed static methods.
   let #(ctor_props, st) =
     common.alloc_methods(st, fn_proto, [
       #("from", IteratorN(rt_types.IteratorFrom), 1),
@@ -160,9 +143,6 @@ pub fn init(
       #("zip", IteratorN(rt_types.IteratorZip), 1),
       #("zipKeyed", IteratorN(rt_types.IteratorZipKeyed), 1),
     ])
-  // Constructor + merge proto methods onto the existing %IteratorPrototype%.
-  // §27.1.3.1: Iterator is an abstract constructor — HAS [[Construct]], but
-  // `new Iterator()` directly throws (enforced in `dispatch_construct`).
   let #(iterator, st) =
     common.init_type_on(
       st,
@@ -175,9 +155,6 @@ pub fn init(
       ctor_props,
       True,
     )
-  // §27.1.3.2/.13: constructor + [@@toStringTag] are ACCESSOR properties
-  // (SetterThatIgnoresPrototypeProperties). init_type_on wrote a data
-  // .constructor — overwrite with the accessor.
   let #(ctor_acc, st) =
     common.alloc_get_set_accessor(
       st,
@@ -203,8 +180,6 @@ pub fn init(
       symbol_to_string_tag,
       tag_acc,
     )
-  // %IteratorHelperPrototype% — §27.1.4.1. proto → %IteratorPrototype%;
-  // next/return + @@toStringTag = "Iterator Helper".
   let #(helper_methods, st) =
     common.alloc_methods(st, fn_proto, [
       #("next", IteratorN(rt_types.IteratorHelperNext), 0),
@@ -212,8 +187,6 @@ pub fn init(
     ])
   let #(iterator_helper_proto, st) =
     common.init_namespace(st, iterator_proto, "Iterator Helper", helper_methods)
-  // %WrapForValidIteratorPrototype% — §27.1.5.2. proto → %IteratorPrototype%;
-  // next/return only (no @@toStringTag).
   let #(wrap_methods, st) =
     common.alloc_methods(st, fn_proto, [
       #("next", IteratorN(rt_types.WrapForValidIteratorNext), 0),
@@ -264,9 +237,6 @@ fn alloc_proto_with_symbol(
   #(h, rt_store.t_pin_root(st, h))
 }
 
-/// One iterator-kind prototype: `{next: <native>}` with `[@@toStringTag]`.
-/// Port of arc `builtins.gleam:458-468 alloc_iterator_proto` — the concrete
-/// per-kind `next` token is wired at init (bodies land in a later DAG unit).
 fn alloc_iter_proto(
   st: Agent,
   fn_proto: Handle,
@@ -281,17 +251,12 @@ fn alloc_iter_proto(
   #(h, st)
 }
 
-// ── dispatch (arc exec/promises.gleam:1791-2003 Async-from-Sync) ────────────
-
-/// Which %AsyncFromSyncIteratorPrototype% method invoked the shared body.
 type AfsKind {
   AfsNext
   AfsReturn
   AfsThrow
 }
 
-/// Route an `IteratorNative` token. `AsyncFromSync*` are the §27.1.4.2
-/// wrapping natives; `Unwrap`/`Close` are the continuation closures they mint.
 pub fn dispatch(
   st: Agent,
   n: IteratorNative,
@@ -302,21 +267,16 @@ pub fn dispatch(
     AsyncFromSyncNext -> async_from_sync(st, this, args, AfsNext)
     AsyncFromSyncReturn -> async_from_sync(st, this, args, AfsReturn)
     AsyncFromSyncThrow -> async_from_sync(st, this, args, AfsThrow)
-    // §27.1.4.4 onFulfilled: `v => ({value: v, done})`.
     AsyncFromSyncUnwrap(done:) -> {
       let v = first_arg_or_undefined(args)
       let #(h, st) = rt_async.alloc_iter_result(st, v, done)
       #(mk_object(h), st)
     }
-    // §27.1.4.4 onRejected: close inner then rethrow. `close_and_throw` is the
-    // §7.4.11 IteratorClose-with-throw-completion policy (original error wins).
     AsyncFromSyncClose(sync_iter:) -> {
       let err = first_arg_or_undefined(args)
       iter_protocol.close_throw(st, mk_object(sync_iter), err)
     }
-    // ── ES2025 §27.1 Iterator constructor + prototype helpers ───────────────
     IteratorConstructor ->
-      // As a plain call (NewTarget undefined) — §27.1.1.1 step 1.
       throw_type_error(st, "Abstract class Iterator not directly constructable")
     rt_types.IteratorFrom -> from(st, args)
     rt_types.IteratorZip -> zip(st, args)
@@ -366,11 +326,7 @@ pub fn dispatch(
   }
 }
 
-// ── §23.1.5.2.1 %ArrayIteratorPrototype%.next() (arc call.gleam:1776) ───────
-
-/// Advance an ArrayIterator one step: re-read the source's live length, read
-/// the element via [[Get]] (may run getters/proxy traps), shape per kind, bump
-/// the cursor. `index: -1` latches exhaustion (spec's generator-return state).
+// §23.1.5.2.1
 fn array_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   use st, iter_h, target, index, kind <- require_array_iter(st, this)
   case index < 0 {
@@ -401,7 +357,6 @@ fn array_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
               }
             }
           }
-          // [[Get]] may have run user code: re-read the slot when bumping.
           let st =
             set_iter_kind(
               st,
@@ -431,9 +386,6 @@ fn require_array_iter(
   }
 }
 
-/// Live-length read for an ArrayIterator source. Array/Arguments answer from
-/// the slot; TypedArray re-validates its buffer witness (§23.1.5.1 step 6.b.i);
-/// everything else takes the spec's `? ToLength(? Get(O, "length"))` path.
 fn array_source_length(st: Agent, target: Handle) -> #(Int, Agent) {
   case rt_store.t_cell_get(st, target) {
     SObject(kind: ArrayObj(length:), ..) -> #(length, st)
@@ -456,9 +408,6 @@ fn array_source_length(st: Agent, target: Handle) -> #(Int, Agent) {
       let #(len_v, st) =
         rt_obj.t_get_prop(st, mk_object(target), StringKey(Named("length")))
       let #(len, st) = rt_val.t_to_length(st, len_v)
-      // arc ops/array_iterator.gleam:214 — array-LIKEs (Proxy, borrowed
-      // .values.call({length: Infinity})) can report unbounded length; bail
-      // rather than spin forever. Real Array/Arguments/TA take branches above.
       case len > limits.max_iteration {
         True -> {
           let #(e, st) = new_range_error(st, iteration_budget_msg)
@@ -472,8 +421,7 @@ fn array_source_length(st: Agent, target: Handle) -> #(Int, Agent) {
 
 const iteration_budget_msg = "Array-like length exceeds the maximum supported iteration"
 
-// ── §24.1.5.2.1 %MapIteratorPrototype%.next() (arc call.gleam:1933) ─────────
-
+// §24.1.5.2.1
 fn map_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
@@ -486,8 +434,7 @@ fn map_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-// ── §24.2.5.2.1 %SetIteratorPrototype%.next() (arc call.gleam:1880) ─────────
-
+// §24.2.5.2.1
 fn set_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
@@ -500,13 +447,7 @@ fn set_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-// ── §22.1.5.1.1 %StringIteratorPrototype%.next() ────────────────────────────
-
-/// D10: `index` is [[StringNextIndex]] kept as a BYTE offset into the UTF-8
-/// source (never observable), so each step is O(1) instead of a codepoint
-/// walk from byte 0. The source string is immutable so no explicit
-/// exhaustion latch is needed, but we still write one for consistency with
-/// the other iterators.
+// §22.1.5.1.1, index is a utf-8 byte offset
 fn string_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
@@ -518,8 +459,6 @@ fn string_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
     _ -> iter_incompatible(st, "String")
   }
 }
-
-// ── shared iterator-next helpers ────────────────────────────────────────────
 
 fn yield_step(step: #(Option(JsVal), Agent)) -> #(JsVal, Agent) {
   case step {
@@ -543,8 +482,7 @@ fn alloc_pair(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   #(mk_object(h), st)
 }
 
-/// Rewrite the iterator's ObjKind, preserving the rest of the slot. Re-reads
-/// the cell so a getter that mutated the iterator object is not clobbered.
+// re-reads the cell so getter mutations survive
 fn set_iter_kind(st: Agent, iter_h: Handle, kind: ObjKind) -> Agent {
   rt_store.t_cell_update(st, iter_h, fn(slot) {
     case slot {
@@ -558,8 +496,7 @@ fn iter_incompatible(st: Agent, tag: String) -> a {
   throw_type_error(st, tag <> " Iterator next called on incompatible receiver")
 }
 
-/// §27.1.4.2 %AsyncFromSyncIteratorPrototype%.next/return/throw — always
-/// returns a promise. Any sync throw during the body REJECTS that promise.
+// §27.1.4.2, any sync throw rejects the promise
 fn async_from_sync(
   st: Agent,
   this: JsVal,
@@ -596,16 +533,12 @@ fn do_async_from_sync(
     KHandle(h) -> h
     _ -> throw_type_error(st, "not an Async-from-Sync Iterator")
   }
-  // §27.1.6.2.1 .next() uses the sync iterator record's cached [[NextMethod]]
-  // (IteratorNext, §7.4.3) — no re-Get. return/throw are looked up per call
-  // (§27.1.6.2.2/.3 GetMethod).
   let #(method, st) = case kind {
     AfsNext -> #(sync.next_method, st)
     AfsReturn -> rt_obj.t_get_prop(st, sync_iter, StringKey(Named("return")))
     AfsThrow -> rt_obj.t_get_prop(st, sync_iter, StringKey(Named("throw")))
   }
   case kind, rt_call.is_callable(st, method) {
-    // §27.1.4.2.2 step 8: no `return` → resolve `{value: arg, done: true}`.
     AfsReturn, False -> {
       let arg = first_arg_or_undefined(args)
       let #(ir_h, st) = rt_async.alloc_iter_result(st, arg, True)
@@ -615,7 +548,6 @@ fn do_async_from_sync(
         ])
       #(mk_undefined(), st)
     }
-    // §27.1.4.2.3 step 8: no `throw` → close inner + throw TypeError.
     AfsThrow, False -> {
       let st = iter_protocol.iterator_close_normal(st, sync_iter)
       throw_type_error(st, "The iterator does not provide a 'throw' method.")
@@ -644,10 +576,7 @@ fn do_async_from_sync(
   }
 }
 
-/// §27.1.4.4 AsyncFromSyncIteratorContinuation — read `done`/`value`,
-/// PromiseResolve the value, PerformPromiseThen with an unwrap-to-`{value,
-/// done}` fulfiller (+ close-on-reject rejector when applicable), then forward
-/// to the outer capability.
+// §27.1.4.4 asyncfromsynciteratorcontinuation
 fn afs_continuation(
   st: Agent,
   result_h: Handle,
@@ -667,9 +596,6 @@ fn afs_continuation(
     False ->
       alloc_closure(st, IteratorN(AsyncFromSyncClose(sync_iter: sync_rec)))
   }
-  // §27.1.4.4 step 12: PerformPromiseThen(valueWrapper, onFulfilled,
-  // onRejected, promiseCapability) — the OUTER capability's resolve/reject
-  // are the reaction's child directly (arc promises.gleam:2006-2048).
   let #(inner_p, st) = rt_async.promise_resolve_static(st, inner)
   let st =
     rt_async.t_perform_then(
@@ -682,8 +608,6 @@ fn afs_continuation(
     )
   #(mk_undefined(), st)
 }
-
-// ── local helpers ───────────────────────────────────────────────────────────
 
 @external(erlang, "arc_rt_call_ffi", "t_apply_protected")
 fn protected(
@@ -731,16 +655,7 @@ fn new_range_error(st: Agent, msg: String) -> #(JsVal, Agent) {
   js.ops.new_error(st, RangeErr, msg)
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// ES2025 §27.1 Iterator Helpers — port of arc `builtins/iterator.gleam`.
-// arc's `#(State, Result(v,e))` → 2core `#(v, Agent)` + `t_throw` (D7).
-// Where arc branches on `Error(thrown)`, 2core wraps in `protected_any`.
-// ═══════════════════════════════════════════════════════════════════════════
-
-/// Wire-compatible with `rt_call.Completion` (same `{normal_completion,_}`
-/// / `{throw_completion,_}` Erlang tags) but generic over the normal value —
-/// so `iterator_step_value`'s `Option(JsVal)` etc. can pass through the FFI
-/// try/catch without a JsVal encoding.
+// must match rt_call.Completion erlang tags
 type ProtOut(a) {
   NormalCompletion(a)
   ThrowCompletion(JsVal)
@@ -752,9 +667,6 @@ fn protected_any(
   body: fn(Agent) -> #(a, Agent),
 ) -> #(ProtOut(a), Agent)
 
-/// Per-module [[Construct]] dispatch — `new Iterator()` (abstract; only
-/// subclass `super()` succeeds). Every other IteratorNative token is
-/// `constructible: False`, so reaching this arm is an engine bug.
 pub fn dispatch_construct(
   st: Agent,
   n: IteratorNative,
@@ -763,7 +675,6 @@ pub fn dispatch_construct(
 ) -> #(Handle, Agent) {
   case n {
     IteratorConstructor -> {
-      // §27.1.1.1: NewTarget is undefined or %Iterator% itself → TypeError.
       let self = mk_object(st.realm.iterator.constructor)
       case rt_val.is_undef(new_target) || same_handle(new_target, self) {
         True ->
@@ -772,7 +683,6 @@ pub fn dispatch_construct(
             "Abstract class Iterator not directly constructable",
           )
         False -> {
-          // OrdinaryCreateFromConstructor(NewTarget, %Iterator.prototype%).
           let #(proto, st) =
             rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
               r.iterator.prototype
@@ -802,11 +712,9 @@ fn same_handle(a: JsVal, b: JsVal) -> Bool {
   }
 }
 
-// ── §27.1.2.1 Iterator.from ( O ) ───────────────────────────────────────────
-
+// §27.1.2.1
 fn from(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let o = first_arg_or_undefined(args)
-  // Step 1: GetIteratorFlattenable(O, iterate-string-primitives).
   let #(rec, st) =
     iter_protocol.get_iterator_flattenable(
       st,
@@ -814,7 +722,6 @@ fn from(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
       IterateStrings,
       "Iterator.from argument",
     )
-  // Step 2: ? OrdinaryHasInstance(%Iterator%, iterator).
   let ctor = st.realm.iterator.constructor
   let #(is_iter, st) = rt_ops.t_ordinary_has_instance(st, ctor, rec.iterator)
   case is_iter != 0 {
@@ -831,8 +738,6 @@ fn from(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// ── Lazy producers — Iterator.prototype.{map,filter,flatMap} ────────────────
-
 fn lazy_helper(
   st: Agent,
   this: JsVal,
@@ -843,8 +748,6 @@ fn lazy_helper(
   use rec, func, st <- consumer_with_callback(st, this, args, name)
   alloc_helper(st, make_kind(func), rec)
 }
-
-// ── Lazy producers — Iterator.prototype.{take,drop} ─────────────────────────
 
 fn take_or_drop(
   st: Agent,
@@ -858,16 +761,12 @@ fn take_or_drop(
     this,
     "Iterator.prototype." <> name <> " called on non-object",
   )
-  // §27.1.4.10 step 3-6: ToNumber(limit) BEFORE GetIteratorDirect. On any
-  // abrupt completion / NaN / negative, close `this` then throw.
+  // §27.1.4.10 tonumber(limit) before getiteratordirect
   let #(remaining, st) = coerce_limit(st, this, args, name)
   let #(rec, st) = get_iterator_direct_for(st, this, name)
   alloc_helper(st, make_kind(remaining), rec)
 }
 
-/// §27.1.4.10/12 step 4-9: ToNumber(limit); NaN, a finite value above
-/// 2^53 - 1, or a negative ToIntegerOrInfinity → RangeError. On any abrupt
-/// completion, close `this` first.
 fn coerce_limit(
   st: Agent,
   this: JsVal,
@@ -875,7 +774,6 @@ fn coerce_limit(
   name: String,
 ) -> #(Int, Agent) {
   let arg = first_arg_or_undefined(args)
-  // ToNumber via t_to_number (runs ToPrimitive for objects; may throw).
   let #(nout, st) = protected_any(st, fn(st) { rt_val.t_to_number(st, arg) })
   let range_error = fn(st, problem) {
     let #(e, st) = new_range_error(st, name <> " limit is " <> problem)
@@ -909,7 +807,6 @@ fn alloc_helper(
   alloc_helper_body(st, ClassicHelper(kind:, underlying:, counter: 0))
 }
 
-/// Allocate a fresh %IteratorHelper% at suspended-start.
 fn alloc_helper_body(st: Agent, body: HelperBody) -> #(JsVal, Agent) {
   let #(h, st) =
     realm_ops.alloc_wrapper(
@@ -920,14 +817,11 @@ fn alloc_helper_body(st: Agent, body: HelperBody) -> #(JsVal, Agent) {
   #(mk_object(h), st)
 }
 
-// ── %IteratorHelperPrototype%.next / .return ────────────────────────────────
-
 const helper_receiver_err = "Iterator Helper method called on incompatible receiver"
 
 const helper_running_err = "Iterator Helper is currently being iterated"
 
-/// §27.1.4.1 %IteratorHelperPrototype%.next: GeneratorResume(this, undefined,
-/// "Iterator Helper"). All three flavours share one [[GeneratorState]] machine.
+// §27.1.4.1
 fn helper_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   use ref, gen_state, body <- require_helper(st, this)
   use st <- resume(st, ref, gen_state)
@@ -955,10 +849,7 @@ fn require_helper(
   }
 }
 
-/// §27.5.3.3 GeneratorResume — the .next() half of the helper generator's
-/// lifecycle. `body` runs marked `Executing`; on normal exit re-suspend
-/// (unless `body` latched Completed). A throw re-suspends too so the caught
-/// completion the outer try observes finds a stable state.
+// §27.5.3.3 generatorresume
 fn resume(
   st: Agent,
   ref: Handle,
@@ -980,9 +871,7 @@ fn resume(
   }
 }
 
-/// §27.5.3.4 GeneratorResumeAbrupt(·, ReturnCompletion(undefined), ·) — the
-/// .return() half. Suspended-start completes BEFORE closing (reentrant call
-/// sees Completed); suspended-yield resumes marked Executing.
+// §27.5.3.4 generatorresumeabrupt
 fn resume_abrupt(
   st: Agent,
   ref: Handle,
@@ -1008,8 +897,6 @@ fn set_gen_state(st: Agent, ref: Handle, gs: GeneratorState) -> Agent {
   map_gen_state(st, ref, fn(_prev) { gs })
 }
 
-/// The ONE lifecycle write for every %IteratorHelper%: `gen_state` is a
-/// sibling of `body`, so a body write can never clobber lifecycle.
 fn map_gen_state(
   st: Agent,
   ref: Handle,
@@ -1044,7 +931,7 @@ fn classic_helper_next(
   }
 }
 
-/// §27.1.4.2 %IteratorHelperPrototype%.return.
+// §27.1.4.2
 fn helper_return(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   use ref, gen_state, body <- require_helper(st, this)
   use st <- resume_abrupt(st, ref, gen_state)
@@ -1062,7 +949,6 @@ fn classic_helper_return(
   kind: IteratorHelperKind,
   underlying: IteratorRecord,
 ) -> #(JsVal, Agent) {
-  // For flatMap, close the inner iterator first (best-effort), then outer.
   let #(inner_res, st) = case kind {
     HelperFlatMap(inner: Some(inner), func: _) ->
       close_normal_catch(st, inner.iterator)
@@ -1137,7 +1023,6 @@ fn step_take(
 ) -> #(JsVal, Agent) {
   case remaining <= 0 {
     True -> {
-      // §27.1.4.11: remaining = 0 → IteratorClose(iterated, ReturnCompletion).
       let #(close_res, st) = close_normal_catch(st, underlying.iterator)
       finish_after_close(st, ref, close_res)
     }
@@ -1189,12 +1074,9 @@ fn step_flat_map(
           iter_protocol.iterator_step_value(st, inner_rec)
         })
       case step {
-        ThrowCompletion(thrown) ->
-          // inner.next() threw → close outer (inner is already broken).
-          close_throw_done(st, ref, underlying, thrown)
+        ThrowCompletion(thrown) -> close_throw_done(st, ref, underlying, thrown)
         NormalCompletion(Some(v)) -> iter_yield(st, v)
         NormalCompletion(None) -> {
-          // Inner exhausted — clear and pull from outer.
           let st = write_kind(st, ref, HelperFlatMap(func:, inner: None))
           step_flat_map(st, ref, underlying, func, None, count)
         }
@@ -1211,7 +1093,6 @@ fn step_flat_map(
             #(rt_call.ThrowCompletion(thrown), st) ->
               close_throw_done(st, ref, underlying, thrown)
             #(rt_call.NormalCompletion(mapped), st) -> {
-              // GetIteratorFlattenable(mapped, reject-primitives).
               let #(open, st) =
                 protected_any(st, fn(st) {
                   iter_protocol.get_iterator_flattenable(
@@ -1249,15 +1130,11 @@ fn step_flat_map(
   }
 }
 
-// ── %WrapForValidIteratorPrototype%.next / .return ──────────────────────────
-
 fn wrap_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   use rec <- require_wrap(st, this)
   rt_call.t_call_checked(st, rec.next_method, rec.iterator, [])
 }
 
-/// §27.1.5.2.2: no `return` → CreateIterResultObject(undefined, true); else
-/// forward the return method's result AS-IS (spec does not require Object here).
 fn wrap_return(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   use rec <- require_wrap(st, this)
   case iter_protocol.call_return(st, rec.iterator) {
@@ -1282,8 +1159,6 @@ fn require_wrap(
     _ -> throw_type_error(st, err)
   }
 }
-
-// ── Eager consumers — toArray, forEach, reduce, some, every, find ───────────
 
 fn to_array(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let #(rec, st) = get_iterator_direct_for(st, this, "toArray")
@@ -1351,8 +1226,7 @@ fn reduce_loop(
   }
 }
 
-/// Shared body for some/every. `match_on` = truthiness value that triggers
-/// early exit. some → True (returns true), every → False (returns false).
+// some: match_on true, every: false
 fn bool_consumer(
   st: Agent,
   this: JsVal,
@@ -1365,8 +1239,6 @@ fn bool_consumer(
   #(mk_bool(option.is_some(matched) == match_on), st)
 }
 
-/// Shared loop for some/every/find: step iterator, call predicate(v, idx),
-/// early-exit (closing iterator) when truthiness == match_on.
 fn predicate_loop(
   st: Agent,
   rec: IteratorRecord,
@@ -1400,15 +1272,12 @@ fn find(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   #(option.unwrap(matched, mk_undefined()), st)
 }
 
-// ── SetterThatIgnoresPrototypeProperties — §27.1.3.2/.13 ────────────────────
-
 type IgnoreSetterKey {
   IgnoreSetCtor
   IgnoreSetTag
 }
 
-/// If `this` is %Iterator.prototype% itself → TypeError. If `this` is not an
-/// Object → TypeError. Otherwise CreateDataPropertyOrThrow(this, key, val).
+// §27.1.3.2 setterthatignoresprototypeproperties
 fn ignore_proto_setter(
   st: Agent,
   this: JsVal,
@@ -1447,9 +1316,7 @@ fn ignore_proto_setter(
   }
 }
 
-// ── shared prologue helpers ─────────────────────────────────────────────────
-
-/// §7.4.9 GetIteratorDirect on `this` for `Iterator.prototype.<name>`.
+// §7.4.9 getiteratordirect
 fn get_iterator_direct_for(
   st: Agent,
   this: JsVal,
@@ -1462,10 +1329,7 @@ fn get_iterator_direct_for(
   )
 }
 
-/// Shared prologue for forEach/reduce/some/every/find/map/filter/flatMap:
-/// validate `this` is Object, validate callback (closing `this` on failure
-/// WITHOUT reading `.next` — §27.1.4.5 step 3 orders callback BEFORE
-/// GetIteratorDirect), then GetIteratorDirect.
+// callback checked before reading .next, §27.1.4.5 step 3
 fn consumer_with_callback(
   st: Agent,
   this: JsVal,
@@ -1505,8 +1369,7 @@ fn require_object_of(
   }
 }
 
-/// Step the underlying iterator. If next() throws, mark the helper done and
-/// propagate WITHOUT close (the iterator is already broken).
+// next() threw: iterator already broken, no close
 fn after_step(
   st: Agent,
   ref: Handle,
@@ -1525,9 +1388,6 @@ fn finish(st: Agent, ref: Handle) -> #(JsVal, Agent) {
   iter_done(mark_done(st, ref))
 }
 
-/// The generator body's IfAbruptCloseIterator: close `underlying` while still
-/// Executing (reentrant next/return during close throws), then Completed +
-/// rethrow.
 fn close_throw_done(
   st: Agent,
   ref: Handle,
@@ -1539,8 +1399,6 @@ fn close_throw_done(
   rt_store.t_throw(mark_done(st, ref), original)
 }
 
-/// `iterator_close_normal` under a catch — a return/close body needs the
-/// close's throw as a Result, not a divergence.
 fn close_normal_catch(st: Agent, iter: JsVal) -> #(Result(Nil, JsVal), Agent) {
   let #(out, st) =
     protected_any(st, fn(st) {
@@ -1552,7 +1410,6 @@ fn close_normal_catch(st: Agent, iter: JsVal) -> #(Result(Nil, JsVal), Agent) {
   }
 }
 
-/// Latch the helper's [[GeneratorState]] to `Completed`.
 fn mark_done(st: Agent, ref: Handle) -> Agent {
   set_gen_state(st, ref, GenCompleted)
 }
@@ -1567,7 +1424,6 @@ fn write_kind(st: Agent, ref: Handle, kind: IteratorHelperKind) -> Agent {
   #(kind, counter)
 }
 
-/// The ONE body write for every %IteratorHelper% flavour.
 fn map_helper_body(
   st: Agent,
   ref: Handle,
@@ -1597,8 +1453,6 @@ fn update_helper(
   }
 }
 
-/// A helper body's normal-completion tail: latch Completed and yield done or
-/// propagate the close's throw.
 fn finish_after_close(
   st: Agent,
   ref: Handle,
@@ -1611,10 +1465,6 @@ fn finish_after_close(
   }
 }
 
-// ── Iterator.zip / Iterator.zipKeyed ────────────────────────────────────────
-
-/// The parsed `mode` option. `padding` rides on `OptLongest` — the ONLY mode
-/// the spec reads it in.
 type ZipModeOption {
   OptShortest
   OptStrict
@@ -1668,7 +1518,6 @@ fn zip_keyed(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   alloc_zip(st, iters, zip_mode(mode), padding, Some(keys))
 }
 
-/// Steps 2-7 shared by zip/zipKeyed: GetOptionsObject + mode + padding.
 fn zip_options(
   st: Agent,
   args: List(JsVal),
@@ -1710,7 +1559,6 @@ fn zip_options(
   }
 }
 
-/// zip step 12: drain the iterables iterator via GetIteratorFlattenable.
 fn zip_collect(
   st: Agent,
   input_rec: IteratorRecord,
@@ -1745,7 +1593,6 @@ fn collected_iters(acc: List(IteratorRecord)) -> List(JsVal) {
   list.reverse(acc) |> list.map(fn(rec) { rec.iterator })
 }
 
-/// zip step 14: "longest" padding by ITERATING the padding object.
 fn zip_padding_iterated(
   st: Agent,
   padding_option: JsVal,
@@ -1797,7 +1644,6 @@ fn zip_padding_loop(
   }
 }
 
-/// zipKeyed step 12: filter to enumerable non-undefined-valued own props.
 fn zip_keyed_collect(
   st: Agent,
   iterables: JsVal,
@@ -1866,7 +1712,6 @@ fn zip_keyed_collect(
   }
 }
 
-/// zipKeyed step 14: "longest" padding read per key from padding object.
 fn zip_keyed_padding(
   st: Agent,
   padding_option: JsVal,
@@ -1900,7 +1745,6 @@ fn zip_keyed_padding_loop(
   }
 }
 
-/// Allocate the IteratorZip helper — the ONE place iterators pair with padding.
 fn alloc_zip(
   st: Agent,
   iters: List(IteratorRecord),
@@ -1917,8 +1761,6 @@ fn alloc_zip(
     })
   alloc_helper_body(st, ZipHelper(members:, mode:, keys:))
 }
-
-// ── IteratorZip stepping ────────────────────────────────────────────────────
 
 fn zip_next(
   st: Agent,
@@ -2054,7 +1896,6 @@ fn zip_emit(
   }
 }
 
-/// zipKeyed finishResults: OrdinaryObjectCreate(null) + define per column.
 fn alloc_zip_keyed_result(
   st: Agent,
   keys: List(ObjectKey),
@@ -2104,9 +1945,6 @@ fn open_members(members: List(ZipMember)) -> List(JsVal) {
   })
 }
 
-/// Unwrap a protected op, or IteratorCloseAll with the thrown error — the
-/// plural sibling of `iter_protocol.or_close`. `iters` is a thunk so
-/// happy-path per-element loops don't pay to build it.
 fn or_close_all(
   st: Agent,
   iters: fn() -> List(JsVal),
@@ -2119,8 +1957,6 @@ fn or_close_all(
   }
 }
 
-/// IteratorCloseAll with a pending throw: close every iterator in REVERSE
-/// list order (errors from .return swallowed), then rethrow the original.
 fn close_all_throw(st: Agent, iters: List(JsVal), original: JsVal) -> a {
   let st =
     list.fold(list.reverse(iters), st, fn(st, it) {
@@ -2130,7 +1966,6 @@ fn close_all_throw(st: Agent, iters: List(JsVal), original: JsVal) -> a {
   rt_store.t_throw(st, original)
 }
 
-/// zip helper body's IfAbruptCloseIterators.
 fn close_all_throw_done(
   st: Agent,
   ref: Handle,
@@ -2145,8 +1980,6 @@ fn close_all_throw_done(
   rt_store.t_throw(mark_done(st, ref), thrown)
 }
 
-/// IteratorCloseAll with a normal/return completion: reverse order; first
-/// abrupt result wins, remaining closes swallow their errors.
 fn close_all_normal(
   st: Agent,
   iters: List(JsVal),
@@ -2174,8 +2007,6 @@ fn zip_write_members(
     ClassicHelper(..) | ConcatHelper(..) -> body
   }
 }
-
-// ── Iterator.concat ─────────────────────────────────────────────────────────
 
 fn concat(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   concat_validate(st, args, [])

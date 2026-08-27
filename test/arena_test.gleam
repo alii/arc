@@ -1,7 +1,3 @@
-//// The cell arena against a dict model: growth across levels, holes, the
-//// hot leaf moving between writes, and the fold / from_descending round
-//// trip a collection relies on.
-
 import arc/rt/arena
 import gleam/dict
 import gleam/int
@@ -73,7 +69,6 @@ pub fn fold_and_rebuild_round_trip_test() {
   let model = list.map(live, fn(id) { #(id, id + 1) }) |> dict.from_list
   check(b, model, 6100)
   assert arena.count(b) == list.length(live)
-  // The rebuilt arena keeps growing from the top like a fresh one.
   let b = arena.set(5001, 9, arena.set(20_000, 8, b))
   assert arena.get(5001, b) == 9
   assert arena.get(20_000, b) == 8

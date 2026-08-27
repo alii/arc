@@ -1,6 +1,4 @@
-//// Asserts that every tuple index and tag atom in arc_rt_layout.hrl matches
-//// the Gleam runtime records the hand-written Erlang fast paths index with
-//// element/2. A field reorder or insert in those records fails here.
+//// arc_rt_layout.hrl indices must match the gleam records
 
 import arc/bytecode/opcode
 import arc/internal/tree_array
@@ -497,9 +495,6 @@ type Probe {
   Miss
 }
 
-/// Integer-indexed exotics never take the Erlang own-data / element fast
-/// paths: every probe on a TypedArray cell misses, so the exotic MOP arms in
-/// arc/rt/obj run.
 pub fn typed_array_fast_paths_miss_test() {
   let st = seeded()
   let #(ctor, st) = rt_obj.t_global_get(st, <<"Uint8Array">>)
@@ -521,10 +516,6 @@ pub fn typed_array_fast_paths_miss_test() {
   assert set_prop_own_data(st, ta, <<"extra">>, n) == dyn(Miss)
 }
 
-/// Proxy exotics never take an Erlang fast path: own-data / element probes,
-/// the monomorphic method call and the instanceof chain walk all miss on a
-/// Proxy cell (its internal methods are traps, never its stored fields), so
-/// the §10.5 arms in arc/rt/obj run.
 pub fn proxy_fast_paths_miss_test() {
   let st = seeded()
   let n = rt_types.mk_number(rt_types.JInt(4))
@@ -539,9 +530,7 @@ pub fn proxy_fast_paths_miss_test() {
   assert get_prop_own_data(st, p, <<"length">>) == dyn(Miss)
   assert set_prop_own_data(st, p, <<"length">>, n) == dyn(Miss)
   assert call_method_mono(st, p, <<"push">>, [n]).0 == dyn(Miss)
-  // `p instanceof F` must reach the getPrototypeOf trap: the probe takes the
-  // fast path for a plain-function ctor over an ordinary V, but never over a
-  // proxy V or an ordinary V whose prototype chain crosses a proxy.
+  // instanceof over a proxy must reach the getprototypeof trap
   let ctor_flags = FnFlags(..no_flags(), is_constructor: True)
   let #(f, st) =
     rt_call.t_new_function(st, compiled_fn("F"), ctor_flags, "F", 0, None)
@@ -553,9 +542,6 @@ pub fn proxy_fast_paths_miss_test() {
   assert instanceof_fast(st, rt_types.mk_object(child), f) == dyn(Miss)
 }
 
-/// A String exotic's synthesized index and "length" properties live in no
-/// props dict, so they never take the Erlang own-data / element fast paths;
-/// its plain named properties do.
 pub fn string_object_fast_paths_miss_test() {
   let st = seeded()
   let n = rt_types.mk_number(rt_types.JInt(1))
@@ -579,9 +565,6 @@ pub fn string_object_fast_paths_miss_test() {
   assert set_prop_own_data(st, s, <<"extra">>, n) != dyn(Miss)
 }
 
-/// Interpreted functions never take a compiled-code fast path: the closure
-/// probe, the monomorphic method call, `new` and `instanceof` all miss on a
-/// KBytecode cell, so its [[Call]]/[[Construct]] reach `JsOps`.
 pub fn bytecode_function_fast_paths_miss_test() {
   let st = seeded()
   let flags = FnFlags(..no_flags(), is_constructor: True, is_strict: True)
@@ -628,9 +611,6 @@ fn compiled_code(
   code: fn(Agent, Dynamic, List(JsVal)) -> #(JsVal, Agent),
 ) -> CompiledFn
 
-/// The positional `KCompiled` matches in the call fast paths keep up with the
-/// record: a plain compiled function takes the closure probe, and `new` on it
-/// takes the fast path once its `prototype` is settled.
 pub fn compiled_function_fast_paths_hit_test() {
   let st = seeded()
   let undef = rt_types.mk_undefined()
@@ -648,9 +628,6 @@ pub fn compiled_function_fast_paths_hit_test() {
 @external(erlang, "arc_rt_ops_ffi", "binop")
 fn k_binop(kind: opcode.Classified, a: JsVal, b: JsVal) -> Dynamic
 
-/// arc_rt_ops_ffi:binop/3 matches the `opcode.Classified` term the resolver
-/// stores in BinOp: every operator it can run answers a value for two small
-/// integers, and the heap-reading ones answer `miss`.
 fn num(n: Int) -> JsVal {
   rt_types.mk_number(rt_types.JInt(n))
 }

@@ -1,12 +1,4 @@
-//// ES2021 §26.2 FinalizationRegistry Objects.
-////
-//// A FinalizationRegistry lets code request a cleanup callback when a
-//// registered target is garbage collected. Each cell's [[WeakRefTarget]] and
-//// [[UnregisterToken]] are held weakly (`gc.prune_weak` drops a cell whose
-//// target died); the cleanup callback itself never fires, which §9.10.3
-//// permits (HostEnqueueFinalizationRegistryCleanupJob is optional). The
-//// constructor and the register/unregister bookkeeping follow the spec
-//// exactly.
+// cleanup callbacks never fire, which the spec permits
 
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{can_be_held_weakly}
@@ -25,8 +17,6 @@ import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-/// Set up FinalizationRegistry.prototype and the FinalizationRegistry
-/// constructor.
 pub fn init(
   st: Agent,
   object_proto: Handle,
@@ -62,7 +52,6 @@ pub fn init(
   #(bt, st)
 }
 
-/// Per-module [[Call]] dispatch for FinalizationRegistry native functions.
 pub fn dispatch(
   st: Agent,
   native: FinalizationRegistryNative,
@@ -70,8 +59,6 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case native {
-    // §26.2.1.1 step 1: If NewTarget is undefined, throw a TypeError — a
-    // plain call routes here; `new` goes through `dispatch_construct`.
     FinalizationRegistryConstructor(..) ->
       rt_val.t_throw_type_error(
         st,
@@ -82,7 +69,6 @@ pub fn dispatch(
   }
 }
 
-/// [[Construct]] dispatch: only the constructor is constructible.
 pub fn dispatch_construct(
   st: Agent,
   native: FinalizationRegistryNative,
@@ -97,30 +83,16 @@ pub fn dispatch_construct(
   }
 }
 
-/// §26.2.1.1 FinalizationRegistry ( cleanupCallback )
-///
-///   1. If NewTarget is undefined, throw a TypeError exception.
-///   2. If IsCallable(cleanupCallback) is false, throw a TypeError exception.
-///   3. Let finalizationRegistry be ? OrdinaryCreateFromConstructor(NewTarget,
-///      "%FinalizationRegistry.prototype%", « [[Realm]], [[CleanupCallback]],
-///      [[Cells]] »).
-///   4-5. Set [[CleanupCallback]]; [[Cells]] starts empty.
-///   6. Return finalizationRegistry.
 fn construct(
   st: Agent,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Handle, Agent) {
-  // Step 1 is the call/construct split: only `new` reaches here.
-  // Step 2
   let callback = helpers.first_arg_or_undefined(args)
   let #(callable, _) = rt_val.t_is_callable(st, callback)
   case callable {
     False -> rt_val.t_throw_type_error(st, "cleanup must be callable")
     True -> {
-      // Step 3: GetPrototypeFromConstructor(NewTarget,
-      // %FinalizationRegistry.prototype%) — the fallback comes from
-      // NewTarget's realm.
       let #(proto_h, st) =
         rt_call.get_prototype_from_constructor(st, new_target, fn(realm: Realm) {
           realm.finalization_registry.prototype
@@ -140,29 +112,15 @@ fn construct(
   }
 }
 
-/// §26.2.3.2 FinalizationRegistry.prototype.register ( target, heldValue
-/// [ , unregisterToken ] )
-///
-///   1-2. RequireInternalSlot(finalizationRegistry, [[Cells]]).
-///   3. If CanBeHeldWeakly(target) is false, throw a TypeError exception.
-///   4. If SameValue(target, heldValue) is true, throw a TypeError exception.
-///   5. If CanBeHeldWeakly(unregisterToken) is false, then
-///      a. If unregisterToken is not undefined, throw a TypeError exception.
-///      b. Set unregisterToken to empty.
-///   6-7. Append the new cell to [[Cells]].
-///   8. Return undefined.
 fn register(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use registry <- require_registry(st, this, "register")
   let #(target, held, token_arg) = helpers.three_args_or_undefined(args)
-  // Step 3
   use Nil <- helpers.guard(can_be_held_weakly(target), fn() {
     rt_val.t_throw_type_error(st, "Invalid value used as weak ref target")
   })
-  // Step 4
   use Nil <- helpers.guard(!rt_val.same_value(target, held), fn() {
     rt_val.t_throw_type_error(st, "target and holdings must not be same")
   })
-  // Step 5
   case can_be_held_weakly(token_arg), classify(token_arg) {
     False, KUndef -> do_register(st, registry, target, held, None)
     False, _ ->
@@ -171,7 +129,6 @@ fn register(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// Steps 6-8 of register — append the cell and return undefined.
 fn do_register(
   st: Agent,
   registry: RegistryRef,
@@ -180,18 +137,10 @@ fn do_register(
   token: Option(JsVal),
 ) -> #(JsVal, Agent) {
   let cell = FinRegCell(target:, held:, token:)
-  // [[Cells]] is append-ordered in the spec; order is unobservable here
-  // (no iteration, cleanup never fires), so prepend for O(1).
+  // order is unobservable, so prepend
   #(mk_undefined(), update_cells(st, registry, fn(cells) { [cell, ..cells] }))
 }
 
-/// §26.2.3.3 FinalizationRegistry.prototype.unregister ( unregisterToken )
-///
-///   1-2. RequireInternalSlot(finalizationRegistry, [[Cells]]).
-///   3. If CanBeHeldWeakly(unregisterToken) is false, throw a TypeError.
-///   4-5. Remove every cell whose [[UnregisterToken]] is not empty and
-///        SameValue(cell.[[UnregisterToken]], unregisterToken) is true.
-///   6. Return whether any cell was removed.
 fn unregister(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use registry <- require_registry(st, this, "unregister")
   let token = helpers.first_arg_or_undefined(args)
@@ -212,15 +161,11 @@ fn unregister(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// A `Handle` that has been *proved* to point at a FinalizationRegistry's
-/// heap slot. Constructible only by `require_registry`, so `read_cells` /
-/// `update_cells` cannot be reached with a handle of any other kind.
+// only built by require_registry
 type RegistryRef {
   RegistryRef(Handle)
 }
 
-/// RequireInternalSlot(this, [[Cells]]) — this must be an object with the
-/// FinalizationRegistry brand, else TypeError. CPS-style.
 fn require_registry(
   st: Agent,
   this: JsVal,
@@ -253,8 +198,6 @@ fn read_cells(st: Agent, registry: RegistryRef) -> List(FinRegCell) {
   cells
 }
 
-/// Read-modify-write [[Cells]] inside a single heap access, carrying the
-/// slot's [[CleanupCallback]] across unchanged.
 fn update_cells(
   st: Agent,
   registry: RegistryRef,

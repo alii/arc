@@ -1,10 +1,3 @@
-//// Inspect — debugging/REPL representation of JS values.
-////
-//// Read-only rendering: never invokes JS (no toString/valueOf, no getters,
-//// no proxy traps), so it is safe to call from error paths without observable
-//// side effects or re-entry. Shared by console.log, uncaught-rejection
-//// reporting, and diagnostic messages ("x is not a function").
-
 import arc/internal/ordered_entries
 import arc/rt/buffer
 import arc/rt/elements
@@ -35,13 +28,9 @@ import gleam/option.{type Option, None, Some}
 import gleam/set.{type Set}
 import gleam/string
 
-/// Cap on rendered array elements / object properties before we elide with
-/// "… N more". Keeps `console.log(new Array(1e6))` from building a million-
-/// item string.
 const max_items = 100
 
-/// Produce a human-readable representation of a JS value (for REPL / console.log).
-/// Read-only — does NOT call toString/valueOf or any JS code.
+// read only: never invokes js, safe on error paths
 pub fn inspect(st: Agent, val: JsVal) -> String {
   inspect_inner(st, val, 0, set.new())
 }
@@ -159,7 +148,6 @@ fn inspect_object(
           "SharedArrayBuffer { byteLength: "
           <> int.to_string(rt_types.buffer_byte_size(storage))
           <> " }"
-        // Detached storage has no bytes, so byteLength is +0.
         ArrayBufferObj(storage:) ->
           "ArrayBuffer { byteLength: "
           <> int.to_string(rt_types.buffer_byte_size(storage))
@@ -178,12 +166,7 @@ fn inspect_object(
           "[Module: { "
           <> string.join(list.sort(dict.keys(exports), string.compare), ", ")
           <> " }]"
-        // The rawJSON box's only own property is "rawJSON", so render it as
-        // the source text it stands for.
         RawJsonObj(raw:) -> "[RawJSON " <> raw <> "]"
-        // Error instances (the [[ErrorData]] slot) render as "Name: message"
-        // (or the captured stack). error_display can only return Some for
-        // ErrorObj, so unwrap is safe here.
         ErrorObj(_) -> error_display(st, h) |> option.unwrap("[Error]")
         IntlObj(data:, ..) ->
           "[Intl."
@@ -195,9 +178,6 @@ fn inspect_object(
         FinalizationRegistryObj(..) -> "FinalizationRegistry {}"
         rt_types.WeakRefObj(..) -> "WeakRef {}"
         rt_types.ShadowRealmObj(..) -> "ShadowRealm {}"
-        // A tagged ordinary object renders via its Symbol.toStringTag
-        // (`Object [Tag] { ... }`). Host objects have no own properties and
-        // render through their prototype's tag the same way.
         Ordinary | KHost(_) -> {
           let body = inspect_plain_object(st, props, depth, visited)
           case list.key_find(symbol_props, rt_types.symbol_to_string_tag) {
@@ -269,8 +249,6 @@ fn inspect_plain_object(
   case depth > 2 {
     True -> "[Object]"
     False -> {
-      // Collect enumerable data properties without rendering yet, so we can
-      // cap the recursion at max_items.
       let visible =
         ordered_property_pairs(props)
         |> list.filter_map(fn(pair) {
@@ -304,8 +282,6 @@ fn inspect_plain_object(
   }
 }
 
-/// Own properties in [[OwnPropertyKeys]] order: integer indices ascending,
-/// then string (and private) keys by creation `seq`.
 fn ordered_property_pairs(
   props: Dict(PropertyKey, Property),
 ) -> List(#(PropertyKey, Property)) {
@@ -327,10 +303,6 @@ fn ordered_property_pairs(
   list.append(idx, named)
 }
 
-/// Format a value for an uncaught-exception / unhandled-rejection report.
-/// Error instances become "Name: message" (or their captured `stack`);
-/// thrown strings are shown raw (browser-style "Uncaught boom"); anything
-/// else falls back to `inspect`. Read-only — never invokes JS.
 pub fn format_error(st: Agent, val: JsVal) -> String {
   case classify(val) {
     KStr(s) -> s
@@ -339,8 +311,6 @@ pub fn format_error(st: Agent, val: JsVal) -> String {
   }
 }
 
-/// Console rendering of a Temporal object: its type name (Node prints the
-/// ISO string too, but the label alone identifies the brand).
 fn temporal_label(data: TemporalData) -> String {
   case data {
     TemporalInstant(..) -> "Temporal.Instant {}"
@@ -354,14 +324,6 @@ fn temporal_label(data: TemporalData) -> String {
   }
 }
 
-/// If `h` is an Error instance (has the [[ErrorData]] internal slot), render
-/// it for display; else None.
-///
-/// Errors with a captured trace render as that trace (it already embeds the
-/// "Name: message" header, V8-style); otherwise we synthesize the header from
-/// `name` and `message` per `Error.prototype.toString` (§20.5.3.4). An own
-/// `stack` data property (Error.captureStackTrace targets) is honored when the
-/// slot's trace is empty.
 fn error_display(st: Agent, h: Handle) -> Option(String) {
   case rt_store.t_cell_get(st, h) {
     SObject(kind: ErrorObj(stack:), ..) -> {
@@ -388,9 +350,6 @@ fn error_display(st: Agent, h: Handle) -> Option(String) {
   }
 }
 
-/// Read a string-valued data property by walking the prototype chain (own
-/// shadows inherited, like [[Get]] minus getters and traps). Returns None when
-/// absent or non-string.
 fn error_property(
   st: Agent,
   h: Handle,

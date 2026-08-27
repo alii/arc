@@ -1,25 +1,3 @@
-/// Bytecode Disassembler
-///
-/// Renders a compiled `FuncTemplate` as plain text — one instruction per
-/// line — so a human can see exactly what the compiler emitted for a piece
-/// of JS. This is a learning/debugging aid, not a serialization format: the
-/// output is not meant to be parsed back.
-///
-/// Each op is printed with `string.inspect`, so the mnemonic is the `Op`
-/// constructor name (`PushConst(0)`, `JumpIfFalse(12)`, ...). That keeps the
-/// disassembler zero-maintenance: a new opcode shows up here the moment it is
-/// added to `opcode.Op`, with no second table to keep in sync.
-///
-/// Jump targets are absolute PCs (phase 3 already resolved them), and every
-/// line is prefixed with its own PC, so control flow can be followed by eye.
-/// A `.line N` row marks where the ops of source line N begin.
-/// Ops that carry an index into a side table get a trailing `; ...` comment
-/// resolving it: `PushConst`/`CmpLocalConstJump` show the constant, and
-/// `MakeClosure` shows the nested function's name.
-///
-/// Nested functions are printed after their parent, depth-first, labelled
-/// with their path in the function tree (`[0]`, `[0.1]`, ...) — the same
-/// index `MakeClosure` refers to.
 import arc/bytecode/opcode.{type Op}
 import arc/compiler
 import arc/esm
@@ -34,21 +12,12 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-/// Which goal symbol a source is parsed and compiled under. Each has its own
-/// parse and compile entry point in `parser`/`compiler`; this names the
-/// choice so a caller states it once.
 pub type Goal {
-  /// A classic script.
   Script
-  /// An ES module.
   Module
-  /// One REPL input: a script whose top-level `let`/`const`/`class` target
-  /// the persistent global lexical record, as `engine.repl_eval` runs it.
   ReplInput
 }
 
-/// A source that never made it to bytecode. Nothing ran, so it renders with
-/// no engine in hand.
 pub type SourceError {
   Syntax(parser.ParseError)
   Compile(compiler.CompileError)
@@ -63,7 +32,6 @@ pub fn format_source_error(err: SourceError) -> String {
   }
 }
 
-/// Parse and compile `source` under `goal`, without running it.
 pub fn compile(
   goal: Goal,
   source: String,
@@ -94,22 +62,16 @@ pub fn compile(
   }
 }
 
-/// Compile `source` under `goal` and disassemble the result.
 pub fn source(goal: Goal, source: String) -> Result(String, SourceError) {
   compile(goal, source) |> result.map(disassemble)
 }
 
-/// Disassemble a compiled template (and, recursively, every function nested
-/// inside it) into one printable string.
 pub fn disassemble(template: FuncTemplate) -> String {
   render(template, "<main>", "")
   |> string.join("\n")
   <> "\n"
 }
 
-/// One function's section: header line, one line per op, then a blank line
-/// and each child function's section. `label` is the display name, `path`
-/// the dotted index path from the root ("" for the root itself).
 fn render(template: FuncTemplate, label: String, path: String) -> List(String) {
   let ops = tuple_array.to_list(template.bytecode)
   let width = pc_width(list.length(ops))
@@ -137,10 +99,6 @@ fn render(template: FuncTemplate, label: String, path: String) -> List(String) {
   |> list.append(children)
 }
 
-/// `function <main> (arity 0, locals 3) [strict]` — one line describing the
-/// function whose code follows. Nested functions also carry their `[path]`
-/// index so the reader can match them to the `MakeClosure(n)` that creates
-/// them.
 fn header(template: FuncTemplate, label: String, path: String) -> String {
   let where = case path {
     "" -> ""
@@ -155,8 +113,6 @@ fn header(template: FuncTemplate, label: String, path: String) -> String {
   "function " <> where <> label <> shape <> flags(template)
 }
 
-/// The subset of the template's boolean flags that are set, as
-/// ` [strict generator]` — or `""` when none are.
 fn flags(template: FuncTemplate) -> String {
   let set =
     [
@@ -179,12 +135,10 @@ fn flags(template: FuncTemplate) -> String {
   }
 }
 
-/// `      .line 3`: the ops from here on were compiled from source line 3.
 fn line_marker(width: Int, line: Int) -> String {
   "  " <> string.repeat(" ", width) <> "  .line " <> int.to_string(line)
 }
 
-/// `  12  PushConst(0)          ; "hello"`
 fn format_op(pc: Int, width: Int, op: Op, template: FuncTemplate) -> String {
   let addr = string.pad_start(int.to_string(pc), width, " ")
   let text = string.inspect(op)
@@ -195,8 +149,6 @@ fn format_op(pc: Int, width: Int, op: Op, template: FuncTemplate) -> String {
   }
 }
 
-/// The trailing `; ...` comment for ops whose operand is an index into one
-/// of the template's side tables — resolved here so the reader never has to.
 fn annotate(op: Op, template: FuncTemplate) -> Option(String) {
   case op {
     opcode.PushConst(index) ->
@@ -214,10 +166,6 @@ fn annotate(op: Op, template: FuncTemplate) -> Option(String) {
   }
 }
 
-/// Render `table[index]` for an inline comment. A bad index is a compiler bug,
-/// not the disassembler's problem — every side-table lookup surfaces it the
-/// same way instead of crashing (or, worse, silently dropping the annotation)
-/// in a debugging tool.
 fn resolve(
   index: Int,
   table: TupleArray(a),
@@ -229,11 +177,6 @@ fn resolve(
   }
 }
 
-/// Compile-time constants are always primitives (the constant pool never
-/// holds heap handles), so this stays pure — no store needed. Every kind is
-/// matched explicitly: a catch-all `string.inspect(other)` would render a
-/// bigint (which the emitter really does intern) as the raw wire term.
-/// `string.inspect` on the string arm gives JS-ish quoting/escaping for free.
 fn constant_to_string(constant: JsVal) -> String {
   case types.classify(constant) {
     types.KStr(text) -> string.inspect(text)
@@ -243,11 +186,8 @@ fn constant_to_string(constant: JsVal) -> String {
     types.KBool(False) -> "false"
     types.KNull -> "null"
     types.KUndef -> "undefined"
-    // The TDZ sentinel the emitter seeds `let`/`const` slots with.
     types.KTdz -> "<uninitialized>"
     types.KSym(id) -> types.symbol_descriptive_string(id)
-    // Unreachable: nothing interns a heap handle in the constant pool. Marked
-    // rather than crashed, since this is a debugging aid.
     types.KHandle(_) -> "<object ref>"
   }
 }
@@ -263,8 +203,6 @@ fn join_path(parent: String, index: Int) -> String {
   }
 }
 
-/// Wide enough for the largest PC in this function, never less than 3 so
-/// small functions still line up with their neighbours.
 fn pc_width(op_count: Int) -> Int {
   int.max(3, string.length(int.to_string(op_count)))
 }

@@ -1,21 +1,3 @@
-//// test262 execution conformance runner for the AOT path (snapshot mode).
-////
-//// The pool (arc_aot_test_ffi.erl) calls `setup()` once in the main process,
-//// `run_file(ctx, path, expected, module_base)` per test in a heap-capped
-//// worker, and `finish(ctx, results)` after all complete. Harness includes
-//// are compiled and loaded ONCE in `setup` and their module atoms travel in
-//// `Ctx`; each test then seeds a fresh Agent, runs the harness modules on it,
-//// and compiles + loads + runs only its own body (globals the harness
-//// modules define persist on the Agent between `js_main` calls).
-////
-//// Usage (from aot/; a full run also needs ERL_FLAGS="+t 30000000", see
-//// `check_atom_headroom`):
-////   TEST262_EXEC=1 gleam test                  — run and compare against snapshot
-////   TEST262_EXEC=1 UPDATE_SNAPSHOT=1 gleam test — run and rewrite the snapshot
-////   TEST262_EXEC=1 FAIL_LOG=path gleam test     — also write per-test failure reasons
-////   TEST262_EXEC=1 RESULTS_FILE=path gleam test — also write JSON results
-////   TEST262_FILTER=substring / TEST262_SHARD=k/n — subset selection
-
 import arc/host
 import arc/host_hooks.{type HostHooks, HostHooks}
 import arc/parser
@@ -52,28 +34,20 @@ const harness_dir: String = "../vendor/test262/harness"
 
 const snapshot_path: String = "../.github/test262/pass-aot.txt"
 
-/// Global the `print` host function writes (the async $DONE protocol).
 const print_output: String = "__print_output__"
 
 pub type Outcome {
   Pass
   Fail(reason: String)
-  /// Statically known to be outside what the AOT compiler accepts: module
-  /// goal, or a feature the emitter rejects at compile time.
   Skip(category: String)
 }
 
-/// A harness include, compiled and loaded once per runner process.
 pub type HarnessEntry {
   Loaded(module: Atom)
-  /// The emitter rejects the file: tests including it are SKIP.
   Unsupported(feature: String)
-  /// Any other compile/load failure: tests including it are FAIL.
   Broken(reason: String)
 }
 
-/// What every worker needs, captured by the per-test closures. Small on
-/// purpose: it is copied into each worker process.
 pub type Ctx {
   Ctx(
     harness: Dict(String, HarnessEntry),
@@ -84,17 +58,12 @@ pub type Ctx {
 }
 
 pub type Setup {
-  /// `entries` pairs each selected test path with whether the snapshot
-  /// expects it to pass.
   Setup(ctx: Ctx, entries: List(#(String, Bool)))
 }
 
-/// One finished test as the pool reports it back.
 pub type TestResult {
   TestResult(path: String, expected_pass: Bool, outcome: Outcome)
 }
-
-// --- setup -------------------------------------------------------------------
 
 pub fn setup() -> Setup {
   let update_mode = test_runner.get_env_is_truthy("UPDATE_SNAPSHOT")
@@ -112,12 +81,7 @@ pub fn setup() -> Setup {
   )
 }
 
-/// Every compiled test costs the VM a few hundred permanent atoms: the BEAM
-/// compiler interns each distinct generated variable name, and 2core numbers
-/// a function's variables from a per-function-index offset, so the names
-/// differ from module to module. A full run needs ~250 atoms per file, far
-/// past the default 1M-entry atom table; refuse to start rather than crash
-/// the VM hours in.
+// compiled var names intern as atoms, default table is 1M
 const atoms_per_file: Int = 400
 
 fn check_atom_headroom(file_count: Int) -> Nil {
@@ -140,8 +104,6 @@ fn check_atom_headroom(file_count: Int) -> Nil {
   }
 }
 
-/// The harness files to precompile. A small selection is scanned for its
-/// includes; a big one just takes every file in the harness directory.
 fn harness_needed(files: List(String)) -> List(String) {
   let always = ["assert.js", "sta.js", "doneprintHandle.js"]
   let named = case list.length(files) > 2000 {
@@ -197,9 +159,7 @@ fn compile_harness_file(name: String) -> HarnessEntry {
   }
 }
 
-/// Harness files run as their own compilation unit, whose top-level
-/// `let`/`const` would be invisible to the test body. Rewriting the
-/// column-0 ones to `var` puts them on the global object instead.
+// harness top-level let/const must land on the global object
 fn globalize_lexicals(source: String) -> String {
   string.split(source, "\n")
   |> list.map(fn(line) {
@@ -218,11 +178,6 @@ fn sanitize(name: String) -> String {
   |> string.replace("/", "_")
 }
 
-// --- per test ------------------------------------------------------------------
-
-/// Run one test262 file. `module_base` is a module-name prefix unique to
-/// this test; the variants load as `<base>_0` / `<base>_1`, which the pool
-/// unloads again even when it had to kill the worker.
 pub fn run_file(ctx: Ctx, relative: String, module_base: String) -> Outcome {
   case simplifile.read(test_dir <> "/" <> relative) {
     Error(err) -> Fail("could not read file: " <> string.inspect(err))
@@ -297,7 +252,6 @@ fn run_compiled(
   }
 }
 
-/// A fresh agent with `$262`, `print` and the harness evaluated on it.
 fn prepare_agent(
   ctx: Ctx,
   metadata: TestMetadata,
@@ -374,10 +328,7 @@ fn judge(
   }
 }
 
-/// The emitter reports an `UnsupportedFeature` met below the top level
-/// (inside a function body) as a runtime `TypeError("unsupported: ...")`
-/// at that point rather than failing the compile; it is the same static
-/// rejection, so it is the same SKIP.
+// runtime "unsupported:" TypeError is the same static rejection
 fn emitter_rejection(thrown: JsVal, st: Agent) -> Option(String) {
   use h <- option.then(as_handle(thrown))
   use name <- option.then(get_data(st, h, "name"))
@@ -426,7 +377,6 @@ fn judge_completion(
   }
 }
 
-/// `Ok(Nil)` for "Test262:AsyncTestComplete", the reason otherwise.
 fn check_async_completion(st: Agent) -> Result(Nil, String) {
   case get_data(st, st.realm.global_object, print_output) {
     None -> Error("async test did not call $DONE (no __print_output__)")
@@ -486,10 +436,6 @@ fn verify_negative_type(
   }
 }
 
-// --- host layer ------------------------------------------------------------------
-
-/// [[CanBlock]] true like the interpreter harness, unless CanBlockIsFalse;
-/// uncaught-job reports are dropped (the outcome is read off the agent).
 fn hooks_for(metadata: TestMetadata) -> HostHooks {
   HostHooks(
     ..host_hooks.default_host_hooks(),
@@ -499,7 +445,6 @@ fn hooks_for(metadata: TestMetadata) -> HostHooks {
   )
 }
 
-/// `$262` plus `print` on the realm of `st`.
 fn install_host_api(st: Agent) -> Agent {
   let #(_dollar_262, st) = rt_realm.install_262(st, st.realm)
   let s: host.State(Nil) = host.from_agent(st, host.new_key())
@@ -508,7 +453,6 @@ fn install_host_api(st: Agent) -> Agent {
   s.agent
 }
 
-/// `print(x)` stores ToString(x) in the `__print_output__` global.
 fn print_native(
   args: List(JsVal),
   _this: JsVal,
@@ -525,8 +469,6 @@ fn print_native(
   #(host.State(..s, agent: st), Ok(mk_undefined()))
 }
 
-// --- value helpers (same shape as the interpreter runner's) ------------------------
-
 fn as_handle(v: JsVal) -> Option(Handle) {
   case classify(v) {
     KHandle(h) -> Some(h)
@@ -542,8 +484,6 @@ fn ordinary_proto(st: Agent, h: Handle) -> Option(Handle) {
   }
 }
 
-/// The DATA property `key` on `h` or its prototype chain, without getters
-/// or traps.
 fn get_data(st: Agent, h: Handle, key: String) -> Option(JsVal) {
   case rt_obj.t_ordinary_own_property(st, h, StringKey(Named(key))) {
     Some(DataProperty(value: val, ..)) -> Some(val)
@@ -570,10 +510,6 @@ fn inspect_thrown(val: JsVal, st: Agent) -> String {
   option.lazy_unwrap(described, fn() { rt_inspect.inspect(st, val) })
 }
 
-// --- finish ------------------------------------------------------------------------
-
-/// Print the summary, write the snapshot / RESULTS_FILE / FAIL_LOG, and
-/// return the number of snapshot mismatches (regressions and new passes).
 pub fn finish(ctx: Ctx, results: List(TestResult)) -> Int {
   let passes =
     list.filter(results, fn(r) { r.outcome == Pass })
@@ -691,9 +627,6 @@ fn write_results(pass: Int, fail: Int, skip: Int) -> Nil {
   }
 }
 
-/// A result mismatches the snapshot when a snapshot exists, this is not an
-/// update run, and the test passed while not listed or failed while listed.
-/// Skips never mismatch.
 pub fn is_mismatch(ctx: Ctx, result: TestResult) -> Bool {
   case ctx.update_mode || !ctx.has_snapshot {
     True -> False
@@ -710,9 +643,6 @@ fn count_mismatches(ctx: Ctx, results: List(TestResult)) -> Int {
   list.count(results, is_mismatch(ctx, _))
 }
 
-// --- ffi ---------------------------------------------------------------------------
-
-/// Map `f` over `items` in parallel (one process each), keeping order.
 @external(erlang, "arc_aot_test262_ffi", "pmap")
 fn pmap(items: List(a), f: fn(a) -> b) -> List(b)
 

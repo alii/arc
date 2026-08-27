@@ -1,8 +1,3 @@
-//// Inspection surface for the website playground: JS source → the three
-//// textual artefacts the AOT pipeline produces on the way to BEAM (2core IR,
-//// Core Erlang, Erlang source). No `compile:forms`, no loading — this half of
-//// the pipeline is pure Gleam and can run wherever the interpreter runs.
-
 import arc_aot/compile
 import arc_aot/emit
 import carder/backend/core_erlang.{type CModule, CModule}
@@ -31,20 +26,15 @@ pub fn emit(source: String, module_name: String) -> Result(Emitted, String) {
   Emitted(ir: compile.ir_to_text(ir), core: core_text(cmod), erlang:)
 }
 
-/// Erlang source text (UTF-8) for abstract forms — `erl_pp` in unicode mode.
 @external(erlang, "arc_aot_pp_ffi", "forms_to_erl")
 fn forms_to_erl(forms: List(eaf.Form)) -> String
 
-/// Core Erlang text for `cmod`, printing each definition in its own process
-/// (see `pmap`) and splicing the pieces back into `core_printer`'s exact
-/// module layout: header, defs joined by "\n", then "\nend\n".
 fn core_text(cmod: CModule) -> String {
   let header =
     core_printer.print_module(CModule(..cmod, defs: []))
     |> string.drop_end(string.length("\nend\n"))
   let defs =
     pmap(cmod.defs, fn(def) {
-      // A one-def module: header line + attributes line, def, footer.
       let one =
         CModule(name: cmod.name, exports: [], attributes: [], defs: [def])
       core_printer.print_module(one)
@@ -65,7 +55,5 @@ fn drop_lines(s: String, n: Int) -> String {
   }
 }
 
-/// Map over `items` with one short-lived process per element (see
-/// `arc_aot_pp_ffi:pmap/2` for why this matters on AtomVM).
 @external(erlang, "arc_aot_pp_ffi", "pmap")
 fn pmap(items: List(a), f: fn(a) -> b) -> List(b)

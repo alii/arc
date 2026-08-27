@@ -1,5 +1,3 @@
-/// Core AST types for the Arc JavaScript parser.
-/// Based on the ESTree specification, adapted for Gleam's type system.
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -9,58 +7,32 @@ pub type Program {
   Module(body: List(ModuleItem))
 }
 
-/// A half-open `[start, end)` range of UTF-8 byte offsets into the original
-/// source text. Slicing the source by these offsets must reproduce the exact
-/// original text of the node. Byte offsets (not UTF-16 columns) are stored so
-/// the conversion to Source Map v3 columns happens once, at map-emit time.
+// half-open [start, end) utf-8 byte offsets
 pub type Span {
   Span(start: Int, end: Int)
 }
 
-/// A binding identifier together with the byte span of its name token in the
-/// source. Used wherever a declaration/expression carries an OPTIONAL name
-/// (function/class declarations and expressions): pairing the two makes
-/// "a name without its span" (or vice versa) unrepresentable — either both
-/// are present (`Some(NamedBinding(..))`) or neither is (`None`). Slicing the
-/// source by `span` returns the exact name text.
 pub type NamedBinding {
   NamedBinding(name: String, span: Span)
 }
 
-/// One quasi (literal chunk) of a tagged template. `cooked` is the decoded
-/// template value — `None` when the quasi contains an invalid escape
-/// sequence, which is legal in tagged templates and yields `undefined`
-/// (§12.9.6). `raw` is the verbatim source text of the quasi (line endings
-/// normalized to LF per the spec's TRV definition). Pairing them per-quasi
-/// makes a cooked/raw length mismatch unrepresentable.
+// cooked is None on an invalid escape (tagged only)
 pub type TemplateQuasi {
   TemplateQuasi(cooked: Option(String), raw: String)
 }
 
-/// The interleaved shape of a template: `` `head ${e0} q0 ${e1} q1` `` — a
-/// leading quasi followed by zero or more `${expression} quasi` pairs. Storing
-/// the alternation itself (rather than two parallel lists) makes the grammar's
-/// "exactly one more quasi than expressions" invariant hold by construction:
-/// a quasi/expression count mismatch is unrepresentable, so consumers fold
-/// over `tail` with no empty-list or trailing-expression special cases.
-///
-/// Generic in the quasi payload: a plain `TemplateLiteral` carries cooked
-/// `String`s, a `TaggedTemplateExpression` carries `TemplateQuasi` (cooked+raw).
 pub type TemplateParts(quasi) {
   TemplateParts(head: quasi, tail: List(#(Expression, quasi)))
 }
 
-/// Every quasi of a template, in source order (always `expressions + 1` of them).
 pub fn template_quasis(parts: TemplateParts(a)) -> List(a) {
   [parts.head, ..list.map(parts.tail, fn(part) { part.1 })]
 }
 
-/// Every substitution expression of a template, in source order.
 pub fn template_expressions(parts: TemplateParts(a)) -> List(Expression) {
   list.map(parts.tail, fn(part) { part.0 })
 }
 
-/// Rewrite each quasi, keeping the interleaving (used to cook raw quasis).
 pub fn map_template_quasis(
   parts: TemplateParts(a),
   with f: fn(a) -> b,
@@ -71,8 +43,6 @@ pub fn map_template_quasis(
   )
 }
 
-/// Like `map_template_quasis`, but the rewrite can fail (an invalid escape in
-/// an untagged template is a SyntaxError, §12.9.6).
 pub fn try_map_template_quasis(
   parts: TemplateParts(a),
   with f: fn(a) -> Result(b, e),
@@ -87,73 +57,34 @@ pub fn try_map_template_quasis(
   TemplateParts(head:, tail:)
 }
 
-/// Which meta property a `MetaProperty` expression is. The grammar only has
-/// these two (§13.3.12 `new.target`, §13.3.13 `import.meta`), so anything
-/// else is unrepresentable.
 pub type MetaPropertyKind {
   NewTarget
   ImportMeta
 }
 
-/// The property of a `MemberExpression` / `OptionalMemberExpression`, in the
-/// two shapes the grammar spells (§13.3.2): `.x` / `.#x` (an IdentifierName
-/// or PrivateIdentifier — both a bare name) versus `[expr]` (a computed
-/// expression). Carrying this in place of a `(property: Expression,
-/// computed: Bool)` pair makes a non-computed property holding an arbitrary
-/// expression — `MemberExpression(o, CallExpression(..), computed: False)` —
-/// unrepresentable, so no consumer needs a "static member with a
-/// non-identifier property" fallback arm.
 pub type MemberProperty {
-  /// `.prop` / `.#priv` — an IdentifierName (keywords included) or a
-  /// PrivateIdentifier. Private names carry the leading `#` in `name`
-  /// (matching `PropertyKey.KeyPrivate`); the emit layer's field helpers
-  /// dispatch on that prefix. `span` covers the identifier token.
   Dot(name: String, span: Span)
-  /// `[expr]` — evaluated and ToPropertyKey'd at runtime.
   Bracket(expression: Expression)
 }
 
-/// A statement paired with the 1-based source line where it begins. Statement
-/// *lists* (block bodies, program bodies, switch-case bodies) hold `Stmt` so the
-/// compiler can record statement lines for `Error.stack`.
-/// Sub-statements held singly (an `if` consequent, a loop body) stay bare
-/// `Statement` and inherit the enclosing line.
 pub type StmtWithLine {
   StmtWithLine(line: Int, statement: Statement)
 }
 
 pub type ModuleItem {
   StatementItem(StmtWithLine)
-  /// `phase` is per-declaration because the grammar can't mix phases:
-  /// `import defer` only takes the namespace form (PhaseDefer) and
-  /// `import source` only a single binding (PhaseSource); everything else
-  /// is PhaseEvaluation. Mirrors ESTree's ImportDeclaration.phase.
   ImportDeclaration(
     specifiers: List(ImportSpecifier),
     source: StringLiteral,
     phase: ImportPhase,
     span: Span,
   )
-  /// `export <VariableStatement | Declaration>` (§16.2.3.1, first
-  /// production). Split from `ExportNamed` because no production has both a
-  /// declaration and specifiers/`from` — folding them into one node made
-  /// three states representable that the grammar cannot spell.
-  ///
-  /// `line` is the 1-based source line of the `export` keyword. The compiler
-  /// unwraps this item to a bare statement (`ast_util.module_items_to_stmts`)
-  /// and needs a real line to tag it with; `0` is the emitter's "no line
-  /// info" sentinel, so a runtime error thrown from `export function f(){}`
-  /// would otherwise have no line at all.
   ExportDeclaration(declaration: Declaration, line: Int, span: Span)
-  /// `export { a, b as c }` and `export { a } from "m"` / `export {} from "m"`
-  /// (§16.2.3.1, remaining productions). Never carries a declaration.
   ExportNamed(
     specifiers: List(ExportSpecifier),
     source: Option(StringLiteral),
     span: Span,
   )
-  /// `line` is the 1-based source line of the `export` keyword — see
-  /// `ExportDeclaration.line`.
   ExportDefaultDeclaration(declaration: Expression, line: Int, span: Span)
   ExportAllDeclaration(
     exported: Option(String),
@@ -162,11 +93,6 @@ pub type ModuleItem {
   )
 }
 
-/// The three declaration forms `export` admits (§16.2.3.1: `export`
-/// VariableStatement, `export` Declaration). Modelling them as their own type
-/// — rather than `Option(Statement)` on the export node — makes
-/// `export while (x) {}` and friends unspellable, so no consumer needs an
-/// impossible arm to unwrap an exported declaration.
 pub type Declaration {
   DeclVariable(kind: VariableKind, declarations: List(VariableDeclarator))
   DeclFunction(function: FunctionLiteral)
@@ -177,9 +103,6 @@ pub type Declaration {
   )
 }
 
-/// Re-wrap an exported declaration as the equivalent bare `Statement`, which
-/// is what the compiler lowers a module body to. Total — every `Declaration`
-/// has exactly one `Statement` counterpart.
 pub fn declaration_to_statement(decl: Declaration) -> Statement {
   case decl {
     DeclVariable(kind:, declarations:) ->
@@ -198,16 +121,10 @@ pub fn declaration_to_statement(decl: Declaration) -> Statement {
 
 pub type ImportSpecifier {
   ImportDefaultSpecifier(local: String, local_span: Span)
-  /// `import * as local` / `import defer * as local` — eager vs deferred is
-  /// the enclosing declaration's `phase`. `local_span` covers the `local`
-  /// binding identifier only (not the `* as` prefix).
   ImportNamespaceSpecifier(local: String, local_span: Span)
   ImportNamedSpecifier(imported: String, local: String, local_span: Span)
 }
 
-/// `local_span` is the byte span of the local-binding identifier — the name
-/// before `as` in `export { local as exported }`, or the whole identifier in
-/// `export { local }`. It is a reference to a module-local binding.
 pub type ExportSpecifier {
   ExportSpecifier(local: String, exported: String, local_span: Span)
 }
@@ -218,11 +135,7 @@ pub type StringLiteral {
 
 pub type Statement {
   EmptyStatement
-  /// `directive` holds the raw (un-decoded) string content when this statement
-  /// is a lone string-literal expression (a Directive in the spec sense), else
-  /// None. Directive prologue detection ("use strict") must compare the raw
-  /// text, since an escaped/continued literal like `'use strict'` is not a
-  /// directive even though its decoded value is "use strict".
+  // directive: raw source text, for "use strict" detection
   ExpressionStatement(expression: Expression, directive: Option(String))
   BlockStatement(body: List(StmtWithLine))
   VariableDeclaration(
@@ -252,19 +165,12 @@ pub type Statement {
     is_await: Bool,
   )
   SwitchStatement(discriminant: Expression, cases: List(SwitchCase))
-  /// `block` and the tail's `finalizer` are the raw statement lists of the
-  /// `{...}` Blocks the grammar requires (§14.15) — not `Statement`s. A `try`
-  /// whose block "wasn't a Block" is unspellable, so no consumer needs a
-  /// fallback.
   TryStatement(block: List(StmtWithLine), tail: TryTail)
   BreakStatement(label: Option(String))
   ContinueStatement(label: Option(String))
   DebuggerStatement
   LabeledStatement(label: String, body: Statement)
   WithStatement(object: Expression, body: Statement)
-  /// `name` is the declaration's name identifier (the binding introduced by
-  /// `function f`) with its source span, or `None` when the declaration is
-  /// anonymous (only possible for `export default function`).
   FunctionDeclaration(
     name: Option(NamedBinding),
     params: List(Pattern),
@@ -272,8 +178,6 @@ pub type Statement {
     is_generator: Bool,
     is_async: Bool,
   )
-  /// `name` is the class name identifier with its source span, or `None` for
-  /// an anonymous class (`export default class`).
   ClassDeclaration(
     name: Option(NamedBinding),
     super_class: Option(Expression),
@@ -283,9 +187,6 @@ pub type Statement {
 
 pub type ForInit {
   ForInitExpression(Expression)
-  /// A `var`/`let`/`const`/`using`/`await using` declaration in a for head.
-  /// Carries the declaration payload directly (rather than a `Statement`) so
-  /// a for-init can never hold anything but a variable declaration.
   ForInitDeclaration(kind: VariableKind, declarations: List(VariableDeclarator))
   ForInitPattern(Pattern)
 }
@@ -294,25 +195,16 @@ pub type SwitchCase {
   SwitchCase(condition: Option(Expression), consequent: List(StmtWithLine))
 }
 
-/// `body` is the raw statement list of the catch Block (§14.15) — the
-/// grammar admits nothing else there.
 pub type CatchClause {
   CatchClause(param: Option(Pattern), body: List(StmtWithLine))
 }
 
-/// What follows a `try` block. The grammar (§14.15) requires at least one of
-/// `catch` / `finally`, so a bare `try {}` is unrepresentable — every consumer
-/// matches exactly these three shapes and none needs a "neither" fallback.
 pub type TryTail {
   TryCatch(handler: CatchClause)
   TryFinally(finalizer: List(StmtWithLine))
   TryCatchFinally(handler: CatchClause, finalizer: List(StmtWithLine))
 }
 
-/// The function a method definition (§15.4) or a `function`/`class` element
-/// denotes, WITHOUT the expression wrapper. `ClassMethod.value` holds one of
-/// these rather than an `Expression`, so "a class method whose value is not a
-/// function" is unrepresentable and no consumer needs a fallback arm.
 pub type FunctionLiteral {
   FunctionLiteral(
     name: Option(NamedBinding),
@@ -345,12 +237,7 @@ pub type VariableKind {
   Let
   Const
   Var
-  /// `using x = expr` — Explicit Resource Management. Const-like binding
-  /// whose resource is disposed ([Symbol.dispose]) when the containing
-  /// block/loop/function body completes. Desugared by the compiler before
-  /// op emission — emit never sees this kind in a compiled declaration.
   Using
-  /// `await using x = expr` — async variant ([Symbol.asyncDispose], awaited).
   AwaitUsing
 }
 
@@ -358,35 +245,15 @@ pub type VariableDeclarator {
   VariableDeclarator(id: Pattern, init: Option(Expression))
 }
 
-/// The Number value a NumericLiteral denotes. Isomorphic to the subset of
-/// `vm/value.JsNum` a literal can reach: a literal carries no sign (unary
-/// minus is a separate operator) and can never denote NaN, so the only
-/// non-finite value it takes is +Infinity — `1e400`, whose mathematical value
-/// overflows the IEEE double range. BEAM's Float has no infinity, hence the
-/// dedicated constructor rather than clamping to Number.MAX_VALUE.
 pub type LiteralNumber {
   FiniteNumber(value: Float)
   InfiniteNumber
 }
 
-/// Every variant carries `span: Span` as its FIRST field — the half-open
-/// `[start, end)` UTF-8 byte range of the WHOLE expression in the original
-/// source, including delimiters: `(x)` spans both parens, `f(a)` runs from
-/// `f` to `)`, `a + b` from start of `a` to end of `b`. Span is positionally
-/// first (not last) because Gleam's shared-field accessor requires the field
-/// at the same name, type AND position across every variant; first is the
-/// only position common to all 36 constructors. This enables the universal
-/// accessor `expr.span` for any `Expression` value. Construction sites should
-/// use labelled arguments (`Identifier(name:, span:)`) so field order is
-/// irrelevant; pattern-match sites that bind other fields positionally must
-/// lead with `_,` for the span or use labelled `..` patterns.
+// span must stay the first field of every variant
 pub type Expression {
-  /// A reference to a binding by name. `span` is the half-open byte range of
-  /// the identifier token in the source, so a bundler can locate and rewrite
-  /// each occurrence (e.g. an imported reference `x` → member access `mod.x`).
   Identifier(span: Span, name: String)
   NumberLiteral(span: Span, value: LiteralNumber)
-  /// BigInt literal (`7n`, `0xFFn`). Value is exact — BEAM ints are bignums.
   BigIntLiteral(span: Span, value: Int)
   StringExpression(span: Span, value: String)
   BooleanLiteral(span: Span, value: Bool)
@@ -440,10 +307,6 @@ pub type Expression {
   SuperExpression(span: Span)
   ArrayExpression(span: Span, elements: List(Option(Expression)))
   ObjectExpression(span: Span, properties: List(Property))
-  /// `name` is the optional self-name identifier (with its span) in a named
-  /// function expression (`const f = function g() {}` -> `g`), or `None` for
-  /// an anonymous function expression. The self-name binding is visible only
-  /// inside the expression body (§13.2.5.5).
   FunctionExpression(
     span: Span,
     name: Option(NamedBinding),
@@ -458,9 +321,6 @@ pub type Expression {
     body: ArrowBody,
     is_async: Bool,
   )
-  /// `name` is the optional class-expression name (with its span,
-  /// `const C = class D {}` -> `D`), or `None` when anonymous. The name
-  /// binding is visible only inside the class body.
   ClassExpression(
     span: Span,
     name: Option(NamedBinding),
@@ -472,15 +332,11 @@ pub type Expression {
   SequenceExpression(span: Span, expressions: List(Expression))
   SpreadElement(span: Span, argument: Expression)
   TemplateLiteral(span: Span, parts: TemplateParts(String))
-  /// Tagged template: tag`raw0 ${e0} raw1`. Each quasi carries its cooked
-  /// value (None for an invalid escape sequence — legal in tagged templates,
-  /// the entry becomes undefined) alongside its verbatim raw text.
   TaggedTemplateExpression(
     span: Span,
     tag: Expression,
     parts: TemplateParts(TemplateQuasi),
   )
-  /// `new.target` / `import.meta` (§13.3.12, §13.3.13).
   MetaProperty(span: Span, kind: MetaPropertyKind)
   ImportExpression(
     span: Span,
@@ -489,36 +345,19 @@ pub type Expression {
     phase: ImportPhase,
   )
   RegExpLiteral(span: Span, pattern: String, flags: String)
-  /// Preserves parenthesization so the compiler can distinguish `x` from `(x)`.
-  /// Needed for ES spec §13.15.2: IsIdentifierRef returns false for
-  /// CoverParenthesizedExpressionAndArrowParameterList.
   ParenthesizedExpression(span: Span, expression: Expression)
-  /// Internal-only — never produced by the parser. Synthesized by the
-  /// compiler when lowering TaggedTemplateExpression: evaluates to the
-  /// per-site cached template object (GetTemplateObject, §13.2.8.4).
-  /// `site` is the call site's index within the compilation unit.
+  // compiler-only, never produced by the parser
   IntrinsicTemplateObject(span: Span, site: Int, quasis: List(TemplateQuasi))
 }
 
-/// Universal accessor for the source span of any `Expression`. Equivalent to
-/// `e.span` (which works because every variant carries `span: Span` at the
-/// same first position) — kept as a named function for use as a first-class
-/// value in `list.map` and similar.
 pub fn expression_span(e: Expression) -> Span {
   e.span
 }
 
-/// The plain name text of an optional `NamedBinding` — for the many consumers
-/// (emit, esm, compiler) that only need the identifier, not its span.
 pub fn binding_name(binding: Option(NamedBinding)) -> Option(String) {
   option.map(binding, fn(b) { b.name })
 }
 
-/// Module request phase, shared by static ImportDeclarations and dynamic
-/// ImportCalls (§13.3.10): evaluation (`import x from "m"` / `import(x)`),
-/// source (`import source x from "m"` / `import.source(x)`, the
-/// source-phase-imports proposal), defer (`import defer * as x from "m"` /
-/// `import.defer(x)`, the defer-import-eval proposal).
 pub type ImportPhase {
   PhaseEvaluation
   PhaseSource
@@ -527,45 +366,18 @@ pub type ImportPhase {
 
 pub type ArrowBody {
   ArrowBodyExpression(Expression)
-  /// The raw statement list of the arrow's `{...}` body — the grammar admits
-  /// nothing else, so consumers never need a "wasn't a Block" fallback.
   ArrowBodyBlock(List(StmtWithLine))
 }
 
-/// One property in an object literal, in the shapes the grammar spells:
-/// `k: v` / `{k}` (Init), `k(){}` (Method), `get k(){}` / `set k(v){}`
-/// (Accessor), `...v` (Spread). Methods and accessors carry a
-/// `FunctionLiteral` — a non-function method body is unrepresentable, and
-/// only Init properties can be `shorthand`.
-/// The name of a property or class element, in the shapes the grammar spells
-/// (§13.2.5.1 PropertyName, §15.7.1 ClassElementName). Every property-bearing
-/// node carries one of these instead of a `(key: Expression, computed: Bool)`
-/// pair, so a non-computed key holding an arbitrary expression — e.g.
-/// `InitProperty(key: CallExpression(..), computed: False)`, which used to be
-/// constructible and reached a defensive "shouldn't happen" fallback in emit —
-/// cannot exist. Consumers match the five literal shapes plus `KeyComputed`
-/// exhaustively and never need a fallback arm.
 pub type PropertyKey {
-  /// `{ x: 1 }`, `class C { x }` — an IdentifierName, keywords included.
   KeyIdentifier(name: String, span: Span)
-  /// `{ "x": 1 }` — the cooked string value, escapes already decoded.
   KeyString(value: String, span: Span)
-  /// `{ 1: v }`, `{ 0x10() {} }` — needs ToPropertyKey at runtime for the
-  /// canonical string form ("1", not "1.0").
   KeyNumber(value: LiteralNumber, span: Span)
-  /// `{ 1n: v }` — the other LiteralPropertyName numeric form.
   KeyBigInt(value: Int, span: Span)
-  /// `class C { #x }`, `#x() {}` — `name` includes the leading `#`. Only legal
-  /// on class elements; the parser rejects it as an object-literal /
-  /// object-pattern key.
   KeyPrivate(name: String, span: Span)
-  /// `{ [expr]: v }` — evaluated and ToPropertyKey'd at runtime (once, at
-  /// class-definition time, for class elements).
   KeyComputed(expression: Expression)
 }
 
-/// The source span of a property key: the key token, or the whole `[expr]`
-/// key expression for a computed key.
 pub fn property_key_span(key: PropertyKey) -> Span {
   case key {
     KeyIdentifier(span:, ..)
@@ -577,9 +389,6 @@ pub fn property_key_span(key: PropertyKey) -> Span {
   }
 }
 
-/// The static string form of a non-computed, non-private key, or None. Numeric
-/// keys are excluded: their canonical string form is a runtime ToPropertyKey
-/// question, not a syntactic one.
 pub fn property_key_static_name(key: PropertyKey) -> Option(String) {
   case key {
     KeyIdentifier(name:, ..) -> Some(name)
@@ -615,21 +424,14 @@ pub type Pattern {
 
 pub type PatternProperty {
   PatternProperty(key: PropertyKey, value: Pattern, shorthand: Bool)
-  /// §13.3.3 BindingRestProperty is `... BindingIdentifier` — no nested
-  /// pattern (unlike array-rest `RestElement`, which does allow one). Storing
-  /// name+span directly makes `{...[a]}` / `{...{x}}` unrepresentable.
   RestProperty(name: String, span: Span)
 }
 
-/// §8.2.1 BoundNames of a BindingPattern, in source order. This is the single
-/// place that answers "which identifiers does this pattern bind?" — use it
-/// instead of matching `IdentifierPattern` at a call site, which silently
-/// drops every name bound by a destructuring pattern.
+// §8.2.1 boundnames, in source order
 pub fn pattern_bound_names(p: Pattern) -> List(String) {
   case p {
     IdentifierPattern(name:, ..) -> [name]
     ArrayPattern(elements:) ->
-      // Elisions (`[a, , b]`) are `None` slots — they bind nothing.
       list.flat_map(elements, fn(element) {
         option.map(element, pattern_bound_names) |> option.unwrap([])
       })
@@ -670,9 +472,6 @@ pub type BinaryOp {
   InstanceOf
 }
 
-/// Short-circuiting operator of a `LogicalExpression` (`&&` / `||` / `??`).
-/// Separate from `BinaryOp` so a LogicalExpression can never carry an
-/// arithmetic/relational operator (and vice versa).
 pub type LogicalOp {
   LogicalAnd
   LogicalOr

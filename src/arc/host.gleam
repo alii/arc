@@ -1,23 +1,4 @@
-//// Helpers for writing host functions.
-////
-//// A host function is `fn(args, this, State(host)) -> #(State(host),
-//// Result(JsVal, JsVal))`: `Ok(v)` returns `v` to JS, `Error(e)` throws `e`.
-//// It runs wherever JS calls it from (script code, a builtin callback such
-//// as `Array.prototype.map`, another host function) and always sees the
-//// whole runtime through `State.agent`.
-////
-//// Validators are strict type checks that throw TypeError on mismatch,
-//// designed for `use` syntax and modeled after Node's `internal/validators`.
-//// Error format:
-////   The "NAME" argument must be of type EXPECTED. Received type ACTUAL
-////
-//// Usage:
-////
-////     fn host_repeat(args, _this, s) {
-////       use str, s <- host.validate_string(s, host.first_arg(args), "str")
-////       use n, s <- host.validate_integer(s, host.arg_at(args, 1), "count", 0, 1_000_000)
-////       #(s, Ok(types.mk_string(string.repeat(str, n))))
-////     }
+//// helpers for writing host functions; validators modeled on node's
 
 import arc/host_hooks
 import arc/rt/async as rt_async
@@ -40,23 +21,12 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-// -- State -------------------------------------------------------------------
-
-/// Names the embedder's payload type `host` for `alloc_host_object` /
-/// `read_host`. `Agent` is not generic over `host` and stores payloads
-/// erased (`KHost`), so this key is what pins the type: every `State(host)`
-/// carries one, host functions are registered under the key of the state
-/// that defined them, and each host object records the key it was written
-/// under. Mint it once with `new_key` and use that one value everywhere;
-/// sharing the value is what makes a mistyped read a compile error. A read
-/// under a different key (a second `new_key()`, or a key minted after a
-/// `snapshot.deserialize` in another node) is `None`, never a mistyped value.
+/// pins the payload type; a read under another key is none
 pub opaque type Key(host) {
   Key(id: Int)
 }
 
-/// A fresh key. Two calls give two keys that never read each other's
-/// objects, even at the same `host` type, so call it once per embedding.
+/// mint once per embedding
 pub fn new_key() -> Key(host) {
   Key(id: unique_integer([Positive]))
 }
@@ -68,38 +38,22 @@ type UniqueIntegerOption {
 @external(erlang, "erlang", "unique_integer")
 fn unique_integer(options: List(UniqueIntegerOption)) -> Int
 
-/// What a host function threads through. `agent` is the whole runtime state:
-/// the `arc/rt/*` operations take and return an `Agent`, so host code that
-/// drops to that layer rebuilds this record with the agent it gets back
-/// (`State(..s, agent: st)`, which keeps `key` and so keeps `host`).
-/// `new_target` is NewTarget of the [[Construct]] this function is serving,
-/// `undefined` under a plain call. `key` is the payload key above.
+/// new_target is undefined under a plain call
 pub type State(host) {
   State(agent: Agent, new_target: JsVal, key: Key(host))
 }
 
-/// Signature of an embedder native as `function` / `class` /
-/// `define_fn` register it.
 pub type HostFn(host) =
   fn(List(JsVal), JsVal, State(host)) -> #(State(host), Result(JsVal, JsVal))
 
-/// Wrap an agent for host code that is not inside a host-function call
-/// (`engine.with_state`, tests). No [[Construct]] is in progress, so
-/// `new_target` is `undefined`.
 pub fn from_agent(agent: Agent, key: Key(host)) -> State(host) {
   State(agent:, new_target: mk_undefined(), key:)
 }
 
-/// NewTarget of the [[Construct]] being served: the leaf class for
-/// `class Sub extends HostClass {}`, the class itself for `new HostClass()`,
-/// `undefined` when called without `new`.
 pub fn new_target(s: State(host)) -> JsVal {
   s.new_target
 }
 
-/// Run `body` against `agent` the way a host function would see it, then
-/// drain the microtask queue so promise reactions it triggered settle before
-/// control returns to the embedder.
 pub fn with_state(
   agent: Agent,
   key: Key(host),
@@ -109,19 +63,11 @@ pub fn with_state(
   #(rt_async.drain(agent), result)
 }
 
-// -- Argument access ---------------------------------------------------------
-//
-// A missing argument is `undefined`, per JS semantics.
-
-/// The first argument, or `undefined` when the caller passed none.
+/// missing args are undefined
 pub const first_arg = helpers.first_arg_or_undefined
 
-/// The i-th argument (0-based), or `undefined` when the caller passed fewer.
 pub const arg_at = helpers.arg_at
 
-// -- Throwing ----------------------------------------------------------------
-
-/// Throw a `TypeError` with `msg`. The dispatch-shaped `#(state, Error(...))`.
 pub fn type_error(
   s: State(host),
   msg: String,
@@ -129,7 +75,6 @@ pub fn type_error(
   throw_new(s, TypeErr, msg)
 }
 
-/// Throw a `RangeError` with `msg`. The dispatch-shaped `#(state, Error(...))`.
 pub fn range_error(
   s: State(host),
   msg: String,
@@ -147,9 +92,6 @@ fn throw_new(
   #(State(..s, agent: st), Error(err))
 }
 
-// -- Validators --------------------------------------------------------------
-
-/// Reject unless `val` is a JS string. Unwraps to the Gleam `String`.
 pub fn validate_string(
   s: State(host),
   val: JsVal,
@@ -162,10 +104,7 @@ pub fn validate_string(
   }
 }
 
-/// Reject unless `val` is callable. Passes the value through unchanged;
-/// hand it to `call` to invoke. Use this when you call the function more
-/// than once (validate once, call many). For one-shot calls, `try_call`
-/// does both in one step.
+/// passes the value through; use try_call for one-shot calls
 pub fn validate_function(
   s: State(host),
   val: JsVal,
@@ -178,8 +117,7 @@ pub fn validate_function(
   }
 }
 
-/// Call `callee` with `this_val` and `args`. `Error` is the thrown value;
-/// return it as-is to rethrow, or inspect it to recover.
+/// error is the thrown value
 pub fn call(
   s: State(host),
   callee: JsVal,
@@ -194,9 +132,6 @@ pub fn call(
   }
 }
 
-/// Validate callability AND call: if `callee` isn't callable, throws
-/// TypeError naming the argument; otherwise calls it and continues with the
-/// result, or propagates the throw.
 pub fn try_call(
   s: State(host),
   callee: JsVal,
@@ -217,15 +152,7 @@ pub fn try_call(
   }
 }
 
-/// Reject unless `val` is an integer-valued JS number within `[min, max]`.
-/// Unwraps to `Int`. Three rejections, and they are NOT the same error:
-///
-///   * not a number at all (`"3"`, `{}`, `undefined`) → **TypeError**, "must
-///     be of type integer. Received type <typeof>";
-///   * a number, but not an integer (`1.5`, `NaN`, `Infinity`) →
-///     **RangeError**, "must be an integer";
-///   * an integer outside `[min, max]` → **RangeError**, "must be >= min and
-///     <= max".
+/// typeerror if not a number, rangeerror if not integral or out of range
 pub fn validate_integer(
   s: State(host),
   val: JsVal,
@@ -241,7 +168,7 @@ pub fn validate_integer(
         Some(i) -> check_range(s, name, i, min, max, cont)
         None -> not_an_integer(s, name, rt_val.jsnum_to_string(n))
       }
-    // NaN / ±Infinity: a number, just not an integral one.
+    // nan / infinity
     KNum(n) -> not_an_integer(s, name, rt_val.jsnum_to_string(n))
     _ -> invalid_arg_type(s, name, "integer", val)
   }
@@ -272,7 +199,6 @@ fn check_range(
   }
 }
 
-/// Reject unless `val` is a JS boolean. Unwraps to `Bool`.
 pub fn validate_boolean(
   s: State(host),
   val: JsVal,
@@ -285,69 +211,22 @@ pub fn validate_boolean(
   }
 }
 
-// -- Suspend / resume --------------------------------------------------------
-//
-// The macrotask loop is the embedder's. Core only knows about Promises and
-// the microtask queue. These two functions are the bridge: a host function
-// hands JS a pending Promise and walks away with a settle `Ticket`; later,
-// from its own loop (BEAM mailbox, libuv, epoll, whatever), it calls
-// `resume` with that Ticket. `resume` queues the settlement as a microtask
-// job behind whatever is already queued, so the Promise settles, and its
-// reactions run, on the next drain: `with_state` drains on the way out, as
-// do the engine's eval/call epilogues.
-//
-//     fn fetch(args, _this, s) {
-//       let #(s, promise, ticket) = host.suspend(s)
-//       kick_off_http(url, on_done: my_queue.push(ticket, _))
-//       #(s, Ok(promise))
-//     }
-//     fn my_loop(agent) {
-//       case my_queue.in_flight() {
-//         0 -> agent
-//         _ -> {
-//           let #(ticket, result) = my_queue.block()
-//           let #(agent, _outcome) =
-//             host.with_state(agent, key, fn(s) { host.resume(s, ticket, result) })
-//           my_loop(agent)
-//         }
-//       }
-//     }
-
-/// What `resume` did with the ticket. Embedders that don't care can bind
-/// `_outcome`; embedders that want to detect their own bugs match on it.
 pub type ResumeOutcome {
-  /// The settlement is queued; the next drain settles the promise.
   Resumed
-  /// The ticket had already been resumed once. Nothing changed.
   AlreadySettled
-  /// The ticket does not name a suspended promise on this agent (it came
-  /// from another engine, or from before a `deserialize`). Nothing changed.
   StaleTicket
 }
 
-/// Opaque settle handle for one `suspend`ed Promise. The ONLY way to get one
-/// is from `suspend`, and the only thing to do with it is hand it back to
-/// `resume`, so passing the Promise object or some unrelated handle to
-/// `resume` is a compile error, not silent heap corruption.
-///
-/// `root` is a private cell that references the promise and is pinned from
-/// `suspend` to `resume`. It is never handed to JS or the embedder, so no
-/// `t_hold_roots` caller can name it and its pin cannot be confused with a
-/// hold on the promise itself: the two lifetimes overlap without nesting
-/// (the engine may be holding the very promise the embedder resumes).
+/// root is a private pinned cell, never handed out
 pub opaque type Ticket {
   Ticket(promise: Handle, root: Handle)
 }
 
-/// Payload of a ticket's root cell.
 type TicketRoot {
   TicketRoot(promise: Handle)
 }
 
-/// Create a pending Promise. Return the value from your host function so JS
-/// can `await` it; keep the `Ticket` to pass to `resume` once your external
-/// work completes. The promise is reachable from a GC root until then, so
-/// everything awaiting it survives any collection in between.
+/// pending promise plus the ticket to resume it with later
 pub fn suspend(s: State(host)) -> #(State(host), JsVal, Ticket) {
   let #(promise, st) = rt_async.t_new_promise(s.agent)
   let root_slot =
@@ -357,16 +236,7 @@ pub fn suspend(s: State(host)) -> #(State(host), JsVal, Ticket) {
   #(State(..s, agent: st), mk_object(promise), Ticket(promise:, root:))
 }
 
-/// Queue the settlement of the Promise behind a `suspend` Ticket as a
-/// microtask job: it resolves on `Ok` (assimilating a thenable like a
-/// `resolve` function does), rejects on `Error`, and the reactions run in
-/// the same drain. The ticket's root is dropped here; the queued job keeps
-/// the promise alive until it has run.
-///
-/// Resuming an already-resumed ticket is a no-op reported as
-/// `AlreadySettled`, and a ticket this agent never issued is `StaleTicket`,
-/// so an embedder counting `Resumed` outcomes against its suspends stays
-/// honest.
+/// queues the settlement as a microtask; drops the ticket root
 pub fn resume(
   s: State(host),
   ticket: Ticket,
@@ -392,12 +262,10 @@ pub fn resume(
 }
 
 type TicketState {
-  /// Suspended and not yet resumed: the root cell still names the promise.
+  // root cell still names the promise
   Live
-  /// Resumed before: the root is gone but the promise is still on this
-  /// agent (it may still be pending until the queued job runs).
+  // resumed before, promise still on this agent
   Spent
-  /// Not a promise of this agent at all.
   Stale
 }
 
@@ -418,8 +286,7 @@ fn is_ticket_root(st: Agent, root: Handle, promise: Handle) -> Bool {
   }
 }
 
-/// The key ticket roots are written under. `new_key` ids are positive, so
-/// no embedder key is ever 0.
+// new_key ids are positive so 0 is never an embedder key
 fn ticket_key() -> Key(TicketRoot) {
   Key(id: 0)
 }
@@ -431,33 +298,19 @@ fn is_promise(st: Agent, h: Handle) -> Bool {
   }
 }
 
-// -- Host hooks --------------------------------------------------------------
-
-/// Re-export: the embedder host-capability record. Start from
-/// `default_host_hooks()`, override fields, hand it to the engine once.
 pub type HostHooks =
   host_hooks.HostHooks
 
-/// The default: [[CanBlock]] false (sync `Atomics.wait` throws instead of
-/// hanging), no dynamic-import hook, and the real BEAM monotonic clock /
-/// sleep.
 pub fn default_host_hooks() -> HostHooks {
   host_hooks.default_host_hooks()
 }
 
-// -- Constructors ------------------------------------------------------------
-//
-// Primitives come from `arc/rt/types` (`mk_string`, `mk_number`, `mk_bool`,
-// ...) and are read back with its `classify`.
-
-/// Allocate a JS array from values. Uses the realm's Array.prototype.
 pub fn array(s: State(host), values: List(JsVal)) -> #(State(host), JsVal) {
   let st = s.agent
   let #(h, st) = common.alloc_array(st, values, st.realm.array.prototype)
   #(State(..s, agent: st), mk_object(h))
 }
 
-/// Allocate a plain JS object from a property list. Uses Object.prototype.
 pub fn object(
   s: State(host),
   props: List(#(String, JsVal)),
@@ -467,16 +320,7 @@ pub fn object(
   #(State(..s, agent: st), mk_object(h))
 }
 
-// -- Opaque host values ------------------------------------------------------
-//
-// The one place payload types are erased. A `KHost` payload is always a
-// `Tagged`: the id of the `Key` it was written under, then the value.
-// `erase` / `unerase` are unchecked casts and `tag` / `untag` are their only
-// callers. `untag` claims `Tagged(host)` for whatever the cell holds, which
-// is true of `key` (an Int in every `Tagged`) and becomes true of `value`
-// once `key` matches the caller's `Key(host)`; on a mismatch `value` is
-// dropped unread.
-
+// the one place payload types are erased; value unread unless key matches
 type Tagged(host) {
   Tagged(key: Int, value: host)
 }
@@ -514,15 +358,7 @@ fn host_slot(
   )
 }
 
-/// Allocate an opaque, embedder-owned object wrapping `value` (the
-/// embedder's own type). The engine never inspects `value`; it renders the
-/// object via the prototype's `@@toStringTag`. The object has no own
-/// properties; pass `Some(proto)` to give it methods/a tag, or `None` for a
-/// null-prototype value. Read it back, typed, with `read_host` under the
-/// same key.
-///
-/// Heap handles inside `value` are traced by the collector, so a payload
-/// may hold JS objects directly.
+/// opaque embedder object; handles inside value are gc-traced
 pub fn alloc_host_object(
   s: State(host),
   value: host,
@@ -533,8 +369,7 @@ pub fn alloc_host_object(
   #(State(..s, agent: st), mk_object(h))
 }
 
-/// Read the embedder value out of a host object. `None` if `val` is not one,
-/// or is one written under a different key than `s` carries.
+/// none if not a host object or written under another key
 pub fn read_host(s: State(host), val: JsVal) -> Option(host) {
   use h <- option.then(handle_of(val))
   case rt_store.t_cell_get(s.agent, h) {
@@ -550,11 +385,7 @@ fn handle_of(val: JsVal) -> Option(Handle) {
   }
 }
 
-// -- Native functions and classes --------------------------------------------
-
-/// Mint a standalone native function object without installing it
-/// anywhere. `impl` is an arbitrary closure, so it can capture typed host
-/// data. `arity` is the reported `.length`. The object is GC-rooted.
+/// mint a rooted native function without installing it
 pub fn function(
   s: State(host),
   name: String,
@@ -573,8 +404,6 @@ pub fn function(
   #(State(..s, agent: st), mk_object(h))
 }
 
-/// `function` + `define_global`: the function becomes callable from JS as
-/// `name(...)`.
 pub fn define_fn(
   s: State(host),
   name: String,
@@ -585,8 +414,7 @@ pub fn define_fn(
   define_global(s, name, f)
 }
 
-/// Install `val` on `globalThis` as a writable, configurable, non-enumerable
-/// data property (the attributes every built-in global has).
+/// writable, configurable, non-enumerable like builtin globals
 pub fn define_global(s: State(host), name: String, val: JsVal) -> State(host) {
   let st = s.agent
   let #(_created, st) =
@@ -602,9 +430,6 @@ pub fn define_global(s: State(host), name: String, val: JsVal) -> State(host) {
   State(..s, agent: st)
 }
 
-/// Install a namespace object (like `Math`) at global `name` whose own
-/// properties are the `#(name, arity, impl)` methods. It carries
-/// `@@toStringTag = name` like every built-in namespace.
 pub fn define_namespace(
   s: State(host),
   name: String,
@@ -617,18 +442,7 @@ pub fn define_namespace(
   define_global(State(..s, agent: st), name, mk_object(ns))
 }
 
-/// Build a constructible class that JS can `new` and `extends`, and return
-/// its constructor (nothing is installed on the global).
-///
-/// `constructor` is the [[Construct]] body: it receives `(args, this,
-/// state)` with `this` undefined and `new_target(state)` set, and returns
-/// the new instance, typically from `object` or `alloc_host_object`. The
-/// instance is re-prototyped to `new_target.prototype`, so a plain
-/// `object(s, [...])` already comes out as an instance of the class or of
-/// the JS subclass being constructed. Calling the class without `new` runs
-/// the same body with `new_target` undefined. `methods` go on the
-/// prototype; `statics` on the constructor (and are inherited by
-/// subclasses). Constructor and prototype are GC-rooted.
+/// constructible and extendable; instance is re-prototyped to new_target
 pub fn class(
   s: State(host),
   name: String,
@@ -656,11 +470,7 @@ pub fn class(
   #(State(..s, agent: st), mk_object(pair.constructor))
 }
 
-/// Add `impl` to the agent's host-function table under the next id. This is
-/// the table's only writer, so ids are dense from 0 in registration order,
-/// which is what lets a deserialized engine's `HostFn(id)` cells find their
-/// closures again once the embedder repeats its registrations. Every call of
-/// `impl` sees the `key` it was registered under.
+// only writer of host_fns, so ids are dense in registration order
 fn register(
   st: Agent,
   key: Key(host),
@@ -701,10 +511,6 @@ fn alloc_host_methods(
   #(list.reverse(props), st)
 }
 
-// -- Internal ----------------------------------------------------------------
-
-/// A number that is not an integer (1.5, NaN, ±Infinity): the VALUE is out of
-/// range, the type is fine.
 fn not_an_integer(
   s: State(host),
   name: String,

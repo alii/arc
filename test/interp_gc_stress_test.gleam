@@ -1,8 +1,3 @@
-//// End to end: a script that allocates in a loop under a tiny GC threshold
-//// collects at the root-activation `Return` safepoint many times over, stays
-//// bounded, and never loses what only the root frame's locals and operand
-//// stack hold.
-
 import arc/compiler
 import arc/interp/entry
 import arc/interp/safepoint
@@ -42,11 +37,7 @@ pub fn allocating_loop_is_bounded_and_keeps_frame_values_test() {
   let #(completion, st) = run(st, source)
   let assert NormalCompletion(v) = completion
   assert rt_inspect.inspect(st, v) == "'42:7998000'"
-  // 4000 iterations x several cells each would be tens of thousands of live
-  // cells without the safepoint; with it the heap holds about one
-  // threshold's worth of garbage at most.
   assert rt_gc.stats(st).live <= base + 4 * threshold
-  // The turn end then drains and keeps the completion value.
   let st = safepoint.end_turn(st, [v])
   assert rt_gc.stats(st).live <= base + 4 * threshold
 }

@@ -1,11 +1,4 @@
-//// Split a long straight-line function body into a chain of tail-calling
-//// functions. erlc's per-function passes (erl_lint, v3_core, sys_core_fold,
-//// beam_ssa_opt) are superlinear in the number of variables one function
-//// binds, so a body whose top-level `Let` spine is long compiles far faster
-//// as several functions of bounded spine length. Pure IR→IR: the cut is
-//// always on the body's outermost `Let` spine, so no label, loop or `Try`
-//// region is crossed and the tail's `Return`s keep their meaning through the
-//// tail call.
+// long let spines make erlc superlinear, so split them
 
 import carder/ir
 import carder/middle/ir_opt/loop_analysis
@@ -16,20 +9,12 @@ import gleam/option.{type Option, None, Some}
 import gleam/set.{type Set}
 import gleam/string
 
-/// Spine `Let`s per emitted function. On a 1,800-let straight-line body
-/// (min of 3, load ~15) erlc took 5.9 s unsplit, 1.23 s at 128, 1.03 s at
-/// 64 and 0.89 s at 32; 64 keeps the chunk count (and the tail calls) low
-/// for the last few percent.
+// measured sweet spot for erlc time
 pub const chunk = 64
 
-/// BEAM caps a function at 255 arguments and the backend adds the store;
-/// a cut whose live set is wider than this waits for a narrower point.
+// beam caps a function at 255 args
 const max_live = 250
 
-/// Split `f` when its top-level `Let` spine is at least `2 * chunk` long.
-/// Returns `f` (rewritten to tail-call the first continuation) followed by
-/// the continuation functions `<name>_c<spine index>` in source order; a
-/// short body comes back unchanged as `[f]`.
 pub fn function(f: ir.Function) -> List(ir.Function) {
   let #(spine, tail) = unzip_spine(f.body, [])
   case list.length(spine) >= 2 * chunk {
@@ -64,11 +49,6 @@ pub fn function(f: ir.Function) -> List(ir.Function) {
   }
 }
 
-/// Backward-pass state: `rest` is the rebuilt body from the current spine
-/// position to the end, `rest_fv` every `Var` occurring in it minus the
-/// spine names it binds, `index` the position of the next spine node from
-/// the front, `helpers` the continuations emitted so far (in reverse cut
-/// order, which is source order).
 type Cut {
   Cut(
     rest: ir.Expr,
@@ -88,9 +68,6 @@ fn cut_step(
 ) -> Cut {
   let #(names, rhs) = node
   let index = cut.index - 1
-  // Cut below `names` when the tail is a full chunk, we are not at the very
-  // top, the live set fits a call, and every live value has a known type to
-  // declare the param with. The live set is only computed at a candidate.
   let candidate = case cut.since_cut >= chunk && index > 0 {
     False -> None
     True -> {
@@ -164,9 +141,6 @@ fn bind_types(
   }
 }
 
-/// Result types of a `Let` right-hand side where they can be read off the
-/// node. `None` (numeric ops, conversions, …) only means a value bound here
-/// cannot be a continuation param, so a cut waits until it is dead.
 fn rhs_types(
   e: ir.Expr,
   env: Dict(String, ir.ValType),

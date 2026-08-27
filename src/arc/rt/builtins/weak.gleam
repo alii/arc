@@ -1,10 +1,3 @@
-//// ES2024 §24.3 WeakMap + §24.4 WeakSet in one module.
-////
-//// Storage: `WeakMapObj(entries: Dict(WeakKey, JsVal))` and
-//// `WeakSetObj(entries: Set(WeakKey))`, keyed by object cell id or by
-//// non-registered symbol identity (§9.13 CanBeHeldWeakly). Object-keyed
-//// entries are pruned by GC when the key dies; symbol-keyed entries persist.
-
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{
   arg_at, first_arg_or_undefined, two_args_or_undefined,
@@ -25,8 +18,6 @@ import arc/rt/val as rt_val
 import gleam/dict.{type Dict}
 import gleam/option.{type Option, None, Some}
 import gleam/set.{type Set}
-
-// ── init — WeakMap + WeakSet constructors + prototypes ──────────────────────
 
 pub fn init(
   st: Agent,
@@ -74,8 +65,6 @@ pub fn init(
   let st = common.add_to_string_tag(st, weak_set.prototype, "WeakSet")
   #(#(weak_map, weak_set), st)
 }
-
-// ── dispatch ────────────────────────────────────────────────────────────────
 
 pub fn dispatch(
   st: Agent,
@@ -134,8 +123,6 @@ pub fn dispatch_construct(
   }
 }
 
-// ── §24.3.1.1 WeakMap ( [ iterable ] ) / §24.4.1.1 WeakSet ( [ iterable ] ) ──
-
 fn weak_construct(
   st: Agent,
   intrinsic: fn(Realm) -> Handle,
@@ -175,18 +162,12 @@ fn weak_construct(
   }
 }
 
-// ── WeakMap.prototype methods ───────────────────────────────────────────────
-
-/// §24.3.3.2 WeakMap.prototype.get ( key )
 fn weak_map_get(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use ref <- require_weak_map(st, this, "get")
   let key = first_arg_or_undefined(args)
-  // A key failing CanBeHeldWeakly can never be present (`insert` demands a
-  // proved `WeakKey`), so no separate gate — mirrors `has`.
   #(lookup_wm(st, ref, key) |> option.unwrap(mk_undefined()), st)
 }
 
-/// §24.3.3.5 WeakMap.prototype.set ( key, value )
 fn weak_map_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use ref <- require_weak_map(st, this, "set")
   let #(key, val) = two_args_or_undefined(args)
@@ -194,7 +175,6 @@ fn weak_map_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   #(this, update_wm(st, ref, dict.insert(_, wk, val)))
 }
 
-/// §24.3.3.4 WeakMap.prototype.has ( key )
 fn weak_map_has(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use ref <- require_weak_map(st, this, "has")
   let key = first_arg_or_undefined(args)
@@ -204,7 +184,6 @@ fn weak_map_has(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §24.3.3.3 WeakMap.prototype.delete ( key )
 fn weak_map_delete(
   st: Agent,
   this: JsVal,
@@ -222,7 +201,6 @@ fn weak_map_delete(
   }
 }
 
-/// Upsert proposal — WeakMap.prototype.getOrInsert ( key, value )
 fn weak_map_get_or_insert(
   st: Agent,
   this: JsVal,
@@ -240,10 +218,7 @@ fn weak_map_get_or_insert(
   }
 }
 
-/// Upsert proposal — WeakMap.prototype.getOrInsertComputed ( key, callbackfn )
-/// Validation order: brand → CanBeHeldWeakly → IsCallable. `update_wm` re-reads
-/// the live entry dict, so a same-key insert made by the callback is
-/// overwritten rather than the whole dict being reverted.
+// callback may insert the same key; re-read before writing
 fn weak_map_get_or_insert_computed(
   st: Agent,
   this: JsVal,
@@ -267,9 +242,6 @@ fn weak_map_get_or_insert_computed(
   }
 }
 
-// ── WeakSet.prototype methods ───────────────────────────────────────────────
-
-/// §24.4.3.1 WeakSet.prototype.add ( value )
 fn weak_set_add(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use ref <- require_weak_set(st, this, "add")
   let val = first_arg_or_undefined(args)
@@ -277,7 +249,6 @@ fn weak_set_add(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   #(this, update_ws(st, ref, set.insert(_, wk)))
 }
 
-/// §24.4.3.3 WeakSet.prototype.has ( value )
 fn weak_set_has(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use ref <- require_weak_set(st, this, "has")
   let val = first_arg_or_undefined(args)
@@ -287,7 +258,6 @@ fn weak_set_has(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §24.4.3.2 WeakSet.prototype.delete ( value )
 fn weak_set_delete(
   st: Agent,
   this: JsVal,
@@ -305,15 +275,10 @@ fn weak_set_delete(
   }
 }
 
-// ── shared brand-check + read/mutate discipline ─────────────────────────────
-
-/// A `Handle` proved to point at a WeakMap slot — constructible only by
-/// `require_weak_map`, so a WeakSet ref cannot reach `read_wm`.
 type WMRef {
   WMRef(Handle)
 }
 
-/// A `Handle` proved to point at a WeakSet slot.
 type WSRef {
   WSRef(Handle)
 }
@@ -366,8 +331,6 @@ fn require_weak_set(
   cont(WSRef(h))
 }
 
-/// §9.13 CanBeHeldWeakly ( v ): objects and non-registered symbols. The only
-/// way to mint a `WeakKey` in this module.
 fn to_weak_key(v: JsVal) -> Option(WeakKey) {
   case classify(v) {
     KHandle(h) -> Some(WeakObjKey(h.id))
@@ -380,7 +343,6 @@ fn to_weak_key(v: JsVal) -> Option(WeakKey) {
   }
 }
 
-/// CanBeHeldWeakly gate — hands over the proved `WeakKey` or throws `msg`.
 fn require_weak_key(
   st: Agent,
   key: JsVal,
@@ -406,9 +368,7 @@ fn lookup_wm(st: Agent, ref: WMRef, key: JsVal) -> Option(JsVal) {
   dict.get(read_wm(st, ref), wk) |> option.from_result
 }
 
-/// Read-modify-write the entry dict inside a single heap access — takes a
-/// FUNCTION rather than a finished dict so a caller cannot hand back a dict
-/// captured before running user code.
+// takes a fn so callers cannot write back a stale dict
 fn update_wm(
   st: Agent,
   ref: WMRef,
@@ -440,8 +400,6 @@ fn update_ws(
     SObject(..slot, kind: WeakSetObj(entries: f(entries)))
   })
 }
-
-// ── shared allocation helpers ───────────────────────────────────────────────
 
 fn alloc_kind_cell(
   st: Agent,

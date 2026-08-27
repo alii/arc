@@ -1,8 +1,3 @@
-//// Dynamic code through the new interpreter: the Function-family
-//// constructors and indirect eval reaching `JsOps.eval_hook`, direct eval
-//// seeing and extending its calling frame, `with` object environments, and
-//// the configurable/non-configurable split of global var declarations.
-
 import arc/compiler
 import arc/interp/entry
 import arc/parser
@@ -73,8 +68,6 @@ fn thrown_name(source: String) -> String {
   }
 }
 
-// -- Function() family ---------------------------------------------------------
-
 pub fn function_constructor_test() {
   assert eval_int("Function('a', 'b', 'return a + b')(2, 3)") == 5
   assert eval_int("new Function('return 7')()") == 7
@@ -83,19 +76,17 @@ pub fn function_constructor_test() {
 
 pub fn function_constructor_name_test() {
   assert eval_string("Function('return 1').name") == "anonymous"
-  // §20.2.1.1.1: no self-name binding, unlike a named function expression.
   assert eval_string("Function('return typeof anonymous')()") == "undefined"
   assert eval_int("Function('a', 'b', '').length") == 2
 }
 
 pub fn function_constructor_syntax_error_test() {
   assert thrown_name("Function('{')") == "SyntaxError"
-  // A trailing line comment in the last parameter must not eat the ")".
+  // a line comment in the last param must not eat the ")"
   assert eval_int("Function('a // note', 'return a')(4)") == 4
 }
 
 pub fn function_constructor_global_scope_test() {
-  // The body closes over the global environment, not the caller's.
   assert eval_string(
       "var x = 'global'; (function () { var x = 'local'; return Function('return x')(); })()",
     )
@@ -115,12 +106,9 @@ pub fn async_function_constructor_test() {
   )
 }
 
-// -- indirect eval ---------------------------------------------------------------
-
 pub fn indirect_eval_test() {
   assert eval_int("(0, eval)('1 + 2')") == 3
   assert eval_int("var e = eval; e('40 + 2')") == 42
-  // Non-string argument comes back unchanged.
   assert eval_int("(0, eval)(5)") == 5
   assert eval_int("[\"6\"].map(eval)[0]") == 6
 }
@@ -130,7 +118,6 @@ pub fn indirect_eval_is_global_test() {
       "var w = 'g'; (function () { var w = 'l'; return (0, eval)('w'); })()",
     )
     == "g"
-  // Eval-introduced globals are configurable; script vars are not.
   assert eval_bool("(0, eval)('var ev = 1'); delete ev")
   assert !eval_bool("var sv = 1; delete sv")
 }
@@ -143,9 +130,6 @@ pub fn indirect_eval_syntax_error_test() {
 }
 
 pub fn other_realm_eval_is_indirect_test() {
-  // §13.3.6.1 step 6.a: only the CURRENT realm's %eval% makes `eval(...)`
-  // a direct eval. Another realm's eval called through the name `eval` is
-  // an ordinary call: indirect, global scope, and in that eval's realm.
   assert thrown_name(
       "(function () { var eval = $262.createRealm().global.eval; var y = 1; return eval('y') })()",
     )
@@ -159,14 +143,11 @@ pub fn other_realm_eval_is_indirect_test() {
   assert eval_bool(
     "var r = $262.createRealm(); r.global.eval('[]') instanceof r.global.Array",
   )
-  // The current realm's own eval, however it was fetched, is still direct.
   assert eval_int(
       "(function () { var eval = globalThis.eval; var y = 41; return eval('y + 1') })()",
     )
     == 42
 }
-
-// -- direct eval -----------------------------------------------------------------
 
 pub fn direct_eval_reads_locals_test() {
   assert eval_int("(function () { var x = 3; return eval('x + 1'); })()") == 4
@@ -179,7 +160,6 @@ pub fn direct_eval_writes_locals_test() {
 }
 
 pub fn direct_eval_var_injection_test() {
-  // Sloppy: the eval's var lands in the calling function's scope.
   assert eval_int("(function () { eval('var y = 5'); return y; })()") == 5
   assert eval_int(
       "(function () { eval('var y = 5'); eval('y = y + 1'); return y; })()",
@@ -223,8 +203,6 @@ pub fn direct_eval_throw_unwinds_test() {
 }
 
 pub fn direct_eval_escaping_throw_restores_depth_test() {
-  // A throw raised in a bytecode function called from eval code, escaping
-  // the eval, must leave the frame and depth bookkeeping where it was.
   let depth =
     "(function () { try { null.x } catch (e) { return e.stack.split('\\n').length } })()"
   let leak =
@@ -233,7 +211,6 @@ pub fn direct_eval_escaping_throw_restores_depth_test() {
   let #(_, st) = eval(leak <> leak)
   assert st.call_depth == 0
   assert st.frames == []
-  // Repeated leaks used to exhaust the call stack for unrelated code.
   assert eval_int(
       "for (var i = 0; i < 300; i++) { "
       <> leak
@@ -249,11 +226,8 @@ pub fn shadowed_eval_is_a_plain_call_test() {
     == 4
 }
 
-// -- with --------------------------------------------------------------------------
-
 pub fn with_read_write_test() {
   assert eval_int("var o = { a: 1 }; with (o) { a = a + 1 } o.a") == 2
-  // An unbound name falls through to the enclosing scope.
   assert eval_int("var o = { a: 1 }, b = 10; with (o) { b = a + b } b") == 11
 }
 

@@ -1,17 +1,3 @@
-//// ES2024 §25.3 DataView Objects
-////
-//// A DataView is a byte-level accessor over an ArrayBuffer (or
-//// SharedArrayBuffer). It carries [[ViewedArrayBuffer]], [[ByteOffset]] and
-//// [[ByteLength]] internal slots; all get*/set* methods funnel through
-//// GetViewValue / SetViewValue (§25.3.1.1 / §25.3.1.2).
-////
-//// Numeric encode/decode uses BEAM bit syntax. Float32/Float64 route through
-//// the ONE JsNum ↔ IEEE-754-bits codec in `arc/rt/typed_array_ffi`
-//// (`f32_bits`/`f64_bits` and their `decode_*` inverses) so the NaN/±Infinity
-//// bit constants live in exactly one place. Float16 is decoded/encoded
-//// manually (sign/exp/mantissa) because BEAM bit syntax has no 16-bit float
-//// segment.
-
 import arc/rt/buffer
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{arg_at, first_arg_or_undefined}
@@ -35,7 +21,6 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-/// Set up DataView.prototype and the DataView constructor.
 pub fn init(
   st: Agent,
   object_proto: Handle,
@@ -85,13 +70,9 @@ pub fn init(
       [],
     )
   let st = common.add_to_string_tag(st, bt.prototype, "DataView")
-  // §25.3.3.1: DataView.prototype is { writable: false, enumerable: false,
-  // configurable: false } — installed that way by common.init_type.
   #(bt, st)
 }
 
-/// Per-module [[Call]] dispatch. `DataView()` without `new` throws
-/// (§25.3.2.1 step 1).
 pub fn dispatch(
   st: Agent,
   native: DataViewNative,
@@ -109,7 +90,6 @@ pub fn dispatch(
   }
 }
 
-/// Per-module [[Construct]] dispatch.
 pub fn dispatch_construct(
   st: Agent,
   native: DataViewNative,
@@ -122,16 +102,12 @@ pub fn dispatch_construct(
   }
 }
 
-// ============================================================================
-// §25.3.2.1 DataView ( buffer [ , byteOffset [ , byteLength ] ] )
-// ============================================================================
-
+// §25.3.2.1
 fn construct(
   st: Agent,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Handle, Agent) {
-  // Step 2: RequireInternalSlot(buffer, [[ArrayBufferData]])
   use buf_h <- helpers.some_or(
     as_array_buffer(st, first_arg_or_undefined(args)),
     fn() {
@@ -141,12 +117,9 @@ fn construct(
       )
     },
   )
-  // Step 3: offset = ToIndex(byteOffset)
   let #(offset, st) =
     rt_val.t_to_index(st, arg_at(args, 1), "Invalid DataView offset")
-  // Step 4: re-check detached — ToIndex may have run user code.
   let #(buf_len, resizable) = live_buffer_info(st, buf_h)
-  // Step 5-6: offset > bufferByteLength → RangeError
   use Nil <- helpers.guard(offset <= buf_len, fn() {
     rt_val.t_throw_range_error(
       st,
@@ -155,10 +128,8 @@ fn construct(
         <> " is outside the bounds of the buffer",
     )
   })
-  // Steps 8-10: resolve view byte length
   let len_arg = arg_at(args, 2)
   let #(view_len, st) = case classify(len_arg) {
-    // byteLength absent: fixed buffer → span to end; resizable → auto-track.
     KUndef ->
       case resizable {
         False -> #(Some(buf_len - offset), st)
@@ -167,23 +138,16 @@ fn construct(
     _ -> {
       let #(view_len, st) =
         rt_val.t_to_index(st, len_arg, "Invalid DataView length")
-      // Step 9.b: check against the buffer length captured BEFORE
-      // ToIndex(byteLength) ran user code (a poisoned valueOf may have grown
-      // a resizable buffer). The re-check below sees the fresh length
-      // (step 14).
       use Nil <- helpers.guard(offset + view_len <= buf_len, fn() {
         rt_val.t_throw_range_error(st, "Invalid DataView length")
       })
       #(Some(view_len), st)
     }
   }
-  // Step 11: OrdinaryCreateFromConstructor — reads NewTarget.prototype,
-  // which may run user code.
   let #(proto, st) =
     rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
       r.data_view.prototype
     })
-  // Step 12-14: re-check detached and length against the CURRENT buffer.
   let #(buf_len, _) = live_buffer_info(st, buf_h)
   use Nil <- helpers.guard(
     case view_len {
@@ -198,10 +162,6 @@ fn construct(
     proto,
   )
 }
-
-// ============================================================================
-// §25.3.4.1-3 prototype accessors: buffer / byteLength / byteOffset
-// ============================================================================
 
 fn get_buffer(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let view = require_data_view(st, this)
@@ -219,10 +179,7 @@ fn get_byte_offset(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   #(mk_number(JInt(view.byte_offset)), st)
 }
 
-// ============================================================================
-// §25.3.1.1 GetViewValue ( view, requestIndex, isLittleEndian, type )
-// ============================================================================
-
+// §25.3.1.1 getviewvalue
 fn get_view_value(
   st: Agent,
   this: JsVal,
@@ -238,24 +195,16 @@ fn get_view_value(
   #(decode(element, chunk, little), st)
 }
 
-// ============================================================================
-// §25.3.1.2 SetViewValue ( view, requestIndex, isLittleEndian, type, value )
-// ============================================================================
-
+// §25.3.1.2 setviewvalue
 fn set_view_value(
   st: Agent,
   this: JsVal,
   args: List(JsVal),
   element: ViewElementType,
 ) -> #(JsVal, Agent) {
-  // SetViewValue step 3 (immutable-arraybuffer proposal): an immutable
-  // viewed buffer is a TypeError BEFORE the ToIndex/ToNumber coercions run
-  // any user code (observable; test262 checks it).
   let view0 = require_data_view(st, this)
   require_mutable_buffer(st, view0.buffer)
   let #(view, get_index, st) = view_and_index(st, this, args)
-  // Step 3: numberValue = ToBigInt(value) / ToNumber(value) — spec-mandated
-  // BEFORE the bounds check, so it cannot fold into checked_view_bytes.
   let #(encoded, st) = encode_value(st, element, arg_at(args, 1))
   let little = rt_val.to_boolean(arg_at(args, 2))
   let elem_size = element_size(element)
@@ -268,16 +217,10 @@ fn set_view_value(
   )
 }
 
-// ============================================================================
-// Internal helpers — receiver/buffer validation
-// ============================================================================
-
-/// The [[DataView]] internal slots we operate on.
 type ViewRecord {
   ViewRecord(buffer: Handle, byte_offset: Int, byte_length: Option(Int))
 }
 
-/// Unwrap `this` as a DataView or throw TypeError.
 fn require_data_view(st: Agent, this: JsVal) -> ViewRecord {
   case helpers.brand_of(st, this, view_record_of) {
     Some(#(view, _ref)) -> view
@@ -289,8 +232,6 @@ fn require_data_view(st: Agent, this: JsVal) -> ViewRecord {
   }
 }
 
-/// The [[DataView]] extractor handed to `brand_of` — a named function (not
-/// an inline lambda) so the brand check builds no closure per call.
 fn view_record_of(kind: ObjKind) -> Option(ViewRecord) {
   case kind {
     DataViewObj(buffer:, byte_offset:, byte_length:) ->
@@ -299,8 +240,6 @@ fn view_record_of(kind: ObjKind) -> Option(ViewRecord) {
   }
 }
 
-/// Immutable ArrayBuffer proposal — SetViewValue step 3: writes through a
-/// DataView over an immutable buffer throw TypeError.
 fn require_mutable_buffer(st: Agent, buf: Handle) -> Nil {
   case buffer.buffer_is_immutable(st, buf) {
     True ->
@@ -312,8 +251,6 @@ fn require_mutable_buffer(st: Agent, buf: Handle) -> Nil {
   }
 }
 
-/// Shared prologue of Get/SetViewValue (§25.3.1.1-2 steps 1-2): unwrap the
-/// DataView receiver, then getIndex = ToIndex(requestIndex).
 fn view_and_index(
   st: Agent,
   this: JsVal,
@@ -329,9 +266,6 @@ fn view_and_index(
   #(view, get_index, st)
 }
 
-/// Shared epilogue of Get/SetViewValue (steps 5+): out-of-bounds (incl.
-/// detached) → TypeError, then RangeError; yields the live buffer bytes and
-/// the absolute byte position of the element.
 fn checked_view_bytes(
   st: Agent,
   view: ViewRecord,
@@ -349,7 +283,6 @@ fn checked_view_bytes(
   #(data, view.byte_offset + get_index)
 }
 
-/// Read `val` as an ArrayBuffer/SharedArrayBuffer handle ([[ArrayBufferData]]).
 fn as_array_buffer(st: Agent, val: JsVal) -> Option(Handle) {
   case classify(val) {
     KHandle(h) ->
@@ -361,11 +294,8 @@ fn as_array_buffer(st: Agent, val: JsVal) -> Option(Handle) {
   }
 }
 
-/// Read the live (non-detached) buffer's #(byte_length, resizable) or throw
-/// TypeError if detached / not a buffer.
 fn live_buffer_info(st: Agent, buf: Handle) -> #(Int, Bool) {
   case buffer.buffer_storage(st, buf) {
-    // `Detached` is a detached buffer — [[ArrayBufferData]] is null.
     Some(Detached(..)) ->
       rt_val.t_throw_type_error(
         st,
@@ -380,7 +310,6 @@ fn live_buffer_info(st: Agent, buf: Handle) -> #(Int, Bool) {
   }
 }
 
-/// Read the live buffer's data BitArray (TypeError if detached).
 fn buffer_data(st: Agent, buf: Handle) -> BitArray {
   case buffer.buffer_bytes(st, buf) {
     Some(bits) -> bits
@@ -392,9 +321,6 @@ fn buffer_data(st: Agent, buf: Handle) -> BitArray {
   }
 }
 
-/// GetViewByteLength + IsViewOutOfBounds (§25.3.1.1-25.3.1.3 helpers):
-/// detached or out-of-bounds (resizable buffer shrunk under the view) →
-/// TypeError; otherwise the current view size in bytes.
 fn view_size(st: Agent, view: ViewRecord) -> Int {
   let #(buf_len, _resizable) = live_buffer_info(st, view.buffer)
   case view.byte_length {
@@ -419,11 +345,6 @@ fn view_size(st: Agent, view: ViewRecord) -> Int {
   }
 }
 
-// ============================================================================
-// Element encode/decode
-// ============================================================================
-
-/// Table 71 element sizes, in bytes.
 fn element_size(element: ViewElementType) -> Int {
   case element {
     VNum(VInt8) | VNum(VUint8) -> 1
@@ -433,7 +354,6 @@ fn element_size(element: ViewElementType) -> Int {
   }
 }
 
-/// Read the chunk's bytes as an unsigned big/little-endian integer.
 fn read_uint(chunk: BitArray, little: Bool) -> Int {
   case little, chunk {
     _, <<v:size(8)>> -> v
@@ -443,13 +363,10 @@ fn read_uint(chunk: BitArray, little: Bool) -> Int {
     False, <<v:size(32)>> -> v
     True, <<v:size(64)-little>> -> v
     False, <<v:size(64)>> -> v
-    // The chunk width always matches element_size; anything else would decode
-    // as a bogus 0 rather than the bytes actually in the buffer.
     _, _ -> panic as "data_view: element chunk is not 1, 2, 4 or 8 bytes wide"
   }
 }
 
-/// Reinterpret an unsigned integer of `bits` width as two's-complement.
 fn to_signed(u: Int, bits: Int) -> Int {
   let half = int.bitwise_shift_left(1, bits - 1)
   case u >= half {
@@ -458,7 +375,6 @@ fn to_signed(u: Int, bits: Int) -> Int {
   }
 }
 
-/// RawBytesToNumeric (§25.1.2.13): decode element bytes to a JsVal.
 fn decode(element: ViewElementType, chunk: BitArray, little: Bool) -> JsVal {
   let u = read_uint(chunk, little)
   case element {
@@ -467,7 +383,6 @@ fn decode(element: ViewElementType, chunk: BitArray, little: Bool) -> JsVal {
   }
 }
 
-/// RawBytesToNumeric for the Number-valued elements.
 fn decode_number(element: ViewNumElement, u: Int) -> JsVal {
   case element {
     VUint8 -> mk_number(JInt(u))
@@ -482,7 +397,6 @@ fn decode_number(element: ViewNumElement, u: Int) -> JsVal {
   }
 }
 
-/// RawBytesToNumeric for the BigInt-valued elements.
 fn decode_bigint(element: ViewBigElement, u: Int) -> JsVal {
   case element {
     VBigUint64 -> mk_bigint(u)
@@ -490,7 +404,7 @@ fn decode_bigint(element: ViewBigElement, u: Int) -> JsVal {
   }
 }
 
-/// Decode IEEE 754 binary16 bits manually (1 sign, 5 exponent, 10 mantissa).
+// binary16: 1 sign, 5 exponent, 10 mantissa
 fn f16_from_bits(u: Int) -> JsNum {
   let sign = int.bitwise_shift_right(u, 15)
   let exp = int.bitwise_and(int.bitwise_shift_right(u, 10), 0x1F)
@@ -510,21 +424,16 @@ fn f16_from_bits(u: Int) -> JsNum {
 fn apply_sign(f: Float, sign: Int) -> Float {
   case sign {
     0 -> f
-    // Multiply (not subtract from 0.0) so that -0.0 is produced for f = 0.0.
     _ -> f *. -1.0
   }
 }
 
-/// 2^e as a Float for the small exponent range half-floats need.
 fn pow2(e: Int) -> Float {
-  // Total for e in [-24, 5]: the base is positive.
   let assert Ok(f) = float.power(2.0, int.to_float(e))
     as "data_view: 2^e is undefined"
   f
 }
 
-/// Coerce + encode the value for SetViewValue. Produces the element's raw
-/// bytes in BIG-endian order (to_endian flips later if needed).
 fn encode_value(
   st: Agent,
   element: ViewElementType,
@@ -542,16 +451,12 @@ fn encode_value(
   }
 }
 
-/// NumericToRawBytes (§25.1.2.14) for the BigInt types, big-endian.
 fn encode_bigint(element: ViewBigElement, n: Int) -> BitArray {
   case element {
-    // ToBigInt64 and ToBigUint64 both reduce modulo 2^64, and Erlang bit
-    // construction wraps to that same 64-bit two's-complement pattern.
     VBigInt64 | VBigUint64 -> <<n:size(64)>>
   }
 }
 
-/// NumericToRawBytes (§25.1.2.14) for the Number types, big-endian.
 fn encode_number(element: ViewNumElement, num: JsNum) -> BitArray {
   case element {
     VInt8 | VUint8 -> <<to_int_wrap(num):size(8)>>
@@ -563,8 +468,6 @@ fn encode_number(element: ViewNumElement, num: JsNum) -> BitArray {
   }
 }
 
-/// ToIntN/ToUintN truncation step: NaN/±Infinity → 0, else truncate toward
-/// zero. Modulo wrapping is left to Erlang bit-syntax construction.
 fn to_int_wrap(num: JsNum) -> Int {
   case num {
     JInt(i) -> i
@@ -573,15 +476,12 @@ fn to_int_wrap(num: JsNum) -> Int {
   }
 }
 
-/// Encode a Number to IEEE 754 binary16 bits with round-to-nearest-even.
-/// Works on the exact binary64 bit pattern so no double rounding occurs.
+// round to nearest even from the binary64 bits
 fn f16_to_bits(num: JsNum) -> Int {
   case num {
     JNan -> 0x7E00
     JPosInf -> 0x7C00
     JNegInf -> 0xFC00
-    // `num_from_int` yields the correctly-rounded double (or ±Infinity past
-    // its range) and never a JInt, so this recurs exactly once.
     JInt(i) -> f16_to_bits(rt_val.num_from_int(i))
     JFloat(f) -> {
       let assert <<b:size(64)>> = <<f:float-size(64)>>
@@ -589,15 +489,10 @@ fn f16_to_bits(num: JsNum) -> Int {
       let sign_bits = int.bitwise_shift_left(int.bitwise_shift_right(b, 63), 15)
       let exp = int.bitwise_and(int.bitwise_shift_right(b, 52), 0x7FF)
       let mant = int.bitwise_and(b, 0xFFFFFFFFFFFFF)
-      // Unbiased exponent for binary16: e16 = e64 - 1023 + 15
       let e16 = exp - 1008
       case e16 >= 0x1F, e16 >= 1 {
-        // Overflow → ±Infinity (covers values ≥ 65520 after rounding via
-        // the e16 == 0x1E carry below; e16 ≥ 31 here is plain overflow).
         True, _ -> int.bitwise_or(sign_bits, 0x7C00)
         False, True -> {
-          // Normal range: keep top 10 mantissa bits, round ties-to-even on
-          // the remaining 42, carry may bump exponent (and overflow to inf).
           let kept = int.bitwise_shift_right(mant, 42)
           let rest = int.bitwise_and(mant, 0x3FFFFFFFFFF)
           let half = 0x20000000000
@@ -614,13 +509,9 @@ fn f16_to_bits(num: JsNum) -> Int {
           }
         }
         False, False -> {
-          // Subnormal or zero: value = (2^52 + mant) · 2^(exp-1075), target
-          // grid is 2^-24. Shift = 42 + (1 - e16) extra bits dropped.
           let drop = 42 + 1 - e16
           case exp == 0 && mant == 0, drop > 63 {
-            // ±0
             True, _ -> sign_bits
-            // Too small to round up to the smallest subnormal
             False, True -> sign_bits
             False, False -> {
               let full = int.bitwise_or(mant, 0x10000000000000)
@@ -634,8 +525,6 @@ fn f16_to_bits(num: JsNum) -> Int {
                 True -> kept + 1
                 False -> kept
               }
-              // A carry out of the subnormal range lands exactly on the
-              // smallest normal (exponent field becomes 1) — already correct.
               int.bitwise_or(sign_bits, rounded)
             }
           }
@@ -645,7 +534,6 @@ fn f16_to_bits(num: JsNum) -> Int {
   }
 }
 
-/// Flip a big-endian element chunk to the requested endianness.
 fn to_endian(chunk: BitArray, little: Bool, size: Int) -> BitArray {
   case little, size {
     False, _ -> chunk
@@ -655,8 +543,6 @@ fn to_endian(chunk: BitArray, little: Bool, size: Int) -> BitArray {
         <<v:size(16)>> -> <<v:size(16)-little>>
         <<v:size(32)>> -> <<v:size(32)-little>>
         <<v:size(64)>> -> <<v:size(64)-little>>
-        // Returning `chunk` unflipped here would silently store big-endian
-        // bytes for a little-endian write.
         _ -> panic as "data_view: element chunk is not 2, 4 or 8 bytes wide"
       }
   }

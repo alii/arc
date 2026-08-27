@@ -1,20 +1,11 @@
 import arc/dis
 import gleam/string
 
-// ============================================================================
-// Bytecode disassembler (arc/dis)
-// ============================================================================
-
-/// Parse + compile a script and disassemble it — the front half of what
-/// `arc --dis <file>` does, without touching the filesystem.
 fn dis_js(source: String) -> String {
   let assert Ok(text) = dis.source(dis.Script, source)
   text
 }
 
-/// The root section is labelled `<main>`, nested functions are labelled with
-/// the index their `MakeClosure` refers to, ops are inspected verbatim, and
-/// constant operands are resolved into a trailing `;` comment.
 pub fn disassemble_shape_test() {
   let text = dis_js("function add(a, b) { return a + b } add(1, 2)")
   assert string.contains(text, "function <main> ")
@@ -30,9 +21,6 @@ pub fn disassemble_string_constant_test() {
   assert string.contains(text, "; \"hi\"")
 }
 
-/// The resolver's superinstructions show up under their own names: a local
-/// compared against a constant, `this.x`, `o.m(` on a local, and a
-/// statement-position field store.
 pub fn disassemble_fused_ops_test() {
   let text =
     dis_js(

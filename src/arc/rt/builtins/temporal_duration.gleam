@@ -1,11 +1,3 @@
-//// Temporal.Duration (proposal-temporal §7): ten integral fields sharing one
-//// sign. The date part (years/months/weeks) is only ever measured against a
-//// relativeTo anchor; the day+time part is exact nanoseconds.
-////
-//// The duration record ops (ToTemporalDuration, IsValidDuration, balancing)
-//// are temporal_common.gleam; relativeTo resolution is temporal_zoned_ops;
-//// the round/total cores are temporal_diff.gleam.
-
 import arc/internal/int_math.{floor_div, trunc_div}
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
@@ -60,11 +52,6 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-// ============================================================================
-// Init — Temporal.Duration constructor + prototype
-// ============================================================================
-
-/// The getters, in prototype-registration order.
 pub const all_duration_getters = [
   DrYears,
   DrMonths,
@@ -80,9 +67,6 @@ pub const all_duration_getters = [
   DrBlank,
 ]
 
-/// Registration specs for `temporal.init_temporal_type`: the constructor
-/// token, `from`/`compare`, the twelve getters and the prototype methods, in
-/// prototype-registration order.
 pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
   TemporalN(TemporalDurationCtor(protos:))
 }
@@ -168,11 +152,6 @@ fn from_int(n: Int) -> JsVal {
   mk_number(JInt(n))
 }
 
-// ============================================================================
-// Constructor and statics
-// ============================================================================
-
-/// new Temporal.Duration(y, mo, w, d, h, mi, s, ms, us, ns) — all optional.
 pub fn ctor(
   st: Agent,
   protos: TemporalProtos,
@@ -192,7 +171,6 @@ pub fn ctor(
   finish_duration(st, protos, dur)
 }
 
-/// Temporal.Duration.from(item) / Temporal.Duration.compare(one, two, options).
 pub fn static(
   st: Agent,
   name: TemporalStaticName,
@@ -208,7 +186,6 @@ pub fn static(
   }
 }
 
-/// Temporal.Duration.compare(one, two [, options]).
 fn duration_compare(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(a, st) = to_temporal_duration(st, helpers.arg_at(args, 0))
   let #(b, st) = to_temporal_duration(st, helpers.arg_at(args, 1))
@@ -229,7 +206,6 @@ fn duration_compare(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
     #(from_int(int_sign(time_duration_ns(a) - time_duration_ns(b))), st)
   }
   case a == b {
-    // Identical field values compare equal without consulting relativeTo.
     True -> #(from_int(0), st)
     False ->
       case rel {
@@ -268,11 +244,6 @@ fn duration_compare(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// ============================================================================
-// Getters
-// ============================================================================
-
-/// RequireInternalSlot(this, [[InitializedTemporalDuration]]).
 fn require_duration(st: Agent, this: JsVal, name: String) -> DurRec {
   require_temporal(st, this, "Duration", name, duration_slot_of)
 }
@@ -302,10 +273,6 @@ pub fn duration_field(d: DurRec, g: TemporalDurationGetter) -> JsVal {
     DrBlank -> mk_bool(duration_sign(d) == 0)
   }
 }
-
-// ============================================================================
-// Methods
-// ============================================================================
 
 pub fn method(
   st: Agent,
@@ -389,11 +356,6 @@ pub fn method(
   }
 }
 
-// ----------------------------------------------------------------------------
-// round
-// ----------------------------------------------------------------------------
-
-/// Temporal.Duration.prototype.round ( roundTo )
 fn duration_round(
   st: Agent,
   protos: TemporalProtos,
@@ -410,8 +372,6 @@ fn duration_round(
         None -> rt_val.t_throw_range_error(st, "invalid smallestUnit")
       }
     KHandle(oh) -> {
-      // Options are read in alphabetical order: largestUnit, relativeTo,
-      // roundingIncrement, roundingMode, smallestUnit.
       let opts = Some(oh)
       let #(largest, st) = get_unit_option_keep(st, opts, "largestUnit")
       let #(rel_v, st) = get_named(st, oh, "relativeTo")
@@ -440,7 +400,7 @@ fn duration_round(
   }
 }
 
-/// `largest` None means "auto": the duration's own default largest unit.
+// largest None means the duration's default largest unit
 fn duration_round_with(
   st: Agent,
   protos: TemporalProtos,
@@ -499,8 +459,6 @@ fn duration_round_with(
           }
         }
         RelZoned(rel_ns, tz, cal) -> {
-          // DifferenceZonedDateTimeWithRounding between the anchor and
-          // anchor + duration.
           let target_ns = terr(st, add_zoned_ns(rel_ns, tz, cal, d))
           case unit_rank(largest) <= unit_rank(Hour) {
             True -> {
@@ -514,8 +472,6 @@ fn duration_round_with(
             False -> {
               let result =
                 terr(st, case unit_rank(smallest) >= unit_rank(Day) {
-                  // Calendar-unit (or zoned day) smallestUnit: wall-clock
-                  // diff with calendar nudging.
                   True -> {
                     use a_dt <- result.try(epoch_ns_to_iso_in(tz, rel_ns))
                     use b_dt <- result.try(epoch_ns_to_iso_in(tz, target_ns))
@@ -530,9 +486,6 @@ fn duration_round_with(
                       True,
                     )
                   }
-                  // Time-unit smallestUnit: days are bounded by real instants
-                  // and the time part is rounded within the day
-                  // (NudgeToZonedTime).
                   False ->
                     zoned_diff_round_time(
                       cal,
@@ -550,8 +503,7 @@ fn duration_round_with(
           }
         }
         RelPlain(rel_date, rel_cal) -> {
-          // A zero duration rounds to zero before the relativeTo date-time
-          // is range-checked.
+          // zero returns before relativeTo is range-checked
           let out_of_range =
             duration_sign(d) != 0
             && !iso_datetime_within_limits(rel_date, midnight)
@@ -585,7 +537,6 @@ fn duration_round_with(
   }
 }
 
-/// rel + duration as an exact (date, time) pair.
 fn duration_target_datetime(
   rel: IsoDate,
   d: DurRec,
@@ -609,11 +560,6 @@ fn duration_target_datetime(
   }
 }
 
-// ----------------------------------------------------------------------------
-// total
-// ----------------------------------------------------------------------------
-
-/// Temporal.Duration.prototype.total ( totalOf )
 fn duration_total(st: Agent, d: DurRec, args: List(JsVal)) -> #(JsVal, Agent) {
   let arg = helpers.arg_at(args, 0)
   case classify(arg) {
@@ -679,8 +625,7 @@ fn duration_total_with(
       }
     }
     RelPlain(rel_date, _rel_cal) -> {
-      // A zero duration totals to zero before the relativeTo date-time is
-      // range-checked.
+      // zero returns before relativeTo is range-checked
       let Nil =
         terr(
           st,
@@ -710,8 +655,6 @@ fn duration_total_with(
   }
 }
 
-/// Whole calendar units in wall-clock space + fractional progress between the
-/// bounding instants (NudgeToCalendarUnit, zoned).
 fn zoned_calendar_total(
   st: Agent,
   tz: types.TimeZone,
@@ -763,12 +706,7 @@ fn zoned_calendar_total(
   )
 }
 
-/// Whole calendar units + fractional progress between bounds
-/// (NudgeToCalendarUnit). Per ComputeNudgeWindow, when the target falls
-/// outside the first window the window is recomputed shifted by one unit.
-/// That happens when day-of-month clamping makes the date diff undercount
-/// (e.g. 2020-01-31 + 1 month lands on 2020-02-29, which diffs back as 0
-/// months).
+// window shifts one unit when month-end clamping undercounts
 fn plain_calendar_total(
   st: Agent,
   rel_date: IsoDate,
@@ -787,8 +725,6 @@ fn plain_calendar_total(
     Month -> diff_date_parts(rel_date, target_date, Month).1
     _ -> trunc_div(epoch_days(target_date) - epoch_days(rel_date), 7)
   }
-  // Window bounds come from CalendarDateAdd, which range-checks its result
-  // (NudgeToCalendarUnit).
   let bound_ns = fn(w: Int) {
     use d2 <- result.map(
       check_date_limits(add_calendar_units(rel_date, unit, w)),
@@ -815,8 +751,6 @@ fn plain_calendar_total(
   )
 }
 
-/// Single correctly-rounded division of the exact rational
-/// whole + sign·num/den (NudgeToCalendarUnit's `total`).
 fn fractional_total(
   whole: Int,
   sign: Int,
@@ -832,12 +766,6 @@ fn fractional_total(
   }
 }
 
-// ----------------------------------------------------------------------------
-// toString
-// ----------------------------------------------------------------------------
-
-/// ToSecondsStringPrecisionRecord for Duration.toString: only sub-minute
-/// smallestUnit values are allowed. Returns #(precision, unit, increment).
 fn duration_string_precision(
   digits: FractionalDigits,
   su: Option(Unit),
@@ -861,9 +789,6 @@ fn duration_string_precision(
   }
 }
 
-/// RoundTimeDuration + TemporalDurationFromInternal for Duration.toString:
-/// round the time portion (hours and below) and rebalance, carrying into
-/// days only when the duration's default largest unit is a date unit.
 fn round_duration_for_string(
   d: DurRec,
   inc: Int,
@@ -894,7 +819,6 @@ fn round_duration_for_string(
   }
 }
 
-/// ISO 8601 duration serialization (TemporalDurationToString).
 pub fn format_duration(d: DurRec, prec: Precision) -> String {
   let sign = duration_sign(d)
   let prefix = case sign < 0 {
@@ -907,8 +831,7 @@ pub fn format_duration(d: DurRec, prec: Precision) -> String {
     <> join_unit(abs_part(d.months), "M")
     <> join_unit(abs_part(d.weeks), "W")
     <> join_unit(abs_part(d.days), "D")
-  // Sub-second components may exceed their unit (e.g. 1.8e16 microseconds);
-  // carry whole seconds out of the combined sub-second total.
+  // sub-second parts may exceed their unit; carry into seconds
   let sub_total =
     abs_part(d.ms) * ns_per_ms + abs_part(d.us) * ns_per_us + abs_part(d.ns)
   let extra_seconds = sub_total / ns_per_second

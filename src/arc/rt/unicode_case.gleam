@@ -1,24 +1,9 @@
-//// Unicode Default Case Conversion — the engine behind
-//// `String.prototype.toLowerCase`/`toUpperCase` (§22.1.3.27/.28) *and*
-//// `Intl`'s `toLocaleLowerCase`/`toLocaleUpperCase` (ECMA-402 §19.1.2/.3).
-////
-//// This lives outside `builtins/` on purpose: Intl must apply the same
-//// casing the plain methods do, and it must do so WITHOUT re-entering JS.
-//// Reading `String.prototype.toLowerCase` off the heap and `[[Call]]`ing it
-//// would let user code that reassigns `String.prototype.toLowerCase` change
-//// what `toLocaleLowerCase` returns.
-
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
 
-/// Unicode Default Case Conversion toLowercase, including the SpecialCasing
-/// Final_Sigma rule: GREEK CAPITAL LETTER SIGMA (U+03A3) lowercases to FINAL
-/// SIGMA (U+03C2) when preceded by a cased character (skipping
-/// case-ignorable characters) and not followed by one.
+// final_sigma rule; scans codepoints, not graphemes
 pub fn to_lower_case(s: String) -> String {
-  // Codepoint-based scan: Gleam's string functions are grapheme-aware, so a
-  // Σ followed by a combining mark would be invisible to string.split.
   let cps = string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
   case list.contains(cps, 0x03A3) {
     False -> string.lowercase(s)
@@ -26,7 +11,6 @@ pub fn to_lower_case(s: String) -> String {
   }
 }
 
-/// Split a codepoint list on U+03A3 boundaries.
 fn split_cps_on_sigma(
   cps: List(Int),
   cur: List(Int),
@@ -39,24 +23,15 @@ fn split_cps_on_sigma(
   }
 }
 
-/// Lowercase the parts of a Σ-split codepoint list, joining with σ or ς per
-/// the Final_Sigma context rule. `is_first` is True for the leading part (no
-/// Σ before it).
 fn sigma_assemble(parts: List(List(Int)), is_first: Bool) -> String {
   case parts {
     [] -> ""
     [last] -> lowercase_cps(last)
     [part, ..rest] -> {
-      // Before-context: nearest non-case-ignorable char at the end of this
-      // part; if the part is entirely ignorable, the preceding boundary char
-      // (another Σ, which is cased) decides.
       let preceded = case first_non_ignorable_cased(list.reverse(part)) {
         Some(cased) -> cased
         None -> !is_first
       }
-      // After-context: nearest non-case-ignorable char at the start of the
-      // next part; if that part is entirely ignorable, a following boundary
-      // (another Σ) counts as cased, end-of-string does not.
       let followed = case rest {
         [next, ..more] ->
           case first_non_ignorable_cased(next) {
@@ -74,8 +49,6 @@ fn sigma_assemble(parts: List(List(Int)), is_first: Bool) -> String {
   }
 }
 
-/// Codepoint ints back to a lowercased string. The ints all came from
-/// string.to_utf_codepoints, so utf_codepoint cannot fail here.
 fn lowercase_cps(cps: List(Int)) -> String {
   cps
   |> list.filter_map(string.utf_codepoint)
@@ -94,9 +67,7 @@ fn first_non_ignorable_cased(cps: List(Int)) -> option.Option(Bool) {
   }
 }
 
-/// Approximation of the Unicode Cased property (Lu/Ll/Lt plus cased Nl/So
-/// ranges). Holes inside ranges are unassigned codepoints, so over-matching
-/// them is harmless.
+// approximates the unicode Cased property
 fn is_cased_cp(cp: Int) -> Bool {
   case cp {
     _ if cp >= 0x41 && cp <= 0x5A -> True
@@ -140,8 +111,7 @@ fn is_cased_cp(cp: Int) -> Bool {
   }
 }
 
-/// Approximation of the Unicode Case_Ignorable property: Mn/Me/Cf/Lm/Sk
-/// blocks plus the Word_Break MidLetter/MidNumLet/Single_Quote punctuation.
+// approximates the unicode Case_Ignorable property
 fn is_case_ignorable_cp(cp: Int) -> Bool {
   case cp {
     0x27
@@ -208,8 +178,6 @@ fn is_case_ignorable_cp(cp: Int) -> Bool {
   }
 }
 
-/// Unicode Default Case Conversion toUppercase. No context-sensitive rule
-/// applies at the root locale, so this is the plain per-codepoint mapping.
 pub fn to_upper_case(s: String) -> String {
   string.uppercase(s)
 }

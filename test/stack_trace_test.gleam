@@ -8,9 +8,6 @@ import arc/rt/types.{type JsVal, KStr, classify}
 import gleam/string
 import rt_helpers
 
-/// Parse + compile + run JS source on a fresh linked agent, return the
-/// settled outcome (Ok(value) / Error(thrown)) rendered where it is not the
-/// value itself.
 fn run_js(source: String) -> Result(Result(JsVal, String), String) {
   case parser.parse_script(source) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
@@ -28,7 +25,6 @@ fn run_js(source: String) -> Result(Result(JsVal, String), String) {
   }
 }
 
-/// Run JS whose final expression is a string, return that string.
 fn eval_string(source: String) -> String {
   case run_js(source) {
     Ok(Ok(v)) ->
@@ -46,7 +42,6 @@ fn eval_string(source: String) -> String {
 
 pub fn basic_error_stack_header_test() {
   let s = eval_string("new Error('boom').stack")
-  // First line is "Error: boom"
   assert string.starts_with(s, "Error: boom")
 }
 
@@ -68,9 +63,6 @@ pub fn nested_frames_have_lines_test() {
   assert string.contains(s, "at script:3")
 }
 
-/// A stack captured in a callee before its first statement (a default
-/// parameter initialiser) must not report the caller's line for the callee
-/// frame, whatever kind of function the callee is.
 pub fn prologue_frame_does_not_inherit_caller_line_test() {
   let run = fn(decl, name) {
     let src =
@@ -93,7 +85,6 @@ pub fn prologue_frame_does_not_inherit_caller_line_test() {
 }
 
 pub fn stack_is_non_enumerable_test() {
-  // Object.keys should not include "stack".
   let s =
     eval_string(
       "var e = new Error('x'); Object.keys(e).indexOf('stack') === -1 ? 'absent' : 'present'",
@@ -107,7 +98,6 @@ pub fn stack_trace_limit_default_test() {
 }
 
 pub fn stack_trace_limit_zero_drops_frames_test() {
-  // limit 0 => only the header line, no "    at " frames.
   let s = eval_string("Error.stackTraceLimit = 0; new Error('x').stack")
   assert s == "Error: x"
 }
@@ -119,7 +109,6 @@ pub fn stack_trace_limit_one_keeps_one_frame_test() {
     <> "function outer() { return inner(); }\n"
     <> "outer()"
   let s = eval_string(src)
-  // Exactly one frame: the innermost (inner).
   assert string.contains(s, "at inner")
   assert !string.contains(s, "at outer")
 }

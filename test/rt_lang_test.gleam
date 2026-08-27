@@ -1,5 +1,3 @@
-//// arc/rt/lang: iterator records, CopyDataProperties, template objects.
-
 import arc/rt/builtins as rt_builtins
 import arc/rt/lang
 import arc/rt/obj as rt_obj
@@ -31,7 +29,6 @@ pub fn iterator_record_steps_then_stays_done_test() {
   assert classify(v1) == KNum(JInt(7))
   assert classify(v2) == KNum(JInt(8))
   assert classify(v3) == KUndef
-  // Closing a done record is a no-op either way.
   let st = lang.t_iter_close(st, rec, False)
   let _st = lang.t_iter_close(st, rec, True)
 }
@@ -76,7 +73,6 @@ pub fn template_object_is_cached_per_site_test() {
   let assert KHandle(_) = classify(raw)
   let #(r1, st) = rt_obj.t_get_prop(st, raw, StringKey(types.Index(1)))
   assert classify(r1) == KStr("\\u")
-  // Frozen: writes do not stick.
   let #(ok, _st) =
     rt_obj.t_set_prop(st, t1, StringKey(types.Index(0)), mk_string("z"))
   assert !ok

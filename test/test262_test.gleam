@@ -1,11 +1,3 @@
-/// Full test262 conformance tests with snapshot-based failure tracking.
-///
-/// Bypasses EUnit's per-test reporting to avoid 53K dots.
-/// Instead, shows a progress counter and prints only failures.
-///
-/// Usage:
-///   TEST262=1 gleam test          — run test262 with snapshot
-///   GENERATE_SNAPSHOT=1 gleam test — regenerate snapshot file
 import arc/parser
 import gleam/dynamic
 import gleam/int
@@ -23,8 +15,6 @@ const test_dir = "vendor/test262/test"
 
 const snapshot_path = "test/test262_snapshot.txt"
 
-/// Runs the test262 parse-only conformance suite.
-/// Gated behind TEST262=1 or GENERATE_SNAPSHOT=1 env vars.
 pub fn test262_run_test() {
   let generate = test_runner.get_env_is_truthy("GENERATE_SNAPSHOT")
   let run = test_runner.get_env_is_truthy("TEST262")
@@ -54,7 +44,6 @@ pub fn test262_run_test() {
         list.index_fold(js_files, #(0, 0, []), fn(acc, full_path, idx) {
           let #(pass_count, fail_count, failures) = acc
 
-          // Progress counter every 500 tests
           let Nil = case idx % 500 {
             0 -> print_progress(idx, total, pass_count, fail_count)
             _ -> Nil
@@ -84,9 +73,7 @@ pub fn test262_run_test() {
                   }
                 False ->
                   case in_snapshot, test_result {
-                    // Expected failure
                     True, Error(_) -> #(pass_count + 1, fail_count, failures)
-                    // Unexpected pass
                     True, Ok(_) -> {
                       io.println(
                         "\n  UNEXPECTED PASS: "
@@ -95,9 +82,7 @@ pub fn test262_run_test() {
                       )
                       #(pass_count, fail_count + 1, failures)
                     }
-                    // Expected pass
                     False, Ok(_) -> #(pass_count + 1, fail_count, failures)
-                    // Unexpected failure
                     False, Error(reason) -> {
                       io.println("\n  FAIL: " <> relative <> " — " <> reason)
                       #(pass_count, fail_count + 1, failures)
@@ -110,7 +95,6 @@ pub fn test262_run_test() {
 
       let #(pass_count, fail_count, failures) = result
 
-      // Clear progress line and print final summary
       clear_line()
 
       case generate {
@@ -156,7 +140,6 @@ fn erl_io_format(_fmt: String, _args: List(String)) -> dynamic.Dynamic {
 }
 
 fn clear_line() -> Nil {
-  // \r moves to start of line, ESC[K clears to end of line
   let assert Ok(esc) = string.utf_codepoint(0x1b)
   io.print("\r" <> string.from_utf_codepoints([esc]) <> "[K")
 }
@@ -171,8 +154,6 @@ fn print_progress(current: Int, total: Int, passes: Int, fails: Int) -> Nil {
     ])
   Nil
 }
-
-// --- Parse test logic ---
 
 fn run_parse_test(
   metadata: TestMetadata,

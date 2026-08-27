@@ -1,9 +1,3 @@
-// NOTE FOR OTHER AGENTS: ParseError uses typed variants (like LexError in lexer.gleam).
-// Use parse_error_to_string(e) and parse_error_pos(e) to read errors.
-// Add new variants here instead of using string messages.
-/// Parse error types and formatting.
-/// Split from parser.gleam — the ParseError type, string formatting, and
-/// position extraction live here so parser.gleam can focus on parsing logic.
 import arc/parser/lexer.{
   type TokenKind, Ampersand, AmpersandAmpersand, AmpersandAmpersandEqual,
   AmpersandEqual, Arrow, As, Async, Await, Bang, BangEqual, BangEqualEqual,
@@ -26,25 +20,11 @@ import arc/parser/number
 import arc/parser/regex_error
 import gleam/option.{type Option, None, Some}
 
-/// EVERY variant carries `pos: Int` as its FIRST field, so `parse_error_pos`
-/// is a plain field access and a new variant cannot forget to be listed
-/// anywhere. (Same trick `parser/ast.Expression` plays with `span: Span`.)
-/// Keep it that way when adding a variant.
+// every variant has pos first so error.pos works
 pub type ParseError {
-  /// A lexer error surfaced through the parser. Carries the lexer's own
-  /// typed error rather than a pre-formatted message.
-  ///
-  /// INVARIANT: `pos` MUST equal `lexer.lex_error_pos(error)` — the lexer's
-  /// own offset, never the parser cursor. Build it with `lex_error/1`, which
-  /// is the only thing that can get that right; do not call this constructor
-  /// directly.
+  // build via lex_error only, pos must match the lexer
   LexError(pos: Int, error: lexer.LexError)
-  /// A regular-expression literal failed scanning or ECMAScript Pattern
-  /// validation. Carries `parser/regex_error`'s own typed error; its message
-  /// comes from `regex_error.pattern_error_message`.
-  ///
-  /// INVARIANT: `pos` MUST equal `regex_error.pattern_error_pos(error)`. Build
-  /// it with `regexp_syntax_error/1`; do not call this constructor directly.
+  // build via regexp_syntax_error only
   RegExpSyntaxError(pos: Int, error: regex_error.PatternError)
   ExpectedToken(pos: Int, expected: TokenKind, got: TokenKind)
   ExpectedIdentifier(pos: Int)
@@ -59,16 +39,10 @@ pub type ParseError {
   UnexpectedSuper(pos: Int)
   UnexpectedCloseParen(pos: Int)
   UnexpectedToken(pos: Int, kind: TokenKind)
-  /// A `Number` token whose text `parser/number` refuses (a digit the radix
-  /// does not admit, a radix prefix with no digits, …). The lexer should
-  /// never emit such a token; carrying `number`'s own typed error keeps the
-  /// message in one place.
   MalformedNumericLiteral(pos: Int, error: number.NumberParseError)
   ReturnOutsideFunction(pos: Int)
   BreakOutsideLoopOrSwitch(pos: Int)
   ContinueOutsideLoop(pos: Int)
-  /// `continue L` where L is in scope but does not label an
-  /// IterationStatement (ES2024 §14.9.1 Early Errors).
   ContinueToNonIterationLabel(pos: Int, name: String)
   ReservedWordStrictMode(pos: Int, name: String)
   YieldReservedStrictMode(pos: Int)
@@ -109,8 +83,6 @@ pub type ParseError {
   NewTargetOutsideFunction(pos: Int)
   MissingConstInitializer(pos: Int)
   RestTrailingComma(pos: Int)
-  /// `{...pat}` where `pat` is a nested `[`/`{` pattern — §13.3.3
-  /// BindingRestProperty accepts a BindingIdentifier only.
   InvalidRestBinding(pos: Int)
   ExpectedForHeadSeparator(pos: Int)
   MissingCatchOrFinally(pos: Int)
@@ -140,11 +112,7 @@ pub type ParseError {
   GeneratorDeclLabeled(pos: Int)
   InvalidDestructuringTarget(pos: Int)
   InvalidAssignmentLhs(pos: Int)
-  /// `new.` not followed by `target`. `got` names the offending token when
-  /// there is one to name.
   ExpectedNewTarget(pos: Int, got: Option(String))
-  /// `import.` not followed by `meta`. `got` names the offending token when
-  /// there is one to name.
   ExpectedImportMeta(pos: Int, got: Option(String))
   ExpectedCallOrDotAfterImport(pos: Int)
   ExpectedIdentifierAfterDot(pos: Int)
@@ -180,43 +148,18 @@ pub type ParseError {
   ImportNotTopLevel(pos: Int)
   ExportNotTopLevel(pos: Int)
   UnicodeEscapeInMetaProperty(pos: Int)
-  /// A template literal quasi whose escape sequence cannot be cooked
-  /// (untagged templates only — tagged templates get `undefined` cooked
-  /// values instead).
   InvalidTemplateEscape(pos: Int)
-  /// A template literal's `${` substitution never reached its closing `}`
-  /// (e.g. it was swallowed by an unterminated string or nested template).
   UnterminatedTemplateSubstitution(pos: Int)
-  /// A "use strict" directive in the body of a function whose parameter
-  /// list is non-simple (defaults / destructuring / rest).
   MisplacedUseStrictDirective(pos: Int)
-  /// `using`/`await using` at the top level of a Script (or eval) — early
-  /// error: a UsingDeclaration with goal Script must be contained within a
-  /// Block, ForStatement, ForInOfStatement, FunctionBody, etc.
   UsingAtScriptTopLevel(pos: Int)
-  /// `using`/`await using` directly within a CaseClause/DefaultClause
-  /// statement list.
   UsingInCaseClause(pos: Int)
-  /// `using x;` — using declarations require an initializer.
   UsingMissingInitializer(pos: Int)
-  /// `for (using x in obj)` — using declarations are not allowed in for-in.
   UsingInForIn(pos: Int)
-  /// `using [a] = …` / `using {a} = …` — using declarations may only bind
-  /// identifiers, never destructuring patterns.
   UsingPatternBinding(pos: Int)
-  /// §13.13.1: `??` mixed with `||`/`&&` at the same level without
-  /// parentheses (`a ?? b || c`, `a && b ?? c`, …).
   CoalesceMixedWithLogical(pos: Int)
-  /// §13.6: the left operand of `**` must be an UpdateExpression, so an
-  /// unparenthesized unary/await operand (`-x ** 2`, `delete a ** 2`) is a
-  /// syntax error.
   UnaryBeforeExponentiation(pos: Int)
-  /// §13.3.1.1: a tagged template inside an optional chain
-  /// (`a?.b`x``, `a?.()`x``).
   TemplateInOptionalChain(pos: Int)
-  /// §13.3.12.1: `import.meta` in code whose goal symbol is Script.
   ImportMetaOutsideModule(pos: Int)
-  /// §13.10: a bare `#x` is only ever the left operand of `in`.
   PrivateNameNotInBrandCheck(pos: Int)
 }
 
@@ -416,8 +359,6 @@ pub fn parse_error_to_string(error: ParseError) -> String {
       "'target' in new.target must not contain unicode escape sequences"
     InvalidTemplateEscape(_) -> "Invalid escape sequence"
     UnterminatedTemplateSubstitution(_) -> "Unterminated template substitution"
-    // Rendered like the `UnexpectedToken("use strict", _)` it replaced so
-    // the reported message is unchanged.
     MisplacedUseStrictDirective(_) -> "Unexpected token: use strict"
     UsingAtScriptTopLevel(_) ->
       "'using' declarations are not allowed at the top level of a script"
@@ -440,32 +381,18 @@ pub fn parse_error_to_string(error: ParseError) -> String {
   }
 }
 
-/// The source byte offset the error is reported at. Every variant carries
-/// `pos` as its first field, so this cannot fall out of date.
 pub fn parse_error_pos(error: ParseError) -> Int {
   error.pos
 }
 
-/// Lift a lexer's typed error into a `ParseError` at the position the lexer
-/// itself reports. THE ONLY way to build a `LexError` — going through this
-/// keeps `pos` and `error` from disagreeing.
 pub fn lex_error(err: lexer.LexError) -> ParseError {
   LexError(lexer.lex_error_pos(err), err)
 }
 
-/// Lift a regex pattern error into a `ParseError` at the position the regex
-/// scanner/validator itself reports. THE ONLY way to build a
-/// `RegExpSyntaxError` — going through this keeps `pos` and `error` from
-/// disagreeing.
 pub fn regexp_syntax_error(err: regex_error.PatternError) -> ParseError {
   RegExpSyntaxError(regex_error.pattern_error_pos(err), err)
 }
 
-/// Render a `TokenKind` as it should appear inside a parse-error message.
-/// Private on purpose: `ExpectedToken`/`UnexpectedToken` carry the typed
-/// `TokenKind` and this is called only at render time, so a caller can never
-/// build one of those variants with an arbitrary string that isn't a real
-/// token kind.
 fn token_kind_to_string(kind: TokenKind) -> String {
   case kind {
     Number -> "number"

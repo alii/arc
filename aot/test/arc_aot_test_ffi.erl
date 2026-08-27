@@ -1,8 +1,6 @@
 -module(arc_aot_test_ffi).
 -export([main/0]).
 
-%% Custom test harness — no EUnit, pure BEAM parallelism.
-%% All tests (unit tests + test262 files) run in one flat pool.
 main() ->
     GleamFiles = filelib:wildcard("**/*.gleam", "test"),
     ErlFiles = filelib:wildcard("**/*.erl", "test"),
@@ -15,8 +13,7 @@ main() ->
                         not lists:member(M, Excluded),
                         has_test_functions(M)],
 
-    %% Load everything up front so on-demand code loading is not charged
-    %% against the first test's max_heap_size.
+    %% preload so code loading is not charged to the first test heap
     Ebin = filename:dirname(code:which(?MODULE)),
     ok = code:ensure_modules_loaded(
            [list_to_atom(filename:rootname(B))
@@ -28,9 +25,6 @@ main() ->
             is_test_function(F)]
     end, TestModules),
 
-    %% If TEST262_EXEC=1, add test262 files as individual pool entries
-    %% (setup applies TEST262_FILTER / TEST262_SHARD and precompiles the
-    %% harness). Ctx rides in each entry; the snapshot stays here.
     {Test262Tests, T262} = case os:getenv("TEST262_EXEC") of
         false -> {[], none};
         "" -> {[], none};
@@ -100,11 +94,6 @@ main() ->
         _ -> erlang:halt(1)
     end.
 
-%% --- Helpers ---
-
-%% Bounded-concurrency feeder: spawns up to MaxWorkers tests at a time,
-%% spawning a new one each time a worker finishes. Uses spawn_link +
-%% trap_exit so crashed workers are detected instead of silently lost.
 feeder(Tests, Parent, Ref, MaxWorkers) ->
     process_flag(trap_exit, true),
     FeedRef = make_ref(),
@@ -147,11 +136,6 @@ feeder_loop(Remaining, Parent, Ref, Self, FeedRef, Active, PidMap) ->
             end
     end.
 
-%% A test262 entry runs test262_aot_exec:run_file/3 under a module-name
-%% prefix minted here, so the modules its variants load (<Base>_0/_1) can be
-%% unloaded afterwards even when the worker was killed mid-run. Its result
-%% is {t262, File, Expected, Outcome}; a timeout or heap kill is a FAIL
-%% outcome, not a pool error.
 spawn_worker({Name, {t262, Ctx, File, Expected}}, Parent, Ref, Feeder, FeedRef) ->
     spawn_link(fun() ->
         Base = <<"arc_aot_t262_",
@@ -178,8 +162,6 @@ spawn_worker({Name, Fun}, Parent, Ref, Feeder, FeedRef) ->
         Feeder ! {FeedRef, done}
     end).
 
-%% Run Fun in a linked sub-process under the entry's heap cap and timeout.
-%% {ok, Value} | {error, {Class, Reason, Stack}}.
 run_capped(Name, Fun) ->
     Self = self(),
     TestRef = make_ref(),
@@ -211,10 +193,6 @@ take(List, 0, Acc) -> {lists:reverse(Acc), List};
 take([], _N, Acc) -> {lists:reverse(Acc), []};
 take([H|T], N, Acc) -> take(T, N - 1, [H | Acc]).
 
-%% Results accumulates the test262 {test_result, File, Expected, Outcome}
-%% records for finish/2. A test262 entry counts as failed (Mis) for the
-%% progress line only when it mismatches the snapshot; those are printed at
-%% once so they survive a cancelled job.
 collect(0, _Ref, Passed, Failed, _Mis, Results, _Total, _Pending, _T262) ->
     {Passed, Failed, Results};
 collect(N, Ref, Passed, Failed, Mis, Results, Total, Pending, T262) ->
@@ -317,17 +295,12 @@ has_test_functions(Module) ->
 is_test_function(Name) ->
     lists:suffix("_test", atom_to_list(Name)).
 
-%% Per-entry timeout. Unit tests get 10s; a test262 file compiles up to two
-%% variants through the BEAM compiler in-process, so it gets 60s.
 timeout_for(Name) ->
     case binary:match(Name, <<"test262/">>) of
         nomatch -> 10000;
         _ -> 60000
     end.
 
-%% Per-test heap cap (words). emit_2core_test:* diff-tests and test262
-%% entries run a full JS→IR→Core→BEAM compile in-process; the beam compiler
-%% alone can brush the default 80MB cap on the longer fixtures.
 max_heap_for(Name) ->
     case binary:match(Name, [<<"emit_2core_test:">>, <<"test262/">>]) of
         nomatch -> 10000000;

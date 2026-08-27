@@ -1,9 +1,3 @@
-//// Temporal.PlainTime (proposal-temporal §4): a wall-clock time with
-//// nanosecond precision and no date, time zone or calendar.
-////
-//// Also owns the wall-clock abstract operations the date-time types share:
-//// ToTemporalTime, the time property-bag fields, RegulateTime and AddTime.
-
 import arc/internal/int_math.{floor_div, floor_mod as math_mod}
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
@@ -43,11 +37,6 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-// ============================================================================
-// Init — Temporal.PlainTime constructor + prototype
-// ============================================================================
-
-/// The time getters, in prototype-registration order.
 pub const all_time_getters = [
   TgHour,
   TgMinute,
@@ -57,9 +46,6 @@ pub const all_time_getters = [
   TgNanosecond,
 ]
 
-/// Registration specs for `temporal.init_temporal_type`: the constructor
-/// token, `from`/`compare`, the six getters and the prototype methods, in
-/// prototype-registration order.
 pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
   TemporalN(TemporalPlainTimeCtor(protos:))
 }
@@ -108,8 +94,6 @@ fn static_name(s: TemporalStaticName) -> String {
   }
 }
 
-/// JS-facing name of a wall-clock getter — shared by PlainDateTime and
-/// ZonedDateTime, which register the same six.
 pub fn time_getter_name(g: TemporalTimeGetter) -> String {
   case g {
     TgHour -> "hour"
@@ -137,12 +121,6 @@ pub fn plain_time_method_name(m: PlainTimeMethod) -> String {
   }
 }
 
-// ============================================================================
-// Constructor and statics
-// ============================================================================
-
-/// new Temporal.PlainTime(h, mi, s, ms, us, ns) — all optional, default 0.
-/// The caller applies NewTarget's prototype (OrdinaryCreateFromConstructor).
 pub fn ctor(
   st: Agent,
   protos: TemporalProtos,
@@ -161,7 +139,6 @@ pub fn ctor(
   }
 }
 
-/// Temporal.PlainTime.from / compare.
 pub fn static(
   st: Agent,
   name: TemporalStaticName,
@@ -184,10 +161,6 @@ pub fn static(
   }
 }
 
-// ============================================================================
-// Getters
-// ============================================================================
-
 pub fn getter(
   st: Agent,
   g: TemporalTimeGetter,
@@ -198,7 +171,6 @@ pub fn getter(
   #(time_field(t, g), st)
 }
 
-/// One wall-clock component as a JS number — shared by the date-time types.
 pub fn time_field(t: TimeRec, g: TemporalTimeGetter) -> JsVal {
   let n = case g {
     TgHour -> t.hour
@@ -210,10 +182,6 @@ pub fn time_field(t: TimeRec, g: TemporalTimeGetter) -> JsVal {
   }
   mk_number(JInt(n))
 }
-
-// ============================================================================
-// Methods
-// ============================================================================
 
 pub fn method(
   st: Agent,
@@ -298,7 +266,6 @@ pub fn method(
   }
 }
 
-/// PlainTime.prototype.until/since: DifferenceTemporalPlainTime.
 fn time_until_since(
   st: Agent,
   protos: TemporalProtos,
@@ -329,11 +296,6 @@ fn time_until_since(
   }
 }
 
-// ============================================================================
-// Wall-clock abstract operations (shared with PlainDateTime / ZonedDateTime)
-// ============================================================================
-
-/// Time fields read from a property bag (all optional).
 pub type TimeFields {
   TimeFields(
     hour: Option(Int),
@@ -347,7 +309,6 @@ pub type TimeFields {
 
 pub const no_time_fields = TimeFields(None, None, None, None, None, None)
 
-/// Fill a TimeRec from optional fields, defaulting each component to `base`.
 pub fn time_fields_apply(f: TimeFields, base: TimeRec) -> TimeRec {
   TimeRec(
     hour: option.unwrap(f.hour, base.hour),
@@ -359,8 +320,6 @@ pub fn time_fields_apply(f: TimeFields, base: TimeRec) -> TimeRec {
   )
 }
 
-/// Read time fields from a bag in spec (alphabetical) order: hour,
-/// microsecond, millisecond, minute, nanosecond, second.
 pub fn read_time_fields(st: Agent, bag: Handle) -> #(TimeFields, Agent) {
   let #(hour, st) = read_int_field(st, bag, "hour")
   let #(us, st) = read_int_field(st, bag, "microsecond")
@@ -371,7 +330,6 @@ pub fn read_time_fields(st: Agent, bag: Handle) -> #(TimeFields, Agent) {
   #(TimeFields(hour:, minute:, second:, ms:, us:, ns:), st)
 }
 
-/// RegulateTime: reject an invalid time or clamp each component.
 pub fn regulate_time(t: TimeRec, overflow: Overflow) -> Result(TimeRec, TErr) {
   case overflow {
     Reject ->
@@ -391,7 +349,6 @@ pub fn regulate_time(t: TimeRec, overflow: Overflow) -> Result(TimeRec, TErr) {
   }
 }
 
-/// ToTemporalTime(item [, options]).
 pub fn to_temporal_time(
   st: Agent,
   item: JsVal,
@@ -452,9 +409,7 @@ pub fn to_temporal_time(
   }
 }
 
-/// TemporalTimeString — time-only (optional T prefix) or full date-time.
 pub fn parse_time_string(s: String) -> Result(TimeRec, TErr) {
-  // Try a full date-time string first.
   case parse_iso_datetime_string(s) {
     Some(p) ->
       case p.offset {
@@ -487,7 +442,6 @@ pub fn parse_time_string(s: String) -> Result(TimeRec, TErr) {
 
 fn parse_time_with_annotations(s: String) -> Option(TimeRec) {
   use #(t, rest) <- option.then(parse_time_part(s))
-  // Optional offset (not Z).
   let rest = case parse_offset_part(rest) {
     Some(#(Zulu, _)) -> "###invalid###"
     Some(#(_, r)) -> r
@@ -499,18 +453,14 @@ fn parse_time_with_annotations(s: String) -> Option(TimeRec) {
     None,
     False,
   ))
-  // The calendar annotation value is not validated for time-only strings
-  // (ToTemporalTime ignores it entirely).
   case rest2 {
     "" -> Some(t)
     _ -> None
   }
 }
 
-/// A time-only string that also matches YYYY-MM / MMDD / MM-DD date syntax is
-/// ambiguous and must be rejected (spec: ParseISODateTime ambiguity rules).
+// time string that also matches date syntax is ambiguous, reject
 fn time_string_is_ambiguous(s: String) -> Bool {
-  // Strip annotations for the check.
   let base = case string.split_once(s, "[") {
     Ok(#(b, _)) -> b
     Error(Nil) -> s
@@ -518,8 +468,6 @@ fn time_string_is_ambiguous(s: String) -> Bool {
   is_year_month_like(base) || is_month_day_like(base)
 }
 
-/// Property bag → TimeRec. Alphabetical: hour, microsecond, millisecond,
-/// minute, nanosecond, second. At least one required.
 pub fn time_from_bag(
   st: Agent,
   bag: Handle,
@@ -540,8 +488,6 @@ pub fn time_from_bag(
   }
 }
 
-/// AddTime: add nanoseconds to a wall-clock time → #(day carry, balanced
-/// time).
 pub fn add_time(t: TimeRec, add_ns: Int) -> #(Int, TimeRec) {
   let total = time_to_ns(t) + add_ns
   let days = floor_div(total, ns_per_day)

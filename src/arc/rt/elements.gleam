@@ -1,7 +1,3 @@
-//// Operations on `JsElements`, the tri-representation array element store
-//// (the subset the MOP and the buffer family need). The type itself lives
-//// in `arc/rt/types`.
-
 import arc/internal/tree_array
 import arc/rt/types.{type JsElements, type JsVal, Dense, NoElements, Sparse}
 import gleam/dict.{type Dict}
@@ -9,20 +5,16 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option}
 
-/// After this many empty slots between the current dense end and a new
-/// index, promote to sparse (arc `elements.gleam:25`).
+// max hole run before dense promotes to sparse
 const max_gap = 1024
 
-/// The FFI `:array` backing tops out here (arc `limits.gleam:27`).
+// ffi :array backing tops out here
 const max_dense_index = 10_000_000
 
-/// Empty elements. Zero allocation — every non-array object starts here.
 pub fn new() -> JsElements {
   NoElements
 }
 
-/// Dense elements from a list of values; `[]` stays `NoElements`. A
-/// `types.mk_hole()` item is an absent index.
 pub fn from_list(items: List(JsVal)) -> JsElements {
   case items {
     [] -> NoElements
@@ -30,12 +22,10 @@ pub fn from_list(items: List(JsVal)) -> JsElements {
   }
 }
 
-/// Read element at `i`, `undefined` for a hole or absent index.
 pub fn get(elements: JsElements, i: Int) -> JsVal {
   get_option(elements, i) |> option.unwrap(types.mk_undefined())
 }
 
-/// Read element at `i`. `None` for a hole or absent index.
 pub fn get_option(elements: JsElements, i: Int) -> Option(JsVal) {
   case elements {
     NoElements -> option.None
@@ -44,14 +34,10 @@ pub fn get_option(elements: JsElements, i: Int) -> Option(JsVal) {
   }
 }
 
-/// True when index `i` holds a present element.
 pub fn has(elements: JsElements, i: Int) -> Bool {
   option.is_some(get_option(elements, i))
 }
 
-/// True when no element is present at any index. O(k) worst case, O(1) for
-/// the common NoElements case. Used by the array-mutator fast path to verify
-/// prototype-chain objects carry no indexed elements.
 pub fn is_empty(elements: JsElements) -> Bool {
   case elements {
     NoElements -> True
@@ -61,8 +47,6 @@ pub fn is_empty(elements: JsElements) -> Bool {
   }
 }
 
-/// Write `v` at `i`, promoting NoElements to Dense or Dense to Sparse as
-/// needed.
 pub fn set(elements: JsElements, i: Int, v: JsVal) -> JsElements {
   case elements {
     NoElements -> set(Dense(tree_array.new(types.mk_hole())), i, v)
@@ -77,7 +61,6 @@ pub fn set(elements: JsElements, i: Int, v: JsVal) -> JsElements {
   }
 }
 
-/// Delete element at `i` (creates a hole). Stays dense.
 pub fn delete(elements: JsElements, i: Int) -> JsElements {
   case elements {
     NoElements -> NoElements
@@ -86,8 +69,6 @@ pub fn delete(elements: JsElements, i: Int) -> JsElements {
   }
 }
 
-/// Write Some(val) as a present element, None as a hole. Internal helper for
-/// the bulk move/reverse operations below, which must preserve holes.
 fn put_option(elements: JsElements, i: Int, val: Option(JsVal)) -> JsElements {
   case val {
     option.Some(v) -> set(elements, i, v)
@@ -95,14 +76,7 @@ fn put_option(elements: JsElements, i: Int, val: Option(JsVal)) -> JsElements {
   }
 }
 
-/// Move elements in [from, len) by a SIGNED `delta`: negative shifts them
-/// toward index 0, positive away from it. Holes are preserved (a hole source
-/// deletes the target slot). This is `copy_within` with a computed
-/// destination, so the overlapping in-place move picks its own iteration
-/// direction from the sign of `delta`. The vacated slots are left untouched;
-/// callers truncate to the new length afterwards. Used by the
-/// shift/unshift/splice fast paths so the whole move is one heap read + one
-/// heap write instead of 3-4 heap ops per element.
+// signed delta, holes preserved, caller truncates after
 pub fn move_range(
   elements: JsElements,
   from: Int,
@@ -112,7 +86,6 @@ pub fn move_range(
   copy_within(elements, from, from + delta, len - from)
 }
 
-/// Reverse elements [0, len) in place, holes included.
 pub fn reverse_range(elements: JsElements, len: Int) -> JsElements {
   reverse_loop(elements, 0, len - 1)
 }
@@ -129,8 +102,6 @@ fn reverse_loop(elements: JsElements, lo: Int, hi: Int) -> JsElements {
   }
 }
 
-/// Set every index in [start, end) to `val` (fills holes with own elements,
-/// matching the spec's per-index Set on the no-overrides fast path).
 pub fn fill_range(
   elements: JsElements,
   start: Int,
@@ -143,9 +114,6 @@ pub fn fill_range(
   }
 }
 
-/// Copy [from, from + count) onto [to, to + count), holes preserved. Picks
-/// the iteration direction so overlapping ranges copy correctly (same trick
-/// as memmove). Used by the copyWithin fast path.
 pub fn copy_within(
   elements: JsElements,
   from: Int,
@@ -194,7 +162,6 @@ fn copy_backward(
   }
 }
 
-/// Write `vals` at consecutive indices starting at `i`.
 pub fn write_list(
   elements: JsElements,
   i: Int,
@@ -206,7 +173,6 @@ pub fn write_list(
   }
 }
 
-/// Present indices in ascending order. Skips holes.
 pub fn indices(elements: JsElements) -> List(Int) {
   case elements {
     NoElements -> []
@@ -217,7 +183,6 @@ pub fn indices(elements: JsElements) -> List(Int) {
   }
 }
 
-/// Drop every element at index >= `new_len`.
 pub fn truncate(elements: JsElements, new_len: Int) -> JsElements {
   case elements {
     NoElements -> NoElements

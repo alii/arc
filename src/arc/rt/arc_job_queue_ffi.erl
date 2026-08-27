@@ -1,6 +1,3 @@
-%% Backing store for the microtask job queue (`JobQueue` in
-%% src/arc/rt/types.gleam): Erlang's `queue` module (two-list
-%% Okasaki FIFO). O(1) amortized in/out vs a List+append O(n) per enqueue.
 -module(arc_job_queue_ffi).
 -export([job_queue_new/0, job_queue_push/2, job_queue_pop/1,
          job_queue_is_empty/1, job_queue_to_list/1]).

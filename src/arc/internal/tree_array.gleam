@@ -1,61 +1,32 @@
-/// Functional array with O(log n) get/set — Erlang's `array` module.
-///
-/// Used for JS array elements (DenseElements). Unlike tuple_array:
-/// - set is O(log n) instead of O(n) — sequential append is n·log(n) not n²
-/// - ~5× memory overhead vs tuple, ~15× less than dict
-/// - get is O(log n) instead of O(1), but the constant is tiny
-///
-/// tuple_array remains for bytecode/locals/constants where reads dominate
-/// and writes are rare.
 import gleam/option.{type Option}
 
 pub type TreeArray(a)
 
-/// Empty array with given default value for unset slots.
 @external(erlang, "arc_tree_array_ffi", "tree_array_new")
 pub fn new(default: a) -> TreeArray(a)
 
-/// Build from list. O(n).
 @external(erlang, "arc_tree_array_ffi", "tree_array_from_list")
 pub fn from_list(items: List(a), default: a) -> TreeArray(a)
 
-/// Read as Option — None for unset slots and out-of-bounds/negative
-/// indices. O(log n). The only read path: there is deliberately no
-/// silent-default variant a caller could reach with a negative index.
+/// none for unset, negative or out of bounds
 @external(erlang, "arc_tree_array_ffi", "tree_array_get_option")
 pub fn get_option(index: Int, arr: TreeArray(a)) -> Option(a)
 
-/// Write at index, growing the array if needed. O(log n).
-///
-/// Contract: `index` must be >= 0, and the caller is responsible for the
-/// dense-range policy — `elements.set` promotes to the sparse representation
-/// at `limits.max_dense_index` and never calls this past it. An
-/// out-of-contract index crashes (function_clause in the FFI); it is NOT a
-/// silent no-op, so a violation can never silently lose a write.
+/// negative index crashes, never a silent no-op
 @external(erlang, "arc_tree_array_ffi", "tree_array_set")
 pub fn set(index: Int, value: a, arr: TreeArray(a)) -> TreeArray(a)
 
-/// Largest set index + 1. O(1).
 @external(erlang, "arc_tree_array_ffi", "tree_array_size")
 pub fn size(arr: TreeArray(a)) -> Int
 
-/// Shrink to new_size. Unsets all indices >= new_size. O(log n).
-///
-/// Contract: `new_size` must be >= 0 (callers only pass JS array lengths).
-/// A negative size crashes (function_clause in the FFI) rather than
-/// silently returning the array unchanged.
+/// negative size crashes
 @external(erlang, "arc_tree_array_ffi", "tree_array_resize")
 pub fn resize(arr: TreeArray(a), new_size: Int) -> TreeArray(a)
 
-/// Reset slot to default value (creates a hole). O(log n).
-///
-/// Contract: `index` must be >= 0. Resetting past the end is a legitimate
-/// no-op (deleting an index the array never grew to); a negative index
-/// crashes (function_clause in the FFI), like `set` and `resize`.
+/// past the end is a no-op, negative crashes
 @external(erlang, "arc_tree_array_ffi", "tree_array_reset")
 pub fn reset(index: Int, arr: TreeArray(a)) -> TreeArray(a)
 
-/// Fold over non-default entries only, in ascending index order. Skips holes.
-/// O(k) where k is the number of set entries.
+/// set entries only, ascending
 @external(erlang, "arc_tree_array_ffi", "tree_array_sparse_fold")
 pub fn sparse_fold(f: fn(Int, a, b) -> b, initial: b, arr: TreeArray(a)) -> b

@@ -1,6 +1,3 @@
-/// Token classification and conversion helpers.
-/// Pure functions that map TokenKind → Bool/String/AST enums.
-/// Split from parser.gleam to reduce file size.
 import arc/parser/ast
 import arc/parser/lexer.{
   type TokenKind, Ampersand, AmpersandAmpersand, AmpersandAmpersandEqual,
@@ -19,8 +16,6 @@ import arc/parser/lexer.{
 }
 import gleam/option.{type Option, None, Some}
 
-/// Returns True for keywords that are ALWAYS reserved and cannot be used as
-/// binding identifiers in any context (strict or sloppy).
 pub fn is_reserved_word_kind(kind: TokenKind) -> Bool {
   case kind {
     Break
@@ -62,8 +57,6 @@ pub fn is_reserved_word_kind(kind: TokenKind) -> Bool {
   }
 }
 
-/// Contextual keywords that can be used as identifiers in non-strict mode.
-/// These are NOT reserved words — they have special meaning only in specific contexts.
 pub fn is_contextual_keyword(kind: TokenKind) -> Bool {
   case kind {
     Let | Static | Yield | Await | Async | From | As | Of | Undefined -> True
@@ -71,7 +64,6 @@ pub fn is_contextual_keyword(kind: TokenKind) -> Bool {
   }
 }
 
-/// Check if a token kind is an identifier or any keyword usable as identifier.
 pub fn is_identifier_or_keyword(kind: TokenKind) -> Bool {
   kind == Identifier || is_keyword_as_identifier(kind)
 }
@@ -80,32 +72,17 @@ pub fn is_keyword_as_identifier(kind: TokenKind) -> Bool {
   is_reserved_word_kind(kind) || is_contextual_keyword(kind)
 }
 
-/// A binary/logical operator token's Pratt precedence together with the AST
-/// operator it produces. Keeping both in ONE value (returned by
-/// `binary_operator`) makes it impossible for the precedence table and the
-/// token→operator mapping to drift apart: a token either is an operator (and
-/// carries both facts) or it isn't (`None`).
 pub type BinaryOperator {
   BinaryOperator(precedence: Int, op: BinOrLogical)
 }
 
-/// What kind of AST a binary-operator token builds. `Coalesce` is split out
-/// from `ShortCircuit` even though both produce a `LogicalExpression`, because
-/// §13.13.1 forbids mixing `??` with `||`/`&&` without parentheses — the
-/// separate variant forces `parse_binary_rhs` to have a distinct arm for it,
-/// so that early error can never be silently forgotten.
 pub type BinOrLogical {
   Binary(ast.BinaryOp)
-  /// `&&` / `||` — the truthy short-circuit operators.
   ShortCircuit(ast.LogicalOp)
-  /// `??` — nullish coalescing.
+  // separate so mixing ?? with || && errors (§13.13.1)
   Coalesce
 }
 
-/// The single table of binary/logical operator tokens.
-/// Returns `None` for every token that is not a binary operator, and for `in`
-/// when `allow_in` is False (a `for (a in b;;)` head must not treat `in` as a
-/// relational operator).
 pub fn binary_operator(
   kind: TokenKind,
   allow_in: Bool,
@@ -145,8 +122,6 @@ pub fn binary_operator(
   }
 }
 
-/// The single table of assignment-operator tokens: `Some(op)` for `=` and
-/// every compound/logical assignment, `None` for every other token.
 pub fn assignment_op(kind: TokenKind) -> Option(ast.AssignmentOp) {
   case kind {
     Equal -> Some(ast.Assign)

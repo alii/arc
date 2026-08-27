@@ -15,7 +15,6 @@ fn get_script_args() -> List(String)
 @external(erlang, "erlang", "halt")
 fn halt(code: Int) -> a
 
-/// Why argv did not name a runnable command.
 pub type UsageError {
   MissingFile(command: String)
   MissingOutputPath
@@ -23,7 +22,6 @@ pub type UsageError {
   UnknownCommand(String)
 }
 
-/// What argv asked for.
 pub type Command {
   Run(path: String)
   Build(path: String, out: Option(String), core: Bool, ir: Bool)
@@ -31,21 +29,16 @@ pub type Command {
   Usage(reason: UsageError)
 }
 
-/// Everything a non-interactive command can fail with. `main` renders it once
-/// and picks the exit code from it.
 pub type CliError {
   BadUsage(reason: UsageError)
   ReadFailed(path: String, error: simplifile.FileError)
   WriteFailed(path: String, error: simplifile.FileError)
   CompileFailed(path: String, error: compile.CompileError)
   LoadFailed(reason: String)
-  /// The script ran but threw; `report` is the rendered `Uncaught ...` line.
   ScriptThrew(report: String)
-  /// The compiled module raised a non-JS error.
   Crashed(reason: String)
 }
 
-/// Pure argv → `Command`.
 pub fn parse_args(args: List(String)) -> Command {
   case args {
     [] | ["help", ..] | ["--help", ..] | ["-h", ..] -> Help
@@ -106,7 +99,6 @@ pub fn format_cli_error(err: CliError) -> String {
   }
 }
 
-/// Usage errors and module-goal sources exit 2; everything else 1.
 pub fn exit_code(err: CliError) -> Int {
   case err {
     BadUsage(_) | CompileFailed(_, compile.ModuleGoalUnsupported) -> 2
@@ -114,8 +106,6 @@ pub fn exit_code(err: CliError) -> Int {
   }
 }
 
-/// The BEAM module name a file compiles to: its basename without extension,
-/// with anything outside [A-Za-z0-9_] replaced by `_`.
 pub fn module_name_for(path: String) -> String {
   let base = case list.last(string.split(path, "/")) {
     Ok(base) -> base
@@ -157,7 +147,6 @@ fn read_source(path: String) -> Result(String, CliError) {
   |> result.map_error(fn(err) { ReadFailed(path:, error: err) })
 }
 
-/// `arc_aot run <file>`: compile, load, run `js_main`, drain microtasks.
 fn run_file(path: String, hooks: HostHooks) -> Result(Nil, CliError) {
   use source <- result.try(read_source(path))
   let name = "arc_aot_js_" <> module_name_for(path)
@@ -176,7 +165,6 @@ fn run_file(path: String, hooks: HostHooks) -> Result(Nil, CliError) {
   }
 }
 
-/// `arc_aot build <file>`: write the .beam (and optionally .core / .ir).
 fn build_file(
   path: String,
   out: Option(String),
@@ -233,8 +221,6 @@ fn strip_suffix(path: String, suffix: String) -> String {
   }
 }
 
-/// Run one command against `hooks` (the `console` sink and clocks the
-/// script sees). `Help` prints usage and succeeds.
 pub fn execute(command: Command, hooks: HostHooks) -> Result(Nil, CliError) {
   case command {
     Help -> {

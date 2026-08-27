@@ -1,15 +1,3 @@
-//// `rt_builtins/promise` — %Promise% constructor + prototype + statics
-//// (SPEC §7.M6 builtin-control §27.2). Port of arc `builtins/promise.gleam`
-//// (init) + arc `exec/promises.gleam` (dispatch bodies), re-expressed over
-//// threaded `Agent`. Promise state-machine primitives
-//// (`t_new_promise_capability` / `t_promise_then` / `t_promise_resolve` /
-//// `t_promise_reject` / `t_enqueue_job` / `promise_resolve_static`) live in
-//// `rt_async`; this module only builds the JS-visible objects and routes
-//// dispatch through them.
-////
-//// **Return-tuple order is `#(V, St')` — value FIRST (R1).** Errors go through
-//// `ops.new_error` + `t_throw` (D7).
-
 import arc/internal/tree_array
 import arc/rt/async as rt_async
 import arc/rt/builtins/common
@@ -42,11 +30,6 @@ import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 
-// ── init (arc builtins/promise.gleam:22-72) ─────────────────────────────────
-
-/// §27.2.4/§27.2.5 — Promise constructor + prototype setup.
-/// Instance methods: then/catch/finally. Statics: resolve/reject/all/race/
-/// allSettled/any. `[@@toStringTag]` = "Promise", `[@@species]` returns `this`.
 pub fn init(
   st: Agent,
   object_proto: Handle,
@@ -66,7 +49,6 @@ pub fn init(
       #("race", PromiseN(PromiseRaceStatic), 1),
       #("allSettled", PromiseN(PromiseAllSettledStatic), 1),
       #("any", PromiseN(PromiseAnyStatic), 1),
-      // Await-dictionary proposal: keyed promise combinators.
       #("allKeyed", PromiseN(PromiseAllKeyedStatic), 1),
       #("allSettledKeyed", PromiseN(PromiseAllSettledKeyedStatic), 1),
     ])
@@ -86,11 +68,6 @@ pub fn init(
   #(bt, st)
 }
 
-// ── dispatch ────────────────────────────────────────────────────────────────
-
-/// Route a `PromiseNative` token to its body. `PromiseConstructor` handles
-/// BOTH `new Promise(executor)` and (per §27.2.3.1 step 1) throws when called
-/// without `new` — the split happens in `dispatch_construct` below.
 pub fn dispatch(
   st: Agent,
   n: PromiseNative,
@@ -99,13 +76,9 @@ pub fn dispatch(
 ) -> #(JsVal, Agent) {
   case n {
     PromiseConstructor ->
-      // §27.2.3.1 step 1: NewTarget is undefined → TypeError. Reaching here
-      // means [[Call]], not [[Construct]] (dispatch_native_construct routes
-      // there separately).
       throw_type_error(st, "Promise constructor requires 'new'")
     PromiseThen -> then(st, this, args)
     PromiseCatch -> {
-      // §27.2.5.1: Return ? Invoke(this, "then", « undefined, onRejected »).
       let on_rejected = first_arg_or_undefined(args)
       t_call_method(st, this, StringKey(Named("then")), [
         mk_undefined(),
@@ -122,7 +95,6 @@ pub fn dispatch(
     PromiseAllKeyedStatic -> keyed_combinator(st, this, args, settled: False)
     PromiseAllSettledKeyedStatic ->
       keyed_combinator(st, this, args, settled: True)
-    // ── minted-closure natives ───────────────────────────────────────────────
     PromiseCapabilityExecutor(resolve_box:, reject_box:) ->
       capability_executor(st, resolve_box, reject_box, args)
     PromiseAllResolveElement(
@@ -194,22 +166,15 @@ pub fn dispatch(
   }
 }
 
-/// `new Promise(executor)` — §27.2.3.1. Called via `dispatch_native_construct`.
-/// Returns the promise object handle, created from `new_target`'s prototype
-/// so subclass instances get the subclass prototype.
 pub fn dispatch_construct(
   st: Agent,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   let executor = first_arg_or_undefined(args)
-  // Step 2: If IsCallable(executor) is false, throw TypeError.
   case is_callable(st, executor) {
     False -> throw_type_error(st, "Promise resolver is not a function")
     True -> {
-      // Steps 3-7: OrdinaryCreateFromConstructor(NewTarget,
-      // "%Promise.prototype%") + internal slots; step 8:
-      // CreateResolvingFunctions.
       let #(proto, st) =
         rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
           r.promise.prototype
@@ -219,11 +184,8 @@ pub fn dispatch_construct(
         rt_async.alloc_resolving_fns(st, promise_h)
       let resolve = mk_object(resolve_h)
       let reject = mk_object(reject_h)
-      // Step 9: Completion(Call(executor, undefined, « resolve, reject »)).
       let #(outcome, st) =
         t_call(st, executor, mk_undefined(), [resolve, reject])
-      // Step 10: abrupt → Call(reject, undefined, « thrown ») — via the reject
-      // FUNCTION so [[AlreadyResolved]] gates a resolve()-then-throw executor.
       let st = case outcome {
         NormalCompletion(_) -> st
         ThrowCompletion(e) -> {
@@ -236,26 +198,18 @@ pub fn dispatch_construct(
   }
 }
 
-// ── §27.2.5.4 Promise.prototype.then ────────────────────────────────────────
-
 fn then(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(on_fulfilled, on_rejected) = two_args_or_undefined(args)
-  // Step 2: IsPromise(this).
   let promise_h = require_promise(st, this, "Promise.prototype.then")
-  // Step 3: C = ? SpeciesConstructor(promise, %Promise%).
   let #(c, st) = species_constructor(st, this)
   case c == mk_object(st.realm.promise.constructor) {
-    // Steps 4-5 for NewPromiseCapability(%Promise%): its resolving functions
-    // never reach user code, so the child promise is the reaction's target.
     True -> {
       let #(child, st) =
         rt_async.t_promise_then(st, promise_h, on_fulfilled, on_rejected)
       #(mk_object(child), st)
     }
     False -> {
-      // Step 4: resultCapability = ? NewPromiseCapability(C).
       let #(cap, st) = new_capability_from_constructor(st, c)
-      // Step 5: PerformPromiseThen(promise, onFulfilled, onRejected, cap).
       let st =
         rt_async.t_perform_then(
           st,
@@ -270,18 +224,13 @@ fn then(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// ── §27.2.5.3 Promise.prototype.finally ─────────────────────────────────────
-
 fn finally(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let on_finally = first_arg_or_undefined(args)
-  // Steps 1-2: this must be an Object.
   case classify(this) {
     KHandle(_) -> Nil
     _ -> throw_type_error(st, "Promise.prototype.finally called on non-object")
   }
-  // Step 3: C = ? SpeciesConstructor(promise, %Promise%).
   let #(c, st) = species_constructor(st, this)
-  // Steps 5-6: wrap onFinally if callable; else pass through as-is.
   let #(then_finally, catch_finally, st) = case is_callable(st, on_finally) {
     False -> #(on_finally, on_finally, st)
     True -> {
@@ -306,15 +255,12 @@ fn finally(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
       #(tf, cf, st)
     }
   }
-  // Step 7: Return ? Invoke(promise, "then", « thenFinally, catchFinally »).
   t_call_method(st, this, StringKey(Named("then")), [
     then_finally,
     catch_finally,
   ])
 }
 
-/// §27.2.5.3.1/.2 Then/Catch Finally Function — `onFinally()`, then chain
-/// PromiseResolve(C, result).then(thunk-or-thrower(original)).
 fn finally_wrapper(
   st: Agent,
   args: List(JsVal),
@@ -323,22 +269,15 @@ fn finally_wrapper(
   constructor: JsVal,
 ) -> #(JsVal, Agent) {
   let original = first_arg_or_undefined(args)
-  // Step 1: result = ? Call(onFinally, undefined).
   let #(result, st) = t_call_checked(st, on_finally, mk_undefined(), [])
-  // Step 2: p = ? PromiseResolve(C, result).
   let #(p, st) = promise_resolve(st, constructor, result)
-  // Step 4: handler = CreateBuiltinFunction(() => original | throw original,
-  // 0, "", « »).
   let #(handler, st) = case rejecting {
     False ->
       alloc_closure_n(st, PromiseN(PromiseFinallyValueThunk(original)), 0)
     True -> alloc_closure_n(st, PromiseN(PromiseFinallyThrower(original)), 0)
   }
-  // Step 5: Return ? Invoke(p, "then", « handler »).
   t_call_method(st, p, StringKey(Named("then")), [handler])
 }
-
-// ── §27.2.4.7 Promise.resolve / §27.2.4.6 Promise.reject ────────────────────
 
 fn resolve_static(
   st: Agent,
@@ -346,17 +285,13 @@ fn resolve_static(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let val = first_arg_or_undefined(args)
-  // Step 2: If C is not an Object, throw a TypeError.
   case classify(this) {
     KHandle(_) -> promise_resolve(st, this, val)
     _ -> throw_type_error(st, "Promise.resolve called on non-object")
   }
 }
 
-/// §27.2.4.7.1 PromiseResolve(C, x): `x` itself when it is a promise whose
-/// `constructor` is C, else a new C capability resolved with `x`.
 fn promise_resolve(st: Agent, c: JsVal, x: JsVal) -> #(JsVal, Agent) {
-  // Step 1: IsPromise(x) and SameValue(x.constructor, C) → return x.
   case rt_async.as_promise(st, x) {
     Some(_) -> {
       let #(ctor, st) =
@@ -370,14 +305,12 @@ fn promise_resolve(st: Agent, c: JsVal, x: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// PromiseResolve steps 2-4: NewPromiseCapability(C), resolve it with `val`.
 fn resolve_with_constructor(
   st: Agent,
   c: JsVal,
   val: JsVal,
 ) -> #(JsVal, Agent) {
   case c == mk_object(st.realm.promise.constructor) {
-    // Intrinsic %Promise%: the capability's resolve function is unobservable.
     True -> {
       let #(h, st) = rt_async.t_new_promise(st)
       #(mk_object(h), rt_async.t_promise_resolve(st, h, val))
@@ -393,23 +326,17 @@ fn resolve_with_constructor(
 fn reject_static(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let reason = first_arg_or_undefined(args)
   case this == mk_object(st.realm.promise.constructor) {
-    // Steps 2-3 for the intrinsic %Promise%: the reject function is
-    // unobservable, so reject the fresh promise in place.
     True -> {
       let #(h, st) = rt_async.t_new_promise(st)
       #(mk_object(h), rt_async.t_promise_reject(st, h, reason))
     }
     False -> {
-      // Step 2: capability = ? NewPromiseCapability(C).
       let #(cap, st) = new_capability_from_constructor(st, this)
-      // Step 3: ? Call(cap.[[Reject]], undefined, « r »).
       let #(_, st) = t_call_checked(st, cap.reject, mk_undefined(), [reason])
       #(cap.promise, st)
     }
   }
 }
-
-// ── §27.2.4.1-.5 combinators (all/allSettled/any/race) ──────────────────────
 
 type CombKind {
   CombAll
@@ -418,9 +345,6 @@ type CombKind {
   CombAny
 }
 
-/// Shared scaffold: NewPromiseCapability(this) — abrupt throws sync — then
-/// GetPromiseResolve + GetIterator + perform loop; abrupt in the loop goes
-/// through IfAbruptRejectPromise (Call(cap.reject, «err»)).
 fn combinator(
   st: Agent,
   this: JsVal,
@@ -433,8 +357,7 @@ fn combinator(
     protected(st, fn(st) {
       let #(promise_resolve, st) = get_promise_resolve(st, this)
       let #(rec, st) = get_iterator_sync(st, iterable)
-      // arc `IteratorOpen | IteratorDone` — carried through `t_throw` via a
-      // heap box so the catch below sees the flag as of the throw point.
+      // tracks whether the iterator still needs closing
       let #(open_h, st) = alloc_box(st, mk_bool(True))
       let #(loop_outcome, st) =
         protected(st, fn(st) {
@@ -442,9 +365,6 @@ fn combinator(
         })
       case loop_outcome {
         NormalCompletion(v) -> #(v, st)
-        // §27.2.4.1 step 6: IfAbruptCloseIterator only when the record is
-        // still open (arc promises.gleam:326-333). §7.4.8 marks the record
-        // done on abrupt-during-step, so `.return()` must NOT be called then.
         ThrowCompletion(e) ->
           case read_box(st, open_h) == mk_bool(True) {
             True -> {
@@ -458,7 +378,6 @@ fn combinator(
   let st = case outcome {
     NormalCompletion(_) -> st
     ThrowCompletion(e) -> {
-      // IfAbruptRejectPromise: ? Call(cap.[[Reject]], undefined, «e»).
       let #(_, st) = t_call_checked(st, cap.reject, mk_undefined(), [e])
       st
     }
@@ -478,7 +397,6 @@ fn perform_combinator(
   let realm = st.realm
   case kind {
     CombRace ->
-      // §27.2.4.5.1: every element uses cap.resolve/cap.reject; done → nothing.
       combinator_loop(
         st,
         rec,
@@ -595,11 +513,6 @@ fn perform_combinator(
   }
 }
 
-/// §27.2.4.1.1 step 4: iterate; per value nextPromise = Call(promiseResolve,
-/// C, «v»), then Invoke(nextPromise, "then", «onFulfilled, onRejected»).
-/// `open_h` mirrors arc `IteratorOpen | IteratorDone` (promises.gleam:220-253):
-/// abrupt during IteratorStepValue or after done → no close; abrupt during
-/// resolve/then with the iterator still open → close.
 fn combinator_loop(
   st: Agent,
   rec: IteratorRecord,
@@ -610,18 +523,15 @@ fn combinator_loop(
   make_handlers: fn(Agent, Int) -> #(JsVal, JsVal, Agent),
   on_done: fn(Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
-  // §7.4.8: abrupt during step marks [[Done]]=true — flag done BEFORE stepping.
+  // §7.4.8 abrupt during step means no close
   let st = rt_store.t_cell_set(st, open_h, SBox(mk_bool(False)))
   let #(step, st) = iterator_step_value(st, rec)
   case step {
     None -> on_done(st)
     Some(v) -> {
-      // Step succeeded → iterator open again for the resolve/then phase.
       let st = rt_store.t_cell_set(st, open_h, SBox(mk_bool(True)))
-      // Step 4.h: nextPromise = ? Call(promiseResolve, C, «v»).
       let #(next_promise, st) = t_call_checked(st, promise_resolve, c, [v])
       let #(on_fulfilled, on_rejected, st) = make_handlers(st, index)
-      // Step 4.s: ? Invoke(nextPromise, "then", «onFulfilled, onRejected»).
       let #(_, st) =
         t_call_method(st, next_promise, StringKey(Named("then")), [
           on_fulfilled,
@@ -670,9 +580,6 @@ fn final_reject_aggregate(
   }
 }
 
-// ── Promise.allKeyed / Promise.allSettledKeyed (await-dictionary proposal) ──
-
-/// Shared per-call context of the PerformPromiseAllKeyed key loop.
 type KeyedLoop {
   KeyedLoop(
     c: JsVal,
@@ -687,35 +594,19 @@ type KeyedLoop {
   )
 }
 
-/// Await-dictionary proposal: Promise.allKeyed(promises) and
-/// Promise.allSettledKeyed(promises).
-///
-/// Spec steps (both methods, `settled` selects the ~all-settled~ variant):
-///   1. Let ctor be the this value.
-///   2. Let promiseCapability be ? NewPromiseCapability(ctor).
-///   3. Let promiseResolve be Completion(GetPromiseResolve(ctor)).
-///   4. IfAbruptRejectPromise(promiseResolve, promiseCapability).
-///   5. If promises is not an Object, reject with a TypeError.
-///   6. Let result be Completion(PerformPromiseAllKeyed(variant, promises,
-///      ctor, promiseCapability, promiseResolve)).
-///   7. IfAbruptRejectPromise(result, promiseCapability).
-///   8. Return promiseCapability.[[Promise]].
 fn keyed_combinator(
   st: Agent,
   this: JsVal,
   args: List(JsVal),
   settled settled: Bool,
 ) -> #(JsVal, Agent) {
-  // Step 2: an abrupt NewPromiseCapability throws synchronously.
   let #(cap, st) = new_capability_from_constructor(st, this)
   let promises = first_arg_or_undefined(args)
-  // Steps 3-7: any later abrupt completion rejects the capability.
   let #(outcome, st) =
     protected(st, fn(st) { perform_all_keyed(st, this, promises, cap, settled) })
   let st = case outcome {
     NormalCompletion(_) -> st
     ThrowCompletion(e) -> {
-      // IfAbruptRejectPromise: ? Call(cap.[[Reject]], undefined, «e»).
       let #(_, st) = t_call_checked(st, cap.reject, mk_undefined(), [e])
       st
     }
@@ -723,10 +614,6 @@ fn keyed_combinator(
   #(cap.promise, st)
 }
 
-/// PerformPromiseAllKeyed steps 1-5 plus the method's steps 3 and 5
-/// (GetPromiseResolve and the is-Object check): collect [[OwnPropertyKeys]],
-/// allocate the shared keys/values stores and remaining counter, then run
-/// the per-key loop.
 fn perform_all_keyed(
   st: Agent,
   c: JsVal,
@@ -734,14 +621,10 @@ fn perform_all_keyed(
   cap: Capability,
   settled: Bool,
 ) -> #(JsVal, Agent) {
-  // Method step 3: GetPromiseResolve(ctor).
   let #(promise_resolve, st) = get_promise_resolve(st, c)
   case classify(promises) {
     KHandle(promises_h) -> {
-      // Step 1: Let allKeys be ? promises.[[OwnPropertyKeys]]() — trap-aware.
       let #(all_keys, st) = rt_obj.t_own_keys(st, promises_h)
-      // Steps 2-4: keys/values lists (shared, mutable from element fns) and
-      // the Record { [[Value]]: 1 } remaining-elements counter.
       let realm = st.realm
       let #(keys_h, st) = alloc_empty_array(st, realm.array.prototype)
       let #(values_h, st) = alloc_empty_array(st, realm.array.prototype)
@@ -760,7 +643,6 @@ fn perform_all_keyed(
         )
       keyed_loop(st, loop, all_keys, 0)
     }
-    // Method step 5: promises is not an Object — reject with TypeError.
     _ ->
       throw_type_error(
         st,
@@ -769,10 +651,6 @@ fn perform_all_keyed(
   }
 }
 
-/// PerformPromiseAllKeyed steps 6-8: for each own key, check the descriptor
-/// is present and enumerable, Get the value, wrap via promiseResolve, attach
-/// the keyed element handlers, then on loop exit decrement the counter and
-/// resolve with the keyed result object if it hit zero.
 fn keyed_loop(
   st: Agent,
   loop: KeyedLoop,
@@ -780,8 +658,6 @@ fn keyed_loop(
   index: Int,
 ) -> #(JsVal, Agent) {
   case all_keys {
-    // Steps 7-8: remainingElementsCount -= 1; at zero resolve with the
-    // CreateKeyedPromiseCombinatorResultObject(keys, values).
     [] ->
       keyed_final_resolve(
         st,
@@ -791,17 +667,13 @@ fn keyed_loop(
         loop.cap.resolve,
       )
     [key, ..rest] -> {
-      // Step 6.a: Let propertyDesc be ? promises.[[GetOwnProperty]](key).
       let #(desc, st) = rt_obj.t_get_own_property(st, loop.promises_h, key)
-      // Step 6.b: skip absent / non-enumerable properties.
       let enumerable =
         option.map(desc, rt_types.prop_enumerable) |> option.unwrap(False)
       case enumerable {
         False -> keyed_loop(st, loop, rest, index)
         True -> {
-          // Step 6.b.i: Let propertyValue be ? Get(promises, key).
           let #(prop_value, st) = rt_obj.t_get_prop(st, loop.promises, key)
-          // Steps 6.b.ii-iii: append key to keys, undefined to values.
           let st =
             set_array_element(
               st,
@@ -810,11 +682,8 @@ fn keyed_loop(
               rt_obj.object_key_value(key),
             )
           let st = set_array_element(st, loop.values_h, index, mk_undefined())
-          // Step 6.b.iv: nextPromise = ? Call(promiseResolve, ctor,
-          // «propertyValue»).
           let #(next_promise, st) =
             t_call_checked(st, loop.promise_resolve, loop.c, [prop_value])
-          // Steps 6.b.v-ix: alreadyCalled record + onFulfilled closure.
           let #(already_called, st) = alloc_box(st, mk_bool(False))
           let element = fn(st, kind) {
             alloc_closure(
@@ -835,23 +704,16 @@ fn keyed_loop(
             False -> KeyedValue
           }
           let #(on_fulfilled, st) = element(st, fulfilled_kind)
-          // Steps 6.b.x-xi: onRejected is cap.[[Reject]] for ~all~, a keyed
-          // rejected-element closure (same alreadyCalled record) for
-          // ~all-settled~.
           let #(on_rejected, st) = case loop.settled {
             False -> #(loop.cap.reject, st)
             True -> element(st, KeyedRejected)
           }
-          // Step 6.b.xii: remainingElementsCount += 1.
           let st = increment_counter(st, loop.remaining_h)
-          // Step 6.b.xiii: ? Invoke(nextPromise, "then",
-          // «onFulfilled, onRejected»).
           let #(_, st) =
             t_call_method(st, next_promise, StringKey(Named("then")), [
               on_fulfilled,
               on_rejected,
             ])
-          // Step 6.b.xiv: index += 1.
           keyed_loop(st, loop, rest, index + 1)
         }
       }
@@ -859,8 +721,6 @@ fn keyed_loop(
   }
 }
 
-/// remainingElementsCount -= 1; at zero,
-/// ? Call(cap.[[Resolve]], undefined, «keyed result object»).
 fn keyed_final_resolve(
   st: Agent,
   remaining_h: Handle,
@@ -878,9 +738,6 @@ fn keyed_final_resolve(
   }
 }
 
-/// CreateKeyedPromiseCombinatorResultObject(keys, values): a null-prototype
-/// ordinary object with one enumerable data property per collected key,
-/// defined in keys-list order so [[OwnPropertyKeys]] round-trips it.
 fn create_keyed_result(
   st: Agent,
   keys_h: Handle,
@@ -888,7 +745,6 @@ fn create_keyed_result(
 ) -> #(Handle, Agent) {
   let keys = read_array_values(st, keys_h)
   let values = read_array_values(st, values_h)
-  // Step 2: Let obj be OrdinaryObjectCreate(null).
   let #(h, st) =
     rt_store.t_cell_new(
       st,
@@ -901,7 +757,6 @@ fn create_keyed_result(
         extensible: True,
       ),
     )
-  // Step 3: ! CreateDataPropertyOrThrow(obj, keys[i], values[i]) for each i.
   let st =
     list.zip(keys, values)
     |> list.fold(st, fn(st, kv) {
@@ -912,15 +767,12 @@ fn create_keyed_result(
             rt_obj.t_define_own_data(st, h, key, v, True, True, True)
           st
         }
-        // Keys come from [[OwnPropertyKeys]] — String/Symbol only.
         None -> st
       }
     })
   #(h, st)
 }
 
-/// Inverse of `rt_obj.object_key_value` for the String/Symbol keys the
-/// keys list holds.
 fn key_of_value(v: JsVal) -> option.Option(ObjectKey) {
   case classify(v) {
     rt_types.KStr(s) -> Some(StringKey(rt_types.canonical_key(s)))
@@ -928,8 +780,6 @@ fn key_of_value(v: JsVal) -> option.Option(ObjectKey) {
     _ -> None
   }
 }
-
-// ── element functions (per-index closures the combinators mint) ─────────────
 
 fn all_element(
   st: Agent,
@@ -961,8 +811,6 @@ fn all_settled_element(
   final_resolve_values(st, remaining, values, resolve)
 }
 
-/// `{status: "fulfilled", value}` / `{status: "rejected", reason}` with
-/// %Object.prototype% (§27.2.4.2.2 steps 9-11 / §27.2.4.2.3 steps 9-11).
 fn settled_record(st: Agent, fulfilled: Bool, val: JsVal) -> #(JsVal, Agent) {
   let #(status, field) = case fulfilled {
     True -> #("fulfilled", "value")
@@ -976,10 +824,6 @@ fn settled_record(st: Agent, fulfilled: Bool, val: JsVal) -> #(JsVal, Agent) {
   #(mk_object(obj_h), st)
 }
 
-/// Keyed combinator element handler (the fulfilledSteps / rejectedSteps
-/// closures of PerformPromiseAllKeyed): once-only, store the (possibly
-/// status-wrapped) value at the captured index, decrement the counter, and
-/// at zero resolve the capability with the keyed result object.
 fn keyed_element(
   st: Agent,
   args: List(JsVal),
@@ -992,8 +836,6 @@ fn keyed_element(
   resolve: JsVal,
 ) -> #(JsVal, Agent) {
   use val, st <- with_element_once(st, args, already_called)
-  // ~all~ stores the raw value; ~all-settled~ wraps it in
-  // {status, value/reason} with %Object.prototype%.
   let #(stored, st) = case kind {
     KeyedValue -> #(val, st)
     KeyedFulfilled -> settled_record(st, True, val)
@@ -1017,7 +859,6 @@ fn any_reject_element(
   final_reject_aggregate(st, remaining, errors, reject)
 }
 
-/// Once-only guard: if already_called is set → undefined; else set it, run body.
 fn with_element_once(
   st: Agent,
   args: List(JsVal),
@@ -1034,18 +875,10 @@ fn with_element_once(
   }
 }
 
-// ── §27.2.1.5 NewPromiseCapability + GetCapabilitiesExecutor ────────────────
-
-/// PromiseCapability Record (§27.2.1.1) — `promise` is a `JsVal` (may be
-/// any object a user constructor returned).
 type Capability {
   Capability(promise: JsVal, resolve: JsVal, reject: JsVal)
 }
 
-/// §27.2.1.5 NewPromiseCapability(C). Intrinsic %Promise% takes the fast path
-/// (rt_async.t_new_promise_capability); any other value must be a
-/// constructor and is invoked as `new C(executor)` with a
-/// GetCapabilitiesExecutor that captures resolve/reject into two SBox cells.
 fn new_capability_from_constructor(
   st: Agent,
   c: JsVal,
@@ -1095,8 +928,6 @@ fn new_capability_from_constructor(
   }
 }
 
-/// §27.2.1.5.1 GetCapabilitiesExecutor — write args into the two SBox cells;
-/// throw if either is already set.
 fn capability_executor(
   st: Agent,
   resolve_box: Handle,
@@ -1121,7 +952,6 @@ fn capability_executor(
   }
 }
 
-/// §27.2.4.1.2 GetPromiseResolve(C): Get(C, "resolve"), require callable.
 fn get_promise_resolve(st: Agent, c: JsVal) -> #(JsVal, Agent) {
   let #(resolve_fn, st) = rt_obj.t_get_prop(st, c, StringKey(Named("resolve")))
   case is_callable(st, resolve_fn) {
@@ -1130,8 +960,6 @@ fn get_promise_resolve(st: Agent, c: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// §7.3.22 SpeciesConstructor(O, %Promise%). Reads `O.constructor[@@species]`;
-/// falls back to %Promise% on undefined/null at any step.
 fn species_constructor(st: Agent, o: JsVal) -> #(JsVal, Agent) {
   let default = mk_object(st.realm.promise.constructor)
   case intrinsic_species(st, o) {
@@ -1140,18 +968,10 @@ fn species_constructor(st: Agent, o: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// The SpeciesConstructor(O, %Promise%) protocol answers %Promise% without
-/// running anything when every step is a plain data read of the intrinsics
-/// as `init` left them: `O` a plain %Promise% instance with no own
-/// `constructor`, `%Promise.prototype%.constructor` a data property holding
-/// %Promise%, and `%Promise%[@@species]` a `ReturnThis` getter (which would
-/// return its receiver, %Promise%). Anything else takes the generic protocol.
 fn intrinsic_species(st: Agent, o: JsVal) -> Bool {
   is_plain_promise(st, o) && common.species_intact(st, st.realm.promise)
 }
 
-/// `o` is a %Promise% instance whose `constructor` lookup reaches
-/// %Promise.prototype%: that prototype, and no own `constructor`.
 fn is_plain_promise(st: Agent, o: JsVal) -> Bool {
   case classify(o) {
     KHandle(h) ->
@@ -1193,8 +1013,6 @@ fn species_constructor_generic(
   }
 }
 
-// ── local helpers ───────────────────────────────────────────────────────────
-
 @external(erlang, "arc_rt_call_ffi", "t_apply_protected")
 fn protected(
   st: Agent,
@@ -1209,7 +1027,6 @@ fn alloc_closure2(st: Agent, tag: rt_types.NativeToken) -> #(JsVal, Agent) {
   alloc_closure_n(st, tag, 2)
 }
 
-/// Anonymous non-constructible builtin closure with `length` = `len`.
 fn alloc_closure_n(
   st: Agent,
   tag: rt_types.NativeToken,
@@ -1238,8 +1055,6 @@ fn read_box(st: Agent, h: Handle) -> JsVal {
   }
 }
 
-/// remainingElementsCount `SBox(JInt(n))` — arc used a dedicated CounterSlot;
-/// 2core has no such slot, so an SBox holding a number stands in.
 fn alloc_counter(st: Agent, n: Int) -> #(Handle, Agent) {
   rt_store.t_cell_new(st, SBox(mk_number(JInt(n))))
 }
@@ -1272,7 +1087,6 @@ fn alloc_empty_array(st: Agent, array_proto: Handle) -> #(Handle, Agent) {
   common.alloc_array(st, [], array_proto)
 }
 
-/// Set element at `index` in a heap-allocated `ArrayObj`, growing `length`.
 fn set_array_element(
   st: Agent,
   arr_h: Handle,
@@ -1297,7 +1111,6 @@ fn set_array_element(
   })
 }
 
-/// Elements `0..length-1` of a heap `ArrayObj`, holes read as undefined.
 fn read_array_values(st: Agent, arr_h: Handle) -> List(JsVal) {
   case rt_store.t_cell_get(st, arr_h) {
     SObject(kind: ArrayObj(length:), elements: els, ..) ->

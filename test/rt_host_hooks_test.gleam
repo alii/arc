@@ -1,6 +1,3 @@
-//// The shared runtime reads clocks, the PRNG and the console sink from
-//// `Agent.hooks`.
-
 import arc/host_hooks.{
   DebugLevel, ErrorLevel, HostHooks, InfoLevel, LogLevel, WarnLevel,
 }

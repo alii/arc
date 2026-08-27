@@ -1,11 +1,4 @@
-%%% arc_rt_call_fast_ffi — the call-site fast paths AOT-emitted code calls
-%%% directly (`aot/src/arc_aot/host_ops.gleam`): `t_call_fast*` for a plain
-%%% closure call, `t_call_method_ic*` / `t_call_method_mono` for a method call
-%%% through the per-site inline cache, `t_new_simple` for `new C(...)` on an
-%%% ordinary constructor. Every entry answers `{miss, St}` on any shape it
-%%% does not handle and the emitter's guard falls back to the full
-%%% `arc@rt@call` path. Record indices come from arc_rt_layout.hrl (asserted
-%%% by arc_rt_layout_test). Nothing here is bound from Gleam except by tests.
+%% aot call-site fast paths, {miss, St} falls back to the full path
 -module(arc_rt_call_fast_ffi).
 -export([t_call_fast/4, t_call_fast0/3, t_call_fast1/4, t_call_fast2/5,
          t_call_fast3/6,
@@ -15,27 +8,17 @@
 
 -include("arc_rt_layout.hrl").
 
-%% Proto-walk depth cap for t_call_method_mono. deltablue.js `inheritsFrom`
-%% chains reach 3 hops (StayConstraint→UnaryConstraint→Constraint); richards
-%% is flat 1-hop. 4 covers both with headroom; deeper → miss to full path.
+%% deltablue proto chains reach 3 hops
 -define(MONO_PROTO_MAX, 4).
 
-%% Ordinary user function: not a class ctor, generator or async.
 -define(KFN_PLAIN(Flags),
         (element(?FNFLAGS_IS_CLASS_CTOR, Flags) =:= false andalso
          element(?FNFLAGS_IS_GEN, Flags) =:= false andalso
          element(?FNFLAGS_IS_ASYNC, Flags) =:= false)).
 
-%% t_call_fast(St, F, This, Args) -> {V, St'}
-%% The generic `f(args)` site as ONE host op: the t_kfn_code gate (matched
-%% in place, no triple built), then the simple-ABI (arity match) or Frame
-%% apply the emitter used to inline at every site, else
-%% arc@rt@call:t_call_checked. Same gate, same Frame, same fallback.
 t_call_fast(St, F, This, Args) ->
     call_fast(St, F, This, Args, undefined, undefined, undefined).
 
-%% t_call_fastN(St, F, This, A1..AN) — the same with 0..3 positional args, so
-%% a simple-ABI hit applies the variant with no args list and no apply hop.
 t_call_fast0(St, F, This) ->
     call_fast(St, F, This, 0, undefined, undefined, undefined).
 t_call_fast1(St, F, This, A) ->
@@ -45,14 +28,12 @@ t_call_fast2(St, F, This, A, B) ->
 t_call_fast3(St, F, This, A, B, C) ->
     call_fast(St, F, This, 3, A, B, C).
 
-%% N is the args list itself, or 0..3 with the args in A, B, C.
 call_fast(St, F = {?HANDLE_TAG, Id}, This, N, A, B, C) ->
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, element(?AGENT_STORE, St))) of
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Slot) of
                 {?KFN_TAG, Code, Home, Flags, _, Simple, _, _, _}
                   when ?KFN_PLAIN(Flags) ->
-                    %% §10.2.1.2 bind-this as in t_kfn_code.
                     case element(?FNFLAGS_IS_ARROW, Flags)
                          orelse element(?FNFLAGS_IS_STRICT, Flags) of
                         true ->
@@ -100,57 +81,15 @@ apply_fast(St, _, _, _, {?SOME, {CodeS, N, false}}, _, N, A, B, C) ->
 apply_fast(St, F, Code, Home, _, ThisR, N, A, B, C) ->
     Code(St, {ThisR, F, home(Home), undefined}, args(N, A, B, C)).
 
-%% Frame slot 3: the callee's [[HomeObject]] cell, or `undefined`.
 home({?SOME, H}) -> H;
 home(?NONE) -> undefined.
 
-%% IcEntry (rt_types.gleam): {ic_call, KeyBin, Ways}, Ways a map from a
-%% way's Match to {Chain, Fn, Kind} (rt_types.IcCallWay): Match says which
-%% receivers the way answers for —
-%%   {ic_shaped, Sid, PId}  a shaped object of shape Sid (so no own `key`)
-%%                          whose proto is PId;
-%%   {ic_plain, PId}        an SObject whose named `key` would be a plain
-%%                          props entry (arc_rt_obj_ffi:named_plain) but is
-%%                          absent, and whose proto is PId;
-%%   {ic_own, RId}          the very cell RId while it still holds the slot
-%%                          in Chain (= [{RId, Slot}]), `key` being its own
-%%                          data property;
-%%   {ic_prim, W, PId}      a string (W = ?REALM_STRING, `key` not its own
-%%                          "length") or number (?REALM_NUMBER) primitive
-%%                          while the realm's wrapper prototype is PId, the
-%%                          callee a native or strict function (`this` stays
-%%                          the primitive, §10.2.1.2) —
-%% Chain = [{ProtoId, ProtoSlot}] from the receiver's proto down to the holder
-%% and Kind the callee cell's ObjKind when the way was filled. Up to
-%% ?IC_CALL_WAYS ways per site (raytrace's shape.intersect and Class.create's
-%% shared `this.initialize.apply(this, arguments)` are polymorphic).
 -define(IC_CALL, ic_call).
 -define(IC_CALL_WAYS, 16).
 
-%% t_call_method_ic(St, Recv, KeyBin, Args, Site, RSite) -> {V, St'}
-%% JMut. The whole compiled `o.key(args)` site as ONE host op: the IC probe
-%% below, and on its miss the same read + call the emitter used to inline at
-%% every site — `t_get_prop_site` at the read site `RSite`, then `call_fast`
-%% with `this = Recv`. St is unchanged on a probe miss (no side effect
-%% precedes the apply), so the read observes exactly the state it did inline.
-%%
-%% The probe: `t_call_method_mono` with a per-site inline cache (JsStore.ics).
-%% Hit: a way's Match holds for the receiver and every cell on its chain
-%% still holds the very slot the key was resolved through (an equal slot has
-%% the same props and the same proto link; any write replaces it), then
-%% apply the way's recorded callee kind with the mono gate, without reading
-%% the callee cell (rt_types.IcCallWay says why). Otherwise the mono body
-%% runs and, when it resolves the key to a callee that passes the gate,
-%% records the way before applying it: replacing a stale way (same Match, a
-%% chain cell was written) or adding one while the site has room. An `own`
-%% way whose cell changed is never refilled, so a receiver whose own slots
-%% keep changing costs one probe, not a store write per call.
 t_call_method_ic(St, Recv, KeyBin, Args, Site, RSite) ->
     ic(St, Recv, KeyBin, Site, RSite, Args, undefined, undefined, undefined).
 
-%% t_call_method_icN(St, Recv, KeyBin, Site, RSite, A1..AN) — the same with
-%% 0..3 positional args, so a hit applies a matching simple variant with no
-%% args list, no length/1 and no apply hop.
 t_call_method_ic0(St, Recv, KeyBin, Site, RSite) ->
     ic(St, Recv, KeyBin, Site, RSite, 0, undefined, undefined, undefined).
 t_call_method_ic1(St, Recv, KeyBin, Site, RSite, A) ->
@@ -160,10 +99,6 @@ t_call_method_ic2(St, Recv, KeyBin, Site, RSite, A, B) ->
 t_call_method_ic3(St, Recv, KeyBin, Site, RSite, A, B, C) ->
     ic(St, Recv, KeyBin, Site, RSite, 3, A, B, C).
 
-%% N is the args list itself, or 0..3 with the args in A, B, C. A hit applies
-%% the callee as a tail call; every other way runs the mono body under
-%% `slow`, which takes the emitter's read + call on its miss. Fill is `none`
-%% (record nothing) or the site to record the resolved way on.
 ic(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Site, RSite, N, A, B, C) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
@@ -192,16 +127,11 @@ ic(St, Recv, KeyBin, Site, RSite, N, A, B, C) ->
         W -> prim(St, Recv, W, KeyBin, Site, RSite, N, A, B, C)
     end.
 
-%% The Realm field of the wrapper prototype a primitive receiver's method
-%% read starts from (arc_rt_obj_ffi:read_prim), or `none`.
 prim_wrapper(Recv, KeyBin) when is_binary(Recv), KeyBin =/= <<"length">> ->
     ?REALM_STRING;
 prim_wrapper(Recv, _) when is_number(Recv) -> ?REALM_NUMBER;
 prim_wrapper(_, _) -> none.
 
-%% The method call on a string / number primitive: probe the site's
-%% `ic_prim` way for this wrapper, else walk from the wrapper prototype as
-%% the mono body does, recording the way.
 prim(St, Recv, W, KeyBin, Site, RSite, N, A, B, C) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
@@ -242,10 +172,6 @@ args(1, A, _, _) -> [A];
 args(2, A, B, _) -> [A, B];
 args(3, A, B, C) -> [A, B, C].
 
-%% Apply a way's recorded callee Kind (already past the mono gate when it
-%% was filled) with positional args: a simple variant of arity N is applied
-%% directly (with `this` only when it reads it); the Frame and native paths
-%% cons the list.
 apply_kind(St, Kind, Fn, Recv, Args, _, _, _) when is_list(Args) ->
     kind_apply(St, Kind, Fn, Recv, Args);
 apply_kind(St, {?KFN_TAG, Code, Home, _, _, Simple, _, _, _}, Fn, Recv, N, A,
@@ -270,9 +196,6 @@ apply_kind(St, {?KFN_TAG, Code, Home, _, _, Simple, _, _, _}, Fn, Recv, N, A,
 apply_kind(St, {?KNATIVE_TAG, Tag, _, _, _}, _, Recv, N, A, B, C) ->
     arc@rt@builtins:dispatch_native(St, Tag, Recv, args(N, A, B, C)).
 
-%% {hit, Fn, Kind} | stale (a shaped/plain way for this receiver failed its
-%% chain: refill) | spent (an own way for this cell no longer holds: do not
-%% refill) | miss (no way for this receiver).
 ic_probe(Data, _, {?SSHAPED_TAG, Sid, {?SOME, {?HANDLE_TAG, PId}} = Proto, _},
          _, Ways) ->
     case Ways of
@@ -323,24 +246,12 @@ ic_chain_ok(Data, {?SOME, {?HANDLE_TAG, PId}}, [{PId, PSlot} | Rest]) ->
     end;
 ic_chain_ok(_, _, _) -> false.
 
-%% t_call_method_mono(St, Recv, KeyBin, Args) -> {V, St'} | {miss, St}
-%% JMut fast-path probe for `o.m(args)`. Folds the get_prop_any proto walk +
-%% t_kfn_code + CallClosure apply into ONE FFI call: own-then-proto data-prop
-%% lookup (up to ?MONO_PROTO_MAX hops) → gate on ordinary user KCompiled or
-%% KNative → apply with `this=Recv`. Any shape miss → `{miss, St}` (St
-%% UNCHANGED — no side-effect precedes the apply) and the emitter falls back
-%% to the full path. NOTE the emitter guard is `V =:= miss`, NOT `IsAtom(V)`
-%% — a method may return undefined/null/bool. §9.1.8.1 own-before-proto: a
-%% shaped own slot or an own data prop shadows the proto method; an own
-%% accessor shadows too and misses.
+%% st unchanged on miss; emitter guards V =:= miss, not is_atom
 t_call_method_mono(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Args) ->
     Data = element(?STORE_DATA, element(?AGENT_STORE, St)),
     mono(St, Recv, arc_rt_arena_ffi:get(RId, Data), KeyBin, Args, none);
 t_call_method_mono(St, _, _, _) -> {miss, St}.
 
-%% RSlot is the receiver's slot; Site is `none` (no cache) or the site id
-%% to record the resolved way on. Ic is `none` or `{Site, Match0, Chain}`:
-%% the way being built, Match0 lacking the proto id the first hop supplies.
 mono(St, Recv = {?HANDLE_TAG, RId}, RSlot, KeyBin, Args, Site)
   when is_tuple(RSlot) ->
     Store = element(?AGENT_STORE, St),
@@ -363,7 +274,7 @@ mono(St, Recv = {?HANDLE_TAG, RId}, RSlot, KeyBin, Args, Site)
     end,
     case Own of
         absent ->
-            %% proto is element 3 for BOTH s_object and s_shaped_object.
+            %% proto is element 3 for both s_object and s_shaped_object
             mono_proto(St, Data, element(?SOBJECT_PROTO, RSlot), KeyBin,
                        Recv, Args, Ic);
         miss -> {miss, St};
@@ -378,8 +289,6 @@ mono_proto(St, Data, {?SOME, {?HANDLE_TAG, PId}}, KeyBin, Recv, Args, Ic) ->
     mono_proto_walk(St, Data, PId, KeyBin, Recv, Args, ?MONO_PROTO_MAX, Ic);
 mono_proto(St, _, _, _, _, _, _) -> {miss, St}.
 
-%% Bounded walk. Accessor or non-cell hit at any hop shadows → miss. Ic
-%% accumulates the hops walked (reversed).
 mono_proto_walk(St, _, _, _, _, _, 0, _) -> {miss, St};
 mono_proto_walk(St, Data, Id, KeyBin, Recv, Args, Fuel, Ic) ->
     case arc_rt_arena_ffi:get(Id, Data) of
@@ -392,7 +301,6 @@ mono_proto_walk(St, Data, Id, KeyBin, Recv, Args, Fuel, Ic) ->
         _ -> {miss, St}
     end.
 
-%% proto is element 3 for BOTH s_object and s_shaped_object.
 mono_hop(St, Data, Id, Slot, absent, KeyBin, Recv, Args, Fuel, Ic) ->
     case element(?SOBJECT_PROTO, Slot) of
         {?SOME, {?HANDLE_TAG, NId}} ->
@@ -405,9 +313,6 @@ mono_hop(St, Data, Id, Slot, V, KeyBin, Recv, Args, _, Ic) when Ic =/= none ->
 mono_hop(St, Data, _, _, V, _, Recv, Args, _, _) ->
     mono_apply(St, Data, V, Recv, Args).
 
-%% The key resolved to V with a way to record: gate, fill, then apply. A
-%% primitive receiver is passed as `this` unconverted, so only a native or a
-%% strict function takes it (§10.2.1.2 OrdinaryCallBindThis).
 mono_found(St, Data, Fn = {?HANDLE_TAG, _}, KeyBin, Recv, Args, Ic) ->
     case mono_kind(Data, Fn) of
         miss -> {miss, St};
@@ -423,8 +328,6 @@ mono_found(St, _, _, _, _, _, _) -> {miss, St}.
 ic_hop(none, _, _) -> none;
 ic_hop({Site, Match, Chain}, Id, Slot) -> {Site, Match, [{Id, Slot} | Chain]}.
 
-%% Record the resolved way under its Match (replacing a stale one) while the
-%% site has room. An `own` way's chain is the receiver cell itself.
 ic_fill(St, {Site, Match0, RevChain}, Fn, Kind, KeyBin) ->
     Store = element(?AGENT_STORE, St),
     Ics = element(?STORE_ICS, Store),
@@ -449,9 +352,7 @@ ic_fill(St, {Site, Match0, RevChain}, Fn, Kind, KeyBin) ->
         false -> St
     end.
 
-%% Own named data prop of an SObject. `absent` = key not present → caller
-%% falls through to proto. An accessor SHADOWS proto, so return a non-cell
-%% (`miss`) rather than `absent` — mono_apply then misses.
+%% an own accessor shadows proto, so miss rather than absent
 mono_own_value(Slot, KeyBin) ->
     case element(?SOBJECT_PROPS, Slot) of
         #{{?KEY_NAMED, KeyBin} := Prop}
@@ -461,7 +362,6 @@ mono_own_value(Slot, KeyBin) ->
         _ -> absent
     end.
 
-%% §9.1.8.1 own-slot probe for an SShapedObject via JsStore.shapes.
 mono_shaped_own(Store, RSlot, KeyBin) ->
     Sid = element(?SSHAPED_SID, RSlot),
     case element(?STORE_SHAPES, Store) of
@@ -474,13 +374,6 @@ mono_shaped_own(Store, RSlot, KeyBin) ->
         _ -> absent
     end.
 
-%% Gate + apply. Same KCompiled gate as call_fast; a method's [[HomeObject]]
-%% rides in the Frame (a simple variant never reads it). KNative →
-%% dispatch_native (M6 seam) so `Array.prototype.push` etc. hit here too.
-%% `this` is Recv — always a cell, so no OrdinaryCallBindThis substitution. A
-%% simple variant (KCompiled.simple) of matching arity is applied as
-%% CodeT(St, Recv, P0..Pn-1) / CodeS(St, P0..Pn-1) with no Frame tuple;
-%% otherwise Frame per D5 mk_frame.
 mono_apply(St, Data, Fn = {?HANDLE_TAG, _}, Recv, Args) ->
     case mono_kind(Data, Fn) of
         miss -> {miss, St};
@@ -488,7 +381,6 @@ mono_apply(St, Data, Fn = {?HANDLE_TAG, _}, Recv, Args) ->
     end;
 mono_apply(St, _, _, _, _) -> {miss, St}.
 
-%% The callee's ObjKind when it passes the gate, else `miss`.
 mono_kind(Data, {?HANDLE_TAG, FnId}) ->
     case arc_rt_arena_ffi:get(FnId, Data) of
         FSlot when element(1, FSlot) =:= ?SOBJECT_TAG ->
@@ -519,18 +411,6 @@ apply_this(CodeT, St, Recv, [A, B]) -> CodeT(St, Recv, A, B);
 apply_this(CodeT, St, Recv, [A, B, C]) -> CodeT(St, Recv, A, B, C);
 apply_this(CodeT, St, Recv, Args) -> erlang:apply(CodeT, [St, Recv | Args]).
 
-%% t_new_simple(St, Ctor, Args) -> {Handle, St'} | {miss, St}
-%% JMut fast-path probe for `new F(args)` on a base constructor (§10.2.2
-%% kind base): F is a KCompiled with is_constructor, a plain function or a
-%% base class constructor, NOT derived/gen/async, no fields_init, and its own
-%% "prototype" is a data-property Handle → inline OrdinaryCreateFromConstructor
-%% + `t_cell_new` + apply body + §10.2.2 step 13 base return-override
-%% (object result overrides `this`; else new `this`). Any shape miss →
-%% `{miss, St}` and the emitter's IsAtom guard falls back to `t_construct`.
-%% The new object is born as an SShapedObject at the empty root shape, so
-%% the ctor body's `this.k = v` writes extend it along shape transitions
-%% (rt_obj set_own_shaped) and later `.k` reads/writes hit the shaped-slot
-%% fast paths. Record indices via arc_rt_layout.hrl.
 t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
@@ -559,10 +439,6 @@ t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
     end;
 t_new_simple(St, _, _) -> {miss, St}.
 
-%% Inline `t_cell_new` (rt_store.gleam) + apply + return-override. The
-%% arity guard lets the compiler fold the store update into one tuple build.
-%% A simple variant of matching arity takes `this` positionally (it never
-%% reads new.target); otherwise the Frame carries NewTarget = Ctor.
 new_simple_apply(St, Store, Data, Ctor, {_, Code, Home, _, _, Simple, _, _, _},
                  Proto, Args)
   when tuple_size(Store) =:= ?STORE_ARITY ->

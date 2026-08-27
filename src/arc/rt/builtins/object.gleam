@@ -1,9 +1,3 @@
-//// `rt_builtins/object` — Object constructor + prototype (§20.1), init +
-//// dispatch (SPEC §7.M6 builtins-object-function-error).
-////
-//// JS errors raise via `t_throw(st, e)` (D7). Return-tuple order
-//// `#(V, St')` (R1).
-
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
 import arc/rt/builtins/iter_protocol
@@ -39,11 +33,8 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-/// V8/Node's standard ToObject failure message.
 const cannot_convert = "Cannot convert undefined or null to object"
 
-/// Set up Object constructor and Object.prototype methods. Object.prototype
-/// is already allocated (it's the root of all chains).
 pub fn init(
   st: Agent,
   object_proto: Handle,
@@ -87,13 +78,11 @@ pub fn init(
       #("valueOf", ObjectN(ObjectPrototypeValueOf), 0),
       #("isPrototypeOf", ObjectN(ObjectPrototypeIsPrototypeOf), 1),
       #("toLocaleString", ObjectN(ObjectPrototypeToLocaleString), 0),
-      // Annex B §B.2.2.2-5 legacy accessor management.
       #("__defineGetter__", ObjectN(ObjectPrototypeDefineGetter), 2),
       #("__defineSetter__", ObjectN(ObjectPrototypeDefineSetter), 2),
       #("__lookupGetter__", ObjectN(ObjectPrototypeLookupGetter), 1),
       #("__lookupSetter__", ObjectN(ObjectPrototypeLookupSetter), 1),
     ])
-  // Annex B §B.2.2.1 — Object.prototype.__proto__ accessor property.
   let #(proto_accessor, st) =
     common.alloc_get_set_accessor(
       st,
@@ -116,9 +105,6 @@ pub fn init(
   )
 }
 
-// ── dispatch ────────────────────────────────────────────────────────────────
-
-/// Per-module dispatch for Object native functions.
 pub fn dispatch(
   st: Agent,
   native: ObjectNative,
@@ -170,7 +156,6 @@ pub fn dispatch(
   }
 }
 
-/// Per-module `[[Construct]]` dispatch — `new Object(value)` (§20.1.1.1).
 pub fn dispatch_construct(
   st: Agent,
   n: ObjectNative,
@@ -180,8 +165,6 @@ pub fn dispatch_construct(
   case n {
     ObjectConstructor -> {
       let r = st.realm
-      // Step 1: NewTarget is neither undefined nor the active function object
-      // → OrdinaryCreateFromConstructor(NewTarget, "%Object.prototype%").
       case classify(new_target) {
         KHandle(nt_h) if nt_h != r.object.constructor -> {
           let #(proto, st) =
@@ -192,7 +175,6 @@ pub fn dispatch_construct(
             )
           rt_obj.t_new_object(st, Some(proto))
         }
-        // Steps 2-3: same as call semantics — always yields a handle.
         _ -> {
           let #(v, st) = object_ctor(st, args)
           let assert KHandle(h) = classify(v)
@@ -204,28 +186,21 @@ pub fn dispatch_construct(
   }
 }
 
-// ── §20.1.1.1 Object() constructor ──────────────────────────────────────────
-
 fn object_ctor(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let object_proto = st.realm.object.prototype
   let arg = first_arg_or_undefined(args)
   case classify(arg) {
-    // Step 3: If value is an Object, return it.
     KHandle(_) -> #(arg, st)
-    // Step 2: undefined/null/absent → new empty object.
     KUndef | KNull -> {
       let #(h, st) = rt_obj.t_new_object(st, Some(object_proto))
       #(mk_object(h), st)
     }
-    // Step 3: Primitives → ToObject wrapper.
     _ -> {
       let #(h, st) = rt_val.t_to_object(st, arg)
       #(mk_object(h), st)
     }
   }
 }
-
-// ── §20.1.2.8 Object.getOwnPropertyDescriptor ───────────────────────────────
 
 fn get_own_prop_desc(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(target, key_val) = two_args_or_undefined(args)
@@ -239,7 +214,6 @@ fn get_own_prop_desc(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
         None -> #(mk_undefined(), st)
       }
     }
-    // String primitives: index chars + "length" via §10.4.3.5.
     KStr(s) -> {
       let #(key, st) = rt_val.t_to_property_key(st, key_val)
       case string_exotic_own_property(s, key) {
@@ -247,7 +221,6 @@ fn get_own_prop_desc(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
         None -> #(mk_undefined(), st)
       }
     }
-    // Primitive: still runs ToPropertyKey (observable), then no own props.
     _ -> {
       let #(_key, st) = rt_val.t_to_property_key(st, key_val)
       #(mk_undefined(), st)
@@ -255,15 +228,11 @@ fn get_own_prop_desc(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §6.2.6.4 FromPropertyDescriptor — build a `{value,writable,...}` /
-/// `{get,set,...}` descriptor object.
 fn from_property_descriptor(st: Agent, prop: Property) -> #(JsVal, Agent) {
   let #(h, st) =
     rt_obj.t_from_property_descriptor(st, rt_obj.parsed_of_property(prop))
   #(mk_object(h), st)
 }
-
-// ── §20.1.2.4 Object.defineProperty / .3 defineProperties ───────────────────
 
 fn define_property(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   case args {
@@ -272,11 +241,8 @@ fn define_property(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
         KHandle(h) -> {
           let key_val = first_arg_or_undefined(rest)
           let desc_val = helpers.arg_at(rest, 1)
-          // Step 2: ToPropertyKey.
           let #(key, st) = rt_val.t_to_property_key(st, key_val)
-          // Step 3: ToPropertyDescriptor.
           let #(parsed, st) = rt_obj.t_to_property_descriptor(st, desc_val)
-          // Step 4: DefinePropertyOrThrow.
           let #(ok, st) = rt_obj.t_define_own_prop(st, h, key, parsed)
           case ok {
             True -> #(obj, st)
@@ -313,8 +279,6 @@ fn define_properties(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §20.1.2.3.1 ObjectDefineProperties — read+parse ALL descriptors first,
-/// then apply in key order.
 fn define_properties_on(
   st: Agent,
   target_h: Handle,
@@ -328,8 +292,6 @@ fn define_properties_on(
       apply_descriptors(st, target_h, descs)
     }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
-    // ToObject on Number/Bool/Symbol/BigInt → wrapper with no own enumerable
-    // props → no-op. String primitive with content → step 4.b.ii TypeError.
     KStr("") -> #(mk_object(target_h), st)
     KStr(_) ->
       rt_val.t_throw_type_error(st, "Property description must be an object")
@@ -383,8 +345,6 @@ fn apply_descriptors(
   }
 }
 
-// ── keys / values / entries / getOwnPropertyNames / symbols ────────────────
-
 fn own_keys_impl(
   st: Agent,
   args: List(JsVal),
@@ -393,8 +353,6 @@ fn own_keys_impl(
   case classify(first_arg_or_undefined(args)) {
     KHandle(h) -> {
       let #(names, st) = case enumerable_only {
-        // §7.3.23 EnumerableOwnProperties(O, key): ownKeys then a per-key
-        // [[GetOwnProperty]] — both trap for a proxy.
         True -> rt_obj.t_enumerable_own_keys(st, h)
         False -> {
           let #(keys, st) = rt_obj.t_own_keys(st, h)
@@ -414,7 +372,6 @@ fn own_keys_impl(
       )
     }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
-    // String primitives: own keys are index chars + "length" (§10.4.3.3).
     KStr(s) -> {
       let index_keys = string_index_keys(0, js_string.length(s))
       let ks = case enumerable_only {
@@ -445,8 +402,6 @@ fn entries(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   ok_array(st, list.reverse(rows))
 }
 
-/// §7.3.23 EnumerableOwnProperties — own enumerable string-keyed key/value
-/// pairs. Interleaves [[GetOwnProperty]] and [[Get]] per key (spec-visible).
 fn own_enumerable_pairs(
   st: Agent,
   args: List(JsVal),
@@ -457,7 +412,6 @@ fn own_enumerable_pairs(
       collect_enumerable(st, h, keys, [])
     }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
-    // String primitives: enumerable own props are the index chars (§10.4.3).
     KStr(s) -> #(
       list.index_map(js_string.explode(s), fn(ch, idx) {
         #(int.to_string(idx), mk_string(ch))
@@ -468,8 +422,6 @@ fn own_enumerable_pairs(
   }
 }
 
-/// §7.3.23 steps 4.a.i-ii per key: [[GetOwnProperty]] then, if enumerable,
-/// [[Get]] — interleaved (a proxy sees getOwnPropertyDescriptor/get pairs).
 fn collect_enumerable(
   st: Agent,
   h: Handle,
@@ -524,7 +476,6 @@ fn get_own_prop_descriptors(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
       let #(result_h, st) = rt_obj.t_new_object(st, Some(object_proto))
       descriptors_from_keys(st, h, result_h, keys)
     }
-    // String primitives: index chars then "length" (§10.4.3.3).
     KStr(s) -> {
       let keys =
         list.append(string_index_object_keys(0, js_string.length(s)), [
@@ -582,8 +533,6 @@ fn descriptors_from_keys(
     }
   }
 }
-
-// ── §20.1.2.2 Object.create / §20.1.2.1 assign / §20.1.2.12 is ──────────────
 
 fn create(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(proto_val, props_val) = two_args_or_undefined(args)
@@ -657,8 +606,6 @@ fn object_is(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   #(mk_bool(rt_val.same_value(a, b)), st)
 }
 
-// ── hasOwn / hasOwnProperty / propertyIsEnumerable ──────────────────────────
-
 fn has_own(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(target, key_val) = two_args_or_undefined(args)
   case classify(target) {
@@ -668,7 +615,6 @@ fn has_own(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
       #(mk_bool(option.is_some(desc)), st)
     }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
-    // String primitives: index chars + "length" via §10.4.3.5.
     KStr(s) -> {
       let #(key, st) = rt_val.t_to_property_key(st, key_val)
       #(mk_bool(option.is_some(string_exotic_own_property(s, key))), st)
@@ -685,7 +631,6 @@ fn has_own_property(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  // §20.1.3.2: ToPropertyKey step 1, ToObject step 2 (order matters).
   let #(key, st) = rt_val.t_to_property_key(st, first_arg_or_undefined(args))
   case classify(this) {
     KHandle(h) -> {
@@ -693,7 +638,6 @@ fn has_own_property(
       #(mk_bool(option.is_some(desc)), st)
     }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
-    // String primitives: index chars + "length" via §10.4.3.5.
     KStr(s) -> #(
       mk_bool(option.is_some(string_exotic_own_property(s, key))),
       st,
@@ -719,7 +663,6 @@ fn property_is_enumerable(
       )
     }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
-    // String primitives: index chars are enumerable, "length" is not.
     KStr(s) -> #(
       mk_bool(
         string_exotic_own_property(s, key)
@@ -732,20 +675,15 @@ fn property_is_enumerable(
   }
 }
 
-// ── §20.1.3.6 Object.prototype.toString / .7 valueOf / .5 toLocaleString ────
-
 fn object_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KUndef -> #(mk_string("[object Undefined]"), st)
     KNull -> #(mk_string("[object Null]"), st)
     _ -> {
-      // Steps 4-14: builtinTag. Step 4 `? IsArray(O)` runs (and may throw
-      // on a revoked proxy) BEFORE step 15's Get.
+      // isarray in builtin_tag must run before the get
       let fallback = builtin_tag(st, this)
-      // Step 15: Let tag be ? Get(O, @@toStringTag).
       let #(tag_val, st) =
         rt_obj.t_get_prop(st, this, SymbolKey(rt_types.symbol_to_string_tag))
-      // Step 16: If tag is not a String, set tag to builtinTag.
       let t = case classify(tag_val) {
         KStr(s) -> s
         _ -> fallback
@@ -755,7 +693,6 @@ fn object_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// §20.1.3.6 steps 4-14 builtinTag classification.
 fn builtin_tag(st: Agent, this: JsVal) -> String {
   case classify(this) {
     KBool(_) -> "Boolean"
@@ -764,8 +701,6 @@ fn builtin_tag(st: Agent, this: JsVal) -> String {
     KSym(_) -> "Symbol"
     KBig(_) -> "Object"
     KHandle(h) -> {
-      // Step 4-5: Let isArray be ? IsArray(O) — pierces proxies to their
-      // target (§7.2.2 step 3) and throws TypeError when revoked.
       use <- bool.guard(rt_obj.t_is_array(st, h), "Array")
       case rt_store.t_cell_get(st, h) {
         SObject(kind:, ..) ->
@@ -786,7 +721,7 @@ fn builtin_tag(st: Agent, this: JsVal) -> String {
             RegExpObj(..) -> "RegExp"
             _ -> "Object"
           }
-        // h-shape-slowpath-compat: shaped objects are always Ordinary-kind.
+        // h-shape-slowpath-compat
         SShapedObject(..) -> "Object"
         _ -> "Object"
       }
@@ -806,8 +741,6 @@ fn object_to_locale_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
     _ -> rt_call.t_call_method(st, this, StringKey(Named("toString")), [])
   }
 }
-
-// ── getPrototypeOf / setPrototypeOf / __proto__ / isPrototypeOf ─────────────
 
 fn get_prototype_of(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let target = first_arg_or_undefined(args)
@@ -848,7 +781,6 @@ fn set_prototype_of(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
         "Object prototype may only be an Object or null",
       )
     KHandle(h), Ok(new_proto) -> {
-      // §20.1.2.23 steps 4-5: O.[[SetPrototypeOf]](proto); throw if false.
       let #(status, st) = rt_obj.t_set_prototype_of(st, h, new_proto)
       case status {
         Ok(Nil) -> #(target, st)
@@ -904,8 +836,6 @@ fn is_prototype_of_loop(
   }
 }
 
-// ── freeze / seal / isFrozen / isSealed / isExtensible / preventExtensions ──
-
 type IntegrityLevel {
   Sealed
   Frozen
@@ -923,9 +853,6 @@ fn set_integrity_level(
   }
 }
 
-/// §7.3.16 SetIntegrityLevel ( O, level ). Step 3: a [[PreventExtensions]]
-/// that reports false (a proxy trap refusing) → false; the Object.freeze /
-/// Object.seal callers turn that into a TypeError (§20.1.2.6 step 3).
 fn set_integrity_level_of(
   st: Agent,
   h: Handle,
@@ -939,7 +866,6 @@ fn set_integrity_level_of(
   list.fold(keys, st, fn(st, k) { seal_one_key(st, h, k, level) })
 }
 
-/// §7.3.16 SetIntegrityLevel(O, frozen).
 pub fn freeze(st: Agent, h: Handle) -> Agent {
   set_integrity_level_of(st, h, Frozen)
 }
@@ -960,10 +886,7 @@ fn seal_one_key(
       configurable: Some(False),
     )
   let #(desc, st) = case level {
-    // Step 5.a: DefinePropertyOrThrow(O, k, { [[Configurable]]: false }).
     Sealed -> #(Some(non_configurable), st)
-    // Step 6.a-b: currentDesc = ? O.[[GetOwnProperty]](k); data → also
-    // { [[Writable]]: false }.
     Frozen -> {
       let #(current, st) = rt_obj.t_get_own_property(st, h, k)
       #(
@@ -1003,8 +926,6 @@ fn test_integrity_level(
     KHandle(h) -> {
       let #(extensible, st) = rt_obj.t_is_extensible(st, h)
       use <- bool.guard(extensible, #(mk_bool(False), st))
-      // §7.3.17 step 6: stop at the first key that fails the level — its
-      // [[GetOwnProperty]] read is the last observable trap on a proxy.
       let #(keys, st) = rt_obj.t_own_keys(st, h)
       let #(ok, st) =
         list.fold(keys, #(True, st), fn(acc, k) {
@@ -1041,8 +962,6 @@ fn is_extensible(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §20.1.2.19 Object.preventExtensions: step 2-3 — a false
-/// [[PreventExtensions]] (proxy trap refusing) is a TypeError.
 fn prevent_extensions(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let target = first_arg_or_undefined(args)
   case classify(target) {
@@ -1057,10 +976,6 @@ fn prevent_extensions(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// ── fromEntries / groupBy ───────────────────────────────────────────────────
-
-/// §20.1.2.7 Object.fromEntries — full §24.1.1.2 AddEntriesFromIterable via
-/// the shared `iter_protocol` drain (arc object.gleam:2136-2157).
 fn from_entries(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let iterable = first_arg_or_undefined(args)
   case classify(iterable) {
@@ -1073,7 +988,6 @@ fn from_entries(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
         mk_object(obj_h),
         iterable,
       )
-      // Step 3: ! CreateDataPropertyOrThrow(obj, ToPropertyKey(key), value).
       let #(key, st) = rt_val.t_to_property_key(st, k)
       let #(_ok, st) =
         rt_obj.t_define_own_data(st, obj_h, key, v, True, True, True)
@@ -1082,15 +996,12 @@ fn from_entries(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §22.1.2.4 Object.groupBy — GroupBy(items, callback, property). Full §7.4
-/// iterator protocol via `iter_protocol` (arc object.gleam:2447-2536).
 fn group_by(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(items, callback) = two_args_or_undefined(args)
   case rt_call.is_callable(st, callback) {
     False ->
       rt_val.t_throw_type_error(st, "Object.groupBy callback is not callable")
     True -> {
-      // §7.3.35 step 4: iteratorRecord = ? GetIterator(items, sync).
       let #(rec, st) = iter_protocol.get_iterator_sync(st, items)
       group_by_loop(st, rec, callback, 0, dict.new(), [])
     }
@@ -1108,9 +1019,6 @@ fn group_by_loop(
   case iter_protocol.iterator_step_value(st, rec) {
     #(None, st) -> group_by_finish(st, groups, list.reverse(order))
     #(Some(item), st) -> {
-      // Steps 6.e-6.g: key = ToPropertyKey(? Call(callback, undefined,
-      // «value, k»)); IfAbruptCloseIterator on either. `or_close` speaks
-      // JsVal, so the resolved key round-trips through a primitive JsVal.
       use key_prim, st <- iter_protocol.or_close(st, rec.iterator, fn(st) {
         let #(kv, st) =
           rt_call.t_call_checked(st, callback, mk_undefined(), [
@@ -1136,7 +1044,6 @@ fn group_by_finish(
   order: List(ObjectKey),
 ) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
-  // OrdinaryObjectCreate(null).
   let #(obj_h, st) = rt_obj.t_new_object(st, None)
   let st =
     list.fold(order, st, fn(st, key) {
@@ -1158,8 +1065,6 @@ fn group_by_finish(
     })
   #(mk_object(obj_h), st)
 }
-
-// ── Annex B §B.2.2 legacy accessor management ───────────────────────────────
 
 type AccessorKind {
   AsGetter
@@ -1249,10 +1154,6 @@ fn lookup_accessor_chain(
   }
 }
 
-// ── shared helpers ──────────────────────────────────────────────────────────
-
-/// §10.4.3.5 StringGetOwnProperty — index chars `{W:F,E:T,C:F}` + `"length"`
-/// `{W:F,E:F,C:F}`. Port of arc `mop.string_exotic_own_property`.
 fn string_exotic_own_property(s: String, key: ObjectKey) -> Option(Property) {
   case key {
     StringKey(Named("length")) ->
@@ -1279,7 +1180,6 @@ fn string_exotic_own_property(s: String, key: ObjectKey) -> Option(Property) {
   }
 }
 
-/// `["0", "1", ..., "len-1"]` as JsVals — String exotic §10.4.3.3 step 3.
 fn string_index_keys(i: Int, len: Int) -> List(JsVal) {
   case i >= len {
     True -> []
@@ -1287,7 +1187,6 @@ fn string_index_keys(i: Int, len: Int) -> List(JsVal) {
   }
 }
 
-/// Same index keys as `ObjectKey`s, for callers that look each key back up.
 fn string_index_object_keys(i: Int, len: Int) -> List(ObjectKey) {
   case i >= len {
     True -> []
@@ -1295,8 +1194,6 @@ fn string_index_object_keys(i: Int, len: Int) -> List(ObjectKey) {
   }
 }
 
-/// Re-encode a resolved `ObjectKey` as a primitive JsVal — round-trips
-/// through `t_to_property_key` with no user code (arc `mop.object_key_value`).
 fn object_key_to_val(key: ObjectKey) -> JsVal {
   case key {
     StringKey(pk) -> mk_string(rt_types.key_to_text(pk))
@@ -1304,13 +1201,11 @@ fn object_key_to_val(key: ObjectKey) -> JsVal {
   }
 }
 
-/// CreateArrayFromList wrapped in `#(JsVal, st)`.
 fn ok_array(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
   let #(h, st) = common.alloc_array(st, values, st.realm.array.prototype)
   #(mk_object(h), st)
 }
 
-/// Render an ObjectKey for error messages.
 fn key_text(key: ObjectKey) -> String {
   case key {
     StringKey(pk) -> rt_types.key_to_text(pk)

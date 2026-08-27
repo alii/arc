@@ -1,8 +1,3 @@
-//// Intl.Segmenter segmentation (root rules, approximate).
-////
-//// Pure `String`/`Granularity` → `List(Segment)` — no `Agent`. Indices are
-//// UTF-16 code units, matching what JS length/indexing sees.
-
 import arc/internal/digits
 import arc/rt/intl_data.{
   type Granularity, type Segment, GGrapheme, GSentence, GWord, Segment,
@@ -11,7 +6,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
-/// The segments covering the string, in order.
+// approximate root rules, indices in utf-16 code units
 pub fn segment_string(s: String, granularity: Granularity) -> List(Segment) {
   case granularity {
     GWord -> segment_words(s)
@@ -126,7 +121,6 @@ fn segment_sentences_loop(
       let is_term = g == "." || g == "!" || g == "?"
       case after_terminator && !is_term && g != " " && g != "\n" {
         True ->
-          // Start a new sentence at this grapheme.
           segment_sentences_loop(
             gs,
             next_idx,

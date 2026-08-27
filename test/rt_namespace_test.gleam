@@ -1,7 +1,3 @@
-//// Module Namespace exotic objects (§10.4.6) on the arc/rt runtime: exports
-//// are LIVE views of their binding cells, a TDZ binding is a ReferenceError,
-//// and the object is a read-only, null-prototype, non-extensible record.
-
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
@@ -34,7 +30,6 @@ fn int(i: Int) -> JsVal {
   mk_number(JInt(i))
 }
 
-/// Run `body`, asserting it throws; the error-constructor name.
 fn throws(st: Agent, body: fn(Agent) -> #(a, Agent)) -> String {
   let #(c, st) =
     t_apply_protected(st, fn(st) {
@@ -48,8 +43,6 @@ fn throws(st: Agent, body: fn(Agent) -> #(a, Agent)) -> String {
   name
 }
 
-/// A namespace over `a = 1` (initialized) and `b` (still in TDZ), created
-/// with the exports deliberately out of order.
 fn fixture() -> #(Agent, Handle, JsVal, Handle, Handle) {
   let st = agent()
   let #(cell_a, st) = rt_store.t_cell_new(st, SBox(int(1)))
@@ -63,11 +56,9 @@ pub fn get_reads_the_live_binding_test() {
   let #(st, _, ns, cell_a, _) = fixture()
   let #(v, st) = rt_obj.t_get_prop(st, ns, key("a"))
   assert classify(v) == KNum(JInt(1))
-  // The module body assigns `a = 2` later: the namespace observes it.
   let st = rt_store.t_cell_set(st, cell_a, SBox(int(2)))
   let #(v, st) = rt_obj.t_get_prop(st, ns, key("a"))
   assert classify(v) == KNum(JInt(2))
-  // Unknown names are undefined (null prototype — nothing inherited).
   let #(v, st) = rt_obj.t_get_prop(st, ns, key("toString"))
   assert classify(v) == KUndef
   let #(v, _) = rt_obj.t_get_prop(st, ns, key("nope"))
@@ -77,19 +68,16 @@ pub fn get_reads_the_live_binding_test() {
 pub fn tdz_binding_is_a_reference_error_test() {
   let #(st, ns_h, ns, _, cell_b) = fixture()
   assert throws(st, rt_obj.t_get_prop(_, ns, key("b"))) == "ReferenceError"
-  // [[GetOwnProperty]] performs [[Get]], so key-only reflection throws too.
   assert throws(st, rt_obj.t_get_own_property(_, ns_h, key("b")))
     == "ReferenceError"
   assert throws(st, rt_obj.t_for_in_keys(_, ns)) == "ReferenceError"
   let #(object, st) = rt_obj.t_global_get(st, <<"Object">>)
   assert throws(st, rt_call.t_call_method(_, object, key("keys"), [ns]))
     == "ReferenceError"
-  // …but [[HasProperty]] and [[OwnPropertyKeys]] do not read the binding.
   let #(has, st) = rt_obj.t_has_prop(st, ns, key("b"))
   assert has
   let #(keys, st) = rt_obj.t_own_keys(st, ns_h)
   assert list.length(keys) == 3
-  // Once initialized the binding reads normally.
   let st = rt_store.t_cell_set(st, cell_b, SBox(int(3)))
   let #(v, _) = rt_obj.t_get_prop(st, ns, key("b"))
   assert classify(v) == KNum(JInt(3))
@@ -147,8 +135,6 @@ pub fn writes_and_deletes_fail_test() {
   assert !ok
   let assert SBox(value:) = rt_store.t_cell_get(st, cell_a)
   assert classify(value) == KNum(JInt(1))
-  // Reflect.set(other, "b", v, ns): the receiver-side descriptor read hits
-  // the TDZ binding.
   let #(other, st) = rt_obj.t_new_object_literal(st)
   let assert types.KHandle(other_h) = classify(other)
   assert throws(st, rt_obj.t_set_prop_with_receiver(
@@ -179,8 +165,6 @@ pub fn prototype_and_extensibility_test() {
   assert !ext
   let #(ok, st) = rt_obj.t_prevent_extensions(st, ns_h)
   assert ok
-  // §10.4.6.2 [[SetPrototypeOf]] is SetImmutablePrototype: null → true,
-  // anything else → false.
   let #(ok, st) = rt_obj.t_set_prototype(st, ns_h, None)
   assert ok
   let #(ok, _) =
@@ -245,8 +229,6 @@ pub fn define_own_property_only_accepts_no_ops_test() {
   let #(ok, st) =
     rt_obj.t_define_own_prop(st, ns_h, key("nope"), value_desc(int(1)))
   assert !ok
-  // A value request against a TDZ export is a genuine ReferenceError, not
-  // false — Reflect.defineProperty must throw it.
   assert throws(st, rt_obj.t_define_own_prop(
       _,
       ns_h,
@@ -254,7 +236,6 @@ pub fn define_own_property_only_accepts_no_ops_test() {
       value_desc(int(1)),
     ))
     == "ReferenceError"
-  // Object.defineProperty turns the false into a TypeError.
   let #(object, st) = rt_obj.t_global_get(st, <<"Object">>)
   let #(desc, st) = rt_obj.t_new_object_literal(st)
   let #(_, st) = rt_obj.t_set_prop(st, desc, key("value"), int(9))
@@ -271,7 +252,6 @@ pub fn define_own_property_only_accepts_no_ops_test() {
 
 pub fn binding_cells_survive_collection_test() {
   let #(st, ns_h, ns, cell_a, cell_b) = fixture()
-  // Root the namespace through the global object, then collect.
   let st = rt_obj.t_global_set(st, <<"ns">>, ns)
   let st = rt_gc.t_collect(st, [])
   assert rt_gc.t_is_live(st, ns_h)

@@ -1,7 +1,3 @@
-//// M11: Build(a) CPS monad + ANF let-binding combinators over
-//// carder/ir — bind/host/cons_list/bind_if/guarded_binop/object_key_lit.
-//// Invariant #3: `host` is the ONLY CallHost("js", ..) site in emit_2core/*.
-
 import arc/bytecode/key
 import arc/parser/ast
 import arc/rt/val
@@ -13,13 +9,9 @@ import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 
-/// Tail continuation receives the final Emitter2 + result and returns the
-/// terminal ir.Expr paired with the emitter it finished with; the builder
-/// wraps the tree in Let-bindings and passes the emitter through.
 pub type Build(a) =
   fn(Emitter2, fn(Emitter2, a) -> #(ir.Expr, Emitter2)) -> #(ir.Expr, Emitter2)
 
-/// Rewrap the tree of a `#(tree, e)` continuation result, keeping the emitter.
 pub fn wrap(
   p: #(ir.Expr, Emitter2),
   f: fn(ir.Expr) -> ir.Expr,
@@ -42,10 +34,6 @@ pub fn bind(rhs: ir.Expr) -> Build(ir.Value) {
   }
 }
 
-/// `bind` that also records the fresh var as a known BEAM number (int|float
-/// term). Use for `Convert(BoxInt,·)` and other
-/// rhs whose result is provably a number term — lets `guarded_binop`/`cmp`
-/// elide the `is_number` TermTest on that operand.
 pub fn bind_number(rhs: ir.Expr) -> Build(ir.Value) {
   fn(e, k) {
     let #(name, e) = state.fresh_var(e)
@@ -57,8 +45,6 @@ pub fn bind_number(rhs: ir.Expr) -> Build(ir.Value) {
   }
 }
 
-/// Record an existing `ir.Var` as a known BEAM number and yield it unchanged.
-/// No-op for non-`Var` values (only Var names are tracked).
 pub fn mark_number(v: ir.Value) -> Build(ir.Value) {
   fn(e, k) {
     case v {
@@ -68,9 +54,6 @@ pub fn mark_number(v: ir.Value) -> Build(ir.Value) {
   }
 }
 
-/// True iff `v` is an `ir.Var` previously recorded via `bind_number` /
-/// `mark_number`. All ir.Const* are machine-typed or non-numeric terms, so
-/// only tracked Vars qualify.
 pub fn is_known_number(e: Emitter2, v: ir.Value) -> Bool {
   case v {
     ir.Var(name) -> state.is_known_number(e, name)
@@ -79,7 +62,6 @@ pub fn is_known_number(e: Emitter2, v: ir.Value) -> Bool {
   }
 }
 
-/// Record an existing `ir.Var` as a known JS string and yield it unchanged.
 pub fn mark_string(v: ir.Value) -> Build(ir.Value) {
   fn(e, k) {
     case v {
@@ -89,9 +71,6 @@ pub fn mark_string(v: ir.Value) -> Build(ir.Value) {
   }
 }
 
-/// True iff `v` is a string literal or a var recorded via `mark_string`. Such
-/// an operand can never be a BEAM number, so an arithmetic or relational op
-/// on it skips the integer fast path.
 pub fn is_known_string(e: Emitter2, v: ir.Value) -> Bool {
   case v {
     ir.Var(name) -> state.is_known_string(e, name)
@@ -100,45 +79,32 @@ pub fn is_known_string(e: Emitter2, v: ir.Value) -> Bool {
   }
 }
 
-/// Bind a `js` host call. D2: NO St arg — emit_core M9 injects instance state.
-/// Invariant #3: this is the ONLY CallHost("js", ..) constructor in emit_2core/*.
 pub fn host(op: String, args: List(ir.Value)) -> Build(ir.Value) {
   bind(ir.CallHost("js", op, args))
 }
 
-/// `host` for unit-typed JMut ops — let-binds the call, discards the result.
 pub fn host_unit(op: String, args: List(ir.Value)) -> Build(Nil) {
   then(host(op, args), fn(_) { pure(Nil) })
 }
 
-/// Right-fold `MakeCons` over `vs` onto the `[]` literal (`ir.MakeNil` — lowers
-/// to Core `CNil`, no host call; JPure `empty_list` seed cost ~40k µs/1M calls).
 pub fn cons_list(vs: List(ir.Value)) -> Build(ir.Value) {
   list.fold_right(vs, bind(ir.TermOp(ir.MakeNil, [])), fn(tail_b, head) {
     then(tail_b, fn(tail) { bind(ir.TermOp(ir.MakeCons, [head, tail])) })
   })
 }
 
-/// Bind a fresh tuple `{v₁,…,vₙ}` built from `vs`.
 pub fn make_tuple(vs: List(ir.Value)) -> Build(ir.Value) {
   bind(ir.TermOp(ir.MakeTuple, vs))
 }
 
-/// Project element `i` (0-based, R7) of tuple `v` as a raw Expr — caller
-/// `bind`s it when a Value is needed.
 pub fn tuple_get(v: ir.Value, i: Int) -> ir.Expr {
   ir.TermOp(ir.TupleGet(i), [v])
 }
 
-/// Run a Build to a Values-terminal ir.Expr and the final Emitter2 (the one
-/// the tail continuation received, or the one a diverging Build stopped at).
 pub fn run(b: Build(ir.Value), e: Emitter2) -> #(ir.Expr, Emitter2) {
   b(e, fn(ef, v) { #(ir.Values([v]), ef) })
 }
 
-/// Run a Build to a caller-supplied TERMINAL ir.Expr (Return/Continue/If…)
-/// instead of the default `Values([v])`. M18 arm bodies end in Step-tuple
-/// `Return`s / `Continue(Lresume,…)`.
 pub fn run_to(
   b: Build(a),
   e: Emitter2,
@@ -147,16 +113,7 @@ pub fn run_to(
   b(e, fn(ef, a) { #(tail(ef, a), ef) })
 }
 
-// ── slot-rebind threading (SPEC§9.12 / emit.binding() opt_level) ──
-// A write_slot(_, False, _) inside an arm binds a fresh name INSIDE that arm's
-// tree and leaks it via e.slot_vars to the outer continuation, where it is out
-// of ir.Let-scope. bind_if/bind_block therefore snapshot slot_vars, run each
-// arm, and thread any rebound slot out through the wrapper's result tuple —
-// the join re-binds a fresh name in the OUTER Build so downstream reads stay
-// in scope under Baseline propagate/dead-let (which would otherwise erase the
-// arm-local binder).
-
-/// Slot ids whose name in `after_` differs from `before` (sorted).
+// arms that rebind a slot thread the new name out through the result
 fn slots_rebound(
   before: Dict(Int, String),
   after_: Dict(Int, String),
@@ -170,15 +127,10 @@ fn slots_rebound(
   |> list.sort(int.compare)
 }
 
-/// Sorted-unique union of two slot lists.
 fn merge_slots(a: List(Int), b: List(Int)) -> List(Int) {
   list.append(a, b) |> list.unique |> list.sort(int.compare)
 }
 
-/// Descend a `run` tree's Let-spine and widen its terminal `Values([v])` to
-/// `Values([v, ..extra])`. A non-Values terminal (Break/Throw…) diverges before
-/// the join and is left unchanged — that path never falls through, so the
-/// wrapper's result arity is irrelevant on it.
 fn append_tail(tree: ir.Expr, extra: List(ir.Value)) -> ir.Expr {
   case tree {
     ir.Let(names, rhs, body) -> ir.Let(names, rhs, append_tail(body, extra))
@@ -187,9 +139,6 @@ fn append_tail(tree: ir.Expr, extra: List(ir.Value)) -> ir.Expr {
   }
 }
 
-/// Widen every `Break(label, vs)` in `tree` to `Break(label, vs ++ extra)`.
-/// Descends Let rhs+body, If arms, and nested Block bodies — the shapes an
-/// emit_chain body can nest a Break under (Loop/Try/Switch don't occur there).
 fn widen_breaks(
   tree: ir.Expr,
   label: String,
@@ -205,7 +154,6 @@ fn widen_breaks(
   }
 }
 
-/// Mint a fresh var per `slots`, set_slot_var each, return names in slot order.
 fn rebind_slots(e: Emitter2, slots: List(Int)) -> #(Emitter2, List(String)) {
   let #(e, rev) =
     list.fold(slots, #(e, []), fn(acc, slot) {
@@ -216,8 +164,6 @@ fn rebind_slots(e: Emitter2, slots: List(Int)) -> #(Emitter2, List(String)) {
   #(e, list.reverse(rev))
 }
 
-/// Current ir.Var for each `slots` under `e_arm` — the arm's rebound name if
-/// it wrote the slot, else the entry-snapshot name (in scope at arm entry).
 fn arm_slot_vals(e_arm: Emitter2, slots: List(Int)) -> List(ir.Value) {
   list.map(slots, fn(s) { ir.Var(state.get_slot_var(e_arm, s)) })
 }
@@ -230,8 +176,6 @@ pub fn bind_if(
   bind_if_typed(cond, ir.TTerm, t, f)
 }
 
-/// As `bind_if` but the If's result type is `[TI32]` — for raw i32 truth
-/// values fed straight to a downstream `ir.If` cond (no bool-atom round-trip).
 pub fn bind_if_i32(
   cond: ir.Value,
   t: Build(ir.Value),
@@ -252,7 +196,6 @@ fn bind_if_typed(
   v
 }
 
-/// `bind_if` yielding two term values from each arm (no pair tuple built).
 pub fn bind_if2(
   cond: ir.Value,
   t: Build(#(ir.Value, ir.Value)),
@@ -316,11 +259,7 @@ fn fresh_vars(e: Emitter2, n: Int) -> #(Emitter2, List(String)) {
   }
 }
 
-/// Run `body` under a try that, on a JS throw, closes `iter` with an
-/// abrupt completion and rethrows (§7.4.8 IteratorClose on a throw
-/// completion — the close's own throw is dropped, the original wins). Slot
-/// rebinds inside `body` thread out through the Try's result the way
-/// `bind_if` threads an arm's.
+// §7.4.8 close on throw, the original error wins
 pub fn close_iter_on_throw(iter: ir.Value, body: Build(Nil)) -> Build(Nil) {
   fn(e: Emitter2, k) {
     let sv0 = e.slot_vars
@@ -354,18 +293,10 @@ pub fn close_iter_on_throw(iter: ir.Value, body: Build(Nil)) -> Build(Nil) {
   }
 }
 
-/// §7.1.2 ToBoolean(v) as a raw i32 for `ir.If` conds: one call to the
-/// guard-dispatch `to_boolean_i32` kernel. The `true`/`false`/integer arms
-/// used to be inlined ahead of the call; with the kernel dispatching on the
-/// wire form the call costs the same as the inline chain (~1.5ns either way,
-/// measured) and the chain was ~30 Core lines per site. Shared by
-/// `truthy_if` and `stmt.emit_cond_i32`'s fallthrough.
 pub fn truthy_i32(v: ir.Value) -> Build(ir.Value) {
   host("truthy", [v])
 }
 
-/// `if (js-truthy v) then t else f`. i32 via `truthy_i32` then a single
-/// `bind_if`, so `t`/`f` are NOT duplicated.
 pub fn truthy_if(
   v: ir.Value,
   t: Build(ir.Value),
@@ -374,9 +305,7 @@ pub fn truthy_if(
   then(truthy_i32(v), bind_if(_, t, f))
 }
 
-/// i32 1 iff `v` is the atom `true`. An `ir.If` tests its condition against
-/// 0, so the Bool result of a host op (`strict_eq`, `is_nullish`) must go
-/// through this before it can be a condition: a bare `false` atom is not 0.
+// ir.If tests against 0 and a bare false atom is not 0
 pub fn is_true_expr(v: ir.Value) -> ir.Expr {
   ir.NumTerm(ir.NEq, v, ir.ConstAtom("true"))
 }
@@ -385,12 +314,10 @@ pub fn is_true(v: ir.Value) -> Build(ir.Value) {
   bind(is_true_expr(v))
 }
 
-/// `host(op, args)` for a Bool-returning op, as an i32 condition.
 pub fn host_bool(op: String, args: List(ir.Value)) -> Build(ir.Value) {
   then(host(op, args), is_true)
 }
 
-/// `if (v is null|undefined) then t else f`.
 pub fn nullish_if(
   v: ir.Value,
   t: Build(ir.Value),
@@ -415,9 +342,6 @@ pub fn bind_block(body: fn(String) -> Build(ir.Value)) -> Build(ir.Value) {
           _,
         ))
       _ -> {
-        // Fall-through gets the arm's rebound names; every Break to `label`
-        // (chain_guard's short-circuit) gets the entry-snapshot names — the
-        // write_slot lies past the guard, so sv0's name is the live value.
         let body_tree =
           append_tail(body_tree, arm_slot_vals(e_b, carried))
           |> widen_breaks(label, arm_slot_vals(e, carried))
@@ -437,7 +361,6 @@ pub fn map(b: Build(a), f: fn(a) -> c) -> Build(c) {
   fn(e, k) { b(e, fn(e, a) { k(e, f(a)) }) }
 }
 
-/// Sequence a list of Build actions left-to-right, collecting results in order.
 pub fn seq(bs: List(Build(a))) -> Build(List(a)) {
   case bs {
     [] -> pure([])
@@ -445,8 +368,6 @@ pub fn seq(bs: List(Build(a))) -> Build(List(a)) {
   }
 }
 
-/// Let-bind `rhs` once, then bind `n` fresh vars to TupleGet(0..n-1) of it
-/// (0-based per R7). Returns the projection Values in index order.
 pub fn bind_n(rhs: ir.Expr, n: Int) -> Build(List(ir.Value)) {
   then(bind(rhs), fn(tup) { proj_from(tup, 0, n) })
 }
@@ -461,11 +382,6 @@ fn proj_from(tup: ir.Value, i: Int, n: Int) -> Build(List(ir.Value)) {
   }
 }
 
-// ── Numeric fast-path (HANDOFF §5 / SPEC §M11) ──────────────────────────────
-
-/// i32 `is_number(v)` guard, or a constant `1` when `v` is statically a known
-/// BEAM number — the elision seam for `guarded_binop`/`cmp`. Returns the guard
-/// Value plus whether it was elided.
 fn number_guard(v: ir.Value) -> Build(#(ir.Value, Bool)) {
   fn(e, k) {
     case is_known_number(e, v) {
@@ -476,12 +392,7 @@ fn number_guard(v: ir.Value) -> Build(#(ir.Value, Bool)) {
   }
 }
 
-/// i32 `is_number(a) & is_number(b)`, eliding either/both TermTests when the
-/// operand is a known number. TermTest yields TI32 (ir.gleam:939). When both
-/// guards are dynamic, combine via a nested `If` (`ga ? gb : 0`) rather than
-/// `Num(IAnd(W32))` — the latter lowers to a cross-module `rt_num:i32_and`
-/// call, the former to an inline Core `case`. Second tuple element is True
-/// when BOTH were elided — caller drops the whole If.
+// nested if, not IAnd: IAnd lowers to a cross-module call
 fn both_numbers(a: ir.Value, b: ir.Value) -> Build(#(ir.Value, Bool)) {
   use #(ga, ea) <- then(number_guard(a))
   use #(gb, eb) <- then(number_guard(b))
@@ -497,17 +408,11 @@ fn both_numbers(a: ir.Value, b: ir.Value) -> Build(#(ir.Value, Bool)) {
   }
 }
 
-/// `+ - *` on two BEAM number terms: the total `arc_rt_ops_ffi` kernel
-/// (native op, then widen an integer past 2^53 - 1 to a double and keep the
-/// sign of an integer zero product). The result is marked a known number.
 pub fn num_binop(op: String, a: ir.Value, b: ir.Value) -> Build(ir.Value) {
   let slow = host(op, [a, b])
   then(int_or(op, a, b, slow, slow), mark_number)
 }
 
-/// The inline integer arm of a `num_*` op when both operands are BEAM
-/// integers (`slow` on a range miss), else `other`. Ops without an integer
-/// arm are just `other`.
 fn int_or(
   op: String,
   a: ir.Value,
@@ -532,7 +437,6 @@ fn int_or(
 
 const max_safe_int = 9_007_199_254_740_991
 
-/// i32 `is_integer(a) & is_integer(b)`; an integer constant needs no test.
 fn both_ints(a: ir.Value, b: ir.Value) -> Build(ir.Value) {
   case is_const_int(a), is_const_int(b) {
     True, True -> pure(ir.ConstI32(1))
@@ -553,9 +457,6 @@ fn is_const_int(v: ir.Value) -> Bool {
   }
 }
 
-/// Bare BEAM `+ - *` on two integers (never raises). The result stands when
-/// it fits 2^53 - 1 either side — and, for `*`, is not the zero whose sign
-/// only the kernel knows — else the kernel `slow` redoes the op.
 fn int_arm(
   op: ir.NumTermOp,
   a: ir.Value,
@@ -583,13 +484,6 @@ fn int_arm(
   }
 }
 
-/// JS arithmetic `+ - *`: the inline integer arm when both operands are BEAM
-/// integers; past that, two BEAM numbers take the pure `num_*` kernel (bare
-/// result, no state pair) and only a non-number operand reaches the `*_any`
-/// operator (ToPrimitive, string concat, bigint, throw-on-symbol). `+` folds
-/// the number and string cases into the one pure `add_prim` kernel, which
-/// misses only for objects, symbols and mixed BigInt. When BOTH operands are
-/// statically known numbers the kernel arm is the pure `num_*` op alone.
 pub fn guarded_binop(
   fast_op: String,
   slow_op: String,
@@ -603,9 +497,6 @@ pub fn guarded_binop(
       False -> {
         let str = is_known_string(e, a) || is_known_string(e, b)
         case str || non_number_const(a) || non_number_const(b), fast_op {
-          // A string / atom literal operand never takes a numeric arm:
-          // `"x" + v` is one `add_prim` (miss → the full operator), and with
-          // a known string side the result is a string too.
           True, "num_add" -> {
             let add = miss_or(host("add_prim", [a, b]), any)
             case str {
@@ -634,8 +525,6 @@ fn non_number_const(v: ir.Value) -> Bool {
   }
 }
 
-/// `r <- probe; r =:= miss ? slow : r` for a pure kernel whose result may
-/// itself be an atom (`js_nan`), so `IsAtom` cannot tell a miss apart.
 pub fn miss_or(
   probe: Build(ir.Value),
   slow: Build(ir.Value),
@@ -645,8 +534,6 @@ pub fn miss_or(
   bind_if(m, slow, pure(r))
 }
 
-/// Two BEAM numbers → the pure `pure_op` kernel, else `slow`; the guard is
-/// elided per operand already known to be a number.
 fn num_or_any(
   pure_op: String,
   a: ir.Value,
@@ -660,17 +547,11 @@ fn num_or_any(
   }
 }
 
-/// JS `/`: two BEAM numbers → the pure `num_div` kernel (exact integer
-/// quotients stay integers), anything else the full operator.
 pub fn guarded_div(a: ir.Value, b: ir.Value) -> Build(ir.Value) {
   num_or_any("num_div", a, b, host("div", [a, b]))
 }
 
-/// JS `%`: probe the pure `num_mod` kernel (two BEAM numbers); on `miss`
-/// the full operator. With a positive integer literal divisor and an integer
-/// dividend, §6.1.6.1.6 is `erlang:rem` (sign of the dividend, an inline
-/// instruction) except for the -0 a negative dividend's zero remainder must
-/// be, which the kernel produces.
+// rem matches js % except the -0 of a negative dividend
 pub fn guarded_mod(a: ir.Value, b: ir.Value) -> Build(ir.Value) {
   let kernel = miss_or(host("num_mod", [a, b]), host("mod", [a, b]))
   case b {
@@ -695,9 +576,6 @@ pub fn guarded_mod(a: ir.Value, b: ir.Value) -> Build(ir.Value) {
   }
 }
 
-/// JS unary `-`: a BEAM number → the pure `num_neg` kernel (a number again,
-/// so the result is marked when the operand was known), else the full
-/// operator (ToNumeric, BigInt).
 pub fn guarded_neg(v: ir.Value) -> Build(ir.Value) {
   fn(e, k) {
     case is_known_number(e, v) {
@@ -711,8 +589,6 @@ pub fn guarded_neg(v: ir.Value) -> Build(ir.Value) {
   }
 }
 
-/// JS relational `< <= > >= ==`: as `guarded_binop` but the fast arm's
-/// NumTerm yields TI32 (gotcha #4), so it is re-branched to a JS bool atom.
 pub fn guarded_cmp(
   fast: ir.NumTermOp,
   slow_op: String,
@@ -721,7 +597,6 @@ pub fn guarded_cmp(
 ) -> Build(ir.Value) {
   fn(e, k) {
     case is_known_string(e, a) || is_known_string(e, b) {
-      // A string operand never takes the numeric arm.
       True -> then(host(slow_op, [a, b]), i32_to_js_bool)(e, k)
       False -> guarded_cmp_numeric(fast, slow_op, a, b)(e, k)
     }
@@ -746,21 +621,11 @@ fn guarded_cmp_numeric(
   case elided {
     True -> fast_arm
     False ->
-      // The slow arm's host op (`t_lt`/`t_le`/…) returns the same i32 truth
-      // value as the fast arm's NumTerm, so it needs the identical re-branch.
       bind_if(both, fast_arm, then(host(slow_op, [a, b]), i32_to_js_bool))
   }
 }
 
-/// Re-branch a wasm-style i32 truth value (`0`/`1`) into the JS boolean it
-/// denotes. The IR's comparison ops and the `*_fast` probes yield TI32
-/// (gotcha #4) and the `t_lt`/`t_eq`/`t_in`/`t_instance_of` host ops return
-/// the same `0|1`, but the RESULT of a JS `<`/`==`/`in`/`instanceof` is a
-/// **Boolean** (§13.10.1, §13.10.2, §7.2.14). The difference is observable —
-/// `typeof (a instanceof B)` and `"" + (a in o)` — so an i32 must never
-/// escape as a JS value. Use at the seam where the truth value becomes the
-/// expression's result; NOT on a value headed straight for an `ir.If` cond
-/// (see `cond_cmp`, which deliberately keeps the raw i32).
+// js comparison results are booleans, never leak a raw i32
 pub fn i32_to_js_bool(v: ir.Value) -> Build(ir.Value) {
   fn(e: Emitter2, k) {
     let rc = e.consts
@@ -768,9 +633,6 @@ pub fn i32_to_js_bool(v: ir.Value) -> Build(ir.Value) {
   }
 }
 
-/// JS relational `< <= > >=` as a RAW i32 truth value for use directly as an
-/// `ir.If` cond (loop conditions) — skips the bool-atom wrap + `truthy` unwrap
-/// that `guarded_cmp` incurs. Slow arm coerces the JS bool result to i32.
 pub fn cond_cmp(
   fast: ir.NumTermOp,
   slow_op: String,
@@ -803,9 +665,6 @@ fn cond_cmp_numeric(
   }
 }
 
-/// ToNumeric fast path: `is_number(v) ? v : host("to_numeric", v)`. Skips the
-/// JMut host call + St-pair unpack when `v` is already a BEAM number. When `v`
-/// is a statically known number the guard itself is elided (returns `v`).
 pub fn guarded_unary_numeric(v: ir.Value) -> Build(ir.Value) {
   fn(e, k) {
     case is_known_number(e, v) {
@@ -819,17 +678,9 @@ pub fn guarded_unary_numeric(v: ir.Value) -> Build(ir.Value) {
   }
 }
 
-// ── Static property keys (invariant #4 / SPEC §2.3) ─────────────────────────
-
-/// Emit the WIRE `ObjectKey` tuple (`{string_key, {index|named|private, ..}}`)
-/// for a compile-time-known property key. THE one static-key canonicalizer:
-/// callers `then` the result with no runtime `to_property_key` call, so the
-/// output MUST be canonical (`{"5":v}`/`{5:v}`/`{5n:v}` all → `{index,5}`).
-/// `KeyComputed` is a caller contract violation — M12 routes it through
-/// `host("to_property_key")`.
+// the one static key canonicalizer, output must be canonical
 pub fn object_key_lit(pk: ast.PropertyKey) -> Build(ir.Value) {
   let inner = case pk {
-    // IdentifierName never starts with a digit → never an array-index string.
     ast.KeyIdentifier(name:, ..) -> wire_named(name)
     ast.KeyString(value: s, ..) -> wire_prop_key(key.canonical_key(s))
     ast.KeyNumber(value: ast.FiniteNumber(f), ..) ->
@@ -839,9 +690,6 @@ pub fn object_key_lit(pk: ast.PropertyKey) -> Build(ir.Value) {
       }
     ast.KeyNumber(value: ast.InfiniteNumber, ..) -> wire_named("Infinity")
     ast.KeyBigInt(value: n, ..) -> wire_prop_key(key.index_key(n))
-    // `name` already carries the leading '#' (ast.gleam:558). D9: the runtime
-    // uid is minted at class-eval time — M12 resolves KeyPrivate via the
-    // class-scope local instead, so this arm keeps the match total.
     ast.KeyPrivate(name:, ..) ->
       ir.TermOp(ir.MakeTuple, [
         ir.ConstAtom("private"),
@@ -858,7 +706,6 @@ fn wire_prop_key(k: key.PropertyKey) -> ir.Expr {
   case k {
     key.Index(n) -> wire_index(n)
     key.Named(s) -> wire_named(s)
-    // canonical_key/index_key never yield Private (key.gleam:55).
     key.Private(text) ->
       ir.TermOp(ir.MakeTuple, [
         ir.ConstAtom("private"),

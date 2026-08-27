@@ -1,8 +1,3 @@
-//// A compiled script's shared-runtime template: the constant pool holds wire
-//// values that classify as the source literals (integral literals in i32
-//// range as the int row, everything else finite as the float row, the same
-//// rule compiled code uses), nested function templates included.
-
 import arc/bytecode/opcode
 import arc/compiler
 import arc/internal/tuple_array
@@ -26,7 +21,6 @@ fn constant_kinds(t: FuncTemplate) -> List(JsValKind) {
   tuple_array.to_list(t.constants) |> list.map(classify)
 }
 
-/// Constant kinds of `t` and every nested template, depth first.
 fn all_constant_kinds(t: FuncTemplate) -> List(JsValKind) {
   list.flatten([
     constant_kinds(t),
@@ -51,7 +45,6 @@ pub fn integral_literal_outside_i32_is_float_row_test() {
   let kinds = constant_kinds(compile("var big = 4294967296; var neg = -7;"))
   assert list.contains(kinds, KNum(JFloat(4_294_967_296.0)))
   assert !list.contains(kinds, KNum(JInt(4_294_967_296)))
-  // `-7` folds to the int -7, the value unary minus gives the literal 7.
   assert list.contains(kinds, KNum(JInt(-7)))
 }
 
@@ -69,8 +62,6 @@ pub fn nested_function_template_constants_classify_test() {
 }
 
 pub fn binding_seeds_classify_as_undefined_and_tdz_test() {
-  // The binding prologue seeds `var` slots with undefined and `let` slots
-  // with the TDZ sentinel, both through the constant pool.
   let kinds = all_constant_kinds(compile("function f() { var v; let l = 1; }"))
   assert list.contains(kinds, KUndef)
   assert list.contains(kinds, KTdz)
@@ -91,8 +82,6 @@ pub fn constant_pool_never_holds_heap_references_test() {
   })
 }
 
-/// GetTemplateObject site indices of `t` and every nested template, depth
-/// first.
 fn all_template_sites(t: FuncTemplate) -> List(Int) {
   let own =
     tuple_array.to_list(t.bytecode)
@@ -118,16 +107,12 @@ const tagged_source = "
 "
 
 pub fn compiling_twice_gives_equal_templates_test() {
-  // Nothing in the compiler reads VM-global state: the same source yields
-  // the same template tree, nested children and template sites included.
   assert compile(tagged_source) == compile(tagged_source)
   assert compile("eval('1'); new Function('return id`x`')")
     == compile("eval('1'); new Function('return id`x`')")
 }
 
 pub fn template_sites_number_the_unit_in_source_order_test() {
-  // One counter threads through every nested function of the unit, so no
-  // two sites share an index and the numbering is dense from 0.
   let sites = all_template_sites(compile(tagged_source))
   assert list.length(sites) == 8
   assert list.sort(sites, int.compare) == [0, 1, 2, 3, 4, 5, 6, 7]

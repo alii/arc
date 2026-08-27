@@ -1,12 +1,3 @@
-//// `rt_builtins/error` — Error + NativeError prototypes/constructors +
-//// Error.prototype.toString / stack accessor (SPEC §7.M6
-//// builtins-object-function-error).
-////
-//// Init + dispatch over the threaded `Agent` model; JS errors raise via
-//// `t_throw(st, e)` (D7).
-////
-//// **Return-tuple order is `#(V, St')` — value FIRST (R1).**
-
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
@@ -32,8 +23,6 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-/// All error-related builtin types (arc `error.gleam:22-34`). Maps onto the
-/// `Realm` record's error/type_error/.. fields.
 pub type ErrorFamily {
   ErrorFamily(
     error: BuiltinPair,
@@ -48,20 +37,16 @@ pub type ErrorFamily {
   )
 }
 
-/// Set up all error prototypes and constructors as `KNative` cells. `realm`
-/// is the id of the realm being built (the stack setter is realm-attributed).
 pub fn init(
   st: Agent,
   object_proto: Handle,
   fn_proto: Handle,
   realm: Int,
 ) -> #(ErrorFamily, Agent) {
-  // Error.prototype.toString method.
   let #(to_string_methods, st) =
     common.alloc_methods(st, fn_proto, [
       #("toString", ErrorN(ErrorPrototypeToString), 0),
     ])
-  // V8 static extensions on the base Error only.
   let #(capture_methods, st) =
     common.alloc_methods(st, fn_proto, [
       #("captureStackTrace", ErrorN(ErrorCaptureStackTrace), 2),
@@ -69,7 +54,6 @@ pub fn init(
     ])
   let #(stl_prop, st) = common.builtin_property(st, mk_number(JFloat(10.0)))
   let error_static = [#("stackTraceLimit", stl_prop), ..capture_methods]
-  // Error — base type with name + message on prototype.
   let #(name_prop, st) = common.builtin_property(st, mk_string("Error"))
   let #(msg_prop, st) = common.builtin_property(st, mk_string(""))
   let #(error, st) =
@@ -83,7 +67,6 @@ pub fn init(
       1,
       error_static,
     )
-  // Error.prototype.stack — accessor {get, set, E:F, C:T}.
   let #(stack_accessor, st) =
     common.alloc_get_set_accessor(
       st,
@@ -94,8 +77,6 @@ pub fn init(
     )
   let st =
     common.add_named_property(st, error.prototype, "stack", stack_accessor)
-  // Error subclasses: proto → %Error.prototype%, ctor.[[Prototype]] → %Error%
-  // (§20.5.6.2).
   let #(type_error, st) = subclass(st, error, "TypeError", 1, ErrorConstructor)
   let #(reference_error, st) =
     subclass(st, error, "ReferenceError", 1, ErrorConstructor)
@@ -105,10 +86,8 @@ pub fn init(
     subclass(st, error, "SyntaxError", 1, ErrorConstructor)
   let #(eval_error, st) = subclass(st, error, "EvalError", 1, ErrorConstructor)
   let #(uri_error, st) = subclass(st, error, "URIError", 1, ErrorConstructor)
-  // AggregateError ( errors, message [ , options ] ) — §20.5.7.1.1.
   let #(aggregate_error, st) =
     subclass(st, error, "AggregateError", 2, AggregateErrorConstructor)
-  // SuppressedError ( error, suppressed, message ) — Explicit Resource Mgmt.
   let #(suppressed_error, st) =
     subclass(st, error, "SuppressedError", 3, SuppressedErrorConstructor)
   #(
@@ -127,8 +106,6 @@ pub fn init(
   )
 }
 
-/// One NativeError subclass — proto inherits from %Error.prototype%, ctor's
-/// [[Prototype]] is %Error% (§20.5.6.2).
 fn subclass(
   st: Agent,
   base: BuiltinPair,
@@ -149,10 +126,6 @@ fn subclass(
   )
 }
 
-// ── dispatch ────────────────────────────────────────────────────────────────
-
-/// Per-module dispatch for Error native functions. `new_target` is `undefined`
-/// for a plain call; `dispatch_native_construct` re-enters with it set.
 pub fn dispatch(
   st: Agent,
   native: ErrorNative,
@@ -174,7 +147,6 @@ pub fn dispatch(
   }
 }
 
-/// §20.5.1.1 Error ( message [ , options ] ) — steps 1-5.
 fn call_error_ctor(
   st: Agent,
   fallback_proto: Handle,
@@ -182,9 +154,7 @@ fn call_error_ctor(
   new_target: JsVal,
 ) -> #(JsVal, Agent) {
   let #(message, options) = helpers.two_args_or_undefined(args)
-  // Steps 1-2: OrdinaryCreateFromConstructor(newTarget, "%Error.prototype%").
   let #(proto, st) = proto_from_new_target(st, new_target, fallback_proto)
-  // Step 3: If message !== undefined, this.message = ToString(message).
   case classify(message) {
     KUndef -> {
       let #(h, st) = alloc_error(st, proto, None, options)
@@ -195,7 +165,7 @@ fn call_error_ctor(
       #(mk_object(h), st)
     }
     _ -> {
-      // Step 3a: ToString(message) — runs BEFORE options "cause" get.
+      // tostring(message) runs before reading cause
       let #(msg, st) = rt_val.t_to_string(st, message)
       let #(h, st) = alloc_error(st, proto, Some(msg), options)
       #(mk_object(h), st)
@@ -203,7 +173,6 @@ fn call_error_ctor(
   }
 }
 
-/// §20.5.7.1.1 AggregateError ( errors, message [ , options ] ) — steps 1-7.
 fn aggregate_error_ctor(
   st: Agent,
   fallback_proto: Handle,
@@ -212,7 +181,6 @@ fn aggregate_error_ctor(
 ) -> #(JsVal, Agent) {
   let #(errors, message, options) = helpers.three_args_or_undefined(args)
   let #(proto, st) = proto_from_new_target(st, new_target, fallback_proto)
-  // Steps 3-4: message + cause.
   let #(h, st) = case classify(message) {
     KUndef -> alloc_error(st, proto, None, options)
     _ -> {
@@ -220,8 +188,6 @@ fn aggregate_error_ctor(
       alloc_error(st, proto, Some(msg), options)
     }
   }
-  // Steps 5-6: IteratorToList(? GetIterator(errors, sync)) → fresh Array,
-  // installed as "errors" {W:T, E:F, C:T}. arc error.gleam:284-298.
   let #(rec, st) = iter_protocol.get_iterator_sync(st, errors)
   let #(collected, st) = iter_protocol.iterator_to_list(st, rec)
   let #(arr_h, st) = common.alloc_array(st, collected, st.realm.array.prototype)
@@ -230,17 +196,6 @@ fn aggregate_error_ctor(
   #(mk_object(h), st)
 }
 
-/// SuppressedError ( error, suppressed, message ) — Explicit Resource
-/// Management proposal.
-///
-///   1. If NewTarget is undefined, let newTarget be the active function object.
-///   2. Let O be ? OrdinaryCreateFromConstructor(newTarget, "%SuppressedError.prototype%").
-///   3. If message is not undefined, then
-///      a. Let msg be ? ToString(message).
-///      b. Perform CreateNonEnumerableDataPropertyOrThrow(O, "message", msg).
-///   4. Perform ! CreateNonEnumerableDataPropertyOrThrow(O, "error", error).
-///   5. Perform ! CreateNonEnumerableDataPropertyOrThrow(O, "suppressed", suppressed).
-///   6. Return O.
 fn suppressed_error_ctor(
   st: Agent,
   fallback_proto: Handle,
@@ -248,10 +203,8 @@ fn suppressed_error_ctor(
   new_target: JsVal,
 ) -> #(JsVal, Agent) {
   let #(err, suppressed, message) = helpers.three_args_or_undefined(args)
-  // Steps 1-2: OrdinaryCreateFromConstructor(newTarget, ...).
   let #(proto, st) = proto_from_new_target(st, new_target, fallback_proto)
   let #(msg_opt, st) = case classify(message) {
-    // Step 3: message is undefined — no "message" property
     KUndef -> #(None, st)
     _ -> {
       let #(s, st) = rt_val.t_to_string(st, message)
@@ -261,8 +214,6 @@ fn suppressed_error_ctor(
   alloc_suppressed(st, proto, msg_opt, err, suppressed)
 }
 
-/// Allocate a SuppressedError instance with non-enumerable error/suppressed
-/// (and optional message) data properties, plus a stack trace.
 fn alloc_suppressed(
   st: Agent,
   proto: Handle,
@@ -270,8 +221,6 @@ fn alloc_suppressed(
   err: JsVal,
   suppressed: JsVal,
 ) -> #(JsVal, Agent) {
-  // Steps 3-5 define "message" (when present) before "error"/"suppressed";
-  // property creation order is the seq-stamp order.
   let #(msg_props, st) = case message {
     Some(msg) -> {
       let #(mp, st) = common.builtin_property(st, mk_string(msg))
@@ -288,9 +237,6 @@ fn alloc_suppressed(
   #(mk_object(h), st)
 }
 
-/// DisposeResources step 1.b.i: "Let error be a newly created SuppressedError
-/// object" with non-enumerable "error" (the new exception) and "suppressed"
-/// (the previously pending exception) properties, in the running realm.
 pub fn make_suppressed_error(
   st: Agent,
   err: JsVal,
@@ -305,10 +251,6 @@ pub fn make_suppressed_error(
   )
 }
 
-/// §20.5.1.1 / §20.5.6.1.1 steps 1-2: with NewTarget undefined, newTarget
-/// is the active function object, whose own `prototype` is the `home`
-/// intrinsic its token carries; otherwise GetPrototypeFromConstructor with
-/// the same %NativeError.prototype% of newTarget's realm as the default.
 fn proto_from_new_target(
   st: Agent,
   new_target: JsVal,
@@ -325,9 +267,7 @@ fn proto_from_new_target(
   }
 }
 
-/// The member of `realm`'s error family that `home` is of its own realm.
-/// The token carries only the handle, so `home` is matched against every
-/// registered realm's family to learn which member it is.
+// maps home to the same error kind in realm
 fn same_error_proto(st: Agent, home: Handle, realm: Realm) -> Handle {
   let wanted = error_protos(realm)
   [st.realm, ..dict.values(st.realms)]
@@ -351,8 +291,6 @@ fn error_protos(r: Realm) -> List(Handle) {
   ]
 }
 
-/// Allocate an error object with optional `message` and install `cause` from
-/// `options` (§20.5.8.1 InstallErrorCause). Attaches a stack header.
 fn alloc_error(
   st: Agent,
   proto: Handle,
@@ -372,7 +310,6 @@ fn alloc_error(
   install_error_cause(st, h, options)
 }
 
-/// §20.5.8.1 InstallErrorCause ( O, options ).
 fn install_error_cause(
   st: Agent,
   h: Handle,
@@ -396,8 +333,6 @@ fn install_error_cause(
   }
 }
 
-/// Read the `name` data property off an error prototype (walks the chain,
-/// bounded by `fuel`). Defaults to "Error".
 fn error_name(st: Agent, proto: Option(Handle), fuel: Int) -> String {
   case proto {
     Some(h) if fuel > 0 ->
@@ -417,21 +352,8 @@ fn error_name(st: Agent, proto: Option(Handle), fuel: Int) -> String {
   }
 }
 
-/// Default Error.stackTraceLimit (V8 parity). Used when the constructor's
-/// `stackTraceLimit` property is missing or not a number.
 const default_stack_limit = 10
 
-/// Build a V8-style stack-trace string. `header` is the first line — the
-/// error's `name: message` (or just `name`). The frames are `Agent.frames`
-/// at the moment the error is constructed: the executing function first,
-/// then its callers. Honors Error.stackTraceLimit. Port of arc
-/// `state.build_stack_trace` (`state.gleam:764-790`). Lines look like:
-///
-///   TypeError: x is not a function
-///       at inner (script:3)
-///       at outer (script:7)
-///       at script:10
-///
 fn build_stack_trace(st: Agent, header: String) -> String {
   let frames = list.take(st.frames, stack_trace_limit(st))
   case list.map(frames, format_frame) {
@@ -440,8 +362,6 @@ fn build_stack_trace(st: Agent, header: String) -> String {
   }
 }
 
-/// Format one frame: `    at name (script:line)`, or `    at script:line`
-/// when the function is anonymous (e.g. the top-level script body).
 fn format_frame(frame: FrameInfo) -> String {
   let FrameInfo(name:, script:, line:) = frame
   let loc = case line {
@@ -454,9 +374,6 @@ fn format_frame(frame: FrameInfo) -> String {
   }
 }
 
-/// Read Error.stackTraceLimit off the Error constructor. Non-numbers fall
-/// back to the default; Infinity means "no limit"; negatives and NaN clamp to
-/// 0 (no frames). Port of arc `state.stack_trace_limit`.
 fn stack_trace_limit(st: Agent) -> Int {
   let ctor = rt_store.t_cell_get(st, st.realm.error.constructor)
   case rt_obj.as_sobject(st, ctor) {
@@ -466,9 +383,8 @@ fn stack_trace_limit(st: Agent) -> Int {
           case classify(v) {
             KNum(JInt(n)) -> int.max(0, n)
             KNum(JFloat(f)) -> int.max(0, float.truncate(f))
-            // Effectively unbounded — far above any real call depth.
+            // effectively unbounded
             KNum(JPosInf) -> 1_000_000
-            // -Infinity is a negative limit; NaN's ToIntegerOrInfinity is 0.
             KNum(JNegInf) | KNum(JNan) -> 0
             _ -> default_stack_limit
           }
@@ -478,16 +394,12 @@ fn stack_trace_limit(st: Agent) -> Int {
   }
 }
 
-/// Write the `[[ErrorData]]` stack string: the header plus one line per
-/// `Agent.frames` entry (header-only when no frames are recorded).
 pub fn attach_stack(st: Agent, h: Handle, name: String, msg: String) -> Agent {
   let header = case msg {
     "" -> name
     _ -> name <> ": " <> msg
   }
   let trace = build_stack_trace(st, header)
-  // Non-error objects (Error.captureStackTrace targets) get a non-enumerable
-  // own `stack` data property, matching V8. arc state.gleam:821-849.
   let #(stack_prop, st) = common.builtin_property(st, mk_string(trace))
   let st = rt_obj.devolve(st, h)
   rt_store.t_cell_update(st, h, fn(slot) {
@@ -501,7 +413,6 @@ pub fn attach_stack(st: Agent, h: Handle, name: String, msg: String) -> Agent {
   })
 }
 
-/// Error.captureStackTrace ( target [ , constructorOpt ] ) — V8 extension.
 fn capture_stack_trace(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   case classify(helpers.first_arg_or_undefined(args)) {
     KHandle(h) -> {
@@ -517,7 +428,6 @@ fn capture_stack_trace(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// Read target's own `name`/`message` data properties for the stack header.
 fn target_header_parts(st: Agent, h: Handle) -> #(String, String) {
   let read = fn(key) {
     case rt_obj.as_sobject(st, rt_store.t_cell_get(st, h)) {
@@ -536,7 +446,6 @@ fn target_header_parts(st: Agent, h: Handle) -> #(String, String) {
   #(option.unwrap(read("name"), "Error"), option.unwrap(read("message"), ""))
 }
 
-/// Error.isError ( arg ) — proposal.
 fn is_error(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let result = case classify(helpers.first_arg_or_undefined(args)) {
     KHandle(h) ->
@@ -549,7 +458,6 @@ fn is_error(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   #(mk_bool(result), st)
 }
 
-/// get Error.prototype.stack — error-stack-accessor proposal.
 fn stack_getter(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
@@ -565,12 +473,7 @@ fn stack_getter(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-/// set Error.prototype.stack — error-stack-accessor proposal. `realm` is
-/// the setter's own realm (§10.3.1: a built-in's callee context takes
-/// F.[[Realm]]): `home` is that realm's %Error.prototype% and every
-/// TypeError the setter itself throws is that realm's, whichever realm called
-/// it. The [[GetOwnProperty]] / [[Set]] / [[DefineOwnProperty]] steps stay in
-/// the caller's realm, since a proxy trap or accessor they reach is user code.
+// throws in the setter's realm, property ops in the caller's
 fn stack_setter(
   st: Agent,
   realm: Int,
@@ -601,13 +504,11 @@ fn stack_setter(
   }
 }
 
-/// Throw a TypeError of realm `realm` rather than of the current one.
 fn throw_type_error_in(st: Agent, realm: Int, message: String) -> #(a, Agent) {
   use st <- rt_realm.with_realm(st, realm)
   rt_val.t_throw_type_error(st, message)
 }
 
-/// SetterThatIgnoresPrototypeProperties ( this, home, p, v ).
 fn set_stack_ignoring_prototype(
   st: Agent,
   realm: Int,
@@ -623,11 +524,9 @@ fn set_stack_ignoring_prototype(
         "Cannot assign to read only property 'stack' of Error.prototype",
       )
     False -> {
-      // Step 3: desc = ? this.[[GetOwnProperty]]("stack") — proxy-aware.
       let #(own, st) =
         rt_obj.t_get_own_property(st, h, StringKey(Named("stack")))
       let #(ok, st) = case option.is_some(own) {
-        // Step 5: Set(this, "stack", v, true) — false → TypeError.
         True ->
           rt_obj.t_set_prop(
             st,
@@ -635,7 +534,6 @@ fn set_stack_ignoring_prototype(
             StringKey(Named("stack")),
             mk_string(s),
           )
-        // Step 4: CreateDataPropertyOrThrow(this, "stack", v) — {W:T,E:T,C:T}.
         False ->
           rt_obj.t_define_own_prop(
             st,
@@ -664,7 +562,7 @@ fn set_stack_ignoring_prototype(
   }
 }
 
-/// §20.5.3.4 Error.prototype.toString ( ).
+// §20.5.3.4
 fn error_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KNull | KUndef ->
@@ -673,23 +571,18 @@ fn error_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
         "Error.prototype.toString called on non-object",
       )
     KHandle(_) -> {
-      // Step 3: Let name be ? Get(O, "name").
       let #(name_val, st) =
         rt_obj.t_get_prop(st, this, StringKey(Named("name")))
-      // Steps 4-5.
       let #(name, st) = case classify(name_val) {
         KUndef -> #("Error", st)
         _ -> rt_val.t_to_string(st, name_val)
       }
-      // Step 6: Let msg be ? Get(O, "message").
       let #(msg_val, st) =
         rt_obj.t_get_prop(st, this, StringKey(Named("message")))
-      // Steps 7-8.
       let #(msg, st) = case classify(msg_val) {
         KUndef -> #("", st)
         _ -> rt_val.t_to_string(st, msg_val)
       }
-      // Steps 9-11.
       let result = case name, msg {
         "", _ -> msg
         _, "" -> name

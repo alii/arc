@@ -1,9 +1,3 @@
-//// Temporal.PlainYearMonth (proposal-temporal §9): constructor, from /
-//// compare, the prototype getters and methods, and ToTemporalYearMonth.
-////
-//// The slot holds the ISO date of the calendar month's reference day (day 1
-//// of the calendar month; day 1 for iso8601) plus the calendar.
-
 import arc/internal/gregorian.{
   days_in_month, days_in_year as days_in_iso_year, is_leap_year,
 }
@@ -51,10 +45,6 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
 
-// ============================================================================
-// Registration tables — the only place the JS-facing names are written down
-// ============================================================================
-
 const all_getters = [
   YmCalendarId,
   YmEra,
@@ -82,9 +72,6 @@ const all_methods = [
   #(PymToPlainDate, 1),
 ]
 
-/// Registration specs for `temporal.init_temporal_type`: the constructor
-/// token, `from`/`compare`, the getters and the prototype methods, in
-/// prototype-registration order.
 pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
   TemporalN(TemporalPlainYearMonthCtor(protos:))
 }
@@ -153,12 +140,6 @@ pub fn method_name(m: PlainYearMonthMethod) -> String {
   }
 }
 
-// ============================================================================
-// Constructor and statics
-// ============================================================================
-
-/// new Temporal.PlainYearMonth(year, month [, calendar [, referenceISODay]])
-/// — allocated on the intrinsic prototype; the caller applies NewTarget's.
 pub fn ctor(
   st: Agent,
   protos: TemporalProtos,
@@ -182,7 +163,6 @@ pub fn ctor(
   }
 }
 
-/// Temporal.PlainYearMonth.from / compare
 pub fn static(
   st: Agent,
   name: TemporalStaticName,
@@ -204,19 +184,12 @@ pub fn static(
         to_temporal_year_month(st, helpers.arg_at(args, 0), mk_undefined())
       let #(b, st) =
         to_temporal_year_month(st, helpers.arg_at(args, 1), mk_undefined())
-      // CompareISODate including the reference day.
       let n = compare_iso_date(IsoDate(a.0, a.1, a.2), IsoDate(b.0, b.1, b.2))
       #(int_val(n), st)
     }
   }
 }
 
-// ============================================================================
-// ToTemporalYearMonth
-// ============================================================================
-
-/// ToTemporalYearMonth(item [, options]) → #(iso_year, iso_month,
-/// reference_day, calendar).
 pub fn to_temporal_year_month(
   st: Agent,
   item: JsVal,
@@ -248,8 +221,6 @@ pub fn to_temporal_year_month(
   }
 }
 
-/// Property bag → year-month. Fields: calendar, then era, eraYear, month,
-/// monthCode, year. Returns the ISO date of the calendar month's first day.
 fn year_month_from_bag(
   st: Agent,
   h: types.Handle,
@@ -261,8 +232,6 @@ fn year_month_from_bag(
   #(terr(st, resolve_calendar_year_month(cal, fields, overflow)), st)
 }
 
-/// Resolve year-month fields to the ISO date of the calendar month's first
-/// day (day 1 for iso8601).
 pub fn resolve_calendar_year_month(
   cal: tcal.Calendar,
   f: DateFields,
@@ -299,10 +268,6 @@ pub fn resolve_calendar_year_month(
   }
 }
 
-// ============================================================================
-// Getters
-// ============================================================================
-
 pub fn getter(
   st: Agent,
   g: TemporalYearMonthGetter,
@@ -334,7 +299,6 @@ fn year_month_field(y: Int, m: Int, g: TemporalYearMonthGetter) -> JsVal {
   }
 }
 
-/// Calendar-aware year-month field getter. y/m/rd are the slot's ISO date.
 fn year_month_field_cal(
   cal: tcal.Calendar,
   y: Int,
@@ -361,10 +325,6 @@ fn year_month_field_cal(
     }
   }
 }
-
-// ============================================================================
-// Methods
-// ============================================================================
 
 pub fn method(
   st: Agent,
@@ -428,7 +388,6 @@ pub fn method(
   }
 }
 
-/// Temporal.PlainYearMonth.prototype.add / subtract
 fn add_subtract(
   st: Agent,
   protos: TemporalProtos,
@@ -440,11 +399,6 @@ fn add_subtract(
   meth: PlainYearMonthMethod,
 ) -> #(JsVal, Agent) {
   let #(dur, overflow, st) = add_sub_args(st, args, meth == PymSubtract)
-  // AddDurationToYearMonth: only years and months are allowed
-  // (weeks/days/time throw RangeError); the calculation always
-  // starts from day 1 of the calendar month, so day overflow never
-  // occurs — `overflow` only affects month-code resolution (e.g.
-  // hebrew M05L in a non-leap year).
   let has_lower_units =
     dur.weeks != 0
     || dur.days != 0
@@ -464,11 +418,7 @@ fn add_subtract(
   }
   case cal {
     tcal.Iso8601 -> {
-      // AddDurationToYearMonth steps 8-9: the intermediate date is
-      // day 1 of the receiver's month and goes through
-      // CalendarDateFromFields, which throws when it is outside the
-      // ISO date limits (e.g. -271821-04-01, before the minimum
-      // date -271821-04-19) — even for a zero duration.
+      // day-1 intermediate must be within iso limits, even for zero duration
       let _day1 = terr(st, check_date_limits(IsoDate(y, m, 1)))
       let #(y2, m2) = balance_year_month(y + dur.years, m + dur.months)
       case iso_year_month_within_limits(y2, m2) {
@@ -486,8 +436,6 @@ fn add_subtract(
           cd.month,
           1,
         ))
-      // CalendarDateFromFields on the day-1 intermediate date also
-      // enforces the ISO date limits for non-ISO calendars.
       let start = terr(st, check_date_limits(start))
       let d2 = terr(st, calendar_date_add(cal, start, dur, overflow))
       let cd2 = tcal.date_from_epoch_days(cal, epoch_days(d2))
@@ -515,7 +463,6 @@ fn add_subtract(
   }
 }
 
-/// Temporal.PlainYearMonth.prototype.with ( temporalYearMonthLike [, options] )
 fn with(
   st: Agent,
   protos: TemporalProtos,
@@ -537,7 +484,6 @@ fn with(
       && era_year == None,
   )
   let #(overflow, st) = validated_overflow(st, helpers.arg_at(args, 1))
-  // Merge with existing calendar year/monthCode.
   let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(y, m, rd)))
   let f = merge_year_month_code(cal, cd, fields)
   let #(y2, m2, rd2, _) =
@@ -545,7 +491,6 @@ fn with(
   make_year_month_cal(st, protos, y2, m2, rd2, cal)
 }
 
-/// Temporal.PlainYearMonth.prototype.toPlainDate ( item )
 fn to_plain_date(
   st: Agent,
   protos: TemporalProtos,
@@ -588,8 +533,6 @@ fn to_plain_date(
   }
 }
 
-/// Format a PlainYearMonth: non-ISO calendars always include the reference
-/// day and the calendar annotation.
 fn format_ym_cal(
   y: Int,
   m: Int,
@@ -612,10 +555,6 @@ fn format_ym_cal(
       }
   }
 }
-
-// ============================================================================
-// until / since
-// ============================================================================
 
 fn year_month_until_since(
   st: Agent,
@@ -640,7 +579,6 @@ fn year_month_until_since(
   let total_months = case cal {
     tcal.Iso8601 -> { b.0 - a.0 } * 12 + b.1 - a.1
     _ -> {
-      // Count whole calendar months between the two month-firsts.
       let #(_, months, _) = calendar_date_until(cal, ia, ib, whole_years: False)
       months
     }
@@ -662,11 +600,6 @@ fn year_month_until_since(
         _, _ -> DurRec(..zero_dur, months: rounded)
       }
     _ ->
-      // Calendar-space years/months decomposition. RoundRelativeDuration
-      // is calendar-agnostic, so roundingMode/roundingIncrement apply
-      // here too: years are nudged against real calendar-year
-      // boundaries, and a rounded month total is re-decomposed by
-      // stepping calendar years (not recomputed unrounded).
       case smallest, largest {
         Year, _ -> {
           let yrs = terr(st, round_calendar_year_total(cal, ia, ib, inc, mode2))
@@ -694,12 +627,7 @@ fn year_month_until_since(
   make_duration(st, protos, dur)
 }
 
-/// NudgeToCalendarUnit for a PlainYearMonth difference in a non-ISO
-/// calendar: round the whole-year count of ib − ia (both ISO dates of
-/// calendar day 1) to `inc`-year multiples per `mode`. The fractional year
-/// is measured as day progress between the bounding calendar-year marks
-/// (start = ia + r1 years, end = ia + r2 years), like the spec's
-/// epoch-nanosecond progress.
+// round year count of ib - ia by day progress between year marks
 fn round_calendar_year_total(
   cal: tcal.Calendar,
   ia: IsoDate,

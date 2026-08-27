@@ -1,14 +1,3 @@
-//// `rt_store` — construction + threaded cell ops for the JS heap (SPEC §7.M1b).
-////
-//// The `JsStore(st)` **type** lives in `rt_types` (leaf, D17); this module
-//// owns only its construction (`t_store_new`) and the state-threading `t_*`
-//// ops that read/mutate the store carried on `Agent.store`.
-////
-//// **Return-tuple order is `#(V, St')` — value FIRST (R1).** `t_cell_new` and
-//// the three counter ops return a tuple; `t_cell_get` returns a bare `JsSlot`;
-//// every other op returns a bare `Agent`. `t_cell_new` NEVER collects
-//// (D11 — allocation is O(1) and pure; GC is turn-boundary only).
-
 import arc/rt/arena
 import arc/rt/limits
 import arc/rt/types.{
@@ -18,19 +7,9 @@ import arc/rt/types.{
 import gleam/dict
 import gleam/set
 
-// ── FFI: opaque JobQueue construction (M8 owns push/pop) ────────────────────
-
-/// Fresh empty microtask queue (Erlang `queue:new/0`). The queue is opaque to
-/// Gleam; M8 owns enqueue/dequeue via the same FFI module.
 @external(erlang, "arc_job_queue_ffi", "job_queue_new")
 fn jq_new() -> JobQueue
 
-// ── construction ────────────────────────────────────────────────────────────
-
-/// Build an empty, realm-less `JsStore` (SPEC §2.2 / §7.M1b). NO realm, NO
-/// global object (G18 — those are allocated INTO the store by M6 `init_realm`).
-/// `ops` is a panic-stub `JsOps` (unreachable until `init_realm` seeds the
-/// real M4/M-CALL fns as its step 1). Total; touches no process dictionary.
 pub fn t_store_new() -> JsStore(Agent) {
   JsStore(
     data: arena.new(),
@@ -39,7 +18,7 @@ pub fn t_store_new() -> JsStore(Agent) {
     alloc_since_gc: 0,
     gc_threshold: 65_536,
     gc_live: 0,
-    // Past the constant birth seqs of `rt_call.birth_props`.
+    // past the constant birth seqs
     prop_seq: 3,
     private_uid: 0,
     symbol_uid: 0,
@@ -55,9 +34,6 @@ pub fn t_store_new() -> JsStore(Agent) {
   )
 }
 
-/// Panic-stub `JsOps` for a store that `init_realm` has not yet seeded. Every
-/// field is unreachable under the driver contract (M6 step 1 replaces this
-/// before any user code runs), so a call here is an internal invariant bug.
 fn unseeded_ops() -> JsOps(Agent) {
   JsOps(
     get_prop: fn(_, _, _) { unseeded() },
@@ -72,30 +48,19 @@ fn unseeded_ops() -> JsOps(Agent) {
   )
 }
 
-/// Shared panic body for `unseeded_ops`. A named `fn() -> a` so each stub
-/// site re-generalises to its own return type (a `let`-bound closure would
-/// monomorphise at first use).
+// named fn so each stub gets its own type
 fn unseeded() -> a {
   panic as "JsOps unseeded — init_realm fills"
 }
-
-// ── store access (private) ──────────────────────────────────────────────────
 
 fn require_js(st: Agent) -> JsStore(Agent) {
   st.store
 }
 
-/// The one write path every mutating op below goes through.
 fn with_js(st: Agent, js: JsStore(Agent)) -> Agent {
   Agent(..st, store: js)
 }
 
-// ── cell ops (arc heap.gleam:115-400) ───────────────────────────────────────
-
-/// Allocate a fresh cell holding `slot`, returning `#(handle, st')` (R1 —
-/// value first). Mints id `next`. Bumps `alloc_since_gc` for the M2
-/// turn-boundary trigger. **Never collects**
-/// (D11) — allocation is O(1) and pure; GC only runs at `call_depth == 0`.
 pub fn t_cell_new(st: Agent, slot: JsSlot) -> #(Handle, Agent) {
   let js = require_js(st)
   let id = js.next
@@ -109,9 +74,6 @@ pub fn t_cell_new(st: Agent, slot: JsSlot) -> #(Handle, Agent) {
   #(JsCell(id), with_js(st, js))
 }
 
-/// `t_cell_new` for a slot that needs `seqs` fresh `Property.seq` stamps:
-/// `build` gets the first, and the counter bump rides in the same store
-/// write as the allocation.
 pub fn t_cell_new_with(
   st: Agent,
   seqs: Int,
@@ -130,8 +92,6 @@ pub fn t_cell_new_with(
   #(JsCell(id), with_js(st, js))
 }
 
-/// Allocate two cells that name each other in one store write. `build` gets
-/// both handles and returns the two slots in handle order.
 pub fn t_cell_new_pair(
   st: Agent,
   build: fn(Handle, Handle) -> #(JsSlot, JsSlot),
@@ -151,106 +111,63 @@ pub fn t_cell_new_pair(
   #(a, b, with_js(st, js))
 }
 
-/// Read the slot at `h`. Fail-closed panic on a dangling handle — every live
-/// `Handle` was minted by `t_cell_new` and not since freed or swept, so a miss
-/// is a use-after-free / GC bug, never a normal path. FFI-backed so the hot
-/// emitted-code read path is one arena read, not `require_js` + a lookup.
 @external(erlang, "arc_rt_store_ffi", "t_cell_get")
 pub fn t_cell_get(st: Agent, h: Handle) -> JsSlot
 
-/// Overwrite the slot at `h` with `slot`, returning the updated state. The
-/// handle must be live (`t_cell_new`-minted, not freed); a write to a dead id
-/// silently resurrects it, so callers uphold the invariant.
 pub fn t_cell_set(st: Agent, h: Handle, slot: JsSlot) -> Agent {
   let js = require_js(st)
   let JsCell(id) = h
   with_js(st, JsStore(..js, data: arena.set(id, slot, js.data)))
 }
 
-// ── variable boxes (compiled code's captured / TDZ bindings) ────────────────
-//
-// A boxed JS binding is a cell holding `SBox(value)` — the SAME slot shape the
-// interpreter uses for captured variables — never a bare `JsVal`: the GC's
-// `refs_in_cell` traces slots by constructor, so a raw value in a cell is
-// either untraced (a live object freed under it) or a `case_clause` crash
-// when the raw value happens to be a handle. The `js` direct-host ops
-// `cell_new`/`cell_get`/`cell_set` resolve here.
-
-/// Allocate a variable box holding `value`. `#(handle, st')`, value first.
+// boxes must be sbox so gc traces them
 pub fn t_var_new(st: Agent, value: JsVal) -> #(Handle, Agent) {
   t_cell_new(st, SBox(value))
 }
 
-/// Read a variable box. Fail-closed panic on a dangling handle or a slot that
-/// is not an `SBox` (an emitter bug), like `t_cell_get`.
 @external(erlang, "arc_rt_store_ffi", "t_var_get")
 pub fn t_var_get(st: Agent, h: Handle) -> JsVal
 
-/// Overwrite a variable box with `value`.
 pub fn t_var_set(st: Agent, h: Handle, value: JsVal) -> Agent {
   t_cell_set(st, h, SBox(value))
 }
 
-/// Read-modify-write the slot at `h` via `f`. Fail-closed panic on a dangling
-/// handle (same posture as `t_cell_get`).
 pub fn t_cell_update(st: Agent, h: Handle, f: fn(JsSlot) -> JsSlot) -> Agent {
   t_cell_set(st, h, f(t_cell_get(st, h)))
 }
 
-/// Drop `h`'s slot, so it reads back as absent. Caller guarantees no live
-/// reference to `h` remains.
 pub fn t_cell_free(st: Agent, h: Handle) -> Agent {
   let js = require_js(st)
   let JsCell(id) = h
   with_js(st, JsStore(..js, data: arena.reset(id, js.data)))
 }
 
-/// Add `h` to the permanent GC root set (`pinned_roots`). Realm intrinsics
-/// and captured-binding cells pin themselves so a turn-boundary collect can
-/// never reclaim them (SPEC §2.2).
 pub fn t_pin_root(st: Agent, h: Handle) -> Agent {
   let js = require_js(st)
   let JsCell(id) = h
   with_js(st, JsStore(..js, pinned_roots: set.insert(js.pinned_roots, id)))
 }
 
-// ── threaded counters (D9, D14) ─────────────────────────────────────────────
-
-/// Next `Property.seq` stamp, threaded through the store (D14). Returns
-/// `#(seq, st')` (R1).
 pub fn t_next_prop_seq(st: Agent) -> #(Int, Agent) {
   let js = require_js(st)
   #(js.prop_seq, with_js(st, JsStore(..js, prop_seq: js.prop_seq + 1)))
 }
 
-/// Next private-name uid for `t_new_private_name` (D9). Per-evaluation
-/// identity; deterministic and replayable (replaces `erlang:unique_integer`).
 pub fn t_next_private_uid(st: Agent) -> #(Int, Agent) {
   let js = require_js(st)
   #(js.private_uid, with_js(st, JsStore(..js, private_uid: js.private_uid + 1)))
 }
 
-/// Next `UserSymbol` uid — the threaded replacement for arc's `make_ref()`.
 pub fn t_next_symbol_uid(st: Agent) -> #(Int, Agent) {
   let js = require_js(st)
   #(js.symbol_uid, with_js(st, JsStore(..js, symbol_uid: js.symbol_uid + 1)))
 }
 
-/// Next parse id: taken once by each root activation of freshly loaded code
-/// (script, module body, eval, dynamic function) and carried by every
-/// closure that code creates.
 pub fn t_next_unit_uid(st: Agent) -> #(Int, Agent) {
   let js = require_js(st)
   #(js.unit_uid, with_js(st, JsStore(..js, unit_uid: js.unit_uid + 1)))
 }
 
-// ── call-depth (D11 gate) ───────────────────────────────────────────────────
-
-/// Enter a JS call: `++call_depth`. `t_maybe_collect` (M2) refuses to run
-/// while `call_depth > 0`, which is what makes fn-entry allocation GC-safe.
-/// Throws RangeError once `call_depth` reaches `limits.max_call_depth` (arc
-/// `call.gleam:174-179`): the one depth choke point for calls, constructs
-/// and coroutine resumes.
 pub fn t_enter_call(st: Agent) -> Agent {
   case st.call_depth >= limits.max_call_depth {
     True -> {
@@ -261,8 +178,6 @@ pub fn t_enter_call(st: Agent) -> Agent {
   }
 }
 
-/// Raise RangeError "Maximum call stack size exceeded". Typed as an op body
-/// so `t_call` can run it under its catch and hand back a `ThrowCompletion`.
 pub fn stack_overflow(st: Agent) -> #(JsVal, Agent) {
   let #(e, st) =
     require_js(st).ops.new_error(
@@ -273,16 +188,9 @@ pub fn stack_overflow(st: Agent) -> #(JsVal, Agent) {
   t_throw(st, e)
 }
 
-/// Leave a JS call: `--call_depth`. Paired with `t_enter_call` by M-CALL's
-/// `t_call_checked` around every compiled-fn invocation.
 pub fn t_leave_call(st: Agent) -> Agent {
   Agent(..st, call_depth: st.call_depth - 1)
 }
 
-// ── exception (D7 / R2) ─────────────────────────────────────────────────────
-
-/// Raise a JS exception carrying the current threaded state, so the catching
-/// frame resumes with the store as it was at throw-time. Wire per R2:
-/// `erlang:error({wasm_exn, 0, [St, V]})` — St FIRST in the payload list.
 @external(erlang, "arc_rt_store_ffi", "t_throw")
 pub fn t_throw(st: Agent, err_val: JsVal) -> a

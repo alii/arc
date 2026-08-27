@@ -1,7 +1,3 @@
-//// The embedder API in arc/host over the shared runtime: host functions are
-//// `KNative(HostFn(id))` cells whose closures live on `Agent.host_fns`, and
-//// host objects are `KHost` cells carrying an erased, typed-on-read payload.
-
 import arc/host.{State}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
@@ -26,7 +22,6 @@ type Payload {
   Holds(Handle)
 }
 
-/// One key per test: each test is its own embedding.
 fn key() -> host.Key(Payload) {
   host.new_key()
 }
@@ -45,7 +40,6 @@ fn handle(v: JsVal) -> Handle {
   h
 }
 
-/// `e.name: e.message` of a thrown error object.
 fn describe(st: Agent, e: JsVal) -> String {
   str(get(st, e, "name").0) <> ": " <> str(get(st, e, "message").0)
 }
@@ -73,12 +67,10 @@ pub fn error_result_becomes_a_throw_test() {
   let st =
     host.define_fn(host.from_agent(agent(), key()), "twice", 1, twice).agent
   let #(f, st) = global(st, "twice")
-  // Not a number: TypeError naming the JS type.
   let #(c, st) = rt_call.t_call(st, f, mk_undefined(), [mk_string("3")])
   let assert ThrowCompletion(e) = c
   assert describe(st, e)
     == "TypeError: The \"n\" argument must be of type integer. Received type string"
-  // A number that is not an integer: RangeError.
   let #(c, st) =
     rt_call.t_call(st, f, mk_undefined(), [mk_number(types.JFloat(1.5))])
   let assert ThrowCompletion(e) = c
@@ -87,7 +79,6 @@ pub fn error_result_becomes_a_throw_test() {
   let #(c, st) = rt_call.t_call(st, f, mk_undefined(), [mk_number(types.JNan)])
   let assert ThrowCompletion(e) = c
   assert string.ends_with(describe(st, e), "Received NaN")
-  // Out of range.
   let #(c, st) = rt_call.t_call(st, f, mk_undefined(), [int(101)])
   let assert ThrowCompletion(e) = c
   assert describe(st, e)
@@ -125,7 +116,6 @@ pub fn validators_unwrap_or_throw_test() {
 
 pub fn try_call_calls_back_into_js_test() {
   let s = host.from_agent(agent(), key())
-  // apply(fn, x) => fn(x) + 1, propagating fn's throw.
   let s =
     host.define_fn(s, "apply", 2, fn(args, _, s) {
       use r, s <- host.try_call(s, host.first_arg(args), "fn", mk_undefined(), [
@@ -141,12 +131,10 @@ pub fn try_call_calls_back_into_js_test() {
   let math_abs = get(st, global(st, "Math").0, "abs").0
   assert rt_call.t_call(st, apply, mk_undefined(), [math_abs, int(-3)]).0
     == NormalCompletion(int(4))
-  // Not callable: TypeError from the validator, nothing called.
   let assert #(ThrowCompletion(e), st) =
     rt_call.t_call(st, apply, mk_undefined(), [int(0), int(0)])
   assert describe(st, e)
     == "TypeError: The \"fn\" argument must be of type function. Received type number"
-  // The callee's throw propagates out of the host function unchanged.
   let #(boom, st) = global(st, "boom")
   let assert #(ThrowCompletion(e), st) =
     rt_call.t_call(st, apply, mk_undefined(), [boom, int(0)])
@@ -172,7 +160,6 @@ pub fn namespace_and_helpers_test() {
     ])
   let st = s.agent
   let #(util, st) = global(st, "util")
-  // Tagged, and its methods are non-enumerable like a built-in namespace's.
   assert rt_inspect.inspect(st, util) == "Object [util] {}"
   assert rt_inspect.inspect(st, get(st, util, "point").0) == "[Function: point]"
   let #(arr, st) = rt_helpers.call_method(st, util, "pair", [int(1), int(2)])
@@ -184,10 +171,6 @@ pub fn namespace_and_helpers_test() {
   assert rt_inspect.inspect(st, p) == "{ x: 3, y: 4 }"
 }
 
-// ── classes ─────────────────────────────────────────────────────────────────
-
-/// `new Point(x)`: a plain object `{x}` that also records the NewTarget it
-/// was constructed under. The dispatcher re-prototypes it.
 fn point_ctor(args, _this, s: host.State(Payload)) {
   let #(s, o) =
     host.object(s, [
@@ -203,7 +186,6 @@ fn point_get_x(_args, this, s: host.State(Payload)) {
 }
 
 fn point_origin(_args, this, s: host.State(Payload)) {
-  // A static: `this` is the constructor it was invoked on.
   let #(h, st) = rt_call.t_construct(s.agent, this, [int(0)], this)
   #(State(..s, agent: st), Ok(mk_object(h)))
 }
@@ -221,15 +203,12 @@ pub fn class_constructs_and_reprototypes_test() {
   let point_proto = handle(get(st, point, "prototype").0)
   let #(p, st) = rt_call.t_construct(st, point, [int(7)], point)
   let p = mk_object(p)
-  // Instance of Point although the ctor allocated a plain object.
   assert rt_obj.t_get_prototype_of(st, handle(p)).0 == Some(point_proto)
   assert get(st, p, "nt").0 == point
   assert rt_helpers.call_method(st, p, "getX", []).0 == int(7)
   assert str(get(st, get(st, p, "constructor").0, "name").0) == "Point"
-  // Statics see the constructor as `this`.
   let #(o, st) = rt_helpers.call_method(st, point, "origin", [])
   assert rt_helpers.call_method(st, o, "getX", []).0 == int(0)
-  // Called without `new`: same body, NewTarget undefined, no re-prototype.
   let assert #(NormalCompletion(q), st) =
     rt_call.t_call(st, point, mk_undefined(), [int(1)])
   assert get(st, q, "nt").0 == mk_undefined()
@@ -238,8 +217,6 @@ pub fn class_constructs_and_reprototypes_test() {
 }
 
 pub fn subclass_new_target_picks_the_prototype_test() {
-  // What `class Sub extends Point {}` + `new Sub(5)` reaches the host ctor
-  // as: Point's [[Construct]] with NewTarget = Sub.
   let #(s, point) = point_class(host.from_agent(agent(), key()))
   let #(s, sub) = host.class(s, "Sub", 1, point_ctor, [], [])
   let st = s.agent
@@ -247,7 +224,6 @@ pub fn subclass_new_target_picks_the_prototype_test() {
   let #(p, st) = rt_call.t_construct(st, point, [int(5)], sub)
   assert rt_obj.t_get_prototype_of(st, p).0 == Some(sub_proto)
   assert get(st, mk_object(p), "nt").0 == sub
-  // Inherited static: `Sub.origin()` constructs through `this` = Sub.
   let #(_, st) = rt_obj.t_set_prototype(st, handle(sub), Some(handle(point)))
   let #(o, st) = rt_helpers.call_method(st, sub, "origin", [])
   assert rt_obj.t_get_prototype_of(st, handle(o)).0 == Some(sub_proto)
@@ -271,8 +247,6 @@ pub fn constructor_must_return_an_object_test() {
     rt_call.t_call(st, construct, reflect, [bad, empty])
   assert describe(st, e) == "TypeError: host constructor must return an object"
 }
-
-// ── host objects ────────────────────────────────────────────────────────────
 
 pub fn host_object_round_trips_typed_test() {
   let s: host.State(Payload) = host.from_agent(agent(), key())
@@ -298,7 +272,6 @@ pub fn host_object_round_trips_typed_test() {
   let st = s.agent
   let assert SObject(kind: KHost(_), proto: None, ..) =
     rt_store.t_cell_get(st, handle(bare))
-  // Renders through the prototype's tag; typeof is "object"; not callable.
   let #(to_string, st) =
     rt_helpers.call_method(
       st,
@@ -313,13 +286,10 @@ pub fn host_object_round_trips_typed_test() {
 
 pub fn gc_traces_handles_inside_payloads_and_closures_test() {
   let s: host.State(Payload) = host.from_agent(agent(), key())
-  // An unrooted object reachable only through a host payload.
   let #(s, inner) = host.object(s, [#("k", int(1))])
   let #(s, holder) = host.alloc_host_object(s, Holds(handle(inner)), None)
-  // Another reachable only through a registered closure's captured env.
   let #(s, captured) = host.object(s, [])
   let s = host.define_fn(s, "peek", 0, fn(_, _, s) { #(s, Ok(captured)) })
-  // And one reachable from nowhere.
   let #(s, garbage) = host.object(s, [])
   let st = rt_store.t_pin_root(s.agent, handle(holder))
   let st = rt_gc.t_collect(st, [])
@@ -331,14 +301,11 @@ pub fn gc_traces_handles_inside_payloads_and_closures_test() {
 }
 
 pub fn another_key_reads_none_not_a_mistyped_value_test() {
-  // The same agent seen through a second key at another payload type: the
-  // object is still a host object, but not this key's.
   let s = host.from_agent(agent(), key())
   let #(s, pid) = host.alloc_host_object(s, Pid(42), None)
   let strings: host.Key(String) = host.new_key()
   let other = host.from_agent(s.agent, strings)
   assert host.read_host(other, pid) == None
-  // And the other way round, including a second key at the SAME type.
   let #(other, word) = host.alloc_host_object(other, "w", None)
   assert host.read_host(State(..s, agent: other.agent), word) == None
   assert host.read_host(host.from_agent(other.agent, key()), pid) == None
@@ -347,7 +314,6 @@ pub fn another_key_reads_none_not_a_mistyped_value_test() {
 }
 
 pub fn host_functions_see_the_key_they_were_defined_under_test() {
-  // `wrap(n)` allocates under the defining key; `unwrap(o)` reads under it.
   let s = host.from_agent(agent(), key())
   let s =
     host.define_fn(s, "wrap", 1, fn(args, _, s) {
@@ -370,7 +336,6 @@ pub fn host_functions_see_the_key_they_were_defined_under_test() {
       wrapped,
     ])
   assert n == int(9)
-  // A ticket root is a host cell too, under the module's own key: not ours.
   let #(s, _promise, _ticket) = host.suspend(State(..s, agent: st))
   let st = s.agent
   let assert Ok(root) =
@@ -384,7 +349,6 @@ pub fn host_functions_see_the_key_they_were_defined_under_test() {
 }
 
 pub fn unregistered_id_is_a_type_error_test() {
-  // A cell whose closure was never (re-)registered on this agent.
   let st = agent()
   let #(h, st) =
     rt_call.t_native_new(st, None, types.HostFn(9), "ghost", 0, False)
@@ -396,7 +360,6 @@ pub fn unregistered_id_is_a_type_error_test() {
 pub fn with_state_runs_body_and_drains_test() {
   let #(st, seen) =
     host.with_state(agent(), key(), fn(s) {
-      // Body allocates and schedules a promise reaction; the drain runs it.
       let #(s, o) = host.object(s, [#("v", int(5))])
       let s = host.define_global(s, "shared", o)
       let st = s.agent
@@ -415,7 +378,6 @@ pub fn with_state_runs_body_and_drains_test() {
           #(State(..s, agent: st), Ok(mk_undefined()))
         })
       let #(_, st) = rt_helpers.call_method(s2.agent, p, "then", [setter])
-      // Not yet: reactions are microtasks.
       assert get(st, global(st, "shared").0, "v").0 == int(5)
       #(State(..s2, agent: st), "done")
     })

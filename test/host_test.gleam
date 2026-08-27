@@ -16,15 +16,12 @@ import gleam/option
 import gleam/string
 import rt_helpers
 
-/// A fresh linked agent as a host function's `State` sees it.
 fn new_state() -> host.State(host) {
   rt_builtins.new_agent(rt_helpers.quiet_hooks())
   |> entry.link
   |> host.from_agent(host.new_key())
 }
 
-/// Run `source` as a script on the agent behind `s`, then drain microtasks
-/// (the engine's turn epilogue).
 fn run(s: host.State(host), source: String) -> #(Completion, Agent) {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
     as { "parse failed: " <> source }
@@ -71,8 +68,6 @@ fn extract_error_message(s: host.State(host), source: String) -> String {
   eval_string(s, "try { " <> source <> " } catch (e) { e.message }")
 }
 
-/// State with a single host fn `name` that passes its first argument to
-/// `validate`, returning `undefined` when called with no arguments.
 fn state_with_validator(name, validate) -> host.State(host) {
   new_state()
   |> host.define_fn(name, 1, fn(args, _, s) {
@@ -82,8 +77,6 @@ fn state_with_validator(name, validate) -> host.State(host) {
     }
   })
 }
-
-// -- validate_string ---------------------------------------------------------
 
 pub fn validate_string_accepts_string_test() {
   let s =
@@ -113,8 +106,6 @@ pub fn validate_string_rejects_null_test() {
   assert extract_error_message(s, "f(null)")
     == "The \"name\" argument must be of type string. Received type object"
 }
-
-// -- validate_function -------------------------------------------------------
 
 pub fn validate_function_accepts_arrow_test() {
   let s =
@@ -146,8 +137,6 @@ pub fn validate_function_accepts_builtin_test() {
   assert eval_string(s, "check(Math.abs)") == "ok"
 }
 
-// -- validate_integer --------------------------------------------------------
-
 pub fn validate_integer_accepts_in_range_test() {
   let s =
     state_with_validator("f", fn(v, s) {
@@ -173,8 +162,6 @@ pub fn validate_integer_rejects_float_test() {
       use _, s <- host.validate_integer(s, v, "n", 0, 100)
       #(s, Ok(mk_undefined()))
     })
-  // A number that isn't an integer is a RANGE error, not a type error: the
-  // type (number) is exactly right, the value isn't in the integer domain.
   assert extract_error_message(s, "f(3.14)")
     == "The value of \"n\" is out of range. It must be an integer. Received 3.14"
   assert extract_error_message(s, "f(NaN)")
@@ -215,8 +202,6 @@ pub fn validate_integer_range_error_is_rangeerror_test() {
     )
     == "range"
 }
-
-// -- try_call ----------------------------------------------------------------
 
 pub fn try_call_invokes_callable_test() {
   let s =
@@ -262,8 +247,6 @@ pub fn try_call_propagates_callback_throw_test() {
     == "from cb"
 }
 
-// -- validate_boolean --------------------------------------------------------
-
 pub fn validate_boolean_accepts_true_test() {
   let s =
     state_with_validator("f", fn(v, s) {
@@ -291,8 +274,6 @@ pub fn validate_boolean_rejects_truthy_test() {
     == "The \"flag\" argument must be of type boolean. Received type number"
 }
 
-// -- host.array --------------------------------------------------------------
-
 pub fn array_builds_real_js_array_test() {
   let s =
     state_with_validator("triple", fn(v, s) {
@@ -302,8 +283,6 @@ pub fn array_builds_real_js_array_test() {
   assert eval_string(s, "Array.isArray(triple(7)) && triple(7).join('-')")
     == "7-7-7"
 }
-
-// -- host.object -------------------------------------------------------------
 
 pub fn object_builds_plain_object_test() {
   let s =
@@ -319,11 +298,6 @@ pub fn object_builds_plain_object_test() {
     })
   assert eval_string(s, "let p = point(3, 4); p.x + ',' + p.y") == "3,4"
 }
-
-// -- to_string (coercing) ----------------------------------------------------
-//
-// ToString on the shared runtime raises its throw; out of a host function the
-// raise propagates to the JS caller like any other abrupt completion.
 
 fn to_string(s: host.State(host), v: JsVal) -> #(String, host.State(host)) {
   let #(str, st) = rt_val.t_to_string(s.agent, v)
@@ -358,12 +332,6 @@ pub fn to_string_propagates_throw_test() {
     run(s, "str({ toString() { throw new Error('nope') } })")
 }
 
-// -- Opaque host values (HostObject) -----------------------------------------
-//
-// An embedder defines its OWN typed enum and stores it in the heap via
-// host.alloc_host_object, reading it back with host.read_host — fully typed,
-// no Dynamic, no coerce, exhaustive matching.
-
 type MyHost {
   Pid(Int)
   Socket(String)
@@ -378,17 +346,13 @@ pub fn host_object_typed_roundtrip_test() {
     })
     |> host.define_fn("readHost", 1, fn(args, _this, s) {
       case host.read_host(s, host.first_arg(args)) {
-        // typed, exhaustive — no Dynamic, no decode, no coerce
         option.Some(Pid(n)) -> #(s, Ok(mk_number(JInt(n))))
         option.Some(Socket(name)) -> #(s, Ok(mk_string("socket:" <> name)))
         option.None -> #(s, Ok(mk_string("not-a-host-object")))
       }
     })
 
-  // round-trips the embedder's typed value through JS and back
   assert eval_number(s, "readHost(makePid())") == 42.0
-  // a plain JS object is not a host object
   assert eval_string(s, "readHost({})") == "not-a-host-object"
-  // the host object is a real, identity-comparable JS object
   assert eval_bool(s, "var p = makePid(); p === p") == True
 }

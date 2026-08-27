@@ -1,11 +1,4 @@
-//// Throwaway IR-emission verifier for the emit_2core perf gap (verify-ir-
-//// emission research unit). Prints the raw twocore IR AND the lowered Core
-//// Erlang for each of the three bench kernels so per-iteration host-call
-//// cost can be counted by eye. Run with:
-////
-////     cd aot && gleam run -m emit_2core_ir_dump 2>&1 | tee .local/ir_dump.txt
-////
-//// Not a test — delete once the perf work lands.
+// throwaway perf dump, not a test
 
 import arc_aot/emit as emit_2core
 import carder/ir
@@ -44,9 +37,6 @@ fn dump(name: String, source: String) -> Nil {
   io.println("")
 }
 
-/// ir.Expr node count — 1 per node, recursing into structured sub-exprs.
-/// Mirrors carder/middle/ir_opt/aggressive.gleam:node_count (private) plus
-/// the Try variant so richards' exception-free bodies still count exactly.
 fn node_count(e: ir.Expr) -> Int {
   case e {
     ir.Let(_, rhs, body) -> 1 + node_count(rhs) + node_count(body)
@@ -70,12 +60,6 @@ fn pad(s: String, w: Int) -> String {
   s <> string.repeat(" ", int.max(0, w - string.length(s)))
 }
 
-/// richards-ir-attribution / r-share-audit (1): per-method ir.Expr node counts
-/// for the compiled richards module. Verifies anf.share is collapsing cold
-/// paths — each `.x`/`.method()` site should contribute O(30) nodes not O(200),
-/// so no single jsf_N body should be many-thousands. Prints all functions
-/// sorted descending by node count; the top rows are the Scheduler.schedule /
-/// TaskControlBlock.run bodies (they have the most member sites).
 fn dump_richards_node_counts() -> Nil {
   io.println("═══════════════════════════════════════════════════════════════")
   io.println("═══ richards — per-function ir.Expr node counts")
@@ -111,13 +95,6 @@ fn dump_richards_node_counts() -> Nil {
   io.println("")
 }
 
-/// perf8 crypto-am-path-trace: reduced am3 kernel — just the `w[j++]=l&mask`
-/// write + `this_array[i++]` read. Verifies (a) `j++`/`i++` on a local var
-/// go through LvIdent slot-var inc (NOT a Handle round-trip), (b) `w[·]=`
-/// emits set_elem_fast_p, (c) `& 0xfffffff` const-int RHS routes through
-/// int_const_bit → erl_band JPure inline, (d) `>>14`/`>>28`/`<<14` route
-/// through int_const_shift → erl_bsr/erl_bsl. Grep the Core Erlang output
-/// for `t_set_elem_fast_p`, `'band'`, `'bsr'`, `t_shr_fast` (residual).
 pub const crypto_am3_write_js = "
 function am3(i,x,w,j,c,n) {
   var this_array = this.array;

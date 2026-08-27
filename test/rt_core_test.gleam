@@ -1,7 +1,3 @@
-//// Core semantics on the arc/rt runtime: §10.2.1.2 this-binding by
-//// strictness, the call-depth RangeError, and the one-Number invariants
-//// (integers past 2^53 - 1 widen to doubles; -0 survives).
-
 import arc/rt/builtins as rt_builtins
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call.{type Frame, NormalCompletion, ThrowCompletion} as rt_call
@@ -49,7 +45,6 @@ fn flags(strict: Bool) {
   )
 }
 
-/// A function object whose body returns its `this` binding.
 fn this_fn(st: Agent, strict: Bool) -> #(JsVal, Agent) {
   let code = as_code(fn(st, frame, _args) { #(frame_at(1, frame), st) })
   let #(h, st) = rt_call.t_fn_new(st, code, flags(strict), "f", 0, None, None)
@@ -89,8 +84,6 @@ pub fn strict_this_passes_through_test() {
   assert r == mk_null()
 }
 
-/// `[1].map(function f(){ return [1].map(f) })`: unbounded recursion that
-/// re-enters through a builtin on every level ends in a catchable RangeError.
 pub fn call_depth_range_error_test() {
   let st = agent()
   let code =
@@ -107,14 +100,11 @@ pub fn call_depth_range_error_test() {
   assert classify(name) == KStr("RangeError")
   let #(msg, st) = rt_obj.t_get_prop(st, e, StringKey(canonical_key("message")))
   assert classify(msg) == KStr("Maximum call stack size exceeded")
-  // The agent is usable afterwards and depth accounting is balanced.
   assert st.call_depth == 0
   let #(f, st) = this_fn(st, True)
   let assert #(NormalCompletion(_), _) =
     rt_call.t_call(st, f, mk_undefined(), [])
 }
-
-// ── Number: 2^53 widening and -0 ────────────────────────────────────────────
 
 fn int(i: Int) -> JsVal {
   mk_number(JInt(i))
@@ -150,7 +140,6 @@ pub fn integer_results_widen_past_2_53_test() {
   assert show(st, e) == "8.112963841460666e+31"
   let #(f, st) = rt_ops.t_mul(st, int(123_456_789), int(987_654_321))
   assert show(st, f) == "121932631112635260"
-  // The value ABI itself never hands out a wide integer.
   assert show(st, int(18_014_398_509_481_985)) == "18014398509481984"
   assert num(int(-9_007_199_254_740_993)) == JFloat(-9_007_199_254_740_992.0)
   assert num(int(9_007_199_254_740_991)) == JInt(9_007_199_254_740_991)
@@ -176,7 +165,6 @@ pub fn float_overflow_is_infinity_test() {
   assert num(g) == JNegInf
   let #(h, st) = rt_ops.t_pow(st, int(-10), int(401))
   assert num(h) == JNegInf
-  // The AOT number fast path shares the kernels.
   assert num(pure_add(big, big)) == JPosInf
   assert num(pure_sub(mk_number(JFloat(-1.0e308)), big)) == JNegInf
   assert num(pure_mul(big, mk_number(JFloat(-10.0)))) == JNegInf
@@ -240,8 +228,6 @@ fn get(st: Agent, obj: JsVal, name: String) -> JsVal {
   rt_obj.t_get_prop(st, obj, StringKey(canonical_key(name))).0
 }
 
-// ── Error.stack from Agent.frames ────────────────────────────────────────────
-
 fn error_stack(st: Agent, msg: String) -> String {
   let ctor = global(st, "Error")
   let #(h, st) = rt_call.t_construct(st, ctor, [mk_string(msg)], ctor)
@@ -263,7 +249,6 @@ pub fn error_stack_renders_frames_test() {
   let #(h, st2) = rt_call.t_construct(st, type_error, [], type_error)
   assert classify(get(st2, mk_object(h), "stack"))
     == KStr("TypeError\n    at inner (script:3)\n    at script:10")
-  // Error.stackTraceLimit caps the frame count.
   let #(_, st) =
     rt_obj.t_set_prop(
       st,
@@ -273,8 +258,6 @@ pub fn error_stack_renders_frames_test() {
     )
   assert error_stack(st, "y") == "Error: y\n    at inner (script:3)"
 }
-
-// ── KBytecode cells dispatch through JsOps ───────────────────────────────────
 
 pub fn bytecode_call_and_construct_use_js_ops_test() {
   let st = agent()
@@ -325,8 +308,6 @@ pub fn bytecode_call_and_construct_use_js_ops_test() {
   assert h == st.realm.array.prototype
 }
 
-// ── GC: WeakMap values live as long as their key ─────────────────────────────
-
 fn handle(v: JsVal) {
   let assert KHandle(h) = classify(v)
   h
@@ -341,14 +322,11 @@ pub fn weak_map_value_traced_until_key_dies_test() {
   let #(v, st) = rt_obj.t_new_object_literal(st)
   let #(_, st) =
     rt_call.t_call_method(st, wm, StringKey(canonical_key("set")), [k, v])
-  // Key reachable: the value survives even though only the entry holds it.
   let st = rt_gc.t_collect(st, [wm_h, handle(k)])
   assert rt_gc.t_is_live(st, handle(v))
   let #(got, st) =
     rt_call.t_call_method(st, wm, StringKey(canonical_key("get")), [k])
   assert got == v
-  // Key unreachable: the entry is pruned in the same collection, which
-  // leaves the value unreferenced for the next one.
   let st = rt_gc.t_collect(st, [wm_h])
   assert !rt_gc.t_is_live(st, handle(k))
   let #(has, st) =
@@ -357,8 +335,6 @@ pub fn weak_map_value_traced_until_key_dies_test() {
   let st = rt_gc.t_collect(st, [wm_h])
   assert !rt_gc.t_is_live(st, handle(v))
 }
-
-// ── Map.groupBy / getOrInsert / getOrInsertComputed ──────────────────────────
 
 fn call_method(st: Agent, recv: JsVal, name: String, args: List(JsVal)) {
   rt_call.t_call_method(st, recv, StringKey(canonical_key(name)), args)
@@ -377,7 +353,6 @@ pub fn map_get_or_insert_test() {
   assert classify(r) == KNum(JInt(1))
   let #(r, st) = call_method(st, m, "getOrInsert", [str("a"), int(2)])
   assert classify(r) == KNum(JInt(1))
-  // -0 is canonicalized to +0 and matches an existing +0 entry.
   let #(mz, st) = rt_ops.t_neg(st, int(0))
   let #(_, st) = call_method(st, m, "getOrInsert", [mz, str("z")])
   let #(r, st) = call_method(st, m, "get", [int(0)])
@@ -393,7 +368,6 @@ pub fn map_get_or_insert_computed_test() {
   let map_ctor = global(st, "Map")
   let #(mh, st) = rt_call.t_construct(st, map_ctor, [], map_ctor)
   let m = mk_object(mh)
-  // Miss: callback receives the canonicalized key; its result is stored.
   let seen_key =
     as_code(fn(st, _frame, args) {
       let assert [k] = args
@@ -406,14 +380,12 @@ pub fn map_get_or_insert_computed_test() {
   let #(mz, st) = rt_ops.t_neg(st, int(0))
   let #(r, st) = call_method(st, m, "getOrInsertComputed", [mz, f])
   assert classify(r) == KStr("Infinity")
-  // Hit: callback not called.
   let boom =
     as_code(fn(st, _frame, _args) { rt_val.t_throw_type_error(st, "called") })
   let #(bh, st) = rt_call.t_fn_new(st, boom, flags(True), "b", 1, None, None)
   let #(r, st) =
     call_method(st, m, "getOrInsertComputed", [int(0), mk_object(bh)])
   assert classify(r) == KStr("Infinity")
-  // A callback that inserts the key itself is overwritten, not duplicated.
   let sneaky =
     as_code(fn(st, _frame, args) {
       let assert [k] = args
@@ -428,7 +400,6 @@ pub fn map_get_or_insert_computed_test() {
   assert classify(r) == KStr("outer")
   let #(size, st) = rt_obj.t_get_prop(st, m, StringKey(canonical_key("size")))
   assert classify(size) == KNum(JInt(2))
-  // Non-callable callback is a TypeError even when the key is present.
   let assert #(ThrowCompletion(_), _) =
     rt_call.t_call(st, get(st, m, "getOrInsertComputed"), m, [int(0), int(1)])
 }
@@ -465,11 +436,9 @@ pub fn map_group_by_test() {
   let #(even, st) = call_method(st, g, "get", [str("even")])
   let #(joined, st) = call_method(st, even, "join", [])
   assert classify(joined) == KStr("2,4")
-  // The -0 group key was canonicalized to +0.
   let #(zero, st) = call_method(st, g, "get", [int(0)])
   let #(joined, st) = call_method(st, zero, "join", [])
   assert classify(joined) == KStr("1.5")
-  // Insertion order of first occurrence: odd, even, 0.
   let #(keys_iter, st) = call_method(st, g, "keys", [])
   let #(first, st) = call_method(st, keys_iter, "next", [])
   assert classify(get(st, first, "value")) == KStr("odd")

@@ -1,6 +1,3 @@
-//// `rt_builtins/string` — String constructor + %String.prototype%
-//// (ES2024 §22.1) over the threaded `Agent` model (D7/R1).
-
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
@@ -44,7 +41,6 @@ import gleam/option.{type Option, None, Some}
 import gleam/order
 import gleam/string
 
-/// Set up String constructor + String.prototype (§22.1.2 / §22.1.3).
 pub fn init(
   st: Agent,
   object_proto: Handle,
@@ -89,7 +85,6 @@ pub fn init(
       #("matchAll", StringN(StringPrototypeMatchAll), 1),
       #("isWellFormed", StringN(StringPrototypeIsWellFormed), 0),
       #("toWellFormed", StringN(StringPrototypeToWellFormed), 0),
-      // Annex B HTML wrapper methods
       #("anchor", StringN(StringPrototypeAnchor), 1),
       #("big", StringN(StringPrototypeBig), 0),
       #("blink", StringN(StringPrototypeBlink), 0),
@@ -104,15 +99,13 @@ pub fn init(
       #("sub", StringN(StringPrototypeSub), 0),
       #("sup", StringN(StringPrototypeSup), 0),
     ])
-  // Static methods on the String constructor.
   let #(static_methods, st) =
     common.alloc_methods(st, fn_proto, [
       #("raw", StringN(StringRaw), 1),
       #("fromCharCode", StringN(StringFromCharCode), 1),
       #("fromCodePoint", StringN(StringFromCodePoint), 1),
     ])
-  // §22.1.3: the String prototype object is itself a String exotic object
-  // with [[StringData]] = "".
+  // the prototype is itself a string object with value ""
   let #(bt, st) =
     common.init_wrapper_type(
       st,
@@ -125,7 +118,6 @@ pub fn init(
       static_methods,
       proto_kind: StringObj(value: ""),
     )
-  // §22.1.3.36 String.prototype [ @@iterator ] ( ) — yields code points.
   let #(iter_fn, st) =
     common.alloc_rooted_native_fn(
       st,
@@ -145,7 +137,6 @@ pub fn init(
   #(bt, st)
 }
 
-/// Per-module dispatch for String native functions.
 pub fn dispatch(
   st: Agent,
   native: StringNative,
@@ -190,7 +181,6 @@ pub fn dispatch(
     StringPrototypeMatchAll -> string_match_all(st, this, args)
     StringPrototypeIsWellFormed -> string_is_well_formed(st, this)
     StringPrototypeToWellFormed -> string_transform(st, this, fn(s) { s })
-    // Annex B HTML wrapper methods
     StringPrototypeAnchor -> html_wrap_attr(st, this, args, "a", "name")
     StringPrototypeBig -> html_wrap(st, this, "big")
     StringPrototypeBlink -> html_wrap(st, this, "blink")
@@ -204,18 +194,13 @@ pub fn dispatch(
     StringPrototypeStrike -> html_wrap(st, this, "strike")
     StringPrototypeSub -> html_wrap(st, this, "sub")
     StringPrototypeSup -> html_wrap(st, this, "sup")
-    // Statics
     StringRaw -> string_raw(st, args)
     StringFromCharCode -> string_from_char_code(st, args)
     StringFromCodePoint -> string_from_code_point(st, args)
   }
 }
 
-// ── String constructor ──────────────────────────────────────────────────────
-
-/// §22.1.1.1 String(value) called as a function. Step 1.a: no args → "".
-/// Step 1.b: symbol → SymbolDescriptiveString (unlike ToString which throws).
-/// `new String` is intercepted in `t_construct` before dispatch.
+// §22.1.1.1 string(value) as a function, symbols don't throw here
 fn call_as_function(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   case args {
     [] -> #(mk_string(""), st)
@@ -233,9 +218,6 @@ fn call_as_function(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-// ── §22.1.3 String.prototype methods ────────────────────────────────────────
-
-/// §22.1.3.36 String.prototype [ @@iterator ] ( ).
 fn string_symbol_iterator(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let #(s, st) = with_this_string(st, this)
   let realm = st.realm
@@ -254,7 +236,6 @@ fn string_symbol_iterator(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   #(mk_object(iter_h), st)
 }
 
-/// §22.1.3.1 String.prototype.charAt ( pos ).
 fn string_char_at(
   st: Agent,
   this: JsVal,
@@ -273,7 +254,6 @@ fn string_char_at(
   }
 }
 
-/// §22.1.3.2 String.prototype.charCodeAt ( pos ).
 fn string_char_code_at(
   st: Agent,
   this: JsVal,
@@ -288,7 +268,6 @@ fn string_char_code_at(
   }
 }
 
-/// §22.1.3.9 String.prototype.indexOf ( searchString [ , position ] ).
 fn string_index_of(
   st: Agent,
   this: JsVal,
@@ -303,7 +282,6 @@ fn string_index_of(
   #(mk_number(JInt(result)), st)
 }
 
-/// §22.1.3.11 String.prototype.lastIndexOf ( searchString [ , position ] ).
 fn string_last_index_of(
   st: Agent,
   this: JsVal,
@@ -313,7 +291,6 @@ fn string_last_index_of(
   let #(search, st) =
     rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   let len = js_string.length(s)
-  // Steps 4-6: ToNumber(position); NaN → +∞ (clamped to len).
   let #(num, st) = rt_val.t_to_number(st, helpers.arg_at(args, 1))
   let from = case num {
     JNan -> len
@@ -323,7 +300,6 @@ fn string_last_index_of(
   #(mk_number(JInt(result)), st)
 }
 
-/// §22.1.3.8 String.prototype.includes.
 fn string_includes(
   st: Agent,
   this: JsVal,
@@ -334,7 +310,6 @@ fn string_includes(
   })
 }
 
-/// §22.1.3.22 String.prototype.startsWith.
 fn string_starts_with(
   st: Agent,
   this: JsVal,
@@ -343,8 +318,6 @@ fn string_starts_with(
   string_search_bool(st, this, args, "startsWith", string.starts_with)
 }
 
-/// Shared body for includes/startsWith: coerce this + searchString, clamp
-/// position, drop the prefix, apply the predicate.
 fn string_search_bool(
   st: Agent,
   this: JsVal,
@@ -354,7 +327,6 @@ fn string_search_bool(
 ) -> #(JsVal, Agent) {
   let #(s, st) = with_this_string(st, this)
   let search_val = helpers.first_arg_or_undefined(args)
-  // Steps 3-4: IsRegExp(searchString) → TypeError.
   let #(is_re, st) = regexp.is_regexp(st, search_val)
   case is_re {
     True ->
@@ -375,7 +347,6 @@ fn string_search_bool(
   }
 }
 
-/// §22.1.3.7 String.prototype.endsWith.
 fn string_ends_with(
   st: Agent,
   this: JsVal,
@@ -400,8 +371,6 @@ fn string_ends_with(
   }
 }
 
-/// endsWith/slice/substring's second argument: absent/undefined → `len`,
-/// else ToIntegerOrInfinity through `map`.
 fn second_arg_index_or_len(
   st: Agent,
   args: List(JsVal),
@@ -421,7 +390,6 @@ fn second_arg_index_or_len(
   }
 }
 
-/// §22.1.3.20 String.prototype.slice ( start, end ).
 fn string_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(s, st) = with_this_string(st, this)
   let len = js_string.length(s)
@@ -434,8 +402,6 @@ fn string_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §22.1.3.24 String.prototype.substring ( start, end ) — no negative
-/// indices; args swapped if start > end.
 fn string_substring(
   st: Agent,
   this: JsVal,
@@ -455,7 +421,6 @@ fn string_substring(
   #(mk_string(js_string.slice(s, start, end - start)), st)
 }
 
-/// §22.1.3.5 String.prototype.concat ( ...args ).
 fn string_concat(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(s, st) = with_this_string(st, this)
   concat_loop(st, args, [s])
@@ -475,7 +440,6 @@ fn concat_loop(
   }
 }
 
-/// §22.1.3.16 String.prototype.repeat ( count ).
 fn string_repeat(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(s, st) = with_this_string(st, this)
   let #(num, st) = rt_val.t_to_number(st, helpers.first_arg_or_undefined(args))
@@ -501,7 +465,7 @@ fn string_repeat(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §22.1.3.16.1 StringPad — shared body for padStart/padEnd.
+// §22.1.3.16.1 stringpad
 fn string_pad(
   st: Agent,
   this: JsVal,
@@ -526,7 +490,6 @@ fn string_pad(
   }
 }
 
-/// §22.1.3.1 String.prototype.at ( index ).
 fn string_at(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(s, st) = with_this_string(st, this)
   let #(idx, st) =
@@ -542,7 +505,6 @@ fn string_at(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §22.1.3.3 String.prototype.codePointAt ( pos ).
 fn string_code_point_at(
   st: Agent,
   this: JsVal,
@@ -561,7 +523,6 @@ fn string_code_point_at(
   }
 }
 
-/// §22.1.3.13 String.prototype.normalize ( [ form ] ).
 fn string_normalize(
   st: Agent,
   this: JsVal,
@@ -588,7 +549,7 @@ fn string_normalize(
   }
 }
 
-/// Annex B §B.2.2.1 String.prototype.substr ( start, length ).
+// annex b §b.2.2.1
 fn string_substr(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(s, st) = with_this_string(st, this)
   let size = js_string.length(s)
@@ -604,8 +565,7 @@ fn string_substr(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-/// §22.1.3.10 String.prototype.localeCompare ( that ) — no locale support:
-/// NFC-normalize then byte compare.
+// no locale support: nfc normalize then compare
 fn string_locale_compare(
   st: Agent,
   this: JsVal,
@@ -621,14 +581,11 @@ fn string_locale_compare(
   #(mk_number(JInt(n)), st)
 }
 
-/// §22.1.3.12 String.prototype.isWellFormed ( ).
 fn string_is_well_formed(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let #(_s, st) = with_this_string(st, this)
-  // Gleam strings are valid UTF-8 → always well-formed.
   #(mk_bool(True), st)
 }
 
-/// §22.1.3.26 / §22.1.3.33 String.prototype.{toString,valueOf}.
 fn string_this_value(
   st: Agent,
   this: JsVal,
@@ -637,11 +594,7 @@ fn string_this_value(
   #(mk_string(this_string_value(st, this, method)), st)
 }
 
-// ── Symbol-method delegation (match/matchAll/replace/replaceAll/search/split)
-
-/// **`if V is an Object: ? GetMethod(V, @@symbol)`** (§22.1.3.13/.14/.19/.20/.21/.22
-/// step 2). The object-only guard is deliberate: a primitive searchValue must
-/// NOT box and consult its prototype.
+// objects only, a primitive must not box and consult its prototype
 fn get_method(
   st: Agent,
   val: JsVal,
@@ -671,9 +624,6 @@ fn not_a_function(symbol: SymbolId) -> String {
   |> string.append(" is not a function")
 }
 
-/// Delegate to a Symbol method on `val` if it has one, passing the ORIGINAL
-/// `this`; otherwise S = ToString(this), rx = RegExpCreate(val, undefined),
-/// Invoke(rx, @@symbol, « S »). Shared by match/search.
 fn delegate_or_regexp(
   st: Agent,
   val: JsVal,
@@ -695,7 +645,6 @@ fn delegate_or_regexp(
   }
 }
 
-/// §22.1.3.12 String.prototype.match(regexp).
 fn string_match(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let st = require_object_coercible(st, this, "match")
   delegate_or_regexp(
@@ -706,7 +655,6 @@ fn string_match(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   )
 }
 
-/// §22.1.3.20 String.prototype.search(regexp).
 fn string_search(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let st = require_object_coercible(st, this, "search")
   delegate_or_regexp(
@@ -717,7 +665,6 @@ fn string_search(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   )
 }
 
-/// §22.1.3.18 String.prototype.replace(searchValue, replaceValue).
 fn string_replace(
   st: Agent,
   this: JsVal,
@@ -738,7 +685,6 @@ fn string_replace(
   }
 }
 
-/// §22.1.3.19 String.prototype.replaceAll(searchValue, replaceValue).
 fn string_replace_all(
   st: Agent,
   this: JsVal,
@@ -761,7 +707,6 @@ fn string_replace_all(
   }
 }
 
-/// §22.1.3.14 String.prototype.matchAll ( regexp ).
 fn string_match_all(
   st: Agent,
   this: JsVal,
@@ -775,7 +720,6 @@ fn string_match_all(
   case method_opt {
     Some(method) -> rt_call.t_call_checked(st, method, regexp_arg, [this])
     None -> {
-      // Steps 3-5: S = ToString(O); rx = RegExpCreate(regexp, "g"); Invoke.
       let #(s, st) = rt_val.t_to_string(st, this)
       let #(rx, st) = regexp.regexp_create(st, regexp_arg, mk_string("g"))
       let #(method_opt, st) = get_method(st, rx, rt_types.symbol_match_all)
@@ -791,7 +735,6 @@ fn string_match_all(
   }
 }
 
-/// §22.1.3.21 String.prototype.split ( separator, limit ).
 fn string_split(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let st = require_object_coercible(st, this, "split")
   let sep_val = helpers.first_arg_or_undefined(args)
@@ -802,7 +745,6 @@ fn string_split(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
       rt_call.t_call_checked(st, method, sep_val, [this, limit_val])
     None -> {
       let #(s, st) = with_this_string(st, this)
-      // Step 4: limit undefined → 2^32-1, else ToUint32(limit).
       let #(lim, st) = case classify(limit_val) {
         KUndef -> #(4_294_967_295, st)
         _ -> rt_val.t_to_uint32(st, limit_val)
@@ -819,14 +761,13 @@ fn string_split_parts(
   lim: Int,
 ) -> #(JsVal, Agent) {
   case classify(sep_val) {
-    // Steps 6-7: separator undefined → [S] (or [] when lim = 0).
     KUndef ->
       case lim {
         0 -> ok_array(st, [])
         _ -> ok_array(st, [mk_string(s)])
       }
     _ -> {
-      // Step 5: R = ToString(separator) — runs before the lim=0 check.
+      // tostring(separator) runs before the lim=0 check
       let #(sep, st) = rt_val.t_to_string(st, sep_val)
       case lim {
         0 -> ok_array(st, [])
@@ -842,8 +783,7 @@ fn string_split_parts(
   }
 }
 
-// ── replace / replaceAll string-search engine (§22.1.3.18/.19 steps 5+) ────
-
+// string-search path of replace and replaceall
 fn replace_string_search(
   st: Agent,
   s: String,
@@ -1020,9 +960,6 @@ fn replace_loop_template(
   }
 }
 
-// ── §22.1.2 String static methods ───────────────────────────────────────────
-
-/// §22.1.2.4 String.raw ( template, ...substitutions ).
 fn string_raw(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let template = helpers.first_arg_or_undefined(args)
   let subs = case args {
@@ -1072,7 +1009,6 @@ fn string_raw_loop(
   }
 }
 
-/// §22.1.2.1 String.fromCharCode ( ...codeUnits ).
 fn string_from_char_code(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(codes, st) = from_char_code_coerce(st, args, [])
   #(mk_string(char_codes_to_string(list.reverse(codes), [])), st)
@@ -1087,7 +1023,7 @@ fn from_char_code_coerce(
     [] -> #(acc, st)
     [arg, ..rest] -> {
       let #(num, st) = rt_val.t_to_number(st, arg)
-      // §7.1.8 ToUint16: NaN/±0/±∞ → +0, else truncate mod 2^16.
+      // §7.1.8 touint16
       let n = case num {
         JInt(i) -> i
         JFloat(f) -> rt_val.float_to_int(f)
@@ -1098,7 +1034,6 @@ fn from_char_code_coerce(
   }
 }
 
-/// UTF-16 code units → string, combining surrogate pairs.
 fn char_codes_to_string(codes: List(Int), acc: List(UtfCodepoint)) -> String {
   case codes {
     [] -> string.from_utf_codepoints(list.reverse(acc))
@@ -1116,7 +1051,6 @@ fn char_codes_to_string(codes: List(Int), acc: List(UtfCodepoint)) -> String {
   }
 }
 
-/// §22.1.2.2 String.fromCodePoint ( ...codePoints ).
 fn string_from_code_point(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   from_code_point_loop(st, args, [])
 }
@@ -1158,8 +1092,7 @@ fn from_code_point_loop(
   }
 }
 
-// ── Annex B §B.2.2 HTML wrapper methods ─────────────────────────────────────
-
+// annex b §b.2.2 html methods
 fn html_wrap(st: Agent, this: JsVal, tag: String) -> #(JsVal, Agent) {
   let #(s, st) = with_this_string(st, this)
   #(mk_string("<" <> tag <> ">" <> s <> "</" <> tag <> ">"), st)
@@ -1194,10 +1127,7 @@ fn html_wrap_attr(
   )
 }
 
-// ── internal helpers ────────────────────────────────────────────────────────
-
-/// matchAll step 2.b / replaceAll step 2.a: when IsRegExp, its "flags" must
-/// be object-coercible and its string must contain "g".
+// an isregexp arg needs coercible flags containing "g"
 fn require_global_when_regexp(
   st: Agent,
   val: JsVal,
@@ -1224,7 +1154,6 @@ fn require_global_when_regexp(
   }
 }
 
-/// §7.2.1 RequireObjectCoercible for methods that defer ToString(this).
 fn require_object_coercible(st: Agent, this: JsVal, name: String) -> Agent {
   case classify(this) {
     KNull | KUndef ->
@@ -1236,8 +1165,6 @@ fn require_object_coercible(st: Agent, this: JsVal, name: String) -> Agent {
   }
 }
 
-/// Coerce `this` to string. Primitive strings pass through; null/undefined →
-/// TypeError; anything else → ToString.
 fn with_this_string(st: Agent, this: JsVal) -> #(String, Agent) {
   case classify(this) {
     KStr(s) -> #(s, st)
@@ -1248,7 +1175,6 @@ fn with_this_string(st: Agent, this: JsVal) -> #(String, Agent) {
   }
 }
 
-/// Coerce `this` to string, apply a pure transformation, return the result.
 fn string_transform(
   st: Agent,
   this: JsVal,
@@ -1258,7 +1184,7 @@ fn string_transform(
   #(mk_string(transform(s)), st)
 }
 
-/// §22.1.3 thisStringValue(value): String primitive or [[StringData]] slot.
+// §22.1.3 thisstringvalue
 fn this_string_value(st: Agent, this: JsVal, method: String) -> String {
   case classify(this) {
     KStr(s) -> s
@@ -1278,8 +1204,6 @@ fn not_a_string(st: Agent, method: String) -> a {
   )
 }
 
-/// Resolve a relative index (§7.1.22-style): -∞ → 0, negative → max(len+n,0),
-/// else min(n, len). undefined → `default`.
 fn relative_index(
   st: Agent,
   v: JsVal,
@@ -1298,7 +1222,6 @@ fn relative_index(
   }
 }
 
-/// Concatenate a reversed accumulator, honouring `limits.max_string_bytes`.
 fn concat_within_limit(st: Agent, parts_rev: List(String)) -> #(JsVal, Agent) {
   let parts = list.reverse(parts_rev)
   let total =
@@ -1313,8 +1236,6 @@ fn ok_array(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
   let #(h, st) = realm_ops.alloc_array(st, values)
   #(mk_object(h), st)
 }
-
-// ── UTF-16 surrogate helpers (arc/internal/utf16.gleam:34-52 inlined) ───────
 
 fn is_high_surrogate(cu: Int) -> Bool {
   cu >= 0xD800 && cu <= 0xDBFF
@@ -1343,11 +1264,7 @@ fn codepoint_or_replacement(i: Int) -> UtfCodepoint {
   }
 }
 
-// ── Unicode Default Case Conversion (port of arc/rt/unicode_case.gleam) ────
-
-/// toLowercase per §22.1.3.27, including the SpecialCasing Final_Sigma rule:
-/// U+03A3 Σ → ς when preceded by a cased char (skipping case-ignorable chars)
-/// and not followed by one; else → σ. Erlang string:lowercase/1 does NOT.
+// final sigma rule, which string.lowercase lacks
 pub fn to_lower_case(s: String) -> String {
   use <- option.lazy_unwrap(js_string.ascii_lower(s))
   case js_string.index_of(s, "\u{03A3}", 0) {
@@ -1360,8 +1277,6 @@ pub fn to_lower_case(s: String) -> String {
   }
 }
 
-/// toUppercase per §22.1.3.28. No context-sensitive rule applies at the root
-/// locale, so this is the plain per-codepoint mapping.
 pub fn to_upper_case(s: String) -> String {
   use <- option.lazy_unwrap(js_string.ascii_upper(s))
   string.uppercase(s)
@@ -1531,8 +1446,6 @@ fn is_case_ignorable_cp(cp: Int) -> Bool {
     _ -> False
   }
 }
-
-// ── FFI ─────────────────────────────────────────────────────────────────────
 
 @external(erlang, "arc_string_ffi", "trim_js_ws")
 fn trim_js_ws(s: String) -> String

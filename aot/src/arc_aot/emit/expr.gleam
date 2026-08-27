@@ -1,18 +1,3 @@
-//// M12: JS Expression → twocore IR lowering. Faithful port of
-//// arc/compiler/emit.gleam:4270-5060 (+ helpers 1790-2130, 2560-2680,
-//// 4100-4250, 5330-5450, 6950-7020) into the anf.Build(ir.Value) CPS monad.
-//// D2: state-invisible — NO St threading (M9 emit_core owns it).
-//// D4: JS calls go through host("call", ..) — fn values are {js_cell,N}.
-//// D15: with/direct-eval/Proxy → runtime UnsupportedFeature throw.
-////
-//// Error seam (R12 × R13 reconciliation): Build(a) is R13-pinned with no
-//// Result slot, Emitter2 (frozen) has no errors field, and R12 forbids panic.
-//// Resolution: every user-reachable early error AND parser-unreachable case
-//// emits a diverging host("throw_*_error", [msg]) at RUNTIME (matching
-//// emit.gleam's opcode.ThrowError), then continues with `undef` so k is still
-//// called and the CPS chain stays total. `emit_expr` therefore always returns
-//// Ok — the Result wrapper exists to satisfy state.EmitDispatch.emit_expr.
-
 import arc/bytecode/key
 import arc/bytecode/lexical
 import arc/compiler/ast_util
@@ -31,18 +16,10 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set
 
-// ── feature gates (flag-bisect via `gleam run -m emit_2core_profile`) ──────
-
-/// JPure `to_property_key_fast` probe → always full JMut host.
 pub const perf5_to_property_key_split: Bool = True
 
-/// `l >> C`/`l << C` int-literal RHS → inline erlang:bsr/bsl, `>>>` →
-/// int_fast("ushr_fast",…). False → bare int_fast/anf.host("ushr",…).
 pub const perf8_int_const_shift: Bool = True
 
-// ── Emitter2-access combinators (state monad over Build) ────────────────────
-
-/// Read the threaded Emitter2. `ask` IS a Build(Emitter2): `use e <- then(ask)`.
 pub fn ask(
   e: Emitter2,
   k: fn(Emitter2, Emitter2) -> #(ir.Expr, Emitter2),
@@ -50,28 +27,22 @@ pub fn ask(
   k(e, e)
 }
 
-/// Thread a pure Emitter2→Emitter2 update through the Build chain.
 pub fn modify(f: fn(Emitter2) -> Emitter2) -> Build(Nil) {
   fn(e, k) { k(f(e), Nil) }
 }
 
-/// Read `e.consts` (RealmConsts sentinels) inside a Build.
 pub fn consts() -> Build(state.RealmConsts) {
   fn(e: Emitter2, k) { k(e, e.consts) }
 }
 
-// ── Error seam (R12: never panic; runtime-diverging host throw instead) ─────
-
-/// Emit a diverging `rt_js` throw (SPEC §8 throw_* ops), then yield `undef`
-/// so the CPS tail is still called. Mirrors emit.gleam's opcode.ThrowError.
+// never panic: emit a runtime throw, yield undef so k still runs
 pub fn throw_at_rt(op: String, msg: String) -> Build(ir.Value) {
   use _ <- anf.then(anf.host(op, [ir.ConstBinary(bit_array.from_string(msg))]))
   use rc <- anf.then(consts())
   anf.pure(rc.undef)
 }
 
-/// Parser-unreachable ast shapes (bare Super/Spread, invalid update target,
-/// etc.) — R12 forbids `panic`, so surface as a runtime TypeError instead.
+// parser-unreachable shapes throw at runtime too
 pub fn unreachable(why: String) -> Build(ir.Value) {
   throw_at_rt("throw_type_error", "emit_2core/expr: unreachable: " <> why)
 }
@@ -86,9 +57,6 @@ fn describe_error(err: EmitError) -> String {
   }
 }
 
-/// Bridge a Result-returning dispatch call (`emit_function`/`emit_async_body`,
-/// which yield `#(Emitter2, ir.Value)`) into Build. On Error, emit a runtime
-/// throw + continue with `undef` (least-bad given frozen Build/Emitter2).
 pub fn bridge_value(
   call: fn(Emitter2) -> Result(#(Emitter2, ir.Value), EmitError),
 ) -> Build(ir.Value) {
@@ -100,9 +68,6 @@ pub fn bridge_value(
   }
 }
 
-/// Bridge a Result-returning dispatch call yielding `#(ir.Expr, Emitter2)`
-/// (`emit_class`/`emit_destructure`/`emit_stmts`) into Build by let-binding
-/// the produced expression tree.
 pub fn bridge_expr(
   call: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
 ) -> Build(ir.Value) {
@@ -117,13 +82,9 @@ pub fn bridge_expr(
   }
 }
 
-// ── Entry points ────────────────────────────────────────────────────────────
-
-/// Lower one ast.Expression to a Build yielding its ir.Value. `named` carries
-/// the NamedEvaluation hint (§8.1.15) for anonymous fn/class RHS.
+// named is the namedevaluation hint for anonymous fn/class
 fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
   case ex {
-    // ── Literals (u-literals, SPEC §7.M12) ──────────────────────────────────
     ast.NumberLiteral(_, value) -> number_literal(value)
     ast.BigIntLiteral(_, n) -> {
       use boxed <- anf.then(
@@ -148,14 +109,10 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
         ir.ConstBinary(bit_array.from_string(pattern)),
         ir.ConstBinary(bit_array.from_string(flags)),
       ])
-    // NamedEvaluation looks THROUGH parens (§13.2.1.2 / emit.gleam:5217).
+    // named evaluation looks through parens
     ast.ParenthesizedExpression(_, inner) -> emit(inner, named)
 
-    // ── Binary expressions (u-binop) ────────────────────────────────────────
-    // §13.10.1 RelationalExpression : PrivateIdentifier `in` ShiftExpression.
-    // LHS is a NAME, not a value — do NOT recurse (bare `#x` is an early
-    // error). Eval RHS, load the class-scope minted private-key local, then
-    // host("private_in") — JRead per R9. Port of emit.gleam:4294-4304.
+    // §13.10.1 #x in obj, lhs is a name not a value
     ast.BinaryExpression(
       operator: ast.In,
       left: ast.Identifier(name: "#" <> rest, ..),
@@ -166,24 +123,15 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
       use k <- anf.then(emit_identifier("#" <> rest))
       anf.host("private_in", [r, k])
     }
-    // Generic binary: eval left THEN right (§13 order), dispatch on op.
-    // Small-int literal operands surface as bare ConstI32 (not the
-    // Let-bound Convert(BoxInt) that number_literal emits) so binop's
-    // fast-path detectors (loose_eq int_const_eq, int_fast) fire on
-    // `x == 0` / `x & 1` as well as const-folded globals.
     ast.BinaryExpression(operator: op, left:, right:, ..) -> {
       use l <- anf.then(expr_operand(left))
       use r <- anf.then(expr_operand(right))
       binop(op, l, r)
     }
 
-    // ── Templates (u-template, port emit.gleam:4916,5016-5047,5059-5078) ────
     ast.TemplateLiteral(parts:, ..) -> emit_template_literal(parts)
 
-    // Tagged template (§13.3.11): rewrite to a synthetic CallExpression with
-    // the per-site cached template object as arg 0 and recurse, so this-bind
-    // for `obj.tag`x`` and arg lowering ride the CallExpression arm.
-    // §13.3.11.1 note: never a direct eval — wrap a bare `eval` tag.
+    // §13.3.11.1 a tagged template is never direct eval
     ast.TaggedTemplateExpression(tag:, parts:, span:) -> {
       use site <- anf.then(next_site())
       let template =
@@ -209,13 +157,8 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
     ast.IntrinsicTemplateObject(site:, quasis:, ..) ->
       emit_template_object(site, quasis)
 
-    // ── Logical / Conditional / Sequence (u-logical-cond-seq) ───────────────
-    // §13.13 short-circuit: RHS is evaluated INSIDE the If arm so its side
-    // effects are guarded. Port of emit.gleam:4470-4510.
     ast.LogicalExpression(operator: op, left:, right:, ..) ->
       case op, is_boolean_expr(left) {
-        // A Boolean-valued left operand IS its own truth value: branch on
-        // the raw i32 and rebuild the `false`/`true` it short-circuits to.
         ast.LogicalAnd, True -> {
           use c <- anf.then(cond_i32(left))
           use rc <- anf.then(consts())
@@ -235,24 +178,16 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
           }
         }
       }
-    // §13.14 ConditionalExpression: `c ? t : f`.
     ast.ConditionalExpression(condition:, consequent:, alternate:, ..) -> {
       use c <- anf.then(cond_i32(condition))
       anf.bind_if(c, expr(consequent), expr(alternate))
     }
-    // §13.16 comma operator: eval left-to-right for effects, yield last.
     ast.SequenceExpression(expressions:, ..) -> emit_sequence(expressions)
 
-    // ── Unary expressions (u-unary-delete, port emit.gleam:4322-4389) ───────
     ast.UnaryExpression(_, op, arg) -> emit_unary(op, arg)
 
-    // ── Member access (u-member-key, port emit.gleam:4825-4856) ─────────────
-    // §13.3.7.3 super.prop / super[k] — read via [[HomeObject]].[[Prototype]]
-    // with receiver = lexical this. Must precede the generic arm.
     ast.MemberExpression(_, ast.SuperExpression(_), property) ->
       emit_super_get(property)
-    // A `?.` link ANYWHERE in the object chain routes the WHOLE expression
-    // through the shared-short-circuit chain compiler (§13.3.9.1).
     ast.MemberExpression(_, object, property) ->
       case ast_util.chain_has_optional(object) {
         True -> emit_chain_root(ex)
@@ -264,22 +199,15 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
           }
         }
       }
-    // Optional member — always a chain root.
     ast.OptionalMemberExpression(..) -> emit_chain_root(ex)
 
-    // ── Calls (u-call-new / u-optional-chain, port emit.gleam:4636-4740) ────
     ast.CallExpression(..) ->
       case ast_util.chain_has_optional(ex) {
         True -> emit_chain_root(ex)
         False -> emit_plain_call(ex)
       }
-    // Optional call — always a chain root.
     ast.OptionalCallExpression(..) -> emit_chain_root(ex)
 
-    // new Foo(args) — SPEC §8 construct(ctor, argsL, newTarget); newTarget=ctor.
-    // Fast path: new_simple probes plain-function ctor (no class/derived/gen/
-    // async/fields) → alloc {proto:ctor.prototype} + apply body; miss (atom)
-    // → full t_construct. Spread bypasses the probe.
     ast.NewExpression(_, callee, args) -> {
       use c <- anf.then(expr(callee))
       use args_l <- anf.then(emit_args_list(args))
@@ -297,7 +225,6 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
       }
     }
 
-    // ── Identifier + lexical pseudo-bindings (u-identifier-lexical) ─────────
     ast.Identifier(name: "undefined", ..) ->
       anf.then(consts(), fn(rc) { anf.pure(rc.undef) })
     ast.Identifier(name: "#" <> _, ..) ->
@@ -307,27 +234,20 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
       )
     ast.Identifier(name:, ..) -> emit_identifier(name)
     ast.ThisExpression(_) -> emit_lexical(lexical.RefThis)
-    // Bare `super` is a §13.3.7.1 early SyntaxError — parser-unreachable.
     ast.SuperExpression(_) -> unreachable("bare super")
     ast.SpreadElement(..) -> unreachable("bare spread")
     ast.MetaProperty(_, ast.NewTarget) -> emit_lexical(lexical.RefNewTarget)
     ast.MetaProperty(_, ast.ImportMeta) ->
       throw_at_rt("throw_type_error", "unsupported: import.meta")
 
-    // ── Update / Assignment (u-assign-update) ───────────────────────────────
     ast.UpdateExpression(_, op, prefix, target) ->
       emit_update(op, prefix, target)
     ast.AssignmentExpression(_, op, left, right) ->
       emit_assignment(op, left, right)
 
-    // ── Object / Array literals (u-object-array) ────────────────────────────
     ast.ObjectExpression(_, properties) -> emit_object(properties, named)
     ast.ArrayExpression(_, elements) -> emit_array(elements)
 
-    // ── Delegated: fn / arrow / class (u-delegate-dispatch) ─────────────────
-    // FunctionExpression: pop the analyzer-assigned child scope id, then bridge
-    // e.dispatch.emit_function. `named` seeds NamedEvaluation only when the
-    // expression itself is anonymous (§15.2.5 / emit.gleam:5220).
     ast.FunctionExpression(_, self_name, params, body, is_gen, is_async) -> {
       let self = ast.binding_name(self_name)
       let inferred = case self {
@@ -359,9 +279,6 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
       })
     }
 
-    // ── Coroutine ops (u-delegate-dispatch) ─────────────────────────────────
-    // EmitDispatch has no emit_await/emit_yield — route through host ops per
-    // SPEC §8. M18 emit_async_body owns the coroutine machinery.
     ast.AwaitExpression(_, argument) -> {
       use v <- anf.then(expr(argument))
       anf.host("await", [v])
@@ -376,7 +293,6 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
         True -> anf.host("yield_star", [v])
         False -> {
           use e <- anf.then(ask)
-          // §27.6.3.8: async-gen `yield x` awaits x first (emit.gleam:4936).
           case e.is_async {
             True -> {
               use awaited <- anf.then(anf.host("await", [v]))
@@ -388,7 +304,6 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
       }
     }
 
-    // ── Dynamic import (u-delegate-dispatch, port emit.gleam:4995) ──────────
     ast.ImportExpression(..) -> {
       use _ <- anf.then(modify(state.mark_unsupported(_, "import()")))
       use rc <- anf.then(consts())
@@ -397,12 +312,10 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
   }
 }
 
-/// Lower an expression with no NamedEvaluation hint.
 pub fn expr(ex: ast.Expression) -> Build(ir.Value) {
   emit(ex, None)
 }
 
-/// SequenceExpression helper: eval each for side effects, yield the last.
 fn emit_sequence(exprs: List(ast.Expression)) -> Build(ir.Value) {
   case exprs {
     [] -> {
@@ -417,8 +330,6 @@ fn emit_sequence(exprs: List(ast.Expression)) -> Build(ir.Value) {
   }
 }
 
-/// state.EmitDispatch.emit_expr adapter (state.gleam:215). Runs the Build to
-/// a Values-terminal ir.Expr via anf.run. Always Ok — see module doc.
 pub fn emit_expr(
   e: Emitter2,
   ex: ast.Expression,
@@ -426,7 +337,6 @@ pub fn emit_expr(
   Ok(anf.run(expr(ex), e))
 }
 
-/// `emit_expr` with the NamedEvaluation hint for an anonymous fn/class `ex`.
 pub fn emit_expr_named(
   e: Emitter2,
   ex: ast.Expression,
@@ -435,12 +345,6 @@ pub fn emit_expr_named(
   Ok(anf.run(emit(ex, named), e))
 }
 
-// ── Identifier read (u-identifier-lexical) ──────────────────────────────────
-// Port of emit.gleam:1800-1810. D15: WithChain resolutions surface as a
-// runtime UnsupportedFeature throw. Slot/lexical helpers live below.
-
-/// Resolve `name` in the current scope and read its value. Private names
-/// (`#x`) resolve as ordinary class-scope minted-key locals (D9).
 pub fn emit_identifier(name: String) -> Build(ir.Value) {
   use e <- anf.then(ask)
   case state.resolve(e, name) {
@@ -449,11 +353,6 @@ pub fn emit_identifier(name: String) -> Build(ir.Value) {
       throw_at_rt("throw_type_error", "unsupported: with (" <> name <> ")")
   }
 }
-
-// ── BinaryOp → IR (u-binop, SPEC §8 op table) ───────────────────────────────
-// Add/Sub/Mul and the four relationals get the both-BEAM-numbers NumTerm fast
-// path via anf.guarded_binop/guarded_cmp; everything else is a straight host
-// call (M9 resolve_js classifies JPure/JRead/JMut — R8/R9).
 
 fn binop(op: ast.BinaryOp, l: ir.Value, r: ir.Value) -> Build(ir.Value) {
   case op {
@@ -467,7 +366,6 @@ fn binop(op: ast.BinaryOp, l: ir.Value, r: ir.Value) -> Build(ir.Value) {
     ast.Divide -> anf.guarded_div(l, r)
     ast.Modulo -> anf.guarded_mod(l, r)
     ast.Exponentiation -> anf.host("pow", [l, r])
-    // §7.2.15 IsStrictlyEqual yields a Boolean — re-branch the i32 result.
     ast.StrictEqual -> {
       use v <- anf.then(strict_eq(l, r))
       anf.i32_to_js_bool(v)
@@ -477,11 +375,6 @@ fn binop(op: ast.BinaryOp, l: ir.Value, r: ir.Value) -> Build(ir.Value) {
       use rc <- anf.then(consts())
       anf.bind_if(v, anf.pure(rc.false_), anf.pure(rc.true_))
     }
-    // Abstract equality: eq_fast (JPure, 0|1|miss) covers null/undef, num×
-    // num, str×str, cell×cell, bool×bool; on `miss` (any pair reaching
-    // ToPrimitive or a cross-type coercion) fall to full JMut `eq`. Both
-    // arms yield Int 0|1. `!=` inverts via the i32 result directly.
-    // §7.2.14 IsLooselyEqual yields a Boolean — re-branch the i32 result.
     ast.Equal -> {
       use v <- anf.then(loose_eq(l, r))
       anf.i32_to_js_bool(v)
@@ -510,28 +403,17 @@ fn binop(op: ast.BinaryOp, l: ir.Value, r: ir.Value) -> Build(ir.Value) {
       int_result(l, r, int_const_bit("erl_band", "bitand_fast", "bitand", l, r))
     ast.BitwiseOr -> int_result(l, r, int_fast("bitor_fast", "bitor", l, r))
     ast.BitwiseXor -> int_result(l, r, int_fast("bitxor_fast", "bitxor", l, r))
-    // §13.10.1 RelationalExpression `in` yields a Boolean; `t_in` returns the
-    // i32 truth value, so re-branch it before it escapes as a JS value.
     ast.In -> anf.then(anf.host("op_in", [l, r]), anf.i32_to_js_bool)
-    // §13.10.2 InstanceofOperator yields a Boolean — re-branch the result.
     ast.InstanceOf -> anf.then(instance_of_i32(l, r), anf.i32_to_js_bool)
   }
 }
 
-/// instanceof_fast (JRead, 0|1|miss) probes the ordinary proto-walk; on
-/// atom `miss` fall to full JMut instance_of. Both arms yield Int 0|1.
 fn instance_of_i32(l: ir.Value, r: ir.Value) -> Build(ir.Value) {
   use v <- anf.then(anf.host("instanceof_fast", [l, r]))
   use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, v)))
   anf.bind_if_i32(is_miss, anf.host("instance_of", [l, r]), anf.pure(v))
 }
 
-/// A condition as the raw i32 truth value an `ir.If` tests, never a JS
-/// Boolean: comparisons keep their NumTerm / kernel 0|1, `!` inverts with
-/// `=:= 0`, `&&` / `||` / `?:` nest as `If`s over i32 arms, and only a value
-/// of unknown shape pays the `truthy` (to_boolean_i32) call. Shared by
-/// if/loop conditions (stmt) and by `!x`, `c ? a : b` and Boolean-valued
-/// `&&`/`||` operands in value position.
 pub fn cond_i32(cond: ast.Expression) -> Build(ir.Value) {
   case ast_util.unwrap_parens(cond) {
     ast.BinaryExpression(operator: op, left:, right:, ..) ->
@@ -589,8 +471,6 @@ fn cond_rel(
   anf.cond_cmp(fast, slow_op, l, r)
 }
 
-/// True iff `ex` always evaluates to a JS Boolean, so its ToBoolean is the
-/// value itself and `false`/`true` can stand in for it at a join.
 fn is_boolean_expr(ex: ast.Expression) -> Bool {
   case ast_util.unwrap_parens(ex) {
     ast.BooleanLiteral(..) -> True
@@ -618,15 +498,6 @@ fn is_boolean_expr(ex: ast.Expression) -> Bool {
   }
 }
 
-/// §7.2.14 IsLooselyEqual: JPure `eq_fast` probe (0|1|miss) → full JMut
-/// `eq` on `miss`. IsAtom on the Int 0|1 is false; on `miss` true.
-/// `x == null` / `null == x` (either literal null OR undefined) is the
-/// dominant richards shape — collapse to two INLINED `=:=` term-tests
-/// (§7.2.14 steps 2-3+14: null/undef vs anything is 1 iff the other is
-/// null/undef); NAdd is safe (both can't be 1) and lowers to a BEAM `+`
-/// BIF, so the whole `x == null` cond is zero call_ext.
-/// `left == right` as the raw i32 0|1 for cond position (stmt.emit_cond_i32).
-/// `binop` re-branches this to a JS Boolean; a cond feeds `ir.If` directly.
 pub fn loose_eq_i32(
   left: ast.Expression,
   right: ast.Expression,
@@ -641,13 +512,7 @@ fn loose_eq(l: ir.Value, r: ir.Value) -> Build(ir.Value) {
     True, _ -> nul_eq_inline(r)
     _, True -> nul_eq_inline(l)
     False, False ->
-      // One side a NON-NEGATIVE small-int constant (const-folded global
-      // or expr_operand's raw ConstI32) → inline `is_integer` + `=:=`
-      // fast path; float/non-int falls to eq_fast (§7.2.14 num×num uses
-      // `==`, so 1.0==1 is true — the IsInt guard misses and eq_fast
-      // handles it). ConstI32 with bit 31 set is a WRAPPED negative
-      // (small_int_value stores unsigned bits) — `=:=` on the raw bits
-      // would mismatch, so those stay on eq_fast.
+      // consti32 with bit 31 set is a wrapped negative, stays on eq_fast
       case l, r {
         ir.ConstI32(c), _ if c >= 0 && c < 0x80000000 -> int_const_eq(r, l)
         _, ir.ConstI32(c) if c >= 0 && c < 0x80000000 -> int_const_eq(l, r)
@@ -669,7 +534,6 @@ fn loose_eq_slow(l: ir.Value, r: ir.Value) -> Build(ir.Value) {
   anf.bind_if(is_miss, anf.host("eq", [l, r]), anf.pure(v))
 }
 
-/// `left === right` as the raw i32 0|1 for cond position.
 pub fn strict_eq_i32(
   left: ast.Expression,
   right: ast.Expression,
@@ -679,17 +543,11 @@ pub fn strict_eq_i32(
   strict_eq(l, r)
 }
 
-/// `d === selector` for one `case selector:` label, as the raw i32.
 pub fn case_test_i32(d: ir.Value, selector: ast.Expression) -> Build(ir.Value) {
   use t <- anf.then(expr_operand(selector))
   strict_eq(d, t)
 }
 
-/// §7.2.15 as an i32. A literal `null`/`undefined`/boolean/string operand is
-/// equal only to the identical term, so those are one inline `=:=`; a
-/// non-negative small-int constant takes `=:=` under an `is_integer` guard
-/// (a float `1.0 === 1` still holds, via the kernel); everything else is one
-/// call to the pure `strict_eq` kernel (numeric `==`, NaN unequal, identity).
 fn strict_eq(l: ir.Value, r: ir.Value) -> Build(ir.Value) {
   case l, r {
     ir.ConstAtom(_), _ | ir.ConstBinary(_), _ ->
@@ -713,10 +571,6 @@ fn int_const_seq(v: ir.Value, c: ir.Value) -> Build(ir.Value) {
   )
 }
 
-/// A binop operand: small-int NumberLiteral → bare ConstI32 (skips the
-/// Let-bound Convert(BoxInt) so `binop` sees the constant directly and
-/// its fast-path detectors fire), `-<int>` → bare ConstI64; everything else
-/// via `expr`.
 fn expr_operand(ex: ast.Expression) -> Build(ir.Value) {
   case ast_util.unwrap_parens(ex) {
     ast.NumberLiteral(_, ast.FiniteNumber(f)) ->
@@ -737,8 +591,6 @@ fn expr_operand(ex: ast.Expression) -> Build(ir.Value) {
   }
 }
 
-/// `v == null` as i32: `v =:= undefined orelse v =:= null`. Emitted as an
-/// If rather than an i32 add so the backend can spell it as the `orelse`.
 fn nul_eq_inline(v: ir.Value) -> Build(ir.Value) {
   use u <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("undefined"))))
   anf.bind(ir.If(
@@ -749,28 +601,10 @@ fn nul_eq_inline(v: ir.Value) -> Build(ir.Value) {
   ))
 }
 
-// ── const-global folding (perf-gate-richards) ───────────────────────────────
-// Top-level `var NAME = <int-literal>` NEVER reassigned in the whole script
-// → reads inline the literal instead of `global_get_fast` (richards' 41k/run
-// STATE_*/ID_*/KIND_* reads → 0 call_ext). Computed once at compile entry,
-// stored on `Emitter2.const_globals`, read by `emit_direct_get`.
-
-/// Collect foldable-as-constant top-level `var` bindings. A binding is
-/// foldable iff (a) its declarator is `var NAME = <NumberLiteral(int)>`,
-/// (b) NAME never appears as an assignment/update target ANYWHERE in the
-/// script (including nested function bodies), (c) the script never names
-/// `eval` or `Function` (direct eval and `with` are D15-rejected, but
-/// indirect eval / Function() can redeclare a global `var`). Limitation: a read
-/// that runs before the `var` line (via a hoisted function called earlier)
-/// would observe `undefined` — no v8-v7 bench does this and it's a
-/// perf-only fold (a wrongly-folded read is caught by the differential
-/// tests, not silently miscompiled).
+// fold never-reassigned top-level int vars to literals
 pub fn analyze_const_globals(
   body: List(ast.StmtWithLine),
 ) -> dict.Dict(String, ir.Value) {
-  // Single left-to-right pass folds `var X = <int-literal>` AND
-  // `var X = A op B` / `var X = ~A` / `var X = -A` where A,B are earlier
-  // folded consts (richards' STATE_SUSPENDED_RUNNABLE / STATE_NOT_HELD).
   let cands =
     list.fold(body, dict.new(), fn(acc, s) {
       case s.statement {
@@ -794,10 +628,6 @@ pub fn analyze_const_globals(
   case dict.is_empty(cands) {
     True -> cands
     False -> {
-      // Top-level `var X = init` is the candidate's own definition, so it
-      // does not count as a write — unless X is initialised twice up here.
-      // Any nested `var X` (a shadowing local, which the const read cannot
-      // tell apart) goes through decl_assigned and does.
       let #(uses, _) =
         list.fold(body, #(Uses(set.new(), False), set.new()), fn(st, s) {
           let #(acc, seen) = st
@@ -828,9 +658,6 @@ pub fn analyze_const_globals(
   }
 }
 
-/// Accumulator for the whole-script walk: every assignment/update target
-/// name, plus whether `eval` / `Function` is named anywhere (identifier,
-/// `.eval`, or `["eval"]`) — either can run code that redeclares a global.
 type Uses {
   Uses(assigned: set.Set(String), names_eval: Bool)
 }
@@ -846,9 +673,6 @@ fn uses_name(acc: Uses, name: String) -> Uses {
   }
 }
 
-/// Fold an initializer to a small-int ir.Value using already-collected
-/// consts. Handles NumberLiteral(int), Identifier→prior-const, `A|B`,
-/// `A&B`, `A^B`, `A+B`, `A-B`, `A*B`, `~A`, `-A`, `(E)`.
 fn fold_const_init(
   known: dict.Dict(String, ir.Value),
   ex: ast.Expression,
@@ -876,7 +700,7 @@ fn fold_const_int(
       option.map(fold_const_int(known, argument), fn(a) {
         int.bitwise_exclusive_or(a, -1)
       })
-    // `-0` and `0 * -n` are the Number -0, not an integer.
+    // -0 and 0 * -n are not integers
     ast.UnaryExpression(operator: ast.Negate, argument:, ..) ->
       case fold_const_int(known, argument) {
         Some(0) -> None
@@ -901,9 +725,7 @@ fn fold_const_int(
   }
 }
 
-/// The fold works in exact integers, so every intermediate must stay inside
-/// the int32 range a folded constant can end up as (and far from the floats
-/// `int.to_float` cannot represent).
+// keep every intermediate inside int32 range
 fn small_int(i: Int) -> Option(Int) {
   case i >= -2_147_483_648 && i < 2_147_483_648 {
     True -> Some(i)
@@ -924,13 +746,6 @@ fn small_int_of(f: Float) -> Option(Int) {
   }
 }
 
-/// A finite double `f` that's an exact non-negative small int → the
-/// ir.Value the JS number `f` lowers to (mirrors `number_literal`'s smi arm,
-/// but a bare term-level integer since it's used where a JsVal is expected —
-/// at BEAM level `Convert(BoxInt(W32), ConstI32(n))` and `ConstI32(n)` both
-/// emit `CInt(n)`; the Convert is a type-level annotation only). `ConstI32`
-/// carries unsigned bits, so a negative int has no term literal (its bits
-/// would surface as `n + 2^32`) and `-0` is not an integer at all.
 fn small_int_value(f: Float) -> Option(ir.Value) {
   let i = float.truncate(f)
   case
@@ -944,10 +759,6 @@ fn small_int_value(f: Float) -> Option(ir.Value) {
   }
 }
 
-/// Full-depth (INTO function bodies) collection of every Identifier name
-/// appearing as an assignment/update target — the prune set for
-/// analyze_const_globals. Over-approximates (includes locals shadowing a
-/// global — safe, just misses a fold).
 fn stmt_assigned_globals(acc: Uses, s: ast.StmtWithLine) -> Uses {
   case s.statement {
     ast.EmptyStatement | ast.DebuggerStatement -> acc
@@ -1030,9 +841,6 @@ fn st_assigned(acc: Uses, s: ast.Statement) -> Uses {
   stmt_assigned_globals(acc, ast.StmtWithLine(0, s))
 }
 
-/// A declarator below the top level: its initializer runs, and every name it
-/// binds is written (or shadowed by a same-named local, which the const read
-/// cannot tell apart from the global).
 fn decl_assigned(acc: Uses, d: ast.VariableDeclarator) -> Uses {
   pat_bound_assigned(opt_ex_assigned(acc, d.init), d.id)
 }
@@ -1061,9 +869,6 @@ fn opt_ex_assigned(acc: Uses, e: Option(ast.Expression)) -> Uses {
   }
 }
 
-/// Walk a binding pattern's default initializers and computed keys — the
-/// expressions that run when the pattern binds. Bound names are NOT marked;
-/// see `pat_bound_assigned` for the shapes that re-assign a global.
 fn pat_default_assigned(acc: Uses, p: ast.Pattern) -> Uses {
   case p {
     ast.IdentifierPattern(..) -> acc
@@ -1088,8 +893,6 @@ fn pat_default_assigned(acc: Uses, p: ast.Pattern) -> Uses {
   }
 }
 
-/// `pat_default_assigned` plus every name the pattern binds: a destructuring
-/// `var` or a for-in/of head writes those names on each evaluation.
 fn pat_bound_assigned(acc: Uses, p: ast.Pattern) -> Uses {
   let acc = pat_default_assigned(acc, p)
   list.fold(ast.pattern_bound_names(p), acc, uses_assign)
@@ -1126,7 +929,7 @@ fn ex_assigned(acc: Uses, ex: ast.Expression) -> Uses {
       ex_assigned(assign_target(acc, argument), argument)
     ast.UnaryExpression(operator: ast.Delete, argument:, ..) ->
       ex_assigned(assign_target(acc, argument), argument)
-    // Descend INTO function bodies (unlike stmt.gleam's per-function walk).
+    // descends into function bodies
     ast.FunctionExpression(body:, params:, ..) ->
       list.fold(
         body,
@@ -1142,7 +945,6 @@ fn ex_assigned(acc: Uses, ex: ast.Expression) -> Uses {
     }
     ast.ClassExpression(super_class:, body:, ..) ->
       class_body_assigned(opt_ex_assigned(acc, super_class), body)
-    // leaves
     ast.Identifier(name:, ..) -> uses_name(acc, name)
     ast.NumberLiteral(..)
     | ast.BigIntLiteral(..)
@@ -1156,7 +958,6 @@ fn ex_assigned(acc: Uses, ex: ast.Expression) -> Uses {
     | ast.RegExpLiteral(..)
     | ast.IntrinsicTemplateObject(..)
     | ast.ImportExpression(..) -> acc
-    // recurse
     ast.BinaryExpression(left:, right:, ..)
     | ast.LogicalExpression(left:, right:, ..) ->
       ex_assigned(ex_assigned(acc, left), right)
@@ -1219,9 +1020,6 @@ fn ex_assigned(acc: Uses, ex: ast.Expression) -> Uses {
   }
 }
 
-/// Every identifier an assignment target writes, through nested
-/// destructuring shapes (`[a, {b}] = …`). Defaults and computed keys are
-/// walked by the caller's `ex_assigned` over the same expression.
 fn assign_target(acc: Uses, ex: ast.Expression) -> Uses {
   case ast_util.unwrap_parens(ex) {
     ast.Identifier(name:, ..) -> uses_assign(acc, name)
@@ -1246,9 +1044,6 @@ fn assign_target(acc: Uses, ex: ast.Expression) -> Uses {
   }
 }
 
-/// A bitwise/shift op with a Number-constant operand can only yield an
-/// int32 (a BigInt operand throws on the mix), so its result is a known
-/// BEAM number for the arithmetic that follows.
 fn int_result(
   l: ir.Value,
   r: ir.Value,
@@ -1267,9 +1062,6 @@ fn is_nullish_const(v: ir.Value) -> Bool {
   }
 }
 
-/// §13.12/§13.9 bitwise/shift: JPure `*_fast` probe (Int|miss — gate on
-/// both bare BEAM integers, ToInt32-wrap in the FFI) → full JMut slow op
-/// (ToPrimitive+ToNumeric chain) on `miss`.
 fn int_fast(
   fast: String,
   slow: String,
@@ -1281,13 +1073,7 @@ fn int_fast(
   anf.bind_if(is_miss, anf.host(slow, [l, r]), anf.pure(v))
 }
 
-/// `l & C` with a NON-NEGATIVE small-int-constant operand: inline
-/// `is_integer(other) ? erlang:band(other, C) : bitand_fast(…)` — the
-/// erlang `band` BIF lowers to an inline instruction, zero call_ext.
-/// Skipping ToInt32 on `other` is safe for `band` with `0 ≤ C < 2³¹`
-/// ONLY: the mask's high bits (incl. sign) are 0, so `other band C ≡
-/// w32(other) band w32(C)` for every integer `other`. Negative C or
-/// `bor`/`bxor` differ on sign extension → stay on the FFI probe.
+// skipping toint32 is only safe for band with 0 <= c < 2^31
 fn int_const_bit(
   bif: String,
   fast: String,
@@ -1315,13 +1101,7 @@ fn int_const_bit_go(
   anf.bind_if(is_i, anf.host(bif, [v, c]), int_fast(fast, slow, v, c))
 }
 
-/// `l >> C` / `l << C` with an int-literal shift count `0 ≤ C < 32`: inline
-/// `is_integer(l) ∧ (l band mask == l) ? erlang:bsr/bsl(l, C) : *_fast` —
-/// the erlang shift BIFs lower to inline instructions, zero call_ext (crypto
-/// am3's ~3M/run `>>14`/`>>28`/`<<14`). §13.9 correctness: bare `bsr`/`bsl`
-/// ≡ `w32(l) bsr/bsl C` iff `l ∈ [0, mask]`; `>>` mask is `2³¹-1`, `<<` mask
-/// is `2^(31-C)-1` (result stays `< 2³¹`). Outside that range (rare) falls
-/// to the `w32`-wrapping FFI. Shifts are non-commutative — only `r` probed.
+// bare bsr/bsl only valid for l in [0, mask]
 fn int_const_shift(
   bif: String,
   fast: String,
@@ -1350,15 +1130,7 @@ fn int_const_shift(
   }
 }
 
-// ── Number literals (u-literals, SPEC §7.M12) ───────────────────────────────
-
-/// A non-negative integral value below 2³¹ boxes as a W32 smi via
-/// `Convert(BoxInt(W32), ConstI32)`, a negative one above -2³¹ via
-/// `BoxInt(W64)` (`ConstI32` carries unsigned bits) — the integer the
-/// interpreter's negate of the same constant yields; every other finite double
-/// is `erlang:binary_to_float` of its shortest round-trip text, which the
-/// BEAM compiler folds to a float literal (`-0.0` and denormals included).
-/// `1e400` — the parser's sole non-finite literal — is `pos_inf`.
+// consti32 carries unsigned bits, negatives box as w64
 fn number_literal(n: ast.LiteralNumber) -> Build(ir.Value) {
   case n {
     ast.InfiniteNumber -> anf.then(consts(), fn(rc) { anf.pure(rc.pos_inf) })
@@ -1384,23 +1156,13 @@ fn number_literal(n: ast.LiteralNumber) -> Build(ir.Value) {
   }
 }
 
-// ── Templates (u-template, port emit.gleam:4916,5016-5047,5059-5078) ────────
-
-/// Next site index in this module: tagged-template call sites (§13.2.8.4
-/// template caching key, qualified by the module name in
-/// `emit_template_object`) and property-read inline-cache sites share it.
 fn next_site() -> Build(Int) {
   fn(e: Emitter2, k) {
     k(state.Emitter2(..e, next_site: e.next_site + 1), e.next_site)
   }
 }
 
-/// `` `a${x}b${y}c` `` is `TemplateParts("a", [#(x,"b"), #(y,"c")])`. §13.2.8.5
-/// concatenates via ToString (string-hint), NOT `+`'s ToPrimitive. For a
-/// primitive hole the two agree, so the pure `add_prim(acc, v)` kernel
-/// appends a string or a side-effect-free ToString in one call; an object
-/// (or symbol, which throws) misses to host("to_string") + string_concat.
-/// Empty quasis add nothing.
+// §13.2.8.5 holes concat via tostring, not toprimitive
 fn emit_template_literal(parts: ast.TemplateParts(String)) -> Build(ir.Value) {
   let head = ir.ConstBinary(bit_array.from_string(parts.head))
   list.fold(parts.tail, anf.pure(head), fn(acc_b, part) {
@@ -1424,10 +1186,7 @@ fn emit_template_literal(parts: ast.TemplateParts(String)) -> Build(ir.Value) {
   })
 }
 
-/// GetTemplateObject (§13.2.8.4): the runtime caches a frozen array per
-/// site key `"<module>#<site>"`, unique across every module loaded into one
-/// agent. `cooked=None` (invalid escape in a tagged template, §12.9.6.1) →
-/// `undefined`.
+// §13.2.8.4 gettemplateobject, cached per site key
 fn emit_template_object(
   site: Int,
   quasis: List(ast.TemplateQuasi),
@@ -1452,7 +1211,6 @@ fn emit_template_object(
   anf.host("get_template_object", [site_v, cooked_l, raw_l])
 }
 
-/// Read scope slot `slot` — a boxed slot reads through host("cell_get").
 pub fn read_slot(slot: Int, boxed: Bool) -> Build(ir.Value) {
   use e <- anf.then(ask)
   let v = ir.Var(state.get_slot_var(e, slot))
@@ -1462,10 +1220,7 @@ pub fn read_slot(slot: Int, boxed: Bool) -> Build(ir.Value) {
   }
 }
 
-/// The folded literal for a const-global read inside a nested function.
-/// Top-level reads never fold: a script-level read can run before the `var`
-/// line (`undefined`) or after eval code redeclared the name, and the few
-/// top-level reads are not worth the miscompile.
+// top-level reads never fold, may run before the var line
 fn const_global(e: Emitter2, name: String) -> Option(ir.Value) {
   case e.fn_scope == scope.root_scope_id {
     True -> None
@@ -1473,14 +1228,8 @@ fn const_global(e: Emitter2, name: String) -> Option(ir.Value) {
   }
 }
 
-/// The non-with ("static") read of a resolved binding. EvalEnv → D15.
 pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
   case d {
-    // Optimization G made top-level `var` root-local, so a const_global now
-    // resolves here (root VarBinding at js_main / CaptureBinding of it in
-    // nested fns — both `origin_kind: VarBinding`) instead of the Global arm.
-    // Re-check const_globals so `STATE_HELD` etc. still inline as ConstI32,
-    // keeping binop's int_const_eq / int_const_bit fast paths live.
     scope.Local(slot:, boxed:, origin_kind: scope.VarBinding, ..) -> {
       use e <- anf.then(ask)
       case const_global(e, name) {
@@ -1488,10 +1237,7 @@ pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
         None -> read_slot(slot, boxed)
       }
     }
-    // §9.1.1.1.6 GetBindingValue: a lexical binding read before its
-    // declaration ran throws. Elided once this function body has emitted the
-    // initialization (straight-line source order); a capture of an outer
-    // lexical can never prove that, so it always checks.
+    // §9.1.1.1.6 tdz check unless init already emitted here
     scope.Local(slot:, boxed:, origin_kind:, ..) -> {
       use v <- anf.then(read_slot(slot, boxed))
       use e <- anf.then(ask)
@@ -1515,15 +1261,10 @@ pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
     }
     scope.Global(name: g) -> {
       use e <- anf.then(ask)
-      // Optimization G: top-level `var`/`function` declared name → boxed
-      // module-local cell (cell_get, ~3ns) instead of the global object
-      // (`global_get` kernel call, ~8ns × 41k/run on richards).
       case dict.get(e.slotted_globals, g) {
         Ok(slot) -> read_slot(slot, True)
         Error(Nil) ->
           case const_global(e, g) {
-            // Top-level `var G = <literal>` never reassigned in the whole
-            // script — inline the literal (analyze_const_globals proved it).
             Some(lit) -> anf.pure(lit)
             None -> global_read(e, g)
           }
@@ -1537,12 +1278,6 @@ pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
   }
 }
 
-/// Read global `g` off the global object. Inside a function body the JRead
-/// own-data probe `global_get_fast` runs inline (bare value on a hit, no
-/// state pair) and only a miss (accessor, prototype-chain or absent
-/// property) calls the full JMut `global_get`; run-once top-level code keeps
-/// the single `global_get` call (probe + full read inside the runtime) for
-/// its smaller forms.
 fn global_read(e: Emitter2, g: String) -> Build(ir.Value) {
   let key = ir.ConstBinary(bit_array.from_string(g))
   case e.fn_scope == scope.root_scope_id {
@@ -1557,8 +1292,6 @@ fn global_read(e: Emitter2, g: String) -> Build(ir.Value) {
   }
 }
 
-/// Port of emit.gleam:2570 resolve_lexical — Option-returning so top-level
-/// `this` reads as `undefined` instead of scope.lookup_lexical's panic.
 fn resolve_lexical(
   e: Emitter2,
   ref: lexical.LexicalRef,
@@ -1574,10 +1307,6 @@ fn resolve_lexical(
   }
 }
 
-/// Read a lexical pseudo-binding (`this`, `new.target`, home_object,
-/// active_func). None → `undefined` (Script/Module root, §16.1.6). Where
-/// `this` may still be unbound (§9.1.1.3.4 GetThisBinding in a derived
-/// constructor before `super()`), the read is checked.
 pub fn emit_lexical(ref: lexical.LexicalRef) -> Build(ir.Value) {
   use e <- anf.then(ask)
   use v <- anf.then(lexical_value(ref))
@@ -1598,20 +1327,13 @@ fn lexical_value(ref: lexical.LexicalRef) -> Build(ir.Value) {
   }
 }
 
-/// §10.2.2 steps 10-12 for a derived constructor: an `undefined` result
-/// yields the raw `this` binding, which `[[Construct]]` rejects with a
-/// ReferenceError when `super()` never ran.
 pub fn derived_return_value(v: ir.Value) -> Build(ir.Value) {
   use rc <- anf.then(consts())
   use is_undef <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, rc.undef)))
   anf.bind_if(is_undef, lexical_value(lexical.RefThis), anf.pure(v))
 }
 
-/// Write `v` into the lexical `this` slot after `super()` — §10.2.4
-/// BindThisValue step 3 throws ReferenceError if already initialized (second
-/// `super()`). The slot is always a cell here: `super()` only occurs in a
-/// derived constructor (whose `this` is boxed, `state.lexical_is_boxed`) or
-/// an arrow capturing it.
+// §10.2.4 bindthisvalue, throws if already initialized
 fn set_lexical_this(v: ir.Value) -> Build(Nil) {
   use e <- anf.then(ask)
   case resolve_lexical(e, lexical.RefThis) {
@@ -1623,14 +1345,10 @@ fn set_lexical_this(v: ir.Value) -> Build(Nil) {
   }
 }
 
-/// §10.2.4 step 3: read the current `this` slot; if it is NOT still `js_tdz`,
-/// throw ReferenceError. The throw diverges at runtime so the caller's write
-/// (which follows unconditionally in the IR) is only reached on the tdz path.
 fn this_check_init(slot: Int, boxed: Bool) -> Build(Nil) {
   use rc <- anf.then(consts())
   use cur <- anf.then(read_slot(slot, boxed))
-  // Term identity, not `strict_eq`: the sentinel is not a JS value and is
-  // never IsStrictlyEqual to anything, itself included.
+  // term identity, the sentinel is not a js value
   use is_tdz <- anf.then(anf.bind(ir.NumTerm(ir.NEq, cur, rc.tdz)))
   use _ <- anf.then(anf.bind_if(
     is_tdz,
@@ -1643,12 +1361,6 @@ fn this_check_init(slot: Int, boxed: Bool) -> Build(Nil) {
   anf.pure(Nil)
 }
 
-// ── Property keys / member reads (u-member-key) ─────────────────────────────
-
-/// §7.1.19 ToPropertyKey split-probe (l-jread-reclass): JPure
-/// `to_property_key_fast` returns the wire key on int/str/sym (no St —
-/// primitives never mutate it) and `miss` on Handle/rare; the miss arm
-/// falls to JMut `to_property_key`. IsAtom on the 2-tuple key is false.
 pub fn to_property_key(v: ir.Value) -> Build(ir.Value) {
   case perf5_to_property_key_split {
     False -> anf.host("to_property_key", [v])
@@ -1660,21 +1372,13 @@ pub fn to_property_key(v: ir.Value) -> Build(ir.Value) {
   }
 }
 
-/// ToPropertyKey for a computed member key `base[v]`: §6.2.5.5 GetValue /
-/// §6.2.5.6 PutValue run ToObject(base) before the key is coerced, so the
-/// slow arm checks the base for null/undefined first. The fast probe only
-/// hits int/string/symbol keys, whose coercion has no observable side
-/// effect, so a nullish base still surfaces as the [[Get]]/[[Set]] TypeError.
+// §6.2.5.5 toobject(base) happens before key coercion
 pub fn to_property_key_of(base: ir.Value, v: ir.Value) -> Build(ir.Value) {
   use k <- anf.then(anf.host("to_property_key_fast", [v]))
   use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, k)))
   anf.bind_if(is_miss, anf.host("to_property_key_of", [base, v]), anf.pure(k))
 }
 
-/// Static/computed PropertyKey → runtime key value. The four literal shapes
-/// lower to the compile-time-canonical wire tuple via `anf.object_key_lit`
-/// (invariant #4 — no runtime ToPropertyKey). KeyPrivate resolves the
-/// class-scope minted-key local (D9). KeyComputed evaluates then coerces.
 pub fn emit_key(pk: ast.PropertyKey) -> Build(ir.Value) {
   case pk {
     ast.KeyIdentifier(..)
@@ -1689,9 +1393,6 @@ pub fn emit_key(pk: ast.PropertyKey) -> Build(ir.Value) {
   }
 }
 
-/// MemberProperty (`.x` / `[e]`) → runtime key value. `#x` resolves the
-/// minted private-key local; plain dot builds the wire key tuple; bracket
-/// evaluates then ToPropertyKey.
 pub fn emit_key_from_prop(prop: ast.MemberProperty) -> Build(ir.Value) {
   case prop {
     ast.Dot(name: "#" <> _ as name, ..) -> emit_identifier(name)
@@ -1710,9 +1411,6 @@ fn is_private_prop(prop: ast.MemberProperty) -> Bool {
   }
 }
 
-/// `Math.m(args)` → JPure host-op name when `m` ∈ the direct-dispatch set
-/// AND `args` matches the FFI arity exactly (no spread). The caller still
-/// checks `Math` resolves to Global (not shadowed) before firing.
 fn math_direct_op(
   obj: ast.Expression,
   prop: ast.MemberProperty,
@@ -1733,8 +1431,6 @@ fn math_direct_op(
   }
 }
 
-/// Static `.name` key as a raw binary — the own-data-property fast-path
-/// discriminator. `#x` (private) and `[e]` (computed) are excluded.
 fn static_dot_key(prop: ast.MemberProperty) -> Option(BitArray) {
   case prop {
     ast.Dot(name: "#" <> _, ..) -> None
@@ -1743,24 +1439,12 @@ fn static_dot_key(prop: ast.MemberProperty) -> Option(BitArray) {
   }
 }
 
-/// Own-data-property READ, static `.key`. Each site gets a module-unique id
-/// and the whole read is ONE JMut host op, `get_prop_site` (arc_rt_obj_ffi):
-/// the store-resident inline cache probe (shape id + slot offset seen at this
-/// site), then the own DataProperty / shaped slot probe that fills an empty
-/// site, then the full `get_prop` with the named key. A single call keeps the
-/// site small in the emitted forms.
 fn get_prop_fast(obj: ir.Value, kb: BitArray) -> Build(ir.Value) {
   use site <- anf.then(next_site())
   anf.host("get_prop_site", [obj, ir.ConstBinary(kb), ir.ConstI32(site)])
 }
 
-/// `this.key` read — the shaped-object field read the IC exists for, and
-/// the hot read of every method body. The IC hit is probed INLINE with the
-/// JRead `get_prop_ic` (bare value on a warm hit, no `{V, St}` alloc, no
-/// state rebind); `=:= miss` (NOT IsAtom — undefined/null/true/false are
-/// legitimate values) falls to the JMut `get_prop_slow` kernel: the filling
-/// probe, then the full `get_prop`. Two calls per site — the inline branch
-/// costs ~200 words of forms, so only `this` receivers pay it.
+// compare against miss atom, undefined/null are valid hits
 fn get_prop_this(obj: ir.Value, kb: BitArray) -> Build(ir.Value) {
   use site <- anf.then(next_site())
   let key = ir.ConstBinary(kb)
@@ -1770,10 +1454,6 @@ fn get_prop_this(obj: ir.Value, kb: BitArray) -> Build(ir.Value) {
   anf.bind_if(ic_miss, anf.host("get_prop_slow", [obj, key, site]), anf.pure(v))
 }
 
-/// Static-key property WRITE: one JMutUnit host op (`set_prop_named`) that
-/// runs the own-data probe and falls to the full `set_prop` /
-/// `set_prop_strict` inside the runtime, so the site is a single call.
-/// Yields `v` (the assignment expression's own value).
 fn set_prop_fast(obj: ir.Value, kb: BitArray, v: ir.Value) -> Build(ir.Value) {
   use e <- anf.then(ask)
   let strict = case e.strict {
@@ -1791,9 +1471,6 @@ fn set_prop_fast(obj: ir.Value, kb: BitArray, v: ir.Value) -> Build(ir.Value) {
   anf.pure(v)
 }
 
-/// A run of `obj.k = v;` expression statements on one receiver: `object` is
-/// `this` or an unboxed local, `first` is the leading write (any value
-/// expression) and `rest` the writes after it, whose values are `simple`.
 pub type PropWriteRun {
   PropWriteRun(
     object: ast.Expression,
@@ -1802,12 +1479,7 @@ pub type PropWriteRun {
   )
 }
 
-/// The longest leading run of two or more `obj.k = v;` statements in `ss`
-/// that can be written as one `set_props_named` call, and the statements
-/// after it. Every value after the first must be `simple`: evaluating it
-/// before the earlier writes run (a setter up the proto chain, a TypeError
-/// on a frozen receiver) is unobservable, because it cannot throw, has no
-/// effect and reads nothing those writes could change.
+// later values must be simple so reordering is unobservable
 pub fn prop_write_run(
   e: Emitter2,
   ss: List(ast.StmtWithLine),
@@ -1853,7 +1525,6 @@ fn prop_write_tail(
   }
 }
 
-/// `obj.name = value;` with a static, non-private key.
 fn prop_write(
   s: ast.Statement,
 ) -> Option(#(ast.Expression, BitArray, ast.Expression)) {
@@ -1883,8 +1554,6 @@ fn same_receiver(a: ast.Expression, b: ast.Expression) -> Bool {
   }
 }
 
-/// A receiver no write in the run can rebind: `this`, or a local held in a
-/// register (a captured local is boxed, and a setter could assign it).
 fn stable_receiver(e: Emitter2, ex: ast.Expression) -> Bool {
   case ex {
     ast.ThisExpression(_) -> !e.this_tdz
@@ -1906,8 +1575,6 @@ fn register_local(e: Emitter2, name: String) -> Bool {
   }
 }
 
-/// An expression whose evaluation cannot throw, has no side effect and
-/// depends on nothing a property write can change.
 fn simple(e: Emitter2, ex: ast.Expression) -> Bool {
   case ex {
     ast.NumberLiteral(..)
@@ -1933,8 +1600,6 @@ fn simple(e: Emitter2, ex: ast.Expression) -> Bool {
   }
 }
 
-/// Emit a `PropWriteRun`: the receiver, the first value, the remaining
-/// values, then one `set_props_named` host op over the key and value lists.
 pub fn emit_prop_write_run(run: PropWriteRun) -> Build(ir.Value) {
   let PropWriteRun(object:, first: #(k0, v0), rest:) = run
   use obj <- anf.then(expr(object))
@@ -1955,8 +1620,7 @@ pub fn emit_prop_write_run(run: PropWriteRun) -> Build(ir.Value) {
   anf.host("set_props_named", [obj, keys, vals, strict])
 }
 
-/// §13.15.2 PutValue step 6.b.iv: strict code turns a failed [[Set]] into a
-/// TypeError; sloppy code ignores it.
+// §13.15.2 step 6.b.iv strict failed set throws
 pub fn set_prop_op_name(strict: Bool) -> String {
   case strict {
     True -> "set_prop_strict"
@@ -1969,8 +1633,7 @@ fn set_prop_op() -> Build(String) {
   anf.pure(set_prop_op_name(e.strict))
 }
 
-/// §13.5.1.2 step 5.b.i: strict code turns a failed [[Delete]] into a
-/// TypeError.
+// §13.5.1.2 step 5.b.i strict failed delete throws
 fn delete_prop_op() -> Build(String) {
   use e <- anf.then(ask)
   anf.pure(case e.strict {
@@ -1979,13 +1642,7 @@ fn delete_prop_op() -> Build(String) {
   })
 }
 
-/// Indexed-element READ fast path (SPEC array-index-fast-path). `idx` is
-/// the RAW evaluated bracket expression (a JsVal, not a PropertyKey) — the
-/// FFI probe gates on it being a bare non-negative integer landing in an
-/// ArrayObj's Dense/Sparse elements. On `miss` (or an atom-valued hit —
-/// `IsAtom` conflates them; a perf loss only) the caller-supplied `slow`
-/// path runs. Callers own ToPropertyKey so a read-modify-write LValue
-/// coerces its bracket expression exactly once (§6.2.5).
+// callers own topropertykey so read-modify-write coerces once
 fn get_elem_fast(
   obj: ir.Value,
   idx: ir.Value,
@@ -1996,11 +1653,6 @@ fn get_elem_fast(
   anf.bind_if(is_miss, slow, anf.pure(v))
 }
 
-/// Indexed-element WRITE fast path. JMutMiss probe returns bare `St'` (the
-/// rebound state — a tuple) on hit / `miss` atom on any shape mismatch, so
-/// `IsAtom(r)` distinguishes them without a `{V,St'}` alloc; the miss arm
-/// runs the caller-supplied `slow` path. Yields `v` (the assignment
-/// expression's own value); `r` itself is discarded past the atom test.
 fn set_elem_fast(
   obj: ir.Value,
   idx: ir.Value,
@@ -2039,8 +1691,6 @@ pub fn emit_member_get(
   }
 }
 
-/// §13.3.7.3 super.prop / super[k] — read via [[HomeObject]].[[Prototype]]
-/// with receiver = lexical this. SPEC §8 super_get(home, this, key).
 pub fn emit_super_get(prop: ast.MemberProperty) -> Build(ir.Value) {
   use this <- anf.then(emit_lexical(lexical.RefThis))
   use ho <- anf.then(emit_lexical(lexical.RefHomeObject))
@@ -2048,11 +1698,6 @@ pub fn emit_super_get(prop: ast.MemberProperty) -> Build(ir.Value) {
   anf.host("super_get", [ho, this, k])
 }
 
-// ── Args list + call/construct + super() (u-call-new; SPEC §8) ──────────────
-
-/// Evaluate `args` left-to-right into a runtime BEAM list value. No spread →
-/// eval each then `cons_list`; any SpreadElement → left-fold, appending each
-/// spread iterable via SPEC §8 `spread_into_list(acc, iterable) → list`.
 pub fn emit_args_list(args: List(ast.Expression)) -> Build(ir.Value) {
   case ast_util.has_spread_arg(args) {
     False -> anf.then(anf.seq(list.map(args, expr)), anf.cons_list)
@@ -2082,10 +1727,6 @@ fn fold_args_spread(
   }
 }
 
-/// D4: JS fn values are `{js_cell,N}` handles. The generic call site is ONE
-/// host op: `call_fast` (arc_rt_call_ffi) runs the `kfn_code` probe, the
-/// simple-ABI / Frame apply and the §8 `t_call_checked` fallback inside, so
-/// no per-site hit/miss branches reach the IR.
 pub fn emit_call(
   f: ir.Value,
   this: ir.Value,
@@ -2094,9 +1735,6 @@ pub fn emit_call(
   anf.host("call_fast", [f, this, args_l])
 }
 
-/// `emit_call` with 0..3 positional args passed to `call_fastN` — a simple-ABI
-/// hit applies the variant with no args list; more args cons and use the
-/// list form.
 pub fn emit_call_pos(
   f: ir.Value,
   this: ir.Value,
@@ -2112,28 +1750,18 @@ pub fn emit_call_pos(
   }
 }
 
-/// Call arguments as passed to `emit_call_with_pair`. `Positional` defers the
-/// args cons-list build so the simple-ABI hit path emits ZERO MakeCons.
 pub type CallArgs {
   Consed(ir.Value)
   Positional(List(ir.Value))
 }
 
-/// `emit_call` with the `kfn_code` triple already in hand. stmt.gleam hoists
-/// that host call out of loops for loop-invariant callees and passes the pair
-/// var here so the per-iteration read is elided. `Positional(pos)` (spread-free
-/// caller) enables the simple-ABI fast path: `pair.2` is
-/// `none | {some,{code_s,arity,needs_this}}`; on arity match the call is
-/// `CallClosure(code_s, pos)` (needs_this=False) or `CallClosure(code_s,
-/// [this_r, ..pos])` (needs_this=True) — no Frame tuple, no args cons.
 pub fn emit_call_with_pair(
   pair: ir.Value,
   f: ir.Value,
   this: ir.Value,
   args: CallArgs,
 ) -> Build(ir.Value) {
-  // Cons the args-list only in arms that need it — `pos` values are already
-  // Let-bound so duplicating the cons across branches reorders no side effects.
+  // pos values already let-bound, safe to cons per arm
   let cons_args = case args {
     Consed(v) -> anf.pure(v)
     Positional(pos) -> anf.cons_list(pos)
@@ -2190,15 +1818,7 @@ pub fn emit_call_with_pair(
   })
 }
 
-/// Method call `o.prop(args)` with `o` already Let-bound (§13.3.6.2 this=obj).
-/// Static-dot ∧ spread-free → ONE JMut host op, `call_method_ic` (proto walk
-/// + KCompiled apply behind the site's inline cache, and on its miss the
-/// `get_prop_site` read + `call_fastN` call, all inside arc_rt_call_ffi);
-/// every non-fusable shape emits `emit_member_get` → `emit_call_pos`
-/// (`call_fastN` kernel) so simple-ABI still applies.
-/// Args evaluate ONCE, before the probe; the accessor-`prop` ×
-/// side-effecting-arg reorder is the only observable delta and the probe
-/// misses on accessors so the read runs after the args as before.
+// args evaluate once, before the probe
 fn emit_member_call(
   o: ir.Value,
   prop: ast.MemberProperty,
@@ -2213,7 +1833,7 @@ fn emit_member_call(
     False ->
       case static_dot_key(prop) {
         None -> {
-          // Computed / #private — key evals BEFORE args (§13.3.6 order).
+          // computed key evals before args, §13.3.6
           use f <- anf.then(emit_member_get(o, prop))
           use pos <- anf.then(anf.seq(list.map(args, expr)))
           emit_call_pos(f, o, pos)
@@ -2226,9 +1846,6 @@ fn emit_member_call(
   }
 }
 
-/// `call_method_ic` with the args passed positionally for 0..3 args (the
-/// FFI applies a matching simple variant without consing); the list form
-/// beyond that.
 fn call_method_ic_pos(
   recv: ir.Value,
   kb: BitArray,
@@ -2252,10 +1869,6 @@ fn call_method_ic_pos(
   }
 }
 
-/// The fused method call (`t_call_method_ic`, arc_rt_call_ffi): the mono
-/// proto walk + apply behind a per-site inline cache, and the read + call
-/// on its miss, keyed by two module-unique site ids (`next_site`, shared
-/// with the read caches).
 fn call_method_ic(
   recv: ir.Value,
   kb: BitArray,
@@ -2265,16 +1878,13 @@ fn call_method_ic(
   anf.host("call_method_ic", [recv, ir.ConstBinary(kb), args_l, site, rsite])
 }
 
-/// The call site's IC id and the read site's IC id for its miss arm — two
-/// ids, since `ic_call` and `ic_read` entries share the store's map.
 fn method_sites() -> Build(#(ir.Value, ir.Value)) {
   use site <- anf.then(next_site())
   use rsite <- anf.then(next_site())
   anf.pure(#(ir.ConstI32(site), ir.ConstI32(rsite)))
 }
 
-/// §13.3.7.1 step 12 InitializeInstanceElements — call the captured
-/// `<class_fields_init>` closure with `this` when it isn't undefined.
+// §13.3.7.1 step 12 initialize instance elements
 fn emit_field_init_call() -> Build(Nil) {
   use init_fn <- anf.then(emit_identifier(ast_util.class_fields_init))
   use rc <- anf.then(consts())
@@ -2289,10 +1899,7 @@ fn emit_field_init_call() -> Build(Nil) {
   anf.pure(Nil)
 }
 
-/// §13.3.7.1 SuperCall. host("super_call",[active_func, argsL, new_target])
-/// (SPEC §8 t_super_call arg order) performs GetPrototypeOf(active_func) +
-/// [[Construct]]; result is bound as `this` (step 8) then field-init (step 12).
-/// A default constructor passes its own argument list through.
+// §13.3.7.1 supercall
 fn emit_super_call(args: List(ast.Expression)) -> Build(ir.Value) {
   use af <- anf.then(emit_lexical(lexical.RefActiveFunc))
   use nt <- anf.then(emit_lexical(lexical.RefNewTarget))
@@ -2311,12 +1918,7 @@ fn emit_super_call(args: List(ast.Expression)) -> Build(ir.Value) {
   anf.pure(inst)
 }
 
-// ── Optional-chain compiler (§13.3.9.1; port emit.gleam:4107-4258) ──────────
-// One shared short-circuit exit: a nullish base at any `?.` link makes the
-// ENTIRE chain evaluate to undefined. In the Build/IR shape there is no
-// depth-1/depth-2 stack cleanup; each optional link Breaks out of an enclosing
-// ir.Block with `undef`, which naturally scopes over later member reads AND
-// call arguments.
+// §13.3.9.1 optional chain, a nullish link breaks with undefined
 
 pub fn emit_chain_root(ex: ast.Expression) -> Build(ir.Value) {
   use rc <- anf.then(consts())
@@ -2361,14 +1963,11 @@ fn emit_chain(
           use args_l <- anf.then(emit_args_list(args))
           emit_call(f, this, args_l)
         }
-        // chain_has_optional=True only for the arms above (+ TaggedTemplate,
-        // a §13.3.1.1 early error). Fallback: plain emission.
         _ -> expr(ex)
       }
   }
 }
 
-/// If `v` is nullish, Break `exit` with undefined; else yield `v` unchanged.
 fn chain_guard(v: ir.Value, exit: String, undef: ir.Value) -> Build(ir.Value) {
   use is_nul <- anf.then(anf.host_bool("is_nullish", [v]))
   anf.bind_if(is_nul, fn(e, _k) { #(ir.Break(exit, [undef]), e) }, anf.pure(v))
@@ -2387,8 +1986,6 @@ fn chain_obj(
   }
 }
 
-/// Emit a chain call's callee. Returns `#(f, this)` — `this` is the receiver
-/// for a member callee (obj / lexical-this for super), else undefined.
 fn emit_chain_callee(
   callee: ast.Expression,
   exit: String,
@@ -2413,10 +2010,7 @@ fn emit_chain_callee(
   }
 }
 
-// ── UnaryExpression (u-unary-delete, port emit.gleam:1854-1916,4322-4389) ───
-
-/// §13.5.3 `typeof name` — an unresolvable Reference yields "undefined", never
-/// throws. Port of emit.gleam:1854 emit_var_typeof (with-chain dropped per D15).
+// §13.5.3 typeof unresolvable is "undefined", never throws
 fn emit_typeof_ident(name: String) -> Build(ir.Value) {
   use e <- anf.then(ask)
   case state.resolve(e, name) {
@@ -2432,12 +2026,10 @@ fn emit_typeof_ident(name: String) -> Build(ir.Value) {
   }
 }
 
-/// §13.5.1.2 `delete name` (sloppy). Port of emit.gleam:1907 emit_var_delete
-/// with the with-chain probe dropped per D15.
+// §13.5.1.2 delete name, sloppy
 fn emit_delete_ident(name: String) -> Build(ir.Value) {
   use e <- anf.then(ask)
   case state.resolve(e, name) {
-    // Declarative bindings are never deletable (§9.1.1.1.7).
     scope.Plain(scope.Local(..)) -> anf.pure(e.consts.false_)
     scope.Plain(scope.Global(name: g)) ->
       anf.host("global_delete", [ir.ConstBinary(bit_array.from_string(g))])
@@ -2447,13 +2039,10 @@ fn emit_delete_ident(name: String) -> Build(ir.Value) {
   }
 }
 
-/// §13.5.1 `delete UnaryExpression`. Port of emit.gleam:4336-4379.
 fn emit_delete(arg: ast.Expression) -> Build(ir.Value) {
   use rc <- anf.then(consts())
   case ast_util.unwrap_parens(arg) {
-    // §13.5.1.2 step 5.b — `delete super.x` / `delete super[e]` throws
-    // ReferenceError. Evaluate `this` (TDZ) and any computed key for side
-    // effects first (§13.3.7 ordering), then throw.
+    // delete super.x throws after evaluating this and key
     ast.MemberExpression(_, ast.SuperExpression(_), property) -> {
       use _ <- anf.then(emit_lexical(lexical.RefThis))
       use _ <- anf.then(case property {
@@ -2475,7 +2064,6 @@ fn emit_delete(arg: ast.Expression) -> Build(ir.Value) {
       anf.host(op, [ov, k])
     }
     ast.Identifier(name:, ..) -> emit_delete_ident(name)
-    // Any other expression: evaluate for side effects, result is `true`.
     other -> {
       use _ <- anf.then(expr(other))
       anf.pure(rc.true_)
@@ -2520,13 +2108,6 @@ fn emit_unary(op: ast.UnaryOp, arg: ast.Expression) -> Build(ir.Value) {
   }
 }
 
-// ── Plain (non-optional-chain) CallExpression dispatch (u-call-new) ─────────
-// Port of emit.gleam:4641-4798. Reached only when
-// `chain_has_optional(ex)==False`; the optional-chain path handles `?.` links.
-
-/// General `X.apply(Y, arguments)` lowering: evaluate `X` → f, `Y` → recv,
-/// then `call_fast(f, recv, _args)` with the raw `_args` cons-list passed
-/// verbatim.
 fn emit_apply_raw_general(
   inner: ast.Expression,
   recv_arg: ast.Expression,
@@ -2537,11 +2118,6 @@ fn emit_apply_raw_general(
   emit_call(f, recv, raw_args)
 }
 
-/// `X.apply(Y, arguments)` fast-path — forwards the frame's raw `_args`
-/// cons-list directly, eliding the arguments-object read + Function.prototype
-/// .apply reflection (raytrace `Class.create`: 66k× per run). The tighter
-/// `this.M.apply(this, arguments)` shape routes through `call_method_ic`
-/// (whose miss arm is the general read + call).
 fn emit_apply_arguments(
   inner: ast.Expression,
   recv_arg: ast.Expression,
@@ -2564,19 +2140,14 @@ fn emit_apply_arguments(
 fn emit_plain_call(ex: ast.Expression) -> Build(ir.Value) {
   let assert ast.CallExpression(_, callee, args) = ex
   case callee {
-    // super(args) — §13.3.7.1 SuperCall.
     ast.SuperExpression(_) -> emit_super_call(args)
-    // super.m(args) / super[k](args) — §13.3.7.3 read + call with lexical this.
     ast.MemberExpression(_, ast.SuperExpression(_), prop) -> {
       use f <- anf.then(emit_super_get(prop))
       use this <- anf.then(emit_lexical(lexical.RefThis))
       use args_l <- anf.then(emit_args_list(args))
       emit_call(f, this, args_l)
     }
-    // `X.apply(Y, arguments)` → direct call with raw `_args`. Gated on
-    // raw_args_var (non-arrow frame-ABI body only) AND `arguments` resolving
-    // to the fn-scope's implicit binding — a param/let/catch shadow means the
-    // identifier is NOT the object built from `_args`, so fall through.
+    // only when arguments is the implicit binding, not a shadow
     ast.MemberExpression(_, inner, ast.Dot(name: "apply", ..) as prop) -> {
       use e <- anf.then(ask)
       case args, e.raw_args_var, state.arguments_is_implicit(e) {
@@ -2588,18 +2159,11 @@ fn emit_plain_call(ex: ast.Expression) -> Build(ir.Value) {
         }
       }
     }
-    // obj.m(args) / obj[k](args) — bind `this` to obj (§13.3.6.2).
     ast.MemberExpression(_, obj, prop) ->
       case math_direct_op(obj, prop, args) {
-        // Math.sqrt/floor/abs/pow/min/max → JPure FFI (raytrace hot path).
-        // Skips the Math-object property lookup + KCompiled dispatch. On
-        // `miss` (non-number arg) coerce via ToNumber (§21.3.2 step 1) and
-        // retry — args evaluate ONCE either way.
         Some(op) -> {
           use e <- anf.then(ask)
-          // Fast path only when `Math` resolves to the untouched global
-          // builtin: not shadowed by a local AND not G-slotted (top-level
-          // `var Math = ...` still resolves as Global but reads a cell).
+          // only when Math is the untouched global
           case
             state.resolve(e, "Math"),
             state.lookup_slotted_global(e, "Math")
@@ -2607,16 +2171,14 @@ fn emit_plain_call(ex: ast.Expression) -> Build(ir.Value) {
             scope.Plain(scope.Global(_)), None -> {
               use pos <- anf.then(anf.seq(list.map(args, expr)))
               use v <- anf.then(anf.host(op, pos))
-              // `=:= miss` (NOT IsAtom: js_nan/js_inf are also atoms).
+              // compare against miss atom, js_nan/js_inf are atoms too
               use is_miss <- anf.then(
                 anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))),
               )
               anf.bind_if(
                 is_miss,
                 {
-                  // §21.3.2 step 1 ToNumber. `t_plus` returns JsVal wire
-                  // (bare int/float/js_nan/js_inf/js_neg_inf); `t_to_number`
-                  // returns JsNum ({j_int,_}/…) which the FFI can't match.
+                  // t_plus returns wire jsval, t_to_number does not
                   use coerced <- anf.then(
                     anf.seq(list.map(pos, fn(a) { anf.host("plus", [a]) })),
                   )
@@ -2625,7 +2187,6 @@ fn emit_plain_call(ex: ast.Expression) -> Build(ir.Value) {
                 anf.pure(v),
               )
             }
-            // `Math` is shadowed or slotted — no fast path.
             _, _ -> {
               use o <- anf.then(expr(obj))
               emit_member_call(o, prop, args)
@@ -2637,17 +2198,12 @@ fn emit_plain_call(ex: ast.Expression) -> Build(ir.Value) {
           emit_member_call(o, prop, args)
         }
       }
-    // Direct-eval candidate — D15 UnsupportedFeature. §13.3.6.1 steps 1-3:
-    // the callee reference and the arguments are evaluated first, so a
-    // throwing argument wins over the unsupported-eval throw.
+    // §13.3.6.1 callee and args evaluate before the eval throw
     ast.Identifier(name: "eval", ..) -> {
       use _ <- anf.then(expr(callee))
       use _ <- anf.then(emit_args_list(args))
       throw_at_rt("throw_type_error", "unsupported: direct eval")
     }
-    // Immediately invoked function / arrow expression: nothing but this call
-    // can ever reach the function, so when its body has a simple-ABI variant
-    // the call goes straight to it and no function object is created.
     _ ->
       case ast_util.unwrap_parens(callee) {
         ast.FunctionExpression(
@@ -2681,12 +2237,7 @@ fn emit_plain_call(ex: ast.Expression) -> Build(ir.Value) {
   }
 }
 
-/// Regular call f(args): thisValue = undefined (§13.3.6.2 step 1.b.iii).
-/// When the callee is an unboxed local ∉ carried OR a slotted-global cell
-/// never reassigned in the loop, stmt.gleam's loop emit hoists
-/// `kfn_code(f, undef)` before the ir.Loop and records the pair var in
-/// e.hoisted_kfn — reuse it here to skip the per-iteration heap read.
-/// Slotted-global entries are keyed `-1 - slot` (disjoint from local slots).
+// slotted globals keyed -1 - slot
 fn emit_generic_call(
   callee: ast.Expression,
   args: List(ast.Expression),
@@ -2699,8 +2250,6 @@ fn emit_generic_call(
         case state.resolve(e, name) {
           scope.Plain(scope.Local(slot:, boxed: False, ..)) ->
             state.lookup_hoisted_kfn(e, slot)
-          // Slotted-global boxed cell — keyed at `-1 - slot` (current
-          // frame's slot; matches loop_invariant_callees' key).
           scope.Plain(scope.Local(slot:, boxed: True, ..)) ->
             state.lookup_hoisted_kfn(e, -1 - slot)
           _ -> None
@@ -2708,9 +2257,6 @@ fn emit_generic_call(
       _ -> None
     }
     use f <- anf.then(expr(callee))
-    // Spread-free → keep the positional value list so the simple-ABI
-    // closure applies: inline via the hoisted `pair` (frame code AND
-    // `pair.2`), else inside the `call_fastN` kernel.
     case ast_util.has_spread_arg(args) {
       False -> {
         use pos <- anf.then(anf.seq(list.map(args, expr)))
@@ -2730,12 +2276,6 @@ fn emit_generic_call(
   }
 }
 
-/// `(function (..) {..})(args)` / `(() => ..)(args)`. The callee compiles
-/// like any function expression; with a simple-ABI variant it is applied by
-/// name — captures, then `this` per §10.2.1.2 (undefined, or the global
-/// object for a sloppy function), then the arguments padded / truncated to
-/// its arity (all of them evaluated, in order) — otherwise through the usual
-/// closure and `call_fast`.
 fn emit_iife(
   callee: ast.Expression,
   shape: state.FnShape,
@@ -2778,14 +2318,8 @@ fn emit_iife(
   }
 }
 
-// ── u-lvalue: evaluate-once protocol for compound/update/logical-assign ─────
-// Port of emit.gleam:2075-2130 emit_static_put + 2682-2727 LvalueShape,
-// re-shaped for the Build monad. §13.15.2 / §13.4: base and key evaluate
-// exactly once, in that order, before the RHS.
+// §13.15.2 base and key evaluate once, in order, before rhs
 
-/// Unconditional store to local slot `slot`, yielding `v`. Boxed → cell_set;
-/// unboxed → fresh Let-rebind + state.set_slot_var so later Identifier reads
-/// see the new SSA name (SPEC gotcha 1848 unboxed-rebind).
 fn write_slot(slot: Int, boxed: Bool, v: ir.Value) -> Build(ir.Value) {
   fn(e: Emitter2, k) {
     case boxed {
@@ -2796,8 +2330,6 @@ fn write_slot(slot: Int, boxed: Bool, v: ir.Value) -> Build(ir.Value) {
         )(e, k)
       False -> {
         let #(name, e) = state.fresh_slot_var(e, slot)
-        // Propagate known-number through the unboxed alias so a slot re-read
-        // (via read_slot → ir.Var(name)) still elides `is_number` guards.
         let e = case anf.is_known_number(e, v) {
           True -> state.mark_known_number(e, name)
           False -> e
@@ -2812,9 +2344,7 @@ fn write_slot(slot: Int, boxed: Bool, v: ir.Value) -> Build(ir.Value) {
   }
 }
 
-/// TDZ-checked store (§9.1.1.1.5 step 5). Port emit.gleam:2118: 2core reads
-/// (Var / cell_get) do NOT throw on `js_tdz`, so an explicit `tdz_check` op
-/// (M12 DECISION) validates the current value before the store.
+// §9.1.1.1.5 reads do not throw on tdz, check before store
 fn write_slot_checked(
   slot: Int,
   boxed: Bool,
@@ -2831,8 +2361,6 @@ fn write_slot_checked(
   write_slot(slot, boxed, v)
 }
 
-/// Port of emit.gleam:2075 emit_static_put. Yields `v` (assignment result).
-/// D15: EvalEnv → runtime UnsupportedFeature throw.
 pub fn emit_direct_put(
   d: scope.Direct,
   name: String,
@@ -2882,8 +2410,7 @@ pub fn emit_direct_put(
   }
 }
 
-/// §6.2.5.6 PutValue on an unresolvable Reference: strict code throws
-/// ReferenceError, sloppy code creates the global property.
+// §6.2.5.6 unresolvable: strict throws, sloppy creates global
 pub fn global_set_op(strict: Bool) -> String {
   case strict {
     True -> "global_set_strict"
@@ -2891,8 +2418,6 @@ pub fn global_set_op(strict: Bool) -> String {
   }
 }
 
-/// Store `v` to identifier `name`. Port emit.gleam:1823 emit_var_put.
-/// D15: WithChain resolutions surface as a runtime UnsupportedFeature throw.
 pub fn emit_identifier_put(name: String, v: ir.Value) -> Build(ir.Value) {
   use e <- anf.then(ask)
   case state.resolve(e, name) {
@@ -2902,12 +2427,6 @@ pub fn emit_identifier_put(name: String, v: ir.Value) -> Build(ir.Value) {
   }
 }
 
-/// A resolved assignment target with its base/key operands already evaluated
-/// and let-bound. D15: no with-chain variant. `own_key` carries the raw key
-/// binary for a static non-private `.name` (own_data fast path); `elem_idx`
-/// carries the RAW evaluated bracket expression for `o[e]` (indexed-element
-/// fast path) — `key` is the `no_key` placeholder when either is Some,
-/// unless `settle_lvalue` already coerced the bracket expression once.
 pub type LValue {
   LvIdent(name: String, direct: scope.Direct)
   LvMember(
@@ -2920,8 +2439,6 @@ pub type LValue {
   LvSuper(home: ir.Value, this: ir.Value, key: ir.Value)
 }
 
-/// Evaluate `target` down to an `LValue`, binding base/key sub-expressions
-/// exactly once. Eval order §13.15.2: object before key (before RHS).
 pub fn emit_lvalue(target: ast.Expression) -> Build(LValue) {
   case ast_util.unwrap_parens(target) {
     ast.Identifier(name:, ..) -> {
@@ -2946,9 +2463,6 @@ pub fn emit_lvalue(target: ast.Expression) -> Build(LValue) {
     ast.MemberExpression(object:, property:, ..) -> {
       use obj <- anf.then(expr(object))
       let own_key = static_dot_key(property)
-      // Fast paths (own_key / elem_idx) never need the wire PropertyKey —
-      // the miss arm builds it from the raw material. `key` stays a dead
-      // placeholder when either is Some (matches the LValue doc contract).
       use #(key, elem_idx) <- anf.then(case own_key, property {
         Some(_), _ -> anf.pure(#(no_key, None))
         None, ast.Bracket(expression:) -> {
@@ -2968,9 +2482,6 @@ pub fn emit_lvalue(target: ast.Expression) -> Build(LValue) {
         elem_idx:,
       ))
     }
-    // Parser rejects every other assignment target as an early error; per
-    // R12 this arm still cannot panic — emit a diverging runtime throw and
-    // hand back a dead dummy so the type stays total.
     _ -> {
       use _ <- anf.then(throw_at_rt(
         "throw_reference_error",
@@ -2981,15 +2492,9 @@ pub fn emit_lvalue(target: ast.Expression) -> Build(LValue) {
   }
 }
 
-/// Placeholder `key` of an LvMember whose fast-path material lives in
-/// `own_key` / `elem_idx`.
 const no_key: ir.Value = ir.ConstAtom("undefined")
 
-/// §13.15.2 / §13.4: a read-modify-write evaluates the bracket expression's
-/// ToPropertyKey exactly once. Coerce it up front (nullish base throws
-/// here, before the key's `toString` runs) and stash the wire key so both
-/// halves' miss arms reuse it; the raw `elem_idx` still drives the fast
-/// probes.
+// coerce bracket key once up front for read-modify-write
 pub fn settle_lvalue(lv: LValue) -> Build(LValue) {
   case lv {
     LvMember(obj:, is_private: False, elem_idx: Some(idx), ..) -> {
@@ -3000,8 +2505,6 @@ pub fn settle_lvalue(lv: LValue) -> Build(LValue) {
   }
 }
 
-/// Wire key for an `elem_idx` miss arm: the settled key when present,
-/// otherwise coerce now.
 fn elem_key(obj: ir.Value, idx: ir.Value, key: ir.Value) -> Build(ir.Value) {
   case key == no_key {
     True -> to_property_key_of(obj, idx)
@@ -3009,7 +2512,6 @@ fn elem_key(obj: ir.Value, idx: ir.Value, key: ir.Value) -> Build(ir.Value) {
   }
 }
 
-/// Read the current value of `lv` (the "get" half of read-modify-write).
 pub fn lvalue_get(lv: LValue) -> Build(ir.Value) {
   case lv {
     LvIdent(name:, direct:) -> emit_direct_get(direct, name)
@@ -3028,8 +2530,6 @@ pub fn lvalue_get(lv: LValue) -> Build(ir.Value) {
   }
 }
 
-/// Write `v` back into `lv` (the "put" half). Yields `v` — the assignment
-/// expression's own value.
 pub fn lvalue_put(lv: LValue, v: ir.Value) -> Build(ir.Value) {
   case lv {
     LvIdent(name:, direct:) -> emit_direct_put(direct, name, v)
@@ -3062,16 +2562,8 @@ pub fn lvalue_put(lv: LValue, v: ir.Value) -> Build(ir.Value) {
   }
 }
 
-// ── Array / Object literal helpers (u-array-object) ─────────────────────────
-// Port of emit.gleam:5341-5563. SPEC §8 op names: new_array, new_object,
-// spread_into_list, define_prop, define_method, copy_data_props.
-
-/// Elision marker (`[1,,3]`): the runtime's dense element store default
-/// (`arc/rt/types.mk_hole`), so t_new_array leaves the index absent.
 const js_hole: ir.Value = ir.ConstAtom("js_hole")
 
-/// No-spread path (dense or with elisions): evaluate elements L-to-R, then
-/// cons_list (in-order over already-evaluated values), then `new_array`.
 fn emit_array_no_spread(
   elements: List(Option(ast.Expression)),
 ) -> Build(ir.Value) {
@@ -3089,9 +2581,6 @@ fn emit_array_no_spread(
   anf.host("new_array", [l])
 }
 
-/// Spread path: L-to-R fold building the runtime cons list in-order.
-/// `spread_into_list` (SPEC §8, arity 2) appends the iterable's elements;
-/// singles/holes append via `list_append_one` — mirrors fold_args_spread.
 fn emit_array_slow(elements: List(Option(ast.Expression))) -> Build(ir.Value) {
   use acc0 <- anf.then(anf.host("empty_list", []))
   use l <- anf.then(
@@ -3112,12 +2601,9 @@ fn emit_array_slow(elements: List(Option(ast.Expression))) -> Build(ir.Value) {
   anf.host("new_array", [l])
 }
 
-/// Emit one Property against `obj`; returns `obj` so the fold threads it.
-/// Port of emit.gleam:5341 emit_object_property.
 fn emit_object_property(obj: ir.Value, p: ast.Property) -> Build(ir.Value) {
   case p {
-    // Annex B §B.3.1: non-computed non-shorthand `__proto__:` sets [[Prototype]]
-    // instead of defining an own property. Must precede the generic Init arm.
+    // annex b __proto__: sets prototype, must precede init arm
     ast.InitProperty(
       key: ast.KeyIdentifier(name: "__proto__", ..),
       value:,
@@ -3133,8 +2619,6 @@ fn emit_object_property(obj: ir.Value, p: ast.Property) -> Build(ir.Value) {
       anf.pure(obj)
     }
 
-    // Data property (covers shorthand — parser sets value=Identifier(name)).
-    // NamedEvaluation: pass the static key string as `named` (§13.2.5.5).
     ast.InitProperty(key:, value:, shorthand: _) -> {
       use k <- anf.then(emit_key(key))
       use v <- anf.then(emit(value, ast.property_key_static_name(key)))
@@ -3142,7 +2626,6 @@ fn emit_object_property(obj: ir.Value, p: ast.Property) -> Build(ir.Value) {
       anf.pure(obj)
     }
 
-    // Concise method — non-constructible, records [[HomeObject]]=obj (M4 op).
     ast.MethodProperty(key:, value:) -> {
       use k <- anf.then(emit_key(key))
       use f <- anf.then(emit_method_closure(
@@ -3162,7 +2645,6 @@ fn emit_object_property(obj: ir.Value, p: ast.Property) -> Build(ir.Value) {
       anf.pure(obj)
     }
 
-    // get/set accessor — inferred name is `"get "|"set " <> key`.
     ast.AccessorProperty(key:, value:, kind:) -> {
       let #(prefix, tag) = accessor_kind(kind)
       let name =
@@ -3174,7 +2656,6 @@ fn emit_object_property(obj: ir.Value, p: ast.Property) -> Build(ir.Value) {
       anf.pure(obj)
     }
 
-    // {...src} — CopyDataProperties (own enumerable; nullish src is a no-op).
     ast.SpreadProperty(argument:) -> {
       use src <- anf.then(expr(argument))
       use _ <- anf.then(anf.host("copy_data_props", [obj, src]))
@@ -3190,9 +2671,6 @@ fn accessor_kind(kind: ast.AccessorKind) -> #(String, ir.Value) {
   }
 }
 
-/// Compile a method/accessor FunctionLiteral to a closure value via
-/// dispatch.emit_function, popping the analyzer's pre-assigned fn-scope id
-/// (state.pop_child_fn — walk order matches scope.child_function_scopes).
 fn emit_method_closure(
   lit: ast.FunctionLiteral,
   name: Option(String),
@@ -3213,7 +2691,6 @@ fn emit_method_closure(
   }
 }
 
-/// Monadic left-fold: thread each `step`'s result as the next accumulator.
 fn fold_build(xs: List(a), acc: b, step: fn(b, a) -> Build(b)) -> Build(b) {
   case xs {
     [] -> anf.pure(acc)
@@ -3221,11 +2698,6 @@ fn fold_build(xs: List(a), acc: b, step: fn(b, a) -> Build(b)) -> Build(b) {
   }
 }
 
-// ── u-delegate-dispatch: fn / arrow bridge (u-object-array covers methods) ──
-
-/// Pop the analyzer-assigned child ScopeId, then bridge
-/// `e.dispatch.emit_function` (Result(#(ir.Expr, Emitter2), _) — R14) into Build.
-/// Shared by FunctionExpression / ArrowFunctionExpression case arms.
 pub fn emit_function_expr(
   shape: state.FnShape,
   named: Option(String),
@@ -3240,10 +2712,6 @@ pub fn emit_function_expr(
   }
 }
 
-// ── u-object-array dispatch adapters ────────────────────────────────────────
-
-/// §13.2.5 ObjectExpression. `named` stops here — properties carry their own
-/// key-derived name (§13.2.5.5).
 fn emit_object(
   properties: List(ast.Property),
   _named: Option(String),
@@ -3269,12 +2737,7 @@ fn emit_object(
   fold_build(rest, obj, emit_object_property)
 }
 
-/// The leading `key: value` members (shorthand included) whose keys are
-/// distinct static strings that are neither `__proto__` nor an array index,
-/// as `#(key, value, name)` triples, and the members from the first other
-/// one on. Nothing can observe the object before the literal completes, so
-/// these are created with it in one `new_object_props` after their values
-/// are evaluated in order.
+// object unobservable until the literal completes
 fn plain_members(
   ps: List(ast.Property),
   acc: List(#(ast.PropertyKey, ast.Expression, String)),
@@ -3304,7 +2767,7 @@ fn plain_member_name(key: ast.PropertyKey) -> Option(String) {
   case key {
     ast.KeyIdentifier(name: "__proto__", ..)
     | ast.KeyString(value: "__proto__", ..) -> None
-    // An IdentifierName never starts with a digit, so is never an index.
+    // identifier names never start with a digit
     ast.KeyIdentifier(name:, ..) -> Some(name)
     ast.KeyString(value:, ..) ->
       case key.canonical_key(value) {
@@ -3315,15 +2778,12 @@ fn plain_member_name(key: ast.PropertyKey) -> Option(String) {
   }
 }
 
-/// §13.2.4 ArrayExpression. Port of emit.gleam:4865-4875.
 fn emit_array(elements: List(Option(ast.Expression))) -> Build(ir.Value) {
   case ast_util.has_spread_element(elements) {
     False -> emit_array_no_spread(elements)
     True -> emit_array_slow(elements)
   }
 }
-
-// ── u-assign-update (port emit.gleam:4392-4634, 6987-7060) ──────────────────
 
 fn compound_binop(op: ast.AssignmentOp) -> Option(ast.BinaryOp) {
   case op {
@@ -3346,15 +2806,14 @@ fn compound_binop(op: ast.AssignmentOp) -> Option(ast.BinaryOp) {
   }
 }
 
-/// §13.4 UpdateExpression `++x` / `x--`. LValue evaluated once; ToNumeric on
-/// the OLD value (so `o.x = "5"; o.x++` writes 6, yields 5).
+// §13.4 tonumeric on the old value
 fn emit_update(
   op: ast.UpdateOp,
   prefix: Bool,
   target: ast.Expression,
 ) -> Build(ir.Value) {
   case ast_util.unwrap_parens(target) {
-    // Annex B web-compat: `f()++` evaluates the call then throws.
+    // annex b: f()++ evaluates the call then throws
     ast.CallExpression(..) as call -> {
       use _ <- anf.then(expr(call))
       throw_at_rt(
@@ -3373,8 +2832,6 @@ fn emit_update(
       }
       use e <- anf.then(ask)
       case anf.is_known_number(e, old) {
-        // Statically known BEAM number: ToNumeric is identity and number±1
-        // stays a number — emit the M0 shape (no TermTest/If/tuple).
         True -> {
           use new <- anf.then(anf.num_binop(fast_op, old, one))
           use _ <- anf.then(lvalue_put(lv, new))
@@ -3384,9 +2841,6 @@ fn emit_update(
           }
         }
         False -> {
-          // ONE is_number test drives BOTH ToNumeric and the ±1 guard: fast
-          // arm knows `old` is a BEAM number so num_binop applies directly;
-          // slow arm keeps full to_numeric + guarded_binop for str/obj/bigint.
           use is_num <- anf.then(anf.bind(ir.TermTest(ir.IsNumber, old)))
           use #(old_n, new) <- anf.then(anf.bind_if2(
             is_num,
@@ -3407,8 +2861,6 @@ fn emit_update(
   }
 }
 
-/// §13.15.2 logical assignment `x &&= v` / `x ||= v` / `x ??= v` — the write
-/// (and RHS evaluation) is guarded by the test.
 fn emit_logical_assign(
   logical: ast.LogicalOp,
   lv: LValue,
@@ -3424,41 +2876,31 @@ fn emit_logical_assign(
     }
   }
   case lv {
-    // Unboxed-local rebind: write_slot(_, False, _) does set_slot_var and emits
-    // a Let INSIDE the If arm, but bind_if threads the mutated Emitter2 out to
-    // the join — later read_slot would emit an out-of-scope Var. So compute the
-    // join value with NO in-arm write, then rebind once at join scope. Writing
-    // `old` back on short-circuit is unobservable for a plain SSA local, so
-    // §13.15.2's guarded-PutValue is preserved. Const/FnName origins are
-    // excluded — their put throws, which MUST stay guarded.
+    // no in-arm write for unboxed locals, rebind once at the join
+    // const/fnname puts throw so they must stay guarded
     LvIdent(_, scope.Local(boxed: False, origin_kind:, ..))
       if origin_kind != scope.ConstBinding && origin_kind != scope.FnNameBinding
     -> {
       use r <- anf.then(choose(emit(right, inferred)))
       lvalue_put(lv, r)
     }
-    // Member / Super / Global / boxed-Local / Const / FnName: put is a host
-    // call (or throw) with no set_slot_var, so keep the write inside the arm —
-    // §13.15.2 requires the setter/PutValue not fire on short-circuit.
     _ -> choose(anf.then(emit(right, inferred), lvalue_put(lv, _)))
   }
 }
 
-/// §13.15.2 AssignmentExpression. Port of emit.gleam:4483-4634 collapsed onto
-/// the LValue protocol (base/key evaluated once, before RHS).
 fn emit_assignment(
   op: ast.AssignmentOp,
   left: ast.Expression,
   right: ast.Expression,
 ) -> Build(ir.Value) {
-  // §13.15.2 step 1.c: NamedEvaluation only when LHS is an unparen'd Identifier.
+  // §13.15.2 step 1.c named evaluation only for a bare identifier
   let inferred = case left {
     ast.Identifier(name: "*default*", ..) -> Some("default")
     ast.Identifier(name:, ..) -> Some(name)
     _ -> None
   }
   case ast_util.unwrap_parens(left) {
-    // Annex B web-compat: `f() = v` evaluates call, then throws BEFORE RHS.
+    // annex b: f() = v evaluates call, throws before rhs
     ast.CallExpression(..) as call -> {
       use _ <- anf.then(expr(call))
       throw_at_rt(
@@ -3466,10 +2908,6 @@ fn emit_assignment(
         "Invalid left-hand side in assignment",
       )
     }
-    // Destructuring assignment `[a,b]=rhs` / `({x}=rhs)` (§13.15.5). Result of
-    // the whole expression is rhs (§13.15.2 step 6). Pattern has no
-    // MemberPattern, so this stays local (emit_destructuring_assign) rather
-    // than routing through EmitDispatch.emit_destructure.
     ast.ArrayExpression(..) as pat | ast.ObjectExpression(..) as pat ->
       case op {
         ast.Assign -> {
@@ -3508,17 +2946,10 @@ fn emit_assignment(
   }
 }
 
-/// Spec-named alias for `compound_binop` (M12 SPEC calls it `compound_to_binop`).
 pub fn compound_to_binop(op: ast.AssignmentOp) -> Option(ast.BinaryOp) {
   compound_binop(op)
 }
 
-// ── §13.15.5 destructuring assignment (u-assign-update) ─────────────────────
-// Port of emit.gleam:6294 emit_destructuring_assign. LHS is ast.Expression
-// (Array/ObjectExpression), NOT ast.Pattern — Pattern has no MemberPattern so
-// EmitDispatch.emit_destructure cannot express `[a.b] = v`. Stays local.
-
-/// Assign `src` into destructuring-assignment target (§13.15.5).
 pub fn emit_destructuring_assign(
   target: ast.Expression,
   src: ir.Value,
@@ -3526,12 +2957,9 @@ pub fn emit_destructuring_assign(
   case ast_util.unwrap_parens(target) {
     ast.Identifier(name:, ..) ->
       anf.then(emit_identifier_put(name, src), fn(_) { anf.pure(Nil) })
-    // AssignmentElement with Initializer (§13.15.5.3): default fires when
-    // src === undefined. Identifier-left gets NamedEvaluation on the default.
     ast.AssignmentExpression(_, ast.Assign, inner_left, default_expr) -> {
       use rc <- anf.then(consts())
-      // §13.15.5.3 NamedEvaluation gate is IsIdentifierRef — false for a
-      // ParenthesizedExpression, so match the RAW left (emit.gleam:6348).
+      // gate on raw left, parens defeat isidentifierref
       let named = case inner_left {
         ast.Identifier(name:, ..) -> Some(name)
         _ -> None
@@ -3549,9 +2977,7 @@ pub fn emit_destructuring_assign(
       use iter <- anf.then(
         anf.host("get_iterator", [src, ir.ConstAtom("sync")]),
       )
-      // §13.15.5.3 step 6: a throwing element assignment IteratorCloses
-      // (abrupt) unless the pattern already drained the iterator, in which
-      // case IteratorStep/iter_rest marked it done and close is a no-op.
+      // §13.15.5.3 step 6 close iterator unless drained
       let drained = array_assign_drains(elements)
       use _ <- anf.then(
         anf.close_iter_on_throw(iter, {
@@ -3559,14 +2985,13 @@ pub fn emit_destructuring_assign(
           anf.pure(Nil)
         }),
       )
-      // §13.15.5.2 step 7: IteratorClose only when the pattern didn't drain.
       case drained {
         True -> anf.pure(Nil)
         False -> anf.host_unit("iter_close", [iter, rc.false_])
       }
     }
     ast.ObjectExpression(_, properties) -> {
-      // §13.15.5.2 step 1 RequireObjectCoercible before any read.
+      // §13.15.5.2 step 1 requireobjectcoercible first
       use _ <- anf.then(anf.host("require_object_coercible", [src]))
       emit_object_assign_props(properties, src, [])
     }
@@ -3574,7 +2999,7 @@ pub fn emit_destructuring_assign(
       use lv <- anf.then(emit_lvalue(m))
       anf.then(lvalue_put(lv, src), fn(_) { anf.pure(Nil) })
     }
-    // Annex B for-in/of: `for (f() of it)` — call, then ReferenceError.
+    // annex b: for (f() of it) calls then throws
     ast.CallExpression(..) as call -> {
       use _ <- anf.then(expr(call))
       use _ <- anf.then(throw_at_rt(
@@ -3583,7 +3008,6 @@ pub fn emit_destructuring_assign(
       ))
       anf.pure(Nil)
     }
-    // §13.15.5 early error: DestructuringAssignmentTargetType must be simple.
     _ -> {
       use _ <- anf.then(throw_at_rt(
         "throw_syntax_error",
@@ -3594,8 +3018,6 @@ pub fn emit_destructuring_assign(
   }
 }
 
-/// Port of emit.gleam:6279 classify_assign_target's Static/Computed arms —
-/// True for a non-super MemberExpression target (lref-first eval order).
 fn is_member_target(target: ast.Expression) -> Bool {
   case ast_util.unwrap_parens(target) {
     ast.MemberExpression(object: ast.SuperExpression(..), ..) -> False
@@ -3604,13 +3026,11 @@ fn is_member_target(target: ast.Expression) -> Bool {
   }
 }
 
-/// SPEC §8 iter_next → #(done, value) pair; project value (tuple_get 1, R7).
 fn iter_next_value(iter: ir.Value) -> Build(ir.Value) {
   use pair <- anf.then(anf.host("iter_next", [iter]))
   anf.bind(anf.tuple_get(pair, 1))
 }
 
-/// Whether the pattern ends in a rest element, which drains the iterator.
 fn array_assign_drains(elements: List(Option(ast.Expression))) -> Bool {
   list.any(elements, fn(el) {
     case el {
@@ -3620,7 +3040,6 @@ fn array_assign_drains(elements: List(Option(ast.Expression))) -> Bool {
   })
 }
 
-/// Array assignment pattern elements (§13.15.5.3).
 fn emit_array_assign_elements(
   elements: List(Option(ast.Expression)),
   iter: ir.Value,
@@ -3629,8 +3048,7 @@ fn emit_array_assign_elements(
     [] -> anf.pure(Nil)
     [Some(ast.SpreadElement(_, argument)), ..] ->
       case is_member_target(argument) {
-        // §13.15.5.5 step 1: a MemberExpression rest target's lref is
-        // evaluated before the iterator is drained.
+        // rest member lref evaluated before draining
         True -> {
           use lv <- anf.then(emit_lvalue(argument))
           use rest <- anf.then(anf.host("iter_rest", [iter]))
@@ -3642,15 +3060,12 @@ fn emit_array_assign_elements(
         }
       }
     [None, ..tail] -> {
-      // Elision — step the iterator, discard the #(done, value) pair.
       use _ <- anf.then(anf.host("iter_next", [iter]))
       emit_array_assign_elements(tail, iter)
     }
     [Some(el), ..tail] ->
       case is_member_target(el) {
-        // §13.15.5.3: for a MemberExpression target the lref (base + key)
-        // is evaluated BEFORE IteratorStep — `[ {}[thrower()] ] = it` must
-        // throw without calling .next() (emit.gleam:6427).
+        // member lref evaluated before iteratorstep
         True -> {
           use lv <- anf.then(emit_lvalue(el))
           use v <- anf.then(iter_next_value(iter))
@@ -3666,8 +3081,6 @@ fn emit_array_assign_elements(
   }
 }
 
-/// ObjectAssignmentPattern properties (§13.15.5.2). `seen` accumulates
-/// evaluated keys (reverse order) for the trailing rest's exclusion set.
 fn emit_object_assign_props(
   props: List(ast.Property),
   src: ir.Value,
@@ -3683,9 +3096,7 @@ fn emit_object_assign_props(
     [ast.InitProperty(key:, value:, ..), ..tail] -> {
       use k <- anf.then(emit_key(key))
       case is_member_target(value) {
-        // §13.15.5.6 step 1a: lref evaluated BEFORE GetV — `({a: this.#f}=o)`
-        // before super() TDZ-throws on `this` without touching o.a's getter
-        // (privatefieldset-evaluation-order-1; emit.gleam:6616).
+        // §13.15.5.6 step 1a lref before getv
         True -> {
           use lv <- anf.then(emit_lvalue(value))
           use v <- anf.then(anf.host("get_prop", [src, k]))
@@ -3699,7 +3110,6 @@ fn emit_object_assign_props(
         }
       }
     }
-    // Method/accessor properties never appear in valid assignment patterns.
     [ast.MethodProperty(..), ..] | [ast.AccessorProperty(..), ..] -> {
       use _ <- anf.then(throw_at_rt(
         "throw_syntax_error",

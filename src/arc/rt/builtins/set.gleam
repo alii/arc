@@ -1,11 +1,3 @@
-//// ES2024 §24.2 Set Objects.
-////
-//// Stores values in an `OrderedEntries(MapKey, JsVal)` mapping normalized
-//// MapKey → original JsVal, which also models the spec's append-only
-//// [[SetData]] insertion order. delete() removes the record; the seq gap is
-//// the spec's emptied record, so a deleted-then-re-added value is revisited
-//// by in-flight iterators per §24.2.5.
-
 import arc/internal/ordered_entries
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined}
@@ -28,11 +20,6 @@ import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-// ── init — Set constructor + Set.prototype ──────────────────────────────────
-
-/// Set up %Set% and %Set.prototype%. §24.2.3.12 `values` doubles as
-/// §24.2.3.11 `keys` and §24.2.3.13 [@@iterator]; §24.2.3.16 [@@toStringTag]
-/// = "Set"; `size` is a get-only accessor.
 pub fn init(
   st: Agent,
   object_proto: Handle,
@@ -54,8 +41,7 @@ pub fn init(
       #("isDisjointFrom", SetN(SetIsDisjointFrom), 1),
       #("entries", SetN(SetEntries), 0),
     ])
-  // `values` allocated separately so `keys` and [@@iterator] alias the SAME
-  // function object.
+  // keys and @@iterator must alias the same values function
   let #(values_h, st) =
     common.alloc_rooted_native_fn(st, fn_proto, SetN(SetValues), "values", 0)
   let #(values_prop, st) = common.builtin_property(st, mk_object(values_h))
@@ -85,8 +71,6 @@ pub fn init(
     common.add_symbol_property(st, bt.prototype, symbol_iterator, iter_prop)
   #(bt, st)
 }
-
-// ── dispatch ────────────────────────────────────────────────────────────────
 
 pub fn dispatch(
   st: Agent,
@@ -127,8 +111,7 @@ pub fn dispatch_construct(
   }
 }
 
-// ── §24.2.1.1 Set ( [ iterable ] ) ──────────────────────────────────────────
-
+// §24.2.1.1 set ( [ iterable ] )
 fn set_constructor(
   st: Agent,
   args: List(JsVal),
@@ -162,8 +145,6 @@ fn set_constructor(
   }
 }
 
-// ── §24.2.3.1 add / §24.2.3.4 has / §24.2.3.3 delete / §24.2.3.2 clear ──────
-
 fn set_add(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use ref <- require_set(st, this, "add")
   let store = read_set_store(st, ref)
@@ -193,8 +174,6 @@ fn set_clear(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   #(mk_undefined(), update_set(st, ref, ordered_entries.clear(store)))
 }
 
-// ── §24.2.3.5 get size / §24.2.3.6 forEach ──────────────────────────────────
-
 fn set_size(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   use ref <- require_set(st, this, "size")
   #(mk_number(JInt(ordered_entries.size(read_set_store(st, ref)))), st)
@@ -209,9 +188,7 @@ fn set_for_each(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   for_each_loop(st, ref, 0, cb, this_arg, this)
 }
 
-/// LIVE iteration by seq cursor — the source is re-read each step, so entries
-/// the callback deletes before being reached are skipped and entries it adds
-/// (including delete + re-add) are visited.
+// live: store is re-read each step
 fn for_each_loop(
   st: Agent,
   ref: SetRef,
@@ -230,8 +207,6 @@ fn for_each_loop(
     }
   }
 }
-
-// ── §24.2.3.12/5 values() / entries() → CreateSetIterator ───────────────────
 
 fn set_values(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   use ref <- require_set(st, this, "values")
@@ -256,10 +231,6 @@ fn alloc_set_iterator(
     )
   #(mk_object(iter_h), st)
 }
-
-// ── ES2025 §24.2.3.14 union / §24.2.3.7 intersection / §24.2.3.5 difference /
-//    §24.2.3.13 symmetricDifference / §24.2.3.9 isSubsetOf /
-//    §24.2.3.10 isSupersetOf / §24.2.3.8 isDisjointFrom ───────────────────────
 
 fn set_union(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use ref <- require_set(st, this, "union")
@@ -411,7 +382,7 @@ fn symmetric_difference_loop(
     None -> alloc_new_set(st, result)
     Some(v) -> {
       let key = js_to_map_key(v)
-      // Step 5.b.iii is a LIVE read of this's [[SetData]].
+      // spec step 5.b.iii is a live read
       let in_this = ordered_entries.has(read_set_store(st, ref), key)
       let result = case in_this {
         True -> ordered_entries.delete(result, key).0
@@ -509,17 +480,11 @@ fn set_is_disjoint_from(
   }
 }
 
-// ── GetSetRecord + protocol helpers ─────────────────────────────────────────
-
-/// Spec's Set Record — captured size/has/keys from the `other` argument.
-/// `size` is post-ToIntegerOrInfinity (+∞ saturated to 2^53-1).
 type SetRecord {
   SetRecord(obj: JsVal, size: Int, has: JsVal, keys: JsVal)
 }
 
-/// ES2025 §24.2.1.2 GetSetRecord(obj) — validates `other` is set-like: reads
-/// .size (ToNumber → NaN check → ToIntegerOrInfinity → negative check), then
-/// .has and .keys (both callable). CPS: `use rec, st <- get_set_record(st, o)`.
+// §24.2.1.2 getsetrecord
 fn get_set_record(
   st: Agent,
   other: JsVal,
@@ -557,8 +522,7 @@ fn get_set_record(
   }
 }
 
-/// §24.2.1.3 GetKeysIterator(rec): call rec.keys(), require the result is an
-/// Object, require its .next is callable.
+// §24.2.1.3 getkeysiterator
 fn get_keys_iterator(st: Agent, rec: SetRecord) -> #(IteratorRecord, Agent) {
   let #(iter, st) = rt_call.t_call_checked(st, rec.keys, rec.obj, [])
   case classify(iter) {
@@ -577,24 +541,17 @@ fn get_keys_iterator(st: Agent, rec: SetRecord) -> #(IteratorRecord, Agent) {
   }
 }
 
-/// §7.4.8 IteratorStepValue on a keys IteratorRecord, -0 → +0 on yielded
-/// values (§24.2.1.2 step 7.b.ii).
 fn step_keys(st: Agent, keys: IteratorRecord) -> #(Option(JsVal), Agent) {
   let #(step, st) = iter_protocol.iterator_step_value(st, keys)
   #(option.map(step, normalize_neg_zero), st)
 }
 
-/// Call rec.has(v), ToBoolean the result.
 fn set_record_has(st: Agent, rec: SetRecord, v: JsVal) -> #(Bool, Agent) {
   let #(r, st) = rt_call.t_call_checked(st, rec.has, rec.obj, [v])
   #(rt_val.to_boolean(r), st)
 }
 
-// ── helpers ─────────────────────────────────────────────────────────────────
-
-/// SetDataAppend — the ONE place a value enters a [[SetData]] store. -0
-/// normalizes to +0 (SameValueZero: what iteration YIELDS is the stored value,
-/// so `[...new Set([-0])][0]` must be +0).
+// the one place a value enters set data, -0 becomes +0
 fn set_data_append(
   store: ordered_entries.OrderedEntries(MapKey, JsVal),
   val: JsVal,
@@ -603,7 +560,6 @@ fn set_data_append(
   ordered_entries.insert(store, js_to_map_key(val), val)
 }
 
-/// -0 → +0; identity otherwise. IEEE 754: -0.0 +. 0.0 == +0.0.
 fn normalize_neg_zero(v: JsVal) -> JsVal {
   case classify(v) {
     KNum(JFloat(f)) -> mk_number(JFloat(f +. 0.0))

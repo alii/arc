@@ -1,5 +1,3 @@
-//// Shared fixtures for the arc/rt tests.
-
 import arc/host_hooks.{type HostHooks, HostHooks}
 import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
@@ -9,7 +7,6 @@ import arc/rt/types.{
 }
 import gleam/option.{None}
 
-/// Deterministic hooks that print nothing: fixed clocks, fixed PRNG.
 pub fn quiet_hooks() -> HostHooks {
   HostHooks(
     ..host_hooks.default_host_hooks(),
@@ -22,22 +19,18 @@ pub fn quiet_hooks() -> HostHooks {
   )
 }
 
-/// A fresh agent with a full realm on `quiet_hooks`.
 pub fn agent() -> Agent {
   rt_builtins.new_agent(quiet_hooks())
 }
 
-/// `globalThis[name]`.
 pub fn global(st: Agent, name: String) -> #(JsVal, Agent) {
   rt_obj.t_global_get(st, <<name:utf8>>)
 }
 
-/// `recv[name]`.
 pub fn get(st: Agent, recv: JsVal, name: String) -> #(JsVal, Agent) {
   rt_obj.t_get_prop(st, recv, StringKey(Named(name)))
 }
 
-/// `recv[name](...args)`; a throw raises.
 pub fn call_method(
   st: Agent,
   recv: JsVal,
@@ -48,40 +41,29 @@ pub fn call_method(
   rt_call.t_call_checked(st, f, recv, args)
 }
 
-/// Send `term` to this process's mailbox; read back with `recorded`.
 @external(erlang, "rt_helpers_ffi", "record")
 pub fn record(term: a) -> Nil
 
-/// Every `record`ed term since the last call, oldest first. The caller
-/// names the element type; every term recorded in one test has it.
 @external(erlang, "rt_helpers_ffi", "recorded")
 pub fn recorded() -> List(a)
 
-/// A Gleam closure as compiled-function code over `(st, frame, args)`.
 @external(erlang, "arc_rt_store_ffi", "identity")
 pub fn as_code(
   f: fn(Agent, rt_call.Frame, List(JsVal)) -> #(JsVal, Agent),
 ) -> CompiledFn
 
-/// Element `n` (1-based) of a call frame: this, active function, home
-/// object, new.target.
 @external(erlang, "erlang", "element")
 pub fn frame_at(n: Int, frame: rt_call.Frame) -> JsVal
 
-/// A `#(this, active_func, home_object, new_target)` tuple as a `Frame`, or
-/// an arbitrary term as a `Loc` for drivers that never read it.
 @external(erlang, "arc_rt_store_ffi", "identity")
 pub fn as_frame(t: a) -> rt_call.Frame
 
 @external(erlang, "arc_rt_store_ffi", "identity")
 pub fn as_loc(t: a) -> types.Loc
 
-/// A compiled state machine that yields `a`, yields `b`, then returns
-/// `done`, reading them from `Loc = #(a, b, done)`.
 @external(erlang, "rt_helpers_ffi", "counter_sm")
 pub fn counter_sm() -> types.SmFn
 
-/// A JS function object whose body is the Gleam `body(st, args)`.
 pub fn func(
   st: Agent,
   body: fn(Agent, List(JsVal)) -> #(JsVal, Agent),

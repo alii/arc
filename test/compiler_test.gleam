@@ -24,17 +24,10 @@ import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
 
-// ============================================================================
-// Test helpers
-// ============================================================================
-
-/// A fresh agent with realm 0 initialised and the interpreter linked in, on
-/// the default host hooks (what `engine.new` boots).
 fn agent() -> Agent {
   rt_builtins.new_agent(host_hooks.default_host_hooks()) |> entry.link
 }
 
-/// A settled top-level run, both arms classified for matching.
 fn classify_outcome(
   completion: rt_call.Completion,
 ) -> Result(JsValueKind, JsValueKind) {
@@ -51,8 +44,6 @@ fn completion_value(completion: rt_call.Completion) -> JsVal {
   }
 }
 
-/// A classified value for panic messages: objects (thrown errors) rendered
-/// through the runtime, everything else as the Gleam term.
 fn render(st: Agent, val: JsValueKind) -> String {
   case val {
     JsObject(h) -> rt_inspect.format_error(st, mk_object(h))
@@ -60,8 +51,6 @@ fn render(st: Agent, val: JsValueKind) -> String {
   }
 }
 
-/// Run a compiled script on `st` and end its turn: one microtask drain with
-/// the completion value held.
 fn run_template(
   st: Agent,
   template: FuncTemplate,
@@ -71,8 +60,6 @@ fn run_template(
   #(classify_outcome(completion), st)
 }
 
-/// Parse + compile + run JS source, return the settled outcome
-/// (Ok(value) / Error(thrown)) plus the final agent.
 fn run_js(
   source: String,
 ) -> Result(#(Result(JsValueKind, JsValueKind), Agent), String) {
@@ -86,10 +73,6 @@ fn run_js(
   }
 }
 
-/// How a promise value has settled: `Some(Ok(value))` if fulfilled,
-/// `Some(Error(reason))` if rejected, `None` if it is not a promise or is
-/// still pending. The Ok/Error split matters: callers asserting on a
-/// rejection must not silently accept a fulfillment with the same value.
 fn promise_settlement(
   st: Agent,
   val: JsValueKind,
@@ -106,9 +89,6 @@ fn promise_settlement(
   }
 }
 
-/// Assert that the script returns a promise that settles with the expected
-/// value. `label` names the expected settlement ("fulfilled"/"rejected") in
-/// panic messages.
 fn assert_promise_settles(
   source: String,
   expected: Result(JsValueKind, JsValueKind),
@@ -178,7 +158,6 @@ fn assert_thrown(source: String) -> Nil {
   }
 }
 
-/// Assert that source fails to parse (early SyntaxError).
 fn assert_parse_error(source: String) -> Nil {
   case parser.parse(source, parser.Script) {
     Error(_parse_err) -> Nil
@@ -186,10 +165,6 @@ fn assert_parse_error(source: String) -> Nil {
       panic as { "expected parse error, parsed successfully: " <> source }
   }
 }
-
-// ============================================================================
-// Literal tests
-// ============================================================================
 
 pub fn number_literal_test() -> Nil {
   assert_normal_number("42", 42.0)
@@ -214,10 +189,6 @@ pub fn null_literal_test() -> Nil {
 pub fn undefined_literal_test() -> Nil {
   assert_normal("undefined", JsUndefined)
 }
-
-// ============================================================================
-// Binary operator tests
-// ============================================================================
 
 pub fn addition_test() -> Nil {
   assert_normal_number("1 + 2", 3.0)
@@ -263,10 +234,6 @@ pub fn nested_arithmetic_test() -> Nil {
   assert_normal_number("(1 + 2) * (3 + 4)", 21.0)
 }
 
-// ============================================================================
-// Unary operator tests
-// ============================================================================
-
 pub fn negate_test() -> Nil {
   assert_normal_number("-5", -5.0)
 }
@@ -282,10 +249,6 @@ pub fn unary_plus_test() -> Nil {
 pub fn void_test() -> Nil {
   assert_normal("void 0", JsUndefined)
 }
-
-// ============================================================================
-// Variable tests
-// ============================================================================
 
 pub fn var_declaration_test() -> Nil {
   assert_normal_number("var x = 10; x", 10.0)
@@ -314,10 +277,6 @@ pub fn compound_assignment_test() -> Nil {
 pub fn var_no_init_test() -> Nil {
   assert_normal("var x; x", JsUndefined)
 }
-
-// ============================================================================
-// Control flow tests
-// ============================================================================
 
 pub fn if_true_test() -> Nil {
   assert_normal_number("var x = 0; if (true) { x = 1; } x", 1.0)
@@ -364,18 +323,9 @@ pub fn continue_test() -> Nil {
   )
 }
 
-// ============================================================================
-// Block scoping tests
-// ============================================================================
-
 pub fn block_scope_let_test() -> Nil {
-  // let inside block should not be visible outside
   assert_normal_number("var x = 1; { let y = 2; x = x + y; } x", 3.0)
 }
-
-// ============================================================================
-// Logical operator tests
-// ============================================================================
 
 pub fn logical_and_short_circuit_test() -> Nil {
   assert_normal("false && true", JsBool(False))
@@ -401,10 +351,6 @@ pub fn nullish_coalescing_value_test() -> Nil {
   assert_normal_number("5 ?? 42", 5.0)
 }
 
-// ============================================================================
-// Conditional (ternary) tests
-// ============================================================================
-
 pub fn ternary_true_test() -> Nil {
   assert_normal_number("true ? 1 : 2", 1.0)
 }
@@ -413,12 +359,7 @@ pub fn ternary_false_test() -> Nil {
   assert_normal_number("false ? 1 : 2", 2.0)
 }
 
-// ============================================================================
-// Object tests
-// ============================================================================
-
 pub fn empty_object_test() -> Nil {
-  // Just test that it doesn't crash — the result is an object ref
   case run_js("({})") {
     Ok(#(Ok(JsObject(_)), _)) -> Nil
     _other -> panic as { "expected object, got something else" }
@@ -437,8 +378,6 @@ pub fn object_property_undefined_test() -> Nil {
   assert_normal("var obj = {}; obj.x", JsUndefined)
 }
 
-// --- Computed keys ---
-
 pub fn object_computed_key_basic_test() -> Nil {
   assert_normal_number("var k = 'x'; var o = {[k]: 42}; o.x", 42.0)
 }
@@ -448,22 +387,18 @@ pub fn object_computed_key_expr_test() -> Nil {
 }
 
 pub fn object_computed_key_number_test() -> Nil {
-  // Number key ToPropertyKey → "42"
   assert_normal_number("var k = 42; var o = {[k]: 7}; o['42']", 7.0)
 }
 
 pub fn object_computed_key_undefined_test() -> Nil {
-  // undefined → "undefined"
   assert_normal_number("var k; var o = {[k]: 3}; o['undefined']", 3.0)
 }
 
 pub fn object_computed_key_null_test() -> Nil {
-  // null → "null"
   assert_normal_number("var o = {[null]: 9}; o['null']", 9.0)
 }
 
 pub fn object_computed_key_mixed_test() -> Nil {
-  // Mix of static and computed
   assert_normal_number(
     "var k = 'b'; var o = {a: 1, [k]: 2, c: 3}; o.a + o.b + o.c",
     6.0,
@@ -471,7 +406,6 @@ pub fn object_computed_key_mixed_test() -> Nil {
 }
 
 pub fn object_computed_key_to_primitive_test() -> Nil {
-  // Object key goes through ToPrimitive → ToString
   assert_normal_number(
     "var k = {toString: function() { return 'foo' }}; var o = {[k]: 5}; o.foo",
     5.0,
@@ -479,12 +413,10 @@ pub fn object_computed_key_to_primitive_test() -> Nil {
 }
 
 pub fn object_computed_key_symbol_test() -> Nil {
-  // Symbol key goes to symbol_properties (not coerced to string)
   assert_normal_number("var s = Symbol('k'); var o = {[s]: 99}; o[s]", 99.0)
 }
 
 pub fn object_computed_key_symbol_not_string_key_test() -> Nil {
-  // Symbol key should NOT create a string-keyed property
   assert_normal(
     "var s = Symbol('k'); var o = {[s]: 1}; Object.keys(o).length",
     JsNumber(Finite(0.0)),
@@ -492,11 +424,8 @@ pub fn object_computed_key_symbol_not_string_key_test() -> Nil {
 }
 
 pub fn object_computed_key_overwrite_test() -> Nil {
-  // Later key wins
   assert_normal_number("var o = {a: 1, ['a']: 2}; o.a", 2.0)
 }
-
-// --- Numeric literal keys (non-computed but need ToString) ---
 
 pub fn object_numeric_key_test() -> Nil {
   assert_normal_number("var o = {1: 'a'}; o['1'] === 'a' ? 1 : 0", 1.0)
@@ -513,8 +442,6 @@ pub fn object_numeric_key_keys_test() -> Nil {
   )
 }
 
-// --- Object spread ---
-
 pub fn object_spread_basic_test() -> Nil {
   assert_normal_number("var s = {a: 1}; var o = {...s}; o.a", 1.0)
 }
@@ -527,12 +454,10 @@ pub fn object_spread_merge_test() -> Nil {
 }
 
 pub fn object_spread_override_after_test() -> Nil {
-  // Later static key overrides spread
   assert_normal_number("var s = {a: 1}; var o = {...s, a: 2}; o.a", 2.0)
 }
 
 pub fn object_spread_override_before_test() -> Nil {
-  // Spread overrides earlier static key
   assert_normal_number("var s = {a: 2}; var o = {a: 1, ...s}; o.a", 2.0)
 }
 
@@ -544,7 +469,6 @@ pub fn object_spread_multiple_test() -> Nil {
 }
 
 pub fn object_spread_null_test() -> Nil {
-  // Spreading null is a no-op per spec (unlike Object.assign target)
   assert_normal(
     "var o = {...null}; Object.keys(o).length",
     JsNumber(Finite(0.0)),
@@ -559,12 +483,10 @@ pub fn object_spread_undefined_test() -> Nil {
 }
 
 pub fn object_spread_primitive_number_test() -> Nil {
-  // Number wrapper has no own enumerable props → no-op
   assert_normal("var o = {...42}; Object.keys(o).length", JsNumber(Finite(0.0)))
 }
 
 pub fn object_spread_only_own_test() -> Nil {
-  // Spread copies OWN properties only, not inherited
   assert_normal(
     "var proto = {inherited: 1}; var src = Object.create(proto); src.own = 2; "
       <> "var o = {...src}; o.inherited === undefined && o.own === 2",
@@ -573,7 +495,6 @@ pub fn object_spread_only_own_test() -> Nil {
 }
 
 pub fn object_spread_only_enumerable_test() -> Nil {
-  // Non-enumerable props are skipped
   assert_normal(
     "var src = {}; Object.defineProperty(src, 'hidden', {value: 1, enumerable: false}); "
       <> "src.visible = 2; var o = {...src}; "
@@ -583,7 +504,6 @@ pub fn object_spread_only_enumerable_test() -> Nil {
 }
 
 pub fn object_spread_array_test() -> Nil {
-  // Spreading an array into an object → index keys
   assert_normal(
     "var o = {...[10, 20, 30]}; o['0'] + o['1'] + o['2']",
     JsNumber(Finite(60.0)),
@@ -591,7 +511,6 @@ pub fn object_spread_array_test() -> Nil {
 }
 
 pub fn object_spread_array_sparse_test() -> Nil {
-  // Holes in source array are skipped
   assert_normal(
     "var o = {...[1, , 3]}; o['0'] === 1 && o['1'] === undefined && o['2'] === 3",
     JsBool(True),
@@ -599,7 +518,6 @@ pub fn object_spread_array_sparse_test() -> Nil {
 }
 
 pub fn object_spread_preserves_symbol_test() -> Nil {
-  // Symbol-keyed enumerable props are copied too
   assert_normal_number(
     "var s = Symbol(); var src = {[s]: 7}; var o = {...src}; o[s]",
     7.0,
@@ -607,17 +525,12 @@ pub fn object_spread_preserves_symbol_test() -> Nil {
 }
 
 pub fn object_spread_with_computed_key_test() -> Nil {
-  // Interleaved spread + computed key + static
   assert_normal(
     "var s = {a: 1}; var k = 'b'; var o = {...s, [k]: 2, c: 3}; "
       <> "o.a + ',' + o.b + ',' + o.c",
     JsString("1,2,3"),
   )
 }
-
-// ============================================================================
-// Array spread tests — [...x], [a, ...b, c]
-// ============================================================================
 
 pub fn array_spread_basic_test() -> Nil {
   assert_normal("[...[1,2,3]].join(',')", JsString("1,2,3"))
@@ -632,13 +545,10 @@ pub fn array_spread_leading_trailing_test() -> Nil {
 }
 
 pub fn array_spread_leading_only_test() -> Nil {
-  // Prefix-only case exercises the IrArrayFrom(N) optimization for leading
-  // non-spread elements before switching to incremental mode.
   assert_normal("[10, 20, ...[30, 40]].join(',')", JsString("10,20,30,40"))
 }
 
 pub fn array_spread_trailing_only_test() -> Nil {
-  // Spread-first means IrArrayFrom(0) then pure incremental.
   assert_normal("[...[1,2], 3, 4].join(',')", JsString("1,2,3,4"))
 }
 
@@ -654,18 +564,14 @@ pub fn array_spread_length_test() -> Nil {
 }
 
 pub fn array_spread_source_holes_test() -> Nil {
-  // Holes in the spread SOURCE become undefined in the result — the array
-  // iterator visits all indices 0..length and Get() returns undefined for holes.
   assert_normal("[...[1,,3]].join(',')", JsString("1,,3"))
 }
 
 pub fn array_spread_source_holes_length_test() -> Nil {
-  // Confirm the hole became an actual element (length 3, not 2).
   assert_normal_number("[...[1,,3]].length", 3.0)
 }
 
 pub fn array_spread_source_holes_value_test() -> Nil {
-  // The filled-in value is undefined, not a hole (1 in arr is true).
   assert_normal(
     "var a = [...[1,,3]]; 1 in a && a[1] === undefined",
     JsBool(True),
@@ -673,8 +579,6 @@ pub fn array_spread_source_holes_value_test() -> Nil {
 }
 
 pub fn array_spread_null_throws_test() -> Nil {
-  // Unlike object spread, array spread uses the iterator protocol —
-  // null has no [Symbol.iterator], so TypeError.
   assert_thrown("[...null]")
 }
 
@@ -683,22 +587,18 @@ pub fn array_spread_undefined_throws_test() -> Nil {
 }
 
 pub fn array_spread_number_throws_test() -> Nil {
-  // Primitives without Symbol.iterator throw. Numbers aren't iterable.
   assert_thrown("[...42]")
 }
 
 pub fn array_spread_non_iterable_object_throws_test() -> Nil {
-  // Plain objects aren't iterable even if they're array-like.
   assert_thrown("var o = {length: 2, 0: 'a', 1: 'b'}; [...o]")
 }
 
 pub fn array_spread_nested_test() -> Nil {
-  // Spread inside a spread source.
   assert_normal("[...[1, ...[2, 3], 4]].join(',')", JsString("1,2,3,4"))
 }
 
 pub fn array_spread_generator_test() -> Nil {
-  // Generators are iterable — spread drains them.
   assert_normal(
     "function* g() { yield 1; yield 2; yield 3; } [...g()].join(',')",
     JsString("1,2,3"),
@@ -713,28 +613,19 @@ pub fn array_spread_generator_interleaved_test() -> Nil {
 }
 
 pub fn array_spread_generator_empty_test() -> Nil {
-  // Generator that yields nothing.
   assert_normal_number("function* g() {} [...g()].length", 0.0)
 }
 
 pub fn array_spread_does_not_mutate_source_test() -> Nil {
-  // Spread should read, not consume, the source array.
   assert_normal("var s = [1,2,3]; [...s]; s.join(',')", JsString("1,2,3"))
 }
 
 pub fn array_spread_copies_not_shares_test() -> Nil {
-  // The result is a new array, not the same ref.
   assert_normal(
     "var s = [1,2,3]; var t = [...s]; t.push(4); s.length",
     JsNumber(Finite(3.0)),
   )
 }
-
-// ============================================================================
-// Sparse array iteration guards — regression for test262 CI OOM.
-// Methods that materialize O(length) data must throw RangeError on
-// sparse arrays with huge lengths instead of iterating billions of times.
-// ============================================================================
 
 pub fn huge_sparse_join_throws_test() -> Nil {
   assert_thrown("Array(100000000).join(',')")
@@ -752,10 +643,6 @@ pub fn huge_sparse_fill_throws_test() -> Nil {
   assert_thrown("Array(100000000).fill(0)")
 }
 
-// keys/values/entries are the exception: §23.1.5.1 CreateArrayIterator is
-// lazy — it materializes nothing and doesn't even read `length` — so a huge
-// length must NOT throw at creation. (Draining the iterator is what costs
-// O(length), and each step re-reads the live length itself.)
 pub fn huge_sparse_keys_creates_lazily_test() -> Nil {
   assert_normal("typeof Array(100000000).keys()", JsString("object"))
 }
@@ -768,8 +655,6 @@ pub fn huge_sparse_entries_creates_lazily_test() -> Nil {
   assert_normal("typeof Array(100000000).entries()", JsString("object"))
 }
 
-/// §23.1.5.1 performs ToObject and nothing else — creating the iterator must
-/// not fire an observable Get("length") on the receiver.
 pub fn create_array_iterator_reads_no_length_test() -> Nil {
   assert_normal_number(
     "const seen = [];
@@ -798,16 +683,11 @@ pub fn under_limit_fill_works_test() -> Nil {
   assert_normal("Array(3).fill(7).join(',')", JsString("7,7,7"))
 }
 
-// ============================================================================
-// Call spread tests — f(...x), obj.m(...x), new F(...x)
-// ============================================================================
-
 pub fn call_spread_basic_test() -> Nil {
   assert_normal_number("function f(a,b,c){ return a+b+c } f(...[1,2,3])", 6.0)
 }
 
 pub fn call_spread_mixed_test() -> Nil {
-  // Regular args before and after spread.
   assert_normal_number(
     "function f(a,b,c,d){ return a*1000+b*100+c*10+d } f(1, ...[2,3], 4)",
     1234.0,
@@ -822,17 +702,14 @@ pub fn call_spread_multiple_test() -> Nil {
 }
 
 pub fn call_spread_empty_test() -> Nil {
-  // Spreading an empty array contributes zero args.
   assert_normal_number("function f(a,b){ return a+b } f(1, ...[], 2)", 3.0)
 }
 
 pub fn call_spread_extra_args_test() -> Nil {
-  // More spread args than params — extras are ignored.
   assert_normal_number("function f(a,b){ return a+b } f(...[1,2,3,4,5])", 3.0)
 }
 
 pub fn call_spread_fewer_args_test() -> Nil {
-  // Fewer spread args than params — missing params are undefined.
   assert_normal("function f(a,b,c){ return c } f(...[1,2])", JsUndefined)
 }
 
@@ -849,7 +726,6 @@ pub fn call_spread_generator_test() -> Nil {
 }
 
 pub fn method_spread_this_binding_test() -> Nil {
-  // obj.m(...x) must bind this=obj. CallMethodApply opcode responsibility.
   assert_normal_number(
     "var o = {v: 100, f: function(a,b){ return this.v + a + b }}; "
       <> "o.f(...[2, 3])",
@@ -866,7 +742,6 @@ pub fn method_spread_mixed_test() -> Nil {
 }
 
 pub fn method_spread_native_test() -> Nil {
-  // Spread into a native method (Array.prototype.push).
   assert_normal(
     "var a = [1,2]; a.push(...[3,4,5]); a.join(',')",
     JsString("1,2,3,4,5"),
@@ -874,12 +749,10 @@ pub fn method_spread_native_test() -> Nil {
 }
 
 pub fn method_spread_native_returns_test() -> Nil {
-  // push returns new length — verify the apply path wires return value.
   assert_normal_number("var a = [1]; a.push(...[2,3,4])", 4.0)
 }
 
 pub fn new_spread_basic_test() -> Nil {
-  // new F(...args) via CallConstructorApply.
   assert_normal_number(
     "function F(a,b){ this.sum = a+b } new F(...[3,4]).sum",
     7.0,
@@ -894,7 +767,6 @@ pub fn new_spread_mixed_test() -> Nil {
 }
 
 pub fn new_spread_class_test() -> Nil {
-  // Spread through a class constructor (derived-constructor check in do_construct).
   assert_normal_number(
     "class C { constructor(a,b){ this.p = a*b } } new C(...[6,7]).p",
     42.0,
@@ -902,7 +774,6 @@ pub fn new_spread_class_test() -> Nil {
 }
 
 pub fn optional_call_spread_test() -> Nil {
-  // f?.(...args) when f is defined.
   assert_normal_number(
     "var f = function(a,b){ return a+b }; f?.(...[5,6])",
     11.0,
@@ -910,14 +781,10 @@ pub fn optional_call_spread_test() -> Nil {
 }
 
 pub fn optional_call_spread_nullish_test() -> Nil {
-  // f?.(...args) when f is undefined — short-circuits to undefined,
-  // spread arg must not be evaluated (but we can't test that without a
-  // side-effect tracker; just verify it doesn't throw).
   assert_normal("var f = undefined; f?.(...[1,2])", JsUndefined)
 }
 
 pub fn call_spread_catch_test() -> Nil {
-  // Thrown TypeError from spread should be catchable.
   assert_normal_number(
     "function f(){} try { f(...null) } catch(e) { 99 }",
     99.0,
@@ -932,7 +799,6 @@ pub fn array_spread_catch_test() -> Nil {
 }
 
 pub fn call_spread_evaluation_order_test() -> Nil {
-  // Args are evaluated left-to-right including spreads.
   assert_normal(
     "var log = []; function t(x){ log.push(x); return x } "
       <> "function f(){} f(t(1), ...[t(2),t(3)], t(4)); log.join(',')",
@@ -947,10 +813,6 @@ pub fn array_spread_evaluation_order_test() -> Nil {
     JsString("1,2,3,4"),
   )
 }
-
-// ============================================================================
-// Optional chaining tests
-// ============================================================================
 
 pub fn optional_chaining_dot_test() -> Nil {
   assert_normal_number("var obj = {x: 42}; obj?.x", 42.0)
@@ -980,22 +842,13 @@ pub fn optional_call_null_test() -> Nil {
   assert_normal("var fn = null; fn?.()", JsUndefined)
 }
 
-// ============================================================================
-// Expression statement result tests
-// ============================================================================
-
 pub fn expression_result_test() -> Nil {
-  // The last expression statement's value should be the program result
   assert_normal_number("1; 2; 3", 3.0)
 }
 
 pub fn empty_program_test() -> Nil {
   assert_normal("", JsUndefined)
 }
-
-// ============================================================================
-// Update expression tests
-// ============================================================================
 
 pub fn prefix_increment_test() -> Nil {
   assert_normal_number("var x = 5; ++x", 6.0)
@@ -1009,9 +862,6 @@ pub fn postfix_increment_side_effect_test() -> Nil {
   assert_normal_number("var x = 5; x++; x", 6.0)
 }
 
-// §13.4.2/§13.4.3 step 3: ToNumeric applies to the OLD value of a member
-// update — `o.x++` on a string property must not string-concatenate, and
-// the postfix result is the numeric old value (not new ∓ 1).
 pub fn postfix_member_string_tonumeric_test() -> Nil {
   assert_normal("var o = {x: '5'}; String([o.x++, o.x])", JsString("5,6"))
 }
@@ -1027,8 +877,6 @@ pub fn prefix_member_string_tonumeric_test() -> Nil {
   assert_normal_number("var o = {y: '7'}; --o.y; o.y", 6.0)
 }
 
-// §13.4.4/§13.4.5 step 3: ToNumeric applies to the OLD value on the prefix
-// identifier path too — `++x` on a string must not string-concatenate.
 pub fn prefix_identifier_string_tonumeric_test() -> Nil {
   assert_normal(
     "var x = '5'; String([++x, x, typeof x])",
@@ -1047,15 +895,9 @@ pub fn postfix_computed_member_string_tonumeric_test() -> Nil {
   )
 }
 
-// The postfix result is the *old* numeric value itself, not new ∓ 1
-// reconstructed from the stored value (which would turn -0 into +0).
 pub fn postfix_member_negative_zero_test() -> Nil {
   assert_normal("var o = {x: -0}; 1 / o.x++", JsNumber(NegInfinity))
 }
-
-// ============================================================================
-// Try/catch tests
-// ============================================================================
 
 pub fn try_catch_basic_test() -> Nil {
   assert_normal_number("try { throw 42; } catch(e) { e }", 42.0)
@@ -1070,7 +912,6 @@ pub fn try_finally_normal_test() -> Nil {
 }
 
 pub fn try_finally_throw_test() -> Nil {
-  // Finally runs even when exception is thrown, then re-throws
   case run_js("var x = 0; try { x = 1; throw 42; } finally { x = 10; }") {
     Ok(#(Error(JsNumber(Finite(42.0))), _)) -> Nil
     other -> panic as { "expected throw of 42: " <> string.inspect(other) }
@@ -1092,7 +933,6 @@ pub fn try_catch_finally_caught_test() -> Nil {
 }
 
 pub fn try_catch_finally_rethrow_test() -> Nil {
-  // If catch re-throws, finally still runs, then the exception propagates
   case
     run_js(
       "var x = 0; try { throw 42; } catch(e) { throw e + 1; } finally { x = 99; }",
@@ -1103,7 +943,6 @@ pub fn try_catch_finally_rethrow_test() -> Nil {
   }
 }
 
-// test262 try/S12.14_A11_T4: finally's continue replaces try's break.
 pub fn try_finally_continue_replaces_break_test() -> Nil {
   assert_normal_number(
     "var c=0,fin=0; do{try{c+=1;break}catch(e){}finally{fin=1;continue}}while(c<2); c*10+fin",
@@ -1111,12 +950,10 @@ pub fn try_finally_continue_replaces_break_test() -> Nil {
   )
 }
 
-// break crossing a finally runs the finally, then proceeds with break.
 pub fn try_finally_break_runs_finally_test() -> Nil {
   assert_normal_number("var f=0; while(true){try{break}finally{f=1}} f", 1.0)
 }
 
-// continue crossing a finally runs it on every iteration.
 pub fn try_finally_continue_runs_finally_test() -> Nil {
   assert_normal_number(
     "var f=0,i=0; while(i<2){try{i++;continue}finally{f++}} f",
@@ -1124,32 +961,24 @@ pub fn try_finally_continue_runs_finally_test() -> Nil {
   )
 }
 
-// return crossing finally: finally runs, original return value preserved.
 pub fn try_finally_return_preserved_test() -> Nil {
   assert_normal_number("(function(){try{return 7}finally{var x=1}})()", 7.0)
 }
 
-// §14.15.3: finally's abrupt return REPLACES try's return.
 pub fn try_finally_return_replaces_return_test() -> Nil {
   assert_normal_number("(function(){try{return 1}finally{return 2}})()", 2.0)
 }
 
-// §14.15.3: finally's break swallows a throw (labeled block target).
 pub fn try_finally_break_swallows_throw_test() -> Nil {
   assert_normal_number("var r=0; L: try{throw 1}finally{r=9;break L} r", 9.0)
 }
 
-// nested finally ordering: inner finally → outer catch → outer finally.
 pub fn try_finally_nested_order_test() -> Nil {
   assert_normal(
     "var s=''; try{try{throw 0}finally{s+='a'}}catch(e){s+='c'}finally{s+='b'} s",
     JsString("acb"),
   )
 }
-
-// ============================================================================
-// Uncaught throw settles as Error(thrown)
-// ============================================================================
 
 pub fn uncaught_throw_test() -> Nil {
   case run_js("throw 42") {
@@ -1159,17 +988,9 @@ pub fn uncaught_throw_test() -> Nil {
   }
 }
 
-// ============================================================================
-// Sequence expression test
-// ============================================================================
-
 pub fn sequence_expression_test() -> Nil {
   assert_normal_number("(1, 2, 3)", 3.0)
 }
-
-// ============================================================================
-// Function tests
-// ============================================================================
 
 pub fn function_declaration_basic_test() -> Nil {
   assert_normal_number("function add(a, b) { return a + b; } add(3, 4)", 7.0)
@@ -1220,10 +1041,6 @@ pub fn function_recursion_test() -> Nil {
   )
 }
 
-// ============================================================================
-// Arrow function tests
-// ============================================================================
-
 pub fn arrow_expression_body_test() -> Nil {
   assert_normal_number("var f = (x) => x + 1; f(5)", 6.0)
 }
@@ -1244,13 +1061,7 @@ pub fn arrow_nested_expression_test() -> Nil {
   assert_normal_number("var f = (x) => x * x + 1; f(3)", 10.0)
 }
 
-// ============================================================================
-// Closure tests
-// ============================================================================
-
 pub fn closure_basic_test() -> Nil {
-  // Use function expression (not declaration) so the closure is created
-  // AFTER x=10 is assigned (function declarations are hoisted above vars)
   assert_normal_number(
     "function make() { var x = 10; var inner = function() { return x; }; return inner; } make()()",
     10.0,
@@ -1308,7 +1119,6 @@ pub fn closure_arrow_expression_capture_test() -> Nil {
 }
 
 pub fn closure_var_capture_test() -> Nil {
-  // Closures capture by reference via BoxSlot — mutations are visible.
   assert_normal_number(
     "function f() { var x = 5; var g = function() { return x; }; x = 10; return g; } f()()",
     10.0,
@@ -1316,7 +1126,6 @@ pub fn closure_var_capture_test() -> Nil {
 }
 
 pub fn closure_independent_copies_test() -> Nil {
-  // Two closures from same factory get independent copies
   assert_normal_number(
     "function make(n) { return function() { return n; }; } var a = make(1); var b = make(2); a() + b()",
     3.0,
@@ -1324,7 +1133,6 @@ pub fn closure_independent_copies_test() -> Nil {
 }
 
 pub fn closure_mutation_after_creation_test() -> Nil {
-  // Mutation after closure creation is visible through the closure
   assert_normal_number(
     "function f() { var x = 5; var g = function() { return x; }; x = 10; return g(); } f()",
     10.0,
@@ -1332,7 +1140,6 @@ pub fn closure_mutation_after_creation_test() -> Nil {
 }
 
 pub fn closure_mutation_through_closure_test() -> Nil {
-  // Mutation through the closure is visible to the parent
   assert_normal_number(
     "function f() { var x = 0; var inc = function() { x = x + 1; }; inc(); inc(); inc(); return x; } f()",
     3.0,
@@ -1340,7 +1147,6 @@ pub fn closure_mutation_through_closure_test() -> Nil {
 }
 
 pub fn closure_shared_between_siblings_test() -> Nil {
-  // Two closures share the same variable
   assert_normal_number(
     "function f() { var x = 0; var inc = function() { x = x + 1; return x; }; var get = function() { return x; }; inc(); inc(); return get(); } f()",
     2.0,
@@ -1348,7 +1154,6 @@ pub fn closure_shared_between_siblings_test() -> Nil {
 }
 
 pub fn closure_counter_pattern_test() -> Nil {
-  // Classic counter closure pattern
   assert_normal_number(
     "function counter() { var n = 0; return function() { n = n + 1; return n; }; } var c = counter(); c(); c(); c()",
     3.0,
@@ -1356,7 +1161,6 @@ pub fn closure_counter_pattern_test() -> Nil {
 }
 
 pub fn closure_hoisted_fn_mutation_test() -> Nil {
-  // Hoisted function declaration + mutation in parent
   assert_normal_number(
     "function f() { function get() { return x; } var x = 42; return get(); } f()",
     42.0,
@@ -1364,19 +1168,13 @@ pub fn closure_hoisted_fn_mutation_test() -> Nil {
 }
 
 pub fn closure_param_mutation_test() -> Nil {
-  // Closure captures a param, parent mutates it
   assert_normal_number(
     "function f(x) { var g = function() { return x; }; x = 99; return g(); } f(1)",
     99.0,
   )
 }
 
-// Regressions for the build_scope_dict / scope.gleam slot-allocator
-// divergence — second same-named block-let must get the slot scope.gleam
-// allocated, not the first.
-
 pub fn closure_sibling_block_let_shadow_test() -> Nil {
-  // Was returning 1: build_scope_dict mapped both `x` to the first slot.
   assert_normal_number(
     "function f(){ {let x=1} {let x=2; return ()=>x} } f()()",
     2.0,
@@ -1384,7 +1182,6 @@ pub fn closure_sibling_block_let_shadow_test() -> Nil {
 }
 
 pub fn closure_sibling_catch_shadow_test() -> Nil {
-  // Was [1,1]: both catch-param `e` mapped to the first slot.
   assert_normal(
     "(function(){ try{throw 1}catch(e){var g=()=>e} try{throw 2}catch(e){var h=()=>e} return g()+','+h() })()",
     JsString("1,2"),
@@ -1392,13 +1189,10 @@ pub fn closure_sibling_catch_shadow_test() -> Nil {
 }
 
 pub fn closure_closed_block_no_leak_test() -> Nil {
-  // Was leaking 1: closure created after block closed must NOT see `x`.
   assert_thrown("function f(){ {let x=1} return ()=>x } f()()")
 }
 
 pub fn closure_block_shadow_offbyone_cascade_test() -> Nil {
-  // Was InternalError "GetBoxed: local is not a box ref": reused slots
-  // pushed `w`'s capture index past the boxed range.
   assert_normal_number(
     "function f(){ {let x=1} {let x=2} {let w=7; return ()=>w} } f()()",
     7.0,
@@ -1406,7 +1200,6 @@ pub fn closure_block_shadow_offbyone_cascade_test() -> Nil {
 }
 
 pub fn closure_nested_block_shadow_test() -> Nil {
-  // Innermost shadow wins through the closure.
   assert_normal_number(
     "function f(){ let a=1; {let a=2; {let a=3; return ()=>a}} } f()()",
     3.0,
@@ -1414,8 +1207,6 @@ pub fn closure_nested_block_shadow_test() -> Nil {
 }
 
 pub fn closure_const_by_value_test() -> Nil {
-  // A const captured only after its initializer ran is copied, not boxed;
-  // every earlier or hoisted capturer still shares the binding and its TDZ.
   assert_normal(
     "function f() {
        var r = [];
@@ -1432,8 +1223,6 @@ pub fn closure_const_by_value_test() -> Nil {
 }
 
 pub fn closure_this_by_value_test() -> Nil {
-  // Outside a class body `this` and new.target are fixed for the activation
-  // and reach arrows by value; a derived constructor still shares `this`.
   assert_normal(
     "function F(v) { this.v = v; this.get = () => () => this.v; this.nt = () => new.target === F }
      var f = new F(4);
@@ -1445,9 +1234,6 @@ pub fn closure_this_by_value_test() -> Nil {
 }
 
 pub fn class_this_by_value_test() -> Nil {
-  // Methods, field initialisers, static blocks and base constructors hand
-  // `this` to arrows by value; only a derived constructor keeps it shared so
-  // an arrow created before super() sees the instance (and its TDZ) later.
   assert_normal(
     "var r = [];
      class A { constructor() { this.a = 5; this.f = () => this.a } m() { return [2].map(x => x * this.a)[0] } static s() { return (() => this === A)() } x = (() => this)(); static { r.push((() => this === A)()) } }
@@ -1460,12 +1246,7 @@ pub fn class_this_by_value_test() -> Nil {
   )
 }
 
-// ============================================================================
-// Array tests
-// ============================================================================
-
 pub fn array_literal_test() -> Nil {
-  // Array literal produces an object
   case run_js("[1, 2, 3]") {
     Ok(#(Ok(JsObject(_)), _)) -> Nil
     _other -> panic as "expected array object"
@@ -1501,33 +1282,26 @@ pub fn array_index_assignment_grows_length_test() -> Nil {
 }
 
 pub fn array_sparse_hole_test() -> Nil {
-  // Holes in array literals preserve length
   assert_normal_number("[1, , 3].length", 3.0)
 }
 
 pub fn array_sparse_hole_value_test() -> Nil {
-  // Reading a hole returns undefined
   assert_normal("[1, , 3][1]", JsUndefined)
 }
 
 pub fn array_sparse_hole_in_operator_test() -> Nil {
-  // But `in` distinguishes holes from undefined: index 1 has no property.
   assert_normal("var a = [1, , 3]; 1 in a", JsBool(False))
 }
 
 pub fn array_sparse_hole_in_operator_present_test() -> Nil {
-  // Non-hole indices are present.
   assert_normal("var a = [1, , 3]; 0 in a && 2 in a", JsBool(True))
 }
 
 pub fn array_sparse_hole_leading_test() -> Nil {
-  // Leading hole.
   assert_normal("var a = [, 2, 3]; 0 in a", JsBool(False))
 }
 
 pub fn array_sparse_hole_all_holes_test() -> Nil {
-  // All-hole array: length 2, neither index present.
-  // [,,] has a trailing comma — 2 elements, both holes.
   assert_normal(
     "var a = [,,]; a.length === 2 && !(0 in a) && !(1 in a)",
     JsBool(True),
@@ -1535,7 +1309,6 @@ pub fn array_sparse_hole_all_holes_test() -> Nil {
 }
 
 pub fn array_sparse_hole_multiple_test() -> Nil {
-  // Multiple holes.
   assert_normal(
     "var a = [1,,3,,5]; !(1 in a) && !(3 in a) && (0 in a) && (4 in a)",
     JsBool(True),
@@ -1543,7 +1316,6 @@ pub fn array_sparse_hole_multiple_test() -> Nil {
 }
 
 pub fn array_sparse_hole_foreach_skips_test() -> Nil {
-  // forEach skips holes (SkipHoles behavior).
   assert_normal_number(
     "var count = 0; [1,,3].forEach(function() { count++ }); count",
     2.0,
@@ -1551,7 +1323,6 @@ pub fn array_sparse_hole_foreach_skips_test() -> Nil {
 }
 
 pub fn array_sparse_hole_spread_prefix_test() -> Nil {
-  // Hole before a spread: [, ...[1,2], 3] → hole at 0, then 1,2,3.
   assert_normal(
     "var a = [, ...[1,2], 3]; !(0 in a) && a.length === 4 && a[1] === 1",
     JsBool(True),
@@ -1559,7 +1330,6 @@ pub fn array_sparse_hole_spread_prefix_test() -> Nil {
 }
 
 pub fn array_sparse_hole_spread_tail_test() -> Nil {
-  // Hole after a spread: [1, ...[], , 3] → length 3, hole at 1.
   assert_normal(
     "var a = [1, ...[], , 3]; a.length === 3 && !(1 in a) && a[2] === 3",
     JsBool(True),
@@ -1567,7 +1337,6 @@ pub fn array_sparse_hole_spread_tail_test() -> Nil {
 }
 
 pub fn array_sparse_hole_spread_sandwich_test() -> Nil {
-  // Holes on both sides of a spread.
   assert_normal(
     "var a = [, ...[1,2], , 3]; a.length === 5 && !(0 in a) && !(3 in a) && a[4] === 3",
     JsBool(True),
@@ -1593,10 +1362,6 @@ pub fn array_in_variable_test() -> Nil {
 pub fn array_length_after_assignment_test() -> Nil {
   assert_normal_number("var a = []; a[0] = 1; a[1] = 2; a.length", 2.0)
 }
-
-// ============================================================================
-// this / new / methods
-// ============================================================================
 
 pub fn new_basic_constructor_test() -> Nil {
   assert_normal_number(
@@ -1626,7 +1391,6 @@ pub fn prototype_method_with_this_test() -> Nil {
 }
 
 pub fn constructor_implicit_return_test() -> Nil {
-  // Constructor returns undefined → new object used
   assert_normal_number(
     "function Foo(x) { this.x = x; }
      var o = new Foo(7);
@@ -1636,7 +1400,6 @@ pub fn constructor_implicit_return_test() -> Nil {
 }
 
 pub fn constructor_explicit_object_return_test() -> Nil {
-  // Constructor returns an object → that object is used
   assert_normal_number(
     "function Foo() { this.a = 1; return { b: 99 }; }
      var o = new Foo();
@@ -1655,7 +1418,6 @@ pub fn static_property_on_function_test() -> Nil {
 }
 
 pub fn sta_js_pattern_test() -> Nil {
-  // Full sta.js-style integration
   assert_normal(
     "function Test262Error(message) {
        this.message = message || '';
@@ -1683,8 +1445,6 @@ pub fn prototype_chain_property_lookup_test() -> Nil {
 }
 
 pub fn this_global_in_plain_sloppy_call_test() -> Nil {
-  // ES §10.2.1.2 OrdinaryCallBindThis: sloppy callee gets globalThis
-  // when thisArg is undefined.
   assert_normal(
     "function f() { return this === globalThis; }
      f()",
@@ -1693,7 +1453,6 @@ pub fn this_global_in_plain_sloppy_call_test() -> Nil {
 }
 
 pub fn this_undefined_in_plain_strict_call_test() -> Nil {
-  // Strict callee keeps undefined this.
   assert_normal(
     "function f() { 'use strict'; return this; }
      f()",
@@ -1708,10 +1467,6 @@ pub fn method_call_binds_this_test() -> Nil {
     99.0,
   )
 }
-
-// ============================================================================
-// Template literals
-// ============================================================================
 
 pub fn template_literal_no_expressions_test() -> Nil {
   assert_normal("`hello world`", JsString("hello world"))
@@ -1736,37 +1491,24 @@ pub fn template_literal_nested_template_test() -> Nil {
   assert_normal("var x = 'y'; `${`inner${x}`}`", JsString("innery"))
 }
 
-// A nested template whose quasi text is `}` must not end the outer
-// substitution at that inner `}`.
 pub fn template_literal_nested_template_brace_quasi_test() -> Nil {
   assert_normal("`${`}`}`", JsString("}"))
 }
 
-// A substitution must contain exactly one expression: trailing tokens after
-// it are a SyntaxError, not silently dropped.
 pub fn template_literal_substitution_trailing_tokens_test() -> Nil {
   assert_parse_error("var a = 1; var b = 2; `${a b}`")
 }
 
-// A `${` whose `}` is swallowed (here by an unterminated string) is a
-// SyntaxError, not a template whose quasi is the leftover text.
 pub fn template_literal_unterminated_substitution_test() -> Nil {
   assert_parse_error("`${'}`")
 }
 
-// A template substitution is always Expression[+In] (ECMA-262 13.2.8), so
-// `in` is an operator inside `${}` even when the template appears in a
-// for-head initializer where the enclosing context is [~In].
 pub fn template_literal_substitution_in_operator_for_head_test() -> Nil {
   assert_normal(
     "var r; for (r = `${'x' in {x:1}}`; false; ) ; r",
     JsString("true"),
   )
 }
-
-// ============================================================================
-// Switch statements
-// ============================================================================
 
 pub fn switch_basic_match_test() -> Nil {
   assert_normal_number(
@@ -1819,7 +1561,6 @@ pub fn switch_no_match_no_default_test() -> Nil {
 }
 
 pub fn assert_js_harness_basic_test() -> Nil {
-  // Minimal sta.js + assert.js + simple assertion
   assert_normal(
     "function Test262Error(message) { this.message = message || ''; }
      Test262Error.prototype.toString = function () { return 'Test262Error: ' + this.message; };
@@ -1849,7 +1590,6 @@ pub fn assert_js_harness_basic_test() -> Nil {
 }
 
 pub fn full_assert_js_compiles_test() -> Nil {
-  // Test that real sta.js + assert.js + simple test compiles and runs
   assert_normal(
     "function Test262Error(message) {
        this.message = message || '';
@@ -1949,10 +1689,6 @@ pub fn switch_string_cases_test() -> Nil {
   )
 }
 
-// ============================================================================
-// Function .name property
-// ============================================================================
-
 pub fn function_declaration_name_test() -> Nil {
   assert_normal("function foo() {} foo.name", JsString("foo"))
 }
@@ -1968,10 +1704,6 @@ pub fn function_expression_anonymous_name_test() -> Nil {
 pub fn arrow_function_name_test() -> Nil {
   assert_normal("var f = () => 1; f.name", JsString("f"))
 }
-
-// ============================================================================
-// .prototype.constructor backlink
-// ============================================================================
 
 pub fn prototype_constructor_backlink_test() -> Nil {
   assert_normal(
@@ -2007,7 +1739,6 @@ pub fn arrow_has_no_prototype_test() -> Nil {
 }
 
 pub fn constructor_return_object_overrides_test() -> Nil {
-  // If constructor explicitly returns an object, that object is used
   assert_normal(
     "function Foo() { return {x: 99}; }
      var o = new Foo();
@@ -2017,7 +1748,6 @@ pub fn constructor_return_object_overrides_test() -> Nil {
 }
 
 pub fn constructor_return_primitive_ignored_test() -> Nil {
-  // If constructor returns a primitive, the constructed object is used
   assert_normal(
     "function Foo() { this.x = 42; return 5; }
      var o = new Foo();
@@ -2027,7 +1757,6 @@ pub fn constructor_return_primitive_ignored_test() -> Nil {
 }
 
 pub fn prototype_chain_inheritance_test() -> Nil {
-  // Properties set on prototype are accessible via the chain
   assert_normal(
     "function Foo() {}
      Foo.prototype.hello = 'world';
@@ -2038,7 +1767,6 @@ pub fn prototype_chain_inheritance_test() -> Nil {
 }
 
 pub fn constructor_non_object_prototype_fallback_test() -> Nil {
-  // When constructor.prototype is not an object, new instance gets Object.prototype
   assert_normal(
     "function Foo() { this.x = 1; }
      Foo.prototype = 42;
@@ -2047,10 +1775,6 @@ pub fn constructor_non_object_prototype_fallback_test() -> Nil {
     JsNumber(Finite(1.0)),
   )
 }
-
-// ============================================================================
-// Destructuring tests
-// ============================================================================
 
 pub fn object_destructuring_basic_test() -> Nil {
   assert_normal_number("let {a, b} = {a: 1, b: 2}; a + b", 3.0)
@@ -2100,7 +1824,6 @@ pub fn array_destructuring_default_test() -> Nil {
 }
 
 pub fn array_destructuring_closes_iterator_test() -> Nil {
-  // §8.6.2: iterator not exhausted after binding → IteratorClose.
   assert_normal_number(
     "var closed = 0;
      var it = { [Symbol.iterator]() { return {
@@ -2114,7 +1837,6 @@ pub fn array_destructuring_closes_iterator_test() -> Nil {
 }
 
 pub fn array_destructuring_assign_closes_iterator_test() -> Nil {
-  // Assignment-pattern variant (emit_destructuring_assign path).
   assert_normal_number(
     "var closed = 0, a, b;
      var it = { [Symbol.iterator]() { return {
@@ -2128,8 +1850,6 @@ pub fn array_destructuring_assign_closes_iterator_test() -> Nil {
 }
 
 pub fn array_destructuring_rest_no_close_test() -> Nil {
-  // Rest element drains the iterator → [[Done]]=true → no close.
-  // Validates the JsUndefined sentinel reorder in emit_array_elements.
   assert_normal_number(
     "var closed = 0, n = 0;
      var it = { [Symbol.iterator]() { return {
@@ -2143,8 +1863,6 @@ pub fn array_destructuring_rest_no_close_test() -> Nil {
 }
 
 pub fn array_destructuring_default_throw_closes_test() -> Nil {
-  // Default initializer throws → IteratorCloseThrow: .return() called,
-  // its error swallowed, original rethrown.
   assert_normal_number(
     "var closed = 0, caught;
      function boom() { throw 'orig'; }
@@ -2170,12 +1888,7 @@ pub fn arrow_param_destructuring_test() -> Nil {
   assert_normal_number("var f = ({a, b}) => a * b; f({a: 3, b: 4})", 12.0)
 }
 
-// ============================================================================
-// For-in loop tests
-// ============================================================================
-
 pub fn for_in_object_basic_test() -> Nil {
-  // Collect keys from a plain object
   assert_normal_number(
     "var sum = 0; var obj = {a: 1, b: 2, c: 3}; for (var k in obj) { sum += obj[k]; } sum",
     6.0,
@@ -2190,17 +1903,14 @@ pub fn for_in_let_binding_test() -> Nil {
 }
 
 pub fn for_in_null_test() -> Nil {
-  // for-in on null should not iterate
   assert_normal_number("var x = 0; for (var k in null) { x = 1; } x", 0.0)
 }
 
 pub fn for_in_undefined_test() -> Nil {
-  // for-in on undefined should not iterate
   assert_normal_number("var x = 0; for (var k in undefined) { x = 1; } x", 0.0)
 }
 
 pub fn for_in_array_test() -> Nil {
-  // for-in on array iterates indices as strings
   assert_normal(
     "var result = ''; for (var k in [10, 20, 30]) { result += k; } result",
     JsString("012"),
@@ -2222,16 +1932,11 @@ pub fn for_in_continue_test() -> Nil {
 }
 
 pub fn for_in_existing_var_test() -> Nil {
-  // for-in with existing variable (no declaration)
   assert_normal(
     "var k; for (k in {hello: 1, world: 2}) {} k",
     JsString("world"),
   )
 }
-
-// ============================================================================
-// For-of loop tests
-// ============================================================================
 
 pub fn for_of_array_basic_test() -> Nil {
   assert_normal_number(
@@ -2299,7 +2004,6 @@ pub fn for_of_throw_closes_iterator_test() -> Nil {
 }
 
 pub fn for_of_next_error_no_close_test() -> Nil {
-  // §14.7.5.6 step 6.a: a throw from .next() must NOT close the iterator.
   assert_normal_number(
     "var closed = 0;
      var it = { [Symbol.iterator]() { return {
@@ -2313,7 +2017,6 @@ pub fn for_of_next_error_no_close_test() -> Nil {
 }
 
 pub fn for_of_exhausted_no_close_test() -> Nil {
-  // Natural exhaustion (done=true) does NOT close the iterator.
   assert_normal_number(
     "var closed = 0, n = 0;
      var it = { [Symbol.iterator]() { return {
@@ -2327,8 +2030,6 @@ pub fn for_of_exhausted_no_close_test() -> Nil {
 }
 
 pub fn for_of_throw_close_error_swallowed_test() -> Nil {
-  // §7.4.11 step 5: body throws 'body'; .return() also throws 'ret'.
-  // Original 'body' must win and .return() must still have been called.
   assert_normal_number(
     "var closed = 0, caught;
      var it = { [Symbol.iterator]() { return {
@@ -2342,9 +2043,7 @@ pub fn for_of_throw_close_error_swallowed_test() -> Nil {
 }
 
 pub fn for_of_break_close_non_object_test() -> Nil {
-  // §7.4.11 step 7: normal-completion close where .return() yields a
-  // non-object → TypeError. Use null (not undefined) to dodge the
-  // call_return undefined-sentinel gap.
+  // null (not undefined) dodges call_return sentinel gap
   assert_normal(
     "var caught;
      var it = { [Symbol.iterator]() { return {
@@ -2358,7 +2057,6 @@ pub fn for_of_break_close_non_object_test() -> Nil {
 }
 
 pub fn for_of_break_no_return_method_test() -> Nil {
-  // Iterator has no .return — break must just exit, no throw, body ran once.
   assert_normal_number(
     "var seen = 0;
      var it = { [Symbol.iterator]() { return {
@@ -2371,7 +2069,6 @@ pub fn for_of_break_no_return_method_test() -> Nil {
 }
 
 pub fn for_of_return_closes_iterator_test() -> Nil {
-  // §7.4.11: return inside for-of must close the iterator.
   assert_normal_number(
     "var closed = 0;
      var it = { [Symbol.iterator]() { return {
@@ -2385,7 +2082,6 @@ pub fn for_of_return_closes_iterator_test() -> Nil {
 }
 
 pub fn for_await_of_break_closes_iterator_test() -> Nil {
-  // §7.4.12: break inside for-await-of must close (and await) the iterator.
   assert_promise_resolves(
     "var closed = 0;
      var it = { [Symbol.asyncIterator]() { return {
@@ -2398,8 +2094,6 @@ pub fn for_await_of_break_closes_iterator_test() -> Nil {
 }
 
 pub fn for_await_of_throw_closes_iterator_test() -> Nil {
-  // §7.4.12 throw-completion: body throw → close, await, swallow inner,
-  // rethrow original.
   assert_promise_resolves(
     "var closed = 0;
      var it = { [Symbol.asyncIterator]() { return {
@@ -2415,7 +2109,6 @@ pub fn for_await_of_throw_closes_iterator_test() -> Nil {
 }
 
 pub fn for_await_of_throw_swallows_close_error_test() -> Nil {
-  // §7.4.12: if .return() rejects, the original body error still wins.
   assert_promise_resolves(
     "var it = { [Symbol.asyncIterator]() { return {
        next() { return Promise.resolve({value: 1, done: false}); },
@@ -2430,7 +2123,6 @@ pub fn for_await_of_throw_swallows_close_error_test() -> Nil {
 }
 
 pub fn for_await_of_next_reject_no_close_test() -> Nil {
-  // §14.7.5.6 step 6.a: a rejection from .next() must NOT close the iterator.
   assert_promise_resolves(
     "var closed = 0;
      var it = { [Symbol.asyncIterator]() { return {
@@ -2458,7 +2150,6 @@ pub fn for_await_of_exhausted_no_close_test() -> Nil {
 }
 
 pub fn for_await_of_break_close_non_object_throws_test() -> Nil {
-  // §7.4.12 step 6: awaited .return() result must be an Object.
   assert_promise_resolves(
     "var it = { [Symbol.asyncIterator]() { return {
        next() { return Promise.resolve({value: 1, done: false}); },
@@ -2473,7 +2164,6 @@ pub fn for_await_of_break_close_non_object_throws_test() -> Nil {
 }
 
 pub fn for_await_of_break_no_return_ok_test() -> Nil {
-  // .return is undefined → no-op, no await, normal completion.
   assert_promise_resolves(
     "var it = { [Symbol.asyncIterator]() { return {
        next() { return Promise.resolve({value: 1, done: false}); }
@@ -2484,7 +2174,6 @@ pub fn for_await_of_break_no_return_ok_test() -> Nil {
 }
 
 pub fn for_of_nested_labeled_break_closes_both_test() -> Nil {
-  // break L crossing the inner for-of and targeting the outer must close both.
   assert_normal_number(
     "var closed = 0;
      function mk() { return { [Symbol.iterator]() { return {
@@ -2498,7 +2187,6 @@ pub fn for_of_nested_labeled_break_closes_both_test() -> Nil {
 }
 
 pub fn for_of_labeled_continue_outer_closes_inner_test() -> Nil {
-  // continue L crossing the for-of must close it.
   assert_normal_number(
     "var closed = 0;
      var it = { [Symbol.iterator]() { return {
@@ -2512,8 +2200,6 @@ pub fn for_of_labeled_continue_outer_closes_inner_test() -> Nil {
 }
 
 pub fn for_of_return_in_try_pops_user_frame_test() -> Nil {
-  // return inside a user try inside for-of: must pop the user try frame
-  // AND F_body, then close iter. The user catch must NOT run.
   assert_normal_number(
     "var closed = 0;
      var it = { [Symbol.iterator]() { return {
@@ -2527,7 +2213,6 @@ pub fn for_of_return_in_try_pops_user_frame_test() -> Nil {
 }
 
 pub fn for_of_return_close_throws_replaces_return_test() -> Nil {
-  // §7.4.11 step 6: throw from .return() supersedes the return completion.
   assert_normal_number(
     "var it = { [Symbol.iterator]() { return {
        next() { return {value: 1, done: false}; },
@@ -2542,13 +2227,10 @@ pub fn for_of_return_close_throws_replaces_return_test() -> Nil {
 }
 
 pub fn unlabeled_break_skips_labeled_block_test() -> Nil {
-  // Regression: unlabeled break must target the nearest loop/switch, not a
-  // labeled block (§14.8). Previously arc broke to L, looping forever to n=3.
   assert_normal_number("var n = 0; while (n < 3) { n++; L: { break; } } n", 1.0)
 }
 
 pub fn for_of_destructuring_test() -> Nil {
-  // for-of with array destructuring
   assert_normal_number(
     "var sum = 0; var arr = [[1, 2], [3, 4]]; for (var [a, b] of arr) { sum += a + b; } sum",
     10.0,
@@ -2561,10 +2243,6 @@ pub fn for_of_string_values_test() -> Nil {
     JsString("abc"),
   )
 }
-
-// ============================================================================
-// delete operator
-// ============================================================================
 
 pub fn delete_property_test() -> Nil {
   assert_normal("var obj = {x: 1, y: 2}; delete obj.x; obj.x", JsUndefined)
@@ -2586,15 +2264,10 @@ pub fn delete_computed_test() -> Nil {
 }
 
 pub fn delete_variable_test() -> Nil {
-  // §9.1.1.4.17 CreateGlobalVarBinding with D = false (§9.1.1.4.18): a
-  // top-level `var` is a non-configurable global property, so the real
-  // [[Delete]] fails — false, and the binding survives.
   assert_normal("var x = 1; [delete x, x].join()", JsString("false,1"))
 }
 
 pub fn delete_hoisted_function_test() -> Nil {
-  // §9.1.1.4.16 CreateGlobalFunctionBinding with D = false: same as vars,
-  // a top-level function declaration is not deletable.
   assert_normal(
     "function f() {}; [delete f, typeof f].join()",
     JsString("false,function"),
@@ -2602,9 +2275,6 @@ pub fn delete_hoisted_function_test() -> Nil {
 }
 
 pub fn delete_sloppy_direct_eval_var_test() -> Nil {
-  // §19.2.1.3 EvalDeclarationInstantiation passes D = true to
-  // CreateGlobalVarBinding, so a var introduced by sloppy direct eval at
-  // global scope IS deletable — unlike a script's own top-level vars.
   assert_normal(
     "eval('var ev = 1'); [delete ev, typeof ev].join()",
     JsString("true,undefined"),
@@ -2612,8 +2282,6 @@ pub fn delete_sloppy_direct_eval_var_test() -> Nil {
 }
 
 pub fn global_var_descriptor_test() -> Nil {
-  // §9.1.1.4.17 step 4: the created property is
-  // { writable: true, enumerable: true, configurable: false }.
   assert_normal(
     "var d = 1;"
       <> "var pd = Object.getOwnPropertyDescriptor(globalThis, 'd');"
@@ -2622,17 +2290,11 @@ pub fn global_var_descriptor_test() -> Nil {
   )
 }
 
-// §13.5.1.2 `delete identifier` (sloppy mode).
-
 pub fn delete_implicit_global_removes_binding_test() -> Nil {
-  // An implicit global (`x = 5`) is a configurable property of the global
-  // object, so `delete x` performs a real [[Delete]] and the name is gone.
   assert_normal("x = 5; delete x; typeof x", JsString("undefined"))
 }
 
 pub fn delete_var_in_function_test() -> Nil {
-  // §9.1.1.1.7 DeleteBinding: bindings created by declarations are never
-  // deletable — false, and the binding survives.
   assert_normal(
     "(function () { var y = 1; return [delete y, y]; })().join()",
     JsString("false,1"),
@@ -2656,22 +2318,16 @@ pub fn delete_catch_parameter_test() -> Nil {
 }
 
 pub fn delete_undeclared_global_test() -> Nil {
-  // Not a binding anywhere: [[Delete]] of a missing own property is true.
   assert_normal("delete definitelyNotDeclared", JsBool(True))
 }
 
 pub fn delete_non_configurable_global_test() -> Nil {
-  // NaN is a non-configurable global data property — false, still bound.
   assert_normal("[delete NaN, typeof NaN].join()", JsString("false,number"))
 }
 
 pub fn delete_non_object_test() -> Nil {
   assert_normal("delete 42", JsBool(True))
 }
-
-// ============================================================================
-// in operator
-// ============================================================================
 
 pub fn in_own_property_test() -> Nil {
   assert_normal("'x' in {x: 1}", JsBool(True))
@@ -2682,7 +2338,6 @@ pub fn in_missing_property_test() -> Nil {
 }
 
 pub fn in_prototype_chain_test() -> Nil {
-  // "constructor" exists on the prototype (inherited)
   assert_normal("'constructor' in {}", JsBool(True))
 }
 
@@ -2698,12 +2353,7 @@ pub fn in_throws_for_non_object_test() -> Nil {
   assert_thrown("'x' in 42")
 }
 
-// ============================================================================
-// Property descriptor behavior
-// ============================================================================
-
 pub fn for_in_skips_non_enumerable_test() -> Nil {
-  // for-in on new Foo() should NOT include "constructor" (non-enumerable)
   assert_normal(
     "function Foo() {} var result = ''; for (var k in new Foo()) { result += k; } result",
     JsString(""),
@@ -2711,7 +2361,6 @@ pub fn for_in_skips_non_enumerable_test() -> Nil {
 }
 
 pub fn for_in_includes_own_enumerable_test() -> Nil {
-  // Own properties set via assignment ARE enumerable
   assert_normal(
     "function Foo() { this.x = 1; this.y = 2; } var result = ''; for (var k in new Foo()) { result += k; } result",
     JsString("xy"),
@@ -2719,7 +2368,6 @@ pub fn for_in_includes_own_enumerable_test() -> Nil {
 }
 
 pub fn for_in_prototype_enumerable_test() -> Nil {
-  // User-set prototype properties are enumerable and show in for-in
   assert_normal(
     "function Foo() {} Foo.prototype.bar = 42; var result = ''; for (var k in new Foo()) { result += k; } result",
     JsString("bar"),
@@ -2727,7 +2375,6 @@ pub fn for_in_prototype_enumerable_test() -> Nil {
 }
 
 pub fn function_name_not_enumerable_test() -> Nil {
-  // function.name is not enumerable
   assert_normal(
     "function foo() {} var result = ''; for (var k in foo) { result += k; } result",
     JsString(""),
@@ -2735,7 +2382,6 @@ pub fn function_name_not_enumerable_test() -> Nil {
 }
 
 pub fn function_prototype_not_enumerable_test() -> Nil {
-  // function.prototype is not enumerable
   assert_normal(
     "function foo() {} var keys = []; for (var k in foo) { keys.push(k); } keys.length",
     JsNumber(Finite(0.0)),
@@ -2745,10 +2391,6 @@ pub fn function_prototype_not_enumerable_test() -> Nil {
 pub fn delete_then_in_test() -> Nil {
   assert_normal("var obj = {x: 1}; delete obj.x; 'x' in obj", JsBool(False))
 }
-
-// ============================================================================
-// Class tests
-// ============================================================================
 
 pub fn class_basic_constructor_test() -> Nil {
   assert_normal(
@@ -2831,8 +2473,6 @@ pub fn class_no_constructor_test() -> Nil {
   )
 }
 
-// ---- Rest parameters (§15.1.5, §10.2.11) ----
-
 pub fn rest_param_function_test() -> Nil {
   assert_normal_number(
     "function f(a, b, ...rest) { return rest.length } f(1, 2, 3, 4, 5)",
@@ -2852,7 +2492,6 @@ pub fn rest_param_collects_values_test() -> Nil {
 }
 
 pub fn rest_param_length_excludes_rest_test() -> Nil {
-  // §15.1.5: a rest parameter does not contribute to `Function.length`.
   assert_normal_number("(function(a, b, ...rest) {}).length", 2.0)
 }
 
@@ -2885,14 +2524,11 @@ pub fn rest_param_destructured_test() -> Nil {
 }
 
 pub fn rest_param_arguments_independent_test() -> Nil {
-  // `arguments` reflects all args regardless of the rest binding.
   assert_normal_number(
     "function f(a, ...rest) { return arguments.length } f(1, 2, 3, 4)",
     4.0,
   )
 }
-
-// ---- Super property access (§13.3.7) ----
 
 pub fn super_method_override_test() -> Nil {
   assert_normal(
@@ -2902,8 +2538,6 @@ pub fn super_method_override_test() -> Nil {
 }
 
 pub fn super_method_multi_level_test() -> Nil {
-  // Resolution must use each method's [[HomeObject]], not the instance's
-  // prototype, so a three-level chain threads correctly.
   assert_normal(
     "class A { who() { return 'A' } }
      class B extends A { who() { return 'B<' + super.who() + '>' } }
@@ -2949,7 +2583,6 @@ pub fn super_static_method_test() -> Nil {
 }
 
 pub fn super_setter_test() -> Nil {
-  // `super.x = v` invokes the parent setter with `this` as the receiver.
   assert_normal_number(
     "class A { set val(v) { this.stored = v * 10 } } class B extends A { setIt(v) { super.val = v; return this.stored } } new B().setIt(5)",
     50.0,
@@ -2967,8 +2600,6 @@ pub fn super_object_literal_test() -> Nil {
 }
 
 pub fn super_property_uninitialized_this_test() -> Nil {
-  // §13.3.7.2: a super property reference calls GetThisBinding first, which
-  // throws when `this` is uninitialized (derived ctor before super()).
   assert_normal(
     "class A { get x() { return 1 } }
      class B extends A { constructor() { super.x; super() } }
@@ -2978,8 +2609,6 @@ pub fn super_property_uninitialized_this_test() -> Nil {
 }
 
 pub fn super_property_eval_order_test() -> Nil {
-  // `super[super()]`: the `this` check precedes evaluating the key (`super()`),
-  // so it throws a ReferenceError before the super constructor runs.
   assert_normal(
     "class A { m() { return 1 } }
      class B extends A { constructor() { super[super()]() } }
@@ -2989,15 +2618,11 @@ pub fn super_property_eval_order_test() -> Nil {
 }
 
 pub fn object_literal_method_enumerable_test() -> Nil {
-  // Object-literal concise methods stay enumerable (unlike class methods),
-  // even though they now carry a [[HomeObject]].
   assert_normal(
     "const o = { m() {}, x: 2 }; Object.keys(o).sort().join(',')",
     JsString("m,x"),
   )
 }
-
-// ---- Private class elements (§15.7, §13.10.1) ----
 
 pub fn class_private_instance_field_test() -> Nil {
   assert_normal_number(
@@ -3007,7 +2632,6 @@ pub fn class_private_instance_field_test() -> Nil {
 }
 
 pub fn class_private_instance_method_test() -> Nil {
-  // (7) private method callable via this.#m()
   assert_normal_number(
     "class A { #m() { return 9 } call() { return this.#m() } } new A().call()",
     9.0,
@@ -3015,7 +2639,6 @@ pub fn class_private_instance_method_test() -> Nil {
 }
 
 pub fn class_static_public_field_test() -> Nil {
-  // (1) static x = 5 readable via static method
   assert_normal_number(
     "class A { static x = 5; static m() { return A.x } } A.m()",
     5.0,
@@ -3023,7 +2646,6 @@ pub fn class_static_public_field_test() -> Nil {
 }
 
 pub fn class_static_private_field_test() -> Nil {
-  // (2) static #y = 7 readable via static method
   assert_normal_number(
     "class B { static #y = 7; static n() { return B.#y } } B.n()",
     7.0,
@@ -3038,7 +2660,6 @@ pub fn class_static_private_method_test() -> Nil {
 }
 
 pub fn class_static_private_accessor_test() -> Nil {
-  // (3) static get #z() → 3
   assert_normal_number(
     "class A { static get #z() { return 3 } static m() { return A.#z } } A.m()",
     3.0,
@@ -3053,7 +2674,6 @@ pub fn class_static_field_derived_test() -> Nil {
 }
 
 pub fn class_static_field_this_is_ctor_test() -> Nil {
-  // §15.7.14: static field initializers run with `this` = the constructor.
   assert_normal("class C { static x = this }; C.x === C", JsBool(True))
   assert_normal(
     "class A {}; class B extends A { static x = this }; B.x === B",
@@ -3062,8 +2682,6 @@ pub fn class_static_field_this_is_ctor_test() -> Nil {
 }
 
 pub fn class_static_field_super_test() -> Nil {
-  // §15.7.14: static field initializer [[HomeObject]] = ctor, so super.x reads
-  // the parent constructor's own property.
   assert_normal_number(
     "class A { static x = 1 }; class B extends A { static y = super.x }; B.y",
     1.0,
@@ -3071,14 +2689,11 @@ pub fn class_static_field_super_test() -> Nil {
 }
 
 pub fn class_static_block_test() -> Nil {
-  // §15.7.1 ClassStaticBlock: runs at class-definition time with `this` = ctor.
   assert_normal_number("class C { static { this.y = 7 } }; C.y", 7.0)
   assert_normal_number("class C { static { C.z = 8 } }; C.z", 8.0)
 }
 
 pub fn class_static_elements_source_order_test() -> Nil {
-  // §15.7.14 step 31: static fields and static blocks interleave in textual
-  // order.
   assert_normal(
     "var s=''; class C { static { s+='a' } static x = (s+='b',1); static { s+='c' } }; s",
     JsString("abc"),
@@ -3086,7 +2701,6 @@ pub fn class_static_elements_source_order_test() -> Nil {
 }
 
 pub fn class_static_block_var_isolated_test() -> Nil {
-  // Each static block has its own var environment (§15.7.1).
   assert_normal_number(
     "var f; class C { static { var x=1; f=()=>x } static { var x=2 } }; f()",
     1.0,
@@ -3094,9 +2708,6 @@ pub fn class_static_block_var_isolated_test() -> Nil {
 }
 
 pub fn class_static_block_early_errors_test() -> Nil {
-  // §15.7.1 ClassStaticBlockBody early errors: [~Yield, +Await, ~Return],
-  // ContainsAwait/ContainsArguments must be false, function-like boundary
-  // for break/continue/labels.
   assert_parse_error("class C { static { var await } }")
   assert_parse_error("class C { static { let await } }")
   assert_parse_error("class C { static { const await = 0 } }")
@@ -3118,8 +2729,6 @@ pub fn class_static_block_early_errors_test() -> Nil {
 }
 
 pub fn class_static_block_nested_function_boundary_test() -> Nil {
-  // §15.7.1: the await/arguments/return restrictions stop at function
-  // boundaries — nested functions get their own context.
   assert_normal(
     "class C{static{(function f(){return arguments[0]})(1)}}; 1",
     JsNumber(Finite(1.0)),
@@ -3130,12 +2739,10 @@ pub fn class_static_block_nested_function_boundary_test() -> Nil {
   )
   assert_normal("class C{static{({await:0})}}; 1", JsNumber(Finite(1.0)))
   assert_normal("class C{static{l:for(;;)break l}}; 1", JsNumber(Finite(1.0)))
-  // BindingIdentifier "await" stops at ANY function boundary (incl. arrows).
   assert_normal("class C{static{(()=>{var await})}}; 1", JsNumber(Finite(1.0)))
 }
 
 pub fn class_private_in_self_test() -> Nil {
-  // (4a) #x in this → true
   assert_normal(
     "class A { #x = 1; has() { return #x in this } } new A().has()",
     JsBool(True),
@@ -3143,7 +2750,6 @@ pub fn class_private_in_self_test() -> Nil {
 }
 
 pub fn class_private_in_foreign_test() -> Nil {
-  // (4b) #x in {} → false
   assert_normal(
     "class A { #x = 1; has(o) { return #x in o } } new A().has({})",
     JsBool(False),
@@ -3151,7 +2757,6 @@ pub fn class_private_in_foreign_test() -> Nil {
 }
 
 pub fn class_private_get_brand_check_test() -> Nil {
-  // (5) o.#x on foreign {} → TypeError (§7.3.31 PrivateGet)
   assert_normal(
     "class A { #x = 1; get(o) { return o.#x } }
      try { new A().get({}); false } catch (e) { e instanceof TypeError }",
@@ -3160,7 +2765,6 @@ pub fn class_private_get_brand_check_test() -> Nil {
 }
 
 pub fn class_private_set_brand_check_test() -> Nil {
-  // (6) o.#x = v on foreign {} → TypeError (§7.3.32 PrivateSet)
   assert_normal(
     "class A { #x = 1; set(o) { o.#x = 9 } }
      try { new A().set({}); false } catch (e) { e instanceof TypeError }",
@@ -3169,7 +2773,6 @@ pub fn class_private_set_brand_check_test() -> Nil {
 }
 
 pub fn class_private_field_postfix_increment_test() -> Nil {
-  // (8) this.#n++ on valid instance increments
   assert_normal_number(
     "class C { #n = 5; bump() { this.#n++; return this.#n } } new C().bump()",
     6.0,
@@ -3183,10 +2786,6 @@ pub fn class_private_field_compound_assign_test() -> Nil {
   )
 }
 
-// ============================================================================
-// Function.prototype.call / apply / bind
-// ============================================================================
-
 pub fn function_call_basic_test() -> Nil {
   assert_normal(
     "function greet(x) { return this.prefix + x; }
@@ -3197,8 +2796,6 @@ pub fn function_call_basic_test() -> Nil {
 }
 
 pub fn function_call_no_args_test() -> Nil {
-  // Sloppy callee: primitive thisArg → boxed to Number wrapper object.
-  // Verify via valueOf() + instanceof.
   assert_normal(
     "function getThis() { return this; }
      let t = getThis.call(42);
@@ -3208,15 +2805,12 @@ pub fn function_call_no_args_test() -> Nil {
 }
 
 pub fn function_call_primitive_this_strict_test() -> Nil {
-  // Strict callee: primitive thisArg passes through unboxed.
   assert_normal(
     "function getThis() { 'use strict'; return this; }
      getThis.call(42)",
     JsNumber(Finite(42.0)),
   )
 }
-
-// -- Wrapper prototype method tests (thisNumberValue / thisBooleanValue etc.) --
 
 pub fn number_tostring_radix_test() -> Nil {
   assert_normal("(255).toString(16)", JsString("ff"))
@@ -3231,7 +2825,6 @@ pub fn number_tostring_default_radix_test() -> Nil {
 }
 
 pub fn number_tostring_radix_undefined_test() -> Nil {
-  // explicit undefined → radix 10 per spec
   assert_normal("(255).toString(undefined)", JsString("255"))
 }
 
@@ -3256,7 +2849,6 @@ pub fn number_valueof_on_wrapper_test() -> Nil {
 }
 
 pub fn number_valueof_cross_type_throws_test() -> Nil {
-  // thisNumberValue rejects non-Number this
   assert_thrown("Number.prototype.valueOf.call(true)")
 }
 
@@ -3277,7 +2869,6 @@ pub fn boolean_valueof_cross_type_throws_test() -> Nil {
 }
 
 pub fn string_valueof_cross_type_throws_test() -> Nil {
-  // String.prototype.valueOf uses thisStringValue, NOT generic ToString
   assert_thrown("String.prototype.valueOf.call(42)")
 }
 
@@ -3286,13 +2877,8 @@ pub fn string_valueof_on_wrapper_test() -> Nil {
 }
 
 pub fn number_primitive_computed_field_test() -> Nil {
-  // GetElem on number primitive with string key → delegates to Number.prototype
   assert_normal("typeof (5)['toString']", JsString("function"))
 }
-
-// -- Computed method call this-binding tests --
-// obj[key](args) must bind `this` to obj. Pre-fix, this compiled to plain
-// GetElem + Call, dropping the receiver entirely.
 
 pub fn computed_method_call_binds_this_test() -> Nil {
   assert_normal(
@@ -3324,12 +2910,7 @@ pub fn computed_method_call_with_spread_test() -> Nil {
   )
 }
 
-// -- Generic array-like tests (ES §23.1.3: Array.prototype methods are generic) --
-// require_array handles: real arrays, arguments, String wrappers, primitive
-// strings, and plain objects with .length + indexed props.
-
 pub fn array_like_join_on_string_primitive_test() -> Nil {
-  // ToObject("abc") → String wrapper, index props from chars.
   assert_normal("Array.prototype.join.call('abc', '-')", JsString("a-b-c"))
 }
 
@@ -3341,7 +2922,6 @@ pub fn array_like_join_on_string_wrapper_test() -> Nil {
 }
 
 pub fn array_like_join_on_plain_object_test() -> Nil {
-  // LengthOfArrayLike: reads .length, gathers "0","1","2" from properties.
   assert_normal(
     "let o = {length: 3, 0: 'a', 1: 'b', 2: 'c'};
      Array.prototype.join.call(o, '+')",
@@ -3350,7 +2930,6 @@ pub fn array_like_join_on_plain_object_test() -> Nil {
 }
 
 pub fn array_like_join_sparse_object_test() -> Nil {
-  // Missing indices treated as empty string (same as real sparse arrays).
   assert_normal(
     "let o = {length: 4, 0: 'a', 2: 'c'};
      Array.prototype.join.call(o, '-')",
@@ -3359,7 +2938,6 @@ pub fn array_like_join_sparse_object_test() -> Nil {
 }
 
 pub fn array_like_join_on_number_test() -> Nil {
-  // Number wrapper has no .length → length 0 → empty string.
   assert_normal("Array.prototype.join.call(42)", JsString(""))
 }
 
@@ -3375,7 +2953,6 @@ pub fn array_like_includes_on_string_test() -> Nil {
 }
 
 pub fn array_like_slice_on_string_returns_array_test() -> Nil {
-  // slice returns a real Array (not a string).
   assert_normal(
     "let r = Array.prototype.slice.call('hello', 1, 4);
      Array.isArray(r) && r.join('') === 'ell'",
@@ -3408,7 +2985,6 @@ pub fn array_like_reduce_on_plain_object_test() -> Nil {
 }
 
 pub fn array_like_slice_on_arguments_test() -> Nil {
-  // The classic pre-rest-params pattern.
   assert_normal(
     "function f() { return Array.prototype.slice.call(arguments, 1).join(','); }
      f(1, 2, 3, 4)",
@@ -3449,10 +3025,6 @@ pub fn array_like_find_on_plain_object_test() -> Nil {
     JsNumber(Finite(10.0)),
   )
 }
-
-// -- Generic array-like MUTATING method tests --
-// push/pop/shift/unshift/reverse/fill should all work on plain objects
-// and arguments, not just real arrays.
 
 pub fn push_on_plain_object_test() -> Nil {
   assert_normal(
@@ -3550,7 +3122,6 @@ pub fn push_returns_new_length_on_empty_object_test() -> Nil {
 }
 
 pub fn pop_on_empty_object_test() -> Nil {
-  // {length:0} or no length → pop returns undefined, sets length to 0
   assert_normal(
     "let o = {};
      let v = Array.prototype.pop.call(o);
@@ -3567,8 +3138,6 @@ pub fn shift_on_empty_object_test() -> Nil {
     JsString("undefined,0"),
   )
 }
-
-// -- Accessor property tests (Object.defineProperty + get/set) --
 
 pub fn accessor_getter_via_define_property_test() -> Nil {
   assert_normal(
@@ -3593,7 +3162,6 @@ pub fn accessor_setter_via_define_property_test() -> Nil {
 }
 
 pub fn accessor_setter_this_binding_test() -> Nil {
-  // Setter's `this` should be the receiver object
   assert_normal(
     "let o = {};
      Object.defineProperty(o, 'x', {
@@ -3606,7 +3174,6 @@ pub fn accessor_setter_this_binding_test() -> Nil {
 }
 
 pub fn accessor_no_setter_silently_fails_test() -> Nil {
-  // Writing to getter-only accessor: no-op in sloppy mode
   assert_normal(
     "let o = {};
      Object.defineProperty(o, 'x', { get: function() { return 1; } });
@@ -3626,7 +3193,6 @@ pub fn accessor_no_getter_returns_undefined_test() -> Nil {
 }
 
 pub fn accessor_on_prototype_getter_test() -> Nil {
-  // Getter on proto should fire with child as `this`
   assert_normal(
     "let proto = {};
      Object.defineProperty(proto, 'x', {
@@ -3640,7 +3206,6 @@ pub fn accessor_on_prototype_getter_test() -> Nil {
 }
 
 pub fn accessor_on_prototype_setter_test() -> Nil {
-  // Setter on proto should fire with child as `this`
   assert_normal(
     "let proto = {};
      Object.defineProperty(proto, 'x', {
@@ -3655,7 +3220,6 @@ pub fn accessor_on_prototype_setter_test() -> Nil {
 }
 
 pub fn non_writable_proto_blocks_set_test() -> Nil {
-  // Non-writable data property on proto prevents creating own on child
   assert_normal(
     "let proto = {};
      Object.defineProperty(proto, 'x', { value: 42, writable: false });
@@ -3667,7 +3231,6 @@ pub fn non_writable_proto_blocks_set_test() -> Nil {
 }
 
 pub fn writable_proto_allows_own_property_test() -> Nil {
-  // Writable data property on proto: child gets its own copy
   assert_normal(
     "let proto = {};
      Object.defineProperty(proto, 'x', { value: 42, writable: true });
@@ -3677,8 +3240,6 @@ pub fn writable_proto_allows_own_property_test() -> Nil {
     JsString("99,42"),
   )
 }
-
-// -- Object literal getter/setter syntax --
 
 pub fn object_literal_getter_test() -> Nil {
   assert_normal(
@@ -3713,9 +3274,6 @@ pub fn object_literal_getter_this_binding_test() -> Nil {
 }
 
 pub fn arrow_captured_this_through_getter_test() -> Nil {
-  // Arrow captures `this` from m's frame; the getter's own receiver must NOT
-  // shadow it. Exercises the *this*-as-captured-local path: arrow's `this`
-  // resolves via GetBoxed to m's box, not the getter's bound receiver.
   assert_normal(
     "function m() {
        let a = () => this;
@@ -3740,7 +3298,6 @@ pub fn get_own_property_descriptor_accessor_test() -> Nil {
 }
 
 pub fn function_call_undefined_this_sloppy_test() -> Nil {
-  // Sloppy callee: undefined thisArg → globalThis (an object).
   assert_normal(
     "function f() { return typeof this; }
      f.call(undefined)",
@@ -3749,7 +3306,6 @@ pub fn function_call_undefined_this_sloppy_test() -> Nil {
 }
 
 pub fn function_call_undefined_this_strict_test() -> Nil {
-  // Strict callee: undefined thisArg passes through unchanged.
   assert_normal(
     "function f() { 'use strict'; return typeof this; }
      f.call(undefined)",
@@ -3758,7 +3314,6 @@ pub fn function_call_undefined_this_strict_test() -> Nil {
 }
 
 pub fn function_call_null_this_sloppy_test() -> Nil {
-  // Sloppy callee: null thisArg → globalThis.
   assert_normal(
     "function f() { return this === globalThis; }
      f.call(null)",
@@ -3838,7 +3393,6 @@ pub fn function_bind_constructor_test() -> Nil {
 }
 
 pub fn function_call_chained_test() -> Nil {
-  // call on a method that was itself obtained via call
   assert_normal(
     "function add(a, b) { return a + b; }
      var result = add.call(null, 10, 20);
@@ -3864,12 +3418,7 @@ pub fn function_bind_multiple_args_test() -> Nil {
   )
 }
 
-// ============================================================================
-// Object.getOwnPropertyDescriptor
-// ============================================================================
-
 pub fn object_gopd_basic_test() -> Nil {
-  // Basic data property descriptor
   assert_normal(
     "var obj = {x: 42};
      var desc = Object.getOwnPropertyDescriptor(obj, 'x');
@@ -3879,7 +3428,6 @@ pub fn object_gopd_basic_test() -> Nil {
 }
 
 pub fn object_gopd_flags_test() -> Nil {
-  // Regular data property has all flags true
   assert_normal(
     "var obj = {x: 1};
      var desc = Object.getOwnPropertyDescriptor(obj, 'x');
@@ -3889,7 +3437,6 @@ pub fn object_gopd_flags_test() -> Nil {
 }
 
 pub fn object_gopd_missing_key_test() -> Nil {
-  // Non-existent property returns undefined
   assert_normal(
     "var obj = {x: 1};
      Object.getOwnPropertyDescriptor(obj, 'y')",
@@ -3898,7 +3445,6 @@ pub fn object_gopd_missing_key_test() -> Nil {
 }
 
 pub fn object_gopd_after_define_test() -> Nil {
-  // Property defined with defineProperty respects flags
   assert_normal(
     "var obj = {};
      Object.defineProperty(obj, 'x', {value: 10, writable: false, enumerable: false, configurable: false});
@@ -3907,10 +3453,6 @@ pub fn object_gopd_after_define_test() -> Nil {
     JsString("10,false,false,false"),
   )
 }
-
-// ============================================================================
-// Object.defineProperty
-// ============================================================================
 
 pub fn object_define_property_basic_test() -> Nil {
   assert_normal(
@@ -3922,7 +3464,6 @@ pub fn object_define_property_basic_test() -> Nil {
 }
 
 pub fn object_define_property_non_writable_test() -> Nil {
-  // Non-writable property can't be changed in sloppy mode (silently fails)
   assert_normal(
     "var obj = {};
      Object.defineProperty(obj, 'x', {value: 42, writable: false});
@@ -3933,7 +3474,6 @@ pub fn object_define_property_non_writable_test() -> Nil {
 }
 
 pub fn object_define_property_non_enumerable_test() -> Nil {
-  // Non-enumerable property doesn't show up in for-in
   assert_normal(
     "var obj = {a: 1};
      Object.defineProperty(obj, 'b', {value: 2, enumerable: false});
@@ -3945,7 +3485,6 @@ pub fn object_define_property_non_enumerable_test() -> Nil {
 }
 
 pub fn object_define_property_returns_obj_test() -> Nil {
-  // defineProperty returns the target object
   assert_normal(
     "var obj = {};
      var result = Object.defineProperty(obj, 'x', {value: 1});
@@ -3963,7 +3502,6 @@ pub fn object_define_property_throws_on_null_test() -> Nil {
 }
 
 pub fn object_define_property_throws_on_number_test() -> Nil {
-  // defineProperty is strict: NO ToObject coercion, throws on all non-objects
   assert_thrown("Object.defineProperty(5, 'x', {})")
 }
 
@@ -3976,7 +3514,6 @@ pub fn object_define_property_throws_on_non_object_descriptor_test() -> Nil {
 }
 
 pub fn object_define_property_throws_type_error_test() -> Nil {
-  // Verify the thrown error IS a TypeError (constructor check per assert.throws)
   assert_normal(
     "try { Object.defineProperty(undefined, 'x', {}); 'no throw' }
      catch (e) { e.constructor === TypeError }",
@@ -3993,7 +3530,6 @@ pub fn object_gopd_throws_on_null_test() -> Nil {
 }
 
 pub fn object_gopd_coerces_number_test() -> Nil {
-  // ToObject coercion: number wrapper has no own properties → undefined
   assert_normal("Object.getOwnPropertyDescriptor(5, 'x')", JsUndefined)
 }
 
@@ -4006,7 +3542,6 @@ pub fn object_keys_throws_on_null_test() -> Nil {
 }
 
 pub fn object_keys_coerces_number_test() -> Nil {
-  // ToObject coercion: number wrapper has no own enumerable properties → []
   assert_normal("Object.keys(5).length", JsNumber(Finite(0.0)))
 }
 
@@ -4045,14 +3580,7 @@ pub fn array_push_throws_on_null_this_test() -> Nil {
   assert_thrown("Array.prototype.push.call(null, 1)")
 }
 
-// ============================================================================
-// Array.prototype methods — Task #3
-// ============================================================================
-
-// --- strict_equal ±0 fix (prerequisite) ---
-
 pub fn strict_equal_pos_neg_zero_test() -> Nil {
-  // JS spec: +0 === -0 is true. Was broken due to BEAM =:= distinguishing them.
   assert_normal("0 === -0", JsBool(True))
 }
 
@@ -4061,11 +3589,8 @@ pub fn strict_equal_neg_zero_pos_zero_test() -> Nil {
 }
 
 pub fn object_is_still_distinguishes_zeros_test() -> Nil {
-  // Object.is uses SameValue, NOT ===. Must still distinguish ±0.
   assert_normal("Object.is(0, -0)", JsBool(False))
 }
-
-// --- pop ---
 
 pub fn array_pop_basic_test() -> Nil {
   assert_normal("var a = [1,2,3]; a.pop()", JsNumber(Finite(3.0)))
@@ -4087,8 +3612,6 @@ pub fn array_pop_throws_on_null_test() -> Nil {
   assert_thrown("Array.prototype.pop.call(null)")
 }
 
-// --- shift ---
-
 pub fn array_shift_basic_test() -> Nil {
   assert_normal("var a = [1,2,3]; a.shift()", JsNumber(Finite(1.0)))
 }
@@ -4100,8 +3623,6 @@ pub fn array_shift_mutates_test() -> Nil {
 pub fn array_shift_empty_test() -> Nil {
   assert_normal("[].shift()", JsUndefined)
 }
-
-// --- unshift ---
 
 pub fn array_unshift_basic_test() -> Nil {
   assert_normal(
@@ -4117,8 +3638,6 @@ pub fn array_unshift_returns_length_test() -> Nil {
 pub fn array_unshift_empty_args_test() -> Nil {
   assert_normal("var a = [1,2]; a.unshift()", JsNumber(Finite(2.0)))
 }
-
-// --- slice ---
 
 pub fn array_slice_basic_test() -> Nil {
   assert_normal("[1,2,3,4].slice(1,3).join(',')", JsString("2,3"))
@@ -4144,8 +3663,6 @@ pub fn array_slice_out_of_bounds_test() -> Nil {
   assert_normal("[1,2,3].slice(5).length", JsNumber(Finite(0.0)))
 }
 
-// --- concat ---
-
 pub fn array_concat_basic_test() -> Nil {
   assert_normal("[1,2].concat([3,4]).join(',')", JsString("1,2,3,4"))
 }
@@ -4161,8 +3678,6 @@ pub fn array_concat_mixed_test() -> Nil {
 pub fn array_concat_does_not_mutate_test() -> Nil {
   assert_normal("var a = [1,2]; a.concat([3]); a.length", JsNumber(Finite(2.0)))
 }
-
-// --- reverse ---
 
 pub fn array_reverse_basic_test() -> Nil {
   assert_normal("var a = [1,2,3]; a.reverse().join(',')", JsString("3,2,1"))
@@ -4180,8 +3695,6 @@ pub fn array_reverse_even_length_test() -> Nil {
   assert_normal("[1,2,3,4].reverse().join(',')", JsString("4,3,2,1"))
 }
 
-// --- fill ---
-
 pub fn array_fill_basic_test() -> Nil {
   assert_normal("[1,2,3].fill(0).join(',')", JsString("0,0,0"))
 }
@@ -4197,8 +3710,6 @@ pub fn array_fill_negative_test() -> Nil {
 pub fn array_fill_returns_this_test() -> Nil {
   assert_normal("var a = [1]; a.fill(0) === a", JsBool(True))
 }
-
-// --- at ---
 
 pub fn array_at_positive_test() -> Nil {
   assert_normal("[1,2,3].at(1)", JsNumber(Finite(2.0)))
@@ -4216,8 +3727,6 @@ pub fn array_at_negative_out_of_bounds_test() -> Nil {
   assert_normal("[1,2,3].at(-5)", JsUndefined)
 }
 
-// --- indexOf ---
-
 pub fn array_index_of_basic_test() -> Nil {
   assert_normal("[1,2,3,2].indexOf(2)", JsNumber(Finite(1.0)))
 }
@@ -4231,20 +3740,16 @@ pub fn array_index_of_from_index_test() -> Nil {
 }
 
 pub fn array_index_of_nan_test() -> Nil {
-  // indexOf uses ===, NaN !== NaN
   assert_normal("[NaN].indexOf(NaN)", JsNumber(Finite(-1.0)))
 }
 
 pub fn array_index_of_neg_zero_test() -> Nil {
-  // +0 === -0 under strict equality
   assert_normal("[-0].indexOf(0)", JsNumber(Finite(0.0)))
 }
 
 pub fn array_index_of_negative_from_test() -> Nil {
   assert_normal("[1,2,3,4].indexOf(3, -2)", JsNumber(Finite(2.0)))
 }
-
-// --- lastIndexOf ---
 
 pub fn array_last_index_of_basic_test() -> Nil {
   assert_normal("[1,2,3,2].lastIndexOf(2)", JsNumber(Finite(3.0)))
@@ -4255,17 +3760,12 @@ pub fn array_last_index_of_from_index_test() -> Nil {
 }
 
 pub fn array_last_index_of_undefined_from_test() -> Nil {
-  // Passing undefined explicitly → ToIntegerOrInfinity(undefined) = 0
-  // Different from omitting the arg! [1,2,1].lastIndexOf(1, undefined) = 0
   assert_normal("[1,2,1].lastIndexOf(1, undefined)", JsNumber(Finite(0.0)))
 }
 
 pub fn array_last_index_of_no_second_arg_test() -> Nil {
-  // No 2nd arg → default to length-1. [1,2,1].lastIndexOf(1) = 2
   assert_normal("[1,2,1].lastIndexOf(1)", JsNumber(Finite(2.0)))
 }
-
-// --- includes ---
 
 pub fn array_includes_basic_test() -> Nil {
   assert_normal("[1,2,3].includes(2)", JsBool(True))
@@ -4276,20 +3776,16 @@ pub fn array_includes_not_found_test() -> Nil {
 }
 
 pub fn array_includes_nan_test() -> Nil {
-  // includes uses SameValueZero, NaN equals NaN
   assert_normal("[NaN].includes(NaN)", JsBool(True))
 }
 
 pub fn array_includes_neg_zero_test() -> Nil {
-  // SameValueZero: ±0 are equal
   assert_normal("[-0].includes(0)", JsBool(True))
 }
 
 pub fn array_includes_from_index_test() -> Nil {
   assert_normal("[1,2,3].includes(1, 1)", JsBool(False))
 }
-
-// --- forEach ---
 
 pub fn array_for_each_basic_test() -> Nil {
   assert_normal(
@@ -4328,8 +3824,6 @@ pub fn array_for_each_non_callable_message_test() -> Nil {
   )
 }
 
-// --- map ---
-
 pub fn array_map_basic_test() -> Nil {
   assert_normal(
     "[1,2,3].map(function(x) { return x * 2 }).join(',')",
@@ -4366,8 +3860,6 @@ pub fn array_map_propagates_throw_test() -> Nil {
   assert_thrown("[1].map(function() { throw 'boom' })")
 }
 
-// --- filter ---
-
 pub fn array_filter_basic_test() -> Nil {
   assert_normal(
     "[1,2,3,4].filter(function(x) { return x % 2 === 0 }).join(',')",
@@ -4383,14 +3875,11 @@ pub fn array_filter_all_false_test() -> Nil {
 }
 
 pub fn array_filter_truthy_coercion_test() -> Nil {
-  // Filter uses ToBoolean on the callback result
   assert_normal(
     "[0,1,2,0,3].filter(function(x) { return x }).join(',')",
     JsString("1,2,3"),
   )
 }
-
-// --- every ---
 
 pub fn array_every_all_true_test() -> Nil {
   assert_normal("[1,2,3].every(function(x) { return x > 0 })", JsBool(True))
@@ -4401,19 +3890,15 @@ pub fn array_every_one_false_test() -> Nil {
 }
 
 pub fn array_every_empty_test() -> Nil {
-  // Vacuously true
   assert_normal("[].every(function() { return false })", JsBool(True))
 }
 
 pub fn array_every_short_circuit_test() -> Nil {
-  // Should stop after first false
   assert_normal(
     "var n = 0; [1,0,1,1].every(function(x) { n++; return x }); n",
     JsNumber(Finite(2.0)),
   )
 }
-
-// --- some ---
 
 pub fn array_some_one_true_test() -> Nil {
   assert_normal("[1,2,3].some(function(x) { return x === 2 })", JsBool(True))
@@ -4434,8 +3919,6 @@ pub fn array_some_short_circuit_test() -> Nil {
   )
 }
 
-// --- find ---
-
 pub fn array_find_basic_test() -> Nil {
   assert_normal(
     "[1,2,3].find(function(x) { return x > 1 })",
@@ -4446,8 +3929,6 @@ pub fn array_find_basic_test() -> Nil {
 pub fn array_find_not_found_test() -> Nil {
   assert_normal("[1,2,3].find(function(x) { return x > 5 })", JsUndefined)
 }
-
-// --- findIndex ---
 
 pub fn array_find_index_basic_test() -> Nil {
   assert_normal(
@@ -4462,8 +3943,6 @@ pub fn array_find_index_not_found_test() -> Nil {
     JsNumber(Finite(-1.0)),
   )
 }
-
-// --- reduce ---
 
 pub fn array_reduce_basic_test() -> Nil {
   assert_normal(
@@ -4498,7 +3977,6 @@ pub fn array_reduce_empty_error_message_test() -> Nil {
 }
 
 pub fn array_reduce_single_no_init_test() -> Nil {
-  // Single element, no init → return that element, callback never called
   assert_normal(
     "[5].reduce(function(a,b) { return a + b })",
     JsNumber(Finite(5.0)),
@@ -4512,8 +3990,6 @@ pub fn array_reduce_index_arg_test() -> Nil {
   )
 }
 
-// --- reduceRight ---
-
 pub fn array_reduce_right_basic_test() -> Nil {
   assert_normal(
     "[1,2,3].reduceRight(function(a,b) { return a - b })",
@@ -4522,7 +3998,6 @@ pub fn array_reduce_right_basic_test() -> Nil {
 }
 
 pub fn array_reduce_right_with_init_test() -> Nil {
-  // With init: 10 - 3 - 2 - 1 = 4 (right to left)
   assert_normal(
     "[1,2,3].reduceRight(function(a,b) { return a - b }, 10)",
     JsNumber(Finite(4.0)),
@@ -4540,8 +4015,6 @@ pub fn array_reduce_right_empty_throws_test() -> Nil {
   assert_thrown("[].reduceRight(function(a,b) { return a })")
 }
 
-// --- Callback mutation edge case ---
-
 pub fn array_map_callback_can_read_array_test() -> Nil {
   assert_normal(
     "[1,2,3].map(function(v,i,a) { return a.length }).join(',')",
@@ -4549,11 +4022,7 @@ pub fn array_map_callback_can_read_array_test() -> Nil {
   )
 }
 
-// --- Generic array-like support (ES §23.1.3 — methods are intentionally generic) ---
-
 pub fn array_map_on_plain_object_test() -> Nil {
-  // {0:1, 1:2, length:2} — numeric keys stored as string props, length as property.
-  // Array.prototype.map should treat this exactly like [1, 2].
   assert_normal(
     "Array.prototype.map.call({0:1, 1:2, length:2}, function(x){return x*10}).join(',')",
     JsString("10,20"),
@@ -4561,7 +4030,6 @@ pub fn array_map_on_plain_object_test() -> Nil {
 }
 
 pub fn array_for_each_on_plain_object_test() -> Nil {
-  // Verify iteration order and values on a simple array-like.
   assert_normal(
     "var s = ''; Array.prototype.forEach.call({0:'a', 1:'b', 2:'c', length:3}, function(v,i){s += i + v}); s",
     JsString("0a1b2c"),
@@ -4569,7 +4037,6 @@ pub fn array_for_each_on_plain_object_test() -> Nil {
 }
 
 pub fn array_join_on_plain_object_test() -> Nil {
-  // join is also generic — should read .length and indices from the plain object.
   assert_normal(
     "Array.prototype.join.call({0:'x', 1:'y', length:2}, '-')",
     JsString("x-y"),
@@ -4577,7 +4044,6 @@ pub fn array_join_on_plain_object_test() -> Nil {
 }
 
 pub fn array_like_skips_holes_test() -> Nil {
-  // Sparse array-like: index 1 is missing. forEach (SkipHoles) should not visit it.
   assert_normal(
     "var r = []; Array.prototype.forEach.call({0:'a', 2:'c', length:3}, function(v,i){r.push(i)}); r.join(',')",
     JsString("0,2"),
@@ -4585,7 +4051,6 @@ pub fn array_like_skips_holes_test() -> Nil {
 }
 
 pub fn array_like_length_coercion_test() -> Nil {
-  // length '2.9' → ToLength truncates to 2. Index 2 is out of bounds, not visited.
   assert_normal(
     "Array.prototype.map.call({0:'a', 1:'b', 2:'c', length:'2.9'}, function(v){return v.toUpperCase()}).join(',')",
     JsString("A,B"),
@@ -4593,7 +4058,6 @@ pub fn array_like_length_coercion_test() -> Nil {
 }
 
 pub fn array_like_negative_length_test() -> Nil {
-  // ToLength clamps negative/NaN → 0. Empty iteration.
   assert_normal(
     "Array.prototype.map.call({0:'x', length:-5}, function(v){return v}).length",
     JsNumber(Finite(0.0)),
@@ -4601,7 +4065,6 @@ pub fn array_like_negative_length_test() -> Nil {
 }
 
 pub fn array_like_missing_length_test() -> Nil {
-  // No .length property → LengthOfArrayLike returns 0 (ToLength(undefined) = 0).
   assert_normal(
     "Array.prototype.map.call({0:'x', 1:'y'}, function(v){return v}).length",
     JsNumber(Finite(0.0)),
@@ -4609,8 +4072,6 @@ pub fn array_like_missing_length_test() -> Nil {
 }
 
 pub fn array_index_of_on_string_test() -> Nil {
-  // Primitive strings are array-like via their char indices.
-  // ToObject("abc") → String wrapper with .length=3 and "0"→"a", "1"→"b", "2"→"c".
   assert_normal(
     "Array.prototype.indexOf.call('abc', 'b')",
     JsNumber(Finite(1.0)),
@@ -4618,7 +4079,6 @@ pub fn array_index_of_on_string_test() -> Nil {
 }
 
 pub fn array_map_on_string_test() -> Nil {
-  // Strings passed to Array.prototype.map: each char is an element.
   assert_normal(
     "Array.prototype.map.call('abc', function(c){return c.toUpperCase()}).join('')",
     JsString("ABC"),
@@ -4626,8 +4086,6 @@ pub fn array_map_on_string_test() -> Nil {
 }
 
 pub fn array_slice_on_arguments_test() -> Nil {
-  // The classic "convert arguments to a real array" pattern.
-  // arguments object is array-like; slice() should copy it into a true Array.
   assert_normal(
     "(function(){ return Array.prototype.slice.call(arguments).join(',') })(10, 20, 30)",
     JsString("10,20,30"),
@@ -4635,7 +4093,6 @@ pub fn array_slice_on_arguments_test() -> Nil {
 }
 
 pub fn array_map_on_arguments_test() -> Nil {
-  // arguments object is array-like — map should iterate its indices.
   assert_normal(
     "(function(){ return Array.prototype.map.call(arguments, function(x){return x+1}).join(',') })(1, 2, 3)",
     JsString("2,3,4"),
@@ -4643,7 +4100,6 @@ pub fn array_map_on_arguments_test() -> Nil {
 }
 
 pub fn array_filter_on_plain_object_test() -> Nil {
-  // filter should produce a true Array from the array-like, keeping only passing elements.
   assert_normal(
     "Array.prototype.filter.call({0:1, 1:2, 2:3, length:3}, function(x){return x > 1}).join(',')",
     JsString("2,3"),
@@ -4651,8 +4107,6 @@ pub fn array_filter_on_plain_object_test() -> Nil {
 }
 
 pub fn array_method_on_number_this_test() -> Nil {
-  // Per spec: ToObject(5) → Number wrapper with no .length → length 0 → empty result.
-  // Previously we threw TypeError here (wrong — only null/undefined throw).
   assert_normal(
     "Array.prototype.map.call(5, function(x){return x}).length",
     JsNumber(Finite(0.0)),
@@ -4660,9 +4114,6 @@ pub fn array_method_on_number_this_test() -> Nil {
 }
 
 pub fn array_from_closes_iterator_when_mapfn_throws_test() -> Nil {
-  // §23.1.2.1 step 5.e.vii (IfAbruptCloseIterator): a throwing mapFn must run
-  // IteratorClose on the source iterator — the generator's `finally` executes
-  // — BEFORE the exception propagates out of Array.from.
   assert_normal(
     "var log = [];
      function* g() { try { yield 1; yield 2; } finally { log.push('finally'); } }
@@ -4674,7 +4125,6 @@ pub fn array_from_closes_iterator_when_mapfn_throws_test() -> Nil {
 }
 
 pub fn array_reduce_on_plain_object_test() -> Nil {
-  // reduce over an array-like: sum of values.
   assert_normal(
     "Array.prototype.reduce.call({0:1, 1:2, 2:3, length:3}, function(a,b){return a+b})",
     JsNumber(Finite(6.0)),
@@ -4682,10 +4132,6 @@ pub fn array_reduce_on_plain_object_test() -> Nil {
 }
 
 pub fn array_pop_on_plain_object_reads_correctly_test() -> Nil {
-  // Mutating methods on array-likes: per spec pop should delete o['1'] and set
-  // o.length=1. We don't yet implement the generic Set/Delete write-back for
-  // mutating methods on non-arrays (see write_array guard), but at minimum the
-  // READ side works — pop should return the last element, not undefined.
   assert_normal(
     "Array.prototype.pop.call({0:'a', 1:'b', length:2})",
     JsString("b"),
@@ -4693,20 +4139,11 @@ pub fn array_pop_on_plain_object_reads_correctly_test() -> Nil {
 }
 
 pub fn array_pop_on_plain_object_does_not_corrupt_kind_test() -> Nil {
-  // Guard: calling a mutating Array method on a plain object must NOT convert
-  // it into an ArrayObject. This is a regression guard for write_array's kind
-  // check — before the guard, pop would rewrite the slot as ArrayObject.
   assert_normal(
     "var o = {0:'a', 1:'b', length:2}; Array.prototype.pop.call(o); Array.isArray(o)",
     JsBool(False),
   )
 }
-
-// ============================================================================
-// Object statics — Task #2
-// ============================================================================
-
-// --- Object.is (SameValue) ---
 
 pub fn object_is_nan_test() -> Nil {
   assert_normal("Object.is(NaN, NaN)", JsBool(True))
@@ -4745,7 +4182,6 @@ pub fn object_is_undefined_undefined_test() -> Nil {
 }
 
 pub fn object_is_no_args_test() -> Nil {
-  // Both default to undefined → SameValue(undefined, undefined) → true
   assert_normal("Object.is()", JsBool(True))
 }
 
@@ -4760,8 +4196,6 @@ pub fn object_is_same_ref_test() -> Nil {
 pub fn object_is_different_ref_test() -> Nil {
   assert_normal("Object.is({}, {})", JsBool(False))
 }
-
-// --- Object.create ---
 
 pub fn object_create_null_proto_test() -> Nil {
   assert_normal(
@@ -4804,7 +4238,6 @@ pub fn object_create_returns_type_error_test() -> Nil {
 }
 
 pub fn instanceof_native_constructor_test() -> Nil {
-  // Regression: instanceof used to reject NativeFunction on RHS.
   assert_normal("[] instanceof Array", JsBool(True))
 }
 
@@ -4813,15 +4246,12 @@ pub fn instanceof_native_constructor_error_test() -> Nil {
 }
 
 pub fn instanceof_native_constructor_error_chain_test() -> Nil {
-  // TypeError.prototype inherits from Error.prototype
   assert_normal("new TypeError('x') instanceof Error", JsBool(True))
 }
 
 pub fn instanceof_native_constructor_false_test() -> Nil {
   assert_normal("[] instanceof TypeError", JsBool(False))
 }
-
-// --- Object.assign ---
 
 pub fn object_assign_basic_test() -> Nil {
   assert_normal("Object.assign({a:1}, {b:2}).b", JsNumber(Finite(2.0)))
@@ -4865,8 +4295,6 @@ pub fn object_assign_later_overrides_earlier_test() -> Nil {
   )
 }
 
-// --- Object.values / Object.entries ---
-
 pub fn object_values_basic_test() -> Nil {
   assert_normal("Object.values({a:1, b:2, c:3}).join(',')", JsString("1,2,3"))
 }
@@ -4902,8 +4330,6 @@ pub fn object_entries_throws_on_undefined_test() -> Nil {
   assert_thrown("Object.entries(undefined)")
 }
 
-// --- Object.hasOwn ---
-
 pub fn object_has_own_true_test() -> Nil {
   assert_normal("Object.hasOwn({a:1}, 'a')", JsBool(True))
 }
@@ -4927,8 +4353,6 @@ pub fn object_has_own_throws_on_undefined_test() -> Nil {
   assert_thrown("Object.hasOwn(undefined, 'x')")
 }
 
-// --- Object.getPrototypeOf / setPrototypeOf ---
-
 pub fn object_get_prototype_of_basic_test() -> Nil {
   assert_normal(
     "var p = {}; var o = Object.create(p); Object.getPrototypeOf(o) === p",
@@ -4948,7 +4372,6 @@ pub fn object_get_prototype_of_plain_test() -> Nil {
 }
 
 pub fn object_get_prototype_of_number_test() -> Nil {
-  // ToObject coerces 5 → Number wrapper → Number.prototype
   assert_normal("Object.getPrototypeOf(5) === Number.prototype", JsBool(True))
 }
 
@@ -4994,17 +4417,14 @@ pub fn object_set_prototype_of_throws_on_invalid_proto_test() -> Nil {
 }
 
 pub fn object_set_prototype_of_primitive_target_passthrough_test() -> Nil {
-  // Non-null/undefined primitive target: return unchanged, no throw.
   assert_normal("Object.setPrototypeOf(5, null)", JsNumber(Finite(5.0)))
 }
 
 pub fn object_set_prototype_of_cycle_throws_test() -> Nil {
-  // Direct self-cycle: Object.setPrototypeOf(a, a)
   assert_thrown("var a = {}; Object.setPrototypeOf(a, a)")
 }
 
 pub fn object_set_prototype_of_cycle_indirect_throws_test() -> Nil {
-  // Indirect cycle: a -> b, then b -> a
   assert_thrown(
     "var a = {}; var b = Object.create(a); Object.setPrototypeOf(a, b)",
   )
@@ -5025,7 +4445,6 @@ pub fn object_set_prototype_of_cycle_is_type_error_test() -> Nil {
 }
 
 pub fn object_set_prototype_of_no_false_positive_test() -> Nil {
-  // Setting to a sibling object's proto shouldn't trip cycle detection.
   assert_normal(
     "var proto = {}; var a = Object.create(proto); var b = {}; "
       <> "Object.setPrototypeOf(b, proto); "
@@ -5033,8 +4452,6 @@ pub fn object_set_prototype_of_no_false_positive_test() -> Nil {
     JsBool(True),
   )
 }
-
-// --- Object.defineProperties ---
 
 pub fn object_define_properties_basic_test() -> Nil {
   assert_normal(
@@ -5066,16 +4483,12 @@ pub fn object_define_properties_throws_on_null_props_test() -> Nil {
 }
 
 pub fn object_define_properties_primitive_props_no_throw_test() -> Nil {
-  // ToObject on second arg: primitive → wrapper with no own enumerable props → no-op
   assert_normal("var o = {}; Object.defineProperties(o, 5) === o", JsBool(True))
 }
 
 pub fn object_define_properties_throws_on_non_object_descriptor_test() -> Nil {
-  // Each descriptor value must be an object
   assert_thrown("Object.defineProperties({}, {a: 5})")
 }
-
-// --- Object.freeze / isFrozen / isExtensible / preventExtensions ---
 
 pub fn object_freeze_returns_arg_test() -> Nil {
   assert_normal("var o = {}; Object.freeze(o) === o", JsBool(True))
@@ -5094,7 +4507,6 @@ pub fn object_freeze_undefined_passthrough_test() -> Nil {
 }
 
 pub fn object_is_frozen_primitive_test() -> Nil {
-  // Primitives are always "frozen"
   assert_normal("Object.isFrozen(5)", JsBool(True))
 }
 
@@ -5107,7 +4519,6 @@ pub fn object_is_frozen_undefined_test() -> Nil {
 }
 
 pub fn object_is_frozen_object_test() -> Nil {
-  // Extensible objects are never frozen
   assert_normal("Object.isFrozen({})", JsBool(False))
 }
 
@@ -5178,19 +4589,15 @@ pub fn object_freeze_preserves_enumerable_test() -> Nil {
 }
 
 pub fn object_prevent_extensions_empty_is_frozen_test() -> Nil {
-  // Empty non-extensible object is vacuously frozen (no props to check)
   assert_normal("Object.isFrozen(Object.preventExtensions({}))", JsBool(True))
 }
 
 pub fn object_prevent_extensions_nonempty_not_frozen_test() -> Nil {
-  // preventExtensions alone doesn't freeze props — still writable/configurable
   assert_normal(
     "var o = {a:1}; Object.preventExtensions(o); Object.isFrozen(o)",
     JsBool(False),
   )
 }
-
-// --- Error message is Node-style ---
 
 pub fn object_keys_error_message_test() -> Nil {
   assert_normal(
@@ -5199,16 +4606,11 @@ pub fn object_keys_error_message_test() -> Nil {
   )
 }
 
-// ============================================================================
-// Reflect
-// ============================================================================
-
 pub fn reflect_get_test() -> Nil {
   assert_normal_number("Reflect.get({a: 42}, 'a')", 42.0)
 }
 
 pub fn reflect_get_receiver_test() -> Nil {
-  // receiver is used as `this` for getters
   assert_normal_number(
     "var o = { get x() { return this.y } };
      Reflect.get(o, 'x', {y: 99})",
@@ -5358,10 +4760,6 @@ pub fn reflect_to_string_tag_test() -> Nil {
   )
 }
 
-// ============================================================================
-// Object.getOwnPropertyNames
-// ============================================================================
-
 pub fn object_gopn_basic_test() -> Nil {
   assert_normal(
     "var obj = {a: 1, b: 2};
@@ -5372,7 +4770,6 @@ pub fn object_gopn_basic_test() -> Nil {
 }
 
 pub fn object_gopn_includes_non_enumerable_test() -> Nil {
-  // getOwnPropertyNames includes non-enumerable properties
   assert_normal(
     "var obj = {a: 1};
      Object.defineProperty(obj, 'b', {value: 2, enumerable: false});
@@ -5380,10 +4777,6 @@ pub fn object_gopn_includes_non_enumerable_test() -> Nil {
     JsNumber(Finite(2.0)),
   )
 }
-
-// ============================================================================
-// Object.keys
-// ============================================================================
 
 pub fn object_keys_basic_test() -> Nil {
   assert_normal(
@@ -5394,7 +4787,6 @@ pub fn object_keys_basic_test() -> Nil {
 }
 
 pub fn object_keys_excludes_non_enumerable_test() -> Nil {
-  // keys excludes non-enumerable properties
   assert_normal(
     "var obj = {a: 1};
      Object.defineProperty(obj, 'b', {value: 2, enumerable: false});
@@ -5402,10 +4794,6 @@ pub fn object_keys_excludes_non_enumerable_test() -> Nil {
     JsNumber(Finite(1.0)),
   )
 }
-
-// ============================================================================
-// Object.prototype.hasOwnProperty
-// ============================================================================
 
 pub fn has_own_property_basic_test() -> Nil {
   assert_normal(
@@ -5424,7 +4812,6 @@ pub fn has_own_property_missing_test() -> Nil {
 }
 
 pub fn has_own_property_inherited_test() -> Nil {
-  // hasOwnProperty should return false for inherited properties
   assert_normal(
     "function Foo() {}
      Foo.prototype.bar = 1;
@@ -5435,7 +4822,6 @@ pub fn has_own_property_inherited_test() -> Nil {
 }
 
 pub fn has_own_property_via_call_test() -> Nil {
-  // The test262 harness pattern: Function.prototype.call.bind(Object.prototype.hasOwnProperty)
   assert_normal(
     "var hasOwn = Object.prototype.hasOwnProperty;
      var obj = {x: 1};
@@ -5445,7 +4831,6 @@ pub fn has_own_property_via_call_test() -> Nil {
 }
 
 pub fn test262_property_helper_pattern_test() -> Nil {
-  // Simulates the key pattern from propertyHelper.js
   assert_normal(
     "var __defineProperty = Object.defineProperty;
      var __getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
@@ -5459,10 +4844,6 @@ pub fn test262_property_helper_pattern_test() -> Nil {
     JsString("2,false,true,2"),
   )
 }
-
-// ============================================================================
-// Array.prototype.join tests
-// ============================================================================
 
 pub fn array_join_default_separator_test() -> Nil {
   assert_normal("[1,2,3].join()", JsString("1,2,3"))
@@ -5488,10 +4869,6 @@ pub fn array_join_empty_separator_test() -> Nil {
   assert_normal("[1,2,3].join('')", JsString("123"))
 }
 
-// ============================================================================
-// Array.prototype.push tests
-// ============================================================================
-
 pub fn array_push_basic_test() -> Nil {
   assert_normal(
     "var a = [1,2]; a.push(3); '' + a[0] + ',' + a[1] + ',' + a[2] + ',' + a.length",
@@ -5507,10 +4884,6 @@ pub fn array_push_returns_length_test() -> Nil {
   assert_normal("var a = [10]; a.push(20)", JsNumber(Finite(2.0)))
 }
 
-// ============================================================================
-// Object.prototype.propertyIsEnumerable tests
-// ============================================================================
-
 pub fn property_is_enumerable_own_enumerable_test() -> Nil {
   assert_normal("var o = {a: 1}; o.propertyIsEnumerable('a')", JsBool(True))
 }
@@ -5525,17 +4898,12 @@ pub fn property_is_enumerable_non_enumerable_test() -> Nil {
 }
 
 pub fn property_is_enumerable_inherited_test() -> Nil {
-  // Inherited properties are NOT own, so should return false
   assert_normal("var o = {}; o.propertyIsEnumerable('toString')", JsBool(False))
 }
 
 pub fn property_is_enumerable_missing_test() -> Nil {
   assert_normal("var o = {}; o.propertyIsEnumerable('nope')", JsBool(False))
 }
-
-// ============================================================================
-// Math.pow tests
-// ============================================================================
 
 pub fn math_pow_basic_test() -> Nil {
   assert_normal("Math.pow(2, 10)", JsNumber(Finite(1024.0)))
@@ -5552,10 +4920,6 @@ pub fn math_pow_fractional_test() -> Nil {
 pub fn math_pow_two_32_test() -> Nil {
   assert_normal("Math.pow(2, 32)", JsNumber(Finite(4_294_967_296.0)))
 }
-
-// ============================================================================
-// String.length and string indexing
-// ============================================================================
 
 pub fn string_length_test() -> Nil {
   assert_normal("'hello'.length", JsNumber(Finite(5.0)))
@@ -5584,10 +4948,6 @@ pub fn string_index_negative_test() -> Nil {
 pub fn string_length_via_var_test() -> Nil {
   assert_normal("var s = 'abc'; s.length", JsNumber(Finite(3.0)))
 }
-
-// ============================================================================
-// String.prototype methods
-// ============================================================================
 
 pub fn string_char_at_test() -> Nil {
   assert_normal("'hello'.charAt(1)", JsString("e"))
@@ -5662,7 +5022,6 @@ pub fn string_substring_test() -> Nil {
 }
 
 pub fn string_substring_swap_test() -> Nil {
-  // substring swaps args if start > end
   assert_normal("'hello'.substring(3, 1)", JsString("el"))
 }
 
@@ -5722,10 +5081,6 @@ pub fn string_value_of_test() -> Nil {
   assert_normal("'hello'.valueOf()", JsString("hello"))
 }
 
-// ============================================================================
-// Math methods (abs, floor, ceil, round, trunc, sqrt, max, min, log, sin, cos)
-// ============================================================================
-
 pub fn math_abs_positive_test() -> Nil {
   assert_normal("Math.abs(5)", JsNumber(Finite(5.0)))
 }
@@ -5763,17 +5118,14 @@ pub fn math_round_down_test() -> Nil {
 }
 
 pub fn math_round_negative_half_test() -> Nil {
-  // JS: Math.round(-0.5) → -0 (a zero result from a negative input is -0)
   assert_normal("Math.round(-0.5)", JsNumber(Finite(-0.0)))
 }
 
 pub fn mul_infinity_by_neg_zero_test() -> Nil {
-  // JS: Infinity * -0 -> NaN (a zero of either sign times an infinity is NaN)
   assert_normal("Infinity * -0", JsNumber(NaN))
 }
 
 pub fn mul_neg_zero_by_neg_infinity_test() -> Nil {
-  // JS: -0 * -Infinity -> NaN
   assert_normal("(-0) * -Infinity", JsNumber(NaN))
 }
 
@@ -5809,10 +5161,6 @@ pub fn math_min_no_args_test() -> Nil {
   assert_normal("Math.min()", JsNumber(Infinity))
 }
 
-// ============================================================================
-// Math constants
-// ============================================================================
-
 pub fn math_pi_test() -> Nil {
   assert_normal("Math.PI", JsNumber(Finite(3.141592653589793)))
 }
@@ -5822,20 +5170,8 @@ pub fn math_e_test() -> Nil {
 }
 
 pub fn math_pi_computation_test() -> Nil {
-  // Use PI in a computation
   assert_normal("Math.floor(Math.PI)", JsNumber(Finite(3.0)))
 }
-
-// ============================================================================
-// Math overflow totality
-//
-// The BEAM has no IEEE-754 infinities: math:exp/pow/cosh/sinh raise
-// `badarith` the moment the true result overflows a 64-bit float, and a
-// float32 infinity bit pattern refuses to DECODE (badmatch). Left unhandled,
-// each of the expressions below crashed the whole runtime instead of
-// returning ±Infinity (ES §21.3.2 / §6.1.6.1.3). arc_math_ffi now returns
-// the JsNum shape directly so overflow is a value, not an exception.
-// ============================================================================
 
 pub fn math_exp_overflow_test() -> Nil {
   assert_normal("Math.exp(1000)", JsNumber(Infinity))
@@ -5846,12 +5182,10 @@ pub fn math_pow_overflow_test() -> Nil {
 }
 
 pub fn exp_operator_overflow_test() -> Nil {
-  // The `**` operator routes through the same Number::exponentiate.
   assert_normal("1e300 ** 2", JsNumber(Infinity))
 }
 
 pub fn exp_operator_overflow_negative_odd_test() -> Nil {
-  // Negative base with an odd integer exponent: the overflow keeps the sign.
   assert_normal("(-1e300) ** 3", JsNumber(NegInfinity))
 }
 
@@ -5864,7 +5198,6 @@ pub fn math_sinh_overflow_test() -> Nil {
 }
 
 pub fn math_sinh_overflow_negative_test() -> Nil {
-  // sinh is odd, so a large-magnitude negative argument overflows to -∞.
   assert_normal("Math.sinh(-1000)", JsNumber(NegInfinity))
 }
 
@@ -5873,7 +5206,6 @@ pub fn math_expm1_overflow_test() -> Nil {
 }
 
 pub fn math_fround_overflow_test() -> Nil {
-  // 1e300 is beyond the float32 range, so it rounds to +Infinity.
   assert_normal("Math.fround(1e300)", JsNumber(Infinity))
 }
 
@@ -5882,39 +5214,22 @@ pub fn math_fround_overflow_negative_test() -> Nil {
 }
 
 pub fn math_fround_finite_test() -> Nil {
-  // Exactly representable in float32: passes through unchanged.
   assert_normal("Math.fround(5.5)", JsNumber(Finite(5.5)))
 }
 
 pub fn math_fround_rounds_to_float32_test() -> Nil {
-  // 1.1 is not exact in float32; fround widens the rounded float32 back.
   assert_normal("Math.fround(1.1)", JsNumber(Finite(1.100000023841858)))
 }
 
-// ============================================================================
-// Math.expm1 / Math.log1p precision for small |x|
-//
-// The whole point of these functions is accuracy near 0, where the naive
-// `exp(x) - 1` / `log(1 + x)` cancel catastrophically (to exactly 0 once
-// |x| < 2^-53). These asserted the OLD (naive) behaviour was wrong.
-// ============================================================================
-
 pub fn math_expm1_tiny_test() -> Nil {
-  // 1 + 1e-16 rounds to exactly 1.0, so the naive exp(x)-1 returned 0.
   assert_normal("Math.expm1(1e-16)", JsNumber(Finite(1.0e-16)))
 }
 
 pub fn math_log1p_tiny_test() -> Nil {
-  // 1 + 1e-16 rounds to exactly 1.0, so the naive log(1+x) returned 0.
   assert_normal("Math.log1p(1e-16)", JsNumber(Finite(1.0e-16)))
 }
 
 pub fn math_expm1_large_no_intermediate_overflow_test() -> Nil {
-  // The Kahan rescale must divide BEFORE multiplying: with `(u-1) *. n` as
-  // the intermediate, Math.expm1(708) badariths on the BEAM even though the
-  // true answer (~3.02e307) is a perfectly finite float. Assert the value is
-  // in the right ballpark rather than bit-equal so the test is
-  // libm-independent.
   assert_normal(
     "Math.expm1(708) > 3.0e307 && Math.expm1(708) < 3.1e307",
     JsBool(True),
@@ -5922,16 +5237,10 @@ pub fn math_expm1_large_no_intermediate_overflow_test() -> Nil {
 }
 
 pub fn math_log1p_large_no_intermediate_overflow_test() -> Nil {
-  // Same intermediate-overflow trap: `ln(u) *. n` badariths for n = 1e308
-  // even though log1p(1e308) is just ~709.196. For n this large the rescale
-  // factor n/(u-1) is exactly 1.0, so the answer equals Math.log(1e308).
   assert_normal("Math.log1p(1e308) === Math.log(1e308)", JsBool(True))
 }
 
 pub fn math_expm1_small_precision_test() -> Nil {
-  // expm1(1e-10)/1e-10 - 1 must be ~5e-11 (the x^2/2 term). The naive
-  // exp(x)-1 is off by ~8e-8 here, which fails this bound by 5 orders of
-  // magnitude. Tolerance (not bit-equality) keeps the test libm-independent.
   assert_normal(
     "Math.abs(Math.expm1(1e-10) / 1e-10 - 1 - 5e-11) < 1e-13",
     JsBool(True),
@@ -5939,17 +5248,11 @@ pub fn math_expm1_small_precision_test() -> Nil {
 }
 
 pub fn math_log1p_small_precision_test() -> Nil {
-  // log1p(1e-10)/1e-10 - 1 must be ~-5e-11 (the -x^2/2 term). The naive
-  // log(1+x) is off by ~8e-8 here.
   assert_normal(
     "Math.abs(Math.log1p(1e-10) / 1e-10 - 1 + 5e-11) < 1e-13",
     JsBool(True),
   )
 }
-
-// ============================================================================
-// String.prototype.split (returns array, test via .join or .length)
-// ============================================================================
 
 pub fn string_split_length_test() -> Nil {
   assert_normal("'a,b,c'.split(',').length", JsNumber(Finite(3.0)))
@@ -5967,10 +5270,6 @@ pub fn string_split_no_match_test() -> Nil {
   assert_normal("'abc'.split('x').length", JsNumber(Finite(1.0)))
 }
 
-// ============================================================================
-// Compound dot-member assignment
-// ============================================================================
-
 pub fn compound_dot_member_add_test() -> Nil {
   assert_normal("var o = {x: 1}; o.x += 2; o.x", JsNumber(Finite(3.0)))
 }
@@ -5982,10 +5281,6 @@ pub fn compound_dot_member_sub_test() -> Nil {
 pub fn compound_dot_member_mul_test() -> Nil {
   assert_normal("var o = {x: 5}; o.x *= 4; o.x", JsNumber(Finite(20.0)))
 }
-
-// ============================================================================
-// String/Number/Boolean constructors (type coercion)
-// ============================================================================
 
 pub fn string_constructor_coerce_number_test() -> Nil {
   assert_normal("String(42)", JsString("42"))
@@ -6039,10 +5334,6 @@ pub fn boolean_constructor_object_truthy_test() -> Nil {
   assert_normal("Boolean({})", JsBool(True))
 }
 
-// ============================================================================
-// Global utility functions
-// ============================================================================
-
 pub fn parse_int_basic_test() -> Nil {
   assert_normal("parseInt('42')", JsNumber(Finite(42.0)))
 }
@@ -6091,16 +5382,11 @@ pub fn is_finite_nan_test() -> Nil {
   assert_normal("isFinite(NaN)", JsBool(False))
 }
 
-// ============================================================================
-// Number.isNaN / Number.isFinite / Number.isInteger (strict — no coercion)
-// ============================================================================
-
 pub fn number_is_nan_true_test() -> Nil {
   assert_normal("Number.isNaN(NaN)", JsBool(True))
 }
 
 pub fn number_is_nan_string_no_coerce_test() -> Nil {
-  // Unlike global isNaN('abc'), Number.isNaN does NOT coerce
   assert_normal("Number.isNaN('abc')", JsBool(False))
 }
 
@@ -6121,7 +5407,6 @@ pub fn number_is_finite_infinity_test() -> Nil {
 }
 
 pub fn number_is_finite_string_no_coerce_test() -> Nil {
-  // Unlike global isFinite('42'), Number.isFinite does NOT coerce
   assert_normal("Number.isFinite('42')", JsBool(False))
 }
 
@@ -6148,10 +5433,6 @@ pub fn number_is_integer_nan_test() -> Nil {
 pub fn number_is_integer_infinity_test() -> Nil {
   assert_normal("Number.isInteger(Infinity)", JsBool(False))
 }
-
-// ============================================================================
-// Class Inheritance Tests
-// ============================================================================
 
 pub fn class_extends_basic_test() -> Nil {
   assert_normal(
@@ -6235,7 +5516,6 @@ pub fn class_extends_super_with_args_test() -> Nil {
 }
 
 pub fn class_extends_default_constructor_test() -> Nil {
-  // When no constructor is provided, a default one that calls super() is synthesized
   assert_normal(
     "class Base { constructor() { this.x = 42; } }
      class Child extends Base {}
@@ -6259,7 +5539,6 @@ pub fn class_extends_static_method_test() -> Nil {
 }
 
 pub fn class_extends_this_tdz_test() -> Nil {
-  // Accessing this before super() should throw ReferenceError
   assert_thrown(
     "class Base { constructor() {} }
      class Child extends Base {
@@ -6270,7 +5549,6 @@ pub fn class_extends_this_tdz_test() -> Nil {
 }
 
 pub fn class_extends_no_super_return_test() -> Nil {
-  // Returning from derived constructor without calling super() should throw
   assert_thrown(
     "class Base { constructor() {} }
      class Child extends Base {
@@ -6310,7 +5588,6 @@ pub fn class_extends_multi_level_method_test() -> Nil {
 }
 
 pub fn class_extends_expression_test() -> Nil {
-  // class expression with extends
   assert_normal(
     "class Base { constructor() { this.x = 10; } }
      var Child = class extends Base { constructor() { super(); } };
@@ -6320,12 +5597,7 @@ pub fn class_extends_expression_test() -> Nil {
   )
 }
 
-// ---- §10.2.2 [[Construct]] return-override + §15.7.14 field initializers ----
-// When a base constructor does `return obj`, the derived `this` becomes that
-// object, and InitializeInstanceElements runs on it (not the discarded alloc).
-
 pub fn class_extends_return_override_public_field_test() -> Nil {
-  // Default derived ctor: field initializer must land on the override target.
   assert_normal_number(
     "class B { constructor(o) { return o } }
      class C extends B { x = 1 }
@@ -6337,7 +5609,6 @@ pub fn class_extends_return_override_public_field_test() -> Nil {
 }
 
 pub fn class_extends_return_override_identity_test() -> Nil {
-  // §10.2.2 step 11: Construct result is the returned object itself.
   assert_normal(
     "class B { constructor(o) { return o } }
      class C extends B {}
@@ -6348,7 +5619,6 @@ pub fn class_extends_return_override_identity_test() -> Nil {
 }
 
 pub fn class_extends_return_override_this_after_super_test() -> Nil {
-  // §13.3.7.1 step 8: `this` after super() must reflect the override.
   assert_normal_number(
     "class B { constructor(o) { return o } }
      class C extends B { constructor(o) { super(o); this.y = 2 } }
@@ -6360,8 +5630,6 @@ pub fn class_extends_return_override_this_after_super_test() -> Nil {
 }
 
 pub fn class_extends_explicit_ctor_field_ordering_test() -> Nil {
-  // Field inits in an explicit derived ctor must run AFTER super(), not before
-  // (before super() `this` is TDZ-uninitialized → would throw ReferenceError).
   assert_normal_number(
     "class B { constructor() {} }
      class C extends B { x = 1; constructor() { super() } }
@@ -6371,7 +5639,6 @@ pub fn class_extends_explicit_ctor_field_ordering_test() -> Nil {
 }
 
 pub fn class_extends_return_override_explicit_ctor_field_test() -> Nil {
-  // Override + explicit ctor + field: combines the two fixes above.
   assert_normal_number(
     "class B { constructor(o) { return o } }
      class C extends B { x = 1; constructor(o) { super(o) } }
@@ -6382,11 +5649,7 @@ pub fn class_extends_return_override_explicit_ctor_field_test() -> Nil {
   )
 }
 
-// §13.3.7.1 step 12 InitializeInstanceElements with super() in non-statement
-// position. The synthetic field-init function (active_func.[[Fields]]) is
-// called after every super() emit, regardless of where the call appears.
 pub fn class_extends_field_after_let_super_test() -> Nil {
-  // `let r = super()` is non-statement-position.
   assert_normal_number(
     "class B {}
      class C extends B {
@@ -6399,7 +5662,6 @@ pub fn class_extends_field_after_let_super_test() -> Nil {
 }
 
 pub fn class_extends_field_after_comma_super_test() -> Nil {
-  // super() inside a SequenceExpression — `return super(), this`.
   assert_normal_number(
     "class B {}
      class C extends B {
@@ -6412,7 +5674,6 @@ pub fn class_extends_field_after_comma_super_test() -> Nil {
 }
 
 pub fn class_extends_field_after_conditional_super_test() -> Nil {
-  // super() in only one branch of an if.
   assert_normal_number(
     "class B {}
      class C extends B {
@@ -6425,9 +5686,6 @@ pub fn class_extends_field_after_conditional_super_test() -> Nil {
 }
 
 pub fn class_extends_field_after_arrow_super_test() -> Nil {
-  // `(() => super())()` — arrow inherits FieldInitMode from the ctor's
-  // emitter, and reads active_func.[[Fields]] via the captured RefActiveFunc
-  // lexical slot.
   assert_normal_number(
     "class B {}
      class C extends B {
@@ -6440,12 +5698,6 @@ pub fn class_extends_field_after_arrow_super_test() -> Nil {
 }
 
 pub fn class_field_init_new_target_undefined_test() -> Nil {
-  // §15.7.14: field initializers run as a synthetic method-like function
-  // [[Call]]ed with this = the instance, so new.target === undefined inside —
-  // even when reached via an arrow (which inherits the init fn's RefNewTarget
-  // slot, not the constructor's). The direct-eval variant of this
-  // (arrow-body-direct-eval-err-contains-newtarget.js) depends on P11
-  // (eval context inheritance) and is covered by test262.
   assert_normal_number(
     "let inField, inCtor;
      class C {
@@ -6458,11 +5710,7 @@ pub fn class_field_init_new_target_undefined_test() -> Nil {
   )
 }
 
-// ---- LexicalRef family: this / active_func (super) / new.target ----
-
 pub fn new_target_basic_test() -> Nil {
-  // §13.3.12: new.target is the called constructor under [[Construct]],
-  // undefined under [[Call]].
   assert_normal_number(
     "let r;
      function f() { r = new.target }
@@ -6474,7 +5722,6 @@ pub fn new_target_basic_test() -> Nil {
 }
 
 pub fn new_target_arrow_test() -> Nil {
-  // Arrows inherit lexical new.target from the enclosing non-arrow.
   assert_normal_number(
     "function f() { return (() => new.target)() }
      (new f() === f ? 1 : 0) + (f() === undefined ? 10 : 0)",
@@ -6483,7 +5730,6 @@ pub fn new_target_arrow_test() -> Nil {
 }
 
 pub fn new_target_derived_chain_test() -> Nil {
-  // new.target stays the leaf constructor through the super() chain.
   assert_normal_number(
     "let hits = 0;
      class B { constructor() { if (new.target === D) hits++ } }
@@ -6495,7 +5741,6 @@ pub fn new_target_derived_chain_test() -> Nil {
 }
 
 pub fn arrow_super_call_test() -> Nil {
-  // The headline bug: super() inside an arrow inside a derived ctor.
   assert_normal_number(
     "class B { constructor() { this.x = 1 } }
      class D extends B { constructor() { (() => super())(); this.x += 1 } }
@@ -6532,7 +5777,6 @@ pub fn super_prop_arrow_test() -> Nil {
 }
 
 pub fn super_prop_receiver_test() -> Nil {
-  // super.prop reads off the prototype but with `this` as receiver.
   assert_normal_number(
     "class B { get v() { return this.x } }
      class D extends B { constructor() { super(); this.x = 9 } read() { return super.v } }
@@ -6542,7 +5786,6 @@ pub fn super_prop_receiver_test() -> Nil {
 }
 
 pub fn super_prop_put_receiver_test() -> Nil {
-  // super.prop = v writes to the receiver (`this`), not to the prototype.
   assert_normal_number(
     "class B {}
      class D extends B { m() { super.x = 4; return this.x } }
@@ -6553,7 +5796,6 @@ pub fn super_prop_put_receiver_test() -> Nil {
 }
 
 pub fn arguments_arrow_regression_test() -> Nil {
-  // Regression: arrows still capture `arguments` via the ordinary closure path.
   assert_normal_number(
     "function f() { return (() => arguments[0])() }
      f(42)",
@@ -6562,7 +5804,6 @@ pub fn arguments_arrow_regression_test() -> Nil {
 }
 
 pub fn reflect_construct_newtarget_test() -> Nil {
-  // §28.1.2 Reflect.construct: 3rd arg overrides newTarget → instance proto.
   assert_normal_number(
     "function A() {}
      function B() {}
@@ -6573,7 +5814,6 @@ pub fn reflect_construct_newtarget_test() -> Nil {
 }
 
 pub fn direct_eval_this_lexical_test() -> Nil {
-  // Direct eval threads all lexical slots; `this` is the first/simplest case.
   assert_normal_number(
     "class C { m() { return eval('this.x') } }
      let c = new C(); c.x = 3; c.m()",
@@ -6581,10 +5821,7 @@ pub fn direct_eval_this_lexical_test() -> Nil {
   )
 }
 
-// Pending: direct-eval `new.target`/`super` inheritance is wired through
-// compile_eval_direct + run_direct_eval, but the parser still hard-rejects
-// these forms at script top level before SyntaxPerms is consulted. Needs
-// emit_eval_body to thread perms into the parse/emit entry (research §V.3).
+// todo: parser rejects direct-eval new.target at top level
 pub fn direct_eval_new_target_pending() -> Nil {
   assert_normal_number(
     "function f() { return eval('new.target') }
@@ -6594,8 +5831,6 @@ pub fn direct_eval_new_target_pending() -> Nil {
 }
 
 pub fn class_extends_return_override_private_field_test() -> Nil {
-  // Private brand + field must be installed on the override target; a static
-  // method with lexical access to #f can then read it off the foreign object.
   assert_normal_number(
     "class B { constructor(o) { return o } }
      class C extends B { #f = 42; static read(o) { return o.#f } }
@@ -6607,9 +5842,6 @@ pub fn class_extends_return_override_private_field_test() -> Nil {
 }
 
 pub fn class_extends_arrow_sees_post_super_this_test() -> Nil {
-  // Arrow created BEFORE super() must observe the post-super() `this`.
-  // *this* is boxed (captured by the arrow); CallSuper writes the constructed
-  // instance into the box via PutBoxed, so the arrow's later GetBoxed reads it.
   assert_normal(
     "var result;
      class B {}
@@ -6627,8 +5859,6 @@ pub fn class_extends_arrow_sees_post_super_this_test() -> Nil {
 }
 
 pub fn class_extends_arrow_this_tdz_before_super_test() -> Nil {
-  // Reading captured *this* BEFORE super() must throw ReferenceError (TDZ).
-  // Exercises the GetBoxed JsUninitialized check.
   assert_thrown(
     "class B {}
      class C extends B {
@@ -6641,10 +5871,6 @@ pub fn class_extends_arrow_this_tdz_before_super_test() -> Nil {
      new C()",
   )
 }
-
-// ============================================================================
-// Promise tests
-// ============================================================================
 
 pub fn promise_typeof_test() -> Nil {
   assert_normal("typeof Promise", JsString("function"))
@@ -6659,7 +5885,6 @@ pub fn promise_reject_typeof_test() -> Nil {
 }
 
 pub fn promise_resolve_basic_test() -> Nil {
-  // Promise.resolve returns a fulfilled promise
   assert_promise_resolves("Promise.resolve(42)", JsNumber(Finite(42.0)))
 }
 
@@ -6668,7 +5893,6 @@ pub fn promise_reject_basic_test() -> Nil {
 }
 
 pub fn promise_resolve_then_test() -> Nil {
-  // .then transforms the value; returns a new promise with the result
   assert_promise_resolves(
     "Promise.resolve(1).then(function(x) { return x + 1; })",
     JsNumber(Finite(2.0)),
@@ -6766,7 +5990,6 @@ pub fn promise_constructor_not_function_test() -> Nil {
 }
 
 pub fn promise_reject_propagation_test() -> Nil {
-  // Rejection propagates through .then with no reject handler, caught by .catch
   assert_promise_resolves(
     "Promise.reject('err')
        .then(function(x) { return 'wrong'; })
@@ -6776,9 +5999,6 @@ pub fn promise_reject_propagation_test() -> Nil {
 }
 
 pub fn promise_then_species_subclass_test() -> Nil {
-  // §27.2.5.4 steps 3-4: the result promise comes from
-  // SpeciesConstructor(this, %Promise%), so a Promise subclass survives
-  // .then / .catch / .finally chaining (matches node).
   assert_normal(
     "class P extends Promise {}
      var a = P.resolve(1).then(x => x) instanceof P;
@@ -6790,7 +6010,6 @@ pub fn promise_then_species_subclass_test() -> Nil {
 }
 
 pub fn promise_then_species_null_test() -> Nil {
-  // §7.3.22 step 5: a null @@species falls back to the intrinsic %Promise%.
   assert_normal(
     "var p = Promise.resolve(1);
      p.constructor = { [Symbol.species]: null };
@@ -6801,7 +6020,6 @@ pub fn promise_then_species_null_test() -> Nil {
 }
 
 pub fn promise_then_species_not_constructor_test() -> Nil {
-  // §7.3.22 step 7: a non-constructor @@species is a TypeError.
   assert_thrown(
     "var p = Promise.resolve(1);
      p.constructor = { [Symbol.species]: 42 };
@@ -6810,7 +6028,6 @@ pub fn promise_then_species_not_constructor_test() -> Nil {
 }
 
 pub fn promise_then_constructor_not_object_test() -> Nil {
-  // §7.3.22 step 3: a present, non-object `constructor` is a TypeError.
   assert_thrown(
     "var p = Promise.resolve(1);
      p.constructor = 42;
@@ -6823,9 +6040,6 @@ pub fn promise_then_non_promise_receiver_test() -> Nil {
 }
 
 pub fn promise_executor_resolve_thenable_then_throw_test() -> Nil {
-  // §27.2.3.1 step 10.a: a throwing executor is handled by the capability's
-  // reject FUNCTION, whose [[AlreadyResolved]] flag the earlier resolve()
-  // already set — the thenable resolution wins over the throw.
   assert_promise_resolves(
     "new Promise(res => { res({ then(r) { r(42); } }); throw new Error('x'); })",
     JsNumber(Finite(42.0)),
@@ -6833,7 +6047,6 @@ pub fn promise_executor_resolve_thenable_then_throw_test() -> Nil {
 }
 
 pub fn promise_executor_resolve_then_throw_test() -> Nil {
-  // resolve(7) then throw: the resolution wins (matches node).
   assert_promise_resolves(
     "new Promise(res => { res(7); throw 'boom'; })",
     JsNumber(Finite(7.0)),
@@ -6841,7 +6054,6 @@ pub fn promise_executor_resolve_then_throw_test() -> Nil {
 }
 
 pub fn promise_executor_reject_then_throw_test() -> Nil {
-  // reject(1) then throw: the first rejection wins.
   assert_promise_rejects(
     "new Promise((res, rej) => { rej(1); throw 2; })",
     JsNumber(Finite(1.0)),
@@ -6849,17 +6061,14 @@ pub fn promise_executor_reject_then_throw_test() -> Nil {
 }
 
 pub fn promise_resolve_identity_test() -> Nil {
-  // Promise.resolve on a non-thenable returns a fulfilled promise
   assert_promise_resolves("Promise.resolve('hello')", JsString("hello"))
 }
 
 pub fn promise_then_identity_test() -> Nil {
-  // .then with no handlers passes through the value
   assert_promise_resolves("Promise.resolve(42).then()", JsNumber(Finite(42.0)))
 }
 
 pub fn promise_finally_passthrough_test() -> Nil {
-  // .finally preserves the resolved value
   assert_promise_resolves(
     "Promise.resolve(42).finally(function() {}).then(function(x) { return x })",
     JsNumber(Finite(42.0)),
@@ -6867,7 +6076,6 @@ pub fn promise_finally_passthrough_test() -> Nil {
 }
 
 pub fn promise_finally_reject_passthrough_test() -> Nil {
-  // .finally preserves the rejection reason
   assert_promise_rejects(
     "Promise.reject('err').finally(function() {})",
     JsString("err"),
@@ -6875,7 +6083,6 @@ pub fn promise_finally_reject_passthrough_test() -> Nil {
 }
 
 pub fn promise_finally_return_ignored_test() -> Nil {
-  // .finally callback's return value is ignored (original value preserved)
   assert_promise_resolves(
     "Promise.resolve(42).finally(function() { return 99 })",
     JsNumber(Finite(42.0)),
@@ -6883,19 +6090,13 @@ pub fn promise_finally_return_ignored_test() -> Nil {
 }
 
 pub fn promise_finally_non_callable_test() -> Nil {
-  // .finally with non-callable passes through
   assert_promise_resolves(
     "Promise.resolve(42).finally(undefined)",
     JsNumber(Finite(42.0)),
   )
 }
 
-// ============================================================================
-// Generators
-// ============================================================================
-
 pub fn generator_basic_test() -> Nil {
-  // Basic generator: yield values, then done
   assert_normal_number(
     "function* g() { yield 1; yield 2; yield 3; }
      var it = g();
@@ -6906,7 +6107,6 @@ pub fn generator_basic_test() -> Nil {
 }
 
 pub fn generator_next_value_test() -> Nil {
-  // .next() returns {value, done} objects
   assert_normal(
     "function* g() { yield 1; yield 2; }
      var it = g();
@@ -6916,7 +6116,6 @@ pub fn generator_next_value_test() -> Nil {
 }
 
 pub fn generator_done_test() -> Nil {
-  // After all yields, done is true
   assert_normal(
     "function* g() { yield 1; }
      var it = g();
@@ -6927,7 +6126,6 @@ pub fn generator_done_test() -> Nil {
 }
 
 pub fn generator_return_value_test() -> Nil {
-  // Return value appears as final {value, done: true}
   assert_normal_number(
     "function* g() { yield 1; return 42; }
      var it = g();
@@ -6938,7 +6136,6 @@ pub fn generator_return_value_test() -> Nil {
 }
 
 pub fn generator_next_sends_value_test() -> Nil {
-  // .next(val) sends val as the result of yield
   assert_normal_number(
     "function* g() { var x = yield 1; yield x + 10; }
      var it = g();
@@ -6949,7 +6146,6 @@ pub fn generator_next_sends_value_test() -> Nil {
 }
 
 pub fn generator_multiple_yields_test() -> Nil {
-  // Multiple yields produce sequential values
   assert_normal_number(
     "function* count() { yield 1; yield 2; yield 3; }
      var it = count();
@@ -6963,7 +6159,6 @@ pub fn generator_multiple_yields_test() -> Nil {
 }
 
 pub fn generator_completed_next_test() -> Nil {
-  // Calling .next() on completed generator returns {value: undefined, done: true}
   assert_normal(
     "function* g() { yield 1; }
      var it = g();
@@ -6975,7 +6170,6 @@ pub fn generator_completed_next_test() -> Nil {
 }
 
 pub fn generator_return_method_test() -> Nil {
-  // .return(val) completes the generator with {value: val, done: true}
   assert_normal_number(
     "function* g() { yield 1; yield 2; yield 3; }
      var it = g();
@@ -6986,7 +6180,6 @@ pub fn generator_return_method_test() -> Nil {
 }
 
 pub fn generator_return_method_done_test() -> Nil {
-  // .return() marks generator as done
   assert_normal(
     "function* g() { yield 1; yield 2; }
      var it = g();
@@ -6997,7 +6190,6 @@ pub fn generator_return_method_done_test() -> Nil {
 }
 
 pub fn generator_return_then_next_test() -> Nil {
-  // After .return(), subsequent .next() returns {value: undefined, done: true}
   assert_normal(
     "function* g() { yield 1; yield 2; }
      var it = g();
@@ -7009,7 +6201,6 @@ pub fn generator_return_then_next_test() -> Nil {
 }
 
 pub fn generator_throw_method_test() -> Nil {
-  // .throw() can be caught inside the generator
   assert_normal_number(
     "function* g() {
        try { yield 1; } catch(e) { yield e + 10; }
@@ -7022,7 +6213,6 @@ pub fn generator_throw_method_test() -> Nil {
 }
 
 pub fn generator_throw_uncaught_test() -> Nil {
-  // .throw() with no catch propagates
   assert_thrown(
     "function* g() { yield 1; yield 2; }
      var it = g();
@@ -7032,7 +6222,6 @@ pub fn generator_throw_uncaught_test() -> Nil {
 }
 
 pub fn generator_return_with_finally_test() -> Nil {
-  // .return() runs finally blocks
   assert_normal_number(
     "var cleanup = 0;
      function* g() {
@@ -7048,7 +6237,6 @@ pub fn generator_return_with_finally_test() -> Nil {
 }
 
 pub fn generator_expression_test() -> Nil {
-  // Generator expressions work too
   assert_normal_number(
     "var g = function*() { yield 10; yield 20; };
      var it = g();
@@ -7058,7 +6246,6 @@ pub fn generator_expression_test() -> Nil {
 }
 
 pub fn generator_with_params_test() -> Nil {
-  // Generator functions accept parameters
   assert_normal_number(
     "function* range(start, end) {
        for (var i = start; i < end; i++) { yield i; }
@@ -7073,7 +6260,6 @@ pub fn generator_with_params_test() -> Nil {
 }
 
 pub fn generator_closure_test() -> Nil {
-  // Generators capture closure variables
   assert_normal_number(
     "function makeGen(x) {
        return function*() { yield x; yield x * 2; };
@@ -7085,7 +6271,6 @@ pub fn generator_closure_test() -> Nil {
 }
 
 pub fn generator_for_of_test() -> Nil {
-  // for-of loop over a generator
   assert_normal_number(
     "function* g() { yield 1; yield 2; yield 3; }
      var sum = 0;
@@ -7096,7 +6281,6 @@ pub fn generator_for_of_test() -> Nil {
 }
 
 pub fn generator_for_of_break_test() -> Nil {
-  // for-of with break exits early
   assert_normal_number(
     "function* g() { yield 1; yield 2; yield 3; yield 4; }
      var sum = 0;
@@ -7107,7 +6291,6 @@ pub fn generator_for_of_break_test() -> Nil {
 }
 
 pub fn generator_fibonacci_test() -> Nil {
-  // Classic fibonacci generator
   assert_normal_number(
     "function* fib() {
        var a = 0, b = 1;
@@ -7121,12 +6304,7 @@ pub fn generator_fibonacci_test() -> Nil {
   )
 }
 
-// ============================================================================
-// Async/Await tests
-// ============================================================================
-
 pub fn async_return_value_test() -> Nil {
-  // Async function that returns a value resolves the promise
   assert_promise_resolves(
     "async function f() { return 42; } f()",
     JsNumber(Finite(42.0)),
@@ -7134,12 +6312,10 @@ pub fn async_return_value_test() -> Nil {
 }
 
 pub fn async_return_undefined_test() -> Nil {
-  // Async function with no return resolves to undefined
   assert_promise_resolves("async function f() {} f()", JsUndefined)
 }
 
 pub fn async_await_resolved_promise_test() -> Nil {
-  // Await a resolved promise
   assert_promise_resolves(
     "async function f() { return await Promise.resolve(10); } f()",
     JsNumber(Finite(10.0)),
@@ -7147,7 +6323,6 @@ pub fn async_await_resolved_promise_test() -> Nil {
 }
 
 pub fn async_await_plain_value_test() -> Nil {
-  // Await a non-promise value wraps it in Promise.resolve
   assert_promise_resolves(
     "async function f() { return await 5; } f()",
     JsNumber(Finite(5.0)),
@@ -7155,7 +6330,6 @@ pub fn async_await_plain_value_test() -> Nil {
 }
 
 pub fn async_multiple_awaits_test() -> Nil {
-  // Multiple sequential awaits
   assert_promise_resolves(
     "async function f() {
        var a = await Promise.resolve(1);
@@ -7168,7 +6342,6 @@ pub fn async_multiple_awaits_test() -> Nil {
 }
 
 pub fn async_await_chain_test() -> Nil {
-  // Await inside expression
   assert_promise_resolves(
     "async function f() {
        return await Promise.resolve(3) + await Promise.resolve(4);
@@ -7179,7 +6352,6 @@ pub fn async_await_chain_test() -> Nil {
 }
 
 pub fn async_throw_rejects_test() -> Nil {
-  // Async function that throws rejects the promise
   assert_promise_rejects(
     "async function f() { throw 'error'; } f()",
     JsString("error"),
@@ -7187,7 +6359,6 @@ pub fn async_throw_rejects_test() -> Nil {
 }
 
 pub fn async_await_rejected_test() -> Nil {
-  // Await a rejected promise without try/catch rejects the outer promise
   assert_promise_rejects(
     "async function f() { return await Promise.reject('fail'); } f()",
     JsString("fail"),
@@ -7195,7 +6366,6 @@ pub fn async_await_rejected_test() -> Nil {
 }
 
 pub fn async_try_catch_test() -> Nil {
-  // Try/catch inside async function catches rejected await
   assert_promise_resolves(
     "async function f() {
        try {
@@ -7210,7 +6380,6 @@ pub fn async_try_catch_test() -> Nil {
 }
 
 pub fn async_expression_test() -> Nil {
-  // Async function expression
   assert_promise_resolves(
     "var f = async function() { return 99; }; f()",
     JsNumber(Finite(99.0)),
@@ -7218,12 +6387,10 @@ pub fn async_expression_test() -> Nil {
 }
 
 pub fn async_arrow_test() -> Nil {
-  // Async arrow function
   assert_promise_resolves("var f = async () => 77; f()", JsNumber(Finite(77.0)))
 }
 
 pub fn async_arrow_await_test() -> Nil {
-  // Async arrow with await
   assert_promise_resolves(
     "var f = async (x) => await Promise.resolve(x * 2);
      f(21)",
@@ -7232,7 +6399,6 @@ pub fn async_arrow_await_test() -> Nil {
 }
 
 pub fn async_sequential_test() -> Nil {
-  // Sequential async operations
   assert_promise_resolves(
     "async function f() {
        var x = await 1;
@@ -7246,7 +6412,6 @@ pub fn async_sequential_test() -> Nil {
 }
 
 pub fn async_nested_call_test() -> Nil {
-  // Async function calling another async function
   assert_promise_resolves(
     "async function double(x) { return x * 2; }
      async function main() {
@@ -7260,7 +6425,6 @@ pub fn async_nested_call_test() -> Nil {
 }
 
 pub fn async_try_finally_test() -> Nil {
-  // try/finally in async function
   assert_promise_resolves(
     "async function f() {
        var x = 0;
@@ -7277,7 +6441,6 @@ pub fn async_try_finally_test() -> Nil {
 }
 
 pub fn async_promise_chain_test() -> Nil {
-  // Awaiting a .then() chain
   assert_promise_resolves(
     "async function f() {
        return await Promise.resolve(2).then(function(x) { return x * 3; });
@@ -7287,12 +6450,7 @@ pub fn async_promise_chain_test() -> Nil {
   )
 }
 
-// ============================================================================
-// Promise ordering / microtask timing tests
-// ============================================================================
-
 pub fn promise_ordering_sync_before_microtask_test() -> Nil {
-  // Synchronous code runs before .then() callbacks
   assert_promise_resolves(
     "var log = '';
      async function test() {
@@ -7308,8 +6466,6 @@ pub fn promise_ordering_sync_before_microtask_test() -> Nil {
 }
 
 pub fn promise_ordering_then_chain_test() -> Nil {
-  // A .then() chain and the test function's awaits interleave across drain rounds.
-  // Each await advances one round; the chain also advances one step per round.
   assert_promise_resolves(
     "var log = '';
      async function test() {
@@ -7330,7 +6486,6 @@ pub fn promise_ordering_then_chain_test() -> Nil {
 }
 
 pub fn promise_ordering_multiple_resolves_test() -> Nil {
-  // Multiple .then() on the same promise run in registration order
   assert_promise_resolves(
     "var log = '';
      async function test() {
@@ -7347,7 +6502,6 @@ pub fn promise_ordering_multiple_resolves_test() -> Nil {
 }
 
 pub fn promise_ordering_nested_then_test() -> Nil {
-  // .then() inside a .then() runs on the next tick
   assert_promise_resolves(
     "var log = '';
      async function test() {
@@ -7366,7 +6520,6 @@ pub fn promise_ordering_nested_then_test() -> Nil {
 }
 
 pub fn promise_ordering_await_interleave_test() -> Nil {
-  // Two async functions interleave via await
   assert_promise_resolves(
     "var log = '';
      async function a() {
@@ -7396,7 +6549,6 @@ pub fn promise_ordering_await_interleave_test() -> Nil {
 }
 
 pub fn promise_ordering_resolve_vs_then_test() -> Nil {
-  // Promise.resolve(val).then(fn) — fn runs asynchronously, not synchronously
   assert_promise_resolves(
     "var log = '';
      async function test() {
@@ -7412,7 +6564,6 @@ pub fn promise_ordering_resolve_vs_then_test() -> Nil {
 }
 
 pub fn promise_ordering_reject_catch_test() -> Nil {
-  // Rejection .catch() callback runs as microtask
   assert_promise_resolves(
     "var log = '';
      async function test() {
@@ -7428,7 +6579,6 @@ pub fn promise_ordering_reject_catch_test() -> Nil {
 }
 
 pub fn promise_ordering_finally_timing_test() -> Nil {
-  // .finally() runs as microtask, value passes through
   assert_promise_resolves(
     "var log = '';
      async function test() {
@@ -7444,13 +6594,6 @@ pub fn promise_ordering_finally_timing_test() -> Nil {
   )
 }
 
-// ============================================================================
-// REPL mode tests
-// ============================================================================
-
-/// Compile one input in REPL mode and run it on `st`, draining microtasks.
-/// Top-level lexical declarations land in the realm's global lexical record,
-/// so later inputs on the returned agent see them.
 fn run_repl_input(
   source: String,
   st: Agent,
@@ -7465,7 +6608,6 @@ fn run_repl_input(
   }
 }
 
-/// Evaluate multiple REPL lines in sequence, returning the result of the last line.
 fn run_repl_lines(
   lines: List(String),
 ) -> Result(#(JsValueKind, Agent), String) {
@@ -7478,9 +6620,7 @@ fn run_repl_lines_loop(
 ) -> Result(#(JsValueKind, Agent), String) {
   case lines {
     [] -> Error("no lines to evaluate")
-    [line] ->
-      // Last line — return its result
-      eval_repl_line(line, st)
+    [line] -> eval_repl_line(line, st)
     [line, ..rest] -> {
       use #(_val, st) <- result.try(eval_repl_line(line, st))
       run_repl_lines_loop(rest, st)
@@ -7499,7 +6639,6 @@ fn eval_repl_line(
   }
 }
 
-/// Evaluate REPL lines where the last line is expected to throw.
 fn run_repl_lines_expect_throw(lines: List(String)) -> Result(Nil, String) {
   run_repl_throw_loop(lines, agent())
 }
@@ -7508,7 +6647,6 @@ fn run_repl_throw_loop(lines: List(String), st: Agent) -> Result(Nil, String) {
   case lines {
     [] -> Error("no lines to evaluate")
     [line] -> {
-      // Last line — expect it to throw
       use #(outcome, _st) <- result.try(run_repl_input(line, st))
       case outcome {
         Error(_) -> Ok(Nil)
@@ -7551,15 +6689,10 @@ pub fn repl_function_persistence_test() -> Nil {
 }
 
 pub fn repl_delete_lexical_global_test() -> Nil {
-  // §9.1.1.4.7 step 1: at LexGlobal top level a `let` lives in the global
-  // declarative record (Realm.lexical_globals) and is never deletable,
-  // so DeleteGlobalVar answers false without touching the global object.
   assert_repl(["let dq = 1", "[delete dq, dq].join()"], JsString("false,1"))
 }
 
 pub fn repl_delete_implicit_global_test() -> Nil {
-  // An implicit global is a configurable property of the global object, so
-  // DeleteGlobalVar's [[Delete]] really removes it.
   assert_repl(["dg = 1", "delete dg", "typeof dg"], JsString("undefined"))
 }
 
@@ -7572,17 +6705,14 @@ pub fn repl_redeclaration_const_test() -> Nil {
 }
 
 pub fn repl_const_assignment_throws_test() -> Result(Nil, String) {
-  // const x = 1; x = 2 on next line should throw TypeError
   let assert Ok(Nil) = run_repl_lines_expect_throw(["const x = 1", "x = 2"])
 }
 
 pub fn repl_const_assignment_same_line_throws_test() -> Result(Nil, String) {
-  // const x = 1; x = 2 on same line should also throw
   let assert Ok(Nil) = run_repl_lines_expect_throw(["const x = 1; x = 2"])
 }
 
 pub fn repl_let_reassignment_test() -> Nil {
-  // let allows reassignment across lines
   assert_repl(["let y = 1", "y = 2", "y"], JsNumber(Finite(2.0)))
 }
 
@@ -7593,10 +6723,6 @@ pub fn globalthis_typeof_test() -> Nil {
 pub fn globalthis_has_builtins_test() -> Nil {
   assert_normal("globalThis.Object === Object", JsBool(True))
 }
-
-// ============================================================================
-// Symbol tests
-// ============================================================================
 
 pub fn typeof_symbol_test() -> Nil {
   assert_normal("typeof Symbol.toStringTag", JsString("symbol"))
@@ -7635,10 +6761,6 @@ pub fn symbol_well_known_iterator_test() -> Nil {
 pub fn symbol_constructor_no_args_test() -> Nil {
   assert_normal("typeof Symbol()", JsString("symbol"))
 }
-
-// ============================================================================
-// ToPrimitive + Object.prototype.toString/valueOf
-// ============================================================================
 
 pub fn object_to_string_plain_test() -> Nil {
   assert_normal("var o = {}; o.toString()", JsString("[object Object]"))
@@ -7715,7 +6837,6 @@ pub fn to_primitive_add_string_concat_test() -> Nil {
 }
 
 pub fn to_primitive_default_to_string_test() -> Nil {
-  // Default Object.prototype.toString returns "[object Object]"
   assert_normal("'' + {}", JsString("[object Object]"))
 }
 
@@ -7727,7 +6848,6 @@ pub fn object_to_string_tag_test() -> Nil {
 }
 
 pub fn arguments_is_not_array_test() -> Nil {
-  // Per spec, arguments is an ordinary object with Object.prototype, not an array
   assert_normal(
     "function f() { return Array.isArray(arguments); } f(1, 2)",
     JsBool(False),
@@ -7742,7 +6862,6 @@ pub fn arguments_proto_is_object_proto_test() -> Nil {
 }
 
 pub fn arguments_unmapped_index_write_no_alias_test() -> Nil {
-  // Unmapped: writing arguments[0] does NOT change the param
   assert_normal_number(
     "function f(a) { arguments[0] = 99; return a; } f(1)",
     1.0,
@@ -7750,7 +6869,6 @@ pub fn arguments_unmapped_index_write_no_alias_test() -> Nil {
 }
 
 pub fn arguments_unmapped_param_write_no_alias_test() -> Nil {
-  // Unmapped: writing the param does NOT change arguments[0]
   assert_normal_number(
     "function f(a) { a = 99; return arguments[0]; } f(1)",
     1.0,
@@ -7758,7 +6876,6 @@ pub fn arguments_unmapped_param_write_no_alias_test() -> Nil {
 }
 
 pub fn arguments_spread_test() -> Nil {
-  // arguments is iterable — [...arguments] works
   assert_normal(
     "function f() { return [...arguments].join(','); } f(1, 2, 3)",
     JsString("1,2,3"),
@@ -7773,7 +6890,6 @@ pub fn arguments_for_of_test() -> Nil {
 }
 
 pub fn arguments_apply_test() -> Nil {
-  // Classic ES5 pattern: forward arguments via apply
   assert_normal_number(
     "function g(a, b, c) { return a + b + c; } function f() { return g.apply(null, arguments); } f(1, 2, 3)",
     6.0,
@@ -7781,7 +6897,6 @@ pub fn arguments_apply_test() -> Nil {
 }
 
 pub fn arguments_arrow_ignores_own_args_test() -> Nil {
-  // Arrow's own invocation args don't shadow the inherited arguments object
   assert_normal_number(
     "function f() { const g = (x, y) => arguments[0]; return g(100, 200); } f(7)",
     7.0,
@@ -7818,26 +6933,18 @@ pub fn arguments_delete_index_test() -> Nil {
 }
 
 pub fn arguments_excess_indexed_test() -> Nil {
-  // Indices past declared arity still work
   assert_normal_number("function f(a) { return arguments[2]; } f(1, 2, 3)", 3.0)
 }
 
-// ============================================================================
-// strict mode runtime enforcement
-// ============================================================================
-
 pub fn strict_undeclared_assign_throws_test() -> Nil {
-  // In strict mode, assigning to an undeclared variable throws ReferenceError
   assert_thrown("function f() { 'use strict'; undeclared = 1; } f()")
 }
 
 pub fn strict_undeclared_assign_top_level_test() -> Nil {
-  // Top-level "use strict" directive also enforces
   assert_thrown("'use strict'; undeclared = 1;")
 }
 
 pub fn sloppy_undeclared_assign_creates_global_test() -> Nil {
-  // In sloppy mode, assigning to an undeclared variable creates a global
   assert_normal_number(
     "function f() { undeclared = 42; } f(); undeclared",
     42.0,
@@ -7845,7 +6952,6 @@ pub fn sloppy_undeclared_assign_creates_global_test() -> Nil {
 }
 
 pub fn strict_existing_global_write_ok_test() -> Nil {
-  // Writing to an EXISTING global in strict mode is fine
   assert_normal_number(
     "var x = 1; function f() { 'use strict'; x = 2; } f(); x",
     2.0,
@@ -7853,7 +6959,6 @@ pub fn strict_existing_global_write_ok_test() -> Nil {
 }
 
 pub fn strict_inherited_from_parent_test() -> Nil {
-  // Strictness is inherited — nested function in strict parent is strict
   assert_thrown(
     "function outer() {
        'use strict';
@@ -7865,7 +6970,6 @@ pub fn strict_inherited_from_parent_test() -> Nil {
 }
 
 pub fn strict_not_inherited_upward_test() -> Nil {
-  // A strict nested function does NOT make the parent strict
   assert_normal_number(
     "function outer() {
        function inner() { 'use strict'; }
@@ -7878,7 +6982,6 @@ pub fn strict_not_inherited_upward_test() -> Nil {
 }
 
 pub fn strict_arrow_inherits_test() -> Nil {
-  // Arrow functions inherit strictness from enclosing scope
   assert_thrown(
     "function f() {
        'use strict';
@@ -7890,7 +6993,6 @@ pub fn strict_arrow_inherits_test() -> Nil {
 }
 
 pub fn strict_class_method_test() -> Nil {
-  // Class bodies are always strict (ES §15.7.1)
   assert_thrown(
     "class C { m() { undeclared = 1; } }
      new C().m()",
@@ -7898,7 +7000,6 @@ pub fn strict_class_method_test() -> Nil {
 }
 
 pub fn strict_class_constructor_test() -> Nil {
-  // Class constructors are strict too
   assert_thrown(
     "class C { constructor() { undeclared = 1; } }
      new C()",
@@ -7906,7 +7007,6 @@ pub fn strict_class_constructor_test() -> Nil {
 }
 
 pub fn strict_class_in_sloppy_no_leak_test() -> Nil {
-  // Class strictness doesn't leak into surrounding sloppy scope
   assert_normal_number(
     "class C { m() { return 1; } }
      undeclaredFromSloppy = 42;
@@ -7916,8 +7016,6 @@ pub fn strict_class_in_sloppy_no_leak_test() -> Nil {
 }
 
 pub fn strict_directive_not_first_test() -> Nil {
-  // "use strict" after non-directive statement has no effect (spec: directive
-  // prologue ends at first non-string-literal expression statement)
   assert_normal_number(
     "function f() {
        var x = 0;
@@ -7931,7 +7029,6 @@ pub fn strict_directive_not_first_test() -> Nil {
 }
 
 pub fn strict_directive_after_other_directive_test() -> Nil {
-  // Multiple directives in prologue are fine — "use strict" doesn't have to be first
   assert_thrown(
     "function f() {
        'some other directive';
@@ -7943,7 +7040,6 @@ pub fn strict_directive_after_other_directive_test() -> Nil {
 }
 
 pub fn strict_reference_error_message_test() -> Nil {
-  // Verify the error message
   assert_normal(
     "function f() { 'use strict'; try { undeclared = 1; } catch (e) { return e.message; } }
      f()",
@@ -7952,7 +7048,6 @@ pub fn strict_reference_error_message_test() -> Nil {
 }
 
 pub fn strict_reference_error_type_test() -> Nil {
-  // Verify it's a ReferenceError (not TypeError or generic Error)
   assert_normal(
     "function f() { 'use strict'; try { undeclared = 1; } catch (e) { return e instanceof ReferenceError; } }
      f()",
@@ -7960,12 +7055,6 @@ pub fn strict_reference_error_type_test() -> Nil {
   )
 }
 
-// ============================================================================
-// Module compilation
-// ============================================================================
-
-/// Parse + compile + run JS module source via the bundle system. Returns the
-/// settled outcome (Ok(value) / Error(thrown)) plus the final agent.
 fn run_module(
   source: String,
 ) -> Result(#(Result(JsValueKind, JsValueKind), Agent), String) {
@@ -8007,7 +7096,6 @@ fn assert_module_normal(source: String, expected: JsValueKind) -> Nil {
 }
 
 pub fn module_basic_strict_mode_test() -> Nil {
-  // Modules are always strict — `this` at the top level is undefined
   assert_module_normal("typeof this", JsString("undefined"))
 }
 
@@ -8023,7 +7111,6 @@ pub fn module_function_declaration_test() -> Nil {
 }
 
 pub fn module_export_named_declaration_test() -> Nil {
-  // export let x = 42 should still work (the declaration runs)
   assert_module_normal("export let x = 42; x", JsNumber(Finite(42.0)))
 }
 
@@ -8054,10 +7141,6 @@ fn counter(key: String, next: fn(fn() -> Int, fn() -> Nil) -> Nil) {
   next(fn() { do_counter_read(key) }, fn() { do_counter_bump(key) })
 }
 
-/// Diamond dependency graph must compile each module exactly once.
-/// Graph: A → [B, C]; B → D; C → D; D → E.
-/// Previously a non-threaded `visited` set caused D and E to be
-/// re-parsed + re-compiled on the C branch (O(2^depth) for deep diamonds).
 pub fn module_diamond_deps_compiled_once_test() -> Nil {
   use read, bump <- counter("resolve")
   use read_loads, bump_load <- counter("load")
@@ -8084,28 +7167,16 @@ pub fn module_diamond_deps_compiled_once_test() -> Nil {
   let entry = "import './b.js'; import './c.js';"
   let assert Ok(bundle) = module.compile_bundle("/a.js", entry, resolve, load)
 
-  // 5 unique modules in the bundle: a, b, c, d, e
   let assert 5 = dict.size(bundle.modules)
 
-  // Resolver is called once per import edge. Edges: A→B, A→C, B→D, C→D, D→E.
-  // With proper dedup, C→D finds D already compiled and does NOT recurse
-  // into D→E again. 5 calls total.
-  // With the old bug: C→D misses the visited check, recompiles D,
-  // recurses into D→E → 6 calls.
   let assert 5 = read()
-  // The loader runs once per unique dependency, however many edges hit it:
-  // b, c, d, e — the duplicate C→D edge never reads source again.
   let assert 4 = read_loads()
   Nil
 }
 
 pub fn module_repl_harness_globals_test() -> Nil {
-  // Test the REPL→module globals flow:
-  // 1. Evaluate a REPL script that defines a function
-  // 2. Run a module that accesses that function via GetGlobal
   let st = agent()
 
-  // Step 1: Compile and run harness script in REPL mode
   let harness_source =
     "function greetFromHarness() { return 'hello from harness'; }"
   let assert Ok(#(harness_body, harness_sb)) =
@@ -8115,12 +7186,10 @@ pub fn module_repl_harness_globals_test() -> Nil {
 
   let assert #(Ok(_), st) = run_template(st, harness_template)
 
-  // Verify greetFromHarness is on globalThis object
   let global_object = mk_object(st.realm.global_object)
   let assert #(True, st) =
     rt_obj.t_has_prop(st, global_object, StringKey(Named("greetFromHarness")))
 
-  // Step 2: Compile and run a module that uses the harness function
   let module_source = "greetFromHarness()"
   let specifier = "<test-module>"
   let assert Ok(bundle) =
@@ -8131,7 +7200,6 @@ pub fn module_repl_harness_globals_test() -> Nil {
       fn(_resolved) { Error(load_error.LoadForbidden) },
     )
 
-  // Evaluate the module on the same agent: it sees the REPL globals
   case module.evaluate_bundle(bundle, st, rt_async.drain) {
     #(_st, Ok(module.EvaluatedBundle(value: val, ..))) -> {
       let assert True = engine.classify(val) == JsString("hello from harness")
@@ -8142,8 +7210,6 @@ pub fn module_repl_harness_globals_test() -> Nil {
   }
 }
 
-/// Call `callee` with `this = undefined` and `args` on `st`, then end the
-/// turn (one microtask drain): the embedder's `engine.call` at agent level.
 fn run_export(
   st: Agent,
   callee: JsVal,
@@ -8159,10 +7225,6 @@ fn from_int(n: Int) -> JsVal {
 }
 
 pub fn run_export_namespace_call_test() -> Nil {
-  // End-to-end embedder path: evaluate a module, read an export off its
-  // namespace (GetModuleNamespace), and invoke it with run_export, which
-  // calls the function AND drains the microtask queue. Mirrors how a host
-  // dispatches each message to a module's `receive` export.
   let source =
     "let total = 0;
      let drained = 0;
@@ -8183,29 +7245,19 @@ pub fn run_export_namespace_call_test() -> Nil {
     module.evaluate_bundle(bundle, agent(), rt_async.drain)
   let namespace = mk_object(ns_ref)
 
-  // Read `receive` off the namespace — no interpreter State needed.
   let assert Some(receive) = module.read_export(st, namespace, "receive")
 
-  // receive(5): returns `total` (5) synchronously; the .then microtask is
-  // drained by run_export, bumping `drained` to 5.
   let assert #(Ok(v1), st) = run_export(st, receive, [from_int(5)])
   let assert True = v1 == JsNumber(Finite(5.0))
 
-  // receive(3): module-scoped state persisted on the threaded agent → total 8.
   let assert #(Ok(v2), st) = run_export(st, receive, [from_int(3)])
   let assert True = v2 == JsNumber(Finite(8.0))
 
-  // Both .then microtasks ran (5 + 3), proving the queue was drained on each
-  // call: getDrained() == 8.
   let assert Some(get_drained) = module.read_export(st, namespace, "getDrained")
   let assert #(Ok(v3), _) = run_export(st, get_drained, [])
   let assert True = v3 == JsNumber(Finite(8.0))
   Nil
 }
-
-// ============================================================================
-// eval() and Function() constructor
-// ============================================================================
 
 pub fn eval_basic_test() -> Nil {
   assert_normal("eval('1+1')", JsNumber(Finite(2.0)))
@@ -8234,10 +7286,6 @@ pub fn function_constructor_no_args_test() -> Nil {
   assert_normal("new Function('return 42')()", JsNumber(Finite(42.0)))
 }
 
-// ============================================================================
-// Direct eval — sees caller's local scope
-// ============================================================================
-
 pub fn direct_eval_read_local_test() -> Nil {
   assert_normal(
     "function f() { let x = 5; return eval('x'); } f()",
@@ -8253,7 +7301,6 @@ pub fn direct_eval_write_local_test() -> Nil {
 }
 
 pub fn direct_eval_shadowed_test() -> Nil {
-  // eval was rebound — should be regular call, not direct eval
   assert_normal(
     "function f() { let x=5; let eval=(s)=>99; return eval('x'); } f()",
     JsNumber(Finite(99.0)),
@@ -8268,8 +7315,6 @@ pub fn direct_eval_this_test() -> Nil {
 }
 
 pub fn direct_eval_this_and_locals_test() -> Nil {
-  // *this* arrives via the captured-locals box table alongside ordinary
-  // locals; both must resolve in the same eval body.
   assert_normal(
     "function f() { let x = 42; return eval('this; x'); } f.call({})",
     JsNumber(Finite(42.0)),
@@ -8277,7 +7322,6 @@ pub fn direct_eval_this_and_locals_test() -> Nil {
 }
 
 pub fn direct_eval_this_identity_test() -> Nil {
-  // eval('this') must be the caller's bound `this`, not globalThis.
   assert_normal(
     "function f() { return eval('this') === this; } f.call({})",
     JsBool(True),
@@ -8285,9 +7329,6 @@ pub fn direct_eval_this_identity_test() -> Nil {
 }
 
 pub fn direct_eval_nested_closure_read_test() -> Nil {
-  // Inner fn doesn't reference `a` syntactically — it's opaque inside the
-  // eval string. Capture must be driven by eval_in_subtree, not free-var
-  // analysis, so the box ref threads through the closure chain.
   assert_normal(
     "function outer(){let a=10;return(function(){return eval('a');})();} outer()",
     JsNumber(Finite(10.0)),
@@ -8315,14 +7356,7 @@ pub fn direct_eval_multiple_outer_vars_test() -> Nil {
   )
 }
 
-// ============================================================================
-// Direct eval — sloppy-mode var injection (eval_env)
-// ============================================================================
-
 pub fn direct_eval_var_injection_test() -> Nil {
-  // Sloppy mode: `var y` in eval lands in caller's eval_env, not global.
-  // Caller's `return y` was compiled before eval ran — emits GetEvalVar
-  // which checks eval_env first.
   assert_normal(
     "function f(){eval('var y=1');return y;} f()",
     JsNumber(Finite(1.0)),
@@ -8330,18 +7364,14 @@ pub fn direct_eval_var_injection_test() -> Nil {
 }
 
 pub fn direct_eval_var_injection_strict_caller_test() -> Nil {
-  // Strict caller: eval gets its own var environment (spec §19.2.1.1).
-  // `y` doesn't leak — caller's `return y` throws ReferenceError.
   assert_thrown("function f(){'use strict';eval('var y=1');return y;} f()")
 }
 
 pub fn direct_eval_var_injection_strict_eval_test() -> Nil {
-  // Strict eval body (even with sloppy caller) also blocks var-injection.
   assert_thrown("function f(){eval('\"use strict\";var y=1');return y;} f()")
 }
 
 pub fn direct_eval_var_persistence_test() -> Nil {
-  // Multiple evals in one frame share the same eval_env ref.
   assert_normal(
     "function f(){eval('var y=1');eval('y++');return y;} f()",
     JsNumber(Finite(2.0)),
@@ -8349,15 +7379,12 @@ pub fn direct_eval_var_persistence_test() -> Nil {
 }
 
 pub fn direct_eval_var_not_leaked_to_callee_test() -> Nil {
-  // eval_env is frame-local. g() gets a fresh frame with eval_env=None,
-  // so its `y` lookup falls through to GetGlobal → ReferenceError.
   assert_thrown(
     "function g(){return y;} function f(){eval('var y=1');return g();} f()",
   )
 }
 
 pub fn direct_eval_var_not_leaked_to_global_test() -> Nil {
-  // Var lands in eval_env, NOT on globalThis. After f() returns, y is gone.
   assert_normal(
     "function f(){eval('var y=1');} f(); typeof y",
     JsString("undefined"),
@@ -8365,7 +7392,6 @@ pub fn direct_eval_var_not_leaked_to_global_test() -> Nil {
 }
 
 pub fn direct_eval_var_write_then_read_test() -> Nil {
-  // Caller can read AND write eval-created vars via GetEvalVar/PutEvalVar.
   assert_normal(
     "function f(){eval('var y=1');y=y+5;return y;} f()",
     JsNumber(Finite(6.0)),
@@ -8373,9 +7399,6 @@ pub fn direct_eval_var_write_then_read_test() -> Nil {
 }
 
 pub fn direct_eval_var_survives_await_test() -> Nil {
-  // Regression: AsyncFunctionSlot used to save pc/locals/stack/try_stack but
-  // NOT eval_env, so a sloppy direct-eval `var` introduced before an await
-  // vanished on resume (the resumed frame adopted the resumer's eval_env=None).
   assert_promise_resolves(
     "async function f(){eval('var x=1');await 0;return x;} f()",
     JsNumber(Finite(1.0)),
@@ -8383,7 +7406,6 @@ pub fn direct_eval_var_survives_await_test() -> Nil {
 }
 
 pub fn direct_eval_var_typeof_test() -> Nil {
-  // typeof must check eval_env, not just globals.
   assert_normal(
     "function f(){eval('var y=1');return typeof y;} f()",
     JsString("number"),
@@ -8391,18 +7413,11 @@ pub fn direct_eval_var_typeof_test() -> Nil {
 }
 
 pub fn direct_eval_var_survives_throw_test() -> Nil {
-  // eval_env allocated during a throwing eval must survive the catch.
-  // Previously the step error-return dropped eval_env when the FIRST eval
-  // in a frame lazy-allocated it then threw.
   assert_normal(
     "function f(){try{eval('var y=1;throw 0');}catch(e){}return y;} f()",
     JsNumber(Finite(1.0)),
   )
 }
-
-// ----------------------------------------------------------------------------
-// DOMException (WebIDL §2.8.1)
-// ----------------------------------------------------------------------------
 
 pub fn dom_exception_exists_test() -> Nil {
   assert_normal("typeof DOMException", JsString("function"))
@@ -8466,10 +7481,6 @@ pub fn dom_exception_to_string_tag_test() -> Nil {
   )
 }
 
-/// §15.7.14 ClassDefaultConstructor: the synthesized default constructor of
-/// a derived class forwards its argument List to the parent WITHOUT array
-/// iteration, so a poisoned %Array.prototype%[@@iterator] is not observable.
-/// A source-level `super(...xs)` spread, by contrast, must observe it.
 pub fn default_derived_ctor_does_not_iterate_test() -> Nil {
   assert_normal(
     "
@@ -8491,9 +7502,6 @@ pub fn default_derived_ctor_does_not_iterate_test() -> Nil {
   )
 }
 
-/// super.p / super[k] as assignment targets outside a plain `super.x = v`:
-/// array/object destructuring, rest, parenthesized, and for-in heads all
-/// PutValue through the SuperReference (IrPutSuperValue).
 pub fn super_member_destructuring_targets_test() -> Nil {
   assert_normal(
     "
@@ -8515,10 +7523,7 @@ pub fn super_member_destructuring_targets_test() -> Nil {
   )
 }
 
-/// A TemplateMiddle / TemplateTail span begins at the `}` closing a
-/// substitution. A combining mark immediately after that `}` forms ONE
-/// grapheme cluster with it, so the quasi must be sliced off by BYTES —
-/// grapheme slicing silently drops the mark from both raw and cooked.
+// quasi must be sliced by bytes, not graphemes
 pub fn template_quasi_combining_mark_after_substitution_test() -> Nil {
   assert_normal(
     "
@@ -8529,10 +7534,6 @@ pub fn template_quasi_combining_mark_after_substitution_test() -> Nil {
   )
 }
 
-/// A `with` holder is one of the caller's own local slots, so a direct eval
-/// inside a `with` inherits it as an ordinary capture — the frame reserves no
-/// extra slot for it. Regression: `scope.finalize` used to size the eval
-/// frame with `+ list.length(with_stack)`, double-counting the holders.
 pub fn direct_eval_inside_with_reads_holder_test() -> Nil {
   assert_normal(
     "
@@ -8545,8 +7546,6 @@ pub fn direct_eval_inside_with_reads_holder_test() -> Nil {
   )
 }
 
-/// Same, one level down: the with-holder AND an ordinary local both have to
-/// resolve from inside the eval'd source.
 pub fn direct_eval_inside_with_in_function_test() -> Nil {
   assert_normal(
     "
@@ -8561,10 +7560,6 @@ pub fn direct_eval_inside_with_in_function_test() -> Nil {
   )
 }
 
-/// A sloppy direct eval at SCRIPT top level has the global environment as its
-/// VariableEnvironment, so its `var` lands on the global object (and, per
-/// §19.2.1.3, is deletable). Regression: this used to be smuggled to the
-/// runtime as a `#("<global>", -1)` sentinel head entry in the name table.
 pub fn direct_eval_at_top_level_vars_go_global_test() -> Nil {
   assert_normal(
     "
@@ -8576,11 +7571,6 @@ pub fn direct_eval_at_top_level_vars_go_global_test() -> Nil {
   )
 }
 
-/// A host loader that serves DIFFERENT source for a specifier it already
-/// served (a file edited between two dynamic imports) makes the fresh parse's
-/// export list disagree with the live namespace's export map. That is a
-/// host-contract violation, so it must surface as a link-time SyntaxError —
-/// never crash the linker on the missing cell.
 pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
   let spec = "/shared.js"
   let no_resolve = fn(_dep, _parent) { Error(load_error.ResolveForbidden) }
@@ -8591,7 +7581,6 @@ pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
   let assert #(st, Ok(module.EvaluatedBundle(namespace: ns, ..))) =
     module.evaluate_bundle(first, agent(), rt_async.drain)
 
-  // Same specifier, source has since gained an export.
   let assert Ok(second) =
     module.compile_bundle(
       spec,
@@ -8617,10 +7606,6 @@ pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
   Nil
 }
 
-/// The same host-loader contract violation, but the fresh parse gained a
-/// RE-export rather than a local export: the reused namespace has no cell for
-/// it either, so it is the same guest-visible link error — never a linker panic
-/// on the missing cell.
 pub fn reused_module_gaining_reexport_is_a_link_error_test() -> Nil {
   let spec = "/shared.js"
   let no_resolve = fn(_dep, _parent) { Error(load_error.ResolveForbidden) }
@@ -8631,7 +7616,6 @@ pub fn reused_module_gaining_reexport_is_a_link_error_test() -> Nil {
   let assert #(st, Ok(module.EvaluatedBundle(namespace: ns, ..))) =
     module.evaluate_bundle(first, agent(), rt_async.drain)
 
-  // Same specifier, source has since gained `export { y } from './dep.js'`.
   let dep_resolve = fn(dep, _parent) {
     case dep {
       "./dep.js" -> Ok("/dep.js")

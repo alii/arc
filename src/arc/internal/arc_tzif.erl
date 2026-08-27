@@ -1,9 +1,4 @@
-%% TZif files (RFC 8536): the binary format the IANA zoneinfo tree is compiled
-%% into, and the searches over the transition table it yields.
-%%
-%% A parsed zone is a flat value the caller keeps and hands back: see tz().
-%% Everything past its last recorded transition is governed by the POSIX
-%% footer, which arc_posix_tz owns.
+%% tzif files (rfc 8536) and transition search
 -module(arc_tzif).
 
 -export([parse/1, offset_at/2, first_transition_after/2,
@@ -11,32 +6,23 @@
 
 -export_type([tz/0, footer/0]).
 
-%% What governs the offset past a zone's last recorded transition. `none` only
-%% for TZif v1 files, which carry no footer at all.
 -type footer() :: none | arc_posix_tz:footer().
 
-%% The offset before the first transition, the ascending transition tuple
-%% ({Sec, OffSec} pairs, each one changing the offset — a *tuple* so a query can
-%% binary-search it), the footer, and the last transition's time (`none` when
-%% there are no transitions), precomputed rather than walked on every query.
+%% {tz, first offset, transitions tuple, footer, last transition sec}
 -type tz() :: {tz, integer(), tuple(), footer(), integer() | none}.
 
-%% ----------------------------------------------------------------------
-%% File format
-%% ----------------------------------------------------------------------
-
-%% Throws on anything that is not a well-formed TZif file; the caller catches.
+%% throws on malformed input, caller catches
 -spec parse(binary()) -> tz().
 parse(<<"TZif", Ver:8, _:15/binary, IsUt:32, IsStd:32, Leap:32,
         Timecnt:32, Typecnt:32, Charcnt:32, Rest/binary>>) ->
     case Ver of
         0 ->
-            %% Version 1: 32-bit data, no footer.
+            %% v1: 32-bit data, no footer
             {First, Trans, _After} =
                 parse_block(Rest, Timecnt, Typecnt, Charcnt, 4),
             make_zone(First, dedupe(First, Trans), none);
         _ ->
-            %% Version 2/3: skip the v1 block, parse the 64-bit block + footer.
+            %% v2/3: skip v1 block, parse 64-bit block and footer
             V1Size = Timecnt * 5 + Typecnt * 6 + Charcnt + Leap * 8
                      + IsStd + IsUt,
             <<_:V1Size/binary, "TZif", _V2:8, _:15/binary,
@@ -80,7 +66,7 @@ first_offset(Types) ->
         [] -> element(1, hd(Types))
     end.
 
-%% Drop transitions that do not change the UTC offset.
+%% drop transitions that keep the same offset
 dedupe(First, Trans) ->
     {_, Out} = lists:foldl(
                  fun({T, Off}, {Prev, Acc}) ->
@@ -91,7 +77,6 @@ dedupe(First, Trans) ->
                  end, {First, []}, Trans),
     lists:reverse(Out).
 
-%% The footer is a POSIX TZ string on its own line at the end of the file.
 parse_footer(<<"\n", Rest/binary>>) ->
     case binary:split(Rest, <<"\n">>) of
         [<<>>, _] -> none;
@@ -100,13 +85,6 @@ parse_footer(<<"\n", Rest/binary>>) ->
     end;
 parse_footer(_) -> none.
 
-%% ----------------------------------------------------------------------
-%% Transition search — every one of these is a binary search over the tuple
-%% ----------------------------------------------------------------------
-
-%% The offset a parsed zone reports at Sec: past the last recorded transition
-%% the POSIX footer rule takes over, before it a binary search over the
-%% transition array answers in O(log n).
 -spec offset_at(tz(), integer()) -> integer().
 offset_at({tz, First, Trans, Footer, LastT}, Sec) ->
     UseFooter = Footer =/= none andalso
@@ -116,9 +94,6 @@ offset_at({tz, First, Trans, Footer, LastT}, Sec) ->
         false -> offset_from_transitions(First, Trans, Sec)
     end.
 
-%% Offset in effect at Sec: the offset of the last transition at or before it,
-%% First when there is none. Zones carry a couple hundred transitions and this
-%% runs on every Date getter.
 offset_from_transitions(First, Trans, Sec) ->
     search_transitions(First, Trans, Sec, 1, tuple_size(Trans)).
 
@@ -130,9 +105,6 @@ search_transitions(Acc, Trans, Sec, Lo, Hi) ->
         _ -> search_transitions(Acc, Trans, Sec, Lo, Mid - 1)
     end.
 
-%% Smallest transition time strictly after Sec, `none` if there is none. Past
-%% the last recorded transition the POSIX footer rule generates them, exactly as
-%% offset_at/2 defers to it.
 -spec first_transition_after(tz(), integer()) -> integer() | none.
 first_transition_after({tz, _First, Trans, Footer, LastT}, Sec) ->
     case search_after(none, Trans, Sec, 1, tuple_size(Trans)) of
@@ -148,8 +120,6 @@ search_after(Best, Trans, Sec, Lo, Hi) ->
         _ -> search_after(Best, Trans, Sec, Mid + 1, Hi)
     end.
 
-%% Look a couple of years either side of Sec for the earliest footer-generated
-%% transition after both Sec and the last recorded one.
 footer_next(none, _LastT, _Sec) -> none;
 footer_next(Footer, LastT, Sec) ->
     FromY = case LastT of
@@ -164,9 +134,6 @@ footer_next(Footer, LastT, Sec) ->
         _ -> lists:min(Cands)
     end.
 
-%% Largest transition time strictly before Sec, `none` if there is none. When
-%% Sec is past the last recorded transition the footer rule may have fired since
-%% then; otherwise the recorded table answers.
 -spec last_transition_before(tz(), integer()) -> integer() | none.
 last_transition_before({tz, _First, Trans, Footer, LastT}, Sec) ->
     case footer_previous(Footer, LastT, Sec) of
@@ -182,9 +149,6 @@ search_before(Best, Trans, Sec, Lo, Hi) ->
         _ -> search_before(Best, Trans, Sec, Lo, Mid - 1)
     end.
 
-%% Latest footer-generated transition strictly before Sec that postdates the
-%% recorded ones. The footer only takes over after the last recorded transition,
-%% so an instant at or before it has none from here.
 footer_previous(none, _LastT, _Sec) -> none;
 footer_previous(Footer, LastT, Sec) ->
     case LastT =:= none orelse Sec > LastT of

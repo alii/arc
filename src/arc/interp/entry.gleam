@@ -1,15 +1,3 @@
-//// Entry points of the bytecode interpreter: run a script, run one bytecode
-//// function to completion for the shared runtime, resume a parked coroutine
-//// frame, and `link`, which seeds those into an `Agent`'s `JsOps` so the
-//// runtime's builtins and compiled code can call back into bytecode.
-////
-//// Every root activation runs under ONE backstop `try` (`ffi.guard1`): the
-//// step loop is Result-based and catches runtime throws at each guarded
-//// call, so a `wasm_exn` reaching the backstop means an unguarded raise
-//// slipped through. It is still folded into a throw completion carrying the
-//// agent the exception travelled with, and the activation's `Error.stack`
-//// frames and depth are trued up to what they were on entry.
-
 import arc/bytecode/lexical
 import arc/bytecode/opcode.{
   AsyncYieldStarNext, CatchOnly, Finally, IterCloseGuard, Pc, YieldStar,
@@ -46,11 +34,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
-// -- Linking -------------------------------------------------------------------
-
-/// Seed the interpreter into `agent`: from here the runtime's `[[Call]]` /
-/// `[[Construct]]` of a `KBytecode` cell, its coroutine drivers and
-/// `eval`/`Function()` reach the functions below. Idempotent.
 pub fn link(agent: Agent) -> Agent {
   let store = agent.store
   Agent(..agent, store: JsStore(..store, ops: linked_ops(store.ops)))
@@ -67,18 +50,11 @@ fn linked_ops(ops: JsOps(Agent)) -> JsOps(Agent) {
   )
 }
 
-// -- Driving one activation --------------------------------------------------------
-
-/// How a root activation's turn ended once its own call stack emptied: it
-/// returned or threw, or (coroutine bodies only) parked at a `yield`/`await`
-/// in the state given.
 type Outcome {
   Finished(Result(JsVal, JsVal), State)
   Parked(state.SuspendKind, JsVal, State)
 }
 
-/// An engine fault has no channel of its own out of a `#(Completion, Agent)`
-/// entry point: it surfaces as a thrown TypeError naming the fault.
 fn fault(s: State, err: VmError) -> #(Result(JsVal, JsVal), State) {
   let #(e, s) =
     state.new_error(
@@ -89,10 +65,8 @@ fn fault(s: State, err: VmError) -> #(Result(JsVal, JsVal), State) {
   #(Error(e), s)
 }
 
-/// The loop's callbacks into this module.
 const drive = call.Drive(start_coroutine:)
 
-/// Drive `state` until its call stack empties or it parks.
 fn execute(state: State) -> Outcome {
   case interpreter.execute_inner(state, drive) {
     Ok(#(Completed(NormalCompletion(v)), s)) -> Finished(Ok(v), s)
@@ -105,8 +79,6 @@ fn execute(state: State) -> Outcome {
   }
 }
 
-/// `execute` for a frame that cannot resume a suspension (script, eval,
-/// plain function): a park escaping it is an engine fault.
 fn complete(state: State, site: String) -> #(Result(JsVal, JsVal), State) {
   case execute(state) {
     Finished(res, s) -> #(res, s)
@@ -114,8 +86,6 @@ fn complete(state: State, site: String) -> #(Result(JsVal, JsVal), State) {
   }
 }
 
-/// What the backstop restores: the `Error.stack` frames and call depth the
-/// agent had before this activation pushed anything.
 type EntryMark {
   EntryMark(frames: List(FrameInfo), call_depth: Int)
 }
@@ -124,10 +94,7 @@ fn mark(agent: Agent) -> EntryMark {
   EntryMark(frames: agent.frames, call_depth: agent.call_depth)
 }
 
-/// True `agent` up to `m`. On the ordinary paths this is a no-op (every
-/// frame pushed has been popped); after a backstop catch, or a throw that
-/// unwound out of the root frame, it discards what the abandoned frames
-/// left behind.
+// restore frames and depth after an abandoned activation
 fn settle(agent: Agent, m: EntryMark) -> Agent {
   case agent.call_depth == m.call_depth && agent.frames == m.frames {
     True -> agent
@@ -135,8 +102,6 @@ fn settle(agent: Agent, m: EntryMark) -> Agent {
   }
 }
 
-/// Run `body` from `agent` under the backstop, yielding its result and the
-/// agent trued up to `m`.
 fn backstopped(
   agent: Agent,
   m: EntryMark,
@@ -149,10 +114,6 @@ fn backstopped(
   }
 }
 
-/// Run a prepared root activation (script body, eval code, module body)
-/// until its call stack empties: `Ok(value)` / `Error(thrown)` and the agent
-/// it finished in, with the activation's `Error.stack` frame pushed for the
-/// duration. This is the `Run` the eval machinery is handed.
 pub fn run(state: State) -> #(Result(JsVal, JsVal), Agent) {
   let m = mark(state.agent)
   let agent = call.push_frame_info(state.agent, state.func)
@@ -170,10 +131,6 @@ fn to_completion(res: Result(JsVal, JsVal)) -> Completion {
   }
 }
 
-// -- Scripts ---------------------------------------------------------------------
-
-/// Locals for global code: all `undefined` except the lexical `this` slot,
-/// which holds the global object (§9.1.1.4.11 GetThisBinding).
 fn top_level_locals(template: FuncTemplate, this: JsVal) -> TupleArray(JsVal) {
   let locals = tuple_array.repeat(mk_undefined(), template.local_count)
   case lexical.lexical_slot(template.lexical, lexical.RefThis) {
@@ -182,9 +139,6 @@ fn top_level_locals(template: FuncTemplate, this: JsVal) -> TupleArray(JsVal) {
   }
 }
 
-/// A root activation of `template` in the current realm's global environment
-/// (§16.1.6 ScriptEvaluation steps 1-11): `this` is the global object. Each
-/// call is a fresh evaluation of the script, so it takes a new parse id.
 pub fn script_state(agent: Agent, template: FuncTemplate) -> State {
   let this = mk_object(agent.realm.global_object)
   let #(unit, agent) = rt_store.t_next_unit_uid(agent)
@@ -208,11 +162,6 @@ pub fn script_state(agent: Agent, template: FuncTemplate) -> State {
   )
 }
 
-/// §16.1.6 ScriptEvaluation of a compiled script in `agent`'s current realm.
-/// Global declarations are instantiated by the script's own prologue
-/// opcodes; lexical globals persist on the realm, so consecutive scripts on
-/// the returned agent share one global environment. Microtasks are NOT
-/// drained here: the engine's turn epilogue owns the one drain.
 pub fn run_script(
   agent: Agent,
   template: FuncTemplate,
@@ -221,16 +170,6 @@ pub fn run_script(
   #(to_completion(res), agent)
 }
 
-// -- JsOps.call_bytecode / construct_bytecode ----------------------------------
-
-/// `JsOps.call_bytecode`: [[Call]] of the bytecode cell `fn_h` (its `kind`
-/// already read by the caller) as a fresh root activation over `this` and
-/// `args`, run until ITS call stack empties. The activation's unit of
-/// `call_depth` is taken here, as `rt/call.t_call` does for every other
-/// callee kind: RangeError at `limits.max_call_depth`. A throw comes back as
-/// `Error`, never as a raise. §10.2.1.1 PrepareForOrdinaryCall step 5: the
-/// callee's [[Realm]] is the running realm while its body runs and the
-/// caller's is restored once it unwinds.
 pub fn call_bytecode(
   st: Agent,
   fn_h: Handle,
@@ -252,11 +191,6 @@ pub fn call_bytecode(
   }
 }
 
-/// `JsOps.bind_call`: `call_bytecode` of `fn_h` (of kind `kind`) over
-/// `this`, taking the args later and raising its throw. What does not vary
-/// with the args is decided once: a plain function of the running realm goes
-/// straight to `run_plain_call` each time; anything else through
-/// `call_bytecode` whole.
 pub fn bind_call(
   st: Agent,
   fn_h: Handle,
@@ -282,9 +216,6 @@ pub fn bind_call(
   }
 }
 
-/// One call through `bind_call`'s binding of a plain, callable function of
-/// the running realm: `run_plain_call` with the depth check in front and
-/// the throw raised rather than returned.
 fn call_bound(
   st: Agent,
   callee: call.RootCallee,
@@ -322,21 +253,12 @@ fn raised(outcome: #(Result(JsVal, JsVal), Agent)) -> #(JsVal, Agent) {
   }
 }
 
-/// The RangeError completion a call refused at `limits.max_call_depth`
-/// answers with, thrown in the caller's frame.
 fn depth_exceeded(st: Agent) -> #(Result(JsVal, JsVal), Agent) {
   let #(e, st) =
     st.store.ops.new_error(st, RangeErr, "Maximum call stack size exceeded")
   #(Error(e), st)
 }
 
-/// A [[Call]] root activation: `enter_root` binds `this`, refuses a class
-/// constructor and takes the depth unit and `Error.stack` frame; a generator
-/// or async body starts through the coroutine driver and completes with its
-/// generator object / promise; anything else runs to its `Return`, whose
-/// value is the result as-is (§10.2.2's return rules apply to constructs
-/// only). This owns the backstop, and hands back the agent trued up to the
-/// frames and depth it entered with.
 fn run_call(
   st: Agent,
   fn_h: Handle,
@@ -355,8 +277,6 @@ fn run_call(
       let m = mark(st)
       case call.enter_root(st, callee, this, args, mk_undefined()) {
         Error(#(thrown, st)) -> #(Error(thrown), st)
-        // `start_coroutine` gives the body its own `Error.stack` frame:
-        // drop the one `enter_root` pushed rather than show it twice.
         Ok(state) -> {
           let agent = call.pop_frame_info(state.agent)
           let body = fn(agent) {
@@ -374,9 +294,6 @@ fn run_call(
   }
 }
 
-/// `run_call` of a plain (non-coroutine) function: enter the root frame and
-/// run it to its `Return` under the backstop, then true the agent up to the
-/// frames and depth it entered with.
 fn run_plain_call(
   st: Agent,
   callee: call.RootCallee,
@@ -401,9 +318,6 @@ fn run_plain_call(
   }
 }
 
-/// The body of a plain root call under the backstop: run to the `Return`.
-/// `complete` unrolled for the callback path, so a normal return costs no
-/// intermediate wrappers; the caller leaves the activation's frame.
 fn complete_call(state: State) -> #(Result(JsVal, JsVal), Agent) {
   case interpreter.execute_inner(state, drive) {
     Ok(#(Completed(NormalCompletion(v)), s)) -> #(Ok(v), s.agent)
@@ -419,14 +333,6 @@ fn complete_call(state: State) -> #(Result(JsVal, JsVal), Agent) {
   }
 }
 
-/// `JsOps.construct_bytecode`: §10.2.2 [[Construct]] of the bytecode cell
-/// `fn_h` (IsConstructor already checked by `t_construct`). `t_construct`
-/// dispatches here unbracketed, so the construct's unit of `call_depth` is
-/// taken here (by `enter_root`), as `rt/call.apply_ctor` does for a compiled
-/// constructor: RangeError at `limits.max_call_depth`, and the body's
-/// root-`Return` safepoint kept shut over the caller's registers. The result
-/// is always an object: `root_this`/`finish_root` create the receiver and
-/// apply the return override, so a non-object here is an engine fault.
 pub fn construct_bytecode(
   st: Agent,
   fn_h: Handle,
@@ -457,19 +363,6 @@ pub fn construct_bytecode(
   }
 }
 
-/// The body of a [[Construct]] of the bytecode cell `cell`, run as a fresh
-/// root activation until its call stack empties, with the receiver
-/// `root_this` creates and the constructor return rules applied to the
-/// result. `enter_root` owns the depth unit and the `Error.stack` frame;
-/// this owns the backstop.
-///
-/// §10.2.2 [[Construct]] steps 1-3 create the receiver in the caller's
-/// context, so `root_this` runs before the realm switch. §10.2.1.1
-/// PrepareForOrdinaryCall step 5: the callee's [[Realm]] is the running
-/// realm while its body runs and the caller's is restored once it unwinds
-/// (also on a throw, which arrives here as a completion). §10.2.2 steps
-/// 10-13 — the return-override / uninitialised-`this` checks — run after
-/// that restore, so their errors are the caller's.
 fn run_construct(
   st: Agent,
   cell: Handle,
@@ -518,8 +411,6 @@ fn run_construct(
   }
 }
 
-/// How a construct's body ended: already a completion (a throw), or a plain
-/// `Return` whose value still owes the constructor return rules.
 type RootOutcome {
   RootSettled(Completion)
   RootReturned(JsVal, State)
@@ -529,10 +420,6 @@ fn escaped(thrown: JsVal) -> RootOutcome {
   RootSettled(ThrowCompletion(thrown))
 }
 
-/// A generator / async root call (never a [[Construct]]: neither kind is a
-/// constructor): the driver turns the laid-out frame into its generator
-/// object or promise and pushes it onto the (empty) root stack; the body
-/// itself never runs to a Return here.
 fn start_coroutine_root(
   st: State,
   coroutine: call.CoroutineCall,
@@ -553,24 +440,6 @@ fn start_coroutine_root(
   }
 }
 
-// -- Coroutine calls (Drive.start_coroutine) --------------------------------------
-
-/// A call whose callee is a generator, async function or async generator,
-/// with its frame already laid out by `call`. The body becomes a root
-/// activation of its own; what the caller receives is pushed onto
-/// `rest_stack` and the caller moves past its Call opcode.
-///
-/// - generator / async generator (§27.5.3.1 GeneratorStart): the body runs
-///   now up to its `InitialYield` (FunctionDeclarationInstantiation is call
-///   time work) and is parked there; the runtime allocates the generator over
-///   `ResumeFrame(frame)`. A throw before InitialYield is the call's throw.
-/// - async function (§27.7.5.1 AsyncFunctionStart): the frame is parked at
-///   pc 0 unrun and handed to `t_async_run`, which runs the first turn
-///   through `resume_frame` and returns the result promise.
-///
-/// Either way that first stretch of the body is a nested activation run
-/// while the caller's registers live only in Gleam variables, so it holds
-/// one unit of `call_depth` (`nested`), given back by settling to the mark.
 fn start_coroutine(
   caller: State,
   c: call.CoroutineCall,
@@ -588,8 +457,6 @@ fn start_coroutine(
   let caller = State(..caller, stack: rest_stack)
   let m = mark(caller.agent)
   use agent <- nested(caller)
-  // The body's own `Error.stack` frame, so neither its first stretch nor
-  // the parked snapshot's line reads the caller's.
   let body =
     State(
       agent: call.push_frame_info(agent, template),
@@ -619,8 +486,6 @@ fn start_coroutine(
   }
   case template.is_generator {
     False -> {
-      // Only the snapshot is taken from `body`; `resume_frame` pushes the
-      // live frame when `t_async_run` runs the first turn on `agent`.
       let frame = park.park(body, ParkedStart)
       case ffi.guard2(rt_async.t_async_run, agent, ResumeFrame(frame)) {
         ffi.Ok(value: promise, agent:) -> resume(agent, mk_object(promise))
@@ -639,8 +504,6 @@ fn start_coroutine(
           resume(agent, mk_object(obj))
         }
         Finished(Error(thrown), s) -> threw(s.agent, thrown)
-        // InitialYield is the body's first suspension point: it can neither
-        // complete nor await before reaching it.
         Finished(Ok(_), s) | Parked(state.Await, _, s) ->
           Error(state.VmFailed(
             state.InternalError("start_coroutine", "body missed InitialYield"),
@@ -650,12 +513,7 @@ fn start_coroutine(
   }
 }
 
-/// Take one unit of `call_depth` for a nested activation entered straight
-/// from an opcode arm (the convention `eval.run_bracketed` states): the
-/// caller's frame is not among the collector's roots while it runs, and a
-/// positive depth is what keeps the root-`Return` safepoint shut. The same
-/// unit bounds recursion through such entries: at `limits.max_call_depth`
-/// the entry is refused with a RangeError thrown in the caller.
+// caller frame is not a gc root while nested runs
 fn nested(
   caller: State,
   k: fn(Agent) -> Result(State, state.StepExit),
@@ -671,10 +529,6 @@ fn nested(
   }
 }
 
-// -- JsOps.eval_hook -----------------------------------------------------------
-
-/// `JsOps.eval_hook`: indirect eval, `Function()` bodies and
-/// `$262.evalScript`, driven by `run`.
 pub fn eval_source(
   st: Agent,
   source: String,
@@ -683,19 +537,7 @@ pub fn eval_source(
   eval.eval_hook(st, source, kind, run)
 }
 
-// -- JsOps.resume_frame ----------------------------------------------------------
-
-/// `JsOps.resume_frame`: continue the parked coroutine body `frame` with
-/// `sent` = `#(mode, value)`, mode 0 `.next(value)` / await fulfilled, 1
-/// `.throw(value)` / await rejected, 2 `.return(value)`, for one turn, and
-/// report how the turn ended; a turn that parks again hands back the new
-/// frame inside the `Step`. The driver (`rt/async`) owns the generator state
-/// transitions and the depth bracket; this owns the body's `Error.stack`
-/// frame and the backstop.
-///
-/// The turn runs with the body's [[Realm]] current, as `run_root` does for a
-/// call: an Await continuation job or a `.next()` from another realm still
-/// resumes the body in the realm that created it (§27.7.5.3, §10.2.1.1).
+// mode 0 next, 1 throw, 2 return
 pub fn resume_frame(
   st: Agent,
   frame: SuspendedFrame,
@@ -715,8 +557,6 @@ pub fn resume_frame(
       ParkedDelegateReturn, 0 -> delegate_returned(s, value)
       ParkedReturnValue, 0 -> step_of(return_into(s, value))
       ParkedDelegateClose, 0 -> delegate_closed(s, value)
-      // A rejected delegate await (or an abrupt completion delivered before
-      // the body ran) lands at the parked point like any other.
       _, 1 -> step_of(throw_into(s, value))
       _, _ -> step_of(return_into(s, value))
     }
@@ -724,8 +564,6 @@ pub fn resume_frame(
   backstopped(agent, m, turn, StepThrow)
 }
 
-/// A turn's outcome as the coroutine driver's `Step`; a park hands back the
-/// frame to resume.
 fn step_of(outcome: Outcome) -> #(Step, Agent) {
   case outcome {
     Finished(Ok(v), s) -> #(StepReturn(v), s.agent)
@@ -738,16 +576,10 @@ fn step_of(outcome: Outcome) -> #(Step, Agent) {
   }
 }
 
-/// The turn ends awaiting `v`; its settlement resumes `s` as `parked` says.
 fn await_at(s: State, v: JsVal, parked: ParkedAt) -> #(Step, Agent) {
   #(StepAwait(v, ResumeFrame(park.park(s, parked))), s.agent)
 }
 
-/// Run a prepared root activation for its first turn: until its call stack
-/// empties or the body parks, with the activation's `Error.stack` frame
-/// pushed for the duration. This is how a module body runs (§16.2.1.5.3.4
-/// ExecuteAsyncModule): it may park on a top-level `await`, and the `Step`
-/// then carries the frame `resume_frame` continues like any async body.
 pub fn run_turn(state: State) -> #(Step, Agent) {
   let m = mark(state.agent)
   let agent = call.push_frame_info(state.agent, state.func)
@@ -755,8 +587,6 @@ pub fn run_turn(state: State) -> #(Step, Agent) {
   backstopped(agent, m, turn, StepThrow)
 }
 
-/// Deliver a throw completion at the body's current point: it lands on the
-/// innermost enclosing handler, or ends the body.
 fn throw_into(s: State, thrown: JsVal) -> Outcome {
   case interpreter.unwind_to_catch(s, thrown) {
     Some(caught) -> execute(caught)
@@ -764,24 +594,15 @@ fn throw_into(s: State, thrown: JsVal) -> Outcome {
   }
 }
 
-/// `throw_into` with a fresh TypeError.
 fn throw_type_into(s: State, msg: String) -> #(Step, Agent) {
   let #(e, s) = state.new_error(s, TypeErr, msg)
   step_of(throw_into(s, e))
 }
 
-// -- yield* delegation (§27.5.3.8 steps 7.b / 7.c) -----------------------------
-// A body parked mid-`yield*` sits ON its delegation opcode with the delegate's
-// Iterator Record on top of the operand stack: `YieldStar` in a generator,
-// `AsyncYieldStarNext` (followed by `Await; AsyncYieldStarResume`) in an
-// async generator. `.next(v)` re-runs the opcode, which calls the delegate's
-// `next` itself; `.throw(v)` / `.return(v)` are forwarded to the delegate
-// here, since the opcode only ever sees normal resumptions.
+// §27.5.3.8 step 7.b/7.c yield* delegation
 
 const missing_throw = "The iterator does not provide a 'throw' method."
 
-/// The delegation a parked body is in: the record, the stack under it, and
-/// for the async lowering the pc of the `Await` after the site.
 type DelegateSite {
   SyncSite(record: IteratorRecord, rest: List(JsVal))
   AsyncSite(record: IteratorRecord, rest: List(JsVal), await_pc: Int)
@@ -806,8 +627,6 @@ fn site_record(site: DelegateSite) -> IteratorRecord {
   }
 }
 
-/// §7.3.10 GetMethod(iterator, name) on the delegate: `Ok(None)` when the
-/// property is undefined or null. A callable check is left to the call.
 fn delegate_method(
   s: State,
   site: DelegateSite,
@@ -824,7 +643,6 @@ fn delegate_method(
   }
 }
 
-/// Call(method, iterator, «value») on the delegate.
 fn call_delegate(
   s: State,
   site: DelegateSite,
@@ -838,8 +656,6 @@ fn call_delegate(
   )
 }
 
-/// A throw completion arriving at the body: forwarded to the delegate when
-/// parked mid-`yield*` (step 7.b), else delivered at the parked point.
 fn inject_throw(s: State, thrown: JsVal) -> #(Step, Agent) {
   case delegate_site(s) {
     None -> step_of(throw_into(s, thrown))
@@ -847,8 +663,6 @@ fn inject_throw(s: State, thrown: JsVal) -> #(Step, Agent) {
   }
 }
 
-/// A return completion arriving at the body: forwarded to the delegate when
-/// parked mid-`yield*` (step 7.c), else unwound from the parked point.
 fn inject_return(s: State, value: JsVal) -> #(Step, Agent) {
   case delegate_site(s) {
     None -> step_of(return_into(s, value))
@@ -856,9 +670,6 @@ fn inject_return(s: State, value: JsVal) -> #(Step, Agent) {
   }
 }
 
-/// A `StepExit` from a guarded delegate call: a throw becomes the `yield*`
-/// expression's completion inside the body; anything else cannot come out of
-/// a single guarded runtime call.
 fn delegate_exit(exit: state.StepExit) -> #(Step, Agent) {
   case exit {
     state.Threw(thrown, s) -> step_of(throw_into(s, thrown))
@@ -883,15 +694,6 @@ fn or_delegate_exit(
   }
 }
 
-/// Step 7.b: `throw = GetMethod(iterator, "throw")`.
-/// - present: `Call(throw, iterator, «thrown»)`; a generator reads the
-///   result now (done: the `yield*` evaluates to its value; not done: yield
-///   it and keep delegating); an async generator continues into the site's
-///   own `Await; AsyncYieldStarResume`, which do exactly that once the
-///   result settles.
-/// - absent: close the delegate (IteratorClose / AsyncIteratorClose with a
-///   normal completion, whose own errors win), then throw a TypeError at
-///   the site.
 fn forward_throw(
   s: State,
   site: DelegateSite,
@@ -919,13 +721,11 @@ fn forward_throw(
       throw_type_into(s, missing_throw)
     }
     None, AsyncSite(record:, ..) -> {
-      // AsyncIteratorClose steps 3-4: GetMethod + Call, both caught.
       use #(closed, s) <- or_delegate_exit(
         call.guarded(s, iter_protocol.call_return(_, record.iterator)),
       )
       case closed {
         Ok(iter_protocol.NoReturnMethod) -> throw_type_into(s, missing_throw)
-        // Steps 5-7 run when the result settles.
         Ok(iter_protocol.Returned(result)) ->
           await_at(s, result, ParkedDelegateClose)
         Error(thrown) -> step_of(throw_into(s, thrown))
@@ -934,13 +734,6 @@ fn forward_throw(
   }
 }
 
-/// Step 7.c: `return = GetMethod(iterator, "return")`.
-/// - absent: the return completion carries on out of the `yield*`; an async
-///   generator awaits the value once more first (step 7.c.iii.2, on top of
-///   the driver's AsyncGeneratorUnwrapYieldResumption).
-/// - present: `Call(return, iterator, «value»)`; a generator reads the
-///   result now (done: return its value out of the body; not done: yield it
-///   and keep delegating); an async generator awaits it first.
 fn forward_return(
   s: State,
   site: DelegateSite,
@@ -961,9 +754,6 @@ fn forward_return(
   }
 }
 
-/// IteratorComplete / IteratorValue on a forwarded call's result `res` with
-/// the body still parked at the site: not done yields the value and keeps
-/// delegating; done hands the value to `on_done`.
 fn delegate_result(
   s: State,
   res: JsVal,
@@ -980,8 +770,6 @@ fn delegate_result(
   }
 }
 
-/// The delegate's `.return(v)` result settled (step 7.c.v-viii): done ends
-/// the body with a return completion of its value, not done yields it.
 fn delegate_returned(s: State, settled: JsVal) -> #(Step, Agent) {
   let rest = case s.stack {
     [_rec, ..rest] -> rest
@@ -990,9 +778,6 @@ fn delegate_returned(s: State, settled: JsVal) -> #(Step, Agent) {
   delegate_result(s, settled, rest, fn(s, val) { step_of(return_into(s, val)) })
 }
 
-/// AsyncIteratorClose settled after a missing `.throw` (steps 6-7 of
-/// §7.4.13, then step 7.b.iii.6): a non-object result is its own TypeError,
-/// otherwise the missing-method TypeError is thrown at the site.
 fn delegate_closed(s: State, settled: JsVal) -> #(Step, Agent) {
   case rt_val.is_object(settled) {
     True -> throw_type_into(s, missing_throw)
@@ -1000,13 +785,6 @@ fn delegate_closed(s: State, settled: JsVal) -> #(Step, Agent) {
   }
 }
 
-// -- Return injection (§27.5.3.4 GeneratorResumeAbrupt, return) --------------
-// Walk the parked body's try stack outwards, running each enclosing
-// `finally` block and closing each live for-of / destructuring iterator
-// (§7.4.9), until nothing intercepts the return.
-
-/// The innermost try frame that must react to a return completion, with the
-/// frames outside it.
 type ReturnHandler {
   FinallyHandler(fin_pc: Int, stack_depth: Int, rest: List(bytecode.TryFrame))
   IterCloseHandler(stack_depth: Int, rest: List(bytecode.TryFrame))
@@ -1033,13 +811,7 @@ fn truncate_stack(stack: List(JsVal), depth: Int) -> List(JsVal) {
   }
 }
 
-/// Deliver a return completion of `value` at the body's current point:
-/// - nothing intercepts it: the body finishes with `value`;
-/// - a `finally` runs and falls off its end: keep unwinding with what the
-///   subroutine completed with (a `return x` inside it wins, §14.15.3);
-/// - a `finally` parks or throws: that is the turn's outcome;
-/// - an iterator close throws or yields a non-object: the return becomes
-///   that throw, unwinding through the REMAINING frames.
+// §27.5.3.4 return: run finallys, close iterators outwards
 fn return_into(s: State, value: JsVal) -> Outcome {
   case find_return_handler(s.try_stack) {
     None -> Finished(Ok(value), s)
@@ -1049,22 +821,18 @@ fn return_into(s: State, value: JsVal) -> Outcome {
           let s = State(..s, try_stack: rest, stack: base)
           case classify(slot) {
             KHandle(_) -> close_for_return(s, slot, value)
-            // The loop's [[Done]] path leaves a non-object in the slot:
-            // nothing to close.
             _ -> return_into(s, value)
           }
         }
         [] -> return_into(State(..s, try_stack: rest, stack: []), value)
       }
     Some(FinallyHandler(fin_pc, stack_depth, rest)) -> {
-      // Enter the finally subroutine with the gosub convention: stack =
-      // [retpc, slot, ..base]; retpc -1 tells Ret to complete the frame
-      // with the slot value.
       let base = truncate_stack(s.stack, stack_depth)
       let fin =
         State(
           ..s,
           try_stack: rest,
+          // retpc -1 tells Ret to complete with the slot
           stack: [mk_number(JInt(-1)), value, ..base],
           pc: fin_pc,
         )
@@ -1076,10 +844,6 @@ fn return_into(s: State, value: JsVal) -> Outcome {
   }
 }
 
-/// §7.4.9 IteratorClose(record, return completion) with the
-/// normal-completion rules: a throwing or non-object `.return()` result
-/// replaces the return with that throw, which the body's remaining handlers
-/// may catch. A record already marked done is left alone.
 fn close_for_return(s: State, record: JsVal, value: JsVal) -> Outcome {
   case call.guarded_unit(s, rt_lang.t_iter_close(_, record, False)) {
     Ok(s) -> return_into(s, value)

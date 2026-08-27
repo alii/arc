@@ -1,20 +1,4 @@
-%%% arc_rt_obj_ffi — own-property fast-path probes for `rt_obj`
-%%% (SPEC §7.M4).
-%%%
-%%% Hand-written Erlang, so it carries the `arc_rt_` namespace prefix
-%%% (overview §5) and can NEVER collide with an OTP module — exactly like
-%%% `arc_rt_call_ffi`. Pure term construction / pattern matching over the
-%%% threaded `St`: no NIF, no process state, cannot crash the node.
-%%%
-%%% Why a shim: the emitted `.x` / `.x = v` / `a[i]` fast paths want a
-%%% SINGLE probe for the common case (own writable DataProperty on an
-%%% ordinary SObject, own slot on an SShapedObject, in-bounds ArrayObj
-%%% element) with NO cross-module `classify`/`as_object_key`/`t_get_prop`
-%%% proto-walk chain. On any shape miss the atom `miss` is returned and the
-%%% emitter's guard falls back to the full `t_get_prop_any` /
-%%% `t_set_prop_any` path. Reads return the bare value; writes return the
-%%% rebuilt `St'`. The interpreter's kernels (arc_interp_prop_ffi) share the
-%%% proto-chain predicate `named_free`.
+%% fast paths return miss and the caller takes the full path
 -module(arc_rt_obj_ffi).
 -export([t_get_prop_own_data/3, t_set_prop_own_data/4, t_set_prop_named/5,
          t_create_data_prop/4, store_put_seq/3,
@@ -27,12 +11,6 @@
          shape_slots_get/2, shape_slots_set/3, shape_slots_append/2,
          shape_slots_fold/3]).
 
-%% Record indices come from arc_rt_layout.hrl (asserted by
-%% arc_rt_layout_test). Plain tuples indexed here:
-%%   SShapedObject slots (plain tuple, arity = ShapeDesc.arity;
-%%     element(Off+1, Slots))
-%%   PropertyKey Named: {named, BinString}
-
 -include("arc_rt_layout.hrl").
 
 -compile({inline, [peek_get/3, slot_of/2, shape_offset/3, get_any/3,
@@ -40,24 +18,13 @@
                    peek_slot/3, index_write/4, elem_write/3,
                    named_free_next/5]}).
 
-%% IcEntry (rt_types.gleam): {ic_read, KeyBin, #{Sid => Off}} — up to
-%% ?IC_READ_WAYS shapes per site.
 -define(IC_READ, ic_read).
 -define(IC_READ_WAYS, 8).
 
-%% t_get_prop_own_data(St, {js_cell,Id}, KeyBin) -> V | miss
-%% JRead. Own DataProperty on an Ordinary SObject (kind=:=ordinary avoids
-%% ArrayObj's virtual "length") or own slot on an SShapedObject. Accessors,
-%% exotic kinds and absent keys → `miss` (the full path does the proto walk).
 t_get_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin) ->
     peek_get(St, Id, KeyBin);
 t_get_prop_own_data(_, _, _) -> miss.
 
-%% t_get_prop_ic(St, {js_cell,Id}, KeyBin, Site) -> V | miss
-%% JRead. Warm inline-cache hit for a compiled `.key` read site: the entry
-%% installed at `Site` names the shape it was seen on and the slot offset
-%% the key has in that shape (`arc/rt/types.IcEntry`). Anything else → `miss`
-%% and the emitter runs `t_get_prop_ic_miss`.
 t_get_prop_ic(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
     case element(?STORE_ICS, Store) of
@@ -74,10 +41,6 @@ t_get_prop_ic(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
     end;
 t_get_prop_ic(_, _, _, _) -> miss.
 
-%% t_get_prop_ic_miss(St, Recv, KeyBin, Site) -> {V | miss, St'}
-%% JMut. The own-data probe on the receiver, filling an empty `Site` from a
-%% shaped own hit. Kept for the host-op table; the emitted read sites use
-%% `t_get_prop_site` / `t_get_prop_slow`, which also walk the proto chain.
 t_get_prop_ic_miss(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
@@ -92,23 +55,12 @@ t_get_prop_ic_miss(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
     end;
 t_get_prop_ic_miss(St, _, _, _) -> {miss, St}.
 
-%% t_get_prop_slow(St, Recv, KeyBin, Site) -> {V, St'}
-%% JMut. Everything past the IC hit for a compiled `.key` read, on ONE read
-%% of the receiver cell: the own slot / own DataProperty (a shaped own hit
-%% fills `Site` when it is still empty), then the §10.1.8.1 proto walk while
-%% every hop is a plain data lookup (`proto_read`), and only an accessor, an
-%% exotic hop or a primitive receiver's wrapper miss reaches the Gleam
-%% [[Get]]. The emitter runs `t_get_prop_ic` (JRead, no St alloc on a hit)
-%% and calls this on `miss`.
 t_get_prop_slow(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     read_named(St, Store, Data, Recv, arc_rt_arena_ffi:get(Id, Data), KeyBin, Site);
 t_get_prop_slow(St, Recv, KeyBin, _) -> read_prim(St, Recv, KeyBin).
 
-%% t_get_prop_site(St, Recv, KeyBin, Site) -> {V, St'}
-%% JMut. The whole compiled `.key` read at one site: IC hit on the slot read
-%% here, else `read_named` on that same slot.
 t_get_prop_site(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
@@ -120,8 +72,6 @@ t_get_prop_site(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
                     {element(Off + 1, Slots), St};
                 _ -> read_named(St, Store, Data, Recv, Slot, KeyBin, Site)
             end;
-        %% An ordinary object's own data property: the common namespace /
-        %% literal read, answered without the IC.
         {?SOBJECT_TAG, ?ORDINARY, _, #{{?KEY_NAMED, KeyBin} := Prop}, _, _, _}
           when element(1, Prop) =:= ?DATAPROP_TAG ->
             {element(?DATAPROP_VALUE, Prop), St};
@@ -129,7 +79,6 @@ t_get_prop_site(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
     end;
 t_get_prop_site(St, Recv, KeyBin, _) -> read_prim(St, Recv, KeyBin).
 
-%% The read past the IC probe, on the receiver's already-read Slot.
 read_named(St, Store, Data, Recv, {?SSHAPED_TAG, Sid, Proto, Slots}, KeyBin,
            Site) ->
     Shapes = element(?STORE_SHAPES, Store),
@@ -157,8 +106,6 @@ read_named(St, Store, Data, Recv, Slot, KeyBin, _)
                     read_proto(St, Data, element(?STORE_SHAPES, Store),
                                element(?SOBJECT_PROTO, Slot), Recv, KeyBin)
             end;
-        %% §10.4.2 Array "length" always tracks ArrayObj.length (a props
-        %% entry only overrides its attributes), an integer JsVal as is.
         false when element(1, Kind) =:= ?ARRAYOBJ_TAG ->
             {element(?ARRAYOBJ_LENGTH, Kind), St};
         false -> get_any(St, Recv, KeyBin)
@@ -171,9 +118,6 @@ read_proto(St, Data, Shapes, Proto, Recv, KeyBin) ->
         V -> {V, St}
     end.
 
-%% A string / number primitive has no own named props besides String
-%% "length" (§10.4.3.5), so a data read walks the realm's wrapper prototype;
-%% a getter there misses so the full path passes the primitive as `this`.
 read_prim(St, Bin, <<"length">>) when is_binary(Bin) ->
     {arc_string_ffi:string_codepoint_length(Bin), St};
 read_prim(St, Bin, KeyBin) when is_binary(Bin) ->
@@ -191,13 +135,7 @@ read_wrapper(St, Which, Recv, KeyBin) ->
 get_any(St, Recv, KeyBin) ->
     'arc@rt@obj':t_get_prop_any(St, Recv, {?OKEY_STRING, {?KEY_NAMED, KeyBin}}).
 
-%% proto_read(Data, Shapes, Proto, KeyBin, Fuel) -> V | undefined | miss
-%% §10.1.8.1 OrdinaryGet steps 1-3 from the prototype link `Proto` down,
-%% while every hop is a plain lookup: an own slot on an SShapedObject, or an
-%% own DataProperty in an SObject's props map for a kind whose named keys
-%% are not virtual (`named_plain`). An accessor, an exotic hop, a dangling
-%% handle or more than Fuel hops miss; absent on the whole chain is
-%% `undefined`, exactly as OrdinaryGet answers.
+%% §10.1.8.1 ordinary get while every hop is plain data
 proto_read(_, _, ?NONE, _, _) -> undefined;
 proto_read(_, _, _, _, 0) -> miss;
 proto_read(Data, Shapes, {?SOME, {?HANDLE_TAG, Id}}, KeyBin, Fuel) ->
@@ -230,12 +168,6 @@ proto_read(Data, Shapes, {?SOME, {?HANDLE_TAG, Id}}, KeyBin, Fuel) ->
     end;
 proto_read(_, _, _, _, _) -> miss.
 
-%% Whether a Named key on this ObjKind is a plain props-map entry for
-%% [[Get]], [[Set]] and property creation (rt/obj own_property_of, get_from,
-%% set_from): Proxy, module namespace and TypedArray cells are exotic for
-%% string keys, Array / String objects synthesize "length", and a
-%% function's "length", "name" and "prototype" may not be in its props yet
-%% (rt/types FnBirth).
 named_plain(?ORDINARY, _) -> true;
 named_plain(Kind, _) when is_atom(Kind) -> true;
 named_plain(Kind, KeyBin) ->
@@ -250,8 +182,6 @@ named_plain(Kind, KeyBin) ->
         _ -> true
     end.
 
-%% Pending birth props (rt/types FnBirth): "length" and "name" are not in
-%% the props map until settled, nor is "prototype" while its parent is Some.
 birth_plain(?BIRTH_SETTLED, _) -> true;
 birth_plain(_, <<"length">>) -> false;
 birth_plain(_, <<"name">>) -> false;
@@ -259,11 +189,6 @@ birth_plain(Birth, <<"prototype">>) ->
     element(?BIRTH_PROTOTYPE_PARENT, Birth) =:= ?NONE;
 birth_plain(_, _) -> true.
 
-%% Record shape Sid's offset for the key at Site: a fresh entry, or one more
-%% shape while the site holds fewer than ?IC_READ_WAYS (past that a new
-%% shape is a plain probe, never a store write, so a megamorphic site does
-%% not churn the store). A site holding another key is left alone. `none`:
-%% no site to fill.
 ic_fill(St, _, none, _, _, _) -> St;
 ic_fill(St, Store, Site, Sid, Off, KeyBin) ->
     Ics = element(?STORE_ICS, Store),
@@ -282,17 +207,11 @@ ic_fill(St, Store, Site, Sid, Off, KeyBin) ->
                                                 #{Sid => Off}}}))
     end.
 
-%% t_global_get_fast(St, KeyBin) -> V | miss
-%% JRead global-var read: own data prop on the realm's global object.
 t_global_get_fast(St, KeyBin) ->
     {?HANDLE_TAG, GId} = element(?REALM_GLOBAL, element(?AGENT_REALM, St)),
     Store = element(?AGENT_STORE, St),
     peek_slot(St, arc_rt_arena_ffi:get(GId, element(?STORE_DATA, Store)), KeyBin).
 
-%% t_global_get(St, KeyBin) -> {V, St'}
-%% JMut kernel behind the emitted `global_get` host op: the own-data probe
-%% above, then the full spec read (proto walk / accessors / ReferenceError)
-%% on a miss. One call per site instead of probe + is_atom + branch.
 t_global_get(St, KeyBin) ->
     case t_global_get_fast(St, KeyBin) of
         miss -> arc@rt@obj:t_global_get(St, KeyBin);
@@ -302,8 +221,6 @@ t_global_get(St, KeyBin) ->
 peek_get(St, Id, KeyBin) ->
     peek_slot(St, slot_of(St, Id), KeyBin).
 
-%% Own data value of an already-read slot: a shaped slot, or a DataProperty
-%% in the props map of a kind whose named keys are plain. `miss` otherwise.
 peek_slot(St, {?SSHAPED_TAG, Sid, _, Slots}, KeyBin) ->
     case shape_offset(St, Sid, KeyBin) of
         miss -> miss;
@@ -322,23 +239,7 @@ peek_slot(_, Slot, KeyBin) when element(1, Slot) =:= ?SOBJECT_TAG ->
     end;
 peek_slot(_, _, _) -> miss.
 
-%% t_set_prop_own_data(St, {js_cell,Id}, KeyBin, V) -> St' | miss
-%% JMutMiss. §10.1.9.1 OrdinarySet for a Named key when it lands on the
-%% receiver as plain data, on ONE read of the receiver cell:
-%%  * SShapedObject: overwrite an own slot, or ADD a field along the shape's
-%%    existing transition edge for KeyBin when the proto chain holds nothing
-%%    but writable data at KeyBin (`named_free`, steps 1-2) — the move
-%%    `set_own_shaped` makes; the first-ever transition still misses so shape
-%%    minting stays in Gleam.
-%%  * SObject of a kind whose named keys are plain (`named_plain`): replace
-%%    the value of an EXISTING own writable DataProperty (attributes and seq
-%%    kept, §10.1.9.2 step 2.c-d), or CREATE {V, W, E, C} on an extensible
-%%    receiver when the key is absent and the proto chain is `named_free`
-%%    (step 2.e, CreateDataProperty), stamped with the store's prop_seq.
-%% A non-writable property, an own accessor, a setter / read-only property up
-%% the chain, a non-extensible receiver for a new key and every exotic
-%% receiver → `miss` so the full `t_set_prop_any` runs. Returns the rebuilt
-%% St' (a tuple) on hit; the emitter's `is_atom` guard distinguishes it.
+%% §10.1.9.1 ordinary set when it lands as plain data
 t_set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
@@ -392,16 +293,9 @@ t_set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
     end;
 t_set_prop_own_data(_, _, _, _) -> miss.
 
-%% store_put_seq(Store, Data, Seq) -> Store2
-%% Store with new data and prop_seq; the arity guard lets the compiler build
-%% the updated store as one tuple.
 store_put_seq(Store, Data, Seq) when tuple_size(Store) =:= ?STORE_ARITY ->
     setelement(?STORE_PROP_SEQ, setelement(?STORE_DATA, Store, Data), Seq).
 
-%% t_set_prop_named(St, Obj, KeyBin, V, Strict) -> St'
-%% JMutUnit. The whole `.key = v` write in one call: the own-data probe above,
-%% then the full `t_set_prop_any` / `t_set_prop_strict` on miss. Yields only
-%% the rebound St'; the emitter already holds V.
 t_set_prop_named(St, Obj, KeyBin, V, Strict) ->
     case t_set_prop_own_data(St, Obj, KeyBin, V) of
         miss ->
@@ -414,16 +308,7 @@ t_set_prop_named(St, Obj, KeyBin, V, Strict) ->
         St1 -> St1
     end.
 
-%% t_create_data_prop(St, Recv, Key, V) -> {true, St'}
-%% JMut. §7.3.5 CreateDataProperty behind the `define_prop` host op (object
-%% literal members, class fields): a NEW plain key — Named on a kind whose
-%% named keys are plain, or Index on a kind whose indices are plain props —
-%% on an extensible SObject is one props insert stamped with prop_seq; a
-%% shaped receiver overwrites its slot or moves along an existing transition
-%% edge ([[DefineOwnProperty]] never consults the proto chain). Key is the
-%% SPEC§8 wire key (bare PropertyKey or {string_key, PropertyKey}). An
-%% existing key, a first-ever transition, a symbol and every exotic receiver
-%% take `arc@rt@obj:t_create_data_prop_slow`.
+%% §7.3.5 create data property, new plain key only
 t_create_data_prop(St, Recv = {?HANDLE_TAG, Id}, Key, V) ->
     PK = case Key of
         {?OKEY_STRING, K} -> K;
@@ -461,7 +346,6 @@ t_create_data_prop(St, Recv = {?HANDLE_TAG, Id}, Key, V) ->
 t_create_data_prop(St, Recv, Key, V) ->
     'arc@rt@obj':t_create_data_prop_slow(St, Recv, Key, V).
 
-%% New {V, W, E, C} entry under an absent key on an extensible SObject.
 plain_define(Slot, PK, V, Store) ->
     Seq = element(?STORE_PROP_SEQ, Store),
     Props = element(?SOBJECT_PROPS, Slot),
@@ -475,7 +359,6 @@ plain_define(Slot, PK, V, Store) ->
              Seq + 1}
     end.
 
-%% Overwrite the slot, or append along the shape's existing transition edge.
 shaped_define(Shapes, {?SSHAPED_TAG, Sid, P, Slots}, KeyBin, V) ->
     case Shapes of
         #{Sid := Desc} ->
@@ -493,17 +376,7 @@ shaped_define(Shapes, {?SSHAPED_TAG, Sid, P, Slots}, KeyBin, V) ->
         _ -> miss
     end.
 
-%% t_instanceof_fast(St, V, Ctor) -> 0 | 1 | miss
-%% JRead fast-path for §13.10.2 InstanceofOperator → §7.3.22
-%% OrdinaryHasInstance. Gate: `Ctor` is an s_object with `k_compiled` kind
-%% (NOT k_bound / proxy) and empty own `symbol_props` — so no own
-%% @@hasInstance override; the inherited Function.prototype[@@hasInstance]
-%% IS OrdinaryHasInstance, which this inlines — holding an own "prototype"
-%% DataProperty whose value is a cell `{js_cell, PId}`. Then walk `V`'s
-%% proto chain comparing cell-ids to `PId`, depth-capped at 64 hops → miss
-%% so a proxy-cycle falls to the full path's RangeError. Non-cell `V` → 0
-%% (§7.3.22 step 3). Any other shape → `miss` and the emitter falls back
-%% to `t_instance_of`.
+%% §7.3.22 ordinary has instance, depth capped at 64
 t_instanceof_fast(St, V, {?HANDLE_TAG, CId}) ->
     case slot_of(St, CId) of
         Slot when element(1, Slot) =:= ?SOBJECT_TAG,
@@ -525,18 +398,14 @@ t_instanceof_fast(St, V, {?HANDLE_TAG, CId}) ->
     end;
 t_instanceof_fast(_, _, _) -> miss.
 
-%% §7.3.22 step 7 chain walk. Fuel exhaustion on a `{js_cell,_}` V → miss
-%% (clause 2); non-cell V (bigint / symbol / primitive) → 0 (clause 3). A
-%% Proxy anywhere on the chain → miss: its [[GetPrototypeOf]] is a trap
-%% (§10.5.1), never the stored proto field.
 proto_has(St, {?HANDLE_TAG, VId}, PId, Fuel) when Fuel > 0 ->
     case slot_of(St, VId) of
         Slot when element(1, Slot) =:= ?SOBJECT_TAG,
                   element(1, element(?SOBJECT_KIND, Slot)) =:= ?PROXYOBJ_TAG ->
             miss;
-        %% proto is element 3 for BOTH s_object and s_shaped_object.
         Slot when element(1, Slot) =:= ?SOBJECT_TAG;
                   element(1, Slot) =:= ?SSHAPED_TAG ->
+            %% proto is element 3 in both slot kinds
             case element(?SOBJECT_PROTO, Slot) of
                 ?NONE -> 0;
                 {?SOME, {?HANDLE_TAG, PId}} -> 1;
@@ -549,37 +418,13 @@ proto_has(St, {?HANDLE_TAG, VId}, PId, Fuel) when Fuel > 0 ->
 proto_has(_, {?HANDLE_TAG, _}, _, _) -> miss;
 proto_has(_, _, _, _) -> 0.
 
-%% ──────────────────── indexed-element fast path ────────────────────
-%% deltablue OrderedCollection/Plan.execute() inner loops read
-%% `this.elms[i]` on every iteration; the general path is
-%% `to_property_key` (JMut, canonicalizes to {index,N}) → `t_get_prop_any`
-%% (proto walk + kind dispatch). This inlines the ArrayObj Dense/Sparse
-%% element read/write with a shape guard, the plain-object `{index,N}` props
-%% entry, and a string key as the named read/write; `miss` on anything
-%% exotic.
-%%   ObjKind ArrayObj: {array_obj, Length}.
-%%   JsElements: no_elements | {dense, array:array()} | {sparse, #{Int=>V}}.
-
-%% The largest array index, 2^32-2 (rt_types.max_array_index): a larger
-%% integer key is the Named string key of its decimal digits, never {index,N}.
+%% 2^32-2, rt_types.max_array_index
 -define(MAX_ARRAY_INDEX, 4294967294).
 
-%% t_get_elem_fast(St, Recv, Key) -> V | miss
-%% JRead. Recv={js_cell,Id}. Key a bare BEAM integer array index (the JsVal
-%% wire form for a JS integer number, or an integral float): an ArrayObj
-%% element with Idx < Length and no {index,Idx} props override, or the own
-%% `{index,Idx}` DataProperty of an object whose indices are plain props.
-%% Key a string: canonicalized, then the named data read (own, then the
-%% proto walk) or the index read. Holes and absent keys miss so the full
-%% path does the proto walk; a fractional / negative / symbol / object key
-%% misses to `to_property_key`. `IsAtom` on the emitter side treats any
-%% atom-valued V (undefined/true/…) as a miss too — a perf loss only.
 t_get_elem_fast(St, {?HANDLE_TAG, Id}, Idx)
   when is_integer(Idx), Idx >= 0, Idx =< ?MAX_ARRAY_INDEX ->
     Store = element(?AGENT_STORE, St),
     index_read(arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)), Idx);
-%% Integral float index (8/2, Math.floor(x)): same element, canonicalized
-%% like CanonicalNumericIndexString (-0.0 → 0; a huge one fails Idx < Length).
 t_get_elem_fast(St, Recv, Idx)
   when is_float(Idx), Idx >= 0.0, Idx == trunc(Idx) ->
     t_get_elem_fast(St, Recv, trunc(Idx));
@@ -600,8 +445,6 @@ t_get_elem_fast(St, {?HANDLE_TAG, Id}, Key) when is_binary(Key) ->
     end;
 t_get_elem_fast(_, _, _) -> miss.
 
-%% Own element / index property of an already-read slot; `miss` when absent
-%% or not plain data.
 index_read(Slot, Idx) when element(1, Slot) =:= ?SOBJECT_TAG ->
     case element(?SOBJECT_KIND, Slot) of
         {?ARRAYOBJ_TAG, Length} when Idx < Length ->
@@ -632,8 +475,6 @@ index_read(Slot, Idx) when element(1, Slot) =:= ?SOBJECT_TAG ->
     end;
 index_read(_, _) -> miss.
 
-%% The value `read_named` would produce without St: own data, then the
-%% plain proto walk. `miss` for anything that needs the full [[Get]].
 named_read(Data, Shapes, {?SSHAPED_TAG, Sid, Proto, Slots}, KeyBin) ->
     case Shapes of
         #{Sid := Desc} ->
@@ -662,10 +503,6 @@ named_read(Data, Shapes, Slot, KeyBin) when element(1, Slot) =:= ?SOBJECT_TAG ->
     end;
 named_read(_, _, _, _) -> miss.
 
-%% Whether an integer-index key on this ObjKind is a plain props-map entry
-%% (rt/obj own_property_of, set_own_string): Array / Arguments keep indices
-%% in `elements` (Arguments may map them), String indices are virtual,
-%% TypedArray / Proxy / module namespace are exotic.
 index_in_props(Kind) when is_atom(Kind) -> true;
 index_in_props(Kind) ->
     case element(1, Kind) of
@@ -678,16 +515,6 @@ index_in_props(Kind) ->
         _ -> true
     end.
 
-%% t_set_elem_fast(St, Recv, Key, V) -> St' | miss
-%% JMutMiss. Recv={js_cell,Id}. Key a bare integer array index: on an
-%% extensible ArrayObj, Idx in [0, Length] (Idx =:= Length appends and bumps
-%% Length), no {index,Idx} props override (covers hole-fill and append; a
-%% dense overwrite additionally requires Idx < array:size to avoid an
-%% unbounded auto-extend); on an object whose indices are plain props, the
-%% `{index,Idx}` overwrite / create of `t_set_prop_own_data`. Key a string:
-%% canonicalized, then the named or the index write. Returns the rebuilt St'
-%% (a tuple) on hit / bare `miss` atom otherwise — the emitter's `is_atom`
-%% guard distinguishes them without a {V,St'} 2-tuple alloc per hit.
 t_set_elem_fast(St, {?HANDLE_TAG, Id}, Idx, V)
   when is_integer(Idx), Idx >= 0, Idx =< ?MAX_ARRAY_INDEX ->
     index_write(St, Id, Idx, V);
@@ -747,7 +574,6 @@ index_write(St, Id, Idx, V) ->
                         false -> miss
                     end
             end;
-        %% Non-extensible: only an existing plain index prop is written.
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case index_in_props(element(?SOBJECT_KIND, Slot)) of
                 true ->
@@ -761,8 +587,6 @@ index_write(St, Id, Idx, V) ->
         _ -> miss
     end.
 
-%% `obj[Idx] = v` on an object whose indices are plain props: the
-%% `t_set_prop_own_data` overwrite / create arms with an `{index,Idx}` key.
 index_prop_write(St, Store, Data, Id, Slot, Idx, V) ->
     Props = element(?SOBJECT_PROPS, Slot),
     K = {?KEY_INDEX, Idx},
@@ -792,13 +616,6 @@ index_prop_write(St, Store, Data, Id, Slot, Idx, V) ->
         _ -> miss
     end.
 
-%% index_free(Data, Proto, Idx, Fuel) -> boolean()
-%% `named_free` for an integer index: every hop either lacks an own property
-%% at Idx or holds writable data there. A shaped hop never has index keys;
-%% an Array / unmapped Arguments hop answers from its props override (a
-%% present element is writable data, so the walk just goes on); String /
-%% TypedArray / Proxy / namespace / mapped Arguments hops, an accessor or
-%% read-only index, or more than Fuel hops → false.
 index_free(_, ?NONE, _, _) -> true;
 index_free(_, _, _, 0) -> false;
 index_free(Data, {?SOME, {?HANDLE_TAG, PId}}, Idx, Fuel) ->
@@ -834,35 +651,24 @@ elem_write({?ELEMS_SPARSE, M}, Idx, V) ->
     {?ELEMS_SPARSE, M#{Idx => V}};
 elem_write(_, _, _) -> miss.
 
-%% Append at Idx==Length: dense array:set/3 auto-extends past size(A), so no
-%% bounds gate; sparse is just a map put. Any other elements-shape misses.
 elem_write_grow({?ELEMS_DENSE, A}, Idx, V) ->
     {?ELEMS_DENSE, array:set(Idx, V, A)};
 elem_write_grow({?ELEMS_SPARSE, M}, Idx, V) ->
     {?ELEMS_SPARSE, M#{Idx => V}};
 elem_write_grow(_, _, _) -> miss.
 
-%% ── ShapeSlots FFI (rt_types.gleam) — plain-tuple slot storage. ──
-%% shape_slots_get(Slots, Off) -> JsVal — 0-based offset.
 shape_slots_get(Slots, Off) -> element(Off + 1, Slots).
 
-%% shape_slots_set(Slots, Off, V) -> Slots' — overwrite the 0-based slot.
 shape_slots_set(Slots, Off, V) -> setelement(Off + 1, Slots, V).
 
-%% shape_slots_append(Slots, V) -> Slots' — the slot a shape transition adds.
 shape_slots_append(Slots, V) -> erlang:append_element(Slots, V).
 
-%% shape_slots_fold(Slots, Acc, F) -> Acc' — fold F(Off, V, A) over every
-%% slot. Mirrors the tree_array.sparse_fold contract used by rt_gc.
 shape_slots_fold(Slots, Acc, F) ->
     shape_slots_fold_1(Slots, Acc, F, 1, tuple_size(Slots)).
 shape_slots_fold_1(_, Acc, _, I, N) when I > N -> Acc;
 shape_slots_fold_1(Slots, Acc, F, I, N) ->
     shape_slots_fold_1(Slots, F(I - 1, element(I, Slots), Acc), F, I + 1, N).
 
-%% shaped_write(Data, Shapes, Sid, Proto, Slots, KeyBin, V) -> Slot' | miss
-%% Overwrite an existing slot in place, or append along the cached
-%% transition edge when the proto chain cannot intercept the write.
 shaped_write(Data, Shapes, Sid, P, Slots, KeyBin, V) ->
     case Shapes of
         #{Sid := Desc} ->
@@ -885,14 +691,7 @@ shaped_write(Data, Shapes, Sid, P, Slots, KeyBin, V) ->
         _ -> miss
     end.
 
-%% named_free(Data, Shapes, Proto, K, Fuel) -> boolean()
-%% True when every object on the proto chain from `Proto` down either lacks
-%% an own property at the Named key K or holds a writable data property
-%% there (a shaped slot always is), along hops whose named lookup is a pure
-%% slots/props probe, so §10.1.9.2 lands on the receiver. An accessor, a
-%% read-only property, an exotic hop (Proxy, TypedArray, Array "length", …),
-%% a dangling handle or a chain deeper than Fuel → false. K is the props-map
-%% key `{named, KeyBin}`, built once by the caller rather than per hop.
+%% true when the proto chain cannot intercept a write at k
 named_free(_, _, ?NONE, _, _) -> true;
 named_free(_, _, _, _, 0) -> false;
 named_free(Data, Shapes, {?SOME, {?HANDLE_TAG, PId}}, K, Fuel) ->
@@ -923,14 +722,10 @@ named_free(Data, Shapes, {?SOME, {?HANDLE_TAG, PId}}, K, Fuel) ->
     end;
 named_free(_, _, _, _, _) -> false.
 
-%% The end of the chain answers here rather than in one more call.
 named_free_next(_, _, ?NONE, _, _) -> true;
 named_free_next(Data, Shapes, P, K, Fuel) ->
     named_free(Data, Shapes, P, K, Fuel - 1).
 
-%% shape_offset(St, ShapeId, KeyBin) -> Off | miss
-%% ShapeDesc.offsets lookup in JsStore.shapes.
-%%   ShapeDesc = {shape_desc, Arity, #{KeyBin=>Off}, #{KeyBin=>ToSid}}.
 shape_offset(St, Sid, KeyBin) ->
     Store = element(?AGENT_STORE, St),
     case element(?STORE_SHAPES, Store) of
@@ -942,8 +737,6 @@ shape_offset(St, Sid, KeyBin) ->
         _ -> miss
     end.
 
-%% Read the slot for `Id` from `St.store.data`. `miss` if absent (a
-%% dangling handle).
 slot_of(St, Id) ->
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, element(?AGENT_STORE, St))) of
         ?STORE_FREE_SLOT -> miss;

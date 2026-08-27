@@ -1,12 +1,3 @@
-//// Temporal.ZonedDateTime (proposal-temporal §6): an exact time paired with
-//// a resolved time zone and a calendar. Every wall-clock view (getters,
-//// toString, with, round) is derived from [[EpochNanoseconds]] through the
-//// zone's offset at that instant.
-////
-//// The zone-aware abstract operations it shares with the other types
-//// (ToTemporalZonedDateTime, InterpretISODateTimeOffset, GetStartOfDay, ...)
-//// are temporal_zoned_ops.gleam; the difference core is temporal_diff.gleam.
-
 import arc/internal/int_math.{floor_div}
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
@@ -72,11 +63,6 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
 
-// ============================================================================
-// Init — Temporal.ZonedDateTime constructor + prototype
-// ============================================================================
-
-/// The getters, in prototype-registration order.
 const all_getters = [
   ZgDate(DgCalendarId),
   ZgTimeZoneId,
@@ -108,9 +94,6 @@ const all_getters = [
   ZgOffset,
 ]
 
-/// The pieces `temporal.init_temporal_type` builds Temporal.ZonedDateTime
-/// from: the constructor token, `from`/`compare`, the getters and the
-/// prototype methods (in registration order).
 pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
   TemporalN(TemporalZonedDateTimeCtor(protos:))
 }
@@ -210,12 +193,6 @@ pub fn method_name(m: ZonedDateTimeMethod) -> String {
   }
 }
 
-// ============================================================================
-// Constructor and statics
-// ============================================================================
-
-/// new Temporal.ZonedDateTime(epochNanoseconds: BigInt, timeZone [, calendar])
-/// — the value before OrdinaryCreateFromConstructor re-points its prototype.
 pub fn ctor(
   st: Agent,
   protos: TemporalProtos,
@@ -224,7 +201,7 @@ pub fn ctor(
   let #(ns, st) = rt_val.t_to_bigint(st, helpers.arg_at(args, 0))
   case classify(helpers.arg_at(args, 1)) {
     KStr(tz_str) -> {
-      // Only bare identifiers: an ISO date-time string is not a zone here.
+      // only bare identifiers, not iso date-time strings
       let tz =
         terr(st, case parse_time_zone_id_strict(tz_str) {
           Ok(tz) -> Ok(tz)
@@ -243,7 +220,6 @@ pub fn ctor(
   }
 }
 
-/// Temporal.ZonedDateTime.from(item [, options]) / .compare(one, two).
 pub fn static(
   st: Agent,
   name: TemporalStaticName,
@@ -265,10 +241,6 @@ pub fn static(
     }
   }
 }
-
-// ============================================================================
-// Getters
-// ============================================================================
 
 fn require_zoned(
   st: Agent,
@@ -303,11 +275,6 @@ pub fn getter(
   }
 }
 
-// ============================================================================
-// Methods
-// ============================================================================
-
-/// direction argument of ZonedDateTime.prototype.getTimeZoneTransition.
 type TransitionDirection {
   Next
   Previous
@@ -329,8 +296,6 @@ pub fn method(
       st,
     )
     ZmToString -> {
-      // Read order: calendarName, fractionalSecondDigits, offset,
-      // roundingMode, smallestUnit, timeZoneName; validate after.
       let #(#(cal_name, opts), st) =
         get_calendar_name_option(st, helpers.arg_at(args, 0))
       let #(digits, st) = get_fractional_digits(st, opts)
@@ -377,8 +342,6 @@ pub fn method(
     }
     ZmAdd | ZmSubtract -> {
       let #(dur, overflow, st) = add_sub_args(st, args, m == ZmSubtract)
-      // Add date part in local wall-clock space, then exact time. Pure
-      // time-unit durations add directly to the epoch (AddZonedDateTime).
       let date_dur =
         DurRec(
           ..zero_dur,
@@ -455,8 +418,6 @@ pub fn method(
           let day_part = floor_div(local, ns_per_day)
           let local_date = iso_date_from_epoch_days(day_part)
           case su == UDay {
-            // Round within the day bounded by start-of-day instants;
-            // both bounds must be representable.
             True -> {
               let day_start = terr(st, start_of_day_ns(tz, local_date))
               let day_end =
@@ -470,8 +431,6 @@ pub fn method(
               make_zoned_cal(st, protos, ns2, tz, zcal)
             }
             False -> {
-              // Round the wall-clock time of day (RoundISODateTime),
-              // then reinterpret preferring the current offset.
               let tod = local - day_part * ns_per_day
               let rounded_tod = round_to_increment(tod, inc * u_ns, mode)
               let #(rd, rt) =
@@ -532,8 +491,7 @@ pub fn method(
       make_zoned_cal(st, protos, ns, tz, new_cal)
     }
     ZmWithPlainTime -> {
-      // Undefined → GetStartOfDay; an explicit time (even midnight) uses
-      // compatible disambiguation. These differ when midnight is skipped.
+      // explicit midnight differs from start of day when midnight is skipped
       let arg = helpers.arg_at(args, 0)
       case classify(arg) {
         KUndef -> {
@@ -576,7 +534,6 @@ pub fn method(
         }
         _ -> rt_val.t_throw_type_error(st, "invalid direction")
       }
-      // UTC and offset zones have no transitions.
       case tz {
         TzUtc | TzOffset(_) -> #(mk_null(), st)
         TzNamed(zone:) -> {
@@ -585,14 +542,13 @@ pub fn method(
             Previous -> temporal_tz.prev_transition_ns(zone, ns)
           }
           case found {
-            // No further transition, or one outside the instant range.
             Ok(None) -> #(mk_null(), st)
             Ok(Some(t_ns)) ->
               case int.absolute_value(t_ns) <= ns_max_instant {
                 True -> make_zoned_cal(st, protos, t_ns, tz, zcal)
                 False -> #(mk_null(), st)
               }
-            // Broken zoneinfo is not "no transition" — report it.
+            // broken zoneinfo is an error, not "no transition"
             Error(err) -> throw_terr(st, unloadable_tz(tz, err))
           }
         }
@@ -605,7 +561,6 @@ pub fn method(
   }
 }
 
-/// ZonedDateTime.prototype.until/since (DifferenceTemporalZonedDateTime).
 fn zoned_until_since(
   st: Agent,
   protos: TemporalProtos,
@@ -624,7 +579,6 @@ fn zoned_until_since(
   let mode2 = apply_since_mode(mode, is_since)
   case unit_rank(largest) <= unit_rank(Hour) {
     True -> {
-      // Exact-time difference, like Instant.
       let su = terr(st, require_time_unit(smallest))
       let diff = b_ns - a_ns
       let rounded = round_to_increment(diff, inc * time_unit_ns(su), mode2)
@@ -632,8 +586,6 @@ fn zoned_until_since(
       make_duration(st, protos, balance_time_ns(rounded, largest))
     }
     False ->
-      // Calendar-unit difference requires equal time zones (§ spec:
-      // TimeZoneEquals, RangeError otherwise).
       case time_zone_equals(a_tz, b_tz) {
         False ->
           rt_val.t_throw_range_error(
@@ -663,8 +615,6 @@ fn zoned_until_since(
   }
 }
 
-/// TemporalZonedDateTimeToString with the default options: rounded offset,
-/// bracketed zone, no calendar suffix.
 fn format_zoned(
   ns: Int,
   tz: TimeZone,

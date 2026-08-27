@@ -1,10 +1,3 @@
-//// Intl.DateTimeFormat time-zone resolution and rendering.
-////
-//// Pure `String`/`Int`/`DtfTimeZone` — no `Agent`. `canonical` is
-//// IsValidTimeZoneName + case normalization; `offset_at` is the one place a
-//// DateTimeFormat's UTC offset ever comes from; `display` renders that offset
-//// under a `timeZoneName` width.
-
 import arc/internal/digits
 import arc/internal/host_time
 import arc/rt/builtins/intl_format as fmt
@@ -20,10 +13,6 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-/// IsValidTimeZoneName + identifier case normalization. Named zones are
-/// resolved against the system tzdata (Temporal's TZif backend), which is
-/// also what supplies their per-instant offset later; the remaining forms
-/// (UTC/GMT aliases, ±HH:MM, Etc/GMT±N) have an offset that never varies.
 pub fn canonical(s: String) -> Option(DtfTimeZone) {
   let lower = string.lowercase(s)
   case lower {
@@ -59,17 +48,11 @@ pub fn canonical(s: String) -> Option(DtfTimeZone) {
   }
 }
 
-/// The UTC offset (minutes) a formatter's zone has at a given instant. The
-/// only place a DateTimeFormat offset ever comes from.
 pub fn offset_at(tz: DtfTimeZone, instant_ms: Int) -> Int {
   case tz {
     HostZone(zone:) -> host_time.zone_offset_at_utc_ms(zone, instant_ms)
     FixedZone(offset_minutes:, ..) -> offset_minutes
     NamedZone(zone:) -> {
-      // `temporal_tz.lookup` already loaded this zone's TZif to mint the
-      // handle, so a failure here means the zoneinfo install vanished
-      // underneath us. Falling back to UTC would silently render every
-      // timestamp in the wrong zone — fail loudly instead.
       let assert Ok(offset_ns) =
         temporal_tz.offset_ns_at(zone, instant_ms * 1_000_000)
         as "intl: tzdata offset lookup failed for a zone lookup accepted"
@@ -78,7 +61,7 @@ pub fn offset_at(tz: DtfTimeZone, instant_ms: Int) -> Int {
   }
 }
 
-/// Etc/GMT+N (UTC-N) and Etc/GMT-N (UTC+N), N in 1..14.
+// etc/gmt+n is utc-n and etc/gmt-n is utc+n
 fn etc_gmt_zone(lower: String) -> Option(DtfTimeZone) {
   case string.split_once(lower, "etc/gmt") {
     Ok(#("", rest)) -> {
@@ -105,13 +88,6 @@ fn etc_gmt_zone(lower: String) -> Option(DtfTimeZone) {
   }
 }
 
-/// Named IANA zones: the abbreviation zones plus structurally-valid
-/// Area/Location identifiers. ECMA-402 §6.5: an implementation supporting
-/// named zones must accept every IANA Zone/Link name, so resolution goes
-/// through the system tzdata (Temporal's TZif backend) rather than a
-/// hardcoded table; names absent from tzdata get the caller's
-/// "Invalid time zone specified" RangeError instead of silently rendering as
-/// UTC (offset 0).
 fn iana_zone(lower: String) -> Option(DtfTimeZone) {
   case lower {
     "est"
@@ -147,9 +123,6 @@ fn iana_zone(lower: String) -> Option(DtfTimeZone) {
   }
 }
 
-/// Resolve a zone id against the system tzdata. The `Zone` handle it returns
-/// is what supplies the offset at each formatted instant — no offset is
-/// snapshotted here. `None` when the name is not in tzdata.
 fn tzdata_zone(lower: String) -> Option(DtfTimeZone) {
   temporal_tz.lookup(lower)
   |> result.map(NamedZone)
@@ -162,7 +135,6 @@ fn is_zone_word(p: String) -> Bool {
   })
 }
 
-/// ±HH:MM offset time zones.
 fn parse_offset_zone(s: String) -> Option(Int) {
   let #(sign, rest) = case string.pop_grapheme(s) {
     Ok(#("+", rest)) -> #(1, rest)
@@ -174,7 +146,6 @@ fn parse_offset_zone(s: String) -> Option(Int) {
     _ ->
       case string.split(rest, ":") {
         [hh, mm] -> {
-          // Guards can't contain function calls — bind the lengths first.
           let hh_len = string.length(hh)
           let mm_len = string.length(mm)
           case int.parse(hh), int.parse(mm) {
@@ -216,7 +187,6 @@ fn format_offset_zone(minutes: Int) -> String {
   sign <> fmt.pad2(m / 60) <> ":" <> fmt.pad2(m % 60)
 }
 
-/// Render a formatter's [[TimeZone]] under a timeZoneName width.
 pub fn display(name: String, width: TimeZoneNameWidth, offset: Int) -> String {
   case name, width {
     "UTC", TzShort | "UTC", TzShortGeneric -> "UTC"

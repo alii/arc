@@ -1,7 +1,3 @@
-/// Regex literal scanning and /u flag validation.
-/// Pure bit-array scanning functions split from parser.gleam.
-/// The parser re-lexes regex literals from source bytes since the lexer
-/// can't always distinguish / (divide) from / (regex start).
 import arc/internal/digits
 import arc/internal/utf16
 import arc/parser/lexer
@@ -26,18 +22,11 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-// ---- Source byte access ----
-
-/// The code point at `pos` and its byte width, or `Eof` past the end of the
-/// bytes. A byte that isn't valid UTF-8 decodes as its own value with width 1
-/// (enough for the scanners to make progress); only genuine end-of-input is
-/// `Eof`, so an "absent" code point can never leak into a value position.
 type CodePoint {
   Cp(value: Int, width: Int)
   Eof
 }
 
-/// Decode the UTF-8 code point at `pos`.
 fn codepoint_at(bytes: BitArray, pos: Int) -> CodePoint {
   case bit_array.slice(bytes, pos, 1) {
     Ok(<<b>>) if b < 0x80 -> Cp(b, 1)
@@ -60,7 +49,6 @@ fn codepoint_at(bytes: BitArray, pos: Int) -> CodePoint {
   }
 }
 
-/// Bytes to advance past `pos`; 1 at end of input (so scanners terminate).
 fn advance_width(bytes: BitArray, pos: Int) -> Int {
   case codepoint_at(bytes, pos) {
     Cp(_, w) -> w
@@ -68,14 +56,9 @@ fn advance_width(bytes: BitArray, pos: Int) -> Int {
   }
 }
 
-/// What sits at `pos` within a pattern body that ends at `end`. Exhaustive:
-/// the three cases the old `""` sentinel conflated are now separate variants.
 type At {
-  /// A lone ASCII character.
   Ascii(ch: String)
-  /// A code point of `width` bytes that is not a lone ASCII character.
   NonAscii(width: Int)
-  /// `pos` is at or past `end` — nothing here.
   AtEnd
 }
 
@@ -94,18 +77,11 @@ fn at(bytes: BitArray, pos: Int, end: Int) -> At {
   }
 }
 
-/// The property-escape name (or value) text at `[start, start + len)`.
-/// `skip_property_chars` only ever advances over ASCII `[A-Za-z0-9_]`, so the
-/// range always slices to text; the empty fallback is unreachable, and would
-/// classify as an invalid property name anyway.
 fn source_slice(bytes: BitArray, start: Int, len: Int) -> String {
   source_bytes.slice(bytes, start, len)
   |> option.unwrap("")
 }
 
-/// The character at `pos`, or `None` at/past `end`. The bounded read the
-/// pattern validator uses everywhere: raw `ascii_at` is for the literal
-/// scanner, which is the thing that discovers where the body ends.
 fn ascii_in(bytes: BitArray, pos: Int, end: Int) -> Option(String) {
   case pos < end {
     True -> ascii_at(bytes, pos)
@@ -113,7 +89,6 @@ fn ascii_in(bytes: BitArray, pos: Int, end: Int) -> Option(String) {
   }
 }
 
-/// Value of the hex digit at `pos`, if there is one before `end`.
 fn hex_in(bytes: BitArray, pos: Int, end: Int) -> Option(Int) {
   case ascii_in(bytes, pos, end) {
     Some(ch) -> digits.hex_value(ch)
@@ -121,7 +96,6 @@ fn hex_in(bytes: BitArray, pos: Int, end: Int) -> Option(Int) {
   }
 }
 
-/// Value of the decimal digit at `pos`, if there is one before `end`.
 fn digit_in(bytes: BitArray, pos: Int, end: Int) -> Option(Int) {
   case ascii_in(bytes, pos, end) {
     Some(ch) -> digits.digit_value(ch)
@@ -129,15 +103,10 @@ fn digit_in(bytes: BitArray, pos: Int, end: Int) -> Option(Int) {
   }
 }
 
-/// Scan a run of decimal digits in `[pos, end)`, returning the position after
-/// the run and its value — `Some` iff the run was non-empty. The value is
-/// accumulated as we walk, so there is no re-slice + re-parse step that could
-/// fail and silently yield 0.
 fn decimal_run(bytes: BitArray, pos: Int, end: Int) -> #(Int, Option(Int)) {
   digit_run_loop(bytes, pos, end, 10, digit_in, None)
 }
 
-/// Same, for a run of hex digits.
 fn hex_run(bytes: BitArray, pos: Int, end: Int) -> #(Int, Option(Int)) {
   digit_run_loop(bytes, pos, end, 16, hex_in, None)
 }
@@ -164,10 +133,6 @@ fn digit_run_loop(
   }
 }
 
-// ---- Regex body scanning ----
-
-/// Scan regex source from just after the opening /, returning the position
-/// just past the closing /. Handles escapes and character classes.
 pub fn scan_regex_source(
   bytes: BitArray,
   pos: Int,
@@ -175,20 +140,13 @@ pub fn scan_regex_source(
   scan_regex_loop(bytes, pos, False)
 }
 
-/// The recursion of `scan_regex_source`. `in_class` is loop state (are we
-/// inside a `[...]`, where `/` is not the terminator?), never a caller's
-/// choice.
 fn scan_regex_loop(
   bytes: BitArray,
   pos: Int,
   in_class: Bool,
 ) -> Result(Int, PatternError) {
   case bit_array.slice(bytes, pos, 1) {
-    // End of source before the closing /.
     Error(_) -> Error(UnterminatedRegex(pos))
-    // Non-ASCII byte: part of the regex body (any SourceCharacter is allowed,
-    // e.g. the Cf format-control U+180E). ascii_at is ASCII-only, so we
-    // handle these here. U+2028/U+2029 are line terminators and end the regex.
     Ok(<<b>>) if b >= 0x80 ->
       case is_unicode_line_terminator(bytes, pos) {
         True -> Error(UnterminatedRegex(pos))
@@ -198,10 +156,6 @@ fn scan_regex_loop(
       case ascii_at(bytes, pos) {
         Some("\n") | Some("\r") -> Error(UnterminatedRegex(pos))
         Some("\\") -> {
-          // Escaped character — skip the backslash and the next character
-          // (which may itself be multi-byte, e.g. an escaped non-ASCII char).
-          // A line terminator after `\` is not allowed (RegularExpressionChar
-          // excludes LineTerminator), including U+2028/U+2029.
           case bit_array.slice(bytes, pos + 1, 1) {
             Error(_) -> Error(UnterminatedRegex(pos + 1))
             Ok(<<0x0A>>) | Ok(<<0x0D>>) -> Error(UnterminatedRegex(pos + 1))
@@ -237,7 +191,6 @@ fn scan_regex_loop(
   }
 }
 
-/// UTF-8 byte width from a leading byte.
 fn utf8_byte_width(lead: Int) -> Int {
   case lead {
     b if b >= 0xF0 -> 4
@@ -247,8 +200,6 @@ fn utf8_byte_width(lead: Int) -> Int {
   }
 }
 
-/// True if the bytes at `pos` are U+2028 (E2 80 A8) or U+2029 (E2 80 A9),
-/// the Unicode line/paragraph separators (line terminators in ES).
 fn is_unicode_line_terminator(bytes: BitArray, pos: Int) -> Bool {
   case bit_array.slice(bytes, pos, 3) {
     Ok(<<0xE2, 0x80, 0xA8>>) | Ok(<<0xE2, 0x80, 0xA9>>) -> True
@@ -256,16 +207,9 @@ fn is_unicode_line_terminator(bytes: BitArray, pos: Int) -> Bool {
   }
 }
 
-// ---- Pattern validation (parse-time early errors) ----
-
-/// Regex compile mode selected by the flags. Derived once, in `regex_flags`,
-/// and carried in `RegexFlags` from there on.
 pub type RegexMode {
-  /// No u or v flag — Annex B extended (web-compat) grammar.
   Legacy
-  /// u flag — strict Unicode-mode grammar.
   Unicode
-  /// v flag — unicodeSets mode (strict grammar, ClassSetExpression classes).
   UnicodeSets
 }
 
@@ -280,26 +224,18 @@ type Ctx {
   )
 }
 
-/// The character at `pos`, or `None` at/past the end of the pattern body.
-/// Every read the validator makes goes through `ctx_*` / `*_in`: the pattern
-/// body of a regex literal is followed by `/flags…` and then the rest of the
-/// file, so an unbounded read would validate against text that is not part of
-/// the pattern.
 fn ctx_ascii(ctx: Ctx, pos: Int) -> Option(String) {
   ascii_in(ctx.bytes, pos, ctx.end)
 }
 
-/// Value of the hex digit at `pos`, if there is one before `ctx.end`.
 fn ctx_hex(ctx: Ctx, pos: Int) -> Option(Int) {
   hex_in(ctx.bytes, pos, ctx.end)
 }
 
-/// Value of the decimal digit at `pos`, if there is one before `ctx.end`.
 fn ctx_digit(ctx: Ctx, pos: Int) -> Option(Int) {
   digit_in(ctx.bytes, pos, ctx.end)
 }
 
-/// The four hex digits at `pos`, if all four are hex digits before `ctx.end`.
 fn ctx_hex4(ctx: Ctx, pos: Int) -> Option(Int) {
   case
     ctx_hex(ctx, pos),
@@ -313,7 +249,6 @@ fn ctx_hex4(ctx: Ctx, pos: Int) -> Option(Int) {
   }
 }
 
-/// True when the character at `pos` is an ASCII letter, before `ctx.end`.
 fn ctx_letter(ctx: Ctx, pos: Int) -> Bool {
   case ctx_ascii(ctx, pos) {
     Some(ch) -> is_ascii_letter(ch)
@@ -321,24 +256,13 @@ fn ctx_letter(ctx: Ctx, pos: Int) -> Bool {
   }
 }
 
-/// Kind of the term just parsed — determines whether a quantifier may follow.
 type TermKind {
-  /// A quantifiable atom.
   KAtom
-  /// ^ $ \b \B and lookbehind — never quantifiable.
   KAssertion
-  /// (?= and (?! — quantifiable in legacy (Annex B) mode only.
   KLookahead
 }
 
-/// Validate a regex pattern body [start, end) against the ECMAScript Pattern
-/// grammar: the Annex B extended grammar without the u/v flag, the strict
-/// grammar with it. Reports the early errors test262 expects at parse time:
-/// nothing-to-repeat, invalid braced quantifiers, quantified assertions,
-/// named-group rules (duplicates, dangling/incomplete \k references), inline
-/// modifier rules, and Unicode-mode escape restrictions.
-/// The mode is taken from `flags`, which `validate_flags` / `skip_regex_flags`
-/// already derived (and which already rejected `u` + `v` together).
+// §22.2.1.1 pattern early errors, annex b grammar without u/v
 pub fn validate_pattern(
   bytes: BitArray,
   start: Int,
@@ -354,18 +278,12 @@ pub fn validate_pattern(
     True -> Ok(Nil)
     False -> Error(UnmatchedParen(stop))
   })
-  // v mode: walk nested classes for property-escape validity (the main
-  // parser skips over v-mode class internals).
   case mode {
     UnicodeSets -> validate_regex_vmode_body(bytes, start, end)
     Legacy | Unicode -> Ok(Nil)
   }
 }
 
-/// First pass over the body: count capturing groups, collect the decoded
-/// names of all named groups (for resolving \k<...> forward references), and
-/// detect whether any GroupSpecifier is present (which switches \k from an
-/// Annex B identity escape to a strict group reference in legacy mode).
 fn scan_groups(
   bytes: BitArray,
   pos: Int,
@@ -394,7 +312,6 @@ fn scan_groups(
           )
         }
         Some("["), _ -> {
-          // Legacy/u classes don't nest — a `[` inside one is a literal.
           let depth = case mode {
             UnicodeSets -> class_depth + 1
             Legacy | Unicode -> 1
@@ -444,9 +361,6 @@ fn scan_groups(
                         has_named,
                       )
                     _ -> {
-                      // Named capturing group. A malformed name is reported
-                      // by the second pass — here it just flips the
-                      // has_named switch.
                       let names2 = case parse_group_name(bytes, pos + 3, end) {
                         Ok(#(name, _)) -> [name, ..names]
                         Error(_malformed_name) -> names
@@ -512,8 +426,6 @@ fn p_disjunction(
   case pos2 < ctx.end && ctx_ascii(ctx, pos2) == Some("|") {
     True -> {
       use #(pos3, names2) <- result.map(p_disjunction(ctx, pos2 + 1))
-      // Names in different alternatives may legally repeat (they can never
-      // both participate in a match), so union without a duplicate check.
       #(pos3, list.append(names, names2))
     }
     False -> Ok(#(pos2, names))
@@ -546,9 +458,6 @@ fn p_alternative(
   }
 }
 
-/// Group names declared in terms of the same alternative (or nested within
-/// one another) can both participate in a match — duplicates are an error.
-/// `pos` is the position of the term/group that introduced `new_names`.
 fn check_no_duplicate(
   new_names: List(String),
   seen: List(String),
@@ -578,9 +487,6 @@ fn p_term(
     Some("*") | Some("+") | Some("?") -> Error(NothingToRepeat(pos))
     Some("{") ->
       case ctx.mode {
-        // Annex B: a braced-quantifier-shaped `{...}` with nothing to
-        // quantify is the InvalidBracedQuantifier early error; any other
-        // `{` is an ExtendedPatternCharacter.
         Legacy ->
           case braced_quantifier(ctx.bytes, pos, ctx.end) {
             Some(_) -> Error(NothingToRepeat(pos))
@@ -662,10 +568,6 @@ fn p_group_body(
   }
 }
 
-/// Optional quantifier after a term: `*` `+` `?` or a braced quantifier,
-/// each with an optional lazy `?` suffix. In legacy mode a `{` that is not a
-/// valid braced quantifier is left for the caller (ExtendedPatternCharacter);
-/// in Unicode modes it is an error.
 fn p_quantifier_opt(ctx: Ctx, pos: Int) -> Result(#(Int, Bool), PatternError) {
   case pos >= ctx.end {
     True -> Ok(#(pos, False))
@@ -698,15 +600,10 @@ fn skip_lazy(ctx: Ctx, pos: Int) -> Int {
   }
 }
 
-/// A well-formed `{n}` / `{n,}` / `{n,m}`: the position after the `}` and the
-/// decoded bounds (`max` is `None` for the open-ended forms).
 type BracedQuantifier {
   BracedQuantifier(after: Int, min: Int, max: Option(Int))
 }
 
-/// Parse a braced quantifier starting at the `{`. `None` means "this `{` is
-/// not a quantifier" — an absence, not a failure: the caller decides whether
-/// that is legal (Annex B) or an error (Unicode modes).
 fn braced_quantifier(
   bytes: BitArray,
   pos: Int,
@@ -729,16 +626,11 @@ fn braced_quantifier(
   }
 }
 
-/// AtomEscape at `pos` (the backslash), outside a character class.
-/// \b and \B are handled by the caller (they are assertions).
 fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
   let strict = ctx.mode != Legacy
   let invalid = InvalidEscape(pos)
   case at(ctx.bytes, pos + 1, ctx.end) {
-    // The scanner prevents a lone trailing `\` in a literal; `new RegExp("\\")`
-    // reaches here.
     AtEnd -> Error(BackslashAtEnd(pos))
-    // An escaped non-ASCII character: an IdentityEscape only in Annex B.
     NonAscii(w) ->
       case strict {
         True -> Error(invalid)
@@ -755,8 +647,6 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
     | Ascii("9") -> {
       let #(after, n) = decimal_run(ctx.bytes, pos + 1, ctx.end)
       case strict, n {
-        // Annex B: a too-large backreference falls back to a legacy octal
-        // escape or identity, so anything goes.
         False, _ -> Ok(after)
         True, Some(n) if n > ctx.captures ->
           Error(BackReferenceOutOfRange(pos, n, ctx.captures))
@@ -788,10 +678,6 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
           ))
           pos + len
         }
-        // v mode: measure the escape only. Whether a property of strings is
-        // legal at this position depends on the enclosing negated classes,
-        // and `validate_regex_vmode_body` — the single owner of that rule —
-        // walks the whole body afterwards and reports it there.
         UnicodeSets -> {
           use len <- result.map(property_escape_length(
             ctx.bytes,
@@ -808,8 +694,6 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
         False ->
           case strict {
             True -> Error(invalid)
-            // Annex B: the backslash alone is an atom matching `\`, and the
-            // `c` is re-parsed as a normal pattern character.
             False -> Ok(pos + 1)
           }
       }
@@ -850,7 +734,6 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
       }
     Ascii(other) ->
       case strict {
-        // Unicode-mode IdentityEscape: SyntaxCharacter or `/` only.
         True ->
           case is_syntax_char(other) || other == "/" {
             True -> Ok(pos + 2)
@@ -861,18 +744,9 @@ fn p_atom_escape(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
   }
 }
 
-/// \u escape at `pos` (the backslash). In Unicode modes: Hex4Digits or
-/// {CodePoint}; in legacy mode an incomplete escape is the identity `u`
-/// (so `/\u{2}/` is `u` with a braced quantifier).
-///
-/// Returns the position after the escape AND its CharacterValue (§22.2.1) —
-/// the two are decided together, so a caller can never accept an escape and
-/// then guess at what character it denotes.
 fn p_unicode_escape(ctx: Ctx, pos: Int) -> Result(#(Int, Int), PatternError) {
   case ctx_hex4(ctx, pos + 2) {
     Some(lead) -> {
-      // In Unicode mode a lead surrogate followed by `\u` + a trail surrogate
-      // is ONE RegExpUnicodeEscapeSequence denoting the combined code point.
       let lone = Ok(#(pos + 6, lead))
       case utf16.is_high(lead), ctx.mode {
         False, _ | True, Legacy -> lone
@@ -893,7 +767,6 @@ fn p_unicode_escape(ctx: Ctx, pos: Int) -> Result(#(Int, Int), PatternError) {
     }
     None ->
       case ctx.mode {
-        // Identity escape: the `u` itself.
         Legacy -> Ok(#(pos + 2, 0x75))
         Unicode | UnicodeSets ->
           case ctx_ascii(ctx, pos + 2) {
@@ -903,7 +776,6 @@ fn p_unicode_escape(ctx: Ctx, pos: Int) -> Result(#(Int, Int), PatternError) {
                 Some(v), Some("}") if v > 0x10FFFF ->
                   Error(InvalidUnicodeEscapeValue(pos))
                 Some(v), Some("}") -> Ok(#(after + 1, v))
-                // No digits, or no closing brace.
                 _, _ -> Error(InvalidUnicodeEscape(pos))
               }
             }
@@ -913,17 +785,11 @@ fn p_unicode_escape(ctx: Ctx, pos: Int) -> Result(#(Int, Int), PatternError) {
   }
 }
 
-/// Which grammar the ClassRanges walk below is running under. Produced only
-/// by `p_class`'s non-v branch, so `strict = mode == UnicodeClass` in every
-/// function it is threaded through — the v-mode class never gets here.
 type ClassMode {
   LegacyClass
   UnicodeClass
 }
 
-/// Character class starting just after the `[`. v-mode classes have their
-/// own (nested) grammar — skip over them bracket-aware; their property
-/// escapes are validated by the separate v-mode walk.
 fn p_class(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
   case ctx.mode {
     UnicodeSets -> skip_v_class(ctx.bytes, pos, ctx.end)
@@ -932,7 +798,6 @@ fn p_class(ctx: Ctx, pos: Int) -> Result(Int, PatternError) {
   }
 }
 
-/// Past the leading `^` of a negated class, if there is one.
 fn skip_class_negation(ctx: Ctx, pos: Int) -> Int {
   case ctx_ascii(ctx, pos) {
     Some("^") -> pos + 1
@@ -970,13 +835,6 @@ fn p_class_ranges(
   }
 }
 
-/// A `x-y` range: both endpoints must be single characters (u-mode only —
-/// Annex B treats a `-` next to a `\d`-style set as a literal), and their
-/// CharacterValues must be in order.
-///
-/// The one exception is a legacy-mode non-BMP endpoint: legacy patterns match
-/// on UTF-16 code units, so such an endpoint is really a surrogate PAIR and
-/// the range's ordering is not decided by its code point.
 fn check_range(
   mode: ClassMode,
   a: ClassAtom,
@@ -985,13 +843,13 @@ fn check_range(
 ) -> Result(Nil, PatternError) {
   case a, b {
     ClassCharacter(value: av, ..), ClassCharacter(value: bv, ..) -> {
+      // legacy non-bmp endpoint is a surrogate pair, order unknowable
       let unknowable = mode == LegacyClass && { av > 0xFFFF || bv > 0xFFFF }
       case !unknowable && av > bv {
         True -> Error(OutOfOrderClassRange(pos))
         False -> Ok(Nil)
       }
     }
-    // \d \s \w \p{..} etc. are not valid range endpoints in u mode.
     _, _ ->
       case mode {
         UnicodeClass -> Error(InvalidClassRange(pos))
@@ -1000,14 +858,8 @@ fn check_range(
   }
 }
 
-/// One class atom, and everything the ClassRanges walk needs to know about
-/// it. A single character always carries its CharacterValue (§22.2.1) — the
-/// value the range-order early error compares — so an atom whose value we
-/// forgot to record is a compile error, not a silently skipped check.
 type ClassAtom {
   ClassCharacter(after: Int, value: Int)
-  /// A CharacterClassEscape (`\d`, `\p{...}`, …): a SET of characters, with
-  /// no single value, and never a valid range endpoint in u mode.
   ClassSet(after: Int)
 }
 
@@ -1037,8 +889,6 @@ fn p_class_atom(
   }
 }
 
-/// The code point of a lone ASCII character (as produced by `ascii_at`).
-/// A non-ASCII or empty string cannot occur; 0 keeps the function total.
 fn ascii_code(ch: String) -> Int {
   case string.to_utf_codepoints(ch) {
     [cp, ..] -> string.utf_codepoint_to_int(cp)
@@ -1046,7 +896,6 @@ fn ascii_code(ch: String) -> Int {
   }
 }
 
-/// ClassEscape at `pos` (the backslash) inside a legacy or u-mode class.
 fn p_class_escape(
   ctx: Ctx,
   mode: ClassMode,
@@ -1056,14 +905,12 @@ fn p_class_escape(
   let invalid = InvalidClassEscape(pos)
   case at(ctx.bytes, pos + 1, ctx.end) {
     AtEnd -> Error(UnterminatedClass(pos))
-    // An escaped non-ASCII character: an IdentityEscape only in Annex B.
     NonAscii(w) ->
       case strict, codepoint_at(ctx.bytes, pos + 1) {
         True, _ -> Error(invalid)
         False, Cp(cp, _) -> Ok(ClassCharacter(after: pos + 1 + w, value: cp))
         False, Eof -> Error(UnterminatedClass(pos))
       }
-    // \b in a class is the backspace character, \- the literal `-`.
     Ascii("b") -> Ok(ClassCharacter(after: pos + 2, value: 0x08))
     Ascii("-") -> Ok(ClassCharacter(after: pos + 2, value: 0x2D))
     Ascii("d")
@@ -1074,7 +921,6 @@ fn p_class_escape(
     | Ascii("W") -> Ok(ClassSet(after: pos + 2))
     Ascii("p" as ch) | Ascii("P" as ch) ->
       case mode {
-        // Annex B: `\p` is the identity escape for `p`.
         LegacyClass -> Ok(ClassCharacter(after: pos + 2, value: ascii_code(ch)))
         UnicodeClass -> {
           use len <- result.map(property_escape_length(
@@ -1097,7 +943,6 @@ fn p_class_escape(
         None ->
           case strict {
             True -> Error(invalid)
-            // Annex B: the backslash alone is a class atom matching `\`.
             False -> Ok(ClassCharacter(after: pos + 1, value: 0x5C))
           }
       }
@@ -1108,7 +953,6 @@ fn p_class_escape(
         _, _ ->
           case strict {
             True -> Error(InvalidHexEscape(pos))
-            // Annex B: the identity escape for `x`.
             False -> Ok(ClassCharacter(after: pos + 2, value: 0x78))
           }
       }
@@ -1127,9 +971,7 @@ fn p_class_escape(
     | Ascii("8")
     | Ascii("9") ->
       case strict {
-        // Annex B: legacy octal escapes and `\8` `\9` identity.
         False -> Ok(legacy_numeric_escape(ctx.bytes, pos, ctx.end))
-        // Strict: only `\0` not followed by a decimal digit (the NUL escape).
         True ->
           case
             ctx_ascii(ctx, pos + 1) == Some("0")
@@ -1140,8 +982,6 @@ fn p_class_escape(
           }
       }
     Ascii("k") ->
-      // IdentityEscape excludes `k` whenever the pattern has named groups
-      // (and \k is never a ClassEscape group reference).
       case strict || ctx.has_named {
         True -> Error(invalid)
         False -> Ok(ClassCharacter(after: pos + 2, value: 0x6B))
@@ -1158,9 +998,6 @@ fn p_class_escape(
   }
 }
 
-/// The value of a `\c` control escape's letter at `pos`: the ControlLetter's
-/// code point modulo 32. In Annex B (`strict` False) `ClassControlLetter` also
-/// admits decimal digits and `_`. `None` when there is no control letter here.
 fn control_letter_at(ctx: Ctx, pos: Int, strict: Bool) -> Option(Int) {
   case ctx_ascii(ctx, pos) {
     Some(ch) ->
@@ -1176,13 +1013,9 @@ fn control_letter_at(ctx: Ctx, pos: Int, strict: Bool) -> Option(Int) {
   }
 }
 
-/// An Annex B `\` + digit escape inside a class: a LegacyOctalEscapeSequence
-/// (up to three octal digits, at most two when the first is 4-7), or the
-/// identity escape for `\8` / `\9`.
 fn legacy_numeric_escape(bytes: BitArray, pos: Int, end: Int) -> ClassAtom {
   case octal_at(bytes, pos + 1, end) {
     None -> {
-      // `\8` / `\9`: identity.
       let value =
         ascii_in(bytes, pos + 1, end)
         |> option.map(ascii_code)
@@ -1200,7 +1033,6 @@ fn legacy_numeric_escape(bytes: BitArray, pos: Int, end: Int) -> ClassAtom {
   }
 }
 
-/// The value of the octal digit at `pos`, if the character there is one.
 fn octal_at(bytes: BitArray, pos: Int, end: Int) -> Option(Int) {
   case digit_in(bytes, pos, end) {
     Some(d) if d < 8 -> Some(d)
@@ -1221,23 +1053,11 @@ fn octal_run(
   }
 }
 
-/// Walk a v-mode (unicodeSets) class from just after the opening `[`,
-/// returning the position past the matching `]`. Classes may nest
-/// (`[a[bc]]`). Enforces the ClassSetExpression surface rules:
-/// - raw ( ) { } / | are ClassSetSyntaxCharacters and must be escaped
-/// - reserved double punctuators (!! ## $$ %% ** ++ ,, .. :: ;; << == >>
-///   ?? @@ ^^ `` ~~) are SyntaxErrors
-/// - `&&` (intersection) and `--` (difference) need operands on both sides
-/// - a single `-` is only valid between two range operands
-/// Property/string escapes (\p{...}, \q{...}) are skipped brace-aware; their
-/// contents are validated by the separate v-mode walk.
 fn skip_v_class(
   bytes: BitArray,
   pos: Int,
   end: Int,
 ) -> Result(Int, PatternError) {
-  // Skip the optional leading negation `^` (a lone `^` here is the negation
-  // marker, not an atom — `[^^^]` is negation + the reserved `^^`).
   let pos2 = case ascii_in(bytes, pos, end) {
     Some("^") -> pos + 1
     _ -> pos
@@ -1261,8 +1081,6 @@ fn v_class_loop(
     }
     _, Some("\\") ->
       case nxt {
-        // \p{...} \P{...} \q{...} \u{...} — skip the whole braced payload so
-        // its contents aren't misread as class syntax.
         Some("p") | Some("P") | Some("q") | Some("u") ->
           case ascii_in(bytes, pos + 2, end) {
             Some("{") -> {
@@ -1305,7 +1123,6 @@ fn v_class_loop(
           }
         }
         _ ->
-          // Single dash: only valid as a range separator between operands.
           case prev_atom && nxt != Some("]") && pos + 1 < end {
             True -> v_class_loop(bytes, pos + 1, end, False)
             False -> Error(InvalidClassCharacter(pos))
@@ -1345,7 +1162,6 @@ fn v_class_loop(
   }
 }
 
-/// Skip to just past the next `}` (for \p{...} / \q{...} payloads).
 fn skip_to_close_brace(
   bytes: BitArray,
   pos: Int,
@@ -1361,10 +1177,6 @@ fn skip_to_close_brace(
   }
 }
 
-/// Parse and validate a group name starting at `pos` (just after `<`),
-/// returning the decoded name and the position after the closing `>`.
-/// First code point must be ID_Start, the rest ID_Continue, with \uXXXX and
-/// \u{...} escapes (including surrogate pairs) decoded.
 fn parse_group_name(
   bytes: BitArray,
   pos: Int,
@@ -1373,11 +1185,6 @@ fn parse_group_name(
   group_name_loop(bytes, pos, end, True, [])
 }
 
-/// The accepted code point of a group-name character, as an encodable
-/// `UtfCodepoint`. Every code point that gets this far already passed
-/// `validate_identifier_codepoint` (which rejects surrogates and NUL) and the
-/// U+10FFFF bound, so the encoding cannot fail — but the type says so instead
-/// of a `filter_map` silently dropping the character from the name.
 fn name_codepoint(cp: Int, pos: Int) -> Result(UtfCodepoint, PatternError) {
   string.utf_codepoint(cp)
   |> result.replace_error(InvalidGroupName(pos))
@@ -1399,7 +1206,6 @@ fn group_name_loop(
       }
     _, Some("\\") -> {
       use #(cp0, next0) <- result.try(decode_name_escape(bytes, pos, end))
-      // Combine a surrogate pair written as two \uXXXX escapes.
       let #(cp, next) = case utf16.is_high(cp0) {
         False -> #(cp0, next0)
         True ->
@@ -1435,9 +1241,6 @@ fn group_name_loop(
   }
 }
 
-/// A `\uXXXX` / `\u{...}` escape inside a group name at `pos` (the
-/// backslash), decoded to its code point. `end` bounds the pattern body, so a
-/// `\u{` run can never scan past it.
 fn decode_name_escape(
   bytes: BitArray,
   pos: Int,
@@ -1449,16 +1252,11 @@ fn decode_name_escape(
         Some("{") -> {
           let #(after, value) = hex_run(bytes, pos + 3, end)
           case value, ascii_in(bytes, after, end) {
-            // Reject code points above U+10FFFF here — downstream identifier
-            // checks assume a valid Unicode scalar range.
             Some(cp), Some("}") if cp <= 0x10FFFF -> Ok(#(cp, after + 1))
             _, _ -> Error(InvalidGroupName(pos))
           }
         }
         _ -> {
-          // Exactly four hex digits: `hex_run` bounded to `pos + 6` (and to
-          // the pattern body) cannot consume more, and `after == pos + 6`
-          // rejects any shorter run.
           let #(after, value) = hex_run(bytes, pos + 2, int.min(pos + 6, end))
           case value, after == pos + 6 {
             Some(cp), True -> Ok(#(cp, pos + 6))
@@ -1470,15 +1268,7 @@ fn decode_name_escape(
   }
 }
 
-/// Validate inline modifier flags (after `(?`), e.g. `(?ims:`, `(?ims-ims:`,
-/// `(?-i:`. Only i/m/s are allowed; no flag may repeat (including across the
-/// add/remove sets), and the two sets must not both be empty. Returns the
-/// position just after the `:`.
-///
-/// PRECONDITION: the character at `pos` is not `:` — `p_group` handles `(?:`
-/// itself and only falls through to here for other `(?x` heads. So a `:` at
-/// `pos2` implies at least one add flag was consumed, and `(?:` can never be
-/// mistaken for an empty modifier set.
+// pos is never ":" here, p_group handles (?: itself
 fn p_modifiers(
   bytes: BitArray,
   pos: Int,
@@ -1526,7 +1316,6 @@ fn p_mod_flags(
   }
 }
 
-/// True for a-z A-Z.
 fn is_ascii_letter(ch: String) -> Bool {
   case string.to_utf_codepoints(ch) {
     [cp] -> digits.is_ascii_alpha_code(string.utf_codepoint_to_int(cp))
@@ -1534,7 +1323,6 @@ fn is_ascii_letter(ch: String) -> Bool {
   }
 }
 
-/// SyntaxCharacter: ^ $ \ . * + ? ( ) [ ] { } |
 fn is_syntax_char(ch: String) -> Bool {
   case ch {
     "^"
@@ -1555,19 +1343,10 @@ fn is_syntax_char(ch: String) -> Bool {
   }
 }
 
-/// The decoded flags of a regular expression, in source order. Produced only
-/// by `validate_flags` / `skip_regex_flags`, so holding one proves the flags
-/// string contained no unknown, duplicate or mutually exclusive flag — and
-/// that `mode` is the grammar those flags select. `validate_pattern` takes
-/// this rather than a raw list, so "forgot to derive the mode from the flags"
-/// cannot be written.
 pub type RegexFlags {
   RegexFlags(mode: RegexMode, flags: List(String))
 }
 
-/// The single place `RegexFlags` is built: reverse the accumulated flags back
-/// into source order, reject `u` + `v` together, and pin the mode they select.
-/// `pos` is the byte offset of the flags for the exclusivity error.
 fn regex_flags(
   seen: List(String),
   pos: Int,
@@ -1581,11 +1360,6 @@ fn regex_flags(
   }
 }
 
-/// Validate a whole flags string (e.g. the second argument of
-/// `new RegExp(pattern, flags)`): every character must belong to the flag
-/// alphabet and none may repeat. Positions in the returned error are byte
-/// offsets into `flags`. This shares `scan_regex_flags` with the literal
-/// scanner, so the flag alphabet and duplicate detection live in one place.
 pub fn validate_flags(flags: String) -> Result(RegexFlags, PatternError) {
   let bytes = <<flags:utf8>>
   use #(end, seen) <- result.try(scan_regex_flags(bytes, 0, []))
@@ -1596,8 +1370,6 @@ pub fn validate_flags(flags: String) -> Result(RegexFlags, PatternError) {
   regex_flags(seen, 0)
 }
 
-/// The full (possibly non-ASCII) grapheme starting at byte `pos`, for
-/// reporting the offending character of an `InvalidFlag`.
 fn grapheme_at(bytes: BitArray, pos: Int) -> String {
   bit_array.slice(bytes, pos, bit_array.byte_size(bytes) - pos)
   |> result.try(bit_array.to_string)
@@ -1605,10 +1377,6 @@ fn grapheme_at(bytes: BitArray, pos: Int) -> String {
   |> result.unwrap("")
 }
 
-/// Scan regex flags after the closing /, returning the position past them and
-/// the validated flags. Rejects duplicate and mutually exclusive flags. The
-/// literal scanner's entry point into the same alphabet + duplicate detection
-/// that `validate_flags` uses.
 pub fn skip_regex_flags(
   bytes: BitArray,
   pos: Int,
@@ -1618,10 +1386,6 @@ pub fn skip_regex_flags(
   #(end, flags)
 }
 
-/// The single owner of the flag alphabet: consume flag characters from `pos`,
-/// rejecting duplicates, and stop at the first character that is not a flag.
-/// The accumulated list is in reverse source order — `regex_flags` is the only
-/// consumer, and it un-reverses.
 fn scan_regex_flags(
   bytes: BitArray,
   pos: Int,
@@ -1644,27 +1408,18 @@ fn scan_regex_flags(
   }
 }
 
-// ---- Unicode property escapes (\p{...} / \P{...}) ----
-
-/// Result of looking up a property name against the ECMA-262 tables
-/// (general categories, scripts, binary properties, string properties).
 type PropertyEscapeKind {
   PropValid
   PropString
   PropInvalid
 }
 
-/// Strict (exact-case, no loose matching) lookup of a lone property name:
-/// a General_Category value, binary property, or binary property of strings.
 @external(erlang, "arc_regex_props_ffi", "classify_lone")
 fn classify_lone_property(name: String) -> PropertyEscapeKind
 
-/// Strict lookup of a name=value pair: only gc/sc/scx (and long forms)
-/// accept values.
 @external(erlang, "arc_regex_props_ffi", "classify_pair")
 fn classify_pair_property(name: String, value: String) -> PropertyEscapeKind
 
-/// True for UnicodePropertyValueCharacter: a-z, A-Z, 0-9, _.
 fn is_property_char(ch: String) -> Bool {
   case ch {
     "_" -> True
@@ -1676,7 +1431,6 @@ fn is_property_char(ch: String) -> Bool {
   }
 }
 
-/// Skip a run of property name/value characters.
 fn skip_property_chars(bytes: BitArray, pos: Int, end: Int) -> Int {
   let is_property_at = case ascii_in(bytes, pos, end) {
     Some(ch) -> is_property_char(ch)
@@ -1688,10 +1442,6 @@ fn skip_property_chars(bytes: BitArray, pos: Int, end: Int) -> Int {
   }
 }
 
-/// Validate a property escape at `pos` (the backslash of \p or \P), returning
-/// its total byte length. `allow_strings` is True only for a non-negated \p
-/// outside negated classes in v mode — the only place a property of strings
-/// (e.g. RGI_Emoji) is legal.
 fn property_escape_length(
   bytes: BitArray,
   pos: Int,
@@ -1730,20 +1480,10 @@ fn property_escape_length(
         _ -> Error(invalid)
       }
     }
-    // In Unicode mode \p must be followed by {…} — \p alone or \pL is a
-    // SyntaxError (IdentityEscape excludes p/P with the u or v flag).
     _ -> Error(invalid)
   }
 }
 
-// ---- v flag (unicodeSets) property escape validation ----
-
-/// Validate property escapes in a /v-flagged pattern body. Deliberately
-/// narrow: walks escapes and class nesting only, so valid v-mode syntax
-/// (nested classes, &&, --) is never falsely rejected. Enforces:
-/// - \p{...}/\P{...} names must be valid (same tables as u mode)
-/// - properties of strings are only legal in a non-negated \p outside
-///   negated character classes
 fn validate_regex_vmode_body(
   bytes: BitArray,
   pos: Int,
