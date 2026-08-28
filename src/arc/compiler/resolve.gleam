@@ -12,10 +12,13 @@ import arc/bytecode/opcode.{
   IrWithPutRefValue, IrWithPutVar, Pc,
 }
 import arc/internal/tuple_array
+import arc/rt/bytecode
 import arc/rt/types.{type JsVal, JInt}
 import gleam/dict.{type Dict}
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/set.{type Set}
 
 pub fn resolve(code: List(IrOp), constants: List(JsVal)) -> Resolved {
@@ -160,24 +163,23 @@ fn peephole(
       ..rest
     ] ->
       case fusable_cmp(kind), rest {
-        Some(pure), [IrJumpIfFalse(l), ..rest] ->
-          peephole(rest, consts, [
-            IrCmpLocalLocalJump(a, b, pure, l, False),
-            ..acc
-          ])
-        Some(pure), [IrJumpIfTrue(l), ..rest] ->
-          case acc {
-            [IrFinal(opcode.IncLocal(i)), ..acc] if i == a && i != b ->
+        Some(pure), [IrJumpIfFalse(l) as j, ..rest]
+        | Some(pure), [IrJumpIfTrue(l) as j, ..rest]
+        -> {
+          let when = j == IrJumpIfTrue(l)
+          case stepped_local(acc, a) {
+            Some(#(by, acc)) if a != b ->
               peephole(rest, consts, [
-                IrIncLocalCmpLocalJump(a, b, pure, l, True),
+                IrIncLocalCmpLocalJump(a, by, b, pure, l, when),
                 ..acc
               ])
             _ ->
               peephole(rest, consts, [
-                IrCmpLocalLocalJump(a, b, pure, l, True),
+                IrCmpLocalLocalJump(a, b, pure, l, when),
                 ..acc
               ])
           }
+        }
         _, _ ->
           peephole(rest, consts, [
             IrFinal(opcode.BinOpLocalLocal(opcode.classify(kind), a, b)),
@@ -191,24 +193,23 @@ fn peephole(
       ..rest
     ] ->
       case fusable_cmp(kind), rest {
-        Some(pure), [IrJumpIfFalse(l), ..rest] ->
-          peephole(rest, consts, [
-            IrCmpLocalConstJump(a, c, pure, l, False),
-            ..acc
-          ])
-        Some(pure), [IrJumpIfTrue(l), ..rest] ->
-          case acc {
-            [IrFinal(opcode.IncLocal(i)), ..acc] if i == a ->
+        Some(pure), [IrJumpIfFalse(l) as j, ..rest]
+        | Some(pure), [IrJumpIfTrue(l) as j, ..rest]
+        -> {
+          let when = j == IrJumpIfTrue(l)
+          case stepped_local(acc, a) {
+            Some(#(by, acc)) ->
               peephole(rest, consts, [
-                IrIncLocalCmpConstJump(a, c, pure, l, True),
+                IrIncLocalCmpConstJump(a, by, c, pure, l, when),
                 ..acc
               ])
-            _ ->
+            None ->
               peephole(rest, consts, [
-                IrCmpLocalConstJump(a, c, pure, l, True),
+                IrCmpLocalConstJump(a, c, pure, l, when),
                 ..acc
               ])
           }
+        }
         _, _ ->
           peephole(rest, consts, [
             IrFinal(opcode.BinOpLocalConst(opcode.classify(kind), a, c)),
@@ -233,9 +234,15 @@ fn peephole(
         True, opcode.Sub -> Some(IrFinal(opcode.PostDecLocal(i)))
         _, _ -> None
       }
-      case fused {
-        Some(op) -> peephole(rest, consts, [op, ..acc])
-        None ->
+      case fused, acc, rest {
+        Some(IrFinal(opcode.PostIncLocal(_))),
+          [IrFinal(opcode.GetLocal(obj)), ..acc],
+          [IrFinal(opcode.GetElem), ..rest]
+          if obj != i
+        ->
+          peephole(rest, consts, [IrFinal(opcode.GetElemPostInc(obj, i)), ..acc])
+        Some(op), _, _ -> peephole(rest, consts, [op, ..acc])
+        None, _, _ ->
           peephole(list.drop(code, 1), consts, [
             IrFinal(opcode.GetLocal(i)),
             ..acc
@@ -443,6 +450,14 @@ fn peephole(
       ])
 
     [op, ..rest] -> peephole(rest, consts, [op, ..acc])
+  }
+}
+
+fn stepped_local(acc: List(IrOp), i: Int) -> Option(#(Int, List(IrOp))) {
+  case acc {
+    [IrFinal(opcode.IncLocal(j)), ..acc] if i == j -> Some(#(1, acc))
+    [IrFinal(opcode.DecLocal(j)), ..acc] if i == j -> Some(#(-1, acc))
+    _ -> None
   }
 }
 
@@ -709,13 +724,98 @@ fn resolve_op(op: IrOp, labels: Dict(LabelId, Pc)) -> Op {
     IrIncLocalJump(i, l) -> opcode.IncLocalJump(i, label_pc(labels, l))
     IrJumpIfLocal(i, l, when) ->
       opcode.JumpIfLocal(i, label_pc(labels, l), when)
-    IrIncLocalCmpConstJump(i, c, kind, l, when) ->
-      opcode.IncLocalCmpConstJump(i, c, kind, label_pc(labels, l), when)
-    IrIncLocalCmpLocalJump(i, b, kind, l, when) ->
-      opcode.IncLocalCmpLocalJump(i, b, kind, label_pc(labels, l), when)
+    IrIncLocalCmpConstJump(i, by, c, kind, l, when) ->
+      opcode.IncLocalCmpConstJump(i, by, c, kind, label_pc(labels, l), when)
+    IrIncLocalCmpLocalJump(i, by, b, kind, l, when) ->
+      opcode.IncLocalCmpLocalJump(i, by, b, kind, label_pc(labels, l), when)
     IrCmpJump(kind, l, when) -> opcode.CmpJump(kind, label_pc(labels, l), when)
     IrCmpConstJump(c, kind, l, when) ->
       opcode.CmpConstJump(c, kind, label_pc(labels, l), when)
     IrLabel(_) | IrLine(_) -> panic as "marker occupies no pc"
+  }
+}
+
+// picks up to two loop-written slots to keep out of the locals tuple
+pub fn assign_regs(
+  code: tuple_array.TupleArray(Op),
+  pinned: Set(Int),
+) -> #(tuple_array.TupleArray(Op), bytecode.Regs) {
+  let ops = tuple_array.to_list(code)
+  let #(scores, pinned) = score_slots(ops, loop_depths(ops), dict.new(), pinned)
+  let picked =
+    dict.to_list(scores)
+    |> list.filter(fn(e) { e.1.1 && !set.contains(pinned, e.0) })
+    |> list.sort(fn(a, b) { int.compare(b.1.0, a.1.0) })
+    |> list.map(fn(e) { e.0 })
+  case picked {
+    [] -> #(code, bytecode.NoRegs)
+    [a, ..rest] -> {
+      let b = case rest {
+        [b, ..] -> b
+        [] -> -1
+      }
+      let remap = fn(i) {
+        case i == a, i == b {
+          True, _ -> -1
+          _, True -> -2
+          _, _ -> i
+        }
+      }
+      let ops = list.map(ops, opcode.map_slots(_, remap))
+      #(tuple_array.from_list(ops), bytecode.Regs(a, b))
+    }
+  }
+}
+
+// nesting depth per pc from backward jumps
+fn loop_depths(ops: List(Op)) -> List(Int) {
+  let deltas =
+    list.index_fold(ops, dict.new(), fn(acc, op, pc) {
+      case opcode.jump_target(op) {
+        t if t >= 0 && t <= pc ->
+          acc
+          |> dict.upsert(t, fn(v) { option.unwrap(v, 0) + 1 })
+          |> dict.upsert(pc + 1, fn(v) { option.unwrap(v, 0) - 1 })
+        _ -> acc
+      }
+    })
+  let #(_, rev) =
+    list.index_fold(ops, #(0, []), fn(acc, _op, pc) {
+      let d = acc.0 + { dict.get(deltas, pc) |> result.unwrap(0) }
+      #(d, [d, ..acc.1])
+    })
+  list.reverse(rev)
+}
+
+// score and whether the slot is written inside a loop
+fn score_slots(
+  ops: List(Op),
+  depths: List(Int),
+  scores: Dict(Int, #(Int, Bool)),
+  pinned: Set(Int),
+) -> #(Dict(Int, #(Int, Bool)), Set(Int)) {
+  case ops, depths {
+    [op, ..ops], [d, ..depths] -> {
+      let w = case d {
+        0 -> 1
+        1 -> 16
+        2 -> 256
+        _ -> 4096
+      }
+      let scores =
+        list.fold(opcode.slot_uses(op), scores, fn(scores, used) {
+          let #(slot, is_write) = used
+          let #(score, hot) =
+            dict.get(scores, slot) |> result.unwrap(#(0, False))
+          let add = case is_write {
+            True -> w * 3
+            False -> w
+          }
+          dict.insert(scores, slot, #(score + add, hot || { is_write && d > 0 }))
+        })
+      let pinned = list.fold(opcode.pinned_slots(op), pinned, set.insert)
+      score_slots(ops, depths, scores, pinned)
+    }
+    _, _ -> #(scores, pinned)
   }
 }

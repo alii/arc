@@ -996,62 +996,24 @@ pub type LegacySlot {
 pub type LegacyStatics {
   LegacyStatics(
     input: String,
-    last_match: String,
-    last_paren: String,
-    left_context: String,
-    right_context: String,
-    paren1: String,
-    paren2: String,
-    paren3: String,
-    paren4: String,
-    paren5: String,
-    paren6: String,
-    paren7: String,
-    paren8: String,
-    paren9: String,
+    subject: String,
+    whole: #(Int, Int),
+    groups: List(#(Int, Int)),
   )
 }
 
 pub fn empty_legacy_statics() -> LegacyStatics {
-  LegacyStatics(
-    input: "",
-    last_match: "",
-    last_paren: "",
-    left_context: "",
-    right_context: "",
-    paren1: "",
-    paren2: "",
-    paren3: "",
-    paren4: "",
-    paren5: "",
-    paren6: "",
-    paren7: "",
-    paren8: "",
-    paren9: "",
-  )
-}
-
-pub fn legacy_slot(statics: LegacyStatics, slot: LegacySlot) -> String {
-  case slot {
-    LegacyInput -> statics.input
-    LegacyLastMatch -> statics.last_match
-    LegacyLastParen -> statics.last_paren
-    LegacyLeftContext -> statics.left_context
-    LegacyRightContext -> statics.right_context
-    LegacyParen1 -> statics.paren1
-    LegacyParen2 -> statics.paren2
-    LegacyParen3 -> statics.paren3
-    LegacyParen4 -> statics.paren4
-    LegacyParen5 -> statics.paren5
-    LegacyParen6 -> statics.paren6
-    LegacyParen7 -> statics.paren7
-    LegacyParen8 -> statics.paren8
-    LegacyParen9 -> statics.paren9
-  }
+  LegacyStatics(input: "", subject: "", whole: #(0, 0), groups: [])
 }
 
 pub type RegExpNative {
-  RegExpConstructor(legacy: LegacyStatics)
+  // per-realm regexp caches ride on the constructor: the last
+  // RegExp.prototype props seen pristine and compiled patterns
+  RegExpConstructor(
+    legacy: LegacyStatics,
+    proto_props: Option(Dict(PropertyKey, Property)),
+    compiled: Dict(String, CompiledRegExp),
+  )
   RegExpLegacyGetter(ctor: Handle, slot: LegacySlot)
   RegExpLegacyInputSetter(ctor: Handle)
   RegExpPrototypeExec
@@ -2298,6 +2260,8 @@ pub type HelperBody {
 
 pub type ObjKind {
   Ordinary
+  // a realm's global object, plain but writes bump the store's global_epoch
+  GlobalObj
   ArrayObj(length: Int)
   ArgumentsObj(length: Int, mapped: Option(List(Handle)))
   StringObj(value: String)
@@ -2392,10 +2356,19 @@ pub type JsSlot {
   )
   SAsyncContext(resume: Resume, promise: Handle)
   SDisposeCapability(resources: List(DisposeResource))
-  SShapedObject(shape_id: Int, proto: Option(Handle), slots: ShapeSlots)
+  // offsets mirrors the shape so reads skip the table
+  SShapedObject(
+    shape_id: Int,
+    proto: Option(Handle),
+    slots: ShapeSlots,
+    offsets: Dict(BitArray, Int),
+  )
 }
 
 pub type ShapeSlots
+
+@external(erlang, "arc_rt_obj_ffi", "shape_slots_new")
+pub fn shape_slots_new() -> ShapeSlots
 
 @external(erlang, "arc_rt_obj_ffi", "shape_slots_get")
 pub fn shape_slots_get(slots: ShapeSlots, off: Int) -> JsVal
@@ -2424,15 +2397,22 @@ pub type ShapeDesc {
 // droppable cache, not a gc root; see arc_rt_call_fast_ffi
 pub type IcEntry {
   IcRead(key: BitArray, offsets: Dict(Int, Int))
-  IcCall(key: BitArray, ways: Dict(IcCallMatch, IcCallWay))
+  IcCall(
+    key: BitArray,
+    ways: Dict(IcCallMatch, IcCallWay),
+    shaped: Dict(Int, Dict(Int, IcCallWay)),
+  )
+  IcInit(from: Int, to: Int, blank: JsSlot, chain: List(#(Int, JsSlot)))
+  IcGlobal(epoch: Int, value: JsVal, refills: Int)
+  IcOff
 }
 
 pub type IcCallWay {
   IcCallWay(chain: List(#(Int, JsSlot)), callee: Handle, kind: ObjKind)
 }
 
+// shaped receivers key by shape id then proto id in IcCall.shaped
 pub type IcCallMatch {
-  IcShaped(shape_id: Int, proto_id: Int)
   IcPlain(proto_id: Int)
   IcOwn(id: Int)
   IcPrim(wrapper: Int, proto_id: Int)
@@ -2732,6 +2712,10 @@ pub type JsStore(st) {
     next_shape: Int,
     unit_uid: Int,
     ics: Dict(Int, IcEntry),
+    // proto id to whether its chain takes plain named writes
+    free_protos: Dict(Int, Nil),
+    // bumped on any write to a global object cell, for global read caches
+    global_epoch: Int,
   )
 }
 

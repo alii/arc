@@ -17,7 +17,7 @@ import gleam/result
 import gleam/set.{type Set}
 
 // bump on any change to the image or runtime records
-pub const abi_version = 7
+pub const abi_version = 8
 
 pub type SnapshotError {
   SnapshotContainsCompiledCode(cell: Handle)
@@ -100,6 +100,8 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
     next_shape:,
     unit_uid:,
     ics: _,
+    free_protos: _,
+    global_epoch: _,
   ) = store
   let microtasks = types.jq_to_list(microtasks)
   let data =
@@ -188,6 +190,8 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     next_shape:,
     unit_uid:,
     ics: dict.new(),
+    free_protos: dict.new(),
+    global_epoch: 0,
   )
 }
 
@@ -234,6 +238,28 @@ fn drop_regexp_matcher(slot: JsSlot) -> JsSlot {
           flags:,
           last_index:,
           compiled: b_regexp.uncompiled_regexp(),
+        ),
+      )
+    SObject(
+      kind: types.KNative(
+        tag: types.RegExpN(types.RegExpConstructor(legacy:, ..)),
+        name:,
+        length:,
+        constructible:,
+      ),
+      ..,
+    ) ->
+      SObject(
+        ..slot,
+        kind: types.KNative(
+          tag: types.RegExpN(types.RegExpConstructor(
+            legacy:,
+            proto_props: None,
+            compiled: dict.new(),
+          )),
+          name:,
+          length:,
+          constructible:,
         ),
       )
     _ -> slot

@@ -4,7 +4,7 @@
          t_call_fast3/6,
          t_call_method_mono/4, t_call_method_ic/6, t_call_method_ic0/5,
          t_call_method_ic1/6, t_call_method_ic2/7, t_call_method_ic3/8,
-         t_new_simple/3]).
+         t_new_simple/3, t_bind_compiled/4]).
 
 -include("arc_rt_layout.hrl").
 
@@ -103,23 +103,53 @@ ic(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Site, RSite, N, A, B, C) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     RSlot = arc_rt_arena_ffi:get(RId, Data),
-    Fill = case element(?STORE_ICS, Store) of
-        #{Site := {?IC_CALL, KeyBin, Ways}} ->
-            case ic_probe(Data, RId, RSlot, KeyBin, Ways) of
+    case element(?STORE_ICS, Store) of
+        #{Site := {?IC_CALL, KeyBin, _, Shaped}}
+          when element(1, RSlot) =:= ?SSHAPED_TAG ->
+            %% shaped ways nest sid then proto id, no tuple key to build
+            case Shaped of
+                #{element(?SSHAPED_SID, RSlot) := Protos} ->
+                    case element(?SSHAPED_PROTO, RSlot) of
+                        {?SOME, {?HANDLE_TAG, PId}} = Proto ->
+                            case Protos of
+                                #{PId := {Chain, Fn, Kind}} ->
+                                    case ic_chain_ok(Data, Proto, Chain) of
+                                        true ->
+                                            apply_kind(St, Kind, Fn, Recv, N,
+                                                       A, B, C);
+                                        false ->
+                                            ic_miss(St, Recv, RSlot, KeyBin,
+                                                    Site, RSite, N, A, B, C)
+                                    end;
+                                _ ->
+                                    ic_miss(St, Recv, RSlot, KeyBin,
+                                            ways_room(Protos, Site), RSite,
+                                            N, A, B, C)
+                            end;
+                        _ ->
+                            ic_miss(St, Recv, RSlot, KeyBin, none, RSite, N,
+                                    A, B, C)
+                    end;
+                _ ->
+                    ic_miss(St, Recv, RSlot, KeyBin, ways_room(Shaped, Site),
+                            RSite, N, A, B, C)
+            end;
+        #{Site := {?IC_CALL, KeyBin, Ways, _}} ->
+            Fill = case ic_probe(Data, RId, RSlot, KeyBin, Ways) of
                 {hit, _, _} = Hit -> Hit;
                 stale -> Site;
                 spent -> none;
-                miss when map_size(Ways) < ?IC_CALL_WAYS -> Site;
-                miss -> none
+                miss -> ways_room(Ways, Site)
+            end,
+            case Fill of
+                {hit, Fn1, Kind1} ->
+                    apply_kind(St, Kind1, Fn1, Recv, N, A, B, C);
+                _ ->
+                    ic_miss(St, Recv, RSlot, KeyBin, Fill, RSite, N, A, B, C)
             end;
-        #{Site := _} -> none;
-        _ -> Site
-    end,
-    case Fill of
-        {hit, Fn1, Kind1} -> apply_kind(St, Kind1, Fn1, Recv, N, A, B, C);
-        _ ->
-            slow(mono(St, Recv, RSlot, KeyBin, args(N, A, B, C), Fill), Recv,
-                 KeyBin, RSite, N, A, B, C)
+        #{Site := _} ->
+            ic_miss(St, Recv, RSlot, KeyBin, none, RSite, N, A, B, C);
+        _ -> ic_miss(St, Recv, RSlot, KeyBin, Site, RSite, N, A, B, C)
     end;
 ic(St, Recv, KeyBin, Site, RSite, N, A, B, C) ->
     case prim_wrapper(Recv, KeyBin) of
@@ -138,7 +168,7 @@ prim(St, Recv, W, KeyBin, Site, RSite, N, A, B, C) ->
     Proto = {?SOME, {?HANDLE_TAG, PId}} =
         {?SOME, element(?PAIR_PROTO, element(W, element(?AGENT_REALM, St)))},
     Fill = case element(?STORE_ICS, Store) of
-        #{Site := {?IC_CALL, KeyBin, Ways}} ->
+        #{Site := {?IC_CALL, KeyBin, Ways, _}} ->
             case Ways of
                 #{{ic_prim, W, PId} := {Chain, Fn0, Kind0}} ->
                     case ic_chain_ok(Data, Proto, Chain) of
@@ -160,6 +190,13 @@ prim(St, Recv, W, KeyBin, Site, RSite, N, A, B, C) ->
                                  {Fill, {ic_prim, W}, []}),
                  Recv, KeyBin, RSite, N, A, B, C)
     end.
+
+ways_room(Ways, Site) when map_size(Ways) < ?IC_CALL_WAYS -> Site;
+ways_room(_, _) -> none.
+
+ic_miss(St, Recv, RSlot, KeyBin, Fill, RSite, N, A, B, C) ->
+    slow(mono(St, Recv, RSlot, KeyBin, args(N, A, B, C), Fill), Recv, KeyBin,
+         RSite, N, A, B, C).
 
 slow({miss, St}, Recv, KeyBin, RSite, N, A, B, C) ->
     {F, St1} = arc_rt_obj_ffi:t_get_prop_site(St, Recv, KeyBin, RSite),
@@ -196,16 +233,6 @@ apply_kind(St, {?KFN_TAG, Code, Home, _, _, Simple, _, _, _}, Fn, Recv, N, A,
 apply_kind(St, {?KNATIVE_TAG, Tag, _, _, _}, _, Recv, N, A, B, C) ->
     arc@rt@builtins:dispatch_native(St, Tag, Recv, args(N, A, B, C)).
 
-ic_probe(Data, _, {?SSHAPED_TAG, Sid, {?SOME, {?HANDLE_TAG, PId}} = Proto, _},
-         _, Ways) ->
-    case Ways of
-        #{{ic_shaped, Sid, PId} := {Chain, Fn, Kind}} ->
-            case ic_chain_ok(Data, Proto, Chain) of
-                true -> {hit, Fn, Kind};
-                false -> stale
-            end;
-        _ -> miss
-    end;
 ic_probe(Data, RId, RSlot, KeyBin, Ways) when element(1, RSlot) =:= ?SOBJECT_TAG ->
     case Ways of
         #{{ic_own, RId} := {[{_, Slot}], Fn, Kind}} ->
@@ -328,28 +355,47 @@ mono_found(St, _, _, _, _, _, _) -> {miss, St}.
 ic_hop(none, _, _) -> none;
 ic_hop({Site, Match, Chain}, Id, Slot) -> {Site, Match, [{Id, Slot} | Chain]}.
 
-ic_fill(St, {Site, Match0, RevChain}, Fn, Kind, KeyBin) ->
+ic_fill(St, {Site, Match0, RevChain}, Fn, Kind, KeyBin)
+  when tuple_size(St) =:= ?AGENT_ARITY,
+       tuple_size(element(?AGENT_STORE, St)) =:= ?STORE_ARITY ->
     Store = element(?AGENT_STORE, St),
     Ics = element(?STORE_ICS, Store),
     Chain = lists:reverse(RevChain),
-    {Match, Way} = case {Match0, Chain} of
+    {Ways, Shaped} = case Ics of
+        #{Site := {?IC_CALL, KeyBin, Ways0, Shaped0}} -> {Ways0, Shaped0};
+        _ -> {#{}, #{}}
+    end,
+    Way = {Chain, Fn, Kind},
+    IcE = case {Match0, Chain} of
         {{ic_shaped, Sid}, [{PId, _} | _]} ->
-            {{ic_shaped, Sid, PId}, {Chain, Fn, Kind}};
-        {ic_plain, [{PId, _} | _]} -> {{ic_plain, PId}, {Chain, Fn, Kind}};
+            case Shaped of
+                #{Sid := Protos} when map_size(Protos) < ?IC_CALL_WAYS ->
+                    {?IC_CALL, KeyBin, Ways, Shaped#{Sid := Protos#{PId => Way}}};
+                #{Sid := _} ->
+                    {?IC_CALL, KeyBin, Ways, Shaped#{Sid := #{PId => Way}}};
+                _ when map_size(Shaped) < ?IC_CALL_WAYS ->
+                    {?IC_CALL, KeyBin, Ways, Shaped#{Sid => #{PId => Way}}};
+                _ -> full
+            end;
+        {ic_plain, [{PId, _} | _]} ->
+            ways_put(KeyBin, Ways, Shaped, {ic_plain, PId}, Way);
         {{ic_own, RId, RSlot}, []} ->
-            {{ic_own, RId}, {[{RId, RSlot}], Fn, Kind}};
-        {{ic_prim, W}, [{PId, _} | _]} -> {{ic_prim, W, PId}, {Chain, Fn, Kind}}
+            ways_put(KeyBin, Ways, Shaped, {ic_own, RId},
+                     {[{RId, RSlot}], Fn, Kind});
+        {{ic_prim, W}, [{PId, _} | _]} ->
+            ways_put(KeyBin, Ways, Shaped, {ic_prim, W, PId}, Way)
     end,
-    Ways = case Ics of
-        #{Site := {?IC_CALL, KeyBin, Ways0}} -> Ways0;
-        _ -> #{}
-    end,
-    case is_map_key(Match, Ways) orelse map_size(Ways) < ?IC_CALL_WAYS of
-        true ->
-            IcE = {?IC_CALL, KeyBin, Ways#{Match => Way}},
+    case IcE of
+        full -> St;
+        _ ->
             setelement(?AGENT_STORE, St,
-                       setelement(?STORE_ICS, Store, Ics#{Site => IcE}));
-        false -> St
+                       setelement(?STORE_ICS, Store, Ics#{Site => IcE}))
+    end.
+
+ways_put(KeyBin, Ways, Shaped, Match, Way) ->
+    case is_map_key(Match, Ways) orelse map_size(Ways) < ?IC_CALL_WAYS of
+        true -> {?IC_CALL, KeyBin, Ways#{Match => Way}, Shaped};
+        false -> full
     end.
 
 %% an own accessor shadows proto, so miss rather than absent
@@ -362,15 +408,9 @@ mono_own_value(Slot, KeyBin) ->
         _ -> absent
     end.
 
-mono_shaped_own(Store, RSlot, KeyBin) ->
-    Sid = element(?SSHAPED_SID, RSlot),
-    case element(?STORE_SHAPES, Store) of
-        #{Sid := Desc} ->
-            case element(?SHAPE_OFFSETS, Desc) of
-                #{KeyBin := Off} ->
-                    element(Off + 1, element(?SSHAPED_SLOTS, RSlot));
-                _ -> absent
-            end;
+mono_shaped_own(_, RSlot, KeyBin) ->
+    case element(?SSHAPED_OFFSETS, RSlot) of
+        #{KeyBin := Off} -> element(Off + 1, element(?SSHAPED_SLOTS, RSlot));
         _ -> absent
     end.
 
@@ -441,8 +481,8 @@ t_new_simple(St, _, _) -> {miss, St}.
 
 new_simple_apply(St, Store, Data, Ctor, {_, Code, Home, _, _, Simple, _, _, _},
                  Proto, Args)
-  when tuple_size(Store) =:= ?STORE_ARITY ->
-    NewSlot = {?SSHAPED_TAG, 0, {?SOME, Proto}, {}},
+  when tuple_size(St) =:= ?AGENT_ARITY, tuple_size(Store) =:= ?STORE_ARITY ->
+    NewSlot = {?SSHAPED_TAG, 0, {?SOME, Proto}, {}, #{}},
     NewId = element(?STORE_NEXT, Store),
     Store2 = setelement(?STORE_DATA, Store, arc_rt_arena_ffi:set(NewId, NewSlot, Data)),
     Store3 = setelement(?STORE_NEXT, Store2, NewId + 1),
@@ -460,3 +500,54 @@ new_simple_apply(St, Store, Data, Ctor, {_, Code, Home, _, _, Simple, _, _, _},
         {?HANDLE_TAG, _} -> {V, St3};
         _ -> {NewThis, St3}
     end.
+
+%% bind once for natives that call back per element, none takes the frame path
+t_bind_compiled(St, F, {?KFN_TAG, Code, Home, Flags, _, Simple, _, _, _}, This)
+  when ?KFN_PLAIN(Flags) ->
+    ThisR = case element(?FNFLAGS_IS_ARROW, Flags)
+                 orelse element(?FNFLAGS_IS_STRICT, Flags) of
+        true -> This;
+        false when This =:= undefined; This =:= null ->
+            element(?REALM_GLOBAL, element(?AGENT_REALM, St));
+        false when element(1, This) =:= ?HANDLE_TAG -> This;
+        false -> prim
+    end,
+    case ThisR of
+        prim -> ?NONE;
+        _ ->
+            Frame = {ThisR, F, home(Home), undefined},
+            Slow = fun(S, Args) -> Code(S, Frame, Args) end,
+            {?SOME, bound(Simple, ThisR, Slow)}
+    end;
+t_bind_compiled(_, _, _, _) -> ?NONE.
+
+bound({?SOME, {CodeS, 0, true}}, T, _) ->
+    fun(S, _) -> CodeS(S, T) end;
+bound({?SOME, {CodeS, 1, true}}, T, _) ->
+    fun(S, [A | _]) -> CodeS(S, T, A);
+       (S, []) -> CodeS(S, T, undefined)
+    end;
+bound({?SOME, {CodeS, 2, true}}, T, Slow) ->
+    fun(S, [A, B | _]) -> CodeS(S, T, A, B);
+       (S, Args) -> Slow(S, Args)
+    end;
+bound({?SOME, {CodeS, 3, true}}, T, Slow) ->
+    fun(S, [A, B, C | _]) -> CodeS(S, T, A, B, C);
+       (S, Args) -> Slow(S, Args)
+    end;
+bound({?SOME, {CodeS, 0, false}}, _, _) ->
+    fun(S, _) -> CodeS(S) end;
+bound({?SOME, {CodeS, 1, false}}, _, _) ->
+    fun(S, [A | _]) -> CodeS(S, A);
+       (S, []) -> CodeS(S, undefined)
+    end;
+bound({?SOME, {CodeS, 2, false}}, _, Slow) ->
+    fun(S, [A, B | _]) -> CodeS(S, A, B);
+       (S, Args) -> Slow(S, Args)
+    end;
+bound({?SOME, {CodeS, 3, false}}, _, Slow) ->
+    fun(S, [A, B, C | _]) -> CodeS(S, A, B, C);
+       (S, Args) -> Slow(S, Args)
+    end;
+bound(_, _, Slow) -> Slow.
+

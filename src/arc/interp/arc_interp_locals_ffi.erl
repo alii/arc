@@ -1,5 +1,5 @@
 -module(arc_interp_locals_ffi).
--export([frame_locals/9, bind_this/2]).
+-export([frame_locals/9, bind_this/2, flush_regs/5]).
 
 -include("../rt/arc_rt_layout.hrl").
 
@@ -56,3 +56,9 @@ bind_this(undefined, Global) -> Global;
 bind_this(null, Global) -> Global;
 bind_this(js_tdz, _Global) -> js_tdz;
 bind_this(_, _) -> miss.
+
+flush_regs(L, A, B, R0, R1) ->
+    put_reg(put_reg(L, A, R0), B, R1).
+
+put_reg(L, S, _) when S < 0 -> L;
+put_reg(L, S, V) -> setelement(S + 1, L, V).

@@ -130,16 +130,17 @@ list_of(Agent, {?HANDLE_TAG, Id}) ->
 list_of(_, _) -> miss.
 
 dense_list(A, Len) ->
-    case array:size(A) >= Len of
-        false -> miss;
-        true -> dense_prefix(A, Len - 1, [])
+    case arc_tree_array_ffi:size(A) of
+        Len -> hole_free(arc_tree_array_ffi:to_list(A));
+        Size when Size > Len ->
+            hole_free(lists:sublist(arc_tree_array_ffi:to_list(A), Len));
+        _ -> miss
     end.
 
-dense_prefix(_, I, Acc) when I < 0 -> Acc;
-dense_prefix(A, I, Acc) ->
-    case array:get(I, A) of
-        ?ELEMS_HOLE -> miss;
-        V -> dense_prefix(A, I - 1, [V | Acc])
+hole_free(L) ->
+    case lists:member(?ELEMS_HOLE, L) of
+        true -> miss;
+        false -> L
     end.
 
 %% tdz box misses
@@ -208,9 +209,9 @@ ordinary_has_instance(Data, Slot, FP, Sym, Fuel) ->
 plain_above(Data, P, FP, Sym, Fuel) ->
     case arc_rt_arena_ffi:get(P, Data) of
         %% shapes hold string keys only
-        {?SSHAPED_TAG, _, ?NONE, _} -> true;
-        {?SSHAPED_TAG, _, {?SOME, {?HANDLE_TAG, FP}}, _} -> true;
-        {?SSHAPED_TAG, _, {?SOME, {?HANDLE_TAG, Q}}, _} ->
+        {?SSHAPED_TAG, _, ?NONE, _, _} -> true;
+        {?SSHAPED_TAG, _, {?SOME, {?HANDLE_TAG, FP}}, _, _} -> true;
+        {?SSHAPED_TAG, _, {?SOME, {?HANDLE_TAG, Q}}, _, _} ->
             plain_above(Data, Q, FP, Sym, Fuel - 1);
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             case kind_tag(element(?SOBJECT_KIND, Slot)) of
@@ -309,7 +310,7 @@ array_iter_advance(Store, Data, IterId, IterSlot, Target, Index, Done, V) ->
     {array_step, Done, V,
      setelement(?STORE_DATA, Store, arc_rt_arena_ffi:set(IterId, NewSlot, Data))}.
 
-iter_elem({?ELEMS_DENSE, A}, Idx) -> array:get(Idx, A);
+iter_elem({?ELEMS_DENSE, A}, Idx) -> arc_tree_array_ffi:get(Idx, A);
 iter_elem({?ELEMS_SPARSE, M}, Idx) ->
     case M of
         #{Idx := V} -> V;

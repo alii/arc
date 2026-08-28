@@ -26,8 +26,10 @@
 -define(STORE_ALLOC, 5).
 -define(STORE_SHAPES, 14).
 -define(STORE_NEXT_SHAPE, 15).
--define(STORE_ARITY, 17).
+-define(STORE_ARITY, 19).
 -define(STORE_ICS, 17).
+-define(STORE_FREE_PROTOS, 18).
+-define(STORE_GLOBAL_EPOCH, 19).
 
 -define(REALM_TAG, realm).
 -define(REALM_OBJECT, 2).
@@ -59,7 +61,8 @@
 -define(SSHAPED_SID, 2).
 -define(SSHAPED_PROTO, 3).
 -define(SSHAPED_SLOTS, 4).
--define(SSHAPED_ARITY, 4).
+-define(SSHAPED_OFFSETS, 5).
+-define(SSHAPED_ARITY, 5).
 
 -define(SHAPE_TAG, shape_desc).
 -define(SHAPE_ARITY_F, 2).
@@ -96,6 +99,7 @@
 -define(ARRAYOBJ_LENGTH, 2).
 -define(ARRAYOBJ_ARITY, 2).
 -define(ORDINARY, ordinary).
+-define(GLOBALOBJ, global_obj).
 -define(ARGUMENTSOBJ_TAG, arguments_obj).
 -define(ARGUMENTSOBJ_MAPPED, 3).
 -define(ARGUMENTSOBJ_ARITY, 3).
@@ -147,6 +151,7 @@
 -define(ELEMS_DENSE, dense).
 -define(ELEMS_SPARSE, sparse).
 -define(ELEMS_HOLE, js_hole).
+-define(VEC_TAG, js_vec).
 
 -define(COMPLETION_NORMAL, normal_completion).
 -define(COMPLETION_THROW, throw_completion).

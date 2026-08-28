@@ -57,29 +57,22 @@ fn read_object(st: Agent, h: Handle) -> JsSlot {
 }
 
 fn own_property_shaped(
-  st: Agent,
-  shape_id: Int,
+  offsets: Dict(BitArray, Int),
   slots: rt_types.ShapeSlots,
   key: PropertyKey,
 ) -> Option(Property) {
   case key {
     Private(_) -> None
     _ ->
-      case dict.get(require_js(st).shapes, shape_id) {
-        Ok(ShapeDesc(offsets:, ..)) ->
-          case
-            dict.get(offsets, bit_array.from_string(rt_types.key_to_text(key)))
-          {
-            Ok(off) ->
-              Some(DataProperty(
-                value: rt_types.shape_slots_get(slots, off),
-                writable: True,
-                enumerable: True,
-                configurable: True,
-                seq: off,
-              ))
-            Error(Nil) -> None
-          }
+      case dict.get(offsets, bit_array.from_string(rt_types.key_to_text(key))) {
+        Ok(off) ->
+          Some(DataProperty(
+            value: rt_types.shape_slots_get(slots, off),
+            writable: True,
+            enumerable: True,
+            configurable: True,
+            seq: off,
+          ))
         Error(Nil) -> None
       }
   }
@@ -99,9 +92,9 @@ fn own_and_proto_of_slot(
   key: ObjectKey,
 ) -> #(Option(Property), Option(Handle)) {
   case slot {
-    SShapedObject(shape_id:, proto:, slots:) -> #(
+    SShapedObject(offsets:, proto:, slots:, ..) -> #(
       case key {
-        StringKey(pk) -> own_property_shaped(st, shape_id, slots, pk)
+        StringKey(pk) -> own_property_shaped(offsets, slots, pk)
         SymbolKey(_) -> None
       },
       proto,
@@ -127,31 +120,28 @@ fn typed_array_absorbs(slot: JsSlot, key: ObjectKey) -> Bool {
   }
 }
 
-pub fn as_sobject(st: Agent, slot: JsSlot) -> JsSlot {
+pub fn as_sobject(slot: JsSlot) -> JsSlot {
   case slot {
-    SShapedObject(shape_id:, proto:, slots:) -> {
-      let props = case dict.get(require_js(st).shapes, shape_id) {
-        Ok(ShapeDesc(offsets:, ..)) ->
-          dict.fold(offsets, dict.new(), fn(acc, key_bin, off) {
-            let value = rt_types.shape_slots_get(slots, off)
-            let key = case bit_array.to_string(key_bin) {
-              Ok(s) -> rt_types.canonical_key(s)
-              Error(Nil) -> Named("")
-            }
-            dict.insert(
-              acc,
-              key,
-              DataProperty(
-                value:,
-                writable: True,
-                enumerable: True,
-                configurable: True,
-                seq: off,
-              ),
-            )
-          })
-        Error(Nil) -> dict.new()
-      }
+    SShapedObject(proto:, slots:, offsets:, ..) -> {
+      let props =
+        dict.fold(offsets, dict.new(), fn(acc, key_bin, off) {
+          let value = rt_types.shape_slots_get(slots, off)
+          let key = case bit_array.to_string(key_bin) {
+            Ok(s) -> rt_types.canonical_key(s)
+            Error(Nil) -> Named("")
+          }
+          dict.insert(
+            acc,
+            key,
+            DataProperty(
+              value:,
+              writable: True,
+              enumerable: True,
+              configurable: True,
+              seq: off,
+            ),
+          )
+        })
       SObject(
         kind: Ordinary,
         proto:,
@@ -168,7 +158,7 @@ pub fn as_sobject(st: Agent, slot: JsSlot) -> JsSlot {
 // write paths call this so the update sees a plain SObject
 pub fn devolve(st: Agent, h: Handle) -> Agent {
   case rt_store.t_cell_get(st, h) {
-    SShapedObject(..) as s -> rt_store.t_cell_set(st, h, as_sobject(st, s))
+    SShapedObject(..) as s -> rt_store.t_cell_set(st, h, as_sobject(s))
     _ -> st
   }
 }
@@ -434,6 +424,19 @@ pub fn t_new_object(st: Agent, proto: Option(Handle)) -> #(Handle, Agent) {
       symbol_props: [],
       elements: NoElements,
       extensible: True,
+    ),
+  )
+}
+
+// §10.1.13 for `new`, born on the empty shape
+pub fn t_new_receiver(st: Agent, proto: Handle) -> #(Handle, Agent) {
+  rt_store.t_cell_new(
+    st,
+    SShapedObject(
+      shape_id: 0,
+      proto: Some(proto),
+      slots: rt_types.shape_slots_new(),
+      offsets: dict.new(),
     ),
   )
 }
@@ -960,8 +963,9 @@ fn set_on_receiver(
   case rt_types.classify(receiver) {
     KHandle(recv_h) -> {
       case read_object(st, recv_h), key {
-        SShapedObject(shape_id:, proto:, slots:), StringKey(Named(name)) ->
-          set_own_shaped(st, recv_h, shape_id, proto, slots, name, v)
+        SShapedObject(shape_id:, proto:, slots:, offsets:),
+          StringKey(Named(name))
+        -> set_own_shaped(st, recv_h, shape_id, proto, slots, offsets, name, v)
         SObject(kind: ProxyObj(..), ..), StringKey(Named(_))
         | SObject(kind: ProxyObj(..), ..), StringKey(Index(_))
         | SObject(kind: ProxyObj(..), ..), SymbolKey(_)
@@ -1010,27 +1014,39 @@ fn set_own_shaped(
   shape_id: Int,
   proto: Option(Handle),
   slots: rt_types.ShapeSlots,
+  offsets: Dict(BitArray, Int),
   name: String,
   v: JsVal,
 ) -> #(Bool, Agent) {
   let js = require_js(st)
   let key_bin = bit_array.from_string(name)
-  case dict.get(js.shapes, shape_id) {
-    Error(Nil) -> #(False, st)
-    Ok(ShapeDesc(arity:, offsets:, transitions:) as from) ->
-      case dict.get(offsets, key_bin) {
-        Ok(off) -> {
-          let slots = rt_types.shape_slots_set(slots, off, v)
-          #(
-            True,
-            rt_store.t_cell_set(st, h, SShapedObject(shape_id:, proto:, slots:)),
-          )
-        }
-        Error(Nil) -> {
-          let #(to, st) = case dict.get(transitions, key_bin) {
-            Ok(to) -> #(to, st)
+  case dict.get(offsets, key_bin) {
+    Ok(off) -> {
+      let slots = rt_types.shape_slots_set(slots, off, v)
+      #(
+        True,
+        rt_store.t_cell_set(
+          st,
+          h,
+          SShapedObject(shape_id:, proto:, slots:, offsets:),
+        ),
+      )
+    }
+    Error(Nil) ->
+      case dict.get(js.shapes, shape_id) {
+        Error(Nil) -> #(False, st)
+        Ok(ShapeDesc(arity:, transitions:, ..) as from) -> {
+          let known =
+            dict.get(transitions, key_bin)
+            |> result.try(fn(to) {
+              dict.get(js.shapes, to)
+              |> result.map(fn(desc) { #(to, desc.offsets, st) })
+            })
+          let #(to, offsets, st) = case known {
+            Ok(hit) -> hit
             Error(Nil) -> {
               let to = js.next_shape
+              let offsets = dict.insert(offsets, key_bin, arity)
               let shapes =
                 js.shapes
                 |> dict.insert(
@@ -1042,14 +1058,11 @@ fn set_own_shaped(
                 )
                 |> dict.insert(
                   to,
-                  ShapeDesc(
-                    arity: arity + 1,
-                    offsets: dict.insert(offsets, key_bin, arity),
-                    transitions: dict.new(),
-                  ),
+                  ShapeDesc(arity: arity + 1, offsets:, transitions: dict.new()),
                 )
               #(
                 to,
+                offsets,
                 Agent(..st, store: JsStore(..js, shapes:, next_shape: to + 1)),
               )
             }
@@ -1060,7 +1073,7 @@ fn set_own_shaped(
             rt_store.t_cell_set(
               st,
               h,
-              SShapedObject(shape_id: to, proto:, slots:),
+              SShapedObject(shape_id: to, proto:, slots:, offsets:),
             ),
           )
         }
@@ -1916,7 +1929,7 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
 // §10.1.11 / §10.5.11; settles pending fn birth props first
 pub fn t_own_keys(st: Agent, obj: Handle) -> #(List(ObjectKey), Agent) {
   case read_object(st, obj) {
-    SShapedObject(shape_id:, ..) -> #(shaped_own_keys(st, shape_id), st)
+    SShapedObject(offsets:, ..) -> #(shaped_own_keys(offsets), st)
     slot -> {
       let #(slot, st) = settle(st, obj, slot)
       sobject_own_keys(st, slot)
@@ -1924,17 +1937,13 @@ pub fn t_own_keys(st: Agent, obj: Handle) -> #(List(ObjectKey), Agent) {
   }
 }
 
-fn shaped_own_keys(st: Agent, shape_id: Int) -> List(ObjectKey) {
-  case dict.get(require_js(st).shapes, shape_id) {
-    Ok(ShapeDesc(offsets:, ..)) ->
-      dict.to_list(offsets)
-      |> list.sort(fn(a, b) { int.compare(a.1, b.1) })
-      |> list.filter_map(fn(pair) {
-        bit_array.to_string(pair.0)
-        |> result.map(fn(name) { StringKey(Named(name)) })
-      })
-    Error(Nil) -> []
-  }
+fn shaped_own_keys(offsets: Dict(BitArray, Int)) -> List(ObjectKey) {
+  dict.to_list(offsets)
+  |> list.sort(fn(a, b) { int.compare(a.1, b.1) })
+  |> list.filter_map(fn(pair) {
+    bit_array.to_string(pair.0)
+    |> result.map(fn(name) { StringKey(Named(name)) })
+  })
 }
 
 fn sobject_own_keys(st: Agent, slot: JsSlot) -> #(List(ObjectKey), Agent) {
@@ -3148,8 +3157,8 @@ pub fn t_define_own_data(
   case key, writable && enumerable && configurable {
     StringKey(Named(name)), True ->
       case rt_store.t_cell_get(st, h) {
-        SShapedObject(shape_id:, proto:, slots:) ->
-          set_own_shaped(st, h, shape_id, proto, slots, name, value)
+        SShapedObject(shape_id:, proto:, slots:, offsets:) ->
+          set_own_shaped(st, h, shape_id, proto, slots, offsets, name, value)
         _ -> define_own_data(st, h, key, value, True, True, True)
       }
     _, _ ->
@@ -3386,7 +3395,7 @@ pub fn t_new_arguments(
     True -> Some(unsafe_coerce(mapped))
     False -> None
   }
-  let elements = tree_array.from_list(args, rt_types.mk_hole())
+  let elements = tree_array.from_list(args)
   let realm = st.realm
   let symbol_props = case
     t_ordinary_own_property(
@@ -3446,7 +3455,7 @@ pub fn t_new_arguments(
 // holes arrive as mk_hole() and stay holes
 pub fn t_new_array(st: Agent, elems: List(JsVal)) -> #(JsVal, Agent) {
   let len = list.length(elems)
-  let elements = tree_array.from_list(elems, rt_types.mk_hole())
+  let elements = tree_array.from_list(elems)
   let #(h, st) =
     rt_store.t_cell_new(
       st,

@@ -187,8 +187,10 @@ pub type Op {
   // jumps when local truthiness equals when
   JumpIfLocal(index: Int, target: Pc, when: Bool)
   IncLocalJump(index: Int, target: Pc)
+  // by is the step, 1 or -1
   IncLocalCmpConstJump(
     index: Int,
+    by: Int,
     const_index: Int,
     kind: PureBinOp,
     target: Pc,
@@ -196,6 +198,7 @@ pub type Op {
   )
   IncLocalCmpLocalJump(
     index: Int,
+    by: Int,
     right: Int,
     kind: PureBinOp,
     target: Pc,
@@ -241,6 +244,8 @@ pub type Op {
   // [val, key, obj] -> []
   PutElemPop
   GetElemLocals(obj: Int, key: Int)
+  // obj[key++] with both plain locals
+  GetElemPostInc(obj: Int, key: Int)
   BinOpLocalField(kind: Classified, index: Int, key: PropertyKey)
   // [right, left] -> []
   BinOpPut(kind: Classified, dst: Int)
@@ -444,6 +449,7 @@ pub type IrOp {
   IrJumpIfLocal(index: Int, label: LabelId, when: Bool)
   IrIncLocalCmpConstJump(
     index: Int,
+    by: Int,
     const_index: Int,
     kind: PureBinOp,
     label: LabelId,
@@ -451,9 +457,117 @@ pub type IrOp {
   )
   IrIncLocalCmpLocalJump(
     index: Int,
+    by: Int,
     right: Int,
     kind: PureBinOp,
     label: LabelId,
     when: Bool,
   )
+}
+
+// local slots an op touches, paired with whether it writes them
+pub fn slot_uses(op: Op) -> List(#(Int, Bool)) {
+  case op {
+    GetLocal(i)
+    | JumpIfLocal(i, _, _)
+    | GetLocalField(i, _)
+    | GetLocalField2(i, _)
+    | GetFieldCall1(_, i)
+    | GetLocalFieldCall(i, _)
+    | PutLocalConstField(i, _, _)
+    | BinOpLocal(_, i)
+    | BinOpLocalConst(_, i, _)
+    | BinOpLocalField(_, i, _)
+    | CmpLocalConstJump(i, _, _, _, _) -> [#(i, False)]
+    PutLocal(i) -> [#(i, True)]
+    IncLocal(i)
+    | DecLocal(i)
+    | IncLocalJump(i, _)
+    | PostIncLocal(i)
+    | PostDecLocal(i)
+    | IncLocalCmpConstJump(i, _, _, _, _, _) -> [#(i, False), #(i, True)]
+    IncLocalCmpLocalJump(i, _, r, _, _, _) -> [
+      #(i, False),
+      #(i, True),
+      #(r, False),
+    ]
+    CmpLocalLocalJump(a, b, _, _, _)
+    | PutLocalLocalField(a, b, _)
+    | BinOpLocalLocal(_, a, b)
+    | GetElemLocals(a, b) -> [#(a, False), #(b, False)]
+    GetElemPostInc(a, b) -> [#(a, False), #(b, False), #(b, True)]
+    BinOpPut(_, d) | BinOpConstPut(_, _, d) -> [#(d, True)]
+    BinOpLocalPut(_, i, d) -> [#(i, False), #(d, True)]
+    BinOpLocalLocalPut(_, a, b, d) -> [#(a, False), #(b, False), #(d, True)]
+    _ -> []
+  }
+}
+
+// slots these ops name can never live outside the tuple
+pub fn pinned_slots(op: Op) -> List(Int) {
+  case op {
+    PutLocalCheckInit(i)
+    | ApplyArguments(slot: i, ..)
+    | BoxLocal(i)
+    | GetBoxed(i)
+    | PutBoxed(i)
+    | PutBoxedCheckInit(i) -> [i]
+    _ -> []
+  }
+}
+
+pub fn map_slots(op: Op, f: fn(Int) -> Int) -> Op {
+  case op {
+    GetLocal(i) -> GetLocal(f(i))
+    PutLocal(i) -> PutLocal(f(i))
+    IncLocal(i) -> IncLocal(f(i))
+    DecLocal(i) -> DecLocal(f(i))
+    JumpIfLocal(i, t, w) -> JumpIfLocal(f(i), t, w)
+    IncLocalJump(i, t) -> IncLocalJump(f(i), t)
+    IncLocalCmpConstJump(i, by, c, k, t, w) ->
+      IncLocalCmpConstJump(f(i), by, c, k, t, w)
+    IncLocalCmpLocalJump(i, by, r, k, t, w) ->
+      IncLocalCmpLocalJump(f(i), by, f(r), k, t, w)
+    CmpLocalLocalJump(a, b, k, t, w) -> CmpLocalLocalJump(f(a), f(b), k, t, w)
+    CmpLocalConstJump(a, c, k, t, w) -> CmpLocalConstJump(f(a), c, k, t, w)
+    GetLocalField(i, k) -> GetLocalField(f(i), k)
+    GetLocalField2(i, k) -> GetLocalField2(f(i), k)
+    GetFieldCall1(k, i) -> GetFieldCall1(k, f(i))
+    GetLocalFieldCall(i, k) -> GetLocalFieldCall(f(i), k)
+    PutLocalLocalField(a, b, k) -> PutLocalLocalField(f(a), f(b), k)
+    PutLocalConstField(a, c, k) -> PutLocalConstField(f(a), c, k)
+    BinOpLocal(k, i) -> BinOpLocal(k, f(i))
+    BinOpLocalLocal(k, a, b) -> BinOpLocalLocal(k, f(a), f(b))
+    BinOpLocalConst(k, a, c) -> BinOpLocalConst(k, f(a), c)
+    PostIncLocal(i) -> PostIncLocal(f(i))
+    PostDecLocal(i) -> PostDecLocal(f(i))
+    GetElemLocals(a, b) -> GetElemLocals(f(a), f(b))
+    GetElemPostInc(a, b) -> GetElemPostInc(f(a), f(b))
+    BinOpLocalField(k, i, key) -> BinOpLocalField(k, f(i), key)
+    BinOpPut(k, d) -> BinOpPut(k, f(d))
+    BinOpConstPut(k, c, d) -> BinOpConstPut(k, c, f(d))
+    BinOpLocalPut(k, i, d) -> BinOpLocalPut(k, f(i), f(d))
+    BinOpLocalLocalPut(k, a, b, d) -> BinOpLocalLocalPut(k, f(a), f(b), f(d))
+    other -> other
+  }
+}
+
+// backward edges only, enough to find loops
+pub fn jump_target(op: Op) -> Int {
+  case op {
+    Jump(Pc(t))
+    | JumpIfFalse(Pc(t))
+    | JumpIfTrue(Pc(t))
+    | JumpIfNullish(Pc(t))
+    | JumpIfNotNullish(Pc(t))
+    | JumpIfLocal(_, Pc(t), _)
+    | IncLocalJump(_, Pc(t))
+    | IncLocalCmpConstJump(_, _, _, _, Pc(t), _)
+    | IncLocalCmpLocalJump(_, _, _, _, Pc(t), _)
+    | CmpLocalLocalJump(_, _, _, Pc(t), _)
+    | CmpLocalConstJump(_, _, _, Pc(t), _)
+    | CmpJump(_, Pc(t), _)
+    | CmpConstJump(_, _, Pc(t), _) -> t
+    _ -> -1
+  }
 }

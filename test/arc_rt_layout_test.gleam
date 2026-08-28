@@ -134,6 +134,8 @@ pub fn js_store_test() {
   assert at(store, "STORE_SHAPES") == dyn(store.shapes)
   assert at(store, "STORE_NEXT_SHAPE") == dyn(15)
   assert at(store, "STORE_ICS") == dyn(store.ics)
+  assert at(store, "STORE_FREE_PROTOS") == dyn(store.free_protos)
+  assert at(store, "STORE_GLOBAL_EPOCH") == dyn(store.global_epoch)
 }
 
 pub fn realm_test() {
@@ -246,8 +248,7 @@ pub fn keys_and_elements_test() {
   assert element(2, dyn(StringKey(Named("x")))) == dyn(Named("x"))
   assert tag_of(SymbolKey(rt_types.symbol_iterator)) == tag("OKEY_SYMBOL")
   assert dyn(NoElements) == tag("ELEMS_NONE")
-  let arr =
-    tree_array.from_list([rt_types.mk_string("a")], rt_types.mk_undefined())
+  let arr = tree_array.from_list([rt_types.mk_string("a")])
   assert tag_of(Dense(arr)) == tag("ELEMS_DENSE")
   assert element(2, dyn(Dense(arr))) == dyn(arr)
   let sparse = dict.from_list([#(0, rt_types.mk_string("s"))])
@@ -260,12 +261,20 @@ pub fn sshaped_object_test() {
   let s0 = rt_types.mk_string("s0")
   let s1 = rt_types.mk_string("s1")
   let sl = slots([s0, s1, rt_types.mk_string("s2")])
-  let obj = SShapedObject(shape_id: 21, proto: Some(JsCell(2)), slots: sl)
+  let offs = dict.from_list([#(<<"k":utf8>>, 0)])
+  let obj =
+    SShapedObject(
+      shape_id: 21,
+      proto: Some(JsCell(2)),
+      slots: sl,
+      offsets: offs,
+    )
   assert tag_of(obj) == tag("SSHAPED_TAG")
   assert arity(obj) == idx("SSHAPED_ARITY")
   assert at(obj, "SSHAPED_SID") == dyn(21)
   assert at(obj, "SSHAPED_PROTO") == dyn(Some(JsCell(2)))
   assert at(obj, "SSHAPED_SLOTS") == dyn(sl)
+  assert at(obj, "SSHAPED_OFFSETS") == dyn(offs)
   assert tuple_size(dyn(sl)) == 3
   assert element(1, dyn(sl)) == dyn(s0)
   assert element(2, dyn(sl)) == dyn(s1)

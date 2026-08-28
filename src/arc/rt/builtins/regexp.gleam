@@ -11,24 +11,25 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type LegacySlot,
-  type LegacyStatics, type ObjectKey, type RegExpFlag, type RegExpNative,
-  ArrayObj, DataProperty, Index, JInt, KHandle, KNative, KNull, KUndef,
-  LegacyInput, LegacyLastMatch, LegacyLastParen, LegacyLeftContext, LegacyParen1,
-  LegacyParen2, LegacyParen3, LegacyParen4, LegacyParen5, LegacyParen6,
-  LegacyParen7, LegacyParen8, LegacyParen9, LegacyRightContext, LegacyStatics,
-  Named, NoElements, Ordinary, RFDotAll, RFGlobal, RFHasIndices, RFIgnoreCase,
-  RFMultiline, RFSticky, RFUnicode, RFUnicodeSets, RegExpConstructor,
-  RegExpGetFlag, RegExpGetFlags, RegExpGetSource, RegExpLegacyGetter,
-  RegExpLegacyInputSetter, RegExpN, RegExpObj, RegExpPrototypeCompile,
-  RegExpPrototypeExec, RegExpPrototypeTest, RegExpPrototypeToString,
-  RegExpStringIteratorNext, RegExpSymbolMatch, RegExpSymbolMatchAll,
-  RegExpSymbolReplace, RegExpSymbolSearch, RegExpSymbolSplit, ReturnThis,
-  SObject, StringKey, classify, mk_bool, mk_null, mk_number, mk_object,
-  mk_string, mk_undefined,
+  type LegacyStatics, type ObjectKey, type Property, type PropertyKey,
+  type RegExpFlag, type RegExpNative, ArrayObj, DataProperty, Index, JInt,
+  KHandle, KNative, KNull, KUndef, LegacyInput, LegacyLastMatch, LegacyLastParen,
+  LegacyLeftContext, LegacyParen1, LegacyParen2, LegacyParen3, LegacyParen4,
+  LegacyParen5, LegacyParen6, LegacyParen7, LegacyParen8, LegacyParen9,
+  LegacyRightContext, LegacyStatics, Named, NoElements, Ordinary, RFDotAll,
+  RFGlobal, RFHasIndices, RFIgnoreCase, RFMultiline, RFSticky, RFUnicode,
+  RFUnicodeSets, RegExpConstructor, RegExpGetFlag, RegExpGetFlags,
+  RegExpGetSource, RegExpLegacyGetter, RegExpLegacyInputSetter, RegExpN,
+  RegExpObj, RegExpPrototypeCompile, RegExpPrototypeExec, RegExpPrototypeTest,
+  RegExpPrototypeToString, RegExpStringIteratorNext, RegExpSymbolMatch,
+  RegExpSymbolMatchAll, RegExpSymbolReplace, RegExpSymbolSearch,
+  RegExpSymbolSplit, ReturnThis, SObject, StringKey, classify, mk_bool, mk_null,
+  mk_number, mk_object, mk_string, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bit_array
-import gleam/dict
+import gleam/bool
+import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -68,7 +69,13 @@ pub fn init(
       object_proto,
       fn_proto,
       proto_props,
-      fn(_) { RegExpN(RegExpConstructor(rt_types.empty_legacy_statics())) },
+      fn(_) {
+        RegExpN(RegExpConstructor(
+          rt_types.empty_legacy_statics(),
+          None,
+          dict.new(),
+        ))
+      },
       "RegExp",
       2,
       [],
@@ -167,7 +174,7 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case native {
-    RegExpConstructor(legacy: _) -> regexp_call(st, args)
+    RegExpConstructor(..) -> regexp_call(st, args)
     RegExpLegacyGetter(ctor:, slot:) -> legacy_static_get(st, this, ctor, slot)
     RegExpLegacyInputSetter(ctor:) ->
       legacy_static_set_input(st, this, args, ctor)
@@ -194,7 +201,7 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case native {
-    RegExpConstructor(legacy: _) -> {
+    RegExpConstructor(..) -> {
       let #(pattern, flags) = helpers.two_args_or_undefined(args)
       let #(pattern_is_regexp, st) = is_regexp(st, pattern)
       construct_regexp(st, pattern, pattern_is_regexp, flags, new_target)
@@ -272,8 +279,7 @@ pub fn regexp_create(st: Agent, p: JsVal, f: JsVal) -> #(JsVal, Agent) {
 pub fn is_regexp(st: Agent, val: JsVal) -> #(Bool, Agent) {
   case classify(val) {
     KHandle(_) -> {
-      let #(matcher, st) =
-        rt_obj.t_get_prop(st, val, rt_types.SymbolKey(rt_types.symbol_match))
+      let #(matcher, st) = helpers.get_symbol(st, val, rt_types.symbol_match)
       case classify(matcher) {
         KUndef -> #(is_regexp_object(st, val), st)
         _ -> #(rt_val.to_boolean(matcher), st)
@@ -307,7 +313,7 @@ fn legacy_static_get(
     False -> rt_val.t_throw_type_error(st, legacy_receiver_error)
     True ->
       case read_legacy_statics(st, ctor) {
-        Some(statics) -> #(mk_string(rt_types.legacy_slot(statics, slot)), st)
+        Some(statics) -> #(mk_string(legacy_slot(statics, slot)), st)
         None -> rt_val.t_throw_type_error(st, legacy_receiver_error)
       }
   }
@@ -342,7 +348,7 @@ fn is_handle(v: JsVal, h: Handle) -> Bool {
 
 fn read_legacy_statics(st: Agent, ctor: Handle) -> Option(LegacyStatics) {
   case rt_store.t_cell_get(st, ctor) {
-    SObject(kind: KNative(tag: RegExpN(RegExpConstructor(legacy:)), ..), ..) ->
+    SObject(kind: KNative(tag: RegExpN(RegExpConstructor(legacy:, ..)), ..), ..) ->
       Some(legacy)
     _ -> None
   }
@@ -353,27 +359,108 @@ fn write_legacy_statics(
   ctor: Handle,
   update: fn(LegacyStatics) -> LegacyStatics,
 ) -> Agent {
+  use tag <- update_constructor(st, ctor)
+  CtorState(..tag, legacy: update(tag.legacy))
+}
+
+type CtorState {
+  CtorState(
+    legacy: LegacyStatics,
+    proto_props: Option(Dict(PropertyKey, Property)),
+    compiled: Dict(String, rt_types.CompiledRegExp),
+  )
+}
+
+fn ctor_state(st: Agent) -> Option(CtorState) {
+  case rt_store.t_cell_get(st, st.realm.regexp.constructor) {
+    SObject(
+      kind: KNative(
+        tag: RegExpN(RegExpConstructor(legacy:, proto_props:, compiled:)),
+        ..,
+      ),
+      ..,
+    ) -> Some(CtorState(legacy:, proto_props:, compiled:))
+    _ -> None
+  }
+}
+
+fn update_constructor(
+  st: Agent,
+  ctor: Handle,
+  update: fn(CtorState) -> CtorState,
+) -> Agent {
   use slot <- rt_store.t_cell_update(st, ctor)
   case slot {
     SObject(
       kind: KNative(
-        tag: RegExpN(RegExpConstructor(legacy:)),
+        tag: RegExpN(RegExpConstructor(legacy:, proto_props:, compiled:)),
         name:,
         length:,
         constructible:,
       ),
       ..,
-    ) ->
+    ) -> {
+      let CtorState(legacy:, proto_props:, compiled:) =
+        update(CtorState(legacy:, proto_props:, compiled:))
       SObject(
         ..slot,
         kind: KNative(
-          tag: RegExpN(RegExpConstructor(update(legacy))),
+          tag: RegExpN(RegExpConstructor(legacy:, proto_props:, compiled:)),
           name:,
           length:,
           constructible:,
         ),
       )
+    }
     other -> other
+  }
+}
+
+@external(erlang, "erlang", "=:=")
+fn same_props(
+  a: Dict(PropertyKey, Property),
+  b: Dict(PropertyKey, Property),
+) -> Bool
+
+// usually one compare against the last props map seen pristine
+fn proto_pristine(st: Agent) -> #(Bool, Agent) {
+  case rt_store.t_cell_get(st, st.realm.regexp.prototype), ctor_state(st) {
+    SObject(props:, ..), Some(CtorState(proto_props:, ..)) ->
+      case proto_props {
+        Some(seen) ->
+          case same_props(seen, props) {
+            True -> #(True, st)
+            False -> verify_pristine(st, props)
+          }
+        None -> verify_pristine(st, props)
+      }
+    _, _ -> #(False, st)
+  }
+}
+
+fn verify_pristine(
+  st: Agent,
+  props: Dict(PropertyKey, Property),
+) -> #(Bool, Agent) {
+  let exec = case dict.get(props, Named("exec")) {
+    Ok(DataProperty(value:, ..)) -> is_intrinsic_exec(st, value)
+    _ -> False
+  }
+  let pristine =
+    exec
+    && intrinsic_getter(st, props, "flags", RegExpGetFlags)
+    && list.all(all_flags, fn(f) {
+      intrinsic_getter(st, props, flag_property(f), RegExpGetFlag(f))
+    })
+  case pristine {
+    False -> #(False, st)
+    True -> {
+      let st = {
+        use tag <- update_constructor(st, st.realm.regexp.constructor)
+        CtorState(..tag, proto_props: Some(props))
+      }
+      #(True, st)
+    }
   }
 }
 
@@ -383,29 +470,36 @@ fn update_legacy_statics(
   whole: #(Int, Int),
   groups: List(#(Int, Int)),
 ) -> Agent {
-  let #(match_start, match_len) = whole
-  let group_strings = list.map(groups, capture_to_legacy_string(s, _))
-  let last_paren = list.last(group_strings) |> result.unwrap("")
-  let paren = fn(n) {
-    helpers.list_at(group_strings, n - 1) |> option.unwrap("")
-  }
   use _previous <- write_legacy_statics(st, st.realm.regexp.constructor)
-  LegacyStatics(
-    input: s,
-    last_match: byte_slice(s, match_start, match_len),
-    last_paren:,
-    left_context: byte_slice(s, 0, match_start),
-    right_context: byte_drop_start(s, match_start + match_len),
-    paren1: paren(1),
-    paren2: paren(2),
-    paren3: paren(3),
-    paren4: paren(4),
-    paren5: paren(5),
-    paren6: paren(6),
-    paren7: paren(7),
-    paren8: paren(8),
-    paren9: paren(9),
-  )
+  LegacyStatics(input: s, subject: s, whole:, groups:)
+}
+
+fn legacy_slot(statics: LegacyStatics, slot: LegacySlot) -> String {
+  let LegacyStatics(input:, subject: s, whole: #(start, len), groups:) = statics
+  let paren = fn(n) {
+    helpers.list_at(groups, n - 1)
+    |> option.map(capture_to_legacy_string(s, _))
+    |> option.unwrap("")
+  }
+  case slot {
+    rt_types.LegacyInput -> input
+    rt_types.LegacyLastMatch -> byte_slice(s, start, len)
+    rt_types.LegacyLastParen ->
+      list.last(groups)
+      |> result.map(capture_to_legacy_string(s, _))
+      |> result.unwrap("")
+    rt_types.LegacyLeftContext -> byte_slice(s, 0, start)
+    rt_types.LegacyRightContext -> byte_drop_start(s, start + len)
+    rt_types.LegacyParen1 -> paren(1)
+    rt_types.LegacyParen2 -> paren(2)
+    rt_types.LegacyParen3 -> paren(3)
+    rt_types.LegacyParen4 -> paren(4)
+    rt_types.LegacyParen5 -> paren(5)
+    rt_types.LegacyParen6 -> paren(6)
+    rt_types.LegacyParen7 -> paren(7)
+    rt_types.LegacyParen8 -> paren(8)
+    rt_types.LegacyParen9 -> paren(9)
+  }
 }
 
 fn capture_to_legacy_string(s: String, cap: #(Int, Int)) -> String {
@@ -456,7 +550,11 @@ fn escape_terminator(cp: UtfCodepoint) -> String {
 
 fn get_flags(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
-    KHandle(_) -> build_flags(st, this, all_flags, "")
+    KHandle(h) ->
+      case own_flags(st, h) {
+        #(Some(flags), st) -> #(mk_string(flags), st)
+        #(None, st) -> build_flags(st, this, all_flags, "")
+      }
     _ ->
       rt_val.t_throw_type_error(
         st,
@@ -486,10 +584,7 @@ fn build_flags(
 
 fn get_flag(st: Agent, this: JsVal, flag: RegExpFlag) -> #(JsVal, Agent) {
   case require_regexp_or_proto(st, this, flag_property(flag)) {
-    RSlot(_, flags, _) -> #(
-      mk_bool(string.contains(flags, flag_char(flag))),
-      st,
-    )
+    RSlot(_, flags, _) -> #(mk_bool(has_flag(flags, flag_char(flag))), st)
     RProto -> #(mk_undefined(), st)
   }
 }
@@ -505,8 +600,7 @@ fn to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   }
   let #(src_v, st) = get_named(st, this, "source")
   let #(src, st) = rt_val.t_to_string(st, src_v)
-  let #(flags_v, st) = get_named(st, this, "flags")
-  let #(flags, st) = rt_val.t_to_string(st, flags_v)
+  let #(flags, st) = read_flags(st, this)
   #(mk_string("/" <> src <> "/" <> flags), st)
 }
 
@@ -559,7 +653,7 @@ fn alloc_regexp_with_proto(
           "" -> "(?:)"
           _ -> source
         },
-        flags:,
+        flags: canonical_flags(flags),
         last_index: 0,
         compiled: uncompiled_regexp(),
       ),
@@ -634,6 +728,9 @@ type ExecFailure {
   PatternCompileFailed(reason: String)
 }
 
+@external(erlang, "arc_regexp_ffi", "has_flag")
+pub fn has_flag(flags: String, flag: String) -> Bool
+
 @external(erlang, "arc_regexp_ffi", "regexp_compile")
 fn ffi_regexp_compile(pattern: String, flags: String) -> rt_types.CompiledRegExp
 
@@ -667,19 +764,11 @@ fn try_get(st: Agent, o: JsVal, key: ObjectKey) -> #(JsVal, Agent) {
 }
 
 fn get_named(st: Agent, o: JsVal, name: String) -> #(JsVal, Agent) {
-  try_get(st, o, StringKey(Named(name)))
+  helpers.get_named(st, o, name)
 }
 
 fn set_throw(st: Agent, h: Handle, name: String, v: JsVal) -> Agent {
-  let #(ok, st) = rt_obj.t_set_prop(st, mk_object(h), StringKey(Named(name)), v)
-  case ok {
-    True -> st
-    False ->
-      rt_val.t_throw_type_error(
-        st,
-        "Cannot assign to read only property '" <> name <> "' of object",
-      )
-  }
+  helpers.set_named(st, mk_object(h), name, v, True)
 }
 
 fn require_object(st: Agent, v: JsVal, op: String) -> Handle {
@@ -755,19 +844,27 @@ type ExecMode {
   MatchOnly
 }
 
-fn builtin_exec_mode(
+type RawExec {
+  RawHit(
+    whole: #(Int, Int),
+    groups: List(#(Int, Int)),
+    names: List(#(String, Int)),
+  )
+  RawMiss
+}
+
+// §22.2.7.2 regexpbuiltinexec up to the result array
+fn builtin_exec_raw(
   st: Agent,
   h: Handle,
   s: String,
-  mode: ExecMode,
-) -> #(JsVal, Agent) {
+) -> #(RawExec, String, Agent) {
   let #(li_v, st) = get_named(st, mk_object(h), "lastIndex")
   let #(last_index, st) = rt_val.t_to_length(st, li_v)
   // re-read after the get, a getter may have recompiled
   let #(flags, compiled, st) = regexp_matcher(st, h)
-  let global = string.contains(flags, "g")
-  let sticky = string.contains(flags, "y")
-  let has_indices = string.contains(flags, "d")
+  let global = has_flag(flags, "g")
+  let sticky = has_flag(flags, "y")
   let last_index = case global || sticky {
     True -> last_index
     False -> 0
@@ -778,23 +875,39 @@ fn builtin_exec_mode(
         True -> set_throw(st, h, "lastIndex", mk_number(JInt(0)))
         False -> st
       }
-      #(mk_null(), st)
+      #(RawMiss, flags, st)
     }
     Ok(#(whole, groups, _gc, names)) -> {
       let #(match_start, match_len) = whole
-      let e = match_start + match_len
       let st = case global || sticky {
-        True -> set_throw(st, h, "lastIndex", mk_number(JInt(e)))
+        True ->
+          set_throw(
+            st,
+            h,
+            "lastIndex",
+            mk_number(JInt(match_start + match_len)),
+          )
         False -> st
       }
       // unconditional like v8, gating would leave stale statics
       let st = update_legacy_statics(st, s, whole, groups)
-      case mode {
-        MatchArray ->
-          build_exec_result(st, s, whole, groups, names, has_indices)
-        MatchOnly -> #(mk_bool(True), st)
-      }
+      #(RawHit(whole:, groups:, names:), flags, st)
     }
+  }
+}
+
+fn builtin_exec_mode(
+  st: Agent,
+  h: Handle,
+  s: String,
+  mode: ExecMode,
+) -> #(JsVal, Agent) {
+  let #(raw, flags, st) = builtin_exec_raw(st, h, s)
+  case raw, mode {
+    RawMiss, _ -> #(mk_null(), st)
+    RawHit(..), MatchOnly -> #(mk_bool(True), st)
+    RawHit(whole:, groups:, names:), MatchArray ->
+      build_exec_result(st, s, whole, groups, names, has_flag(flags, "d"))
   }
 }
 
@@ -807,7 +920,7 @@ fn regexp_matcher(
       case ffi_is_compiled(compiled) {
         True -> #(flags, compiled, st)
         False -> {
-          let compiled = ffi_regexp_compile(source, flags)
+          let #(compiled, st) = compile_cached(st, source, flags)
           let kind = RegExpObj(source:, flags:, last_index:, compiled:)
           let st = rt_store.t_cell_set(st, h, SObject(..slot, kind:))
           #(flags, compiled, st)
@@ -818,6 +931,33 @@ fn regexp_matcher(
         st,
         "RegExp.prototype.exec requires that 'this' be a RegExp",
       )
+  }
+}
+
+fn compile_cached(
+  st: Agent,
+  source: String,
+  flags: String,
+) -> #(rt_types.CompiledRegExp, Agent) {
+  let key = flags <> "/" <> source
+  let cached = case ctor_state(st) {
+    Some(CtorState(compiled:, ..)) -> dict.get(compiled, key)
+    None -> Error(Nil)
+  }
+  case cached {
+    Ok(compiled) -> #(compiled, st)
+    Error(Nil) -> {
+      let fresh = ffi_regexp_compile(source, flags)
+      let st = {
+        use tag <- update_constructor(st, st.realm.regexp.constructor)
+        let cache = case dict.size(tag.compiled) < 256 {
+          True -> tag.compiled
+          False -> dict.new()
+        }
+        CtorState(..tag, compiled: dict.insert(cache, key, fresh))
+      }
+      #(fresh, st)
+    }
   }
 }
 
@@ -834,21 +974,7 @@ fn build_exec_result(
     mk_string(byte_slice(s, match_start, match_len)),
     ..list.map(groups, capture_to_value(s, _))
   ]
-  let #(groups_val, st) = case names {
-    [] -> #(mk_undefined(), st)
-    _ -> {
-      let values =
-        list.map(names, fn(pair) {
-          let #(name, idx) = pair
-          let v =
-            helpers.list_at(groups, idx - 1)
-            |> option.map(capture_to_value(s, _))
-            |> option.unwrap(mk_undefined())
-          #(name, v)
-        })
-      alloc_null_proto_object(st, dedupe_group_values(values))
-    }
-  }
+  let #(groups_val, st) = groups_object(st, s, groups, names)
   let #(indices_val, st) = case has_indices {
     False -> #(mk_undefined(), st)
     True -> make_indices(st, whole, groups, names)
@@ -865,6 +991,29 @@ fn build_exec_result(
       ..extra
     ])
   #(mk_object(arr_h), st)
+}
+
+fn groups_object(
+  st: Agent,
+  s: String,
+  groups: List(#(Int, Int)),
+  names: List(#(String, Int)),
+) -> #(JsVal, Agent) {
+  case names {
+    [] -> #(mk_undefined(), st)
+    _ -> {
+      let values =
+        list.map(names, fn(pair) {
+          let #(name, idx) = pair
+          let v =
+            helpers.list_at(groups, idx - 1)
+            |> option.map(capture_to_value(s, _))
+            |> option.unwrap(mk_undefined())
+          #(name, v)
+        })
+      alloc_null_proto_object(st, dedupe_group_values(values))
+    }
+  }
 }
 
 fn make_indices(
@@ -1050,7 +1199,7 @@ fn regexp_compile(
             ..slot,
             kind: RegExpObj(
               source:,
-              flags:,
+              flags: canonical_flags(flags),
               last_index: 0,
               compiled: uncompiled_regexp(),
             ),
@@ -1076,13 +1225,67 @@ fn regexp_symbol_match(
 ) -> #(JsVal, Agent) {
   let h = require_object(st, this, "[Symbol.match]")
   let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
-  let #(flags_v, st) = get_named(st, this, "flags")
-  let #(flags, st) = rt_val.t_to_string(st, flags_v)
-  case string.contains(flags, "g") {
-    False -> regexp_exec_abstract(st, this, s)
-    True -> {
+  let #(flags, st) = read_flags(st, this)
+  let #(fast, st) = pristine_exec(st, h)
+  case has_flag(flags, "g"), fast {
+    False, True -> builtin_exec_mode(st, h, s, MatchArray)
+    False, False -> regexp_exec_abstract(st, this, s)
+    True, fast -> {
       let st = set_throw(st, h, "lastIndex", mk_number(JInt(0)))
-      match_global_loop(st, this, h, s, [], 0)
+      case fast {
+        True -> match_global_fast(st, h, s)
+        False -> match_global_loop(st, this, h, s, [], 0)
+      }
+    }
+  }
+}
+
+// no user code can run mid-loop, so lastIndex and statics land once
+fn match_global_fast(st: Agent, h: Handle, s: String) -> #(JsVal, Agent) {
+  let #(hits, st) = global_hits(st, h, s)
+  case hits {
+    [] -> #(mk_null(), st)
+    _ ->
+      ok_array(
+        st,
+        list.map(hits, fn(hit) { mk_string(byte_slice(s, hit.0, hit.1)) }),
+      )
+  }
+}
+
+// §22.2.7.2 iterated with the global flag until the first miss
+fn global_hits(
+  st: Agent,
+  h: Handle,
+  s: String,
+) -> #(List(#(Int, Int, List(#(Int, Int)), List(#(String, Int)))), Agent) {
+  let #(flags, compiled, st) = regexp_matcher(st, h)
+  let rev = scan_hits(compiled, s, has_flag(flags, "y"), 0, [])
+  let st = case rev {
+    [#(ms, ml, groups, _), ..] ->
+      update_legacy_statics(st, s, #(ms, ml), groups)
+    [] -> st
+  }
+  let st = set_throw(st, h, "lastIndex", mk_number(JInt(0)))
+  #(list.reverse(rev), st)
+}
+
+fn scan_hits(
+  compiled: rt_types.CompiledRegExp,
+  s: String,
+  sticky: Bool,
+  q: Int,
+  acc: List(#(Int, Int, List(#(Int, Int)), List(#(String, Int)))),
+) -> List(#(Int, Int, List(#(Int, Int)), List(#(String, Int)))) {
+  case ffi_regexp_exec_compiled(compiled, s, q, sticky) {
+    Error(NoMatch) | Error(OffsetOutOfRange) | Error(PatternCompileFailed(_)) ->
+      acc
+    Ok(#(#(ms, ml), groups, _gc, names)) -> {
+      let next = case ml {
+        0 -> next_char_boundary(s, ms)
+        _ -> ms + ml
+      }
+      scan_hits(compiled, s, sticky, next, [#(ms, ml, groups, names), ..acc])
     }
   }
 }
@@ -1141,13 +1344,30 @@ fn regexp_symbol_search(
   let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   let #(previous, st) = get_named(st, this, "lastIndex")
   let st = set_unless_same_value(st, h, previous, mk_number(JInt(0)))
-  let #(result, st) = regexp_exec_abstract(st, this, s)
-  let #(current, st) = get_named(st, this, "lastIndex")
-  let st = set_unless_same_value(st, h, current, previous)
-  case classify(result) {
-    KNull -> #(mk_number(JInt(-1)), st)
-    _ -> get_named(st, result, "index")
+  let #(fast, st) = pristine_exec(st, h)
+  case fast {
+    True -> {
+      let #(raw, _flags, st) = builtin_exec_raw(st, h, s)
+      let st = restore_last_index(st, h, previous)
+      case raw {
+        RawMiss -> #(mk_number(JInt(-1)), st)
+        RawHit(whole: #(ms, _), ..) -> #(mk_number(JInt(ms)), st)
+      }
+    }
+    False -> {
+      let #(result, st) = regexp_exec_abstract(st, this, s)
+      let st = restore_last_index(st, h, previous)
+      case classify(result) {
+        KNull -> #(mk_number(JInt(-1)), st)
+        _ -> get_named(st, result, "index")
+      }
+    }
   }
+}
+
+fn restore_last_index(st: Agent, h: Handle, previous: JsVal) -> Agent {
+  let #(current, st) = get_named(st, mk_object(h), "lastIndex")
+  set_unless_same_value(st, h, current, previous)
 }
 
 fn set_unless_same_value(
@@ -1193,23 +1413,107 @@ fn regexp_symbol_replace(
       )
     }
   }
-  let #(flags_v, st) = get_named(st, this, "flags")
-  let #(flags, st) = rt_val.t_to_string(st, flags_v)
-  let global = string.contains(flags, "g")
-  let #(results, st) = case global {
+  let #(flags, st) = read_flags(st, this)
+  let global = has_flag(flags, "g")
+  let st = case global {
+    True -> set_throw(st, h, "lastIndex", mk_number(JInt(0)))
+    False -> st
+  }
+  let #(fast, st) = pristine_exec(st, h)
+  case fast {
     True -> {
-      let st = set_throw(st, h, "lastIndex", mk_number(JInt(0)))
-      collect_replace_results(st, this, h, s, [])
+      let #(hits, st) = collect_raw_results(st, h, s, global)
+      process_raw_results(st, hits, s, replacer, 0, "")
     }
     False -> {
-      let #(result, st) = regexp_exec_abstract(st, this, s)
-      case classify(result) {
-        KNull -> #([], st)
-        _ -> #([result], st)
+      let #(results, st) = case global {
+        True -> collect_replace_results(st, this, h, s, [])
+        False -> {
+          let #(result, st) = regexp_exec_abstract(st, this, s)
+          case classify(result) {
+            KNull -> #([], st)
+            _ -> #([result], st)
+          }
+        }
+      }
+      process_replace_results(st, results, s, length_s, replacer, 0, "")
+    }
+  }
+}
+
+fn collect_raw_results(
+  st: Agent,
+  h: Handle,
+  s: String,
+  global: Bool,
+) -> #(List(RawExec), Agent) {
+  case global {
+    True -> {
+      let #(hits, st) = global_hits(st, h, s)
+      #(
+        list.map(hits, fn(hit) {
+          RawHit(whole: #(hit.0, hit.1), groups: hit.2, names: hit.3)
+        }),
+        st,
+      )
+    }
+    False -> {
+      let #(raw, _flags, st) = builtin_exec_raw(st, h, s)
+      case raw {
+        RawMiss -> #([], st)
+        RawHit(..) -> #([raw], st)
       }
     }
   }
-  process_replace_results(st, results, s, length_s, replacer, 0, "")
+}
+
+fn process_raw_results(
+  st: Agent,
+  hits: List(RawExec),
+  s: String,
+  replacer: Replacer,
+  next_pos: Int,
+  acc: String,
+) -> #(JsVal, Agent) {
+  case hits {
+    [] | [RawMiss, ..] -> #(mk_string(acc <> byte_drop_start(s, next_pos)), st)
+    [RawHit(whole: #(ms, ml), groups:, names:), ..rest] -> {
+      let matched = byte_slice(s, ms, ml)
+      let captures = list.map(groups, capture_to_value(s, _))
+      let #(named_captures, st) = groups_object(st, s, groups, names)
+      let #(replacement, st) =
+        compute_replacement(
+          st,
+          matched,
+          s,
+          ms,
+          captures,
+          list.length(groups),
+          named_captures,
+          replacer,
+        )
+      let #(acc, next_pos) =
+        splice_replacement(acc, s, next_pos, ms, matched, replacement)
+      process_raw_results(st, rest, s, replacer, next_pos, acc)
+    }
+  }
+}
+
+fn splice_replacement(
+  acc: String,
+  s: String,
+  next_pos: Int,
+  position: Int,
+  matched: String,
+  replacement: String,
+) -> #(String, Int) {
+  case position >= next_pos {
+    True -> #(
+      acc <> byte_slice(s, next_pos, position - next_pos) <> replacement,
+      position + string.byte_size(matched),
+    )
+    False -> #(acc, next_pos)
+  }
 }
 
 fn collect_replace_results(
@@ -1265,31 +1569,9 @@ fn process_replace_results(
           named_captures,
           replacer,
         )
-      case position >= next_pos {
-        True -> {
-          let acc =
-            acc <> byte_slice(s, next_pos, position - next_pos) <> replacement
-          process_replace_results(
-            st,
-            rest,
-            s,
-            length_s,
-            replacer,
-            position + string.byte_size(matched),
-            acc,
-          )
-        }
-        False ->
-          process_replace_results(
-            st,
-            rest,
-            s,
-            length_s,
-            replacer,
-            next_pos,
-            acc,
-          )
-      }
+      let #(acc, next_pos) =
+        splice_replacement(acc, s, next_pos, position, matched, replacement)
+      process_replace_results(st, rest, s, length_s, replacer, next_pos, acc)
     }
   }
 }
@@ -1433,9 +1715,8 @@ fn regexp_symbol_split(
   let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   let realm = st.realm
   let #(c, st) = species_constructor(st, mk_object(h), realm.regexp.constructor)
-  let #(flags_v, st) = get_named(st, this, "flags")
-  let #(flags, st) = rt_val.t_to_string(st, flags_v)
-  let new_flags = case string.contains(flags, "y") {
+  let #(flags, st) = read_flags(st, this)
+  let new_flags = case has_flag(flags, "y") {
     True -> flags
     False -> flags <> "y"
   }
@@ -1456,7 +1737,179 @@ fn regexp_symbol_split(
         _ -> ok_array(st, [])
       }
     }
-    _, _ -> split_loop(st, splitter, sp_h, s, size, lim, 0, 0, [], 0)
+    _, _ -> {
+      let #(fast, st) = case is_handle(c, realm.regexp.constructor) {
+        True -> pristine_exec(st, sp_h)
+        False -> #(False, st)
+      }
+      case fast {
+        True -> {
+          let #(_flags, compiled, st) = regexp_matcher(st, sp_h)
+          split_fast(st, compiled, s, size, lim, 0, 0, [], 0)
+        }
+        False -> split_loop(st, splitter, sp_h, s, size, lim, 0, 0, [], 0)
+      }
+    }
+  }
+}
+
+// §22.2.6.4 result when rx is plain and the proto getters are intrinsic
+fn own_flags(st: Agent, h: Handle) -> #(Option(String), Agent) {
+  let proto = st.realm.regexp.prototype
+  case rt_store.t_cell_get(st, h) {
+    SObject(kind: RegExpObj(flags:, ..), proto: Some(p), props:, ..)
+      if p == proto
+    ->
+      case dict.size(props) == 1 {
+        False -> #(None, st)
+        True -> {
+          // stored canonical at allocation
+          let #(pristine, st) = proto_pristine(st)
+          case pristine {
+            True -> #(Some(flags), st)
+            False -> #(None, st)
+          }
+        }
+      }
+    _ -> #(None, st)
+  }
+}
+
+fn canonical_flags(flags: String) -> String {
+  // zero or one flag is already in order
+  case string.byte_size(flags) <= 1 {
+    True -> flags
+    False ->
+      list.fold(all_flags, "", fn(acc, f) {
+        case has_flag(flags, flag_char(f)) {
+          True -> acc <> flag_char(f)
+          False -> acc
+        }
+      })
+  }
+}
+
+fn intrinsic_getter(
+  st: Agent,
+  props: dict.Dict(rt_types.PropertyKey, rt_types.Property),
+  name: String,
+  expected: RegExpNative,
+) -> Bool {
+  case dict.get(props, Named(name)) {
+    Ok(rt_types.AccessorProperty(get: Some(g), ..)) ->
+      case classify(g) {
+        KHandle(gh) ->
+          case rt_store.t_cell_get(st, gh) {
+            SObject(kind: KNative(tag: RegExpN(tag), ..), ..) -> tag == expected
+            _ -> False
+          }
+        _ -> False
+      }
+    _ -> False
+  }
+}
+
+// get(rx, "flags") short of the accessor call when nothing is observable
+fn read_flags(st: Agent, rx: JsVal) -> #(String, Agent) {
+  let #(fast, st) = case classify(rx) {
+    KHandle(h) -> own_flags(st, h)
+    _ -> #(None, st)
+  }
+  case fast {
+    Some(flags) -> #(flags, st)
+    None -> {
+      let #(flags_v, st) = get_named(st, rx, "flags")
+      rt_val.t_to_string(st, flags_v)
+    }
+  }
+}
+
+// own exec absent and the proto's exec is the untouched intrinsic
+fn pristine_exec(st: Agent, h: Handle) -> #(Bool, Agent) {
+  let proto = st.realm.regexp.prototype
+  case rt_store.t_cell_get(st, h) {
+    SObject(kind: RegExpObj(..), proto: Some(p), props:, ..) if p == proto ->
+      case dict.has_key(props, Named("exec")) {
+        True -> #(False, st)
+        False -> proto_pristine(st)
+      }
+    _ -> #(False, st)
+  }
+}
+
+// unanchored search replaces the per-index sticky probe, same matches
+fn split_fast(
+  st: Agent,
+  compiled: rt_types.CompiledRegExp,
+  s: String,
+  size: Int,
+  lim: Int,
+  p: Int,
+  q: Int,
+  acc: List(JsVal),
+  count: Int,
+) -> #(JsVal, Agent) {
+  let rest = fn(st) {
+    ok_array(st, list.reverse([mk_string(byte_drop_start(s, p)), ..acc]))
+  }
+  use <- bool.lazy_guard(q >= size, fn() { rest(st) })
+  case ffi_regexp_exec_compiled(compiled, s, q, False) {
+    Error(NoMatch) | Error(OffsetOutOfRange) | Error(PatternCompileFailed(_)) ->
+      rest(st)
+    // the spec never probes at size itself, so a match there is a miss
+    Ok(#(#(ms, _), _, _, _)) if ms >= size -> rest(st)
+    Ok(#(whole, groups, _gc, _names)) -> {
+      let #(ms, ml) = whole
+      let e = int.min(ms + ml, size)
+      let st = update_legacy_statics(st, s, whole, groups)
+      case e == p {
+        True ->
+          split_fast(
+            st,
+            compiled,
+            s,
+            size,
+            lim,
+            p,
+            next_char_boundary(s, ms),
+            acc,
+            count,
+          )
+        False -> {
+          let acc = [mk_string(byte_slice(s, p, ms - p)), ..acc]
+          let count = count + 1
+          use <- bool.lazy_guard(count == lim, fn() {
+            ok_array(st, list.reverse(acc))
+          })
+          let #(acc, count, hit) =
+            split_fast_captures(s, groups, acc, count, lim)
+          case hit {
+            True -> ok_array(st, list.reverse(acc))
+            False -> split_fast(st, compiled, s, size, lim, e, e, acc, count)
+          }
+        }
+      }
+    }
+  }
+}
+
+fn split_fast_captures(
+  s: String,
+  groups: List(#(Int, Int)),
+  acc: List(JsVal),
+  count: Int,
+  lim: Int,
+) -> #(List(JsVal), Int, Bool) {
+  case groups {
+    [] -> #(acc, count, False)
+    [cap, ..groups] -> {
+      let acc = [capture_to_value(s, cap), ..acc]
+      let count = count + 1
+      case count == lim {
+        True -> #(acc, count, True)
+        False -> split_fast_captures(s, groups, acc, count, lim)
+      }
+    }
   }
 }
 
@@ -1579,13 +2032,12 @@ fn regexp_symbol_match_all(
   let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   let realm = st.realm
   let #(c, st) = species_constructor(st, mk_object(h), realm.regexp.constructor)
-  let #(flags_v, st) = get_named(st, this, "flags")
-  let #(flags, st) = rt_val.t_to_string(st, flags_v)
+  let #(flags, st) = read_flags(st, this)
   let #(m_h, st) = rt_call.t_construct(st, c, [this, mk_string(flags)], c)
   let #(li_v, st) = get_named(st, this, "lastIndex")
   let #(last_index, st) = rt_val.t_to_length(st, li_v)
   let st = set_throw(st, m_h, "lastIndex", mk_number(JInt(last_index)))
-  let global = string.contains(flags, "g")
+  let global = has_flag(flags, "g")
   create_regexp_string_iterator(st, m_h, s, global)
 }
 
@@ -1766,8 +2218,7 @@ fn species_constructor(
   case classify(c) {
     KUndef -> #(mk_object(default_ctor), st)
     KHandle(_) -> {
-      let #(s, st) =
-        rt_obj.t_get_prop(st, c, rt_types.SymbolKey(rt_types.symbol_species))
+      let #(s, st) = helpers.get_symbol(st, c, rt_types.symbol_species)
       case classify(s) {
         KUndef | KNull -> #(mk_object(default_ctor), st)
         KHandle(_) -> #(s, st)

@@ -139,39 +139,35 @@ pub fn parse_int_value(
   radix_val: JsVal,
 ) -> #(JsNum, Agent) {
   let #(s, st) = rt_val.t_to_string(st, val)
-  let str = trim_leading_js_whitespace(s)
   let #(radix_int, st) = rt_val.t_to_int32(st, radix_val)
   // strip sign before prefix check so "-0x10" works
-  let #(str, negative) = case string.first(str) {
-    Ok("-") -> #(string.drop_start(str, 1), True)
-    Ok("+") -> #(string.drop_start(str, 1), False)
-    _ -> #(str, False)
+  let #(bytes, negative) = case <<trim_leading_js_whitespace(s):utf8>> {
+    <<"-", rest:bits>> -> #(rest, True)
+    <<"+", rest:bits>> -> #(rest, False)
+    bytes -> #(bytes, False)
   }
   let #(radix, strip_prefix) = case radix_int {
     0 -> #(10, True)
     16 -> #(16, True)
     n -> #(n, False)
   }
-  let has_hex_prefix =
-    string.starts_with(str, "0x") || string.starts_with(str, "0X")
-  let #(str, radix) = case strip_prefix && has_hex_prefix {
-    True -> #(string.drop_start(str, 2), 16)
-    False -> #(str, radix)
+  let #(bytes, radix) = case strip_prefix, bytes {
+    True, <<"0x", rest:bits>> | True, <<"0X", rest:bits>> -> #(rest, 16)
+    _, _ -> #(bytes, radix)
   }
   case radix >= 2 && radix <= 36 {
     False -> #(JNan, st)
-    True -> #(parse_int_digits(str, radix, negative), st)
+    True -> #(parse_int_digits(bytes, radix, negative), st)
   }
 }
 
 pub fn parse_float_value(st: Agent, val: JsVal) -> #(JsNum, Agent) {
   let #(s, st) = rt_val.t_to_string(st, val)
-  let str = trim_leading_js_whitespace(s)
-  #(parse_decimal_string(str), st)
+  #(parse_decimal_string(trim_leading_js_whitespace(s)), st)
 }
 
-fn parse_int_digits(str: String, radix: Int, negative: Bool) -> JsNum {
-  case scan_radix_digits(to_codepoint_chars(str), radix, 0, 0) {
+fn parse_int_digits(bytes: BitArray, radix: Int, negative: Bool) -> JsNum {
+  case scan_radix_digits(bytes, radix, 0, 0) {
     #(0, _) -> JNan
     #(_, math_int) ->
       case negative, math_int {
@@ -183,61 +179,57 @@ fn parse_int_digits(str: String, radix: Int, negative: Bool) -> JsNum {
 }
 
 fn scan_radix_digits(
-  chars: List(String),
+  bytes: BitArray,
   radix: Int,
   count: Int,
   acc: Int,
 ) -> #(Int, Int) {
-  case chars {
-    [ch, ..rest] ->
-      case digit_value(ch, radix) {
+  case bytes {
+    <<c, rest:bits>> ->
+      case digit_value(c, radix) {
         Some(d) -> scan_radix_digits(rest, radix, count + 1, acc * radix + d)
         None -> #(count, acc)
       }
-    [] -> #(count, acc)
+    _ -> #(count, acc)
   }
 }
 
-fn digit_value(ch: String, radix: Int) -> Option(Int) {
-  case string.to_utf_codepoints(ch) {
-    [cp] -> {
-      let c = string.utf_codepoint_to_int(cp)
-      let v = case c {
-        _ if c >= 48 && c <= 57 -> Some(c - 48)
-        _ if c >= 65 && c <= 90 -> Some(c - 55)
-        _ if c >= 97 && c <= 122 -> Some(c - 87)
-        _ -> None
-      }
-      case v {
-        Some(d) if d < radix -> Some(d)
-        _ -> None
-      }
-    }
-    _ -> None
+fn digit_value(c: Int, radix: Int) -> Option(Int) {
+  let v = case c {
+    _ if c >= 48 && c <= 57 -> c - 48
+    _ if c >= 65 && c <= 90 -> c - 55
+    _ if c >= 97 && c <= 122 -> c - 87
+    _ -> radix
+  }
+  case v < radix {
+    True -> Some(v)
+    False -> None
   }
 }
 
+// §19.2.4 longest strdecimalliteral prefix
 fn parse_decimal_string(str: String) -> JsNum {
-  let chars = to_codepoint_chars(str)
-  case scan_decimal_literal(chars) {
+  let bytes = <<str:utf8>>
+  case scan_decimal_literal(bytes) {
     0 -> JNan
-    len -> rt_val.string_to_number(string.concat(list.take(chars, len)))
+    len -> rt_val.string_to_number(bytes_prefix(bytes, len))
   }
 }
 
-// code points not graphemes: "1\u{0301}" parses as 1
-fn to_codepoint_chars(s: String) -> List(String) {
-  use cp <- list.map(string.to_utf_codepoints(s))
-  string.from_utf_codepoints([cp])
+@external(erlang, "binary", "part")
+fn binary_part(s: BitArray, start: Int, len: Int) -> String
+
+fn bytes_prefix(bytes: BitArray, len: Int) -> String {
+  binary_part(bytes, 0, len)
 }
 
-fn scan_decimal_literal(chars: List(String)) -> Int {
-  let #(sign_len, rest) = case chars {
-    ["+", ..r] | ["-", ..r] -> #(1, r)
-    _ -> #(0, chars)
+fn scan_decimal_literal(bytes: BitArray) -> Int {
+  let #(sign_len, rest) = case bytes {
+    <<"+", r:bits>> | <<"-", r:bits>> -> #(1, r)
+    _ -> #(0, bytes)
   }
   case rest {
-    ["I", "n", "f", "i", "n", "i", "t", "y", ..] -> sign_len + 8
+    <<"Infinity", _:bits>> -> sign_len + 8
     _ ->
       case scan_unsigned_decimal(rest) {
         0 -> 0
@@ -246,10 +238,10 @@ fn scan_decimal_literal(chars: List(String)) -> Int {
   }
 }
 
-fn scan_unsigned_decimal(gs: List(String)) -> Int {
-  let #(icount, after_int) = scan_digit_run(gs, 0)
+fn scan_unsigned_decimal(bytes: BitArray) -> Int {
+  let #(icount, after_int) = scan_digit_run(bytes, 0)
   let #(mantissa_len, after_mantissa) = case after_int {
-    [".", ..after_dot] -> {
+    <<".", after_dot:bits>> -> {
       let #(fcount, after_frac) = scan_digit_run(after_dot, 0)
       case icount + fcount > 0 {
         True -> #(icount + 1 + fcount, after_frac)
@@ -264,22 +256,18 @@ fn scan_unsigned_decimal(gs: List(String)) -> Int {
   }
 }
 
-fn scan_digit_run(gs: List(String), count: Int) -> #(Int, List(String)) {
-  case gs {
-    [ch, ..rest] ->
-      case digit_value(ch, 10) {
-        Some(_) -> scan_digit_run(rest, count + 1)
-        None -> #(count, gs)
-      }
-    [] -> #(count, gs)
+fn scan_digit_run(bytes: BitArray, count: Int) -> #(Int, BitArray) {
+  case bytes {
+    <<c, rest:bits>> if c >= 48 && c <= 57 -> scan_digit_run(rest, count + 1)
+    _ -> #(count, bytes)
   }
 }
 
-fn scan_exponent_length(gs: List(String)) -> Int {
-  case gs {
-    ["e", ..rest] | ["E", ..rest] -> {
+fn scan_exponent_length(bytes: BitArray) -> Int {
+  case bytes {
+    <<"e", rest:bits>> | <<"E", rest:bits>> -> {
       let #(sign_len, digits) = case rest {
-        ["+", ..r] | ["-", ..r] -> #(1, r)
+        <<"+", r:bits>> | <<"-", r:bits>> -> #(1, r)
         _ -> #(0, rest)
       }
       case scan_digit_run(digits, 0) {

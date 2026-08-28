@@ -4,8 +4,14 @@
     format_to_exponential/2,
     format_to_exponential_auto/1,
     format_to_precision/2,
-    format_float_radix/2
+    format_float_radix/2,
+    format_int_radix/2
 ]).
+
+format_int_radix(I, Base) ->
+    list_to_binary(lower(integer_to_list(I, Base))).
+
+lower(S) -> [case C >= $A andalso C =< $Z of true -> C + 32; false -> C end || C <- S].
 
 %% §21.1.3.3, caller ensures |x| < 1e21 and 0..100 digits
 format_to_fixed(X, Digits) ->
@@ -37,7 +43,7 @@ exponential_pos(X, F) ->
 exponential_auto_pos(X) when X == 0.0 ->
     <<"0e+0">>;
 exponential_auto_pos(X) ->
-    {Digits, E} = shortest_digits(X),
+    {Digits, E} = arc_rt_float_ffi:shortest_digits(X),
     format_exponential(Digits, E).
 
 precision_pos(X, P) when X == 0.0 ->
@@ -68,19 +74,11 @@ format_exponential([D | Rest], E) ->
     end,
     list_to_binary([D, Frac, $e, Sign, integer_to_list(abs(E))]).
 
-shortest_digits(X) ->
-    {Mantissa, E0} = split_exponent(arc_rt_float_ffi:shortest(X)),
-    [IntPart, FracPart] = string:split(Mantissa, "."),
-    Combined = IntPart ++ FracPart,
-    Lead = length(lists:takewhile(fun(C) -> C =:= $0 end, Combined)),
-    Digits = string:trim(lists:nthtail(Lead, Combined), trailing, "0"),
-    {Digits, length(IntPart) - 1 - Lead + E0}.
-
 %% first p significant digits, rounded once half away from zero
 significant_exact(X, P) ->
     Sci = arc_rt_float_ffi:scientific(X, min(249, P + 30)),
-    {Mantissa, E0} = split_exponent(Sci),
-    [IntPart, FracPart] = string:split(Mantissa, "."),
+    {Mantissa, E0} = arc_rt_float_ffi:split_exponent(Sci),
+    {IntPart, FracPart} = arc_rt_float_ffi:split_dot(Mantissa),
     {Keep, Rest} = lists:split(P, IntPart ++ FracPart),
     RoundUp = case Rest of [C | _] when C >= $5 -> true; _ -> false end,
     Rounded = case RoundUp of
@@ -92,22 +90,19 @@ significant_exact(X, P) ->
         false -> {Rounded, E0}
     end.
 
-split_exponent(S) ->
-    case string:split(S, "e") of
-        [Mantissa, Exp] -> {Mantissa, list_to_integer(Exp)};
-        [Mantissa] -> {Mantissa, 0}
-    end.
-
-%% {decimals, d} double-rounds; round the exact expansion once
+%% exact: n = round-half-up(m * 2^e * 10^d) in integers
 decimals_exact(X, D) ->
-    Wide = arc_rt_float_ffi:decimals(X, min(253, D + 30)),
-    [IntPart, Frac] = string:split(Wide, "."),
-    Keep = lists:sublist(Frac, D),
-    Rest = lists:nthtail(D, Frac),
-    RoundUp = case Rest of [C | _] when C >= $5 -> true; _ -> false end,
-    Num0 = list_to_integer(IntPart ++ Keep),
-    Num = case RoundUp of true -> Num0 + 1; false -> Num0 end,
-    S = integer_to_list(Num),
+    <<_:1, BE:11, F:52>> = <<X/float>>,
+    {M, E} = case BE of
+        0 -> {F, -1074};
+        _ -> {F + (1 bsl 52), BE - 1075}
+    end,
+    P = pow10(D, 1),
+    N = case E >= 0 of
+        true -> (M bsl E) * P;
+        false -> (M * P + (1 bsl (-E - 1))) bsr -E
+    end,
+    S = integer_to_list(N),
     case D of
         0 -> S;
         _ ->
@@ -115,6 +110,9 @@ decimals_exact(X, D) ->
             {I2, F2} = lists:split(length(Padded) - D, Padded),
             I2 ++ "." ++ F2
     end.
+
+pow10(0, Acc) -> Acc;
+pow10(D, Acc) -> pow10(D - 1, Acc * 10).
 
 format_float_radix(F, Base) ->
     with_abs(F, fun(A) -> radix_pos(A, Base) end).
@@ -134,7 +132,7 @@ radix_pos(A, Base) ->
                 end
         end,
     IntPart = case Carry of true -> Int + 1; false -> Int end,
-    IntStr = string:lowercase(integer_to_list(IntPart, Base)),
+    IntStr = lower(integer_to_list(IntPart, Base)),
     FracStr = case FracDigits of
         [] -> "";
         Ds -> [$. | [radix_digit(D) || D <- Ds]]

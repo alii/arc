@@ -1,3 +1,4 @@
+import arc/rt/js_string
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -93,7 +94,7 @@ pub fn tokenize_named(template: String) -> List(NamedSegment) {
 }
 
 fn tokenize(template: String, emit: Emit(seg)) -> List(seg) {
-  case string.contains(template, "$") {
+  case js_string.has_byte(template, 0x24) {
     False -> [emit.plain(LiteralSeg(template))]
     True -> tokenize_loop(to_code_points(template), emit, "", [])
   }

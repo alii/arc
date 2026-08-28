@@ -23,6 +23,42 @@ pub fn get_index(st: Agent, this: JsVal, idx: Int) -> #(JsVal, Agent) {
   }
 }
 
+@external(erlang, "arc_rt_obj_ffi", "t_get_prop_slow")
+fn ffi_get_named(
+  st: Agent,
+  recv: JsVal,
+  key: String,
+  site: Option(Nil),
+) -> #(JsVal, Agent)
+
+pub fn get_named(st: Agent, recv: JsVal, key: String) -> #(JsVal, Agent) {
+  ffi_get_named(st, recv, key, None)
+}
+
+@external(erlang, "arc_rt_helpers_ffi", "get_symbol_data")
+fn get_symbol_data(st: Agent, recv: JsVal, sym: SymbolId) -> JsVal
+
+@external(erlang, "arc_rt_helpers_ffi", "is_miss")
+fn is_miss(v: JsVal) -> Bool
+
+pub fn get_symbol(st: Agent, recv: JsVal, sym: SymbolId) -> #(JsVal, Agent) {
+  let v = get_symbol_data(st, recv, sym)
+  case is_miss(v) {
+    True -> rt_obj.t_get_prop(st, recv, rt_types.SymbolKey(sym))
+    False -> #(v, st)
+  }
+}
+
+// strict set, throws on failure
+@external(erlang, "arc_rt_obj_ffi", "t_set_prop_named")
+pub fn set_named(
+  st: Agent,
+  obj: JsVal,
+  key: String,
+  v: JsVal,
+  strict: Bool,
+) -> Agent
+
 pub fn list_at(lst: List(a), idx: Int) -> Option(a) {
   case idx, lst {
     0, [x, ..] -> Some(x)
@@ -32,7 +68,11 @@ pub fn list_at(lst: List(a), idx: Int) -> Option(a) {
 }
 
 pub fn arg_at(args: List(JsVal), idx: Int) -> JsVal {
-  list_at(args, idx) |> option.unwrap(mk_undefined())
+  case args, idx {
+    [v, ..], 0 -> v
+    [_, ..rest], _ -> arg_at(rest, idx - 1)
+    [], _ -> mk_undefined()
+  }
 }
 
 pub fn first_arg_or_undefined(args: List(JsVal)) -> JsVal {

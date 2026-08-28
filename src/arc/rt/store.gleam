@@ -31,6 +31,8 @@ pub fn t_store_new() -> JsStore(Agent) {
     next_shape: 1,
     unit_uid: 0,
     ics: dict.new(),
+    free_protos: dict.new(),
+    global_epoch: 0,
   )
 }
 
@@ -62,7 +64,7 @@ fn with_js(st: Agent, js: JsStore(Agent)) -> Agent {
 }
 
 pub fn t_cell_new(st: Agent, slot: JsSlot) -> #(Handle, Agent) {
-  let js = require_js(st)
+  let js = st.store
   let id = js.next
   let js =
     JsStore(
@@ -71,7 +73,7 @@ pub fn t_cell_new(st: Agent, slot: JsSlot) -> #(Handle, Agent) {
       next: id + 1,
       alloc_since_gc: js.alloc_since_gc + 1,
     )
-  #(JsCell(id), with_js(st, js))
+  #(JsCell(id), Agent(..st, store: js))
 }
 
 pub fn t_cell_new_with(
@@ -79,7 +81,7 @@ pub fn t_cell_new_with(
   seqs: Int,
   build: fn(Int) -> JsSlot,
 ) -> #(Handle, Agent) {
-  let js = require_js(st)
+  let js = st.store
   let id = js.next
   let js =
     JsStore(
@@ -89,14 +91,14 @@ pub fn t_cell_new_with(
       alloc_since_gc: js.alloc_since_gc + 1,
       prop_seq: js.prop_seq + seqs,
     )
-  #(JsCell(id), with_js(st, js))
+  #(JsCell(id), Agent(..st, store: js))
 }
 
 pub fn t_cell_new_pair(
   st: Agent,
   build: fn(Handle, Handle) -> #(JsSlot, JsSlot),
 ) -> #(Handle, Handle, Agent) {
-  let js = require_js(st)
+  let js = st.store
   let id = js.next
   let a = JsCell(id)
   let b = JsCell(id + 1)
@@ -108,16 +110,28 @@ pub fn t_cell_new_pair(
       next: id + 2,
       alloc_since_gc: js.alloc_since_gc + 2,
     )
-  #(a, b, with_js(st, js))
+  #(a, b, Agent(..st, store: js))
 }
 
 @external(erlang, "arc_rt_store_ffi", "t_cell_get")
 pub fn t_cell_get(st: Agent, h: Handle) -> JsSlot
 
 pub fn t_cell_set(st: Agent, h: Handle, slot: JsSlot) -> Agent {
-  let js = require_js(st)
+  let js = st.store
   let JsCell(id) = h
-  with_js(st, JsStore(..js, data: arena.set(id, slot, js.data)))
+  let data = arena.set(id, slot, js.data)
+  let global_epoch = case slot {
+    rt_types.SObject(kind: rt_types.GlobalObj, ..) -> js.global_epoch + 1
+    _ -> js.global_epoch
+  }
+  case dict.has_key(js.free_protos, id) {
+    True ->
+      Agent(
+        ..st,
+        store: JsStore(..js, data:, free_protos: dict.new(), global_epoch:),
+      )
+    False -> Agent(..st, store: JsStore(..js, data:, global_epoch:))
+  }
 }
 
 // boxes must be sbox so gc traces them

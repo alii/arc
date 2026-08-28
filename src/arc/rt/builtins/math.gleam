@@ -88,7 +88,26 @@ pub fn init(
   )
 }
 
+@external(erlang, "arc_rt_math_ffi", "fast")
+fn fast(native: MathNative, args: List(JsVal)) -> JsVal
+
+@external(erlang, "arc_rt_math_ffi", "is_miss")
+fn is_miss(v: JsVal) -> Bool
+
 pub fn dispatch(
+  st: Agent,
+  native: MathNative,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(JsVal, Agent) {
+  let v = fast(native, args)
+  case is_miss(v) {
+    True -> dispatch_slow(st, native, this, args)
+    False -> #(v, st)
+  }
+}
+
+fn dispatch_slow(
   st: Agent,
   native: MathNative,
   _this: JsVal,

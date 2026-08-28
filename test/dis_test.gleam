@@ -26,9 +26,10 @@ pub fn disassemble_fused_ops_test() {
     dis_js(
       "function f(o) { if (o === 1) return; while (o != null) o = o.next; this.count = o.size; o.run(1) }",
     )
-  assert string.contains(text, "CmpLocalConstJump(4, 0, Equality(StrictEqOp)")
-  assert string.contains(text, "GetLocalField(4, Named(\"next\"))")
-  assert string.contains(text, "GetLocalField(4, Named(\"size\"))")
+  assert string.contains(text, "[regs 4]")
+  assert string.contains(text, "CmpLocalConstJump(-1, 0, Equality(StrictEqOp)")
+  assert string.contains(text, "GetLocalField(-1, Named(\"next\"))")
+  assert string.contains(text, "GetLocalField(-1, Named(\"size\"))")
   assert string.contains(text, "PutFieldPop(Named(\"count\"))")
-  assert string.contains(text, "GetLocalField2(4, Named(\"run\"))")
+  assert string.contains(text, "GetLocalField2(-1, Named(\"run\"))")
 }

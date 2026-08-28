@@ -8,7 +8,8 @@
     strict_eq/2, same_value_zero/2,
     t_to_property_key_fast/1,
     js_number_to_string/1,
-    parse_float/1,
+    t_to_string/2, t_to_number/2, t_to_integer_or_infinity/2, t_to_length/2,
+    string_to_number/1,
     is_neg_zero/1, float_same_term/2
 ]).
 
@@ -126,6 +127,25 @@ mk_object(H) -> H.
 
 mk_tdz() -> js_tdz.
 
+%% hot heads of the val.gleam coercions, everything else goes back there
+t_to_string(St, V) when is_binary(V) -> {V, St};
+t_to_string(St, V) when is_integer(V) -> {integer_to_binary(V), St};
+t_to_string(St, V) when is_float(V) -> {js_number_to_string(V), St};
+t_to_string(St, V) -> 'arc@rt@val':t_to_string_slow(St, V).
+
+t_to_number(St, V) when is_integer(V) -> {{j_int, V}, St};
+t_to_number(St, V) when is_float(V) -> {{j_float, V}, St};
+t_to_number(St, V) -> 'arc@rt@val':t_to_number_slow(St, V).
+
+t_to_integer_or_infinity(St, V) when is_integer(V) -> {V, St};
+t_to_integer_or_infinity(St, V) when is_float(V) -> {trunc(V), St};
+t_to_integer_or_infinity(St, undefined) -> {0, St};
+t_to_integer_or_infinity(St, V) -> 'arc@rt@val':t_to_integer_or_infinity_slow(St, V).
+
+t_to_length(St, V) when is_integer(V), V >= 0 -> {V, St};
+t_to_length(St, V) when is_integer(V) -> {0, St};
+t_to_length(St, V) -> 'arc@rt@val':t_to_length_slow(St, V).
+
 %% §6.1.6.1.20 number tostring
 js_number_to_string(N) when is_float(N) ->
     case N == 0.0 of
@@ -135,7 +155,30 @@ js_number_to_string(N) when is_float(N) ->
     end.
 
 js_positive_to_string(X) ->
-    {Digits, E} = shortest_digits(X),
+    try short_fixed(float_to_binary(X, [short])) of
+        general -> js_positive_digits(X);
+        Bin -> Bin
+    catch
+        error:badarg -> js_positive_digits(X)
+    end.
+
+%% erlang's fixed-notation window sits inside js's, so only ".0" differs
+short_fixed(<<$0, _/binary>>) -> general;
+short_fixed(Bin) -> short_fixed(Bin, Bin, 0, 0).
+
+short_fixed(<<$e, _/binary>>, _, _, _) -> general;
+short_fixed(<<$., R/binary>>, Bin, I, _) -> short_fixed(R, Bin, I + 1, I);
+short_fixed(<<_, R/binary>>, Bin, I, Dot) -> short_fixed(R, Bin, I + 1, Dot);
+short_fixed(<<>>, _, _, Dot) when Dot > 21 -> general;
+short_fixed(<<>>, Bin, Size, Dot) when Size - Dot =:= 2 ->
+    case binary:last(Bin) of
+        $0 -> binary:part(Bin, 0, Dot);
+        _ -> Bin
+    end;
+short_fixed(<<>>, Bin, _, _) -> Bin.
+
+js_positive_digits(X) ->
+    {Digits, E} = arc_rt_float_ffi:shortest_digits(X),
     K = length(Digits),
     if
         E >= K - 1, E =< 20 ->
@@ -160,20 +203,6 @@ format_exponential([D | Rest], E) ->
     end,
     list_to_binary([D, Frac, $e, Sign, integer_to_list(abs(E))]).
 
-shortest_digits(X) ->
-    {Mantissa, E0} = split_exponent(arc_rt_float_ffi:shortest(X)),
-    [IntPart, FracPart] = string:split(Mantissa, "."),
-    Combined = IntPart ++ FracPart,
-    Lead = length(lists:takewhile(fun(C) -> C =:= $0 end, Combined)),
-    Digits = string:trim(lists:nthtail(Lead, Combined), trailing, "0"),
-    {Digits, length(IntPart) - 1 - Lead + E0}.
-
-split_exponent(S) ->
-    case string:split(S, "e") of
-        [Mantissa, Exp] -> {Mantissa, list_to_integer(Exp)};
-        [Mantissa] -> {Mantissa, 0}
-    end.
-
 is_neg_zero(X) when is_float(X) ->
     case <<X/float>> of
         <<1:1, 0:63>> -> true;
@@ -182,77 +211,84 @@ is_neg_zero(X) when is_float(X) ->
 
 float_same_term(A, B) -> A =:= B.
 
-%% §7.1.4.1.1 string to number
-parse_float(S) ->
-    Norm = normalize(S),
-    case try_binary_to_float(Norm) of
-        {ok, F} -> {ok, F};
-        error ->
-            case is_float_syntax(Norm) of
-                true -> {error, out_of_range};
-                false -> {error, invalid}
-            end
-    end.
+%% §7.1.4.1.1 stringtonumber, one pass over the trimmed bytes
+string_to_number(S) ->
+    stn(arc_string_ffi:trim_js_ws(S)).
 
-try_binary_to_float(S) ->
-    try
-        {ok, erlang:binary_to_float(S)}
+stn(<<>>) -> {j_float, 0.0};
+stn(<<$0, X, D/binary>>) when X =:= $x; X =:= $X -> stn_radix(D, 16);
+stn(<<$0, O, D/binary>>) when O =:= $o; O =:= $O -> stn_radix(D, 8);
+stn(<<$0, B, D/binary>>) when B =:= $b; B =:= $B -> stn_radix(D, 2);
+stn(<<$-, R/binary>>) -> stn_negate(stn_unsigned(R));
+stn(<<$+, R/binary>>) -> stn_unsigned(R);
+stn(B) -> stn_unsigned(B).
+
+stn_radix(<<C, _/binary>>, _) when C =:= $-; C =:= $+ -> j_nan;
+stn_radix(<<>>, _) -> j_nan;
+stn_radix(D, Base) ->
+    try binary_to_integer(D, Base) of
+        N -> 'arc@rt@val':num_from_int(N)
     catch
-        error:badarg -> error
+        error:badarg -> j_nan
     end.
 
-normalize(S) ->
-    {Mantissa, Exponent} = split_exponent_bin(S),
-    {Sign, Digits} = take_sign(Mantissa),
-    <<Sign/binary, (pad_mantissa(Digits))/binary, Exponent/binary>>.
+stn_negate({j_float, F}) -> {j_float, -F};
+stn_negate({j_int, 0}) -> {j_float, -0.0};
+stn_negate({j_int, I}) -> {j_int, -I};
+stn_negate(j_pos_inf) -> j_neg_inf;
+stn_negate(Other) -> Other.
 
-split_exponent_bin(S) ->
-    case binary:match(S, [<<"e">>, <<"E">>]) of
-        {Pos, _Len} ->
-            <<Mantissa:Pos/binary, Exponent/binary>> = S,
-            {Mantissa, Exponent};
-        nomatch ->
-            {S, <<>>}
+stn_unsigned(<<"Infinity">>) -> j_pos_inf;
+stn_unsigned(B) ->
+    I = stn_digits(B, 0),
+    case B of
+        <<_:I/binary>> when I > 0 ->
+            'arc@rt@val':int_number(binary_to_integer(B));
+        <<Int:I/binary, $., R/binary>> ->
+            F = stn_digits(R, 0),
+            case I + F > 0 of
+                true ->
+                    <<Frac:F/binary, E/binary>> = R,
+                    stn_decimal(Int, Frac, E);
+                false -> j_nan
+            end;
+        <<Int:I/binary, E/binary>> when I > 0 -> stn_decimal(Int, <<>>, E);
+        _ -> j_nan
     end.
 
-take_sign(<<C, Rest/binary>>) when C =:= $+; C =:= $- -> {<<C>>, Rest};
-take_sign(S) -> {<<>>, S}.
+stn_digits(<<D, R/binary>>, N) when D >= $0, D =< $9 -> stn_digits(R, N + 1);
+stn_digits(_, N) -> N.
 
-pad_mantissa(<<>>) ->
-    <<>>;
-pad_mantissa(<<".", _/binary>> = M) ->
-    pad_mantissa(<<"0", M/binary>>);
-pad_mantissa(M) ->
-    case binary:match(M, <<".">>) of
-        nomatch -> <<M/binary, ".0">>;
+%% e is empty or an exponent part, else nan
+stn_decimal(Int, Frac, E) ->
+    Exp = case E of
+        <<>> -> <<"0">>;
+        <<C, S, D/binary>>
+          when (C =:= $e orelse C =:= $E), (S =:= $+ orelse S =:= $-) ->
+            stn_exp_digits(D, <<S>>);
+        <<C, D/binary>> when C =:= $e; C =:= $E -> stn_exp_digits(D, <<>>);
+        _ -> nan
+    end,
+    case Exp of
+        nan -> j_nan;
         _ ->
-            case binary:last(M) of
-                $. -> <<M/binary, "0">>;
-                _ -> M
+            Norm = <<(stn_or_zero(Int))/binary, $., (stn_or_zero(Frac))/binary,
+                     $e, Exp/binary>>,
+            try binary_to_float(Norm) of
+                Fl -> {j_float, Fl}
+            catch
+                %% syntax is already checked, so this is overflow
+                error:badarg -> j_pos_inf
             end
     end.
 
-is_float_syntax(S0) ->
-    S1 = skip_sign(S0),
-    case take_digits(S1) of
-        {true, <<".", S2/binary>>} ->
-            case take_digits(S2) of
-                {true, <<>>} -> true;
-                {true, <<E, S3/binary>>} when E =:= $e; E =:= $E ->
-                    case take_digits(skip_sign(S3)) of
-                        {true, <<>>} -> true;
-                        _ -> false
-                    end;
-                _ -> false
-            end;
-        _ -> false
+stn_exp_digits(D, Sign) ->
+    case stn_digits(D, 0) =:= byte_size(D) andalso D =/= <<>> of
+        true -> <<Sign/binary, D/binary>>;
+        false -> nan
     end.
 
-skip_sign(<<C, Rest/binary>>) when C =:= $+; C =:= $- -> Rest;
-skip_sign(S) -> S.
+stn_or_zero(<<>>) -> <<"0">>;
+stn_or_zero(B) -> B.
 
-take_digits(S) -> take_digits(S, false).
-take_digits(<<D, Rest/binary>>, _) when D >= $0, D =< $9 ->
-    take_digits(Rest, true);
-take_digits(S, Seen) ->
-    {Seen, S}.
+

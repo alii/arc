@@ -542,7 +542,7 @@ pub fn alloc_array(
   let len = list.length(values)
   let elements = case values {
     [] -> NoElements
-    _ -> Dense(tree_array.from_list(values, rt_types.mk_hole()))
+    _ -> Dense(tree_array.from_list(values))
   }
   rt_store.t_cell_new(
     st,

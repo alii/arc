@@ -2,16 +2,17 @@ import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
+import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsNum, type JsVal, type JsonNative, ArrayObj,
-  BigIntObj, BooleanObj, JFloat, JInt, JNan, JNegInf, JPosInf, JsonIsRawJson,
-  JsonN, JsonParse, JsonRawJson, JsonStringify, KBig, KBool, KHandle, KNull,
-  KNum, KStr, KSym, KUndef, Named, NumberObj, Ordinary, RawJsonObj, SObject,
-  SShapedObject, StringKey, StringObj, classify, index_key, mk_bool, mk_null,
-  mk_number, mk_object, mk_string, mk_undefined,
+  type Agent, type Handle, type JsNum, type JsVal, type JsonNative,
+  type PropertyKey, ArrayObj, BigIntObj, BooleanObj, Index, JFloat, JInt, JNan,
+  JNegInf, JPosInf, JsonIsRawJson, JsonN, JsonParse, JsonRawJson, JsonStringify,
+  KBig, KBool, KHandle, KNull, KNum, KStr, KSym, KUndef, Named, NumberObj,
+  Ordinary, RawJsonObj, SObject, SShapedObject, StringKey, StringObj, classify,
+  index_key, mk_bool, mk_null, mk_number, mk_object, mk_string, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -74,13 +75,15 @@ fn json_parse(args: List(JsVal), caller: Int, st: Agent) -> #(JsVal, Agent) {
   let #(json_str, st) =
     rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   let bytes = bit_array.from_string(json_str)
-  case parse_value(bytes) {
+  let reviver = helpers.arg_at(args, 1)
+  // iscallable has no side effects, so it can run before the parse
+  let revive = rt_call.is_callable(st, reviver)
+  case parse_value(bytes, revive) {
     Error(e) -> rt_val.t_throw_syntax_error(st, json_error_message(e))
     Ok(#(val, rest)) ->
       case skip_whitespace(rest) {
         <<>> -> {
-          let reviver = helpers.arg_at(args, 1)
-          case rt_call.is_callable(st, reviver) {
+          case revive {
             False -> materialize_plain(st, val)
             True -> {
               let #(record, st) = materialize(st, val)
@@ -120,6 +123,7 @@ fn internalize_json_property(
         }
         False -> {
           let #(keys, st) = enumerable_string_keys(st, h)
+          let keys = list.map(keys, rt_types.key_to_text)
           internalize_keys(st, ctx, h, keys, record_members(node))
         }
       }
@@ -347,358 +351,11 @@ fn skip_whitespace(bytes: BitArray) -> BitArray {
   }
 }
 
+@external(erlang, "arc_rt_json_ffi", "parse_value")
 fn parse_value(
   bytes: BitArray,
-) -> Result(#(JsonValue, BitArray), JsonParseError) {
-  let bytes = skip_whitespace(bytes)
-  case bytes {
-    <<>> -> Error(UnexpectedEnd)
-    <<0x6e, 0x75, 0x6c, 0x6c, rest:bytes>> ->
-      Ok(#(JsonNull(source: <<"null":utf8>>), rest))
-    <<0x74, 0x72, 0x75, 0x65, rest:bytes>> ->
-      Ok(#(JsonBool(value: True, source: <<"true":utf8>>), rest))
-    <<0x66, 0x61, 0x6c, 0x73, 0x65, rest:bytes>> ->
-      Ok(#(JsonBool(value: False, source: <<"false":utf8>>), rest))
-    <<0x22, rest:bytes>> -> {
-      use #(s, rest) <- result.try(parse_string(rest))
-      let span = bit_array.byte_size(bytes) - bit_array.byte_size(rest)
-      use raw <- result.map(take_bytes(bytes, span))
-      #(JsonString(value: s, source: raw), rest)
-    }
-    <<0x5b, rest:bytes>> -> parse_array(rest, [])
-    <<0x7b, rest:bytes>> -> parse_object(rest, [])
-    <<b, _:bytes>> if b == 0x2d || b >= 0x30 && b <= 0x39 -> parse_number(bytes)
-    <<c:utf8_codepoint, _:bytes>> ->
-      Error(UnexpectedToken(found: string.from_utf_codepoints([c])))
-    _ -> Error(InvalidUtf8)
-  }
-}
-
-type StringScan {
-  FoundQuote(content_len: Int, after: BitArray)
-  FoundEscape(prefix_len: Int, after: BitArray)
-  FoundControlChar
-  NoClosingQuote
-}
-
-fn scan_string(bytes: BitArray, n: Int) -> StringScan {
-  case bytes {
-    <<0x22, rest:bytes>> -> FoundQuote(n, rest)
-    <<0x5c, rest:bytes>> -> FoundEscape(n, rest)
-    <<c, rest:bytes>> ->
-      case c < 0x20 {
-        True -> FoundControlChar
-        False -> scan_string(rest, n + 1)
-      }
-    _ -> NoClosingQuote
-  }
-}
-
-fn parse_string(
-  bytes: BitArray,
-) -> Result(#(String, BitArray), JsonParseError) {
-  case scan_string(bytes, 0) {
-    FoundQuote(n, after) -> {
-      use s <- result.map(take_string(bytes, n))
-      #(s, after)
-    }
-    FoundEscape(n, after) -> {
-      use chunk <- result.try(take_string(bytes, n))
-      parse_escape(after, string_tree.from_string(chunk))
-    }
-    FoundControlChar -> Error(ControlCharInString)
-    NoClosingQuote -> Error(UnterminatedString)
-  }
-}
-
-fn parse_string_content(
-  bytes: BitArray,
-  acc: StringTree,
-) -> Result(#(String, BitArray), JsonParseError) {
-  case scan_string(bytes, 0) {
-    FoundQuote(n, after) -> {
-      use chunk <- result.map(take_string(bytes, n))
-      #(string_tree.to_string(string_tree.append(acc, chunk)), after)
-    }
-    FoundEscape(n, after) -> {
-      use chunk <- result.try(take_string(bytes, n))
-      parse_escape(after, string_tree.append(acc, chunk))
-    }
-    FoundControlChar -> Error(ControlCharInString)
-    NoClosingQuote -> Error(UnterminatedString)
-  }
-}
-
-fn parse_escape(
-  bytes: BitArray,
-  acc: StringTree,
-) -> Result(#(String, BitArray), JsonParseError) {
-  case bytes {
-    <<>> -> Error(UnterminatedEscape)
-    <<0x22, rest:bytes>> ->
-      parse_string_content(rest, string_tree.append(acc, "\""))
-    <<0x5c, rest:bytes>> ->
-      parse_string_content(rest, string_tree.append(acc, "\\"))
-    <<0x2f, rest:bytes>> ->
-      parse_string_content(rest, string_tree.append(acc, "/"))
-    <<0x62, rest:bytes>> ->
-      parse_string_content(rest, string_tree.append(acc, "\u{0008}"))
-    <<0x66, rest:bytes>> ->
-      parse_string_content(rest, string_tree.append(acc, "\u{000C}"))
-    <<0x6e, rest:bytes>> ->
-      parse_string_content(rest, string_tree.append(acc, "\n"))
-    <<0x72, rest:bytes>> ->
-      parse_string_content(rest, string_tree.append(acc, "\r"))
-    <<0x74, rest:bytes>> ->
-      parse_string_content(rest, string_tree.append(acc, "\t"))
-    <<0x75, rest:bytes>> -> {
-      use #(decoded, rest) <- result.try(decode_unicode_escape(rest))
-      parse_string_content(rest, string_tree.append(acc, decoded))
-    }
-    <<c:utf8_codepoint, _:bytes>> ->
-      Error(InvalidEscape(escape: string.from_utf_codepoints([c])))
-    _ -> Error(UnterminatedEscape)
-  }
-}
-
-fn parse_unicode_escape(
-  bytes: BitArray,
-) -> Result(#(Int, BitArray), JsonParseError) {
-  case bytes {
-    <<a, b, c, d, rest:bytes>> ->
-      case hex_digit(a), hex_digit(b), hex_digit(c), hex_digit(d) {
-        Some(h1), Some(h2), Some(h3), Some(h4) ->
-          Ok(#(h1 * 4096 + h2 * 256 + h3 * 16 + h4, rest))
-        _, _, _, _ -> Error(InvalidUnicodeEscape)
-      }
-    _ -> Error(InvalidUnicodeEscape)
-  }
-}
-
-fn hex_digit(byte: Int) -> Option(Int) {
-  case byte {
-    b if b >= 0x30 && b <= 0x39 -> Some(b - 0x30)
-    b if b >= 0x41 && b <= 0x46 -> Some(b - 0x41 + 10)
-    b if b >= 0x61 && b <= 0x66 -> Some(b - 0x61 + 10)
-    _ -> None
-  }
-}
-
-fn decode_unicode_escape(
-  bytes: BitArray,
-) -> Result(#(String, BitArray), JsonParseError) {
-  use #(cp, rest) <- result.try(parse_unicode_escape(bytes))
-  case cp >= 0xd800 && cp <= 0xdbff {
-    True ->
-      case parse_low_surrogate(rest) {
-        Some(#(low, rest)) ->
-          codepoint_to_string(
-            0x10000 + { cp - 0xd800 } * 1024 + { low - 0xdc00 },
-          )
-          |> result.map(fn(s) { #(s, rest) })
-        None -> Ok(#("\u{FFFD}", rest))
-      }
-    False ->
-      case cp >= 0xdc00 && cp <= 0xdfff {
-        True -> Ok(#("\u{FFFD}", rest))
-        False -> codepoint_to_string(cp) |> result.map(fn(s) { #(s, rest) })
-      }
-  }
-}
-
-fn parse_low_surrogate(bytes: BitArray) -> Option(#(Int, BitArray)) {
-  case bytes {
-    <<0x5c, 0x75, rest:bytes>> ->
-      case parse_unicode_escape(rest) {
-        Ok(#(low, rest)) if low >= 0xdc00 && low <= 0xdfff -> Some(#(low, rest))
-        _ -> None
-      }
-    _ -> None
-  }
-}
-
-fn codepoint_to_string(codepoint: Int) -> Result(String, JsonParseError) {
-  string.utf_codepoint(codepoint)
-  |> result.map(fn(cp) { string.from_utf_codepoints([cp]) })
-  |> result.replace_error(InvalidCodepoint)
-}
-
-type NumberSpan {
-  NumberSpan(int_len: Int, frac_len: Int, exp_len: Int)
-}
-
-// grammar prevalidated, so string_to_number is total here
-fn parse_number(
-  bytes: BitArray,
-) -> Result(#(JsonValue, BitArray), JsonParseError) {
-  case scan_number(bytes) {
-    Ok(span) -> {
-      let len = span.int_len + span.frac_len + span.exp_len
-      use num_str <- result.map(take_string(bytes, len))
-      #(
-        JsonNumber(
-          value: rt_val.string_to_number(num_str),
-          source: bit_array.from_string(num_str),
-        ),
-        drop_bytes(bytes, len),
-      )
-    }
-    Error(Nil) -> {
-      use raw <- result.try(take_string(bytes, count_number_bytes(bytes, 0)))
-      Error(InvalidNumber(raw:))
-    }
-  }
-}
-
-fn scan_number(bytes: BitArray) -> Result(NumberSpan, Nil) {
-  let #(bytes, sign_len) = case bytes {
-    <<0x2d, rest:bytes>> -> #(rest, 1)
-    _ -> #(bytes, 0)
-  }
-  use #(bytes, digits) <- result.try(scan_integer_digits(bytes))
-  use #(bytes, frac_len) <- result.try(scan_fraction(bytes))
-  use exp_len <- result.map(scan_exponent(bytes))
-  NumberSpan(int_len: sign_len + digits, frac_len:, exp_len:)
-}
-
-fn scan_integer_digits(bytes: BitArray) -> Result(#(BitArray, Int), Nil) {
-  case bytes {
-    <<0x30, next, _:bytes>> if next >= 0x30 && next <= 0x39 -> Error(Nil)
-    <<0x30, rest:bytes>> -> Ok(#(rest, 1))
-    <<b, rest:bytes>> if b >= 0x31 && b <= 0x39 -> {
-      let #(rest, n) = scan_digits(rest, 0)
-      Ok(#(rest, 1 + n))
-    }
-    _ -> Error(Nil)
-  }
-}
-
-fn scan_fraction(bytes: BitArray) -> Result(#(BitArray, Int), Nil) {
-  case bytes {
-    <<0x2e, rest:bytes>> ->
-      case scan_digits(rest, 0) {
-        #(_, 0) -> Error(Nil)
-        #(rest, n) -> Ok(#(rest, 1 + n))
-      }
-    _ -> Ok(#(bytes, 0))
-  }
-}
-
-fn scan_exponent(bytes: BitArray) -> Result(Int, Nil) {
-  case bytes {
-    <<e, rest:bytes>> if e == 0x65 || e == 0x45 -> {
-      let #(rest, sign_len) = case rest {
-        <<s, tail:bytes>> if s == 0x2b || s == 0x2d -> #(tail, 1)
-        _ -> #(rest, 0)
-      }
-      case scan_digits(rest, 0) {
-        #(_, 0) -> Error(Nil)
-        #(_, n) -> Ok(1 + sign_len + n)
-      }
-    }
-    _ -> Ok(0)
-  }
-}
-
-fn scan_digits(bytes: BitArray, n: Int) -> #(BitArray, Int) {
-  case bytes {
-    <<b, rest:bytes>> if b >= 0x30 && b <= 0x39 -> scan_digits(rest, n + 1)
-    _ -> #(bytes, n)
-  }
-}
-
-fn count_number_bytes(bytes: BitArray, n: Int) -> Int {
-  case bytes {
-    <<b, rest:bytes>>
-      if b == 0x2d
-      || b == 0x2b
-      || b == 0x2e
-      || b == 0x65
-      || b == 0x45
-      || b >= 0x30
-      && b <= 0x39
-    -> count_number_bytes(rest, n + 1)
-    _ -> n
-  }
-}
-
-fn parse_array(
-  bytes: BitArray,
-  acc: List(JsonValue),
-) -> Result(#(JsonValue, BitArray), JsonParseError) {
-  let bytes = skip_whitespace(bytes)
-  case bytes {
-    <<>> -> Error(UnterminatedArray)
-    <<0x5d, rest:bytes>> -> Ok(#(JsonArray(list.reverse(acc)), rest))
-    _ -> {
-      let bytes = case acc {
-        [] -> Ok(bytes)
-        _ ->
-          case bytes {
-            <<0x2c, rest:bytes>> -> Ok(skip_whitespace(rest))
-            _ -> Error(Expected(what: "',' or ']'", in_: "array"))
-          }
-      }
-      use bytes <- result.try(bytes)
-      use #(val, rest) <- result.try(parse_value(bytes))
-      parse_array(rest, [val, ..acc])
-    }
-  }
-}
-
-fn parse_object(
-  bytes: BitArray,
-  acc: List(#(String, JsonValue)),
-) -> Result(#(JsonValue, BitArray), JsonParseError) {
-  let bytes = skip_whitespace(bytes)
-  case bytes {
-    <<>> -> Error(UnterminatedObject)
-    <<0x7d, rest:bytes>> -> Ok(#(JsonObject(list.reverse(acc)), rest))
-    _ -> {
-      let bytes = case acc {
-        [] -> Ok(bytes)
-        _ ->
-          case bytes {
-            <<0x2c, rest:bytes>> -> Ok(skip_whitespace(rest))
-            _ -> Error(Expected(what: "',' or '}'", in_: "object"))
-          }
-      }
-      use bytes <- result.try(bytes)
-      use rest <- result.try(case skip_whitespace(bytes) {
-        <<0x22, rest:bytes>> -> Ok(rest)
-        _ -> Error(Expected(what: "string key", in_: "object"))
-      })
-      use #(key, rest) <- result.try(parse_string(rest))
-      use rest <- result.try(case skip_whitespace(rest) {
-        <<0x3a, rest:bytes>> -> Ok(rest)
-        _ -> Error(Expected(what: "':' after key", in_: "object"))
-      })
-      use #(val, rest) <- result.try(parse_value(rest))
-      parse_object(rest, [#(key, val), ..acc])
-    }
-  }
-}
-
-// every cut is at an ascii byte, so the slice is valid utf-8
-fn take_string(bytes: BitArray, len: Int) -> Result(String, JsonParseError) {
-  bit_array.slice(bytes, 0, len)
-  |> result.map(utf8_slice_as_string)
-  |> result.replace_error(UnexpectedEnd)
-}
-
-@external(erlang, "gleam_stdlib", "identity")
-fn utf8_slice_as_string(bytes: BitArray) -> String
-
-fn take_bytes(bytes: BitArray, len: Int) -> Result(BitArray, JsonParseError) {
-  bit_array.slice(bytes, 0, len) |> result.replace_error(UnexpectedEnd)
-}
-
-fn drop_bytes(bytes: BitArray, n: Int) -> BitArray {
-  case bit_array.slice(bytes, n, bit_array.byte_size(bytes) - n) {
-    Ok(rest) -> rest
-    Error(Nil) -> <<>>
-  }
-}
+  with_source: Bool,
+) -> Result(#(JsonValue, BitArray), JsonParseError)
 
 fn materialize(st: Agent, val: JsonValue) -> #(ParseRecord, Agent) {
   case val {
@@ -753,10 +410,14 @@ fn materialize_plain(st: Agent, val: JsonValue) -> #(JsVal, Agent) {
       let object_proto = st.realm.object.prototype
       let #(h, st) = {
         use seq <- rt_store.t_cell_new_with(st, list.length(entries))
+        let props = case ffi_plain_props(entries, seq) {
+          Some(#(props, _seq)) -> props
+          None -> plain_props(entries, dict.new(), seq)
+        }
         SObject(
           kind: Ordinary,
           proto: Some(object_proto),
-          props: plain_props(entries, dict.new(), seq),
+          props:,
           symbol_props: [],
           elements: rt_types.NoElements,
           extensible: True,
@@ -794,6 +455,12 @@ fn materialize_plain_entries(
     }
   }
 }
+
+@external(erlang, "arc_rt_json_ffi", "plain_props")
+fn ffi_plain_props(
+  entries: List(#(String, JsVal)),
+  seq: Int,
+) -> Option(#(dict.Dict(rt_types.PropertyKey, rt_types.Property), Int))
 
 fn plain_props(
   entries: List(#(String, JsVal)),
@@ -926,7 +593,7 @@ fn validate_raw_json_text(bytes: BitArray) -> Result(Nil, JsonParseError) {
         False -> Ok(Nil)
       }
   })
-  use #(parsed, rest) <- result.try(parse_value(bytes))
+  use #(parsed, rest) <- result.try(parse_value(bytes, False))
   use Nil <- result.try(case skip_whitespace(rest) {
     <<>> -> Ok(Nil)
     _ -> Error(TrailingContent)
@@ -999,8 +666,12 @@ fn json_stringify(
   let #(gap, st) = compute_gap(st, space)
   let #(wrapper, st) = alloc_holder(st, val)
   let ctx = StringifyCtx(replacer:, gap:, caller:)
-  case serialize_property(st, ctx, [], "", "", wrapper) {
-    #(Some(s), st) -> #(mk_string(s), st)
+  case serialize_property(st, ctx, [], "", Named(""), wrapper) {
+    #(Some(tree), st) ->
+      case string_tree.byte_size(tree) > limits.max_string_bytes {
+        True -> rt_val.t_throw_range_error(st, "Invalid string length")
+        False -> #(mk_string(flatten(tree)), st)
+      }
     #(None, st) -> #(mk_undefined(), st)
   }
 }
@@ -1114,22 +785,23 @@ fn serialize_property(
   ctx: StringifyCtx,
   stack: List(Int),
   indent: String,
-  key: String,
+  key: PropertyKey,
   holder: Handle,
-) -> #(Option(String), Agent) {
-  let #(val, st) =
-    rt_obj.t_get_prop(
-      st,
-      mk_object(holder),
-      StringKey(rt_types.canonical_key(key)),
-    )
+) -> #(Option(StringTree), Agent) {
+  // canonical keys, so a named key never spells an index
+  let #(val, st) = case key {
+    Named(name) -> helpers.get_named(st, mk_object(holder), name)
+    Index(i) -> helpers.get_index(st, mk_object(holder), i)
+    rt_types.Private(_) -> #(mk_undefined(), st)
+  }
   let #(val, st) = case classify(val) {
     KHandle(_) | KBig(_) -> {
-      let #(to_json, st) =
-        rt_obj.t_get_prop(st, val, StringKey(Named("toJSON")))
+      let #(to_json, st) = helpers.get_named(st, val, "toJSON")
       case rt_call.is_callable(st, to_json) {
         True ->
-          call_in_caller_realm(st, ctx.caller, to_json, val, [mk_string(key)])
+          call_in_caller_realm(st, ctx.caller, to_json, val, [
+            mk_string(rt_types.key_to_text(key)),
+          ])
         False -> #(val, st)
       }
     }
@@ -1138,61 +810,73 @@ fn serialize_property(
   let #(val, st) = case ctx.replacer {
     ReplacerFn(rf) ->
       call_in_caller_realm(st, ctx.caller, rf, mk_object(holder), [
-        mk_string(key),
+        mk_string(rt_types.key_to_text(key)),
         val,
       ])
     NoReplacer | PropertyList(_) -> #(val, st)
   }
-  case raw_json_text(st, val) {
-    Some(text) -> #(Some(text), st)
-    None -> {
-      let #(val, st) = case classify(val) {
-        KHandle(h) ->
-          case obj_kind(st, h) {
-            Some(NumberObj(_)) -> {
-              let #(n, st) = rt_val.t_to_number(st, val)
-              #(mk_number(n), st)
-            }
-            Some(StringObj(_)) -> {
-              let #(s, st) = rt_val.t_to_string(st, val)
-              #(mk_string(s), st)
-            }
-            Some(BooleanObj(b)) -> #(mk_bool(b), st)
-            Some(BigIntObj(bi)) -> #(rt_types.mk_bigint(bi), st)
-            _ -> #(val, st)
-          }
-        _ -> #(val, st)
+  serialize_value(st, ctx, stack, indent, val)
+}
+
+fn serialize_value(
+  st: Agent,
+  ctx: StringifyCtx,
+  stack: List(Int),
+  indent: String,
+  val: JsVal,
+) -> #(Option(StringTree), Agent) {
+  case classify(val) {
+    KStr(s) -> #(Some(quote_tree(s)), st)
+    KNum(n) ->
+      case n {
+        JInt(_) | JFloat(_) -> #(
+          Some(string_tree.from_string(rt_val.jsnum_to_string(n))),
+          st,
+        )
+        JNan | JPosInf | JNegInf -> #(Some(string_tree.from_string("null")), st)
       }
-      case classify(val) {
-        KNull -> #(Some("null"), st)
-        KBool(True) -> #(Some("true"), st)
-        KBool(False) -> #(Some("false"), st)
-        KStr(s) -> #(Some(stringify_string(s)), st)
-        KNum(n) ->
-          case n {
-            JInt(_) | JFloat(_) -> #(Some(rt_val.jsnum_to_string(n)), st)
-            JNan | JPosInf | JNegInf -> #(Some("null"), st)
-          }
-        KBig(_) ->
-          rt_val.t_throw_type_error(st, "Do not know how to serialize a BigInt")
-        KHandle(h) ->
-          case rt_call.is_callable(st, val) {
-            True -> #(None, st)
-            False ->
-              case is_array_handle(st, h) {
-                True -> {
-                  let #(s, st) = serialize_array(st, ctx, stack, indent, h)
-                  #(Some(s), st)
-                }
-                False -> {
-                  let #(s, st) = serialize_object(st, ctx, stack, indent, h)
-                  #(Some(s), st)
-                }
-              }
-          }
-        KUndef | KSym(_) | rt_types.KTdz -> #(None, st)
-      }
+    KNull -> #(Some(string_tree.from_string("null")), st)
+    KBool(True) -> #(Some(string_tree.from_string("true")), st)
+    KBool(False) -> #(Some(string_tree.from_string("false")), st)
+    KHandle(h) -> serialize_handle(st, ctx, stack, indent, val, h)
+    KBig(_) ->
+      rt_val.t_throw_type_error(st, "Do not know how to serialize a BigInt")
+    KUndef | KSym(_) | rt_types.KTdz -> #(None, st)
+  }
+}
+
+fn serialize_handle(
+  st: Agent,
+  ctx: StringifyCtx,
+  stack: List(Int),
+  indent: String,
+  val: JsVal,
+  h: Handle,
+) -> #(Option(StringTree), Agent) {
+  case obj_kind(st, h) {
+    Some(RawJsonObj(raw:)) -> #(Some(string_tree.from_string(raw)), st)
+    Some(NumberObj(_)) -> {
+      let #(n, st) = rt_val.t_to_number(st, val)
+      serialize_value(st, ctx, stack, indent, mk_number(n))
     }
+    Some(StringObj(_)) -> {
+      let #(s, st) = rt_val.t_to_string(st, val)
+      #(Some(quote_tree(s)), st)
+    }
+    Some(BooleanObj(b)) -> serialize_value(st, ctx, stack, indent, mk_bool(b))
+    Some(BigIntObj(_)) ->
+      rt_val.t_throw_type_error(st, "Do not know how to serialize a BigInt")
+    _ ->
+      case rt_call.is_callable(st, val) {
+        True -> #(None, st)
+        False -> {
+          let #(tree, st) = case is_array_handle(st, h) {
+            True -> serialize_array(st, ctx, stack, indent, h)
+            False -> serialize_object(st, ctx, stack, indent, h)
+          }
+          #(Some(tree), st)
+        }
+      }
   }
 }
 
@@ -1202,14 +886,14 @@ fn serialize_object(
   stack: List(Int),
   indent: String,
   h: Handle,
-) -> #(String, Agent) {
+) -> #(StringTree, Agent) {
   case list.contains(stack, h.id) {
     True -> rt_val.t_throw_type_error(st, circular_msg)
     False -> {
       let stack = [h.id, ..stack]
       let step_indent = indent <> ctx.gap
       let #(keys, st) = case ctx.replacer {
-        PropertyList(names) -> #(names, st)
+        PropertyList(names) -> #(list.map(names, rt_types.canonical_key), st)
         NoReplacer | ReplacerFn(_) -> enumerable_string_keys(st, h)
       }
       let #(partial, st) =
@@ -1225,21 +909,25 @@ fn serialize_members(
   stack: List(Int),
   step_indent: String,
   h: Handle,
-  keys: List(String),
-  acc: List(String),
-) -> #(List(String), Agent) {
+  keys: List(PropertyKey),
+  acc: List(StringTree),
+) -> #(List(StringTree), Agent) {
   case keys {
-    [] -> #(list.reverse(acc), st)
+    [] -> #(acc, st)
     [k, ..rest] -> {
       let #(str_p, st) = serialize_property(st, ctx, stack, step_indent, k, h)
       case str_p {
-        Some(s) -> {
+        Some(tree) -> {
           let sep = case ctx.gap {
             "" -> ":"
             _ -> ": "
           }
+          let member =
+            quote_tree(rt_types.key_to_text(k))
+            |> string_tree.append(sep)
+            |> string_tree.append_tree(tree)
           serialize_members(st, ctx, stack, step_indent, h, rest, [
-            stringify_string(k) <> sep <> s,
+            member,
             ..acc
           ])
         }
@@ -1255,7 +943,7 @@ fn serialize_array(
   stack: List(Int),
   indent: String,
   h: Handle,
-) -> #(String, Agent) {
+) -> #(StringTree, Agent) {
   case list.contains(stack, h.id) {
     True -> rt_val.t_throw_type_error(st, circular_msg)
     False -> {
@@ -1277,105 +965,51 @@ fn serialize_elements(
   h: Handle,
   i: Int,
   len: Int,
-  acc: List(String),
-) -> #(List(String), Agent) {
+  acc: List(StringTree),
+) -> #(List(StringTree), Agent) {
   case i >= len {
-    True -> #(list.reverse(acc), st)
+    True -> #(acc, st)
     False -> {
       let #(str_p, st) =
-        serialize_property(st, ctx, stack, step_indent, int.to_string(i), h)
-      let s = option.unwrap(str_p, "null")
-      serialize_elements(st, ctx, stack, step_indent, h, i + 1, len, [s, ..acc])
+        serialize_property(st, ctx, stack, step_indent, index_key(i), h)
+      let item =
+        option.lazy_unwrap(str_p, fn() { string_tree.from_string("null") })
+      serialize_elements(st, ctx, stack, step_indent, h, i + 1, len, [
+        item,
+        ..acc
+      ])
     }
   }
 }
 
 fn finalize_brackets(
-  partial: List(String),
+  partial_rev: List(StringTree),
   gap: String,
   step_indent: String,
   stepback: String,
   open: String,
   close: String,
-) -> String {
-  case partial, gap {
-    [], _ -> open <> close
-    _, "" -> open <> string.join(partial, ",") <> close
+) -> StringTree {
+  let items = list.reverse(partial_rev)
+  case items, gap {
+    [], _ -> string_tree.from_strings([open, close])
+    _, "" ->
+      string_tree.join(items, ",")
+      |> string_tree.prepend(open)
+      |> string_tree.append(close)
     _, _ ->
-      open
-      <> "\n"
-      <> step_indent
-      <> string.join(partial, ",\n" <> step_indent)
-      <> "\n"
-      <> stepback
-      <> close
+      string_tree.join(items, ",\n" <> step_indent)
+      |> string_tree.prepend(open <> "\n" <> step_indent)
+      |> string_tree.append("\n" <> stepback <> close)
   }
 }
 
-type EscapeScan {
-  FoundEscapable(n: Int, byte: Int, rest: BitArray)
-  AllClean
-}
+@external(erlang, "arc_rt_json_ffi", "quote")
+fn quote_tree(s: String) -> StringTree
 
-fn scan_escapable(bytes: BitArray, n: Int) -> EscapeScan {
-  case bytes {
-    <<0x22, rest:bytes>> -> FoundEscapable(n, 0x22, rest)
-    <<0x5c, rest:bytes>> -> FoundEscapable(n, 0x5c, rest)
-    <<c, rest:bytes>> if c < 0x20 -> FoundEscapable(n, c, rest)
-    <<_, rest:bytes>> -> scan_escapable(rest, n + 1)
-    _ -> AllClean
-  }
-}
-
-// §25.5.2.3 quotejsonstring
-fn stringify_string(s: String) -> String {
-  let bytes = <<s:utf8>>
-  case scan_escapable(bytes, 0) {
-    AllClean -> "\"" <> s <> "\""
-    found -> "\"" <> escape_from(found, bytes, string_tree.new()) <> "\""
-  }
-}
-
-fn escape_from(scan: EscapeScan, bytes: BitArray, acc: StringTree) -> String {
-  case scan {
-    AllClean ->
-      string_tree.to_string(append_span(acc, bytes, bit_array.byte_size(bytes)))
-    FoundEscapable(n, byte, rest) -> {
-      let acc =
-        string_tree.append(append_span(acc, bytes, n), escape_byte(byte))
-      escape_from(scan_escapable(rest, 0), rest, acc)
-    }
-  }
-}
-
-fn escape_byte(byte: Int) -> String {
-  case byte {
-    0x22 -> "\\\""
-    0x5c -> "\\\\"
-    0x08 -> "\\b"
-    0x09 -> "\\t"
-    0x0a -> "\\n"
-    0x0c -> "\\f"
-    0x0d -> "\\r"
-    _ -> unicode_escape(byte)
-  }
-}
-
-fn append_span(acc: StringTree, bytes: BitArray, n: Int) -> StringTree {
-  case n {
-    0 -> acc
-    _ -> {
-      let assert Ok(chunk) =
-        bit_array.slice(bytes, 0, n) |> result.try(bit_array.to_string)
-      string_tree.append(acc, chunk)
-    }
-  }
-}
-
-fn unicode_escape(code: Int) -> String {
-  let assert Ok(hex) = int.to_base_string(code, 16)
-  "\\u" <> string.pad_start(string.lowercase(hex), to: 4, with: "0")
-}
+// all utf-8 binaries already, skips the unicode rescan
+@external(erlang, "erlang", "iolist_to_binary")
+fn flatten(tree: StringTree) -> String
 
 fn obj_kind(st: Agent, h: Handle) -> Option(rt_types.ObjKind) {
   case rt_store.t_cell_get(st, h) {
@@ -1405,7 +1039,32 @@ fn length_of_array_like(st: Agent, h: Handle) -> #(Int, Agent) {
   rt_val.t_to_length(st, len_v)
 }
 
-fn enumerable_string_keys(st: Agent, h: Handle) -> #(List(String), Agent) {
-  let #(keys, st) = rt_obj.t_enumerable_own_keys(st, h)
-  #(list.map(keys, rt_types.key_to_text), st)
+fn enumerable_string_keys(st: Agent, h: Handle) -> #(List(PropertyKey), Agent) {
+  case rt_store.t_cell_get(st, h) {
+    // shaped slots are all plain enumerable data
+    SShapedObject(..) -> {
+      let #(keys, st) = rt_obj.t_own_keys(st, h)
+      #(list.filter_map(keys, string_key), st)
+    }
+    SObject(kind: Ordinary, props:, elements: rt_types.NoElements, ..) -> #(
+      plain_enumerable_keys(props),
+      st,
+    )
+    _ -> {
+      let #(keys, st) = rt_obj.t_enumerable_own_keys(st, h)
+      #(keys, st)
+    }
+  }
 }
+
+fn string_key(key: rt_types.ObjectKey) -> Result(PropertyKey, Nil) {
+  case key {
+    StringKey(pk) -> Ok(pk)
+    rt_types.SymbolKey(_) -> Error(Nil)
+  }
+}
+
+@external(erlang, "arc_rt_json_ffi", "plain_keys")
+fn plain_enumerable_keys(
+  props: dict.Dict(PropertyKey, rt_types.Property),
+) -> List(PropertyKey)

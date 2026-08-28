@@ -1098,7 +1098,7 @@ fn set_array_element(
       SObject(kind: ArrayObj(length:), elements:, ..) -> {
         let ta = case elements {
           Dense(t) -> t
-          _ -> tree_array.new(rt_types.mk_hole())
+          _ -> tree_array.new()
         }
         SObject(
           ..slot,

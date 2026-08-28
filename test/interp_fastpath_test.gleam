@@ -8,6 +8,29 @@ import arc/rt/inspect as rt_inspect
 import arc/rt/types.{KStr, classify}
 import rt_helpers
 
+fn global_epoch_after(source: String) -> Int {
+  let st = rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
+  let assert Ok(#(body, sb)) = parser.parse_script(source)
+    as { "parse failed: " <> source }
+  let assert Ok(template) = compiler.compile(body, sb)
+    as { "compile failed: " <> source }
+  let #(_, st) = entry.run_script(st, template)
+  st.store.global_epoch
+}
+
+pub fn global_epoch_test() {
+  let quiet = global_epoch_after("var o = {}; o.x = 1; o.y = 5")
+  assert global_epoch_after("var o = {}; o.x = 1; g = 5") > quiet
+  assert global_epoch_after("var o = {}; o.x = 1; globalThis.h = 5") > quiet
+  assert global_epoch_after("var o = {}; o.x = 1; this[3] = 5") > quiet
+  assert global_epoch_after(
+      "var o = {}; o.x = 1; Object.defineProperty(globalThis, 'q', { value: 1 })",
+    )
+    > quiet
+  assert global_epoch_after("var o = {}; o.x = 1; delete globalThis.NaN")
+    == quiet
+}
+
 fn run_string(source: String) -> String {
   let st = rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
   let assert Ok(#(body, sb)) = parser.parse_script(source)
@@ -153,6 +176,68 @@ pub fn put_field_test() {
        [a.join(), a.length, s.length].join()",
     )
     == "1,1,3"
+}
+
+pub fn put_field_proto_chain_change_test() {
+  assert run_string(
+      "function P(v) { this.v = v; this.w = v }
+       var log = [];
+       new P(1); new P(2);
+       Object.defineProperty(P.prototype, 'v', { set: function (n) { log.push('s' + n) }, configurable: true });
+       var a = new P(3);
+       Object.defineProperty(Object.prototype, 'w', { value: 0, writable: false, configurable: true });
+       var b = new P(4);
+       delete Object.prototype.w;
+       Object.defineProperty(P.prototype, 'v', { value: 9, writable: true, configurable: true });
+       var c = new P(5);
+       [log.join('+'), a.hasOwnProperty('v'), a.w, b.hasOwnProperty('w'), b.w, c.v, c.w].join()",
+    )
+    == "s3+s4,false,3,false,,5,5"
+  assert run_string(
+      "function P(v) { this.v = v }
+       var log = [];
+       new P(1);
+       var q = { set v(n) { log.push(n) } };
+       Object.setPrototypeOf(P.prototype, q);
+       var a = new P(2);
+       P.prototype.__proto__ = Object.prototype;
+       var b = new P(3);
+       function R(v) { this.__proto__ = v; this.k = 1 }
+       new R({}); var r = new R(q);
+       [log.join('+'), a.hasOwnProperty('v'), b.v, Object.getPrototypeOf(r) === q, r.hasOwnProperty('__proto__')].join()",
+    )
+    == "2,false,3,true,false"
+  assert run_string(
+      "class A { constructor() { this.x = 1 } }
+       new A(); new A();
+       class B extends A { constructor() { super(); this.y = 2 } set x(v) { this.z = v } }
+       var b = new B();
+       Object.freeze(A.prototype);
+       var a = new A();
+       [b.hasOwnProperty('x'), b.z, b.y, a.x].join()",
+    )
+    == "false,1,2,1"
+}
+
+pub fn constructed_receiver_shape_test() {
+  assert run_string(
+      "function P(a) { this.x = a; this.y = a + 1 }
+       var p = new P(1), q = new P(2);
+       q.z = 9; delete q.x; q[0] = 'i';
+       Object.defineProperty(p, 'g', { get: function () { return this.x + 10 }, enumerable: true });
+       var r = new P(3); r.y = 7;
+       [Object.keys(p).join(''), Object.keys(q).join(''), JSON.stringify(r), p.g, q.x, 'y' in q, r.hasOwnProperty('x')].join()",
+    )
+    == "xyg,0yz,{\"x\":3,\"y\":7},11,,true,true"
+  assert run_string(
+      "class A { #p = 1; constructor(v) { this.v = v } get p() { return this.#p + this.v } }
+       var a = new A(4), b = new A(5);
+       var seen = []; for (var k in b) seen.push(k);
+       class B { constructor() { Object.preventExtensions(this) } }
+       var ok; try { new B().w = 1; ok = new B().w === undefined } catch (e) { ok = false }
+       [a.p, b.p, seen.join(''), ok, Object.getOwnPropertyNames(a).join('')].join()",
+    )
+    == "5,6,v,true,v"
 }
 
 pub fn define_field_test() {

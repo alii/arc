@@ -147,12 +147,11 @@ pub fn script_state(agent: Agent, template: FuncTemplate) -> State {
     pc: 0,
     stack: [],
     locals: top_level_locals(template, this),
-    code: template.bytecode,
-    constants: template.constants,
     func: template,
     unit:,
     call_stack: [],
     outer_depth: agent.call_depth,
+    depth: agent.call_depth,
     try_stack: [],
     this:,
     new_target: mk_undefined(),
@@ -278,7 +277,7 @@ fn run_call(
       case call.enter_root(st, callee, this, args, mk_undefined()) {
         Error(#(thrown, st)) -> #(Error(thrown), st)
         Ok(state) -> {
-          let agent = call.pop_frame_info(state.agent)
+          let agent = state.agent
           let body = fn(agent) {
             let #(res, s) =
               start_coroutine_root(
@@ -463,12 +462,11 @@ fn start_coroutine(
       pc: 0,
       stack: [],
       locals:,
-      code: template.bytecode,
-      constants: template.constants,
       func: template,
       unit:,
       call_stack: [],
       outer_depth: agent.call_depth,
+      depth: agent.call_depth,
       try_stack: [],
       this:,
       new_target: mk_undefined(),
@@ -609,7 +607,7 @@ type DelegateSite {
 }
 
 fn delegate_site(s: State) -> Option(DelegateSite) {
-  case tuple_array.get_unchecked(s.pc, s.code), s.stack {
+  case tuple_array.get_unchecked(s.pc, s.func.bytecode), s.stack {
     YieldStar, [rec, ..rest] ->
       rt_lang.record_parts(s.agent, rec)
       |> option.map(SyncSite(_, rest))

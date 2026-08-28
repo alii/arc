@@ -1,4 +1,3 @@
-import arc/bytecode/opcode.{type Op}
 import arc/internal/tuple_array.{type TupleArray}
 import arc/rt/bytecode.{type FuncTemplate, type TryFrame}
 import arc/rt/gc as rt_gc
@@ -18,13 +17,12 @@ pub type State {
     pc: Int,
     stack: List(JsVal),
     locals: TupleArray(JsVal),
-    code: TupleArray(Op),
-    constants: TupleArray(JsVal),
     func: FuncTemplate,
     unit: Int,
     call_stack: List(SavedFrame),
-    // call_depth == outer_depth + length(call_stack)
     outer_depth: Int,
+    // agent.call_depth may lag this inside the loop
+    depth: Int,
     try_stack: List(TryFrame),
     this: JsVal,
     new_target: JsVal,
@@ -34,20 +32,24 @@ pub type State {
   )
 }
 
+// caller.pc/stack/locals/agent are stale, the frame fields win
 pub type SavedFrame {
   SavedFrame(
-    func: FuncTemplate,
-    unit: Int,
-    locals: TupleArray(JsVal),
-    stack: List(JsVal),
+    caller: State,
     pc: Int,
-    try_stack: List(TryFrame),
+    stack: List(JsVal),
+    locals: TupleArray(JsVal),
     constructor_this: Option(JsVal),
-    this: JsVal,
-    new_target: JsVal,
-    home_object: JsVal,
-    call_args: List(JsVal),
-    eval_env: Option(Handle),
+  )
+  // caller kept loop registers, locals is stale at caller.func.regs
+  SavedRegFrame(
+    caller: State,
+    pc: Int,
+    stack: List(JsVal),
+    locals: TupleArray(JsVal),
+    constructor_this: Option(JsVal),
+    r0: JsVal,
+    r1: JsVal,
   )
 }
 
@@ -65,12 +67,11 @@ pub fn frame_roots(state: State) -> List(Handle) {
     pc: _,
     stack:,
     locals:,
-    code: _,
-    constants: _,
     func: _,
     unit: _,
     call_stack:,
     outer_depth: _,
+    depth: _,
     try_stack: _,
     this:,
     new_target:,
@@ -79,42 +80,70 @@ pub fn frame_roots(state: State) -> List(Handle) {
     eval_env:,
   ) = state
   let acc =
-    []
-    |> push_vals(stack)
-    |> push_term(locals)
-    |> push_val(this)
-    |> push_val(new_target)
-    |> push_val(home_object)
-    |> push_vals(call_args)
-    |> push_opt_handle(eval_env)
+    acc_frame(
+      [],
+      stack,
+      locals,
+      this,
+      new_target,
+      home_object,
+      call_args,
+      eval_env,
+    )
   list.fold(call_stack, acc, push_saved_frame)
   |> list.map(JsCell)
 }
 
-fn push_saved_frame(acc: List(Int), frame: SavedFrame) -> List(Int) {
-  let SavedFrame(
-    func: _,
-    unit: _,
-    locals:,
-    stack:,
-    pc: _,
-    try_stack: _,
-    constructor_this:,
-    this:,
-    new_target:,
-    home_object:,
-    call_args:,
-    eval_env:,
-  ) = frame
+fn acc_frame(
+  acc: List(Int),
+  stack: List(JsVal),
+  locals: TupleArray(JsVal),
+  this: JsVal,
+  new_target: JsVal,
+  home_object: JsVal,
+  call_args: List(JsVal),
+  eval_env: Option(Handle),
+) -> List(Int) {
   acc
   |> push_vals(stack)
   |> push_term(locals)
-  |> push_opt_val(constructor_this)
   |> push_val(this)
   |> push_val(new_target)
   |> push_val(home_object)
   |> push_vals(call_args)
   |> push_opt_handle(eval_env)
+}
+
+// caller.call_stack is the fold's own tail, not walked again
+fn push_saved_frame(acc: List(Int), frame: SavedFrame) -> List(Int) {
+  case frame {
+    SavedFrame(caller:, pc: _, stack:, locals:, constructor_this:) ->
+      push_caller(acc, caller, stack, locals, constructor_this)
+    SavedRegFrame(caller:, pc: _, stack:, locals:, constructor_this:, r0:, r1:) ->
+      push_caller(acc, caller, stack, locals, constructor_this)
+      |> push_val(r0)
+      |> push_val(r1)
+  }
+}
+
+fn push_caller(
+  acc: List(Int),
+  caller: State,
+  stack: List(JsVal),
+  locals: TupleArray(JsVal),
+  constructor_this: Option(JsVal),
+) -> List(Int) {
+  acc_frame(
+    acc,
+    stack,
+    locals,
+    caller.this,
+    caller.new_target,
+    caller.home_object,
+    caller.call_args,
+    caller.eval_env,
+  )
+  |> push_opt_val(constructor_this)
 }
 
 fn push_val(acc: List(Int), v: JsVal) -> List(Int) {

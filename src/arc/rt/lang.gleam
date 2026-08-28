@@ -107,6 +107,12 @@ fn parts_of(
   }
 }
 
+@external(erlang, "arc_rt_lang_ffi", "iter_fast")
+fn iter_fast(
+  st: Agent,
+  rec: JsVal,
+) -> Option(#(Bool, IteratorRecord, NativeIter))
+
 fn read_record(st: Agent, rec: JsVal) -> #(Bool, IteratorRecord, Agent) {
   case record_fields(st, rec) {
     Some(#(done, record)) -> #(done, record, st)
@@ -188,9 +194,15 @@ pub fn t_get_iterator(
 
 // §7.4.8 iteratorstepvalue; a throw marks the record done first
 pub fn t_iter_next(st: Agent, rec: JsVal) -> #(#(Bool, JsVal), Agent) {
-  let #(done, record, st) = read_record(st, rec)
+  let #(done, record, native, st) = case iter_fast(st, rec) {
+    Some(#(done, record, native)) -> #(done, record, native, st)
+    None -> {
+      let #(done, record, st) = read_record(st, rec)
+      #(done, record, native_iter(st, record), st)
+    }
+  }
   use <- bool.guard(done, #(#(True, mk_undefined()), st))
-  let stepped = case native_iter(st, record) {
+  let stepped = case native {
     NativeNext(next, iter_h) -> iter_protocol.native_step(st, next, iter_h)
     NativeGenerator(data) -> Some(generator_step(st, rec, data))
     NotNative -> None

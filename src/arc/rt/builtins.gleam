@@ -48,11 +48,11 @@ import arc/rt/types.{
   DateN, DisposableStackN, DomExceptionN, ErrorN, FinalizationRegistryN,
   FunctionN, GeneratorN, GlobalN, HostFn, HostFnEntry, IntlN, IteratorN, JInt,
   JNan, JPosInf, JsOps, JsStore, JsonN, KHandle, MapN, MathN, Named, NoElements,
-  NumberConstructor, NumberN, NumberObj, ObjectN, Ordinary, PromiseN,
-  PromiseRejectFn, PromiseResolveFn, ProxyN, Realm, ReflectN, RegExpN,
-  ReturnThis, SObject, SetN, StringConstructor, StringKey, StringN, StringObj,
-  SymbolConstructor, SymbolN, TemporalN, Test262N, ThrowTypeErrorPoison,
-  TypedArrayN, WeakN, WeakRefN, classify, mk_number, mk_object, mk_undefined,
+  NumberConstructor, NumberN, NumberObj, ObjectN, PromiseN, PromiseRejectFn,
+  PromiseResolveFn, ProxyN, Realm, ReflectN, RegExpN, ReturnThis, SObject, SetN,
+  StringConstructor, StringKey, StringN, StringObj, SymbolConstructor, SymbolN,
+  TemporalN, Test262N, ThrowTypeErrorPoison, TypedArrayN, WeakN, WeakRefN,
+  classify, mk_number, mk_object, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict
@@ -448,7 +448,7 @@ fn alloc_global_object(
     rt_store.t_cell_new(
       st,
       SObject(
-        kind: Ordinary,
+        kind: rt_types.GlobalObj,
         proto: Some(object_proto),
         props: common.named_props(list.reverse(props)),
         symbol_props: [],

@@ -16,8 +16,7 @@ import arc/rt/val as rt_val
 import gleam/float
 import gleam/int
 import gleam/list
-import gleam/option.{type Option, None, Some}
-import gleam/string
+import gleam/option.{None, Some}
 
 pub type NumberBuiltins {
   NumberBuiltins(
@@ -177,43 +176,6 @@ fn call_as_function(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
       }
     }
   }
-}
-
-pub fn parse_int_value(
-  st: Agent,
-  val: JsVal,
-  radix_val: JsVal,
-) -> #(JsNum, Agent) {
-  let #(s, st) = rt_val.t_to_string(st, val)
-  let str = trim_leading_js_ws(s)
-  let #(radix_num, st) = rt_val.t_to_number(st, radix_val)
-  // radix is toint32, not tointegerorinfinity
-  let radix_int = rt_val.num_to_int32(radix_num)
-  let #(str, negative) = case string.first(str) {
-    Ok("-") -> #(string.drop_start(str, 1), True)
-    Ok("+") -> #(string.drop_start(str, 1), False)
-    _ -> #(str, False)
-  }
-  let #(radix, strip_prefix) = case radix_int {
-    0 -> #(10, True)
-    16 -> #(16, True)
-    n -> #(n, False)
-  }
-  let has_hex_prefix =
-    string.starts_with(str, "0x") || string.starts_with(str, "0X")
-  let #(str, radix) = case strip_prefix && has_hex_prefix {
-    True -> #(string.drop_start(str, 2), 16)
-    False -> #(str, radix)
-  }
-  case radix >= 2 && radix <= 36 {
-    False -> #(JNan, st)
-    True -> #(parse_int_digits(str, radix, negative), st)
-  }
-}
-
-pub fn parse_float_value(st: Agent, val: JsVal) -> #(JsNum, Agent) {
-  let #(s, st) = rt_val.t_to_string(st, val)
-  #(parse_decimal_string(trim_leading_js_ws(s)), st)
 }
 
 pub fn js_is_nan(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
@@ -410,10 +372,7 @@ fn format_number_radix(n: JsNum, base: Int) -> String {
     JNan, _ -> "NaN"
     JPosInf, _ -> "Infinity"
     JNegInf, _ -> "-Infinity"
-    JInt(i), _ -> {
-      let assert Ok(s) = int.to_base_string(i, base)
-      string.lowercase(s)
-    }
+    JInt(i), _ -> format_int_radix(i, base)
     JFloat(f), _ -> format_float_radix(f, base)
   }
 }
@@ -428,177 +387,6 @@ fn format_non_finite(n: JsNum, f: fn(Float) -> String) -> String {
   }
 }
 
-fn parse_decimal_string(str: String) -> JsNum {
-  let chars = to_codepoint_chars(str)
-  case scan_decimal_literal(chars) {
-    0 -> JNan
-    len -> rt_val.string_to_number(string.concat(list.take(chars, len)))
-  }
-}
-
-fn to_codepoint_chars(s: String) -> List(String) {
-  use cp <- list.map(string.to_utf_codepoints(s))
-  string.from_utf_codepoints([cp])
-}
-
-fn scan_decimal_literal(chars: List(String)) -> Int {
-  let #(sign_len, rest) = case chars {
-    ["+", ..r] | ["-", ..r] -> #(1, r)
-    _ -> #(0, chars)
-  }
-  case rest {
-    ["I", "n", "f", "i", "n", "i", "t", "y", ..] -> sign_len + 8
-    _ ->
-      case scan_unsigned_decimal(rest) {
-        0 -> 0
-        n -> sign_len + n
-      }
-  }
-}
-
-fn scan_unsigned_decimal(gs: List(String)) -> Int {
-  let #(icount, after_int) = scan_digit_run(gs, 0)
-  let #(mantissa_len, after_mantissa) = case after_int {
-    [".", ..after_dot] -> {
-      let #(fcount, after_frac) = scan_digit_run(after_dot, 0)
-      case icount + fcount > 0 {
-        True -> #(icount + 1 + fcount, after_frac)
-        False -> #(0, after_frac)
-      }
-    }
-    _ -> #(icount, after_int)
-  }
-  case mantissa_len {
-    0 -> 0
-    _ -> mantissa_len + scan_exponent_length(after_mantissa)
-  }
-}
-
-fn scan_digit_run(gs: List(String), count: Int) -> #(Int, List(String)) {
-  case gs {
-    [ch, ..rest] ->
-      case digit_value(ch) {
-        Some(_) -> scan_digit_run(rest, count + 1)
-        None -> #(count, gs)
-      }
-    [] -> #(count, gs)
-  }
-}
-
-fn scan_exponent_length(gs: List(String)) -> Int {
-  case gs {
-    ["e", ..rest] | ["E", ..rest] -> {
-      let #(sign_len, digits) = case rest {
-        ["+", ..r] | ["-", ..r] -> #(1, r)
-        _ -> #(0, rest)
-      }
-      case scan_digit_run(digits, 0) {
-        #(0, _) -> 0
-        #(dcount, _) -> 1 + sign_len + dcount
-      }
-    }
-    _ -> 0
-  }
-}
-
-fn parse_int_digits(s: String, radix: Int, negative: Bool) -> JsNum {
-  case parse_digits_loop(to_codepoint_chars(s), radix, 0, False) {
-    None -> JNan
-    Some(n) ->
-      case negative {
-        True if n == 0 -> JFloat(-0.0)
-        True -> rt_val.num_from_int(-n)
-        False -> rt_val.num_from_int(n)
-      }
-  }
-}
-
-fn parse_digits_loop(
-  chars: List(String),
-  radix: Int,
-  acc: Int,
-  found_any: Bool,
-) -> Option(Int) {
-  case chars {
-    [] ->
-      case found_any {
-        True -> Some(acc)
-        False -> None
-      }
-    [ch, ..rest] ->
-      case alnum_value(ch) {
-        Some(d) if d < radix ->
-          parse_digits_loop(rest, radix, acc * radix + d, True)
-        _ ->
-          case found_any {
-            True -> Some(acc)
-            False -> None
-          }
-      }
-  }
-}
-
-fn digit_value(ch: String) -> Option(Int) {
-  case ch {
-    "0" -> Some(0)
-    "1" -> Some(1)
-    "2" -> Some(2)
-    "3" -> Some(3)
-    "4" -> Some(4)
-    "5" -> Some(5)
-    "6" -> Some(6)
-    "7" -> Some(7)
-    "8" -> Some(8)
-    "9" -> Some(9)
-    _ -> None
-  }
-}
-
-fn alnum_value(ch: String) -> Option(Int) {
-  case ch {
-    "0" -> Some(0)
-    "1" -> Some(1)
-    "2" -> Some(2)
-    "3" -> Some(3)
-    "4" -> Some(4)
-    "5" -> Some(5)
-    "6" -> Some(6)
-    "7" -> Some(7)
-    "8" -> Some(8)
-    "9" -> Some(9)
-    "a" | "A" -> Some(10)
-    "b" | "B" -> Some(11)
-    "c" | "C" -> Some(12)
-    "d" | "D" -> Some(13)
-    "e" | "E" -> Some(14)
-    "f" | "F" -> Some(15)
-    "g" | "G" -> Some(16)
-    "h" | "H" -> Some(17)
-    "i" | "I" -> Some(18)
-    "j" | "J" -> Some(19)
-    "k" | "K" -> Some(20)
-    "l" | "L" -> Some(21)
-    "m" | "M" -> Some(22)
-    "n" | "N" -> Some(23)
-    "o" | "O" -> Some(24)
-    "p" | "P" -> Some(25)
-    "q" | "Q" -> Some(26)
-    "r" | "R" -> Some(27)
-    "s" | "S" -> Some(28)
-    "t" | "T" -> Some(29)
-    "u" | "U" -> Some(30)
-    "v" | "V" -> Some(31)
-    "w" | "W" -> Some(32)
-    "x" | "X" -> Some(33)
-    "y" | "Y" -> Some(34)
-    "z" | "Z" -> Some(35)
-    _ -> None
-  }
-}
-
-@external(erlang, "arc_string_ffi", "trim_leading_js_ws")
-fn trim_leading_js_ws(s: String) -> String
-
 @external(erlang, "arc_rt_number_ffi", "format_to_fixed")
 fn format_to_fixed(x: Float, digits: Int) -> String
 
@@ -610,6 +398,9 @@ fn format_to_exponential_auto(x: Float) -> String
 
 @external(erlang, "arc_rt_number_ffi", "format_to_precision")
 fn format_to_precision(x: Float, precision: Int) -> String
+
+@external(erlang, "arc_rt_number_ffi", "format_int_radix")
+fn format_int_radix(i: Int, base: Int) -> String
 
 @external(erlang, "arc_rt_number_ffi", "format_float_radix")
 fn format_float_radix(x: Float, base: Int) -> String

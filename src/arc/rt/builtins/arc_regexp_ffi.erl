@@ -1,7 +1,11 @@
 -module(arc_regexp_ffi).
 -export([regexp_exec_info/5]).
 -export([regexp_compile/2, is_compiled/1, regexp_exec_compiled/4]).
--export([pair_trail/1]).
+-export([pair_trail/1, has_flag/2]).
+
+has_flag(<<C, _/binary>>, <<C>>) -> true;
+has_flag(<<_, R/binary>>, F) -> has_flag(R, F);
+has_flag(<<>>, _) -> false.
 
 -define(CS, arc_regex_charset).
 

@@ -1283,11 +1283,13 @@ fn global_read(e: Emitter2, g: String) -> Build(ir.Value) {
   case e.fn_scope == scope.root_scope_id {
     True -> anf.host("global_get", [key])
     False -> {
-      use v <- anf.then(anf.host("global_get_fast", [key]))
+      use site <- anf.then(next_site())
+      let site = ir.ConstI32(site)
+      use v <- anf.then(anf.host("global_get_fast", [key, site]))
       use miss <- anf.then(
         anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))),
       )
-      anf.bind_if(miss, anf.host("global_get", [key]), anf.pure(v))
+      anf.bind_if(miss, anf.host("global_get_miss", [key, site]), anf.pure(v))
     }
   }
 }
@@ -1441,7 +1443,11 @@ fn static_dot_key(prop: ast.MemberProperty) -> Option(BitArray) {
 
 fn get_prop_fast(obj: ir.Value, kb: BitArray) -> Build(ir.Value) {
   use site <- anf.then(next_site())
-  anf.host("get_prop_site", [obj, ir.ConstBinary(kb), ir.ConstI32(site)])
+  let key = ir.ConstBinary(kb)
+  let site = ir.ConstI32(site)
+  use v <- anf.then(anf.host("get_prop_fast", [obj, key, site]))
+  use ic_miss <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))))
+  anf.bind_if(ic_miss, anf.host("get_prop_slow", [obj, key, site]), anf.pure(v))
 }
 
 // compare against miss atom, undefined/null are valid hits
@@ -1460,12 +1466,14 @@ fn set_prop_fast(obj: ir.Value, kb: BitArray, v: ir.Value) -> Build(ir.Value) {
     True -> ir.ConstAtom("true")
     False -> ir.ConstAtom("false")
   }
+  use site <- anf.then(next_site())
   use _ <- anf.then(
-    anf.host("set_prop_named", [
+    anf.host("set_prop_site", [
       obj,
       ir.ConstBinary(kb),
       v,
       strict,
+      ir.ConstI32(site),
     ]),
   )
   anf.pure(v)
@@ -1617,7 +1625,8 @@ pub fn emit_prop_write_run(run: PropWriteRun) -> Build(ir.Value) {
     True -> ir.ConstAtom("true")
     False -> ir.ConstAtom("false")
   }
-  anf.host("set_props_named", [obj, keys, vals, strict])
+  use site <- anf.then(next_site())
+  anf.host("set_props_init", [obj, keys, vals, strict, ir.ConstI32(site)])
 }
 
 // §13.15.2 step 6.b.iv strict failed set throws

@@ -6,6 +6,7 @@ import arc/rt/types.{
   mk_number, mk_object, mk_string,
 }
 import arc/rt/val as rt_val
+import gleam/dict
 import gleam/option.{Some}
 import rt_helpers
 
@@ -76,12 +77,22 @@ pub fn shaped_set_transitions_test() {
   let #(a, st) =
     rt_store.t_cell_new(
       st,
-      types.SShapedObject(shape_id: 0, proto: Some(proto), slots: slots([])),
+      types.SShapedObject(
+        shape_id: 0,
+        proto: Some(proto),
+        slots: slots([]),
+        offsets: dict.new(),
+      ),
     )
   let #(b, st) =
     rt_store.t_cell_new(
       st,
-      types.SShapedObject(shape_id: 0, proto: Some(proto), slots: slots([])),
+      types.SShapedObject(
+        shape_id: 0,
+        proto: Some(proto),
+        slots: slots([]),
+        offsets: dict.new(),
+      ),
     )
   let x = StringKey(Named("x"))
   let y = StringKey(Named("y"))

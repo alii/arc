@@ -16,7 +16,7 @@ import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
-import gleam/set
+import gleam/set.{type Set}
 
 pub type CompileError =
   emit.EmitError
@@ -81,6 +81,10 @@ fn resolve_top_level(
 ) -> FuncTemplate {
   let resolve.Resolved(bytecode:, constants:, lines:) =
     resolve.resolve(code, constants)
+  let #(bytecode, regs) = case local_names {
+    None -> resolve.assign_regs(bytecode, captured_slots(child_templates))
+    Some(_) -> #(bytecode, bytecode.NoRegs)
+  }
   FuncTemplate(
     name: None,
     arity: 0,
@@ -101,7 +105,15 @@ fn resolve_top_level(
     local_names:,
     lexical: info.lexical,
     code_kind:,
+    regs:,
   )
+}
+
+fn captured_slots(children: List(FuncTemplate)) -> Set(Int) {
+  list.flat_map(children, fn(t) {
+    list.map(t.env_descriptors, fn(c) { c.parent_index })
+  })
+  |> set.from_list
 }
 
 pub fn compile(
@@ -406,6 +418,15 @@ fn compile_child(
 
   let resolve.Resolved(bytecode:, constants:, lines:) =
     resolve.resolve(child.code, child.constants)
+  // coroutine frames park with raw locals, so they never get registers
+  let #(bytecode, regs) = case
+    local_names,
+    child.is_generator || child.is_async
+  {
+    None, False ->
+      resolve.assign_regs(bytecode, captured_slots(grandchild_templates))
+    _, _ -> #(bytecode, bytecode.NoRegs)
+  }
   FuncTemplate(
     name: child.name,
     arity: child.arity,
@@ -426,6 +447,7 @@ fn compile_child(
     local_names:,
     lexical: info.lexical,
     code_kind: child.code_kind,
+    regs:,
   )
 }
 

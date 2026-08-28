@@ -45,6 +45,7 @@ pub type FuncTemplate {
     local_names: Option(EvalNameTable),
     lexical: LexicalSlots,
     code_kind: CodeKind,
+    regs: Regs,
   )
 }
 
@@ -91,4 +92,10 @@ pub type SuspendedFrame {
     realm: Int,
     unit: Int,
   )
+}
+
+// loop-hot slots the interpreter keeps in loop arguments, -1 unused
+pub type Regs {
+  NoRegs
+  Regs(a: Int, b: Int)
 }

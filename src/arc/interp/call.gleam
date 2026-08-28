@@ -6,7 +6,8 @@ import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/ffi
 import arc/interp/safepoint
 import arc/interp/state.{
-  type SavedFrame, type State, type StepExit, Returned, SavedFrame, State, Threw,
+  type SavedFrame, type State, type StepExit, Returned, SavedFrame,
+  SavedRegFrame, State, Threw,
 }
 import arc/rt/builtins as rt_builtins
 import arc/rt/builtins/function as b_function
@@ -80,12 +81,72 @@ pub fn current_line(agent: Agent) -> Int {
   }
 }
 
-fn leave_frame(agent: Agent) -> Agent {
-  let frames = case agent.frames {
-    [_, ..rest] -> rest
-    [] -> []
+/// catch frames and call_depth up with the loop's fast calls
+pub fn sync(state: State, agent: Agent, pc: Int, bump: Int) -> Agent {
+  let depth = state.depth
+  let line = tuple_array.element(pc + 1, state.func.lines)
+  case depth - agent.call_depth, bump {
+    0, 0 ->
+      case agent.frames {
+        [FrameInfo(line: l, ..), ..] if l == line -> agent
+        frames -> Agent(..agent, frames: set_top_line(frames, line))
+      }
+    behind, _ if behind <= 0 ->
+      Agent(
+        ..agent,
+        call_depth: depth + bump,
+        frames: set_top_line(agent.frames, line),
+      )
+    behind, _ ->
+      Agent(
+        ..agent,
+        call_depth: depth + bump,
+        frames: pending_frames(agent.frames, state, line, behind),
+      )
   }
-  Agent(..agent, call_depth: agent.call_depth - 1, frames:)
+}
+
+fn set_top_line(frames: List(types.FrameInfo), line: Int) {
+  case frames {
+    [FrameInfo(line: l, ..), ..] if l == line -> frames
+    [top, ..rest] -> [FrameInfo(..top, line:), ..rest]
+    [] -> [FrameInfo("", stack_source, line)]
+  }
+}
+
+fn pending_frames(
+  frames: List(types.FrameInfo),
+  state: State,
+  line: Int,
+  behind: Int,
+) -> List(types.FrameInfo) {
+  case behind, state.call_stack {
+    0, _ -> set_top_line(frames, line)
+    _, [saved, ..] -> [
+      frame_info_at(state.func, line),
+      ..pending_frames(
+        frames,
+        saved.caller,
+        tuple_array.element(saved.pc, saved.caller.func.lines),
+        behind - 1,
+      )
+    ]
+    _, [] -> [frame_info_at(state.func, line), ..frames]
+  }
+}
+
+// frames above agent.call_depth were never pushed
+fn leave_frame(agent: Agent, depth: Int) -> Agent {
+  case agent.call_depth == depth {
+    False -> agent
+    True -> {
+      let frames = case agent.frames {
+        [_, ..rest] -> rest
+        [] -> []
+      }
+      Agent(..agent, call_depth: depth - 1, frames:)
+    }
+  }
 }
 
 pub type CoroutineCall {
@@ -206,7 +267,7 @@ pub fn call_function(
             ),
           )
         False -> {
-          let depth = agent.call_depth
+          let depth = state.depth
           case depth >= limits.max_call_depth {
             True ->
               state.throw_range_error(
@@ -216,33 +277,22 @@ pub fn call_function(
             False -> {
               let saved =
                 SavedFrame(
-                  func: state.func,
-                  unit: state.unit,
-                  locals: state.locals,
-                  stack: rest_stack,
+                  caller: state,
                   pc: state.pc + 1,
-                  try_stack: state.try_stack,
+                  stack: rest_stack,
+                  locals: state.locals,
                   constructor_this:,
-                  this: state.this,
-                  new_target: state.new_target,
-                  home_object: state.home_object,
-                  call_args: state.call_args,
-                  eval_env: state.eval_env,
                 )
               Ok(State(
-                agent: Agent(..agent, call_depth: depth + 1, frames: [
-                  frame_info_at(template, 0),
-                  ..agent.frames
-                ]),
+                agent:,
                 stack: [],
                 locals:,
                 func: template,
                 unit:,
-                code: template.bytecode,
-                constants: template.constants,
                 pc: 0,
                 call_stack: [saved, ..state.call_stack],
                 outer_depth: state.outer_depth,
+                depth: depth + 1,
                 try_stack: [],
                 this: this_val,
                 new_target:,
@@ -271,7 +321,7 @@ pub fn is_tail_call(state: State, pc: Int, callee: FuncTemplate) -> Bool {
   case frame_eligible {
     False -> False
     True ->
-      case tuple_array.element(pc + 2, state.code) {
+      case tuple_array.element(pc + 2, state.func.bytecode) {
         opcode.Return -> True
         _ -> False
       }
@@ -281,18 +331,13 @@ pub fn is_tail_call(state: State, pc: Int, callee: FuncTemplate) -> Bool {
 /// §15.10.3 drop the just-parked caller frame
 pub fn elide_tail_frame(new_state: State) -> State {
   case new_state.call_stack {
-    [_caller, ..rest_frames] -> {
-      let agent = new_state.agent
-      let frames = case agent.frames {
-        [callee, _caller, ..rest] -> [callee, ..rest]
-        other -> other
-      }
+    [saved, ..rest_frames] ->
       State(
         ..new_state,
         call_stack: rest_frames,
-        agent: Agent(..agent, frames:, call_depth: agent.call_depth - 1),
+        depth: saved.caller.depth,
+        agent: leave_frame(new_state.agent, saved.caller.depth),
       )
-    }
     [] -> new_state
   }
 }
@@ -522,7 +567,7 @@ fn call_nested(
 pub fn array_values(agent: Agent, v: JsVal) -> List(JsVal) {
   case classify(v) {
     KHandle(h) ->
-      case rt_obj.as_sobject(agent, rt_store.t_cell_get(agent, h)) {
+      case rt_obj.as_sobject(rt_store.t_cell_get(agent, h)) {
         SObject(kind: ArrayObj(length:), elements:, ..)
         | SObject(kind: ArgumentsObj(length:, ..), elements:, ..) ->
           padded_elements(elements, length - 1, [])
@@ -552,7 +597,7 @@ fn new_base_this(agent: Agent, new_target: JsVal) -> #(Handle, Agent) {
       new_target,
       rt_call.object_prototype,
     )
-  rt_obj.t_new_object(agent, Some(proto))
+  rt_obj.t_new_receiver(agent, proto)
 }
 
 /// §10.2.2 construct
@@ -741,89 +786,46 @@ pub fn return_op(state: State) -> Result(State, StepExit) {
   }
   case state.call_stack {
     [] -> Error(Returned(return_value, state))
-    [saved, ..rest_frames] ->
+    [saved, ..] ->
       case resolve_return(state, return_value, saved.constructor_this) {
         Error(#(thrown, state)) -> Error(Threw(thrown, state))
-        Ok(pushed) ->
-          Ok(return_to(
-            state.agent,
-            state.outer_depth,
-            saved,
-            rest_frames,
-            pushed,
-          ))
+        Ok(pushed) -> Ok(return_to(state, saved, pushed))
       }
   }
 }
 
-fn return_to(
-  agent: Agent,
-  outer_depth: Int,
-  saved: SavedFrame,
-  rest_frames: List(SavedFrame),
-  value: JsVal,
-) -> State {
-  safepoint.maybe_collect_at_return(restore_frame(
-    leave_frame(agent),
-    outer_depth,
-    saved,
-    [value, ..saved.stack],
-    rest_frames,
-  ))
+fn return_to(state: State, saved: SavedFrame, value: JsVal) -> State {
+  safepoint.maybe_collect_at_return(
+    restore_frame(leave_frame(state.agent, state.depth), saved, [
+      value,
+      ..saved.stack
+    ]),
+  )
 }
 
-fn restore_frame(
+pub fn restore_frame(
   agent: Agent,
-  outer_depth: Int,
   saved: SavedFrame,
   stack: List(JsVal),
-  rest_frames: List(SavedFrame),
 ) -> State {
-  let SavedFrame(
-    func:,
-    unit:,
-    locals:,
-    stack: _,
-    pc:,
-    try_stack:,
-    constructor_this: _,
-    this:,
-    new_target:,
-    home_object:,
-    call_args:,
-    eval_env:,
-  ) = saved
-  State(
-    agent:,
-    stack:,
-    locals:,
-    func:,
-    unit:,
-    code: func.bytecode,
-    constants: func.constants,
-    pc:,
-    call_stack: rest_frames,
-    outer_depth:,
-    try_stack:,
-    this:,
-    new_target:,
-    home_object:,
-    call_args:,
-    eval_env:,
-  )
+  let caller = saved.caller
+  let locals = case saved, caller.func.regs {
+    SavedRegFrame(locals:, r0:, r1:, ..), bytecode.Regs(a, b) ->
+      ffi.flush_regs(locals, a, b, r0, r1)
+    _, _ -> saved.locals
+  }
+  State(..caller, agent:, stack:, locals:, pc: saved.pc)
 }
 
 /// out of handlers here; continue the search in the caller
 pub fn unwind_frame(state: State) -> Option(State) {
   case state.call_stack {
     [] -> None
-    [saved, ..rest_frames] ->
+    [saved, ..] ->
       Some(restore_frame(
-        leave_frame(state.agent),
-        state.outer_depth,
+        leave_frame(state.agent, state.depth),
         saved,
         saved.stack,
-        rest_frames,
       ))
   }
 }
@@ -887,7 +889,6 @@ pub type RootCallee {
     home: JsVal,
     flags: FnFlags,
     unit: Int,
-    frame: types.FrameInfo,
   )
 }
 
@@ -909,7 +910,6 @@ pub fn root_callee(
     },
     flags:,
     unit:,
-    frame: frame_info_at(template, 0),
   )
 }
 
@@ -945,8 +945,7 @@ pub fn root_state(
   args: List(JsVal),
   new_target: JsVal,
 ) -> State {
-  let RootCallee(callee:, template:, env:, home:, flags:, unit:, frame:) =
-    callee
+  let RootCallee(callee:, template:, env:, home:, flags:, unit:) = callee
   let #(locals, this_val, agent) =
     setup_frame(
       agent,
@@ -959,18 +958,18 @@ pub fn root_state(
       this_arg,
       new_target,
     )
+  // frame push and depth bump happen lazily at the first sync
   let depth = agent.call_depth + 1
   State(
-    agent: Agent(..agent, call_depth: depth, frames: [frame, ..agent.frames]),
+    agent:,
     pc: 0,
     stack: [],
     locals:,
-    code: template.bytecode,
-    constants: template.constants,
     func: template,
     unit:,
     call_stack: [],
     outer_depth: depth,
+    depth:,
     try_stack: [],
     this: this_val,
     new_target:,

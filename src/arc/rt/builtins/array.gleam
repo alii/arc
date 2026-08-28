@@ -382,7 +382,7 @@ fn object_length(st: Agent, ref: Handle) -> #(Int, Agent) {
     SObject(kind: StringObj(value: s), ..) -> #(js_string.length(s), st)
     SObject(props:, ..) -> length_of_properties(st, ref, props)
     rt_types.SShapedObject(..) as s ->
-      case rt_obj.as_sobject(st, s) {
+      case rt_obj.as_sobject(s) {
         SObject(props:, ..) -> length_of_properties(st, ref, props)
         _ -> #(0, st)
       }
@@ -873,6 +873,25 @@ fn join_elements_generic(
 }
 
 fn array_push(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
+  case push_fast(st, this, args) {
+    Pushed(new_length, st) -> #(from_int(new_length), st)
+    PushSlow -> array_push_slow(st, this, args)
+  }
+}
+
+type PushFast {
+  Pushed(Int, Agent)
+  PushSlow
+}
+
+@external(erlang, "arc_rt_array_ffi", "push")
+fn push_fast(st: Agent, this: JsVal, args: List(JsVal)) -> PushFast
+
+fn array_push_slow(
+  st: Agent,
+  this: JsVal,
+  args: List(JsVal),
+) -> #(JsVal, Agent) {
   let fast = case classify(this), args {
     KHandle(ref), [_, ..] ->
       try_push_fast_path(st, ref, rt_store.t_cell_get(st, ref), args)
@@ -915,6 +934,21 @@ fn push_generic(
 }
 
 fn array_pop(st: Agent, this: JsVal, _args: List(JsVal)) -> #(JsVal, Agent) {
+  case pop_fast(st, this) {
+    Popped(val, st) -> #(val, st)
+    PopSlow -> array_pop_slow(st, this)
+  }
+}
+
+type PopFast {
+  Popped(JsVal, Agent)
+  PopSlow
+}
+
+@external(erlang, "arc_rt_array_ffi", "pop")
+fn pop_fast(st: Agent, this: JsVal) -> PopFast
+
+fn array_pop_slow(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   use st, _this, ref, length <- require_array(st, this)
   case length == 0 {
     True -> #(mk_undefined(), generic_set_length(st, ref, 0))

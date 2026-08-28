@@ -1,32 +1,37 @@
 -module(arc_rt_array_ffi).
--export([own_element/3, arg_list/2, index_free/5, scan_forward/5, scan_backward/4]).
+-export([own_element/3, arg_list/2, index_free/5, scan_forward/5, scan_backward/4,
+         push/3, pop/2]).
 
 -include("../arc_rt_layout.hrl").
+-compile({inline, [own_read/2, elem_read/2]}).
 
 own_element(St, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, element(?AGENT_STORE, St))) of
         {?SOBJECT_TAG, Kind, _, Props, _, Els, _}
           when element(1, Kind) =:= ?ARRAYOBJ_TAG;
                element(1, Kind) =:= ?ARGUMENTSOBJ_TAG ->
-            case Props of
-                #{{?KEY_INDEX, Idx} := _} -> slow;
-                _ ->
-                    case Els of
-                        {?ELEMS_DENSE, A} ->
-                            case array:get(Idx, A) of
-                                ?ELEMS_HOLE -> slow;
-                                V -> {hit, V}
-                            end;
-                        {?ELEMS_SPARSE, #{Idx := ?ELEMS_HOLE}} -> slow;
-                        {?ELEMS_SPARSE, #{Idx := V}} -> {hit, V};
-                        _ -> slow
-                    end
+            if
+                Props =:= #{} -> own_read(Els, Idx);
+                is_map_key({?KEY_INDEX, Idx}, Props) -> slow;
+                true -> own_read(Els, Idx)
             end;
         _ -> slow
     end;
 own_element(_, _, _) -> slow.
 
-elem_read({?ELEMS_DENSE, A}, Idx) -> array:get(Idx, A);
+own_read({?ELEMS_DENSE, T}, Idx)
+  when element(1, T) =/= ?VEC_TAG, Idx < tuple_size(T) ->
+    case element(Idx + 1, T) of
+        ?ELEMS_HOLE -> slow;
+        V -> {hit, V}
+    end;
+own_read(Els, Idx) ->
+    case elem_read(Els, Idx) of
+        ?ELEMS_HOLE -> slow;
+        V -> {hit, V}
+    end.
+
+elem_read({?ELEMS_DENSE, A}, Idx) -> arc_tree_array_ffi:get(Idx, A);
 elem_read({?ELEMS_SPARSE, M}, Idx) ->
     case M of
         #{Idx := V} -> V;
@@ -42,6 +47,9 @@ index_free(St, Props, Proto, Start, Count) ->
 chain_free(_, ?NONE, _, _) -> true;
 chain_free(Data, {?SOME, {?HANDLE_TAG, Id}}, Start, Count) ->
     case arc_rt_arena_ffi:get(Id, Data) of
+        {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Length}, Proto, _, _, _, _}
+          when Start >= Length ->
+            chain_free(Data, Proto, Start, Count);
         {?SOBJECT_TAG, Kind, Proto, Props, _, Els, _} ->
             case Kind of
                 _ when element(1, Kind) =:= ?PROXYOBJ_TAG -> false;
@@ -72,7 +80,7 @@ probe_keys(Props, Idx, End) ->
     is_map_key({?KEY_INDEX, Idx}, Props) orelse probe_keys(Props, Idx + 1, End).
 
 elements_have_index({?ELEMS_DENSE, A}, Start, Count) ->
-    array:sparse_size(A) > 0
+    arc_tree_array_ffi:size(A) > 0
         andalso (Count > 64 orelse probe_dense(A, Start, Start + Count));
 elements_have_index({?ELEMS_SPARSE, M}, Start, Count) ->
     map_size(M) > 0
@@ -81,7 +89,7 @@ elements_have_index(_, _, _) -> false.
 
 probe_dense(_, Idx, End) when Idx >= End -> false;
 probe_dense(A, Idx, End) ->
-    array:get(Idx, A) =/= ?ELEMS_HOLE orelse probe_dense(A, Idx + 1, End).
+    arc_tree_array_ffi:get(Idx, A) =/= ?ELEMS_HOLE orelse probe_dense(A, Idx + 1, End).
 
 probe_sparse(_, Idx, End) when Idx >= End -> false;
 probe_sparse(M, Idx, End) ->
@@ -107,9 +115,10 @@ arg_list(_, _) -> args_slow.
 
 dense_prefix(_, 0) -> {args_hit, []};
 dense_prefix({?ELEMS_DENSE, A}, Len) when Len > 0 ->
-    case array:size(A) of
-        Len -> hole_free(array:to_list(A));
-        Size when Size > Len -> hole_free(lists:sublist(array:to_list(A), Len));
+    case arc_tree_array_ffi:size(A) of
+        Len -> hole_free(arc_tree_array_ffi:to_list(A));
+        Size when Size > Len ->
+            hole_free(lists:sublist(arc_tree_array_ffi:to_list(A), Len));
         _ -> args_slow
     end;
 dense_prefix(_, _) -> args_slow.
@@ -144,3 +153,70 @@ scan_backward(Els, Search, Idx, Eq) ->
 
 eq(strict, A, B) -> arc_rt_val_ffi:strict_eq(A, B);
 eq(same_value_zero, A, B) -> arc_rt_val_ffi:same_value_zero(A, B).
+
+-define(MAX_DENSE_INDEX, 10000000).
+-define(MAX_GAP, 1024).
+%% plain extensible array with no own props, free proto chain
+push(St, {?HANDLE_TAG, Id}, Args) ->
+    Store = element(?AGENT_STORE, St),
+    Data = element(?STORE_DATA, Store),
+    case arc_rt_arena_ffi:get(Id, Data) of
+        {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, Proto, Props, Sym, Els, true}
+          when Props =:= #{} ->
+            N = length(Args),
+            NewLen = Len + N,
+            case NewLen =< ?MAX_DENSE_INDEX
+                 andalso chain_free(Data, Proto, Len, N) of
+                false -> push_slow;
+                true ->
+                    case append(Els, Len, Args) of
+                        slow -> push_slow;
+                        NewEls ->
+                            Slot = {?SOBJECT_TAG, {?ARRAYOBJ_TAG, NewLen}, Proto, Props,
+                                    Sym, NewEls, true},
+                            {pushed, NewLen,
+                             setelement(?AGENT_STORE, St,
+                                        setelement(?STORE_DATA, Store,
+                                                   arc_rt_arena_ffi:set(Id, Slot, Data)))}
+                    end
+            end;
+        _ -> push_slow
+    end;
+push(_, _, _) -> push_slow.
+
+append(?ELEMS_NONE, 0, Args) -> {?ELEMS_DENSE, arc_tree_array_ffi:from_list(Args)};
+append(?ELEMS_NONE, Len, Args) when Len =< ?MAX_GAP ->
+    {?ELEMS_DENSE, set_each(Args, Len, {})};
+append({?ELEMS_DENSE, A}, Len, Args) ->
+    case arc_tree_array_ffi:size(A) of
+        Size when Size =< Len, Len - Size =< ?MAX_GAP ->
+            {?ELEMS_DENSE, set_each(Args, Len, A)};
+        _ -> slow
+    end;
+append(_, _, _) -> slow.
+
+set_each([V | Vs], I, A) -> set_each(Vs, I + 1, arc_tree_array_ffi:set(I, V, A));
+set_each([], _, A) -> A.
+
+pop(St, {?HANDLE_TAG, Id}) ->
+    Store = element(?AGENT_STORE, St),
+    Data = element(?STORE_DATA, Store),
+    case arc_rt_arena_ffi:get(Id, Data) of
+        {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, Proto, Props, Sym, {?ELEMS_DENSE, A}, true}
+          when Props =:= #{}, Len > 0 ->
+            Last = Len - 1,
+            case arc_tree_array_ffi:size(A) =:= Len
+                 andalso arc_tree_array_ffi:get(Last, A) of
+                false -> pop_slow;
+                ?ELEMS_HOLE -> pop_slow;
+                V ->
+                    Slot = {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Last}, Proto, Props, Sym,
+                            {?ELEMS_DENSE, arc_tree_array_ffi:resize(A, Last)}, true},
+                    {popped, V,
+                     setelement(?AGENT_STORE, St,
+                                setelement(?STORE_DATA, Store,
+                                           arc_rt_arena_ffi:set(Id, Slot, Data)))}
+            end;
+        _ -> pop_slow
+    end;
+pop(_, _) -> pop_slow.

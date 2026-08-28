@@ -336,7 +336,7 @@ fn install_error_cause(
 fn error_name(st: Agent, proto: Option(Handle), fuel: Int) -> String {
   case proto {
     Some(h) if fuel > 0 ->
-      case rt_obj.as_sobject(st, rt_store.t_cell_get(st, h)) {
+      case rt_obj.as_sobject(rt_store.t_cell_get(st, h)) {
         SObject(proto: parent, ..) ->
           case rt_obj.t_ordinary_own_property(st, h, StringKey(Named("name"))) {
             Some(DataProperty(value: v, ..)) ->
@@ -376,7 +376,7 @@ fn format_frame(frame: FrameInfo) -> String {
 
 fn stack_trace_limit(st: Agent) -> Int {
   let ctor = rt_store.t_cell_get(st, st.realm.error.constructor)
-  case rt_obj.as_sobject(st, ctor) {
+  case rt_obj.as_sobject(ctor) {
     SObject(props:, ..) ->
       case dict.get(props, Named("stackTraceLimit")) {
         Ok(DataProperty(value: v, ..)) ->
@@ -430,7 +430,7 @@ fn capture_stack_trace(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 
 fn target_header_parts(st: Agent, h: Handle) -> #(String, String) {
   let read = fn(key) {
-    case rt_obj.as_sobject(st, rt_store.t_cell_get(st, h)) {
+    case rt_obj.as_sobject(rt_store.t_cell_get(st, h)) {
       SObject(props:, ..) ->
         case dict.get(props, Named(key)) {
           Ok(DataProperty(value: v, ..)) ->

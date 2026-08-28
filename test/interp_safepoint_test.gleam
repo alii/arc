@@ -63,6 +63,7 @@ fn empty_template() -> FuncTemplate {
     local_names: None,
     lexical: lexical.NoLexicalSlots,
     code_kind: lexical.ScriptCode,
+    regs: bytecode.NoRegs,
   )
 }
 
@@ -73,12 +74,11 @@ fn root_state(agent: Agent, locals: List(JsVal), stack: List(JsVal)) -> State {
     pc: 0,
     stack:,
     locals: tuple_array.from_list(locals),
-    code: func.bytecode,
-    constants: func.constants,
     func:,
     unit: 0,
     call_stack: [],
     outer_depth: agent.call_depth,
+    depth: agent.call_depth,
     try_stack: [],
     this: mk_undefined(),
     new_target: mk_undefined(),
@@ -119,22 +119,16 @@ pub fn nested_activation_never_collects_test() {
 fn with_caller_frame(s: State, held: JsVal) -> State {
   let caller =
     SavedFrame(
-      func: s.func,
-      unit: s.unit,
-      locals: s.locals,
-      stack: [held],
+      caller: s,
       pc: 0,
-      try_stack: [],
+      stack: [held],
+      locals: s.locals,
       constructor_this: None,
-      this: mk_undefined(),
-      new_target: mk_undefined(),
-      home_object: mk_undefined(),
-      call_args: [],
-      eval_env: None,
     )
   State(
     ..s,
     call_stack: [caller],
+    depth: s.depth + 1,
     agent: Agent(..s.agent, call_depth: s.agent.call_depth + 1),
   )
 }

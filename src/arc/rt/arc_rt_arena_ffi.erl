@@ -64,69 +64,45 @@ get_option(I, A) ->
     end.
 
 set(I, V, {arena, S, N, HotIx, Hot}) when I bsr 4 =:= HotIx ->
-    {arena, S, N, HotIx, setelement((I band ?M) + 1, Hot, V)};
+    {arena, S, N, HotIx, set16(I band ?M, Hot, V)};
+set(I, V, {arena, S, N, HotIx, Hot}) when HotIx bsr S =:= 0 ->
+    N1 = put_leaf_1(HotIx bsl ?B, Hot, S, N),
+    {arena, S, N1, I bsr 4, set16(I band ?M, leaf(I, S, N1), V)};
 set(I, V, {arena, S, N, HotIx, Hot}) when I >= 0 ->
     {S1, N1} = put_leaf(HotIx bsl ?B, Hot, S, N),
-    {arena, S1, N1, I bsr 4, setelement((I band ?M) + 1, leaf(I, S1, N1), V)}.
+    {arena, S1, N1, I bsr 4, set16(I band ?M, leaf(I, S1, N1), V)}.
 
-put_leaf(I, L, 4, N) when I bsr 4 < ?W ->
-    {4, setelement((I bsr 4) + 1, N, L)};
-put_leaf(I, L, 8, N) when I bsr 8 < ?W ->
-    I2 = (I bsr 8) + 1,
-    case element(I2, N) of
-        N1 when is_tuple(N1) ->
-            {8, setelement(I2, N, setelement(((I bsr 4) band ?M) + 1, N1, L))};
-        _ -> put_leaf_slow(I, L, 8, N)
-    end;
-put_leaf(I, L, 12, N) when I bsr 12 < ?W ->
-    I3 = (I bsr 12) + 1,
-    case element(I3, N) of
-        N2 when is_tuple(N2) ->
-            I2 = ((I bsr 8) band ?M) + 1,
-            case element(I2, N2) of
-                N1 when is_tuple(N1) ->
-                    {12,
-                     setelement(I3, N,
-                     setelement(I2, N2,
-                     setelement(((I bsr 4) band ?M) + 1, N1, L)))};
-                _ -> put_leaf_slow(I, L, 12, N)
-            end;
-        _ -> put_leaf_slow(I, L, 12, N)
-    end;
-put_leaf(I, L, 16, N) when I bsr 16 < ?W ->
-    I4 = (I bsr 16) + 1,
-    case element(I4, N) of
-        N3 when is_tuple(N3) ->
-            I3 = ((I bsr 12) band ?M) + 1,
-            case element(I3, N3) of
-                N2 when is_tuple(N2) ->
-                    I2 = ((I bsr 8) band ?M) + 1,
-                    case element(I2, N2) of
-                        N1 when is_tuple(N1) ->
-                            {16,
-                             setelement(I4, N,
-                             setelement(I3, N3,
-                             setelement(I2, N2,
-                             setelement(((I bsr 4) band ?M) + 1, N1, L))))};
-                        _ -> put_leaf_slow(I, L, 16, N)
-                    end;
-                _ -> put_leaf_slow(I, L, 16, N)
-            end;
-        _ -> put_leaf_slow(I, L, 16, N)
-    end;
-put_leaf(I, L, S, N) ->
-    put_leaf_slow(I, L, S, N).
+%% literal positions compile to an in-place copy, not a bif call
+-compile({inline, [set16/3]}).
+set16(I, L, V) when tuple_size(L) =:= ?W ->
+    case I of
+        0 -> setelement(1, L, V);
+        1 -> setelement(2, L, V);
+        2 -> setelement(3, L, V);
+        3 -> setelement(4, L, V);
+        4 -> setelement(5, L, V);
+        5 -> setelement(6, L, V);
+        6 -> setelement(7, L, V);
+        7 -> setelement(8, L, V);
+        8 -> setelement(9, L, V);
+        9 -> setelement(10, L, V);
+        10 -> setelement(11, L, V);
+        11 -> setelement(12, L, V);
+        12 -> setelement(13, L, V);
+        13 -> setelement(14, L, V);
+        14 -> setelement(15, L, V);
+        _ -> setelement(16, L, V)
+    end.
 
-put_leaf_slow(I, L, S, N) when I bsr S < ?W -> {S, put_leaf_1(I, L, S, N)};
-put_leaf_slow(I, L, S, N) ->
-    put_leaf_slow(I, L, S + ?B, setelement(1, ?EMPTY, N)).
+put_leaf(I, L, S, N) when I bsr S < ?W -> {S, put_leaf_1(I, L, S, N)};
+put_leaf(I, L, S, N) -> put_leaf(I, L, S + ?B, setelement(1, ?EMPTY, N)).
 
 put_leaf_1(_, L, 0, _) -> L;
 put_leaf_1(I, L, S, ?F) ->
-    setelement(((I bsr S) band ?M) + 1, ?EMPTY, put_leaf_1(I, L, S - ?B, ?F));
+    set16((I bsr S) band ?M, ?EMPTY, put_leaf_1(I, L, S - ?B, ?F));
 put_leaf_1(I, L, S, N) ->
-    Ix = ((I bsr S) band ?M) + 1,
-    setelement(Ix, N, put_leaf_1(I, L, S - ?B, element(Ix, N))).
+    Ix = (I bsr S) band ?M,
+    set16(Ix, N, put_leaf_1(I, L, S - ?B, element(Ix + 1, N))).
 
 leaf(I, 4, N) when I bsr 4 < ?W ->
     full(element((I bsr 4) + 1, N));

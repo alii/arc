@@ -18,7 +18,7 @@ pub fn new() -> JsElements {
 pub fn from_list(items: List(JsVal)) -> JsElements {
   case items {
     [] -> NoElements
-    _ -> Dense(tree_array.from_list(items, types.mk_hole()))
+    _ -> Dense(tree_array.from_list(items))
   }
 }
 
@@ -49,7 +49,7 @@ pub fn is_empty(elements: JsElements) -> Bool {
 
 pub fn set(elements: JsElements, i: Int, v: JsVal) -> JsElements {
   case elements {
-    NoElements -> set(Dense(tree_array.new(types.mk_hole())), i, v)
+    NoElements -> set(Dense(tree_array.new()), i, v)
     Dense(data) -> {
       let size = tree_array.size(data)
       case i - size > max_gap || i >= max_dense_index {

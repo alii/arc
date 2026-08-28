@@ -329,8 +329,8 @@ fn raw_define_private_data(
 ) -> Agent {
   let #(seq, st) = rt_store.t_next_prop_seq(st)
   rt_store.t_cell_update(st, obj, fn(slot) {
-    let assert SObject(props:, ..) = slot
-      as "t_private_define target is not an SObject"
+    let assert SObject(props:, ..) as slot = rt_obj.as_sobject(slot)
+      as "t_define_private target is not an SObject"
     SObject(
       ..slot,
       props: dict.insert(
@@ -369,7 +369,7 @@ fn raw_merge_private_accessor(
     False -> #(get, Some(fn_v))
   }
   rt_store.t_cell_update(st, obj, fn(slot) {
-    let assert SObject(props:, ..) = slot
+    let assert SObject(props:, ..) as slot = rt_obj.as_sobject(slot)
       as "t_define_private target is not an SObject"
     SObject(
       ..slot,

@@ -14,13 +14,13 @@ import arc/rt/types.{
   ArrayObj, AsyncFromSyncIterator, AsyncGenRequest, AsyncGeneratorObj, BigIntObj,
   BooleanObj, DataViewObj, DateObj, Dense, DisposableStackObj, ErrorObj,
   FinRegCell, FinalizationRegistryObj, ForInIterator, GeneratorObj, Handler,
-  HostJob, IcCall, IcRead, IdentityPassThrough, IntlObj, IteratorHelperObj,
-  JsCell, JsStore, KBound, KBytecode, KCompiled, KHandle, KHost, KNative,
-  MapIterator, MapObj, ModuleNamespace, NoElements, NumberObj, Ordinary,
-  PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction, PromiseRejected,
-  ProxyObj, RawJsonObj, ReactionJob, RegExpObj, ResolveThenableJob,
-  ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen, SBox,
-  SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
+  HostJob, IcCall, IcGlobal, IcInit, IcOff, IcRead, IdentityPassThrough, IntlObj,
+  IteratorHelperObj, JsCell, JsStore, KBound, KBytecode, KCompiled, KHandle,
+  KHost, KNative, MapIterator, MapObj, ModuleNamespace, NoElements, NumberObj,
+  Ordinary, PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction,
+  PromiseRejected, ProxyObj, RawJsonObj, ReactionJob, RegExpObj,
+  ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
+  SBox, SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
   SetIterator, SetObj, Sparse, StringIterator, StringObj, SymbolObj, TemporalObj,
   ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakObjKey, WeakRefObj,
   WeakSetObj, WeakSymKey, WrapForValidIteratorObj, classify, jq_to_list,
@@ -75,6 +75,8 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
     unit_uid: _,
     // ics are validated on use, so weak
     ics: _,
+    free_protos: _,
+    global_epoch: _,
   ) = require_js(st)
   let acc = set.to_list(pinned_roots)
   let acc = list.append(unhandled_rejections, acc)
@@ -99,7 +101,7 @@ pub fn refs_in_cell(slot: JsSlot, acc: List(Int)) -> List(Int) {
       |> push_props_refs(props, _)
       |> push_symbol_props_refs(symbol_props, _)
       |> push_elements_refs(elements, _)
-    SShapedObject(shape_id: _, proto:, slots:) ->
+    SShapedObject(shape_id: _, proto:, slots:, offsets: _) ->
       push_term_refs(to_dynamic(slots), push_opt_handle(proto, acc))
     SBox(value:) -> push_val_refs(value, acc)
     SPromiseData(state:, is_handled: _) -> push_promise_state_refs(state, acc)
@@ -174,6 +176,7 @@ fn push_template_refs(template: FuncTemplate, acc: List(Int)) -> List(Int) {
     local_names: _,
     lexical: _,
     code_kind: _,
+    regs: _,
   ) = template
   push_vals_tuple_refs(constants, acc)
 }
@@ -197,7 +200,7 @@ fn push_request_refs(acc: List(Int), req: AsyncGenRequest) -> List(Int) {
 // exhaustive; weak keys not traced, see prune_weak_slot
 fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
   case kind {
-    Ordinary -> acc
+    Ordinary | rt_types.GlobalObj -> acc
     ArrayObj(length: _) -> acc
     ArgumentsObj(length: _, mapped:) ->
       case mapped {
@@ -420,6 +423,7 @@ pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {
       alloc_since_gc: 0,
       gc_live: dict.size(live),
       ics: dict.filter(js.ics, fn(_, entry) { is_read_ic(entry) }),
+      free_protos: dict.new(),
     ),
   )
 }
@@ -427,8 +431,8 @@ pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {
 // call ics name cell ids that sweep hands out again
 fn is_read_ic(entry: IcEntry) -> Bool {
   case entry {
-    IcRead(..) -> True
-    IcCall(..) -> False
+    IcRead(..) | IcOff -> True
+    IcCall(..) | IcInit(..) | IcGlobal(..) -> False
   }
 }
 

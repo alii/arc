@@ -75,7 +75,7 @@ fn inspect_object(
   depth: Int,
   visited: Set(Handle),
 ) -> String {
-  case rt_obj.as_sobject(st, rt_store.t_cell_get(st, h)) {
+  case rt_obj.as_sobject(rt_store.t_cell_get(st, h)) {
     SObject(kind:, props:, elements:, symbol_props:, ..) ->
       case kind {
         ArrayObj(length:) -> inspect_array(st, elements, length, depth, visited)
@@ -178,7 +178,7 @@ fn inspect_object(
         FinalizationRegistryObj(..) -> "FinalizationRegistry {}"
         rt_types.WeakRefObj(..) -> "WeakRef {}"
         rt_types.ShadowRealmObj(..) -> "ShadowRealm {}"
-        Ordinary | KHost(_) -> {
+        Ordinary | rt_types.GlobalObj | KHost(_) -> {
           let body = inspect_plain_object(st, props, depth, visited)
           case list.key_find(symbol_props, rt_types.symbol_to_string_tag) {
             Ok(DataProperty(value:, ..)) ->
@@ -357,7 +357,7 @@ fn error_property(
   fuel: Int,
 ) -> Option(String) {
   use <- bool.guard(fuel <= 0, None)
-  case rt_obj.as_sobject(st, rt_store.t_cell_get(st, h)) {
+  case rt_obj.as_sobject(rt_store.t_cell_get(st, h)) {
     SObject(props:, proto:, ..) ->
       case dict.get(props, Named(key)) {
         Ok(DataProperty(value:, ..)) ->

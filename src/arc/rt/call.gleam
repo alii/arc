@@ -388,10 +388,13 @@ pub fn t_bind_callable(
           Some(js_ops(st).bind_call(st, h, kind, this))
         SObject(kind: KNative(tag:, ..), ..) ->
           Some(fn(st, args) { call_native(st, tag, this, args) })
-        SObject(kind: KCompiled(code:, home_object:, flags:, ..), ..) ->
-          Some(fn(st, args) {
-            call_compiled(st, h, code, home_object, flags, this, args)
-          })
+        SObject(kind: KCompiled(code:, home_object:, flags:, ..) as kind, ..) ->
+          bind_compiled(st, callee, kind, this)
+          |> option.or(
+            Some(fn(st, args) {
+              call_compiled(st, h, code, home_object, flags, this, args)
+            }),
+          )
         SObject(kind: KBound(..), ..) -> Some(generic)
         SObject(kind: ProxyObj(target:, ..), ..) ->
           case is_callable(st, mk_object(target)) {
@@ -403,6 +406,14 @@ pub fn t_bind_callable(
     _ -> None
   }
 }
+
+@external(erlang, "arc_rt_call_fast_ffi", "t_bind_compiled")
+fn bind_compiled(
+  st: Agent,
+  callee: JsVal,
+  kind: ObjKind,
+  this: JsVal,
+) -> Option(fn(Agent, List(JsVal)) -> #(JsVal, Agent))
 
 fn rethrown(outcome: #(Completion, Agent)) -> #(JsVal, Agent) {
   case outcome {
@@ -503,7 +514,7 @@ fn construct_kfunction(
     False -> {
       let #(proto, st) =
         get_prototype_from_constructor(st, new_target, object_prototype)
-      let #(new_this, st) = rt_obj.t_new_object(st, Some(proto))
+      let #(new_this, st) = rt_obj.t_new_receiver(st, proto)
       let st = run_fields_init(st, fields_init, new_this)
       let frame = mk_frame(mk_object(new_this), callee_v, home, new_target)
       let #(c, st) = apply_ctor(st, code, frame, args)
@@ -739,7 +750,7 @@ fn alloc_args_array(st: Agent, items: List(JsVal)) -> #(Handle, Agent) {
   let len = list.length(items)
   let elements = case items {
     [] -> NoElements
-    _ -> Dense(tree_array.from_list(items, rt_types.mk_hole()))
+    _ -> Dense(tree_array.from_list(items))
   }
   rt_store.t_cell_new(
     st,

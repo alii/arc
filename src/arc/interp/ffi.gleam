@@ -148,6 +148,7 @@ pub type Sentinel {
   Miss
   JsTdz
   Undefined
+  Null
 }
 
 @external(erlang, "erlang", "=:=")
@@ -329,6 +330,15 @@ pub fn frame_locals(
 
 @external(erlang, "arc_interp_locals_ffi", "bind_this")
 pub fn bind_this(this: JsVal, global: Handle) -> JsVal
+
+@external(erlang, "arc_interp_locals_ffi", "flush_regs")
+pub fn flush_regs(
+  locals: TupleArray(JsVal),
+  a: Int,
+  b: Int,
+  r0: JsVal,
+  r1: JsVal,
+) -> TupleArray(JsVal)
 
 // hd([atom]) folds to a constant, not a call
 @external(erlang, "erlang", "hd")

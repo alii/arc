@@ -3,12 +3,12 @@
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ErrorKind, type Handle, type JsNum, type JsOps, type JsVal,
-  type ObjectKey, type ToPrimHint, HintDefault, HintNumber, HintString, Index,
-  JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KBool, KBound, KBytecode,
-  KCompiled, KHandle, KNative, KNull, KNum, KStr, KSym, KTdz, KUndef, Named,
-  ProxyObj, RangeErr, ReferenceErr, SObject, StringKey, SymbolKey, SyntaxErr,
-  TypeErr, array_index_of_float, canonical_key, classify, index_key, mk_number,
-  mk_object, mk_string, symbol_to_primitive,
+  type ObjectKey, type SymbolId, type ToPrimHint, HintDefault, HintNumber,
+  HintString, Index, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KBool, KBound,
+  KBytecode, KCompiled, KHandle, KNative, KNull, KNum, KStr, KSym, KTdz, KUndef,
+  Named, ProxyObj, RangeErr, ReferenceErr, SObject, StringKey, SymbolKey,
+  SyntaxErr, TypeErr, array_index_of_float, canonical_key, classify, index_key,
+  mk_number, mk_object, mk_string, symbol_to_primitive,
 }
 import gleam/bit_array
 import gleam/float
@@ -204,7 +204,11 @@ pub fn t_to_primitive(
     KTdz -> panic as "ToPrimitive on the TDZ sentinel"
     KHandle(h) -> {
       let ops = require_ops(st)
-      let #(exotic, st) = ops.get_prop(st, v, SymbolKey(symbol_to_primitive))
+      let fast = get_symbol_data(st, v, symbol_to_primitive)
+      let #(exotic, st) = case is_miss(fast) {
+        True -> ops.get_prop(st, v, SymbolKey(symbol_to_primitive))
+        False -> #(fast, st)
+      }
       case is_nullish(exotic) {
         True -> t_ordinary_to_primitive(st, h, hint)
         False -> {
@@ -235,6 +239,21 @@ pub fn t_to_primitive(
   }
 }
 
+// data property fast paths ahead of the full get
+@external(erlang, "arc_rt_helpers_ffi", "get_symbol_data")
+fn get_symbol_data(st: Agent, recv: JsVal, sym: SymbolId) -> JsVal
+
+@external(erlang, "arc_rt_helpers_ffi", "is_miss")
+fn is_miss(v: JsVal) -> Bool
+
+@external(erlang, "arc_rt_obj_ffi", "t_get_prop_slow")
+fn get_named_data(
+  st: Agent,
+  recv: JsVal,
+  key: String,
+  site: Option(Nil),
+) -> #(JsVal, Agent)
+
 // §7.1.1.1 ordinarytoprimitive
 pub fn t_ordinary_to_primitive(
   st: Agent,
@@ -258,7 +277,7 @@ fn try_primitive_methods(
     [] -> t_throw_type_error(st, "Cannot convert object to primitive value")
     [name, ..rest] -> {
       let ops = require_ops(st)
-      let #(method, st) = ops.get_prop(st, receiver, StringKey(Named(name)))
+      let #(method, st) = get_named_data(st, receiver, name, None)
       let #(callable, st) = t_is_callable(st, method)
       case callable {
         True -> {
@@ -424,7 +443,10 @@ pub fn prim_to_string(v: JsVal) -> Result(String, CoerceError) {
 }
 
 // §7.1.17 tostring
-pub fn t_to_string(st: Agent, v: JsVal) -> #(String, Agent) {
+@external(erlang, "arc_rt_val_ffi", "t_to_string")
+pub fn t_to_string(st: Agent, v: JsVal) -> #(String, Agent)
+
+pub fn t_to_string_slow(st: Agent, v: JsVal) -> #(String, Agent) {
   case classify(v) {
     KStr(s) -> #(s, st)
     KNum(n) -> #(jsnum_to_string(n), st)
@@ -492,252 +514,13 @@ fn primitive_to_prop_key(st: Agent, v: JsVal) -> #(ObjectKey, Agent) {
   }
 }
 
-pub type FloatParseError {
-  OutOfRange
-  Invalid
-}
-
-@external(erlang, "arc_rt_val_ffi", "parse_float")
-pub fn parse_float(s: String) -> Result(Float, FloatParseError)
-
 // §7.1.4.1.1 stringtonumber
-pub fn string_to_number(s: String) -> JsNum {
-  // fast path for plain digit strings, very hot for array keys
-  case parse_plain_digits(s) {
-    Ok(n) -> n
-    Error(Nil) -> string_to_number_slow(s)
-  }
-}
-
-// max 15 digits keeps it exact as a float
-fn parse_plain_digits(s: String) -> Result(JsNum, Nil) {
-  case bit_array.from_string(s) {
-    // -0 needs the float shape
-    <<0x2d, rest:bytes>> -> {
-      use n <- result.map(accumulate_digits(rest, 0, 0))
-      case n {
-        0 -> JFloat(-0.0)
-        _ -> JInt(-n)
-      }
-    }
-    bytes -> {
-      use n <- result.map(accumulate_digits(bytes, 0, 0))
-      JInt(n)
-    }
-  }
-}
-
-fn accumulate_digits(
-  bytes: BitArray,
-  acc: Int,
-  count: Int,
-) -> Result(Int, Nil) {
-  case bytes {
-    <<>> if count >= 1 && count <= 15 -> Ok(acc)
-    <<d, rest:bytes>> if d >= 0x30 && d <= 0x39 ->
-      accumulate_digits(rest, acc * 10 + d - 0x30, count + 1)
-    _ -> Error(Nil)
-  }
-}
-
-fn string_to_number_slow(s: String) -> JsNum {
-  let bytes = trim_string_ws(bit_array.from_string(s))
-  case bytes {
-    <<>> -> JFloat(0.0)
-    // no sign allowed with 0x 0o 0b
-    <<"0x":utf8, digits:bytes>> | <<"0X":utf8, digits:bytes>> ->
-      parse_radix_literal(digits, 16)
-    <<"0o":utf8, digits:bytes>> | <<"0O":utf8, digits:bytes>> ->
-      parse_radix_literal(digits, 8)
-    <<"0b":utf8, digits:bytes>> | <<"0B":utf8, digits:bytes>> ->
-      parse_radix_literal(digits, 2)
-    <<"-":utf8, rest:bytes>> ->
-      case parse_unsigned_literal(rest) {
-        Ok(n) -> negate_jsnum(n)
-        Error(Nil) -> JNan
-      }
-    <<"+":utf8, rest:bytes>> ->
-      case parse_unsigned_literal(rest) {
-        Ok(n) -> n
-        Error(Nil) -> JNan
-      }
-    _ ->
-      case parse_unsigned_literal(bytes) {
-        Ok(n) -> n
-        Error(Nil) -> JNan
-      }
-  }
-}
-
-fn negate_jsnum(n: JsNum) -> JsNum {
-  case n {
-    JFloat(f) -> JFloat(float.negate(f))
-    JInt(0) -> JFloat(-0.0)
-    JInt(i) -> JInt(0 - i)
-    JPosInf -> JNegInf
-    JNegInf -> JPosInf
-    JNan -> JNan
-  }
-}
+@external(erlang, "arc_rt_val_ffi", "string_to_number")
+pub fn string_to_number(s: String) -> JsNum
 
 // §7.1.4.1 strwhitespacechar, not unicode white_space
-fn trim_string_ws(bytes: BitArray) -> BitArray {
-  let bytes = drop_leading_string_ws(bytes)
-  let keep = content_length(bytes, 0, 0)
-  case keep == bit_array.byte_size(bytes) {
-    True -> bytes
-    False -> {
-      let assert Ok(trimmed) = bit_array.slice(bytes, 0, keep)
-        as "keep is always <= byte_size"
-      trimmed
-    }
-  }
-}
-
-fn drop_leading_string_ws(bytes: BitArray) -> BitArray {
-  case bytes {
-    // tab lf vt ff cr sp
-    <<b, rest:bytes>>
-      if b == 0x09
-      || b == 0x0a
-      || b == 0x0b
-      || b == 0x0c
-      || b == 0x0d
-      || b == 0x20
-    -> drop_leading_string_ws(rest)
-    // u+00a0
-    <<0xc2, 0xa0, rest:bytes>> -> drop_leading_string_ws(rest)
-    // u+1680
-    <<0xe1, 0x9a, 0x80, rest:bytes>> -> drop_leading_string_ws(rest)
-    // u+2000..200a u+2028 u+2029 u+202f
-    <<0xe2, 0x80, b, rest:bytes>>
-      if b >= 0x80 && b <= 0x8a || b == 0xa8 || b == 0xa9 || b == 0xaf
-    -> drop_leading_string_ws(rest)
-    // u+205f
-    <<0xe2, 0x81, 0x9f, rest:bytes>> -> drop_leading_string_ws(rest)
-    // u+3000
-    <<0xe3, 0x80, 0x80, rest:bytes>> -> drop_leading_string_ws(rest)
-    // u+feff
-    <<0xef, 0xbb, 0xbf, rest:bytes>> -> drop_leading_string_ws(rest)
-    _ -> bytes
-  }
-}
-
-fn content_length(bytes: BitArray, idx: Int, last: Int) -> Int {
-  case bytes {
-    <<>> -> last
-    <<b, rest:bytes>>
-      if b == 0x09
-      || b == 0x0a
-      || b == 0x0b
-      || b == 0x0c
-      || b == 0x0d
-      || b == 0x20
-    -> content_length(rest, idx + 1, last)
-    <<0xc2, 0xa0, rest:bytes>> -> content_length(rest, idx + 2, last)
-    <<0xe1, 0x9a, 0x80, rest:bytes>> -> content_length(rest, idx + 3, last)
-    <<0xe2, 0x80, b, rest:bytes>>
-      if b >= 0x80 && b <= 0x8a || b == 0xa8 || b == 0xa9 || b == 0xaf
-    -> content_length(rest, idx + 3, last)
-    <<0xe2, 0x81, 0x9f, rest:bytes>> -> content_length(rest, idx + 3, last)
-    <<0xe3, 0x80, 0x80, rest:bytes>> -> content_length(rest, idx + 3, last)
-    <<0xef, 0xbb, 0xbf, rest:bytes>> -> content_length(rest, idx + 3, last)
-    <<_, rest:bytes>> -> content_length(rest, idx + 1, idx + 1)
-    _ -> panic as "content_length: input is a UTF-8 string, always byte-aligned"
-  }
-}
-
-fn parse_unsigned_literal(bytes: BitArray) -> Result(JsNum, Nil) {
-  case bytes {
-    <<"Infinity":utf8>> -> Ok(JPosInf)
-    _ -> {
-      let #(icount, after_int) = scan_ascii_digits(bytes, 0)
-      case after_int {
-        <<>> if icount > 0 -> parse_integer_literal(bytes)
-        <<".":utf8, after_dot:bytes>> -> {
-          let #(fcount, after_frac) = scan_ascii_digits(after_dot, 0)
-          case icount > 0 || fcount > 0 {
-            False -> Error(Nil)
-            True -> {
-              use Nil <- result.try(check_exponent_part(after_frac))
-              parse_decimal_literal(bytes)
-            }
-          }
-        }
-        _ if icount > 0 -> {
-          use Nil <- result.try(check_exponent_part(after_int))
-          parse_decimal_literal(bytes)
-        }
-        _ -> Error(Nil)
-      }
-    }
-  }
-}
-
-fn scan_ascii_digits(bytes: BitArray, count: Int) -> #(Int, BitArray) {
-  case bytes {
-    <<d, rest:bytes>> if d >= 0x30 && d <= 0x39 ->
-      scan_ascii_digits(rest, count + 1)
-    _ -> #(count, bytes)
-  }
-}
-
-fn check_exponent_part(bytes: BitArray) -> Result(Nil, Nil) {
-  case bytes {
-    <<>> -> Ok(Nil)
-    <<e, digits:bytes>> if e == 0x65 || e == 0x45 -> {
-      let valid = case digits {
-        <<"+":utf8, ds:bytes>> | <<"-":utf8, ds:bytes>> ->
-          nonempty_all_digits(ds)
-        _ -> nonempty_all_digits(digits)
-      }
-      case valid {
-        False -> Error(Nil)
-        True -> Ok(Nil)
-      }
-    }
-    _ -> Error(Nil)
-  }
-}
-
-fn nonempty_all_digits(bytes: BitArray) -> Bool {
-  case bytes {
-    <<d>> if d >= 0x30 && d <= 0x39 -> True
-    <<d, rest:bytes>> if d >= 0x30 && d <= 0x39 -> nonempty_all_digits(rest)
-    _ -> False
-  }
-}
-
-// overflow is infinity not nan, e.g. number("1e999")
-fn parse_decimal_literal(bytes: BitArray) -> Result(JsNum, Nil) {
-  use text <- result.try(bit_array.to_string(bytes))
-  case parse_float(text) {
-    Ok(f) -> Ok(JFloat(f))
-    Error(OutOfRange) -> Ok(JPosInf)
-    Error(Invalid) -> Error(Nil)
-  }
-}
-
-fn parse_integer_literal(bytes: BitArray) -> Result(JsNum, Nil) {
-  use digits <- result.try(bit_array.to_string(bytes))
-  int.parse(digits) |> result.map(int_number)
-}
-
-// empty or signed digits are nan
-fn parse_radix_literal(digits: BitArray, radix: Int) -> JsNum {
-  case digits {
-    <<>> | <<"-":utf8, _:bytes>> | <<"+":utf8, _:bytes>> -> JNan
-    _ -> {
-      let parsed =
-        bit_array.to_string(digits)
-        |> result.try(int.base_parse(_, radix))
-      case parsed {
-        Ok(n) -> num_from_int(n)
-        Error(Nil) -> JNan
-      }
-    }
-  }
-}
+@external(erlang, "arc_string_ffi", "trim_js_ws")
+fn trim_string_ws(s: String) -> String
 
 const nf_two52 = 4_503_599_627_370_496
 
@@ -795,14 +578,12 @@ fn nf_bit_length(n: Int, acc: Int) -> Int {
 
 // §7.1.14 stringtobigint, none on failure
 pub fn string_to_bigint(s: String) -> Option(Int) {
-  let bytes = trim_string_ws(bit_array.from_string(s))
-  case bit_array.to_string(bytes) {
-    Error(Nil) -> None
-    Ok("") -> Some(0)
-    Ok("0x" <> rest) | Ok("0X" <> rest) -> parse_bigint_radix_digits(rest, 16)
-    Ok("0o" <> rest) | Ok("0O" <> rest) -> parse_bigint_radix_digits(rest, 8)
-    Ok("0b" <> rest) | Ok("0B" <> rest) -> parse_bigint_radix_digits(rest, 2)
-    Ok(t) -> int.parse(t) |> option.from_result
+  case trim_string_ws(s) {
+    "" -> Some(0)
+    "0x" <> rest | "0X" <> rest -> parse_bigint_radix_digits(rest, 16)
+    "0o" <> rest | "0O" <> rest -> parse_bigint_radix_digits(rest, 8)
+    "0b" <> rest | "0B" <> rest -> parse_bigint_radix_digits(rest, 2)
+    t -> int.parse(t) |> option.from_result
   }
 }
 
@@ -814,7 +595,10 @@ fn parse_bigint_radix_digits(digits: String, base: Int) -> Option(Int) {
 }
 
 // §7.1.4 tonumber
-pub fn t_to_number(st: Agent, v: JsVal) -> #(JsNum, Agent) {
+@external(erlang, "arc_rt_val_ffi", "t_to_number")
+pub fn t_to_number(st: Agent, v: JsVal) -> #(JsNum, Agent)
+
+pub fn t_to_number_slow(st: Agent, v: JsVal) -> #(JsNum, Agent) {
   case classify(v) {
     KNum(n) -> #(n, st)
     KStr(s) -> #(string_to_number(s), st)
@@ -897,12 +681,18 @@ pub fn t_to_uint32(st: Agent, v: JsVal) -> #(Int, Agent) {
 }
 
 // §7.1.5 tointegerorinfinity
-pub fn t_to_integer_or_infinity(st: Agent, v: JsVal) -> #(Int, Agent) {
+@external(erlang, "arc_rt_val_ffi", "t_to_integer_or_infinity")
+pub fn t_to_integer_or_infinity(st: Agent, v: JsVal) -> #(Int, Agent)
+
+pub fn t_to_integer_or_infinity_slow(st: Agent, v: JsVal) -> #(Int, Agent) {
   let #(n, st) = t_to_number(st, v)
   #(jsnum_to_integer_or_infinity(n), st)
 }
 
-pub fn t_to_length(st: Agent, v: JsVal) -> #(Int, Agent) {
+@external(erlang, "arc_rt_val_ffi", "t_to_length")
+pub fn t_to_length(st: Agent, v: JsVal) -> #(Int, Agent)
+
+pub fn t_to_length_slow(st: Agent, v: JsVal) -> #(Int, Agent) {
   let #(n, st) = t_to_number(st, v)
   #(jsnum_to_length(n), st)
 }

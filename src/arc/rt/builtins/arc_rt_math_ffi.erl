@@ -2,7 +2,21 @@
 -module(arc_rt_math_ffi).
 -export([exp/1, pow/2, cosh/1, sinh/1, hypot/1, fround/1,
          t_math_sqrt/1, t_math_floor/1, t_math_abs/1,
-         t_math_pow/2, t_math_min/2, t_math_max/2]).
+         t_math_pow/2, t_math_min/2, t_math_max/2, fast/2, is_miss/1]).
+
+is_miss(V) -> V =:= miss.
+
+%% plain number args straight to the kernels, else miss
+fast(math_floor, [X | _]) -> t_math_floor(X);
+fast(math_abs, [X | _]) -> t_math_abs(X);
+fast(math_sqrt, [X | _]) -> t_math_sqrt(X);
+fast(math_pow, [B, E | _]) -> t_math_pow(B, E);
+fast(math_max, [A, B]) -> t_math_max(A, B);
+fast(math_min, [A, B]) -> t_math_min(A, B);
+fast(math_ceil, [X | _]) when is_integer(X) -> X;
+fast(math_round, [X | _]) when is_integer(X) -> X;
+fast(math_trunc, [X | _]) when is_integer(X) -> X;
+fast(_, _) -> miss.
 
 -define(MAX_SAFE_INT, 9007199254740991).
 

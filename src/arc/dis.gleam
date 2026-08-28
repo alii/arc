@@ -110,7 +110,21 @@ fn header(template: FuncTemplate, label: String, path: String) -> String {
     <> ", locals "
     <> int.to_string(template.local_count)
     <> ")"
-  "function " <> where <> label <> shape <> flags(template)
+  "function " <> where <> label <> shape <> flags(template) <> regs(template)
+}
+
+// negative slot operands index this list
+fn regs(template: FuncTemplate) -> String {
+  case template.regs {
+    bytecode.NoRegs -> ""
+    bytecode.Regs(a, b) ->
+      " [regs "
+      <> string.join(
+        list.filter(list.map([a, b], int.to_string), fn(s) { s != "-1" }),
+        " ",
+      )
+      <> "]"
+  }
 }
 
 fn flags(template: FuncTemplate) -> String {
@@ -154,7 +168,7 @@ fn annotate(op: Op, template: FuncTemplate) -> Option(String) {
     opcode.PushConst(index) ->
       Some(resolve(index, template.constants, constant_to_string))
     opcode.CmpLocalConstJump(_, index, _, _, _)
-    | opcode.IncLocalCmpConstJump(_, index, _, _, _)
+    | opcode.IncLocalCmpConstJump(_, _, index, _, _, _)
     | opcode.CmpConstJump(index, _, _, _)
     | opcode.BinOpConst(_, index)
     | opcode.BinOpConstPut(_, index, _)

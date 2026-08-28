@@ -30,9 +30,8 @@ import arc/rt/types.{
   StringPrototypeToLocaleUpperCase, StringPrototypeToLowerCase,
   StringPrototypeToString, StringPrototypeToUpperCase,
   StringPrototypeToWellFormed, StringPrototypeTrim, StringPrototypeTrimEnd,
-  StringPrototypeTrimStart, StringPrototypeValueOf, StringRaw, SymbolKey,
-  classify, mk_bool, mk_number, mk_object, mk_string, mk_undefined,
-  well_known_symbol_description,
+  StringPrototypeTrimStart, StringPrototypeValueOf, StringRaw, classify, mk_bool,
+  mk_number, mk_object, mk_string, mk_undefined, well_known_symbol_description,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/int
@@ -277,9 +276,14 @@ fn string_index_of(
   let #(search, st) =
     rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   let #(pos, st) = rt_val.t_to_integer_or_infinity(st, helpers.arg_at(args, 1))
-  let from = int.clamp(pos, 0, js_string.length(s))
-  let result = js_string.index_of(s, search, from) |> option.unwrap(-1)
-  #(mk_number(JInt(result)), st)
+  let result = case pos <= 0 {
+    True -> js_string.index_of(s, search, 0)
+    False -> {
+      let len = js_string.length(s)
+      js_string.index_of_known(s, len, search, int.min(pos, len))
+    }
+  }
+  #(mk_number(JInt(option.unwrap(result, -1))), st)
 }
 
 fn string_last_index_of(
@@ -290,14 +294,16 @@ fn string_last_index_of(
   let #(s, st) = with_this_string(st, this)
   let #(search, st) =
     rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
-  let len = js_string.length(s)
   let #(num, st) = rt_val.t_to_number(st, helpers.arg_at(args, 1))
-  let from = case num {
-    JNan -> len
-    _ -> int.clamp(rt_val.jsnum_to_integer_or_infinity(num), 0, len)
+  let result = case num {
+    JNan | rt_types.JPosInf -> js_string.last_index_of_all(s, search)
+    _ -> {
+      let len = js_string.length(s)
+      let from = int.clamp(rt_val.jsnum_to_integer_or_infinity(num), 0, len)
+      js_string.last_index_of(s, search, from)
+    }
   }
-  let result = js_string.last_index_of(s, search, from) |> option.unwrap(-1)
-  #(mk_number(JInt(result)), st)
+  #(mk_number(JInt(option.unwrap(result, -1))), st)
 }
 
 fn string_includes(
@@ -305,9 +311,7 @@ fn string_includes(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  string_search_bool(st, this, args, "includes", fn(hay, needle) {
-    option.is_some(js_string.index_of(hay, needle, 0))
-  })
+  string_search_bool(st, this, args, "includes", js_string.contains)
 }
 
 fn string_starts_with(
@@ -340,8 +344,10 @@ fn string_search_bool(
       let #(search, st) = rt_val.t_to_string(st, search_val)
       let #(pos, st) =
         rt_val.t_to_integer_or_infinity(st, helpers.arg_at(args, 1))
-      let from = int.clamp(pos, 0, js_string.length(s))
-      let sub = js_string.drop_start(s, from)
+      let sub = case pos <= 0 {
+        True -> s
+        False -> js_string.drop_known(s, js_string.length(s), pos)
+      }
       #(mk_bool(predicate(sub, search)), st)
     }
   }
@@ -365,7 +371,7 @@ fn string_ends_with(
       let #(search, st) = rt_val.t_to_string(st, search_val)
       let len = js_string.length(s)
       let #(end_pos, st) = second_arg_index_or_len(st, args, len, int.clamp)
-      let sub = js_string.slice(s, 0, end_pos)
+      let sub = js_string.slice_known(s, len, 0, end_pos)
       #(mk_bool(string.ends_with(sub, search)), st)
     }
   }
@@ -397,7 +403,7 @@ fn string_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     relative_index(st, helpers.first_arg_or_undefined(args), len, 0)
   let #(end, st) = relative_index(st, helpers.arg_at(args, 1), len, len)
   case end > start {
-    True -> #(mk_string(js_string.slice(s, start, end - start)), st)
+    True -> #(mk_string(js_string.slice_known(s, len, start, end - start)), st)
     False -> #(mk_string(""), st)
   }
 }
@@ -418,7 +424,7 @@ fn string_substring(
     True -> #(end, start)
     False -> #(start, end)
   }
-  #(mk_string(js_string.slice(s, start, end - start)), st)
+  #(mk_string(js_string.slice_known(s, len, start, end - start)), st)
 }
 
 fn string_concat(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
@@ -500,7 +506,7 @@ fn string_at(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     False -> idx
   }
   case actual >= 0 && actual < len {
-    True -> #(mk_string(js_string.slice(s, actual, 1)), st)
+    True -> #(mk_string(js_string.slice_known(s, len, actual, 1)), st)
     False -> #(mk_undefined(), st)
   }
 }
@@ -561,7 +567,10 @@ fn string_substr(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let end = int.min(start + len, size)
   case start >= end {
     True -> #(mk_string(""), st)
-    False -> #(mk_string(js_string.slice(s, start, end - start)), st)
+    False -> #(
+      mk_string(js_string.slice_known(s, size, start, end - start)),
+      st,
+    )
   }
 }
 
@@ -602,7 +611,7 @@ fn get_method(
 ) -> #(Option(JsVal), Agent) {
   case classify(val) {
     KHandle(_) -> {
-      let #(func, st) = rt_obj.t_get_prop(st, val, SymbolKey(symbol))
+      let #(func, st) = helpers.get_symbol(st, val, symbol)
       case rt_val.is_nullish(func) {
         True -> #(None, st)
         False -> {
@@ -776,7 +785,7 @@ fn string_split_parts(
             "" -> js_string.explode(s) |> list.take(lim)
             _ -> js_string.split(s, sep, lim)
           }
-          ok_array(st, list.map(parts, mk_string))
+          ok_array(st, mk_strings(parts))
         }
       }
     }
@@ -809,20 +818,41 @@ fn replace_string_search(
     False -> {
       let #(template, st) = rt_val.t_to_string(st, replace_val)
       let segments = substitution.tokenize_plain(template)
-      let needs_before = list.contains(segments, substitution.BeforeSeg)
-      let parts =
-        replace_loop_template(
-          s,
-          search_str,
-          search_len,
-          segments,
-          needs_before,
-          "",
-          [],
-          all,
-        )
-      concat_within_limit(st, parts)
+      let literal = case segments {
+        [] -> Some("")
+        [substitution.LiteralSeg(text)] -> Some(text)
+        _ -> None
+      }
+      case literal, search_str {
+        Some(text), _ if search_str != "" ->
+          string_within_limit(
+            st,
+            js_string.replace_literal(s, search_str, text, all),
+          )
+        _, _ -> {
+          let needs_before = list.contains(segments, substitution.BeforeSeg)
+          let parts =
+            replace_loop_template(
+              s,
+              search_str,
+              search_len,
+              segments,
+              needs_before,
+              "",
+              [],
+              all,
+            )
+          concat_within_limit(st, parts)
+        }
+      }
     }
+  }
+}
+
+fn string_within_limit(st: Agent, s: String) -> #(JsVal, Agent) {
+  case string.byte_size(s) > limits.max_string_bytes {
+    True -> rt_val.t_throw_range_error(st, "Invalid string length")
+    False -> #(mk_string(s), st)
   }
 }
 
@@ -1140,7 +1170,7 @@ fn require_global_when_regexp(
       let #(flags, st) = rt_obj.t_get_prop(st, val, StringKey(Named("flags")))
       let #(flags, st) = rt_val.t_require_object_coercible(st, flags)
       let #(s, st) = rt_val.t_to_string(st, flags)
-      case string.contains(s, "g") {
+      case regexp.has_flag(s, "g") {
         True -> st
         False ->
           rt_val.t_throw_type_error(
@@ -1165,9 +1195,21 @@ fn require_object_coercible(st: Agent, this: JsVal, name: String) -> Agent {
   }
 }
 
+@external(erlang, "erlang", "is_binary")
+fn is_str(v: JsVal) -> Bool
+
+@external(erlang, "arc_rt_store_ffi", "identity")
+fn unchecked_str(v: JsVal) -> String
+
 fn with_this_string(st: Agent, this: JsVal) -> #(String, Agent) {
+  case is_str(this) {
+    True -> #(unchecked_str(this), st)
+    False -> coerce_this_string(st, this)
+  }
+}
+
+fn coerce_this_string(st: Agent, this: JsVal) -> #(String, Agent) {
   case classify(this) {
-    KStr(s) -> #(s, st)
     KNull -> rt_val.t_throw_type_error(st, "Cannot read properties of null")
     KUndef ->
       rt_val.t_throw_type_error(st, "Cannot read properties of undefined")
@@ -1231,6 +1273,10 @@ fn concat_within_limit(st: Agent, parts_rev: List(String)) -> #(JsVal, Agent) {
     False -> #(mk_string(string.concat(parts)), st)
   }
 }
+
+// mk_string over a list, which is the identity
+@external(erlang, "arc_rt_store_ffi", "identity")
+fn mk_strings(parts: List(String)) -> List(JsVal)
 
 fn ok_array(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
   let #(h, st) = realm_ops.alloc_array(st, values)
