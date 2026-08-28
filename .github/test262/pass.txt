@@ -40801,6 +40801,7 @@ language/literals/regexp/invalid-braced-quantifier-lower.js
 language/literals/regexp/invalid-braced-quantifier-range.js
 language/literals/regexp/invalid-optional-lookbehind.js
 language/literals/regexp/invalid-optional-negative-lookbehind.js
+language/literals/regexp/invalid-quantifier-out-of-order.js
 language/literals/regexp/invalid-range-lookbehind.js
 language/literals/regexp/invalid-range-negative-lookbehind.js
 language/literals/regexp/lastIndex.js
@@ -40880,6 +40881,7 @@ language/literals/regexp/u-invalid-optional-lookahead.js
 language/literals/regexp/u-invalid-optional-lookbehind.js
 language/literals/regexp/u-invalid-optional-negative-lookahead.js
 language/literals/regexp/u-invalid-optional-negative-lookbehind.js
+language/literals/regexp/u-invalid-quantifier-out-of-order.js
 language/literals/regexp/u-invalid-range-lookahead.js
 language/literals/regexp/u-invalid-range-lookbehind.js
 language/literals/regexp/u-invalid-range-negative-lookahead.js
@@ -51781,6 +51783,7 @@ staging/sm/RegExp/test-trailing.js
 staging/sm/RegExp/toString.js
 staging/sm/RegExp/unicode-back-reference.js
 staging/sm/RegExp/unicode-character-class-escape.js
+staging/sm/RegExp/unicode-class-braced.js
 staging/sm/RegExp/unicode-class-ignoreCase.js
 staging/sm/RegExp/unicode-class-range.js
 staging/sm/RegExp/unicode-disallow-extended.js
