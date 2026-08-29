@@ -8,10 +8,10 @@ pub fn closure_capture_keeps_object_alive_test() {
   let #(captured, st) = rt_obj.t_new_object_literal(st)
   let assert KHandle(captured_h) = classify(captured)
   let #(f, st) = rt_helpers.func(st, fn(st, _) { #(captured, st) })
-  let st = rt_obj.t_global_set(st, <<"keep">>, f)
+  let st = rt_obj.t_global_set(st, "keep", f)
   let st = rt_gc.t_collect(st, [])
   assert rt_gc.t_is_live(st, captured_h)
-  let st = rt_obj.t_global_set(st, <<"keep">>, mk_undefined())
+  let st = rt_obj.t_global_set(st, "keep", mk_undefined())
   let st = rt_gc.t_collect(st, [])
   assert !rt_gc.t_is_live(st, captured_h)
 }

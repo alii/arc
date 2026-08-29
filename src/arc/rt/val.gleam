@@ -1,6 +1,7 @@
 //// §7.1 type conversion and §7.2 comparison
 
-import arc/bytecode/key.{array_index_of_float}
+import arc/bytecode/key.{type Key, array_index_of_float}
+import arc/rt/name_keys as nk
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ErrorKind, type Handle, type JsNum, type JsOps, type JsVal,
@@ -250,7 +251,7 @@ fn is_miss(v: JsVal) -> Bool
 fn get_named_data(
   st: Agent,
   recv: JsVal,
-  key: String,
+  key: Key,
   site: Option(Nil),
 ) -> #(JsVal, Agent)
 
@@ -260,24 +261,24 @@ pub fn t_ordinary_to_primitive(
   h: Handle,
   hint: ToPrimHint,
 ) -> #(JsVal, Agent) {
-  let method_names = case hint {
-    HintString -> ["toString", "valueOf"]
-    HintNumber | HintDefault -> ["valueOf", "toString"]
+  let method_keys = case hint {
+    HintString -> [nk.to_string, nk.value_of]
+    HintNumber | HintDefault -> [nk.value_of, nk.to_string]
   }
-  try_primitive_methods(st, h, method_names)
+  try_primitive_methods(st, h, method_keys)
 }
 
 fn try_primitive_methods(
   st: Agent,
   h: Handle,
-  method_names: List(String),
+  method_keys: List(Key),
 ) -> #(JsVal, Agent) {
   let receiver = mk_object(h)
-  case method_names {
+  case method_keys {
     [] -> t_throw_type_error(st, "Cannot convert object to primitive value")
-    [name, ..rest] -> {
+    [k, ..rest] -> {
       let ops = require_ops(st)
-      let #(method, st) = get_named_data(st, receiver, name, None)
+      let #(method, st) = get_named_data(st, receiver, k, None)
       let #(callable, st) = t_is_callable(st, method)
       case callable {
         True -> {

@@ -6,7 +6,7 @@
     mk_string/1, mk_bigint/1, mk_symbol/1, mk_object/1, mk_tdz/0,
     to_boolean_i32/1, to_boolean/1,
     strict_eq/2, same_value_zero/2,
-    t_to_property_key_fast/1,
+    t_to_property_key_fast/2, keys_of/2,
     key_fast/2, key_find/2, key_of/2, key_text/2, index_of_text/1,
     js_number_to_string/1,
     t_to_string/2, t_to_number/2, t_to_integer_or_infinity/2, t_to_length/2,
@@ -81,18 +81,23 @@ same_value_zero(A, B) -> strict_eq(A, B).
 
 -define(MAX_ARRAY_INDEX, 4294967294).
 
-%% aot bridge: the old wire key, see arc_rt_obj_ffi:as_object_key
-t_to_property_key_fast(N)
-  when is_integer(N), N >= 0, N =< ?MAX_ARRAY_INDEX ->
-    {string_key, ?INDEX_KEY(N)};
-t_to_property_key_fast(B) when is_binary(B) ->
-    case index_of_text(B) of
-        none -> {string_key, {named, B}};
-        I -> {string_key, ?INDEX_KEY(I)}
-    end;
-t_to_property_key_fast({js_sym, S}) ->
-    {symbol_key, S};
-t_to_property_key_fast(_) -> miss.
+%% non allocating object key for aot computed access, miss when unknown
+t_to_property_key_fast(_, {js_sym, S}) -> {symbol_key, S};
+t_to_property_key_fast(St, V) ->
+    case key_fast(element(?AGENT_STORE, St), V) of
+        miss -> miss;
+        K -> {string_key, K}
+    end.
+
+%% the per heap keys for an aot unit's name texts
+keys_of(St, Names) ->
+    {Keys, Store} = keys_of(tuple_to_list(Names), element(?AGENT_STORE, St), []),
+    {list_to_tuple(Keys), setelement(?AGENT_STORE, St, Store)}.
+
+keys_of([B | Bs], Store, Acc) ->
+    {K, Store1} = key_of(Store, B),
+    keys_of(Bs, Store1, [K | Acc]);
+keys_of([], Store, Acc) -> {lists:reverse(Acc), Store}.
 
 %% int key for a js value without allocating, else miss
 key_fast(_, N) when is_integer(N), N >= 0, N =< ?MAX_ARRAY_INDEX ->

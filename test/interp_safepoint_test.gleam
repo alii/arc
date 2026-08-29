@@ -285,7 +285,7 @@ pub fn closure_environment_and_constants_are_traced_test() {
         extensible: True,
       ),
     )
-  let st = rt_obj.t_global_set(st, <<"f">>, mk_object(fn_h))
+  let st = rt_obj.t_global_set(st, "f", mk_object(fn_h))
   let st = rt_gc.t_collect(st, [])
   assert rt_gc.t_is_live(st, captured_h)
   assert rt_gc.t_is_live(st, pooled_h)

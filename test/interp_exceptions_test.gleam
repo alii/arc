@@ -302,7 +302,7 @@ pub fn host_native_throw_and_reentry_test() {
       }
       rt_val.t_throw_type_error(st, "host: " <> msg)
     })
-  let st = rt_obj.t_global_set(st, <<"thrower":utf8>>, thrower)
+  let st = rt_obj.t_global_set(st, "thrower", thrower)
   let #(reenter, st) =
     rt_helpers.func(st, fn(st, args) {
       case args {
@@ -310,7 +310,7 @@ pub fn host_native_throw_and_reentry_test() {
         _ -> #(types.mk_undefined(), st)
       }
     })
-  let st = rt_obj.t_global_set(st, <<"reenter":utf8>>, reenter)
+  let st = rt_obj.t_global_set(st, "reenter", reenter)
   let #(settle, st) =
     rt_helpers.func(st, fn(st, args) {
       case args {
@@ -328,7 +328,7 @@ pub fn host_native_throw_and_reentry_test() {
         _ -> #(types.mk_undefined(), st)
       }
     })
-  let st = rt_obj.t_global_set(st, <<"settle":utf8>>, settle)
+  let st = rt_obj.t_global_set(st, "settle", settle)
 
   assert eval_string_on(st, "try { thrower('a') } catch (e) { e.message }")
     == "host: a"

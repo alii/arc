@@ -298,21 +298,6 @@ pub fn t_object_rest(
   #(mk_object(h), copy_data_properties(st, h, source, excluded))
 }
 
-// aot passes wire keys
-pub fn t_object_rest_any(
-  st: Agent,
-  source: JsVal,
-  excluded: List(k),
-) -> #(JsVal, Agent) {
-  let #(excluded, st) =
-    list.fold(excluded, #([], st), fn(acc, k) {
-      let #(done, st) = acc
-      let #(k, st) = rt_obj.as_object_key(st, k)
-      #([k, ..done], st)
-    })
-  t_object_rest(st, source, excluded)
-}
-
 fn copy_data_properties(
   st: Agent,
   target: Handle,
@@ -389,7 +374,6 @@ pub fn t_get_template_object(
 }
 
 // §13.5.1.2 step 5 sloppy delete on the global
-pub fn t_global_delete(st: Agent, name: String) -> #(Bool, Agent) {
-  let #(k, st) = rt_store.t_key(st, name)
+pub fn t_global_delete(st: Agent, k: Key) -> #(Bool, Agent) {
   rt_obj.t_delete_prop(st, st.realm.global_object, StringKey(k))
 }

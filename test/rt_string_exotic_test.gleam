@@ -21,7 +21,7 @@ fn int(i: Int) -> JsVal {
 }
 
 fn wrapper(st: Agent, s: String) -> #(JsVal, Agent) {
-  let #(ctor, st) = rt_obj.t_global_get(st, <<"String">>)
+  let #(ctor, st) = rt_obj.t_global_get(st, "String")
   let #(h, st) = rt_call.t_construct(st, ctor, [mk_string(s)], ctor)
   #(mk_object(h), st)
 }
@@ -183,7 +183,7 @@ pub fn own_property_keys_order_test() {
   let #(names, st) = rt_obj.t_for_in_keys(st, s)
   assert list.map(names, classify)
     == list.map(["0", "1", "2", "7", "foo", "bar"], KStr)
-  let #(object, st) = rt_obj.t_global_get(st, <<"Object">>)
+  let #(object, st) = rt_obj.t_global_get(st, "Object")
   let #(k_, st) = rt_helpers.key(st, "keys")
   let #(ks, st) = rt_call.t_call_method(st, object, k_, [s])
   let #(k_, st) = rt_helpers.key(st, "join")
@@ -199,7 +199,7 @@ pub fn own_property_keys_order_test() {
 pub fn frozen_string_wrapper_test() {
   let st = agent()
   let #(s, st) = wrapper(st, "ab")
-  let #(object, st) = rt_obj.t_global_get(st, <<"Object">>)
+  let #(object, st) = rt_obj.t_global_get(st, "Object")
   let #(k_, st) = rt_helpers.key(st, "isFrozen")
   let #(frozen, st) = rt_call.t_call_method(st, object, k_, [s])
   assert classify(frozen) == types.KBool(False)

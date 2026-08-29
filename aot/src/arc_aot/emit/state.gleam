@@ -101,6 +101,7 @@ pub type FnSave {
     hoisted_kfn: Dict(Int, ir.Value),
     sm_abrupt: Option(SmAbrupt),
     raw_args_var: Option(String),
+    uses_keys: Bool,
   )
 }
 
@@ -256,6 +257,10 @@ pub type Emitter2 {
     next_fn: Int,
     fn_names: Set(String),
     next_site: Int,
+    // name text to its slot in the unit keys tuple
+    names: Dict(String, Int),
+    // this function or a closure it makes reads the keys tuple
+    uses_keys: Bool,
     module_name: String,
     frame_stack: List(Frame2),
     pending_label: Option(String),
@@ -320,6 +325,40 @@ pub fn lookup_slotted_global(e: Emitter2, name: String) -> Option(Int) {
 
 pub fn fresh_var(e: Emitter2) -> #(String, Emitter2) {
   #("_t" <> int_to_string(e.next_var), Emitter2(..e, next_var: e.next_var + 1))
+}
+
+pub const keys_var = "_keys"
+
+pub fn name_slot(e: Emitter2, text: String) -> #(Int, Emitter2) {
+  let e = Emitter2(..e, uses_keys: True)
+  case dict.get(e.names, text) {
+    Ok(i) -> #(i, e)
+    Error(Nil) -> {
+      let i = dict.size(e.names)
+      #(i, Emitter2(..e, names: dict.insert(e.names, text, i)))
+    }
+  }
+}
+
+pub fn keys_params(e: Emitter2) -> List(ir.Local) {
+  case e.uses_keys {
+    True -> [ir.Local(keys_var, ir.TTerm)]
+    False -> []
+  }
+}
+
+pub fn keys_args(used: Bool) -> List(ir.Value) {
+  case used {
+    True -> [ir.Var(keys_var)]
+    False -> []
+  }
+}
+
+// the unit's name texts in slot order
+pub fn name_texts(e: Emitter2) -> List(String) {
+  dict.to_list(e.names)
+  |> list.sort(fn(a, b) { int.compare(a.1, b.1) })
+  |> list.map(fn(p) { p.0 })
 }
 
 pub fn let_tail_value(rhs: ir.Expr) -> Option(ir.Value) {
@@ -877,6 +916,8 @@ pub fn new_emitter(
     next_fn: 0,
     fn_names: set.new(),
     next_site: site_base(module_name),
+    names: dict.new(),
+    uses_keys: False,
     module_name:,
     frame_stack: [],
     pending_label: None,
@@ -1065,6 +1106,7 @@ pub fn enter_function(
       hoisted_kfn: e.hoisted_kfn,
       sm_abrupt: e.sm_abrupt,
       raw_args_var: e.raw_args_var,
+      uses_keys: e.uses_keys,
     )
   let child =
     Emitter2(
@@ -1093,6 +1135,7 @@ pub fn enter_function(
       hoisted_kfn: dict.new(),
       sm_abrupt: None,
       raw_args_var: None,
+      uses_keys: False,
     )
   #(child, save)
 }
@@ -1124,6 +1167,8 @@ pub fn leave_function(e: Emitter2, save: FnSave) -> Emitter2 {
     hoisted_kfn: save.hoisted_kfn,
     sm_abrupt: save.sm_abrupt,
     raw_args_var: save.raw_args_var,
+    // a child that reads keys is handed them by this function
+      uses_keys: save.uses_keys || e.uses_keys,
   )
 }
 

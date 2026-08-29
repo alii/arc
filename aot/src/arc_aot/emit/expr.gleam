@@ -1279,7 +1279,7 @@ pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
 }
 
 fn global_read(e: Emitter2, g: String) -> Build(ir.Value) {
-  let key = ir.ConstBinary(bit_array.from_string(g))
+  use key <- anf.then(anf.key(g))
   case e.fn_scope == scope.root_scope_id {
     True -> anf.host("global_get", [key])
     False -> {
@@ -1433,17 +1433,17 @@ fn math_direct_op(
   }
 }
 
-fn static_dot_key(prop: ast.MemberProperty) -> Option(BitArray) {
+fn static_dot_key(prop: ast.MemberProperty) -> Option(String) {
   case prop {
     ast.Dot(name: "#" <> _, ..) -> None
-    ast.Dot(name:, ..) -> Some(bit_array.from_string(name))
+    ast.Dot(name:, ..) -> Some(name)
     ast.Bracket(..) -> None
   }
 }
 
-fn get_prop_fast(obj: ir.Value, kb: BitArray) -> Build(ir.Value) {
+fn get_prop_fast(obj: ir.Value, name: String) -> Build(ir.Value) {
   use site <- anf.then(next_site())
-  let key = ir.ConstBinary(kb)
+  use key <- anf.then(anf.key(name))
   let site = ir.ConstI32(site)
   use v <- anf.then(anf.host("get_prop_fast", [obj, key, site]))
   use ic_miss <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))))
@@ -1451,30 +1451,25 @@ fn get_prop_fast(obj: ir.Value, kb: BitArray) -> Build(ir.Value) {
 }
 
 // compare against miss atom, undefined/null are valid hits
-fn get_prop_this(obj: ir.Value, kb: BitArray) -> Build(ir.Value) {
+fn get_prop_this(obj: ir.Value, name: String) -> Build(ir.Value) {
   use site <- anf.then(next_site())
-  let key = ir.ConstBinary(kb)
+  use key <- anf.then(anf.key(name))
   let site = ir.ConstI32(site)
   use v <- anf.then(anf.host("get_prop_ic", [obj, key, site]))
   use ic_miss <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))))
   anf.bind_if(ic_miss, anf.host("get_prop_slow", [obj, key, site]), anf.pure(v))
 }
 
-fn set_prop_fast(obj: ir.Value, kb: BitArray, v: ir.Value) -> Build(ir.Value) {
+fn set_prop_fast(obj: ir.Value, name: String, v: ir.Value) -> Build(ir.Value) {
   use e <- anf.then(ask)
   let strict = case e.strict {
     True -> ir.ConstAtom("true")
     False -> ir.ConstAtom("false")
   }
   use site <- anf.then(next_site())
+  use key <- anf.then(anf.key(name))
   use _ <- anf.then(
-    anf.host("set_prop_site", [
-      obj,
-      ir.ConstBinary(kb),
-      v,
-      strict,
-      ir.ConstI32(site),
-    ]),
+    anf.host("set_prop_site", [obj, key, v, strict, ir.ConstI32(site)]),
   )
   anf.pure(v)
 }
@@ -1482,8 +1477,8 @@ fn set_prop_fast(obj: ir.Value, kb: BitArray, v: ir.Value) -> Build(ir.Value) {
 pub type PropWriteRun {
   PropWriteRun(
     object: ast.Expression,
-    first: #(BitArray, ast.Expression),
-    rest: List(#(BitArray, ast.Expression)),
+    first: #(String, ast.Expression),
+    rest: List(#(String, ast.Expression)),
   )
 }
 
@@ -1516,8 +1511,8 @@ fn prop_write_tail(
   e: Emitter2,
   object: ast.Expression,
   ss: List(ast.StmtWithLine),
-  acc: List(#(BitArray, ast.Expression)),
-) -> #(List(#(BitArray, ast.Expression)), List(ast.StmtWithLine)) {
+  acc: List(#(String, ast.Expression)),
+) -> #(List(#(String, ast.Expression)), List(ast.StmtWithLine)) {
   let done = fn() { #(list.reverse(acc), ss) }
   case ss {
     [ast.StmtWithLine(statement: s, ..), ..tail] ->
@@ -1535,7 +1530,7 @@ fn prop_write_tail(
 
 fn prop_write(
   s: ast.Statement,
-) -> Option(#(ast.Expression, BitArray, ast.Expression)) {
+) -> Option(#(ast.Expression, String, ast.Expression)) {
   case s {
     ast.ExpressionStatement(
       expression: ast.AssignmentExpression(
@@ -1613,12 +1608,10 @@ pub fn emit_prop_write_run(run: PropWriteRun) -> Build(ir.Value) {
   use obj <- anf.then(expr(object))
   use v0 <- anf.then(expr(v0))
   use vs <- anf.then(anf.seq(list.map(rest, fn(p) { expr(p.1) })))
-  use keys <- anf.then(
-    anf.cons_list([
-      ir.ConstBinary(k0),
-      ..list.map(rest, fn(p) { ir.ConstBinary(p.0) })
-    ]),
+  use ks <- anf.then(
+    anf.seq([anf.key(k0), ..list.map(rest, fn(p) { anf.key(p.0) })]),
   )
+  use keys <- anf.then(anf.cons_list(ks))
   use vals <- anf.then(anf.cons_list([v0, ..vs]))
   use e <- anf.then(ask)
   let strict = case e.strict {
@@ -1684,10 +1677,7 @@ pub fn emit_member_get(
       case prop {
         ast.Bracket(expression:) -> {
           use idx <- anf.then(expr(expression))
-          get_elem_fast(obj, idx, {
-            use k <- anf.then(to_property_key_of(obj, idx))
-            anf.host("get_prop", [obj, k])
-          })
+          get_elem_fast(obj, idx, anf.host("get_by_value", [obj, idx]))
         }
         _ -> {
           use k <- anf.then(emit_key_from_prop(prop))
@@ -1857,15 +1847,16 @@ fn emit_member_call(
 
 fn call_method_ic_pos(
   recv: ir.Value,
-  kb: BitArray,
+  name: String,
   pos: List(ir.Value),
 ) -> Build(ir.Value) {
   case pos {
     [] | [_] | [_, _] | [_, _, _] -> {
       use #(site, rsite) <- anf.then(method_sites())
+      use key <- anf.then(anf.key(name))
       anf.host("call_method_ic" <> int.to_string(list.length(pos)), [
         recv,
-        ir.ConstBinary(kb),
+        key,
         site,
         rsite,
         ..pos
@@ -1873,18 +1864,19 @@ fn call_method_ic_pos(
     }
     _ -> {
       use args_l <- anf.then(anf.cons_list(pos))
-      call_method_ic(recv, kb, args_l)
+      call_method_ic(recv, name, args_l)
     }
   }
 }
 
 fn call_method_ic(
   recv: ir.Value,
-  kb: BitArray,
+  name: String,
   args_l: ir.Value,
 ) -> Build(ir.Value) {
   use #(site, rsite) <- anf.then(method_sites())
-  anf.host("call_method_ic", [recv, ir.ConstBinary(kb), args_l, site, rsite])
+  use key <- anf.then(anf.key(name))
+  anf.host("call_method_ic", [recv, key, args_l, site, rsite])
 }
 
 fn method_sites() -> Build(#(ir.Value, ir.Value)) {
@@ -2028,7 +2020,7 @@ fn emit_typeof_ident(name: String) -> Build(ir.Value) {
       anf.host("type_of", [v])
     }
     scope.Plain(scope.Global(name: g)) ->
-      anf.host("global_typeof", [ir.ConstBinary(bit_array.from_string(g))])
+      anf.then(anf.key(g), fn(k) { anf.host("global_typeof", [k]) })
     scope.Plain(scope.EvalEnv(..)) ->
       throw_at_rt("throw_type_error", "unsupported: direct eval")
     scope.WithChain(..) -> throw_at_rt("throw_type_error", "unsupported: with")
@@ -2041,7 +2033,7 @@ fn emit_delete_ident(name: String) -> Build(ir.Value) {
   case state.resolve(e, name) {
     scope.Plain(scope.Local(..)) -> anf.pure(e.consts.false_)
     scope.Plain(scope.Global(name: g)) ->
-      anf.host("global_delete", [ir.ConstBinary(bit_array.from_string(g))])
+      anf.then(anf.key(g), fn(k) { anf.host("global_delete", [k]) })
     scope.Plain(scope.EvalEnv(..)) ->
       throw_at_rt("throw_type_error", "unsupported: direct eval")
     scope.WithChain(..) -> throw_at_rt("throw_type_error", "unsupported: with")
@@ -2404,12 +2396,8 @@ pub fn emit_direct_put(
       case dict.get(e.slotted_globals, name) {
         Ok(slot) -> write_slot(slot, True, v)
         Error(Nil) -> {
-          use _ <- anf.then(
-            anf.host(global_set_op(e.strict), [
-              ir.ConstBinary(bit_array.from_string(name)),
-              v,
-            ]),
-          )
+          use k <- anf.then(anf.key(name))
+          use _ <- anf.then(anf.host(global_set_op(e.strict), [k, v]))
           anf.pure(v)
         }
       }
@@ -2442,7 +2430,7 @@ pub type LValue {
     obj: ir.Value,
     key: ir.Value,
     is_private: Bool,
-    own_key: Option(BitArray),
+    own_key: Option(String),
     elem_idx: Option(ir.Value),
   )
   LvSuper(home: ir.Value, this: ir.Value, key: ir.Value)
@@ -2734,11 +2722,8 @@ fn emit_object(
           list.map(lead, fn(m) { emit(m.1, ast.property_key_static_name(m.0)) }),
         ),
       )
-      use keys <- anf.then(
-        anf.cons_list(
-          list.map(lead, fn(m) { ir.ConstBinary(bit_array.from_string(m.2)) }),
-        ),
-      )
+      use ks <- anf.then(anf.seq(list.map(lead, fn(m) { anf.key(m.2) })))
+      use keys <- anf.then(anf.cons_list(ks))
       use vals <- anf.then(anf.cons_list(vs))
       anf.host("new_object_props", [keys, vals])
     }

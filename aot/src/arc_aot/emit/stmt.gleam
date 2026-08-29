@@ -652,13 +652,11 @@ fn store_declared(
       case dict.get(e.slotted_globals, name) {
         Ok(slot) ->
           host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
-        Error(Nil) ->
-          host_unit_(
-            e,
-            "global_set",
-            [ir.ConstBinary(bit_array.from_string(name)), v],
-            k,
-          )
+        Error(Nil) -> {
+          let #(tree, e) = anf.run(anf.key(name), e)
+          use e, key <- let_(e, tree)
+          host_unit_(e, "global_set", [key, v], k)
+        }
       }
     scope.Plain(scope.EvalEnv(_)) ->
       Error(state.UnsupportedFeature("direct eval"))
@@ -1485,13 +1483,11 @@ fn for_lhs_ident_assign(
       case dict.get(e.slotted_globals, name) {
         Ok(slot) ->
           host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
-        Error(Nil) ->
-          host_unit_(
-            e,
-            expr.global_set_op(e.strict),
-            [ir.ConstBinary(bit_array.from_string(name)), v],
-            k,
-          )
+        Error(Nil) -> {
+          let #(tree, e) = anf.run(anf.key(name), e)
+          use e, key <- let_(e, tree)
+          host_unit_(e, expr.global_set_op(e.strict), [key, v], k)
+        }
       }
     scope.Plain(scope.EvalEnv(_)) ->
       Error(state.UnsupportedFeature("direct eval"))
@@ -1575,17 +1571,8 @@ fn for_lhs_member_put(
           ))
       }
     ast.Dot(name:, ..) -> {
-      use e, inner <- let_(
-        e,
-        ir.TermOp(ir.MakeTuple, [
-          ir.ConstAtom("named"),
-          ir.ConstBinary(bit_array.from_string(name)),
-        ]),
-      )
-      use e, key <- let_(
-        e,
-        ir.TermOp(ir.MakeTuple, [ir.ConstAtom("string_key"), inner]),
-      )
+      let #(tree, e) = anf.run(anf.then(anf.key(name), anf.string_key), e)
+      use e, key <- let_(e, tree)
       host_unit_(e, expr.set_prop_op_name(e.strict), [base, key, v], k)
     }
     ast.Bracket(expression:) -> {

@@ -26,7 +26,7 @@ pub fn agent() -> Agent {
 }
 
 pub fn global(st: Agent, name: String) -> #(JsVal, Agent) {
-  rt_obj.t_global_get(st, <<name:utf8>>)
+  rt_obj.t_global_get(st, name)
 }
 
 // allocates the name so the key is valid in the returned agent

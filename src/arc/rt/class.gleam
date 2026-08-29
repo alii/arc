@@ -497,41 +497,6 @@ pub fn t_private_in(st: Agent, obj: JsVal, priv_key: JsVal) -> Bool {
 }
 
 // super.key read on home.[[prototype]] with receiver as this
-// aot passes wire keys
-pub fn t_define_method_any(
-  st: Agent,
-  target: Handle,
-  key: k,
-  fn_h: Handle,
-  kind: MethodInstallKind,
-  enumerable: Bool,
-) -> Agent {
-  let #(key, st) = rt_obj.as_object_key(st, key)
-  t_define_method(st, target, key, fn_h, kind, enumerable)
-}
-
-pub fn t_super_get_any(
-  st: Agent,
-  home: Handle,
-  receiver: JsVal,
-  key: k,
-) -> #(JsVal, Agent) {
-  let #(key, st) = rt_obj.as_object_key(st, key)
-  t_super_get(st, home, receiver, key)
-}
-
-pub fn t_super_set_any(
-  st: Agent,
-  home: Handle,
-  receiver: JsVal,
-  key: k,
-  v: JsVal,
-  strict strict: Bool,
-) -> #(JsVal, Agent) {
-  let #(key, st) = rt_obj.as_object_key(st, key)
-  t_super_set(st, home, receiver, key, v, strict)
-}
-
 pub fn t_super_get(
   st: Agent,
   home: Handle,

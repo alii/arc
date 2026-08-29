@@ -3,6 +3,7 @@ import arc/compiler/ast_util
 import arc/compiler/scope
 import arc/parser
 import arc/parser/ast
+import arc_aot/emit/anf
 import arc_aot/emit/async
 import arc_aot/emit/class
 import arc_aot/emit/destructure
@@ -128,9 +129,15 @@ fn global_var_prologue(
     let #(wrap, e) = acc
     let #(name, op) = entry
     let #(t, e) = state.fresh_var(e)
-    let kb = ir.ConstBinary(bit_array.from_string(name))
+    let #(kw, key, e) = anf.run_open(anf.key(name), e)
     let w = fn(tail) {
-      wrap(ir.Let([t], ir.CallHost("js", op, [kb, ir.ConstAtom("false")]), tail))
+      wrap(
+        kw(ir.Let(
+          [t],
+          ir.CallHost("js", op, [key, ir.ConstAtom("false")]),
+          tail,
+        )),
+      )
     }
     #(w, e)
   })
@@ -228,16 +235,16 @@ pub fn emit_hoists(
         }
         _ -> {
           let #(t, e) = state.fresh_var(e)
-          let kb = ir.ConstBinary(bit_array.from_string(name))
+          let #(kw, key, e) = anf.run_open(anf.key(name), e)
           let w = fn(tail) {
             wrap(ir.Let(
               [fn_var],
               ctree,
-              ir.Let(
+              kw(ir.Let(
                 [t],
-                ir.CallHost("js", "global_set", [kb, ir.Var(fn_var)]),
+                ir.CallHost("js", "global_set", [key, ir.Var(fn_var)]),
                 tail,
-              ),
+              )),
             ))
           }
           #(w, e)
@@ -297,8 +304,12 @@ fn cut_or_continue(
   n: Int,
 ) -> Result(#(ir.Expr, state.Emitter2), EmitError) {
   let done = hoists == [] && stmts == []
-  let live =
-    dict.values(e.slot_vars) |> list.unique |> list.sort(string.compare)
+  let live = [
+    state.keys_var,
+    ..dict.values(e.slot_vars)
+    |> list.unique
+    |> list.sort(string.compare)
+  ]
   let ready =
     e.next_var - start >= chunk_budget && !done && list.length(live) <= max_live
   case ready {
@@ -377,13 +388,28 @@ pub fn compile(
     [feature, ..] -> Error(state.UnsupportedFeature(feature))
     [] -> Ok(Nil)
   })
+  let names =
+    ir.TermOp(
+      ir.MakeTuple,
+      list.map(state.name_texts(ef), fn(text) {
+        ir.ConstBinary(bit_array.from_string(text))
+      }),
+    )
   let js_main =
     ir.Function(
       name: "js_main",
       params: [ir.Local("_frame", ir.TTerm), ir.Local("_args", ir.TTerm)],
       result: [ir.TTerm],
       locals: [],
-      body: prologue(top_tree),
+      body: ir.Let(
+        ["_names"],
+        names,
+        ir.Let(
+          [state.keys_var],
+          ir.CallHost("js", "keys_of", [ir.Var("_names")]),
+          prologue(top_tree),
+        ),
+      ),
     )
   ir.Module(
     name: opts.module_name,

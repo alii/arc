@@ -224,7 +224,7 @@ pub fn minus_zero_survives_integer_arithmetic_test() {
 }
 
 fn global(st: Agent, name: String) -> JsVal {
-  rt_obj.t_global_get(st, <<name:utf8>>).0
+  rt_obj.t_global_get(st, name).0
 }
 
 fn get(st: Agent, obj: JsVal, name: String) -> JsVal {

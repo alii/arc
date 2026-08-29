@@ -657,8 +657,7 @@ fn build_class_init_closure(
       )
     }),
   )
-  let ncap =
-    list.length(child_info.captures) + dict.size(child_info.lexical_captures)
+  let ncap = func.capture_count(child_info)
   let e_child =
     state.add_function(
       e_child,
@@ -670,6 +669,8 @@ fn build_class_init_closure(
         body: body_expr,
       ),
     )
+  let capture_vals =
+    list.append(capture_vals, state.keys_args(e_child.uses_keys))
   let e = state.leave_function(e_child, save)
   use e, fun <- let_(e, ir.MakeClosure(fn_name, capture_vals, 2))
   use e, flags_t <- let_(e, ir.TermOp(ir.MakeTuple, init_fn_flags(e.consts)))

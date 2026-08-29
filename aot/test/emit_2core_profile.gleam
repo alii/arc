@@ -1,5 +1,6 @@
 // profiling harness, not a test
 
+import arc/rt/store as rt_store
 import arc/rt/types.{type Agent}
 import arc_aot/emit as emit_2core
 import arc_aot/run
@@ -400,11 +401,8 @@ fn microbench() {
   let #(_v2, st_obj) = ffi_apply_js_main(mod2, seed2)
   let js2 = st_obj.store
   let o_h = to_dynamic(#(atom.create("js_cell"), js2.next - 1))
-  let key =
-    to_dynamic(#(
-      atom.create("string_key"),
-      #(atom.create("named"), <<"x":utf8>>),
-    ))
+  let kx = rt_store.t_key(st_obj, "x").0
+  let key = to_dynamic(#(atom.create("string_key"), kx))
   micro(
     "t_get_prop_any (o.x)",
     "get_prop",
@@ -419,7 +417,7 @@ fn microbench() {
     to_dynamic(#(o_h, key)),
     1_000_000,
   )
-  let kb = to_dynamic(<<"x":utf8>>)
+  let kb = to_dynamic(kx)
   micro(
     "t_get_prop_own_data (FFI)",
     "get_prop_own_data",

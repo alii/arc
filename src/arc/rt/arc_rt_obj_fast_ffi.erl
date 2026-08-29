@@ -9,14 +9,6 @@
 
 -compile({inline, [slot_offset/3]}).
 
-%% keys arrive as name text, see arc_rt_obj_ffi:wire_key
-wire_keys(St, Keys) -> wire_keys(St, Keys, []).
-
-wire_keys(St, [W | Ws], Acc) ->
-    {K, St1} = arc_rt_obj_ffi:wire_key(St, W),
-    wire_keys(St1, Ws, [K | Acc]);
-wire_keys(St, [], Acc) -> {lists:reverse(Acc), St}.
-
 -define(IC_READ, ic_read).
 
 -define(IC_GLOBAL, ic_global).
@@ -24,31 +16,30 @@ wire_keys(St, [], Acc) -> {lists:reverse(Acc), St}.
 
 %% site cache of a global object data property, valid while the epoch holds;
 %% keyed like the read and call ics so a site can never answer for another name
-t_global_get(St, KeyBin, Site) ->
+t_global_get(St, K, Site) ->
     Store = element(?AGENT_STORE, St),
     case element(?STORE_ICS, Store) of
-        #{Site := {?IC_GLOBAL, KeyBin, Epoch, V, _}}
+        #{Site := {?IC_GLOBAL, K, Epoch, V, _}}
           when Epoch =:= element(?STORE_GLOBAL_EPOCH, Store) ->
             V;
-        #{Site := ic_off} -> arc_rt_obj_ffi:t_global_get_fast(St, KeyBin);
+        #{Site := ic_off} -> arc_rt_obj_ffi:t_global_get_fast(St, K);
         _ -> miss
     end.
 
-t_global_get_miss(St, KeyBin, Site) when tuple_size(St) =:= ?AGENT_ARITY ->
-    {V, St1} = arc_rt_obj_ffi:t_global_get(St, KeyBin),
+t_global_get_miss(St, K, Site) when tuple_size(St) =:= ?AGENT_ARITY ->
+    {V, St1} = arc_rt_obj_ffi:t_global_get(St, K),
     case element(?AGENT_STORE, St1) of
         Store when tuple_size(Store) =:= ?STORE_ARITY ->
             Ics = element(?STORE_ICS, Store),
             N = case Ics of
-                #{Site := {?IC_GLOBAL, KeyBin, _, _, N0}} -> N0 + 1;
+                #{Site := {?IC_GLOBAL, K, _, _, N0}} -> N0 + 1;
                 #{Site := _} -> ?IC_GLOBAL_REFILLS + 1;
                 _ -> 0
             end,
             {?HANDLE_TAG, GId} = element(?REALM_GLOBAL, element(?AGENT_REALM, St1)),
             Slot = arc_rt_arena_ffi:get(GId, element(?STORE_DATA, Store)),
-            K = arc_rt_obj_ffi:wire_find(Store, KeyBin),
             Entry = case N < ?IC_GLOBAL_REFILLS andalso global_plain(Slot, K, V) of
-                true -> {?IC_GLOBAL, KeyBin, element(?STORE_GLOBAL_EPOCH, Store), V, N};
+                true -> {?IC_GLOBAL, K, element(?STORE_GLOBAL_EPOCH, Store), V, N};
                 false -> ic_off
             end,
             case N > ?IC_GLOBAL_REFILLS of
@@ -70,12 +61,10 @@ global_plain(Slot, K, V)
 global_plain(_, _, _) -> false.
 
 %% bare value or miss, miss takes arc_rt_obj_ffi:t_get_prop_slow which fills
-t_get_prop(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
+t_get_prop(St, {?HANDLE_TAG, Id}, K, Site) ->
     Store = element(?AGENT_STORE, St),
     Slot = arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)),
-    K = arc_rt_obj_ffi:wire_find(Store, KeyBin),
     case element(1, Slot) of
-        _ when K =:= miss -> miss;
         ?SSHAPED_TAG ->
             case element(?STORE_ICS, Store) of
                 #{Site := {?IC_READ, K, Offs}} ->
@@ -103,20 +92,12 @@ t_get_prop(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
             end;
         _ -> miss
     end;
-t_get_prop(_, Bin, <<"length">>, _) when is_binary(Bin) ->
-    arc_string_ffi:string_codepoint_length(Bin);
 t_get_prop(_, Bin, ?K_length, _) when is_binary(Bin) ->
     arc_string_ffi:string_codepoint_length(Bin);
 t_get_prop(_, _, _, _) -> miss.
 
 %% own slot overwrite only, guards keep setelement inline
-t_set_prop(St, Obj, K, V, Strict) when is_integer(K) ->
-    set_prop(St, Obj, K, V, Strict);
-t_set_prop(St, Obj, W, V, Strict) ->
-    {K, St1} = arc_rt_obj_ffi:wire_key(St, W),
-    set_prop(St1, Obj, K, V, Strict).
-
-set_prop(St, Obj = {?HANDLE_TAG, Id}, KeyBin, V, Strict)
+t_set_prop(St, Obj = {?HANDLE_TAG, Id}, K, V, Strict)
   when tuple_size(St) =:= ?AGENT_ARITY ->
     case element(?AGENT_STORE, St) of
         Store when tuple_size(Store) =:= ?STORE_ARITY ->
@@ -124,9 +105,9 @@ set_prop(St, Obj = {?HANDLE_TAG, Id}, KeyBin, V, Strict)
             case arc_rt_arena_ffi:get(Id, Data) of
                 Slot when element(1, Slot) =:= ?SSHAPED_TAG,
                           tuple_size(Slot) =:= ?SSHAPED_ARITY ->
-                    case slot_offset(Store, Slot, KeyBin) of
+                    case slot_offset(Store, Slot, K) of
                         miss ->
-                            arc_rt_obj_ffi:t_set_prop_named(St, Obj, KeyBin, V,
+                            arc_rt_obj_ffi:t_set_prop_named(St, Obj, K, V,
                                                             Strict);
                         Off ->
                             Slots = setelement(Off + 1,
@@ -140,7 +121,6 @@ set_prop(St, Obj = {?HANDLE_TAG, Id}, KeyBin, V, Strict)
                           tuple_size(Slot) =:= ?SOBJECT_ARITY,
                           element(?SOBJECT_KIND, Slot) =:= ?ORDINARY ->
                     Props = element(?SOBJECT_PROPS, Slot),
-                    K = KeyBin,
                     case Props of
                         #{K := Prop}
                           when element(1, Prop) =:= ?DATAPROP_TAG,
@@ -152,23 +132,17 @@ set_prop(St, Obj = {?HANDLE_TAG, Id}, KeyBin, V, Strict)
                                        setelement(?STORE_DATA, Store,
                                                   arc_rt_arena_ffi:set(Id, NewSlot, Data)));
                         _ ->
-                            arc_rt_obj_ffi:t_set_prop_named(St, Obj, KeyBin, V,
+                            arc_rt_obj_ffi:t_set_prop_named(St, Obj, K, V,
                                                             Strict)
                     end;
-                _ -> arc_rt_obj_ffi:t_set_prop_named(St, Obj, KeyBin, V, Strict)
+                _ -> arc_rt_obj_ffi:t_set_prop_named(St, Obj, K, V, Strict)
             end
     end;
-set_prop(St, Obj, KeyBin, V, Strict) ->
-    arc_rt_obj_ffi:t_set_prop_named(St, Obj, KeyBin, V, Strict).
+t_set_prop(St, Obj, K, V, Strict) ->
+    arc_rt_obj_ffi:t_set_prop_named(St, Obj, K, V, Strict).
 
 %% own overwrite first, then the site's cached transition for a new key
-t_set_prop(St, Obj, K, V, Strict, Site) when is_integer(K) ->
-    set_prop(St, Obj, K, V, Strict, Site);
-t_set_prop(St, Obj, W, V, Strict, Site) ->
-    {K, St1} = arc_rt_obj_ffi:wire_key(St, W),
-    set_prop(St1, Obj, K, V, Strict, Site).
-
-set_prop(St, Obj = {?HANDLE_TAG, Id}, KeyBin, V, Strict, Site)
+t_set_prop(St, Obj = {?HANDLE_TAG, Id}, K, V, Strict, Site)
   when tuple_size(St) =:= ?AGENT_ARITY ->
     case element(?AGENT_STORE, St) of
         Store when tuple_size(Store) =:= ?STORE_ARITY ->
@@ -176,10 +150,10 @@ set_prop(St, Obj = {?HANDLE_TAG, Id}, KeyBin, V, Strict, Site)
             case arc_rt_arena_ffi:get(Id, Data) of
                 Slot when element(1, Slot) =:= ?SSHAPED_TAG,
                           tuple_size(Slot) =:= ?SSHAPED_ARITY ->
-                    case slot_offset(Store, Slot, KeyBin) of
+                    case slot_offset(Store, Slot, K) of
                         miss ->
                             shaped_init(St, Store, Data, Id, Slot, Obj,
-                                        [KeyBin], [V], Strict, Site);
+                                        [K], [V], Strict, Site);
                         Off ->
                             Slots = setelement(Off + 1,
                                                element(?SSHAPED_SLOTS, Slot), V),
@@ -188,15 +162,15 @@ set_prop(St, Obj = {?HANDLE_TAG, Id}, KeyBin, V, Strict, Site)
                                        setelement(?STORE_DATA, Store,
                                                   arc_rt_arena_ffi:set(Id, NewSlot, Data)))
                     end;
-                _ -> set_prop(St, Obj, KeyBin, V, Strict)
+                _ -> t_set_prop(St, Obj, K, V, Strict)
             end
     end;
-set_prop(St, Obj, KeyBin, V, Strict, _) ->
-    arc_rt_obj_ffi:t_set_prop_named(St, Obj, KeyBin, V, Strict).
+t_set_prop(St, Obj, K, V, Strict, _) ->
+    arc_rt_obj_ffi:t_set_prop_named(St, Obj, K, V, Strict).
 
-slot_offset(_, Slot, KeyBin) ->
+slot_offset(_, Slot, K) ->
     case element(?SSHAPED_OFFSETS, Slot) of
-        #{KeyBin := Off} -> Off;
+        #{K := Off} -> Off;
         _ -> miss
     end.
 
@@ -204,11 +178,7 @@ slot_offset(_, Slot, KeyBin) ->
 -define(IC_INIT_HOPS, 8).
 
 %% caches a pure append run from one shape, proto chain checked by identity
-t_set_props_init(St, Obj, Keys, Vals, Strict, Site) ->
-    {Ks, St1} = wire_keys(St, Keys),
-    set_props_init(St1, Obj, Ks, Vals, Strict, Site).
-
-set_props_init(St, Obj = {?HANDLE_TAG, Id}, Keys, Vals, Strict, Site)
+t_set_props_init(St, Obj = {?HANDLE_TAG, Id}, Keys, Vals, Strict, Site)
   when tuple_size(St) =:= ?AGENT_ARITY ->
     case element(?AGENT_STORE, St) of
         Store when tuple_size(Store) =:= ?STORE_ARITY ->
@@ -218,11 +188,11 @@ set_props_init(St, Obj = {?HANDLE_TAG, Id}, Keys, Vals, Strict, Site)
                           tuple_size(Slot) =:= ?SSHAPED_ARITY ->
                     shaped_init(St, Store, Data, Id, Slot, Obj, Keys, Vals,
                                 Strict, Site);
-                _ -> set_props_named(St, Obj, Keys, Vals, Strict)
+                _ -> t_set_props_named(St, Obj, Keys, Vals, Strict)
             end
     end;
-set_props_init(St, Obj, Keys, Vals, Strict, _) ->
-    set_props_named(St, Obj, Keys, Vals, Strict).
+t_set_props_init(St, Obj, Keys, Vals, Strict, _) ->
+    t_set_props_named(St, Obj, Keys, Vals, Strict).
 
 shaped_init(St, Store, Data, Id, Slot, Obj, Keys, Vals, Strict, Site)
   when tuple_size(St) =:= ?AGENT_ARITY, tuple_size(Store) =:= ?STORE_ARITY ->
@@ -239,12 +209,12 @@ shaped_init(St, Store, Data, Id, Slot, Obj, Keys, Vals, Strict, Site)
                                setelement(?STORE_DATA, Store,
                                           arc_rt_arena_ffi:set(Id, NewSlot, Data)));
                 false ->
-                    init_fill(set_props_named(St, Obj, Keys, Vals, Strict),
+                    init_fill(t_set_props_named(St, Obj, Keys, Vals, Strict),
                               Id, Sid, Proto, Keys, Site)
             end;
-        #{Site := _} -> set_props_named(St, Obj, Keys, Vals, Strict);
+        #{Site := _} -> t_set_props_named(St, Obj, Keys, Vals, Strict);
         _ ->
-            init_fill(set_props_named(St, Obj, Keys, Vals, Strict), Id, Sid,
+            init_fill(t_set_props_named(St, Obj, Keys, Vals, Strict), Id, Sid,
                       Proto, Keys, Site)
     end.
 
@@ -314,11 +284,7 @@ chain_of(Data, {?SOME, {?HANDLE_TAG, PId}}, Fuel, Acc) ->
     end;
 chain_of(_, _, _, _) -> none.
 
-t_set_props_named(St, Obj, Keys, Vals, Strict) ->
-    {Ks, St1} = wire_keys(St, Keys),
-    set_props_named(St1, Obj, Ks, Vals, Strict).
-
-set_props_named(St, Obj = {?HANDLE_TAG, Id}, Keys, Vals, Strict) ->
+t_set_props_named(St, Obj = {?HANDLE_TAG, Id}, Keys, Vals, Strict) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     case arc_rt_arena_ffi:get(Id, Data) of
@@ -327,7 +293,7 @@ set_props_named(St, Obj = {?HANDLE_TAG, Id}, Keys, Vals, Strict) ->
                        Strict, element(?STORE_SHAPES, Store), false);
         _ -> each_named(St, Obj, Keys, Vals, Strict)
     end;
-set_props_named(St, Obj, Keys, Vals, Strict) ->
+t_set_props_named(St, Obj, Keys, Vals, Strict) ->
     each_named(St, Obj, Keys, Vals, Strict).
 
 shaped_run(St, Store, Data, Id, Obj, Sid, P, Slots, [K | Ks], [V | Vs],
@@ -382,8 +348,7 @@ each_named(St, Obj, [K | Ks], [V | Vs], Strict) ->
                Ks, Vs, Strict);
 each_named(St, _, _, _, _) -> St.
 
-t_new_object_props(St0, Keys0, Vals) ->
-    {Keys, St} = wire_keys(St0, Keys0),
+t_new_object_props(St, Keys, Vals) ->
     Store = element(?AGENT_STORE, St),
     new_object_props(St, Store, Keys, Vals).
 

@@ -13,7 +13,7 @@ fn agent() -> Agent {
 }
 
 fn json(st: Agent, method: String, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(ns, st) = rt_obj.t_global_get(st, <<"JSON">>)
+  let #(ns, st) = rt_obj.t_global_get(st, "JSON")
   let #(k_, st) = rt_helpers.key(st, method)
   rt_call.t_call_method(st, ns, k_, args)
 }
@@ -36,7 +36,7 @@ pub fn raw_json_is_a_brand_not_a_shape_test() {
     ..,
   )) = d
   assert classify(value) == KStr("12")
-  let #(object, st) = rt_obj.t_global_get(st, <<"Object">>)
+  let #(object, st) = rt_obj.t_global_get(st, "Object")
   let #(k_, st) = rt_helpers.key(st, "isFrozen")
   let #(frozen, st) = rt_call.t_call_method(st, object, k_, [raw])
   assert classify(frozen) == KBool(True)

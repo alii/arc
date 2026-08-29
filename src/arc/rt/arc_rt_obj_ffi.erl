@@ -10,8 +10,7 @@
          named_free/5, free_chain/4, named_plain/2,
          shape_slots_new/0, shape_slots_get/2, shape_slots_set/3,
          shape_slots_append/2,
-         shape_slots_fold/3,
-         as_object_key/2, wire_find/2, wire_key/2]).
+         shape_slots_fold/3]).
 
 -include("arc_rt_layout.hrl").
 -include("arc_rt_names.hrl").
@@ -25,42 +24,12 @@
 -define(IC_READ, ic_read).
 -define(IC_READ_WAYS, 8).
 
-%% keys arrive as ints from gleam, as name text or the old tuples from aot
-
-%% non allocating, miss when no object could hold the key
-wire_find(_, K) when is_integer(K) -> K;
-wire_find(Store, B) when is_binary(B) -> arc_rt_val_ffi:key_find(Store, B);
-wire_find(Store, {named, B}) -> arc_rt_val_ffi:key_find(Store, B);
-wire_find(_, {index, I}) -> ?INDEX_KEY(I);
-wire_find(Store, {?OKEY_STRING, K}) -> wire_find(Store, K);
-wire_find(_, {?OKEY_SYMBOL, _}) -> miss.
-
-%% allocating, {Key, St1}
-wire_key(St, K) when is_integer(K) -> {K, St};
-wire_key(St, B) when is_binary(B) ->
-    {K, Store} = arc_rt_val_ffi:key_of(element(?AGENT_STORE, St), B),
-    {K, in_agent(St, Store)};
-wire_key(St, {named, B}) -> wire_key(St, B);
-wire_key(St, {index, I}) -> {?INDEX_KEY(I), St};
-wire_key(St, {?OKEY_STRING, K}) -> wire_key(St, K).
-
-%% {ObjectKey, St1} from a key, an object key or an aot wire key
-as_object_key(St, {?OKEY_STRING, K}) when is_integer(K) -> {{?OKEY_STRING, K}, St};
-as_object_key(St, {?OKEY_SYMBOL, _} = K) -> {K, St};
-as_object_key(St, W) ->
-    {K, St1} = wire_key(St, W),
-    {{?OKEY_STRING, K}, St1}.
-
-t_get_prop_own_data(St, {?HANDLE_TAG, Id}, W) ->
-    case wire_find(element(?AGENT_STORE, St), W) of
-        miss -> miss;
-        K -> peek_get(St, Id, K)
-    end;
+t_get_prop_own_data(St, {?HANDLE_TAG, Id}, K) ->
+    peek_get(St, Id, K);
 t_get_prop_own_data(_, _, _) -> miss.
 
-t_get_prop_ic(St, {?HANDLE_TAG, Id}, W, Site) ->
+t_get_prop_ic(St, {?HANDLE_TAG, Id}, K, Site) ->
     Store = element(?AGENT_STORE, St),
-    K = wire_find(Store, W),
     case element(?STORE_ICS, Store) of
         #{Site := {?IC_READ, K, Offs}} ->
             case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
@@ -75,43 +44,27 @@ t_get_prop_ic(St, {?HANDLE_TAG, Id}, W, Site) ->
     end;
 t_get_prop_ic(_, _, _, _) -> miss.
 
-t_get_prop_ic_miss(St, {?HANDLE_TAG, Id}, W, Site) ->
+t_get_prop_ic_miss(St, {?HANDLE_TAG, Id}, K, Site) ->
     Store = element(?AGENT_STORE, St),
-    case wire_find(Store, W) of
-        miss -> {miss, St};
-        K ->
-            case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
-                {?SSHAPED_TAG, Sid, _, Slots, Offs} ->
-                    case Offs of
-                        #{K := Off} ->
-                            {element(Off + 1, Slots),
-                             ic_fill(St, Store, Site, Sid, Off, K)};
-                        _ -> {miss, St}
-                    end;
-                Slot -> {peek_slot(St, Slot, K), St}
-            end
+    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
+        {?SSHAPED_TAG, Sid, _, Slots, Offs} ->
+            case Offs of
+                #{K := Off} ->
+                    {element(Off + 1, Slots),
+                     ic_fill(St, Store, Site, Sid, Off, K)};
+                _ -> {miss, St}
+            end;
+        Slot -> {peek_slot(St, Slot, K), St}
     end;
 t_get_prop_ic_miss(St, _, _, _) -> {miss, St}.
 
-t_get_prop_slow(St, Recv, K, Site) when is_integer(K) ->
-    get_prop_slow(St, Recv, K, Site);
-t_get_prop_slow(St, Recv, W, Site) ->
-    {K, St1} = wire_key(St, W),
-    get_prop_slow(St1, Recv, K, Site).
-
-get_prop_slow(St, Recv = {?HANDLE_TAG, Id}, K, Site) ->
+t_get_prop_slow(St, Recv = {?HANDLE_TAG, Id}, K, Site) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     read_named(St, Store, Data, Recv, arc_rt_arena_ffi:get(Id, Data), K, Site);
-get_prop_slow(St, Recv, K, _) -> read_prim(St, Recv, K).
+t_get_prop_slow(St, Recv, K, _) -> read_prim(St, Recv, K).
 
-t_get_prop_site(St, Recv, K, Site) when is_integer(K) ->
-    get_prop_site(St, Recv, K, Site);
-t_get_prop_site(St, Recv, W, Site) ->
-    {K, St1} = wire_key(St, W),
-    get_prop_site(St1, Recv, K, Site).
-
-get_prop_site(St, Recv = {?HANDLE_TAG, Id}, K, Site) ->
+t_get_prop_site(St, Recv = {?HANDLE_TAG, Id}, K, Site) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     Slot = arc_rt_arena_ffi:get(Id, Data),
@@ -127,7 +80,7 @@ get_prop_site(St, Recv = {?HANDLE_TAG, Id}, K, Site) ->
             {element(?DATAPROP_VALUE, Prop), St};
         _ -> read_named(St, Store, Data, Recv, Slot, K, Site)
     end;
-get_prop_site(St, Recv, K, _) -> read_prim(St, Recv, K).
+t_get_prop_site(St, Recv, K, _) -> read_prim(St, Recv, K).
 
 read_named(St, Store, Data, Recv, {?SSHAPED_TAG, Sid, Proto, Slots, Offs},
            K, Site) ->
@@ -248,19 +201,14 @@ ic_fill(St, Store, Site, Sid, Off, K) ->
                                                 #{Sid => Off}}}))
     end.
 
-t_global_get_fast(St, W) ->
+t_global_get_fast(St, K) ->
     {?HANDLE_TAG, GId} = element(?REALM_GLOBAL, element(?AGENT_REALM, St)),
     Store = element(?AGENT_STORE, St),
-    case wire_find(Store, W) of
-        miss -> miss;
-        K -> peek_slot(St, arc_rt_arena_ffi:get(GId, element(?STORE_DATA, Store)), K)
-    end.
+    peek_slot(St, arc_rt_arena_ffi:get(GId, element(?STORE_DATA, Store)), K).
 
-t_global_get(St, W) ->
-    case t_global_get_fast(St, W) of
-        miss ->
-            {K, St1} = wire_key(St, W),
-            arc@rt@obj:t_global_get_key(St1, K);
+t_global_get(St, K) ->
+    case t_global_get_fast(St, K) of
+        miss -> arc@rt@obj:t_global_get_key(St, K);
         V -> {V, St}
     end.
 
@@ -285,13 +233,7 @@ peek_slot(_, Slot, K) when element(1, Slot) =:= ?SOBJECT_TAG ->
 peek_slot(_, _, _) -> miss.
 
 %% §10.1.9.1 ordinary set when it lands as plain data
-t_set_prop_own_data(St, Obj, K, V) when is_integer(K) ->
-    set_prop_own_data(St, Obj, K, V);
-t_set_prop_own_data(St, Obj, W, V) ->
-    {K, St1} = wire_key(St, W),
-    set_prop_own_data(St1, Obj, K, V).
-
-set_prop_own_data(St, {?HANDLE_TAG, Id}, K, V) when K >= 0 ->
+t_set_prop_own_data(St, {?HANDLE_TAG, Id}, K, V) when K >= 0 ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     case arc_rt_arena_ffi:get(Id, Data) of
@@ -333,7 +275,7 @@ set_prop_own_data(St, {?HANDLE_TAG, Id}, K, V) when K >= 0 ->
             end;
         _ -> miss
     end;
-set_prop_own_data(_, _, _, _) -> miss.
+t_set_prop_own_data(_, _, _, _) -> miss.
 
 set_prop_new(St, Store, Data, Id, Slot, K, V)
   when tuple_size(Store) =:= ?STORE_ARITY ->
@@ -378,23 +320,25 @@ in_props(Slot, Props) when tuple_size(Slot) =:= ?SOBJECT_ARITY ->
 in_value(Prop, V) when tuple_size(Prop) =:= ?DATAPROP_ARITY ->
     setelement(?DATAPROP_VALUE, Prop, V).
 
-t_set_prop_named(St, Obj, W, V, Strict) ->
-    {K, St0} = wire_key(St, W),
-    case set_prop_own_data(St0, Obj, K, V) of
+t_set_prop_named(St, Obj, K, V, Strict) ->
+    case t_set_prop_own_data(St, Obj, K, V) of
         miss ->
             Key = {?OKEY_STRING, K},
             {_, St1} = case Strict of
-                true -> 'arc@rt@obj':t_set_prop_strict(St0, Obj, Key, V);
-                false -> 'arc@rt@obj':t_set_prop(St0, Obj, Key, V)
+                true -> 'arc@rt@obj':t_set_prop_strict(St, Obj, Key, V);
+                false -> 'arc@rt@obj':t_set_prop(St, Obj, Key, V)
             end,
             St1;
         St1 -> St1
     end.
 
 %% §7.3.5 create data property, new plain key only
-t_create_data_prop(St0, Recv = {?HANDLE_TAG, Id}, W, V) ->
-    {Key, St} = as_object_key(St0, W),
-    {_, PK} = Key,
+t_create_data_prop(St, Recv = {?HANDLE_TAG, Id}, Key, V) ->
+    PK = case Key of
+        {?OKEY_STRING, PK0} -> PK0;
+        {?OKEY_SYMBOL, _} -> symbol;
+        _ -> Key
+    end,
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     Slot = arc_rt_arena_ffi:get(Id, Data),
@@ -423,8 +367,7 @@ t_create_data_prop(St0, Recv = {?HANDLE_TAG, Id}, W, V) ->
             Store1 = in_store(Store, arc_rt_arena_ffi:set(Id, NewSlot, Data)),
             {true, in_agent(St, touched(Store1, NewSlot))}
     end;
-t_create_data_prop(St0, Recv, W, V) ->
-    {Key, St} = as_object_key(St0, W),
+t_create_data_prop(St, Recv, Key, V) ->
     'arc@rt@obj':t_create_data_prop_slow(St, Recv, Key, V).
 
 plain_define(Slot, PK, V, Store) ->
@@ -608,7 +551,7 @@ t_set_elem_fast(St, Recv = {?HANDLE_TAG, Id}, Key, V) when is_binary(Key) ->
     case arc_rt_val_ffi:key_find(element(?AGENT_STORE, St), Key) of
         miss -> miss;
         K when K < 0 -> index_write(St, Id, -K - 1, V);
-        K -> set_prop_own_data(St, Recv, K, V)
+        K -> t_set_prop_own_data(St, Recv, K, V)
     end;
 t_set_elem_fast(_, _, _, _) -> miss.
 

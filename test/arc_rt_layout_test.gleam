@@ -498,10 +498,10 @@ fn get_elem_fast(st: Agent, recv: JsVal, idx: Int) -> Dynamic
 fn set_elem_fast(st: Agent, recv: JsVal, idx: Int, v: JsVal) -> Dynamic
 
 @external(erlang, "arc_rt_obj_ffi", "t_get_prop_own_data")
-fn get_prop_own_data(st: Agent, recv: JsVal, key: BitArray) -> Dynamic
+fn get_prop_own_data(st: Agent, recv: JsVal, key: Key) -> Dynamic
 
 @external(erlang, "arc_rt_obj_ffi", "t_set_prop_own_data")
-fn set_prop_own_data(st: Agent, recv: JsVal, key: BitArray, v: JsVal) -> Dynamic
+fn set_prop_own_data(st: Agent, recv: JsVal, key: Key, v: JsVal) -> Dynamic
 
 @external(erlang, "arc_rt_obj_ffi", "t_instanceof_fast")
 fn instanceof_fast(st: Agent, v: JsVal, ctor: JsVal) -> Dynamic
@@ -510,7 +510,7 @@ fn instanceof_fast(st: Agent, v: JsVal, ctor: JsVal) -> Dynamic
 fn call_method_mono(
   st: Agent,
   recv: JsVal,
-  key: BitArray,
+  key: Key,
   args: List(JsVal),
 ) -> #(Dynamic, Agent)
 
@@ -523,7 +523,7 @@ type Probe {
 
 pub fn typed_array_fast_paths_miss_test() {
   let st = seeded()
-  let #(ctor, st) = rt_obj.t_global_get(st, <<"Uint8Array">>)
+  let #(ctor, st) = rt_obj.t_global_get(st, "Uint8Array")
   let n = rt_types.mk_number(rt_types.JInt(4))
   let #(h, st) = rt_call.t_construct(st, ctor, [n], ctor)
   let ta = rt_types.mk_object(h)
@@ -533,9 +533,9 @@ pub fn typed_array_fast_paths_miss_test() {
   assert get_elem_fast(st, ta, 0) == dyn(Miss)
   assert set_elem_fast(st, ta, 0, n) == dyn(Miss)
   assert set_elem_fast(st, ta, 4, n) == dyn(Miss)
-  assert get_prop_own_data(st, ta, <<"length">>) == dyn(Miss)
-  assert get_prop_own_data(st, ta, <<"extra">>) == dyn(Miss)
-  assert set_prop_own_data(st, ta, <<"extra">>, n) == dyn(Miss)
+  assert get_prop_own_data(st, ta, nk.length) == dyn(Miss)
+  assert get_prop_own_data(st, ta, extra) == dyn(Miss)
+  assert set_prop_own_data(st, ta, extra, n) == dyn(Miss)
 }
 
 pub fn proxy_fast_paths_miss_test() {
@@ -543,15 +543,15 @@ pub fn proxy_fast_paths_miss_test() {
   let n = rt_types.mk_number(rt_types.JInt(4))
   let #(arr, st) = rt_obj.t_new_array(st, [n, n])
   let #(handler, st) = rt_obj.t_new_object_literal(st)
-  let #(proxy_ctor, st) = rt_obj.t_global_get(st, <<"Proxy">>)
+  let #(proxy_ctor, st) = rt_obj.t_global_get(st, "Proxy")
   let #(ph, st) =
     rt_call.t_construct(st, proxy_ctor, [arr, handler], proxy_ctor)
   let p = rt_types.mk_object(ph)
   assert get_elem_fast(st, p, 0) == dyn(Miss)
   assert set_elem_fast(st, p, 0, n) == dyn(Miss)
-  assert get_prop_own_data(st, p, <<"length">>) == dyn(Miss)
-  assert set_prop_own_data(st, p, <<"length">>, n) == dyn(Miss)
-  assert call_method_mono(st, p, <<"push">>, [n]).0 == dyn(Miss)
+  assert get_prop_own_data(st, p, nk.length) == dyn(Miss)
+  assert set_prop_own_data(st, p, nk.length, n) == dyn(Miss)
+  assert call_method_mono(st, p, nk.push, [n]).0 == dyn(Miss)
   // instanceof over a proxy must reach the getprototypeof trap
   let ctor_flags = FnFlags(..no_flags(), is_constructor: True)
   let #(f, st) =
@@ -567,7 +567,7 @@ pub fn proxy_fast_paths_miss_test() {
 pub fn string_object_fast_paths_miss_test() {
   let st = seeded()
   let n = rt_types.mk_number(rt_types.JInt(1))
-  let #(string_ctor, st) = rt_obj.t_global_get(st, <<"String">>)
+  let #(string_ctor, st) = rt_obj.t_global_get(st, "String")
   let #(sh, st) =
     rt_call.t_construct(
       st,
@@ -582,10 +582,10 @@ pub fn string_object_fast_paths_miss_test() {
   assert get_elem_fast(st, s, 0) == dyn(Miss)
   assert set_elem_fast(st, s, 0, n) == dyn(Miss)
   assert set_elem_fast(st, s, 3, n) == dyn(Miss)
-  assert get_prop_own_data(st, s, <<"length">>) == dyn(Miss)
-  assert set_prop_own_data(st, s, <<"length">>, n) == dyn(Miss)
-  assert get_prop_own_data(st, s, <<"extra">>) == dyn(rt_types.mk_string("x"))
-  assert set_prop_own_data(st, s, <<"extra">>, n) != dyn(Miss)
+  assert get_prop_own_data(st, s, nk.length) == dyn(Miss)
+  assert set_prop_own_data(st, s, nk.length, n) == dyn(Miss)
+  assert get_prop_own_data(st, s, extra) == dyn(rt_types.mk_string("x"))
+  assert set_prop_own_data(st, s, extra, n) != dyn(Miss)
 }
 
 pub fn bytecode_function_fast_paths_miss_test() {
@@ -625,7 +625,7 @@ pub fn bytecode_function_fast_paths_miss_test() {
   let #(o, st) = rt_obj.t_new_object_literal(st)
   let #(m, st) = rt_store.t_key(st, "m")
   let #(_, st) = rt_obj.t_set_prop(st, o, StringKey(m), f)
-  assert call_method_mono(st, o, <<"m">>, []).0 == dyn(Miss)
+  assert call_method_mono(st, o, m, []).0 == dyn(Miss)
   assert new_simple(st, f, []).0 == dyn(Miss)
   assert instanceof_fast(st, o, f) == dyn(Miss)
 }

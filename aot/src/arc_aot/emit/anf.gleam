@@ -1,9 +1,9 @@
 import arc/bytecode/key
 import arc/parser/ast
+import arc/rt/names
 import arc/rt/val
 import arc_aot/emit/state.{type Emitter2, Emitter2}
 import carder/ir
-import gleam/bit_array
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
@@ -103,6 +103,16 @@ pub fn tuple_get(v: ir.Value, i: Int) -> ir.Expr {
 
 pub fn run(b: Build(ir.Value), e: Emitter2) -> #(ir.Expr, Emitter2) {
   b(e, fn(ef, v) { #(ir.Values([v]), ef) })
+}
+
+// runs b to a let spine wrapper and the value at its tail
+pub fn run_open(
+  b: Build(ir.Value),
+  e: Emitter2,
+) -> #(fn(ir.Expr) -> ir.Expr, ir.Value, Emitter2) {
+  let #(tree, e) = run(b, e)
+  let assert Some(v) = state.let_tail_value(tree) as "run ends in values"
+  #(state.splice_let(tree, "_", _), v, e)
 }
 
 pub fn run_to(
@@ -678,48 +688,60 @@ pub fn guarded_unary_numeric(v: ir.Value) -> Build(ir.Value) {
   }
 }
 
-// the one static key canonicalizer, output must be canonical
-pub fn object_key_lit(pk: ast.PropertyKey) -> Build(ir.Value) {
-  let inner = case pk {
-    ast.KeyIdentifier(name:, ..) -> wire_named(name)
-    ast.KeyString(value: s, ..) -> wire_prop_key(key.source_key(s))
+// the runtime key for a name text, a literal unless the heap numbers it
+pub fn key(text: String) -> Build(ir.Value) {
+  fn(e, k) {
+    case key.index_of_text(text) {
+      Some(i) -> k(e, ir.ConstI64(key.index(i)))
+      None ->
+        case names.fixed_number(text) {
+          Some(n) -> k(e, ir.ConstI64(key.name(n)))
+          None -> {
+            let #(slot, e) = state.name_slot(e, text)
+            bind(ir.TermOp(ir.TupleGet(slot), [ir.Var(state.keys_var)]))(e, k)
+          }
+        }
+    }
+  }
+}
+
+pub fn index_key(i: Int) -> ir.Value {
+  ir.ConstI64(key.index(i))
+}
+
+// a literal key for a name the runtime fixes, see arc/rt/names
+pub fn fixed_key(text: String) -> ir.Value {
+  case names.fixed_number(text) {
+    Some(n) -> ir.ConstI64(key.name(n))
+    None -> panic as { "not a fixed name: " <> text }
+  }
+}
+
+// the one static key canonicalizer
+pub fn key_lit(pk: ast.PropertyKey) -> Build(ir.Value) {
+  case pk {
+    ast.KeyIdentifier(name:, ..) -> key(name)
+    ast.KeyString(value: s, ..) -> key(s)
     ast.KeyNumber(value: ast.FiniteNumber(f), ..) ->
       case key.array_index_of_float(f) {
-        Some(i) -> wire_index(i)
-        None -> wire_named(val.js_format_float(f))
+        Some(i) -> pure(index_key(i))
+        None -> key(val.js_format_float(f))
       }
-    ast.KeyNumber(value: ast.InfiniteNumber, ..) -> wire_named("Infinity")
+    ast.KeyNumber(value: ast.InfiniteNumber, ..) -> key("Infinity")
     ast.KeyBigInt(value: n, ..) ->
       case key.is_array_index(n) {
-        True -> wire_index(n)
-        False -> wire_named(int.to_string(n))
+        True -> pure(index_key(n))
+        False -> key(int.to_string(n))
       }
-    ast.KeyPrivate(name:, ..) ->
-      ir.TermOp(ir.MakeTuple, [
-        ir.ConstAtom("private"),
-        ir.ConstBinary(bit_array.from_string(name)),
-      ])
-    ast.KeyComputed(..) ->
-      panic as "object_key_lit: KeyComputed routes through host(to_property_key)"
-  }
-  use iv <- then(bind(inner))
-  make_tuple([ir.ConstAtom("string_key"), iv])
-}
-
-fn wire_prop_key(k: key.SourceKey) -> ir.Expr {
-  case k {
-    key.SourceIndex(n) -> wire_index(n)
-    key.SourceName(s) -> wire_named(s)
+    ast.KeyPrivate(..) | ast.KeyComputed(..) ->
+      panic as "key_lit: private and computed keys are runtime values"
   }
 }
 
-fn wire_index(n: Int) -> ir.Expr {
-  ir.TermOp(ir.MakeTuple, [ir.ConstAtom("index"), ir.ConstI64(n)])
+pub fn string_key(k: ir.Value) -> Build(ir.Value) {
+  make_tuple([ir.ConstAtom("string_key"), k])
 }
 
-fn wire_named(s: String) -> ir.Expr {
-  ir.TermOp(ir.MakeTuple, [
-    ir.ConstAtom("named"),
-    ir.ConstBinary(bit_array.from_string(s)),
-  ])
+pub fn object_key_lit(pk: ast.PropertyKey) -> Build(ir.Value) {
+  then(key_lit(pk), string_key)
 }

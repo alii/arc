@@ -89,25 +89,6 @@ pub fn t_with_delete_binding(
   rt_obj.t_delete_prop(st, obj, StringKey(key))
 }
 
-// aot passes the name text
-pub fn t_create_global_var_binding(
-  st: Agent,
-  name: String,
-  deletable: Bool,
-) -> Agent {
-  let #(key, st) = rt_store.t_key(st, name)
-  t_create_global_var(st, key, deletable)
-}
-
-pub fn t_create_global_fn_binding(
-  st: Agent,
-  name: String,
-  deletable: Bool,
-) -> Agent {
-  let #(key, st) = rt_store.t_key(st, name)
-  t_create_global_fn(st, key, deletable)
-}
-
 // §9.1.1.4.17; deviation: non-extensible global skips the typeerror
 pub fn t_create_global_var(st: Agent, key: Key, deletable: Bool) -> Agent {
   let global = st.realm.global_object

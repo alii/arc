@@ -36,7 +36,7 @@ fn str(s: String) -> JsVal {
 }
 
 fn global(st: Agent, name: String) -> JsVal {
-  let #(v, _) = rt_obj.t_global_get(st, <<name:utf8>>)
+  let #(v, _) = rt_obj.t_global_get(st, name)
   v
 }
 

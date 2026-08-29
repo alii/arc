@@ -75,7 +75,7 @@ pub fn tdz_binding_is_a_reference_error_test() {
   let #(k_, st) = rt_helpers.key(st, "b")
   assert throws(st, rt_obj.t_get_own_property(_, ns_h, k_)) == "ReferenceError"
   assert throws(st, rt_obj.t_for_in_keys(_, ns)) == "ReferenceError"
-  let #(object, st) = rt_obj.t_global_get(st, <<"Object">>)
+  let #(object, st) = rt_obj.t_global_get(st, "Object")
   let #(k_, st) = rt_helpers.key(st, "keys")
   assert throws(st, rt_call.t_call_method(_, object, k_, [ns]))
     == "ReferenceError"
@@ -102,7 +102,7 @@ pub fn own_keys_are_sorted_exports_then_to_string_tag_test() {
   let st = rt_store.t_cell_set(st, cell_b, SBox(int(3)))
   let #(names, st) = rt_obj.t_for_in_keys(st, ns)
   assert list.map(names, classify) == [KStr("a"), KStr("b")]
-  let #(object, st) = rt_obj.t_global_get(st, <<"Object">>)
+  let #(object, st) = rt_obj.t_global_get(st, "Object")
   let #(k_, st) = rt_helpers.key(st, "prototype")
   let #(object_proto, st) = rt_obj.t_get_prop(st, object, k_)
   let #(k_, st) = rt_helpers.key(st, "toString")
@@ -247,7 +247,7 @@ pub fn define_own_property_only_accepts_no_ops_test() {
   let #(k_b, st) = rt_helpers.key(st, "b")
   assert throws(st, rt_obj.t_define_own_prop(_, ns_h, k_b, value_desc(int(1))))
     == "ReferenceError"
-  let #(object, st) = rt_obj.t_global_get(st, <<"Object">>)
+  let #(object, st) = rt_obj.t_global_get(st, "Object")
   let #(desc, st) = rt_obj.t_new_object_literal(st)
   let #(k_, st) = rt_helpers.key(st, "value")
   let #(_, st) = rt_obj.t_set_prop(st, desc, k_, int(9))
@@ -264,7 +264,7 @@ pub fn define_own_property_only_accepts_no_ops_test() {
 
 pub fn binding_cells_survive_collection_test() {
   let #(st, ns_h, ns, cell_a, cell_b) = fixture()
-  let st = rt_obj.t_global_set(st, <<"ns">>, ns)
+  let st = rt_obj.t_global_set(st, "ns", ns)
   let st = rt_gc.t_collect(st, [])
   assert rt_gc.t_is_live(st, ns_h)
   assert rt_gc.t_is_live(st, cell_a)

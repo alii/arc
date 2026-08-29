@@ -2301,12 +2301,16 @@ fn cap_param_name(e: Emitter2, i: Int) -> String {
 }
 
 fn build_sm_params(e: Emitter2, i: Int, ncap: Int) -> List(ir.Local) {
-  case i < ncap {
-    True -> [
+  case i < ncap, e.uses_keys {
+    True, _ -> [
       ir.Local(cap_param_name(e, i), ir.TTerm),
       ..build_sm_params(e, i + 1, ncap)
     ]
-    False -> [
+    False, True -> [
+      ir.Local(state.keys_var, ir.TTerm),
+      ..build_sm_params(state.Emitter2(..e, uses_keys: False), i, ncap)
+    ]
+    False, False -> [
       ir.Local("_rs", ir.TTerm),
       ir.Local("_sent", ir.TTerm),
       ir.Local("_loc", ir.TTerm),
@@ -2362,7 +2366,11 @@ fn emit_sm_function(
 
 fn build_outer_params(e: Emitter2, i: Int, n: Int) -> List(ir.Local) {
   case i < n {
-    False -> [ir.Local("_frame", ir.TTerm), ir.Local("_args", ir.TTerm)]
+    False ->
+      list.append(state.keys_params(e), [
+        ir.Local("_frame", ir.TTerm),
+        ir.Local("_args", ir.TTerm),
+      ])
     True -> [
       ir.Local(cap_param_name(e, i), ir.TTerm),
       ..build_outer_params(e, i + 1, n)
@@ -2620,29 +2628,15 @@ fn rs_box(n: Int) -> anf.Build(ir.Value) {
 }
 
 fn key_named(s: String) -> anf.Build(ir.Value) {
-  use inner <- anf.then(
-    anf.make_tuple([
-      ir.ConstAtom("named"),
-      ir.ConstBinary(bit_array.from_string(s)),
-    ]),
-  )
-  anf.make_tuple([ir.ConstAtom("string_key"), inner])
+  anf.then(anf.key(s), anf.string_key)
 }
 
 fn get_named(obj: ir.Value, name: String) -> anf.Build(ir.Value) {
   use site <- anf.then(fn(e: Emitter2, k) {
     k(state.Emitter2(..e, next_site: e.next_site + 1), e.next_site)
   })
-  anf.host("get_prop_site", [
-    obj,
-    ir.ConstBinary(bit_array.from_string(name)),
-    ir.ConstI32(site),
-  ])
-}
-
-fn key_named_dyn(bin: ir.Value) -> anf.Build(ir.Value) {
-  use inner <- anf.then(anf.make_tuple([ir.ConstAtom("named"), bin]))
-  anf.make_tuple([ir.ConstAtom("string_key"), inner])
+  use key <- anf.then(anf.key(name))
+  anf.host("get_prop_site", [obj, key, ir.ConstI32(site)])
 }
 
 fn iter_hint(kind: state.CoroutineKind) -> ir.Value {
@@ -2710,7 +2704,7 @@ fn emit_delegate_arm(
     use mode_ne0 <- anf.then(
       anf.bind(ir.Num(ir.INe(ir.W32), [mode_i32, ir.ConstI32(0)])),
     )
-    let mbin = fn(s) { ir.Values([ir.ConstBinary(bit_array.from_string(s))]) }
+    let mkey = fn(s) { ir.Values([anf.fixed_key(s)]) }
     use meth <- anf.then(anf.bind_if(
       mode_ne0,
       {
@@ -2718,11 +2712,11 @@ fn emit_delegate_arm(
           anf.bind(ir.Switch(
             mode_i32,
             [ir.TTerm],
-            [ir.SwitchArm(1, mbin("throw")), ir.SwitchArm(2, mbin("return"))],
-            mbin("next"),
+            [ir.SwitchArm(1, mkey("throw")), ir.SwitchArm(2, mkey("return"))],
+            mkey("next"),
           )),
         )
-        use key <- anf.then(key_named_dyn(mname))
+        use key <- anf.then(anf.string_key(mname))
         anf.host("get_prop", [inner, key])
       },
       get_named(iter_h, "next"),
@@ -3521,15 +3515,7 @@ fn emit_for_of_step(
 }
 
 fn named_key_tuple(s: String) -> ir.Expr {
-  let inner_n = "_nk_" <> s
-  ir.Let(
-    [inner_n],
-    ir.TermOp(ir.MakeTuple, [
-      ir.ConstAtom("named"),
-      ir.ConstBinary(bit_array.from_string(s)),
-    ]),
-    ir.TermOp(ir.MakeTuple, [ir.ConstAtom("string_key"), ir.Var(inner_n)]),
-  )
+  ir.TermOp(ir.MakeTuple, [ir.ConstAtom("string_key"), anf.fixed_key(s)])
 }
 
 fn bind_for_lhs(
@@ -3930,6 +3916,7 @@ pub fn emit_coroutine_fn(
     use #(arms, e_sm) <- result.try(build_switch_arms(e_sm, ctx, plan))
     let #(default, e_sm) = sm_default_arm(e_sm)
     let e_sm = emit_sm_function(e_sm, sm_name, ncap, lresume, arms, default)
+    let sm_keys = e_sm.uses_keys
     let e_pro = state.leave_function(e_sm, sm_save)
     let #(tree, e_pro) =
       anf.run_to(
@@ -3938,7 +3925,11 @@ pub fn emit_coroutine_fn(
             anf.make_tuple(initial_loc_values(e_pro, layout, info.local_count)),
           )
           use sm <- anf.then(
-            anf.bind(ir.MakeClosure(sm_name, cap_vars(e_pro, 0, ncap), 3)),
+            anf.bind(ir.MakeClosure(
+              sm_name,
+              list.append(cap_vars(e_pro, 0, ncap), state.keys_args(sm_keys)),
+              3,
+            )),
           )
           anf.host(start_op(kind), [
             sm,
@@ -3979,6 +3970,7 @@ pub fn emit_coroutine_fn(
         body: body_expr,
       ),
     )
+  let captures = list.append(captures, state.keys_args(e_outer.uses_keys))
   let e = state.leave_function(e_outer, save)
   Ok(emit_closure_site(
     e,

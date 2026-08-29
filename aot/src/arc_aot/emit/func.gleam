@@ -187,7 +187,7 @@ pub fn cap_param_name(e: Emitter2, i: Int) -> String {
   state.cap_param_name(e, i)
 }
 
-fn capture_count(info: FunctionInfo) -> Int {
+pub fn capture_count(info: FunctionInfo) -> Int {
   list.length(info.captures) + dict.size(info.lexical_captures)
 }
 
@@ -241,9 +241,14 @@ fn lexical_capture_name(ref: lexical.LexicalRef) -> String {
   }
 }
 
+// captures, then the keys tuple when read, then the runtime args
 pub fn build_ir_params(e: Emitter2, i: Int, n: Int) -> List(ir.Local) {
   case i < n {
-    False -> [ir.Local("_frame", ir.TTerm), ir.Local("_args", ir.TTerm)]
+    False ->
+      list.append(state.keys_params(e), [
+        ir.Local("_frame", ir.TTerm),
+        ir.Local("_args", ir.TTerm),
+      ])
     True -> [
       ir.Local(cap_param_name(e, i), ir.TTerm),
       ..build_ir_params(e, i + 1, n)
@@ -1431,10 +1436,10 @@ fn build_simple_ir_params(
     ]
     False -> {
       let ps = build_simple_pos_params(e, fixed, 0, arity)
-      case needs_this {
+      list.append(state.keys_params(e), case needs_this {
         True -> [ir.Local(simple_this_param, ir.TTerm), ..ps]
         False -> ps
-      }
+      })
     }
   }
 }
@@ -1540,7 +1545,7 @@ fn simple_shim_body(
     True -> [ir.Var(simple_this_param)]
     False -> []
   }
-  let lead = list.append(caps, this)
+  let lead = list.flatten([caps, state.keys_args(e.uses_keys), this])
   let unpack = shim_walk(target, 0, arity, undef, ir.Var("_args"), lead, [])
   case needs_this {
     True ->
@@ -1751,7 +1756,7 @@ fn compile_function(
         None, True, Some(n) -> Some(n)
         _, _, _ -> None
       }
-      use #(e, simple) <- result.try(case simple_arity {
+      use #(e, simple, child_keys) <- result.try(case simple_arity {
         None -> {
           use #(body_expr, e_child) <- result.try(emit_body(
             e_child,
@@ -1771,7 +1776,7 @@ fn compile_function(
                 body: body_expr,
               ),
             )
-          Ok(#(state.leave_function(e_child, save), None))
+          Ok(#(state.leave_function(e_child, save), None, e_child.uses_keys))
         }
         Some(#(arity, needs_this)) -> {
           let simple_fn_name = case needs_this {
@@ -1824,9 +1829,11 @@ fn compile_function(
           Ok(#(
             state.leave_function(e_child, save),
             Some(#(simple_fn_name, arity, needs_this)),
+            e_child.uses_keys,
           ))
         }
       })
+      let capture_vals = list.append(capture_vals, state.keys_args(child_keys))
       let site = fn(e) {
         emit_closure_site(
           e,

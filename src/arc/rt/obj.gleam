@@ -18,7 +18,6 @@ import arc/rt/types.{
   ShapeDesc, StringKey, StringObj, SymbolKey, TypeErr, TypedArrayObj,
 } as rt_types
 import arc/rt/val as rt_val
-import gleam/bit_array
 import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/int
@@ -822,13 +821,14 @@ fn plain_slot(slot: JsSlot) -> Bool {
   }
 }
 
-// [[Get]] by value, an unseen string on a plain chain is undefined
+// getvalue by key value, nullish base throws before the key coerces
 pub fn t_get_by_value(st: Agent, recv: JsVal, k: JsVal) -> #(JsVal, Agent) {
   case rt_types.classify(recv) {
-    KUndef | KNull -> {
-      let #(key, st) = rt_val.t_to_property_key(st, k)
-      t_get_prop(st, recv, key)
-    }
+    KUndef | KNull ->
+      throw_type_error(
+        st,
+        "Cannot read properties of " <> rt_val.nullish_label(recv),
+      )
     _ ->
       case t_read_key(st, recv, k) {
         #(Ok(key), st) -> t_get_prop(st, recv, key)
@@ -3367,9 +3367,9 @@ pub fn t_define_own_accessor(
   )
 }
 
-// accepts a Key, an ObjectKey, or the aot wire forms
-@external(erlang, "arc_rt_obj_ffi", "as_object_key")
-pub fn as_object_key(st: Agent, key: k) -> #(ObjectKey, Agent)
+// an object key or a bare key from aot
+@external(erlang, "arc_rt_store_ffi", "as_object_key")
+fn as_object_key(key: k) -> ObjectKey
 
 @external(erlang, "arc_rt_store_ffi", "identity")
 fn unsafe_coerce(a: a) -> b
@@ -3378,8 +3378,7 @@ fn unsafe_coerce(a: a) -> b
 fn is_list(a: a) -> Bool
 
 pub fn t_get_prop_any(st: Agent, recv: JsVal, key: k) -> #(JsVal, Agent) {
-  let #(key, st) = as_object_key(st, key)
-  t_get_prop(st, recv, key)
+  t_get_prop(st, recv, as_object_key(key))
 }
 
 pub fn t_set_prop_any(
@@ -3388,8 +3387,7 @@ pub fn t_set_prop_any(
   key: k,
   v: JsVal,
 ) -> #(Bool, Agent) {
-  let #(key, st) = as_object_key(st, key)
-  t_set_prop(st, recv, key, v)
+  t_set_prop(st, recv, as_object_key(key), v)
 }
 
 // §13.15.2 strict putvalue throws on failed set
@@ -3399,7 +3397,7 @@ pub fn t_set_prop_strict(
   key: k,
   v: JsVal,
 ) -> #(Bool, Agent) {
-  let #(okey, st) = as_object_key(st, key)
+  let okey = as_object_key(key)
   let #(ok, st) = t_set_prop(st, recv, okey, v)
   case ok {
     True -> #(True, st)
@@ -3409,25 +3407,6 @@ pub fn t_set_prop_strict(
         "Cannot assign to read only property '" <> key_text(st, okey) <> "'",
       )
   }
-}
-
-pub fn t_has_prop_any(st: Agent, recv: JsVal, key: k) -> #(Bool, Agent) {
-  let #(key, st) = as_object_key(st, key)
-  t_has_prop(st, recv, key)
-}
-
-pub fn t_delete_prop_any(st: Agent, obj: Handle, key: k) -> #(Bool, Agent) {
-  let #(key, st) = as_object_key(st, key)
-  t_delete_prop(st, obj, key)
-}
-
-pub fn t_delete_prop_strict_any(
-  st: Agent,
-  obj: Handle,
-  key: k,
-) -> #(Bool, Agent) {
-  let #(key, st) = as_object_key(st, key)
-  t_delete_prop_strict(st, obj, key)
 }
 
 // §13.5.1.2 strict delete throws on non-configurable
@@ -3462,7 +3441,7 @@ pub fn t_create_data_prop_slow(
   key: k,
   v: JsVal,
 ) -> #(Bool, Agent) {
-  let #(okey, st) = as_object_key(st, key)
+  let okey = as_object_key(key)
   case rt_types.classify(recv) {
     KHandle(h) -> {
       let #(ok, st) = t_define_own_data(st, h, okey, v, True, True, True)
@@ -3554,32 +3533,15 @@ pub fn t_global_typeof_key(st: Agent, key: Key) -> #(String, Agent) {
   }
 }
 
-// aot passes the name text
-pub fn t_global_get(st: Agent, name: BitArray) -> #(JsVal, Agent) {
-  let #(key, st) = binary_key(st, name)
+// by name text, for tests and embedders
+pub fn t_global_get(st: Agent, name: String) -> #(JsVal, Agent) {
+  let #(key, st) = rt_store.t_key(st, name)
   t_global_get_key(st, key)
 }
 
-pub fn t_global_set(st: Agent, name: BitArray, v: JsVal) -> Agent {
-  let #(key, st) = binary_key(st, name)
+pub fn t_global_set(st: Agent, name: String, v: JsVal) -> Agent {
+  let #(key, st) = rt_store.t_key(st, name)
   t_global_set_key(st, key, v)
-}
-
-pub fn t_global_set_strict(st: Agent, name: BitArray, v: JsVal) -> Agent {
-  let #(key, st) = binary_key(st, name)
-  t_global_set_strict_key(st, key, v)
-}
-
-pub fn t_global_typeof(st: Agent, name: BitArray) -> #(String, Agent) {
-  let #(key, st) = binary_key(st, name)
-  t_global_typeof_key(st, key)
-}
-
-pub fn binary_key(st: Agent, name: BitArray) -> #(Key, Agent) {
-  case bit_array.to_string(name) {
-    Ok(s) -> rt_store.t_key(st, s)
-    Error(Nil) -> panic as "global name is not utf8"
-  }
 }
 
 // mapped is undefined or a cons-list of param cells

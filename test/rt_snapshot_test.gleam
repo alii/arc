@@ -21,8 +21,8 @@ fn roundtrip(st: Agent) -> Agent {
 
 pub fn roundtrip_keeps_globals_and_properties_test() {
   let st = rt_helpers.agent()
-  let st = rt_obj.t_global_set(st, <<"n">>, mk_number(JInt(42)))
-  let st = rt_obj.t_global_set(st, <<"s">>, mk_string("hello"))
+  let st = rt_obj.t_global_set(st, "n", mk_number(JInt(42)))
+  let st = rt_obj.t_global_set(st, "s", mk_string("hello"))
   let #(obj, st) = rt_obj.t_new_object_literal(st)
   let #(ka, st) = rt_store.t_key(st, "a")
   let #(kb, st) = rt_store.t_key(st, "b")
@@ -31,7 +31,7 @@ pub fn roundtrip_keeps_globals_and_properties_test() {
   let #(inner, st) = rt_obj.t_new_object_literal(st)
   let #(_, st) = rt_obj.t_set_prop(st, inner, StringKey(kc), mk_string("deep"))
   let #(_, st) = rt_obj.t_set_prop(st, obj, StringKey(kb), inner)
-  let st = rt_obj.t_global_set(st, <<"obj">>, obj)
+  let st = rt_obj.t_global_set(st, "obj", obj)
 
   let st = roundtrip(st)
   let #(n, st) = rt_helpers.global(st, "n")
@@ -54,7 +54,7 @@ pub fn roundtrip_keeps_arrays_test() {
       mk_number(JInt(20)),
       mk_number(JInt(30)),
     ])
-  let st = rt_obj.t_global_set(st, <<"arr">>, arr)
+  let st = rt_obj.t_global_set(st, "arr", arr)
 
   let st = roundtrip(st)
   let #(arr, st) = rt_helpers.global(st, "arr")
@@ -82,11 +82,11 @@ pub fn natives_work_after_roundtrip_test() {
 
 pub fn roundtrip_is_repeatable_test() {
   let st = rt_helpers.agent()
-  let st = rt_obj.t_global_set(st, <<"x">>, mk_number(JInt(1)))
+  let st = rt_obj.t_global_set(st, "x", mk_number(JInt(1)))
   let st = roundtrip(st)
   let #(x, st) = rt_helpers.global(st, "x")
   let assert KNum(JInt(x)) = classify(x)
-  let st = rt_obj.t_global_set(st, <<"x">>, mk_number(JInt(x + 10)))
+  let st = rt_obj.t_global_set(st, "x", mk_number(JInt(x + 10)))
   let st = roundtrip(st)
   let #(x, _st) = rt_helpers.global(st, "x")
   assert classify(x) == KNum(JInt(11))
@@ -96,7 +96,7 @@ pub fn regexp_matcher_is_dropped_and_rebuilt_test() {
   let st = rt_helpers.agent()
   let #(re, st) = b_regexp.regexp_create_literal(st, "a+b", "")
   let assert KHandle(h) = classify(re)
-  let st = rt_obj.t_global_set(st, <<"re">>, re)
+  let st = rt_obj.t_global_set(st, "re", re)
   let matcher_cached = fn(st) {
     let assert SObject(kind: RegExpObj(compiled:, ..), ..) =
       rt_store.t_cell_get(st, h)
@@ -142,7 +142,7 @@ pub fn compiled_function_is_refused_test() {
   let st = rt_helpers.agent()
   let #(f, st) = rt_helpers.func(st, fn(st, _) { #(mk_number(JInt(1)), st) })
   let assert KHandle(h) = classify(f)
-  let st = rt_obj.t_global_set(st, <<"f">>, f)
+  let st = rt_obj.t_global_set(st, "f", f)
   assert snapshot.serialize(st) == Error(SnapshotContainsCompiledCode(h))
 }
 

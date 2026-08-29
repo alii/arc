@@ -4,7 +4,6 @@ import arc_aot/emit/anf.{type Build}
 import arc_aot/emit/expr
 import arc_aot/emit/state.{type BindMode, type EmitError, type Emitter2}
 import carder/ir
-import gleam/bit_array
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set
@@ -84,11 +83,10 @@ fn bind_identifier(name: String, v: ir.Value, mode: BindMode) -> Build(Nil) {
             }
           }
         }
-        scope.Plain(scope.Global(_)) ->
-          anf.host_unit("global_set", [
-            ir.ConstBinary(bit_array.from_string(name)),
-            v,
-          ])
+        scope.Plain(scope.Global(_)) -> {
+          use k <- anf.then(anf.key(name))
+          anf.host_unit("global_set", [k, v])
+        }
         scope.Plain(scope.EvalEnv(_)) ->
           anf.then(
             expr.throw_at_rt("throw_type_error", "unsupported: direct eval"),
