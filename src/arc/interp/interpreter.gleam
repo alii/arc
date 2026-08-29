@@ -341,6 +341,7 @@ fn sync_fallback_template() -> FuncTemplate {
       Return,
     ]),
     constants: tuple_array.from_list([mk_undefined()]),
+    keys: tuple_array.from_list([]),
     lines: tuple_array.from_list([0, 0, 0, 0, 0, 0]),
     functions: tuple_array.from_list([]),
     env_descriptors: [bytecode.CaptureLocal(0), bytecode.CaptureLocal(1)],
@@ -385,9 +386,11 @@ pub fn execute_inner(
   let locals = state.locals
   let code = func.bytecode
   let constants = func.constants
+  let keys = func.keys
   let _ = tuple_array.size(locals)
   let _ = tuple_array.size(code)
   let _ = tuple_array.size(constants)
+  let _ = tuple_array.size(keys)
   case func.regs {
     bytecode.NoRegs -> {
       let u = ffi.val([ffi.Undefined])
@@ -400,6 +403,7 @@ pub fn execute_inner(
         state.agent,
         code,
         constants,
+        keys,
         u,
         u,
       )
@@ -414,6 +418,7 @@ pub fn execute_inner(
         state.agent,
         code,
         constants,
+        keys,
         ld(locals, a),
         ld(locals, b),
       )
@@ -442,14 +447,28 @@ fn enter(
   agent: Agent,
   code: TupleArray(Op),
   constants: TupleArray(JsVal),
+  keys: TupleArray(PropertyKey),
 ) -> Result(#(Outcome, State), VmError) {
   let _ = tuple_array.size(locals)
   let _ = tuple_array.size(code)
   let _ = tuple_array.size(constants)
+  let _ = tuple_array.size(keys)
   case state.func.regs {
     bytecode.NoRegs -> {
       let u = ffi.val([ffi.Undefined])
-      fast_loop(state, drive, pc, stack, locals, agent, code, constants, u, u)
+      fast_loop(
+        state,
+        drive,
+        pc,
+        stack,
+        locals,
+        agent,
+        code,
+        constants,
+        keys,
+        u,
+        u,
+      )
     }
     bytecode.Regs(a, b) ->
       fast_loop(
@@ -461,10 +480,15 @@ fn enter(
         agent,
         code,
         constants,
+        keys,
         ld(locals, a),
         ld(locals, b),
       )
   }
+}
+
+fn key_at(state: State, slot: Int) -> PropertyKey {
+  tuple_array.element(slot + 1, state.func.keys)
 }
 
 fn ld(locals: TupleArray(JsVal), slot: Int) -> JsVal {
@@ -484,6 +508,7 @@ fn wreg(
   agent: Agent,
   code: TupleArray(Op),
   constants: TupleArray(JsVal),
+  keys: TupleArray(PropertyKey),
   r0: JsVal,
   r1: JsVal,
   slot: Int,
@@ -491,9 +516,33 @@ fn wreg(
 ) -> Result(#(Outcome, State), VmError) {
   case slot {
     -1 ->
-      fast_loop(state, drive, pc, stack, locals, agent, code, constants, v, r1)
+      fast_loop(
+        state,
+        drive,
+        pc,
+        stack,
+        locals,
+        agent,
+        code,
+        constants,
+        keys,
+        v,
+        r1,
+      )
     _ ->
-      fast_loop(state, drive, pc, stack, locals, agent, code, constants, r0, v)
+      fast_loop(
+        state,
+        drive,
+        pc,
+        stack,
+        locals,
+        agent,
+        code,
+        constants,
+        keys,
+        r0,
+        v,
+      )
   }
 }
 
@@ -534,6 +583,7 @@ fn fast_loop(
   agent: Agent,
   code: TupleArray(Op),
   constants: TupleArray(JsVal),
+  keys: TupleArray(PropertyKey),
   r0: JsVal,
   r1: JsVal,
 ) -> Result(#(Outcome, State), VmError) {
@@ -549,6 +599,7 @@ fn fast_loop(
         agent,
         code,
         constants,
+        keys,
         r0,
         r1,
       )
@@ -566,6 +617,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
           )
@@ -584,6 +636,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
           )
@@ -602,6 +655,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
           )
@@ -629,6 +683,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
           )
@@ -649,6 +704,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
                 index,
@@ -664,6 +720,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -693,6 +750,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
           )
@@ -722,6 +780,7 @@ fn fast_loop(
                 rt_store.t_cell_set(agent, as_handle(slot), SBox(v)),
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -740,6 +799,7 @@ fn fast_loop(
         agent,
         code,
         constants,
+        keys,
         r0,
         r1,
       )
@@ -758,6 +818,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -773,6 +834,7 @@ fn fast_loop(
                     agent,
                     code,
                     constants,
+                    keys,
                     r0,
                     r1,
                   )
@@ -788,6 +850,7 @@ fn fast_loop(
                         agent,
                         code,
                         constants,
+                        keys,
                         r0,
                         r1,
                       )
@@ -801,6 +864,7 @@ fn fast_loop(
                         agent,
                         code,
                         constants,
+                        keys,
                         r0,
                         r1,
                       )
@@ -824,6 +888,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -839,6 +904,7 @@ fn fast_loop(
                     agent,
                     code,
                     constants,
+                    keys,
                     r0,
                     r1,
                   )
@@ -854,6 +920,7 @@ fn fast_loop(
                         agent,
                         code,
                         constants,
+                        keys,
                         r0,
                         r1,
                       )
@@ -867,6 +934,7 @@ fn fast_loop(
                         agent,
                         code,
                         constants,
+                        keys,
                         r0,
                         r1,
                       )
@@ -890,6 +958,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -903,6 +972,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -924,6 +994,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -937,6 +1008,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -963,6 +1035,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -991,6 +1064,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -1026,6 +1100,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -1067,6 +1142,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
           )
@@ -1099,6 +1175,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
           )
@@ -1126,6 +1203,7 @@ fn fast_loop(
                     agent,
                     code,
                     constants,
+                    keys,
                     r0,
                     r1,
                     dst,
@@ -1141,6 +1219,7 @@ fn fast_loop(
                     agent,
                     code,
                     constants,
+                    keys,
                     r0,
                     r1,
                   )
@@ -1172,6 +1251,7 @@ fn fast_loop(
                     agent,
                     code,
                     constants,
+                    keys,
                     r0,
                     r1,
                     dst,
@@ -1187,6 +1267,7 @@ fn fast_loop(
                     agent,
                     code,
                     constants,
+                    keys,
                     r0,
                     r1,
                   )
@@ -1225,6 +1306,7 @@ fn fast_loop(
                     agent,
                     code,
                     constants,
+                    keys,
                     r0,
                     r1,
                     dst,
@@ -1240,6 +1322,7 @@ fn fast_loop(
                     agent,
                     code,
                     constants,
+                    keys,
                     r0,
                     r1,
                   )
@@ -1249,9 +1332,9 @@ fn fast_loop(
         _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    BinOpLocalField(kind, index, Named(_) as k) ->
-      case stack {
-        [left, ..rest] -> {
+    BinOpLocalField(kind, index, k) ->
+      case tuple_array.element(k + 1, keys), stack {
+        Named(_) as k, [left, ..rest] -> {
           let right =
             ffi.get_field(
               agent,
@@ -1284,6 +1367,7 @@ fn fast_loop(
                     agent,
                     code,
                     constants,
+                    keys,
                     r0,
                     r1,
                   )
@@ -1291,7 +1375,7 @@ fn fast_loop(
             }
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _, _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     BinOpLocalLocalPut(kind, left_idx, right_idx, dst) -> {
@@ -1329,6 +1413,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
                 dst,
@@ -1344,6 +1429,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -1373,6 +1459,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -1408,6 +1495,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
                 index,
@@ -1423,6 +1511,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -1457,6 +1546,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
                 index,
@@ -1472,6 +1562,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -1502,6 +1593,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -1515,6 +1607,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -1549,6 +1642,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
                 index,
@@ -1564,6 +1658,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -1611,6 +1706,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
                 index,
@@ -1626,6 +1722,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -1677,6 +1774,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
                 index,
@@ -1692,6 +1790,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -1724,6 +1823,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
                 index,
@@ -1739,6 +1839,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -1770,6 +1871,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
                 index,
@@ -1785,6 +1887,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -1827,6 +1930,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -1840,6 +1944,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -1875,6 +1980,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -1888,6 +1994,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -1913,6 +2020,7 @@ fn fast_loop(
                     agent,
                     code,
                     constants,
+                    keys,
                     r0,
                     r1,
                   )
@@ -1926,6 +2034,7 @@ fn fast_loop(
                     agent,
                     code,
                     constants,
+                    keys,
                     r0,
                     r1,
                   )
@@ -1958,6 +2067,7 @@ fn fast_loop(
                     agent,
                     code,
                     constants,
+                    keys,
                     r0,
                     r1,
                   )
@@ -1971,6 +2081,7 @@ fn fast_loop(
                     agent,
                     code,
                     constants,
+                    keys,
                     r0,
                     r1,
                   )
@@ -1996,6 +2107,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -2020,6 +2132,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -2044,6 +2157,7 @@ fn fast_loop(
                 Agent(..agent, store:),
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -2085,6 +2199,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
           )
@@ -2131,6 +2246,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
                 key_idx,
@@ -2146,6 +2262,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -2169,6 +2286,7 @@ fn fast_loop(
                 Agent(..agent, store:),
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -2177,9 +2295,9 @@ fn fast_loop(
         _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    GetField(Named(_) as k) ->
-      case stack {
-        [recv, ..rest] -> {
+    GetField(k) ->
+      case tuple_array.element(k + 1, keys), stack {
+        Named(_) as k, [recv, ..rest] -> {
           let v = ffi.get_field(agent, recv, k)
           case ffi.is(v, ffi.Miss) {
             True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
@@ -2193,17 +2311,18 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
           }
         }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _, _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    GetField2(Named(_) as k) ->
-      case stack {
-        [recv, ..rest] -> {
+    GetField2(k) ->
+      case tuple_array.element(k + 1, keys), stack {
+        Named(_) as k, [recv, ..rest] -> {
           let v = ffi.get_field(agent, recv, k)
           case ffi.is(v, ffi.Miss) {
             True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
@@ -2217,17 +2336,18 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
           }
         }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _, _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    PutField(Named(_) as k) ->
-      case stack {
-        [val, recv, ..rest] -> {
+    PutField(k) ->
+      case tuple_array.element(k + 1, keys), stack {
+        Named(_) as k, [val, recv, ..rest] -> {
           let store = ffi.put_field(agent.store, recv, k, val, True)
           case ffi.is(store, ffi.Miss) {
             True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
@@ -2241,17 +2361,18 @@ fn fast_loop(
                 Agent(..agent, store:),
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _, _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    PutFieldPop(Named(_) as k) ->
-      case stack {
-        [val, recv, ..rest] -> {
+    PutFieldPop(k) ->
+      case tuple_array.element(k + 1, keys), stack {
+        Named(_) as k, [val, recv, ..rest] -> {
           let store = ffi.put_field(agent.store, recv, k, val, True)
           case ffi.is(store, ffi.Miss) {
             True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
@@ -2265,12 +2386,13 @@ fn fast_loop(
                 Agent(..agent, store:),
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _, _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     PutLocalLocalField(obj, value, k) -> {
@@ -2296,7 +2418,7 @@ fn fast_loop(
                   }
                 False -> tuple_array.element(obj + 1, locals)
               },
-              k,
+              tuple_array.element(k + 1, keys),
               val,
               True,
             )
@@ -2312,6 +2434,7 @@ fn fast_loop(
                 Agent(..agent, store:),
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -2332,7 +2455,7 @@ fn fast_loop(
               }
             False -> tuple_array.element(obj + 1, locals)
           },
-          k,
+          tuple_array.element(k + 1, keys),
           tuple_array.element(const_index + 1, constants),
           True,
         )
@@ -2348,71 +2471,82 @@ fn fast_loop(
             Agent(..agent, store:),
             code,
             constants,
+            keys,
             r0,
             r1,
           )
       }
     }
 
-    GetLocalField(index, Named(_) as k) -> {
-      let v =
-        ffi.get_field(
-          agent,
-          case index < 0 {
+    GetLocalField(index, k) ->
+      case tuple_array.element(k + 1, keys) {
+        Named(_) as k -> {
+          let v =
+            ffi.get_field(
+              agent,
+              case index < 0 {
+                True ->
+                  case index {
+                    -1 -> r0
+                    _ -> r1
+                  }
+                False -> tuple_array.element(index + 1, locals)
+              },
+              k,
+            )
+          case ffi.is(v, ffi.Miss) {
+            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            False ->
+              fast_loop(
+                state,
+                drive,
+                pc + 1,
+                [v, ..stack],
+                locals,
+                agent,
+                code,
+                constants,
+                keys,
+                r0,
+                r1,
+              )
+          }
+        }
+        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    GetLocalField2(index, k) ->
+      case tuple_array.element(k + 1, keys) {
+        Named(_) as k -> {
+          let recv = case index < 0 {
             True ->
               case index {
                 -1 -> r0
                 _ -> r1
               }
             False -> tuple_array.element(index + 1, locals)
-          },
-          k,
-        )
-      case ffi.is(v, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          fast_loop(
-            state,
-            drive,
-            pc + 1,
-            [v, ..stack],
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-      }
-    }
-
-    GetLocalField2(index, Named(_) as k) -> {
-      let recv = case index < 0 {
-        True ->
-          case index {
-            -1 -> r0
-            _ -> r1
           }
-        False -> tuple_array.element(index + 1, locals)
+          let v = ffi.get_field(agent, recv, k)
+          case ffi.is(v, ffi.Miss) {
+            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            False ->
+              fast_loop(
+                state,
+                drive,
+                pc + 1,
+                [v, recv, ..stack],
+                locals,
+                agent,
+                code,
+                constants,
+                keys,
+                r0,
+                r1,
+              )
+          }
+        }
+        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
-      let v = ffi.get_field(agent, recv, k)
-      case ffi.is(v, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
-        False ->
-          fast_loop(
-            state,
-            drive,
-            pc + 1,
-            [v, recv, ..stack],
-            locals,
-            agent,
-            code,
-            constants,
-            r0,
-            r1,
-          )
-      }
-    }
 
     GetGlobal(name) -> {
       let v = ffi.get_global(agent, agent.realm.lexical_globals, name)
@@ -2428,6 +2562,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
           )
@@ -2452,6 +2587,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -2485,6 +2621,7 @@ fn fast_loop(
                 Agent(..agent, store:),
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -2495,7 +2632,14 @@ fn fast_loop(
 
     NewObject -> {
       let #(obj, stack, store) =
-        ffi.new_object(agent.store, agent.realm.object.prototype, [], 0, stack)
+        ffi.new_object(
+          agent.store,
+          agent.realm.object.prototype,
+          keys,
+          [],
+          0,
+          stack,
+        )
       fast_loop(
         state,
         drive,
@@ -2505,17 +2649,19 @@ fn fast_loop(
         Agent(..agent, store:),
         code,
         constants,
+        keys,
         r0,
         r1,
       )
     }
 
-    NewObjectWith(keys, count) -> {
+    NewObjectWith(slots, count) -> {
       let #(obj, stack, store) =
         ffi.new_object(
           agent.store,
           agent.realm.object.prototype,
           keys,
+          slots,
           count,
           stack,
         )
@@ -2528,6 +2674,7 @@ fn fast_loop(
         Agent(..agent, store:),
         code,
         constants,
+        keys,
         r0,
         r1,
       )
@@ -2549,6 +2696,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -2557,9 +2705,9 @@ fn fast_loop(
         [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    DefineField(Named(_) as k) ->
-      case stack {
-        [val, obj, ..rest] -> {
+    DefineField(k) ->
+      case tuple_array.element(k + 1, keys), stack {
+        Named(_) as k, [val, obj, ..rest] -> {
           let store = ffi.define_field(agent.store, obj, k, val)
           case ffi.is(store, ffi.Miss) {
             True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
@@ -2573,12 +2721,13 @@ fn fast_loop(
                 Agent(..agent, store:),
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _, _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     MakeClosure(func_index) -> {
@@ -2599,6 +2748,7 @@ fn fast_loop(
         agent,
         code,
         constants,
+        keys,
         r0,
         r1,
       )
@@ -2618,6 +2768,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -2638,6 +2789,7 @@ fn fast_loop(
                     agent,
                     code,
                     constants,
+                    keys,
                     r0,
                     r1,
                   )
@@ -2662,6 +2814,7 @@ fn fast_loop(
                         s.agent,
                         code,
                         constants,
+                        keys,
                         r0,
                         r1,
                       )
@@ -2732,6 +2885,7 @@ fn fast_loop(
         agent,
         code,
         constants,
+        keys,
         r0,
         r1,
       )
@@ -2749,6 +2903,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
           )
@@ -2770,6 +2925,7 @@ fn fast_loop(
         s.agent,
         code,
         constants,
+        keys,
         r0,
         r1,
       )
@@ -2787,6 +2943,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
             ffi.cell_of(agent, callee),
@@ -2807,6 +2964,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
             ffi.cell_of(agent, callee),
@@ -2827,6 +2985,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
             ffi.cell_of(agent, callee),
@@ -2849,6 +3008,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
                 ffi.cell_of(agent, callee),
@@ -2875,6 +3035,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
             ffi.cell_of(agent, method),
@@ -2895,6 +3056,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
             ffi.cell_of(agent, method),
@@ -2915,6 +3077,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
             ffi.cell_of(agent, method),
@@ -2937,6 +3100,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
                 ffi.cell_of(agent, method),
@@ -2951,10 +3115,11 @@ fn fast_loop(
           }
       }
 
-    GetFieldCall1(Named(_) as k, arg_idx) ->
+    GetFieldCall1(k, arg_idx) ->
       case stack {
         [recv, ..rest] -> {
-          let method = ffi.get_field(agent, recv, k)
+          let method =
+            ffi.get_field(agent, recv, tuple_array.element(k + 1, keys))
           let arg = case arg_idx < 0 {
             True ->
               case arg_idx {
@@ -2975,6 +3140,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
                 ffi.cell_of(agent, method),
@@ -2990,10 +3156,11 @@ fn fast_loop(
         [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    GetFieldCall(Named(_) as k) ->
+    GetFieldCall(k) ->
       case stack {
         [recv, ..rest] -> {
-          let method = ffi.get_field(agent, recv, k)
+          let method =
+            ffi.get_field(agent, recv, tuple_array.element(k + 1, keys))
           case ffi.is(method, ffi.Miss) {
             True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
@@ -3006,6 +3173,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
                 ffi.cell_of(agent, method),
@@ -3021,7 +3189,7 @@ fn fast_loop(
         [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    GetLocalFieldCall(index, Named(_) as k) -> {
+    GetLocalFieldCall(index, k) -> {
       let recv = case index < 0 {
         True ->
           case index {
@@ -3030,7 +3198,7 @@ fn fast_loop(
           }
         False -> tuple_array.element(index + 1, locals)
       }
-      let method = ffi.get_field(agent, recv, k)
+      let method = ffi.get_field(agent, recv, tuple_array.element(k + 1, keys))
       case ffi.is(method, ffi.Miss) {
         True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
@@ -3043,6 +3211,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
             ffi.cell_of(agent, method),
@@ -3068,6 +3237,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
             ctor,
@@ -3102,6 +3272,7 @@ fn fast_loop(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
                 ffi.cell_of(agent, target),
@@ -3129,6 +3300,7 @@ fn fast_loop(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
             ctor,
@@ -3206,6 +3378,7 @@ fn fast_loop(
                     caller.agent,
                     caller.func.bytecode,
                     caller.func.constants,
+                    caller.func.keys,
                   )
                 }
                 False ->
@@ -3214,9 +3387,11 @@ fn fast_loop(
                       let caller_func = caller.func
                       let code = caller_func.bytecode
                       let constants = caller_func.constants
+                      let keys = caller_func.keys
                       let _ = tuple_array.size(caller_locals)
                       let _ = tuple_array.size(code)
                       let _ = tuple_array.size(constants)
+                      let _ = tuple_array.size(keys)
                       fast_loop(
                         caller,
                         drive,
@@ -3226,6 +3401,7 @@ fn fast_loop(
                         agent,
                         code,
                         constants,
+                        keys,
                         r0,
                         r1,
                       )
@@ -3236,9 +3412,11 @@ fn fast_loop(
                         bytecode.NoRegs -> {
                           let code = caller_func.bytecode
                           let constants = caller_func.constants
+                          let keys = caller_func.keys
                           let _ = tuple_array.size(caller_locals)
                           let _ = tuple_array.size(code)
                           let _ = tuple_array.size(constants)
+                          let _ = tuple_array.size(keys)
                           let u = ffi.val([ffi.Undefined])
                           fast_loop(
                             caller,
@@ -3249,6 +3427,7 @@ fn fast_loop(
                             agent,
                             code,
                             constants,
+                            keys,
                             u,
                             u,
                           )
@@ -3263,6 +3442,7 @@ fn fast_loop(
                             agent,
                             caller_func.bytecode,
                             caller_func.constants,
+                            caller_func.keys,
                           )
                       }
                     }
@@ -3297,6 +3477,7 @@ fn fast_call(
   agent: Agent,
   code: TupleArray(Op),
   constants: TupleArray(JsVal),
+  keys: TupleArray(PropertyKey),
   r0: JsVal,
   r1: JsVal,
   slot: rt_types.JsSlot,
@@ -3341,6 +3522,7 @@ fn fast_call(
                 Agent(..agent, call_depth: agent.call_depth - 1),
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
               )
@@ -3468,9 +3650,11 @@ fn fast_call(
                 bytecode.NoRegs -> {
                   let code = template.bytecode
                   let constants = template.constants
+                  let keys = template.keys
                   let _ = tuple_array.size(callee_locals)
                   let _ = tuple_array.size(code)
                   let _ = tuple_array.size(constants)
+                  let _ = tuple_array.size(keys)
                   let u = ffi.val([ffi.Undefined])
                   fast_loop(
                     new_state,
@@ -3481,6 +3665,7 @@ fn fast_call(
                     new_state.agent,
                     code,
                     constants,
+                    keys,
                     u,
                     u,
                   )
@@ -3495,6 +3680,7 @@ fn fast_call(
                     new_state.agent,
                     template.bytecode,
                     template.constants,
+                    template.keys,
                   )
               }
             }
@@ -3572,6 +3758,7 @@ fn fast_construct(
   agent: Agent,
   code: TupleArray(Op),
   constants: TupleArray(JsVal),
+  keys: TupleArray(PropertyKey),
   r0: JsVal,
   r1: JsVal,
   ctor: JsVal,
@@ -3596,6 +3783,7 @@ fn fast_construct(
             agent,
             code,
             constants,
+            keys,
             r0,
             r1,
             slot,
@@ -3625,6 +3813,7 @@ fn fast_construct(
                 agent,
                 code,
                 constants,
+                keys,
                 r0,
                 r1,
                 slot,
@@ -3709,6 +3898,7 @@ fn dispatch_slow(
         s.agent,
         s.func.bytecode,
         s.func.constants,
+        s.func.keys,
       )
     exit -> after_step(exit, drive)
   }
@@ -3729,6 +3919,7 @@ fn after_step(
         s.agent,
         s.func.bytecode,
         s.func.constants,
+        s.func.keys,
       )
     Error(Returned(value, post)) ->
       Ok(#(Completed(NormalCompletion(value)), post))
@@ -4532,7 +4723,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case state.stack {
         [left, ..rest] -> {
           use receiver <- local_or_tdz(state, index)
-          use #(right, state) <- result.try(get_field(state, receiver, k))
+          use #(right, state) <- result.try(get_field(
+            state,
+            receiver,
+            key_at(state, k),
+          ))
           binop_step(state, kind, left, right, rest)
         }
         _ -> underflow(state, "BinOpLocalField")
@@ -4741,13 +4936,14 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       )
     }
 
-    NewObjectWith(keys, count) -> {
+    NewObjectWith(slots, count) -> {
       let agent = state.agent
       let #(obj, stack, store) =
         ffi.new_object(
           agent.store,
           agent.realm.object.prototype,
-          keys,
+          state.func.keys,
+          slots,
           count,
           state.stack,
         )
@@ -4764,7 +4960,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     GetField(k) ->
       case state.stack {
         [receiver, ..rest] -> {
-          use #(val, state) <- result.map(get_field(state, receiver, k))
+          use #(val, state) <- result.map(get_field(
+            state,
+            receiver,
+            key_at(state, k),
+          ))
           State(..state, stack: [val, ..rest], pc: state.pc + 1)
         }
         [] -> underflow(state, "GetField")
@@ -4773,7 +4973,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     GetField2(k) ->
       case state.stack {
         [receiver, ..rest] -> {
-          use #(val, state) <- result.map(get_field(state, receiver, k))
+          use #(val, state) <- result.map(get_field(
+            state,
+            receiver,
+            key_at(state, k),
+          ))
           State(..state, stack: [val, receiver, ..rest], pc: state.pc + 1)
         }
         [] -> underflow(state, "GetField2")
@@ -4784,7 +4988,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case is_tdz(receiver) {
         True -> tdz_reference_error(state)
         False -> {
-          use #(val, state) <- result.map(get_field(state, receiver, k))
+          use #(val, state) <- result.map(get_field(
+            state,
+            receiver,
+            key_at(state, k),
+          ))
           State(..state, stack: [val, ..state.stack], pc: state.pc + 1)
         }
       }
@@ -4793,7 +5001,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     GetFieldCall(k) ->
       case state.stack {
         [receiver, ..rest] -> {
-          use #(method, state) <- result.try(get_field(state, receiver, k))
+          use #(method, state) <- result.try(get_field(
+            state,
+            receiver,
+            key_at(state, k),
+          ))
           call.call(state, method, receiver, [], rest, drive)
         }
         [] -> underflow(state, "GetFieldCall")
@@ -4802,7 +5014,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     GetFieldCall1(k, arg_idx) ->
       case state.stack {
         [receiver, ..rest] -> {
-          use #(method, state) <- result.try(get_field(state, receiver, k))
+          use #(method, state) <- result.try(get_field(
+            state,
+            receiver,
+            key_at(state, k),
+          ))
           let arg = tuple_array.get_unchecked(arg_idx, state.locals)
           case is_tdz(arg) {
             True -> tdz_reference_error(state)
@@ -4817,7 +5033,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case is_tdz(receiver) {
         True -> tdz_reference_error(state)
         False -> {
-          use #(method, state) <- result.try(get_field(state, receiver, k))
+          use #(method, state) <- result.try(get_field(
+            state,
+            receiver,
+            key_at(state, k),
+          ))
           call.call(state, method, receiver, [], state.stack, drive)
         }
       }
@@ -4828,7 +5048,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case is_tdz(receiver) {
         True -> tdz_reference_error(state)
         False -> {
-          use #(val, state) <- result.map(get_field(state, receiver, k))
+          use #(val, state) <- result.map(get_field(
+            state,
+            receiver,
+            key_at(state, k),
+          ))
           State(
             ..state,
             stack: [val, receiver, ..state.stack],
@@ -4843,7 +5067,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       let val = tuple_array.get_unchecked(value, state.locals)
       case is_tdz(receiver) || is_tdz(val) {
         True -> tdz_reference_error(state)
-        False -> put_field_step(state, k, val, receiver, state.stack)
+        False ->
+          put_field_step(state, key_at(state, k), val, receiver, state.stack)
       }
     }
 
@@ -4854,7 +5079,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         False ->
           put_field_step(
             state,
-            k,
+            key_at(state, k),
             tuple_array.get_unchecked(const_index, state.func.constants),
             receiver,
             state.stack,
@@ -4865,14 +5090,17 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     PutField(k) ->
       case state.stack {
         [value, receiver, ..rest] ->
-          put_field_step(state, k, value, receiver, [value, ..rest])
+          put_field_step(state, key_at(state, k), value, receiver, [
+            value,
+            ..rest
+          ])
         _ -> underflow(state, "PutField")
       }
 
     PutFieldPop(k) ->
       case state.stack {
         [value, receiver, ..rest] ->
-          put_field_step(state, k, value, receiver, rest)
+          put_field_step(state, key_at(state, k), value, receiver, rest)
         _ -> underflow(state, "PutFieldPop")
       }
 
@@ -4992,7 +5220,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               use state <- result.map(create_data_property_or_throw(
                 state,
                 h,
-                StringKey(k),
+                StringKey(key_at(state, k)),
                 value,
               ))
               State(..state, stack: [obj, ..rest], pc: state.pc + 1)
@@ -5011,7 +5239,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 state,
                 rt_class_define_method,
                 target,
-                StringKey(k),
+                StringKey(key_at(state, k)),
                 fn_h,
                 rt_types.MIMethod,
                 False,
@@ -5058,7 +5286,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 state,
                 rt_class_define_method,
                 target,
-                StringKey(k),
+                StringKey(key_at(state, k)),
                 fn_h,
                 accessor_install_kind(kind),
                 enumerable,
@@ -5220,14 +5448,16 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 state,
                 rt_obj.t_delete_prop,
                 h,
-                StringKey(k),
+                StringKey(key_at(state, k)),
               ))
               // §13.5.1.2 step 5.b.i
               case deleted, state.func.is_strict {
                 False, True ->
                   state.throw_type_error(
                     state,
-                    "Cannot delete property '" <> key_display_string(k) <> "'",
+                    "Cannot delete property '"
+                      <> key_display_string(key_at(state, k))
+                      <> "'",
                   )
                 _, _ ->
                   Ok(

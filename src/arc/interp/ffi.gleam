@@ -290,7 +290,8 @@ pub fn put_field(
 pub fn new_object(
   store: JsStore(Agent),
   proto: Handle,
-  keys: List(PropertyKey),
+  keys: TupleArray(PropertyKey),
+  slots: List(Int),
   count: Int,
   stack: List(JsVal),
 ) -> #(JsVal, List(JsVal), JsStore(Agent))

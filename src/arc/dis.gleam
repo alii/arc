@@ -1,3 +1,4 @@
+import arc/bytecode/key
 import arc/bytecode/opcode.{type Op}
 import arc/compiler
 import arc/esm
@@ -176,8 +177,40 @@ fn annotate(op: Op, template: FuncTemplate) -> Option(String) {
       Some(resolve(index, template.constants, constant_to_string))
     opcode.MakeClosure(index) ->
       Some(resolve(index, template.functions, child_label))
+    opcode.GetField(k)
+    | opcode.GetField2(k)
+    | opcode.PutField(k)
+    | opcode.PutFieldPop(k)
+    | opcode.DeleteField(k)
+    | opcode.DefineField(k)
+    | opcode.DefineMethod(k)
+    | opcode.DefineAccessor(k, _, _)
+    | opcode.GetLocalField(_, k)
+    | opcode.GetLocalField2(_, k)
+    | opcode.GetFieldCall(k)
+    | opcode.GetFieldCall1(k, _)
+    | opcode.GetLocalFieldCall(_, k)
+    | opcode.PutLocalLocalField(_, _, k)
+    | opcode.BinOpLocalField(_, _, k) ->
+      Some(resolve(k, template.keys, key_to_string))
+    opcode.PutLocalConstField(_, index, k) ->
+      Some(
+        resolve(k, template.keys, key_to_string)
+        <> " = "
+        <> resolve(index, template.constants, constant_to_string),
+      )
+    opcode.NewObjectWith(slots, _) ->
+      Some(
+        list.reverse(slots)
+        |> list.map(resolve(_, template.keys, key_to_string))
+        |> string.join(" "),
+      )
     _ -> None
   }
+}
+
+fn key_to_string(k: key.PropertyKey) -> String {
+  "." <> key.key_display_string(k)
 }
 
 fn resolve(

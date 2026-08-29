@@ -166,6 +166,7 @@ fn push_template_refs(template: FuncTemplate, acc: List(Int)) -> List(Int) {
     local_count: _,
     bytecode: _,
     constants:,
+    keys: _,
     lines: _,
     functions: _,
     env_descriptors: _,

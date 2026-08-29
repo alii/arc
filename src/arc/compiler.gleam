@@ -1,3 +1,4 @@
+import arc/bytecode/key.{type PropertyKey}
 import arc/bytecode/lexical.{type CodeKind, type LexicalSlots}
 import arc/bytecode/opcode
 import arc/compiler/ast_util
@@ -73,14 +74,15 @@ pub type DirectEvalCaller {
 fn resolve_top_level(
   code: List(opcode.IrOp),
   constants: List(JsVal),
+  keys: List(PropertyKey),
   info: scope.FunctionInfo,
   child_templates: List(FuncTemplate),
   is_strict: Bool,
   code_kind: CodeKind,
   local_names: Option(EvalNameTable),
 ) -> FuncTemplate {
-  let resolve.Resolved(bytecode:, constants:, lines:) =
-    resolve.resolve(code, constants)
+  let resolve.Resolved(bytecode:, constants:, keys:, lines:) =
+    resolve.resolve(code, constants, keys)
   let #(bytecode, regs) = case local_names {
     None -> resolve.assign_regs(bytecode, captured_slots(child_templates))
     Some(_) -> #(bytecode, bytecode.NoRegs)
@@ -92,6 +94,7 @@ fn resolve_top_level(
     local_count: info.local_count,
     bytecode:,
     constants:,
+    keys:,
     lines:,
     functions: tuple_array.from_list(child_templates),
     env_descriptors: [],
@@ -199,6 +202,7 @@ fn compile_module_with_scope(
     emit.EmitOutput(
       code:,
       constants:,
+      keys:,
       children:,
       is_strict:,
       tree:,
@@ -211,6 +215,7 @@ fn compile_module_with_scope(
     resolve_top_level(
       code,
       constants,
+      keys,
       info,
       child_templates,
       is_strict,
@@ -304,6 +309,7 @@ pub fn compile_eval_direct(
     emit.EmitOutput(
       code:,
       constants:,
+      keys:,
       children:,
       is_strict: strict,
       tree:,
@@ -334,6 +340,7 @@ pub fn compile_eval_direct(
   Ok(resolve_top_level(
     code,
     constants,
+    keys,
     info,
     child_templates,
     strict,
@@ -354,6 +361,7 @@ fn compile_script(
     emit.EmitOutput(
       code:,
       constants:,
+      keys:,
       children:,
       is_strict:,
       tree:,
@@ -370,6 +378,7 @@ fn compile_script(
   resolve_top_level(
     code,
     constants,
+    keys,
     info,
     child_templates,
     is_strict,
@@ -416,8 +425,8 @@ fn compile_child(
   let grandchild_templates =
     compile_children(child.functions, tree, child.scope_id)
 
-  let resolve.Resolved(bytecode:, constants:, lines:) =
-    resolve.resolve(child.code, child.constants)
+  let resolve.Resolved(bytecode:, constants:, keys:, lines:) =
+    resolve.resolve(child.code, child.constants, child.keys)
   // coroutine frames park with raw locals, so they never get registers
   let #(bytecode, regs) = case
     local_names,
@@ -434,6 +443,7 @@ fn compile_child(
     local_count: info.local_count,
     bytecode:,
     constants:,
+    keys:,
     lines:,
     functions: tuple_array.from_list(grandchild_templates),
     env_descriptors:,

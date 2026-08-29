@@ -1,7 +1,7 @@
 %% property fast paths: answer or miss, never raise
 -module(arc_interp_prop_ffi).
 -export([get_field/3, own_data/2, get_elem/3, get_elem2/3, put_field/5, put_elem/4,
-         define_field/4, new_object/5, new_receiver/2, get_global/3,
+         define_field/4, new_object/6, new_receiver/2, get_global/3,
          put_global/6]).
 
 -include("../rt/arc_rt_layout.hrl").
@@ -111,7 +111,7 @@ named_virtual(_, _) -> miss.
 -compile({inline, [named_plain/2, named_virtual/2, birth_plain/2, cell_field/4,
                    hop/5, proto_field/3, put_prop/7, put_new/6, set_plain/5, shaped_grow/7, shaped_next/3,
                    chain_free/4,
-                   literal_props/3]}).
+                   literal_props/4]}).
 named_plain(?ORDINARY, _) -> true;
 named_plain(Kind, _) when is_atom(Kind) -> true;
 named_plain(Kind, K) ->
@@ -330,10 +330,10 @@ define_field(Store, {?HANDLE_TAG, Id}, K, V)
     end;
 define_field(_, _, _, _) -> miss.
 
-%% keys given last first, values on top of stack
-new_object(Store, Proto, Keys, N, Stack) when tuple_size(Store) =:= ?STORE_ARITY ->
+%% key slots given last first, values on top of stack
+new_object(Store, Proto, Keys, Slots, N, Stack) when tuple_size(Store) =:= ?STORE_ARITY ->
     Seq = element(?STORE_PROP_SEQ, Store),
-    {Props, Stack2} = literal_props(Keys, Stack, Seq),
+    {Props, Stack2} = literal_props(Keys, Slots, Stack, Seq),
     Slot = {?SOBJECT_TAG, ?ORDINARY, {?SOME, Proto}, Props, [], ?ELEMS_NONE, true},
     Id = element(?STORE_NEXT, Store),
     Store2 = setelement(?STORE_DATA, Store,
@@ -360,18 +360,20 @@ new_receiver(Agent, {?HANDLE_TAG, _} = Proto)
 new_receiver(_, _) -> miss.
 
 -define(WEC(V, Seq), {?DATAPROP_TAG, V, true, true, true, Seq}).
-literal_props([], Stack, _) -> {#{}, Stack};
-literal_props([K1], [V1 | Stack], Seq) ->
-    {#{K1 => ?WEC(V1, Seq)}, Stack};
-literal_props([K2, K1], [V2, V1 | Stack], Seq) ->
-    {#{K1 => ?WEC(V1, Seq), K2 => ?WEC(V2, Seq + 1)}, Stack};
-literal_props(Keys, Stack, Seq) ->
-    {Pairs, Stack2} = literal_pairs(Keys, Stack, Seq + length(Keys) - 1, []),
+literal_props(_, [], Stack, _) -> {#{}, Stack};
+literal_props(Keys, [S1], [V1 | Stack], Seq) ->
+    {#{element(S1 + 1, Keys) => ?WEC(V1, Seq)}, Stack};
+literal_props(Keys, [S2, S1], [V2, V1 | Stack], Seq) ->
+    {#{element(S1 + 1, Keys) => ?WEC(V1, Seq),
+       element(S2 + 1, Keys) => ?WEC(V2, Seq + 1)}, Stack};
+literal_props(Keys, Slots, Stack, Seq) ->
+    {Pairs, Stack2} = literal_pairs(Keys, Slots, Stack, Seq + length(Slots) - 1, []),
     {maps:from_list(Pairs), Stack2}.
 
-literal_pairs([K | Keys], [V | Stack], Seq, Acc) ->
-    literal_pairs(Keys, Stack, Seq - 1, [{K, ?WEC(V, Seq)} | Acc]);
-literal_pairs([], Stack, _, Acc) -> {Acc, Stack}.
+literal_pairs(Keys, [S | Slots], [V | Stack], Seq, Acc) ->
+    literal_pairs(Keys, Slots, Stack, Seq - 1,
+                  [{element(S + 1, Keys), ?WEC(V, Seq)} | Acc]);
+literal_pairs(_, [], Stack, _, Acc) -> {Acc, Stack}.
 
 chain_free(Store, _, {?SOME, {?HANDLE_TAG, PId}}, {?KEY_NAMED, KB})
   when is_map_key(PId, element(?STORE_FREE_PROTOS, Store)),

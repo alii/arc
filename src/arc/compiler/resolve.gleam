@@ -1,15 +1,14 @@
 import arc/bytecode/binop
-import arc/bytecode/key
+import arc/bytecode/key.{type PropertyKey}
 import arc/bytecode/opcode.{
   type IrOp, type LabelId, type Op, type Pc, IrAsyncYieldStarNext,
   IrAsyncYieldStarResume, IrBinOp, IrCmpConstJump, IrCmpJump,
-  IrCmpLocalConstJump, IrCmpLocalLocalJump, IrDefineAccessor, IrDefineField,
-  IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetField2, IrGosub,
+  IrCmpLocalConstJump, IrCmpLocalLocalJump, IrFinal, IrGosub,
   IrIncLocalCmpConstJump, IrIncLocalCmpLocalJump, IrIncLocalJump, IrJump,
   IrJumpIfFalse, IrJumpIfLocal, IrJumpIfNotNullish, IrJumpIfNullish,
-  IrJumpIfTrue, IrLabel, IrLine, IrPushTry, IrPutField, IrWithDeleteVar,
-  IrWithGetRefValue, IrWithGetVar, IrWithGetVarThis, IrWithMakeRef,
-  IrWithPutRefValue, IrWithPutVar, Pc,
+  IrJumpIfTrue, IrLabel, IrLine, IrPushTry, IrWithDeleteVar, IrWithGetRefValue,
+  IrWithGetVar, IrWithGetVarThis, IrWithMakeRef, IrWithPutRefValue, IrWithPutVar,
+  Pc,
 }
 import arc/internal/tuple_array
 import arc/rt/bytecode
@@ -21,16 +20,22 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set.{type Set}
 
-pub fn resolve(code: List(IrOp), constants: List(JsVal)) -> Resolved {
+pub fn resolve(
+  code: List(IrOp),
+  constants: List(JsVal),
+  keys: List(PropertyKey),
+) -> Resolved {
   let const_arr = tuple_array.from_list(constants)
+  let keys_arr = tuple_array.from_list(keys)
   let code = thread_jumps(code, label_suffixes(code, dict.new()), [])
   let code = drop_dead_labels(code, referenced_labels(code, set.new()), [])
-  let code = peephole(code, const_arr, [])
+  let code = peephole(code, const_arr, keys_arr, [])
   let label_map = build_label_map(code, 0, dict.new())
   let #(ops, lines) = resolve_ops(code, label_map, 0, [], [])
   Resolved(
     bytecode: tuple_array.from_list(ops),
     constants: const_arr,
+    keys: keys_arr,
     lines: tuple_array.from_list(lines),
   )
 }
@@ -39,14 +44,23 @@ pub type Resolved {
   Resolved(
     bytecode: tuple_array.TupleArray(Op),
     constants: tuple_array.TupleArray(JsVal),
+    keys: tuple_array.TupleArray(PropertyKey),
     lines: tuple_array.TupleArray(Int),
   )
+}
+
+fn is_named(keys: tuple_array.TupleArray(PropertyKey), slot: Int) -> Bool {
+  case tuple_array.get_unchecked(slot, keys) {
+    key.Named(_) -> True
+    key.Index(_) | key.Private(_) -> False
+  }
 }
 
 /// runs before label resolution so fusion can't break jumps
 fn peephole(
   code: List(IrOp),
   consts: tuple_array.TupleArray(JsVal),
+  keys: tuple_array.TupleArray(PropertyKey),
   acc: List(IrOp),
 ) -> List(IrOp) {
   case code {
@@ -71,9 +85,9 @@ fn peephole(
         _, _ -> None
       }
       case fused {
-        Some(op) -> peephole(rest, consts, [op, ..acc])
+        Some(op) -> peephole(rest, consts, keys, [op, ..acc])
         None ->
-          peephole(rest, consts, [
+          peephole(rest, consts, keys, [
             IrFinal(opcode.PutLocal(j)),
             IrBinOp(kind),
             IrFinal(opcode.PushConst(c)),
@@ -103,9 +117,9 @@ fn peephole(
       }
       case fused, rest {
         Some(op), [IrFinal(opcode.Pop), ..rest] ->
-          peephole(rest, consts, [op, ..acc])
-        Some(op), _ -> peephole([get, ..rest], consts, [op, ..acc])
-        None, _ -> peephole(list.drop(code, 1), consts, [get, ..acc])
+          peephole(rest, consts, keys, [op, ..acc])
+        Some(op), _ -> peephole([get, ..rest], consts, keys, [op, ..acc])
+        None, _ -> peephole(list.drop(code, 1), consts, keys, [get, ..acc])
       }
     }
 
@@ -122,7 +136,7 @@ fn peephole(
     ]
       if i == j
     ->
-      peephole(rest, consts, [
+      peephole(rest, consts, keys, [
         IrFinal(opcode.PutBoxed(j)),
         IrBinOp(kind),
         IrFinal(opcode.PushConst(c)),
@@ -137,13 +151,13 @@ fn peephole(
       IrFinal(opcode.PutLocal(i)),
       IrFinal(opcode.Pop),
       ..rest
-    ] -> peephole(rest, consts, put_local(acc, i))
+    ] -> peephole(rest, consts, keys, put_local(acc, i))
     [
       IrFinal(opcode.Dup),
       IrFinal(opcode.PutBoxed(i)),
       IrFinal(opcode.Pop),
       ..rest
-    ] -> peephole(rest, consts, [IrFinal(opcode.PutBoxed(i)), ..acc])
+    ] -> peephole(rest, consts, keys, [IrFinal(opcode.PutBoxed(i)), ..acc])
 
     // seed immediately overwritten
     [
@@ -153,7 +167,7 @@ fn peephole(
       ..rest
     ]
       if i == j
-    -> peephole(rest, consts, put_local(acc, i))
+    -> peephole(rest, consts, keys, put_local(acc, i))
 
     // compare and branch
     [
@@ -169,19 +183,19 @@ fn peephole(
           let when = j == IrJumpIfTrue(l)
           case stepped_local(acc, a) {
             Some(#(by, acc)) if a != b ->
-              peephole(rest, consts, [
+              peephole(rest, consts, keys, [
                 IrIncLocalCmpLocalJump(a, by, b, pure, l, when),
                 ..acc
               ])
             _ ->
-              peephole(rest, consts, [
+              peephole(rest, consts, keys, [
                 IrCmpLocalLocalJump(a, b, pure, l, when),
                 ..acc
               ])
           }
         }
         _, _ ->
-          peephole(rest, consts, [
+          peephole(rest, consts, keys, [
             IrFinal(opcode.BinOpLocalLocal(opcode.classify(kind), a, b)),
             ..acc
           ])
@@ -199,19 +213,19 @@ fn peephole(
           let when = j == IrJumpIfTrue(l)
           case stepped_local(acc, a) {
             Some(#(by, acc)) ->
-              peephole(rest, consts, [
+              peephole(rest, consts, keys, [
                 IrIncLocalCmpConstJump(a, by, c, pure, l, when),
                 ..acc
               ])
             None ->
-              peephole(rest, consts, [
+              peephole(rest, consts, keys, [
                 IrCmpLocalConstJump(a, c, pure, l, when),
                 ..acc
               ])
           }
         }
         _, _ ->
-          peephole(rest, consts, [
+          peephole(rest, consts, keys, [
             IrFinal(opcode.BinOpLocalConst(opcode.classify(kind), a, c)),
             ..acc
           ])
@@ -240,10 +254,13 @@ fn peephole(
           [IrFinal(opcode.GetElem), ..rest]
           if obj != i
         ->
-          peephole(rest, consts, [IrFinal(opcode.GetElemPostInc(obj, i)), ..acc])
-        Some(op), _, _ -> peephole(rest, consts, [op, ..acc])
+          peephole(rest, consts, keys, [
+            IrFinal(opcode.GetElemPostInc(obj, i)),
+            ..acc
+          ])
+        Some(op), _, _ -> peephole(rest, consts, keys, [op, ..acc])
         None, _, _ ->
-          peephole(list.drop(code, 1), consts, [
+          peephole(list.drop(code, 1), consts, keys, [
             IrFinal(opcode.GetLocal(i)),
             ..acc
           ])
@@ -251,31 +268,33 @@ fn peephole(
     }
 
     [IrFinal(opcode.GetLocal(i)), IrJumpIfFalse(l), ..rest] ->
-      peephole(rest, consts, [IrJumpIfLocal(i, l, False), ..acc])
+      peephole(rest, consts, keys, [IrJumpIfLocal(i, l, False), ..acc])
     [IrFinal(opcode.GetLocal(i)), IrJumpIfTrue(l), ..rest] ->
-      peephole(rest, consts, [IrJumpIfLocal(i, l, True), ..acc])
+      peephole(rest, consts, keys, [IrJumpIfLocal(i, l, True), ..acc])
 
     // binops with folded operand loads
     [IrFinal(opcode.GetLocal(i)), IrBinOp(kind), ..rest] ->
       peephole(
         [IrFinal(opcode.BinOpLocal(opcode.classify(kind), i)), ..rest],
         consts,
+        keys,
         acc,
       )
     [IrFinal(opcode.PushConst(c)), IrBinOp(kind), ..rest] ->
       peephole(
         [IrFinal(opcode.BinOpConst(opcode.classify(kind), c)), ..rest],
         consts,
+        keys,
         acc,
       )
     [IrFinal(opcode.PutLocal(i)), ..rest] ->
-      peephole(rest, consts, put_local(acc, i))
+      peephole(rest, consts, keys, put_local(acc, i))
     [IrJump(l), ..rest] ->
       case lands_here(rest, l), acc {
-        True, _ -> peephole(rest, consts, acc)
+        True, _ -> peephole(rest, consts, keys, acc)
         False, [IrFinal(opcode.IncLocal(i)), ..acc] ->
-          peephole(rest, consts, [IrIncLocalJump(i, l), ..acc])
-        False, _ -> peephole(rest, consts, [IrJump(l), ..acc])
+          peephole(rest, consts, keys, [IrIncLocalJump(i, l), ..acc])
+        False, _ -> peephole(rest, consts, keys, [IrJump(l), ..acc])
       }
     [
       IrFinal(opcode.Pop),
@@ -288,16 +307,16 @@ fn peephole(
         IrFinal(opcode.GetLocal(_)) as value,
         IrFinal(opcode.Return) as ret,
         ..rest
-      ] -> peephole([value, ret, ..rest], consts, acc)
+      ] -> peephole([value, ret, ..rest], consts, keys, acc)
     [IrBinOp(kind) as op, IrJumpIfFalse(l) as jump, ..rest]
     | [IrBinOp(kind) as op, IrJumpIfTrue(l) as jump, ..rest] ->
       case fusable_cmp(kind) {
         Some(pure) ->
-          peephole(rest, consts, [
+          peephole(rest, consts, keys, [
             IrCmpJump(pure, l, jump == IrJumpIfTrue(l)),
             ..acc
           ])
-        None -> peephole(rest, consts, [jump, op, ..acc])
+        None -> peephole(rest, consts, keys, [jump, op, ..acc])
       }
     [
       IrFinal(opcode.BinOpConst(kind, c)) as op,
@@ -312,42 +331,50 @@ fn peephole(
       case kind {
         opcode.PureOp(binop.Compare(_) as pure)
         | opcode.PureOp(binop.Equality(_) as pure) ->
-          peephole(rest, consts, [
+          peephole(rest, consts, keys, [
             IrCmpConstJump(c, pure, l, jump == IrJumpIfTrue(l)),
             ..acc
           ])
-        _ -> peephole(rest, consts, [jump, op, ..acc])
+        _ -> peephole(rest, consts, keys, [jump, op, ..acc])
       }
     [
       IrFinal(opcode.GetLocal(obj)),
       IrFinal(opcode.GetLocal(k)),
       IrFinal(opcode.GetElem),
       ..rest
-    ] -> peephole(rest, consts, [IrFinal(opcode.GetElemLocals(obj, k)), ..acc])
+    ] ->
+      peephole(rest, consts, keys, [
+        IrFinal(opcode.GetElemLocals(obj, k)),
+        ..acc
+      ])
     [IrFinal(opcode.PutElem), IrFinal(opcode.Pop), ..rest] ->
-      peephole(rest, consts, [IrFinal(opcode.PutElemPop), ..acc])
-    [IrFinal(opcode.GetLocal(i)), IrGetField(name), IrBinOp(kind), ..rest] ->
-      peephole(rest, consts, [
-        IrFinal(opcode.BinOpLocalField(
-          opcode.classify(kind),
-          i,
-          key.canonical_key(name),
-        )),
+      peephole(rest, consts, keys, [IrFinal(opcode.PutElemPop), ..acc])
+    [
+      IrFinal(opcode.GetLocal(i)),
+      IrFinal(opcode.GetField(k)),
+      IrBinOp(kind),
+      ..rest
+    ] ->
+      peephole(rest, consts, keys, [
+        IrFinal(opcode.BinOpLocalField(opcode.classify(kind), i, k)),
         ..acc
       ])
 
     // field access superinstructions
     [
-      IrGetField2(name),
+      IrFinal(opcode.GetField2(k)),
       IrFinal(opcode.GetLocal(a)),
       IrFinal(opcode.CallMethod(1)),
       ..rest
     ] ->
-      case key.canonical_key(name) {
-        key.Named(_) as k ->
-          peephole(rest, consts, [IrFinal(opcode.GetFieldCall1(k, a)), ..acc])
-        k ->
-          peephole(rest, consts, [
+      case is_named(keys, k) {
+        True ->
+          peephole(rest, consts, keys, [
+            IrFinal(opcode.GetFieldCall1(k, a)),
+            ..acc
+          ])
+        False ->
+          peephole(rest, consts, keys, [
             IrFinal(opcode.CallMethod(1)),
             IrFinal(opcode.GetLocal(a)),
             IrFinal(opcode.GetField2(k)),
@@ -356,66 +383,60 @@ fn peephole(
       }
     [
       IrFinal(opcode.GetLocal(_)) as recv,
-      IrGetField2(_) as get,
+      IrFinal(opcode.GetField2(_)) as get,
       IrFinal(opcode.GetLocal(_)) as arg,
       IrFinal(opcode.CallMethod(1)) as call,
       ..rest
-    ] -> peephole([get, arg, call, ..rest], consts, [recv, ..acc])
+    ] -> peephole([get, arg, call, ..rest], consts, keys, [recv, ..acc])
     [
       IrFinal(opcode.GetLocal(i)),
-      IrGetField2(name),
+      IrFinal(opcode.GetField2(k)),
       IrFinal(opcode.CallMethod(0)),
       ..rest
     ] ->
-      case key.canonical_key(name) {
-        key.Named(_) as k ->
-          peephole(rest, consts, [
+      case is_named(keys, k) {
+        True ->
+          peephole(rest, consts, keys, [
             IrFinal(opcode.GetLocalFieldCall(i, k)),
             ..acc
           ])
-        k ->
-          peephole(rest, consts, [
+        False ->
+          peephole(rest, consts, keys, [
             IrFinal(opcode.CallMethod(0)),
             IrFinal(opcode.GetLocalField2(i, k)),
             ..acc
           ])
       }
-    [IrGetField2(name), IrFinal(opcode.CallMethod(0)), ..rest] ->
-      case key.canonical_key(name) {
-        key.Named(_) as k ->
-          peephole(rest, consts, [IrFinal(opcode.GetFieldCall(k)), ..acc])
-        k ->
-          peephole(rest, consts, [
+    [IrFinal(opcode.GetField2(k)), IrFinal(opcode.CallMethod(0)), ..rest] ->
+      case is_named(keys, k) {
+        True ->
+          peephole(rest, consts, keys, [IrFinal(opcode.GetFieldCall(k)), ..acc])
+        False ->
+          peephole(rest, consts, keys, [
             IrFinal(opcode.CallMethod(0)),
             IrFinal(opcode.GetField2(k)),
             ..acc
           ])
       }
-    [IrFinal(opcode.GetLocal(i)), IrGetField(name), ..rest] ->
-      peephole(rest, consts, [
-        IrFinal(opcode.GetLocalField(i, key.canonical_key(name))),
-        ..acc
-      ])
-    [IrFinal(opcode.GetLocal(i)), IrGetField2(name), ..rest] ->
-      peephole(rest, consts, [
-        IrFinal(opcode.GetLocalField2(i, key.canonical_key(name))),
-        ..acc
-      ])
+    [IrFinal(opcode.GetLocal(i)), IrFinal(opcode.GetField(k)), ..rest] ->
+      peephole(rest, consts, keys, [IrFinal(opcode.GetLocalField(i, k)), ..acc])
+    [IrFinal(opcode.GetLocal(i)), IrFinal(opcode.GetField2(k)), ..rest] ->
+      peephole(rest, consts, keys, [IrFinal(opcode.GetLocalField2(i, k)), ..acc])
     [
       IrFinal(opcode.GetLocal(o)),
       IrFinal(opcode.GetLocal(v)),
-      IrPutField(name),
+      IrFinal(opcode.PutField(k)),
       IrFinal(opcode.Pop),
       ..rest
     ] ->
-      case key.canonical_key(name) {
-        key.Named(_) as k ->
-          peephole(rest, consts, [
+      case is_named(keys, k) {
+        True ->
+          peephole(rest, consts, keys, [
             IrFinal(opcode.PutLocalLocalField(o, v, k)),
             ..acc
           ])
-        k ->
-          peephole(rest, consts, [
+        False ->
+          peephole(rest, consts, keys, [
             IrFinal(opcode.PutFieldPop(k)),
             IrFinal(opcode.GetLocal(v)),
             IrFinal(opcode.GetLocal(o)),
@@ -425,31 +446,28 @@ fn peephole(
     [
       IrFinal(opcode.GetLocal(o)),
       IrFinal(opcode.PushConst(c)),
-      IrPutField(name),
+      IrFinal(opcode.PutField(k)),
       IrFinal(opcode.Pop),
       ..rest
     ] ->
-      case key.canonical_key(name) {
-        key.Named(_) as k ->
-          peephole(rest, consts, [
+      case is_named(keys, k) {
+        True ->
+          peephole(rest, consts, keys, [
             IrFinal(opcode.PutLocalConstField(o, c, k)),
             ..acc
           ])
-        k ->
-          peephole(rest, consts, [
+        False ->
+          peephole(rest, consts, keys, [
             IrFinal(opcode.PutFieldPop(k)),
             IrFinal(opcode.PushConst(c)),
             IrFinal(opcode.GetLocal(o)),
             ..acc
           ])
       }
-    [IrPutField(name), IrFinal(opcode.Pop), ..rest] ->
-      peephole(rest, consts, [
-        IrFinal(opcode.PutFieldPop(key.canonical_key(name))),
-        ..acc
-      ])
+    [IrFinal(opcode.PutField(k)), IrFinal(opcode.Pop), ..rest] ->
+      peephole(rest, consts, keys, [IrFinal(opcode.PutFieldPop(k)), ..acc])
 
-    [op, ..rest] -> peephole(rest, consts, [op, ..acc])
+    [op, ..rest] -> peephole(rest, consts, keys, [op, ..acc])
   }
 }
 
@@ -599,17 +617,7 @@ fn label_refs(op: IrOp) -> List(LabelId) {
     | IrPushTry(l, opcode.CatchOnly)
     | IrPushTry(l, opcode.IterCloseGuard) -> [l]
     IrPushTry(l, opcode.Finally(fin)) -> [l, fin]
-    IrFinal(_)
-    | IrLabel(_)
-    | IrLine(_)
-    | IrGetField(_)
-    | IrGetField2(_)
-    | IrPutField(_)
-    | IrDeleteField(_)
-    | IrDefineField(_)
-    | IrDefineMethod(_)
-    | IrDefineAccessor(..)
-    | IrBinOp(_) -> []
+    IrFinal(_) | IrLabel(_) | IrLine(_) | IrBinOp(_) -> []
   }
 }
 
@@ -705,15 +713,6 @@ fn resolve_op(op: IrOp, labels: Dict(LabelId, Pc)) -> Op {
       opcode.WithGetRefValue(name, label_pc(labels, l))
     IrWithPutRefValue(name, l) ->
       opcode.WithPutRefValue(name, label_pc(labels, l))
-
-    IrGetField(name) -> opcode.GetField(key.canonical_key(name))
-    IrGetField2(name) -> opcode.GetField2(key.canonical_key(name))
-    IrPutField(name) -> opcode.PutField(key.canonical_key(name))
-    IrDeleteField(name) -> opcode.DeleteField(key.canonical_key(name))
-    IrDefineField(name) -> opcode.DefineField(key.canonical_key(name))
-    IrDefineMethod(name) -> opcode.DefineMethod(key.canonical_key(name))
-    IrDefineAccessor(name, kind, enumerable) ->
-      opcode.DefineAccessor(key.canonical_key(name), kind, enumerable)
 
     IrBinOp(kind) -> opcode.bin_op(kind)
 

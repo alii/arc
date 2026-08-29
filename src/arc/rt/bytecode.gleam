@@ -1,3 +1,4 @@
+import arc/bytecode/key.{type PropertyKey}
 import arc/bytecode/lexical.{type CodeKind, type LexicalSlots}
 import arc/bytecode/opcode.{type Op, type Pc, type TryKind}
 import arc/internal/tuple_array.{type TupleArray}
@@ -30,6 +31,8 @@ pub type FuncTemplate {
     local_count: Int,
     bytecode: TupleArray(Op),
     constants: TupleArray(JsVal),
+    // keyed ops carry a slot into this table
+    keys: TupleArray(PropertyKey),
     // source line per pc, for error.stack
     lines: TupleArray(Int),
     functions: TupleArray(FuncTemplate),

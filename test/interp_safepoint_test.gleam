@@ -50,6 +50,7 @@ fn empty_template() -> FuncTemplate {
     local_count: 1,
     bytecode: tuple_array.from_list([]),
     constants: tuple_array.from_list([]),
+    keys: tuple_array.from_list([]),
     lines: tuple_array.from_list([]),
     functions: tuple_array.from_list([]),
     env_descriptors: [],

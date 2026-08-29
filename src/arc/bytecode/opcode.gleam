@@ -1,5 +1,4 @@
 import arc/bytecode/binop.{type PureBinOp}
-import arc/bytecode/key.{type PropertyKey}
 import gleam/option.{type Option}
 
 pub type TemplateQuasi {
@@ -76,13 +75,14 @@ pub type Op {
   // [base, val] -> [] and jump if object, else pop sentinel
   WithPutRefValue(name: String, target: Pc)
 
-  GetField(key: PropertyKey)
-  GetField2(key: PropertyKey)
-  PutField(key: PropertyKey)
+  // key operands are slots in functemplate.keys
+  GetField(key: Int)
+  GetField2(key: Int)
+  PutField(key: Int)
   GetElem
   GetElem2
   PutElem
-  DeleteField(key: PropertyKey)
+  DeleteField(key: Int)
   DeleteElem
   // mints a fresh unique private key string per class evaluation
   NewPrivateName(name: String)
@@ -102,14 +102,14 @@ pub type Op {
   DefinePrivateAccessor(kind: AccessorKind)
 
   NewObject
-  // keys stored last key first, the order values pop
-  NewObjectWith(keys: List(PropertyKey), count: Int)
-  DefineField(key: PropertyKey)
+  // key slots stored last key first, the order values pop
+  NewObjectWith(keys: List(Int), count: Int)
+  DefineField(key: Int)
   DefineFieldComputed
   ToPropertyKey
-  DefineMethod(key: PropertyKey)
+  DefineMethod(key: Int)
   DefineMethodComputed
-  DefineAccessor(key: PropertyKey, kind: AccessorKind, enumerable: Bool)
+  DefineAccessor(key: Int, kind: AccessorKind, enumerable: Bool)
   DefineAccessorComputed(kind: AccessorKind, enumerable: Bool)
   // peek [fn, obj], sets fn home object; stack-neutral
   MakeMethod
@@ -222,18 +222,18 @@ pub type Op {
   CmpJump(kind: PureBinOp, target: Pc, when: Bool)
   // [left] -> []
   CmpConstJump(const_index: Int, kind: PureBinOp, target: Pc, when: Bool)
-  GetLocalField(index: Int, key: PropertyKey)
+  GetLocalField(index: Int, key: Int)
   // [] -> [val, obj]
-  GetLocalField2(index: Int, key: PropertyKey)
+  GetLocalField2(index: Int, key: Int)
   // [obj] -> [result]
-  GetFieldCall(key: PropertyKey)
+  GetFieldCall(key: Int)
   // method read before the arg tdz check
-  GetFieldCall1(key: PropertyKey, arg: Int)
-  GetLocalFieldCall(index: Int, key: PropertyKey)
+  GetFieldCall1(key: Int, arg: Int)
+  GetLocalFieldCall(index: Int, key: Int)
   // [val, obj] -> []
-  PutFieldPop(key: PropertyKey)
-  PutLocalLocalField(obj: Int, value: Int, key: PropertyKey)
-  PutLocalConstField(obj: Int, const_index: Int, key: PropertyKey)
+  PutFieldPop(key: Int)
+  PutLocalLocalField(obj: Int, value: Int, key: Int)
+  PutLocalConstField(obj: Int, const_index: Int, key: Int)
   BinOpConst(kind: Classified, const_index: Int)
   BinOpLocal(kind: Classified, index: Int)
   BinOpLocalLocal(kind: Classified, left: Int, right: Int)
@@ -246,7 +246,7 @@ pub type Op {
   GetElemLocals(obj: Int, key: Int)
   // obj[key++] with both plain locals
   GetElemPostInc(obj: Int, key: Int)
-  BinOpLocalField(kind: Classified, index: Int, key: PropertyKey)
+  BinOpLocalField(kind: Classified, index: Int, key: Int)
   // [right, left] -> []
   BinOpPut(kind: Classified, dst: Int)
   BinOpConstPut(kind: Classified, const_index: Int, dst: Int)
@@ -392,7 +392,7 @@ pub type UnaryOpKind {
   Void
 }
 
-// final ops wrapped in irfinal; only label/key/binop stay symbolic
+// final ops wrapped in irfinal; only label/binop stay symbolic
 pub type IrOp {
   IrFinal(op: Op)
 
@@ -418,14 +418,6 @@ pub type IrOp {
   IrWithMakeRef(name: String, label: LabelId)
   IrWithGetRefValue(name: String, label: LabelId)
   IrWithPutRefValue(name: String, label: LabelId)
-
-  IrGetField(name: String)
-  IrGetField2(name: String)
-  IrPutField(name: String)
-  IrDeleteField(name: String)
-  IrDefineField(name: String)
-  IrDefineMethod(name: String)
-  IrDefineAccessor(name: String, kind: AccessorKind, enumerable: Bool)
 
   IrBinOp(kind: BinOpKind)
 

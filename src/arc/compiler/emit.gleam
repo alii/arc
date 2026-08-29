@@ -1,11 +1,11 @@
 import arc/bytecode/key
 import arc/bytecode/lexical
 import arc/bytecode/opcode.{
-  type IrOp, type LabelId, CatchOnly, Finally, IrAsyncYieldStarNext,
-  IrAsyncYieldStarResume, IrBinOp, IrDefineAccessor, IrDefineField,
-  IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetField2, IrGosub,
-  IrJump, IrJumpIfFalse, IrJumpIfNotNullish, IrJumpIfNullish, IrJumpIfTrue,
-  IrLabel, IrPushTry, IrPutField, IterCloseGuard,
+  type IrOp, type LabelId, type Op, CatchOnly, DefineAccessor, DefineField,
+  DefineMethod, DeleteField, Finally, GetField, GetField2, IrAsyncYieldStarNext,
+  IrAsyncYieldStarResume, IrBinOp, IrFinal, IrGosub, IrJump, IrJumpIfFalse,
+  IrJumpIfNotNullish, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrPushTry,
+  IterCloseGuard, PutField,
 }
 import arc/compiler/ast_util
 import arc/compiler/scope.{
@@ -37,6 +37,7 @@ pub type CompiledChild {
     length: Int,
     code: List(IrOp),
     constants: List(JsVal),
+    keys: List(key.PropertyKey),
     functions: List(CompiledChild),
     is_strict: Bool,
     is_arrow: Bool,
@@ -55,6 +56,7 @@ pub type EmitOutput {
   EmitOutput(
     code: List(IrOp),
     constants: List(JsVal),
+    keys: List(key.PropertyKey),
     children: List(CompiledChild),
     is_strict: Bool,
     // must replace the caller's tree: scratch slots bumped local_count
@@ -89,6 +91,9 @@ pub opaque type Emitter {
     constants_map: Dict(JsVal, Int),
     constants_list: List(JsVal),
     next_const: Int,
+    keys_map: Dict(key.PropertyKey, Int),
+    keys_list: List(key.PropertyKey),
+    next_key: Int,
     next_label: Int,
     frame_stack: List(Frame),
     functions: List(CompiledChild),
@@ -237,10 +242,11 @@ pub fn emit_module(
     True -> emit_module_using_top(e, stmts)
   })
 
-  let #(code, constants, children) = finish(e)
+  let #(code, constants, keys, children) = finish(e)
   Ok(EmitOutput(
     code:,
     constants:,
+    keys:,
     children:,
     is_strict: True,
     tree: e.scope_tree,
@@ -802,11 +808,12 @@ fn emit_top_level_body(
   use #(e, hoisted_funcs) <- result.try(collect_hoisted_funcs(e, stmts))
   let e = emit_hoisted_funcs(e, hoisted_funcs)
   use e <- result.try(emit_stmts_tail(e, stmts))
-  let #(code, constants, children) = finish(e)
+  let #(code, constants, keys, children) = finish(e)
   Ok(
     EmitOutput(
       code:,
       constants:,
+      keys:,
       children:,
       is_strict: script_strict,
       tree: e.scope_tree,
@@ -821,6 +828,9 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
     constants_map: dict.new(),
     constants_list: [],
     next_const: 0,
+    keys_map: dict.new(),
+    keys_list: [],
+    next_key: 0,
     next_label: 0,
     frame_stack: [],
     functions: [],
@@ -1479,6 +1489,28 @@ fn add_constant(e: Emitter, val: JsVal) -> #(Emitter, Int) {
   }
 }
 
+fn add_key(e: Emitter, k: key.PropertyKey) -> #(Emitter, Int) {
+  case dict.get(e.keys_map, k) {
+    Ok(idx) -> #(e, idx)
+    Error(Nil) -> {
+      let idx = e.next_key
+      let e =
+        Emitter(
+          ..e,
+          keys_map: dict.insert(e.keys_map, k, idx),
+          keys_list: [k, ..e.keys_list],
+          next_key: idx + 1,
+        )
+      #(e, idx)
+    }
+  }
+}
+
+fn emit_keyed(e: Emitter, name: String, make: fn(Int) -> Op) -> Emitter {
+  let #(e, slot) = add_key(e, key.canonical_key(name))
+  emit_op(e, make(slot))
+}
+
 fn push_const(e: Emitter, val: JsVal) -> Emitter {
   let #(e, idx) = add_constant(e, val)
   emit_op(e, opcode.PushConst(idx))
@@ -1492,7 +1524,7 @@ fn emit_get_field(e: Emitter, name: String) -> Emitter {
       e
       |> emit_var_get(name)
       |> emit_op(opcode.GetPrivateFieldDyn)
-    _ -> emit_ir(e, IrGetField(name))
+    _ -> emit_keyed(e, name, GetField)
   }
 }
 
@@ -1503,7 +1535,7 @@ fn emit_get_field2(e: Emitter, name: String) -> Emitter {
       e
       |> emit_var_get(name)
       |> emit_op(opcode.GetPrivateFieldDyn2)
-    _ -> emit_ir(e, IrGetField2(name))
+    _ -> emit_keyed(e, name, GetField2)
   }
 }
 
@@ -1514,7 +1546,7 @@ fn emit_put_field(e: Emitter, name: String) -> Emitter {
       e
       |> emit_var_get(name)
       |> emit_op(opcode.PutPrivateFieldDyn)
-    _ -> emit_ir(e, IrPutField(name))
+    _ -> emit_keyed(e, name, PutField)
   }
 }
 
@@ -1764,7 +1796,7 @@ fn emit_async_iterator_close(e: Emitter) -> Emitter {
   let #(e, no_ret) = fresh_label(e)
   let #(e, closed) = fresh_label(e)
   e
-  |> emit_ir(IrGetField2("return"))
+  |> emit_keyed("return", GetField2)
   |> emit_op(opcode.Dup)
   |> emit_ir(IrJumpIfNullish(no_ret))
   |> emit_op(opcode.CallMethod(0))
@@ -2000,10 +2032,13 @@ fn emit_field_init_call(e: Emitter) -> Emitter {
   |> emit_op(opcode.Pop)
 }
 
-fn finish(e: Emitter) -> #(List(IrOp), List(JsVal), List(CompiledChild)) {
+fn finish(
+  e: Emitter,
+) -> #(List(IrOp), List(JsVal), List(key.PropertyKey), List(CompiledChild)) {
   #(
     list.reverse(e.code),
     list.reverse(e.constants_list),
+    list.reverse(e.keys_list),
     list.reverse(e.functions),
   )
 }
@@ -2579,7 +2614,7 @@ fn compile_function_body(
   }
   let e =
     Emitter(..e, code: list.flatten([e.code, args_setup_rev, pre_args_code]))
-  let #(code, constants, children) = finish(e)
+  let #(code, constants, keys, children) = finish(e)
 
   let child =
     CompiledChild(
@@ -2589,6 +2624,7 @@ fn compile_function_body(
       length: expected_length,
       code:,
       constants:,
+      keys:,
       functions: children,
       is_strict: child_strict,
       is_arrow:,
@@ -3253,7 +3289,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         }
         ast.MemberExpression(_, obj, ast.Dot(name: prop, ..)) -> {
           use e <- result.map(emit_expr(e, obj))
-          emit_ir(e, IrDeleteField(prop))
+          emit_keyed(e, prop, DeleteField)
         }
         ast.MemberExpression(_, obj, ast.Bracket(key_expr)) -> {
           use e <- result.try(emit_expr(e, obj))
@@ -3639,7 +3675,12 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
               emit_named_expr(e, member.1, member.0)
             }),
           )
-          let e = emit_op(e, opcode.NewObjectWith(keys, list.length(keys)))
+          let #(e, slots) =
+            list.fold_right(keys, #(e, []), fn(acc, k) {
+              let #(e, slot) = add_key(acc.0, k)
+              #(e, [slot, ..acc.1])
+            })
+          let e = emit_op(e, opcode.NewObjectWith(slots, list.length(slots)))
           list.try_fold(rest, e, emit_object_property)
         }
       }
@@ -4153,7 +4194,7 @@ fn emit_object_property(
     ast.InitProperty(key: ast.KeyIdentifier(name:, ..), value:, ..)
     | ast.InitProperty(key: ast.KeyString(value: name, ..), value:, ..) -> {
       use e <- result.map(emit_named_expr(e, value, name))
-      emit_ir(e, IrDefineField(name))
+      emit_keyed(e, name, DefineField)
     }
 
     // numeric keys need runtime ToPropertyKey ("1" not "1.0")
@@ -4164,7 +4205,7 @@ fn emit_object_property(
     | ast.MethodProperty(key: ast.KeyString(value: name, ..), value:) -> {
       use e <- result.map(emit_method_value(e, value, Some(name)))
       let e = emit_op(e, opcode.MakeMethod)
-      emit_ir(e, IrDefineField(name))
+      emit_keyed(e, name, DefineField)
     }
 
     ast.MethodProperty(key:, value:) ->
@@ -4174,7 +4215,7 @@ fn emit_object_property(
     | ast.AccessorProperty(key: ast.KeyString(value: name, ..), value:, kind:) -> {
       let #(prefix, accessor) = property_accessor(kind)
       use e <- result.map(emit_method_value(e, value, Some(prefix <> name)))
-      emit_ir(e, IrDefineAccessor(name, accessor, True))
+      emit_keyed(e, name, DefineAccessor(_, accessor, True))
     }
 
     ast.AccessorProperty(key:, value:, kind:) -> {
@@ -4497,15 +4538,15 @@ fn emit_for_await_of(
   // F_next: errors in next/await/unwrap must not close (§14.7.5.6)
   let e = emit_ir(e, IrPushTry(catch_next, CatchOnly))
   let e = emit_op(e, opcode.Dup)
-  let e = emit_ir(e, IrGetField2("next"))
+  let e = emit_keyed(e, "next", GetField2)
   let e = emit_op(e, opcode.CallMethod(0))
   let e = emit_op(e, opcode.Await)
   let e = emit_op(e, opcode.IteratorCheckObject)
   // [result_obj, iter, ..base]
   let e = emit_op(e, opcode.Dup)
-  let e = emit_ir(e, IrGetField("done"))
+  let e = emit_keyed(e, "done", GetField)
   let e = emit_ir(e, IrJumpIfTrue(exhausted))
-  let e = emit_ir(e, IrGetField("value"))
+  let e = emit_keyed(e, "value", GetField)
   let e = emit_op(e, opcode.PopTry)
   // [value, iter, ..base]
   use e <- result.map(emit_for_of_iter_body(
@@ -4529,7 +4570,7 @@ fn emit_for_await_of(
   let e = emit_op(e, opcode.Swap)
   let e = emit_op(e, opcode.Dup)
   // [iter, iter, thrown, ..base]
-  let e = emit_ir(e, IrGetField2("return"))
+  let e = emit_keyed(e, "return", GetField2)
   let e = emit_op(e, opcode.Dup)
   let e = emit_ir(e, IrJumpIfNullish(no_ret_thr))
   // [ret_fn, iter, iter, thrown, ..base]
@@ -4701,7 +4742,7 @@ fn emit_single_object_prop(
     | ast.PatternProperty(key: ast.KeyString(value: name, ..), value:, ..) -> {
       // [src] -> dup -> GetField -> [val, src] -> bind -> [src]
       let e = emit_op(e, opcode.Dup)
-      let e = emit_ir(e, IrGetField(name))
+      let e = emit_keyed(e, name, GetField)
       use e <- result.map(emit_destructuring_bind(e, value, binding_kind))
       case has_rest {
         False -> #(e, n_excl)
@@ -5034,7 +5075,7 @@ fn emit_keyed_destructure_assign(
       use e <- result.map(emit_expr(e, object))
       e
       |> emit_op(opcode.Swap)
-      |> emit_ir(IrGetField(name))
+      |> emit_keyed(name, GetField)
       |> emit_put_field(prop)
       |> emit_op(opcode.Pop)
     }
@@ -5046,14 +5087,14 @@ fn emit_keyed_destructure_assign(
       use e <- result.map(emit_expr(e, key))
       e
       |> emit_op(opcode.Swap)
-      |> emit_ir(IrGetField(name))
+      |> emit_keyed(name, GetField)
       |> emit_op(opcode.PutElem)
       |> emit_op(opcode.Pop)
     }
     // identifier/pattern/default/super targets: GetV first is spec-correct
     SuperMember(..) | PlainTarget(_) -> {
       let e = emit_op(e, opcode.Dup)
-      let e = emit_ir(e, IrGetField(name))
+      let e = emit_keyed(e, name, GetField)
       emit_destructuring_assign(e, target)
     }
   }
@@ -5575,7 +5616,7 @@ fn compile_class_body(
         e
         |> emit_op(opcode.MakeClosure(ctor_idx))
         |> emit_op(opcode.Dup)
-        |> emit_ir(IrGetField("prototype"))
+        |> emit_keyed("prototype", GetField)
         |> emit_op(opcode.Swap)
         |> emit_op(opcode.MakeMethod)
         |> emit_op(opcode.Swap)
@@ -5668,7 +5709,7 @@ fn emit_attach_field_init(e: Emitter, init_idx: Option(Int)) -> Emitter {
     Some(idx) ->
       e
       |> emit_op(opcode.Dup)
-      |> emit_ir(IrGetField("prototype"))
+      |> emit_keyed("prototype", GetField)
       |> emit_op(opcode.MakeClosure(idx))
       |> emit_op(opcode.MakeMethod)
       |> emit_op(opcode.Swap)
@@ -5685,7 +5726,7 @@ fn with_method_target(
 ) -> Result(Emitter, EmitError) {
   let e = emit_op(e, opcode.Dup)
   let e = case on_prototype {
-    True -> emit_ir(e, IrGetField("prototype"))
+    True -> emit_keyed(e, "prototype", GetField)
     False -> e
   }
   use e <- result.map(body(e))
@@ -5770,19 +5811,18 @@ fn emit_class_methods(
         ..,
       ) -> {
       let #(fn_name, define_op) = case kind {
-        ast.MethodGet -> #(
-          "get " <> name,
-          IrDefineAccessor(name, opcode.Getter, False),
-        )
-        ast.MethodSet -> #(
-          "set " <> name,
-          IrDefineAccessor(name, opcode.Setter, False),
-        )
+        ast.MethodGet -> #("get " <> name, DefineAccessor(
+          _,
+          opcode.Getter,
+          False,
+        ))
+        ast.MethodSet -> #("set " <> name, DefineAccessor(
+          _,
+          opcode.Setter,
+          False,
+        ))
         // constructor already stripped by classify_class_body
-        ast.MethodMethod | ast.MethodConstructor -> #(
-          name,
-          IrDefineMethod(name),
-        )
+        ast.MethodMethod | ast.MethodConstructor -> #(name, DefineMethod)
       }
       use e <- with_method_target(e, on_prototype)
       use e <- result.map(make_method_closure(
@@ -5793,7 +5833,7 @@ fn emit_class_methods(
         is_gen,
         is_async,
       ))
-      emit_ir(e, define_op)
+      emit_keyed(e, name, define_op)
     }
     // function name left None: SetFunctionName from runtime keys not implemented
     ast_util.ClassMethodEl(
@@ -5944,7 +5984,7 @@ fn emit_field_init(e: Emitter, fi: FieldInit) -> Result(Emitter, EmitError) {
     NamedFieldInit(name:, init:) ->
       use_this(e, fn(e) {
         use e <- result.map(emit_named_expr(e, init, name))
-        emit_ir(e, IrDefineField(name))
+        emit_keyed(e, name, DefineField)
       })
     NumericFieldInit(value: n, init:) ->
       use_this(e, fn(e) {
