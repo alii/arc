@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/internal/int_math.{floor_div}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -33,13 +34,13 @@ import arc/rt/types.{
   InstantFromEpochNanoseconds, InstantRound, InstantSince, InstantSubtract,
   InstantToJson, InstantToLocaleString, InstantToString,
   InstantToZonedDateTimeIso, InstantUntil, InstantValueOf, JFloat, JInt, JNan,
-  JNegInf, JPosInf, KUndef, Named, NowInstant, NowPlainDateISO,
-  NowPlainDateTimeISO, NowPlainTimeISO, NowTimeZoneId, NowZonedDateTimeISO,
-  StringKey, TemporalDurationCtor, TemporalDurationGetter,
-  TemporalDurationMethod, TemporalDurationStatic, TemporalInstantCtor,
-  TemporalInstantGetter, TemporalInstantMethod, TemporalInstantStatic, TemporalN,
-  TemporalNowFn, TemporalPlainDateCtor, TemporalPlainDateGetter,
-  TemporalPlainDateMethod, TemporalPlainDateStatic, TemporalPlainDateTimeCtor,
+  JNegInf, JPosInf, KUndef, NowInstant, NowPlainDateISO, NowPlainDateTimeISO,
+  NowPlainTimeISO, NowTimeZoneId, NowZonedDateTimeISO, StringKey,
+  TemporalDurationCtor, TemporalDurationGetter, TemporalDurationMethod,
+  TemporalDurationStatic, TemporalInstantCtor, TemporalInstantGetter,
+  TemporalInstantMethod, TemporalInstantStatic, TemporalN, TemporalNowFn,
+  TemporalPlainDateCtor, TemporalPlainDateGetter, TemporalPlainDateMethod,
+  TemporalPlainDateStatic, TemporalPlainDateTimeCtor,
   TemporalPlainDateTimeGetter, TemporalPlainDateTimeMethod,
   TemporalPlainDateTimeStatic, TemporalPlainMonthDayCtor,
   TemporalPlainMonthDayGetter, TemporalPlainMonthDayMethod,

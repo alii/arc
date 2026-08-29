@@ -1,3 +1,7 @@
+import arc/bytecode/key.{
+  type PropertyKey, Index, Named, index_key, key_display_string, max_array_index,
+  max_array_length,
+}
 import arc/rt/builtins/array_from_async
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -11,30 +15,28 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ArrayNative, type BuiltinPair, type Handle, type JsElements,
-  type JsSlot, type JsVal, type Property, type PropertyKey, ArrayConstructor,
-  ArrayFrom, ArrayFromAsync, ArrayFromAsyncCloseReject,
-  ArrayFromAsyncLikeOnMapped, ArrayFromAsyncLikeOnValue, ArrayFromAsyncOnMapped,
-  ArrayFromAsyncOnNext, ArrayFromAsyncRejectWith, ArrayIsArray, ArrayIterEntries,
-  ArrayIterKeys, ArrayIterValues, ArrayIterator, ArrayN, ArrayObj, ArrayOf,
-  ArrayPrototypeAt, ArrayPrototypeConcat, ArrayPrototypeCopyWithin,
-  ArrayPrototypeEntries, ArrayPrototypeEvery, ArrayPrototypeFill,
-  ArrayPrototypeFilter, ArrayPrototypeFind, ArrayPrototypeFindIndex,
-  ArrayPrototypeFindLast, ArrayPrototypeFindLastIndex, ArrayPrototypeFlat,
-  ArrayPrototypeFlatMap, ArrayPrototypeForEach, ArrayPrototypeIncludes,
-  ArrayPrototypeIndexOf, ArrayPrototypeJoin, ArrayPrototypeKeys,
-  ArrayPrototypeLastIndexOf, ArrayPrototypeMap, ArrayPrototypePop,
-  ArrayPrototypePush, ArrayPrototypeReduce, ArrayPrototypeReduceRight,
-  ArrayPrototypeReverse, ArrayPrototypeShift, ArrayPrototypeSlice,
-  ArrayPrototypeSome, ArrayPrototypeSort, ArrayPrototypeSplice,
-  ArrayPrototypeToLocaleString, ArrayPrototypeToReversed, ArrayPrototypeToSorted,
-  ArrayPrototypeToSpliced, ArrayPrototypeToString, ArrayPrototypeUnshift,
-  ArrayPrototypeValues, ArrayPrototypeWith, DataProperty, Index, JFloat, JInt,
-  JNan, JNegInf, JPosInf, KHandle, KNull, KNum, KStr, KUndef, Named, NoElements,
-  ObjectPrototypeToString, Ordinary, ParsedDesc, ProxyObj, ReturnThis, SObject,
-  StringKey, StringObj, SymbolKey, classify, index_key, key_display_string,
-  max_array_length, mk_bool, mk_object, mk_string, mk_undefined,
-  symbol_is_concat_spreadable, symbol_iterator, symbol_species,
-  symbol_unscopables,
+  type JsSlot, type JsVal, type Property, ArrayConstructor, ArrayFrom,
+  ArrayFromAsync, ArrayFromAsyncCloseReject, ArrayFromAsyncLikeOnMapped,
+  ArrayFromAsyncLikeOnValue, ArrayFromAsyncOnMapped, ArrayFromAsyncOnNext,
+  ArrayFromAsyncRejectWith, ArrayIsArray, ArrayIterEntries, ArrayIterKeys,
+  ArrayIterValues, ArrayIterator, ArrayN, ArrayObj, ArrayOf, ArrayPrototypeAt,
+  ArrayPrototypeConcat, ArrayPrototypeCopyWithin, ArrayPrototypeEntries,
+  ArrayPrototypeEvery, ArrayPrototypeFill, ArrayPrototypeFilter,
+  ArrayPrototypeFind, ArrayPrototypeFindIndex, ArrayPrototypeFindLast,
+  ArrayPrototypeFindLastIndex, ArrayPrototypeFlat, ArrayPrototypeFlatMap,
+  ArrayPrototypeForEach, ArrayPrototypeIncludes, ArrayPrototypeIndexOf,
+  ArrayPrototypeJoin, ArrayPrototypeKeys, ArrayPrototypeLastIndexOf,
+  ArrayPrototypeMap, ArrayPrototypePop, ArrayPrototypePush, ArrayPrototypeReduce,
+  ArrayPrototypeReduceRight, ArrayPrototypeReverse, ArrayPrototypeShift,
+  ArrayPrototypeSlice, ArrayPrototypeSome, ArrayPrototypeSort,
+  ArrayPrototypeSplice, ArrayPrototypeToLocaleString, ArrayPrototypeToReversed,
+  ArrayPrototypeToSorted, ArrayPrototypeToSpliced, ArrayPrototypeToString,
+  ArrayPrototypeUnshift, ArrayPrototypeValues, ArrayPrototypeWith, DataProperty,
+  JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KNull, KNum, KStr, KUndef,
+  NoElements, ObjectPrototypeToString, Ordinary, ParsedDesc, ProxyObj,
+  ReturnThis, SObject, StringKey, StringObj, SymbolKey, classify, mk_bool,
+  mk_object, mk_string, mk_undefined, symbol_is_concat_spreadable,
+  symbol_iterator, symbol_species, symbol_unscopables,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bool
@@ -541,7 +543,7 @@ fn probe_index_if_present(
   this: JsVal,
   idx: Int,
 ) -> #(Option(JsVal), Agent) {
-  case classify(this), idx >= 0 && idx <= rt_types.max_array_index {
+  case classify(this), idx >= 0 && idx <= max_array_index {
     KHandle(h), True ->
       case rt_obj.t_get_own_index(st, h, idx) {
         rt_obj.OwnIndexValue(v) -> #(Some(v), st)

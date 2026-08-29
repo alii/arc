@@ -1,3 +1,6 @@
+import arc/bytecode/key.{
+  type PropertyKey, Index, Named, Private, canonical_key, index_key, key_to_text,
+}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
@@ -7,12 +10,12 @@ import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsNum, type JsVal, type JsonNative,
-  type PropertyKey, ArrayObj, BigIntObj, BooleanObj, Index, JFloat, JInt, JNan,
-  JNegInf, JPosInf, JsonIsRawJson, JsonN, JsonParse, JsonRawJson, JsonStringify,
-  KBig, KBool, KHandle, KNull, KNum, KStr, KSym, KUndef, Named, NumberObj,
-  Ordinary, RawJsonObj, SObject, SShapedObject, StringKey, StringObj, classify,
-  index_key, mk_bool, mk_null, mk_number, mk_object, mk_string, mk_undefined,
+  type Agent, type Handle, type JsNum, type JsVal, type JsonNative, ArrayObj,
+  BigIntObj, BooleanObj, JFloat, JInt, JNan, JNegInf, JPosInf, JsonIsRawJson,
+  JsonN, JsonParse, JsonRawJson, JsonStringify, KBig, KBool, KHandle, KNull,
+  KNum, KStr, KSym, KUndef, NumberObj, Ordinary, RawJsonObj, SObject,
+  SShapedObject, StringKey, StringObj, classify, mk_bool, mk_null, mk_number,
+  mk_object, mk_string, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -108,11 +111,7 @@ fn internalize_json_property(
   node: Option(ParseRecord),
 ) -> #(JsVal, Agent) {
   let #(val, st) =
-    rt_obj.t_get_prop(
-      st,
-      mk_object(holder),
-      StringKey(rt_types.canonical_key(name)),
-    )
+    rt_obj.t_get_prop(st, mk_object(holder), StringKey(canonical_key(name)))
   let node = fresh_record(node, val)
   let st = case classify(val) {
     KHandle(h) ->
@@ -123,7 +122,7 @@ fn internalize_json_property(
         }
         False -> {
           let #(keys, st) = enumerable_string_keys(st, h)
-          let keys = list.map(keys, rt_types.key_to_text)
+          let keys = list.map(keys, key_to_text)
           internalize_keys(st, ctx, h, keys, record_members(node))
         }
       }
@@ -205,7 +204,7 @@ fn replace_or_delete(
   name: String,
   new_element: JsVal,
 ) -> Agent {
-  let key = StringKey(rt_types.canonical_key(name))
+  let key = StringKey(canonical_key(name))
   case classify(new_element) {
     KUndef -> {
       let #(_, st) = rt_obj.t_delete_prop(st, h, key)
@@ -460,17 +459,17 @@ fn materialize_plain_entries(
 fn ffi_plain_props(
   entries: List(#(String, JsVal)),
   seq: Int,
-) -> Option(#(dict.Dict(rt_types.PropertyKey, rt_types.Property), Int))
+) -> Option(#(dict.Dict(PropertyKey, rt_types.Property), Int))
 
 fn plain_props(
   entries: List(#(String, JsVal)),
-  acc: dict.Dict(rt_types.PropertyKey, rt_types.Property),
+  acc: dict.Dict(PropertyKey, rt_types.Property),
   seq: Int,
-) -> dict.Dict(rt_types.PropertyKey, rt_types.Property) {
+) -> dict.Dict(PropertyKey, rt_types.Property) {
   case entries {
     [] -> acc
     [#(name, value), ..rest] -> {
-      let key = rt_types.canonical_key(name)
+      let key = canonical_key(name)
       case dict.get(acc, key) {
         Ok(first) -> {
           let prop =
@@ -524,12 +523,12 @@ fn materialize_object_entries(
 fn props_from_entries(
   st: Agent,
   entries: List(#(String, ParseRecord)),
-  acc: dict.Dict(rt_types.PropertyKey, rt_types.Property),
-) -> #(dict.Dict(rt_types.PropertyKey, rt_types.Property), Agent) {
+  acc: dict.Dict(PropertyKey, rt_types.Property),
+) -> #(dict.Dict(PropertyKey, rt_types.Property), Agent) {
   case entries {
     [] -> #(acc, st)
     [#(name, record), ..rest] -> {
-      let key = rt_types.canonical_key(name)
+      let key = canonical_key(name)
       let value = record_value(record)
       case dict.get(acc, key) {
         Ok(first) -> {
@@ -792,7 +791,7 @@ fn serialize_property(
   let #(val, st) = case key {
     Named(name) -> helpers.get_named(st, mk_object(holder), name)
     Index(i) -> helpers.get_index(st, mk_object(holder), i)
-    rt_types.Private(_) -> #(mk_undefined(), st)
+    Private(_) -> #(mk_undefined(), st)
   }
   let #(val, st) = case classify(val) {
     KHandle(_) | KBig(_) -> {
@@ -800,7 +799,7 @@ fn serialize_property(
       case rt_call.is_callable(st, to_json) {
         True ->
           call_in_caller_realm(st, ctx.caller, to_json, val, [
-            mk_string(rt_types.key_to_text(key)),
+            mk_string(key_to_text(key)),
           ])
         False -> #(val, st)
       }
@@ -810,7 +809,7 @@ fn serialize_property(
   let #(val, st) = case ctx.replacer {
     ReplacerFn(rf) ->
       call_in_caller_realm(st, ctx.caller, rf, mk_object(holder), [
-        mk_string(rt_types.key_to_text(key)),
+        mk_string(key_to_text(key)),
         val,
       ])
     NoReplacer | PropertyList(_) -> #(val, st)
@@ -893,7 +892,7 @@ fn serialize_object(
       let stack = [h.id, ..stack]
       let step_indent = indent <> ctx.gap
       let #(keys, st) = case ctx.replacer {
-        PropertyList(names) -> #(list.map(names, rt_types.canonical_key), st)
+        PropertyList(names) -> #(list.map(names, canonical_key), st)
         NoReplacer | ReplacerFn(_) -> enumerable_string_keys(st, h)
       }
       let #(partial, st) =
@@ -923,7 +922,7 @@ fn serialize_members(
             _ -> ": "
           }
           let member =
-            quote_tree(rt_types.key_to_text(k))
+            quote_tree(key_to_text(k))
             |> string_tree.append(sep)
             |> string_tree.append_tree(tree)
           serialize_members(st, ctx, stack, step_indent, h, rest, [

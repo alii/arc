@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/host_hooks.{type HostHooks}
 import arc/rt/async as rt_async
 import arc/rt/builtins/array as b_array
@@ -47,7 +48,7 @@ import arc/rt/types.{
   BooleanConstructor, BooleanN, BooleanObj, ConsoleN, DataProperty, DataViewN,
   DateN, DisposableStackN, DomExceptionN, ErrorN, FinalizationRegistryN,
   FunctionN, GeneratorN, GlobalN, HostFn, HostFnEntry, IntlN, IteratorN, JInt,
-  JNan, JPosInf, JsOps, JsStore, JsonN, KHandle, MapN, MathN, Named, NoElements,
+  JNan, JPosInf, JsOps, JsStore, JsonN, KHandle, MapN, MathN, NoElements,
   NumberConstructor, NumberN, NumberObj, ObjectN, PromiseN, PromiseRejectFn,
   PromiseResolveFn, ProxyN, Realm, ReflectN, RegExpN, ReturnThis, SObject, SetN,
   StringConstructor, StringKey, StringN, StringObj, SymbolConstructor, SymbolN,

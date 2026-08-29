@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/internal/digits
 import arc/rt/buffer
 import arc/rt/builtins/common
@@ -9,8 +10,8 @@ import arc/rt/store as rt_store
 import arc/rt/typed_array_ffi.{splice_clamped}
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, ArrayBufferObj, Bytes, JInt, KHandle,
-  KStr, KUndef, Named, NumKind, SObject, StringKey, TypedArrayObj, Uint8Kind,
-  classify, mk_number, mk_object, mk_string, mk_undefined,
+  KStr, KUndef, NumKind, SObject, StringKey, TypedArrayObj, Uint8Kind, classify,
+  mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array

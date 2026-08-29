@@ -1,3 +1,4 @@
+import arc/bytecode/key.{type PropertyKey, Index}
 import arc/rt/elements
 import arc/rt/store as rt_store
 import arc/rt/typed_array_ffi.{
@@ -6,11 +7,10 @@ import arc/rt/typed_array_ffi.{
 }
 import arc/rt/types.{
   type Agent, type BigIntKind, type BufferStorage, type Handle, type JsElements,
-  type JsNum, type JsVal, type NumberKind, type Property, type PropertyKey,
-  type TypedArrayKind, AccessorProperty, ArgumentsObj, ArrayBufferObj, ArrayObj,
-  BigKind, DataProperty, Index, JFloat, JInt, JNan, JNegInf, JPosInf, KBig,
-  KHandle, KNum, NumKind, Ordinary, SObject, SShapedObject, classify, mk_bigint,
-  mk_number,
+  type JsNum, type JsVal, type NumberKind, type Property, type TypedArrayKind,
+  AccessorProperty, ArgumentsObj, ArrayBufferObj, ArrayObj, BigKind,
+  DataProperty, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KHandle, KNum,
+  NumKind, Ordinary, SObject, SShapedObject, classify, mk_bigint, mk_number,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array

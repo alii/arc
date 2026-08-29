@@ -1,10 +1,11 @@
+import arc/bytecode/key.{Named}
 import arc/host.{AlreadySettled, Resumed, StaleTicket, State}
 import arc/interp/safepoint
 import arc/rt/async as rt_async
 import arc/rt/gc as rt_gc
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, type PromiseState, JInt, KHandle, Named,
+  type Agent, type Handle, type JsVal, type PromiseState, JInt, KHandle,
   PromiseFulfilled, PromisePending, PromiseRejected, StringKey, classify,
   mk_number, mk_string, mk_undefined,
 }

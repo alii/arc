@@ -1,8 +1,9 @@
+import arc/bytecode/key.{canonical_key}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type JsVal, JInt, KNum, KStr, StringKey, canonical_key, classify,
-  mk_bool, mk_number, mk_object, mk_string,
+  type Agent, type JsVal, JInt, KNum, KStr, StringKey, classify, mk_bool,
+  mk_number, mk_object, mk_string,
 }
 import gleam/list
 import gleam/option.{Some}

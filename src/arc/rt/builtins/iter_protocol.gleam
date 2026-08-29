@@ -1,3 +1,4 @@
+import arc/bytecode/key.{type PropertyKey, Index, Named}
 import arc/internal/ordered_entries
 import arc/internal/tree_array
 import arc/rt/builtins/helpers
@@ -11,13 +12,12 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsElements, type JsOps, type JsSlot, type JsVal,
-  type Property, type PropertyKey, ArrayObj, AsyncFromSyncIterator, DataProperty,
-  Dense, Index, IteratorRecord, JInt, KHandle, KNull, KStr, KUndef,
-  MapIterEntries, MapIterKeys, MapIterValues, MapIterator, MapObj, Named,
-  NoElements, SObject, SetIterEntries, SetIterValues, SetIterator, SetObj,
-  StringIterator, StringKey, SymbolKey, TypeErr, classify, map_key_to_js,
-  mk_number, mk_object, mk_string, mk_undefined, symbol_async_iterator,
-  symbol_iterator,
+  type Property, ArrayObj, AsyncFromSyncIterator, DataProperty, Dense,
+  IteratorRecord, JInt, KHandle, KNull, KStr, KUndef, MapIterEntries,
+  MapIterKeys, MapIterValues, MapIterator, MapObj, NoElements, SObject,
+  SetIterEntries, SetIterValues, SetIterator, SetObj, StringIterator, StringKey,
+  SymbolKey, TypeErr, classify, map_key_to_js, mk_number, mk_object, mk_string,
+  mk_undefined, symbol_async_iterator, symbol_iterator,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict.{type Dict}

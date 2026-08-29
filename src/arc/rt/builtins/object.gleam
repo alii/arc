@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Index, Named, key_to_text}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
 import arc/rt/builtins/iter_protocol
@@ -8,9 +9,9 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type ObjectKey,
   type ObjectNative, type ParsedDesc, type Property, AccessorProperty,
-  ArgumentsObj, BooleanObj, DataProperty, DateObj, ErrorObj, Index, JInt, KBig,
-  KBool, KBytecode, KCompiled, KHandle, KNative, KNull, KNum, KStr, KSym, KUndef,
-  Named, NumberObj, ObjectAssign, ObjectConstructor, ObjectCreate,
+  ArgumentsObj, BooleanObj, DataProperty, DateObj, ErrorObj, JInt, KBig, KBool,
+  KBytecode, KCompiled, KHandle, KNative, KNull, KNum, KStr, KSym, KUndef,
+  NumberObj, ObjectAssign, ObjectConstructor, ObjectCreate,
   ObjectDefineProperties, ObjectDefineProperty, ObjectEntries, ObjectFreeze,
   ObjectFromEntries, ObjectGetOwnPropertyDescriptor,
   ObjectGetOwnPropertyDescriptors, ObjectGetOwnPropertyNames,
@@ -366,10 +367,7 @@ fn own_keys_impl(
           #(names, st)
         }
       }
-      ok_array(
-        st,
-        list.map(names, fn(pk) { mk_string(rt_types.key_to_text(pk)) }),
-      )
+      ok_array(st, list.map(names, fn(pk) { mk_string(key_to_text(pk)) }))
     }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
     KStr(s) -> {
@@ -439,10 +437,7 @@ fn collect_enumerable(
         False -> collect_enumerable(st, h, rest, acc)
         True -> {
           let #(v, st) = rt_obj.t_get_prop(st, mk_object(h), k)
-          collect_enumerable(st, h, rest, [
-            #(rt_types.key_to_text(pk), v),
-            ..acc
-          ])
+          collect_enumerable(st, h, rest, [#(key_to_text(pk), v), ..acc])
         }
       }
     }
@@ -1196,7 +1191,7 @@ fn string_index_object_keys(i: Int, len: Int) -> List(ObjectKey) {
 
 fn object_key_to_val(key: ObjectKey) -> JsVal {
   case key {
-    StringKey(pk) -> mk_string(rt_types.key_to_text(pk))
+    StringKey(pk) -> mk_string(key_to_text(pk))
     SymbolKey(id) -> mk_symbol(id)
   }
 }
@@ -1208,7 +1203,7 @@ fn ok_array(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
 
 fn key_text(key: ObjectKey) -> String {
   case key {
-    StringKey(pk) -> rt_types.key_to_text(pk)
+    StringKey(pk) -> key_to_text(pk)
     SymbolKey(sym) -> rt_types.symbol_descriptive_string(sym)
   }
 }

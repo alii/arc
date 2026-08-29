@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/compiler
 import arc/internal/tuple_array
 import arc/parser
@@ -7,7 +8,7 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, BirthPending, BirthSettled, DataProperty, JInt,
-  KBytecode, KHandle, KNum, KStr, Named, SObject, StringKey, classify,
+  KBytecode, KHandle, KNum, KStr, SObject, StringKey, classify,
 }
 import gleam/list
 import gleam/option.{None, Some}

@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named, index_key, max_array_length}
 import arc/rt/async as rt_async
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
@@ -10,9 +11,8 @@ import arc/rt/types.{
   type NativeToken, ArrayFromAsyncCloseReject, ArrayFromAsyncLikeOnMapped,
   ArrayFromAsyncLikeOnValue, ArrayFromAsyncOnMapped, ArrayFromAsyncOnNext,
   ArrayFromAsyncRejectWith, ArrayN, ArrayObj, FromAsyncCtx, FromAsyncLikeCtx,
-  JInt, KHandle, KNull, KUndef, Named, SObject, StringKey, SymbolKey, classify,
-  index_key, max_array_length, mk_number, mk_object, mk_undefined,
-  symbol_async_iterator, symbol_iterator,
+  JInt, KHandle, KNull, KUndef, SObject, StringKey, SymbolKey, classify,
+  mk_number, mk_object, mk_undefined, symbol_async_iterator, symbol_iterator,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict

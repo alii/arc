@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/internal/host_time
 import arc/internal/int_math.{floor_div, floor_mod as math_mod}
 import arc/internal/temporal_calendar as tcal
@@ -19,7 +20,7 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type ObjKind, type TemporalProtos,
   type TimeZone, HintString, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KNum,
-  KStr, KUndef, Named, SObject, StringKey, TemporalDate, TemporalDateTime,
+  KStr, KUndef, SObject, StringKey, TemporalDate, TemporalDateTime,
   TemporalDuration, TemporalInstant, TemporalMonthDay, TemporalObj, TemporalTime,
   TemporalYearMonth, TemporalZonedDateTime, TzNamed, TzOffset, TzUtc, classify,
   mk_object, mk_undefined,

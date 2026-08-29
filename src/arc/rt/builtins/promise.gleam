@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named, canonical_key}
 import arc/internal/tree_array
 import arc/rt/async as rt_async
 import arc/rt/builtins/common
@@ -15,7 +16,7 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type ObjectKey,
   type PromiseKeyedKind, type PromiseNative, ArrayObj, Dense, JInt, KHandle,
-  KeyedFulfilled, KeyedRejected, KeyedValue, Named, NoElements, Ordinary,
+  KeyedFulfilled, KeyedRejected, KeyedValue, NoElements, Ordinary,
   PromiseAllKeyedStatic, PromiseAllResolveElement, PromiseAllSettledElement,
   PromiseAllSettledKeyedStatic, PromiseAllSettledStatic, PromiseAllStatic,
   PromiseAnyRejectElement, PromiseAnyStatic, PromiseCapabilityExecutor,
@@ -775,7 +776,7 @@ fn create_keyed_result(
 
 fn key_of_value(v: JsVal) -> option.Option(ObjectKey) {
   case classify(v) {
-    rt_types.KStr(s) -> Some(StringKey(rt_types.canonical_key(s)))
+    rt_types.KStr(s) -> Some(StringKey(canonical_key(s)))
     rt_types.KSym(sym) -> Some(SymbolKey(sym))
     _ -> None
   }

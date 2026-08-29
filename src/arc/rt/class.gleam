@@ -1,15 +1,17 @@
+import arc/bytecode/key.{
+  type PropertyKey, Named, Private, key_display_string, private_display_name,
+  private_key_text,
+}
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type FnFlags, type Handle, type JsOps, type JsVal,
-  type MethodInstallKind, type ObjectKey, type Property, type PropertyKey,
-  AccessorProperty, DataProperty, KBytecode, KCompiled, KHandle, KNull, KStr,
-  KTdz, MIGetter, MIMethod, MISetter, MIStatic, MIStaticGetter, MIStaticSetter,
-  Named, Private, SObject, StringKey, SymbolKey, classify, mk_object, mk_string,
-  mk_undefined,
+  type MethodInstallKind, type ObjectKey, type Property, AccessorProperty,
+  DataProperty, KBytecode, KCompiled, KHandle, KNull, KStr, KTdz, MIGetter,
+  MIMethod, MISetter, MIStatic, MIStaticGetter, MIStaticSetter, SObject,
+  StringKey, SymbolKey, classify, mk_object, mk_string, mk_undefined,
 } as rt_types
-import gleam/bit_array
 import gleam/dict
 import gleam/option.{type Option, None, Some}
 
@@ -22,16 +24,16 @@ fn throw_type_error(st: Agent, msg: String) -> a {
   rt_store.t_throw(st, e)
 }
 
-fn priv_key_bytes(v: JsVal) -> BitArray {
+fn priv_key_text(v: JsVal) -> String {
   case classify(v) {
-    KStr(s) -> bit_array.from_string(s)
+    KStr(s) -> s
     _ -> panic as "rt_class: private-name JsVal is not KStr (M16 invariant)"
   }
 }
 
 fn object_key_display(key: ObjectKey) -> String {
   case key {
-    StringKey(pk) -> rt_types.key_display_string(pk)
+    StringKey(pk) -> key_display_string(pk)
     SymbolKey(sym) -> rt_types.symbol_descriptive_string(sym)
   }
 }
@@ -39,11 +41,7 @@ fn object_key_display(key: ObjectKey) -> String {
 // §15.7.14 mint a fresh private name
 pub fn t_new_private_name(st: Agent, source: String) -> #(JsVal, Agent) {
   let #(uid, st) = rt_store.t_next_private_uid(st)
-  let bytes = rt_types.private_key_text(source, uid)
-  // valid utf-8 since nul is a codepoint
-  let assert Ok(text) = bit_array.to_string(bytes)
-    as "private_key_text is UTF-8 by construction"
-  #(mk_string(text), st)
+  #(mk_string(private_key_text(source, uid)), st)
 }
 
 // §15.4.4 makemethod, no-op on native/bound
@@ -220,7 +218,7 @@ pub fn t_define_method(
 // symbol key names the fn "[description]"
 fn key_fn_name(key: ObjectKey) -> String {
   case key {
-    StringKey(pk) -> rt_types.key_display_string(pk)
+    StringKey(pk) -> key_display_string(pk)
     SymbolKey(sym) ->
       case rt_types.symbol_description(sym) {
         Some(d) -> "[" <> d <> "]"
@@ -245,9 +243,9 @@ pub fn t_private_define(
   priv_key: JsVal,
   v: JsVal,
 ) -> Agent {
-  let bytes = priv_key_bytes(priv_key)
-  let st = check_private_add(st, obj, bytes)
-  raw_define_private_data(st, obj, Private(bytes), v, True)
+  let text = priv_key_text(priv_key)
+  let st = check_private_add(st, obj, text)
+  raw_define_private_data(st, obj, Private(text), v, True)
 }
 
 // §7.3.29; home_object already set at class definition
@@ -258,12 +256,12 @@ pub fn t_define_private(
   fn_v: JsVal,
   kind: MethodInstallKind,
 ) -> Agent {
-  let bytes = priv_key_bytes(priv_key)
-  let key = Private(bytes)
+  let text = priv_key_text(priv_key)
+  let key = Private(text)
   case kind {
     // non-writable so private set rejects methods
     MIMethod | MIStatic -> {
-      let st = check_private_add(st, obj, bytes)
+      let st = check_private_add(st, obj, text)
       raw_define_private_data(st, obj, key, fn_v, False)
     }
     // same accessor half twice is a typeerror
@@ -274,7 +272,7 @@ pub fn t_define_private(
       }
       let existing = rt_obj.t_ordinary_own_property(st, obj, StringKey(key))
       let st = case existing {
-        None -> check_private_add(st, obj, bytes)
+        None -> check_private_add(st, obj, text)
         Some(AccessorProperty(get:, set:, ..)) ->
           case
             is_getter
@@ -282,27 +280,27 @@ pub fn t_define_private(
             || !is_getter
             && option.is_some(set)
           {
-            True -> throw_private_double_init(st, bytes, "private accessor ")
+            True -> throw_private_double_init(st, text, "private accessor ")
             False -> st
           }
         Some(DataProperty(..)) ->
-          throw_private_double_init(st, bytes, "private accessor ")
+          throw_private_double_init(st, text, "private accessor ")
       }
       raw_merge_private_accessor(st, obj, key, existing, fn_v, is_getter)
     }
   }
 }
 
-fn check_private_add(st: Agent, obj: Handle, bytes: BitArray) -> Agent {
-  case rt_obj.t_ordinary_own_property(st, obj, StringKey(Private(bytes))) {
-    Some(_) -> throw_private_double_init(st, bytes, "")
+fn check_private_add(st: Agent, obj: Handle, text: String) -> Agent {
+  case rt_obj.t_ordinary_own_property(st, obj, StringKey(Private(text))) {
+    Some(_) -> throw_private_double_init(st, text, "")
     None ->
       case rt_obj.t_ordinary_is_extensible(st, obj) {
         False ->
           throw_type_error(
             st,
             "Cannot define private member "
-              <> rt_types.private_display_name(bytes)
+              <> private_display_name(text)
               <> " on a non-extensible object",
           )
         True -> st
@@ -310,12 +308,12 @@ fn check_private_add(st: Agent, obj: Handle, bytes: BitArray) -> Agent {
   }
 }
 
-fn throw_private_double_init(st: Agent, bytes: BitArray, kind: String) -> a {
+fn throw_private_double_init(st: Agent, text: String, kind: String) -> a {
   throw_type_error(
     st,
     "Cannot initialize "
       <> kind
-      <> rt_types.private_display_name(bytes)
+      <> private_display_name(text)
       <> " twice on the same object",
   )
 }
@@ -394,11 +392,11 @@ pub fn t_private_get(
   obj: JsVal,
   priv_key: JsVal,
 ) -> #(JsVal, Agent) {
-  let bytes = priv_key_bytes(priv_key)
-  let name = rt_types.private_display_name(bytes)
+  let text = priv_key_text(priv_key)
+  let name = private_display_name(text)
   case classify(obj) {
     KHandle(h) ->
-      case rt_obj.t_ordinary_own_property(st, h, StringKey(Private(bytes))) {
+      case rt_obj.t_ordinary_own_property(st, h, StringKey(Private(text))) {
         Some(DataProperty(value:, ..)) -> #(value, st)
         Some(AccessorProperty(get: Some(getter), ..)) ->
           js_ops(st).call(st, getter, obj, [])
@@ -427,9 +425,9 @@ pub fn t_private_set(
   priv_key: JsVal,
   v: JsVal,
 ) -> #(JsVal, Agent) {
-  let bytes = priv_key_bytes(priv_key)
-  let name = rt_types.private_display_name(bytes)
-  let key = Private(bytes)
+  let text = priv_key_text(priv_key)
+  let name = private_display_name(text)
+  let key = Private(text)
   case classify(obj) {
     KHandle(h) ->
       case rt_obj.t_ordinary_own_property(st, h, StringKey(key)) {
@@ -488,19 +486,19 @@ pub fn t_private_set(
 
 // §13.10.1 #x in obj
 pub fn t_private_in(st: Agent, obj: JsVal, priv_key: JsVal) -> Bool {
-  let bytes = priv_key_bytes(priv_key)
+  let text = priv_key_text(priv_key)
   case classify(obj) {
     KHandle(h) ->
       option.is_some(rt_obj.t_ordinary_own_property(
         st,
         h,
-        StringKey(Private(bytes)),
+        StringKey(Private(text)),
       ))
     _ ->
       throw_type_error(
         st,
         "Cannot use 'in' operator to search for private name "
-          <> rt_types.private_display_name(bytes)
+          <> private_display_name(text)
           <> " in non-object",
       )
   }

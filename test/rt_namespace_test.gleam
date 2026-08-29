@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named, canonical_key}
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
@@ -5,8 +6,8 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type ParsedDesc, DataProperty, JInt, KNum,
-  KStr, KUndef, Named, ParsedDesc, SBox, StringKey, SymbolKey, canonical_key,
-  classify, mk_number, mk_object, mk_string, mk_tdz, mk_undefined,
+  KStr, KUndef, ParsedDesc, SBox, StringKey, SymbolKey, classify, mk_number,
+  mk_object, mk_string, mk_tdz, mk_undefined,
 }
 import gleam/list
 import gleam/option.{None, Some}

@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named, canonical_key}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
@@ -10,28 +11,28 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type StringNative,
-  type SymbolId, JFloat, JInt, JNan, KHandle, KNull, KStr, KUndef, Named,
-  NoElements, SObject, StringConstructor, StringFromCharCode,
-  StringFromCodePoint, StringIterator, StringKey, StringN, StringObj,
-  StringPrototypeAnchor, StringPrototypeAt, StringPrototypeBig,
-  StringPrototypeBlink, StringPrototypeBold, StringPrototypeCharAt,
-  StringPrototypeCharCodeAt, StringPrototypeCodePointAt, StringPrototypeConcat,
-  StringPrototypeEndsWith, StringPrototypeFixed, StringPrototypeFontcolor,
-  StringPrototypeFontsize, StringPrototypeIncludes, StringPrototypeIndexOf,
-  StringPrototypeIsWellFormed, StringPrototypeItalics,
-  StringPrototypeLastIndexOf, StringPrototypeLink, StringPrototypeLocaleCompare,
-  StringPrototypeMatch, StringPrototypeMatchAll, StringPrototypeNormalize,
-  StringPrototypePadEnd, StringPrototypePadStart, StringPrototypeRepeat,
-  StringPrototypeReplace, StringPrototypeReplaceAll, StringPrototypeSearch,
-  StringPrototypeSlice, StringPrototypeSmall, StringPrototypeSplit,
-  StringPrototypeStartsWith, StringPrototypeStrike, StringPrototypeSub,
-  StringPrototypeSubstr, StringPrototypeSubstring, StringPrototypeSup,
-  StringPrototypeSymbolIterator, StringPrototypeToLocaleLowerCase,
-  StringPrototypeToLocaleUpperCase, StringPrototypeToLowerCase,
-  StringPrototypeToString, StringPrototypeToUpperCase,
-  StringPrototypeToWellFormed, StringPrototypeTrim, StringPrototypeTrimEnd,
-  StringPrototypeTrimStart, StringPrototypeValueOf, StringRaw, classify, mk_bool,
-  mk_number, mk_object, mk_string, mk_undefined, well_known_symbol_description,
+  type SymbolId, JFloat, JInt, JNan, KHandle, KNull, KStr, KUndef, NoElements,
+  SObject, StringConstructor, StringFromCharCode, StringFromCodePoint,
+  StringIterator, StringKey, StringN, StringObj, StringPrototypeAnchor,
+  StringPrototypeAt, StringPrototypeBig, StringPrototypeBlink,
+  StringPrototypeBold, StringPrototypeCharAt, StringPrototypeCharCodeAt,
+  StringPrototypeCodePointAt, StringPrototypeConcat, StringPrototypeEndsWith,
+  StringPrototypeFixed, StringPrototypeFontcolor, StringPrototypeFontsize,
+  StringPrototypeIncludes, StringPrototypeIndexOf, StringPrototypeIsWellFormed,
+  StringPrototypeItalics, StringPrototypeLastIndexOf, StringPrototypeLink,
+  StringPrototypeLocaleCompare, StringPrototypeMatch, StringPrototypeMatchAll,
+  StringPrototypeNormalize, StringPrototypePadEnd, StringPrototypePadStart,
+  StringPrototypeRepeat, StringPrototypeReplace, StringPrototypeReplaceAll,
+  StringPrototypeSearch, StringPrototypeSlice, StringPrototypeSmall,
+  StringPrototypeSplit, StringPrototypeStartsWith, StringPrototypeStrike,
+  StringPrototypeSub, StringPrototypeSubstr, StringPrototypeSubstring,
+  StringPrototypeSup, StringPrototypeSymbolIterator,
+  StringPrototypeToLocaleLowerCase, StringPrototypeToLocaleUpperCase,
+  StringPrototypeToLowerCase, StringPrototypeToString,
+  StringPrototypeToUpperCase, StringPrototypeToWellFormed, StringPrototypeTrim,
+  StringPrototypeTrimEnd, StringPrototypeTrimStart, StringPrototypeValueOf,
+  StringRaw, classify, mk_bool, mk_number, mk_object, mk_string, mk_undefined,
+  well_known_symbol_description,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/int
@@ -1018,7 +1019,7 @@ fn string_raw_loop(
     rt_obj.t_get_prop(
       st,
       raw_val,
-      StringKey(rt_types.canonical_key(int.to_string(index))),
+      StringKey(canonical_key(int.to_string(index))),
     )
   let #(lit, st) = rt_val.t_to_string(st, lit_val)
   let acc_rev = [lit, ..acc_rev]

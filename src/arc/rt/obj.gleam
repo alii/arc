@@ -1,3 +1,6 @@
+import arc/bytecode/key.{
+  type PropertyKey, Index, Named, Private, canonical_key, index_key, key_to_text,
+}
 import arc/internal/tree_array
 import arc/rt/buffer
 import arc/rt/bytecode.{FuncTemplate}
@@ -8,13 +11,12 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsElements, type JsOps, type JsSlot,
   type JsStore, type JsVal, type ObjKind, type ObjectKey, type ParsedDesc,
-  type Property, type PropertyKey, type SymbolId, type TypedArrayKind,
-  AccessorProperty, Agent, ArgumentsObj, ArrayObj, BirthPending, BirthSettled,
-  DataProperty, Dense, Index, JsStore, KBytecode, KCompiled, KHandle, KNull,
-  KTdz, KUndef, ModuleNamespace, Named, NoElements, Ordinary, ParsedDesc,
-  Private, ProxyObj, SAsyncContext, SAsyncGen, SBox, SDisposeCapability,
-  SGenerator, SObject, SPromiseData, SShapedObject, ShapeDesc, StringKey,
-  StringObj, SymbolKey, TypeErr, TypedArrayObj,
+  type Property, type SymbolId, type TypedArrayKind, AccessorProperty, Agent,
+  ArgumentsObj, ArrayObj, BirthPending, BirthSettled, DataProperty, Dense,
+  JsStore, KBytecode, KCompiled, KHandle, KNull, KTdz, KUndef, ModuleNamespace,
+  NoElements, Ordinary, ParsedDesc, ProxyObj, SAsyncContext, SAsyncGen, SBox,
+  SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
+  ShapeDesc, StringKey, StringObj, SymbolKey, TypeErr, TypedArrayObj,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -64,7 +66,7 @@ fn own_property_shaped(
   case key {
     Private(_) -> None
     _ ->
-      case dict.get(offsets, bit_array.from_string(rt_types.key_to_text(key))) {
+      case dict.get(offsets, bit_array.from_string(key_to_text(key))) {
         Ok(off) ->
           Some(DataProperty(
             value: rt_types.shape_slots_get(slots, off),
@@ -127,7 +129,7 @@ pub fn as_sobject(slot: JsSlot) -> JsSlot {
         dict.fold(offsets, dict.new(), fn(acc, key_bin, off) {
           let value = rt_types.shape_slots_get(slots, off)
           let key = case bit_array.to_string(key_bin) {
-            Ok(s) -> rt_types.canonical_key(s)
+            Ok(s) -> canonical_key(s)
             Error(Nil) -> Named("")
           }
           dict.insert(
@@ -365,28 +367,28 @@ fn desc_is_data(d: ParsedDesc) -> Bool {
 
 fn key_text(key: ObjectKey) -> String {
   case key {
-    StringKey(pk) -> rt_types.key_to_text(pk)
+    StringKey(pk) -> key_to_text(pk)
     SymbolKey(sym) -> rt_types.symbol_descriptive_string(sym)
   }
 }
 
 fn key_quoted(key: ObjectKey) -> String {
   case key {
-    StringKey(pk) -> "'" <> rt_types.key_to_text(pk) <> "'"
+    StringKey(pk) -> "'" <> key_to_text(pk) <> "'"
     SymbolKey(_) -> "[symbol]"
   }
 }
 
 pub fn object_key_value(key: ObjectKey) -> JsVal {
   case key {
-    StringKey(pk) -> rt_types.mk_string(rt_types.key_to_text(pk))
+    StringKey(pk) -> rt_types.mk_string(key_to_text(pk))
     SymbolKey(sym) -> rt_types.mk_symbol(sym)
   }
 }
 
 fn object_key_of_value(v: JsVal) -> Option(ObjectKey) {
   case rt_types.classify(v) {
-    rt_types.KStr(s) -> Some(StringKey(rt_types.canonical_key(s)))
+    rt_types.KStr(s) -> Some(StringKey(canonical_key(s)))
     rt_types.KSym(sym) -> Some(SymbolKey(sym))
     _ -> None
   }
@@ -1797,7 +1799,7 @@ fn has_from(st: Agent, h: Handle, key: ObjectKey) -> #(Bool, Agent) {
     -> #(True, st)
     SObject(kind: ModuleNamespace(exports:), symbol_props:, ..), _ -> #(
       case key {
-        StringKey(pk) -> dict.has_key(exports, rt_types.key_to_text(pk))
+        StringKey(pk) -> dict.has_key(exports, key_to_text(pk))
         SymbolKey(sym) ->
           option.is_some(own_symbol_property_of(symbol_props, sym))
       },
@@ -1858,7 +1860,7 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
         ProxyObj(target:, handler:, revoked:), _ ->
           proxy_delete(st, Proxy(target:, handler:, revoked:), key)
         ModuleNamespace(exports:), _ -> #(
-          !dict.has_key(exports, rt_types.key_to_text(pk)),
+          !dict.has_key(exports, key_to_text(pk)),
           st,
         )
         ArrayObj(_), Named("length") -> #(False, st)
@@ -2058,7 +2060,7 @@ fn for_in_keys_loop(
           case key {
             SymbolKey(_) -> state
             StringKey(pk) -> {
-              let name = rt_types.key_to_text(pk)
+              let name = key_to_text(pk)
               case set.contains(s, name) {
                 True -> state
                 False -> {
@@ -2242,7 +2244,7 @@ fn namespace_get(
   exports: Dict(String, Handle),
   key: PropertyKey,
 ) -> #(JsVal, Agent) {
-  let name = rt_types.key_to_text(key)
+  let name = key_to_text(key)
   case dict.get(exports, name) {
     Error(Nil) -> #(rt_types.mk_undefined(), st)
     Ok(cell) -> #(namespace_binding_value(st, name, cell), st)
@@ -2255,7 +2257,7 @@ fn namespace_own_property(
   exports: Dict(String, Handle),
   key: PropertyKey,
 ) -> Option(Property) {
-  let name = rt_types.key_to_text(key)
+  let name = key_to_text(key)
   use cell <- option.map(dict.get(exports, name) |> option.from_result)
   DataProperty(
     value: namespace_binding_value(st, name, cell),
@@ -2273,7 +2275,7 @@ fn namespace_define(
   key: PropertyKey,
   desc: ParsedDesc,
 ) -> #(Bool, Agent) {
-  let name = rt_types.key_to_text(key)
+  let name = key_to_text(key)
   case dict.get(exports, name) {
     Error(Nil) -> #(False, st)
     Ok(cell) -> {
@@ -2979,7 +2981,7 @@ fn gather_keys_via_get(
   acc: List(ObjectKey),
 ) -> #(List(ObjectKey), Agent) {
   use <- bool.guard(idx >= len, #(list.reverse(acc), st))
-  let #(item, st) = t_get_prop(st, obj, StringKey(rt_types.index_key(idx)))
+  let #(item, st) = t_get_prop(st, obj, StringKey(index_key(idx)))
   case object_key_of_value(item) {
     Some(k) -> gather_keys_via_get(st, obj, idx + 1, len, [k, ..acc])
     None ->
@@ -3377,7 +3379,7 @@ pub fn t_global_typeof(st: Agent, name: BitArray) -> #(String, Agent) {
 
 fn binary_key(name: BitArray) -> PropertyKey {
   case bit_array.to_string(name) {
-    Ok(s) -> rt_types.canonical_key(s)
+    Ok(s) -> canonical_key(s)
     Error(_) -> Named("")
   }
 }

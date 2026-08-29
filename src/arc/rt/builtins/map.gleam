@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/internal/ordered_entries
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
@@ -11,7 +12,7 @@ import arc/rt/types.{
   MapConstructor, MapDelete, MapEntries, MapForEach, MapGet, MapGetOrInsert,
   MapGetOrInsertComputed, MapGetSize, MapGroupBy, MapHas, MapIterEntries,
   MapIterKeys, MapIterValues, MapIterator, MapKeys, MapN, MapObj, MapSet,
-  MapValues, Named, NoElements, SObject, StringKey, classify, js_to_map_key,
+  MapValues, NoElements, SObject, StringKey, classify, js_to_map_key,
   map_key_to_js, mk_bool, mk_number, mk_object, mk_undefined, symbol_iterator,
 }
 import arc/rt/val as rt_val

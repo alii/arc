@@ -1,3 +1,4 @@
+import arc/bytecode/key.{canonical_key}
 import arc/rt/builtins as rt_builtins
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call.{type Frame, NormalCompletion, ThrowCompletion} as rt_call
@@ -8,8 +9,8 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledFn, type JsVal, Agent, BirthSettled, FnFlags,
   FrameInfo, JFloat, JInt, JNegInf, JPosInf, JsOps, JsStore, KBool, KBytecode,
-  KHandle, KNum, KStr, NoElements, SObject, StringKey, canonical_key, classify,
-  mk_null, mk_number, mk_object, mk_string, mk_undefined,
+  KHandle, KNum, KStr, NoElements, SObject, StringKey, classify, mk_null,
+  mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict

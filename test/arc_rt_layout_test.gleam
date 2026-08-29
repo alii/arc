@@ -1,5 +1,6 @@
 //// arc_rt_layout.hrl indices must match the gleam records
 
+import arc/bytecode/key.{Index, Named, Private}
 import arc/bytecode/opcode
 import arc/internal/tree_array
 import arc/interp/ffi
@@ -11,11 +12,10 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledFn, type FnFlags, type JsVal, type ShapeSlots,
   AccessorProperty, ArgumentsObj, ArrayObj, BirthPending, BirthSettled,
-  DataProperty, Dense, FnFlags, Index, JsCell, JsStore, KBytecode, KCompiled,
-  KHandle, KNative, Named, NoElements, Ordinary, Private, ProxyObj,
-  ResumeCompiled, ResumeFrame, ReturnThis, SBox, SObject, SShapedObject,
-  ShapeDesc, Sparse, StepAwait, StepReturn, StepThrow, StepYield, StringKey,
-  StringObj, SymbolKey,
+  DataProperty, Dense, FnFlags, JsCell, JsStore, KBytecode, KCompiled, KHandle,
+  KNative, NoElements, Ordinary, ProxyObj, ResumeCompiled, ResumeFrame,
+  ReturnThis, SBox, SObject, SShapedObject, ShapeDesc, Sparse, StepAwait,
+  StepReturn, StepThrow, StepYield, StringKey, StringObj, SymbolKey,
 } as rt_types
 import gleam/dict
 import gleam/dynamic.{type Dynamic}
@@ -249,7 +249,7 @@ pub fn keys_and_elements_test() {
   assert element(2, dyn(Named("x"))) == dyn("x")
   assert tag_of(Index(5)) == tag("KEY_INDEX")
   assert element(2, dyn(Index(5))) == dyn(5)
-  assert tag_of(Private(<<"#p":utf8>>)) == tag("KEY_PRIVATE")
+  assert tag_of(Private("#p")) == tag("KEY_PRIVATE")
   assert tag_of(StringKey(Named("x"))) == tag("OKEY_STRING")
   assert element(2, dyn(StringKey(Named("x")))) == dyn(Named("x"))
   assert tag_of(SymbolKey(rt_types.symbol_iterator)) == tag("OKEY_SYMBOL")

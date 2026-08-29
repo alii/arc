@@ -1,7 +1,8 @@
+import arc/bytecode/key.{Named}
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, AccessorProperty, DataProperty, KHandle,
-  Named, StringKey, SymbolKey, classify, mk_object, mk_undefined,
+  StringKey, SymbolKey, classify, mk_object, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/option.{type Option, None, Some}

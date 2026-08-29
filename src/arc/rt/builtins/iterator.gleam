@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named, index_key}
 import arc/rt/async as rt_async
 import arc/rt/buffer as rt_buffer
 import arc/rt/builtins/common
@@ -20,13 +21,12 @@ import arc/rt/types.{
   ConcatHelper, ConcatItem, GenCompleted, GenExecuting, GenSuspendedStart,
   GenSuspendedYield, HelperDrop, HelperFilter, HelperFlatMap, HelperMap,
   HelperTake, IteratorConstructor, IteratorHelperObj, IteratorN, JFloat, JInt,
-  JNan, JNegInf, JPosInf, KHandle, KNull, KStr, KUndef, MapIterator, Named,
-  NoElements, Ordinary, RangeErr, ReturnThis, SObject, SetIterator,
-  StringIterator, StringKey, SymbolKey, TypeErr, TypedArrayObj,
-  WrapForValidIteratorObj, ZipExhausted, ZipHelper, ZipLongest, ZipOpen,
-  ZipShortest, ZipStrict, classify, index_key, mk_bool, mk_number, mk_object,
-  mk_string, mk_undefined, symbol_async_iterator, symbol_iterator,
-  symbol_to_string_tag,
+  JNan, JNegInf, JPosInf, KHandle, KNull, KStr, KUndef, MapIterator, NoElements,
+  Ordinary, RangeErr, ReturnThis, SObject, SetIterator, StringIterator,
+  StringKey, SymbolKey, TypeErr, TypedArrayObj, WrapForValidIteratorObj,
+  ZipExhausted, ZipHelper, ZipLongest, ZipOpen, ZipShortest, ZipStrict, classify,
+  mk_bool, mk_number, mk_object, mk_string, mk_undefined, symbol_async_iterator,
+  symbol_iterator, symbol_to_string_tag,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict

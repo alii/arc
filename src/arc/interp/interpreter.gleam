@@ -1,5 +1,7 @@
 import arc/bytecode/binop
-import arc/bytecode/key
+import arc/bytecode/key.{
+  type PropertyKey, Index, Named, key_display_string, key_to_text,
+}
 import arc/bytecode/lexical
 import arc/bytecode/opcode.{
   type Op, ApplyArguments, ArrayFrom, ArrayFromWithHoles, ArrayPush,
@@ -66,10 +68,10 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type LexicalGlobal, type ObjectKey,
   AccessorProperty, Agent, DataProperty, ForInIterator, FunctionApply,
-  FunctionCall, FunctionN, HintString, Index, JsStore, KBytecode, KCompiled,
-  KHandle, KNative, KNull, KNum, KStr, KSym, KUndef, Named, NoElements, Realm,
-  ReflectApply, ReflectN, SBox, SObject, SShapedObject, StringKey, SymbolKey,
-  classify, mk_bool, mk_number, mk_object, mk_string, mk_tdz, mk_undefined,
+  FunctionCall, FunctionN, HintString, JsStore, KBytecode, KCompiled, KHandle,
+  KNative, KNull, KNum, KStr, KSym, KUndef, NoElements, Realm, ReflectApply,
+  ReflectN, SBox, SObject, SShapedObject, StringKey, SymbolKey, classify,
+  mk_bool, mk_number, mk_object, mk_string, mk_tdz, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -194,14 +196,6 @@ fn rt_unit6(
 ) -> Result(State, StepExit) {
   ffi.guarded(ffi.guard_unit6(f, state.agent, a, b, c, d, e), state)
   |> drop_nil
-}
-
-fn okey(k: key.PropertyKey) -> ObjectKey {
-  case k {
-    key.Named(name) -> StringKey(Named(name))
-    key.Index(i) -> StringKey(Index(i))
-    key.Private(text) -> StringKey(rt_types.private_key(text))
-  }
 }
 
 fn named(name: String) -> ObjectKey {
@@ -1255,7 +1249,7 @@ fn fast_loop(
         _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    BinOpLocalField(kind, index, key.Named(_) as k) ->
+    BinOpLocalField(kind, index, Named(_) as k) ->
       case stack {
         [left, ..rest] -> {
           let right =
@@ -2183,7 +2177,7 @@ fn fast_loop(
         _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    GetField(key.Named(_) as k) ->
+    GetField(Named(_) as k) ->
       case stack {
         [recv, ..rest] -> {
           let v = ffi.get_field(agent, recv, k)
@@ -2207,7 +2201,7 @@ fn fast_loop(
         [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    GetField2(key.Named(_) as k) ->
+    GetField2(Named(_) as k) ->
       case stack {
         [recv, ..rest] -> {
           let v = ffi.get_field(agent, recv, k)
@@ -2231,7 +2225,7 @@ fn fast_loop(
         [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    PutField(key.Named(_) as k) ->
+    PutField(Named(_) as k) ->
       case stack {
         [val, recv, ..rest] -> {
           let store = ffi.put_field(agent.store, recv, k, val, True)
@@ -2255,7 +2249,7 @@ fn fast_loop(
         _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    PutFieldPop(key.Named(_) as k) ->
+    PutFieldPop(Named(_) as k) ->
       case stack {
         [val, recv, ..rest] -> {
           let store = ffi.put_field(agent.store, recv, k, val, True)
@@ -2360,7 +2354,7 @@ fn fast_loop(
       }
     }
 
-    GetLocalField(index, key.Named(_) as k) -> {
+    GetLocalField(index, Named(_) as k) -> {
       let v =
         ffi.get_field(
           agent,
@@ -2392,7 +2386,7 @@ fn fast_loop(
       }
     }
 
-    GetLocalField2(index, key.Named(_) as k) -> {
+    GetLocalField2(index, Named(_) as k) -> {
       let recv = case index < 0 {
         True ->
           case index {
@@ -2563,7 +2557,7 @@ fn fast_loop(
         [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    DefineField(key.Named(_) as k) ->
+    DefineField(Named(_) as k) ->
       case stack {
         [val, obj, ..rest] -> {
           let store = ffi.define_field(agent.store, obj, k, val)
@@ -2957,7 +2951,7 @@ fn fast_loop(
           }
       }
 
-    GetFieldCall1(key.Named(_) as k, arg_idx) ->
+    GetFieldCall1(Named(_) as k, arg_idx) ->
       case stack {
         [recv, ..rest] -> {
           let method = ffi.get_field(agent, recv, k)
@@ -2996,7 +2990,7 @@ fn fast_loop(
         [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    GetFieldCall(key.Named(_) as k) ->
+    GetFieldCall(Named(_) as k) ->
       case stack {
         [recv, ..rest] -> {
           let method = ffi.get_field(agent, recv, k)
@@ -3027,7 +3021,7 @@ fn fast_loop(
         [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    GetLocalFieldCall(index, key.Named(_) as k) -> {
+    GetLocalFieldCall(index, Named(_) as k) -> {
       let recv = case index < 0 {
         True ->
           case index {
@@ -3649,7 +3643,7 @@ fn fast_construct(
   }
 }
 
-const prototype_key = key.Named("prototype")
+const prototype_key = Named("prototype")
 
 @external(erlang, "erlang", "=:=")
 fn same_op(a: Op, b: Op) -> Bool
@@ -4998,7 +4992,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               use state <- result.map(create_data_property_or_throw(
                 state,
                 h,
-                okey(k),
+                StringKey(k),
                 value,
               ))
               State(..state, stack: [obj, ..rest], pc: state.pc + 1)
@@ -5017,7 +5011,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 state,
                 rt_class_define_method,
                 target,
-                okey(k),
+                StringKey(k),
                 fn_h,
                 rt_types.MIMethod,
                 False,
@@ -5064,7 +5058,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 state,
                 rt_class_define_method,
                 target,
-                okey(k),
+                StringKey(k),
                 fn_h,
                 accessor_install_kind(kind),
                 enumerable,
@@ -5226,16 +5220,14 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 state,
                 rt_obj.t_delete_prop,
                 h,
-                okey(k),
+                StringKey(k),
               ))
               // §13.5.1.2 step 5.b.i
               case deleted, state.func.is_strict {
                 False, True ->
                   state.throw_type_error(
                     state,
-                    "Cannot delete property '"
-                      <> key.key_display_string(k)
-                      <> "'",
+                    "Cannot delete property '" <> key_display_string(k) <> "'",
                   )
                 _, _ ->
                   Ok(
@@ -6092,7 +6084,7 @@ fn set_fn_name_if_empty(
     rt_types.MIMethod | rt_types.MIStatic -> ""
   }
   let name = case k {
-    StringKey(pk) -> rt_types.key_display_string(pk)
+    StringKey(pk) -> key_display_string(pk)
     SymbolKey(sym) ->
       case rt_types.symbol_description(sym) {
         Some(d) -> "[" <> d <> "]"
@@ -6133,7 +6125,7 @@ fn lookup_eval_env(state: State, name: String) -> Option(JsVal) {
 // §6.2.5.6 putvalue, static key
 fn put_field_step(
   state: State,
-  k: key.PropertyKey,
+  k: PropertyKey,
   value: JsVal,
   receiver: JsVal,
   stack: List(JsVal),
@@ -6144,7 +6136,7 @@ fn put_field_step(
         state,
         rt_obj.t_set_prop,
         receiver,
-        okey(k),
+        StringKey(k),
         value,
       ))
       case ok, state.func.is_strict {
@@ -6152,7 +6144,7 @@ fn put_field_step(
           state.throw_type_error(
             state,
             "Cannot assign to read only property '"
-              <> key.key_display_string(k)
+              <> key_display_string(k)
               <> "' of object",
           )
         _, _ -> Ok(State(..state, stack:, pc: state.pc + 1))
@@ -6164,7 +6156,7 @@ fn put_field_step(
         "Cannot set properties of "
           <> rt_val.nullish_label(receiver)
           <> " (setting '"
-          <> key.key_display_string(k)
+          <> key_display_string(k)
           <> "')",
       )
     _ ->
@@ -6173,7 +6165,7 @@ fn put_field_step(
           state.throw_type_error(
             state,
             "Cannot create property '"
-              <> key.key_display_string(k)
+              <> key_display_string(k)
               <> "' on primitive value",
           )
         False -> Ok(State(..state, stack:, pc: state.pc + 1))
@@ -6184,7 +6176,7 @@ fn put_field_step(
 fn get_field(
   state: State,
   receiver: JsVal,
-  k: key.PropertyKey,
+  k: PropertyKey,
 ) -> Result(#(JsVal, State), StepExit) {
   case classify(receiver) {
     KUndef | KNull ->
@@ -6193,10 +6185,10 @@ fn get_field(
         "Cannot read properties of "
           <> rt_val.nullish_label(receiver)
           <> " (reading '"
-          <> key.key_display_string(k)
+          <> key_display_string(k)
           <> "')",
       )
-    _ -> rt3(state, rt_obj.t_get_prop, receiver, okey(k))
+    _ -> rt3(state, rt_obj.t_get_prop, receiver, StringKey(k))
   }
 }
 
@@ -6630,7 +6622,7 @@ fn create_data_property_or_throw(
 
 fn object_key_display(k: ObjectKey) -> String {
   case k {
-    StringKey(pk) -> rt_types.key_display_string(pk)
+    StringKey(pk) -> key_display_string(pk)
     SymbolKey(sym) -> rt_types.symbol_descriptive_string(sym)
   }
 }
@@ -7029,7 +7021,7 @@ fn prop_key_value(pk: ObjectKey) -> JsVal {
   case pk {
     SymbolKey(sym) -> rt_types.mk_symbol(sym)
     StringKey(Index(n)) -> int_val(n)
-    StringKey(other) -> mk_string(rt_types.key_to_text(other))
+    StringKey(other) -> mk_string(key_to_text(other))
   }
 }
 

@@ -452,7 +452,7 @@ proto_has(St, {?HANDLE_TAG, VId}, PId, Fuel) when Fuel > 0 ->
 proto_has(_, {?HANDLE_TAG, _}, _, _) -> miss;
 proto_has(_, _, _, _) -> 0.
 
-%% 2^32-2, rt_types.max_array_index
+%% 2^32-2, key.max_array_index
 -define(MAX_ARRAY_INDEX, 4294967294).
 
 t_get_elem_fast(St, {?HANDLE_TAG, Id}, Idx)

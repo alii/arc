@@ -1,3 +1,4 @@
+import arc/bytecode/key.{type PropertyKey}
 import arc/host_hooks.{type ConsoleLevel, type HostHooks}
 import arc/internal/ordered_entries.{type OrderedEntries}
 import arc/internal/temporal_calendar.{type Calendar}
@@ -92,115 +93,9 @@ pub type IterHint {
   IterAsync
 }
 
-// 2^32 - 2 (§6.1.7)
-pub const max_array_index = 4_294_967_294
-
-// 2^32 - 1
-pub const max_array_length = 4_294_967_295
-
-pub type PropertyKey {
-  Index(n: Int)
-  Named(name: String)
-  Private(text: BitArray)
-}
-
 pub type ObjectKey {
   StringKey(PropertyKey)
   SymbolKey(SymbolId)
-}
-
-pub fn canonical_key(s: String) -> PropertyKey {
-  case bit_array.from_string(s) {
-    // digit guard avoids int.parse badarg cost on every key
-    <<c, _:bytes>> if c >= 48 && c <= 57 ->
-      case int.parse(s) {
-        Ok(n) if n >= 0 && n <= max_array_index ->
-          case int.to_string(n) == s {
-            True -> Index(n)
-            False -> Named(s)
-          }
-        _ -> Named(s)
-      }
-    _ -> Named(s)
-  }
-}
-
-pub fn index_key(n: Int) -> PropertyKey {
-  case n >= 0 && n <= max_array_index {
-    True -> Index(n)
-    False -> Named(int.to_string(n))
-  }
-}
-
-pub fn array_index_of_float(f: Float) -> Option(Int) {
-  let n = f +. 0.0
-  let i = float.truncate(n)
-  case int.to_float(i) == n && i >= 0 && i <= max_array_index {
-    True -> Some(i)
-    False -> None
-  }
-}
-
-pub fn key_to_text(key: PropertyKey) -> String {
-  case key {
-    Index(n) -> int.to_string(n)
-    Named(s) -> s
-    Private(text) ->
-      case bit_array.to_string(text) {
-        Ok(s) -> s
-        Error(Nil) -> ""
-      }
-  }
-}
-
-pub fn key_display_string(key: PropertyKey) -> String {
-  case key {
-    Index(n) -> int.to_string(n)
-    Named(name) -> name
-    Private(text) -> private_display_name(text)
-  }
-}
-
-pub fn is_private_key(key: PropertyKey) -> Bool {
-  case key {
-    Private(_) -> True
-    Index(_) | Named(_) -> False
-  }
-}
-
-pub fn private_key(name: String) -> PropertyKey {
-  Private(bit_array.from_string(name))
-}
-
-pub fn private_key_from_text(text: BitArray) -> PropertyKey {
-  Private(text)
-}
-
-pub fn private_key_text(name: String, uid: Int) -> BitArray {
-  <<name:utf8, 0, int.to_string(uid):utf8>>
-}
-
-pub fn private_display_name(key_text: BitArray) -> String {
-  case split_at_nul(key_text, <<>>) {
-    Some(name) -> name
-    None ->
-      case bit_array.to_string(key_text) {
-        Ok(s) -> s
-        Error(Nil) -> ""
-      }
-  }
-}
-
-fn split_at_nul(rest: BitArray, acc: BitArray) -> Option(String) {
-  case rest {
-    <<0, _:bytes>> ->
-      case bit_array.to_string(acc) {
-        Ok(s) -> Some(s)
-        Error(Nil) -> None
-      }
-    <<b, tail:bytes>> -> split_at_nul(tail, <<acc:bits, b>>)
-    _ -> None
-  }
 }
 
 pub type WellKnown {

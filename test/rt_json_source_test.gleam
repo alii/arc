@@ -1,8 +1,9 @@
+import arc/bytecode/key.{canonical_key}
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type JsVal, DataProperty, FnFlags, JFloat, JInt, KBool, KHandle,
-  KNum, KStr, StringKey, canonical_key, classify, mk_number, mk_string,
+  KNum, KStr, StringKey, classify, mk_number, mk_string,
 }
 import gleam/int
 import gleam/list

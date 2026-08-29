@@ -1,3 +1,6 @@
+import arc/bytecode/key.{
+  type PropertyKey, Index, Named, Private, key_display_string,
+}
 import arc/internal/ordered_entries
 import arc/rt/buffer
 import arc/rt/elements
@@ -6,16 +9,15 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsElements, type JsVal, type Property,
-  type PropertyKey, type TemporalData, ArgumentsObj, ArrayBufferObj,
-  ArrayIterator, ArrayObj, AsyncFromSyncIterator, AsyncGeneratorObj, BigIntObj,
-  BooleanObj, DataProperty, DataViewObj, DateObj, DisposableStackObj, ErrorObj,
-  FinalizationRegistryObj, ForInIterator, GeneratorObj, Index, IntlObj,
-  IteratorHelperObj, KBig, KBool, KBound, KBytecode, KCompiled, KHandle, KHost,
-  KNative, KNull, KNum, KStr, KSym, KTdz, KUndef, MapIterator, MapObj,
-  ModuleNamespace, Named, NumberObj, Ordinary, Private, PromiseObj, ProxyObj,
-  RawJsonObj, RegExpObj, SObject, SetIterator, SetObj, Shared, StringIterator,
-  StringObj, SymbolObj, TemporalDate, TemporalDateTime, TemporalDuration,
-  TemporalInstant, TemporalMonthDay, TemporalObj, TemporalTime,
+  type TemporalData, ArgumentsObj, ArrayBufferObj, ArrayIterator, ArrayObj,
+  AsyncFromSyncIterator, AsyncGeneratorObj, BigIntObj, BooleanObj, DataProperty,
+  DataViewObj, DateObj, DisposableStackObj, ErrorObj, FinalizationRegistryObj,
+  ForInIterator, GeneratorObj, IntlObj, IteratorHelperObj, KBig, KBool, KBound,
+  KBytecode, KCompiled, KHandle, KHost, KNative, KNull, KNum, KStr, KSym, KTdz,
+  KUndef, MapIterator, MapObj, ModuleNamespace, NumberObj, Ordinary, PromiseObj,
+  ProxyObj, RawJsonObj, RegExpObj, SObject, SetIterator, SetObj, Shared,
+  StringIterator, StringObj, SymbolObj, TemporalDate, TemporalDateTime,
+  TemporalDuration, TemporalInstant, TemporalMonthDay, TemporalObj, TemporalTime,
   TemporalYearMonth, TemporalZonedDateTime, TypedArrayObj, WeakMapObj,
   WeakSetObj, WrapForValidIteratorObj, classify,
 } as rt_types
@@ -263,7 +265,7 @@ fn inspect_plain_object(
         list.take(visible, max_items)
         |> list.map(fn(pair) {
           let #(key, val) = pair
-          rt_types.key_display_string(key)
+          key_display_string(key)
           <> ": "
           <> inspect_inner(st, val, depth + 1, visited)
         })

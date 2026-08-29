@@ -1,8 +1,9 @@
+import arc/bytecode/key.{Named}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type JsVal, JInt, KHandle, KNum, KStr, Named, StringKey, classify,
+  type Agent, type JsVal, JInt, KHandle, KNum, KStr, StringKey, classify,
   mk_number, mk_object, mk_string,
 }
 import arc/rt/val as rt_val

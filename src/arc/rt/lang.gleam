@@ -1,3 +1,4 @@
+import arc/bytecode/key.{type PropertyKey, Named, canonical_key}
 import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as b_object
@@ -8,7 +9,7 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type IteratorNative, type IteratorRecord, type JsVal,
   type ObjectKey, Agent, DataProperty, GeneratorN, GeneratorNext, GeneratorObj,
-  IteratorN, IteratorRecord, JsStore, KHandle, KNative, KNull, KUndef, Named,
+  IteratorN, IteratorRecord, JsStore, KHandle, KNative, KNull, KUndef,
   NoElements, Ordinary, SObject, StringKey, TypeErr, classify, mk_bool,
   mk_object, mk_string, mk_undefined,
 }
@@ -85,7 +86,7 @@ pub fn record_parts(st: Agent, rec: JsVal) -> Option(IteratorRecord) {
 fn record_props(
   st: Agent,
   rec: JsVal,
-) -> Option(Dict(types.PropertyKey, types.Property)) {
+) -> Option(Dict(PropertyKey, types.Property)) {
   case classify(rec) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
@@ -97,7 +98,7 @@ fn record_props(
 }
 
 fn parts_of(
-  props: Dict(types.PropertyKey, types.Property),
+  props: Dict(PropertyKey, types.Property),
 ) -> Option(IteratorRecord) {
   case dict.get(props, Named("iterator")), dict.get(props, Named("next")) {
     Ok(DataProperty(value: iterator, ..)),
@@ -385,6 +386,6 @@ pub fn t_global_delete(st: Agent, name: String) -> #(Bool, Agent) {
   rt_obj.t_delete_prop(
     st,
     st.realm.global_object,
-    StringKey(types.canonical_key(name)),
+    StringKey(canonical_key(name)),
   )
 }

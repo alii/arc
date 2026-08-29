@@ -1,10 +1,11 @@
+import arc/bytecode/key.{Index, Named, canonical_key}
 import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type JsVal, type ParsedDesc, DataProperty, Index, JInt, KNum, KStr,
-  KUndef, Named, ParsedDesc, StringKey, SymbolKey, canonical_key, classify,
-  mk_number, mk_object, mk_string,
+  type Agent, type JsVal, type ParsedDesc, DataProperty, JInt, KNum, KStr,
+  KUndef, ParsedDesc, StringKey, SymbolKey, classify, mk_number, mk_object,
+  mk_string,
 }
 import gleam/list
 import gleam/option.{None, Some}

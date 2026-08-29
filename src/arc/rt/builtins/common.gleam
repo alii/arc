@@ -1,12 +1,13 @@
+import arc/bytecode/key.{type PropertyKey, Named}
 import arc/internal/tree_array
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type NativeToken,
-  type ObjKind, type Property, type PropertyKey, type SymbolId, AccessorProperty,
-  ArrayObj, BuiltinPair, DataProperty, Dense, ErrorObj, JInt, KNative, Named,
-  NoElements, Ordinary, SObject, mk_number, mk_object, mk_string,
+  type ObjKind, type Property, type SymbolId, AccessorProperty, ArrayObj,
+  BuiltinPair, DataProperty, Dense, ErrorObj, JInt, KNative, NoElements,
+  Ordinary, SObject, mk_number, mk_object, mk_string,
 } as rt_types
 import gleam/dict.{type Dict}
 import gleam/list

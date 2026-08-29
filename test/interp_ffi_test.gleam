@@ -1,9 +1,9 @@
-import arc/bytecode/key
+import arc/bytecode/key.{Index, Named}
 import arc/interp/ffi
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type JsVal, Index, JFloat, JInt, KHandle, KNum, KStr, KUndef, Named, StringKey,
-  classify, mk_number, mk_string, mk_undefined,
+  type JsVal, JFloat, JInt, KHandle, KNum, KStr, KUndef, StringKey, classify,
+  mk_number, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/option.{None, Some}

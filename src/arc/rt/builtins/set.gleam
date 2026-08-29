@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/internal/ordered_entries
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined}
@@ -8,9 +9,9 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type MapKey,
   type ObjKind, type SetIterKind, type SetNative, JFloat, JInt, JNan, KHandle,
-  KNull, KNum, KUndef, Named, NoElements, SObject, SetAdd, SetClear,
-  SetConstructor, SetDelete, SetDifference, SetEntries, SetForEach, SetGetSize,
-  SetHas, SetIntersection, SetIsDisjointFrom, SetIsSubsetOf, SetIsSupersetOf,
+  KNull, KNum, KUndef, NoElements, SObject, SetAdd, SetClear, SetConstructor,
+  SetDelete, SetDifference, SetEntries, SetForEach, SetGetSize, SetHas,
+  SetIntersection, SetIsDisjointFrom, SetIsSubsetOf, SetIsSupersetOf,
   SetIterEntries, SetIterValues, SetIterator, SetN, SetObj,
   SetSymmetricDifference, SetUnion, SetValues, StringKey, classify,
   js_to_map_key, mk_bool, mk_number, mk_object, mk_undefined, symbol_iterator,

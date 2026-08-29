@@ -1,10 +1,11 @@
+import arc/bytecode/key.{Named}
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsNum, type JsOps, type JsVal, HintDefault,
   HintNumber, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KBool, KBound, KHandle,
-  KNull, KNum, KStr, KSym, KUndef, Named, SObject, StringKey, SymbolKey,
-  classify, mk_bigint, mk_number, mk_object, mk_string, symbol_has_instance,
+  KNull, KNum, KStr, KSym, KUndef, SObject, StringKey, SymbolKey, classify,
+  mk_bigint, mk_number, mk_object, mk_string, symbol_has_instance,
 }
 import arc/rt/val as rt_val
 import gleam/float

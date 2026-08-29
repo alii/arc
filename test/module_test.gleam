@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/interp/dynamic_import
 import arc/interp/entry
 import arc/module
@@ -9,7 +10,7 @@ import arc/rt/builtins as rt_builtins
 import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type JsVal, JInt, KNum, KStr, KUndef, Named, PromiseFulfilled,
+  type Agent, type JsVal, JInt, KNum, KStr, KUndef, PromiseFulfilled,
   PromiseRejected, StringKey, SymbolKey, classify, mk_number, mk_object,
   mk_string, mk_undefined,
 }

@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named, index_key}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
@@ -10,9 +11,8 @@ import arc/rt/types.{
   DataProperty, DynamicFunction, FunctionApply, FunctionBind, FunctionCall,
   FunctionConstructor, FunctionHasInstance, FunctionN, FunctionPrototypeCall,
   FunctionToString, JInt, KBound, KBytecode, KCompiled, KHandle, KNative, KNull,
-  KStr, KUndef, Named, NoElements, ProxyObj, SObject, StringKey,
-  ThrowTypeErrorFn, classify, mk_bool, mk_number, mk_object, mk_string,
-  mk_undefined,
+  KStr, KUndef, NoElements, ProxyObj, SObject, StringKey, ThrowTypeErrorFn,
+  classify, mk_bool, mk_number, mk_object, mk_string, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict
@@ -331,8 +331,7 @@ fn collect_array_like(
     False -> {
       let #(v, st) = case helpers.own_element(st, arr, i) {
         helpers.Hit(v) -> #(v, st)
-        helpers.Slow ->
-          rt_obj.t_get_prop(st, arr, StringKey(rt_types.index_key(i)))
+        helpers.Slow -> rt_obj.t_get_prop(st, arr, StringKey(index_key(i)))
       }
       collect_array_like(st, arr, i + 1, len, [v, ..acc])
     }

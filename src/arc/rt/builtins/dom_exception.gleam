@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/rt/builtins/common
 import arc/rt/builtins/error as b_error
 import arc/rt/builtins/helpers
@@ -6,7 +7,7 @@ import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type BuiltinPair, type DomExceptionNative, type Handle, type JsVal,
   DomExceptionConstructor, DomExceptionGetCode, DomExceptionN, JInt, KHandle,
-  KUndef, Named, StringKey, classify, mk_number, mk_object, mk_string,
+  KUndef, StringKey, classify, mk_number, mk_object, mk_string,
 }
 import arc/rt/val as rt_val
 

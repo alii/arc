@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Index, Named}
 import arc/rt/buffer
 import arc/rt/builtins/array_buffer
 import arc/rt/builtins/common
@@ -13,9 +14,9 @@ import arc/rt/types.{
   type Agent, type ArrayIterKind, type BuiltinPair, type Handle, type JsNum,
   type JsVal, type Realm, type TypedArrayKind, type TypedArrayNative,
   type TypedArrays, ArrayIterEntries, ArrayIterKeys, ArrayIterValues,
-  ArrayIterator, BigKind, Index, JFloat, JInt, JNan, JNegInf, JPosInf, KBig,
-  KHandle, KNull, KNum, KUndef, Named, NumKind, ReturnThis, SObject, StringKey,
-  SymbolKey, TypedArrayConstructor, TypedArrayFrom, TypedArrayGetBuffer,
+  ArrayIterator, BigKind, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KHandle,
+  KNull, KNum, KUndef, NumKind, ReturnThis, SObject, StringKey, SymbolKey,
+  TypedArrayConstructor, TypedArrayFrom, TypedArrayGetBuffer,
   TypedArrayGetByteLength, TypedArrayGetByteOffset, TypedArrayGetLength,
   TypedArrayGetToStringTag, TypedArrayIntrinsicConstructor, TypedArrayN,
   TypedArrayObj, TypedArrayOf, TypedArrayPrototypeAt,

@@ -72,10 +72,6 @@ pub fn private_key(name: String) -> PropertyKey {
   Private(name)
 }
 
-pub fn private_key_from_text(text: String) -> PropertyKey {
-  Private(text)
-}
-
 pub fn private_key_text(name: String, uid: Int) -> String {
   name <> uid_separator <> int.to_string(uid)
 }

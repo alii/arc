@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/compiler.{type ExportSeed}
 import arc/esm
 import arc/internal/tuple_array.{type TupleArray}
@@ -1173,7 +1174,7 @@ fn fill_deferred_namespace(
         rt_obj.t_define_own_data(
           st,
           handler,
-          StringKey(types.Named(t.0)),
+          StringKey(Named(t.0)),
           mk_object(fn_h),
           True,
           True,

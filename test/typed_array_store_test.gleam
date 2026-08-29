@@ -1,6 +1,7 @@
+import arc/bytecode/key.{Named}
 import arc/engine.{type JsValueKind, Finite, JsNumber, JsString}
 import arc/rt/obj as rt_obj
-import arc/rt/types.{DataProperty, Named, StringKey}
+import arc/rt/types.{DataProperty, StringKey}
 import gleam/option.{Some}
 
 fn global_after(source: String, name: String) -> JsValueKind {

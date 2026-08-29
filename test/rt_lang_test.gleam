@@ -1,9 +1,10 @@
+import arc/bytecode/key.{Index, Named}
 import arc/rt/builtins as rt_builtins
 import arc/rt/lang
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, JInt, KHandle, KNum, KStr, KUndef, Named, StringKey, classify,
-  mk_number, mk_string, mk_undefined,
+  type Agent, JInt, KHandle, KNum, KStr, KUndef, StringKey, classify, mk_number,
+  mk_string, mk_undefined,
 }
 import gleam/list
 import gleam/option.{Some}
@@ -71,9 +72,9 @@ pub fn template_object_is_cached_per_site_test() {
   assert t1 != t3
   let #(raw, st) = rt_obj.t_get_prop(st, t1, StringKey(Named("raw")))
   let assert KHandle(_) = classify(raw)
-  let #(r1, st) = rt_obj.t_get_prop(st, raw, StringKey(types.Index(1)))
+  let #(r1, st) = rt_obj.t_get_prop(st, raw, StringKey(Index(1)))
   assert classify(r1) == KStr("\\u")
   let #(ok, _st) =
-    rt_obj.t_set_prop(st, t1, StringKey(types.Index(0)), mk_string("z"))
+    rt_obj.t_set_prop(st, t1, StringKey(Index(0)), mk_string("z"))
   assert !ok
 }

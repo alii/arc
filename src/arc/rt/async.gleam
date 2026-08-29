@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/rt/call.{
   type Completion, type Frame, NormalCompletion, ThrowCompletion, is_callable,
   t_call,
@@ -17,7 +18,7 @@ import arc/rt/types.{
   AGSuspendedYield, Agent, AsyncGenRequest, AsyncGenResume, AsyncGeneratorObj,
   AsyncWaiter, DataProperty, GenCompleted, GenExecuting, GenNext, GenReturn,
   GenSuspendedStart, GenSuspendedYield, GenThrow, GeneratorObj, Handler, HostJob,
-  IdentityPassThrough, JsCell, JsStore, KHandle, Named, NoElements, Ordinary,
+  IdentityPassThrough, JsCell, JsStore, KHandle, NoElements, Ordinary,
   PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction, PromiseRejectFn,
   PromiseRejected, PromiseResolveFn, RangeErr, ReactionJob, ResolveThenableJob,
   ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen, SBox, SGenerator,

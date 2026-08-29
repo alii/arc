@@ -1,10 +1,10 @@
+import arc/bytecode/key.{Named}
 import arc/engine.{Finite, JsNumber, JsString, ModuleReturned, Returned}
 import arc/host.{type State, State}
 import arc/module/load_error
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type JsVal, JInt, Named, StringKey, mk_number, mk_object, mk_string,
-  mk_undefined,
+  type JsVal, JInt, StringKey, mk_number, mk_object, mk_string, mk_undefined,
 }
 import gleam/option.{Some}
 

@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/rt/buffer
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -14,7 +15,7 @@ import arc/rt/types.{
   ArrayBufferN, ArrayBufferObj, ArrayBufferResize, ArrayBufferSlice,
   ArrayBufferSliceToImmutable, ArrayBufferTransfer,
   ArrayBufferTransferToFixedLength, ArrayBufferTransferToImmutable, Bytes,
-  DataViewObj, Detached, Immutable, JInt, KHandle, KUndef, LocalBlock, Named,
+  DataViewObj, Detached, Immutable, JInt, KHandle, KUndef, LocalBlock,
   OwnerBlock, ReturnThis, SObject, Shared, SharedArrayBufferConstructor,
   SharedArrayBufferGetByteLength, SharedArrayBufferGetGrowable,
   SharedArrayBufferGetMaxByteLength, SharedArrayBufferGrow,

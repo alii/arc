@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/host_hooks.{HostHooks}
 import arc/rt/async as rt_async
 import arc/rt/builtins as rt_builtins
@@ -8,7 +9,7 @@ import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type JsVal, FnFlags, HostJob, JInt, KBool, KHandle, KNum, KStr,
-  Named, StringKey, classify, mk_number, mk_object, mk_string, mk_undefined,
+  StringKey, classify, mk_number, mk_object, mk_string, mk_undefined,
 }
 import gleam/option.{None, Some}
 import rt_helpers

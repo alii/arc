@@ -1,3 +1,4 @@
+import arc/bytecode/key.{index_key}
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -19,7 +20,7 @@ pub fn own_element(st: Agent, this: JsVal, idx: Int) -> OwnElement
 pub fn get_index(st: Agent, this: JsVal, idx: Int) -> #(JsVal, Agent) {
   case own_element(st, this, idx) {
     Hit(v) -> #(v, st)
-    Slow -> rt_obj.t_get_prop(st, this, StringKey(rt_types.index_key(idx)))
+    Slow -> rt_obj.t_get_prop(st, this, StringKey(index_key(idx)))
   }
 }
 

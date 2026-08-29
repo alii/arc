@@ -7,8 +7,7 @@ import arc/interp/state.{type State, type StepExit}
 import arc/rt/bytecode.{type EnvCapture, type EnvTuple}
 import arc/rt/types.{
   type Agent, type Handle, type JsSlot, type JsStore, type JsVal,
-  type LexicalGlobal, type Property, type PropertyKey as RtPropertyKey,
-  type SymbolId,
+  type LexicalGlobal, type Property, type SymbolId,
 }
 import gleam
 import gleam/dict.{type Dict}
@@ -253,7 +252,7 @@ pub fn box_get(agent: Agent, slot: JsVal) -> JsVal
 pub fn get_field(agent: Agent, obj: JsVal, key: PropertyKey) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "own_data")
-pub fn own_data(props: Dict(RtPropertyKey, Property), key: PropertyKey) -> JsVal
+pub fn own_data(props: Dict(PropertyKey, Property), key: PropertyKey) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "get_global")
 pub fn get_global(

@@ -1,9 +1,10 @@
+import arc/bytecode/key.{Named}
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/obj.{constructor_props, prototype_seq} as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type FnFlags, type Handle, BirthPending, DataProperty, FnFlags,
-  KBytecode, KHandle, Named, NoElements, Ordinary, SObject, StringKey, classify,
+  KBytecode, KHandle, NoElements, Ordinary, SObject, StringKey, classify,
   mk_object,
 }
 import gleam/dict

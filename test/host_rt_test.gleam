@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/host.{State}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
@@ -6,7 +7,7 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, JInt, JsCell, KHandle, KHost, KNative,
-  KStr, Named, SObject, StringKey, classify, mk_number, mk_object, mk_string,
+  KStr, SObject, StringKey, classify, mk_number, mk_object, mk_string,
   mk_undefined,
 }
 import arc/rt/val as rt_val

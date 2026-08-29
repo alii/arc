@@ -1,5 +1,6 @@
 //// helpers for writing host functions; validators modeled on node's
 
+import arc/bytecode/key.{canonical_key}
 import arc/host_hooks
 import arc/rt/async as rt_async
 import arc/rt/builtins/common
@@ -421,7 +422,7 @@ pub fn define_global(s: State(host), name: String, val: JsVal) -> State(host) {
     rt_obj.t_define_own_data(
       st,
       st.realm.global_object,
-      StringKey(rt_types.canonical_key(name)),
+      StringKey(canonical_key(name)),
       val,
       True,
       False,

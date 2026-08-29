@@ -1,14 +1,16 @@
 //// §7.1 type conversion and §7.2 comparison
 
+import arc/bytecode/key.{
+  Index, Named, array_index_of_float, canonical_key, index_key,
+}
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ErrorKind, type Handle, type JsNum, type JsOps, type JsVal,
   type ObjectKey, type SymbolId, type ToPrimHint, HintDefault, HintNumber,
-  HintString, Index, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KBool, KBound,
+  HintString, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KBool, KBound,
   KBytecode, KCompiled, KHandle, KNative, KNull, KNum, KStr, KSym, KTdz, KUndef,
-  Named, ProxyObj, RangeErr, ReferenceErr, SObject, StringKey, SymbolKey,
-  SyntaxErr, TypeErr, array_index_of_float, canonical_key, classify, index_key,
-  mk_number, mk_object, mk_string, symbol_to_primitive,
+  ProxyObj, RangeErr, ReferenceErr, SObject, StringKey, SymbolKey, SyntaxErr,
+  TypeErr, classify, mk_number, mk_object, mk_string, symbol_to_primitive,
 }
 import gleam/bit_array
 import gleam/float

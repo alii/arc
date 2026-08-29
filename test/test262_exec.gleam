@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/compiler
 import arc/esm
 import arc/host
@@ -25,7 +26,7 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BufferStorage, type Handle, type JsVal, type WaiterRef, Agent,
   ArrayBufferObj, ArrayObj, DataProperty, Detached, JFloat, JInt, KHandle, KStr,
-  KUndef, Named, NoElements, Ordinary, ProxyObj, SObject, SShapedObject, Shared,
+  KUndef, NoElements, Ordinary, ProxyObj, SObject, SShapedObject, Shared,
   StringKey, classify, mk_null, mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val

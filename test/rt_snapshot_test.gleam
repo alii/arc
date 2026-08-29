@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/rt/async as rt_async
 import arc/rt/builtins/regexp as b_regexp
 import arc/rt/obj as rt_obj
@@ -7,8 +8,8 @@ import arc/rt/snapshot.{
 }
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, HostJob, JInt, KBool, KHandle, KNum, KStr, Named, RegExpObj,
-  SObject, StringKey, classify, mk_number, mk_string,
+  type Agent, HostJob, JInt, KBool, KHandle, KNum, KStr, RegExpObj, SObject,
+  StringKey, classify, mk_number, mk_string,
 }
 import gleam/dict
 import rt_helpers

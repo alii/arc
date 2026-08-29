@@ -1,9 +1,10 @@
+import arc/bytecode/key.{canonical_key}
 import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type JsVal, DataProperty, KBool, KStr, StringKey, canonical_key,
-  classify, mk_object, mk_string,
+  type Agent, type JsVal, DataProperty, KBool, KStr, StringKey, classify,
+  mk_object, mk_string,
 }
 import gleam/option.{None, Some}
 import rt_helpers

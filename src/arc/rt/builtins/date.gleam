@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/internal/digits.{take_digits}
 import arc/internal/gregorian.{civil_from_days, days_from_year}
 import arc/internal/host_time.{
@@ -31,7 +32,7 @@ import arc/rt/types.{
   DatePrototypeToLocaleString, DatePrototypeToLocaleTimeString,
   DatePrototypeToString, DatePrototypeToTimeString, DatePrototypeToUTCString,
   DatePrototypeValueOf, DateUTC, HintDefault, HintNumber, HintString, JFloat,
-  JInt, JNan, JNegInf, JPosInf, KHandle, KNum, KStr, Named, StringKey, classify,
+  JInt, JNan, JNegInf, JPosInf, KHandle, KNum, KStr, StringKey, classify,
   mk_null, mk_number, mk_object, mk_string,
 } as rt_types
 import arc/rt/val as rt_val

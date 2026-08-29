@@ -1,8 +1,9 @@
+import arc/bytecode/key.{Named}
 import arc/rt/builtins/console as b_console
 import arc/rt/inspect
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  JFloat, JInt, Named, StringKey, mk_bigint, mk_hole, mk_number, mk_string,
+  JFloat, JInt, StringKey, mk_bigint, mk_hole, mk_number, mk_string,
   mk_undefined,
 }
 import rt_helpers

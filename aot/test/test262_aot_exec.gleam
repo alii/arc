@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/host
 import arc/host_hooks.{type HostHooks, HostHooks}
 import arc/parser
@@ -7,8 +8,8 @@ import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, DataProperty, KHandle, KStr, KUndef,
-  Named, ProxyObj, SObject, SShapedObject, StringKey, classify, mk_object,
-  mk_string, mk_undefined,
+  ProxyObj, SObject, SShapedObject, StringKey, classify, mk_object, mk_string,
+  mk_undefined,
 }
 import arc/rt/val as rt_val
 import arc_aot/compile

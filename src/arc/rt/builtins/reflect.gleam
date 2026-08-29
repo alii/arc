@@ -1,16 +1,17 @@
+import arc/bytecode/key.{Named, index_key}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, type ReflectNative, KHandle, KNull, Named,
+  type Agent, type Handle, type JsVal, type ReflectNative, KHandle, KNull,
   ReflectApply, ReflectConstruct, ReflectDefineProperty, ReflectDeleteProperty,
   ReflectGet, ReflectGetOwnPropertyDescriptor, ReflectGetPrototypeOf, ReflectHas,
   ReflectIsExtensible, ReflectN, ReflectOwnKeys, ReflectPreventExtensions,
   ReflectSet, ReflectSetPrototypeOf, StringKey, classify, mk_bool, mk_null,
   mk_object, mk_undefined,
-} as rt_types
+}
 import arc/rt/val as rt_val
 import gleam/list
 import gleam/option.{None, Some}
@@ -276,8 +277,7 @@ fn collect_indexed(
   case i >= len {
     True -> #(list.reverse(acc), st)
     False -> {
-      let #(v, st) =
-        rt_obj.t_get_prop(st, obj, StringKey(rt_types.index_key(i)))
+      let #(v, st) = rt_obj.t_get_prop(st, obj, StringKey(index_key(i)))
       collect_indexed(st, obj, i + 1, len, [v, ..acc])
     }
   }

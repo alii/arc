@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/compiler
 import arc/parser
 import arc/rt/async as rt_async
@@ -11,7 +12,7 @@ import arc/rt/realm as rt_realm
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type Realm,
   type ShadowRealmNative, IndirectEval, JInt, JPosInf, KHandle, KNum, KStr,
-  Named, ShadowRealmConstructor, ShadowRealmEvaluate, ShadowRealmImportValue,
+  ShadowRealmConstructor, ShadowRealmEvaluate, ShadowRealmImportValue,
   ShadowRealmN, ShadowRealmObj, StringKey, TypeErr, WrappedFunctionCall,
   classify, mk_number, mk_object, mk_undefined,
 }

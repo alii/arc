@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{
   arg_at, first_arg_or_undefined, two_args_or_undefined,
@@ -8,7 +9,7 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type ObjKind,
-  type Realm, type WeakKey, type WeakNative, KHandle, KNull, KSym, KUndef, Named,
+  type Realm, type WeakKey, type WeakNative, KHandle, KNull, KSym, KUndef,
   NoElements, SObject, StringKey, WeakMapConstructor, WeakMapDelete, WeakMapGet,
   WeakMapGetOrInsert, WeakMapGetOrInsertComputed, WeakMapHas, WeakMapObj,
   WeakMapSet, WeakN, WeakObjKey, WeakSetAdd, WeakSetConstructor, WeakSetDelete,

@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/compiler
 import arc/engine.{
   type JsValueKind, Finite, Infinity, JsBool, JsNull, JsNumber, JsObject,
@@ -16,7 +17,7 @@ import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type JsVal, JInt, Named, PromiseFulfilled, PromisePending,
+  type Agent, type JsVal, JInt, PromiseFulfilled, PromisePending,
   PromiseRejected, StringKey, mk_number, mk_object, mk_undefined,
 }
 import gleam/dict

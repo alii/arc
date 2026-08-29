@@ -1,3 +1,4 @@
+import arc/bytecode/key.{type PropertyKey, Index, Named}
 import arc/parser/regex
 import arc/parser/regex_error
 import arc/rt/async as rt_async
@@ -11,16 +12,16 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type LegacySlot,
-  type LegacyStatics, type ObjectKey, type Property, type PropertyKey,
-  type RegExpFlag, type RegExpNative, ArrayObj, DataProperty, Index, JInt,
-  KHandle, KNative, KNull, KUndef, LegacyInput, LegacyLastMatch, LegacyLastParen,
-  LegacyLeftContext, LegacyParen1, LegacyParen2, LegacyParen3, LegacyParen4,
-  LegacyParen5, LegacyParen6, LegacyParen7, LegacyParen8, LegacyParen9,
-  LegacyRightContext, LegacyStatics, Named, NoElements, Ordinary, RFDotAll,
-  RFGlobal, RFHasIndices, RFIgnoreCase, RFMultiline, RFSticky, RFUnicode,
-  RFUnicodeSets, RegExpConstructor, RegExpGetFlag, RegExpGetFlags,
-  RegExpGetSource, RegExpLegacyGetter, RegExpLegacyInputSetter, RegExpN,
-  RegExpObj, RegExpPrototypeCompile, RegExpPrototypeExec, RegExpPrototypeTest,
+  type LegacyStatics, type ObjectKey, type Property, type RegExpFlag,
+  type RegExpNative, ArrayObj, DataProperty, JInt, KHandle, KNative, KNull,
+  KUndef, LegacyInput, LegacyLastMatch, LegacyLastParen, LegacyLeftContext,
+  LegacyParen1, LegacyParen2, LegacyParen3, LegacyParen4, LegacyParen5,
+  LegacyParen6, LegacyParen7, LegacyParen8, LegacyParen9, LegacyRightContext,
+  LegacyStatics, NoElements, Ordinary, RFDotAll, RFGlobal, RFHasIndices,
+  RFIgnoreCase, RFMultiline, RFSticky, RFUnicode, RFUnicodeSets,
+  RegExpConstructor, RegExpGetFlag, RegExpGetFlags, RegExpGetSource,
+  RegExpLegacyGetter, RegExpLegacyInputSetter, RegExpN, RegExpObj,
+  RegExpPrototypeCompile, RegExpPrototypeExec, RegExpPrototypeTest,
   RegExpPrototypeToString, RegExpStringIteratorNext, RegExpSymbolMatch,
   RegExpSymbolMatchAll, RegExpSymbolReplace, RegExpSymbolSearch,
   RegExpSymbolSplit, ReturnThis, SObject, StringKey, classify, mk_bool, mk_null,
@@ -1791,7 +1792,7 @@ fn canonical_flags(flags: String) -> String {
 
 fn intrinsic_getter(
   st: Agent,
-  props: dict.Dict(rt_types.PropertyKey, rt_types.Property),
+  props: dict.Dict(PropertyKey, rt_types.Property),
   name: String,
   expected: RegExpNative,
 ) -> Bool {

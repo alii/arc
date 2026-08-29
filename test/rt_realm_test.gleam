@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/lang as rt_lang
@@ -5,8 +6,8 @@ import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type Realm, AccessorProperty, Agent, JInt,
-  JsOps, JsStore, KHandle, Named, ScriptEval, StringKey, classify, mk_number,
-  mk_object, mk_string, mk_undefined,
+  JsOps, JsStore, KHandle, ScriptEval, StringKey, classify, mk_number, mk_object,
+  mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict

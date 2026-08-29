@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/bytecode/lexical
 import arc/bytecode/opcode.{
   AsyncYieldStarNext, CatchOnly, Finally, IterCloseGuard, Pc, YieldStar,
@@ -24,9 +25,9 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type EvalKind, type FrameInfo, type Handle, type IteratorRecord,
   type JsOps, type JsVal, type Step, Agent, JInt, JsOps, JsStore, KBytecode,
-  KHandle, KNull, KUndef, Named, RangeErr, ResumeFrame, SObject, StepAwait,
-  StepReturn, StepThrow, StepYield, StringKey, TypeErr, classify, mk_number,
-  mk_object, mk_undefined,
+  KHandle, KNull, KUndef, RangeErr, ResumeFrame, SObject, StepAwait, StepReturn,
+  StepThrow, StepYield, StringKey, TypeErr, classify, mk_number, mk_object,
+  mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bool

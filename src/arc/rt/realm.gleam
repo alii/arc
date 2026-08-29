@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
@@ -5,7 +6,7 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type Realm, type Test262Native, Agent,
-  ArrayBufferDetach262, ArrayBufferN, DataProperty, KHandle, Named, NoElements,
+  ArrayBufferDetach262, ArrayBufferN, DataProperty, KHandle, NoElements,
   Ordinary, SObject, ScriptEval, StringKey, Test262CreateRealm,
   Test262EvalScript, Test262Gc, Test262N, classify, mk_object, mk_undefined,
 }
