@@ -101,7 +101,7 @@ pub fn run_loaded(module: Atom, st: Agent) -> #(Agent, DiffRun) {
   #(st, DiffRun(stdout: buf_read(), result:))
 }
 
-pub fn run_compiled(source: String) -> DiffRun {
+pub fn load_compiled(source: String) -> Result(Atom, String) {
   let mod_name = "arc_emit2c_test_" <> int.to_string(unique_integer([Positive]))
   let opts =
     emit_2core.CompileOpts(
@@ -110,17 +110,23 @@ pub fn run_compiled(source: String) -> DiffRun {
       entry_name: "js_main",
     )
   case emit_2core.compile_source(source, opts) {
-    Error(e) -> DiffRun(stdout: <<>>, result: Error(string.inspect(e)))
+    Error(e) -> Error(string.inspect(e))
     Ok(unit) ->
       case pipeline.compile_ir(unit.module, emit_2core.binding()) {
-        Error(e) -> DiffRun(stdout: <<>>, result: Error(string.inspect(e)))
+        Error(e) -> Error(string.inspect(e))
         Ok(beam) ->
           case run.load(beam, mod_name) {
-            Error(reason) ->
-              DiffRun(stdout: <<>>, result: Error("load failed: " <> reason))
-            Ok(module) -> run_loaded(module, seed()).1
+            Error(reason) -> Error("load failed: " <> reason)
+            Ok(module) -> Ok(module)
           }
       }
+  }
+}
+
+pub fn run_compiled(source: String) -> DiffRun {
+  case load_compiled(source) {
+    Error(reason) -> DiffRun(stdout: <<>>, result: Error(reason))
+    Ok(module) -> run_loaded(module, seed()).1
   }
 }
 

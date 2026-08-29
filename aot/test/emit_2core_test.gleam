@@ -18,6 +18,20 @@ pub fn make_adder_diff_test() {
   assert c.stdout == i.stdout
 }
 
+const unit_a_src = "var A = {}; A.same = function (x, y) { return A.tag + (x === y) }; A.tag = 's'"
+
+const unit_b_src = "var callCount = 0; var ref = () => { callCount = callCount + 1 }; A.same(1, 1); ref(); console.log(callCount)"
+
+// two units in one heap number their cache sites alike
+pub fn global_cache_across_units_test() {
+  let assert Ok(a) = harness.load_compiled(unit_a_src)
+  let assert Ok(b) = harness.load_compiled(unit_b_src)
+  let #(st, ra) = harness.run_loaded(a, harness.seed())
+  let assert Ok(_) = ra.result
+  let #(_, rb) = harness.run_loaded(b, st)
+  assert rb.stdout == <<"1\n":utf8>>
+}
+
 const object_literal_src = "let o={x:5};console.log(o.x)"
 
 const obj_prop_src = "let o={x:0};for(let i=1;i<=4;i++)o.x=o.x+i;console.log(o.x)"
