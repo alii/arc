@@ -1,10 +1,14 @@
 import arc/rt/arena
 import arc/rt/limits
+import arc/rt/names
 import arc/rt/types.{
   type Agent, type Handle, type JobQueue, type JsOps, type JsSlot, type JsStore,
   type JsVal, Agent, JsCell, JsOps, JsStore, RangeErr, SBox,
 } as rt_types
 import gleam/dict
+import gleam/int
+import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/set
 
 @external(erlang, "arc_job_queue_ffi", "job_queue_new")
@@ -33,6 +37,9 @@ pub fn t_store_new() -> JsStore(Agent) {
     ics: dict.new(),
     free_protos: dict.new(),
     global_epoch: 0,
+    names: dict.new(),
+    name_texts: dict.new(),
+    next_name: names.fixed_count(),
   )
 }
 
@@ -180,6 +187,51 @@ pub fn t_next_symbol_uid(st: Agent) -> #(Int, Agent) {
 pub fn t_next_unit_uid(st: Agent) -> #(Int, Agent) {
   let js = require_js(st)
   #(js.unit_uid, with_js(st, JsStore(..js, unit_uid: js.unit_uid + 1)))
+}
+
+pub fn find_name(js: JsStore(st), text: String) -> Option(Int) {
+  use <- option.lazy_or(names.fixed_number(text))
+  dict.get(js.names, text) |> option.from_result
+}
+
+pub fn name_number(js: JsStore(st), text: String) -> #(Int, JsStore(st)) {
+  case find_name(js, text) {
+    Some(n) -> #(n, js)
+    None -> {
+      let n = js.next_name
+      let js =
+        JsStore(
+          ..js,
+          names: dict.insert(js.names, text, n),
+          name_texts: dict.insert(js.name_texts, n, text),
+          next_name: n + 1,
+        )
+      #(n, js)
+    }
+  }
+}
+
+pub fn name_text(js: JsStore(st), n: Int) -> String {
+  case n < names.fixed_count() {
+    True -> names.fixed_text(n)
+    False ->
+      dict.get(js.name_texts, n)
+      |> result.lazy_unwrap(fn() { unknown_name(n) })
+  }
+}
+
+fn unknown_name(n: Int) -> String {
+  let message = "unknown name number " <> int.to_string(n)
+  panic as message
+}
+
+pub fn t_name_number(st: Agent, text: String) -> #(Int, Agent) {
+  let #(n, js) = name_number(require_js(st), text)
+  #(n, with_js(st, js))
+}
+
+pub fn t_name_text(st: Agent, n: Int) -> String {
+  name_text(require_js(st), n)
 }
 
 pub fn t_enter_call(st: Agent) -> Agent {

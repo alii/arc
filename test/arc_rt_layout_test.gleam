@@ -123,6 +123,9 @@ pub fn js_store_test() {
       ics: dict.from_list([
         #(1, rt_types.IcRead(<<"k":utf8>>, dict.from_list([#(7, 0)]))),
       ]),
+      names: dict.from_list([#("zz", 9000)]),
+      name_texts: dict.from_list([#(9000, "zz")]),
+      next_name: 9001,
     )
   assert tag_of(store) == tag("STORE_TAG")
   assert arity(store) == idx("STORE_ARITY")
@@ -136,6 +139,9 @@ pub fn js_store_test() {
   assert at(store, "STORE_ICS") == dyn(store.ics)
   assert at(store, "STORE_FREE_PROTOS") == dyn(store.free_protos)
   assert at(store, "STORE_GLOBAL_EPOCH") == dyn(store.global_epoch)
+  assert at(store, "STORE_NAMES") == dyn(store.names)
+  assert at(store, "STORE_NAME_TEXTS") == dyn(store.name_texts)
+  assert at(store, "STORE_NEXT_NAME") == dyn(9001)
 }
 
 pub fn realm_test() {

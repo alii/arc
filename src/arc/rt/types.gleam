@@ -2716,6 +2716,9 @@ pub type JsStore(st) {
     free_protos: Dict(Int, Nil),
     // bumped on any write to a global object cell, for global read caches
     global_epoch: Int,
+    names: Dict(String, Int),
+    name_texts: Dict(Int, String),
+    next_name: Int,
   )
 }
 

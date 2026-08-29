@@ -17,7 +17,7 @@ import gleam/result
 import gleam/set.{type Set}
 
 // bump on any change to the image or runtime records
-pub const abi_version = 8
+pub const abi_version = 9
 
 pub type SnapshotError {
   SnapshotContainsCompiledCode(cell: Handle)
@@ -46,6 +46,9 @@ type StoreImage {
     shapes: Dict(Int, ShapeDesc),
     next_shape: Int,
     unit_uid: Int,
+    names: Dict(String, Int),
+    name_texts: Dict(Int, String),
+    next_name: Int,
   )
 }
 
@@ -102,6 +105,9 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
     ics: _,
     free_protos: _,
     global_epoch: _,
+    names:,
+    name_texts:,
+    next_name:,
   ) = store
   let microtasks = types.jq_to_list(microtasks)
   let data =
@@ -128,6 +134,9 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
       shapes:,
       next_shape:,
       unit_uid:,
+      names:,
+      name_texts:,
+      next_name:,
     )
   let realms = RealmImage(current: realm, realms:, template_objects:)
   Ok(encode(abi_version, store, realms))
@@ -170,6 +179,9 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     shapes:,
     next_shape:,
     unit_uid:,
+    names:,
+    name_texts:,
+    next_name:,
   ) = image
   JsStore(
     data: dict.fold(data, arena.new(), fn(acc, id, slot) {
@@ -192,6 +204,9 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     ics: dict.new(),
     free_protos: dict.new(),
     global_epoch: 0,
+    names:,
+    name_texts:,
+    next_name:,
   )
 }
 

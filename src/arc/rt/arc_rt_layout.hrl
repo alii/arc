@@ -26,10 +26,13 @@
 -define(STORE_ALLOC, 5).
 -define(STORE_SHAPES, 14).
 -define(STORE_NEXT_SHAPE, 15).
--define(STORE_ARITY, 19).
+-define(STORE_ARITY, 22).
 -define(STORE_ICS, 17).
 -define(STORE_FREE_PROTOS, 18).
 -define(STORE_GLOBAL_EPOCH, 19).
+-define(STORE_NAMES, 20).
+-define(STORE_NAME_TEXTS, 21).
+-define(STORE_NEXT_NAME, 22).
 
 -define(REALM_TAG, realm).
 -define(REALM_OBJECT, 2).

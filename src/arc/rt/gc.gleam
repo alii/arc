@@ -77,6 +77,9 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
     ics: _,
     free_protos: _,
     global_epoch: _,
+    names: _,
+    name_texts: _,
+    next_name: _,
   ) = require_js(st)
   let acc = set.to_list(pinned_roots)
   let acc = list.append(unhandled_rejections, acc)
