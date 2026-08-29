@@ -5,13 +5,12 @@
          put_global/6]).
 
 -include("../rt/arc_rt_layout.hrl").
-
--define(LENGTH_KEY, {?KEY_NAMED, <<"length">>}).
+-include("../rt/arc_rt_names.hrl").
 
 %% §10.1.8.1 ordinary get, miss when anything observable
 get_field(Agent, {?HANDLE_TAG, Id}, K) ->
     cell_field(element(?AGENT_STORE, Agent), Id, K, undefined);
-get_field(_, Bin, ?LENGTH_KEY) when is_binary(Bin) ->
+get_field(_, Bin, ?K_length) when is_binary(Bin) ->
     arc_string_ffi:string_codepoint_length(Bin);
 get_field(Agent, Bin, K) when is_binary(Bin) ->
     proto_field(Agent, ?REALM_STRING, K);
@@ -36,14 +35,14 @@ get_global(Agent, Lex, Name) ->
             end;
         _ ->
             {?HANDLE_TAG, G} = element(?REALM_GLOBAL, element(?AGENT_REALM, Agent)),
-            cell_field(element(?AGENT_STORE, Agent), G, {?KEY_NAMED, Name}, miss)
+            cell_field(element(?AGENT_STORE, Agent), G, Name, miss)
     end.
 
 %% §9.1.1.4.5 setmutablebinding on the global object
 put_global(Store, Lex, Global, Name, V, Strict) ->
     case is_map_key(Name, Lex) of
         true -> miss;
-        false -> put_field(Store, Global, {?KEY_NAMED, Name}, V, not Strict)
+        false -> put_field(Store, Global, Name, V, not Strict)
     end.
 
 %% getters miss so slow path passes primitive as this
@@ -57,9 +56,8 @@ cell_field(Store, Id, K, Absent) ->
     Data = element(?STORE_DATA, Store),
     case arc_rt_arena_ffi:get(Id, Data) of
         {?SSHAPED_TAG, _, Proto, Slots, Offs} ->
-            KeyBin = element(2, K),
             case Offs of
-                #{KeyBin := Off} -> element(Off + 1, Slots);
+                #{K := Off} -> element(Off + 1, Slots);
                 _ -> field_next(Data, Proto, K, 64, Absent)
             end;
         {?SOBJECT_TAG, ?ORDINARY, Proto, Props, _, _, _} ->
@@ -75,9 +73,8 @@ cell_field(Store, Id, K, Absent) ->
 hop(Data, Slot, K, Fuel, Absent) ->
     case Slot of
         {?SSHAPED_TAG, _, Proto, Slots, Offs} ->
-            KeyBin = element(2, K),
             case Offs of
-                #{KeyBin := Off} -> element(Off + 1, Slots);
+                #{K := Off} -> element(Off + 1, Slots);
                 _ -> field_next(Data, Proto, K, Fuel, Absent)
             end;
         _ when element(1, Slot) =:= ?SOBJECT_TAG ->
@@ -104,7 +101,7 @@ field_next(Data, {?SOME, {?HANDLE_TAG, P}}, K, Fuel, Absent) when Fuel > 1 ->
     hop(Data, arc_rt_arena_ffi:get(P, Data), K, Fuel - 1, Absent);
 field_next(_, _, _, _, _) -> miss.
 
-named_virtual({?ARRAYOBJ_TAG, Length}, ?LENGTH_KEY) -> Length;
+named_virtual({?ARRAYOBJ_TAG, Length}, ?K_length) -> Length;
 named_virtual(_, _) -> miss.
 
 %% false when named keys on this kind are exotic or virtual
@@ -119,8 +116,8 @@ named_plain(Kind, K) ->
         ?PROXYOBJ_TAG -> false;
         module_namespace -> false;
         typed_array_obj -> false;
-        ?ARRAYOBJ_TAG -> K =/= ?LENGTH_KEY;
-        string_obj -> K =/= ?LENGTH_KEY;
+        ?ARRAYOBJ_TAG -> K =/= ?K_length;
+        string_obj -> K =/= ?K_length;
         ?KBYTECODE_TAG -> birth_plain(element(?KBYTECODE_BIRTH, Kind), K);
         ?KFN_TAG -> birth_plain(element(?KFN_BIRTH, Kind), K);
         _ -> true
@@ -128,9 +125,9 @@ named_plain(Kind, K) ->
 
 %% length/name/prototype not in props until birth settled
 birth_plain(?BIRTH_SETTLED, _) -> true;
-birth_plain(_, ?LENGTH_KEY) -> false;
-birth_plain(_, {?KEY_NAMED, <<"name">>}) -> false;
-birth_plain(Birth, {?KEY_NAMED, <<"prototype">>}) ->
+birth_plain(_, ?K_length) -> false;
+birth_plain(_, ?K_name) -> false;
+birth_plain(Birth, ?K_prototype) ->
     element(?BIRTH_PROTOTYPE_PARENT, Birth) =:= ?NONE;
 birth_plain(_, _) -> true.
 
@@ -143,11 +140,11 @@ get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
             if
                 Idx >= Length -> miss;
                 Props =:= #{} -> elem_read(Elems, Idx);
-                is_map_key({?KEY_INDEX, Idx}, Props) -> miss;
+                is_map_key(?INDEX_KEY(Idx), Props) -> miss;
                 true -> elem_read(Elems, Idx)
             end;
         {?SOBJECT_TAG, {?ARGUMENTSOBJ_TAG, _, _}, _, Props, _, Elems, _} ->
-            case is_map_key({?KEY_INDEX, Idx}, Props) of
+            case is_map_key(?INDEX_KEY(Idx), Props) of
                 true -> miss;
                 false -> elem_read(Elems, Idx)
             end;
@@ -156,7 +153,7 @@ get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
                 false -> miss;
                 true ->
                     case Props of
-                        #{{?KEY_INDEX, Idx} := Prop} ->
+                        #{?INDEX_KEY(Idx) := Prop} ->
                             case element(1, Prop) of
                                 ?DATAPROP_TAG -> element(?DATAPROP_VALUE, Prop);
                                 _ -> miss
@@ -171,11 +168,10 @@ get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
         _ -> miss
     end;
 get_elem(Store, {?HANDLE_TAG, _} = Obj, Key) when is_binary(Key) ->
-    case arc_rt_val_ffi:t_to_property_key_fast(Key) of
-        {?OKEY_STRING, {?KEY_NAMED, _} = K} ->
-            cell_field(Store, element(?HANDLE_ID, Obj), K, undefined);
-        {?OKEY_STRING, {?KEY_INDEX, Idx}} -> get_elem(Store, Obj, Idx);
-        _ -> miss
+    case arc_rt_val_ffi:key_find(Store, Key) of
+        miss -> miss;
+        K when K < 0 -> get_elem(Store, Obj, -K - 1);
+        K -> cell_field(Store, element(?HANDLE_ID, Obj), K, undefined)
     end;
 get_elem(_, _, _) -> miss.
 
@@ -206,15 +202,14 @@ put_field(Store, {?HANDLE_TAG, Id}, K, V, Create)
   when tuple_size(Store) =:= ?STORE_ARITY ->
     Data = element(?STORE_DATA, Store),
     case arc_rt_arena_ffi:get(Id, Data) of
-        {?SSHAPED_TAG, Sid, P, Slots, Offs} = Slot ->
-            KeyBin = element(2, K),
+        {?SSHAPED_TAG, Sid, P, Slots, Offs} = Slot when K >= 0 ->
             case Offs of
-                #{KeyBin := Off} ->
+                #{K := Off} ->
                     NewSlot = setelement(?SSHAPED_SLOTS, Slot,
                                          setelement(Off + 1, Slots, V)),
                     setelement(?STORE_DATA, Store, arc_rt_arena_ffi:set(Id, NewSlot, Data));
                 _ when Create ->
-                    case shaped_next(Store, Sid, KeyBin) of
+                    case shaped_next(Store, Sid, K) of
                         miss -> miss;
                         Next ->
                             case chain_free(Store, Data, P, K) of
@@ -254,13 +249,13 @@ put_prop(Store, Data, Id, Slot, K, V, Create) ->
         _ -> miss
     end.
 
-%% known successor shape for adding keybin, as {To, ToOffsets}
-shaped_next(Store, Sid, KeyBin) ->
+%% known successor shape for adding key, as {To, ToOffsets}
+shaped_next(Store, Sid, K) ->
     Shapes = element(?STORE_SHAPES, Store),
     case Shapes of
         #{Sid := Desc} ->
             case element(?SHAPE_TRANSITIONS, Desc) of
-                #{KeyBin := To} ->
+                #{K := To} ->
                     #{To := ToDesc} = Shapes,
                     {To, element(?SHAPE_OFFSETS, ToDesc)};
                 _ -> miss
@@ -294,16 +289,14 @@ define_field(Store, {?HANDLE_TAG, Id}, K, V)
   when tuple_size(Store) =:= ?STORE_ARITY ->
     Data = element(?STORE_DATA, Store),
     case arc_rt_arena_ffi:get(Id, Data) of
-        {?SSHAPED_TAG, Sid, P, Slots, Offs} = Slot
-          when element(1, K) =:= ?KEY_NAMED ->
-            KeyBin = element(2, K),
+        {?SSHAPED_TAG, Sid, P, Slots, Offs} = Slot when K >= 0 ->
             case Offs of
-                #{KeyBin := Off} ->
+                #{K := Off} ->
                     NewSlot = setelement(?SSHAPED_SLOTS, Slot,
                                          setelement(Off + 1, Slots, V)),
                     setelement(?STORE_DATA, Store, arc_rt_arena_ffi:set(Id, NewSlot, Data));
                 _ ->
-                    case shaped_next(Store, Sid, KeyBin) of
+                    case shaped_next(Store, Sid, K) of
                         miss -> miss;
                         Next -> shaped_grow(Store, Data, Id, Next, P, Slots, V)
                     end
@@ -375,14 +368,14 @@ literal_pairs(Keys, [S | Slots], [V | Stack], Seq, Acc) ->
                   [{element(S + 1, Keys), ?WEC(V, Seq)} | Acc]);
 literal_pairs(_, [], Stack, _, Acc) -> {Acc, Stack}.
 
-chain_free(Store, _, {?SOME, {?HANDLE_TAG, PId}}, {?KEY_NAMED, KB})
-  when is_map_key(PId, element(?STORE_FREE_PROTOS, Store)),
-       byte_size(KB) =/= 9 orelse KB =/= <<"__proto__">> ->
+chain_free(Store, _, {?SOME, {?HANDLE_TAG, PId}}, K)
+  when K >= 0, K =/= ?K___proto__,
+       is_map_key(PId, element(?STORE_FREE_PROTOS, Store)) ->
     true;
-chain_free(Store, Data, Proto, {?KEY_NAMED, _} = K) ->
+chain_free(Store, Data, Proto, K) when K >= 0 ->
     arc_rt_obj_ffi:free_chain(Store, Data, Proto, K);
-chain_free(_, Data, Proto, {?KEY_INDEX, Idx}) ->
-    index_free(Data, Proto, Idx, 64).
+chain_free(_, Data, Proto, K) ->
+    index_free(Data, Proto, -K - 1, 64).
 
 %% creating an element needs free proto chain, writable length
 put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
@@ -390,7 +383,7 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
     Data = element(?STORE_DATA, Store),
     case arc_rt_arena_ffi:get(Id, Data) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Length} = Kind, Proto, Props, Sym, Elems, true}
-          when Props =:= #{}; not is_map_key({?KEY_INDEX, Idx}, Props) ->
+          when Props =:= #{}; not is_map_key(?INDEX_KEY(Idx), Props) ->
             if
                 Idx < Length ->
                     NewE = case elem_overwrite(Elems, Idx, V) of
@@ -426,18 +419,18 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
             end;
         {?SOBJECT_TAG, Kind, _, _, _, _, true} = Slot
           when is_atom(Kind), Idx =< ?MAX_ARRAY_INDEX ->
-            put_prop(Store, Data, Id, Slot, {?KEY_INDEX, Idx}, V, true);
+            put_prop(Store, Data, Id, Slot, ?INDEX_KEY(Idx), V, true);
         _ -> miss
     end;
 put_elem(Store, {?HANDLE_TAG, _} = Obj, Key, V) when is_binary(Key) ->
-    case arc_rt_val_ffi:t_to_property_key_fast(Key) of
-        {?OKEY_STRING, {?KEY_NAMED, _} = K} -> put_field(Store, Obj, K, V, true);
-        {?OKEY_STRING, {?KEY_INDEX, Idx}} -> put_elem(Store, Obj, Idx, V);
-        _ -> miss
+    case arc_rt_val_ffi:key_find(Store, Key) of
+        miss -> miss;
+        K when K < 0 -> put_elem(Store, Obj, -K - 1, V);
+        K -> put_field(Store, Obj, K, V, true)
     end;
 put_elem(_, _, _, _) -> miss.
 
-length_writable(#{?LENGTH_KEY := Prop})
+length_writable(#{?K_length := Prop})
   when element(1, Prop) =:= ?DATAPROP_TAG ->
     element(?DATAPROP_WRITABLE, Prop) =:= true;
 length_writable(_) -> true.
@@ -446,15 +439,14 @@ index_free(_, ?NONE, _, _) -> true;
 index_free(_, _, _, 0) -> false;
 index_free(Data, {?SOME, {?HANDLE_TAG, P}}, Idx, Fuel) ->
     case arc_rt_arena_ffi:get(P, Data) of
-        {?SSHAPED_TAG, _, Proto, _, Offs} ->
-            (not is_map_key(integer_to_binary(Idx), Offs))
-                andalso index_free(Data, Proto, Idx, Fuel - 1);
+        {?SSHAPED_TAG, _, Proto, _, _} ->
+            index_free(Data, Proto, Idx, Fuel - 1);
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Length}, Proto, _, _, _, _}
           when Idx >= Length ->
             index_free(Data, Proto, Idx, Fuel - 1);
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
             index_is_plain(element(?SOBJECT_KIND, Slot))
-                andalso (not is_map_key({?KEY_INDEX, Idx},
+                andalso (not is_map_key(?INDEX_KEY(Idx),
                                         element(?SOBJECT_PROPS, Slot)))
                 andalso (not elem_has(element(?SOBJECT_ELEMENTS, Slot), Idx))
                 andalso index_free(Data, element(?SOBJECT_PROTO, Slot), Idx,

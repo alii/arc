@@ -1,4 +1,3 @@
-import arc/bytecode/key.{Named, canonical_key}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
@@ -7,6 +6,7 @@ import arc/rt/builtins/substitution
 import arc/rt/call as rt_call
 import arc/rt/js_string
 import arc/rt/limits
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -997,9 +997,8 @@ fn string_raw(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
     [_, ..rest] -> rest
     [] -> []
   }
-  let #(raw_val, st) = rt_obj.t_get_prop(st, template, StringKey(Named("raw")))
-  let #(len_val, st) =
-    rt_obj.t_get_prop(st, raw_val, StringKey(Named("length")))
+  let #(raw_val, st) = rt_obj.t_get_prop(st, template, StringKey(nk.raw))
+  let #(len_val, st) = rt_obj.t_get_prop(st, raw_val, StringKey(nk.length))
   let #(literal_count, st) = rt_val.t_to_length(st, len_val)
   case literal_count {
     0 -> #(mk_string(""), st)
@@ -1015,12 +1014,7 @@ fn string_raw_loop(
   index: Int,
   acc_rev: List(String),
 ) -> #(JsVal, Agent) {
-  let #(lit_val, st) =
-    rt_obj.t_get_prop(
-      st,
-      raw_val,
-      StringKey(canonical_key(int.to_string(index))),
-    )
+  let #(lit_val, st) = rt_obj.t_get_index(st, raw_val, index)
   let #(lit, st) = rt_val.t_to_string(st, lit_val)
   let acc_rev = [lit, ..acc_rev]
   case index + 1 == literal_count {
@@ -1168,7 +1162,7 @@ fn require_global_when_regexp(
   case is_re {
     False -> st
     True -> {
-      let #(flags, st) = rt_obj.t_get_prop(st, val, StringKey(Named("flags")))
+      let #(flags, st) = rt_obj.t_get_prop(st, val, StringKey(nk.flags))
       let #(flags, st) = rt_val.t_require_object_coercible(st, flags)
       let #(s, st) = rt_val.t_to_string(st, flags)
       case regexp.has_flag(s, "g") {

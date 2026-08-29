@@ -1,8 +1,6 @@
 //// §7.1 type conversion and §7.2 comparison
 
-import arc/bytecode/key.{
-  Index, Named, array_index_of_float, canonical_key, index_key,
-}
+import arc/bytecode/key.{array_index_of_float}
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ErrorKind, type Handle, type JsNum, type JsOps, type JsVal,
@@ -495,25 +493,61 @@ pub fn t_to_property_key_of(
   }
 }
 
-// §7.1.19 steps 2-3 for a primitive
+// like t_to_property_key but error(text) instead of naming a new string
+pub fn t_find_property_key(
+  st: Agent,
+  v: JsVal,
+) -> #(Result(ObjectKey, String), Agent) {
+  let #(prim, st) = case classify(v) {
+    KHandle(_) -> t_to_primitive(st, v, HintString)
+    _ -> #(v, st)
+  }
+  let found = fn(st, text) {
+    case rt_store.t_find_key(st, text) {
+      Some(k) -> #(Ok(StringKey(k)), st)
+      None -> #(Error(text), st)
+    }
+  }
+  case classify(prim) {
+    KSym(id) -> #(Ok(SymbolKey(id)), st)
+    KStr(s) -> found(st, s)
+    KNum(JInt(n)) ->
+      case key.is_array_index(n) {
+        True -> #(Ok(StringKey(key.index(n))), st)
+        False -> found(st, int.to_string(n))
+      }
+    KNum(JFloat(f)) ->
+      case array_index_of_float(f) {
+        Some(i) -> #(Ok(StringKey(key.index(i))), st)
+        None -> found(st, js_format_float(f))
+      }
+    _ -> {
+      let #(s, st) = t_to_string(st, prim)
+      found(st, s)
+    }
+  }
+}
+
+// §7.1.19 steps 2-3 for a primitive, allocates the name
 fn primitive_to_prop_key(st: Agent, v: JsVal) -> #(ObjectKey, Agent) {
   case classify(v) {
     KSym(id) -> #(SymbolKey(id), st)
-    KNum(JInt(n)) -> #(StringKey(index_key(n)), st)
+    KNum(JInt(n)) -> string_key(rt_store.t_key_of_int(st, n))
     KNum(JFloat(f)) ->
       case array_index_of_float(f) {
-        Some(i) -> #(StringKey(Index(i)), st)
-        None -> #(StringKey(Named(js_format_float(f))), st)
+        Some(i) -> #(StringKey(key.index(i)), st)
+        None -> string_key(rt_store.t_key(st, js_format_float(f)))
       }
-    KNum(JNan) -> #(StringKey(Named("NaN")), st)
-    KNum(JPosInf) -> #(StringKey(Named("Infinity")), st)
-    KNum(JNegInf) -> #(StringKey(Named("-Infinity")), st)
-    KStr(s) -> #(StringKey(canonical_key(s)), st)
+    KStr(s) -> string_key(rt_store.t_key(st, s))
     _ -> {
       let #(s, st) = t_to_string(st, v)
-      #(StringKey(canonical_key(s)), st)
+      string_key(rt_store.t_key(st, s))
     }
   }
+}
+
+fn string_key(pair: #(Int, Agent)) -> #(ObjectKey, Agent) {
+  #(StringKey(pair.0), pair.1)
 }
 
 // §7.1.4.1.1 stringtonumber

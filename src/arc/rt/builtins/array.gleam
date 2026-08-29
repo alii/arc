@@ -1,7 +1,4 @@
-import arc/bytecode/key.{
-  type PropertyKey, Index, Named, index_key, key_display_string, max_array_index,
-  max_array_length,
-}
+import arc/bytecode/key.{type Key, max_array_index, max_array_length}
 import arc/rt/builtins/array_from_async
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -11,6 +8,7 @@ import arc/rt/call as rt_call
 import arc/rt/elements
 import arc/rt/js_string
 import arc/rt/limits
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -148,7 +146,7 @@ pub fn init(
       #(
         dict.insert(
           props,
-          Named(name),
+          common.name_key(name),
           DataProperty(
             value: mk_bool(True),
             writable: True,
@@ -395,13 +393,13 @@ fn object_length(st: Agent, ref: Handle) -> #(Int, Agent) {
 fn length_of_properties(
   st: Agent,
   ref: Handle,
-  props: Dict(PropertyKey, Property),
+  props: Dict(Key, Property),
 ) -> #(Int, Agent) {
-  case dict.get(props, Named("length")) {
+  case dict.get(props, nk.length) {
     Ok(DataProperty(value: len_val, ..)) -> rt_val.t_to_length(st, len_val)
     _ -> {
       let #(len_val, st) =
-        rt_obj.t_get_prop(st, mk_object(ref), StringKey(Named("length")))
+        rt_obj.t_get_prop(st, mk_object(ref), StringKey(nk.length))
       rt_val.t_to_length(st, len_val)
     }
   }
@@ -481,7 +479,7 @@ fn guard_safe_length(
   }
 }
 
-fn generic_set(st: Agent, ref: Handle, key: PropertyKey, val: JsVal) -> Agent {
+fn generic_set(st: Agent, ref: Handle, key: Key, val: JsVal) -> Agent {
   let #(ok, st) = rt_obj.t_set_prop(st, mk_object(ref), StringKey(key), val)
   case ok {
     True -> st
@@ -489,42 +487,48 @@ fn generic_set(st: Agent, ref: Handle, key: PropertyKey, val: JsVal) -> Agent {
       rt_val.t_throw_type_error(
         st,
         "Cannot assign to read only property '"
-          <> key_display_string(key)
+          <> rt_store.t_key_text(st, key)
           <> "' of object",
       )
   }
 }
 
 fn generic_set_index(st: Agent, ref: Handle, idx: Int, val: JsVal) -> Agent {
-  generic_set(st, ref, index_key(idx), val)
+  let #(k, st) = rt_store.t_key_of_int(st, idx)
+  generic_set(st, ref, k, val)
 }
 
 fn generic_set_length(st: Agent, ref: Handle, len: Int) -> Agent {
-  generic_set(st, ref, Named("length"), from_int(len))
+  generic_set(st, ref, nk.length, from_int(len))
 }
 
-fn generic_delete(st: Agent, ref: Handle, key: PropertyKey) -> Agent {
+fn generic_delete(st: Agent, ref: Handle, key: Key) -> Agent {
   let #(ok, st) = rt_obj.t_delete_prop(st, ref, StringKey(key))
   case ok {
     True -> st
     False ->
       rt_val.t_throw_type_error(
         st,
-        "Cannot delete property '" <> key_display_string(key) <> "' of object",
+        "Cannot delete property '"
+          <> rt_store.t_key_text(st, key)
+          <> "' of object",
       )
   }
 }
 
 fn generic_delete_index(st: Agent, ref: Handle, idx: Int) -> Agent {
-  generic_delete(st, ref, index_key(idx))
+  let #(k, st) = rt_store.t_key_of_int(st, idx)
+  generic_delete(st, ref, k)
 }
 
 fn generic_has_op(st: Agent, ref: Handle, idx: Int) -> #(Bool, Agent) {
-  rt_obj.t_has_prop(st, mk_object(ref), StringKey(index_key(idx)))
+  let #(k, st) = rt_store.t_key_of_int(st, idx)
+  rt_obj.t_has_prop(st, mk_object(ref), StringKey(k))
 }
 
 fn generic_get(st: Agent, ref: Handle, idx: Int) -> #(JsVal, Agent) {
-  rt_obj.t_get_prop(st, mk_object(ref), StringKey(index_key(idx)))
+  let #(k, st) = rt_store.t_key_of_int(st, idx)
+  rt_obj.t_get_prop(st, mk_object(ref), StringKey(k))
 }
 
 fn get_index_if_present(
@@ -566,7 +570,8 @@ fn inherited_index(
   this: JsVal,
   idx: Int,
 ) -> #(Option(JsVal), Agent) {
-  let key = StringKey(index_key(idx))
+  let #(k, st) = rt_store.t_key_of_int(st, idx)
+  let key = StringKey(k)
   let #(has, st) = rt_obj.t_has_prop(st, mk_object(proto), key)
   case has {
     False -> #(None, st)
@@ -582,7 +587,8 @@ fn generic_index_if_present(
   this: JsVal,
   idx: Int,
 ) -> #(Option(JsVal), Agent) {
-  let #(has, st) = rt_obj.t_has_prop(st, this, StringKey(index_key(idx)))
+  let #(k, st) = rt_store.t_key_of_int(st, idx)
+  let #(has, st) = rt_obj.t_has_prop(st, this, StringKey(k))
   case has {
     False -> #(None, st)
     True -> {
@@ -611,14 +617,14 @@ fn dense_snapshot(
   }
 }
 
-fn properties_have_index_keys(props: Dict(PropertyKey, Property)) -> Bool {
+fn properties_have_index_keys(props: Dict(Key, Property)) -> Bool {
   !dict.is_empty(props) && any_index_key(dict.keys(props))
 }
 
-fn any_index_key(keys: List(PropertyKey)) -> Bool {
+fn any_index_key(keys: List(Key)) -> Bool {
   case keys {
     [] -> False
-    [Index(_), ..] -> True
+    [k, ..] if k < 0 -> True
     [_, ..rest] -> any_index_key(rest)
   }
 }
@@ -640,7 +646,7 @@ fn try_elements_fast_path(
       extensible: True,
       ..,
     ) as slot -> {
-      let length_writable = case dict.get(props, Named("length")) {
+      let length_writable = case dict.get(props, nk.length) {
         Ok(DataProperty(writable:, ..)) -> writable
         _ -> True
       }
@@ -683,7 +689,7 @@ fn try_push_fast_path(
       ..,
     ) -> {
       let arg_count = list.length(args)
-      let length_writable = case dict.get(props, Named("length")) {
+      let length_writable = case dict.get(props, nk.length) {
         Ok(DataProperty(writable:, ..)) -> writable
         _ -> True
       }
@@ -716,7 +722,7 @@ fn try_push_fast_path(
 @external(erlang, "arc_rt_array_ffi", "index_free")
 fn index_free(
   st: Agent,
-  props: Dict(PropertyKey, Property),
+  props: Dict(Key, Property),
   proto: Option(Handle),
   start: Int,
   count: Int,
@@ -732,8 +738,10 @@ fn hole_is_inherited(
     Some(proto_ref) ->
       case rt_store.t_cell_get(st, proto_ref) {
         SObject(kind: ProxyObj(..), ..) -> #(True, st)
-        _ ->
-          rt_obj.t_has_prop(st, mk_object(proto_ref), StringKey(index_key(idx)))
+        _ -> {
+          let #(k, st) = rt_store.t_key_of_int(st, idx)
+          rt_obj.t_has_prop(st, mk_object(proto_ref), StringKey(k))
+        }
       }
   }
 }
@@ -1416,7 +1424,7 @@ fn intrinsic_species(st: Agent, slot: JsSlot) -> Bool {
   case slot {
     SObject(kind: ArrayObj(_), proto: Some(p), props:, ..) ->
       p == array.prototype
-      && !dict.has_key(props, Named("constructor"))
+      && !dict.has_key(props, nk.constructor)
       && common.species_intact(st, array)
     _ -> False
   }
@@ -1434,7 +1442,7 @@ fn species_protocol(
         False -> #(None, st)
         True -> {
           let #(ctor, st) =
-            rt_obj.t_get_prop(st, original, StringKey(Named("constructor")))
+            rt_obj.t_get_prop(st, original, StringKey(nk.constructor))
           // other realm %Array% gives undefined, species never read
           let ctor = case classify(ctor) {
             KHandle(ctor_ref) ->
@@ -1546,8 +1554,8 @@ fn write_species_element(
       enumerable: Some(True),
       configurable: Some(True),
     )
-  let #(ok, st) =
-    rt_obj.t_define_own_prop(st, target, StringKey(index_key(idx)), desc)
+  let #(k, st) = rt_store.t_key_of_int(st, idx)
+  let #(ok, st) = rt_obj.t_define_own_prop(st, target, StringKey(k), desc)
   case ok {
     True -> st
     False ->
@@ -3312,7 +3320,7 @@ fn array_from_array_like(
       case classify(iter_method) {
         KUndef | KNull -> {
           let #(len_val, st) =
-            rt_obj.t_get_prop(st, items, StringKey(Named("length")))
+            rt_obj.t_get_prop(st, items, StringKey(nk.length))
           let #(length, st) = rt_val.t_to_length(st, len_val)
           use <- bool.lazy_guard(length > limits.max_iteration, fn() {
             rt_val.t_throw_range_error(st, iteration_budget_msg)
@@ -3506,8 +3514,7 @@ fn collect_elements_descending(
 
 fn array_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   use st, array, ref <- to_object_ref(st, this)
-  let #(func, st) =
-    rt_obj.t_get_prop(st, mk_object(ref), StringKey(Named("join")))
+  let #(func, st) = rt_obj.t_get_prop(st, mk_object(ref), StringKey(nk.join))
   let #(callable, st) = rt_val.t_is_callable(st, func)
   case callable {
     True -> rt_call.t_call_checked(st, func, array, [])
@@ -3565,7 +3572,7 @@ fn to_locale_string_loop(
           )
         _ -> {
           let #(method, st) =
-            rt_obj.t_get_prop(st, elem, StringKey(Named("toLocaleString")))
+            rt_obj.t_get_prop(st, elem, StringKey(nk.to_locale_string))
           use method <- helpers.require_callable(st, method, fn() {
             not_a_function(st, method)
           })

@@ -1,8 +1,8 @@
-import arc/bytecode/key.{Named}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
 import arc/rt/call as rt_call
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
@@ -318,12 +318,11 @@ fn install_error_cause(
 ) -> #(Handle, Agent) {
   case classify(options) {
     KHandle(_) -> {
-      let #(has, st) = rt_obj.t_has_prop(st, options, StringKey(Named("cause")))
+      let #(has, st) = rt_obj.t_has_prop(st, options, StringKey(nk.cause))
       case has {
         False -> #(h, st)
         True -> {
-          let #(cause, st) =
-            rt_obj.t_get_prop(st, options, StringKey(Named("cause")))
+          let #(cause, st) = rt_obj.t_get_prop(st, options, StringKey(nk.cause))
           let #(cp, st) = common.builtin_property(st, cause)
           let st = common.add_named_property(st, h, "cause", cp)
           #(h, st)
@@ -339,7 +338,7 @@ fn error_name(st: Agent, proto: Option(Handle), fuel: Int) -> String {
     Some(h) if fuel > 0 ->
       case rt_obj.as_sobject(rt_store.t_cell_get(st, h)) {
         SObject(proto: parent, ..) ->
-          case rt_obj.t_ordinary_own_property(st, h, StringKey(Named("name"))) {
+          case rt_obj.t_ordinary_own_property(st, h, StringKey(nk.name)) {
             Some(DataProperty(value: v, ..)) ->
               case classify(v) {
                 KStr(n) -> n
@@ -379,7 +378,7 @@ fn stack_trace_limit(st: Agent) -> Int {
   let ctor = rt_store.t_cell_get(st, st.realm.error.constructor)
   case rt_obj.as_sobject(ctor) {
     SObject(props:, ..) ->
-      case dict.get(props, Named("stackTraceLimit")) {
+      case dict.get(props, nk.stack_trace_limit) {
         Ok(DataProperty(value: v, ..)) ->
           case classify(v) {
             KNum(JInt(n)) -> int.max(0, n)
@@ -408,7 +407,7 @@ pub fn attach_stack(st: Agent, h: Handle, name: String, msg: String) -> Agent {
       SObject(kind: ErrorObj(..), ..) as s ->
         SObject(..s, kind: ErrorObj(stack: trace))
       SObject(props:, ..) as s ->
-        SObject(..s, props: dict.insert(props, Named("stack"), stack_prop))
+        SObject(..s, props: dict.insert(props, nk.stack, stack_prop))
       other -> other
     }
   })
@@ -433,7 +432,7 @@ fn target_header_parts(st: Agent, h: Handle) -> #(String, String) {
   let read = fn(key) {
     case rt_obj.as_sobject(rt_store.t_cell_get(st, h)) {
       SObject(props:, ..) ->
-        case dict.get(props, Named(key)) {
+        case dict.get(props, key) {
           Ok(DataProperty(value: v, ..)) ->
             case classify(v) {
               KStr(s) -> Some(s)
@@ -444,7 +443,7 @@ fn target_header_parts(st: Agent, h: Handle) -> #(String, String) {
       _ -> None
     }
   }
-  #(option.unwrap(read("name"), "Error"), option.unwrap(read("message"), ""))
+  #(option.unwrap(read(nk.name), "Error"), option.unwrap(read(nk.message), ""))
 }
 
 fn is_error(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
@@ -525,21 +524,15 @@ fn set_stack_ignoring_prototype(
         "Cannot assign to read only property 'stack' of Error.prototype",
       )
     False -> {
-      let #(own, st) =
-        rt_obj.t_get_own_property(st, h, StringKey(Named("stack")))
+      let #(own, st) = rt_obj.t_get_own_property(st, h, StringKey(nk.stack))
       let #(ok, st) = case option.is_some(own) {
         True ->
-          rt_obj.t_set_prop(
-            st,
-            mk_object(h),
-            StringKey(Named("stack")),
-            mk_string(s),
-          )
+          rt_obj.t_set_prop(st, mk_object(h), StringKey(nk.stack), mk_string(s))
         False ->
           rt_obj.t_define_own_prop(
             st,
             h,
-            StringKey(Named("stack")),
+            StringKey(nk.stack),
             ParsedDesc(
               value: Some(mk_string(s)),
               get: None,
@@ -572,14 +565,12 @@ fn error_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
         "Error.prototype.toString called on non-object",
       )
     KHandle(_) -> {
-      let #(name_val, st) =
-        rt_obj.t_get_prop(st, this, StringKey(Named("name")))
+      let #(name_val, st) = rt_obj.t_get_prop(st, this, StringKey(nk.name))
       let #(name, st) = case classify(name_val) {
         KUndef -> #("Error", st)
         _ -> rt_val.t_to_string(st, name_val)
       }
-      let #(msg_val, st) =
-        rt_obj.t_get_prop(st, this, StringKey(Named("message")))
+      let #(msg_val, st) = rt_obj.t_get_prop(st, this, StringKey(nk.message))
       let #(msg, st) = case classify(msg_val) {
         KUndef -> #("", st)
         _ -> rt_val.t_to_string(st, msg_val)

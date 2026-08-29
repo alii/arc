@@ -1,4 +1,4 @@
-import arc/bytecode/key.{type PropertyKey}
+import arc/bytecode/key.{type SourceKey}
 import arc/bytecode/lexical.{type CodeKind, type LexicalSlots}
 import arc/bytecode/opcode
 import arc/compiler/ast_util
@@ -74,13 +74,13 @@ pub type DirectEvalCaller {
 fn resolve_top_level(
   code: List(opcode.IrOp),
   constants: List(JsVal),
-  keys: List(PropertyKey),
+  keys: List(SourceKey),
   info: scope.FunctionInfo,
-  child_templates: List(FuncTemplate),
+  child_templates: List(FuncTemplate(SourceKey)),
   is_strict: Bool,
   code_kind: CodeKind,
   local_names: Option(EvalNameTable),
-) -> FuncTemplate {
+) -> FuncTemplate(SourceKey) {
   let resolve.Resolved(bytecode:, constants:, keys:, lines:) =
     resolve.resolve(code, constants, keys)
   let #(bytecode, regs) = case local_names {
@@ -112,7 +112,7 @@ fn resolve_top_level(
   )
 }
 
-fn captured_slots(children: List(FuncTemplate)) -> Set(Int) {
+fn captured_slots(children: List(FuncTemplate(SourceKey))) -> Set(Int) {
   list.flat_map(children, fn(t) {
     list.map(t.env_descriptors, fn(c) { c.parent_index })
   })
@@ -122,13 +122,13 @@ fn captured_slots(children: List(FuncTemplate)) -> Set(Int) {
 pub fn compile(
   body: List(ast.StmtWithLine),
   sb: scope.ScopeBuilder,
-) -> Result(FuncTemplate, CompileError) {
+) -> Result(FuncTemplate(SourceKey), CompileError) {
   compile_script(body, sb, scope.LexLocal, deletable_global_vars: False)
 }
 
 pub type CompiledModuleBody {
   CompiledModuleBody(
-    template: FuncTemplate,
+    template: FuncTemplate(SourceKey),
     export_names: Dict(String, Int),
     hoisted_funcs: List(#(String, Int)),
     export_seeds: Dict(String, ExportSeed),
@@ -238,7 +238,7 @@ fn compile_module_with_scope(
 pub fn compile_repl(
   body: List(ast.StmtWithLine),
   sb: scope.ScopeBuilder,
-) -> Result(FuncTemplate, CompileError) {
+) -> Result(FuncTemplate(SourceKey), CompileError) {
   compile_script(body, sb, scope.LexGlobal, deletable_global_vars: False)
 }
 
@@ -246,7 +246,7 @@ pub fn compile_repl(
 pub fn compile_eval(
   body: List(ast.StmtWithLine),
   sb: scope.ScopeBuilder,
-) -> Result(FuncTemplate, CompileError) {
+) -> Result(FuncTemplate(SourceKey), CompileError) {
   compile_script(body, sb, scope.LexLocal, deletable_global_vars: True)
 }
 
@@ -254,7 +254,7 @@ pub fn compile_eval_direct(
   body: List(ast.StmtWithLine),
   sb: scope.ScopeBuilder,
   caller: DirectEvalCaller,
-) -> Result(FuncTemplate, CompileError) {
+) -> Result(FuncTemplate(SourceKey), CompileError) {
   let caller_is_strict = caller.strictness == Strict
   let caller_is_global = caller.var_env == GlobalVarEnv
   // finalize does not scan directives, so check the body too
@@ -354,7 +354,7 @@ fn compile_script(
   sb: scope.ScopeBuilder,
   top_lex: scope.TopLevelLex,
   deletable_global_vars deletable_global_vars: Bool,
-) -> Result(FuncTemplate, CompileError) {
+) -> Result(FuncTemplate(SourceKey), CompileError) {
   let opts = scope.AnalyzeOpts(..scope.default_analyze_opts(), top_lex:)
   let tree = scope.finalize(sb, opts)
   use
@@ -395,7 +395,7 @@ fn compile_child(
   child: emit.CompiledChild,
   tree: scope.ScopeTree,
   parent_fn_scope: scope.ScopeId,
-) -> FuncTemplate {
+) -> FuncTemplate(SourceKey) {
   let info = scope.function_info(tree, child.scope_id)
   let parent_info = scope.function_info(tree, parent_fn_scope)
 
@@ -465,7 +465,7 @@ fn compile_children(
   children: List(emit.CompiledChild),
   tree: scope.ScopeTree,
   parent_fn_scope: scope.ScopeId,
-) -> List(FuncTemplate) {
+) -> List(FuncTemplate(SourceKey)) {
   list.map(children, compile_child(_, tree, parent_fn_scope))
 }
 

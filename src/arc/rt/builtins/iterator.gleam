@@ -1,4 +1,3 @@
-import arc/bytecode/key.{Named, index_key}
 import arc/rt/async as rt_async
 import arc/rt/buffer as rt_buffer
 import arc/rt/builtins/common
@@ -7,6 +6,7 @@ import arc/rt/builtins/iter_protocol.{IterateStrings, RejectPrimitives}
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/limits
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
@@ -344,12 +344,7 @@ fn array_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
           let #(out, st) = case kind {
             ArrayIterKeys -> #(mk_number(JInt(index)), st)
             _ -> {
-              let #(elem, st) =
-                rt_obj.t_get_prop(
-                  st,
-                  mk_object(target),
-                  StringKey(index_key(index)),
-                )
+              let #(elem, st) = rt_obj.t_get_index(st, mk_object(target), index)
               case kind {
                 ArrayIterValues -> #(elem, st)
                 ArrayIterEntries -> alloc_pair(st, mk_number(JInt(index)), elem)
@@ -406,7 +401,7 @@ fn array_source_length(st: Agent, target: Handle) -> #(Int, Agent) {
       }
     _ -> {
       let #(len_v, st) =
-        rt_obj.t_get_prop(st, mk_object(target), StringKey(Named("length")))
+        rt_obj.t_get_prop(st, mk_object(target), StringKey(nk.length))
       let #(len, st) = rt_val.t_to_length(st, len_v)
       case len > limits.max_iteration {
         True -> {
@@ -535,8 +530,8 @@ fn do_async_from_sync(
   }
   let #(method, st) = case kind {
     AfsNext -> #(sync.next_method, st)
-    AfsReturn -> rt_obj.t_get_prop(st, sync_iter, StringKey(Named("return")))
-    AfsThrow -> rt_obj.t_get_prop(st, sync_iter, StringKey(Named("throw")))
+    AfsReturn -> rt_obj.t_get_prop(st, sync_iter, StringKey(nk.return))
+    AfsThrow -> rt_obj.t_get_prop(st, sync_iter, StringKey(nk.throw))
   }
   case kind, rt_call.is_callable(st, method) {
     AfsReturn, False -> {
@@ -586,9 +581,9 @@ fn afs_continuation(
   cap_reject: JsVal,
 ) -> #(JsVal, Agent) {
   let result = mk_object(result_h)
-  let #(done_v, st) = rt_obj.t_get_prop(st, result, StringKey(Named("done")))
+  let #(done_v, st) = rt_obj.t_get_prop(st, result, StringKey(nk.done))
   let done = rt_val.to_boolean(done_v)
-  let #(inner, st) = rt_obj.t_get_prop(st, result, StringKey(Named("value")))
+  let #(inner, st) = rt_obj.t_get_prop(st, result, StringKey(nk.value))
   let #(on_fulfilled, st) =
     alloc_closure(st, IteratorN(AsyncFromSyncUnwrap(done:)))
   let #(on_rejected, st) = case done || !close_on_rejection {
@@ -1296,7 +1291,7 @@ fn ignore_proto_setter(
         False -> {
           let val = first_arg_or_undefined(args)
           let key = case which {
-            IgnoreSetCtor -> StringKey(Named("constructor"))
+            IgnoreSetCtor -> StringKey(nk.constructor)
             IgnoreSetTag -> SymbolKey(symbol_to_string_tag)
           }
           let #(ok, st) =
@@ -1527,15 +1522,13 @@ fn zip_options(
   case classify(options) {
     KUndef -> #(OptShortest, st)
     KHandle(_) -> {
-      let #(mode_v, st) =
-        rt_obj.t_get_prop(st, options, StringKey(Named("mode")))
+      let #(mode_v, st) = rt_obj.t_get_prop(st, options, StringKey(nk.mode))
       case classify(mode_v) {
         KUndef -> #(OptShortest, st)
         KStr("shortest") -> #(OptShortest, st)
         KStr("strict") -> #(OptStrict, st)
         KStr("longest") -> {
-          let #(pad, st) =
-            rt_obj.t_get_prop(st, options, StringKey(Named("padding")))
+          let #(pad, st) = rt_obj.t_get_prop(st, options, StringKey(nk.padding))
           case classify(pad) {
             KUndef | KHandle(_) -> #(OptLongest(padding: pad), st)
             _ ->

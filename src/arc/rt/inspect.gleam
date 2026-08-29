@@ -1,10 +1,9 @@
-import arc/bytecode/key.{
-  type PropertyKey, Index, Named, Private, key_display_string,
-}
+import arc/bytecode/key.{type Key}
 import arc/internal/ordered_entries
 import arc/rt/buffer
 import arc/rt/elements
 import arc/rt/intl_data
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -83,11 +82,7 @@ fn inspect_object(
         ArrayObj(length:) -> inspect_array(st, elements, length, depth, visited)
         KCompiled(..) | KBytecode(..) | KNative(..) | KBound(..) -> {
           let name = case
-            rt_obj.t_ordinary_own_property(
-              st,
-              h,
-              rt_types.StringKey(Named("name")),
-            )
+            rt_obj.t_ordinary_own_property(st, h, rt_types.StringKey(nk.name))
           {
             Some(DataProperty(value:, ..)) ->
               case classify(value) {
@@ -244,7 +239,7 @@ fn inspect_array_loop(
 
 fn inspect_plain_object(
   st: Agent,
-  props: Dict(PropertyKey, Property),
+  props: Dict(Key, Property),
   depth: Int,
   visited: Set(Handle),
 ) -> String {
@@ -265,7 +260,7 @@ fn inspect_plain_object(
         list.take(visible, max_items)
         |> list.map(fn(pair) {
           let #(key, val) = pair
-          key_display_string(key)
+          rt_store.t_key_text(st, key)
           <> ": "
           <> inspect_inner(st, val, depth + 1, visited)
         })
@@ -285,19 +280,17 @@ fn inspect_plain_object(
 }
 
 fn ordered_property_pairs(
-  props: Dict(PropertyKey, Property),
-) -> List(#(PropertyKey, Property)) {
+  props: Dict(Key, Property),
+) -> List(#(Key, Property)) {
   let #(idx, named) =
     dict.fold(props, #([], []), fn(acc, key, prop) {
       let #(idx, named) = acc
-      case key {
-        Index(i) -> #([#(i, prop), ..idx], named)
-        Named(_) | Private(_) -> #(idx, [#(key, prop), ..named])
+      case key < 0 {
+        True -> #([#(key, prop), ..idx], named)
+        False -> #(idx, [#(key, prop), ..named])
       }
     })
-  let idx =
-    list.sort(idx, fn(a, b) { int.compare(a.0, b.0) })
-    |> list.map(fn(pair) { #(Index(pair.0), pair.1) })
+  let idx = list.sort(idx, fn(a, b) { int.compare(b.0, a.0) })
   let named =
     list.sort(named, fn(a, b) {
       int.compare(rt_types.prop_seq(a.1), rt_types.prop_seq(b.1))
@@ -333,13 +326,13 @@ fn error_display(st: Agent, h: Handle) -> Option(String) {
         "" -> None
         s -> Some(s)
       }
-      Some(case option.or(slot_stack, error_property(st, h, "stack", 100)) {
+      Some(case option.or(slot_stack, error_property(st, h, nk.stack, 100)) {
         Some(s) -> s
         None -> {
           let name =
-            error_property(st, h, "name", 100) |> option.unwrap("Error")
+            error_property(st, h, nk.name, 100) |> option.unwrap("Error")
           let message =
-            error_property(st, h, "message", 100) |> option.unwrap("")
+            error_property(st, h, nk.message, 100) |> option.unwrap("")
           case name, message {
             "", _ -> message
             _, "" -> name
@@ -352,16 +345,11 @@ fn error_display(st: Agent, h: Handle) -> Option(String) {
   }
 }
 
-fn error_property(
-  st: Agent,
-  h: Handle,
-  key: String,
-  fuel: Int,
-) -> Option(String) {
+fn error_property(st: Agent, h: Handle, key: Key, fuel: Int) -> Option(String) {
   use <- bool.guard(fuel <= 0, None)
   case rt_obj.as_sobject(rt_store.t_cell_get(st, h)) {
     SObject(props:, proto:, ..) ->
-      case dict.get(props, Named(key)) {
+      case dict.get(props, key) {
         Ok(DataProperty(value:, ..)) ->
           case classify(value) {
             KStr(s) -> Some(s)

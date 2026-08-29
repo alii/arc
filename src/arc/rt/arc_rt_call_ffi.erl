@@ -3,6 +3,7 @@
          mk_frame/4, t_kfn_code/3, birth_props/2]).
 
 -include("arc_rt_layout.hrl").
+-include("arc_rt_names.hrl").
 
 t_kfn_code(St, {js_cell, Id}, This) ->
     Store = element(?AGENT_STORE, St),
@@ -57,7 +58,5 @@ mk_frame(This, ActiveFunc, HomeObj, NewTarget) ->
     {This, ActiveFunc, HomeObj, NewTarget}.
 
 birth_props(LengthV, Name) ->
-    #{{?KEY_NAMED, <<"length">>} =>
-          {?DATAPROP_TAG, LengthV, false, false, true, 0},
-      {?KEY_NAMED, <<"name">>} =>
-          {?DATAPROP_TAG, Name, false, false, true, 1}}.
+    #{?K_length => {?DATAPROP_TAG, LengthV, false, false, true, 0},
+      ?K_name => {?DATAPROP_TAG, Name, false, false, true, 1}}.

@@ -10,9 +10,11 @@
          named_free/5, free_chain/4, named_plain/2,
          shape_slots_new/0, shape_slots_get/2, shape_slots_set/3,
          shape_slots_append/2,
-         shape_slots_fold/3]).
+         shape_slots_fold/3,
+         as_object_key/2, wire_find/2, wire_key/2]).
 
 -include("arc_rt_layout.hrl").
+-include("arc_rt_names.hrl").
 
 -compile({inline, [peek_get/3, slot_of/2, get_any/3,
                    named_plain/2, birth_plain/2, store_put_seq/3, index_read/2,
@@ -21,17 +23,46 @@
                    in_store/2, in_agent/2, in_props/2, in_value/2, touched/2]}).
 
 -define(IC_READ, ic_read).
--define(PROTO_KEY, {?KEY_NAMED, <<"__proto__">>}).
 -define(IC_READ_WAYS, 8).
 
-t_get_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin) ->
-    peek_get(St, Id, KeyBin);
+%% keys arrive as ints from gleam, as name text or the old tuples from aot
+
+%% non allocating, miss when no object could hold the key
+wire_find(_, K) when is_integer(K) -> K;
+wire_find(Store, B) when is_binary(B) -> arc_rt_val_ffi:key_find(Store, B);
+wire_find(Store, {named, B}) -> arc_rt_val_ffi:key_find(Store, B);
+wire_find(_, {index, I}) -> ?INDEX_KEY(I);
+wire_find(Store, {?OKEY_STRING, K}) -> wire_find(Store, K);
+wire_find(_, {?OKEY_SYMBOL, _}) -> miss.
+
+%% allocating, {Key, St1}
+wire_key(St, K) when is_integer(K) -> {K, St};
+wire_key(St, B) when is_binary(B) ->
+    {K, Store} = arc_rt_val_ffi:key_of(element(?AGENT_STORE, St), B),
+    {K, in_agent(St, Store)};
+wire_key(St, {named, B}) -> wire_key(St, B);
+wire_key(St, {index, I}) -> {?INDEX_KEY(I), St};
+wire_key(St, {?OKEY_STRING, K}) -> wire_key(St, K).
+
+%% {ObjectKey, St1} from a key, an object key or an aot wire key
+as_object_key(St, {?OKEY_STRING, K}) when is_integer(K) -> {{?OKEY_STRING, K}, St};
+as_object_key(St, {?OKEY_SYMBOL, _} = K) -> {K, St};
+as_object_key(St, W) ->
+    {K, St1} = wire_key(St, W),
+    {{?OKEY_STRING, K}, St1}.
+
+t_get_prop_own_data(St, {?HANDLE_TAG, Id}, W) ->
+    case wire_find(element(?AGENT_STORE, St), W) of
+        miss -> miss;
+        K -> peek_get(St, Id, K)
+    end;
 t_get_prop_own_data(_, _, _) -> miss.
 
-t_get_prop_ic(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
+t_get_prop_ic(St, {?HANDLE_TAG, Id}, W, Site) ->
     Store = element(?AGENT_STORE, St),
+    K = wire_find(Store, W),
     case element(?STORE_ICS, Store) of
-        #{Site := {?IC_READ, KeyBin, Offs}} ->
+        #{Site := {?IC_READ, K, Offs}} ->
             case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
                 {?SSHAPED_TAG, Sid, _, Slots, _} ->
                     case Offs of
@@ -44,118 +75,131 @@ t_get_prop_ic(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
     end;
 t_get_prop_ic(_, _, _, _) -> miss.
 
-t_get_prop_ic_miss(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
+t_get_prop_ic_miss(St, {?HANDLE_TAG, Id}, W, Site) ->
     Store = element(?AGENT_STORE, St),
-    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
-        {?SSHAPED_TAG, Sid, _, Slots, Offs} ->
-            case Offs of
-                #{KeyBin := Off} ->
-                    {element(Off + 1, Slots),
-                     ic_fill(St, Store, Site, Sid, Off, KeyBin)};
-                _ -> {miss, St}
-            end;
-        Slot -> {peek_slot(St, Slot, KeyBin), St}
+    case wire_find(Store, W) of
+        miss -> {miss, St};
+        K ->
+            case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
+                {?SSHAPED_TAG, Sid, _, Slots, Offs} ->
+                    case Offs of
+                        #{K := Off} ->
+                            {element(Off + 1, Slots),
+                             ic_fill(St, Store, Site, Sid, Off, K)};
+                        _ -> {miss, St}
+                    end;
+                Slot -> {peek_slot(St, Slot, K), St}
+            end
     end;
 t_get_prop_ic_miss(St, _, _, _) -> {miss, St}.
 
-t_get_prop_slow(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
+t_get_prop_slow(St, Recv, K, Site) when is_integer(K) ->
+    get_prop_slow(St, Recv, K, Site);
+t_get_prop_slow(St, Recv, W, Site) ->
+    {K, St1} = wire_key(St, W),
+    get_prop_slow(St1, Recv, K, Site).
+
+get_prop_slow(St, Recv = {?HANDLE_TAG, Id}, K, Site) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
-    read_named(St, Store, Data, Recv, arc_rt_arena_ffi:get(Id, Data), KeyBin, Site);
-t_get_prop_slow(St, Recv, KeyBin, _) -> read_prim(St, Recv, KeyBin).
+    read_named(St, Store, Data, Recv, arc_rt_arena_ffi:get(Id, Data), K, Site);
+get_prop_slow(St, Recv, K, _) -> read_prim(St, Recv, K).
 
-t_get_prop_site(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
+t_get_prop_site(St, Recv, K, Site) when is_integer(K) ->
+    get_prop_site(St, Recv, K, Site);
+t_get_prop_site(St, Recv, W, Site) ->
+    {K, St1} = wire_key(St, W),
+    get_prop_site(St1, Recv, K, Site).
+
+get_prop_site(St, Recv = {?HANDLE_TAG, Id}, K, Site) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     Slot = arc_rt_arena_ffi:get(Id, Data),
     case Slot of
         {?SSHAPED_TAG, Sid, _, Slots, _} ->
             case element(?STORE_ICS, Store) of
-                #{Site := {?IC_READ, KeyBin, #{Sid := Off}}} ->
+                #{Site := {?IC_READ, K, #{Sid := Off}}} ->
                     {element(Off + 1, Slots), St};
-                _ -> read_named(St, Store, Data, Recv, Slot, KeyBin, Site)
+                _ -> read_named(St, Store, Data, Recv, Slot, K, Site)
             end;
-        {?SOBJECT_TAG, ?ORDINARY, _, #{{?KEY_NAMED, KeyBin} := Prop}, _, _, _}
+        {?SOBJECT_TAG, ?ORDINARY, _, #{K := Prop}, _, _, _}
           when element(1, Prop) =:= ?DATAPROP_TAG ->
             {element(?DATAPROP_VALUE, Prop), St};
-        _ -> read_named(St, Store, Data, Recv, Slot, KeyBin, Site)
+        _ -> read_named(St, Store, Data, Recv, Slot, K, Site)
     end;
-t_get_prop_site(St, Recv, KeyBin, _) -> read_prim(St, Recv, KeyBin).
+get_prop_site(St, Recv, K, _) -> read_prim(St, Recv, K).
 
 read_named(St, Store, Data, Recv, {?SSHAPED_TAG, Sid, Proto, Slots, Offs},
-           KeyBin, Site) ->
+           K, Site) ->
     case Offs of
-        #{KeyBin := Off} ->
-            {element(Off + 1, Slots), ic_fill(St, Store, Site, Sid, Off, KeyBin)};
+        #{K := Off} ->
+            {element(Off + 1, Slots), ic_fill(St, Store, Site, Sid, Off, K)};
         _ ->
-            read_proto(St, Data, element(?STORE_SHAPES, Store), Proto, Recv,
-                       KeyBin)
+            read_proto(St, Data, element(?STORE_SHAPES, Store), Proto, Recv, K)
     end;
-read_named(St, Store, Data, Recv, Slot, KeyBin, _)
+read_named(St, Store, Data, Recv, Slot, K, _)
   when element(1, Slot) =:= ?SOBJECT_TAG ->
     Kind = element(?SOBJECT_KIND, Slot),
-    case named_plain(Kind, KeyBin) of
+    case named_plain(Kind, K) of
         true ->
             case element(?SOBJECT_PROPS, Slot) of
-                #{{?KEY_NAMED, KeyBin} := Prop}
-                  when element(1, Prop) =:= ?DATAPROP_TAG ->
+                #{K := Prop} when element(1, Prop) =:= ?DATAPROP_TAG ->
                     {element(?DATAPROP_VALUE, Prop), St};
-                #{{?KEY_NAMED, KeyBin} := _} -> get_any(St, Recv, KeyBin);
+                #{K := _} -> get_any(St, Recv, K);
                 _ ->
                     read_proto(St, Data, element(?STORE_SHAPES, Store),
-                               element(?SOBJECT_PROTO, Slot), Recv, KeyBin)
+                               element(?SOBJECT_PROTO, Slot), Recv, K)
             end;
-        false when element(1, Kind) =:= ?ARRAYOBJ_TAG ->
+        false when element(1, Kind) =:= ?ARRAYOBJ_TAG, K =:= ?K_length ->
             {element(?ARRAYOBJ_LENGTH, Kind), St};
-        false -> get_any(St, Recv, KeyBin)
+        false -> get_any(St, Recv, K)
     end;
-read_named(St, _, _, Recv, _, KeyBin, _) -> get_any(St, Recv, KeyBin).
+read_named(St, _, _, Recv, _, K, _) -> get_any(St, Recv, K).
 
-read_proto(St, Data, Shapes, Proto, Recv, KeyBin) ->
-    case proto_read(Data, Shapes, Proto, KeyBin, 64) of
-        miss -> get_any(St, Recv, KeyBin);
+read_proto(St, Data, Shapes, Proto, Recv, K) ->
+    case proto_read(Data, Shapes, Proto, K, 64) of
+        miss -> get_any(St, Recv, K);
         V -> {V, St}
     end.
 
-read_prim(St, Bin, <<"length">>) when is_binary(Bin) ->
+read_prim(St, Bin, ?K_length) when is_binary(Bin) ->
     {arc_string_ffi:string_codepoint_length(Bin), St};
-read_prim(St, Bin, KeyBin) when is_binary(Bin) ->
-    read_wrapper(St, ?REALM_STRING, Bin, KeyBin);
-read_prim(St, N, KeyBin) when is_number(N) ->
-    read_wrapper(St, ?REALM_NUMBER, N, KeyBin);
-read_prim(St, Recv, KeyBin) -> get_any(St, Recv, KeyBin).
+read_prim(St, Bin, K) when is_binary(Bin), K >= 0 ->
+    read_wrapper(St, ?REALM_STRING, Bin, K);
+read_prim(St, N, K) when is_number(N) ->
+    read_wrapper(St, ?REALM_NUMBER, N, K);
+read_prim(St, Recv, K) -> get_any(St, Recv, K).
 
-read_wrapper(St, Which, Recv, KeyBin) ->
+read_wrapper(St, Which, Recv, K) ->
     Pair = element(Which, element(?AGENT_REALM, St)),
     Store = element(?AGENT_STORE, St),
     read_proto(St, element(?STORE_DATA, Store), element(?STORE_SHAPES, Store),
-               {?SOME, element(?PAIR_PROTO, Pair)}, Recv, KeyBin).
+               {?SOME, element(?PAIR_PROTO, Pair)}, Recv, K).
 
-get_any(St, Recv, KeyBin) ->
-    'arc@rt@obj':t_get_prop_any(St, Recv, {?OKEY_STRING, {?KEY_NAMED, KeyBin}}).
+get_any(St, Recv, K) ->
+    'arc@rt@obj':t_get_prop(St, Recv, {?OKEY_STRING, K}).
 
 %% §10.1.8.1 ordinary get while every hop is plain data
 proto_read(_, _, ?NONE, _, _) -> undefined;
 proto_read(_, _, _, _, 0) -> miss;
-proto_read(Data, Shapes, {?SOME, {?HANDLE_TAG, Id}}, KeyBin, Fuel) ->
+proto_read(Data, Shapes, {?SOME, {?HANDLE_TAG, Id}}, K, Fuel) ->
     case arc_rt_arena_ffi:get(Id, Data) of
         {?SSHAPED_TAG, _, Proto, Slots, Offs} ->
             case Offs of
-                #{KeyBin := Off} -> element(Off + 1, Slots);
-                _ -> proto_read(Data, Shapes, Proto, KeyBin, Fuel - 1)
+                #{K := Off} -> element(Off + 1, Slots);
+                _ -> proto_read(Data, Shapes, Proto, K, Fuel - 1)
             end;
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case named_plain(element(?SOBJECT_KIND, Slot), KeyBin) of
+            case named_plain(element(?SOBJECT_KIND, Slot), K) of
                 false -> miss;
                 true ->
                     case element(?SOBJECT_PROPS, Slot) of
-                        #{{?KEY_NAMED, KeyBin} := Prop}
-                          when element(1, Prop) =:= ?DATAPROP_TAG ->
+                        #{K := Prop} when element(1, Prop) =:= ?DATAPROP_TAG ->
                             element(?DATAPROP_VALUE, Prop);
-                        #{{?KEY_NAMED, KeyBin} := _} -> miss;
+                        #{K := _} -> miss;
                         _ ->
                             proto_read(Data, Shapes,
-                                       element(?SOBJECT_PROTO, Slot), KeyBin,
+                                       element(?SOBJECT_PROTO, Slot), K,
                                        Fuel - 1)
                     end
             end;
@@ -163,70 +207,76 @@ proto_read(Data, Shapes, {?SOME, {?HANDLE_TAG, Id}}, KeyBin, Fuel) ->
     end;
 proto_read(_, _, _, _, _) -> miss.
 
+%% false when named keys on this kind are exotic or virtual
 named_plain(?ORDINARY, _) -> true;
 named_plain(Kind, _) when is_atom(Kind) -> true;
-named_plain(Kind, KeyBin) ->
+named_plain(Kind, K) ->
     case element(1, Kind) of
         ?PROXYOBJ_TAG -> false;
         module_namespace -> false;
         typed_array_obj -> false;
-        ?ARRAYOBJ_TAG -> KeyBin =/= <<"length">>;
-        string_obj -> KeyBin =/= <<"length">>;
-        ?KBYTECODE_TAG -> birth_plain(element(?KBYTECODE_BIRTH, Kind), KeyBin);
-        ?KFN_TAG -> birth_plain(element(?KFN_BIRTH, Kind), KeyBin);
+        ?ARRAYOBJ_TAG -> K =/= ?K_length andalso K >= 0;
+        string_obj -> K =/= ?K_length andalso K >= 0;
+        ?ARGUMENTSOBJ_TAG -> K >= 0;
+        ?KBYTECODE_TAG -> birth_plain(element(?KBYTECODE_BIRTH, Kind), K);
+        ?KFN_TAG -> birth_plain(element(?KFN_BIRTH, Kind), K);
         _ -> true
     end.
 
 birth_plain(?BIRTH_SETTLED, _) -> true;
-birth_plain(_, <<"length">>) -> false;
-birth_plain(_, <<"name">>) -> false;
-birth_plain(Birth, <<"prototype">>) ->
+birth_plain(_, ?K_length) -> false;
+birth_plain(_, ?K_name) -> false;
+birth_plain(Birth, ?K_prototype) ->
     element(?BIRTH_PROTOTYPE_PARENT, Birth) =:= ?NONE;
 birth_plain(_, _) -> true.
 
 ic_fill(St, _, none, _, _, _) -> St;
-ic_fill(St, Store, Site, Sid, Off, KeyBin) ->
+ic_fill(St, Store, Site, Sid, Off, K) ->
     Ics = element(?STORE_ICS, Store),
     case Ics of
-        #{Site := {?IC_READ, KeyBin, Offs}}
+        #{Site := {?IC_READ, K, Offs}}
           when map_size(Offs) < ?IC_READ_WAYS ->
             in_agent(St,
                        setelement(?STORE_ICS, Store,
-                                  Ics#{Site := {?IC_READ, KeyBin,
+                                  Ics#{Site := {?IC_READ, K,
                                                 Offs#{Sid => Off}}}));
         #{Site := _} -> St;
         _ ->
             in_agent(St,
                        setelement(?STORE_ICS, Store,
-                                  Ics#{Site => {?IC_READ, KeyBin,
+                                  Ics#{Site => {?IC_READ, K,
                                                 #{Sid => Off}}}))
     end.
 
-t_global_get_fast(St, KeyBin) ->
+t_global_get_fast(St, W) ->
     {?HANDLE_TAG, GId} = element(?REALM_GLOBAL, element(?AGENT_REALM, St)),
     Store = element(?AGENT_STORE, St),
-    peek_slot(St, arc_rt_arena_ffi:get(GId, element(?STORE_DATA, Store)), KeyBin).
+    case wire_find(Store, W) of
+        miss -> miss;
+        K -> peek_slot(St, arc_rt_arena_ffi:get(GId, element(?STORE_DATA, Store)), K)
+    end.
 
-t_global_get(St, KeyBin) ->
-    case t_global_get_fast(St, KeyBin) of
-        miss -> arc@rt@obj:t_global_get(St, KeyBin);
+t_global_get(St, W) ->
+    case t_global_get_fast(St, W) of
+        miss ->
+            {K, St1} = wire_key(St, W),
+            arc@rt@obj:t_global_get_key(St1, K);
         V -> {V, St}
     end.
 
-peek_get(St, Id, KeyBin) ->
-    peek_slot(St, slot_of(St, Id), KeyBin).
+peek_get(St, Id, K) ->
+    peek_slot(St, slot_of(St, Id), K).
 
-peek_slot(_, {?SSHAPED_TAG, _, _, Slots, Offs}, KeyBin) ->
+peek_slot(_, {?SSHAPED_TAG, _, _, Slots, Offs}, K) ->
     case Offs of
-        #{KeyBin := Off} -> element(Off + 1, Slots);
+        #{K := Off} -> element(Off + 1, Slots);
         _ -> miss
     end;
-peek_slot(_, Slot, KeyBin) when element(1, Slot) =:= ?SOBJECT_TAG ->
-    case named_plain(element(?SOBJECT_KIND, Slot), KeyBin) of
+peek_slot(_, Slot, K) when element(1, Slot) =:= ?SOBJECT_TAG ->
+    case named_plain(element(?SOBJECT_KIND, Slot), K) of
         true ->
             case element(?SOBJECT_PROPS, Slot) of
-                #{{?KEY_NAMED, KeyBin} := Prop}
-                  when element(1, Prop) =:= ?DATAPROP_TAG ->
+                #{K := Prop} when element(1, Prop) =:= ?DATAPROP_TAG ->
                     element(?DATAPROP_VALUE, Prop);
                 _ -> miss
             end;
@@ -235,13 +285,19 @@ peek_slot(_, Slot, KeyBin) when element(1, Slot) =:= ?SOBJECT_TAG ->
 peek_slot(_, _, _) -> miss.
 
 %% §10.1.9.1 ordinary set when it lands as plain data
-t_set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
+t_set_prop_own_data(St, Obj, K, V) when is_integer(K) ->
+    set_prop_own_data(St, Obj, K, V);
+t_set_prop_own_data(St, Obj, W, V) ->
+    {K, St1} = wire_key(St, W),
+    set_prop_own_data(St1, Obj, K, V).
+
+set_prop_own_data(St, {?HANDLE_TAG, Id}, K, V) when K >= 0 ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     case arc_rt_arena_ffi:get(Id, Data) of
         {?SSHAPED_TAG, _, _, _, _} = Shaped ->
             Shapes = element(?STORE_SHAPES, Store),
-            case shaped_write(Data, Shapes, Shaped, KeyBin, V) of
+            case shaped_write(Data, Shapes, Shaped, K, V) of
                 miss -> miss;
                 NewSlot ->
                     in_agent(St,
@@ -249,11 +305,10 @@ t_set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
                                    arc_rt_arena_ffi:set(Id, NewSlot, Data)))
             end;
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case named_plain(element(?SOBJECT_KIND, Slot), KeyBin) of
+            case named_plain(element(?SOBJECT_KIND, Slot), K) of
                 false -> miss;
                 true ->
                     Props = element(?SOBJECT_PROPS, Slot),
-                    K = {?KEY_NAMED, KeyBin},
                     case Props of
                         #{K := Prop}
                           when element(1, Prop) =:= ?DATAPROP_TAG,
@@ -278,7 +333,7 @@ t_set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
             end;
         _ -> miss
     end;
-t_set_prop_own_data(_, _, _, _) -> miss.
+set_prop_own_data(_, _, _, _) -> miss.
 
 set_prop_new(St, Store, Data, Id, Slot, K, V)
   when tuple_size(Store) =:= ?STORE_ARITY ->
@@ -292,9 +347,8 @@ set_prop_new(St, Store, Data, Id, Slot, K, V)
 
 %% proto chain takes a plain named write at k, filling the store memo
 free_chain(_, _, ?NONE, _) -> true;
-free_chain(Store, Data, {?SOME, {?HANDLE_TAG, PId}} = Proto,
-           {?KEY_NAMED, KB} = K)
-  when byte_size(KB) =/= 9; KB =/= <<"__proto__">> ->
+free_chain(Store, Data, {?SOME, {?HANDLE_TAG, PId}} = Proto, K)
+  when K =/= ?K___proto__ ->
     case is_map_key(PId, element(?STORE_FREE_PROTOS, Store)) of
         true -> true;
         false -> named_free_cached(Store, Data, Proto, K)
@@ -324,41 +378,41 @@ in_props(Slot, Props) when tuple_size(Slot) =:= ?SOBJECT_ARITY ->
 in_value(Prop, V) when tuple_size(Prop) =:= ?DATAPROP_ARITY ->
     setelement(?DATAPROP_VALUE, Prop, V).
 
-t_set_prop_named(St, Obj, KeyBin, V, Strict) ->
-    case t_set_prop_own_data(St, Obj, KeyBin, V) of
+t_set_prop_named(St, Obj, W, V, Strict) ->
+    {K, St0} = wire_key(St, W),
+    case set_prop_own_data(St0, Obj, K, V) of
         miss ->
-            Key = {?KEY_NAMED, KeyBin},
+            Key = {?OKEY_STRING, K},
             {_, St1} = case Strict of
-                true -> 'arc@rt@obj':t_set_prop_strict(St, Obj, Key, V);
-                false -> 'arc@rt@obj':t_set_prop_any(St, Obj, Key, V)
+                true -> 'arc@rt@obj':t_set_prop_strict(St0, Obj, Key, V);
+                false -> 'arc@rt@obj':t_set_prop(St0, Obj, Key, V)
             end,
             St1;
         St1 -> St1
     end.
 
 %% §7.3.5 create data property, new plain key only
-t_create_data_prop(St, Recv = {?HANDLE_TAG, Id}, Key, V) ->
-    PK = case Key of
-        {?OKEY_STRING, K} -> K;
-        K -> K
-    end,
+t_create_data_prop(St0, Recv = {?HANDLE_TAG, Id}, W, V) ->
+    {Key, St} = as_object_key(St0, W),
+    {_, PK} = Key,
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     Slot = arc_rt_arena_ffi:get(Id, Data),
-    R = case PK of
-        {?KEY_NAMED, KeyBin} when element(1, Slot) =:= ?SSHAPED_TAG ->
-            shaped_define(element(?STORE_SHAPES, Store), Slot, KeyBin, V);
-        {?KEY_NAMED, KeyBin} when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case named_plain(element(?SOBJECT_KIND, Slot), KeyBin) of
+    R = if
+        not is_integer(PK) -> miss;
+        PK >= 0, PK band 3 =:= 0, element(1, Slot) =:= ?SSHAPED_TAG ->
+            shaped_define(element(?STORE_SHAPES, Store), Slot, PK, V);
+        PK >= 0, PK band 3 =:= 0, element(1, Slot) =:= ?SOBJECT_TAG ->
+            case named_plain(element(?SOBJECT_KIND, Slot), PK) of
                 true -> plain_define(Slot, PK, V, Store);
                 false -> miss
             end;
-        {?KEY_INDEX, _} when element(1, Slot) =:= ?SOBJECT_TAG ->
+        PK < 0, element(1, Slot) =:= ?SOBJECT_TAG ->
             case index_in_props(element(?SOBJECT_KIND, Slot)) of
                 true -> plain_define(Slot, PK, V, Store);
                 false -> miss
             end;
-        _ -> miss
+        true -> miss
     end,
     case R of
         miss -> 'arc@rt@obj':t_create_data_prop_slow(St, Recv, Key, V);
@@ -369,7 +423,8 @@ t_create_data_prop(St, Recv = {?HANDLE_TAG, Id}, Key, V) ->
             Store1 = in_store(Store, arc_rt_arena_ffi:set(Id, NewSlot, Data)),
             {true, in_agent(St, touched(Store1, NewSlot))}
     end;
-t_create_data_prop(St, Recv, Key, V) ->
+t_create_data_prop(St0, Recv, W, V) ->
+    {Key, St} = as_object_key(St0, W),
     'arc@rt@obj':t_create_data_prop_slow(St, Recv, Key, V).
 
 plain_define(Slot, PK, V, Store) ->
@@ -385,24 +440,24 @@ plain_define(Slot, PK, V, Store) ->
              Seq + 1}
     end.
 
-shaped_define(Shapes, {?SSHAPED_TAG, Sid, P, Slots, Offs} = Shaped, KeyBin, V) ->
+shaped_define(Shapes, {?SSHAPED_TAG, Sid, P, Slots, Offs} = Shaped, K, V) ->
     case Offs of
-        #{KeyBin := Off} ->
+        #{K := Off} ->
             setelement(?SSHAPED_SLOTS, Shaped, setelement(Off + 1, Slots, V));
         _ ->
-            case shaped_next(Shapes, Sid, KeyBin) of
+            case shaped_next(Shapes, Sid, K) of
                 miss -> miss;
                 {To, ToOffs} ->
                     {?SSHAPED_TAG, To, P, erlang:append_element(Slots, V), ToOffs}
             end
     end.
 
-%% known successor shape for adding keybin
-shaped_next(Shapes, Sid, KeyBin) ->
+%% known successor shape for adding key
+shaped_next(Shapes, Sid, K) ->
     case Shapes of
         #{Sid := Desc} ->
             case element(?SHAPE_TRANSITIONS, Desc) of
-                #{KeyBin := To} ->
+                #{K := To} ->
                     #{To := ToDesc} = Shapes,
                     {To, element(?SHAPE_OFFSETS, ToDesc)};
                 _ -> miss
@@ -418,7 +473,7 @@ t_instanceof_fast(St, V, {?HANDLE_TAG, CId}) ->
             case element(?SOBJECT_KIND, Slot) of
                 Kind when element(1, Kind) =:= ?KFN_TAG ->
                     case element(?SOBJECT_PROPS, Slot) of
-                        #{{?KEY_NAMED, <<"prototype">>} := Prop}
+                        #{?K_prototype := Prop}
                           when element(1, Prop) =:= ?DATAPROP_TAG ->
                             case element(?DATAPROP_VALUE, Prop) of
                                 {?HANDLE_TAG, PId} -> proto_has(St, V, PId, 64);
@@ -463,19 +518,18 @@ t_get_elem_fast(St, Recv, Idx)
   when is_float(Idx), Idx >= 0.0, Idx == trunc(Idx) ->
     t_get_elem_fast(St, Recv, trunc(Idx));
 t_get_elem_fast(St, {?HANDLE_TAG, Id}, Key) when is_binary(Key) ->
-    case arc_rt_val_ffi:t_to_property_key_fast(Key) of
-        {?OKEY_STRING, {?KEY_NAMED, KeyBin}} ->
-            Store = element(?AGENT_STORE, St),
+    Store = element(?AGENT_STORE, St),
+    case arc_rt_val_ffi:key_find(Store, Key) of
+        miss -> miss;
+        K when K < 0 ->
+            index_read(arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)), -K - 1);
+        K ->
             Data = element(?STORE_DATA, Store),
             case named_read(Data, element(?STORE_SHAPES, Store),
-                            arc_rt_arena_ffi:get(Id, Data), KeyBin) of
+                            arc_rt_arena_ffi:get(Id, Data), K) of
                 undefined -> miss;
                 V -> V
-            end;
-        {?OKEY_STRING, {?KEY_INDEX, Idx}} ->
-            Store = element(?AGENT_STORE, St),
-            index_read(arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)), Idx);
-        _ -> miss
+            end
     end;
 t_get_elem_fast(_, _, _) -> miss.
 
@@ -483,7 +537,7 @@ index_read(Slot, Idx) when element(1, Slot) =:= ?SOBJECT_TAG ->
     case element(?SOBJECT_KIND, Slot) of
         {?ARRAYOBJ_TAG, Length} when Idx < Length ->
             case element(?SOBJECT_PROPS, Slot) of
-                #{{?KEY_INDEX, Idx} := _} -> miss;
+                #{?INDEX_KEY(Idx) := _} -> miss;
                 _ ->
                     case element(?SOBJECT_ELEMENTS, Slot) of
                         {?ELEMS_DENSE, A} ->
@@ -499,7 +553,7 @@ index_read(Slot, Idx) when element(1, Slot) =:= ?SOBJECT_TAG ->
             case index_in_props(Kind) of
                 true ->
                     case element(?SOBJECT_PROPS, Slot) of
-                        #{{?KEY_INDEX, Idx} := Prop}
+                        #{?INDEX_KEY(Idx) := Prop}
                           when element(1, Prop) =:= ?DATAPROP_TAG ->
                             element(?DATAPROP_VALUE, Prop);
                         _ -> miss
@@ -509,25 +563,24 @@ index_read(Slot, Idx) when element(1, Slot) =:= ?SOBJECT_TAG ->
     end;
 index_read(_, _) -> miss.
 
-named_read(Data, Shapes, {?SSHAPED_TAG, _, Proto, Slots, Offs}, KeyBin) ->
+named_read(Data, Shapes, {?SSHAPED_TAG, _, Proto, Slots, Offs}, K) ->
     case Offs of
-        #{KeyBin := Off} -> element(Off + 1, Slots);
-        _ -> proto_read(Data, Shapes, Proto, KeyBin, 64)
+        #{K := Off} -> element(Off + 1, Slots);
+        _ -> proto_read(Data, Shapes, Proto, K, 64)
     end;
-named_read(Data, Shapes, Slot, KeyBin) when element(1, Slot) =:= ?SOBJECT_TAG ->
+named_read(Data, Shapes, Slot, K) when element(1, Slot) =:= ?SOBJECT_TAG ->
     Kind = element(?SOBJECT_KIND, Slot),
-    case named_plain(Kind, KeyBin) of
+    case named_plain(Kind, K) of
         true ->
             case element(?SOBJECT_PROPS, Slot) of
-                #{{?KEY_NAMED, KeyBin} := Prop}
-                  when element(1, Prop) =:= ?DATAPROP_TAG ->
+                #{K := Prop} when element(1, Prop) =:= ?DATAPROP_TAG ->
                     element(?DATAPROP_VALUE, Prop);
-                #{{?KEY_NAMED, KeyBin} := _} -> miss;
+                #{K := _} -> miss;
                 _ ->
                     proto_read(Data, Shapes, element(?SOBJECT_PROTO, Slot),
-                               KeyBin, 64)
+                               K, 64)
             end;
-        false when element(1, Kind) =:= ?ARRAYOBJ_TAG ->
+        false when element(1, Kind) =:= ?ARRAYOBJ_TAG, K =:= ?K_length ->
             element(?ARRAYOBJ_LENGTH, Kind);
         false -> miss
     end;
@@ -552,11 +605,10 @@ t_set_elem_fast(St, Recv, Idx, V)
   when is_float(Idx), Idx >= 0.0, Idx == trunc(Idx) ->
     t_set_elem_fast(St, Recv, trunc(Idx), V);
 t_set_elem_fast(St, Recv = {?HANDLE_TAG, Id}, Key, V) when is_binary(Key) ->
-    case arc_rt_val_ffi:t_to_property_key_fast(Key) of
-        {?OKEY_STRING, {?KEY_NAMED, KeyBin}} ->
-            t_set_prop_own_data(St, Recv, KeyBin, V);
-        {?OKEY_STRING, {?KEY_INDEX, Idx}} -> index_write(St, Id, Idx, V);
-        _ -> miss
+    case arc_rt_val_ffi:key_find(element(?AGENT_STORE, St), Key) of
+        miss -> miss;
+        K when K < 0 -> index_write(St, Id, -K - 1, V);
+        K -> set_prop_own_data(St, Recv, K, V)
     end;
 t_set_elem_fast(_, _, _, _) -> miss.
 
@@ -570,7 +622,7 @@ index_write(St, Id, Idx, V) ->
             case element(?SOBJECT_KIND, Slot) of
                 {?ARRAYOBJ_TAG, Length} when Idx < Length ->
                     case element(?SOBJECT_PROPS, Slot) of
-                        #{{?KEY_INDEX, Idx} := _} -> miss;
+                        #{?INDEX_KEY(Idx) := _} -> miss;
                         _ ->
                             case elem_write(element(?SOBJECT_ELEMENTS, Slot), Idx, V) of
                                 miss -> miss;
@@ -583,7 +635,7 @@ index_write(St, Id, Idx, V) ->
                     end;
                 {?ARRAYOBJ_TAG, Length} when Idx =:= Length ->
                     case element(?SOBJECT_PROPS, Slot) of
-                        #{{?KEY_INDEX, Idx} := _} -> miss;
+                        #{?INDEX_KEY(Idx) := _} -> miss;
                         _ ->
                             case elem_write_grow(element(?SOBJECT_ELEMENTS, Slot), Idx, V) of
                                 miss -> miss;
@@ -608,7 +660,7 @@ index_write(St, Id, Idx, V) ->
             case index_in_props(element(?SOBJECT_KIND, Slot)) of
                 true ->
                     case element(?SOBJECT_PROPS, Slot) of
-                        #{{?KEY_INDEX, Idx} := _} ->
+                        #{?INDEX_KEY(Idx) := _} ->
                             index_prop_write(St, Store, Data, Id, Slot, Idx, V);
                         _ -> miss
                     end;
@@ -619,7 +671,7 @@ index_write(St, Id, Idx, V) ->
 
 index_prop_write(St, Store, Data, Id, Slot, Idx, V) ->
     Props = element(?SOBJECT_PROPS, Slot),
-    K = {?KEY_INDEX, Idx},
+    K = ?INDEX_KEY(Idx),
     case Props of
         #{K := Prop}
           when element(1, Prop) =:= ?DATAPROP_TAG,
@@ -660,7 +712,7 @@ index_free(Data, {?SOME, {?HANDLE_TAG, PId}}, Idx, Fuel) ->
                 false -> false;
                 true ->
                     case element(?SOBJECT_PROPS, Slot) of
-                        #{{?KEY_INDEX, Idx} := Prop} ->
+                        #{?INDEX_KEY(Idx) := Prop} ->
                             element(1, Prop) =:= ?DATAPROP_TAG andalso
                                 element(?DATAPROP_WRITABLE, Prop) =:= true;
                         _ ->
@@ -701,16 +753,16 @@ shape_slots_fold_1(_, Acc, _, I, N) when I > N -> Acc;
 shape_slots_fold_1(Slots, Acc, F, I, N) ->
     shape_slots_fold_1(Slots, F(I - 1, element(I, Slots), Acc), F, I + 1, N).
 
-shaped_write(Data, Shapes, {?SSHAPED_TAG, Sid, P, Slots, Offs} = Shaped, KeyBin,
+shaped_write(Data, Shapes, {?SSHAPED_TAG, Sid, P, Slots, Offs} = Shaped, K,
              V) ->
     case Offs of
-        #{KeyBin := Off} ->
+        #{K := Off} ->
             setelement(?SSHAPED_SLOTS, Shaped, setelement(Off + 1, Slots, V));
         _ ->
-            case shaped_next(Shapes, Sid, KeyBin) of
+            case shaped_next(Shapes, Sid, K) of
                 miss -> miss;
                 {To, ToOffs} ->
-                    case named_free(Data, Shapes, P, {?KEY_NAMED, KeyBin}, 64) of
+                    case named_free(Data, Shapes, P, K, 64) of
                         true ->
                             {?SSHAPED_TAG, To, P, erlang:append_element(Slots, V),
                              ToOffs};
@@ -744,10 +796,10 @@ clean_chain(Data, Shapes, {?SOME, {?HANDLE_TAG, PId}}, Fuel, Ids) when Fuel > 0 
 clean_chain(_, _, _, _, _) -> false.
 
 clean_props(none) -> true;
-clean_props({{?KEY_NAMED, _} = K, Prop, I}) ->
+clean_props({K, Prop, I}) when K >= 0, K band 3 =:= 0 ->
     case Prop of
         {?DATAPROP_TAG, _, true, _, _, _} -> clean_props(maps:next(I));
-        _ when K =:= ?PROTO_KEY -> clean_props(maps:next(I));
+        _ when K =:= ?K___proto__ -> clean_props(maps:next(I));
         _ -> false
     end;
 clean_props({_, _, I}) -> clean_props(maps:next(I)).
@@ -759,11 +811,11 @@ named_free(Data, Shapes, {?SOME, {?HANDLE_TAG, PId}}, K, Fuel) ->
     case arc_rt_arena_ffi:get(PId, Data) of
         {?SSHAPED_TAG, _, P2, _, Offs} ->
             case Offs of
-                #{element(2, K) := _} -> true;
+                #{K := _} -> true;
                 _ -> named_free_next(Data, Shapes, P2, K, Fuel)
             end;
         Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case named_plain(element(?SOBJECT_KIND, Slot), element(2, K)) of
+            case named_plain(element(?SOBJECT_KIND, Slot), K) of
                 true ->
                     case element(?SOBJECT_PROPS, Slot) of
                         #{K := Prop} ->

@@ -1,3 +1,4 @@
+import arc/bytecode/key.{type Key}
 import arc/host_hooks.{type HostHooks}
 import arc/rt/arena
 import arc/rt/builtins as rt_builtins
@@ -17,7 +18,7 @@ import gleam/result
 import gleam/set.{type Set}
 
 // bump on any change to the image or runtime records
-pub const abi_version = 10
+pub const abi_version = 11
 
 pub type SnapshotError {
   SnapshotContainsCompiledCode(cell: Handle)
@@ -47,7 +48,7 @@ type StoreImage {
     next_shape: Int,
     unit_uid: Int,
     names: Dict(String, Int),
-    name_texts: Dict(Int, String),
+    key_texts: Dict(Key, String),
     next_name: Int,
   )
 }
@@ -106,7 +107,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
     free_protos: _,
     global_epoch: _,
     names:,
-    name_texts:,
+    key_texts:,
     next_name:,
   ) = store
   let microtasks = types.jq_to_list(microtasks)
@@ -135,7 +136,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
       next_shape:,
       unit_uid:,
       names:,
-      name_texts:,
+      key_texts:,
       next_name:,
     )
   let realms = RealmImage(current: realm, realms:, template_objects:)
@@ -180,7 +181,7 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     next_shape:,
     unit_uid:,
     names:,
-    name_texts:,
+    key_texts:,
     next_name:,
   ) = image
   JsStore(
@@ -205,7 +206,7 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     free_protos: dict.new(),
     global_epoch: 0,
     names:,
-    name_texts:,
+    key_texts:,
     next_name:,
   )
 }

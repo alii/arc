@@ -1,7 +1,5 @@
 import arc/bytecode/binop
-import arc/bytecode/key.{
-  type PropertyKey, Index, Named, key_display_string, key_to_text,
-}
+import arc/bytecode/key.{type Key}
 import arc/bytecode/lexical
 import arc/bytecode/opcode.{
   type Op, ApplyArguments, ArrayFrom, ArrayFromWithHoles, ArrayPush,
@@ -62,6 +60,7 @@ import arc/rt/env as rt_env
 import arc/rt/inspect as rt_inspect
 import arc/rt/lang as rt_lang
 import arc/rt/limits
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
@@ -74,7 +73,6 @@ import arc/rt/types.{
   mk_bool, mk_number, mk_object, mk_string, mk_tdz, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
-import gleam/bit_array
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -198,10 +196,6 @@ fn rt_unit6(
   |> drop_nil
 }
 
-fn named(name: String) -> ObjectKey {
-  StringKey(Named(name))
-}
-
 fn is_undef(v: JsVal) -> Bool {
   case classify(v) {
     KUndef -> True
@@ -233,7 +227,7 @@ fn inspect(state: State, v: JsVal) -> String {
 
 pub fn make_closure(
   agent: Agent,
-  template: FuncTemplate,
+  template: FuncTemplate(Key),
   captured: List(JsVal),
   unit: Int,
 ) -> #(Handle, Agent) {
@@ -326,7 +320,7 @@ fn sync_fallback_disposer(
   #(mk_object(h), agent)
 }
 
-fn sync_fallback_template() -> FuncTemplate {
+fn sync_fallback_template() -> FuncTemplate(Key) {
   bytecode.FuncTemplate(
     name: None,
     arity: 0,
@@ -359,11 +353,11 @@ fn sync_fallback_template() -> FuncTemplate {
   )
 }
 
-fn lex_lookup(agent: Agent, name: String) -> Option(LexicalGlobal) {
+fn lex_lookup(agent: Agent, name: Key) -> Option(LexicalGlobal) {
   dict.get(agent.realm.lexical_globals, name) |> option.from_result
 }
 
-fn lex_write(agent: Agent, name: String, binding: LexicalGlobal) -> Agent {
+fn lex_write(agent: Agent, name: Key, binding: LexicalGlobal) -> Agent {
   let realm = agent.realm
   Agent(
     ..agent,
@@ -447,7 +441,7 @@ fn enter(
   agent: Agent,
   code: TupleArray(Op),
   constants: TupleArray(JsVal),
-  keys: TupleArray(PropertyKey),
+  keys: TupleArray(Key),
 ) -> Result(#(Outcome, State), VmError) {
   let _ = tuple_array.size(locals)
   let _ = tuple_array.size(code)
@@ -487,7 +481,7 @@ fn enter(
   }
 }
 
-fn key_at(state: State, slot: Int) -> PropertyKey {
+fn key_at(state: State, slot: Int) -> Key {
   tuple_array.element(slot + 1, state.func.keys)
 }
 
@@ -508,7 +502,7 @@ fn wreg(
   agent: Agent,
   code: TupleArray(Op),
   constants: TupleArray(JsVal),
-  keys: TupleArray(PropertyKey),
+  keys: TupleArray(Key),
   r0: JsVal,
   r1: JsVal,
   slot: Int,
@@ -583,7 +577,7 @@ fn fast_loop(
   agent: Agent,
   code: TupleArray(Op),
   constants: TupleArray(JsVal),
-  keys: TupleArray(PropertyKey),
+  keys: TupleArray(Key),
   r0: JsVal,
   r1: JsVal,
 ) -> Result(#(Outcome, State), VmError) {
@@ -1334,7 +1328,7 @@ fn fast_loop(
 
     BinOpLocalField(kind, index, k) ->
       case tuple_array.element(k + 1, keys), stack {
-        Named(_) as k, [left, ..rest] -> {
+        k, [left, ..rest] if k >= 0 -> {
           let right =
             ffi.get_field(
               agent,
@@ -2297,7 +2291,7 @@ fn fast_loop(
 
     GetField(k) ->
       case tuple_array.element(k + 1, keys), stack {
-        Named(_) as k, [recv, ..rest] -> {
+        k, [recv, ..rest] if k >= 0 -> {
           let v = ffi.get_field(agent, recv, k)
           case ffi.is(v, ffi.Miss) {
             True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
@@ -2322,7 +2316,7 @@ fn fast_loop(
 
     GetField2(k) ->
       case tuple_array.element(k + 1, keys), stack {
-        Named(_) as k, [recv, ..rest] -> {
+        k, [recv, ..rest] if k >= 0 -> {
           let v = ffi.get_field(agent, recv, k)
           case ffi.is(v, ffi.Miss) {
             True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
@@ -2347,7 +2341,7 @@ fn fast_loop(
 
     PutField(k) ->
       case tuple_array.element(k + 1, keys), stack {
-        Named(_) as k, [val, recv, ..rest] -> {
+        k, [val, recv, ..rest] if k >= 0 -> {
           let store = ffi.put_field(agent.store, recv, k, val, True)
           case ffi.is(store, ffi.Miss) {
             True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
@@ -2372,7 +2366,7 @@ fn fast_loop(
 
     PutFieldPop(k) ->
       case tuple_array.element(k + 1, keys), stack {
-        Named(_) as k, [val, recv, ..rest] -> {
+        k, [val, recv, ..rest] if k >= 0 -> {
           let store = ffi.put_field(agent.store, recv, k, val, True)
           case ffi.is(store, ffi.Miss) {
             True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
@@ -2480,7 +2474,7 @@ fn fast_loop(
 
     GetLocalField(index, k) ->
       case tuple_array.element(k + 1, keys) {
-        Named(_) as k -> {
+        k if k >= 0 -> {
           let v =
             ffi.get_field(
               agent,
@@ -2517,7 +2511,7 @@ fn fast_loop(
 
     GetLocalField2(index, k) ->
       case tuple_array.element(k + 1, keys) {
-        Named(_) as k -> {
+        k if k >= 0 -> {
           let recv = case index < 0 {
             True ->
               case index {
@@ -2548,8 +2542,13 @@ fn fast_loop(
         _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    GetGlobal(name) -> {
-      let v = ffi.get_global(agent, agent.realm.lexical_globals, name)
+    GetGlobal(k) -> {
+      let v =
+        ffi.get_global(
+          agent,
+          agent.realm.lexical_globals,
+          tuple_array.element(k + 1, keys),
+        )
       case ffi.is(v, ffi.Miss) {
         True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
@@ -2569,8 +2568,13 @@ fn fast_loop(
       }
     }
 
-    TypeofGlobal(name) -> {
-      let v = ffi.get_global(agent, agent.realm.lexical_globals, name)
+    TypeofGlobal(k) -> {
+      let v =
+        ffi.get_global(
+          agent,
+          agent.realm.lexical_globals,
+          tuple_array.element(k + 1, keys),
+        )
       case ffi.is(v, ffi.Miss) {
         True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
         False -> {
@@ -2596,7 +2600,7 @@ fn fast_loop(
       }
     }
 
-    PutGlobal(name) ->
+    PutGlobal(k) ->
       case stack {
         [val, ..rest] -> {
           let realm = agent.realm
@@ -2605,7 +2609,7 @@ fn fast_loop(
               agent.store,
               realm.lexical_globals,
               realm.global_object,
-              name,
+              tuple_array.element(k + 1, keys),
               val,
               state.func.is_strict,
             )
@@ -2707,7 +2711,7 @@ fn fast_loop(
 
     DefineField(k) ->
       case tuple_array.element(k + 1, keys), stack {
-        Named(_) as k, [val, obj, ..rest] -> {
+        k, [val, obj, ..rest] if k >= 0 -> {
           let store = ffi.define_field(agent.store, obj, k, val)
           case ffi.is(store, ffi.Miss) {
             True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
@@ -3477,7 +3481,7 @@ fn fast_call(
   agent: Agent,
   code: TupleArray(Op),
   constants: TupleArray(JsVal),
-  keys: TupleArray(PropertyKey),
+  keys: TupleArray(Key),
   r0: JsVal,
   r1: JsVal,
   slot: rt_types.JsSlot,
@@ -3758,7 +3762,7 @@ fn fast_construct(
   agent: Agent,
   code: TupleArray(Op),
   constants: TupleArray(JsVal),
-  keys: TupleArray(PropertyKey),
+  keys: TupleArray(Key),
   r0: JsVal,
   r1: JsVal,
   ctor: JsVal,
@@ -3832,7 +3836,7 @@ fn fast_construct(
   }
 }
 
-const prototype_key = Named("prototype")
+const prototype_key = nk.prototype
 
 @external(erlang, "erlang", "=:=")
 fn same_op(a: Op, b: Op) -> Bool
@@ -4175,16 +4179,13 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       }
 
     // §9.1.1.4.4 getbindingvalue
-    GetGlobal(name) ->
+    GetGlobal(k) -> {
+      let name = key_at(state, k)
       case lex_lookup(state.agent, name) {
         Some(binding) -> {
           let value = rt_types.lexical_global_value(binding)
           case is_tdz(value) {
-            True ->
-              state.throw_reference_error(
-                state,
-                "Cannot access '" <> name <> "' before initialization",
-              )
+            True -> throw_tdz(state, name)
             False ->
               Ok(
                 State(..state, stack: [value, ..state.stack], pc: state.pc + 1),
@@ -4196,22 +4197,20 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           State(..state, stack: [value, ..state.stack], pc: state.pc + 1)
         }
       }
+    }
 
     // §9.1.1.4.5 setmutablebinding
-    PutGlobal(name) ->
+    PutGlobal(k) ->
       case state.stack {
-        [value, ..rest] ->
+        [value, ..rest] -> {
+          let name = key_at(state, k)
           case lex_lookup(state.agent, name) {
             // const rejects assignment even in tdz
             Some(rt_types.Const(_)) ->
               state.throw_type_error(state, "Assignment to constant variable.")
             Some(rt_types.Let(current)) ->
               case is_tdz(current) {
-                True ->
-                  state.throw_reference_error(
-                    state,
-                    "Cannot access '" <> name <> "' before initialization",
-                  )
+                True -> throw_tdz(state, name)
                 False ->
                   Ok(
                     State(
@@ -4231,12 +4230,13 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               State(..state, pc: state.pc + 1)
             }
           }
+        }
         [] -> underflow(state, "PutGlobal")
       }
 
     // §9.1.1.4.7 deletebinding, lexical bindings never deletable
-    DeleteGlobalVar(name) ->
-      case lex_lookup(state.agent, name) {
+    DeleteGlobalVar(k) ->
+      case lex_lookup(state.agent, key_at(state, k)) {
         Some(_) ->
           Ok(
             State(
@@ -4249,7 +4249,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           use #(deleted, state) <- result.map(rt2(
             state,
             rt_env.t_delete_global_var,
-            name,
+            key_at(state, k),
           ))
           State(
             ..state,
@@ -4260,35 +4260,35 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       }
 
     // §9.1.1.4.17 createglobalvarbinding, d = true only for eval
-    DeclareGlobalVar(name, deletable) -> {
+    DeclareGlobalVar(k, deletable) -> {
       use state <- result.map(rt_unit3(
         state,
-        rt_env.t_create_global_var_binding,
-        name,
+        rt_env.t_create_global_var,
+        key_at(state, k),
         deletable,
       ))
       State(..state, pc: state.pc + 1)
     }
 
-    DeclareGlobalFn(name, deletable) -> {
+    DeclareGlobalFn(k, deletable) -> {
       use state <- result.map(rt_unit3(
         state,
-        rt_env.t_create_global_fn_binding,
-        name,
+        rt_env.t_create_global_fn,
+        key_at(state, k),
         deletable,
       ))
       State(..state, pc: state.pc + 1)
     }
 
-    GetEvalVar(name) ->
-      case lookup_eval_env(state, name) {
+    GetEvalVar(k) ->
+      case lookup_eval_env(state, key_at(state, k)) {
         Some(v) ->
           Ok(State(..state, stack: [v, ..state.stack], pc: state.pc + 1))
-        None -> step(state, drive, GetGlobal(name))
+        None -> step(state, drive, GetGlobal(k))
       }
 
-    TypeofEvalVar(name) ->
-      case lookup_eval_env(state, name) {
+    TypeofEvalVar(k) ->
+      case lookup_eval_env(state, key_at(state, k)) {
         Some(v) -> {
           let #(t, _) = rt_val.t_type_of(state.agent, v)
           Ok(
@@ -4299,14 +4299,15 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             ),
           )
         }
-        None -> step(state, drive, TypeofGlobal(name))
+        None -> step(state, drive, TypeofGlobal(k))
       }
 
-    PutEvalVar(name) ->
+    PutEvalVar(k) ->
       case state.eval_env, state.stack {
-        Some(env), [v, ..rest] ->
+        Some(env), [v, ..rest] -> {
+          let name = key_at(state, k)
           case rt_env.eval_env_has(state.agent, env, name) {
-            False -> step(state, drive, PutGlobal(name))
+            False -> step(state, drive, PutGlobal(k))
             True ->
               Ok(
                 State(
@@ -4317,18 +4318,23 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 ),
               )
           }
-        _, _ -> step(state, drive, PutGlobal(name))
+        }
+        _, _ -> step(state, drive, PutGlobal(k))
       }
 
     // §19.2.1.3 no eval scope: global var, deletable
-    DeclareEvalVar(name) ->
+    DeclareEvalVar(k) ->
       case state.eval_env {
-        None -> step(state, drive, DeclareGlobalVar(name, deletable: True))
+        None -> step(state, drive, DeclareGlobalVar(k, deletable: True))
         Some(env) ->
           Ok(
             State(
               ..state,
-              agent: rt_env.t_eval_env_declare(state.agent, env, name),
+              agent: rt_env.t_eval_env_declare(
+                state.agent,
+                env,
+                key_at(state, k),
+              ),
               pc: state.pc + 1,
             ),
           )
@@ -4535,11 +4541,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       }
 
     // §9.1.1.4.16 creategloballexbinding
-    DeclareGlobalLex(name, is_const) ->
+    DeclareGlobalLex(k, is_const) ->
       Ok(
         State(
           ..state,
-          agent: lex_write(state.agent, name, case is_const {
+          agent: lex_write(state.agent, key_at(state, k), case is_const {
             True -> rt_types.Const(mk_tdz())
             False -> rt_types.Let(mk_tdz())
           }),
@@ -4547,9 +4553,10 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         ),
       )
 
-    InitGlobalLex(name) ->
+    InitGlobalLex(k) ->
       case state.stack {
         [val, ..rest] -> {
+          let name = key_at(state, k)
           let binding = case lex_lookup(state.agent, name) {
             Some(existing) -> rt_types.lexical_global_with_value(existing, val)
             None -> rt_types.Let(val)
@@ -4609,16 +4616,13 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       }
 
     // tdz throws, undeclared is "undefined"
-    TypeofGlobal(name) ->
+    TypeofGlobal(k) -> {
+      let name = key_at(state, k)
       case lex_lookup(state.agent, name) {
         Some(binding) -> {
           let value = rt_types.lexical_global_value(binding)
           case is_tdz(value) {
-            True ->
-              state.throw_reference_error(
-                state,
-                "Cannot access '" <> name <> "' before initialization",
-              )
+            True -> throw_tdz(state, name)
             False -> {
               let #(t, _) = rt_val.t_type_of(state.agent, value)
               Ok(
@@ -4634,12 +4638,13 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         None -> {
           use #(t, state) <- result.map(rt2(
             state,
-            rt_obj.t_global_typeof,
-            bit_array.from_string(name),
+            rt_obj.t_global_typeof_key,
+            name,
           ))
           State(..state, stack: [mk_string(t), ..state.stack], pc: state.pc + 1)
         }
       }
+    }
 
     BinOp(kind) ->
       case state.stack {
@@ -5456,7 +5461,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                   state.throw_type_error(
                     state,
                     "Cannot delete property '"
-                      <> key_display_string(key_at(state, k))
+                      <> key_text(state, key_at(state, k))
                       <> "'",
                   )
                 _, _ ->
@@ -5610,22 +5615,36 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 "Cannot read properties of " <> rt_val.nullish_label(receiver),
               )
             _ -> {
-              use #(pk, state) <- result.try(rt2(
+              use #(pk, state) <- result.try(rt3(
                 state,
-                rt_val.t_to_property_key,
+                rt_obj.t_read_key,
+                receiver,
                 k,
               ))
-              use #(val, state) <- result.map(rt3(
-                state,
-                rt_obj.t_get_prop,
-                receiver,
-                pk,
-              ))
-              State(
-                ..state,
-                stack: [val, prop_key_value(pk), receiver, ..rest],
-                pc: state.pc + 1,
-              )
+              case pk {
+                Ok(pk) -> {
+                  use #(val, state) <- result.map(rt3(
+                    state,
+                    rt_obj.t_get_prop,
+                    receiver,
+                    pk,
+                  ))
+                  let key_value = prop_key_value(state.agent, pk)
+                  State(
+                    ..state,
+                    stack: [val, key_value, receiver, ..rest],
+                    pc: state.pc + 1,
+                  )
+                }
+                Error(text) ->
+                  Ok(
+                    State(
+                      ..state,
+                      stack: [mk_undefined(), mk_string(text), receiver, ..rest],
+                      pc: state.pc + 1,
+                    ),
+                  )
+              }
             }
           }
         _ -> underflow(state, "GetElem2")
@@ -6314,7 +6333,7 @@ fn set_fn_name_if_empty(
     rt_types.MIMethod | rt_types.MIStatic -> ""
   }
   let name = case k {
-    StringKey(pk) -> key_display_string(pk)
+    StringKey(pk) -> rt_store.t_key_text(agent, pk)
     SymbolKey(sym) ->
       case rt_types.symbol_description(sym) {
         Some(d) -> "[" <> d <> "]"
@@ -6348,14 +6367,23 @@ fn read_box(state: State, slot: JsVal) -> Option(JsVal) {
   }
 }
 
-fn lookup_eval_env(state: State, name: String) -> Option(JsVal) {
+fn throw_tdz(state: State, name: Key) -> Result(a, StepExit) {
+  state.throw_reference_error(
+    state,
+    "Cannot access '"
+      <> rt_store.t_key_text(state.agent, name)
+      <> "' before initialization",
+  )
+}
+
+fn lookup_eval_env(state: State, name: Key) -> Option(JsVal) {
   option.then(state.eval_env, rt_env.eval_env_lookup(state.agent, _, name))
 }
 
 // §6.2.5.6 putvalue, static key
 fn put_field_step(
   state: State,
-  k: PropertyKey,
+  k: Key,
   value: JsVal,
   receiver: JsVal,
   stack: List(JsVal),
@@ -6374,7 +6402,7 @@ fn put_field_step(
           state.throw_type_error(
             state,
             "Cannot assign to read only property '"
-              <> key_display_string(k)
+              <> key_text(state, k)
               <> "' of object",
           )
         _, _ -> Ok(State(..state, stack:, pc: state.pc + 1))
@@ -6386,7 +6414,7 @@ fn put_field_step(
         "Cannot set properties of "
           <> rt_val.nullish_label(receiver)
           <> " (setting '"
-          <> key_display_string(k)
+          <> key_text(state, k)
           <> "')",
       )
     _ ->
@@ -6395,7 +6423,7 @@ fn put_field_step(
           state.throw_type_error(
             state,
             "Cannot create property '"
-              <> key_display_string(k)
+              <> key_text(state, k)
               <> "' on primitive value",
           )
         False -> Ok(State(..state, stack:, pc: state.pc + 1))
@@ -6406,7 +6434,7 @@ fn put_field_step(
 fn get_field(
   state: State,
   receiver: JsVal,
-  k: PropertyKey,
+  k: Key,
 ) -> Result(#(JsVal, State), StepExit) {
   case classify(receiver) {
     KUndef | KNull ->
@@ -6415,7 +6443,7 @@ fn get_field(
         "Cannot read properties of "
           <> rt_val.nullish_label(receiver)
           <> " (reading '"
-          <> key_display_string(k)
+          <> key_text(state, k)
           <> "')",
       )
     _ -> rt3(state, rt_obj.t_get_prop, receiver, StringKey(k))
@@ -6425,11 +6453,11 @@ fn get_field(
 // §9.1.1.4.4 object record half
 fn global_object_get(
   state: State,
-  name: String,
+  name: Key,
 ) -> Result(#(JsVal, State), StepExit) {
   let agent = state.agent
   let global = agent.realm.global_object
-  let k = named(name)
+  let k = StringKey(name)
   case rt_obj.t_ordinary_own_property(agent, global, k) {
     Some(DataProperty(value:, ..)) -> Ok(#(value, state))
     Some(AccessorProperty(..)) ->
@@ -6443,25 +6471,32 @@ fn global_object_get(
       ))
       case has {
         True -> rt3(state, rt_obj.t_get_prop, mk_object(global), k)
-        False -> state.throw_reference_error(state, name <> " is not defined")
+        False -> throw_undefined_global(state, name)
       }
     }
   }
 }
 
+fn throw_undefined_global(state: State, name: Key) -> Result(a, StepExit) {
+  state.throw_reference_error(
+    state,
+    rt_store.t_key_text(state.agent, name) <> " is not defined",
+  )
+}
+
 // §9.1.1.4.5 object record half
 fn global_object_put(
   state: State,
-  name: String,
+  name: Key,
   value: JsVal,
 ) -> Result(State, StepExit) {
   let global = mk_object(state.agent.realm.global_object)
-  let k = named(name)
+  let k = StringKey(name)
   case state.func.is_strict {
     True -> {
       use #(has, state) <- result.try(rt3(state, rt_obj.t_has_prop, global, k))
       case has {
-        False -> state.throw_reference_error(state, name <> " is not defined")
+        False -> throw_undefined_global(state, name)
         True -> {
           use #(ok, state) <- result.try(rt4(
             state,
@@ -6476,7 +6511,7 @@ fn global_object_put(
               state.throw_type_error(
                 state,
                 "Cannot assign to read only property '"
-                  <> name
+                  <> rt_store.t_key_text(state.agent, name)
                   <> "' of object '#<Object>'",
               )
           }
@@ -6623,12 +6658,11 @@ fn get_elem_step(
         "Cannot read properties of " <> rt_val.nullish_label(receiver),
       )
     _ -> {
-      use #(pk, state) <- result.try(rt2(state, rt_val.t_to_property_key, k))
       use #(val, state) <- result.map(rt3(
         state,
-        rt_obj.t_get_prop,
+        rt_obj.t_get_by_value,
         receiver,
-        pk,
+        k,
       ))
       State(..state, stack: [val, ..rest], pc: state.pc + 1)
     }
@@ -6845,16 +6879,13 @@ fn create_data_property_or_throw(
     False ->
       state.throw_type_error(
         state,
-        "Cannot define property " <> object_key_display(k),
+        "Cannot define property " <> rt_obj.key_text(state.agent, k),
       )
   }
 }
 
-fn object_key_display(k: ObjectKey) -> String {
-  case k {
-    StringKey(pk) -> key_display_string(pk)
-    SymbolKey(sym) -> rt_types.symbol_descriptive_string(sym)
-  }
+fn key_text(state: State, k: Key) -> String {
+  rt_store.t_key_text(state.agent, k)
 }
 
 fn to_property_keys(
@@ -6890,7 +6921,7 @@ fn class_proto_parent(
             state,
             rt_obj.t_get_prop,
             parent,
-            named("prototype"),
+            StringKey(nk.prototype),
           ))
           case classify(pp) {
             KHandle(p) -> Ok(#(Some(p), state))
@@ -6913,7 +6944,7 @@ fn class_proto_parent(
 }
 
 fn own_prototype_handle(agent: Agent, h: Handle) -> Option(Handle) {
-  case rt_obj.t_ordinary_own_property(agent, h, named("prototype")) {
+  case rt_obj.t_ordinary_own_property(agent, h, StringKey(nk.prototype)) {
     Some(DataProperty(value:, ..)) -> handle_of(value)
     _ -> None
   }
@@ -7247,11 +7278,11 @@ fn for_in_remaining(
 }
 
 // §13.15.2 re-conversion must be side-effect free
-fn prop_key_value(pk: ObjectKey) -> JsVal {
+fn prop_key_value(agent: Agent, pk: ObjectKey) -> JsVal {
   case pk {
     SymbolKey(sym) -> rt_types.mk_symbol(sym)
-    StringKey(Index(n)) -> int_val(n)
-    StringKey(other) -> mk_string(key_to_text(other))
+    StringKey(k) if k < 0 -> int_val(key.index_of(k))
+    StringKey(k) -> rt_store.t_key_value(agent, k)
   }
 }
 
@@ -7273,7 +7304,13 @@ fn get_super_value(
             this_val,
           ))
           let stack = case keep_base {
-            True -> [val, prop_key_value(pk), base, this_val, ..rest]
+            True -> [
+              val,
+              prop_key_value(state.agent, pk),
+              base,
+              this_val,
+              ..rest
+            ]
             False -> [val, ..rest]
           }
           State(..state, stack:, pc: state.pc + 1)
@@ -7350,7 +7387,7 @@ fn delegate_target(
         state,
         rt_obj.t_get_prop,
         slot,
-        named("next"),
+        StringKey(nk.next),
       ))
       #(slot, next_fn, state)
     }

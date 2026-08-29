@@ -6,6 +6,7 @@
          capture_env/2, iter_step/2]).
 
 -include("../rt/arc_rt_layout.hrl").
+-include("../rt/arc_rt_names.hrl").
 
 is_miss(miss) -> true;
 is_miss(_) -> false.
@@ -91,7 +92,7 @@ ctor_prototype(Agent, {?HANDLE_TAG, Id}) ->
             of
                 true ->
                     case element(?SOBJECT_PROPS, Slot) of
-                        #{{?KEY_NAMED, <<"prototype">>} := Prop}
+                        #{?K_prototype := Prop}
                           when element(1, Prop) =:= ?DATAPROP_TAG ->
                             case element(?DATAPROP_VALUE, Prop) of
                                 {?HANDLE_TAG, _} = P -> P;
@@ -115,10 +116,10 @@ list_of(Agent, {?HANDLE_TAG, Id}) ->
          {?ELEMS_DENSE, A}, _}
           when map_size(Props) =:= 2, (Mapped =:= ?NONE orelse Mapped =:= {?SOME, []}) ->
             case Props of
-                #{{?KEY_NAMED, <<"length">>} := Prop}
+                #{?K_length := Prop}
                   when element(1, Prop) =:= ?DATAPROP_TAG,
                        is_integer(element(?DATAPROP_VALUE, Prop)),
-                       is_map_key({?KEY_NAMED, <<"callee">>}, Props) ->
+                       is_map_key(?K_callee, Props) ->
                     dense_list(A, element(?DATAPROP_VALUE, Prop));
                 _ -> miss
             end;
@@ -180,7 +181,7 @@ instance_of(Agent, V, {?HANDLE_TAG, CId}, Sym) ->
                     case V of
                         {?HANDLE_TAG, VId} ->
                             case element(?SOBJECT_PROPS, Slot) of
-                                #{{?KEY_NAMED, <<"prototype">>} := Prop}
+                                #{?K_prototype := Prop}
                                   when element(1, Prop) =:= ?DATAPROP_TAG ->
                                     case element(?DATAPROP_VALUE, Prop) of
                                         {?HANDLE_TAG, PId} ->
@@ -245,8 +246,8 @@ chain_reaches(Data, VId, PId, Fuel) ->
 
 %% §23.1.5.2.1 array iterator or generator resume, else `protocol`
 %% index -1 marks exhausted
--define(ITERATOR_KEY, {?KEY_NAMED, <<"iterator">>}).
--define(NEXT_KEY, {?KEY_NAMED, <<"next">>}).
+-define(ITERATOR_KEY, ?K_iterator).
+-define(NEXT_KEY, ?K_next).
 iter_step(Store, {?HANDLE_TAG, RecId}) ->
     Data = element(?STORE_DATA, Store),
     case arc_rt_arena_ffi:get(RecId, Data) of
@@ -282,7 +283,7 @@ iter_step_with(Store, Data, ?TOKEN_ARRAY_ITER_NEXT, IterId, IterSlot)
                                        true, undefined);
                 {?SOBJECT_TAG, {?ARRAYOBJ_TAG, _}, _, Props, _, Els, _} ->
                     case map_size(Props) =/= 0
-                         andalso is_map_key({?KEY_INDEX, Index}, Props) of
+                         andalso is_map_key(?INDEX_KEY(Index), Props) of
                         true -> protocol;
                         false ->
                             case iter_elem(Els, Index) of

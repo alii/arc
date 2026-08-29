@@ -36,7 +36,7 @@ pub fn format_source_error(err: SourceError) -> String {
 pub fn compile(
   goal: Goal,
   source: String,
-) -> Result(FuncTemplate, SourceError) {
+) -> Result(FuncTemplate(key.SourceKey), SourceError) {
   case goal {
     Script -> {
       use #(body, sb) <- result.try(
@@ -67,13 +67,17 @@ pub fn source(goal: Goal, source: String) -> Result(String, SourceError) {
   compile(goal, source) |> result.map(disassemble)
 }
 
-pub fn disassemble(template: FuncTemplate) -> String {
+pub fn disassemble(template: FuncTemplate(key.SourceKey)) -> String {
   render(template, "<main>", "")
   |> string.join("\n")
   <> "\n"
 }
 
-fn render(template: FuncTemplate, label: String, path: String) -> List(String) {
+fn render(
+  template: FuncTemplate(key.SourceKey),
+  label: String,
+  path: String,
+) -> List(String) {
   let ops = tuple_array.to_list(template.bytecode)
   let width = pc_width(list.length(ops))
 
@@ -100,7 +104,11 @@ fn render(template: FuncTemplate, label: String, path: String) -> List(String) {
   |> list.append(children)
 }
 
-fn header(template: FuncTemplate, label: String, path: String) -> String {
+fn header(
+  template: FuncTemplate(key.SourceKey),
+  label: String,
+  path: String,
+) -> String {
   let where = case path {
     "" -> ""
     _ -> "[" <> path <> "] "
@@ -115,7 +123,7 @@ fn header(template: FuncTemplate, label: String, path: String) -> String {
 }
 
 // negative slot operands index this list
-fn regs(template: FuncTemplate) -> String {
+fn regs(template: FuncTemplate(key.SourceKey)) -> String {
   case template.regs {
     bytecode.NoRegs -> ""
     bytecode.Regs(a, b) ->
@@ -128,7 +136,7 @@ fn regs(template: FuncTemplate) -> String {
   }
 }
 
-fn flags(template: FuncTemplate) -> String {
+fn flags(template: FuncTemplate(key.SourceKey)) -> String {
   let set =
     [
       #("strict", template.is_strict),
@@ -154,7 +162,12 @@ fn line_marker(width: Int, line: Int) -> String {
   "  " <> string.repeat(" ", width) <> "  .line " <> int.to_string(line)
 }
 
-fn format_op(pc: Int, width: Int, op: Op, template: FuncTemplate) -> String {
+fn format_op(
+  pc: Int,
+  width: Int,
+  op: Op,
+  template: FuncTemplate(key.SourceKey),
+) -> String {
   let addr = string.pad_start(int.to_string(pc), width, " ")
   let text = string.inspect(op)
   case annotate(op, template) {
@@ -164,7 +177,7 @@ fn format_op(pc: Int, width: Int, op: Op, template: FuncTemplate) -> String {
   }
 }
 
-fn annotate(op: Op, template: FuncTemplate) -> Option(String) {
+fn annotate(op: Op, template: FuncTemplate(key.SourceKey)) -> Option(String) {
   case op {
     opcode.PushConst(index) ->
       Some(resolve(index, template.constants, constant_to_string))
@@ -193,6 +206,19 @@ fn annotate(op: Op, template: FuncTemplate) -> Option(String) {
     | opcode.PutLocalLocalField(_, _, k)
     | opcode.BinOpLocalField(_, _, k) ->
       Some(resolve(k, template.keys, key_to_string))
+    opcode.GetGlobal(k)
+    | opcode.PutGlobal(k)
+    | opcode.DeleteGlobalVar(k)
+    | opcode.TypeofGlobal(k)
+    | opcode.GetEvalVar(k)
+    | opcode.PutEvalVar(k)
+    | opcode.DeclareEvalVar(k)
+    | opcode.TypeofEvalVar(k)
+    | opcode.DeclareGlobalVar(k, _)
+    | opcode.DeclareGlobalFn(k, _)
+    | opcode.DeclareGlobalLex(k, _)
+    | opcode.InitGlobalLex(k) ->
+      Some(resolve(k, template.keys, key.source_key_text))
     opcode.PutLocalConstField(_, index, k) ->
       Some(
         resolve(k, template.keys, key_to_string)
@@ -209,8 +235,8 @@ fn annotate(op: Op, template: FuncTemplate) -> Option(String) {
   }
 }
 
-fn key_to_string(k: key.PropertyKey) -> String {
-  "." <> key.key_display_string(k)
+fn key_to_string(k: key.SourceKey) -> String {
+  "." <> key.source_key_text(k)
 }
 
 fn resolve(
@@ -239,7 +265,7 @@ fn constant_to_string(constant: JsVal) -> String {
   }
 }
 
-fn child_label(child: FuncTemplate) -> String {
+fn child_label(child: FuncTemplate(key.SourceKey)) -> String {
   option.unwrap(child.name, "<anonymous>")
 }
 

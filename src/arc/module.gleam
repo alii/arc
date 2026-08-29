@@ -1,9 +1,10 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{type Key, type SourceKey}
 import arc/compiler.{type ExportSeed}
 import arc/esm
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/entry
 import arc/interp/interpreter
+import arc/interp/load
 import arc/interp/safepoint
 import arc/interp/state.{type State, State}
 import arc/link
@@ -40,7 +41,7 @@ import gleam/string
 pub type CompiledModule {
   CompiledModule(
     specifier: esm.Resolved,
-    template: FuncTemplate,
+    template: FuncTemplate(SourceKey),
     import_bindings: List(#(esm.Raw, List(esm.ImportBinding))),
     export_entries: List(esm.ExportEntry),
     export_names: Dict(String, Int),
@@ -283,7 +284,16 @@ pub type LinkedModule {
     exports: Dict(String, Handle),
     namespace_box: Handle,
     unit: Int,
+    // loaded into this heap, none for a synthetic module
+    template: Option(FuncTemplate(Key)),
   )
+}
+
+fn loaded_template(lm: LinkedModule) -> FuncTemplate(Key) {
+  case lm.template {
+    Some(t) -> t
+    None -> panic as "arc/module: synthetic module has no body"
+  }
 }
 
 pub type Linked {
@@ -640,8 +650,7 @@ fn eval_module_body(
         |> list.append(own_export_seeds(lm, compiled))
       let st =
         registry.write_module_status(es.agent, specifier, registry.Evaluating)
-      let #(outcome, st) =
-        run_module_body(st, specifier, compiled, lm.unit, seeds, finish)
+      let #(outcome, st) = run_module_body(st, specifier, lm, seeds, finish)
       case outcome {
         BodyThrew(thrown) -> {
           let st =
@@ -674,7 +683,7 @@ type BodyOutcome {
 }
 
 fn module_locals(
-  template: FuncTemplate,
+  template: FuncTemplate(Key),
   seeds: List(#(Int, JsVal)),
 ) -> TupleArray(JsVal) {
   list.fold(
@@ -686,7 +695,7 @@ fn module_locals(
 
 fn module_activation(
   agent: Agent,
-  template: FuncTemplate,
+  template: FuncTemplate(Key),
   unit: Int,
   seeds: List(#(Int, JsVal)),
 ) -> State {
@@ -712,26 +721,24 @@ fn module_activation(
 fn run_module_body(
   st: Agent,
   specifier: String,
-  compiled: CompiledModule,
-  unit: Int,
+  lm: LinkedModule,
   seeds: List(#(Int, JsVal)),
   finish: Finish,
 ) -> #(BodyOutcome, Agent) {
   let outer_referrer = registry.read_active_referrer(st)
   let st = registry.write_active_referrer(st, Some(specifier))
-  let #(outcome, st) = run_module_turns(st, compiled, unit, seeds, finish)
+  let #(outcome, st) = run_module_turns(st, lm, seeds, finish)
   #(outcome, registry.write_active_referrer(st, outer_referrer))
 }
 
 fn run_module_turns(
   st: Agent,
-  compiled: CompiledModule,
-  unit: Int,
+  lm: LinkedModule,
   seeds: List(#(Int, JsVal)),
   finish: Finish,
 ) -> #(BodyOutcome, Agent) {
   let #(step, st) =
-    entry.run_turn(module_activation(st, compiled.template, unit, seeds))
+    entry.run_turn(module_activation(st, loaded_template(lm), lm.unit, seeds))
   case step {
     StepReturn(v) -> #(BodyReturned(v), safepoint.finish_turn(st, [v], finish))
     StepThrow(e) -> #(BodyThrew(e), safepoint.finish_turn(st, [e], finish))
@@ -871,12 +878,20 @@ fn build_linked(
       let assert Ok(exp) = dict.get(exports, spec)
       let assert Ok(ns_box) = dict.get(namespace_boxes, spec)
       let #(unit, st) = rt_store.t_next_unit_uid(st)
+      let #(template, st) = case dict.get(bundle.modules, spec) {
+        Ok(SourceModule(compiled)) -> {
+          let #(t, st) = load.template(st, compiled.template)
+          #(Some(t), st)
+        }
+        Ok(SyntheticModule(_)) | Error(Nil) -> #(None, st)
+      }
       let lm =
         LinkedModule(
           local_boxes: lb,
           exports: exp,
           namespace_box: ns_box,
           unit:,
+          template:,
         )
       #(st, dict.insert(modules, spec, lm))
     })
@@ -980,14 +995,14 @@ fn instantiate_hoisted_functions(
       import_seeds(linked, compiled.specifier_map, compiled.import_bindings)
       |> assert_link_invariant
       |> list.append(own_export_seeds(lm, compiled))
-    let locals = module_locals(compiled.template, seeds)
+    let template = loaded_template(lm)
+    let locals = module_locals(template, seeds)
     list.fold(compiled.hoisted_funcs, st, fn(st, hf) {
       let #(name, func_idx) = hf
       case dict.get(lm.local_boxes, name) {
         Error(Nil) -> st
         Ok(box) -> {
-          let child =
-            tuple_array.get_unchecked(func_idx, compiled.template.functions)
+          let child = tuple_array.get_unchecked(func_idx, template.functions)
           let captured =
             list.map(child.env_descriptors, fn(desc) {
               tuple_array.get_unchecked(desc.parent_index, locals)
@@ -1174,7 +1189,7 @@ fn fill_deferred_namespace(
         rt_obj.t_define_own_data(
           st,
           handler,
-          StringKey(Named(t.0)),
+          StringKey(rt_obj.trap_key(t.0)),
           mk_object(fn_h),
           True,
           True,

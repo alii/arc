@@ -37,7 +37,7 @@ pub type CompiledChild {
     length: Int,
     code: List(IrOp),
     constants: List(JsVal),
-    keys: List(key.PropertyKey),
+    keys: List(key.SourceKey),
     functions: List(CompiledChild),
     is_strict: Bool,
     is_arrow: Bool,
@@ -56,7 +56,7 @@ pub type EmitOutput {
   EmitOutput(
     code: List(IrOp),
     constants: List(JsVal),
-    keys: List(key.PropertyKey),
+    keys: List(key.SourceKey),
     children: List(CompiledChild),
     is_strict: Bool,
     // must replace the caller's tree: scratch slots bumped local_count
@@ -91,8 +91,8 @@ pub opaque type Emitter {
     constants_map: Dict(JsVal, Int),
     constants_list: List(JsVal),
     next_const: Int,
-    keys_map: Dict(key.PropertyKey, Int),
-    keys_list: List(key.PropertyKey),
+    keys_map: Dict(key.SourceKey, Int),
+    keys_list: List(key.SourceKey),
     next_key: Int,
     next_label: Int,
     frame_stack: List(Frame),
@@ -802,7 +802,7 @@ fn emit_top_level_body(
     LexGlobal ->
       list.fold(ast_util.collect_top_lex_names(stmts), e, fn(e, lex) {
         let #(name, is_const) = lex
-        emit_op(e, opcode.DeclareGlobalLex(name, is_const))
+        emit_keyed(e, name, opcode.DeclareGlobalLex(_, is_const))
       })
   }
   use #(e, hoisted_funcs) <- result.try(collect_hoisted_funcs(e, stmts))
@@ -1044,8 +1044,8 @@ fn emit_annexb_promote(e: Emitter, name: String) -> Emitter {
         AnnexBFallthrough -> {
           let e = emit_slot_get(e, scope.SlotRef(source.slot, source.is_boxed))
           case fn_fallthrough(e) {
-            ToGlobal -> emit_op(e, opcode.PutGlobal(name))
-            ToEvalEnv -> emit_op(e, opcode.PutEvalVar(name))
+            ToGlobal -> emit_keyed(e, name, opcode.PutGlobal)
+            ToEvalEnv -> emit_keyed(e, name, opcode.PutEvalVar)
           }
         }
       }
@@ -1115,28 +1115,28 @@ fn emit_slot_put(e: Emitter, ref: scope.SlotRef) -> Emitter {
 fn emit_declare_var_global(e: Emitter, name: String) -> Emitter {
   case fn_fallthrough(e) {
     ToGlobal ->
-      emit_op(
-        e,
-        opcode.DeclareGlobalVar(name, deletable: e.deletable_global_vars),
-      )
-    ToEvalEnv -> emit_op(e, opcode.DeclareEvalVar(name))
+      emit_keyed(e, name, opcode.DeclareGlobalVar(
+        _,
+        deletable: e.deletable_global_vars,
+      ))
+    ToEvalEnv -> emit_keyed(e, name, opcode.DeclareEvalVar)
   }
 }
 
 fn emit_declare_fn_global(e: Emitter, name: String) -> Emitter {
   case fn_fallthrough(e) {
     ToGlobal ->
-      emit_op(
-        e,
-        opcode.DeclareGlobalFn(name, deletable: e.deletable_global_vars),
-      )
-    ToEvalEnv -> emit_op(e, opcode.DeclareEvalVar(name))
+      emit_keyed(e, name, opcode.DeclareGlobalFn(
+        _,
+        deletable: e.deletable_global_vars,
+      ))
+    ToEvalEnv -> emit_keyed(e, name, opcode.DeclareEvalVar)
   }
 }
 
 fn declare_lex(e: Emitter, name: String, is_const: Bool) -> Emitter {
   case at_global_lex(e) {
-    True -> emit_op(e, opcode.DeclareGlobalLex(name, is_const))
+    True -> emit_keyed(e, name, opcode.DeclareGlobalLex(_, is_const))
     False -> e
   }
 }
@@ -1144,7 +1144,7 @@ fn declare_lex(e: Emitter, name: String, is_const: Bool) -> Emitter {
 // init store bypassing tdz/const checks
 fn init_lex(e: Emitter, name: String) -> Emitter {
   case at_global_lex(e) {
-    True -> emit_op(e, opcode.InitGlobalLex(name))
+    True -> emit_keyed(e, name, opcode.InitGlobalLex)
     False -> emit_var_init(e, name)
   }
 }
@@ -1229,8 +1229,8 @@ fn emit_var_init(e: Emitter, name: String) -> Emitter {
     scope.Local(slot:, boxed: False, ..) ->
       Emitter(..e, initialized: set.insert(e.initialized, slot))
       |> emit_op(opcode.PutLocal(slot))
-    scope.Global(name:) -> emit_op(e, opcode.PutGlobal(name))
-    scope.EvalEnv(name:) -> emit_op(e, opcode.PutEvalVar(name))
+    scope.Global(name:) -> emit_keyed(e, name, opcode.PutGlobal)
+    scope.EvalEnv(name:) -> emit_keyed(e, name, opcode.PutEvalVar)
   }
 }
 
@@ -1242,8 +1242,8 @@ fn emit_var_typeof(e: Emitter, name: String) -> Emitter {
     case fallback {
       scope.Local(slot:, boxed:, ..) ->
         emit_slot_get(e, scope.SlotRef(slot:, boxed:)) |> emit_op(opcode.TypeOf)
-      scope.Global(name:) -> emit_op(e, opcode.TypeofGlobal(name))
-      scope.EvalEnv(name:) -> emit_op(e, opcode.TypeofEvalVar(name))
+      scope.Global(name:) -> emit_keyed(e, name, opcode.TypeofGlobal)
+      scope.EvalEnv(name:) -> emit_keyed(e, name, opcode.TypeofEvalVar)
     }
   }
   case crossed {
@@ -1273,7 +1273,7 @@ fn emit_var_delete(e: Emitter, name: String) -> Emitter {
   use e <- emit_with_chain(e, crossed, opcode.IrWithDeleteVar(name, _))
   case fallback {
     scope.Local(..) -> push_const(e, mk_bool(False))
-    scope.Global(name:) -> emit_op(e, opcode.DeleteGlobalVar(name))
+    scope.Global(name:) -> emit_keyed(e, name, opcode.DeleteGlobalVar)
     scope.EvalEnv(name: _) -> push_const(e, mk_bool(True))
   }
 }
@@ -1395,8 +1395,8 @@ fn emit_static_get(e: Emitter, res: scope.Direct) -> Emitter {
   case res {
     scope.Local(slot:, boxed:, ..) ->
       emit_slot_get(e, scope.SlotRef(slot:, boxed:))
-    scope.Global(name:) -> emit_op(e, opcode.GetGlobal(name))
-    scope.EvalEnv(name:) -> emit_op(e, opcode.GetEvalVar(name))
+    scope.Global(name:) -> emit_keyed(e, name, opcode.GetGlobal)
+    scope.EvalEnv(name:) -> emit_keyed(e, name, opcode.GetEvalVar)
   }
 }
 
@@ -1430,8 +1430,8 @@ fn emit_static_put(
       }
     scope.Local(slot:, boxed:, ..) ->
       emit_slot_put(e, scope.SlotRef(slot:, boxed:))
-    scope.Global(name:) -> emit_op(e, opcode.PutGlobal(name))
-    scope.EvalEnv(name:) -> emit_op(e, opcode.PutEvalVar(name))
+    scope.Global(name:) -> emit_keyed(e, name, opcode.PutGlobal)
+    scope.EvalEnv(name:) -> emit_keyed(e, name, opcode.PutEvalVar)
   }
 }
 
@@ -1489,7 +1489,7 @@ fn add_constant(e: Emitter, val: JsVal) -> #(Emitter, Int) {
   }
 }
 
-fn add_key(e: Emitter, k: key.PropertyKey) -> #(Emitter, Int) {
+fn add_key(e: Emitter, k: key.SourceKey) -> #(Emitter, Int) {
   case dict.get(e.keys_map, k) {
     Ok(idx) -> #(e, idx)
     Error(Nil) -> {
@@ -1507,7 +1507,7 @@ fn add_key(e: Emitter, k: key.PropertyKey) -> #(Emitter, Int) {
 }
 
 fn emit_keyed(e: Emitter, name: String, make: fn(Int) -> Op) -> Emitter {
-  let #(e, slot) = add_key(e, key.canonical_key(name))
+  let #(e, slot) = add_key(e, key.source_key(name))
   emit_op(e, make(slot))
 }
 
@@ -2034,7 +2034,7 @@ fn emit_field_init_call(e: Emitter) -> Emitter {
 
 fn finish(
   e: Emitter,
-) -> #(List(IrOp), List(JsVal), List(key.PropertyKey), List(CompiledChild)) {
+) -> #(List(IrOp), List(JsVal), List(key.SourceKey), List(CompiledChild)) {
   #(
     list.reverse(e.code),
     list.reverse(e.constants_list),
@@ -2591,14 +2591,23 @@ fn compile_function_body(
   let e = emit_op(e, opcode.Return)
 
   let uses_args = !is_arrow && e.references_arguments
-  let put_args = case scope.lookup(e.scope_tree, e.fn_scope, "arguments") {
-    scope.Plain(scope.Local(slot:, boxed: True, ..)) ->
-      IrFinal(opcode.PutBoxed(slot))
-    scope.Plain(scope.Local(slot:, boxed: False, ..)) ->
-      IrFinal(opcode.PutLocal(slot))
+  let #(e, put_args) = case
+    scope.lookup(e.scope_tree, e.fn_scope, "arguments")
+  {
+    scope.Plain(scope.Local(slot:, boxed: True, ..)) -> #(
+      e,
+      IrFinal(opcode.PutBoxed(slot)),
+    )
+    scope.Plain(scope.Local(slot:, boxed: False, ..)) -> #(
+      e,
+      IrFinal(opcode.PutLocal(slot)),
+    )
     scope.Plain(scope.Global(_))
     | scope.Plain(scope.EvalEnv(_))
-    | scope.WithChain(..) -> IrFinal(opcode.PutGlobal("arguments"))
+    | scope.WithChain(..) -> {
+      let #(e, slot) = add_key(e, key.source_key("arguments"))
+      #(e, IrFinal(opcode.PutGlobal(slot)))
+    }
   }
   let simple_params = !non_simple_fixed && rest_param == None
   let forward_args =
@@ -4128,14 +4137,10 @@ fn emit_method_value(
 // leading distinct static-key data members, for NewObjectWith
 fn literal_head(
   properties: List(ast.Property),
-  keys: List(key.PropertyKey),
+  keys: List(key.SourceKey),
   head: List(#(String, ast.Expression)),
   seen: Set(String),
-) -> #(
-  List(key.PropertyKey),
-  List(#(String, ast.Expression)),
-  List(ast.Property),
-) {
+) -> #(List(key.SourceKey), List(#(String, ast.Expression)), List(ast.Property)) {
   let done = #(keys, list.reverse(head), properties)
   case properties {
     [ast.InitProperty(key: k, value:, ..), ..rest] ->
@@ -4156,7 +4161,7 @@ fn literal_head(
 fn literal_key(
   k: ast.PropertyKey,
   seen: Set(String),
-) -> Option(#(String, key.PropertyKey)) {
+) -> Option(#(String, key.SourceKey)) {
   let name = case k {
     ast.KeyIdentifier(name:, ..) -> Some(name)
     ast.KeyString(value: name, ..) -> Some(name)
@@ -4164,9 +4169,9 @@ fn literal_key(
   }
   use name <- option.then(name)
   use <- bool.guard(name == "__proto__" || set.contains(seen, name), None)
-  case key.canonical_key(name) {
-    key.Named(_) as pk -> Some(#(name, pk))
-    _ -> None
+  case key.source_key(name) {
+    key.SourceName(_) as pk -> Some(#(name, pk))
+    key.SourceIndex(_) -> None
   }
 }
 

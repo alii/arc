@@ -1,9 +1,9 @@
-import arc/bytecode/key.{Named}
 import arc/internal/ordered_entries
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
 import arc/rt/builtins/iter_protocol
 import arc/rt/call as rt_call
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -119,7 +119,7 @@ fn map_constructor(
     KUndef | KNull -> #(map_h, st)
     _ -> {
       let iterable = first_arg_or_undefined(args)
-      let #(adder, st) = rt_obj.t_get_prop(st, map, StringKey(Named("set")))
+      let #(adder, st) = rt_obj.t_get_prop(st, map, StringKey(nk.set))
       case rt_call.is_callable(st, adder) {
         False ->
           rt_val.t_throw_type_error(

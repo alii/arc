@@ -1,4 +1,3 @@
-import arc/bytecode/key.{Named}
 import arc/rt/call.{
   type Completion, type Frame, NormalCompletion, ThrowCompletion, is_callable,
   t_call,
@@ -6,6 +5,7 @@ import arc/rt/call.{
 import arc/rt/gc as rt_gc
 import arc/rt/inspect
 import arc/rt/limits
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -374,8 +374,8 @@ pub fn alloc_iter_result(
     kind: Ordinary,
     proto: Some(object_proto),
     props: dict.from_list([
-      #(Named("value"), DataProperty(value, True, True, True, seq)),
-      #(Named("done"), DataProperty(mk_bool(done), True, True, True, seq + 1)),
+      #(nk.value, DataProperty(value, True, True, True, seq)),
+      #(nk.done, DataProperty(mk_bool(done), True, True, True, seq + 1)),
     ]),
     symbol_props: [],
     elements: NoElements,
@@ -468,9 +468,7 @@ fn generator_prototype(
 ) -> Handle {
   case classify(callee) {
     KHandle(fn_h) ->
-      case
-        rt_obj.t_ordinary_own_property(st, fn_h, StringKey(Named("prototype")))
-      {
+      case rt_obj.t_ordinary_own_property(st, fn_h, StringKey(nk.prototype)) {
         Some(DataProperty(value:, ..)) ->
           case classify(value) {
             KHandle(p) -> p
@@ -729,7 +727,7 @@ fn resolve_with_handle(
     SObject(..) | rt_types.SShapedObject(..) -> {
       let #(outcome, st) =
         protected(st, fn(st) {
-          rt_obj.t_get_prop(st, resolution, StringKey(Named("then")))
+          rt_obj.t_get_prop(st, resolution, StringKey(nk.then))
         })
       case outcome {
         ThrowCompletion(e) -> t_promise_reject(st, promise_h, e)

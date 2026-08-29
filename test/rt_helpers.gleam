@@ -1,10 +1,13 @@
-import arc/bytecode/key.{Named}
 import arc/host_hooks.{type HostHooks, HostHooks}
 import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
-import arc/rt/types.{type Agent, type CompiledFn, type JsVal, FnFlags, StringKey}
-import gleam/option.{None}
+import arc/rt/store as rt_store
+import arc/rt/types.{
+  type Agent, type CompiledFn, type JsVal, type ObjectKey, type Property,
+  FnFlags, StringKey,
+}
+import gleam/option.{type Option, None}
 
 pub fn quiet_hooks() -> HostHooks {
   HostHooks(
@@ -26,8 +29,27 @@ pub fn global(st: Agent, name: String) -> #(JsVal, Agent) {
   rt_obj.t_global_get(st, <<name:utf8>>)
 }
 
+// allocates the name so the key is valid in the returned agent
+pub fn key(st: Agent, name: String) -> #(ObjectKey, Agent) {
+  let #(k, st) = rt_store.t_key(st, name)
+  #(StringKey(k), st)
+}
+
 pub fn get(st: Agent, recv: JsVal, name: String) -> #(JsVal, Agent) {
-  rt_obj.t_get_prop(st, recv, StringKey(Named(name)))
+  let #(k, st) = key(st, name)
+  rt_obj.t_get_prop(st, recv, k)
+}
+
+pub fn has(st: Agent, recv: JsVal, name: String) -> #(Bool, Agent) {
+  let #(k, st) = key(st, name)
+  rt_obj.t_has_prop(st, recv, k)
+}
+
+// a name no object was ever keyed by is absent
+pub fn own(st: Agent, h: types.Handle, name: String) -> Option(Property) {
+  option.then(rt_store.t_find_key(st, name), fn(k) {
+    rt_obj.t_ordinary_own_property(st, h, StringKey(k))
+  })
 }
 
 pub fn call_method(

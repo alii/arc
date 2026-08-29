@@ -1,17 +1,18 @@
-import arc/bytecode/key.{Named}
 import arc/engine.{type JsValueKind, Finite, JsNumber, JsString}
 import arc/rt/obj as rt_obj
+import arc/rt/store as rt_store
 import arc/rt/types.{DataProperty, StringKey}
 import gleam/option.{Some}
 
 fn global_after(source: String, name: String) -> JsValueKind {
   let eng = engine.new()
   let assert Ok(#(_, eng)) = engine.eval(eng, source)
+  let assert Some(k) = rt_store.t_find_key(engine.heap(eng), name)
   let assert #(Some(DataProperty(value: v, ..)), _) =
     rt_obj.t_get_own_property(
       engine.heap(eng),
       engine.global(eng),
-      StringKey(Named(name)),
+      StringKey(k),
     )
   engine.classify(v)
 }

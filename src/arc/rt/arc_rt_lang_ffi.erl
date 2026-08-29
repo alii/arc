@@ -3,14 +3,13 @@
 -export([iter_fast/2]).
 
 -include("arc_rt_layout.hrl").
-
--define(K(Name), {?KEY_NAMED, <<Name>>}).
+-include("arc_rt_names.hrl").
 
 iter_fast(St, {?HANDLE_TAG, Id}) ->
     Data = element(?STORE_DATA, element(?AGENT_STORE, St)),
     case arc_rt_arena_ffi:get(Id, Data) of
         {?SOBJECT_TAG, ?ORDINARY, _,
-         #{?K("done") := DoneP, ?K("iterator") := IterP, ?K("next") := NextP},
+         #{?K_done := DoneP, ?K_iterator := IterP, ?K_next := NextP},
          _, _, _}
           when element(1, DoneP) =:= ?DATAPROP_TAG,
                element(1, IterP) =:= ?DATAPROP_TAG,

@@ -1,4 +1,3 @@
-import arc/bytecode/key.{Named}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{
   arg_at, first_arg_or_undefined, two_args_or_undefined,
@@ -143,7 +142,7 @@ fn weak_construct(
     _ -> {
       let iterable = first_arg_or_undefined(args)
       let #(adder, st) =
-        rt_obj.t_get_prop(st, coll, StringKey(Named(adder_name)))
+        rt_obj.t_get_prop(st, coll, StringKey(common.name_key(adder_name)))
       case rt_call.is_callable(st, adder) {
         False ->
           rt_val.t_throw_type_error(

@@ -1,4 +1,3 @@
-import arc/bytecode/key.{Named}
 import arc/compiler
 import arc/parser
 import arc/rt/async as rt_async
@@ -7,6 +6,7 @@ import arc/rt/builtins/helpers.{first_arg_or_undefined}
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/inspect
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/types.{
@@ -212,9 +212,9 @@ fn copy_name_and_length(
 ) -> #(#(String, JsVal), Agent) {
   let target_v = mk_object(target)
   let #(len_desc, st) =
-    rt_obj.t_get_own_property(st, target, StringKey(Named("length")))
+    rt_obj.t_get_own_property(st, target, StringKey(nk.length))
   let #(len_val, st) = case len_desc {
-    Some(_) -> rt_obj.t_get_prop(st, target_v, StringKey(Named("length")))
+    Some(_) -> rt_obj.t_get_prop(st, target_v, StringKey(nk.length))
     None -> #(mk_undefined(), st)
   }
   let length = case classify(len_val) {
@@ -223,8 +223,7 @@ fn copy_name_and_length(
       mk_number(JInt(int.max(rt_val.jsnum_to_integer_or_infinity(n), 0)))
     _ -> mk_number(JInt(0))
   }
-  let #(name_val, st) =
-    rt_obj.t_get_prop(st, target_v, StringKey(Named("name")))
+  let #(name_val, st) = rt_obj.t_get_prop(st, target_v, StringKey(nk.name))
   let name = case classify(name_val) {
     KStr(s) -> s
     _ -> ""

@@ -1,4 +1,3 @@
-import arc/bytecode/key.{Named}
 import arc/internal/digits
 import arc/rt/buffer
 import arc/rt/builtins/common
@@ -10,8 +9,8 @@ import arc/rt/store as rt_store
 import arc/rt/typed_array_ffi.{splice_clamped}
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, ArrayBufferObj, Bytes, JInt, KHandle,
-  KStr, KUndef, NumKind, SObject, StringKey, TypedArrayObj, Uint8Kind, classify,
-  mk_number, mk_object, mk_string, mk_undefined,
+  KStr, KUndef, NumKind, SObject, TypedArrayObj, Uint8Kind, classify, mk_number,
+  mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -177,7 +176,7 @@ fn get_option_value(
 ) -> #(JsVal, Agent) {
   case opts {
     None -> #(mk_undefined(), st)
-    Some(ref) -> rt_obj.t_get_prop(st, mk_object(ref), StringKey(Named(key)))
+    Some(ref) -> rt_obj.t_get_text(st, mk_object(ref), key)
   }
 }
 

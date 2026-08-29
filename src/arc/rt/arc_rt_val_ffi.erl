@@ -7,11 +7,15 @@
     to_boolean_i32/1, to_boolean/1,
     strict_eq/2, same_value_zero/2,
     t_to_property_key_fast/1,
+    key_fast/2, key_find/2, key_of/2, key_text/2, index_of_text/1,
     js_number_to_string/1,
     t_to_string/2, t_to_number/2, t_to_integer_or_infinity/2, t_to_length/2,
     string_to_number/1,
     is_neg_zero/1, float_same_term/2
 ]).
+
+-include("arc_rt_layout.hrl").
+-include("arc_rt_names.hrl").
 
 %% no catch-all: a bad wire term should crash
 classify(undefined) -> k_undef;
@@ -76,26 +80,64 @@ same_value_zero(js_nan, js_nan) -> true;
 same_value_zero(A, B) -> strict_eq(A, B).
 
 -define(MAX_ARRAY_INDEX, 4294967294).
+
+%% aot bridge: the old wire key, see arc_rt_obj_ffi:as_object_key
 t_to_property_key_fast(N)
   when is_integer(N), N >= 0, N =< ?MAX_ARRAY_INDEX ->
-    {string_key, {index, N}};
+    {string_key, ?INDEX_KEY(N)};
 t_to_property_key_fast(B) when is_binary(B) ->
-    {string_key, canonical_key_bin(B)};
+    case index_of_text(B) of
+        none -> {string_key, {named, B}};
+        I -> {string_key, ?INDEX_KEY(I)}
+    end;
 t_to_property_key_fast({js_sym, S}) ->
     {symbol_key, S};
 t_to_property_key_fast(_) -> miss.
 
-canonical_key_bin(<<C, _/binary>> = B) when C >= $0, C =< $9 ->
-    try binary_to_integer(B) of
-        N when N >= 0, N =< ?MAX_ARRAY_INDEX ->
-            case integer_to_binary(N) =:= B of
-                true -> {index, N};
-                false -> {named, B}
+%% int key for a js value without allocating, else miss
+key_fast(_, N) when is_integer(N), N >= 0, N =< ?MAX_ARRAY_INDEX ->
+    ?INDEX_KEY(N);
+key_fast(Store, B) when is_binary(B) -> key_find(Store, B);
+key_fast(_, _) -> miss.
+
+%% the names map is seeded with the fixed names
+key_find(Store, B) ->
+    case index_of_text(B) of
+        none ->
+            case element(?STORE_NAMES, Store) of
+                #{B := N} -> ?NAME_KEY(N);
+                #{} -> miss
             end;
-        _ -> {named, B}
-    catch _:_ -> {named, B}
-    end;
-canonical_key_bin(B) -> {named, B}.
+        I -> ?INDEX_KEY(I)
+    end.
+
+%% allocating form of key_find
+key_of(Store, B) ->
+    case key_find(Store, B) of
+        miss ->
+            N = element(?STORE_NEXT_NAME, Store),
+            Names = element(?STORE_NAMES, Store),
+            Texts = element(?STORE_KEY_TEXTS, Store),
+            Store1 = setelement(?STORE_NAMES, Store, Names#{B => N}),
+            Store2 = setelement(?STORE_KEY_TEXTS, Store1, Texts#{?NAME_KEY(N) => B}),
+            {?NAME_KEY(N), setelement(?STORE_NEXT_NAME, Store2, N + 1)};
+        K -> {K, Store}
+    end.
+
+key_text(_, K) when K < 0 -> integer_to_binary(-K - 1);
+key_text(_, K) when K band 3 =:= ?KEY_KIND_NAME, K bsr 2 < ?N_FIXED_COUNT ->
+    arc_rt_names_ffi:fixed_text(K bsr 2);
+key_text(Store, K) -> maps:get(K, element(?STORE_KEY_TEXTS, Store)).
+
+%% §6.1.7 canonical array index text, the erl twin of key.index_of_text
+index_of_text(<<"0">>) -> 0;
+index_of_text(<<C, R/binary>> = B) when C >= $1, C =< $9, byte_size(B) =< 10 ->
+    digits(R, C - $0);
+index_of_text(_) -> none.
+
+digits(<<>>, N) when N =< ?MAX_ARRAY_INDEX -> N;
+digits(<<C, R/binary>>, N) when C >= $0, C =< $9 -> digits(R, N * 10 + C - $0);
+digits(_, _) -> none.
 
 %% not a jsval, classify has no clause for it
 mk_hole() -> js_hole.

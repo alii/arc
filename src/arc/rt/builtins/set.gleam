@@ -1,9 +1,9 @@
-import arc/bytecode/key.{Named}
 import arc/internal/ordered_entries
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined}
 import arc/rt/builtins/iter_protocol.{type IteratorRecord}
 import arc/rt/call as rt_call
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -129,7 +129,7 @@ fn set_constructor(
     KUndef | KNull -> #(set_h, st)
     _ -> {
       let iterable = first_arg_or_undefined(args)
-      let #(adder, st) = rt_obj.t_get_prop(st, set_v, StringKey(Named("add")))
+      let #(adder, st) = rt_obj.t_get_prop(st, set_v, StringKey(nk.add))
       case rt_call.is_callable(st, adder) {
         False ->
           rt_val.t_throw_type_error(
@@ -493,8 +493,7 @@ fn get_set_record(
 ) -> #(JsVal, Agent) {
   case classify(other) {
     KHandle(_) -> {
-      let #(raw_size, st) =
-        rt_obj.t_get_prop(st, other, StringKey(Named("size")))
+      let #(raw_size, st) = rt_obj.t_get_prop(st, other, StringKey(nk.size))
       let #(num, st) = rt_val.t_to_number(st, raw_size)
       case num {
         JNan -> rt_val.t_throw_type_error(st, "size is NaN")
@@ -503,13 +502,11 @@ fn get_set_record(
           case int_size < 0 {
             True -> rt_val.t_throw_range_error(st, "size is negative")
             False -> {
-              let #(has, st) =
-                rt_obj.t_get_prop(st, other, StringKey(Named("has")))
+              let #(has, st) = rt_obj.t_get_prop(st, other, StringKey(nk.has))
               use has <- helpers.require_callable(st, has, fn() {
                 "has is not a function"
               })
-              let #(keys, st) =
-                rt_obj.t_get_prop(st, other, StringKey(Named("keys")))
+              let #(keys, st) = rt_obj.t_get_prop(st, other, StringKey(nk.keys))
               use keys <- helpers.require_callable(st, keys, fn() {
                 "keys is not a function"
               })
@@ -528,7 +525,7 @@ fn get_keys_iterator(st: Agent, rec: SetRecord) -> #(IteratorRecord, Agent) {
   let #(iter, st) = rt_call.t_call_checked(st, rec.keys, rec.obj, [])
   case classify(iter) {
     KHandle(_) -> {
-      let #(next_fn, st) = rt_obj.t_get_prop(st, iter, StringKey(Named("next")))
+      let #(next_fn, st) = rt_obj.t_get_prop(st, iter, StringKey(nk.next))
       case rt_call.is_callable(st, next_fn) {
         False ->
           rt_val.t_throw_type_error(st, "iterator.next is not a function")

@@ -1,8 +1,8 @@
-import arc/bytecode/key.{Named}
 import arc/rt/builtins/common
 import arc/rt/builtins/error as b_error
 import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type BuiltinPair, type DomExceptionNative, type Handle, type JsVal,
@@ -88,8 +88,7 @@ fn arg_string(st: Agent, arg: JsVal, default: String) -> #(String, Agent) {
 fn get_code(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(_) -> {
-      let #(name_val, st) =
-        rt_obj.t_get_prop(st, this, StringKey(Named("name")))
+      let #(name_val, st) = rt_obj.t_get_prop(st, this, StringKey(nk.name))
       let #(name, st) = rt_val.t_to_string(st, name_val)
       #(mk_number(JInt(legacy_code(name))), st)
     }

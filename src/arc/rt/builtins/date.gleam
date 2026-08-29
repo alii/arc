@@ -1,4 +1,3 @@
-import arc/bytecode/key.{Named}
 import arc/internal/digits.{take_digits}
 import arc/internal/gregorian.{civil_from_days, days_from_year}
 import arc/internal/host_time.{
@@ -9,6 +8,7 @@ import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -1229,8 +1229,7 @@ fn date_to_json(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 }
 
 fn invoke_to_iso_string(st: Agent, obj: JsVal) -> #(JsVal, Agent) {
-  let #(method, st) =
-    rt_obj.t_get_prop(st, obj, StringKey(Named("toISOString")))
+  let #(method, st) = rt_obj.t_get_prop(st, obj, StringKey(nk.to_isostring))
   let #(callable, st) = rt_val.t_is_callable(st, method)
   case callable {
     True -> rt_call.t_call_checked(st, method, obj, [])

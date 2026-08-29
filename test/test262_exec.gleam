@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{type SourceKey}
 import arc/compiler
 import arc/esm
 import arc/host
@@ -115,7 +115,7 @@ fn boot_base_agent() -> Agent {
 fn harness_template(
   key: String,
   read_source: fn() -> Result(String, String),
-) -> Result(FuncTemplate, String) {
+) -> Result(FuncTemplate(SourceKey), String) {
   case template_cache_get(key) {
     Some(template) -> Ok(template)
     None -> {
@@ -127,7 +127,9 @@ fn harness_template(
   }
 }
 
-fn compile_harness_source(source: String) -> Result(FuncTemplate, String) {
+fn compile_harness_source(
+  source: String,
+) -> Result(FuncTemplate(SourceKey), String) {
   use #(body, sb) <- result.try(
     parser.parse_script(source)
     |> result.map_error(fn(err) {
@@ -647,7 +649,7 @@ fn do_run_script_with_harness(
   }
 }
 
-fn run_settled(st: Agent, template: FuncTemplate) -> Settled {
+fn run_settled(st: Agent, template: FuncTemplate(SourceKey)) -> Settled {
   let #(completion, st) = entry.run_script(st, template)
   let held = case completion {
     NormalCompletion(v) -> v
@@ -706,18 +708,13 @@ fn print_native(
 ) -> #(HostState, Result(JsVal, JsVal)) {
   let #(str, st) = rt_val.t_to_string(s.agent, host.first_arg(args))
   let global = mk_object(st.realm.global_object)
-  let #(_ok, st) =
-    rt_obj.t_set_prop(
-      st,
-      global,
-      StringKey(Named(print_output)),
-      mk_string(str),
-    )
+  let #(k, st) = rt_store.t_key(st, print_output)
+  let #(_ok, st) = rt_obj.t_set_prop(st, global, StringKey(k), mk_string(str))
   done(s, st)
 }
 
 fn eval_harness_template(
-  template: FuncTemplate,
+  template: FuncTemplate(SourceKey),
   st: Agent,
 ) -> Result(Agent, String) {
   case run_settled(st, template) {
@@ -743,7 +740,8 @@ fn ordinary_proto(st: Agent, h: Handle) -> Option(Handle) {
 }
 
 fn get_data(st: Agent, h: Handle, key: String) -> Option(JsVal) {
-  case rt_obj.t_ordinary_own_property(st, h, StringKey(Named(key))) {
+  use k <- option.then(rt_store.t_find_key(st, key))
+  case rt_obj.t_ordinary_own_property(st, h, StringKey(k)) {
     Some(DataProperty(value: val, ..)) -> Some(val)
     Some(_) -> None
     None -> option.then(ordinary_proto(st, h), get_data(st, _, key))
@@ -812,13 +810,14 @@ fn build_agent(s: HostState, parent: Option(AgentPid)) -> #(HostState, JsVal) {
     #("__reports__", common.configurable(reports_prop)),
     #("__agents__", common.configurable(agents_prop)),
   ]
+  let #(props, st) = common.keyed_props(st, list.append(method_props, hidden))
   let #(h, st) =
     rt_store.t_cell_new(
       st,
       SObject(
         kind: Ordinary,
         proto: Some(st.realm.object.prototype),
-        props: common.named_props(list.append(method_props, hidden)),
+        props:,
         symbol_props: [],
         elements: NoElements,
         extensible: True,
@@ -1088,7 +1087,8 @@ fn agent_leaving_native(
 
 fn agent_hidden_ref(st: Agent, this: JsVal, name: String) -> Option(Handle) {
   use this_h <- option.then(as_handle(this))
-  case rt_obj.t_ordinary_own_property(st, this_h, StringKey(Named(name))) {
+  use k <- option.then(rt_store.t_find_key(st, name))
+  case rt_obj.t_ordinary_own_property(st, this_h, StringKey(k)) {
     Some(DataProperty(value:, ..)) -> as_handle(value)
     _ -> None
   }
@@ -1185,12 +1185,12 @@ fn agent_cache_put(_key: String, _agent: Agent) -> Nil {
 }
 
 @external(erlang, "test262_exec_ffi", "cache_get")
-fn template_cache_get(_key: String) -> Option(FuncTemplate) {
+fn template_cache_get(_key: String) -> Option(FuncTemplate(SourceKey)) {
   panic as beam_only_test
 }
 
 @external(erlang, "test262_exec_ffi", "cache_put")
-fn template_cache_put(_key: String, _template: FuncTemplate) -> Nil {
+fn template_cache_put(_key: String, _template: FuncTemplate(SourceKey)) -> Nil {
   panic as beam_only_test
 }
 

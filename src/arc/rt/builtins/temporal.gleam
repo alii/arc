@@ -1,4 +1,3 @@
-import arc/bytecode/key.{Named}
 import arc/internal/int_math.{floor_div}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -24,6 +23,7 @@ import arc/rt/builtins/temporal_plain_month_day
 import arc/rt/builtins/temporal_plain_time
 import arc/rt/builtins/temporal_plain_year_month
 import arc/rt/builtins/temporal_zoned_date_time
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type Handle, type InstantGetterName, type InstantMethodName,
@@ -557,8 +557,7 @@ fn instant_method(
         get_unit_option(st, opts, "smallestUnit", allow_auto: False)
       let #(tz_opt, st) = case opts {
         None -> #(mk_undefined(), st)
-        Some(h) ->
-          rt_obj.t_get_prop(st, mk_object(h), StringKey(Named("timeZone")))
+        Some(h) -> rt_obj.t_get_prop(st, mk_object(h), StringKey(nk.time_zone))
       }
       let #(prec, su, sinc, mode) =
         terr(st, seconds_string_precision(digits, su_opt, mode))

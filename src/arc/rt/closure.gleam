@@ -1,5 +1,6 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{type Key}
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
+import arc/rt/name_keys as nk
 import arc/rt/obj.{constructor_props, prototype_seq} as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -10,7 +11,7 @@ import arc/rt/types.{
 import gleam/dict
 import gleam/option.{None, Some}
 
-pub fn template_flags(template: FuncTemplate) -> FnFlags {
+pub fn template_flags(template: FuncTemplate(Key)) -> FnFlags {
   FnFlags(
     is_constructor: template.is_constructor,
     is_class_constructor: template.is_class_constructor,
@@ -29,7 +30,7 @@ pub fn template_flags(template: FuncTemplate) -> FnFlags {
 // does not root the result
 pub fn t_new_bytecode_function(
   st: Agent,
-  template: FuncTemplate,
+  template: FuncTemplate(Key),
   env: EnvTuple,
   unit: Int,
 ) -> #(Handle, Agent) {
@@ -72,7 +73,7 @@ pub fn t_new_bytecode_function(
 
 fn new_with_prototype(
   st: Agent,
-  template: FuncTemplate,
+  template: FuncTemplate(Key),
   env: EnvTuple,
   unit: Int,
   flags: FnFlags,
@@ -121,7 +122,7 @@ fn new_with_prototype(
           birth: BirthPending(None),
         ),
         proto: Some(fn_proto),
-        props: dict.from_list([#(Named("prototype"), prototype_prop)]),
+        props: dict.from_list([#(nk.prototype, prototype_prop)]),
         symbol_props: [],
         elements: NoElements,
         extensible: True,
@@ -145,7 +146,7 @@ fn async_generator_fn_prototype(st: Agent) -> Handle {
     rt_obj.t_ordinary_own_property(
       st,
       realm.async_gen.constructor,
-      StringKey(Named("prototype")),
+      StringKey(nk.prototype),
     )
   {
     Some(DataProperty(value:, ..)) ->

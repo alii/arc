@@ -1,7 +1,9 @@
-import arc/bytecode/key.{Index, Named}
+import arc/bytecode/key
 import arc/rt/builtins as rt_builtins
 import arc/rt/lang
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
+import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, JInt, KHandle, KNum, KStr, KUndef, StringKey, classify, mk_number,
   mk_string, mk_undefined,
@@ -40,7 +42,7 @@ pub fn iter_rest_and_spread_test() {
   let #(rec, st) = lang.t_get_iterator(st, arr, lang.Sync)
   let #(_, st) = lang.t_iter_next(st, rec)
   let #(rest, st) = lang.t_iter_rest(st, rec)
-  let #(len, st) = rt_obj.t_get_prop(st, rest, StringKey(Named("length")))
+  let #(len, st) = rt_obj.t_get_prop(st, rest, StringKey(nk.length))
   assert classify(len) == KNum(JInt(2))
   let #(spread, _st) = lang.t_spread_into_list(st, [mk_string("a")], arr)
   assert list.map(spread, classify)
@@ -51,13 +53,13 @@ pub fn object_rest_excludes_keys_test() {
   let st = agent()
   let #(src_h, st) = rt_obj.t_new_object(st, Some(st.realm.object.prototype))
   let src = types.mk_object(src_h)
-  let #(_, st) =
-    rt_obj.t_set_prop(st, src, StringKey(Named("a")), mk_string("1"))
-  let #(_, st) =
-    rt_obj.t_set_prop(st, src, StringKey(Named("b")), mk_string("2"))
-  let #(rest, st) = lang.t_object_rest(st, src, [StringKey(Named("a"))])
-  let #(a, st) = rt_obj.t_get_prop(st, rest, StringKey(Named("a")))
-  let #(b, _st) = rt_obj.t_get_prop(st, rest, StringKey(Named("b")))
+  let #(ka, st) = rt_store.t_key(st, "a")
+  let #(kb, st) = rt_store.t_key(st, "b")
+  let #(_, st) = rt_obj.t_set_prop(st, src, StringKey(ka), mk_string("1"))
+  let #(_, st) = rt_obj.t_set_prop(st, src, StringKey(kb), mk_string("2"))
+  let #(rest, st) = lang.t_object_rest(st, src, [StringKey(ka)])
+  let #(a, st) = rt_obj.t_get_prop(st, rest, StringKey(ka))
+  let #(b, _st) = rt_obj.t_get_prop(st, rest, StringKey(kb))
   assert classify(a) == KUndef
   assert classify(b) == KStr("2")
 }
@@ -70,11 +72,11 @@ pub fn template_object_is_cached_per_site_test() {
   let #(t3, st) = lang.t_get_template_object(st, "m#12", cooked, ["a", "\\u"])
   assert t1 == t2
   assert t1 != t3
-  let #(raw, st) = rt_obj.t_get_prop(st, t1, StringKey(Named("raw")))
+  let #(raw, st) = rt_obj.t_get_prop(st, t1, StringKey(nk.raw))
   let assert KHandle(_) = classify(raw)
-  let #(r1, st) = rt_obj.t_get_prop(st, raw, StringKey(Index(1)))
+  let #(r1, st) = rt_obj.t_get_prop(st, raw, StringKey(key.index(1)))
   assert classify(r1) == KStr("\\u")
   let #(ok, _st) =
-    rt_obj.t_set_prop(st, t1, StringKey(Index(0)), mk_string("z"))
+    rt_obj.t_set_prop(st, t1, StringKey(key.index(0)), mk_string("z"))
   assert !ok
 }

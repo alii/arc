@@ -1,9 +1,10 @@
-import arc/bytecode/key.{Index, Named, key_to_text}
+import arc/bytecode/key
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
 import arc/rt/builtins/iter_protocol
 import arc/rt/call as rt_call
 import arc/rt/js_string
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -208,16 +209,15 @@ fn get_own_prop_desc(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   case classify(target) {
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
     KHandle(h) -> {
-      let #(key, st) = rt_val.t_to_property_key(st, key_val)
-      let #(desc, st) = rt_obj.t_get_own_property(st, h, key)
+      let #(desc, st) = own_property_by_value(st, h, key_val)
       case desc {
         Some(prop) -> from_property_descriptor(st, prop)
         None -> #(mk_undefined(), st)
       }
     }
     KStr(s) -> {
-      let #(key, st) = rt_val.t_to_property_key(st, key_val)
-      case string_exotic_own_property(s, key) {
+      let #(key, st) = rt_val.t_find_property_key(st, key_val)
+      case string_own_property(s, key) {
         Some(prop) -> from_property_descriptor(st, prop)
         None -> #(mk_undefined(), st)
       }
@@ -250,7 +250,7 @@ fn define_property(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
             False ->
               rt_val.t_throw_type_error(
                 st,
-                "Cannot define property " <> key_text(key),
+                "Cannot define property " <> key_text(st, key),
               )
           }
         }
@@ -339,7 +339,7 @@ fn apply_descriptors(
         False ->
           rt_val.t_throw_type_error(
             st,
-            "Cannot define property " <> key_text(k),
+            "Cannot define property " <> key_text(st, k),
           )
       }
     }
@@ -367,7 +367,7 @@ fn own_keys_impl(
           #(names, st)
         }
       }
-      ok_array(st, list.map(names, fn(pk) { mk_string(key_to_text(pk)) }))
+      ok_array(st, list.map(names, rt_store.t_key_value(st, _)))
     }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
     KStr(s) -> {
@@ -437,7 +437,10 @@ fn collect_enumerable(
         False -> collect_enumerable(st, h, rest, acc)
         True -> {
           let #(v, st) = rt_obj.t_get_prop(st, mk_object(h), k)
-          collect_enumerable(st, h, rest, [#(key_to_text(pk), v), ..acc])
+          collect_enumerable(st, h, rest, [
+            #(rt_store.t_key_text(st, pk), v),
+            ..acc
+          ])
         }
       }
     }
@@ -474,7 +477,7 @@ fn get_own_prop_descriptors(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
     KStr(s) -> {
       let keys =
         list.append(string_index_object_keys(0, js_string.length(s)), [
-          StringKey(Named("length")),
+          StringKey(nk.length),
         ])
       let #(result_h, st) = rt_obj.t_new_object(st, Some(object_proto))
       let st =
@@ -585,7 +588,7 @@ fn assign_one(st: Agent, target_h: Handle, src: JsVal) -> Agent {
                 rt_val.t_throw_type_error(
                   st,
                   "Cannot assign to read only property '"
-                    <> key_text(k)
+                    <> key_text(st, k)
                     <> "' of object",
                 )
             }
@@ -605,14 +608,13 @@ fn has_own(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(target, key_val) = two_args_or_undefined(args)
   case classify(target) {
     KHandle(h) -> {
-      let #(key, st) = rt_val.t_to_property_key(st, key_val)
-      let #(desc, st) = rt_obj.t_get_own_property(st, h, key)
+      let #(desc, st) = own_property_by_value(st, h, key_val)
       #(mk_bool(option.is_some(desc)), st)
     }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
     KStr(s) -> {
-      let #(key, st) = rt_val.t_to_property_key(st, key_val)
-      #(mk_bool(option.is_some(string_exotic_own_property(s, key))), st)
+      let #(key, st) = rt_val.t_find_property_key(st, key_val)
+      #(mk_bool(option.is_some(string_own_property(s, key))), st)
     }
     _ -> {
       let #(_key, st) = rt_val.t_to_property_key(st, key_val)
@@ -626,18 +628,46 @@ fn has_own_property(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(key, st) = rt_val.t_to_property_key(st, first_arg_or_undefined(args))
+  let key_val = first_arg_or_undefined(args)
   case classify(this) {
     KHandle(h) -> {
-      let #(desc, st) = rt_obj.t_get_own_property(st, h, key)
+      let #(desc, st) = own_property_by_value(st, h, key_val)
       #(mk_bool(option.is_some(desc)), st)
     }
-    KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
-    KStr(s) -> #(
-      mk_bool(option.is_some(string_exotic_own_property(s, key))),
-      st,
-    )
-    _ -> #(mk_bool(False), st)
+    KNull | KUndef -> {
+      let #(_, st) = rt_val.t_find_property_key(st, key_val)
+      rt_val.t_throw_type_error(st, cannot_convert)
+    }
+    KStr(s) -> {
+      let #(key, st) = rt_val.t_find_property_key(st, key_val)
+      #(mk_bool(option.is_some(string_own_property(s, key))), st)
+    }
+    _ -> {
+      let #(_, st) = rt_val.t_find_property_key(st, key_val)
+      #(mk_bool(False), st)
+    }
+  }
+}
+
+// t_get_own_property that never names an unseen string on a plain object
+fn own_property_by_value(
+  st: Agent,
+  h: Handle,
+  key_val: JsVal,
+) -> #(Option(Property), Agent) {
+  case rt_obj.t_own_read_key(st, h, key_val) {
+    #(Ok(key), st) -> rt_obj.t_get_own_property(st, h, key)
+    #(Error(_unseen), st) -> #(None, st)
+  }
+}
+
+fn string_own_property(
+  s: String,
+  key: Result(ObjectKey, String),
+) -> Option(Property) {
+  case key {
+    Ok(key) -> string_exotic_own_property(s, key)
+    Error(_unseen) -> None
   }
 }
 
@@ -646,10 +676,10 @@ fn property_is_enumerable(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(key, st) = rt_val.t_to_property_key(st, first_arg_or_undefined(args))
+  let key_val = first_arg_or_undefined(args)
   case classify(this) {
     KHandle(h) -> {
-      let #(desc, st) = rt_obj.t_get_own_property(st, h, key)
+      let #(desc, st) = own_property_by_value(st, h, key_val)
       #(
         mk_bool(
           option.map(desc, rt_types.prop_enumerable) |> option.unwrap(False),
@@ -657,16 +687,25 @@ fn property_is_enumerable(
         st,
       )
     }
-    KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
-    KStr(s) -> #(
-      mk_bool(
-        string_exotic_own_property(s, key)
-        |> option.map(rt_types.prop_enumerable)
-        |> option.unwrap(False),
-      ),
-      st,
-    )
-    _ -> #(mk_bool(False), st)
+    KNull | KUndef -> {
+      let #(_, st) = rt_val.t_find_property_key(st, key_val)
+      rt_val.t_throw_type_error(st, cannot_convert)
+    }
+    KStr(s) -> {
+      let #(key, st) = rt_val.t_find_property_key(st, key_val)
+      #(
+        mk_bool(
+          string_own_property(s, key)
+          |> option.map(rt_types.prop_enumerable)
+          |> option.unwrap(False),
+        ),
+        st,
+      )
+    }
+    _ -> {
+      let #(_, st) = rt_val.t_find_property_key(st, key_val)
+      #(mk_bool(False), st)
+    }
   }
 }
 
@@ -733,7 +772,7 @@ fn object_value_of(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 fn object_to_locale_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
-    _ -> rt_call.t_call_method(st, this, StringKey(Named("toString")), [])
+    _ -> rt_call.t_call_method(st, this, StringKey(nk.to_string), [])
   }
 }
 
@@ -905,7 +944,7 @@ fn seal_one_key(
         False ->
           rt_val.t_throw_type_error(
             st,
-            "Cannot redefine property: " <> key_text(k),
+            "Cannot redefine property: " <> key_text(st, k),
           )
       }
     }
@@ -1021,7 +1060,7 @@ fn group_by_loop(
             mk_number(JInt(index)),
           ])
         let #(key, st) = rt_val.t_to_property_key(st, kv)
-        #(object_key_to_val(key), st)
+        #(rt_obj.t_object_key_value(st, key), st)
       })
       let #(key, st) = rt_val.t_to_property_key(st, key_prim)
       let #(groups, order) = case dict.get(groups, key) {
@@ -1105,7 +1144,7 @@ fn define_getter_setter(
         False ->
           rt_val.t_throw_type_error(
             st,
-            "Cannot define property " <> key_text(key),
+            "Cannot define property " <> key_text(st, key),
           )
       }
     }
@@ -1149,9 +1188,9 @@ fn lookup_accessor_chain(
   }
 }
 
-fn string_exotic_own_property(s: String, key: ObjectKey) -> Option(Property) {
-  case key {
-    StringKey(Named("length")) ->
+fn string_exotic_own_property(s: String, k: ObjectKey) -> Option(Property) {
+  case k {
+    StringKey(k) if k == nk.length ->
       Some(DataProperty(
         value: mk_number(JInt(js_string.length(s))),
         writable: False,
@@ -1159,8 +1198,8 @@ fn string_exotic_own_property(s: String, key: ObjectKey) -> Option(Property) {
         configurable: False,
         seq: 0,
       ))
-    StringKey(Index(i)) ->
-      case js_string.char_at(s, i) {
+    StringKey(k) if k < 0 ->
+      case js_string.char_at(s, key.index_of(k)) {
         Some(ch) ->
           Some(DataProperty(
             value: mk_string(ch),
@@ -1185,14 +1224,7 @@ fn string_index_keys(i: Int, len: Int) -> List(JsVal) {
 fn string_index_object_keys(i: Int, len: Int) -> List(ObjectKey) {
   case i >= len {
     True -> []
-    False -> [StringKey(Index(i)), ..string_index_object_keys(i + 1, len)]
-  }
-}
-
-fn object_key_to_val(key: ObjectKey) -> JsVal {
-  case key {
-    StringKey(pk) -> mk_string(key_to_text(pk))
-    SymbolKey(id) -> mk_symbol(id)
+    False -> [StringKey(key.index(i)), ..string_index_object_keys(i + 1, len)]
   }
 }
 
@@ -1201,9 +1233,6 @@ fn ok_array(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
   #(mk_object(h), st)
 }
 
-fn key_text(key: ObjectKey) -> String {
-  case key {
-    StringKey(pk) -> key_to_text(pk)
-    SymbolKey(sym) -> rt_types.symbol_descriptive_string(sym)
-  }
+fn key_text(st: Agent, key: ObjectKey) -> String {
+  rt_obj.key_text(st, key)
 }

@@ -1,7 +1,7 @@
-import arc/bytecode/key.{Named}
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/lang as rt_lang
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/types.{
@@ -78,15 +78,15 @@ pub fn lexical_globals_persist_across_switches_test() {
           ..st.realm,
           lexical_globals: dict.insert(
             st.realm.lexical_globals,
-            "x",
+            nk.value,
             types.Let(mk_string("v")),
           ),
         )
       #(Nil, Agent(..st, realm:))
     })
-  assert dict.get(rt_call.realm_by_id(st, other.id).lexical_globals, "x")
+  assert dict.get(rt_call.realm_by_id(st, other.id).lexical_globals, nk.value)
     == Ok(types.Let(mk_string("v")))
-  assert dict.get(st.realm.lexical_globals, "x") == Error(Nil)
+  assert dict.get(st.realm.lexical_globals, nk.value) == Error(Nil)
 }
 
 pub fn install_262_and_create_realm_test() {
@@ -97,8 +97,7 @@ pub fn install_262_and_create_realm_test() {
   assert g == dollar
   assert get(st, dollar, "global") == mk_object(st.realm.global_object)
   let #(agent_obj, st) = rt_obj.t_new_object_literal(st)
-  let #(_, st) =
-    rt_obj.t_set_prop(st, dollar, StringKey(Named("agent")), agent_obj)
+  let #(_, st) = rt_obj.t_set_prop(st, dollar, StringKey(nk.agent), agent_obj)
   let #(child, st) = rt_helpers.call_method(st, dollar, "createRealm", [])
   assert st.realm.id == 0
   assert dict.size(st.realms) == 2
@@ -178,11 +177,7 @@ pub fn stack_setter_uses_its_own_realm_test() {
   let #(other, st) = two_realms()
   let setter = fn(r: Realm) {
     let assert Some(AccessorProperty(set: Some(s), ..)) =
-      rt_obj.t_ordinary_own_property(
-        st,
-        r.error.prototype,
-        StringKey(Named("stack")),
-      )
+      rt_obj.t_ordinary_own_property(st, r.error.prototype, StringKey(nk.stack))
     s
   }
   let set_a = setter(st.realm)
@@ -230,7 +225,7 @@ pub fn species_create_ignores_a_foreign_array_constructor_test() {
   let #(arr, st) = rt_obj.t_new_array(st, [mk_number(JInt(1))])
   let other_array = mk_object(other.array.constructor)
   let #(_, st) =
-    rt_obj.t_set_prop(st, arr, StringKey(Named("constructor")), other_array)
+    rt_obj.t_set_prop(st, arr, StringKey(nk.constructor), other_array)
   let #(identity, st) =
     rt_helpers.func(st, fn(st, args) {
       let assert [v, ..] = args

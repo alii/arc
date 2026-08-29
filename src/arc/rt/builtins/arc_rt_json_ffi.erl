@@ -1,6 +1,6 @@
 %% §25.5.1 json text to json.gleam's JsonValue, by offset into one binary
 -module(arc_rt_json_ffi).
--export([parse_value/2, plain_props/2, plain_keys/1, quote/1]).
+-export([parse_value/2, plain_props/3, plain_keys/1, quote/1]).
 
 -include("../arc_rt_layout.hrl").
 
@@ -13,15 +13,16 @@ plain_keys(Props) ->
     NamedKeys = [K || {_, K} <- lists:keysort(1, Named)],
     case Idx of
         [] -> NamedKeys;
-        _ -> [{?KEY_INDEX, I} || I <- lists:sort(Idx)] ++ NamedKeys
+        %% index keys are negative, ascending index is descending key
+        _ -> lists:reverse(lists:sort(Idx), NamedKeys)
     end.
 
 %% enumerable and seq sit at the same positions in both property shapes
 plain_key(_, Prop, Acc) when element(?DATAPROP_ENUMERABLE, Prop) =:= false ->
     Acc;
-plain_key({?KEY_INDEX, I}, _, {Idx, Named}) ->
-    {[I | Idx], Named};
-plain_key({?KEY_NAMED, _} = K, Prop, {Idx, Named}) ->
+plain_key(K, _, {Idx, Named}) when K < 0 ->
+    {[K | Idx], Named};
+plain_key(K, Prop, {Idx, Named}) when K band 3 =:= 0 ->
     {Idx, [{element(?DATAPROP_SEQ, Prop), K} | Named]};
 plain_key(_, _, Acc) ->
     Acc.
@@ -72,30 +73,18 @@ hexc(N) when N < 10 -> $0 + N;
 hexc(N) -> $a + N - 10.
 
 %% own data props from parsed entries; miss on duplicate keys
-plain_props(Entries, Seq) -> plain_props(Entries, Seq, []).
+plain_props(Store, Entries, Seq) -> plain_props(Store, Entries, Seq, []).
 
-plain_props([{Name, V} | Rest], Seq, Acc) ->
+plain_props(Store, [{Name, V} | Rest], Seq, Acc) ->
     Prop = {?DATAPROP_TAG, V, true, true, true, Seq},
-    plain_props(Rest, Seq + 1, [{key(Name), Prop} | Acc]);
-plain_props([], Seq, Acc) ->
+    {K, Store1} = arc_rt_val_ffi:key_of(Store, Name),
+    plain_props(Store1, Rest, Seq + 1, [{K, Prop} | Acc]);
+plain_props(Store, [], Seq, Acc) ->
     Map = maps:from_list(Acc),
     case map_size(Map) =:= length(Acc) of
-        true -> {some, {Map, Seq}};
+        true -> {some, {Map, Seq, Store}};
         false -> none
     end.
-
-key(<<C, _/binary>> = B) when ?DIGIT(C) ->
-    try binary_to_integer(B) of
-        N when N >= 0, N =< ?MAX_ARRAY_INDEX ->
-            case integer_to_binary(N) =:= B of
-                true -> {?KEY_INDEX, N};
-                false -> {?KEY_NAMED, B}
-            end;
-        _ -> {?KEY_NAMED, B}
-    catch
-        error:badarg -> {?KEY_NAMED, B}
-    end;
-key(B) -> {?KEY_NAMED, B}.
 -define(PLAIN(C), (C =/= $" andalso C =/= $\\ andalso C >= 16#20)).
 
 %% src: keep source slices for the reviver context

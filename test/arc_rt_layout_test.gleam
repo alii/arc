@@ -1,12 +1,13 @@
 //// arc_rt_layout.hrl indices must match the gleam records
 
-import arc/bytecode/key.{Index, Named, Private}
+import arc/bytecode/key.{type Key}
 import arc/bytecode/opcode
 import arc/internal/tree_array
 import arc/interp/ffi
 import arc/rt/arena
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -27,6 +28,12 @@ import rt_helpers
 @external(erlang, "arc_rt_layout_root_ffi", "idx")
 fn idx(name: String) -> Int
 
+@external(erlang, "arc_rt_layout_root_ffi", "name_key")
+fn name_key(n: Int) -> Int
+
+@external(erlang, "arc_rt_layout_root_ffi", "index_key")
+fn index_key(i: Int) -> Int
+
 @external(erlang, "arc_rt_layout_root_ffi", "tag")
 fn tag(name: String) -> Dynamic
 
@@ -46,7 +53,7 @@ fn compiled_fn(label: String) -> CompiledFn
 fn slots(vals: List(JsVal)) -> ShapeSlots
 
 @external(erlang, "arc_rt_layout_root_ffi", "dyn")
-fn template(label: String) -> FuncTemplate
+fn template(label: String) -> FuncTemplate(Key)
 
 @external(erlang, "arc_rt_layout_root_ffi", "dyn")
 fn env(vals: List(JsVal)) -> EnvTuple
@@ -107,7 +114,7 @@ pub fn js_store_test() {
   let desc =
     ShapeDesc(
       arity: 1,
-      offsets: dict.from_list([#(<<"k":utf8>>, 0)]),
+      offsets: dict.from_list([#(nk.value, 0)]),
       transitions: dict.new(),
     )
   let store =
@@ -121,10 +128,13 @@ pub fn js_store_test() {
       shapes: dict.from_list([#(7, desc)]),
       next_shape: 15,
       ics: dict.from_list([
-        #(1, rt_types.IcRead(<<"k":utf8>>, dict.from_list([#(7, 0)]))),
+        #(1, rt_types.IcRead(nk.value, dict.from_list([#(7, 0)]))),
       ]),
       names: dict.from_list([#("zz", 9000)]),
-      name_texts: dict.from_list([#(9000, "zz")]),
+      key_texts: dict.from_list([
+        #(key.name(9000), "zz"),
+        #(key.private(3), "#zz"),
+      ]),
       next_name: 9001,
     )
   assert tag_of(store) == tag("STORE_TAG")
@@ -140,7 +150,7 @@ pub fn js_store_test() {
   assert at(store, "STORE_FREE_PROTOS") == dyn(store.free_protos)
   assert at(store, "STORE_GLOBAL_EPOCH") == dyn(store.global_epoch)
   assert at(store, "STORE_NAMES") == dyn(store.names)
-  assert at(store, "STORE_NAME_TEXTS") == dyn(store.name_texts)
+  assert at(store, "STORE_KEY_TEXTS") == dyn(store.key_texts)
   assert at(store, "STORE_NEXT_NAME") == dyn(9001)
 }
 
@@ -184,7 +194,7 @@ pub fn sobject_test() {
   let props =
     dict.from_list([
       #(
-        Named("x"),
+        nk.value,
         DataProperty(
           value: vx,
           writable: True,
@@ -245,13 +255,14 @@ pub fn sobject_test() {
 }
 
 pub fn keys_and_elements_test() {
-  assert tag_of(Named("x")) == tag("KEY_NAMED")
-  assert element(2, dyn(Named("x"))) == dyn("x")
-  assert tag_of(Index(5)) == tag("KEY_INDEX")
-  assert element(2, dyn(Index(5))) == dyn(5)
-  assert tag_of(Private("#p")) == tag("KEY_PRIVATE")
-  assert tag_of(StringKey(Named("x"))) == tag("OKEY_STRING")
-  assert element(2, dyn(StringKey(Named("x")))) == dyn(Named("x"))
+  assert dyn(key.name(7)) == dyn(name_key(7))
+  assert dyn(key.index(5)) == dyn(index_key(5))
+  assert dyn(nk.length) == dyn(idx("K_length"))
+  assert dyn(nk.prototype) == dyn(idx("K_prototype"))
+  assert key.kind(key.name(7)) == idx("KEY_KIND_NAME")
+  assert key.kind(key.private(7)) == idx("KEY_KIND_PRIVATE")
+  assert tag_of(StringKey(nk.value)) == tag("OKEY_STRING")
+  assert element(2, dyn(StringKey(nk.value))) == dyn(nk.value)
   assert tag_of(SymbolKey(rt_types.symbol_iterator)) == tag("OKEY_SYMBOL")
   assert dyn(NoElements) == tag("ELEMS_NONE")
   let arr = tree_array.from_list([rt_types.mk_string("a")])
@@ -267,7 +278,7 @@ pub fn sshaped_object_test() {
   let s0 = rt_types.mk_string("s0")
   let s1 = rt_types.mk_string("s1")
   let sl = slots([s0, s1, rt_types.mk_string("s2")])
-  let offs = dict.from_list([#(<<"k":utf8>>, 0)])
+  let offs = dict.from_list([#(nk.value, 0)])
   let obj =
     SShapedObject(
       shape_id: 21,
@@ -291,8 +302,8 @@ pub fn shape_desc_test() {
   let desc =
     ShapeDesc(
       arity: 2,
-      offsets: dict.from_list([#(<<"a":utf8>>, 0), #(<<"b":utf8>>, 1)]),
-      transitions: dict.from_list([#(<<"c":utf8>>, 9)]),
+      offsets: dict.from_list([#(nk.name, 0), #(nk.value, 1)]),
+      transitions: dict.from_list([#(nk.done, 9)]),
     )
   assert tag_of(desc) == tag("SHAPE_TAG")
   assert arity(desc) == idx("SHAPE_ARITY")
@@ -516,13 +527,9 @@ pub fn typed_array_fast_paths_miss_test() {
   let n = rt_types.mk_number(rt_types.JInt(4))
   let #(h, st) = rt_call.t_construct(st, ctor, [n], ctor)
   let ta = rt_types.mk_object(h)
+  let #(extra, st) = rt_store.t_key(st, "extra")
   let #(_, st) =
-    rt_obj.t_set_prop(
-      st,
-      ta,
-      StringKey(Named("extra")),
-      rt_types.mk_string("x"),
-    )
+    rt_obj.t_set_prop(st, ta, StringKey(extra), rt_types.mk_string("x"))
   assert get_elem_fast(st, ta, 0) == dyn(Miss)
   assert set_elem_fast(st, ta, 0, n) == dyn(Miss)
   assert set_elem_fast(st, ta, 4, n) == dyn(Miss)
@@ -549,7 +556,7 @@ pub fn proxy_fast_paths_miss_test() {
   let ctor_flags = FnFlags(..no_flags(), is_constructor: True)
   let #(f, st) =
     rt_call.t_new_function(st, compiled_fn("F"), ctor_flags, "F", 0, None)
-  let #(_, st) = rt_obj.t_get_prop(st, f, StringKey(Named("prototype")))
+  let #(_, st) = rt_obj.t_get_prop(st, f, StringKey(nk.prototype))
   let #(plain, st) = rt_obj.t_new_object_literal(st)
   assert instanceof_fast(st, plain, f) == dyn(0)
   assert instanceof_fast(st, p, f) == dyn(Miss)
@@ -569,8 +576,9 @@ pub fn string_object_fast_paths_miss_test() {
       string_ctor,
     )
   let s = rt_types.mk_object(sh)
+  let #(extra, st) = rt_store.t_key(st, "extra")
   let #(_, st) =
-    rt_obj.t_set_prop(st, s, StringKey(Named("extra")), rt_types.mk_string("x"))
+    rt_obj.t_set_prop(st, s, StringKey(extra), rt_types.mk_string("x"))
   assert get_elem_fast(st, s, 0) == dyn(Miss)
   assert set_elem_fast(st, s, 0, n) == dyn(Miss)
   assert set_elem_fast(st, s, 3, n) == dyn(Miss)
@@ -615,7 +623,8 @@ pub fn bytecode_function_fast_paths_miss_test() {
   let undef = rt_types.mk_undefined()
   assert dyn(rt_call.t_kfn_code(st, f, undef)) == dyn(undef)
   let #(o, st) = rt_obj.t_new_object_literal(st)
-  let #(_, st) = rt_obj.t_set_prop(st, o, StringKey(Named("m")), f)
+  let #(m, st) = rt_store.t_key(st, "m")
+  let #(_, st) = rt_obj.t_set_prop(st, o, StringKey(m), f)
   assert call_method_mono(st, o, <<"m">>, []).0 == dyn(Miss)
   assert new_simple(st, f, []).0 == dyn(Miss)
   assert instanceof_fast(st, o, f) == dyn(Miss)
@@ -634,7 +643,7 @@ pub fn compiled_function_fast_paths_hit_test() {
   let #(f, st) = rt_call.t_new_function(st, code, flags, "F", 0, None)
   assert dyn(rt_call.t_kfn_code(st, f, undef)) != dyn(undef)
   assert new_simple(st, f, []).0 == dyn(Miss)
-  let #(proto, st) = rt_obj.t_get_prop(st, f, StringKey(Named("prototype")))
+  let #(proto, st) = rt_obj.t_get_prop(st, f, StringKey(nk.prototype))
   let #(this, _) = new_simple(st, f, [])
   assert this != dyn(Miss)
   assert this != dyn(proto)

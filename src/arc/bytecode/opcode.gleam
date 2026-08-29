@@ -45,15 +45,15 @@ pub type Op {
   PutLocal(index: Int)
   // throws unless slot is uninitialized (super() result)
   PutLocalCheckInit(index: Int)
-  GetGlobal(name: String)
-  PutGlobal(name: String)
+  GetGlobal(key: Int)
+  PutGlobal(key: Int)
   // §9.1.1.4.7 sloppy delete identifier at global scope
-  DeleteGlobalVar(name: String)
+  DeleteGlobalVar(key: Int)
   // eval_env first, else global; sloppy direct-eval contexts
-  GetEvalVar(name: String)
-  PutEvalVar(name: String)
-  DeclareEvalVar(name: String)
-  TypeofEvalVar(name: String)
+  GetEvalVar(key: Int)
+  PutEvalVar(key: Int)
+  DeclareEvalVar(key: Int)
+  TypeofEvalVar(key: Int)
 
   ToObject
   // string-hint tostring, for template substitutions
@@ -179,7 +179,7 @@ pub type Op {
   BinOp(kind: Classified)
   UnaryOp(kind: UnaryOpKind)
   TypeOf
-  TypeofGlobal(name: String)
+  TypeofGlobal(key: Int)
 
   // statement-position i++ on a plain local
   IncLocal(index: Int)
@@ -303,11 +303,11 @@ pub type Op {
   DynamicImportDefer
 
   // §9.1.1.4.17, deletable becomes configurable
-  DeclareGlobalVar(name: String, deletable: Bool)
+  DeclareGlobalVar(key: Int, deletable: Bool)
   // typeerror if candeclareglobalfunction rejects
-  DeclareGlobalFn(name: String, deletable: Bool)
-  DeclareGlobalLex(name: String, is_const: Bool)
-  InitGlobalLex(name: String)
+  DeclareGlobalFn(key: Int, deletable: Bool)
+  DeclareGlobalLex(key: Int, is_const: Bool)
+  InitGlobalLex(key: Int)
 
   // [resource] -> [disposer fn or undefined]
   GetDisposer(is_async: Bool)

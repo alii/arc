@@ -1,3 +1,4 @@
+import arc/bytecode/key.{type Key}
 import arc/rt/arena
 import arc/rt/limits
 import arc/rt/names
@@ -7,8 +8,8 @@ import arc/rt/types.{
 } as rt_types
 import gleam/dict
 import gleam/int
+import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/result
 import gleam/set
 
 @external(erlang, "arc_job_queue_ffi", "job_queue_new")
@@ -24,7 +25,7 @@ pub fn t_store_new() -> JsStore(Agent) {
     gc_live: 0,
     // past the constant birth seqs
     prop_seq: 3,
-    private_uid: 0,
+    private_uid: list.length(reserved_private),
     symbol_uid: 0,
     ops: unseeded_ops(),
     microtasks: jq_new(),
@@ -37,10 +38,36 @@ pub fn t_store_new() -> JsStore(Agent) {
     ics: dict.new(),
     free_protos: dict.new(),
     global_epoch: 0,
-    names: dict.new(),
-    name_texts: dict.new(),
+    // seeded with every fixed name so a lookup is one probe
+    names: names.fixed_map(),
+    key_texts: list.index_map(reserved_private, fn(text, uid) {
+      #(key.private(uid), text)
+    })
+      |> dict.from_list,
     next_name: names.fixed_count(),
   )
+}
+
+// private keys the engine keeps on the global object
+const reserved_private = [
+  "arc_module_status", "arc_module_errors", "arc_module_cache",
+  "arc_module_deferred", "arc_module_pending", "arc_module_referrer",
+  "[[IteratingRegExp]]", "[[IteratedString]]", "[[Global]]", "[[Done]]",
+]
+
+pub fn reserved_private_key(text: String) -> Key {
+  case find_index(reserved_private, text, 0) {
+    Some(uid) -> key.private(uid)
+    None -> panic as { "not a reserved private name " <> text }
+  }
+}
+
+fn find_index(items: List(String), text: String, i: Int) -> Option(Int) {
+  case items {
+    [] -> None
+    [first, ..] if first == text -> Some(i)
+    [_, ..rest] -> find_index(rest, text, i + 1)
+  }
 }
 
 fn unseeded_ops() -> JsOps(Agent) {
@@ -174,11 +201,6 @@ pub fn t_next_prop_seq(st: Agent) -> #(Int, Agent) {
   #(js.prop_seq, with_js(st, JsStore(..js, prop_seq: js.prop_seq + 1)))
 }
 
-pub fn t_next_private_uid(st: Agent) -> #(Int, Agent) {
-  let js = require_js(st)
-  #(js.private_uid, with_js(st, JsStore(..js, private_uid: js.private_uid + 1)))
-}
-
 pub fn t_next_symbol_uid(st: Agent) -> #(Int, Agent) {
   let js = require_js(st)
   #(js.symbol_uid, with_js(st, JsStore(..js, symbol_uid: js.symbol_uid + 1)))
@@ -190,7 +212,6 @@ pub fn t_next_unit_uid(st: Agent) -> #(Int, Agent) {
 }
 
 pub fn find_name(js: JsStore(st), text: String) -> Option(Int) {
-  use <- option.lazy_or(names.fixed_number(text))
   dict.get(js.names, text) |> option.from_result
 }
 
@@ -203,7 +224,7 @@ pub fn name_number(js: JsStore(st), text: String) -> #(Int, JsStore(st)) {
         JsStore(
           ..js,
           names: dict.insert(js.names, text, n),
-          name_texts: dict.insert(js.name_texts, n, text),
+          key_texts: dict.insert(js.key_texts, key.name(n), text),
           next_name: n + 1,
         )
       #(n, js)
@@ -212,26 +233,63 @@ pub fn name_number(js: JsStore(st), text: String) -> #(Int, JsStore(st)) {
 }
 
 pub fn name_text(js: JsStore(st), n: Int) -> String {
-  case n < names.fixed_count() {
-    True -> names.fixed_text(n)
-    False ->
-      dict.get(js.name_texts, n)
-      |> result.lazy_unwrap(fn() { unknown_name(n) })
+  key_text(js, key.name(n))
+}
+
+// index digits, the name text, or a private name's source text
+@external(erlang, "arc_rt_val_ffi", "key_text")
+pub fn key_text(js: JsStore(st), k: Key) -> String
+
+// non allocating: a text no object has ever been keyed by is none
+pub fn t_find_key(st: Agent, text: String) -> Option(Key) {
+  case key.index_of_text(text) {
+    Some(i) -> Some(key.index(i))
+    None -> find_name(require_js(st), text) |> option.map(key.name)
   }
 }
 
-fn unknown_name(n: Int) -> String {
-  let message = "unknown name number " <> int.to_string(n)
-  panic as message
+// the key for text, naming it on first use
+pub fn t_key(st: Agent, text: String) -> #(Key, Agent) {
+  case key.index_of_text(text) {
+    Some(i) -> #(key.index(i), st)
+    None -> {
+      let js = require_js(st)
+      case find_name(js, text) {
+        Some(n) -> #(key.name(n), st)
+        None -> {
+          let #(n, js) = name_number(js, text)
+          #(key.name(n), with_js(st, js))
+        }
+      }
+    }
+  }
 }
 
-pub fn t_name_number(st: Agent, text: String) -> #(Int, Agent) {
-  let #(n, js) = name_number(require_js(st), text)
-  #(n, with_js(st, js))
+pub fn t_key_of_int(st: Agent, n: Int) -> #(Key, Agent) {
+  case key.is_array_index(n) {
+    True -> #(key.index(n), st)
+    False -> t_key(st, int.to_string(n))
+  }
 }
 
-pub fn t_name_text(st: Agent, n: Int) -> String {
-  name_text(require_js(st), n)
+pub fn t_key_text(st: Agent, k: Key) -> String {
+  key_text(require_js(st), k)
+}
+
+pub fn t_key_value(st: Agent, k: Key) -> JsVal {
+  rt_types.mk_string(key_text(require_js(st), k))
+}
+
+pub fn t_new_private_key(st: Agent, text: String) -> #(Key, Agent) {
+  let js = require_js(st)
+  let k = key.private(js.private_uid)
+  let js =
+    JsStore(
+      ..js,
+      private_uid: js.private_uid + 1,
+      key_texts: dict.insert(js.key_texts, k, text),
+    )
+  #(k, with_js(st, js))
 }
 
 pub fn t_enter_call(st: Agent) -> Agent {

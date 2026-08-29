@@ -1,4 +1,4 @@
-import arc/bytecode/key.{type PropertyKey, Index}
+import arc/bytecode/key.{type Key}
 import arc/rt/elements
 import arc/rt/store as rt_store
 import arc/rt/typed_array_ffi.{
@@ -515,7 +515,7 @@ pub fn plain_indexed_values(
 }
 
 fn plain_indexed_loop(
-  props: dict.Dict(PropertyKey, Property),
+  props: dict.Dict(Key, Property),
   elements: JsElements,
   k: Int,
   acc: List(JsVal),
@@ -523,7 +523,7 @@ fn plain_indexed_loop(
   case k < 0 {
     True -> Some(acc)
     False -> {
-      let v = case dict.get(props, Index(k)) {
+      let v = case dict.get(props, key.index(k)) {
         Ok(DataProperty(value: v, ..)) -> Some(v)
         Ok(AccessorProperty(..)) -> None
         Error(Nil) -> elements.get_option(elements, k)

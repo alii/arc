@@ -31,7 +31,7 @@
 -define(STORE_FREE_PROTOS, 18).
 -define(STORE_GLOBAL_EPOCH, 19).
 -define(STORE_NAMES, 20).
--define(STORE_NAME_TEXTS, 21).
+-define(STORE_KEY_TEXTS, 21).
 -define(STORE_NEXT_NAME, 22).
 
 -define(REALM_TAG, realm).
@@ -144,9 +144,6 @@
 -define(ACCESSORPROP_SET, 3).
 -define(ACCESSORPROP_ARITY, 6).
 
--define(KEY_NAMED, named).
--define(KEY_INDEX, index).
--define(KEY_PRIVATE, private).
 -define(OKEY_STRING, string_key).
 -define(OKEY_SYMBOL, symbol_key).
 

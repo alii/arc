@@ -1,3 +1,4 @@
+import arc/bytecode/key.{type SourceKey}
 import arc/bytecode/opcode
 import arc/compiler
 import arc/internal/tuple_array
@@ -11,24 +12,24 @@ import gleam/int
 import gleam/list
 import gleam/option.{Some}
 
-fn compile(source: String) -> FuncTemplate {
+fn compile(source: String) -> FuncTemplate(SourceKey) {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
   let assert Ok(template) = compiler.compile(body, sb)
   template
 }
 
-fn constant_kinds(t: FuncTemplate) -> List(JsValKind) {
+fn constant_kinds(t: FuncTemplate(SourceKey)) -> List(JsValKind) {
   tuple_array.to_list(t.constants) |> list.map(classify)
 }
 
-fn all_constant_kinds(t: FuncTemplate) -> List(JsValKind) {
+fn all_constant_kinds(t: FuncTemplate(SourceKey)) -> List(JsValKind) {
   list.flatten([
     constant_kinds(t),
     ..list.map(tuple_array.to_list(t.functions), all_constant_kinds)
   ])
 }
 
-fn child(t: FuncTemplate, index: Int) -> FuncTemplate {
+fn child(t: FuncTemplate(SourceKey), index: Int) -> FuncTemplate(SourceKey) {
   let assert Some(c) = tuple_array.get(index, t.functions)
   c
 }
@@ -82,7 +83,7 @@ pub fn constant_pool_never_holds_heap_references_test() {
   })
 }
 
-fn all_template_sites(t: FuncTemplate) -> List(Int) {
+fn all_template_sites(t: FuncTemplate(SourceKey)) -> List(Int) {
   let own =
     tuple_array.to_list(t.bytecode)
     |> list.filter_map(fn(op) {

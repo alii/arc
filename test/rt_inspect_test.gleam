@@ -1,10 +1,8 @@
-import arc/bytecode/key.{Named}
 import arc/rt/builtins/console as b_console
 import arc/rt/inspect
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  JFloat, JInt, StringKey, mk_bigint, mk_hole, mk_number, mk_string,
-  mk_undefined,
+  JFloat, JInt, mk_bigint, mk_hole, mk_number, mk_string, mk_undefined,
 }
 import rt_helpers
 
@@ -12,8 +10,10 @@ pub fn renders_structures_test() {
   let st = rt_helpers.agent()
   let #(inner, st) = rt_obj.t_new_array(st, [mk_number(JInt(1)), mk_hole()])
   let #(o, st) = rt_obj.t_new_object_literal(st)
-  let #(_, st) = rt_obj.t_set_prop(st, o, StringKey(Named("a")), inner)
-  let #(_, st) = rt_obj.t_set_prop(st, o, StringKey(Named("self")), o)
+  let #(ka, st) = rt_helpers.key(st, "a")
+  let #(kself, st) = rt_helpers.key(st, "self")
+  let #(_, st) = rt_obj.t_set_prop(st, o, ka, inner)
+  let #(_, st) = rt_obj.t_set_prop(st, o, kself, o)
   assert inspect.inspect(st, o) == "{ a: [ 1, <empty> ], self: [Circular] }"
   let #(is_nan, st) = rt_helpers.global(st, "isNaN")
   let #(line, _) =

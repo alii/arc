@@ -1,3 +1,4 @@
+import arc/bytecode/key.{type Key}
 import arc/internal/tuple_array.{type TupleArray}
 import arc/rt/bytecode.{type FuncTemplate, type TryFrame}
 import arc/rt/gc as rt_gc
@@ -17,7 +18,7 @@ pub type State {
     pc: Int,
     stack: List(JsVal),
     locals: TupleArray(JsVal),
-    func: FuncTemplate,
+    func: FuncTemplate(Key),
     unit: Int,
     call_stack: List(SavedFrame),
     outer_depth: Int,

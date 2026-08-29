@@ -1,9 +1,10 @@
-import arc/bytecode/key.{Named, index_key, max_array_length}
+import arc/bytecode/key.{max_array_length}
 import arc/rt/async as rt_async
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
 import arc/rt/call as rt_call
 import arc/rt/elements
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -174,7 +175,7 @@ fn from_async_closure(
         _ -> rt_val.t_throw_type_error(st, "The iterator is not an object")
       }
       let #(next_method, st) =
-        rt_obj.t_get_prop(st, iter_val, StringKey(Named("next")))
+        rt_obj.t_get_prop(st, iter_val, StringKey(nk.next))
       from_async_iterate(
         st,
         c,
@@ -282,8 +283,7 @@ fn from_async_next_steps(
     KHandle(_) -> st
     _ -> rt_val.t_throw_type_error(st, "Iterator result is not an object")
   }
-  let #(done_val, st) =
-    rt_obj.t_get_prop(st, next_result, StringKey(Named("done")))
+  let #(done_val, st) = rt_obj.t_get_prop(st, next_result, StringKey(nk.done))
   case rt_val.to_boolean(done_val) {
     True -> {
       let st = from_async_set_length(st, ctx.target, ctx.k)
@@ -291,7 +291,7 @@ fn from_async_next_steps(
     }
     False -> {
       let #(next_value, st) =
-        rt_obj.t_get_prop(st, next_result, StringKey(Named("value")))
+        rt_obj.t_get_prop(st, next_result, StringKey(nk.value))
       case ctx.map_fn {
         None -> from_async_define_and_continue(st, ctx, next_value)
         Some(map_fn) ->
@@ -386,7 +386,7 @@ fn call_return_method(st: Agent, iter: JsVal) -> #(Option(JsVal), Agent) {
     KHandle(_) -> {
       let got =
         attempt_value(st, fn(st) {
-          rt_obj.t_get_prop(st, iter, StringKey(Named("return")))
+          rt_obj.t_get_prop(st, iter, StringKey(nk.return))
         })
       case got {
         Error(#(_inner_thrown, st)) -> #(None, st)
@@ -421,7 +421,7 @@ fn from_async_array_like(
   resolve: JsVal,
   reject: JsVal,
 ) -> Agent {
-  let #(len_val, st) = rt_obj.t_get_prop(st, items, StringKey(Named("length")))
+  let #(len_val, st) = rt_obj.t_get_prop(st, items, StringKey(nk.length))
   let #(len, st) = rt_val.t_to_length(st, len_val)
   let #(target, st) = case rt_call.is_constructor(st, c) {
     True -> {
@@ -452,8 +452,7 @@ fn from_async_like_step(st: Agent, ctx: FromAsyncLikeCtx) -> Agent {
       settle(st, ctx.resolve, ctx.target)
     }
     True -> {
-      let #(k_val, st) =
-        rt_obj.t_get_prop(st, ctx.items, StringKey(index_key(ctx.k)))
+      let #(k_val, st) = rt_obj.t_get_index(st, ctx.items, ctx.k)
       from_async_await(
         st,
         k_val,
@@ -537,16 +536,9 @@ fn from_async_define_own(st: Agent, target: JsVal, k: Int, v: JsVal) -> Agent {
     KHandle(r) -> r
     _ -> rt_val.t_throw_type_error(st, "Cannot define property on a primitive")
   }
+  let #(key, st) = rt_store.t_key_of_int(st, k)
   let #(ok, st) =
-    rt_obj.t_define_own_data(
-      st,
-      ref,
-      StringKey(index_key(k)),
-      v,
-      True,
-      True,
-      True,
-    )
+    rt_obj.t_define_own_data(st, ref, StringKey(key), v, True, True, True)
   case ok {
     True -> st
     False ->
@@ -561,7 +553,7 @@ fn from_async_set_length(st: Agent, target: JsVal, n: Int) -> Agent {
   case classify(target) {
     KHandle(_) -> {
       let #(ok, st) =
-        rt_obj.t_set_prop(st, target, StringKey(Named("length")), from_int(n))
+        rt_obj.t_set_prop(st, target, StringKey(nk.length), from_int(n))
       case ok {
         True -> st
         False ->

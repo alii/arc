@@ -1,10 +1,10 @@
 // §13.3.10 import calls, failures reject the promise
 
-import arc/bytecode/key.{Named, key_to_text}
 import arc/module/registry
 import arc/rt/async as rt_async
 import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -205,8 +205,7 @@ fn validate_options(st: Agent, options: JsVal) -> Agent {
   case classify(options) {
     KUndef -> st
     KHandle(_) -> {
-      let #(attributes, st) =
-        rt_obj.t_get_prop(st, options, StringKey(Named("with")))
+      let #(attributes, st) = rt_obj.t_get_prop(st, options, StringKey(nk.with))
       case classify(attributes) {
         KUndef -> st
         KHandle(attributes_h) -> validate_attributes(st, attributes_h)
@@ -242,7 +241,9 @@ fn validate_attributes(st: Agent, attributes: Handle) -> Agent {
     [key, ..] ->
       rt_val.t_throw_type_error(
         st,
-        "Import attribute '" <> key_to_text(key) <> "' is not supported",
+        "Import attribute '"
+          <> rt_store.t_key_text(st, key)
+          <> "' is not supported",
       )
   }
 }

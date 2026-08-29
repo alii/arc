@@ -1,4 +1,3 @@
-import arc/bytecode/key.{Named}
 import arc/host_hooks.{HostHooks}
 import arc/rt/async as rt_async
 import arc/rt/builtins as rt_builtins
@@ -111,14 +110,14 @@ fn is_extensible(st: Agent, v: JsVal) -> Bool {
 pub fn promise_takes_own_properties_test() {
   let st = rt_helpers.agent()
   let #(p, st) = promise_static(st, "resolve", mk_number(JInt(1)))
-  let #(_, st) =
-    rt_obj.t_set_prop(st, p, StringKey(Named("tag")), mk_string("t"))
+  let #(ktag, st) = rt_store.t_key(st, "tag")
+  let #(_, st) = rt_obj.t_set_prop(st, p, StringKey(ktag), mk_string("t"))
   let #(tag, st) = rt_helpers.get(st, p, "tag")
   assert classify(tag) == KStr("t")
   assert is_extensible(st, p)
   let assert KHandle(ph) = classify(p)
   let #(keys, _) = rt_obj.t_own_keys(st, ph)
-  assert keys == [StringKey(Named("tag"))]
+  assert keys == [StringKey(ktag)]
 }
 
 pub fn promise_subclass_test() {
@@ -186,8 +185,8 @@ pub fn generator_object_is_extensible_with_own_props_test() {
   let gen = mk_object(gen_h)
   assert rt_obj.t_get_proto(st, gen_h).0 == Some(st.realm.generator.prototype)
   assert is_extensible(st, gen)
-  let #(_, st) =
-    rt_obj.t_set_prop(st, gen, StringKey(Named("x")), mk_number(JInt(5)))
+  let #(kx, st) = rt_store.t_key(st, "x")
+  let #(_, st) = rt_obj.t_set_prop(st, gen, StringKey(kx), mk_number(JInt(5)))
   let #(x, st) = rt_helpers.get(st, gen, "x")
   assert classify(x) == KNum(JInt(5))
   let next_value = fn(st) {

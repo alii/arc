@@ -1,4 +1,4 @@
-import arc/bytecode/key.{type PropertyKey}
+import arc/bytecode/key.{type Key}
 import arc/bytecode/lexical.{type CodeKind, type LexicalSlots}
 import arc/bytecode/opcode.{type Op, type Pc, type TryKind}
 import arc/internal/tuple_array.{type TupleArray}
@@ -18,11 +18,12 @@ pub type EnvCapture {
   CaptureLocal(parent_index: Int)
 }
 
-pub fn line_at(template: FuncTemplate, pc: Int) -> Int {
+pub fn line_at(template: FuncTemplate(k), pc: Int) -> Int {
   tuple_array.element(pc + 1, template.lines)
 }
 
-pub type FuncTemplate {
+// k is SourceKey as compiled, Key once loaded into a heap
+pub type FuncTemplate(k) {
   FuncTemplate(
     name: Option(String),
     arity: Int,
@@ -32,10 +33,10 @@ pub type FuncTemplate {
     bytecode: TupleArray(Op),
     constants: TupleArray(JsVal),
     // keyed ops carry a slot into this table
-    keys: TupleArray(PropertyKey),
+    keys: TupleArray(k),
     // source line per pc, for error.stack
     lines: TupleArray(Int),
-    functions: TupleArray(FuncTemplate),
+    functions: TupleArray(FuncTemplate(k)),
     env_descriptors: List(EnvCapture),
     is_strict: Bool,
     is_arrow: Bool,
@@ -82,7 +83,7 @@ pub type ParkedAt {
 
 pub type SuspendedFrame {
   SuspendedFrame(
-    template: FuncTemplate,
+    template: FuncTemplate(Key),
     pc: Int,
     locals: TupleArray(JsVal),
     stack: List(JsVal),

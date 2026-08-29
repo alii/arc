@@ -1,5 +1,5 @@
-import arc/bytecode/key.{Named}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -29,7 +29,7 @@ pub fn array_join_via_t_call_test() {
       mk_number(JInt(2)),
       mk_number(JInt(3)),
     ])
-  let #(join, st) = rt_obj.t_get_prop(st, arr, StringKey(Named("join")))
+  let #(join, st) = rt_obj.t_get_prop(st, arr, StringKey(nk.join))
   let assert KHandle(_) = classify(join)
   let #(result, _st) = rt_call.t_call(st, join, arr, [])
   let assert NormalCompletion(v) = result
@@ -44,7 +44,7 @@ pub fn array_length_test() {
       mk_number(JInt(2)),
       mk_number(JInt(3)),
     ])
-  let #(len, _st) = rt_obj.t_get_prop(st, arr, StringKey(Named("length")))
+  let #(len, _st) = rt_obj.t_get_prop(st, arr, StringKey(nk.length))
   assert classify(len) == KNum(JInt(3))
 }
 
@@ -52,7 +52,8 @@ pub fn object_set_get_round_trip_test() {
   let st = agent()
   let #(h, st) = rt_obj.t_new_object(st, Some(st.realm.object.prototype))
   let obj = mk_object(h)
-  let key = StringKey(Named("greeting"))
+  let #(key, st) = rt_store.t_key(st, "greeting")
+  let key = StringKey(key)
   let #(ok, st) = rt_obj.t_set_prop(st, obj, key, mk_string("hi"))
   assert ok
   let #(v, _st) = rt_obj.t_get_prop(st, obj, key)
@@ -65,7 +66,7 @@ pub fn type_error_is_caught_as_throw_completion_test() {
     t_apply_protected(st, fn(st) { rt_val.t_throw_type_error(st, "boom") })
   let assert ThrowCompletion(err) = completion
   let assert KHandle(_) = classify(err)
-  let #(msg, _st) = rt_obj.t_get_prop(st, err, StringKey(Named("message")))
+  let #(msg, _st) = rt_obj.t_get_prop(st, err, StringKey(nk.message))
   assert classify(msg) == KStr("boom")
 }
 
@@ -95,8 +96,10 @@ pub fn shaped_set_transitions_test() {
         offsets: dict.new(),
       ),
     )
-  let x = StringKey(Named("x"))
-  let y = StringKey(Named("y"))
+  let #(x, st) = rt_store.t_key(st, "x")
+  let #(y, st) = rt_store.t_key(st, "y")
+  let x = StringKey(x)
+  let y = StringKey(y)
   let #(ok, st) = rt_obj.t_set_prop(st, mk_object(a), x, mk_number(JInt(1)))
   assert ok
   let #(ok, st) = rt_obj.t_set_prop(st, mk_object(a), y, mk_number(JInt(2)))

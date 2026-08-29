@@ -1,6 +1,7 @@
-import arc/bytecode/key.{type PropertyKey, Named}
+import arc/bytecode/key.{type Key}
 import arc/internal/tree_array
 import arc/rt/limits
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -274,7 +275,7 @@ fn proxy_trap(
     )
   })
   let #(trap, st) =
-    rt_obj.t_get_prop(st, mk_object(handler), StringKey(Named(name)))
+    rt_obj.t_get_prop(st, mk_object(handler), StringKey(rt_obj.trap_key(name)))
   case classify(trap) {
     KUndef | KNull -> #(None, st)
     _ ->
@@ -580,7 +581,7 @@ pub fn get_prototype_from_constructor(
   case classify(constructor) {
     KHandle(ctor_h) -> {
       let #(proto, st) =
-        rt_obj.t_get_prop(st, constructor, StringKey(Named("prototype")))
+        rt_obj.t_get_prop(st, constructor, StringKey(nk.prototype))
       case classify(proto) {
         KHandle(h) -> #(h, st)
         _ -> #(intrinsic(function_realm(st, ctor_h)), st)
@@ -686,7 +687,7 @@ pub fn async_generator_fn_prototype(
     rt_obj.t_ordinary_own_property(
       st,
       realm.async_gen.constructor,
-      StringKey(Named("prototype")),
+      StringKey(nk.prototype),
     )
   {
     Some(DataProperty(value:, ..)) ->
@@ -779,7 +780,7 @@ pub fn fn_own_prop(value: JsVal, seq: Int) -> Property {
 }
 
 @external(erlang, "arc_rt_call_ffi", "birth_props")
-pub fn birth_props(length_v: JsVal, name: String) -> Dict(PropertyKey, Property)
+pub fn birth_props(length_v: JsVal, name: String) -> Dict(Key, Property)
 
 fn alloc_fn_cell(
   st: Agent,
@@ -884,7 +885,7 @@ pub fn t_new_function(
         rt_obj.t_define_own_data(
           st,
           h,
-          StringKey(Named("prototype")),
+          StringKey(nk.prototype),
           mk_object(own_proto),
           True,
           False,
@@ -944,9 +945,9 @@ pub fn t_bound_new(
 ) -> #(Handle, Agent) {
   let target_v = mk_object(target)
   let #(own_length, st) =
-    rt_obj.t_get_own_property(st, target, StringKey(Named("length")))
+    rt_obj.t_get_own_property(st, target, StringKey(nk.length))
   let #(target_len, st) = case own_length {
-    Some(_) -> rt_obj.t_get_prop(st, target_v, StringKey(Named("length")))
+    Some(_) -> rt_obj.t_get_prop(st, target_v, StringKey(nk.length))
     None -> #(mk_undefined(), st)
   }
   let n_args = list.length(bound_args)
@@ -958,8 +959,7 @@ pub fn t_bound_new(
       )
     _ -> mk_number(JInt(0))
   }
-  let #(target_name, st) =
-    rt_obj.t_get_prop(st, target_v, StringKey(Named("name")))
+  let #(target_name, st) = rt_obj.t_get_prop(st, target_v, StringKey(nk.name))
   let bound_name = case classify(target_name) {
     KStr(s) -> "bound " <> s
     _ -> "bound "

@@ -1,4 +1,3 @@
-import arc/bytecode/key.{Named}
 import arc/internal/host_time
 import arc/internal/int_math.{floor_div, floor_mod as math_mod}
 import arc/internal/temporal_calendar as tcal
@@ -20,8 +19,8 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type ObjKind, type TemporalProtos,
   type TimeZone, HintString, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KNum,
-  KStr, KUndef, SObject, StringKey, TemporalDate, TemporalDateTime,
-  TemporalDuration, TemporalInstant, TemporalMonthDay, TemporalObj, TemporalTime,
+  KStr, KUndef, SObject, TemporalDate, TemporalDateTime, TemporalDuration,
+  TemporalInstant, TemporalMonthDay, TemporalObj, TemporalTime,
   TemporalYearMonth, TemporalZonedDateTime, TzNamed, TzOffset, TzUtc, classify,
   mk_object, mk_undefined,
 }
@@ -491,7 +490,7 @@ pub fn opt_get(
 ) -> #(JsVal, Agent) {
   case opts {
     None -> #(mk_undefined(), st)
-    Some(h) -> rt_obj.t_get_prop(st, mk_object(h), StringKey(Named(key)))
+    Some(h) -> rt_obj.t_get_text(st, mk_object(h), key)
   }
 }
 
@@ -1352,7 +1351,7 @@ pub fn read_bag_int_field(
   key: String,
   conv: fn(Agent, JsVal) -> #(Int, Agent),
 ) -> #(Option(Int), Agent) {
-  let #(v, st) = rt_obj.t_get_prop(st, mk_object(bag), StringKey(Named(key)))
+  let #(v, st) = rt_obj.t_get_text(st, mk_object(bag), key)
   case classify(v) {
     KUndef -> #(None, st)
     _ -> {

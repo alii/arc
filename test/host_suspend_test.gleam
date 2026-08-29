@@ -1,9 +1,9 @@
-import arc/bytecode/key.{Named}
 import arc/host.{AlreadySettled, Resumed, StaleTicket, State}
 import arc/interp/safepoint
 import arc/rt/async as rt_async
 import arc/rt/gc as rt_gc
 import arc/rt/obj as rt_obj
+import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type PromiseState, JInt, KHandle,
   PromiseFulfilled, PromisePending, PromiseRejected, StringKey, classify,
@@ -31,11 +31,12 @@ fn promise_state(st: Agent, promise: JsVal) -> PromiseState {
 fn recorder(s: host.State(Nil)) -> #(host.State(Nil), JsVal) {
   host.function(s, "record", 1, fn(args, _, s) {
     let st = s.agent
+    let #(k, st) = rt_store.t_key(st, "seen")
     let #(_, st) =
       rt_obj.t_set_prop(
         st,
         global(st, "globalThis").0,
-        StringKey(Named("seen")),
+        StringKey(k),
         host.first_arg(args),
       )
     #(State(..s, agent: st), Ok(mk_undefined()))

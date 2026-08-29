@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -74,11 +74,7 @@ pub fn t_ordinary_has_instance(
       case classify(v) {
         KHandle(obj_h) -> {
           let #(proto_val, st) =
-            js_ops(st).get_prop(
-              st,
-              mk_object(ctor),
-              StringKey(Named("prototype")),
-            )
+            js_ops(st).get_prop(st, mk_object(ctor), StringKey(nk.prototype))
           case classify(proto_val) {
             KHandle(proto_h) -> proto_walk(st, obj_h, proto_h, 10_000)
             _ ->
@@ -440,11 +436,14 @@ pub fn t_plus(st: Agent, a: JsVal) -> #(JsVal, Agent) {
 
 pub fn t_in(st: Agent, key: JsVal, obj: JsVal) -> #(Int, Agent) {
   case classify(obj) {
-    KHandle(_) -> {
-      let #(pk, st) = rt_val.t_to_property_key(st, key)
-      let #(found, st) = rt_obj.t_has_prop(st, obj, pk)
-      #(bool_int(found), st)
-    }
+    KHandle(_) ->
+      case rt_obj.t_read_key(st, obj, key) {
+        #(Ok(pk), st) -> {
+          let #(found, st) = rt_obj.t_has_prop(st, obj, pk)
+          #(bool_int(found), st)
+        }
+        #(Error(_unseen), st) -> #(0, st)
+      }
     _ -> {
       let #(tag, st) = rt_val.t_type_of(st, obj)
       rt_val.t_throw_type_error(

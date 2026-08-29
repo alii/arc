@@ -1,9 +1,8 @@
-import arc/bytecode/key.{canonical_key}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type JsVal, JInt, KNum, KStr, StringKey, classify, mk_bool,
-  mk_number, mk_object, mk_string,
+  type Agent, type JsVal, JInt, KNum, KStr, classify, mk_bool, mk_number,
+  mk_object, mk_string,
 }
 import gleam/list
 import gleam/option.{Some}
@@ -34,12 +33,13 @@ fn u8_of(st: Agent, bytes: List(Int)) -> #(JsVal, Agent) {
 }
 
 fn get_(st: Agent, obj: JsVal, key: String) -> JsVal {
-  let #(v, _) = rt_obj.t_get_prop(st, obj, StringKey(canonical_key(key)))
+  let #(v, _) = rt_helpers.get(st, obj, key)
   v
 }
 
 fn set(st: Agent, obj: JsVal, key: String, v: JsVal) -> Agent {
-  let #(_, st) = rt_obj.t_set_prop(st, obj, StringKey(canonical_key(key)), v)
+  let #(k, st) = rt_helpers.key(st, key)
+  let #(_, st) = rt_obj.t_set_prop(st, obj, k, v)
   st
 }
 

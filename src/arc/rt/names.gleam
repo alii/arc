@@ -35,6 +35,11 @@ pub const fixed: List(String) = [
   "size",
   "has",
   "$1",
+  "$_",
+  "$&",
+  "$+",
+  "$`",
+  "$'",
   "$2",
   "$262",
   "$3",
@@ -671,7 +676,7 @@ pub const fixed: List(String) = [
 pub fn fixed_count() -> Int
 
 @external(erlang, "arc_rt_names_ffi", "fixed_map")
-fn fixed_map() -> Dict(String, Int)
+pub fn fixed_map() -> Dict(String, Int)
 
 pub fn fixed_number(text: String) -> Option(Int) {
   dict.get(fixed_map(), text) |> option.from_result

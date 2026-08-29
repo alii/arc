@@ -1,4 +1,3 @@
-import arc/bytecode/key.{Named}
 import arc/rt/async as rt_async
 import arc/rt/builtins/regexp as b_regexp
 import arc/rt/obj as rt_obj
@@ -25,12 +24,13 @@ pub fn roundtrip_keeps_globals_and_properties_test() {
   let st = rt_obj.t_global_set(st, <<"n">>, mk_number(JInt(42)))
   let st = rt_obj.t_global_set(st, <<"s">>, mk_string("hello"))
   let #(obj, st) = rt_obj.t_new_object_literal(st)
-  let #(_, st) =
-    rt_obj.t_set_prop(st, obj, StringKey(Named("a")), mk_number(JInt(1)))
+  let #(ka, st) = rt_store.t_key(st, "a")
+  let #(kb, st) = rt_store.t_key(st, "b")
+  let #(kc, st) = rt_store.t_key(st, "c")
+  let #(_, st) = rt_obj.t_set_prop(st, obj, StringKey(ka), mk_number(JInt(1)))
   let #(inner, st) = rt_obj.t_new_object_literal(st)
-  let #(_, st) =
-    rt_obj.t_set_prop(st, inner, StringKey(Named("c")), mk_string("deep"))
-  let #(_, st) = rt_obj.t_set_prop(st, obj, StringKey(Named("b")), inner)
+  let #(_, st) = rt_obj.t_set_prop(st, inner, StringKey(kc), mk_string("deep"))
+  let #(_, st) = rt_obj.t_set_prop(st, obj, StringKey(kb), inner)
   let st = rt_obj.t_global_set(st, <<"obj">>, obj)
 
   let st = roundtrip(st)

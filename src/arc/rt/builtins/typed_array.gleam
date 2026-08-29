@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Index, Named}
+import arc/bytecode/key
 import arc/rt/buffer
 import arc/rt/builtins/array_buffer
 import arc/rt/builtins/common
@@ -7,6 +7,7 @@ import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/realm_ops
 import arc/rt/builtins/uint8_codec
 import arc/rt/call as rt_call
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/typed_array_ffi.{fill_clamped, splice_clamped, ta_zeroed}
@@ -90,11 +91,7 @@ pub fn init(
   let #(values_prop, st) = common.builtin_property(st, mk_object(values_h))
   // tostring is the same object as array.prototype.tostring
   let #(array_to_string, st) =
-    rt_obj.t_get_prop(
-      st,
-      mk_object(array.prototype),
-      StringKey(Named("toString")),
-    )
+    rt_obj.t_get_prop(st, mk_object(array.prototype), StringKey(nk.to_string))
   let #(to_string_prop, st) = common.builtin_property(st, array_to_string)
   let #(methods, st) =
     common.alloc_methods(st, function_proto, [
@@ -409,8 +406,7 @@ fn ta_from(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
       }
     }
     False -> {
-      let #(len_val, st) =
-        rt_obj.t_get_prop(st, source, StringKey(Named("length")))
+      let #(len_val, st) = rt_obj.t_get_prop(st, source, StringKey(nk.length))
       let #(len, st) = rt_val.t_to_length(st, len_val)
       let #(target, target_h, st) = ta_create(st, this, len)
       let bulk = case mapping, classify(source) {
@@ -468,7 +464,7 @@ fn from_array_like_loop(
   case k >= len {
     True -> #(target, st)
     False -> {
-      let #(v, st) = rt_obj.t_get_prop(st, source, StringKey(Index(k)))
+      let #(v, st) = rt_obj.t_get_prop(st, source, StringKey(key.index(k)))
       let st = map_and_store(st, target, target_h, v, k, mapping, this_arg)
       from_array_like_loop(
         st,
@@ -847,8 +843,7 @@ fn from_object(
       }
     }
     False -> {
-      let #(len_val, st) =
-        rt_obj.t_get_prop(st, obj_val, StringKey(Named("length")))
+      let #(len_val, st) = rt_obj.t_get_prop(st, obj_val, StringKey(nk.length))
       let #(len, st) = rt_val.t_to_length(st, len_val)
       let #(fresh, st) = alloc_ta_with_length(st, kind, proto, len)
       let bulk =
@@ -887,7 +882,7 @@ fn store_array_like(
   case k >= len {
     True -> st
     False -> {
-      let #(v, st) = rt_obj.t_get_prop(st, obj_val, StringKey(Index(k)))
+      let #(v, st) = rt_obj.t_get_prop(st, obj_val, StringKey(key.index(k)))
       let st = set_index(st, fresh.ta_ref, fresh.value, k, v)
       store_array_like(st, fresh, obj_val, k + 1, len)
     }
@@ -1302,7 +1297,7 @@ fn set_from_array_like(
   len: Int,
   src: JsVal,
 ) -> #(JsVal, Agent) {
-  let #(len_val, st) = rt_obj.t_get_prop(st, src, StringKey(Named("length")))
+  let #(len_val, st) = rt_obj.t_get_prop(st, src, StringKey(nk.length))
   let #(src_len, st) = rt_val.t_to_length(st, len_val)
   use <- bool.lazy_guard(src_len + offset > len, fn() {
     rt_val.t_throw_range_error(st, "offset is out of bounds")
@@ -1333,7 +1328,7 @@ fn set_array_like_loop(
   case k >= src_len {
     True -> st
     False -> {
-      let #(v, st) = rt_obj.t_get_prop(st, src, StringKey(Index(k)))
+      let #(v, st) = rt_obj.t_get_prop(st, src, StringKey(key.index(k)))
       let st = set_index(st, view.ref, mk_object(view.ref), offset + k, v)
       set_array_like_loop(st, view, offset, src, k + 1, src_len)
     }
@@ -1698,7 +1693,7 @@ fn set_index(
     rt_obj.t_set_prop_with_receiver(
       st,
       target_h,
-      StringKey(Index(k)),
+      StringKey(key.index(k)),
       v,
       target,
     )
@@ -2415,8 +2410,7 @@ fn locale_loop(
   case rt_val.is_nullish(el) {
     True -> locale_loop(st, view, k + 1, locales_v, options_v, ["", ..acc])
     False -> {
-      let #(m, st) =
-        rt_obj.t_get_prop(st, el, StringKey(Named("toLocaleString")))
+      let #(m, st) = rt_obj.t_get_prop(st, el, StringKey(nk.to_locale_string))
       let #(res, st) = call(st, m, el, [locales_v, options_v])
       let #(s, st) = rt_val.t_to_string(st, res)
       locale_loop(st, view, k + 1, locales_v, options_v, [s, ..acc])
@@ -2431,8 +2425,7 @@ fn resolve_species_ctor(
   kind: TypedArrayKind,
 ) -> #(Option(JsVal), Agent) {
   let default_ctor = typed_array_pair(st, kind).constructor
-  let #(ctor, st) =
-    rt_obj.t_get_prop(st, exemplar, StringKey(Named("constructor")))
+  let #(ctor, st) = rt_obj.t_get_prop(st, exemplar, StringKey(nk.constructor))
   case classify(ctor) {
     KUndef -> #(None, st)
     KHandle(_) -> {

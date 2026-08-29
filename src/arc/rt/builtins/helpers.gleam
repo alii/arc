@@ -1,4 +1,4 @@
-import arc/bytecode/key.{index_key}
+import arc/bytecode/key.{type Key}
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -20,7 +20,10 @@ pub fn own_element(st: Agent, this: JsVal, idx: Int) -> OwnElement
 pub fn get_index(st: Agent, this: JsVal, idx: Int) -> #(JsVal, Agent) {
   case own_element(st, this, idx) {
     Hit(v) -> #(v, st)
-    Slow -> rt_obj.t_get_prop(st, this, StringKey(index_key(idx)))
+    Slow -> {
+      let #(k, st) = rt_store.t_key_of_int(st, idx)
+      rt_obj.t_get_prop(st, this, StringKey(k))
+    }
   }
 }
 
@@ -28,11 +31,11 @@ pub fn get_index(st: Agent, this: JsVal, idx: Int) -> #(JsVal, Agent) {
 fn ffi_get_named(
   st: Agent,
   recv: JsVal,
-  key: String,
+  key: Key,
   site: Option(Nil),
 ) -> #(JsVal, Agent)
 
-pub fn get_named(st: Agent, recv: JsVal, key: String) -> #(JsVal, Agent) {
+pub fn get_named(st: Agent, recv: JsVal, key: Key) -> #(JsVal, Agent) {
   ffi_get_named(st, recv, key, None)
 }
 
@@ -55,7 +58,7 @@ pub fn get_symbol(st: Agent, recv: JsVal, sym: SymbolId) -> #(JsVal, Agent) {
 pub fn set_named(
   st: Agent,
   obj: JsVal,
-  key: String,
+  key: Key,
   v: JsVal,
   strict: Bool,
 ) -> Agent

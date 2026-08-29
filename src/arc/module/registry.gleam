@@ -1,6 +1,6 @@
 // module registry caches live as private-keyed props on the global
 
-import arc/bytecode/key.{type PropertyKey, Named, private_key}
+import arc/bytecode/key.{type Key}
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -10,28 +10,28 @@ import arc/rt/types.{
 import gleam/dict
 import gleam/option.{type Option, None, Some}
 
-fn status_property() -> PropertyKey {
-  private_key("arc_module_status")
+fn status_property() -> Key {
+  rt_store.reserved_private_key("arc_module_status")
 }
 
-fn error_cache_property() -> PropertyKey {
-  private_key("arc_module_errors")
+fn error_cache_property() -> Key {
+  rt_store.reserved_private_key("arc_module_errors")
 }
 
-fn namespace_cache_property() -> PropertyKey {
-  private_key("arc_module_cache")
+fn namespace_cache_property() -> Key {
+  rt_store.reserved_private_key("arc_module_cache")
 }
 
-fn deferred_cache_property() -> PropertyKey {
-  private_key("arc_module_deferred")
+fn deferred_cache_property() -> Key {
+  rt_store.reserved_private_key("arc_module_deferred")
 }
 
-fn pending_cache_property() -> PropertyKey {
-  private_key("arc_module_pending")
+fn pending_cache_property() -> Key {
+  rt_store.reserved_private_key("arc_module_pending")
 }
 
-fn referrer_property() -> PropertyKey {
-  private_key("arc_module_referrer")
+fn referrer_property() -> Key {
+  rt_store.reserved_private_key("arc_module_referrer")
 }
 
 const referrer_key = "active"
@@ -169,7 +169,7 @@ pub fn clear_module_registrations(st: Agent, spec: String) -> Agent {
   |> clear_deferred_namespace(spec)
 }
 
-fn cache_object(st: Agent, property: PropertyKey) -> Option(Handle) {
+fn cache_object(st: Agent, property: Key) -> Option(Handle) {
   case
     rt_obj.t_ordinary_own_property(
       st,
@@ -186,19 +186,16 @@ fn cache_object(st: Agent, property: PropertyKey) -> Option(Handle) {
   }
 }
 
-fn read_entry(st: Agent, property: PropertyKey, key: String) -> Option(JsVal) {
+fn read_entry(st: Agent, property: Key, key: String) -> Option(JsVal) {
   use cache <- option.then(cache_object(st, property))
-  case rt_obj.t_ordinary_own_property(st, cache, StringKey(Named(key))) {
+  use k <- option.then(rt_store.t_find_key(st, key))
+  case rt_obj.t_ordinary_own_property(st, cache, StringKey(k)) {
     Some(DataProperty(value:, ..)) -> Some(value)
     _ -> None
   }
 }
 
-fn read_object_entry(
-  st: Agent,
-  property: PropertyKey,
-  key: String,
-) -> Option(Handle) {
+fn read_object_entry(st: Agent, property: Key, key: String) -> Option(Handle) {
   use v <- option.then(read_entry(st, property, key))
   case classify(v) {
     KHandle(h) -> Some(h)
@@ -206,12 +203,7 @@ fn read_object_entry(
   }
 }
 
-fn write_entry(
-  st: Agent,
-  property: PropertyKey,
-  key: String,
-  val: JsVal,
-) -> Agent {
+fn write_entry(st: Agent, property: Key, key: String, val: JsVal) -> Agent {
   let #(cache, st) = case cache_object(st, property) {
     Some(cache) -> #(cache, st)
     None -> {
@@ -221,16 +213,12 @@ fn write_entry(
       #(cache, st)
     }
   }
-  put_hidden_slot(st, cache, Named(key), val)
+  let #(k, st) = rt_store.t_key(st, key)
+  put_hidden_slot(st, cache, k, val)
 }
 
 // bypasses [[DefineOwnProperty]] so a frozen global cannot block it
-fn put_hidden_slot(
-  st: Agent,
-  target: Handle,
-  key: PropertyKey,
-  val: JsVal,
-) -> Agent {
+fn put_hidden_slot(st: Agent, target: Handle, key: Key, val: JsVal) -> Agent {
   let st = rt_obj.devolve(st, target)
   let #(seq, st) = rt_store.t_next_prop_seq(st)
   use slot <- rt_store.t_cell_update(st, target)
@@ -254,16 +242,15 @@ fn put_hidden_slot(
   }
 }
 
-fn clear_entry(st: Agent, property: PropertyKey, key: String) -> Agent {
-  case cache_object(st, property) {
-    None -> st
-    Some(cache) -> {
-      let #(deleted, st) =
-        rt_obj.t_delete_prop(st, cache, StringKey(Named(key)))
+fn clear_entry(st: Agent, property: Key, key: String) -> Agent {
+  case cache_object(st, property), rt_store.t_find_key(st, key) {
+    Some(cache), Some(k) -> {
+      let #(deleted, st) = rt_obj.t_delete_prop(st, cache, StringKey(k))
       case deleted {
         True -> st
         False -> panic as "arc/module/registry: cache entry refused deletion"
       }
     }
+    _, _ -> st
   }
 }

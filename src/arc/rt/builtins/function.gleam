@@ -1,7 +1,7 @@
-import arc/bytecode/key.{Named, index_key}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/realm as rt_realm
@@ -249,7 +249,7 @@ pub fn create_dynamic_function(
         rt_obj.t_define_own_data(
           st,
           h,
-          StringKey(Named("name")),
+          StringKey(nk.name),
           mk_string("anonymous"),
           False,
           False,
@@ -296,8 +296,7 @@ pub fn create_list_from_array_like(
       let #(len, st) = case rt_store.t_cell_get(st, h) {
         SObject(kind: rt_types.ArrayObj(length:), ..) -> #(length, st)
         _ -> {
-          let #(len_v, st) =
-            rt_obj.t_get_prop(st, arr, StringKey(Named("length")))
+          let #(len_v, st) = rt_obj.t_get_prop(st, arr, StringKey(nk.length))
           rt_val.t_to_length(st, len_v)
         }
       }
@@ -331,7 +330,10 @@ fn collect_array_like(
     False -> {
       let #(v, st) = case helpers.own_element(st, arr, i) {
         helpers.Hit(v) -> #(v, st)
-        helpers.Slow -> rt_obj.t_get_prop(st, arr, StringKey(index_key(i)))
+        helpers.Slow -> {
+          let #(k, st) = rt_store.t_key_of_int(st, i)
+          rt_obj.t_get_prop(st, arr, StringKey(k))
+        }
       }
       collect_array_like(st, arr, i + 1, len, [v, ..acc])
     }
@@ -346,7 +348,7 @@ fn function_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
         | SObject(kind: KBytecode(..), ..)
         | SObject(kind: KNative(..), ..) -> {
           let name = case
-            rt_obj.t_ordinary_own_property(st, h, StringKey(Named("name")))
+            rt_obj.t_ordinary_own_property(st, h, StringKey(nk.name))
           {
             Some(DataProperty(value: v, ..)) ->
               case classify(v) {

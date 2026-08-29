@@ -1,9 +1,11 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{type SourceKey}
 import arc/compiler
 import arc/internal/tuple_array
+import arc/interp/load
 import arc/parser
 import arc/rt/bytecode.{type FuncTemplate}
 import arc/rt/closure as rt_closure
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -14,33 +16,36 @@ import gleam/list
 import gleam/option.{None, Some}
 import rt_helpers
 
-fn compile(source: String) -> FuncTemplate {
+fn compile(source: String) -> FuncTemplate(SourceKey) {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
   let assert Ok(template) = compiler.compile(body, sb)
   template
 }
 
-fn find(t: FuncTemplate, name: String) -> Result(FuncTemplate, Nil) {
-  list.find_map(tuple_array.to_list(t.functions), fn(c: FuncTemplate) {
-    case c.name == Some(name) {
-      True -> Ok(c)
-      False -> find(c, name)
-    }
-  })
+fn find(
+  t: FuncTemplate(SourceKey),
+  name: String,
+) -> Result(FuncTemplate(SourceKey), Nil) {
+  list.find_map(
+    tuple_array.to_list(t.functions),
+    fn(c: FuncTemplate(SourceKey)) {
+      case c.name == Some(name) {
+        True -> Ok(c)
+        False -> find(c, name)
+      }
+    },
+  )
 }
 
 fn make(source: String, name: String) -> #(Handle, Agent) {
   let assert Ok(t) = find(compile(source), name)
-  rt_closure.t_new_bytecode_function(
-    rt_helpers.agent(),
-    t,
-    bytecode.env_from_list([]),
-    0,
-  )
+  let #(t, st) = load.template(rt_helpers.agent(), t)
+  rt_closure.t_new_bytecode_function(st, t, bytecode.env_from_list([]), 0)
 }
 
 fn own_handle(st: Agent, h: Handle, key: String) -> Result(Handle, Nil) {
-  case rt_obj.t_ordinary_own_property(st, h, StringKey(Named(key))) {
+  let #(k, st) = rt_helpers.key(st, key)
+  case rt_obj.t_ordinary_own_property(st, h, k) {
     Some(DataProperty(value:, ..)) ->
       case classify(value) {
         KHandle(p) -> Ok(p)
@@ -65,18 +70,18 @@ pub fn plain_function_shape_test() {
   let #(keys, st) = rt_obj.t_own_keys(st, f)
   assert keys
     == [
-      StringKey(Named("length")),
-      StringKey(Named("name")),
-      StringKey(Named("prototype")),
+      StringKey(nk.length),
+      StringKey(nk.name),
+      StringKey(nk.prototype),
     ]
   let assert Some(DataProperty(value: len, writable: False, ..)) =
-    rt_obj.t_ordinary_own_property(st, f, StringKey(Named("length")))
+    rt_obj.t_ordinary_own_property(st, f, StringKey(nk.length))
   assert classify(len) == KNum(JInt(2))
   let assert Some(DataProperty(value: name, ..)) =
-    rt_obj.t_ordinary_own_property(st, f, StringKey(Named("name")))
+    rt_obj.t_ordinary_own_property(st, f, StringKey(nk.name))
   assert classify(name) == KStr("Foo")
   let assert Some(DataProperty(writable: True, configurable: False, ..)) =
-    rt_obj.t_ordinary_own_property(st, f, StringKey(Named("prototype")))
+    rt_obj.t_ordinary_own_property(st, f, StringKey(nk.prototype))
   let assert Ok(proto) = own_handle(st, f, "prototype")
   assert proto_of(st, proto) == st.realm.object.prototype
   assert own_handle(st, proto, "constructor") == Ok(f)
@@ -89,31 +94,34 @@ pub fn plain_function_shape_test() {
 
 pub fn birth_props_precede_later_props_test() {
   let #(f, st) = make("function Foo(a, b) {}", "Foo")
+  let #(sooner, st) = rt_helpers.key(st, "sooner")
+  let #(later, st) = rt_helpers.key(st, "later")
+  let #(method, st) = rt_helpers.key(st, "method")
+  let #(z, st) = rt_helpers.key(st, "z")
   let #(_, st) =
     rt_obj.t_define_own_data(
       st,
       f,
-      StringKey(Named("sooner")),
+      sooner,
       types.mk_undefined(),
       True,
       True,
       True,
     )
   let #(prototype, st) =
-    rt_obj.t_get_prop(st, types.mk_object(f), StringKey(Named("prototype")))
+    rt_obj.t_get_prop(st, types.mk_object(f), StringKey(nk.prototype))
   let assert KHandle(proto) = classify(prototype)
   let assert Some(DataProperty(
     writable: True,
     enumerable: False,
     configurable: True,
     ..,
-  )) =
-    rt_obj.t_ordinary_own_property(st, proto, StringKey(Named("constructor")))
+  )) = rt_obj.t_ordinary_own_property(st, proto, StringKey(nk.constructor))
   let #(_, st) =
     rt_obj.t_define_own_data(
       st,
       f,
-      StringKey(Named("later")),
+      later,
       types.mk_undefined(),
       True,
       True,
@@ -123,7 +131,7 @@ pub fn birth_props_precede_later_props_test() {
     rt_obj.t_define_own_data(
       st,
       proto,
-      StringKey(Named("method")),
+      method,
       types.mk_undefined(),
       True,
       True,
@@ -132,41 +140,34 @@ pub fn birth_props_precede_later_props_test() {
   let #(keys, st) = rt_obj.t_own_keys(st, f)
   assert keys
     == [
-      StringKey(Named("length")),
-      StringKey(Named("name")),
-      StringKey(Named("prototype")),
-      StringKey(Named("sooner")),
-      StringKey(Named("later")),
+      StringKey(nk.length),
+      StringKey(nk.name),
+      StringKey(nk.prototype),
+      sooner,
+      later,
     ]
   let #(pkeys, st) = rt_obj.t_own_keys(st, proto)
-  assert pkeys == [StringKey(Named("constructor")), StringKey(Named("method"))]
+  assert pkeys == [StringKey(nk.constructor), method]
   let assert Ok(t) = find(compile("function Bar() {}"), "Bar")
+  let #(t, st) = load.template(st, t)
   let #(g, st) =
     rt_closure.t_new_bytecode_function(st, t, bytecode.env_from_list([]), 0)
   let #(_, st) =
-    rt_obj.t_define_own_data(
-      st,
-      g,
-      StringKey(Named("z")),
-      types.mk_undefined(),
-      True,
-      True,
-      True,
-    )
+    rt_obj.t_define_own_data(st, g, z, types.mk_undefined(), True, True, True)
   let #(gkeys, _) = rt_obj.t_own_keys(st, g)
   assert gkeys
     == [
-      StringKey(Named("length")),
-      StringKey(Named("name")),
-      StringKey(Named("prototype")),
-      StringKey(Named("z")),
+      StringKey(nk.length),
+      StringKey(nk.name),
+      StringKey(nk.prototype),
+      z,
     ]
 }
 
 pub fn class_constructor_prototype_not_writable_test() {
   let #(c, st) = make("class C { constructor() {} }", "C")
   let assert Some(DataProperty(writable: False, configurable: False, ..)) =
-    rt_obj.t_ordinary_own_property(st, c, StringKey(Named("prototype")))
+    rt_obj.t_ordinary_own_property(st, c, StringKey(nk.prototype))
   let assert Ok(proto) = own_handle(st, c, "prototype")
   assert own_handle(st, proto, "constructor") == Ok(c)
   let assert SObject(kind: KBytecode(home_object: Some(home), ..), ..) =
@@ -178,7 +179,7 @@ pub fn generator_function_shape_test() {
   let #(g, st) = make("function* gen() {}", "gen")
   assert proto_of(st, g) == st.realm.generator_fn.prototype
   let assert Some(DataProperty(writable: True, ..)) =
-    rt_obj.t_ordinary_own_property(st, g, StringKey(Named("prototype")))
+    rt_obj.t_ordinary_own_property(st, g, StringKey(nk.prototype))
   let assert Ok(proto) = own_handle(st, g, "prototype")
   assert proto_of(st, proto) == st.realm.generator.prototype
   assert own_handle(st, proto, "constructor") == Error(Nil)
@@ -197,26 +198,20 @@ pub fn async_generator_function_shape_test() {
 pub fn async_function_has_no_prototype_test() {
   let #(a, st) = make("async function af() {}", "af")
   assert proto_of(st, a) == st.realm.async_fn.prototype
-  assert rt_obj.t_ordinary_own_property(st, a, StringKey(Named("prototype")))
-    == None
+  assert rt_obj.t_ordinary_own_property(st, a, StringKey(nk.prototype)) == None
   let assert SObject(kind: KBytecode(home_object: None, ..), ..) =
     rt_store.t_cell_get(st, a)
 }
 
 pub fn arrow_and_method_have_no_prototype_test() {
   let #(arrow, st) = make("var arrow = () => 1;", "arrow")
-  assert rt_obj.t_ordinary_own_property(
-      st,
-      arrow,
-      StringKey(Named("prototype")),
-    )
+  assert rt_obj.t_ordinary_own_property(st, arrow, StringKey(nk.prototype))
     == None
   let assert SObject(kind: KBytecode(flags: af, ..), ..) =
     rt_store.t_cell_get(st, arrow)
   assert af.is_arrow && !af.is_method
   let #(m, st) = make("var o = { m() {} };", "m")
-  assert rt_obj.t_ordinary_own_property(st, m, StringKey(Named("prototype")))
-    == None
+  assert rt_obj.t_ordinary_own_property(st, m, StringKey(nk.prototype)) == None
   let assert SObject(kind: KBytecode(flags: mf, ..), ..) =
     rt_store.t_cell_get(st, m)
   assert mf.is_method && !mf.is_constructor

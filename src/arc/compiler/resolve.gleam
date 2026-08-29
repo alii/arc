@@ -1,5 +1,5 @@
 import arc/bytecode/binop
-import arc/bytecode/key.{type PropertyKey}
+import arc/bytecode/key.{type SourceKey}
 import arc/bytecode/opcode.{
   type IrOp, type LabelId, type Op, type Pc, IrAsyncYieldStarNext,
   IrAsyncYieldStarResume, IrBinOp, IrCmpConstJump, IrCmpJump,
@@ -23,7 +23,7 @@ import gleam/set.{type Set}
 pub fn resolve(
   code: List(IrOp),
   constants: List(JsVal),
-  keys: List(PropertyKey),
+  keys: List(SourceKey),
 ) -> Resolved {
   let const_arr = tuple_array.from_list(constants)
   let keys_arr = tuple_array.from_list(keys)
@@ -44,15 +44,15 @@ pub type Resolved {
   Resolved(
     bytecode: tuple_array.TupleArray(Op),
     constants: tuple_array.TupleArray(JsVal),
-    keys: tuple_array.TupleArray(PropertyKey),
+    keys: tuple_array.TupleArray(SourceKey),
     lines: tuple_array.TupleArray(Int),
   )
 }
 
-fn is_named(keys: tuple_array.TupleArray(PropertyKey), slot: Int) -> Bool {
+fn is_named(keys: tuple_array.TupleArray(SourceKey), slot: Int) -> Bool {
   case tuple_array.get_unchecked(slot, keys) {
-    key.Named(_) -> True
-    key.Index(_) | key.Private(_) -> False
+    key.SourceName(_) -> True
+    key.SourceIndex(_) -> False
   }
 }
 
@@ -60,7 +60,7 @@ fn is_named(keys: tuple_array.TupleArray(PropertyKey), slot: Int) -> Bool {
 fn peephole(
   code: List(IrOp),
   consts: tuple_array.TupleArray(JsVal),
-  keys: tuple_array.TupleArray(PropertyKey),
+  keys: tuple_array.TupleArray(SourceKey),
   acc: List(IrOp),
 ) -> List(IrOp) {
   case code {

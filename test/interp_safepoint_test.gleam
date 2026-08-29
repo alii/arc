@@ -1,3 +1,4 @@
+import arc/bytecode/key.{type Key}
 import arc/bytecode/lexical
 import arc/internal/tuple_array
 import arc/interp/safepoint
@@ -42,7 +43,7 @@ fn churn(st: Agent, n: Int) -> Agent {
   }
 }
 
-fn empty_template() -> FuncTemplate {
+fn empty_template() -> FuncTemplate(Key) {
   FuncTemplate(
     name: None,
     arity: 0,

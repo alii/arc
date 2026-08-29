@@ -1,4 +1,3 @@
-import arc/bytecode/key.{Named}
 import arc/interp/dynamic_import
 import arc/interp/entry
 import arc/module
@@ -9,6 +8,7 @@ import arc/rt/async as rt_async
 import arc/rt/builtins as rt_builtins
 import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
+import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type JsVal, JInt, KNum, KStr, KUndef, PromiseFulfilled,
   PromiseRejected, StringKey, SymbolKey, classify, mk_number, mk_object,
@@ -55,7 +55,8 @@ fn bundle(entry_source: String) -> module.ModuleBundle {
 }
 
 fn get(st: Agent, recv: JsVal, name: String) -> #(JsVal, Agent) {
-  rt_obj.t_get_prop(st, recv, StringKey(Named(name)))
+  let #(k, st) = rt_store.t_key(st, name)
+  rt_obj.t_get_prop(st, recv, StringKey(k))
 }
 
 pub fn link_builds_namespaces_over_live_cells_test() {

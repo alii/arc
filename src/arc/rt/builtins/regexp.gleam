@@ -1,4 +1,4 @@
-import arc/bytecode/key.{type PropertyKey, Index, Named}
+import arc/bytecode/key.{type Key}
 import arc/parser/regex
 import arc/parser/regex_error
 import arc/rt/async as rt_async
@@ -8,6 +8,7 @@ import arc/rt/builtins/substitution
 import arc/rt/call as rt_call
 import arc/rt/elements
 import arc/rt/limits
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -222,7 +223,7 @@ fn regexp_call(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
   case pattern_is_regexp, classify(flags) {
     True, KUndef -> {
-      let #(ctor, st) = get_named(st, pattern, "constructor")
+      let #(ctor, st) = get_named(st, pattern, nk.constructor)
       case rt_val.same_value(ctor, new_target) {
         True -> #(pattern, st)
         False -> construct(st)
@@ -248,10 +249,10 @@ fn construct_regexp(
     None ->
       case pattern_is_regexp {
         True -> {
-          let #(p, st) = get_named(st, pattern, "source")
+          let #(p, st) = get_named(st, pattern, nk.source)
           case classify(flags) {
             KUndef -> {
-              let #(f, st) = get_named(st, pattern, "flags")
+              let #(f, st) = get_named(st, pattern, nk.flags)
               #(p, f, st)
             }
             _ -> #(p, flags, st)
@@ -367,7 +368,7 @@ fn write_legacy_statics(
 type CtorState {
   CtorState(
     legacy: LegacyStatics,
-    proto_props: Option(Dict(PropertyKey, Property)),
+    proto_props: Option(Dict(Key, Property)),
     compiled: Dict(String, rt_types.CompiledRegExp),
   )
 }
@@ -418,10 +419,7 @@ fn update_constructor(
 }
 
 @external(erlang, "erlang", "=:=")
-fn same_props(
-  a: Dict(PropertyKey, Property),
-  b: Dict(PropertyKey, Property),
-) -> Bool
+fn same_props(a: Dict(Key, Property), b: Dict(Key, Property)) -> Bool
 
 // usually one compare against the last props map seen pristine
 fn proto_pristine(st: Agent) -> #(Bool, Agent) {
@@ -439,11 +437,8 @@ fn proto_pristine(st: Agent) -> #(Bool, Agent) {
   }
 }
 
-fn verify_pristine(
-  st: Agent,
-  props: Dict(PropertyKey, Property),
-) -> #(Bool, Agent) {
-  let exec = case dict.get(props, Named("exec")) {
+fn verify_pristine(st: Agent, props: Dict(Key, Property)) -> #(Bool, Agent) {
+  let exec = case dict.get(props, nk.exec) {
     Ok(DataProperty(value:, ..)) -> is_intrinsic_exec(st, value)
     _ -> False
   }
@@ -573,7 +568,7 @@ fn build_flags(
   case remaining {
     [] -> #(mk_string(acc), st)
     [flag, ..rest] -> {
-      let #(v, st) = get_named(st, this, flag_property(flag))
+      let #(v, st) = get_named(st, this, common.name_key(flag_property(flag)))
       let acc = case rt_val.to_boolean(v) {
         True -> acc <> flag_char(flag)
         False -> acc
@@ -599,7 +594,7 @@ fn to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
         "RegExp.prototype.toString called on non-object",
       )
   }
-  let #(src_v, st) = get_named(st, this, "source")
+  let #(src_v, st) = get_named(st, this, nk.source)
   let #(src, st) = rt_val.t_to_string(st, src_v)
   let #(flags, st) = read_flags(st, this)
   #(mk_string("/" <> src <> "/" <> flags), st)
@@ -764,11 +759,11 @@ fn try_get(st: Agent, o: JsVal, key: ObjectKey) -> #(JsVal, Agent) {
   rt_obj.t_get_prop(st, o, key)
 }
 
-fn get_named(st: Agent, o: JsVal, name: String) -> #(JsVal, Agent) {
+fn get_named(st: Agent, o: JsVal, name: Key) -> #(JsVal, Agent) {
   helpers.get_named(st, o, name)
 }
 
-fn set_throw(st: Agent, h: Handle, name: String, v: JsVal) -> Agent {
+fn set_throw(st: Agent, h: Handle, name: Key, v: JsVal) -> Agent {
   helpers.set_named(st, mk_object(h), name, v, True)
 }
 
@@ -794,7 +789,7 @@ fn regexp_exec_mode(
   mode: ExecMode,
 ) -> #(JsVal, Agent) {
   let h = require_object(st, rx, ".exec")
-  let #(exec_fn, st) = get_named(st, rx, "exec")
+  let #(exec_fn, st) = get_named(st, rx, nk.exec)
   let receiver = rt_store.t_cell_get(st, h)
   case receiver, is_intrinsic_exec(st, exec_fn) {
     SObject(kind: RegExpObj(..), ..), True -> builtin_exec_mode(st, h, s, mode)
@@ -860,7 +855,7 @@ fn builtin_exec_raw(
   h: Handle,
   s: String,
 ) -> #(RawExec, String, Agent) {
-  let #(li_v, st) = get_named(st, mk_object(h), "lastIndex")
+  let #(li_v, st) = get_named(st, mk_object(h), nk.last_index)
   let #(last_index, st) = rt_val.t_to_length(st, li_v)
   // re-read after the get, a getter may have recompiled
   let #(flags, compiled, st) = regexp_matcher(st, h)
@@ -873,7 +868,7 @@ fn builtin_exec_raw(
   case ffi_regexp_exec_compiled(compiled, s, last_index, sticky) {
     Error(NoMatch) | Error(OffsetOutOfRange) | Error(PatternCompileFailed(_)) -> {
       let st = case global || sticky {
-        True -> set_throw(st, h, "lastIndex", mk_number(JInt(0)))
+        True -> set_throw(st, h, nk.last_index, mk_number(JInt(0)))
         False -> st
       }
       #(RawMiss, flags, st)
@@ -885,7 +880,7 @@ fn builtin_exec_raw(
           set_throw(
             st,
             h,
-            "lastIndex",
+            nk.last_index,
             mk_number(JInt(match_start + match_len)),
           )
         False -> st
@@ -982,13 +977,13 @@ fn build_exec_result(
   }
   let extra = case classify(indices_val) {
     KUndef -> []
-    _ -> [#("indices", indices_val)]
+    _ -> [#(nk.indices, indices_val)]
   }
   let #(arr_h, st) =
     alloc_array_with_props(st, match_values, [
-      #("index", mk_number(JInt(match_start))),
-      #("input", mk_string(s)),
-      #("groups", groups_val),
+      #(nk.index, mk_number(JInt(match_start))),
+      #(nk.input, mk_string(s)),
+      #(nk.groups, groups_val),
       ..extra
     ])
   #(mk_object(arr_h), st)
@@ -1057,7 +1052,7 @@ fn make_indices(
     }
   }
   let #(arr_h, st) =
-    alloc_array_with_props(st, pair_values, [#("groups", groups_val)])
+    alloc_array_with_props(st, pair_values, [#(nk.groups, groups_val)])
   #(mk_object(arr_h), st)
 }
 
@@ -1088,13 +1083,14 @@ fn alloc_null_proto_object(
       let #(prop, st) = common.data_property(st, v)
       #([#(k, prop), ..ps], st)
     })
+  let #(props, st) = common.keyed_props(st, list.reverse(props))
   let #(h, st) =
     rt_store.t_cell_new(
       st,
       SObject(
         kind: Ordinary,
         proto: None,
-        props: common.named_props(list.reverse(props)),
+        props:,
         symbol_props: [],
         elements: NoElements,
         extensible: True,
@@ -1114,13 +1110,13 @@ fn capture_to_value(s: String, cap: #(Int, Int)) -> JsVal {
 fn alloc_array_with_props(
   st: Agent,
   values: List(JsVal),
-  entries: List(#(String, JsVal)),
+  entries: List(#(Key, JsVal)),
 ) -> #(Handle, Agent) {
   let array_proto = st.realm.array.prototype
   use seq <- rt_store.t_cell_new_with(st, list.length(entries))
   let props =
     list.index_map(entries, fn(kv, i) {
-      #(Named(kv.0), DataProperty(kv.1, True, True, True, seq + i))
+      #(kv.0, DataProperty(kv.1, True, True, True, seq + i))
     })
   SObject(
     kind: ArrayObj(list.length(values)),
@@ -1208,7 +1204,7 @@ fn regexp_compile(
         _ -> slot
       }
     })
-  let st = set_throw(st, h, "lastIndex", mk_number(JInt(0)))
+  let st = set_throw(st, h, nk.last_index, mk_number(JInt(0)))
   #(this, st)
 }
 
@@ -1232,7 +1228,7 @@ fn regexp_symbol_match(
     False, True -> builtin_exec_mode(st, h, s, MatchArray)
     False, False -> regexp_exec_abstract(st, this, s)
     True, fast -> {
-      let st = set_throw(st, h, "lastIndex", mk_number(JInt(0)))
+      let st = set_throw(st, h, nk.last_index, mk_number(JInt(0)))
       case fast {
         True -> match_global_fast(st, h, s)
         False -> match_global_loop(st, this, h, s, [], 0)
@@ -1267,7 +1263,7 @@ fn global_hits(
       update_legacy_statics(st, s, #(ms, ml), groups)
     [] -> st
   }
-  let st = set_throw(st, h, "lastIndex", mk_number(JInt(0)))
+  let st = set_throw(st, h, nk.last_index, mk_number(JInt(0)))
   #(list.reverse(rev), st)
 }
 
@@ -1307,7 +1303,7 @@ fn match_global_loop(
         _ -> ok_array(st, list.reverse(acc))
       }
     _ -> {
-      let #(m_v, st) = try_get(st, result, StringKey(Index(0)))
+      let #(m_v, st) = try_get(st, result, StringKey(key.index(0)))
       let #(match_str, st) = rt_val.t_to_string(st, m_v)
       let st = advance_if_empty(st, h, s, match_str)
       match_global_loop(st, rx, h, s, [mk_string(match_str), ..acc], n + 1)
@@ -1323,12 +1319,12 @@ fn advance_if_empty(
 ) -> Agent {
   case match_str {
     "" -> {
-      let #(li_v, st) = get_named(st, mk_object(h), "lastIndex")
+      let #(li_v, st) = get_named(st, mk_object(h), nk.last_index)
       let #(this_index, st) = rt_val.t_to_length(st, li_v)
       set_throw(
         st,
         h,
-        "lastIndex",
+        nk.last_index,
         mk_number(JInt(next_char_boundary(s, this_index))),
       )
     }
@@ -1343,7 +1339,7 @@ fn regexp_symbol_search(
 ) -> #(JsVal, Agent) {
   let h = require_object(st, this, "[Symbol.search]")
   let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
-  let #(previous, st) = get_named(st, this, "lastIndex")
+  let #(previous, st) = get_named(st, this, nk.last_index)
   let st = set_unless_same_value(st, h, previous, mk_number(JInt(0)))
   let #(fast, st) = pristine_exec(st, h)
   case fast {
@@ -1360,14 +1356,14 @@ fn regexp_symbol_search(
       let st = restore_last_index(st, h, previous)
       case classify(result) {
         KNull -> #(mk_number(JInt(-1)), st)
-        _ -> get_named(st, result, "index")
+        _ -> get_named(st, result, nk.index)
       }
     }
   }
 }
 
 fn restore_last_index(st: Agent, h: Handle, previous: JsVal) -> Agent {
-  let #(current, st) = get_named(st, mk_object(h), "lastIndex")
+  let #(current, st) = get_named(st, mk_object(h), nk.last_index)
   set_unless_same_value(st, h, current, previous)
 }
 
@@ -1379,7 +1375,7 @@ fn set_unless_same_value(
 ) -> Agent {
   case rt_val.same_value(current, target) {
     True -> st
-    False -> set_throw(st, h, "lastIndex", target)
+    False -> set_throw(st, h, nk.last_index, target)
   }
 }
 
@@ -1417,7 +1413,7 @@ fn regexp_symbol_replace(
   let #(flags, st) = read_flags(st, this)
   let global = has_flag(flags, "g")
   let st = case global {
-    True -> set_throw(st, h, "lastIndex", mk_number(JInt(0)))
+    True -> set_throw(st, h, nk.last_index, mk_number(JInt(0)))
     False -> st
   }
   let #(fast, st) = pristine_exec(st, h)
@@ -1528,7 +1524,7 @@ fn collect_replace_results(
   case classify(result) {
     KNull -> #(list.reverse(acc), st)
     _ -> {
-      let #(m_v, st) = try_get(st, result, StringKey(Index(0)))
+      let #(m_v, st) = try_get(st, result, StringKey(key.index(0)))
       let #(match_str, st) = rt_val.t_to_string(st, m_v)
       let st = advance_if_empty(st, h, s, match_str)
       collect_replace_results(st, rx, h, s, [result, ..acc])
@@ -1548,17 +1544,17 @@ fn process_replace_results(
   case results {
     [] -> #(mk_string(acc <> byte_drop_start(s, next_pos)), st)
     [result, ..rest] -> {
-      let #(len_v, st) = get_named(st, result, "length")
+      let #(len_v, st) = get_named(st, result, nk.length)
       let #(result_length, st) = rt_val.t_to_length(st, len_v)
       let n_captures = int.max(result_length - 1, 0)
-      let #(m_v, st) = try_get(st, result, StringKey(Index(0)))
+      let #(m_v, st) = try_get(st, result, StringKey(key.index(0)))
       let #(matched, st) = rt_val.t_to_string(st, m_v)
-      let #(pos_v, st) = get_named(st, result, "index")
+      let #(pos_v, st) = get_named(st, result, nk.index)
       let #(pos_raw, st) = rt_val.t_to_integer_or_infinity(st, pos_v)
       let position = int.clamp(pos_raw, 0, length_s)
       let #(captures, st) =
         collect_coerced_captures(st, result, 1, n_captures, [])
-      let #(named_captures, st) = get_named(st, result, "groups")
+      let #(named_captures, st) = get_named(st, result, nk.groups)
       let #(replacement, st) =
         compute_replacement(
           st,
@@ -1587,7 +1583,7 @@ fn collect_coerced_captures(
   case n > n_captures {
     True -> #(list.reverse(acc), st)
     False -> {
-      let #(cap, st) = try_get(st, result, StringKey(Index(n)))
+      let #(cap, st) = try_get(st, result, StringKey(key.index(n)))
       case classify(cap) {
         KUndef ->
           collect_coerced_captures(st, result, n + 1, n_captures, [
@@ -1670,7 +1666,8 @@ fn resolve_segments(
         substitution.Text(text) ->
           resolve_segments(st, rest, ctx, nc, [text, ..acc])
         substitution.NamedRef(name) -> {
-          let #(cap, st) = get_named(st, nc, name)
+          let #(k, st) = rt_store.t_key(st, name)
+          let #(cap, st) = get_named(st, nc, k)
           case classify(cap) {
             KUndef -> resolve_segments(st, rest, ctx, nc, ["", ..acc])
             _ -> {
@@ -1792,11 +1789,11 @@ fn canonical_flags(flags: String) -> String {
 
 fn intrinsic_getter(
   st: Agent,
-  props: dict.Dict(PropertyKey, rt_types.Property),
+  props: dict.Dict(Key, rt_types.Property),
   name: String,
   expected: RegExpNative,
 ) -> Bool {
-  case dict.get(props, Named(name)) {
+  case dict.get(props, common.name_key(name)) {
     Ok(rt_types.AccessorProperty(get: Some(g), ..)) ->
       case classify(g) {
         KHandle(gh) ->
@@ -1819,7 +1816,7 @@ fn read_flags(st: Agent, rx: JsVal) -> #(String, Agent) {
   case fast {
     Some(flags) -> #(flags, st)
     None -> {
-      let #(flags_v, st) = get_named(st, rx, "flags")
+      let #(flags_v, st) = get_named(st, rx, nk.flags)
       rt_val.t_to_string(st, flags_v)
     }
   }
@@ -1830,7 +1827,7 @@ fn pristine_exec(st: Agent, h: Handle) -> #(Bool, Agent) {
   let proto = st.realm.regexp.prototype
   case rt_store.t_cell_get(st, h) {
     SObject(kind: RegExpObj(..), proto: Some(p), props:, ..) if p == proto ->
-      case dict.has_key(props, Named("exec")) {
+      case dict.has_key(props, nk.exec) {
         True -> #(False, st)
         False -> proto_pristine(st)
       }
@@ -1930,7 +1927,7 @@ fn split_loop(
     True ->
       ok_array(st, list.reverse([mk_string(byte_drop_start(s, p)), ..acc]))
     False -> {
-      let st = set_throw(st, sp_h, "lastIndex", mk_number(JInt(q)))
+      let st = set_throw(st, sp_h, nk.last_index, mk_number(JInt(q)))
       let #(z, st) = regexp_exec_abstract(st, splitter, s)
       case classify(z) {
         KNull ->
@@ -1947,7 +1944,7 @@ fn split_loop(
             count,
           )
         _ -> {
-          let #(li_v, st) = get_named(st, splitter, "lastIndex")
+          let #(li_v, st) = get_named(st, splitter, nk.last_index)
           let #(e0, st) = rt_val.t_to_length(st, li_v)
           let e = int.min(e0, size)
           case e == p {
@@ -1970,7 +1967,7 @@ fn split_loop(
               case count == lim {
                 True -> ok_array(st, list.reverse(acc))
                 False -> {
-                  let #(len_v, st) = get_named(st, z, "length")
+                  let #(len_v, st) = get_named(st, z, nk.length)
                   let #(z_len, st) = rt_val.t_to_length(st, len_v)
                   let n_caps = int.max(z_len - 1, 0)
                   let #(acc, count, hit, st) =
@@ -2013,7 +2010,7 @@ fn split_captures(
   case i > n_caps {
     True -> #(acc, count, False, st)
     False -> {
-      let #(cap, st) = try_get(st, z, StringKey(Index(i)))
+      let #(cap, st) = try_get(st, z, StringKey(key.index(i)))
       let acc = [cap, ..acc]
       let count = count + 1
       case count == lim {
@@ -2035,9 +2032,9 @@ fn regexp_symbol_match_all(
   let #(c, st) = species_constructor(st, mk_object(h), realm.regexp.constructor)
   let #(flags, st) = read_flags(st, this)
   let #(m_h, st) = rt_call.t_construct(st, c, [this, mk_string(flags)], c)
-  let #(li_v, st) = get_named(st, this, "lastIndex")
+  let #(li_v, st) = get_named(st, this, nk.last_index)
   let #(last_index, st) = rt_val.t_to_length(st, li_v)
-  let st = set_throw(st, m_h, "lastIndex", mk_number(JInt(last_index)))
+  let st = set_throw(st, m_h, nk.last_index, mk_number(JInt(last_index)))
   let global = has_flag(flags, "g")
   create_regexp_string_iterator(st, m_h, s, global)
 }
@@ -2070,12 +2067,12 @@ fn create_regexp_string_iterator(
       SObject(
         kind: Ordinary,
         proto: Some(realm.iterator_proto),
-        props: common.named_props([
-          #("next", next_prop),
-          #(rsi_matcher, matcher_prop),
-          #(rsi_string, string_prop),
-          #(rsi_global, global_prop),
-          #(rsi_done, done_prop),
+        props: dict.from_list([
+          #(nk.next, next_prop),
+          #(rsi_matcher(), matcher_prop),
+          #(rsi_string(), string_prop),
+          #(rsi_global(), global_prop),
+          #(rsi_done(), done_prop),
         ]),
         symbol_props: [],
         elements: NoElements,
@@ -2085,13 +2082,21 @@ fn create_regexp_string_iterator(
   #(mk_object(iter_h), st)
 }
 
-const rsi_matcher = "[[IteratingRegExp]]"
+fn rsi_matcher() -> Key {
+  rt_store.reserved_private_key("[[IteratingRegExp]]")
+}
 
-const rsi_string = "[[IteratedString]]"
+fn rsi_string() -> Key {
+  rt_store.reserved_private_key("[[IteratedString]]")
+}
 
-const rsi_global = "[[Global]]"
+fn rsi_global() -> Key {
+  rt_store.reserved_private_key("[[Global]]")
+}
 
-const rsi_done = "[[Done]]"
+fn rsi_done() -> Key {
+  rt_store.reserved_private_key("[[Done]]")
+}
 
 fn regexp_string_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let h = case classify(this) {
@@ -2126,7 +2131,7 @@ fn regexp_string_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
               iter_result(st, match, False)
             }
             True -> {
-              let #(m_v, st) = try_get(st, match, StringKey(Index(0)))
+              let #(m_v, st) = try_get(st, match, StringKey(key.index(0)))
               let #(match_str, st) = rt_val.t_to_string(st, m_v)
               let st = advance_if_empty(st, matcher, s, match_str)
               iter_result(st, match, False)
@@ -2143,7 +2148,7 @@ fn read_rsi_state(
 ) -> Option(#(Handle, String, Bool, Bool)) {
   case rt_store.t_cell_get(st, h) {
     SObject(props:, ..) -> {
-      use m <- option.then(case dict.get(props, Named(rsi_matcher)) {
+      use m <- option.then(case dict.get(props, rsi_matcher()) {
         Ok(rt_types.DataProperty(value:, ..)) ->
           case classify(value) {
             KHandle(mh) -> Some(mh)
@@ -2151,7 +2156,7 @@ fn read_rsi_state(
           }
         _ -> None
       })
-      use s <- option.then(case dict.get(props, Named(rsi_string)) {
+      use s <- option.then(case dict.get(props, rsi_string()) {
         Ok(rt_types.DataProperty(value:, ..)) ->
           case classify(value) {
             rt_types.KStr(s) -> Some(s)
@@ -2159,11 +2164,11 @@ fn read_rsi_state(
           }
         _ -> None
       })
-      use g <- option.then(case dict.get(props, Named(rsi_global)) {
+      use g <- option.then(case dict.get(props, rsi_global()) {
         Ok(rt_types.DataProperty(value:, ..)) -> Some(rt_val.to_boolean(value))
         _ -> None
       })
-      use d <- option.map(case dict.get(props, Named(rsi_done)) {
+      use d <- option.map(case dict.get(props, rsi_done()) {
         Ok(rt_types.DataProperty(value:, ..)) -> Some(rt_val.to_boolean(value))
         _ -> None
       })
@@ -2177,13 +2182,13 @@ fn mark_iter_done(st: Agent, h: Handle) -> Agent {
   rt_store.t_cell_update(st, h, fn(slot) {
     case slot {
       SObject(props:, ..) ->
-        case dict.get(props, Named(rsi_done)) {
+        case dict.get(props, rsi_done()) {
           Ok(rt_types.DataProperty(seq:, ..)) ->
             SObject(
               ..slot,
               props: dict.insert(
                 props,
-                Named(rsi_done),
+                rsi_done(),
                 rt_types.DataProperty(
                   value: mk_bool(True),
                   writable: True,
@@ -2215,7 +2220,7 @@ fn species_constructor(
   o: JsVal,
   default_ctor: Handle,
 ) -> #(JsVal, Agent) {
-  let #(c, st) = get_named(st, o, "constructor")
+  let #(c, st) = get_named(st, o, nk.constructor)
   case classify(c) {
     KUndef -> #(mk_object(default_ctor), st)
     KHandle(_) -> {

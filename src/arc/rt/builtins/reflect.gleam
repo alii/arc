@@ -1,8 +1,8 @@
-import arc/bytecode/key.{Named, index_key}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type ReflectNative, KHandle, KNull,
@@ -158,8 +158,10 @@ fn reflect_get(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
     [k] -> #(k, mk_object(h))
     [] -> #(mk_undefined(), mk_object(h))
   }
-  let #(pk, st) = rt_val.t_to_property_key(st, key_val)
-  rt_obj.t_get_prop_with_receiver(st, h, pk, receiver)
+  case rt_obj.t_read_key(st, mk_object(h), key_val) {
+    #(Ok(pk), st) -> rt_obj.t_get_prop_with_receiver(st, h, pk, receiver)
+    #(Error(_unseen), st) -> #(mk_undefined(), st)
+  }
 }
 
 fn reflect_get_own_property_descriptor(
@@ -192,9 +194,13 @@ fn reflect_get_prototype_of(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
 fn reflect_has(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use h, rest, st <- require_object_target(args, st, "has")
   let key_val = helpers.first_arg_or_undefined(rest)
-  let #(pk, st) = rt_val.t_to_property_key(st, key_val)
-  let #(found, st) = rt_obj.t_has_prop(st, mk_object(h), pk)
-  #(mk_bool(found), st)
+  case rt_obj.t_read_key(st, mk_object(h), key_val) {
+    #(Ok(pk), st) -> {
+      let #(found, st) = rt_obj.t_has_prop(st, mk_object(h), pk)
+      #(mk_bool(found), st)
+    }
+    #(Error(_unseen), st) -> #(mk_bool(False), st)
+  }
 }
 
 fn reflect_is_extensible(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
@@ -207,7 +213,7 @@ fn reflect_own_keys(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use h, _rest, st <- require_object_target(args, st, "ownKeys")
   let #(keys, st) = rt_obj.t_own_keys(st, h)
   let #(arr, st) =
-    realm_ops.alloc_array(st, list.map(keys, rt_obj.object_key_value))
+    realm_ops.alloc_array(st, list.map(keys, rt_obj.t_object_key_value(st, _)))
   #(mk_object(arr), st)
 }
 
@@ -255,7 +261,7 @@ fn reflect_set_prototype_of(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
 fn create_list_from_array_like(st: Agent, obj: JsVal) -> #(List(JsVal), Agent) {
   case classify(obj) {
     KHandle(_) -> {
-      let #(len_v, st) = rt_obj.t_get_prop(st, obj, StringKey(Named("length")))
+      let #(len_v, st) = rt_obj.t_get_prop(st, obj, StringKey(nk.length))
       let #(len, st) = rt_val.t_to_length(st, len_v)
       collect_indexed(st, obj, 0, len, [])
     }
@@ -277,7 +283,7 @@ fn collect_indexed(
   case i >= len {
     True -> #(list.reverse(acc), st)
     False -> {
-      let #(v, st) = rt_obj.t_get_prop(st, obj, StringKey(index_key(i)))
+      let #(v, st) = rt_obj.t_get_index(st, obj, i)
       collect_indexed(st, obj, i + 1, len, [v, ..acc])
     }
   }

@@ -1,15 +1,16 @@
-import arc/bytecode/key.{Named}
 import arc/engine.{Finite, JsNumber, JsString, ModuleReturned, Returned}
 import arc/host.{type State, State}
 import arc/module/load_error
 import arc/rt/obj as rt_obj
+import arc/rt/store as rt_store
 import arc/rt/types.{
   type JsVal, JInt, StringKey, mk_number, mk_object, mk_string, mk_undefined,
 }
 import gleam/option.{Some}
 
 fn get(s: State(host), recv: JsVal, name: String) -> #(JsVal, State(host)) {
-  let #(v, agent) = rt_obj.t_get_prop(s.agent, recv, StringKey(Named(name)))
+  let #(k, agent) = rt_store.t_key(s.agent, name)
+  let #(v, agent) = rt_obj.t_get_prop(agent, recv, StringKey(k))
   #(v, State(..s, agent:))
 }
 

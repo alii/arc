@@ -1,4 +1,4 @@
-import arc/bytecode/key.{type PropertyKey}
+import arc/bytecode/key.{type Key}
 import arc/host_hooks.{type ConsoleLevel, type HostHooks}
 import arc/internal/ordered_entries.{type OrderedEntries}
 import arc/internal/temporal_calendar.{type Calendar}
@@ -94,7 +94,7 @@ pub type IterHint {
 }
 
 pub type ObjectKey {
-  StringKey(PropertyKey)
+  StringKey(Key)
   SymbolKey(SymbolId)
 }
 
@@ -906,7 +906,7 @@ pub type RegExpNative {
   // RegExp.prototype props seen pristine and compiled patterns
   RegExpConstructor(
     legacy: LegacyStatics,
-    proto_props: Option(Dict(PropertyKey, Property)),
+    proto_props: Option(Dict(Key, Property)),
     compiled: Dict(String, CompiledRegExp),
   )
   RegExpLegacyGetter(ctor: Handle, slot: LegacySlot)
@@ -2175,7 +2175,7 @@ pub type ObjKind {
     birth: FnBirth,
   )
   KBytecode(
-    template: FuncTemplate,
+    template: FuncTemplate(Key),
     env: EnvTuple,
     home_object: Option(Handle),
     flags: FnFlags,
@@ -2236,7 +2236,7 @@ pub type JsSlot {
   SObject(
     kind: ObjKind,
     proto: Option(Handle),
-    props: Dict(PropertyKey, Property),
+    props: Dict(Key, Property),
     symbol_props: List(#(SymbolId, Property)),
     elements: JsElements,
     extensible: Bool,
@@ -2256,7 +2256,7 @@ pub type JsSlot {
     shape_id: Int,
     proto: Option(Handle),
     slots: ShapeSlots,
-    offsets: Dict(BitArray, Int),
+    offsets: Dict(Key, Int),
   )
 }
 
@@ -2282,18 +2282,14 @@ pub fn shape_slots_fold(
 ) -> a
 
 pub type ShapeDesc {
-  ShapeDesc(
-    arity: Int,
-    offsets: Dict(BitArray, Int),
-    transitions: Dict(BitArray, Int),
-  )
+  ShapeDesc(arity: Int, offsets: Dict(Key, Int), transitions: Dict(Key, Int))
 }
 
 // droppable cache, not a gc root; see arc_rt_call_fast_ffi
 pub type IcEntry {
-  IcRead(key: BitArray, offsets: Dict(Int, Int))
+  IcRead(key: Key, offsets: Dict(Int, Int))
   IcCall(
-    key: BitArray,
+    key: Key,
     ways: Dict(IcCallMatch, IcCallWay),
     shaped: Dict(Int, Dict(Int, IcCallWay)),
   )
@@ -2494,7 +2490,7 @@ pub type Realm {
     // fields above are abi (arc_rt_layout.hrl), append only
     shared_array_buffer: BuiltinPair,
     id: Int,
-    lexical_globals: Dict(String, LexicalGlobal),
+    lexical_globals: Dict(Key, LexicalGlobal),
     suppressed_error: BuiltinPair,
   )
 }
@@ -2612,7 +2608,8 @@ pub type JsStore(st) {
     // bumped on any write to a global object cell, for global read caches
     global_epoch: Int,
     names: Dict(String, Int),
-    name_texts: Dict(Int, String),
+    // text of dynamic name keys and private keys
+    key_texts: Dict(Key, String),
     next_name: Int,
   )
 }

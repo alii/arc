@@ -1,6 +1,7 @@
-import arc/bytecode/key.{type PropertyKey, Named}
+import arc/bytecode/key.{type Key}
 import arc/internal/tree_array
 import arc/rt/call as rt_call
+import arc/rt/names
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -128,17 +129,34 @@ pub fn fn_prototype_property(st: Agent, proto: Handle) -> #(Property, Agent) {
   )
 }
 
-pub fn named_props(
-  props: List(#(String, Property)),
-) -> Dict(PropertyKey, Property) {
+// builtin property names must be listed in names.gleam
+pub fn name_key(text: String) -> Key {
+  case names.fixed_number(text) {
+    Some(n) -> key.name(n)
+    None -> panic as { "builtin name missing from names.gleam: " <> text }
+  }
+}
+
+pub fn named_props(props: List(#(String, Property))) -> Dict(Key, Property) {
   use acc, #(k, v) <- list.fold(props, dict.new())
-  dict.insert(acc, Named(k), v)
+  dict.insert(acc, name_key(k), v)
+}
+
+// like named_props but allocates names the embedder chose
+pub fn keyed_props(
+  st: Agent,
+  props: List(#(String, Property)),
+) -> #(Dict(Key, Property), Agent) {
+  use acc, #(k, v) <- list.fold(props, #(dict.new(), st))
+  let #(props, st) = acc
+  let #(k, st) = rt_store.t_key(st, k)
+  #(dict.insert(props, k, v), st)
 }
 
 pub fn alloc_proto(
   st: Agent,
   proto: Option(Handle),
-  props: Dict(PropertyKey, Property),
+  props: Dict(Key, Property),
 ) -> #(Handle, Agent) {
   let #(h, st) =
     rt_store.t_cell_new(
@@ -160,10 +178,16 @@ pub fn alloc_pojo(
   object_proto: Handle,
   props: List(#(String, JsVal)),
 ) -> #(Handle, Agent) {
-  use seq <- rt_store.t_cell_new_with(st, list.length(props))
+  let #(keyed, st) =
+    list.fold(props, #([], st), fn(acc, kv) {
+      let #(done, st) = acc
+      let #(k, st) = rt_store.t_key(st, kv.0)
+      #([#(k, kv.1), ..done], st)
+    })
+  use seq <- rt_store.t_cell_new_with(st, list.length(keyed))
   let entries =
-    list.index_map(props, fn(kv, i) {
-      #(Named(kv.0), DataProperty(kv.1, True, True, True, seq + i))
+    list.index_map(list.reverse(keyed), fn(kv, i) {
+      #(kv.0, DataProperty(kv.1, True, True, True, seq + i))
     })
   SObject(
     kind: Ordinary,
@@ -304,6 +328,7 @@ pub fn init_type(
   let #(proto_h, st) = alloc_proto(st, Some(parent_proto), dict.new())
   let #(ctor_all_props, st) =
     ctor_properties(st, proto_h, name, arity, ctor_props)
+  let #(ctor_all_props, st) = keyed_props(st, ctor_all_props)
   let #(ctor_h, st) =
     rt_store.t_cell_new(
       st,
@@ -315,7 +340,7 @@ pub fn init_type(
           constructible: True,
         ),
         proto: Some(ctor_parent),
-        props: named_props(ctor_all_props),
+        props: ctor_all_props,
         symbol_props: [],
         elements: NoElements,
         extensible: True,
@@ -323,10 +348,11 @@ pub fn init_type(
     )
   let st = rt_store.t_pin_root(st, ctor_h)
   let #(all_proto_props, st) = proto_properties(st, ctor_h, proto_props)
+  let #(all_proto_props, st) = keyed_props(st, all_proto_props)
   let st =
     rt_store.t_cell_update(st, proto_h, fn(slot) {
       let assert SObject(..) = slot
-      SObject(..slot, props: named_props(all_proto_props))
+      SObject(..slot, props: all_proto_props)
     })
   #(BuiltinPair(prototype: proto_h, constructor: ctor_h), st)
 }
@@ -368,13 +394,14 @@ pub fn init_namespace(
   props: List(#(String, Property)),
 ) -> #(Handle, Agent) {
   let #(tag_pair, st) = to_string_tag(st, tag)
+  let #(props, st) = keyed_props(st, props)
   let #(h, st) =
     rt_store.t_cell_new(
       st,
       SObject(
         kind: Ordinary,
         proto: Some(object_proto),
-        props: named_props(props),
+        props:,
         symbol_props: [tag_pair],
         elements: NoElements,
         extensible: True,
@@ -396,6 +423,7 @@ pub fn init_type_on(
 ) -> #(BuiltinPair, Agent) {
   let #(ctor_all_props, st) =
     ctor_properties(st, proto_h, name, arity, ctor_props)
+  let #(ctor_all_props, st) = keyed_props(st, ctor_all_props)
   let #(ctor_h, st) =
     rt_store.t_cell_new(
       st,
@@ -407,7 +435,7 @@ pub fn init_type_on(
           constructible:,
         ),
         proto: Some(ctor_parent),
-        props: named_props(ctor_all_props),
+        props: ctor_all_props,
         symbol_props: [],
         elements: NoElements,
         extensible: True,
@@ -415,15 +443,11 @@ pub fn init_type_on(
     )
   let st = rt_store.t_pin_root(st, ctor_h)
   let #(all_proto_props, st) = proto_properties(st, ctor_h, proto_props)
+  let #(all_proto_props, st) = keyed_props(st, all_proto_props)
   let st =
     rt_store.t_cell_update(st, proto_h, fn(slot) {
       let assert SObject(props: existing, ..) = slot
-      let merged =
-        list.fold(all_proto_props, existing, fn(acc, kv) {
-          let #(k, v) = kv
-          dict.insert(acc, Named(k), v)
-        })
-      SObject(..slot, props: merged)
+      SObject(..slot, props: dict.merge(existing, all_proto_props))
     })
   #(BuiltinPair(prototype: proto_h, constructor: ctor_h), st)
 }
@@ -434,9 +458,10 @@ pub fn add_named_property(
   name: String,
   prop: Property,
 ) -> Agent {
+  let #(k, st) = rt_store.t_key(st, name)
   rt_store.t_cell_update(st, h, fn(slot) {
     let assert SObject(props:, ..) = slot
-    SObject(..slot, props: dict.insert(props, Named(name), prop))
+    SObject(..slot, props: dict.insert(props, k, prop))
   })
 }
 
@@ -491,7 +516,7 @@ pub fn species_intact(st: Agent, pair: BuiltinPair) -> Bool {
     rt_obj.t_ordinary_own_property(
       st,
       prototype,
-      rt_types.StringKey(Named("constructor")),
+      rt_types.StringKey(name_key("constructor")),
     ),
     rt_obj.t_ordinary_own_property(
       st,

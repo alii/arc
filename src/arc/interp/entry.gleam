@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{type Key, type SourceKey}
 import arc/bytecode/lexical
 import arc/bytecode/opcode.{
   AsyncYieldStarNext, CatchOnly, Finally, IterCloseGuard, Pc, YieldStar,
@@ -8,6 +8,7 @@ import arc/interp/call
 import arc/interp/eval
 import arc/interp/ffi
 import arc/interp/interpreter.{Completed, Suspended}
+import arc/interp/load
 import arc/interp/park
 import arc/interp/state.{type State, type VmError, State, SuspensionLeak}
 import arc/rt/async as rt_async
@@ -19,6 +20,7 @@ import arc/rt/bytecode.{
 import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/lang as rt_lang
 import arc/rt/limits
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
@@ -132,7 +134,10 @@ fn to_completion(res: Result(JsVal, JsVal)) -> Completion {
   }
 }
 
-fn top_level_locals(template: FuncTemplate, this: JsVal) -> TupleArray(JsVal) {
+fn top_level_locals(
+  template: FuncTemplate(Key),
+  this: JsVal,
+) -> TupleArray(JsVal) {
   let locals = tuple_array.repeat(mk_undefined(), template.local_count)
   case lexical.lexical_slot(template.lexical, lexical.RefThis) {
     Some(idx) -> tuple_array.set_unchecked(idx, this, locals)
@@ -140,7 +145,9 @@ fn top_level_locals(template: FuncTemplate, this: JsVal) -> TupleArray(JsVal) {
   }
 }
 
-pub fn script_state(agent: Agent, template: FuncTemplate) -> State {
+// loads the compiled template into the agent's heap
+pub fn script_state(agent: Agent, template: FuncTemplate(SourceKey)) -> State {
+  let #(template, agent) = load.template(agent, template)
   let this = mk_object(agent.realm.global_object)
   let #(unit, agent) = rt_store.t_next_unit_uid(agent)
   State(
@@ -164,7 +171,7 @@ pub fn script_state(agent: Agent, template: FuncTemplate) -> State {
 
 pub fn run_script(
   agent: Agent,
-  template: FuncTemplate,
+  template: FuncTemplate(SourceKey),
 ) -> #(Completion, Agent) {
   let #(res, agent) = run(script_state(agent, template))
   #(to_completion(res), agent)
@@ -262,7 +269,7 @@ fn depth_exceeded(st: Agent) -> #(Result(JsVal, JsVal), Agent) {
 fn run_call(
   st: Agent,
   fn_h: Handle,
-  template: FuncTemplate,
+  template: FuncTemplate(Key),
   env: bytecode.EnvTuple,
   home_object: Option(Handle),
   flags: types.FnFlags,
@@ -629,11 +636,11 @@ fn site_record(site: DelegateSite) -> IteratorRecord {
 fn delegate_method(
   s: State,
   site: DelegateSite,
-  name: String,
+  name: Key,
 ) -> Result(#(Option(JsVal), State), state.StepExit) {
   let iterator = site_record(site).iterator
   use #(method, s) <- result.map(ffi.guarded(
-    ffi.guard3(rt_obj.t_get_prop, s.agent, iterator, StringKey(Named(name))),
+    ffi.guard3(rt_obj.t_get_prop, s.agent, iterator, StringKey(name)),
     s,
   ))
   case classify(method) {
@@ -698,7 +705,7 @@ fn forward_throw(
   site: DelegateSite,
   thrown: JsVal,
 ) -> #(Step, Agent) {
-  use #(method, s) <- or_delegate_exit(delegate_method(s, site, "throw"))
+  use #(method, s) <- or_delegate_exit(delegate_method(s, site, nk.throw))
   case method, site {
     Some(method), SyncSite(rest:, ..) -> {
       use #(res, s) <- or_delegate_exit(call_delegate(s, site, method, thrown))
@@ -738,7 +745,7 @@ fn forward_return(
   site: DelegateSite,
   value: JsVal,
 ) -> #(Step, Agent) {
-  use #(method, s) <- or_delegate_exit(delegate_method(s, site, "return"))
+  use #(method, s) <- or_delegate_exit(delegate_method(s, site, nk.return))
   case method, site {
     None, SyncSite(..) -> step_of(return_into(s, value))
     None, AsyncSite(..) -> await_at(s, value, ParkedReturnValue)

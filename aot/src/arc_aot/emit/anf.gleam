@@ -682,14 +682,18 @@ pub fn guarded_unary_numeric(v: ir.Value) -> Build(ir.Value) {
 pub fn object_key_lit(pk: ast.PropertyKey) -> Build(ir.Value) {
   let inner = case pk {
     ast.KeyIdentifier(name:, ..) -> wire_named(name)
-    ast.KeyString(value: s, ..) -> wire_prop_key(key.canonical_key(s))
+    ast.KeyString(value: s, ..) -> wire_prop_key(key.source_key(s))
     ast.KeyNumber(value: ast.FiniteNumber(f), ..) ->
       case key.array_index_of_float(f) {
         Some(i) -> wire_index(i)
         None -> wire_named(val.js_format_float(f))
       }
     ast.KeyNumber(value: ast.InfiniteNumber, ..) -> wire_named("Infinity")
-    ast.KeyBigInt(value: n, ..) -> wire_prop_key(key.index_key(n))
+    ast.KeyBigInt(value: n, ..) ->
+      case key.is_array_index(n) {
+        True -> wire_index(n)
+        False -> wire_named(int.to_string(n))
+      }
     ast.KeyPrivate(name:, ..) ->
       ir.TermOp(ir.MakeTuple, [
         ir.ConstAtom("private"),
@@ -702,15 +706,10 @@ pub fn object_key_lit(pk: ast.PropertyKey) -> Build(ir.Value) {
   make_tuple([ir.ConstAtom("string_key"), iv])
 }
 
-fn wire_prop_key(k: key.PropertyKey) -> ir.Expr {
+fn wire_prop_key(k: key.SourceKey) -> ir.Expr {
   case k {
-    key.Index(n) -> wire_index(n)
-    key.Named(s) -> wire_named(s)
-    key.Private(text) ->
-      ir.TermOp(ir.MakeTuple, [
-        ir.ConstAtom("private"),
-        ir.ConstBinary(bit_array.from_string(text)),
-      ])
+    key.SourceIndex(n) -> wire_index(n)
+    key.SourceName(s) -> wire_named(s)
   }
 }
 

@@ -1,11 +1,10 @@
-import arc/bytecode/key.{
-  type PropertyKey, Index, Named, Private, canonical_key, index_key, key_to_text,
-}
+import arc/bytecode/key.{type Key}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/limits
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
@@ -110,8 +109,8 @@ fn internalize_json_property(
   name: String,
   node: Option(ParseRecord),
 ) -> #(JsVal, Agent) {
-  let #(val, st) =
-    rt_obj.t_get_prop(st, mk_object(holder), StringKey(canonical_key(name)))
+  let #(key, st) = rt_store.t_key(st, name)
+  let #(val, st) = rt_obj.t_get_prop(st, mk_object(holder), StringKey(key))
   let node = fresh_record(node, val)
   let st = case classify(val) {
     KHandle(h) ->
@@ -122,7 +121,7 @@ fn internalize_json_property(
         }
         False -> {
           let #(keys, st) = enumerable_string_keys(st, h)
-          let keys = list.map(keys, key_to_text)
+          let keys = list.map(keys, rt_store.t_key_text(st, _))
           internalize_keys(st, ctx, h, keys, record_members(node))
         }
       }
@@ -204,7 +203,8 @@ fn replace_or_delete(
   name: String,
   new_element: JsVal,
 ) -> Agent {
-  let key = StringKey(canonical_key(name))
+  let #(key, st) = rt_store.t_key(st, name)
+  let key = StringKey(key)
   case classify(new_element) {
     KUndef -> {
       let #(_, st) = rt_obj.t_delete_prop(st, h, key)
@@ -231,7 +231,25 @@ fn replace_or_delete(
 }
 
 fn alloc_holder(st: Agent, val: JsVal) -> #(Handle, Agent) {
-  common.alloc_pojo(st, st.realm.object.prototype, [#("", val)])
+  let #(k, st) = rt_store.t_key(st, "")
+  let #(h, st) = rt_obj.t_new_object(st, Some(st.realm.object.prototype))
+  let #(_, st) =
+    rt_obj.t_define_own_data(st, h, StringKey(k), val, True, True, True)
+  #(h, st)
+}
+
+fn key_list(
+  st: Agent,
+  names: List(String),
+  acc: List(Key),
+) -> #(List(Key), Agent) {
+  case names {
+    [] -> #(list.reverse(acc), st)
+    [name, ..rest] -> {
+      let #(k, st) = rt_store.t_key(st, name)
+      key_list(st, rest, [k, ..acc])
+    }
+  }
 }
 
 fn alloc_context(st: Agent, source: Option(BitArray)) -> #(Handle, Agent) {
@@ -407,21 +425,27 @@ fn materialize_plain(st: Agent, val: JsonValue) -> #(JsVal, Agent) {
     JsonObject(entries) -> {
       let #(entries, st) = materialize_plain_entries(st, entries, [])
       let object_proto = st.realm.object.prototype
-      let #(h, st) = {
-        use seq <- rt_store.t_cell_new_with(st, list.length(entries))
-        let props = case ffi_plain_props(entries, seq) {
-          Some(#(props, _seq)) -> props
-          None -> plain_props(entries, dict.new(), seq)
-        }
-        SObject(
-          kind: Ordinary,
-          proto: Some(object_proto),
-          props:,
-          symbol_props: [],
-          elements: rt_types.NoElements,
-          extensible: True,
+      let #(props, st) = case
+        ffi_plain_props(st.store, entries, st.store.prop_seq)
+      {
+        Some(#(props, prop_seq, store)) -> #(
+          props,
+          rt_types.Agent(..st, store: rt_types.JsStore(..store, prop_seq:)),
         )
+        None -> plain_props(st, entries, dict.new())
       }
+      let #(h, st) =
+        rt_store.t_cell_new(
+          st,
+          SObject(
+            kind: Ordinary,
+            proto: Some(object_proto),
+            props:,
+            symbol_props: [],
+            elements: rt_types.NoElements,
+            extensible: True,
+          ),
+        )
       #(mk_object(h), st)
     }
   }
@@ -457,19 +481,20 @@ fn materialize_plain_entries(
 
 @external(erlang, "arc_rt_json_ffi", "plain_props")
 fn ffi_plain_props(
+  store: rt_types.JsStore(Agent),
   entries: List(#(String, JsVal)),
   seq: Int,
-) -> Option(#(dict.Dict(PropertyKey, rt_types.Property), Int))
+) -> Option(#(dict.Dict(Key, rt_types.Property), Int, rt_types.JsStore(Agent)))
 
 fn plain_props(
+  st: Agent,
   entries: List(#(String, JsVal)),
-  acc: dict.Dict(PropertyKey, rt_types.Property),
-  seq: Int,
-) -> dict.Dict(PropertyKey, rt_types.Property) {
+  acc: dict.Dict(Key, rt_types.Property),
+) -> #(dict.Dict(Key, rt_types.Property), Agent) {
   case entries {
-    [] -> acc
+    [] -> #(acc, st)
     [#(name, value), ..rest] -> {
-      let key = canonical_key(name)
+      let #(key, st) = rt_store.t_key(st, name)
       case dict.get(acc, key) {
         Ok(first) -> {
           let prop =
@@ -480,11 +505,12 @@ fn plain_props(
               True,
               rt_types.prop_seq(first),
             )
-          plain_props(rest, dict.insert(acc, key, prop), seq)
+          plain_props(st, rest, dict.insert(acc, key, prop))
         }
         Error(Nil) -> {
+          let #(seq, st) = rt_store.t_next_prop_seq(st)
           let prop = rt_types.DataProperty(value, True, True, True, seq)
-          plain_props(rest, dict.insert(acc, key, prop), seq + 1)
+          plain_props(st, rest, dict.insert(acc, key, prop))
         }
       }
     }
@@ -523,12 +549,12 @@ fn materialize_object_entries(
 fn props_from_entries(
   st: Agent,
   entries: List(#(String, ParseRecord)),
-  acc: dict.Dict(PropertyKey, rt_types.Property),
-) -> #(dict.Dict(PropertyKey, rt_types.Property), Agent) {
+  acc: dict.Dict(Key, rt_types.Property),
+) -> #(dict.Dict(Key, rt_types.Property), Agent) {
   case entries {
     [] -> #(acc, st)
     [#(name, record), ..rest] -> {
-      let key = canonical_key(name)
+      let #(key, st) = rt_store.t_key(st, name)
       let value = record_value(record)
       case dict.get(acc, key) {
         Ok(first) -> {
@@ -572,7 +598,7 @@ fn json_raw_json(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
           SObject(
             kind: RawJsonObj(raw: json_str),
             proto: None,
-            props: dict.from_list([#(Named("rawJSON"), prop)]),
+            props: dict.from_list([#(nk.raw_json, prop)]),
             symbol_props: [],
             elements: rt_types.NoElements,
             extensible: False,
@@ -665,7 +691,8 @@ fn json_stringify(
   let #(gap, st) = compute_gap(st, space)
   let #(wrapper, st) = alloc_holder(st, val)
   let ctx = StringifyCtx(replacer:, gap:, caller:)
-  case serialize_property(st, ctx, [], "", Named(""), wrapper) {
+  let #(root_key, st) = rt_store.t_key(st, "")
+  case serialize_property(st, ctx, [], "", root_key, wrapper) {
     #(Some(tree), st) ->
       case string_tree.byte_size(tree) > limits.max_string_bytes {
         True -> rt_val.t_throw_range_error(st, "Invalid string length")
@@ -706,8 +733,7 @@ fn collect_property_list(
   case k >= len {
     True -> #(list.reverse(acc), st)
     False -> {
-      let #(v, st) =
-        rt_obj.t_get_prop(st, mk_object(h), StringKey(index_key(k)))
+      let #(v, st) = helpers.get_index(st, mk_object(h), k)
       let #(item, st) = replacer_item(st, v)
       case item {
         Some(s) ->
@@ -784,22 +810,20 @@ fn serialize_property(
   ctx: StringifyCtx,
   stack: List(Int),
   indent: String,
-  key: PropertyKey,
+  k: Key,
   holder: Handle,
 ) -> #(Option(StringTree), Agent) {
-  // canonical keys, so a named key never spells an index
-  let #(val, st) = case key {
-    Named(name) -> helpers.get_named(st, mk_object(holder), name)
-    Index(i) -> helpers.get_index(st, mk_object(holder), i)
-    Private(_) -> #(mk_undefined(), st)
+  let #(val, st) = case k < 0 {
+    True -> helpers.get_index(st, mk_object(holder), key.index_of(k))
+    False -> helpers.get_named(st, mk_object(holder), k)
   }
   let #(val, st) = case classify(val) {
     KHandle(_) | KBig(_) -> {
-      let #(to_json, st) = helpers.get_named(st, val, "toJSON")
+      let #(to_json, st) = helpers.get_named(st, val, nk.to_json)
       case rt_call.is_callable(st, to_json) {
         True ->
           call_in_caller_realm(st, ctx.caller, to_json, val, [
-            mk_string(key_to_text(key)),
+            rt_store.t_key_value(st, k),
           ])
         False -> #(val, st)
       }
@@ -809,7 +833,7 @@ fn serialize_property(
   let #(val, st) = case ctx.replacer {
     ReplacerFn(rf) ->
       call_in_caller_realm(st, ctx.caller, rf, mk_object(holder), [
-        mk_string(key_to_text(key)),
+        rt_store.t_key_value(st, k),
         val,
       ])
     NoReplacer | PropertyList(_) -> #(val, st)
@@ -892,7 +916,7 @@ fn serialize_object(
       let stack = [h.id, ..stack]
       let step_indent = indent <> ctx.gap
       let #(keys, st) = case ctx.replacer {
-        PropertyList(names) -> #(list.map(names, canonical_key), st)
+        PropertyList(names) -> key_list(st, names, [])
         NoReplacer | ReplacerFn(_) -> enumerable_string_keys(st, h)
       }
       let #(partial, st) =
@@ -908,7 +932,7 @@ fn serialize_members(
   stack: List(Int),
   step_indent: String,
   h: Handle,
-  keys: List(PropertyKey),
+  keys: List(Key),
   acc: List(StringTree),
 ) -> #(List(StringTree), Agent) {
   case keys {
@@ -922,7 +946,7 @@ fn serialize_members(
             _ -> ": "
           }
           let member =
-            quote_tree(key_to_text(k))
+            quote_tree(rt_store.t_key_text(st, k))
             |> string_tree.append(sep)
             |> string_tree.append_tree(tree)
           serialize_members(st, ctx, stack, step_indent, h, rest, [
@@ -969,8 +993,8 @@ fn serialize_elements(
   case i >= len {
     True -> #(acc, st)
     False -> {
-      let #(str_p, st) =
-        serialize_property(st, ctx, stack, step_indent, index_key(i), h)
+      let #(k, st) = rt_store.t_key_of_int(st, i)
+      let #(str_p, st) = serialize_property(st, ctx, stack, step_indent, k, h)
       let item =
         option.lazy_unwrap(str_p, fn() { string_tree.from_string("null") })
       serialize_elements(st, ctx, stack, step_indent, h, i + 1, len, [
@@ -1033,12 +1057,11 @@ fn is_array_handle(st: Agent, h: Handle) -> Bool {
 }
 
 fn length_of_array_like(st: Agent, h: Handle) -> #(Int, Agent) {
-  let #(len_v, st) =
-    rt_obj.t_get_prop(st, mk_object(h), StringKey(Named("length")))
+  let #(len_v, st) = rt_obj.t_get_prop(st, mk_object(h), StringKey(nk.length))
   rt_val.t_to_length(st, len_v)
 }
 
-fn enumerable_string_keys(st: Agent, h: Handle) -> #(List(PropertyKey), Agent) {
+fn enumerable_string_keys(st: Agent, h: Handle) -> #(List(Key), Agent) {
   case rt_store.t_cell_get(st, h) {
     // shaped slots are all plain enumerable data
     SShapedObject(..) -> {
@@ -1056,7 +1079,7 @@ fn enumerable_string_keys(st: Agent, h: Handle) -> #(List(PropertyKey), Agent) {
   }
 }
 
-fn string_key(key: rt_types.ObjectKey) -> Result(PropertyKey, Nil) {
+fn string_key(key: rt_types.ObjectKey) -> Result(Key, Nil) {
   case key {
     StringKey(pk) -> Ok(pk)
     rt_types.SymbolKey(_) -> Error(Nil)
@@ -1064,6 +1087,4 @@ fn string_key(key: rt_types.ObjectKey) -> Result(PropertyKey, Nil) {
 }
 
 @external(erlang, "arc_rt_json_ffi", "plain_keys")
-fn plain_enumerable_keys(
-  props: dict.Dict(PropertyKey, rt_types.Property),
-) -> List(PropertyKey)
+fn plain_enumerable_keys(props: dict.Dict(Key, rt_types.Property)) -> List(Key)

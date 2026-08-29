@@ -1,9 +1,10 @@
-import arc/bytecode/key.{type PropertyKey, Named, canonical_key}
+import arc/bytecode/key.{type Key}
 import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as b_object
 import arc/rt/builtins/regexp as b_regexp
 import arc/rt/call.{t_call_checked}
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -31,9 +32,6 @@ fn protected_step(
   body: fn(Agent) -> #(#(Bool, JsVal), Agent),
 ) -> #(StepOutcome, Agent)
 
-@external(erlang, "arc_rt_store_ffi", "as_object_key")
-fn as_object_key(key: k) -> ObjectKey
-
 pub fn t_new_error(st: Agent, message: String) -> #(JsVal, Agent) {
   st.store.ops.new_error(st, TypeErr, message)
 }
@@ -44,20 +42,20 @@ pub type IterHint {
   Async
 }
 
-const k_iterator = StringKey(Named("iterator"))
+const k_iterator = StringKey(nk.iterator)
 
-const k_next = StringKey(Named("next"))
+const k_next = StringKey(nk.next)
 
-const k_done = StringKey(Named("done"))
+const k_done = StringKey(nk.done)
 
 fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
   let js = st.store
   let seq = js.prop_seq
   let props =
     dict.from_list([
-      #(Named("iterator"), DataProperty(rec.iterator, True, True, True, seq)),
-      #(Named("next"), DataProperty(rec.next_method, True, True, True, seq + 1)),
-      #(Named("done"), DataProperty(mk_bool(False), True, True, True, seq + 2)),
+      #(nk.iterator, DataProperty(rec.iterator, True, True, True, seq)),
+      #(nk.next, DataProperty(rec.next_method, True, True, True, seq + 1)),
+      #(nk.done, DataProperty(mk_bool(False), True, True, True, seq + 2)),
     ])
   let st = Agent(..st, store: JsStore(..js, prop_seq: seq + 3))
   let #(h, st) =
@@ -83,10 +81,7 @@ pub fn record_parts(st: Agent, rec: JsVal) -> Option(IteratorRecord) {
   record_props(st, rec) |> option.then(parts_of)
 }
 
-fn record_props(
-  st: Agent,
-  rec: JsVal,
-) -> Option(Dict(PropertyKey, types.Property)) {
+fn record_props(st: Agent, rec: JsVal) -> Option(Dict(Key, types.Property)) {
   case classify(rec) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
@@ -97,10 +92,8 @@ fn record_props(
   }
 }
 
-fn parts_of(
-  props: Dict(PropertyKey, types.Property),
-) -> Option(IteratorRecord) {
-  case dict.get(props, Named("iterator")), dict.get(props, Named("next")) {
+fn parts_of(props: Dict(Key, types.Property)) -> Option(IteratorRecord) {
+  case dict.get(props, nk.iterator), dict.get(props, nk.next) {
     Ok(DataProperty(value: iterator, ..)),
       Ok(DataProperty(value: next_method, ..))
     -> Some(IteratorRecord(iterator:, next_method:))
@@ -129,7 +122,7 @@ fn read_record(st: Agent, rec: JsVal) -> #(Bool, IteratorRecord, Agent) {
 fn record_fields(st: Agent, rec: JsVal) -> Option(#(Bool, IteratorRecord)) {
   case record_props(st, rec) {
     Some(props) ->
-      case dict.get(props, Named("done")), parts_of(props) {
+      case dict.get(props, nk.done), parts_of(props) {
         Ok(DataProperty(value: done, ..)), Some(record) ->
           Some(#(rt_val.to_boolean(done), record))
         _, _ -> None
@@ -225,7 +218,7 @@ fn protocol_step(
     case done {
       True -> #(#(True, mk_undefined()), st)
       False -> {
-        let #(v, st) = rt_obj.t_get_prop(st, result, StringKey(Named("value")))
+        let #(v, st) = rt_obj.t_get_prop(st, result, StringKey(nk.value))
         #(#(False, v), st)
       }
     }
@@ -299,11 +292,25 @@ pub fn t_copy_data_props(
 pub fn t_object_rest(
   st: Agent,
   source: JsVal,
-  excluded: List(k),
+  excluded: List(ObjectKey),
 ) -> #(JsVal, Agent) {
   let #(h, st) = rt_obj.t_new_object(st, Some(st.realm.object.prototype))
-  let excluded = list.map(excluded, as_object_key)
   #(mk_object(h), copy_data_properties(st, h, source, excluded))
+}
+
+// aot passes wire keys
+pub fn t_object_rest_any(
+  st: Agent,
+  source: JsVal,
+  excluded: List(k),
+) -> #(JsVal, Agent) {
+  let #(excluded, st) =
+    list.fold(excluded, #([], st), fn(acc, k) {
+      let #(done, st) = acc
+      let #(k, st) = rt_obj.as_object_key(st, k)
+      #([k, ..done], st)
+    })
+  t_object_rest(st, source, excluded)
 }
 
 fn copy_data_properties(
@@ -363,7 +370,7 @@ pub fn t_get_template_object(
         rt_obj.t_define_own_data(
           st,
           tpl_h,
-          StringKey(Named("raw")),
+          StringKey(nk.raw),
           raw_v,
           False,
           False,
@@ -383,9 +390,6 @@ pub fn t_get_template_object(
 
 // §13.5.1.2 step 5 sloppy delete on the global
 pub fn t_global_delete(st: Agent, name: String) -> #(Bool, Agent) {
-  rt_obj.t_delete_prop(
-    st,
-    st.realm.global_object,
-    StringKey(canonical_key(name)),
-  )
+  let #(k, st) = rt_store.t_key(st, name)
+  rt_obj.t_delete_prop(st, st.realm.global_object, StringKey(k))
 }

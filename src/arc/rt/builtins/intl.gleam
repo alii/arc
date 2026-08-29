@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Index, Named}
+import arc/bytecode/key
 import arc/internal/gregorian.{days_from_civil}
 import arc/internal/int_math.{floor_div}
 import arc/internal/temporal_calendar as tcal
@@ -66,6 +66,7 @@ import arc/rt/intl_data.{
   TzdStripIfInteger, UnitList, UnitLong, UnitNarrow, UnitShort, UsageSearch,
   UsageSort, WLong, WNarrow, WNumeric, WShort, WTwoDigit,
 }
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -808,7 +809,7 @@ fn strict_options(st: Agent, v: JsVal) -> #(Option(Handle), Agent) {
 fn opt_get(st: Agent, opts: Option(Handle), name: String) -> #(JsVal, Agent) {
   case opts {
     None -> #(mk_undefined(), st)
-    Some(h) -> rt_obj.t_get_prop(st, mk_object(h), StringKey(Named(name)))
+    Some(h) -> rt_obj.t_get_text(st, mk_object(h), name)
   }
 }
 
@@ -971,7 +972,7 @@ fn canonical_tag_or_throw(st: Agent, s: String) -> #(String, Agent) {
 
 fn locale_list_from_object(st: Agent, h: Handle) -> #(List(String), Agent) {
   let o = mk_object(h)
-  let #(len_v, st) = rt_obj.t_get_prop(st, o, StringKey(Named("length")))
+  let #(len_v, st) = rt_obj.t_get_prop(st, o, StringKey(nk.length))
   let #(len_n, st) = rt_val.t_to_number(st, len_v)
   let len = rt_val.jsnum_to_length(len_n)
   locale_list_loop(st, o, 0, len, [])
@@ -987,7 +988,7 @@ fn locale_list_loop(
   case k >= len {
     True -> #(list.reverse(seen), st)
     False -> {
-      let key = StringKey(Index(k))
+      let key = StringKey(key.index(k))
       let #(has, st) = rt_obj.t_has_prop(st, o, key)
       case has {
         False -> locale_list_loop(st, o, k + 1, len, seen)
@@ -5090,7 +5091,7 @@ fn string_list_from_iterable(
       use Nil <- helpers.guard(rt_val.is_object(iter), fn() {
         rt_val.t_throw_type_error(st, "iterator result is not an object")
       })
-      let #(next_fn, st) = rt_obj.t_get_prop(st, iter, StringKey(Named("next")))
+      let #(next_fn, st) = rt_obj.t_get_prop(st, iter, StringKey(nk.next))
       iterate_strings(st, iter, next_fn, [])
     }
   }
@@ -5106,11 +5107,11 @@ fn iterate_strings(
   use Nil <- helpers.guard(rt_val.is_object(step), fn() {
     rt_val.t_throw_type_error(st, "iterator result is not an object")
   })
-  let #(done, st) = rt_obj.t_get_prop(st, step, StringKey(Named("done")))
+  let #(done, st) = rt_obj.t_get_prop(st, step, StringKey(nk.done))
   case rt_val.to_boolean(done) {
     True -> #(list.reverse(acc), st)
     False -> {
-      let #(v, st) = rt_obj.t_get_prop(st, step, StringKey(Named("value")))
+      let #(v, st) = rt_obj.t_get_prop(st, step, StringKey(nk.value))
       case classify(v) {
         KStr(s) -> iterate_strings(st, iter, next_fn, [s, ..acc])
         _ ->
@@ -5257,8 +5258,7 @@ fn to_duration_record(
         list.fold(duration_units, #(zero_duration, st, False), fn(acc, unit) {
           let #(fields, st, any) = acc
           let name = duration_unit_js_name(unit)
-          let #(v, st) =
-            rt_obj.t_get_prop(st, duration_v, StringKey(Named(name)))
+          let #(v, st) = rt_obj.t_get_text(st, duration_v, name)
           case classify(v) {
             KUndef -> #(fields, st, any)
             _ -> {

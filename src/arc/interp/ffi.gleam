@@ -1,6 +1,6 @@
 // kernels may return atom `miss`, test is_miss before use
 
-import arc/bytecode/key.{type PropertyKey}
+import arc/bytecode/key.{type Key}
 import arc/bytecode/lexical.{type LexicalSlots}
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/state.{type State, type StepExit}
@@ -249,24 +249,24 @@ pub fn type_of_in(store: JsStore(Agent), v: JsVal) -> String
 pub fn box_get(agent: Agent, slot: JsVal) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "get_field")
-pub fn get_field(agent: Agent, obj: JsVal, key: PropertyKey) -> JsVal
+pub fn get_field(agent: Agent, obj: JsVal, key: Key) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "own_data")
-pub fn own_data(props: Dict(PropertyKey, Property), key: PropertyKey) -> JsVal
+pub fn own_data(props: Dict(Key, Property), key: Key) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "get_global")
 pub fn get_global(
   agent: Agent,
-  lex: Dict(String, LexicalGlobal),
-  name: String,
+  lex: Dict(Key, LexicalGlobal),
+  name: Key,
 ) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "put_global")
 pub fn put_global(
   store: JsStore(Agent),
-  lex: Dict(String, LexicalGlobal),
+  lex: Dict(Key, LexicalGlobal),
   global: Handle,
-  name: String,
+  name: Key,
   v: JsVal,
   strict: Bool,
 ) -> JsStore(Agent)
@@ -281,7 +281,7 @@ pub fn get_elem2(store: JsStore(Agent), obj: JsVal, key: JsVal) -> JsVal
 pub fn put_field(
   store: JsStore(Agent),
   obj: JsVal,
-  key: PropertyKey,
+  key: Key,
   v: JsVal,
   create: Bool,
 ) -> JsStore(Agent)
@@ -290,7 +290,7 @@ pub fn put_field(
 pub fn new_object(
   store: JsStore(Agent),
   proto: Handle,
-  keys: TupleArray(PropertyKey),
+  keys: TupleArray(Key),
   slots: List(Int),
   count: Int,
   stack: List(JsVal),
@@ -303,7 +303,7 @@ pub fn new_receiver(agent: Agent, proto: JsVal) -> #(JsVal, Agent)
 pub fn define_field(
   store: JsStore(Agent),
   obj: JsVal,
-  key: PropertyKey,
+  key: Key,
   v: JsVal,
 ) -> JsStore(Agent)
 

@@ -1,7 +1,7 @@
-import arc/bytecode/key.{Named}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -77,7 +77,7 @@ pub fn install_262(st: Agent, realm: Realm) -> #(Handle, Agent) {
     rt_obj.t_define_own_data(
       st,
       realm.global_object,
-      StringKey(Named("$262")),
+      StringKey(nk.x24262),
       mk_object(h),
       True,
       True,
@@ -131,7 +131,8 @@ fn create_realm_262(
 }
 
 fn own_data(st: Agent, h: Handle, name: String) -> Option(JsVal) {
-  case rt_obj.t_ordinary_own_property(st, h, StringKey(Named(name))) {
+  use k <- option.then(rt_store.t_find_key(st, name))
+  case rt_obj.t_ordinary_own_property(st, h, StringKey(k)) {
     Some(DataProperty(value:, ..)) -> Some(value)
     _ -> None
   }

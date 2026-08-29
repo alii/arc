@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named}
+import arc/bytecode/key.{type SourceKey}
 import arc/compiler
 import arc/engine.{
   type JsValueKind, Finite, Infinity, JsBool, JsNull, JsNumber, JsObject,
@@ -16,6 +16,7 @@ import arc/rt/bytecode.{type FuncTemplate}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
+import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type JsVal, JInt, PromiseFulfilled, PromisePending,
   PromiseRejected, StringKey, mk_number, mk_object, mk_undefined,
@@ -54,7 +55,7 @@ fn render(st: Agent, val: JsValueKind) -> String {
 
 fn run_template(
   st: Agent,
-  template: FuncTemplate,
+  template: FuncTemplate(SourceKey),
 ) -> #(Result(JsValueKind, JsValueKind), Agent) {
   let #(completion, st) = entry.run_script(st, template)
   let st = safepoint.end_turn(st, [completion_value(completion)])
@@ -7188,8 +7189,8 @@ pub fn module_repl_harness_globals_test() -> Nil {
   let assert #(Ok(_), st) = run_template(st, harness_template)
 
   let global_object = mk_object(st.realm.global_object)
-  let assert #(True, st) =
-    rt_obj.t_has_prop(st, global_object, StringKey(Named("greetFromHarness")))
+  let #(k, st) = rt_store.t_key(st, "greetFromHarness")
+  let assert #(True, st) = rt_obj.t_has_prop(st, global_object, StringKey(k))
 
   let module_source = "greetFromHarness()"
   let specifier = "<test-module>"

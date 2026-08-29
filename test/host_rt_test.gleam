@@ -1,4 +1,3 @@
-import arc/bytecode/key.{Named}
 import arc/host.{State}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
@@ -369,11 +368,12 @@ pub fn with_state_runs_body_and_drains_test() {
       let #(s2, setter) =
         host.function(State(..s, agent: st), "set", 1, fn(args, _, s) {
           let st = s.agent
+          let #(k, st) = rt_store.t_key(st, "v")
           let #(_, st) =
             rt_obj.t_set_prop(
               st,
               global(st, "shared").0,
-              StringKey(Named("v")),
+              StringKey(k),
               host.first_arg(args),
             )
           #(State(..s, agent: st), Ok(mk_undefined()))

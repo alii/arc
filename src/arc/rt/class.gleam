@@ -1,16 +1,14 @@
-import arc/bytecode/key.{
-  type PropertyKey, Named, Private, key_display_string, private_display_name,
-  private_key_text,
-}
+import arc/bytecode/key.{type Key}
 import arc/rt/call as rt_call
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type FnFlags, type Handle, type JsOps, type JsVal,
   type MethodInstallKind, type ObjectKey, type Property, AccessorProperty,
-  DataProperty, KBytecode, KCompiled, KHandle, KNull, KStr, KTdz, MIGetter,
-  MIMethod, MISetter, MIStatic, MIStaticGetter, MIStaticSetter, SObject,
-  StringKey, SymbolKey, classify, mk_object, mk_string, mk_undefined,
+  DataProperty, KBytecode, KCompiled, KHandle, KNull, KTdz, MIGetter, MIMethod,
+  MISetter, MIStatic, MIStaticGetter, MIStaticSetter, SObject, StringKey,
+  SymbolKey, classify, mk_object, mk_undefined,
 } as rt_types
 import gleam/dict
 import gleam/option.{type Option, None, Some}
@@ -24,24 +22,22 @@ fn throw_type_error(st: Agent, msg: String) -> a {
   rt_store.t_throw(st, e)
 }
 
-fn priv_key_text(v: JsVal) -> String {
+// a private name value is its key as a js integer
+fn private_key_of(v: JsVal) -> Key {
   case classify(v) {
-    KStr(s) -> s
-    _ -> panic as "rt_class: private-name JsVal is not KStr (M16 invariant)"
+    rt_types.KNum(rt_types.JInt(k)) -> k
+    _ -> panic as "rt_class: private name value is not a key"
   }
 }
 
-fn object_key_display(key: ObjectKey) -> String {
-  case key {
-    StringKey(pk) -> key_display_string(pk)
-    SymbolKey(sym) -> rt_types.symbol_descriptive_string(sym)
-  }
+fn private_display_name(st: Agent, k: Key) -> String {
+  rt_store.t_key_text(st, k)
 }
 
 // §15.7.14 mint a fresh private name
 pub fn t_new_private_name(st: Agent, source: String) -> #(JsVal, Agent) {
-  let #(uid, st) = rt_store.t_next_private_uid(st)
-  #(mk_string(private_key_text(source, uid)), st)
+  let #(k, st) = rt_store.t_new_private_key(st, source)
+  #(rt_types.mk_int(k), st)
 }
 
 // §15.4.4 makemethod, no-op on native/bound
@@ -83,8 +79,7 @@ fn class_heritage(st: Agent, super: JsVal) -> #(Option(Handle), Handle, Agent) {
             "Class extends value is not a constructor or null",
           )
         True -> {
-          let #(pp, st) =
-            rt_obj.t_get_prop(st, super, StringKey(Named("prototype")))
+          let #(pp, st) = rt_obj.t_get_prop(st, super, StringKey(nk.prototype))
           case classify(pp) {
             KHandle(pph) -> #(Some(pph), parent_h, st)
             KNull -> #(None, parent_h, st)
@@ -131,7 +126,7 @@ pub fn t_class_setup(
     rt_obj.t_define_own_data(
       st,
       ctor,
-      StringKey(Named("prototype")),
+      StringKey(nk.prototype),
       mk_object(proto),
       False,
       False,
@@ -141,7 +136,7 @@ pub fn t_class_setup(
     rt_obj.t_define_own_data(
       st,
       proto,
-      StringKey(Named("constructor")),
+      StringKey(nk.constructor),
       mk_object(ctor),
       True,
       False,
@@ -165,7 +160,7 @@ pub fn t_define_method(
         False ->
           throw_type_error(
             st,
-            "Cannot redefine property: " <> object_key_display(key),
+            "Cannot redefine property: " <> rt_obj.key_text(st, key),
           )
         True -> Nil
       }
@@ -178,7 +173,7 @@ pub fn t_define_method(
     MISetter | MIStaticSetter -> "set "
     MIMethod | MIStatic -> ""
   }
-  let st = set_fn_name_if_empty(st, fn_h, prefix, key_fn_name(key))
+  let st = set_fn_name_if_empty(st, fn_h, prefix, key_fn_name(st, key))
   let fn_v = mk_object(fn_h)
   case kind {
     MIMethod | MIStatic -> {
@@ -216,9 +211,9 @@ pub fn t_define_method(
 }
 
 // symbol key names the fn "[description]"
-fn key_fn_name(key: ObjectKey) -> String {
+fn key_fn_name(st: Agent, key: ObjectKey) -> String {
   case key {
-    StringKey(pk) -> key_display_string(pk)
+    StringKey(pk) -> rt_store.t_key_text(st, pk)
     SymbolKey(sym) ->
       case rt_types.symbol_description(sym) {
         Some(d) -> "[" <> d <> "]"
@@ -243,9 +238,9 @@ pub fn t_private_define(
   priv_key: JsVal,
   v: JsVal,
 ) -> Agent {
-  let text = priv_key_text(priv_key)
-  let st = check_private_add(st, obj, text)
-  raw_define_private_data(st, obj, Private(text), v, True)
+  let key = private_key_of(priv_key)
+  let st = check_private_add(st, obj, key)
+  raw_define_private_data(st, obj, key, v, True)
 }
 
 // §7.3.29; home_object already set at class definition
@@ -256,12 +251,11 @@ pub fn t_define_private(
   fn_v: JsVal,
   kind: MethodInstallKind,
 ) -> Agent {
-  let text = priv_key_text(priv_key)
-  let key = Private(text)
+  let key = private_key_of(priv_key)
   case kind {
     // non-writable so private set rejects methods
     MIMethod | MIStatic -> {
-      let st = check_private_add(st, obj, text)
+      let st = check_private_add(st, obj, key)
       raw_define_private_data(st, obj, key, fn_v, False)
     }
     // same accessor half twice is a typeerror
@@ -272,7 +266,7 @@ pub fn t_define_private(
       }
       let existing = rt_obj.t_ordinary_own_property(st, obj, StringKey(key))
       let st = case existing {
-        None -> check_private_add(st, obj, text)
+        None -> check_private_add(st, obj, key)
         Some(AccessorProperty(get:, set:, ..)) ->
           case
             is_getter
@@ -280,27 +274,27 @@ pub fn t_define_private(
             || !is_getter
             && option.is_some(set)
           {
-            True -> throw_private_double_init(st, text, "private accessor ")
+            True -> throw_private_double_init(st, key, "private accessor ")
             False -> st
           }
         Some(DataProperty(..)) ->
-          throw_private_double_init(st, text, "private accessor ")
+          throw_private_double_init(st, key, "private accessor ")
       }
       raw_merge_private_accessor(st, obj, key, existing, fn_v, is_getter)
     }
   }
 }
 
-fn check_private_add(st: Agent, obj: Handle, text: String) -> Agent {
-  case rt_obj.t_ordinary_own_property(st, obj, StringKey(Private(text))) {
-    Some(_) -> throw_private_double_init(st, text, "")
+fn check_private_add(st: Agent, obj: Handle, key: Key) -> Agent {
+  case rt_obj.t_ordinary_own_property(st, obj, StringKey(key)) {
+    Some(_) -> throw_private_double_init(st, key, "")
     None ->
       case rt_obj.t_ordinary_is_extensible(st, obj) {
         False ->
           throw_type_error(
             st,
             "Cannot define private member "
-              <> private_display_name(text)
+              <> private_display_name(st, key)
               <> " on a non-extensible object",
           )
         True -> st
@@ -308,12 +302,12 @@ fn check_private_add(st: Agent, obj: Handle, text: String) -> Agent {
   }
 }
 
-fn throw_private_double_init(st: Agent, text: String, kind: String) -> a {
+fn throw_private_double_init(st: Agent, key: Key, kind: String) -> a {
   throw_type_error(
     st,
     "Cannot initialize "
       <> kind
-      <> private_display_name(text)
+      <> private_display_name(st, key)
       <> " twice on the same object",
   )
 }
@@ -321,7 +315,7 @@ fn throw_private_double_init(st: Agent, text: String, kind: String) -> a {
 fn raw_define_private_data(
   st: Agent,
   obj: Handle,
-  key: PropertyKey,
+  key: Key,
   v: JsVal,
   writable: Bool,
 ) -> Agent {
@@ -349,7 +343,7 @@ fn raw_define_private_data(
 fn raw_merge_private_accessor(
   st: Agent,
   obj: Handle,
-  key: PropertyKey,
+  key: Key,
   existing: Option(Property),
   fn_v: JsVal,
   is_getter: Bool,
@@ -392,28 +386,31 @@ pub fn t_private_get(
   obj: JsVal,
   priv_key: JsVal,
 ) -> #(JsVal, Agent) {
-  let text = priv_key_text(priv_key)
-  let name = private_display_name(text)
+  let key = private_key_of(priv_key)
+  let name = fn() { private_display_name(st, key) }
   case classify(obj) {
     KHandle(h) ->
-      case rt_obj.t_ordinary_own_property(st, h, StringKey(Private(text))) {
+      case rt_obj.t_ordinary_own_property(st, h, StringKey(key)) {
         Some(DataProperty(value:, ..)) -> #(value, st)
         Some(AccessorProperty(get: Some(getter), ..)) ->
           js_ops(st).call(st, getter, obj, [])
         Some(AccessorProperty(get: None, ..)) ->
-          throw_type_error(st, "'" <> name <> "' was defined without a getter")
+          throw_type_error(
+            st,
+            "'" <> name() <> "' was defined without a getter",
+          )
         None ->
           throw_type_error(
             st,
             "Cannot read private member "
-              <> name
+              <> name()
               <> " from an object whose class did not declare it",
           )
       }
     _ ->
       throw_type_error(
         st,
-        "Cannot read private member " <> name <> " on non-object",
+        "Cannot read private member " <> name() <> " on non-object",
       )
   }
 }
@@ -425,9 +422,8 @@ pub fn t_private_set(
   priv_key: JsVal,
   v: JsVal,
 ) -> #(JsVal, Agent) {
-  let text = priv_key_text(priv_key)
-  let name = private_display_name(text)
-  let key = Private(text)
+  let key = private_key_of(priv_key)
+  let name = fn() { private_display_name(st, key) }
   case classify(obj) {
     KHandle(h) ->
       case rt_obj.t_ordinary_own_property(st, h, StringKey(key)) {
@@ -465,46 +461,77 @@ pub fn t_private_set(
           throw_type_error(
             st,
             "Cannot write private member "
-              <> name
+              <> name()
               <> ": it is a method or has no setter",
           )
         None ->
           throw_type_error(
             st,
             "Cannot write private member "
-              <> name
+              <> name()
               <> " to an object whose class did not declare it",
           )
       }
     _ ->
       throw_type_error(
         st,
-        "Cannot write private member " <> name <> " on non-object",
+        "Cannot write private member " <> name() <> " on non-object",
       )
   }
 }
 
 // §13.10.1 #x in obj
 pub fn t_private_in(st: Agent, obj: JsVal, priv_key: JsVal) -> Bool {
-  let text = priv_key_text(priv_key)
+  let key = private_key_of(priv_key)
   case classify(obj) {
     KHandle(h) ->
-      option.is_some(rt_obj.t_ordinary_own_property(
-        st,
-        h,
-        StringKey(Private(text)),
-      ))
+      option.is_some(rt_obj.t_ordinary_own_property(st, h, StringKey(key)))
     _ ->
       throw_type_error(
         st,
         "Cannot use 'in' operator to search for private name "
-          <> private_display_name(text)
+          <> private_display_name(st, key)
           <> " in non-object",
       )
   }
 }
 
 // super.key read on home.[[prototype]] with receiver as this
+// aot passes wire keys
+pub fn t_define_method_any(
+  st: Agent,
+  target: Handle,
+  key: k,
+  fn_h: Handle,
+  kind: MethodInstallKind,
+  enumerable: Bool,
+) -> Agent {
+  let #(key, st) = rt_obj.as_object_key(st, key)
+  t_define_method(st, target, key, fn_h, kind, enumerable)
+}
+
+pub fn t_super_get_any(
+  st: Agent,
+  home: Handle,
+  receiver: JsVal,
+  key: k,
+) -> #(JsVal, Agent) {
+  let #(key, st) = rt_obj.as_object_key(st, key)
+  t_super_get(st, home, receiver, key)
+}
+
+pub fn t_super_set_any(
+  st: Agent,
+  home: Handle,
+  receiver: JsVal,
+  key: k,
+  v: JsVal,
+  strict strict: Bool,
+) -> #(JsVal, Agent) {
+  let #(key, st) = rt_obj.as_object_key(st, key)
+  t_super_set(st, home, receiver, key, v, strict)
+}
+
 pub fn t_super_get(
   st: Agent,
   home: Handle,

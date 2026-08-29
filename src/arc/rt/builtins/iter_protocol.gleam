@@ -1,4 +1,4 @@
-import arc/bytecode/key.{type PropertyKey, Index, Named}
+import arc/bytecode/key.{type Key}
 import arc/internal/ordered_entries
 import arc/internal/tree_array
 import arc/rt/builtins/helpers
@@ -8,6 +8,7 @@ import arc/rt/call.{
 }
 import arc/rt/elements as rt_elements
 import arc/rt/js_string
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -79,7 +80,7 @@ pub fn get_iterator_direct(
 ) -> #(IteratorRecord, Agent) {
   case rt_val.is_object(obj) {
     True -> {
-      let #(next, st) = rt_obj.t_get_prop(st, obj, StringKey(Named("next")))
+      let #(next, st) = rt_obj.t_get_prop(st, obj, StringKey(nk.next))
       #(IteratorRecord(iterator: obj, next_method: next), st)
     }
     False -> throw_type_error(st, non_object_msg)
@@ -135,9 +136,9 @@ pub fn get_iterator_async(st: Agent, obj: JsVal) -> #(IteratorRecord, Agent) {
   }
 }
 
-const k_iterator = StringKey(Named("iterator"))
+const k_iterator = StringKey(nk.iterator)
 
-const k_next = StringKey(Named("next"))
+const k_next = StringKey(nk.next)
 
 // §27.1.6.1, proto must be %AsyncFromSyncIteratorPrototype%
 pub fn create_async_from_sync(
@@ -178,7 +179,7 @@ pub fn create_async_from_sync(
       ),
     )
   let wrapper = mk_object(wrapper_h)
-  let #(next, st) = rt_obj.t_get_prop(st, wrapper, StringKey(Named("next")))
+  let #(next, st) = rt_obj.t_get_prop(st, wrapper, StringKey(nk.next))
   #(IteratorRecord(iterator: wrapper, next_method: next), st)
 }
 
@@ -237,7 +238,7 @@ pub fn iterator_step_result(
   let #(result, st) = t_call_checked(st, rec.next_method, rec.iterator, [])
   case rt_val.is_object(result) {
     True -> {
-      let #(done, st) = rt_obj.t_get_prop(st, result, StringKey(Named("done")))
+      let #(done, st) = rt_obj.t_get_prop(st, result, StringKey(nk.done))
       cont(result, rt_val.to_boolean(done), st)
     }
     False -> throw_type_error(st, "Iterator result is not an object")
@@ -253,7 +254,7 @@ pub fn iterator_step_value(
   case done {
     True -> #(None, st)
     False -> {
-      let #(v, st) = rt_obj.t_get_prop(st, result, StringKey(Named("value")))
+      let #(v, st) = rt_obj.t_get_prop(st, result, StringKey(nk.value))
       #(Some(v), st)
     }
   }
@@ -370,7 +371,7 @@ fn array_values_to_list(
 
 fn walk_elements(
   elements: JsElements,
-  props: Dict(PropertyKey, Property),
+  props: Dict(Key, Property),
   i: Int,
   length: Int,
   acc: List(JsVal),
@@ -378,7 +379,10 @@ fn walk_elements(
   case i < length {
     False -> #(acc, i)
     True ->
-      case dict.has_key(props, Index(i)), rt_elements.get_option(elements, i) {
+      case
+        dict.has_key(props, key.index(i)),
+        rt_elements.get_option(elements, i)
+      {
         False, Some(v) ->
           walk_elements(elements, props, i + 1, length, [v, ..acc])
         _, _ -> #(acc, i)
@@ -604,9 +608,7 @@ pub fn call_return(
   obj: JsVal,
 ) -> #(Result(ReturnCall, JsVal), Agent) {
   let #(get_c, st) =
-    protected(st, fn(st) {
-      rt_obj.t_get_prop(st, obj, StringKey(Named("return")))
-    })
+    protected(st, fn(st) { rt_obj.t_get_prop(st, obj, StringKey(nk.return)) })
   case get_c {
     ThrowCompletion(e) -> #(Error(e), st)
     NormalCompletion(ret_fn) ->
@@ -700,14 +702,14 @@ fn add_entries_loop(
   case done {
     True -> #(target, st)
     False -> {
-      let #(entry, st) = rt_obj.t_get_prop(st, step, StringKey(Named("value")))
+      let #(entry, st) = rt_obj.t_get_prop(st, step, StringKey(nk.value))
       case rt_val.is_object(entry) {
         True -> {
           use k, st <- or_close(st, rec.iterator, fn(st) {
-            rt_obj.t_get_prop(st, entry, StringKey(Index(0)))
+            rt_obj.t_get_prop(st, entry, StringKey(key.index(0)))
           })
           use v, st <- or_close(st, rec.iterator, fn(st) {
-            rt_obj.t_get_prop(st, entry, StringKey(Index(1)))
+            rt_obj.t_get_prop(st, entry, StringKey(key.index(1)))
           })
           use _, st <- or_close(st, rec.iterator, fn(st) {
             #(mk_undefined(), add_entry(st, k, v))
@@ -759,7 +761,7 @@ fn add_values_loop(
   case done {
     True -> #(target, st)
     False -> {
-      let #(v, st) = rt_obj.t_get_prop(st, step, StringKey(Named("value")))
+      let #(v, st) = rt_obj.t_get_prop(st, step, StringKey(nk.value))
       use _add_result, st <- or_close(st, rec.iterator, fn(st) {
         t_call_checked(st, adder, target, [v])
       })
@@ -785,8 +787,8 @@ pub fn iterator_rest(st: Agent, iter: JsVal) -> #(JsVal, Agent) {
 pub fn read_iter_result(st: Agent, res: JsVal) -> #(#(Bool, JsVal), Agent) {
   case rt_val.is_object(res) {
     True -> {
-      let #(done, st) = rt_obj.t_get_prop(st, res, StringKey(Named("done")))
-      let #(val, st) = rt_obj.t_get_prop(st, res, StringKey(Named("value")))
+      let #(done, st) = rt_obj.t_get_prop(st, res, StringKey(nk.done))
+      let #(val, st) = rt_obj.t_get_prop(st, res, StringKey(nk.value))
       #(#(rt_val.to_boolean(done), val), st)
     }
     False -> throw_type_error(st, "Iterator result is not an object")

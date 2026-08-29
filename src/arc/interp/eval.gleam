@@ -1,10 +1,12 @@
 // §19.2.1.1 performeval, direct eval aliases caller box cells
 
+import arc/bytecode/key.{type Key, type SourceKey}
 import arc/bytecode/lexical
 import arc/compiler
 import arc/compiler/compile_task
 import arc/compiler/scope
 import arc/internal/tuple_array.{type TupleArray}
+import arc/interp/load
 import arc/interp/state.{type State, State}
 import arc/parser
 import arc/parser/ast
@@ -35,14 +37,15 @@ type Parse =
 
 type Compile =
   fn(List(ast.StmtWithLine), scope.ScopeBuilder) ->
-    Result(FuncTemplate, compiler.CompileError)
+    Result(FuncTemplate(SourceKey), compiler.CompileError)
 
+// compiles then loads into the agent's heap
 fn compile_source(
   agent: Agent,
   source: String,
   parse: Parse,
   compile: Compile,
-) -> Result(FuncTemplate, #(JsVal, Agent)) {
+) -> Result(#(FuncTemplate(Key), Agent), #(JsVal, Agent)) {
   let compiled =
     compile_task.run(string.byte_size(source), fn() {
       case parse(source) {
@@ -52,12 +55,16 @@ fn compile_source(
           |> result.map_error(compiler.error_message)
       }
     })
-  result.map_error(compiled, fn(msg) {
-    agent.store.ops.new_error(agent, SyntaxErr, msg)
-  })
+  case compiled {
+    Ok(template) -> Ok(load.template(agent, template))
+    Error(msg) -> Error(agent.store.ops.new_error(agent, SyntaxErr, msg))
+  }
 }
 
-fn top_level_locals(template: FuncTemplate, this: JsVal) -> TupleArray(JsVal) {
+fn top_level_locals(
+  template: FuncTemplate(Key),
+  this: JsVal,
+) -> TupleArray(JsVal) {
   let locals = tuple_array.repeat(mk_undefined(), template.local_count)
   case lexical.lexical_slot(template.lexical, lexical.RefThis) {
     Some(idx) -> tuple_array.set_unchecked(idx, this, locals)
@@ -67,7 +74,7 @@ fn top_level_locals(template: FuncTemplate, this: JsVal) -> TupleArray(JsVal) {
 
 fn activation(
   agent: Agent,
-  template: FuncTemplate,
+  template: FuncTemplate(Key),
   locals: TupleArray(JsVal),
   this: JsVal,
   eval_env: Option(Handle),
@@ -94,7 +101,7 @@ fn activation(
 
 fn run_global_code(
   agent: Agent,
-  template: FuncTemplate,
+  template: FuncTemplate(Key),
   run: Run,
 ) -> #(Result(JsVal, JsVal), Agent) {
   let global = mk_object(agent.realm.global_object)
@@ -144,7 +151,7 @@ pub fn eval_hook(
     ScriptEval -> compiler.compile
   }
   let outcome = {
-    use template <- result.try(compile_source(
+    use #(template, agent) <- result.try(compile_source(
       agent,
       source,
       parser.parse_script,
@@ -215,13 +222,13 @@ pub fn direct_eval(
       )
     KStr(source), None -> {
       let outcome = {
-        use template <- result.try(compile_source(
+        use #(template, agent) <- result.try(compile_source(
           caller.agent,
           source,
           parser.parse_script,
           compiler.compile_eval,
         ))
-        let global = mk_object(caller.agent.realm.global_object)
+        let global = mk_object(agent.realm.global_object)
         let make = fn(agent) {
           activation(
             agent,
@@ -231,7 +238,7 @@ pub fn direct_eval(
             None,
           )
         }
-        let #(res, agent) = run_bracketed(caller.agent, make, run)
+        let #(res, agent) = run_bracketed(agent, make, run)
         Ok(#(res, agent))
       }
       adopt(caller, outcome, caller.eval_env)
@@ -267,7 +274,7 @@ fn run_direct_eval(
       private_names:,
     )
   let outcome = {
-    use template <- result.try(
+    use #(template, agent) <- result.try(
       compile_source(
         caller.agent,
         source,
@@ -289,10 +296,10 @@ fn run_direct_eval(
       list.append(box_refs, list.repeat(mk_undefined(), padding))
       |> tuple_array.from_list
     let #(eval_env, agent) = case func.is_strict, var_env, caller.eval_env {
-      True, _, _ | _, GlobalVarEnv, _ -> #(None, caller.agent)
-      False, FrameVarEnv, Some(h) -> #(Some(h), caller.agent)
+      True, _, _ | _, GlobalVarEnv, _ -> #(None, agent)
+      False, FrameVarEnv, Some(h) -> #(Some(h), agent)
       False, FrameVarEnv, None -> {
-        let #(h, agent) = rt_env.t_new_eval_env(caller.agent)
+        let #(h, agent) = rt_env.t_new_eval_env(agent)
         #(Some(h), agent)
       }
     }

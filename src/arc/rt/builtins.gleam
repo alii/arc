@@ -1,4 +1,3 @@
-import arc/bytecode/key.{Named}
 import arc/host_hooks.{type HostHooks}
 import arc/rt/async as rt_async
 import arc/rt/builtins/array as b_array
@@ -39,6 +38,7 @@ import arc/rt/builtins/typed_array as b_typed_array
 import arc/rt/builtins/weak as b_weak
 import arc/rt/builtins/weak_ref as b_weak_ref
 import arc/rt/call as rt_call
+import arc/rt/name_keys as nk
 import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
@@ -696,8 +696,7 @@ fn own_data_prototype(
   case as_handle(ctor) {
     None -> #(None, st)
     Some(h) -> {
-      let #(prop, st) =
-        rt_obj.t_own_property(st, h, StringKey(Named("prototype")))
+      let #(prop, st) = rt_obj.t_own_property(st, h, StringKey(nk.prototype))
       case prop {
         Some(DataProperty(value:, ..)) -> #(as_handle(value), st)
         _ -> #(None, st)

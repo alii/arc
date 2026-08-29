@@ -7,6 +7,7 @@
          t_new_simple/3, t_bind_compiled/4]).
 
 -include("arc_rt_layout.hrl").
+-include("arc_rt_names.hrl").
 
 %% deltablue proto chains reach 3 hops
 -define(MONO_PROTO_MAX, 4).
@@ -87,17 +88,23 @@ home(?NONE) -> undefined.
 -define(IC_CALL, ic_call).
 -define(IC_CALL_WAYS, 16).
 
-t_call_method_ic(St, Recv, KeyBin, Args, Site, RSite) ->
-    ic(St, Recv, KeyBin, Site, RSite, Args, undefined, undefined, undefined).
+%% keys arrive as name text from aot, see arc_rt_obj_ffi:wire_key
+t_call_method_ic(St0, Recv, W, Args, Site, RSite) ->
+    {K, St} = arc_rt_obj_ffi:wire_key(St0, W),
+    ic(St, Recv, K, Site, RSite, Args, undefined, undefined, undefined).
 
-t_call_method_ic0(St, Recv, KeyBin, Site, RSite) ->
-    ic(St, Recv, KeyBin, Site, RSite, 0, undefined, undefined, undefined).
-t_call_method_ic1(St, Recv, KeyBin, Site, RSite, A) ->
-    ic(St, Recv, KeyBin, Site, RSite, 1, A, undefined, undefined).
-t_call_method_ic2(St, Recv, KeyBin, Site, RSite, A, B) ->
-    ic(St, Recv, KeyBin, Site, RSite, 2, A, B, undefined).
-t_call_method_ic3(St, Recv, KeyBin, Site, RSite, A, B, C) ->
-    ic(St, Recv, KeyBin, Site, RSite, 3, A, B, C).
+t_call_method_ic0(St0, Recv, W, Site, RSite) ->
+    {K, St} = arc_rt_obj_ffi:wire_key(St0, W),
+    ic(St, Recv, K, Site, RSite, 0, undefined, undefined, undefined).
+t_call_method_ic1(St0, Recv, W, Site, RSite, A) ->
+    {K, St} = arc_rt_obj_ffi:wire_key(St0, W),
+    ic(St, Recv, K, Site, RSite, 1, A, undefined, undefined).
+t_call_method_ic2(St0, Recv, W, Site, RSite, A, B) ->
+    {K, St} = arc_rt_obj_ffi:wire_key(St0, W),
+    ic(St, Recv, K, Site, RSite, 2, A, B, undefined).
+t_call_method_ic3(St0, Recv, W, Site, RSite, A, B, C) ->
+    {K, St} = arc_rt_obj_ffi:wire_key(St0, W),
+    ic(St, Recv, K, Site, RSite, 3, A, B, C).
 
 ic(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Site, RSite, N, A, B, C) ->
     Store = element(?AGENT_STORE, St),
@@ -157,7 +164,7 @@ ic(St, Recv, KeyBin, Site, RSite, N, A, B, C) ->
         W -> prim(St, Recv, W, KeyBin, Site, RSite, N, A, B, C)
     end.
 
-prim_wrapper(Recv, KeyBin) when is_binary(Recv), KeyBin =/= <<"length">> ->
+prim_wrapper(Recv, KeyBin) when is_binary(Recv), KeyBin =/= ?K_length ->
     ?REALM_STRING;
 prim_wrapper(Recv, _) when is_number(Recv) -> ?REALM_NUMBER;
 prim_wrapper(_, _) -> none.
@@ -245,7 +252,7 @@ ic_probe(Data, RId, RSlot, KeyBin, Ways) when element(1, RSlot) =:= ?SOBJECT_TAG
                 {?SOME, {?HANDLE_TAG, PId}} = Proto ->
                     case Ways of
                         #{{ic_plain, PId} := {Chain, Fn, Kind}} ->
-                            Own = is_map_key({?KEY_NAMED, KeyBin},
+                            Own = is_map_key(KeyBin,
                                              element(?SOBJECT_PROPS, RSlot))
                                 orelse not arc_rt_obj_ffi:named_plain(
                                              element(?SOBJECT_KIND, RSlot),
@@ -274,7 +281,8 @@ ic_chain_ok(Data, {?SOME, {?HANDLE_TAG, PId}}, [{PId, PSlot} | Rest]) ->
 ic_chain_ok(_, _, _) -> false.
 
 %% st unchanged on miss; emitter guards V =:= miss, not is_atom
-t_call_method_mono(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Args) ->
+t_call_method_mono(St0, Recv = {?HANDLE_TAG, RId}, W, Args) ->
+    {KeyBin, St} = arc_rt_obj_ffi:wire_key(St0, W),
     Data = element(?STORE_DATA, element(?AGENT_STORE, St)),
     mono(St, Recv, arc_rt_arena_ffi:get(RId, Data), KeyBin, Args, none);
 t_call_method_mono(St, _, _, _) -> {miss, St}.
@@ -401,10 +409,10 @@ ways_put(KeyBin, Ways, Shaped, Match, Way) ->
 %% an own accessor shadows proto, so miss rather than absent
 mono_own_value(Slot, KeyBin) ->
     case element(?SOBJECT_PROPS, Slot) of
-        #{{?KEY_NAMED, KeyBin} := Prop}
+        #{KeyBin := Prop}
           when element(1, Prop) =:= ?DATAPROP_TAG ->
             element(?DATAPROP_VALUE, Prop);
-        #{{?KEY_NAMED, KeyBin} := _} -> miss;
+        #{KeyBin := _} -> miss;
         _ -> absent
     end.
 
@@ -463,7 +471,7 @@ t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
                        element(?FNFLAGS_IS_GEN, Flags) =:= false,
                        element(?FNFLAGS_IS_ASYNC, Flags) =:= false ->
                     case element(?SOBJECT_PROPS, Slot) of
-                        #{{?KEY_NAMED, <<"prototype">>} := Prop}
+                        #{?K_prototype := Prop}
                           when element(1, Prop) =:= ?DATAPROP_TAG ->
                             case element(?DATAPROP_VALUE, Prop) of
                                 Proto = {?HANDLE_TAG, _} ->

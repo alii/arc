@@ -2,41 +2,90 @@ import gleam/bit_array
 import gleam/float
 import gleam/int
 import gleam/option.{type Option, None, Some}
-import gleam/string
 
 // §6.1.7 max array index is 2^32 - 2
 pub const max_array_index = 4_294_967_294
 
 pub const max_array_length = 4_294_967_295
 
-pub type PropertyKey {
-  Index(n: Int)
-  Named(name: String)
-  Private(text: String)
+// what the compiler writes into a template key slot
+pub type SourceKey {
+  SourceIndex(n: Int)
+  SourceName(name: String)
 }
 
-// §7.1.21 canonical numeric index string plus range check
-pub fn canonical_key(s: String) -> PropertyKey {
-  // digit guard: int.parse raises and catches on non-numeric keys
+// runtime key: index i is -(i+1), else name number * 4 + kind
+pub type Key =
+  Int
+
+pub const kind_name = 0
+
+pub const kind_symbol = 1
+
+pub const kind_private = 2
+
+pub fn index(i: Int) -> Key {
+  -i - 1
+}
+
+pub fn is_index(k: Key) -> Bool {
+  k < 0
+}
+
+pub fn index_of(k: Key) -> Int {
+  -k - 1
+}
+
+pub fn name(number: Int) -> Key {
+  int.bitwise_shift_left(number, 2)
+}
+
+pub fn name_number(k: Key) -> Int {
+  int.bitwise_shift_right(k, 2)
+}
+
+pub fn kind(k: Key) -> Int {
+  int.bitwise_and(k, 3)
+}
+
+pub fn is_name(k: Key) -> Bool {
+  k >= 0 && int.bitwise_and(k, 3) == kind_name
+}
+
+pub fn private(uid: Int) -> Key {
+  int.bitwise_shift_left(uid, 2) + kind_private
+}
+
+pub fn is_private(k: Key) -> Bool {
+  k >= 0 && int.bitwise_and(k, 3) == kind_private
+}
+
+// §6.1.7 the one canonical array index rule for text
+pub fn index_of_text(s: String) -> Option(Int) {
   case bit_array.from_string(s) {
-    <<c, _:bytes>> if c >= 48 && c <= 57 ->
+    <<48>> -> Some(0)
+    <<c, _:bytes>> if c >= 49 && c <= 57 ->
       case int.parse(s) {
-        Ok(n) if n >= 0 && n <= max_array_index ->
+        Ok(n) if n <= max_array_index ->
           case int.to_string(n) == s {
-            True -> Index(n)
-            False -> Named(s)
+            True -> Some(n)
+            False -> None
           }
-        _ -> Named(s)
+        _ -> None
       }
-    _ -> Named(s)
+    _ -> None
   }
 }
 
-pub fn index_key(n: Int) -> PropertyKey {
-  case n >= 0 && n <= max_array_index {
-    True -> Index(n)
-    False -> Named(int.to_string(n))
+pub fn source_key(s: String) -> SourceKey {
+  case index_of_text(s) {
+    Some(n) -> SourceIndex(n)
+    None -> SourceName(s)
   }
+}
+
+pub fn is_array_index(n: Int) -> Bool {
+  n >= 0 && n <= max_array_index
 }
 
 pub fn array_index_of_float(f: Float) -> Option(Int) {
@@ -49,43 +98,9 @@ pub fn array_index_of_float(f: Float) -> Option(Int) {
   }
 }
 
-// for humans; use key_to_text when the string is data
-pub fn key_display_string(key: PropertyKey) -> String {
-  case key {
-    Index(n) -> int.to_string(n)
-    Named(name) -> name
-    Private(text) -> private_display_name(text)
-  }
-}
-
-pub fn key_to_text(key: PropertyKey) -> String {
-  case key {
-    Index(n) -> int.to_string(n)
-    Named(s) -> s
-    Private(text) -> text
-  }
-}
-
-const uid_separator = "\u{0}"
-
-pub fn private_key(name: String) -> PropertyKey {
-  Private(name)
-}
-
-pub fn private_key_text(name: String, uid: Int) -> String {
-  name <> uid_separator <> int.to_string(uid)
-}
-
-pub fn is_private_key(key: PropertyKey) -> Bool {
-  case key {
-    Private(_) -> True
-    Index(_) | Named(_) -> False
-  }
-}
-
-pub fn private_display_name(key_text: String) -> String {
-  case string.split_once(key_text, uid_separator) {
-    Ok(#(name, _uid)) -> name
-    Error(Nil) -> key_text
+pub fn source_key_text(k: SourceKey) -> String {
+  case k {
+    SourceIndex(n) -> int.to_string(n)
+    SourceName(s) -> s
   }
 }

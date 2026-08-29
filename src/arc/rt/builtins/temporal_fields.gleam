@@ -1,4 +1,3 @@
-import arc/bytecode/key.{Named}
 import arc/internal/digits.{take_digits}
 import arc/internal/gregorian.{days_in_month}
 import arc/internal/int_math.{floor_div, floor_mod as math_mod, trunc_div}
@@ -20,10 +19,9 @@ import arc/rt/builtins/temporal_iso.{
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type TemporalData, HintString, JInt,
-  KHandle, KStr, KUndef, StringKey, TemporalDate, TemporalDateTime,
-  TemporalDuration, TemporalInstant, TemporalMonthDay, TemporalTime,
-  TemporalYearMonth, TemporalZonedDateTime, classify, mk_number, mk_object,
-  mk_string, mk_undefined,
+  KHandle, KStr, KUndef, TemporalDate, TemporalDateTime, TemporalDuration,
+  TemporalInstant, TemporalMonthDay, TemporalTime, TemporalYearMonth,
+  TemporalZonedDateTime, classify, mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/int
@@ -36,7 +34,7 @@ pub fn int_val(i: Int) -> JsVal {
 }
 
 pub fn get_named(st: Agent, h: Handle, key: String) -> #(JsVal, Agent) {
-  rt_obj.t_get_prop(st, mk_object(h), StringKey(Named(key)))
+  rt_obj.t_get_text(st, mk_object(h), key)
 }
 
 pub fn calendar_slot_of(data: TemporalData) -> Option(tcal.Calendar) {

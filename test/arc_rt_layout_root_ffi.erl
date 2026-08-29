@@ -1,7 +1,8 @@
 -module(arc_rt_layout_root_ffi).
--export([idx/1, tag/1, element/2, tuple_size/1, dyn/1, slots/1]).
+-export([name_key/1, index_key/1, idx/1, tag/1, element/2, tuple_size/1, dyn/1, slots/1]).
 
 -include("arc/rt/arc_rt_layout.hrl").
+-include("arc/rt/arc_rt_names.hrl").
 
 idx(<<"AGENT_ARITY">>) -> ?AGENT_ARITY;
 idx(<<"AGENT_STORE">>) -> ?AGENT_STORE;
@@ -20,8 +21,12 @@ idx(<<"STORE_ICS">>) -> ?STORE_ICS;
 idx(<<"STORE_FREE_PROTOS">>) -> ?STORE_FREE_PROTOS;
 idx(<<"STORE_GLOBAL_EPOCH">>) -> ?STORE_GLOBAL_EPOCH;
 idx(<<"STORE_NAMES">>) -> ?STORE_NAMES;
-idx(<<"STORE_NAME_TEXTS">>) -> ?STORE_NAME_TEXTS;
+idx(<<"STORE_KEY_TEXTS">>) -> ?STORE_KEY_TEXTS;
 idx(<<"STORE_NEXT_NAME">>) -> ?STORE_NEXT_NAME;
+idx(<<"K_length">>) -> ?K_length;
+idx(<<"K_prototype">>) -> ?K_prototype;
+idx(<<"KEY_KIND_NAME">>) -> ?KEY_KIND_NAME;
+idx(<<"KEY_KIND_PRIVATE">>) -> ?KEY_KIND_PRIVATE;
 idx(<<"REALM_OBJECT">>) -> ?REALM_OBJECT;
 idx(<<"REALM_FUNCTION">>) -> ?REALM_FUNCTION;
 idx(<<"REALM_ARRAY">>) -> ?REALM_ARRAY;
@@ -132,9 +137,6 @@ tag(<<"STRINGOBJ_TAG">>) -> ?STRINGOBJ_TAG;
 tag(<<"FNFLAGS_TAG">>) -> ?FNFLAGS_TAG;
 tag(<<"DATAPROP_TAG">>) -> ?DATAPROP_TAG;
 tag(<<"ACCESSORPROP_TAG">>) -> ?ACCESSORPROP_TAG;
-tag(<<"KEY_NAMED">>) -> ?KEY_NAMED;
-tag(<<"KEY_INDEX">>) -> ?KEY_INDEX;
-tag(<<"KEY_PRIVATE">>) -> ?KEY_PRIVATE;
 tag(<<"OKEY_STRING">>) -> ?OKEY_STRING;
 tag(<<"OKEY_SYMBOL">>) -> ?OKEY_SYMBOL;
 tag(<<"ELEMS_NONE">>) -> ?ELEMS_NONE;
@@ -152,3 +154,6 @@ tuple_size(_) -> 0.
 dyn(X) -> X.
 
 slots(L) -> list_to_tuple(L).
+
+name_key(N) -> ?NAME_KEY(N).
+index_key(I) -> ?INDEX_KEY(I).

@@ -2779,9 +2779,9 @@ fn plain_member_name(key: ast.PropertyKey) -> Option(String) {
     // identifier names never start with a digit
     ast.KeyIdentifier(name:, ..) -> Some(name)
     ast.KeyString(value:, ..) ->
-      case key.canonical_key(value) {
-        key.Named(_) -> Some(value)
-        _ -> None
+      case key.source_key(value) {
+        key.SourceName(_) -> Some(value)
+        key.SourceIndex(_) -> None
       }
     _ -> None
   }

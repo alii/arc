@@ -1,5 +1,6 @@
 //// flat bytecode calls; other callees nest via rt/call
 
+import arc/bytecode/key.{type Key}
 import arc/bytecode/lexical
 import arc/bytecode/opcode
 import arc/internal/tuple_array.{type TupleArray}
@@ -50,12 +51,15 @@ pub fn guarded_unit(
 
 pub const stack_source = "script"
 
-pub fn frame_info_at(template: FuncTemplate, line: Int) -> types.FrameInfo {
+pub fn frame_info_at(
+  template: FuncTemplate(Key),
+  line: Int,
+) -> types.FrameInfo {
   FrameInfo(name: option.unwrap(template.name, ""), script: stack_source, line:)
 }
 
 /// no depth bump, caller already counted it
-pub fn push_frame_info(agent: Agent, template: FuncTemplate) -> Agent {
+pub fn push_frame_info(agent: Agent, template: FuncTemplate(Key)) -> Agent {
   Agent(..agent, frames: [frame_info_at(template, 0), ..agent.frames])
 }
 
@@ -152,7 +156,7 @@ fn leave_frame(agent: Agent, depth: Int) -> Agent {
 pub type CoroutineCall {
   CoroutineCall(
     fn_h: Handle,
-    template: FuncTemplate,
+    template: FuncTemplate(Key),
     unit: Int,
     locals: TupleArray(JsVal),
     this: JsVal,
@@ -173,7 +177,7 @@ fn setup_frame(
   env: EnvTuple,
   callee: JsVal,
   home: JsVal,
-  template: FuncTemplate,
+  template: FuncTemplate(Key),
   flags: FnFlags,
   args: List(JsVal),
   this_arg: JsVal,
@@ -214,7 +218,7 @@ fn setup_frame(
 pub fn call_function(
   state: State,
   fn_h: Handle,
-  template: FuncTemplate,
+  template: FuncTemplate(Key),
   unit: Int,
   env: EnvTuple,
   home_object: Option(Handle),
@@ -309,7 +313,7 @@ pub fn call_function(
 }
 
 /// §15.10 isintailposition
-pub fn is_tail_call(state: State, pc: Int, callee: FuncTemplate) -> Bool {
+pub fn is_tail_call(state: State, pc: Int, callee: FuncTemplate(Key)) -> Bool {
   let frame_eligible = case state.try_stack, state.call_stack {
     [], [_, ..] ->
       state.func.is_strict
@@ -867,7 +871,7 @@ pub type RootKind {
 /// §10.2.2 steps 1-3, taken in the caller's realm
 pub fn root_this(
   agent: Agent,
-  template: FuncTemplate,
+  template: FuncTemplate(Key),
   new_target: JsVal,
 ) -> Result(#(JsVal, RootKind, Agent), #(JsVal, Agent)) {
   use <- bool.guard(
@@ -884,7 +888,7 @@ pub fn root_this(
 pub type RootCallee {
   RootCallee(
     callee: JsVal,
-    template: FuncTemplate,
+    template: FuncTemplate(Key),
     env: EnvTuple,
     home: JsVal,
     flags: FnFlags,
@@ -894,7 +898,7 @@ pub type RootCallee {
 
 pub fn root_callee(
   fn_h: Handle,
-  template: FuncTemplate,
+  template: FuncTemplate(Key),
   env: EnvTuple,
   home_object: Option(Handle),
   flags: FnFlags,

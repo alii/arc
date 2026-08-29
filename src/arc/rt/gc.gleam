@@ -1,3 +1,4 @@
+import arc/bytecode/key.{type Key}
 import arc/internal/ordered_entries
 import arc/internal/tree_array
 import arc/internal/tuple_array.{type TupleArray}
@@ -78,7 +79,7 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
     free_protos: _,
     global_epoch: _,
     names: _,
-    name_texts: _,
+    key_texts: _,
     next_name: _,
   ) = require_js(st)
   let acc = set.to_list(pinned_roots)
@@ -158,7 +159,10 @@ pub fn push_suspended_frame_refs(
   }
 }
 
-fn push_template_refs(template: FuncTemplate, acc: List(Int)) -> List(Int) {
+fn push_template_refs(
+  template: FuncTemplate(Key),
+  acc: List(Int),
+) -> List(Int) {
   let FuncTemplate(
     name: _,
     arity: _,
