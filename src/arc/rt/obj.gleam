@@ -3367,44 +3367,26 @@ pub fn t_define_own_accessor(
   )
 }
 
-// an object key or a bare key from aot
-@external(erlang, "arc_rt_store_ffi", "as_object_key")
-fn as_object_key(key: k) -> ObjectKey
-
 @external(erlang, "arc_rt_store_ffi", "identity")
 fn unsafe_coerce(a: a) -> b
 
 @external(erlang, "erlang", "is_list")
 fn is_list(a: a) -> Bool
 
-pub fn t_get_prop_any(st: Agent, recv: JsVal, key: k) -> #(JsVal, Agent) {
-  t_get_prop(st, recv, as_object_key(key))
-}
-
-pub fn t_set_prop_any(
-  st: Agent,
-  recv: JsVal,
-  key: k,
-  v: JsVal,
-) -> #(Bool, Agent) {
-  t_set_prop(st, recv, as_object_key(key), v)
-}
-
 // §13.15.2 strict putvalue throws on failed set
 pub fn t_set_prop_strict(
   st: Agent,
   recv: JsVal,
-  key: k,
+  key: ObjectKey,
   v: JsVal,
 ) -> #(Bool, Agent) {
-  let okey = as_object_key(key)
-  let #(ok, st) = t_set_prop(st, recv, okey, v)
+  let #(ok, st) = t_set_prop(st, recv, key, v)
   case ok {
     True -> #(True, st)
     False ->
       throw_type_error(
         st,
-        "Cannot assign to read only property '" <> key_text(st, okey) <> "'",
+        "Cannot assign to read only property '" <> key_text(st, key) <> "'",
       )
   }
 }
@@ -3431,26 +3413,25 @@ pub fn t_delete_prop_strict(
 pub fn t_create_data_prop(
   st: Agent,
   recv: JsVal,
-  key: k,
+  key: ObjectKey,
   v: JsVal,
 ) -> #(Bool, Agent)
 
 pub fn t_create_data_prop_slow(
   st: Agent,
   recv: JsVal,
-  key: k,
+  key: ObjectKey,
   v: JsVal,
 ) -> #(Bool, Agent) {
-  let okey = as_object_key(key)
   case rt_types.classify(recv) {
     KHandle(h) -> {
-      let #(ok, st) = t_define_own_data(st, h, okey, v, True, True, True)
+      let #(ok, st) = t_define_own_data(st, h, key, v, True, True, True)
       case ok {
         True -> #(True, st)
         False ->
           throw_type_error(
             st,
-            "Cannot define property '" <> key_text(st, okey) <> "'",
+            "Cannot define property '" <> key_text(st, key) <> "'",
           )
       }
     }
@@ -3458,7 +3439,7 @@ pub fn t_create_data_prop_slow(
       throw_type_error(
         st,
         "Cannot define property '"
-          <> key_text(st, okey)
+          <> key_text(st, key)
           <> "' on "
           <> case rt_types.classify(recv) {
           KNull -> "null"

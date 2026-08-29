@@ -3,7 +3,6 @@ import arc/rt/name_keys as nk
 import arc/rt/names
 import arc/rt/snapshot
 import arc/rt/store as rt_store
-import gleam/dynamic.{type Dynamic}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -13,9 +12,6 @@ import rt_helpers
 
 @external(erlang, "arc_rt_names_ffi", "fixed_count")
 fn ffi_fixed_count() -> Int
-
-@external(erlang, "arc_rt_names_ffi", "fixed_number")
-fn ffi_fixed_number(text: String) -> Dynamic
 
 @external(erlang, "arc_rt_names_ffi", "fixed_text")
 fn ffi_fixed_text(n: Int) -> String
@@ -38,9 +34,6 @@ fn index_key(i: Int) -> Int
 @external(erlang, "arc_names_test_ffi", "index_of_text")
 fn ffi_index_of_text(text: String) -> Option(Int)
 
-@external(erlang, "gleam_stdlib", "identity")
-fn dyn(x: a) -> Dynamic
-
 pub fn fixed_unique_test() {
   assert list.length(names.fixed) == set.size(set.from_list(names.fixed))
   assert list.length(names.fixed) == names.fixed_count()
@@ -51,10 +44,8 @@ pub fn fixed_in_sync_test() {
     assert names.fixed_text(i) == text
     assert names.fixed_number(text) == Some(i)
     assert ffi_fixed_text(i) == text
-    assert ffi_fixed_number(text) == dyn(i)
   })
   assert names.fixed_number("zzz_not_fixed") == None
-  assert ffi_fixed_number("zzz_not_fixed") == dyn(None)
 }
 
 pub fn macros_test() {

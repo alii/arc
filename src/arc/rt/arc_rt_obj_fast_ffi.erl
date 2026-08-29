@@ -1,8 +1,7 @@
 %% called only by aot emitted code
 -module(arc_rt_obj_fast_ffi).
--export([t_set_props_named/5, t_set_props_init/6, t_new_object_props/3,
-         t_set_prop/5, t_set_prop/6, t_get_prop/4, t_global_get/3,
-         t_global_get_miss/3]).
+-export([t_set_props_init/6, t_new_object_props/3, t_set_prop/6,
+         t_get_prop/4, t_global_get/3, t_global_get_miss/3]).
 
 -include("arc_rt_layout.hrl").
 -include("arc_rt_names.hrl").

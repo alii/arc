@@ -316,13 +316,13 @@ pub fn profile_file(label: String, path: String, runs: Int) -> Nil {
   let rt = fn(m: String) { atom.create("arc@rt@" <> m) }
   let ffi = fn(m: String) { atom.create("arc_" <> m) }
   let targets = [
-    #(rt("obj"), "t_get_prop_any", 3),
-    #(rt("obj"), "t_set_prop_any", 4),
+    #(rt("obj"), "t_get_prop", 3),
+    #(rt("obj"), "t_set_prop", 4),
     #(rt("call"), "t_call_checked", 4),
     #(rt("call"), "t_kfn_code", 3),
     #(rt("call"), "t_construct", 4),
     #(rt("ops"), "t_instance_of", 3),
-    #(ffi("rt_obj_ffi"), "t_get_prop_own_data", 3),
+    #(ffi("rt_obj_fast_ffi"), "t_get_prop", 4),
     #(rt("obj"), "t_global_get", 2),
     #(ffi("rt_obj_ffi"), "t_global_get_fast", 2),
     #(ffi("rt_obj_ffi"), "t_get_elem_fast", 3),
@@ -404,14 +404,14 @@ fn microbench() {
   let kx = rt_store.t_key(st_obj, "x").0
   let key = to_dynamic(#(atom.create("string_key"), kx))
   micro(
-    "t_get_prop_any (o.x)",
+    "t_get_prop (o.x)",
     "get_prop",
     st_obj,
     to_dynamic(#(o_h, key)),
     1_000_000,
   )
   micro(
-    "t_set_prop_any (o.x = v)",
+    "t_set_prop (o.x = v)",
     "set_prop",
     st_obj,
     to_dynamic(#(o_h, key)),
@@ -419,8 +419,8 @@ fn microbench() {
   )
   let kb = to_dynamic(kx)
   micro(
-    "t_get_prop_own_data (FFI)",
-    "get_prop_own_data",
+    "t_get_prop (fast FFI)",
+    "get_prop_fast",
     st_obj,
     to_dynamic(#(o_h, kb)),
     1_000_000,
@@ -441,7 +441,7 @@ const obj_prop_us_target = 11_800
 const richards_baseline = [
   #("arc_rt_obj_ffi", "t_global_get_fast", 2, 65),
   #("arc@rt@obj", "t_global_get", 2, 0),
-  #("arc_rt_obj_ffi", "t_get_prop_own_data", 3, 106),
+  #("arc_rt_obj_fast_ffi", "t_get_prop", 4, 106),
   #("arc_rt_obj_ffi", "t_set_prop_own_data", 4, 143),
   #("arc_rt_obj_ffi", "t_ic_get", 4, 0),
   #("arc_rt_obj_ffi", "t_ic_set", 5, 0),
@@ -587,7 +587,7 @@ pub fn bench_verify() -> Bool {
       let n = fn(m, f, a) { count_of(atom.create(m), atom.create(f), a) }
       let g_after = n("arc_rt_obj_ffi", "t_global_get_fast", 2)
       let i_after = n("arc_rt_obj_ffi", "t_ic_get", 4)
-      let h_own = n("arc_rt_obj_ffi", "t_get_prop_own_data", 3)
+      let h_own = n("arc_rt_obj_fast_ffi", "t_get_prop", 4)
       io.println(
         "    G slotted-globals: t_global_get_fast "
         <> int.to_string(g_after)
@@ -607,7 +607,7 @@ pub fn bench_verify() -> Bool {
         },
       )
       io.println(
-        "    H shaped-objects:  t_get_prop_own_data "
+        "    H shaped-objects:  t_get_prop "
         <> int.to_string(h_own)
         <> "/run — "
         <> case h_own < 50 {
@@ -822,7 +822,7 @@ pub fn crypto_am3_op_map() -> Nil {
     #(ffi("rt_obj_ffi"), "t_get_elem_fast_p", 3, "w_array[j] read", 4000),
     #(ffi("rt_obj_ffi"), "t_set_elem_fast_p", 4, "w_array[j++]= write", 4000),
     #(ffi("rt_obj_ffi"), "t_arr_c_load", 1, "arr_c hoist (1/am3 call)", 100),
-    #(rt("obj"), "t_get_prop_any", 3, "elem-miss slow path", 0),
+    #(rt("obj"), "t_get_prop", 3, "elem-miss slow path", 0),
     #(rt("val"), "t_to_property_key", 2, "elem-miss key coerce", 0),
   ]
   io.println(

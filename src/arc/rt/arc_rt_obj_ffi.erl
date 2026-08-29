@@ -1,9 +1,8 @@
 %% fast paths return miss and the caller takes the full path
 -module(arc_rt_obj_ffi).
--export([t_get_prop_own_data/3, t_set_prop_own_data/4, t_set_prop_named/5,
-         t_create_data_prop/4, store_put_seq/3,
-         t_get_prop_ic/4, t_get_prop_ic_miss/4, t_get_prop_slow/4,
-         t_get_prop_site/4,
+-export([t_set_prop_own_data/4, t_set_prop_named/5,
+         t_create_data_prop/4,
+         t_get_prop_ic/4, t_get_prop_slow/4, t_get_prop_site/4,
          t_instanceof_fast/3,
          t_get_elem_fast/3, t_set_elem_fast/4,
          t_global_get_fast/2, t_global_get/2,
@@ -15,7 +14,7 @@
 -include("arc_rt_layout.hrl").
 -include("arc_rt_names.hrl").
 
--compile({inline, [peek_get/3, slot_of/2, get_any/3,
+-compile({inline, [slot_of/2, get_any/3,
                    named_plain/2, birth_plain/2, store_put_seq/3, index_read/2,
                    peek_slot/3, index_write/4, elem_write/3,
                    named_free_next/5, set_prop_new/7, free_chain/4,
@@ -23,10 +22,6 @@
 
 -define(IC_READ, ic_read).
 -define(IC_READ_WAYS, 8).
-
-t_get_prop_own_data(St, {?HANDLE_TAG, Id}, K) ->
-    peek_get(St, Id, K);
-t_get_prop_own_data(_, _, _) -> miss.
 
 t_get_prop_ic(St, {?HANDLE_TAG, Id}, K, Site) ->
     Store = element(?AGENT_STORE, St),
@@ -43,20 +38,6 @@ t_get_prop_ic(St, {?HANDLE_TAG, Id}, K, Site) ->
         _ -> miss
     end;
 t_get_prop_ic(_, _, _, _) -> miss.
-
-t_get_prop_ic_miss(St, {?HANDLE_TAG, Id}, K, Site) ->
-    Store = element(?AGENT_STORE, St),
-    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
-        {?SSHAPED_TAG, Sid, _, Slots, Offs} ->
-            case Offs of
-                #{K := Off} ->
-                    {element(Off + 1, Slots),
-                     ic_fill(St, Store, Site, Sid, Off, K)};
-                _ -> {miss, St}
-            end;
-        Slot -> {peek_slot(St, Slot, K), St}
-    end;
-t_get_prop_ic_miss(St, _, _, _) -> {miss, St}.
 
 t_get_prop_slow(St, Recv = {?HANDLE_TAG, Id}, K, Site) ->
     Store = element(?AGENT_STORE, St),
@@ -212,9 +193,6 @@ t_global_get(St, K) ->
         V -> {V, St}
     end.
 
-peek_get(St, Id, K) ->
-    peek_slot(St, slot_of(St, Id), K).
-
 peek_slot(_, {?SSHAPED_TAG, _, _, Slots, Offs}, K) ->
     case Offs of
         #{K := Off} -> element(Off + 1, Slots);
@@ -336,8 +314,7 @@ t_set_prop_named(St, Obj, K, V, Strict) ->
 t_create_data_prop(St, Recv = {?HANDLE_TAG, Id}, Key, V) ->
     PK = case Key of
         {?OKEY_STRING, PK0} -> PK0;
-        {?OKEY_SYMBOL, _} -> symbol;
-        _ -> Key
+        {?OKEY_SYMBOL, _} -> symbol
     end,
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),

@@ -2,7 +2,7 @@
 -module(arc_rt_call_fast_ffi).
 -export([t_call_fast/4, t_call_fast0/3, t_call_fast1/4, t_call_fast2/5,
          t_call_fast3/6,
-         t_call_method_mono/4, t_call_method_ic/6, t_call_method_ic0/5,
+         t_call_method_ic/6, t_call_method_ic0/5,
          t_call_method_ic1/6, t_call_method_ic2/7, t_call_method_ic3/8,
          t_new_simple/3, t_bind_compiled/4]).
 
@@ -273,12 +273,6 @@ ic_chain_ok(Data, {?SOME, {?HANDLE_TAG, PId}}, [{PId, PSlot} | Rest]) ->
         _ -> false
     end;
 ic_chain_ok(_, _, _) -> false.
-
-%% st unchanged on miss; emitter guards V =:= miss, not is_atom
-t_call_method_mono(St, Recv = {?HANDLE_TAG, RId}, K, Args) ->
-    Data = element(?STORE_DATA, element(?AGENT_STORE, St)),
-    mono(St, Recv, arc_rt_arena_ffi:get(RId, Data), K, Args, none);
-t_call_method_mono(St, _, _, _) -> {miss, St}.
 
 mono(St, Recv = {?HANDLE_TAG, RId}, RSlot, K, Args, Site)
   when is_tuple(RSlot) ->

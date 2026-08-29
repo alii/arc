@@ -7,7 +7,7 @@
     to_boolean_i32/1, to_boolean/1,
     strict_eq/2, same_value_zero/2,
     t_to_property_key_fast/2, keys_of/2,
-    key_fast/2, key_find/2, key_of/2, key_text/2, index_of_text/1,
+    key_find/2, key_of/2, key_text/2, index_of_text/1,
     js_number_to_string/1,
     t_to_string/2, t_to_number/2, t_to_integer_or_infinity/2, t_to_length/2,
     string_to_number/1,
