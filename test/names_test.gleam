@@ -71,19 +71,19 @@ pub fn no_fixed_name_is_an_array_index_test() {
 pub fn dynamic_names_test() {
   let js = rt_store.t_store_new()
   let count = names.fixed_count()
-  assert js.next_name == count
+  assert js.names.next == count
   let assert Some(length) = names.fixed_number("length")
   let #(n, js) = rt_store.name_number(js, "length")
   assert n == length
-  assert js.next_name == count
+  assert js.names.next == count
   assert rt_store.find_name(js, "zzz_not_fixed") == None
-  assert js.next_name == count
+  assert js.names.next == count
   let #(a, js) = rt_store.name_number(js, "zzz_not_fixed")
   assert a == count
-  assert js.next_name == count + 1
+  assert js.names.next == count + 1
   let #(b, js) = rt_store.name_number(js, "zzz_not_fixed")
   assert b == a
-  assert js.next_name == count + 1
+  assert js.names.next == count + 1
   assert rt_store.find_name(js, "zzz_not_fixed") == Some(a)
   assert rt_store.name_text(js, a) == "zzz_not_fixed"
   assert rt_store.name_text(js, length) == "length"
@@ -94,7 +94,7 @@ pub fn dynamic_names_test() {
 
 pub fn agent_wrappers_test() {
   let st = rt_helpers.agent()
-  let before = st.store.next_name
+  let before = st.store.names.next
   let #(a, st) = rt_store.t_key(st, "zzz_not_fixed")
   assert key.name_number(a) == before
   assert rt_store.t_key_text(st, a) == "zzz_not_fixed"
@@ -104,13 +104,13 @@ pub fn agent_wrappers_test() {
 
 pub fn snapshot_roundtrip_keeps_names_test() {
   let st = rt_helpers.agent()
-  let before = st.store.next_name
+  let before = st.store.names.next
   let #(a, st) = rt_store.t_key(st, "zzz_not_fixed")
   let #(b, st) = rt_store.t_key(st, "zzz_other")
   let #(p, st) = rt_store.t_new_private_key(st, "#zzz")
   let assert Ok(bin) = snapshot.serialize(st)
   let assert Ok(st) = snapshot.deserialize(bin, rt_helpers.quiet_hooks())
-  assert st.store.next_name == before + 2
+  assert st.store.names.next == before + 2
   assert rt_store.t_key_text(st, a) == "zzz_not_fixed"
   assert rt_store.t_key_text(st, b) == "zzz_other"
   assert rt_store.t_key_text(st, p) == "#zzz"
@@ -155,12 +155,12 @@ pub fn canonical_index_rule_test() {
 
 pub fn find_does_not_allocate_test() {
   let st = rt_helpers.agent()
-  let before = st.store.next_name
+  let before = st.store.names.next
   assert rt_store.t_find_key(st, "zzz_never") == None
   assert rt_store.t_find_key(st, "12") == Some(key.index(12))
   assert rt_store.t_find_key(st, "length") == Some(nk.length)
   let #(k, st2) = rt_store.t_key(st, "zzz_never")
-  assert st2.store.next_name == before + 1
+  assert st2.store.names.next == before + 1
   assert rt_store.t_find_key(st2, "zzz_never") == Some(k)
   assert key.is_name(k)
 }

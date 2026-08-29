@@ -45,15 +45,15 @@ pub fn t_throw_syntax_error(st: Agent, msg: String) -> a {
 
 // §9.1.1.1.5/6 tdz read throws referenceerror
 pub fn t_tdz_check(st: Agent, v: JsVal, name: BitArray) -> Agent {
-  case classify(v) {
-    KTdz -> {
+  case v == types.mk_tdz() {
+    True -> {
       let n = bit_array.to_string(name) |> result.unwrap("<name>")
       t_throw_reference_error(
         st,
         "Cannot access '" <> n <> "' before initialization",
       )
     }
-    _ -> st
+    False -> st
   }
 }
 

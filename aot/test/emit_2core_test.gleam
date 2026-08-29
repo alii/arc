@@ -1,3 +1,4 @@
+import arc/rt/gc as rt_gc
 import emit_2core_harness as harness
 
 const sum_src = "function sum(n){let s=0;for(let i=1;i<=n;i++)s+=i;return s} console.log(sum(10))"
@@ -30,6 +31,23 @@ pub fn global_cache_across_units_test() {
   let assert Ok(_) = ra.result
   let #(_, rb) = harness.run_loaded(b, st)
   assert rb.stdout == <<"1\n":utf8>>
+}
+
+const pinned_a_src = "globalThis.make = function () { var o = {}; o.zzpinned = 1; return Object.keys(o)[0] + o.zzpinned }
+console.log('warm')"
+
+const pinned_b_src = "console.log(make())"
+
+// a loaded unit's closures hold their keys where the sweep cannot look
+pub fn unit_names_survive_a_sweep_test() {
+  let assert Ok(a) = harness.load_compiled(pinned_a_src)
+  let assert Ok(b) = harness.load_compiled(pinned_b_src)
+  let #(st, r) = harness.run_loaded(a, harness.seed())
+  assert r.stdout == <<"warm\n":utf8>>
+  assert rt_gc.stats(st).pinned_names >= 2
+  let st = rt_gc.t_collect_full(st, [])
+  let #(_, r) = harness.run_loaded(b, st)
+  assert r.stdout == <<"zzpinned1\n":utf8>>
 }
 
 const object_literal_src = "let o={x:5};console.log(o.x)"

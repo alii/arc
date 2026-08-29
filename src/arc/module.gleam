@@ -284,12 +284,12 @@ pub type LinkedModule {
     exports: Dict(String, Handle),
     namespace_box: Handle,
     unit: Int,
-    // loaded into this heap, none for a synthetic module
-    template: Option(FuncTemplate(Key)),
+    // loaded per run so its keys never outlive a gc
+    template: Option(FuncTemplate(SourceKey)),
   )
 }
 
-fn loaded_template(lm: LinkedModule) -> FuncTemplate(Key) {
+fn body_template(lm: LinkedModule) -> FuncTemplate(SourceKey) {
   case lm.template {
     Some(t) -> t
     None -> panic as "arc/module: synthetic module has no body"
@@ -683,7 +683,7 @@ type BodyOutcome {
 }
 
 fn module_locals(
-  template: FuncTemplate(Key),
+  template: FuncTemplate(k),
   seeds: List(#(Int, JsVal)),
 ) -> TupleArray(JsVal) {
   list.fold(
@@ -737,8 +737,9 @@ fn run_module_turns(
   seeds: List(#(Int, JsVal)),
   finish: Finish,
 ) -> #(BodyOutcome, Agent) {
+  let #(template, st) = load.template(st, body_template(lm))
   let #(step, st) =
-    entry.run_turn(module_activation(st, loaded_template(lm), lm.unit, seeds))
+    entry.run_turn(module_activation(st, template, lm.unit, seeds))
   case step {
     StepReturn(v) -> #(BodyReturned(v), safepoint.finish_turn(st, [v], finish))
     StepThrow(e) -> #(BodyThrew(e), safepoint.finish_turn(st, [e], finish))
@@ -878,12 +879,9 @@ fn build_linked(
       let assert Ok(exp) = dict.get(exports, spec)
       let assert Ok(ns_box) = dict.get(namespace_boxes, spec)
       let #(unit, st) = rt_store.t_next_unit_uid(st)
-      let #(template, st) = case dict.get(bundle.modules, spec) {
-        Ok(SourceModule(compiled)) -> {
-          let #(t, st) = load.template(st, compiled.template)
-          #(Some(t), st)
-        }
-        Ok(SyntheticModule(_)) | Error(Nil) -> #(None, st)
+      let template = case dict.get(bundle.modules, spec) {
+        Ok(SourceModule(compiled)) -> Some(compiled.template)
+        Ok(SyntheticModule(_)) | Error(Nil) -> None
       }
       let lm =
         LinkedModule(
@@ -995,14 +993,18 @@ fn instantiate_hoisted_functions(
       import_seeds(linked, compiled.specifier_map, compiled.import_bindings)
       |> assert_link_invariant
       |> list.append(own_export_seeds(lm, compiled))
-    let template = loaded_template(lm)
+    let template = body_template(lm)
     let locals = module_locals(template, seeds)
     list.fold(compiled.hoisted_funcs, st, fn(st, hf) {
       let #(name, func_idx) = hf
       case dict.get(lm.local_boxes, name) {
         Error(Nil) -> st
         Ok(box) -> {
-          let child = tuple_array.get_unchecked(func_idx, template.functions)
+          let #(child, st) =
+            load.template(
+              st,
+              tuple_array.get_unchecked(func_idx, template.functions),
+            )
           let captured =
             list.map(child.env_descriptors, fn(desc) {
               tuple_array.get_unchecked(desc.parent_index, locals)

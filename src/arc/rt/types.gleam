@@ -82,6 +82,13 @@ pub fn mk_object(h: Handle) -> JsVal
 @external(erlang, "arc_rt_val_ffi", "mk_tdz")
 pub fn mk_tdz() -> JsVal
 
+// a class private name, not a js value
+@external(erlang, "arc_rt_val_ffi", "mk_private")
+pub fn mk_private(k: Key) -> JsVal
+
+@external(erlang, "arc_rt_val_ffi", "private_key_of")
+pub fn private_key_of(v: JsVal) -> Key
+
 pub type ToPrimHint {
   HintDefault
   HintString
@@ -2607,10 +2614,21 @@ pub type JsStore(st) {
     free_protos: Dict(Int, Nil),
     // bumped on any write to a global object cell, for global read caches
     global_epoch: Int,
-    names: Dict(String, Int),
+    names: NameTable,
+  )
+}
+
+// the heap's numbering of property names, see arc/rt/store
+pub type NameTable {
+  NameTable(
+    numbers: Dict(String, Int),
     // text of dynamic name keys and private keys
-    key_texts: Dict(Key, String),
-    next_name: Int,
+    texts: Dict(Key, String),
+    next: Int,
+    // keys held where the gc cannot look, kept for good
+    pinned: Dict(Key, Nil),
+    // texts size after the last name sweep
+    swept: Int,
   )
 }
 

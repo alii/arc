@@ -26,13 +26,18 @@
 -define(STORE_ALLOC, 5).
 -define(STORE_SHAPES, 14).
 -define(STORE_NEXT_SHAPE, 15).
--define(STORE_ARITY, 22).
+-define(STORE_ARITY, 20).
 -define(STORE_ICS, 17).
 -define(STORE_FREE_PROTOS, 18).
 -define(STORE_GLOBAL_EPOCH, 19).
 -define(STORE_NAMES, 20).
--define(STORE_KEY_TEXTS, 21).
--define(STORE_NEXT_NAME, 22).
+
+-define(NAMES_TAG, name_table).
+-define(NAMES_NUMBERS, 2).
+-define(NAMES_TEXTS, 3).
+-define(NAMES_NEXT, 4).
+-define(NAMES_PINNED, 5).
+-define(NAMES_ARITY, 6).
 
 -define(REALM_TAG, realm).
 -define(REALM_OBJECT, 2).
@@ -47,6 +52,13 @@
 
 -define(HANDLE_TAG, js_cell).
 -define(HANDLE_ID, 2).
+
+-define(PRIVATE_TAG, js_private).
+
+-define(FT_TAG, func_template).
+-define(FT_KEYS, 8).
+-define(FT_FUNCTIONS, 10).
+-define(FT_ARITY, 22).
 
 -define(SBOX_TAG, s_box).
 -define(SBOX_VALUE, 2).

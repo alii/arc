@@ -87,7 +87,7 @@ fn run_one(p: Prog) -> Nil {
     )
     Error(e) -> #(
       "ERR " <> engine.eval_error_message(e),
-      rt_gc.GcStats(0, 0, 0),
+      rt_gc.GcStats(0, 0, 0, 0, 0),
     )
   }
   io.println(

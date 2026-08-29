@@ -4,7 +4,7 @@ import arc/rt/limits
 import arc/rt/names
 import arc/rt/types.{
   type Agent, type Handle, type JobQueue, type JsOps, type JsSlot, type JsStore,
-  type JsVal, Agent, JsCell, JsOps, JsStore, RangeErr, SBox,
+  type JsVal, Agent, JsCell, JsOps, JsStore, NameTable, RangeErr, SBox,
 } as rt_types
 import gleam/dict
 import gleam/int
@@ -38,13 +38,20 @@ pub fn t_store_new() -> JsStore(Agent) {
     ics: dict.new(),
     free_protos: dict.new(),
     global_epoch: 0,
-    // seeded with every fixed name so a lookup is one probe
-    names: names.fixed_map(),
-    key_texts: list.index_map(reserved_private, fn(text, uid) {
-      #(key.private(uid), text)
-    })
-      |> dict.from_list,
-    next_name: names.fixed_count(),
+    names: NameTable(
+      // seeded with every fixed name so a lookup is one probe
+      numbers: names.fixed_map(),
+      texts: list.index_map(reserved_private, fn(text, uid) {
+        #(key.private(uid), text)
+      })
+        |> dict.from_list,
+      next: names.fixed_count(),
+      pinned: list.index_map(reserved_private, fn(_, uid) {
+        #(key.private(uid), Nil)
+      })
+        |> dict.from_list,
+      swept: 0,
+    ),
   )
 }
 
@@ -212,22 +219,23 @@ pub fn t_next_unit_uid(st: Agent) -> #(Int, Agent) {
 }
 
 pub fn find_name(js: JsStore(st), text: String) -> Option(Int) {
-  dict.get(js.names, text) |> option.from_result
+  dict.get(js.names.numbers, text) |> option.from_result
 }
 
 pub fn name_number(js: JsStore(st), text: String) -> #(Int, JsStore(st)) {
   case find_name(js, text) {
     Some(n) -> #(n, js)
     None -> {
-      let n = js.next_name
-      let js =
-        JsStore(
-          ..js,
-          names: dict.insert(js.names, text, n),
-          key_texts: dict.insert(js.key_texts, key.name(n), text),
-          next_name: n + 1,
+      let t = js.names
+      let n = t.next
+      let names =
+        NameTable(
+          ..t,
+          numbers: dict.insert(t.numbers, text, n),
+          texts: dict.insert(t.texts, key.name(n), text),
+          next: n + 1,
         )
-      #(n, js)
+      #(n, JsStore(..js, names:, alloc_since_gc: js.alloc_since_gc + 1))
     }
   }
 }
@@ -283,11 +291,13 @@ pub fn t_key_value(st: Agent, k: Key) -> JsVal {
 pub fn t_new_private_key(st: Agent, text: String) -> #(Key, Agent) {
   let js = require_js(st)
   let k = key.private(js.private_uid)
+  let names = NameTable(..js.names, texts: dict.insert(js.names.texts, k, text))
   let js =
     JsStore(
       ..js,
       private_uid: js.private_uid + 1,
-      key_texts: dict.insert(js.key_texts, k, text),
+      names:,
+      alloc_since_gc: js.alloc_since_gc + 1,
     )
   #(k, with_js(st, js))
 }

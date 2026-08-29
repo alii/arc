@@ -83,7 +83,7 @@ fn compile_load(source: String, name: String) -> Result(Atom, String) {
 }
 
 fn stats_line(label: String, s: rt_gc.GcStats) -> String {
-  let rt_gc.GcStats(live:, next:, since_gc:) = s
+  let rt_gc.GcStats(live:, next:, since_gc:, ..) = s
   "  "
   <> label
   <> " next="

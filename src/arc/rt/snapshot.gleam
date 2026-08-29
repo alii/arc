@@ -1,15 +1,14 @@
-import arc/bytecode/key.{type Key}
 import arc/host_hooks.{type HostHooks}
 import arc/rt/arena
 import arc/rt/builtins as rt_builtins
 import arc/rt/builtins/regexp as b_regexp
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type Job, type JsSlot, type JsStore, type Realm,
-  type ShapeDesc, Agent, HostJob, JsCell, JsStore, KCompiled, ReactionJob,
-  RegExpObj, ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext,
-  SAsyncGen, SBox, SDisposeCapability, SGenerator, SObject, SPromiseData,
-  SShapedObject,
+  type Agent, type Handle, type Job, type JsSlot, type JsStore, type NameTable,
+  type Realm, type ShapeDesc, Agent, HostJob, JsCell, JsStore, KCompiled,
+  ReactionJob, RegExpObj, ResolveThenableJob, ResumeCompiled, ResumeFrame,
+  SAsyncContext, SAsyncGen, SBox, SDisposeCapability, SGenerator, SObject,
+  SPromiseData, SShapedObject,
 }
 import gleam/dict.{type Dict}
 import gleam/list
@@ -18,7 +17,7 @@ import gleam/result
 import gleam/set.{type Set}
 
 // bump on any change to the image or runtime records
-pub const abi_version = 11
+pub const abi_version = 12
 
 pub type SnapshotError {
   SnapshotContainsCompiledCode(cell: Handle)
@@ -47,9 +46,7 @@ type StoreImage {
     shapes: Dict(Int, ShapeDesc),
     next_shape: Int,
     unit_uid: Int,
-    names: Dict(String, Int),
-    key_texts: Dict(Key, String),
-    next_name: Int,
+    names: NameTable,
   )
 }
 
@@ -107,8 +104,6 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
     free_protos: _,
     global_epoch: _,
     names:,
-    key_texts:,
-    next_name:,
   ) = store
   let microtasks = types.jq_to_list(microtasks)
   let data =
@@ -136,8 +131,6 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
       next_shape:,
       unit_uid:,
       names:,
-      key_texts:,
-      next_name:,
     )
   let realms = RealmImage(current: realm, realms:, template_objects:)
   Ok(encode(abi_version, store, realms))
@@ -181,8 +174,6 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     next_shape:,
     unit_uid:,
     names:,
-    key_texts:,
-    next_name:,
   ) = image
   JsStore(
     data: dict.fold(data, arena.new(), fn(acc, id, slot) {
@@ -206,8 +197,6 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     free_protos: dict.new(),
     global_epoch: 0,
     names:,
-    key_texts:,
-    next_name:,
   )
 }
 

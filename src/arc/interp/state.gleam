@@ -95,6 +95,40 @@ pub fn frame_roots(state: State) -> List(Handle) {
   |> list.map(JsCell)
 }
 
+// templates, locals and stacks in flight, for the name sweep
+pub fn frame_terms(state: State) -> List(Dynamic) {
+  list.fold(
+    state.call_stack,
+    [to_dynamic(state.func), to_dynamic(state.locals), to_dynamic(state.stack)],
+    fn(acc, frame) {
+      case frame {
+        SavedFrame(caller:, pc: _, stack:, locals:, constructor_this: _) -> [
+          to_dynamic(caller.func),
+          to_dynamic(locals),
+          to_dynamic(stack),
+          ..acc
+        ]
+        SavedRegFrame(
+          caller:,
+          pc: _,
+          stack:,
+          locals:,
+          constructor_this: _,
+          r0:,
+          r1:,
+        ) -> [
+          to_dynamic(caller.func),
+          to_dynamic(locals),
+          to_dynamic(stack),
+          to_dynamic(r0),
+          to_dynamic(r1),
+          ..acc
+        ]
+      }
+    },
+  )
+}
+
 fn acc_frame(
   acc: List(Int),
   stack: List(JsVal),

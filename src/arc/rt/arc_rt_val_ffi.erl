@@ -4,6 +4,7 @@
     classify/1,
     mk_undefined/0, mk_hole/0, mk_null/0, mk_bool/1, mk_number/1, mk_int/1,
     mk_string/1, mk_bigint/1, mk_symbol/1, mk_object/1, mk_tdz/0,
+    mk_private/1, private_key_of/1,
     to_boolean_i32/1, to_boolean/1,
     strict_eq/2, same_value_zero/2,
     t_to_property_key_fast/2, keys_of/2,
@@ -89,10 +90,16 @@ t_to_property_key_fast(St, V) ->
         K -> {string_key, K}
     end.
 
-%% the per heap keys for an aot unit's name texts
+%% an aot unit's keys, pinned since its code holds them unseen
 keys_of(St, Names) ->
-    {Keys, Store} = keys_of(tuple_to_list(Names), element(?AGENT_STORE, St), []),
-    {list_to_tuple(Keys), setelement(?AGENT_STORE, St, Store)}.
+    Store = element(?AGENT_STORE, St),
+    {Keys, Store1} = keys_of(tuple_to_list(Names), Store, []),
+    T = element(?STORE_NAMES, Store1),
+    Pinned = lists:foldl(fun(K, P) when K >= ?NAME_KEY(?N_FIXED_COUNT) -> P#{K => nil};
+                            (_, P) -> P
+                         end, element(?NAMES_PINNED, T), Keys),
+    Store2 = setelement(?STORE_NAMES, Store1, setelement(?NAMES_PINNED, T, Pinned)),
+    {list_to_tuple(Keys), setelement(?AGENT_STORE, St, Store2)}.
 
 keys_of([B | Bs], Store, Acc) ->
     {K, Store1} = key_of(Store, B),
@@ -109,7 +116,7 @@ key_fast(_, _) -> miss.
 key_find(Store, B) ->
     case index_of_text(B) of
         none ->
-            case element(?STORE_NAMES, Store) of
+            case element(?NAMES_NUMBERS, element(?STORE_NAMES, Store)) of
                 #{B := N} -> ?NAME_KEY(N);
                 #{} -> miss
             end;
@@ -120,19 +127,30 @@ key_find(Store, B) ->
 key_of(Store, B) ->
     case key_find(Store, B) of
         miss ->
-            N = element(?STORE_NEXT_NAME, Store),
-            Names = element(?STORE_NAMES, Store),
-            Texts = element(?STORE_KEY_TEXTS, Store),
-            Store1 = setelement(?STORE_NAMES, Store, Names#{B => N}),
-            Store2 = setelement(?STORE_KEY_TEXTS, Store1, Texts#{?NAME_KEY(N) => B}),
-            {?NAME_KEY(N), setelement(?STORE_NEXT_NAME, Store2, N + 1)};
+            T = element(?STORE_NAMES, Store),
+            N = element(?NAMES_NEXT, T),
+            T1 = setelement(?NAMES_NUMBERS, T, maps:put(B, N, element(?NAMES_NUMBERS, T))),
+            T2 = setelement(?NAMES_TEXTS, T1, maps:put(?NAME_KEY(N), B, element(?NAMES_TEXTS, T1))),
+            T3 = setelement(?NAMES_NEXT, T2, N + 1),
+            Store1 = setelement(?STORE_NAMES, Store, T3),
+            {?NAME_KEY(N), setelement(?STORE_ALLOC, Store1, element(?STORE_ALLOC, Store1) + 1)};
         K -> {K, Store}
     end.
 
 key_text(_, K) when K < 0 -> integer_to_binary(-K - 1);
 key_text(_, K) when K band 3 =:= ?KEY_KIND_NAME, K bsr 2 < ?N_FIXED_COUNT ->
     arc_rt_names_ffi:fixed_text(K bsr 2);
-key_text(Store, K) -> maps:get(K, element(?STORE_KEY_TEXTS, Store)).
+key_text(Store, K) ->
+    case element(?NAMES_TEXTS, element(?STORE_NAMES, Store)) of
+        #{K := B} -> B;
+        %% a swept key, never a live one
+        #{} -> <<"<key ", (integer_to_binary(K))/binary, ">">>
+    end.
+
+%% not a js value, only class code and the gc see it
+mk_private(K) -> {?PRIVATE_TAG, K}.
+
+private_key_of({?PRIVATE_TAG, K}) -> K.
 
 %% §6.1.7 canonical array index text, the erl twin of key.index_of_text
 index_of_text(<<"0">>) -> 0;

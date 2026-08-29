@@ -22,14 +22,6 @@ fn throw_type_error(st: Agent, msg: String) -> a {
   rt_store.t_throw(st, e)
 }
 
-// a private name value is its key as a js integer
-fn private_key_of(v: JsVal) -> Key {
-  case classify(v) {
-    rt_types.KNum(rt_types.JInt(k)) -> k
-    _ -> panic as "rt_class: private name value is not a key"
-  }
-}
-
 fn private_display_name(st: Agent, k: Key) -> String {
   rt_store.t_key_text(st, k)
 }
@@ -37,7 +29,7 @@ fn private_display_name(st: Agent, k: Key) -> String {
 // §15.7.14 mint a fresh private name
 pub fn t_new_private_name(st: Agent, source: String) -> #(JsVal, Agent) {
   let #(k, st) = rt_store.t_new_private_key(st, source)
-  #(rt_types.mk_int(k), st)
+  #(rt_types.mk_private(k), st)
 }
 
 // §15.4.4 makemethod, no-op on native/bound
@@ -238,7 +230,7 @@ pub fn t_private_define(
   priv_key: JsVal,
   v: JsVal,
 ) -> Agent {
-  let key = private_key_of(priv_key)
+  let key = rt_types.private_key_of(priv_key)
   let st = check_private_add(st, obj, key)
   raw_define_private_data(st, obj, key, v, True)
 }
@@ -251,7 +243,7 @@ pub fn t_define_private(
   fn_v: JsVal,
   kind: MethodInstallKind,
 ) -> Agent {
-  let key = private_key_of(priv_key)
+  let key = rt_types.private_key_of(priv_key)
   case kind {
     // non-writable so private set rejects methods
     MIMethod | MIStatic -> {
@@ -386,7 +378,7 @@ pub fn t_private_get(
   obj: JsVal,
   priv_key: JsVal,
 ) -> #(JsVal, Agent) {
-  let key = private_key_of(priv_key)
+  let key = rt_types.private_key_of(priv_key)
   let name = fn() { private_display_name(st, key) }
   case classify(obj) {
     KHandle(h) ->
@@ -422,7 +414,7 @@ pub fn t_private_set(
   priv_key: JsVal,
   v: JsVal,
 ) -> #(JsVal, Agent) {
-  let key = private_key_of(priv_key)
+  let key = rt_types.private_key_of(priv_key)
   let name = fn() { private_display_name(st, key) }
   case classify(obj) {
     KHandle(h) ->
@@ -482,7 +474,7 @@ pub fn t_private_set(
 
 // §13.10.1 #x in obj
 pub fn t_private_in(st: Agent, obj: JsVal, priv_key: JsVal) -> Bool {
-  let key = private_key_of(priv_key)
+  let key = rt_types.private_key_of(priv_key)
   case classify(obj) {
     KHandle(h) ->
       option.is_some(rt_obj.t_ordinary_own_property(st, h, StringKey(key)))

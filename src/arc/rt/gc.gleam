@@ -7,6 +7,7 @@ import arc/rt/bytecode.{
   type EnvTuple, type FuncTemplate, type SuspendedFrame, FuncTemplate,
   SuspendedFrame,
 }
+import arc/rt/names
 import arc/rt/types.{
   type Agent, type AsyncGenRequest, type Handle, type IcEntry, type Job,
   type JsElements, type JsSlot, type JsStore, type JsVal, type ObjKind,
@@ -29,6 +30,7 @@ import arc/rt/types.{
 } as rt_types
 import gleam/dict.{type Dict}
 import gleam/dynamic.{type Dynamic}
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set
@@ -44,6 +46,15 @@ fn push_symbol_props_refs(
   props: List(#(k, Property)),
   acc: List(Int),
 ) -> List(Int)
+
+@external(erlang, "arc_rt_gc_ffi", "keys_in_term")
+fn push_term_keys(v: Dynamic, acc: Dict(Key, Nil)) -> Dict(Key, Nil)
+
+@external(erlang, "arc_rt_gc_ffi", "keys_in_slot")
+fn push_slot_keys(slot: JsSlot, acc: Dict(Key, Nil)) -> Dict(Key, Nil)
+
+@external(erlang, "arc_rt_gc_ffi", "keys_in_keyed")
+fn push_keyed_keys(m: Dict(Key, v), acc: Dict(Key, Nil)) -> Dict(Key, Nil)
 
 @external(erlang, "gleam_stdlib", "identity")
 fn to_dynamic(a: anything) -> Dynamic
@@ -79,8 +90,6 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
     free_protos: _,
     global_epoch: _,
     names: _,
-    key_texts: _,
-    next_name: _,
   ) = require_js(st)
   let acc = set.to_list(pinned_roots)
   let acc = list.append(unhandled_rejections, acc)
@@ -415,16 +424,35 @@ pub fn t_release_roots(st: Agent, ids: List(Int)) -> Agent {
   Agent(..st, store: JsStore(..js, pinned_roots: pinned))
 }
 
-// no renumbering; dead ids dropped, next falls past highest survivor
 pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {
+  t_collect_frames(st, extra_roots, [], False)
+}
+
+// also sweeps unused names regardless of table size
+pub fn t_collect_full(st: Agent, extra_roots: List(Handle)) -> Agent {
+  t_collect_frames(st, extra_roots, [], True)
+}
+
+pub const min_names_sweep: Int = 4096
+
+pub fn names_due(js: JsStore(st)) -> Bool {
+  dict.size(js.names.texts) >= int.max(min_names_sweep, 2 * js.names.swept)
+}
+
+// no renumbering; dead ids dropped, next falls past highest survivor
+pub fn t_collect_frames(
+  st: Agent,
+  extra_roots: List(Handle),
+  frame_terms: List(Dynamic),
+  sweep_names: Bool,
+) -> Agent {
   let js = require_js(st)
   let roots =
     list.fold(extra_roots, roots_of_state(st), fn(a, h) { [h.id, ..a] })
   let live = mark_loop(js.data, roots, dict.new())
   let #(data, next) = sweep(js.data, live)
-  Agent(
-    ..st,
-    store: JsStore(
+  let js =
+    JsStore(
       ..js,
       data:,
       next:,
@@ -432,8 +460,53 @@ pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {
       gc_live: dict.size(live),
       ics: dict.filter(js.ics, fn(_, entry) { is_read_ic(entry) }),
       free_protos: dict.new(),
-    ),
-  )
+    )
+  let st = Agent(..st, store: js)
+  case sweep_names || names_due(js) {
+    True -> sweep_names_with(st, frame_terms)
+    False -> st
+  }
+}
+
+// over swept cells; numbers are never reused
+fn sweep_names_with(st: Agent, frame_terms: List(Dynamic)) -> Agent {
+  let js = require_js(st)
+  let keys =
+    arena.fold(
+      fn(_, slot, acc) { push_slot_keys(slot, acc) },
+      js.names.pinned,
+      js.data,
+    )
+    |> key_roots_of_state(st, _)
+    |> list.fold(frame_terms, _, fn(acc, term) { push_term_keys(term, acc) })
+  let fixed = names.fixed_count()
+  let numbers =
+    dict.filter(js.names.numbers, fn(_, n) {
+      n < fixed || marked(key.name(n), keys)
+    })
+  let texts = dict.filter(js.names.texts, fn(k, _) { marked(k, keys) })
+  let names =
+    rt_types.NameTable(..js.names, numbers:, texts:, swept: dict.size(texts))
+  Agent(..st, store: JsStore(..js, names:))
+}
+
+// roots_of_state again plus the shape table, for keys
+fn key_roots_of_state(st: Agent, acc: Dict(Key, Nil)) -> Dict(Key, Nil) {
+  let js = require_js(st)
+  let acc =
+    dict.fold(js.shapes, acc, fn(acc, _, desc) {
+      push_keyed_keys(desc.offsets, acc) |> push_keyed_keys(desc.transitions, _)
+    })
+  // ics match their key on use, so a stale one is only garbage
+  let acc = push_term_keys(to_dynamic(jq_to_list(js.microtasks)), acc)
+  let acc = push_term_keys(to_dynamic(dict.values(st.host_fns)), acc)
+  let acc = push_term_keys(to_dynamic(st.import_hook), acc)
+  let acc = push_term_keys(to_dynamic(st.waiters), acc)
+  let realms = dict.insert(st.realms, st.realm.id, st.realm)
+  dict.fold(realms, acc, fn(acc, _id, realm) {
+    push_keyed_keys(realm.lexical_globals, acc)
+    |> push_term_keys(to_dynamic(dict.values(realm.lexical_globals)), _)
+  })
 }
 
 // call ics name cell ids that sweep hands out again
@@ -544,7 +617,14 @@ fn weak_live(v: JsVal, live: Dict(Int, Nil)) -> Option(JsVal) {
 }
 
 pub type GcStats {
-  GcStats(live: Int, next: Int, since_gc: Int)
+  GcStats(
+    live: Int,
+    next: Int,
+    since_gc: Int,
+    // dynamic name and private key texts held, and those pinned for good
+    names: Int,
+    pinned_names: Int,
+  )
 }
 
 pub fn stats(st: Agent) -> GcStats {
@@ -553,6 +633,8 @@ pub fn stats(st: Agent) -> GcStats {
     live: arena.count(js.data),
     next: js.next,
     since_gc: js.alloc_since_gc,
+    names: dict.size(js.names.texts),
+    pinned_names: dict.size(js.names.pinned),
   )
 }
 

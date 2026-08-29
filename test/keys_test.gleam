@@ -39,7 +39,7 @@ pub fn reads_of_unseen_names_do_not_grow_the_table_test() {
   let eng = engine.new()
   let #(_, eng) =
     run(eng, "var o = {a: 1}, arr = [1], s = 'str', r = [], i, k; 'ok'")
-  let before = engine.heap(eng).store.next_name
+  let before = engine.heap(eng).store.names.next
   let #(out, eng) =
     run(
       eng,
@@ -53,10 +53,10 @@ pub fn reads_of_unseen_names_do_not_grow_the_table_test() {
        String(r.every(function (x) { return x === undefined || x === false }))",
     )
   assert out == "true"
-  assert engine.heap(eng).store.next_name == before
+  assert engine.heap(eng).store.names.next == before
   let #(out, eng) = run(eng, "o['zz_never_0'] = 2; String(o.zz_never_0)")
   assert out == "2"
-  assert engine.heap(eng).store.next_name == before + 1
+  assert engine.heap(eng).store.names.next == before + 1
 }
 
 pub fn unseen_name_read_through_proxy_still_traps_test() {
@@ -73,7 +73,7 @@ pub fn unseen_name_read_through_proxy_still_traps_test() {
 pub fn json_round_trip_with_many_names_test() {
   let eng = engine.new()
   let #(_, eng) = run(eng, "'warm'")
-  let before = engine.heap(eng).store.next_name
+  let before = engine.heap(eng).store.names.next
   let #(out, eng) =
     run(
       eng,
@@ -85,7 +85,7 @@ pub fn json_round_trip_with_many_names_test() {
          && back.k9999 === 9999 && Object.keys(back)[42] === 'k42')",
     )
   assert out == "true"
-  let grown = engine.heap(eng).store.next_name - before
+  let grown = engine.heap(eng).store.names.next - before
   assert grown >= 10_000 && grown < 10_010
 }
 

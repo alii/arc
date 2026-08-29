@@ -2,8 +2,11 @@
 
 import arc/bytecode/key.{type Key}
 import arc/bytecode/opcode
+import arc/compiler
 import arc/internal/tree_array
 import arc/interp/ffi
+import arc/interp/load
+import arc/parser
 import arc/rt/arena
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
@@ -130,12 +133,16 @@ pub fn js_store_test() {
       ics: dict.from_list([
         #(1, rt_types.IcRead(nk.value, dict.from_list([#(7, 0)]))),
       ]),
-      names: dict.from_list([#("zz", 9000)]),
-      key_texts: dict.from_list([
-        #(key.name(9000), "zz"),
-        #(key.private(3), "#zz"),
-      ]),
-      next_name: 9001,
+      names: rt_types.NameTable(
+        numbers: dict.from_list([#("zz", 9000)]),
+        texts: dict.from_list([
+          #(key.name(9000), "zz"),
+          #(key.private(3), "#zz"),
+        ]),
+        next: 9001,
+        pinned: dict.from_list([#(key.name(9000), Nil)]),
+        swept: 17,
+      ),
     )
   assert tag_of(store) == tag("STORE_TAG")
   assert arity(store) == idx("STORE_ARITY")
@@ -150,8 +157,32 @@ pub fn js_store_test() {
   assert at(store, "STORE_FREE_PROTOS") == dyn(store.free_protos)
   assert at(store, "STORE_GLOBAL_EPOCH") == dyn(store.global_epoch)
   assert at(store, "STORE_NAMES") == dyn(store.names)
-  assert at(store, "STORE_KEY_TEXTS") == dyn(store.key_texts)
-  assert at(store, "STORE_NEXT_NAME") == dyn(9001)
+  let names = store.names
+  assert tag_of(names) == tag("NAMES_TAG")
+  assert arity(names) == idx("NAMES_ARITY")
+  assert at(names, "NAMES_NUMBERS") == dyn(names.numbers)
+  assert at(names, "NAMES_TEXTS") == dyn(names.texts)
+  assert at(names, "NAMES_NEXT") == dyn(9001)
+  assert at(names, "NAMES_PINNED") == dyn(names.pinned)
+}
+
+pub fn private_name_test() {
+  let p = rt_types.mk_private(key.private(77))
+  assert tag_of(p) == tag("PRIVATE_TAG")
+  assert arity(p) == 2
+  assert element(2, dyn(p)) == dyn(key.private(77))
+  assert rt_types.private_key_of(p) == key.private(77)
+}
+
+pub fn func_template_test() {
+  let assert Ok(#(body, sb)) =
+    parser.parse_script("function f() { return o.zz1 } o.zz2")
+  let assert Ok(t) = compiler.compile(body, sb)
+  let #(t, _) = load.template(seeded(), t)
+  assert tag_of(t) == tag("FT_TAG")
+  assert arity(t) == idx("FT_ARITY")
+  assert at(t, "FT_KEYS") == dyn(t.keys)
+  assert at(t, "FT_FUNCTIONS") == dyn(t.functions)
 }
 
 pub fn realm_test() {
