@@ -13,11 +13,12 @@
 -define(IC_GLOBAL, ic_global).
 -define(IC_GLOBAL_REFILLS, 16).
 
-%% site cache of a global object data property, valid while the epoch holds
+%% site cache of a global object data property, valid while the epoch holds;
+%% keyed like the read and call ics so a site can never answer for another name
 t_global_get(St, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
     case element(?STORE_ICS, Store) of
-        #{Site := {?IC_GLOBAL, Epoch, V, _}}
+        #{Site := {?IC_GLOBAL, KeyBin, Epoch, V, _}}
           when Epoch =:= element(?STORE_GLOBAL_EPOCH, Store) ->
             V;
         #{Site := ic_off} -> arc_rt_obj_ffi:t_global_get_fast(St, KeyBin);
@@ -30,14 +31,14 @@ t_global_get_miss(St, KeyBin, Site) when tuple_size(St) =:= ?AGENT_ARITY ->
         Store when tuple_size(Store) =:= ?STORE_ARITY ->
             Ics = element(?STORE_ICS, Store),
             N = case Ics of
-                #{Site := {?IC_GLOBAL, _, _, N0}} -> N0 + 1;
+                #{Site := {?IC_GLOBAL, KeyBin, _, _, N0}} -> N0 + 1;
                 #{Site := _} -> ?IC_GLOBAL_REFILLS + 1;
                 _ -> 0
             end,
             {?HANDLE_TAG, GId} = element(?REALM_GLOBAL, element(?AGENT_REALM, St1)),
             Slot = arc_rt_arena_ffi:get(GId, element(?STORE_DATA, Store)),
             Entry = case N < ?IC_GLOBAL_REFILLS andalso global_plain(Slot, KeyBin, V) of
-                true -> {?IC_GLOBAL, element(?STORE_GLOBAL_EPOCH, Store), V, N};
+                true -> {?IC_GLOBAL, KeyBin, element(?STORE_GLOBAL_EPOCH, Store), V, N};
                 false -> ic_off
             end,
             case N > ?IC_GLOBAL_REFILLS of

@@ -2403,7 +2403,7 @@ pub type IcEntry {
     shaped: Dict(Int, Dict(Int, IcCallWay)),
   )
   IcInit(from: Int, to: Int, blank: JsSlot, chain: List(#(Int, JsSlot)))
-  IcGlobal(epoch: Int, value: JsVal, refills: Int)
+  IcGlobal(key: BitArray, epoch: Int, value: JsVal, refills: Int)
   IcOff
 }
 

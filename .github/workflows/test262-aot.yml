@@ -1,10 +1,20 @@
 name: test262 conformance (aot)
 
 on:
-  schedule:
-    # Nightly. The AOT run compiles every test through the BEAM compiler, so
-    # it is far too slow to run on every push.
-    - cron: '17 3 * * *'
+  push:
+    branches: [master]
+    # Same shape as test262.yml. A shard takes 5-10 minutes, so this runs on
+    # every push that can change the AOT result, not on a nightly schedule.
+    paths:
+      - 'aot/**'
+      - 'src/**'
+      - 'testkit/**'
+      - 'gleam.toml'
+      - 'manifest.toml'
+      - 'vendor/**'
+      - '.github/test262/pass-aot.txt'
+      - '.github/scripts/**'
+      - '.github/workflows/test262-aot.yml'
   workflow_dispatch:
 
 permissions:
@@ -51,7 +61,7 @@ jobs:
         run: |
           TEST262_EXEC=1 UPDATE_SNAPSHOT=1 TEST262_SHARD='${{ matrix.shard }}/8' RESULTS_FILE='../results-aot-${{ matrix.shard }}.json' gleam test
           cp ../.github/test262/pass-aot.txt '../pass-aot-${{ matrix.shard }}.txt'
-        timeout-minutes: 300
+        timeout-minutes: 30
 
       - uses: actions/upload-artifact@v4
         with:

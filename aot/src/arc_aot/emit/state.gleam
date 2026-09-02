@@ -618,6 +618,16 @@ pub fn clear_hoisted_kfn(e: Emitter2) -> Emitter2 {
 @external(erlang, "erlang", "integer_to_binary")
 fn int_to_string(i: Int) -> String
 
+// ics live in one per-agent map keyed by site, so modules loaded into the
+// same agent must not number their sites alike: each module counts up from a
+// base drawn from its name (2^30 bases, 2^24 sites each, all small ints)
+fn site_base(module_name: String) -> Int {
+  phash2(module_name, 1_073_741_824) * 16_777_216
+}
+
+@external(erlang, "erlang", "phash2")
+fn phash2(term: String, range: Int) -> Int
+
 pub fn push_frame(e: Emitter2, frame: Frame2) -> Emitter2 {
   Emitter2(..e, frame_stack: [frame, ..e.frame_stack], pending_label: None)
 }
@@ -866,7 +876,7 @@ pub fn new_emitter(
     next_label: 0,
     next_fn: 0,
     fn_names: set.new(),
-    next_site: 0,
+    next_site: site_base(module_name),
     module_name:,
     frame_stack: [],
     pending_label: None,

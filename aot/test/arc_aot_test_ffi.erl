@@ -1,6 +1,9 @@
 -module(arc_aot_test_ffi).
 -export([main/0]).
 
+%% {WorkerPid, Name, StartMs} for every test currently running
+-define(IN_FLIGHT, arc_aot_in_flight).
+
 main() ->
     GleamFiles = filelib:wildcard("**/*.gleam", "test"),
     ErlFiles = filelib:wildcard("**/*.erl", "test"),
@@ -45,11 +48,12 @@ main() ->
     Ref = make_ref(),
     T0 = erlang:monotonic_time(millisecond),
     MaxWorkers = erlang:system_info(schedulers_online),
+    ?IN_FLIGHT = ets:new(?IN_FLIGHT, [named_table, public, set]),
+    spawn_link(fun() -> memory_guard(memory_budget_bytes()) end),
     spawn_link(fun() -> feeder(AllTests, Parent, Ref, MaxWorkers) end),
 
-    Pending = maps:from_list([{Name, true} || {Name, _} <- AllTests]),
     {Passed, Failed, Results} =
-        collect(Total, Ref, 0, [], 0, [], Total, Pending, T262),
+        collect(Total, Ref, 0, [], 0, [], Total, T262),
     clear_line(),
     T1 = erlang:monotonic_time(millisecond),
     Elapsed = T1 - T0,
@@ -94,52 +98,52 @@ main() ->
         _ -> erlang:halt(1)
     end.
 
+%% MaxWorkers tests run at once, each in a numbered slot. The vm never frees a
+%% module name (65536 of them, ever), so a test's compiled modules are named
+%% after the slot and reused, not after the test.
 feeder(Tests, Parent, Ref, MaxWorkers) ->
     process_flag(trap_exit, true),
-    FeedRef = make_ref(),
-    Self = self(),
     {Initial, Rest} = take(Tests, MaxWorkers),
+    Slots = lists:seq(0, length(Initial) - 1),
     PidMap = maps:from_list(
-        [{spawn_worker(T, Parent, Ref, Self, FeedRef), element(1, T)}
-         || T <- Initial]),
-    feeder_loop(Rest, Parent, Ref, Self, FeedRef, length(Initial), PidMap).
+        [{spawn_worker(T, Slot, Parent, Ref), {element(1, T), Slot}}
+         || {T, Slot} <- lists:zip(Initial, Slots)]),
+    feeder_loop(Rest, Parent, Ref, PidMap).
 
-feeder_loop(_Remaining, _Parent, _Ref, _Self, _FeedRef, 0, _PidMap) -> ok;
-feeder_loop(Remaining, Parent, Ref, Self, FeedRef, Active, PidMap) ->
+%% a worker exit frees its slot for the next test; a worker that died before
+%% it could report is reported here
+feeder_loop(_Remaining, _Parent, _Ref, PidMap) when map_size(PidMap) =:= 0 ->
+    ok;
+feeder_loop(Remaining, Parent, Ref, PidMap) ->
     receive
-        {FeedRef, done} ->
-            case Remaining of
-                [{_Name, _Fun} = T | Rest] ->
-                    Pid = spawn_worker(T, Parent, Ref, Self, FeedRef),
-                    feeder_loop(Rest, Parent, Ref, Self, FeedRef, Active,
-                                maps:put(Pid, element(1, T), PidMap));
-                [] ->
-                    feeder_loop([], Parent, Ref, Self, FeedRef, Active - 1, PidMap)
-            end;
-        {'EXIT', _Pid, normal} ->
-            feeder_loop(Remaining, Parent, Ref, Self, FeedRef, Active, PidMap);
         {'EXIT', Pid, Reason} ->
-            case maps:find(Pid, PidMap) of
-                {ok, Name} ->
-                    Parent ! {Ref, Name, {error, {exit, Reason, []}}},
-                    NewPidMap = maps:remove(Pid, PidMap),
+            case maps:take(Pid, PidMap) of
+                {{Name, Slot}, Others} ->
+                    ets:delete(?IN_FLIGHT, Pid),
+                    case Reason of
+                        normal -> ok;
+                        _ -> Parent ! {Ref, Name, {error, {exit, Reason, []}}}
+                    end,
                     case Remaining of
-                        [{_N, _F} = T | Rest] ->
-                            NewPid = spawn_worker(T, Parent, Ref, Self, FeedRef),
-                            feeder_loop(Rest, Parent, Ref, Self, FeedRef, Active,
-                                        maps:put(NewPid, element(1, T), NewPidMap));
+                        [T | Rest] ->
+                            NewPid = spawn_worker(T, Slot, Parent, Ref),
+                            feeder_loop(Rest, Parent, Ref,
+                                        Others#{NewPid => {element(1, T), Slot}});
                         [] ->
-                            feeder_loop([], Parent, Ref, Self, FeedRef, Active - 1, NewPidMap)
+                            feeder_loop([], Parent, Ref, Others)
                     end;
                 error ->
-                    feeder_loop(Remaining, Parent, Ref, Self, FeedRef, Active, PidMap)
+                    feeder_loop(Remaining, Parent, Ref, PidMap)
             end
     end.
 
-spawn_worker({Name, {t262, Ctx, File, Expected}}, Parent, Ref, Feeder, FeedRef) ->
+spawn_worker({Name, {t262, Ctx, File, Expected}}, Slot, Parent, Ref) ->
     spawn_link(fun() ->
-        Base = <<"arc_aot_t262_",
-                 (integer_to_binary(erlang:unique_integer([positive])))/binary>>,
+        Base = <<"arc_aot_t262_s", (integer_to_binary(Slot))/binary>>,
+        Mods = [binary_to_atom(<<Base/binary, Sfx/binary>>)
+                || Sfx <- [<<"_0">>, <<"_1">>]],
+        %% a test killed mid-run leaves the slot's modules loaded
+        [arc_aot_exec_ffi:unload(M) || M <- Mods],
         Fun = fun() -> test262_aot_exec:run_file(Ctx, File, Base) end,
         Outcome = case run_capped(Name, Fun) of
             {ok, O} -> O;
@@ -147,25 +151,23 @@ spawn_worker({Name, {t262, Ctx, File, Expected}}, Parent, Ref, Feeder, FeedRef) 
             {error, {error, heap_limit_exceeded, _}} -> {fail, <<"heap limit exceeded">>};
             {error, {C, R, S}} -> {fail, render_crash(C, R, S)}
         end,
-        [arc_aot_exec_ffi:unload(binary_to_atom(<<Base/binary, Sfx/binary>>))
-         || Sfx <- [<<"_0">>, <<"_1">>]],
-        Parent ! {Ref, Name, {t262, File, Expected, Outcome}},
-        Feeder ! {FeedRef, done}
+        [arc_aot_exec_ffi:unload(M) || M <- Mods],
+        Parent ! {Ref, Name, {t262, File, Expected, Outcome}}
     end);
-spawn_worker({Name, Fun}, Parent, Ref, Feeder, FeedRef) ->
+spawn_worker({Name, Fun}, _Slot, Parent, Ref) ->
     spawn_link(fun() ->
         Result = case run_capped(Name, Fun) of
             {ok, _} -> ok;
             {error, _} = E -> E
         end,
-        Parent ! {Ref, Name, Result},
-        Feeder ! {FeedRef, done}
+        Parent ! {Ref, Name, Result}
     end).
 
 run_capped(Name, Fun) ->
     Self = self(),
     TestRef = make_ref(),
     process_flag(trap_exit, true),
+    ets:insert(?IN_FLIGHT, {Self, Name, erlang:monotonic_time(millisecond)}),
     Pid = spawn_link(fun() ->
         process_flag(max_heap_size,
                      #{size => max_heap_for(Name), kill => true,
@@ -175,13 +177,51 @@ run_capped(Name, Fun) ->
         end,
         Self ! {TestRef, Res}
     end),
-    receive
-        {TestRef, R} -> R;
+    R = receive
+        {TestRef, Res} -> Res;
         {'EXIT', Pid, killed} -> {error, {error, heap_limit_exceeded, []}}
     after timeout_for(Name) ->
         exit(Pid, kill),
         {error, {error, test_timeout, []}}
-    end.
+    end,
+    ets:delete(?IN_FLIGHT, Self),
+    R.
+
+%% longest-running first
+in_flight() ->
+    Now = erlang:monotonic_time(millisecond),
+    lists:reverse(lists:sort(
+        [{Now - T0, Pid, Name} || {Pid, Name, T0} <- ets:tab2list(?IN_FLIGHT)])).
+
+%% max_heap_size only sees a test's heap: a runaway that keeps its garbage in
+%% off-heap binaries (strings) grows the vm until the machine kills it. When
+%% the whole vm outgrows the budget, kill the longest-running test instead.
+memory_guard(Budget) ->
+    timer:sleep(250),
+    case erlang:memory(total) of
+        Total when Total > Budget ->
+            case in_flight() of
+                [{Ms, Pid, Name} | _] ->
+                    io:format("~n  vm at ~b MB, over the ~b MB budget "
+                              "(TEST_MEMORY_BUDGET_MB): killing ~ts after ~.1fs~n",
+                              [Total div 1048576, Budget div 1048576,
+                               Name, Ms / 1000.0]),
+                    ets:delete(?IN_FLIGHT, Pid),
+                    exit(Pid, kill),
+                    timer:sleep(2000);
+                [] -> ok
+            end;
+        _ -> ok
+    end,
+    memory_guard(Budget).
+
+memory_budget_bytes() ->
+    Mb = case os:getenv("TEST_MEMORY_BUDGET_MB") of
+        false -> 4096;
+        "" -> 4096;
+        S -> list_to_integer(S)
+    end,
+    Mb * 1048576.
 
 render_crash(Class, Reason, Stack) ->
     Top = case Stack of [H | _] -> H; _ -> no_stack end,
@@ -193,19 +233,16 @@ take(List, 0, Acc) -> {lists:reverse(Acc), List};
 take([], _N, Acc) -> {lists:reverse(Acc), []};
 take([H|T], N, Acc) -> take(T, N - 1, [H | Acc]).
 
-collect(0, _Ref, Passed, Failed, _Mis, Results, _Total, _Pending, _T262) ->
+collect(0, _Ref, Passed, Failed, _Mis, Results, _Total, _T262) ->
     {Passed, Failed, Results};
-collect(N, Ref, Passed, Failed, Mis, Results, Total, Pending, T262) ->
+collect(N, Ref, Passed, Failed, Mis, Results, Total, T262) ->
     receive
-        {Ref, Name, ok} ->
+        {Ref, _Name, ok} ->
             Done = Total - N + 1,
-            NewPending = maps:remove(Name, Pending),
             maybe_progress(Done, Total, Passed + 1, length(Failed) + Mis),
-            collect(N - 1, Ref, Passed + 1, Failed, Mis, Results, Total,
-                    NewPending, T262);
+            collect(N - 1, Ref, Passed + 1, Failed, Mis, Results, Total, T262);
         {Ref, Name, {t262, File, Expected, Outcome}} ->
             Done = Total - N + 1,
-            NewPending = maps:remove(Name, Pending),
             Result = {test_result, File, Expected, Outcome},
             {ctx, Ctx} = T262,
             {P1, M1} = case test262_aot_exec:is_mismatch(Ctx, Result) of
@@ -220,30 +257,20 @@ collect(N, Ref, Passed, Failed, Mis, Results, Total, Pending, T262) ->
                     {Passed, Mis + 1}
             end,
             maybe_progress(Done, Total, P1, length(Failed) + M1),
-            collect(N - 1, Ref, P1, Failed, M1, [Result | Results], Total,
-                    NewPending, T262);
+            collect(N - 1, Ref, P1, Failed, M1, [Result | Results], Total, T262);
         {Ref, Name, {error, {Class, Reason, Stack}}} ->
             Done = Total - N + 1,
-            NewPending = maps:remove(Name, Pending),
             maybe_progress(Done, Total, Passed, length(Failed) + 1 + Mis),
             collect(N - 1, Ref, Passed, [{Name, Class, Reason, Stack} | Failed],
-                    Mis, Results, Total, NewPending, T262)
+                    Mis, Results, Total, T262)
     after 10000 ->
-        Still = maps:keys(Pending),
-        Remaining = length(Still),
         clear_line(),
-        case Remaining > 10 of
-            true ->
-                io:format("  [~b/~b] waiting for ~b tests...~n",
-                          [Total - N, Total, Remaining]);
-            false ->
-                io:format("  [~b/~b] waiting for ~b tests:~n",
-                          [Total - N, Total, Remaining]),
-                lists:foreach(fun(Name) ->
-                    io:format("    ~ts~n", [Name])
-                end, lists:sort(Still))
-        end,
-        collect(N, Ref, Passed, Failed, Mis, Results, Total, Pending, T262)
+        io:format("  [~b/~b] nothing finished in 10s, ~b left; running now:~n",
+                  [Total - N, Total, N]),
+        lists:foreach(fun({Ms, _Pid, Name}) ->
+            io:format("    ~ts (~.1fs)~n", [Name, Ms / 1000.0])
+        end, in_flight()),
+        collect(N, Ref, Passed, Failed, Mis, Results, Total, T262)
     end.
 
 maybe_progress(Done, Total, _Pass, _Fail) when Done =:= Total ->
@@ -259,6 +286,8 @@ format_test_name(Module, Function) ->
 
 print_failure(error, test_timeout, _Stack) ->
     io:format("    timed out~n");
+print_failure(exit, killed, _Stack) ->
+    io:format("    killed by the memory guard~n");
 print_failure(error, {gleam_error, assert, Message, _Module, _Function, _Line, _Extra}, _Stack) ->
     io:format("    ~ts~n", [Message]);
 print_failure(error, {gleam_error, let_assert, Message, _Module, _Function, _Line, _Extra}, _Stack) ->
