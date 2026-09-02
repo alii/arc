@@ -1,4 +1,4 @@
-import arc/bytecode/key
+import arc/bytecode/key.{type Key}
 import arc/compiler
 import arc/engine.{ModuleReturned, Returned}
 import arc/host.{State}
@@ -14,7 +14,7 @@ import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
 import arc/rt/snapshot
 import arc/rt/store as rt_store
-import arc/rt/types.{type Agent, Agent, JsStore}
+import arc/rt/types.{type Agent, type JsVal, Agent, JsStore}
 import gleam/dict
 import gleam/dynamic.{type Dynamic}
 import gleam/list
@@ -432,4 +432,65 @@ pub fn a_live_big_table_is_not_walked_every_collection_test() {
   assert st.store.names.gcs == 2
   let st = list.fold([1, 2, 3], st, fn(st, _) { rt_gc.t_collect(st, []) })
   assert st.store.names.gcs == 0
+}
+
+fn shape_of(st: Agent, name: String) -> Int {
+  let #(v, st) = rt_helpers.global(st, name)
+  let assert types.KHandle(h) = types.classify(v)
+  let assert types.SShapedObject(shape_id:, ..) = rt_store.t_cell_get(st, h)
+  shape_id
+}
+
+pub fn dead_shapes_free_their_names_test() {
+  let st = sweep(agent())
+  let base = names(st)
+  let shapes0 = rt_gc.stats(st).shapes
+  let #(_, st) =
+    run(
+      st,
+      "function R(k) { this[k] = 1 } for (var i = 0; i < 20000; i++) new R('kq' + i); 'ok'",
+    )
+  assert rt_gc.stats(st).shapes >= shapes0 + 20_000
+  let st = sweep(st)
+  assert names(st) <= base + 5
+  assert rt_gc.stats(st).shapes <= shapes0 + 5
+}
+
+@external(erlang, "arc_rt_obj_ffi", "t_get_prop_slow")
+fn read_filling(st: Agent, recv: JsVal, k: Key, site: Int) -> #(JsVal, Agent)
+
+@external(erlang, "arc_rt_obj_ffi", "t_get_prop_ic")
+fn read_cached(st: Agent, recv: JsVal, k: Key, site: Int) -> Dynamic
+
+pub fn live_shape_chains_keep_their_ids_test() {
+  let st = sweep(agent())
+  let #(_, st) =
+    run(
+      st,
+      "function P(a, b) { this.pa = a; this.pb = b }
+       var keep = new P(1, 2), gone = new P(3, 4); gone.pextra = 5; gone = null;
+       'ok'",
+    )
+  let sid = shape_of(st, "keep")
+  let #(keep, st) = rt_helpers.global(st, "keep")
+  let assert Some(pb) = rt_store.t_find_key(st, "pb")
+  let site = 999_001
+  let #(v, st) = read_filling(st, keep, pb, site)
+  assert rt_inspect.inspect(st, v) == "2"
+  assert read_cached(st, keep, pb, site) == to_dynamic(2)
+  let shapes0 = rt_gc.stats(st).shapes
+  let st = sweep(st)
+  // the pextra leaf went, the chain under keep did not
+  assert rt_gc.stats(st).shapes == shapes0 - 1
+  assert rt_store.t_find_key(st, "pextra") == None
+  assert read_cached(st, keep, pb, site) == to_dynamic(2)
+  let #(out, st) =
+    run(st, "var again = new P(6, 7); String(keep.pb + again.pb)")
+  assert out == "'9'"
+  assert shape_of(st, "again") == sid
+  // a regrown leaf takes a fresh id, never the dropped one
+  let next0 = st.store.next_shape
+  let #(_, st) = run(st, "var later = new P(0, 0); later.pextra = 1")
+  assert shape_of(st, "later") == next0
+  let _ = sweep(st)
 }

@@ -64,12 +64,12 @@ fn require_js(st: Agent) -> JsStore(Agent) {
   st.store
 }
 
-// every root outside the arena, read by both the cell mark and the name sweep
+// roots outside the arena, for the cell mark and the name sweep
 pub type Roots {
   Roots(ids: List(Int), terms: List(Dynamic), keyed: List(Dynamic))
 }
 
-// exhaustive destructures: a new field must be classed as a root or not here
+// exhaustive destructures: class each new field as a root or not
 pub fn roots_of_state(st: Agent) -> Roots {
   let Agent(
     store:,
@@ -100,7 +100,7 @@ pub fn roots_of_state(st: Agent) -> Roots {
     shapes:,
     next_shape: _,
     unit_uid: _,
-    // ics are validated on use, so weak for cells and names alike
+    // ics are validated on use, so weak
     ics: _,
     free_protos: _,
     global_epoch: _,
@@ -119,7 +119,7 @@ pub fn roots_of_state(st: Agent) -> Roots {
   |> dict.fold(Roots(ids:, terms:, keyed:), realm_roots)
 }
 
-pub fn shape_keyed(shapes: Dict(Int, rt_types.ShapeDesc)) -> List(Dynamic) {
+fn shape_keyed(shapes: Dict(Int, rt_types.ShapeDesc)) -> List(Dynamic) {
   dict.fold(shapes, [], fn(acc, _, desc) {
     [to_dynamic(desc.offsets), to_dynamic(desc.transitions), ..acc]
   })
@@ -231,8 +231,7 @@ pub fn refs_in_cell(slot: JsSlot, acc: List(Int)) -> List(Int) {
   }
 }
 
-// exhaustive twin of refs_in_cell: js values name no keys, templates,
-// private names, host terms and keyed maps do
+// exhaustive twin of refs_in_cell; js values name no keys
 fn keys_in_cell(slot: JsSlot, acc: Dict(Key, Nil)) -> Dict(Key, Nil) {
   case slot {
     SObject(
@@ -615,8 +614,7 @@ pub fn t_collect_full(st: Agent, extra_roots: List(Handle)) -> Agent {
   t_collect_frames(st, extra_roots, [], True)
 }
 
-// growth since the last sweep, or a table that dwarfs the live heap once
-// enough collections have passed to pay for walking it again
+// doubled since the last sweep, or dwarfs the heap and paid for
 pub fn names_due(js: JsStore(st)) -> Bool {
   let n = js.names
   let size = dict.size(n.texts)
@@ -652,24 +650,31 @@ pub fn t_collect_frames(
       names: rt_types.NameTable(..js.names, gcs: js.names.gcs + 1),
     )
   case sweep_names || names_due(js) {
-    True -> Agent(..st, store: sweep_names_with(js, roots, terms))
+    True -> sweep_names_with(Agent(..st, store: js), frame_terms)
     False -> Agent(..st, store: js)
   }
 }
 
-// over swept cells; numbers are never reused
-fn sweep_names_with(
-  js: JsStore(Agent),
-  roots: Roots,
-  terms: List(Dynamic),
-) -> JsStore(Agent) {
-  let keys =
+// dead shapes first, then names; neither id space is reused
+fn sweep_names_with(st: Agent, frame_terms: List(Dynamic)) -> Agent {
+  let js = require_js(st)
+  let #(keys, live_shapes) =
     arena.fold(
-      fn(_, slot, acc) { keys_in_cell(slot, acc) },
-      dict.new(),
+      fn(_, slot, acc) {
+        let #(keys, shapes) = acc
+        let shapes = case slot {
+          SShapedObject(shape_id:, ..) -> mark(shape_id, Nil, shapes)
+          _ -> shapes
+        }
+        #(keys_in_cell(slot, keys), shapes)
+      },
+      #(dict.new(), dict.new()),
       js.data,
     )
-    |> key_roots(roots, terms, _)
+  let #(_, shapes) = keep_shapes(js.shapes, live_shapes, 0, dict.new())
+  let st = Agent(..st, store: JsStore(..js, shapes:))
+  let roots = roots_of_state(st)
+  let keys = key_roots(roots, list.append(frame_terms, roots.terms), keys)
   let fixed = names.fixed_count()
   let numbers =
     dict.filter(js.names.numbers, fn(_, n) {
@@ -684,7 +689,36 @@ fn sweep_names_with(
       swept: dict.size(texts),
       gcs: 0,
     )
-  JsStore(..js, names:)
+  Agent(..st, store: JsStore(..st.store, names:))
+}
+
+// kept if a cell has it or a kept shape descends from it
+fn keep_shapes(
+  all: Dict(Int, rt_types.ShapeDesc),
+  live: Dict(Int, Nil),
+  id: Int,
+  kept: Dict(Int, rt_types.ShapeDesc),
+) -> #(Bool, Dict(Int, rt_types.ShapeDesc)) {
+  case dict.get(all, id) {
+    Error(Nil) -> #(False, kept)
+    Ok(desc) -> {
+      let #(transitions, kept) =
+        dict.fold(desc.transitions, #(dict.new(), kept), fn(acc, k, to) {
+          let #(ts, kept) = acc
+          case keep_shapes(all, live, to, kept) {
+            #(True, kept) -> #(dict.insert(ts, k, to), kept)
+            #(False, kept) -> #(ts, kept)
+          }
+        })
+      case id == 0 || marked(id, live) || dict.size(transitions) > 0 {
+        True -> #(
+          True,
+          dict.insert(kept, id, rt_types.ShapeDesc(..desc, transitions:)),
+        )
+        False -> #(False, kept)
+      }
+    }
+  }
 }
 
 // call ics name cell ids that sweep hands out again
@@ -799,6 +833,7 @@ pub type GcStats {
     live: Int,
     next: Int,
     since_gc: Int,
+    shapes: Int,
     // dynamic name and private key texts held, and those pinned for good
     names: Int,
     pinned_names: Int,
@@ -811,6 +846,7 @@ pub fn stats(st: Agent) -> GcStats {
     live: arena.count(js.data),
     next: js.next,
     since_gc: js.alloc_since_gc,
+    shapes: dict.size(js.shapes),
     names: dict.size(js.names.texts),
     pinned_names: dict.size(js.names.pinned),
   )

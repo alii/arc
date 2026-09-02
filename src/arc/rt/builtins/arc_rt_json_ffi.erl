@@ -73,8 +73,7 @@ quote_esc(Bin, P) ->
 hexc(N) when N < 10 -> $0 + N;
 hexc(N) -> $a + N - 10.
 
-%% own data props from parsed entries; miss on duplicate keys.
-%% names are numbered against the table in hand, the store written once
+%% own data props, store written once per object; miss on duplicate keys
 plain_props(Store, Entries, Seq) ->
     T = element(?STORE_NAMES, Store),
     Next = element(?NAMES_NEXT, T),
