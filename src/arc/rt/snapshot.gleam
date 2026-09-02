@@ -2,6 +2,7 @@ import arc/host_hooks.{type HostHooks}
 import arc/rt/arena
 import arc/rt/builtins as rt_builtins
 import arc/rt/builtins/regexp as b_regexp
+import arc/rt/names as rt_names
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type Job, type JsSlot, type JsStore, type NameTable,
@@ -17,7 +18,7 @@ import gleam/result
 import gleam/set.{type Set}
 
 // bump on any change to the image or runtime records
-pub const abi_version = 14
+pub const abi_version = 15
 
 pub type SnapshotError {
   SnapshotContainsCompiledCode(cell: Handle)
@@ -59,11 +60,17 @@ type RealmImage {
 }
 
 @external(erlang, "arc_snapshot_ffi", "encode")
-fn encode(version: Int, store: StoreImage, realms: RealmImage) -> BitArray
+fn encode(
+  version: Int,
+  names: Int,
+  store: StoreImage,
+  realms: RealmImage,
+) -> BitArray
 
 @external(erlang, "arc_snapshot_ffi", "decode")
 fn decode(
   version: Int,
+  names: Int,
   data: BitArray,
 ) -> Result(#(StoreImage, RealmImage), DeserializeError)
 
@@ -134,14 +141,18 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
       names:,
     )
   let realms = RealmImage(current: realm, realms:, template_objects:)
-  Ok(encode(abi_version, store, realms))
+  Ok(encode(abi_version, rt_names.fingerprint(), store, realms))
 }
 
 pub fn deserialize(
   data: BitArray,
   hooks: HostHooks,
 ) -> Result(Agent, DeserializeError) {
-  use #(store, realms) <- result.map(decode(abi_version, data))
+  use #(store, realms) <- result.map(decode(
+    abi_version,
+    rt_names.fingerprint(),
+    data,
+  ))
   let RealmImage(current: realm, realms:, template_objects:) = realms
   Agent(
     store: restore(store),

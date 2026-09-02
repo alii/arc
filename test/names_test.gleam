@@ -19,6 +19,12 @@ fn ffi_fixed_text(n: Int) -> String
 @external(erlang, "arc_names_test_ffi", "macro_fixed_count")
 fn macro_fixed_count() -> Int
 
+@external(erlang, "arc_names_test_ffi", "macro_fingerprint")
+fn macro_fingerprint() -> Int
+
+@external(erlang, "erlang", "phash2")
+fn phash2(term: List(String)) -> Int
+
 @external(erlang, "arc_names_test_ffi", "macro_length")
 fn macro_length() -> Int
 
@@ -56,6 +62,26 @@ pub fn macros_test() {
   assert name_key(3) == 12
   assert index_key(0) == -1
   assert index_key(7) == -8
+}
+
+// the three generated files carry one fingerprint of the ordered list
+pub fn fingerprint_in_sync_test() {
+  let expected = list.length(names.fixed) * 134_217_728 + phash2(names.fixed)
+  assert names.fingerprint() == expected
+  assert macro_fingerprint() == expected
+  assert nk.names_fingerprint == expected
+}
+
+// an image made against another fixed list would mis-key every property
+pub fn snapshot_from_another_name_list_is_refused_test() {
+  let assert Ok(bin) = snapshot.serialize(rt_helpers.agent())
+  let assert <<"arc-engine":utf8, v:32, f:64, rest:bits>> = bin
+  assert f == names.fingerprint()
+  let good = <<"arc-engine":utf8, v:32, f:64, rest:bits>>
+  let assert Ok(_) = snapshot.deserialize(good, rt_helpers.quiet_hooks())
+  let bad = <<"arc-engine":utf8, v:32, { f + 1 }:64, rest:bits>>
+  assert snapshot.deserialize(bad, rt_helpers.quiet_hooks())
+    == Error(snapshot.IncompatibleSnapshot)
 }
 
 pub fn no_fixed_name_is_an_array_index_test() {

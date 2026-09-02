@@ -675,6 +675,10 @@ pub const fixed: List(String) = [
 @external(erlang, "arc_rt_names_ffi", "fixed_count")
 pub fn fixed_count() -> Int
 
+// tells this build's fixed list from another build's
+@external(erlang, "arc_rt_names_ffi", "fingerprint")
+pub fn fingerprint() -> Int
+
 @external(erlang, "arc_rt_names_ffi", "fixed_map")
 pub fn fixed_map() -> Dict(String, Int)
 

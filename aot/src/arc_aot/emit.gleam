@@ -3,6 +3,7 @@ import arc/compiler/ast_util
 import arc/compiler/scope
 import arc/parser
 import arc/parser/ast
+import arc/rt/names
 import arc_aot/emit/anf
 import arc_aot/emit/async
 import arc_aot/emit/class
@@ -411,6 +412,7 @@ pub fn compile(
         ir.CallHost("js", "claim_unit", [
           ir.ConstI64(site_base),
           ir.ConstBinary(bit_array.from_string(opts.module_name)),
+          ir.ConstI64(names.fingerprint()),
         ]),
         ir.Let(
           ["_names"],

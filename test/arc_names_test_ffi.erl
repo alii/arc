@@ -1,10 +1,11 @@
 -module(arc_names_test_ffi).
--export([macro_fixed_count/0, macro_length/0, macro_proto/0, name_key/1, index_key/1,
-         index_of_text/1]).
+-export([macro_fixed_count/0, macro_fingerprint/0, macro_length/0, macro_proto/0,
+         name_key/1, index_key/1, index_of_text/1]).
 
 -include("arc/rt/arc_rt_names.hrl").
 
 macro_fixed_count() -> ?N_FIXED_COUNT.
+macro_fingerprint() -> ?NAMES_FINGERPRINT.
 macro_length() -> ?N_length.
 macro_proto() -> ?N___proto__.
 name_key(N) -> ?NAME_KEY(N) + ?KEY_KIND_NAME.

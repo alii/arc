@@ -9,6 +9,7 @@
 -define(INDEX_KEY(I), (-(I) - 1)).
 
 -define(N_FIXED_COUNT, 668).
+-define(NAMES_FINGERPRINT, 89731844376).
 
 -define(N_length, 0).
 -define(N_prototype, 1).

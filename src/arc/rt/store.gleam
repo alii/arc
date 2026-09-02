@@ -234,19 +234,34 @@ pub fn t_next_unit_uid(st: Agent) -> #(Int, Agent) {
 }
 
 // a compiled unit's sites count up from its base, so no two units share one
-pub fn t_claim_unit(st: Agent, base: Int, module: String) -> Agent {
+pub fn t_claim_unit(
+  st: Agent,
+  base: Int,
+  module: String,
+  fingerprint: Int,
+) -> Agent {
   let js = require_js(st)
+  let names_match = fingerprint == names.fingerprint()
   case dict.get(js.units, base) {
+    _ if !names_match ->
+      t_throw_type_error(
+        st,
+        "module " <> module <> " was built for another list of fixed names",
+      )
     Ok(owner) if owner == module -> st
-    Ok(owner) -> {
-      let msg =
-        "cache site clash between modules " <> owner <> " and " <> module
-      let #(e, st) = js.ops.new_error(st, TypeErr, msg)
-      t_throw(st, e)
-    }
+    Ok(owner) ->
+      t_throw_type_error(
+        st,
+        "cache site clash between modules " <> owner <> " and " <> module,
+      )
     Error(Nil) ->
       with_js(st, JsStore(..js, units: dict.insert(js.units, base, module)))
   }
+}
+
+fn t_throw_type_error(st: Agent, msg: String) -> Agent {
+  let #(e, st) = require_js(st).ops.new_error(st, TypeErr, msg)
+  t_throw(st, e)
 }
 
 pub fn find_name(js: JsStore(st), text: String) -> Option(Int) {

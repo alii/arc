@@ -1,6 +1,7 @@
 import arc/engine
 import arc/host_hooks.{type ConsoleLevel, DebugLevel, InfoLevel, LogLevel}
 import arc/internal/host_time
+import arc/rt/inspect
 import arc/rt/types.{type Agent}
 import arc_aot/emit as emit_2core
 import arc_aot/run.{type RunResult}
@@ -116,6 +117,15 @@ pub fn run_loaded(module: Atom, st: Agent) -> #(Agent, DiffRun) {
   buf_reset()
   let #(st, result) = run.run_loaded(module, st)
   #(st, DiffRun(stdout: buf_read(), result:))
+}
+
+// runs a loaded unit and renders what it threw
+pub fn run_thrown(module: Atom, st: Agent) -> String {
+  case run.apply_main(module, st) {
+    #(run.JsThrew(e), st) -> inspect.format_error(st, e)
+    #(run.JsReturned(_), _) -> "returned"
+    #(run.JsCrashed(reason), _) -> "crashed: " <> reason
+  }
 }
 
 pub fn load_compiled(source: String) -> Result(Atom, String) {

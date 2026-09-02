@@ -1,6 +1,11 @@
 import arc/rt/gc as rt_gc
+import arc/rt/names
 import arc/rt/store as rt_store
+import arc_aot/emit as emit_2core
 import arc_aot/emit/state
+import arc_aot/run
+import carder/ir
+import carder/pipeline
 import emit_2core_harness as harness
 import gleam/erlang/atom
 import gleam/list
@@ -103,11 +108,48 @@ pub fn call_cache_across_units_test() {
 pub fn site_clash_test() {
   let assert Ok(b) = harness.load_compiled(unit_a_src)
   let base = state.site_base(atom.to_string(b))
-  let st = rt_store.t_claim_unit(harness.seed(), base, "zz_other")
-  let st = rt_store.t_claim_unit(st, base, "zz_other")
-  let #(_, r) = harness.run_loaded(b, st)
-  let assert Error(msg) = r.result
-  assert string.starts_with(msg, "uncaught")
+  let fp = names.fingerprint()
+  let st = rt_store.t_claim_unit(harness.seed(), base, "zz_other", fp)
+  let st = rt_store.t_claim_unit(st, base, "zz_other", fp)
+  assert string.contains(harness.run_thrown(b, st), "cache site clash")
+}
+
+// a unit built against another fixed name list does not run
+pub fn unit_from_another_name_list_is_refused_test() {
+  let name = "arc_emit2c_test_names_fp"
+  let opts =
+    emit_2core.CompileOpts(
+      module_name: name,
+      source_kind: emit_2core.AsScript,
+      entry_name: "js_main",
+    )
+  let assert Ok(unit) = emit_2core.compile_source("console.log(1)", opts)
+  let doctor = fn(f: ir.Function) {
+    case f.name, f.body {
+      "js_main",
+        ir.Let(
+          [u],
+          ir.CallHost(cap, "claim_unit", [base, module, ir.ConstI64(fp)]),
+          rest,
+        )
+      -> {
+        assert fp == names.fingerprint()
+        let claim =
+          ir.CallHost(cap, "claim_unit", [base, module, ir.ConstI64(fp + 1)])
+        ir.Function(..f, body: ir.Let([u], claim, rest))
+      }
+      _, _ -> f
+    }
+  }
+  let module =
+    ir.Module(..unit.module, functions: list.map(unit.module.functions, doctor))
+  assert module != unit.module
+  let assert Ok(beam) = pipeline.compile_ir(module, emit_2core.binding())
+  let assert Ok(loaded) = run.load(beam, name)
+  assert string.contains(
+    harness.run_thrown(loaded, harness.seed()),
+    "another list of fixed names",
+  )
 }
 
 const pinned_a_src = "globalThis.make = function () { var o = {}; o.zzpinned = 1; return Object.keys(o)[0] + o.zzpinned }
