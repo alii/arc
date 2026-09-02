@@ -7,6 +7,7 @@ import arc/rt/types.{
   type Agent, type CompiledFn, type JsVal, type ObjectKey, type Property,
   FnFlags, StringKey,
 }
+import gleam/dynamic
 import gleam/option.{type Option, None}
 
 pub fn quiet_hooks() -> HostHooks {
@@ -104,3 +105,6 @@ pub fn func(
   let #(h, st) = rt_call.t_fn_new(st, code, flags, "f", 0, None, None)
   #(types.mk_object(h), st)
 }
+
+@external(erlang, "rt_helpers_ffi", "catch")
+pub fn catch(f: fn() -> a) -> Result(a, #(dynamic.Dynamic, dynamic.Dynamic))

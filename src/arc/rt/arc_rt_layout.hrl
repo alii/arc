@@ -56,6 +56,7 @@
 -define(PRIVATE_TAG, js_private).
 
 -define(FT_TAG, func_template).
+-define(FT_CONSTANTS, 7).
 -define(FT_KEYS, 8).
 -define(FT_FUNCTIONS, 10).
 -define(FT_ARITY, 22).

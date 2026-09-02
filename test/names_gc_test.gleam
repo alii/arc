@@ -11,6 +11,7 @@ import arc/rt/async as rt_async
 import arc/rt/call.{NormalCompletion}
 import arc/rt/gc as rt_gc
 import arc/rt/inspect as rt_inspect
+import arc/rt/obj as rt_obj
 import arc/rt/snapshot
 import arc/rt/store as rt_store
 import arc/rt/types.{type Agent, Agent, JsStore}
@@ -18,6 +19,7 @@ import gleam/dict
 import gleam/dynamic.{type Dynamic}
 import gleam/option.{None, Some}
 import gleam/string
+import names_gc_check
 import rt_helpers
 
 fn agent() -> Agent {
@@ -37,16 +39,26 @@ fn run_with(st: Agent, source: String, compile) -> #(String, Agent) {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
   let assert Ok(template) = compile(body, sb)
   let #(completion, st) = entry.run_script(st, template)
-  let assert NormalCompletion(v) = completion
+  let v = case completion {
+    NormalCompletion(v) -> v
+    call.ThrowCompletion(e) -> panic as { "threw " <> rt_inspect.inspect(st, e) }
+  }
   #(rt_inspect.inspect(st, v), st)
+}
+
+fn engine_sweep(eng: engine.Engine(h)) -> engine.Engine(h) {
+  let #(eng, Nil) =
+    engine.with_state(eng, fn(s) { #(State(..s, agent: sweep(s.agent)), Nil) })
+  eng
 }
 
 fn names(st: Agent) -> Int {
   rt_gc.stats(st).names
 }
 
+// a full collect, then every reachable key must still have a text
 fn sweep(st: Agent) -> Agent {
-  rt_gc.t_collect_full(st, [])
+  names_gc_check.collect_and_check(st)
 }
 
 pub fn dead_names_are_freed_test() {
@@ -83,6 +95,7 @@ pub fn growth_alone_triggers_a_sweep_test() {
     )
   // swept at a return safepoint mid run, plain collections only
   assert names(st) < base + 50_000
+  let _ = sweep(st)
 }
 
 pub fn live_holders_keep_their_names_test() {
@@ -209,10 +222,11 @@ pub fn snapshot_round_trips_after_a_sweep_test() {
   assert out == "'zzsnap9'"
 }
 
-pub fn unknown_key_text_is_a_placeholder_test() {
+pub fn unknown_key_text_is_an_error_test() {
   let st = agent()
-  assert rt_store.t_key_text(st, key.name(999_999)) == "<key 3999996>"
-  // a holder the sweep missed still prints and enumerates
+  let assert Error(_) =
+    rt_helpers.catch(fn() { rt_store.t_key_text(st, key.name(999_999)) })
+  // inspect stays tolerant so debugging output never crashes
   let #(_, st) = run(st, "var lost = {}; lost['zzlost'] = 1; 'ok'")
   let assert Some(k) = rt_store.t_find_key(st, "zzlost")
   let js = st.store
@@ -223,11 +237,10 @@ pub fn unknown_key_text_is_a_placeholder_test() {
       texts: dict.delete(js.names.texts, k),
     )
   let st = Agent(..st, store: JsStore(..js, names:))
-  let #(out, st) = run(st, "Object.keys(lost)[0] + ':' + lost['zzlost']")
-  assert string.starts_with(out, "'<key ")
-  assert string.ends_with(out, ">:undefined'")
   let #(v, st) = rt_helpers.global(st, "lost")
   assert string.contains(rt_inspect.inspect(st, v), "<key ")
+  let assert Error(_) =
+    rt_helpers.catch(fn() { run(st, "Object.keys(lost)[0]") })
 }
 
 pub fn module_exports_survive_a_sweep_test() {
@@ -240,16 +253,14 @@ pub fn module_exports_survive_a_sweep_test() {
       fn(_, _) { Error(load_error.ResolveForbidden) },
       fn(_) { Error(load_error.LoadForbidden) },
     )
-  let #(eng, Nil) =
-    engine.with_state(eng, fn(s) {
-      #(State(..s, agent: rt_gc.t_collect_full(s.agent, [])), Nil)
-    })
+  let eng = engine_sweep(eng)
   let assert Some(bump) = engine.read_export(eng, ns, "zzbump")
   let assert #(Returned(value:), eng) =
     engine.call(eng, bump, types.mk_undefined(), [])
   assert engine.inspect(eng, value) == "42"
   let assert Some(v) = engine.read_export(eng, ns, "zzexported")
   assert engine.inspect(eng, v) == "41"
+  engine_sweep(eng)
 }
 
 pub fn running_frames_keep_their_names_test() {
@@ -269,6 +280,7 @@ pub fn running_frames_keep_their_names_test() {
   assert out == "'zztop2'"
   // swept while the loop ran
   assert names(st) < base + 50_000
+  let _ = sweep(st)
 }
 
 @external(erlang, "arc_rt_gc_ffi", "keys_in_term")
@@ -343,14 +355,53 @@ pub fn host_fn_holding_a_template_survives_a_sweep_test() {
       let assert NormalCompletion(v) = completion
       #(State(..s, agent: st), Ok(v))
     })
-  let #(eng, Nil) =
-    engine.with_state(eng, fn(s) {
-      #(State(..s, agent: rt_gc.t_collect_full(s.agent, [])), Nil)
-    })
+  let eng = engine_sweep(eng)
   let assert Ok(#(Returned(value:), eng)) = engine.eval(eng, "held() + held()")
   assert engine.inspect(eng, value) == "2"
-  let #(_, Nil) =
-    engine.with_state(eng, fn(s) {
-      #(State(..s, agent: rt_gc.t_collect_full(s.agent, [])), Nil)
+  engine_sweep(eng)
+}
+
+pub fn many_holders_pass_the_check_test() {
+  let #(resolve, load) =
+    files([#("/lib.js", "export const zzlib = { zzinner: 1 };")])
+  let st = module_host.install_import_hook(agent(), "/main.js", resolve, load)
+  let #(_, st) =
+    run(
+      st,
+      "var mod; import('/lib.js').then(ns => { mod = ns });
+       var gen = (function* () { var o = { zzg1: 1 }; yield o; o.zzg2 = 2; yield o })();
+       gen.next();
+       var K = class { #zzpriv = 3; static #zzs() {} get(o) { return o.#zzpriv } };
+       var k = new K();
+       /(zz)(re)/.exec('xxzzreyy'); var legacy = RegExp.$1 + RegExp.lastMatch;
+       var re = /a/g; re.zzown = 1;
+       var px = new Proxy({ zztarget: 1 }, { get(t, p) { return p } });
+       var settled; var pr = Promise.resolve({ zzpv: 1 }).then(v => { settled = v; return { zzp2: 2 } });
+       var js = JSON.parse(JSON.stringify({ zzj: [1, { zzk: 2 }] }));
+       'ok'",
+    )
+  let eng =
+    engine.new()
+    |> engine.define_fn("mk", 0, fn(_args, _this, s) {
+      let #(k, agent) = rt_store.t_key(s.agent, "zzhostmade")
+      let #(o, agent) = rt_obj.t_new_object_literal(agent)
+      let #(_, agent) =
+        rt_obj.t_set_prop(agent, o, types.StringKey(k), types.mk_int(5))
+      #(State(..s, agent:), Ok(o))
     })
+  let assert Ok(#(Returned(_), eng)) = engine.eval(eng, "var hosted = mk()")
+  let eng = engine_sweep(eng)
+  let assert Ok(#(Returned(value:), eng)) =
+    engine.eval(eng, "Object.keys(hosted)[0] + hosted.zzhostmade")
+  assert engine.inspect(eng, value) == "'zzhostmade5'"
+  let st = sweep(st)
+  let st = rt_async.drain(st) |> sweep
+  let #(out, st) =
+    run(
+      st,
+      "[Object.keys(mod.zzlib)[0], Object.keys(gen.next().value).join('+'), new K().get(k), legacy,
+        Object.keys(re)[0], px.zzasked, Object.keys(settled)[0], Object.keys(js.zzj[1])[0]].join()",
+    )
+  assert out == "'zzinner,zzg1+zzg2,3,zzzzre,zzown,zzasked,zzpv,zzk'"
+  let _ = sweep(st)
 }

@@ -143,8 +143,7 @@ key_text(_, K) when K band 3 =:= ?KEY_KIND_NAME, K bsr 2 < ?N_FIXED_COUNT ->
 key_text(Store, K) ->
     case element(?NAMES_TEXTS, element(?STORE_NAMES, Store)) of
         #{K := B} -> B;
-        %% a swept key, never a live one
-        #{} -> <<"<key ", (integer_to_binary(K))/binary, ">">>
+        #{} -> erlang:error({unknown_key, K})
     end.
 
 %% not a js value, only class code and the gc see it

@@ -4,6 +4,7 @@ import arc/rt/buffer
 import arc/rt/elements
 import arc/rt/intl_data
 import arc/rt/name_keys as nk
+import arc/rt/names
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -26,6 +27,7 @@ import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 import gleam/set.{type Set}
 import gleam/string
 
@@ -260,7 +262,7 @@ fn inspect_plain_object(
         list.take(visible, max_items)
         |> list.map(fn(pair) {
           let #(key, val) = pair
-          rt_store.t_key_text(st, key)
+          key_text(st, key)
           <> ": "
           <> inspect_inner(st, val, depth + 1, visited)
         })
@@ -276,6 +278,20 @@ fn inspect_plain_object(
         _ -> "{ " <> string.join(entries, ", ") <> " }"
       }
     }
+  }
+}
+
+// tolerant so a key the sweep lost still prints
+fn key_text(st: Agent, k: Key) -> String {
+  case
+    key.is_index(k)
+    || key.is_name(k)
+    && key.name_number(k) < names.fixed_count()
+  {
+    True -> rt_store.t_key_text(st, k)
+    False ->
+      dict.get(st.store.names.texts, k)
+      |> result.unwrap("<key " <> int.to_string(k) <> ">")
   }
 }
 

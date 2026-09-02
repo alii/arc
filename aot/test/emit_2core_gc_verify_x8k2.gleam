@@ -247,7 +247,7 @@ fn inspect_roots() {
   io.println("═══ roots_of_state includes global object? ═══")
   let st = seed()
   let rt_types.JsCell(global_id) = st.realm.global_object
-  let roots = rt_gc.roots_of_state(st)
+  let roots = rt_gc.roots_of_state(st).ids
   let n = list.length(roots)
   let has_global = list.contains(roots, global_id)
   io.println(

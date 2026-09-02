@@ -1,12 +1,16 @@
 -module(arc_rt_gc_ffi).
 -export([refs_in_term/2, refs_in_props/2, refs_in_symbol_props/2]).
--export([keys_in_term/2, keys_in_slot/2, keys_in_keyed/2]).
+-export([keys_in_term/2, keys_in_keyed/2]).
 
 -include("arc_rt_layout.hrl").
 -include("arc_rt_names.hrl").
 
 %% walks fun env too so closures keep captured handles alive
 refs_in_term({js_cell, N}, Acc) when is_integer(N) -> [N | Acc];
+refs_in_term(B, Acc) when is_binary(B) -> Acc;
+%% only a template's constants are values
+refs_in_term(T, Acc) when tuple_size(T) =:= ?FT_ARITY, element(1, T) =:= ?FT_TAG ->
+    refs_in_term(element(?FT_CONSTANTS, T), Acc);
 refs_in_term(F, Acc) when is_function(F) ->
     {env, Env} = erlang:fun_info(F, env),
     lists:foldl(fun refs_in_term/2, Acc, Env);
@@ -62,13 +66,6 @@ key_slots(T, I, Acc) ->
         true -> key_slots(T, I - 1, Acc#{K => nil});
         false -> key_slots(T, I - 1, Acc)
     end.
-
-%% prop values and elements are js values and name no keys
-keys_in_slot(S, Acc) when element(1, S) =:= ?SOBJECT_TAG ->
-    keys_in_term(element(?SOBJECT_KIND, S), keys_in_keyed(element(?SOBJECT_PROPS, S), Acc));
-keys_in_slot(S, Acc) when element(1, S) =:= ?SSHAPED_TAG ->
-    keys_in_keyed(element(?SSHAPED_OFFSETS, S), Acc);
-keys_in_slot(S, Acc) -> keys_in_term(S, Acc).
 
 keys_in_keyed(M, Acc) ->
     maps:fold(fun(K, _, A) ->

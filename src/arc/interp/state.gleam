@@ -1,15 +1,14 @@
 import arc/bytecode/key.{type Key}
 import arc/internal/tuple_array.{type TupleArray}
 import arc/rt/bytecode.{type FuncTemplate, type TryFrame}
-import arc/rt/gc as rt_gc
 import arc/rt/types.{
-  type Agent, type ErrorKind, type Handle, type JsVal, JsCell, RangeErr,
-  ReferenceErr, SyntaxErr, TypeErr,
+  type Agent, type ErrorKind, type Handle, type JsVal, RangeErr, ReferenceErr,
+  SyntaxErr, TypeErr,
 }
 import gleam/dynamic.{type Dynamic}
 import gleam/int
 import gleam/list
-import gleam/option.{type Option, None, Some}
+import gleam/option.{type Option}
 import gleam/result
 
 pub type State {
@@ -62,13 +61,13 @@ pub fn with_agent(state: State, agent: Agent) -> State {
 fn to_dynamic(a: anything) -> Dynamic
 
 // exhaustive destructures on purpose: classify new fields as roots or not
-pub fn frame_roots(state: State) -> List(Handle) {
+pub fn frame_terms(state: State) -> List(Dynamic) {
   let State(
     agent: _,
     pc: _,
     stack:,
     locals:,
-    func: _,
+    func:,
     unit: _,
     call_stack:,
     outer_depth: _,
@@ -80,131 +79,41 @@ pub fn frame_roots(state: State) -> List(Handle) {
     call_args:,
     eval_env:,
   ) = state
-  let acc =
-    acc_frame(
-      [],
-      stack,
-      locals,
-      this,
-      new_target,
-      home_object,
-      call_args,
-      eval_env,
-    )
+  let acc = [
+    to_dynamic(func),
+    to_dynamic(locals),
+    to_dynamic(stack),
+    to_dynamic(#(this, new_target, home_object, call_args, eval_env)),
+  ]
   list.fold(call_stack, acc, push_saved_frame)
-  |> list.map(JsCell)
-}
-
-// templates, locals and stacks in flight, for the name sweep
-pub fn frame_terms(state: State) -> List(Dynamic) {
-  list.fold(
-    state.call_stack,
-    [to_dynamic(state.func), to_dynamic(state.locals), to_dynamic(state.stack)],
-    fn(acc, frame) {
-      case frame {
-        SavedFrame(caller:, pc: _, stack:, locals:, constructor_this: _) -> [
-          to_dynamic(caller.func),
-          to_dynamic(locals),
-          to_dynamic(stack),
-          ..acc
-        ]
-        SavedRegFrame(
-          caller:,
-          pc: _,
-          stack:,
-          locals:,
-          constructor_this: _,
-          r0:,
-          r1:,
-        ) -> [
-          to_dynamic(caller.func),
-          to_dynamic(locals),
-          to_dynamic(stack),
-          to_dynamic(r0),
-          to_dynamic(r1),
-          ..acc
-        ]
-      }
-    },
-  )
-}
-
-fn acc_frame(
-  acc: List(Int),
-  stack: List(JsVal),
-  locals: TupleArray(JsVal),
-  this: JsVal,
-  new_target: JsVal,
-  home_object: JsVal,
-  call_args: List(JsVal),
-  eval_env: Option(Handle),
-) -> List(Int) {
-  acc
-  |> push_vals(stack)
-  |> push_term(locals)
-  |> push_val(this)
-  |> push_val(new_target)
-  |> push_val(home_object)
-  |> push_vals(call_args)
-  |> push_opt_handle(eval_env)
 }
 
 // caller.call_stack is the fold's own tail, not walked again
-fn push_saved_frame(acc: List(Int), frame: SavedFrame) -> List(Int) {
+fn push_saved_frame(acc: List(Dynamic), frame: SavedFrame) -> List(Dynamic) {
   case frame {
-    SavedFrame(caller:, pc: _, stack:, locals:, constructor_this:) ->
-      push_caller(acc, caller, stack, locals, constructor_this)
-    SavedRegFrame(caller:, pc: _, stack:, locals:, constructor_this:, r0:, r1:) ->
-      push_caller(acc, caller, stack, locals, constructor_this)
-      |> push_val(r0)
-      |> push_val(r1)
+    SavedFrame(caller:, pc: _, stack:, locals:, constructor_this:) -> [
+      to_dynamic(#(stack, locals, constructor_this)),
+      ..push_caller(acc, caller)
+    ]
+    SavedRegFrame(caller:, pc: _, stack:, locals:, constructor_this:, r0:, r1:) -> [
+      to_dynamic(#(stack, locals, constructor_this, r0, r1)),
+      ..push_caller(acc, caller)
+    ]
   }
 }
 
-fn push_caller(
-  acc: List(Int),
-  caller: State,
-  stack: List(JsVal),
-  locals: TupleArray(JsVal),
-  constructor_this: Option(JsVal),
-) -> List(Int) {
-  acc_frame(
-    acc,
-    stack,
-    locals,
-    caller.this,
-    caller.new_target,
-    caller.home_object,
-    caller.call_args,
-    caller.eval_env,
-  )
-  |> push_opt_val(constructor_this)
-}
-
-fn push_val(acc: List(Int), v: JsVal) -> List(Int) {
-  rt_gc.push_val_refs(v, acc)
-}
-
-fn push_vals(acc: List(Int), vs: List(JsVal)) -> List(Int) {
-  list.fold(vs, acc, push_val)
-}
-
-fn push_term(acc: List(Int), t: TupleArray(JsVal)) -> List(Int) {
-  rt_gc.push_term_refs(to_dynamic(t), acc)
-}
-
-fn push_opt_val(acc: List(Int), ov: Option(JsVal)) -> List(Int) {
-  case ov {
-    Some(v) -> push_val(acc, v)
-    None -> acc
-  }
-}
-
-fn push_opt_handle(acc: List(Int), oh: Option(Handle)) -> List(Int) {
-  case oh {
-    Some(h) -> [h.id, ..acc]
-    None -> acc
-  }
+fn push_caller(acc: List(Dynamic), caller: State) -> List(Dynamic) {
+  [
+    to_dynamic(caller.func),
+    to_dynamic(#(
+      caller.this,
+      caller.new_target,
+      caller.home_object,
+      caller.call_args,
+      caller.eval_env,
+    )),
+    ..acc
+  ]
 }
 
 pub type SuspendKind {
