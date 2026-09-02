@@ -31,14 +31,14 @@ refs_in_prop({?DATAPROP_TAG, V, _, _, _, _}, Acc) -> refs_in_term(V, Acc);
 refs_in_prop({?ACCESSORPROP_TAG, G, S, _, _, _}, Acc) -> refs_in_term(G, refs_in_term(S, Acc));
 refs_in_prop(P, Acc) -> refs_in_term(P, Acc).
 
-%% fixed names and index keys are never swept
--define(DYN_KEY(K), (K >= 0 andalso
+%% only integers are keys; an unloaded template's slots are not yet
+-define(DYN_KEY(K), (is_integer(K) andalso K >= 0 andalso
     (K band 3 =:= ?KEY_KIND_PRIVATE orelse K >= ?NAME_KEY(?N_FIXED_COUNT)))).
 
 %% keys a template, private name or object key names
-keys_in_term({?PRIVATE_TAG, K}, Acc) when is_integer(K) -> Acc#{K => nil};
-keys_in_term({?OKEY_STRING, K}, Acc) when is_integer(K) ->
-    case ?DYN_KEY(K) of true -> Acc#{K => nil}; false -> Acc end;
+keys_in_term({?PRIVATE_TAG, K}, Acc) when is_integer(K), K >= 0 -> Acc#{K => nil};
+keys_in_term({?OKEY_STRING, K}, Acc) when ?DYN_KEY(K) -> Acc#{K => nil};
+keys_in_term({?OKEY_STRING, _}, Acc) -> Acc;
 keys_in_term({?HANDLE_TAG, _}, Acc) -> Acc;
 keys_in_term(T, Acc) when tuple_size(T) =:= ?FT_ARITY, element(1, T) =:= ?FT_TAG ->
     Keys = element(?FT_KEYS, T),

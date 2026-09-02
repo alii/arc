@@ -3,8 +3,11 @@ import arc/compiler
 import arc/engine.{ModuleReturned, Returned}
 import arc/host.{State}
 import arc/interp/entry
+import arc/module
 import arc/module/load_error
+import arc/module_host
 import arc/parser
+import arc/rt/async as rt_async
 import arc/rt/call.{NormalCompletion}
 import arc/rt/gc as rt_gc
 import arc/rt/inspect as rt_inspect
@@ -12,6 +15,7 @@ import arc/rt/snapshot
 import arc/rt/store as rt_store
 import arc/rt/types.{type Agent, Agent, JsStore}
 import gleam/dict
+import gleam/dynamic.{type Dynamic}
 import gleam/option.{None, Some}
 import gleam/string
 import rt_helpers
@@ -265,4 +269,88 @@ pub fn running_frames_keep_their_names_test() {
   assert out == "'zztop2'"
   // swept while the loop ran
   assert names(st) < base + 50_000
+}
+
+@external(erlang, "arc_rt_gc_ffi", "keys_in_term")
+fn keys_in_term(v: Dynamic, acc: dict.Dict(Int, Nil)) -> dict.Dict(Int, Nil)
+
+@external(erlang, "gleam_stdlib", "identity")
+fn to_dynamic(a: anything) -> Dynamic
+
+fn files(
+  table: List(#(String, String)),
+) -> #(module_host.ResolveFn, module_host.LoadFn) {
+  let sources = dict.from_list(table)
+  #(fn(raw, _referrer) { Ok(raw) }, fn(resolved) {
+    case dict.get(sources, resolved) {
+      Ok(v) -> Ok(v)
+      Error(Nil) -> Error(load_error.LoadNotFound)
+    }
+  })
+}
+
+const lazy_js = "var o = {}; for (var i = 0; i < 50; i++) o['zzlazy' + i] = i;
+  export const someExport = Object.keys(o).length + o.zzlazy7;"
+
+pub fn unloaded_template_names_no_keys_test() {
+  let assert Ok(#(body, sb)) =
+    parser.parse_script("var o = {}; o.someName = o.length")
+  let assert Ok(template) = compiler.compile(body, sb)
+  assert dict.size(keys_in_term(to_dynamic(template), dict.new())) == 0
+}
+
+pub fn static_import_defer_survives_a_sweep_test() {
+  let #(resolve, load) =
+    files([
+      #("/main.js", "import defer * as ns from '/lazy.js'; export { ns };"),
+      #("/lazy.js", lazy_js),
+    ])
+  let assert Ok(bundle) =
+    module.compile_bundle(
+      "/main.js",
+      "import defer * as ns from '/lazy.js'; export { ns };",
+      resolve,
+      load,
+    )
+  let assert #(st, Ok(evaluated)) =
+    module.evaluate_bundle(bundle, agent(), rt_async.drain)
+  let st = sweep(st)
+  let assert Some(ns) =
+    module.read_export(st, types.mk_object(evaluated.namespace), "ns")
+  let #(v, st) = rt_helpers.get(st, ns, "someExport")
+  assert rt_inspect.inspect(st, v) == "57"
+  let _ = sweep(st)
+}
+
+pub fn dynamic_import_defer_survives_a_sweep_test() {
+  let #(resolve, load) = files([#("/lazy.js", lazy_js)])
+  let st = module_host.install_import_hook(agent(), "/main.js", resolve, load)
+  let #(_, st) =
+    run(st, "var ns; import.defer('/lazy.js').then(n => { ns = n })")
+  let st = rt_async.drain(st) |> sweep
+  let #(out, st) = run(st, "String(ns.someExport)")
+  assert out == "'57'"
+  let _ = sweep(st)
+}
+
+pub fn host_fn_holding_a_template_survives_a_sweep_test() {
+  let assert Ok(#(body, sb)) = parser.parse_script("({ zzheld: 1 }).zzheld")
+  let assert Ok(template) = compiler.compile(body, sb)
+  let eng =
+    engine.new()
+    |> engine.define_fn("held", 0, fn(_args, _this, s) {
+      let #(completion, st) = entry.run_script(s.agent, template)
+      let assert NormalCompletion(v) = completion
+      #(State(..s, agent: st), Ok(v))
+    })
+  let #(eng, Nil) =
+    engine.with_state(eng, fn(s) {
+      #(State(..s, agent: rt_gc.t_collect_full(s.agent, [])), Nil)
+    })
+  let assert Ok(#(Returned(value:), eng)) = engine.eval(eng, "held() + held()")
+  assert engine.inspect(eng, value) == "2"
+  let #(_, Nil) =
+    engine.with_state(eng, fn(s) {
+      #(State(..s, agent: rt_gc.t_collect_full(s.agent, [])), Nil)
+    })
 }
