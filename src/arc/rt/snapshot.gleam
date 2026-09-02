@@ -17,7 +17,7 @@ import gleam/result
 import gleam/set.{type Set}
 
 // bump on any change to the image or runtime records
-pub const abi_version = 13
+pub const abi_version = 14
 
 pub type SnapshotError {
   SnapshotContainsCompiledCode(cell: Handle)

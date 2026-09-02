@@ -615,9 +615,16 @@ pub fn t_collect_full(st: Agent, extra_roots: List(Handle)) -> Agent {
   t_collect_frames(st, extra_roots, [], True)
 }
 
+// growth since the last sweep, or a table that dwarfs the live heap once
+// enough collections have passed to pay for walking it again
 pub fn names_due(js: JsStore(st)) -> Bool {
   let n = js.names
-  n.sweep_min == 0 || dict.size(n.texts) >= int.max(n.sweep_min, 2 * n.swept)
+  let size = dict.size(n.texts)
+  n.sweep_min == 0
+  || size >= int.max(n.sweep_min, 2 * n.swept)
+  || size >= n.sweep_min
+  && size > 4 * js.gc_live
+  && n.gcs * js.gc_threshold >= size
 }
 
 // no renumbering; dead ids dropped, next falls past highest survivor
@@ -642,6 +649,7 @@ pub fn t_collect_frames(
       gc_live: dict.size(live),
       ics: dict.filter(js.ics, fn(_, entry) { is_read_ic(entry) }),
       free_protos: dict.new(),
+      names: rt_types.NameTable(..js.names, gcs: js.names.gcs + 1),
     )
   case sweep_names || names_due(js) {
     True -> Agent(..st, store: sweep_names_with(js, roots, terms))
@@ -669,7 +677,13 @@ fn sweep_names_with(
     })
   let texts = dict.filter(js.names.texts, fn(k, _) { marked(k, keys) })
   let names =
-    rt_types.NameTable(..js.names, numbers:, texts:, swept: dict.size(texts))
+    rt_types.NameTable(
+      ..js.names,
+      numbers:,
+      texts:,
+      swept: dict.size(texts),
+      gcs: 0,
+    )
   JsStore(..js, names:)
 }
 

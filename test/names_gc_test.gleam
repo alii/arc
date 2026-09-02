@@ -17,6 +17,7 @@ import arc/rt/store as rt_store
 import arc/rt/types.{type Agent, Agent, JsStore}
 import gleam/dict
 import gleam/dynamic.{type Dynamic}
+import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
 import names_gc_check
@@ -404,4 +405,31 @@ pub fn many_holders_pass_the_check_test() {
     )
   assert out == "'zzinner,zzg1+zzg2,3,zzzzre,zzown,zzasked,zzpv,zzk'"
   let _ = sweep(st)
+}
+
+pub fn a_dropped_spike_is_swept_by_a_plain_collection_test() {
+  let st = sweep(agent())
+  let base = names(st)
+  let #(_, st) =
+    run(st, "var big = {}; for (var i = 0; i < 20000; i++) big['bk' + i] = i")
+  let st = sweep(st)
+  assert names(st) >= base + 20_000
+  assert 20_000 > 4 * rt_gc.stats(st).live
+  let #(_, st) = run(st, "big = null")
+  let st = rt_gc.t_collect(st, [])
+  assert names(st) <= base + 5
+}
+
+pub fn a_live_big_table_is_not_walked_every_collection_test() {
+  let st =
+    sweep(agent())
+    |> rt_store.t_gc_settings(gc_threshold: 4096, names_sweep_min: 4096)
+  let #(_, st) =
+    run(st, "var big = {}; for (var i = 0; i < 20000; i++) big['bw' + i] = i")
+  let st = sweep(st)
+  let st = rt_gc.t_collect(st, []) |> rt_gc.t_collect([])
+  // 20k names want five 4k collections of work before another walk
+  assert st.store.names.gcs == 2
+  let st = list.fold([1, 2, 3], st, fn(st, _) { rt_gc.t_collect(st, []) })
+  assert st.store.names.gcs == 0
 }

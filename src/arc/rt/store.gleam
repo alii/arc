@@ -52,6 +52,7 @@ pub fn t_store_new() -> JsStore(Agent) {
         |> dict.from_list,
       swept: 0,
       sweep_min: default_names_sweep_min,
+      gcs: 0,
     ),
   )
 }
@@ -241,6 +242,7 @@ pub fn name_number(js: JsStore(st), text: String) -> #(Int, JsStore(st)) {
     None -> {
       let t = js.names
       let n = t.next
+      let text = copy_text(text)
       let names =
         NameTable(
           ..t,
@@ -252,6 +254,10 @@ pub fn name_number(js: JsStore(st), text: String) -> #(Int, JsStore(st)) {
     }
   }
 }
+
+// so the table never keeps a slice of a bigger string alive
+@external(erlang, "binary", "copy")
+fn copy_text(text: String) -> String
 
 pub fn name_text(js: JsStore(st), n: Int) -> String {
   key_text(js, key.name(n))

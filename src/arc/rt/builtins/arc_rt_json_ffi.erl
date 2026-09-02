@@ -3,6 +3,7 @@
 -export([parse_value/2, plain_props/3, plain_keys/1, quote/1]).
 
 -include("../arc_rt_layout.hrl").
+-include("../arc_rt_names.hrl").
 
 -define(DIGIT(C), (C >= $0 andalso C =< $9)).
 -define(MAX_ARRAY_INDEX, 4294967294).
@@ -72,17 +73,43 @@ quote_esc(Bin, P) ->
 hexc(N) when N < 10 -> $0 + N;
 hexc(N) -> $a + N - 10.
 
-%% own data props from parsed entries; miss on duplicate keys
-plain_props(Store, Entries, Seq) -> plain_props(Store, Entries, Seq, []).
+%% own data props from parsed entries; miss on duplicate keys.
+%% names are numbered against the table in hand, the store written once
+plain_props(Store, Entries, Seq) ->
+    T = element(?STORE_NAMES, Store),
+    Next = element(?NAMES_NEXT, T),
+    plain_props(Entries, Seq, Seq, [], element(?NAMES_NUMBERS, T),
+                element(?NAMES_TEXTS, T), Next, Next, Store).
 
-plain_props(Store, [{Name, V} | Rest], Seq, Acc) ->
+plain_props([{Name, V} | Rest], Seq, Seq0, Acc, Nums, Texts, Next, Next0, Store) ->
     Prop = {?DATAPROP_TAG, V, true, true, true, Seq},
-    {K, Store1} = arc_rt_val_ffi:key_of(Store, Name),
-    plain_props(Store1, Rest, Seq + 1, [{K, Prop} | Acc]);
-plain_props(Store, [], Seq, Acc) ->
+    case arc_rt_val_ffi:index_of_text(Name) of
+        none ->
+            case Nums of
+                #{Name := N} ->
+                    plain_props(Rest, Seq + 1, Seq0, [{?NAME_KEY(N), Prop} | Acc],
+                                Nums, Texts, Next, Next0, Store);
+                #{} ->
+                    B = binary:copy(Name),
+                    plain_props(Rest, Seq + 1, Seq0, [{?NAME_KEY(Next), Prop} | Acc],
+                                Nums#{B => Next}, Texts#{?NAME_KEY(Next) => B},
+                                Next + 1, Next0, Store)
+            end;
+        I ->
+            plain_props(Rest, Seq + 1, Seq0, [{?INDEX_KEY(I), Prop} | Acc],
+                        Nums, Texts, Next, Next0, Store)
+    end;
+plain_props([], Seq, Seq0, Acc, Nums, Texts, Next, Next0, Store) ->
     Map = maps:from_list(Acc),
-    case map_size(Map) =:= length(Acc) of
-        true -> {some, {Map, Seq, Store}};
+    case map_size(Map) =:= Seq - Seq0 of
+        true when Next =:= Next0 -> {some, {Map, Seq, Store}};
+        true ->
+            T = element(?STORE_NAMES, Store),
+            T1 = setelement(?NAMES_NEXT,
+                     setelement(?NAMES_TEXTS, setelement(?NAMES_NUMBERS, T, Nums), Texts),
+                     Next),
+            Alloc = element(?STORE_ALLOC, Store) + Next - Next0,
+            {some, {Map, Seq, setelement(?STORE_ALLOC, setelement(?STORE_NAMES, Store, T1), Alloc)}};
         false -> none
     end.
 -define(PLAIN(C), (C =/= $" andalso C =/= $\\ andalso C >= 16#20)).

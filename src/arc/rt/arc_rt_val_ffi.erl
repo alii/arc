@@ -124,9 +124,10 @@ key_find(Store, B) ->
     end.
 
 %% allocating form of key_find
-key_of(Store, B) ->
-    case key_find(Store, B) of
+key_of(Store, B0) ->
+    case key_find(Store, B0) of
         miss ->
+            B = binary:copy(B0),
             T = element(?STORE_NAMES, Store),
             N = element(?NAMES_NEXT, T),
             T1 = setelement(?NAMES_NUMBERS, T, maps:put(B, N, element(?NAMES_NUMBERS, T))),

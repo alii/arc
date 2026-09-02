@@ -2631,6 +2631,8 @@ pub type NameTable {
     swept: Int,
     // texts size a sweep waits for; 0 sweeps on every collection
     sweep_min: Int,
+    // collections since the last name sweep
+    gcs: Int,
   )
 }
 
