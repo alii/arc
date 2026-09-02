@@ -5,9 +5,11 @@ import arc/rt/types.{type Agent}
 import arc_aot/emit as emit_2core
 import arc_aot/run.{type RunResult}
 import carder/pipeline
+import gleam/dict
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
 import gleam/int
+import gleam/list
 import gleam/string
 
 pub type DiffRun {
@@ -28,6 +30,21 @@ pub fn run_interpreted(source: String) -> DiffRun {
 
 @external(erlang, "emit_2core_harness_ffi", "to_dynamic")
 fn to_dynamic(a: a) -> Dynamic
+
+// the kinds of cache entry filled at sites `before` did not have
+pub fn ic_kinds(st: Agent, before: Agent) -> List(String) {
+  dict.to_list(st.store.ics)
+  |> list.filter(fn(p) { !dict.has_key(before.store.ics, p.0) })
+  |> list.map(fn(p) {
+    case p.1 {
+      types.IcRead(..) -> "read"
+      types.IcCall(..) -> "call"
+      types.IcInit(..) -> "init"
+      types.IcGlobal(..) -> "global"
+      types.IcOff -> "off"
+    }
+  })
+}
 
 pub const fixed_now_ms = 1_700_000_000_000
 

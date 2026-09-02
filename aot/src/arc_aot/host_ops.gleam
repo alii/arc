@@ -39,6 +39,7 @@ pub fn table() -> DirectHost {
       #("to_property_key_of", HostOp(val, "t_to_property_key_of", Mut)),
       #("to_property_key_fast", HostOp(val_ffi, "t_to_property_key_fast", Read)),
       #("keys_of", HostOp(val_ffi, "keys_of", Mut)),
+      #("claim_unit", HostOp(store, "t_claim_unit", MutUnit)),
       #("type_of", HostOp(val, "t_type_of", Mut)),
       #("to_object", HostOp(val, "t_to_object", Mut)),
       #("is_callable", HostOp(val, "t_is_callable", Mut)),

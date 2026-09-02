@@ -104,6 +104,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
     free_protos: _,
     global_epoch: _,
     names:,
+    units: _,
   ) = store
   let microtasks = types.jq_to_list(microtasks)
   let data =
@@ -197,6 +198,7 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     free_protos: dict.new(),
     global_epoch: 0,
     names:,
+    units: dict.new(),
   )
 }
 

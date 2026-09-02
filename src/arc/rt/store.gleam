@@ -4,7 +4,7 @@ import arc/rt/limits
 import arc/rt/names
 import arc/rt/types.{
   type Agent, type Handle, type JobQueue, type JsOps, type JsSlot, type JsStore,
-  type JsVal, Agent, JsCell, JsOps, JsStore, NameTable, RangeErr, SBox,
+  type JsVal, Agent, JsCell, JsOps, JsStore, NameTable, RangeErr, SBox, TypeErr,
 } as rt_types
 import gleam/dict
 import gleam/int
@@ -36,6 +36,7 @@ pub fn t_store_new() -> JsStore(Agent) {
     next_shape: 1,
     unit_uid: 0,
     ics: dict.new(),
+    units: dict.new(),
     free_protos: dict.new(),
     global_epoch: 0,
     names: NameTable(
@@ -230,6 +231,22 @@ pub fn t_next_symbol_uid(st: Agent) -> #(Int, Agent) {
 pub fn t_next_unit_uid(st: Agent) -> #(Int, Agent) {
   let js = require_js(st)
   #(js.unit_uid, with_js(st, JsStore(..js, unit_uid: js.unit_uid + 1)))
+}
+
+// a compiled unit's sites count up from its base, so no two units share one
+pub fn t_claim_unit(st: Agent, base: Int, module: String) -> Agent {
+  let js = require_js(st)
+  case dict.get(js.units, base) {
+    Ok(owner) if owner == module -> st
+    Ok(owner) -> {
+      let msg =
+        "cache site clash between modules " <> owner <> " and " <> module
+      let #(e, st) = js.ops.new_error(st, TypeErr, msg)
+      t_throw(st, e)
+    }
+    Error(Nil) ->
+      with_js(st, JsStore(..js, units: dict.insert(js.units, base, module)))
+  }
 }
 
 pub fn find_name(js: JsStore(st), text: String) -> Option(Int) {

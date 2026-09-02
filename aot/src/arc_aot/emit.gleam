@@ -384,9 +384,14 @@ pub fn compile(
   let #(prologue, e) = root_binding_prologue(e)
   let #(prologue, e) = global_var_prologue(e, body, strict, prologue)
   use #(top_tree, ef) <- result.try(emit_top_level(e, body, body, e.next_var, 0))
-  use Nil <- result.map(case list.reverse(ef.unsupported) {
+  use Nil <- result.try(case list.reverse(ef.unsupported) {
     [feature, ..] -> Error(state.UnsupportedFeature(feature))
     [] -> Ok(Nil)
+  })
+  let site_base = state.site_base(opts.module_name)
+  use Nil <- result.map(case ef.next_site - site_base > state.sites_per_unit {
+    True -> Error(state.UnsupportedFeature("too many cache sites"))
+    False -> Ok(Nil)
   })
   let names =
     ir.TermOp(
@@ -402,12 +407,19 @@ pub fn compile(
       result: [ir.TTerm],
       locals: [],
       body: ir.Let(
-        ["_names"],
-        names,
+        ["_unit"],
+        ir.CallHost("js", "claim_unit", [
+          ir.ConstI64(site_base),
+          ir.ConstBinary(bit_array.from_string(opts.module_name)),
+        ]),
         ir.Let(
-          [state.keys_var],
-          ir.CallHost("js", "keys_of", [ir.Var("_names")]),
-          prologue(top_tree),
+          ["_names"],
+          names,
+          ir.Let(
+            [state.keys_var],
+            ir.CallHost("js", "keys_of", [ir.Var("_names")]),
+            prologue(top_tree),
+          ),
         ),
       ),
     )

@@ -329,6 +329,9 @@ pub fn fresh_var(e: Emitter2) -> #(String, Emitter2) {
 
 pub const keys_var = "_keys"
 
+// cache site numbers a unit may use above its base
+pub const sites_per_unit = 16_777_216
+
 pub fn name_slot(e: Emitter2, text: String) -> #(Int, Emitter2) {
   let e = Emitter2(..e, uses_keys: True)
   case dict.get(e.names, text) {
@@ -660,8 +663,8 @@ fn int_to_string(i: Int) -> String
 // ics live in one per-agent map keyed by site, so modules loaded into the
 // same agent must not number their sites alike: each module counts up from a
 // base drawn from its name (2^30 bases, 2^24 sites each, all small ints)
-fn site_base(module_name: String) -> Int {
-  phash2(module_name, 1_073_741_824) * 16_777_216
+pub fn site_base(module_name: String) -> Int {
+  phash2(module_name, 1_073_741_824) * sites_per_unit
 }
 
 @external(erlang, "erlang", "phash2")

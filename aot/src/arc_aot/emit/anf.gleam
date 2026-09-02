@@ -705,6 +705,14 @@ pub fn key(text: String) -> Build(ir.Value) {
   }
 }
 
+// a cache site number no other unit in the heap shares
+pub fn ic_site() -> Build(ir.Value) {
+  fn(e: Emitter2, k) {
+    let n = e.next_site
+    k(Emitter2(..e, next_site: n + 1), ir.ConstI64(n))
+  }
+}
+
 pub fn index_key(i: Int) -> ir.Value {
   ir.ConstI64(key.index(i))
 }

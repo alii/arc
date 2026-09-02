@@ -105,6 +105,7 @@ pub fn roots_of_state(st: Agent) -> Roots {
     free_protos: _,
     global_epoch: _,
     names:,
+    units: _,
   ) = store
   let ids = list.append(unhandled_rejections, set.to_list(pinned_roots))
   let terms = [

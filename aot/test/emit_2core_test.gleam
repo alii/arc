@@ -1,5 +1,10 @@
 import arc/rt/gc as rt_gc
+import arc/rt/store as rt_store
+import arc_aot/emit/state
 import emit_2core_harness as harness
+import gleam/erlang/atom
+import gleam/list
+import gleam/string
 
 const sum_src = "function sum(n){let s=0;for(let i=1;i<=n;i++)s+=i;return s} console.log(sum(10))"
 
@@ -31,6 +36,78 @@ pub fn global_cache_across_units_test() {
   let assert Ok(_) = ra.result
   let #(_, rb) = harness.run_loaded(b, st)
   assert rb.stdout == <<"1\n":utf8>>
+}
+
+const init_a_src = "globalThis.Box = globalThis.Box || function () {}; function fa(o) { o.a = 1; o.b = 2 } var oa = new Box(); fa(oa); console.log(Object.keys(oa).join(), oa.a, oa.b)"
+
+const init_b_src = "globalThis.Box = globalThis.Box || function () {}; function fb(o) { o.c = 3; o.d = 4 } var ob = new Box(); fb(ob); console.log(Object.keys(ob).join(), ob.c, ob.d)"
+
+// two units appending different keys at aligned init sites
+pub fn init_cache_across_units_test() {
+  let assert Ok(a) = harness.load_compiled(init_a_src)
+  let assert Ok(b) = harness.load_compiled(init_b_src)
+  let st = harness.seed()
+  let #(st, ra) = harness.run_loaded(a, st)
+  assert ra.stdout == <<"a,b 1 2\n":utf8>>
+  let #(st, rb) = harness.run_loaded(b, st)
+  assert rb.stdout == <<"c,d 3 4\n":utf8>>
+  let #(st, ra) = harness.run_loaded(a, st)
+  assert ra.stdout == <<"a,b 1 2\n":utf8>>
+  let #(_, rb) = harness.run_loaded(b, st)
+  assert rb.stdout == <<"c,d 3 4\n":utf8>>
+}
+
+const read_a_src = "globalThis.P = globalThis.P || function () { this.p = 1; this.q = 2 }; function ra(o) { return o.p } var s = 0; for (var i = 0; i < 5; i++) s = s + ra(new P()); console.log(s)"
+
+const read_b_src = "globalThis.P = globalThis.P || function () { this.p = 1; this.q = 2 }; function rb(o) { return o.q } var s = 0; for (var i = 0; i < 5; i++) s = s + rb(new P()); console.log(s)"
+
+// two units reading different keys at aligned read sites
+pub fn read_cache_across_units_test() {
+  let assert Ok(a) = harness.load_compiled(read_a_src)
+  let assert Ok(b) = harness.load_compiled(read_b_src)
+  let st0 = harness.seed()
+  let #(st1, ra) = harness.run_loaded(a, st0)
+  assert ra.stdout == <<"5\n":utf8>>
+  let #(st, rb) = harness.run_loaded(b, st1)
+  assert rb.stdout == <<"10\n":utf8>>
+  assert list.contains(harness.ic_kinds(st1, st0), "read")
+  assert list.contains(harness.ic_kinds(st, st1), "read")
+  let #(st, ra) = harness.run_loaded(a, st)
+  assert ra.stdout == <<"5\n":utf8>>
+  let #(_, rb) = harness.run_loaded(b, st)
+  assert rb.stdout == <<"10\n":utf8>>
+}
+
+const call_a_src = "globalThis.mk2 = globalThis.mk2 || function () { return { m1() { return 1 }, m2() { return 2 } } }; function ca(o) { return o.m1() } var s = 0; for (var i = 0; i < 5; i++) s = s + ca(mk2()); console.log(s)"
+
+const call_b_src = "globalThis.mk2 = globalThis.mk2 || function () { return { m1() { return 1 }, m2() { return 2 } } }; function cb(o) { return o.m2() } var s = 0; for (var i = 0; i < 5; i++) s = s + cb(mk2()); console.log(s)"
+
+// two units calling different methods at aligned call sites
+pub fn call_cache_across_units_test() {
+  let assert Ok(a) = harness.load_compiled(call_a_src)
+  let assert Ok(b) = harness.load_compiled(call_b_src)
+  let st0 = harness.seed()
+  let #(st1, ra) = harness.run_loaded(a, st0)
+  assert ra.stdout == <<"5\n":utf8>>
+  let #(st, rb) = harness.run_loaded(b, st1)
+  assert rb.stdout == <<"10\n":utf8>>
+  assert list.contains(harness.ic_kinds(st1, st0), "call")
+  assert list.contains(harness.ic_kinds(st, st1), "call")
+  let #(st, ra) = harness.run_loaded(a, st)
+  assert ra.stdout == <<"5\n":utf8>>
+  let #(_, rb) = harness.run_loaded(b, st)
+  assert rb.stdout == <<"10\n":utf8>>
+}
+
+// a unit whose site base another module already holds does not run
+pub fn site_clash_test() {
+  let assert Ok(b) = harness.load_compiled(unit_a_src)
+  let base = state.site_base(atom.to_string(b))
+  let st = rt_store.t_claim_unit(harness.seed(), base, "zz_other")
+  let st = rt_store.t_claim_unit(st, base, "zz_other")
+  let #(_, r) = harness.run_loaded(b, st)
+  let assert Error(msg) = r.result
+  assert string.starts_with(msg, "uncaught")
 }
 
 const pinned_a_src = "globalThis.make = function () { var o = {}; o.zzpinned = 1; return Object.keys(o)[0] + o.zzpinned }

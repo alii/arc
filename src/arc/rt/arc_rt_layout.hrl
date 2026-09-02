@@ -26,7 +26,7 @@
 -define(STORE_ALLOC, 5).
 -define(STORE_SHAPES, 14).
 -define(STORE_NEXT_SHAPE, 15).
--define(STORE_ARITY, 20).
+-define(STORE_ARITY, 21).
 -define(STORE_ICS, 17).
 -define(STORE_FREE_PROTOS, 18).
 -define(STORE_GLOBAL_EPOCH, 19).

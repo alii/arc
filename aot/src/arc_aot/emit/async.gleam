@@ -2632,11 +2632,9 @@ fn key_named(s: String) -> anf.Build(ir.Value) {
 }
 
 fn get_named(obj: ir.Value, name: String) -> anf.Build(ir.Value) {
-  use site <- anf.then(fn(e: Emitter2, k) {
-    k(state.Emitter2(..e, next_site: e.next_site + 1), e.next_site)
-  })
+  use site <- anf.then(anf.ic_site())
   use key <- anf.then(anf.key(name))
-  anf.host("get_prop_site", [obj, key, ir.ConstI32(site)])
+  anf.host("get_prop_site", [obj, key, site])
 }
 
 fn iter_hint(kind: state.CoroutineKind) -> ir.Value {

@@ -2615,6 +2615,8 @@ pub type JsStore(st) {
     // bumped on any write to a global object cell, for global read caches
     global_epoch: Int,
     names: NameTable,
+    // module name of each compiled unit run here, by site base
+    units: Dict(Int, String),
   )
 }
 
