@@ -5615,10 +5615,9 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 "Cannot read properties of " <> rt_val.nullish_label(receiver),
               )
             _ -> {
-              use #(pk, state) <- result.try(rt3(
+              use #(pk, state) <- result.try(rt2(
                 state,
-                rt_obj.t_read_key,
-                receiver,
+                rt_val.t_find_property_key,
                 k,
               ))
               case pk {
@@ -5636,14 +5635,19 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                     pc: state.pc + 1,
                   )
                 }
-                Error(text) ->
-                  Ok(
-                    State(
-                      ..state,
-                      stack: [mk_undefined(), mk_string(text), receiver, ..rest],
-                      pc: state.pc + 1,
-                    ),
+                Error(text) -> {
+                  use #(val, state) <- result.map(rt3(
+                    state,
+                    rt_obj.t_get_by_text,
+                    receiver,
+                    text,
+                  ))
+                  State(
+                    ..state,
+                    stack: [val, mk_string(text), receiver, ..rest],
+                    pc: state.pc + 1,
                   )
+                }
               }
             }
           }

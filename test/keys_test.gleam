@@ -3,6 +3,7 @@ import arc/compiler
 import arc/engine.{type Engine, JsString, Returned}
 import arc/internal/tuple_array
 import arc/interp/load
+import arc/module/load_error
 import arc/parser
 import arc/rt/bytecode.{type FuncTemplate}
 import arc/rt/store as rt_store
@@ -68,6 +69,65 @@ pub fn unseen_name_read_through_proxy_still_traps_test() {
        [o.zq_unseen_1, o['zq_unseen_2'], 'zq_unseen_3' in o].join() + '|' + seen.join()",
     )
     == "7,7,true|string:zq_unseen_1,string:zq_unseen_2,has:zq_unseen_3"
+}
+
+// typed arrays, proxies and namespaces answer unseen strings without naming them
+pub fn exotic_reads_of_unseen_names_do_not_grow_the_table_test() {
+  let resolve = fn(raw: String, _referrer: String) { Ok(raw) }
+  let load = fn(resolved: String) {
+    case resolved {
+      "dep" -> Ok("export const a = 1")
+      _ -> Error(load_error.LoadNotFound)
+    }
+  }
+  let assert Ok(#(_, eng)) =
+    engine.eval_module(
+      engine.new(),
+      "entry",
+      "import * as ns from 'dep'; globalThis.ns = ns",
+      resolve,
+      load,
+    )
+  let #(_, eng) =
+    run(
+      eng,
+      "var ta = new Uint8Array(8), seen = [], described = [], plain = {a: 1},
+           p = new Proxy({}, { get(t, k) { seen.push(k); return 1 } }),
+           d = new Proxy({}, { getOwnPropertyDescriptor(t, k) { described.push(k) } }),
+           bare = new Proxy(plain, {}), i, k, ok = true; 'ok'",
+    )
+  let before = engine.heap(eng).store.names.next
+  let #(out, eng) =
+    run(
+      eng,
+      "for (i = 0; i < 10000; i++) {
+         k = 'zx_' + i;
+         ok = ok && ta[k] === undefined && !(k in ta) && !Reflect.has(ta, k)
+           && Reflect.get(ta, k) === undefined && !Object.hasOwn(ta, k)
+           && p[k] === 1 && bare[k] === undefined && !(k in bare)
+           && !Object.hasOwn(bare, k) && !Object.hasOwn(d, k)
+           && ns[k] === undefined && !(k in ns) && !Object.hasOwn(ns, k)
+           && Reflect.get(ns, k) === undefined;
+       }
+       String(ok && seen.length === 10000 && seen[9999] === k
+         && described.length === 10000 && described[0] === 'zx_' + 0
+         && ns.a === 1 && 'a' in ns)",
+    )
+  assert out == "true"
+  assert engine.heap(eng).store.names.next == before
+}
+
+// §10.4.5 numeric strings stop at the typed array, other strings walk on
+pub fn typed_array_unseen_string_keys_test() {
+  assert js(
+      "var ta = new Int8Array(4); ta[1] = 5;
+       Object.getPrototypeOf(Int8Array.prototype).zq_walked = 'w';
+       var r = [ta['-0'], ta['1.5'], ta['4294967295'], ta['-1'], ta['zq_walked'], ta['zq_absent'],
+                '-0' in ta, '1.5' in ta, 'zq_walked' in ta, 'zq_absent' in ta,
+                Reflect.has(ta, '-0'), Reflect.get(ta, 'zq_walked'), Object.hasOwn(ta, '1.5')];
+       r.join()",
+    )
+    == ",,,,w,,false,false,true,false,false,w,false"
 }
 
 pub fn json_round_trip_with_many_names_test() {

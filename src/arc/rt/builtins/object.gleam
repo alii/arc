@@ -655,9 +655,9 @@ fn own_property_by_value(
   h: Handle,
   key_val: JsVal,
 ) -> #(Option(Property), Agent) {
-  case rt_obj.t_own_read_key(st, h, key_val) {
+  case rt_val.t_find_property_key(st, key_val) {
     #(Ok(key), st) -> rt_obj.t_get_own_property(st, h, key)
-    #(Error(_unseen), st) -> #(None, st)
+    #(Error(text), st) -> rt_obj.t_own_property_by_text(st, h, text)
   }
 }
 

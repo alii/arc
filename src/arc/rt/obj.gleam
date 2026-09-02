@@ -739,85 +739,154 @@ fn primitive_string_get(
   }
 }
 
-// a string no object was keyed by is absent on any chain of plain objects
-pub fn t_read_key(
-  st: Agent,
-  recv: JsVal,
-  k: JsVal,
-) -> #(Result(ObjectKey, String), Agent) {
-  case rt_val.t_find_property_key(st, k) {
-    #(Ok(key), st) -> #(Ok(key), st)
-    #(Error(text), st) ->
-      case plain_chain(st, recv) {
-        True -> #(Error(text), st)
-        False -> {
-          let #(key, st) = rt_store.t_key(st, text)
-          #(Ok(StringKey(key)), st)
-        }
+// what a read looks a property up by
+type By {
+  ByKey(ObjectKey)
+  // a string no object was keyed by, so only exotic objects can answer it
+  ByText(String)
+}
+
+// a trap that ran may have keyed the text since
+fn rekey(st: Agent, by: By) -> By {
+  case by {
+    ByText(text) ->
+      case rt_store.t_find_key(st, text) {
+        Some(k) -> ByKey(StringKey(k))
+        None -> by
       }
+    ByKey(_) -> by
   }
 }
 
-// t_read_key for an own property query on h
-pub fn t_own_read_key(
+fn by_value(st: Agent, by: By) -> JsVal {
+  case by {
+    ByKey(key) -> t_object_key_value(st, key)
+    ByText(text) -> rt_types.mk_string(text)
+  }
+}
+
+fn by_quoted(st: Agent, by: By) -> String {
+  case by {
+    ByKey(key) -> key_quoted(st, key)
+    ByText(text) -> "'" <> text <> "'"
+  }
+}
+
+fn get_by(st: Agent, h: Handle, by: By, receiver: JsVal) -> #(JsVal, Agent) {
+  case by {
+    ByKey(key) -> get_from(st, h, key, receiver)
+    ByText(text) -> get_by_text(st, h, text, receiver)
+  }
+}
+
+fn has_by(st: Agent, h: Handle, by: By) -> #(Bool, Agent) {
+  case by {
+    ByKey(key) -> has_from(st, h, key)
+    ByText(text) -> t_has_by_text(st, h, text)
+  }
+}
+
+fn own_by(st: Agent, h: Handle, by: By) -> #(Option(Property), Agent) {
+  case by {
+    ByKey(key) -> t_get_own_property(st, h, key)
+    ByText(text) -> t_own_property_by_text(st, h, text)
+  }
+}
+
+// [[get]] by a string no object was keyed by, naming nothing
+pub fn t_get_by_text(st: Agent, recv: JsVal, text: String) -> #(JsVal, Agent) {
+  let realm = st.realm
+  let head = case rt_types.classify(recv) {
+    KHandle(h) -> Some(h)
+    rt_types.KStr(_) -> Some(realm.string.prototype)
+    rt_types.KNum(_) -> Some(realm.number.prototype)
+    rt_types.KBool(_) -> Some(realm.boolean.prototype)
+    rt_types.KSym(_) -> Some(realm.symbol.prototype)
+    rt_types.KBig(_) -> Some(realm.bigint.prototype)
+    KUndef | KNull | KTdz -> None
+  }
+  case head {
+    Some(h) -> get_by_text(st, h, text, recv)
+    None -> #(rt_types.mk_undefined(), st)
+  }
+}
+
+pub fn t_get_by_text_with_receiver(
   st: Agent,
   h: Handle,
-  k: JsVal,
-) -> #(Result(ObjectKey, String), Agent) {
-  case rt_val.t_find_property_key(st, k) {
-    #(Ok(key), st) -> #(Ok(key), st)
-    #(Error(text), st) ->
-      case plain_slot(read_object(st, h)) {
-        True -> #(Error(text), st)
-        False -> {
-          let #(key, st) = rt_store.t_key(st, text)
-          #(Ok(StringKey(key)), st)
-        }
+  text: String,
+  receiver: JsVal,
+) -> #(JsVal, Agent) {
+  get_by_text(st, h, text, receiver)
+}
+
+fn get_by_text(
+  st: Agent,
+  h: Handle,
+  text: String,
+  receiver: JsVal,
+) -> #(JsVal, Agent) {
+  case read_object(st, h) {
+    SObject(kind: ProxyObj(target:, handler:, revoked:), ..) ->
+      proxy_get(st, Proxy(target:, handler:, revoked:), ByText(text), receiver)
+    SObject(kind: ModuleNamespace(exports:), ..) ->
+      namespace_get(st, exports, text)
+    slot ->
+      case text_proto(slot, text) {
+        Some(p) -> get_by_text(st, p, text, receiver)
+        None -> #(rt_types.mk_undefined(), st)
       }
   }
 }
 
-fn plain_chain(st: Agent, recv: JsVal) -> Bool {
-  let realm = st.realm
-  case rt_types.classify(recv) {
-    KHandle(h) -> plain_from(st, Some(h), limits.max_prototype_depth)
-    rt_types.KStr(_) ->
-      plain_from(st, Some(realm.string.prototype), limits.max_prototype_depth)
-    rt_types.KNum(_) ->
-      plain_from(st, Some(realm.number.prototype), limits.max_prototype_depth)
-    rt_types.KBool(_) ->
-      plain_from(st, Some(realm.boolean.prototype), limits.max_prototype_depth)
-    rt_types.KSym(_) ->
-      plain_from(st, Some(realm.symbol.prototype), limits.max_prototype_depth)
-    rt_types.KBig(_) ->
-      plain_from(st, Some(realm.bigint.prototype), limits.max_prototype_depth)
-    KUndef | KNull | KTdz -> False
-  }
-}
-
-fn plain_from(st: Agent, h: Option(Handle), fuel: Int) -> Bool {
-  case h {
-    None -> True
-    Some(_) if fuel <= 0 -> False
-    Some(h) ->
-      case read_object(st, h) {
-        SShapedObject(proto:, ..) -> plain_from(st, proto, fuel - 1)
-        SObject(proto:, ..) as slot ->
-          plain_slot(slot) && plain_from(st, proto, fuel - 1)
-        _ -> False
+// [[hasproperty]] by a string no object was keyed by, naming nothing
+pub fn t_has_by_text(st: Agent, h: Handle, text: String) -> #(Bool, Agent) {
+  case read_object(st, h) {
+    SObject(kind: ProxyObj(target:, handler:, revoked:), ..) ->
+      proxy_has(st, Proxy(target:, handler:, revoked:), ByText(text))
+    SObject(kind: ModuleNamespace(exports:), ..) -> #(
+      dict.has_key(exports, text),
+      st,
+    )
+    slot ->
+      case text_proto(slot, text) {
+        Some(p) -> t_has_by_text(st, p, text)
+        None -> #(False, st)
       }
   }
 }
 
-// named keys on this object are only what its props hold
-fn plain_slot(slot: JsSlot) -> Bool {
+// [[getownproperty]] by a string no object was keyed by, naming nothing
+pub fn t_own_property_by_text(
+  st: Agent,
+  h: Handle,
+  text: String,
+) -> #(Option(Property), Agent) {
+  case read_object(st, h) {
+    SObject(kind: ProxyObj(target:, handler:, revoked:), ..) ->
+      proxy_get_own_property(
+        st,
+        Proxy(target:, handler:, revoked:),
+        ByText(text),
+      )
+    SObject(kind: ModuleNamespace(exports:), ..) -> #(
+      namespace_own_property(st, exports, text),
+      st,
+    )
+    _ -> #(None, st)
+  }
+}
+
+// §10.4.5 a typed array answers any numeric string itself
+fn text_proto(slot: JsSlot, text: String) -> Option(Handle) {
   case slot {
-    SShapedObject(..) -> True
-    SObject(kind: ProxyObj(..), ..)
-    | SObject(kind: TypedArrayObj(..), ..)
-    | SObject(kind: ModuleNamespace(..), ..) -> False
-    SObject(..) -> True
-    _ -> False
+    SObject(kind: TypedArrayObj(..), proto:, ..) ->
+      case buffer.is_canonical_numeric_string(text) {
+        True -> None
+        False -> proto
+      }
+    SObject(proto:, ..) | SShapedObject(proto:, ..) -> proto
+    _ -> None
   }
 }
 
@@ -830,9 +899,9 @@ pub fn t_get_by_value(st: Agent, recv: JsVal, k: JsVal) -> #(JsVal, Agent) {
         "Cannot read properties of " <> rt_val.nullish_label(recv),
       )
     _ ->
-      case t_read_key(st, recv, k) {
+      case rt_val.t_find_property_key(st, k) {
         #(Ok(key), st) -> t_get_prop(st, recv, key)
-        #(Error(_unseen), st) -> #(rt_types.mk_undefined(), st)
+        #(Error(text), st) -> t_get_by_text(st, recv, text)
       }
   }
 }
@@ -859,10 +928,10 @@ fn get_from(
     SObject(kind: ProxyObj(..), ..) as slot, _ if private ->
       ordinary_get(st, slot, key, receiver)
     SObject(kind: ProxyObj(target:, handler:, revoked:), ..), _ ->
-      proxy_get(st, Proxy(target:, handler:, revoked:), key, receiver)
+      proxy_get(st, Proxy(target:, handler:, revoked:), ByKey(key), receiver)
     // §10.4.6.8, tdz export throws referenceerror
     SObject(kind: ModuleNamespace(exports:), ..), StringKey(pk) ->
-      namespace_get(st, exports, pk)
+      namespace_get(st, exports, rt_store.t_key_text(st, pk))
     SObject(
       kind: TypedArrayObj(buffer: buf, elem_kind:, byte_offset:, length:),
       ..,
@@ -1099,7 +1168,8 @@ fn set_on_receiver(
         SObject(kind: ProxyObj(..), ..), _ ->
           set_on_proxy_receiver(st, recv_h, key, v)
         SObject(kind: ModuleNamespace(exports:), ..), StringKey(pk) -> {
-          let _existing = namespace_own_property(st, exports, pk)
+          let _existing =
+            namespace_own_property(st, exports, rt_store.t_key_text(st, pk))
           #(False, st)
         }
         _, _ -> set_own_via_devolve(st, recv_h, key, v)
@@ -1913,7 +1983,7 @@ fn has_from(st: Agent, h: Handle, key: ObjectKey) -> #(Bool, Agent) {
   case read_object(st, h), key {
     _, _ if private -> #(False, st)
     SObject(kind: ProxyObj(target:, handler:, revoked:), ..), _ ->
-      proxy_has(st, Proxy(target:, handler:, revoked:), key)
+      proxy_has(st, Proxy(target:, handler:, revoked:), ByKey(key))
     SObject(kind: KBytecode(birth: BirthPending(Some(_)), ..), ..), StringKey(k)
     | SObject(kind: KCompiled(birth: BirthPending(Some(_)), ..), ..),
       StringKey(k)
@@ -2238,9 +2308,9 @@ pub fn t_get_own_property(
   case read_object(st, h), key {
     slot, _ if private -> #(own_and_proto_of_slot(st, slot, key).0, st)
     SObject(kind: ProxyObj(target:, handler:, revoked:), ..), _ ->
-      proxy_get_own_property(st, Proxy(target:, handler:, revoked:), key)
+      proxy_get_own_property(st, Proxy(target:, handler:, revoked:), ByKey(key))
     SObject(kind: ModuleNamespace(exports:), ..), StringKey(pk) -> #(
-      namespace_own_property(st, exports, pk),
+      namespace_own_property(st, exports, rt_store.t_key_text(st, pk)),
       st,
     )
     SObject(kind: KBytecode(birth: BirthPending(Some(_)), ..), ..) as slot,
@@ -2376,9 +2446,8 @@ fn namespace_binding_value(st: Agent, name: String, cell: Handle) -> JsVal {
 fn namespace_get(
   st: Agent,
   exports: Dict(String, Handle),
-  key: Key,
+  name: String,
 ) -> #(JsVal, Agent) {
-  let name = rt_store.t_key_text(st, key)
   case dict.get(exports, name) {
     Error(Nil) -> #(rt_types.mk_undefined(), st)
     Ok(cell) -> #(namespace_binding_value(st, name, cell), st)
@@ -2389,9 +2458,8 @@ fn namespace_get(
 fn namespace_own_property(
   st: Agent,
   exports: Dict(String, Handle),
-  key: Key,
+  name: String,
 ) -> Option(Property) {
-  let name = rt_store.t_key_text(st, key)
   use cell <- option.map(dict.get(exports, name) |> option.from_result)
   DataProperty(
     value: namespace_binding_value(st, name, cell),
@@ -2616,20 +2684,22 @@ fn proxy_prevent_extensions(st: Agent, p: Proxy) -> #(Bool, Agent) {
 fn proxy_get_own_property(
   st: Agent,
   p: Proxy,
-  key: ObjectKey,
+  by: By,
 ) -> #(Option(Property), Agent) {
   let #(trap, st) = proxy_trap(st, p, "getOwnPropertyDescriptor")
+  let by = rekey(st, by)
   case trap {
-    None -> t_get_own_property(st, p.target, key)
+    None -> own_by(st, p.target, by)
     Some(trap_fn) -> {
       let #(res, st) =
         call_trap(st, p, trap_fn, [
           rt_types.mk_object(p.target),
-          t_object_key_value(st, key),
+          by_value(st, by),
         ])
+      let by = rekey(st, by)
       case rt_types.classify(res) {
         KUndef -> {
-          let #(target_desc, st) = t_get_own_property(st, p.target, key)
+          let #(target_desc, st) = own_by(st, p.target, by)
           case target_desc {
             None -> #(None, st)
             Some(prop) ->
@@ -2638,7 +2708,7 @@ fn proxy_get_own_property(
                   throw_type_error(
                     st,
                     "'getOwnPropertyDescriptor' on proxy: trap returned undefined for property "
-                      <> key_quoted(st, key)
+                      <> by_quoted(st, by)
                       <> " which is non-configurable in the proxy target",
                   )
                 True -> {
@@ -2648,7 +2718,7 @@ fn proxy_get_own_property(
                       throw_type_error(
                         st,
                         "'getOwnPropertyDescriptor' on proxy: trap returned undefined for property "
-                          <> key_quoted(st, key)
+                          <> by_quoted(st, by)
                           <> " which exists in the non-extensible proxy target",
                       )
                     True -> #(None, st)
@@ -2658,7 +2728,7 @@ fn proxy_get_own_property(
           }
         }
         KHandle(_) -> {
-          let #(target_desc, st) = t_get_own_property(st, p.target, key)
+          let #(target_desc, st) = own_by(st, p.target, by)
           let #(ext, st) = t_is_extensible(st, p.target)
           let #(parsed, st) = t_to_property_descriptor(st, res)
           let completed = complete_descriptor(parsed)
@@ -2672,7 +2742,7 @@ fn proxy_get_own_property(
               throw_type_error(
                 st,
                 "'getOwnPropertyDescriptor' on proxy: trap returned descriptor for property "
-                  <> key_quoted(st, key)
+                  <> by_quoted(st, by)
                   <> " that is incompatible with the existing property in the proxy target",
               )
             },
@@ -2683,7 +2753,7 @@ fn proxy_get_own_property(
               throw_type_error(
                 st,
                 "'getOwnPropertyDescriptor' on proxy: trap reported non-configurability for property "
-                  <> key_quoted(st, key)
+                  <> by_quoted(st, by)
                   <> " which is non-existent in the proxy target",
               )
             False, Some(td) ->
@@ -2692,7 +2762,7 @@ fn proxy_get_own_property(
                   throw_type_error(
                     st,
                     "'getOwnPropertyDescriptor' on proxy: trap reported non-configurability for property "
-                      <> key_quoted(st, key)
+                      <> by_quoted(st, by)
                       <> " which is configurable in the proxy target",
                   )
                 False ->
@@ -2704,7 +2774,7 @@ fn proxy_get_own_property(
                       throw_type_error(
                         st,
                         "'getOwnPropertyDescriptor' on proxy: trap reported non-writability for property "
-                          <> key_quoted(st, key)
+                          <> by_quoted(st, by)
                           <> " which is writable in the proxy target",
                       )
                     _, _ -> #(Some(completed), st)
@@ -2716,7 +2786,7 @@ fn proxy_get_own_property(
           throw_type_error(
             st,
             "'getOwnPropertyDescriptor' on proxy: trap returned neither object nor undefined for property "
-              <> key_quoted(st, key),
+              <> by_quoted(st, by),
           )
       }
     }
@@ -2807,18 +2877,20 @@ fn proxy_define_own_property(
 }
 
 // §10.5.7
-fn proxy_has(st: Agent, p: Proxy, key: ObjectKey) -> #(Bool, Agent) {
+fn proxy_has(st: Agent, p: Proxy, by: By) -> #(Bool, Agent) {
   let #(trap, st) = proxy_trap(st, p, "has")
+  let by = rekey(st, by)
   case trap {
-    None -> has_from(st, p.target, key)
+    None -> has_by(st, p.target, by)
     Some(trap_fn) -> {
       let #(res, st) =
         call_trap(st, p, trap_fn, [
           rt_types.mk_object(p.target),
-          t_object_key_value(st, key),
+          by_value(st, by),
         ])
       use <- bool.guard(rt_val.to_boolean(res), #(True, st))
-      let #(target_desc, st) = t_get_own_property(st, p.target, key)
+      let by = rekey(st, by)
+      let #(target_desc, st) = own_by(st, p.target, by)
       case target_desc {
         None -> #(False, st)
         Some(prop) ->
@@ -2827,7 +2899,7 @@ fn proxy_has(st: Agent, p: Proxy, key: ObjectKey) -> #(Bool, Agent) {
               throw_type_error(
                 st,
                 "'has' on proxy: trap returned falsish for property "
-                  <> key_quoted(st, key)
+                  <> by_quoted(st, by)
                   <> " which exists in the proxy target as non-configurable",
               )
             True -> {
@@ -2837,7 +2909,7 @@ fn proxy_has(st: Agent, p: Proxy, key: ObjectKey) -> #(Bool, Agent) {
                   throw_type_error(
                     st,
                     "'has' on proxy: trap returned falsish for property "
-                      <> key_quoted(st, key)
+                      <> by_quoted(st, by)
                       <> " but the proxy target is not extensible",
                   )
                 True -> #(False, st)
@@ -2850,23 +2922,20 @@ fn proxy_has(st: Agent, p: Proxy, key: ObjectKey) -> #(Bool, Agent) {
 }
 
 // §10.5.8
-fn proxy_get(
-  st: Agent,
-  p: Proxy,
-  key: ObjectKey,
-  receiver: JsVal,
-) -> #(JsVal, Agent) {
+fn proxy_get(st: Agent, p: Proxy, by: By, receiver: JsVal) -> #(JsVal, Agent) {
   let #(trap, st) = proxy_trap(st, p, "get")
+  let by = rekey(st, by)
   case trap {
-    None -> get_from(st, p.target, key, receiver)
+    None -> get_by(st, p.target, by, receiver)
     Some(trap_fn) -> {
       let #(res, st) =
         call_trap(st, p, trap_fn, [
           rt_types.mk_object(p.target),
-          t_object_key_value(st, key),
+          by_value(st, by),
           receiver,
         ])
-      let #(target_desc, st) = t_get_own_property(st, p.target, key)
+      let by = rekey(st, by)
+      let #(target_desc, st) = own_by(st, p.target, by)
       case target_desc {
         Some(DataProperty(value: tv, writable: False, configurable: False, ..)) ->
           case same_value(res, tv) {
@@ -2875,7 +2944,7 @@ fn proxy_get(
               throw_type_error(
                 st,
                 "'get' on proxy: property "
-                  <> key_quoted(st, key)
+                  <> by_quoted(st, by)
                   <> " is a read-only and non-configurable data property on the proxy target but the proxy did not return its actual value",
               )
           }
@@ -2886,7 +2955,7 @@ fn proxy_get(
               throw_type_error(
                 st,
                 "'get' on proxy: property "
-                  <> key_quoted(st, key)
+                  <> by_quoted(st, by)
                   <> " is a non-configurable accessor property on the proxy target without a getter, but the trap did not return undefined",
               )
           }

@@ -436,14 +436,13 @@ pub fn t_plus(st: Agent, a: JsVal) -> #(JsVal, Agent) {
 
 pub fn t_in(st: Agent, key: JsVal, obj: JsVal) -> #(Int, Agent) {
   case classify(obj) {
-    KHandle(_) ->
-      case rt_obj.t_read_key(st, obj, key) {
-        #(Ok(pk), st) -> {
-          let #(found, st) = rt_obj.t_has_prop(st, obj, pk)
-          #(bool_int(found), st)
-        }
-        #(Error(_unseen), st) -> #(0, st)
+    KHandle(h) -> {
+      let #(found, st) = case rt_val.t_find_property_key(st, key) {
+        #(Ok(pk), st) -> rt_obj.t_has_prop(st, obj, pk)
+        #(Error(text), st) -> rt_obj.t_has_by_text(st, h, text)
       }
+      #(bool_int(found), st)
+    }
     _ -> {
       let #(tag, st) = rt_val.t_type_of(st, obj)
       rt_val.t_throw_type_error(

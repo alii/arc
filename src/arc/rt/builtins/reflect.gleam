@@ -158,9 +158,10 @@ fn reflect_get(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
     [k] -> #(k, mk_object(h))
     [] -> #(mk_undefined(), mk_object(h))
   }
-  case rt_obj.t_read_key(st, mk_object(h), key_val) {
+  case rt_val.t_find_property_key(st, key_val) {
     #(Ok(pk), st) -> rt_obj.t_get_prop_with_receiver(st, h, pk, receiver)
-    #(Error(_unseen), st) -> #(mk_undefined(), st)
+    #(Error(text), st) ->
+      rt_obj.t_get_by_text_with_receiver(st, h, text, receiver)
   }
 }
 
@@ -170,8 +171,10 @@ fn reflect_get_own_property_descriptor(
 ) -> #(JsVal, Agent) {
   use h, rest, st <- require_object_target(args, st, "getOwnPropertyDescriptor")
   let key_val = helpers.first_arg_or_undefined(rest)
-  let #(pk, st) = rt_val.t_to_property_key(st, key_val)
-  let #(desc, st) = rt_obj.t_get_own_property(st, h, pk)
+  let #(desc, st) = case rt_val.t_find_property_key(st, key_val) {
+    #(Ok(pk), st) -> rt_obj.t_get_own_property(st, h, pk)
+    #(Error(text), st) -> rt_obj.t_own_property_by_text(st, h, text)
+  }
   case desc {
     Some(prop) -> {
       let #(dh, st) =
@@ -194,13 +197,11 @@ fn reflect_get_prototype_of(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
 fn reflect_has(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use h, rest, st <- require_object_target(args, st, "has")
   let key_val = helpers.first_arg_or_undefined(rest)
-  case rt_obj.t_read_key(st, mk_object(h), key_val) {
-    #(Ok(pk), st) -> {
-      let #(found, st) = rt_obj.t_has_prop(st, mk_object(h), pk)
-      #(mk_bool(found), st)
-    }
-    #(Error(_unseen), st) -> #(mk_bool(False), st)
+  let #(found, st) = case rt_val.t_find_property_key(st, key_val) {
+    #(Ok(pk), st) -> rt_obj.t_has_prop(st, mk_object(h), pk)
+    #(Error(text), st) -> rt_obj.t_has_by_text(st, h, text)
   }
+  #(mk_bool(found), st)
 }
 
 fn reflect_is_extensible(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
