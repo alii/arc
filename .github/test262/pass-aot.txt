@@ -7829,7 +7829,6 @@ built-ins/Math/sqrt/length.js
 built-ins/Math/sqrt/name.js
 built-ins/Math/sqrt/not-a-constructor.js
 built-ins/Math/sqrt/prop-desc.js
-built-ins/Math/sqrt/results.js
 built-ins/Math/tan/S15.8.2.18_A1.js
 built-ins/Math/tan/S15.8.2.18_A2.js
 built-ins/Math/tan/S15.8.2.18_A3.js
@@ -26668,7 +26667,6 @@ intl402/Temporal/ZonedDateTime/legacy-non-iana.js
 intl402/Temporal/ZonedDateTime/links-backward.js
 intl402/Temporal/ZonedDateTime/links-backzone.js
 intl402/Temporal/ZonedDateTime/links-etcetera.js
-intl402/Temporal/ZonedDateTime/links.js
 intl402/Temporal/ZonedDateTime/non-canonical-utc.js
 intl402/Temporal/ZonedDateTime/prototype/add/basic-buddhist.js
 intl402/Temporal/ZonedDateTime/prototype/add/basic-chinese.js
