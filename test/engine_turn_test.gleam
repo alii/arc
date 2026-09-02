@@ -3,9 +3,9 @@ import arc/host.{State}
 import arc/module_host
 import arc/rt/async as rt_async
 import arc/rt/gc as rt_gc
+import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type JsVal, Agent, JInt, JsStore, KHandle, classify, mk_number,
-  mk_undefined,
+  type Agent, type JsVal, JInt, KHandle, classify, mk_number, mk_undefined,
 }
 import gleam/set
 import gleam/string
@@ -17,8 +17,9 @@ fn small_engine() -> Engine(Nil) {
   let eng = engine.new() |> engine.with_host_hooks(rt_helpers.quiet_hooks())
   let #(eng, Nil) =
     engine.with_state(eng, fn(s) {
-      let st = rt_gc.t_collect(s.agent, [])
-      let st = Agent(..st, store: JsStore(..st.store, gc_threshold: threshold))
+      let st =
+        rt_gc.t_collect(s.agent, [])
+        |> rt_store.t_gc_settings(gc_threshold: threshold, names_sweep_min: 0)
       #(State(..s, agent: st), Nil)
     })
   eng

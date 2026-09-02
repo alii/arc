@@ -51,8 +51,21 @@ pub fn t_store_new() -> JsStore(Agent) {
       })
         |> dict.from_list,
       swept: 0,
+      sweep_min: default_names_sweep_min,
     ),
   )
+}
+
+pub const default_names_sweep_min: Int = 4096
+
+pub fn t_gc_settings(
+  st: Agent,
+  gc_threshold gc_threshold: Int,
+  names_sweep_min sweep_min: Int,
+) -> Agent {
+  let js = require_js(st)
+  let names = NameTable(..js.names, sweep_min:)
+  with_js(st, JsStore(..js, gc_threshold:, names:))
 }
 
 // private keys the engine keeps on the global object

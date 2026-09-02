@@ -6,15 +6,16 @@ import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion} as rt_call
 import arc/rt/gc as rt_gc
 import arc/rt/inspect as rt_inspect
-import arc/rt/types.{type Agent, Agent, JsStore}
+import arc/rt/store as rt_store
+import arc/rt/types.{type Agent}
 import rt_helpers
 
 const threshold = 256
 
 fn small_agent() -> Agent {
   let st = rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
-  let st = rt_gc.t_collect(st, [])
-  Agent(..st, store: JsStore(..st.store, gc_threshold: threshold))
+  rt_gc.t_collect(st, [])
+  |> rt_store.t_gc_settings(gc_threshold: threshold, names_sweep_min: 0)
 }
 
 fn run(st: Agent, source: String) -> #(rt_call.Completion, Agent) {

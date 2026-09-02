@@ -106,6 +106,15 @@ fn boot_base_agent() -> Agent {
     Some(agent) -> agent
     None -> {
       let agent = rt_builtins.new_agent(harness_host_hooks()) |> entry.link
+      let agent = case test_runner.get_env_is_truthy("TEST262_NAMES_SWEEP") {
+        True ->
+          rt_store.t_gc_settings(
+            agent,
+            gc_threshold: agent.store.gc_threshold,
+            names_sweep_min: 0,
+          )
+        False -> agent
+      }
       agent_cache_put(agent_cache_key, agent)
       agent
     }

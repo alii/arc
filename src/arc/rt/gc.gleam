@@ -615,10 +615,9 @@ pub fn t_collect_full(st: Agent, extra_roots: List(Handle)) -> Agent {
   t_collect_frames(st, extra_roots, [], True)
 }
 
-pub const min_names_sweep: Int = 4096
-
 pub fn names_due(js: JsStore(st)) -> Bool {
-  dict.size(js.names.texts) >= int.max(min_names_sweep, 2 * js.names.swept)
+  let n = js.names
+  n.sweep_min == 0 || dict.size(n.texts) >= int.max(n.sweep_min, 2 * n.swept)
 }
 
 // no renumbering; dead ids dropped, next falls past highest survivor

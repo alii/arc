@@ -37,7 +37,7 @@
 -define(NAMES_TEXTS, 3).
 -define(NAMES_NEXT, 4).
 -define(NAMES_PINNED, 5).
--define(NAMES_ARITY, 6).
+-define(NAMES_ARITY, 7).
 
 -define(REALM_TAG, realm).
 -define(REALM_OBJECT, 2).

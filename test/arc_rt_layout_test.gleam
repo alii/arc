@@ -142,6 +142,7 @@ pub fn js_store_test() {
         next: 9001,
         pinned: dict.from_list([#(key.name(9000), Nil)]),
         swept: 17,
+        sweep_min: 18,
       ),
     )
   assert tag_of(store) == tag("STORE_TAG")

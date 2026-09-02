@@ -2629,6 +2629,8 @@ pub type NameTable {
     pinned: Dict(Key, Nil),
     // texts size after the last name sweep
     swept: Int,
+    // texts size a sweep waits for; 0 sweeps on every collection
+    sweep_min: Int,
   )
 }
 

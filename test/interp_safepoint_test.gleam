@@ -12,8 +12,8 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, Agent, BirthSettled, FnFlags,
-  GenSuspendedYield, HostJob, JsStore, KBytecode, KHandle, NoElements,
-  ResumeFrame, SGenerator, SObject, classify, mk_object, mk_undefined,
+  GenSuspendedYield, HostJob, KBytecode, KHandle, NoElements, ResumeFrame,
+  SGenerator, SObject, classify, mk_object, mk_undefined,
 }
 import gleam/dict
 import gleam/option.{None, Some}
@@ -23,8 +23,8 @@ import rt_helpers
 const threshold = 64
 
 fn small_agent() -> Agent {
-  let st = rt_gc.t_collect(rt_helpers.agent(), [])
-  Agent(..st, store: JsStore(..st.store, gc_threshold: threshold))
+  rt_gc.t_collect(rt_helpers.agent(), [])
+  |> rt_store.t_gc_settings(gc_threshold: threshold, names_sweep_min: 0)
 }
 
 fn new_object(st: Agent) -> #(Handle, JsVal, Agent) {
