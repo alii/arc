@@ -2,7 +2,7 @@
 
 -export([
     classify/1,
-    mk_undefined/0, mk_hole/0, mk_null/0, mk_bool/1, mk_number/1, mk_int/1,
+    mk_undefined/0, mk_hole/0, mk_array_lit/1, mk_null/0, mk_bool/1, mk_number/1, mk_int/1,
     mk_string/1, mk_bigint/1, mk_symbol/1, mk_object/1, mk_tdz/0,
     to_boolean_i32/1, to_boolean/1,
     strict_eq/2, same_value_zero/2,
@@ -99,6 +99,8 @@ canonical_key_bin(B) -> {named, B}.
 
 %% not a jsval, classify has no clause for it
 mk_hole() -> js_hole.
+
+mk_array_lit(Elems) -> {js_alit, Elems}.
 
 mk_undefined() -> undefined.
 

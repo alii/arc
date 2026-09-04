@@ -65,6 +65,8 @@ pub fn table() -> DirectHost {
       #("new_object_props", HostOp(obj_fast_ffi, "t_new_object_props", Mut)),
       #("new_array", HostOp(obj, "t_new_array", Mut)),
       #("array_from_list", HostOp(obj, "t_new_array", Mut)),
+      #("array_lit", HostOp(obj_ffi, "t_array_lit", Mut)),
+      #("array_lit_packed", HostOp(obj_ffi, "t_array_lit_packed", Mut)),
       #("new_error", HostOp(lang, "t_new_error", Mut)),
       #("fn_new", HostOp(call, "t_new_function", Mut)),
       #("new_arguments", HostOp(obj, "t_new_arguments", Mut)),

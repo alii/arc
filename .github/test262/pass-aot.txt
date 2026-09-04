@@ -7829,6 +7829,7 @@ built-ins/Math/sqrt/length.js
 built-ins/Math/sqrt/name.js
 built-ins/Math/sqrt/not-a-constructor.js
 built-ins/Math/sqrt/prop-desc.js
+built-ins/Math/sqrt/results.js
 built-ins/Math/tan/S15.8.2.18_A1.js
 built-ins/Math/tan/S15.8.2.18_A2.js
 built-ins/Math/tan/S15.8.2.18_A3.js

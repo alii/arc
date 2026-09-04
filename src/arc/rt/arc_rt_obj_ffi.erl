@@ -5,7 +5,8 @@
          t_get_prop_ic/4, t_get_prop_ic_miss/4, t_get_prop_slow/4,
          t_get_prop_site/4,
          t_instanceof_fast/3,
-         t_get_elem_fast/3, t_set_elem_fast/4,
+         t_get_elem_fast/3, t_set_elem_fast/4, t_array_lit/2,
+         t_array_lit_packed/2,
          t_global_get_fast/2, t_global_get/2,
          named_free/5, free_chain/4, named_plain/2,
          shape_slots_new/0, shape_slots_get/2, shape_slots_set/3,
@@ -27,6 +28,19 @@
 t_get_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin) ->
     peek_get(St, Id, KeyBin);
 t_get_prop_own_data(_, _, _) -> miss.
+
+%% nested constant array literals arrive as {js_alit, Elems}
+t_array_lit(St, Elems) ->
+    {Vs, St1} = array_lit_elems(Elems, St, []),
+    'arc@rt@obj':t_new_array(St1, Vs).
+
+array_lit_elems([{js_alit, Sub} | T], St, Acc) ->
+    {V, St1} = t_array_lit(St, Sub),
+    array_lit_elems(T, St1, [V | Acc]);
+array_lit_elems([V | T], St, Acc) -> array_lit_elems(T, St, [V | Acc]);
+array_lit_elems([], St, Acc) -> {lists:reverse(Acc), St}.
+
+t_array_lit_packed(St, Bin) -> t_array_lit(St, binary_to_term(Bin)).
 
 t_get_prop_ic(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
