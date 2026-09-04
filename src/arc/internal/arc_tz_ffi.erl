@@ -2,8 +2,9 @@
 -module(arc_tz_ffi).
 
 -export([lookup/1, offset_at/2, next_transition/2, previous_transition/2,
-         canonical_id/1, host_zone/0, zone_named/1, utc_zone/0, zone_id/1,
-         zone_offset_at_utc_ms/2, zone_offset_at_local_ms/2]).
+         canonical_id/1, available_zones/0, host_zone/0, zone_named/1,
+         utc_zone/0, zone_id/1, zone_offset_at_utc_ms/2,
+         zone_offset_at_local_ms/2]).
 
 -export_type([local_zone/0]).
 
@@ -17,18 +18,15 @@
 
 -spec lookup(binary()) -> {ok, binary()} | {error, nil}.
 lookup(Id) when is_binary(Id) ->
-    case root() of
-        none -> {error, nil};
-        Root ->
-            case maps:get(names, zi_tables(Root)) of
-                Names when map_size(Names) > 0 ->
-                    case maps:find(string:lowercase(Id), Names) of
-                        {ok, Proper} -> {ok, Proper};
-                        error -> {error, nil}
-                    end;
-                _NoZi -> resolve_in_tree(Root, Id)
-            end
+    case maps:find(ascii_lowercase(Id), arc_tz_links_ffi:names()) of
+        {ok, Proper} -> {ok, Proper};
+        error -> {error, nil}
     end.
+
+ascii_lowercase(Bin) -> << <<(ascii_lower(C))>> || <<C>> <= Bin >>.
+
+ascii_lower(C) when C >= $A, C =< $Z -> C + 32;
+ascii_lower(C) -> C.
 
 -spec offset_at(binary(), integer()) -> {ok, integer()} | {error, tz_error()}.
 offset_at(Id, Sec) ->
@@ -61,16 +59,24 @@ previous_transition(Id, Sec) ->
 
 -spec canonical_id(binary()) -> binary().
 canonical_id(Id) when is_binary(Id) ->
+    Proper = case lookup(Id) of
+        {ok, P} -> P;
+        {error, nil} -> Id
+    end,
+    maps:get(Proper, arc_tz_links_ffi:links(), Proper).
+
+%% bundled zones the host has data for
+-spec available_zones() -> [binary()].
+available_zones() ->
     case root() of
-        none -> Id;
-        Root -> follow_links(Id, maps:get(links, zi_tables(Root)), 8)
+        none -> [];
+        Root -> [Z || Z <- arc_tz_links_ffi:zones(), is_file(Root, Z)]
     end.
 
-follow_links(Id, _Links, 0) -> Id;
-follow_links(Id, Links, N) ->
-    case maps:find(string:lowercase(Id), Links) of
-        {ok, Target} -> follow_links(Target, Links, N - 1);
-        error -> Id
+is_file(Root, Id) ->
+    case prim_file:read_file_info(filename:join(Root, binary_to_list(Id))) of
+        {ok, Info} -> element(3, Info) =:= regular;
+        {error, _Missing} -> false
     end.
 
 -spec host_zone() -> local_zone().
@@ -151,9 +157,7 @@ zone_from_localtime_contents() ->
 zone_with_contents(Bin) ->
     case root() of
         none -> none;
-        Root ->
-            Names = maps:values(maps:get(names, zi_tables(Root))),
-            match_zone_contents(Root, Bin, Names)
+        Root -> match_zone_contents(Root, Bin, arc_tz_links_ffi:zones())
     end.
 
 match_zone_contents(_Root, _Bin, []) -> none;
@@ -202,6 +206,12 @@ posix_zone(Tz) ->
 
 known_zone("") -> none;
 known_zone(Name) ->
+    case lookup(unicode:characters_to_binary(Name)) of
+        {ok, Id} -> loaded(Id);
+        {error, nil} -> host_only_zone(Name)
+    end.
+
+host_only_zone(Name) ->
     case root() of
         none -> none;
         Root ->
@@ -261,86 +271,17 @@ floor_div(A, B) ->
     end.
 
 root() ->
-    find_root(["/usr/share/zoneinfo", "/usr/share/lib/zoneinfo",
-               "/etc/zoneinfo"]).
+    %% no prim_file on atomvm
+    try find_root(["/usr/share/zoneinfo", "/usr/share/lib/zoneinfo",
+                   "/etc/zoneinfo"])
+    catch error:undef -> none
+    end.
 
 find_root([]) -> none;
 find_root([D | Rest]) ->
     case prim_file:read_file_info(D) of
         {ok, Info} when element(3, Info) =:= directory -> D;
         _NotADir -> find_root(Rest)
-    end.
-
-zi_tables(Root) ->
-    Empty = #{names => #{}, links => #{}},
-    Path = filename:join(Root, "tzdata.zi"),
-    case prim_file:read_file(Path) of
-        {ok, Bin} ->
-            Lines = binary:split(Bin, <<"\n">>, [global]),
-            lists:foldl(fun add_zi_line/2, Empty, Lines);
-        {error, enoent} ->
-            Empty;
-        {error, Reason} ->
-            logger:warning("arc_tz_ffi: cannot read ~ts: ~p", [Path, Reason]),
-            Empty
-    end.
-
-add_zi_line(<<"Z ", Rest/binary>>, Acc) ->
-    case binary:split(Rest, <<" ">>) of
-        [Name | _] -> add_zi_name(Name, Acc);
-        _NoFields -> Acc
-    end;
-add_zi_line(<<"L ", Rest/binary>>, Acc) ->
-    case binary:split(Rest, <<" ">>) of
-        [Target, LinkName] -> add_zi_link(Target, LinkName, Acc);
-        _NoLinkName -> Acc
-    end;
-add_zi_line(_Other, Acc) -> Acc.
-
-add_zi_name(Name, #{names := Names} = Acc) ->
-    case valid_zone_name(binary_to_list(Name)) of
-        true -> Acc#{names := Names#{string:lowercase(Name) => Name}};
-        false -> Acc
-    end.
-
-add_zi_link(Target, LinkName, Acc0) ->
-    Key = string:lowercase(LinkName),
-    #{names := Names, links := Links} = Acc = add_zi_name(LinkName, Acc0),
-    case maps:is_key(Key, Names) of
-        true -> Acc#{links := Links#{Key => Target}};
-        false -> Acc
-    end.
-
-%% trees without tzdata.zi (macos)
-resolve_in_tree(Root, Id) ->
-    Name = unicode:characters_to_list(Id),
-    case safe_zone_name(Name) of
-        false -> {error, nil};
-        true ->
-            case resolve_components(Root, filename:split(Name), []) of
-                {ok, Parts} ->
-                    Rel = filename:join(Parts),
-                    case valid_zone_name(Rel) andalso
-                         is_tzif(filename:join(Root, Rel)) of
-                        true -> {ok, unicode:characters_to_binary(Rel)};
-                        false -> {error, nil}
-                    end;
-                error -> {error, nil}
-            end
-    end.
-
-resolve_components(_Dir, [], Acc) -> {ok, lists:reverse(Acc)};
-resolve_components(Dir, [Comp | Rest], Acc) ->
-    case prim_file:list_dir(Dir) of
-        {error, _NotADir} -> error;
-        {ok, Entries} ->
-            Lower = string:lowercase(Comp),
-            case [E || E <- Entries, string:lowercase(E) =:= Lower] of
-                [Proper | _] ->
-                    resolve_components(filename:join(Dir, Proper), Rest,
-                                       [Proper | Acc]);
-                [] -> error
-            end
     end.
 
 valid_zone_name("posixrules") -> false;
@@ -367,7 +308,7 @@ load_zone(Id) ->
     case root() of
         none -> {error, no_zoneinfo};
         Root ->
-            Path = filename:join(Root, binary_to_list(Id)),
+            Path = filename:join(Root, binary_to_list(canonical_id(Id))),
             case prim_file:read_file(Path) of
                 {ok, Bin} ->
                     try {ok, arc_tzif:parse(Bin)}

@@ -1,6 +1,8 @@
 import arc/internal/int_math.{floor_div}
+import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/string
 
 pub opaque type Zone {
   Zone(id: String)
@@ -26,6 +28,18 @@ pub fn canonical(zone: Zone) -> String {
     "Etc/UTC" | "Etc/GMT" | "GMT" -> "UTC"
     c -> c
   }
+}
+
+@external(erlang, "arc_tz_ffi", "available_zones")
+fn ffi_available_zones() -> List(String)
+
+// primary ids the host has data for, sorted
+pub fn available_ids() -> List(String) {
+  let zones =
+    list.filter(ffi_available_zones(), fn(z) {
+      z != "Etc/UTC" && z != "Etc/GMT"
+    })
+  list.sort(["UTC", ..zones], string.compare)
 }
 
 pub type TzError {
