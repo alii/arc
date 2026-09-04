@@ -1,7 +1,7 @@
 -module(arc_regexp_ffi).
 -export([regexp_exec_info/5]).
 -export([regexp_compile/2, is_compiled/1, regexp_exec_compiled/4]).
--export([pair_trail/1, has_flag/2]).
+-export([pair_trail/1, has_flag/2, take_hex/1]).
 
 has_flag(<<C, _/binary>>, <<C>>) -> true;
 has_flag(<<_, R/binary>>, F) -> has_flag(R, F);
@@ -12,7 +12,7 @@ has_flag(<<>>, _) -> false.
 %% inclass: false | true | atom (prev item can start a range)
 -define(IN_CLASS(X), (X =:= true orelse X =:= atom)).
 
-%% m and s are desugared in translate_pat, never pcre options
+%% m and s are desugared in tr, never pcre options
 flags_to_opts(Flags) ->
     flags_to_opts(Flags, [unicode]).
 
@@ -31,11 +31,11 @@ get_compiled(Pattern, Flags) ->
     Opts = flags_to_opts(Flags),
     Mode = unicode_mode(Flags),
     NL = newline_mode(Flags),
-    Caseless = lists:member(caseless, Opts),
-    {Stripped, GroupCount, Names} = scan_pattern(Pattern),
-    Translated = unicode:characters_to_binary(
-                   leading_star_prefix(Stripped, NL)
-                   ++ translate_pat(Stripped, false, Mode, Caseless, [NL])),
+    CI = lists:member(caseless, Opts),
+    {GroupCount, Names} = count_groups(Pattern, false, 0, []),
+    Env = {Mode, CI, index_by_name(Names)},
+    Body = tr(Pattern, false, [NL], Env, []),
+    Translated = iolist_to_binary([leading_star_prefix(Pattern, NL) | Body]),
     case re:compile(Translated, Opts) of
         {ok, MP} ->
             {ok, {MP, GroupCount, Names}};
@@ -48,36 +48,25 @@ compile_reason({Msg, Pos}) when is_list(Msg), is_integer(Pos) ->
 compile_reason(Other) ->
     unicode:characters_to_binary(io_lib:format("~tp", [Other])).
 
-scan_pattern(Pattern) ->
-    {ChunksRev, GroupCount, NamesRev} =
-        scan(unicode:characters_to_list(Pattern), false, 0, [], []),
-    Names = lists:reverse(NamesRev),
-    Stripped = resolve_backrefs(lists:reverse(ChunksRev), index_by_name(Names)),
-    {Stripped, GroupCount, Names}.
-
-scan([], _InClass, N, Chunks, Names) ->
-    {Chunks, N, Names};
-scan([$\\, $k, $< | Rest], false, N, Chunks, Names) ->
-    {Name, Rest2, Terminated} = take_group_name(Rest),
-    Raw = "\\k<" ++ Name ++ case Terminated of true -> ">"; false -> "" end,
-    Chunk = {backref, unicode:characters_to_binary(Name), Raw},
-    scan(Rest2, false, N, [Chunk | Chunks], Names);
-scan([$\\, C | Rest], InClass, N, Chunks, Names) ->
-    scan(Rest, InClass, N, [C, $\\ | Chunks], Names);
-scan([$[ | Rest], false, N, Chunks, Names) ->
-    scan(Rest, true, N, [$[ | Chunks], Names);
-scan([$] | Rest], true, N, Chunks, Names) ->
-    scan(Rest, false, N, [$] | Chunks], Names);
-scan([$(, $?, $<, C | Rest], false, N, Chunks, Names) when C =/= $=, C =/= $! ->
-    {Name, Rest2, _Terminated} = take_group_name([C | Rest]),
-    scan(Rest2, false, N + 1, [$( | Chunks],
-         [{unicode:characters_to_binary(Name), N + 1} | Names]);
-scan([$(, $? | Rest], false, N, Chunks, Names) ->
-    scan(Rest, false, N, [$?, $( | Chunks], Names);
-scan([$( | Rest], false, N, Chunks, Names) ->
-    scan(Rest, false, N + 1, [$( | Chunks], Names);
-scan([C | Rest], InClass, N, Chunks, Names) ->
-    scan(Rest, InClass, N, [C | Chunks], Names).
+count_groups(<<>>, _InClass, N, Names) ->
+    {N, lists:reverse(Names)};
+count_groups(<<$\\, _, R/binary>>, InClass, N, Names) ->
+    count_groups(R, InClass, N, Names);
+count_groups(<<$[, R/binary>>, false, N, Names) ->
+    count_groups(R, true, N, Names);
+count_groups(<<$], R/binary>>, true, N, Names) ->
+    count_groups(R, false, N, Names);
+count_groups(<<$(, $?, $<, C, _/binary>> = B, false, N, Names)
+  when C =/= $=, C =/= $! ->
+    <<_:3/binary, R/binary>> = B,
+    {Name, R2, _Terminated} = take_group_name(R),
+    count_groups(R2, false, N + 1, [{Name, N + 1} | Names]);
+count_groups(<<$(, $?, R/binary>>, false, N, Names) ->
+    count_groups(R, false, N, Names);
+count_groups(<<$(, R/binary>>, false, N, Names) ->
+    count_groups(R, false, N + 1, Names);
+count_groups(<<_, R/binary>>, InClass, N, Names) ->
+    count_groups(R, InClass, N, Names).
 
 index_by_name(Names) ->
     lists:foldl(
@@ -89,23 +78,6 @@ index_by_name(Names) ->
                       Acc ++ [{Name, [Idx]}]
               end
       end, [], Names).
-
-resolve_backrefs(Chunks, ByName) ->
-    lists:flatmap(fun(Chunk) -> resolve_chunk(Chunk, ByName) end, Chunks).
-
-%% {pcre, _} chunks pass through translate_pat untouched
-resolve_chunk({backref, Name, Raw}, ByName) ->
-    case lists:keyfind(Name, 1, ByName) of
-        {_, [Idx]} ->
-            [{pcre, "\\g{" ++ integer_to_list(Idx) ++ "}"}];
-        {_, Idxs} ->
-            Refs = ["\\g{" ++ integer_to_list(I) ++ "}" || I <- Idxs],
-            [{pcre, "(?:" ++ lists:append(lists:join("|", Refs)) ++ ")"}];
-        false ->
-            Raw
-    end;
-resolve_chunk(C, _ByName) when is_integer(C) ->
-    [C].
 
 unicode_mode(<<>>) -> none;
 unicode_mode(<<"v", _/binary>>) -> v;
@@ -127,158 +99,190 @@ unicode_mode(<<_, Rest/binary>>) -> unicode_mode(Rest).
 -define(JS_LT, "\\n\\r\\x{2028}\\x{2029}").
 
 %% restores pcre startline optimisation lost by desugaring dot
-leading_star_prefix([$., Star | _], {_Multiline, DotAll})
+leading_star_prefix(<<$., Star, _/binary>>, {_Multiline, DotAll})
   when Star =:= $*; Star =:= $+ ->
     case DotAll of
         true -> "\\G";
         false -> "(?:\\G|(?<=[" ?JS_LT "]))"
     end;
-leading_star_prefix(_Stripped, _NewlineMode) ->
+leading_star_prefix(_Pattern, _NewlineMode) ->
     "".
 
-translate_pat([], _InClass, _Mode, _CI, _MS) -> [];
-translate_pat([$\\, $u, ${ | Rest], InClass, Mode, CI, MS) ->
-    case take_hex(Rest, []) of
-        {Hex, [$} | Rest2]} when Hex =/= [] ->
-            case is_surrogate_hex(Hex) of
+hex_escape(V) -> ["\\x{", integer_to_list(V, 16), "}"].
+
+%% acc is the output chunks, reversed
+tr(<<>>, _InClass, _MS, _Env, Acc) ->
+    lists:reverse(Acc);
+tr(<<$\\, $u, ${, R/binary>>, InClass, MS, Env, Acc) ->
+    case take_hex(R) of
+        {V, N, <<$}, R2/binary>>} when N > 0 ->
+            case V >= 16#D800 andalso V =< 16#DFFF of
                 true ->
-                    emit_surrogate(?IN_CLASS(InClass), Rest2, Mode, CI, MS);
+                    emit_surrogate(?IN_CLASS(InClass), R2, MS, Env, Acc);
                 false ->
-                    [$\\, $x, ${] ++ Hex ++ [$}]
-                        ++ translate_pat(Rest2, after_atom(InClass), Mode, CI, MS)
+                    tr(R2, after_atom(InClass), MS, Env, [hex_escape(V) | Acc])
             end;
         _ ->
-            [$\\, $u, ${ | translate_pat(Rest, InClass, Mode, CI, MS)]
+            tr(R, InClass, MS, Env, [<<"\\u{">> | Acc])
     end;
-translate_pat([$\\, $u, A, B, C, D | Rest], InClass, Mode, CI, MS) ->
+tr(<<$\\, $u, A, B, C, D, R/binary>> = In, InClass, MS, {Mode, _, _} = Env, Acc) ->
     case is_hex(A) andalso is_hex(B) andalso is_hex(C) andalso is_hex(D) of
         true ->
             V = list_to_integer([A, B, C, D], 16),
             if
                 V >= 16#D800, V =< 16#DBFF,
                 (InClass =:= false orelse Mode =/= none) ->
-                    case pair_trail(Rest) of
-                        {ok, W, Rest2} ->
-                            "\\x{" ++ integer_to_list(combine_surrogates(V, W), 16) ++ "}"
-                                ++ translate_pat(Rest2, after_atom(InClass),
-                                                 Mode, CI, MS);
+                    case pair_trail(R) of
+                        {ok, W, R2} ->
+                            Hex = hex_escape(combine_surrogates(V, W)),
+                            tr(R2, after_atom(InClass), MS, Env, [Hex | Acc]);
                         none ->
-                            emit_surrogate(?IN_CLASS(InClass), Rest, Mode, CI, MS)
+                            emit_surrogate(?IN_CLASS(InClass), R, MS, Env, Acc)
                     end;
                 V >= 16#D800, V =< 16#DFFF ->
-                    emit_surrogate(?IN_CLASS(InClass), Rest, Mode, CI, MS);
+                    emit_surrogate(?IN_CLASS(InClass), R, MS, Env, Acc);
                 true ->
-                    [$\\, $x, ${, A, B, C, D, $}
-                     | translate_pat(Rest, after_atom(InClass), Mode, CI, MS)]
+                    tr(R, after_atom(InClass), MS, Env,
+                       [<<$\\, $x, ${, A, B, C, D, $}>> | Acc])
             end;
-        false -> [$\\, $u | translate_pat([A, B, C, D | Rest], InClass, Mode, CI, MS)]
+        false ->
+            <<_:2/binary, R1/binary>> = In,
+            tr(R1, InClass, MS, Env, [<<"\\u">> | Acc])
     end;
-translate_pat([$\\, P, ${ | Rest], InClass, Mode, CI, MS)
+tr(<<$\\, P, ${, R/binary>>, InClass, MS, {Mode, _, _} = Env, Acc)
   when (P =:= $p orelse P =:= $P), Mode =/= none ->
-    case take_prop(Rest, []) of
-        {Payload, Rest2} ->
+    case take_prop(R) of
+        {Payload, R2} ->
             case prop_translation(Payload, P =:= $P, ?IN_CLASS(InClass), Mode) of
                 {ok, Io} ->
-                    unicode:characters_to_list(iolist_to_binary(Io))
-                        ++ translate_pat(Rest2, after_class_item(InClass),
-                                         Mode, CI, MS);
+                    tr(R2, after_class_item(InClass), MS, Env, [Io | Acc]);
                 error ->
-                    [$\\, P, ${ | translate_pat(Rest, InClass, Mode, CI, MS)]
+                    tr(R, InClass, MS, Env, [<<$\\, P, ${>> | Acc])
             end;
         none ->
-            [$\\, P, ${ | translate_pat(Rest, InClass, Mode, CI, MS)]
+            tr(R, InClass, MS, Env, [<<$\\, P, ${>> | Acc])
     end;
-translate_pat([$\\, $s | Rest], false, Mode, CI, MS) ->
-    "[" ?JSS_CHARS "]" ++ translate_pat(Rest, false, Mode, CI, MS);
-translate_pat([$\\, $S | Rest], false, Mode, CI, MS) ->
-    "[^" ?JSS_CHARS "]" ++ translate_pat(Rest, false, Mode, CI, MS);
-translate_pat([$\\, $w | Rest], false, Mode, CI, MS) ->
-    word_atom(Mode) ++ translate_pat(Rest, false, Mode, CI, MS);
-translate_pat([$\\, $W | Rest], false, Mode, CI, MS) ->
-    nword_atom(Mode) ++ translate_pat(Rest, false, Mode, CI, MS);
-translate_pat([$\\, $s | Rest], IC, Mode, CI, MS) when ?IN_CLASS(IC) ->
-    splice_in_class(?JSS_CHARS, Rest, Mode, CI, MS);
-translate_pat([$\\, $S | Rest], IC, Mode, CI, MS) when ?IN_CLASS(IC) ->
-    splice_in_class(?CS:emit_complement(?CS:vspace(), CI), Rest, Mode, CI, MS);
-translate_pat([$\\, $w | Rest], IC, Mode, CI, MS) when ?IN_CLASS(IC) ->
-    splice_in_class(word_items(Mode), Rest, Mode, CI, MS);
-translate_pat([$\\, $W | Rest], IC, Mode, CI, MS) when ?IN_CLASS(IC) ->
-    splice_in_class(nword_items(Mode, CI), Rest, Mode, CI, MS);
-translate_pat([$\\, D | Rest], IC, Mode, CI, MS)
+tr(<<$\\, $s, R/binary>>, false, MS, Env, Acc) ->
+    tr(R, false, MS, Env, ["[" ?JSS_CHARS "]" | Acc]);
+tr(<<$\\, $S, R/binary>>, false, MS, Env, Acc) ->
+    tr(R, false, MS, Env, ["[^" ?JSS_CHARS "]" | Acc]);
+tr(<<$\\, $w, R/binary>>, false, MS, {Mode, _, _} = Env, Acc) ->
+    tr(R, false, MS, Env, [word_atom(Mode) | Acc]);
+tr(<<$\\, $W, R/binary>>, false, MS, {Mode, _, _} = Env, Acc) ->
+    tr(R, false, MS, Env, [nword_atom(Mode) | Acc]);
+tr(<<$\\, $s, R/binary>>, IC, MS, Env, Acc) when ?IN_CLASS(IC) ->
+    splice_in_class(?JSS_CHARS, R, MS, Env, Acc);
+tr(<<$\\, $S, R/binary>>, IC, MS, {_, CI, _} = Env, Acc) when ?IN_CLASS(IC) ->
+    splice_in_class(?CS:emit_complement(?CS:vspace(), CI), R, MS, Env, Acc);
+tr(<<$\\, $w, R/binary>>, IC, MS, {Mode, _, _} = Env, Acc) when ?IN_CLASS(IC) ->
+    splice_in_class(word_items(Mode), R, MS, Env, Acc);
+tr(<<$\\, $W, R/binary>>, IC, MS, {Mode, CI, _} = Env, Acc) when ?IN_CLASS(IC) ->
+    splice_in_class(nword_items(Mode, CI), R, MS, Env, Acc);
+tr(<<$\\, D, R/binary>>, IC, MS, Env, Acc)
   when ?IN_CLASS(IC), D =:= $d orelse D =:= $D ->
-    splice_in_class([$\\, D], Rest, Mode, CI, MS);
-translate_pat([$-, $\\, E | Rest], IC, Mode, CI, MS)
+    splice_in_class([$\\, D], R, MS, Env, Acc);
+tr(<<$-, $\\, E, _/binary>> = In, IC, MS, Env, Acc)
   when ?IN_CLASS(IC),
        E =:= $d orelse E =:= $D orelse E =:= $s orelse E =:= $S
        orelse E =:= $w orelse E =:= $W ->
-    [$\\, $- | translate_pat([$\\, E | Rest], true, Mode, CI, MS)];
-translate_pat([$-, C | _] = L, atom, Mode, CI, MS) when C =/= $] ->
-    translate_range_hi(tl(L), Mode, CI, MS);
-translate_pat([$- | Rest], IC, Mode, CI, MS) when ?IN_CLASS(IC) ->
-    [$\\, $- | translate_pat(Rest, atom, Mode, CI, MS)];
-translate_pat([$\\, $b | Rest], false, Mode, CI, MS) ->
+    <<_, R/binary>> = In,
+    tr(R, true, MS, Env, [<<"\\-">> | Acc]);
+tr(<<$-, C, _/binary>> = In, atom, MS, Env, Acc) when C =/= $] ->
+    <<_, R/binary>> = In,
+    translate_range_hi(R, MS, Env, Acc);
+tr(<<$-, R/binary>>, IC, MS, Env, Acc) when ?IN_CLASS(IC) ->
+    tr(R, atom, MS, Env, [<<"\\-">> | Acc]);
+tr(<<$\\, $b, R/binary>>, false, MS, {Mode, _, _} = Env, Acc) ->
     W = word_atom(Mode),
-    "(?:(?<=" ++ W ++ ")(?!" ++ W ++ ")|(?<!" ++ W ++ ")(?=" ++ W ++ "))"
-        ++ translate_pat(Rest, false, Mode, CI, MS);
-translate_pat([$\\, $B | Rest], false, Mode, CI, MS) ->
+    Src = ["(?:(?<=", W, ")(?!", W, ")|(?<!", W, ")(?=", W, "))"],
+    tr(R, false, MS, Env, [Src | Acc]);
+tr(<<$\\, $B, R/binary>>, false, MS, {Mode, _, _} = Env, Acc) ->
     W = word_atom(Mode),
-    "(?:(?<=" ++ W ++ ")(?=" ++ W ++ ")|(?<!" ++ W ++ ")(?!" ++ W ++ "))"
-        ++ translate_pat(Rest, false, Mode, CI, MS);
-translate_pat([{pcre, Io} | Rest], InClass, Mode, CI, MS) ->
-    [Io | translate_pat(Rest, after_atom(InClass), Mode, CI, MS)];
-translate_pat([$\\, C | Rest], InClass, Mode, CI, MS)
+    Src = ["(?:(?<=", W, ")(?=", W, ")|(?<!", W, ")(?!", W, "))"],
+    tr(R, false, MS, Env, [Src | Acc]);
+tr(<<$\\, $k, $<, R/binary>> = In, false, MS, {_, _, ByName} = Env, Acc) ->
+    {Name, R2, _Terminated} = take_group_name(R),
+    case lists:keyfind(Name, 1, ByName) of
+        {_, [Idx]} ->
+            tr(R2, false, MS, Env, [["\\g{", integer_to_list(Idx), "}"] | Acc]);
+        {_, Idxs} ->
+            Refs = [["\\g{", integer_to_list(I), "}"] || I <- Idxs],
+            tr(R2, false, MS, Env, [["(?:", lists:join("|", Refs), ")"] | Acc]);
+        false ->
+            <<_:2/binary, R1/binary>> = In,
+            tr(R1, false, MS, Env, [<<"\\k">> | Acc])
+    end;
+tr(<<$\\, C, R/binary>>, InClass, MS, Env, Acc)
   when C =:= $v; C =:= $a; C =:= $e; C =:= $g;
        C =:= $h; C =:= $H; C =:= $V; C =:= $R; C =:= $X; C =:= $N;
        C =:= $z; C =:= $Z; C =:= $A; C =:= $G; C =:= $C; C =:= $K ->
-    ["\\x{", integer_to_list(js_escape_cp(C), 16), "}"
-     | translate_pat(Rest, after_atom(InClass), Mode, CI, MS)];
-translate_pat([$\\, C | Rest], InClass, Mode, CI, MS) ->
-    [$\\, C | translate_pat(Rest, after_atom(InClass), Mode, CI, MS)];
-translate_pat([$[ | Rest], false, v, CI, MS) ->
-    case arc_regex_vclass:parse(Rest, CI) of
-        {ok, Ranges0, Strings, Rest2} ->
+    tr(R, after_atom(InClass), MS, Env, [hex_escape(js_escape_cp(C)) | Acc]);
+tr(<<$\\, C, R/binary>>, InClass, MS, Env, Acc) ->
+    tr(R, after_atom(InClass), MS, Env, [<<$\\, C>> | Acc]);
+tr(<<$[, R/binary>>, false, MS, {v, CI, _} = Env, Acc) ->
+    case arc_regex_vclass:parse(R, CI) of
+        {ok, Ranges0, Strings, R2} ->
             Ranges = case CI of
                          true -> ?CS:vclose(Ranges0);
                          false -> Ranges0
                      end,
-            ?CS:emit_vclass(Ranges, Strings) ++ translate_pat(Rest2, false, v, CI, MS);
+            tr(R2, false, MS, Env, [?CS:emit_vclass(Ranges, Strings) | Acc]);
         error ->
-            open_class(Rest, v, CI, MS)
+            open_class(R, MS, Env, Acc)
     end;
-translate_pat([$[ | Rest], false, Mode, CI, MS) ->
-    open_class(Rest, Mode, CI, MS);
-translate_pat([$] | Rest], IC, Mode, CI, MS) when ?IN_CLASS(IC) ->
-    [$] | translate_pat(Rest, false, Mode, CI, MS)];
-translate_pat([$( | Rest], false, Mode, CI, [Cur | _] = MS) ->
-    case take_modifiers(Rest, Cur) of
-        {ok, Src, Cur2, Rest2} ->
-            [$( | Src] ++ translate_pat(Rest2, false, Mode, CI, [Cur2 | MS]);
+tr(<<$[, R/binary>>, false, MS, Env, Acc) ->
+    open_class(R, MS, Env, Acc);
+tr(<<$], R/binary>>, IC, MS, Env, Acc) when ?IN_CLASS(IC) ->
+    tr(R, false, MS, Env, [$] | Acc]);
+%% group names live in Names, pcre only sees the index
+tr(<<$(, $?, $<, C, _/binary>> = In, false, [Cur | _] = MS, Env, Acc)
+  when C =/= $=, C =/= $! ->
+    <<_:3/binary, R/binary>> = In,
+    {_Name, R2, _Terminated} = take_group_name(R),
+    tr(R2, false, [Cur | MS], Env, [$( | Acc]);
+tr(<<$(, R/binary>>, false, [Cur | _] = MS, Env, Acc) ->
+    case take_modifiers(R, Cur) of
+        {ok, Src, Cur2, R2} ->
+            tr(R2, false, [Cur2 | MS], Env, [[$( | Src] | Acc]);
         none ->
-            [$( | translate_pat(Rest, false, Mode, CI, [Cur | MS])]
+            tr(R, false, [Cur | MS], Env, [$( | Acc])
     end;
-translate_pat([$) | Rest], false, Mode, CI, MS) ->
-    [$) | translate_pat(Rest, false, Mode, CI, pop_ms(MS))];
-translate_pat([$. | Rest], false, Mode, CI, [{_M, false} | _] = MS) ->
-    "[^" ?JS_LT "]" ++ translate_pat(Rest, false, Mode, CI, MS);
-translate_pat([$. | Rest], false, Mode, CI, [{_M, true} | _] = MS) ->
-    "(?s:.)" ++ translate_pat(Rest, false, Mode, CI, MS);
-translate_pat([$^ | Rest], false, Mode, CI, [{false, _S} | _] = MS) ->
-    "\\A" ++ translate_pat(Rest, false, Mode, CI, MS);
-translate_pat([$^ | Rest], false, Mode, CI, [{true, _S} | _] = MS) ->
-    "(?:\\A|(?<=[" ?JS_LT "]))" ++ translate_pat(Rest, false, Mode, CI, MS);
-translate_pat([$$ | Rest], false, Mode, CI, [{false, _S} | _] = MS) ->
-    "\\z" ++ translate_pat(Rest, false, Mode, CI, MS);
-translate_pat([$$ | Rest], false, Mode, CI, [{true, _S} | _] = MS) ->
-    "(?=[" ?JS_LT "]|\\z)" ++ translate_pat(Rest, false, Mode, CI, MS);
-translate_pat([C | Rest], InClass, Mode, CI, MS) ->
-    [C | translate_pat(Rest, after_atom(InClass), Mode, CI, MS)].
+tr(<<$), R/binary>>, false, MS, Env, Acc) ->
+    tr(R, false, pop_ms(MS), Env, [$) | Acc]);
+tr(<<$., R/binary>>, false, [{_M, false} | _] = MS, Env, Acc) ->
+    tr(R, false, MS, Env, ["[^" ?JS_LT "]" | Acc]);
+tr(<<$., R/binary>>, false, [{_M, true} | _] = MS, Env, Acc) ->
+    tr(R, false, MS, Env, ["(?s:.)" | Acc]);
+tr(<<$^, R/binary>>, false, [{false, _S} | _] = MS, Env, Acc) ->
+    tr(R, false, MS, Env, ["\\A" | Acc]);
+tr(<<$^, R/binary>>, false, [{true, _S} | _] = MS, Env, Acc) ->
+    tr(R, false, MS, Env, ["(?:\\A|(?<=[" ?JS_LT "]))" | Acc]);
+tr(<<$$, R/binary>>, false, [{false, _S} | _] = MS, Env, Acc) ->
+    tr(R, false, MS, Env, ["\\z" | Acc]);
+tr(<<$$, R/binary>>, false, [{true, _S} | _] = MS, Env, Acc) ->
+    tr(R, false, MS, Env, ["(?=[" ?JS_LT "]|\\z)" | Acc]);
+tr(In, InClass, MS, Env, Acc) ->
+    case plain_len(In, 0) of
+        0 ->
+            <<C, R/binary>> = In,
+            tr(R, after_atom(InClass), MS, Env, [C | Acc]);
+        N ->
+            <<Run:N/binary, R/binary>> = In,
+            tr(R, after_atom(InClass), MS, Env, [Run | Acc])
+    end.
 
-open_class(Rest, Mode, CI, MS) ->
-    {Open, Body} = case Rest of
-                       [$^ | R] -> {"[^", R};
-                       _ -> {"[", Rest}
-                   end,
-    Open ++ translate_pat(Body, true, Mode, CI, MS).
+%% bytes with no clause of their own in tr
+plain_len(<<C, R/binary>>, N)
+  when C =/= $\\, C =/= $[, C =/= $], C =/= $(, C =/= $), C =/= $.,
+       C =/= $^, C =/= $$, C =/= $- ->
+    plain_len(R, N + 1);
+plain_len(_, N) ->
+    N.
+
+open_class(<<$^, Body/binary>>, MS, Env, Acc) ->
+    tr(Body, true, MS, Env, [<<"[^">> | Acc]);
+open_class(Body, MS, Env, Acc) ->
+    tr(Body, true, MS, Env, [$[ | Acc]).
 
 after_atom(false) -> false;
 after_atom(_InClass) -> atom.
@@ -289,59 +293,61 @@ after_class_item(_InClass) -> true.
 js_escape_cp($v) -> 16#0B;
 js_escape_cp(C) -> C.
 
-translate_range_hi([$\\, $u | R0] = L, Mode, CI, MS) ->
-    Braced = case R0 of [${ | _] -> true; _ -> false end,
+translate_range_hi(<<$\\, $u, R0/binary>> = L, MS, {Mode, _, _} = Env, Acc) ->
+    Braced = case R0 of <<${, _/binary>> -> true; _ -> false end,
     case parse_uescape(R0) of
         {ok, V, R1} when V < 16#D800; V > 16#DFFF ->
-            "-\\x{" ++ integer_to_list(V, 16) ++ "}"
-                ++ translate_pat(R1, true, Mode, CI, MS);
+            tr(R1, true, MS, Env, [[$- | hex_escape(V)] | Acc]);
         {ok, V, R1} ->
             case (not Braced) andalso Mode =/= none andalso V =< 16#DBFF
                 andalso pair_trail(R1) of
                 {ok, W, R2} ->
-                    "-\\x{" ++ integer_to_list(combine_surrogates(V, W), 16) ++ "}"
-                        ++ translate_pat(R2, true, Mode, CI, MS);
+                    Hex = hex_escape(combine_surrogates(V, W)),
+                    tr(R2, true, MS, Env, [[$- | Hex] | Acc]);
                 _ ->
-                    "-\\x{D7FF}" ++ translate_pat(R1, true, Mode, CI, MS)
+                    tr(R1, true, MS, Env, [<<"-\\x{D7FF}">> | Acc])
             end;
         none ->
-            range_hi_verbatim(L, Mode, CI, MS)
+            range_hi_verbatim(L, MS, Env, Acc)
     end;
-translate_range_hi(L, Mode, CI, MS) ->
-    range_hi_verbatim(L, Mode, CI, MS).
+translate_range_hi(L, MS, Env, Acc) ->
+    range_hi_verbatim(L, MS, Env, Acc).
 
-range_hi_verbatim([$\\, $x, A, B | R] = L, Mode, CI, MS) ->
+range_hi_verbatim(<<$\\, $x, A, B, R/binary>> = L, MS, Env, Acc) ->
     case is_hex(A) andalso is_hex(B) of
-        true -> [$-, $\\, $x, A, B | translate_pat(R, true, Mode, CI, MS)];
-        false -> range_hi_escape(L, Mode, CI, MS)
+        true -> tr(R, true, MS, Env, [<<$-, $\\, $x, A, B>> | Acc]);
+        false -> range_hi_escape(L, MS, Env, Acc)
     end;
-range_hi_verbatim([$\\, $c, C | R] = L, Mode, CI, MS) ->
+range_hi_verbatim(<<$\\, $c, C, R/binary>> = L, MS, Env, Acc) ->
     case (C >= $a andalso C =< $z) orelse (C >= $A andalso C =< $Z) of
-        true -> [$-, $\\, $c, C | translate_pat(R, true, Mode, CI, MS)];
-        false -> range_hi_escape(L, Mode, CI, MS)
+        true -> tr(R, true, MS, Env, [<<$-, $\\, $c, C>> | Acc]);
+        false -> range_hi_escape(L, MS, Env, Acc)
     end;
-range_hi_verbatim(L, Mode, CI, MS) ->
-    range_hi_escape(L, Mode, CI, MS).
+range_hi_verbatim(L, MS, Env, Acc) ->
+    range_hi_escape(L, MS, Env, Acc).
 
-range_hi_escape([$\\, C | R], Mode, CI, MS)
+range_hi_escape(<<$\\, C, R/binary>>, MS, Env, Acc)
   when C =:= $v; C =:= $a; C =:= $e; C =:= $g;
        C =:= $h; C =:= $H; C =:= $V; C =:= $R; C =:= $X; C =:= $N;
        C =:= $z; C =:= $Z; C =:= $A; C =:= $G; C =:= $C; C =:= $K ->
-    [$-, "\\x{", integer_to_list(js_escape_cp(C), 16), "}"
-     | translate_pat(R, true, Mode, CI, MS)];
-range_hi_escape([$\\, C | R], Mode, CI, MS) ->
-    [$-, $\\, C | translate_pat(R, true, Mode, CI, MS)];
-range_hi_escape([C | R], Mode, CI, MS) ->
-    [$-, C | translate_pat(R, true, Mode, CI, MS)].
+    tr(R, true, MS, Env, [[$- | hex_escape(js_escape_cp(C))] | Acc]);
+range_hi_escape(<<$\\, C/utf8, R/binary>>, MS, Env, Acc) ->
+    tr(R, true, MS, Env, [<<$-, $\\, C/utf8>> | Acc]);
+range_hi_escape(<<$\\, C, R/binary>>, MS, Env, Acc) ->
+    tr(R, true, MS, Env, [<<$-, $\\, C>> | Acc]);
+range_hi_escape(<<C/utf8, R/binary>>, MS, Env, Acc) ->
+    tr(R, true, MS, Env, [<<$-, C/utf8>> | Acc]);
+range_hi_escape(<<C, R/binary>>, MS, Env, Acc) ->
+    tr(R, true, MS, Env, [<<$-, C>> | Acc]).
 
-take_modifiers([$? | Rest], Cur) ->
+take_modifiers(<<$?, Rest/binary>>, Cur) ->
     {Add, R1} = take_ims(Rest, []),
     case R1 of
-        [$: | R2] ->
+        <<$:, R2/binary>> ->
             {ok, [$? | Add] ++ ":", apply_ims(Cur, Add, []), R2};
-        [$- | R1b] ->
+        <<$-, R1b/binary>> ->
             case take_ims(R1b, []) of
-                {Rem, [$: | R2]} ->
+                {Rem, <<$:, R2/binary>>} ->
                     {ok, [$? | Add] ++ [$- | Rem] ++ ":",
                      apply_ims(Cur, Add, Rem), R2};
                 _ -> none
@@ -350,7 +356,7 @@ take_modifiers([$? | Rest], Cur) ->
     end;
 take_modifiers(_Rest, _Cur) -> none.
 
-take_ims([C | Rest], Acc) when C =:= $i; C =:= $m; C =:= $s ->
+take_ims(<<C, Rest/binary>>, Acc) when C =:= $i; C =:= $m; C =:= $s ->
     take_ims(Rest, [C | Acc]);
 take_ims(Rest, Acc) -> {lists:reverse(Acc), Rest}.
 
@@ -368,10 +374,11 @@ pop_ms([_Inner, Outer | Rest]) -> [Outer | Rest];
 pop_ms([Bottom]) -> [Bottom].
 
 %% a dash right after a class escape is literal, escape it
-splice_in_class(Items, [$-, C | Rest], Mode, CI, MS) when C =/= $] ->
-    Items ++ [$\\, $-] ++ translate_pat([C | Rest], true, Mode, CI, MS);
-splice_in_class(Items, Rest, Mode, CI, MS) ->
-    Items ++ translate_pat(Rest, true, Mode, CI, MS).
+splice_in_class(Items, <<$-, C, _/binary>> = In, MS, Env, Acc) when C =/= $] ->
+    <<_, R/binary>> = In,
+    tr(R, true, MS, Env, [[Items, "\\-"] | Acc]);
+splice_in_class(Items, R, MS, Env, Acc) ->
+    tr(R, true, MS, Env, [Items | Acc]).
 
 word_atom(none) -> "\\w";
 word_atom(_UOrV) -> ?WORD.
@@ -385,66 +392,72 @@ word_items(_UOrV) -> ?WORD_BODY.
 nword_items(none, _CI) -> "\\W";
 nword_items(_UOrV, CI) -> ?CS:emit_complement(?CS:vword(), CI).
 
-take_prop([$} | Rest], Acc) -> {lists:reverse(Acc), Rest};
-take_prop([C | Rest], Acc)
+take_prop(Bin) -> take_prop(Bin, 0, Bin).
+
+take_prop(<<$}, Rest/binary>>, N, Orig) -> {binary:part(Orig, 0, N), Rest};
+take_prop(<<C, Rest/binary>>, N, Orig)
   when (C >= $a andalso C =< $z); (C >= $A andalso C =< $Z);
        (C >= $0 andalso C =< $9); C =:= $_; C =:= $= ->
-    take_prop(Rest, [C | Acc]);
-take_prop(_, _Acc) -> none.
+    take_prop(Rest, N + 1, Orig);
+take_prop(_, _N, _Orig) -> none.
 
 prop_translation(Payload, Negated, InClass, Mode) ->
-    case binary:split(list_to_binary(Payload), <<"=">>) of
+    case binary:split(Payload, <<"=">>) of
         [Name, Value] ->
             arc_regex_props_ffi:translate_pair(Name, Value, Negated, InClass);
         [Name] ->
             arc_regex_props_ffi:translate_lone(Name, Negated, InClass, Mode =:= v)
     end.
 
-take_hex([C | Rest], Acc) ->
-    case is_hex(C) of
-        true -> take_hex(Rest, [C | Acc]);
-        false -> {lists:reverse(Acc), [C | Rest]}
-    end;
-take_hex([], Acc) -> {lists:reverse(Acc), []}.
+%% {value, digit count, rest}; value saturates past 0x10ffff
+take_hex(Bin) -> take_hex(Bin, 0, 0).
+
+take_hex(<<C, Rest/binary>>, V, N) when C >= $0, C =< $9 ->
+    take_hex(Rest, hex_acc(V, C - $0), N + 1);
+take_hex(<<C, Rest/binary>>, V, N) when C >= $a, C =< $f ->
+    take_hex(Rest, hex_acc(V, C - $a + 10), N + 1);
+take_hex(<<C, Rest/binary>>, V, N) when C >= $A, C =< $F ->
+    take_hex(Rest, hex_acc(V, C - $A + 10), N + 1);
+take_hex(Rest, V, N) -> {V, N, Rest}.
+
+hex_acc(V, _D) when V > 16#10FFFF -> V;
+hex_acc(V, D) -> V * 16 + D.
 
 is_hex(C) ->
     (C >= $0 andalso C =< $9)
         orelse (C >= $a andalso C =< $f)
         orelse (C >= $A andalso C =< $F).
 
-is_surrogate_hex(Hex) ->
-    V = list_to_integer(Hex, 16),
-    V >= 16#D800 andalso V =< 16#DFFF.
-
 %% lone surrogates never match, emit an unmatchable stand-in
-emit_surrogate(false, Rest, Mode, CI, MS) ->
-    "(?!)" ++ translate_pat(Rest, false, Mode, CI, MS);
-emit_surrogate(true, Rest, Mode, CI, MS) ->
+emit_surrogate(false, Rest, MS, Env, Acc) ->
+    tr(Rest, false, MS, Env, [<<"(?!)">> | Acc]);
+emit_surrogate(true, Rest, MS, Env, Acc) ->
     {Item, Rest2} = class_surrogate_item(Rest),
-    Item ++ translate_pat(Rest2, true, Mode, CI, MS).
+    tr(Rest2, true, MS, Env, [Item | Acc]).
 
-class_surrogate_item([$-, C | _] = Rest) when C =/= $] ->
-    case class_range_hi(tl(Rest)) of
+class_surrogate_item(<<$-, C, _/binary>> = Rest) when C =/= $] ->
+    <<_, T/binary>> = Rest,
+    case class_range_hi(T) of
         {ok, Hi, Rest2} when Hi > 16#DFFF ->
-            {"\\x{E000}-\\x{" ++ integer_to_list(Hi, 16) ++ "}", Rest2};
+            {["\\x{E000}-\\x{", integer_to_list(Hi, 16), "}"], Rest2};
         {ok, _Hi, Rest2} ->
             {"\\p{Cs}", Rest2};
         none ->
-            {"\\p{Cs}\\-", tl(Rest)}
+            {"\\p{Cs}\\-", T}
     end;
 class_surrogate_item(Rest) ->
     {"\\p{Cs}", Rest}.
 
-class_range_hi([$\\, $u | R0]) -> parse_uescape(R0);
-class_range_hi([C | R]) when C > 16#DFFF -> {ok, C, R};
+class_range_hi(<<$\\, $u, R0/binary>>) -> parse_uescape(R0);
+class_range_hi(<<C/utf8, R/binary>>) when C > 16#DFFF -> {ok, C, R};
 class_range_hi(_) -> none.
 
-parse_uescape([${ | R]) ->
-    case take_hex(R, []) of
-        {Hex, [$} | R2]} when Hex =/= [] -> {ok, list_to_integer(Hex, 16), R2};
+parse_uescape(<<${, R/binary>>) ->
+    case take_hex(R) of
+        {V, N, <<$}, R2/binary>>} when N > 0 -> {ok, V, R2};
         _ -> none
     end;
-parse_uescape([A, B, C, D | R]) ->
+parse_uescape(<<A, B, C, D, R/binary>>) ->
     case is_hex(A) andalso is_hex(B) andalso is_hex(C) andalso is_hex(D) of
         true -> {ok, list_to_integer([A, B, C, D], 16), R};
         false -> none
@@ -454,7 +467,7 @@ parse_uescape(_) -> none.
 combine_surrogates(Lead, Trail) ->
     16#10000 + (Lead - 16#D800) * 16#400 + (Trail - 16#DC00).
 
-pair_trail([$\\, $u, E, F, G, H | Rest]) ->
+pair_trail(<<$\\, $u, E, F, G, H, Rest/binary>>) ->
     case is_hex(E) andalso is_hex(F) andalso is_hex(G) andalso is_hex(H) of
         true ->
             case list_to_integer([E, F, G, H], 16) of
@@ -517,8 +530,11 @@ run_compiled({ok, {MP, GroupCount, Names}}, String, Offset, Sticky) ->
 pad_captures(Caps, N) when length(Caps) >= N -> Caps;
 pad_captures(Caps, N) -> Caps ++ lists:duplicate(N - length(Caps), {-1, 0}).
 
-take_group_name(L) -> take_group_name(L, []).
-
-take_group_name([$> | Rest], Acc) -> {lists:reverse(Acc), Rest, true};
-take_group_name([C | Rest], Acc) -> take_group_name(Rest, [C | Acc]);
-take_group_name([], Acc) -> {lists:reverse(Acc), [], false}.
+take_group_name(Bin) ->
+    case binary:match(Bin, <<">">>) of
+        {P, 1} ->
+            {binary:part(Bin, 0, P),
+             binary:part(Bin, P + 1, byte_size(Bin) - P - 1), true};
+        nomatch ->
+            {Bin, <<>>, false}
+    end.
