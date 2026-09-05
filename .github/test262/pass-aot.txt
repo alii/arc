@@ -17432,6 +17432,7 @@ built-ins/Temporal/Instant/prototype/toString/timezone-string-datetime.js
 built-ins/Temporal/Instant/prototype/toString/timezone-string-leap-second.js
 built-ins/Temporal/Instant/prototype/toString/timezone-string-multiple-offsets.js
 built-ins/Temporal/Instant/prototype/toString/timezone-string-sub-minute-offset.js
+built-ins/Temporal/Instant/prototype/toString/timezone-string-unknown.js
 built-ins/Temporal/Instant/prototype/toString/timezone-string-year-zero.js
 built-ins/Temporal/Instant/prototype/toString/timezone-string.js
 built-ins/Temporal/Instant/prototype/toString/timezone-wrong-type.js
@@ -17451,6 +17452,7 @@ built-ins/Temporal/Instant/prototype/toZonedDateTimeISO/timezone-string-datetime
 built-ins/Temporal/Instant/prototype/toZonedDateTimeISO/timezone-string-leap-second.js
 built-ins/Temporal/Instant/prototype/toZonedDateTimeISO/timezone-string-multiple-offsets.js
 built-ins/Temporal/Instant/prototype/toZonedDateTimeISO/timezone-string-sub-minute-offset.js
+built-ins/Temporal/Instant/prototype/toZonedDateTimeISO/timezone-string-unknown.js
 built-ins/Temporal/Instant/prototype/toZonedDateTimeISO/timezone-string-year-zero.js
 built-ins/Temporal/Instant/prototype/toZonedDateTimeISO/timezone-string.js
 built-ins/Temporal/Instant/prototype/toZonedDateTimeISO/timezone-wrong-type.js
@@ -38928,6 +38930,7 @@ language/literals/regexp/invalid-braced-quantifier-lower.js
 language/literals/regexp/invalid-braced-quantifier-range.js
 language/literals/regexp/invalid-optional-lookbehind.js
 language/literals/regexp/invalid-optional-negative-lookbehind.js
+language/literals/regexp/invalid-quantifier-out-of-order.js
 language/literals/regexp/invalid-range-lookbehind.js
 language/literals/regexp/invalid-range-negative-lookbehind.js
 language/literals/regexp/lastIndex.js
@@ -39005,6 +39008,7 @@ language/literals/regexp/u-invalid-optional-lookahead.js
 language/literals/regexp/u-invalid-optional-lookbehind.js
 language/literals/regexp/u-invalid-optional-negative-lookahead.js
 language/literals/regexp/u-invalid-optional-negative-lookbehind.js
+language/literals/regexp/u-invalid-quantifier-out-of-order.js
 language/literals/regexp/u-invalid-range-lookahead.js
 language/literals/regexp/u-invalid-range-lookbehind.js
 language/literals/regexp/u-invalid-range-negative-lookahead.js
@@ -48899,6 +48903,7 @@ staging/sm/regress/regress-553778.js
 staging/sm/regress/regress-559402-2.js
 staging/sm/regress/regress-560998-1.js
 staging/sm/regress/regress-560998-2.js
+staging/sm/regress/regress-561031.js
 staging/sm/regress/regress-567152.js
 staging/sm/regress/regress-569306.js
 staging/sm/regress/regress-571014.js
