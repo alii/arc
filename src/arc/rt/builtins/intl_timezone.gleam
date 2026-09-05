@@ -1,49 +1,37 @@
-import arc/internal/digits
 import arc/internal/host_time
 import arc/rt/builtins/intl_format as fmt
-import arc/rt/builtins/intl_locale as tags
 import arc/rt/builtins/temporal_tz
 import arc/rt/intl_data.{
   type DtfTimeZone, type TimeZoneNameWidth, FixedZone, HostZone, NamedZone,
   TzLong, TzLongGeneric, TzLongOffset, TzShort, TzShortGeneric, TzShortOffset,
 }
 import gleam/int
-import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/result
 import gleam/string
 
 pub fn canonical(s: String) -> Option(DtfTimeZone) {
-  let lower = string.lowercase(s)
-  case lower {
-    "utc"
-    | "etc/universal"
-    | "etc/zulu"
-    | "universal"
-    | "zulu"
-    | "etc/utc"
-    | "etc/uct"
-    | "uct" ->
-      Some(FixedZone(
-        case lower {
-          "etc/utc" -> "Etc/UTC"
-          "etc/uct" -> "Etc/UCT"
-          "uct" -> "UCT"
-          _ -> "UTC"
-        },
-        0,
-      ))
-    "gmt" | "etc/greenwich" | "greenwich" -> Some(FixedZone("GMT", 0))
-    "etc/gmt" | "etc/gmt0" | "etc/gmt+0" | "etc/gmt-0" ->
-      Some(FixedZone("Etc/GMT", 0))
+  case parse_offset_zone(s) {
+    Some(minutes) -> Some(FixedZone(format_offset_zone(minutes), minutes))
+    None ->
+      option.lazy_or(etc_gmt_zone(string.lowercase(s)), fn() { named_zone(s) })
+  }
+}
+
+fn is_utc(name: String) -> Bool {
+  case temporal_tz.lookup(name) {
+    Ok(zone) -> temporal_tz.canonical(zone) == "UTC"
+    Error(Nil) -> False
+  }
+}
+
+fn named_zone(s: String) -> Option(DtfTimeZone) {
+  use zone <- option.then(option.from_result(temporal_tz.lookup(s)))
+  case temporal_tz.canonical(zone) {
+    "UTC" -> Some(FixedZone(temporal_tz.zone_id(zone), 0))
     _ ->
-      case parse_offset_zone(s) {
-        Some(minutes) -> Some(FixedZone(format_offset_zone(minutes), minutes))
-        None ->
-          case etc_gmt_zone(lower) {
-            Some(res) -> Some(res)
-            None -> iana_zone(lower)
-          }
+      case temporal_tz.offset_ns_at(zone, 0) {
+        Ok(_) -> Some(NamedZone(zone:))
+        Error(_host_lacks_data) -> None
       }
   }
 }
@@ -86,53 +74,6 @@ fn etc_gmt_zone(lower: String) -> Option(DtfTimeZone) {
     }
     _ -> None
   }
-}
-
-fn iana_zone(lower: String) -> Option(DtfTimeZone) {
-  case lower {
-    "est"
-    | "cst6cdt"
-    | "est5edt"
-    | "mst7mdt"
-    | "pst8pdt"
-    | "mst"
-    | "hst"
-    | "cet"
-    | "eet"
-    | "met"
-    | "wet" -> tzdata_zone(lower)
-    _ ->
-      case string.split(lower, "/") {
-        [area, ..rest] if rest != [] -> {
-          let known_area =
-            list.contains(
-              [
-                "africa", "america", "antarctica", "arctic", "asia", "atlantic",
-                "australia", "europe", "indian", "pacific",
-              ],
-              area,
-            )
-          let parts_ok = list.all(rest, fn(p) { p != "" && is_zone_word(p) })
-          case known_area && parts_ok {
-            True -> tzdata_zone(lower)
-            False -> None
-          }
-        }
-        _ -> None
-      }
-  }
-}
-
-fn tzdata_zone(lower: String) -> Option(DtfTimeZone) {
-  temporal_tz.lookup(lower)
-  |> result.map(NamedZone)
-  |> option.from_result
-}
-
-fn is_zone_word(p: String) -> Bool {
-  tags.all_codepoints(p, fn(c) {
-    digits.is_ascii_alnum_code(c) || c == 0x5f || c == 0x2b || c == 0x2d
-  })
 }
 
 fn parse_offset_zone(s: String) -> Option(Int) {
@@ -188,11 +129,9 @@ fn format_offset_zone(minutes: Int) -> String {
 }
 
 pub fn display(name: String, width: TimeZoneNameWidth, offset: Int) -> String {
-  case name, width {
-    "UTC", TzShort | "UTC", TzShortGeneric -> "UTC"
-    "UTC", TzLong | "UTC", TzLongGeneric -> "Coordinated Universal Time"
-    "UTC", TzShortOffset -> "GMT"
-    "UTC", TzLongOffset -> "GMT"
+  case is_utc(name), width {
+    True, TzShort | True, TzShortGeneric -> "UTC"
+    True, TzLong | True, TzLongGeneric -> "Coordinated Universal Time"
     _, TzLong | _, TzLongOffset | _, TzLongGeneric -> gmt_offset(offset, True)
     _, TzShort | _, TzShortOffset | _, TzShortGeneric ->
       gmt_offset(offset, False)

@@ -5614,9 +5614,8 @@ fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
         regex.validate_pattern(p.bytes, body_start, end_pos - 1, flags)
         |> result.map_error(regexp_syntax_error),
       )
-      let assert Some(pattern) =
+      let pattern =
         source_bytes.slice(p.bytes, body_start, end_pos - 1 - body_start)
-        as "parser: regex body slice out of range"
       let flags_str = string.join(flags.flags, "")
       // window past / is garbage; relex after the flags
       let p2 = jump_to(p, flags_end)
@@ -6543,10 +6542,7 @@ fn template_continuation(p: P) -> P {
 
 // raw quasi text, line terminators normalized (§12.9.6 trv)
 fn template_span_raw(p: P, trailing: Int) -> String {
-  let assert Some(raw) =
-    source_bytes.slice(p.bytes, pos_of(p) + 1, peek_raw_len(p) - 1 - trailing)
-    as "parser: template quasi slice out of range"
-  raw
+  source_bytes.slice(p.bytes, pos_of(p) + 1, peek_raw_len(p) - 1 - trailing)
   |> string.replace("\r\n", "\n")
   |> string.replace("\r", "\n")
 }

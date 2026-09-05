@@ -3,6 +3,7 @@ import arc/bytecode/lexical
 import arc/compiler/ast_util
 import arc/compiler/scope
 import arc/parser/ast
+import arc/rt/types as rt_types
 import arc/rt/val as rt_val
 import arc_aot/emit/anf.{type Build}
 import arc_aot/emit/state.{type EmitError, type Emitter2}
@@ -1132,25 +1133,33 @@ fn int_const_shift(
 
 // consti32 carries unsigned bits, negatives box as w64
 fn number_literal(n: ast.LiteralNumber) -> Build(ir.Value) {
+  case const_num(n) {
+    rt_types.JInt(i) if i >= 0 ->
+      anf.bind_number(ir.Convert(ir.BoxInt(ir.W32), ir.ConstI32(i)))
+    rt_types.JInt(i) ->
+      anf.bind_number(ir.Convert(ir.BoxInt(ir.W64), ir.ConstI64(i)))
+    rt_types.JFloat(f) ->
+      anf.then(
+        anf.host("float_lit", [
+          ir.ConstBinary(bit_array.from_string(float.to_string(f))),
+        ]),
+        anf.mark_number,
+      )
+    rt_types.JPosInf -> anf.then(consts(), fn(rc) { anf.pure(rc.pos_inf) })
+    rt_types.JNegInf -> anf.then(consts(), fn(rc) { anf.pure(rc.neg_inf) })
+    rt_types.JNan -> anf.then(consts(), fn(rc) { anf.pure(rc.nan) })
+  }
+}
+
+fn const_num(n: ast.LiteralNumber) -> rt_types.JsNum {
   case n {
-    ast.InfiniteNumber -> anf.then(consts(), fn(rc) { anf.pure(rc.pos_inf) })
+    ast.InfiniteNumber -> rt_types.JPosInf
     ast.FiniteNumber(f) -> {
       let i = float.truncate(f)
       let integral = int.to_float(i) == f && !rt_val.is_neg_zero(f)
-      case integral && i >= 0 && i < 2_147_483_648 {
-        True -> anf.bind_number(ir.Convert(ir.BoxInt(ir.W32), ir.ConstI32(i)))
-        False ->
-          case integral && i < 0 && i > -2_147_483_648 {
-            True ->
-              anf.bind_number(ir.Convert(ir.BoxInt(ir.W64), ir.ConstI64(i)))
-            False ->
-              anf.then(
-                anf.host("float_lit", [
-                  ir.ConstBinary(bit_array.from_string(float.to_string(f))),
-                ]),
-                anf.mark_number,
-              )
-          }
+      case integral && i > -2_147_483_648 && i < 2_147_483_648 {
+        True -> rt_types.JInt(i)
+        False -> rt_types.JFloat(f)
       }
     }
   }
@@ -2789,10 +2798,129 @@ fn plain_member_name(key: ast.PropertyKey) -> Option(String) {
 
 fn emit_array(elements: List(Option(ast.Expression))) -> Build(ir.Value) {
   case ast_util.has_spread_element(elements) {
-    False -> emit_array_no_spread(elements)
     True -> emit_array_slow(elements)
+    False ->
+      case const_elements(elements) {
+        Some(cs) -> emit_const_array(cs)
+        None -> emit_array_no_spread(elements)
+      }
   }
 }
+
+type ConstElem {
+  ConstHole
+  ConstLeaf(ex: ast.Expression, term: rt_types.JsVal, floats: Int)
+  ConstNest(elems: List(ConstElem))
+}
+
+fn const_elements(
+  elements: List(Option(ast.Expression)),
+) -> Option(List(ConstElem)) {
+  option.all(list.map(elements, const_element))
+}
+
+fn const_element(el: Option(ast.Expression)) -> Option(ConstElem) {
+  case option.map(el, ast_util.unwrap_parens) {
+    None -> Some(ConstHole)
+    Some(ast.ArrayExpression(_, els)) ->
+      case ast_util.has_spread_element(els) {
+        True -> None
+        False -> option.map(const_elements(els), ConstNest)
+      }
+    Some(ex) -> {
+      use #(term, floats) <- option.map(const_leaf(ex))
+      ConstLeaf(ex:, term:, floats:)
+    }
+  }
+}
+
+fn const_leaf(ex: ast.Expression) -> Option(#(rt_types.JsVal, Int)) {
+  case ex {
+    ast.NumberLiteral(_, n) -> Some(num_leaf(const_num(n)))
+    ast.UnaryExpression(operator: ast.Negate, argument:, ..) ->
+      case ast_util.unwrap_parens(argument) {
+        ast.NumberLiteral(_, ast.FiniteNumber(f)) ->
+          Some(num_leaf(const_num(ast.FiniteNumber(float.negate(f)))))
+        _ -> None
+      }
+    ast.StringExpression(_, s) -> Some(#(rt_types.mk_string(s), 0))
+    ast.BooleanLiteral(_, b) -> Some(#(rt_types.mk_bool(b), 0))
+    ast.NullLiteral(_) -> Some(#(rt_types.mk_null(), 0))
+    ast.UndefinedExpression(_) -> Some(#(rt_types.mk_undefined(), 0))
+    _ -> None
+  }
+}
+
+fn num_leaf(n: rt_types.JsNum) -> #(rt_types.JsVal, Int) {
+  case n {
+    rt_types.JFloat(_) -> #(rt_types.mk_number(n), 1)
+    _ -> #(rt_types.mk_number(n), 0)
+  }
+}
+
+fn const_floats(elems: List(ConstElem), acc: Int) -> Int {
+  list.fold(elems, acc, fn(acc, c) {
+    case c {
+      ConstHole -> acc
+      ConstLeaf(floats:, ..) -> acc + floats
+      ConstNest(sub) -> const_floats(sub, acc)
+    }
+  })
+}
+
+// many float lets stall erl_lint, so big tables ship packed
+fn emit_const_array(elems: List(ConstElem)) -> Build(ir.Value) {
+  case const_floats(elems, 0) >= 32 {
+    True ->
+      anf.host("array_lit_packed", [
+        ir.ConstBinary(pack_term(list.map(elems, const_term))),
+      ])
+    False -> {
+      use spec <- anf.then(const_spec(elems))
+      let nested =
+        list.any(elems, fn(c) {
+          case c {
+            ConstNest(_) -> True
+            _ -> False
+          }
+        })
+      case nested {
+        True -> anf.host("array_lit", [spec])
+        False -> anf.host("new_array", [spec])
+      }
+    }
+  }
+}
+
+// nested arrays become {js_alit, elems} for one host call
+fn const_spec(elems: List(ConstElem)) -> Build(ir.Value) {
+  use vs <- anf.then(
+    anf.seq(
+      list.map(elems, fn(c) {
+        case c {
+          ConstHole -> anf.pure(js_hole)
+          ConstLeaf(ex:, ..) -> expr(ex)
+          ConstNest(sub) -> {
+            use l <- anf.then(const_spec(sub))
+            anf.make_tuple([ir.ConstAtom("js_alit"), l])
+          }
+        }
+      }),
+    ),
+  )
+  anf.cons_list(vs)
+}
+
+fn const_term(c: ConstElem) -> rt_types.JsVal {
+  case c {
+    ConstHole -> rt_types.mk_hole()
+    ConstLeaf(term:, ..) -> term
+    ConstNest(sub) -> rt_types.mk_array_lit(list.map(sub, const_term))
+  }
+}
+
+@external(erlang, "erlang", "term_to_binary")
+fn pack_term(elems: List(rt_types.JsVal)) -> BitArray
 
 fn compound_binop(op: ast.AssignmentOp) -> Option(ast.BinaryOp) {
   case op {

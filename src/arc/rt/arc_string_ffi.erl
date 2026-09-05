@@ -179,6 +179,11 @@ string_replace_literal(Hay, Search, Repl, true) ->
 string_replace_literal(Hay, Search, Repl, false) ->
     binary:replace(Hay, Search, Repl, []).
 
+string_repeat(Bin, N) when N > 1024, byte_size(Bin) < 1024 ->
+    Block = binary:copy(Bin, 1024),
+    Whole = binary:copy(Block, N div 1024),
+    Tail = binary:copy(Bin, N rem 1024),
+    <<Whole/binary, Tail/binary>>;
 string_repeat(Bin, N) when N > 0 -> binary:copy(Bin, N);
 string_repeat(_, _) -> <<>>.
 

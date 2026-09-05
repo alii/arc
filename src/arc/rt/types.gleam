@@ -54,6 +54,10 @@ pub fn mk_undefined() -> JsVal
 @external(erlang, "arc_rt_val_ffi", "mk_hole")
 pub fn mk_hole() -> JsVal
 
+// nested array literal marker, not a js value
+@external(erlang, "arc_rt_val_ffi", "mk_array_lit")
+pub fn mk_array_lit(elems: List(JsVal)) -> JsVal
+
 @external(erlang, "arc_rt_val_ffi", "mk_null")
 pub fn mk_null() -> JsVal
 

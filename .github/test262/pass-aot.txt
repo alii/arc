@@ -24131,6 +24131,7 @@ intl402/Date/prototype/toLocaleTimeString/builtin.js
 intl402/Date/prototype/toLocaleTimeString/length.js
 intl402/DateTimeFormat/builtin.js
 intl402/DateTimeFormat/canonicalize-calendar.js
+intl402/DateTimeFormat/canonicalize-timezone.js
 intl402/DateTimeFormat/canonicalize-utc-timezone.js
 intl402/DateTimeFormat/casing-numbering-system-calendar-options.js
 intl402/DateTimeFormat/constructor-calendar-numberingSystem-order.js
@@ -24342,6 +24343,7 @@ intl402/DateTimeFormat/test-option-formatMatcher.js
 intl402/DateTimeFormat/test-option-hour12.js
 intl402/DateTimeFormat/test-option-localeMatcher.js
 intl402/DateTimeFormat/this-value-ignored.js
+intl402/DateTimeFormat/timezone-case-insensitive.js
 intl402/DateTimeFormat/timezone-invalid.js
 intl402/DateTimeFormat/timezone-legacy-non-iana.js
 intl402/DateTimeFormat/timezone-not-canonicalized.js

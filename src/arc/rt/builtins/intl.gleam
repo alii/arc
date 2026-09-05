@@ -13,6 +13,7 @@ import arc/rt/builtins/intl_segment as seg
 import arc/rt/builtins/intl_timezone as tz
 import arc/rt/builtins/realm_ops
 import arc/rt/builtins/string as b_string
+import arc/rt/builtins/temporal_tz
 import arc/rt/call as rt_call
 import arc/rt/intl_data.{
   type BoundGetterService, type CaseFirst, type CollatorSensitivity,
@@ -1034,7 +1035,7 @@ fn supported_values_of(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
         "MXN", "RUB", "SEK", "USD",
       ])
     "numberingSystem" -> Some(fmt.numbering_systems())
-    "timeZone" -> Some(supported_time_zones())
+    "timeZone" -> Some(temporal_tz.available_ids())
     "unit" -> Some(fmt.sanctioned_units())
     _ -> None
   }
@@ -1064,29 +1065,6 @@ fn supported_calendars() -> List(String) {
 
 fn valid_dtf_calendar(v: String) -> Bool {
   list.contains(supported_calendars(), v)
-}
-
-// keep sorted
-fn supported_time_zones() -> List(String) {
-  list.sort(
-    list.flatten([
-      [
-        "UTC", "Africa/Cairo", "Africa/Johannesburg", "America/Chicago",
-        "America/Denver", "America/Los_Angeles", "America/New_York",
-        "America/Sao_Paulo", "Asia/Dubai", "Asia/Hong_Kong", "Asia/Kolkata",
-        "Asia/Shanghai", "Asia/Singapore", "Asia/Tokyo", "Asia/Seoul",
-        "Australia/Sydney", "Europe/Berlin", "Europe/London", "Europe/Madrid",
-        "Europe/Moscow", "Europe/Paris", "Europe/Rome", "Pacific/Auckland",
-      ],
-      int.range(12, 0, [], fn(acc, n) {
-        ["Etc/GMT+" <> int.to_string(n), ..acc]
-      }),
-      int.range(14, 0, [], fn(acc, n) {
-        ["Etc/GMT-" <> int.to_string(n), ..acc]
-      }),
-    ]),
-    string.compare,
-  )
 }
 
 fn supported_locales_of(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {

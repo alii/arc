@@ -14,7 +14,7 @@ import arc/parser/regex_error.{
   ReservedDoublePunctuator, UnmatchedParen, UnterminatedClass,
   UnterminatedGroupName, UnterminatedRegex,
 }
-import arc/parser/source_bytes.{ascii_at}
+import arc/parser/source_bytes.{ascii_at, byte_at}
 import gleam/bit_array
 import gleam/int
 import gleam/list
@@ -28,24 +28,23 @@ type CodePoint {
 }
 
 fn codepoint_at(bytes: BitArray, pos: Int) -> CodePoint {
-  case bit_array.slice(bytes, pos, 1) {
-    Ok(<<b>>) if b < 0x80 -> Cp(b, 1)
-    Ok(<<b>>) -> {
-      let w = utf8_byte_width(b)
-      case bit_array.slice(bytes, pos, w) {
-        Ok(chunk) ->
-          case bit_array.to_string(chunk) {
-            Ok(s) ->
-              case string.to_utf_codepoints(s) {
-                [c, ..] -> Cp(string.utf_codepoint_to_int(c), w)
-                [] -> Cp(b, 1)
-              }
-            Error(Nil) -> Cp(b, 1)
-          }
-        Error(Nil) -> Cp(b, 1)
-      }
+  case bytes {
+    <<_:bytes-size(pos), b, _:bytes>> if b < 0x80 -> Cp(b, 1)
+    <<_:bytes-size(pos), c:utf8_codepoint, _:bytes>> -> {
+      let v = string.utf_codepoint_to_int(c)
+      Cp(v, codepoint_width(v))
     }
-    Ok(_) | Error(Nil) -> Eof
+    <<_:bytes-size(pos), b, _:bytes>> -> Cp(b, 1)
+    _ -> Eof
+  }
+}
+
+fn codepoint_width(cp: Int) -> Int {
+  case cp {
+    c if c >= 0x10000 -> 4
+    c if c >= 0x800 -> 3
+    c if c >= 0x80 -> 2
+    _ -> 1
   }
 }
 
@@ -77,11 +76,6 @@ fn at(bytes: BitArray, pos: Int, end: Int) -> At {
   }
 }
 
-fn source_slice(bytes: BitArray, start: Int, len: Int) -> String {
-  source_bytes.slice(bytes, start, len)
-  |> option.unwrap("")
-}
-
 fn ascii_in(bytes: BitArray, pos: Int, end: Int) -> Option(String) {
   case pos < end {
     True -> ascii_at(bytes, pos)
@@ -89,47 +83,75 @@ fn ascii_in(bytes: BitArray, pos: Int, end: Int) -> Option(String) {
   }
 }
 
-fn hex_in(bytes: BitArray, pos: Int, end: Int) -> Option(Int) {
-  case ascii_in(bytes, pos, end) {
-    Some(ch) -> digits.hex_value(ch)
-    None -> None
+fn byte_in(bytes: BitArray, pos: Int, end: Int) -> Int {
+  case pos < end {
+    True -> byte_at(bytes, pos)
+    False -> -1
   }
 }
 
+fn hex_in(bytes: BitArray, pos: Int, end: Int) -> Option(Int) {
+  digits.hex_value_code(byte_in(bytes, pos, end))
+}
+
 fn digit_in(bytes: BitArray, pos: Int, end: Int) -> Option(Int) {
-  case ascii_in(bytes, pos, end) {
-    Some(ch) -> digits.digit_value(ch)
-    None -> None
+  case byte_in(bytes, pos, end) {
+    b if b >= 0x30 && b <= 0x39 -> Some(b - 0x30)
+    _ -> None
+  }
+}
+
+fn pattern_body(bytes: BitArray, start: Int, end: Int) -> BitArray {
+  case bytes {
+    <<_:bytes-size(start), body:bytes-size(end - start), _:bytes>> -> body
+    _ -> <<>>
   }
 }
 
 fn decimal_run(bytes: BitArray, pos: Int, end: Int) -> #(Int, Option(Int)) {
-  digit_run_loop(bytes, pos, end, 10, digit_in, None)
+  case pattern_body(bytes, pos, end) {
+    <<b, rest:bytes>> if b >= 0x30 && b <= 0x39 ->
+      decimal_run_loop(rest, pos + 1, b - 0x30)
+    _ -> #(pos, None)
+  }
+}
+
+fn decimal_run_loop(rest: BitArray, pos: Int, acc: Int) -> #(Int, Option(Int)) {
+  case rest {
+    <<b, rest:bytes>> if b >= 0x30 && b <= 0x39 ->
+      decimal_run_loop(rest, pos + 1, acc * 10 + b - 0x30)
+    _ -> #(pos, Some(acc))
+  }
 }
 
 fn hex_run(bytes: BitArray, pos: Int, end: Int) -> #(Int, Option(Int)) {
-  digit_run_loop(bytes, pos, end, 16, hex_in, None)
+  case pattern_body(bytes, pos, end) {
+    <<b, rest:bytes>> ->
+      case digits.hex_value_code(b) {
+        Some(d) -> hex_run_loop(rest, pos + 1, d)
+        None -> #(pos, None)
+      }
+    _ -> #(pos, None)
+  }
 }
 
-fn digit_run_loop(
-  bytes: BitArray,
-  pos: Int,
-  end: Int,
-  base: Int,
-  digit: fn(BitArray, Int, Int) -> Option(Int),
-  acc: Option(Int),
-) -> #(Int, Option(Int)) {
-  case pos < end, digit(bytes, pos, end) {
-    True, Some(d) ->
-      digit_run_loop(
-        bytes,
-        pos + 1,
-        end,
-        base,
-        digit,
-        Some(option.unwrap(acc, 0) * base + d),
-      )
-    _, _ -> #(pos, acc)
+// value saturates past 0x10ffff, callers only range check it
+fn hex_run_loop(rest: BitArray, pos: Int, acc: Int) -> #(Int, Option(Int)) {
+  case rest {
+    <<b, rest:bytes>> if b >= 0x30 && b <= 0x39 ->
+      hex_run_loop(rest, pos + 1, hex_acc(acc, b - 0x30))
+    <<b, rest:bytes>> if b >= 0x61 && b <= 0x66 ->
+      hex_run_loop(rest, pos + 1, hex_acc(acc, b - 0x57))
+    <<b, rest:bytes>> if b >= 0x41 && b <= 0x46 ->
+      hex_run_loop(rest, pos + 1, hex_acc(acc, b - 0x37))
+    _ -> #(pos, Some(acc))
+  }
+}
+
+fn hex_acc(acc: Int, d: Int) -> Int {
+  case acc > 0x10ffff {
+    True -> acc
+    False -> acc * 16 + d
   }
 }
 
@@ -137,73 +159,33 @@ pub fn scan_regex_source(
   bytes: BitArray,
   pos: Int,
 ) -> Result(Int, PatternError) {
-  scan_regex_loop(bytes, pos, False)
+  case bytes {
+    <<_:bytes-size(pos), rest:bytes>> -> scan_regex_loop(rest, pos, False)
+    _ -> Error(UnterminatedRegex(pos))
+  }
 }
 
+// line terminators end it, even escaped; trail bytes fall through
 fn scan_regex_loop(
-  bytes: BitArray,
+  rest: BitArray,
   pos: Int,
   in_class: Bool,
 ) -> Result(Int, PatternError) {
-  case bit_array.slice(bytes, pos, 1) {
-    Error(_) -> Error(UnterminatedRegex(pos))
-    Ok(<<b>>) if b >= 0x80 ->
-      case is_unicode_line_terminator(bytes, pos) {
-        True -> Error(UnterminatedRegex(pos))
-        False -> scan_regex_loop(bytes, pos + utf8_byte_width(b), in_class)
-      }
-    Ok(_) -> {
-      case ascii_at(bytes, pos) {
-        Some("\n") | Some("\r") -> Error(UnterminatedRegex(pos))
-        Some("\\") -> {
-          case bit_array.slice(bytes, pos + 1, 1) {
-            Error(_) -> Error(UnterminatedRegex(pos + 1))
-            Ok(<<0x0A>>) | Ok(<<0x0D>>) -> Error(UnterminatedRegex(pos + 1))
-            Ok(<<nb>>) if nb >= 0x80 ->
-              case is_unicode_line_terminator(bytes, pos + 1) {
-                True -> Error(UnterminatedRegex(pos + 1))
-                False ->
-                  scan_regex_loop(
-                    bytes,
-                    pos + 1 + utf8_byte_width(nb),
-                    in_class,
-                  )
-              }
-            Ok(<<nb>>) ->
-              scan_regex_loop(bytes, pos + 1 + utf8_byte_width(nb), in_class)
-            Ok(_) -> scan_regex_loop(bytes, pos + 2, in_class)
-          }
-        }
-        Some("[") -> scan_regex_loop(bytes, pos + 1, True)
-        Some("]") ->
-          case in_class {
-            True -> scan_regex_loop(bytes, pos + 1, False)
-            False -> scan_regex_loop(bytes, pos + 1, in_class)
-          }
-        Some("/") ->
-          case in_class {
-            True -> scan_regex_loop(bytes, pos + 1, in_class)
-            False -> Ok(pos + 1)
-          }
-        _ -> scan_regex_loop(bytes, pos + 1, in_class)
-      }
-    }
-  }
-}
-
-fn utf8_byte_width(lead: Int) -> Int {
-  case lead {
-    b if b >= 0xF0 -> 4
-    b if b >= 0xE0 -> 3
-    b if b >= 0xC0 -> 2
-    _ -> 1
-  }
-}
-
-fn is_unicode_line_terminator(bytes: BitArray, pos: Int) -> Bool {
-  case bit_array.slice(bytes, pos, 3) {
-    Ok(<<0xE2, 0x80, 0xA8>>) | Ok(<<0xE2, 0x80, 0xA9>>) -> True
-    _ -> False
+  case rest {
+    <<0x5c, 0x0a, _:bytes>> | <<0x5c, 0x0d, _:bytes>> ->
+      Error(UnterminatedRegex(pos + 1))
+    <<0x5c, 0xe2, 0x80, 0xa8, _:bytes>> | <<0x5c, 0xe2, 0x80, 0xa9, _:bytes>> ->
+      Error(UnterminatedRegex(pos + 1))
+    <<0x5c, _, rest:bytes>> -> scan_regex_loop(rest, pos + 2, in_class)
+    <<0x5c, _:bytes>> -> Error(UnterminatedRegex(pos + 1))
+    <<0x5b, rest:bytes>> -> scan_regex_loop(rest, pos + 1, True)
+    <<0x5d, rest:bytes>> -> scan_regex_loop(rest, pos + 1, False)
+    <<0x2f, _:bytes>> if !in_class -> Ok(pos + 1)
+    <<0x0a, _:bytes>> | <<0x0d, _:bytes>> -> Error(UnterminatedRegex(pos))
+    <<0xe2, 0x80, 0xa8, _:bytes>> | <<0xe2, 0x80, 0xa9, _:bytes>> ->
+      Error(UnterminatedRegex(pos))
+    <<_, rest:bytes>> -> scan_regex_loop(rest, pos + 1, in_class)
+    _ -> Error(UnterminatedRegex(pos))
   }
 }
 
@@ -270,8 +252,9 @@ pub fn validate_pattern(
   flags: RegexFlags,
 ) -> Result(Nil, PatternError) {
   let mode = flags.mode
+  let body = pattern_body(bytes, start, end)
   let #(captures, names, has_named) =
-    scan_groups(bytes, start, end, mode, 0, 0, [], False)
+    scan_groups(bytes, body, start, end, mode, 0, 0, [], False)
   let ctx = Ctx(bytes:, end:, mode:, captures:, names:, has_named:)
   use #(stop, _names) <- result.try(p_disjunction(ctx, start))
   use Nil <- result.try(case stop >= end {
@@ -286,6 +269,7 @@ pub fn validate_pattern(
 
 fn scan_groups(
   bytes: BitArray,
+  rest: BitArray,
   pos: Int,
   end: Int,
   mode: RegexMode,
@@ -294,127 +278,111 @@ fn scan_groups(
   names: List(String),
   has_named: Bool,
 ) -> #(Int, List(String), Bool) {
-  case pos >= end {
-    True -> #(captures, names, has_named)
-    False ->
-      case ascii_in(bytes, pos, end), class_depth {
-        Some("\\"), _ -> {
-          let w = advance_width(bytes, pos + 1)
-          scan_groups(
-            bytes,
-            pos + 1 + w,
-            end,
-            mode,
-            class_depth,
-            captures,
-            names,
-            has_named,
-          )
-        }
-        Some("["), _ -> {
-          let depth = case mode {
-            UnicodeSets -> class_depth + 1
-            Legacy | Unicode -> 1
-          }
-          scan_groups(
-            bytes,
-            pos + 1,
-            end,
-            mode,
-            depth,
-            captures,
-            names,
-            has_named,
-          )
-        }
-        Some("]"), _ -> {
-          let depth = case mode {
-            UnicodeSets -> int.max(class_depth - 1, 0)
-            Legacy | Unicode -> 0
-          }
-          scan_groups(
-            bytes,
-            pos + 1,
-            end,
-            mode,
-            depth,
-            captures,
-            names,
-            has_named,
-          )
-        }
-        Some("("), 0 ->
-          case ascii_in(bytes, pos + 1, end) {
-            Some("?") ->
-              case ascii_in(bytes, pos + 2, end) {
-                Some("<") ->
-                  case ascii_in(bytes, pos + 3, end) {
-                    Some("=") | Some("!") ->
-                      scan_groups(
-                        bytes,
-                        pos + 4,
-                        end,
-                        mode,
-                        0,
-                        captures,
-                        names,
-                        has_named,
-                      )
-                    _ -> {
-                      let names2 = case parse_group_name(bytes, pos + 3, end) {
-                        Ok(#(name, _)) -> [name, ..names]
-                        Error(_malformed_name) -> names
-                      }
-                      scan_groups(
-                        bytes,
-                        pos + 3,
-                        end,
-                        mode,
-                        0,
-                        captures + 1,
-                        names2,
-                        True,
-                      )
-                    }
-                  }
-                _ ->
-                  scan_groups(
-                    bytes,
-                    pos + 2,
-                    end,
-                    mode,
-                    0,
-                    captures,
-                    names,
-                    has_named,
-                  )
-              }
-            _ ->
-              scan_groups(
-                bytes,
-                pos + 1,
-                end,
-                mode,
-                0,
-                captures + 1,
-                names,
-                has_named,
-              )
-          }
-        _, _ -> {
-          let w = advance_width(bytes, pos)
-          scan_groups(
-            bytes,
-            pos + w,
-            end,
-            mode,
-            class_depth,
-            captures,
-            names,
-            has_named,
-          )
-        }
+  case rest, class_depth {
+    <<0x5c, _, rest:bytes>>, _ ->
+      scan_groups(
+        bytes,
+        rest,
+        pos + 2,
+        end,
+        mode,
+        class_depth,
+        captures,
+        names,
+        has_named,
+      )
+    <<0x5b, rest:bytes>>, _ -> {
+      let depth = case mode {
+        UnicodeSets -> class_depth + 1
+        Legacy | Unicode -> 1
       }
+      scan_groups(
+        bytes,
+        rest,
+        pos + 1,
+        end,
+        mode,
+        depth,
+        captures,
+        names,
+        has_named,
+      )
+    }
+    <<0x5d, rest:bytes>>, _ -> {
+      let depth = case mode {
+        UnicodeSets -> int.max(class_depth - 1, 0)
+        Legacy | Unicode -> 0
+      }
+      scan_groups(
+        bytes,
+        rest,
+        pos + 1,
+        end,
+        mode,
+        depth,
+        captures,
+        names,
+        has_named,
+      )
+    }
+    <<0x28, 0x3f, 0x3c, 0x3d, rest:bytes>>, 0
+    | <<0x28, 0x3f, 0x3c, 0x21, rest:bytes>>, 0
+    ->
+      scan_groups(
+        bytes,
+        rest,
+        pos + 4,
+        end,
+        mode,
+        0,
+        captures,
+        names,
+        has_named,
+      )
+    <<0x28, 0x3f, 0x3c, rest:bytes>>, 0 -> {
+      let names = case parse_group_name(bytes, pos + 3, end) {
+        Ok(#(name, _)) -> [name, ..names]
+        Error(_malformed_name) -> names
+      }
+      scan_groups(bytes, rest, pos + 3, end, mode, 0, captures + 1, names, True)
+    }
+    <<0x28, 0x3f, rest:bytes>>, 0 ->
+      scan_groups(
+        bytes,
+        rest,
+        pos + 2,
+        end,
+        mode,
+        0,
+        captures,
+        names,
+        has_named,
+      )
+    <<0x28, rest:bytes>>, 0 ->
+      scan_groups(
+        bytes,
+        rest,
+        pos + 1,
+        end,
+        mode,
+        0,
+        captures + 1,
+        names,
+        has_named,
+      )
+    <<_, rest:bytes>>, _ ->
+      scan_groups(
+        bytes,
+        rest,
+        pos + 1,
+        end,
+        mode,
+        class_depth,
+        captures,
+        names,
+        has_named,
+      )
+    _, _ -> #(captures, names, has_named)
   }
 }
 
@@ -1452,7 +1420,7 @@ fn property_escape_length(
   case ascii_in(bytes, pos + 2, end) {
     Some("{") -> {
       let name_end = skip_property_chars(bytes, pos + 3, end)
-      let name = source_slice(bytes, pos + 3, name_end - pos - 3)
+      let name = source_bytes.slice(bytes, pos + 3, name_end - pos - 3)
       case ascii_in(bytes, name_end, end) {
         Some("}") ->
           case classify_lone_property(name) {
@@ -1467,7 +1435,7 @@ fn property_escape_length(
         Some("=") -> {
           let value_end = skip_property_chars(bytes, name_end + 1, end)
           let value =
-            source_slice(bytes, name_end + 1, value_end - name_end - 1)
+            source_bytes.slice(bytes, name_end + 1, value_end - name_end - 1)
           case ascii_in(bytes, value_end, end) {
             Some("}") ->
               case classify_pair_property(name, value) {
