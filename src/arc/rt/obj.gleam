@@ -1,3 +1,6 @@
+import arc/bytecode/key.{
+  type PropertyKey, Index, Named, Private, canonical_key, index_key, key_to_text,
+}
 import arc/internal/tree_array
 import arc/internal/unsafe
 import arc/rt/buffer
@@ -8,13 +11,13 @@ import arc/rt/limits
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Cell, type Handle, type JsElements, type JsVal, type ObjKind,
-  type ObjectKey, type ParsedDesc, type Property, type PropertyKey,
-  type SymbolId, type TypedArrayKind, AccessorProperty, Agent, ArgumentsObj,
-  ArrayObj, BirthPending, BirthSettled, BytecodeFn, CompiledFn, DataProperty,
-  Dense, Index, JsStore, KHandle, KNull, KTdz, KUndef, ModuleNamespace, Named,
-  NoElements, Ordinary, ParsedDesc, Private, ProxyObj, SAsyncContext, SAsyncGen,
-  SBox, SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
-  ShapeDesc, StringKey, StringObj, SymbolKey, TypedArrayObj, plain_object,
+  type ObjectKey, type ParsedDesc, type Property, type SymbolId,
+  type TypedArrayKind, AccessorProperty, Agent, ArgumentsObj, ArrayObj,
+  BirthPending, BirthSettled, BytecodeFn, CompiledFn, DataProperty, Dense,
+  KHandle, KNull, KTdz, KUndef, ModuleNamespace, NoElements, Ordinary,
+  ParsedDesc, ProxyObj, SAsyncContext, SAsyncGen, SBox, SDisposeCapability,
+  SGenerator, SObject, SPromiseData, SShapedObject, ShapeDesc, Store, StringKey,
+  StringObj, SymbolKey, TypedArrayObj, plain_object,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -50,7 +53,7 @@ fn own_property_shaped(
   case key {
     Private(_) -> None
     _ ->
-      case dict.get(offsets, bit_array.from_string(types.key_to_text(key))) {
+      case dict.get(offsets, bit_array.from_string(key_to_text(key))) {
         Ok(off) ->
           Some(DataProperty(
             value: types.shape_slots_get(slots, off),
@@ -113,7 +116,7 @@ pub fn as_sobject(cell: Cell) -> Cell {
         dict.fold(offsets, dict.new(), fn(acc, key_bin, off) {
           let value = types.shape_slots_get(slots, off)
           let key = case bit_array.to_string(key_bin) {
-            Ok(s) -> types.canonical_key(s)
+            Ok(s) -> canonical_key(s)
             Error(Nil) -> Named("")
           }
           dict.insert(
@@ -338,28 +341,28 @@ fn desc_is_data(d: ParsedDesc) -> Bool {
 
 fn key_text(key: ObjectKey) -> String {
   case key {
-    StringKey(pk) -> types.key_to_text(pk)
+    StringKey(pk) -> key_to_text(pk)
     SymbolKey(sym) -> types.symbol_descriptive_string(sym)
   }
 }
 
 fn key_quoted(key: ObjectKey) -> String {
   case key {
-    StringKey(pk) -> "'" <> types.key_to_text(pk) <> "'"
+    StringKey(pk) -> "'" <> key_to_text(pk) <> "'"
     SymbolKey(_) -> "[symbol]"
   }
 }
 
 pub fn object_key_value(key: ObjectKey) -> JsVal {
   case key {
-    StringKey(pk) -> types.mk_string(types.key_to_text(pk))
+    StringKey(pk) -> types.mk_string(key_to_text(pk))
     SymbolKey(sym) -> types.mk_symbol(sym)
   }
 }
 
 fn object_key_of_value(v: JsVal) -> Option(ObjectKey) {
   case types.classify(v) {
-    types.KStr(s) -> Some(StringKey(types.canonical_key(s)))
+    types.KStr(s) -> Some(StringKey(canonical_key(s)))
     types.KSym(sym) -> Some(SymbolKey(sym))
     _ -> None
   }
@@ -1000,7 +1003,7 @@ fn set_own_shaped(
     Error(Nil) ->
       case dict.get(store.shapes, shape_id) {
         Error(Nil) -> #(False, st)
-        Ok(ShapeDesc(arity:, transitions:, ..) as from) -> {
+        Ok(ShapeDesc(slot_count:, transitions:, ..) as from) -> {
           let known =
             dict.get(transitions, key_bin)
             |> result.try(fn(to) {
@@ -1011,7 +1014,7 @@ fn set_own_shaped(
             Ok(hit) -> hit
             Error(Nil) -> {
               let to = store.next_shape
-              let offsets = dict.insert(offsets, key_bin, arity)
+              let offsets = dict.insert(offsets, key_bin, slot_count)
               let shapes =
                 store.shapes
                 |> dict.insert(
@@ -1023,15 +1026,16 @@ fn set_own_shaped(
                 )
                 |> dict.insert(
                   to,
-                  ShapeDesc(arity: arity + 1, offsets:, transitions: dict.new()),
+                  ShapeDesc(
+                    slot_count: slot_count + 1,
+                    offsets:,
+                    transitions: dict.new(),
+                  ),
                 )
               #(
                 to,
                 offsets,
-                Agent(
-                  ..st,
-                  store: JsStore(..store, shapes:, next_shape: to + 1),
-                ),
+                Agent(..st, store: Store(..store, shapes:, next_shape: to + 1)),
               )
             }
           }
@@ -1751,7 +1755,7 @@ fn has_from(st: Agent, h: Handle, key: ObjectKey) -> #(Bool, Agent) {
     -> #(True, st)
     SObject(kind: ModuleNamespace(exports:), symbol_props:, ..), _ -> #(
       case key {
-        StringKey(pk) -> dict.has_key(exports, types.key_to_text(pk))
+        StringKey(pk) -> dict.has_key(exports, key_to_text(pk))
         SymbolKey(sym) ->
           option.is_some(own_symbol_property_of(symbol_props, sym))
       },
@@ -1812,7 +1816,7 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
         ProxyObj(target:, handler:, revoked:), _ ->
           proxy_delete(st, Proxy(target:, handler:, revoked:), key)
         ModuleNamespace(exports:), _ -> #(
-          !dict.has_key(exports, types.key_to_text(pk)),
+          !dict.has_key(exports, key_to_text(pk)),
           st,
         )
         ArrayObj(_), Named("length") -> #(False, st)
@@ -1990,7 +1994,7 @@ pub fn t_for_in_keys(st: Agent, obj: JsVal) -> #(List(JsVal), Agent) {
       case plain_for_in_keys(st, obj) {
         PlainKeys(keys) -> #(keys, st)
         Miss ->
-          for_in_keys_loop(
+          t_for_in_keys_loop(
             st,
             Some(h),
             set.new(),
@@ -2000,7 +2004,7 @@ pub fn t_for_in_keys(st: Agent, obj: JsVal) -> #(List(JsVal), Agent) {
       }
     _ -> {
       let #(h, st) = st.store.ops.to_object(st, obj)
-      for_in_keys_loop(st, Some(h), set.new(), [], limits.max_prototype_depth)
+      t_for_in_keys_loop(st, Some(h), set.new(), [], limits.max_prototype_depth)
     }
   }
 }
@@ -2015,7 +2019,7 @@ type PlainKeys {
 fn plain_for_in_keys(st: Agent, obj: JsVal) -> PlainKeys
 
 // non-enumerable own key still shadows proto keys; fuel bounds trap loops
-fn for_in_keys_loop(
+fn t_for_in_keys_loop(
   st: Agent,
   current: Option(Handle),
   seen: set.Set(String),
@@ -2031,7 +2035,7 @@ fn for_in_keys_loop(
           case key {
             SymbolKey(_) -> state
             StringKey(pk) -> {
-              let name = types.key_to_text(pk)
+              let name = key_to_text(pk)
               case set.contains(s, name) {
                 True -> state
                 False -> {
@@ -2050,7 +2054,7 @@ fn for_in_keys_loop(
           }
         })
       let #(proto, st) = t_get_prototype_of(st, h)
-      for_in_keys_loop(st, proto, seen, acc, fuel - 1)
+      t_for_in_keys_loop(st, proto, seen, acc, fuel - 1)
     }
     _ -> #(list.reverse(acc), st)
   }
@@ -2201,7 +2205,7 @@ fn namespace_get(
   exports: Dict(String, Handle),
   key: PropertyKey,
 ) -> #(JsVal, Agent) {
-  let name = types.key_to_text(key)
+  let name = key_to_text(key)
   case dict.get(exports, name) {
     Error(Nil) -> #(types.mk_undefined(), st)
     Ok(box) -> #(namespace_binding_value(st, name, box), st)
@@ -2214,7 +2218,7 @@ fn namespace_own_property(
   exports: Dict(String, Handle),
   key: PropertyKey,
 ) -> Option(Property) {
-  let name = types.key_to_text(key)
+  let name = key_to_text(key)
   use box <- option.map(dict.get(exports, name) |> option.from_result)
   DataProperty(
     value: namespace_binding_value(st, name, box),
@@ -2232,7 +2236,7 @@ fn namespace_define(
   key: PropertyKey,
   desc: ParsedDesc,
 ) -> #(Bool, Agent) {
-  let name = types.key_to_text(key)
+  let name = key_to_text(key)
   case dict.get(exports, name) {
     Error(Nil) -> #(False, st)
     Ok(box) -> {
@@ -2953,7 +2957,7 @@ fn gather_keys_via_get(
   acc: List(ObjectKey),
 ) -> #(List(ObjectKey), Agent) {
   use <- bool.guard(idx >= len, #(list.reverse(acc), st))
-  let #(item, st) = t_get_prop(st, obj, StringKey(types.index_key(idx)))
+  let #(item, st) = t_get_prop(st, obj, StringKey(index_key(idx)))
   case object_key_of_value(item) {
     Some(k) -> gather_keys_via_get(st, obj, idx + 1, len, [k, ..acc])
     None ->
@@ -3374,7 +3378,7 @@ pub fn t_global_typeof(st: Agent, name: BitArray) -> #(String, Agent) {
 
 fn binary_key(name: BitArray) -> PropertyKey {
   case bit_array.to_string(name) {
-    Ok(s) -> types.canonical_key(s)
+    Ok(s) -> canonical_key(s)
     Error(_) -> Named("")
   }
 }

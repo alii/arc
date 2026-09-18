@@ -37,8 +37,8 @@ pub fn main() -> Nil {
   Nil
 }
 
-fn emit(args, _this, s: host.State(Nil)) {
-  use text, s <- host.validate_string(s, host.first_arg(args), "text")
+fn emit(args, _this, ctx: host.Context(Nil)) {
+  use text, ctx <- host.validate_string(ctx, host.first_arg(args), "text")
   io.println(text)
-  #(s, Ok(mk_undefined()))
+  #(ctx, Ok(mk_undefined()))
 }

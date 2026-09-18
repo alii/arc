@@ -22,7 +22,7 @@ type_of(_) -> miss.
 
 %% proxy misses, §10.5.14
 type_of(Store, {?HANDLE_TAG, Id}) ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
+    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, Store)) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             case kind_tag(element(?SOBJECT_KIND, Cell)) of
                 ?COMPILEDFN_TAG -> <<"function">>;
@@ -32,7 +32,7 @@ type_of(Store, {?HANDLE_TAG, Id}) ->
                 ?PROXYOBJ_TAG -> miss;
                 _ -> <<"object">>
             end;
-        Cell when element(1, Cell) =:= ?SSHAPED_TAG -> <<"object">>;
+        Cell when element(1, Cell) =:= ?SSHAPEDOBJECT_TAG -> <<"object">>;
         _ -> miss
     end;
 type_of(_Store, V) -> type_of(V).
@@ -41,7 +41,7 @@ kind_tag(Kind) when is_atom(Kind) -> Kind;
 kind_tag(Kind) -> element(1, Kind).
 
 cell_of(Agent, {?HANDLE_TAG, Id}) ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, element(?AGENT_STORE, Agent))) of
+    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, Agent))) of
         ?STORE_FREE_CELL -> miss;
         Cell -> Cell
     end;
@@ -49,7 +49,7 @@ cell_of(_, _) -> miss.
 
 %% §10.1.13 step 2 when own data "prototype" is an object
 ctor_prototype(Agent, {?HANDLE_TAG, Id}) ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, element(?AGENT_STORE, Agent))) of
+    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, Agent))) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             Kind = kind_tag(element(?SOBJECT_KIND, Cell)),
             case
@@ -59,8 +59,8 @@ ctor_prototype(Agent, {?HANDLE_TAG, Id}) ->
                 true ->
                     case element(?SOBJECT_PROPS, Cell) of
                         #{{?KEY_NAMED, <<"prototype">>} := Prop}
-                          when element(1, Prop) =:= ?DATAPROP_TAG ->
-                            case element(?DATAPROP_VALUE, Prop) of
+                          when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
+                            case element(?DATAPROPERTY_VALUE, Prop) of
                                 {?HANDLE_TAG, _} = P -> P;
                                 _ -> miss
                             end;
@@ -74,7 +74,7 @@ ctor_prototype(_, _) -> miss.
 
 %% §7.3.20 for plain arrays and unmapped arguments, holes miss
 list_of(Agent, {?HANDLE_TAG, Id}) ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, element(?AGENT_STORE, Agent))) of
+    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, Agent))) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, Props, _, {?ELEMS_DENSE, A}, _}
           when map_size(Props) =:= 0 ->
             dense_list(A, Len);
@@ -83,10 +83,10 @@ list_of(Agent, {?HANDLE_TAG, Id}) ->
           when map_size(Props) =:= 2, (Mapped =:= ?NONE orelse Mapped =:= {?SOME, []}) ->
             case Props of
                 #{{?KEY_NAMED, <<"length">>} := Prop}
-                  when element(1, Prop) =:= ?DATAPROP_TAG,
-                       is_integer(element(?DATAPROP_VALUE, Prop)),
+                  when element(1, Prop) =:= ?DATAPROPERTY_TAG,
+                       is_integer(element(?DATAPROPERTY_VALUE, Prop)),
                        is_map_key({?KEY_NAMED, <<"callee">>}, Props) ->
-                    dense_list(A, element(?DATAPROP_VALUE, Prop));
+                    dense_list(A, element(?DATAPROPERTY_VALUE, Prop));
                 _ -> miss
             end;
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, 0}, _, Props, _, _, _}
@@ -112,7 +112,7 @@ hole_free(L) ->
 
 %% tdz box misses
 box_get(Agent, {?HANDLE_TAG, Id}) ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, element(?AGENT_STORE, Agent))) of
+    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, Agent))) of
         {?SBOX_TAG, js_tdz} -> miss;
         {?SBOX_TAG, V} -> V;
         _ -> miss
@@ -130,17 +130,17 @@ capture_env(Descriptors, Locals) ->
 %% proxies miss
 instance_of(_, js_tdz, _, _) -> miss;
 instance_of(Agent, V, {?HANDLE_TAG, CId}, Sym) ->
-    Data = element(?STORE_DATA, element(?AGENT_STORE, Agent)),
+    Cells = element(?STORE_CELLS, element(?AGENT_STORE, Agent)),
     {?HANDLE_TAG, FP} =
-        element(?PAIR_PROTO,
+        element(?BUILTINPAIR_PROTO,
                 element(?REALM_FUNCTION, element(?AGENT_REALM, Agent))),
-    case arc_rt_arena_ffi:get(CId, Data) of
+    case arc_rt_arena_ffi:get(CId, Cells) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             Kind = kind_tag(element(?SOBJECT_KIND, Cell)),
             case
                 (Kind =:= ?BYTECODEFN_TAG orelse Kind =:= ?COMPILEDFN_TAG
                  orelse Kind =:= ?NATIVEFN_TAG)
-                andalso ordinary_has_instance(Data, Cell, FP, Sym, ?MAX_PROTO_HOPS)
+                andalso ordinary_has_instance(Cells, Cell, FP, Sym, ?MAX_PROTO_HOPS)
             of
                 false -> miss;
                 true ->
@@ -148,10 +148,10 @@ instance_of(Agent, V, {?HANDLE_TAG, CId}, Sym) ->
                         {?HANDLE_TAG, VId} ->
                             case element(?SOBJECT_PROPS, Cell) of
                                 #{{?KEY_NAMED, <<"prototype">>} := Prop}
-                                  when element(1, Prop) =:= ?DATAPROP_TAG ->
-                                    case element(?DATAPROP_VALUE, Prop) of
+                                  when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
+                                    case element(?DATAPROPERTY_VALUE, Prop) of
                                         {?HANDLE_TAG, PId} ->
-                                            chain_reaches(Data, VId, PId,
+                                            chain_reaches(Cells, VId, PId,
                                                           ?MAX_PROTO_HOPS);
                                         _ -> miss
                                     end;
@@ -165,36 +165,36 @@ instance_of(Agent, V, {?HANDLE_TAG, CId}, Sym) ->
 instance_of(_, _, _, _) -> miss.
 
 ordinary_has_instance(_, _, _, _, 0) -> false;
-ordinary_has_instance(Data, Cell, FP, Sym, Fuel) ->
+ordinary_has_instance(Cells, Cell, FP, Sym, Fuel) ->
     (not lists:keymember(Sym, 1, element(?SOBJECT_SYMBOL_PROPS, Cell)))
         andalso case element(?SOBJECT_PROTO, Cell) of
                     ?NONE -> true;
                     {?SOME, {?HANDLE_TAG, FP}} -> true;
-                    {?SOME, {?HANDLE_TAG, P}} -> plain_above(Data, P, FP, Sym, Fuel - 1);
+                    {?SOME, {?HANDLE_TAG, P}} -> plain_above(Cells, P, FP, Sym, Fuel - 1);
                     _ -> false
                 end.
 
-plain_above(Data, P, FP, Sym, Fuel) ->
-    case arc_rt_arena_ffi:get(P, Data) of
+plain_above(Cells, P, FP, Sym, Fuel) ->
+    case arc_rt_arena_ffi:get(P, Cells) of
         %% shapes hold string keys only
-        {?SSHAPED_TAG, _, ?NONE, _, _} -> true;
-        {?SSHAPED_TAG, _, {?SOME, {?HANDLE_TAG, FP}}, _, _} -> true;
-        {?SSHAPED_TAG, _, {?SOME, {?HANDLE_TAG, Q}}, _, _} ->
-            plain_above(Data, Q, FP, Sym, Fuel - 1);
+        {?SSHAPEDOBJECT_TAG, _, ?NONE, _, _} -> true;
+        {?SSHAPEDOBJECT_TAG, _, {?SOME, {?HANDLE_TAG, FP}}, _, _} -> true;
+        {?SSHAPEDOBJECT_TAG, _, {?SOME, {?HANDLE_TAG, Q}}, _, _} ->
+            plain_above(Cells, Q, FP, Sym, Fuel - 1);
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             case kind_tag(element(?SOBJECT_KIND, Cell)) of
                 ?PROXYOBJ_TAG -> false;
-                _ -> ordinary_has_instance(Data, Cell, FP, Sym, Fuel)
+                _ -> ordinary_has_instance(Cells, Cell, FP, Sym, Fuel)
             end;
         _ -> false
     end.
 
 %% §7.3.22 step 7
 chain_reaches(_, _, _, 0) -> miss;
-chain_reaches(Data, VId, PId, Fuel) ->
-    case arc_rt_arena_ffi:get(VId, Data) of
+chain_reaches(Cells, VId, PId, Fuel) ->
+    case arc_rt_arena_ffi:get(VId, Cells) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG;
-                  element(1, Cell) =:= ?SSHAPED_TAG ->
+                  element(1, Cell) =:= ?SSHAPEDOBJECT_TAG ->
             case element(1, Cell) =:= ?SOBJECT_TAG
                  andalso kind_tag(element(?SOBJECT_KIND, Cell)) =:= ?PROXYOBJ_TAG of
                 true -> miss;
@@ -203,7 +203,7 @@ chain_reaches(Data, VId, PId, Fuel) ->
                         ?NONE -> false;
                         {?SOME, {?HANDLE_TAG, PId}} -> true;
                         {?SOME, {?HANDLE_TAG, Next}} ->
-                            chain_reaches(Data, Next, PId, Fuel - 1);
+                            chain_reaches(Cells, Next, PId, Fuel - 1);
                         _ -> miss
                     end
             end;
@@ -215,16 +215,16 @@ chain_reaches(Data, VId, PId, Fuel) ->
 -define(ITERATOR_KEY, {?KEY_NAMED, <<"iterator">>}).
 -define(NEXT_KEY, {?KEY_NAMED, <<"next">>}).
 iter_step(Store, {?HANDLE_TAG, RecId}) ->
-    Data = element(?STORE_DATA, Store),
-    case arc_rt_arena_ffi:get(RecId, Data) of
+    Cells = element(?STORE_CELLS, Store),
+    case arc_rt_arena_ffi:get(RecId, Cells) of
         {?SOBJECT_TAG, ?ORDINARY, _, #{?ITERATOR_KEY := IP, ?NEXT_KEY := NP},
          _, _, _}
-          when element(1, IP) =:= ?DATAPROP_TAG,
-               element(1, NP) =:= ?DATAPROP_TAG ->
-            case {element(?DATAPROP_VALUE, NP), element(?DATAPROP_VALUE, IP)} of
+          when element(1, IP) =:= ?DATAPROPERTY_TAG,
+               element(1, NP) =:= ?DATAPROPERTY_TAG ->
+            case {element(?DATAPROPERTY_VALUE, NP), element(?DATAPROPERTY_VALUE, IP)} of
                 {{?HANDLE_TAG, NextId}, {?HANDLE_TAG, IterId}} ->
-                    iter_step_with(Store, Data, native_token(arc_rt_arena_ffi:get(NextId, Data)),
-                                   IterId, arc_rt_arena_ffi:get(IterId, Data));
+                    iter_step_with(Store, Cells, native_token(arc_rt_arena_ffi:get(NextId, Cells)),
+                                   IterId, arc_rt_arena_ffi:get(IterId, Cells));
                 _ -> iter_miss
             end;
         _ -> iter_miss
@@ -234,15 +234,15 @@ iter_step(_, _) -> iter_miss.
 
 native_token(Cell) -> ?NATIVE_TOKEN(Cell).
 
-iter_step_with(Store, Data, ?TOKEN_ARRAY_ITER_NEXT, IterId, IterCell)
+iter_step_with(Store, Cells, ?TOKEN_ARRAY_ITER_NEXT, IterId, IterCell)
   when element(1, IterCell) =:= ?SOBJECT_TAG ->
     case element(?SOBJECT_KIND, IterCell) of
-        {?ARRAYITER_TAG, _, Index, ?ARRAYITER_VALUES} when Index < 0 ->
+        {?ARRAYITERATOR_TAG, _, Index, ?ARRAYITER_VALUES} when Index < 0 ->
             {array_advanced, true, undefined, Store};
-        {?ARRAYITER_TAG, {?HANDLE_TAG, T} = Target, Index, ?ARRAYITER_VALUES} ->
-            case arc_rt_arena_ffi:get(T, Data) of
+        {?ARRAYITERATOR_TAG, {?HANDLE_TAG, T} = Target, Index, ?ARRAYITER_VALUES} ->
+            case arc_rt_arena_ffi:get(T, Cells) of
                 {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, _, _, _, _} when Index >= Len ->
-                    array_iter_advance(Store, Data, IterId, IterCell, Target, -1,
+                    array_iter_advance(Store, Cells, IterId, IterCell, Target, -1,
                                        true, undefined);
                 {?SOBJECT_TAG, {?ARRAYOBJ_TAG, _}, _, Props, _, Els, _} ->
                     case map_size(Props) =/= 0
@@ -252,7 +252,7 @@ iter_step_with(Store, Data, ?TOKEN_ARRAY_ITER_NEXT, IterId, IterCell)
                             case elem_at(Els, Index) of
                                 ?ELEMS_HOLE -> iter_miss;
                                 V ->
-                                    array_iter_advance(Store, Data, IterId, IterCell,
+                                    array_iter_advance(Store, Cells, IterId, IterCell,
                                                        Target, Index + 1, false, V)
                             end
                     end;
@@ -268,11 +268,11 @@ iter_step_with(_, _, ?TOKEN_GENERATOR_NEXT, _, IterCell)
     end;
 iter_step_with(_, _, _, _, _) -> iter_miss.
 
-array_iter_advance(Store, Data, IterId, IterCell, Target, Index, Done, V) ->
+array_iter_advance(Store, Cells, IterId, IterCell, Target, Index, Done, V) ->
     NewCell = setelement(?SOBJECT_KIND, IterCell,
-                         {?ARRAYITER_TAG, Target, Index, ?ARRAYITER_VALUES}),
+                         {?ARRAYITERATOR_TAG, Target, Index, ?ARRAYITER_VALUES}),
     {array_advanced, Done, V,
-     setelement(?STORE_DATA, Store, arc_rt_arena_ffi:set(IterId, NewCell, Data))}.
+     setelement(?STORE_CELLS, Store, arc_rt_arena_ffi:set(IterId, NewCell, Cells))}.
 
 elem_at(Els, Idx) -> ?ELEM_AT(Els, Idx).
 

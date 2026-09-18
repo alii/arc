@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/internal/ordered_entries
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
@@ -12,8 +13,8 @@ import arc/rt/types.{
   MapConstructor, MapDelete, MapEntries, MapForEach, MapGet, MapGetOrInsert,
   MapGetOrInsertComputed, MapGetSize, MapGroupBy, MapHas, MapIterEntries,
   MapIterKeys, MapIterValues, MapIterator, MapKeys, MapN, MapObj, MapSet,
-  MapValues, Named, SObject, StringKey, classify, js_to_map_key, map_key_to_js,
-  mk_bool, mk_int, mk_object, mk_undefined, symbol_iterator,
+  MapValues, SObject, StringKey, classify, js_to_map_key, map_key_to_js, mk_bool,
+  mk_int, mk_object, mk_undefined, symbol_iterator,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -145,10 +146,10 @@ fn map_group_by(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
     "Map.groupBy callback is not callable"
   })
   let #(rec, st) = iter_protocol.get_iterator_sync(st, items)
-  group_by_loop(st, rec, callback, 0, dict.new(), [])
+  map_group_by_loop(st, rec, callback, 0, dict.new(), [])
 }
 
-fn group_by_loop(
+fn map_group_by_loop(
   st: Agent,
   rec: iter_protocol.IteratorRecord,
   callback: JsVal,
@@ -170,7 +171,7 @@ fn group_by_loop(
         Ok(members) -> #(dict.insert(groups, key, [item, ..members]), order)
         Error(Nil) -> #(dict.insert(groups, key, [item]), [key, ..order])
       }
-      group_by_loop(st, rec, callback, index + 1, groups, order)
+      map_group_by_loop(st, rec, callback, index + 1, groups, order)
     }
   }
 }
@@ -196,21 +197,21 @@ fn group_by_finish(
 
 fn map_get(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let key_arg = first_arg_or_undefined(args)
-  use ref <- require_map(st, this, "get")
+  use map <- require_map(st, this, "get")
   let map_key = js_to_map_key(key_arg)
   let result =
-    ordered_entries.get(read_map_store(st, ref), map_key)
+    ordered_entries.get(read_map_store(st, map), map_key)
     |> option.unwrap(mk_undefined())
   #(result, st)
 }
 
 fn map_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(key_arg, val_arg) = two_args_or_undefined(args)
-  use ref <- require_map(st, this, "set")
-  let store = read_map_store(st, ref)
+  use map <- require_map(st, this, "set")
+  let store = read_map_store(st, map)
   let map_key = js_to_map_key(key_arg)
   let store = ordered_entries.insert(store, map_key, val_arg)
-  let st = update_map_data(st, ref, store)
+  let st = update_map_data(st, map, store)
   #(this, st)
 }
 
@@ -220,8 +221,8 @@ fn map_get_or_insert(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(key_arg, val_arg) = two_args_or_undefined(args)
-  use ref <- require_map(st, this, "getOrInsert")
-  let store = read_map_store(st, ref)
+  use map <- require_map(st, this, "getOrInsert")
+  let store = read_map_store(st, map)
   let map_key = js_to_map_key(key_arg)
   case ordered_entries.get(store, map_key) {
     Some(existing) -> #(existing, st)
@@ -229,7 +230,7 @@ fn map_get_or_insert(
       let st =
         update_map_data(
           st,
-          ref,
+          map,
           ordered_entries.insert(store, map_key, val_arg),
         )
       #(val_arg, st)
@@ -243,12 +244,12 @@ fn map_get_or_insert_computed(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(key_arg, callback) = two_args_or_undefined(args)
-  use ref <- require_map(st, this, "getOrInsertComputed")
+  use map <- require_map(st, this, "getOrInsertComputed")
   use callback <- helpers.require_callable(st, callback, fn() {
     rt_val.type_of(st, callback) <> " is not a function"
   })
   let map_key = js_to_map_key(key_arg)
-  case ordered_entries.get(read_map_store(st, ref), map_key) {
+  case ordered_entries.get(read_map_store(st, map), map_key) {
     Some(existing) -> #(existing, st)
     None -> {
       let #(value, st) =
@@ -256,59 +257,59 @@ fn map_get_or_insert_computed(
           map_key_to_js(map_key),
         ])
       let store =
-        ordered_entries.insert(read_map_store(st, ref), map_key, value)
-      #(value, update_map_data(st, ref, store))
+        ordered_entries.insert(read_map_store(st, map), map_key, value)
+      #(value, update_map_data(st, map, store))
     }
   }
 }
 
 fn map_has(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let key_arg = first_arg_or_undefined(args)
-  use ref <- require_map(st, this, "has")
+  use map <- require_map(st, this, "has")
   let map_key = js_to_map_key(key_arg)
-  #(mk_bool(ordered_entries.has(read_map_store(st, ref), map_key)), st)
+  #(mk_bool(ordered_entries.has(read_map_store(st, map), map_key)), st)
 }
 
 fn map_delete(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let key_arg = first_arg_or_undefined(args)
-  use ref <- require_map(st, this, "delete")
-  let store = read_map_store(st, ref)
+  use map <- require_map(st, this, "delete")
+  let store = read_map_store(st, map)
   let map_key = js_to_map_key(key_arg)
   case ordered_entries.delete(store, map_key) {
     #(_store, False) -> #(mk_bool(False), st)
     #(store, True) -> {
-      let st = update_map_data(st, ref, store)
+      let st = update_map_data(st, map, store)
       #(mk_bool(True), st)
     }
   }
 }
 
 fn map_clear(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  use ref <- require_map(st, this, "clear")
-  let store = read_map_store(st, ref)
-  let st = update_map_data(st, ref, ordered_entries.clear(store))
+  use map <- require_map(st, this, "clear")
+  let store = read_map_store(st, map)
+  let st = update_map_data(st, map, ordered_entries.clear(store))
   #(mk_undefined(), st)
 }
 
 fn map_for_each(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(cb, this_arg) = two_args_or_undefined(args)
   // brand check before callable check, observable
-  use ref <- require_map(st, this, "forEach")
+  use map <- require_map(st, this, "forEach")
   use cb <- helpers.require_callable(st, cb, fn() {
     rt_val.type_of(st, cb) <> " is not a function"
   })
-  for_each_loop(st, ref, 0, cb, this_arg, this)
+  map_for_each_loop(st, map, 0, cb, this_arg, this)
 }
 
-fn for_each_loop(
+fn map_for_each_loop(
   st: Agent,
-  ref: MapRef,
+  map: MapHandle,
   cursor: Int,
   cb: JsVal,
   this_arg: JsVal,
   map_this: JsVal,
 ) -> #(JsVal, Agent) {
-  let store = read_map_store(st, ref)
+  let store = read_map_store(st, map)
   case ordered_entries.next_from(store, cursor) {
     None -> #(mk_undefined(), st)
     Some(#(next_cursor, map_key, val)) -> {
@@ -319,14 +320,14 @@ fn for_each_loop(
           original_key,
           map_this,
         ])
-      for_each_loop(st, ref, next_cursor, cb, this_arg, map_this)
+      map_for_each_loop(st, map, next_cursor, cb, this_arg, map_this)
     }
   }
 }
 
 fn map_get_size(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  use ref <- require_map(st, this, "size")
-  #(mk_int(ordered_entries.size(read_map_store(st, ref))), st)
+  use map <- require_map(st, this, "size")
+  #(mk_int(ordered_entries.size(read_map_store(st, map))), st)
 }
 
 fn map_iterator(
@@ -335,30 +336,25 @@ fn map_iterator(
   method: String,
   kind: MapIterKind,
 ) -> #(JsVal, Agent) {
-  use ref <- require_map(st, this, method)
+  use map <- require_map(st, this, method)
   let #(iter_h, st) =
     realm_ops.alloc_object(
       st,
-      MapIterator(target: map_ref_handle(ref), index: 0, kind:),
+      MapIterator(target: map.handle, index: 0, kind:),
       st.realm.map_iter_proto,
     )
   #(mk_object(iter_h), st)
 }
 
-type MapRef {
-  MapRef(Handle)
-}
-
-fn map_ref_handle(r: MapRef) -> Handle {
-  let MapRef(h) = r
-  h
+type MapHandle {
+  MapHandle(handle: Handle)
 }
 
 fn require_map(
   st: Agent,
   this: JsVal,
   method: String,
-  cont: fn(MapRef) -> #(JsVal, Agent),
+  cont: fn(MapHandle) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   use _nil, h <- helpers.require_brand(
     st,
@@ -368,7 +364,7 @@ fn require_map(
     },
     map_brand_of,
   )
-  cont(MapRef(h))
+  cont(MapHandle(h))
 }
 
 fn map_brand_of(kind: ObjKind) -> Option(Nil) {
@@ -380,20 +376,20 @@ fn map_brand_of(kind: ObjKind) -> Option(Nil) {
 
 fn read_map_store(
   st: Agent,
-  ref: MapRef,
+  map: MapHandle,
 ) -> ordered_entries.OrderedEntries(MapKey, JsVal) {
   let assert SObject(kind: MapObj(entries:), ..) =
-    rt_store.t_cell_get(st, map_ref_handle(ref))
-    as "map: MapRef does not point at a Map cell"
+    rt_store.t_cell_get(st, map.handle)
+    as "map: MapHandle does not point at a Map cell"
   entries
 }
 
 fn update_map_data(
   st: Agent,
-  ref: MapRef,
+  map: MapHandle,
   entries: ordered_entries.OrderedEntries(MapKey, JsVal),
 ) -> Agent {
-  rt_store.t_cell_update(st, map_ref_handle(ref), fn(cell) {
+  rt_store.t_cell_update(st, map.handle, fn(cell) {
     let assert SObject(..) = cell
     SObject(..cell, kind: MapObj(entries:))
   })

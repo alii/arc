@@ -3,16 +3,16 @@ import arc/parser/lexer.{
   type TokenKind, Ampersand, AmpersandAmpersand, AmpersandAmpersandEqual,
   AmpersandEqual, As, Async, Await, BangEqual, BangEqualEqual, Break, Caret,
   CaretEqual, Case, Catch, Class, Const, Continue, Debugger, Default, Delete, Do,
-  Else, Equal, EqualEqual, EqualEqualEqual, Export, Extends, Finally, For, From,
-  Function, GreaterThan, GreaterThanEqual, GreaterThanGreaterThan,
-  GreaterThanGreaterThanEqual, GreaterThanGreaterThanGreaterThan,
-  GreaterThanGreaterThanGreaterThanEqual, Identifier, If, Import, In, Instanceof,
-  KFalse, KTrue, LessThan, LessThanEqual, LessThanLessThan,
-  LessThanLessThanEqual, Let, Minus, MinusEqual, New, Null, Of, Percent,
-  PercentEqual, Pipe, PipeEqual, PipePipe, PipePipeEqual, Plus, PlusEqual,
-  QuestionQuestion, QuestionQuestionEqual, Return, Slash, SlashEqual, Star,
-  StarEqual, StarStar, StarStarEqual, Static, Super, Switch, This, Throw, Try,
-  Typeof, Undefined, Var, Void, While, With, Yield,
+  Else, Equal, EqualEqual, EqualEqualEqual, Export, Extends, FalseLiteral,
+  Finally, For, From, Function, GreaterThan, GreaterThanEqual,
+  GreaterThanGreaterThan, GreaterThanGreaterThanEqual,
+  GreaterThanGreaterThanGreaterThan, GreaterThanGreaterThanGreaterThanEqual,
+  Identifier, If, Import, In, Instanceof, LessThan, LessThanEqual,
+  LessThanLessThan, LessThanLessThanEqual, Let, Minus, MinusEqual, New, Null, Of,
+  Percent, PercentEqual, Pipe, PipeEqual, PipePipe, PipePipeEqual, Plus,
+  PlusEqual, QuestionQuestion, QuestionQuestionEqual, Return, Slash, SlashEqual,
+  Star, StarEqual, StarStar, StarStarEqual, Static, Super, Switch, This, Throw,
+  TrueLiteral, Try, Typeof, Undefined, Var, Void, While, With, Yield,
 }
 import gleam/option.{type Option, None, Some}
 
@@ -51,8 +51,8 @@ pub fn is_reserved_word_kind(kind: TokenKind) -> Bool {
     | While
     | With
     | Null
-    | KTrue
-    | KFalse -> True
+    | TrueLiteral
+    | FalseLiteral -> True
     _ -> False
   }
 }

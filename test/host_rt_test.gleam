@@ -1,13 +1,14 @@
-import arc/host.{State}
+import arc/bytecode/key.{Named}
+import arc/host.{Context}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
 import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, Handle, HostObj, KHandle, KStr, Named,
-  NativeFn, SObject, StringKey, classify, mk_int, mk_number, mk_object,
-  mk_string, mk_undefined,
+  type Agent, type Handle, type JsVal, Handle, HostObj, KHandle, KStr, NativeFn,
+  SObject, StringKey, classify, mk_int, mk_number, mk_object, mk_string,
+  mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -40,9 +41,9 @@ fn describe(st: Agent, e: JsVal) -> String {
   str(get(st, e, "name").0) <> ": " <> str(get(st, e, "message").0)
 }
 
-fn twice(args, _this, s: host.State(Payload)) {
-  use n, s <- host.validate_integer(s, host.first_arg(args), "n", 0, 100)
-  #(s, Ok(mk_int(n * 2)))
+fn twice(args, _this, ctx: host.Context(Payload)) {
+  use n, ctx <- host.validate_integer(ctx, host.first_arg(args), "n", 0, 100)
+  #(ctx, Ok(mk_int(n * 2)))
 }
 
 pub fn define_fn_installs_a_callable_global_test() {
@@ -83,18 +84,18 @@ pub fn error_result_becomes_a_throw_test() {
 }
 
 pub fn validators_unwrap_or_throw_test() {
-  let s = host.from_agent(agent(), key())
-  let s =
-    host.define_fn(s, "shout", 1, fn(args, _, s) {
-      use text, s <- host.validate_string(s, host.first_arg(args), "text")
-      #(s, Ok(mk_string(string.uppercase(text))))
+  let ctx = host.from_agent(agent(), key())
+  let ctx =
+    host.define_fn(ctx, "shout", 1, fn(args, _, ctx) {
+      use text, ctx <- host.validate_string(ctx, host.first_arg(args), "text")
+      #(ctx, Ok(mk_string(string.uppercase(text))))
     })
-  let s =
-    host.define_fn(s, "flip", 1, fn(args, _, s) {
-      use b, s <- host.validate_boolean(s, host.first_arg(args), "flag")
-      #(s, Ok(types.mk_bool(!b)))
+  let ctx =
+    host.define_fn(ctx, "flip", 1, fn(args, _, ctx) {
+      use b, ctx <- host.validate_boolean(ctx, host.first_arg(args), "flag")
+      #(ctx, Ok(types.mk_bool(!b)))
     })
-  let st = s.agent
+  let st = ctx.agent
   let #(shout, st) = global(st, "shout")
   let #(flip, st) = global(st, "flip")
   assert rt_call.t_try_call(st, shout, mk_undefined(), [mk_string("hi")]).0
@@ -112,18 +113,26 @@ pub fn validators_unwrap_or_throw_test() {
 }
 
 pub fn try_call_calls_back_into_js_test() {
-  let s = host.from_agent(agent(), key())
-  let s =
-    host.define_fn(s, "apply", 2, fn(args, _, s) {
-      use r, s <- host.try_call(s, host.first_arg(args), "fn", mk_undefined(), [
-        host.arg_at(args, 1),
-      ])
-      use n, s <- host.validate_integer(s, r, "result", -1000, 1000)
-      #(s, Ok(mk_int(n + 1)))
+  let ctx = host.from_agent(agent(), key())
+  let ctx =
+    host.define_fn(ctx, "apply", 2, fn(args, _, ctx) {
+      use r, ctx <- host.try_call(
+        ctx,
+        host.first_arg(args),
+        "fn",
+        mk_undefined(),
+        [
+          host.arg_at(args, 1),
+        ],
+      )
+      use n, ctx <- host.validate_integer(ctx, r, "result", -1000, 1000)
+      #(ctx, Ok(mk_int(n + 1)))
     })
-  let s =
-    host.define_fn(s, "boom", 0, fn(_, _, s) { host.type_error(s, "boom") })
-  let st = s.agent
+  let ctx =
+    host.define_fn(ctx, "boom", 0, fn(_, _, ctx) {
+      host.type_error(ctx, "boom")
+    })
+  let st = ctx.agent
   let #(apply, st) = global(st, "apply")
   let math_abs = get(st, global(st, "Math").0, "abs").0
   assert rt_call.t_try_call(st, apply, mk_undefined(), [math_abs, mk_int(-3)]).0
@@ -139,23 +148,23 @@ pub fn try_call_calls_back_into_js_test() {
 }
 
 pub fn namespace_and_helpers_test() {
-  let s = host.from_agent(agent(), key())
-  let s =
-    host.define_namespace(s, "util", [
-      #("pair", 2, fn(args, _, s) {
-        let #(s, arr) = host.array(s, args)
-        #(s, Ok(arr))
+  let ctx = host.from_agent(agent(), key())
+  let ctx =
+    host.define_namespace(ctx, "util", [
+      #("pair", 2, fn(args, _, ctx) {
+        let #(ctx, arr) = host.array(ctx, args)
+        #(ctx, Ok(arr))
       }),
-      #("point", 2, fn(args, _, s) {
-        let #(s, o) =
-          host.object(s, [
+      #("point", 2, fn(args, _, ctx) {
+        let #(ctx, o) =
+          host.object(ctx, [
             #("x", host.first_arg(args)),
             #("y", host.arg_at(args, 1)),
           ])
-        #(s, Ok(o))
+        #(ctx, Ok(o))
       }),
     ])
-  let st = s.agent
+  let st = ctx.agent
   let #(util, st) = global(st, "util")
   assert rt_inspect.inspect(st, util) == "Object [util] {}"
   assert rt_inspect.inspect(st, get(st, util, "point").0) == "[Function: point]"
@@ -170,34 +179,34 @@ pub fn namespace_and_helpers_test() {
   assert rt_inspect.inspect(st, p) == "{ x: 3, y: 4 }"
 }
 
-fn point_ctor(args, _this, s: host.State(Payload)) {
-  let #(s, o) =
-    host.object(s, [
+fn point_ctor(args, _this, ctx: host.Context(Payload)) {
+  let #(ctx, o) =
+    host.object(ctx, [
       #("x", host.first_arg(args)),
-      #("nt", host.new_target(s)),
+      #("nt", host.new_target(ctx)),
     ])
-  #(s, Ok(o))
+  #(ctx, Ok(o))
 }
 
-fn point_get_x(_args, this, s: host.State(Payload)) {
-  let #(x, st) = get(s.agent, this, "x")
-  #(State(..s, agent: st), Ok(x))
+fn point_get_x(_args, this, ctx: host.Context(Payload)) {
+  let #(x, st) = get(ctx.agent, this, "x")
+  #(Context(..ctx, agent: st), Ok(x))
 }
 
-fn point_origin(_args, this, s: host.State(Payload)) {
-  let #(h, st) = rt_call.t_construct(s.agent, this, [mk_int(0)], this)
-  #(State(..s, agent: st), Ok(mk_object(h)))
+fn point_origin(_args, this, ctx: host.Context(Payload)) {
+  let #(h, st) = rt_call.t_construct(ctx.agent, this, [mk_int(0)], this)
+  #(Context(..ctx, agent: st), Ok(mk_object(h)))
 }
 
-fn point_class(s) {
-  host.class(s, "Point", 1, point_ctor, [#("getX", 0, point_get_x)], [
+fn point_class(ctx) {
+  host.class(ctx, "Point", 1, point_ctor, [#("getX", 0, point_get_x)], [
     #("origin", 0, point_origin),
   ])
 }
 
 pub fn class_constructs_and_reprototypes_test() {
-  let #(s, point) = point_class(host.from_agent(agent(), key()))
-  let st = s.agent
+  let #(ctx, point) = point_class(host.from_agent(agent(), key()))
+  let st = ctx.agent
   assert rt_call.is_constructor(st, point)
   let point_proto = handle(get(st, point, "prototype").0)
   let #(p, st) = rt_call.t_construct(st, point, [mk_int(7)], point)
@@ -216,9 +225,9 @@ pub fn class_constructs_and_reprototypes_test() {
 }
 
 pub fn subclass_new_target_picks_the_prototype_test() {
-  let #(s, point) = point_class(host.from_agent(agent(), key()))
-  let #(s, sub) = host.class(s, "Sub", 1, point_ctor, [], [])
-  let st = s.agent
+  let #(ctx, point) = point_class(host.from_agent(agent(), key()))
+  let #(ctx, sub) = host.class(ctx, "Sub", 1, point_ctor, [], [])
+  let st = ctx.agent
   let sub_proto = handle(get(st, sub, "prototype").0)
   let #(p, st) = rt_call.t_construct(st, point, [mk_int(5)], sub)
   assert rt_obj.t_get_prototype_of(st, p).0 == Some(sub_proto)
@@ -229,16 +238,16 @@ pub fn subclass_new_target_picks_the_prototype_test() {
 }
 
 pub fn constructor_must_return_an_object_test() {
-  let #(s, bad) =
+  let #(ctx, bad) =
     host.class(
       host.from_agent(agent(), key()),
       "Bad",
       0,
-      fn(_, _, s) { #(s, Ok(mk_int(1))) },
+      fn(_, _, ctx) { #(ctx, Ok(mk_int(1))) },
       [],
       [],
     )
-  let st = s.agent
+  let st = ctx.agent
   let reflect = global(st, "Reflect").0
   let construct = get(st, reflect, "construct").0
   let #(empty, st) = rt_obj.t_new_array(st, [])
@@ -248,11 +257,11 @@ pub fn constructor_must_return_an_object_test() {
 }
 
 pub fn host_object_round_trips_typed_test() {
-  let s: host.State(Payload) = host.from_agent(agent(), key())
-  let #(s, tagged_proto) = host.object(s, [])
+  let ctx: host.Context(Payload) = host.from_agent(agent(), key())
+  let #(ctx, tagged_proto) = host.object(ctx, [])
   let st =
     rt_obj.t_define_own_data(
-      s.agent,
+      ctx.agent,
       handle(tagged_proto),
       types.SymbolKey(types.symbol_to_string_tag),
       mk_string("Pid"),
@@ -260,15 +269,16 @@ pub fn host_object_round_trips_typed_test() {
       enumerable: False,
       configurable: True,
     ).1
-  let s = State(..s, agent: st)
-  let #(s, pid) = host.alloc_host_object(s, Pid(42), Some(handle(tagged_proto)))
-  let #(s, bare) = host.alloc_host_object(s, Pid(7), None)
-  let #(s, plain) = host.object(s, [])
-  assert host.read_host(s, pid) == Some(Pid(42))
-  assert host.read_host(s, bare) == Some(Pid(7))
-  assert host.read_host(s, plain) == None
-  assert host.read_host(s, mk_int(3)) == None
-  let st = s.agent
+  let ctx = Context(..ctx, agent: st)
+  let #(ctx, pid) =
+    host.alloc_host_object(ctx, Pid(42), Some(handle(tagged_proto)))
+  let #(ctx, bare) = host.alloc_host_object(ctx, Pid(7), None)
+  let #(ctx, plain) = host.object(ctx, [])
+  assert host.read_host(ctx, pid) == Some(Pid(42))
+  assert host.read_host(ctx, bare) == Some(Pid(7))
+  assert host.read_host(ctx, plain) == None
+  assert host.read_host(ctx, mk_int(3)) == None
+  let st = ctx.agent
   let assert SObject(kind: HostObj(_), proto: None, ..) =
     rt_store.t_cell_get(st, handle(bare))
   let #(to_string, st) =
@@ -284,50 +294,58 @@ pub fn host_object_round_trips_typed_test() {
 }
 
 pub fn gc_traces_handles_inside_payloads_and_closures_test() {
-  let s: host.State(Payload) = host.from_agent(agent(), key())
-  let #(s, inner) = host.object(s, [#("k", mk_int(1))])
-  let #(s, holder) = host.alloc_host_object(s, Holds(handle(inner)), None)
-  let #(s, captured) = host.object(s, [])
-  let s = host.define_fn(s, "peek", 0, fn(_, _, s) { #(s, Ok(captured)) })
-  let #(s, garbage) = host.object(s, [])
-  let st = rt_store.t_pin_root(s.agent, handle(holder))
+  let ctx: host.Context(Payload) = host.from_agent(agent(), key())
+  let #(ctx, inner) = host.object(ctx, [#("k", mk_int(1))])
+  let #(ctx, holder) = host.alloc_host_object(ctx, Holds(handle(inner)), None)
+  let #(ctx, captured) = host.object(ctx, [])
+  let ctx =
+    host.define_fn(ctx, "peek", 0, fn(_, _, ctx) { #(ctx, Ok(captured)) })
+  let #(ctx, garbage) = host.object(ctx, [])
+  let st = rt_store.t_pin_root(ctx.agent, handle(holder))
   let st = rt_gc.t_collect(st, [])
   assert rt_gc.t_is_live(st, handle(inner))
   assert rt_gc.t_is_live(st, handle(captured))
   assert !rt_gc.t_is_live(st, handle(garbage))
-  assert host.read_host(State(..s, agent: st), holder)
+  assert host.read_host(Context(..ctx, agent: st), holder)
     == Some(Holds(handle(inner)))
 }
 
 pub fn another_key_reads_none_not_a_mistyped_value_test() {
-  let s = host.from_agent(agent(), key())
-  let #(s, pid) = host.alloc_host_object(s, Pid(42), None)
+  let ctx = host.from_agent(agent(), key())
+  let #(ctx, pid) = host.alloc_host_object(ctx, Pid(42), None)
   let strings: host.Key(String) = host.new_key()
-  let other = host.from_agent(s.agent, strings)
+  let other = host.from_agent(ctx.agent, strings)
   assert host.read_host(other, pid) == None
   let #(other, word) = host.alloc_host_object(other, "w", None)
-  assert host.read_host(State(..s, agent: other.agent), word) == None
+  assert host.read_host(Context(..ctx, agent: other.agent), word) == None
   assert host.read_host(host.from_agent(other.agent, key()), pid) == None
   assert host.read_host(other, word) == Some("w")
-  assert host.read_host(State(..s, agent: other.agent), pid) == Some(Pid(42))
+  assert host.read_host(Context(..ctx, agent: other.agent), pid)
+    == Some(Pid(42))
 }
 
 pub fn host_functions_see_the_key_they_were_defined_under_test() {
-  let s = host.from_agent(agent(), key())
-  let s =
-    host.define_fn(s, "wrap", 1, fn(args, _, s) {
-      use n, s <- host.validate_integer(s, host.first_arg(args), "n", 0, 100)
-      let #(s, o) = host.alloc_host_object(s, Pid(n), None)
-      #(s, Ok(o))
+  let ctx = host.from_agent(agent(), key())
+  let ctx =
+    host.define_fn(ctx, "wrap", 1, fn(args, _, ctx) {
+      use n, ctx <- host.validate_integer(
+        ctx,
+        host.first_arg(args),
+        "n",
+        0,
+        100,
+      )
+      let #(ctx, o) = host.alloc_host_object(ctx, Pid(n), None)
+      #(ctx, Ok(o))
     })
-  let s =
-    host.define_fn(s, "unwrap", 1, fn(args, _, s) {
-      case host.read_host(s, host.first_arg(args)) {
-        Some(Pid(n)) -> #(s, Ok(mk_int(n)))
-        Some(Holds(_)) | None -> host.type_error(s, "not a pid")
+  let ctx =
+    host.define_fn(ctx, "unwrap", 1, fn(args, _, ctx) {
+      case host.read_host(ctx, host.first_arg(args)) {
+        Some(Pid(n)) -> #(ctx, Ok(mk_int(n)))
+        Some(Holds(_)) | None -> host.type_error(ctx, "not a pid")
       }
     })
-  let st = s.agent
+  let st = ctx.agent
   let #(wrapped, st) =
     rt_call.t_call(st, global(st, "wrap").0, mk_undefined(), [mk_int(9)])
   let #(n, st) =
@@ -335,8 +353,8 @@ pub fn host_functions_see_the_key_they_were_defined_under_test() {
       wrapped,
     ])
   assert n == mk_int(9)
-  let #(s, _promise, _ticket) = host.suspend(State(..s, agent: st))
-  let st = s.agent
+  let #(ctx, _promise, _ticket) = host.suspend(Context(..ctx, agent: st))
+  let st = ctx.agent
   let assert Ok(root) =
     list.find(set.to_list(st.store.pinned_roots), fn(id) {
       case rt_store.t_cell_get(st, Handle(id:)) {
@@ -344,7 +362,7 @@ pub fn host_functions_see_the_key_they_were_defined_under_test() {
         _ -> False
       }
     })
-  assert host.read_host(s, mk_object(Handle(id: root))) == None
+  assert host.read_host(ctx, mk_object(Handle(id: root))) == None
 }
 
 pub fn unregistered_id_is_a_type_error_test() {
@@ -363,17 +381,17 @@ pub fn unregistered_id_is_a_type_error_test() {
   assert describe(st, e) == "TypeError: host function #9 is not registered"
 }
 
-pub fn with_state_runs_body_and_drains_test() {
+pub fn with_context_runs_body_and_drains_test() {
   let #(st, seen) =
-    host.with_state(agent(), key(), fn(s) {
-      let #(s, o) = host.object(s, [#("v", mk_int(5))])
-      let s = host.define_global(s, "shared", o)
-      let st = s.agent
+    host.with_context(agent(), key(), fn(ctx) {
+      let #(ctx, o) = host.object(ctx, [#("v", mk_int(5))])
+      let ctx = host.define_global(ctx, "shared", o)
+      let st = ctx.agent
       let promise = global(st, "Promise").0
       let #(p, st) = rt_helpers.call_method(st, promise, "resolve", [mk_int(1)])
       let #(s2, setter) =
-        host.function(State(..s, agent: st), "set", 1, fn(args, _, s) {
-          let st = s.agent
+        host.function(Context(..ctx, agent: st), "set", 1, fn(args, _, ctx) {
+          let st = ctx.agent
           let #(_, st) =
             rt_obj.t_set_prop(
               st,
@@ -381,11 +399,11 @@ pub fn with_state_runs_body_and_drains_test() {
               StringKey(Named("v")),
               host.first_arg(args),
             )
-          #(State(..s, agent: st), Ok(mk_undefined()))
+          #(Context(..ctx, agent: st), Ok(mk_undefined()))
         })
       let #(_, st) = rt_helpers.call_method(s2.agent, p, "then", [setter])
       assert get(st, global(st, "shared").0, "v").0 == mk_int(5)
-      #(State(..s2, agent: st), "done")
+      #(Context(..s2, agent: st), "done")
     })
   assert seen == "done"
   assert get(st, global(st, "shared").0, "v").0 == mk_int(1)

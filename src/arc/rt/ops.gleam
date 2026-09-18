@@ -1,12 +1,12 @@
+import arc/bytecode/key.{Named}
 import arc/rt/js_string
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsNum, type JsOps, type JsVal, BoundFn,
-  HintDefault, HintNumber, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KBool,
-  KHandle, KNull, KNum, KStr, KSym, KUndef, Named, SObject, StringKey, SymbolKey,
-  classify, mk_bigint, mk_int, mk_number, mk_object, mk_string,
-  symbol_has_instance,
+  type Agent, type Handle, type JsNum, type JsVal, BoundFn, HintDefault,
+  HintNumber, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KBool, KHandle, KNull,
+  KNum, KStr, KSym, KUndef, SObject, StringKey, SymbolKey, classify, mk_bigint,
+  mk_int, mk_number, mk_object, mk_string, symbol_has_instance,
 }
 import arc/rt/val as rt_val
 import gleam/float
@@ -15,16 +15,12 @@ import gleam/option.{None, Some}
 import gleam/order
 import gleam/string
 
-fn js_ops(st: Agent) -> JsOps(Agent) {
-  st.store.ops
-}
-
 // §13.10.2 instanceof operator
 // called by name from arc_rt_obj_ffi
 pub fn t_instance_of(st: Agent, v: JsVal, target: JsVal) -> #(Bool, Agent) {
   case classify(target) {
     KHandle(ctor_h) -> {
-      let ops = js_ops(st)
+      let ops = st.store.ops
       let #(handler, st) =
         ops.get_prop(st, target, SymbolKey(symbol_has_instance))
       case rt_val.is_nullish(handler) {
@@ -74,7 +70,7 @@ pub fn t_ordinary_has_instance(
       case classify(v) {
         KHandle(obj_h) -> {
           let #(proto_val, st) =
-            js_ops(st).get_prop(
+            st.store.ops.get_prop(
               st,
               mk_object(ctor),
               StringKey(Named("prototype")),

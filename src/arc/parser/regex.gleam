@@ -1000,10 +1000,10 @@ fn parse_group_name(
   ctx: PatternContext,
   pos: Int,
 ) -> Result(#(String, Int), PatternError) {
-  group_name_loop(ctx, pos, is_first: True, acc: [])
+  parse_group_name_loop(ctx, pos, is_first: True, acc: [])
 }
 
-fn group_name_loop(
+fn parse_group_name_loop(
   ctx: PatternContext,
   pos: Int,
   is_first is_first: Bool,
@@ -1043,7 +1043,7 @@ fn group_name_char(
   use encoded <- result.try(
     string.utf_codepoint(code) |> result.replace_error(invalid),
   )
-  group_name_loop(ctx, next, is_first: False, acc: [encoded, ..acc])
+  parse_group_name_loop(ctx, next, is_first: False, acc: [encoded, ..acc])
 }
 
 // group names always take the u flag escape forms

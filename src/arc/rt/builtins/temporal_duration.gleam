@@ -40,12 +40,15 @@ import arc/rt/builtins/temporal_zoned_ops.{
 import arc/rt/types.{
   type Agent, type DurationMethod, type JsVal, type NativeToken,
   type TemporalDurationGetter, type TemporalProtos, type TemporalStaticName,
-  DmAbs, DmAdd, DmNegated, DmRound, DmSubtract, DmToJson, DmToLocaleString,
-  DmToString, DmTotal, DmValueOf, DmWith, DrBlank, DrDays, DrHours,
-  DrMicroseconds, DrMilliseconds, DrMinutes, DrMonths, DrNanoseconds, DrSeconds,
-  DrSign, DrWeeks, DrYears, JFloat, KHandle, KStr, KUndef, TemporalDurationCtor,
-  TemporalDurationGetter, TemporalDurationMethod, TemporalDurationStatic,
-  TemporalN, TsCompare, TsFrom, classify, mk_bool, mk_int, mk_number, mk_string,
+  CompareStatic, DurationAbs, DurationAdd, DurationBlank, DurationDays,
+  DurationHours, DurationMicroseconds, DurationMilliseconds, DurationMinutes,
+  DurationMonths, DurationNanoseconds, DurationNegated, DurationRound,
+  DurationSeconds, DurationSign, DurationSubtract, DurationToJson,
+  DurationToLocaleString, DurationToString, DurationTotal, DurationValueOf,
+  DurationWeeks, DurationWith, DurationYears, FromStatic, JFloat, KHandle, KStr,
+  KUndef, TemporalDurationCtor, TemporalDurationGetter, TemporalDurationMethod,
+  TemporalDurationStatic, TemporalN, classify, mk_bool, mk_int, mk_number,
+  mk_string,
 }
 import arc/rt/val as rt_val
 import gleam/int
@@ -54,18 +57,18 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 
 pub const all_duration_getters = [
-  DrYears,
-  DrMonths,
-  DrWeeks,
-  DrDays,
-  DrHours,
-  DrMinutes,
-  DrSeconds,
-  DrMilliseconds,
-  DrMicroseconds,
-  DrNanoseconds,
-  DrSign,
-  DrBlank,
+  DurationYears,
+  DurationMonths,
+  DurationWeeks,
+  DurationDays,
+  DurationHours,
+  DurationMinutes,
+  DurationSeconds,
+  DurationMilliseconds,
+  DurationMicroseconds,
+  DurationNanoseconds,
+  DurationSign,
+  DurationBlank,
 ]
 
 pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
@@ -73,7 +76,7 @@ pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
 }
 
 pub fn statics(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
-  list.map([#(TsFrom, 1), #(TsCompare, 2)], fn(s) {
+  list.map([#(FromStatic, 1), #(CompareStatic, 2)], fn(s) {
     #(static_name(s.0), TemporalN(TemporalDurationStatic(s.0, protos)), s.1)
   })
 }
@@ -87,17 +90,17 @@ pub fn getters() -> List(#(String, NativeToken)) {
 pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
   list.map(
     [
-      #(DmWith, 1),
-      #(DmNegated, 0),
-      #(DmAbs, 0),
-      #(DmAdd, 1),
-      #(DmSubtract, 1),
-      #(DmRound, 1),
-      #(DmTotal, 1),
-      #(DmToString, 0),
-      #(DmToJson, 0),
-      #(DmToLocaleString, 0),
-      #(DmValueOf, 0),
+      #(DurationWith, 1),
+      #(DurationNegated, 0),
+      #(DurationAbs, 0),
+      #(DurationAdd, 1),
+      #(DurationSubtract, 1),
+      #(DurationRound, 1),
+      #(DurationTotal, 1),
+      #(DurationToString, 0),
+      #(DurationToJson, 0),
+      #(DurationToLocaleString, 0),
+      #(DurationValueOf, 0),
     ],
     fn(m) {
       #(
@@ -111,34 +114,34 @@ pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
 
 pub fn duration_getter_name(g: TemporalDurationGetter) -> String {
   case g {
-    DrYears -> "years"
-    DrMonths -> "months"
-    DrWeeks -> "weeks"
-    DrDays -> "days"
-    DrHours -> "hours"
-    DrMinutes -> "minutes"
-    DrSeconds -> "seconds"
-    DrMilliseconds -> "milliseconds"
-    DrMicroseconds -> "microseconds"
-    DrNanoseconds -> "nanoseconds"
-    DrSign -> "sign"
-    DrBlank -> "blank"
+    DurationYears -> "years"
+    DurationMonths -> "months"
+    DurationWeeks -> "weeks"
+    DurationDays -> "days"
+    DurationHours -> "hours"
+    DurationMinutes -> "minutes"
+    DurationSeconds -> "seconds"
+    DurationMilliseconds -> "milliseconds"
+    DurationMicroseconds -> "microseconds"
+    DurationNanoseconds -> "nanoseconds"
+    DurationSign -> "sign"
+    DurationBlank -> "blank"
   }
 }
 
 pub fn duration_method_name(m: DurationMethod) -> String {
   case m {
-    DmWith -> "with"
-    DmNegated -> "negated"
-    DmAbs -> "abs"
-    DmAdd -> "add"
-    DmSubtract -> "subtract"
-    DmRound -> "round"
-    DmTotal -> "total"
-    DmToString -> "toString"
-    DmToJson -> "toJSON"
-    DmToLocaleString -> "toLocaleString"
-    DmValueOf -> "valueOf"
+    DurationWith -> "with"
+    DurationNegated -> "negated"
+    DurationAbs -> "abs"
+    DurationAdd -> "add"
+    DurationSubtract -> "subtract"
+    DurationRound -> "round"
+    DurationTotal -> "total"
+    DurationToString -> "toString"
+    DurationToJson -> "toJSON"
+    DurationToLocaleString -> "toLocaleString"
+    DurationValueOf -> "valueOf"
   }
 }
 
@@ -180,11 +183,11 @@ pub fn static(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case name {
-    TsFrom -> {
+    FromStatic -> {
       let #(d, st) = to_temporal_duration(st, helpers.arg_at(args, 0))
       make_duration(st, protos, d)
     }
-    TsCompare -> duration_compare(st, args)
+    CompareStatic -> duration_compare(st, args)
   }
 }
 
@@ -252,18 +255,18 @@ pub fn getter(
 
 pub fn duration_field(d: Duration, g: TemporalDurationGetter) -> JsVal {
   case g {
-    DrYears -> mk_int(d.years)
-    DrMonths -> mk_int(d.months)
-    DrWeeks -> mk_int(d.weeks)
-    DrDays -> mk_int(d.days)
-    DrHours -> mk_int(d.hours)
-    DrMinutes -> mk_int(d.minutes)
-    DrSeconds -> mk_int(d.seconds)
-    DrMilliseconds -> mk_int(d.milliseconds)
-    DrMicroseconds -> mk_int(d.microseconds)
-    DrNanoseconds -> mk_int(d.nanoseconds)
-    DrSign -> mk_int(duration_sign(d))
-    DrBlank -> mk_bool(duration_sign(d) == 0)
+    DurationYears -> mk_int(d.years)
+    DurationMonths -> mk_int(d.months)
+    DurationWeeks -> mk_int(d.weeks)
+    DurationDays -> mk_int(d.days)
+    DurationHours -> mk_int(d.hours)
+    DurationMinutes -> mk_int(d.minutes)
+    DurationSeconds -> mk_int(d.seconds)
+    DurationMilliseconds -> mk_int(d.milliseconds)
+    DurationMicroseconds -> mk_int(d.microseconds)
+    DurationNanoseconds -> mk_int(d.nanoseconds)
+    DurationSign -> mk_int(duration_sign(d))
+    DurationBlank -> mk_bool(duration_sign(d) == 0)
   }
 }
 
@@ -276,11 +279,11 @@ pub fn method(
 ) -> #(JsVal, Agent) {
   let d = require_duration(st, this, duration_method_name(m))
   case m {
-    DmToJson | DmToLocaleString -> #(
+    DurationToJson | DurationToLocaleString -> #(
       mk_string(format_duration(d, AutoPrecision)),
       st,
     )
-    DmToString -> {
+    DurationToString -> {
       let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
       let #(digits, st) = get_fractional_digits(st, opts)
       let #(mode, st) = get_rounding_mode_option(st, opts, Trunc)
@@ -295,20 +298,20 @@ pub fn method(
         })
       #(mk_string(format_duration(d2, precision)), st)
     }
-    DmValueOf ->
+    DurationValueOf ->
       rt_val.t_throw_type_error(
         st,
         "Temporal.Duration cannot be converted with valueOf",
       )
-    DmNegated -> make_duration(st, protos, negate_duration(d))
-    DmAbs -> {
+    DurationNegated -> make_duration(st, protos, negate_duration(d))
+    DurationAbs -> {
       let abs_d = case duration_sign(d) < 0 {
         True -> negate_duration(d)
         False -> d
       }
       make_duration(st, protos, abs_d)
     }
-    DmWith ->
+    DurationWith ->
       case classify(helpers.arg_at(args, 0)) {
         KHandle(bag) -> {
           let #(fields, st) = read_duration_fields(st, bag)
@@ -318,10 +321,10 @@ pub fn method(
         }
         _ -> rt_val.t_throw_type_error(st, "argument must be an object")
       }
-    DmAdd | DmSubtract -> {
+    DurationAdd | DurationSubtract -> {
       let #(other, st) = to_temporal_duration(st, helpers.arg_at(args, 0))
       let other = case m {
-        DmSubtract -> negate_duration(other)
+        DurationSubtract -> negate_duration(other)
         _ -> other
       }
       case has_calendar_units(d) || has_calendar_units(other) {
@@ -338,8 +341,8 @@ pub fn method(
         }
       }
     }
-    DmRound -> duration_round(st, protos, d, args)
-    DmTotal -> duration_total(st, d, args)
+    DurationRound -> duration_round(st, protos, d, args)
+    DurationTotal -> duration_total(st, d, args)
   }
 }
 

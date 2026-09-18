@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named, canonical_key}
 import arc/internal/tree_array
 import arc/rt/async as rt_async
 import arc/rt/builtins/common
@@ -15,7 +16,7 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type ObjectKey,
   type PromiseKeyedKind, type PromiseNative, ArrayObj, Dense, JInt, KHandle,
-  KeyedFulfilled, KeyedRejected, KeyedValue, Named, PromiseAllKeyedStatic,
+  KeyedFulfilled, KeyedRejected, KeyedValue, PromiseAllKeyedStatic,
   PromiseAllResolveElement, PromiseAllSettledElement,
   PromiseAllSettledKeyedStatic, PromiseAllSettledStatic, PromiseAllStatic,
   PromiseAnyRejectElement, PromiseAnyStatic, PromiseCapabilityExecutor,
@@ -89,10 +90,10 @@ pub fn dispatch(
     PromiseFinally -> finally(st, this, args)
     PromiseResolveStatic -> resolve_static(st, this, args)
     PromiseRejectStatic -> reject_static(st, this, args)
-    PromiseAllStatic -> combinator(st, this, args, CombAll)
-    PromiseRaceStatic -> combinator(st, this, args, CombRace)
-    PromiseAllSettledStatic -> combinator(st, this, args, CombAllSettled)
-    PromiseAnyStatic -> combinator(st, this, args, CombAny)
+    PromiseAllStatic -> combinator(st, this, args, AllCombinator)
+    PromiseRaceStatic -> combinator(st, this, args, RaceCombinator)
+    PromiseAllSettledStatic -> combinator(st, this, args, AllSettledCombinator)
+    PromiseAnyStatic -> combinator(st, this, args, AnyCombinator)
     PromiseAllKeyedStatic -> keyed_combinator(st, this, args, settled: False)
     PromiseAllSettledKeyedStatic ->
       keyed_combinator(st, this, args, settled: True)
@@ -343,18 +344,18 @@ fn reject_static(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-type CombKind {
-  CombAll
-  CombRace
-  CombAllSettled
-  CombAny
+type CombinatorKind {
+  AllCombinator
+  RaceCombinator
+  AllSettledCombinator
+  AnyCombinator
 }
 
 fn combinator(
   st: Agent,
   this: JsVal,
   args: List(JsVal),
-  kind: CombKind,
+  kind: CombinatorKind,
 ) -> #(JsVal, Agent) {
   let #(cap, st) = new_capability_from_constructor(st, this)
   let iterable = first_arg_or_undefined(args)
@@ -396,12 +397,12 @@ fn perform_combinator(
   c: JsVal,
   cap: Capability,
   promise_resolve: JsVal,
-  kind: CombKind,
+  kind: CombinatorKind,
   open_h: Handle,
 ) -> #(JsVal, Agent) {
   let realm = st.realm
   case kind {
-    CombRace ->
+    RaceCombinator ->
       combinator_loop(
         st,
         rec,
@@ -412,7 +413,7 @@ fn perform_combinator(
         fn(st, _i) { #(cap.resolve, cap.reject, st) },
         fn(st) { #(mk_undefined(), st) },
       )
-    CombAll -> {
+    AllCombinator -> {
       let #(values_h, st) = alloc_empty_array(st, realm.array.prototype)
       let #(remaining_h, st) = alloc_counter(st, 1)
       combinator_loop(
@@ -442,7 +443,7 @@ fn perform_combinator(
         fn(st) { final_resolve_values(st, remaining_h, values_h, cap.resolve) },
       )
     }
-    CombAllSettled -> {
+    AllSettledCombinator -> {
       let #(values_h, st) = alloc_empty_array(st, realm.array.prototype)
       let #(remaining_h, st) = alloc_counter(st, 1)
       combinator_loop(
@@ -485,7 +486,7 @@ fn perform_combinator(
         fn(st) { final_resolve_values(st, remaining_h, values_h, cap.resolve) },
       )
     }
-    CombAny -> {
+    AnyCombinator -> {
       let #(errors_h, st) = alloc_empty_array(st, realm.array.prototype)
       let #(remaining_h, st) = alloc_counter(st, 1)
       combinator_loop(
@@ -648,7 +649,7 @@ fn perform_all_keyed(
           values_h:,
           remaining_h:,
         )
-      keyed_loop(st, loop, all_keys, 0)
+      perform_all_keyed_loop(st, loop, all_keys, 0)
     }
     _ ->
       rt_val.t_throw_type_error(
@@ -658,7 +659,7 @@ fn perform_all_keyed(
   }
 }
 
-fn keyed_loop(
+fn perform_all_keyed_loop(
   st: Agent,
   loop: KeyedLoop,
   all_keys: List(ObjectKey),
@@ -678,7 +679,7 @@ fn keyed_loop(
       let enumerable =
         option.map(desc, types.prop_enumerable) |> option.unwrap(False)
       case enumerable {
-        False -> keyed_loop(st, loop, rest, index)
+        False -> perform_all_keyed_loop(st, loop, rest, index)
         True -> {
           let #(prop_value, st) = rt_obj.t_get_prop(st, loop.promises, key)
           let st =
@@ -721,7 +722,7 @@ fn keyed_loop(
               on_fulfilled,
               on_rejected,
             ])
-          keyed_loop(st, loop, rest, index + 1)
+          perform_all_keyed_loop(st, loop, rest, index + 1)
         }
       }
     }
@@ -779,7 +780,7 @@ fn create_keyed_result(
 
 fn key_of_value(v: JsVal) -> option.Option(ObjectKey) {
   case classify(v) {
-    types.KStr(s) -> Some(StringKey(types.canonical_key(s)))
+    types.KStr(s) -> Some(StringKey(canonical_key(s)))
     types.KSym(sym) -> Some(SymbolKey(sym))
     _ -> None
   }

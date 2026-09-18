@@ -12,8 +12,8 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-pub type CalDate {
-  CalDate(year: Int, month: Int, day: Int)
+pub type CalendarDate {
+  CalendarDate(year: Int, month: Int, day: Int)
 }
 
 pub type MonthCodeIssue {
@@ -132,12 +132,12 @@ fn coptic_to_days(
   epoch - 1 + 365 * { y - 1 } + floor_div(y, 4) + 30 * { month - 1 } + day
 }
 
-fn coptic_from_days(epoch: Int, shift: Int, days: Int) -> CalDate {
+fn coptic_from_days(epoch: Int, shift: Int, days: Int) -> CalendarDate {
   let y = floor_div(4 * { days - epoch } + 1463, 1461)
   let m =
     floor_div(days - coptic_to_days(epoch, shift, y + shift, 1, 1), 30) + 1
   let d = days - coptic_to_days(epoch, shift, y + shift, m, 1) + 1
-  CalDate(y + shift, m, d)
+  CalendarDate(y + shift, m, d)
 }
 
 fn coptic_is_leap(shift: Int, year: Int) -> Bool {
@@ -182,12 +182,12 @@ fn islamic_days_in_month(year: Int, month: Int) -> Int {
   }
 }
 
-fn islamic_from_days(epoch: Int, days: Int) -> CalDate {
+fn islamic_from_days(epoch: Int, days: Int) -> CalendarDate {
   let y0 = floor_div(30 * { days - epoch } + 10_646, 10_631)
   let y = adjust_year(days, y0, fn(yy) { islamic_to_days(epoch, yy, 1, 1) })
   let #(m, d) =
     scan_months(days, y, 1, 12, fn(yy, mm) { islamic_to_days(epoch, yy, mm, 1) })
-  CalDate(y, m, d)
+  CalendarDate(y, m, d)
 }
 
 // month_bits: bit (12 - month) set = 30 days
@@ -230,12 +230,12 @@ fn umalqura_to_days(year: Int, month: Int, day: Int) -> Int {
   - 1
 }
 
-fn umalqura_from_days(days: Int) -> CalDate {
+fn umalqura_from_days(days: Int) -> CalendarDate {
   let y0 = floor_div(30 * { days - islamic_civil_epoch } + 10_646, 10_631)
   let y = adjust_year(days, y0, fn(yy) { umalqura_to_days(yy, 1, 1) })
   let #(m, d) =
     scan_months(days, y, 1, 12, fn(yy, mm) { umalqura_to_days(yy, mm, 1) })
-  CalDate(y, m, d)
+  CalendarDate(y, m, d)
 }
 
 const persian_epoch = -492_268
@@ -267,12 +267,12 @@ fn persian_days_in_month(year: Int, month: Int) -> Int {
   }
 }
 
-fn persian_from_days(days: Int) -> CalDate {
+fn persian_from_days(days: Int) -> CalendarDate {
   let y0 = 1 + floor_div(33 * { days - persian_epoch } + 3, 12_053)
   let y = adjust_year(days, y0, fn(yy) { persian_to_days(yy, 1, 1) })
   let #(m, d) =
     scan_months(days, y, 1, 12, fn(yy, mm) { persian_to_days(yy, mm, 1) })
-  CalDate(y, m, d)
+  CalendarDate(y, m, d)
 }
 
 fn indian_year_start(year: Int) -> Int {
@@ -311,7 +311,7 @@ fn indian_to_days(year: Int, month: Int, day: Int) -> Int {
   indian_year_start(year) + offset + day - 1
 }
 
-fn indian_from_days(days: Int) -> CalDate {
+fn indian_from_days(days: Int) -> CalendarDate {
   let #(gregorian_year, _, _) = civil_from_days(days)
   let y0 = gregorian_year - 78
   let y = case days < indian_year_start(y0) {
@@ -320,7 +320,7 @@ fn indian_from_days(days: Int) -> CalDate {
   }
   let #(m, d) =
     scan_months(days, y, 1, 12, fn(yy, mm) { indian_to_days(yy, mm, 1) })
-  CalDate(y, m, d)
+  CalendarDate(y, m, d)
 }
 
 const hebrew_epoch = -2_092_590
@@ -441,13 +441,13 @@ fn hebrew_to_days(year: Int, month: Int, day: Int) -> Int {
   - 1
 }
 
-fn hebrew_from_days(days: Int) -> CalDate {
+fn hebrew_from_days(days: Int) -> CalendarDate {
   let approx = floor_div(98_496 * { days - hebrew_epoch }, 35_975_351) + 1
   let y = adjust_year(days, approx, hebrew_new_year)
   let shape = hebrew_year_shape(y)
   let #(m, d) =
     hebrew_scan_months(days, shape, 1, hebrew_months_in_year(y), shape.new_year)
-  CalDate(y, m, d)
+  CalendarDate(y, m, d)
 }
 
 fn hebrew_scan_months(
@@ -585,14 +585,14 @@ fn lunisolar_to_days(
   - 1
 }
 
-fn lunisolar_from_days(year_table: YearTable, days: Int) -> CalDate {
+fn lunisolar_from_days(year_table: YearTable, days: Int) -> CalendarDate {
   let #(y0, _, _) = civil_from_days(days)
   let y = adjust_year(days, y0, fn(yy) { lunisolar_year_start(year_table, yy) })
   let #(m, d) =
     scan_months(days, y, 1, lunisolar_months_in_year(year_table, y), fn(yy, mm) {
       lunisolar_to_days(year_table, yy, mm, 1)
     })
-  CalDate(y, m, d)
+  CalendarDate(y, m, d)
 }
 
 fn days_before_month(month: Int, month_length: fn(Int) -> Int) -> Int {
@@ -627,11 +627,11 @@ fn scan_months(
   }
 }
 
-pub fn date_from_epoch_days(cal: Calendar, days: Int) -> CalDate {
+pub fn date_from_epoch_days(cal: Calendar, days: Int) -> CalendarDate {
   case arithmetic(cal) {
     IsoArith(offset) -> {
       let #(y, m, d) = civil_from_days(days)
-      CalDate(y + offset, m, d)
+      CalendarDate(y + offset, m, d)
     }
     CopticArith(epoch:, year_shift:) ->
       coptic_from_days(epoch, year_shift, days)
@@ -939,21 +939,21 @@ fn era_code_for(
 }
 
 type JapaneseEra {
-  JapaneseEra(code: EraCode, year_offset: Int, start: CalDate)
+  JapaneseEra(code: EraCode, year_offset: Int, start: CalendarDate)
 }
 
 // newest first
 const japanese_eras = [
-  JapaneseEra(code: Reiwa, year_offset: 2018, start: CalDate(2019, 5, 1)),
-  JapaneseEra(code: Heisei, year_offset: 1988, start: CalDate(1989, 1, 8)),
-  JapaneseEra(code: Showa, year_offset: 1925, start: CalDate(1926, 12, 25)),
-  JapaneseEra(code: Taisho, year_offset: 1911, start: CalDate(1912, 7, 30)),
-  JapaneseEra(code: Meiji, year_offset: 1867, start: CalDate(1873, 1, 1)),
+  JapaneseEra(code: Reiwa, year_offset: 2018, start: CalendarDate(2019, 5, 1)),
+  JapaneseEra(code: Heisei, year_offset: 1988, start: CalendarDate(1989, 1, 8)),
+  JapaneseEra(code: Showa, year_offset: 1925, start: CalendarDate(1926, 12, 25)),
+  JapaneseEra(code: Taisho, year_offset: 1911, start: CalendarDate(1912, 7, 30)),
+  JapaneseEra(code: Meiji, year_offset: 1867, start: CalendarDate(1873, 1, 1)),
 ]
 
 fn japanese_era_code(year: Int, month: Int, day: Int) -> EraCode {
   let started = fn(era: JapaneseEra) {
-    let CalDate(y, m, d) = era.start
+    let CalendarDate(y, m, d) = era.start
     year > y || { year == y && { month > m || { month == m && day >= d } } }
   }
   case list.find(japanese_eras, started) {

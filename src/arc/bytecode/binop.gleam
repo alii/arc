@@ -7,32 +7,32 @@ pub type PureBinOp {
 }
 
 pub type ArithOp {
-  ArithSub
-  ArithMul
-  ArithDiv
-  ArithMod
-  ArithExp
+  Sub
+  Mul
+  Div
+  Mod
+  Exp
 }
 
 pub type BitwiseOp {
-  AndOp
-  OrOp
-  XorOp
-  ShlOp
-  ShrOp
-  UShrOp
+  BitAnd
+  BitOr
+  BitXor
+  ShiftLeft
+  ShiftRight
+  ShiftRightUnsigned
 }
 
 pub type CompareOp {
-  LtCmp
-  LtEqCmp
-  GtCmp
-  GtEqCmp
+  Less
+  LessEq
+  Greater
+  GreaterEq
 }
 
 pub type EqualityOp {
-  EqOp
-  NotEqOp
-  StrictEqOp
-  StrictNotEqOp
+  LooseEq
+  LooseNotEq
+  StrictEq
+  StrictNotEq
 }

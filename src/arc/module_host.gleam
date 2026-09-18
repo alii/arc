@@ -116,7 +116,7 @@ fn eager_import_module(
   resolve: ResolveFn,
   load: LoadFn,
 ) -> #(Agent, Result(JsVal, JsVal)) {
-  case registry.read_cache_state(st, resolved) {
+  case registry.read_cached_module(st, resolved) {
     // error cache wins: a namespace entry may be stale after a throw
     registry.Failed(error:) -> #(st, Error(error))
     // parked on tla: same in-flight promise (Evaluate step 4)
@@ -173,7 +173,7 @@ fn defer_import_module(
   resolve_fn: JsVal,
   reject_fn: JsVal,
 ) -> #(Agent, Result(JsVal, JsVal)) {
-  case registry.read_cache_state(st, resolved) {
+  case registry.read_cached_module(st, resolved) {
     registry.Failed(error:) -> #(st, Error(error))
     registry.Pending(deferred: option.Some(deferred_ns), ..)
     | registry.Started(deferred: option.Some(deferred_ns), ..)

@@ -1,9 +1,10 @@
+import arc/bytecode/key.{Named}
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/obj.{constructor_props, prototype_seq} as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type FnFlags, type Handle, BirthPending, BytecodeFn, DataProperty,
-  FnFlags, KHandle, Named, NoElements, Ordinary, SObject, StringKey, classify,
+  FnFlags, KHandle, NoElements, Ordinary, SObject, StringKey, classify,
   mk_object,
 }
 import gleam/dict
@@ -30,7 +31,7 @@ pub fn t_new_bytecode_function(
   st: Agent,
   template: FuncTemplate,
   env: EnvTuple,
-  unit: Int,
+  unit_id: Int,
 ) -> #(Handle, Agent) {
   let flags = template_flags(template)
   let realm = st.realm
@@ -54,7 +55,7 @@ pub fn t_new_bytecode_function(
             flags:,
             fields_init: None,
             realm: realm.id,
-            unit:,
+            unit_id:,
             birth: BirthPending(prototype_parent),
           ),
           proto: Some(fn_proto),
@@ -65,7 +66,7 @@ pub fn t_new_bytecode_function(
         ),
       )
     }
-    _, _ -> new_with_eager_prototype(st, template, env, unit, flags)
+    _, _ -> new_with_eager_prototype(st, template, env, unit_id, flags)
   }
 }
 
@@ -73,7 +74,7 @@ fn new_with_eager_prototype(
   st: Agent,
   template: FuncTemplate,
   env: EnvTuple,
-  unit: Int,
+  unit_id: Int,
   flags: FnFlags,
 ) -> #(Handle, Agent) {
   let realm = st.realm
@@ -116,7 +117,7 @@ fn new_with_eager_prototype(
           flags:,
           fields_init: None,
           realm: realm.id,
-          unit:,
+          unit_id:,
           birth: BirthPending(None),
         ),
         proto: Some(fn_proto),

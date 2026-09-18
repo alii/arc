@@ -75,14 +75,14 @@ fn top_level_activation(
   this: JsVal,
   eval_env: Option(Handle),
 ) -> State {
-  let #(unit, agent) = rt_store.t_next_unit_uid(agent)
+  let #(unit_id, agent) = rt_store.t_next_unit_id(agent)
   State(
     agent:,
     pc: 0,
     stack: [],
     locals:,
     func: template,
-    unit:,
+    unit_id:,
     call_stack: [],
     outer_depth: agent.call_depth,
     depth: agent.call_depth,

@@ -580,7 +580,7 @@ fn dispose_async(st: Agent, this: JsVal) -> #(JsVal, Agent) {
       let resources = read_capability(st, capability)
       let st = mark_disposed(st, h)
       let st =
-        async_dispose_loop(
+        dispose_async_loop(
           st,
           resources,
           pending: None,
@@ -595,7 +595,7 @@ fn dispose_async(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 }
 
 // §3.1.3 disposeresources, async, resumed across microtasks
-fn async_dispose_loop(
+fn dispose_async_loop(
   st: Agent,
   resources: List(DisposeResource),
   pending pending: Option(JsVal),
@@ -621,7 +621,7 @@ fn async_dispose_loop(
             attach_await(st, result, rest, pending, resolve, reject)
           #(ThrowCompletion(thrown), st) -> {
             let #(pending, st) = fold_error(st, pending, thrown)
-            async_dispose_loop(
+            dispose_async_loop(
               st,
               rest,
               pending:,
@@ -647,7 +647,7 @@ fn async_dispose_loop(
               attach_await_rejected(st, thrown, rest, pending, resolve, reject)
           }
         NullDispose ->
-          async_dispose_loop(
+          dispose_async_loop(
             st,
             rest,
             pending:,
@@ -760,7 +760,7 @@ fn async_dispose_continue(
     False -> #(pending, st)
   }
   let st =
-    async_dispose_loop(
+    dispose_async_loop(
       st,
       remaining,
       pending:,

@@ -110,16 +110,16 @@ cp_at(S, I) when I >= 0 ->
         true ->
             Off = byte_offset(S, I),
             <<_:Off/binary, C/utf8, _/binary>> = bin(S),
-            {some, C};
-        false -> none
+            {?SOME, C};
+        false -> ?NONE
     end;
-cp_at(_, _) -> none.
+cp_at(_, _) -> ?NONE.
 
 char_at_val(S, I) ->
     case cp_at(S, I) of
-        {some, C} when C < 16#80 -> {some, <<C>>};
-        {some, C} -> {some, {?STR_TAG, <<C/utf8>>, 1, {0}}};
-        none -> none
+        {?SOME, C} when C < 16#80 -> {?SOME, <<C>>};
+        {?SOME, C} -> {?SOME, {?STR_TAG, <<C/utf8>>, 1, {0}}};
+        ?NONE -> ?NONE
     end.
 
 %% caller clamps: 0 =< Start, 0 =< N, Start + N =< len
@@ -166,11 +166,11 @@ index_of_val(Hay, Needle, From) ->
     NB = bin(Needle),
     Start = byte_offset(Hay, From),
     case NB of
-        <<>> -> {some, From};
+        <<>> -> {?SOME, From};
         _ ->
             case binary:match(HB, NB, [{scope, {Start, byte_size(HB) - Start}}]) of
-                nomatch -> none;
-                {Pos, _} -> {some, codepoint_index(Hay, Pos)}
+                nomatch -> ?NONE;
+                {Pos, _} -> {?SOME, codepoint_index(Hay, Pos)}
             end
     end.
 

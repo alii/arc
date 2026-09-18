@@ -1,6 +1,6 @@
 import arc/bytecode/binop
 import arc/bytecode/error_kind.{TypeError}
-import arc/bytecode/key
+import arc/bytecode/key.{Index, Named, key_display_string, key_to_text}
 import arc/bytecode/lexical
 import arc/bytecode/opcode.{
   type Op, ApplyArguments, ArrayFrom, ArrayFromWithHoles, ArrayPush,
@@ -15,25 +15,25 @@ import arc/bytecode/opcode.{
   DefineMethodComputed, DefinePrivateAccessor, DefinePrivateField,
   DefinePrivateMethod, DeleteElem, DeleteField, DeleteGlobalVar, Dup,
   DynamicImport, DynamicImportDefer, DynamicImportSource, ForInNext, ForInStart,
-  GetAsyncIterator, GetBoxed, GetDisposer, GetElem, GetElem2, GetElemLocals,
-  GetElemPostInc, GetEvalVar, GetField, GetField2, GetFieldCall, GetFieldCall1,
-  GetGlobal, GetIterator, GetLocal, GetLocalField, GetLocalField2,
-  GetLocalFieldCall, GetPrivateFieldDyn, GetPrivateFieldDyn2, GetPrototypeOf,
-  GetSuperValue, GetSuperValue2, GetTemplateObject, Gosub, IncLocal,
-  IncLocalCmpConstJump, IncLocalCmpLocalJump, IncLocalJump, InitGlobalLex,
-  InitialYield, IteratorCheckObject, IteratorClose, IteratorCloseThrow,
-  IteratorNext, IteratorRecord, IteratorRest, Jump, JumpIfFalse, JumpIfLocal,
-  JumpIfNotNullish, JumpIfNullish, JumpIfTrue, MakeClosure, MakeMethod,
-  MakeSuppressed, NewObject, NewObjectWith, NewPrivateName, NewRegExp,
-  ObjectRestCopy, ObjectSpread, Pc, Pop, PopTry, PostDecLocal, PostIncLocal,
-  PrivateInDyn, PushConst, PushTry, PutBoxed, PutBoxedCheckInit, PutElem,
-  PutElemPop, PutEvalVar, PutField, PutFieldPop, PutGlobal, PutLocal,
-  PutLocalCheckInit, PutLocalConstField, PutLocalLocalField, PutPrivateFieldDyn,
-  PutSuperValue, Ret, Return, Rot3, Safepoint, SetProto, SetupDerivedClass, Swap,
-  Throw, ThrowConstAssign, ThrowError, ToObject, ToPropertyKey, ToStringVal,
-  TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, Unrot4, WithDeleteVar,
-  WithGetRefValue, WithGetVar, WithGetVarThis, WithMakeRef, WithPutRefValue,
-  WithPutVar, Yield, YieldStar,
+  GetAsyncIterator, GetBoxed, GetDisposer, GetElem, GetElemKeep, GetElemLocals,
+  GetElemPostInc, GetEvalVar, GetField, GetFieldCall, GetFieldCall1,
+  GetFieldKeep, GetGlobal, GetIterator, GetLocal, GetLocalField,
+  GetLocalFieldCall, GetLocalFieldKeep, GetPrivateFieldDyn,
+  GetPrivateFieldDynKeep, GetPrototypeOf, GetSuperValue, GetSuperValueKeep,
+  GetTemplateObject, Gosub, IncLocal, IncLocalCmpConstJump, IncLocalCmpLocalJump,
+  IncLocalJump, InitGlobalLex, InitialYield, IteratorCheckObject, IteratorClose,
+  IteratorCloseThrow, IteratorNext, IteratorRecord, IteratorRest, Jump,
+  JumpIfFalse, JumpIfLocal, JumpIfNotNullish, JumpIfNullish, JumpIfTrue,
+  MakeClosure, MakeMethod, MakeSuppressed, NewObject, NewObjectWith,
+  NewPrivateName, NewRegExp, ObjectRestCopy, ObjectSpread, Pc, Pop, PopTry,
+  PostDecLocal, PostIncLocal, PrivateInDyn, PushConst, PushTry, PutBoxed,
+  PutBoxedCheckInit, PutElem, PutElemPop, PutEvalVar, PutField, PutFieldPop,
+  PutGlobal, PutLocal, PutLocalCheckInit, PutLocalConstField, PutLocalLocalField,
+  PutPrivateFieldDyn, PutSuperValue, Ret, Return, Rot3, Safepoint, SetProto,
+  SetupDerivedClass, Swap, Throw, ThrowConstAssign, ThrowError, ToObject,
+  ToPropertyKey, ToStringVal, TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp,
+  Unrot4, WithDeleteVar, WithGetRefValue, WithGetVar, WithGetVarThis,
+  WithMakeRef, WithPutRefValue, WithPutVar, Yield, YieldStar,
 }
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/call.{type Drive}
@@ -74,10 +74,10 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type LexicalGlobal, type ObjectKey,
   AccessorProperty, Agent, BytecodeFn, DataProperty, FunctionApply, FunctionCall,
-  FunctionN, HintString, Index, JsStore, KHandle, KNull, KNum, KStr, KSym,
-  KUndef, Named, NativeFn, NoElements, Realm, ReflectApply, ReflectN, SBox,
-  SObject, SShapedObject, StringKey, SymbolKey, classify, mk_bool, mk_int,
-  mk_object, mk_string, mk_tdz, mk_undefined,
+  FunctionN, HintString, KHandle, KNull, KNum, KStr, KSym, KUndef, NativeFn,
+  NoElements, Realm, ReflectApply, ReflectN, SBox, SObject, SShapedObject, Store,
+  StringKey, SymbolKey, classify, mk_bool, mk_int, mk_object, mk_string, mk_tdz,
+  mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -94,14 +94,14 @@ pub type Outcome {
 }
 
 type IterPlan {
-  ArrayAdvanced(done: Bool, value: JsVal, store: types.JsStore(Agent))
+  ArrayAdvanced(done: Bool, value: JsVal, store: types.Store)
   ResumeGenerator(gen_h: Handle)
   IterMiss
 }
 
 // §23.1.5.2.1 in the kernel only when the read observes nothing
 @external(erlang, "arc_interp_ffi", "iter_step")
-fn iter_step(store: types.JsStore(Agent), rec: JsVal) -> IterPlan
+fn iter_step(store: types.Store, rec: JsVal) -> IterPlan
 
 const prototype_key = key.Named("prototype")
 
@@ -213,14 +213,6 @@ fn rt_unit6(
   |> drop_nil
 }
 
-fn object_key(k: key.PropertyKey) -> ObjectKey {
-  case k {
-    key.Named(name) -> StringKey(Named(name))
-    key.Index(i) -> StringKey(Index(i))
-    key.Private(text) -> StringKey(types.private_key(text))
-  }
-}
-
 fn is_undef(v: JsVal) -> Bool {
   kernel.is(v, kernel.Undefined)
 }
@@ -240,7 +232,7 @@ fn using_disposer(
   agent: Agent,
   val: JsVal,
   is_async is_async: Bool,
-  unit unit: Int,
+  unit_id unit_id: Int,
 ) -> #(JsVal, Agent) {
   case classify(val) {
     KUndef | KNull -> #(mk_undefined(), agent)
@@ -250,7 +242,7 @@ fn using_disposer(
       case method {
         disposable_stack.DirectDispose(m) -> direct_disposer(agent, m, val)
         disposable_stack.SyncFallbackDispose(m) ->
-          sync_fallback_disposer(agent, m, val, unit)
+          sync_fallback_disposer(agent, m, val, unit_id)
       }
     }
     _ ->
@@ -286,14 +278,14 @@ fn sync_fallback_disposer(
   agent: Agent,
   method: Handle,
   val: JsVal,
-  unit: Int,
+  unit_id: Int,
 ) -> #(JsVal, Agent) {
   let #(h, agent) =
     rt_closure.t_new_bytecode_function(
       agent,
       sync_fallback_template(),
       bytecode.env_from_list([mk_object(method), val]),
-      unit,
+      unit_id,
     )
   #(mk_object(h), agent)
 }
@@ -2005,10 +1997,10 @@ fn fast_loop(
         _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    GetElem2 ->
+    GetElemKeep ->
       case stack {
         [k, recv, ..] -> {
-          let v = kernel.get_elem2(agent.store, recv, k)
+          let v = kernel.get_elem_keep(agent.store, recv, k)
           case kernel.is(v, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
@@ -2202,7 +2194,7 @@ fn fast_loop(
         [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
-    GetField2(key.Named(_) as k) ->
+    GetFieldKeep(key.Named(_) as k) ->
       case stack {
         [recv, ..rest] -> {
           let v = kernel.get_field(agent, recv, k)
@@ -2387,7 +2379,7 @@ fn fast_loop(
       }
     }
 
-    GetLocalField2(index, key.Named(_) as k) -> {
+    GetLocalFieldKeep(index, key.Named(_) as k) -> {
       let recv = case index < 0 {
         True ->
           case index {
@@ -2595,7 +2587,7 @@ fn fast_loop(
           agent,
           template,
           kernel.capture_env(template.env_descriptors, locals),
-          state.unit,
+          state.unit_id,
         )
       fast_loop(
         state,
@@ -3530,7 +3522,7 @@ fn fast_call(
             home_object:,
             flags:,
             realm:,
-            unit:,
+            unit_id:,
             ..,
           ),
           ..,
@@ -3607,7 +3599,7 @@ fn fast_call(
                   stack: [],
                   locals: callee_locals,
                   func: template,
-                  unit:,
+                  unit_id:,
                   pc: 0,
                   call_stack: [saved, ..state.call_stack],
                   outer_depth: state.outer_depth,
@@ -4465,7 +4457,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       let #(tpl, agent) =
         rt_lang.t_get_template_object(
           state.agent,
-          int.to_string(state.unit) <> "#" <> int.to_string(site),
+          int.to_string(state.unit_id) <> "#" <> int.to_string(site),
           cooked,
           raw,
         )
@@ -4683,7 +4675,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             using_disposer,
             val,
             is_async,
-            state.unit,
+            state.unit_id,
           ))
           State(..state, stack: [disposer, ..state.stack])
         }
@@ -5071,14 +5063,14 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "GetField")
       }
 
-    GetField2(k) ->
+    GetFieldKeep(k) ->
       case state.stack {
         [receiver, ..rest] -> {
           use <- getter_as_frame(state, receiver, k, state.stack, drive)
           use #(val, state) <- result.map(get_field(state, receiver, k))
           State(..state, stack: [val, receiver, ..rest], pc: state.pc + 1)
         }
-        [] -> underflow(state, "GetField2")
+        [] -> underflow(state, "GetFieldKeep")
       }
 
     GetLocalField(index, k) -> {
@@ -5126,7 +5118,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       }
     }
 
-    GetLocalField2(index, k) -> {
+    GetLocalFieldKeep(index, k) -> {
       let receiver = tuple_array.get_unchecked(index, state.locals)
       case kernel.is(receiver, kernel.JsTdz) {
         True -> tdz_reference_error(state)
@@ -5205,7 +5197,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "GetPrivateFieldDyn")
       }
 
-    GetPrivateFieldDyn2 ->
+    GetPrivateFieldDynKeep ->
       case state.stack {
         [k, obj, ..rest] -> {
           use #(val, state) <- result.map(rt3(
@@ -5216,7 +5208,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           ))
           State(..state, stack: [val, obj, ..rest], pc: state.pc + 1)
         }
-        _ -> underflow(state, "GetPrivateFieldDyn2")
+        _ -> underflow(state, "GetPrivateFieldDynKeep")
       }
 
     // §7.3.31 privateset
@@ -5281,7 +5273,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 h,
                 k,
                 func,
-                types.MIMethod,
+                types.InstallMethod,
               ))
               State(..state, stack: [obj, ..rest], pc: state.pc + 1)
             }
@@ -5297,8 +5289,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           case handle_of(obj) {
             Some(h) -> {
               let install = case kind {
-                opcode.Getter -> types.MIGetter
-                opcode.Setter -> types.MISetter
+                opcode.Getter -> types.InstallGetter
+                opcode.Setter -> types.InstallSetter
               }
               use state <- result.map(rt_unit5(
                 state,
@@ -5324,7 +5316,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               use state <- result.map(create_data_property_or_throw(
                 state,
                 h,
-                object_key(k),
+                StringKey(k),
                 value,
               ))
               State(..state, stack: [obj, ..rest], pc: state.pc + 1)
@@ -5343,9 +5335,9 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 state,
                 rt_class.t_define_method,
                 target,
-                object_key(k),
+                StringKey(k),
                 fn_h,
-                types.MIMethod,
+                types.InstallMethod,
                 False,
               ))
               State(..state, stack: [obj, ..rest], pc: state.pc + 1)
@@ -5371,7 +5363,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 target,
                 pk,
                 fn_h,
-                types.MIMethod,
+                types.InstallMethod,
                 False,
               ))
               State(..state, stack: [obj, ..rest], pc: state.pc + 1)
@@ -5390,7 +5382,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 state,
                 rt_class.t_define_method,
                 target,
-                object_key(k),
+                StringKey(k),
                 fn_h,
                 accessor_install_kind(kind),
                 enumerable,
@@ -5552,7 +5544,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 state,
                 rt_obj.t_delete_prop,
                 h,
-                object_key(k),
+                StringKey(k),
               ))
               // §13.5.1.2 step 5.b.i
               case deleted, state.func.is_strict {
@@ -5708,7 +5700,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     }
 
     // §13.15.2 topropertykey runs once; converted key is left for putelem
-    GetElem2 ->
+    GetElemKeep ->
       case state.stack {
         [k, receiver, ..rest] ->
           case classify(receiver) {
@@ -5736,7 +5728,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               )
             }
           }
-        _ -> underflow(state, "GetElem2")
+        _ -> underflow(state, "GetElemKeep")
       }
 
     PutElem ->
@@ -5969,8 +5961,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     GetSuperValue ->
       get_super_value(state, keep_base: False, op: "GetSuperValue")
 
-    GetSuperValue2 ->
-      get_super_value(state, keep_base: True, op: "GetSuperValue2")
+    GetSuperValueKeep ->
+      get_super_value(state, keep_base: True, op: "GetSuperValueKeep")
 
     PutSuperValue ->
       case state.stack {
@@ -6017,7 +6009,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           state.agent,
           template,
           kernel.capture_env(template.env_descriptors, state.locals),
-          state.unit,
+          state.unit_id,
         )
       Ok(
         State(
@@ -6391,8 +6383,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
 
 fn accessor_install_kind(kind: opcode.AccessorKind) -> types.MethodInstallKind {
   case kind {
-    opcode.Getter -> types.MIGetter
-    opcode.Setter -> types.MISetter
+    opcode.Getter -> types.InstallGetter
+    opcode.Setter -> types.InstallSetter
   }
 }
 
@@ -6429,7 +6421,7 @@ fn put_field_step(
         state,
         rt_obj.t_set_prop,
         receiver,
-        object_key(k),
+        StringKey(k),
         value,
       ))
       case ok, state.func.is_strict {
@@ -6481,7 +6473,7 @@ fn get_field(
           <> key.key_display_string(k)
           <> "')",
       )
-    _ -> rt3(state, rt_obj.t_get_prop, receiver, object_key(k))
+    _ -> rt3(state, rt_obj.t_get_prop, receiver, StringKey(k))
   }
 }
 
@@ -6612,26 +6604,27 @@ fn pure_binop_general(
     #(mk_bool(r == 1), state)
   }
   case op {
-    binop.Arith(binop.ArithSub) -> rt3(state, rt_ops.t_sub, left, right)
-    binop.Arith(binop.ArithMul) -> rt3(state, rt_ops.t_mul, left, right)
-    binop.Arith(binop.ArithDiv) -> rt3(state, rt_ops.t_div, left, right)
-    binop.Arith(binop.ArithMod) -> rt3(state, rt_ops.t_mod, left, right)
-    binop.Arith(binop.ArithExp) -> rt3(state, rt_ops.t_pow, left, right)
-    binop.Bitwise(binop.AndOp) -> rt3(state, rt_ops.t_bitand, left, right)
-    binop.Bitwise(binop.OrOp) -> rt3(state, rt_ops.t_bitor, left, right)
-    binop.Bitwise(binop.XorOp) -> rt3(state, rt_ops.t_bitxor, left, right)
-    binop.Bitwise(binop.ShlOp) -> rt3(state, rt_ops.t_shl, left, right)
-    binop.Bitwise(binop.ShrOp) -> rt3(state, rt_ops.t_shr, left, right)
-    binop.Bitwise(binop.UShrOp) -> rt3(state, rt_ops.t_ushr, left, right)
-    binop.Compare(binop.LtCmp) -> cmp(rt_ops.t_lt)
-    binop.Compare(binop.LtEqCmp) -> cmp(rt_ops.t_le)
-    binop.Compare(binop.GtCmp) -> cmp(rt_ops.t_gt)
-    binop.Compare(binop.GtEqCmp) -> cmp(rt_ops.t_ge)
-    binop.Equality(binop.EqOp) -> cmp(rt_ops.t_eq)
-    binop.Equality(binop.NotEqOp) -> cmp(rt_ops.t_neq)
-    binop.Equality(binop.StrictEqOp) ->
+    binop.Arith(binop.Sub) -> rt3(state, rt_ops.t_sub, left, right)
+    binop.Arith(binop.Mul) -> rt3(state, rt_ops.t_mul, left, right)
+    binop.Arith(binop.Div) -> rt3(state, rt_ops.t_div, left, right)
+    binop.Arith(binop.Mod) -> rt3(state, rt_ops.t_mod, left, right)
+    binop.Arith(binop.Exp) -> rt3(state, rt_ops.t_pow, left, right)
+    binop.Bitwise(binop.BitAnd) -> rt3(state, rt_ops.t_bitand, left, right)
+    binop.Bitwise(binop.BitOr) -> rt3(state, rt_ops.t_bitor, left, right)
+    binop.Bitwise(binop.BitXor) -> rt3(state, rt_ops.t_bitxor, left, right)
+    binop.Bitwise(binop.ShiftLeft) -> rt3(state, rt_ops.t_shl, left, right)
+    binop.Bitwise(binop.ShiftRight) -> rt3(state, rt_ops.t_shr, left, right)
+    binop.Bitwise(binop.ShiftRightUnsigned) ->
+      rt3(state, rt_ops.t_ushr, left, right)
+    binop.Compare(binop.Less) -> cmp(rt_ops.t_lt)
+    binop.Compare(binop.LessEq) -> cmp(rt_ops.t_le)
+    binop.Compare(binop.Greater) -> cmp(rt_ops.t_gt)
+    binop.Compare(binop.GreaterEq) -> cmp(rt_ops.t_ge)
+    binop.Equality(binop.LooseEq) -> cmp(rt_ops.t_eq)
+    binop.Equality(binop.LooseNotEq) -> cmp(rt_ops.t_neq)
+    binop.Equality(binop.StrictEq) ->
       Ok(#(mk_bool(rt_ops.strict_eq(left, right)), state))
-    binop.Equality(binop.StrictNotEqOp) ->
+    binop.Equality(binop.StrictNotEq) ->
       Ok(#(mk_bool(!rt_ops.strict_eq(left, right)), state))
   }
 }
@@ -6772,7 +6765,7 @@ fn local_or_tdz(
 
 fn binop_step(
   state: State,
-  kind: opcode.Classified,
+  kind: opcode.ClassifiedBinOp,
   left: JsVal,
   right: JsVal,
   rest: List(JsVal),
@@ -6783,7 +6776,7 @@ fn binop_step(
 
 fn binop_put_step(
   state: State,
-  kind: opcode.Classified,
+  kind: opcode.ClassifiedBinOp,
   left: JsVal,
   right: JsVal,
   rest: List(JsVal),
@@ -6796,7 +6789,7 @@ fn binop_put_step(
 
 fn binop_value(
   state: State,
-  kind: opcode.Classified,
+  kind: opcode.ClassifiedBinOp,
   left: JsVal,
   right: JsVal,
 ) -> Result(#(JsVal, State), StepExit) {
@@ -6875,7 +6868,7 @@ fn create_data_property_or_throw(
 
 fn object_key_display(k: ObjectKey) -> String {
   case k {
-    StringKey(pk) -> types.key_display_string(pk)
+    StringKey(pk) -> key_display_string(pk)
     SymbolKey(sym) -> types.symbol_descriptive_string(sym)
   }
 }
@@ -7110,12 +7103,12 @@ fn resume_inline(
   let running =
     Agent(
       ..agent,
-      store: JsStore(
+      store: Store(
         ..store,
-        data: arena.set(
+        cells: arena.set(
           gen_h.id,
           types.SGenerator(state: types.GenExecuting, resume:),
-          store.data,
+          store.cells,
         ),
       ),
       call_depth: depth + 1,
@@ -7201,7 +7194,7 @@ fn settle_generator(
   let store = agent.store
   Agent(
     ..agent,
-    store: JsStore(..store, data: arena.set(gen_h.id, cell, store.data)),
+    store: Store(..store, cells: arena.set(gen_h.id, cell, store.cells)),
     call_depth: depth,
     frames:,
   )
@@ -7258,7 +7251,7 @@ fn prop_key_value(pk: ObjectKey) -> JsVal {
   case pk {
     SymbolKey(sym) -> types.mk_symbol(sym)
     StringKey(Index(n)) -> mk_int(n)
-    StringKey(other) -> mk_string(types.key_to_text(other))
+    StringKey(other) -> mk_string(key_to_text(other))
   }
 }
 
@@ -7470,7 +7463,15 @@ fn call_as_frame(
 ) -> Result(State, StepExit) {
   case kernel.cell_of(state.agent, f) {
     SObject(
-      kind: BytecodeFn(template:, env:, home_object:, flags:, realm:, unit:, ..),
+      kind: BytecodeFn(
+        template:,
+        env:,
+        home_object:,
+        flags:,
+        realm:,
+        unit_id:,
+        ..,
+      ),
       ..,
     )
       if realm == state.agent.realm.id
@@ -7482,7 +7483,7 @@ fn call_as_frame(
         state,
         fn_h,
         template,
-        unit,
+        unit_id,
         env,
         home_object,
         flags,

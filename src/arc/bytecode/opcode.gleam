@@ -73,10 +73,10 @@ pub type Op {
   WithPutRefValue(name: String, target: Pc)
 
   GetField(key: PropertyKey)
-  GetField2(key: PropertyKey)
+  GetFieldKeep(key: PropertyKey)
   PutField(key: PropertyKey)
   GetElem
-  GetElem2
+  GetElemKeep
   PutElem
   DeleteField(key: PropertyKey)
   DeleteElem
@@ -85,7 +85,7 @@ pub type Op {
   // [key, obj] -> [val], own-only
   GetPrivateFieldDyn
   // [key, obj] -> [val, obj]
-  GetPrivateFieldDyn2
+  GetPrivateFieldDynKeep
   // [key, val, obj] -> [val]
   PutPrivateFieldDyn
   // [key, obj] -> [bool]
@@ -174,7 +174,7 @@ pub type Op {
   PutBoxedCheckInit(index: Int)
 
   // build with bin_op, never classify at execution time
-  BinOp(kind: Classified)
+  BinOp(kind: ClassifiedBinOp)
   UnaryOp(kind: UnaryOpKind)
   TypeOf
   TypeofGlobal(name: String)
@@ -222,7 +222,7 @@ pub type Op {
   CmpConstJump(const_index: Int, kind: PureBinOp, target: Pc, when: Bool)
   GetLocalField(index: Int, key: PropertyKey)
   // [] -> [val, obj]
-  GetLocalField2(index: Int, key: PropertyKey)
+  GetLocalFieldKeep(index: Int, key: PropertyKey)
   // [obj] -> [result]
   GetFieldCall(key: PropertyKey)
   // method read before the arg tdz check
@@ -232,10 +232,10 @@ pub type Op {
   PutFieldPop(key: PropertyKey)
   PutLocalLocalField(obj: Int, value: Int, key: PropertyKey)
   PutLocalConstField(obj: Int, const_index: Int, key: PropertyKey)
-  BinOpConst(kind: Classified, const_index: Int)
-  BinOpLocal(kind: Classified, index: Int)
-  BinOpLocalLocal(kind: Classified, left: Int, right: Int)
-  BinOpLocalConst(kind: Classified, left: Int, const_index: Int)
+  BinOpConst(kind: ClassifiedBinOp, const_index: Int)
+  BinOpLocal(kind: ClassifiedBinOp, index: Int)
+  BinOpLocalLocal(kind: ClassifiedBinOp, left: Int, right: Int)
+  BinOpLocalConst(kind: ClassifiedBinOp, left: Int, const_index: Int)
   // [] -> [tonumber(old)], local becomes old + 1
   PostIncLocal(index: Int)
   PostDecLocal(index: Int)
@@ -244,12 +244,12 @@ pub type Op {
   GetElemLocals(obj: Int, key: Int)
   // obj[key++] with both plain locals
   GetElemPostInc(obj: Int, key: Int)
-  BinOpLocalField(kind: Classified, index: Int, key: PropertyKey)
+  BinOpLocalField(kind: ClassifiedBinOp, index: Int, key: PropertyKey)
   // [right, left] -> []
-  BinOpPut(kind: Classified, dst: Int)
-  BinOpConstPut(kind: Classified, const_index: Int, dst: Int)
-  BinOpLocalPut(kind: Classified, index: Int, dst: Int)
-  BinOpLocalLocalPut(kind: Classified, left: Int, right: Int, dst: Int)
+  BinOpPut(kind: ClassifiedBinOp, dst: Int)
+  BinOpConstPut(kind: ClassifiedBinOp, const_index: Int, dst: Int)
+  BinOpLocalPut(kind: ClassifiedBinOp, index: Int, dst: Int)
+  BinOpLocalLocalPut(kind: ClassifiedBinOp, left: Int, right: Int, dst: Int)
 
   ForInStart
   ForInNext
@@ -273,7 +273,7 @@ pub type Op {
   // [key, base, this] -> [val]
   GetSuperValue
   // [key, base, this] -> [val, pk, base, this], key coerced once
-  GetSuperValue2
+  GetSuperValueKeep
   // [val, key, base, this] -> [val]
   PutSuperValue
 
@@ -330,51 +330,51 @@ pub type BinOpKind {
   BitXor
   ShiftLeft
   ShiftRight
-  UShiftRight
-  Eq
-  NotEq
+  ShiftRightUnsigned
+  LooseEq
+  LooseNotEq
   StrictEq
   StrictNotEq
-  Lt
-  LtEq
-  Gt
-  GtEq
+  Less
+  LessEq
+  Greater
+  GreaterEq
   In
   InstanceOf
 }
 
 // classified once at resolve time, not per execution
-pub type Classified {
+pub type ClassifiedBinOp {
   PureOp(op: PureBinOp)
   AddOp
   InOp
   InstanceOfOp
 }
 
-pub fn classify(kind: BinOpKind) -> Classified {
+pub fn classify(kind: BinOpKind) -> ClassifiedBinOp {
   case kind {
     Add -> AddOp
     In -> InOp
     InstanceOf -> InstanceOfOp
-    Sub -> PureOp(binop.Arith(binop.ArithSub))
-    Mul -> PureOp(binop.Arith(binop.ArithMul))
-    Div -> PureOp(binop.Arith(binop.ArithDiv))
-    Mod -> PureOp(binop.Arith(binop.ArithMod))
-    Exp -> PureOp(binop.Arith(binop.ArithExp))
-    BitAnd -> PureOp(binop.Bitwise(binop.AndOp))
-    BitOr -> PureOp(binop.Bitwise(binop.OrOp))
-    BitXor -> PureOp(binop.Bitwise(binop.XorOp))
-    ShiftLeft -> PureOp(binop.Bitwise(binop.ShlOp))
-    ShiftRight -> PureOp(binop.Bitwise(binop.ShrOp))
-    UShiftRight -> PureOp(binop.Bitwise(binop.UShrOp))
-    Eq -> PureOp(binop.Equality(binop.EqOp))
-    NotEq -> PureOp(binop.Equality(binop.NotEqOp))
-    StrictEq -> PureOp(binop.Equality(binop.StrictEqOp))
-    StrictNotEq -> PureOp(binop.Equality(binop.StrictNotEqOp))
-    Lt -> PureOp(binop.Compare(binop.LtCmp))
-    LtEq -> PureOp(binop.Compare(binop.LtEqCmp))
-    Gt -> PureOp(binop.Compare(binop.GtCmp))
-    GtEq -> PureOp(binop.Compare(binop.GtEqCmp))
+    Sub -> PureOp(binop.Arith(binop.Sub))
+    Mul -> PureOp(binop.Arith(binop.Mul))
+    Div -> PureOp(binop.Arith(binop.Div))
+    Mod -> PureOp(binop.Arith(binop.Mod))
+    Exp -> PureOp(binop.Arith(binop.Exp))
+    BitAnd -> PureOp(binop.Bitwise(binop.BitAnd))
+    BitOr -> PureOp(binop.Bitwise(binop.BitOr))
+    BitXor -> PureOp(binop.Bitwise(binop.BitXor))
+    ShiftLeft -> PureOp(binop.Bitwise(binop.ShiftLeft))
+    ShiftRight -> PureOp(binop.Bitwise(binop.ShiftRight))
+    ShiftRightUnsigned -> PureOp(binop.Bitwise(binop.ShiftRightUnsigned))
+    LooseEq -> PureOp(binop.Equality(binop.LooseEq))
+    LooseNotEq -> PureOp(binop.Equality(binop.LooseNotEq))
+    StrictEq -> PureOp(binop.Equality(binop.StrictEq))
+    StrictNotEq -> PureOp(binop.Equality(binop.StrictNotEq))
+    Less -> PureOp(binop.Compare(binop.Less))
+    LessEq -> PureOp(binop.Compare(binop.LessEq))
+    Greater -> PureOp(binop.Compare(binop.Greater))
+    GreaterEq -> PureOp(binop.Compare(binop.GreaterEq))
   }
 }
 
@@ -418,7 +418,7 @@ pub type IrOp {
   IrWithPutRefValue(name: String, label: LabelId)
 
   IrGetField(name: String)
-  IrGetField2(name: String)
+  IrGetFieldKeep(name: String)
   IrPutField(name: String)
   IrDeleteField(name: String)
   IrDefineField(name: String)
@@ -469,7 +469,7 @@ pub fn slot_uses(op: Op) -> List(#(Int, Bool)) {
     GetLocal(i)
     | JumpIfLocal(i, _, _)
     | GetLocalField(i, _)
-    | GetLocalField2(i, _)
+    | GetLocalFieldKeep(i, _)
     | GetFieldCall1(_, i)
     | GetLocalFieldCall(i, _)
     | PutLocalConstField(i, _, _)
@@ -529,7 +529,7 @@ pub fn map_slots(op: Op, f: fn(Int) -> Int) -> Op {
     CmpLocalLocalJump(a, b, k, t, w) -> CmpLocalLocalJump(f(a), f(b), k, t, w)
     CmpLocalConstJump(a, c, k, t, w) -> CmpLocalConstJump(f(a), c, k, t, w)
     GetLocalField(i, k) -> GetLocalField(f(i), k)
-    GetLocalField2(i, k) -> GetLocalField2(f(i), k)
+    GetLocalFieldKeep(i, k) -> GetLocalFieldKeep(f(i), k)
     GetFieldCall1(k, i) -> GetFieldCall1(k, f(i))
     GetLocalFieldCall(i, k) -> GetLocalFieldCall(f(i), k)
     PutLocalLocalField(a, b, k) -> PutLocalLocalField(f(a), f(b), k)

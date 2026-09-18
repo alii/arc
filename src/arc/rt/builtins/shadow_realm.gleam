@@ -1,4 +1,5 @@
 import arc/bytecode/error_kind.{TypeError}
+import arc/bytecode/key.{Named}
 import arc/compiler
 import arc/parser
 import arc/rt/async as rt_async
@@ -11,7 +12,7 @@ import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type Realm,
-  type ShadowRealmNative, IndirectEval, JPosInf, KHandle, KNum, KStr, Named,
+  type ShadowRealmNative, IndirectEval, JPosInf, KHandle, KNum, KStr,
   ShadowRealmConstructor, ShadowRealmEvaluate, ShadowRealmImportValue,
   ShadowRealmN, ShadowRealmObj, StringKey, WrappedFunctionCall, classify, mk_int,
   mk_number, mk_object, mk_undefined,

@@ -1,3 +1,4 @@
+import arc/bytecode/key.{canonical_key}
 import arc/internal/unsafe
 import arc/interp/kernel
 import arc/rt/builtins as rt_builtins
@@ -9,9 +10,9 @@ import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type JsVal, Agent, BirthSettled, BytecodeFn, FnFlags, FrameInfo,
-  JFloat, JInt, JNegInf, JPosInf, JsOps, JsStore, KBool, KHandle, KNum, KStr,
-  StringKey, canonical_key, classify, mk_int, mk_null, mk_number, mk_object,
-  mk_string, mk_undefined, plain_object,
+  JFloat, JInt, JNegInf, JPosInf, JsOps, KBool, KHandle, KNum, KStr, Store,
+  StringKey, classify, mk_int, mk_null, mk_number, mk_object, mk_string,
+  mk_undefined, plain_object,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -262,7 +263,7 @@ pub fn bytecode_call_and_construct_use_js_ops_test() {
         #(st.realm.array.prototype, st)
       },
     )
-  let st = Agent(..st, store: JsStore(..st.store, ops:))
+  let st = Agent(..st, store: Store(..st.store, ops:))
   let kind =
     BytecodeFn(
       template: template("tpl"),
@@ -271,7 +272,7 @@ pub fn bytecode_call_and_construct_use_js_ops_test() {
       flags: FnFlags(..flags(strict: True), is_constructor: True),
       fields_init: None,
       realm: 0,
-      unit: 0,
+      unit_id: 0,
       birth: BirthSettled,
     )
   let #(fh, st) =

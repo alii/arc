@@ -125,12 +125,12 @@ pub fn with_host_hooks(
   Engine(..engine, agent: Agent(..agent, hooks:))
 }
 
-fn host_state(engine: Engine(host)) -> host.State(host) {
+fn host_context(engine: Engine(host)) -> host.Context(host) {
   host.from_agent(engine.agent, engine.key)
 }
 
-fn adopt(engine: Engine(host), s: host.State(host)) -> Engine(host) {
-  Engine(..engine, agent: s.agent)
+fn adopt(engine: Engine(host), ctx: host.Context(host)) -> Engine(host) {
+  Engine(..engine, agent: ctx.agent)
 }
 
 pub fn define_fn(
@@ -139,7 +139,7 @@ pub fn define_fn(
   arity: Int,
   impl: host.HostFn(host),
 ) -> Engine(host) {
-  adopt(engine, host.define_fn(host_state(engine), name, arity, impl))
+  adopt(engine, host.define_fn(host_context(engine), name, arity, impl))
 }
 
 pub fn define_namespace(
@@ -147,7 +147,7 @@ pub fn define_namespace(
   name: String,
   methods: List(#(String, Int, host.HostFn(host))),
 ) -> Engine(host) {
-  adopt(engine, host.define_namespace(host_state(engine), name, methods))
+  adopt(engine, host.define_namespace(host_context(engine), name, methods))
 }
 
 pub fn define_global(
@@ -155,7 +155,7 @@ pub fn define_global(
   name: String,
   val: JsValue,
 ) -> Engine(host) {
-  adopt(engine, host.define_global(host_state(engine), name, val))
+  adopt(engine, host.define_global(host_context(engine), name, val))
 }
 
 /// mint a native function without installing it as a global
@@ -165,8 +165,8 @@ pub fn host_fn(
   arity: Int,
   impl: host.HostFn(host),
 ) -> #(Engine(host), JsValue) {
-  let #(s, f) = host.function(host_state(engine), name, arity, impl)
-  #(adopt(engine, s), f)
+  let #(ctx, f) = host.function(host_context(engine), name, arity, impl)
+  #(adopt(engine, ctx), f)
 }
 
 /// build a constructible class; nothing is installed
@@ -178,29 +178,29 @@ pub fn host_class(
   methods: List(#(String, Int, host.HostFn(host))),
   statics: List(#(String, Int, host.HostFn(host))),
 ) -> #(Engine(host), JsValue) {
-  let #(s, ctor) =
-    host.class(host_state(engine), name, arity, constructor, methods, statics)
-  #(adopt(engine, s), ctor)
+  let #(ctx, ctor) =
+    host.class(host_context(engine), name, arity, constructor, methods, statics)
+  #(adopt(engine, ctx), ctor)
 }
 
 /// run host code against the engine, then end the turn
-pub fn with_state(
+pub fn with_context(
   engine: Engine(host),
-  body: fn(host.State(host)) -> #(host.State(host), a),
+  body: fn(host.Context(host)) -> #(host.Context(host), a),
 ) -> #(Engine(host), a) {
-  with_state_with(engine, body, rt_async.drain)
+  with_context_with(engine, body, rt_async.drain)
 }
 
-pub fn with_state_with(
+pub fn with_context_with(
   engine: Engine(host),
-  body: fn(host.State(host)) -> #(host.State(host), a),
+  body: fn(host.Context(host)) -> #(host.Context(host), a),
   finish: fn(Agent) -> Agent,
 ) -> #(Engine(host), a) {
-  let #(s, result) = body(host_state(engine))
+  let #(ctx, result) = body(host_context(engine))
   let held =
     rt_gc.push_refs(result, [])
     |> list.map(fn(id) { mk_object(Handle(id)) })
-  let agent = safepoint.finish_turn(s.agent, held, finish)
+  let agent = safepoint.finish_turn(ctx.agent, held, finish)
   #(Engine(..engine, agent:), result)
 }
 

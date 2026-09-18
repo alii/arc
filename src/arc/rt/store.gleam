@@ -2,17 +2,17 @@ import arc/bytecode/error_kind.{RangeError}
 import arc/rt/arena
 import arc/rt/limits
 import arc/rt/types.{
-  type Agent, type Cell, type Handle, type JsOps, type JsStore, type JsVal,
-  type ObjectKey, type Property, type StoreMeta, Agent, DataProperty, Handle,
-  JsOps, JsStore, SBox, StoreMeta,
+  type Agent, type Cell, type Handle, type JsOps, type JsVal, type ObjectKey,
+  type Property, type Store, type StoreMeta, Agent, DataProperty, Handle, JsOps,
+  SBox, Store, StoreMeta,
 }
 import gleam/dict
 import gleam/set
 
-pub fn new() -> JsStore(Agent) {
-  JsStore(
-    data: arena.new(),
-    next: 0,
+pub fn new() -> Store {
+  Store(
+    cells: arena.new(),
+    next_id: 0,
     alloc_since_gc: 0,
     // young generation size in cells between minor gcs
     gc_threshold: 4096,
@@ -23,27 +23,27 @@ pub fn new() -> JsStore(Agent) {
     ]),
     next_shape: 1,
     ics: dict.new(),
-    free_protos: dict.new(),
+    plain_write_protos: dict.new(),
     global_epoch: 0,
     ops: unseeded_ops(),
     microtasks: types.job_queue_new(),
     pinned_roots: set.new(),
     meta: StoreMeta(
-      gc_live: 0,
-      private_uid: 0,
-      symbol_uid: 0,
-      unit_uid: 0,
+      live_count: 0,
+      next_private_id: 0,
+      next_symbol_id: 0,
+      next_unit_id: 0,
       unhandled_rejections: [],
-      old: arena.new(),
-      old_next: 0,
-      weak_old: [],
+      old_gen: arena.new(),
+      young_start: 0,
+      old_weak_ids: [],
       major_live: 0,
       minors_since_major: 0,
     ),
   )
 }
 
-fn unseeded_ops() -> JsOps(Agent) {
+fn unseeded_ops() -> JsOps {
   JsOps(
     get_prop: fn(_, _, _) { unseeded() },
     call: fn(_, _, _, _) { unseeded() },
@@ -63,16 +63,16 @@ fn unseeded() -> a {
 }
 
 pub fn t_cell_new(st: Agent, cell: Cell) -> #(Handle, Agent) {
-  let js = st.store
-  let id = js.next
-  let js =
-    JsStore(
-      ..js,
-      data: arena.set(id, cell, js.data),
-      next: id + 1,
-      alloc_since_gc: js.alloc_since_gc + 1,
+  let store = st.store
+  let id = store.next_id
+  let store =
+    Store(
+      ..store,
+      cells: arena.set(id, cell, store.cells),
+      next_id: id + 1,
+      alloc_since_gc: store.alloc_since_gc + 1,
     )
-  #(Handle(id), Agent(..st, store: js))
+  #(Handle(id), Agent(..st, store: store))
 }
 
 pub fn t_cell_new_with(
@@ -80,54 +80,54 @@ pub fn t_cell_new_with(
   seqs: Int,
   build: fn(Int) -> Cell,
 ) -> #(Handle, Agent) {
-  let js = st.store
-  let id = js.next
-  let js =
-    JsStore(
-      ..js,
-      data: arena.set(id, build(js.prop_seq), js.data),
-      next: id + 1,
-      alloc_since_gc: js.alloc_since_gc + 1,
-      prop_seq: js.prop_seq + seqs,
+  let store = st.store
+  let id = store.next_id
+  let store =
+    Store(
+      ..store,
+      cells: arena.set(id, build(store.prop_seq), store.cells),
+      next_id: id + 1,
+      alloc_since_gc: store.alloc_since_gc + 1,
+      prop_seq: store.prop_seq + seqs,
     )
-  #(Handle(id), Agent(..st, store: js))
+  #(Handle(id), Agent(..st, store: store))
 }
 
 pub fn t_cell_new_pair(
   st: Agent,
   build: fn(Handle, Handle) -> #(Cell, Cell),
 ) -> #(Handle, Handle, Agent) {
-  let js = st.store
-  let id = js.next
+  let store = st.store
+  let id = store.next_id
   let a = Handle(id)
   let b = Handle(id + 1)
   let #(cell_a, cell_b) = build(a, b)
-  let js =
-    JsStore(
-      ..js,
-      data: arena.set(id + 1, cell_b, arena.set(id, cell_a, js.data)),
-      next: id + 2,
-      alloc_since_gc: js.alloc_since_gc + 2,
+  let store =
+    Store(
+      ..store,
+      cells: arena.set(id + 1, cell_b, arena.set(id, cell_a, store.cells)),
+      next_id: id + 2,
+      alloc_since_gc: store.alloc_since_gc + 2,
     )
-  #(a, b, Agent(..st, store: js))
+  #(a, b, Agent(..st, store: store))
 }
 
 @external(erlang, "arc_rt_store_ffi", "t_cell_get")
 pub fn t_cell_get(st: Agent, h: Handle) -> Cell
 
 pub fn t_cell_set(st: Agent, h: Handle, cell: Cell) -> Agent {
-  let js = st.store
+  let store = st.store
   let Handle(id) = h
-  let data = arena.set(id, cell, js.data)
+  let cells = arena.set(id, cell, store.cells)
   let global_epoch = case cell {
-    types.SObject(kind: types.GlobalObj, ..) -> js.global_epoch + 1
-    _ -> js.global_epoch
+    types.SObject(kind: types.GlobalObj, ..) -> store.global_epoch + 1
+    _ -> store.global_epoch
   }
-  let free_protos = case dict.has_key(js.free_protos, id) {
+  let plain_write_protos = case dict.has_key(store.plain_write_protos, id) {
     True -> dict.new()
-    False -> js.free_protos
+    False -> store.plain_write_protos
   }
-  Agent(..st, store: JsStore(..js, data:, free_protos:, global_epoch:))
+  Agent(..st, store: Store(..store, cells:, plain_write_protos:, global_epoch:))
 }
 
 // boxes must be sbox so gc traces them
@@ -147,23 +147,26 @@ pub fn t_cell_update(st: Agent, h: Handle, f: fn(Cell) -> Cell) -> Agent {
 }
 
 pub fn t_cell_free(st: Agent, h: Handle) -> Agent {
-  let js = st.store
+  let store = st.store
   let Handle(id) = h
-  Agent(..st, store: JsStore(..js, data: arena.free(id, js.data)))
+  Agent(..st, store: Store(..store, cells: arena.free(id, store.cells)))
 }
 
 pub fn t_pin_root(st: Agent, h: Handle) -> Agent {
-  let js = st.store
+  let store = st.store
   let Handle(id) = h
   Agent(
     ..st,
-    store: JsStore(..js, pinned_roots: set.insert(js.pinned_roots, id)),
+    store: Store(..store, pinned_roots: set.insert(store.pinned_roots, id)),
   )
 }
 
 pub fn t_next_prop_seq(st: Agent) -> #(Int, Agent) {
-  let js = st.store
-  #(js.prop_seq, Agent(..st, store: JsStore(..js, prop_seq: js.prop_seq + 1)))
+  let store = st.store
+  #(
+    store.prop_seq,
+    Agent(..st, store: Store(..store, prop_seq: store.prop_seq + 1)),
+  )
 }
 
 // spelled out rather than via types.*_property: one call per property made
@@ -206,32 +209,32 @@ pub fn t_builtin_property(st: Agent, value: JsVal) -> #(Property, Agent) {
   #(prop, st)
 }
 
-pub fn t_next_private_uid(st: Agent) -> #(Int, Agent) {
+pub fn t_next_private_id(st: Agent) -> #(Int, Agent) {
   let meta = st.store.meta
   #(
-    meta.private_uid,
-    with_meta(st, StoreMeta(..meta, private_uid: meta.private_uid + 1)),
+    meta.next_private_id,
+    with_meta(st, StoreMeta(..meta, next_private_id: meta.next_private_id + 1)),
   )
 }
 
-pub fn t_next_symbol_uid(st: Agent) -> #(Int, Agent) {
+pub fn t_next_symbol_id(st: Agent) -> #(Int, Agent) {
   let meta = st.store.meta
   #(
-    meta.symbol_uid,
-    with_meta(st, StoreMeta(..meta, symbol_uid: meta.symbol_uid + 1)),
+    meta.next_symbol_id,
+    with_meta(st, StoreMeta(..meta, next_symbol_id: meta.next_symbol_id + 1)),
   )
 }
 
-pub fn t_next_unit_uid(st: Agent) -> #(Int, Agent) {
+pub fn t_next_unit_id(st: Agent) -> #(Int, Agent) {
   let meta = st.store.meta
   #(
-    meta.unit_uid,
-    with_meta(st, StoreMeta(..meta, unit_uid: meta.unit_uid + 1)),
+    meta.next_unit_id,
+    with_meta(st, StoreMeta(..meta, next_unit_id: meta.next_unit_id + 1)),
   )
 }
 
 fn with_meta(st: Agent, meta: StoreMeta) -> Agent {
-  Agent(..st, store: JsStore(..st.store, meta:))
+  Agent(..st, store: Store(..st.store, meta:))
 }
 
 pub fn t_enter_call(st: Agent) -> Agent {

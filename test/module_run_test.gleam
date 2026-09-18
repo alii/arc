@@ -12,8 +12,8 @@ import arc/rt/call.{NormalCompletion} as _
 import arc/rt/gc as rt_gc
 import arc/rt/inspect as rt_inspect
 import arc/rt/types.{
-  type Agent, type JsVal, Agent, JInt, JsStore, KNum, KStr, PromiseFulfilled,
-  PromisePending, PromiseRejected, classify, mk_object,
+  type Agent, type JsVal, Agent, JInt, KNum, KStr, PromiseFulfilled,
+  PromisePending, PromiseRejected, Store, classify, mk_object,
 }
 import gleam/dict
 import gleam/list
@@ -28,7 +28,7 @@ fn agent() -> Agent {
 
 fn small_gc_agent() -> Agent {
   let st = agent() |> rt_gc.t_collect([])
-  Agent(..st, store: JsStore(..st.store, gc_threshold: 64))
+  Agent(..st, store: Store(..st.store, gc_threshold: 64))
 }
 
 fn churning_module(tag: String) -> String {

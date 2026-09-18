@@ -1,4 +1,5 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError}
+import arc/bytecode/key.{Named}
 import arc/internal/host_time
 import arc/internal/int_math.{floor_div, floor_mod}
 import arc/internal/temporal_calendar as tcal
@@ -20,12 +21,12 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type ObjKind, type TemporalProtos,
-  type TemporalStaticName, type TimeZone, Agent, HintString, IanaZone, JFloat,
-  JInt, JNan, JNegInf, JPosInf, KHandle, KNum, KStr, KUndef, Named, OffsetZone,
-  SObject, StringKey, TemporalDate, TemporalDateTime, TemporalDuration,
-  TemporalInstant, TemporalMonthDay, TemporalObj, TemporalTime,
-  TemporalYearMonth, TemporalZonedDateTime, TsCompare, TsFrom, UtcZone, classify,
-  mk_object, mk_undefined,
+  type TemporalStaticName, type TimeZone, Agent, CompareStatic, FromStatic,
+  HintString, IanaZone, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KNum,
+  KStr, KUndef, OffsetZone, SObject, StringKey, TemporalDate, TemporalDateTime,
+  TemporalDuration, TemporalInstant, TemporalMonthDay, TemporalObj, TemporalTime,
+  TemporalYearMonth, TemporalZonedDateTime, UtcZone, classify, mk_object,
+  mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/float
@@ -58,8 +59,8 @@ pub fn require_temporal(
 
 pub fn static_name(s: TemporalStaticName) -> String {
   case s {
-    TsFrom -> "from"
-    TsCompare -> "compare"
+    FromStatic -> "from"
+    CompareStatic -> "compare"
   }
 }
 
@@ -584,10 +585,10 @@ pub fn get_offset_option(
 }
 
 pub type CalendarNameMode {
-  CalAuto
-  CalAlways
-  CalNever
-  CalCritical
+  CalendarNameAuto
+  CalendarNameAlways
+  CalendarNameNever
+  CalendarNameCritical
 }
 
 pub type ShowOffset {
@@ -596,9 +597,9 @@ pub type ShowOffset {
 }
 
 pub type TimeZoneNameMode {
-  TzAuto
-  TzNever
-  TzCritical
+  ZoneNameAuto
+  ZoneNameNever
+  ZoneNameCritical
 }
 
 pub fn get_calendar_name_option(
@@ -610,12 +611,12 @@ pub fn get_calendar_name_option(
     opts,
     "calendarName",
     [
-      #("auto", CalAuto),
-      #("always", CalAlways),
-      #("never", CalNever),
-      #("critical", CalCritical),
+      #("auto", CalendarNameAuto),
+      #("always", CalendarNameAlways),
+      #("never", CalendarNameNever),
+      #("critical", CalendarNameCritical),
     ],
-    CalAuto,
+    CalendarNameAuto,
   )
 }
 
@@ -640,22 +641,26 @@ pub fn get_time_zone_name_option(
     st,
     opts,
     "timeZoneName",
-    [#("auto", TzAuto), #("never", TzNever), #("critical", TzCritical)],
-    TzAuto,
+    [
+      #("auto", ZoneNameAuto),
+      #("never", ZoneNameNever),
+      #("critical", ZoneNameCritical),
+    ],
+    ZoneNameAuto,
   )
 }
 
 pub fn calendar_suffix(mode: CalendarNameMode, cal: tcal.Calendar) -> String {
   let id = tcal.identifier(cal)
   case mode {
-    CalNever -> ""
-    CalAuto ->
+    CalendarNameNever -> ""
+    CalendarNameAuto ->
       case cal {
         tcal.Iso8601 -> ""
         _ -> "[u-ca=" <> id <> "]"
       }
-    CalAlways -> "[u-ca=" <> id <> "]"
-    CalCritical -> "[!u-ca=" <> id <> "]"
+    CalendarNameAlways -> "[u-ca=" <> id <> "]"
+    CalendarNameCritical -> "[!u-ca=" <> id <> "]"
   }
 }
 
@@ -667,7 +672,7 @@ pub fn format_with_reference(
   short short: String,
 ) -> String {
   case cal, mode {
-    tcal.Iso8601, CalAuto | tcal.Iso8601, CalNever -> short
+    tcal.Iso8601, CalendarNameAuto | tcal.Iso8601, CalendarNameNever -> short
     _, _ -> format_iso_date(iso) <> calendar_suffix(mode, cal)
   }
 }
@@ -698,11 +703,11 @@ pub type RoundingMode {
 }
 
 pub type UnsignedRoundingMode {
-  RZero
-  RInfinity
-  RHalfZero
-  RHalfInfinity
-  RHalfEven
+  UnsignedZero
+  UnsignedInfinity
+  UnsignedHalfZero
+  UnsignedHalfInfinity
+  UnsignedHalfEven
 }
 
 pub type UnitOption {
@@ -951,19 +956,19 @@ pub fn unsigned_rounding_mode(
   negative negative: Bool,
 ) -> UnsignedRoundingMode {
   case mode, negative {
-    Ceil, False -> RInfinity
-    Ceil, True -> RZero
-    Floor, False -> RZero
-    Floor, True -> RInfinity
-    Expand, _ -> RInfinity
-    Trunc, _ -> RZero
-    HalfCeil, False -> RHalfInfinity
-    HalfCeil, True -> RHalfZero
-    HalfFloor, False -> RHalfZero
-    HalfFloor, True -> RHalfInfinity
-    HalfExpand, _ -> RHalfInfinity
-    HalfTrunc, _ -> RHalfZero
-    HalfEven, _ -> RHalfEven
+    Ceil, False -> UnsignedInfinity
+    Ceil, True -> UnsignedZero
+    Floor, False -> UnsignedZero
+    Floor, True -> UnsignedInfinity
+    Expand, _ -> UnsignedInfinity
+    Trunc, _ -> UnsignedZero
+    HalfCeil, False -> UnsignedHalfInfinity
+    HalfCeil, True -> UnsignedHalfZero
+    HalfFloor, False -> UnsignedHalfZero
+    HalfFloor, True -> UnsignedHalfInfinity
+    HalfExpand, _ -> UnsignedHalfInfinity
+    HalfTrunc, _ -> UnsignedHalfZero
+    HalfEven, _ -> UnsignedHalfEven
   }
 }
 
@@ -978,18 +983,18 @@ pub fn apply_unsigned_rounding(
     True -> False
     False ->
       case mode {
-        RZero -> False
-        RInfinity -> True
-        RHalfZero | RHalfInfinity | RHalfEven -> {
+        UnsignedZero -> False
+        UnsignedInfinity -> True
+        UnsignedHalfZero | UnsignedHalfInfinity | UnsignedHalfEven -> {
           let twice = 2 * num
           case int.compare(twice, den) {
             order.Lt -> False
             order.Gt -> True
             order.Eq ->
               case mode {
-                RHalfZero -> False
-                RHalfInfinity -> True
-                RHalfEven | RZero | RInfinity -> !r1_even
+                UnsignedHalfZero -> False
+                UnsignedHalfInfinity -> True
+                UnsignedHalfEven | UnsignedZero | UnsignedInfinity -> !r1_even
               }
           }
         }

@@ -53,24 +53,24 @@ walk(I, Shift, Node) ->
 probe(I, {arena, _, _, HotIx, Hot}) when I bsr ?LEVEL_BITS =:= HotIx ->
     element((I band ?MASK) + 1, Hot);
 probe(I, {arena, Shift, Root, _, _}) when I >= 0, I bsr Shift < ?FANOUT ->
-    probe_1(I, Shift, Root);
+    probe_walk(I, Shift, Root);
 probe(_, _) -> ?FREE.
 
-probe_1(_, _, ?FREE) -> ?FREE;
-probe_1(I, 0, Node) -> element((I band ?MASK) + 1, Node);
-probe_1(I, Shift, Node) ->
-    probe_1(I, Shift - ?LEVEL_BITS, element(((I bsr Shift) band ?MASK) + 1, Node)).
+probe_walk(_, _, ?FREE) -> ?FREE;
+probe_walk(I, 0, Node) -> element((I band ?MASK) + 1, Node);
+probe_walk(I, Shift, Node) ->
+    probe_walk(I, Shift - ?LEVEL_BITS, element(((I bsr Shift) band ?MASK) + 1, Node)).
 
 get_option(I, A) ->
     case probe(I, A) of
-        ?FREE -> none;
-        V -> {some, V}
+        ?FREE -> ?NONE;
+        V -> {?SOME, V}
     end.
 
 set(I, V, {arena, Shift, Root, HotIx, Hot}) when I bsr ?LEVEL_BITS =:= HotIx ->
     {arena, Shift, Root, HotIx, set16(I band ?MASK, Hot, V)};
 set(I, V, {arena, Shift, Root, HotIx, Hot}) when HotIx bsr Shift =:= 0 ->
-    Root1 = put_leaf_1(HotIx bsl ?LEVEL_BITS, Hot, Shift, Root),
+    Root1 = put_leaf_walk(HotIx bsl ?LEVEL_BITS, Hot, Shift, Root),
     {arena, Shift, Root1, I bsr ?LEVEL_BITS,
      set16(I band ?MASK, leaf(I, Shift, Root1), V)};
 set(I, V, {arena, Shift, Root, HotIx, Hot}) when I >= 0 ->
@@ -101,17 +101,17 @@ set16(I, Leaf, V) when tuple_size(Leaf) =:= ?FANOUT ->
     end.
 
 put_leaf(I, Leaf, Shift, Root) when I bsr Shift < ?FANOUT ->
-    {Shift, put_leaf_1(I, Leaf, Shift, Root)};
+    {Shift, put_leaf_walk(I, Leaf, Shift, Root)};
 put_leaf(I, Leaf, Shift, Root) ->
     put_leaf(I, Leaf, Shift + ?LEVEL_BITS, setelement(1, ?EMPTY, Root)).
 
-put_leaf_1(_, Leaf, 0, _) -> Leaf;
-put_leaf_1(I, Leaf, Shift, ?FREE) ->
+put_leaf_walk(_, Leaf, 0, _) -> Leaf;
+put_leaf_walk(I, Leaf, Shift, ?FREE) ->
     set16((I bsr Shift) band ?MASK, ?EMPTY,
-          put_leaf_1(I, Leaf, Shift - ?LEVEL_BITS, ?FREE));
-put_leaf_1(I, Leaf, Shift, Node) ->
+          put_leaf_walk(I, Leaf, Shift - ?LEVEL_BITS, ?FREE));
+put_leaf_walk(I, Leaf, Shift, Node) ->
     Ix = (I bsr Shift) band ?MASK,
-    set16(Ix, Node, put_leaf_1(I, Leaf, Shift - ?LEVEL_BITS, element(Ix + 1, Node))).
+    set16(Ix, Node, put_leaf_walk(I, Leaf, Shift - ?LEVEL_BITS, element(Ix + 1, Node))).
 
 leaf(I, 4, Root) when I bsr 4 < ?FANOUT ->
     or_empty(element((I bsr 4) + 1, Root));
@@ -131,17 +131,17 @@ leaf(I, 12, Root) when I bsr 12 < ?FANOUT ->
             end;
         _ -> ?EMPTY
     end;
-leaf(I, Shift, Root) when I bsr Shift < ?FANOUT -> leaf_1(I, Shift, Root);
+leaf(I, Shift, Root) when I bsr Shift < ?FANOUT -> leaf_walk(I, Shift, Root);
 leaf(_, _, _) -> ?EMPTY.
 
 -compile({inline, [or_empty/1]}).
 or_empty(?FREE) -> ?EMPTY;
 or_empty(Leaf) -> Leaf.
 
-leaf_1(_, _, ?FREE) -> ?EMPTY;
-leaf_1(_, 0, Node) -> Node;
-leaf_1(I, Shift, Node) ->
-    leaf_1(I, Shift - ?LEVEL_BITS, element(((I bsr Shift) band ?MASK) + 1, Node)).
+leaf_walk(_, _, ?FREE) -> ?EMPTY;
+leaf_walk(_, 0, Node) -> Node;
+leaf_walk(I, Shift, Node) ->
+    leaf_walk(I, Shift - ?LEVEL_BITS, element(((I bsr Shift) band ?MASK) + 1, Node)).
 
 free(I, A) ->
     case probe(I, A) of
@@ -209,11 +209,11 @@ settle({arena, Shift, Root, HotIx, Hot}) ->
 
 fold(Fun, Acc, A) ->
     {arena, Shift, Root, _, _} = settle(A),
-    fold_1(Fun, Acc, Root, Shift, 0).
+    fold_subtree(Fun, Acc, Root, Shift, 0).
 
-fold_1(_, Acc, ?FREE, _, _) -> Acc;
-fold_1(Fun, Acc, Node, 0, Base) -> fold_leaf(Fun, Acc, Node, Base, 1);
-fold_1(Fun, Acc, Node, Shift, Base) -> fold_node(Fun, Acc, Node, Shift, Base, 1).
+fold_subtree(_, Acc, ?FREE, _, _) -> Acc;
+fold_subtree(Fun, Acc, Node, 0, Base) -> fold_leaf(Fun, Acc, Node, Base, 1);
+fold_subtree(Fun, Acc, Node, Shift, Base) -> fold_node(Fun, Acc, Node, Shift, Base, 1).
 
 fold_leaf(Fun, Acc, Leaf, Base, Ix) when Ix =< ?FANOUT ->
     case element(Ix, Leaf) of
@@ -223,7 +223,7 @@ fold_leaf(Fun, Acc, Leaf, Base, Ix) when Ix =< ?FANOUT ->
 fold_leaf(_, Acc, _, _, _) -> Acc.
 
 fold_node(Fun, Acc, Node, Shift, Base, Ix) when Ix =< ?FANOUT ->
-    Acc1 = fold_1(Fun, Acc, element(Ix, Node), Shift - ?LEVEL_BITS,
+    Acc1 = fold_subtree(Fun, Acc, element(Ix, Node), Shift - ?LEVEL_BITS,
                   Base + ((Ix - 1) bsl Shift)),
     fold_node(Fun, Acc1, Node, Shift, Base, Ix + 1);
 fold_node(_, Acc, _, _, _, _) -> Acc.

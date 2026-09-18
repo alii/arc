@@ -89,17 +89,17 @@ pub fn move_range(
 }
 
 pub fn reverse_range(elements: JsElements, len: Int) -> JsElements {
-  reverse_loop(elements, 0, len - 1)
+  reverse_range_loop(elements, 0, len - 1)
 }
 
-fn reverse_loop(elements: JsElements, lo: Int, hi: Int) -> JsElements {
+fn reverse_range_loop(elements: JsElements, lo: Int, hi: Int) -> JsElements {
   case lo >= hi {
     True -> elements
     False -> {
       let lo_val = get_option(elements, lo)
       let hi_val = get_option(elements, hi)
       let elements = put_option(elements, lo, hi_val) |> put_option(hi, lo_val)
-      reverse_loop(elements, lo + 1, hi - 1)
+      reverse_range_loop(elements, lo + 1, hi - 1)
     }
   }
 }

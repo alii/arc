@@ -128,7 +128,7 @@ radix_pos(A, Base) ->
                 Delta = max(0.5 * (next_double(A) - A), next_double(0.0)),
                 case Frac >= Delta of
                     false -> {[], false};
-                    true -> fraction_loop(Frac, Delta, Base, [])
+                    true -> radix_fraction_digits(Frac, Delta, Base, [])
                 end
         end,
     IntPart = case Carry of true -> Int + 1; false -> Int end,
@@ -139,7 +139,7 @@ radix_pos(A, Base) ->
     end,
     list_to_binary(IntStr ++ FracStr).
 
-fraction_loop(Frac, Delta, Base, Acc) ->
+radix_fraction_digits(Frac, Delta, Base, Acc) ->
     BaseF = float(Base),
     Scaled = Frac * BaseF,
     Delta1 = Delta * BaseF,
@@ -151,7 +151,7 @@ fraction_loop(Frac, Delta, Base, Acc) ->
         true -> propagate_carry(Acc1, Base);
         false ->
             case Frac1 >= Delta1 of
-                true -> fraction_loop(Frac1, Delta1, Base, Acc1);
+                true -> radix_fraction_digits(Frac1, Delta1, Base, Acc1);
                 false -> {lists:reverse(Acc1), false}
             end
     end.

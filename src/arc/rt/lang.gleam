@@ -1,4 +1,5 @@
 import arc/bytecode/error_kind.{TypeError}
+import arc/bytecode/key.{type PropertyKey, Named, canonical_key}
 import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as b_object
@@ -7,11 +8,11 @@ import arc/rt/call.{NormalCompletion, ThrowCompletion, t_call}
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type IteratorNative, type IteratorRecord,
-  type JsStore, type JsVal, type ObjectKey, Agent, DataProperty, GeneratorN,
-  GeneratorNext, GeneratorObj, IteratorN, IteratorRecord, JsStore, KHandle,
-  KNull, KUndef, Named, NativeFn, NoElements, Ordinary, SObject, StringKey,
-  classify, mk_bool, mk_object, mk_string, mk_undefined,
+  type Agent, type Handle, type IteratorNative, type IteratorRecord, type JsVal,
+  type ObjectKey, type Store, Agent, DataProperty, GeneratorN, GeneratorNext,
+  GeneratorObj, IteratorN, IteratorRecord, KHandle, KNull, KUndef, NativeFn,
+  NoElements, Ordinary, SObject, Store, StringKey, classify, mk_bool, mk_object,
+  mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bool
@@ -37,8 +38,8 @@ const k_next = StringKey(Named("next"))
 const k_done = StringKey(Named("done"))
 
 fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
-  let js = st.store
-  let seq = js.prop_seq
+  let store = st.store
+  let seq = store.prop_seq
   let props =
     dict.from_list([
       #(
@@ -72,7 +73,7 @@ fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
         ),
       ),
     ])
-  let st = Agent(..st, store: JsStore(..js, prop_seq: seq + 3))
+  let st = Agent(..st, store: Store(..store, prop_seq: seq + 3))
   let #(h, st) =
     rt_store.t_cell_new(
       st,
@@ -99,7 +100,7 @@ pub fn record_parts(st: Agent, rec: JsVal) -> Option(IteratorRecord) {
 fn record_props(
   st: Agent,
   rec: JsVal,
-) -> Option(Dict(types.PropertyKey, types.Property)) {
+) -> Option(Dict(PropertyKey, types.Property)) {
   case classify(rec) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
@@ -111,7 +112,7 @@ fn record_props(
 }
 
 fn parts_of(
-  props: Dict(types.PropertyKey, types.Property),
+  props: Dict(PropertyKey, types.Property),
 ) -> Option(IteratorRecord) {
   case dict.get(props, Named("iterator")), dict.get(props, Named("next")) {
     Ok(DataProperty(value: iterator, ..)),
@@ -437,7 +438,7 @@ pub fn t_global_delete(st: Agent, name: String) -> #(Bool, Agent) {
   rt_obj.t_delete_prop(
     st,
     st.realm.global_object,
-    StringKey(types.canonical_key(name)),
+    StringKey(canonical_key(name)),
   )
 }
 
@@ -453,7 +454,7 @@ pub type ArrayIterStep {
 pub fn array_iter_start(agent: Agent, iterable: JsVal) -> JsVal
 
 @external(erlang, "arc_rt_lang_ffi", "array_iter_next")
-pub fn array_iter_next(store: JsStore(Agent), rec: JsVal) -> ArrayIterStep
+pub fn array_iter_next(store: Store, rec: JsVal) -> ArrayIterStep
 
 @external(erlang, "arc_rt_lang_ffi", "is_array_iter")
 pub fn is_array_iter(v: JsVal) -> Bool

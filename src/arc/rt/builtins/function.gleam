@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/rt/abstract_ops as rt_abstract
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -11,9 +12,8 @@ import arc/rt/types.{
   BoundFn, BytecodeFn, CompiledFn, DataProperty, DynamicFunction, FunctionApply,
   FunctionBind, FunctionCall, FunctionConstructor, FunctionHasInstance,
   FunctionN, FunctionPrototypeCall, FunctionToString, KHandle, KNull, KStr,
-  KUndef, Named, NativeFn, NoElements, ProxyObj, SObject, StringKey,
-  ThrowTypeErrorFn, classify, mk_bool, mk_int, mk_object, mk_string,
-  mk_undefined,
+  KUndef, NativeFn, NoElements, ProxyObj, SObject, StringKey, ThrowTypeErrorFn,
+  classify, mk_bool, mk_int, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict

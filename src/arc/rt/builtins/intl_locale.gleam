@@ -16,9 +16,9 @@ pub type LocaleId {
 }
 
 pub type Extension {
-  UExt(attributes: List(String), keywords: List(#(String, String)))
-  TExt(tlang: Option(LocaleId), fields: List(#(String, String)))
-  OtherExt(singleton: String, subtags: List(String))
+  UnicodeExtension(attributes: List(String), keywords: List(#(String, String)))
+  TransformExtension(tlang: Option(LocaleId), fields: List(#(String, String)))
+  OtherExtension(singleton: String, subtags: List(String))
 }
 
 fn all_codepoints(s: String, pred: fn(Int) -> Bool) -> Bool {
@@ -225,7 +225,7 @@ fn parse_extensions(
                       is_alnum(p) && n >= 2 && n <= 8
                     })
                   {
-                    True -> Ok(OtherExt(singleton: s, subtags: body))
+                    True -> Ok(OtherExtension(singleton: s, subtags: body))
                     False -> Error(Nil)
                   }
               })
@@ -257,7 +257,7 @@ fn parse_u_ext(body: List(String)) -> Result(Extension, Nil) {
       let #(attributes, rest) =
         list.split_while(body, fn(p) { is_type_subtag(p) })
       use keywords <- result.try(parse_u_keywords(rest, []))
-      Ok(UExt(attributes:, keywords:))
+      Ok(UnicodeExtension(attributes:, keywords:))
     }
   }
 }
@@ -295,14 +295,14 @@ fn parse_t_ext(body: List(String)) -> Result(Extension, Nil) {
       case is_tkey(first) {
         True -> {
           use fields <- result.try(parse_t_fields(body, []))
-          Ok(TExt(tlang: None, fields:))
+          Ok(TransformExtension(tlang: None, fields:))
         }
         False -> {
           let #(lang_parts, field_parts) =
             list.split_while(body, fn(p) { !is_tkey(p) })
           use tlang <- result.try(parse_tlang(lang_parts))
           use fields <- result.try(parse_t_fields(field_parts, []))
-          Ok(TExt(tlang: Some(tlang), fields:))
+          Ok(TransformExtension(tlang: Some(tlang), fields:))
         }
       }
   }
@@ -782,15 +782,15 @@ pub fn canonicalize(lid: LocaleId) -> LocaleId {
 
 fn extension_singleton(ext: Extension) -> String {
   case ext {
-    UExt(..) -> "u"
-    TExt(..) -> "t"
-    OtherExt(singleton:, ..) -> singleton
+    UnicodeExtension(..) -> "u"
+    TransformExtension(..) -> "t"
+    OtherExtension(singleton:, ..) -> singleton
   }
 }
 
 fn canonicalize_extension(ext: Extension) -> Extension {
   case ext {
-    UExt(attributes:, keywords:) -> {
+    UnicodeExtension(attributes:, keywords:) -> {
       let attributes = list.sort(list.unique(attributes), string.compare)
       let keywords =
         keywords
@@ -805,9 +805,9 @@ fn canonicalize_extension(ext: Extension) -> Extension {
           #(k, v)
         })
         |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
-      UExt(attributes:, keywords:)
+      UnicodeExtension(attributes:, keywords:)
     }
-    TExt(tlang:, fields:) -> {
+    TransformExtension(tlang:, fields:) -> {
       let tlang = option.map(tlang, fn(tl) { canonicalize(apply_aliases(tl)) })
       let fields =
         fields
@@ -816,9 +816,9 @@ fn canonicalize_extension(ext: Extension) -> Extension {
           #(k, t_value_alias(k, v))
         })
         |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
-      TExt(tlang:, fields:)
+      TransformExtension(tlang:, fields:)
     }
-    OtherExt(..) -> ext
+    OtherExtension(..) -> ext
   }
 }
 
@@ -986,7 +986,7 @@ fn extensions_suffix(lid: LocaleId) -> String {
 
 fn extension_to_string(ext: Extension) -> String {
   case ext {
-    UExt(attributes:, keywords:) -> {
+    UnicodeExtension(attributes:, keywords:) -> {
       let kw_parts =
         list.map(keywords, fn(kv) {
           case kv {
@@ -996,7 +996,7 @@ fn extension_to_string(ext: Extension) -> String {
         })
       string.join(["u", ..list.append(attributes, kw_parts)], "-")
     }
-    TExt(tlang:, fields:) -> {
+    TransformExtension(tlang:, fields:) -> {
       let lang_part = case tlang {
         Some(tl) -> [string.lowercase(to_string(tl))]
         None -> []
@@ -1004,7 +1004,8 @@ fn extension_to_string(ext: Extension) -> String {
       let field_parts = list.map(fields, fn(kv) { kv.0 <> "-" <> kv.1 })
       string.join(["t", ..list.append(lang_part, field_parts)], "-")
     }
-    OtherExt(singleton:, subtags:) -> string.join([singleton, ..subtags], "-")
+    OtherExtension(singleton:, subtags:) ->
+      string.join([singleton, ..subtags], "-")
   }
 }
 

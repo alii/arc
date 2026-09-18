@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/compiler
 import arc/engine.{
   type JsValueKind, Finite, Infinity, JsBool, JsNull, JsNumber, JsObject,
@@ -16,8 +17,8 @@ import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type JsVal, Named, PromiseFulfilled, PromisePending,
-  PromiseRejected, StringKey, mk_int, mk_object, mk_undefined,
+  type Agent, type JsVal, PromiseFulfilled, PromisePending, PromiseRejected,
+  StringKey, mk_int, mk_object, mk_undefined,
 }
 import gleam/dict
 import gleam/option.{None, Some}
@@ -6640,10 +6641,13 @@ fn eval_repl_line(
 }
 
 fn run_repl_lines_expect_throw(lines: List(String)) -> Result(Nil, String) {
-  run_repl_throw_loop(lines, agent())
+  run_repl_lines_expect_throw_loop(lines, agent())
 }
 
-fn run_repl_throw_loop(lines: List(String), st: Agent) -> Result(Nil, String) {
+fn run_repl_lines_expect_throw_loop(
+  lines: List(String),
+  st: Agent,
+) -> Result(Nil, String) {
   case lines {
     [] -> Error("no lines to evaluate")
     [line] -> {
@@ -6655,7 +6659,7 @@ fn run_repl_throw_loop(lines: List(String), st: Agent) -> Result(Nil, String) {
     }
     [line, ..rest] -> {
       use #(_val, st) <- result.try(eval_repl_line(line, st))
-      run_repl_throw_loop(rest, st)
+      run_repl_lines_expect_throw_loop(rest, st)
     }
   }
 }

@@ -15,19 +15,19 @@ to_dynamic(X) -> X.
 
 capture_stdout(Thunk) ->
     OldGL = erlang:group_leader(),
-    Collector = spawn(fun() -> collector_loop(<<>>) end),
+    Collector = spawn(fun() -> collect_output(<<>>) end),
     true = erlang:group_leader(Collector, self()),
     Result = try Thunk() after erlang:group_leader(OldGL, self()) end,
     Ref = make_ref(),
     Collector ! {get_output, self(), Ref},
     receive {Ref, Output} -> {Output, Result} end.
 
-collector_loop(Acc) ->
+collect_output(Acc) ->
     receive
         {io_request, From, ReplyAs, Req} ->
             {Reply, NewAcc} = handle_io(Req, Acc),
             From ! {io_reply, ReplyAs, Reply},
-            collector_loop(NewAcc);
+            collect_output(NewAcc);
         {get_output, From, Ref} ->
             From ! {Ref, Acc}
     end.

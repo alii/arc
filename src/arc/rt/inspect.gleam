@@ -1,3 +1,6 @@
+import arc/bytecode/key.{
+  type PropertyKey, Index, Named, Private, key_display_string,
+}
 import arc/internal/ordered_entries
 import arc/rt/buffer
 import arc/rt/elements
@@ -6,18 +9,17 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsElements, type JsVal, type Property,
-  type PropertyKey, type TemporalData, ArgumentsObj, ArrayBufferObj,
-  ArrayIterator, ArrayObj, AsyncFromSyncIterator, AsyncGeneratorObj, BigIntObj,
-  BooleanObj, BoundFn, BytecodeFn, CompiledFn, DataProperty, DataViewObj,
-  DateObj, DisposableStackObj, ErrorObj, FinalizationRegistryObj, GeneratorObj,
-  HostObj, Index, IntlObj, IteratorHelperObj, KBig, KBool, KHandle, KNull, KNum,
-  KStr, KSym, KTdz, KUndef, MapIterator, MapObj, ModuleNamespace, Named,
-  NativeFn, NumberObj, Ordinary, Private, PromiseObj, ProxyObj, RawJsonObj,
-  RegExpObj, SObject, SetIterator, SetObj, Shared, StringIterator, StringObj,
-  SymbolObj, TemporalDate, TemporalDateTime, TemporalDuration, TemporalInstant,
-  TemporalMonthDay, TemporalObj, TemporalTime, TemporalYearMonth,
-  TemporalZonedDateTime, TypedArrayObj, WeakMapObj, WeakSetObj,
-  WrapForValidIteratorObj, classify,
+  type TemporalData, ArgumentsObj, ArrayBufferObj, ArrayIterator, ArrayObj,
+  AsyncFromSyncIterator, AsyncGeneratorObj, BigIntObj, BooleanObj, BoundFn,
+  BytecodeFn, CompiledFn, DataProperty, DataViewObj, DateObj, DisposableStackObj,
+  ErrorObj, FinalizationRegistryObj, GeneratorObj, HostObj, IntlObj,
+  IteratorHelperObj, KBig, KBool, KHandle, KNull, KNum, KStr, KSym, KTdz, KUndef,
+  MapIterator, MapObj, ModuleNamespace, NativeFn, NumberObj, Ordinary,
+  PromiseObj, ProxyObj, RawJsonObj, RegExpObj, SObject, SetIterator, SetObj,
+  Shared, StringIterator, StringObj, SymbolObj, TemporalDate, TemporalDateTime,
+  TemporalDuration, TemporalInstant, TemporalMonthDay, TemporalObj, TemporalTime,
+  TemporalYearMonth, TemporalZonedDateTime, TypedArrayObj, WeakMapObj,
+  WeakSetObj, WrapForValidIteratorObj, classify,
 }
 import arc/rt/val as rt_val
 import gleam/bool
@@ -32,10 +34,10 @@ const max_items = 100
 
 // read only: never invokes js, safe on error paths
 pub fn inspect(st: Agent, val: JsVal) -> String {
-  inspect_inner(st, val, 0, set.new())
+  inspect_at_depth(st, val, 0, set.new())
 }
 
-fn inspect_inner(
+fn inspect_at_depth(
   st: Agent,
   val: JsVal,
   depth: Int,
@@ -116,7 +118,7 @@ fn inspect_object(
         BigIntObj(value: bi) -> "[BigInt: " <> int.to_string(bi) <> "n]"
         SymbolObj(value: sym) ->
           "[Symbol: "
-          <> inspect_inner(st, types.mk_symbol(sym), depth, visited)
+          <> inspect_at_depth(st, types.mk_symbol(sym), depth, visited)
           <> "]"
         MapObj(entries:) ->
           "Map(" <> int.to_string(ordered_entries.size(entries)) <> ")"
@@ -229,7 +231,7 @@ fn inspect_array_loop(
     False, False -> {
       let item =
         elements.get_option(elements, idx)
-        |> option.map(inspect_inner(st, _, depth + 1, visited))
+        |> option.map(inspect_at_depth(st, _, depth + 1, visited))
         |> option.unwrap("<empty>")
       inspect_array_loop(st, elements, idx + 1, length, depth, visited, [
         item,
@@ -262,9 +264,9 @@ fn inspect_plain_object(
         list.take(visible, max_items)
         |> list.map(fn(pair) {
           let #(key, val) = pair
-          types.key_display_string(key)
+          key_display_string(key)
           <> ": "
-          <> inspect_inner(st, val, depth + 1, visited)
+          <> inspect_at_depth(st, val, depth + 1, visited)
         })
       let entries = case total > max_items {
         True ->

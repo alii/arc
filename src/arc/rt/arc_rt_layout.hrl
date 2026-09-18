@@ -17,16 +17,16 @@
 -define(AGENT_REALMS, 8).
 -define(AGENT_SIZE, 12).
 
-%% JsStore
--define(STORE_TAG, js_store).
--define(STORE_DATA, 2).
--define(STORE_NEXT, 3).
+%% Store
+-define(STORE_TAG, store).
+-define(STORE_CELLS, 2).
+-define(STORE_NEXT_ID, 3).
 -define(STORE_ALLOC_SINCE_GC, 4).
 -define(STORE_PROP_SEQ, 6).
 -define(STORE_SHAPES, 7).
 -define(STORE_NEXT_SHAPE, 8).
 -define(STORE_ICS, 9).
--define(STORE_FREE_PROTOS, 10).
+-define(STORE_PLAIN_WRITE_PROTOS, 10).
 -define(STORE_GLOBAL_EPOCH, 11).
 -define(STORE_PINNED_ROOTS, 14).
 -define(STORE_SIZE, 15).
@@ -49,9 +49,9 @@
 -define(REALM_GLOBAL, 51).
 -define(REALM_ID, 53).
 -define(REALM_SIZE, 55).
--define(PAIR_TAG, builtin_pair).
--define(PAIR_PROTO, 2).
--define(PAIR_CTOR, 3).
+-define(BUILTINPAIR_TAG, builtin_pair).
+-define(BUILTINPAIR_PROTO, 2).
+-define(BUILTINPAIR_CTOR, 3).
 
 %% LexicalGlobal, Let and Const alike
 -define(LEXICAL_GLOBAL_VALUE, 2).
@@ -81,12 +81,12 @@
 -define(SOBJECT_EXTENSIBLE, 7).
 -define(SOBJECT_SIZE, 7).
 
--define(SSHAPED_TAG, s_shaped_object).
--define(SSHAPED_SID, 2).
--define(SSHAPED_PROTO, 3).
--define(SSHAPED_SLOTS, 4).
--define(SSHAPED_OFFSETS, 5).
--define(SSHAPED_SIZE, 5).
+-define(SSHAPEDOBJECT_TAG, s_shaped_object).
+-define(SSHAPEDOBJECT_SID, 2).
+-define(SSHAPEDOBJECT_PROTO, 3).
+-define(SSHAPEDOBJECT_SLOTS, 4).
+-define(SSHAPEDOBJECT_OFFSETS, 5).
+-define(SSHAPEDOBJECT_SIZE, 5).
 
 %% proto sits at the same position in both object cells
 -define(CELL_PROTO, ?SOBJECT_PROTO).
@@ -128,8 +128,8 @@
 -define(BYTECODEFN_SIZE, 9).
 
 -define(BIRTH_SETTLED, birth_settled).
--define(BIRTH_PENDING_TAG, birth_pending).
--define(BIRTH_PROTOTYPE_PARENT, 2).
+-define(BIRTHPENDING_TAG, birth_pending).
+-define(BIRTHPENDING_PROTOTYPE_PARENT, 2).
 
 -define(NATIVEFN_TAG, native_fn).
 -define(NATIVEFN_TOKEN, 2).
@@ -148,11 +148,11 @@
 -define(ARGUMENTSOBJ_MAPPED, 3).
 -define(ARGUMENTSOBJ_SIZE, 3).
 
--define(ARRAYITER_TAG, array_iterator).
--define(ARRAYITER_TARGET, 2).
--define(ARRAYITER_INDEX, 3).
--define(ARRAYITER_KIND, 4).
--define(ARRAYITER_SIZE, 4).
+-define(ARRAYITERATOR_TAG, array_iterator).
+-define(ARRAYITERATOR_TARGET, 2).
+-define(ARRAYITERATOR_INDEX, 3).
+-define(ARRAYITERATOR_KIND, 4).
+-define(ARRAYITERATOR_SIZE, 4).
 -define(ARRAYITER_VALUES, array_iter_values).
 
 -define(GENERATOROBJ_TAG, generator_obj).
@@ -184,30 +184,32 @@
          element(?FNFLAGS_IS_ASYNC, Flags) =:= false)).
 
 %% NativeToken values the kernels recognise
--define(TOKEN_ARRAY_ITER_NEXT, {iterator_n, array_iterator_next}).
+-define(ITERATORN_TAG, iterator_n).
+-define(TOKEN_RETURN_THIS, return_this).
+-define(TOKEN_ARRAY_ITER_NEXT, {?ITERATORN_TAG, array_iterator_next}).
 -define(TOKEN_GENERATOR_NEXT, {generator_n, generator_next}).
 -define(TOKEN_ARRAY_VALUES, {array_n, array_prototype_values}).
 -define(TOKEN_STRING_ITER, {string_n, string_prototype_symbol_iterator}).
--define(TOKEN_STRING_ITER_NEXT, {iterator_n, string_iterator_next}).
+-define(TOKEN_STRING_ITER_NEXT, {?ITERATORN_TAG, string_iterator_next}).
 -define(TOKEN_MAP_ENTRIES, {map_n, map_entries}).
--define(TOKEN_MAP_ITER_NEXT, {iterator_n, map_iterator_next}).
+-define(TOKEN_MAP_ITER_NEXT, {?ITERATORN_TAG, map_iterator_next}).
 -define(TOKEN_SET_VALUES, {set_n, set_values}).
--define(TOKEN_SET_ITER_NEXT, {iterator_n, set_iterator_next}).
+-define(TOKEN_SET_ITER_NEXT, {?ITERATORN_TAG, set_iterator_next}).
 
 %% Property
--define(DATAPROP_TAG, data_property).
--define(DATAPROP_VALUE, 2).
--define(DATAPROP_WRITABLE, 3).
--define(DATAPROP_ENUMERABLE, 4).
--define(DATAPROP_CONFIGURABLE, 5).
--define(DATAPROP_SEQ, 6).
--define(DATAPROP_SIZE, 6).
--define(ACCESSORPROP_TAG, accessor_property).
--define(ACCESSORPROP_GET, 2).
--define(ACCESSORPROP_SET, 3).
--define(ACCESSORPROP_SIZE, 6).
+-define(DATAPROPERTY_TAG, data_property).
+-define(DATAPROPERTY_VALUE, 2).
+-define(DATAPROPERTY_WRITABLE, 3).
+-define(DATAPROPERTY_ENUMERABLE, 4).
+-define(DATAPROPERTY_CONFIGURABLE, 5).
+-define(DATAPROPERTY_SEQ, 6).
+-define(DATAPROPERTY_SIZE, 6).
+-define(ACCESSORPROPERTY_TAG, accessor_property).
+-define(ACCESSORPROPERTY_GET, 2).
+-define(ACCESSORPROPERTY_SET, 3).
+-define(ACCESSORPROPERTY_SIZE, 6).
 %% writable, enumerable, configurable data property
--define(PLAIN_PROPERTY(V, Seq), {?DATAPROP_TAG, V, true, true, true, Seq}).
+-define(PLAIN_PROPERTY(V, Seq), {?DATAPROPERTY_TAG, V, true, true, true, Seq}).
 
 %% PropertyKey and ObjectKey
 -define(KEY_NAMED, named).
@@ -216,6 +218,8 @@
 -define(OKEY_STRING, string_key).
 -define(OKEY_SYMBOL, symbol_key).
 -define(LENGTH_KEY, {?KEY_NAMED, <<"length">>}).
+%% SymbolId for Symbol.iterator
+-define(SYMBOL_ITERATOR, {well_known_symbol, sym_iterator}).
 
 %% Elements
 -define(ELEMS_NONE, no_elements).
@@ -231,9 +235,9 @@
 -define(STEP_THROW, step_throw).
 -define(STEP_YIELD, step_yield).
 -define(STEP_AWAIT, step_await).
--define(RESUME_COMPILED_TAG, resume_compiled).
--define(RESUME_FRAME_TAG, resume_frame).
--define(ITERATOR_RECORD_TAG, iterator_record).
+-define(RESUMECOMPILED_TAG, resume_compiled).
+-define(RESUMEFRAME_TAG, resume_frame).
+-define(ITERATORRECORD_TAG, iterator_record).
 -define(ARC_ITER, arc_iter).
 
 %% shapes shared with emitted code
@@ -243,7 +247,7 @@
 -define(FRAME(This, Fn, Home, NewTarget), {This, Fn, Home, NewTarget}).
 
 %% constants
-%% rt_types.max_array_index, 2^32 - 2
+%% bytecode key.max_array_index, 2^32 - 2
 -define(MAX_ARRAY_INDEX, 4294967294).
 %% limits.max_safe_integer, 2^53 - 1
 -define(MAX_SAFE_INT, 9007199254740991).
@@ -254,6 +258,15 @@
 -define(MAX_DENSE_INDEX, 10000000).
 
 %% shared kernels; each module instantiates them as one-line locals
+
+%% store with Cell written at Id, next_id and alloc_since_gc bumped
+-define(ALLOC_CELL(Store, Cells, Id, Cell),
+        setelement(?STORE_ALLOC_SINCE_GC,
+                   setelement(?STORE_NEXT_ID,
+                              setelement(?STORE_CELLS, Store,
+                                         arc_rt_arena_ffi:set(Id, Cell, Cells)),
+                              Id + 1),
+                   element(?STORE_ALLOC_SINCE_GC, Store) + 1)).
 
 %% which builtin a native fn cell dispatches to, else none
 -define(NATIVE_TOKEN(Cell),
@@ -330,7 +343,7 @@
              _ when K =:= LengthK -> false;
              _ when K =:= NameK -> false;
              _ when K =:= PrototypeK ->
-                 element(?BIRTH_PROTOTYPE_PARENT, Birth) =:= ?NONE;
+                 element(?BIRTHPENDING_PROTOTYPE_PARENT, Birth) =:= ?NONE;
              _ -> true
          end)).
 
@@ -340,5 +353,9 @@
 -define(IC_INIT, ic_init).
 -define(IC_GLOBAL, ic_global).
 -define(IC_OFF, ic_off).
+%% IcCallMatch tags
+-define(ICPLAIN_TAG, ic_plain).
+-define(ICOWN_TAG, ic_own).
+-define(ICPRIM_TAG, ic_prim).
 
 -endif.

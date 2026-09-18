@@ -1,14 +1,15 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError, TypeError}
+import arc/bytecode/key.{Named}
 import arc/internal/digits.{take_digits}
 import arc/internal/gregorian.{days_in_month}
 import arc/internal/int_math.{floor_div, floor_mod, trunc_div}
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
-  type RoundingMode, RHalfEven, RHalfInfinity, RHalfZero, RInfinity, RZero,
-  get_overflow_option_from_value, negate_duration, read_int_field,
-  read_pos_int_field, temporal_data_of, time_part_ns, to_temporal_duration,
-  unsigned_rounding_mode,
+  type RoundingMode, UnsignedHalfEven, UnsignedHalfInfinity, UnsignedHalfZero,
+  UnsignedInfinity, UnsignedZero, get_overflow_option_from_value,
+  negate_duration, read_int_field, read_pos_int_field, temporal_data_of,
+  time_part_ns, to_temporal_duration, unsigned_rounding_mode,
 }
 import arc/rt/builtins/temporal_iso.{
   type Duration, type IsoDate, type IsoDateSlots, type Overflow, type ParsedIso,
@@ -21,10 +22,9 @@ import arc/rt/builtins/temporal_iso.{
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type TemporalData, HintString, KHandle,
-  KStr, KUndef, Named, StringKey, TemporalDate, TemporalDateTime,
-  TemporalDuration, TemporalInstant, TemporalMonthDay, TemporalTime,
-  TemporalYearMonth, TemporalZonedDateTime, classify, mk_int, mk_object,
-  mk_string, mk_undefined,
+  KStr, KUndef, StringKey, TemporalDate, TemporalDateTime, TemporalDuration,
+  TemporalInstant, TemporalMonthDay, TemporalTime, TemporalYearMonth,
+  TemporalZonedDateTime, classify, mk_int, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/int
@@ -526,7 +526,7 @@ pub fn calendar_with_fields(
 
 pub fn merge_year_month_code(
   cal: tcal.Calendar,
-  cd: tcal.CalDate,
+  cd: tcal.CalendarDate,
   f: DateFields,
 ) -> DateFields {
   let has_year = f.year != None || f.era != None || f.era_year != None
@@ -677,9 +677,9 @@ fn month_code_pos(cal: tcal.Calendar, year: Int, month: Int) -> Int {
 
 fn add_calendar_years_constrain(
   cal: tcal.Calendar,
-  cd: tcal.CalDate,
+  cd: tcal.CalendarDate,
   years: Int,
-) -> tcal.CalDate {
+) -> tcal.CalendarDate {
   let y = cd.year + years
   let mc = tcal.month_code_of(cal, cd.year, cd.month)
   let m = case tcal.carry_month_code(cal, y, mc) {
@@ -687,13 +687,13 @@ fn add_calendar_years_constrain(
     Error(skip_to) -> skip_to
   }
   let d = int.min(cd.day, tcal.days_in_month(cal, y, m))
-  tcal.CalDate(y, m, d)
+  tcal.CalendarDate(y, m, d)
 }
 
 fn count_calendar_years(
   cal: tcal.Calendar,
-  cd1: tcal.CalDate,
-  cd2: tcal.CalDate,
+  cd1: tcal.CalendarDate,
+  cd2: tcal.CalendarDate,
   candidate: Int,
   sign: Int,
 ) -> Int {
@@ -718,7 +718,7 @@ fn count_calendar_years(
 
 fn stepped_month_pos(
   cal: tcal.Calendar,
-  cd1: tcal.CalDate,
+  cd1: tcal.CalendarDate,
   target_year: Int,
   sign: Int,
 ) -> Int {
@@ -740,9 +740,9 @@ fn stepped_month_pos(
 
 fn count_calendar_months(
   cal: tcal.Calendar,
-  cd: tcal.CalDate,
+  cd: tcal.CalendarDate,
   day_cmp: Int,
-  cd2: tcal.CalDate,
+  cd2: tcal.CalendarDate,
   sign: Int,
   acc: Int,
 ) -> Int {
@@ -755,7 +755,7 @@ fn count_calendar_months_loop(
   y: Int,
   m: Int,
   day_cmp: Int,
-  cd2: tcal.CalDate,
+  cd2: tcal.CalendarDate,
   sign: Int,
   acc: Int,
 ) -> Int {
@@ -809,21 +809,21 @@ pub fn round_between(
       let r1_even = floor_mod(abs_r1 / inc, 2) == 0
       let umode = unsigned_rounding_mode(mode, sign < 0)
       case umode {
-        RZero -> abs_r1
-        RInfinity -> abs_r2
-        RHalfZero | RHalfInfinity | RHalfEven ->
+        UnsignedZero -> abs_r1
+        UnsignedInfinity -> abs_r2
+        UnsignedHalfZero | UnsignedHalfInfinity | UnsignedHalfEven ->
           case cmp {
             -1 -> abs_r1
             1 -> abs_r2
             _ ->
               case umode {
-                RHalfInfinity -> abs_r2
-                RHalfEven ->
+                UnsignedHalfInfinity -> abs_r2
+                UnsignedHalfEven ->
                   case r1_even {
                     True -> abs_r1
                     False -> abs_r2
                   }
-                RZero | RInfinity | RHalfZero -> abs_r1
+                UnsignedZero | UnsignedInfinity | UnsignedHalfZero -> abs_r1
               }
           }
       }
@@ -1092,13 +1092,13 @@ pub fn is_year_month_like(s: String) -> Bool {
   }
 }
 
-pub fn era_field(cal: tcal.Calendar, cd: tcal.CalDate) -> JsVal {
+pub fn era_field(cal: tcal.Calendar, cd: tcal.CalendarDate) -> JsVal {
   tcal.era_for(cal, cd.year, cd.month, cd.day)
   |> option.map(fn(e: tcal.Era) { mk_string(tcal.era_code_string(e.code)) })
   |> option.unwrap(mk_undefined())
 }
 
-pub fn era_year_field(cal: tcal.Calendar, cd: tcal.CalDate) -> JsVal {
+pub fn era_year_field(cal: tcal.Calendar, cd: tcal.CalendarDate) -> JsVal {
   tcal.era_for(cal, cd.year, cd.month, cd.day)
   |> option.map(fn(e: tcal.Era) { mk_int(e.year) })
   |> option.unwrap(mk_undefined())

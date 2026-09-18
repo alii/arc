@@ -2,7 +2,7 @@ import arc/internal/host_time
 import arc/rt/builtins/temporal_tz
 import gleam/option.{type Option, None}
 
-pub type NumStyle {
+pub type NumberStyle {
   StyleDecimal
   StylePercent
   StyleCurrency(currency: String, display: CurrencyDisplay, sign: CurrencySign)
@@ -30,15 +30,15 @@ pub type SignDisplay {
 }
 
 pub type CurrencyDisplay {
-  CurCode
-  CurSymbol
-  CurNarrowSymbol
-  CurName
+  CurrencyCode
+  CurrencySymbol
+  CurrencyNarrowSymbol
+  CurrencyName
 }
 
 pub type CurrencySign {
-  CurStandard
-  CurAccounting
+  StandardSign
+  AccountingSign
 }
 
 pub type UnitDisplay {
@@ -66,8 +66,8 @@ pub type RoundingPriority {
 }
 
 pub type TrailingZeroDisplay {
-  TzdAuto
-  TzdStripIfInteger
+  TrailingZeroAuto
+  TrailingZeroStripIfInteger
 }
 
 pub type IntlDigitOptions {
@@ -90,9 +90,9 @@ pub type IntlUseGrouping {
 }
 
 pub type NameWidth {
-  WLong
-  WShort
-  WNarrow
+  WidthLong
+  WidthShort
+  WidthNarrow
 }
 
 pub type PluralType {
@@ -107,29 +107,29 @@ pub type ListFormatType {
 }
 
 pub type ListFormatStyle {
-  LLong
-  LShort
-  LNarrow
+  ListLong
+  ListShort
+  ListNarrow
 }
 
-pub type RtfStyle {
-  RtfLong
-  RtfShort
-  RtfNarrow
+pub type RelativeTimeStyle {
+  RelativeLong
+  RelativeShort
+  RelativeNarrow
 }
 
-pub type RtfNumeric {
-  RtfAlways
-  RtfAuto
+pub type RelativeTimeNumeric {
+  NumericAlways
+  NumericAuto
 }
 
 pub type DurationUnitStyle {
-  DurLong
-  DurShort
-  DurNarrow
-  DurNumeric
-  DurTwoDigit
-  DurFractional
+  UnitStyleLong
+  UnitStyleShort
+  UnitStyleNarrow
+  UnitStyleNumeric
+  UnitStyleTwoDigit
+  UnitStyleFractional
 }
 
 pub type DurationDisplay {
@@ -138,10 +138,10 @@ pub type DurationDisplay {
 }
 
 pub type DurationBaseStyle {
-  BsLong
-  BsShort
-  BsNarrow
-  BsDigital
+  BaseLong
+  BaseShort
+  BaseNarrow
+  BaseDigital
 }
 
 pub type DurationUnitOptions {
@@ -181,44 +181,44 @@ pub fn service_name(service: IntlService) -> String {
 }
 
 pub type BoundGetterService {
-  BgCollator
-  BgNumberFormat
-  BgDateTimeFormat
+  BoundCollator
+  BoundNumberFormat
+  BoundDateTimeFormat
 }
 
 pub fn bound_getter_service(service: BoundGetterService) -> IntlService {
   case service {
-    BgCollator -> IntlCollator
-    BgNumberFormat -> IntlNumberFormat
-    BgDateTimeFormat -> IntlDateTimeFormat
+    BoundCollator -> IntlCollator
+    BoundNumberFormat -> IntlNumberFormat
+    BoundDateTimeFormat -> IntlDateTimeFormat
   }
 }
 
 pub type ConstructibleService {
-  CsLocale
-  CsCollator
-  CsNumberFormat
-  CsDateTimeFormat
-  CsPluralRules
-  CsListFormat
-  CsRelativeTimeFormat
-  CsSegmenter
-  CsDisplayNames
-  CsDurationFormat
+  LocaleService
+  CollatorService
+  NumberFormatService
+  DateTimeFormatService
+  PluralRulesService
+  ListFormatService
+  RelativeTimeFormatService
+  SegmenterService
+  DisplayNamesService
+  DurationFormatService
 }
 
 pub fn constructible_service(service: ConstructibleService) -> IntlService {
   case service {
-    CsLocale -> IntlLocale
-    CsCollator -> IntlCollator
-    CsNumberFormat -> IntlNumberFormat
-    CsDateTimeFormat -> IntlDateTimeFormat
-    CsPluralRules -> IntlPluralRules
-    CsListFormat -> IntlListFormat
-    CsRelativeTimeFormat -> IntlRelativeTimeFormat
-    CsSegmenter -> IntlSegmenter
-    CsDisplayNames -> IntlDisplayNames
-    CsDurationFormat -> IntlDurationFormat
+    LocaleService -> IntlLocale
+    CollatorService -> IntlCollator
+    NumberFormatService -> IntlNumberFormat
+    DateTimeFormatService -> IntlDateTimeFormat
+    PluralRulesService -> IntlPluralRules
+    ListFormatService -> IntlListFormat
+    RelativeTimeFormatService -> IntlRelativeTimeFormat
+    SegmenterService -> IntlSegmenter
+    DisplayNamesService -> IntlDisplayNames
+    DurationFormatService -> IntlDurationFormat
   }
 }
 
@@ -288,23 +288,23 @@ pub type CaseFirst {
   CaseFirstFalse
 }
 
-pub type DtfComponent {
-  DtfWeekday
-  DtfEra
-  DtfYear
-  DtfMonth
-  DtfDay
-  DtfDayPeriod
-  DtfHour
-  DtfMinute
-  DtfSecond
-  DtfFractionalSecondDigits
-  DtfTimeZoneName
+pub type DateTimeComponent {
+  WeekdayComponent
+  EraComponent
+  YearComponent
+  MonthComponent
+  DayComponent
+  DayPeriodComponent
+  HourComponent
+  MinuteComponent
+  SecondComponent
+  FractionalSecondDigitsComponent
+  TimeZoneNameComponent
 }
 
 pub type NumericWidth {
-  WNumeric
-  WTwoDigit
+  Numeric
+  TwoDigit
 }
 
 pub type MonthWidth {
@@ -313,12 +313,12 @@ pub type MonthWidth {
 }
 
 pub type TimeZoneNameWidth {
-  TzShort
-  TzLong
-  TzShortOffset
-  TzLongOffset
-  TzShortGeneric
-  TzLongGeneric
+  ZoneShort
+  ZoneLong
+  ZoneShortOffset
+  ZoneLongOffset
+  ZoneShortGeneric
+  ZoneLongGeneric
 }
 
 pub type HourCycle {
@@ -329,21 +329,21 @@ pub type HourCycle {
 }
 
 pub type DateStyle {
-  DsFull
-  DsLong
-  DsMedium
-  DsShort
+  DateFull
+  DateLong
+  DateMedium
+  DateShort
 }
 
 pub type TimeStyle {
-  TsFull
-  TsLong
-  TsMedium
-  TsShort
+  TimeFull
+  TimeLong
+  TimeMedium
+  TimeShort
 }
 
-pub type DtfComponents {
-  DtfComponents(
+pub type DateTimeComponents {
+  DateTimeComponents(
     weekday: Option(NameWidth),
     era: Option(NameWidth),
     year: Option(NumericWidth),
@@ -359,7 +359,7 @@ pub type DtfComponents {
   )
 }
 
-pub const empty_dtf_components = DtfComponents(
+pub const empty_dtf_components = DateTimeComponents(
   weekday: None,
   era: None,
   year: None,
@@ -373,14 +373,14 @@ pub const empty_dtf_components = DtfComponents(
   time_zone_name: None,
 )
 
-pub type DtfTimeZone {
+pub type FormatTimeZone {
   // host zone, reported as "UTC"
   HostZone(zone: host_time.TimeZone)
   NamedZone(zone: temporal_tz.Zone)
   FixedZone(id: String, offset_minutes: Int)
 }
 
-pub fn dtf_time_zone_id(tz: DtfTimeZone) -> String {
+pub fn dtf_time_zone_id(tz: FormatTimeZone) -> String {
   case tz {
     HostZone(_) -> "UTC"
     NamedZone(zone:) -> temporal_tz.zone_id(zone)
@@ -393,7 +393,7 @@ pub type DateTimeFormatState {
     locale: String,
     calendar: String,
     numbering_system: String,
-    time_zone: DtfTimeZone,
+    time_zone: FormatTimeZone,
     hour_cycle: Option(HourCycle),
     weekday: Option(NameWidth),
     era: Option(NameWidth),
@@ -408,8 +408,8 @@ pub type DateTimeFormatState {
     time_zone_name: Option(TimeZoneNameWidth),
     date_style: Option(DateStyle),
     time_style: Option(TimeStyle),
-    explicit: List(DtfComponent),
-    components: DtfComponents,
+    explicit: List(DateTimeComponent),
+    components: DateTimeComponents,
   )
 }
 
@@ -433,8 +433,8 @@ pub type ListFormatState {
 pub type RelativeTimeFormatState {
   RelativeTimeFormatState(
     locale: String,
-    style: RtfStyle,
-    numeric: RtfNumeric,
+    style: RelativeTimeStyle,
+    numeric: RelativeTimeNumeric,
     numbering_system: String,
   )
 }
@@ -444,9 +444,9 @@ pub type SegmenterState {
 }
 
 pub type Granularity {
-  GGrapheme
-  GWord
-  GSentence
+  GraphemeGranularity
+  WordGranularity
+  SentenceGranularity
 }
 
 pub type Segment {
@@ -464,22 +464,22 @@ pub type DisplayNamesState {
 }
 
 pub type DisplayNamesType {
-  DnLanguage
-  DnRegion
-  DnScript
-  DnCurrency
-  DnCalendar
-  DnDateTimeField
+  LanguageNames
+  RegionNames
+  ScriptNames
+  CurrencyNames
+  CalendarNames
+  DateTimeFieldNames
 }
 
 pub type DisplayNamesFallback {
-  FbCode
-  FbNone
+  CodeFallback
+  NoFallback
 }
 
 pub type LanguageDisplay {
-  LdDialect
-  LdStandard
+  DialectNames
+  StandardNames
 }
 
 pub type SegmentsState {
@@ -498,7 +498,7 @@ pub type NumberFormatState {
   NumberFormatState(
     locale: String,
     numbering_system: String,
-    style: NumStyle,
+    style: NumberStyle,
     digits: IntlDigitOptions,
     use_grouping: IntlUseGrouping,
     notation: Notation,

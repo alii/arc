@@ -663,17 +663,17 @@ fn js_trunc(n: Float) -> Float {
 }
 
 fn count_leading_zeros_32(n: Int) -> Int {
-  count_leading_zeros_loop(n, 31, 0)
+  count_leading_zeros_32_loop(n, 31, 0)
 }
 
-fn count_leading_zeros_loop(n: Int, bit: Int, count: Int) -> Int {
+fn count_leading_zeros_32_loop(n: Int, bit: Int, count: Int) -> Int {
   case bit < 0 {
     True -> count
     False -> {
       let mask = int.bitwise_shift_left(1, bit)
       case int.bitwise_and(n, mask) != 0 {
         True -> count
-        False -> count_leading_zeros_loop(n, bit - 1, count + 1)
+        False -> count_leading_zeros_32_loop(n, bit - 1, count + 1)
       }
     }
   }

@@ -7,7 +7,7 @@
 -compile({inline, [own_read/2, elem_at/2]}).
 
 own_element(St, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, element(?AGENT_STORE, St))) of
+    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, St))) of
         {?SOBJECT_TAG, Kind, _, Props, _, Els, _}
           when element(1, Kind) =:= ?ARRAYOBJ_TAG;
                element(1, Kind) =:= ?ARGUMENTSOBJ_TAG ->
@@ -36,15 +36,15 @@ elem_at(Els, Idx) -> ?ELEM_AT(Els, Idx).
 
 index_range_plain(St, Props, Proto, Start, Count) ->
     (not props_have_index(Props, Start, Count))
-        andalso chain_index_range_plain(element(?STORE_DATA, element(?AGENT_STORE, St)),
+        andalso chain_index_range_plain(element(?STORE_CELLS, element(?AGENT_STORE, St)),
                            Proto, Start, Count).
 
 chain_index_range_plain(_, ?NONE, _, _) -> true;
-chain_index_range_plain(Data, {?SOME, {?HANDLE_TAG, Id}}, Start, Count) ->
-    case arc_rt_arena_ffi:get(Id, Data) of
+chain_index_range_plain(Cells, {?SOME, {?HANDLE_TAG, Id}}, Start, Count) ->
+    case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Length}, Proto, _, _, _, _}
           when Start >= Length ->
-            chain_index_range_plain(Data, Proto, Start, Count);
+            chain_index_range_plain(Cells, Proto, Start, Count);
         {?SOBJECT_TAG, Kind, Proto, Props, _, Els, _} ->
             case Kind of
                 _ when element(1, Kind) =:= ?PROXYOBJ_TAG -> false;
@@ -53,10 +53,10 @@ chain_index_range_plain(Data, {?SOME, {?HANDLE_TAG, Id}}, Start, Count) ->
                     (Els =:= ?ELEMS_NONE
                         orelse not elements_have_index(Els, Start, Count))
                     andalso (not props_have_index(Props, Start, Count))
-                    andalso chain_index_range_plain(Data, Proto, Start, Count)
+                    andalso chain_index_range_plain(Cells, Proto, Start, Count)
             end;
-        Shaped when element(1, Shaped) =:= ?SSHAPED_TAG ->
-            chain_index_range_plain(Data, element(?SSHAPED_PROTO, Shaped), Start, Count);
+        Shaped when element(1, Shaped) =:= ?SSHAPEDOBJECT_TAG ->
+            chain_index_range_plain(Cells, element(?SSHAPEDOBJECT_PROTO, Shaped), Start, Count);
         _ -> true
     end.
 
@@ -95,16 +95,16 @@ probe_sparse(M, Idx, End) ->
 %% §7.3.19 createlistfromarraylike for plain arrays and arguments, else miss
 arg_list(St, {?HANDLE_TAG, Id}) ->
     Store = element(?AGENT_STORE, St),
-    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
+    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, Store)) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, Props, _, Els, _}
           when map_size(Props) =:= 0 ->
             dense_prefix(Els, Len);
         {?SOBJECT_TAG, {?ARGUMENTSOBJ_TAG, _, _}, _,
          #{?LENGTH_KEY := LenProp, ?CALLEE_KEY := _} = Props, _, Els, _}
           when map_size(Props) =:= 2,
-               element(1, LenProp) =:= ?DATAPROP_TAG,
-               is_integer(element(?DATAPROP_VALUE, LenProp)) ->
-            dense_prefix(Els, element(?DATAPROP_VALUE, LenProp));
+               element(1, LenProp) =:= ?DATAPROPERTY_TAG,
+               is_integer(element(?DATAPROPERTY_VALUE, LenProp)) ->
+            dense_prefix(Els, element(?DATAPROPERTY_VALUE, LenProp));
         _ -> miss
     end;
 arg_list(_, _) -> miss.
@@ -153,14 +153,14 @@ eq(same_value_zero, A, B) -> arc_rt_val_ffi:same_value_zero(A, B).
 %% plain extensible array with no own props, free proto chain
 push(St, {?HANDLE_TAG, Id}, Args) ->
     Store = element(?AGENT_STORE, St),
-    Data = element(?STORE_DATA, Store),
-    case arc_rt_arena_ffi:get(Id, Data) of
+    Cells = element(?STORE_CELLS, Store),
+    case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, Proto, Props, Sym, Els, true}
           when Props =:= #{} ->
             N = length(Args),
             NewLen = Len + N,
             case NewLen =< ?MAX_DENSE_INDEX
-                 andalso chain_index_range_plain(Data, Proto, Len, N) of
+                 andalso chain_index_range_plain(Cells, Proto, Len, N) of
                 false -> push_miss;
                 true ->
                     case append(Els, Len, Args) of
@@ -170,8 +170,8 @@ push(St, {?HANDLE_TAG, Id}, Args) ->
                                     Sym, NewEls, true},
                             {pushed, NewLen,
                              setelement(?AGENT_STORE, St,
-                                        setelement(?STORE_DATA, Store,
-                                                   arc_rt_arena_ffi:set(Id, Cell, Data)))}
+                                        setelement(?STORE_CELLS, Store,
+                                                   arc_rt_arena_ffi:set(Id, Cell, Cells)))}
                     end
             end;
         _ -> push_miss
@@ -194,8 +194,8 @@ set_each([], _, A) -> A.
 
 pop(St, {?HANDLE_TAG, Id}) ->
     Store = element(?AGENT_STORE, St),
-    Data = element(?STORE_DATA, Store),
-    case arc_rt_arena_ffi:get(Id, Data) of
+    Cells = element(?STORE_CELLS, Store),
+    case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, Proto, Props, Sym, {?ELEMS_DENSE, A}, true}
           when Props =:= #{}, Len > 0 ->
             Last = Len - 1,
@@ -208,8 +208,8 @@ pop(St, {?HANDLE_TAG, Id}) ->
                             {?ELEMS_DENSE, arc_tree_array_ffi:resize(A, Last)}, true},
                     {popped, V,
                      setelement(?AGENT_STORE, St,
-                                setelement(?STORE_DATA, Store,
-                                           arc_rt_arena_ffi:set(Id, Cell, Data)))}
+                                setelement(?STORE_CELLS, Store,
+                                           arc_rt_arena_ffi:set(Id, Cell, Cells)))}
             end;
         _ -> pop_miss
     end;

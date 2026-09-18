@@ -2,7 +2,7 @@ import arc/engine.{
   type JsValueKind, Finite, JsBool, JsNull, JsNumber, JsString, JsUndefined,
   ModuleReturned, Returned,
 }
-import arc/host.{State}
+import arc/host.{Context}
 import arc/module/load_error
 import arc/module_host
 import arc/rt/builtins/console
@@ -216,10 +216,10 @@ pub fn serialize_builtins_survive_test() {
 pub fn serialize_host_fn_reregister_test() {
   let eng =
     engine.new()
-    |> engine.define_fn("double", 1, fn(args, _this, state) {
+    |> engine.define_fn("double", 1, fn(args, _this, ctx) {
       case kinds(args) {
-        [JsNumber(Finite(n)), ..] -> #(state, Ok(num(n *. 2.0)))
-        _ -> #(state, Ok(mk_undefined()))
+        [JsNumber(Finite(n)), ..] -> #(ctx, Ok(num(n *. 2.0)))
+        _ -> #(ctx, Ok(mk_undefined()))
       }
     })
 
@@ -227,10 +227,10 @@ pub fn serialize_host_fn_reregister_test() {
 
   let restored =
     roundtrip(eng)
-    |> engine.define_fn("double", 1, fn(args, _this, state) {
+    |> engine.define_fn("double", 1, fn(args, _this, ctx) {
       case kinds(args) {
-        [JsNumber(Finite(n)), ..] -> #(state, Ok(num(n *. 2.0)))
-        _ -> #(state, Ok(mk_undefined()))
+        [JsNumber(Finite(n)), ..] -> #(ctx, Ok(num(n *. 2.0)))
+        _ -> #(ctx, Ok(mk_undefined()))
       }
     })
 
@@ -242,30 +242,30 @@ fn with_import_hook(
   source: String,
 ) -> engine.Engine(host) {
   let #(eng, Nil) =
-    engine.with_state(eng, fn(s) {
+    engine.with_context(eng, fn(ctx) {
       let agent =
         module_host.install_import_hook(
-          s.agent,
+          ctx.agent,
           "/main.js",
           fn(raw, _referrer) { Ok(raw) },
           fn(_resolved) { Ok(source) },
         )
-      #(State(..s, agent:), Nil)
+      #(Context(..ctx, agent:), Nil)
     })
   eng
 }
 
 pub fn serialize_host_fn_reregister_around_import_hook_test() {
-  let double = fn(args, _this, state) {
+  let double = fn(args, _this, ctx) {
     case kinds(args) {
-      [JsNumber(Finite(n)), ..] -> #(state, Ok(num(n *. 2.0)))
-      _ -> #(state, Ok(mk_undefined()))
+      [JsNumber(Finite(n)), ..] -> #(ctx, Ok(num(n *. 2.0)))
+      _ -> #(ctx, Ok(mk_undefined()))
     }
   }
-  let negate = fn(args, _this, state) {
+  let negate = fn(args, _this, ctx) {
     case kinds(args) {
-      [JsNumber(Finite(n)), ..] -> #(state, Ok(num(0.0 -. n)))
-      _ -> #(state, Ok(mk_undefined()))
+      [JsNumber(Finite(n)), ..] -> #(ctx, Ok(num(0.0 -. n)))
+      _ -> #(ctx, Ok(mk_undefined()))
     }
   }
   let eng =
@@ -325,10 +325,10 @@ pub fn serialize_constructor_and_instances_test() {
 pub fn define_fn_callable_from_js_test() {
   let eng =
     engine.new()
-    |> engine.define_fn("double", 1, fn(args, _this, state) {
+    |> engine.define_fn("double", 1, fn(args, _this, ctx) {
       case kinds(args) {
-        [JsNumber(Finite(n)), ..] -> #(state, Ok(num(n *. 2.0)))
-        _ -> #(state, Ok(mk_undefined()))
+        [JsNumber(Finite(n)), ..] -> #(ctx, Ok(num(n *. 2.0)))
+        _ -> #(ctx, Ok(mk_undefined()))
       }
     })
 
@@ -339,8 +339,8 @@ pub fn define_fn_callable_from_js_test() {
 pub fn define_fn_has_name_and_length_test() {
   let eng =
     engine.new()
-    |> engine.define_fn("myFunc", 3, fn(_args, _this, state) {
-      #(state, Ok(mk_undefined()))
+    |> engine.define_fn("myFunc", 3, fn(_args, _this, ctx) {
+      #(ctx, Ok(mk_undefined()))
     })
 
   let assert Ok(#(Returned(value:), _)) =
@@ -352,16 +352,16 @@ pub fn define_namespace_creates_object_with_methods_test() {
   let eng =
     engine.new()
     |> engine.define_namespace("math2", [
-      #("square", 1, fn(args, _this, state) {
+      #("square", 1, fn(args, _this, ctx) {
         case kinds(args) {
-          [JsNumber(Finite(n)), ..] -> #(state, Ok(num(n *. n)))
-          _ -> #(state, Ok(mk_undefined()))
+          [JsNumber(Finite(n)), ..] -> #(ctx, Ok(num(n *. n)))
+          _ -> #(ctx, Ok(mk_undefined()))
         }
       }),
-      #("cube", 1, fn(args, _this, state) {
+      #("cube", 1, fn(args, _this, ctx) {
         case kinds(args) {
-          [JsNumber(Finite(n)), ..] -> #(state, Ok(num(n *. n *. n)))
-          _ -> #(state, Ok(mk_undefined()))
+          [JsNumber(Finite(n)), ..] -> #(ctx, Ok(num(n *. n *. n)))
+          _ -> #(ctx, Ok(mk_undefined()))
         }
       }),
     ])
@@ -375,7 +375,7 @@ pub fn define_namespace_has_tostringtag_test() {
   let eng =
     engine.new()
     |> engine.define_namespace("widgets", [
-      #("noop", 0, fn(_args, _this, state) { #(state, Ok(mk_undefined())) }),
+      #("noop", 0, fn(_args, _this, ctx) { #(ctx, Ok(mk_undefined())) }),
     ])
 
   let assert Ok(#(Returned(value:), _)) =
@@ -396,10 +396,10 @@ pub fn define_global_installs_value_test() {
 pub fn host_fn_receives_this_test() {
   let eng =
     engine.new()
-    |> engine.define_fn("whoami", 0, fn(_args, this, state) {
+    |> engine.define_fn("whoami", 0, fn(_args, this, ctx) {
       case engine.classify(this) {
-        JsString(s) -> #(state, Ok(mk_string("this=" <> s)))
-        _ -> #(state, Ok(mk_string("this=other")))
+        JsString(s) -> #(ctx, Ok(mk_string("this=" <> s)))
+        _ -> #(ctx, Ok(mk_string("this=other")))
       }
     })
 
@@ -410,8 +410,8 @@ pub fn host_fn_receives_this_test() {
 pub fn host_fn_can_throw_test() {
   let eng =
     engine.new()
-    |> engine.define_fn("boom", 0, fn(_args, _this, state) {
-      #(state, Error(mk_string("kaboom")))
+    |> engine.define_fn("boom", 0, fn(_args, _this, ctx) {
+      #(ctx, Error(mk_string("kaboom")))
     })
 
   let assert Ok(#(Returned(value:), _)) =
@@ -516,9 +516,9 @@ pub fn eval_module_syntax_error_test() {
 
 fn fmt_engine() -> engine.Engine(host) {
   engine.new()
-  |> engine.define_fn("fmt", 0, fn(args, _this, s) {
-    let #(line, agent) = console.format(s.agent, args)
-    #(State(..s, agent:), Ok(mk_string(line)))
+  |> engine.define_fn("fmt", 0, fn(args, _this, ctx) {
+    let #(line, agent) = console.format(ctx.agent, args)
+    #(Context(..ctx, agent:), Ok(mk_string(line)))
   })
 }
 

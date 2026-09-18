@@ -5,7 +5,7 @@ import arc/parser/ast
 import arc_aot/emit/anf
 import arc_aot/emit/func
 import arc_aot/emit/state.{
-  type EmitResult, type Emitter, type Next, type NextWith, ClassCtx, Emitter,
+  type EmitResult, type Emitter, type Next, type NextWith, ClassContext, Emitter,
 }
 import carder/ir
 import gleam/bit_array
@@ -114,18 +114,18 @@ fn emit_computed_keys(
   store_class_const(e, ast_util.computed_field_const(idx), pk, next)
 }
 
-// atoms must match gleam's erlang spelling of MIMethod etc
+// atoms must match gleam's erlang spelling of InstallMethod etc
 fn method_install_atom(
   kind: ast.MethodKind,
   is_static is_static: Bool,
 ) -> ir.Value {
   ir.ConstAtom(case kind, is_static {
-    ast.MethodGet, False -> "m_i_getter"
-    ast.MethodSet, False -> "m_i_setter"
-    ast.MethodMethod, False | ast.MethodConstructor, False -> "m_i_method"
-    ast.MethodGet, True -> "m_i_static_getter"
-    ast.MethodSet, True -> "m_i_static_setter"
-    ast.MethodMethod, True | ast.MethodConstructor, True -> "m_i_static"
+    ast.GetterMethod, False -> "install_getter"
+    ast.SetterMethod, False -> "install_setter"
+    ast.PlainMethod, False | ast.ConstructorMethod, False -> "install_method"
+    ast.GetterMethod, True -> "install_static_getter"
+    ast.SetterMethod, True -> "install_static_setter"
+    ast.PlainMethod, True | ast.ConstructorMethod, True -> "install_static"
   })
 }
 
@@ -139,8 +139,8 @@ fn method_fn_name(
     ast.KeyNumber(..) | ast.KeyBigInt(..) | ast.KeyComputed(..) -> None
   }
   case kind, base {
-    ast.MethodGet, Some(n) -> Some("get " <> n)
-    ast.MethodSet, Some(n) -> Some("set " <> n)
+    ast.GetterMethod, Some(n) -> Some("get " <> n)
+    ast.SetterMethod, Some(n) -> Some("set " <> n)
     _, _ -> base
   }
 }
@@ -341,7 +341,7 @@ pub fn emit_class(
       )
     })
   let ctx =
-    ClassCtx(
+    ClassContext(
       brand_vars:,
       proto_home_box:,
       static_home_box:,

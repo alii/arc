@@ -4,7 +4,7 @@ import arc/internal/gregorian.{
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
-  CalAuto, Compatible, Day, apply_since_duration, apply_since_mode,
+  CalendarNameAuto, Compatible, Day, apply_since_duration, apply_since_mode,
   calendar_suffix, date_slot_of, epoch_ns_to_iso_in, get_calendar_name_option,
   get_difference_settings, get_options_object, get_overflow_option_from_value,
   make_date_cal, make_date_time_cal, make_duration, make_month_day_cal,
@@ -31,37 +31,39 @@ import arc/rt/builtins/temporal_zoned_ops.{get_epoch_ns_for, start_of_day_ns}
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type NativeToken, type PlainDateMethod,
   type TemporalDateGetter, type TemporalProtos, type TemporalStaticName,
-  DgCalendarId, DgDay, DgDayOfWeek, DgDayOfYear, DgDaysInMonth, DgDaysInWeek,
-  DgDaysInYear, DgEra, DgEraYear, DgInLeapYear, DgMonth, DgMonthCode,
-  DgMonthsInYear, DgWeekOfYear, DgYear, DgYearOfWeek, KHandle, KStr, KUndef,
-  PdAdd, PdEquals, PdSince, PdSubtract, PdToJson, PdToLocaleString,
-  PdToPlainDateTime, PdToPlainMonthDay, PdToPlainYearMonth, PdToString,
-  PdToZonedDateTime, PdUntil, PdValueOf, PdWith, PdWithCalendar, TemporalDate,
-  TemporalDateTime, TemporalN, TemporalPlainDateCtor, TemporalPlainDateGetter,
-  TemporalPlainDateMethod, TemporalPlainDateStatic, TemporalZonedDateTime,
-  TsCompare, TsFrom, classify, mk_bool, mk_int, mk_string, mk_undefined,
+  CompareStatic, DateCalendarId, DateDay, DateDayOfWeek, DateDayOfYear,
+  DateDaysInMonth, DateDaysInWeek, DateDaysInYear, DateEra, DateEraYear,
+  DateInLeapYear, DateMonth, DateMonthCode, DateMonthsInYear, DateWeekOfYear,
+  DateYear, DateYearOfWeek, FromStatic, KHandle, KStr, KUndef, PlainDateAdd,
+  PlainDateEquals, PlainDateSince, PlainDateSubtract, PlainDateToJson,
+  PlainDateToLocaleString, PlainDateToPlainDateTime, PlainDateToPlainMonthDay,
+  PlainDateToPlainYearMonth, PlainDateToString, PlainDateToZonedDateTime,
+  PlainDateUntil, PlainDateValueOf, PlainDateWith, PlainDateWithCalendar,
+  TemporalDate, TemporalDateTime, TemporalN, TemporalPlainDateCtor,
+  TemporalPlainDateGetter, TemporalPlainDateMethod, TemporalPlainDateStatic,
+  TemporalZonedDateTime, classify, mk_bool, mk_int, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/list
 import gleam/option
 
 pub const all_date_getters = [
-  DgCalendarId,
-  DgEra,
-  DgEraYear,
-  DgYear,
-  DgMonth,
-  DgMonthCode,
-  DgDay,
-  DgDayOfWeek,
-  DgDayOfYear,
-  DgWeekOfYear,
-  DgYearOfWeek,
-  DgDaysInWeek,
-  DgDaysInMonth,
-  DgDaysInYear,
-  DgMonthsInYear,
-  DgInLeapYear,
+  DateCalendarId,
+  DateEra,
+  DateEraYear,
+  DateYear,
+  DateMonth,
+  DateMonthCode,
+  DateDay,
+  DateDayOfWeek,
+  DateDayOfYear,
+  DateWeekOfYear,
+  DateYearOfWeek,
+  DateDaysInWeek,
+  DateDaysInMonth,
+  DateDaysInYear,
+  DateMonthsInYear,
+  DateInLeapYear,
 ]
 
 pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
@@ -69,7 +71,7 @@ pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
 }
 
 pub fn statics(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
-  list.map([#(TsFrom, 1), #(TsCompare, 2)], fn(s) {
+  list.map([#(FromStatic, 1), #(CompareStatic, 2)], fn(s) {
     #(static_name(s.0), TemporalN(TemporalPlainDateStatic(s.0, protos)), s.1)
   })
 }
@@ -83,21 +85,21 @@ pub fn getters() -> List(#(String, NativeToken)) {
 pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
   list.map(
     [
-      #(PdToPlainYearMonth, 0),
-      #(PdToPlainMonthDay, 0),
-      #(PdToPlainDateTime, 0),
-      #(PdToZonedDateTime, 1),
-      #(PdAdd, 1),
-      #(PdSubtract, 1),
-      #(PdWith, 1),
-      #(PdWithCalendar, 1),
-      #(PdUntil, 1),
-      #(PdSince, 1),
-      #(PdEquals, 1),
-      #(PdToString, 0),
-      #(PdToLocaleString, 0),
-      #(PdToJson, 0),
-      #(PdValueOf, 0),
+      #(PlainDateToPlainYearMonth, 0),
+      #(PlainDateToPlainMonthDay, 0),
+      #(PlainDateToPlainDateTime, 0),
+      #(PlainDateToZonedDateTime, 1),
+      #(PlainDateAdd, 1),
+      #(PlainDateSubtract, 1),
+      #(PlainDateWith, 1),
+      #(PlainDateWithCalendar, 1),
+      #(PlainDateUntil, 1),
+      #(PlainDateSince, 1),
+      #(PlainDateEquals, 1),
+      #(PlainDateToString, 0),
+      #(PlainDateToLocaleString, 0),
+      #(PlainDateToJson, 0),
+      #(PlainDateValueOf, 0),
     ],
     fn(m) {
       #(
@@ -111,42 +113,42 @@ pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
 
 pub fn date_getter_name(g: TemporalDateGetter) -> String {
   case g {
-    DgCalendarId -> "calendarId"
-    DgEra -> "era"
-    DgEraYear -> "eraYear"
-    DgYear -> "year"
-    DgMonth -> "month"
-    DgMonthCode -> "monthCode"
-    DgDay -> "day"
-    DgDayOfWeek -> "dayOfWeek"
-    DgDayOfYear -> "dayOfYear"
-    DgWeekOfYear -> "weekOfYear"
-    DgYearOfWeek -> "yearOfWeek"
-    DgDaysInWeek -> "daysInWeek"
-    DgDaysInMonth -> "daysInMonth"
-    DgDaysInYear -> "daysInYear"
-    DgMonthsInYear -> "monthsInYear"
-    DgInLeapYear -> "inLeapYear"
+    DateCalendarId -> "calendarId"
+    DateEra -> "era"
+    DateEraYear -> "eraYear"
+    DateYear -> "year"
+    DateMonth -> "month"
+    DateMonthCode -> "monthCode"
+    DateDay -> "day"
+    DateDayOfWeek -> "dayOfWeek"
+    DateDayOfYear -> "dayOfYear"
+    DateWeekOfYear -> "weekOfYear"
+    DateYearOfWeek -> "yearOfWeek"
+    DateDaysInWeek -> "daysInWeek"
+    DateDaysInMonth -> "daysInMonth"
+    DateDaysInYear -> "daysInYear"
+    DateMonthsInYear -> "monthsInYear"
+    DateInLeapYear -> "inLeapYear"
   }
 }
 
 pub fn plain_date_method_name(m: PlainDateMethod) -> String {
   case m {
-    PdToPlainYearMonth -> "toPlainYearMonth"
-    PdToPlainMonthDay -> "toPlainMonthDay"
-    PdToPlainDateTime -> "toPlainDateTime"
-    PdToZonedDateTime -> "toZonedDateTime"
-    PdAdd -> "add"
-    PdSubtract -> "subtract"
-    PdWith -> "with"
-    PdWithCalendar -> "withCalendar"
-    PdUntil -> "until"
-    PdSince -> "since"
-    PdEquals -> "equals"
-    PdToString -> "toString"
-    PdToLocaleString -> "toLocaleString"
-    PdToJson -> "toJSON"
-    PdValueOf -> "valueOf"
+    PlainDateToPlainYearMonth -> "toPlainYearMonth"
+    PlainDateToPlainMonthDay -> "toPlainMonthDay"
+    PlainDateToPlainDateTime -> "toPlainDateTime"
+    PlainDateToZonedDateTime -> "toZonedDateTime"
+    PlainDateAdd -> "add"
+    PlainDateSubtract -> "subtract"
+    PlainDateWith -> "with"
+    PlainDateWithCalendar -> "withCalendar"
+    PlainDateUntil -> "until"
+    PlainDateSince -> "since"
+    PlainDateEquals -> "equals"
+    PlainDateToString -> "toString"
+    PlainDateToLocaleString -> "toLocaleString"
+    PlainDateToJson -> "toJSON"
+    PlainDateValueOf -> "valueOf"
   }
 }
 
@@ -175,12 +177,12 @@ pub fn static(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case name {
-    TsFrom -> {
+    FromStatic -> {
       let #(#(d, cal), st) =
         to_temporal_date(st, helpers.arg_at(args, 0), helpers.arg_at(args, 1))
       make_date_cal(st, protos, d, cal)
     }
-    TsCompare -> {
+    CompareStatic -> {
       let #(#(a, _), st) =
         to_temporal_date(st, helpers.arg_at(args, 0), mk_undefined())
       let #(#(b, _), st) =
@@ -244,22 +246,22 @@ pub fn getter(
 
 pub fn date_field(d: IsoDate, g: TemporalDateGetter) -> JsVal {
   case g {
-    DgCalendarId -> mk_string("iso8601")
-    DgEra -> mk_undefined()
-    DgEraYear -> mk_undefined()
-    DgYear -> mk_int(d.year)
-    DgMonth -> mk_int(d.month)
-    DgMonthCode -> mk_string(month_code_str(d.month))
-    DgDay -> mk_int(d.day)
-    DgDayOfWeek -> mk_int(day_of_week(d))
-    DgDayOfYear -> mk_int(day_of_year(d))
-    DgWeekOfYear -> mk_int(week_of_year(d).0)
-    DgYearOfWeek -> mk_int(week_of_year(d).1)
-    DgDaysInWeek -> mk_int(7)
-    DgDaysInMonth -> mk_int(days_in_month(d.year, d.month))
-    DgDaysInYear -> mk_int(days_in_iso_year(d.year))
-    DgMonthsInYear -> mk_int(12)
-    DgInLeapYear -> mk_bool(is_leap_year(d.year))
+    DateCalendarId -> mk_string("iso8601")
+    DateEra -> mk_undefined()
+    DateEraYear -> mk_undefined()
+    DateYear -> mk_int(d.year)
+    DateMonth -> mk_int(d.month)
+    DateMonthCode -> mk_string(month_code_str(d.month))
+    DateDay -> mk_int(d.day)
+    DateDayOfWeek -> mk_int(day_of_week(d))
+    DateDayOfYear -> mk_int(day_of_year(d))
+    DateWeekOfYear -> mk_int(week_of_year(d).0)
+    DateYearOfWeek -> mk_int(week_of_year(d).1)
+    DateDaysInWeek -> mk_int(7)
+    DateDaysInMonth -> mk_int(days_in_month(d.year, d.month))
+    DateDaysInYear -> mk_int(days_in_iso_year(d.year))
+    DateMonthsInYear -> mk_int(12)
+    DateInLeapYear -> mk_bool(is_leap_year(d.year))
   }
 }
 
@@ -273,22 +275,23 @@ pub fn date_field_cal(
     _ -> {
       let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
       case g {
-        DgCalendarId -> mk_string(tcal.identifier(cal))
-        DgEra -> era_field(cal, cd)
-        DgEraYear -> era_year_field(cal, cd)
-        DgYear -> mk_int(cd.year)
-        DgMonth -> mk_int(cd.month)
-        DgMonthCode -> mk_string(tcal.month_code(cal, cd.year, cd.month))
-        DgDay -> mk_int(cd.day)
-        DgDayOfWeek -> mk_int(day_of_week(d))
-        DgDayOfYear -> mk_int(tcal.day_of_year(cal, cd.year, cd.month, cd.day))
-        DgWeekOfYear -> mk_undefined()
-        DgYearOfWeek -> mk_undefined()
-        DgDaysInWeek -> mk_int(7)
-        DgDaysInMonth -> mk_int(tcal.days_in_month(cal, cd.year, cd.month))
-        DgDaysInYear -> mk_int(tcal.days_in_year(cal, cd.year))
-        DgMonthsInYear -> mk_int(tcal.months_in_year(cal, cd.year))
-        DgInLeapYear -> mk_bool(tcal.in_leap_year(cal, cd.year))
+        DateCalendarId -> mk_string(tcal.identifier(cal))
+        DateEra -> era_field(cal, cd)
+        DateEraYear -> era_year_field(cal, cd)
+        DateYear -> mk_int(cd.year)
+        DateMonth -> mk_int(cd.month)
+        DateMonthCode -> mk_string(tcal.month_code(cal, cd.year, cd.month))
+        DateDay -> mk_int(cd.day)
+        DateDayOfWeek -> mk_int(day_of_week(d))
+        DateDayOfYear ->
+          mk_int(tcal.day_of_year(cal, cd.year, cd.month, cd.day))
+        DateWeekOfYear -> mk_undefined()
+        DateYearOfWeek -> mk_undefined()
+        DateDaysInWeek -> mk_int(7)
+        DateDaysInMonth -> mk_int(tcal.days_in_month(cal, cd.year, cd.month))
+        DateDaysInYear -> mk_int(tcal.days_in_year(cal, cd.year))
+        DateMonthsInYear -> mk_int(tcal.months_in_year(cal, cd.year))
+        DateInLeapYear -> mk_bool(tcal.in_leap_year(cal, cd.year))
       }
     }
   }
@@ -310,31 +313,31 @@ pub fn method(
       date_slot_of,
     )
   case m {
-    PdToJson | PdToLocaleString -> #(
-      mk_string(format_iso_date(d) <> calendar_suffix(CalAuto, cal)),
+    PlainDateToJson | PlainDateToLocaleString -> #(
+      mk_string(format_iso_date(d) <> calendar_suffix(CalendarNameAuto, cal)),
       st,
     )
-    PdToString -> {
+    PlainDateToString -> {
       let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
       let #(cal_name, st) = get_calendar_name_option(st, opts)
       #(mk_string(format_iso_date(d) <> calendar_suffix(cal_name, cal)), st)
     }
-    PdValueOf ->
+    PlainDateValueOf ->
       rt_val.t_throw_type_error(
         st,
         "Temporal.PlainDate cannot be converted with valueOf; use compare() or equals()",
       )
-    PdEquals -> {
+    PlainDateEquals -> {
       let #(#(other, other_cal), st) =
         to_temporal_date(st, helpers.arg_at(args, 0), mk_undefined())
       #(mk_bool(d == other && cal == other_cal), st)
     }
-    PdAdd | PdSubtract -> {
-      let #(dur, overflow, st) = add_sub_args(st, args, m == PdSubtract)
+    PlainDateAdd | PlainDateSubtract -> {
+      let #(dur, overflow, st) = add_sub_args(st, args, m == PlainDateSubtract)
       let d2 = rt_val.or_throw(st, calendar_date_add(cal, d, dur, overflow))
       make_date_cal(st, protos, d2, cal)
     }
-    PdWith -> {
+    PlainDateWith -> {
       let #(bag, st) = require_partial_bag(st, helpers.arg_at(args, 0))
       let #(fields, st) = read_date_fields(st, bag, cal)
       let Nil = require_nonempty_fields(st, fields == no_date_fields)
@@ -345,16 +348,16 @@ pub fn method(
       let date = rt_val.or_throw(st, check_date_limits(date))
       make_date_cal(st, protos, date, cal)
     }
-    PdWithCalendar -> {
+    PlainDateWithCalendar -> {
       let #(new_cal, st) =
         to_temporal_calendar_identifier(st, helpers.arg_at(args, 0))
       make_date_cal(st, protos, d, new_cal)
     }
-    PdToPlainDateTime -> {
+    PlainDateToPlainDateTime -> {
       let #(t, st) = optional_time_arg(st, helpers.arg_at(args, 0))
       make_date_time_cal(st, protos, d, t, cal)
     }
-    PdToPlainYearMonth -> {
+    PlainDateToPlainYearMonth -> {
       let first = case cal {
         tcal.Iso8601 -> IsoDate(..d, day: 1)
         _ -> {
@@ -369,7 +372,7 @@ pub fn method(
       }
       make_year_month_cal(st, protos, first.year, first.month, first.day, cal)
     }
-    PdToPlainMonthDay ->
+    PlainDateToPlainMonthDay ->
       case cal {
         tcal.Iso8601 ->
           make_month_day_cal(st, protos, d.month, d.day, 1972, cal)
@@ -384,7 +387,7 @@ pub fn method(
           make_month_day_cal(st, protos, iso.month, iso.day, iso.year, cal)
         }
       }
-    PdToZonedDateTime -> {
+    PlainDateToZonedDateTime -> {
       let arg = helpers.arg_at(args, 0)
       let #(tz, plain_time, st) = case classify(arg) {
         KStr(tz_str) -> {
@@ -412,7 +415,7 @@ pub fn method(
       }
       make_zoned_cal(st, protos, ns, tz, cal)
     }
-    PdUntil | PdSince -> {
+    PlainDateUntil | PlainDateSince -> {
       let #(#(other, other_cal), st) =
         to_temporal_date(st, helpers.arg_at(args, 0), mk_undefined())
       case other_cal == cal {
@@ -421,7 +424,8 @@ pub fn method(
             st,
             "cannot compute difference between dates of different calendars",
           )
-        True -> date_until_since(st, protos, cal, d, other, args, m == PdSince)
+        True ->
+          date_until_since(st, protos, cal, d, other, args, m == PlainDateSince)
       }
     }
   }

@@ -1,11 +1,12 @@
 //// spec abstract operations shared by rt and builtins
 
+import arc/bytecode/key.{Named, index_key}
 import arc/rt/elements as rt_elements
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, ArrayObj, KHandle, KUndef, Named,
-  ProxyObj, SObject, StringKey, classify,
+  type Agent, type Handle, type JsVal, ArrayObj, KHandle, KUndef, ProxyObj,
+  SObject, StringKey, classify,
 }
 import arc/rt/val as rt_val
 import gleam/int
@@ -15,8 +16,7 @@ import gleam/list
 pub fn get_index(st: Agent, this: JsVal, idx: Int) -> #(JsVal, Agent) {
   case rt_elements.own_element(st, this, idx) {
     rt_elements.Hit(v) -> #(v, st)
-    rt_elements.Miss ->
-      rt_obj.t_get_prop(st, this, StringKey(types.index_key(idx)))
+    rt_elements.Miss -> rt_obj.t_get_prop(st, this, StringKey(index_key(idx)))
   }
 }
 

@@ -11,8 +11,8 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, Agent, BirthSettled, BytecodeFn, FnFlags,
-  GenSuspendedYield, HostJob, JsStore, KHandle, ResumeFrame, SGenerator,
-  classify, mk_object, mk_undefined, plain_object,
+  GenSuspendedYield, HostJob, KHandle, ResumeFrame, SGenerator, Store, classify,
+  mk_object, mk_undefined, plain_object,
 }
 import gleam/dict
 import gleam/option.{None, Some}
@@ -23,7 +23,7 @@ const threshold = 64
 
 fn small_agent() -> Agent {
   let st = rt_gc.t_collect(rt_helpers.agent(), [])
-  Agent(..st, store: JsStore(..st.store, gc_threshold: threshold))
+  Agent(..st, store: Store(..st.store, gc_threshold: threshold))
 }
 
 fn new_object(st: Agent) -> #(Handle, JsVal, Agent) {
@@ -75,7 +75,7 @@ fn root_state(agent: Agent, locals: List(JsVal), stack: List(JsVal)) -> State {
     stack:,
     locals: tuple_array.from_list(locals),
     func:,
-    unit: 0,
+    unit_id: 0,
     call_stack: [],
     outer_depth: agent.call_depth,
     depth: agent.call_depth,
@@ -98,7 +98,7 @@ pub fn toplevel_return_collects_and_keeps_frame_values_test() {
   assert rt_gc.t_is_live(s.agent, local_h)
   assert rt_gc.t_is_live(s.agent, stacked_h)
   assert !rt_gc.t_is_live(s.agent, dead_h)
-  assert rt_gc.stats(s.agent).since_gc == 0
+  assert rt_gc.stats(s.agent).alloc_since_gc == 0
 }
 
 pub fn below_threshold_does_not_collect_test() {
@@ -162,10 +162,10 @@ pub fn inner_frame_under_nested_entry_never_collects_test() {
 pub fn allocation_loop_stays_bounded_test() {
   let st = small_agent()
   let #(kept_h, kept, st) = new_object(st)
-  let base = rt_gc.stats(st).live
+  let base = rt_gc.stats(st).live_count
   let s = stress(root_state(st, [kept], []), 200, base)
   assert rt_gc.t_is_live(s.agent, kept_h)
-  assert rt_gc.stats(s.agent).live <= base + 2 * threshold
+  assert rt_gc.stats(s.agent).live_count <= base + 2 * threshold
 }
 
 fn stress(s: State, rounds: Int, base: Int) -> State {
@@ -174,7 +174,7 @@ fn stress(s: State, rounds: Int, base: Int) -> State {
     _ -> {
       let s = State(..s, agent: churn(s.agent, 2 * threshold))
       let s = safepoint.maybe_collect_at_return(s)
-      assert rt_gc.stats(s.agent).live <= base + 2 * threshold
+      assert rt_gc.stats(s.agent).live_count <= base + 2 * threshold
       stress(s, rounds - 1, base)
     }
   }
@@ -184,7 +184,7 @@ pub fn end_turn_keeps_completion_value_across_drain_test() {
   let st = small_agent()
   let #(kept_h, kept, st) = new_object(st)
   let #(dead_h, _, st) = new_object(st)
-  let base = rt_gc.stats(st).live
+  let base = rt_gc.stats(st).live_count
   let alloc_job = HostJob(churn(_, 2 * threshold))
   let st =
     st
@@ -194,7 +194,7 @@ pub fn end_turn_keeps_completion_value_across_drain_test() {
   let st = safepoint.end_turn(st, [kept])
   assert rt_gc.t_is_live(st, kept_h)
   assert !rt_gc.t_is_live(st, dead_h)
-  assert rt_gc.stats(st).live <= base + 2 * threshold
+  assert rt_gc.stats(st).live_count <= base + 2 * threshold
   assert !set.contains(st.store.pinned_roots, kept_h.id)
 }
 
@@ -226,7 +226,7 @@ pub fn parked_frame_roots_its_registers_test() {
       parked: ParkedOp,
       call_args: [],
       realm: st.realm.id,
-      unit: 0,
+      unit_id: 0,
     )
   let #(gen_h, st) =
     rt_store.t_cell_new(
@@ -273,7 +273,7 @@ pub fn closure_environment_and_constants_are_traced_test() {
           flags:,
           fields_init: None,
           realm: 0,
-          unit: 0,
+          unit_id: 0,
           birth: BirthSettled,
         ),
         None,

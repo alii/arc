@@ -24,14 +24,15 @@ import arc/rt/builtins/temporal_iso.{
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type NativeToken, type PlainTimeMethod,
-  type TemporalProtos, type TemporalStaticName, type TemporalTimeGetter, KHandle,
-  KStr, PtAdd, PtEquals, PtRound, PtSince, PtSubtract, PtToJson,
-  PtToLocaleString, PtToString, PtUntil, PtValueOf, PtWith, SObject,
-  TemporalDateTime, TemporalN, TemporalObj, TemporalPlainTimeCtor,
-  TemporalPlainTimeGetter, TemporalPlainTimeMethod, TemporalPlainTimeStatic,
-  TemporalTime, TemporalZonedDateTime, TgHour, TgMicrosecond, TgMillisecond,
-  TgMinute, TgNanosecond, TgSecond, TsCompare, TsFrom, classify, mk_bool, mk_int,
-  mk_string,
+  type TemporalProtos, type TemporalStaticName, type TemporalTimeGetter,
+  CompareStatic, FromStatic, KHandle, KStr, PlainTimeAdd, PlainTimeEquals,
+  PlainTimeRound, PlainTimeSince, PlainTimeSubtract, PlainTimeToJson,
+  PlainTimeToLocaleString, PlainTimeToString, PlainTimeUntil, PlainTimeValueOf,
+  PlainTimeWith, SObject, TemporalDateTime, TemporalN, TemporalObj,
+  TemporalPlainTimeCtor, TemporalPlainTimeGetter, TemporalPlainTimeMethod,
+  TemporalPlainTimeStatic, TemporalTime, TemporalZonedDateTime, TimeHour,
+  TimeMicrosecond, TimeMillisecond, TimeMinute, TimeNanosecond, TimeSecond,
+  classify, mk_bool, mk_int, mk_string,
 }
 import arc/rt/val as rt_val
 import gleam/int
@@ -41,12 +42,12 @@ import gleam/result
 import gleam/string
 
 pub const all_time_getters = [
-  TgHour,
-  TgMinute,
-  TgSecond,
-  TgMillisecond,
-  TgMicrosecond,
-  TgNanosecond,
+  TimeHour,
+  TimeMinute,
+  TimeSecond,
+  TimeMillisecond,
+  TimeMicrosecond,
+  TimeNanosecond,
 ]
 
 pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
@@ -54,7 +55,7 @@ pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
 }
 
 pub fn statics(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
-  list.map([#(TsFrom, 1), #(TsCompare, 2)], fn(s) {
+  list.map([#(FromStatic, 1), #(CompareStatic, 2)], fn(s) {
     #(static_name(s.0), TemporalN(TemporalPlainTimeStatic(s.0, protos)), s.1)
   })
 }
@@ -68,17 +69,17 @@ pub fn getters() -> List(#(String, NativeToken)) {
 pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
   list.map(
     [
-      #(PtAdd, 1),
-      #(PtSubtract, 1),
-      #(PtWith, 1),
-      #(PtUntil, 1),
-      #(PtSince, 1),
-      #(PtRound, 1),
-      #(PtEquals, 1),
-      #(PtToString, 0),
-      #(PtToLocaleString, 0),
-      #(PtToJson, 0),
-      #(PtValueOf, 0),
+      #(PlainTimeAdd, 1),
+      #(PlainTimeSubtract, 1),
+      #(PlainTimeWith, 1),
+      #(PlainTimeUntil, 1),
+      #(PlainTimeSince, 1),
+      #(PlainTimeRound, 1),
+      #(PlainTimeEquals, 1),
+      #(PlainTimeToString, 0),
+      #(PlainTimeToLocaleString, 0),
+      #(PlainTimeToJson, 0),
+      #(PlainTimeValueOf, 0),
     ],
     fn(m) {
       #(
@@ -92,28 +93,28 @@ pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
 
 pub fn time_getter_name(g: TemporalTimeGetter) -> String {
   case g {
-    TgHour -> "hour"
-    TgMinute -> "minute"
-    TgSecond -> "second"
-    TgMillisecond -> "millisecond"
-    TgMicrosecond -> "microsecond"
-    TgNanosecond -> "nanosecond"
+    TimeHour -> "hour"
+    TimeMinute -> "minute"
+    TimeSecond -> "second"
+    TimeMillisecond -> "millisecond"
+    TimeMicrosecond -> "microsecond"
+    TimeNanosecond -> "nanosecond"
   }
 }
 
 pub fn plain_time_method_name(m: PlainTimeMethod) -> String {
   case m {
-    PtAdd -> "add"
-    PtSubtract -> "subtract"
-    PtWith -> "with"
-    PtUntil -> "until"
-    PtSince -> "since"
-    PtRound -> "round"
-    PtEquals -> "equals"
-    PtToString -> "toString"
-    PtToLocaleString -> "toLocaleString"
-    PtToJson -> "toJSON"
-    PtValueOf -> "valueOf"
+    PlainTimeAdd -> "add"
+    PlainTimeSubtract -> "subtract"
+    PlainTimeWith -> "with"
+    PlainTimeUntil -> "until"
+    PlainTimeSince -> "since"
+    PlainTimeRound -> "round"
+    PlainTimeEquals -> "equals"
+    PlainTimeToString -> "toString"
+    PlainTimeToLocaleString -> "toLocaleString"
+    PlainTimeToJson -> "toJSON"
+    PlainTimeValueOf -> "valueOf"
   }
 }
 
@@ -143,12 +144,12 @@ pub fn static(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case name {
-    TsFrom -> {
+    FromStatic -> {
       let #(t, st) =
         to_temporal_time(st, helpers.arg_at(args, 0), helpers.arg_at(args, 1))
       make_time(st, protos, t)
     }
-    TsCompare -> {
+    CompareStatic -> {
       let #(a, st) =
         to_temporal_time(st, helpers.arg_at(args, 0), types.mk_undefined())
       let #(b, st) =
@@ -170,12 +171,12 @@ pub fn getter(
 
 pub fn time_field(t: IsoTime, g: TemporalTimeGetter) -> JsVal {
   let n = case g {
-    TgHour -> t.hour
-    TgMinute -> t.minute
-    TgSecond -> t.second
-    TgMillisecond -> t.millisecond
-    TgMicrosecond -> t.microsecond
-    TgNanosecond -> t.nanosecond
+    TimeHour -> t.hour
+    TimeMinute -> t.minute
+    TimeSecond -> t.second
+    TimeMillisecond -> t.millisecond
+    TimeMicrosecond -> t.microsecond
+    TimeNanosecond -> t.nanosecond
   }
   mk_int(n)
 }
@@ -196,11 +197,11 @@ pub fn method(
       time_slot_of,
     )
   case m {
-    PtToJson | PtToLocaleString -> #(
+    PlainTimeToJson | PlainTimeToLocaleString -> #(
       mk_string(format_iso_time(t, AutoPrecision)),
       st,
     )
-    PtToString -> {
+    PlainTimeToString -> {
       let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
       let #(#(precision, smallest_time_unit, inc, mode), st) =
         to_string_time_options(st, opts)
@@ -214,26 +215,26 @@ pub fn method(
       }
       #(mk_string(format_iso_time(t2, precision)), st)
     }
-    PtValueOf ->
+    PlainTimeValueOf ->
       rt_val.t_throw_type_error(
         st,
         "Temporal.PlainTime cannot be converted with valueOf",
       )
-    PtEquals -> {
+    PlainTimeEquals -> {
       let #(other, st) =
         to_temporal_time(st, helpers.arg_at(args, 0), types.mk_undefined())
       #(mk_bool(t == other), st)
     }
-    PtAdd | PtSubtract -> {
+    PlainTimeAdd | PlainTimeSubtract -> {
       let #(dur, st) = to_temporal_duration(st, helpers.arg_at(args, 0))
       let dur = case m {
-        PtSubtract -> negate_duration(dur)
+        PlainTimeSubtract -> negate_duration(dur)
         _ -> dur
       }
       let #(_, t2) = add_time(t, time_part_ns(dur))
       make_time(st, protos, t2)
     }
-    PtWith -> {
+    PlainTimeWith -> {
       let #(bag, st) = require_partial_bag(st, helpers.arg_at(args, 0))
       let #(f, st) = read_time_fields(st, bag)
       let Nil = require_nonempty_fields(st, f == no_time_fields)
@@ -243,7 +244,7 @@ pub fn method(
       let t3 = rt_val.or_throw(st, regulate_time(t2, overflow))
       make_time(st, protos, t3)
     }
-    PtRound -> {
+    PlainTimeRound -> {
       let #(#(smallest_time_unit, inc, mode), st) =
         round_options(st, helpers.arg_at(args, 0), allow_day: False)
       let unit_ns = time_unit_ns(smallest_time_unit)
@@ -257,10 +258,10 @@ pub fn method(
         }
       }
     }
-    PtUntil | PtSince -> {
+    PlainTimeUntil | PlainTimeSince -> {
       let #(other, st) =
         to_temporal_time(st, helpers.arg_at(args, 0), types.mk_undefined())
-      time_until_since(st, protos, t, other, args, m == PtSince)
+      time_until_since(st, protos, t, other, args, m == PlainTimeSince)
     }
   }
 }

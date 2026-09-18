@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/host_hooks.{type HostHooks}
 import arc/rt/async as rt_async
 import arc/rt/builtins/array as b_array
@@ -47,12 +48,12 @@ import arc/rt/types.{
   BooleanConstructor, BooleanN, BooleanObj, ConsoleN, DataProperty, DataViewN,
   DateN, DisposableStackN, DomExceptionN, ErrorN, FinalizationRegistryN,
   FunctionN, GeneratorN, GlobalN, HostFn, HostFnEntry, IntlN, IteratorN, JInt,
-  JNan, JPosInf, JsOps, JsStore, JsonN, KHandle, MapN, MathN, Named,
-  NumberConstructor, NumberN, NumberObj, ObjectN, PromiseN, PromiseRejectFn,
-  PromiseResolveFn, ProxyN, Realm, ReflectN, RegExpN, ReturnThis, SetN,
-  StringConstructor, StringKey, StringN, StringObj, SymbolConstructor, SymbolN,
-  TemporalN, Test262N, ThrowTypeErrorPoison, TypedArrayN, WeakN, WeakRefN,
-  classify, mk_number, mk_object, mk_undefined, plain_object,
+  JNan, JPosInf, JsOps, JsonN, KHandle, MapN, MathN, NumberConstructor, NumberN,
+  NumberObj, ObjectN, PromiseN, PromiseRejectFn, PromiseResolveFn, ProxyN, Realm,
+  ReflectN, RegExpN, ReturnThis, SetN, Store, StringConstructor, StringKey,
+  StringN, StringObj, SymbolConstructor, SymbolN, TemporalN, Test262N,
+  ThrowTypeErrorPoison, TypedArrayN, WeakN, WeakRefN, classify, mk_number,
+  mk_object, mk_undefined, plain_object,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -339,7 +340,7 @@ pub fn seed_ops(st: Agent) -> Agent {
   let store = st.store
   Agent(
     ..st,
-    store: JsStore(
+    store: Store(
       ..store,
       ops: JsOps(
         get_prop: rt_obj.t_get_prop,
@@ -522,9 +523,9 @@ pub fn dispatch_native(
 ) -> #(JsVal, Agent) {
   case token {
     PromiseResolveFn(promise:, already_resolved:) ->
-      rt_async.do_resolve_fn(st, promise, already_resolved, args)
+      rt_async.promise_resolve_fn(st, promise, already_resolved, args)
     PromiseRejectFn(promise:, already_resolved:) ->
-      rt_async.do_reject_fn(st, promise, already_resolved, args)
+      rt_async.promise_reject_fn(st, promise, already_resolved, args)
     AsyncGenResume(gen:, is_throw:, kind:) -> #(
       mk_undefined(),
       rt_async.t_asyncgen_resume(

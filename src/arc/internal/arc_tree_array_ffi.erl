@@ -44,8 +44,8 @@ get(_, _) -> ?HOLE.
 
 get_option(I, V) ->
     case get(I, V) of
-        ?HOLE -> none;
-        X -> {some, X}
+        ?HOLE -> ?NONE;
+        X -> {?SOME, X}
     end.
 
 vget(I, 0, N) -> element((I band ?MASK) + 1, N);
@@ -102,27 +102,27 @@ put_leaf(I, L, 8, N) when I bsr 8 < ?FANOUT ->
     case element(I2, N) of
         N1 when is_tuple(N1) ->
             {8, setelement(I2, N, setelement(((I bsr 4) band ?MASK) + 1, N1, L))};
-        _ -> {8, put_leaf_1(I, L, 8, N)}
+        _ -> {8, put_leaf_walk(I, L, 8, N)}
     end;
-put_leaf(I, L, S, N) when I bsr S < ?FANOUT -> {S, put_leaf_1(I, L, S, N)};
+put_leaf(I, L, S, N) when I bsr S < ?FANOUT -> {S, put_leaf_walk(I, L, S, N)};
 put_leaf(I, L, S, N) ->
     put_leaf(I, L, S + ?LEVEL_BITS, setelement(1, ?EMPTY, N)).
 
-put_leaf_1(_, L, 0, _) -> L;
-put_leaf_1(I, L, S, N) when is_tuple(N) ->
+put_leaf_walk(_, L, 0, _) -> L;
+put_leaf_walk(I, L, S, N) when is_tuple(N) ->
     Ix = ((I bsr S) band ?MASK) + 1,
-    setelement(Ix, N, put_leaf_1(I, L, S - ?LEVEL_BITS, element(Ix, N)));
-put_leaf_1(I, L, S, _) ->
+    setelement(Ix, N, put_leaf_walk(I, L, S - ?LEVEL_BITS, element(Ix, N)));
+put_leaf_walk(I, L, S, _) ->
     setelement(((I bsr S) band ?MASK) + 1, ?EMPTY,
-               put_leaf_1(I, L, S - ?LEVEL_BITS, ?HOLE)).
+               put_leaf_walk(I, L, S - ?LEVEL_BITS, ?HOLE)).
 
-leaf(I, S, N) when I bsr S < ?FANOUT -> leaf_1(I, S, N);
+leaf(I, S, N) when I bsr S < ?FANOUT -> leaf_walk(I, S, N);
 leaf(_, _, _) -> ?EMPTY.
 
-leaf_1(_, 0, N) when is_tuple(N) -> N;
-leaf_1(I, S, N) when is_tuple(N) ->
-    leaf_1(I, S - ?LEVEL_BITS, element(((I bsr S) band ?MASK) + 1, N));
-leaf_1(_, _, _) -> ?EMPTY.
+leaf_walk(_, 0, N) when is_tuple(N) -> N;
+leaf_walk(I, S, N) when is_tuple(N) ->
+    leaf_walk(I, S - ?LEVEL_BITS, element(((I bsr S) band ?MASK) + 1, N));
+leaf_walk(_, _, _) -> ?EMPTY.
 
 reset(I, V) ->
     case I < size(V) of
@@ -167,7 +167,7 @@ settle({?VEC_TAG, Size, S, N, HotIx, Hot}) ->
 
 sparse_fold(F, Acc, {?VEC_TAG, _, _, _, _, _} = V) ->
     {?VEC_TAG, Size, S, N, _, _} = settle(V),
-    fold_1(F, Acc, N, S, 0, Size);
+    fold_subtree(F, Acc, N, S, 0, Size);
 sparse_fold(F, Acc, T) -> fold_flat(F, Acc, T, 1, tuple_size(T)).
 
 fold_flat(F, Acc, T, I, N) when I =< N ->
@@ -177,10 +177,10 @@ fold_flat(F, Acc, T, I, N) when I =< N ->
     end;
 fold_flat(_, Acc, _, _, _) -> Acc.
 
-fold_1(_, Acc, _, _, Base, Size) when Base >= Size -> Acc;
-fold_1(_, Acc, N, _, _, _) when not is_tuple(N) -> Acc;
-fold_1(F, Acc, N, 0, Base, _) -> fold_leaf(F, Acc, N, Base, 1);
-fold_1(F, Acc, N, S, Base, Size) -> fold_node(F, Acc, N, S, Base, 1, Size).
+fold_subtree(_, Acc, _, _, Base, Size) when Base >= Size -> Acc;
+fold_subtree(_, Acc, N, _, _, _) when not is_tuple(N) -> Acc;
+fold_subtree(F, Acc, N, 0, Base, _) -> fold_leaf(F, Acc, N, Base, 1);
+fold_subtree(F, Acc, N, S, Base, Size) -> fold_node(F, Acc, N, S, Base, 1, Size).
 
 fold_leaf(F, Acc, N, Base, Ix) when Ix =< ?FANOUT ->
     case element(Ix, N) of
@@ -190,7 +190,7 @@ fold_leaf(F, Acc, N, Base, Ix) when Ix =< ?FANOUT ->
 fold_leaf(_, Acc, _, _, _) -> Acc.
 
 fold_node(F, Acc, N, S, Base, Ix, Size) when Ix =< ?FANOUT ->
-    Acc1 = fold_1(F, Acc, element(Ix, N), S - ?LEVEL_BITS,
+    Acc1 = fold_subtree(F, Acc, element(Ix, N), S - ?LEVEL_BITS,
                   Base + ((Ix - 1) bsl S), Size),
     fold_node(F, Acc1, N, S, Base, Ix + 1, Size);
 fold_node(_, Acc, _, _, _, _, _) -> Acc.
@@ -202,26 +202,26 @@ dense_list(A, Len) ->
         Len ->
             L = to_list(A),
             case lists:member(?HOLE, L) of
-                true -> none;
-                false -> {some, L}
+                true -> ?NONE;
+                false -> {?SOME, L}
             end;
-        _ when Len =:= 0 -> {some, []};
-        _ -> none
+        _ when Len =:= 0 -> {?SOME, []};
+        _ -> ?NONE
     end.
 
 %% Count values from index From when all are set, else none
-range_list(_, _, 0) -> {some, []};
+range_list(_, _, 0) -> {?SOME, []};
 range_list(A, From, Count) when From >= 0 ->
     case From + Count =< size(A) of
-        false -> none;
+        false -> ?NONE;
         true -> range_acc(A, From, From + Count - 1, [])
     end;
-range_list(_, _, _) -> none.
+range_list(_, _, _) -> ?NONE.
 
-range_acc(_, From, I, Acc) when I < From -> {some, Acc};
+range_acc(_, From, I, Acc) when I < From -> {?SOME, Acc};
 range_acc(A, From, I, Acc) ->
     case get(I, A) of
-        ?HOLE -> none;
+        ?HOLE -> ?NONE;
         V -> range_acc(A, From, I - 1, [V | Acc])
     end.
 

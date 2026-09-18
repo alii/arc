@@ -140,7 +140,7 @@ pub type CoroutineCall {
   CoroutineCall(
     fn_h: Handle,
     template: FuncTemplate,
-    unit: Int,
+    unit_id: Int,
     locals: TupleArray(JsVal),
     this: JsVal,
     home_object: JsVal,
@@ -222,7 +222,7 @@ fn call_function(
   state: State,
   fn_h: Handle,
   template: FuncTemplate,
-  unit: Int,
+  unit_id: Int,
   env: EnvTuple,
   home_object: Option(Handle),
   flags: FnFlags,
@@ -237,7 +237,7 @@ fn call_function(
     state,
     fn_h,
     template,
-    unit,
+    unit_id,
     env,
     home_object,
     flags,
@@ -256,7 +256,7 @@ pub fn call_function_then(
   state: State,
   fn_h: Handle,
   template: FuncTemplate,
-  unit: Int,
+  unit_id: Int,
   env: EnvTuple,
   home_object: Option(Handle),
   flags: FnFlags,
@@ -296,7 +296,7 @@ pub fn call_function_then(
             CoroutineCall(
               fn_h:,
               template:,
-              unit:,
+              unit_id:,
               locals:,
               this: this_val,
               home_object: home,
@@ -336,7 +336,7 @@ pub fn call_function_then(
                 stack: [],
                 locals:,
                 func: template,
-                unit:,
+                unit_id:,
                 pc: 0,
                 call_stack: [saved, ..state.call_stack],
                 outer_depth: state.outer_depth,
@@ -440,7 +440,15 @@ pub fn call_cell(
 ) -> Result(State, StepExit) {
   case cell {
     SObject(
-      kind: BytecodeFn(template:, env:, home_object:, flags:, realm:, unit:, ..),
+      kind: BytecodeFn(
+        template:,
+        env:,
+        home_object:,
+        flags:,
+        realm:,
+        unit_id:,
+        ..,
+      ),
       ..,
     )
       if realm == state.agent.realm.id
@@ -450,7 +458,7 @@ pub fn call_cell(
           state,
           h,
           template,
-          unit,
+          unit_id,
           env,
           home_object,
           flags,
@@ -685,7 +693,15 @@ fn construct_handle(
 ) -> Result(State, StepExit) {
   case rt_store.t_cell_get(state.agent, ctor_h) {
     SObject(
-      kind: BytecodeFn(template:, env:, home_object:, flags:, realm:, unit:, ..),
+      kind: BytecodeFn(
+        template:,
+        env:,
+        home_object:,
+        flags:,
+        realm:,
+        unit_id:,
+        ..,
+      ),
       ..,
     )
       if realm == state.agent.realm.id
@@ -697,7 +713,7 @@ fn construct_handle(
             state,
             ctor_h,
             template,
-            unit,
+            unit_id,
             env,
             home_object,
             flags,
@@ -718,7 +734,7 @@ fn construct_handle(
             state,
             ctor_h,
             template,
-            unit,
+            unit_id,
             env,
             home_object,
             flags,
@@ -965,7 +981,7 @@ pub type RootCallee {
     env: EnvTuple,
     home: JsVal,
     flags: FnFlags,
-    unit: Int,
+    unit_id: Int,
   )
 }
 
@@ -975,7 +991,7 @@ pub fn root_callee(
   env: EnvTuple,
   home_object: Option(Handle),
   flags: FnFlags,
-  unit: Int,
+  unit_id: Int,
 ) -> RootCallee {
   RootCallee(
     callee: mk_object(fn_h),
@@ -983,7 +999,7 @@ pub fn root_callee(
     env:,
     home: home_value(home_object),
     flags:,
-    unit:,
+    unit_id:,
   )
 }
 
@@ -1011,7 +1027,7 @@ pub fn root_state(
   args: List(JsVal),
   new_target: JsVal,
 ) -> State {
-  let RootCallee(callee:, template:, env:, home:, flags:, unit:) = callee
+  let RootCallee(callee:, template:, env:, home:, flags:, unit_id:) = callee
   let #(locals, this_val, agent) =
     setup_frame(
       agent,
@@ -1032,7 +1048,7 @@ pub fn root_state(
     stack: [],
     locals:,
     func: template,
-    unit:,
+    unit_id:,
     call_stack: [],
     outer_depth: depth,
     depth:,
@@ -1049,7 +1065,7 @@ pub fn root_coroutine(state: State, fn_h: Handle) -> CoroutineCall {
   CoroutineCall(
     fn_h:,
     template: state.func,
-    unit: state.unit,
+    unit_id: state.unit_id,
     locals: state.locals,
     this: state.this,
     home_object: state.home_object,

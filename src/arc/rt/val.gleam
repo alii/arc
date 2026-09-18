@@ -4,15 +4,17 @@ import arc/bytecode/error_kind.{
   type ErrorKind, type JsError, JsError, RangeError, ReferenceError, SyntaxError,
   TypeError,
 }
+import arc/bytecode/key.{
+  Index, Named, array_index_of_float, canonical_key, index_key,
+}
 import arc/rt/js_string
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsNum, type JsOps, type JsVal, type ObjectKey,
-  type SymbolId, type ToPrimHint, BoundFn, BytecodeFn, CompiledFn, HintDefault,
-  HintNumber, HintString, Index, JFloat, JInt, JNan, JNegInf, JPosInf, KBig,
-  KBool, KHandle, KNull, KNum, KStr, KSym, KTdz, KUndef, Named, NativeFn,
-  ProxyObj, SObject, StringKey, SymbolKey, array_index_of_float, canonical_key,
-  classify, index_key, mk_int, mk_number, mk_object, mk_string,
+  type Agent, type Handle, type JsNum, type JsVal, type ObjectKey, type SymbolId,
+  type ToPrimHint, BoundFn, BytecodeFn, CompiledFn, HintDefault, HintNumber,
+  HintString, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KBool, KHandle, KNull,
+  KNum, KStr, KSym, KTdz, KUndef, NativeFn, ProxyObj, SObject, StringKey,
+  SymbolKey, classify, mk_int, mk_number, mk_object, mk_string,
   symbol_to_primitive,
 }
 import gleam/bit_array
@@ -22,13 +24,9 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
-fn require_ops(st: Agent) -> JsOps(Agent) {
-  st.store.ops
-}
-
 // allocates the realm's error object without throwing it
 pub fn t_new_error(st: Agent, kind: ErrorKind, msg: String) -> #(JsVal, Agent) {
-  require_ops(st).new_error(st, kind, msg)
+  st.store.ops.new_error(st, kind, msg)
 }
 
 pub fn t_throw(st: Agent, error: JsError) -> a {
@@ -44,7 +42,7 @@ pub fn or_throw(st: Agent, r: Result(a, JsError)) -> a {
 }
 
 fn throw_kind(st: Agent, kind: ErrorKind, msg: String) -> a {
-  let #(err, st) = require_ops(st).new_error(st, kind, msg)
+  let #(err, st) = st.store.ops.new_error(st, kind, msg)
   rt_store.t_throw(st, err)
 }
 
@@ -209,7 +207,7 @@ pub fn t_to_primitive(
     )
     KTdz -> panic as "ToPrimitive on the TDZ sentinel"
     KHandle(h) -> {
-      let ops = require_ops(st)
+      let ops = st.store.ops
       let #(exotic, st) = get_symbol(st, v, symbol_to_primitive)
       case is_nullish(exotic) {
         True -> t_ordinary_to_primitive(st, h, hint)
@@ -263,7 +261,7 @@ pub fn get_named(st: Agent, recv: JsVal, key: String) -> #(JsVal, Agent) {
 pub fn get_symbol(st: Agent, recv: JsVal, sym: SymbolId) -> #(JsVal, Agent) {
   let v = get_symbol_data(st, recv, sym)
   case is_miss(v) {
-    True -> require_ops(st).get_prop(st, recv, SymbolKey(sym))
+    True -> st.store.ops.get_prop(st, recv, SymbolKey(sym))
     False -> #(v, st)
   }
 }
@@ -290,7 +288,7 @@ fn call_primitive_methods(
   case method_names {
     [] -> t_throw_type_error(st, "Cannot convert object to primitive value")
     [name, ..rest] -> {
-      let ops = require_ops(st)
+      let ops = st.store.ops
       let #(method, st) = get_named(st, receiver, name)
       case is_callable(st, method) {
         True -> {
@@ -678,7 +676,7 @@ pub fn t_to_object(st: Agent, v: JsVal) -> #(Handle, Agent) {
     KNull -> t_throw_type_error(st, "Cannot convert null to object")
     KUndef -> t_throw_type_error(st, "Cannot convert undefined to object")
     KTdz -> panic as "ToObject on the TDZ sentinel"
-    _ -> require_ops(st).to_object(st, v)
+    _ -> st.store.ops.to_object(st, v)
   }
 }
 

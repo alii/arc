@@ -217,7 +217,7 @@ pub fn has_use_strict_directive(stmts: List(ast.StmtWithLine)) -> Bool {
     [
       ast.StmtWithLine(
         statement: ast.ExpressionStatement(
-          expression: ast.StringExpression(_, _),
+          expression: ast.StringLiteral(_, _),
           directive:,
         ),
         ..,
@@ -420,7 +420,7 @@ pub type ClassElementBucket {
 // the one partition, parser and emitter share it
 pub fn class_element_bucket(el: ast.ClassElement) -> ClassElementBucket {
   case el {
-    ast.ClassMethod(kind: ast.MethodConstructor, ..) -> ConstructorBucket
+    ast.ClassMethod(kind: ast.ConstructorMethod, ..) -> ConstructorBucket
     ast.ClassMethod(is_static: False, ..) -> InstanceMethodBucket
     ast.ClassMethod(is_static: True, ..) -> StaticMethodBucket
     ast.ClassField(is_static: False, ..) -> InstanceFieldBucket
@@ -516,9 +516,9 @@ pub fn class_private_names(body: List(ast.ClassElement)) -> List(String) {
 // nul prefix so source can never name it
 pub fn private_fn_const(kind: ast.MethodKind, name: String) -> String {
   case kind {
-    ast.MethodGet -> "\u{0}pg:" <> name
-    ast.MethodSet -> "\u{0}ps:" <> name
-    ast.MethodMethod | ast.MethodConstructor -> "\u{0}pm:" <> name
+    ast.GetterMethod -> "\u{0}pg:" <> name
+    ast.SetterMethod -> "\u{0}ps:" <> name
+    ast.PlainMethod | ast.ConstructorMethod -> "\u{0}pm:" <> name
   }
 }
 

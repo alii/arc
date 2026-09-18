@@ -1,4 +1,5 @@
 import arc/bytecode/error_kind.{RangeError, TypeError}
+import arc/bytecode/key.{Named, index_key}
 import arc/rt/abstract_ops as rt_abstract
 import arc/rt/async as rt_async
 import arc/rt/buffer as rt_buffer
@@ -24,12 +25,11 @@ import arc/rt/types.{
   ConcatHelper, ConcatItem, GenCompleted, GenExecuting, GenSuspendedStart,
   GenSuspendedYield, HelperDrop, HelperFilter, HelperFlatMap, HelperMap,
   HelperTake, IteratorConstructor, IteratorHelperObj, IteratorN, JNan, KHandle,
-  KNull, KStr, KUndef, MapIterator, Named, NoElements, Ordinary, ReturnThis,
-  SObject, SetIterator, StringIterator, StringKey, SymbolKey, TypedArrayObj,
+  KNull, KStr, KUndef, MapIterator, NoElements, Ordinary, ReturnThis, SObject,
+  SetIterator, StringIterator, StringKey, SymbolKey, TypedArrayObj,
   WrapForValidIteratorObj, ZipExhausted, ZipHelper, ZipLongest, ZipOpen,
-  ZipShortest, ZipStrict, classify, index_key, mk_bool, mk_int, mk_object,
-  mk_string, mk_undefined, symbol_async_iterator, symbol_iterator,
-  symbol_to_string_tag,
+  ZipShortest, ZipStrict, classify, mk_bool, mk_int, mk_object, mk_string,
+  mk_undefined, symbol_async_iterator, symbol_iterator, symbol_to_string_tag,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -254,10 +254,10 @@ fn alloc_iter_proto(
   #(h, st)
 }
 
-type AfsKind {
-  AfsNext
-  AfsReturn
-  AfsThrow
+type AsyncFromSyncForward {
+  ForwardNext
+  ForwardReturn
+  ForwardThrow
 }
 
 pub fn dispatch(
@@ -267,9 +267,9 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case n {
-    AsyncFromSyncNext -> async_from_sync(st, this, args, AfsNext)
-    AsyncFromSyncReturn -> async_from_sync(st, this, args, AfsReturn)
-    AsyncFromSyncThrow -> async_from_sync(st, this, args, AfsThrow)
+    AsyncFromSyncNext -> async_from_sync(st, this, args, ForwardNext)
+    AsyncFromSyncReturn -> async_from_sync(st, this, args, ForwardReturn)
+    AsyncFromSyncThrow -> async_from_sync(st, this, args, ForwardThrow)
     AsyncFromSyncUnwrap(done:) -> {
       let v = first_arg_or_undefined(args)
       let #(h, st) = rt_async.alloc_iter_result(st, v, done)
@@ -506,7 +506,7 @@ fn async_from_sync(
   st: Agent,
   this: JsVal,
   args: List(JsVal),
-  kind: AfsKind,
+  kind: AsyncFromSyncForward,
 ) -> #(JsVal, Agent) {
   let #(#(promise_h, resolve_h, reject_h), st) =
     rt_async.t_new_promise_capability(st)
@@ -514,7 +514,7 @@ fn async_from_sync(
   let cap_reject = mk_object(reject_h)
   let #(outcome, st) =
     rt_call.try_run(st, fn(st) {
-      do_async_from_sync(st, this, args, kind, cap_resolve, cap_reject)
+      forward_to_sync_iterator(st, this, args, kind, cap_resolve, cap_reject)
     })
   let st = case outcome {
     NormalCompletion(_) -> st
@@ -523,11 +523,11 @@ fn async_from_sync(
   #(mk_object(promise_h), st)
 }
 
-fn do_async_from_sync(
+fn forward_to_sync_iterator(
   st: Agent,
   this: JsVal,
   args: List(JsVal),
-  kind: AfsKind,
+  kind: AsyncFromSyncForward,
   cap_resolve: JsVal,
   cap_reject: JsVal,
 ) -> #(JsVal, Agent) {
@@ -539,12 +539,13 @@ fn do_async_from_sync(
     _ -> rt_val.t_throw_type_error(st, "not an Async-from-Sync Iterator")
   }
   let #(method, st) = case kind {
-    AfsNext -> #(sync.next_method, st)
-    AfsReturn -> rt_obj.t_get_prop(st, sync_iter, StringKey(Named("return")))
-    AfsThrow -> rt_obj.t_get_prop(st, sync_iter, StringKey(Named("throw")))
+    ForwardNext -> #(sync.next_method, st)
+    ForwardReturn ->
+      rt_obj.t_get_prop(st, sync_iter, StringKey(Named("return")))
+    ForwardThrow -> rt_obj.t_get_prop(st, sync_iter, StringKey(Named("throw")))
   }
   case kind, rt_val.is_callable(st, method) {
-    AfsReturn, False -> {
+    ForwardReturn, False -> {
       let arg = first_arg_or_undefined(args)
       let #(ir_h, st) = rt_async.alloc_iter_result(st, arg, done: True)
       let #(_, st) =
@@ -553,7 +554,7 @@ fn do_async_from_sync(
         ])
       #(mk_undefined(), st)
     }
-    AfsThrow, False -> {
+    ForwardThrow, False -> {
       let st = iter_protocol.iterator_close_normal(st, sync_iter)
       rt_val.t_throw_type_error(
         st,
@@ -565,8 +566,8 @@ fn do_async_from_sync(
       case classify(result_val) {
         KHandle(result_h) -> {
           let close_on_rejection = case kind {
-            AfsReturn -> False
-            AfsNext | AfsThrow -> True
+            ForwardReturn -> False
+            ForwardNext | ForwardThrow -> True
           }
           afs_continuation(
             st,
@@ -1200,7 +1201,7 @@ fn every_some(
     Every -> False
     AtLeastOne -> True
   }
-  let #(stopped_at, st) = predicate_loop(st, rec, func, 0, stop_on:)
+  let #(stopped_at, st) = step_until(st, rec, func, 0, stop_on:)
   let result = case quantifier {
     Every -> option.is_none(stopped_at)
     AtLeastOne -> option.is_some(stopped_at)
@@ -1209,7 +1210,7 @@ fn every_some(
 }
 
 // closes and returns the element once the predicate gives stop_on
-fn predicate_loop(
+fn step_until(
   st: Agent,
   rec: IteratorRecord,
   func: JsVal,
@@ -1229,7 +1230,7 @@ fn predicate_loop(
               let st = iter_protocol.iterator_close_normal(st, rec.iterator)
               #(Some(v), st)
             }
-            False -> predicate_loop(st, rec, func, counter + 1, stop_on:)
+            False -> step_until(st, rec, func, counter + 1, stop_on:)
           }
       }
     }
@@ -1238,7 +1239,7 @@ fn predicate_loop(
 
 fn find(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use rec, func, st <- consumer_with_callback(st, this, args, "find")
-  let #(matched, st) = predicate_loop(st, rec, func, 0, stop_on: True)
+  let #(matched, st) = step_until(st, rec, func, 0, stop_on: True)
   #(option.unwrap(matched, mk_undefined()), st)
 }
 
@@ -1447,16 +1448,16 @@ fn finish_after_close(
 }
 
 type ZipModeOption {
-  OptShortest
-  OptStrict
-  OptLongest(padding: JsVal)
+  ShortestOption
+  StrictOption
+  LongestOption(padding: JsVal)
 }
 
 fn zip_mode(opt: ZipModeOption) -> ZipMode {
   case opt {
-    OptShortest -> ZipShortest
-    OptStrict -> ZipStrict
-    OptLongest(padding: _) -> ZipLongest
+    ShortestOption -> ZipShortest
+    StrictOption -> ZipStrict
+    LongestOption(padding: _) -> ZipLongest
   }
 }
 
@@ -1471,8 +1472,8 @@ fn zip(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(input_rec, st) = iter_protocol.get_iterator_sync(st, iterables)
   let #(iters, st) = zip_collect(st, input_rec, [])
   let #(padding, st) = case mode {
-    OptLongest(padding: opt) -> zip_padding_iterated(st, opt, iters)
-    OptShortest | OptStrict -> #(unread_padding(iters), st)
+    LongestOption(padding: opt) -> zip_padding_iterated(st, opt, iters)
+    ShortestOption | StrictOption -> #(unread_padding(iters), st)
   }
   alloc_zip(st, iters, zip_mode(mode), padding, None)
 }
@@ -1493,8 +1494,8 @@ fn zip_keyed(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(#(keys, iters), st) =
     zip_keyed_collect(st, iterables, iterables_h, all_keys, [], [])
   let #(padding, st) = case mode {
-    OptLongest(padding: opt) -> zip_keyed_padding(st, opt, keys, iters)
-    OptShortest | OptStrict -> #(unread_padding(iters), st)
+    LongestOption(padding: opt) -> zip_keyed_padding(st, opt, keys, iters)
+    ShortestOption | StrictOption -> #(unread_padding(iters), st)
   }
   alloc_zip(st, iters, zip_mode(mode), padding, Some(keys))
 }
@@ -1506,19 +1507,19 @@ fn zip_options(
 ) -> #(ZipModeOption, Agent) {
   let options = arg_at(args, 1)
   case classify(options) {
-    KUndef -> #(OptShortest, st)
+    KUndef -> #(ShortestOption, st)
     KHandle(_) -> {
       let #(mode_v, st) =
         rt_obj.t_get_prop(st, options, StringKey(Named("mode")))
       case classify(mode_v) {
-        KUndef -> #(OptShortest, st)
-        KStr("shortest") -> #(OptShortest, st)
-        KStr("strict") -> #(OptStrict, st)
+        KUndef -> #(ShortestOption, st)
+        KStr("shortest") -> #(ShortestOption, st)
+        KStr("strict") -> #(StrictOption, st)
         KStr("longest") -> {
           let #(pad, st) =
             rt_obj.t_get_prop(st, options, StringKey(Named("padding")))
           case classify(pad) {
-            KUndef | KHandle(_) -> #(OptLongest(padding: pad), st)
+            KUndef | KHandle(_) -> #(LongestOption(padding: pad), st)
             _ ->
               rt_val.t_throw_type_error(
                 st,
@@ -1590,12 +1591,12 @@ fn zip_padding_iterated(
       use pad_rec, st <- or_close_all(st, fn() { opened }, fn(st) {
         iter_protocol.get_iterator_sync(st, padding_option)
       })
-      zip_padding_loop(st, pad_rec, opened, iter_count, [])
+      zip_padding_iterated_loop(st, pad_rec, opened, iter_count, [])
     }
   }
 }
 
-fn zip_padding_loop(
+fn zip_padding_iterated_loop(
   st: Agent,
   pad_rec: IteratorRecord,
   opened: List(JsVal),
@@ -1622,7 +1623,10 @@ fn zip_padding_loop(
           st,
         )
         NormalCompletion(Some(v)) ->
-          zip_padding_loop(st, pad_rec, opened, remaining - 1, [v, ..acc])
+          zip_padding_iterated_loop(st, pad_rec, opened, remaining - 1, [
+            v,
+            ..acc
+          ])
       }
     }
   }

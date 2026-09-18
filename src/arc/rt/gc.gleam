@@ -6,22 +6,22 @@ import arc/rt/bytecode.{
 }
 import arc/rt/types.{
   type Agent, type AsyncGenRequest, type Cell, type Handle, type IcEntry,
-  type JsElements, type JsStore, type JsVal, type ObjKind, type PromiseReaction,
+  type JsElements, type JsVal, type ObjKind, type PromiseReaction,
   type PromiseState, type Property, type ReactionHandler, type Resume,
-  type WeakKey, Agent, ArgumentsObj, ArrayBufferObj, ArrayIterator, ArrayObj,
-  AsyncFromSyncIterator, AsyncGenRequest, AsyncGeneratorObj, BigIntObj,
+  type Store, type WeakKey, Agent, ArgumentsObj, ArrayBufferObj, ArrayIterator,
+  ArrayObj, AsyncFromSyncIterator, AsyncGenRequest, AsyncGeneratorObj, BigIntObj,
   BooleanObj, BoundFn, BytecodeFn, CompiledFn, DataViewObj, DateObj, Dense,
   DisposableStackObj, ErrorObj, FinalizationRegistryObj, GeneratorObj, Handle,
   Handler, HostObj, IcCall, IcGlobal, IcInit, IcOff, IcRead, IdentityPassThrough,
-  IntlObj, IteratorHelperObj, JsStore, KHandle, MapIterator, MapObj,
-  ModuleNamespace, NativeFn, NoElements, NumberObj, Ordinary, PromiseFulfilled,
-  PromiseObj, PromisePending, PromiseReaction, PromiseRejected, ProxyObj,
-  RawJsonObj, RegExpObj, Registration, ResumeCompiled, ResumeFrame,
-  SAsyncContext, SAsyncGen, SBox, SDisposeCapability, SGenerator, SObject,
-  SPromiseData, SShapedObject, SetIterator, SetObj, Sparse, StringIterator,
-  StringObj, SymbolObj, TemporalObj, ThrowerPassThrough, TypedArrayObj,
-  WeakMapObj, WeakObjKey, WeakRefObj, WeakSetObj, WeakSymKey,
-  WrapForValidIteratorObj, classify, job_queue_to_list,
+  IntlObj, IteratorHelperObj, KHandle, MapIterator, MapObj, ModuleNamespace,
+  NativeFn, NoElements, NumberObj, Ordinary, PromiseFulfilled, PromiseObj,
+  PromisePending, PromiseReaction, PromiseRejected, ProxyObj, RawJsonObj,
+  RegExpObj, Registration, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
+  SBox, SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
+  SetIterator, SetObj, Sparse, Store, StringIterator, StringObj, SymbolObj,
+  TemporalObj, ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakObjKey,
+  WeakRefObj, WeakSetObj, WeakSymKey, WrapForValidIteratorObj, classify,
+  job_queue_to_list,
 }
 import gleam/dict.{type Dict}
 import gleam/int
@@ -48,9 +48,9 @@ fn push_symbol_props_refs(
 
 // exhaustive destructure: a new store field must be rooted here
 pub fn roots_of_state(st: Agent) -> List(Int) {
-  let JsStore(
-    data: _,
-    next: _,
+  let Store(
+    cells: _,
+    next_id: _,
     alloc_since_gc: _,
     gc_threshold: _,
     prop_seq: _,
@@ -58,20 +58,20 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
     next_shape: _,
     // ics are validated on use, so weak
     ics: _,
-    free_protos: _,
+    plain_write_protos: _,
     global_epoch: _,
     ops: _,
     microtasks:,
     pinned_roots:,
     meta: types.StoreMeta(
-      gc_live: _,
-      private_uid: _,
-      symbol_uid: _,
-      unit_uid: _,
+      live_count: _,
+      next_private_id: _,
+      next_symbol_id: _,
+      next_unit_id: _,
       unhandled_rejections:,
-      old: _,
-      old_next: _,
-      weak_old: _,
+      old_gen: _,
+      young_start: _,
+      old_weak_ids: _,
       major_live: _,
       minors_since_major: _,
     ),
@@ -138,7 +138,7 @@ fn push_suspended_frame_refs(
     parked: _,
     call_args:,
     realm: _,
-    unit: _,
+    unit_id: _,
   ) = frame
   let acc = push_template_refs(template, acc)
   let acc = push_refs(locals, acc)
@@ -224,7 +224,7 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       flags: _,
       fields_init:,
       realm: _,
-      unit: _,
+      unit_id: _,
       birth:,
     ) -> {
       let acc = push_optional_handle(home_object, acc)
@@ -345,67 +345,67 @@ pub fn t_maybe_collect(st: Agent) -> Agent {
 }
 
 // minor gcs are cheap, so a fixed young generation size
-pub fn due(js: JsStore(st)) -> Bool {
-  js.alloc_since_gc >= js.gc_threshold
+pub fn due(store: Store) -> Bool {
+  store.alloc_since_gc >= store.gc_threshold
 }
 
 pub fn t_hold_roots(st: Agent, held: List(JsVal)) -> #(Agent, List(Int)) {
-  let js = st.store
+  let store = st.store
   let ids =
     list.fold(held, [], fn(acc, v) { push_refs(v, acc) })
-    |> list.filter(fn(id) { !set.contains(js.pinned_roots, id) })
+    |> list.filter(fn(id) { !set.contains(store.pinned_roots, id) })
     |> list.unique
-  let pinned = list.fold(ids, js.pinned_roots, set.insert)
-  #(Agent(..st, store: JsStore(..js, pinned_roots: pinned)), ids)
+  let pinned = list.fold(ids, store.pinned_roots, set.insert)
+  #(Agent(..st, store: Store(..store, pinned_roots: pinned)), ids)
 }
 
 pub fn t_release_roots(st: Agent, ids: List(Int)) -> Agent {
-  let js = st.store
-  let pinned = list.fold(ids, js.pinned_roots, set.delete)
-  Agent(..st, store: JsStore(..js, pinned_roots: pinned))
+  let store = st.store
+  let pinned = list.fold(ids, store.pinned_roots, set.delete)
+  Agent(..st, store: Store(..store, pinned_roots: pinned))
 }
 
 // majors keep the old full-gc schedule, minors run in between
 pub const minors_per_major: Int = 16
 
 pub fn t_collect_some(st: Agent, extra_roots: List(Handle)) -> Agent {
-  let js = st.store
-  let meta = js.meta
+  let store = st.store
+  let meta = store.meta
   let floor = meta.major_live / 2
   case
-    meta.old_next > 0
-    && meta.gc_live - meta.major_live < int.max(js.gc_threshold, floor)
-    && meta.minors_since_major * js.gc_threshold
-    < int.max(minors_per_major * js.gc_threshold, floor)
+    meta.young_start > 0
+    && meta.live_count - meta.major_live < int.max(store.gc_threshold, floor)
+    && meta.minors_since_major * store.gc_threshold
+    < int.max(minors_per_major * store.gc_threshold, floor)
   {
     True -> collect_minor(st, extra_roots)
     False -> t_collect(st, extra_roots)
   }
 }
 
-// full; no renumbering, dead ids dropped, next falls past highest survivor
+// full; no renumbering, dead ids dropped, next_id falls past highest survivor
 pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {
-  let js = st.store
+  let store = st.store
   let roots =
     list.fold(extra_roots, roots_of_state(st), fn(a, h) { [h.id, ..a] })
-  let live = mark_loop(js.data, roots, dict.new())
-  let #(data, next, weak) = sweep(js.data, live)
+  let live = mark_reachable(store.cells, roots, dict.new())
+  let #(cells, next_id, weak) = sweep(store.cells, live)
   let live_count = dict.size(live)
   Agent(
     ..st,
-    store: JsStore(
-      ..js,
-      data:,
-      next:,
+    store: Store(
+      ..store,
+      cells:,
+      next_id:,
       alloc_since_gc: 0,
-      ics: dict.filter(js.ics, fn(_, entry) { is_read_ic(entry) }),
-      free_protos: dict.new(),
+      ics: dict.filter(store.ics, fn(_, entry) { is_read_ic(entry) }),
+      plain_write_protos: dict.new(),
       meta: types.StoreMeta(
-        ..js.meta,
-        gc_live: live_count,
-        old: data,
-        old_next: next,
-        weak_old: weak,
+        ..store.meta,
+        live_count:,
+        old_gen: cells,
+        young_start: next_id,
+        old_weak_ids: weak,
         major_live: live_count,
         minors_since_major: 0,
       ),
@@ -413,33 +413,33 @@ pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {
   )
 }
 
-// young ids are old_next and up; old cells reach them only if written since
+// young ids are young_start and up; old cells reach them only if written since
 fn collect_minor(st: Agent, extra_roots: List(Handle)) -> Agent {
-  let js = st.store
-  let meta = js.meta
-  let w = meta.old_next
-  let data = js.data
+  let store = st.store
+  let meta = store.meta
+  let w = meta.young_start
+  let cells = store.cells
   let roots =
     list.fold(extra_roots, roots_of_state(st), fn(a, h) { [h.id, ..a] })
   let roots =
-    list.fold(arena.diff_below(w, meta.old, data), roots, fn(acc, id) {
-      case arena.get_option(id, data), arena.get_option(id, meta.old) {
+    list.fold(arena.diff_below(w, meta.old_gen, cells), roots, fn(acc, id) {
+      case arena.get_option(id, cells), arena.get_option(id, meta.old_gen) {
         Some(cell), Some(before) -> diff_refs(before, cell, acc)
         Some(cell), None -> push_cell_refs(cell, acc)
         None, _ -> acc
       }
     })
-  let #(live, weak) = mark_young(data, roots, w, dict.new(), meta.weak_old)
+  let #(live, weak) = mark_young(cells, roots, w, dict.new(), meta.old_weak_ids)
   let is_live = fn(id) { id < w || marked(id, live) }
-  let kept = case dict.size(live) * 2 > js.next - w {
-    True -> reset_dead(data, w, js.next, live)
+  let kept = case dict.size(live) * 2 > store.next_id - w {
+    True -> reset_dead(cells, w, store.next_id, live)
     False ->
       list.sort(dict.keys(live), int.compare)
-      |> list.fold(arena.truncate(w, data), fn(acc, id) {
-        arena.set(id, arena.get(id, data), acc)
+      |> list.fold(arena.truncate(w, cells), fn(acc, id) {
+        arena.set(id, arena.get(id, cells), acc)
       })
   }
-  // ids under next are never handed out again, so stale weak map keys only
+  // ids under next_id are never handed out again, so stale weak map keys only
   // cost memory until the next major; refs and registries would dangle
   let #(kept, weak) =
     list.fold(weak, #(kept, []), fn(acc, id) {
@@ -456,16 +456,16 @@ fn collect_minor(st: Agent, extra_roots: List(Handle)) -> Agent {
     })
   Agent(
     ..st,
-    store: JsStore(
-      ..js,
-      data: kept,
+    store: Store(
+      ..store,
+      cells: kept,
       alloc_since_gc: 0,
       meta: types.StoreMeta(
         ..meta,
-        gc_live: meta.gc_live + dict.size(live),
-        old: kept,
-        old_next: js.next,
-        weak_old: weak,
+        live_count: meta.live_count + dict.size(live),
+        old_gen: kept,
+        young_start: store.next_id,
+        old_weak_ids: weak,
         minors_since_major: meta.minors_since_major + 1,
       ),
     ),
@@ -473,24 +473,24 @@ fn collect_minor(st: Agent, extra_roots: List(Handle)) -> Agent {
 }
 
 fn reset_dead(
-  data: Arena(Cell),
+  cells: Arena(Cell),
   id: Int,
   next: Int,
   live: Dict(Int, Nil),
 ) -> Arena(Cell) {
   case id >= next {
-    True -> data
+    True -> cells
     False ->
       case marked(id, live) {
-        True -> reset_dead(data, id + 1, next, live)
-        False -> reset_dead(arena.free(id, data), id + 1, next, live)
+        True -> reset_dead(cells, id + 1, next, live)
+        False -> reset_dead(arena.free(id, cells), id + 1, next, live)
       }
   }
 }
 
 // live young ids, plus any weak containers among them added to weak
 fn mark_young(
-  data: Arena(Cell),
+  cells: Arena(Cell),
   frontier: List(Int),
   w: Int,
   visited: Dict(Int, Nil),
@@ -500,17 +500,17 @@ fn mark_young(
     [] -> #(visited, weak)
     [id, ..rest] ->
       case id < w || marked(id, visited) {
-        True -> mark_young(data, rest, w, visited, weak)
+        True -> mark_young(cells, rest, w, visited, weak)
         False -> {
           let visited = mark(id, Nil, visited)
-          case arena.get_option(id, data) {
-            None -> mark_young(data, rest, w, visited, weak)
+          case arena.get_option(id, cells) {
+            None -> mark_young(cells, rest, w, visited, weak)
             Some(cell) -> {
               let weak = case is_weak_cell(cell) {
                 True -> [id, ..weak]
                 False -> weak
               }
-              mark_young(data, push_cell_refs(cell, rest), w, visited, weak)
+              mark_young(cells, push_cell_refs(cell, rest), w, visited, weak)
             }
           }
         }
@@ -543,8 +543,8 @@ fn marked(id: Int, live: Dict(Int, Nil)) -> Bool
 @external(erlang, "maps", "put")
 fn mark(id: Int, nil: Nil, live: Dict(Int, Nil)) -> Dict(Int, Nil)
 
-fn mark_loop(
-  data: Arena(Cell),
+fn mark_reachable(
+  cells: Arena(Cell),
   frontier: List(Int),
   visited: Dict(Int, Nil),
 ) -> Dict(Int, Nil) {
@@ -552,12 +552,13 @@ fn mark_loop(
     [] -> visited
     [id, ..rest] ->
       case marked(id, visited) {
-        True -> mark_loop(data, rest, visited)
+        True -> mark_reachable(cells, rest, visited)
         False -> {
           let visited = mark(id, Nil, visited)
-          case arena.get_option(id, data) {
-            None -> mark_loop(data, rest, visited)
-            Some(cell) -> mark_loop(data, push_cell_refs(cell, rest), visited)
+          case arena.get_option(id, cells) {
+            None -> mark_reachable(cells, rest, visited)
+            Some(cell) ->
+              mark_reachable(cells, push_cell_refs(cell, rest), visited)
           }
         }
       }
@@ -565,7 +566,7 @@ fn mark_loop(
 }
 
 fn sweep(
-  data: Arena(Cell),
+  cells: Arena(Cell),
   live: Dict(Int, Nil),
 ) -> #(Arena(Cell), Int, List(Int)) {
   let is_live = fn(id) { marked(id, live) }
@@ -587,7 +588,7 @@ fn sweep(
         }
       },
       #([], []),
-      data,
+      cells,
     )
   let next = case kept {
     [] -> 0
@@ -657,20 +658,20 @@ fn weak_live(v: JsVal, is_live: fn(Int) -> Bool) -> Option(JsVal) {
 }
 
 pub type GcStats {
-  GcStats(live: Int, next: Int, since_gc: Int)
+  GcStats(live_count: Int, next_id: Int, alloc_since_gc: Int)
 }
 
 pub fn stats(st: Agent) -> GcStats {
-  let js = st.store
+  let store = st.store
   GcStats(
-    live: arena.count(js.data),
-    next: js.next,
-    since_gc: js.alloc_since_gc,
+    live_count: arena.count(store.cells),
+    next_id: store.next_id,
+    alloc_since_gc: store.alloc_since_gc,
   )
 }
 
 pub fn t_is_live(st: Agent, h: Handle) -> Bool {
-  let js = st.store
+  let store = st.store
   let Handle(id) = h
-  option.is_some(arena.get_option(id, js.data))
+  option.is_some(arena.get_option(id, store.cells))
 }

@@ -1,6 +1,7 @@
 import arc/internal/digits
 import arc/rt/intl_data.{
-  type Granularity, type Segment, GGrapheme, GSentence, GWord, Segment,
+  type Granularity, type Segment, GraphemeGranularity, Segment,
+  SentenceGranularity, WordGranularity,
 }
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -9,9 +10,9 @@ import gleam/string
 // approximate root rules, indices in utf-16 code units
 pub fn segment_string(s: String, granularity: Granularity) -> List(Segment) {
   case granularity {
-    GWord -> segment_words(s)
-    GSentence -> segment_sentences(s)
-    GGrapheme -> segment_graphemes(s)
+    WordGranularity -> segment_words(s)
+    SentenceGranularity -> segment_sentences(s)
+    GraphemeGranularity -> segment_graphemes(s)
   }
 }
 

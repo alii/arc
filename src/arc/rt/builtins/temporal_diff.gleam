@@ -251,10 +251,10 @@ pub fn bubble_date_duration(
     |> list.filter(fn(u) {
       unit_rank(u) <= unit_rank(largest) && { u != Week || largest == Week }
     })
-  bubble_loop(sign, dur, nudged_ns, origin, candidates)
+  bubble_date_duration_loop(sign, dur, nudged_ns, origin, candidates)
 }
 
-fn bubble_loop(
+fn bubble_date_duration_loop(
   sign: Int,
   dur: Duration,
   nudged_ns: Int,
@@ -281,7 +281,8 @@ fn bubble_loop(
         |> add_days(end_dur.weeks * 7)
       let end_ns = utc_epoch_ns(end_date, origin.1)
       case int_sign(nudged_ns - end_ns) != 0 - sign {
-        True -> bubble_loop(sign, end_dur, nudged_ns, origin, rest)
+        True ->
+          bubble_date_duration_loop(sign, end_dur, nudged_ns, origin, rest)
         False -> dur
       }
     }

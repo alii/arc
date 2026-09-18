@@ -1,4 +1,5 @@
 import arc/bytecode/error_kind.{TypeError}
+import arc/bytecode/key.{Named}
 import arc/bytecode/opcode.{
   AsyncYieldStarNext, CatchOnly, Finally, IterCloseGuard, Pc, YieldStar,
 }
@@ -25,9 +26,9 @@ import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type EvalKind, type FrameInfo, type Handle, type IteratorRecord,
-  type JsOps, type JsVal, type Step, Agent, BytecodeFn, JsOps, JsStore, KHandle,
-  KNull, KUndef, Named, ResumeFrame, SObject, StepAwait, StepReturn, StepThrow,
-  StepYield, StringKey, classify, mk_int, mk_object, mk_undefined,
+  type JsOps, type JsVal, type Step, Agent, BytecodeFn, JsOps, KHandle, KNull,
+  KUndef, ResumeFrame, SObject, StepAwait, StepReturn, StepThrow, StepYield,
+  Store, StringKey, classify, mk_int, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bool
@@ -36,10 +37,10 @@ import gleam/result
 
 pub fn link(agent: Agent) -> Agent {
   let store = agent.store
-  Agent(..agent, store: JsStore(..store, ops: linked_ops(store.ops)))
+  Agent(..agent, store: Store(..store, ops: linked_ops(store.ops)))
 }
 
-fn linked_ops(ops: JsOps(Agent)) -> JsOps(Agent) {
+fn linked_ops(ops: JsOps) -> JsOps {
   JsOps(
     ..ops,
     eval_hook: eval_source,
@@ -164,17 +165,17 @@ pub fn call_bytecode(
     home_object:,
     flags:,
     realm:,
-    unit:,
+    unit_id:,
     ..,
   ) = kind
     as "call_bytecode: not a BytecodeFn kind"
   case st.call_depth >= limits.max_call_depth, realm == st.realm.id {
     True, _ -> depth_exceeded(st)
     False, True ->
-      run_call(st, fn_h, template, env, home_object, flags, unit, this, args)
+      run_call(st, fn_h, template, env, home_object, flags, unit_id, this, args)
     False, False -> {
       use st <- rt_realm.with_realm(st, realm)
-      run_call(st, fn_h, template, env, home_object, flags, unit, this, args)
+      run_call(st, fn_h, template, env, home_object, flags, unit_id, this, args)
     }
   }
 }
@@ -191,7 +192,7 @@ pub fn prepare_call(
     home_object:,
     flags:,
     realm:,
-    unit:,
+    unit_id:,
     ..,
   ) = kind
     as "prepare_call: not a BytecodeFn kind"
@@ -203,7 +204,7 @@ pub fn prepare_call(
   {
     True -> {
       let callee =
-        call.root_callee(fn_h, template, env, home_object, flags, unit)
+        call.root_callee(fn_h, template, env, home_object, flags, unit_id)
       let new_target = mk_undefined()
       fn(st, args) { call_prepared(st, callee, this, args, new_target) }
     }
@@ -254,11 +255,12 @@ fn run_call(
   env: bytecode.EnvTuple,
   home_object: Option(Handle),
   flags: types.FnFlags,
-  unit: Int,
+  unit_id: Int,
   this: JsVal,
   args: List(JsVal),
 ) -> #(Result(JsVal, JsVal), Agent) {
-  let callee = call.root_callee(fn_h, template, env, home_object, flags, unit)
+  let callee =
+    call.root_callee(fn_h, template, env, home_object, flags, unit_id)
   case template.is_generator || template.is_async {
     False -> run_plain_call(st, callee, this, args)
     True -> {
@@ -339,7 +341,15 @@ fn run_construct(
   new_target: JsVal,
 ) -> #(Completion(JsVal), Agent) {
   let assert SObject(
-    kind: BytecodeFn(template:, env:, home_object:, flags:, realm:, unit:, ..),
+    kind: BytecodeFn(
+      template:,
+      env:,
+      home_object:,
+      flags:,
+      realm:,
+      unit_id:,
+      ..,
+    ),
     ..,
   ) = rt_store.t_cell_get(st, callee_h)
     as "construct_bytecode: handle is not a BytecodeFn cell"
@@ -350,7 +360,7 @@ fn run_construct(
       let #(outcome, st) = {
         use st <- rt_realm.with_realm(st, realm)
         let callee =
-          call.root_callee(callee_h, template, env, home_object, flags, unit)
+          call.root_callee(callee_h, template, env, home_object, flags, unit_id)
         case call.enter_root(st, callee, this, args, new_target) {
           Error(#(thrown, agent)) -> #(
             RootSettled(ThrowCompletion(thrown)),
@@ -416,7 +426,7 @@ fn start_coroutine(
   let call.CoroutineCall(
     fn_h:,
     template:,
-    unit:,
+    unit_id:,
     locals:,
     this:,
     home_object:,
@@ -433,7 +443,7 @@ fn start_coroutine(
       stack: [],
       locals:,
       func: template,
-      unit:,
+      unit_id:,
       call_stack: [],
       outer_depth: agent.call_depth,
       depth: agent.call_depth,

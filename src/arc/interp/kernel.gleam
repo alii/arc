@@ -3,14 +3,13 @@
 import arc/bytecode/binop.{type PureBinOp}
 import arc/bytecode/key.{type PropertyKey}
 import arc/bytecode/lexical.{type LexicalSlots}
-import arc/bytecode/opcode.{type Classified}
+import arc/bytecode/opcode.{type ClassifiedBinOp}
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/state.{type State, type StepExit}
 import arc/rt/bytecode.{type EnvCapture, type EnvTuple}
 import arc/rt/types.{
-  type Agent, type Cell, type Handle, type JsStore, type JsVal,
-  type LexicalGlobal, type Property, type PropertyKey as RtPropertyKey,
-  type SymbolId,
+  type Agent, type Cell, type Handle, type JsVal, type LexicalGlobal,
+  type Property, type Store, type SymbolId,
 }
 import gleam
 import gleam/dict.{type Dict}
@@ -165,7 +164,7 @@ pub fn ctor_prototype(agent: Agent, new_target: JsVal) -> Handle
 pub fn list_of(agent: Agent, array_like: JsVal) -> List(JsVal)
 
 @external(erlang, "arc_rt_ops_ffi", "classified_binop")
-pub fn classified_binop(kind: Classified, a: JsVal, b: JsVal) -> JsVal
+pub fn classified_binop(kind: ClassifiedBinOp, a: JsVal, b: JsVal) -> JsVal
 
 @external(erlang, "arc_rt_ops_ffi", "pure_binop")
 pub fn pure_binop(op: PureBinOp, a: JsVal, b: JsVal) -> JsVal
@@ -230,7 +229,7 @@ pub fn instance_of(
 ) -> JsVal
 
 @external(erlang, "arc_interp_ffi", "type_of")
-pub fn type_of(store: JsStore(Agent), v: JsVal) -> String
+pub fn type_of(store: Store, v: JsVal) -> String
 
 @external(erlang, "arc_interp_ffi", "box_get")
 pub fn box_get(agent: Agent, box: JsVal) -> JsVal
@@ -239,7 +238,7 @@ pub fn box_get(agent: Agent, box: JsVal) -> JsVal
 pub fn get_field(agent: Agent, obj: JsVal, key: PropertyKey) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "own_data")
-pub fn own_data(props: Dict(RtPropertyKey, Property), key: PropertyKey) -> JsVal
+pub fn own_data(props: Dict(PropertyKey, Property), key: PropertyKey) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "get_global")
 pub fn get_global(
@@ -250,56 +249,51 @@ pub fn get_global(
 
 @external(erlang, "arc_interp_prop_ffi", "put_global")
 pub fn put_global(
-  store: JsStore(Agent),
+  store: Store,
   lex: Dict(String, LexicalGlobal),
   global: Handle,
   name: String,
   v: JsVal,
   strict strict: Bool,
-) -> JsStore(Agent)
+) -> Store
 
 @external(erlang, "arc_interp_prop_ffi", "get_elem")
-pub fn get_elem(store: JsStore(Agent), obj: JsVal, key: JsVal) -> JsVal
+pub fn get_elem(store: Store, obj: JsVal, key: JsVal) -> JsVal
 
-@external(erlang, "arc_interp_prop_ffi", "get_elem2")
-pub fn get_elem2(store: JsStore(Agent), obj: JsVal, key: JsVal) -> JsVal
+@external(erlang, "arc_interp_prop_ffi", "get_elem_keep")
+pub fn get_elem_keep(store: Store, obj: JsVal, key: JsVal) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "put_field")
 pub fn put_field(
-  store: JsStore(Agent),
+  store: Store,
   obj: JsVal,
   key: PropertyKey,
   v: JsVal,
   create create: Bool,
-) -> JsStore(Agent)
+) -> Store
 
 @external(erlang, "arc_interp_prop_ffi", "new_object")
 pub fn new_object(
-  store: JsStore(Agent),
+  store: Store,
   proto: Handle,
   keys: List(PropertyKey),
   count: Int,
   stack: List(JsVal),
-) -> #(JsVal, List(JsVal), JsStore(Agent))
+) -> #(JsVal, List(JsVal), Store)
 
 @external(erlang, "arc_interp_prop_ffi", "new_receiver")
 pub fn new_receiver(agent: Agent, proto: JsVal) -> #(JsVal, Agent)
 
 @external(erlang, "arc_interp_prop_ffi", "define_field")
 pub fn define_field(
-  store: JsStore(Agent),
+  store: Store,
   obj: JsVal,
   key: PropertyKey,
   v: JsVal,
-) -> JsStore(Agent)
+) -> Store
 
 @external(erlang, "arc_interp_prop_ffi", "put_elem")
-pub fn put_elem(
-  store: JsStore(Agent),
-  obj: JsVal,
-  index: JsVal,
-  v: JsVal,
-) -> JsStore(Agent)
+pub fn put_elem(store: Store, obj: JsVal, index: JsVal, v: JsVal) -> Store
 
 @external(erlang, "arc_interp_locals_ffi", "frame_locals")
 pub fn frame_locals(

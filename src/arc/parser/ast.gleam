@@ -75,22 +75,18 @@ pub type ModuleItem {
   StatementItem(StmtWithLine)
   ImportDeclaration(
     specifiers: List(ImportSpecifier),
-    source: StringLiteral,
+    source: String,
     phase: ImportPhase,
     span: Span,
   )
   ExportDeclaration(declaration: Declaration, line: Int, span: Span)
   ExportNamed(
     specifiers: List(ExportSpecifier),
-    source: Option(StringLiteral),
+    source: Option(String),
     span: Span,
   )
   ExportDefaultDeclaration(declaration: Expression, line: Int, span: Span)
-  ExportAllDeclaration(
-    exported: Option(String),
-    source: StringLiteral,
-    span: Span,
-  )
+  ExportAllDeclaration(exported: Option(String), source: String, span: Span)
 }
 
 pub type Declaration {
@@ -127,10 +123,6 @@ pub type ImportSpecifier {
 
 pub type ExportSpecifier {
   ExportSpecifier(local: String, exported: String, local_span: Span)
-}
-
-pub type StringLiteral {
-  StringLit(value: String)
 }
 
 pub type Statement {
@@ -227,10 +219,10 @@ pub type ClassElement {
 }
 
 pub type MethodKind {
-  MethodConstructor
-  MethodMethod
-  MethodGet
-  MethodSet
+  ConstructorMethod
+  PlainMethod
+  GetterMethod
+  SetterMethod
 }
 
 pub type VariableKind {
@@ -255,7 +247,7 @@ pub type Expression {
   Identifier(span: Span, name: String)
   NumberLiteral(span: Span, value: LiteralNumber)
   BigIntLiteral(span: Span, value: Int)
-  StringExpression(span: Span, value: String)
+  StringLiteral(span: Span, value: String)
   BooleanLiteral(span: Span, value: Bool)
   NullLiteral(span: Span)
   UndefinedExpression(span: Span)

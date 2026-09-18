@@ -113,7 +113,7 @@ canonical_key_bin(<<C, _/binary>> = B) when C >= $0, C =< $9 ->
 canonical_key_bin(B) -> {?KEY_NAMED, B}.
 
 %% not a jsval, classify has no clause for it
-mk_hole() -> js_hole.
+mk_hole() -> ?ELEMS_HOLE.
 
 mk_array_lit(Elems) -> {js_alit, Elems}.
 

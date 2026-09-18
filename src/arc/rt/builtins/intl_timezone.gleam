@@ -3,15 +3,16 @@ import arc/rt/builtins/intl_format
 import arc/rt/builtins/temporal_common
 import arc/rt/builtins/temporal_tz
 import arc/rt/intl_data.{
-  type DtfTimeZone, type TimeZoneNameWidth, FixedZone, HostZone, NamedZone,
-  TzLong, TzLongGeneric, TzLongOffset, TzShort, TzShortGeneric, TzShortOffset,
+  type FormatTimeZone, type TimeZoneNameWidth, FixedZone, HostZone, NamedZone,
+  ZoneLong, ZoneLongGeneric, ZoneLongOffset, ZoneShort, ZoneShortGeneric,
+  ZoneShortOffset,
 }
 import arc/rt/types.{type Agent}
 import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
-pub fn resolve(st: Agent, s: String) -> #(Option(DtfTimeZone), Agent) {
+pub fn resolve(st: Agent, s: String) -> #(Option(FormatTimeZone), Agent) {
   case parse_utc_offset_minutes(s) {
     Some(minutes) -> #(Some(FixedZone(offset_zone_name(minutes), minutes)), st)
     None ->
@@ -30,7 +31,7 @@ fn is_utc(name: String) -> Bool {
 }
 
 // a zone the host has no data for is not offered
-fn named_zone(st: Agent, s: String) -> #(Option(DtfTimeZone), Agent) {
+fn named_zone(st: Agent, s: String) -> #(Option(FormatTimeZone), Agent) {
   case temporal_tz.known_identifier(s) {
     None -> #(None, st)
     Some(identifier) ->
@@ -45,7 +46,7 @@ fn named_zone(st: Agent, s: String) -> #(Option(DtfTimeZone), Agent) {
   }
 }
 
-pub fn offset_at(tz: DtfTimeZone, instant_ms: Int) -> Int {
+pub fn offset_at(tz: FormatTimeZone, instant_ms: Int) -> Int {
   case tz {
     HostZone(zone:) -> host_time.zone_offset_at_utc_ms(zone, instant_ms)
     FixedZone(offset_minutes:, ..) -> offset_minutes
@@ -55,7 +56,7 @@ pub fn offset_at(tz: DtfTimeZone, instant_ms: Int) -> Int {
 }
 
 // etc/gmt+n is utc-n and etc/gmt-n is utc+n
-fn etc_gmt_zone(lower: String) -> Option(DtfTimeZone) {
+fn etc_gmt_zone(lower: String) -> Option(FormatTimeZone) {
   case lower {
     "etc/gmt+" <> digits ->
       etc_gmt_fixed("Etc/GMT+", digits, sign: -1, max_hours: 12)
@@ -70,7 +71,7 @@ fn etc_gmt_fixed(
   digits: String,
   sign sign: Int,
   max_hours max_hours: Int,
-) -> Option(DtfTimeZone) {
+) -> Option(FormatTimeZone) {
   case int.parse(digits) {
     Ok(hours) if hours >= 1 && hours <= max_hours ->
       Some(FixedZone(prefix <> int.to_string(hours), sign * hours * 60))
@@ -130,11 +131,11 @@ pub fn display_name(
   offset_minutes: Int,
 ) -> String {
   case is_utc(name), width {
-    True, TzShort | True, TzShortGeneric -> "UTC"
-    True, TzLong | True, TzLongGeneric -> "Coordinated Universal Time"
-    _, TzLong | _, TzLongOffset | _, TzLongGeneric ->
+    True, ZoneShort | True, ZoneShortGeneric -> "UTC"
+    True, ZoneLong | True, ZoneLongGeneric -> "Coordinated Universal Time"
+    _, ZoneLong | _, ZoneLongOffset | _, ZoneLongGeneric ->
       gmt_offset_label(offset_minutes, long: True)
-    _, TzShort | _, TzShortOffset | _, TzShortGeneric ->
+    _, ZoneShort | _, ZoneShortOffset | _, ZoneShortGeneric ->
       gmt_offset_label(offset_minutes, long: False)
   }
 }

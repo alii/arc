@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
@@ -10,9 +11,9 @@ import arc/rt/types.{
   type JsVal, type Realm, AggregateErrorConstructor, DataProperty,
   ErrorCaptureStackTrace, ErrorConstructor, ErrorIsError, ErrorN, ErrorObj,
   ErrorPrototypeToString, ErrorStackGetter, ErrorStackSetter, FrameInfo, JFloat,
-  JInt, JNan, JNegInf, JPosInf, KHandle, KNull, KNum, KStr, KUndef, Named,
-  ParsedDesc, SObject, StringKey, SuppressedErrorConstructor, classify, mk_bool,
-  mk_number, mk_object, mk_string, mk_undefined,
+  JInt, JNan, JNegInf, JPosInf, KHandle, KNull, KNum, KStr, KUndef, ParsedDesc,
+  SObject, StringKey, SuppressedErrorConstructor, classify, mk_bool, mk_number,
+  mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict

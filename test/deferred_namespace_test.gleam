@@ -18,12 +18,14 @@ fn no_source_loads(_resolved: String) {
 fn deferred_namespace_of(
   spec: String,
 ) -> Result(Handle, module.DeferredNamespaceError) {
-  let s =
+  let ctx =
     rt_builtins.new_agent(rt_helpers.quiet_hooks())
     |> entry.link
     |> host.from_agent(host.new_key())
-  let #(s, greet) =
-    host.function(s, "greet", 0, fn(_a, _t, s) { #(s, Ok(mk_string("hi"))) })
+  let #(ctx, greet) =
+    host.function(ctx, "greet", 0, fn(_a, _t, ctx) {
+      #(ctx, Ok(mk_string("hi")))
+    })
   let hosts =
     dict.from_list([
       #("dance", module.HostModule("dance", [#("greet", greet)])),
@@ -37,11 +39,12 @@ fn deferred_namespace_of(
       hosts,
     )
   let #(_st, out) =
-    host.with_state(s.agent, s.key, fn(s) {
-      let assert #(st, Ok(linked)) = module.link_for_evaluation(bundle, s.agent)
+    host.with_context(ctx.agent, ctx.key, fn(ctx) {
+      let assert #(st, Ok(linked)) =
+        module.link_for_evaluation(bundle, ctx.agent)
       let #(st, deferred) =
         module.get_or_create_deferred_namespace(st, linked, spec)
-      #(host.State(..s, agent: st), deferred)
+      #(host.Context(..ctx, agent: st), deferred)
     })
   out
 }

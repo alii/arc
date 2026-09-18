@@ -1,3 +1,4 @@
+import arc/bytecode/key.{type PropertyKey, Index}
 import arc/rt/elements
 import arc/rt/store as rt_store
 import arc/rt/typed_array_bytes.{
@@ -5,11 +6,11 @@ import arc/rt/typed_array_bytes.{
 }
 import arc/rt/types.{
   type Agent, type BigIntKind, type BufferStorage, type Handle, type JsElements,
-  type JsNum, type JsVal, type NumberKind, type Property, type PropertyKey,
-  type TypedArrayKind, AccessorProperty, ArgumentsObj, ArrayBufferObj, ArrayObj,
-  BigKind, DataProperty, Index, JFloat, JInt, JNan, JNegInf, JPosInf, KBig,
-  KHandle, KNum, NumKind, Ordinary, SObject, SShapedObject, classify, mk_bigint,
-  mk_int, mk_number,
+  type JsNum, type JsVal, type NumberKind, type Property, type TypedArrayKind,
+  AccessorProperty, ArgumentsObj, ArrayBufferObj, ArrayObj, BigKind,
+  DataProperty, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KHandle, KNum,
+  NumKind, Ordinary, SObject, SShapedObject, classify, mk_bigint, mk_int,
+  mk_number,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -344,20 +345,20 @@ pub fn typed_array_store(
   case view.elem_kind {
     BigKind(big_kind) -> {
       let #(n, st) = rt_val.t_to_bigint(st, val)
-      do_typed_store(st, view, idx, fn(data, off) {
+      write_typed_element(st, view, idx, fn(data, off) {
         set_int(data, off, typed_array_bytes.bigint_elem(big_kind), n)
       })
     }
     NumKind(num_kind) -> {
       let #(num, st) = rt_val.t_to_number(st, val)
-      do_typed_store(st, view, idx, fn(data, off) {
+      write_typed_element(st, view, idx, fn(data, off) {
         encode_typed_number(data, off, num_kind, num)
       })
     }
   }
 }
 
-fn do_typed_store(
+fn write_typed_element(
   st: Agent,
   view: View,
   idx: Option(Int),
@@ -457,10 +458,10 @@ pub fn typed_array_encode_primitives(
   values: List(JsVal),
 ) -> Option(BitArray) {
   let size = typed_array_bytes.elem_size(elem_kind)
-  encode_primitives_loop(elem_kind, size, values, [])
+  typed_array_encode_primitives_loop(elem_kind, size, values, [])
 }
 
-fn encode_primitives_loop(
+fn typed_array_encode_primitives_loop(
   elem_kind: TypedArrayKind,
   size: Int,
   values: List(JsVal),
@@ -483,7 +484,8 @@ fn encode_primitives_loop(
           }
       }
       case seg {
-        Some(s) -> encode_primitives_loop(elem_kind, size, rest, [s, ..acc])
+        Some(s) ->
+          typed_array_encode_primitives_loop(elem_kind, size, rest, [s, ..acc])
         None -> None
       }
     }
@@ -500,7 +502,7 @@ pub fn plain_indexed_values(
     SObject(kind:, props:, elements:, ..) ->
       case kind {
         ArrayObj(_) | ArgumentsObj(..) | Ordinary ->
-          plain_indexed_loop(props, elements, len - 1, [])
+          plain_indexed_values_loop(props, elements, len - 1, [])
         _ -> None
       }
     SShapedObject(..) ->
@@ -512,7 +514,7 @@ pub fn plain_indexed_values(
   }
 }
 
-fn plain_indexed_loop(
+fn plain_indexed_values_loop(
   props: dict.Dict(PropertyKey, Property),
   elements: JsElements,
   k: Int,
@@ -531,7 +533,7 @@ fn plain_indexed_loop(
         Some(v) ->
           case classify(v) {
             KHandle(_) -> None
-            _ -> plain_indexed_loop(props, elements, k - 1, [v, ..acc])
+            _ -> plain_indexed_values_loop(props, elements, k - 1, [v, ..acc])
           }
       }
     }

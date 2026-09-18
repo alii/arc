@@ -27,37 +27,37 @@ decode_escapes(S, Mode) ->
         nomatch -> {ok, S};
         _ ->
             try
-                {ok, iolist_to_binary(escape_loop(S, Mode, []))}
+                {ok, iolist_to_binary(decode_escapes_loop(S, Mode, []))}
             catch
                 throw:invalid_escape -> {error, invalid_escape}
             end
     end.
 
-escape_loop(<<>>, _Mode, Acc) ->
+decode_escapes_loop(<<>>, _Mode, Acc) ->
     lists:reverse(Acc);
-escape_loop(<<"\\", Rest/binary>>, Mode, Acc) ->
+decode_escapes_loop(<<"\\", Rest/binary>>, Mode, Acc) ->
     case Rest of
         <<>> -> throw(invalid_escape);
-        <<"b", T/binary>> -> escape_loop(T, Mode, [<<8>> | Acc]);
-        <<"t", T/binary>> -> escape_loop(T, Mode, [<<9>> | Acc]);
-        <<"n", T/binary>> -> escape_loop(T, Mode, [<<10>> | Acc]);
-        <<"v", T/binary>> -> escape_loop(T, Mode, [<<11>> | Acc]);
-        <<"f", T/binary>> -> escape_loop(T, Mode, [<<12>> | Acc]);
-        <<"r", T/binary>> -> escape_loop(T, Mode, [<<13>> | Acc]);
-        <<"\"", T/binary>> -> escape_loop(T, Mode, [<<34>> | Acc]);
-        <<"'", T/binary>> -> escape_loop(T, Mode, [<<39>> | Acc]);
-        <<"`", T/binary>> -> escape_loop(T, Mode, [<<"`">> | Acc]);
-        <<"$", T/binary>> -> escape_loop(T, Mode, [<<"$">> | Acc]);
-        <<"\\", T/binary>> -> escape_loop(T, Mode, [<<"\\">> | Acc]);
-        <<"\r\n", T/binary>> -> escape_loop(T, Mode, Acc);
-        <<"\r", T/binary>> -> escape_loop(T, Mode, Acc);
-        <<"\n", T/binary>> -> escape_loop(T, Mode, Acc);
+        <<"b", T/binary>> -> decode_escapes_loop(T, Mode, [<<8>> | Acc]);
+        <<"t", T/binary>> -> decode_escapes_loop(T, Mode, [<<9>> | Acc]);
+        <<"n", T/binary>> -> decode_escapes_loop(T, Mode, [<<10>> | Acc]);
+        <<"v", T/binary>> -> decode_escapes_loop(T, Mode, [<<11>> | Acc]);
+        <<"f", T/binary>> -> decode_escapes_loop(T, Mode, [<<12>> | Acc]);
+        <<"r", T/binary>> -> decode_escapes_loop(T, Mode, [<<13>> | Acc]);
+        <<"\"", T/binary>> -> decode_escapes_loop(T, Mode, [<<34>> | Acc]);
+        <<"'", T/binary>> -> decode_escapes_loop(T, Mode, [<<39>> | Acc]);
+        <<"`", T/binary>> -> decode_escapes_loop(T, Mode, [<<"`">> | Acc]);
+        <<"$", T/binary>> -> decode_escapes_loop(T, Mode, [<<"$">> | Acc]);
+        <<"\\", T/binary>> -> decode_escapes_loop(T, Mode, [<<"\\">> | Acc]);
+        <<"\r\n", T/binary>> -> decode_escapes_loop(T, Mode, Acc);
+        <<"\r", T/binary>> -> decode_escapes_loop(T, Mode, Acc);
+        <<"\n", T/binary>> -> decode_escapes_loop(T, Mode, Acc);
         %% u+2028 / u+2029 line continuations
-        <<16#E2, 16#80, 16#A8, T/binary>> -> escape_loop(T, Mode, Acc);
-        <<16#E2, 16#80, 16#A9, T/binary>> -> escape_loop(T, Mode, Acc);
+        <<16#E2, 16#80, 16#A8, T/binary>> -> decode_escapes_loop(T, Mode, Acc);
+        <<16#E2, 16#80, 16#A9, T/binary>> -> decode_escapes_loop(T, Mode, Acc);
         <<"x", H1, H2, T/binary>> when ?IS_HEX1(H1), ?IS_HEX1(H2) ->
             CP = list_to_integer([H1, H2], 16),
-            escape_loop(T, Mode, [encode_codepoint(CP) | Acc]);
+            decode_escapes_loop(T, Mode, [encode_codepoint(CP) | Acc]);
         <<"x", _/binary>> -> throw(invalid_escape);
         <<"u{", T/binary>> ->
             case read_braced_hex(T) of
@@ -73,22 +73,22 @@ escape_loop(<<"\\", Rest/binary>>, Mode, Acc) ->
                 <<D, _/binary>> when D >= $0, D =< $9 ->
                     decode_octal(<<"0", T/binary>>, Mode, Acc);
                 _ ->
-                    escape_loop(T, Mode, [<<0>> | Acc])
+                    decode_escapes_loop(T, Mode, [<<0>> | Acc])
             end;
         <<D, _/binary>> when D >= $1, D =< $7 ->
             decode_octal(Rest, Mode, Acc);
         <<D, T/binary>> when D =:= $8; D =:= $9 ->
             ok = require_legacy_octal(Mode),
-            escape_loop(T, Mode, [<<D>> | Acc]);
+            decode_escapes_loop(T, Mode, [<<D>> | Acc]);
         <<C/utf8, T/binary>> ->
-            escape_loop(T, Mode, [<<C/utf8>> | Acc]);
+            decode_escapes_loop(T, Mode, [<<C/utf8>> | Acc]);
         <<B, T/binary>> ->
-            escape_loop(T, Mode, [<<B>> | Acc])
+            decode_escapes_loop(T, Mode, [<<B>> | Acc])
     end;
-escape_loop(<<C/utf8, Rest/binary>>, Mode, Acc) ->
-    escape_loop(Rest, Mode, [<<C/utf8>> | Acc]);
-escape_loop(<<B, Rest/binary>>, Mode, Acc) ->
-    escape_loop(Rest, Mode, [<<B>> | Acc]).
+decode_escapes_loop(<<C/utf8, Rest/binary>>, Mode, Acc) ->
+    decode_escapes_loop(Rest, Mode, [<<C/utf8>> | Acc]);
+decode_escapes_loop(<<B, Rest/binary>>, Mode, Acc) ->
+    decode_escapes_loop(Rest, Mode, [<<B>> | Acc]).
 
 %% annex b: legacy octal and \8 \9 only in string literals
 require_legacy_octal(string) -> ok;
@@ -101,14 +101,14 @@ decode_octal(<<D1, Rest/binary>>, Mode, Acc) when D1 >= $0, D1 =< $7 ->
             case T of
                 <<D3, T2/binary>> when D3 >= $0, D3 =< $7, D1 =< $3 ->
                     CP = list_to_integer([D1, D2, D3], 8),
-                    escape_loop(T2, Mode, [encode_codepoint(CP) | Acc]);
+                    decode_escapes_loop(T2, Mode, [encode_codepoint(CP) | Acc]);
                 _ ->
                     CP = list_to_integer([D1, D2], 8),
-                    escape_loop(T, Mode, [encode_codepoint(CP) | Acc])
+                    decode_escapes_loop(T, Mode, [encode_codepoint(CP) | Acc])
             end;
         _ ->
             CP = list_to_integer([D1], 8),
-            escape_loop(Rest, Mode, [encode_codepoint(CP) | Acc])
+            decode_escapes_loop(Rest, Mode, [encode_codepoint(CP) | Acc])
     end.
 
 read_braced_hex(Bin) -> read_braced_hex(Bin, []).
@@ -130,12 +130,12 @@ unicode_escape(CU, Rest, Mode, Acc) when CU >= 16#D800, CU =< 16#DBFF ->
     case read_low_surrogate_escape(Rest) of
         {ok, Low, Rest1} ->
             CP = 16#10000 + (CU - 16#D800) * 16#400 + (Low - 16#DC00),
-            escape_loop(Rest1, Mode, [encode_codepoint(CP) | Acc]);
+            decode_escapes_loop(Rest1, Mode, [encode_codepoint(CP) | Acc]);
         error ->
-            escape_loop(Rest, Mode, [encode_codepoint(CU) | Acc])
+            decode_escapes_loop(Rest, Mode, [encode_codepoint(CU) | Acc])
     end;
 unicode_escape(CU, Rest, Mode, Acc) ->
-    escape_loop(Rest, Mode, [encode_codepoint(CU) | Acc]).
+    decode_escapes_loop(Rest, Mode, [encode_codepoint(CU) | Acc]).
 
 read_low_surrogate_escape(<<"\\u{", T/binary>>) ->
     case read_braced_hex(T) of

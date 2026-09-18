@@ -20,8 +20,8 @@ pub type NamedSegment {
   NamedSeg(name: String)
 }
 
-pub type Ctx {
-  Ctx(
+pub type MatchContext {
+  MatchContext(
     matched: String,
     before: fn() -> String,
     after: fn() -> String,
@@ -36,7 +36,7 @@ pub type Resolved {
   NamedRef(name: String)
 }
 
-pub fn resolve_plain(seg: PlainSegment, ctx: Ctx) -> String {
+pub fn resolve_plain(seg: PlainSegment, ctx: MatchContext) -> String {
   case seg {
     LiteralSeg(text) -> text
     MatchedSeg -> ctx.matched
@@ -61,14 +61,17 @@ pub fn resolve_plain(seg: PlainSegment, ctx: Ctx) -> String {
   }
 }
 
-pub fn resolve(seg: NamedSegment, ctx: Ctx) -> Resolved {
+pub fn resolve(seg: NamedSegment, ctx: MatchContext) -> Resolved {
   case seg {
     Plain(p) -> Text(resolve_plain(p, ctx))
     NamedSeg(name) -> NamedRef(name)
   }
 }
 
-pub fn resolve_without_named(segments: List(PlainSegment), ctx: Ctx) -> String {
+pub fn resolve_without_named(
+  segments: List(PlainSegment),
+  ctx: MatchContext,
+) -> String {
   segments
   |> resolve_plain_parts(ctx)
   |> string.concat
@@ -76,7 +79,7 @@ pub fn resolve_without_named(segments: List(PlainSegment), ctx: Ctx) -> String {
 
 pub fn resolve_plain_parts(
   segments: List(PlainSegment),
-  ctx: Ctx,
+  ctx: MatchContext,
 ) -> List(String) {
   list.map(segments, resolve_plain(_, ctx))
 }

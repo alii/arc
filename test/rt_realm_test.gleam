@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/lang as rt_lang
@@ -5,8 +6,8 @@ import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type Realm, AccessorProperty, Agent,
-  JsOps, JsStore, KHandle, Named, ScriptEval, StringKey, classify, mk_int,
-  mk_object, mk_string, mk_undefined,
+  JsOps, KHandle, ScriptEval, Store, StringKey, classify, mk_int, mk_object,
+  mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -125,7 +126,7 @@ pub fn eval_script_runs_in_its_realm_test() {
   let st =
     Agent(
       ..st,
-      store: JsStore(..st.store, ops: JsOps(..st.store.ops, eval_hook: hook)),
+      store: Store(..st.store, ops: JsOps(..st.store.ops, eval_hook: hook)),
     )
   let #(dollar_h, st) = rt_realm.install_262(st, st.realm)
   let #(child, st) =

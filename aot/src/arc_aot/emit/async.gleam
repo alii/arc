@@ -124,8 +124,8 @@ type ForAwaitSpec {
   )
 }
 
-type LocLayout {
-  LocLayout(
+type LocalLayout {
+  LocalLayout(
     slot_to_idx: Dict(Int, Int),
     size: Int,
     extras: Dict(String, Int),
@@ -148,7 +148,7 @@ type ResumeWith {
   ResumeCatch(try_id: Int, param: Option(ast.Pattern))
 }
 
-type SegTail {
+type SegmentTail {
   FallTo(to: Int)
   FallToFinally(try_id: Int, to: Int)
   FinallyEnd(try_id: Int)
@@ -165,7 +165,7 @@ type SegTail {
   ForAwaitSetup(right: ast.Expression, head: Int)
   AsyncGenYieldSent(resume_state: Int)
   BodyEnd
-  SegDone
+  SegmentDone
 }
 
 type HeadValue {
@@ -182,7 +182,7 @@ type ArmSpec {
     entry_cursor: ArmCursor,
     resume: Option(ResumeWith),
     body_fragment: List(ast.StmtWithLine),
-    tail: SegTail,
+    tail: SegmentTail,
     machine_frames: List(MachineFrame),
   )
 }
@@ -220,10 +220,10 @@ type MachineFrame {
   )
 }
 
-type MachineCtx {
-  MachineCtx(
+type MachineContext {
+  MachineContext(
     kind: state.CoroutineKind,
-    layout: LocLayout,
+    layout: LocalLayout,
     resume_loop_label: String,
     resume_mode: ir.Value,
     sent_value: ir.Value,
@@ -235,13 +235,13 @@ type MachineCtx {
   )
 }
 
-fn new_machine_ctx(
+fn new_machine_context(
   kind: state.CoroutineKind,
-  layout: LocLayout,
+  layout: LocalLayout,
   resume_loop_label: String,
   plan: SplitPlan,
-) -> MachineCtx {
-  MachineCtx(
+) -> MachineContext {
+  MachineContext(
     kind:,
     layout:,
     resume_loop_label:,
@@ -255,37 +255,37 @@ fn new_machine_ctx(
   )
 }
 
-fn push_arm(ctx: MachineCtx, n: Int, body: ir.Expr) -> MachineCtx {
-  MachineCtx(..ctx, arms: [ir.SwitchArm(n, body), ..ctx.arms])
+fn push_arm(ctx: MachineContext, n: Int, body: ir.Expr) -> MachineContext {
+  MachineContext(..ctx, arms: [ir.SwitchArm(n, body), ..ctx.arms])
 }
 
-fn finish_arms(ctx: MachineCtx) -> List(ir.SwitchArm) {
+fn finish_arms(ctx: MachineContext) -> List(ir.SwitchArm) {
   list.reverse(ctx.arms)
 }
 
-fn current_try(ctx: MachineCtx) -> Option(TryEntry) {
+fn current_try(ctx: MachineContext) -> Option(TryEntry) {
   case ctx.try_stack {
     [top, ..] -> Some(top)
     [] -> None
   }
 }
 
-fn with_region(ctx: MachineCtx, region: Option(Int)) -> MachineCtx {
-  MachineCtx(..ctx, try_stack: try_chain(ctx.try_entries, region))
+fn with_region(ctx: MachineContext, region: Option(Int)) -> MachineContext {
+  MachineContext(..ctx, try_stack: try_chain(ctx.try_entries, region))
 }
 
 // a throw in a catch body must not re-enter its own catch
-fn with_catch_body(ctx: MachineCtx, entry: TryEntry) -> MachineCtx {
+fn with_catch_body(ctx: MachineContext, entry: TryEntry) -> MachineContext {
   let outer = try_chain(ctx.try_entries, entry.outer)
   let stack = case entry.finally_state {
     Some(_) -> [TryEntry(..entry, catch_state: None), ..outer]
     None -> outer
   }
-  MachineCtx(..ctx, try_stack: stack)
+  MachineContext(..ctx, try_stack: stack)
 }
 
-fn with_finally_body(ctx: MachineCtx, entry: TryEntry) -> MachineCtx {
-  MachineCtx(..ctx, try_stack: try_chain(ctx.try_entries, entry.outer))
+fn with_finally_body(ctx: MachineContext, entry: TryEntry) -> MachineContext {
+  MachineContext(..ctx, try_stack: try_chain(ctx.try_entries, entry.outer))
 }
 
 fn try_chain(entries: List(TryEntry), region: Option(Int)) -> List(TryEntry) {
@@ -308,7 +308,7 @@ const pend_return = 2
 
 const pend_goto = 3
 
-// fixed ir names bound by emit_machine_function and read through MachineCtx
+// fixed ir names bound by emit_machine_function and read through MachineContext
 // mirror rt_async sent modes, compared numerically in emitted code
 const resume_next = rt_async.sent_next
 
@@ -345,14 +345,18 @@ fn pending_tuple(pending: PendingKind) -> ir.Expr {
   }
 }
 
-fn machine_continue(ctx: MachineCtx, target: Int, loc: ir.Value) -> ir.Expr {
+fn machine_continue(
+  ctx: MachineContext,
+  target: Int,
+  loc: ir.Value,
+) -> ir.Expr {
   ir.Continue(ctx.resume_loop_label, [ir.ConstI32(target), loc])
 }
 
 // packs the live slot vars, so reassignments since the resume are kept
 fn repack_live_locals(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   overrides: Dict(Int, ir.Value),
   k: fn(Emitter, ir.Value) -> #(ir.Expr, Emitter),
 ) -> #(ir.Expr, Emitter) {
@@ -361,7 +365,7 @@ fn repack_live_locals(
 
 fn repack_live_locals_loop(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   overrides: Dict(Int, ir.Value),
   i: Int,
   acc: List(ir.Value),
@@ -407,7 +411,7 @@ fn repack_live_locals_loop(
 
 fn jump_state_leaf(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   target: Int,
   overrides: Dict(Int, ir.Value),
 ) -> #(ir.Expr, Emitter) {
@@ -418,7 +422,7 @@ fn jump_state_leaf(
 // parks pend in the finally's slot and jumps to it
 fn jump_to_finally(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   entry: TryEntry,
   finally_state: Int,
   pend: ir.Expr,
@@ -428,7 +432,7 @@ fn jump_to_finally(
   anf.wrap(jump_state_leaf(e, ctx, finally_state, over), ir.Let([pn], pend, _))
 }
 
-fn slot_at_loc_idx(layout: LocLayout, idx: Int) -> Option(Int) {
+fn slot_at_loc_idx(layout: LocalLayout, idx: Int) -> Option(Int) {
   case dict.get(layout.slot_to_idx, idx) {
     Ok(at) if at == idx -> Some(idx)
     _ ->
@@ -444,7 +448,7 @@ fn slot_at_loc_idx(layout: LocLayout, idx: Int) -> Option(Int) {
 // compile-time abrupt completion: finally first, packs live locals
 fn route_abrupt(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   pending: PendingKind,
   stop_at: Option(Int),
 ) -> #(ir.Expr, Emitter) {
@@ -453,7 +457,7 @@ fn route_abrupt(
 
 fn route_abrupt_walk(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   stack: List(TryEntry),
   pending: PendingKind,
   stop_at: Option(Int),
@@ -482,7 +486,7 @@ fn route_abrupt_walk(
 
 fn route_abrupt_tail(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   pending: PendingKind,
 ) -> #(ir.Expr, Emitter) {
   case pending {
@@ -525,11 +529,13 @@ fn sentinel_target(l: MachineFrame, ir_label: String) -> #(Int, Option(Int)) {
   }
 }
 
-fn make_on_return(ctx: MachineCtx) -> NextWith(ir.Value) {
+fn make_on_return(ctx: MachineContext) -> NextWith(ir.Value) {
   fn(e, v) { Ok(route_abrupt(e, ctx, PendingReturn(v), None)) }
 }
 
-fn make_on_goto(ctx: MachineCtx) -> fn(Emitter, String) -> Option(EmitResult) {
+fn make_on_goto(
+  ctx: MachineContext,
+) -> fn(Emitter, String) -> Option(EmitResult) {
   fn(e, ir_label) {
     case sentinel_match(ctx.machine_frames, ir_label) {
       None -> None
@@ -543,7 +549,7 @@ fn make_on_goto(ctx: MachineCtx) -> fn(Emitter, String) -> Option(EmitResult) {
 
 fn with_abrupt_intercept(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   body: fn(Emitter, fn(Emitter) -> Emitter) -> a,
 ) -> a {
   let #(e, n_pushed) = push_machine_frames(e, ctx.machine_frames)
@@ -598,7 +604,7 @@ fn expr_has_split(e: ast.Expression) -> Bool {
     ast.Identifier(..)
     | ast.NumberLiteral(..)
     | ast.BigIntLiteral(..)
-    | ast.StringExpression(..)
+    | ast.StringLiteral(..)
     | ast.BooleanLiteral(..)
     | ast.NullLiteral(..)
     | ast.UndefinedExpression(..)
@@ -841,7 +847,7 @@ fn push_pending_stmt(p: SplitPlanner, sl: ast.StmtWithLine) -> SplitPlanner {
 
 fn finish_arm(
   p: SplitPlanner,
-  tail: SegTail,
+  tail: SegmentTail,
   new_state: Int,
   entry: ArmEntry,
 ) -> SplitPlanner {
@@ -1041,7 +1047,7 @@ fn plan_expr(p: SplitPlanner, e: ast.Expression) -> SplitPlanner {
     ast.Identifier(..)
     | ast.NumberLiteral(..)
     | ast.BigIntLiteral(..)
-    | ast.StringExpression(..)
+    | ast.StringLiteral(..)
     | ast.BooleanLiteral(..)
     | ast.NullLiteral(..)
     | ast.UndefinedExpression(..)
@@ -1878,7 +1884,7 @@ fn plan_try(
         _, _, _ -> {
           let #(sink, p) = alloc_state(p)
           let p = finish_arm(p, normal_tail, sink, JumpEntry)
-          #(plan_handler(p), SegDone)
+          #(plan_handler(p), SegmentDone)
         }
       }
       let #(finally_cursor, p) = case finalizer, finally_state, finally_split {
@@ -1892,7 +1898,7 @@ fn plan_try(
           let p = finish_arm(p, catch_close_tail, sink, JumpEntry)
           let finally_cursor = option.map(finalizer, fn(_) { p.cur })
           let p = plan_finalizer(p)
-          #(finally_cursor, finish_arm(p, SegDone, after_state, JumpEntry))
+          #(finally_cursor, finish_arm(p, SegmentDone, after_state, JumpEntry))
         }
       }
       let entry =
@@ -1993,7 +1999,10 @@ fn for_await_iter_key(head: Int) -> String {
   "iter_fa_" <> int.to_string(head)
 }
 
-fn compute_loc_layout(info: scope.FunctionInfo, plan: SplitPlan) -> LocLayout {
+fn compute_loc_layout(
+  info: scope.FunctionInfo,
+  plan: SplitPlan,
+) -> LocalLayout {
   let hoist_count = info.local_count
   let slot_to_idx = index_identity_map(hoist_count)
   let #(extras, next) =
@@ -2002,17 +2011,21 @@ fn compute_loc_layout(info: scope.FunctionInfo, plan: SplitPlan) -> LocLayout {
   let #(extras, next) = alloc_for_await_extras(plan.for_awaits, extras, next)
   let #(extras, size) = alloc_for_of_extras(plan.arms, extras, next)
   let initial_values = build_initial_loc(size, pending_index_set(extras, plan))
-  LocLayout(slot_to_idx:, size:, extras:, initial_values:)
+  LocalLayout(slot_to_idx:, size:, extras:, initial_values:)
 }
 
 fn index_identity_map(n: Int) -> Dict(Int, Int) {
-  identity_map_loop(0, n, dict.new())
+  index_identity_map_loop(0, n, dict.new())
 }
 
-fn identity_map_loop(i: Int, n: Int, acc: Dict(Int, Int)) -> Dict(Int, Int) {
+fn index_identity_map_loop(
+  i: Int,
+  n: Int,
+  acc: Dict(Int, Int),
+) -> Dict(Int, Int) {
   case i < n {
     False -> acc
-    True -> identity_map_loop(i + 1, n, dict.insert(acc, i, i))
+    True -> index_identity_map_loop(i + 1, n, dict.insert(acc, i, i))
   }
 }
 
@@ -2094,10 +2107,10 @@ fn pending_index_set(extras: Dict(String, Int), plan: SplitPlan) -> Set(Int) {
 }
 
 fn build_initial_loc(size: Int, pending_idxs: Set(Int)) -> List(ir.Value) {
-  initial_loc_loop(0, size, pending_idxs, [])
+  build_initial_loc_loop(0, size, pending_idxs, [])
 }
 
-fn initial_loc_loop(
+fn build_initial_loc_loop(
   i: Int,
   size: Int,
   pending: Set(Int),
@@ -2110,14 +2123,14 @@ fn initial_loc_loop(
         True -> ir.ConstAtom("normal")
         False -> ir.ConstAtom("undefined")
       }
-      initial_loc_loop(i + 1, size, pending, [v, ..acc])
+      build_initial_loc_loop(i + 1, size, pending, [v, ..acc])
     }
   }
 }
 
 fn enrich_try_entries(
   entries: List(TryEntry),
-  layout: LocLayout,
+  layout: LocalLayout,
 ) -> List(TryEntry) {
   use entry <- list.map(entries)
   let pending_loc_idx =
@@ -2173,14 +2186,14 @@ fn step_await(v: ir.Value, resume_state: Int, loc: ir.Value) -> ir.Expr {
 
 // packs from the saved tuple, ignoring anything reassigned since the resume
 fn repack_saved_locals(
-  ctx: MachineCtx,
+  ctx: MachineContext,
   overrides: Dict(Int, ir.Value),
 ) -> anf.Build(ir.Value) {
   repack_saved_locals_loop(ctx, overrides, 0, [])
 }
 
 fn repack_saved_locals_loop(
-  ctx: MachineCtx,
+  ctx: MachineContext,
   overrides: Dict(Int, ir.Value),
   i: Int,
   acc: List(ir.Value),
@@ -2326,7 +2339,7 @@ fn kind_is_gen(kind: state.CoroutineKind) -> Bool {
 
 fn initial_loc_values(
   e: Emitter,
-  layout: LocLayout,
+  layout: LocalLayout,
   n_locals: Int,
 ) -> List(ir.Value) {
   list.index_map(layout.initial_values, fn(v, i) {
@@ -2384,7 +2397,7 @@ fn emit_closure_alloc(
 
 // raw-expr form of repack_saved_locals with fixed var names
 fn repack_saved_locals_expr(
-  ctx: MachineCtx,
+  ctx: MachineContext,
   overrides: Dict(Int, ir.Value),
   k: fn(ir.Value) -> ir.Expr,
 ) -> ir.Expr {
@@ -2392,7 +2405,7 @@ fn repack_saved_locals_expr(
 }
 
 fn repack_saved_locals_expr_loop(
-  ctx: MachineCtx,
+  ctx: MachineContext,
   overrides: Dict(Int, ir.Value),
   i: Int,
   acc: List(ir.Value),
@@ -2430,7 +2443,7 @@ fn repack_saved_locals_expr_loop(
 
 // runtime throw caught by an arm: catch first, packs saved locals
 fn route_throw(
-  ctx: MachineCtx,
+  ctx: MachineContext,
   region: Option(TryEntry),
   ev: ir.Value,
 ) -> ir.Expr {
@@ -2459,7 +2472,7 @@ fn route_throw(
 }
 
 fn route_return(
-  ctx: MachineCtx,
+  ctx: MachineContext,
   region: Option(TryEntry),
   v: ir.Value,
 ) -> ir.Expr {
@@ -2486,7 +2499,7 @@ fn route_return(
 
 fn wrap_arm_try(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   region: Option(TryEntry),
   inner: ir.Expr,
 ) -> ir.Expr {
@@ -2501,7 +2514,7 @@ fn wrap_arm_try(
 }
 
 fn emit_mode_dispatch(
-  ctx: MachineCtx,
+  ctx: MachineContext,
   entry: ArmEntry,
   region: Option(TryEntry),
   normal: ir.Expr,
@@ -2598,7 +2611,7 @@ fn iter_hint(kind: state.CoroutineKind) -> ir.Value {
 
 fn emit_delegate_setup(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   iterable: ir.Value,
   delegate_state: Int,
   iter_idx: Int,
@@ -2627,7 +2640,7 @@ fn emit_delegate_setup(
 // §27.5.3.8 yield* delegate arm, dispatches mode itself
 fn emit_delegate_arm(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   delegate_spec: DelegateSpec,
   iter_idx: Int,
   inner_idx: Int,
@@ -2653,7 +2666,7 @@ fn emit_delegate_arm(
       anf.pure(undef),
       anf.pure(ctx.sent_value),
     ))
-    let ctx = MachineCtx(..ctx, resume_mode:, sent_value:)
+    let ctx = MachineContext(..ctx, resume_mode:, sent_value:)
     use mode_i32 <- anf.then(
       anf.bind(ir.Convert(ir.UnboxInt(ir.W32), ctx.resume_mode)),
     )
@@ -2731,7 +2744,7 @@ fn emit_delegate_arm(
 
 fn emit_delegate_await_arm(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   delegate_spec: DelegateSpec,
   result_idx: Int,
 ) -> EmitResult {
@@ -2755,7 +2768,7 @@ fn emit_delegate_await_arm(
 }
 
 fn delegate_result(
-  ctx: MachineCtx,
+  ctx: MachineContext,
   delegate_spec: DelegateSpec,
   res: ir.Value,
   mode_i32: ir.Value,
@@ -2812,21 +2825,21 @@ fn delegate_result(
   )
 }
 
-fn find_try_entry(ctx: MachineCtx, id: Int) -> Option(TryEntry) {
+fn find_try_entry(ctx: MachineContext, id: Int) -> Option(TryEntry) {
   list.find(ctx.try_entries, fn(t) { t.id == id }) |> option.from_result
 }
 
-fn outer_entry(ctx: MachineCtx, entry: TryEntry) -> Option(TryEntry) {
+fn outer_entry(ctx: MachineContext, entry: TryEntry) -> Option(TryEntry) {
   find_try(ctx.try_entries, entry.outer)
 }
 
-fn restore_and_seed(e: Emitter, ctx: MachineCtx, k: Next) -> EmitResult {
+fn restore_and_seed(e: Emitter, ctx: MachineContext, k: Next) -> EmitResult {
   restore_and_seed_loop(e, ctx, dict.to_list(ctx.layout.slot_to_idx), k)
 }
 
 fn restore_and_seed_loop(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   slots: List(#(Int, Int)),
   k: Next,
 ) -> EmitResult {
@@ -2844,7 +2857,7 @@ fn restore_and_seed_loop(
 // finally-exit redispatch of a carried completion: catch first, live locals
 fn dispatch_throw(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   outer: Option(TryEntry),
   carry: ir.Value,
 ) -> #(ir.Expr, Emitter) {
@@ -2874,7 +2887,7 @@ fn dispatch_throw(
 
 fn dispatch_return(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   outer: Option(TryEntry),
   carry: ir.Value,
 ) -> #(ir.Expr, Emitter) {
@@ -2897,7 +2910,7 @@ fn dispatch_return(
 
 fn dispatch_goto(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   outer: Option(TryEntry),
   carry: ir.Value,
 ) -> #(ir.Expr, Emitter) {
@@ -2924,7 +2937,7 @@ fn dispatch_goto(
 
 fn build_pending_dispatch(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   entry: TryEntry,
   pend: ir.Value,
 ) -> #(ir.Expr, Emitter) {
@@ -2981,7 +2994,7 @@ fn with_done(
 
 fn emit_finally_arm(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   entry: TryEntry,
   finalizer: List(ast.StmtWithLine),
 ) -> EmitResult {
@@ -3015,7 +3028,7 @@ fn emit_finally_arm(
 
 fn emit_catch_arm(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   entry: TryEntry,
   handler: ast.CatchClause,
 ) -> EmitResult {
@@ -3076,10 +3089,10 @@ fn emit_catch_arm(
   })
 }
 
-fn emit_arm_body(e: Emitter, ctx: MachineCtx, arm: ArmSpec) -> EmitResult {
+fn emit_arm_body(e: Emitter, ctx: MachineContext, arm: ArmSpec) -> EmitResult {
   let e = install_cursor(e, arm.entry_cursor)
   let ctx =
-    MachineCtx(
+    MachineContext(
       ..with_region(ctx, arm.region),
       machine_frames: arm.machine_frames,
     )
@@ -3140,11 +3153,15 @@ fn emit_arm_body(e: Emitter, ctx: MachineCtx, arm: ArmSpec) -> EmitResult {
   })
 }
 
-fn emit_seg_tail(e: Emitter, ctx: MachineCtx, tail: SegTail) -> EmitResult {
+fn emit_seg_tail(
+  e: Emitter,
+  ctx: MachineContext,
+  tail: SegmentTail,
+) -> EmitResult {
   case tail {
     BodyEnd -> Ok(#(step_return(e.consts.undef), e))
     // unreachable in practice, keeps the arm well-typed
-    SegDone -> Ok(#(step_return(e.consts.undef), e))
+    SegmentDone -> Ok(#(step_return(e.consts.undef), e))
     FallTo(to) -> Ok(jump_state_leaf(e, ctx, to, dict.new()))
     FallToFinally(try_id, to) ->
       case find_try_entry(ctx, try_id) {
@@ -3262,7 +3279,11 @@ fn emit_opt_expr(
   }
 }
 
-fn emit_head_value(e: Emitter, ctx: MachineCtx, head: HeadValue) -> EmitResult {
+fn emit_head_value(
+  e: Emitter,
+  ctx: MachineContext,
+  head: HeadValue,
+) -> EmitResult {
   case head {
     FromExpr(ex) -> e.dispatch.emit_expr(e, ex)
     FromResumedValue -> Ok(#(ir.Values([ctx.sent_value]), e))
@@ -3272,7 +3293,7 @@ fn emit_head_value(e: Emitter, ctx: MachineCtx, head: HeadValue) -> EmitResult {
 // gets the iterator for right, stores it in the iter slot, jumps to head
 fn emit_iterator_setup(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   right: ast.Expression,
   iter_key: String,
   hint: ir.Value,
@@ -3290,7 +3311,7 @@ fn emit_iterator_setup(
 
 fn emit_for_of_step(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   left: ast.ForInit,
   iter_key: String,
   body_state: Int,
@@ -3381,7 +3402,7 @@ fn bind_mode_of(kind: ast.VariableKind) -> state.BindMode {
 
 fn emit_switch_dispatch(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   discriminant: HeadValue,
   tests: List(#(Option(ast.Expression), Int)),
   after: Int,
@@ -3399,7 +3420,7 @@ fn emit_switch_dispatch(
 
 fn switch_chain(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   dv: ir.Value,
   tests: List(#(Option(ast.Expression), Int)),
   after: Int,
@@ -3511,7 +3532,7 @@ fn find_try(entries: List(TryEntry), region: Option(Int)) -> Option(TryEntry) {
   }
 }
 
-fn extra_idx(layout: LocLayout, key: String) -> Int {
+fn extra_idx(layout: LocalLayout, key: String) -> Int {
   case dict.get(layout.extras, key) {
     Ok(i) -> i
     Error(Nil) -> panic as { "aot/async: loc layout has no extra " <> key }
@@ -3520,7 +3541,7 @@ fn extra_idx(layout: LocLayout, key: String) -> Int {
 
 fn build_switch_arms(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   plan: SplitPlan,
 ) -> Result(#(List(ir.SwitchArm), Emitter), state.EmitError) {
   use #(ctx, e) <- result.try(
@@ -3537,7 +3558,7 @@ fn build_switch_arms(
           let #(rv, e) = state.fresh_var(e)
           let idx =
             extra_idx(ctx.layout, delegate_result_key(delegate_spec.state_id))
-          let arm_ctx = MachineCtx(..ctx, sent_value: ir.Var(rv))
+          let arm_ctx = MachineContext(..ctx, sent_value: ir.Var(rv))
           use #(inner, e) <- result.map(emit_arm_body(e, arm_ctx, arm))
           let body =
             ir.Let([rv], ir.TermOp(ir.TupleGet(idx), [ctx.saved_locals]), inner)
@@ -3560,7 +3581,7 @@ fn build_switch_arms(
       use #(ctx, e) <- result.try(case entry.catch_state, entry.handler {
         Some(catch_state), Some(h) -> {
           let ctx =
-            MachineCtx(
+            MachineContext(
               ..with_catch_body(ctx, entry),
               machine_frames: entry.machine_frames,
             )
@@ -3578,7 +3599,7 @@ fn build_switch_arms(
       case entry.finally_state, entry.finalizer {
         Some(finally_state), Some(fin) -> {
           let ctx =
-            MachineCtx(
+            MachineContext(
               ..with_finally_body(ctx, entry),
               machine_frames: entry.machine_frames,
             )
@@ -3710,7 +3731,7 @@ pub fn emit_coroutine_fn(
         scope_tree: machine_tree,
       )
     let #(resume_loop_label, e_machine) = state.fresh_label(e_machine)
-    let ctx = new_machine_ctx(kind, layout, resume_loop_label, plan)
+    let ctx = new_machine_context(kind, layout, resume_loop_label, plan)
     use #(arms, e_machine) <- result.try(build_switch_arms(e_machine, ctx, plan))
     let #(default, e_machine) = machine_default_arm(e_machine)
     let e_machine =
@@ -3821,7 +3842,7 @@ fn add_temp_slots(
 
 fn emit_for_await_head(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   spec: ForAwaitSpec,
 ) -> #(ir.Expr, Emitter) {
   let iter_idx = extra_idx(ctx.layout, for_await_iter_key(spec.head))
@@ -3838,7 +3859,7 @@ fn emit_for_await_head(
 
 fn emit_for_await_check(
   e: Emitter,
-  ctx: MachineCtx,
+  ctx: MachineContext,
   spec: ForAwaitSpec,
 ) -> EmitResult {
   with_done(e, fn(e, done) {
@@ -3932,7 +3953,7 @@ fn is_trivial(ex: ast.Expression) -> Bool {
   case ex {
     ast.NumberLiteral(..)
     | ast.BigIntLiteral(..)
-    | ast.StringExpression(..)
+    | ast.StringLiteral(..)
     | ast.BooleanLiteral(..)
     | ast.NullLiteral(..)
     | ast.UndefinedExpression(..)

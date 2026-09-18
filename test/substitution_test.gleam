@@ -1,5 +1,6 @@
 import arc/rt/builtins/substitution.{
-  type PlainSegment, CaptureSeg, Ctx, LiteralSeg, MatchedSeg, NamedSeg, Plain,
+  type PlainSegment, CaptureSeg, LiteralSeg, MatchContext, MatchedSeg, NamedSeg,
+  Plain,
 }
 
 const combining_acute = "\u{0301}"
@@ -8,8 +9,8 @@ fn tokenize(template: String) -> List(PlainSegment) {
   substitution.tokenize_plain(template)
 }
 
-fn ctx() -> substitution.Ctx {
-  Ctx(
+fn ctx() -> substitution.MatchContext {
+  MatchContext(
     matched: "X",
     before: fn() { "a" },
     after: fn() { "b" },

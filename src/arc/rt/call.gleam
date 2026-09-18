@@ -1,15 +1,15 @@
+import arc/bytecode/key.{type PropertyKey, Named}
 import arc/internal/tree_array
 import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledCode, type DirectEntry, type FnFlags, type Handle,
-  type JsOps, type JsVal, type NativeToken, type ObjKind, type Property,
-  type PropertyKey, type Realm, Agent, ArrayObj, BirthPending, BirthSettled,
-  BoundFn, BytecodeFn, CompiledFn, DataProperty, Dense, JInt, JPosInf, KHandle,
-  KNull, KNum, KStr, KTdz, KUndef, Named, NativeFn, NoElements, ProxyObj,
-  SObject, StringKey, classify, mk_int, mk_number, mk_object, mk_tdz,
-  mk_undefined,
+  type JsVal, type NativeToken, type ObjKind, type Property, type Realm, Agent,
+  ArrayObj, BirthPending, BirthSettled, BoundFn, BytecodeFn, CompiledFn,
+  DataProperty, Dense, JInt, JPosInf, KHandle, KNull, KNum, KStr, KTdz, KUndef,
+  NativeFn, NoElements, ProxyObj, SObject, StringKey, classify, mk_int,
+  mk_number, mk_object, mk_tdz, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bool
@@ -72,10 +72,6 @@ fn dispatch_native_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent)
 
-fn js_ops(st: Agent) -> JsOps(Agent) {
-  st.store.ops
-}
-
 fn read_obj_kind(st: Agent, h: Handle) -> Option(ObjKind) {
   case rt_store.t_cell_get(st, h) {
     SObject(kind:, ..) -> Some(kind)
@@ -119,7 +115,7 @@ pub fn t_try_call(
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
         SObject(kind: BytecodeFn(..) as kind, ..) -> {
-          let #(res, st) = js_ops(st).call_bytecode(st, h, kind, this, args)
+          let #(res, st) = st.store.ops.call_bytecode(st, h, kind, this, args)
           case res {
             Ok(v) -> #(NormalCompletion(v), st)
             Error(e) -> #(ThrowCompletion(e), st)
@@ -218,7 +214,7 @@ pub fn resolve_this(st: Agent, flags: FnFlags, this: JsVal) -> #(JsVal, Agent) {
         // tdz sentinel must not escape as this
         KTdz -> panic as "TDZ sentinel escaped as `this` in resolve_this"
         _ -> {
-          let #(h, st) = js_ops(st).to_object(st, this)
+          let #(h, st) = st.store.ops.to_object(st, this)
           #(mk_object(h), st)
         }
       }
@@ -306,7 +302,7 @@ pub fn t_call(
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
         SObject(kind: BytecodeFn(..) as kind, ..) ->
-          case js_ops(st).call_bytecode(st, h, kind, this, args) {
+          case st.store.ops.call_bytecode(st, h, kind, this, args) {
             #(Ok(v), st) -> #(v, st)
             #(Error(e), st) -> rt_store.t_throw(st, e)
           }
@@ -326,7 +322,7 @@ pub fn t_prepare_call(
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
         SObject(kind: BytecodeFn(..) as kind, ..) ->
-          js_ops(st).prepare_call(st, h, kind, this)
+          st.store.ops.prepare_call(st, h, kind, this)
         SObject(kind: NativeFn(token:, ..), ..) -> fn(st, args) {
           call_native(st, token, this, args)
         }
@@ -382,7 +378,7 @@ pub fn t_try_prepare_call(
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
         SObject(kind: BytecodeFn(..) as kind, ..) ->
-          Some(js_ops(st).prepare_call(st, h, kind, this))
+          Some(st.store.ops.prepare_call(st, h, kind, this))
         SObject(kind: NativeFn(token:, ..), ..) ->
           Some(fn(st, args) { call_native(st, token, this, args) })
         SObject(kind: CompiledFn(code:, home_object:, flags:, ..) as kind, ..) ->
@@ -472,7 +468,7 @@ fn construct_by_kind(
         new_target,
       )
     Some(BytecodeFn(..)) ->
-      js_ops(st).construct_bytecode(st, callee_h, args, new_target)
+      st.store.ops.construct_bytecode(st, callee_h, args, new_target)
     Some(NativeFn(token:, ..)) ->
       dispatch_native_construct(st, token, args, new_target)
     Some(BoundFn(target:, bound_args:, ..)) -> {
