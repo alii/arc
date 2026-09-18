@@ -1,6 +1,7 @@
 %% fast paths return miss and the caller takes the full path
 -module(arc_rt_obj_ffi).
--export([t_get_prop_own_data/3, t_set_prop_own_data/4, t_set_prop_named/5,
+-export([t_copy_data_fast/3, t_for_in_fast/2,
+         t_get_prop_own_data/3, t_set_prop_own_data/4, t_set_prop_named/5,
          t_create_data_prop/4, store_put_seq/3,
          t_get_prop_ic/4, t_get_prop_ic_miss/4, t_get_prop_slow/4,
          t_get_prop_site/4,
@@ -802,3 +803,97 @@ slot_of(St, Id) ->
         ?STORE_FREE_SLOT -> miss;
         Slot -> Slot
     end.
+
+%% object spread onto a fresh literal when the source holds only plain data
+t_copy_data_fast(St, {?HANDLE_TAG, TId}, {?HANDLE_TAG, SId})
+  when tuple_size(St) =:= ?AGENT_ARITY ->
+    Store = element(?AGENT_STORE, St),
+    Data = element(?STORE_DATA, Store),
+    case arc_rt_arena_ffi:get(TId, Data) of
+        {?SOBJECT_TAG, ?ORDINARY, _, TProps, _, _, true} = TSlot ->
+            case source_pairs(arc_rt_arena_ffi:get(SId, Data)) of
+                miss -> none;
+                Pairs ->
+                    case merge_pairs(Pairs, TProps, element(?STORE_PROP_SEQ, Store)) of
+                        miss -> none;
+                        {TProps2, Seq} ->
+                            NewSlot = setelement(?SOBJECT_PROPS, TSlot, TProps2),
+                            {some, in_agent(St, store_put_seq(Store,
+                                arc_rt_arena_ffi:set(TId, NewSlot, Data), Seq))}
+                    end
+            end;
+        _ -> none
+    end;
+t_copy_data_fast(_, _, _) -> none.
+
+source_pairs({?SOBJECT_TAG, ?ORDINARY, _, Props, [], ?ELEMS_NONE, _}) ->
+    L = maps:to_list(Props),
+    case lists:all(fun plain_named/1, L) of
+        false -> miss;
+        true ->
+            Sorted = lists:sort(fun({_, A}, {_, B}) ->
+                element(?DATAPROP_SEQ, A) =< element(?DATAPROP_SEQ, B) end, L),
+            [{K, element(?DATAPROP_VALUE, P)}
+             || {K, P} <- Sorted, element(?DATAPROP_ENUMERABLE, P) =:= true]
+    end;
+source_pairs({?SSHAPED_TAG, _, _, Slots, Offs}) ->
+    [{{?KEY_NAMED, KB}, element(Off + 1, Slots)}
+     || {KB, Off} <- lists:keysort(2, maps:to_list(Offs))];
+source_pairs(_) -> miss.
+
+plain_named({{?KEY_NAMED, _}, P}) -> element(1, P) =:= ?DATAPROP_TAG;
+plain_named(_) -> false.
+
+merge_pairs([], Props, Seq) -> {Props, Seq};
+merge_pairs([{K, V} | Rest], Props, Seq) ->
+    case Props of
+        #{K := Old} when element(1, Old) =:= ?DATAPROP_TAG ->
+            merge_pairs(Rest, Props#{K := {?DATAPROP_TAG, V, true, true, true,
+                                           element(?DATAPROP_SEQ, Old)}}, Seq);
+        #{K := _} -> miss;
+        _ ->
+            merge_pairs(Rest, Props#{K => {?DATAPROP_TAG, V, true, true, true, Seq}},
+                        Seq + 1)
+    end.
+
+%% §14.7.5.9 key list when the whole chain is plain named data, else none
+t_for_in_fast(St, {?HANDLE_TAG, Id}) when tuple_size(St) =:= ?AGENT_ARITY ->
+    Data = element(?STORE_DATA, element(?AGENT_STORE, St)),
+    for_in_chain(Data, arc_rt_arena_ffi:get(Id, Data), #{}, [], 64);
+t_for_in_fast(_, _) -> none.
+
+for_in_chain(_, _, _, _, 0) -> none;
+for_in_chain(Data, {?SSHAPED_TAG, _, Proto, _, Offs}, Seen, Acc, Fuel) ->
+    Keys = [KB || {KB, _} <- lists:keysort(2, maps:to_list(Offs))],
+    for_in_add(Data, Proto, Keys, [], Seen, Acc, Fuel);
+for_in_chain(Data, {?SOBJECT_TAG, Kind, Proto, Props, _, ?ELEMS_NONE, _},
+             Seen, Acc, Fuel) when Kind =:= ?ORDINARY; Kind =:= ?GLOBALOBJ ->
+    case for_in_named(maps:to_list(Props), [], []) of
+        none -> none;
+        {Enum, Hidden} -> for_in_add(Data, Proto, Enum, Hidden, Seen, Acc, Fuel)
+    end;
+for_in_chain(_, _, _, _, _) -> none.
+
+for_in_add(Data, Proto, Enum, Hidden, Seen, Acc, Fuel) ->
+    Acc1 = lists:foldl(fun(K, A) ->
+               case is_map_key(K, Seen) of true -> A; false -> [K | A] end
+           end, Acc, Enum),
+    Seen1 = lists:foldl(fun(K, S) -> S#{K => []} end, Seen, Enum ++ Hidden),
+    case Proto of
+        ?NONE -> {some, [arc_rt_str_ffi:mk(K) || K <- lists:reverse(Acc1)]};
+        {?SOME, {?HANDLE_TAG, P}} ->
+            for_in_chain(Data, arc_rt_arena_ffi:get(P, Data), Seen1, Acc1, Fuel - 1)
+    end.
+
+%% enumerable named keys by seq plus the hidden ones; both records keep
+%% enumerable and seq in the same slots
+for_in_named([], Enum, Hidden) ->
+    Sorted = lists:sort(fun({A, _}, {B, _}) -> A =< B end, Enum),
+    {[K || {_, K} <- Sorted], Hidden};
+for_in_named([{{?KEY_NAMED, K}, P} | Rest], Enum, Hidden) ->
+    case element(?DATAPROP_ENUMERABLE, P) of
+        true ->
+            for_in_named(Rest, [{element(?DATAPROP_SEQ, P), K} | Enum], Hidden);
+        false -> for_in_named(Rest, Enum, [K | Hidden])
+    end;
+for_in_named(_, _, _) -> none.

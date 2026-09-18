@@ -58,6 +58,7 @@ import arc/rt/closure
 import arc/rt/elements as rt_elements
 import arc/rt/env as rt_env
 import arc/rt/inspect as rt_inspect
+import arc/rt/js_string
 import arc/rt/lang as rt_lang
 import arc/rt/limits
 import arc/rt/obj as rt_obj
@@ -65,14 +66,15 @@ import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type LexicalGlobal, type ObjectKey,
-  AccessorProperty, Agent, DataProperty, ForInIterator, FunctionApply,
-  FunctionCall, FunctionN, HintString, Index, JsStore, KBytecode, KCompiled,
-  KHandle, KNative, KNull, KNum, KStr, KSym, KUndef, Named, NoElements, Realm,
-  ReflectApply, ReflectN, SBox, SObject, SShapedObject, StringKey, SymbolKey,
-  classify, mk_bool, mk_number, mk_object, mk_string, mk_tdz, mk_undefined,
+  AccessorProperty, Agent, DataProperty, FunctionApply, FunctionCall, FunctionN,
+  HintString, Index, JsStore, KBytecode, KCompiled, KHandle, KNative, KNull,
+  KNum, KStr, KSym, KUndef, Named, NoElements, Realm, ReflectApply, ReflectN,
+  SBox, SObject, SShapedObject, StringKey, SymbolKey, classify, mk_bool,
+  mk_number, mk_object, mk_string, mk_tdz, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bit_array
+import gleam/bool
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -209,10 +211,7 @@ fn named(name: String) -> ObjectKey {
 }
 
 fn is_undef(v: JsVal) -> Bool {
-  case classify(v) {
-    KUndef -> True
-    _ -> False
-  }
+  ffi.is(v, ffi.Undefined)
 }
 
 fn is_object(v: JsVal) -> Bool {
@@ -2628,6 +2627,99 @@ fn fast_loop(
       )
     }
 
+    GetIterator ->
+      case stack {
+        [iterable, ..rest] -> {
+          let rec = ffi.array_iter_start(agent, iterable)
+          case ffi.is(rec, ffi.Miss) {
+            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            False ->
+              fast_loop(
+                state,
+                drive,
+                pc + 1,
+                [rec, ..rest],
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+          }
+        }
+        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    IteratorClose ->
+      case stack {
+        [rec, ..rest] ->
+          case
+            ffi.is(rec, ffi.Undefined)
+            || {
+              ffi.is_array_iter(rec)
+              && ffi.is(
+                ffi.get_field(
+                  agent,
+                  mk_object(ffi.array_iter_proto(agent, rec)),
+                  return_key,
+                ),
+                ffi.Undefined,
+              )
+            }
+          {
+            True ->
+              fast_loop(
+                state,
+                drive,
+                pc + 1,
+                rest,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+            False -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+          }
+        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    ForInNext ->
+      case stack {
+        [iter, ..rest] ->
+          case ffi.for_in_next(iter) {
+            ffi.ForInKey(key:, rest: iter) ->
+              fast_loop(
+                state,
+                drive,
+                pc + 1,
+                [mk_bool(False), key, iter, ..rest],
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+            ffi.ForInEnd ->
+              fast_loop(
+                state,
+                drive,
+                pc + 1,
+                [mk_bool(True), mk_undefined(), iter, ..rest],
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+          }
+        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
     IteratorNext ->
       case stack {
         [rec, ..rest] ->
@@ -2646,60 +2738,97 @@ fn fast_loop(
                 r1,
               )
             False ->
-              case fast_iter_step(agent.store, rec) {
-                ArrayStep(done, val, store) -> {
-                  let agent = Agent(..agent, store:)
-                  let slot = case done {
-                    True -> mk_undefined()
-                    False -> rec
-                  }
-                  fast_loop(
-                    state,
-                    drive,
-                    pc + 1,
-                    [mk_bool(done), val, slot, ..rest],
-                    locals,
-                    agent,
-                    code,
-                    constants,
-                    r0,
-                    r1,
-                  )
-                }
-                // registers stay live across the step, flushed only on exits
-                fast -> {
-                  let state =
-                    State(
-                      ..state,
-                      pc:,
-                      stack:,
-                      agent: call.sync(state, agent, pc, 0),
-                    )
-                  case iterator_next_slow(state, drive, rec, rest, fast) {
-                    Ok(s) ->
+              case ffi.is_array_iter(rec) {
+                True ->
+                  case ffi.array_iter_next(agent.store, rec) {
+                    ffi.IterStep(done:, value:, rec:) ->
                       fast_loop(
-                        s,
+                        state,
                         drive,
-                        s.pc,
-                        s.stack,
+                        pc + 1,
+                        [mk_bool(done), value, rec, ..rest],
                         locals,
-                        s.agent,
+                        agent,
                         code,
                         constants,
                         r0,
                         r1,
                       )
-                    Error(exit) ->
-                      after_step(
-                        Error(
-                          state.map_exit_state(exit, fn(s) {
-                            State(..s, locals: fl(s, locals, r0, r1))
-                          }),
-                        ),
+                    ffi.IterPair(key:, value:, rec:) -> {
+                      let #(pair, agent) =
+                        rt_obj.t_new_array(agent, [key, value])
+                      fast_loop(
+                        state,
                         drive,
+                        pc + 1,
+                        [mk_bool(False), pair, rec, ..rest],
+                        locals,
+                        agent,
+                        code,
+                        constants,
+                        r0,
+                        r1,
                       )
+                    }
+                    ffi.IterMiss ->
+                      slow(state, drive, pc, stack, locals, agent, r0, r1)
                   }
-                }
+                False ->
+                  case fast_iter_step(agent.store, rec) {
+                    ArrayStep(done, val, store) -> {
+                      let agent = Agent(..agent, store:)
+                      let slot = case done {
+                        True -> mk_undefined()
+                        False -> rec
+                      }
+                      fast_loop(
+                        state,
+                        drive,
+                        pc + 1,
+                        [mk_bool(done), val, slot, ..rest],
+                        locals,
+                        agent,
+                        code,
+                        constants,
+                        r0,
+                        r1,
+                      )
+                    }
+                    // registers stay live across the step, flushed only on exits
+                    fast -> {
+                      let state =
+                        State(
+                          ..state,
+                          pc:,
+                          stack:,
+                          agent: call.sync(state, agent, pc, 0),
+                        )
+                      case iterator_next_slow(state, drive, rec, rest, fast) {
+                        Ok(s) ->
+                          fast_loop(
+                            s,
+                            drive,
+                            s.pc,
+                            s.stack,
+                            locals,
+                            s.agent,
+                            code,
+                            constants,
+                            r0,
+                            r1,
+                          )
+                        Error(exit) ->
+                          after_step(
+                            Error(
+                              state.map_exit_state(exit, fn(s) {
+                                State(..s, locals: fl(s, locals, r0, r1))
+                              }),
+                            ),
+                            drive,
+                          )
+                      }
+                    }
+                  }
               }
           }
         [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
@@ -3669,6 +3798,8 @@ fn fast_construct(
 
 const prototype_key = key.Named("prototype")
 
+const return_key = key.Named("return")
+
 @external(erlang, "erlang", "=:=")
 fn same_op(a: Op, b: Op) -> Bool
 
@@ -3687,6 +3818,159 @@ const reflect_apply = ReflectN(ReflectApply)
 
 fn instance_of_kernel(agent: Agent, left: JsVal, right: JsVal) -> JsVal {
   ffi.instance_of(agent, left, right, rt_types.symbol_has_instance)
+}
+
+// the stack-only array record, spelled out with full get semantics
+fn array_iter_next_slow(
+  state: State,
+  rec: JsVal,
+  rest: List(JsVal),
+) -> Result(State, StepExit) {
+  use <- iter_next_kernel(state, rec, rest)
+  let #(target, index, next_fn) = ffi.array_iter_parts(rec)
+  let len = case classify(target) {
+    KHandle(h) ->
+      case rt_store.t_cell_get(state.agent, h) {
+        SObject(kind: rt_types.ArrayObj(length:), ..) -> length
+        _ -> 0
+      }
+    _ -> 0
+  }
+  case index >= len {
+    True ->
+      Ok(
+        State(
+          ..state,
+          stack: [mk_bool(True), mk_undefined(), mk_undefined(), ..rest],
+          pc: state.pc + 1,
+        ),
+      )
+    False -> {
+      use #(v, state) <- result.map(rt3(
+        state,
+        rt_obj.t_get_prop,
+        target,
+        StringKey(Index(index)),
+      ))
+      let rec = ffi.array_iter_record(target, index + 1, next_fn)
+      State(..state, stack: [mk_bool(False), v, rec, ..rest], pc: state.pc + 1)
+    }
+  }
+}
+
+// what the fast loop would have done, before the array hole path
+fn iter_next_kernel(
+  state: State,
+  rec: JsVal,
+  rest: List(JsVal),
+  otherwise: fn() -> Result(State, StepExit),
+) -> Result(State, StepExit) {
+  case ffi.array_iter_next(state.agent.store, rec) {
+    ffi.IterStep(done:, value:, rec:) ->
+      Ok(
+        State(
+          ..state,
+          stack: [mk_bool(done), value, rec, ..rest],
+          pc: state.pc + 1,
+        ),
+      )
+    ffi.IterPair(key:, value:, rec:) -> {
+      let #(pair, agent) = rt_obj.t_new_array(state.agent, [key, value])
+      Ok(
+        State(
+          ..state,
+          agent:,
+          stack: [mk_bool(False), pair, rec, ..rest],
+          pc: state.pc + 1,
+        ),
+      )
+    }
+    ffi.IterMiss -> otherwise()
+  }
+}
+
+// gives the record real iterator objects once something may observe them
+fn materialize_record(
+  state: State,
+  rec: JsVal,
+) -> Result(#(JsVal, State), StepExit) {
+  case ffi.is_array_iter(rec) {
+    False -> Ok(#(rec, state))
+    True -> {
+      let #(target, index, next_fn) = ffi.array_iter_parts(rec)
+      let kind = case classify(target) {
+        KHandle(h) ->
+          case rt_store.t_cell_get(state.agent, h) {
+            SObject(kind: rt_types.MapObj(_), ..) ->
+              rt_types.MapIterator(
+                target: h,
+                index:,
+                kind: rt_types.MapIterEntries,
+              )
+            SObject(kind: rt_types.SetObj(_), ..) ->
+              rt_types.SetIterator(
+                target: h,
+                index:,
+                kind: rt_types.SetIterValues,
+              )
+            _ ->
+              rt_types.ArrayIterator(
+                target: h,
+                index:,
+                kind: rt_types.ArrayIterValues,
+              )
+          }
+        _ -> rt_types.StringIterator(source: js_string.bin(target), index:)
+      }
+      rt2(
+        state,
+        fn(agent, _) {
+          let #(iter, agent) =
+            rt_store.t_cell_new(
+              agent,
+              SObject(
+                kind:,
+                proto: Some(ffi.array_iter_proto(agent, rec)),
+                props: dict.new(),
+                symbol_props: [],
+                elements: NoElements,
+                extensible: True,
+              ),
+            )
+          rt_lang.t_alloc_record(
+            agent,
+            rt_types.IteratorRecord(
+              iterator: mk_object(iter),
+              next_method: next_fn,
+            ),
+          )
+        },
+        Nil,
+      )
+    }
+  }
+}
+
+// §7.4.11 only needs the objects when a return method exists
+pub fn closable_record(
+  state: State,
+  rec: JsVal,
+) -> Result(#(JsVal, State), StepExit) {
+  case ffi.is_array_iter(rec) {
+    False -> Ok(#(rec, state))
+    True -> {
+      use #(ret, state) <- result.try(rt3(
+        state,
+        rt_obj.t_get_prop,
+        mk_object(ffi.array_iter_proto(state.agent, rec)),
+        StringKey(Named("return")),
+      ))
+      case classify(ret) {
+        KUndef | KNull -> Ok(#(mk_undefined(), state))
+        _ -> materialize_record(state, rec)
+      }
+    }
+  }
 }
 
 @external(erlang, "arc_rt_ops_ffi", "pure_binop")
@@ -5720,29 +6004,9 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case state.stack {
         [obj, ..rest] -> {
           use #(keys, state) <- result.map(rt2(state, rt_obj.t_for_in_keys, obj))
-          let names =
-            list.filter_map(keys, fn(k) {
-              case classify(k) {
-                KStr(s) -> Ok(s)
-                _ -> Error(Nil)
-              }
-            })
-          let #(iter, agent) =
-            rt_store.t_cell_new(
-              state.agent,
-              SObject(
-                kind: ForInIterator(remaining: names),
-                proto: None,
-                props: dict.new(),
-                symbol_props: [],
-                elements: NoElements,
-                extensible: False,
-              ),
-            )
           State(
             ..state,
-            agent:,
-            stack: [mk_object(iter), ..rest],
+            stack: [ffi.for_in_list(keys), ..rest],
             pc: state.pc + 1,
           )
         }
@@ -5752,26 +6016,16 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     ForInNext ->
       case state.stack {
         [iter, ..rest] ->
-          case for_in_remaining(state.agent, iter) {
-            Some(#(h, [name, ..remaining])) -> {
-              let agent =
-                rt_store.t_cell_update(state.agent, h, fn(slot) {
-                  case slot {
-                    SObject(..) ->
-                      SObject(..slot, kind: ForInIterator(remaining:))
-                    _ -> slot
-                  }
-                })
+          case ffi.for_in_next(iter) {
+            ffi.ForInKey(key:, rest: iter) ->
               Ok(
                 State(
                   ..state,
-                  agent:,
-                  stack: [mk_bool(False), mk_string(name), iter, ..rest],
+                  stack: [mk_bool(False), key, iter, ..rest],
                   pc: state.pc + 1,
                 ),
               )
-            }
-            Some(#(_, [])) ->
+            ffi.ForInEnd ->
               Ok(
                 State(
                   ..state,
@@ -5779,11 +6033,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                   pc: state.pc + 1,
                 ),
               )
-            None ->
-              Error(VmFailed(
-                InternalError("ForInNext", "not a ForInIterator"),
-                state,
-              ))
           }
         _ -> underflow(state, "ForInNext")
       }
@@ -5792,13 +6041,19 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     GetIterator ->
       case state.stack {
         [iterable, ..rest] -> {
-          use #(rec, state) <- result.map(rt3(
-            state,
-            rt_lang.t_get_iterator,
-            iterable,
-            rt_lang.Sync,
-          ))
-          State(..state, stack: [rec, ..rest], pc: state.pc + 1)
+          let rec = ffi.array_iter_start(state.agent, iterable)
+          case ffi.is(rec, ffi.Miss) {
+            False -> Ok(State(..state, stack: [rec, ..rest], pc: state.pc + 1))
+            True -> {
+              use #(rec, state) <- result.map(rt3(
+                state,
+                rt_lang.t_get_iterator,
+                iterable,
+                rt_lang.Sync,
+              ))
+              State(..state, stack: [rec, ..rest], pc: state.pc + 1)
+            }
+          }
         }
         _ -> underflow(state, "GetIterator")
       }
@@ -5859,6 +6114,9 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 ),
               )
             False -> {
+              use <- bool.lazy_guard(ffi.is_array_iter(rec), fn() {
+                array_iter_next_slow(state, rec, rest)
+              })
               case fast_iter_step(state.agent.store, rec) {
                 ArrayStep(done, val, store) -> {
                   let agent = Agent(..state.agent, store:)
@@ -5889,7 +6147,13 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           let state = State(..state, stack: rest, pc: state.pc + 1)
           case is_undef(rec) {
             True -> Ok(state)
-            False -> rt_unit3(state, rt_lang.t_iter_close, rec, False)
+            False -> {
+              use #(rec, state) <- result.try(closable_record(state, rec))
+              case is_undef(rec) {
+                True -> Ok(state)
+                False -> rt_unit3(state, rt_lang.t_iter_close, rec, False)
+              }
+            }
           }
         }
         [] -> underflow(state, "IteratorClose")
@@ -5903,8 +6167,17 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           case is_undef(rec) {
             True -> Error(Threw(thrown, state))
             False ->
-              case rt_unit3(state, rt_lang.t_iter_close, rec, True) {
-                Ok(state) -> Error(Threw(thrown, state))
+              case closable_record(state, rec) {
+                Ok(#(rec, state)) ->
+                  case is_undef(rec) {
+                    True -> Error(Threw(thrown, state))
+                    False ->
+                      case rt_unit3(state, rt_lang.t_iter_close, rec, True) {
+                        Ok(state) -> Error(Threw(thrown, state))
+                        Error(Threw(_, state)) -> Error(Threw(thrown, state))
+                        Error(other) -> Error(other)
+                      }
+                  }
                 Error(Threw(_, state)) -> Error(Threw(thrown, state))
                 Error(other) -> Error(other)
               }
@@ -5924,6 +6197,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               Ok(State(..state, agent:, stack: [arr, ..rest]))
             }
             False -> {
+              use #(rec, state) <- result.try(materialize_record(state, rec))
               use #(arr, state) <- result.map(rt2(
                 state,
                 rt_lang.t_iter_rest,
@@ -5960,6 +6234,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     YieldStar ->
       case state.stack {
         [arg, slot, ..rest] -> {
+          use #(slot, state) <- result.try(materialize_record(state, slot))
+          let state = State(..state, stack: [arg, slot, ..rest])
           use #(iterator, next_fn, state) <- result.try(delegate_target(
             state,
             slot,
@@ -7033,17 +7309,6 @@ type FastIter {
 // §23.1.5.2.1 in the kernel only when the read observes nothing
 @external(erlang, "arc_interp_ffi", "iter_step")
 fn fast_iter_step(store: rt_types.JsStore(Agent), rec: JsVal) -> FastIter
-
-fn for_in_remaining(
-  agent: Agent,
-  iter: JsVal,
-) -> Option(#(Handle, List(String))) {
-  use h <- option.then(handle_of(iter))
-  case rt_store.t_cell_get(agent, h) {
-    SObject(kind: ForInIterator(remaining:), ..) -> Some(#(h, remaining))
-    _ -> None
-  }
-}
 
 // §13.15.2 re-conversion must be side-effect free
 fn prop_key_value(pk: ObjectKey) -> JsVal {

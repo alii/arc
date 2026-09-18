@@ -273,10 +273,19 @@ pub fn t_spread_into_list(
   acc: List(JsVal),
   iterable: JsVal,
 ) -> #(List(JsVal), Agent) {
-  let #(record, st) = iter_protocol.get_iterator_sync(st, iterable)
-  let #(values, st) = iter_protocol.iterator_to_list(st, record)
+  let #(values, st) = case array_spread(st, iterable) {
+    Some(values) -> #(values, st)
+    None -> {
+      let #(record, st) = iter_protocol.get_iterator_sync(st, iterable)
+      iter_protocol.iterator_to_list(st, record)
+    }
+  }
   #(list.append(acc, values), st)
 }
+
+// a plain array whose iteration observes nothing, holes excluded
+@external(erlang, "arc_rt_lang_ffi", "array_spread")
+fn array_spread(st: Agent, iterable: JsVal) -> Option(List(JsVal))
 
 // §14.7.5.7 step 6.a, not awaited here
 pub fn t_async_iter_next(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
@@ -290,9 +299,18 @@ pub fn t_copy_data_props(
   target: JsVal,
   source: JsVal,
 ) -> #(JsVal, Agent) {
-  let assert KHandle(target_h) = classify(target)
-  #(target, copy_data_properties(st, target_h, source, []))
+  case copy_data_fast(st, target, source) {
+    Some(st) -> #(target, st)
+    None -> {
+      let assert KHandle(target_h) = classify(target)
+      #(target, copy_data_properties(st, target_h, source, []))
+    }
+  }
 }
+
+// spread of plain data onto a fresh literal in one write
+@external(erlang, "arc_rt_obj_ffi", "t_copy_data_fast")
+fn copy_data_fast(st: Agent, target: JsVal, source: JsVal) -> Option(Agent)
 
 // object rest pattern, excluded keys skipped
 pub fn t_object_rest(

@@ -817,9 +817,22 @@ fn return_into(s: State, value: JsVal) -> Outcome {
       case truncate_stack(s.stack, stack_depth) {
         [slot, ..base] -> {
           let s = State(..s, try_stack: rest, stack: base)
-          case classify(slot) {
-            KHandle(_) -> close_for_return(s, slot, value)
-            _ -> return_into(s, value)
+          case interpreter.closable_record(s, slot) {
+            Ok(#(slot, s)) ->
+              case classify(slot) {
+                KHandle(_) -> close_for_return(s, slot, value)
+                _ -> return_into(s, value)
+              }
+            Error(state.Threw(thrown, s)) -> throw_into(s, thrown)
+            Error(state.Returned(v, s)) -> Finished(Ok(v), s)
+            Error(exit) -> {
+              let #(res, s) =
+                fault(
+                  exit_state(exit),
+                  state.InternalError("return_into", "unexpected step exit"),
+                )
+              Finished(res, s)
+            }
           }
         }
         [] -> return_into(State(..s, try_stack: rest, stack: []), value)

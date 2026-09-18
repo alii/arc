@@ -13,8 +13,8 @@ import arc/rt/types.{
   type Resume, type WeakKey, Agent, ArgumentsObj, ArrayBufferObj, ArrayIterator,
   ArrayObj, AsyncFromSyncIterator, AsyncGenRequest, AsyncGeneratorObj, BigIntObj,
   BooleanObj, DataViewObj, DateObj, Dense, DisposableStackObj, ErrorObj,
-  FinRegCell, FinalizationRegistryObj, ForInIterator, GeneratorObj, Handler,
-  HostJob, IcCall, IcGlobal, IcInit, IcOff, IcRead, IdentityPassThrough, IntlObj,
+  FinRegCell, FinalizationRegistryObj, GeneratorObj, Handler, HostJob, IcCall,
+  IcGlobal, IcInit, IcOff, IcRead, IdentityPassThrough, IntlObj,
   IteratorHelperObj, JsCell, JsStore, KBound, KBytecode, KCompiled, KHandle,
   KHost, KNative, MapIterator, MapObj, ModuleNamespace, NoElements, NumberObj,
   Ordinary, PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction,
@@ -289,7 +289,6 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     ModuleNamespace(exports:) ->
       dict.fold(exports, acc, fn(a, _, h) { [h.id, ..a] })
     ProxyObj(target:, handler:, revoked: _) -> [target.id, handler.id, ..acc]
-    ForInIterator(remaining: _) -> acc
     ArrayIterator(target:, index: _, kind: _) -> [target.id, ..acc]
     MapIterator(target:, index: _, kind: _) -> [target.id, ..acc]
     SetIterator(target:, index: _, kind: _) -> [target.id, ..acc]

@@ -9,15 +9,15 @@ import arc/rt/types.{
   type PropertyKey, type TemporalData, ArgumentsObj, ArrayBufferObj,
   ArrayIterator, ArrayObj, AsyncFromSyncIterator, AsyncGeneratorObj, BigIntObj,
   BooleanObj, DataProperty, DataViewObj, DateObj, DisposableStackObj, ErrorObj,
-  FinalizationRegistryObj, ForInIterator, GeneratorObj, Index, IntlObj,
-  IteratorHelperObj, KBig, KBool, KBound, KBytecode, KCompiled, KHandle, KHost,
-  KNative, KNull, KNum, KStr, KSym, KTdz, KUndef, MapIterator, MapObj,
-  ModuleNamespace, Named, NumberObj, Ordinary, Private, PromiseObj, ProxyObj,
-  RawJsonObj, RegExpObj, SObject, SetIterator, SetObj, Shared, StringIterator,
-  StringObj, SymbolObj, TemporalDate, TemporalDateTime, TemporalDuration,
-  TemporalInstant, TemporalMonthDay, TemporalObj, TemporalTime,
-  TemporalYearMonth, TemporalZonedDateTime, TypedArrayObj, WeakMapObj,
-  WeakSetObj, WrapForValidIteratorObj, classify,
+  FinalizationRegistryObj, GeneratorObj, Index, IntlObj, IteratorHelperObj, KBig,
+  KBool, KBound, KBytecode, KCompiled, KHandle, KHost, KNative, KNull, KNum,
+  KStr, KSym, KTdz, KUndef, MapIterator, MapObj, ModuleNamespace, Named,
+  NumberObj, Ordinary, Private, PromiseObj, ProxyObj, RawJsonObj, RegExpObj,
+  SObject, SetIterator, SetObj, Shared, StringIterator, StringObj, SymbolObj,
+  TemporalDate, TemporalDateTime, TemporalDuration, TemporalInstant,
+  TemporalMonthDay, TemporalObj, TemporalTime, TemporalYearMonth,
+  TemporalZonedDateTime, TypedArrayObj, WeakMapObj, WeakSetObj,
+  WrapForValidIteratorObj, classify,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bool
@@ -129,7 +129,6 @@ fn inspect_object(
         SetIterator(..) -> "Object [Set Iterator] {}"
         MapIterator(..) -> "Object [Map Iterator] {}"
         AsyncFromSyncIterator(..) -> "Object [Async-from-Sync Iterator] {}"
-        ForInIterator(..) -> "[Object]"
         DateObj(ms:) ->
           case ms {
             rt_types.JInt(_) | rt_types.JFloat(_) ->

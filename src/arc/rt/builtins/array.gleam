@@ -1150,17 +1150,21 @@ fn copy_range_fueled(
   check_budget(st, fuel <= 0 && remaining > 0)
   case dense_snapshot(st, src) {
     Some(#(els, proto)) ->
-      copy_range_snapshot(
-        st,
-        src,
-        els,
-        proto,
-        src_idx,
-        dst_idx,
-        remaining,
-        dst,
-        fuel,
-      )
+      case elements.range_list(els, src_idx, remaining) {
+        Some(vals) -> #(elements.write_list(dst, dst_idx, vals), st)
+        None ->
+          copy_range_snapshot(
+            st,
+            src,
+            els,
+            proto,
+            src_idx,
+            dst_idx,
+            remaining,
+            dst,
+            fuel,
+          )
+      }
     None -> copy_range_generic(st, src, src_idx, dst_idx, remaining, dst, fuel)
   }
 }
@@ -3305,6 +3309,15 @@ fn array_from_array_like(
       rt_val.t_throw_type_error(st, "Cannot create array from " <> ty)
     }
     _ -> {
+      // a plain array under the intrinsic constructor is a copy
+      let plain = case classify(ctor), map_fn {
+        KHandle(h), None if h == st.realm.array.constructor ->
+          array_spread(st, items)
+        _, _ -> None
+      }
+      use <- bool.lazy_guard(option.is_some(plain), fn() {
+        alloc_array_list(st, option.unwrap(plain, []))
+      })
       let #(iter_method, st) =
         rt_obj.t_get_prop(st, items, SymbolKey(symbol_iterator))
       case classify(iter_method) {
@@ -3619,3 +3632,7 @@ fn array_values(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 fn array_entries(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   create_array_iterator(st, this, ArrayIterEntries)
 }
+
+// every element of a plain hole-free array whose iteration observes nothing
+@external(erlang, "arc_rt_lang_ffi", "array_spread")
+fn array_spread(st: Agent, items: JsVal) -> Option(List(JsVal))

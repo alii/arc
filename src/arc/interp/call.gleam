@@ -570,7 +570,10 @@ pub fn array_values(agent: Agent, v: JsVal) -> List(JsVal) {
       case rt_obj.as_sobject(rt_store.t_cell_get(agent, h)) {
         SObject(kind: ArrayObj(length:), elements:, ..)
         | SObject(kind: ArgumentsObj(length:, ..), elements:, ..) ->
-          padded_elements(elements, length - 1, [])
+          rt_elements.dense_list(elements, length)
+          |> option.lazy_unwrap(fn() {
+            padded_elements(elements, length - 1, [])
+          })
         _ -> []
       }
     _ -> []

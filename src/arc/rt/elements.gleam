@@ -167,9 +167,39 @@ pub fn write_list(
   i: Int,
   vals: List(JsVal),
 ) -> JsElements {
-  case vals {
-    [] -> elements
-    [v, ..rest] -> write_list(set(elements, i, v), i + 1, rest)
+  case vals, elements {
+    [], _ -> elements
+    _, NoElements if i == 0 -> from_list(vals)
+    [v, ..rest], Dense(data) ->
+      case
+        tree_array.size(data) == i && i + list.length(vals) < max_dense_index
+      {
+        True -> Dense(tree_array.append_list(data, vals))
+        False -> write_list(set(elements, i, v), i + 1, rest)
+      }
+    [v, ..rest], _ -> write_list(set(elements, i, v), i + 1, rest)
+  }
+}
+
+// count values from index from when every one is present
+pub fn range_list(
+  elements: JsElements,
+  from: Int,
+  count: Int,
+) -> Option(List(JsVal)) {
+  case elements {
+    _ if count == 0 -> option.Some([])
+    Dense(data) -> tree_array.range_list(data, from, count)
+    _ -> option.None
+  }
+}
+
+// the first len values when every one is present
+pub fn dense_list(elements: JsElements, len: Int) -> Option(List(JsVal)) {
+  case elements {
+    NoElements if len == 0 -> option.Some([])
+    Dense(data) -> tree_array.dense_list(data, len)
+    _ -> option.None
   }
 }
 

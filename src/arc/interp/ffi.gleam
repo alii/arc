@@ -349,3 +349,41 @@ pub fn object(of: List(Handle)) -> JsVal
 
 @external(erlang, "erlang", "hd")
 pub fn handle(of: List(JsVal)) -> Handle
+
+// for-of over plain arrays, see arc_interp_ffi:array_iter_start
+pub type ArrayIterStep {
+  IterStep(done: Bool, value: JsVal, rec: JsVal)
+  // a map entry that still needs its pair array
+  IterPair(key: JsVal, value: JsVal, rec: JsVal)
+  IterMiss
+}
+
+@external(erlang, "arc_rt_lang_ffi", "array_iter_start")
+pub fn array_iter_start(agent: Agent, iterable: JsVal) -> JsVal
+
+@external(erlang, "arc_rt_lang_ffi", "array_iter_next")
+pub fn array_iter_next(store: JsStore(Agent), rec: JsVal) -> ArrayIterStep
+
+@external(erlang, "arc_rt_lang_ffi", "is_array_iter")
+pub fn is_array_iter(v: JsVal) -> Bool
+
+@external(erlang, "arc_rt_lang_ffi", "array_iter_parts")
+pub fn array_iter_parts(rec: JsVal) -> #(JsVal, Int, JsVal)
+
+@external(erlang, "arc_rt_lang_ffi", "array_iter_proto")
+pub fn array_iter_proto(agent: Agent, rec: JsVal) -> Handle
+
+@external(erlang, "arc_rt_lang_ffi", "array_iter_record")
+pub fn array_iter_record(target: JsVal, index: Int, next_fn: JsVal) -> JsVal
+
+// for-in keeps its pending keys on the operand stack, never in the heap
+pub type ForInStep {
+  ForInKey(key: JsVal, rest: JsVal)
+  ForInEnd
+}
+
+@external(erlang, "arc_interp_ffi", "for_in_list")
+pub fn for_in_list(keys: List(JsVal)) -> JsVal
+
+@external(erlang, "arc_interp_ffi", "for_in_next")
+pub fn for_in_next(iter: JsVal) -> ForInStep

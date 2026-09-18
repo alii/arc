@@ -2033,13 +2033,27 @@ pub fn t_for_in_keys(st: Agent, obj: JsVal) -> #(List(JsVal), Agent) {
   case rt_types.classify(obj) {
     KUndef | KNull -> #([], st)
     KHandle(h) ->
-      for_in_keys_loop(st, Some(h), set.new(), [], limits.max_prototype_depth)
+      case for_in_fast(st, obj) {
+        Some(keys) -> #(keys, st)
+        None ->
+          for_in_keys_loop(
+            st,
+            Some(h),
+            set.new(),
+            [],
+            limits.max_prototype_depth,
+          )
+      }
     _ -> {
       let #(h, st) = js_ops(st).to_object(st, obj)
       for_in_keys_loop(st, Some(h), set.new(), [], limits.max_prototype_depth)
     }
   }
 }
+
+// plain chains only, see arc_rt_obj_ffi
+@external(erlang, "arc_rt_obj_ffi", "t_for_in_fast")
+fn for_in_fast(st: Agent, obj: JsVal) -> Option(List(JsVal))
 
 // non-enumerable own key still shadows proto keys; fuel bounds trap loops
 fn for_in_keys_loop(

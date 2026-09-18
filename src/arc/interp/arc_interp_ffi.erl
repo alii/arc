@@ -1,6 +1,8 @@
 %% fast-path kernels: total, answer `miss` when anything observable is needed
 -module(arc_interp_ffi).
--export([is_miss/1, is_tdz/1, is_undefined/1,
+-export([for_in_list/1, for_in_next/1,
+         native_token/1, iter_elem/2,
+         is_miss/1, is_tdz/1, is_undefined/1,
          truthy/1, lnot/1, nullish/1, typeof/1, typeof/2,
          box_get/2, cell_of/2, ctor_prototype/2, list_of/2, instance_of/4,
          capture_env/2, iter_step/2]).
@@ -266,6 +268,7 @@ iter_step(Store, {?HANDLE_TAG, RecId}) ->
     end;
 iter_step(_, _) -> protocol.
 
+
 native_token(Slot)
   when element(1, Slot) =:= ?SOBJECT_TAG,
        element(1, element(?SOBJECT_KIND, Slot)) =:= ?KNATIVE_TAG ->
@@ -319,3 +322,8 @@ iter_elem({?ELEMS_SPARSE, M}, Idx) ->
         _ -> ?ELEMS_HOLE
     end;
 iter_elem(_, _) -> ?ELEMS_HOLE.
+
+for_in_list(Keys) -> {for_in, Keys}.
+
+for_in_next({for_in, [K | Rest]}) -> {for_in_key, K, {for_in, Rest}};
+for_in_next({for_in, []}) -> for_in_end.

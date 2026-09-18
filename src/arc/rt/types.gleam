@@ -2321,7 +2321,6 @@ pub type ObjKind {
   RawJsonObj(raw: String)
   ModuleNamespace(exports: Dict(String, Handle))
   ProxyObj(target: Handle, handler: Handle, revoked: Bool)
-  ForInIterator(remaining: List(String))
   ArrayIterator(target: Handle, index: Int, kind: ArrayIterKind)
   MapIterator(target: Handle, index: Int, kind: MapIterKind)
   SetIterator(target: Handle, index: Int, kind: SetIterKind)

@@ -126,6 +126,16 @@
 -define(GENERATOROBJ_ARITY, 2).
 -define(TOKEN_ARRAY_ITER_NEXT, {iterator_n, array_iterator_next}).
 -define(TOKEN_GENERATOR_NEXT, {generator_n, generator_next}).
+-define(TOKEN_ARRAY_VALUES, {array_n, array_prototype_values}).
+-define(TOKEN_STRING_ITER, {string_n, string_prototype_symbol_iterator}).
+-define(TOKEN_STRING_ITER_NEXT, {iterator_n, string_iterator_next}).
+-define(TOKEN_MAP_ENTRIES, {map_n, map_entries}).
+-define(TOKEN_MAP_ITER_NEXT, {iterator_n, map_iterator_next}).
+-define(TOKEN_SET_VALUES, {set_n, set_values}).
+-define(TOKEN_SET_ITER_NEXT, {iterator_n, set_iterator_next}).
+-define(MAPOBJ_TAG, map_obj).
+-define(SETOBJ_TAG, set_obj).
+-define(ARC_ITER, arc_iter).
 -define(PROXYOBJ_TAG, proxy_obj).
 -define(STRINGOBJ_TAG, string_obj).
 -define(STRINGOBJ_VALUE, 2).
