@@ -47,13 +47,9 @@ fn monotonic_time(unit: TimeUnit) -> Int
 
 fn compile_and_seed(source: String, name: String) -> #(Atom, Agent) {
   let opts =
-    emit_2core.CompileOpts(
-      module_name: name,
-      source_kind: emit_2core.AsScript,
-      entry_name: "js_main",
-    )
-  let assert Ok(unit) = emit_2core.compile_source(source, opts)
-  let assert Ok(beam) = pipeline.compile_ir(unit.module, emit_2core.binding())
+    emit_2core.CompileOpts(module_name: name, source_kind: emit_2core.AsScript)
+  let assert Ok(ir_module) = emit_2core.compile_source(source, opts)
+  let assert Ok(beam) = pipeline.compile_ir(ir_module, emit_2core.binding())
   let assert Ok(mod) = run.load(beam, name)
   #(mod, harness.seed())
 }
@@ -704,7 +700,7 @@ pub fn raytrace_apply_verify() -> Bool {
     "    (1) t_new_arguments ≈0:       "
     <> case args_ok {
       True ->
-        "✓ FIRES (perf7_args_elide elided; "
+        "✓ FIRES (arguments object elided; "
         <> int.to_string(n_new_args)
         <> "/run)"
       False ->
@@ -857,13 +853,12 @@ fn dump_am3_core() -> Nil {
     emit_2core.CompileOpts(
       module_name: "arc_prof_am3",
       source_kind: emit_2core.AsScript,
-      entry_name: "js_main",
     )
   case emit_2core.compile_source(am3_bench_js, opts) {
     Error(e) ->
       io.println("!! am3 compile_source FAILED: " <> string.inspect(e))
-    Ok(unit) ->
-      case pipeline.ir_to_core(unit.module, emit_2core.binding()) {
+    Ok(ir_module) ->
+      case pipeline.ir_to_core(ir_module, emit_2core.binding()) {
         Error(e) ->
           io.println("!! am3 ir_to_core FAILED: " <> string.inspect(e))
         Ok(core) -> io.println(core)

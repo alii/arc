@@ -26,7 +26,7 @@ pub type RealmConsts {
   )
 }
 
-pub fn realm_consts() -> RealmConsts {
+fn realm_consts() -> RealmConsts {
   RealmConsts(
     undef: ir.ConstAtom("undefined"),
     null: ir.ConstAtom("null"),
@@ -49,9 +49,18 @@ pub type EmitError {
   ScopeCursorDesync(at: ScopeId)
 }
 
+pub fn describe_error(err: EmitError) -> String {
+  case err {
+    BreakOutsideLoop -> "break outside loop"
+    ContinueOutsideLoop -> "continue outside loop"
+    EarlySyntaxError(message:) -> message
+    UnsupportedFeature(feature:) -> "unsupported: " <> feature
+    ScopeCursorDesync(..) -> "scope cursor desync"
+  }
+}
+
 pub type FieldInitMode {
   NoFieldInit
-  FieldInitAtStart
   FieldInitAfterSuper
 }
 
@@ -86,9 +95,6 @@ pub type FnSave {
     pending_label: Option(String),
     strict: Bool,
     is_async: Bool,
-    is_generator: Bool,
-    is_arrow: Bool,
-    with_stack: List(String),
     private_env: List(String),
     field_init: FieldInitMode,
     derived_ctor: Bool,
@@ -161,7 +167,6 @@ pub type FnShape {
   Arrow(is_async: Bool)
   Method(is_gen: Bool, is_async: Bool)
   ClassCtor(derived: Bool, has_field_init: Bool, default: Bool)
-  ClassInitFn
 }
 
 pub type FnBody {
@@ -201,8 +206,6 @@ pub type EmitDispatch {
     emit_expr_named: fn(Emitter2, ast.Expression, Option(String)) ->
       Result(#(ir.Expr, Emitter2), EmitError),
     emit_stmts: fn(Emitter2, List(ast.StmtWithLine), K) ->
-      Result(#(ir.Expr, Emitter2), EmitError),
-    emit_pattern: fn(Emitter2, ast.Pattern, ir.Value, BindMode) ->
       Result(#(ir.Expr, Emitter2), EmitError),
     emit_function: fn(
       Emitter2,
@@ -263,9 +266,6 @@ pub type Emitter2 {
     unsupported: List(String),
     strict: Bool,
     is_async: Bool,
-    is_generator: Bool,
-    is_arrow: Bool,
-    with_stack: List(String),
     private_env: List(String),
     field_init: FieldInitMode,
     derived_ctor: Bool,
@@ -312,14 +312,11 @@ pub fn set_slotted_globals(e: Emitter2, d: Dict(String, Int)) -> Emitter2 {
 }
 
 pub fn lookup_slotted_global(e: Emitter2, name: String) -> Option(Int) {
-  case dict.get(e.slotted_globals, name) {
-    Ok(slot) -> Some(slot)
-    Error(_) -> None
-  }
+  option.from_result(dict.get(e.slotted_globals, name))
 }
 
 pub fn fresh_var(e: Emitter2) -> #(String, Emitter2) {
-  #("_t" <> int_to_string(e.next_var), Emitter2(..e, next_var: e.next_var + 1))
+  #("_t" <> int.to_string(e.next_var), Emitter2(..e, next_var: e.next_var + 1))
 }
 
 pub fn let_tail_value(rhs: ir.Expr) -> Option(ir.Value) {
@@ -369,7 +366,7 @@ pub fn let_(
 
 pub fn fresh_label(e: Emitter2) -> #(String, Emitter2) {
   #(
-    "_L" <> int_to_string(e.next_label),
+    "_L" <> int.to_string(e.next_label),
     Emitter2(..e, next_label: e.next_label + 1),
   )
 }
@@ -380,7 +377,7 @@ pub fn fresh_fn_name(
 ) -> #(String, Emitter2) {
   let base = case option.then(js_name, fn_base) {
     Some(name) -> name
-    None -> "fn_" <> int_to_string(e.next_fn)
+    None -> "fn_" <> int.to_string(e.next_fn)
   }
   let name = unique_fn_name(base, e.fn_names, 2)
   #(
@@ -445,7 +442,7 @@ fn unique_fn_name(base: String, taken: Set(String), n: Int) -> String {
   case fn_name_free(base, taken) {
     True -> base
     False -> {
-      let cand = base <> "_" <> int_to_string(n)
+      let cand = base <> "_" <> int.to_string(n)
       case fn_name_free(cand, taken) {
         True -> cand
         False -> unique_fn_name(base, taken, n + 1)
@@ -479,14 +476,12 @@ fn strip_suffix(s: String, suffix: String) -> Option(String) {
 }
 
 fn strip_chunk_suffix(s: String) -> Option(String) {
-  case string.split(s, "_c") {
-    [_, _, ..] -> {
-      let assert Ok(last) = list.last(string.split(s, "_c"))
+  case list.reverse(string.split(s, "_c")) {
+    [last, _, ..] ->
       case int.parse(last) {
         Ok(_) -> Some(string.drop_end(s, string.length(last) + 2))
         Error(Nil) -> None
       }
-    }
     _ -> None
   }
 }
@@ -507,14 +502,14 @@ pub fn mark_unsupported(e: Emitter2, feature: String) -> Emitter2 {
 pub fn slot_var_name(e: Emitter2, slot: Int) -> String {
   case dict.get(e.slot_names, #(e.fn_scope, slot)) {
     Ok(name) -> name
-    Error(Nil) -> "js_local_" <> int_to_string(slot)
+    Error(Nil) -> "js_local_" <> int.to_string(slot)
   }
 }
 
 pub fn get_slot_var(e: Emitter2, slot: Int) -> String {
   case dict.get(e.slot_vars, slot) {
     Ok(name) -> name
-    Error(_) -> slot_var_name(e, slot)
+    Error(Nil) -> slot_var_name(e, slot)
   }
 }
 
@@ -565,7 +560,7 @@ fn unique_name(base: String, taken: Set(String), n: Int) -> String {
   case set.contains(taken, base) {
     False -> base
     True -> {
-      let cand = base <> "__" <> int_to_string(n)
+      let cand = base <> "__" <> int.to_string(n)
       case set.contains(taken, cand) {
         False -> cand
         True -> unique_name(base, taken, n + 1)
@@ -576,16 +571,13 @@ fn unique_name(base: String, taken: Set(String), n: Int) -> String {
 
 pub fn fresh_slot_var(e: Emitter2, slot: Int) -> #(String, Emitter2) {
   #(
-    slot_var_name(e, slot) <> "_" <> int_to_string(e.next_var),
+    slot_var_name(e, slot) <> "_" <> int.to_string(e.next_var),
     Emitter2(..e, next_var: e.next_var + 1),
   )
 }
 
 pub fn cap_param_name(e: Emitter2, i: Int) -> String {
-  case list_at(e.cap_names, i) {
-    Some(name) -> name
-    None -> "cap_" <> int_to_string(i)
-  }
+  list_at(e.cap_names, i) |> option.unwrap("cap_" <> int.to_string(i))
 }
 
 fn list_at(xs: List(a), i: Int) -> Option(a) {
@@ -605,18 +597,8 @@ pub fn set_hoisted_kfn(e: Emitter2, slot: Int, pair_var: ir.Value) -> Emitter2 {
 }
 
 pub fn lookup_hoisted_kfn(e: Emitter2, slot: Int) -> Option(ir.Value) {
-  case dict.get(e.hoisted_kfn, slot) {
-    Ok(v) -> Some(v)
-    Error(_) -> None
-  }
+  option.from_result(dict.get(e.hoisted_kfn, slot))
 }
-
-pub fn clear_hoisted_kfn(e: Emitter2) -> Emitter2 {
-  Emitter2(..e, hoisted_kfn: dict.new())
-}
-
-@external(erlang, "erlang", "integer_to_binary")
-fn int_to_string(i: Int) -> String
 
 // ics live in one per-agent map keyed by site, so modules loaded into the
 // same agent must not number their sites alike: each module counts up from a
@@ -795,7 +777,7 @@ fn continue_target_of(frame: Frame2, name: Option(String)) -> Option(String) {
   }
 }
 
-fn cross_cleanups(frame: Frame2) -> List(BarrierCleanup) {
+pub fn cross_cleanups(frame: Frame2) -> List(BarrierCleanup) {
   case frame {
     Loop2(iter_close: Some(#(iv, esc)), ..) -> [IterClose(iv, False, Some(esc))]
     Loop2(..) | Switch2(..) | Labeled2(..) -> []
@@ -884,9 +866,6 @@ pub fn new_emitter(
     unsupported: [],
     strict:,
     is_async: False,
-    is_generator: False,
-    is_arrow: False,
-    with_stack: [],
     private_env: [],
     field_init: NoFieldInit,
     derived_ctor: False,
@@ -938,7 +917,7 @@ pub fn arguments_is_implicit(e: Emitter2) -> Bool {
 
 pub fn pop_child_fn(e: Emitter2) -> #(ScopeId, Emitter2) {
   let assert [fn_id, ..rest] = e.child_fn_cursor
-    as "emit_2core.pop_child_fn: cursor exhausted (analyzer/emit walk desync)"
+    as "aot/state: child fn cursor exhausted (analyzer/emit walk desync)"
   #(fn_id, Emitter2(..e, child_fn_cursor: rest))
 }
 
@@ -1036,7 +1015,6 @@ pub fn enter_function(
   child_id: ScopeId,
   strict strict: Bool,
   is_async is_async: Bool,
-  is_generator is_generator: Bool,
   is_arrow is_arrow: Bool,
 ) -> #(Emitter2, FnSave) {
   let save =
@@ -1050,9 +1028,6 @@ pub fn enter_function(
       pending_label: e.pending_label,
       strict: e.strict,
       is_async: e.is_async,
-      is_generator: e.is_generator,
-      is_arrow: e.is_arrow,
-      with_stack: e.with_stack,
       private_env: e.private_env,
       field_init: e.field_init,
       derived_ctor: e.derived_ctor,
@@ -1078,9 +1053,6 @@ pub fn enter_function(
       pending_label: None,
       strict:,
       is_async:,
-      is_generator:,
-      is_arrow:,
-      with_stack: [],
       private_env: e.private_env,
       field_init: NoFieldInit,
       derived_ctor: False,
@@ -1109,9 +1081,6 @@ pub fn leave_function(e: Emitter2, save: FnSave) -> Emitter2 {
     pending_label: save.pending_label,
     strict: save.strict,
     is_async: save.is_async,
-    is_generator: save.is_generator,
-    is_arrow: save.is_arrow,
-    with_stack: save.with_stack,
     private_env: save.private_env,
     field_init: save.field_init,
     derived_ctor: save.derived_ctor,

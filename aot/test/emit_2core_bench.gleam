@@ -38,16 +38,11 @@ type Loaded {
 
 fn compile_load(source: String, name: String) -> #(Int, Int, Loaded) {
   let opts =
-    emit_2core.CompileOpts(
-      module_name: name,
-      source_kind: emit_2core.AsScript,
-      entry_name: "js_main",
-    )
+    emit_2core.CompileOpts(module_name: name, source_kind: emit_2core.AsScript)
   let #(compile_us, beam) =
     time_us(fn() {
-      let assert Ok(unit) = emit_2core.compile_source(source, opts)
-      let assert Ok(beam) =
-        pipeline.compile_ir(unit.module, emit_2core.binding())
+      let assert Ok(ir_module) = emit_2core.compile_source(source, opts)
+      let assert Ok(beam) = pipeline.compile_ir(ir_module, emit_2core.binding())
       beam
     })
   let assert Ok(mod) = run.load(beam, name)

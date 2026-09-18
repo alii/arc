@@ -9,8 +9,8 @@ import arc_aot/emit/anf
 import arc_aot/emit/expr
 import arc_aot/emit/state.{
   type EmitError, type Emitter2, type FnBody, type FnShape, Arrow, ClassCtor,
-  ClassInitFn, Emitter2, ExprBody, FieldInitAfterSuper, FnDecl, FnExpr, Method,
-  NoFieldInit, StmtBody,
+  Emitter2, ExprBody, FieldInitAfterSuper, FnDecl, FnExpr, Method, NoFieldInit,
+  StmtBody,
 }
 import carder/ir
 import gleam/bit_array
@@ -20,10 +20,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
-
-pub const perf5_code_t: Bool = True
-
-pub const perf7_args_elide: Bool = True
 
 type Rk(a) =
   fn(Emitter2, a) -> Result(#(ir.Expr, Emitter2), EmitError)
@@ -138,8 +134,6 @@ fn derive_flags(shape: FnShape) -> ShapeFlags {
       ShapeFlags(False, is_gen, is_async, False, False, False, True, None)
     ClassCtor(derived:, ..) ->
       ShapeFlags(False, False, False, True, True, derived, False, None)
-    ClassInitFn ->
-      ShapeFlags(False, False, False, False, False, False, False, None)
   }
 }
 
@@ -183,10 +177,6 @@ fn derive_field_init(
   }
 }
 
-pub fn cap_param_name(e: Emitter2, i: Int) -> String {
-  state.cap_param_name(e, i)
-}
-
 fn capture_count(info: FunctionInfo) -> Int {
   list.length(info.captures) + dict.size(info.lexical_captures)
 }
@@ -206,7 +196,7 @@ pub fn build_capture_values(
           case lexical.lexical_slot(parent_info.lexical, ref) {
             Some(pslot) -> Ok(ir.Var(state.get_slot_var(e, pslot)))
             None ->
-              panic as "emit_2core/fn: lexical capture parent slot missing (analyzer invariant)"
+              panic as "aot/func: lexical capture parent slot missing (analyzer invariant)"
           }
       }
     })
@@ -217,7 +207,7 @@ pub fn seed_capture_slots(e: Emitter2, info: FunctionInfo) -> Emitter2 {
   let names =
     list.map(info.captures, fn(c) {
       let assert Ok(child_slot) = dict.get(info.names, c.0)
-        as "emit_2core/fn: capture name missing from FunctionInfo.names"
+        as "aot/func: capture name missing from FunctionInfo.names"
       #(child_slot, state.slot_var_name(e, child_slot))
     })
   let lexical_names =
@@ -245,7 +235,7 @@ pub fn build_ir_params(e: Emitter2, i: Int, n: Int) -> List(ir.Local) {
   case i < n {
     False -> [ir.Local("_frame", ir.TTerm), ir.Local("_args", ir.TTerm)]
     True -> [
-      ir.Local(cap_param_name(e, i), ir.TTerm),
+      ir.Local(state.cap_param_name(e, i), ir.TTerm),
       ..build_ir_params(e, i + 1, n)
     ]
   }
@@ -615,8 +605,7 @@ fn refs_args_expr(e: ast.Expression) -> Bool {
       || refs_args_expr(alternate)
     ast.SequenceExpression(expressions:, ..) ->
       list.any(expressions, refs_args_expr)
-    ast.CallExpression(callee: ast.Identifier(name: "eval", ..), arguments:, ..) ->
-      True || list.any(arguments, refs_args_expr)
+    ast.CallExpression(callee: ast.Identifier(name: "eval", ..), ..) -> True
     // never elide apply(_, arguments) here or scan and emit desync
     ast.CallExpression(callee:, arguments:, ..)
     | ast.OptionalCallExpression(callee:, arguments:, ..)
@@ -1187,10 +1176,9 @@ fn is_simple_abi_eligible(
           case refs_args_body(body) || refs_frame_body(body, False) {
             True -> None
             False ->
-              case is_arrow, refs_frame_body(body, True), perf5_code_t {
-                True, True, _ -> None
-                _, True, False -> None
-                _, needs_this, _ -> Some(#(list.length(fixed), needs_this))
+              case is_arrow, refs_frame_body(body, True) {
+                True, True -> None
+                _, needs_this -> Some(#(list.length(fixed), needs_this))
               }
           }
       }
@@ -1211,7 +1199,7 @@ fn init_arguments(
     True -> k(e)
     False ->
       case dict.get(scope.get_scope(e.tree, e.fn_scope).bindings, "arguments") {
-        Error(_) -> k(e)
+        Error(Nil) -> k(e)
         Ok(b) -> {
           // mapped only for sloppy simple params, §10.2.11 step 18
           use e, mapped <- build_mapped_cells(e, fixed, non_simple || has_rest)
@@ -1264,7 +1252,7 @@ fn hoist_fn_decls(
       is_async:,
     ) -> {
       let #(child_id, e) = state.pop_child_fn(e)
-      use #(ctree, e) <- result.try(emit_function_tree(
+      use #(ctree, e) <- result.try(emit_function(
         e,
         FnDecl(is_gen: is_generator, is_async:),
         Some(name),
@@ -1275,7 +1263,7 @@ fn hoist_fn_decls(
       use e, fn_h <- let_(e, ctree)
       let assert Ok(b) =
         dict.get(scope.get_scope(e.tree, e.cur_scope).bindings, name)
-        as "emit_2core/fn: hoisted function missing from var-scope bindings"
+        as "aot/func: hoisted function missing from var-scope bindings"
       store_slot(e, b, fn_h, next)
     }
     _ -> next(e)
@@ -1285,7 +1273,7 @@ fn hoist_fn_decls(
 fn fn_scope_binding(e: Emitter2, name: String) -> Binding {
   let assert Ok(b) =
     dict.get(scope.get_scope(e.tree, e.fn_scope).bindings, name)
-    as "emit_2core/fn: name missing from fn-scope bindings"
+    as "aot/func: name missing from fn-scope bindings"
   b
 }
 
@@ -1314,7 +1302,7 @@ pub fn emit_prologue(
     !is_arrow
     && {
       list.any(params, refs_args_pattern)
-      || case perf7_args_elide && own_args {
+      || case own_args {
         True -> needs_args_object_stmts(stmts)
         False -> refs_args_stmts(stmts)
       }
@@ -1414,7 +1402,7 @@ fn list_at(xs: List(a), i: Int) -> Option(a) {
   }
 }
 
-pub const simple_this_param = "_this"
+const simple_this_param = "_this"
 
 fn build_simple_ir_params(
   e: Emitter2,
@@ -1426,7 +1414,7 @@ fn build_simple_ir_params(
 ) -> List(ir.Local) {
   case i < ncap {
     True -> [
-      ir.Local(cap_param_name(e, i), ir.TTerm),
+      ir.Local(state.cap_param_name(e, i), ir.TTerm),
       ..build_simple_ir_params(e, fixed, i + 1, ncap, arity, needs_this)
     ]
     False -> {
@@ -1465,7 +1453,7 @@ fn bind_simple_params(
     [] -> k(e)
     [p, ..rest] -> {
       let assert ast.IdentifierPattern(name:, ..) = p
-        as "emit_2core/fn: simple-abi param not IdentifierPattern"
+        as "aot/func: simple-abi param not IdentifierPattern"
       let b = fn_scope_binding(e, name)
       let pn = simple_param_ir_name(e, fixed_all, i)
       let raw = ir.Var(pn)
@@ -1509,10 +1497,7 @@ fn emit_simple_body(
   needs_this: Bool,
   info: FunctionInfo,
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  let stmts = case body {
-    StmtBody(s) -> s
-    ExprBody(x) -> [ast.StmtWithLine(0, ast.ReturnStatement(Some(x)))]
-  }
+  let stmts = body_stmts(body)
   let ret_undef = fn(ef: Emitter2) { Ok(#(ir.Return([ef.consts.undef]), ef)) }
   run_rk(e, fn(e, done) {
     use e <- seed_simple_this(e, needs_this, info)
@@ -1725,7 +1710,6 @@ fn compile_function(
           fn_scope_id,
           strict: child_strict,
           is_async: False,
-          is_generator: False,
           is_arrow: sf.is_arrow,
         )
       let derived_ctor = sf.is_derived_constructor
@@ -1867,7 +1851,7 @@ type Compiled {
   )
 }
 
-fn emit_function_tree(
+pub fn emit_function(
   e: Emitter2,
   shape: FnShape,
   js_name: Option(String),
@@ -1884,17 +1868,6 @@ fn emit_function_tree(
     fn_scope_id,
   ))
   compiled.site(e)
-}
-
-pub fn emit_function(
-  e: Emitter2,
-  shape: FnShape,
-  js_name: Option(String),
-  params: List(ast.Pattern),
-  body: FnBody,
-  fn_scope_id: ScopeId,
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  emit_function_tree(e, shape, js_name, params, body, fn_scope_id)
 }
 
 pub fn emit_function_site(

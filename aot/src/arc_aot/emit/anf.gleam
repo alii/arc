@@ -396,20 +396,6 @@ pub fn seq(bs: List(Build(a))) -> Build(List(a)) {
   }
 }
 
-pub fn bind_n(rhs: ir.Expr, n: Int) -> Build(List(ir.Value)) {
-  then(bind(rhs), fn(tup) { proj_from(tup, 0, n) })
-}
-
-fn proj_from(tup: ir.Value, i: Int, n: Int) -> Build(List(ir.Value)) {
-  case i < n {
-    False -> pure([])
-    True ->
-      then(bind(tuple_get(tup, i)), fn(vi) {
-        map(proj_from(tup, i + 1, n), fn(rest) { [vi, ..rest] })
-      })
-  }
-}
-
 fn number_guard(v: ir.Value) -> Build(#(ir.Value, Bool)) {
   fn(e, k) {
     case is_known_number(e, v) {
@@ -690,19 +676,6 @@ fn cond_cmp_numeric(
         bind(ir.NumTerm(fast, a, b)),
         then(host(slow_op, [a, b]), fn(v) { host("truthy", [v]) }),
       )
-  }
-}
-
-pub fn guarded_unary_numeric(v: ir.Value) -> Build(ir.Value) {
-  fn(e, k) {
-    case is_known_number(e, v) {
-      True -> k(e, v)
-      False ->
-        {
-          use is_n <- then(bind(ir.TermTest(ir.IsNumber, v)))
-          bind_if(is_n, pure(v), host("to_numeric", [v]))
-        }(e, k)
-    }
   }
 }
 

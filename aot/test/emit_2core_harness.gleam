@@ -107,12 +107,11 @@ pub fn run_compiled(source: String) -> DiffRun {
     emit_2core.CompileOpts(
       module_name: mod_name,
       source_kind: emit_2core.AsScript,
-      entry_name: "js_main",
     )
   case emit_2core.compile_source(source, opts) {
     Error(e) -> DiffRun(stdout: <<>>, result: Error(string.inspect(e)))
-    Ok(unit) ->
-      case pipeline.compile_ir(unit.module, emit_2core.binding()) {
+    Ok(ir_module) ->
+      case pipeline.compile_ir(ir_module, emit_2core.binding()) {
         Error(e) -> DiffRun(stdout: <<>>, result: Error(string.inspect(e)))
         Ok(beam) ->
           case run.load(beam, mod_name) {

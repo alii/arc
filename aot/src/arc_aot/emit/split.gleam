@@ -10,10 +10,10 @@ import gleam/set.{type Set}
 import gleam/string
 
 // measured sweet spot for erlc time
-pub const chunk = 64
+const chunk = 64
 
 // beam caps a function at 255 args
-const max_live = 250
+pub const max_live_params = 250
 
 pub fn function(f: ir.Function) -> List(ir.Function) {
   let #(spine, tail) = unzip_spine(f.body, [])
@@ -75,7 +75,10 @@ fn cut_step(
         set.intersection(cut.rest_fv, bound)
         |> set.to_list
         |> list.sort(string.compare)
-      case list.length(live) <= max_live, list.try_map(live, dict.get(env, _)) {
+      case
+        list.length(live) <= max_live_params,
+        list.try_map(live, dict.get(env, _))
+      {
         True, Ok(tys) -> Some(#(live, tys))
         _, _ -> None
       }

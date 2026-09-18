@@ -12,8 +12,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
-pub const js_exn_tag = "js_exn"
-
 type Rk(a) =
   fn(Emitter2, a) -> Result(#(ir.Expr, Emitter2), EmitError)
 
@@ -34,16 +32,6 @@ fn host_(
   let_(e, ir.CallHost("js", op, args), k)
 }
 
-fn host_unit_(
-  e: Emitter2,
-  op: String,
-  args: List(ir.Value),
-  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  use e, _ <- host_(e, op, args)
-  k(e)
-}
-
 fn each_(
   e: Emitter2,
   items: List(a),
@@ -60,24 +48,6 @@ fn each_(
   }
 }
 
-fn if_(
-  e: Emitter2,
-  cond: ir.Value,
-  t: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-  f: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-  k: Rk(ir.Value),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  use #(tt, e) <- result.try(t(e))
-  use #(ft, e) <- result.try(f(e))
-  let_(e, ir.If(cond, [ir.TTerm], tt, ft), k)
-}
-
-fn pure_arm(
-  v: ir.Value,
-) -> fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  fn(e) { Ok(#(ir.Values([v]), e)) }
-}
-
 fn run_rk(
   e: Emitter2,
   f: fn(
@@ -86,16 +56,6 @@ fn run_rk(
   ) -> Result(#(ir.Expr, Emitter2), EmitError),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   f(e, fn(ef, tree) { Ok(#(tree, ef)) })
-}
-
-pub fn emit_throw_stmt(
-  e: Emitter2,
-  arg: ast.Expression,
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  use e, done <- run_rk(e)
-  use #(tree, e) <- result.try(e.dispatch.emit_expr(e, arg))
-  use e, v <- let_(e, tree)
-  done(e, ir.Throw(js_exn_tag, [v]))
 }
 
 // §14.15.3 finally overrides the pending completion
@@ -203,7 +163,7 @@ pub fn emit_try_catch_finally(
   let inner =
     ir.Try(result: [], body: body_ir, handlers: [
       ir.CatchHandler(
-        on: ir.OnTag(js_exn_tag),
+        on: ir.OnTag(e.consts.js_tag),
         payload: [ex],
         exnref: None,
         handler: h_ir,
@@ -255,7 +215,8 @@ fn wrap_with_finally(
   let fin_pos = snapshot_scope(e)
   let #(ex, e) = state.fresh_var(e)
   use #(f_throw, e) <- result.try(emit_finalizer(e, finalizer))
-  let throw_handler = ir.Let([], f_throw, ir.Throw(js_exn_tag, [ir.Var(ex)]))
+  let throw_handler =
+    ir.Let([], f_throw, ir.Throw(e.consts.js_tag, [ir.Var(ex)]))
   let e = state.leave_scope(e, fin_pos)
   use #(f_normal, e) <- result.try(emit_finalizer(e, finalizer))
   let #(region, e) =
@@ -264,7 +225,7 @@ fn wrap_with_finally(
       esc,
       ir.Try(result: [], body: protected_ir, handlers: [
         ir.CatchHandler(
-          on: ir.OnTag(js_exn_tag),
+          on: ir.OnTag(e.consts.js_tag),
           payload: [ex],
           exnref: None,
           handler: throw_handler,

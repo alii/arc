@@ -87,15 +87,14 @@ fn bench_compiled(name: String, source: String) -> Outcome {
     emit_2core.CompileOpts(
       module_name: mod_name,
       source_kind: emit_2core.AsScript,
-      entry_name: "js_main",
     )
   let #(emit_us, emit_r) =
     time_us(fn() { emit_2core.compile_source(source, opts) })
   case emit_r {
     Error(e) -> CompileFailed("emit_2core", string.inspect(e))
-    Ok(unit) -> {
+    Ok(ir_module) -> {
       let #(lower_us, lower_r) =
-        time_us(fn() { pipeline.compile_ir(unit.module, emit_2core.binding()) })
+        time_us(fn() { pipeline.compile_ir(ir_module, emit_2core.binding()) })
       io.println(
         "  compile: emit_2core="
         <> int.to_string(emit_us)

@@ -171,36 +171,12 @@ fn inline_cleanups(
   }
 }
 
-fn return_cleanups(frames: List(state.Frame2)) -> List(BarrierCleanup) {
-  use frame <- list.flat_map(frames)
-  case frame {
-    state.Loop2(iter_close: Some(#(iv, esc)), ..) -> [
-      state.IterClose(iv, False, Some(esc)),
-    ]
-    state.Loop2(..) | state.Switch2(..) | state.Labeled2(..) -> []
-    state.Barrier2(finally_body:, iter_close:, escape:) -> {
-      let acc = case finally_body {
-        Some(#(body, save)) -> [state.FinallyBlock(body, save, escape)]
-        None -> []
-      }
-      case iter_close {
-        Some(iv) -> [state.IterClose(iv, False, escape), ..acc]
-        None ->
-          case acc {
-            [] -> [state.CatchOnly]
-            _ -> acc
-          }
-      }
-    }
-  }
-}
-
-fn emit_break(
+// break or continue
+fn emit_jump(
   e: Emitter2,
-  label: Option(String),
-  _next: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
+  target: Result(#(String, List(BarrierCleanup)), EmitError),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  use #(ir_label, cleanups) <- result.try(state.find_break_target(e, label))
+  use #(ir_label, cleanups) <- result.try(target)
   let frames = e.frame_stack
   use e <- inline_cleanups(e, cleanups)
   case sm_goto(e, ir_label) {
@@ -219,24 +195,6 @@ fn keep_frames(
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   use #(tree, e) <- result.map(r)
   #(tree, state.Emitter2(..e, frame_stack: frames))
-}
-
-fn emit_continue(
-  e: Emitter2,
-  label: Option(String),
-  _next: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  use #(ir_label, cleanups) <- result.try(state.find_continue_target(e, label))
-  let frames = e.frame_stack
-  use e <- inline_cleanups(e, cleanups)
-  case sm_goto(e, ir_label) {
-    Some(r) -> r
-    None -> {
-      let carried = find_frame_carried(e, ir_label)
-      Ok(#(ir.Break(ir_label, carried_values(e, carried)), e))
-    }
-  }
-  |> keep_frames(frames)
 }
 
 fn sm_goto(
@@ -266,11 +224,10 @@ fn derived_return(
 fn emit_return(
   e: Emitter2,
   arg: Option(ast.Expression),
-  _next: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
 ) -> Result(#(ir.Expr, Emitter2), EmitError) {
   let with_value = fn(e: Emitter2, v: ir.Value) {
     let frames = e.frame_stack
-    use e <- inline_cleanups(e, return_cleanups(e.frame_stack))
+    use e <- inline_cleanups(e, list.flat_map(frames, state.cross_cleanups))
     use e, v <- derived_return(e, v)
     case e.sm_abrupt {
       Some(sm) -> sm.on_return(e, v)
@@ -353,9 +310,11 @@ fn emit_stmt(
     ast.FunctionDeclaration(..) -> k(e)
     ast.BlockStatement([]) -> k(e)
 
-    ast.BreakStatement(label:) -> emit_break(e, label, k)
-    ast.ContinueStatement(label:) -> emit_continue(e, label, k)
-    ast.ReturnStatement(argument:) -> emit_return(e, argument, k)
+    ast.BreakStatement(label:) ->
+      emit_jump(e, state.find_break_target(e, label))
+    ast.ContinueStatement(label:) ->
+      emit_jump(e, state.find_continue_target(e, label))
+    ast.ReturnStatement(argument:) -> emit_return(e, argument)
 
     ast.BlockStatement(body:) -> emit_block(e, body, k)
     ast.VariableDeclaration(kind:, declarations:) ->
@@ -372,7 +331,7 @@ fn emit_stmt(
       emit_for_in(e, left, right, body, k)
     ast.ForOfStatement(left:, right:, body:, is_await:) ->
       case is_await {
-        True -> todo as "M18 for-await-of"
+        True -> todo as "for await outside a coroutine"
         False -> emit_for_of(e, left, right, body, k)
       }
     ast.SwitchStatement(discriminant:, cases:) ->
@@ -468,7 +427,7 @@ fn hoist_fn_decls(
 fn cur_scope_binding(e: Emitter2, name: String) -> Binding {
   let assert Ok(b) =
     dict.get(scope.get_scope(e.tree, e.cur_scope).bindings, name)
-    as "emit_2core/stmt: name missing from block-scope bindings"
+    as "aot/stmt: name missing from block-scope bindings"
   b
 }
 
@@ -515,7 +474,7 @@ fn emit_block(
 }
 
 // annex b §B.3.1 function declaration as if clause
-pub fn block_wrap_fn_decl(stmt: ast.Statement) -> ast.Statement {
+fn block_wrap_fn_decl(stmt: ast.Statement) -> ast.Statement {
   case stmt {
     ast.FunctionDeclaration(..) ->
       ast.BlockStatement([ast.StmtWithLine(0, stmt)])
@@ -649,10 +608,10 @@ fn store_declared(
       }
     }
     scope.Plain(scope.Global(_)) ->
-      case dict.get(e.slotted_globals, name) {
-        Ok(slot) ->
+      case state.lookup_slotted_global(e, name) {
+        Some(slot) ->
           host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
-        Error(Nil) ->
+        None ->
           host_unit_(
             e,
             "global_set",
@@ -827,7 +786,7 @@ fn hoist_kfn_codes(
 }
 
 // todo: misses reassignment inside called functions
-pub fn loop_invariant_callees(
+fn loop_invariant_callees(
   e: Emitter2,
   body: ast.Statement,
   cond: Option(ast.Expression),
@@ -1482,10 +1441,10 @@ fn for_lhs_ident_assign(
       }
     }
     scope.Plain(scope.Global(_)) ->
-      case dict.get(e.slotted_globals, name) {
-        Ok(slot) ->
+      case state.lookup_slotted_global(e, name) {
+        Some(slot) ->
           host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
-        Error(Nil) ->
+        None ->
           host_unit_(
             e,
             expr.global_set_op(e.strict),

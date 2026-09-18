@@ -17,10 +17,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set
 
-pub const perf5_to_property_key_split: Bool = True
-
-pub const perf8_int_const_shift: Bool = True
-
 pub fn ask(
   e: Emitter2,
   k: fn(Emitter2, Emitter2) -> #(ir.Expr, Emitter2),
@@ -44,29 +40,8 @@ pub fn throw_at_rt(op: String, msg: String) -> Build(ir.Value) {
 }
 
 // parser-unreachable shapes throw at runtime too
-pub fn unreachable(why: String) -> Build(ir.Value) {
+fn unreachable(why: String) -> Build(ir.Value) {
   throw_at_rt("throw_type_error", "emit_2core/expr: unreachable: " <> why)
-}
-
-fn describe_error(err: EmitError) -> String {
-  case err {
-    state.BreakOutsideLoop -> "break outside loop"
-    state.ContinueOutsideLoop -> "continue outside loop"
-    state.EarlySyntaxError(message:) -> message
-    state.UnsupportedFeature(feature:) -> "unsupported: " <> feature
-    state.ScopeCursorDesync(..) -> "scope cursor desync"
-  }
-}
-
-pub fn bridge_value(
-  call: fn(Emitter2) -> Result(#(Emitter2, ir.Value), EmitError),
-) -> Build(ir.Value) {
-  fn(e, k) {
-    case call(e) {
-      Ok(#(e, v)) -> k(e, v)
-      Error(err) -> throw_at_rt("throw_type_error", describe_error(err))(e, k)
-    }
-  }
 }
 
 pub fn bridge_expr(
@@ -78,7 +53,8 @@ pub fn bridge_expr(
         let #(name, e) = state.fresh_var(e)
         anf.wrap(k(e, ir.Var(name)), ir.Let([name], tree, _))
       }
-      Error(err) -> throw_at_rt("throw_type_error", describe_error(err))(e, k)
+      Error(err) ->
+        throw_at_rt("throw_type_error", state.describe_error(err))(e, k)
     }
   }
 }
@@ -245,7 +221,7 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
     ast.AssignmentExpression(_, op, left, right) ->
       emit_assignment(op, left, right)
 
-    ast.ObjectExpression(_, properties) -> emit_object(properties, named)
+    ast.ObjectExpression(_, properties) -> emit_object(properties)
     ast.ArrayExpression(_, elements) -> emit_array(elements)
 
     ast.FunctionExpression(_, self_name, params, body, is_gen, is_async) -> {
@@ -312,7 +288,7 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
   }
 }
 
-pub fn expr(ex: ast.Expression) -> Build(ir.Value) {
+fn expr(ex: ast.Expression) -> Build(ir.Value) {
   emit(ex, None)
 }
 
@@ -345,7 +321,7 @@ pub fn emit_expr_named(
   Ok(anf.run(emit(ex, named), e))
 }
 
-pub fn emit_identifier(name: String) -> Build(ir.Value) {
+fn emit_identifier(name: String) -> Build(ir.Value) {
   use e <- anf.then(ask)
   case state.resolve(e, name) {
     scope.Plain(d) -> emit_direct_get(d, name)
@@ -385,20 +361,11 @@ fn binop(op: ast.BinaryOp, l: ir.Value, r: ir.Value) -> Build(ir.Value) {
       anf.bind_if(v, anf.pure(rc.false_), anf.pure(rc.true_))
     }
     ast.LeftShift ->
-      int_result(l, r, case perf8_int_const_shift {
-        True -> int_const_shift("erl_bsl", "shl_fast", "shl", l, r)
-        False -> int_fast("shl_fast", "shl", l, r)
-      })
+      int_result(l, r, int_const_shift("erl_bsl", "shl_fast", "shl", l, r))
     ast.RightShift ->
-      int_result(l, r, case perf8_int_const_shift {
-        True -> int_const_shift("erl_bsr", "shr_fast", "shr", l, r)
-        False -> int_fast("shr_fast", "shr", l, r)
-      })
+      int_result(l, r, int_const_shift("erl_bsr", "shr_fast", "shr", l, r))
     ast.UnsignedRightShift ->
-      int_result(l, r, case perf8_int_const_shift {
-        True -> int_fast("ushr_fast", "ushr", l, r)
-        False -> anf.host("ushr", [l, r])
-      })
+      int_result(l, r, int_fast("ushr_fast", "ushr", l, r))
     ast.BitwiseAnd ->
       int_result(l, r, int_const_bit("erl_band", "bitand_fast", "bitand", l, r))
     ast.BitwiseOr -> int_result(l, r, int_fast("bitor_fast", "bitor", l, r))
@@ -498,7 +465,7 @@ fn is_boolean_expr(ex: ast.Expression) -> Bool {
   }
 }
 
-pub fn loose_eq_i32(
+fn loose_eq_i32(
   left: ast.Expression,
   right: ast.Expression,
 ) -> Build(ir.Value) {
@@ -534,7 +501,7 @@ fn loose_eq_slow(l: ir.Value, r: ir.Value) -> Build(ir.Value) {
   anf.bind_if(is_miss, anf.host("eq", [l, r]), anf.pure(v))
 }
 
-pub fn strict_eq_i32(
+fn strict_eq_i32(
   left: ast.Expression,
   right: ast.Expression,
 ) -> Build(ir.Value) {
@@ -1218,7 +1185,7 @@ fn emit_template_object(
   anf.host("get_template_object", [site_v, cooked_l, raw_l])
 }
 
-pub fn read_slot(slot: Int, boxed: Bool) -> Build(ir.Value) {
+fn read_slot(slot: Int, boxed: Bool) -> Build(ir.Value) {
   use e <- anf.then(ask)
   let v = ir.Var(state.get_slot_var(e, slot))
   case boxed {
@@ -1235,7 +1202,7 @@ fn const_global(e: Emitter2, name: String) -> Option(ir.Value) {
   }
 }
 
-pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
+fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
   case d {
     scope.Local(slot:, boxed:, origin_kind: scope.VarBinding, ..) -> {
       use e <- anf.then(ask)
@@ -1268,9 +1235,9 @@ pub fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
     }
     scope.Global(name: g) -> {
       use e <- anf.then(ask)
-      case dict.get(e.slotted_globals, g) {
-        Ok(slot) -> read_slot(slot, True)
-        Error(Nil) ->
+      case state.lookup_slotted_global(e, g) {
+        Some(slot) -> read_slot(slot, True)
+        None ->
           case const_global(e, g) {
             Some(lit) -> anf.pure(lit)
             None -> global_read(e, g)
@@ -1316,7 +1283,7 @@ fn resolve_lexical(
   }
 }
 
-pub fn emit_lexical(ref: lexical.LexicalRef) -> Build(ir.Value) {
+fn emit_lexical(ref: lexical.LexicalRef) -> Build(ir.Value) {
   use e <- anf.then(ask)
   use v <- anf.then(lexical_value(ref))
   case ref, e.this_tdz {
@@ -1370,19 +1337,14 @@ fn this_check_init(slot: Int, boxed: Bool) -> Build(Nil) {
   anf.pure(Nil)
 }
 
-pub fn to_property_key(v: ir.Value) -> Build(ir.Value) {
-  case perf5_to_property_key_split {
-    False -> anf.host("to_property_key", [v])
-    True -> {
-      use k <- anf.then(anf.host("to_property_key_fast", [v]))
-      use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, k)))
-      anf.bind_if(is_miss, anf.host("to_property_key", [v]), anf.pure(k))
-    }
-  }
+fn to_property_key(v: ir.Value) -> Build(ir.Value) {
+  use k <- anf.then(anf.host("to_property_key_fast", [v]))
+  use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, k)))
+  anf.bind_if(is_miss, anf.host("to_property_key", [v]), anf.pure(k))
 }
 
 // §6.2.5.5 toobject(base) happens before key coercion
-pub fn to_property_key_of(base: ir.Value, v: ir.Value) -> Build(ir.Value) {
+fn to_property_key_of(base: ir.Value, v: ir.Value) -> Build(ir.Value) {
   use k <- anf.then(anf.host("to_property_key_fast", [v]))
   use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, k)))
   anf.bind_if(is_miss, anf.host("to_property_key_of", [base, v]), anf.pure(k))
@@ -1402,7 +1364,7 @@ pub fn emit_key(pk: ast.PropertyKey) -> Build(ir.Value) {
   }
 }
 
-pub fn emit_key_from_prop(prop: ast.MemberProperty) -> Build(ir.Value) {
+fn emit_key_from_prop(prop: ast.MemberProperty) -> Build(ir.Value) {
   case prop {
     ast.Dot(name: "#" <> _ as name, ..) -> emit_identifier(name)
     ast.Dot(name:, span:) -> anf.object_key_lit(ast.KeyIdentifier(name:, span:))
@@ -1681,10 +1643,7 @@ fn set_elem_fast(
   anf.pure(v)
 }
 
-pub fn emit_member_get(
-  obj: ir.Value,
-  prop: ast.MemberProperty,
-) -> Build(ir.Value) {
+fn emit_member_get(obj: ir.Value, prop: ast.MemberProperty) -> Build(ir.Value) {
   case static_dot_key(prop) {
     Some(kb) -> get_prop_fast(obj, kb)
     None ->
@@ -1707,14 +1666,14 @@ pub fn emit_member_get(
   }
 }
 
-pub fn emit_super_get(prop: ast.MemberProperty) -> Build(ir.Value) {
+fn emit_super_get(prop: ast.MemberProperty) -> Build(ir.Value) {
   use this <- anf.then(emit_lexical(lexical.RefThis))
   use ho <- anf.then(emit_lexical(lexical.RefHomeObject))
   use k <- anf.then(emit_key_from_prop(prop))
   anf.host("super_get", [ho, this, k])
 }
 
-pub fn emit_args_list(args: List(ast.Expression)) -> Build(ir.Value) {
+fn emit_args_list(args: List(ast.Expression)) -> Build(ir.Value) {
   case ast_util.has_spread_arg(args) {
     False -> anf.then(anf.seq(list.map(args, expr)), anf.cons_list)
     True -> {
@@ -1743,15 +1702,11 @@ fn fold_args_spread(
   }
 }
 
-pub fn emit_call(
-  f: ir.Value,
-  this: ir.Value,
-  args_l: ir.Value,
-) -> Build(ir.Value) {
+fn emit_call(f: ir.Value, this: ir.Value, args_l: ir.Value) -> Build(ir.Value) {
   anf.host("call_fast", [f, this, args_l])
 }
 
-pub fn emit_call_pos(
+fn emit_call_pos(
   f: ir.Value,
   this: ir.Value,
   pos: List(ir.Value),
@@ -1766,12 +1721,12 @@ pub fn emit_call_pos(
   }
 }
 
-pub type CallArgs {
+type CallArgs {
   Consed(ir.Value)
   Positional(List(ir.Value))
 }
 
-pub fn emit_call_with_pair(
+fn emit_call_with_pair(
   pair: ir.Value,
   f: ir.Value,
   this: ir.Value,
@@ -1929,14 +1884,14 @@ fn emit_super_call(args: List(ast.Expression)) -> Build(ir.Value) {
   use e <- anf.then(ask)
   use _ <- anf.then(case e.field_init {
     state.FieldInitAfterSuper -> emit_field_init_call()
-    state.NoFieldInit | state.FieldInitAtStart -> anf.pure(Nil)
+    state.NoFieldInit -> anf.pure(Nil)
   })
   anf.pure(inst)
 }
 
 // §13.3.9.1 optional chain, a nullish link breaks with undefined
 
-pub fn emit_chain_root(ex: ast.Expression) -> Build(ir.Value) {
+fn emit_chain_root(ex: ast.Expression) -> Build(ir.Value) {
   use rc <- anf.then(consts())
   anf.bind_block(fn(exit) { emit_chain(ex, exit, rc.undef) })
 }
@@ -2175,45 +2130,22 @@ fn emit_plain_call(ex: ast.Expression) -> Build(ir.Value) {
         }
       }
     }
-    ast.MemberExpression(_, obj, prop) ->
+    ast.MemberExpression(_, obj, prop) -> {
+      let member_call = fn() {
+        use o <- anf.then(expr(obj))
+        emit_member_call(o, prop, args)
+      }
       case math_direct_op(obj, prop, args) {
         Some(op) -> {
           use e <- anf.then(ask)
-          // only when Math is the untouched global
-          case
-            state.resolve(e, "Math"),
-            state.lookup_slotted_global(e, "Math")
-          {
-            scope.Plain(scope.Global(_)), None -> {
-              use pos <- anf.then(anf.seq(list.map(args, expr)))
-              use v <- anf.then(anf.host(op, pos))
-              // compare against miss atom, js_nan/js_inf are atoms too
-              use is_miss <- anf.then(
-                anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))),
-              )
-              anf.bind_if(
-                is_miss,
-                {
-                  // t_plus returns wire jsval, t_to_number does not
-                  use coerced <- anf.then(
-                    anf.seq(list.map(pos, fn(a) { anf.host("plus", [a]) })),
-                  )
-                  anf.host(op, coerced)
-                },
-                anf.pure(v),
-              )
-            }
-            _, _ -> {
-              use o <- anf.then(expr(obj))
-              emit_member_call(o, prop, args)
-            }
+          case is_untouched_global(e, "Math") {
+            True -> emit_math_builtin_call(op, args)
+            False -> member_call()
           }
         }
-        None -> {
-          use o <- anf.then(expr(obj))
-          emit_member_call(o, prop, args)
-        }
+        None -> member_call()
       }
+    }
     // §13.3.6.1 callee and args evaluate before the eval throw
     ast.Identifier(name: "eval", ..) -> {
       use _ <- anf.then(expr(callee))
@@ -2253,40 +2185,66 @@ fn emit_plain_call(ex: ast.Expression) -> Build(ir.Value) {
   }
 }
 
+fn is_untouched_global(e: Emitter2, name: String) -> Bool {
+  case state.resolve(e, name), state.lookup_slotted_global(e, name) {
+    scope.Plain(scope.Global(_)), None -> True
+    _, _ -> False
+  }
+}
+
+fn emit_math_builtin_call(
+  op: String,
+  args: List(ast.Expression),
+) -> Build(ir.Value) {
+  use pos <- anf.then(anf.seq(list.map(args, expr)))
+  use v <- anf.then(anf.host(op, pos))
+  // compare against miss atom, js_nan/js_inf are atoms too
+  use is_miss <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))))
+  anf.bind_if(
+    is_miss,
+    {
+      // t_plus returns wire jsval, t_to_number does not
+      use coerced <- anf.then(
+        anf.seq(list.map(pos, fn(a) { anf.host("plus", [a]) })),
+      )
+      anf.host(op, coerced)
+    },
+    anf.pure(v),
+  )
+}
+
 // slotted globals keyed -1 - slot
 fn emit_generic_call(
   callee: ast.Expression,
   args: List(ast.Expression),
 ) -> Build(ir.Value) {
-  {
-    use rc <- anf.then(consts())
-    use e <- anf.then(ask)
-    let hoisted = case ast_util.unwrap_parens(callee) {
-      ast.Identifier(name:, ..) ->
-        case state.resolve(e, name) {
-          scope.Plain(scope.Local(slot:, boxed: False, ..)) ->
-            state.lookup_hoisted_kfn(e, slot)
-          scope.Plain(scope.Local(slot:, boxed: True, ..)) ->
-            state.lookup_hoisted_kfn(e, -1 - slot)
-          _ -> None
-        }
-      _ -> None
-    }
-    use f <- anf.then(expr(callee))
-    case ast_util.has_spread_arg(args) {
-      False -> {
-        use pos <- anf.then(anf.seq(list.map(args, expr)))
-        case hoisted {
-          Some(pair) -> emit_call_with_pair(pair, f, rc.undef, Positional(pos))
-          None -> emit_call_pos(f, rc.undef, pos)
-        }
+  use rc <- anf.then(consts())
+  use e <- anf.then(ask)
+  let hoisted = case ast_util.unwrap_parens(callee) {
+    ast.Identifier(name:, ..) ->
+      case state.resolve(e, name) {
+        scope.Plain(scope.Local(slot:, boxed: False, ..)) ->
+          state.lookup_hoisted_kfn(e, slot)
+        scope.Plain(scope.Local(slot:, boxed: True, ..)) ->
+          state.lookup_hoisted_kfn(e, -1 - slot)
+        _ -> None
       }
-      True -> {
-        use args_l <- anf.then(emit_args_list(args))
-        case hoisted {
-          Some(pair) -> emit_call_with_pair(pair, f, rc.undef, Consed(args_l))
-          None -> emit_call(f, rc.undef, args_l)
-        }
+    _ -> None
+  }
+  use f <- anf.then(expr(callee))
+  case ast_util.has_spread_arg(args) {
+    False -> {
+      use pos <- anf.then(anf.seq(list.map(args, expr)))
+      case hoisted {
+        Some(pair) -> emit_call_with_pair(pair, f, rc.undef, Positional(pos))
+        None -> emit_call_pos(f, rc.undef, pos)
+      }
+    }
+    True -> {
+      use args_l <- anf.then(emit_args_list(args))
+      case hoisted {
+        Some(pair) -> emit_call_with_pair(pair, f, rc.undef, Consed(args_l))
+        None -> emit_call(f, rc.undef, args_l)
       }
     }
   }
@@ -2309,7 +2267,10 @@ fn emit_iife(
       Ok(#(site, e)) -> k(e, site)
       Error(err) ->
         {
-          use v <- anf.then(throw_at_rt("throw_type_error", describe_error(err)))
+          use v <- anf.then(throw_at_rt(
+            "throw_type_error",
+            state.describe_error(err),
+          ))
           anf.pure(state.ClosureSite(ir.Values([v])))
         }(e, k)
     }
@@ -2408,9 +2369,9 @@ pub fn emit_direct_put(
     scope.Local(slot:, boxed:, ..) -> write_slot(slot, boxed, v)
     scope.Global(_) -> {
       use e <- anf.then(ask)
-      case dict.get(e.slotted_globals, name) {
-        Ok(slot) -> write_slot(slot, True, v)
-        Error(Nil) -> {
+      case state.lookup_slotted_global(e, name) {
+        Some(slot) -> write_slot(slot, True, v)
+        None -> {
           use _ <- anf.then(
             anf.host(global_set_op(e.strict), [
               ir.ConstBinary(bit_array.from_string(name)),
@@ -2443,7 +2404,7 @@ pub fn emit_identifier_put(name: String, v: ir.Value) -> Build(ir.Value) {
   }
 }
 
-pub type LValue {
+type LValue {
   LvIdent(name: String, direct: scope.Direct)
   LvMember(
     obj: ir.Value,
@@ -2455,7 +2416,7 @@ pub type LValue {
   LvSuper(home: ir.Value, this: ir.Value, key: ir.Value)
 }
 
-pub fn emit_lvalue(target: ast.Expression) -> Build(LValue) {
+fn emit_lvalue(target: ast.Expression) -> Build(LValue) {
   case ast_util.unwrap_parens(target) {
     ast.Identifier(name:, ..) -> {
       use e <- anf.then(ask)
@@ -2511,7 +2472,7 @@ pub fn emit_lvalue(target: ast.Expression) -> Build(LValue) {
 const no_key: ir.Value = ir.ConstAtom("undefined")
 
 // coerce bracket key once up front for read-modify-write
-pub fn settle_lvalue(lv: LValue) -> Build(LValue) {
+fn settle_lvalue(lv: LValue) -> Build(LValue) {
   case lv {
     LvMember(obj:, is_private: False, elem_idx: Some(idx), ..) -> {
       use key <- anf.then(to_property_key_of(obj, idx))
@@ -2528,7 +2489,7 @@ fn elem_key(obj: ir.Value, idx: ir.Value, key: ir.Value) -> Build(ir.Value) {
   }
 }
 
-pub fn lvalue_get(lv: LValue) -> Build(ir.Value) {
+fn lvalue_get(lv: LValue) -> Build(ir.Value) {
   case lv {
     LvIdent(name:, direct:) -> emit_direct_get(direct, name)
     LvMember(obj:, key:, is_private: True, ..) ->
@@ -2546,7 +2507,7 @@ pub fn lvalue_get(lv: LValue) -> Build(ir.Value) {
   }
 }
 
-pub fn lvalue_put(lv: LValue, v: ir.Value) -> Build(ir.Value) {
+fn lvalue_put(lv: LValue, v: ir.Value) -> Build(ir.Value) {
   case lv {
     LvIdent(name:, direct:) -> emit_direct_put(direct, name, v)
     LvMember(obj:, key:, is_private: True, ..) -> {
@@ -2714,7 +2675,7 @@ fn fold_build(xs: List(a), acc: b, step: fn(b, a) -> Build(b)) -> Build(b) {
   }
 }
 
-pub fn emit_function_expr(
+fn emit_function_expr(
   shape: state.FnShape,
   named: Option(String),
   params: List(ast.Pattern),
@@ -2728,10 +2689,7 @@ pub fn emit_function_expr(
   }
 }
 
-fn emit_object(
-  properties: List(ast.Property),
-  _named: Option(String),
-) -> Build(ir.Value) {
+fn emit_object(properties: List(ast.Property)) -> Build(ir.Value) {
   let #(lead, rest) = plain_members(properties, [], set.new())
   use obj <- anf.then(case lead {
     [] -> anf.host("new_object", [])
@@ -2920,7 +2878,7 @@ fn const_term(c: ConstElem) -> rt_types.JsVal {
 @external(erlang, "erlang", "term_to_binary")
 fn pack_term(elems: List(rt_types.JsVal)) -> BitArray
 
-fn compound_binop(op: ast.AssignmentOp) -> Option(ast.BinaryOp) {
+pub fn compound_binop(op: ast.AssignmentOp) -> Option(ast.BinaryOp) {
   case op {
     ast.AddAssign -> Some(ast.Add)
     ast.SubtractAssign -> Some(ast.Subtract)
@@ -2938,6 +2896,15 @@ fn compound_binop(op: ast.AssignmentOp) -> Option(ast.BinaryOp) {
     | ast.LogicalAndAssign
     | ast.LogicalOrAssign
     | ast.NullishCoalesceAssign -> None
+  }
+}
+
+pub fn logical_assign_op(op: ast.AssignmentOp) -> Option(ast.LogicalOp) {
+  case op {
+    ast.LogicalAndAssign -> Some(ast.LogicalAnd)
+    ast.LogicalOrAssign -> Some(ast.LogicalOr)
+    ast.NullishCoalesceAssign -> Some(ast.NullishCoalescing)
+    _ -> None
   }
 }
 
@@ -3079,10 +3046,6 @@ fn emit_assignment(
       }
     }
   }
-}
-
-pub fn compound_to_binop(op: ast.AssignmentOp) -> Option(ast.BinaryOp) {
-  compound_binop(op)
 }
 
 pub fn emit_destructuring_assign(
