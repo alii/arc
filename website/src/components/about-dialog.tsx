@@ -60,45 +60,33 @@ export function AboutDialog({ trigger }: { trigger: ReactNode }) {
 										</Dialog.Close>
 									</div>
 
-									<Section title="Everything runs in your tab">
-										Arc is a JavaScript engine written in Gleam. This page runs it on{' '}
+									<Section title="What is running">
+										This page runs Arc inside your browser. Arc is a JavaScript engine, and here it runs on{' '}
 										<ExternalLink href="https://www.atomvm.net">AtomVM</ExternalLink>, a small BEAM implementation
-										compiled to WebAssembly. The download is about 7 MB and happens once. Nothing you type leaves your
-										browser, and there is no server.
+										compiled to WebAssembly. It downloads once, at about 7 MB. After that nothing you type leaves your
+										machine.
 									</Section>
 
-									<Section title="Output">
-										<Kbd>run</Kbd> sends your program to Arc's interpreter inside AtomVM. The Output tab shows what the
-										program prints, plus its final value unless that value is <code>undefined</code>. Errors appear as
-										the engine reports them.
-									</Section>
-
-									<Section title="Erlang · Core Erlang · IR">
-										Arc can also compile JavaScript ahead of time. It converts the program to a small intermediate
-										representation (IR), then to a module shaped like Core Erlang, then to Erlang abstract forms, which
-										the Erlang compiler turns into BEAM bytecode. The three tabs show these steps for the program in
-										the editor. The Erlang tab is exactly what gets compiled. The Core Erlang tab is a readable copy of
-										the middle step, because the real compile path skips the Core Erlang compiler. The last step needs
-										OTP's compiler, which the browser does not have, so you can read the output here but not run it.
-									</Section>
-
-									<Section title="Warming up">
-										AtomVM loads code the first time it is used, and Arc creates JavaScript's global environment
-										(hundreds of built-ins) at startup. So after the page loads, a small program runs in the background
-										to load all of that before your first click. The status reads <em>warming up caches</em> until it
-										finishes. You can still press run, and it will wait its turn.
+									<Section title="Tabs">
+										<Kbd>run</Kbd> sends your program to Arc's interpreter, and the Output tab shows what it prints plus
+										the final value, unless that is <code>undefined</code>. The other tabs show what Arc's ahead-of-time
+										compiler does to the same program. IR comes first, then Core Erlang, then Erlang, which is what gets
+										compiled to BEAM bytecode. Core Erlang is shown for reading only, because Arc never sends it through
+										Erlang's Core Erlang compiler. The browser has no Erlang compiler, so the compiled output can't be
+										run here.
 									</Section>
 
 									<Section title="Speed">
-										AtomVM in WebAssembly is an interpreter running an interpreter. Programs here run roughly tens of
-										times slower than on the real BEAM.
+										Programs run roughly tens of times slower here than on the real BEAM, because AtomVM in WebAssembly
+										is an interpreter running an interpreter. AtomVM also loads code on first use and Arc builds its
+										built-ins at startup, so a small program runs in the background after the page loads to get that out
+										of the way. The status reads <em>warming up caches</em> until it finishes, and if you press run
+										before then, your program waits its turn.
 									</Section>
 
-									<Section title="Regular expressions">
-										AtomVM has no regex engine, so <code>RegExp</code> uses your browser's own JavaScript engine. Arc
-										asks the page to run the match and sends the result back to the BEAM side, converting offsets
-										between UTF-8 and UTF-16. Each match takes about a millisecond. There are no timers, filesystem or
-										network. Arc does not provide them and this page does not either.
+									<Section title="Limits">
+										AtomVM has no regex engine, so <code>RegExp</code> uses your browser's, at about a millisecond per
+										match. There are no timers, filesystem or network.
 									</Section>
 
 									<p className="text-xs text-rpd-muted dark:text-rp-muted">

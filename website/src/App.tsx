@@ -52,22 +52,16 @@ export default function App() {
 				</motion.div>
 
 				<motion.p variants={item}>
-					Arc is a JavaScript engine written in <ExternalLink href="https://gleam.run">Gleam</ExternalLink>. It runs on
-					Erlang/OTP, and in the browser through <ExternalLink href="https://www.atomvm.net">AtomVM</ExternalLink>{' '}
-					compiled to WebAssembly.
-					{wide ? ' The playground next to this text runs Arc in your browser that way.' : ''}
+					Arc is a JavaScript engine written in <ExternalLink href="https://gleam.run">Gleam</ExternalLink>. It
+					implements ECMAScript and has no built-in timers, I/O or concurrency. The BEAM program that embeds it provides
+					whatever globals and host functions the JavaScript needs.
 				</motion.p>
 
 				<motion.p variants={item}>
-					It implements ECMAScript, including closures, generators, async/await, classes, proxies, typed arrays, Intl
-					and Temporal. Arc only provides what the ECMAScript spec defines, so it has no timers, I/O or concurrency
-					built in. The BEAM program that embeds it chooses which globals and host functions the JavaScript can use.
-				</motion.p>
-
-				<motion.p variants={item}>
-					Arc can also compile JavaScript ahead of time. It translates the program to Erlang and compiles that to BEAM
-					bytecode, so it runs as ordinary BEAM code and skips the interpreter.
-					{wide ? ' The Erlang tab in the playground shows what it produces.' : ''}
+					By default Arc interprets JavaScript, and it can also compile it ahead of time to Erlang. It runs on
+					Erlang/OTP, and in the browser on <ExternalLink href="https://www.atomvm.net">AtomVM</ExternalLink> compiled
+					to WebAssembly.
+					{wide ? ' The playground next to this text runs that way, and its Erlang tab shows the compiled output.' : ''}
 					{wide && (
 						<>
 							{' '}
