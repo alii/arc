@@ -1,5 +1,5 @@
+import arc/internal/bytes.{byte_at, drop_start, unsafe_slice}
 import arc/internal/digits
-import arc/parser/source_bytes.{byte_at}
 import gleam/bit_array
 import gleam/bool
 import gleam/int
@@ -175,16 +175,12 @@ pub fn lex_error_to_string(error: LexError) -> String {
   }
 }
 
-pub fn lex_error_pos(error: LexError) -> Int {
-  error.pos
-}
-
 pub type SourceKind {
   ScriptSource
   ModuleSource
 }
 
-// rest is always drop_bytes(bytes, pos), kept to avoid reslicing
+// rest is always drop_start(bytes, pos), kept to avoid reslicing
 pub type Scanner {
   Scanner(
     bytes: BitArray,
@@ -201,7 +197,7 @@ pub fn scanner_at(
   line: Int,
   source_kind: SourceKind,
 ) -> Scanner {
-  Scanner(bytes:, pos:, line:, source_kind:, rest: drop_bytes(bytes, pos))
+  Scanner(bytes:, pos:, line:, source_kind:, rest: drop_start(bytes, pos))
 }
 
 pub fn scan_next(s: Scanner) -> #(Token, Scanner) {
@@ -227,7 +223,7 @@ pub fn scan_next(s: Scanner) -> #(Token, Scanner) {
               pos: new_pos + raw_len,
               line: end_line,
               source_kind:,
-              rest: drop_bytes(rest, raw_len),
+              rest: drop_start(rest, raw_len),
             ),
           )
         }
@@ -260,7 +256,7 @@ fn hard_error_token(
   line: Int,
   source_kind: SourceKind,
 ) -> #(Token, Scanner) {
-  let error_pos = lex_error_pos(err)
+  let error_pos = err.pos
   let error_line = line + count_newlines_in(bytes, from, error_pos - from)
   #(
     Token(LexFailure(err), "", error_pos, error_line, 0, False, False),
@@ -275,7 +271,7 @@ fn hard_error_token(
 }
 
 fn count_newlines_in(bytes: BitArray, from: Int, len: Int) -> Int {
-  count_newlines(bit_array.from_string(byte_slice(bytes, from, len)), 0)
+  count_newlines(bit_array.from_string(unsafe_slice(bytes, from, len)), 0)
 }
 
 fn count_newlines(bytes: BitArray, count: Int) -> Int {
@@ -372,7 +368,7 @@ fn skip_line_comment(
   source_kind: SourceKind,
 ) -> WsScan {
   let comment_len = line_comment_length(rest, 0)
-  let after = drop_bytes(rest, comment_len)
+  let after = drop_start(rest, comment_len)
   skip_ws_loop(after, consumed + comment_len, newlines, False, source_kind)
 }
 
@@ -633,7 +629,7 @@ fn validate_escape(
   in_template in_template: Bool,
 ) -> Result(Escape, LexError) {
   let pos = backslash_pos + 1
-  case drop_bytes(bytes, pos) {
+  case drop_start(bytes, pos) {
     // \0 before a digit and \1-\9 are annex b legacy
     <<0x30, d, _:bytes>> if d >= 0x30 && d <= 0x39 ->
       legacy_digit_escape(backslash_pos, in_template)
@@ -682,10 +678,10 @@ fn scan_unicode_escape(
   backslash_pos: Int,
 ) -> Option(UnicodeEscape) {
   let after_u = backslash_pos + 2
-  case drop_bytes(bytes, after_u) {
+  case drop_start(bytes, after_u) {
     <<0x7B, tail:bytes>> -> {
       let #(digit_count, code) = hex_run(tail, 0, 0)
-      case drop_bytes(tail, digit_count) {
+      case drop_start(tail, digit_count) {
         <<0x7D, _:bytes>> if digit_count > 0 ->
           Some(UnicodeEscape(code:, end: after_u + 1 + digit_count + 1))
         _ -> None
@@ -747,7 +743,7 @@ fn bad_escape_token(
   }
   let len = escape_end - start
   Token(
-    ..plain_token(Illegal, byte_slice(bytes, start, len), start, len, line),
+    ..plain_token(Illegal, unsafe_slice(bytes, start, len), start, len, line),
     had_escape: True,
   )
 }
@@ -764,7 +760,7 @@ fn read_string_body(
   case scan_to_closing_quote(rest, 0, quote) {
     StrQuote(consumed) -> {
       let raw_len = pos + consumed - start + 1
-      let content = byte_slice(bytes, start + 1, raw_len - 2)
+      let content = unsafe_slice(bytes, start + 1, raw_len - 2)
       Ok(
         Token(
           ..plain_token(KString, content, start, raw_len, line),
@@ -782,7 +778,7 @@ fn read_string_body(
       let next = backslash_pos + escape.byte_len
       read_string_body(
         bytes,
-        drop_bytes(bytes, next),
+        drop_start(bytes, next),
         next,
         start,
         quote,
@@ -795,7 +791,7 @@ fn read_string_body(
 }
 
 fn unterminated_quote_token(bytes: BitArray, start: Int, line: Int) -> Token {
-  plain_token(Illegal, byte_slice(bytes, start, 1), start, 1, line)
+  plain_token(Illegal, unsafe_slice(bytes, start, 1), start, 1, line)
 }
 
 type StrScan {
@@ -831,7 +827,7 @@ pub fn scan_template_continuation(
 ) -> #(Token, Scanner) {
   let pos = rbrace_pos + 1
   let token =
-    read_template_span(bytes, drop_bytes(bytes, pos), pos, rbrace_pos, line)
+    read_template_span(bytes, drop_start(bytes, pos), pos, rbrace_pos, line)
   let end_pos = token.pos + token.raw_len
   let end_line = line + count_newlines_in(bytes, token.pos, token.raw_len)
   #(token, scanner_at(bytes, end_pos, end_line, source_kind))
@@ -853,17 +849,23 @@ fn read_template_span(
         Error(_invalid_escape), <<0x5C, 0x75, 0x7B, _:bytes>> -> pos + 3
         Error(_invalid_escape), _ -> pos + 1 + char_width_at(bytes, pos + 1)
       }
-      read_template_span(bytes, drop_bytes(bytes, next), next, start, line)
+      read_template_span(bytes, drop_start(bytes, next), next, start, line)
     }
     <<0x24, 0x7B, _:bytes>> -> {
       let len = pos + 2 - start
-      plain_token(TemplateHead, byte_slice(bytes, start, len), start, len, line)
+      plain_token(
+        TemplateHead,
+        unsafe_slice(bytes, start, len),
+        start,
+        len,
+        line,
+      )
     }
     <<0x60, _:bytes>> -> {
       let len = pos - start + 1
       plain_token(
         TemplateLiteral,
-        byte_slice(bytes, start, len),
+        unsafe_slice(bytes, start, len),
         start,
         len,
         line,
@@ -884,9 +886,9 @@ fn read_number_lenient(
   case read_number(bytes, start, line, rest) {
     Ok(token) -> token
     Error(err) -> {
-      let end = int.max(lex_error_pos(err), start + 1)
+      let end = int.max(err.pos, start + 1)
       let len = end - start
-      plain_token(Illegal, byte_slice(bytes, start, len), start, len, line)
+      plain_token(Illegal, unsafe_slice(bytes, start, len), start, len, line)
     }
   }
 }
@@ -1098,11 +1100,11 @@ fn number_token(
       let identifier_end =
         int.max(end + skip_identifier_bytes(rest, 0).consumed, end + 1)
       let len = identifier_end - start
-      plain_token(Illegal, byte_slice(bytes, start, len), start, len, line)
+      plain_token(Illegal, unsafe_slice(bytes, start, len), start, len, line)
     }
     False -> {
       let len = end - start
-      plain_token(Number, byte_slice(bytes, start, len), start, len, line)
+      plain_token(Number, unsafe_slice(bytes, start, len), start, len, line)
     }
   }
 }
@@ -1178,7 +1180,7 @@ fn read_ascii_identifier(
       identifier_token(
         start,
         start + consumed,
-        byte_slice(bytes, start, consumed),
+        unsafe_slice(bytes, start, consumed),
         line,
         had_escape: False,
       )
@@ -1196,7 +1198,7 @@ fn read_escaped_identifier(
 ) -> Token {
   case decode_identifier_escape(bytes, backslash_pos, is_start: True) {
     Some(#(first_end, char)) -> {
-      let head = byte_slice(bytes, start, backslash_pos - start) <> char
+      let head = unsafe_slice(bytes, start, backslash_pos - start) <> char
       finish_identifier_token(bytes, start, first_end, Some(head), line)
     }
     None -> bad_escape_token(bytes, start, backslash_pos, line)
@@ -1215,12 +1217,12 @@ fn finish_identifier_token(
     scan_identifier_tail(bytes, first_end)
   let had_escape = option.is_some(decoded_head) || option.is_some(decoded_tail)
   let name = case had_escape {
-    False -> byte_slice(bytes, start, end - start)
+    False -> unsafe_slice(bytes, start, end - start)
     True ->
-      option.unwrap(decoded_head, byte_slice(bytes, start, first_end - start))
+      option.unwrap(decoded_head, unsafe_slice(bytes, start, first_end - start))
       <> option.unwrap(
         decoded_tail,
-        byte_slice(bytes, first_end, end - first_end),
+        unsafe_slice(bytes, first_end, end - first_end),
       )
   }
   identifier_token(start, end, name, line, had_escape:)
@@ -1231,7 +1233,7 @@ fn decode_identifier_escape(
   backslash_pos: Int,
   is_start is_start: Bool,
 ) -> Option(#(Int, String)) {
-  case drop_bytes(bytes, backslash_pos + 1) {
+  case drop_start(bytes, backslash_pos + 1) {
     <<0x75, _:bytes>> -> {
       use escape <- option.then(valid_unicode_escape(bytes, backslash_pos))
       use char <- option.map(identifier_char(escape.code, is_start))
@@ -1269,7 +1271,7 @@ fn scan_identifier_tail_loop(
   pos: Int,
   decoded: Option(String),
 ) -> IdentTail {
-  case skip_identifier_bytes(drop_bytes(bytes, pos), 0) {
+  case skip_identifier_bytes(drop_start(bytes, pos), 0) {
     RunEnd(consumed) -> identifier_tail(bytes, pos, consumed, decoded)
     RunEscape(consumed) -> {
       let backslash_pos = pos + consumed
@@ -1277,7 +1279,7 @@ fn scan_identifier_tail_loop(
         Some(#(next_pos, char)) -> {
           let text =
             option.unwrap(decoded, "")
-            <> byte_slice(bytes, pos, consumed)
+            <> unsafe_slice(bytes, pos, consumed)
             <> char
           scan_identifier_tail_loop(bytes, next_pos, Some(text))
         }
@@ -1294,7 +1296,7 @@ fn identifier_tail(
   decoded: Option(String),
 ) -> IdentTail {
   let decoded =
-    option.map(decoded, fn(text) { text <> byte_slice(bytes, pos, plain_len) })
+    option.map(decoded, fn(text) { text <> unsafe_slice(bytes, pos, plain_len) })
   IdentTail(end: pos + plain_len, decoded:)
 }
 
@@ -1442,13 +1444,6 @@ fn char_at(bytes: BitArray, pos: Int) -> String {
   let width = char_width_at(bytes, pos)
   case width {
     0 -> ""
-    _ -> byte_slice(bytes, pos, width)
+    _ -> unsafe_slice(bytes, pos, width)
   }
 }
-
-// offsets are always char boundaries, so no utf-8 revalidation
-@external(erlang, "arc_bytes_ffi", "unsafe_slice")
-fn byte_slice(bytes: BitArray, start: Int, len: Int) -> String
-
-@external(erlang, "arc_bytes_ffi", "drop_start")
-fn drop_bytes(bytes: BitArray, pos: Int) -> BitArray

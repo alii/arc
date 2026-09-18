@@ -66,7 +66,7 @@ fn run_js(
   case parser.parse_script(source) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
     Ok(#(body, sb)) ->
-      case compiler.compile(body, sb) {
+      case compiler.compile_script(body, sb) {
         Error(err) -> Error("compile error: " <> compiler.error_message(err))
         Ok(template) -> Ok(run_template(agent(), template))
       }

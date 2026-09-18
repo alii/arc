@@ -264,7 +264,7 @@ pub fn eval_with(
       use #(body, sb) <- result.try(
         parser.parse_script(source) |> result.map_error(ParseError),
       )
-      compiler.compile(body, sb) |> result.map_error(CompileError)
+      compiler.compile_script(body, sb) |> result.map_error(CompileError)
     }),
   )
   let #(completion, agent) = entry.run_script(engine.agent, template)

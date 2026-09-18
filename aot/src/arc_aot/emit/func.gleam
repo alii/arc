@@ -179,7 +179,9 @@ pub fn build_capture_values(
   child_info: FunctionInfo,
 ) -> List(ir.Value) {
   let named =
-    list.map(child_info.captures, fn(c) { ir.Var(state.get_slot_var(e, c.1)) })
+    list.map(child_info.captures, fn(c) {
+      ir.Var(state.get_slot_var(e, c.parent_slot))
+    })
   let parent_info = state.fn_info(e)
   let lex =
     list.filter_map(lexical.all_lexical_refs, fn(ref) {
@@ -199,8 +201,8 @@ pub fn build_capture_values(
 pub fn seed_capture_slots(e: Emitter, info: FunctionInfo) -> Emitter {
   let names =
     list.map(info.captures, fn(c) {
-      let assert Ok(child_slot) = dict.get(info.names, c.0)
-        as "aot/func: capture name missing from FunctionInfo.names"
+      let assert Ok(child_slot) = dict.get(info.slot_by_name, c.name)
+        as "aot/func: capture name missing from FunctionInfo.slot_by_name"
       #(child_slot, state.slot_base_name(e, child_slot))
     })
   let lexical_names =
@@ -235,7 +237,7 @@ pub fn build_ir_params(e: Emitter, i: Int, n: Int) -> List(ir.Local) {
 }
 
 fn store_slot(e: Emitter, b: Binding, val: ir.Value, k: Next) -> EmitResult {
-  case b.is_boxed {
+  case b.boxed {
     True ->
       host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, b.slot)), val], k)
     False -> {
@@ -284,7 +286,7 @@ pub fn binding_prologue(e: Emitter, scope_id: ScopeId, k: Next) -> EmitResult {
   let #(_, b): #(String, Binding) = entry
   let name = state.slot_base_name(e, b.slot)
   let seed = fn(e: Emitter, init) {
-    case b.is_boxed {
+    case b.boxed {
       False -> {
         use body <- state.map_tree(next(state.set_slot_var(e, b.slot, name)))
         ir.Let([name], ir.Values([init]), body)
@@ -319,7 +321,7 @@ fn body_param_copies(
         True -> declared_param_names
         False -> ["arguments", ..declared_param_names]
       }
-      let function_names = ast_util.direct_fn_names(stmts)
+      let function_names = ast_util.top_level_function_names(stmts)
       let body_bindings =
         dict.to_list(scope.get_scope(e.scope_tree, body_id).bindings)
         |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
@@ -435,7 +437,7 @@ fn bind_one_param(
     False -> {
       let assert ast.IdentifierPattern(name:, ..) = p
       let b = fn_scope_binding(e, name)
-      case b.is_boxed {
+      case b.boxed {
         False -> {
           let vn = state.slot_base_name(e, b.slot)
           use body <- state.map_tree(k(state.set_slot_var(e, b.slot, vn)))
@@ -1449,7 +1451,7 @@ fn bind_simple_params(
       let raw = ir.Var(pn)
       let vn = state.slot_base_name(e, b.slot)
       let next = fn(e) { bind_simple_params(e, fixed_all, rest, i + 1, k) }
-      case b.is_boxed {
+      case b.boxed {
         False if pn == vn -> next(state.set_slot_var(e, b.slot, vn))
         False -> {
           use body <- state.map_tree(next(state.set_slot_var(e, b.slot, vn)))

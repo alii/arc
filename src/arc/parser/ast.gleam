@@ -350,10 +350,6 @@ pub type Expression {
   IntrinsicTemplateObject(span: Span, site: Int, quasis: List(TemplateQuasi))
 }
 
-pub fn expression_span(e: Expression) -> Span {
-  e.span
-}
-
 pub fn binding_name(binding: Option(NamedBinding)) -> Option(String) {
   option.map(binding, fn(b) { b.name })
 }

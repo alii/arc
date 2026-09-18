@@ -1,3 +1,4 @@
+import arc/internal/bytes as source_bytes
 import arc/internal/digits
 import arc/internal/utf16
 import arc/parser/lexer
@@ -14,7 +15,6 @@ import arc/parser/regex_error.{
   ReservedDoublePunctuator, UnmatchedParen, UnterminatedClass,
   UnterminatedGroupName, UnterminatedRegex,
 }
-import arc/parser/source_bytes
 import gleam/bit_array
 import gleam/bool
 import gleam/int
@@ -71,7 +71,10 @@ pub fn skip_regex_flags(
 ) -> Result(#(Int, RegexFlags), PatternError) {
   use #(end, seen) <- result.try(scan_regex_flags(bytes, pos, []))
   use mode <- result.map(mode_of_flags(seen, pos))
-  #(end, RegexFlags(mode:, text: source_bytes.slice(bytes, pos, end - pos)))
+  #(
+    end,
+    RegexFlags(mode:, text: source_bytes.unsafe_slice(bytes, pos, end - pos)),
+  )
 }
 
 pub fn validate_flags(flags: String) -> Result(RegexFlags, PatternError) {
@@ -260,7 +263,7 @@ fn escaped_char_at(ctx: PatternContext, pos: Int) -> EscapedChar {
     Some(CodePoint(value:, width:)) if value >= 0x80 -> NonAscii(value:, width:)
     Some(CodePoint(value:, ..)) if value >= 0x30 && value <= 0x39 ->
       Digit(value - 0x30)
-    Some(_) -> Ascii(source_bytes.slice(ctx.bytes, pos, 1))
+    Some(_) -> Ascii(source_bytes.unsafe_slice(ctx.bytes, pos, 1))
   }
 }
 
@@ -1088,7 +1091,8 @@ fn property_escape_length(
   use <- bool.guard(ascii_at(ctx, pos + 2) != Some("{"), invalid)
   let name_start = pos + 3
   let name_end = skip_property_chars(ctx, name_start)
-  let name = source_bytes.slice(ctx.bytes, name_start, name_end - name_start)
+  let name =
+    source_bytes.unsafe_slice(ctx.bytes, name_start, name_end - name_start)
   case ascii_at(ctx, name_end) {
     Some("}") ->
       case classify_lone_property(name), allow_strings {
@@ -1100,7 +1104,11 @@ fn property_escape_length(
       let value_start = name_end + 1
       let value_end = skip_property_chars(ctx, value_start)
       let value =
-        source_bytes.slice(ctx.bytes, value_start, value_end - value_start)
+        source_bytes.unsafe_slice(
+          ctx.bytes,
+          value_start,
+          value_end - value_start,
+        )
       use <- bool.guard(ascii_at(ctx, value_end) != Some("}"), invalid)
       case classify_pair_property(name, value) {
         PropValid -> Ok(value_end + 1 - pos)

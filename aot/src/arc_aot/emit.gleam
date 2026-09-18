@@ -79,7 +79,7 @@ fn root_binding_prologue(
       scope.VarBinding -> e.consts.undef
       _ -> e.consts.tdz
     }
-    let wrap = case b.is_boxed {
+    let wrap = case b.boxed {
       True -> fn(tail) {
         wrap(ir.Let([sv], ir.CallHost("js", "cell_new", [init]), tail))
       }
@@ -101,10 +101,10 @@ fn global_var_prologue(
     False -> state.fn_info(e).annexb_candidates
   }
   let vars =
-    list.append(ast_util.collect_hoisted_vars(body), annexb)
+    list.append(ast_util.var_declared_names(body), annexb)
     |> list.map(fn(name) { #(name, "declare_global_var") })
   let fns =
-    ast_util.direct_fn_names(body)
+    ast_util.top_level_function_names(body)
     |> list.map(fn(name) { #(name, "declare_global_fn") })
   list.append(vars, fns)
   |> list.unique

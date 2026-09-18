@@ -25,7 +25,7 @@ fn new_state() -> host.State(host) {
 fn run(s: host.State(host), source: String) -> #(Completion, Agent) {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
     as { "parse failed: " <> source }
-  let assert Ok(template) = compiler.compile(body, sb)
+  let assert Ok(template) = compiler.compile_script(body, sb)
     as { "compile failed: " <> source }
   let #(completion, st) = entry.run_script(s.agent, template)
   #(completion, rt_async.drain(st))

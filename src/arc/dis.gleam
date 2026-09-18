@@ -41,7 +41,7 @@ pub fn compile(
       use #(body, sb) <- result.try(
         parser.parse_script(source) |> result.map_error(Syntax),
       )
-      compiler.compile(body, sb) |> result.map_error(Compile)
+      compiler.compile_script(body, sb) |> result.map_error(Compile)
     }
     ReplInput -> {
       use #(body, sb) <- result.try(

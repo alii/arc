@@ -309,7 +309,7 @@ fn emit_stmt(e: Emitter, s: ast.Statement, k: Next) -> EmitResult {
 }
 
 fn store_slot(e: Emitter, b: Binding, val: ir.Value, k: Next) -> EmitResult {
-  case b.is_boxed {
+  case b.boxed {
     True ->
       host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, b.slot)), val], k)
     False -> {
@@ -328,7 +328,7 @@ fn binding_prologue(e: Emitter, scope_id: ScopeId, k: Next) -> EmitResult {
   let #(_, b): #(String, Binding) = entry
   let name = state.slot_base_name(e, b.slot)
   let seed = fn(e: Emitter, init) {
-    case b.is_boxed {
+    case b.boxed {
       False -> {
         use body <- state.map_tree(next(state.set_slot_var(e, b.slot, name)))
         ir.Let([name], ir.Values([init]), body)
@@ -445,13 +445,8 @@ fn annexb_promote(e: Emitter, name: String, k: Next) -> EmitResult {
         Some(scope.Binding(kind: LetBinding, ..))
         | Some(scope.Binding(kind: ConstBinding, ..))
         | Some(scope.Binding(kind: FnNameBinding, ..)) -> None
-        Some(scope.Binding(slot:, kind:, is_boxed:, origin_kind_for_capture:)) ->
-          Some(scope.Local(
-            slot:,
-            boxed: is_boxed,
-            kind:,
-            origin_kind: origin_kind_for_capture,
-          ))
+        Some(scope.Binding(slot:, kind:, boxed:, declared_kind:)) ->
+          Some(scope.Local(slot:, boxed:, kind:, declared_kind:))
       }
       case target {
         None -> k(e)
@@ -472,7 +467,7 @@ fn annexb_promote(e: Emitter, name: String, k: Next) -> EmitResult {
 fn read_binding(b: Binding) -> anf.Build(ir.Value) {
   fn(e: Emitter, k) {
     let v = ir.Var(state.get_slot_var(e, b.slot))
-    case b.is_boxed {
+    case b.boxed {
       True -> anf.host("cell_get", [v])(e, k)
       False -> k(e, v)
     }
@@ -692,8 +687,8 @@ fn assigned_unboxed_slots(e: Emitter, s: ast.Statement) -> List(Int) {
       False -> Error(Nil)
       True ->
         case annexb_find_target(e, Some(e.cur_scope), name) {
-          Some(scope.Binding(kind: VarBinding, slot:, is_boxed:, ..)) ->
-            bound_unboxed(slot, is_boxed)
+          Some(scope.Binding(kind: VarBinding, slot:, boxed:, ..)) ->
+            bound_unboxed(slot, boxed)
           _ -> Error(Nil)
         }
     }
@@ -1344,8 +1339,8 @@ fn for_lhs_ident_assign(
     )
   }
   case state.resolve(e, name) {
-    scope.Plain(scope.Local(origin_kind: ConstBinding, ..)) -> throw_const(e)
-    scope.Plain(scope.Local(origin_kind: FnNameBinding, ..)) ->
+    scope.Plain(scope.Local(declared_kind: ConstBinding, ..)) -> throw_const(e)
+    scope.Plain(scope.Local(declared_kind: FnNameBinding, ..)) ->
       case e.strict {
         True -> throw_const(e)
         False -> k(e)

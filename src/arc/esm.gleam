@@ -67,8 +67,10 @@ pub type ImportBinding {
   NamespaceImport(local: String, phase: Phase)
 }
 
+// the spec local name of an anonymous export default
+pub const default_export_local_name = "*default*"
+
 pub type ExportEntry {
-  // anonymous default exports use local_name "*default*"
   LocalExport(export_name: String, local_name: String)
   ReExport(export_name: String, imported_name: String, source_specifier: Raw)
   ReExportAll(source_specifier: Raw)
@@ -266,7 +268,7 @@ fn export_entries(item: ast.ModuleItem) -> List(ExportEntry) {
       ..,
     ) -> [LocalExport(export_name: "default", local_name: name)]
     ast.ExportDefaultDeclaration(..) -> [
-      LocalExport(export_name: "default", local_name: "*default*"),
+      LocalExport(export_name: "default", local_name: default_export_local_name),
     ]
     ast.ExportNamed(specifiers:, source: Some(ast.StringLit(source)), ..) ->
       list.map(specifiers, fn(spec) {

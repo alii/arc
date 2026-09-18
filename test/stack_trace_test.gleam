@@ -12,7 +12,7 @@ fn run_js(source: String) -> Result(Result(JsVal, String), String) {
   case parser.parse_script(source) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
     Ok(#(body, sb)) ->
-      case compiler.compile(body, sb) {
+      case compiler.compile_script(body, sb) {
         Error(e) -> Error("compile error: " <> string.inspect(e))
         Ok(template) -> {
           let st = rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link

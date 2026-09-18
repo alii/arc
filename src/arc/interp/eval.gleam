@@ -128,7 +128,7 @@ pub fn eval_hook(
 ) -> #(JsVal, Agent) {
   let compile = case kind {
     IndirectEval | DynamicFunction -> compiler.compile_eval
-    ScriptEval -> compiler.compile
+    ScriptEval -> compiler.compile_script
   }
   let outcome = {
     use template <- result.try(compile_source(
@@ -230,13 +230,10 @@ fn run_direct_eval(
   let code_kind = func.code_kind
   let eval_caller =
     compiler.DirectEvalCaller(
-      names: list.map(name_table, fn(pair) { pair.0 }),
-      slots: func.lexical,
+      slot_names: list.map(name_table, fn(pair) { pair.0 }),
+      lexical: func.lexical,
       code_kind:,
-      strictness: case func.is_strict {
-        True -> compiler.Strict
-        False -> compiler.Sloppy
-      },
+      is_strict: func.is_strict,
       var_env:,
       param_scope_names:,
       with_names:,

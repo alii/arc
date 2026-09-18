@@ -1,3 +1,5 @@
+import gleam/dict.{type Dict}
+import gleam/list
 import gleam/option.{type Option, None, Some}
 
 // §9.1.1.3 function env slots, like quickjs pseudo vars
@@ -8,7 +10,7 @@ pub type LexicalRef {
   RefNewTarget
 }
 
-// order must match frame.setup_frame
+// order must match interp/call.setup_frame
 pub const all_lexical_refs = [
   RefThis,
   RefActiveFunc,
@@ -87,6 +89,24 @@ pub fn lexical_refs_or(a: LexicalRefs, b: LexicalRefs) -> LexicalRefs {
   )
 }
 
+pub fn lexical_refs_and(a: LexicalRefs, b: LexicalRefs) -> LexicalRefs {
+  LexicalRefs(
+    this: a.this && b.this,
+    active_func: a.active_func && b.active_func,
+    home_object: a.home_object && b.home_object,
+    new_target: a.new_target && b.new_target,
+  )
+}
+
+pub fn lexical_refs_present(d: Dict(LexicalRef, a)) -> LexicalRefs {
+  LexicalRefs(
+    this: dict.has_key(d, RefThis),
+    active_func: dict.has_key(d, RefActiveFunc),
+    home_object: dict.has_key(d, RefHomeObject),
+    new_target: dict.has_key(d, RefNewTarget),
+  )
+}
+
 pub fn lexical_refs_get(refs: LexicalRefs, ref: LexicalRef) -> Bool {
   case ref {
     RefThis -> refs.this
@@ -94,6 +114,24 @@ pub fn lexical_refs_get(refs: LexicalRefs, ref: LexicalRef) -> Bool {
     RefHomeObject -> refs.home_object
     RefNewTarget -> refs.new_target
   }
+}
+
+// consecutive slots from `from` for each kept ref, in setup_frame order
+pub fn number_refs(
+  from from: Int,
+  keep keep: fn(LexicalRef) -> Bool,
+) -> Dict(LexicalRef, Int) {
+  let #(numbered, _next) = {
+    use #(numbered, next) as acc, ref <- list.fold(all_lexical_refs, #(
+      dict.new(),
+      from,
+    ))
+    case keep(ref) {
+      True -> #(dict.insert(numbered, ref, next), next + 1)
+      False -> acc
+    }
+  }
+  numbered
 }
 
 // §19.2.1.1 eval syntax legality derives from this

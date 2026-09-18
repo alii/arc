@@ -33,7 +33,7 @@ fn run(source: String) -> #(rt_call.Completion, Agent) {
 }
 
 fn run_on(st: Agent, source: String) -> #(rt_call.Completion, Agent) {
-  run_with(st, source, compiler.compile)
+  run_with(st, source, compiler.compile_script)
 }
 
 fn repl_on(st: Agent, source: String) -> #(rt_call.Completion, Agent) {
