@@ -108,7 +108,7 @@ pub fn ctor(
   let cal = rt_val.or_throw(st, to_calendar_arg(helpers.arg_at(args, 2)))
   let #(y, st) = truncated_int_arg_or(st, args, 3, 1972)
   case is_valid_iso_date(y, m, d) {
-    False -> rt_val.t_throw_range_error(st, "invalid ISO month-day")
+    False -> rt_val.throw_range_error(st, "invalid ISO month-day")
     True -> make_month_day_cal(st, protos, m, d, y, cal)
   }
 }
@@ -131,7 +131,7 @@ pub fn static(
     }
     // unreachable, plainmonthday has no compare
     CompareStatic ->
-      rt_val.t_throw_type_error(st, "Temporal.PlainMonthDay has no compare")
+      rt_val.throw_type_error(st, "Temporal.PlainMonthDay has no compare")
   }
 }
 
@@ -142,7 +142,7 @@ pub fn to_temporal_month_day(
 ) -> #(IsoDateSlots, Agent) {
   case classify(item) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind:, ..) ->
           case month_day_slot_of(kind) {
             Some(md) -> {
@@ -159,10 +159,7 @@ pub fn to_temporal_month_day(
       #(md, st)
     }
     _ ->
-      rt_val.t_throw_type_error(
-        st,
-        "cannot convert to a Temporal.PlainMonthDay",
-      )
+      rt_val.throw_type_error(st, "cannot convert to a Temporal.PlainMonthDay")
   }
 }
 
@@ -386,7 +383,7 @@ pub fn method(
       #(mk_string(format_md_cal(m, d, ry, cal, cal_name)), st)
     }
     PlainMonthDayValueOf ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Temporal.PlainMonthDay cannot be converted with valueOf",
       )
@@ -453,7 +450,7 @@ fn to_plain_date(
           make_date_cal(st, protos, date, cal)
         }
         temporal_calendar.Iso8601, None ->
-          rt_val.t_throw_type_error(st, "year is required")
+          rt_val.throw_type_error(st, "year is required")
         _, _ ->
           case year != None || { era != None && era_year != None } {
             True -> {
@@ -477,11 +474,11 @@ fn to_plain_date(
               let date = rt_val.or_throw(st, check_date_limits(date))
               make_date_cal(st, protos, date, cal)
             }
-            False -> rt_val.t_throw_type_error(st, "year is required")
+            False -> rt_val.throw_type_error(st, "year is required")
           }
       }
     }
-    _ -> rt_val.t_throw_type_error(st, "argument must be an object")
+    _ -> rt_val.throw_type_error(st, "argument must be an object")
   }
 }
 

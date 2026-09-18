@@ -127,9 +127,9 @@ pub fn dispatch(
 ) -> #(JsVal, Agent) {
   case native {
     ArrayBufferConstructor(..) ->
-      rt_val.t_throw_type_error(st, "Constructor ArrayBuffer requires 'new'")
+      rt_val.throw_type_error(st, "Constructor ArrayBuffer requires 'new'")
     SharedArrayBufferConstructor(..) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Constructor SharedArrayBuffer requires 'new'",
       )
@@ -174,7 +174,7 @@ pub fn dispatch_construct(
       constructor(st, args, new_target, shared: False)
     SharedArrayBufferConstructor(..) ->
       constructor(st, args, new_target, shared: True)
-    _ -> rt_val.t_throw_type_error(st, "not a constructor")
+    _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }
 
@@ -185,7 +185,7 @@ fn constructor(
   shared shared: Bool,
 ) -> #(Handle, Agent) {
   let #(byte_length, st) =
-    rt_val.t_to_index(
+    rt_val.to_index(
       st,
       helpers.first_arg_or_undefined(args),
       invalid_length_msg,
@@ -204,7 +204,7 @@ fn allocate(
 ) -> #(Handle, Agent) {
   case max {
     Some(m) if byte_length > m ->
-      rt_val.t_throw_range_error(
+      rt_val.throw_range_error(
         st,
         ctor_name(shared) <> " length exceeds maxByteLength option",
       )
@@ -221,8 +221,7 @@ fn allocate(
         None -> True
       }
       case byte_length <= max_buffer_byte_length && max_ok {
-        False ->
-          rt_val.t_throw_range_error(st, "Array buffer allocation failed")
+        False -> rt_val.throw_range_error(st, "Array buffer allocation failed")
         True -> {
           let storage = case shared {
             False -> Bytes(bytes: zero_block(byte_length), max_byte_length: max)
@@ -259,11 +258,11 @@ fn max_byte_length_option(st: Agent, options: JsVal) -> #(Option(Int), Agent) {
   case classify(options) {
     KHandle(_) -> {
       let #(max_val, st) =
-        rt_obj.t_get_prop(st, options, StringKey(Named("maxByteLength")))
+        rt_obj.get_prop(st, options, StringKey(Named("maxByteLength")))
       case classify(max_val) {
         KUndef -> #(None, st)
         _ -> {
-          let #(max, st) = rt_val.t_to_index(st, max_val, invalid_length_msg)
+          let #(max, st) = rt_val.to_index(st, max_val, invalid_length_msg)
           #(Some(max), st)
         }
       }
@@ -275,7 +274,7 @@ fn max_byte_length_option(st: Agent, options: JsVal) -> #(Option(Int), Agent) {
 fn is_view(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let result = case classify(helpers.first_arg_or_undefined(args)) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: DataViewObj(..), ..)
         | SObject(kind: TypedArrayObj(..), ..) -> True
         _ -> False
@@ -328,14 +327,14 @@ fn ab_resize(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "resize")
   case max_byte_length(buf) {
     None ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "ArrayBuffer.prototype.resize called on a non-resizable ArrayBuffer",
       )
     Some(_) -> {
       let buf = require_unshared(st, buf, "resize")
       let #(new_len, st) =
-        rt_val.t_to_index(
+        rt_val.to_index(
           st,
           helpers.first_arg_or_undefined(args),
           invalid_length_msg,
@@ -344,7 +343,7 @@ fn ab_resize(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
       let #(bytes, max) = require_resizable_bytes(st, buf, "resize")
       case new_len > max {
         True ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "ArrayBuffer.prototype.resize: new length exceeds maxByteLength",
           )
@@ -387,7 +386,7 @@ fn buffer_slice(
     False -> st.realm.array_buffer.constructor
   }
   let #(ctor, st) = species_constructor(st, this, default_ctor)
-  let #(new_h, st) = rt_call.t_construct(st, ctor, [mk_int(new_len)], ctor)
+  let #(new_h, st) = rt_call.construct(st, ctor, [mk_int(new_len)], ctor)
   let new_val = mk_object(new_h)
   let new_buf = require_buffer(st, new_val, "slice")
   let new_buf = require_family(st, new_buf, "slice", shared)
@@ -395,14 +394,14 @@ fn buffer_slice(
   let new_buf = require_not_immutable(st, new_buf, "slice")
   case new_buf.h == buf.h {
     True ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "species constructor returned the same " <> ctor_name(shared),
       )
     False ->
       case buffer.buffer_byte_size(new_storage) < new_len {
         True ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "species constructor returned a buffer smaller than requested",
           )
@@ -448,7 +447,7 @@ fn slice_to_immutable(
   let current_len = bit_array.byte_size(bytes)
   case current_len < final {
     True ->
-      rt_val.t_throw_range_error(
+      rt_val.throw_range_error(
         st,
         "ArrayBuffer.prototype.sliceToImmutable: source was resized below the requested range",
       )
@@ -489,7 +488,7 @@ fn ab_transfer(
   let len_arg = helpers.first_arg_or_undefined(args)
   let #(new_len, st) = case classify(len_arg) {
     KUndef -> #(live_byte_size(buf), st)
-    _ -> rt_val.t_to_index(st, len_arg, invalid_length_msg)
+    _ -> rt_val.to_index(st, len_arg, invalid_length_msg)
   }
   let buf = require_buffer(st, mk_object(buf.h), "transfer")
   let old_bits = require_unshared_bytes(st, buf, "transfer")
@@ -503,7 +502,7 @@ fn ab_transfer(
     None -> True
   }
   case new_len <= max_buffer_byte_length && max_ok {
-    False -> rt_val.t_throw_range_error(st, "Array buffer allocation failed")
+    False -> rt_val.throw_range_error(st, "Array buffer allocation failed")
     True -> {
       let old_len = bit_array.byte_size(old_bits)
       let copy_len = int.min(new_len, old_len)
@@ -550,14 +549,14 @@ fn sab_grow(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "grow")
   case max_byte_length(buf) {
     None ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "SharedArrayBuffer.prototype.grow called on a non-growable SharedArrayBuffer",
       )
     Some(max) -> {
       let _block = require_shared(st, buf, "grow")
       let #(new_len, st) =
-        rt_val.t_to_index(
+        rt_val.to_index(
           st,
           helpers.first_arg_or_undefined(args),
           invalid_length_msg,
@@ -565,7 +564,7 @@ fn sab_grow(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
       let buf = require_buffer(st, mk_object(buf.h), "grow")
       let block = require_shared(st, buf, "grow")
       let invalid = fn() {
-        rt_val.t_throw_range_error(
+        rt_val.throw_range_error(
           st,
           "SharedArrayBuffer.prototype.grow: invalid length",
         )
@@ -696,7 +695,7 @@ fn require_resizable_bytes(
   case buf.storage {
     Bytes(bytes:, max_byte_length: Some(max)) -> #(bytes, max)
     Bytes(max_byte_length: None, ..) | Immutable(..) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "ArrayBuffer.prototype."
           <> method
@@ -708,7 +707,7 @@ fn require_resizable_bytes(
 }
 
 fn detached_error(st: Agent, method: String) -> a {
-  rt_val.t_throw_type_error(
+  rt_val.throw_type_error(
     st,
     "ArrayBuffer.prototype." <> method <> " called on a detached ArrayBuffer",
   )
@@ -721,7 +720,7 @@ fn require_not_immutable(
 ) -> LiveBuffer {
   case buf.storage {
     Immutable(..) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "ArrayBuffer.prototype."
           <> method
@@ -732,7 +731,7 @@ fn require_not_immutable(
 }
 
 fn incompatible(st: Agent, method: String) -> a {
-  rt_val.t_throw_type_error(
+  rt_val.throw_type_error(
     st,
     "Method " <> method <> " called on incompatible receiver",
   )
@@ -772,25 +771,25 @@ fn species_constructor(
   o: JsVal,
   default_ctor: Handle,
 ) -> #(JsVal, Agent) {
-  let #(c, st) = rt_obj.t_get_prop(st, o, StringKey(Named("constructor")))
+  let #(c, st) = rt_obj.get_prop(st, o, StringKey(Named("constructor")))
   case classify(c) {
     KUndef -> #(mk_object(default_ctor), st)
     KHandle(_) -> {
       let #(s, st) =
-        rt_obj.t_get_prop(st, c, types.SymbolKey(types.symbol_species))
+        rt_obj.get_prop(st, c, types.SymbolKey(types.symbol_species))
       case classify(s) {
         KUndef | types.KNull -> #(mk_object(default_ctor), st)
         _ ->
           case rt_call.is_constructor(st, s) {
             True -> #(s, st)
             False ->
-              rt_val.t_throw_type_error(
+              rt_val.throw_type_error(
                 st,
                 "species constructor is not a constructor",
               )
           }
       }
     }
-    _ -> rt_val.t_throw_type_error(st, "constructor property is not an object")
+    _ -> rt_val.throw_type_error(st, "constructor property is not an object")
   }
 }

@@ -13,13 +13,13 @@ fn handle(v: JsVal) -> Handle {
 
 fn new_weak_ref(st: Agent, target: JsVal) -> #(JsVal, Agent) {
   let #(ctor, st) = global(st, "WeakRef")
-  let #(h, st) = rt_call.t_construct(st, ctor, [target], ctor)
+  let #(h, st) = rt_call.construct(st, ctor, [target], ctor)
   #(mk_object(h), st)
 }
 
 pub fn deref_returns_target_test() {
   let st = agent()
-  let #(target, st) = rt_obj.t_new_object_literal(st)
+  let #(target, st) = rt_obj.new_object_literal(st)
   let #(ref, st) = new_weak_ref(st, target)
   let #(got, _st) = call_method(st, ref, "deref", [])
   assert got == target
@@ -27,15 +27,15 @@ pub fn deref_returns_target_test() {
 
 pub fn target_is_weak_test() {
   let st = agent()
-  let #(target, st) = rt_obj.t_new_object_literal(st)
+  let #(target, st) = rt_obj.new_object_literal(st)
   let #(ref, st) = new_weak_ref(st, target)
-  let st = rt_gc.t_collect(st, [handle(ref), handle(target)])
-  assert rt_gc.t_is_live(st, handle(target))
+  let st = rt_gc.collect(st, [handle(ref), handle(target)])
+  assert rt_gc.is_live(st, handle(target))
   let #(got, st) = call_method(st, ref, "deref", [])
   assert got == target
-  let st = rt_gc.t_collect(st, [handle(ref)])
-  assert !rt_gc.t_is_live(st, handle(target))
-  let #(_fresh, st) = rt_obj.t_new_object_literal(st)
+  let st = rt_gc.collect(st, [handle(ref)])
+  assert !rt_gc.is_live(st, handle(target))
+  let #(_fresh, st) = rt_obj.new_object_literal(st)
   let #(got, _st) = call_method(st, ref, "deref", [])
   assert classify(got) == KUndef
 }

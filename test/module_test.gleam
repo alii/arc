@@ -51,7 +51,7 @@ fn bundle(entry_source: String) -> module.ModuleBundle {
 }
 
 fn get(st: Agent, recv: JsVal, name: String) -> #(JsVal, Agent) {
-  rt_obj.t_get_prop(st, recv, StringKey(Named(name)))
+  rt_obj.get_prop(st, recv, StringKey(Named(name)))
 }
 
 pub fn link_builds_namespaces_over_live_cells_test() {
@@ -66,7 +66,7 @@ pub fn link_builds_namespaces_over_live_cells_test() {
   let #(v, st) = get(st, mk_object(dance_ns), "greet")
   assert classify(v) == KNum(JInt(7))
   let #(tag, _) =
-    rt_obj.t_get_prop(
+    rt_obj.get_prop(
       st,
       mk_object(dance_ns),
       SymbolKey(types.symbol_to_string_tag),
@@ -113,7 +113,7 @@ pub fn deferred_namespace_over_host_module_test() {
   let #(then_v, st) = get(st, ns, "then")
   assert classify(then_v) == KUndef
   let #(tag, st) =
-    rt_obj.t_get_prop(st, ns, SymbolKey(types.symbol_to_string_tag))
+    rt_obj.get_prop(st, ns, SymbolKey(types.symbol_to_string_tag))
   assert classify(tag) == KStr("Deferred Module")
   let #(greet, _) = get(st, ns, "greet")
   assert classify(greet) == KNum(JInt(7))

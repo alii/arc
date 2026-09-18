@@ -1,14 +1,14 @@
 %% object model kernels; exports may answer miss for the general path
 -module(arc_rt_obj_ffi).
--export([t_get_prop_own_data/3, t_set_prop_own_data/4, t_set_named/5,
+-export([get_prop_own_data/3, set_prop_own_data/4, set_named/5,
          plain_copy_data_props/3, plain_for_in_keys/2, plain_own_enum_pairs/2,
-         t_create_data_prop/4,
-         t_get_named_ic_fill/4, t_get_named/4,
-         t_get_named_site/4,
-         t_instanceof_i32/3, t_instanceof_i32_general/3,
-         t_get_elem/3, t_set_elem/4, t_array_lit/2,
-         t_array_lit_packed/2,
-         t_global_peek/2, t_global_get/2,
+         create_data_prop/4,
+         get_named_ic_fill/4, get_named/4,
+         get_named_site/4,
+         instanceof_i32/3, instanceof_i32_general/3,
+         get_elem/3, set_elem/4, array_lit/2,
+         array_lit_packed/2,
+         global_peek/2, global_get/2,
          named_write_walk/5, chain_takes_named_write/4, named_plain/2,
          shape_slots_new/0, shape_slots_get/2, shape_slots_set/3,
          shape_slots_append/2, get_symbol_data/3, native_token/1, elem_at/2,
@@ -26,25 +26,25 @@
 -define(PROTO_KEY, {?KEY_NAMED, <<"__proto__">>}).
 -define(IC_READ_WAYS, 8).
 
-t_get_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin) ->
+get_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin) ->
     peek_named_at(St, Id, KeyBin);
-t_get_prop_own_data(_, _, _) -> miss.
+get_prop_own_data(_, _, _) -> miss.
 
 %% nested constant array literals arrive as {js_alit, Elems}
-t_array_lit(St, Elems) ->
+array_lit(St, Elems) ->
     {Vs, St1} = array_lit_elems(Elems, St, []),
-    'arc@rt@obj':t_new_array(St1, Vs).
+    'arc@rt@obj':new_array(St1, Vs).
 
 array_lit_elems([{js_alit, Sub} | T], St, Acc) ->
-    {V, St1} = t_array_lit(St, Sub),
+    {V, St1} = array_lit(St, Sub),
     array_lit_elems(T, St1, [V | Acc]);
 array_lit_elems([V | T], St, Acc) -> array_lit_elems(T, St, [V | Acc]);
 array_lit_elems([], St, Acc) -> {lists:reverse(Acc), St}.
 
-t_array_lit_packed(St, Bin) -> t_array_lit(St, binary_to_term(Bin)).
+array_lit_packed(St, Bin) -> array_lit(St, binary_to_term(Bin)).
 
 
-t_get_named_ic_fill(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
+get_named_ic_fill(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
     case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, Store)) of
         {?SSHAPEDOBJECT_TAG, Sid, _, Slots, Offs} ->
@@ -56,15 +56,15 @@ t_get_named_ic_fill(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
             end;
         Cell -> {peek_named(St, Cell, KeyBin), St}
     end;
-t_get_named_ic_fill(St, _, _, _) -> {miss, St}.
+get_named_ic_fill(St, _, _, _) -> {miss, St}.
 
-t_get_named(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
+get_named(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
     Cells = element(?STORE_CELLS, Store),
     read_named(St, Store, Cells, Recv, arc_rt_arena_ffi:get(Id, Cells), KeyBin, Site);
-t_get_named(St, Recv, KeyBin, _) -> read_prim(St, Recv, KeyBin).
+get_named(St, Recv, KeyBin, _) -> read_prim(St, Recv, KeyBin).
 
-t_get_named_site(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
+get_named_site(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
     Cells = element(?STORE_CELLS, Store),
     Cell = arc_rt_arena_ffi:get(Id, Cells),
@@ -80,7 +80,7 @@ t_get_named_site(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
             {element(?DATAPROPERTY_VALUE, Prop), St};
         _ -> read_named(St, Store, Cells, Recv, Cell, KeyBin, Site)
     end;
-t_get_named_site(St, Recv, KeyBin, _) -> read_prim(St, Recv, KeyBin).
+get_named_site(St, Recv, KeyBin, _) -> read_prim(St, Recv, KeyBin).
 
 read_named(St, Store, Cells, Recv, {?SSHAPEDOBJECT_TAG, Sid, Proto, Slots, Offs},
            KeyBin, Site) ->
@@ -132,7 +132,7 @@ read_wrapper(St, Which, Recv, KeyBin) ->
                {?SOME, element(?BUILTINPAIR_PROTO, Pair)}, Recv, KeyBin).
 
 general_get(St, Recv, KeyBin) ->
-    'arc@rt@obj':t_get_prop_untyped_key(St, Recv, {?OKEY_STRING, {?KEY_NAMED, KeyBin}}).
+    'arc@rt@obj':get_prop_untyped_key(St, Recv, {?OKEY_STRING, {?KEY_NAMED, KeyBin}}).
 
 %% §10.1.8.1 ordinary get while every hop is plain data
 proto_read(_, _, ?NONE, _, _) -> undefined;
@@ -186,14 +186,14 @@ ic_fill(St, Store, Site, Sid, Off, KeyBin) ->
                                                 #{Sid => Off}}}))
     end.
 
-t_global_peek(St, KeyBin) ->
+global_peek(St, KeyBin) ->
     {?HANDLE_TAG, GId} = element(?REALM_GLOBAL, element(?AGENT_REALM, St)),
     Store = element(?AGENT_STORE, St),
     peek_named(St, arc_rt_arena_ffi:get(GId, element(?STORE_CELLS, Store)), KeyBin).
 
-t_global_get(St, KeyBin) ->
-    case t_global_peek(St, KeyBin) of
-        miss -> 'arc@rt@lang':t_global_get(St, KeyBin);
+global_get(St, KeyBin) ->
+    case global_peek(St, KeyBin) of
+        miss -> 'arc@rt@lang':global_get(St, KeyBin);
         V -> {V, St}
     end.
 
@@ -219,7 +219,7 @@ peek_named(_, Cell, KeyBin) when element(1, Cell) =:= ?SOBJECT_TAG ->
 peek_named(_, _, _) -> miss.
 
 %% §10.1.9.1 ordinary set when it lands as plain data
-t_set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
+set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
     Store = element(?AGENT_STORE, St),
     Cells = element(?STORE_CELLS, Store),
     case arc_rt_arena_ffi:get(Id, Cells) of
@@ -261,7 +261,7 @@ t_set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
             end;
         _ -> miss
     end;
-t_set_prop_own_data(_, _, _, _) -> miss.
+set_prop_own_data(_, _, _, _) -> miss.
 
 set_prop_new(St, Store, Cells, Id, Cell, K, V)
   when tuple_size(Store) =:= ?STORE_SIZE ->
@@ -305,20 +305,20 @@ with_props(Cell, Props) when tuple_size(Cell) =:= ?SOBJECT_SIZE ->
 with_value(Prop, V) when tuple_size(Prop) =:= ?DATAPROPERTY_SIZE ->
     setelement(?DATAPROPERTY_VALUE, Prop, V).
 
-t_set_named(St, Obj, KeyBin, V, Strict) ->
-    case t_set_prop_own_data(St, Obj, KeyBin, V) of
+set_named(St, Obj, KeyBin, V, Strict) ->
+    case set_prop_own_data(St, Obj, KeyBin, V) of
         miss ->
             Key = {?KEY_NAMED, KeyBin},
             {_, St1} = case Strict of
-                true -> 'arc@rt@obj':t_set_prop_strict(St, Obj, Key, V);
-                false -> 'arc@rt@obj':t_set_prop_untyped_key(St, Obj, Key, V)
+                true -> 'arc@rt@obj':set_prop_strict(St, Obj, Key, V);
+                false -> 'arc@rt@obj':set_prop_untyped_key(St, Obj, Key, V)
             end,
             St1;
         St1 -> St1
     end.
 
 %% §7.3.5 create data property, new plain key only
-t_create_data_prop(St, Recv = {?HANDLE_TAG, Id}, Key, V) ->
+create_data_prop(St, Recv = {?HANDLE_TAG, Id}, Key, V) ->
     PK = case Key of
         {?OKEY_STRING, K} -> K;
         K -> K
@@ -342,7 +342,7 @@ t_create_data_prop(St, Recv = {?HANDLE_TAG, Id}, Key, V) ->
         _ -> miss
     end,
     case R of
-        miss -> 'arc@rt@obj':t_create_data_prop_general(St, Recv, Key, V);
+        miss -> 'arc@rt@obj':create_data_prop_general(St, Recv, Key, V);
         {seq, NewCell, Seq} ->
             Store1 = store_put_seq(Store, arc_rt_arena_ffi:set(Id, NewCell, Cells), Seq),
             {true, with_store(St, bump_epoch_if_global(Store1, NewCell))};
@@ -350,8 +350,8 @@ t_create_data_prop(St, Recv = {?HANDLE_TAG, Id}, Key, V) ->
             Store1 = with_cells(Store, arc_rt_arena_ffi:set(Id, NewCell, Cells)),
             {true, with_store(St, bump_epoch_if_global(Store1, NewCell))}
     end;
-t_create_data_prop(St, Recv, Key, V) ->
-    'arc@rt@obj':t_create_data_prop_general(St, Recv, Key, V).
+create_data_prop(St, Recv, Key, V) ->
+    'arc@rt@obj':create_data_prop_general(St, Recv, Key, V).
 
 plain_define(Cell, PK, V, Store) ->
     Seq = element(?STORE_PROP_SEQ, Store),
@@ -380,7 +380,7 @@ shaped_define(Shapes, {?SSHAPEDOBJECT_TAG, Sid, P, Slots, Offs} = Shaped, KeyBin
 shaped_next(Shapes, Sid, KeyBin) -> ?SHAPED_NEXT(Shapes, Sid, KeyBin).
 
 %% §7.3.22 ordinary has instance
-t_instanceof_i32(St, V, {?HANDLE_TAG, CId}) ->
+instanceof_i32(St, V, {?HANDLE_TAG, CId}) ->
     case live_cell(St, CId) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG,
                   element(?SOBJECT_SYMBOL_PROPS, Cell) =:= [] ->
@@ -399,10 +399,10 @@ t_instanceof_i32(St, V, {?HANDLE_TAG, CId}) ->
             end;
         _ -> miss
     end;
-t_instanceof_i32(_, _, _) -> miss.
+instanceof_i32(_, _, _) -> miss.
 
-t_instanceof_i32_general(St, V, Ctor) ->
-    case 'arc@rt@ops':t_instance_of(St, V, Ctor) of
+instanceof_i32_general(St, V, Ctor) ->
+    case 'arc@rt@ops':instance_of(St, V, Ctor) of
         {true, St1} -> {1, St1};
         {false, St1} -> {0, St1}
     end.
@@ -427,14 +427,14 @@ proto_has(St, {?HANDLE_TAG, VId}, PId, Fuel) when Fuel > 0 ->
 proto_has(_, {?HANDLE_TAG, _}, _, _) -> miss;
 proto_has(_, _, _, _) -> 0.
 
-t_get_elem(St, {?HANDLE_TAG, Id}, Idx)
+get_elem(St, {?HANDLE_TAG, Id}, Idx)
   when is_integer(Idx), Idx >= 0, Idx =< ?MAX_ARRAY_INDEX ->
     Store = element(?AGENT_STORE, St),
     index_read(arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, Store)), Idx);
-t_get_elem(St, Recv, Idx)
+get_elem(St, Recv, Idx)
   when is_float(Idx), Idx >= 0.0, Idx == trunc(Idx) ->
-    t_get_elem(St, Recv, trunc(Idx));
-t_get_elem(St, {?HANDLE_TAG, Id}, Key) when ?IS_STR(Key) ->
+    get_elem(St, Recv, trunc(Idx));
+get_elem(St, {?HANDLE_TAG, Id}, Key) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:property_key_of(Key) of
         {?OKEY_STRING, {?KEY_NAMED, KeyBin}} ->
             Store = element(?AGENT_STORE, St),
@@ -449,7 +449,7 @@ t_get_elem(St, {?HANDLE_TAG, Id}, Key) when ?IS_STR(Key) ->
             index_read(arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, Store)), Idx);
         _ -> miss
     end;
-t_get_elem(_, _, _) -> miss.
+get_elem(_, _, _) -> miss.
 
 index_read(Cell, Idx) when element(1, Cell) =:= ?SOBJECT_TAG ->
     case element(?SOBJECT_KIND, Cell) of
@@ -517,20 +517,20 @@ index_keys_in_props(Kind) ->
         _ -> true
     end.
 
-t_set_elem(St, {?HANDLE_TAG, Id}, Idx, V)
+set_elem(St, {?HANDLE_TAG, Id}, Idx, V)
   when is_integer(Idx), Idx >= 0, Idx =< ?MAX_ARRAY_INDEX ->
     index_write(St, Id, Idx, V);
-t_set_elem(St, Recv, Idx, V)
+set_elem(St, Recv, Idx, V)
   when is_float(Idx), Idx >= 0.0, Idx == trunc(Idx) ->
-    t_set_elem(St, Recv, trunc(Idx), V);
-t_set_elem(St, Recv = {?HANDLE_TAG, Id}, Key, V) when ?IS_STR(Key) ->
+    set_elem(St, Recv, trunc(Idx), V);
+set_elem(St, Recv = {?HANDLE_TAG, Id}, Key, V) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:property_key_of(Key) of
         {?OKEY_STRING, {?KEY_NAMED, KeyBin}} ->
-            t_set_prop_own_data(St, Recv, KeyBin, V);
+            set_prop_own_data(St, Recv, KeyBin, V);
         {?OKEY_STRING, {?KEY_INDEX, Idx}} -> index_write(St, Id, Idx, V);
         _ -> miss
     end;
-t_set_elem(_, _, _, _) -> miss.
+set_elem(_, _, _, _) -> miss.
 
 index_write(St, Id, Idx, V) ->
     Store = element(?AGENT_STORE, St),

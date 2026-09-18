@@ -27,7 +27,7 @@ fn template_flags(template: FuncTemplate) -> FnFlags {
 }
 
 // does not root the result
-pub fn t_new_bytecode_function(
+pub fn new_bytecode_function(
   st: Agent,
   template: FuncTemplate,
   env: EnvTuple,
@@ -45,7 +45,7 @@ pub fn t_new_bytecode_function(
         False, True -> #(realm.async_fn.prototype, None)
         False, False -> #(realm.function.prototype, None)
       }
-      rt_store.t_cell_new(
+      rt_store.cell_new(
         st,
         SObject(
           kind: BytecodeFn(
@@ -99,7 +99,7 @@ fn new_with_eager_prototype(
     )
   }
   let #(h, _, st) = {
-    use h, proto <- rt_store.t_cell_new_pair(st)
+    use h, proto <- rt_store.cell_new_pair(st)
     let prototype_prop =
       DataProperty(
         value: mk_object(proto),
@@ -142,7 +142,7 @@ fn new_with_eager_prototype(
 fn async_generator_fn_prototype(st: Agent) -> Handle {
   let realm = st.realm
   case
-    rt_obj.t_ordinary_own_property(
+    rt_obj.ordinary_own_property(
       st,
       realm.async_gen.constructor,
       StringKey(Named("prototype")),

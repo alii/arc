@@ -70,19 +70,19 @@ fn call_in_caller_realm(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   use st <- rt_realm.with_realm(st, caller)
-  rt_call.t_call(st, callee, this, args)
+  rt_call.call(st, callee, this, args)
 }
 
 // §25.5.1
 fn json_parse(args: List(JsVal), caller: Int, st: Agent) -> #(JsVal, Agent) {
   let #(json_text, st) =
-    rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+    rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   let bytes = bit_array.from_string(json_text)
   let reviver = helpers.arg_at(args, 1)
   // iscallable has no side effects, so it can run before the parse
   let revive = rt_val.is_callable(st, reviver)
   case parse_value(bytes, revive) {
-    Error(e) -> rt_val.t_throw_syntax_error(st, json_error_message(e))
+    Error(e) -> rt_val.throw_syntax_error(st, json_error_message(e))
     Ok(#(val, rest)) ->
       case skip_whitespace(rest) {
         <<>> -> {
@@ -96,8 +96,7 @@ fn json_parse(args: List(JsVal), caller: Int, st: Agent) -> #(JsVal, Agent) {
             }
           }
         }
-        _ ->
-          rt_val.t_throw_syntax_error(st, json_error_message(TrailingContent))
+        _ -> rt_val.throw_syntax_error(st, json_error_message(TrailingContent))
       }
   }
 }
@@ -111,7 +110,7 @@ fn internalize_json_property(
   node: Option(ParseRecord),
 ) -> #(JsVal, Agent) {
   let #(val, st) =
-    rt_obj.t_get_prop(st, mk_object(holder), StringKey(key.canonical(name)))
+    rt_obj.get_prop(st, mk_object(holder), StringKey(key.canonical(name)))
   let node = fresh_record(node, val)
   let st = case classify(val) {
     KHandle(h) ->
@@ -208,12 +207,12 @@ fn replace_or_delete(
   let k = StringKey(key.canonical(name))
   case classify(new_element) {
     KUndef -> {
-      let #(_, st) = rt_obj.t_delete_prop(st, h, k)
+      let #(_, st) = rt_obj.delete_prop(st, h, k)
       st
     }
     _ -> {
       let #(_, st) =
-        rt_obj.t_define_own_prop(
+        rt_obj.define_own_prop(
           st,
           h,
           k,
@@ -378,7 +377,7 @@ fn materialize(st: Agent, val: JsonValue) -> #(ParseRecord, Agent) {
       let #(entries, st) = materialize_object_entries(st, entries, [])
       let #(props, st) = props_from_entries(st, entries, dict.new())
       let #(h, st) =
-        rt_store.t_cell_new(
+        rt_store.cell_new(
           st,
           plain_object(Ordinary, Some(st.realm.object.prototype), props),
         )
@@ -402,7 +401,7 @@ fn materialize_plain(st: Agent, val: JsonValue) -> #(JsVal, Agent) {
       let #(entries, st) = materialize_plain_entries(st, entries, [])
       let object_proto = st.realm.object.prototype
       let #(h, st) = {
-        use seq <- rt_store.t_cell_new_with(st, list.length(entries))
+        use seq <- rt_store.cell_new_with(st, list.length(entries))
         let props = case plain_prop_dict(entries, seq) {
           PlainProps(props:, ..) -> props
           PropsMiss -> plain_props(entries, dict.new(), seq)
@@ -525,7 +524,7 @@ fn props_from_entries(
           props_from_entries(st, rest, dict.insert(acc, pk, prop))
         }
         Error(Nil) -> {
-          let #(prop, st) = rt_store.t_plain_property(st, value)
+          let #(prop, st) = rt_store.plain_property(st, value)
           props_from_entries(st, rest, dict.insert(acc, pk, prop))
         }
       }
@@ -535,11 +534,11 @@ fn props_from_entries(
 
 fn json_raw_json(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   let #(json_text, st) =
-    rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+    rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   case validate_raw_json_text(bit_array.from_string(json_text)) {
-    Error(e) -> rt_val.t_throw_syntax_error(st, json_error_message(e))
+    Error(e) -> rt_val.throw_syntax_error(st, json_error_message(e))
     Ok(Nil) -> {
-      let #(seq, st) = rt_store.t_next_prop_seq(st)
+      let #(seq, st) = rt_store.next_prop_seq(st)
       let prop =
         types.DataProperty(
           value: mk_string(json_text),
@@ -549,7 +548,7 @@ fn json_raw_json(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
           seq:,
         )
       let #(h, st) =
-        rt_store.t_cell_new(
+        rt_store.cell_new(
           st,
           SObject(
             kind: RawJsonObj(raw: json_text),
@@ -653,7 +652,7 @@ fn json_stringify(
     case plain {
       JsonDone(text) ->
         case string.byte_size(text) > limits.max_string_bytes {
-          True -> rt_val.t_throw_range_error(st, "Invalid string length")
+          True -> rt_val.throw_range_error(st, "Invalid string length")
           False -> #(mk_string(text), st)
         }
       JsonMiss -> #(mk_undefined(), st)
@@ -664,7 +663,7 @@ fn json_stringify(
   case serialize_property(st, ctx, [], "", Named(""), wrapper) {
     #(Some(tree), st) ->
       case string_tree.byte_size(tree) > limits.max_string_bytes {
-        True -> rt_val.t_throw_range_error(st, "Invalid string length")
+        True -> rt_val.throw_range_error(st, "Invalid string length")
         False -> #(mk_string(flatten(tree)), st)
       }
     #(None, st) -> #(mk_undefined(), st)
@@ -703,8 +702,7 @@ fn collect_property_list(
   case k >= len {
     True -> #(list.reverse(acc), st)
     False -> {
-      let #(v, st) =
-        rt_obj.t_get_prop(st, mk_object(h), StringKey(key.index(k)))
+      let #(v, st) = rt_obj.get_prop(st, mk_object(h), StringKey(key.index(k)))
       let #(item, st) = replacer_item(st, v)
       case item {
         Some(s) ->
@@ -726,13 +724,13 @@ fn replacer_item(st: Agent, v: JsVal) -> #(Option(String), Agent) {
   case classify(v) {
     KStr(s) -> #(Some(s), st)
     KNum(_) -> {
-      let #(s, st) = rt_val.t_to_string(st, v)
+      let #(s, st) = rt_val.to_string(st, v)
       #(Some(s), st)
     }
     KHandle(h) ->
       case obj_kind(st, h) {
         Some(StringObj(_)) | Some(NumberObj(_)) -> {
-          let #(s, st) = rt_val.t_to_string(st, v)
+          let #(s, st) = rt_val.to_string(st, v)
           #(Some(s), st)
         }
         _ -> #(None, st)
@@ -746,11 +744,11 @@ fn compute_gap(st: Agent, space: JsVal) -> #(String, Agent) {
     KHandle(h) ->
       case obj_kind(st, h) {
         Some(NumberObj(_)) -> {
-          let #(n, st) = rt_val.t_to_number(st, space)
+          let #(n, st) = rt_val.to_number(st, space)
           #(mk_number(n), st)
         }
         Some(StringObj(_)) -> {
-          let #(s, st) = rt_val.t_to_string(st, space)
+          let #(s, st) = rt_val.to_string(st, space)
           #(mk_string(s), st)
         }
         _ -> #(space, st)
@@ -836,7 +834,7 @@ fn serialize_value(
     KBool(False) -> #(Some(string_tree.from_string("false")), st)
     KHandle(h) -> serialize_handle(st, ctx, stack, indent, val, h)
     KBig(_) ->
-      rt_val.t_throw_type_error(st, "Do not know how to serialize a BigInt")
+      rt_val.throw_type_error(st, "Do not know how to serialize a BigInt")
     KUndef | KSym(_) | types.KTdz -> #(None, st)
   }
 }
@@ -852,16 +850,16 @@ fn serialize_handle(
   case obj_kind(st, h) {
     Some(RawJsonObj(raw:)) -> #(Some(string_tree.from_string(raw)), st)
     Some(NumberObj(_)) -> {
-      let #(n, st) = rt_val.t_to_number(st, val)
+      let #(n, st) = rt_val.to_number(st, val)
       serialize_value(st, ctx, stack, indent, mk_number(n))
     }
     Some(StringObj(_)) -> {
-      let #(s, st) = rt_val.t_to_string(st, val)
+      let #(s, st) = rt_val.to_string(st, val)
       #(Some(quote_tree(s)), st)
     }
     Some(BooleanObj(b)) -> serialize_value(st, ctx, stack, indent, mk_bool(b))
     Some(BigIntObj(_)) ->
-      rt_val.t_throw_type_error(st, "Do not know how to serialize a BigInt")
+      rt_val.throw_type_error(st, "Do not know how to serialize a BigInt")
     _ ->
       case rt_val.is_callable(st, val) {
         True -> #(None, st)
@@ -884,7 +882,7 @@ fn serialize_object(
   h: Handle,
 ) -> #(StringTree, Agent) {
   case list.contains(stack, h.id) {
-    True -> rt_val.t_throw_type_error(st, circular_msg)
+    True -> rt_val.throw_type_error(st, circular_msg)
     False -> {
       let stack = [h.id, ..stack]
       let step_indent = indent <> ctx.gap
@@ -941,7 +939,7 @@ fn serialize_array(
   h: Handle,
 ) -> #(StringTree, Agent) {
   case list.contains(stack, h.id) {
-    True -> rt_val.t_throw_type_error(st, circular_msg)
+    True -> rt_val.throw_type_error(st, circular_msg)
     False -> {
       let stack = [h.id, ..stack]
       let step_indent = indent <> ctx.gap
@@ -1017,7 +1015,7 @@ fn quote_tree(s: String) -> StringTree
 fn flatten(tree: StringTree) -> String
 
 fn obj_kind(st: Agent, h: Handle) -> Option(types.ObjKind) {
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     SObject(kind:, ..) -> Some(kind)
     SShapedObject(..) -> Some(Ordinary)
     _ -> None
@@ -1025,10 +1023,10 @@ fn obj_kind(st: Agent, h: Handle) -> Option(types.ObjKind) {
 }
 
 fn enumerable_string_keys(st: Agent, h: Handle) -> #(List(PropertyKey), Agent) {
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     // shaped slots are all plain enumerable data
     SShapedObject(..) -> {
-      let #(keys, st) = rt_obj.t_own_keys(st, h)
+      let #(keys, st) = rt_obj.own_keys(st, h)
       #(list.filter_map(keys, string_key), st)
     }
     SObject(kind: Ordinary, props:, elements: types.NoElements, ..) -> #(
@@ -1036,7 +1034,7 @@ fn enumerable_string_keys(st: Agent, h: Handle) -> #(List(PropertyKey), Agent) {
       st,
     )
     _ -> {
-      let #(keys, st) = rt_obj.t_enumerable_own_keys(st, h)
+      let #(keys, st) = rt_obj.enumerable_own_keys(st, h)
       #(keys, st)
     }
   }

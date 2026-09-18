@@ -36,7 +36,7 @@ pub fn symbol_match(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let h = require_object(st, this, "[Symbol.match]")
-  let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+  let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   let #(flags, st) = read_flags(st, this)
   let #(pristine, st) = pristine_exec(st, h)
   case has_flag(flags, "g"), pristine {
@@ -120,8 +120,8 @@ fn collect_global_matches(
         _ -> ok_array(st, list.reverse(acc))
       }
     _ -> {
-      let #(m_v, st) = rt_obj.t_get_prop(st, result, StringKey(Index(0)))
-      let #(match_text, st) = rt_val.t_to_string(st, m_v)
+      let #(m_v, st) = rt_obj.get_prop(st, result, StringKey(Index(0)))
+      let #(match_text, st) = rt_val.to_string(st, m_v)
       let st = advance_if_empty(st, h, s, match_text)
       collect_global_matches(
         st,
@@ -144,7 +144,7 @@ fn advance_if_empty(
   case match_text {
     "" -> {
       let #(li_v, st) = get_named(st, mk_object(h), "lastIndex")
-      let #(this_index, st) = rt_val.t_to_length(st, li_v)
+      let #(this_index, st) = rt_val.to_length(st, li_v)
       set_throw(
         st,
         h,
@@ -162,7 +162,7 @@ pub fn symbol_search(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let h = require_object(st, this, "[Symbol.search]")
-  let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+  let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   let #(previous, st) = get_named(st, this, "lastIndex")
   let st = set_unless_same_value(st, h, previous, mk_int(0))
   let #(pristine, st) = pristine_exec(st, h)
@@ -217,13 +217,13 @@ pub fn symbol_replace(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let h = require_object(st, this, "[Symbol.replace]")
-  let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+  let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   let length_s = string.byte_size(s)
   let replace_value = helpers.arg_at(args, 1)
   let #(replacer, st) = case rt_val.is_callable(st, replace_value) {
     True -> #(FunctionalReplacer(replace_value), st)
     False -> {
-      let #(tpl, st) = rt_val.t_to_string(st, replace_value)
+      let #(tpl, st) = rt_val.to_string(st, replace_value)
       #(
         TemplateReplacer(
           substitution.tokenize_named(tpl),
@@ -350,8 +350,8 @@ fn collect_replace_results(
   case classify(result) {
     KNull -> #(list.reverse(acc), st)
     _ -> {
-      let #(m_v, st) = rt_obj.t_get_prop(st, result, StringKey(Index(0)))
-      let #(match_text, st) = rt_val.t_to_string(st, m_v)
+      let #(m_v, st) = rt_obj.get_prop(st, result, StringKey(Index(0)))
+      let #(match_text, st) = rt_val.to_string(st, m_v)
       let st = advance_if_empty(st, h, s, match_text)
       collect_replace_results(st, rx, h, s, [result, ..acc])
     }
@@ -371,12 +371,12 @@ fn process_replace_results(
     [] -> #(mk_string(acc <> bytes.drop_start(s, next_pos)), st)
     [result, ..rest] -> {
       let #(len_v, st) = get_named(st, result, "length")
-      let #(result_length, st) = rt_val.t_to_length(st, len_v)
+      let #(result_length, st) = rt_val.to_length(st, len_v)
       let n_captures = int.max(result_length - 1, 0)
-      let #(m_v, st) = rt_obj.t_get_prop(st, result, StringKey(Index(0)))
-      let #(matched, st) = rt_val.t_to_string(st, m_v)
+      let #(m_v, st) = rt_obj.get_prop(st, result, StringKey(Index(0)))
+      let #(matched, st) = rt_val.to_string(st, m_v)
       let #(pos_v, st) = get_named(st, result, "index")
-      let #(pos_raw, st) = rt_val.t_to_integer_or_infinity(st, pos_v)
+      let #(pos_raw, st) = rt_val.to_integer_or_infinity(st, pos_v)
       let position = int.clamp(pos_raw, 0, length_s)
       let #(captures, st) =
         collect_coerced_captures(st, result, 1, n_captures, [])
@@ -409,7 +409,7 @@ fn collect_coerced_captures(
   case n > n_captures {
     True -> #(list.reverse(acc), st)
     False -> {
-      let #(cap, st) = rt_obj.t_get_prop(st, result, StringKey(Index(n)))
+      let #(cap, st) = rt_obj.get_prop(st, result, StringKey(Index(n)))
       case classify(cap) {
         KUndef ->
           collect_coerced_captures(st, result, n + 1, n_captures, [
@@ -417,7 +417,7 @@ fn collect_coerced_captures(
             ..acc
           ])
         _ -> {
-          let #(cap_text, st) = rt_val.t_to_string(st, cap)
+          let #(cap_text, st) = rt_val.to_string(st, cap)
           collect_coerced_captures(st, result, n + 1, n_captures, [
             mk_string(cap_text),
             ..acc
@@ -452,7 +452,7 @@ fn compute_replacement(
       }
       let store = st.store
       let #(result, st) = store.ops.call(st, fun, mk_undefined(), call_args)
-      rt_val.t_to_string(st, result)
+      rt_val.to_string(st, result)
     }
     TemplateReplacer(with_named, without_named) -> {
       let ctx =
@@ -471,7 +471,7 @@ fn compute_replacement(
             st,
             list.reverse(substitution.expand_plain_parts(without_named, ctx)),
           )
-        KNull -> rt_val.t_throw_type_error(st, "Cannot convert null to object")
+        KNull -> rt_val.throw_type_error(st, "Cannot convert null to object")
         _ -> expand_segments(st, with_named, ctx, named_captures, [])
       }
     }
@@ -496,7 +496,7 @@ fn expand_segments(
           case classify(cap) {
             KUndef -> expand_segments(st, rest, ctx, nc, ["", ..acc])
             _ -> {
-              let #(cap_text, st) = rt_val.t_to_string(st, cap)
+              let #(cap_text, st) = rt_val.to_string(st, cap)
               expand_segments(st, rest, ctx, nc, [cap_text, ..acc])
             }
           }
@@ -509,7 +509,7 @@ fn finish_replacement(st: Agent, rev_parts: List(String)) -> #(String, Agent) {
   let parts = list.reverse(rev_parts)
   let total = list.fold(parts, 0, fn(sum, p) { sum + string.byte_size(p) })
   case total > limits.max_string_bytes {
-    True -> rt_val.t_throw_range_error(st, "Invalid string length")
+    True -> rt_val.throw_range_error(st, "Invalid string length")
     False -> #(string.concat(parts), st)
   }
 }
@@ -535,7 +535,7 @@ pub fn symbol_split(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let h = require_object(st, this, "[Symbol.split]")
-  let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+  let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   let realm = st.realm
   let #(c, st) = species_constructor(st, mk_object(h), realm.regexp.constructor)
   let #(flags, st) = read_flags(st, this)
@@ -543,12 +543,12 @@ pub fn symbol_split(
     True -> flags
     False -> flags <> "y"
   }
-  let #(sp_h, st) = rt_call.t_construct(st, c, [this, mk_string(new_flags)], c)
+  let #(sp_h, st) = rt_call.construct(st, c, [this, mk_string(new_flags)], c)
   let splitter = mk_object(sp_h)
   let limit_arg = helpers.arg_at(args, 1)
   let #(lim, st) = case classify(limit_arg) {
     KUndef -> #(4_294_967_295, st)
-    _ -> rt_val.t_to_uint32(st, limit_arg)
+    _ -> rt_val.to_uint32(st, limit_arg)
   }
   let size = string.byte_size(s)
   case lim, size {
@@ -689,7 +689,7 @@ fn symbol_split_loop(
           )
         _ -> {
           let #(li_v, st) = get_named(st, splitter, "lastIndex")
-          let #(e0, st) = rt_val.t_to_length(st, li_v)
+          let #(e0, st) = rt_val.to_length(st, li_v)
           let e = int.min(e0, size)
           case e == p {
             True ->
@@ -712,7 +712,7 @@ fn symbol_split_loop(
                 True -> ok_array(st, list.reverse(acc))
                 False -> {
                   let #(len_v, st) = get_named(st, z, "length")
-                  let #(z_len, st) = rt_val.t_to_length(st, len_v)
+                  let #(z_len, st) = rt_val.to_length(st, len_v)
                   let n_caps = int.max(z_len - 1, 0)
                   let #(acc, count, hit, st) =
                     split_captures(st, z, 1, n_caps, acc, count, lim)
@@ -754,7 +754,7 @@ fn split_captures(
   case i > n_caps {
     True -> #(acc, count, False, st)
     False -> {
-      let #(cap, st) = rt_obj.t_get_prop(st, z, StringKey(Index(i)))
+      let #(cap, st) = rt_obj.get_prop(st, z, StringKey(Index(i)))
       let acc = [cap, ..acc]
       let count = count + 1
       case count == lim {
@@ -771,13 +771,13 @@ pub fn symbol_match_all(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let h = require_object(st, this, "[Symbol.matchAll]")
-  let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+  let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   let realm = st.realm
   let #(c, st) = species_constructor(st, mk_object(h), realm.regexp.constructor)
   let #(flags, st) = read_flags(st, this)
-  let #(m_h, st) = rt_call.t_construct(st, c, [this, mk_string(flags)], c)
+  let #(m_h, st) = rt_call.construct(st, c, [this, mk_string(flags)], c)
   let #(li_v, st) = get_named(st, this, "lastIndex")
-  let #(last_index, st) = rt_val.t_to_length(st, li_v)
+  let #(last_index, st) = rt_val.to_length(st, li_v)
   let st = set_throw(st, m_h, "lastIndex", mk_int(last_index))
   let global = has_flag(flags, "g")
   create_regexp_string_iterator(st, m_h, s, global)
@@ -792,7 +792,7 @@ fn create_regexp_string_iterator(
 ) -> #(JsVal, Agent) {
   let realm = st.realm
   let #(next_h, st) =
-    rt_call.t_native_new(
+    rt_call.native_new(
       st,
       Some(realm.function.prototype),
       RegExpN(RegExpStringIteratorNext),
@@ -800,13 +800,13 @@ fn create_regexp_string_iterator(
       0,
       constructible: False,
     )
-  let #(next_prop, st) = rt_store.t_builtin_property(st, mk_object(next_h))
-  let #(matcher_prop, st) = rt_store.t_frozen_property(st, mk_object(matcher))
-  let #(string_prop, st) = rt_store.t_frozen_property(st, mk_string(s))
-  let #(global_prop, st) = rt_store.t_frozen_property(st, mk_bool(global))
-  let #(done_prop, st) = rt_store.t_plain_property(st, mk_bool(False))
+  let #(next_prop, st) = rt_store.builtin_property(st, mk_object(next_h))
+  let #(matcher_prop, st) = rt_store.frozen_property(st, mk_object(matcher))
+  let #(string_prop, st) = rt_store.frozen_property(st, mk_string(s))
+  let #(global_prop, st) = rt_store.frozen_property(st, mk_bool(global))
+  let #(done_prop, st) = rt_store.plain_property(st, mk_bool(False))
   let #(iter_h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       plain_object(
         Ordinary,
@@ -835,7 +835,7 @@ pub fn string_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let h = case classify(this) {
     KHandle(h) -> h
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "next method called on incompatible receiver: not an Object",
       )
@@ -843,7 +843,7 @@ pub fn string_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let #(matcher, s, global, done) = case read_rsi_state(st, h) {
     Some(state) -> state
     None ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "next method called on incompatible receiver: not a RegExp String Iterator",
       )
@@ -864,8 +864,8 @@ pub fn string_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
               iter_result(st, match, done: False)
             }
             True -> {
-              let #(m_v, st) = rt_obj.t_get_prop(st, match, StringKey(Index(0)))
-              let #(match_text, st) = rt_val.t_to_string(st, m_v)
+              let #(m_v, st) = rt_obj.get_prop(st, match, StringKey(Index(0)))
+              let #(match_text, st) = rt_val.to_string(st, m_v)
               let st = advance_if_empty(st, matcher, s, match_text)
               iter_result(st, match, done: False)
             }
@@ -879,7 +879,7 @@ fn read_rsi_state(
   st: Agent,
   h: Handle,
 ) -> Option(#(Handle, String, Bool, Bool)) {
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     SObject(props:, ..) -> {
       use m <- option.then(case dict.get(props, Named(rsi_matcher)) {
         Ok(types.DataProperty(value:, ..)) ->
@@ -912,7 +912,7 @@ fn read_rsi_state(
 }
 
 fn mark_iter_done(st: Agent, h: Handle) -> Agent {
-  rt_store.t_cell_update(st, h, fn(cell) {
+  rt_store.cell_update(st, h, fn(cell) {
     case cell {
       SObject(props:, ..) ->
         case dict.get(props, Named(rsi_done)) {

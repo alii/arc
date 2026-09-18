@@ -145,7 +145,7 @@ fn assert_in_range(label: String, got: Int, lo: Int, hi: Int) {
 }
 
 fn run_a() {
-  io.println("═══ A: DIRECT t_collect + re-read survivor ═══")
+  io.println("═══ A: DIRECT collect + re-read survivor ═══")
   case compile_load(prog_a_alloc, "gcv_a_alloc") {
     Error(e) -> io.println("  ABORT: " <> e)
     Ok(m_alloc) -> {
@@ -163,7 +163,7 @@ fn run_a() {
             "  outcome  : " <> string.slice(string.inspect(out1), 0, 80),
           )
           io.println("  stdout   : " <> string.inspect(stdout_text(st1)))
-          let st2 = rt_gc.t_collect(st1, [])
+          let st2 = rt_gc.collect(st1, [])
           let s2 = rt_gc.stats(st2)
           io.println(stats_line("post-gc:  ", s2))
           let dropped = s1.live_count - s2.live_count
@@ -195,7 +195,7 @@ fn run_a() {
 
 fn run_b() {
   io.println("")
-  io.println("═══ B: IN-SITU (t_maybe_collect between .then#1 and .then#2) ═══")
+  io.println("═══ B: IN-SITU (maybe_collect between .then#1 and .then#2) ═══")
   case compile_load(prog_b, "gcv_b") {
     Error(e) -> io.println("  ABORT: " <> e)
     Ok(m) -> {

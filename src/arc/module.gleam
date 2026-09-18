@@ -395,13 +395,13 @@ pub fn link_for_evaluation_reusing(
   case linkable.validate(lg) {
     Error(link_error) -> {
       let #(err, st) =
-        rt_val.t_new_error(st, SyntaxError, linkable.error_message(link_error))
+        rt_val.new_error(st, SyntaxError, linkable.error_message(link_error))
       #(Error(EvaluationError(err)), st)
     }
     Ok(Nil) -> {
       let pre =
         dict.fold(preexisting, dict.new(), fn(acc, spec, ns) {
-          case rt_store.t_cell_get(st, ns) {
+          case rt_store.cell_get(st, ns) {
             SObject(kind: ModuleNamespace(exports:), ..) ->
               dict.insert(acc, spec, ReusedNamespace(ns, exports))
             _ ->
@@ -411,7 +411,7 @@ pub fn link_for_evaluation_reusing(
       case stale_reused_export(bundle, lg, pre) {
         Some(#(spec, name)) -> {
           let #(err, st) =
-            rt_val.t_new_error(
+            rt_val.new_error(
               st,
               SyntaxError,
               stale_reused_export_message(spec, name),
@@ -450,7 +450,7 @@ pub fn evaluate_linked(
   case res {
     Error(EvaluationPending(promise: _)) -> {
       let #(err, st) =
-        rt_val.t_new_error(st, TypeError, tla_never_settled_message)
+        rt_val.new_error(st, TypeError, tla_never_settled_message)
       #(Error(EvaluationError(value: err)), st)
     }
     other -> #(other, st)
@@ -486,7 +486,7 @@ fn read_namespace_box(
   spec: String,
   box: Handle,
 ) -> Result(Handle, LinkInvariantBroken) {
-  case rt_store.t_cell_get(st, box) {
+  case rt_store.cell_get(st, box) {
     SBox(value:) ->
       case classify(value) {
         KHandle(ns) -> Ok(ns)
@@ -572,12 +572,12 @@ pub fn read_export(st: Agent, namespace: JsVal, name: String) -> Option(JsVal) {
     KHandle(h) -> Some(h)
     _ -> None
   })
-  use exports <- option.then(case rt_store.t_cell_get(st, ns) {
+  use exports <- option.then(case rt_store.cell_get(st, ns) {
     SObject(kind: ModuleNamespace(exports:), ..) -> Some(exports)
     _ -> None
   })
   use box <- option.then(dict.get(exports, name) |> option.from_result)
-  case rt_store.t_cell_get(st, box) {
+  case rt_store.cell_get(st, box) {
     SBox(value:) ->
       case classify(value) {
         KTdz -> None
@@ -656,7 +656,7 @@ fn evaluate_with_deps(
       let #(error_val, st) = case err {
         EvaluationError(value: v) -> #(v, evaluation.agent)
         NotInBundle(..) | EvaluationPending(..) ->
-          rt_val.t_new_error(
+          rt_val.new_error(
             evaluation.agent,
             TypeError,
             error_message(evaluation.agent, err),
@@ -780,7 +780,7 @@ fn run_module_turns(
       drive_top_level_await(st, awaited, resume, drain)
     StepYield(..) -> {
       let #(err, st) =
-        rt_val.t_new_error(st, TypeError, "InternalError: module body yielded")
+        rt_val.new_error(st, TypeError, "InternalError: module body yielded")
       #(BodyThrew(err), safepoint.finish_turn(st, [err], drain))
     }
   }
@@ -793,14 +793,14 @@ fn drive_top_level_await(
   resume: types.Resume,
   drain: Drain,
 ) -> #(BodyOutcome, Agent) {
-  let #(promise, st) = rt_async.t_new_promise(st)
+  let #(promise, st) = rt_async.new_promise(st)
   // held from gleam across drains
-  let st = rt_store.t_pin_root(st, promise)
+  let st = rt_store.pin_root(st, promise)
   let #(data, pstate, _) = rt_async.promise_data(st, promise)
   // mark handled, the host inspects it below
-  let st = rt_store.t_cell_set(st, data, SPromiseData(pstate, is_handled: True))
-  let #(ctx, st) = rt_store.t_cell_new(st, SAsyncContext(resume:, promise:))
-  let st = rt_async.t_await(st, ctx, awaited)
+  let st = rt_store.cell_set(st, data, SPromiseData(pstate, is_handled: True))
+  let #(ctx, st) = rt_store.cell_new(st, SAsyncContext(resume:, promise:))
+  let st = rt_async.await(st, ctx, awaited)
   let st = safepoint.finish_turn(st, [], drain)
   case rt_async.promise_data(st, promise) {
     #(_, PromiseFulfilled(v), _) -> #(BodyReturned(v), st)
@@ -811,8 +811,8 @@ fn drive_top_level_await(
 
 // pinned: binding cells are held from gleam
 fn alloc_box(st: Agent, val: JsVal) -> #(Handle, Agent) {
-  let #(box, st) = rt_store.t_cell_new(st, SBox(val))
-  #(box, rt_store.t_pin_root(st, box))
+  let #(box, st) = rt_store.cell_new(st, SBox(val))
+  #(box, rt_store.pin_root(st, box))
 }
 
 fn reserve_cell(st: Agent) -> #(Handle, Agent) {
@@ -915,7 +915,7 @@ fn build_linked(
     list.fold(ns_to_fill, st, fn(st, pair) {
       let #(spec, obj) = pair
       let assert Ok(exp) = dict.get(exports, spec)
-      rt_store.t_cell_set(st, obj, namespace_cell(exp, "Module"))
+      rt_store.cell_set(st, obj, namespace_cell(exp, "Module"))
     })
   let #(modules, st) =
     list.fold(specs, #(dict.new(), st), fn(acc, spec) {
@@ -923,7 +923,7 @@ fn build_linked(
       let assert Ok(lb) = dict.get(local_boxes, spec)
       let assert Ok(exp) = dict.get(exports, spec)
       let assert Ok(ns_box) = dict.get(namespace_boxes, spec)
-      let #(unit_id, st) = rt_store.t_next_unit_id(st)
+      let #(unit_id, st) = rt_store.next_unit_id(st)
       let lm =
         LinkedModule(
           local_boxes: lb,
@@ -1046,13 +1046,13 @@ fn instantiate_hoisted_functions(
               tuple_array.get_unchecked(desc.parent_index, locals)
             })
           let #(closure, st) =
-            rt_closure.t_new_bytecode_function(
+            rt_closure.new_bytecode_function(
               st,
               child,
               bytecode.env_from_list(captured),
               lm.unit_id,
             )
-          rt_store.t_cell_set(st, box, SBox(mk_object(closure)))
+          rt_store.cell_set(st, box, SBox(mk_object(closure)))
         }
       }
     })
@@ -1178,8 +1178,8 @@ fn fill_deferred_namespace(
     |> result.replace_error(ModuleNotLinked(spec))
     |> assert_link_invariant
   let #(target, st) =
-    rt_store.t_cell_new(st, namespace_cell(lm.exports, "Deferred Module"))
-  let #(handler, st) = rt_obj.t_new_object(st, Some(st.realm.object.prototype))
+    rt_store.cell_new(st, namespace_cell(lm.exports, "Deferred Module"))
+  let #(handler, st) = rt_obj.new_object(st, Some(st.realm.object.prototype))
   let st =
     [
       DeferredTrap("get", 3, ReflectGet, always_triggers: False),
@@ -1207,7 +1207,7 @@ fn fill_deferred_namespace(
     |> list.fold(st, fn(st, t) {
       let #(fn_h, st) = alloc_deferred_trap(st, t, bundle, linked, spec)
       let #(_, st) =
-        rt_obj.t_define_own_data(
+        rt_obj.define_own_data(
           st,
           handler,
           StringKey(Named(t.name)),
@@ -1218,7 +1218,7 @@ fn fill_deferred_namespace(
         )
       st
     })
-  rt_store.t_cell_set(
+  rt_store.cell_set(
     st,
     proxy,
     SObject(
@@ -1241,7 +1241,7 @@ fn alloc_deferred_trap(
   spec: String,
 ) -> #(Handle, Agent) {
   let DeferredTrap(name:, arity:, native:, always_triggers:) = trap
-  use st, args <- rt_call.t_new_builtin_function(
+  use st, args <- rt_call.new_builtin_function(
     st,
     "%DeferredNamespace[" <> name <> "]%",
     arity,
@@ -1283,11 +1283,11 @@ fn ensure_deferred_evaluated(
     st,
   )
   case registry.read_module_error(st, spec) {
-    Some(err) -> rt_store.t_throw(st, err)
+    Some(err) -> rt_store.throw(st, err)
     None ->
       case ready_for_sync_execution(st, bundle, spec, set.new()).0 {
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Cannot synchronously evaluate deferred module: '"
               <> spec
@@ -1346,10 +1346,10 @@ fn evaluate_deferred_subgraph(
   case evaluate_if_needed(bundle, linked, evaluation, spec, rt_async.no_drain) {
     #(Ok(_), evaluation) -> evaluation.agent
     #(Error(EvaluationError(value:)), evaluation) ->
-      rt_store.t_throw(evaluation.agent, value)
+      rt_store.throw(evaluation.agent, value)
     #(Error(NotInBundle(..) as other), evaluation)
     | #(Error(EvaluationPending(..) as other), evaluation) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         evaluation.agent,
         "Failed to evaluate deferred module '"
           <> spec

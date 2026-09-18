@@ -248,7 +248,7 @@ fn stringify_elements(
   case values {
     [] -> #(list.reverse(acc), st)
     [val, ..rest] -> {
-      let #(s, st) = rt_val.t_to_string(st, val)
+      let #(s, st) = rt_val.to_string(st, val)
       stringify_elements(st, rest, [#(s, val), ..acc])
     }
   }
@@ -268,7 +268,7 @@ fn merge_sort(
       merge_all(
         st,
         list.map(items, fn(x) { [x] }),
-        rt_call.t_prepare_call(st, comparefn, mk_undefined()),
+        rt_call.prepare_call(st, comparefn, mk_undefined()),
       )
   }
 }
@@ -316,7 +316,7 @@ fn merge_two(
     _, [] -> #(reverse_onto(acc, left), st)
     [l, ..ls], [r, ..rs] -> {
       let #(res, st) = comparefn(st, [l, r])
-      let #(num, st) = rt_val.t_to_number(st, res)
+      let #(num, st) = rt_val.to_number(st, res)
       let cmp = case num {
         JInt(n) -> int.to_float(n)
         JFloat(f) -> f

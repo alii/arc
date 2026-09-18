@@ -284,7 +284,7 @@ pub fn init(
       0,
     )
   let #(seg_iter_prop, st) =
-    rt_store.t_builtin_property(st, mk_object(seg_iter_fn))
+    rt_store.builtin_property(st, mk_object(seg_iter_fn))
   let st =
     common.add_symbol_property(
       st,
@@ -324,7 +324,7 @@ pub fn init(
         let #(props, st) = acc
         let #(name, bt) = entry
         let #(prop, st) =
-          rt_store.t_builtin_property(st, mk_object(bt.constructor))
+          rt_store.builtin_property(st, mk_object(bt.constructor))
         #([#(name, prop), ..props], st)
       },
     )
@@ -514,7 +514,7 @@ pub fn dispatch_construct(
         _ -> panic as "Intl constructor returned a non-object"
       }
     }
-    _ -> rt_val.t_throw_type_error(st, "not a constructor")
+    _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }
 
@@ -548,10 +548,7 @@ fn branded_of(
   case found {
     Some(#(#(v, bound), h)) -> #(h, v, bound)
     None ->
-      rt_val.t_throw_type_error(
-        st,
-        method <> " called on incompatible receiver",
-      )
+      rt_val.throw_type_error(st, method <> " called on incompatible receiver")
   }
 }
 
@@ -628,7 +625,7 @@ fn branded_date_time_format(
 }
 
 fn write_intl_data(st: Agent, h: Handle, data: IntlData) -> Agent {
-  rt_store.t_cell_update(st, h, fn(cell) {
+  rt_store.cell_update(st, h, fn(cell) {
     case cell {
       SObject(kind: IntlObj(bound:, ..), ..) ->
         SObject(..cell, kind: IntlObj(data:, bound:))
@@ -816,14 +813,14 @@ fn canonicalize_locale_list(
         None -> locale_list_from_object(st, h)
       }
     _ -> {
-      let #(h, st) = rt_val.t_to_object(st, locales)
+      let #(h, st) = rt_val.to_object(st, locales)
       locale_list_from_object(st, h)
     }
   }
 }
 
 fn locale_of_handle(st: Agent, h: Handle) -> Option(LocaleState) {
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     SObject(kind: IntlObj(data: LocaleData(l), ..), ..) -> Some(l)
     _ -> None
   }
@@ -833,7 +830,7 @@ fn canonical_tag_or_throw(st: Agent, s: String) -> #(String, Agent) {
   case intl_locale.canonicalize_tag(s) {
     Ok(tag) -> #(tag, st)
     Error(Nil) ->
-      rt_val.t_throw_range_error(
+      rt_val.throw_range_error(
         st,
         "Incorrect locale information provided: " <> s,
       )
@@ -842,8 +839,8 @@ fn canonical_tag_or_throw(st: Agent, s: String) -> #(String, Agent) {
 
 fn locale_list_from_object(st: Agent, h: Handle) -> #(List(String), Agent) {
   let o = mk_object(h)
-  let #(len_v, st) = rt_obj.t_get_prop(st, o, StringKey(Named("length")))
-  let #(len_n, st) = rt_val.t_to_number(st, len_v)
+  let #(len_v, st) = rt_obj.get_prop(st, o, StringKey(Named("length")))
+  let #(len_n, st) = rt_val.to_number(st, len_v)
   let len = rt_val.jsnum_to_length(len_n)
   locale_list_from_object_loop(st, o, 0, len, [])
 }
@@ -859,20 +856,20 @@ fn locale_list_from_object_loop(
     True -> #(list.reverse(seen), st)
     False -> {
       let key = StringKey(Index(k))
-      let #(has, st) = rt_obj.t_has_prop(st, o, key)
+      let #(has, st) = rt_obj.has_prop(st, o, key)
       case has {
         False -> locale_list_from_object_loop(st, o, k + 1, len, seen)
         True -> {
-          let #(k_value, st) = rt_obj.t_get_prop(st, o, key)
+          let #(k_value, st) = rt_obj.get_prop(st, o, key)
           let #(tag_text, st) = case classify(k_value) {
             KStr(s) -> #(s, st)
             KHandle(o) ->
               case locale_of_handle(st, o) {
                 Some(l) -> #(l.locale, st)
-                None -> rt_val.t_to_string(st, k_value)
+                None -> rt_val.to_string(st, k_value)
               }
             _ ->
-              rt_val.t_throw_type_error(
+              rt_val.throw_type_error(
                 st,
                 "Locales item must be a string or object",
               )
@@ -896,7 +893,7 @@ fn get_canonical_locales(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 }
 
 fn supported_values_of(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(key, st) = rt_val.t_to_string(st, first_arg_or_undefined(args))
+  let #(key, st) = rt_val.to_string(st, first_arg_or_undefined(args))
   let values = case key {
     "calendar" -> Some(supported_calendars())
     "collation" -> Some(supported_collations())
@@ -912,7 +909,7 @@ fn supported_values_of(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
   case values {
     Some(vs) -> alloc_array(st, list.map(vs, mk_string))
-    None -> rt_val.t_throw_range_error(st, "Invalid key : " <> key)
+    None -> rt_val.throw_range_error(st, "Invalid key : " <> key)
   }
 }
 
@@ -1037,7 +1034,7 @@ fn construct_service(
   }
   case !callable_without_new && rt_val.is_undef(new_target) {
     True ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Constructor Intl."
           <> service_name(intl_data.constructible_service(service))
@@ -1110,19 +1107,16 @@ fn locale_state(
     KHandle(h) ->
       case locale_of_handle(st, h) {
         Some(l) -> #(l.locale, st)
-        None -> rt_val.t_to_string(st, tag_v)
+        None -> rt_val.to_string(st, tag_v)
       }
     _ ->
-      rt_val.t_throw_type_error(
-        st,
-        "Intl.Locale tag must be a string or object",
-      )
+      rt_val.throw_type_error(st, "Intl.Locale tag must be a string or object")
   }
   let #(opts, st) = coerce_options_to_object(st, options_v)
   let lid = case intl_locale.parse(tag_text) {
     Ok(lid) -> lid
     Error(Nil) ->
-      rt_val.t_throw_range_error(
+      rt_val.throw_range_error(
         st,
         "Incorrect locale information provided: " <> tag_text,
       )
@@ -1132,7 +1126,7 @@ fn locale_state(
     Some(l) ->
       case intl_locale.is_language(l) {
         True -> st
-        False -> rt_val.t_throw_range_error(st, "Invalid language: " <> l)
+        False -> rt_val.throw_range_error(st, "Invalid language: " <> l)
       }
     None -> st
   }
@@ -1141,7 +1135,7 @@ fn locale_state(
     Some(s) ->
       case intl_locale.is_script(s) {
         True -> st
-        False -> rt_val.t_throw_range_error(st, "Invalid script: " <> s)
+        False -> rt_val.throw_range_error(st, "Invalid script: " <> s)
       }
     None -> st
   }
@@ -1150,7 +1144,7 @@ fn locale_state(
     Some(r) ->
       case intl_locale.is_region(r) {
         True -> st
-        False -> rt_val.t_throw_range_error(st, "Invalid region: " <> r)
+        False -> rt_val.throw_range_error(st, "Invalid region: " <> r)
       }
     None -> st
   }
@@ -1166,7 +1160,7 @@ fn locale_state(
         && list.length(list.unique(parts)) == list.length(parts)
       case valid {
         True -> Some(parts)
-        False -> rt_val.t_throw_range_error(st, "Invalid variants: " <> v)
+        False -> rt_val.throw_range_error(st, "Invalid variants: " <> v)
       }
     }
   }
@@ -1200,7 +1194,7 @@ fn locale_state(
     Some(fd) ->
       case weekday_string(fd) {
         Some(v) -> Some(v)
-        None -> rt_val.t_throw_range_error(st, "Invalid firstDayOfWeek: " <> fd)
+        None -> rt_val.throw_range_error(st, "Invalid firstDayOfWeek: " <> fd)
       }
   }
   let #(numbering, st) = get_text_opt(st, opts, "numberingSystem", [], None)
@@ -1259,7 +1253,7 @@ fn require_type_seq(st: Agent, v: Option(String), name: String) -> Agent {
     Some(s) ->
       case intl_locale.is_type_sequence(s) {
         True -> st
-        False -> rt_val.t_throw_range_error(st, "Invalid " <> name <> ": " <> s)
+        False -> rt_val.throw_range_error(st, "Invalid " <> name <> ": " <> s)
       }
     None -> st
   }
@@ -1527,13 +1521,13 @@ fn number_format_state(
     KBool(False) -> #(GroupingNever, st)
     KBool(True) -> #(GroupingAlways, st)
     _ -> {
-      let #(s, st) = rt_val.t_to_string(st, grouping_v)
+      let #(s, st) = rt_val.to_string(st, grouping_v)
       case s {
         "min2" -> #(GroupingMin2, st)
         "auto" -> #(GroupingAuto, st)
         "always" -> #(GroupingAlways, st)
         _ ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "Value " <> s <> " out of range for options property useGrouping",
           )
@@ -1601,14 +1595,14 @@ fn read_unit_options(st: Agent, opts: Option(Handle)) -> #(NumberStyle, Agent) {
     Some(c) ->
       case intl_locale.is_alpha(c) && string.length(c) == 3 {
         True -> st
-        False -> rt_val.t_throw_range_error(st, "Invalid currency code: " <> c)
+        False -> rt_val.throw_range_error(st, "Invalid currency code: " <> c)
       }
     None -> st
   }
   let sc = case kind, currency {
     RequestedCurrency, Some(c) -> StyledCurrency(currency: string.uppercase(c))
     RequestedCurrency, None ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Currency code is required with currency style",
       )
@@ -1643,7 +1637,7 @@ fn read_unit_options(st: Agent, opts: Option(Handle)) -> #(NumberStyle, Agent) {
       case intl_format.is_well_formed_unit(u) {
         True -> st
         False ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "Invalid unit argument for option unit: " <> u,
           )
@@ -1658,7 +1652,7 @@ fn read_unit_options(st: Agent, opts: Option(Handle)) -> #(NumberStyle, Agent) {
     }
     StyledUnit, Some(u) -> fn(ud) { StyleUnit(unit: u, display: ud) }
     StyledUnit, None ->
-      rt_val.t_throw_type_error(st, "Unit is required with unit style")
+      rt_val.throw_type_error(st, "Unit is required with unit style")
   }
   let #(unit_display, st) =
     get_enum_opt(
@@ -1735,7 +1729,7 @@ fn digit_options(
   {
     True -> st
     False ->
-      rt_val.t_throw_range_error(
+      rt_val.throw_range_error(
         st,
         "roundingIncrement value is out of range: "
           <> int.to_string(rounding_increment),
@@ -1850,7 +1844,7 @@ fn digit_options(
             Some(mn), Some(mx) ->
               case mn > mx {
                 True ->
-                  rt_val.t_throw_range_error(
+                  rt_val.throw_range_error(
                     st,
                     "minimumFractionDigits is greater than maximumFractionDigits",
                   )
@@ -1877,7 +1871,7 @@ fn digit_options(
     True ->
       case need_sd || !need_fd {
         True ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "roundingIncrement requires fractionDigits rounding type",
           )
@@ -1886,7 +1880,7 @@ fn digit_options(
             None -> st
             Some(#(mn, mx)) if mn == mx -> st
             Some(_) ->
-              rt_val.t_throw_range_error(
+              rt_val.throw_range_error(
                 st,
                 "roundingIncrement requires minimumFractionDigits equal to maximumFractionDigits",
               )
@@ -2031,11 +2025,11 @@ fn dtf_state_required(
   let #(time_zone, st) = case classify(tz_v) {
     KUndef -> #(HostZone(st.hooks.time_zone), st)
     _ -> {
-      let #(s, st) = rt_val.t_to_string(st, tz_v)
+      let #(s, st) = rt_val.to_string(st, tz_v)
       case intl_timezone.lookup(st, s) {
         #(Some(tz), st) -> #(tz, st)
         #(None, st) ->
-          rt_val.t_throw_range_error(st, "Invalid time zone specified: " <> s)
+          rt_val.throw_range_error(st, "Invalid time zone specified: " <> s)
       }
     }
   }
@@ -2191,7 +2185,7 @@ fn dtf_state_required(
     DateOnly ->
       case time_style {
         Some(_) ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "timeStyle cannot be used with toLocaleDateString",
           )
@@ -2200,7 +2194,7 @@ fn dtf_state_required(
     TimeOnly ->
       case date_style {
         Some(_) ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "dateStyle cannot be used with toLocaleTimeString",
           )
@@ -2211,7 +2205,7 @@ fn dtf_state_required(
   let styled = option.is_some(date_style) || option.is_some(time_style)
   let st = case styled && explicit {
     True ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Invalid option: dateStyle/timeStyle cannot be used with other date/time options",
       )
@@ -2569,7 +2563,7 @@ fn display_names_state(
   let type_ = case type_ {
     Some(t) -> t
     None ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Intl.DisplayNames constructor requires type option",
       )
@@ -2896,7 +2890,7 @@ fn duration_unit_options(
     )
   let st = case display == DisplayAlways && style == UnitStyleFractional {
     True ->
-      rt_val.t_throw_range_error(
+      rt_val.throw_range_error(
         st,
         name <> "Display cannot be 'always' for fractional units",
       )
@@ -2907,7 +2901,7 @@ fn duration_unit_options(
       case style {
         UnitStyleFractional -> style
         _ ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             name <> " style must be fractional after a fractional unit",
           )
@@ -2920,7 +2914,7 @@ fn duration_unit_options(
             False -> style
           }
         _ ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             name <> " style cannot be mixed with numeric styles",
           )
@@ -3338,7 +3332,7 @@ fn bound_getter(
     None -> {
       // not rooted: receiver's bound field keeps it alive
       let #(fn_h, st) =
-        rt_call.t_native_new(
+        rt_call.native_new(
           st,
           Some(st.realm.function.prototype),
           IntlN(IntlBoundMethod(service:, target:)),
@@ -3347,7 +3341,7 @@ fn bound_getter(
           constructible: False,
         )
       let st =
-        rt_store.t_cell_update(st, target, fn(cell) {
+        rt_store.cell_update(st, target, fn(cell) {
           case cell {
             SObject(kind: IntlObj(data:, ..), ..) ->
               SObject(..cell, kind: IntlObj(data:, bound: Some(fn_h)))
@@ -3380,8 +3374,8 @@ fn bound_method(
     }
     BoundCollator -> {
       let #(_h, c, _bound) = branded_collator(st, this, method)
-      let #(a, st) = rt_val.t_to_string(st, first_arg_or_undefined(args))
-      let #(b, st) = rt_val.t_to_string(st, helpers.arg_at(args, 1))
+      let #(a, st) = rt_val.to_string(st, first_arg_or_undefined(args))
+      let #(b, st) = rt_val.to_string(st, helpers.arg_at(args, 1))
       #(mk_int(collator_compare(c, a, b)), st)
     }
   }
@@ -3420,7 +3414,7 @@ fn to_intl_number(st: Agent, v: JsVal) -> #(JsNum, Agent) {
   case classify(v) {
     // int.to_float would badarg on huge bigints
     KBig(n) -> #(rt_val.num_from_int(n), st)
-    _ -> rt_val.t_to_number(st, v)
+    _ -> rt_val.to_number(st, v)
   }
 }
 
@@ -3500,14 +3494,14 @@ fn nf_range_parts(
   y_v: JsVal,
 ) -> #(List(intl_format.RangePart), Agent) {
   let st = case rt_val.is_undef(x_v) || rt_val.is_undef(y_v) {
-    True -> rt_val.t_throw_type_error(st, "Invalid range arguments")
+    True -> rt_val.throw_type_error(st, "Invalid range arguments")
     False -> st
   }
   let #(x, st) = to_intl_number(st, x_v)
   let #(y, st) = to_intl_number(st, y_v)
   let st = case x, y {
     JNan, _ | _, JNan ->
-      rt_val.t_throw_range_error(st, "Invalid range argument: NaN")
+      rt_val.throw_range_error(st, "Invalid range argument: NaN")
     _, _ -> st
   }
   // decimal strings stay exact beyond float precision
@@ -3560,7 +3554,7 @@ type AcceptedTemporal {
 }
 
 fn throw_zoned(st: Agent) -> a {
-  rt_val.t_throw_type_error(
+  rt_val.throw_type_error(
     st,
     "Temporal.ZonedDateTime cannot be formatted with Intl.DateTimeFormat; use Temporal.ZonedDateTime.prototype.toLocaleString instead",
   )
@@ -3577,7 +3571,7 @@ fn accept_temporal(st: Agent, t: TemporalFormattable) -> AcceptedTemporal {
 fn dtf_temporal_value(st: Agent, v: JsVal) -> Option(TemporalFormattable) {
   case classify(v) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: TemporalObj(data:), ..) -> temporal_formattable(data)
         _ -> None
       }
@@ -3770,7 +3764,7 @@ fn dtf_temporal_state(
         PlainTimeFields(..) -> True
       }
       use Nil <- helpers.guard(cal_ok, fn() {
-        rt_val.t_throw_range_error(
+        rt_val.throw_range_error(
           st,
           "Temporal object calendar does not match DateTimeFormat calendar",
         )
@@ -3790,7 +3784,7 @@ fn dtf_temporal_state(
           case style_ok {
             True -> with_components(d, keep_components(d.components, allowed))
             False ->
-              rt_val.t_throw_type_error(
+              rt_val.throw_type_error(
                 st,
                 "DateTimeFormat has no suitable format for this Temporal type",
               )
@@ -3808,7 +3802,7 @@ fn dtf_temporal_state(
               case d.explicit {
                 [] -> with_components(d, DateTimeComponents(..defaults, era:))
                 _ ->
-                  rt_val.t_throw_type_error(
+                  rt_val.throw_type_error(
                     st,
                     "DateTimeFormat options have no overlap with this Temporal type",
                   )
@@ -4213,26 +4207,26 @@ fn dtf_range_parts(
 ) -> #(List(intl_format.RangePart), Agent) {
   let defined = !{ rt_val.is_undef(x_v) || rt_val.is_undef(y_v) }
   use Nil <- helpers.guard(defined, fn() {
-    rt_val.t_throw_type_error(st, "Invalid range arguments")
+    rt_val.throw_type_error(st, "Invalid range arguments")
   })
   let tx = dtf_temporal_value(st, x_v)
   let ty = dtf_temporal_value(st, y_v)
   let #(x_v, st) = case tx {
     Some(_) -> #(x_v, st)
     None -> {
-      let #(n, st) = rt_val.t_to_number(st, x_v)
+      let #(n, st) = rt_val.to_number(st, x_v)
       #(mk_number(n), st)
     }
   }
   let #(y_v, st) = case ty {
     Some(_) -> #(y_v, st)
     None -> {
-      let #(n, st) = rt_val.t_to_number(st, y_v)
+      let #(n, st) = rt_val.to_number(st, y_v)
       #(mk_number(n), st)
     }
   }
   let same_type_error = fn() {
-    rt_val.t_throw_type_error(
+    rt_val.throw_type_error(
       st,
       "Intl.DateTimeFormat range arguments must be of the same type",
     )
@@ -4420,13 +4414,13 @@ fn dtf_fields_number(
 ) -> #(intl_format.DateFields, Int, Agent) {
   let #(tv, st) = case classify(date_v) {
     KUndef -> #(JInt(st.hooks.wall_clock_ms()), st)
-    _ -> rt_val.t_to_number(st, date_v)
+    _ -> rt_val.to_number(st, date_v)
   }
   let tv_f = case tv {
     JInt(i) -> time_clip(st, int.to_float(i))
     JFloat(f) -> time_clip(st, int.to_float(float.truncate(f)))
     JNan | JPosInf | JNegInf ->
-      rt_val.t_throw_range_error(st, "Invalid time value")
+      rt_val.throw_range_error(st, "Invalid time value")
   }
   let offset = intl_timezone.offset_at(d.time_zone, float.truncate(tv_f))
   #(intl_format.fields_from_epoch_ms(tv_f, offset), offset, st)
@@ -4435,7 +4429,7 @@ fn dtf_fields_number(
 fn time_clip(st: Agent, f: Float) -> Float {
   case float.absolute_value(f) <=. 8.64e15 {
     True -> f
-    False -> rt_val.t_throw_range_error(st, "Invalid time value")
+    False -> rt_val.throw_range_error(st, "Invalid time value")
   }
 }
 
@@ -4480,7 +4474,7 @@ fn run_method(
       parts_to_js_sourced(st, parts)
     }
     IntlSelect, PluralRulesData(p) -> {
-      let #(n, st) = rt_val.t_to_number(st, arg0)
+      let #(n, st) = rt_val.to_number(st, arg0)
       #(
         mk_string(intl_format.plural_category_to_js_string(plural_select(p, n))),
         st,
@@ -4489,13 +4483,13 @@ fn run_method(
     IntlSelectRange, PluralRulesData(_) -> {
       let defined = !{ rt_val.is_undef(arg0) || rt_val.is_undef(arg1) }
       use Nil <- helpers.guard(defined, fn() {
-        rt_val.t_throw_type_error(st, "Invalid selectRange arguments")
+        rt_val.throw_type_error(st, "Invalid selectRange arguments")
       })
-      let #(x, st) = rt_val.t_to_number(st, arg0)
-      let #(y, st) = rt_val.t_to_number(st, arg1)
+      let #(x, st) = rt_val.to_number(st, arg0)
+      let #(y, st) = rt_val.to_number(st, arg1)
       case x, y {
         JNan, _ | _, JNan ->
-          rt_val.t_throw_range_error(st, "Invalid selectRange argument: NaN")
+          rt_val.throw_range_error(st, "Invalid selectRange argument: NaN")
         _, _ -> #(
           mk_string(intl_format.plural_category_to_js_string(
             intl_format.PluralOther,
@@ -4545,10 +4539,7 @@ fn run_method(
     | IntlSegmentIteratorNext, _
     | IntlSegmentsContaining, _
     ->
-      rt_val.t_throw_type_error(
-        st,
-        js_name <> " called on incompatible receiver",
-      )
+      rt_val.throw_type_error(st, js_name <> " called on incompatible receiver")
   }
 }
 
@@ -4584,7 +4575,7 @@ fn host_number_to_locale_string(
   options: JsVal,
 ) -> #(JsVal, Agent) {
   let not_number = fn() {
-    rt_val.t_throw_type_error(
+    rt_val.throw_type_error(
       st,
       "Number.prototype.toLocaleString requires that 'this' be a Number",
     )
@@ -4592,7 +4583,7 @@ fn host_number_to_locale_string(
   let n = case classify(this) {
     KNum(n) -> n
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: NumberObj(value: n), ..) -> n
         _ -> not_number()
       }
@@ -4610,7 +4601,7 @@ fn host_bigint_to_locale_string(
   options: JsVal,
 ) -> #(JsVal, Agent) {
   let not_bigint = fn() {
-    rt_val.t_throw_type_error(
+    rt_val.throw_type_error(
       st,
       "BigInt.prototype.toLocaleString requires that 'this' be a BigInt",
     )
@@ -4618,7 +4609,7 @@ fn host_bigint_to_locale_string(
   let n = case classify(this) {
     KBig(n) -> n
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: BigIntObj(value: n), ..) -> n
         _ -> not_bigint()
       }
@@ -4637,13 +4628,13 @@ fn host_locale_compare(
   options: JsVal,
 ) -> #(JsVal, Agent) {
   use Nil <- helpers.guard(!rt_val.is_nullish(this), fn() {
-    rt_val.t_throw_type_error(
+    rt_val.throw_type_error(
       st,
       "String.prototype.localeCompare called on null or undefined",
     )
   })
-  let #(s, st) = rt_val.t_to_string(st, this)
-  let #(that, st) = rt_val.t_to_string(st, that_v)
+  let #(s, st) = rt_val.to_string(st, this)
+  let #(that, st) = rt_val.to_string(st, that_v)
   let #(c, st) = collator_state(st, locales, options)
   #(mk_int(collator_compare(c, s, that)), st)
 }
@@ -4655,9 +4646,9 @@ fn host_locale_case(
   upper upper: Bool,
 ) -> #(JsVal, Agent) {
   use Nil <- helpers.guard(!rt_val.is_nullish(this), fn() {
-    rt_val.t_throw_type_error(st, "method called on null or undefined")
+    rt_val.throw_type_error(st, "method called on null or undefined")
   })
-  let #(s, st) = rt_val.t_to_string(st, this)
+  let #(s, st) = rt_val.to_string(st, this)
   let #(tag_list, st) = canonicalize_locale_list(st, locales)
   let lang = case tag_list {
     [first, ..] -> intl_locale.language_of(first)
@@ -4684,11 +4675,11 @@ fn host_date_to_locale(
   required: RequiredComponents,
 ) -> #(JsVal, Agent) {
   let not_date = fn() {
-    rt_val.t_throw_type_error(st, "this is not a Date object")
+    rt_val.throw_type_error(st, "this is not a Date object")
   }
   let tv = case classify(this) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: DateObj(ms: tv), ..) -> tv
         _ -> not_date()
       }
@@ -4735,18 +4726,17 @@ fn rtf_method_parts(
   value_v: JsVal,
   unit_v: JsVal,
 ) -> #(List(intl_format.UnitPart), Agent) {
-  let #(n, st) = rt_val.t_to_number(st, value_v)
+  let #(n, st) = rt_val.to_number(st, value_v)
   let f = case n {
     JInt(i) -> int.to_float(i)
     JFloat(f) -> f
     JNan | JPosInf | JNegInf ->
-      rt_val.t_throw_range_error(st, "Value need to be finite number")
+      rt_val.throw_range_error(st, "Value need to be finite number")
   }
-  let #(unit_text, st) = rt_val.t_to_string(st, unit_v)
+  let #(unit_text, st) = rt_val.to_string(st, unit_v)
   let unit = case singular_unit(unit_text) {
     Some(u) -> u
-    None ->
-      rt_val.t_throw_range_error(st, "Invalid unit argument: " <> unit_text)
+    None -> rt_val.throw_range_error(st, "Invalid unit argument: " <> unit_text)
   }
   let abs_opts =
     intl_format.NumberFormatOptions(
@@ -4794,15 +4784,15 @@ fn string_list_from_iterable(
     }
     _ -> {
       let #(method, st) =
-        rt_obj.t_get_prop(st, iterable, SymbolKey(types.symbol_iterator))
+        rt_obj.get_prop(st, iterable, SymbolKey(types.symbol_iterator))
       use Nil <- helpers.guard(rt_val.is_callable(st, method), fn() {
-        rt_val.t_throw_type_error(st, "object is not iterable")
+        rt_val.throw_type_error(st, "object is not iterable")
       })
-      let #(iter, st) = rt_call.t_call(st, method, iterable, [])
+      let #(iter, st) = rt_call.call(st, method, iterable, [])
       use Nil <- helpers.guard(rt_val.is_object(iter), fn() {
-        rt_val.t_throw_type_error(st, "iterator result is not an object")
+        rt_val.throw_type_error(st, "iterator result is not an object")
       })
-      let #(next_fn, st) = rt_obj.t_get_prop(st, iter, StringKey(Named("next")))
+      let #(next_fn, st) = rt_obj.get_prop(st, iter, StringKey(Named("next")))
       iterate_strings(st, iter, next_fn, [])
     }
   }
@@ -4814,19 +4804,19 @@ fn iterate_strings(
   next_fn: JsVal,
   acc: List(String),
 ) -> #(List(String), Agent) {
-  let #(step, st) = rt_call.t_call(st, next_fn, iter, [])
+  let #(step, st) = rt_call.call(st, next_fn, iter, [])
   use Nil <- helpers.guard(rt_val.is_object(step), fn() {
-    rt_val.t_throw_type_error(st, "iterator result is not an object")
+    rt_val.throw_type_error(st, "iterator result is not an object")
   })
-  let #(done, st) = rt_obj.t_get_prop(st, step, StringKey(Named("done")))
+  let #(done, st) = rt_obj.get_prop(st, step, StringKey(Named("done")))
   case rt_val.to_boolean(done) {
     True -> #(list.reverse(acc), st)
     False -> {
-      let #(v, st) = rt_obj.t_get_prop(st, step, StringKey(Named("value")))
+      let #(v, st) = rt_obj.get_prop(st, step, StringKey(Named("value")))
       case classify(v) {
         KStr(s) -> iterate_strings(st, iter, next_fn, [s, ..acc])
         _ ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Iterable yielded a value that is not a string",
           )
@@ -4840,7 +4830,7 @@ fn display_names_of(
   dn: DisplayNamesState,
   code_v: JsVal,
 ) -> #(JsVal, Agent) {
-  let #(code, st) = rt_val.t_to_string(st, code_v)
+  let #(code, st) = rt_val.to_string(st, code_v)
   let type_ = dn.display_type
   let fallback = dn.fallback
   let #(canonical, name) = case type_ {
@@ -4853,10 +4843,10 @@ fn display_names_of(
               #(tag, intl_format.language_display_name(tag))
             }
             _, _ ->
-              rt_val.t_throw_range_error(st, "invalid language code: " <> code)
+              rt_val.throw_range_error(st, "invalid language code: " <> code)
           }
         Error(Nil) ->
-          rt_val.t_throw_range_error(st, "invalid language code: " <> code)
+          rt_val.throw_range_error(st, "invalid language code: " <> code)
       }
     RegionNames ->
       case intl_locale.is_region(code) {
@@ -4864,7 +4854,7 @@ fn display_names_of(
           let r = string.uppercase(code)
           #(r, intl_format.region_display_name(r))
         }
-        False -> rt_val.t_throw_range_error(st, "invalid region code: " <> code)
+        False -> rt_val.throw_range_error(st, "invalid region code: " <> code)
       }
     ScriptNames ->
       case intl_locale.is_script(code) {
@@ -4872,7 +4862,7 @@ fn display_names_of(
           let s = intl_locale.titlecase(code)
           #(s, intl_format.script_display_name(s))
         }
-        False -> rt_val.t_throw_range_error(st, "invalid script code: " <> code)
+        False -> rt_val.throw_range_error(st, "invalid script code: " <> code)
       }
     CurrencyNames ->
       case intl_locale.is_alpha(code) && string.length(code) == 3 {
@@ -4880,8 +4870,7 @@ fn display_names_of(
           let c = string.uppercase(code)
           #(c, intl_format.currency_display_name(c))
         }
-        False ->
-          rt_val.t_throw_range_error(st, "invalid currency code: " <> code)
+        False -> rt_val.throw_range_error(st, "invalid currency code: " <> code)
       }
     CalendarNames ->
       case intl_locale.is_type_sequence(string.lowercase(code)) {
@@ -4894,8 +4883,7 @@ fn display_names_of(
           }
           #(c, name)
         }
-        False ->
-          rt_val.t_throw_range_error(st, "invalid calendar code: " <> code)
+        False -> rt_val.throw_range_error(st, "invalid calendar code: " <> code)
       }
     DateTimeFieldNames ->
       case
@@ -4918,7 +4906,7 @@ fn display_names_of(
           #(code, Some(name))
         }
         False ->
-          rt_val.t_throw_range_error(st, "invalid dateTimeField code: " <> code)
+          rt_val.throw_range_error(st, "invalid dateTimeField code: " <> code)
       }
   }
   case name, fallback {
@@ -4939,16 +4927,13 @@ fn duration_parts(
   let has_pos = list.any(values, fn(v) { v >. 0.0 })
   let st = case has_neg && has_pos {
     True ->
-      rt_val.t_throw_range_error(
-        st,
-        "Duration fields must have consistent sign",
-      )
+      rt_val.throw_range_error(st, "Duration fields must have consistent sign")
     False -> st
   }
   let st = case is_valid_duration(fields) {
     True -> st
     False ->
-      rt_val.t_throw_range_error(st, "Duration field value is out of range")
+      rt_val.throw_range_error(st, "Duration field value is out of range")
   }
   #(build_duration_parts(df, fields), st)
 }
@@ -4962,19 +4947,18 @@ fn to_duration_record(
       case parse_iso_duration(text) {
         Ok(fields) -> #(fields, st)
         Error(Nil) ->
-          rt_val.t_throw_range_error(st, "Invalid duration string: " <> text)
+          rt_val.throw_range_error(st, "Invalid duration string: " <> text)
       }
     KHandle(_) -> {
       let #(fields, st, any_defined) =
         list.fold(duration_units, #(zero_duration, st, False), fn(acc, unit) {
           let #(fields, st, any) = acc
           let name = duration_unit_js_name(unit)
-          let #(v, st) =
-            rt_obj.t_get_prop(st, duration_v, StringKey(Named(name)))
+          let #(v, st) = rt_obj.get_prop(st, duration_v, StringKey(Named(name)))
           case classify(v) {
             KUndef -> #(fields, st, any)
             _ -> {
-              let #(n, st) = rt_val.t_to_number(st, v)
+              let #(n, st) = rt_val.to_number(st, v)
               case n {
                 JInt(i) -> #(
                   set_duration_field(fields, unit, int.to_float(i)),
@@ -4985,13 +4969,13 @@ fn to_duration_record(
                   case f == float.floor(f) {
                     True -> #(set_duration_field(fields, unit, f), st, True)
                     False ->
-                      rt_val.t_throw_range_error(
+                      rt_val.throw_range_error(
                         st,
                         name <> " must be an integral number",
                       )
                   }
                 JNan | JPosInf | JNegInf ->
-                  rt_val.t_throw_range_error(
+                  rt_val.throw_range_error(
                     st,
                     name <> " must be a finite number",
                   )
@@ -5001,10 +4985,10 @@ fn to_duration_record(
         })
       case any_defined {
         True -> #(fields, st)
-        False -> rt_val.t_throw_range_error(st, "Invalid duration object")
+        False -> rt_val.throw_range_error(st, "Invalid duration object")
       }
     }
-    _ -> rt_val.t_throw_type_error(st, "Duration must be an object or string")
+    _ -> rt_val.throw_type_error(st, "Duration must be an object or string")
   }
 }
 
@@ -5468,7 +5452,7 @@ fn segmenter_segment(
 ) -> #(JsVal, Agent) {
   let name = "Intl.Segmenter.prototype.segment"
   let #(_h, sg, _bound) = branded_segmenter(st, this, name)
-  let #(s, st) = rt_val.t_to_string(st, first_arg_or_undefined(args))
+  let #(s, st) = rt_val.to_string(st, first_arg_or_undefined(args))
   let data = SegmentsData(SegmentsState(string: s, granularity: sg.granularity))
   let #(h, st) =
     realm_ops.alloc_object(st, IntlObj(data:, bound: None), segments_proto)
@@ -5519,7 +5503,7 @@ fn segments_containing(
 ) -> #(JsVal, Agent) {
   let input = sg.string
   let granularity = sg.granularity
-  let #(n, st) = rt_val.t_to_number(st, index_v)
+  let #(n, st) = rt_val.to_number(st, index_v)
   let segments = intl_segment.segment_string(input, granularity)
   let total = intl_segment.utf16_len(input)
   let idx = case n {

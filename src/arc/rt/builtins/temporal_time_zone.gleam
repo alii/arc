@@ -27,7 +27,7 @@ pub fn time_zone_from_string(st: Agent, id: String) -> #(TemporalZone, Agent) {
       let #(tz, st) = tz_from_datetime_string(st, id)
       #(rt_val.or_throw(st, tz), st)
     }
-    #(Error(InvalidIdentifier(e)), st) -> rt_val.t_throw(st, e)
+    #(Error(InvalidIdentifier(e)), st) -> rt_val.throw(st, e)
   }
 }
 
@@ -213,14 +213,14 @@ pub fn to_temporal_time_zone(st: Agent, v: JsVal) -> #(TemporalZone, Agent) {
   case classify(v) {
     KStr(s) -> time_zone_from_string(st, s)
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(
           kind: TemporalObj(data: TemporalZonedDateTime(time_zone:, ..)),
           ..,
         ) -> #(time_zone, st)
-        _ -> rt_val.t_throw_type_error(st, "timeZone must be a string")
+        _ -> rt_val.throw_type_error(st, "timeZone must be a string")
       }
-    _ -> rt_val.t_throw_type_error(st, "timeZone must be a string")
+    _ -> rt_val.throw_type_error(st, "timeZone must be a string")
   }
 }
 

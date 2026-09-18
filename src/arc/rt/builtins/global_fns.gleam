@@ -99,13 +99,11 @@ pub fn dispatch(
     GlobalDecodeUri -> uri_decode_dispatch(args, st, WholeUri)
     GlobalDecodeUriComponent -> uri_decode_dispatch(args, st, UriComponent)
     GlobalEscape -> {
-      let #(s, st) =
-        rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+      let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
       #(mk_string(js_escape(s)), st)
     }
     GlobalUnescape -> {
-      let #(s, st) =
-        rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+      let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
       #(mk_string(js_unescape(s)), st)
     }
   }
@@ -126,7 +124,7 @@ fn indirect_eval(st: Agent, realm: Int, args: List(JsVal)) -> #(JsVal, Agent) {
 pub fn is_intrinsic_eval(st: Agent, callee: JsVal) -> Bool {
   case types.classify(callee) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: NativeFn(token: GlobalN(GlobalEval(realm:)), ..), ..) ->
           realm == st.realm.id
         _ -> False
@@ -140,8 +138,8 @@ pub fn parse_int_value(
   val: JsVal,
   radix_val: JsVal,
 ) -> #(JsNum, Agent) {
-  let #(s, st) = rt_val.t_to_string(st, val)
-  let #(radix_int, st) = rt_val.t_to_int32(st, radix_val)
+  let #(s, st) = rt_val.to_string(st, val)
+  let #(radix_int, st) = rt_val.to_int32(st, radix_val)
   // strip sign before prefix check so "-0x10" works
   let #(bytes, negative) = case <<utf8.trim_leading_js_ws(s):utf8>> {
     <<"-", rest:bits>> -> #(rest, True)
@@ -164,7 +162,7 @@ pub fn parse_int_value(
 }
 
 pub fn parse_float_value(st: Agent, val: JsVal) -> #(JsNum, Agent) {
-  let #(s, st) = rt_val.t_to_string(st, val)
+  let #(s, st) = rt_val.to_string(st, val)
   #(parse_decimal_string(utf8.trim_leading_js_ws(s)), st)
 }
 
@@ -286,7 +284,7 @@ fn scan_exponent_length(bytes: BitArray) -> Int {
 }
 
 fn global_is_nan(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  let #(num, st) = rt_val.t_to_number(st, helpers.first_arg_or_undefined(args))
+  let #(num, st) = rt_val.to_number(st, helpers.first_arg_or_undefined(args))
   let result = case num {
     JNan -> True
     _ -> False
@@ -295,7 +293,7 @@ fn global_is_nan(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
 }
 
 fn global_is_finite(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  let #(num, st) = rt_val.t_to_number(st, helpers.first_arg_or_undefined(args))
+  let #(num, st) = rt_val.to_number(st, helpers.first_arg_or_undefined(args))
   let result = case num {
     JInt(_) | JFloat(_) -> True
     JNan | JPosInf | JNegInf -> False
@@ -314,7 +312,7 @@ fn uri_encode_dispatch(
   st: Agent,
   kind: UriKind,
 ) -> #(JsVal, Agent) {
-  let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+  let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   #(mk_string(uri_encode(s, kind)), st)
 }
 
@@ -323,11 +321,11 @@ fn uri_decode_dispatch(
   st: Agent,
   kind: UriKind,
 ) -> #(JsVal, Agent) {
-  let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+  let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   case uri_decode(s, kind) {
     Ok(decoded) -> #(mk_string(decoded), st)
     Error(offset) ->
-      rt_val.t_throw(
+      rt_val.throw(
         st,
         JsError(UriError, "URI malformed at position " <> int.to_string(offset)),
       )

@@ -109,7 +109,7 @@ fn init_function_intrinsic(
   let #(name_p, st) = common.fn_name_property(st, name)
   let #(proto_p, st) = common.fn_prototype_property(st, gfn_proto)
   let #(ctor_h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       plain_object(
         NativeFn(token: ctor_token, name:, length: 1, constructible: True),
@@ -121,12 +121,12 @@ fn init_function_intrinsic(
         ]),
       ),
     )
-  let st = rt_store.t_pin_root(st, ctor_h)
-  let #(ctor_prop, st) = rt_store.t_frozen_property(st, mk_object(ctor_h))
+  let st = rt_store.pin_root(st, ctor_h)
+  let #(ctor_prop, st) = rt_store.frozen_property(st, mk_object(ctor_h))
   let ctor_prop = common.make_configurable(ctor_prop)
   let #(proto_props, st) = case generator_proto {
     Some(gp) -> {
-      let #(gp_prop, st) = rt_store.t_frozen_property(st, mk_object(gp))
+      let #(gp_prop, st) = rt_store.frozen_property(st, mk_object(gp))
       #(
         [
           #("constructor", ctor_prop),
@@ -139,7 +139,7 @@ fn init_function_intrinsic(
   }
   let #(tag_pair, st) = common.string_tag_property(st, name)
   let st =
-    rt_store.t_cell_update(st, gfn_proto, fn(cell) {
+    rt_store.cell_update(st, gfn_proto, fn(cell) {
       let assert SObject(..) = cell
       SObject(..cell, props: common.named_props(proto_props), symbol_props: [
         tag_pair,
@@ -147,7 +147,7 @@ fn init_function_intrinsic(
     })
   let st = case generator_proto {
     Some(gp) -> {
-      let #(bp, st) = rt_store.t_frozen_property(st, mk_object(gfn_proto))
+      let #(bp, st) = rt_store.frozen_property(st, mk_object(gfn_proto))
       common.add_named_property(
         st,
         gp,
@@ -170,29 +170,29 @@ pub fn dispatch(
   case n {
     GeneratorNext -> {
       let #(h, st) =
-        rt_async.t_gen_next(st, rt_async.generator_data(st, this), arg)
+        rt_async.gen_next(st, rt_async.generator_data(st, this), arg)
       #(mk_object(h), st)
     }
     GeneratorReturn -> {
       let #(h, st) =
-        rt_async.t_gen_return(st, rt_async.generator_data(st, this), arg)
+        rt_async.gen_return(st, rt_async.generator_data(st, this), arg)
       #(mk_object(h), st)
     }
     GeneratorThrow -> {
       let #(h, st) =
-        rt_async.t_gen_throw(st, rt_async.generator_data(st, this), arg)
+        rt_async.gen_throw(st, rt_async.generator_data(st, this), arg)
       #(mk_object(h), st)
     }
     AsyncGeneratorNext -> {
-      let #(h, st) = rt_async.t_asyncgen_next(st, this, arg)
+      let #(h, st) = rt_async.asyncgen_next(st, this, arg)
       #(mk_object(h), st)
     }
     AsyncGeneratorReturn -> {
-      let #(h, st) = rt_async.t_asyncgen_return(st, this, arg)
+      let #(h, st) = rt_async.asyncgen_return(st, this, arg)
       #(mk_object(h), st)
     }
     AsyncGeneratorThrow -> {
-      let #(h, st) = rt_async.t_asyncgen_throw(st, this, arg)
+      let #(h, st) = rt_async.asyncgen_throw(st, this, arg)
       #(mk_object(h), st)
     }
     GeneratorFunctionCtor(realm:)
@@ -215,7 +215,7 @@ pub fn dispatch_construct(
     | AsyncFunctionCtor(realm:), Some(kind)
     | AsyncGeneratorFunctionCtor(realm:), Some(kind)
     -> b_function.create_dynamic_function(st, realm, args, kind, new_target)
-    _, _ -> rt_val.t_throw_type_error(st, "not a constructor")
+    _, _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }
 

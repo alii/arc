@@ -20,7 +20,7 @@ apply_js_main(St, Mod) ->
 
 epilogue(St0) ->
     St1 = 'arc@rt@async':drain(St0),
-    'arc@rt@gc':t_maybe_collect(St1).
+    'arc@rt@gc':maybe_collect(St1).
 
 render_reason(Class, Reason, Stk) ->
     Top = case Stk of [H | _] -> H; [] -> no_stack end,

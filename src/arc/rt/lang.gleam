@@ -4,7 +4,7 @@ import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as b_object
 import arc/rt/builtins/regexp as b_regexp
-import arc/rt/call.{NormalCompletion, ThrowCompletion, t_call} as rt_call
+import arc/rt/call.{NormalCompletion, ThrowCompletion, call} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -23,8 +23,8 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
-pub fn t_new_type_error(st: Agent, message: String) -> #(JsVal, Agent) {
-  rt_val.t_new_error(st, TypeError, message)
+pub fn new_type_error(st: Agent, message: String) -> #(JsVal, Agent) {
+  rt_val.new_error(st, TypeError, message)
 }
 
 // iterator record is a null-proto object: iterator, next, done
@@ -39,7 +39,7 @@ const k_next = StringKey(Named("next"))
 
 const k_done = StringKey(Named("done"))
 
-fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
+pub fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
   let store = st.store
   let seq = store.prop_seq
   let props =
@@ -77,7 +77,7 @@ fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
     ])
   let st = Agent(..st, store: Store(..store, prop_seq: seq + 3))
   let #(h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       SObject(
         kind: Ordinary,
@@ -91,10 +91,6 @@ fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
   #(mk_object(h), st)
 }
 
-pub fn t_alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
-  alloc_record(st, rec)
-}
-
 pub fn record_parts(st: Agent, rec: JsVal) -> Option(IteratorRecord) {
   record_props(st, rec) |> option.then(parts_of)
 }
@@ -105,7 +101,7 @@ fn record_props(
 ) -> Option(Dict(PropertyKey, types.Property)) {
   case classify(rec) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: Ordinary, props:, ..) -> Some(props)
         _ -> None
       }
@@ -136,9 +132,9 @@ fn read_record(st: Agent, rec: JsVal) -> #(Bool, IteratorRecord, Agent) {
   case record_fields(st, rec) {
     Some(#(done, record)) -> #(done, record, st)
     None -> {
-      let #(done, st) = rt_obj.t_get_prop(st, rec, k_done)
-      let #(iterator, st) = rt_obj.t_get_prop(st, rec, k_iterator)
-      let #(next_method, st) = rt_obj.t_get_prop(st, rec, k_next)
+      let #(done, st) = rt_obj.get_prop(st, rec, k_done)
+      let #(iterator, st) = rt_obj.get_prop(st, rec, k_iterator)
+      let #(next_method, st) = rt_obj.get_prop(st, rec, k_next)
       #(rt_val.to_boolean(done), IteratorRecord(iterator:, next_method:), st)
     }
   }
@@ -157,7 +153,7 @@ fn record_fields(st: Agent, rec: JsVal) -> Option(#(Bool, IteratorRecord)) {
 }
 
 fn mark_done(st: Agent, rec: JsVal) -> Agent {
-  let #(_, st) = rt_obj.t_set_prop(st, rec, k_done, mk_bool(True))
+  let #(_, st) = rt_obj.set_prop(st, rec, k_done, mk_bool(True))
   st
 }
 
@@ -170,11 +166,11 @@ type NativeIter {
 fn native_iter(st: Agent, record: IteratorRecord) -> NativeIter {
   case classify(record.next_method), classify(record.iterator) {
     KHandle(next_h), KHandle(iter_h) ->
-      case rt_store.t_cell_get(st, next_h) {
+      case rt_store.cell_get(st, next_h) {
         SObject(kind: NativeFn(token: IteratorN(next), ..), ..) ->
           NativeNext(next, iter_h)
         SObject(kind: NativeFn(token: GeneratorN(GeneratorNext), ..), ..) ->
-          case rt_store.t_cell_get(st, iter_h) {
+          case rt_store.cell_get(st, iter_h) {
             SObject(kind: GeneratorObj(data:), ..) -> NativeGenerator(data)
             _ -> NativeMiss
           }
@@ -189,21 +185,16 @@ fn generator_step(
   rec: JsVal,
   data: Handle,
 ) -> #(Option(JsVal), Agent) {
-  let step = fn(st) { rt_async.t_gen_step(st, data, mk_undefined()) }
+  let step = fn(st) { rt_async.gen_step(st, data, mk_undefined()) }
   case rt_call.try_run(st, step) {
     #(NormalCompletion(#(True, _)), st) -> #(None, st)
     #(NormalCompletion(#(False, v)), st) -> #(Some(v), st)
-    #(ThrowCompletion(thrown), st) ->
-      rt_store.t_throw(mark_done(st, rec), thrown)
+    #(ThrowCompletion(thrown), st) -> rt_store.throw(mark_done(st, rec), thrown)
   }
 }
 
 // §7.4.3 getiterator, returns the record object
-pub fn t_get_iterator(
-  st: Agent,
-  obj: JsVal,
-  hint: IterHint,
-) -> #(JsVal, Agent) {
+pub fn get_iterator(st: Agent, obj: JsVal, hint: IterHint) -> #(JsVal, Agent) {
   let #(rec, st) = case hint {
     Sync -> iter_protocol.get_iterator_sync(st, obj)
     Async -> iter_protocol.get_iterator_async(st, obj)
@@ -212,7 +203,7 @@ pub fn t_get_iterator(
 }
 
 // §7.4.8 iteratorstepvalue; a throw marks the record done first
-pub fn t_iter_next(st: Agent, rec: JsVal) -> #(#(Bool, JsVal), Agent) {
+pub fn iter_next(st: Agent, rec: JsVal) -> #(#(Bool, JsVal), Agent) {
   let #(done, record, native, st) = case plain_iter_record(st, rec) {
     PlainRecord(done:, record:, native:) -> #(done, record, native, st)
     RecordMiss -> {
@@ -243,7 +234,7 @@ fn protocol_step(
     case done {
       True -> #(#(True, mk_undefined()), st)
       False -> {
-        let #(v, st) = rt_obj.t_get_prop(st, result, StringKey(Named("value")))
+        let #(v, st) = rt_obj.get_prop(st, result, StringKey(Named("value")))
         #(#(False, v), st)
       }
     }
@@ -251,13 +242,12 @@ fn protocol_step(
   case rt_call.try_run(st, step) {
     #(NormalCompletion(#(True, _) as pair), st) -> #(pair, mark_done(st, rec))
     #(NormalCompletion(pair), st) -> #(pair, st)
-    #(ThrowCompletion(thrown), st) ->
-      rt_store.t_throw(mark_done(st, rec), thrown)
+    #(ThrowCompletion(thrown), st) -> rt_store.throw(mark_done(st, rec), thrown)
   }
 }
 
 // §7.4.11 iteratorclose; abrupt swallows what return() does
-pub fn t_iter_close(st: Agent, rec: JsVal, abrupt abrupt: Bool) -> Agent {
+pub fn iter_close(st: Agent, rec: JsVal, abrupt abrupt: Bool) -> Agent {
   let #(done, record, st) = read_record(st, rec)
   case done {
     True -> st
@@ -275,19 +265,19 @@ pub fn t_iter_close(st: Agent, rec: JsVal, abrupt abrupt: Bool) -> Agent {
 }
 
 // §14.3.3 rest element
-pub fn t_iter_rest(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
+pub fn iter_rest(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
   let #(done, record, st) = read_record(st, rec)
   case done {
-    True -> rt_obj.t_new_array(st, [])
+    True -> rt_obj.new_array(st, [])
     False -> {
       let st = mark_done(st, rec)
       let #(values, st) = iter_protocol.iterator_to_list(st, record)
-      rt_obj.t_new_array(st, values)
+      rt_obj.new_array(st, values)
     }
   }
 }
 
-pub fn t_spread_into_list(
+pub fn spread_into_list(
   st: Agent,
   acc: List(JsVal),
   iterable: JsVal,
@@ -312,13 +302,13 @@ pub type PlainSpread {
 pub fn array_spread(st: Agent, iterable: JsVal) -> PlainSpread
 
 // §14.7.5.7 step 6.a, not awaited here
-pub fn t_async_iter_next(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
+pub fn async_iter_next(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
   let #(_done, record, st) = read_record(st, rec)
-  t_call(st, record.next_method, record.iterator, [])
+  call(st, record.next_method, record.iterator, [])
 }
 
 // §7.3.25 copydataproperties for {...source}
-pub fn t_copy_data_props(
+pub fn copy_data_props(
   st: Agent,
   target: JsVal,
   source: JsVal,
@@ -342,12 +332,12 @@ type PlainCopy {
 fn plain_copy_data_props(st: Agent, target: JsVal, source: JsVal) -> PlainCopy
 
 // object rest pattern, excluded keys skipped
-pub fn t_object_rest(
+pub fn object_rest(
   st: Agent,
   source: JsVal,
   excluded: List(k),
 ) -> #(JsVal, Agent) {
-  let #(h, st) = rt_obj.t_new_object(st, Some(st.realm.object.prototype))
+  let #(h, st) = rt_obj.new_object(st, Some(st.realm.object.prototype))
   let excluded = list.map(excluded, rt_store.as_object_key)
   #(mk_object(h), copy_data_properties(st, h, source, excluded))
 }
@@ -361,19 +351,19 @@ fn copy_data_properties(
   case classify(source) {
     KNull | KUndef -> st
     _ -> {
-      let #(from, st) = rt_val.t_to_object(st, source)
-      let #(keys, st) = rt_obj.t_own_keys(st, from)
+      let #(from, st) = rt_val.to_object(st, source)
+      let #(keys, st) = rt_obj.own_keys(st, from)
       use st, key <- list.fold(keys, st)
       use <- bool.guard(list.contains(excluded, key), st)
-      let #(prop, st) = rt_obj.t_get_own_property(st, from, key)
+      let #(prop, st) = rt_obj.get_own_property(st, from, key)
       let wanted =
         option.map(prop, types.prop_enumerable) |> option.unwrap(False)
       case wanted {
         False -> st
         True -> {
-          let #(v, st) = rt_obj.t_get_prop(st, mk_object(from), key)
+          let #(v, st) = rt_obj.get_prop(st, mk_object(from), key)
           let #(_, st) =
-            rt_obj.t_define_own_data(
+            rt_obj.define_own_data(
               st,
               target,
               key,
@@ -389,7 +379,7 @@ fn copy_data_properties(
   }
 }
 
-pub fn t_regexp_new(
+pub fn regexp_new(
   st: Agent,
   pattern: String,
   flags: String,
@@ -398,7 +388,7 @@ pub fn t_regexp_new(
 }
 
 // §13.2.8.4 gettemplateobject, cached per realm and site
-pub fn t_get_template_object(
+pub fn get_template_object(
   st: Agent,
   site: String,
   cooked: List(JsVal),
@@ -408,13 +398,13 @@ pub fn t_get_template_object(
   case dict.get(st.template_objects, site) {
     Ok(h) -> #(mk_object(h), st)
     Error(Nil) -> {
-      let #(raw_v, st) = rt_obj.t_new_array(st, list.map(raw, mk_string))
+      let #(raw_v, st) = rt_obj.new_array(st, list.map(raw, mk_string))
       let assert KHandle(raw_h) = classify(raw_v)
       let st = b_object.freeze(st, raw_h)
-      let #(tpl_v, st) = rt_obj.t_new_array(st, cooked)
+      let #(tpl_v, st) = rt_obj.new_array(st, cooked)
       let assert KHandle(tpl_h) = classify(tpl_v)
       let #(_, st) =
-        rt_obj.t_define_own_data(
+        rt_obj.define_own_data(
           st,
           tpl_h,
           StringKey(Named("raw")),
@@ -424,7 +414,7 @@ pub fn t_get_template_object(
           configurable: False,
         )
       let st = b_object.freeze(st, tpl_h)
-      let st = rt_store.t_pin_root(st, tpl_h)
+      let st = rt_store.pin_root(st, tpl_h)
       let st =
         Agent(
           ..st,
@@ -436,12 +426,8 @@ pub fn t_get_template_object(
 }
 
 // §13.5.1.2 step 5 sloppy delete on the global
-pub fn t_global_delete(st: Agent, name: String) -> #(Bool, Agent) {
-  rt_obj.t_delete_prop(
-    st,
-    st.realm.global_object,
-    StringKey(key.canonical(name)),
-  )
+pub fn global_delete(st: Agent, name: String) -> #(Bool, Agent) {
+  rt_obj.delete_prop(st, st.realm.global_object, StringKey(key.canonical(name)))
 }
 
 // for-of over plain arrays and strings keeps this record on the operand stack
@@ -471,45 +457,45 @@ pub fn array_iter_proto(st: Agent, rec: JsVal) -> Handle
 pub fn array_iter_record(target: JsVal, index: Int, next_fn: JsVal) -> JsVal
 
 // absent name throws referenceerror; called by name from arc_rt_obj_ffi
-pub fn t_global_get(st: Agent, name: BitArray) -> #(JsVal, Agent) {
+pub fn global_get(st: Agent, name: BitArray) -> #(JsVal, Agent) {
   let g = types.mk_object(st.realm.global_object)
   let key = StringKey(binary_key(name))
-  let #(has, st) = rt_obj.t_has_prop(st, g, key)
+  let #(has, st) = rt_obj.has_prop(st, g, key)
   case has {
-    True -> rt_obj.t_get_prop(st, g, key)
+    True -> rt_obj.get_prop(st, g, key)
     False -> {
       let text = bit_array.to_string(name) |> result.unwrap("")
-      rt_val.t_throw_reference_error(st, text <> " is not defined")
+      rt_val.throw_reference_error(st, text <> " is not defined")
     }
   }
 }
 
-pub fn t_global_this(st: Agent) -> JsVal {
+pub fn global_this(st: Agent) -> JsVal {
   types.mk_object(st.realm.global_object)
 }
 
 // sloppy: failed set ignored
-pub fn t_global_set(st: Agent, name: BitArray, v: JsVal) -> Agent {
+pub fn global_set(st: Agent, name: BitArray, v: JsVal) -> Agent {
   let g = st.realm.global_object
   let #(_, st) =
-    rt_obj.t_set_prop(st, types.mk_object(g), StringKey(binary_key(name)), v)
+    rt_obj.set_prop(st, types.mk_object(g), StringKey(binary_key(name)), v)
   st
 }
 
 // strict: unresolvable throws referenceerror, failed set typeerror
-pub fn t_global_set_strict(st: Agent, name: BitArray, v: JsVal) -> Agent {
+pub fn global_set_strict(st: Agent, name: BitArray, v: JsVal) -> Agent {
   let g = types.mk_object(st.realm.global_object)
   let key = StringKey(binary_key(name))
   let text = bit_array.to_string(name) |> result.unwrap("")
-  let #(has, st) = rt_obj.t_has_prop(st, g, key)
+  let #(has, st) = rt_obj.has_prop(st, g, key)
   case has {
-    False -> rt_val.t_throw_reference_error(st, text <> " is not defined")
+    False -> rt_val.throw_reference_error(st, text <> " is not defined")
     True -> {
-      let #(ok, st) = rt_obj.t_set_prop(st, g, key, v)
+      let #(ok, st) = rt_obj.set_prop(st, g, key, v)
       case ok {
         True -> st
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Cannot assign to read only property '" <> text <> "'",
           )
@@ -519,14 +505,14 @@ pub fn t_global_set_strict(st: Agent, name: BitArray, v: JsVal) -> Agent {
 }
 
 // unresolvable global yields "undefined" without throwing
-pub fn t_global_typeof(st: Agent, name: BitArray) -> #(String, Agent) {
+pub fn global_typeof(st: Agent, name: BitArray) -> #(String, Agent) {
   let g = st.realm.global_object
   let key = StringKey(binary_key(name))
-  let #(has, st) = rt_obj.t_has_prop(st, types.mk_object(g), key)
+  let #(has, st) = rt_obj.has_prop(st, types.mk_object(g), key)
   case has {
     False -> #("undefined", st)
     True -> {
-      let #(v, st) = rt_obj.t_get_prop(st, types.mk_object(g), key)
+      let #(v, st) = rt_obj.get_prop(st, types.mk_object(g), key)
       #(rt_val.type_of(st, v), st)
     }
   }

@@ -336,9 +336,9 @@ fn push_birth_refs(birth: types.FnBirth, acc: List(Int)) -> List(Int) {
 }
 
 // turn boundary only, call_depth 0; called by name from arc_aot_run_ffi
-pub fn t_maybe_collect(st: Agent) -> Agent {
+pub fn maybe_collect(st: Agent) -> Agent {
   case st.call_depth == 0 && due(st.store) {
-    True -> t_collect_some(st, [])
+    True -> collect_some(st, [])
     False -> st
   }
 }
@@ -348,7 +348,7 @@ pub fn due(store: Store) -> Bool {
   store.alloc_since_gc >= store.gc_threshold
 }
 
-pub fn t_hold_roots(st: Agent, held: List(JsVal)) -> #(List(Int), Agent) {
+pub fn hold_roots(st: Agent, held: List(JsVal)) -> #(List(Int), Agent) {
   let store = st.store
   let ids =
     list.fold(held, [], fn(acc, v) { push_refs(v, acc) })
@@ -358,7 +358,7 @@ pub fn t_hold_roots(st: Agent, held: List(JsVal)) -> #(List(Int), Agent) {
   #(ids, Agent(..st, store: Store(..store, pinned_roots: pinned)))
 }
 
-pub fn t_release_roots(st: Agent, ids: List(Int)) -> Agent {
+pub fn release_roots(st: Agent, ids: List(Int)) -> Agent {
   let store = st.store
   let pinned = list.fold(ids, store.pinned_roots, set.delete)
   Agent(..st, store: Store(..store, pinned_roots: pinned))
@@ -367,7 +367,7 @@ pub fn t_release_roots(st: Agent, ids: List(Int)) -> Agent {
 // majors keep the old full-gc schedule, minors run in between
 pub const minors_per_major: Int = 16
 
-pub fn t_collect_some(st: Agent, extra_roots: List(Handle)) -> Agent {
+pub fn collect_some(st: Agent, extra_roots: List(Handle)) -> Agent {
   let store = st.store
   let meta = store.meta
   let floor = meta.major_live / 2
@@ -378,12 +378,12 @@ pub fn t_collect_some(st: Agent, extra_roots: List(Handle)) -> Agent {
     < int.max(minors_per_major * store.gc_threshold, floor)
   {
     True -> collect_minor(st, extra_roots)
-    False -> t_collect(st, extra_roots)
+    False -> collect(st, extra_roots)
   }
 }
 
 // full; no renumbering, dead ids dropped, next_id falls past highest survivor
-pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {
+pub fn collect(st: Agent, extra_roots: List(Handle)) -> Agent {
   let store = st.store
   let roots =
     list.fold(extra_roots, roots_of_state(st), fn(a, h) { [h.id, ..a] })
@@ -668,7 +668,7 @@ pub fn stats(st: Agent) -> GcStats {
   )
 }
 
-pub fn t_is_live(st: Agent, h: Handle) -> Bool {
+pub fn is_live(st: Agent, h: Handle) -> Bool {
   let store = st.store
   let Handle(id) = h
   option.is_some(arena.get_option(id, store.cells))

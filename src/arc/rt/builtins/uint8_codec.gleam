@@ -72,7 +72,7 @@ type Uint8View {
 fn uint8_view(st: Agent, v: JsVal) -> Option(Uint8View) {
   case classify(v) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(
           kind: TypedArrayObj(
             buffer:,
@@ -91,8 +91,7 @@ fn uint8_view(st: Agent, v: JsVal) -> Option(Uint8View) {
 fn validate_u8(st: Agent, this: JsVal) -> Nil {
   case uint8_view(st, this) {
     Some(_) -> Nil
-    None ->
-      rt_val.t_throw_type_error(st, "Method must be called on a Uint8Array")
+    None -> rt_val.throw_type_error(st, "Method must be called on a Uint8Array")
   }
 }
 
@@ -103,7 +102,7 @@ fn u8_require_mutable(st: Agent, this: JsVal) -> Nil {
   }
   case immutable {
     True ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot modify a Uint8Array backed by an immutable ArrayBuffer",
       )
@@ -121,7 +120,7 @@ fn u8_live_view(st: Agent, this: JsVal) -> Uint8LiveView {
     Some(Uint8View(buffer:, byte_offset:, length:)) ->
       case buffer.bytes(st, buffer) {
         None ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             buffer.view_witness_error_message(buffer.BufferDetached),
           )
@@ -133,7 +132,7 @@ fn u8_live_view(st: Agent, this: JsVal) -> Uint8LiveView {
           }
           case oob {
             True ->
-              rt_val.t_throw_type_error(
+              rt_val.throw_type_error(
                 st,
                 buffer.view_witness_error_message(buffer.OutOfBoundsView),
               )
@@ -155,8 +154,7 @@ fn u8_live_view(st: Agent, this: JsVal) -> Uint8LiveView {
           }
         }
       }
-    None ->
-      rt_val.t_throw_type_error(st, "Method must be called on a Uint8Array")
+    None -> rt_val.throw_type_error(st, "Method must be called on a Uint8Array")
   }
 }
 
@@ -164,7 +162,7 @@ fn get_opts_object(st: Agent, v: JsVal) -> Option(Handle) {
   case classify(v) {
     KUndef -> None
     KHandle(h) -> Some(h)
-    _ -> rt_val.t_throw_type_error(st, "options must be an object or undefined")
+    _ -> rt_val.throw_type_error(st, "options must be an object or undefined")
   }
 }
 
@@ -175,7 +173,7 @@ fn get_option_value(
 ) -> #(JsVal, Agent) {
   case opts {
     None -> #(mk_undefined(), st)
-    Some(h) -> rt_obj.t_get_prop(st, mk_object(h), StringKey(Named(key)))
+    Some(h) -> rt_obj.get_prop(st, mk_object(h), StringKey(Named(key)))
   }
 }
 
@@ -193,13 +191,13 @@ fn get_enum_option(
       case parse(s) {
         Some(v) -> #(v, st)
         None ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "\"" <> s <> "\" is not a valid value for option " <> key,
           )
       }
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "option " <> key <> " must be a string, got " <> rt_val.type_of(st, got),
       )
@@ -228,7 +226,7 @@ fn require_string(st: Agent, v: JsVal) -> String {
   case classify(v) {
     KStr(s) -> s
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "expected input to be a string, got " <> rt_val.type_of(st, v),
       )
@@ -328,7 +326,7 @@ fn u8_write_bytes(
 }
 
 fn decode_error(st: Agent, codec: Codec) -> a {
-  rt_val.t_throw_syntax_error(
+  rt_val.throw_syntax_error(
     st,
     "unable to decode " <> codec_name(codec) <> " string",
   )
@@ -366,7 +364,7 @@ fn decode_to_new_u8(
 fn u8_alloc_from_bytes(st: Agent, bytes: BitArray) -> #(JsVal, Agent) {
   let len = bit_array.byte_size(bytes)
   use <- bool.lazy_guard(len > max_byte_length, fn() {
-    rt_val.t_throw_range_error(st, "Invalid typed array length")
+    rt_val.throw_range_error(st, "Invalid typed array length")
   })
   let kind = NumKind(Uint8Kind)
   let #(buf, st) =

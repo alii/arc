@@ -28,7 +28,7 @@ pub fn with_realm(
   let restored = enter(after, origin)
   case outcome {
     NormalCompletion(v) -> #(v, restored)
-    ThrowCompletion(e) -> rt_store.t_throw(restored, e)
+    ThrowCompletion(e) -> rt_store.throw(restored, e)
   }
 }
 
@@ -51,9 +51,9 @@ pub fn install_262(st: Agent, realm: Realm) -> #(Handle, Agent) {
       #("detachArrayBuffer", ArrayBufferN(ArrayBufferDetach262), 1),
     ])
   let #(global_prop, st) =
-    rt_store.t_builtin_property(st, mk_object(realm.global_object))
+    rt_store.builtin_property(st, mk_object(realm.global_object))
   let #(h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       plain_object(
         Ordinary,
@@ -61,9 +61,9 @@ pub fn install_262(st: Agent, realm: Realm) -> #(Handle, Agent) {
         common.named_props([#("global", global_prop), ..methods]),
       ),
     )
-  let st = rt_store.t_pin_root(st, h)
+  let st = rt_store.pin_root(st, h)
   let #(_new, st) =
-    rt_obj.t_define_own_data(
+    rt_obj.define_own_data(
       st,
       realm.global_object,
       StringKey(Named("$262")),
@@ -91,8 +91,7 @@ pub fn dispatch_262(
 }
 
 fn eval_script(st: Agent, realm: Int, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(source, st) =
-    rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+  let #(source, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   use st <- with_realm(st, realm)
   st.store.ops.eval_hook(st, source, ScriptEval)
 }
@@ -111,7 +110,7 @@ fn create_realm_262(
     |> option.then(own_data(st, _, "agent"))
   let st = case agent_obj {
     Some(v) -> {
-      let #(prop, st) = rt_store.t_builtin_property(st, v)
+      let #(prop, st) = rt_store.builtin_property(st, v)
       common.add_named_property(st, dollar, "agent", prop)
     }
     None -> st
@@ -120,7 +119,7 @@ fn create_realm_262(
 }
 
 fn own_data(st: Agent, h: Handle, name: String) -> Option(JsVal) {
-  case rt_obj.t_ordinary_own_property(st, h, StringKey(Named(name))) {
+  case rt_obj.ordinary_own_property(st, h, StringKey(Named(name))) {
     Some(DataProperty(value:, ..)) -> Some(value)
     _ -> None
   }

@@ -42,7 +42,7 @@ pub fn dispatch(
 ) -> #(JsVal, Agent) {
   case native {
     WeakRefConstructor ->
-      rt_val.t_throw_type_error(st, "Constructor WeakRef requires 'new'")
+      rt_val.throw_type_error(st, "Constructor WeakRef requires 'new'")
     WeakRefPrototypeDeref -> deref(st, this, args)
   }
 }
@@ -55,7 +55,7 @@ pub fn dispatch_construct(
 ) -> #(Handle, Agent) {
   case native {
     WeakRefConstructor -> construct(st, args, new_target)
-    WeakRefPrototypeDeref -> rt_val.t_throw_type_error(st, "not a constructor")
+    WeakRefPrototypeDeref -> rt_val.throw_type_error(st, "not a constructor")
   }
 }
 
@@ -67,7 +67,7 @@ fn construct(
 ) -> #(Handle, Agent) {
   let target = helpers.first_arg_or_undefined(args)
   use Nil <- helpers.guard(can_be_held_weakly(target), fn() {
-    rt_val.t_throw_type_error(st, "Invalid value used as weak ref target")
+    rt_val.throw_type_error(st, "Invalid value used as weak ref target")
   })
   let #(proto_h, st) =
     rt_call.get_prototype_from_constructor(st, new_target, fn(realm: Realm) {

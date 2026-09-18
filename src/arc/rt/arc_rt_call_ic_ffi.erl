@@ -1,10 +1,10 @@
 %% aot call site ics and direct entry; exports may answer {miss, St}
 -module(arc_rt_call_ic_ffi).
--export([t_call_by_kind/4, t_call_by_kind0/3, t_call_by_kind1/4, t_call_by_kind2/5,
-         t_call_by_kind3/6,
-         t_call_method_mono/4, t_call_method_ic/6, t_call_method_ic0/5,
-         t_call_method_ic1/6, t_call_method_ic2/7, t_call_method_ic3/8,
-         t_new_direct/3, t_prepare_compiled_call/4]).
+-export([call_by_kind/4, call_by_kind0/3, call_by_kind1/4, call_by_kind2/5,
+         call_by_kind3/6,
+         call_method_mono/4, call_method_ic/6, call_method_ic0/5,
+         call_method_ic1/6, call_method_ic2/7, call_method_ic3/8,
+         new_direct/3, prepare_compiled_call/4]).
 
 -include("arc_rt_layout.hrl").
 
@@ -13,16 +13,16 @@
 -define(IC_CALL_WAYS, 16).
 
 %% args travel as a count n with a, b, c, or as a list in place of n
-t_call_by_kind(St, F, This, Args) ->
+call_by_kind(St, F, This, Args) ->
     dispatch_kind(St, F, This, Args, undefined, undefined, undefined).
 
-t_call_by_kind0(St, F, This) ->
+call_by_kind0(St, F, This) ->
     dispatch_kind(St, F, This, 0, undefined, undefined, undefined).
-t_call_by_kind1(St, F, This, A) ->
+call_by_kind1(St, F, This, A) ->
     dispatch_kind(St, F, This, 1, A, undefined, undefined).
-t_call_by_kind2(St, F, This, A, B) ->
+call_by_kind2(St, F, This, A, B) ->
     dispatch_kind(St, F, This, 2, A, B, undefined).
-t_call_by_kind3(St, F, This, A, B, C) ->
+call_by_kind3(St, F, This, A, B, C) ->
     dispatch_kind(St, F, This, 3, A, B, C).
 
 dispatch_kind(St, F = {?HANDLE_TAG, Id}, This, N, A, B, C) ->
@@ -51,7 +51,7 @@ dispatch_kind(St, F = {?HANDLE_TAG, Id}, This, N, A, B, C) ->
 dispatch_kind(St, F, This, N, A, B, C) -> call_general(St, F, This, N, A, B, C).
 
 call_general(St, F, This, N, A, B, C) ->
-    'arc@rt@call':t_call(St, F, This, arg_list(N, A, B, C)).
+    'arc@rt@call':call(St, F, This, arg_list(N, A, B, C)).
 
 enter_compiled(St, _, _, _, {?SOME, ?DIRECT_ENTRY(CodeS, Arity, TakesThis)},
                ThisR, Args, _, _, _)
@@ -83,18 +83,18 @@ enter_compiled(St, F, Code, Home, _, ThisR, N, A, B, C) ->
 home_or_undefined({?SOME, H}) -> H;
 home_or_undefined(?NONE) -> undefined.
 
-t_call_method_ic(St, Recv, KeyBin, Args, Site, RSite) ->
+call_method_ic(St, Recv, KeyBin, Args, Site, RSite) ->
     call_via_ic(St, Recv, KeyBin, Site, RSite, Args, undefined, undefined,
                 undefined).
 
-t_call_method_ic0(St, Recv, KeyBin, Site, RSite) ->
+call_method_ic0(St, Recv, KeyBin, Site, RSite) ->
     call_via_ic(St, Recv, KeyBin, Site, RSite, 0, undefined, undefined,
                 undefined).
-t_call_method_ic1(St, Recv, KeyBin, Site, RSite, A) ->
+call_method_ic1(St, Recv, KeyBin, Site, RSite, A) ->
     call_via_ic(St, Recv, KeyBin, Site, RSite, 1, A, undefined, undefined).
-t_call_method_ic2(St, Recv, KeyBin, Site, RSite, A, B) ->
+call_method_ic2(St, Recv, KeyBin, Site, RSite, A, B) ->
     call_via_ic(St, Recv, KeyBin, Site, RSite, 2, A, B, undefined).
-t_call_method_ic3(St, Recv, KeyBin, Site, RSite, A, B, C) ->
+call_method_ic3(St, Recv, KeyBin, Site, RSite, A, B, C) ->
     call_via_ic(St, Recv, KeyBin, Site, RSite, 3, A, B, C).
 
 call_via_ic(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Site, RSite, N, A, B, C) ->
@@ -199,7 +199,7 @@ ic_miss(St, Recv, RCell, KeyBin, FillSite, RSite, N, A, B, C) ->
                  Recv, KeyBin, RSite, N, A, B, C).
 
 after_lookup({miss, St}, Recv, KeyBin, RSite, N, A, B, C) ->
-    {F, St1} = arc_rt_obj_ffi:t_get_named_site(St, Recv, KeyBin, RSite),
+    {F, St1} = arc_rt_obj_ffi:get_named_site(St, Recv, KeyBin, RSite),
     dispatch_kind(St1, F, Recv, N, A, B, C);
 after_lookup(Hit, _, _, _, _, _, _, _) -> Hit.
 
@@ -276,10 +276,10 @@ ic_chain_ok(Cells, {?SOME, {?HANDLE_TAG, PId}}, [{PId, PCell} | Rest]) ->
 ic_chain_ok(_, _, _) -> false.
 
 %% st unchanged on miss; emitter guards V =:= miss, not is_atom
-t_call_method_mono(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Args) ->
+call_method_mono(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Args) ->
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     call_via_walk(St, Recv, arc_rt_arena_ffi:get(RId, Cells), KeyBin, Args, none);
-t_call_method_mono(St, _, _, _) -> {miss, St}.
+call_method_mono(St, _, _, _) -> {miss, St}.
 
 %% resolves keybin along a plain chain, filling site when one is given
 call_via_walk(St, Recv = {?HANDLE_TAG, RId}, RCell, KeyBin, Args, Site)
@@ -452,7 +452,7 @@ apply_this(CodeT, St, Recv, [A, B]) -> CodeT(St, Recv, A, B);
 apply_this(CodeT, St, Recv, [A, B, C]) -> CodeT(St, Recv, A, B, C);
 apply_this(CodeT, St, Recv, Args) -> erlang:apply(CodeT, [St, Recv | Args]).
 
-t_new_direct(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
+new_direct(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
     Store = element(?AGENT_STORE, St),
     Cells = element(?STORE_CELLS, Store),
     case arc_rt_arena_ffi:get(CId, Cells) of
@@ -478,7 +478,7 @@ t_new_direct(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
             end;
         _ -> {miss, St}
     end;
-t_new_direct(St, _, _) -> {miss, St}.
+new_direct(St, _, _) -> {miss, St}.
 
 new_direct_apply(St, Store, Cells, Ctor, ?COMPILEDFN(Code, Home, _, _, DirectEntry), Proto,
                  Args)
@@ -500,7 +500,7 @@ new_direct_apply(St, Store, Cells, Ctor, ?COMPILEDFN(Code, Home, _, _, DirectEnt
     end.
 
 %% prepare once for natives that call back per element, none takes the frame path
-t_prepare_compiled_call(St, F, ?COMPILEDFN(Code, Home, Flags, _, DirectEntry), This)
+prepare_compiled_call(St, F, ?COMPILEDFN(Code, Home, Flags, _, DirectEntry), This)
   when ?IS_PLAIN_FN(Flags) ->
     ThisR = case element(?FNFLAGS_IS_ARROW, Flags)
                  orelse element(?FNFLAGS_IS_STRICT, Flags) of
@@ -517,7 +517,7 @@ t_prepare_compiled_call(St, F, ?COMPILEDFN(Code, Home, Flags, _, DirectEntry), T
             General = fun(S, Args) -> Code(S, Frame, Args) end,
             {?SOME, prepared_direct_entry(DirectEntry, ThisR, General)}
     end;
-t_prepare_compiled_call(_, _, _, _) -> ?NONE.
+prepare_compiled_call(_, _, _, _) -> ?NONE.
 
 prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 0, true)}, T, _) ->
     fun(S, _) -> CodeS(S, T) end;

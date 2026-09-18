@@ -108,32 +108,32 @@ bench_op(Which, St, Arg, N) ->
 
 bench_op_loop(_, _, _, 0) -> ok;
 bench_op_loop(direct_callee, St, F, N) ->
-    _ = 'arc@rt@call':t_direct_callee(St, F, undefined),
+    _ = 'arc@rt@call':direct_callee(St, F, undefined),
     bench_op_loop(direct_callee, St, F, N-1);
 bench_op_loop(direct_callee_ffi, St, F, N) ->
-    _ = arc_rt_call_ffi:t_direct_callee(St, F, undefined),
+    _ = arc_rt_call_ffi:direct_callee(St, F, undefined),
     bench_op_loop(direct_callee_ffi, St, F, N-1);
 bench_op_loop(cell_get, St, H, N) ->
-    _ = 'arc@rt@store':t_cell_get(St, H),
+    _ = 'arc@rt@store':cell_get(St, H),
     bench_op_loop(cell_get, St, H, N-1);
 bench_op_loop(cell_get_ffi, St, H, N) ->
-    _ = arc_rt_store_ffi:t_cell_get(St, H),
+    _ = arc_rt_store_ffi:cell_get(St, H),
     bench_op_loop(cell_get_ffi, St, H, N-1);
 bench_op_loop(get_prop, St, {O, K}, N) ->
-    {_, _} = 'arc@rt@obj':t_get_prop_untyped_key(St, O, K),
+    {_, _} = 'arc@rt@obj':get_prop_untyped_key(St, O, K),
     bench_op_loop(get_prop, St, {O, K}, N-1);
 bench_op_loop(get_prop_own_data, St, {O, Kb}, N) ->
-    _ = arc_rt_obj_ffi:t_get_prop_own_data(St, O, Kb),
+    _ = arc_rt_obj_ffi:get_prop_own_data(St, O, Kb),
     bench_op_loop(get_prop_own_data, St, {O, Kb}, N-1);
 bench_op_loop(get_prop_own_data_2k, St, {O, Kb1, Kb2}, N) ->
-    _ = arc_rt_obj_ffi:t_get_prop_own_data(St, O, Kb1),
-    _ = arc_rt_obj_ffi:t_get_prop_own_data(St, O, Kb2),
+    _ = arc_rt_obj_ffi:get_prop_own_data(St, O, Kb1),
+    _ = arc_rt_obj_ffi:get_prop_own_data(St, O, Kb2),
     bench_op_loop(get_prop_own_data_2k, St, {O, Kb1, Kb2}, N-1);
 bench_op_loop(set_prop_own_data, St, {O, Kb}, N) ->
-    _ = arc_rt_obj_ffi:t_set_prop_own_data(St, O, Kb, 42),
+    _ = arc_rt_obj_ffi:set_prop_own_data(St, O, Kb, 42),
     bench_op_loop(set_prop_own_data, St, {O, Kb}, N-1);
 bench_op_loop(set_prop, St, {O, K}, N) ->
-    {_, St2} = 'arc@rt@obj':t_set_prop_untyped_key(St, O, K, 42),
+    {_, St2} = 'arc@rt@obj':set_prop_untyped_key(St, O, K, 42),
     bench_op_loop(set_prop, St2, {O, K}, N-1);
 bench_op_loop(nop, St, A, N) ->
     bench_op_loop(nop, St, A, N-1).

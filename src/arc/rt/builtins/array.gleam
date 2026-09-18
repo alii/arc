@@ -50,14 +50,14 @@ const iteration_budget_msg = "Invalid array length"
 
 fn check_budget(st: Agent, exhausted exhausted: Bool) -> Nil {
   case exhausted {
-    True -> rt_val.t_throw_range_error(st, iteration_budget_msg)
+    True -> rt_val.throw_range_error(st, iteration_budget_msg)
     False -> Nil
   }
 }
 
 pub fn within_budget(st: Agent, length: Int, k: fn() -> a) -> a {
   case length > limits.max_iteration {
-    True -> rt_val.t_throw_range_error(st, iteration_budget_msg)
+    True -> rt_val.throw_range_error(st, iteration_budget_msg)
     False -> k()
   }
 }
@@ -129,7 +129,7 @@ pub fn init(
       static_methods,
     )
   let st =
-    rt_store.t_cell_update(st, bt.prototype, fn(cell) {
+    rt_store.cell_update(st, bt.prototype, fn(cell) {
       case cell {
         SObject(..) as cell -> SObject(..cell, kind: ArrayObj(0))
         other -> other
@@ -137,7 +137,7 @@ pub fn init(
     })
   let assert Ok(#(_, DataProperty(value: values_fn, ..))) =
     list.find(proto_methods, fn(entry) { entry.0 == "values" })
-  let #(values_prop, st) = rt_store.t_builtin_property(st, values_fn)
+  let #(values_prop, st) = rt_store.builtin_property(st, values_fn)
   let st =
     common.add_symbol_property(st, bt.prototype, symbol_iterator, values_prop)
   let unscopable_names = [
@@ -148,7 +148,7 @@ pub fn init(
   let #(unscopable_props, st) =
     list.fold(unscopable_names, #(dict.new(), st), fn(acc, name) {
       let #(props, st) = acc
-      let #(seq, st) = rt_store.t_next_prop_seq(st)
+      let #(seq, st) = rt_store.next_prop_seq(st)
       #(
         dict.insert(
           props,
@@ -159,8 +159,8 @@ pub fn init(
       )
     })
   let #(unscopables_h, st) =
-    rt_store.t_cell_new(st, plain_object(Ordinary, None, unscopable_props))
-  let #(seq, st) = rt_store.t_next_prop_seq(st)
+    rt_store.cell_new(st, plain_object(Ordinary, None, unscopable_props))
+  let #(seq, st) = rt_store.next_prop_seq(st)
   let st =
     common.add_symbol_property(
       st,
@@ -250,15 +250,15 @@ fn construct(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
             JInt(n) ->
               case n >= 0 && n <= max_array_length {
                 True -> alloc_array(st, n, elements.new(), array_proto)
-                False -> rt_val.t_throw_range_error(st, "Invalid array length")
+                False -> rt_val.throw_range_error(st, "Invalid array length")
               }
             JFloat(f) ->
               case array_length_of_float(f) {
                 Some(n) -> alloc_array(st, n, elements.new(), array_proto)
-                None -> rt_val.t_throw_range_error(st, "Invalid array length")
+                None -> rt_val.throw_range_error(st, "Invalid array length")
               }
             JNan | JPosInf | JNegInf ->
-              rt_val.t_throw_range_error(st, "Invalid array length")
+              rt_val.throw_range_error(st, "Invalid array length")
           }
         _ -> alloc_array(st, 1, elements.from_list([only]), array_proto)
       }
@@ -290,7 +290,7 @@ pub fn alloc_array(
   array_proto: Handle,
 ) -> #(JsVal, Agent) {
   let #(h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       SObject(
         kind: ArrayObj(length),
@@ -316,9 +316,9 @@ fn require_object(
   cont: fn(JsVal, Handle, Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   case classify(this) {
-    KUndef | KNull -> rt_val.t_throw_type_error(st, cannot_convert)
+    KUndef | KNull -> rt_val.throw_type_error(st, cannot_convert)
     _ -> {
-      let #(h, st) = rt_val.t_to_object(st, this)
+      let #(h, st) = rt_val.to_object(st, this)
       cont(mk_object(h), h, st)
     }
   }
@@ -344,7 +344,7 @@ pub fn require_array(
 }
 
 fn object_length(st: Agent, h: Handle) -> #(Int, Agent) {
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     SObject(kind: ArrayObj(length:), ..) -> #(length, st)
     SObject(kind: StringObj(value: s), ..) -> #(utf8.length(s), st)
     SObject(props:, ..) -> length_of_properties(st, h, props)
@@ -363,7 +363,7 @@ fn length_of_properties(
   props: Dict(PropertyKey, Property),
 ) -> #(Int, Agent) {
   case dict.get(props, Named("length")) {
-    Ok(DataProperty(value: len_val, ..)) -> rt_val.t_to_length(st, len_val)
+    Ok(DataProperty(value: len_val, ..)) -> rt_val.to_length(st, len_val)
     _ -> {
       rt_abstract_ops.length_of_array_like(st, mk_object(h))
     }
@@ -386,9 +386,9 @@ fn require_bound(
   this: JsVal,
   cont: fn(ElementFn) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
-  case rt_call.t_try_prepare_call(st, cb, this) {
+  case rt_call.try_prepare_call(st, cb, this) {
     Some(call) -> cont(call)
-    None -> rt_val.t_throw_type_error(st, not_a_function(st, cb))
+    None -> rt_val.throw_type_error(st, not_a_function(st, cb))
   }
 }
 
@@ -406,7 +406,7 @@ fn delete_count(
     [] -> #(#(0, []), st)
     [_] -> #(#(length - actual_start, []), st)
     [_, dc_val, ..rest] -> {
-      let #(dc, st) = rt_val.t_to_integer_or_infinity(st, dc_val)
+      let #(dc, st) = rt_val.to_integer_or_infinity(st, dc_val)
       #(#(int.clamp(dc, 0, length - actual_start), rest), st)
     }
   }
@@ -419,17 +419,17 @@ fn guard_safe_length(
 ) -> #(JsVal, Agent) {
   case n > limits.max_safe_integer {
     True ->
-      rt_val.t_throw_type_error(st, "Array length exceeds maximum safe integer")
+      rt_val.throw_type_error(st, "Array length exceeds maximum safe integer")
     False -> cont()
   }
 }
 
 fn generic_set(st: Agent, h: Handle, pk: PropertyKey, val: JsVal) -> Agent {
-  let #(ok, st) = rt_obj.t_set_prop(st, mk_object(h), StringKey(pk), val)
+  let #(ok, st) = rt_obj.set_prop(st, mk_object(h), StringKey(pk), val)
   case ok {
     True -> st
     False ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot assign to read only property '"
           <> key.display_string(pk)
@@ -447,11 +447,11 @@ pub fn generic_set_length(st: Agent, h: Handle, len: Int) -> Agent {
 }
 
 fn generic_delete(st: Agent, h: Handle, pk: PropertyKey) -> Agent {
-  let #(ok, st) = rt_obj.t_delete_prop(st, h, StringKey(pk))
+  let #(ok, st) = rt_obj.delete_prop(st, h, StringKey(pk))
   case ok {
     True -> st
     False ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot delete property '" <> key.display_string(pk) <> "' of object",
       )
@@ -463,11 +463,11 @@ pub fn generic_delete_index(st: Agent, h: Handle, idx: Int) -> Agent {
 }
 
 fn generic_has_op(st: Agent, h: Handle, idx: Int) -> #(Bool, Agent) {
-  rt_obj.t_has_prop(st, mk_object(h), StringKey(key.index(idx)))
+  rt_obj.has_prop(st, mk_object(h), StringKey(key.index(idx)))
 }
 
 fn generic_get(st: Agent, h: Handle, idx: Int) -> #(JsVal, Agent) {
-  rt_obj.t_get_prop(st, mk_object(h), StringKey(key.index(idx)))
+  rt_obj.get_prop(st, mk_object(h), StringKey(key.index(idx)))
 }
 
 pub fn get_index_if_present(
@@ -488,10 +488,10 @@ fn probe_index_if_present(
 ) -> #(Option(JsVal), Agent) {
   case classify(this), idx >= 0 && idx <= max_array_index {
     KHandle(h), True ->
-      case rt_obj.t_get_own_index(st, h, idx) {
+      case rt_obj.get_own_index(st, h, idx) {
         rt_obj.OwnIndexValue(v) -> #(Some(v), st)
         rt_obj.OwnIndexProperty(prop) -> {
-          let #(v, st) = rt_obj.t_property_get_value(st, prop, this)
+          let #(v, st) = rt_obj.property_get_value(st, prop, this)
           #(Some(v), st)
         }
         rt_obj.OwnIndexAbsent(Some(proto)) ->
@@ -510,11 +510,11 @@ fn inherited_index(
   idx: Int,
 ) -> #(Option(JsVal), Agent) {
   let key = StringKey(key.index(idx))
-  let #(has, st) = rt_obj.t_has_prop(st, mk_object(proto), key)
+  let #(has, st) = rt_obj.has_prop(st, mk_object(proto), key)
   case has {
     False -> #(None, st)
     True -> {
-      let #(v, st) = rt_obj.t_get_prop(st, this, key)
+      let #(v, st) = rt_obj.get_prop(st, this, key)
       #(Some(v), st)
     }
   }
@@ -525,7 +525,7 @@ fn generic_index_if_present(
   this: JsVal,
   idx: Int,
 ) -> #(Option(JsVal), Agent) {
-  let #(has, st) = rt_obj.t_has_prop(st, this, StringKey(key.index(idx)))
+  let #(has, st) = rt_obj.has_prop(st, this, StringKey(key.index(idx)))
   case has {
     False -> #(None, st)
     True -> {
@@ -542,7 +542,7 @@ pub fn dense_snapshot(
 ) -> Option(#(JsElements, Option(Handle))) {
   case classify(this) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: ArrayObj(_), props:, elements: els, proto:, ..) ->
           case properties_have_index_keys(props) {
             True -> None
@@ -574,7 +574,7 @@ pub fn with_plain_elements(
   to: Int,
   transform: fn(JsElements, Int) -> #(JsElements, Int, payload),
 ) -> Option(#(payload, Agent)) {
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     SObject(
       kind: ArrayObj(length:),
       props:,
@@ -597,7 +597,7 @@ pub fn with_plain_elements(
         True -> {
           let #(els, new_length, payload) = transform(els, length)
           let st =
-            rt_store.t_cell_set(
+            rt_store.cell_set(
               st,
               h,
               SObject(..cell, kind: ArrayObj(new_length), elements: els),
@@ -639,7 +639,7 @@ fn push_dense(
         True -> {
           let new_length = length + arg_count
           let st =
-            rt_store.t_cell_set(
+            rt_store.cell_set(
               st,
               h,
               SObject(
@@ -673,10 +673,9 @@ pub fn hole_is_inherited(
   case proto {
     None -> #(False, st)
     Some(proto_h) ->
-      case rt_store.t_cell_get(st, proto_h) {
+      case rt_store.cell_get(st, proto_h) {
         SObject(kind: ProxyObj(..), ..) -> #(True, st)
-        _ ->
-          rt_obj.t_has_prop(st, mk_object(proto_h), StringKey(key.index(idx)))
+        _ -> rt_obj.has_prop(st, mk_object(proto_h), StringKey(key.index(idx)))
       }
   }
 }
@@ -691,7 +690,7 @@ fn array_join(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
       }
     [] -> mk_string(",")
   }
-  let #(separator, st) = rt_val.t_to_string(st, sep_val)
+  let #(separator, st) = rt_val.to_string(st, sep_val)
   use <- within_budget(st, length)
   let #(joined, st) = join_elements(st, this, 0, length, separator, [])
   #(mk_string(joined), st)
@@ -704,7 +703,7 @@ fn finish_join(
 ) -> #(String, Agent) {
   case limits.join(list.reverse(acc), separator) {
     Ok(joined) -> #(joined, st)
-    Error(Nil) -> rt_val.t_throw_range_error(st, "Invalid string length")
+    Error(Nil) -> rt_val.throw_range_error(st, "Invalid string length")
   }
 }
 
@@ -754,7 +753,7 @@ fn join_elements_snapshot(
             KHandle(_) ->
               join_elements_generic(st, this, idx, length, separator, acc)
             _ -> {
-              let #(s, st) = rt_val.t_to_string(st, v)
+              let #(s, st) = rt_val.to_string(st, v)
               join_elements_snapshot(
                 st,
                 this,
@@ -807,7 +806,7 @@ fn join_elements_generic(
             ..acc
           ])
         _ -> {
-          let #(s, st) = rt_val.t_to_string(st, v)
+          let #(s, st) = rt_val.to_string(st, v)
           join_elements_generic(st, this, idx + 1, length, separator, [s, ..acc])
         }
       }
@@ -832,7 +831,7 @@ fn push(st: Agent, this: JsVal, args: List(JsVal)) -> Push
 
 fn push_general(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let fast = case classify(this), args {
-    KHandle(h), [_, ..] -> push_dense(st, h, rt_store.t_cell_get(st, h), args)
+    KHandle(h), [_, ..] -> push_dense(st, h, rt_store.cell_get(st, h), args)
     _, _ -> None
   }
   case fast {
@@ -854,12 +853,12 @@ fn push_generic(
 ) -> #(Int, Agent) {
   case args {
     [] -> {
-      let is_real_array = case rt_store.t_cell_get(st, h) {
+      let is_real_array = case rt_store.cell_get(st, h) {
         SObject(kind: ArrayObj(..), ..) -> True
         _ -> False
       }
       use <- bool.lazy_guard(is_real_array && length > max_array_length, fn() {
-        rt_val.t_throw_range_error(st, "Invalid array length")
+        rt_val.throw_range_error(st, "Invalid array length")
       })
       let st = generic_set_length(st, h, length)
       #(length, st)
@@ -1253,20 +1252,14 @@ fn concat_item(
     True, KHandle(h) -> {
       let #(length, st) = object_length(st, h)
       use <- bool.lazy_guard(pos + length > limits.max_safe_integer, fn() {
-        rt_val.t_throw_type_error(
-          st,
-          "Array length exceeds maximum safe integer",
-        )
+        rt_val.throw_type_error(st, "Array length exceeds maximum safe integer")
       })
       let #(copied, st) = copy_range(st, item, 0, pos, length, elems)
       #(#(copied, pos + length), st)
     }
     _, _ -> {
       use <- bool.lazy_guard(pos >= limits.max_safe_integer, fn() {
-        rt_val.t_throw_type_error(
-          st,
-          "Array length exceeds maximum safe integer",
-        )
+        rt_val.throw_type_error(st, "Array length exceeds maximum safe integer")
       })
       #(#(elements.set(elems, pos, item), pos + 1), st)
     }
@@ -1287,7 +1280,7 @@ fn concat_items_species(
         True, KHandle(h) -> {
           let #(length, st) = object_length(st, h)
           use <- bool.lazy_guard(pos + length > limits.max_safe_integer, fn() {
-            rt_val.t_throw_type_error(
+            rt_val.throw_type_error(
               st,
               "Array length exceeds maximum safe integer",
             )
@@ -1306,7 +1299,7 @@ fn concat_items_species(
         }
         _, _ -> {
           use <- bool.lazy_guard(pos >= limits.max_safe_integer, fn() {
-            rt_val.t_throw_type_error(
+            rt_val.throw_type_error(
               st,
               "Array length exceeds maximum safe integer",
             )
@@ -1323,7 +1316,7 @@ fn is_concat_spreadable(st: Agent, item: JsVal) -> #(Bool, Agent) {
   case classify(item) {
     KHandle(_) -> {
       let #(flag, st) =
-        rt_obj.t_get_prop(st, item, SymbolKey(symbol_is_concat_spreadable))
+        rt_obj.get_prop(st, item, SymbolKey(symbol_is_concat_spreadable))
       case classify(flag) {
         KUndef -> #(rt_abstract_ops.is_array(st, item), st)
         _ -> #(rt_val.to_boolean(flag), st)
@@ -1340,7 +1333,7 @@ fn array_species_create(
 ) -> #(Option(Handle), Agent) {
   let #(species, st) = case classify(original) {
     KHandle(h) ->
-      case intrinsic_species(st, rt_store.t_cell_get(st, h)) {
+      case intrinsic_species(st, rt_store.cell_get(st, h)) {
         True -> #(None, st)
         False -> species_protocol(st, original, length)
       }
@@ -1348,7 +1341,7 @@ fn array_species_create(
   }
   case species {
     None if length > max_array_length ->
-      rt_val.t_throw_range_error(st, "Invalid array length")
+      rt_val.throw_range_error(st, "Invalid array length")
     _ -> #(species, st)
   }
 }
@@ -1375,7 +1368,7 @@ fn species_protocol(
         False -> #(None, st)
         True -> {
           let #(ctor, st) =
-            rt_obj.t_get_prop(st, original, StringKey(Named("constructor")))
+            rt_obj.get_prop(st, original, StringKey(Named("constructor")))
           // other realm %Array% gives undefined, species never read
           let ctor = case classify(ctor) {
             KHandle(ctor_h) ->
@@ -1388,7 +1381,7 @@ fn species_protocol(
           let #(ctor, st) = case classify(ctor) {
             KHandle(_) -> {
               let #(species, st) =
-                rt_obj.t_get_prop(st, ctor, SymbolKey(symbol_species))
+                rt_obj.get_prop(st, ctor, SymbolKey(symbol_species))
               case classify(species) {
                 KNull -> #(mk_undefined(), st)
                 _ -> #(species, st)
@@ -1426,9 +1419,9 @@ fn species_construct(
 ) -> #(Option(Handle), Agent) {
   case rt_call.is_constructor(st, ctor) {
     False ->
-      rt_val.t_throw_type_error(st, "Species constructor is not a constructor")
+      rt_val.throw_type_error(st, "Species constructor is not a constructor")
     True -> {
-      let #(created, st) = rt_call.t_construct(st, ctor, [mk_int(length)], ctor)
+      let #(created, st) = rt_call.construct(st, ctor, [mk_int(length)], ctor)
       #(Some(created), st)
     }
   }
@@ -1485,11 +1478,11 @@ pub fn write_species_element(
       configurable: Some(True),
     )
   let #(ok, st) =
-    rt_obj.t_define_own_prop(st, target, StringKey(key.index(idx)), desc)
+    rt_obj.define_own_prop(st, target, StringKey(key.index(idx)), desc)
   case ok {
     True -> st
     False ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot define property " <> int.to_string(idx) <> " on object",
       )
@@ -1599,7 +1592,7 @@ fn fill_generic(st: Agent, h: Handle, idx: Int, end: Int, val: JsVal) -> Agent {
 
 fn array_at(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use this, _h, length, st <- require_array(st, this)
-  let #(raw, st) = rt_val.t_to_integer_or_infinity(st, helpers.arg_at(args, 0))
+  let #(raw, st) = rt_val.to_integer_or_infinity(st, helpers.arg_at(args, 0))
   let idx = case raw < 0 {
     True -> length + raw
     False -> raw
@@ -1639,7 +1632,7 @@ fn forward_search_driver(
   use this, _h, length, st <- require_array(st, this)
   use <- bool.guard(length == 0, #(wrap(-1), st))
   let search = helpers.first_arg_or_undefined(args)
-  let #(from, st) = rt_val.t_to_integer_or_infinity(st, helpers.arg_at(args, 1))
+  let #(from, st) = rt_val.to_integer_or_infinity(st, helpers.arg_at(args, 1))
   let start = case from < 0 {
     True -> int.max(length + from, 0)
     False -> from
@@ -1668,7 +1661,7 @@ fn array_last_index_of(
   let search = helpers.first_arg_or_undefined(args)
   // checked by arg count, explicit undefined gives 0
   let #(from, st) = case args {
-    [_, f, ..] -> rt_val.t_to_integer_or_infinity(st, f)
+    [_, f, ..] -> rt_val.to_integer_or_infinity(st, f)
     _ -> #(length - 1, st)
   }
   let start = case from < 0 {
@@ -1977,7 +1970,7 @@ fn iterate_array_loop(
 ) -> #(JsVal, Agent) {
   case idx == end, fuel {
     True, _ -> cont(NotFound, st)
-    False, 0 -> rt_val.t_throw_range_error(st, iteration_budget_msg)
+    False, 0 -> rt_val.throw_range_error(st, iteration_budget_msg)
     False, _ -> {
       let #(maybe_elem, st) = case elements.own_element(st, arr, idx) {
         elements.Hit(elem) -> #(Some(elem), st)
@@ -2163,7 +2156,7 @@ fn array_for_each_loop(
 ) -> Agent {
   case idx >= length, idx == limits.max_iteration {
     True, _ -> st
-    False, True -> rt_val.t_throw_range_error(st, iteration_budget_msg)
+    False, True -> rt_val.throw_range_error(st, iteration_budget_msg)
     False, False -> {
       let st = case elements.own_element(st, arr, idx) {
         elements.Hit(elem) -> cb(st, [elem, mk_int(idx), arr]).1
@@ -2365,7 +2358,7 @@ fn reduce_directed(
         find_present(st, this, start, end, dir, limits.max_iteration)
       case found {
         None ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Reduce of empty array with no initial value",
           )
@@ -2418,7 +2411,7 @@ fn reduce_directed_loop(
 ) -> #(JsVal, Agent) {
   case idx == end, fuel {
     True, _ -> #(acc, st)
-    False, 0 -> rt_val.t_throw_range_error(st, iteration_budget_msg)
+    False, 0 -> rt_val.throw_range_error(st, iteration_budget_msg)
     False, _ -> {
       let step = step_of(dir)
       case elements.own_element(st, arr, idx) {
@@ -2590,7 +2583,7 @@ fn array_flat(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     KUndef -> #(1, st)
     _ -> {
       let #(raw, st) =
-        rt_val.t_to_integer_or_infinity(st, helpers.arg_at(args, 0))
+        rt_val.to_integer_or_infinity(st, helpers.arg_at(args, 0))
       #(int.max(raw, 0), st)
     }
   }
@@ -2810,16 +2803,16 @@ fn array_to_spliced(
 fn array_with(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
   use this, _h, length, st <- require_array(st, this)
-  let #(raw, st) = rt_val.t_to_integer_or_infinity(st, helpers.arg_at(args, 0))
+  let #(raw, st) = rt_val.to_integer_or_infinity(st, helpers.arg_at(args, 0))
   let actual_index = case raw < 0 {
     True -> length + raw
     False -> raw
   }
   use <- bool.lazy_guard(length > max_array_length, fn() {
-    rt_val.t_throw_range_error(st, "Invalid array length")
+    rt_val.throw_range_error(st, "Invalid array length")
   })
   case actual_index < 0 || actual_index >= length {
-    True -> rt_val.t_throw_range_error(st, "Invalid index")
+    True -> rt_val.throw_range_error(st, "Invalid index")
     False -> {
       let replacement = case args {
         [_, r, ..] -> r
@@ -2871,10 +2864,9 @@ fn collect_elements_descending(
 
 fn array_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   use array, h, st <- require_object(st, this)
-  let #(func, st) =
-    rt_obj.t_get_prop(st, mk_object(h), StringKey(Named("join")))
+  let #(func, st) = rt_obj.get_prop(st, mk_object(h), StringKey(Named("join")))
   case rt_val.is_callable(st, func) {
-    True -> rt_call.t_call(st, func, array, [])
+    True -> rt_call.call(st, func, array, [])
     False -> b_object.dispatch(st, ObjectPrototypeToString, array, [])
   }
 }
@@ -2910,7 +2902,7 @@ fn array_to_locale_string_loop(
     True ->
       case limits.join(list.reverse(acc), ",") {
         Ok(result) -> #(mk_string(result), st)
-        Error(Nil) -> rt_val.t_throw_range_error(st, "Invalid string length")
+        Error(Nil) -> rt_val.throw_range_error(st, "Invalid string length")
       }
     False -> {
       let #(elem, st) = rt_abstract_ops.get_index(st, this, idx)
@@ -2927,13 +2919,13 @@ fn array_to_locale_string_loop(
           )
         _ -> {
           let #(method, st) =
-            rt_obj.t_get_prop(st, elem, StringKey(Named("toLocaleString")))
+            rt_obj.get_prop(st, elem, StringKey(Named("toLocaleString")))
           use method <- helpers.require_callable(st, method, fn() {
             not_a_function(st, method)
           })
           let #(locale_val, st) =
-            rt_call.t_call(st, method, elem, [locales_v, options_v])
-          let #(s, st) = rt_val.t_to_string(st, locale_val)
+            rt_call.call(st, method, elem, [locales_v, options_v])
+          let #(s, st) = rt_val.to_string(st, locale_val)
           array_to_locale_string_loop(
             st,
             this,

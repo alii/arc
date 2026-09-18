@@ -134,34 +134,31 @@ fn with_ta_and_index(
   }
   let ta_val = helpers.first_arg_or_undefined(args)
   use view <- helpers.some_or(read_typed_array(st, ta_val), fn() {
-    rt_val.t_throw_type_error(
-      st,
-      "Atomics operation needs an integer TypedArray",
-    )
+    rt_val.throw_type_error(st, "Atomics operation needs an integer TypedArray")
   })
   use elem <- helpers.some_or(atomics_elem(view.elem_kind, waitable), fn() {
-    rt_val.t_throw_type_error(
+    rt_val.throw_type_error(
       st,
       "Invalid TypedArray element type for Atomics operation",
     )
   })
   use storage <- helpers.some_or(buffer.storage(st, view.buffer), fn() {
-    rt_val.t_throw_type_error(st, "TypedArray is not attached")
+    rt_val.throw_type_error(st, "TypedArray is not attached")
   })
   use Nil <- helpers.guard(
     !require_shared || buffer.buffer_is_shared(storage),
     fn() {
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Atomics.wait requires a SharedArrayBuffer TypedArray",
       )
     },
   )
   use buf <- helpers.some_or(live_buffer(storage), fn() {
-    rt_val.t_throw_type_error(st, "ArrayBuffer is detached")
+    rt_val.throw_type_error(st, "ArrayBuffer is detached")
   })
   use Nil <- helpers.guard(!write || !buf.immutable, fn() {
-    rt_val.t_throw_type_error(
+    rt_val.throw_type_error(
       st,
       "Atomics operation cannot write to an immutable ArrayBuffer",
     )
@@ -177,13 +174,9 @@ fn with_ta_and_index(
       elem:,
     )
   let #(idx, st) =
-    rt_val.t_to_index(
-      st,
-      helpers.arg_at(args, 1),
-      "Invalid atomic access index",
-    )
+    rt_val.to_index(st, helpers.arg_at(args, 1), "Invalid atomic access index")
   use Nil <- helpers.guard(idx < live, fn() {
-    rt_val.t_throw_range_error(st, "Atomics access index out of range")
+    rt_val.throw_range_error(st, "Atomics access index out of range")
   })
   #(info, idx, st)
 }
@@ -200,7 +193,7 @@ type TypedArrayView {
 fn read_typed_array(st: Agent, val: JsVal) -> Option(TypedArrayView) {
   case classify(val) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(
           kind: TypedArrayObj(buffer:, elem_kind:, byte_offset:, length:),
           ..,
@@ -255,15 +248,15 @@ fn live_buffer(storage: BufferStorage) -> Option(BufferInfo) {
 // §25.4.3.4 coercion may have detached or shrunk buffer
 fn revalidate(st: Agent, info: AtomicsTarget, idx: Int) -> BufferInfo {
   use storage <- helpers.some_or(buffer.storage(st, info.buffer), fn() {
-    rt_val.t_throw_type_error(st, "TypedArray is not attached")
+    rt_val.throw_type_error(st, "TypedArray is not attached")
   })
   use buf <- helpers.some_or(live_buffer(storage), fn() {
-    rt_val.t_throw_type_error(st, "ArrayBuffer is detached")
+    rt_val.throw_type_error(st, "ArrayBuffer is detached")
   })
   let size = elem_size(info)
   let byte_off = info.byte_offset + idx * size
   use Nil <- helpers.guard(byte_off + size <= buf.byte_size, fn() {
-    rt_val.t_throw_range_error(st, "Atomics access index out of range")
+    rt_val.throw_range_error(st, "Atomics access index out of range")
   })
   buf
 }
@@ -271,9 +264,9 @@ fn revalidate(st: Agent, info: AtomicsTarget, idx: Int) -> BufferInfo {
 // non-finite maps to +0, match before saturating
 fn to_operand(st: Agent, info: AtomicsTarget, val: JsVal) -> #(Int, Agent) {
   case info.elem_kind {
-    BigKind(_) -> rt_val.t_to_bigint(st, val)
+    BigKind(_) -> rt_val.to_bigint(st, val)
     NumKind(_) -> {
-      let #(num, st) = rt_val.t_to_number(st, val)
+      let #(num, st) = rt_val.to_number(st, val)
       case num {
         JPosInf | JNegInf -> #(0, st)
         _ -> #(rt_val.jsnum_to_integer_or_infinity(num), st)
@@ -416,13 +409,13 @@ fn atomic_store(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(info, idx, st) = with_ta_and_index(st, args, mode: RmwAccess)
   case info.elem_kind {
     BigKind(_) -> {
-      let #(v, st) = rt_val.t_to_bigint(st, helpers.arg_at(args, 2))
+      let #(v, st) = rt_val.to_bigint(st, helpers.arg_at(args, 2))
       let buf = revalidate(st, info, idx)
       let st = write_element(st, info, buf, idx, v)
       #(mk_bigint(v), st)
     }
     NumKind(_) -> {
-      let #(num, st) = rt_val.t_to_number(st, helpers.arg_at(args, 2))
+      let #(num, st) = rt_val.to_number(st, helpers.arg_at(args, 2))
       let buf = revalidate(st, info, idx)
       let #(stored, ret) = case num {
         JPosInf -> #(0, mk_number(JPosInf))
@@ -440,7 +433,7 @@ fn atomic_store(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 
 fn is_lock_free(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(n, st) =
-    rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
+    rt_val.to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
   let ok = case n {
     1 | 2 | 4 | 8 -> True
     _ -> False
@@ -456,9 +449,9 @@ fn pause(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
       case rt_val.integral_int(f) {
         Some(_) -> #(mk_undefined(), st)
         None ->
-          rt_val.t_throw_type_error(st, "Atomics.pause: not an integral number")
+          rt_val.throw_type_error(st, "Atomics.pause: not an integral number")
       }
-    _ -> rt_val.t_throw_type_error(st, "Atomics.pause: not an integral number")
+    _ -> rt_val.throw_type_error(st, "Atomics.pause: not an integral number")
   }
 }
 
@@ -468,7 +461,7 @@ fn do_wait(st: Agent, args: List(JsVal), sync sync: Bool) -> #(JsVal, Agent) {
   let #(v, st) = wait_value(st, info, helpers.arg_at(args, 2))
   let #(timeout_ms, st) = wait_timeout(st, helpers.arg_at(args, 3))
   use Nil <- helpers.guard(!sync || st.hooks.can_block, fn() {
-    rt_val.t_throw_type_error(st, "Atomics.wait cannot be called in this agent")
+    rt_val.throw_type_error(st, "Atomics.wait cannot be called in this agent")
   })
   let _buf = revalidate(st, info, idx)
   let byte_off = element_offset(info, idx)
@@ -514,15 +507,15 @@ fn do_wait(st: Agent, args: List(JsVal), sync sync: Bool) -> #(JsVal, Agent) {
 fn wait_value(st: Agent, info: AtomicsTarget, val: JsVal) -> #(Int, Agent) {
   case info.elem_kind {
     BigKind(_) -> {
-      let #(n, st) = rt_val.t_to_bigint(st, val)
+      let #(n, st) = rt_val.to_bigint(st, val)
       #(wrap_to_kind(n, I64), st)
     }
-    NumKind(_) -> rt_val.t_to_int32(st, val)
+    NumKind(_) -> rt_val.to_int32(st, val)
   }
 }
 
 fn wait_timeout(st: Agent, val: JsVal) -> #(Option(Int), Agent) {
-  let #(num, st) = rt_val.t_to_number(st, val)
+  let #(num, st) = rt_val.to_number(st, val)
   let t = case num {
     JNan | JPosInf -> None
     JNegInf -> Some(0)
@@ -566,7 +559,7 @@ fn notify_count(st: Agent, val: JsVal) -> #(Int, Agent) {
   case classify(val) {
     KUndef -> #(limits.max_safe_integer, st)
     _ -> {
-      let #(n, st) = rt_val.t_to_integer_or_infinity(st, val)
+      let #(n, st) = rt_val.to_integer_or_infinity(st, val)
       #(int.max(n, 0), st)
     }
   }

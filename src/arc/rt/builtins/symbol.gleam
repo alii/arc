@@ -32,8 +32,8 @@ pub fn init(
   let #(len_p, st) = common.fn_length_property(st, 0)
   let #(name_p, st) = common.fn_name_property(st, "Symbol")
   let #(proto_p, st) = common.fn_prototype_property(st, prototype)
-  let #(for_p, st) = rt_store.t_builtin_property(st, mk_object(for_h))
-  let #(key_for_p, st) = rt_store.t_builtin_property(st, mk_object(key_for_h))
+  let #(for_p, st) = rt_store.builtin_property(st, mk_object(for_h))
+  let #(key_for_p, st) = rt_store.builtin_property(st, mk_object(key_for_h))
   let #(wk_props, st) =
     well_known_properties(st, [
       #("toStringTag", types.symbol_to_string_tag),
@@ -62,7 +62,7 @@ pub fn init(
       ..wk_props
     ])
   let #(constructor, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       plain_object(
         NativeFn(
@@ -75,7 +75,7 @@ pub fn init(
         ctor_props,
       ),
     )
-  let st = rt_store.t_pin_root(st, constructor)
+  let st = rt_store.pin_root(st, constructor)
   let #(to_string_h, st) =
     common.alloc_rooted_native_fn(
       st,
@@ -108,9 +108,9 @@ pub fn init(
       "get description",
       0,
     )
-  let #(ctor_p, st) = rt_store.t_builtin_property(st, mk_object(constructor))
-  let #(ts_p, st) = rt_store.t_builtin_property(st, mk_object(to_string_h))
-  let #(vo_p, st) = rt_store.t_builtin_property(st, mk_object(value_of_h))
+  let #(ctor_p, st) = rt_store.builtin_property(st, mk_object(constructor))
+  let #(ts_p, st) = rt_store.builtin_property(st, mk_object(to_string_h))
+  let #(vo_p, st) = rt_store.builtin_property(st, mk_object(value_of_h))
   let #(desc_p, st) =
     common.accessor_property(
       st,
@@ -120,10 +120,9 @@ pub fn init(
       configurable: True,
     )
   let #(tag_pair, st) = common.string_tag_property(st, "Symbol")
-  let #(to_prim_p, st) =
-    rt_store.t_frozen_property(st, mk_object(to_primitive_h))
+  let #(to_prim_p, st) = rt_store.frozen_property(st, mk_object(to_primitive_h))
   let st =
-    rt_store.t_cell_update(st, prototype, fn(cell) {
+    rt_store.cell_update(st, prototype, fn(cell) {
       let assert SObject(..) = cell
       SObject(
         ..cell,
@@ -150,7 +149,7 @@ fn well_known_properties(
   case specs {
     [] -> #([], st)
     [#(name, id), ..rest] -> {
-      let #(prop, st) = rt_store.t_frozen_property(st, mk_symbol(id))
+      let #(prop, st) = rt_store.frozen_property(st, mk_symbol(id))
       let #(tail, st) = well_known_properties(st, rest)
       #([#(name, prop), ..tail], st)
     }
@@ -158,7 +157,7 @@ fn well_known_properties(
 }
 
 pub fn new(st: Agent, description: Option(String)) -> #(SymbolId, Agent) {
-  let #(uid, st) = rt_store.t_next_symbol_id(st)
+  let #(uid, st) = rt_store.next_symbol_id(st)
   #(UserSymbol(uid:, description:), st)
 }
 
@@ -187,8 +186,7 @@ fn call_as_function(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
       #(mk_symbol(id), st)
     }
     _ -> {
-      let #(s, st) =
-        rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+      let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
       let #(id, st) = new(st, Some(s))
       #(mk_symbol(id), st)
     }
@@ -197,7 +195,7 @@ fn call_as_function(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 
 // §20.4.2.2 registered symbols are equal by key, no registry
 fn symbol_for(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(key, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+  let #(key, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   #(mk_symbol(RegisteredSymbol(key:)), st)
 }
 
@@ -206,8 +204,7 @@ fn symbol_key_for(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   case classify(helpers.first_arg_or_undefined(args)) {
     KSym(RegisteredSymbol(key:)) -> #(mk_string(key), st)
     KSym(_) -> #(mk_undefined(), st)
-    _ ->
-      rt_val.t_throw_type_error(st, "Symbol.keyFor requires a Symbol argument")
+    _ -> rt_val.throw_type_error(st, "Symbol.keyFor requires a Symbol argument")
   }
 }
 
@@ -237,7 +234,7 @@ fn this_symbol_value(st: Agent, this: JsVal, method: String) -> SymbolId {
   case classify(this) {
     KSym(id) -> id
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: SymbolObj(value: id), ..) -> id
         _ -> not_a_symbol(st, method)
       }
@@ -246,7 +243,7 @@ fn this_symbol_value(st: Agent, this: JsVal, method: String) -> SymbolId {
 }
 
 fn not_a_symbol(st: Agent, method: String) -> a {
-  rt_val.t_throw_type_error(
+  rt_val.throw_type_error(
     st,
     "Symbol.prototype." <> method <> " requires that 'this' be a Symbol",
   )

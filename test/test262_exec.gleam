@@ -695,15 +695,10 @@ fn print_native(
   args: List(JsVal),
   _this: JsVal,
 ) -> #(Result(JsVal, JsVal), HostContext) {
-  let #(str, st) = rt_val.t_to_string(ctx.agent, host.first_arg(args))
+  let #(str, st) = rt_val.to_string(ctx.agent, host.first_arg(args))
   let global = mk_object(st.realm.global_object)
   let #(_ok, st) =
-    rt_obj.t_set_prop(
-      st,
-      global,
-      StringKey(Named(print_output)),
-      mk_string(str),
-    )
+    rt_obj.set_prop(st, global, StringKey(Named(print_output)), mk_string(str))
   done(ctx, st)
 }
 
@@ -719,7 +714,7 @@ fn eval_harness_template(
 }
 
 fn ordinary_proto(st: Agent, h: Handle) -> Option(Handle) {
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     SObject(kind: ProxyObj(..), ..) -> None
     SObject(proto:, ..) | SShapedObject(proto:, ..) -> proto
     _ -> None
@@ -727,7 +722,7 @@ fn ordinary_proto(st: Agent, h: Handle) -> Option(Handle) {
 }
 
 fn get_data(st: Agent, h: Handle, key: String) -> Option(JsVal) {
-  case rt_obj.t_ordinary_own_property(st, h, StringKey(Named(key))) {
+  case rt_obj.ordinary_own_property(st, h, StringKey(Named(key))) {
     Some(DataProperty(value: val, ..)) -> Some(val)
     Some(_) -> None
     None -> option.then(ordinary_proto(st, h), get_data(st, _, key))
@@ -758,7 +753,7 @@ fn extend_262_with_agent(
   parent: Option(AgentPid),
 ) -> HostContext {
   let #(agent_obj, ctx) = build_agent(ctx, parent)
-  let #(prop, st) = rt_store.t_builtin_property(ctx.agent, agent_obj)
+  let #(prop, st) = rt_store.builtin_property(ctx.agent, agent_obj)
   let st = common.add_named_property(st, dollar_262, "agent", prop)
   host.Context(..ctx, agent: st)
 }
@@ -785,7 +780,7 @@ fn build_agent(
       let #(props, ctx) = acc
       let #(name, impl, arity) = method
       let #(f, ctx) = host.function(ctx, name, arity, impl)
-      let #(prop, st) = rt_store.t_builtin_property(ctx.agent, f)
+      let #(prop, st) = rt_store.builtin_property(ctx.agent, f)
       #([#(name, prop), ..props], host.Context(..ctx, agent: st))
     })
   let st = ctx.agent
@@ -793,16 +788,16 @@ fn build_agent(
   let #(children, st) = common.alloc_array(st, [], array_proto)
   let #(reports, st) = common.alloc_array(st, [], array_proto)
   let #(agents, st) = common.alloc_array(st, [], array_proto)
-  let #(children_prop, st) = rt_store.t_frozen_property(st, mk_object(children))
-  let #(reports_prop, st) = rt_store.t_frozen_property(st, mk_object(reports))
-  let #(agents_prop, st) = rt_store.t_frozen_property(st, mk_object(agents))
+  let #(children_prop, st) = rt_store.frozen_property(st, mk_object(children))
+  let #(reports_prop, st) = rt_store.frozen_property(st, mk_object(reports))
+  let #(agents_prop, st) = rt_store.frozen_property(st, mk_object(agents))
   let hidden = [
     #("__children__", common.make_configurable(children_prop)),
     #("__reports__", common.make_configurable(reports_prop)),
     #("__agents__", common.make_configurable(agents_prop)),
   ]
   let #(h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       plain_object(
         Ordinary,
@@ -836,7 +831,7 @@ fn agent_start_native(
   args: List(JsVal),
   this: JsVal,
 ) -> #(Result(JsVal, JsVal), HostContext) {
-  let #(source, st) = rt_val.t_to_string(ctx.agent, host.first_arg(args))
+  let #(source, st) = rt_val.to_string(ctx.agent, host.first_arg(args))
   let ctx = host.Context(..ctx, agent: st)
   case agent_queue(ctx.agent, this, "__children__") {
     None -> host.type_error(ctx, "start: $262.agent state missing")
@@ -894,7 +889,7 @@ fn run_agent_child_loop(st: Agent, agent_this: JsVal, parent: AgentPid) -> Nil {
     AgentWakeParentDown -> Nil
     AgentWakeSab(ref) ->
       run_agent_child_loop(
-        settle_pending_wakes(rt_async.t_wake_waiter(st, ref)),
+        settle_pending_wakes(rt_async.wake_waiter(st, ref)),
         agent_this,
         parent,
       )
@@ -903,7 +898,7 @@ fn run_agent_child_loop(st: Agent, agent_this: JsVal, parent: AgentPid) -> Nil {
       let st = case agent_queue(st, agent_this, "__agents__") {
         Some(#(_arr, callbacks)) ->
           list.fold(callbacks, st, fn(st, cb) {
-            case rt_call.t_try_call(st, cb, mk_undefined(), [msg]) {
+            case rt_call.try_call(st, cb, mk_undefined(), [msg]) {
               #(NormalCompletion(_), st) -> st
               #(ThrowCompletion(thrown), st) -> {
                 io.println_error(
@@ -999,7 +994,7 @@ fn agent_report_native(
   this: JsVal,
   parent: Option(AgentPid),
 ) -> #(Result(JsVal, JsVal), HostContext) {
-  let #(str, st) = rt_val.t_to_string(ctx.agent, host.first_arg(args))
+  let #(str, st) = rt_val.to_string(ctx.agent, host.first_arg(args))
   case parent {
     Some(parent) -> {
       let Nil = ffi_send_report(parent, str)
@@ -1048,7 +1043,7 @@ fn agent_sleep_native(
   args: List(JsVal),
   _this: JsVal,
 ) -> #(Result(JsVal, JsVal), HostContext) {
-  let #(num, st) = rt_val.t_to_number(ctx.agent, host.first_arg(args))
+  let #(num, st) = rt_val.to_number(ctx.agent, host.first_arg(args))
   let ms = case num {
     JInt(i) -> i
     JFloat(f) -> float.truncate(f)
@@ -1076,7 +1071,7 @@ fn agent_leaving_native(
 
 fn agent_hidden_handle(st: Agent, this: JsVal, name: String) -> Option(Handle) {
   use this_h <- option.then(rt_val.handle_of(this))
-  case rt_obj.t_ordinary_own_property(st, this_h, StringKey(Named(name))) {
+  case rt_obj.ordinary_own_property(st, this_h, StringKey(Named(name))) {
     Some(DataProperty(value:, ..)) -> rt_val.handle_of(value)
     _ -> None
   }
@@ -1088,7 +1083,7 @@ fn agent_queue(
   name: String,
 ) -> Option(#(Handle, List(JsVal))) {
   use arr <- option.then(agent_hidden_handle(st, this, name))
-  case rt_store.t_cell_get(st, arr) {
+  case rt_store.cell_get(st, arr) {
     SObject(kind: ArrayObj(length:), elements: els, ..) -> {
       let values =
         int.range(from: length - 1, to: -1, with: [], run: fn(acc, i) {
@@ -1101,9 +1096,9 @@ fn agent_queue(
 }
 
 fn agent_queue_write(st: Agent, arr: Handle, values: List(JsVal)) -> Agent {
-  case rt_store.t_cell_get(st, arr) {
+  case rt_store.cell_get(st, arr) {
     SObject(kind: ArrayObj(_), ..) as cell ->
-      rt_store.t_cell_set(
+      rt_store.cell_set(
         st,
         arr,
         SObject(

@@ -13,7 +13,7 @@ const threshold = 256
 
 fn small_agent() -> Agent {
   let st = rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
-  let st = rt_gc.t_collect(st, [])
+  let st = rt_gc.collect(st, [])
   Agent(..st, store: Store(..st.store, gc_threshold: threshold))
 }
 

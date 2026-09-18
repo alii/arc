@@ -204,7 +204,7 @@ pub fn ctor(
   protos: TemporalProtos,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(ns, st) = rt_val.t_to_bigint(st, helpers.arg_at(args, 0))
+  let #(ns, st) = rt_val.to_bigint(st, helpers.arg_at(args, 0))
   case classify(helpers.arg_at(args, 1)) {
     KStr(tz_text) -> {
       // only bare identifiers, not iso date-time strings
@@ -221,12 +221,11 @@ pub fn ctor(
         })
       let cal = rt_val.or_throw(st, to_calendar_arg(helpers.arg_at(args, 2)))
       case is_valid_epoch_ns(ns) {
-        False ->
-          rt_val.t_throw_range_error(st, "epoch nanoseconds out of range")
+        False -> rt_val.throw_range_error(st, "epoch nanoseconds out of range")
         True -> make_zoned_cal(st, protos, ns, tz, cal)
       }
     }
-    _ -> rt_val.t_throw_type_error(st, "time zone must be a string")
+    _ -> rt_val.throw_type_error(st, "time zone must be a string")
   }
 }
 
@@ -339,7 +338,7 @@ pub fn method(
       #(mk_string(with_tz <> calendar_suffix(cal_name, zcal)), st)
     }
     ZonedDateTimeValueOf ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Temporal.ZonedDateTime cannot be converted with valueOf",
       )
@@ -377,7 +376,7 @@ pub fn method(
         to_temporal_zoned(st, helpers.arg_at(args, 0), mk_undefined())
       case ocal == zcal {
         False ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "cannot compute difference between dates of different calendars",
           )
@@ -401,7 +400,7 @@ pub fn method(
       let unit_ns = time_unit_ns(smallest_time_unit)
       let max = max_rounding_increment(smallest_time_unit) |> option.unwrap(1)
       case valid_rounding_increment(inc, max, inclusive: False) {
-        False -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
+        False -> rt_val.throw_range_error(st, "invalid roundingIncrement")
         True -> {
           let local = ns + off
           let day_part = floor_div(local, ns_per_day)
@@ -500,12 +499,11 @@ pub fn method(
     ZonedDateTimeGetTimeZoneTransition -> {
       let arg = helpers.arg_at(args, 0)
       let #(dir, st) = case classify(arg) {
-        KUndef ->
-          rt_val.t_throw_type_error(st, "direction parameter is required")
+        KUndef -> rt_val.throw_type_error(st, "direction parameter is required")
         KStr("next") -> #(Next, st)
         KStr("previous") -> #(Previous, st)
         KStr(_) ->
-          rt_val.t_throw_range_error(st, "direction must be next or previous")
+          rt_val.throw_range_error(st, "direction must be next or previous")
         KHandle(oh) -> {
           let #(dir, st) =
             get_enum_option(
@@ -517,10 +515,10 @@ pub fn method(
             )
           case dir {
             Some(d2) -> #(d2, st)
-            None -> rt_val.t_throw_range_error(st, "direction is required")
+            None -> rt_val.throw_range_error(st, "direction is required")
           }
         }
-        _ -> rt_val.t_throw_type_error(st, "invalid direction")
+        _ -> rt_val.throw_type_error(st, "invalid direction")
       }
       case tz {
         UtcZone | OffsetZone(_) -> #(mk_null(), st)
@@ -572,7 +570,7 @@ fn zoned_until_since(
     False ->
       case time_zone_equals(a_tz, b_tz) {
         False ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "time zones must be equal for calendar-unit differences",
           )

@@ -2247,7 +2247,7 @@ fn emit_math_builtin_call(
   anf.bind_if(
     is_miss,
     {
-      // t_plus returns wire jsval, t_to_number does not
+      // plus returns wire jsval, to_number does not
       use coerced <- anf.then(
         anf.seq(list.map(pos, fn(a) { anf.host("plus", [a]) })),
       )

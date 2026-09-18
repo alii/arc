@@ -136,8 +136,8 @@ fn profile(label: String, source: String, runs: Int, iters: Int) -> Nil {
   )
 
   let direct =
-    count_of(atom.create("arc_rt_call_ffi"), atom.create("t_direct_callee"), 3)
-  let general = count_of(atom.create("arc@rt@call"), atom.create("t_call"), 4)
+    count_of(atom.create("arc_rt_call_ffi"), atom.create("direct_callee"), 3)
+  let general = count_of(atom.create("arc@rt@call"), atom.create("call"), 4)
   case direct + general {
     0 -> Nil
     _ ->
@@ -146,7 +146,7 @@ fn profile(label: String, source: String, runs: Int, iters: Int) -> Nil {
         <> int.to_string(direct)
         <> " ("
         <> int.to_string(direct / runs)
-        <> "/run)  t_call(general)="
+        <> "/run)  call(general)="
         <> int.to_string(general)
         <> " → direct callee "
         <> case general {
@@ -309,28 +309,28 @@ pub fn profile_file(label: String, path: String, runs: Int) -> Nil {
   let rt = fn(m: String) { atom.create("arc@rt@" <> m) }
   let ffi = fn(m: String) { atom.create("arc_" <> m) }
   let targets = [
-    #(rt("obj"), "t_get_prop_untyped_key", 3),
-    #(rt("obj"), "t_set_prop_untyped_key", 4),
-    #(rt("call"), "t_call", 4),
-    #(rt("call"), "t_direct_callee", 3),
-    #(rt("call"), "t_construct", 4),
-    #(rt("ops"), "t_instance_of", 3),
-    #(ffi("rt_obj_ffi"), "t_get_prop_own_data", 3),
-    #(rt("lang"), "t_global_get", 2),
-    #(ffi("rt_obj_ffi"), "t_global_peek", 2),
-    #(ffi("rt_obj_ffi"), "t_get_elem", 3),
+    #(rt("obj"), "get_prop_untyped_key", 3),
+    #(rt("obj"), "set_prop_untyped_key", 4),
+    #(rt("call"), "call", 4),
+    #(rt("call"), "direct_callee", 3),
+    #(rt("call"), "construct", 4),
+    #(rt("ops"), "instance_of", 3),
+    #(ffi("rt_obj_ffi"), "get_prop_own_data", 3),
+    #(rt("lang"), "global_get", 2),
+    #(ffi("rt_obj_ffi"), "global_peek", 2),
+    #(ffi("rt_obj_ffi"), "get_elem", 3),
     #(ffi("rt_obj_ffi"), "elem_at", 2),
-    #(ffi("rt_obj_ffi"), "t_set_elem", 4),
+    #(ffi("rt_obj_ffi"), "set_elem", 4),
     #(ffi("rt_obj_ffi"), "elem_write", 3),
-    #(rt("val"), "t_to_property_key", 2),
-    #(ffi("rt_obj_ffi"), "t_set_prop_own_data", 4),
-    #(rt("store"), "t_cell_get", 2),
-    #(ffi("rt_store_ffi"), "t_cell_get", 2),
-    #(ffi("rt_call_ic_ffi"), "t_call_method_ic", 6),
-    #(ffi("rt_call_ic_ffi"), "t_new_direct", 3),
-    #(ffi("rt_obj_ic_ffi"), "t_get_named_ic", 4),
-    #(ffi("rt_obj_ic_ffi"), "t_set_named_ic", 6),
-    #(rt("obj"), "t_new_arguments", 4),
+    #(rt("val"), "to_property_key", 2),
+    #(ffi("rt_obj_ffi"), "set_prop_own_data", 4),
+    #(rt("store"), "cell_get", 2),
+    #(ffi("rt_store_ffi"), "cell_get", 2),
+    #(ffi("rt_call_ic_ffi"), "call_method_ic", 6),
+    #(ffi("rt_call_ic_ffi"), "new_direct", 3),
+    #(ffi("rt_obj_ic_ffi"), "get_named_ic", 4),
+    #(ffi("rt_obj_ic_ffi"), "set_named_ic", 6),
+    #(rt("obj"), "new_arguments", 4),
     #(ffi("rt_call_ic_ffi"), "new_direct_apply", 7),
   ]
   list.each(targets, fn(t) {
@@ -411,14 +411,14 @@ fn microbench() {
       #(atom.create("named"), <<"x":utf8>>),
     ))
   micro(
-    "t_get_prop_untyped_key (o.x)",
+    "get_prop_untyped_key (o.x)",
     "get_prop",
     st_obj,
     to_dynamic(#(o_h, key)),
     1_000_000,
   )
   micro(
-    "t_set_prop_untyped_key (o.x = v)",
+    "set_prop_untyped_key (o.x = v)",
     "set_prop",
     st_obj,
     to_dynamic(#(o_h, key)),
@@ -426,14 +426,14 @@ fn microbench() {
   )
   let kb = to_dynamic(<<"x":utf8>>)
   micro(
-    "t_get_prop_own_data (FFI)",
+    "get_prop_own_data (FFI)",
     "get_prop_own_data",
     st_obj,
     to_dynamic(#(o_h, kb)),
     1_000_000,
   )
   micro(
-    "t_set_prop_own_data (FFI)",
+    "set_prop_own_data (FFI)",
     "set_prop_own_data",
     st_obj,
     to_dynamic(#(o_h, kb)),
@@ -446,16 +446,16 @@ const richards_us_target = 2200
 const obj_prop_us_target = 11_800
 
 const richards_baseline = [
-  #("arc_rt_obj_ffi", "t_global_peek", 2, 65),
-  #("arc@rt@lang", "t_global_get", 2, 0),
-  #("arc_rt_obj_ffi", "t_get_prop_own_data", 3, 106),
-  #("arc_rt_obj_ffi", "t_set_prop_own_data", 4, 143),
-  #("arc_rt_obj_ic_ffi", "t_get_named_ic", 4, 0),
-  #("arc_rt_obj_ic_ffi", "t_set_named_ic", 6, 0),
-  #("arc_rt_call_ic_ffi", "t_new_direct", 3, 32),
-  #("arc_rt_call_ic_ffi", "t_call_method_ic", 6, 40_466),
-  #("arc_rt_store_ffi", "t_cell_get", 2, 1320),
-  #("arc_rt_call_ffi", "t_direct_callee", 3, 1),
+  #("arc_rt_obj_ffi", "global_peek", 2, 65),
+  #("arc@rt@lang", "global_get", 2, 0),
+  #("arc_rt_obj_ffi", "get_prop_own_data", 3, 106),
+  #("arc_rt_obj_ffi", "set_prop_own_data", 4, 143),
+  #("arc_rt_obj_ic_ffi", "get_named_ic", 4, 0),
+  #("arc_rt_obj_ic_ffi", "set_named_ic", 6, 0),
+  #("arc_rt_call_ic_ffi", "new_direct", 3, 32),
+  #("arc_rt_call_ic_ffi", "call_method_ic", 6, 40_466),
+  #("arc_rt_store_ffi", "cell_get", 2, 1320),
+  #("arc_rt_call_ffi", "direct_callee", 3, 1),
 ]
 
 fn correctness_gate(label: String, path: String) -> Bool {
@@ -592,11 +592,11 @@ pub fn bench_verify() -> Bool {
     False -> {
       io.println("  ── attribution (target missed) ──")
       let n = fn(m, f, a) { count_of(atom.create(m), atom.create(f), a) }
-      let g_after = n("arc_rt_obj_ffi", "t_global_peek", 2)
-      let i_after = n("arc_rt_obj_ic_ffi", "t_get_named_ic", 4)
-      let h_own = n("arc_rt_obj_ffi", "t_get_prop_own_data", 3)
+      let g_after = n("arc_rt_obj_ffi", "global_peek", 2)
+      let i_after = n("arc_rt_obj_ic_ffi", "get_named_ic", 4)
+      let h_own = n("arc_rt_obj_ffi", "get_prop_own_data", 3)
       io.println(
-        "    G slotted-globals: t_global_peek "
+        "    G slotted-globals: global_peek "
         <> int.to_string(g_after)
         <> "/run — "
         <> case g_after < 10 {
@@ -605,7 +605,7 @@ pub fn bench_verify() -> Bool {
         },
       )
       io.println(
-        "    I prop-IC:         t_get_named_ic "
+        "    I prop-IC:         get_named_ic "
         <> int.to_string(i_after)
         <> "/run — "
         <> case i_after > 0 {
@@ -614,7 +614,7 @@ pub fn bench_verify() -> Bool {
         },
       )
       io.println(
-        "    H shaped-objects:  t_get_prop_own_data "
+        "    H shaped-objects:  get_prop_own_data "
         <> int.to_string(h_own)
         <> "/run — "
         <> case h_own < 50 {
@@ -677,15 +677,15 @@ pub fn raytrace_apply_verify() -> Bool {
 
   let rt = fn(m: String) { atom.create("arc@rt@" <> m) }
   let ffi = fn(m: String) { atom.create("arc_" <> m) }
-  let n_new_args = count_of(rt("obj"), atom.create("t_new_arguments"), 4)
-  let n_call = count_of(rt("call"), atom.create("t_call"), 4)
+  let n_new_args = count_of(rt("obj"), atom.create("new_arguments"), 4)
+  let n_call = count_of(rt("call"), atom.create("call"), 4)
   let n_new_direct =
-    count_of(ffi("rt_call_ic_ffi"), atom.create("t_new_direct"), 3)
+    count_of(ffi("rt_call_ic_ffi"), atom.create("new_direct"), 3)
   let n_ns_apply =
     count_of(ffi("rt_call_ic_ffi"), atom.create("new_direct_apply"), 7)
   let n_method_ic =
-    count_of(ffi("rt_call_ic_ffi"), atom.create("t_call_method_ic"), 6)
-  let n_construct = count_of(rt("call"), atom.create("t_construct"), 4)
+    count_of(ffi("rt_call_ic_ffi"), atom.create("call_method_ic"), 6)
+  let n_construct = count_of(rt("call"), atom.create("construct"), 4)
   io.println("  ── targeted counts (per run) ──")
   let row = fn(name: String, n: Int) {
     io.println(
@@ -694,19 +694,19 @@ pub fn raytrace_apply_verify() -> Bool {
       <> string.pad_start(int.to_string(n), 10, " "),
     )
   }
-  row("t_new_arguments/4", n_new_args)
-  row("t_call/4", n_call)
-  row("t_new_direct/3", n_new_direct)
+  row("new_arguments/4", n_new_args)
+  row("call/4", n_call)
+  row("new_direct/3", n_new_direct)
   row("new_direct_apply/7", n_ns_apply)
-  row("t_call_method_ic/6", n_method_ic)
-  row("t_construct/4 (new_direct miss)", n_construct)
+  row("call_method_ic/6", n_method_ic)
+  row("construct/4 (new_direct miss)", n_construct)
 
   let args_ok = n_new_args < 100
   let chk_ok = n_call < 100
   let reaches = n_method_ic >= n_ns_apply - n_construct - 10
   io.println("  ── verdict ──")
   io.println(
-    "    (1) t_new_arguments ≈0:       "
+    "    (1) new_arguments ≈0:       "
     <> case args_ok {
       True ->
         "✓ FIRES (arguments object elided; "
@@ -719,7 +719,7 @@ pub fn raytrace_apply_verify() -> Bool {
     },
   )
   io.println(
-    "    (2) t_call ≈0:        "
+    "    (2) call ≈0:        "
     <> case chk_ok {
       True ->
         "✓ FIRES (.apply → call_method_ic; " <> int.to_string(n_call) <> "/run)"
@@ -821,18 +821,18 @@ pub fn crypto_am3_op_map() -> Nil {
     #(ffi("rt_ops_ffi"), "shl", 2, "<<14 fallback", 0),
     #(ffi("rt_ops_ffi"), "bitand", 2, "& 0x3fff/0xfffffff fallback", 0),
     #(ffi("rt_ops_ffi"), "ushr", 2, ">>> (am3 has none)", 0),
-    #(rt("ops"), "t_mul", 3, "* fallback (JMut)", 0),
-    #(rt("ops"), "t_add", 3, "+ fallback (JMut)", 0),
+    #(rt("ops"), "mul", 3, "* fallback (JMut)", 0),
+    #(rt("ops"), "add", 3, "+ fallback (JMut)", 0),
     #(
       ffi("rt_obj_ffi"),
-      "t_get_elem",
+      "get_elem",
       3,
       "this_array[i] / w_array[j] read",
       12_000,
     ),
-    #(ffi("rt_obj_ffi"), "t_set_elem", 4, "w_array[j++]= write", 4000),
-    #(rt("obj"), "t_get_prop_untyped_key", 3, "elem-miss general path", 0),
-    #(rt("val"), "t_to_property_key", 2, "elem-miss key coerce", 0),
+    #(ffi("rt_obj_ffi"), "set_elem", 4, "w_array[j++]= write", 4000),
+    #(rt("obj"), "get_prop_untyped_key", 3, "elem-miss general path", 0),
+    #(rt("val"), "to_property_key", 2, "elem-miss key coerce", 0),
   ]
   io.println(
     "    "

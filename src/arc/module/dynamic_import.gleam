@@ -156,7 +156,7 @@ pub fn source_import_call(st: Agent, specifier: JsVal) -> #(JsVal, Agent) {
   )
   use st <- enqueue_import_job(st, promise)
   let #(err, st) =
-    rt_val.t_new_error(
+    rt_val.new_error(
       st,
       SyntaxError,
       "Module has no source phase representation",
@@ -171,10 +171,10 @@ fn with_import_request(
   options: JsVal,
   k: fn(JsVal, Handle, Agent) -> Agent,
 ) -> #(JsVal, Agent) {
-  let #(promise, st) = rt_async.t_new_promise(st)
+  let #(promise, st) = rt_async.new_promise(st)
   let st = case import_request(st, specifier, options) {
     #(ThrowCompletion(reason), st) ->
-      rt_async.t_promise_reject(st, promise, reason)
+      rt_async.promise_reject(st, promise, reason)
     #(NormalCompletion(specifier), st) -> k(specifier, promise, st)
   }
   #(mk_object(promise), st)
@@ -194,7 +194,7 @@ fn import_request(
   options: JsVal,
 ) -> #(Completion(JsVal), Agent) {
   use st <- rt_call.try_run(st)
-  let #(specifier_string, st) = rt_val.t_to_string(st, specifier)
+  let #(specifier_string, st) = rt_val.to_string(st, specifier)
   let st = validate_options(st, options)
   #(mk_string(specifier_string), st)
 }
@@ -204,16 +204,15 @@ fn validate_options(st: Agent, options: JsVal) -> Agent {
     KUndef -> st
     KHandle(_) -> {
       let #(attributes, st) =
-        rt_obj.t_get_prop(st, options, StringKey(Named("with")))
+        rt_obj.get_prop(st, options, StringKey(Named("with")))
       case classify(attributes) {
         KUndef -> st
         KHandle(attributes_h) -> validate_attributes(st, attributes_h)
-        _ ->
-          rt_val.t_throw_type_error(st, "The 'with' option must be an object")
+        _ -> rt_val.throw_type_error(st, "The 'with' option must be an object")
       }
     }
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "The second argument to import() must be an object",
       )
@@ -221,23 +220,20 @@ fn validate_options(st: Agent, options: JsVal) -> Agent {
 }
 
 fn validate_attributes(st: Agent, attributes: Handle) -> Agent {
-  let #(keys, st) = rt_obj.t_enumerable_own_keys(st, attributes)
+  let #(keys, st) = rt_obj.enumerable_own_keys(st, attributes)
   let st =
     list.fold(keys, st, fn(st, pk) {
-      let #(v, st) = rt_obj.t_get_prop(st, mk_object(attributes), StringKey(pk))
+      let #(v, st) = rt_obj.get_prop(st, mk_object(attributes), StringKey(pk))
       case classify(v) {
         KStr(_) -> st
         _ ->
-          rt_val.t_throw_type_error(
-            st,
-            "Import attribute values must be strings",
-          )
+          rt_val.throw_type_error(st, "Import attribute values must be strings")
       }
     })
   case keys {
     [] -> st
     [pk, ..] ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Import attribute '" <> key.to_text(pk) <> "' is not supported",
       )
@@ -266,20 +262,20 @@ fn enqueue_host_job(
   run: fn(Agent) -> Agent,
 ) -> Agent {
   let job = fn(st) {
-    let #(held, st) = rt_gc.t_hold_roots(st, capability)
+    let #(held, st) = rt_gc.hold_roots(st, capability)
     let #(outcome, st) =
       rt_call.try_run(st, fn(st) { #(mk_undefined(), run(st)) })
-    let st = rt_gc.t_release_roots(st, held)
+    let st = rt_gc.release_roots(st, held)
     case outcome {
       NormalCompletion(_) -> st
-      ThrowCompletion(thrown) -> rt_store.t_throw(st, thrown)
+      ThrowCompletion(thrown) -> rt_store.throw(st, thrown)
     }
   }
-  rt_async.t_enqueue_job(st, HostJob(run: job))
+  rt_async.enqueue_job(st, HostJob(run: job))
 }
 
 fn call_settle_fn(st: Agent, settle_fn: JsVal, arg: JsVal) -> Agent {
-  let #(_, st) = rt_call.t_try_call(st, settle_fn, mk_undefined(), [arg])
+  let #(_, st) = rt_call.try_call(st, settle_fn, mk_undefined(), [arg])
   st
 }
 
@@ -290,7 +286,7 @@ fn call_host_hook(
   case st.import_hook {
     None -> {
       let #(err, st) =
-        rt_val.t_new_error(
+        rt_val.new_error(
           st,
           TypeError,
           "Dynamic import is not supported in this context",
@@ -302,7 +298,7 @@ fn call_host_hook(
         rt_call.try_run(st, fn(st) {
           case call(st, hook_args, mk_undefined(), mk_undefined()) {
             #(Ok(v), st) -> #(v, st)
-            #(Error(thrown), st) -> rt_store.t_throw(st, thrown)
+            #(Error(thrown), st) -> rt_store.throw(st, thrown)
           }
         })
       case outcome {

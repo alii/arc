@@ -338,7 +338,7 @@ pub fn embedder_calls_bytecode_value_test() {
     )
   let #(twice, st) = rt_helpers.global(st, "twice")
   let #(inc, st) = rt_helpers.global(st, "inc")
-  let #(v, _) = rt_call.t_call(st, twice, mk_undefined(), [inc, mk_int(40)])
+  let #(v, _) = rt_call.call(st, twice, mk_undefined(), [inc, mk_int(40)])
   assert classify(v) == KNum(JInt(42))
 }
 

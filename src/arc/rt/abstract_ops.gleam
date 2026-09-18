@@ -16,7 +16,7 @@ import gleam/list
 pub fn get_index(st: Agent, this: JsVal, idx: Int) -> #(JsVal, Agent) {
   case elements.own_element(st, this, idx) {
     elements.Hit(v) -> #(v, st)
-    elements.Miss -> rt_obj.t_get_prop(st, this, StringKey(key.index(idx)))
+    elements.Miss -> rt_obj.get_prop(st, this, StringKey(key.index(idx)))
   }
 }
 
@@ -30,10 +30,10 @@ pub fn is_array(st: Agent, v: JsVal) -> Bool {
 
 // §7.2.2, throws on revoked proxy
 pub fn is_array_handle(st: Agent, h: Handle) -> Bool {
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     SObject(kind: ArrayObj(_), ..) -> True
     SObject(kind: ProxyObj(revoked: True, ..), ..) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot perform 'IsArray' on a proxy that has been revoked",
       )
@@ -44,8 +44,8 @@ pub fn is_array_handle(st: Agent, h: Handle) -> Bool {
 
 // §7.3.18 lengthofarraylike
 pub fn length_of_array_like(st: Agent, obj: JsVal) -> #(Int, Agent) {
-  let #(len_v, st) = rt_obj.t_get_prop(st, obj, StringKey(Named("length")))
-  rt_val.t_to_length(st, len_v)
+  let #(len_v, st) = rt_obj.get_prop(st, obj, StringKey(Named("length")))
+  rt_val.to_length(st, len_v)
 }
 
 // relative index clamp shared by slice, at, fill, copyWithin, subarray
@@ -58,7 +58,7 @@ pub fn relative_index(
   case classify(val) {
     KUndef -> #(default, st)
     _ -> {
-      let #(raw, st) = rt_val.t_to_integer_or_infinity(st, val)
+      let #(raw, st) = rt_val.to_integer_or_infinity(st, val)
       let k = case raw < 0 {
         True -> int.max(len + raw, 0)
         False -> int.min(raw, len)
@@ -84,14 +84,14 @@ pub fn create_list_from_array_like(
   case arg_list(st, arr), classify(arr) {
     DenseArgs(args), _ -> #(args, st)
     Miss, KHandle(h) -> {
-      let #(len, st) = case rt_store.t_cell_get(st, h) {
+      let #(len, st) = case rt_store.cell_get(st, h) {
         SObject(kind: ArrayObj(length:), ..) -> #(length, st)
         _ -> length_of_array_like(st, arr)
       }
       collect_array_like(st, arr, 0, len, [])
     }
     Miss, _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "CreateListFromArrayLike called on non-object",
       )

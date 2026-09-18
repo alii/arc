@@ -36,7 +36,7 @@ fn date_utc(st: Agent, fields: List(Int)) -> Int {
 
 fn new_date(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(date, st) = rt_helpers.global(st, "Date")
-  let #(h, st) = rt_call.t_construct(st, date, args, date)
+  let #(h, st) = rt_call.construct(st, date, args, date)
   #(mk_object(h), st)
 }
 

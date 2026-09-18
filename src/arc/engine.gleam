@@ -166,7 +166,7 @@ pub fn register_host_module(
   let st =
     list.fold(exports, engine.agent, fn(st, export) {
       case types.classify(export.1) {
-        KHandle(h) -> rt_store.t_pin_root(st, h)
+        KHandle(h) -> rt_store.pin_root(st, h)
         _ -> st
       }
     })
@@ -314,7 +314,7 @@ pub fn call_with(
   args: List(JsVal),
   drain: Drain,
 ) -> #(Outcome, Engine(host)) {
-  let #(completion, st) = rt_call.t_try_call(engine.agent, callee, this, args)
+  let #(completion, st) = rt_call.try_call(engine.agent, callee, this, args)
   settle(engine, completion, st, drain)
 }
 
@@ -345,8 +345,8 @@ pub fn format_error(engine: Engine(host), error: JsVal) -> String {
 pub fn dump_object(engine: Engine(host), val: JsVal) -> Option(String) {
   case types.classify(val) {
     KHandle(h) ->
-      case rt_gc.t_is_live(engine.agent, h) {
-        True -> Some(string.inspect(rt_store.t_cell_get(engine.agent, h)))
+      case rt_gc.is_live(engine.agent, h) {
+        True -> Some(string.inspect(rt_store.cell_get(engine.agent, h)))
         False -> Some("<collected>")
       }
     _ -> None

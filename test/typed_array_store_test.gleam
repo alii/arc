@@ -9,7 +9,7 @@ fn global_after(source: String, name: String) -> JsValKind {
   let eng = engine.new()
   let assert Ok(#(_, eng)) = engine.eval(eng, source)
   let assert #(Some(DataProperty(value: v, ..)), _) =
-    rt_obj.t_get_own_property(
+    rt_obj.get_own_property(
       engine.agent(eng),
       engine.global(eng),
       StringKey(Named(name)),

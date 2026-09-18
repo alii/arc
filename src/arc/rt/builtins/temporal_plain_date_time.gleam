@@ -182,12 +182,12 @@ pub fn ctor(
   let t =
     IsoTime(hour:, minute:, second:, millisecond:, microsecond:, nanosecond:)
   case is_valid_iso_date(year, month, day) && is_valid_time(t) {
-    False -> rt_val.t_throw_range_error(st, "invalid ISO date-time")
+    False -> rt_val.throw_range_error(st, "invalid ISO date-time")
     True -> {
       let date = IsoDate(year:, month:, day:)
       case iso_datetime_within_limits(date, t) {
         False ->
-          rt_val.t_throw_range_error(st, "date-time outside of supported range")
+          rt_val.throw_range_error(st, "date-time outside of supported range")
         True -> make_date_time_cal(st, protos, date, t, cal)
       }
     }
@@ -265,10 +265,7 @@ pub fn to_temporal_date_time(
       #(#(d, t, cal), st)
     }
     _ ->
-      rt_val.t_throw_type_error(
-        st,
-        "cannot convert to a Temporal.PlainDateTime",
-      )
+      rt_val.throw_type_error(st, "cannot convert to a Temporal.PlainDateTime")
   }
 }
 
@@ -357,7 +354,7 @@ pub fn method(
       #(mk_string(s), st)
     }
     PlainDateTimeValueOf ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Temporal.PlainDateTime cannot be converted with valueOf",
       )
@@ -412,7 +409,7 @@ pub fn method(
         _ -> ns_per_day / unit_ns
       }
       case valid_rounding_increment(inc, max, inclusive: False) {
-        False -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
+        False -> rt_val.throw_range_error(st, "invalid roundingIncrement")
         True -> {
           let rounded =
             round_to_increment(utc_epoch_ns(d, t), inc * unit_ns, mode)
@@ -435,8 +432,8 @@ pub fn method(
           let ns = rt_val.or_throw(st, validate_epoch_ns(ns))
           make_zoned_cal(st, protos, ns, tz, cal)
         }
-        KUndef -> rt_val.t_throw_type_error(st, "time zone is required")
-        _ -> rt_val.t_throw_type_error(st, "time zone must be a string")
+        KUndef -> rt_val.throw_type_error(st, "time zone is required")
+        _ -> rt_val.throw_type_error(st, "time zone must be a string")
       }
     }
     PlainDateTimeUntil | PlainDateTimeSince -> {
@@ -444,7 +441,7 @@ pub fn method(
         to_temporal_date_time(st, helpers.arg_at(args, 0), mk_undefined())
       case ocal == cal {
         False ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "cannot compute difference between dates of different calendars",
           )

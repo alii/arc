@@ -26,14 +26,14 @@ pub fn error_kind_prototype(r: Realm, kind: ErrorKind) -> Handle {
   }
 }
 
-pub fn t_new_error(
+pub fn new_error(
   st: Agent,
   kind: ErrorKind,
   message: String,
 ) -> #(JsVal, Agent) {
   let proto = error_kind_prototype(st.realm, kind)
   let name = error_kind.name(kind)
-  let #(msg_prop, st) = rt_store.t_builtin_property(st, mk_string(message))
+  let #(msg_prop, st) = rt_store.builtin_property(st, mk_string(message))
   let #(h, st) = common.alloc_error_object(st, proto, [#("message", msg_prop)])
   let st = b_error.attach_stack(st, h, name, message)
   #(mk_object(h), st)
@@ -44,11 +44,11 @@ pub fn alloc_object(
   kind: ObjKind,
   proto: Handle,
 ) -> #(Handle, Agent) {
-  rt_store.t_cell_new(st, plain_object(kind, Some(proto), dict.new()))
+  rt_store.cell_new(st, plain_object(kind, Some(proto), dict.new()))
 }
 
 // §7.1.18 toobject
-pub fn t_wrap_primitive(st: Agent, v: JsVal) -> #(Handle, Agent) {
+pub fn wrap_primitive(st: Agent, v: JsVal) -> #(Handle, Agent) {
   case classify(v) {
     KHandle(h) -> #(h, st)
     KStr(s) -> alloc_object(st, StringObj(s), st.realm.string.prototype)
@@ -57,11 +57,8 @@ pub fn t_wrap_primitive(st: Agent, v: JsVal) -> #(Handle, Agent) {
     KSym(id) -> alloc_object(st, SymbolObj(id), st.realm.symbol.prototype)
     KBig(n) -> alloc_object(st, BigIntObj(n), st.realm.bigint.prototype)
     KUndef | KNull ->
-      rt_val.t_throw_type_error(
-        st,
-        "Cannot convert undefined or null to object",
-      )
-    KTdz -> panic as "t_wrap_primitive: TDZ sentinel escaped into a JsVal"
+      rt_val.throw_type_error(st, "Cannot convert undefined or null to object")
+    KTdz -> panic as "wrap_primitive: TDZ sentinel escaped into a JsVal"
   }
 }
 

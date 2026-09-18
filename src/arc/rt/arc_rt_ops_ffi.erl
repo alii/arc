@@ -3,7 +3,7 @@
 -module(arc_rt_ops_ffi).
 -export([add/2, sub/2, mul/2, 'div'/2, mod/2, neg/1, plus/1, step/2,
          lt/2, le/2, gt/2, ge/2, eq/2, neq/2, classified_binop/3, pure_binop/3,
-         t_add/3, t_sub/3, t_mul/3, t_div/3, t_mod/3, t_neg/2,
+         add/3, sub/3, mul/3, 'div'/3, mod/3, neg/2,
          pow_total/2, fmod_total/2, fadd/2, fsub/2, fmul/2, fdiv/2,
          eq_i32/2, strict_eq/2, strict_neq/2, strict_eq_i32/2,
          bitand/2, bitor/2, bitxor/2,
@@ -301,23 +301,23 @@ classified_binop(_, _, _) -> miss.
 
 pure_binop(Op, A, B) -> ?PURE_BINOP(Op, A, B).
 
-t_add(St, A, B) when is_number(A), is_number(B) -> {add(A, B), St};
-t_add(St, A, B) -> 'arc@rt@ops':t_add(St, A, B).
+add(St, A, B) when is_number(A), is_number(B) -> {add(A, B), St};
+add(St, A, B) -> 'arc@rt@ops':add(St, A, B).
 
-t_sub(St, A, B) when is_number(A), is_number(B) -> {sub(A, B), St};
-t_sub(St, A, B) -> 'arc@rt@ops':t_sub(St, A, B).
+sub(St, A, B) when is_number(A), is_number(B) -> {sub(A, B), St};
+sub(St, A, B) -> 'arc@rt@ops':sub(St, A, B).
 
-t_mul(St, A, B) when is_number(A), is_number(B) -> {mul(A, B), St};
-t_mul(St, A, B) -> 'arc@rt@ops':t_mul(St, A, B).
+mul(St, A, B) when is_number(A), is_number(B) -> {mul(A, B), St};
+mul(St, A, B) -> 'arc@rt@ops':mul(St, A, B).
 
-t_div(St, A, B) when is_number(A), is_number(B) -> {'div'(A, B), St};
-t_div(St, A, B) -> 'arc@rt@ops':t_div(St, A, B).
+'div'(St, A, B) when is_number(A), is_number(B) -> {'div'(A, B), St};
+'div'(St, A, B) -> 'arc@rt@ops':'div'(St, A, B).
 
-t_mod(St, A, B) when is_number(A), is_number(B) -> {mod(A, B), St};
-t_mod(St, A, B) -> 'arc@rt@ops':t_mod(St, A, B).
+mod(St, A, B) when is_number(A), is_number(B) -> {mod(A, B), St};
+mod(St, A, B) -> 'arc@rt@ops':mod(St, A, B).
 
-t_neg(St, A) when is_number(A) -> {neg(A), St};
-t_neg(St, A) -> 'arc@rt@ops':t_neg(St, A).
+neg(St, A) when is_number(A) -> {neg(A), St};
+neg(St, A) -> 'arc@rt@ops':neg(St, A).
 
 %% a float sum only overflows when both terms share the sign of x
 fadd(X, Y) ->

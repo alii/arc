@@ -66,7 +66,7 @@ fn this_boolean_value(st: Agent, this: JsVal, method: String) -> Bool {
   case classify(this) {
     KBool(b) -> b
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: BooleanObj(value: b), ..) -> b
         _ -> not_a_boolean(st, method)
       }
@@ -75,7 +75,7 @@ fn this_boolean_value(st: Agent, this: JsVal, method: String) -> Bool {
 }
 
 fn not_a_boolean(st: Agent, method: String) -> a {
-  rt_val.t_throw_type_error(
+  rt_val.throw_type_error(
     st,
     "Boolean.prototype." <> method <> " requires that 'this' be a Boolean",
   )

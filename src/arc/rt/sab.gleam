@@ -88,7 +88,7 @@ pub fn register_async(
   let ref = make_waiter_ref()
   case wait_async(owner, ref, byte_offset, expected) {
     Waiting -> {
-      let #(promise, st) = rt_async.t_add_waiter(st, owner, ref, deadline)
+      let #(promise, st) = rt_async.add_waiter(st, owner, ref, deadline)
       #(Some(promise), st)
     }
     NotEqualNow -> #(None, st)

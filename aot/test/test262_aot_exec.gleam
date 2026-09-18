@@ -472,9 +472,9 @@ fn print_native(
   args: List(JsVal),
   _this: JsVal,
 ) -> #(Result(JsVal, JsVal), host.Context(Nil)) {
-  let #(str, st) = rt_val.t_to_string(ctx.agent, host.first_arg(args))
+  let #(str, st) = rt_val.to_string(ctx.agent, host.first_arg(args))
   let #(_ok, st) =
-    rt_obj.t_set_prop(
+    rt_obj.set_prop(
       st,
       mk_object(st.realm.global_object),
       StringKey(Named(print_output)),
@@ -484,7 +484,7 @@ fn print_native(
 }
 
 fn ordinary_proto(st: Agent, h: Handle) -> Option(Handle) {
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     SObject(kind: ProxyObj(..), ..) -> None
     SObject(proto:, ..) | SShapedObject(proto:, ..) -> proto
     _ -> None
@@ -492,7 +492,7 @@ fn ordinary_proto(st: Agent, h: Handle) -> Option(Handle) {
 }
 
 fn get_data(st: Agent, h: Handle, key: String) -> Option(JsVal) {
-  case rt_obj.t_ordinary_own_property(st, h, StringKey(Named(key))) {
+  case rt_obj.ordinary_own_property(st, h, StringKey(Named(key))) {
     Some(DataProperty(value: val, ..)) -> Some(val)
     Some(_) -> None
     None -> option.then(ordinary_proto(st, h), get_data(st, _, key))

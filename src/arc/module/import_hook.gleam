@@ -32,12 +32,12 @@ pub fn install_import_hook(
 }
 
 fn type_error(st: Agent, msg: String) -> #(Result(JsVal, JsVal), Agent) {
-  let #(err, st) = rt_val.t_new_error(st, TypeError, msg)
+  let #(err, st) = rt_val.new_error(st, TypeError, msg)
   #(Error(err), st)
 }
 
 fn syntax_error(st: Agent, msg: String) -> #(Result(JsVal, JsVal), Agent) {
-  let #(err, st) = rt_val.t_new_error(st, SyntaxError, msg)
+  let #(err, st) = rt_val.new_error(st, SyntaxError, msg)
   #(Error(err), st)
 }
 
@@ -258,7 +258,7 @@ fn chain_deferred_settlement(
     [] -> call_import_settle_fn(st, fulfill, ns)
     [#(dep_spec, tla_promise), ..rest] -> {
       let #(on_fulfilled, st) = {
-        use st, _args <- rt_call.t_new_builtin_function(
+        use st, _args <- rt_call.new_builtin_function(
           st,
           "%ContinueDeferredImport%",
           0,
@@ -271,7 +271,7 @@ fn chain_deferred_settlement(
         )
       }
       let #(on_rejected, st) = {
-        use st, args <- rt_call.t_new_builtin_function(
+        use st, args <- rt_call.new_builtin_function(
           st,
           "%ContinueDeferredImportRejected%",
           1,
@@ -282,7 +282,7 @@ fn chain_deferred_settlement(
         #(mk_undefined(), call_import_settle_fn(st, reject, reason))
       }
       let #(_child, st) =
-        rt_async.t_promise_then(
+        rt_async.promise_then(
           st,
           tla_promise,
           mk_object(on_fulfilled),
@@ -302,7 +302,7 @@ fn first_or_undefined(args: List(JsVal)) -> JsVal {
 
 // §27.2.1.3 resolving functions never throw
 fn call_import_settle_fn(st: Agent, settle_fn: JsVal, arg: JsVal) -> Agent {
-  case rt_call.t_try_call(st, settle_fn, mk_undefined(), [arg]) {
+  case rt_call.try_call(st, settle_fn, mk_undefined(), [arg]) {
     #(rt_call.NormalCompletion(_), st) -> st
     #(rt_call.ThrowCompletion(thrown), st) -> {
       st.hooks.report_uncaught(
@@ -382,9 +382,9 @@ fn pending_module_promise(
     option.Some(namespace_h) -> {
       let namespace = mk_object(namespace_h)
       let #(#(ns_promise, ns_resolve, ns_reject), st) =
-        rt_async.t_new_promise_capability(st)
+        rt_async.new_promise_capability(st)
       let #(on_fulfilled, st) = {
-        use st, _args <- rt_call.t_new_builtin_function(
+        use st, _args <- rt_call.new_builtin_function(
           st,
           "%FinishDynamicImport%",
           0,
@@ -396,7 +396,7 @@ fn pending_module_promise(
         #(namespace, st)
       }
       let #(on_rejected, st) = {
-        use st, args <- rt_call.t_new_builtin_function(
+        use st, args <- rt_call.new_builtin_function(
           st,
           "%FinishDynamicImportRejected%",
           1,
@@ -406,10 +406,10 @@ fn pending_module_promise(
           st
           |> registry.clear_pending_promise(resolved)
           |> registry.write_module_error(resolved, reason)
-        rt_store.t_throw(st, reason)
+        rt_store.throw(st, reason)
       }
       let st =
-        rt_async.t_perform_then(
+        rt_async.perform_then(
           st,
           tla_promise,
           mk_object(on_fulfilled),

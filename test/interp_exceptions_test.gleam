@@ -300,22 +300,22 @@ pub fn host_native_throw_and_reentry_test() {
         [m, ..] -> show(m)
         [] -> "no message"
       }
-      rt_val.t_throw_type_error(st, "host: " <> msg)
+      rt_val.throw_type_error(st, "host: " <> msg)
     })
-  let st = rt_lang.t_global_set(st, <<"thrower":utf8>>, thrower)
+  let st = rt_lang.global_set(st, <<"thrower":utf8>>, thrower)
   let #(reenter, st) =
     rt_helpers.func(st, fn(st, args) {
       case args {
-        [f, x, ..] -> rt_call.t_call(st, f, types.mk_undefined(), [x])
+        [f, x, ..] -> rt_call.call(st, f, types.mk_undefined(), [x])
         _ -> #(types.mk_undefined(), st)
       }
     })
-  let st = rt_lang.t_global_set(st, <<"reenter":utf8>>, reenter)
+  let st = rt_lang.global_set(st, <<"reenter":utf8>>, reenter)
   let #(settle, st) =
     rt_helpers.func(st, fn(st, args) {
       case args {
         [f, ..] ->
-          case rt_call.t_try_call(st, f, types.mk_undefined(), []) {
+          case rt_call.try_call(st, f, types.mk_undefined(), []) {
             #(NormalCompletion(v), st) -> #(
               types.mk_string("ok:" <> show(v)),
               st,
@@ -328,7 +328,7 @@ pub fn host_native_throw_and_reentry_test() {
         _ -> #(types.mk_undefined(), st)
       }
     })
-  let st = rt_lang.t_global_set(st, <<"settle":utf8>>, settle)
+  let st = rt_lang.global_set(st, <<"settle":utf8>>, settle)
 
   assert eval_string_on(st, "try { thrower('a') } catch (e) { e.message }")
     == "host: a"

@@ -303,7 +303,7 @@ fn to_string(
   ctx: host.Context(host),
   v: JsVal,
 ) -> #(String, host.Context(host)) {
-  let #(str, st) = rt_val.t_to_string(ctx.agent, v)
+  let #(str, st) = rt_val.to_string(ctx.agent, v)
   #(str, host.Context(..ctx, agent: st))
 }
 

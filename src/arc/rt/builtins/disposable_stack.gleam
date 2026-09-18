@@ -104,8 +104,7 @@ fn init_stack_type(
       dispose_name,
       0,
     )
-  let #(dispose_prop, st) =
-    rt_store.t_builtin_property(st, mk_object(dispose_h))
+  let #(dispose_prop, st) = rt_store.builtin_property(st, mk_object(dispose_h))
   let #(getters, st) =
     common.alloc_getters(st, function_proto, [
       #("disposed", DisposableStackN(disposed_fn)),
@@ -140,10 +139,7 @@ pub fn dispatch(
 ) -> #(JsVal, Agent) {
   case native {
     DisposableStackConstructor(..) ->
-      rt_val.t_throw_type_error(
-        st,
-        "Constructor DisposableStack requires 'new'",
-      )
+      rt_val.throw_type_error(st, "Constructor DisposableStack requires 'new'")
     DisposableStackPrototypeDispose -> dispose(st, this)
     DisposableStackPrototypeUse -> use_resource(st, this, args)
     DisposableStackPrototypeAdopt -> adopt(st, this, args, async: False)
@@ -151,7 +147,7 @@ pub fn dispatch(
     DisposableStackPrototypeMove(proto:) -> move(st, this, proto, async: False)
     DisposableStackDisposedGetter -> disposed_getter(st, this, async: False)
     AsyncDisposableStackConstructor(..) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Constructor AsyncDisposableStack requires 'new'",
       )
@@ -186,7 +182,7 @@ pub fn dispatch_construct(
       construct(st, proto, new_target, async: False)
     AsyncDisposableStackConstructor(proto:) ->
       construct(st, proto, new_target, async: True)
-    _ -> rt_val.t_throw_type_error(st, "not a constructor")
+    _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }
 
@@ -203,11 +199,11 @@ fn construct(
 }
 
 fn new_capability(st: Agent) -> #(Handle, Agent) {
-  rt_store.t_cell_new(st, SDisposeCapability(resources: []))
+  rt_store.cell_new(st, SDisposeCapability(resources: []))
 }
 
 fn read_capability(st: Agent, cap: Handle) -> List(DisposeResource) {
-  let assert SDisposeCapability(resources:) = rt_store.t_cell_get(st, cap)
+  let assert SDisposeCapability(resources:) = rt_store.cell_get(st, cap)
     as "disposable_stack: capability handle is not an SDisposeCapability cell"
   resources
 }
@@ -215,7 +211,7 @@ fn read_capability(st: Agent, cap: Handle) -> List(DisposeResource) {
 // newest first, so dispose walks in reverse order
 fn push_resource(st: Agent, cap: Handle, resource: DisposeResource) -> Agent {
   let resources = read_capability(st, cap)
-  rt_store.t_cell_set(
+  rt_store.cell_set(
     st,
     cap,
     SDisposeCapability(resources: [resource, ..resources]),
@@ -239,7 +235,7 @@ fn read_stack(
 ) -> Option(#(Handle, DisposableState)) {
   case classify(this) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: DisposableStackObj(async: a, state: disposable_state), ..)
           if a == async
         -> Some(#(h, disposable_state))
@@ -266,7 +262,7 @@ fn require_stack(
   case read_stack(st, this, async) {
     Some(#(h, disposable_state)) -> cont(h, disposable_state)
     None ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Method "
           <> stack_type_name(async)
@@ -278,7 +274,7 @@ fn require_stack(
 }
 
 fn mark_disposed(st: Agent, h: Handle) -> Agent {
-  rt_store.t_cell_update(st, h, fn(cell) {
+  rt_store.cell_update(st, h, fn(cell) {
     let assert SObject(kind: DisposableStackObj(async:, ..), ..) = cell
       as "disposable_stack: mark_disposed on a non-stack cell"
     SObject(..cell, kind: DisposableStackObj(async:, state: Disposed))
@@ -312,7 +308,7 @@ fn dispose(st: Agent, this: JsVal) -> #(JsVal, Agent) {
       let st = mark_disposed(st, h)
       case dispose_resources(st, resources, NormalCompletion(mk_undefined())) {
         #(NormalCompletion(v), st) -> #(v, st)
-        #(ThrowCompletion(thrown), st) -> rt_store.t_throw(st, thrown)
+        #(ThrowCompletion(thrown), st) -> rt_store.throw(st, thrown)
       }
     }
   }
@@ -331,10 +327,10 @@ fn dispose_resources(
         MethodDispose(value: v, method:) ->
           case classify(method) {
             KUndef -> #(NormalCompletion(mk_undefined()), st)
-            _ -> rt_call.t_try_call(st, method, v, [])
+            _ -> rt_call.try_call(st, method, v, [])
           }
         DisposeCallback(callback:, args:) ->
-          rt_call.t_try_call(st, callback, mk_undefined(), args)
+          rt_call.try_call(st, callback, mk_undefined(), args)
         AsyncFallbackDispose(..) | NullDispose ->
           panic as "sync DisposableStack holds async-only resource variant — engine invariant"
       }
@@ -374,7 +370,7 @@ fn use_resource(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
       #(val, push_resource(st, capability, resource))
     }
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "DisposableStack.prototype.use called with a non-object, non-nullish value",
       )
@@ -407,7 +403,7 @@ fn use_resource_async(
       #(val, push_resource(st, capability, resource))
     }
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "AsyncDisposableStack.prototype.use called with a non-object, non-nullish value",
       )
@@ -419,20 +415,16 @@ fn get_method(
   val: JsVal,
   symbol: SymbolId,
 ) -> #(Option(Handle), Agent) {
-  let #(method, st) = rt_obj.t_get_prop(st, val, SymbolKey(symbol))
+  let #(method, st) = rt_obj.get_prop(st, val, SymbolKey(symbol))
   case classify(method) {
     KUndef | KNull -> #(None, st)
     KHandle(h) ->
       case rt_val.is_callable(st, method) {
         True -> #(Some(h), st)
         False ->
-          rt_val.t_throw_type_error(
-            st,
-            "Dispose method property is not callable",
-          )
+          rt_val.throw_type_error(st, "Dispose method property is not callable")
       }
-    _ ->
-      rt_val.t_throw_type_error(st, "Dispose method property is not callable")
+    _ -> rt_val.throw_type_error(st, "Dispose method property is not callable")
   }
 }
 
@@ -475,12 +467,12 @@ pub fn get_dispose_method(
 fn no_dispose_method(st: Agent, is_async is_async: Bool) -> a {
   case is_async {
     True ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Object does not have a [Symbol.asyncDispose] or [Symbol.dispose] method",
       )
     False ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Object does not have a [Symbol.dispose] method",
       )
@@ -497,7 +489,7 @@ fn adopt(
   use capability <- require_pending(st, disposable_state, async:)
   let #(val, on_dispose) = two_args_or_undefined(args)
   case rt_val.is_callable(st, on_dispose) {
-    False -> rt_val.t_throw_type_error(st, "onDispose is not a function")
+    False -> rt_val.throw_type_error(st, "onDispose is not a function")
     True -> {
       let resource = DisposeCallback(callback: on_dispose, args: [val])
       #(val, push_resource(st, capability, resource))
@@ -515,7 +507,7 @@ fn defer(
   use capability <- require_pending(st, disposable_state, async:)
   let on_dispose = first_arg_or_undefined(args)
   case rt_val.is_callable(st, on_dispose) {
-    False -> rt_val.t_throw_type_error(st, "onDispose is not a function")
+    False -> rt_val.throw_type_error(st, "onDispose is not a function")
     True -> {
       let resource = DisposeCallback(callback: on_dispose, args: [])
       #(mk_undefined(), push_resource(st, capability, resource))
@@ -545,7 +537,7 @@ fn require_pending(
 ) -> #(JsVal, Agent) {
   case disposable_state {
     Disposed ->
-      rt_val.t_throw_reference_error(
+      rt_val.throw_reference_error(
         st,
         stack_type_name(async) <> " already disposed",
       )
@@ -555,14 +547,14 @@ fn require_pending(
 
 fn dispose_async(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let #(#(promise_h, resolve_h, reject_h), st) =
-    rt_async.t_new_promise_capability(st)
+    rt_async.new_promise_capability(st)
   let promise = mk_object(promise_h)
   let resolve = mk_object(resolve_h)
   let reject = mk_object(reject_h)
   case read_stack(st, this, async: True) {
     None -> {
       let #(err, st) =
-        rt_val.t_new_error(
+        rt_val.new_error(
           st,
           TypeError,
           "Method "
@@ -616,7 +608,7 @@ fn dispose_async_loop(
       }
     [resource, ..rest] -> {
       let call_then_await = fn(callee, this, args) {
-        case rt_call.t_try_call(st, callee, this, args) {
+        case rt_call.try_call(st, callee, this, args) {
           #(NormalCompletion(result), st) ->
             attach_await(st, result, rest, pending, resolve, reject)
           #(ThrowCompletion(thrown), st) -> {
@@ -640,7 +632,7 @@ fn dispose_async_loop(
           call_then_await(callback, mk_undefined(), args)
         // sync throw becomes a rejected promise, folded after a hop
         AsyncFallbackDispose(value: v, method:) ->
-          case rt_call.t_try_call(st, method, v, []) {
+          case rt_call.try_call(st, method, v, []) {
             #(NormalCompletion(_discarded), st) ->
               attach_await(st, mk_undefined(), rest, pending, resolve, reject)
             #(ThrowCompletion(thrown), st) ->
@@ -695,8 +687,8 @@ fn attach_await_rejected(
   resolve: JsVal,
   reject: JsVal,
 ) -> Agent {
-  let #(promise_h, st) = rt_async.t_new_promise(st)
-  let st = rt_async.t_promise_reject(st, promise_h, thrown)
+  let #(promise_h, st) = rt_async.new_promise(st)
+  let st = rt_async.promise_reject(st, promise_h, thrown)
   attach_reactions(st, promise_h, rest, pending, resolve, reject)
 }
 
@@ -713,7 +705,7 @@ fn attach_reactions(
   let #(on_reject, st) =
     alloc_continue(st, rest, pending, resolve, reject, is_reject: True)
   let #(_child, st) =
-    rt_async.t_promise_then(
+    rt_async.promise_then(
       st,
       promise_h,
       mk_object(on_fulfill),
@@ -730,7 +722,7 @@ fn alloc_continue(
   reject: JsVal,
   is_reject is_reject: Bool,
 ) -> #(Handle, Agent) {
-  rt_call.t_native_new(
+  rt_call.native_new(
     st,
     Some(st.realm.function.prototype),
     DisposableStackN(AsyncDisposeContinue(
@@ -774,6 +766,6 @@ fn async_dispose_continue(
 
 // intrinsic resolving functions never throw
 fn settle_capability(st: Agent, fun: JsVal, arg: JsVal) -> Agent {
-  let #(_val, st) = rt_call.t_call(st, fun, mk_undefined(), [arg])
+  let #(_val, st) = rt_call.call(st, fun, mk_undefined(), [arg])
   st
 }

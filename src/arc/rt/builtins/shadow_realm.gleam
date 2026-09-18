@@ -57,7 +57,7 @@ pub fn dispatch(
 ) -> #(JsVal, Agent) {
   case n {
     ShadowRealmConstructor(..) ->
-      rt_val.t_throw_type_error(st, "Constructor ShadowRealm requires 'new'")
+      rt_val.throw_type_error(st, "Constructor ShadowRealm requires 'new'")
     ShadowRealmEvaluate(realm:) -> evaluate(st, realm, this, args)
     ShadowRealmImportValue(realm:) -> import_value(st, realm, this, args)
     WrappedFunctionCall(target:, caller_realm:, target_realm:) ->
@@ -78,7 +78,7 @@ pub fn dispatch_construct(
     ShadowRealmEvaluate(..)
     | ShadowRealmImportValue(..)
     | WrappedFunctionCall(..) ->
-      rt_val.t_throw_type_error(st, "not a constructor")
+      rt_val.throw_type_error(st, "not a constructor")
   }
 }
 
@@ -109,7 +109,7 @@ fn require_shadow_realm(st: Agent, this: JsVal, method: String) -> Int {
   case brand {
     Some(#(realm, _)) -> realm
     None ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "ShadowRealm.prototype." <> method <> " called on incompatible receiver",
       )
@@ -137,7 +137,7 @@ fn get_wrapped_value(
       case rt_val.is_callable(st, val) {
         True -> wrapped_function_create(st, from, into, h)
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "value crossing the ShadowRealm boundary must be callable or primitive",
           )
@@ -173,7 +173,7 @@ fn wrapped_function_create(
     protected_in_realm(st, from, copy_name_and_length(_, target))
   case copied {
     ThrowCompletion(_thrown) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "wrapped function could not copy target name and length",
       )
@@ -186,7 +186,7 @@ fn wrapped_function_create(
           target_realm: from,
         ))
       let #(h, st) =
-        rt_call.t_native_new_computed_length(
+        rt_call.native_new_computed_length(
           st,
           Some(fn_proto),
           tag,
@@ -205,9 +205,9 @@ fn copy_name_and_length(
 ) -> #(#(String, JsVal), Agent) {
   let target_v = mk_object(target)
   let #(len_desc, st) =
-    rt_obj.t_get_own_property(st, target, StringKey(Named("length")))
+    rt_obj.get_own_property(st, target, StringKey(Named("length")))
   let #(len_val, st) = case len_desc {
-    Some(_) -> rt_obj.t_get_prop(st, target_v, StringKey(Named("length")))
+    Some(_) -> rt_obj.get_prop(st, target_v, StringKey(Named("length")))
     None -> #(mk_undefined(), st)
   }
   let length = case classify(len_val) {
@@ -215,8 +215,7 @@ fn copy_name_and_length(
     KNum(n) -> mk_int(int.max(rt_val.jsnum_to_integer_or_infinity(n), 0))
     _ -> mk_int(0)
   }
-  let #(name_val, st) =
-    rt_obj.t_get_prop(st, target_v, StringKey(Named("name")))
+  let #(name_val, st) = rt_obj.get_prop(st, target_v, StringKey(Named("name")))
   let name = case classify(name_val) {
     KStr(s) -> s
     _ -> ""
@@ -237,7 +236,7 @@ fn evaluate(
   case classify(first_arg_or_undefined(args)) {
     KStr(source) -> perform_shadow_realm_eval(st, source, own_realm, eval_realm)
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "ShadowRealm.prototype.evaluate expects a string",
       )
@@ -260,7 +259,7 @@ fn perform_shadow_realm_eval(
   }
   let st = case early {
     Ok(_template) -> st
-    Error(message) -> rt_val.t_throw_syntax_error(st, message)
+    Error(message) -> rt_val.throw_syntax_error(st, message)
   }
   let #(outcome, st) =
     protected_in_realm(st, eval_realm, fn(st) {
@@ -270,7 +269,7 @@ fn perform_shadow_realm_eval(
     NormalCompletion(v) -> get_wrapped_value(st, eval_realm, caller_realm, v)
     // original error must not cross the boundary
     ThrowCompletion(thrown) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "ShadowRealm.prototype.evaluate threw: "
           <> rt_inspect.format_error(st, thrown),
@@ -293,12 +292,12 @@ fn wrapped_function_call(
     get_wrapped_value(st, caller_realm, target_realm, this)
   let #(outcome, st) =
     protected_in_realm(st, target_realm, fn(st) {
-      rt_call.t_call(st, mk_object(target), wrapped_this, wrapped_args)
+      rt_call.call(st, mk_object(target), wrapped_this, wrapped_args)
     })
   case outcome {
     NormalCompletion(v) -> get_wrapped_value(st, target_realm, caller_realm, v)
     ThrowCompletion(thrown) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "wrapped function threw: " <> rt_inspect.format_error(st, thrown),
       )
@@ -315,22 +314,22 @@ fn import_value(
   use st <- rt_realm.with_realm(st, own_realm)
   let _eval_realm = require_shadow_realm(st, this, "importValue")
   let #(specifier, export_name) = helpers.two_args_or_undefined(args)
-  let #(_specifier, st) = rt_val.t_to_string(st, specifier)
+  let #(_specifier, st) = rt_val.to_string(st, specifier)
   case classify(export_name) {
     KStr(_) -> {
       let #(err, st) =
-        rt_val.t_new_error(
+        rt_val.new_error(
           st,
           TypeError,
           "ShadowRealm.prototype.importValue: module loading is not "
             <> "available in this host",
         )
-      let #(promise, st) = rt_async.t_new_promise(st)
-      let st = rt_async.t_promise_reject(st, promise, err)
+      let #(promise, st) = rt_async.new_promise(st)
+      let st = rt_async.promise_reject(st, promise, err)
       #(mk_object(promise), st)
     }
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "ShadowRealm.prototype.importValue: exportName must be a string",
       )

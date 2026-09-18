@@ -91,7 +91,7 @@ fn throw_new(
   msg: String,
 ) -> #(Result(JsVal, JsVal), Context(host)) {
   let st = ctx.agent
-  let #(err, st) = rt_val.t_new_error(st, kind, msg)
+  let #(err, st) = rt_val.new_error(st, kind, msg)
   #(Error(err), Context(..ctx, agent: st))
 }
 
@@ -127,7 +127,7 @@ pub fn call(
   this_val: JsVal,
   args: List(JsVal),
 ) -> #(Result(JsVal, JsVal), Context(host)) {
-  let #(completion, st) = rt_call.t_try_call(ctx.agent, callee, this_val, args)
+  let #(completion, st) = rt_call.try_call(ctx.agent, callee, this_val, args)
   let ctx = Context(..ctx, agent: st)
   case completion {
     NormalCompletion(v) -> #(Ok(v), ctx)
@@ -231,15 +231,15 @@ type TicketRoot {
 
 /// pending promise plus the ticket to resume it with later
 pub fn suspend(ctx: Context(host)) -> #(JsVal, Ticket, Context(host)) {
-  let #(promise, st) = rt_async.t_new_promise(ctx.agent)
+  let #(promise, st) = rt_async.new_promise(ctx.agent)
   let root_cell =
     host_cell(
       tag(ticket_brand(), TicketRoot(promise:)),
       None,
       extensible: False,
     )
-  let #(root, st) = rt_store.t_cell_new(st, root_cell)
-  let st = rt_store.t_pin_root(st, root)
+  let #(root, st) = rt_store.cell_new(st, root_cell)
+  let st = rt_store.pin_root(st, root)
   #(mk_object(promise), Ticket(promise:, root:), Context(..ctx, agent: st))
 }
 
@@ -254,15 +254,15 @@ pub fn resume(
     Stale -> #(StaleTicket, ctx)
     Spent -> #(AlreadySettled, ctx)
     Live -> {
-      let st = rt_gc.t_release_roots(ctx.agent, [root.id])
-      let st = rt_store.t_cell_free(st, root)
+      let st = rt_gc.release_roots(ctx.agent, [root.id])
+      let st = rt_store.cell_free(st, root)
       let settle = fn(st) {
         case outcome {
-          Ok(value) -> rt_async.t_promise_resolve(st, promise, value)
-          Error(reason) -> rt_async.t_promise_reject(st, promise, reason)
+          Ok(value) -> rt_async.promise_resolve(st, promise, value)
+          Error(reason) -> rt_async.promise_reject(st, promise, reason)
         }
       }
-      let st = rt_async.t_enqueue_job(st, HostJob(run: settle))
+      let st = rt_async.enqueue_job(st, HostJob(run: settle))
       #(Resumed, Context(..ctx, agent: st))
     }
   }
@@ -279,14 +279,14 @@ type TicketState {
 fn ticket_state(st: Agent, ticket: Ticket) -> TicketState {
   let Ticket(promise:, root:) = ticket
   use <- bool.guard(is_ticket_root(st, root, promise), Live)
-  let spent = rt_gc.t_is_live(st, promise) && is_promise(st, promise)
+  let spent = rt_gc.is_live(st, promise) && is_promise(st, promise)
   use <- bool.guard(spent, Spent)
   Stale
 }
 
 fn is_ticket_root(st: Agent, root: Handle, promise: Handle) -> Bool {
-  use <- bool.guard(!rt_gc.t_is_live(st, root), False)
-  case rt_store.t_cell_get(st, root) {
+  use <- bool.guard(!rt_gc.is_live(st, root), False)
+  case rt_store.cell_get(st, root) {
     SObject(kind: HostObj(payload:), ..) ->
       payload == tag(ticket_brand(), TicketRoot(promise:))
     _ -> False
@@ -299,7 +299,7 @@ fn ticket_brand() -> Brand(TicketRoot) {
 }
 
 fn is_promise(st: Agent, h: Handle) -> Bool {
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     SObject(kind: PromiseObj(..), ..) -> True
     _ -> False
   }
@@ -377,7 +377,7 @@ pub fn alloc_host_object(
   prototype: Option(Handle),
 ) -> #(JsVal, Context(host)) {
   let #(h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       ctx.agent,
       host_cell(tag(ctx.brand, value), prototype, extensible: True),
     )
@@ -387,7 +387,7 @@ pub fn alloc_host_object(
 /// none if not a host object or written under another brand
 pub fn read_host(ctx: Context(host), val: JsVal) -> Option(host) {
   use h <- option.then(rt_val.handle_of(val))
-  case rt_store.t_cell_get(ctx.agent, h) {
+  case rt_store.cell_get(ctx.agent, h) {
     SObject(kind: HostObj(payload:), ..) -> untag(ctx.brand, payload)
     _ -> None
   }
@@ -430,7 +430,7 @@ pub fn define_global(
 ) -> Context(host) {
   let st = ctx.agent
   let #(_created, st) =
-    rt_obj.t_define_own_data(
+    rt_obj.define_own_data(
       st,
       st.realm.global_object,
       StringKey(key.canonical(name)),
@@ -517,7 +517,7 @@ fn alloc_host_methods(
           name,
           arity,
         )
-      let #(prop, st) = rt_store.t_builtin_property(st, mk_object(h))
+      let #(prop, st) = rt_store.builtin_property(st, mk_object(h))
       #([#(name, prop), ..props], st)
     })
   #(list.reverse(props), st)

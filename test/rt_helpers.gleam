@@ -36,11 +36,11 @@ pub fn agent() -> Agent {
 }
 
 pub fn global(st: Agent, name: String) -> #(JsVal, Agent) {
-  rt_lang.t_global_get(st, <<name:utf8>>)
+  rt_lang.global_get(st, <<name:utf8>>)
 }
 
 pub fn get(st: Agent, recv: JsVal, name: String) -> #(JsVal, Agent) {
-  rt_obj.t_get_prop(st, recv, StringKey(Named(name)))
+  rt_obj.get_prop(st, recv, StringKey(Named(name)))
 }
 
 pub fn call_method(
@@ -50,7 +50,7 @@ pub fn call_method(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(f, st) = get(st, recv, name)
-  rt_call.t_call(st, f, recv, args)
+  rt_call.call(st, f, recv, args)
 }
 
 @external(erlang, "rt_helpers_ffi", "record")
@@ -83,6 +83,6 @@ pub fn func(
   st: Agent,
   body: fn(Agent, List(JsVal)) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
-  let #(h, st) = rt_call.t_new_builtin_function(st, "f", 0, body)
+  let #(h, st) = rt_call.new_builtin_function(st, "f", 0, body)
   #(types.mk_object(h), st)
 }

@@ -39,7 +39,7 @@ pub fn require_temporal(
   case helpers.brand_of(st, this, extract) {
     Some(#(v, _h)) -> v
     None ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Temporal."
           <> type_name
@@ -63,7 +63,7 @@ pub fn temporal_data_of(
 ) -> Option(temporal_data.TemporalData) {
   case classify(v) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: TemporalObj(data:), ..) -> Some(data)
         _ -> None
       }
@@ -337,7 +337,7 @@ pub fn finish_duration(
   dur: Duration,
 ) -> #(JsVal, Agent) {
   case is_valid_duration(dur) {
-    False -> rt_val.t_throw_range_error(st, "invalid duration")
+    False -> rt_val.throw_range_error(st, "invalid duration")
     True -> make_duration(st, protos, dur)
   }
 }
@@ -380,14 +380,14 @@ pub fn apply_new_target_proto(
 ) -> #(Handle, Agent) {
   let assert KHandle(obj) = classify(v)
     as "Temporal constructor produced no object"
-  let assert SObject(proto: Some(intrinsic), ..) = rt_store.t_cell_get(st, obj)
+  let assert SObject(proto: Some(intrinsic), ..) = rt_store.cell_get(st, obj)
     as "Temporal constructor produced an object with no prototype"
   let #(proto, st) =
     rt_call.get_prototype_from_constructor(st, new_target, fn(_realm) {
       intrinsic
     })
   let st =
-    rt_store.t_cell_update(st, obj, fn(cell) {
+    rt_store.cell_update(st, obj, fn(cell) {
       case cell {
         SObject(..) -> SObject(..cell, proto: Some(proto))
         other -> other
@@ -397,12 +397,12 @@ pub fn apply_new_target_proto(
 }
 
 pub fn to_integer_with_truncation(st: Agent, v: JsVal) -> #(Int, Agent) {
-  let #(n, st) = rt_val.t_to_number(st, v)
+  let #(n, st) = rt_val.to_number(st, v)
   case n {
     JInt(i) -> #(i, st)
     JFloat(f) -> #(rt_val.float_to_int(f), st)
     JNan | JPosInf | JNegInf ->
-      rt_val.t_throw_range_error(st, "not a finite number")
+      rt_val.throw_range_error(st, "not a finite number")
   }
 }
 
@@ -413,12 +413,12 @@ pub fn to_positive_integer_with_truncation(
   let #(n, st) = to_integer_with_truncation(st, v)
   case n > 0 {
     True -> #(n, st)
-    False -> rt_val.t_throw_range_error(st, "expected a positive integer")
+    False -> rt_val.throw_range_error(st, "expected a positive integer")
   }
 }
 
 pub fn to_integer_if_integral(st: Agent, v: JsVal) -> #(Int, Agent) {
-  let #(n, st) = rt_val.t_to_number(st, v)
+  let #(n, st) = rt_val.to_number(st, v)
   case n {
     JInt(i) -> #(i, st)
     JFloat(f) -> {
@@ -427,11 +427,11 @@ pub fn to_integer_if_integral(st: Agent, v: JsVal) -> #(Int, Agent) {
       // arithmetic compare: term == treats -0.0 != 0.0
       case f >=. fi && f <=. fi {
         True -> #(i, st)
-        False -> rt_val.t_throw_range_error(st, "expected an integral number")
+        False -> rt_val.throw_range_error(st, "expected an integral number")
       }
     }
     JNan | JPosInf | JNegInf ->
-      rt_val.t_throw_range_error(st, "expected an integral number")
+      rt_val.throw_range_error(st, "expected an integral number")
   }
 }
 
@@ -584,7 +584,7 @@ pub fn read_bag_int_field(
   key: String,
   conv: fn(Agent, JsVal) -> #(Int, Agent),
 ) -> #(Option(Int), Agent) {
-  let #(v, st) = rt_obj.t_get_prop(st, mk_object(bag), StringKey(Named(key)))
+  let #(v, st) = rt_obj.get_prop(st, mk_object(bag), StringKey(Named(key)))
   case classify(v) {
     KUndef -> #(None, st)
     _ -> {
@@ -621,7 +621,7 @@ pub fn read_integral_int_field(
 pub fn to_temporal_duration(st: Agent, item: JsVal) -> #(Duration, Agent) {
   case classify(item) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind:, ..) ->
           case duration_slot_of(kind) {
             Some(d) -> #(d, st)
@@ -634,11 +634,11 @@ pub fn to_temporal_duration(st: Agent, item: JsVal) -> #(Duration, Agent) {
         Some(d) ->
           case is_valid_duration(d) {
             True -> #(d, st)
-            False -> rt_val.t_throw_range_error(st, "invalid duration")
+            False -> rt_val.throw_range_error(st, "invalid duration")
           }
-        None -> rt_val.t_throw_range_error(st, "invalid duration string: " <> s)
+        None -> rt_val.throw_range_error(st, "invalid duration string: " <> s)
       }
-    _ -> rt_val.t_throw_type_error(st, "cannot convert to a Temporal.Duration")
+    _ -> rt_val.throw_type_error(st, "cannot convert to a Temporal.Duration")
   }
 }
 
@@ -710,15 +710,12 @@ pub fn duration_from_bag(st: Agent, bag: Handle) -> #(Duration, Agent) {
   let #(fields, st) = read_duration_fields(st, bag)
   case list.all(fields, option.is_none) {
     True ->
-      rt_val.t_throw_type_error(
-        st,
-        "invalid property bag for Temporal.Duration",
-      )
+      rt_val.throw_type_error(st, "invalid property bag for Temporal.Duration")
     False -> {
       let d = apply_duration_fields(zero_duration, fields)
       case is_valid_duration(d) {
         True -> #(d, st)
-        False -> rt_val.t_throw_range_error(st, "invalid duration")
+        False -> rt_val.throw_range_error(st, "invalid duration")
       }
     }
   }

@@ -18,14 +18,14 @@ fn agent() -> Agent {
 pub fn array_join_via_t_call_test() {
   let st = agent()
   let #(arr, st) =
-    rt_obj.t_new_array(st, [
+    rt_obj.new_array(st, [
       mk_int(1),
       mk_int(2),
       mk_int(3),
     ])
-  let #(join, st) = rt_obj.t_get_prop(st, arr, StringKey(Named("join")))
+  let #(join, st) = rt_obj.get_prop(st, arr, StringKey(Named("join")))
   let assert KHandle(_) = classify(join)
-  let #(result, _st) = rt_call.t_try_call(st, join, arr, [])
+  let #(result, _st) = rt_call.try_call(st, join, arr, [])
   let assert NormalCompletion(v) = result
   assert classify(v) == KStr("1,2,3")
 }
@@ -33,33 +33,33 @@ pub fn array_join_via_t_call_test() {
 pub fn array_length_test() {
   let st = agent()
   let #(arr, st) =
-    rt_obj.t_new_array(st, [
+    rt_obj.new_array(st, [
       mk_int(1),
       mk_int(2),
       mk_int(3),
     ])
-  let #(len, _st) = rt_obj.t_get_prop(st, arr, StringKey(Named("length")))
+  let #(len, _st) = rt_obj.get_prop(st, arr, StringKey(Named("length")))
   assert classify(len) == KNum(JInt(3))
 }
 
 pub fn object_set_get_round_trip_test() {
   let st = agent()
-  let #(h, st) = rt_obj.t_new_object(st, Some(st.realm.object.prototype))
+  let #(h, st) = rt_obj.new_object(st, Some(st.realm.object.prototype))
   let obj = mk_object(h)
   let key = StringKey(Named("greeting"))
-  let #(ok, st) = rt_obj.t_set_prop(st, obj, key, mk_string("hi"))
+  let #(ok, st) = rt_obj.set_prop(st, obj, key, mk_string("hi"))
   assert ok
-  let #(v, _st) = rt_obj.t_get_prop(st, obj, key)
+  let #(v, _st) = rt_obj.get_prop(st, obj, key)
   assert classify(v) == KStr("hi")
 }
 
 pub fn type_error_is_caught_as_throw_completion_test() {
   let st = agent()
   let #(completion, st) =
-    rt_call.try_run(st, fn(st) { rt_val.t_throw_type_error(st, "boom") })
+    rt_call.try_run(st, fn(st) { rt_val.throw_type_error(st, "boom") })
   let assert ThrowCompletion(err) = completion
   let assert KHandle(_) = classify(err)
-  let #(msg, _st) = rt_obj.t_get_prop(st, err, StringKey(Named("message")))
+  let #(msg, _st) = rt_obj.get_prop(st, err, StringKey(Named("message")))
   assert classify(msg) == KStr("boom")
 }
 
@@ -70,7 +70,7 @@ pub fn shaped_set_transitions_test() {
   let st = agent()
   let proto = st.realm.object.prototype
   let #(a, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       types.SShapedObject(
         shape_id: 0,
@@ -80,7 +80,7 @@ pub fn shaped_set_transitions_test() {
       ),
     )
   let #(b, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       types.SShapedObject(
         shape_id: 0,
@@ -91,24 +91,24 @@ pub fn shaped_set_transitions_test() {
     )
   let x = StringKey(Named("x"))
   let y = StringKey(Named("y"))
-  let #(ok, st) = rt_obj.t_set_prop(st, mk_object(a), x, mk_int(1))
+  let #(ok, st) = rt_obj.set_prop(st, mk_object(a), x, mk_int(1))
   assert ok
-  let #(ok, st) = rt_obj.t_set_prop(st, mk_object(a), y, mk_int(2))
+  let #(ok, st) = rt_obj.set_prop(st, mk_object(a), y, mk_int(2))
   assert ok
-  let #(ok, st) = rt_obj.t_set_prop(st, mk_object(b), x, mk_int(3))
+  let #(ok, st) = rt_obj.set_prop(st, mk_object(b), x, mk_int(3))
   assert ok
-  let #(ok, st) = rt_obj.t_set_prop(st, mk_object(a), x, mk_int(4))
+  let #(ok, st) = rt_obj.set_prop(st, mk_object(a), x, mk_int(4))
   assert ok
-  let assert types.SShapedObject(shape_id: sa, ..) = rt_store.t_cell_get(st, a)
-  let assert types.SShapedObject(shape_id: sb, ..) = rt_store.t_cell_get(st, b)
+  let assert types.SShapedObject(shape_id: sa, ..) = rt_store.cell_get(st, a)
+  let assert types.SShapedObject(shape_id: sb, ..) = rt_store.cell_get(st, b)
   assert sa == 2
   assert sb == 1
-  let #(ax, st) = rt_obj.t_get_prop(st, mk_object(a), x)
-  let #(ay, st) = rt_obj.t_get_prop(st, mk_object(a), y)
-  let #(bx, st) = rt_obj.t_get_prop(st, mk_object(b), x)
+  let #(ax, st) = rt_obj.get_prop(st, mk_object(a), x)
+  let #(ay, st) = rt_obj.get_prop(st, mk_object(a), y)
+  let #(bx, st) = rt_obj.get_prop(st, mk_object(b), x)
   assert classify(ax) == KNum(JInt(4))
   assert classify(ay) == KNum(JInt(2))
   assert classify(bx) == KNum(JInt(3))
-  let #(keys, _st) = rt_obj.t_own_keys(st, a)
+  let #(keys, _st) = rt_obj.own_keys(st, a)
   assert keys == [x, y]
 }

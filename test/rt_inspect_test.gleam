@@ -10,10 +10,10 @@ import rt_helpers
 
 pub fn renders_structures_test() {
   let st = rt_helpers.agent()
-  let #(inner, st) = rt_obj.t_new_array(st, [mk_int(1), mk_hole()])
-  let #(o, st) = rt_obj.t_new_object_literal(st)
-  let #(_, st) = rt_obj.t_set_prop(st, o, StringKey(Named("a")), inner)
-  let #(_, st) = rt_obj.t_set_prop(st, o, StringKey(Named("self")), o)
+  let #(inner, st) = rt_obj.new_array(st, [mk_int(1), mk_hole()])
+  let #(o, st) = rt_obj.new_object_literal(st)
+  let #(_, st) = rt_obj.set_prop(st, o, StringKey(Named("a")), inner)
+  let #(_, st) = rt_obj.set_prop(st, o, StringKey(Named("self")), o)
   assert rt_inspect.inspect(st, o) == "{ a: [ 1, <empty> ], self: [Circular] }"
   let #(is_nan, st) = rt_helpers.global(st, "isNaN")
   let #(line, _) =

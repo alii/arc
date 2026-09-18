@@ -172,7 +172,7 @@ pub fn clear_module_registrations(st: Agent, spec: String) -> Agent {
 
 fn cache_object(st: Agent, property: PropertyKey) -> Option(Handle) {
   case
-    rt_obj.t_ordinary_own_property(
+    rt_obj.ordinary_own_property(
       st,
       st.realm.global_object,
       StringKey(property),
@@ -189,7 +189,7 @@ fn cache_object(st: Agent, property: PropertyKey) -> Option(Handle) {
 
 fn read_entry(st: Agent, property: PropertyKey, key: String) -> Option(JsVal) {
   use cache <- option.then(cache_object(st, property))
-  case rt_obj.t_ordinary_own_property(st, cache, StringKey(Named(key))) {
+  case rt_obj.ordinary_own_property(st, cache, StringKey(Named(key))) {
     Some(DataProperty(value:, ..)) -> Some(value)
     _ -> None
   }
@@ -216,7 +216,7 @@ fn write_entry(
   let #(cache, st) = case cache_object(st, property) {
     Some(cache) -> #(cache, st)
     None -> {
-      let #(cache, st) = rt_obj.t_new_object(st, None)
+      let #(cache, st) = rt_obj.new_object(st, None)
       let st =
         put_hidden_property(
           st,
@@ -238,8 +238,8 @@ fn put_hidden_property(
   val: JsVal,
 ) -> Agent {
   let st = rt_obj.devolve(st, target)
-  let #(seq, st) = rt_store.t_next_prop_seq(st)
-  use cell <- rt_store.t_cell_update(st, target)
+  let #(seq, st) = rt_store.next_prop_seq(st)
+  use cell <- rt_store.cell_update(st, target)
   case cell {
     SObject(props:, ..) ->
       SObject(
@@ -264,8 +264,7 @@ fn clear_entry(st: Agent, property: PropertyKey, key: String) -> Agent {
   case cache_object(st, property) {
     None -> st
     Some(cache) -> {
-      let #(deleted, st) =
-        rt_obj.t_delete_prop(st, cache, StringKey(Named(key)))
+      let #(deleted, st) = rt_obj.delete_prop(st, cache, StringKey(Named(key)))
       case deleted {
         True -> st
         False -> panic as "arc/module/registry: cache entry refused deletion"

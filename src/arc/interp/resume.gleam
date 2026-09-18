@@ -157,7 +157,7 @@ fn start_coroutine(
   case template.is_generator {
     False -> {
       let frame = park.park(body, ParkedStart)
-      case guard.guard2(rt_async.t_run, agent, ResumeFrame(frame)) {
+      case guard.guard2(rt_async.run, agent, ResumeFrame(frame)) {
         guard.Value(value: promise, agent:) -> resume(agent, mk_object(promise))
         guard.Thrown(agent:, thrown:) -> threw(agent, thrown)
       }
@@ -168,8 +168,8 @@ fn start_coroutine(
           let frame = ResumeFrame(park.park(state, ParkedStart))
           let agent = frames.settle(state.agent, m)
           let #(obj, agent) = case template.is_async {
-            False -> rt_async.t_gen_new(agent, callee, frame)
-            True -> rt_async.t_asyncgen_new(agent, callee, frame)
+            False -> rt_async.gen_new(agent, callee, frame)
+            True -> rt_async.asyncgen_new(agent, callee, frame)
           }
           resume(agent, mk_object(obj))
         }
@@ -289,12 +289,7 @@ fn delegate_method(
 ) -> Result(#(Option(JsVal), State), StepExit) {
   let iterator = site_record(site).iterator
   use #(method, state) <- result.map(guard.guard_state(
-    guard.guard3(
-      rt_obj.t_get_prop,
-      state.agent,
-      iterator,
-      StringKey(Named(name)),
-    ),
+    guard.guard3(rt_obj.get_prop, state.agent, iterator, StringKey(Named(name))),
     state,
   ))
   case classify(method) {
@@ -311,7 +306,7 @@ fn call_delegate(
 ) -> Result(#(JsVal, State), StepExit) {
   let iterator = site_record(site).iterator
   guard.guard_state(
-    guard.guard4(rt_call.t_call, state.agent, method, iterator, [value]),
+    guard.guard4(rt_call.call, state.agent, method, iterator, [value]),
     state,
   )
 }
@@ -535,9 +530,7 @@ fn return_into(state: State, value: JsVal) -> Executed {
 }
 
 fn close_for_return(state: State, record: JsVal, value: JsVal) -> Executed {
-  case
-    guard.guarded_unit(state, rt_lang.t_iter_close(_, record, abrupt: False))
-  {
+  case guard.guarded_unit(state, rt_lang.iter_close(_, record, abrupt: False)) {
     Ok(state) -> return_into(state, value)
     Error(exit) -> exit_executed(exit, "close_for_return")
   }

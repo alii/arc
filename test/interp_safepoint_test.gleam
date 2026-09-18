@@ -23,12 +23,12 @@ import rt_helpers
 const threshold = 64
 
 fn small_agent() -> Agent {
-  let st = rt_gc.t_collect(rt_helpers.agent(), [])
+  let st = rt_gc.collect(rt_helpers.agent(), [])
   Agent(..st, store: Store(..st.store, gc_threshold: threshold))
 }
 
 fn new_object(st: Agent) -> #(Handle, JsVal, Agent) {
-  let #(v, st) = rt_obj.t_new_object_literal(st)
+  let #(v, st) = rt_obj.new_object_literal(st)
   let assert KHandle(h) = classify(v)
   #(h, v, st)
 }
@@ -97,9 +97,9 @@ pub fn toplevel_return_collects_and_keeps_frame_values_test() {
   let st = churn(st, threshold)
   let state =
     safepoint.maybe_collect_at_return(root_state(st, [local], [stacked]))
-  assert rt_gc.t_is_live(state.agent, local_h)
-  assert rt_gc.t_is_live(state.agent, stacked_h)
-  assert !rt_gc.t_is_live(state.agent, dead_h)
+  assert rt_gc.is_live(state.agent, local_h)
+  assert rt_gc.is_live(state.agent, stacked_h)
+  assert !rt_gc.is_live(state.agent, dead_h)
   assert rt_gc.stats(state.agent).alloc_since_gc == 0
 }
 
@@ -107,15 +107,15 @@ pub fn below_threshold_does_not_collect_test() {
   let st = small_agent()
   let #(dead_h, _, st) = new_object(st)
   let state = safepoint.maybe_collect_at_return(root_state(st, [], []))
-  assert rt_gc.t_is_live(state.agent, dead_h)
+  assert rt_gc.is_live(state.agent, dead_h)
 }
 
 pub fn nested_activation_never_collects_test() {
-  let st = rt_store.t_enter_call(small_agent())
+  let st = rt_store.enter_call(small_agent())
   let #(dead_h, _, st) = new_object(st)
   let st = churn(st, threshold)
   let state = safepoint.maybe_collect_at_return(root_state(st, [], []))
-  assert rt_gc.t_is_live(state.agent, dead_h)
+  assert rt_gc.is_live(state.agent, dead_h)
 }
 
 fn with_caller_frame(state: State, held: JsVal) -> State {
@@ -145,12 +145,12 @@ pub fn inner_frame_return_collects_and_keeps_caller_values_test() {
       root_state(st, [], []),
       held,
     ))
-  assert rt_gc.t_is_live(state.agent, held_h)
-  assert !rt_gc.t_is_live(state.agent, dead_h)
+  assert rt_gc.is_live(state.agent, held_h)
+  assert !rt_gc.is_live(state.agent, dead_h)
 }
 
 pub fn inner_frame_under_nested_entry_never_collects_test() {
-  let st = rt_store.t_enter_call(small_agent())
+  let st = rt_store.enter_call(small_agent())
   let #(dead_h, _, st) = new_object(st)
   let st = churn(st, threshold)
   let state =
@@ -158,7 +158,7 @@ pub fn inner_frame_under_nested_entry_never_collects_test() {
       root_state(st, [], []),
       mk_undefined(),
     ))
-  assert rt_gc.t_is_live(state.agent, dead_h)
+  assert rt_gc.is_live(state.agent, dead_h)
 }
 
 pub fn allocation_loop_stays_bounded_test() {
@@ -166,7 +166,7 @@ pub fn allocation_loop_stays_bounded_test() {
   let #(kept_h, kept, st) = new_object(st)
   let base = rt_gc.stats(st).live_count
   let state = stress(root_state(st, [kept], []), 200, base)
-  assert rt_gc.t_is_live(state.agent, kept_h)
+  assert rt_gc.is_live(state.agent, kept_h)
   assert rt_gc.stats(state.agent).live_count <= base + 2 * threshold
 }
 
@@ -190,12 +190,12 @@ pub fn end_turn_keeps_completion_value_across_drain_test() {
   let alloc_job = HostJob(churn(_, 2 * threshold))
   let st =
     st
-    |> rt_async.t_enqueue_job(alloc_job)
-    |> rt_async.t_enqueue_job(alloc_job)
-    |> rt_async.t_enqueue_job(alloc_job)
+    |> rt_async.enqueue_job(alloc_job)
+    |> rt_async.enqueue_job(alloc_job)
+    |> rt_async.enqueue_job(alloc_job)
   let st = safepoint.end_turn(st, [kept])
-  assert rt_gc.t_is_live(st, kept_h)
-  assert !rt_gc.t_is_live(st, dead_h)
+  assert rt_gc.is_live(st, kept_h)
+  assert !rt_gc.is_live(st, dead_h)
   assert rt_gc.stats(st).live_count <= base + 2 * threshold
   assert !set.contains(st.store.pinned_roots, kept_h.id)
 }
@@ -203,7 +203,7 @@ pub fn end_turn_keeps_completion_value_across_drain_test() {
 pub fn end_turn_leaves_permanent_pins_alone_test() {
   let st = small_agent()
   let #(pinned_h, pinned, st) = new_object(st)
-  let st = rt_store.t_pin_root(st, pinned_h)
+  let st = rt_store.pin_root(st, pinned_h)
   let st = safepoint.end_turn(st, [pinned])
   assert set.contains(st.store.pinned_roots, pinned_h.id)
 }
@@ -231,19 +231,19 @@ pub fn parked_frame_roots_its_registers_test() {
       unit_id: 0,
     )
   let #(gen_h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       SGenerator(state: GenSuspendedYield, resume: ResumeFrame(frame)),
     )
-  let st = rt_gc.t_collect(st, [gen_h])
-  assert rt_gc.t_is_live(st, local_h)
-  assert rt_gc.t_is_live(st, stacked_h)
-  assert rt_gc.t_is_live(st, this_h)
-  assert rt_gc.t_is_live(st, env_h)
-  assert !rt_gc.t_is_live(st, dead_h)
-  let st = rt_gc.t_collect(st, [])
-  assert !rt_gc.t_is_live(st, local_h)
-  assert !rt_gc.t_is_live(st, gen_h)
+  let st = rt_gc.collect(st, [gen_h])
+  assert rt_gc.is_live(st, local_h)
+  assert rt_gc.is_live(st, stacked_h)
+  assert rt_gc.is_live(st, this_h)
+  assert rt_gc.is_live(st, env_h)
+  assert !rt_gc.is_live(st, dead_h)
+  let st = rt_gc.collect(st, [])
+  assert !rt_gc.is_live(st, local_h)
+  assert !rt_gc.is_live(st, gen_h)
 }
 
 pub fn closure_environment_and_constants_are_traced_test() {
@@ -265,7 +265,7 @@ pub fn closure_environment_and_constants_are_traced_test() {
       is_strict: True,
     )
   let #(fn_h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       plain_object(
         BytecodeFn(
@@ -282,9 +282,9 @@ pub fn closure_environment_and_constants_are_traced_test() {
         dict.new(),
       ),
     )
-  let st = rt_lang.t_global_set(st, <<"f">>, mk_object(fn_h))
-  let st = rt_gc.t_collect(st, [])
-  assert rt_gc.t_is_live(st, captured_h)
-  assert rt_gc.t_is_live(st, pooled_h)
-  assert !rt_gc.t_is_live(st, dead_h)
+  let st = rt_lang.global_set(st, <<"f">>, mk_object(fn_h))
+  let st = rt_gc.collect(st, [])
+  assert rt_gc.is_live(st, captured_h)
+  assert rt_gc.is_live(st, pooled_h)
+  assert !rt_gc.is_live(st, dead_h)
 }

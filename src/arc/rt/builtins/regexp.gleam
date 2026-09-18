@@ -92,7 +92,7 @@ pub fn init(
         let #(sym, tok, name, arity) = spec
         let #(fn_h, st) =
           common.alloc_rooted_native_fn(st, fn_proto, RegExpN(tok), name, arity)
-        let #(prop, st) = rt_store.t_builtin_property(st, mk_object(fn_h))
+        let #(prop, st) = rt_store.builtin_property(st, mk_object(fn_h))
         common.add_symbol_property(st, bt.prototype, sym, prop)
       },
     )
@@ -198,7 +198,7 @@ pub fn dispatch_construct(
       let #(pattern_is_regexp, st) = is_regexp(st, pattern)
       construct_regexp(st, pattern, pattern_is_regexp, flags, new_target)
     }
-    _ -> rt_val.t_throw_type_error(st, "not a constructor")
+    _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }
 
@@ -284,7 +284,7 @@ pub fn is_regexp(st: Agent, val: JsVal) -> #(Bool, Agent) {
 fn regexp_source_flags(st: Agent, v: JsVal) -> Option(#(String, String)) {
   case classify(v) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: RegExpObj(source:, flags:, ..), ..) ->
           Some(#(source, flags))
         _ -> None
@@ -302,11 +302,11 @@ fn legacy_static_get(
   which: LegacyStatic,
 ) -> #(JsVal, Agent) {
   case is_handle(this, ctor) {
-    False -> rt_val.t_throw_type_error(st, legacy_receiver_error)
+    False -> rt_val.throw_type_error(st, legacy_receiver_error)
     True ->
       case read_legacy_statics(st, ctor) {
         Some(statics) -> #(mk_string(legacy_static_value(statics, which)), st)
-        None -> rt_val.t_throw_type_error(st, legacy_receiver_error)
+        None -> rt_val.throw_type_error(st, legacy_receiver_error)
       }
   }
 }
@@ -318,10 +318,9 @@ fn legacy_static_set_input(
   ctor: Handle,
 ) -> #(JsVal, Agent) {
   case is_handle(this, ctor) {
-    False -> rt_val.t_throw_type_error(st, legacy_receiver_error)
+    False -> rt_val.throw_type_error(st, legacy_receiver_error)
     True -> {
-      let #(s, st) =
-        rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+      let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
       let st =
         write_legacy_statics(st, ctor, fn(statics) {
           LegacyStatics(..statics, input: s)
@@ -339,7 +338,7 @@ pub fn is_handle(v: JsVal, h: Handle) -> Bool {
 }
 
 fn read_legacy_statics(st: Agent, ctor: Handle) -> Option(LegacyStatics) {
-  case rt_store.t_cell_get(st, ctor) {
+  case rt_store.cell_get(st, ctor) {
     SObject(
       kind: NativeFn(token: RegExpN(RegExpConstructor(legacy:, ..)), ..),
       ..,
@@ -366,7 +365,7 @@ type CtorState {
 }
 
 fn ctor_state(st: Agent) -> Option(CtorState) {
-  case rt_store.t_cell_get(st, st.realm.regexp.constructor) {
+  case rt_store.cell_get(st, st.realm.regexp.constructor) {
     SObject(
       kind: NativeFn(
         token: RegExpN(RegExpConstructor(legacy:, proto_props:, compiled:)),
@@ -383,7 +382,7 @@ fn update_constructor(
   ctor: Handle,
   update: fn(CtorState) -> CtorState,
 ) -> Agent {
-  use cell <- rt_store.t_cell_update(st, ctor)
+  use cell <- rt_store.cell_update(st, ctor)
   case cell {
     SObject(
       kind: NativeFn(
@@ -418,7 +417,7 @@ fn same_props(
 
 // usually one compare against the last props map seen pristine
 fn proto_pristine(st: Agent) -> #(Bool, Agent) {
-  case rt_store.t_cell_get(st, st.realm.regexp.prototype), ctor_state(st) {
+  case rt_store.cell_get(st, st.realm.regexp.prototype), ctor_state(st) {
     SObject(props:, ..), Some(CtorState(proto_props:, ..)) ->
       case proto_props {
         Some(seen) ->
@@ -550,7 +549,7 @@ fn get_flags(st: Agent, this: JsVal) -> #(JsVal, Agent) {
         #(None, st) -> build_flags(st, this, all_flags, "")
       }
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "RegExp.prototype.flags getter called on non-object",
       )
@@ -587,13 +586,13 @@ fn to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(_) -> Nil
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "RegExp.prototype.toString called on non-object",
       )
   }
   let #(src_v, st) = get_named(st, this, "source")
-  let #(src, st) = rt_val.t_to_string(st, src_v)
+  let #(src, st) = rt_val.to_string(st, src_v)
   let #(flags, st) = read_flags(st, this)
   #(mk_string("/" <> src <> "/" <> flags), st)
 }
@@ -605,11 +604,11 @@ fn pattern_and_flags_from_strings(
 ) -> #(String, String, Agent) {
   let #(source, st) = case classify(pattern_v) {
     types.KUndef -> #("", st)
-    _ -> rt_val.t_to_string(st, pattern_v)
+    _ -> rt_val.to_string(st, pattern_v)
   }
   let #(flags, st) = case classify(flags_v) {
     types.KUndef -> #("", st)
-    _ -> rt_val.t_to_string(st, flags_v)
+    _ -> rt_val.to_string(st, flags_v)
   }
   #(source, flags, st)
 }
@@ -630,7 +629,7 @@ fn alloc_regexp_with_proto(
   flags: String,
   proto: Handle,
 ) -> #(Handle, Agent) {
-  let #(seq, st) = rt_store.t_next_prop_seq(st)
+  let #(seq, st) = rt_store.next_prop_seq(st)
   let li_prop =
     types.DataProperty(
       value: mk_int(0),
@@ -639,7 +638,7 @@ fn alloc_regexp_with_proto(
       configurable: False,
       seq:,
     )
-  rt_store.t_cell_new(
+  rt_store.cell_new(
     st,
     plain_object(
       RegExpObj(
@@ -670,7 +669,7 @@ fn validate_pattern_and_flags(
   case checked {
     Ok(Nil) -> Nil
     Error(err) ->
-      rt_val.t_throw_syntax_error(st, regex_error.pattern_error_message(err))
+      rt_val.throw_syntax_error(st, regex_error.pattern_error_message(err))
   }
 }
 
@@ -682,7 +681,7 @@ type RegExpRead {
 fn require_regexp_or_proto(st: Agent, v: JsVal, op: String) -> RegExpRead {
   case classify(v) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: RegExpObj(source:, flags:, last_index:, ..), ..) ->
           ReadRegExp(source, flags, last_index)
         _ ->
@@ -698,7 +697,7 @@ fn require_regexp_or_proto(st: Agent, v: JsVal, op: String) -> RegExpRead {
 fn is_regexp_object(st: Agent, v: JsVal) -> Bool {
   case classify(v) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: RegExpObj(..), ..) -> True
         _ -> False
       }
@@ -707,7 +706,7 @@ fn is_regexp_object(st: Agent, v: JsVal) -> Bool {
 }
 
 fn throw_receiver(st: Agent, op: String) -> a {
-  rt_val.t_throw_type_error(
+  rt_val.throw_type_error(
     st,
     "Method RegExp.prototype." <> op <> " called on incompatible receiver",
   )
@@ -744,14 +743,14 @@ pub fn get_named(st: Agent, o: JsVal, name: String) -> #(JsVal, Agent) {
 }
 
 pub fn set_throw(st: Agent, h: Handle, name: String, v: JsVal) -> Agent {
-  helpers.t_set_named(st, mk_object(h), name, v, strict: True)
+  helpers.set_named(st, mk_object(h), name, v, strict: True)
 }
 
 pub fn require_object(st: Agent, v: JsVal, op: String) -> Handle {
   case classify(v) {
     KHandle(h) -> h
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "RegExp.prototype" <> op <> " called on non-object",
       )
@@ -774,7 +773,7 @@ fn regexp_exec_mode(
 ) -> #(JsVal, Agent) {
   let h = require_object(st, rx, ".exec")
   let #(exec_fn, st) = get_named(st, rx, "exec")
-  let receiver = rt_store.t_cell_get(st, h)
+  let receiver = rt_store.cell_get(st, h)
   case receiver, is_intrinsic_exec(st, exec_fn) {
     SObject(kind: RegExpObj(..), ..), True -> builtin_exec_mode(st, h, s, mode)
     _, _ -> {
@@ -785,7 +784,7 @@ fn regexp_exec_mode(
           case classify(result) {
             KHandle(_) | KNull -> #(result, st)
             _ ->
-              rt_val.t_throw_type_error(
+              rt_val.throw_type_error(
                 st,
                 "exec method returned something other than an Object or null",
               )
@@ -796,7 +795,7 @@ fn regexp_exec_mode(
             SObject(kind: RegExpObj(..), ..) ->
               builtin_exec_mode(st, h, s, mode)
             _ ->
-              rt_val.t_throw_type_error(
+              rt_val.throw_type_error(
                 st,
                 "Method called on incompatible receiver: not a RegExp",
               )
@@ -809,7 +808,7 @@ fn regexp_exec_mode(
 fn is_intrinsic_exec(st: Agent, f: JsVal) -> Bool {
   case classify(f) {
     KHandle(fh) ->
-      case rt_store.t_cell_get(st, fh) {
+      case rt_store.cell_get(st, fh) {
         SObject(kind: NativeFn(token: RegExpN(RegExpPrototypeExec), ..), ..) ->
           True
         _ -> False
@@ -839,7 +838,7 @@ pub fn builtin_exec_ranges(
   s: String,
 ) -> #(MatchRanges, String, Agent) {
   let #(li_v, st) = get_named(st, mk_object(h), "lastIndex")
-  let #(last_index, st) = rt_val.t_to_length(st, li_v)
+  let #(last_index, st) = rt_val.to_length(st, li_v)
   // re-read after the get, a getter may have recompiled
   let #(flags, compiled, st) = regexp_matcher(st, h)
   let global = has_flag(flags, "g")
@@ -888,19 +887,19 @@ pub fn regexp_matcher(
   st: Agent,
   h: Handle,
 ) -> #(String, types.CompiledRegExp, Agent) {
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     SObject(kind: RegExpObj(source:, flags:, last_index:, compiled:), ..) as cell ->
       case is_compiled(compiled) {
         True -> #(flags, compiled, st)
         False -> {
           let #(compiled, st) = compile_cached(st, source, flags)
           let kind = RegExpObj(source:, flags:, last_index:, compiled:)
-          let st = rt_store.t_cell_set(st, h, SObject(..cell, kind:))
+          let st = rt_store.cell_set(st, h, SObject(..cell, kind:))
           #(flags, compiled, st)
         }
       }
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "RegExp.prototype.exec requires that 'this' be a RegExp",
       )
@@ -1057,11 +1056,11 @@ fn alloc_null_proto_object(
     list.fold(entries, #([], st), fn(acc, kv) {
       let #(ps, st) = acc
       let #(k, v) = kv
-      let #(prop, st) = rt_store.t_plain_property(st, v)
+      let #(prop, st) = rt_store.plain_property(st, v)
       #([#(k, prop), ..ps], st)
     })
   let #(h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       plain_object(Ordinary, None, common.named_props(list.reverse(props))),
     )
@@ -1082,7 +1081,7 @@ fn alloc_array_with_props(
   entries: List(#(String, JsVal)),
 ) -> #(Handle, Agent) {
   let array_proto = st.realm.array.prototype
-  use seq <- rt_store.t_cell_new_with(st, list.length(entries))
+  use seq <- rt_store.cell_new_with(st, list.length(entries))
   let props =
     list.index_map(entries, fn(kv, i) {
       #(Named(kv.0), types.plain_property(kv.1, seq + i))
@@ -1100,10 +1099,10 @@ fn alloc_array_with_props(
 fn regexp_exec(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: RegExpObj(..), ..) -> {
           let #(s, st) =
-            rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+            rt_val.to_string(st, helpers.first_arg_or_undefined(args))
           builtin_exec_mode(st, h, s, MatchArray)
         }
         _ -> not_regexp(st, "exec")
@@ -1114,7 +1113,7 @@ fn regexp_exec(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
 
 fn regexp_test(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let _ = require_object(st, this, ".test")
-  let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+  let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   let #(m, st) = regexp_exec_mode(st, this, s, MatchOnly)
   #(mk_bool(classify(m) != KNull), st)
 }
@@ -1127,7 +1126,7 @@ fn prototype_compile(
   let realm_proto = st.realm.regexp.prototype
   let h = case classify(this) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: RegExpObj(..), proto: Some(proto), ..)
           if proto == realm_proto
         -> h
@@ -1138,12 +1137,12 @@ fn prototype_compile(
   let #(pattern_v, flags_v) = helpers.two_args_or_undefined(args)
   let #(source, flags, st) = case classify(pattern_v) {
     KHandle(ph) ->
-      case rt_store.t_cell_get(st, ph) {
+      case rt_store.cell_get(st, ph) {
         SObject(kind: RegExpObj(source: p, flags: f, ..), ..) ->
           case classify(flags_v) {
             KUndef -> #(p, f, st)
             _ ->
-              rt_val.t_throw_type_error(
+              rt_val.throw_type_error(
                 st,
                 "Cannot supply flags when constructing one RegExp from another",
               )
@@ -1158,7 +1157,7 @@ fn prototype_compile(
     _ -> source
   }
   let st =
-    rt_store.t_cell_update(st, h, fn(cell) {
+    rt_store.cell_update(st, h, fn(cell) {
       case cell {
         SObject(kind: RegExpObj(..), ..) ->
           SObject(
@@ -1178,7 +1177,7 @@ fn prototype_compile(
 }
 
 pub fn not_regexp(st: Agent, method: String) -> a {
-  rt_val.t_throw_type_error(
+  rt_val.throw_type_error(
     st,
     "RegExp.prototype." <> method <> " requires that 'this' be a RegExp",
   )
@@ -1186,7 +1185,7 @@ pub fn not_regexp(st: Agent, method: String) -> a {
 
 fn own_flags(st: Agent, h: Handle) -> #(Option(String), Agent) {
   let proto = st.realm.regexp.prototype
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     SObject(kind: RegExpObj(flags:, ..), proto: Some(p), props:, ..)
       if p == proto
     ->
@@ -1229,7 +1228,7 @@ fn intrinsic_getter(
     Ok(types.AccessorProperty(get: Some(g), ..)) ->
       case classify(g) {
         KHandle(gh) ->
-          case rt_store.t_cell_get(st, gh) {
+          case rt_store.cell_get(st, gh) {
             SObject(kind: NativeFn(token: RegExpN(native), ..), ..) ->
               native == expected
             _ -> False
@@ -1250,7 +1249,7 @@ pub fn read_flags(st: Agent, rx: JsVal) -> #(String, Agent) {
     Some(flags) -> #(flags, st)
     None -> {
       let #(flags_v, st) = get_named(st, rx, "flags")
-      rt_val.t_to_string(st, flags_v)
+      rt_val.to_string(st, flags_v)
     }
   }
 }
@@ -1258,7 +1257,7 @@ pub fn read_flags(st: Agent, rx: JsVal) -> #(String, Agent) {
 // own exec absent and the proto's exec is the untouched intrinsic
 pub fn pristine_exec(st: Agent, h: Handle) -> #(Bool, Agent) {
   let proto = st.realm.regexp.prototype
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     SObject(kind: RegExpObj(..), proto: Some(p), props:, ..) if p == proto ->
       case dict.has_key(props, Named("exec")) {
         True -> #(False, st)
@@ -1283,13 +1282,13 @@ pub fn species_constructor(
         KUndef | KNull -> #(mk_object(default_ctor), st)
         KHandle(_) -> #(s, st)
         _ ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "constructor[Symbol.species] is not a constructor",
           )
       }
     }
-    _ -> rt_val.t_throw_type_error(st, "object.constructor is not an Object")
+    _ -> rt_val.throw_type_error(st, "object.constructor is not an Object")
   }
 }
 

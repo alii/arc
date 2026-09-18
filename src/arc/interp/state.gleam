@@ -241,7 +241,7 @@ pub fn new_error(
   msg: String,
 ) -> #(JsVal, State) {
   let agent = state.agent
-  let #(err, agent) = rt_val.t_new_error(agent, kind, msg)
+  let #(err, agent) = rt_val.new_error(agent, kind, msg)
   #(err, State(..state, agent:))
 }
 
@@ -263,7 +263,7 @@ pub fn throw_reference_error(state: State, msg: String) -> Result(a, StepExit) {
 }
 
 pub fn stack_overflow_error(agent: Agent) -> #(JsVal, Agent) {
-  rt_val.t_new_error(agent, RangeError, "Maximum call stack size exceeded")
+  rt_val.new_error(agent, RangeError, "Maximum call stack size exceeded")
 }
 
 pub fn throw_stack_overflow(state: State) -> Result(a, StepExit) {

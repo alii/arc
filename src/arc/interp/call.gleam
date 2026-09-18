@@ -119,7 +119,7 @@ fn class_constructor_call_error(
   agent: Agent,
   template: FuncTemplate,
 ) -> #(JsVal, Agent) {
-  rt_val.t_new_error(
+  rt_val.new_error(
     agent,
     TypeError,
     "Class constructor "
@@ -324,12 +324,12 @@ pub fn call(
       )
     True ->
       case classify(callee) {
-        // dangling handle: t_cell_get names the use-after-free
+        // dangling handle: cell_get names the use-after-free
         KHandle(h) ->
           call_cell(
             state,
             h,
-            rt_store.t_cell_get(state.agent, h),
+            rt_store.cell_get(state.agent, h),
             this,
             args,
             rest_stack,
@@ -460,7 +460,7 @@ fn list_from_array_like(
   }
 }
 
-// at the depth limit the nested t_try_call raises rangeerror
+// at the depth limit the nested try_call raises rangeerror
 fn call_native(
   state: State,
   token: NativeToken,
@@ -472,13 +472,13 @@ fn call_native(
   case state.agent.call_depth >= limits.max_call_depth {
     True -> call_nested(state, callee, this, args, rest_stack)
     False -> {
-      let agent = rt_store.t_enter_call(state.agent)
+      let agent = rt_store.enter_call(state.agent)
       case guard.guard4(rt_builtins.dispatch_native, agent, token, this, args) {
         guard.Value(value: v, agent:) ->
           Ok(
             State(
               ..state,
-              agent: rt_store.t_leave_call(agent),
+              agent: rt_store.leave_call(agent),
               stack: [v, ..rest_stack],
               pc: state.pc + 1,
             ),
@@ -486,11 +486,7 @@ fn call_native(
         guard.Thrown(agent:, thrown:) ->
           Error(Threw(
             thrown,
-            State(
-              ..state,
-              agent: rt_store.t_leave_call(agent),
-              stack: rest_stack,
-            ),
+            State(..state, agent: rt_store.leave_call(agent), stack: rest_stack),
           ))
       }
     }
@@ -523,7 +519,7 @@ fn call_nested(
   args: List(JsVal),
   rest_stack: List(JsVal),
 ) -> Result(State, StepExit) {
-  case rt_call.t_try_call(state.agent, callee, this, args) {
+  case rt_call.try_call(state.agent, callee, this, args) {
     #(rt_call.NormalCompletion(v), agent) ->
       Ok(State(..state, agent:, stack: [v, ..rest_stack], pc: state.pc + 1))
     #(rt_call.ThrowCompletion(thrown), agent) ->
@@ -535,7 +531,7 @@ fn call_nested(
 pub fn array_values(agent: Agent, v: JsVal) -> List(JsVal) {
   case classify(v) {
     KHandle(h) ->
-      case rt_obj.as_sobject(rt_store.t_cell_get(agent, h)) {
+      case rt_obj.as_sobject(rt_store.cell_get(agent, h)) {
         SObject(kind: ArrayObj(length:), elements: els, ..)
         | SObject(kind: ArgumentsObj(length:, ..), elements: els, ..) ->
           elements.dense_list(els, length)
@@ -565,7 +561,7 @@ fn new_base_this(agent: Agent, new_target: JsVal) -> #(Handle, Agent) {
       new_target,
       rt_call.object_prototype,
     )
-  rt_obj.t_new_receiver(agent, proto)
+  rt_obj.new_receiver(agent, proto)
 }
 
 // §10.2.2 construct
@@ -597,7 +593,7 @@ fn construct_handle(
   new_target: JsVal,
   drive: Drive,
 ) -> Result(State, StepExit) {
-  case rt_store.t_cell_get(state.agent, ctor_h) {
+  case rt_store.cell_get(state.agent, ctor_h) {
     SObject(
       kind: BytecodeFn(
         template:,
@@ -671,7 +667,7 @@ fn construct_handle(
     _ ->
       case
         guard.guard4(
-          rt_call.t_construct,
+          rt_call.construct,
           state.agent,
           kernel.object_val([ctor_h]),
           args,
@@ -700,7 +696,7 @@ fn read_lexical_local(state: State, ref: lexical.LexicalRef) -> JsVal {
       let raw = tuple_array.get_unchecked(idx, state.locals)
       case classify(raw) {
         KHandle(h) ->
-          case rt_store.t_cell_get(state.agent, h) {
+          case rt_store.cell_get(state.agent, h) {
             SBox(value:) -> value
             _ -> raw
           }
@@ -837,22 +833,17 @@ pub fn arguments_object(
   let callee = read_lexical_local(state, lexical.RefActiveFunc)
   case state.func.is_strict || !simple_params {
     True ->
-      rt_obj.t_new_arguments(
-        state.agent,
-        state.call_args,
-        mk_undefined(),
-        callee,
-      )
+      rt_obj.new_arguments(state.agent, state.call_args, mk_undefined(), callee)
     False -> {
       let no_boxes: List(Handle) = []
-      rt_obj.t_new_arguments(state.agent, state.call_args, no_boxes, callee)
+      rt_obj.new_arguments(state.agent, state.call_args, no_boxes, callee)
     }
   }
 }
 
 pub fn create_rest_array(state: State, from_index: Int) -> State {
   let #(arr, agent) =
-    rt_obj.t_new_array(state.agent, list.drop(state.call_args, from_index))
+    rt_obj.new_array(state.agent, list.drop(state.call_args, from_index))
   State(..state, agent:, stack: [arr, ..state.stack], pc: state.pc + 1)
 }
 

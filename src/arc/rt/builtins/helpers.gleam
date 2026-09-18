@@ -18,8 +18,8 @@ pub fn get_symbol(st: Agent, recv: JsVal, sym: SymbolId) -> #(JsVal, Agent) {
 }
 
 // strict set, throws on failure
-@external(erlang, "arc_rt_obj_ffi", "t_set_named")
-pub fn t_set_named(
+@external(erlang, "arc_rt_obj_ffi", "set_named")
+pub fn set_named(
   st: Agent,
   obj: JsVal,
   key: String,
@@ -102,7 +102,7 @@ pub fn brand_of(
 ) -> Option(#(a, Handle)) {
   case classify(this) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind:, ..) ->
           case extract(kind) {
             Some(v) -> Some(#(v, h))
@@ -123,14 +123,14 @@ pub fn require_brand(
 ) -> #(JsVal, Agent) {
   case brand_of(st, this, extract) {
     Some(#(v, h)) -> cont(v, h)
-    None -> rt_val.t_throw_type_error(st, msg())
+    None -> rt_val.throw_type_error(st, msg())
   }
 }
 
 pub fn require_object(st: Agent, this: JsVal, name: String) -> Handle {
   case classify(this) {
     KHandle(h) -> h
-    _ -> rt_val.t_throw_type_error(st, name <> " called on non-object")
+    _ -> rt_val.throw_type_error(st, name <> " called on non-object")
   }
 }
 
@@ -142,7 +142,7 @@ pub fn require_callable(
 ) -> #(JsVal, Agent) {
   case rt_val.is_callable(st, val) {
     True -> cont(val)
-    False -> rt_val.t_throw_type_error(st, msg())
+    False -> rt_val.throw_type_error(st, msg())
   }
 }
 

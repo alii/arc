@@ -25,11 +25,11 @@ pub fn init(
       2,
     )
   let #(revocable_prop, st) =
-    rt_store.t_builtin_property(st, mk_object(revocable_h))
+    rt_store.builtin_property(st, mk_object(revocable_h))
   let #(len_p, st) = common.fn_length_property(st, 2)
   let #(name_p, st) = common.fn_name_property(st, "Proxy")
   let #(ctor_h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       plain_object(
         types.NativeFn(
@@ -46,7 +46,7 @@ pub fn init(
         ]),
       ),
     )
-  let st = rt_store.t_pin_root(st, ctor_h)
+  let st = rt_store.pin_root(st, ctor_h)
   #(BuiltinPair(prototype: object_proto, constructor: ctor_h), st)
 }
 
@@ -58,7 +58,7 @@ pub fn dispatch(
 ) -> #(JsVal, Agent) {
   case native {
     ProxyConstructor ->
-      rt_val.t_throw_type_error(st, "Constructor Proxy requires 'new'")
+      rt_val.throw_type_error(st, "Constructor Proxy requires 'new'")
     ProxyRevocable -> proxy_revocable(st, args)
     ProxyRevoke(proxy:) -> proxy_revoke(st, proxy)
   }
@@ -72,7 +72,7 @@ pub fn dispatch_construct(
 ) -> #(Handle, Agent) {
   case native {
     ProxyConstructor -> proxy_create(st, args)
-    _ -> rt_val.t_throw_type_error(st, "not a constructor")
+    _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }
 
@@ -80,7 +80,7 @@ fn proxy_create(st: Agent, args: List(JsVal)) -> #(Handle, Agent) {
   let #(target_v, handler_v) = helpers.two_args_or_undefined(args)
   let target = require_object(st, target_v, "Proxy target")
   let handler = require_object(st, handler_v, "Proxy handler")
-  rt_store.t_cell_new(
+  rt_store.cell_new(
     st,
     plain_object(ProxyObj(target:, handler:, revoked: False), None, dict.new()),
   )
@@ -91,7 +91,7 @@ fn proxy_revocable(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let realm = st.realm
   // not rooted, pinning would leak proxy and handler
   let #(revoker_h, st) =
-    rt_call.t_native_new(
+    rt_call.native_new(
       st,
       Some(realm.function.prototype),
       ProxyN(ProxyRevoke(proxy: proxy_h)),
@@ -109,7 +109,7 @@ fn proxy_revocable(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 
 fn proxy_revoke(st: Agent, proxy: Handle) -> #(JsVal, Agent) {
   let st =
-    rt_store.t_cell_update(st, proxy, fn(cell) {
+    rt_store.cell_update(st, proxy, fn(cell) {
       case cell {
         SObject(kind: ProxyObj(target:, handler:, ..), ..) ->
           SObject(..cell, kind: ProxyObj(target:, handler:, revoked: True))
@@ -123,7 +123,7 @@ fn require_object(st: Agent, v: JsVal, what: String) -> Handle {
   case classify(v) {
     KHandle(h) -> h
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot create proxy with a non-object as " <> what,
       )

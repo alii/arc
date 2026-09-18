@@ -23,15 +23,15 @@ fn roundtrip(st: Agent) -> Agent {
 
 pub fn roundtrip_keeps_globals_and_properties_test() {
   let st = rt_helpers.agent()
-  let st = rt_lang.t_global_set(st, <<"n">>, mk_int(42))
-  let st = rt_lang.t_global_set(st, <<"s">>, mk_string("hello"))
-  let #(obj, st) = rt_obj.t_new_object_literal(st)
-  let #(_, st) = rt_obj.t_set_prop(st, obj, StringKey(Named("a")), mk_int(1))
-  let #(inner, st) = rt_obj.t_new_object_literal(st)
+  let st = rt_lang.global_set(st, <<"n">>, mk_int(42))
+  let st = rt_lang.global_set(st, <<"s">>, mk_string("hello"))
+  let #(obj, st) = rt_obj.new_object_literal(st)
+  let #(_, st) = rt_obj.set_prop(st, obj, StringKey(Named("a")), mk_int(1))
+  let #(inner, st) = rt_obj.new_object_literal(st)
   let #(_, st) =
-    rt_obj.t_set_prop(st, inner, StringKey(Named("c")), mk_string("deep"))
-  let #(_, st) = rt_obj.t_set_prop(st, obj, StringKey(Named("b")), inner)
-  let st = rt_lang.t_global_set(st, <<"obj">>, obj)
+    rt_obj.set_prop(st, inner, StringKey(Named("c")), mk_string("deep"))
+  let #(_, st) = rt_obj.set_prop(st, obj, StringKey(Named("b")), inner)
+  let st = rt_lang.global_set(st, <<"obj">>, obj)
 
   let st = roundtrip(st)
   let #(n, st) = rt_helpers.global(st, "n")
@@ -49,12 +49,12 @@ pub fn roundtrip_keeps_globals_and_properties_test() {
 pub fn roundtrip_keeps_arrays_test() {
   let st = rt_helpers.agent()
   let #(arr, st) =
-    rt_obj.t_new_array(st, [
+    rt_obj.new_array(st, [
       mk_int(10),
       mk_int(20),
       mk_int(30),
     ])
-  let st = rt_lang.t_global_set(st, <<"arr">>, arr)
+  let st = rt_lang.global_set(st, <<"arr">>, arr)
 
   let st = roundtrip(st)
   let #(arr, st) = rt_helpers.global(st, "arr")
@@ -75,18 +75,18 @@ pub fn natives_work_after_roundtrip_test() {
     ])
   assert classify(max) == KNum(JInt(5))
   let #(array, st) = rt_helpers.global(st, "Array")
-  let #(empty, st) = rt_obj.t_new_array(st, [])
+  let #(empty, st) = rt_obj.new_array(st, [])
   let #(is_array, _st) = rt_helpers.call_method(st, array, "isArray", [empty])
   assert classify(is_array) == KBool(True)
 }
 
 pub fn roundtrip_is_repeatable_test() {
   let st = rt_helpers.agent()
-  let st = rt_lang.t_global_set(st, <<"x">>, mk_int(1))
+  let st = rt_lang.global_set(st, <<"x">>, mk_int(1))
   let st = roundtrip(st)
   let #(x, st) = rt_helpers.global(st, "x")
   let assert KNum(JInt(x)) = classify(x)
-  let st = rt_lang.t_global_set(st, <<"x">>, mk_int(x + 10))
+  let st = rt_lang.global_set(st, <<"x">>, mk_int(x + 10))
   let st = roundtrip(st)
   let #(x, _st) = rt_helpers.global(st, "x")
   assert classify(x) == KNum(JInt(11))
@@ -96,10 +96,10 @@ pub fn regexp_matcher_is_dropped_and_rebuilt_test() {
   let st = rt_helpers.agent()
   let #(re, st) = b_regexp.create_literal(st, "a+b", "")
   let assert KHandle(h) = classify(re)
-  let st = rt_lang.t_global_set(st, <<"re">>, re)
+  let st = rt_lang.global_set(st, <<"re">>, re)
   let matcher_cached = fn(st) {
     let assert SObject(kind: RegExpObj(compiled:, ..), ..) =
-      rt_store.t_cell_get(st, h)
+      rt_store.cell_get(st, h)
     compiled != b_regexp.uncompiled()
   }
   assert !matcher_cached(st)
@@ -140,13 +140,13 @@ pub fn compiled_function_is_refused_test() {
   let st = rt_helpers.agent()
   let #(f, st) = rt_helpers.func(st, fn(st, _) { #(mk_int(1), st) })
   let assert KHandle(h) = classify(f)
-  let st = rt_lang.t_global_set(st, <<"f">>, f)
+  let st = rt_lang.global_set(st, <<"f">>, f)
   assert snapshot.serialize(st) == Error(SnapshotContainsCompiledCode(h))
 }
 
 pub fn queued_host_job_is_refused_test() {
   let st = rt_helpers.agent()
-  let st = rt_async.t_enqueue_job(st, HostJob(run: fn(st) { st }))
+  let st = rt_async.enqueue_job(st, HostJob(run: fn(st) { st }))
   assert snapshot.serialize(st) == Error(SnapshotContainsHostJob)
 }
 

@@ -37,7 +37,7 @@ pub fn init(
       fn(acc, entry) {
         let #(props, st) = acc
         let #(name, f) = entry
-        let #(prop, st) = rt_store.t_frozen_property(st, mk_number(JFloat(f)))
+        let #(prop, st) = rt_store.frozen_property(st, mk_number(JFloat(f)))
         #([#(name, prop), ..props], st)
       },
     )
@@ -493,7 +493,7 @@ fn math_unary(
   st: Agent,
   apply: fn(JsNum) -> JsNum,
 ) -> #(JsVal, Agent) {
-  let #(x, st) = rt_val.t_to_number(st, helpers.first_arg_or_undefined(args))
+  let #(x, st) = rt_val.to_number(st, helpers.first_arg_or_undefined(args))
   #(mk_number(apply(x)), st)
 }
 
@@ -503,8 +503,8 @@ fn math_binary(
   apply: fn(JsNum, JsNum) -> JsNum,
 ) -> #(JsVal, Agent) {
   let #(a_val, b_val) = helpers.two_args_or_undefined(args)
-  let #(a, st) = rt_val.t_to_number(st, a_val)
-  let #(b, st) = rt_val.t_to_number(st, b_val)
+  let #(a, st) = rt_val.to_number(st, a_val)
+  let #(b, st) = rt_val.to_number(st, b_val)
   #(mk_number(apply(a, b)), st)
 }
 
@@ -520,7 +520,7 @@ fn coerce_args_loop(
   case args {
     [] -> #(list.reverse(acc), st)
     [arg, ..rest] -> {
-      let #(n, st) = rt_val.t_to_number(st, arg)
+      let #(n, st) = rt_val.to_number(st, arg)
       coerce_args_loop(rest, st, [n, ..acc])
     }
   }

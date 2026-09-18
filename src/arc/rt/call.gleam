@@ -74,7 +74,7 @@ fn dispatch_native_construct(
 ) -> #(Handle, Agent)
 
 fn read_obj_kind(st: Agent, h: Handle) -> Option(ObjKind) {
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     SObject(kind:, ..) -> Some(kind)
     types.SShapedObject(..) -> Some(types.Ordinary)
     _ -> None
@@ -102,11 +102,11 @@ fn handle_is_constructor(st: Agent, h: Handle) -> Bool {
 }
 
 // {code, this, direct_entry} for a plain compiled fn, else miss
-@external(erlang, "arc_rt_call_ffi", "t_direct_callee")
-pub fn t_direct_callee(st: Agent, callee: JsVal, this: JsVal) -> Dynamic
+@external(erlang, "arc_rt_call_ffi", "direct_callee")
+pub fn direct_callee(st: Agent, callee: JsVal, this: JsVal) -> Dynamic
 
 // §10.2.1 [[call]], catches a throw into a completion
-pub fn t_try_call(
+pub fn try_call(
   st: Agent,
   callee: JsVal,
   this: JsVal,
@@ -114,7 +114,7 @@ pub fn t_try_call(
 ) -> #(Completion(JsVal), Agent) {
   case classify(callee) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: BytecodeFn(..) as kind, ..) -> {
           let #(res, st) = st.store.ops.call_bytecode(st, h, kind, this, args)
           case res {
@@ -146,12 +146,7 @@ fn call_cell(
       try_call_native(st, token, this, args)
     }
     SObject(kind: BoundFn(target:, bound_this:, bound_args:), ..) ->
-      t_try_call(
-        st,
-        mk_object(target),
-        bound_this,
-        list.append(bound_args, args),
-      )
+      try_call(st, mk_object(target), bound_this, list.append(bound_args, args))
     SObject(kind: ProxyObj(target:, handler:, revoked:), ..) -> {
       use st <- bracketed(st)
       call_proxy(st, callee, target, handler, revoked, this, args)
@@ -186,7 +181,7 @@ fn try_call_compiled(
   case flags.is_class_constructor {
     True ->
       try_run(st, fn(st) {
-        rt_val.t_throw_type_error(
+        rt_val.throw_type_error(
           st,
           "Class constructor cannot be invoked without 'new'",
         )
@@ -238,10 +233,10 @@ fn call_proxy(
     })
     let #(trap, st) = proxy_trap(st, handler, revoked, "apply")
     case trap {
-      None -> t_call(st, mk_object(target), this, args)
+      None -> call(st, mk_object(target), this, args)
       Some(trap_fn) -> {
         let #(args_arr, st) = alloc_args_array(st, args)
-        t_call(st, trap_fn, mk_object(handler), [
+        call(st, trap_fn, mk_object(handler), [
           mk_object(target),
           this,
           mk_object(args_arr),
@@ -259,20 +254,20 @@ fn proxy_trap(
   name name: String,
 ) -> #(Option(JsVal), Agent) {
   use <- bool.lazy_guard(revoked, fn() {
-    rt_val.t_throw_type_error(
+    rt_val.throw_type_error(
       st,
       "Cannot perform '" <> name <> "' on a proxy that has been revoked",
     )
   })
   let #(trap, st) =
-    rt_obj.t_get_prop(st, mk_object(handler), StringKey(Named(name)))
+    rt_obj.get_prop(st, mk_object(handler), StringKey(Named(name)))
   case classify(trap) {
     KUndef | KNull -> #(None, st)
     _ ->
       case rt_val.is_callable(st, trap) {
         True -> #(Some(trap), st)
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "'" <> name <> "' trap of proxy handler is not a function",
           )
@@ -285,14 +280,14 @@ fn not_a_function(st: Agent, callee: JsVal) -> #(Completion(JsVal), Agent) {
 }
 
 fn not_a_function_raise(st: Agent, callee: JsVal) -> a {
-  rt_val.t_throw_type_error(
+  rt_val.throw_type_error(
     st,
     rt_val.type_of(st, callee) <> " is not a function",
   )
 }
 
 // rethrows; seeds jsops.call; called by name from arc_rt_call_ic_ffi
-pub fn t_call(
+pub fn call(
   st: Agent,
   callee: JsVal,
   this: JsVal,
@@ -300,11 +295,11 @@ pub fn t_call(
 ) -> #(JsVal, Agent) {
   case classify(callee) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: BytecodeFn(..) as kind, ..) ->
           case st.store.ops.call_bytecode(st, h, kind, this, args) {
             #(Ok(v), st) -> #(v, st)
-            #(Error(e), st) -> rt_store.t_throw(st, e)
+            #(Error(e), st) -> rt_store.throw(st, e)
           }
         cell -> rethrown(call_cell(st, callee, h, cell, this, args))
       }
@@ -312,15 +307,15 @@ pub fn t_call(
   }
 }
 
-pub fn t_prepare_call(
+pub fn prepare_call(
   st: Agent,
   callee: JsVal,
   this: JsVal,
 ) -> fn(Agent, List(JsVal)) -> #(JsVal, Agent) {
-  let generic = fn(st, args) { t_call(st, callee, this, args) }
+  let generic = fn(st, args) { call(st, callee, this, args) }
   case classify(callee) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: BytecodeFn(..) as kind, ..) ->
           st.store.ops.prepare_call(st, h, kind, this)
         SObject(kind: NativeFn(token:, ..), ..) -> fn(st, args) {
@@ -368,21 +363,21 @@ fn rethrown_bracket(
   rethrown(bracketed(st, body))
 }
 
-pub fn t_try_prepare_call(
+pub fn try_prepare_call(
   st: Agent,
   callee: JsVal,
   this: JsVal,
 ) -> Option(fn(Agent, List(JsVal)) -> #(JsVal, Agent)) {
-  let generic = fn(st, args) { t_call(st, callee, this, args) }
+  let generic = fn(st, args) { call(st, callee, this, args) }
   case classify(callee) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: BytecodeFn(..) as kind, ..) ->
           Some(st.store.ops.prepare_call(st, h, kind, this))
         SObject(kind: NativeFn(token:, ..), ..) ->
           Some(fn(st, args) { call_native(st, token, this, args) })
         SObject(kind: CompiledFn(code:, home_object:, flags:, ..) as kind, ..) ->
-          t_prepare_compiled_call(st, callee, kind, this)
+          prepare_compiled_call(st, callee, kind, this)
           |> option.or(
             Some(fn(st, args) {
               call_compiled(st, h, code, home_object, flags, this, args)
@@ -400,8 +395,8 @@ pub fn t_try_prepare_call(
   }
 }
 
-@external(erlang, "arc_rt_call_ic_ffi", "t_prepare_compiled_call")
-fn t_prepare_compiled_call(
+@external(erlang, "arc_rt_call_ic_ffi", "prepare_compiled_call")
+fn prepare_compiled_call(
   st: Agent,
   callee: JsVal,
   kind: ObjKind,
@@ -411,22 +406,22 @@ fn t_prepare_compiled_call(
 fn rethrown(outcome: #(Completion(JsVal), Agent)) -> #(JsVal, Agent) {
   case outcome {
     #(NormalCompletion(v), st) -> #(v, st)
-    #(ThrowCompletion(e), st) -> rt_store.t_throw(st, e)
+    #(ThrowCompletion(e), st) -> rt_store.throw(st, e)
   }
 }
 
-pub fn t_call_method(
+pub fn call_method(
   st: Agent,
   recv: JsVal,
   key: types.ObjectKey,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(callee, st) = rt_obj.t_get_prop(st, recv, key)
-  t_call(st, callee, recv, args)
+  let #(callee, st) = rt_obj.get_prop(st, recv, key)
+  call(st, callee, recv, args)
 }
 
 // §10.2.2 [[construct]], isconstructor gate first
-pub fn t_construct(
+pub fn construct(
   st: Agent,
   callee: JsVal,
   args: List(JsVal),
@@ -443,7 +438,7 @@ pub fn t_construct(
 }
 
 fn not_a_constructor(st: Agent, callee: JsVal) -> a {
-  rt_val.t_throw_type_error(
+  rt_val.throw_type_error(
     st,
     rt_val.type_of(st, callee) <> " is not a constructor",
   )
@@ -476,12 +471,11 @@ fn construct_by_kind(
         KHandle(nt_h) if nt_h == callee_h -> mk_object(target)
         _ -> new_target
       }
-      t_construct(st, mk_object(target), list.append(bound_args, args), nt)
+      construct(st, mk_object(target), list.append(bound_args, args), nt)
     }
     Some(ProxyObj(target:, handler:, revoked:)) ->
       construct_proxy(st, target, handler, revoked, args, new_target)
-    _ ->
-      panic as "t_construct: IsConstructor passed but ObjKind not constructible"
+    _ -> panic as "construct: IsConstructor passed but ObjKind not constructible"
   }
 }
 
@@ -509,7 +503,7 @@ fn construct_compiled(
     False -> {
       let #(proto, st) =
         get_prototype_from_constructor(st, new_target, object_prototype)
-      let #(new_this, st) = rt_obj.t_new_receiver(st, proto)
+      let #(new_this, st) = rt_obj.new_receiver(st, proto)
       let st = run_fields_init(st, fields_init, new_this)
       let frame = mk_frame(mk_object(new_this), callee_v, home, new_target)
       let #(c, st) = apply_ctor(st, code, frame, args)
@@ -524,12 +518,12 @@ fn apply_ctor(
   frame: Frame,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let st = rt_store.t_enter_call(st)
+  let st = rt_store.enter_call(st)
   let #(c, st) = try_call_code(st, code, frame, args)
-  let st = rt_store.t_leave_call(st)
+  let st = rt_store.leave_call(st)
   case c {
     NormalCompletion(v) -> #(v, st)
-    ThrowCompletion(e) -> rt_store.t_throw(st, e)
+    ThrowCompletion(e) -> rt_store.throw(st, e)
   }
 }
 
@@ -549,14 +543,14 @@ fn derived_return_override(st: Agent, result: JsVal) -> #(Handle, Agent) {
   case classify(result) {
     KHandle(h) -> #(h, st)
     KTdz ->
-      rt_val.t_throw_reference_error(
+      rt_val.throw_reference_error(
         st,
         "Must call super constructor in derived class before returning from derived constructor",
       )
     KUndef ->
       panic as "derived ctor returned KUndef — M18 return-lowering contract violated"
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Derived constructors may only return object or undefined",
       )
@@ -572,7 +566,7 @@ pub fn get_prototype_from_constructor(
   case classify(constructor) {
     KHandle(ctor_h) -> {
       let #(proto, st) =
-        rt_obj.t_get_prop(st, constructor, StringKey(Named("prototype")))
+        rt_obj.get_prop(st, constructor, StringKey(Named("prototype")))
       case classify(proto) {
         KHandle(h) -> #(h, st)
         _ -> #(intrinsic(function_realm(st, ctor_h)), st)
@@ -601,11 +595,11 @@ pub fn function_realm(st: Agent, obj: Handle) -> Realm {
 
 // §7.3.24 getfunctionrealm as a realm id
 pub fn get_function_realm(st: Agent, obj: Handle) -> Int {
-  case rt_store.t_cell_get(st, obj) {
+  case rt_store.cell_get(st, obj) {
     SObject(kind: BytecodeFn(realm:, ..), ..) -> realm
     SObject(kind: BoundFn(target:, ..), ..) -> get_function_realm(st, target)
     SObject(kind: ProxyObj(revoked: True, ..), ..) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot perform 'getFunctionRealm' on a proxy that has been revoked",
       )
@@ -669,7 +663,7 @@ fn is_function_proto_of(st: Agent, realm: types.Realm, p: Handle) -> Bool {
 
 pub fn async_generator_fn_prototype(st: Agent, realm: types.Realm) -> Handle {
   case
-    rt_obj.t_ordinary_own_property(
+    rt_obj.ordinary_own_property(
       st,
       realm.async_gen.constructor,
       StringKey(Named("prototype")),
@@ -693,7 +687,7 @@ fn run_fields_init(
   case fields_init {
     None -> st
     Some(init_h) -> {
-      let #(_, st) = t_call(st, mk_object(init_h), mk_object(new_this), [])
+      let #(_, st) = call(st, mk_object(init_h), mk_object(new_this), [])
       st
     }
   }
@@ -710,11 +704,11 @@ fn construct_proxy(
 ) -> #(Handle, Agent) {
   let #(trap, st) = proxy_trap(st, handler, revoked, "construct")
   case trap {
-    None -> t_construct(st, mk_object(target), args, new_target)
+    None -> construct(st, mk_object(target), args, new_target)
     Some(trap_fn) -> {
       let #(args_arr, st) = alloc_args_array(st, args)
       let #(res, st) =
-        t_call(st, trap_fn, mk_object(handler), [
+        call(st, trap_fn, mk_object(handler), [
           mk_object(target),
           mk_object(args_arr),
           new_target,
@@ -722,7 +716,7 @@ fn construct_proxy(
       case classify(res) {
         KHandle(h) -> #(h, st)
         _ ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "'construct' on proxy: trap returned non-object",
           )
@@ -737,7 +731,7 @@ fn alloc_args_array(st: Agent, items: List(JsVal)) -> #(Handle, Agent) {
     [] -> NoElements
     _ -> Dense(tree_array.from_list(items))
   }
-  rt_store.t_cell_new(
+  rt_store.cell_new(
     st,
     SObject(
       kind: ArrayObj(length: len),
@@ -771,7 +765,7 @@ fn alloc_fn_cell(
   length_v: JsVal,
   name: String,
 ) -> #(Handle, Agent) {
-  rt_store.t_cell_new(
+  rt_store.cell_new(
     st,
     SObject(
       kind:,
@@ -798,7 +792,7 @@ pub fn builtin_function_flags() -> FnFlags {
 }
 
 // a host closure callable as a compiled function, frame ignored
-pub fn t_new_builtin_function(
+pub fn new_builtin_function(
   st: Agent,
   name: String,
   arity: Int,
@@ -808,11 +802,11 @@ pub fn t_new_builtin_function(
     unsafe.coerce(fn(st: Agent, _frame: Frame, args: List(JsVal)) {
       body(st, args)
     })
-  t_fn_new(st, code, builtin_function_flags(), name, arity, None, None)
+  fn_new(st, code, builtin_function_flags(), name, arity, None, None)
 }
 
 // no .prototype here, makeconstructor is separate
-pub fn t_fn_new(
+pub fn fn_new(
   st: Agent,
   code: CompiledCode,
   flags: FnFlags,
@@ -840,7 +834,7 @@ pub fn t_fn_new(
 }
 
 // closure site of every compiled function
-pub fn t_new_function(
+pub fn new_function(
   st: Agent,
   code: CompiledCode,
   flags: FnFlags,
@@ -862,7 +856,7 @@ pub fn t_new_function(
     False -> None
   }
   let #(h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       SObject(
         kind: CompiledFn(
@@ -889,9 +883,9 @@ pub fn t_new_function(
         True -> realm.async_gen.prototype
         False -> realm.generator.prototype
       }
-      let #(own_proto, st) = rt_obj.t_new_object(st, Some(gen_proto))
+      let #(own_proto, st) = rt_obj.new_object(st, Some(gen_proto))
       let #(_, st) =
-        rt_obj.t_define_own_data(
+        rt_obj.define_own_data(
           st,
           h,
           StringKey(Named("prototype")),
@@ -907,7 +901,7 @@ pub fn t_new_function(
 }
 
 // proto is explicit: called during bootstrap
-pub fn t_native_new(
+pub fn native_new(
   st: Agent,
   proto: Option(Handle),
   token: NativeToken,
@@ -925,7 +919,7 @@ pub fn t_native_new(
 }
 
 // length may be +infinity (wrappedfunctioncreate)
-pub fn t_native_new_computed_length(
+pub fn native_new_computed_length(
   st: Agent,
   proto: Option(Handle),
   token: NativeToken,
@@ -946,7 +940,7 @@ pub fn t_native_new_computed_length(
 }
 
 // §20.2.3.2 bind steps 3-10; caller checks iscallable
-pub fn t_bound_new(
+pub fn bound_new(
   st: Agent,
   target: Handle,
   bound_this: JsVal,
@@ -954,9 +948,9 @@ pub fn t_bound_new(
 ) -> #(Handle, Agent) {
   let target_v = mk_object(target)
   let #(own_length, st) =
-    rt_obj.t_get_own_property(st, target, StringKey(Named("length")))
+    rt_obj.get_own_property(st, target, StringKey(Named("length")))
   let #(target_len, st) = case own_length {
-    Some(_) -> rt_obj.t_get_prop(st, target_v, StringKey(Named("length")))
+    Some(_) -> rt_obj.get_prop(st, target_v, StringKey(Named("length")))
     None -> #(mk_undefined(), st)
   }
   let n_args = list.length(bound_args)
@@ -967,7 +961,7 @@ pub fn t_bound_new(
     _ -> mk_int(0)
   }
   let #(target_name, st) =
-    rt_obj.t_get_prop(st, target_v, StringKey(Named("name")))
+    rt_obj.get_prop(st, target_v, StringKey(Named("name")))
   let bound_name = case classify(target_name) {
     KStr(s) -> "bound " <> s
     _ -> "bound "

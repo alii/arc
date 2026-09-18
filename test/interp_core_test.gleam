@@ -212,7 +212,7 @@ pub fn run_bytecode_from_gleam_test() {
   let #(_, st) = run_on(agent(), "function triple(n) { return n * 3 }")
   let #(f, st) = rt_helpers.global(st, "triple")
   let #(v, _) =
-    rt_call.t_call(st, f, types.mk_undefined(), [
+    rt_call.call(st, f, types.mk_undefined(), [
       types.mk_int(14),
     ])
   assert classify(v) == KNum(JInt(42))
@@ -296,7 +296,7 @@ pub fn async_bodies_see_their_arguments_test() {
 }
 
 fn eval_small_heap(source: String) -> String {
-  let st = rt_gc.t_collect(agent(), [])
+  let st = rt_gc.collect(agent(), [])
   let st = Agent(..st, store: Store(..st.store, gc_threshold: 64))
   case run_on(st, source) {
     #(NormalCompletion(v), st) ->

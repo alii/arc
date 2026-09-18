@@ -114,7 +114,7 @@ pub fn buffer_store_region(
 }
 
 pub fn storage(st: Agent, buffer: Handle) -> Option(BufferStorage) {
-  case rt_store.t_cell_get(st, buffer) {
+  case rt_store.cell_get(st, buffer) {
     SObject(kind: ArrayBufferObj(storage:), ..) -> Some(storage)
     _ -> None
   }
@@ -137,7 +137,7 @@ fn live_byte_size(st: Agent, buffer: Handle) -> Int {
 }
 
 pub fn set_storage(st: Agent, buffer: Handle, storage: BufferStorage) -> Agent {
-  use cell <- rt_store.t_cell_update(st, buffer)
+  use cell <- rt_store.cell_update(st, buffer)
   let assert SObject(kind: ArrayBufferObj(..), ..) = cell
     as "buffer.set_storage: handle does not hold an ArrayBuffer"
   SObject(..cell, kind: ArrayBufferObj(storage:))
@@ -150,7 +150,7 @@ pub fn store_region(
   byte_offset: Int,
   count: Int,
 ) -> Agent {
-  use cell <- rt_store.t_cell_update(st, buffer)
+  use cell <- rt_store.cell_update(st, buffer)
   let assert SObject(kind: ArrayBufferObj(storage:), ..) = cell
     as "buffer.store_region: handle does not hold an ArrayBuffer"
   SObject(
@@ -436,13 +436,13 @@ pub fn typed_array_store(
   use <- bool.guard(is_immutable(st, view.buffer), #(False, st))
   case view.elem_kind {
     BigKind(big_kind) -> {
-      let #(n, st) = rt_val.t_to_bigint(st, val)
+      let #(n, st) = rt_val.to_bigint(st, val)
       write_typed_element(st, view, idx, fn(data, off) {
         set_int(data, off, typed_array_bytes.bigint_elem(big_kind), n)
       })
     }
     NumKind(num_kind) -> {
-      let #(num, st) = rt_val.t_to_number(st, val)
+      let #(num, st) = rt_val.to_number(st, val)
       write_typed_element(st, view, idx, fn(data, off) {
         encode_typed_number(data, off, num_kind, num)
       })
@@ -458,7 +458,7 @@ fn write_typed_element(
 ) -> #(Bool, Agent) {
   case idx {
     Some(i) ->
-      case rt_store.t_cell_get(st, view.buffer) {
+      case rt_store.cell_get(st, view.buffer) {
         SObject(kind: ArrayBufferObj(storage:), ..) as cell -> {
           let size = typed_array_bytes.elem_size(view.elem_kind)
           // bounds taken here: coercion may have resized the buffer
@@ -479,7 +479,7 @@ fn write_typed_element(
               let new_storage =
                 buffer_store_region(storage, new_bits, off, size)
               let st =
-                rt_store.t_cell_set(
+                rt_store.cell_set(
                   st,
                   view.buffer,
                   SObject(..cell, kind: ArrayBufferObj(storage: new_storage)),
@@ -590,7 +590,7 @@ pub fn plain_indexed_values(
   h: Handle,
   len: Int,
 ) -> Option(List(JsVal)) {
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     SObject(kind:, props:, elements:, ..) ->
       case kind {
         ArrayObj(_) | ArgumentsObj(..) | Ordinary ->

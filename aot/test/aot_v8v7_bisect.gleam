@@ -218,7 +218,7 @@ pub fn main() {
     "function Sch(){this.list=null};Sch.prototype.addTask=function(id,pri,q,task){this.list={id:id,pri:pri,q:q,task:task,link:this.list}};var s=new Sch();s.addTask(1,2,3,4);if(s.list.id!==1)throw 1",
   )
   t(
-    "t_while_this_after",
+    "while_this_after",
     "function F(){this.n=0;this.v=7};F.prototype.a=function(){while(this.n>0){var q=1};return this.v};var o=new F();if(o.a()!==7)throw 1",
   )
 

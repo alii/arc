@@ -19,11 +19,11 @@ pub fn get_enum_option(
   case classify(v) {
     KUndef -> #(default, st)
     _ -> {
-      let #(s, st) = rt_val.t_to_string(st, v)
+      let #(s, st) = rt_val.to_string(st, v)
       case list.key_find(allowed, s) {
         Ok(parsed) -> #(parsed, st)
         Error(Nil) ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             s <> " is not a valid value for option " <> key,
           )

@@ -17,21 +17,21 @@ fn handle(v: JsVal) -> Handle {
 fn new_registry(st: Agent) -> #(JsVal, Agent) {
   let #(ctor, st) = global(st, "FinalizationRegistry")
   let #(cb, st) = func(st, fn(st, _args) { #(types.mk_undefined(), st) })
-  let #(h, st) = rt_call.t_construct(st, ctor, [cb], ctor)
+  let #(h, st) = rt_call.construct(st, ctor, [cb], ctor)
   #(mk_object(h), st)
 }
 
 fn registration_count(st: Agent, registry: JsVal) -> Int {
   let assert SObject(kind: FinalizationRegistryObj(registrations:, ..), ..) =
-    rt_store.t_cell_get(st, handle(registry))
+    rt_store.cell_get(st, handle(registry))
   list.length(registrations)
 }
 
 pub fn register_unregister_test() {
   let st = agent()
   let #(reg, st) = new_registry(st)
-  let #(target, st) = rt_obj.t_new_object_literal(st)
-  let #(token, st) = rt_obj.t_new_object_literal(st)
+  let #(target, st) = rt_obj.new_object_literal(st)
+  let #(token, st) = rt_obj.new_object_literal(st)
   let #(_, st) = call_method(st, reg, "register", [target, token, token])
   let #(_, st) = call_method(st, reg, "register", [target, token])
   assert registration_count(st, reg) == 2
@@ -46,37 +46,37 @@ pub fn register_unregister_test() {
 pub fn held_value_strong_target_weak_test() {
   let st = agent()
   let #(reg, st) = new_registry(st)
-  let #(target, st) = rt_obj.t_new_object_literal(st)
-  let #(held, st) = rt_obj.t_new_object_literal(st)
+  let #(target, st) = rt_obj.new_object_literal(st)
+  let #(held, st) = rt_obj.new_object_literal(st)
   let #(_, st) = call_method(st, reg, "register", [target, held])
-  let st = rt_gc.t_collect(st, [handle(reg), handle(target)])
-  assert rt_gc.t_is_live(st, handle(target))
-  assert rt_gc.t_is_live(st, handle(held))
+  let st = rt_gc.collect(st, [handle(reg), handle(target)])
+  assert rt_gc.is_live(st, handle(target))
+  assert rt_gc.is_live(st, handle(held))
   assert registration_count(st, reg) == 1
-  let st = rt_gc.t_collect(st, [handle(reg)])
-  assert !rt_gc.t_is_live(st, handle(target))
+  let st = rt_gc.collect(st, [handle(reg)])
+  assert !rt_gc.is_live(st, handle(target))
   assert registration_count(st, reg) == 0
-  let st = rt_gc.t_collect(st, [handle(reg)])
-  assert !rt_gc.t_is_live(st, handle(held))
+  let st = rt_gc.collect(st, [handle(reg)])
+  assert !rt_gc.is_live(st, handle(held))
 }
 
 pub fn dead_token_is_emptied_test() {
   let st = agent()
   let #(reg, st) = new_registry(st)
-  let #(target, st) = rt_obj.t_new_object_literal(st)
-  let #(token, st) = rt_obj.t_new_object_literal(st)
+  let #(target, st) = rt_obj.new_object_literal(st)
+  let #(token, st) = rt_obj.new_object_literal(st)
   let #(_, st) = call_method(st, reg, "register", [target, token, token])
-  let st = rt_gc.t_collect(st, [handle(reg), handle(target)])
-  assert rt_gc.t_is_live(st, handle(token))
+  let st = rt_gc.collect(st, [handle(reg), handle(target)])
+  assert rt_gc.is_live(st, handle(token))
   assert registration_count(st, reg) == 1
   let #(reg2, st) = new_registry(st)
-  let #(token2, st) = rt_obj.t_new_object_literal(st)
+  let #(token2, st) = rt_obj.new_object_literal(st)
   let #(_, st) =
     call_method(st, reg2, "register", [target, types.mk_undefined(), token2])
-  let st = rt_gc.t_collect(st, [handle(reg2), handle(target)])
-  assert !rt_gc.t_is_live(st, handle(token2))
+  let st = rt_gc.collect(st, [handle(reg2), handle(target)])
+  assert !rt_gc.is_live(st, handle(token2))
   assert registration_count(st, reg2) == 1
-  let #(fresh, st) = rt_obj.t_new_object_literal(st)
+  let #(fresh, st) = rt_obj.new_object_literal(st)
   let #(removed, st) = call_method(st, reg2, "unregister", [fresh])
   assert classify(removed) == KBool(False)
   assert registration_count(st, reg2) == 1

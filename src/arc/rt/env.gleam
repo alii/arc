@@ -8,22 +8,22 @@ import arc/rt/val as rt_val
 import gleam/option.{type Option, None, Some}
 
 // §9.1.1.2.1 hasbinding, honours @@unscopables
-pub fn t_with_has_binding(
+pub fn with_has_binding(
   st: Agent,
   obj: Handle,
   name: String,
 ) -> #(Bool, Agent) {
   let recv = mk_object(obj)
-  let #(found, st) = rt_obj.t_has_prop(st, recv, StringKey(Named(name)))
+  let #(found, st) = rt_obj.has_prop(st, recv, StringKey(Named(name)))
   case found {
     False -> #(False, st)
     True -> {
       let #(unscopables, st) =
-        rt_obj.t_get_prop(st, recv, SymbolKey(types.symbol_unscopables))
+        rt_obj.get_prop(st, recv, SymbolKey(types.symbol_unscopables))
       case classify(unscopables) {
         KHandle(_) -> {
           let #(blocked, st) =
-            rt_obj.t_get_prop(st, unscopables, StringKey(Named(name)))
+            rt_obj.get_prop(st, unscopables, StringKey(Named(name)))
           #(!rt_val.to_boolean(blocked), st)
         }
         _ -> #(True, st)
@@ -33,7 +33,7 @@ pub fn t_with_has_binding(
 }
 
 // §9.1.1.2.6, rechecks hasproperty after unscopables getter
-pub fn t_with_get_binding_value(
+pub fn with_get_binding_value(
   st: Agent,
   obj: Handle,
   name: String,
@@ -41,16 +41,16 @@ pub fn t_with_get_binding_value(
 ) -> #(JsVal, Agent) {
   let recv = mk_object(obj)
   let key = StringKey(Named(name))
-  let #(still, st) = rt_obj.t_has_prop(st, recv, key)
+  let #(still, st) = rt_obj.has_prop(st, recv, key)
   case still, strict {
-    False, True -> rt_val.t_throw_reference_error(st, name <> " is not defined")
+    False, True -> rt_val.throw_reference_error(st, name <> " is not defined")
     False, False -> #(mk_undefined(), st)
-    True, _ -> rt_obj.t_get_prop(st, recv, key)
+    True, _ -> rt_obj.get_prop(st, recv, key)
   }
 }
 
 // §9.1.1.2.5, stores to the original object
-pub fn t_with_set_mutable_binding(
+pub fn with_set_mutable_binding(
   st: Agent,
   obj: Handle,
   name: String,
@@ -59,15 +59,15 @@ pub fn t_with_set_mutable_binding(
 ) -> Agent {
   let recv = mk_object(obj)
   let key = StringKey(Named(name))
-  let #(still, st) = rt_obj.t_has_prop(st, recv, key)
+  let #(still, st) = rt_obj.has_prop(st, recv, key)
   let st = case still, strict {
-    False, True -> rt_val.t_throw_reference_error(st, name <> " is not defined")
+    False, True -> rt_val.throw_reference_error(st, name <> " is not defined")
     _, _ -> st
   }
-  let #(ok, st) = rt_obj.t_set_prop(st, recv, key, value)
+  let #(ok, st) = rt_obj.set_prop(st, recv, key, value)
   case ok, strict {
     False, True ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot assign to read only property '" <> name <> "' of object",
       )
@@ -76,28 +76,28 @@ pub fn t_with_set_mutable_binding(
 }
 
 // §9.1.1.2.7
-pub fn t_with_delete_binding(
+pub fn with_delete_binding(
   st: Agent,
   obj: Handle,
   name: String,
 ) -> #(Bool, Agent) {
-  rt_obj.t_delete_prop(st, obj, StringKey(Named(name)))
+  rt_obj.delete_prop(st, obj, StringKey(Named(name)))
 }
 
 // §9.1.1.4.17; deviation: non-extensible global skips the typeerror
-pub fn t_create_global_var_binding(
+pub fn create_global_var_binding(
   st: Agent,
   name: String,
   deletable deletable: Bool,
 ) -> Agent {
   let global = st.realm.global_object
   let key = StringKey(Named(name))
-  let #(own, st) = rt_obj.t_get_own_property(st, global, key)
+  let #(own, st) = rt_obj.get_own_property(st, global, key)
   case own {
     Some(_) -> st
     None -> {
       let #(_, st) =
-        rt_obj.t_define_own_data(
+        rt_obj.define_own_data(
           st,
           global,
           key,
@@ -112,17 +112,17 @@ pub fn t_create_global_var_binding(
 }
 
 // §9.1.1.4.16 + §9.1.1.4.18 declaration half
-pub fn t_create_global_fn_binding(
+pub fn create_global_fn_binding(
   st: Agent,
   name: String,
   deletable deletable: Bool,
 ) -> Agent {
   let global = st.realm.global_object
   let key = StringKey(Named(name))
-  let #(own, st) = rt_obj.t_get_own_property(st, global, key)
+  let #(own, st) = rt_obj.get_own_property(st, global, key)
   let define = fn(st) {
     let #(_, st) =
-      rt_obj.t_define_own_data(
+      rt_obj.define_own_data(
         st,
         global,
         key,
@@ -135,7 +135,7 @@ pub fn t_create_global_fn_binding(
   }
   case own {
     None -> {
-      let #(extensible, st) = rt_obj.t_is_extensible(st, global)
+      let #(extensible, st) = rt_obj.is_extensible(st, global)
       case extensible {
         True -> define(st)
         False -> not_definable(st, name)
@@ -150,41 +150,38 @@ pub fn t_create_global_fn_binding(
 }
 
 fn not_definable(st: Agent, name: String) -> a {
-  rt_val.t_throw_type_error(
-    st,
-    "Cannot declare global function '" <> name <> "'",
-  )
+  rt_val.throw_type_error(st, "Cannot declare global function '" <> name <> "'")
 }
 
 // §9.1.1.4.7 object record half
-pub fn t_delete_global_var(st: Agent, name: String) -> #(Bool, Agent) {
-  rt_obj.t_delete_prop(st, st.realm.global_object, StringKey(Named(name)))
+pub fn delete_global_var(st: Agent, name: String) -> #(Bool, Agent) {
+  rt_obj.delete_prop(st, st.realm.global_object, StringKey(Named(name)))
 }
 
 // §19.2.1.3 sloppy direct eval var scope, never escapes to js
-pub fn t_new_eval_env(st: Agent) -> #(Handle, Agent) {
-  rt_obj.t_new_object(st, None)
+pub fn new_eval_env(st: Agent) -> #(Handle, Agent) {
+  rt_obj.new_object(st, None)
 }
 
 pub fn eval_env_lookup(st: Agent, env: Handle, name: String) -> Option(JsVal) {
-  case rt_obj.t_ordinary_own_property(st, env, StringKey(Named(name))) {
+  case rt_obj.ordinary_own_property(st, env, StringKey(Named(name))) {
     Some(DataProperty(value:, ..)) -> Some(value)
     _ -> None
   }
 }
 
 pub fn eval_env_has(st: Agent, env: Handle, name: String) -> Bool {
-  option.is_some(rt_obj.t_ordinary_own_property(st, env, StringKey(Named(name))))
+  option.is_some(rt_obj.ordinary_own_property(st, env, StringKey(Named(name))))
 }
 
-pub fn t_eval_env_set(
+pub fn eval_env_set(
   st: Agent,
   env: Handle,
   name: String,
   value: JsVal,
 ) -> Agent {
   let #(_, st) =
-    rt_obj.t_define_own_data(
+    rt_obj.define_own_data(
       st,
       env,
       StringKey(Named(name)),
@@ -196,9 +193,9 @@ pub fn t_eval_env_set(
   st
 }
 
-pub fn t_eval_env_declare(st: Agent, env: Handle, name: String) -> Agent {
+pub fn eval_env_declare(st: Agent, env: Handle, name: String) -> Agent {
   case eval_env_has(st, env, name) {
     True -> st
-    False -> t_eval_env_set(st, env, name, mk_undefined())
+    False -> eval_env_set(st, env, name, mk_undefined())
   }
 }

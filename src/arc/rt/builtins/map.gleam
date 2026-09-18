@@ -44,8 +44,7 @@ pub fn init(
     common.alloc_methods(st, fn_proto, [#("groupBy", MapN(MapGroupBy), 2)])
   let #(entries_h, st) =
     common.alloc_rooted_native_fn(st, fn_proto, MapN(MapEntries), "entries", 0)
-  let #(entries_prop, st) =
-    rt_store.t_builtin_property(st, mk_object(entries_h))
+  let #(entries_prop, st) = rt_store.builtin_property(st, mk_object(entries_h))
   let #(size_props, st) =
     common.alloc_getters(st, fn_proto, [#("size", MapN(MapGetSize))])
   let proto_props =
@@ -77,7 +76,7 @@ pub fn dispatch(
 ) -> #(JsVal, Agent) {
   case n {
     MapConstructor(..) ->
-      rt_val.t_throw_type_error(st, "Constructor Map requires 'new'")
+      rt_val.throw_type_error(st, "Constructor Map requires 'new'")
     MapGroupBy -> map_group_by(st, args)
     MapGet -> map_get(st, this, args)
     MapSet -> map_set(st, this, args)
@@ -102,7 +101,7 @@ pub fn dispatch_construct(
 ) -> #(Handle, Agent) {
   case n {
     MapConstructor(..) -> map_constructor(st, args, new_target)
-    _ -> rt_val.t_throw_type_error(st, "not a constructor")
+    _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }
 
@@ -122,13 +121,10 @@ fn map_constructor(
     KUndef | KNull -> #(map_h, st)
     _ -> {
       let iterable = first_arg_or_undefined(args)
-      let #(adder, st) = rt_obj.t_get_prop(st, map, StringKey(Named("set")))
+      let #(adder, st) = rt_obj.get_prop(st, map, StringKey(Named("set")))
       case rt_val.is_callable(st, adder) {
         False ->
-          rt_val.t_throw_type_error(
-            st,
-            "'set' property of Map is not a function",
-          )
+          rt_val.throw_type_error(st, "'set' property of Map is not a function")
         True -> {
           let #(_map, st) =
             iter_protocol.add_entries_from_iterable(st, map, iterable, adder)
@@ -141,7 +137,7 @@ fn map_constructor(
 
 fn map_group_by(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(items, callback) = two_args_or_undefined(args)
-  let #(_, st) = rt_val.t_require_object_coercible(st, items)
+  let #(_, st) = rt_val.require_object_coercible(st, items)
   use callback <- helpers.require_callable(st, callback, fn() {
     "Map.groupBy callback is not callable"
   })
@@ -161,7 +157,7 @@ fn map_group_by_loop(
     #(None, st) -> group_by_finish(st, groups, list.reverse(order))
     #(Some(item), st) -> {
       use kv, st <- iter_protocol.or_close(st, rec.iterator, fn(st) {
-        rt_call.t_call(st, callback, mk_undefined(), [
+        rt_call.call(st, callback, mk_undefined(), [
           item,
           mk_int(index),
         ])
@@ -253,7 +249,7 @@ fn map_get_or_insert_computed(
     Some(existing) -> #(existing, st)
     None -> {
       let #(value, st) =
-        rt_call.t_call(st, callback, mk_undefined(), [
+        rt_call.call(st, callback, mk_undefined(), [
           map_key_to_js(map_key),
         ])
       let store =
@@ -315,7 +311,7 @@ fn map_for_each_loop(
     Some(#(next_cursor, map_key, val)) -> {
       let original_key = map_key_to_js(map_key)
       let #(_result, st) =
-        rt_call.t_call(st, cb, this_arg, [
+        rt_call.call(st, cb, this_arg, [
           val,
           original_key,
           map_this,
@@ -379,7 +375,7 @@ fn read_map_store(
   map: MapHandle,
 ) -> ordered_entries.OrderedEntries(MapKey, JsVal) {
   let assert SObject(kind: MapObj(entries:), ..) =
-    rt_store.t_cell_get(st, map.handle)
+    rt_store.cell_get(st, map.handle)
     as "map: MapHandle does not point at a Map cell"
   entries
 }
@@ -389,7 +385,7 @@ fn update_map_data(
   map: MapHandle,
   entries: ordered_entries.OrderedEntries(MapKey, JsVal),
 ) -> Agent {
-  rt_store.t_cell_update(st, map.handle, fn(cell) {
+  rt_store.cell_update(st, map.handle, fn(cell) {
     let assert SObject(..) = cell
     SObject(..cell, kind: MapObj(entries:))
   })

@@ -708,36 +708,31 @@ pub fn frame_test() {
   assert rt_call.frame_active_func(frame) == f
 }
 
-@external(erlang, "arc_rt_obj_ffi", "t_get_elem")
-fn t_get_elem(st: Agent, recv: JsVal, idx: Int) -> Dynamic
+@external(erlang, "arc_rt_obj_ffi", "get_elem")
+fn get_elem(st: Agent, recv: JsVal, idx: Int) -> Dynamic
 
-@external(erlang, "arc_rt_obj_ffi", "t_set_elem")
-fn t_set_elem(st: Agent, recv: JsVal, idx: Int, v: JsVal) -> Dynamic
+@external(erlang, "arc_rt_obj_ffi", "set_elem")
+fn set_elem(st: Agent, recv: JsVal, idx: Int, v: JsVal) -> Dynamic
 
-@external(erlang, "arc_rt_obj_ffi", "t_get_prop_own_data")
-fn t_get_prop_own_data(st: Agent, recv: JsVal, key: BitArray) -> Dynamic
+@external(erlang, "arc_rt_obj_ffi", "get_prop_own_data")
+fn get_prop_own_data(st: Agent, recv: JsVal, key: BitArray) -> Dynamic
 
-@external(erlang, "arc_rt_obj_ffi", "t_set_prop_own_data")
-fn t_set_prop_own_data(
-  st: Agent,
-  recv: JsVal,
-  key: BitArray,
-  v: JsVal,
-) -> Dynamic
+@external(erlang, "arc_rt_obj_ffi", "set_prop_own_data")
+fn set_prop_own_data(st: Agent, recv: JsVal, key: BitArray, v: JsVal) -> Dynamic
 
-@external(erlang, "arc_rt_obj_ffi", "t_instanceof_i32")
-fn t_instanceof_i32(st: Agent, v: JsVal, ctor: JsVal) -> Dynamic
+@external(erlang, "arc_rt_obj_ffi", "instanceof_i32")
+fn instanceof_i32(st: Agent, v: JsVal, ctor: JsVal) -> Dynamic
 
-@external(erlang, "arc_rt_call_ic_ffi", "t_call_method_mono")
-fn t_call_method_mono(
+@external(erlang, "arc_rt_call_ic_ffi", "call_method_mono")
+fn call_method_mono(
   st: Agent,
   recv: JsVal,
   key: BitArray,
   args: List(JsVal),
 ) -> #(Dynamic, Agent)
 
-@external(erlang, "arc_rt_call_ic_ffi", "t_new_direct")
-fn t_new_direct(st: Agent, ctor: JsVal, args: List(JsVal)) -> #(Dynamic, Agent)
+@external(erlang, "arc_rt_call_ic_ffi", "new_direct")
+fn new_direct(st: Agent, ctor: JsVal, args: List(JsVal)) -> #(Dynamic, Agent)
 
 type Probe {
   Miss
@@ -745,62 +740,61 @@ type Probe {
 
 pub fn typed_array_fast_paths_miss_test() {
   let st = seeded()
-  let #(ctor, st) = rt_lang.t_global_get(st, <<"Uint8Array">>)
+  let #(ctor, st) = rt_lang.global_get(st, <<"Uint8Array">>)
   let n = types.mk_int(4)
-  let #(h, st) = rt_call.t_construct(st, ctor, [n], ctor)
+  let #(h, st) = rt_call.construct(st, ctor, [n], ctor)
   let ta = types.mk_object(h)
   let #(_, st) =
-    rt_obj.t_set_prop(st, ta, StringKey(Named("extra")), types.mk_string("x"))
-  assert t_get_elem(st, ta, 0) == dyn(Miss)
-  assert t_set_elem(st, ta, 0, n) == dyn(Miss)
-  assert t_set_elem(st, ta, 4, n) == dyn(Miss)
-  assert t_get_prop_own_data(st, ta, <<"length">>) == dyn(Miss)
-  assert t_get_prop_own_data(st, ta, <<"extra">>) == dyn(Miss)
-  assert t_set_prop_own_data(st, ta, <<"extra">>, n) == dyn(Miss)
+    rt_obj.set_prop(st, ta, StringKey(Named("extra")), types.mk_string("x"))
+  assert get_elem(st, ta, 0) == dyn(Miss)
+  assert set_elem(st, ta, 0, n) == dyn(Miss)
+  assert set_elem(st, ta, 4, n) == dyn(Miss)
+  assert get_prop_own_data(st, ta, <<"length">>) == dyn(Miss)
+  assert get_prop_own_data(st, ta, <<"extra">>) == dyn(Miss)
+  assert set_prop_own_data(st, ta, <<"extra">>, n) == dyn(Miss)
 }
 
 pub fn proxy_fast_paths_miss_test() {
   let st = seeded()
   let n = types.mk_int(4)
-  let #(arr, st) = rt_obj.t_new_array(st, [n, n])
-  let #(handler, st) = rt_obj.t_new_object_literal(st)
-  let #(proxy_ctor, st) = rt_lang.t_global_get(st, <<"Proxy">>)
-  let #(ph, st) =
-    rt_call.t_construct(st, proxy_ctor, [arr, handler], proxy_ctor)
+  let #(arr, st) = rt_obj.new_array(st, [n, n])
+  let #(handler, st) = rt_obj.new_object_literal(st)
+  let #(proxy_ctor, st) = rt_lang.global_get(st, <<"Proxy">>)
+  let #(ph, st) = rt_call.construct(st, proxy_ctor, [arr, handler], proxy_ctor)
   let p = types.mk_object(ph)
-  assert t_get_elem(st, p, 0) == dyn(Miss)
-  assert t_set_elem(st, p, 0, n) == dyn(Miss)
-  assert t_get_prop_own_data(st, p, <<"length">>) == dyn(Miss)
-  assert t_set_prop_own_data(st, p, <<"length">>, n) == dyn(Miss)
-  assert t_call_method_mono(st, p, <<"push">>, [n]).0 == dyn(Miss)
+  assert get_elem(st, p, 0) == dyn(Miss)
+  assert set_elem(st, p, 0, n) == dyn(Miss)
+  assert get_prop_own_data(st, p, <<"length">>) == dyn(Miss)
+  assert set_prop_own_data(st, p, <<"length">>, n) == dyn(Miss)
+  assert call_method_mono(st, p, <<"push">>, [n]).0 == dyn(Miss)
   // instanceof over a proxy must reach the getprototypeof trap
   let ctor_flags = FnFlags(..no_flags(), is_constructor: True)
   let #(f, st) =
-    rt_call.t_new_function(st, dummy_code("F"), ctor_flags, "F", 0, None)
-  let #(_, st) = rt_obj.t_get_prop(st, f, StringKey(Named("prototype")))
-  let #(plain, st) = rt_obj.t_new_object_literal(st)
-  assert t_instanceof_i32(st, plain, f) == dyn(0)
-  assert t_instanceof_i32(st, p, f) == dyn(Miss)
-  let #(child, st) = rt_obj.t_new_object(st, Some(ph))
-  assert t_instanceof_i32(st, types.mk_object(child), f) == dyn(Miss)
+    rt_call.new_function(st, dummy_code("F"), ctor_flags, "F", 0, None)
+  let #(_, st) = rt_obj.get_prop(st, f, StringKey(Named("prototype")))
+  let #(plain, st) = rt_obj.new_object_literal(st)
+  assert instanceof_i32(st, plain, f) == dyn(0)
+  assert instanceof_i32(st, p, f) == dyn(Miss)
+  let #(child, st) = rt_obj.new_object(st, Some(ph))
+  assert instanceof_i32(st, types.mk_object(child), f) == dyn(Miss)
 }
 
 pub fn string_object_fast_paths_miss_test() {
   let st = seeded()
   let n = types.mk_int(1)
-  let #(string_ctor, st) = rt_lang.t_global_get(st, <<"String">>)
+  let #(string_ctor, st) = rt_lang.global_get(st, <<"String">>)
   let #(sh, st) =
-    rt_call.t_construct(st, string_ctor, [types.mk_string("abc")], string_ctor)
+    rt_call.construct(st, string_ctor, [types.mk_string("abc")], string_ctor)
   let s = types.mk_object(sh)
   let #(_, st) =
-    rt_obj.t_set_prop(st, s, StringKey(Named("extra")), types.mk_string("x"))
-  assert t_get_elem(st, s, 0) == dyn(Miss)
-  assert t_set_elem(st, s, 0, n) == dyn(Miss)
-  assert t_set_elem(st, s, 3, n) == dyn(Miss)
-  assert t_get_prop_own_data(st, s, <<"length">>) == dyn(Miss)
-  assert t_set_prop_own_data(st, s, <<"length">>, n) == dyn(Miss)
-  assert t_get_prop_own_data(st, s, <<"extra">>) == dyn(types.mk_string("x"))
-  assert t_set_prop_own_data(st, s, <<"extra">>, n) != dyn(Miss)
+    rt_obj.set_prop(st, s, StringKey(Named("extra")), types.mk_string("x"))
+  assert get_elem(st, s, 0) == dyn(Miss)
+  assert set_elem(st, s, 0, n) == dyn(Miss)
+  assert set_elem(st, s, 3, n) == dyn(Miss)
+  assert get_prop_own_data(st, s, <<"length">>) == dyn(Miss)
+  assert set_prop_own_data(st, s, <<"length">>, n) == dyn(Miss)
+  assert get_prop_own_data(st, s, <<"extra">>) == dyn(types.mk_string("x"))
+  assert set_prop_own_data(st, s, <<"extra">>, n) != dyn(Miss)
 }
 
 pub fn bytecode_function_fast_paths_miss_test() {
@@ -821,7 +815,7 @@ pub fn bytecode_function_fast_paths_miss_test() {
   assert size_of(kind) == idx("BYTECODEFN_SIZE")
   assert at(kind, "BYTECODEFN_BIRTH") == tag("BIRTH_SETTLED")
   let #(fh, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       plain_object(kind, Some(st.realm.function.prototype), dict.new()),
     )
@@ -829,12 +823,12 @@ pub fn bytecode_function_fast_paths_miss_test() {
   assert rt_val.is_callable(st, f)
   assert rt_call.is_constructor(st, f)
   let undef = types.mk_undefined()
-  assert rt_call.t_direct_callee(st, f, undef) == dyn(Miss)
-  let #(o, st) = rt_obj.t_new_object_literal(st)
-  let #(_, st) = rt_obj.t_set_prop(st, o, StringKey(Named("m")), f)
-  assert t_call_method_mono(st, o, <<"m">>, []).0 == dyn(Miss)
-  assert t_new_direct(st, f, []).0 == dyn(Miss)
-  assert t_instanceof_i32(st, o, f) == dyn(Miss)
+  assert rt_call.direct_callee(st, f, undef) == dyn(Miss)
+  let #(o, st) = rt_obj.new_object_literal(st)
+  let #(_, st) = rt_obj.set_prop(st, o, StringKey(Named("m")), f)
+  assert call_method_mono(st, o, <<"m">>, []).0 == dyn(Miss)
+  assert new_direct(st, f, []).0 == dyn(Miss)
+  assert instanceof_i32(st, o, f) == dyn(Miss)
 }
 
 @external(erlang, "arc_rt_layout_root_ffi", "dyn")
@@ -847,11 +841,11 @@ pub fn compiled_function_fast_paths_hit_test() {
   let undef = types.mk_undefined()
   let code = compiled_code(fn(st, _frame, _args) { #(undef, st) })
   let flags = FnFlags(..no_flags(), is_constructor: True, is_strict: True)
-  let #(f, st) = rt_call.t_new_function(st, code, flags, "F", 0, None)
-  assert rt_call.t_direct_callee(st, f, undef) != dyn(Miss)
-  assert t_new_direct(st, f, []).0 == dyn(Miss)
-  let #(proto, st) = rt_obj.t_get_prop(st, f, StringKey(Named("prototype")))
-  let #(this, _) = t_new_direct(st, f, [])
+  let #(f, st) = rt_call.new_function(st, code, flags, "F", 0, None)
+  assert rt_call.direct_callee(st, f, undef) != dyn(Miss)
+  assert new_direct(st, f, []).0 == dyn(Miss)
+  let #(proto, st) = rt_obj.get_prop(st, f, StringKey(Named("prototype")))
+  let #(this, _) = new_direct(st, f, [])
   assert this != dyn(Miss)
   assert this != dyn(proto)
 }

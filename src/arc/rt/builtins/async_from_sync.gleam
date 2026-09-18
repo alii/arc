@@ -55,7 +55,7 @@ fn async_from_sync(
   kind: AsyncFromSyncForward,
 ) -> #(JsVal, Agent) {
   let #(#(promise_h, resolve_h, reject_h), st) =
-    rt_async.t_new_promise_capability(st)
+    rt_async.new_promise_capability(st)
   let cap_resolve = mk_object(resolve_h)
   let cap_reject = mk_object(reject_h)
   let #(outcome, st) =
@@ -64,7 +64,7 @@ fn async_from_sync(
     })
   let st = case outcome {
     NormalCompletion(_) -> st
-    ThrowCompletion(e) -> rt_async.t_promise_reject(st, promise_h, e)
+    ThrowCompletion(e) -> rt_async.promise_reject(st, promise_h, e)
   }
   #(mk_object(promise_h), st)
 }
@@ -82,33 +82,32 @@ fn forward_to_sync_iterator(
   let sync_iter = sync.iterator
   let sync_rec = case classify(sync_iter) {
     KHandle(h) -> h
-    _ -> rt_val.t_throw_type_error(st, "not an Async-from-Sync Iterator")
+    _ -> rt_val.throw_type_error(st, "not an Async-from-Sync Iterator")
   }
   let #(method, st) = case kind {
     ForwardNext -> #(sync.next_method, st)
-    ForwardReturn ->
-      rt_obj.t_get_prop(st, sync_iter, StringKey(Named("return")))
-    ForwardThrow -> rt_obj.t_get_prop(st, sync_iter, StringKey(Named("throw")))
+    ForwardReturn -> rt_obj.get_prop(st, sync_iter, StringKey(Named("return")))
+    ForwardThrow -> rt_obj.get_prop(st, sync_iter, StringKey(Named("throw")))
   }
   case kind, rt_val.is_callable(st, method) {
     ForwardReturn, False -> {
       let arg = first_arg_or_undefined(args)
       let #(ir_h, st) = rt_async.alloc_iter_result(st, arg, done: True)
       let #(_, st) =
-        rt_call.t_call(st, cap_resolve, mk_undefined(), [
+        rt_call.call(st, cap_resolve, mk_undefined(), [
           mk_object(ir_h),
         ])
       #(mk_undefined(), st)
     }
     ForwardThrow, False -> {
       let st = iter_protocol.iterator_close_normal(st, sync_iter)
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "The iterator does not provide a 'throw' method.",
       )
     }
     _, _ -> {
-      let #(result_val, st) = rt_call.t_call(st, method, sync_iter, args)
+      let #(result_val, st) = rt_call.call(st, method, sync_iter, args)
       case classify(result_val) {
         KHandle(result_h) -> {
           let close_on_rejection = case kind {
@@ -124,7 +123,7 @@ fn forward_to_sync_iterator(
             cap_reject,
           )
         }
-        _ -> rt_val.t_throw_type_error(st, "Iterator result is not an object")
+        _ -> rt_val.throw_type_error(st, "Iterator result is not an object")
       }
     }
   }
@@ -140,9 +139,9 @@ fn afs_continuation(
   cap_reject cap_reject: JsVal,
 ) -> #(JsVal, Agent) {
   let result = mk_object(result_h)
-  let #(done_v, st) = rt_obj.t_get_prop(st, result, StringKey(Named("done")))
+  let #(done_v, st) = rt_obj.get_prop(st, result, StringKey(Named("done")))
   let done = rt_val.to_boolean(done_v)
-  let #(inner, st) = rt_obj.t_get_prop(st, result, StringKey(Named("value")))
+  let #(inner, st) = rt_obj.get_prop(st, result, StringKey(Named("value")))
   let #(on_fulfilled, st) =
     alloc_closure(st, IteratorN(AsyncFromSyncUnwrap(done:)))
   let #(on_rejected, st) = case done || !close_on_rejection {
@@ -152,7 +151,7 @@ fn afs_continuation(
   }
   let #(inner_p, st) = rt_async.promise_resolve_static(st, inner)
   let st =
-    rt_async.t_perform_then(
+    rt_async.perform_then(
       st,
       inner_p,
       on_fulfilled,
@@ -165,7 +164,7 @@ fn afs_continuation(
 
 fn alloc_closure(st: Agent, token: NativeToken) -> #(JsVal, Agent) {
   let #(h, st) =
-    rt_call.t_native_new(
+    rt_call.native_new(
       st,
       Some(st.realm.function.prototype),
       token,
@@ -179,10 +178,10 @@ fn alloc_closure(st: Agent, token: NativeToken) -> #(JsVal, Agent) {
 fn require_async_from_sync(st: Agent, this: JsVal) -> Handle {
   case classify(this) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: AsyncFromSyncIterator(sync_rec:), ..) -> sync_rec
-        _ -> rt_val.t_throw_type_error(st, "not an Async-from-Sync Iterator")
+        _ -> rt_val.throw_type_error(st, "not an Async-from-Sync Iterator")
       }
-    _ -> rt_val.t_throw_type_error(st, "not an Async-from-Sync Iterator")
+    _ -> rt_val.throw_type_error(st, "not an Async-from-Sync Iterator")
   }
 }

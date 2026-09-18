@@ -51,9 +51,9 @@ pub fn define_fn_installs_a_callable_global_test() {
     host.define_fn(host.from_agent(agent(), brand()), "twice", 1, twice).agent
   let #(f, st) = global(st, "twice")
   let assert SObject(kind: NativeFn(token: types.HostFn(0), ..), ..) =
-    rt_store.t_cell_get(st, handle(f))
+    rt_store.cell_get(st, handle(f))
   assert dict.size(st.host_fns) == 1
-  let #(c, st) = rt_call.t_try_call(st, f, mk_undefined(), [mk_int(21)])
+  let #(c, st) = rt_call.try_call(st, f, mk_undefined(), [mk_int(21)])
   assert c == NormalCompletion(mk_int(42))
   assert str(get(st, f, "name").0) == "twice"
   assert get(st, f, "length").0 == mk_int(1)
@@ -64,20 +64,20 @@ pub fn error_result_becomes_a_throw_test() {
   let st =
     host.define_fn(host.from_agent(agent(), brand()), "twice", 1, twice).agent
   let #(f, st) = global(st, "twice")
-  let #(c, st) = rt_call.t_try_call(st, f, mk_undefined(), [mk_string("3")])
+  let #(c, st) = rt_call.try_call(st, f, mk_undefined(), [mk_string("3")])
   let assert ThrowCompletion(e) = c
   assert describe(st, e)
     == "TypeError: The \"n\" argument must be of type integer. Received type string"
   let #(c, st) =
-    rt_call.t_try_call(st, f, mk_undefined(), [mk_number(types.JFloat(1.5))])
+    rt_call.try_call(st, f, mk_undefined(), [mk_number(types.JFloat(1.5))])
   let assert ThrowCompletion(e) = c
   assert describe(st, e)
     == "RangeError: The value of \"n\" is out of range. It must be an integer. Received 1.5"
   let #(c, st) =
-    rt_call.t_try_call(st, f, mk_undefined(), [mk_number(types.JNan)])
+    rt_call.try_call(st, f, mk_undefined(), [mk_number(types.JNan)])
   let assert ThrowCompletion(e) = c
   assert string.ends_with(describe(st, e), "Received NaN")
-  let #(c, st) = rt_call.t_try_call(st, f, mk_undefined(), [mk_int(101)])
+  let #(c, st) = rt_call.try_call(st, f, mk_undefined(), [mk_int(101)])
   let assert ThrowCompletion(e) = c
   assert describe(st, e)
     == "RangeError: The value of \"n\" is out of range. It must be >= 0 and <= 100. Received 101"
@@ -98,16 +98,16 @@ pub fn validators_unwrap_or_throw_test() {
   let st = ctx.agent
   let #(shout, st) = global(st, "shout")
   let #(flip, st) = global(st, "flip")
-  assert rt_call.t_try_call(st, shout, mk_undefined(), [mk_string("hi")]).0
+  assert rt_call.try_call(st, shout, mk_undefined(), [mk_string("hi")]).0
     == NormalCompletion(mk_string("HI"))
-  assert rt_call.t_try_call(st, flip, mk_undefined(), [types.mk_bool(True)]).0
+  assert rt_call.try_call(st, flip, mk_undefined(), [types.mk_bool(True)]).0
     == NormalCompletion(types.mk_bool(False))
   let assert #(ThrowCompletion(e), st) =
-    rt_call.t_try_call(st, shout, mk_undefined(), [mk_int(1)])
+    rt_call.try_call(st, shout, mk_undefined(), [mk_int(1)])
   assert describe(st, e)
     == "TypeError: The \"text\" argument must be of type string. Received type number"
   let assert #(ThrowCompletion(e), st) =
-    rt_call.t_try_call(st, flip, mk_undefined(), [mk_undefined()])
+    rt_call.try_call(st, flip, mk_undefined(), [mk_undefined()])
   assert describe(st, e)
     == "TypeError: The \"flag\" argument must be of type boolean. Received type undefined"
 }
@@ -135,15 +135,15 @@ pub fn try_call_calls_back_into_js_test() {
   let st = ctx.agent
   let #(apply, st) = global(st, "apply")
   let math_abs = get(st, global(st, "Math").0, "abs").0
-  assert rt_call.t_try_call(st, apply, mk_undefined(), [math_abs, mk_int(-3)]).0
+  assert rt_call.try_call(st, apply, mk_undefined(), [math_abs, mk_int(-3)]).0
     == NormalCompletion(mk_int(4))
   let assert #(ThrowCompletion(e), st) =
-    rt_call.t_try_call(st, apply, mk_undefined(), [mk_int(0), mk_int(0)])
+    rt_call.try_call(st, apply, mk_undefined(), [mk_int(0), mk_int(0)])
   assert describe(st, e)
     == "TypeError: The \"fn\" argument must be of type function. Received type number"
   let #(boom, st) = global(st, "boom")
   let assert #(ThrowCompletion(e), st) =
-    rt_call.t_try_call(st, apply, mk_undefined(), [boom, mk_int(0)])
+    rt_call.try_call(st, apply, mk_undefined(), [boom, mk_int(0)])
   assert describe(st, e) == "TypeError: boom"
 }
 
@@ -194,7 +194,7 @@ fn point_get_x(ctx: host.Context(Payload), _args, this) {
 }
 
 fn point_origin(ctx: host.Context(Payload), _args, this) {
-  let #(h, st) = rt_call.t_construct(ctx.agent, this, [mk_int(0)], this)
+  let #(h, st) = rt_call.construct(ctx.agent, this, [mk_int(0)], this)
   #(Ok(mk_object(h)), Context(..ctx, agent: st))
 }
 
@@ -209,18 +209,18 @@ pub fn class_constructs_and_reprototypes_test() {
   let st = ctx.agent
   assert rt_call.is_constructor(st, point)
   let point_proto = handle(get(st, point, "prototype").0)
-  let #(p, st) = rt_call.t_construct(st, point, [mk_int(7)], point)
+  let #(p, st) = rt_call.construct(st, point, [mk_int(7)], point)
   let p = mk_object(p)
-  assert rt_obj.t_get_prototype_of(st, handle(p)).0 == Some(point_proto)
+  assert rt_obj.get_prototype_of(st, handle(p)).0 == Some(point_proto)
   assert get(st, p, "nt").0 == point
   assert rt_helpers.call_method(st, p, "getX", []).0 == mk_int(7)
   assert str(get(st, get(st, p, "constructor").0, "name").0) == "Point"
   let #(o, st) = rt_helpers.call_method(st, point, "origin", [])
   assert rt_helpers.call_method(st, o, "getX", []).0 == mk_int(0)
   let assert #(NormalCompletion(q), st) =
-    rt_call.t_try_call(st, point, mk_undefined(), [mk_int(1)])
+    rt_call.try_call(st, point, mk_undefined(), [mk_int(1)])
   assert get(st, q, "nt").0 == mk_undefined()
-  assert rt_obj.t_get_prototype_of(st, handle(q)).0
+  assert rt_obj.get_prototype_of(st, handle(q)).0
     == Some(st.realm.object.prototype)
 }
 
@@ -229,12 +229,12 @@ pub fn subclass_new_target_picks_the_prototype_test() {
   let #(sub, ctx) = host.class(ctx, "Sub", 1, point_ctor, [], [])
   let st = ctx.agent
   let sub_proto = handle(get(st, sub, "prototype").0)
-  let #(p, st) = rt_call.t_construct(st, point, [mk_int(5)], sub)
-  assert rt_obj.t_get_prototype_of(st, p).0 == Some(sub_proto)
+  let #(p, st) = rt_call.construct(st, point, [mk_int(5)], sub)
+  assert rt_obj.get_prototype_of(st, p).0 == Some(sub_proto)
   assert get(st, mk_object(p), "nt").0 == sub
-  let #(_, st) = rt_obj.t_set_prototype_of(st, handle(sub), Some(handle(point)))
+  let #(_, st) = rt_obj.set_prototype_of(st, handle(sub), Some(handle(point)))
   let #(o, st) = rt_helpers.call_method(st, sub, "origin", [])
-  assert rt_obj.t_get_prototype_of(st, handle(o)).0 == Some(sub_proto)
+  assert rt_obj.get_prototype_of(st, handle(o)).0 == Some(sub_proto)
 }
 
 pub fn constructor_must_return_an_object_test() {
@@ -250,9 +250,9 @@ pub fn constructor_must_return_an_object_test() {
   let st = ctx.agent
   let reflect = global(st, "Reflect").0
   let construct = get(st, reflect, "construct").0
-  let #(empty, st) = rt_obj.t_new_array(st, [])
+  let #(empty, st) = rt_obj.new_array(st, [])
   let assert #(ThrowCompletion(e), st) =
-    rt_call.t_try_call(st, construct, reflect, [bad, empty])
+    rt_call.try_call(st, construct, reflect, [bad, empty])
   assert describe(st, e) == "TypeError: host constructor must return an object"
 }
 
@@ -260,7 +260,7 @@ pub fn host_object_round_trips_typed_test() {
   let ctx: host.Context(Payload) = host.from_agent(agent(), brand())
   let #(tagged_proto, ctx) = host.object(ctx, [])
   let st =
-    rt_obj.t_define_own_data(
+    rt_obj.define_own_data(
       ctx.agent,
       handle(tagged_proto),
       types.SymbolKey(types.symbol_to_string_tag),
@@ -280,7 +280,7 @@ pub fn host_object_round_trips_typed_test() {
   assert host.read_host(ctx, mk_int(3)) == None
   let st = ctx.agent
   let assert SObject(kind: HostObj(_), proto: None, ..) =
-    rt_store.t_cell_get(st, handle(bare))
+    rt_store.cell_get(st, handle(bare))
   let #(to_string, st) =
     rt_helpers.call_method(
       st,
@@ -301,11 +301,11 @@ pub fn gc_traces_handles_inside_payloads_and_closures_test() {
   let ctx =
     host.define_fn(ctx, "peek", 0, fn(ctx, _, _) { #(Ok(captured), ctx) })
   let #(garbage, ctx) = host.object(ctx, [])
-  let st = rt_store.t_pin_root(ctx.agent, handle(holder))
-  let st = rt_gc.t_collect(st, [])
-  assert rt_gc.t_is_live(st, handle(inner))
-  assert rt_gc.t_is_live(st, handle(captured))
-  assert !rt_gc.t_is_live(st, handle(garbage))
+  let st = rt_store.pin_root(ctx.agent, handle(holder))
+  let st = rt_gc.collect(st, [])
+  assert rt_gc.is_live(st, handle(inner))
+  assert rt_gc.is_live(st, handle(captured))
+  assert !rt_gc.is_live(st, handle(garbage))
   assert host.read_host(Context(..ctx, agent: st), holder)
     == Some(Holds(handle(inner)))
 }
@@ -347,9 +347,9 @@ pub fn host_functions_see_the_brand_they_were_defined_under_test() {
     })
   let st = ctx.agent
   let #(wrapped, st) =
-    rt_call.t_call(st, global(st, "wrap").0, mk_undefined(), [mk_int(9)])
+    rt_call.call(st, global(st, "wrap").0, mk_undefined(), [mk_int(9)])
   let #(n, st) =
-    rt_call.t_call(st, global(st, "unwrap").0, mk_undefined(), [
+    rt_call.call(st, global(st, "unwrap").0, mk_undefined(), [
       wrapped,
     ])
   assert n == mk_int(9)
@@ -357,7 +357,7 @@ pub fn host_functions_see_the_brand_they_were_defined_under_test() {
   let st = ctx.agent
   let assert Ok(root) =
     list.find(set.to_list(st.store.pinned_roots), fn(id) {
-      case rt_store.t_cell_get(st, Handle(id:)) {
+      case rt_store.cell_get(st, Handle(id:)) {
         SObject(kind: HostObj(_), ..) -> True
         _ -> False
       }
@@ -368,7 +368,7 @@ pub fn host_functions_see_the_brand_they_were_defined_under_test() {
 pub fn unregistered_id_is_a_type_error_test() {
   let st = agent()
   let #(h, st) =
-    rt_call.t_native_new(
+    rt_call.native_new(
       st,
       None,
       types.HostFn(9),
@@ -377,7 +377,7 @@ pub fn unregistered_id_is_a_type_error_test() {
       constructible: False,
     )
   let assert #(ThrowCompletion(e), st) =
-    rt_call.t_try_call(st, mk_object(h), mk_undefined(), [])
+    rt_call.try_call(st, mk_object(h), mk_undefined(), [])
   assert describe(st, e) == "TypeError: host function #9 is not registered"
 }
 
@@ -393,7 +393,7 @@ pub fn with_context_runs_body_and_drains_test() {
         host.function(Context(..ctx, agent: st), "set", 1, fn(ctx, args, _) {
           let st = ctx.agent
           let #(_, st) =
-            rt_obj.t_set_prop(
+            rt_obj.set_prop(
               st,
               global(st, "shared").0,
               StringKey(Named("v")),

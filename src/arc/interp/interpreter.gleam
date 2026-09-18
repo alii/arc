@@ -491,7 +491,7 @@ fn fast_loop(
                 pc + 1,
                 rest,
                 locals,
-                rt_store.t_cell_set(
+                rt_store.cell_set(
                   agent,
                   kernel.to_handle_unchecked([local]),
                   SBox(v),
@@ -2384,7 +2384,7 @@ fn fast_loop(
     MakeClosure(func_index) -> {
       let template = tuple_array.element(func_index + 1, state.func.functions)
       let #(fn_h, agent) =
-        rt_closure.t_new_bytecode_function(
+        rt_closure.new_bytecode_function(
           agent,
           template,
           kernel.capture_env(template.env_descriptors, locals),
@@ -2532,8 +2532,7 @@ fn fast_loop(
                         r1,
                       )
                     rt_lang.IterPair(key:, value:, rec:) -> {
-                      let #(pair, agent) =
-                        rt_obj.t_new_array(agent, [key, value])
+                      let #(pair, agent) = rt_obj.new_array(agent, [key, value])
                       fast_loop(
                         state,
                         drive,
@@ -3627,7 +3626,7 @@ fn array_iter_next_general(
   let #(target, index, next_fn) = rt_lang.array_iter_parts(rec)
   let len = case classify(target) {
     KHandle(h) ->
-      case rt_store.t_cell_get(state.agent, h) {
+      case rt_store.cell_get(state.agent, h) {
         SObject(kind: types.ArrayObj(length:), ..) -> length
         _ -> 0
       }
@@ -3645,7 +3644,7 @@ fn array_iter_next_general(
     False -> {
       use #(v, state) <- result.map(guarded3(
         state,
-        rt_obj.t_get_prop,
+        rt_obj.get_prop,
         target,
         StringKey(Index(index)),
       ))
@@ -3672,7 +3671,7 @@ fn iter_next_kernel(
         ),
       )
     rt_lang.IterPair(key:, value:, rec:) -> {
-      let #(pair, agent) = rt_obj.t_new_array(state.agent, [key, value])
+      let #(pair, agent) = rt_obj.new_array(state.agent, [key, value])
       Ok(
         State(
           ..state,
@@ -3697,7 +3696,7 @@ fn materialize_record(
       let #(target, index, next_fn) = rt_lang.array_iter_parts(rec)
       let kind = case classify(target) {
         KHandle(h) ->
-          case rt_store.t_cell_get(state.agent, h) {
+          case rt_store.cell_get(state.agent, h) {
             SObject(kind: types.MapObj(_), ..) ->
               types.MapIterator(target: h, index:, kind: types.MapIterEntries)
             SObject(kind: types.SetObj(_), ..) ->
@@ -3715,7 +3714,7 @@ fn materialize_record(
         state,
         fn(agent, _) {
           let #(iter, agent) =
-            rt_store.t_cell_new(
+            rt_store.cell_new(
               agent,
               SObject(
                 kind:,
@@ -3726,7 +3725,7 @@ fn materialize_record(
                 extensible: True,
               ),
             )
-          rt_lang.t_alloc_record(
+          rt_lang.alloc_record(
             agent,
             types.IteratorRecord(
               iterator: mk_object(iter),
@@ -3750,7 +3749,7 @@ pub fn closable_record(
     True -> {
       use #(ret, state) <- result.try(guarded3(
         state,
-        rt_obj.t_get_prop,
+        rt_obj.get_prop,
         mk_object(rt_lang.array_iter_proto(state.agent, rec)),
         StringKey(Named("return")),
       ))
@@ -4001,7 +4000,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
 
     BoxLocal(index) -> {
       let current = tuple_array.get_unchecked(index, state.locals)
-      let #(box, agent) = rt_store.t_cell_new(state.agent, SBox(current))
+      let #(box, agent) = rt_store.cell_new(state.agent, SBox(current))
       let locals =
         tuple_array.set_unchecked(index, mk_object(box), state.locals)
       Ok(State(..state, agent:, locals:, pc: state.pc + 1))
@@ -4026,7 +4025,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [new_value, ..rest] ->
           case handle_of(tuple_array.get_unchecked(index, state.locals)) {
             Some(box) -> {
-              let agent = rt_store.t_cell_set(state.agent, box, SBox(new_value))
+              let agent = rt_store.cell_set(state.agent, box, SBox(new_value))
               Ok(State(..state, agent:, stack: rest, pc: state.pc + 1))
             }
             None ->
@@ -4047,7 +4046,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               case kernel.is(current, kernel.JsTdz) {
                 True -> {
                   let agent =
-                    rt_store.t_cell_set(state.agent, box, SBox(new_value))
+                    rt_store.cell_set(state.agent, box, SBox(new_value))
                   Ok(
                     State(
                       ..state,
@@ -4152,7 +4151,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         None -> {
           use #(deleted, state) <- result.map(guarded2(
             state,
-            rt_env.t_delete_global_var,
+            rt_env.delete_global_var,
             name,
           ))
           State(
@@ -4167,7 +4166,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     DeclareGlobalVar(name, deletable) -> {
       use state <- result.map(guarded_unit3(
         state,
-        rt_env.t_create_global_var_binding,
+        rt_env.create_global_var_binding,
         name,
         deletable,
       ))
@@ -4177,7 +4176,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     DeclareGlobalFn(name, deletable) -> {
       use state <- result.map(guarded_unit3(
         state,
-        rt_env.t_create_global_fn_binding,
+        rt_env.create_global_fn_binding,
         name,
         deletable,
       ))
@@ -4215,7 +4214,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               Ok(
                 State(
                   ..state,
-                  agent: rt_env.t_eval_env_set(state.agent, env, name, v),
+                  agent: rt_env.eval_env_set(state.agent, env, name, v),
                   stack: rest,
                   pc: state.pc + 1,
                 ),
@@ -4232,7 +4231,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           Ok(
             State(
               ..state,
-              agent: rt_env.t_eval_env_declare(state.agent, env, name),
+              agent: rt_env.eval_env_declare(state.agent, env, name),
               pc: state.pc + 1,
             ),
           )
@@ -4246,7 +4245,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             _ -> {
               use #(s, state) <- result.map(guarded2(
                 state,
-                rt_val.t_to_string,
+                rt_val.to_string,
                 val,
               ))
               State(..state, stack: [mk_string(s), ..rest], pc: state.pc + 1)
@@ -4263,7 +4262,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         })
       let raw = list.map(quasis, fn(q) { q.raw })
       let #(tpl, agent) =
-        rt_lang.t_get_template_object(
+        rt_lang.get_template_object(
           state.agent,
           int.to_string(state.unit_id) <> "#" <> int.to_string(site),
           cooked,
@@ -4281,7 +4280,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             _ -> {
               use #(prim, state) <- result.try(guarded3(
                 state,
-                rt_val.t_to_primitive,
+                rt_val.to_primitive,
                 val,
                 HintString,
               ))
@@ -4291,7 +4290,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 _ -> {
                   use #(s, state) <- result.map(guarded2(
                     state,
-                    rt_val.t_to_string,
+                    rt_val.to_string,
                     prim,
                   ))
                   State(
@@ -4309,7 +4308,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     ToObject ->
       case state.stack {
         [val, ..rest] -> {
-          use #(h, state) <- result.map(guarded2(state, rt_val.t_to_object, val))
+          use #(h, state) <- result.map(guarded2(state, rt_val.to_object, val))
           State(..state, stack: [mk_object(h), ..rest], pc: state.pc + 1)
         }
         [] -> underflow(state, "ToObject")
@@ -4329,7 +4328,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(h) -> {
               use #(bound, state) <- result.try(guarded3(
                 state,
-                rt_env.t_with_has_binding,
+                rt_env.with_has_binding,
                 h,
                 name,
               ))
@@ -4339,7 +4338,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 True -> {
                   use state <- result.map(guarded_unit5(
                     state,
-                    rt_env.t_with_set_mutable_binding,
+                    rt_env.with_set_mutable_binding,
                     h,
                     name,
                     val,
@@ -4361,7 +4360,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(h) -> {
               use #(bound, state) <- result.try(guarded3(
                 state,
-                rt_env.t_with_has_binding,
+                rt_env.with_has_binding,
                 h,
                 name,
               ))
@@ -4370,7 +4369,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 True -> {
                   use #(deleted, state) <- result.map(guarded3(
                     state,
-                    rt_env.t_with_delete_binding,
+                    rt_env.with_delete_binding,
                     h,
                     name,
                   ))
@@ -4390,7 +4389,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(h) -> {
               use #(bound, state) <- result.map(guarded3(
                 state,
-                rt_env.t_with_has_binding,
+                rt_env.with_has_binding,
                 h,
                 name,
               ))
@@ -4411,7 +4410,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(h) -> {
               use #(val, state) <- result.map(guarded4(
                 state,
-                rt_env.t_with_get_binding_value,
+                rt_env.with_get_binding_value,
                 h,
                 name,
                 state.func.is_strict,
@@ -4430,7 +4429,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(h) -> {
               use state <- result.map(guarded_unit5(
                 state,
-                rt_env.t_with_set_mutable_binding,
+                rt_env.with_set_mutable_binding,
                 h,
                 name,
                 val,
@@ -4542,7 +4541,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         None -> {
           use #(t, state) <- result.map(guarded2(
             state,
-            rt_lang.t_global_typeof,
+            rt_lang.global_typeof,
             bit_array.from_string(name),
           ))
           State(..state, stack: [mk_string(t), ..state.stack], pc: state.pc + 1)
@@ -4827,10 +4826,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
 
     NewObject -> {
       let #(h, agent) =
-        rt_obj.t_new_object(
-          state.agent,
-          Some(state.agent.realm.object.prototype),
-        )
+        rt_obj.new_object(state.agent, Some(state.agent.realm.object.prototype))
       Ok(
         State(
           ..state,
@@ -4986,7 +4982,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
 
     // §15.7.14 step 5/6 fresh privatename per class evaluation
     NewPrivateName(name) -> {
-      let #(k, agent) = rt_class.t_new_private_name(state.agent, name)
+      let #(k, agent) = rt_class.new_private_name(state.agent, name)
       Ok(State(..state, agent:, stack: [k, ..state.stack], pc: state.pc + 1))
     }
 
@@ -4996,7 +4992,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [k, obj, ..rest] -> {
           use #(val, state) <- result.map(guarded3(
             state,
-            rt_class.t_private_get,
+            rt_class.private_get,
             obj,
             k,
           ))
@@ -5010,7 +5006,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [k, obj, ..rest] -> {
           use #(val, state) <- result.map(guarded3(
             state,
-            rt_class.t_private_get,
+            rt_class.private_get,
             obj,
             k,
           ))
@@ -5025,7 +5021,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [k, val, obj, ..rest] -> {
           use #(v, state) <- result.map(guarded4(
             state,
-            rt_class.t_private_set,
+            rt_class.private_set,
             obj,
             k,
             val,
@@ -5041,7 +5037,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [k, obj, ..rest] -> {
           use #(found, state) <- result.map(
             guard.guarded(state, fn(agent) {
-              #(rt_class.t_private_in(agent, obj, k), agent)
+              #(rt_class.private_in(agent, obj, k), agent)
             }),
           )
           State(..state, stack: [mk_bool(found), ..rest], pc: state.pc + 1)
@@ -5057,7 +5053,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(h) -> {
               use state <- result.map(guarded_unit4(
                 state,
-                rt_class.t_private_define,
+                rt_class.private_define,
                 h,
                 k,
                 val,
@@ -5077,7 +5073,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(h) -> {
               use state <- result.map(guarded_unit5(
                 state,
-                rt_class.t_define_private,
+                rt_class.define_private,
                 h,
                 k,
                 func,
@@ -5102,7 +5098,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               }
               use state <- result.map(guarded_unit5(
                 state,
-                rt_class.t_define_private,
+                rt_class.define_private,
                 h,
                 k,
                 func,
@@ -5141,7 +5137,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(target), Some(fn_h) -> {
               use state <- result.map(guarded_unit6(
                 state,
-                rt_class.t_define_method,
+                rt_class.define_method,
                 target,
                 StringKey(k),
                 fn_h,
@@ -5162,12 +5158,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(target), Some(fn_h) -> {
               use #(pk, state) <- result.try(guarded2(
                 state,
-                rt_val.t_to_property_key,
+                rt_val.to_property_key,
                 k,
               ))
               use state <- result.map(guarded_unit6(
                 state,
-                rt_class.t_define_method,
+                rt_class.define_method,
                 target,
                 pk,
                 fn_h,
@@ -5188,7 +5184,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(target), Some(fn_h) -> {
               use state <- result.map(guarded_unit6(
                 state,
-                rt_class.t_define_method,
+                rt_class.define_method,
                 target,
                 StringKey(k),
                 fn_h,
@@ -5209,12 +5205,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(target), Some(fn_h) -> {
               use #(pk, state) <- result.try(guarded2(
                 state,
-                rt_val.t_to_property_key,
+                rt_val.to_property_key,
                 k,
               ))
               use state <- result.map(guarded_unit6(
                 state,
-                rt_class.t_define_method,
+                rt_class.define_method,
                 target,
                 pk,
                 fn_h,
@@ -5236,7 +5232,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               Ok(
                 State(
                   ..state,
-                  agent: rt_class.t_make_method(state.agent, fn_h, target),
+                  agent: rt_class.make_method(state.agent, fn_h, target),
                   pc: state.pc + 1,
                 ),
               )
@@ -5252,7 +5248,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(h) -> {
               use #(pk, state) <- result.try(guarded2(
                 state,
-                rt_val.t_to_property_key,
+                rt_val.to_property_key,
                 k,
               ))
               use state <- result.map(create_data_property_or_throw(
@@ -5276,7 +5272,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(h) -> {
               use #(_, state) <- result.map(guarded3(
                 state,
-                rt_obj.t_set_proto,
+                rt_obj.set_proto,
                 h,
                 val,
               ))
@@ -5294,7 +5290,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             True -> {
               use #(_, state) <- result.map(guarded3(
                 state,
-                rt_lang.t_copy_data_props,
+                rt_lang.copy_data_props,
                 obj,
                 source,
               ))
@@ -5330,7 +5326,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                   )
                   use #(obj, state) <- result.map(guarded3(
                     state,
-                    rt_lang.t_object_rest,
+                    rt_lang.object_rest,
                     source,
                     keys,
                   ))
@@ -5350,7 +5346,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(h) -> {
               use #(deleted, state) <- result.try(guarded3(
                 state,
-                rt_obj.t_delete_prop,
+                rt_obj.delete_prop,
                 h,
                 StringKey(k),
               ))
@@ -5386,12 +5382,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(h) -> {
               use #(pk, state) <- result.try(guarded2(
                 state,
-                rt_val.t_to_property_key,
+                rt_val.to_property_key,
                 k,
               ))
               use #(deleted, state) <- result.try(guarded3(
                 state,
-                rt_obj.t_delete_prop,
+                rt_obj.delete_prop,
                 h,
                 pk,
               ))
@@ -5434,7 +5430,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               let agent = state.agent
               let ctor_proto = own_prototype_handle(agent, ctor_h)
               let agent =
-                option.map(ctor_proto, rt_class.t_make_method(agent, ctor_h, _))
+                option.map(ctor_proto, rt_class.make_method(agent, ctor_h, _))
                 |> option.unwrap(agent)
               let agent =
                 option.map(ctor_proto, set_cell_prototype(
@@ -5463,7 +5459,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     ArrayFrom(count) ->
       case pop_n(state.stack, count) {
         Some(#(items, rest)) -> {
-          let #(arr, agent) = rt_obj.t_new_array(state.agent, items)
+          let #(arr, agent) = rt_obj.new_array(state.agent, items)
           Ok(State(..state, agent:, stack: [arr, ..rest], pc: state.pc + 1))
         }
         None -> underflow(state, "ArrayFrom")
@@ -5474,7 +5470,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case pop_n(state.stack, count - list.length(holes)) {
         Some(#(values, rest)) -> {
           let items = fill_holes(values, holes, 0, count, [])
-          let #(arr, agent) = rt_obj.t_new_array(state.agent, items)
+          let #(arr, agent) = rt_obj.new_array(state.agent, items)
           Ok(State(..state, agent:, stack: [arr, ..rest], pc: state.pc + 1))
         }
         None -> underflow(state, "ArrayFromWithHoles")
@@ -5518,12 +5514,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             _ -> {
               use #(pk, state) <- result.try(guarded2(
                 state,
-                rt_val.t_to_property_key,
+                rt_val.to_property_key,
                 k,
               ))
               use #(val, state) <- result.map(guarded3(
                 state,
-                rt_obj.t_get_prop,
+                rt_obj.get_prop,
                 receiver,
                 pk,
               ))
@@ -5594,7 +5590,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(h) -> {
               use #(items, state) <- result.map(guarded3(
                 state,
-                rt_lang.t_spread_into_list,
+                rt_lang.spread_into_list,
                 [],
                 iterable,
               ))
@@ -5777,12 +5773,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(base_h) -> {
               use #(pk, state) <- result.try(guarded2(
                 state,
-                rt_val.t_to_property_key,
+                rt_val.to_property_key,
                 k,
               ))
               use #(ok, state) <- result.try(guarded5(
                 state,
-                rt_obj.t_set_prop_with_receiver,
+                rt_obj.set_prop_with_receiver,
                 base_h,
                 pk,
                 val,
@@ -5811,7 +5807,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     MakeClosure(func_index) -> {
       let template = tuple_array.get_unchecked(func_index, state.func.functions)
       let #(fn_h, agent) =
-        rt_closure.t_new_bytecode_function(
+        rt_closure.new_bytecode_function(
           state.agent,
           template,
           kernel.capture_env(template.env_descriptors, state.locals),
@@ -5833,7 +5829,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [obj, ..rest] -> {
           use #(keys, state) <- result.map(guarded2(
             state,
-            rt_obj.t_for_in_keys,
+            rt_obj.for_in_keys,
             obj,
           ))
           State(
@@ -5879,7 +5875,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             True -> {
               use #(rec, state) <- result.map(guarded3(
                 state,
-                rt_lang.t_get_iterator,
+                rt_lang.get_iterator,
                 iterable,
                 rt_lang.Sync,
               ))
@@ -5918,7 +5914,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                       iterator,
                       "Iterator is not an object",
                     )
-                  rt_lang.t_alloc_record(agent, record)
+                  rt_lang.alloc_record(agent, record)
                 }),
               )
               State(..state, stack: [rec, ..rest], pc: state.pc + 1)
@@ -5983,7 +5979,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               use #(rec, state) <- result.try(closable_record(state, rec))
               case is_undef(rec) {
                 True -> Ok(state)
-                False -> guarded_unit3(state, rt_lang.t_iter_close, rec, False)
+                False -> guarded_unit3(state, rt_lang.iter_close, rec, False)
               }
             }
           }
@@ -6004,9 +6000,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                   case is_undef(rec) {
                     True -> Error(Threw(thrown, state))
                     False ->
-                      case
-                        guarded_unit3(state, rt_lang.t_iter_close, rec, True)
-                      {
+                      case guarded_unit3(state, rt_lang.iter_close, rec, True) {
                         Ok(state) -> Error(Threw(thrown, state))
                         Error(Threw(_, state)) -> Error(Threw(thrown, state))
                         Error(other) -> Error(other)
@@ -6027,14 +6021,14 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           let state = State(..state, stack: rest, pc: state.pc + 1)
           case is_undef(rec) {
             True -> {
-              let #(arr, agent) = rt_obj.t_new_array(state.agent, [])
+              let #(arr, agent) = rt_obj.new_array(state.agent, [])
               Ok(State(..state, agent:, stack: [arr, ..rest]))
             }
             False -> {
               use #(rec, state) <- result.try(materialize_record(state, rec))
               use #(arr, state) <- result.map(guarded2(
                 state,
-                rt_lang.t_iter_rest,
+                rt_lang.iter_rest,
                 rec,
               ))
               State(..state, stack: [arr, ..rest])
@@ -6097,7 +6091,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             record,
           ))
           use #(res, state) <- result.map(
-            guarded4(state, rt_call.t_call, next_fn, iterator, [arg]),
+            guarded4(state, rt_call.call, next_fn, iterator, [arg]),
           )
           State(..state, stack: [res, record, ..rest], pc: state.pc + 1)
         }
@@ -6209,7 +6203,7 @@ fn tdz_reference_error(state: State) -> Result(State, StepExit) {
 
 fn read_box(state: State, local: JsVal) -> Option(JsVal) {
   use h <- option.then(handle_of(local))
-  case rt_store.t_cell_get(state.agent, h) {
+  case rt_store.cell_get(state.agent, h) {
     SBox(value:) -> Some(value)
     _ -> None
   }
@@ -6231,7 +6225,7 @@ fn put_field_step(
     KHandle(_) -> {
       use #(ok, state) <- result.try(guarded4(
         state,
-        rt_obj.t_set_prop,
+        rt_obj.set_prop,
         receiver,
         StringKey(k),
         value,
@@ -6285,7 +6279,7 @@ fn get_field(
           <> key.display_string(k)
           <> "')",
       )
-    _ -> guarded3(state, rt_obj.t_get_prop, receiver, StringKey(k))
+    _ -> guarded3(state, rt_obj.get_prop, receiver, StringKey(k))
   }
 }
 
@@ -6297,19 +6291,19 @@ fn global_object_get(
   let agent = state.agent
   let global = agent.realm.global_object
   let k = StringKey(Named(name))
-  case rt_obj.t_ordinary_own_property(agent, global, k) {
+  case rt_obj.ordinary_own_property(agent, global, k) {
     Some(DataProperty(value:, ..)) -> Ok(#(value, state))
     Some(AccessorProperty(..)) ->
-      guarded3(state, rt_obj.t_get_prop, mk_object(global), k)
+      guarded3(state, rt_obj.get_prop, mk_object(global), k)
     None -> {
       use #(has, state) <- result.try(guarded3(
         state,
-        rt_obj.t_has_prop,
+        rt_obj.has_prop,
         mk_object(global),
         k,
       ))
       case has {
-        True -> guarded3(state, rt_obj.t_get_prop, mk_object(global), k)
+        True -> guarded3(state, rt_obj.get_prop, mk_object(global), k)
         False -> state.throw_reference_error(state, name <> " is not defined")
       }
     }
@@ -6328,7 +6322,7 @@ fn global_object_put(
     True -> {
       use #(has, state) <- result.try(guarded3(
         state,
-        rt_obj.t_has_prop,
+        rt_obj.has_prop,
         global,
         k,
       ))
@@ -6337,7 +6331,7 @@ fn global_object_put(
         True -> {
           use #(ok, state) <- result.try(guarded4(
             state,
-            rt_obj.t_set_prop,
+            rt_obj.set_prop,
             global,
             k,
             value,
@@ -6358,7 +6352,7 @@ fn global_object_put(
     False -> {
       use #(_, state) <- result.map(guarded4(
         state,
-        rt_obj.t_set_prop,
+        rt_obj.set_prop,
         global,
         k,
         value,
@@ -6383,7 +6377,7 @@ fn with_get_var(
         Some(h) -> {
           use #(bound, state) <- result.try(guarded3(
             state,
-            rt_env.t_with_has_binding,
+            rt_env.with_has_binding,
             h,
             name,
           ))
@@ -6392,7 +6386,7 @@ fn with_get_var(
             True -> {
               use #(val, state) <- result.map(guarded4(
                 state,
-                rt_env.t_with_get_binding_value,
+                rt_env.with_get_binding_value,
                 h,
                 name,
                 state.func.is_strict,
@@ -6421,25 +6415,24 @@ fn pure_binop_general(
     #(mk_bool(r == 1), state)
   }
   case op {
-    binop.Arith(binop.Sub) -> guarded3(state, rt_ops.t_sub, left, right)
-    binop.Arith(binop.Mul) -> guarded3(state, rt_ops.t_mul, left, right)
-    binop.Arith(binop.Div) -> guarded3(state, rt_ops.t_div, left, right)
-    binop.Arith(binop.Mod) -> guarded3(state, rt_ops.t_mod, left, right)
-    binop.Arith(binop.Exp) -> guarded3(state, rt_ops.t_pow, left, right)
-    binop.Bitwise(binop.BitAnd) -> guarded3(state, rt_ops.t_bitand, left, right)
-    binop.Bitwise(binop.BitOr) -> guarded3(state, rt_ops.t_bitor, left, right)
-    binop.Bitwise(binop.BitXor) -> guarded3(state, rt_ops.t_bitxor, left, right)
-    binop.Bitwise(binop.ShiftLeft) -> guarded3(state, rt_ops.t_shl, left, right)
-    binop.Bitwise(binop.ShiftRight) ->
-      guarded3(state, rt_ops.t_shr, left, right)
+    binop.Arith(binop.Sub) -> guarded3(state, rt_ops.sub, left, right)
+    binop.Arith(binop.Mul) -> guarded3(state, rt_ops.mul, left, right)
+    binop.Arith(binop.Div) -> guarded3(state, rt_ops.div, left, right)
+    binop.Arith(binop.Mod) -> guarded3(state, rt_ops.mod, left, right)
+    binop.Arith(binop.Exp) -> guarded3(state, rt_ops.pow, left, right)
+    binop.Bitwise(binop.BitAnd) -> guarded3(state, rt_ops.bitand, left, right)
+    binop.Bitwise(binop.BitOr) -> guarded3(state, rt_ops.bitor, left, right)
+    binop.Bitwise(binop.BitXor) -> guarded3(state, rt_ops.bitxor, left, right)
+    binop.Bitwise(binop.ShiftLeft) -> guarded3(state, rt_ops.shl, left, right)
+    binop.Bitwise(binop.ShiftRight) -> guarded3(state, rt_ops.shr, left, right)
     binop.Bitwise(binop.ShiftRightUnsigned) ->
-      guarded3(state, rt_ops.t_ushr, left, right)
-    binop.Compare(binop.Less) -> cmp(rt_ops.t_lt)
-    binop.Compare(binop.LessEq) -> cmp(rt_ops.t_le)
-    binop.Compare(binop.Greater) -> cmp(rt_ops.t_gt)
-    binop.Compare(binop.GreaterEq) -> cmp(rt_ops.t_ge)
-    binop.Equality(binop.LooseEq) -> cmp(rt_ops.t_eq)
-    binop.Equality(binop.LooseNotEq) -> cmp(rt_ops.t_neq)
+      guarded3(state, rt_ops.ushr, left, right)
+    binop.Compare(binop.Less) -> cmp(rt_ops.lt)
+    binop.Compare(binop.LessEq) -> cmp(rt_ops.le)
+    binop.Compare(binop.Greater) -> cmp(rt_ops.gt)
+    binop.Compare(binop.GreaterEq) -> cmp(rt_ops.ge)
+    binop.Equality(binop.LooseEq) -> cmp(rt_ops.eq)
+    binop.Equality(binop.LooseNotEq) -> cmp(rt_ops.neq)
     binop.Equality(binop.StrictEq) ->
       Ok(#(mk_bool(rt_ops.strict_eq(left, right)), state))
     binop.Equality(binop.StrictNotEq) ->
@@ -6453,9 +6446,9 @@ fn unaryop_general(
   operand: JsVal,
 ) -> Result(#(JsVal, State), StepExit) {
   case kind {
-    opcode.Neg -> guarded2(state, rt_ops.t_neg, operand)
-    opcode.Pos -> guarded2(state, rt_ops.t_plus, operand)
-    opcode.BitNot -> guarded2(state, rt_ops.t_bitnot, operand)
+    opcode.Neg -> guarded2(state, rt_ops.neg, operand)
+    opcode.Pos -> guarded2(state, rt_ops.plus, operand)
+    opcode.BitNot -> guarded2(state, rt_ops.bitnot, operand)
     opcode.LogicalNot -> Ok(#(mk_bool(!rt_val.to_boolean(operand)), state))
     opcode.Void -> Ok(#(mk_undefined(), state))
   }
@@ -6472,11 +6465,11 @@ fn fused_update_local(
   case kernel.is(v, kernel.JsTdz) {
     True -> tdz_reference_error(state)
     False -> {
-      use #(n, state) <- result.try(guarded2(state, rt_ops.t_plus, v))
+      use #(n, state) <- result.try(guarded2(state, rt_ops.plus, v))
       let one = mk_int(1)
       use #(r, state) <- result.map(case increment {
-        True -> guarded3(state, rt_ops.t_add, n, one)
-        False -> guarded3(state, rt_ops.t_sub, n, one)
+        True -> guarded3(state, rt_ops.add, n, one)
+        False -> guarded3(state, rt_ops.sub, n, one)
       })
       let locals = tuple_array.set_unchecked(index, r, state.locals)
       State(..state, locals:, pc: next_pc)
@@ -6497,14 +6490,10 @@ fn get_elem_step(
         "Cannot read properties of " <> rt_val.nullish_label(receiver),
       )
     _ -> {
-      use #(pk, state) <- result.try(guarded2(
-        state,
-        rt_val.t_to_property_key,
-        k,
-      ))
+      use #(pk, state) <- result.try(guarded2(state, rt_val.to_property_key, k))
       use #(val, state) <- result.map(guarded3(
         state,
-        rt_obj.t_get_prop,
+        rt_obj.get_prop,
         receiver,
         pk,
       ))
@@ -6522,14 +6511,10 @@ fn put_elem_step(
 ) -> Result(State, StepExit) {
   case classify(receiver) {
     KHandle(_) -> {
-      use #(pk, state) <- result.try(guarded2(
-        state,
-        rt_val.t_to_property_key,
-        k,
-      ))
+      use #(pk, state) <- result.try(guarded2(state, rt_val.to_property_key, k))
       use #(ok, state) <- result.try(guarded4(
         state,
-        rt_obj.t_set_prop,
+        rt_obj.set_prop,
         receiver,
         pk,
         val,
@@ -6567,11 +6552,11 @@ fn fused_postfix_local(
 ) -> Result(State, StepExit) {
   let next_pc = state.pc + 1
   use v <- local_or_tdz(state, index)
-  use #(n, state) <- result.try(guarded2(state, rt_ops.t_plus, v))
+  use #(n, state) <- result.try(guarded2(state, rt_ops.plus, v))
   let one = mk_int(1)
   use #(r, state) <- result.map(case increment {
-    True -> guarded3(state, rt_ops.t_add, n, one)
-    False -> guarded3(state, rt_ops.t_sub, n, one)
+    True -> guarded3(state, rt_ops.add, n, one)
+    False -> guarded3(state, rt_ops.sub, n, one)
   })
   let locals = tuple_array.set_unchecked(index, r, state.locals)
   State(..state, stack: [n, ..state.stack], locals:, pc: next_pc)
@@ -6623,7 +6608,7 @@ fn binop_value(
     binop.InstanceOfOp -> {
       use #(r, state) <- result.map(guarded3(
         state,
-        rt_ops.t_instance_of,
+        rt_ops.instance_of,
         left,
         right,
       ))
@@ -6632,12 +6617,7 @@ fn binop_value(
     binop.InOp ->
       case rt_val.is_object(right) {
         True -> {
-          use #(r, state) <- result.map(guarded3(
-            state,
-            rt_ops.t_in,
-            left,
-            right,
-          ))
+          use #(r, state) <- result.map(guarded3(state, rt_ops.in, left, right))
           #(mk_bool(r), state)
         }
         False ->
@@ -6649,7 +6629,7 @@ fn binop_value(
               <> inspect(state, right),
           )
       }
-    binop.AddOp -> guarded3(state, rt_ops.t_add, left, right)
+    binop.AddOp -> guarded3(state, rt_ops.add, left, right)
     binop.PureOp(op) -> pure_binop_general(state, op, left, right)
   }
 }
@@ -6679,7 +6659,7 @@ fn create_data_property_or_throw(
 ) -> Result(State, StepExit) {
   use #(ok, state) <- result.try(guarded7(
     state,
-    rt_obj.t_define_own_data,
+    rt_obj.define_own_data,
     h,
     k,
     val,
@@ -6712,11 +6692,7 @@ fn to_property_keys(
   case raw {
     [] -> Ok(#(list.reverse(acc), state))
     [k, ..rest] -> {
-      use #(pk, state) <- result.try(guarded2(
-        state,
-        rt_val.t_to_property_key,
-        k,
-      ))
+      use #(pk, state) <- result.try(guarded2(state, rt_val.to_property_key, k))
       to_property_keys(state, rest, [pk, ..acc])
     }
   }
@@ -6739,7 +6715,7 @@ fn class_proto_parent(
         True -> {
           use #(pp, state) <- result.try(guarded3(
             state,
-            rt_obj.t_get_prop,
+            rt_obj.get_prop,
             parent,
             StringKey(Named("prototype")),
           ))
@@ -6764,14 +6740,14 @@ fn class_proto_parent(
 }
 
 fn own_prototype_handle(agent: Agent, h: Handle) -> Option(Handle) {
-  case rt_obj.t_ordinary_own_property(agent, h, StringKey(Named("prototype"))) {
+  case rt_obj.ordinary_own_property(agent, h, StringKey(Named("prototype"))) {
     Some(DataProperty(value:, ..)) -> handle_of(value)
     _ -> None
   }
 }
 
 fn cell_prototype(agent: Agent, h: Handle) -> Option(Handle) {
-  case rt_store.t_cell_get(agent, h) {
+  case rt_store.cell_get(agent, h) {
     SObject(proto:, ..) | SShapedObject(proto:, ..) -> proto
     _ -> None
   }
@@ -6779,7 +6755,7 @@ fn cell_prototype(agent: Agent, h: Handle) -> Option(Handle) {
 
 // targets are fresh objects, so a direct write is safe
 fn set_cell_prototype(agent: Agent, h: Handle, proto: Option(Handle)) -> Agent {
-  rt_store.t_cell_update(agent, h, fn(cell) {
+  rt_store.cell_update(agent, h, fn(cell) {
     case cell {
       SObject(..) -> SObject(..cell, proto:)
       SShapedObject(..) -> SShapedObject(..cell, proto:)
@@ -6790,7 +6766,7 @@ fn set_cell_prototype(agent: Agent, h: Handle, proto: Option(Handle)) -> Agent {
 
 // fresh literal: extensible, writable length
 fn array_push(agent: Agent, h: Handle, value: Option(JsVal)) -> Agent {
-  rt_store.t_cell_update(agent, h, fn(cell) {
+  rt_store.cell_update(agent, h, fn(cell) {
     case cell {
       SObject(kind: types.ArrayObj(length:), elements:, ..) ->
         SObject(
@@ -6807,7 +6783,7 @@ fn array_push(agent: Agent, h: Handle, value: Option(JsVal)) -> Agent {
 }
 
 fn array_append(agent: Agent, h: Handle, items: List(JsVal)) -> Agent {
-  rt_store.t_cell_update(agent, h, fn(cell) {
+  rt_store.cell_update(agent, h, fn(cell) {
     case cell {
       SObject(kind: types.ArrayObj(length:), elements:, ..) ->
         SObject(
@@ -6887,7 +6863,7 @@ fn next_by_plan(
     kernel.ResumeGenerator(gen_h) ->
       gen_step(state, drive, gen_h, mk_undefined())
     kernel.ArrayAdvanced(..) | kernel.IterMiss ->
-      guarded2(state, rt_lang.t_iter_next, rec)
+      guarded2(state, rt_lang.iter_next, rec)
   }
 }
 
@@ -6899,7 +6875,7 @@ fn gen_step(
   sent: JsVal,
 ) -> Result(#(#(Bool, JsVal), State), StepExit) {
   let agent = state.agent
-  case rt_store.t_cell_get(agent, gen_h) {
+  case rt_store.cell_get(agent, gen_h) {
     types.SGenerator(
       state: types.GenSuspendedYield,
       resume: types.ResumeFrame(frame:) as resume,
@@ -6919,9 +6895,9 @@ fn gen_step(
           ])
         ParkedStart ->
           resume_inline(state, drive, gen_h, resume, frame, frame.stack)
-        _ -> guarded3(state, rt_async.t_gen_step, gen_h, sent)
+        _ -> guarded3(state, rt_async.gen_step, gen_h, sent)
       }
-    _ -> guarded3(state, rt_async.t_gen_step, gen_h, sent)
+    _ -> guarded3(state, rt_async.gen_step, gen_h, sent)
   }
 }
 
@@ -7058,7 +7034,7 @@ fn delegate_step(
     Some(gen_h) -> gen_step(state, drive, gen_h, arg)
     None -> {
       use #(res, state) <- result.try(
-        guarded4(state, rt_call.t_call, next_fn, iterator, [arg]),
+        guarded4(state, rt_call.call, next_fn, iterator, [arg]),
       )
       guarded2(state, iter_protocol.read_iter_result, res)
     }
@@ -7072,7 +7048,7 @@ fn native_generator(
 ) -> Option(Handle) {
   use next_h <- option.then(handle_of(next_fn))
   use iter_h <- option.then(handle_of(iterator))
-  case rt_store.t_cell_get(agent, next_h), rt_store.t_cell_get(agent, iter_h) {
+  case rt_store.cell_get(agent, next_h), rt_store.cell_get(agent, iter_h) {
     SObject(
       kind: types.NativeFn(token: types.GeneratorN(types.GeneratorNext), ..),
       ..,
@@ -7103,12 +7079,12 @@ fn get_super_value(
         Some(base_h) -> {
           use #(pk, state) <- result.try(guarded2(
             state,
-            rt_val.t_to_property_key,
+            rt_val.to_property_key,
             k,
           ))
           use #(val, state) <- result.map(guarded4(
             state,
-            rt_obj.t_get_prop_with_receiver,
+            rt_obj.get_prop_with_receiver,
             base_h,
             pk,
             this_val,
@@ -7132,17 +7108,17 @@ fn get_super_value(
 
 fn async_iterator_object(agent: Agent, iterable: JsVal) -> #(JsVal, Agent) {
   let #(method, agent) =
-    rt_obj.t_get_prop(agent, iterable, SymbolKey(types.symbol_async_iterator))
+    rt_obj.get_prop(agent, iterable, SymbolKey(types.symbol_async_iterator))
   case classify(method) {
     KUndef | KNull -> {
       let #(sync_method, agent) =
-        rt_obj.t_get_prop(agent, iterable, SymbolKey(types.symbol_iterator))
+        rt_obj.get_prop(agent, iterable, SymbolKey(types.symbol_iterator))
       case rt_val.is_callable(agent, sync_method) {
         False -> {
           let ty = rt_val.type_of(agent, iterable)
           let #(err, agent) =
-            rt_val.t_new_error(agent, TypeError, ty <> " is not async iterable")
-          rt_store.t_throw(agent, err)
+            rt_val.new_error(agent, TypeError, ty <> " is not async iterable")
+          rt_store.throw(agent, err)
         }
         True -> {
           let #(sync, agent) =
@@ -7154,17 +7130,17 @@ fn async_iterator_object(agent: Agent, iterable: JsVal) -> #(JsVal, Agent) {
       }
     }
     _ -> {
-      let #(iterator, agent) = rt_call.t_call(agent, method, iterable, [])
+      let #(iterator, agent) = rt_call.call(agent, method, iterable, [])
       case rt_val.is_object(iterator) {
         True -> #(iterator, agent)
         False -> {
           let #(err, agent) =
-            rt_val.t_new_error(
+            rt_val.new_error(
               agent,
               TypeError,
               "Result of the Symbol.asyncIterator method is not an object",
             )
-          rt_store.t_throw(agent, err)
+          rt_store.throw(agent, err)
         }
       }
     }
@@ -7180,7 +7156,7 @@ fn delegate_target(
     None -> {
       use #(next_fn, state) <- result.map(guarded3(
         state,
-        rt_obj.t_get_prop,
+        rt_obj.get_prop,
         record,
         StringKey(Named("next")),
       ))

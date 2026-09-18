@@ -31,7 +31,7 @@ pub fn using_disposer(
       }
     }
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         agent,
         "using declaration initializer is not an object, null, or undefined",
       )
@@ -45,7 +45,7 @@ fn direct_disposer(
   val: JsVal,
 ) -> #(JsVal, Agent) {
   let #(h, agent) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       agent,
       SObject(
         kind: types.BoundFn(target: method, bound_this: val, bound_args: []),
@@ -66,7 +66,7 @@ fn sync_fallback_disposer(
   unit_id: Int,
 ) -> #(JsVal, Agent) {
   let #(h, agent) =
-    rt_closure.t_new_bytecode_function(
+    rt_closure.new_bytecode_function(
       agent,
       sync_fallback_template(),
       bytecode.env_from_list([mk_object(method), val]),
