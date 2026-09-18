@@ -11,8 +11,8 @@ import gleam/order
 import gleam/set.{type Set}
 import gleam/string
 
-pub type RealmConsts {
-  RealmConsts(
+pub type IrConsts {
+  IrConsts(
     undef: ir.Value,
     null: ir.Value,
     true_: ir.Value,
@@ -22,12 +22,12 @@ pub type RealmConsts {
     neg_inf: ir.Value,
     tdz: ir.Value,
     empty_bin: ir.Value,
-    js_tag: String,
+    exn_tag: String,
   )
 }
 
-fn realm_consts() -> RealmConsts {
-  RealmConsts(
+fn ir_consts() -> IrConsts {
+  IrConsts(
     undef: ir.ConstAtom("undefined"),
     null: ir.ConstAtom("null"),
     true_: ir.ConstAtom("true"),
@@ -37,7 +37,7 @@ fn realm_consts() -> RealmConsts {
     neg_inf: ir.ConstAtom("js_neg_inf"),
     tdz: ir.ConstAtom("js_tdz"),
     empty_bin: ir.ConstBinary(<<>>),
-    js_tag: "js_exn",
+    exn_tag: "js_exn",
   )
 }
 
@@ -67,16 +67,22 @@ pub type FieldInitMode {
 pub type ClassCtx {
   ClassCtx(
     brand_vars: Dict(String, ir.Value),
-    proto_home_cell: ir.Value,
-    static_home_cell: ir.Value,
-    ctor_self_cell: ir.Value,
-    inner_name_cell: Option(ir.Value),
+    proto_home_box: ir.Value,
+    static_home_box: ir.Value,
+    ctor_self_box: ir.Value,
+    inner_name_box: Option(ir.Value),
     is_derived: Bool,
   )
 }
 
-pub type ScopeSave2 {
-  ScopeSave2(
+// a loop-invariant callee whose direct entry is loaded before the loop
+pub type InvariantCallee {
+  PlainSlot(slot: Int)
+  BoxedSlot(slot: Int)
+}
+
+pub type ScopeSnapshot {
+  ScopeSnapshot(
     cur_scope: ScopeId,
     scope_cursor: List(ScopeId),
     slot_vars: Dict(Int, String),
@@ -91,7 +97,7 @@ pub type FnSave {
     scope_cursor: List(ScopeId),
     child_fn_cursor: List(ScopeId),
     in_block: Bool,
-    frame_stack: List(Frame2),
+    frame_stack: List(Frame),
     pending_label: Option(String),
     strict: Bool,
     is_async: Bool,
@@ -103,25 +109,25 @@ pub type FnSave {
     class_stack: List(ClassCtx),
     slot_vars: Dict(Int, String),
     cap_names: List(String),
-    initialized: Set(Int),
-    hoisted_kfn: Dict(Int, ir.Value),
-    sm_abrupt: Option(SmAbrupt),
+    initialized_slots: Set(Int),
+    invariant_callees: Dict(InvariantCallee, ir.Value),
+    machine_abrupt: Option(MachineAbrupt),
     raw_args_var: Option(String),
   )
 }
 
-pub type Frame2 {
-  Loop2(
+pub type Frame {
+  LoopFrame(
     ir_break: String,
     ir_continue: String,
     js_label: Option(String),
     carried: List(Int),
     iter_close: Option(#(String, Escape)),
   )
-  Switch2(ir_break: String, js_label: Option(String), carried: List(Int))
-  Labeled2(ir_break: String, js_label: String, carried: List(Int))
-  Barrier2(
-    finally_body: Option(#(List(ast.StmtWithLine), ScopeSave2)),
+  SwitchFrame(ir_break: String, js_label: Option(String), carried: List(Int))
+  LabeledBlockFrame(ir_break: String, js_label: String, carried: List(Int))
+  BarrierFrame(
+    finally_body: Option(#(List(ast.StmtWithLine), ScopeSnapshot)),
     iter_close: Option(String),
     escape: Option(Escape),
   )
@@ -134,20 +140,23 @@ pub type Escape {
 pub type BarrierCleanup {
   FinallyBlock(
     body: List(ast.StmtWithLine),
-    saved_scope: ScopeSave2,
+    saved_scope: ScopeSnapshot,
     escape: Option(Escape),
   )
-  IterClose(iter_var: String, is_async: Bool, escape: Option(Escape))
+  IterClose(iter_var: String, escape: Option(Escape))
   CatchOnly
 }
 
-pub type K =
-  fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError)
+pub type EmitResult =
+  Result(#(ir.Expr, Emitter), EmitError)
 
-pub fn map_tree(
-  r: Result(#(ir.Expr, Emitter2), EmitError),
-  f: fn(ir.Expr) -> ir.Expr,
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+pub type Next =
+  fn(Emitter) -> EmitResult
+
+pub type NextWith(a) =
+  fn(Emitter, a) -> EmitResult
+
+pub fn map_tree(r: EmitResult, f: fn(ir.Expr) -> ir.Expr) -> EmitResult {
   case r {
     Ok(#(tree, e)) -> Ok(#(f(tree), e))
     Error(err) -> Error(err)
@@ -174,93 +183,88 @@ pub type FnBody {
   ExprBody(ast.Expression)
 }
 
-pub type FnSite {
-  DirectFn(
+pub type EmittedFn {
+  DirectCallable(
     name: String,
     captures: List(ir.Value),
     arity: Int,
-    needs_this: Bool,
+    takes_this: Bool,
     strict: Bool,
   )
-  ClosureSite(tree: ir.Expr)
+  ClosureExpr(ir.Expr)
 }
 
 pub type CoroutineKind {
-  CorGenerator
-  CorAsync
-  CorAsyncGen
+  Generator
+  AsyncFunction
+  AsyncGenerator
 }
 
-pub type SmAbrupt {
-  SmAbrupt(
-    on_return: fn(Emitter2, ir.Value) -> Result(#(ir.Expr, Emitter2), EmitError),
-    on_goto: fn(Emitter2, String) ->
-      Option(Result(#(ir.Expr, Emitter2), EmitError)),
+pub type MachineAbrupt {
+  MachineAbrupt(
+    on_return: NextWith(ir.Value),
+    on_goto: fn(Emitter, String) -> Option(EmitResult),
   )
 }
 
 pub type EmitDispatch {
   EmitDispatch(
-    emit_expr: fn(Emitter2, ast.Expression) ->
-      Result(#(ir.Expr, Emitter2), EmitError),
-    emit_expr_named: fn(Emitter2, ast.Expression, Option(String)) ->
-      Result(#(ir.Expr, Emitter2), EmitError),
-    emit_stmts: fn(Emitter2, List(ast.StmtWithLine), K) ->
-      Result(#(ir.Expr, Emitter2), EmitError),
+    emit_expr: fn(Emitter, ast.Expression) -> EmitResult,
+    emit_expr_named: fn(Emitter, ast.Expression, Option(String)) -> EmitResult,
+    emit_stmts: fn(Emitter, List(ast.StmtWithLine), Next) -> EmitResult,
     emit_function: fn(
-      Emitter2,
+      Emitter,
       FnShape,
       Option(String),
       List(ast.Pattern),
       FnBody,
       ScopeId,
-    ) -> Result(#(ir.Expr, Emitter2), EmitError),
-    emit_function_site: fn(
-      Emitter2,
+    ) -> EmitResult,
+    emit_function_callable: fn(
+      Emitter,
       FnShape,
       Option(String),
       List(ast.Pattern),
       FnBody,
       ScopeId,
-    ) -> Result(#(FnSite, Emitter2), EmitError),
+    ) -> Result(#(EmittedFn, Emitter), EmitError),
     emit_class: fn(
-      Emitter2,
+      Emitter,
       Option(String),
       Option(String),
       Option(ast.Expression),
       List(ast.ClassElement),
-    ) -> Result(#(ir.Expr, Emitter2), EmitError),
-    emit_async_body: fn(
-      Emitter2,
+    ) -> EmitResult,
+    emit_coroutine_fn: fn(
+      Emitter,
       FnShape,
       Option(String),
       List(ast.Pattern),
       FnBody,
       ScopeId,
       List(ir.Value),
-    ) -> Result(#(ir.Expr, Emitter2), EmitError),
-    emit_destructure: fn(Emitter2, ast.Pattern, ir.Value, BindMode) ->
-      Result(#(ir.Expr, Emitter2), EmitError),
+    ) -> EmitResult,
+    emit_destructure: fn(Emitter, ast.Pattern, ir.Value, BindMode) -> EmitResult,
   )
 }
 
-pub type Emitter2 {
-  Emitter2(
-    tree: ScopeTree,
+pub type Emitter {
+  Emitter(
+    scope_tree: ScopeTree,
     fn_scope: ScopeId,
     cur_scope: ScopeId,
     scope_cursor: List(ScopeId),
     child_fn_cursor: List(ScopeId),
     in_block: Bool,
-    slot_names: Dict(#(ScopeId, Int), String),
+    slot_base_names: Dict(#(ScopeId, Int), String),
     cap_names: List(String),
     next_var: Int,
     next_label: Int,
     next_fn: Int,
     fn_names: Set(String),
-    next_site: Int,
+    next_ic_site: Int,
     module_name: String,
-    frame_stack: List(Frame2),
+    frame_stack: List(Frame),
     pending_label: Option(String),
     fns_acc: List(ir.Function),
     unsupported: List(String),
@@ -271,52 +275,53 @@ pub type Emitter2 {
     derived_ctor: Bool,
     default_ctor: Bool,
     this_tdz: Bool,
+    // current ssa version per slot
     slot_vars: Dict(Int, String),
-    initialized: Set(Int),
+    initialized_slots: Set(Int),
     known_numbers: Set(String),
     known_strings: Set(String),
-    hoisted_kfn: Dict(Int, ir.Value),
+    invariant_callees: Dict(InvariantCallee, ir.Value),
     const_globals: Dict(String, ir.Value),
     slotted_globals: Dict(String, Int),
     class_stack: List(ClassCtx),
-    sm_abrupt: Option(SmAbrupt),
+    machine_abrupt: Option(MachineAbrupt),
     raw_args_var: Option(String),
     dispatch: EmitDispatch,
-    consts: RealmConsts,
+    consts: IrConsts,
   )
 }
 
 // never cleared; var names are module-unique
-pub fn mark_known_number(e: Emitter2, name: String) -> Emitter2 {
-  Emitter2(..e, known_numbers: set.insert(e.known_numbers, name))
+pub fn mark_known_number(e: Emitter, name: String) -> Emitter {
+  Emitter(..e, known_numbers: set.insert(e.known_numbers, name))
 }
 
-pub fn is_known_number(e: Emitter2, name: String) -> Bool {
+pub fn is_known_number(e: Emitter, name: String) -> Bool {
   set.contains(e.known_numbers, name)
 }
 
-pub fn mark_known_string(e: Emitter2, name: String) -> Emitter2 {
-  Emitter2(..e, known_strings: set.insert(e.known_strings, name))
+pub fn mark_known_string(e: Emitter, name: String) -> Emitter {
+  Emitter(..e, known_strings: set.insert(e.known_strings, name))
 }
 
-pub fn is_known_string(e: Emitter2, name: String) -> Bool {
+pub fn is_known_string(e: Emitter, name: String) -> Bool {
   set.contains(e.known_strings, name)
 }
 
-pub fn set_const_globals(e: Emitter2, d: Dict(String, ir.Value)) -> Emitter2 {
-  Emitter2(..e, const_globals: d)
+pub fn set_const_globals(e: Emitter, d: Dict(String, ir.Value)) -> Emitter {
+  Emitter(..e, const_globals: d)
 }
 
-pub fn set_slotted_globals(e: Emitter2, d: Dict(String, Int)) -> Emitter2 {
-  Emitter2(..e, slotted_globals: d)
+pub fn set_slotted_globals(e: Emitter, d: Dict(String, Int)) -> Emitter {
+  Emitter(..e, slotted_globals: d)
 }
 
-pub fn lookup_slotted_global(e: Emitter2, name: String) -> Option(Int) {
+pub fn lookup_slotted_global(e: Emitter, name: String) -> Option(Int) {
   option.from_result(dict.get(e.slotted_globals, name))
 }
 
-pub fn fresh_var(e: Emitter2) -> #(String, Emitter2) {
-  #("_t" <> int.to_string(e.next_var), Emitter2(..e, next_var: e.next_var + 1))
+pub fn fresh_var(e: Emitter) -> #(String, Emitter) {
+  #("_t" <> int.to_string(e.next_var), Emitter(..e, next_var: e.next_var + 1))
 }
 
 pub fn let_tail_value(rhs: ir.Expr) -> Option(ir.Value) {
@@ -337,11 +342,7 @@ pub fn splice_let(rhs: ir.Expr, drop: String, body: ir.Expr) -> ir.Expr {
 }
 
 // splices the let spine so rhs names stay in scope for k
-pub fn let_(
-  e: Emitter2,
-  rhs: ir.Expr,
-  k: fn(Emitter2, ir.Value) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+pub fn let_(e: Emitter, rhs: ir.Expr, k: NextWith(ir.Value)) -> EmitResult {
   case rhs {
     ir.Let(names, inner_rhs, inner_body) -> {
       use tail <- map_tree(let_(e, inner_body, k))
@@ -364,17 +365,17 @@ pub fn let_(
   }
 }
 
-pub fn fresh_label(e: Emitter2) -> #(String, Emitter2) {
+pub fn fresh_label(e: Emitter) -> #(String, Emitter) {
   #(
     "_L" <> int.to_string(e.next_label),
-    Emitter2(..e, next_label: e.next_label + 1),
+    Emitter(..e, next_label: e.next_label + 1),
   )
 }
 
 pub fn fresh_fn_name(
-  e: Emitter2,
+  e: Emitter,
   js_name: Option(String),
-) -> #(String, Emitter2) {
+) -> #(String, Emitter) {
   let base = case option.then(js_name, fn_base) {
     Some(name) -> name
     None -> "fn_" <> int.to_string(e.next_fn)
@@ -382,11 +383,7 @@ pub fn fresh_fn_name(
   let name = unique_fn_name(base, e.fn_names, 2)
   #(
     name,
-    Emitter2(
-      ..e,
-      next_fn: e.next_fn + 1,
-      fn_names: set.insert(e.fn_names, name),
-    ),
+    Emitter(..e, next_fn: e.next_fn + 1, fn_names: set.insert(e.fn_names, name)),
   )
 }
 
@@ -486,34 +483,34 @@ fn strip_chunk_suffix(s: String) -> Option(String) {
   }
 }
 
-pub fn add_function(e: Emitter2, f: ir.Function) -> Emitter2 {
+pub fn add_function(e: Emitter, f: ir.Function) -> Emitter {
   let fs = list.reverse(split.function(f))
-  Emitter2(..e, fns_acc: list.append(fs, e.fns_acc))
+  Emitter(..e, fns_acc: list.append(fs, e.fns_acc))
 }
 
-pub fn take_functions(e: Emitter2) -> List(ir.Function) {
+pub fn take_functions(e: Emitter) -> List(ir.Function) {
   list.reverse(e.fns_acc)
 }
 
-pub fn mark_unsupported(e: Emitter2, feature: String) -> Emitter2 {
-  Emitter2(..e, unsupported: [feature, ..e.unsupported])
+pub fn mark_unsupported(e: Emitter, feature: String) -> Emitter {
+  Emitter(..e, unsupported: [feature, ..e.unsupported])
 }
 
-pub fn slot_var_name(e: Emitter2, slot: Int) -> String {
-  case dict.get(e.slot_names, #(e.fn_scope, slot)) {
+pub fn slot_base_name(e: Emitter, slot: Int) -> String {
+  case dict.get(e.slot_base_names, #(e.fn_scope, slot)) {
     Ok(name) -> name
     Error(Nil) -> "js_local_" <> int.to_string(slot)
   }
 }
 
-pub fn get_slot_var(e: Emitter2, slot: Int) -> String {
+pub fn get_slot_var(e: Emitter, slot: Int) -> String {
   case dict.get(e.slot_vars, slot) {
     Ok(name) -> name
-    Error(Nil) -> slot_var_name(e, slot)
+    Error(Nil) -> slot_base_name(e, slot)
   }
 }
 
-fn slot_names(tree: ScopeTree) -> Dict(#(ScopeId, Int), String) {
+fn slot_base_names(tree: ScopeTree) -> Dict(#(ScopeId, Int), String) {
   let by_frame =
     dict.fold(tree.scopes, dict.new(), fn(acc, _id, sc) {
       dict.fold(sc.bindings, acc, fn(acc, js_name, b) {
@@ -569,14 +566,14 @@ fn unique_name(base: String, taken: Set(String), n: Int) -> String {
   }
 }
 
-pub fn fresh_slot_var(e: Emitter2, slot: Int) -> #(String, Emitter2) {
+pub fn fresh_slot_var(e: Emitter, slot: Int) -> #(String, Emitter) {
   #(
-    slot_var_name(e, slot) <> "_" <> int.to_string(e.next_var),
-    Emitter2(..e, next_var: e.next_var + 1),
+    slot_base_name(e, slot) <> "_" <> int.to_string(e.next_var),
+    Emitter(..e, next_var: e.next_var + 1),
   )
 }
 
-pub fn cap_param_name(e: Emitter2, i: Int) -> String {
+pub fn cap_param_name(e: Emitter, i: Int) -> String {
   list_at(e.cap_names, i) |> option.unwrap("cap_" <> int.to_string(i))
 }
 
@@ -588,16 +585,26 @@ fn list_at(xs: List(a), i: Int) -> Option(a) {
   }
 }
 
-pub fn set_slot_var(e: Emitter2, slot: Int, name: String) -> Emitter2 {
-  Emitter2(..e, slot_vars: dict.insert(e.slot_vars, slot, name))
+pub fn set_slot_var(e: Emitter, slot: Int, name: String) -> Emitter {
+  Emitter(..e, slot_vars: dict.insert(e.slot_vars, slot, name))
 }
 
-pub fn set_hoisted_kfn(e: Emitter2, slot: Int, pair_var: ir.Value) -> Emitter2 {
-  Emitter2(..e, hoisted_kfn: dict.insert(e.hoisted_kfn, slot, pair_var))
+pub fn set_invariant_callee(
+  e: Emitter,
+  callee: InvariantCallee,
+  direct_callee: ir.Value,
+) -> Emitter {
+  Emitter(
+    ..e,
+    invariant_callees: dict.insert(e.invariant_callees, callee, direct_callee),
+  )
 }
 
-pub fn lookup_hoisted_kfn(e: Emitter2, slot: Int) -> Option(ir.Value) {
-  option.from_result(dict.get(e.hoisted_kfn, slot))
+pub fn lookup_invariant_callee(
+  e: Emitter,
+  callee: InvariantCallee,
+) -> Option(ir.Value) {
+  option.from_result(dict.get(e.invariant_callees, callee))
 }
 
 // ics live in one per-agent map keyed by site, so modules loaded into the
@@ -610,20 +617,20 @@ fn site_base(module_name: String) -> Int {
 @external(erlang, "erlang", "phash2")
 fn phash2(term: String, range: Int) -> Int
 
-pub fn push_frame(e: Emitter2, frame: Frame2) -> Emitter2 {
-  Emitter2(..e, frame_stack: [frame, ..e.frame_stack], pending_label: None)
+pub fn push_frame(e: Emitter, frame: Frame) -> Emitter {
+  Emitter(..e, frame_stack: [frame, ..e.frame_stack], pending_label: None)
 }
 
 pub fn push_loop(
-  e: Emitter2,
+  e: Emitter,
   ir_break: String,
   ir_continue: String,
   carried: List(Int),
   iter_close: Option(#(String, Escape)),
-) -> Emitter2 {
+) -> Emitter {
   push_frame(
     e,
-    Loop2(
+    LoopFrame(
       ir_break:,
       ir_continue:,
       js_label: e.pending_label,
@@ -634,41 +641,41 @@ pub fn push_loop(
 }
 
 pub fn push_switch(
-  e: Emitter2,
+  e: Emitter,
   ir_break: String,
   carried: List(Int),
-) -> Emitter2 {
-  push_frame(e, Switch2(ir_break:, js_label: e.pending_label, carried:))
+) -> Emitter {
+  push_frame(e, SwitchFrame(ir_break:, js_label: e.pending_label, carried:))
 }
 
 pub fn push_labeled(
-  e: Emitter2,
+  e: Emitter,
   ir_break: String,
   js_label: String,
   carried: List(Int),
-) -> Emitter2 {
-  push_frame(e, Labeled2(ir_break:, js_label:, carried:))
+) -> Emitter {
+  push_frame(e, LabeledBlockFrame(ir_break:, js_label:, carried:))
 }
 
 // not via push_frame: pending_label must survive a barrier
 pub fn push_barrier(
-  e: Emitter2,
-  finally_body: Option(#(List(ast.StmtWithLine), ScopeSave2)),
+  e: Emitter,
+  finally_body: Option(#(List(ast.StmtWithLine), ScopeSnapshot)),
   iter_close: Option(String),
   escape: Option(Escape),
-) -> Emitter2 {
-  Emitter2(..e, frame_stack: [
-    Barrier2(finally_body:, iter_close:, escape:),
+) -> Emitter {
+  Emitter(..e, frame_stack: [
+    BarrierFrame(finally_body:, iter_close:, escape:),
     ..e.frame_stack
   ])
 }
 
-pub fn fresh_escape(e: Emitter2, arity: Int) -> #(Escape, Emitter2) {
+pub fn fresh_escape(e: Emitter, arity: Int) -> #(Escape, Emitter) {
   let #(label, e) = fresh_label(e)
   #(Escape(label:, arity:), e)
 }
 
-fn fresh_vars(e: Emitter2, n: Int) -> #(List(String), Emitter2) {
+fn fresh_vars(e: Emitter, n: Int) -> #(List(String), Emitter) {
   let #(e, names) = {
     use #(e, acc), _ <- list.fold(list.repeat(Nil, n), #(e, []))
     let #(v, e) = fresh_var(e)
@@ -677,15 +684,12 @@ fn fresh_vars(e: Emitter2, n: Int) -> #(List(String), Emitter2) {
   #(list.reverse(names), e)
 }
 
-pub fn escape_handler(
-  e: Emitter2,
-  esc: Escape,
-) -> #(ir.CatchHandler, Emitter2) {
+pub fn escape_handler(e: Emitter, esc: Escape) -> #(ir.CatchHandler, Emitter) {
   let #(x, e) = fresh_var(e)
   let dummies = list.repeat(e.consts.undef, esc.arity)
   #(
     ir.CatchHandler(
-      on: ir.OnTag(e.consts.js_tag),
+      on: ir.OnTag(e.consts.exn_tag),
       payload: [x],
       exnref: None,
       handler: ir.Break(esc.label, [ir.ConstI32(1), ir.Var(x), ..dummies]),
@@ -695,10 +699,10 @@ pub fn escape_handler(
 }
 
 pub fn land_escapes(
-  e: Emitter2,
+  e: Emitter,
   esc: Escape,
   region: ir.Expr,
-) -> #(ir.Expr, Emitter2) {
+) -> #(ir.Expr, Emitter) {
   let #(code, e) = fresh_var(e)
   let #(exn, e) = fresh_var(e)
   let #(inner, e) = fresh_vars(e, esc.arity)
@@ -723,7 +727,7 @@ pub fn land_escapes(
         ir.If(
           ir.Var(code),
           [],
-          ir.Throw(e.consts.js_tag, [ir.Var(exn)]),
+          ir.Throw(e.consts.exn_tag, [ir.Var(exn)]),
           ir.Values([]),
         ),
         ir.Values(list.map(outer, ir.Var)),
@@ -732,18 +736,19 @@ pub fn land_escapes(
   #(tree, e)
 }
 
-pub fn pop_frame(e: Emitter2) -> Emitter2 {
+pub fn pop_frame(e: Emitter) -> Emitter {
   let assert [_, ..rest] = e.frame_stack
-  Emitter2(..e, frame_stack: rest)
+  Emitter(..e, frame_stack: rest)
 }
 
-pub fn set_pending_label(e: Emitter2, label: String) -> Emitter2 {
-  Emitter2(..e, pending_label: Some(label))
+pub fn set_pending_label(e: Emitter, label: String) -> Emitter {
+  Emitter(..e, pending_label: Some(label))
 }
 
-fn break_target_of(frame: Frame2, name: Option(String)) -> Option(String) {
+fn break_target_of(frame: Frame, name: Option(String)) -> Option(String) {
   case frame {
-    Loop2(ir_break:, js_label:, ..) | Switch2(ir_break:, js_label:, ..) ->
+    LoopFrame(ir_break:, js_label:, ..)
+    | SwitchFrame(ir_break:, js_label:, ..) ->
       case name {
         None -> Some(ir_break)
         Some(_) ->
@@ -752,19 +757,19 @@ fn break_target_of(frame: Frame2, name: Option(String)) -> Option(String) {
             False -> None
           }
       }
-    Labeled2(ir_break:, js_label:, ..) ->
+    LabeledBlockFrame(ir_break:, js_label:, ..) ->
       // §14.8 unlabeled break skips a labeled block
       case name {
         Some(n) if n == js_label -> Some(ir_break)
         _ -> None
       }
-    Barrier2(..) -> None
+    BarrierFrame(..) -> None
   }
 }
 
-fn continue_target_of(frame: Frame2, name: Option(String)) -> Option(String) {
+fn continue_target_of(frame: Frame, name: Option(String)) -> Option(String) {
   case frame {
-    Loop2(ir_continue:, js_label:, ..) ->
+    LoopFrame(ir_continue:, js_label:, ..) ->
       case name {
         None -> Some(ir_continue)
         Some(_) ->
@@ -773,21 +778,23 @@ fn continue_target_of(frame: Frame2, name: Option(String)) -> Option(String) {
             False -> None
           }
       }
-    Switch2(..) | Labeled2(..) | Barrier2(..) -> None
+    SwitchFrame(..) | LabeledBlockFrame(..) | BarrierFrame(..) -> None
   }
 }
 
-pub fn cross_cleanups(frame: Frame2) -> List(BarrierCleanup) {
+pub fn cross_cleanups(frame: Frame) -> List(BarrierCleanup) {
   case frame {
-    Loop2(iter_close: Some(#(iv, esc)), ..) -> [IterClose(iv, False, Some(esc))]
-    Loop2(..) | Switch2(..) | Labeled2(..) -> []
-    Barrier2(finally_body:, iter_close:, escape:) -> {
+    LoopFrame(iter_close: Some(#(iv, esc)), ..) -> [
+      IterClose(iv, Some(esc)),
+    ]
+    LoopFrame(..) | SwitchFrame(..) | LabeledBlockFrame(..) -> []
+    BarrierFrame(finally_body:, iter_close:, escape:) -> {
       let acc = case finally_body {
         Some(#(body, save)) -> [FinallyBlock(body, save, escape)]
         None -> []
       }
       case iter_close {
-        Some(iv) -> [IterClose(iv, False, escape), ..acc]
+        Some(iv) -> [IterClose(iv, escape), ..acc]
         None ->
           case acc {
             [] -> [CatchOnly]
@@ -799,9 +806,9 @@ pub fn cross_cleanups(frame: Frame2) -> List(BarrierCleanup) {
 }
 
 fn find_target(
-  frames: List(Frame2),
+  frames: List(Frame),
   name: Option(String),
-  target_of: fn(Frame2, Option(String)) -> Option(String),
+  target_of: fn(Frame, Option(String)) -> Option(String),
   miss: EmitError,
   crossed: List(BarrierCleanup),
 ) -> Result(#(String, List(BarrierCleanup)), EmitError) {
@@ -820,14 +827,14 @@ fn find_target(
 }
 
 pub fn find_break_target(
-  e: Emitter2,
+  e: Emitter,
   name: Option(String),
 ) -> Result(#(String, List(BarrierCleanup)), EmitError) {
   find_target(e.frame_stack, name, break_target_of, BreakOutsideLoop, [])
 }
 
 pub fn find_continue_target(
-  e: Emitter2,
+  e: Emitter,
   name: Option(String),
 ) -> Result(#(String, List(BarrierCleanup)), EmitError) {
   find_target(e.frame_stack, name, continue_target_of, ContinueOutsideLoop, [])
@@ -844,21 +851,21 @@ pub fn new_emitter(
   strict: Bool,
   module_name: String,
   dispatch: EmitDispatch,
-) -> Emitter2 {
-  Emitter2(
-    tree:,
+) -> Emitter {
+  Emitter(
+    scope_tree: tree,
     fn_scope: root,
     cur_scope: root,
     scope_cursor: block_child_scopes(tree, root),
     child_fn_cursor: scope.child_function_scopes(tree, root),
     in_block: False,
-    slot_names: slot_names(tree),
+    slot_base_names: slot_base_names(tree),
     cap_names: [],
     next_var: 0,
     next_label: 0,
     next_fn: 0,
     fn_names: set.new(),
-    next_site: site_base(module_name),
+    next_ic_site: site_base(module_name),
     module_name:,
     frame_stack: [],
     pending_label: None,
@@ -872,26 +879,26 @@ pub fn new_emitter(
     default_ctor: False,
     this_tdz: False,
     slot_vars: dict.new(),
-    initialized: set.new(),
+    initialized_slots: set.new(),
     known_numbers: set.new(),
     known_strings: set.new(),
-    hoisted_kfn: dict.new(),
+    invariant_callees: dict.new(),
     const_globals: dict.new(),
     slotted_globals: dict.new(),
     class_stack: [],
-    sm_abrupt: None,
+    machine_abrupt: None,
     raw_args_var: None,
     dispatch:,
-    consts: realm_consts(),
+    consts: ir_consts(),
   )
 }
 
-pub fn fn_info(e: Emitter2) -> scope.FunctionInfo {
-  scope.function_info(e.tree, e.fn_scope)
+pub fn fn_info(e: Emitter) -> scope.FunctionInfo {
+  scope.function_info(e.scope_tree, e.fn_scope)
 }
 
 pub fn lexical_is_boxed(
-  e: Emitter2,
+  e: Emitter,
   info: scope.FunctionInfo,
   ref: lexical.LexicalRef,
 ) -> Bool {
@@ -899,12 +906,14 @@ pub fn lexical_is_boxed(
   || { ref == lexical.RefThis && e.derived_ctor }
 }
 
-pub fn resolve(e: Emitter2, name: String) -> scope.Resolution {
-  scope.lookup(e.tree, e.cur_scope, name)
+pub fn resolve(e: Emitter, name: String) -> scope.Resolution {
+  scope.lookup(e.scope_tree, e.cur_scope, name)
 }
 
-pub fn arguments_is_implicit(e: Emitter2) -> Bool {
-  case dict.get(scope.get_scope(e.tree, e.fn_scope).bindings, "arguments") {
+pub fn arguments_is_implicit(e: Emitter) -> Bool {
+  case
+    dict.get(scope.get_scope(e.scope_tree, e.fn_scope).bindings, "arguments")
+  {
     Ok(scope.Binding(slot: fs, kind: scope.VarBinding, ..)) ->
       case resolve(e, "arguments") {
         scope.Plain(scope.Local(slot:, kind: scope.VarBinding, ..)) ->
@@ -915,50 +924,50 @@ pub fn arguments_is_implicit(e: Emitter2) -> Bool {
   }
 }
 
-pub fn pop_child_fn(e: Emitter2) -> #(ScopeId, Emitter2) {
+pub fn pop_child_fn(e: Emitter) -> #(ScopeId, Emitter) {
   let assert [fn_id, ..rest] = e.child_fn_cursor
     as "aot/state: child fn cursor exhausted (analyzer/emit walk desync)"
-  #(fn_id, Emitter2(..e, child_fn_cursor: rest))
+  #(fn_id, Emitter(..e, child_fn_cursor: rest))
 }
 
 // empty cursor stays put; never re-read consumed children
 pub fn enter_scope(
-  e: Emitter2,
+  e: Emitter,
   in_block in_block: Bool,
-) -> #(Emitter2, ScopeSave2) {
+) -> #(Emitter, ScopeSnapshot) {
   case e.scope_cursor {
     [child_id, ..parent_rest] -> {
       let save =
-        ScopeSave2(
+        ScopeSnapshot(
           cur_scope: e.cur_scope,
           scope_cursor: parent_rest,
           slot_vars: e.slot_vars,
           in_block: e.in_block,
         )
       let e =
-        Emitter2(
+        Emitter(
           ..e,
           cur_scope: child_id,
-          scope_cursor: block_child_scopes(e.tree, child_id),
+          scope_cursor: block_child_scopes(e.scope_tree, child_id),
           in_block:,
         )
       #(e, save)
     }
     [] -> {
       let save =
-        ScopeSave2(
+        ScopeSnapshot(
           cur_scope: e.cur_scope,
           scope_cursor: [],
           slot_vars: e.slot_vars,
           in_block: e.in_block,
         )
-      #(Emitter2(..e, in_block:), save)
+      #(Emitter(..e, in_block:), save)
     }
   }
 }
 
-pub fn leave_scope(e: Emitter2, save: ScopeSave2) -> Emitter2 {
-  Emitter2(
+pub fn leave_scope(e: Emitter, save: ScopeSnapshot) -> Emitter {
+  Emitter(
     ..e,
     cur_scope: save.cur_scope,
     scope_cursor: save.scope_cursor,
@@ -968,11 +977,14 @@ pub fn leave_scope(e: Emitter2, save: ScopeSave2) -> Emitter2 {
 }
 
 pub fn leave_scope_if_inside(
-  e: Emitter2,
+  e: Emitter,
   entered: ScopeId,
-  save: ScopeSave2,
-) -> Emitter2 {
-  case entered != save.cur_scope && scope_within(e.tree, e.cur_scope, entered) {
+  save: ScopeSnapshot,
+) -> Emitter {
+  case
+    entered != save.cur_scope
+    && scope_within(e.scope_tree, e.cur_scope, entered)
+  {
     True -> leave_scope(e, save)
     False -> e
   }
@@ -990,9 +1002,9 @@ fn scope_within(tree: ScopeTree, id: ScopeId, ancestor: ScopeId) -> Bool {
 }
 
 pub fn enter_for_scope(
-  e: Emitter2,
+  e: Emitter,
   has_lex_head: Bool,
-) -> #(Emitter2, Option(ScopeSave2)) {
+) -> #(Emitter, Option(ScopeSnapshot)) {
   case has_lex_head {
     True -> {
       let #(e, save) = enter_scope(e, in_block: e.in_block)
@@ -1002,7 +1014,7 @@ pub fn enter_for_scope(
   }
 }
 
-pub fn leave_for_scope(e: Emitter2, save: Option(ScopeSave2)) -> Emitter2 {
+pub fn leave_for_scope(e: Emitter, save: Option(ScopeSnapshot)) -> Emitter {
   case save {
     Some(s) -> leave_scope(e, s)
     None -> e
@@ -1011,12 +1023,12 @@ pub fn leave_for_scope(e: Emitter2, save: Option(ScopeSave2)) -> Emitter2 {
 
 // counters and fns_acc are module-wide and not saved
 pub fn enter_function(
-  e: Emitter2,
+  e: Emitter,
   child_id: ScopeId,
   strict strict: Bool,
   is_async is_async: Bool,
   is_arrow is_arrow: Bool,
-) -> #(Emitter2, FnSave) {
+) -> #(Emitter, FnSave) {
   let save =
     FnSave(
       fn_scope: e.fn_scope,
@@ -1036,18 +1048,18 @@ pub fn enter_function(
       class_stack: e.class_stack,
       slot_vars: e.slot_vars,
       cap_names: e.cap_names,
-      initialized: e.initialized,
-      hoisted_kfn: e.hoisted_kfn,
-      sm_abrupt: e.sm_abrupt,
+      initialized_slots: e.initialized_slots,
+      invariant_callees: e.invariant_callees,
+      machine_abrupt: e.machine_abrupt,
       raw_args_var: e.raw_args_var,
     )
   let child =
-    Emitter2(
+    Emitter(
       ..e,
       fn_scope: child_id,
       cur_scope: child_id,
-      scope_cursor: block_child_scopes(e.tree, child_id),
-      child_fn_cursor: scope.child_function_scopes(e.tree, child_id),
+      scope_cursor: block_child_scopes(e.scope_tree, child_id),
+      child_fn_cursor: scope.child_function_scopes(e.scope_tree, child_id),
       in_block: False,
       frame_stack: [],
       pending_label: None,
@@ -1061,16 +1073,16 @@ pub fn enter_function(
       class_stack: e.class_stack,
       slot_vars: dict.new(),
       cap_names: [],
-      initialized: set.new(),
-      hoisted_kfn: dict.new(),
-      sm_abrupt: None,
+      initialized_slots: set.new(),
+      invariant_callees: dict.new(),
+      machine_abrupt: None,
       raw_args_var: None,
     )
   #(child, save)
 }
 
-pub fn leave_function(e: Emitter2, save: FnSave) -> Emitter2 {
-  Emitter2(
+pub fn leave_function(e: Emitter, save: FnSave) -> Emitter {
+  Emitter(
     ..e,
     fn_scope: save.fn_scope,
     cur_scope: save.cur_scope,
@@ -1089,17 +1101,17 @@ pub fn leave_function(e: Emitter2, save: FnSave) -> Emitter2 {
     class_stack: save.class_stack,
     slot_vars: save.slot_vars,
     cap_names: save.cap_names,
-    initialized: save.initialized,
-    hoisted_kfn: save.hoisted_kfn,
-    sm_abrupt: save.sm_abrupt,
+    initialized_slots: save.initialized_slots,
+    invariant_callees: save.invariant_callees,
+    machine_abrupt: save.machine_abrupt,
     raw_args_var: save.raw_args_var,
   )
 }
 
-pub fn set_sm_abrupt(e: Emitter2, hooks: SmAbrupt) -> Emitter2 {
-  Emitter2(..e, sm_abrupt: Some(hooks))
+pub fn set_machine_abrupt(e: Emitter, hooks: MachineAbrupt) -> Emitter {
+  Emitter(..e, machine_abrupt: Some(hooks))
 }
 
-pub fn clear_sm_abrupt(e: Emitter2) -> Emitter2 {
-  Emitter2(..e, sm_abrupt: None)
+pub fn clear_machine_abrupt(e: Emitter) -> Emitter {
+  Emitter(..e, machine_abrupt: None)
 }

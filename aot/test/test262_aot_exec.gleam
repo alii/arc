@@ -257,7 +257,7 @@ fn prepare_agent(
   metadata: TestMetadata,
   is_async: Bool,
 ) -> Result(Agent, Outcome) {
-  let st = run.seed(hooks_for(metadata))
+  let st = run.new_linked_agent(hooks_for(metadata))
   case list.contains(metadata.flags, "raw") {
     True -> Ok(st)
     False -> {

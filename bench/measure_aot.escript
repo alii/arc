@@ -25,7 +25,7 @@ main([File | Rest]) ->
 run_once(Mod, Hooks) ->
     Self = self(),
     Pid = spawn_opt(fun() ->
-        A = arc_aot@run:seed(Hooks),
+        A = arc_aot@run:new_linked_agent(Hooks),
         erlang:garbage_collect(),
         {reductions, R0} = process_info(self(), reductions),
         {garbage_collection, GI0} = process_info(self(), garbage_collection),

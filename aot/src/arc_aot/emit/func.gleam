@@ -8,9 +8,9 @@ import arc/parser/ast
 import arc_aot/emit/anf
 import arc_aot/emit/expr
 import arc_aot/emit/state.{
-  type EmitError, type Emitter2, type FnBody, type FnShape, Arrow, ClassCtor,
-  Emitter2, ExprBody, FieldInitAfterSuper, FnDecl, FnExpr, Method, NoFieldInit,
-  StmtBody,
+  type EmitError, type EmitResult, type Emitter, type FnBody, type FnShape,
+  type Next, type NextWith, Arrow, ClassCtor, Emitter, ExprBody,
+  FieldInitAfterSuper, FnDecl, FnExpr, Method, NoFieldInit, StmtBody,
 }
 import carder/ir
 import gleam/bit_array
@@ -21,41 +21,41 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
 
-type Rk(a) =
-  fn(Emitter2, a) -> Result(#(ir.Expr, Emitter2), EmitError)
+// list-abi parameter names shared by every emitted js function
+pub const frame_param = "_frame"
 
-fn let_(
-  e: Emitter2,
-  rhs: ir.Expr,
-  k: Rk(ir.Value),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+pub const args_param = "_args"
+
+const simple_this_param = "_this"
+
+fn let_(e: Emitter, rhs: ir.Expr, k: NextWith(ir.Value)) -> EmitResult {
   state.let_(e, rhs, k)
 }
 
 fn host_(
-  e: Emitter2,
+  e: Emitter,
   op: String,
   args: List(ir.Value),
-  k: Rk(ir.Value),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  k: NextWith(ir.Value),
+) -> EmitResult {
   let_(e, ir.CallHost("js", op, args), k)
 }
 
 fn host_unit_(
-  e: Emitter2,
+  e: Emitter,
   op: String,
   args: List(ir.Value),
-  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  k: Next,
+) -> EmitResult {
   use e, _ <- host_(e, op, args)
   k(e)
 }
 
 fn cons_list_(
-  e: Emitter2,
+  e: Emitter,
   vs: List(ir.Value),
-  k: Rk(ir.Value),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  k: NextWith(ir.Value),
+) -> EmitResult {
   case vs {
     [] -> host_(e, "empty_list", [], k)
     [head, ..rest] -> {
@@ -66,28 +66,21 @@ fn cons_list_(
 }
 
 fn each_(
-  e: Emitter2,
+  e: Emitter,
   items: List(a),
-  then k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-  with step: fn(
-    Emitter2,
-    a,
-    fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-  ) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  then k: Next,
+  with step: fn(Emitter, a, Next) -> EmitResult,
+) -> EmitResult {
   case items {
     [] -> k(e)
     [x, ..rest] -> step(e, x, fn(e) { each_(e, rest, k, step) })
   }
 }
 
-fn run_rk(
-  e: Emitter2,
-  f: fn(
-    Emitter2,
-    fn(Emitter2, ir.Expr) -> Result(#(ir.Expr, Emitter2), EmitError),
-  ) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+fn with_done(
+  e: Emitter,
+  f: fn(Emitter, NextWith(ir.Expr)) -> EmitResult,
+) -> EmitResult {
   f(e, fn(ef, tree) { Ok(#(tree, ef)) })
 }
 
@@ -139,9 +132,9 @@ fn derive_flags(shape: FnShape) -> ShapeFlags {
 
 fn coroutine_kind(sf: ShapeFlags) -> Option(state.CoroutineKind) {
   case sf.is_generator, sf.is_async {
-    True, True -> Some(state.CorAsyncGen)
-    True, False -> Some(state.CorGenerator)
-    False, True -> Some(state.CorAsync)
+    True, True -> Some(state.AsyncGenerator)
+    True, False -> Some(state.Generator)
+    False, True -> Some(state.AsyncFunction)
     False, False -> None
   }
 }
@@ -182,7 +175,7 @@ fn capture_count(info: FunctionInfo) -> Int {
 }
 
 pub fn build_capture_values(
-  e: Emitter2,
+  e: Emitter,
   child_info: FunctionInfo,
 ) -> List(ir.Value) {
   let named =
@@ -203,12 +196,12 @@ pub fn build_capture_values(
   list.append(named, lex)
 }
 
-pub fn seed_capture_slots(e: Emitter2, info: FunctionInfo) -> Emitter2 {
+pub fn seed_capture_slots(e: Emitter, info: FunctionInfo) -> Emitter {
   let names =
     list.map(info.captures, fn(c) {
       let assert Ok(child_slot) = dict.get(info.names, c.0)
         as "aot/func: capture name missing from FunctionInfo.names"
-      #(child_slot, state.slot_var_name(e, child_slot))
+      #(child_slot, state.slot_base_name(e, child_slot))
     })
   let lexical_names =
     list.filter_map(lexical.all_lexical_refs, fn(ref) {
@@ -218,7 +211,7 @@ pub fn seed_capture_slots(e: Emitter2, info: FunctionInfo) -> Emitter2 {
       }
     })
   let all = list.append(names, lexical_names)
-  let e = Emitter2(..e, cap_names: list.map(all, fn(p) { p.1 }))
+  let e = Emitter(..e, cap_names: list.map(all, fn(p) { p.1 }))
   list.fold(all, e, fn(e, p) { state.set_slot_var(e, p.0, p.1) })
 }
 
@@ -231,9 +224,9 @@ fn lexical_capture_name(ref: lexical.LexicalRef) -> String {
   }
 }
 
-pub fn build_ir_params(e: Emitter2, i: Int, n: Int) -> List(ir.Local) {
+pub fn build_ir_params(e: Emitter, i: Int, n: Int) -> List(ir.Local) {
   case i < n {
-    False -> [ir.Local("_frame", ir.TTerm), ir.Local("_args", ir.TTerm)]
+    False -> [ir.Local(frame_param, ir.TTerm), ir.Local(args_param, ir.TTerm)]
     True -> [
       ir.Local(state.cap_param_name(e, i), ir.TTerm),
       ..build_ir_params(e, i + 1, n)
@@ -241,17 +234,12 @@ pub fn build_ir_params(e: Emitter2, i: Int, n: Int) -> List(ir.Local) {
   }
 }
 
-fn store_slot(
-  e: Emitter2,
-  b: Binding,
-  val: ir.Value,
-  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+fn store_slot(e: Emitter, b: Binding, val: ir.Value, k: Next) -> EmitResult {
   case b.is_boxed {
     True ->
       host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, b.slot)), val], k)
     False -> {
-      let name = state.slot_var_name(e, b.slot)
+      let name = state.slot_base_name(e, b.slot)
       use body <- state.map_tree(k(state.set_slot_var(e, b.slot, name)))
       ir.Let([name], ir.Values([val]), body)
     }
@@ -259,28 +247,28 @@ fn store_slot(
 }
 
 pub fn unpack_frame(
-  e: Emitter2,
+  e: Emitter,
   is_arrow: Bool,
   info: FunctionInfo,
-  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  k: Next,
+) -> EmitResult {
   case is_arrow, info.lexical {
     False, lexical.OwnedLexicalSlots(base:) -> {
       use e, ref, next <- each_(e, lexical.all_lexical_refs, then: k)
       let idx = lexical.lexical_ref_offset(ref)
       let slot = base + idx
-      use e, raw <- let_(e, ir.TermOp(ir.TupleGet(idx), [ir.Var("_frame")]))
+      use e, raw <- let_(e, ir.TermOp(ir.TupleGet(idx), [ir.Var(frame_param)]))
       case state.lexical_is_boxed(e, info, ref) {
         False -> {
-          let name = state.slot_var_name(e, slot)
+          let name = state.slot_base_name(e, slot)
           use body <- state.map_tree(next(state.set_slot_var(e, slot, name)))
           ir.Let([name], ir.Values([raw]), body)
         }
         True -> {
-          use e, cell <- host_(e, "cell_new", [raw])
-          let name = state.slot_var_name(e, slot)
+          use e, box <- host_(e, "cell_new", [raw])
+          let name = state.slot_base_name(e, slot)
           use body <- state.map_tree(next(state.set_slot_var(e, slot, name)))
-          ir.Let([name], ir.Values([cell]), body)
+          ir.Let([name], ir.Values([box]), body)
         }
       }
     }
@@ -288,27 +276,23 @@ pub fn unpack_frame(
   }
 }
 
-pub fn binding_prologue(
-  e: Emitter2,
-  scope_id: ScopeId,
-  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+pub fn binding_prologue(e: Emitter, scope_id: ScopeId, k: Next) -> EmitResult {
   let bindings =
-    dict.to_list(scope.get_scope(e.tree, scope_id).bindings)
+    dict.to_list(scope.get_scope(e.scope_tree, scope_id).bindings)
     |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
   use e, entry, next <- each_(e, bindings, then: k)
   let #(_, b): #(String, Binding) = entry
-  let name = state.slot_var_name(e, b.slot)
-  let seed = fn(e: Emitter2, init) {
+  let name = state.slot_base_name(e, b.slot)
+  let seed = fn(e: Emitter, init) {
     case b.is_boxed {
       False -> {
         use body <- state.map_tree(next(state.set_slot_var(e, b.slot, name)))
         ir.Let([name], ir.Values([init]), body)
       }
       True -> {
-        use e, cell <- host_(e, "cell_new", [init])
+        use e, box <- host_(e, "cell_new", [init])
         use body <- state.map_tree(next(state.set_slot_var(e, b.slot, name)))
-        ir.Let([name], ir.Values([cell]), body)
+        ir.Let([name], ir.Values([box]), body)
       }
     }
   }
@@ -321,12 +305,12 @@ pub fn binding_prologue(
 
 // §10.2.11 step 28.f.i.2, copy params into body vars
 fn body_param_copies(
-  e: Emitter2,
+  e: Emitter,
   declared_param_names: List(String),
   is_arrow: Bool,
   stmts: List(ast.StmtWithLine),
-  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  k: Next,
+) -> EmitResult {
   let body_id = e.cur_scope
   case body_id == e.fn_scope {
     True -> k(e)
@@ -337,7 +321,7 @@ fn body_param_copies(
       }
       let function_names = ast_util.direct_fn_names(stmts)
       let body_bindings =
-        dict.to_list(scope.get_scope(e.tree, body_id).bindings)
+        dict.to_list(scope.get_scope(e.scope_tree, body_id).bindings)
         |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
       use e, entry, next <- each_(e, body_bindings, then: k)
       let #(bname, b): #(String, Binding) = entry
@@ -348,7 +332,7 @@ fn body_param_copies(
       case copies {
         False -> next(e)
         True ->
-          case scope.lookup(e.tree, e.fn_scope, bname) {
+          case scope.lookup(e.scope_tree, e.fn_scope, bname) {
             scope.Plain(scope.Local(slot: src_slot, boxed: src_boxed, ..)) -> {
               let src_var = ir.Var(state.get_slot_var(e, src_slot))
               case src_boxed {
@@ -370,20 +354,24 @@ fn body_param_copies(
 
 // §13.2.5.5 named function self binding
 fn init_self_name(
-  e: Emitter2,
+  e: Emitter,
   self_name: Option(String),
   info: FunctionInfo,
-  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  k: Next,
+) -> EmitResult {
   case self_name {
     None -> k(e)
     Some(fname) ->
-      case dict.get(scope.get_scope(e.tree, e.fn_scope).bindings, fname) {
+      case dict.get(scope.get_scope(e.scope_tree, e.fn_scope).bindings, fname) {
         Ok(b) if b.kind == FnNameBinding -> {
           let assert Some(af_slot) =
             lexical.lexical_slot(info.lexical, lexical.RefActiveFunc)
           let af = ir.Var(state.get_slot_var(e, af_slot))
-          let e = Emitter2(..e, initialized: set.insert(e.initialized, b.slot))
+          let e =
+            Emitter(
+              ..e,
+              initialized_slots: set.insert(e.initialized_slots, b.slot),
+            )
           store_slot(e, b, af, k)
         }
         _ -> k(e)
@@ -392,21 +380,21 @@ fn init_self_name(
 }
 
 fn unpack_args(
-  e: Emitter2,
+  e: Emitter,
   fixed: List(ast.Pattern),
   non_simple: Bool,
-  k: fn(Emitter2, ir.Value) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  unpack_args_loop(e, fixed, non_simple, ir.Var("_args"), k)
+  k: NextWith(ir.Value),
+) -> EmitResult {
+  unpack_args_loop(e, fixed, non_simple, ir.Var(args_param), k)
 }
 
 fn unpack_args_loop(
-  e: Emitter2,
+  e: Emitter,
   params: List(ast.Pattern),
   non_simple: Bool,
   tail: ir.Value,
-  k: fn(Emitter2, ir.Value) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  k: NextWith(ir.Value),
+) -> EmitResult {
   case params {
     [] -> k(e, tail)
     [p, ..rest] -> {
@@ -437,27 +425,27 @@ fn unpack_args_loop(
 }
 
 fn bind_one_param(
-  e: Emitter2,
+  e: Emitter,
   p: ast.Pattern,
   raw: ir.Value,
   non_simple: Bool,
-  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  k: Next,
+) -> EmitResult {
   case non_simple {
     False -> {
       let assert ast.IdentifierPattern(name:, ..) = p
       let b = fn_scope_binding(e, name)
       case b.is_boxed {
         False -> {
-          let vn = state.slot_var_name(e, b.slot)
+          let vn = state.slot_base_name(e, b.slot)
           use body <- state.map_tree(k(state.set_slot_var(e, b.slot, vn)))
           ir.Let([vn], ir.Values([raw]), body)
         }
         True -> {
-          use e, cell <- host_(e, "cell_new", [raw])
-          let vn = state.slot_var_name(e, b.slot)
+          use e, box <- host_(e, "cell_new", [raw])
+          let vn = state.slot_base_name(e, b.slot)
           use body <- state.map_tree(k(state.set_slot_var(e, b.slot, vn)))
-          ir.Let([vn], ir.Values([cell]), body)
+          ir.Let([vn], ir.Values([box]), body)
         }
       }
     }
@@ -475,12 +463,12 @@ fn bind_one_param(
 }
 
 fn bind_rest(
-  e: Emitter2,
+  e: Emitter,
   rest: Option(ast.Pattern),
   tail: ir.Value,
   non_simple: Bool,
-  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  k: Next,
+) -> EmitResult {
   case rest {
     None -> k(e)
     Some(target) -> {
@@ -1178,7 +1166,7 @@ fn is_simple_abi_eligible(
             False ->
               case is_arrow, refs_frame_body(body, True) {
                 True, True -> None
-                _, needs_this -> Some(#(list.length(fixed), needs_this))
+                _, takes_this -> Some(#(list.length(fixed), takes_this))
               }
           }
       }
@@ -1187,28 +1175,33 @@ fn is_simple_abi_eligible(
 }
 
 fn init_arguments(
-  e: Emitter2,
+  e: Emitter,
   is_arrow: Bool,
   uses_args: Bool,
   fixed: List(ast.Pattern),
   non_simple: Bool,
   has_rest: Bool,
-  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  k: Next,
+) -> EmitResult {
   case is_arrow || !uses_args {
     True -> k(e)
     False ->
-      case dict.get(scope.get_scope(e.tree, e.fn_scope).bindings, "arguments") {
+      case
+        dict.get(
+          scope.get_scope(e.scope_tree, e.fn_scope).bindings,
+          "arguments",
+        )
+      {
         Error(Nil) -> k(e)
         Ok(b) -> {
           // mapped only for sloppy simple params, §10.2.11 step 18
-          use e, mapped <- build_mapped_cells(e, fixed, non_simple || has_rest)
+          use e, mapped <- build_mapped_boxes(e, fixed, non_simple || has_rest)
           use e, callee <- let_(
             e,
-            ir.TermOp(ir.TupleGet(1), [ir.Var("_frame")]),
+            ir.TermOp(ir.TupleGet(1), [ir.Var(frame_param)]),
           )
           use e, args_obj <- host_(e, "new_arguments", [
-            ir.Var("_args"),
+            ir.Var(args_param),
             mapped,
             callee,
           ])
@@ -1218,30 +1211,30 @@ fn init_arguments(
   }
 }
 
-fn build_mapped_cells(
-  e: Emitter2,
+fn build_mapped_boxes(
+  e: Emitter,
   fixed: List(ast.Pattern),
   unmapped: Bool,
-  k: Rk(ir.Value),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  k: NextWith(ir.Value),
+) -> EmitResult {
   case unmapped || e.strict {
     True -> k(e, e.consts.undef)
     False -> {
-      let cells =
+      let boxes =
         list.map(fixed, fn(p) {
           let assert ast.IdentifierPattern(name:, ..) = p
           ir.Var(state.get_slot_var(e, fn_scope_binding(e, name).slot))
         })
-      cons_list_(e, cells, k)
+      cons_list_(e, boxes, k)
     }
   }
 }
 
 fn hoist_fn_decls(
-  e: Emitter2,
+  e: Emitter,
   stmts: List(ast.StmtWithLine),
-  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  k: Next,
+) -> EmitResult {
   use e, located, next <- each_(e, stmts, then: k)
   case ast_util.peel_labels(located.statement) {
     ast.FunctionDeclaration(
@@ -1260,19 +1253,19 @@ fn hoist_fn_decls(
         StmtBody(body),
         child_id,
       ))
-      use e, fn_h <- let_(e, ctree)
+      use e, closure <- let_(e, ctree)
       let assert Ok(b) =
-        dict.get(scope.get_scope(e.tree, e.cur_scope).bindings, name)
+        dict.get(scope.get_scope(e.scope_tree, e.cur_scope).bindings, name)
         as "aot/func: hoisted function missing from var-scope bindings"
-      store_slot(e, b, fn_h, next)
+      store_slot(e, b, closure, next)
     }
     _ -> next(e)
   }
 }
 
-fn fn_scope_binding(e: Emitter2, name: String) -> Binding {
+fn fn_scope_binding(e: Emitter, name: String) -> Binding {
   let assert Ok(b) =
-    dict.get(scope.get_scope(e.tree, e.fn_scope).bindings, name)
+    dict.get(scope.get_scope(e.scope_tree, e.fn_scope).bindings, name)
     as "aot/func: name missing from fn-scope bindings"
   b
 }
@@ -1286,16 +1279,15 @@ pub fn body_stmts(body: FnBody) -> List(ast.StmtWithLine) {
 
 // §10.2.11 function declaration instantiation
 pub fn emit_prologue(
-  e: Emitter2,
+  e: Emitter,
   self_name: Option(String),
   is_arrow: Bool,
   own_args: Bool,
   params: List(ast.Pattern),
   stmts: List(ast.StmtWithLine),
   info: FunctionInfo,
-  k: fn(Emitter2, fn(Emitter2) -> Emitter2) ->
-    Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  k: fn(Emitter, fn(Emitter) -> Emitter) -> EmitResult,
+) -> EmitResult {
   let #(fixed, rest_param) = ast_util.split_trailing_rest(params)
   let non_simple = !ast_util.all_simple_params(fixed)
   let uses_args =
@@ -1309,7 +1301,7 @@ pub fn emit_prologue(
     }
   let e = case is_arrow || !own_args {
     True -> e
-    False -> Emitter2(..e, raw_args_var: Some("_args"))
+    False -> Emitter(..e, raw_args_var: Some(args_param))
   }
   use e <- unpack_frame(e, is_arrow, info)
   use e <- binding_prologue(e, e.fn_scope)
@@ -1345,14 +1337,14 @@ pub fn emit_prologue(
 }
 
 fn emit_body(
-  e: Emitter2,
+  e: Emitter,
   sf: ShapeFlags,
   params: List(ast.Pattern),
   body: FnBody,
   info: FunctionInfo,
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+) -> EmitResult {
   let stmts = body_stmts(body)
-  let ret_undef = fn(ef: Emitter2) {
+  let ret_undef = fn(ef: Emitter) {
     case ef.derived_ctor {
       False -> Ok(#(ir.Return([ef.consts.undef]), ef))
       True -> {
@@ -1381,14 +1373,14 @@ fn simple_param_name(i: Int) -> String {
 }
 
 fn simple_param_ir_name(
-  e: Emitter2,
+  e: Emitter,
   fixed: List(ast.Pattern),
   i: Int,
 ) -> String {
   case list_at(fixed, i) {
     Some(ast.IdentifierPattern(name:, ..)) -> {
       let b = fn_scope_binding(e, name)
-      state.slot_var_name(e, b.slot)
+      state.slot_base_name(e, b.slot)
     }
     _ -> simple_param_name(i)
   }
@@ -1402,24 +1394,22 @@ fn list_at(xs: List(a), i: Int) -> Option(a) {
   }
 }
 
-const simple_this_param = "_this"
-
 fn build_simple_ir_params(
-  e: Emitter2,
+  e: Emitter,
   fixed: List(ast.Pattern),
   i: Int,
   ncap: Int,
   arity: Int,
-  needs_this: Bool,
+  takes_this: Bool,
 ) -> List(ir.Local) {
   case i < ncap {
     True -> [
       ir.Local(state.cap_param_name(e, i), ir.TTerm),
-      ..build_simple_ir_params(e, fixed, i + 1, ncap, arity, needs_this)
+      ..build_simple_ir_params(e, fixed, i + 1, ncap, arity, takes_this)
     ]
     False -> {
       let ps = build_simple_pos_params(e, fixed, 0, arity)
-      case needs_this {
+      case takes_this {
         True -> [ir.Local(simple_this_param, ir.TTerm), ..ps]
         False -> ps
       }
@@ -1428,7 +1418,7 @@ fn build_simple_ir_params(
 }
 
 fn build_simple_pos_params(
-  e: Emitter2,
+  e: Emitter,
   fixed: List(ast.Pattern),
   i: Int,
   arity: Int,
@@ -1443,12 +1433,12 @@ fn build_simple_pos_params(
 }
 
 fn bind_simple_params(
-  e: Emitter2,
+  e: Emitter,
   fixed_all: List(ast.Pattern),
   fixed: List(ast.Pattern),
   i: Int,
-  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+  k: Next,
+) -> EmitResult {
   case fixed {
     [] -> k(e)
     [p, ..rest] -> {
@@ -1457,7 +1447,7 @@ fn bind_simple_params(
       let b = fn_scope_binding(e, name)
       let pn = simple_param_ir_name(e, fixed_all, i)
       let raw = ir.Var(pn)
-      let vn = state.slot_var_name(e, b.slot)
+      let vn = state.slot_base_name(e, b.slot)
       let next = fn(e) { bind_simple_params(e, fixed_all, rest, i + 1, k) }
       case b.is_boxed {
         False if pn == vn -> next(state.set_slot_var(e, b.slot, vn))
@@ -1466,9 +1456,9 @@ fn bind_simple_params(
           ir.Let([vn], ir.Values([raw]), body)
         }
         True -> {
-          use e, cell <- host_(e, "cell_new", [raw])
+          use e, box <- host_(e, "cell_new", [raw])
           use body <- state.map_tree(next(state.set_slot_var(e, b.slot, vn)))
-          ir.Let([vn], ir.Values([cell]), body)
+          ir.Let([vn], ir.Values([box]), body)
         }
       }
     }
@@ -1476,12 +1466,12 @@ fn bind_simple_params(
 }
 
 fn seed_simple_this(
-  e: Emitter2,
-  needs_this: Bool,
+  e: Emitter,
+  takes_this: Bool,
   info: FunctionInfo,
-  k: fn(Emitter2) -> Result(#(ir.Expr, Emitter2), EmitError),
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
-  case needs_this, info.lexical {
+  k: Next,
+) -> EmitResult {
+  case takes_this, info.lexical {
     True, lexical.OwnedLexicalSlots(base:) -> {
       let slot = base + lexical.lexical_ref_offset(lexical.RefThis)
       k(state.set_slot_var(e, slot, simple_this_param))
@@ -1491,16 +1481,16 @@ fn seed_simple_this(
 }
 
 fn emit_simple_body(
-  e: Emitter2,
+  e: Emitter,
   fixed: List(ast.Pattern),
   body: FnBody,
-  needs_this: Bool,
+  takes_this: Bool,
   info: FunctionInfo,
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+) -> EmitResult {
   let stmts = body_stmts(body)
-  let ret_undef = fn(ef: Emitter2) { Ok(#(ir.Return([ef.consts.undef]), ef)) }
-  run_rk(e, fn(e, done) {
-    use e <- seed_simple_this(e, needs_this, info)
+  let ret_undef = fn(ef: Emitter) { Ok(#(ir.Return([ef.consts.undef]), ef)) }
+  with_done(e, fn(e, done) {
+    use e <- seed_simple_this(e, takes_this, info)
     use e <- binding_prologue(e, e.fn_scope)
     use e <- bind_simple_params(e, fixed, fixed, 0)
     use e <- hoist_fn_decls(e, stmts)
@@ -1510,28 +1500,28 @@ fn emit_simple_body(
 }
 
 fn simple_shim_body(
-  e: Emitter2,
+  e: Emitter,
   target: String,
   ncap: Int,
   arity: Int,
-  needs_this: Bool,
+  takes_this: Bool,
   undef: ir.Value,
 ) -> ir.Expr {
   let caps =
     build_ir_params(e, 0, ncap)
     |> list.take(ncap)
     |> list.map(fn(l) { ir.Var(l.name) })
-  let this = case needs_this {
+  let this = case takes_this {
     True -> [ir.Var(simple_this_param)]
     False -> []
   }
   let lead = list.append(caps, this)
-  let unpack = shim_walk(target, 0, arity, undef, ir.Var("_args"), lead, [])
-  case needs_this {
+  let unpack = shim_walk(target, 0, arity, undef, ir.Var(args_param), lead, [])
+  case takes_this {
     True ->
       ir.Let(
         [simple_this_param],
-        ir.TermOp(ir.TupleGet(0), [ir.Var("_frame")]),
+        ir.TermOp(ir.TupleGet(0), [ir.Var(frame_param)]),
         unpack,
       )
     False -> unpack
@@ -1586,15 +1576,15 @@ fn shim_walk(
   }
 }
 
-fn atom_bool(rc: state.RealmConsts, b: Bool) -> ir.Value {
+fn atom_bool(rc: state.IrConsts, b: Bool) -> ir.Value {
   case b {
     True -> rc.true_
     False -> rc.false_
   }
 }
 
-fn emit_closure_site(
-  e: Emitter2,
+fn emit_closure_alloc(
+  e: Emitter,
   fn_name: String,
   sf: ShapeFlags,
   is_strict: Bool,
@@ -1602,7 +1592,7 @@ fn emit_closure_site(
   expected_length: Int,
   capture_vals: List(ir.Value),
   simple: Option(#(String, Int, Bool)),
-) -> #(ir.Expr, Emitter2) {
+) -> #(ir.Expr, Emitter) {
   let rc = e.consts
   // must match arc/rt/types.FnFlags field order
   let flags = [
@@ -1626,8 +1616,8 @@ fn emit_closure_site(
       use flags_t <- anf.then(anf.make_tuple(flags))
       use simple_v <- anf.then(case simple {
         None -> anf.pure(ir.ConstAtom("none"))
-        Some(#(sfn, arity, needs_this)) -> {
-          let cls_arity = case needs_this {
+        Some(#(sfn, arity, takes_this)) -> {
+          let cls_arity = case takes_this {
             True -> arity + 1
             False -> arity
           }
@@ -1638,7 +1628,7 @@ fn emit_closure_site(
             anf.make_tuple([
               scls,
               ir.ConstI32(arity),
-              atom_bool(rc, needs_this),
+              atom_bool(rc, takes_this),
             ]),
           )
           anf.make_tuple([ir.ConstAtom("some"), inner])
@@ -1669,20 +1659,20 @@ fn expected_length(fixed: List(ast.Pattern)) -> Int {
 }
 
 fn compile_function(
-  e: Emitter2,
+  e: Emitter,
   shape: FnShape,
   js_name: Option(String),
   params: List(ast.Pattern),
   body: FnBody,
   fn_scope_id: ScopeId,
-) -> Result(#(Compiled, Emitter2), EmitError) {
+) -> Result(#(EmittedClosure, Emitter), EmitError) {
   let sf = derive_flags(shape)
   let stmts = case body {
     StmtBody(s) -> s
     ExprBody(_) -> []
   }
   let child_strict = e.strict || ast_util.has_use_strict_directive(stmts)
-  let child_info = scope.function_info(e.tree, fn_scope_id)
+  let child_info = scope.function_info(e.scope_tree, fn_scope_id)
   // capture values read from parent before enter_function
   let capture_vals = build_capture_values(e, child_info)
   let #(fixed, _) = ast_util.split_trailing_rest(params)
@@ -1690,7 +1680,7 @@ fn compile_function(
 
   case coroutine_kind(sf) {
     Some(_) -> {
-      use #(tree, e) <- result.map(e.dispatch.emit_async_body(
+      use #(tree, e) <- result.map(e.dispatch.emit_coroutine_fn(
         e,
         shape,
         js_name,
@@ -1699,7 +1689,7 @@ fn compile_function(
         fn_scope_id,
         capture_vals,
       ))
-      #(Compiled(fn(e) { #(tree, e) }, None), e)
+      #(EmittedClosure(fn(e) { #(tree, e) }, None), e)
     }
     None -> {
       let #(fn_name, e) = state.fresh_fn_name(e, js_name)
@@ -1718,7 +1708,7 @@ fn compile_function(
         _ -> False
       }
       let e_child =
-        Emitter2(
+        Emitter(
           ..e_child,
           field_init:,
           derived_ctor:,
@@ -1757,8 +1747,8 @@ fn compile_function(
             )
           Ok(#(state.leave_function(e_child, save), None))
         }
-        Some(#(arity, needs_this)) -> {
-          let simple_fn_name = case needs_this {
+        Some(#(arity, takes_this)) -> {
+          let simple_fn_name = case takes_this {
             True -> fn_name <> "_t"
             False -> fn_name <> "_s"
           }
@@ -1766,7 +1756,7 @@ fn compile_function(
             e_child,
             fixed,
             body,
-            needs_this,
+            takes_this,
             child_info,
           ))
           let e_child =
@@ -1780,7 +1770,7 @@ fn compile_function(
                   0,
                   ncap,
                   arity,
-                  needs_this,
+                  takes_this,
                 ),
                 result: [ir.TTerm],
                 locals: [],
@@ -1800,19 +1790,19 @@ fn compile_function(
                   simple_fn_name,
                   ncap,
                   arity,
-                  needs_this,
+                  takes_this,
                   e_child.consts.undef,
                 ),
               ),
             )
           Ok(#(
             state.leave_function(e_child, save),
-            Some(#(simple_fn_name, arity, needs_this)),
+            Some(#(simple_fn_name, arity, takes_this)),
           ))
         }
       })
-      let site = fn(e) {
-        emit_closure_site(
+      let alloc = fn(e) {
+        emit_closure_alloc(
           e,
           fn_name,
           sf,
@@ -1824,41 +1814,41 @@ fn compile_function(
         )
       }
       case simple {
-        Some(#(name, arity, needs_this)) ->
+        Some(#(name, arity, takes_this)) ->
           Ok(#(
-            Compiled(
-              site,
-              Some(state.DirectFn(
+            EmittedClosure(
+              alloc,
+              Some(state.DirectCallable(
                 name:,
                 captures: capture_vals,
                 arity:,
-                needs_this:,
+                takes_this:,
                 strict: child_strict,
               )),
             ),
             e,
           ))
-        None -> Ok(#(Compiled(site, None), e))
+        None -> Ok(#(EmittedClosure(alloc, None), e))
       }
     }
   }
 }
 
-type Compiled {
-  Compiled(
-    site: fn(Emitter2) -> #(ir.Expr, Emitter2),
-    direct: Option(state.FnSite),
+type EmittedClosure {
+  EmittedClosure(
+    alloc: fn(Emitter) -> #(ir.Expr, Emitter),
+    direct_entry: Option(state.EmittedFn),
   )
 }
 
 pub fn emit_function(
-  e: Emitter2,
+  e: Emitter,
   shape: FnShape,
   js_name: Option(String),
   params: List(ast.Pattern),
   body: FnBody,
   fn_scope_id: ScopeId,
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+) -> EmitResult {
   use #(compiled, e) <- result.map(compile_function(
     e,
     shape,
@@ -1867,17 +1857,17 @@ pub fn emit_function(
     body,
     fn_scope_id,
   ))
-  compiled.site(e)
+  compiled.alloc(e)
 }
 
-pub fn emit_function_site(
-  e: Emitter2,
+pub fn emit_function_callable(
+  e: Emitter,
   shape: FnShape,
   js_name: Option(String),
   params: List(ast.Pattern),
   body: FnBody,
   fn_scope_id: ScopeId,
-) -> Result(#(state.FnSite, Emitter2), EmitError) {
+) -> Result(#(state.EmittedFn, Emitter), EmitError) {
   use #(compiled, e) <- result.map(compile_function(
     e,
     shape,
@@ -1886,11 +1876,11 @@ pub fn emit_function_site(
     body,
     fn_scope_id,
   ))
-  case compiled.direct {
+  case compiled.direct_entry {
     Some(direct) -> #(direct, e)
     None -> {
-      let #(tree, e) = compiled.site(e)
-      #(state.ClosureSite(tree), e)
+      let #(tree, e) = compiled.alloc(e)
+      #(state.ClosureExpr(tree), e)
     }
   }
 }

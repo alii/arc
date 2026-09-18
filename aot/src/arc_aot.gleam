@@ -155,7 +155,7 @@ fn run_file(path: String, hooks: HostHooks) -> Result(Nil, CliError) {
     |> result.map_error(fn(err) { CompileFailed(path:, error: err) }),
   )
   use module <- result.try(run.load(beam, name) |> result.map_error(LoadFailed))
-  let #(outcome, st) = run.apply_main(module, run.seed(hooks))
+  let #(outcome, st) = run.apply_main(module, run.new_linked_agent(hooks))
   run.unload(module)
   case outcome {
     run.JsReturned(_) -> Ok(Nil)

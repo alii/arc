@@ -92,7 +92,7 @@ fn do_err_read() -> BitArray
 pub fn env_is_truthy(name: String) -> Bool
 
 pub fn seed() -> Agent {
-  run.seed(test_hooks())
+  run.new_linked_agent(test_hooks())
 }
 
 pub fn run_loaded(module: Atom, st: Agent) -> #(Agent, DiffRun) {
