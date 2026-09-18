@@ -6,7 +6,6 @@
 -include("../arc_rt_layout.hrl").
 
 -define(DIGIT(C), (C >= $0 andalso C =< $9)).
--define(MAX_ARRAY_INDEX, 4294967294).
 
 %% §10.1.11 order over a props map: indices ascending, names by seq
 plain_keys(Props) ->
@@ -17,7 +16,7 @@ plain_keys(Props) ->
         _ -> [{?KEY_INDEX, I} || I <- lists:sort(Idx)] ++ NamedKeys
     end.
 
-%% enumerable and seq sit at the same positions in both property shapes
+%% enumerable and seq sit at the same positions in both property records
 plain_key(_, Prop, Acc) when element(?DATAPROP_ENUMERABLE, Prop) =:= false ->
     Acc;
 plain_key({?KEY_INDEX, I}, _, {Idx, Named}) ->
@@ -76,7 +75,7 @@ hexc(N) -> $a + N - 10.
 plain_props(Entries, Seq) -> plain_props(Entries, Seq, []).
 
 plain_props([{Name, V} | Rest], Seq, Acc) ->
-    Prop = {?DATAPROP_TAG, V, true, true, true, Seq},
+    Prop = ?PLAIN_PROPERTY(V, Seq),
     plain_props(Rest, Seq + 1, [{key(Name), Prop} | Acc]);
 plain_props([], Seq, Acc) ->
     Map = maps:from_list(Acc),
@@ -390,7 +389,7 @@ enc({?HANDLE_TAG, Id}, {Data, OP, AP, _} = Cx, Ind, Seen) ->
         {?SSHAPED_TAG, _, Proto, Slots, Offs}
           when (Proto =:= {?SOME, {?HANDLE_TAG, OP}} orelse Proto =:= ?NONE),
                not is_map_key(<<"toJSON">>, Offs) ->
-            Pairs = [{KB, element(Off + 1, Slots)}
+            Pairs = [{KB, ?SLOT_AT(Slots, Off)}
                      || {KB, Off} <- lists:keysort(2, maps:to_list(Offs))],
             enc_object(Pairs, Cx, Ind, [Id | Seen]);
         {?SOBJECT_TAG, ?ORDINARY, Proto, Props, _, ?ELEMS_NONE, _}
@@ -403,7 +402,7 @@ enc({?HANDLE_TAG, Id}, {Data, OP, AP, _} = Cx, Ind, Seen) ->
         {?SOBJECT_TAG, Kind, _, _, _, _, _} when element(1, Kind) =:= ?KBYTECODE_TAG;
                                                  element(1, Kind) =:= ?KNATIVE_TAG;
                                                  element(1, Kind) =:= ?KFN_TAG;
-                                                 element(1, Kind) =:= k_bound ->
+                                                 element(1, Kind) =:= ?BOUNDFN_TAG ->
             skip;
         _ -> throw(json_miss)
     end;

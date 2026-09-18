@@ -9,152 +9,150 @@
 -include("arc_rt_layout.hrl").
 
 %% deltablue proto chains reach 3 hops
--define(MONO_PROTO_MAX, 4).
+-define(WALK_MAX_HOPS, 4).
+-define(IC_CALL_WAYS, 16).
 
--define(KFN_PLAIN(Flags),
-        (element(?FNFLAGS_IS_CLASS_CTOR, Flags) =:= false andalso
-         element(?FNFLAGS_IS_GEN, Flags) =:= false andalso
-         element(?FNFLAGS_IS_ASYNC, Flags) =:= false)).
-
+%% args travel as a count n with a, b, c, or as a list in place of n
 t_call_fast(St, F, This, Args) ->
-    call_fast(St, F, This, Args, undefined, undefined, undefined).
+    dispatch_kind(St, F, This, Args, undefined, undefined, undefined).
 
 t_call_fast0(St, F, This) ->
-    call_fast(St, F, This, 0, undefined, undefined, undefined).
+    dispatch_kind(St, F, This, 0, undefined, undefined, undefined).
 t_call_fast1(St, F, This, A) ->
-    call_fast(St, F, This, 1, A, undefined, undefined).
+    dispatch_kind(St, F, This, 1, A, undefined, undefined).
 t_call_fast2(St, F, This, A, B) ->
-    call_fast(St, F, This, 2, A, B, undefined).
+    dispatch_kind(St, F, This, 2, A, B, undefined).
 t_call_fast3(St, F, This, A, B, C) ->
-    call_fast(St, F, This, 3, A, B, C).
+    dispatch_kind(St, F, This, 3, A, B, C).
 
-call_fast(St, F = {?HANDLE_TAG, Id}, This, N, A, B, C) ->
+dispatch_kind(St, F = {?HANDLE_TAG, Id}, This, N, A, B, C) ->
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, element(?AGENT_STORE, St))) of
-        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case element(?SOBJECT_KIND, Slot) of
-                {?KFN_TAG, Code, Home, Flags, _, Simple, _, _, _}
-                  when ?KFN_PLAIN(Flags) ->
+        Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
+            case element(?SOBJECT_KIND, Cell) of
+                ?KFN(Code, Home, Flags, _, Simple) when ?IS_PLAIN_FN(Flags) ->
                     case element(?FNFLAGS_IS_ARROW, Flags)
                          orelse element(?FNFLAGS_IS_STRICT, Flags) of
                         true ->
-                            apply_fast(St, F, Code, Home, Simple, This, N, A,
-                                       B, C);
+                            enter_compiled(St, F, Code, Home, Simple, This, N,
+                                           A, B, C);
                         false when This =:= undefined; This =:= null ->
                             G = element(?REALM_GLOBAL, element(?AGENT_REALM, St)),
-                            apply_fast(St, F, Code, Home, Simple, G, N, A, B,
-                                       C);
+                            enter_compiled(St, F, Code, Home, Simple, G, N, A,
+                                           B, C);
                         false when element(1, This) =:= ?HANDLE_TAG ->
-                            apply_fast(St, F, Code, Home, Simple, This, N, A,
-                                       B, C);
-                        false -> call_slow(St, F, This, N, A, B, C)
+                            enter_compiled(St, F, Code, Home, Simple, This, N,
+                                           A, B, C);
+                        false -> call_general(St, F, This, N, A, B, C)
                     end;
-                _ -> call_slow(St, F, This, N, A, B, C)
+                _ -> call_general(St, F, This, N, A, B, C)
             end;
-        _ -> call_slow(St, F, This, N, A, B, C)
+        _ -> call_general(St, F, This, N, A, B, C)
     end;
-call_fast(St, F, This, N, A, B, C) -> call_slow(St, F, This, N, A, B, C).
+dispatch_kind(St, F, This, N, A, B, C) -> call_general(St, F, This, N, A, B, C).
 
-call_slow(St, F, This, N, A, B, C) ->
-    arc@rt@call:t_call_checked(St, F, This, args(N, A, B, C)).
+call_general(St, F, This, N, A, B, C) ->
+    'arc@rt@call':t_call_checked(St, F, This, arg_list(N, A, B, C)).
 
-apply_fast(St, _, _, _, {?SOME, {CodeS, Arity, NeedsThis}}, ThisR, Args, _, _,
-           _)
+enter_compiled(St, _, _, _, {?SOME, ?DIRECT_ENTRY(CodeS, Arity, TakesThis)},
+               ThisR, Args, _, _, _)
   when is_list(Args), length(Args) =:= Arity ->
-    case NeedsThis of
+    case TakesThis of
         true -> apply_this(CodeS, St, ThisR, Args);
         false -> erlang:apply(CodeS, [St | Args])
     end;
-apply_fast(St, _, _, _, {?SOME, {CodeS, N, true}}, ThisR, N, A, B, C) ->
+enter_compiled(St, _, _, _, {?SOME, ?DIRECT_ENTRY(CodeS, N, true)}, ThisR, N,
+               A, B, C) ->
     case N of
         0 -> CodeS(St, ThisR);
         1 -> CodeS(St, ThisR, A);
         2 -> CodeS(St, ThisR, A, B);
         3 -> CodeS(St, ThisR, A, B, C)
     end;
-apply_fast(St, _, _, _, {?SOME, {CodeS, N, false}}, _, N, A, B, C) ->
+enter_compiled(St, _, _, _, {?SOME, ?DIRECT_ENTRY(CodeS, N, false)}, _, N, A,
+               B, C) ->
     case N of
         0 -> CodeS(St);
         1 -> CodeS(St, A);
         2 -> CodeS(St, A, B);
         3 -> CodeS(St, A, B, C)
     end;
-apply_fast(St, F, Code, Home, _, ThisR, N, A, B, C) ->
-    Code(St, {ThisR, F, home(Home), undefined}, args(N, A, B, C)).
+enter_compiled(St, F, Code, Home, _, ThisR, N, A, B, C) ->
+    Code(St, ?FRAME(ThisR, F, home_or_undefined(Home), undefined),
+         arg_list(N, A, B, C)).
 
-home({?SOME, H}) -> H;
-home(?NONE) -> undefined.
-
--define(IC_CALL, ic_call).
--define(IC_CALL_WAYS, 16).
+home_or_undefined({?SOME, H}) -> H;
+home_or_undefined(?NONE) -> undefined.
 
 t_call_method_ic(St, Recv, KeyBin, Args, Site, RSite) ->
-    ic(St, Recv, KeyBin, Site, RSite, Args, undefined, undefined, undefined).
+    call_via_ic(St, Recv, KeyBin, Site, RSite, Args, undefined, undefined,
+                undefined).
 
 t_call_method_ic0(St, Recv, KeyBin, Site, RSite) ->
-    ic(St, Recv, KeyBin, Site, RSite, 0, undefined, undefined, undefined).
+    call_via_ic(St, Recv, KeyBin, Site, RSite, 0, undefined, undefined,
+                undefined).
 t_call_method_ic1(St, Recv, KeyBin, Site, RSite, A) ->
-    ic(St, Recv, KeyBin, Site, RSite, 1, A, undefined, undefined).
+    call_via_ic(St, Recv, KeyBin, Site, RSite, 1, A, undefined, undefined).
 t_call_method_ic2(St, Recv, KeyBin, Site, RSite, A, B) ->
-    ic(St, Recv, KeyBin, Site, RSite, 2, A, B, undefined).
+    call_via_ic(St, Recv, KeyBin, Site, RSite, 2, A, B, undefined).
 t_call_method_ic3(St, Recv, KeyBin, Site, RSite, A, B, C) ->
-    ic(St, Recv, KeyBin, Site, RSite, 3, A, B, C).
+    call_via_ic(St, Recv, KeyBin, Site, RSite, 3, A, B, C).
 
-ic(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Site, RSite, N, A, B, C) ->
+call_via_ic(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Site, RSite, N, A, B, C) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
-    RSlot = arc_rt_arena_ffi:get(RId, Data),
+    RCell = arc_rt_arena_ffi:get(RId, Data),
     case element(?STORE_ICS, Store) of
         #{Site := {?IC_CALL, KeyBin, _, Shaped}}
-          when element(1, RSlot) =:= ?SSHAPED_TAG ->
+          when element(1, RCell) =:= ?SSHAPED_TAG ->
             %% shaped ways nest sid then proto id, no tuple key to build
             case Shaped of
-                #{element(?SSHAPED_SID, RSlot) := Protos} ->
-                    case element(?SSHAPED_PROTO, RSlot) of
+                #{element(?SSHAPED_SID, RCell) := Protos} ->
+                    case element(?SSHAPED_PROTO, RCell) of
                         {?SOME, {?HANDLE_TAG, PId}} = Proto ->
                             case Protos of
                                 #{PId := {Chain, Fn, Kind}} ->
                                     case ic_chain_ok(Data, Proto, Chain) of
                                         true ->
-                                            apply_kind(St, Kind, Fn, Recv, N,
-                                                       A, B, C);
+                                            call_kind(St, Kind, Fn, Recv, N,
+                                                      A, B, C);
                                         false ->
-                                            ic_miss(St, Recv, RSlot, KeyBin,
+                                            ic_miss(St, Recv, RCell, KeyBin,
                                                     Site, RSite, N, A, B, C)
                                     end;
                                 _ ->
-                                    ic_miss(St, Recv, RSlot, KeyBin,
+                                    ic_miss(St, Recv, RCell, KeyBin,
                                             ways_room(Protos, Site), RSite,
                                             N, A, B, C)
                             end;
                         _ ->
-                            ic_miss(St, Recv, RSlot, KeyBin, none, RSite, N,
+                            ic_miss(St, Recv, RCell, KeyBin, none, RSite, N,
                                     A, B, C)
                     end;
                 _ ->
-                    ic_miss(St, Recv, RSlot, KeyBin, ways_room(Shaped, Site),
+                    ic_miss(St, Recv, RCell, KeyBin, ways_room(Shaped, Site),
                             RSite, N, A, B, C)
             end;
         #{Site := {?IC_CALL, KeyBin, Ways, _}} ->
-            Fill = case ic_probe(Data, RId, RSlot, KeyBin, Ways) of
+            Probe = case ic_probe(Data, RId, RCell, KeyBin, Ways) of
                 {hit, _, _} = Hit -> Hit;
                 stale -> Site;
                 spent -> none;
                 miss -> ways_room(Ways, Site)
             end,
-            case Fill of
+            case Probe of
                 {hit, Fn1, Kind1} ->
-                    apply_kind(St, Kind1, Fn1, Recv, N, A, B, C);
+                    call_kind(St, Kind1, Fn1, Recv, N, A, B, C);
                 _ ->
-                    ic_miss(St, Recv, RSlot, KeyBin, Fill, RSite, N, A, B, C)
+                    ic_miss(St, Recv, RCell, KeyBin, Probe, RSite, N, A, B, C)
             end;
         #{Site := _} ->
-            ic_miss(St, Recv, RSlot, KeyBin, none, RSite, N, A, B, C);
-        _ -> ic_miss(St, Recv, RSlot, KeyBin, Site, RSite, N, A, B, C)
+            ic_miss(St, Recv, RCell, KeyBin, none, RSite, N, A, B, C);
+        _ -> ic_miss(St, Recv, RCell, KeyBin, Site, RSite, N, A, B, C)
     end;
-ic(St, Recv, KeyBin, Site, RSite, N, A, B, C) ->
+call_via_ic(St, Recv, KeyBin, Site, RSite, N, A, B, C) ->
     case prim_wrapper(Recv, KeyBin) of
-        none -> slow({miss, St}, Recv, KeyBin, RSite, N, A, B, C);
-        W -> prim(St, Recv, W, KeyBin, Site, RSite, N, A, B, C)
+        none -> after_lookup({miss, St}, Recv, KeyBin, RSite, N, A, B, C);
+        W -> call_on_primitive(St, Recv, W, KeyBin, Site, RSite, N, A, B, C)
     end.
 
 prim_wrapper(Recv, KeyBin) when ?IS_STR(Recv), KeyBin =/= <<"length">> ->
@@ -162,12 +160,12 @@ prim_wrapper(Recv, KeyBin) when ?IS_STR(Recv), KeyBin =/= <<"length">> ->
 prim_wrapper(Recv, _) when is_number(Recv) -> ?REALM_NUMBER;
 prim_wrapper(_, _) -> none.
 
-prim(St, Recv, W, KeyBin, Site, RSite, N, A, B, C) ->
+call_on_primitive(St, Recv, W, KeyBin, Site, RSite, N, A, B, C) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     Proto = {?SOME, {?HANDLE_TAG, PId}} =
         {?SOME, element(?PAIR_PROTO, element(W, element(?AGENT_REALM, St)))},
-    Fill = case element(?STORE_ICS, Store) of
+    Probe = case element(?STORE_ICS, Store) of
         #{Site := {?IC_CALL, KeyBin, Ways, _}} ->
             case Ways of
                 #{{ic_prim, W, PId} := {Chain, Fn0, Kind0}} ->
@@ -181,74 +179,79 @@ prim(St, Recv, W, KeyBin, Site, RSite, N, A, B, C) ->
         #{Site := _} -> none;
         _ -> Site
     end,
-    case Fill of
-        {hit, Fn, Kind} -> apply_kind(St, Kind, Fn, Recv, N, A, B, C);
-        none -> slow({miss, St}, Recv, KeyBin, RSite, N, A, B, C);
+    case Probe of
+        {hit, Fn, Kind} -> call_kind(St, Kind, Fn, Recv, N, A, B, C);
+        none -> after_lookup({miss, St}, Recv, KeyBin, RSite, N, A, B, C);
         _ ->
-            slow(mono_proto_walk(St, Data, PId, KeyBin, Recv,
-                                 args(N, A, B, C), ?MONO_PROTO_MAX,
-                                 {Fill, {ic_prim, W}, []}),
-                 Recv, KeyBin, RSite, N, A, B, C)
+            after_lookup(walk_chain(St, Data, PId, KeyBin, Recv,
+                                    arg_list(N, A, B, C), ?WALK_MAX_HOPS,
+                                    {Probe, {ic_prim, W}, []}),
+                         Recv, KeyBin, RSite, N, A, B, C)
     end.
 
 ways_room(Ways, Site) when map_size(Ways) < ?IC_CALL_WAYS -> Site;
 ways_room(_, _) -> none.
 
-ic_miss(St, Recv, RSlot, KeyBin, Fill, RSite, N, A, B, C) ->
-    slow(mono(St, Recv, RSlot, KeyBin, args(N, A, B, C), Fill), Recv, KeyBin,
-         RSite, N, A, B, C).
+%% fill site: the site to refill after the walk, or none when the ways are full
+ic_miss(St, Recv, RCell, KeyBin, FillSite, RSite, N, A, B, C) ->
+    after_lookup(call_via_walk(St, Recv, RCell, KeyBin, arg_list(N, A, B, C),
+                               FillSite),
+                 Recv, KeyBin, RSite, N, A, B, C).
 
-slow({miss, St}, Recv, KeyBin, RSite, N, A, B, C) ->
+after_lookup({miss, St}, Recv, KeyBin, RSite, N, A, B, C) ->
     {F, St1} = arc_rt_obj_ffi:t_get_prop_site(St, Recv, KeyBin, RSite),
-    call_fast(St1, F, Recv, N, A, B, C);
-slow(Hit, _, _, _, _, _, _, _) -> Hit.
+    dispatch_kind(St1, F, Recv, N, A, B, C);
+after_lookup(Hit, _, _, _, _, _, _, _) -> Hit.
 
-args(L, _, _, _) when is_list(L) -> L;
-args(0, _, _, _) -> [];
-args(1, A, _, _) -> [A];
-args(2, A, B, _) -> [A, B];
-args(3, A, B, C) -> [A, B, C].
+arg_list(L, _, _, _) when is_list(L) -> L;
+arg_list(0, _, _, _) -> [];
+arg_list(1, A, _, _) -> [A];
+arg_list(2, A, B, _) -> [A, B];
+arg_list(3, A, B, C) -> [A, B, C].
 
-apply_kind(St, Kind, Fn, Recv, Args, _, _, _) when is_list(Args) ->
-    kind_apply(St, Kind, Fn, Recv, Args);
-apply_kind(St, {?KFN_TAG, Code, Home, _, _, Simple, _, _, _}, Fn, Recv, N, A,
-           B, C) ->
+call_kind(St, Kind, Fn, Recv, Args, _, _, _) when is_list(Args) ->
+    call_kind_list(St, Kind, Fn, Recv, Args);
+call_kind(St, ?KFN(Code, Home, _, _, Simple), Fn, Recv, N, A, B, C) ->
     case Simple of
-        {?SOME, {CodeT, N, true}} ->
+        {?SOME, ?DIRECT_ENTRY(CodeT, N, true)} ->
             case N of
                 0 -> CodeT(St, Recv);
                 1 -> CodeT(St, Recv, A);
                 2 -> CodeT(St, Recv, A, B);
                 3 -> CodeT(St, Recv, A, B, C)
             end;
-        {?SOME, {CodeS, N, false}} ->
+        {?SOME, ?DIRECT_ENTRY(CodeS, N, false)} ->
             case N of
                 0 -> CodeS(St);
                 1 -> CodeS(St, A);
                 2 -> CodeS(St, A, B);
                 3 -> CodeS(St, A, B, C)
             end;
-        _ -> Code(St, {Recv, Fn, home(Home), undefined}, args(N, A, B, C))
+        _ ->
+            Code(St, ?FRAME(Recv, Fn, home_or_undefined(Home), undefined),
+                 arg_list(N, A, B, C))
     end;
-apply_kind(St, {?KNATIVE_TAG, Tag, _, _, _}, _, Recv, N, A, B, C) ->
-    arc@rt@builtins:dispatch_native(St, Tag, Recv, args(N, A, B, C)).
+call_kind(St, {?KNATIVE_TAG, Tag, _, _, _}, _, Recv, N, A, B, C) ->
+    'arc@rt@builtins':dispatch_native(St, Tag, Recv, arg_list(N, A, B, C)).
 
-ic_probe(Data, RId, RSlot, KeyBin, Ways) when element(1, RSlot) =:= ?SOBJECT_TAG ->
+%% {hit, Fn, Kind} | miss | stale when a cached chain changed | spent when
+%% the own way no longer matches the receiver
+ic_probe(Data, RId, RCell, KeyBin, Ways) when element(1, RCell) =:= ?SOBJECT_TAG ->
     case Ways of
-        #{{ic_own, RId} := {[{_, Slot}], Fn, Kind}} ->
-            case Slot =:= RSlot of
+        #{{ic_own, RId} := {[{_, Cell}], Fn, Kind}} ->
+            case Cell =:= RCell of
                 true -> {hit, Fn, Kind};
                 false -> spent
             end;
         _ ->
-            case element(?SOBJECT_PROTO, RSlot) of
+            case element(?SOBJECT_PROTO, RCell) of
                 {?SOME, {?HANDLE_TAG, PId}} = Proto ->
                     case Ways of
                         #{{ic_plain, PId} := {Chain, Fn, Kind}} ->
                             Own = is_map_key({?KEY_NAMED, KeyBin},
-                                             element(?SOBJECT_PROPS, RSlot))
+                                             element(?SOBJECT_PROPS, RCell))
                                 orelse not arc_rt_obj_ffi:named_plain(
-                                             element(?SOBJECT_KIND, RSlot),
+                                             element(?SOBJECT_KIND, RCell),
                                              KeyBin),
                             case Own of
                                 true -> miss;
@@ -266,9 +269,9 @@ ic_probe(Data, RId, RSlot, KeyBin, Ways) when element(1, RSlot) =:= ?SOBJECT_TAG
 ic_probe(_, _, _, _, _) -> miss.
 
 ic_chain_ok(_, _, []) -> true;
-ic_chain_ok(Data, {?SOME, {?HANDLE_TAG, PId}}, [{PId, PSlot} | Rest]) ->
+ic_chain_ok(Data, {?SOME, {?HANDLE_TAG, PId}}, [{PId, PCell} | Rest]) ->
     case arc_rt_arena_ffi:get(PId, Data) of
-        PSlot -> ic_chain_ok(Data, element(?SOBJECT_PROTO, PSlot), Rest);
+        PCell -> ic_chain_ok(Data, element(?CELL_PROTO, PCell), Rest);
         _ -> false
     end;
 ic_chain_ok(_, _, _) -> false.
@@ -276,88 +279,89 @@ ic_chain_ok(_, _, _) -> false.
 %% st unchanged on miss; emitter guards V =:= miss, not is_atom
 t_call_method_mono(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Args) ->
     Data = element(?STORE_DATA, element(?AGENT_STORE, St)),
-    mono(St, Recv, arc_rt_arena_ffi:get(RId, Data), KeyBin, Args, none);
+    call_via_walk(St, Recv, arc_rt_arena_ffi:get(RId, Data), KeyBin, Args, none);
 t_call_method_mono(St, _, _, _) -> {miss, St}.
 
-mono(St, Recv = {?HANDLE_TAG, RId}, RSlot, KeyBin, Args, Site)
-  when is_tuple(RSlot) ->
+%% resolves keybin along a plain chain, filling site when one is given
+call_via_walk(St, Recv = {?HANDLE_TAG, RId}, RCell, KeyBin, Args, Site)
+  when is_tuple(RCell) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
-    {Own, Ic} = case element(1, RSlot) of
+    {Own, Ic} = case element(1, RCell) of
         ?SOBJECT_TAG when Site =:= none ->
-            {mono_own_value(RSlot, KeyBin), none};
+            {own_named(RCell, KeyBin), none};
         ?SOBJECT_TAG ->
-            case arc_rt_obj_ffi:named_plain(element(?SOBJECT_KIND, RSlot),
+            case arc_rt_obj_ffi:named_plain(element(?SOBJECT_KIND, RCell),
                                             KeyBin) of
-                true -> {mono_own_value(RSlot, KeyBin), {Site, ic_plain, []}};
-                false -> {mono_own_value(RSlot, KeyBin), none}
+                true -> {own_named(RCell, KeyBin), {Site, ic_plain, []}};
+                false -> {own_named(RCell, KeyBin), none}
             end;
         ?SSHAPED_TAG when Site =:= none ->
-            {mono_shaped_own(RSlot, KeyBin), none};
+            {own_shaped(RCell, KeyBin), none};
         ?SSHAPED_TAG ->
-            {mono_shaped_own(RSlot, KeyBin),
-             {Site, {ic_shaped, element(?SSHAPED_SID, RSlot)}, []}};
+            {own_shaped(RCell, KeyBin),
+             {Site, {ic_shaped, element(?SSHAPED_SID, RCell)}, []}};
         _ -> {miss, none}
     end,
     case Own of
         absent ->
-            %% proto is element 3 for both s_object and s_shaped_object
-            mono_proto(St, Data, element(?SOBJECT_PROTO, RSlot), KeyBin,
-                       Recv, Args, Ic);
+            walk_proto(St, Data, element(?CELL_PROTO, RCell), KeyBin, Recv,
+                       Args, Ic);
         miss -> {miss, St};
-        V when Ic =/= none, element(1, RSlot) =:= ?SOBJECT_TAG ->
-            mono_found(St, Data, V, KeyBin, Recv, Args,
-                       {Site, {ic_own, RId, RSlot}, []});
-        V -> mono_apply(St, Data, V, Recv, Args)
+        V when Ic =/= none, element(1, RCell) =:= ?SOBJECT_TAG ->
+            call_found_fill(St, Data, V, KeyBin, Recv, Args,
+                            {Site, {ic_own, RId, RCell}, []});
+        V -> call_found(St, Data, V, Recv, Args)
     end;
-mono(St, _, _, _, _, _) -> {miss, St}.
+call_via_walk(St, _, _, _, _, _) -> {miss, St}.
 
-mono_proto(St, Data, {?SOME, {?HANDLE_TAG, PId}}, KeyBin, Recv, Args, Ic) ->
-    mono_proto_walk(St, Data, PId, KeyBin, Recv, Args, ?MONO_PROTO_MAX, Ic);
-mono_proto(St, _, _, _, _, _, _) -> {miss, St}.
+walk_proto(St, Data, {?SOME, {?HANDLE_TAG, PId}}, KeyBin, Recv, Args, Ic) ->
+    walk_chain(St, Data, PId, KeyBin, Recv, Args, ?WALK_MAX_HOPS, Ic);
+walk_proto(St, _, _, _, _, _, _) -> {miss, St}.
 
-mono_proto_walk(St, _, _, _, _, _, 0, _) -> {miss, St};
-mono_proto_walk(St, Data, Id, KeyBin, Recv, Args, Fuel, Ic) ->
+walk_chain(St, _, _, _, _, _, 0, _) -> {miss, St};
+walk_chain(St, Data, Id, KeyBin, Recv, Args, Fuel, Ic) ->
     case arc_rt_arena_ffi:get(Id, Data) of
-        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            mono_hop(St, Data, Id, Slot, mono_own_value(Slot, KeyBin),
-                     KeyBin, Recv, Args, Fuel, Ic);
-        Slot when element(1, Slot) =:= ?SSHAPED_TAG ->
-            Own = mono_shaped_own(Slot, KeyBin),
-            mono_hop(St, Data, Id, Slot, Own, KeyBin, Recv, Args, Fuel, Ic);
+        Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
+            walk_hop(St, Data, Id, Cell, own_named(Cell, KeyBin), KeyBin,
+                     Recv, Args, Fuel, Ic);
+        Cell when element(1, Cell) =:= ?SSHAPED_TAG ->
+            walk_hop(St, Data, Id, Cell, own_shaped(Cell, KeyBin), KeyBin,
+                     Recv, Args, Fuel, Ic);
         _ -> {miss, St}
     end.
 
-mono_hop(St, Data, Id, Slot, absent, KeyBin, Recv, Args, Fuel, Ic) ->
-    case element(?SOBJECT_PROTO, Slot) of
+walk_hop(St, Data, Id, Cell, absent, KeyBin, Recv, Args, Fuel, Ic) ->
+    case element(?CELL_PROTO, Cell) of
         {?SOME, {?HANDLE_TAG, NId}} ->
-            mono_proto_walk(St, Data, NId, KeyBin, Recv, Args, Fuel - 1,
-                            ic_hop(Ic, Id, Slot));
+            walk_chain(St, Data, NId, KeyBin, Recv, Args, Fuel - 1,
+                       ic_hop(Ic, Id, Cell));
         _ -> {miss, St}
     end;
-mono_hop(St, Data, Id, Slot, V, KeyBin, Recv, Args, _, Ic) when Ic =/= none ->
-    mono_found(St, Data, V, KeyBin, Recv, Args, ic_hop(Ic, Id, Slot));
-mono_hop(St, Data, _, _, V, _, Recv, Args, _, _) ->
-    mono_apply(St, Data, V, Recv, Args).
+walk_hop(St, Data, Id, Cell, V, KeyBin, Recv, Args, _, Ic) when Ic =/= none ->
+    call_found_fill(St, Data, V, KeyBin, Recv, Args, ic_hop(Ic, Id, Cell));
+walk_hop(St, Data, _, _, V, _, Recv, Args, _, _) ->
+    call_found(St, Data, V, Recv, Args).
 
-mono_found(St, Data, Fn = {?HANDLE_TAG, _}, KeyBin, Recv, Args, Ic) ->
-    case mono_kind(Data, Fn) of
+call_found_fill(St, Data, Fn = {?HANDLE_TAG, _}, KeyBin, Recv, Args, Ic) ->
+    case plain_callee_kind(Data, Fn) of
         miss -> {miss, St};
-        {?KFN_TAG, _, _, Flags, _, _, _, _, _}
+        ?KFN(_, _, Flags, _, _)
           when not is_tuple(Recv),
                element(?FNFLAGS_IS_STRICT, Flags) =/= true ->
             {miss, St};
         Kind ->
-            kind_apply(ic_fill(St, Ic, Fn, Kind, KeyBin), Kind, Fn, Recv, Args)
+            call_kind_list(ic_fill(St, Ic, Fn, Kind, KeyBin), Kind, Fn, Recv,
+                           Args)
     end;
-mono_found(St, _, _, _, _, _, _) -> {miss, St}.
+call_found_fill(St, _, _, _, _, _, _) -> {miss, St}.
 
 ic_hop(none, _, _) -> none;
-ic_hop({Site, Match, Chain}, Id, Slot) -> {Site, Match, [{Id, Slot} | Chain]}.
+ic_hop({Site, Match, Chain}, Id, Cell) -> {Site, Match, [{Id, Cell} | Chain]}.
 
 ic_fill(St, {Site, Match0, RevChain}, Fn, Kind, KeyBin)
-  when tuple_size(St) =:= ?AGENT_ARITY,
-       tuple_size(element(?AGENT_STORE, St)) =:= ?STORE_ARITY ->
+  when tuple_size(St) =:= ?AGENT_SIZE,
+       tuple_size(element(?AGENT_STORE, St)) =:= ?STORE_SIZE ->
     Store = element(?AGENT_STORE, St),
     Ics = element(?STORE_ICS, Store),
     Chain = lists:reverse(RevChain),
@@ -379,9 +383,9 @@ ic_fill(St, {Site, Match0, RevChain}, Fn, Kind, KeyBin)
             end;
         {ic_plain, [{PId, _} | _]} ->
             ways_put(KeyBin, Ways, Shaped, {ic_plain, PId}, Way);
-        {{ic_own, RId, RSlot}, []} ->
+        {{ic_own, RId, RCell}, []} ->
             ways_put(KeyBin, Ways, Shaped, {ic_own, RId},
-                     {[{RId, RSlot}], Fn, Kind});
+                     {[{RId, RCell}], Fn, Kind});
         {{ic_prim, W}, [{PId, _} | _]} ->
             ways_put(KeyBin, Ways, Shaped, {ic_prim, W, PId}, Way)
     end,
@@ -399,8 +403,8 @@ ways_put(KeyBin, Ways, Shaped, Match, Way) ->
     end.
 
 %% an own accessor shadows proto, so miss rather than absent
-mono_own_value(Slot, KeyBin) ->
-    case element(?SOBJECT_PROPS, Slot) of
+own_named(Cell, KeyBin) ->
+    case element(?SOBJECT_PROPS, Cell) of
         #{{?KEY_NAMED, KeyBin} := Prop}
           when element(1, Prop) =:= ?DATAPROP_TAG ->
             element(?DATAPROP_VALUE, Prop);
@@ -408,42 +412,40 @@ mono_own_value(Slot, KeyBin) ->
         _ -> absent
     end.
 
-mono_shaped_own(RSlot, KeyBin) ->
-    case element(?SSHAPED_OFFSETS, RSlot) of
-        #{KeyBin := Off} -> element(Off + 1, element(?SSHAPED_SLOTS, RSlot));
+own_shaped(RCell, KeyBin) ->
+    case element(?SSHAPED_OFFSETS, RCell) of
+        #{KeyBin := Off} -> ?SLOT_AT(element(?SSHAPED_SLOTS, RCell), Off);
         _ -> absent
     end.
 
-mono_apply(St, Data, Fn = {?HANDLE_TAG, _}, Recv, Args) ->
-    case mono_kind(Data, Fn) of
+call_found(St, Data, Fn = {?HANDLE_TAG, _}, Recv, Args) ->
+    case plain_callee_kind(Data, Fn) of
         miss -> {miss, St};
-        Kind -> kind_apply(St, Kind, Fn, Recv, Args)
+        Kind -> call_kind_list(St, Kind, Fn, Recv, Args)
     end;
-mono_apply(St, _, _, _, _) -> {miss, St}.
+call_found(St, _, _, _, _) -> {miss, St}.
 
-mono_kind(Data, {?HANDLE_TAG, FnId}) ->
+plain_callee_kind(Data, {?HANDLE_TAG, FnId}) ->
     case arc_rt_arena_ffi:get(FnId, Data) of
-        FSlot when element(1, FSlot) =:= ?SOBJECT_TAG ->
-            case element(?SOBJECT_KIND, FSlot) of
-                Kind = {?KFN_TAG, _, _, Flags, _, _, _, _, _}
-                  when ?KFN_PLAIN(Flags) ->
-                    Kind;
+        FCell when element(1, FCell) =:= ?SOBJECT_TAG ->
+            case element(?SOBJECT_KIND, FCell) of
+                Kind = ?KFN(_, _, Flags, _, _) when ?IS_PLAIN_FN(Flags) -> Kind;
                 Kind when element(1, Kind) =:= ?KNATIVE_TAG -> Kind;
                 _ -> miss
             end;
         _ -> miss
     end.
 
-kind_apply(St, {?KFN_TAG, Code, Home, _, _, Simple, _, _, _}, Fn, Recv, Args) ->
+call_kind_list(St, ?KFN(Code, Home, _, _, Simple), Fn, Recv, Args) ->
     case Simple of
-        {?SOME, {CodeT, Arity, true}} when length(Args) =:= Arity ->
+        {?SOME, ?DIRECT_ENTRY(CodeT, Arity, true)} when length(Args) =:= Arity ->
             apply_this(CodeT, St, Recv, Args);
-        {?SOME, {CodeS, Arity, false}} when length(Args) =:= Arity ->
+        {?SOME, ?DIRECT_ENTRY(CodeS, Arity, false)} when length(Args) =:= Arity ->
             erlang:apply(CodeS, [St | Args]);
-        _ -> Code(St, {Recv, Fn, home(Home), undefined}, Args)
+        _ -> Code(St, ?FRAME(Recv, Fn, home_or_undefined(Home), undefined), Args)
     end;
-kind_apply(St, {?KNATIVE_TAG, Tag, _, _, _}, _, Recv, Args) ->
-    arc@rt@builtins:dispatch_native(St, Tag, Recv, Args).
+call_kind_list(St, {?KNATIVE_TAG, Tag, _, _, _}, _, Recv, Args) ->
+    'arc@rt@builtins':dispatch_native(St, Tag, Recv, Args).
 
 apply_this(CodeT, St, Recv, []) -> CodeT(St, Recv);
 apply_this(CodeT, St, Recv, [A]) -> CodeT(St, Recv, A);
@@ -455,14 +457,14 @@ t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     case arc_rt_arena_ffi:get(CId, Data) of
-        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case element(?SOBJECT_KIND, Slot) of
-                Kind = {?KFN_TAG, _, _, Flags, ?NONE, _, _, _, _}
+        Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
+            case element(?SOBJECT_KIND, Cell) of
+                Kind = ?KFN(_, _, Flags, ?NONE, _)
                   when element(?FNFLAGS_IS_CTOR, Flags) =:= true,
                        element(?FNFLAGS_IS_DERIVED, Flags) =:= false,
                        element(?FNFLAGS_IS_GEN, Flags) =:= false,
                        element(?FNFLAGS_IS_ASYNC, Flags) =:= false ->
-                    case element(?SOBJECT_PROPS, Slot) of
+                    case element(?SOBJECT_PROPS, Cell) of
                         #{{?KEY_NAMED, <<"prototype">>} := Prop}
                           when element(1, Prop) =:= ?DATAPROP_TAG ->
                             case element(?DATAPROP_VALUE, Prop) of
@@ -479,22 +481,23 @@ t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
     end;
 t_new_simple(St, _, _) -> {miss, St}.
 
-new_simple_apply(St, Store, Data, Ctor, {_, Code, Home, _, _, Simple, _, _, _},
-                 Proto, Args)
-  when tuple_size(St) =:= ?AGENT_ARITY, tuple_size(Store) =:= ?STORE_ARITY ->
-    NewSlot = {?SSHAPED_TAG, 0, {?SOME, Proto}, {}, #{}},
+new_simple_apply(St, Store, Data, Ctor, ?KFN(Code, Home, _, _, Simple), Proto,
+                 Args)
+  when tuple_size(St) =:= ?AGENT_SIZE, tuple_size(Store) =:= ?STORE_SIZE ->
+    NewCell = {?SSHAPED_TAG, 0, {?SOME, Proto}, {}, #{}},
     NewId = element(?STORE_NEXT, Store),
-    Store2 = setelement(?STORE_DATA, Store, arc_rt_arena_ffi:set(NewId, NewSlot, Data)),
+    Store2 = setelement(?STORE_DATA, Store, arc_rt_arena_ffi:set(NewId, NewCell, Data)),
     Store3 = setelement(?STORE_NEXT, Store2, NewId + 1),
-    Store4 = setelement(?STORE_ALLOC, Store3, element(?STORE_ALLOC, Store) + 1),
+    Store4 = setelement(?STORE_ALLOC_SINCE_GC, Store3,
+                        element(?STORE_ALLOC_SINCE_GC, Store) + 1),
     St2 = setelement(?AGENT_STORE, St, Store4),
     NewThis = {?HANDLE_TAG, NewId},
     {V, St3} = case Simple of
-        {?SOME, {CodeT, Arity, true}} when length(Args) =:= Arity ->
+        {?SOME, ?DIRECT_ENTRY(CodeT, Arity, true)} when length(Args) =:= Arity ->
             apply_this(CodeT, St2, NewThis, Args);
-        {?SOME, {CodeS, Arity, false}} when length(Args) =:= Arity ->
+        {?SOME, ?DIRECT_ENTRY(CodeS, Arity, false)} when length(Args) =:= Arity ->
             erlang:apply(CodeS, [St2 | Args]);
-        _ -> Code(St2, {NewThis, Ctor, home(Home), Ctor}, Args)
+        _ -> Code(St2, ?FRAME(NewThis, Ctor, home_or_undefined(Home), Ctor), Args)
     end,
     case V of
         {?HANDLE_TAG, _} -> {V, St3};
@@ -502,8 +505,8 @@ new_simple_apply(St, Store, Data, Ctor, {_, Code, Home, _, _, Simple, _, _, _},
     end.
 
 %% bind once for natives that call back per element, none takes the frame path
-t_bind_compiled(St, F, {?KFN_TAG, Code, Home, Flags, _, Simple, _, _, _}, This)
-  when ?KFN_PLAIN(Flags) ->
+t_bind_compiled(St, F, ?KFN(Code, Home, Flags, _, Simple), This)
+  when ?IS_PLAIN_FN(Flags) ->
     ThisR = case element(?FNFLAGS_IS_ARROW, Flags)
                  orelse element(?FNFLAGS_IS_STRICT, Flags) of
         true -> This;
@@ -515,39 +518,38 @@ t_bind_compiled(St, F, {?KFN_TAG, Code, Home, Flags, _, Simple, _, _, _}, This)
     case ThisR of
         prim -> ?NONE;
         _ ->
-            Frame = {ThisR, F, home(Home), undefined},
-            Slow = fun(S, Args) -> Code(S, Frame, Args) end,
-            {?SOME, bound(Simple, ThisR, Slow)}
+            Frame = ?FRAME(ThisR, F, home_or_undefined(Home), undefined),
+            General = fun(S, Args) -> Code(S, Frame, Args) end,
+            {?SOME, prepared_direct_entry(Simple, ThisR, General)}
     end;
 t_bind_compiled(_, _, _, _) -> ?NONE.
 
-bound({?SOME, {CodeS, 0, true}}, T, _) ->
+prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 0, true)}, T, _) ->
     fun(S, _) -> CodeS(S, T) end;
-bound({?SOME, {CodeS, 1, true}}, T, _) ->
+prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 1, true)}, T, _) ->
     fun(S, [A | _]) -> CodeS(S, T, A);
        (S, []) -> CodeS(S, T, undefined)
     end;
-bound({?SOME, {CodeS, 2, true}}, T, Slow) ->
+prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 2, true)}, T, General) ->
     fun(S, [A, B | _]) -> CodeS(S, T, A, B);
-       (S, Args) -> Slow(S, Args)
+       (S, Args) -> General(S, Args)
     end;
-bound({?SOME, {CodeS, 3, true}}, T, Slow) ->
+prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 3, true)}, T, General) ->
     fun(S, [A, B, C | _]) -> CodeS(S, T, A, B, C);
-       (S, Args) -> Slow(S, Args)
+       (S, Args) -> General(S, Args)
     end;
-bound({?SOME, {CodeS, 0, false}}, _, _) ->
+prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 0, false)}, _, _) ->
     fun(S, _) -> CodeS(S) end;
-bound({?SOME, {CodeS, 1, false}}, _, _) ->
+prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 1, false)}, _, _) ->
     fun(S, [A | _]) -> CodeS(S, A);
        (S, []) -> CodeS(S, undefined)
     end;
-bound({?SOME, {CodeS, 2, false}}, _, Slow) ->
+prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 2, false)}, _, General) ->
     fun(S, [A, B | _]) -> CodeS(S, A, B);
-       (S, Args) -> Slow(S, Args)
+       (S, Args) -> General(S, Args)
     end;
-bound({?SOME, {CodeS, 3, false}}, _, Slow) ->
+prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 3, false)}, _, General) ->
     fun(S, [A, B, C | _]) -> CodeS(S, A, B, C);
-       (S, Args) -> Slow(S, Args)
+       (S, Args) -> General(S, Args)
     end;
-bound(_, _, Slow) -> Slow.
-
+prepared_direct_entry(_, _, General) -> General.

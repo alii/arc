@@ -94,8 +94,9 @@ probe_dense(A, Idx, End) ->
 probe_sparse(_, Idx, End) when Idx >= End -> false;
 probe_sparse(M, Idx, End) ->
     is_map_key(Idx, M) orelse probe_sparse(M, Idx + 1, End).
--define(LENGTH_KEY, {?KEY_NAMED, <<"length">>}).
+
 -define(CALLEE_KEY, {?KEY_NAMED, <<"callee">>}).
+
 %% §7.3.19 fast path, args_slow otherwise
 arg_list(St, {?HANDLE_TAG, Id}) ->
     Store = element(?AGENT_STORE, St),
@@ -154,8 +155,6 @@ scan_backward(Els, Search, Idx, Eq) ->
 eq(strict, A, B) -> arc_rt_val_ffi:strict_eq(A, B);
 eq(same_value_zero, A, B) -> arc_rt_val_ffi:same_value_zero(A, B).
 
--define(MAX_DENSE_INDEX, 10000000).
--define(MAX_GAP, 1024).
 %% plain extensible array with no own props, free proto chain
 push(St, {?HANDLE_TAG, Id}, Args) ->
     Store = element(?AGENT_STORE, St),
@@ -172,12 +171,12 @@ push(St, {?HANDLE_TAG, Id}, Args) ->
                     case append(Els, Len, Args) of
                         slow -> push_slow;
                         NewEls ->
-                            Slot = {?SOBJECT_TAG, {?ARRAYOBJ_TAG, NewLen}, Proto, Props,
+                            Cell = {?SOBJECT_TAG, {?ARRAYOBJ_TAG, NewLen}, Proto, Props,
                                     Sym, NewEls, true},
                             {pushed, NewLen,
                              setelement(?AGENT_STORE, St,
                                         setelement(?STORE_DATA, Store,
-                                                   arc_rt_arena_ffi:set(Id, Slot, Data)))}
+                                                   arc_rt_arena_ffi:set(Id, Cell, Data)))}
                     end
             end;
         _ -> push_slow
@@ -210,12 +209,12 @@ pop(St, {?HANDLE_TAG, Id}) ->
                 false -> pop_slow;
                 ?ELEMS_HOLE -> pop_slow;
                 V ->
-                    Slot = {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Last}, Proto, Props, Sym,
+                    Cell = {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Last}, Proto, Props, Sym,
                             {?ELEMS_DENSE, arc_tree_array_ffi:resize(A, Last)}, true},
                     {popped, V,
                      setelement(?AGENT_STORE, St,
                                 setelement(?STORE_DATA, Store,
-                                           arc_rt_arena_ffi:set(Id, Slot, Data)))}
+                                           arc_rt_arena_ffi:set(Id, Cell, Data)))}
             end;
         _ -> pop_slow
     end;

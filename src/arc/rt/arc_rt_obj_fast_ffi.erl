@@ -1,4 +1,4 @@
-%% called only by aot emitted code
+%% site-cached kernels called only by aot emitted code; reads may answer miss
 -module(arc_rt_obj_fast_ffi).
 -export([t_set_props_named/5, t_set_props_init/6, t_new_object_props/3,
          t_set_prop/5, t_set_prop/6, t_get_prop/4, t_global_get/3,
@@ -8,9 +8,6 @@
 
 -compile({inline, [slot_offset/3]}).
 
--define(IC_READ, ic_read).
-
--define(IC_GLOBAL, ic_global).
 -define(IC_GLOBAL_REFILLS, 16).
 
 %% site cache of a global object data property, valid while the epoch holds;
@@ -21,14 +18,14 @@ t_global_get(St, KeyBin, Site) ->
         #{Site := {?IC_GLOBAL, KeyBin, Epoch, V, _}}
           when Epoch =:= element(?STORE_GLOBAL_EPOCH, Store) ->
             V;
-        #{Site := ic_off} -> arc_rt_obj_ffi:t_global_get_fast(St, KeyBin);
+        #{Site := ?IC_OFF} -> arc_rt_obj_ffi:t_global_get_fast(St, KeyBin);
         _ -> miss
     end.
 
-t_global_get_miss(St, KeyBin, Site) when tuple_size(St) =:= ?AGENT_ARITY ->
+t_global_get_miss(St, KeyBin, Site) when tuple_size(St) =:= ?AGENT_SIZE ->
     {V, St1} = arc_rt_obj_ffi:t_global_get(St, KeyBin),
     case element(?AGENT_STORE, St1) of
-        Store when tuple_size(Store) =:= ?STORE_ARITY ->
+        Store when tuple_size(Store) =:= ?STORE_SIZE ->
             Ics = element(?STORE_ICS, Store),
             N = case Ics of
                 #{Site := {?IC_GLOBAL, KeyBin, _, _, N0}} -> N0 + 1;
@@ -36,10 +33,10 @@ t_global_get_miss(St, KeyBin, Site) when tuple_size(St) =:= ?AGENT_ARITY ->
                 _ -> 0
             end,
             {?HANDLE_TAG, GId} = element(?REALM_GLOBAL, element(?AGENT_REALM, St1)),
-            Slot = arc_rt_arena_ffi:get(GId, element(?STORE_DATA, Store)),
-            Entry = case N < ?IC_GLOBAL_REFILLS andalso global_plain(Slot, KeyBin, V) of
+            Cell = arc_rt_arena_ffi:get(GId, element(?STORE_DATA, Store)),
+            Entry = case N < ?IC_GLOBAL_REFILLS andalso global_plain(Cell, KeyBin, V) of
                 true -> {?IC_GLOBAL, KeyBin, element(?STORE_GLOBAL_EPOCH, Store), V, N};
-                false -> ic_off
+                false -> ?IC_OFF
             end,
             case N > ?IC_GLOBAL_REFILLS of
                 true -> {V, St1};
@@ -49,9 +46,9 @@ t_global_get_miss(St, KeyBin, Site) when tuple_size(St) =:= ?AGENT_ARITY ->
             end
     end.
 
-global_plain(Slot, KeyBin, V)
-  when tuple_size(Slot) =:= ?SOBJECT_ARITY, element(1, Slot) =:= ?SOBJECT_TAG ->
-    case element(?SOBJECT_PROPS, Slot) of
+global_plain(Cell, KeyBin, V)
+  when tuple_size(Cell) =:= ?SOBJECT_SIZE, element(1, Cell) =:= ?SOBJECT_TAG ->
+    case element(?SOBJECT_PROPS, Cell) of
         #{{?KEY_NAMED, KeyBin} := Prop} ->
             element(1, Prop) =:= ?DATAPROP_TAG
                 andalso element(?DATAPROP_VALUE, Prop) =:= V;
@@ -59,33 +56,33 @@ global_plain(Slot, KeyBin, V)
     end;
 global_plain(_, _, _) -> false.
 
-%% bare value or miss, miss takes arc_rt_obj_ffi:t_get_prop_slow which fills
+%% bare value or miss; on miss arc_rt_obj_ffi:t_get_prop_slow fills the ic
 t_get_prop(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
-    Slot = arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)),
-    case element(1, Slot) of
+    Cell = arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)),
+    case element(1, Cell) of
         ?SSHAPED_TAG ->
             case element(?STORE_ICS, Store) of
                 #{Site := {?IC_READ, KeyBin, Offs}} ->
                     case Offs of
-                        #{element(?SSHAPED_SID, Slot) := Off} ->
-                            element(Off + 1, element(?SSHAPED_SLOTS, Slot));
+                        #{element(?SSHAPED_SID, Cell) := Off} ->
+                            ?SLOT_AT(element(?SSHAPED_SLOTS, Cell), Off);
                         _ -> miss
                     end;
                 _ -> miss
             end;
         ?SOBJECT_TAG ->
-            case element(?SOBJECT_PROPS, Slot) of
+            case element(?SOBJECT_PROPS, Cell) of
                 #{{?KEY_NAMED, KeyBin} := Prop}
                   when element(1, Prop) =:= ?DATAPROP_TAG ->
-                    Kind = element(?SOBJECT_KIND, Slot),
+                    Kind = element(?SOBJECT_KIND, Cell),
                     case is_atom(Kind)
                          orelse arc_rt_obj_ffi:named_plain(Kind, KeyBin) of
                         true -> element(?DATAPROP_VALUE, Prop);
                         false -> miss
                     end;
                 _ ->
-                    case element(?SOBJECT_KIND, Slot) of
+                    case element(?SOBJECT_KIND, Cell) of
                         {?ARRAYOBJ_TAG, Len} when KeyBin =:= <<"length">> -> Len;
                         _ -> miss
                     end
@@ -96,42 +93,41 @@ t_get_prop(_, S, <<"length">>, _) when ?IS_STR(S) ->
     arc_rt_str_ffi:len(S);
 t_get_prop(_, _, _, _) -> miss.
 
-%% own slot overwrite only, guards keep setelement inline
+%% own overwrite only, size guards keep setelement inline
 t_set_prop(St, Obj = {?HANDLE_TAG, Id}, KeyBin, V, Strict)
-  when tuple_size(St) =:= ?AGENT_ARITY ->
+  when tuple_size(St) =:= ?AGENT_SIZE ->
     case element(?AGENT_STORE, St) of
-        Store when tuple_size(Store) =:= ?STORE_ARITY ->
+        Store when tuple_size(Store) =:= ?STORE_SIZE ->
             Data = element(?STORE_DATA, Store),
             case arc_rt_arena_ffi:get(Id, Data) of
-                Slot when element(1, Slot) =:= ?SSHAPED_TAG,
-                          tuple_size(Slot) =:= ?SSHAPED_ARITY ->
-                    case slot_offset(Store, Slot, KeyBin) of
+                Cell when element(1, Cell) =:= ?SSHAPED_TAG,
+                          tuple_size(Cell) =:= ?SSHAPED_SIZE ->
+                    case slot_offset(Store, Cell, KeyBin) of
                         miss ->
                             arc_rt_obj_ffi:t_set_prop_named(St, Obj, KeyBin, V,
                                                             Strict);
                         Off ->
-                            Slots = setelement(Off + 1,
-                                               element(?SSHAPED_SLOTS, Slot), V),
-                            NewSlot = setelement(?SSHAPED_SLOTS, Slot, Slots),
+                            Slots = ?SLOT_SET(element(?SSHAPED_SLOTS, Cell), Off, V),
+                            NewCell = setelement(?SSHAPED_SLOTS, Cell, Slots),
                             setelement(?AGENT_STORE, St,
                                        setelement(?STORE_DATA, Store,
-                                                  arc_rt_arena_ffi:set(Id, NewSlot, Data)))
+                                                  arc_rt_arena_ffi:set(Id, NewCell, Data)))
                     end;
-                Slot when element(1, Slot) =:= ?SOBJECT_TAG,
-                          tuple_size(Slot) =:= ?SOBJECT_ARITY,
-                          element(?SOBJECT_KIND, Slot) =:= ?ORDINARY ->
-                    Props = element(?SOBJECT_PROPS, Slot),
+                Cell when element(1, Cell) =:= ?SOBJECT_TAG,
+                          tuple_size(Cell) =:= ?SOBJECT_SIZE,
+                          element(?SOBJECT_KIND, Cell) =:= ?ORDINARY ->
+                    Props = element(?SOBJECT_PROPS, Cell),
                     K = {?KEY_NAMED, KeyBin},
                     case Props of
                         #{K := Prop}
                           when element(1, Prop) =:= ?DATAPROP_TAG,
-                               tuple_size(Prop) =:= ?DATAPROP_ARITY,
+                               tuple_size(Prop) =:= ?DATAPROP_SIZE,
                                element(?DATAPROP_WRITABLE, Prop) =:= true ->
-                            NewSlot = setelement(?SOBJECT_PROPS, Slot,
+                            NewCell = setelement(?SOBJECT_PROPS, Cell,
                                                  Props#{K := setelement(?DATAPROP_VALUE, Prop, V)}),
                             setelement(?AGENT_STORE, St,
                                        setelement(?STORE_DATA, Store,
-                                                  arc_rt_arena_ffi:set(Id, NewSlot, Data)));
+                                                  arc_rt_arena_ffi:set(Id, NewCell, Data)));
                         _ ->
                             arc_rt_obj_ffi:t_set_prop_named(St, Obj, KeyBin, V,
                                                             Strict)
@@ -144,24 +140,23 @@ t_set_prop(St, Obj, KeyBin, V, Strict) ->
 
 %% own overwrite first, then the site's cached transition for a new key
 t_set_prop(St, Obj = {?HANDLE_TAG, Id}, KeyBin, V, Strict, Site)
-  when tuple_size(St) =:= ?AGENT_ARITY ->
+  when tuple_size(St) =:= ?AGENT_SIZE ->
     case element(?AGENT_STORE, St) of
-        Store when tuple_size(Store) =:= ?STORE_ARITY ->
+        Store when tuple_size(Store) =:= ?STORE_SIZE ->
             Data = element(?STORE_DATA, Store),
             case arc_rt_arena_ffi:get(Id, Data) of
-                Slot when element(1, Slot) =:= ?SSHAPED_TAG,
-                          tuple_size(Slot) =:= ?SSHAPED_ARITY ->
-                    case slot_offset(Store, Slot, KeyBin) of
+                Cell when element(1, Cell) =:= ?SSHAPED_TAG,
+                          tuple_size(Cell) =:= ?SSHAPED_SIZE ->
+                    case slot_offset(Store, Cell, KeyBin) of
                         miss ->
-                            shaped_init(St, Store, Data, Id, Slot, Obj,
+                            shaped_init(St, Store, Data, Id, Cell, Obj,
                                         [KeyBin], [V], Strict, Site);
                         Off ->
-                            Slots = setelement(Off + 1,
-                                               element(?SSHAPED_SLOTS, Slot), V),
-                            NewSlot = setelement(?SSHAPED_SLOTS, Slot, Slots),
+                            Slots = ?SLOT_SET(element(?SSHAPED_SLOTS, Cell), Off, V),
+                            NewCell = setelement(?SSHAPED_SLOTS, Cell, Slots),
                             setelement(?AGENT_STORE, St,
                                        setelement(?STORE_DATA, Store,
-                                                  arc_rt_arena_ffi:set(Id, NewSlot, Data)))
+                                                  arc_rt_arena_ffi:set(Id, NewCell, Data)))
                     end;
                 _ -> t_set_prop(St, Obj, KeyBin, V, Strict)
             end
@@ -169,25 +164,24 @@ t_set_prop(St, Obj = {?HANDLE_TAG, Id}, KeyBin, V, Strict, Site)
 t_set_prop(St, Obj, KeyBin, V, Strict, _) ->
     arc_rt_obj_ffi:t_set_prop_named(St, Obj, KeyBin, V, Strict).
 
-slot_offset(_, Slot, KeyBin) ->
-    case element(?SSHAPED_OFFSETS, Slot) of
+slot_offset(_, Cell, KeyBin) ->
+    case element(?SSHAPED_OFFSETS, Cell) of
         #{KeyBin := Off} -> Off;
         _ -> miss
     end.
 
--define(IC_INIT, ic_init).
 -define(IC_INIT_HOPS, 8).
 
 %% caches a pure append run from one shape, proto chain checked by identity
 t_set_props_init(St, Obj = {?HANDLE_TAG, Id}, Keys, Vals, Strict, Site)
-  when tuple_size(St) =:= ?AGENT_ARITY ->
+  when tuple_size(St) =:= ?AGENT_SIZE ->
     case element(?AGENT_STORE, St) of
-        Store when tuple_size(Store) =:= ?STORE_ARITY ->
+        Store when tuple_size(Store) =:= ?STORE_SIZE ->
             Data = element(?STORE_DATA, Store),
             case arc_rt_arena_ffi:get(Id, Data) of
-                Slot when element(1, Slot) =:= ?SSHAPED_TAG,
-                          tuple_size(Slot) =:= ?SSHAPED_ARITY ->
-                    shaped_init(St, Store, Data, Id, Slot, Obj, Keys, Vals,
+                Cell when element(1, Cell) =:= ?SSHAPED_TAG,
+                          tuple_size(Cell) =:= ?SSHAPED_SIZE ->
+                    shaped_init(St, Store, Data, Id, Cell, Obj, Keys, Vals,
                                 Strict, Site);
                 _ -> t_set_props_named(St, Obj, Keys, Vals, Strict)
             end
@@ -195,20 +189,20 @@ t_set_props_init(St, Obj = {?HANDLE_TAG, Id}, Keys, Vals, Strict, Site)
 t_set_props_init(St, Obj, Keys, Vals, Strict, _) ->
     t_set_props_named(St, Obj, Keys, Vals, Strict).
 
-shaped_init(St, Store, Data, Id, Slot, Obj, Keys, Vals, Strict, Site)
-  when tuple_size(St) =:= ?AGENT_ARITY, tuple_size(Store) =:= ?STORE_ARITY ->
-    Sid = element(?SSHAPED_SID, Slot),
-    Proto = element(?SSHAPED_PROTO, Slot),
+shaped_init(St, Store, Data, Id, Cell, Obj, Keys, Vals, Strict, Site)
+  when tuple_size(St) =:= ?AGENT_SIZE, tuple_size(Store) =:= ?STORE_SIZE ->
+    Sid = element(?SSHAPED_SID, Cell),
+    Proto = element(?SSHAPED_PROTO, Cell),
     case element(?STORE_ICS, Store) of
         #{Site := {?IC_INIT, Sid, _, Blank, Chain}}
           when element(?SSHAPED_PROTO, Blank) =:= Proto ->
             case chain_same(Data, Proto, Chain) of
                 true ->
-                    Slots = init_slots(element(?SSHAPED_SLOTS, Slot), Vals),
-                    NewSlot = setelement(?SSHAPED_SLOTS, Blank, Slots),
+                    Slots = init_slots(element(?SSHAPED_SLOTS, Cell), Vals),
+                    NewCell = setelement(?SSHAPED_SLOTS, Blank, Slots),
                     setelement(?AGENT_STORE, St,
                                setelement(?STORE_DATA, Store,
-                                          arc_rt_arena_ffi:set(Id, NewSlot, Data)));
+                                          arc_rt_arena_ffi:set(Id, NewCell, Data)));
                 false ->
                     init_fill(t_set_props_named(St, Obj, Keys, Vals, Strict),
                               Id, Sid, Proto, Keys, Site)
@@ -223,33 +217,33 @@ init_slots({}, Vals) -> list_to_tuple(Vals);
 init_slots(Slots, Vals) -> list_to_tuple(tuple_to_list(Slots) ++ Vals).
 
 chain_same(_, ?NONE, []) -> true;
-chain_same(Data, {?SOME, {?HANDLE_TAG, PId}}, [{PId, PSlot} | Rest]) ->
+chain_same(Data, {?SOME, {?HANDLE_TAG, PId}}, [{PId, PCell} | Rest]) ->
     case arc_rt_arena_ffi:get(PId, Data) of
-        PSlot -> chain_same(Data, element(?SOBJECT_PROTO, PSlot), Rest);
+        PCell -> chain_same(Data, element(?CELL_PROTO, PCell), Rest);
         _ -> false
     end;
 chain_same(_, _, _) -> false.
 
 %% fill only when the run appended every key in order onto sid
 init_fill(St, Id, Sid, Proto, Keys, Site)
-  when tuple_size(St) =:= ?AGENT_ARITY ->
+  when tuple_size(St) =:= ?AGENT_SIZE ->
     case element(?AGENT_STORE, St) of
-        Store when tuple_size(Store) =:= ?STORE_ARITY ->
+        Store when tuple_size(Store) =:= ?STORE_SIZE ->
             Data = element(?STORE_DATA, Store),
-            Slot = arc_rt_arena_ffi:get(Id, Data),
+            Cell = arc_rt_arena_ffi:get(Id, Data),
             Shapes = element(?STORE_SHAPES, Store),
             Ics = element(?STORE_ICS, Store),
-            Entry = case element(1, Slot) =:= ?SSHAPED_TAG
-                         andalso element(?SSHAPED_PROTO, Slot) =:= Proto
+            Entry = case element(1, Cell) =:= ?SSHAPED_TAG
+                         andalso element(?SSHAPED_PROTO, Cell) =:= Proto
                          andalso appended(Shapes, Sid, Keys) of
-                To when is_integer(To), To =:= element(?SSHAPED_SID, Slot) ->
+                To when is_integer(To), To =:= element(?SSHAPED_SID, Cell) ->
                     case chain_of(Data, Proto, ?IC_INIT_HOPS, []) of
-                        none -> ic_off;
+                        none -> ?IC_OFF;
                         Chain ->
-                            Blank = setelement(?SSHAPED_SLOTS, Slot, {}),
+                            Blank = setelement(?SSHAPED_SLOTS, Cell, {}),
                             {?IC_INIT, Sid, To, Blank, Chain}
                     end;
-                _ -> ic_off
+                _ -> ?IC_OFF
             end,
             setelement(?AGENT_STORE, St,
                        setelement(?STORE_ICS, Store, Ics#{Site => Entry}))
@@ -259,12 +253,12 @@ appended(_, Sid, []) -> Sid;
 appended(Shapes, Sid, [K | Ks]) ->
     case Shapes of
         #{Sid := Desc} ->
-            Arity = element(?SHAPE_ARITY_F, Desc),
+            SlotCount = element(?SHAPE_SLOT_COUNT, Desc),
             case element(?SHAPE_TRANSITIONS, Desc) of
                 #{K := To} ->
                     case Shapes of
                         #{To := ToDesc}
-                          when element(?SHAPE_ARITY_F, ToDesc) =:= Arity + 1 ->
+                          when element(?SHAPE_SLOT_COUNT, ToDesc) =:= SlotCount + 1 ->
                             appended(Shapes, To, Ks);
                         _ -> false
                     end;
@@ -277,10 +271,10 @@ chain_of(_, ?NONE, _, Acc) -> lists:reverse(Acc);
 chain_of(_, _, 0, _) -> none;
 chain_of(Data, {?SOME, {?HANDLE_TAG, PId}}, Fuel, Acc) ->
     case arc_rt_arena_ffi:get(PId, Data) of
-        PSlot when element(1, PSlot) =:= ?SOBJECT_TAG;
-                   element(1, PSlot) =:= ?SSHAPED_TAG ->
-            chain_of(Data, element(?SOBJECT_PROTO, PSlot), Fuel - 1,
-                     [{PId, PSlot} | Acc]);
+        PCell when element(1, PCell) =:= ?SOBJECT_TAG;
+                   element(1, PCell) =:= ?SSHAPED_TAG ->
+            chain_of(Data, element(?CELL_PROTO, PCell), Fuel - 1,
+                     [{PId, PCell} | Acc]);
         _ -> none
     end;
 chain_of(_, _, _, _) -> none.
@@ -304,13 +298,14 @@ shaped_run(St, Store, Data, Id, Obj, Sid, P, Slots, [K | Ks], [V | Vs],
             case element(?SHAPE_OFFSETS, Desc) of
                 #{K := Off} ->
                     shaped_run(St, Store, Data, Id, Obj, Sid, P,
-                               setelement(Off + 1, Slots, V), Ks, Vs, Strict,
+                               ?SLOT_SET(Slots, Off, V), Ks, Vs, Strict,
                                Shapes, true);
                 _ ->
                     case element(?SHAPE_TRANSITIONS, Desc) of
                         #{K := To} ->
-                            case arc_rt_obj_ffi:named_free(
-                                   Data, Shapes, P, {?KEY_NAMED, K}, 64) of
+                            case arc_rt_obj_ffi:named_write_walk(
+                                   Data, Shapes, P, {?KEY_NAMED, K},
+                                   ?MAX_PROTO_HOPS) of
                                 true ->
                                     shaped_run(St, Store, Data, Id, Obj, To,
                                                P,
@@ -338,11 +333,11 @@ shaped_run(St, Store, Data, Id, _, Sid, P, Slots, _, _, _, Shapes, Dirty) ->
 
 commit(St, _, _, _, _, _, _, _, false) -> St;
 commit(St, Store, Data, Id, Sid, P, Slots, Shapes, true)
-  when tuple_size(St) =:= ?AGENT_ARITY, tuple_size(Store) =:= ?STORE_ARITY ->
+  when tuple_size(St) =:= ?AGENT_SIZE, tuple_size(Store) =:= ?STORE_SIZE ->
     #{Sid := Desc} = Shapes,
-    Slot = {?SSHAPED_TAG, Sid, P, Slots, element(?SHAPE_OFFSETS, Desc)},
+    Cell = {?SSHAPED_TAG, Sid, P, Slots, element(?SHAPE_OFFSETS, Desc)},
     setelement(?AGENT_STORE, St,
-               setelement(?STORE_DATA, Store, arc_rt_arena_ffi:set(Id, Slot, Data))).
+               setelement(?STORE_DATA, Store, arc_rt_arena_ffi:set(Id, Cell, Data))).
 
 each_named(St, Obj, [K | Ks], [V | Vs], Strict) ->
     each_named(arc_rt_obj_ffi:t_set_prop_named(St, Obj, K, V, Strict), Obj,
@@ -354,24 +349,24 @@ t_new_object_props(St, Keys, Vals) ->
     new_object_props(St, Store, Keys, Vals).
 
 new_object_props(St, Store, Keys, Vals)
-  when tuple_size(St) =:= ?AGENT_ARITY, tuple_size(Store) =:= ?STORE_ARITY ->
+  when tuple_size(St) =:= ?AGENT_SIZE, tuple_size(Store) =:= ?STORE_SIZE ->
     Seq = element(?STORE_PROP_SEQ, Store),
     {Props, Seq1} = props_of(Keys, Vals, Seq, []),
     Proto = element(?PAIR_PROTO,
                     element(?REALM_OBJECT, element(?AGENT_REALM, St))),
-    Slot = {?SOBJECT_TAG, ?ORDINARY, {?SOME, Proto}, Props, [], ?ELEMS_NONE,
+    Cell = {?SOBJECT_TAG, ?ORDINARY, {?SOME, Proto}, Props, [], ?ELEMS_NONE,
             true},
     Id = element(?STORE_NEXT, Store),
     Store1 = setelement(?STORE_DATA, Store,
-                        arc_rt_arena_ffi:set(Id, Slot, element(?STORE_DATA, Store))),
+                        arc_rt_arena_ffi:set(Id, Cell, element(?STORE_DATA, Store))),
     Store2 = setelement(?STORE_NEXT, Store1, Id + 1),
-    Store3 = setelement(?STORE_ALLOC, Store2,
-                        element(?STORE_ALLOC, Store) + 1),
+    Store3 = setelement(?STORE_ALLOC_SINCE_GC, Store2,
+                        element(?STORE_ALLOC_SINCE_GC, Store) + 1),
     Store4 = setelement(?STORE_PROP_SEQ, Store3, Seq1),
     {{?HANDLE_TAG, Id}, setelement(?AGENT_STORE, St, Store4)}.
 
 props_of([K | Ks], [V | Vs], Seq, Acc) ->
     props_of(Ks, Vs, Seq + 1,
-             [{{?KEY_NAMED, K}, {?DATAPROP_TAG, V, true, true, true, Seq}}
+             [{{?KEY_NAMED, K}, ?PLAIN_PROPERTY(V, Seq)}
               | Acc]);
 props_of([], [], Seq, Acc) -> {maps:from_list(Acc), Seq}.

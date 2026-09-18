@@ -28,7 +28,7 @@ classify(B) when is_binary(B) -> {k_str, B};
 classify({?STR_TAG, B, _, _}) -> {k_str, B};
 classify({js_bigint, N}) -> {k_big, N};
 classify({js_sym, S}) -> {k_sym, S};
-classify({js_cell, N}) -> {k_handle, {js_cell, N}};
+classify({?HANDLE_TAG, _} = H) -> {k_handle, H};
 classify(js_tdz) -> k_tdz.
 
 to_boolean_i32(undefined) -> 0;
@@ -48,7 +48,7 @@ to_boolean_i32({?STR_TAG, _, _, _}) -> 1;
 to_boolean_i32({js_bigint, 0}) -> 0;
 to_boolean_i32({js_bigint, _}) -> 1;
 to_boolean_i32({js_sym, _}) -> 1;
-to_boolean_i32({js_cell, _}) -> 1;
+to_boolean_i32({?HANDLE_TAG, _}) -> 1;
 to_boolean_i32(js_tdz) -> 0.
 
 %% not dead: carder rewrites to_boolean_i32 to this
@@ -68,7 +68,7 @@ to_boolean({?STR_TAG, _, _, _}) -> true;
 to_boolean({js_bigint, 0}) -> false;
 to_boolean({js_bigint, _}) -> true;
 to_boolean({js_sym, _}) -> true;
-to_boolean({js_cell, _}) -> true;
+to_boolean({?HANDLE_TAG, _}) -> true;
 to_boolean(js_tdz) -> false.
 
 strict_eq(js_nan, _) -> false;
@@ -79,29 +79,28 @@ strict_eq(A, B) -> A =:= B.
 same_value_zero(js_nan, js_nan) -> true;
 same_value_zero(A, B) -> strict_eq(A, B).
 
--define(MAX_ARRAY_INDEX, 4294967294).
 t_to_property_key_fast(N)
   when is_integer(N), N >= 0, N =< ?MAX_ARRAY_INDEX ->
-    {string_key, {index, N}};
+    {?OKEY_STRING, {?KEY_INDEX, N}};
 t_to_property_key_fast(B) when is_binary(B) ->
-    {string_key, canonical_key_bin(B)};
+    {?OKEY_STRING, canonical_key_bin(B)};
 t_to_property_key_fast({?STR_TAG, B, _, _}) ->
-    {string_key, {named, B}};
+    {?OKEY_STRING, {?KEY_NAMED, B}};
 t_to_property_key_fast({js_sym, S}) ->
-    {symbol_key, S};
+    {?OKEY_SYMBOL, S};
 t_to_property_key_fast(_) -> miss.
 
 canonical_key_bin(<<C, _/binary>> = B) when C >= $0, C =< $9 ->
     try binary_to_integer(B) of
         N when N >= 0, N =< ?MAX_ARRAY_INDEX ->
             case integer_to_binary(N) =:= B of
-                true -> {index, N};
-                false -> {named, B}
+                true -> {?KEY_INDEX, N};
+                false -> {?KEY_NAMED, B}
             end;
-        _ -> {named, B}
-    catch _:_ -> {named, B}
+        _ -> {?KEY_NAMED, B}
+    catch _:_ -> {?KEY_NAMED, B}
     end;
-canonical_key_bin(B) -> {named, B}.
+canonical_key_bin(B) -> {?KEY_NAMED, B}.
 
 %% not a jsval, classify has no clause for it
 mk_hole() -> js_hole.
@@ -120,7 +119,6 @@ mk_number(j_nan) -> js_nan;
 mk_number(j_pos_inf) -> js_inf;
 mk_number(j_neg_inf) -> js_neg_inf.
 
--define(MAX_SAFE_INT, 9007199254740991).
 mk_int(N) when N > ?MAX_SAFE_INT; N < -?MAX_SAFE_INT ->
     mk_number('arc@rt@val':num_from_int(N));
 mk_int(N) -> N.
@@ -135,7 +133,7 @@ mk_object(H) -> H.
 
 mk_tdz() -> js_tdz.
 
-%% hot heads of the val.gleam coercions, everything else goes back there
+%% hot heads of the val.gleam coercions, the rest calls back into it by name
 t_to_string(St, V) when is_binary(V) -> {V, St};
 t_to_string(St, {?STR_TAG, B, _, _}) -> {B, St};
 t_to_string(St, V) when is_integer(V) -> {integer_to_binary(V), St};

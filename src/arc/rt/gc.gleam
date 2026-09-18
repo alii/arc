@@ -503,7 +503,7 @@ fn reset_dead(
     False ->
       case marked(id, live) {
         True -> reset_dead(data, id + 1, next, live)
-        False -> reset_dead(arena.reset(id, data), id + 1, next, live)
+        False -> reset_dead(arena.free(id, data), id + 1, next, live)
       }
   }
 }

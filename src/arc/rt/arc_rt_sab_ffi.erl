@@ -15,13 +15,13 @@ spawn_owner(Bytes) ->
         loop(Bytes, [], MRef)
     end).
 
-loop(Bytes, Waiters, Creator) ->
+loop(Bytes, Waiters, CreatorMon) ->
     receive
         {sab, From, Ref, Req} ->
             {Reply, Bytes1, Waiters1} = handle(Req, From, Bytes, Waiters),
             From ! {Ref, Reply},
-            loop(Bytes1, Waiters1, Creator);
-        {'DOWN', Creator, process, _Pid, _Reason} ->
+            loop(Bytes1, Waiters1, CreatorMon);
+        {'DOWN', CreatorMon, process, _Pid, _Reason} ->
             ok
     end.
 

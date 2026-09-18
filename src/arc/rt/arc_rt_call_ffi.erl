@@ -4,15 +4,12 @@
 
 -include("arc_rt_layout.hrl").
 
-t_kfn_code(St, {js_cell, Id}, This) ->
+t_kfn_code(St, {?HANDLE_TAG, Id}, This) ->
     Store = element(?AGENT_STORE, St),
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
-        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case element(?SOBJECT_KIND, Slot) of
-                {?KFN_TAG, Code, none, Flags, _, Simple, _, _, _}
-                  when element(?FNFLAGS_IS_CLASS_CTOR, Flags) =:= false,
-                       element(?FNFLAGS_IS_GEN, Flags) =:= false,
-                       element(?FNFLAGS_IS_ASYNC, Flags) =:= false ->
+        Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
+            case element(?SOBJECT_KIND, Cell) of
+                ?KFN(Code, ?NONE, Flags, _, Simple) when ?IS_PLAIN_FN(Flags) ->
                     %% §10.2.1.2 bind this, sloppy primitive this misses
                     case element(?FNFLAGS_IS_ARROW, Flags)
                          orelse element(?FNFLAGS_IS_STRICT, Flags) of
@@ -32,29 +29,23 @@ t_kfn_code(St, {js_cell, Id}, This) ->
     end;
 t_kfn_code(_, _, _) -> undefined.
 
-t_call_protected(St, Code, Frame, Args) ->
-    try Code(St, Frame, Args) of
-        {V, St2} -> {{?COMPLETION_NORMAL, V}, St2}
-    catch
-        error:{wasm_exn, 0, [St2, E]} -> {{?COMPLETION_THROW, E}, St2}
-    end.
+%% runs body under the js guard, answering a Completion
+-define(PROTECT(Body),
+        try Body of
+            {V, St2} -> {{?COMPLETION_NORMAL, V}, St2}
+        catch
+            error:?JS_THROW(St2, E) -> {{?COMPLETION_THROW, E}, St2}
+        end).
+
+t_call_protected(St, Code, Frame, Args) -> ?PROTECT(Code(St, Frame, Args)).
 
 t_native_protected(St, Tag, This, Args) ->
-    try arc_rt_builtins_ffi:dispatch_native(St, Tag, This, Args) of
-        {V, St2} -> {{?COMPLETION_NORMAL, V}, St2}
-    catch
-        error:{wasm_exn, 0, [St2, E]} -> {{?COMPLETION_THROW, E}, St2}
-    end.
+    ?PROTECT(arc_rt_builtins_ffi:dispatch_native(St, Tag, This, Args)).
 
-t_apply_protected(St, Body) ->
-    try Body(St) of
-        {V, St2} -> {{?COMPLETION_NORMAL, V}, St2}
-    catch
-        error:{wasm_exn, 0, [St2, E]} -> {{?COMPLETION_THROW, E}, St2}
-    end.
+t_apply_protected(St, Body) -> ?PROTECT(Body(St)).
 
 mk_frame(This, ActiveFunc, HomeObj, NewTarget) ->
-    {This, ActiveFunc, HomeObj, NewTarget}.
+    ?FRAME(This, ActiveFunc, HomeObj, NewTarget).
 
 birth_props(LengthV, Name) ->
     #{{?KEY_NAMED, <<"length">>} =>

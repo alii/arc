@@ -9,7 +9,7 @@ is_miss(V) -> V =:= miss.
 %% §10.1.8.1 over data props; a getter that returns this is the receiver
 get_symbol_data(St, {?HANDLE_TAG, Id} = Recv, Sym) ->
     Data = element(?STORE_DATA, element(?AGENT_STORE, St)),
-    walk(Data, Id, Sym, Recv, 64);
+    walk(Data, Id, Sym, Recv, ?MAX_PROTO_HOPS);
 get_symbol_data(_, _, _) -> miss.
 
 walk(_, _, _, _, 0) -> miss;

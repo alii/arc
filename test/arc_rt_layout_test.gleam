@@ -1,21 +1,24 @@
 //// arc_rt_layout.hrl indices must match the gleam records
 
 import arc/bytecode/opcode
+import arc/internal/ordered_entries
 import arc/internal/tree_array
 import arc/interp/ffi
 import arc/rt/arena
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
+import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledFn, type FnFlags, type JsVal, type ShapeSlots,
   AccessorProperty, ArgumentsObj, ArrayObj, BirthPending, BirthSettled,
-  DataProperty, Dense, FnFlags, Index, JsCell, JsStore, KBytecode, KCompiled,
-  KHandle, KNative, Named, NoElements, Ordinary, Private, ProxyObj,
-  ResumeCompiled, ResumeFrame, ReturnThis, SBox, SObject, SShapedObject,
+  DataProperty, Dense, FnFlags, GlobalObj, Index, IteratorRecord, JsCell,
+  JsStore, KBound, KBytecode, KCompiled, KHandle, KNative, MapObj,
+  ModuleNamespace, Named, NoElements, Ordinary, Private, ProxyObj,
+  ResumeCompiled, ResumeFrame, ReturnThis, SBox, SObject, SShapedObject, SetObj,
   ShapeDesc, Sparse, StepAwait, StepReturn, StepThrow, StepYield, StringKey,
-  StringObj, SymbolKey,
+  StringObj, SymbolKey, TypedArrayObj,
 } as rt_types
 import gleam/dict
 import gleam/dynamic.{type Dynamic}
@@ -30,10 +33,10 @@ fn idx(name: String) -> Int
 @external(erlang, "arc_rt_layout_root_ffi", "tag")
 fn tag(name: String) -> Dynamic
 
-@external(erlang, "arc_rt_layout_root_ffi", "element")
+@external(erlang, "arc_rt_layout_root_ffi", "element_of")
 fn element(n: Int, of: Dynamic) -> Dynamic
 
-@external(erlang, "arc_rt_layout_root_ffi", "tuple_size")
+@external(erlang, "arc_rt_layout_root_ffi", "size_of")
 fn tuple_size(of: Dynamic) -> Int
 
 @external(erlang, "arc_rt_layout_root_ffi", "dyn")
@@ -44,6 +47,36 @@ fn compiled_fn(label: String) -> CompiledFn
 
 @external(erlang, "arc_rt_layout_root_ffi", "slots")
 fn slots(vals: List(JsVal)) -> ShapeSlots
+
+@external(erlang, "arc_rt_layout_root_ffi", "kfn_parts")
+fn kfn_parts(kind: rt_types.ObjKind) -> Dynamic
+
+@external(erlang, "arc_rt_layout_root_ffi", "direct_entry")
+fn direct_entry(code: CompiledFn, arity: Int, takes_this: Bool) -> Dynamic
+
+@external(erlang, "arc_rt_layout_root_ffi", "is_plain_fn")
+fn is_plain_fn(flags: FnFlags) -> Bool
+
+@external(erlang, "arc_rt_layout_root_ffi", "plain_property")
+fn plain_property(v: JsVal, seq: Int) -> Dynamic
+
+@external(erlang, "arc_rt_layout_root_ffi", "slot_at")
+fn slot_at(slots: ShapeSlots, off: Int) -> JsVal
+
+@external(erlang, "arc_rt_layout_root_ffi", "slot_set")
+fn slot_set(slots: ShapeSlots, off: Int, v: JsVal) -> ShapeSlots
+
+@external(erlang, "arc_rt_layout_root_ffi", "frame")
+fn frame_macro(this: JsVal, f: JsVal, home: JsVal, nt: JsVal) -> Dynamic
+
+@external(erlang, "arc_rt_call_ffi", "mk_frame")
+fn mk_frame(this: JsVal, f: JsVal, home: JsVal, nt: JsVal) -> rt_call.Frame
+
+@external(erlang, "arc_rt_layout_root_ffi", "is_js_number")
+fn is_js_number(v: JsVal) -> Bool
+
+@external(erlang, "arc_rt_layout_root_ffi", "is_str")
+fn is_str(v: JsVal) -> Bool
 
 @external(erlang, "arc_rt_layout_root_ffi", "dyn")
 fn template(label: String) -> FuncTemplate
@@ -68,7 +101,7 @@ fn tag_of(record: a) -> Dynamic {
   element(1, dyn(record))
 }
 
-fn arity(record: a) -> Int {
+fn size_of(record: a) -> Int {
   tuple_size(dyn(record))
 }
 
@@ -92,7 +125,7 @@ fn no_flags() -> FnFlags {
 pub fn agent_test() {
   let st = seeded()
   assert tag_of(st) == tag("AGENT_TAG")
-  assert arity(st) == idx("AGENT_ARITY")
+  assert size_of(st) == idx("AGENT_SIZE")
   assert at(st, "AGENT_STORE") == dyn(st.store)
   assert at(st, "AGENT_REALM") == dyn(st.realm)
   assert at(st, "AGENT_HOST_FNS") == dyn(st.host_fns)
@@ -125,23 +158,24 @@ pub fn js_store_test() {
       ]),
     )
   assert tag_of(store) == tag("STORE_TAG")
-  assert arity(store) == idx("STORE_ARITY")
+  assert size_of(store) == idx("STORE_SIZE")
   assert at(store, "STORE_DATA") == dyn(store.data)
   assert at(store, "STORE_NEXT") == dyn(13)
   assert at(store, "STORE_PINNED_ROOTS") == dyn(store.pinned_roots)
-  assert at(store, "STORE_ALLOC") == dyn(14)
+  assert at(store, "STORE_ALLOC_SINCE_GC") == dyn(14)
   assert at(store, "STORE_PROP_SEQ") == dyn(16)
   assert at(store, "STORE_SHAPES") == dyn(store.shapes)
   assert at(store, "STORE_NEXT_SHAPE") == dyn(15)
   assert at(store, "STORE_ICS") == dyn(store.ics)
   assert at(store, "STORE_FREE_PROTOS") == dyn(store.free_protos)
   assert at(store, "STORE_GLOBAL_EPOCH") == dyn(store.global_epoch)
+  assert dyn(arena.get(3, arena.free(3, store.data))) == tag("STORE_FREE_CELL")
 }
 
 pub fn realm_test() {
   let realm = seeded().realm
   assert tag_of(realm) == tag("REALM_TAG")
-  assert arity(realm) == idx("REALM_ARITY")
+  assert size_of(realm) == idx("REALM_SIZE")
   assert at(realm, "REALM_OBJECT") == dyn(realm.object)
   assert at(realm, "REALM_FUNCTION") == dyn(realm.function)
   assert at(realm, "REALM_ARRAY") == dyn(realm.array)
@@ -160,16 +194,46 @@ pub fn realm_test() {
   assert realm.function != realm.array
   let pair = realm.object
   assert tag_of(pair) == tag("PAIR_TAG")
-  assert arity(pair) == 3
+  assert size_of(pair) == 3
   assert at(pair, "PAIR_PROTO") == dyn(pair.prototype)
   assert at(pair, "PAIR_CTOR") == dyn(pair.constructor)
   assert pair.prototype != pair.constructor
+  let v = rt_types.mk_string("g")
+  assert at(rt_types.Let(v), "LEXICAL_GLOBAL_VALUE") == dyn(v)
+  assert at(rt_types.Const(v), "LEXICAL_GLOBAL_VALUE") == dyn(v)
+}
+
+pub fn jsval_predicates_test() {
+  let str = rt_types.mk_string("s")
+  let wide = rt_types.mk_string("h\u{e9}")
+  assert tag_of(wide) == tag("STR_TAG")
+  assert is_str(str)
+  assert is_str(wide)
+  assert !is_str(rt_types.mk_number(rt_types.JInt(1)))
+  assert !is_str(rt_types.mk_undefined())
+  let nums = [
+    rt_types.mk_number(rt_types.JInt(1)),
+    rt_types.mk_number(rt_types.JFloat(1.5)),
+    rt_types.mk_number(rt_types.JNan),
+    rt_types.mk_number(rt_types.JPosInf),
+    rt_types.mk_number(rt_types.JNegInf),
+  ]
+  assert list.all(nums, is_js_number)
+  assert !is_js_number(str)
+  assert !is_js_number(rt_types.mk_bigint(1))
+  assert !is_js_number(rt_types.mk_undefined())
+}
+
+pub fn constants_test() {
+  assert idx("MAX_ARRAY_INDEX") == rt_types.max_array_index
+  assert idx("MAX_SAFE_INT") == limits.max_safe_integer
+  assert idx("MAX_DENSE_INDEX") == limits.max_dense_index
 }
 
 pub fn handle_test() {
   let h = JsCell(4242)
   assert tag_of(h) == tag("HANDLE_TAG")
-  assert arity(h) == 2
+  assert size_of(h) == 2
   assert at(h, "HANDLE_ID") == dyn(4242)
   assert dyn(rt_types.mk_object(h)) == dyn(h)
   let assert KHandle(back) = rt_types.classify(rt_types.mk_object(h))
@@ -217,7 +281,7 @@ pub fn sobject_test() {
       extensible: False,
     )
   assert tag_of(obj) == tag("SOBJECT_TAG")
-  assert arity(obj) == idx("SOBJECT_ARITY")
+  assert size_of(obj) == idx("SOBJECT_SIZE")
   assert at(obj, "SOBJECT_KIND") == dyn(ArrayObj(9))
   assert at(obj, "SOBJECT_PROTO") == dyn(Some(proto))
   assert element(2, at(obj, "SOBJECT_PROTO")) == dyn(proto)
@@ -228,17 +292,31 @@ pub fn sobject_test() {
   assert dyn(Ordinary) == tag("ORDINARY")
   let kind = ArrayObj(9)
   assert tag_of(kind) == tag("ARRAYOBJ_TAG")
-  assert arity(kind) == idx("ARRAYOBJ_ARITY")
+  assert size_of(kind) == idx("ARRAYOBJ_SIZE")
   assert at(kind, "ARRAYOBJ_LENGTH") == dyn(9)
   let args = ArgumentsObj(length: 2, mapped: None)
   assert tag_of(args) == tag("ARGUMENTSOBJ_TAG")
-  assert arity(args) == idx("ARGUMENTSOBJ_ARITY")
+  assert size_of(args) == idx("ARGUMENTSOBJ_SIZE")
   assert at(args, "ARGUMENTSOBJ_MAPPED") == dyn(None)
   assert tag_of(ProxyObj(target: proto, handler: proto, revoked: False))
     == tag("PROXYOBJ_TAG")
   let wrapper = StringObj("s")
   assert tag_of(wrapper) == tag("STRINGOBJ_TAG")
   assert at(wrapper, "STRINGOBJ_VALUE") == dyn("s")
+  assert dyn(GlobalObj) == tag("GLOBALOBJ")
+  assert tag_of(KBound(target: proto, bound_this: vx, bound_args: []))
+    == tag("BOUNDFN_TAG")
+  let view =
+    TypedArrayObj(
+      buffer: proto,
+      elem_kind: rt_types.NumKind(rt_types.Uint8Kind),
+      byte_offset: 0,
+      length: None,
+    )
+  assert tag_of(view) == tag("TYPEDARRAYOBJ_TAG")
+  assert tag_of(ModuleNamespace(dict.new())) == tag("MODULENS_TAG")
+  assert tag_of(MapObj(ordered_entries.new())) == tag("MAPOBJ_TAG")
+  assert tag_of(SetObj(ordered_entries.new())) == tag("SETOBJ_TAG")
   let box = SBox(rt_types.mk_string("b"))
   assert tag_of(box) == tag("SBOX_TAG")
   assert at(box, "SBOX_VALUE") == dyn(rt_types.mk_string("b"))
@@ -246,6 +324,7 @@ pub fn sobject_test() {
 
 pub fn keys_and_elements_test() {
   assert tag_of(Named("x")) == tag("KEY_NAMED")
+  assert dyn(Named("length")) == tag("LENGTH_KEY")
   assert element(2, dyn(Named("x"))) == dyn("x")
   assert tag_of(Index(5)) == tag("KEY_INDEX")
   assert element(2, dyn(Index(5))) == dyn(5)
@@ -276,15 +355,19 @@ pub fn sshaped_object_test() {
       offsets: offs,
     )
   assert tag_of(obj) == tag("SSHAPED_TAG")
-  assert arity(obj) == idx("SSHAPED_ARITY")
+  assert size_of(obj) == idx("SSHAPED_SIZE")
   assert at(obj, "SSHAPED_SID") == dyn(21)
   assert at(obj, "SSHAPED_PROTO") == dyn(Some(JsCell(2)))
   assert at(obj, "SSHAPED_SLOTS") == dyn(sl)
   assert at(obj, "SSHAPED_OFFSETS") == dyn(offs)
+  assert idx("CELL_PROTO") == idx("SSHAPED_PROTO")
+  assert idx("CELL_PROTO") == idx("SOBJECT_PROTO")
   assert tuple_size(dyn(sl)) == 3
   assert element(1, dyn(sl)) == dyn(s0)
   assert element(2, dyn(sl)) == dyn(s1)
   assert rt_types.shape_slots_get(sl, 1) == s1
+  assert slot_at(sl, 1) == s1
+  assert slot_set(sl, 0, s1) == rt_types.shape_slots_set(sl, 0, s1)
 }
 
 pub fn shape_desc_test() {
@@ -295,8 +378,8 @@ pub fn shape_desc_test() {
       transitions: dict.from_list([#(<<"c":utf8>>, 9)]),
     )
   assert tag_of(desc) == tag("SHAPE_TAG")
-  assert arity(desc) == idx("SHAPE_ARITY")
-  assert at(desc, "SHAPE_ARITY_F") == dyn(2)
+  assert size_of(desc) == idx("SHAPE_SIZE")
+  assert at(desc, "SHAPE_SLOT_COUNT") == dyn(2)
   assert at(desc, "SHAPE_OFFSETS") == dyn(desc.offsets)
   assert at(desc, "SHAPE_TRANSITIONS") == dyn(desc.transitions)
 }
@@ -321,9 +404,19 @@ pub fn fn_flags_test() {
   assert list.length(one_hot) == list.length(names)
   use #(set_name, flags) <- list.each(one_hot)
   assert tag_of(flags) == tag("FNFLAGS_TAG")
-  assert arity(flags) == idx("FNFLAGS_ARITY")
+  assert size_of(flags) == idx("FNFLAGS_SIZE")
   use name <- list.each(names)
   assert at(flags, name) == dyn(name == set_name)
+}
+
+pub fn is_plain_fn_test() {
+  let base = no_flags()
+  assert is_plain_fn(base)
+  assert is_plain_fn(FnFlags(..base, is_constructor: True, is_strict: True))
+  assert is_plain_fn(FnFlags(..base, is_arrow: True, is_method: True))
+  assert !is_plain_fn(FnFlags(..base, is_class_constructor: True))
+  assert !is_plain_fn(FnFlags(..base, is_generator: True))
+  assert !is_plain_fn(FnFlags(..base, is_async: True))
 }
 
 pub fn kcompiled_test() {
@@ -342,7 +435,7 @@ pub fn kcompiled_test() {
       birth: BirthPending(Some(JsCell(32))),
     )
   assert tag_of(kfn) == tag("KFN_TAG")
-  assert arity(kfn) == idx("KFN_ARITY")
+  assert size_of(kfn) == idx("KFN_SIZE")
   assert at(kfn, "KFN_CODE") == dyn(code)
   assert at(kfn, "KFN_HOME") == dyn(Some(JsCell(30)))
   assert at(kfn, "KFN_FLAGS") == dyn(flags)
@@ -360,6 +453,15 @@ pub fn kcompiled_test() {
   assert element(1, inner) == dyn(code_s)
   assert element(2, inner) == dyn(2)
   assert element(3, inner) == dyn(True)
+  assert inner == direct_entry(code_s, 2, True)
+  assert kfn_parts(kfn)
+    == dyn(#(
+      code,
+      Some(JsCell(30)),
+      flags,
+      Some(JsCell(31)),
+      Some(#(code_s, 2, True)),
+    ))
   let bare =
     KCompiled(
       code:,
@@ -380,7 +482,7 @@ pub fn kcompiled_test() {
 pub fn knative_test() {
   let kn = KNative(tag: ReturnThis, name: "nm", length: 3, constructible: True)
   assert tag_of(kn) == tag("KNATIVE_TAG")
-  assert arity(kn) == idx("KNATIVE_ARITY")
+  assert size_of(kn) == idx("KNATIVE_SIZE")
   assert at(kn, "KNATIVE_TOKEN") == dyn(ReturnThis)
   assert at(kn, "KNATIVE_NAME") == dyn("nm")
   assert at(kn, "KNATIVE_LENGTH") == dyn(3)
@@ -429,12 +531,20 @@ pub fn data_property_test() {
   list.each(one_hot, fn(entry) {
     let #(set_name, prop) = entry
     assert tag_of(prop) == tag("DATAPROP_TAG")
-    assert arity(prop) == idx("DATAPROP_ARITY")
+    assert size_of(prop) == idx("DATAPROP_SIZE")
     assert at(prop, "DATAPROP_VALUE") == dyn(v)
     assert at(prop, "DATAPROP_SEQ") == dyn(77)
     use name <- list.each(names)
     assert at(prop, name) == dyn(name == set_name)
   })
+  assert plain_property(v, 9)
+    == dyn(DataProperty(
+      value: v,
+      writable: True,
+      enumerable: True,
+      configurable: True,
+      seq: 9,
+    ))
   let g = rt_types.mk_string("g")
   let s = rt_types.mk_string("s")
   let acc =
@@ -446,7 +556,7 @@ pub fn data_property_test() {
       seq: 78,
     )
   assert tag_of(acc) == tag("ACCESSORPROP_TAG")
-  assert arity(acc) == idx("ACCESSORPROP_ARITY")
+  assert size_of(acc) == idx("ACCESSORPROP_SIZE")
   assert at(acc, "ACCESSORPROP_GET") == dyn(Some(g))
   assert at(acc, "ACCESSORPROP_SET") == dyn(Some(s))
 }
@@ -455,7 +565,7 @@ pub fn step_and_resume_test() {
   let v = rt_types.mk_string("v")
   let compiled = ResumeCompiled(sm: sm_fn("sm"), rs: 3, loc: loc("L"))
   assert tag_of(compiled) == tag("RESUME_COMPILED_TAG")
-  assert arity(compiled) == 4
+  assert size_of(compiled) == 4
   assert element(2, dyn(compiled)) == dyn("sm")
   assert element(3, dyn(compiled)) == dyn(3)
   assert element(4, dyn(compiled)) == dyn("L")
@@ -478,6 +588,17 @@ pub fn completion_test() {
   assert element(2, dyn(NormalCompletion(v))) == dyn(v)
   assert tag_of(ThrowCompletion(v)) == tag("COMPLETION_THROW")
   assert element(2, dyn(ThrowCompletion(v))) == dyn(v)
+}
+
+pub fn frame_test() {
+  let this = rt_types.mk_string("this")
+  let f = rt_types.mk_string("fn")
+  let home = rt_types.mk_string("home")
+  let nt = rt_types.mk_undefined()
+  let frame = mk_frame(this, f, home, nt)
+  assert frame_macro(this, f, home, nt) == dyn(frame)
+  assert dyn(frame) == dyn(#(this, f, home, nt))
+  assert rt_call.frame_active_func(frame) == f
 }
 
 @external(erlang, "arc_rt_obj_ffi", "t_get_elem_fast")
@@ -595,7 +716,7 @@ pub fn bytecode_function_fast_paths_miss_test() {
       birth: BirthSettled,
     )
   assert tag_of(kind) == tag("KBYTECODE_TAG")
-  assert arity(kind) == idx("KBYTECODE_ARITY")
+  assert size_of(kind) == idx("KBYTECODE_SIZE")
   assert at(kind, "KBYTECODE_BIRTH") == tag("BIRTH_SETTLED")
   let #(fh, st) =
     rt_store.t_cell_new(
@@ -685,16 +806,30 @@ pub fn iterator_kinds_test() {
   let it =
     rt_types.ArrayIterator(target: h, index: 4, kind: rt_types.ArrayIterValues)
   assert tag_of(it) == tag("ARRAYITER_TAG")
-  assert arity(it) == idx("ARRAYITER_ARITY")
+  assert size_of(it) == idx("ARRAYITER_SIZE")
   assert at(it, "ARRAYITER_TARGET") == dyn(h)
   assert at(it, "ARRAYITER_INDEX") == dyn(4)
   assert at(it, "ARRAYITER_KIND") == tag("ARRAYITER_VALUES")
   let g = rt_types.GeneratorObj(data: h)
   assert tag_of(g) == tag("GENERATOROBJ_TAG")
-  assert arity(g) == idx("GENERATOROBJ_ARITY")
+  assert size_of(g) == idx("GENERATOROBJ_SIZE")
   assert at(g, "GENERATOROBJ_DATA") == dyn(h)
   assert dyn(rt_types.IteratorN(rt_types.ArrayIteratorNext))
     == tag("TOKEN_ARRAY_ITER_NEXT")
   assert dyn(rt_types.GeneratorN(rt_types.GeneratorNext))
     == tag("TOKEN_GENERATOR_NEXT")
+  let v = rt_types.mk_object(h)
+  assert tag_of(IteratorRecord(iterator: v, next_method: v))
+    == tag("ITERATOR_RECORD_TAG")
+}
+
+pub fn ic_entry_tags_test() {
+  let key = <<"k":utf8>>
+  assert tag_of(rt_types.IcRead(key, dict.new())) == tag("IC_READ")
+  assert tag_of(rt_types.IcCall(key, dict.new(), dict.new())) == tag("IC_CALL")
+  let blank = SBox(rt_types.mk_undefined())
+  assert tag_of(rt_types.IcInit(0, 1, blank, [])) == tag("IC_INIT")
+  assert tag_of(rt_types.IcGlobal(key, 0, rt_types.mk_undefined(), 0))
+    == tag("IC_GLOBAL")
+  assert dyn(rt_types.IcOff) == tag("IC_OFF")
 }

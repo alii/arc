@@ -4,6 +4,8 @@
          t_math_sqrt/1, t_math_floor/1, t_math_abs/1,
          t_math_pow/2, t_math_min/2, t_math_max/2, fast/2, is_miss/1]).
 
+-include("../arc_rt_layout.hrl").
+
 is_miss(V) -> V =:= miss.
 
 %% plain number args straight to the kernels, else miss
@@ -17,8 +19,6 @@ fast(math_ceil, [X | _]) when is_integer(X) -> X;
 fast(math_round, [X | _]) when is_integer(X) -> X;
 fast(math_trunc, [X | _]) when is_integer(X) -> X;
 fast(_, _) -> miss.
-
--define(MAX_SAFE_INT, 9007199254740991).
 
 exp(X) ->
     try {j_float, math:exp(X)}
@@ -99,10 +99,6 @@ signed_infinity(X) ->
     end.
 
 %% never wildcard-match a non-number arg, spec throws there
--define(IS_NUMLIKE(X),
-        (is_number(X) orelse X =:= js_nan
-         orelse X =:= js_inf orelse X =:= js_neg_inf)).
-
 t_math_sqrt(X) when is_number(X), X >= 0 -> math:sqrt(X);
 t_math_sqrt(X) when is_number(X) -> js_nan;
 t_math_sqrt(js_nan) -> js_nan;
@@ -137,9 +133,9 @@ t_math_pow(B, E) when is_number(B), is_number(E) ->
         j_neg_inf -> js_neg_inf;
         j_nan -> js_nan
     end;
-t_math_pow(B, E) when E == 0, ?IS_NUMLIKE(B) -> 1;
-t_math_pow(js_nan, E) when ?IS_NUMLIKE(E) -> js_nan;
-t_math_pow(B, js_nan) when ?IS_NUMLIKE(B) -> js_nan;
+t_math_pow(B, E) when E == 0, ?IS_JS_NUMBER(B) -> 1;
+t_math_pow(js_nan, E) when ?IS_JS_NUMBER(E) -> js_nan;
+t_math_pow(B, js_nan) when ?IS_JS_NUMBER(B) -> js_nan;
 t_math_pow(js_inf, E) when is_number(E) ->
     if E > 0 -> js_inf; E < 0 -> 0; true -> 1 end;
 t_math_pow(js_neg_inf, E) when is_number(E) ->
@@ -159,10 +155,10 @@ t_math_pow(js_neg_inf, js_inf) -> js_inf;
 t_math_pow(js_neg_inf, js_neg_inf) -> 0;
 t_math_pow(_, _) -> miss.
 
-t_math_min(js_nan, B) when ?IS_NUMLIKE(B) -> js_nan;
-t_math_min(A, js_nan) when ?IS_NUMLIKE(A) -> js_nan;
-t_math_min(js_neg_inf, B) when ?IS_NUMLIKE(B) -> js_neg_inf;
-t_math_min(A, js_neg_inf) when ?IS_NUMLIKE(A) -> js_neg_inf;
+t_math_min(js_nan, B) when ?IS_JS_NUMBER(B) -> js_nan;
+t_math_min(A, js_nan) when ?IS_JS_NUMBER(A) -> js_nan;
+t_math_min(js_neg_inf, B) when ?IS_JS_NUMBER(B) -> js_neg_inf;
+t_math_min(A, js_neg_inf) when ?IS_JS_NUMBER(A) -> js_neg_inf;
 t_math_min(js_inf, B) -> num_or_miss(B);
 t_math_min(A, js_inf) -> num_or_miss(A);
 t_math_min(A, B) when is_number(A), is_number(B) ->
@@ -171,10 +167,10 @@ t_math_min(A, B) when is_number(A), is_number(B) ->
     end;
 t_math_min(_, _) -> miss.
 
-t_math_max(js_nan, B) when ?IS_NUMLIKE(B) -> js_nan;
-t_math_max(A, js_nan) when ?IS_NUMLIKE(A) -> js_nan;
-t_math_max(js_inf, B) when ?IS_NUMLIKE(B) -> js_inf;
-t_math_max(A, js_inf) when ?IS_NUMLIKE(A) -> js_inf;
+t_math_max(js_nan, B) when ?IS_JS_NUMBER(B) -> js_nan;
+t_math_max(A, js_nan) when ?IS_JS_NUMBER(A) -> js_nan;
+t_math_max(js_inf, B) when ?IS_JS_NUMBER(B) -> js_inf;
+t_math_max(A, js_inf) when ?IS_JS_NUMBER(A) -> js_inf;
 t_math_max(js_neg_inf, B) -> num_or_miss(B);
 t_math_max(A, js_neg_inf) -> num_or_miss(A);
 t_math_max(A, B) when is_number(A), is_number(B) ->
