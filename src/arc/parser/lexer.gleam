@@ -1,179 +1,30 @@
 import arc/internal/bytes.{byte_at, drop_start, unsafe_slice}
 import arc/internal/digits
+import arc/parser/token.{
+  type LexError, type Token, type TokenKind, Ampersand, AmpersandAmpersand,
+  AmpersandAmpersandEqual, AmpersandEqual, Arrow, Bang, BangEqual,
+  BangEqualEqual, Caret, CaretEqual, Colon, Comma, ConsecutiveNumericSeparator,
+  Dot, DotDotDot, Eof, Equal, EqualEqual, EqualEqualEqual, ExpectedBinaryDigits,
+  ExpectedExponentDigits, ExpectedHexDigits, ExpectedOctalDigits, GreaterThan,
+  GreaterThanEqual, GreaterThanGreaterThan, GreaterThanGreaterThanEqual,
+  GreaterThanGreaterThanGreaterThan, GreaterThanGreaterThanGreaterThanEqual,
+  HtmlCommentInModule, Identifier, Illegal, InvalidBigIntLiteral,
+  InvalidEscapeSequence, InvalidHexEscapeSequence, InvalidUnicodeEscapeSequence,
+  LeadingNumericSeparator, LeftBrace, LeftBracket, LeftParen, LessThan,
+  LessThanEqual, LessThanLessThan, LessThanLessThanEqual, LexFailure, Minus,
+  MinusEqual, MinusMinus, Number, Percent, PercentEqual, Pipe, PipeEqual,
+  PipePipe, PipePipeEqual, Plus, PlusEqual, PlusPlus, Question, QuestionDot,
+  QuestionQuestion, QuestionQuestionEqual, RightBrace, RightBracket, RightParen,
+  Semicolon, Slash, SlashEqual, Star, StarEqual, StarStar, StarStarEqual,
+  StringLiteral, TemplateHead, TemplateLiteral, Tilde, Token,
+  TrailingNumericSeparator, UnterminatedBlockComment, keyword_or_identifier,
+}
 import gleam/bit_array
 import gleam/bool
 import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
-
-pub type Token {
-  // had_escape: identifiers only; annex_b_legacy: Number/StringLiteral only
-  Token(
-    kind: TokenKind,
-    value: String,
-    pos: Int,
-    line: Int,
-    raw_len: Int,
-    had_escape: Bool,
-    annex_b_legacy: Bool,
-  )
-}
-
-pub type TokenKind {
-  Number
-  StringLiteral
-  TemplateLiteral
-  TemplateHead
-
-  Identifier
-  Var
-  Let
-  Const
-  Function
-  Return
-  If
-  Else
-  While
-  Do
-  For
-  Break
-  Continue
-  Switch
-  Case
-  Default
-  Throw
-  Try
-  Catch
-  Finally
-  New
-  Delete
-  Typeof
-  Void
-  In
-  Instanceof
-  This
-  Class
-  Extends
-  Super
-  Import
-  Export
-  From
-  As
-  Of
-  Async
-  Await
-  Yield
-  Null
-  Undefined
-  TrueLiteral
-  FalseLiteral
-  Debugger
-  With
-  Static
-
-  LeftParen
-  RightParen
-  LeftBrace
-  RightBrace
-  LeftBracket
-  RightBracket
-  Semicolon
-  Comma
-  Dot
-  DotDotDot
-  QuestionDot
-  QuestionQuestion
-  Arrow
-  Colon
-
-  Plus
-  Minus
-  Star
-  StarStar
-  Slash
-  Percent
-  Ampersand
-  AmpersandAmpersand
-  Pipe
-  PipePipe
-  Caret
-  Tilde
-  Bang
-  Equal
-  EqualEqual
-  EqualEqualEqual
-  BangEqual
-  BangEqualEqual
-  LessThan
-  LessThanEqual
-  GreaterThan
-  GreaterThanEqual
-  LessThanLessThan
-  GreaterThanGreaterThan
-  GreaterThanGreaterThanGreaterThan
-  PlusEqual
-  MinusEqual
-  StarEqual
-  StarStarEqual
-  SlashEqual
-  PercentEqual
-  AmpersandEqual
-  AmpersandAmpersandEqual
-  PipeEqual
-  PipePipeEqual
-  CaretEqual
-  QuestionQuestionEqual
-  LessThanLessThanEqual
-  GreaterThanGreaterThanEqual
-  GreaterThanGreaterThanGreaterThanEqual
-  PlusPlus
-  MinusMinus
-  Question
-
-  Eof
-  // lenient: unclassifiable but legal inside a regex body
-  Illegal
-  // hard error, zero-length, stops the stream
-  LexFailure(error: LexError)
-}
-
-pub type LexError {
-  UnterminatedBlockComment(pos: Int)
-  InvalidEscapeSequence(pos: Int)
-  InvalidHexEscapeSequence(pos: Int)
-  InvalidUnicodeEscapeSequence(pos: Int)
-  ExpectedExponentDigits(pos: Int)
-  ExpectedHexDigits(pos: Int)
-  ExpectedOctalDigits(pos: Int)
-  ExpectedBinaryDigits(pos: Int)
-  ConsecutiveNumericSeparator(pos: Int)
-  LeadingNumericSeparator(pos: Int)
-  TrailingNumericSeparator(pos: Int)
-  InvalidBigIntLiteral(pos: Int)
-  HtmlCommentInModule(pos: Int)
-}
-
-pub fn lex_error_to_string(error: LexError) -> String {
-  case error {
-    UnterminatedBlockComment(_) -> "Unterminated block comment"
-    InvalidEscapeSequence(_) -> "Invalid escape sequence"
-    InvalidHexEscapeSequence(_) -> "Invalid hexadecimal escape sequence"
-    InvalidUnicodeEscapeSequence(_) -> "Invalid Unicode escape sequence"
-    ExpectedExponentDigits(_) -> "Expected digits after exponent indicator"
-    ExpectedHexDigits(_) -> "Expected hex digits after 0x"
-    ExpectedOctalDigits(_) -> "Expected octal digits after 0o"
-    ExpectedBinaryDigits(_) -> "Expected binary digits after 0b"
-    ConsecutiveNumericSeparator(_) ->
-      "Numeric separator can not be used consecutively"
-    LeadingNumericSeparator(_) ->
-      "Numeric separator can not be used after leading 0"
-    TrailingNumericSeparator(_) -> "Trailing numeric separator"
-    InvalidBigIntLiteral(_) ->
-      "Invalid BigInt literal: legacy octal and leading-zero literals cannot be BigInts"
-    HtmlCommentInModule(_) -> "HTML comments are not allowed in module code"
-  }
-}
 
 pub type SourceKind {
   ScriptSource
@@ -1470,56 +1321,6 @@ fn is_id_start(cp: Int) -> Bool
 
 @external(erlang, "arc_unicode_ffi", "is_id_continue")
 fn is_id_continue(cp: Int) -> Bool
-
-pub fn keyword_or_identifier(word: String) -> TokenKind {
-  case word {
-    "var" -> Var
-    "let" -> Let
-    "const" -> Const
-    "function" -> Function
-    "return" -> Return
-    "if" -> If
-    "else" -> Else
-    "while" -> While
-    "do" -> Do
-    "for" -> For
-    "break" -> Break
-    "continue" -> Continue
-    "switch" -> Switch
-    "case" -> Case
-    "default" -> Default
-    "throw" -> Throw
-    "try" -> Try
-    "catch" -> Catch
-    "finally" -> Finally
-    "new" -> New
-    "delete" -> Delete
-    "typeof" -> Typeof
-    "void" -> Void
-    "in" -> In
-    "instanceof" -> Instanceof
-    "this" -> This
-    "class" -> Class
-    "extends" -> Extends
-    "super" -> Super
-    "import" -> Import
-    "export" -> Export
-    "from" -> From
-    "as" -> As
-    "of" -> Of
-    "async" -> Async
-    "await" -> Await
-    "yield" -> Yield
-    "null" -> Null
-    "undefined" -> Undefined
-    "true" -> TrueLiteral
-    "false" -> FalseLiteral
-    "debugger" -> Debugger
-    "with" -> With
-    "static" -> Static
-    _ -> Identifier
-  }
-}
 
 fn char_width_at(bytes: BitArray, pos: Int) -> Int {
   case bit_array.slice(bytes, pos, 1) {

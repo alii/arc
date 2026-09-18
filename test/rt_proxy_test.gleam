@@ -1,26 +1,18 @@
 import arc/bytecode/key
-import arc/internal/unsafe
 import arc/rt/builtins as rt_builtins
-import arc/rt/call.{type Frame, NormalCompletion, ThrowCompletion} as rt_call
+import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/lang as rt_lang
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/types.{
-  type Agent, type CompiledCode, type JsVal, FnFlags, JInt, KBool, KHandle, KNum,
-  KStr, KUndef, StringKey, classify, mk_bool, mk_int, mk_null, mk_object,
-  mk_string, mk_undefined,
+  type Agent, type JsVal, JInt, KBool, KHandle, KNum, KStr, KUndef, StringKey,
+  classify, mk_bool, mk_int, mk_null, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
 import rt_helpers
-
-fn as_code(
-  f: fn(Agent, Frame, List(JsVal)) -> #(JsVal, Agent),
-) -> CompiledCode {
-  unsafe.coerce(f)
-}
 
 fn agent() -> Agent {
   rt_builtins.new_agent(rt_helpers.quiet_hooks())
@@ -31,7 +23,7 @@ fn key(name: String) {
 }
 
 fn global(st: Agent, name: String) -> JsVal {
-  let #(v, _) = rt_obj.t_global_get(st, <<name:utf8>>)
+  let #(v, _) = rt_lang.t_global_get(st, <<name:utf8>>)
   v
 }
 
@@ -66,19 +58,7 @@ fn func(
   st: Agent,
   body: fn(Agent, List(JsVal)) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
-  let flags =
-    FnFlags(
-      is_constructor: False,
-      is_class_constructor: False,
-      is_derived_constructor: False,
-      is_arrow: True,
-      is_method: False,
-      is_generator: False,
-      is_async: False,
-      is_strict: True,
-    )
-  let code = as_code(fn(st, _frame, args) { body(st, args) })
-  let #(h, st) = rt_call.t_fn_new(st, code, flags, "", 0, None, None)
+  let #(h, st) = rt_call.t_new_builtin_function(st, "", 0, body)
   #(mk_object(h), st)
 }
 

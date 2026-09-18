@@ -1,15 +1,13 @@
+import arc/cli/examples
 import arc/compiler
 import arc/dis
 import arc/engine.{
   type Engine, type Outcome, type Repl, ModuleReturned, ModuleThrew, Returned,
   Threw,
 }
-import arc/esm
-import arc/internal/path
-import arc/module/load_error
-import arc/module_host.{type LoadError, type ResolveError}
+import arc/module/file_loader
+import arc/module/specifier
 import arc/parser
-import arc/repl/examples
 import gleam/int
 import gleam/io
 import gleam/option.{None, Some}
@@ -111,9 +109,12 @@ fn handle_repl_line(repl: Repl(host), line: String) -> ReplStep(host) {
     }
 
     "/dis " <> source -> {
-      case dis.source(dis.ReplInput, source) {
+      case
+        compiler.compile_source(compiler.ReplSource, source)
+        |> result.map(dis.disassemble)
+      {
         Ok(text) -> io.print(text)
-        Error(err) -> io.println(dis.format_source_error(err))
+        Error(err) -> io.println(compiler.format_source_error(err))
       }
       Continue(repl)
     }
@@ -212,7 +213,7 @@ type CliError(host) {
   ReadFailed(path: String, error: simplifile.FileError)
   WriteFailed(path: String, error: simplifile.FileError)
   EvalFailed(error: engine.EvalError(host))
-  DisFailed(error: dis.SourceError)
+  DisFailed(error: compiler.SourceError)
   ScriptThrew(report: String)
 }
 
@@ -224,15 +225,15 @@ fn format_cli_error(err: CliError(host)) -> String {
     WriteFailed(path, file_err) ->
       "Error writing " <> path <> ": " <> simplifile.describe_error(file_err)
     EvalFailed(eval_err) -> format_eval_error(eval_err)
-    DisFailed(source_err) -> dis.format_source_error(source_err)
+    DisFailed(source_err) -> compiler.format_source_error(source_err)
     ScriptThrew(report) -> report
   }
 }
 
-fn goal_symbol(path: String) -> dis.Goal {
+fn source_kind(path: String) -> compiler.SourceKind {
   case string.ends_with(path, ".cjs") {
-    True -> dis.Script
-    False -> dis.Module
+    True -> compiler.ScriptSource
+    False -> compiler.ModuleSource
   }
 }
 
@@ -241,9 +242,9 @@ fn run_file(path: String) -> Result(Nil, CliError(host)) {
     simplifile.read(path)
     |> result.map_error(fn(err) { ReadFailed(path:, error: err) }),
   )
-  case goal_symbol(path) {
-    dis.Script | dis.ReplInput -> run_script_file(source)
-    dis.Module -> run_module_file(path, source)
+  case source_kind(path) {
+    compiler.ScriptSource | compiler.ReplSource -> run_script_file(source)
+    compiler.ModuleSource -> run_module_file(path, source)
   }
 }
 
@@ -252,32 +253,20 @@ fn run_module_file(
   source: String,
 ) -> Result(Nil, CliError(host)) {
   let eng = engine.new()
-  let entry = path.normalize(entry_path)
-  case engine.eval_module(eng, entry, source, resolve_dep, load_dep) {
+  let entry = specifier.normalize(entry_path)
+  case
+    engine.eval_module(
+      eng,
+      entry,
+      source,
+      file_loader.file_resolve,
+      file_loader.file_load,
+    )
+  {
     Ok(#(ModuleReturned(..), _eng)) -> Ok(Nil)
     Ok(#(ModuleThrew(error:), eng)) ->
       Error(ScriptThrew(format_uncaught(eng, error)))
     Error(err) -> Error(EvalFailed(err))
-  }
-}
-
-fn resolve_dep(
-  raw_specifier: String,
-  parent_specifier: String,
-) -> Result(String, ResolveError) {
-  let raw = esm.raw(raw_specifier)
-  let parent = esm.resolved_unchecked(parent_specifier)
-  case path.resolve_specifier(raw, parent) {
-    path.PathSpecifier(resolved) -> Ok(esm.resolved_text(resolved))
-    path.BareSpecifier(_bare) -> Error(load_error.UnsupportedBareSpecifier)
-  }
-}
-
-fn load_dep(resolved: String) -> Result(String, LoadError) {
-  case simplifile.read(resolved) {
-    Ok(source) -> Ok(source)
-    Error(simplifile.Enoent) -> Error(load_error.LoadNotFound)
-    Error(err) -> Error(load_error.ReadFailed(simplifile.describe_error(err)))
   }
 }
 
@@ -297,7 +286,9 @@ fn run_dis(path: String) -> Result(Nil, CliError(host)) {
     |> result.map_error(fn(err) { ReadFailed(path:, error: err) }),
   )
   use text <- result.try(
-    dis.source(goal_symbol(path), source) |> result.map_error(DisFailed),
+    compiler.compile_source(source_kind(path), source)
+    |> result.map(dis.disassemble)
+    |> result.map_error(DisFailed),
   )
   let out_path = path <> ".dis.txt"
   use Nil <- result.map(

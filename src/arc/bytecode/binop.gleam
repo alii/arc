@@ -36,3 +36,11 @@ pub type EqualityOp {
   StrictEq
   StrictNotEq
 }
+
+// classified once at emit time, not per execution
+pub type ClassifiedBinOp {
+  PureOp(op: PureBinOp)
+  AddOp
+  InOp
+  InstanceOfOp
+}

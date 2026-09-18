@@ -6,17 +6,16 @@ import arc/bytecode/error_kind.{type ErrorKind}
 import arc/bytecode/key.{type PropertyKey}
 import arc/host_hooks.{type ConsoleLevel, type HostHooks}
 import arc/internal/ordered_entries.{type OrderedEntries}
-import arc/internal/temporal_calendar.{type Calendar}
 import arc/internal/tree_array.{type TreeArray}
 import arc/rt/arena.{type Arena}
-import arc/rt/builtins/temporal_tz
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate, type SuspendedFrame}
 import arc/rt/intl_data.{
   type BoundGetterService, type ConstructibleService, type IntlData,
   type IntlService,
 }
+import arc/rt/temporal_data.{type TemporalData}
 import arc/rt/wire
-import gleam/bit_array
+import arc/time_zone
 import gleam/dict.{type Dict}
 import gleam/float
 import gleam/int
@@ -267,98 +266,6 @@ pub type SharedBlock {
 pub type SabOwner
 
 pub type WaiterRef
-
-@external(erlang, "arc_rt_sab_ffi", "byte_length")
-fn byte_length(owner: SabOwner) -> Int
-
-@external(erlang, "arc_rt_sab_ffi", "read")
-fn read(owner: SabOwner) -> BitArray
-
-@external(erlang, "arc_rt_sab_ffi", "write")
-fn write(owner: SabOwner, byte_offset: Int, chunk: BitArray) -> Nil
-
-pub fn buffer_is_shared(storage: BufferStorage) -> Bool {
-  case storage {
-    Shared(..) -> True
-    Bytes(..) | Immutable(..) | Detached(..) -> False
-  }
-}
-
-pub fn buffer_is_detached(storage: BufferStorage) -> Bool {
-  case storage {
-    Detached(..) -> True
-    Bytes(..) | Immutable(..) | Shared(..) -> False
-  }
-}
-
-pub fn buffer_is_immutable(storage: BufferStorage) -> Bool {
-  case storage {
-    Immutable(..) -> True
-    Bytes(..) | Shared(..) | Detached(..) -> False
-  }
-}
-
-pub fn buffer_max_byte_length(storage: BufferStorage) -> Option(Int) {
-  case storage {
-    Detached(max_byte_length:)
-    | Bytes(max_byte_length:, ..)
-    | Shared(max_byte_length:, ..) -> max_byte_length
-    Immutable(..) -> None
-  }
-}
-
-pub fn buffer_byte_size(storage: BufferStorage) -> Int {
-  case storage {
-    Detached(..) -> 0
-    Bytes(bytes:, ..)
-    | Immutable(bytes:)
-    | Shared(block: LocalBlock(bytes:), ..) -> bit_array.byte_size(bytes)
-    Shared(block: OwnerBlock(byte_length:, ..), max_byte_length: None) ->
-      byte_length
-    Shared(block: OwnerBlock(owner:, ..), max_byte_length: Some(_)) ->
-      byte_length(owner)
-  }
-}
-
-pub fn buffer_bits(storage: BufferStorage) -> Option(BitArray) {
-  case storage {
-    Detached(..) -> None
-    Bytes(bytes:, ..)
-    | Immutable(bytes:)
-    | Shared(block: LocalBlock(bytes:), ..) -> Some(bytes)
-    Shared(block: OwnerBlock(owner:, ..), ..) -> Some(read(owner))
-  }
-}
-
-pub fn buffer_store_region(
-  storage: BufferStorage,
-  new_bits: BitArray,
-  byte_offset: Int,
-  count: Int,
-) -> BufferStorage {
-  case storage {
-    Bytes(bytes: _, max_byte_length:) ->
-      Bytes(bytes: new_bits, max_byte_length:)
-    Shared(block:, max_byte_length:) -> {
-      let assert True =
-        byte_offset >= 0
-        && count >= 0
-        && byte_offset + count <= bit_array.byte_size(new_bits)
-        as "buffer_store_region: write range outside the new buffer image"
-      case block {
-        LocalBlock(_) ->
-          Shared(block: LocalBlock(bytes: new_bits), max_byte_length:)
-        OwnerBlock(owner:, ..) -> {
-          let assert Ok(chunk) = bit_array.slice(new_bits, byte_offset, count)
-            as "buffer_store_region: region checked above"
-          let Nil = write(owner, byte_offset, chunk)
-          storage
-        }
-      }
-    }
-    Immutable(..) | Detached(..) -> storage
-  }
-}
 
 pub type CompiledCode
 
@@ -1716,12 +1623,6 @@ pub type PlainDateTimeMethod {
   PlainDateTimeToZonedDateTime
 }
 
-pub type TemporalZone {
-  UtcZone
-  OffsetZone(ns: Int)
-  IanaZone(zone: temporal_tz.Zone)
-}
-
 pub type InstantStaticName {
   InstantFrom
   InstantFromEpochMilliseconds
@@ -1755,50 +1656,6 @@ pub type TemporalNowName {
   NowPlainTimeISO
   NowPlainDateTimeISO
   NowZonedDateTimeISO
-}
-
-pub type TemporalData {
-  TemporalInstant(epoch_ns: Int)
-  TemporalDate(year: Int, month: Int, day: Int, calendar: Calendar)
-  TemporalTime(
-    hour: Int,
-    minute: Int,
-    second: Int,
-    millisecond: Int,
-    microsecond: Int,
-    nanosecond: Int,
-  )
-  TemporalDateTime(
-    year: Int,
-    month: Int,
-    day: Int,
-    hour: Int,
-    minute: Int,
-    second: Int,
-    millisecond: Int,
-    microsecond: Int,
-    nanosecond: Int,
-    calendar: Calendar,
-  )
-  TemporalYearMonth(year: Int, month: Int, day: Int, calendar: Calendar)
-  TemporalMonthDay(month: Int, day: Int, ref_year: Int, calendar: Calendar)
-  TemporalDuration(
-    years: Int,
-    months: Int,
-    weeks: Int,
-    days: Int,
-    hours: Int,
-    minutes: Int,
-    seconds: Int,
-    milliseconds: Int,
-    microseconds: Int,
-    nanoseconds: Int,
-  )
-  TemporalZonedDateTime(
-    epoch_ns: Int,
-    time_zone: TemporalZone,
-    calendar: Calendar,
-  )
 }
 
 pub type AsyncGenResumeKind {
@@ -1970,18 +1827,6 @@ pub fn plain_object(
 }
 
 pub type ShapeSlots
-
-@external(erlang, "arc_rt_obj_ffi", "shape_slots_new")
-pub fn shape_slots_new() -> ShapeSlots
-
-@external(erlang, "arc_rt_obj_ffi", "shape_slots_get")
-pub fn shape_slots_get(slots: ShapeSlots, off: Int) -> JsVal
-
-@external(erlang, "arc_rt_obj_ffi", "shape_slots_set")
-pub fn shape_slots_set(slots: ShapeSlots, off: Int, v: JsVal) -> ShapeSlots
-
-@external(erlang, "arc_rt_obj_ffi", "shape_slots_append")
-pub fn shape_slots_append(slots: ShapeSlots, v: JsVal) -> ShapeSlots
 
 pub type ShapeDesc {
   ShapeDesc(
@@ -2340,7 +2185,7 @@ pub type Agent {
     // gc only collects when this is 0
     call_depth: Int,
     // zones loaded through hooks.load_time_zone, by proper id
-    tz_zones: Dict(String, temporal_tz.Zone),
+    tz_zones: Dict(String, time_zone.Zone),
   )
 }
 

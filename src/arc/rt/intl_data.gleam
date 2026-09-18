@@ -1,6 +1,5 @@
-import arc/rt/builtins/temporal_tz
 import arc/time_zone
-import gleam/option.{type Option, None}
+import gleam/option.{type Option, None, Some}
 
 pub type NumberStyle {
   StyleDecimal
@@ -376,14 +375,14 @@ pub const empty_dtf_components = DateTimeComponents(
 pub type FormatTimeZone {
   // host zone, reported as "UTC"
   HostZone(zone: time_zone.TimeZone)
-  NamedZone(zone: temporal_tz.Zone)
+  NamedZone(zone: time_zone.Zone)
   FixedZone(id: String, offset_minutes: Int)
 }
 
 pub fn dtf_time_zone_id(tz: FormatTimeZone) -> String {
   case tz {
     HostZone(_) -> "UTC"
-    NamedZone(zone:) -> temporal_tz.zone_id(zone)
+    NamedZone(zone:) -> time_zone.zone_id(zone)
     FixedZone(id:, ..) -> id
   }
 }
@@ -523,4 +522,283 @@ pub type DurationFormatState {
     nanoseconds: DurationUnitOptions,
     fractional_digits: Option(Int),
   )
+}
+
+pub fn collator_usage_to_js_string(v: CollatorUsage) -> String {
+  case v {
+    UsageSort -> "sort"
+    UsageSearch -> "search"
+  }
+}
+
+pub fn collator_sensitivity_to_js_string(v: CollatorSensitivity) -> String {
+  case v {
+    SensBase -> "base"
+    SensAccent -> "accent"
+    SensCase -> "case"
+    SensVariant -> "variant"
+  }
+}
+
+pub fn case_first_to_js_string(v: CaseFirst) -> String {
+  case v {
+    CaseFirstUpper -> "upper"
+    CaseFirstLower -> "lower"
+    CaseFirstFalse -> "false"
+  }
+}
+
+pub fn case_first_from_js_string(s: String) -> Option(CaseFirst) {
+  case s {
+    "upper" -> Some(CaseFirstUpper)
+    "lower" -> Some(CaseFirstLower)
+    "false" -> Some(CaseFirstFalse)
+    _ -> None
+  }
+}
+
+pub fn num_style_to_js_string(v: NumberStyle) -> String {
+  case v {
+    StyleDecimal -> "decimal"
+    StylePercent -> "percent"
+    StyleCurrency(..) -> "currency"
+    StyleUnit(..) -> "unit"
+  }
+}
+
+pub fn notation_to_js_string(v: Notation) -> String {
+  case v {
+    NotationStandard -> "standard"
+    NotationScientific -> "scientific"
+    NotationEngineering -> "engineering"
+    NotationCompact(..) -> "compact"
+  }
+}
+
+pub fn compact_display_to_js_string(v: CompactDisplay) -> String {
+  case v {
+    CompactShort -> "short"
+    CompactLong -> "long"
+  }
+}
+
+pub fn sign_display_to_js_string(v: SignDisplay) -> String {
+  case v {
+    SignAuto -> "auto"
+    SignNever -> "never"
+    SignAlways -> "always"
+    SignExceptZero -> "exceptZero"
+    SignNegative -> "negative"
+  }
+}
+
+pub fn currency_display_to_js_string(v: CurrencyDisplay) -> String {
+  case v {
+    CurrencyCode -> "code"
+    CurrencySymbol -> "symbol"
+    CurrencyNarrowSymbol -> "narrowSymbol"
+    CurrencyName -> "name"
+  }
+}
+
+pub fn currency_sign_to_js_string(v: CurrencySign) -> String {
+  case v {
+    StandardSign -> "standard"
+    AccountingSign -> "accounting"
+  }
+}
+
+pub fn unit_display_to_js_string(v: UnitDisplay) -> String {
+  case v {
+    UnitShort -> "short"
+    UnitNarrow -> "narrow"
+    UnitLong -> "long"
+  }
+}
+
+pub fn rounding_mode_to_js_string(v: RoundingMode) -> String {
+  case v {
+    RoundCeil -> "ceil"
+    RoundFloor -> "floor"
+    RoundExpand -> "expand"
+    RoundTrunc -> "trunc"
+    RoundHalfCeil -> "halfCeil"
+    RoundHalfFloor -> "halfFloor"
+    RoundHalfExpand -> "halfExpand"
+    RoundHalfTrunc -> "halfTrunc"
+    RoundHalfEven -> "halfEven"
+  }
+}
+
+pub fn rounding_priority_to_js_string(v: RoundingPriority) -> String {
+  case v {
+    PriorityAuto -> "auto"
+    PriorityMorePrecision -> "morePrecision"
+    PriorityLessPrecision -> "lessPrecision"
+  }
+}
+
+pub fn trailing_zero_display_to_js_string(v: TrailingZeroDisplay) -> String {
+  case v {
+    TrailingZeroAuto -> "auto"
+    TrailingZeroStripIfInteger -> "stripIfInteger"
+  }
+}
+
+pub fn numeric_width_to_js_string(v: NumericWidth) -> String {
+  case v {
+    Numeric -> "numeric"
+    TwoDigit -> "2-digit"
+  }
+}
+
+pub fn name_width_to_js_string(v: NameWidth) -> String {
+  case v {
+    WidthLong -> "long"
+    WidthShort -> "short"
+    WidthNarrow -> "narrow"
+  }
+}
+
+pub fn month_width_to_js_string(v: MonthWidth) -> String {
+  case v {
+    MonthNum(w) -> numeric_width_to_js_string(w)
+    MonthName(w) -> name_width_to_js_string(w)
+  }
+}
+
+pub fn time_zone_name_width_to_js_string(v: TimeZoneNameWidth) -> String {
+  case v {
+    ZoneShort -> "short"
+    ZoneLong -> "long"
+    ZoneShortOffset -> "shortOffset"
+    ZoneLongOffset -> "longOffset"
+    ZoneShortGeneric -> "shortGeneric"
+    ZoneLongGeneric -> "longGeneric"
+  }
+}
+
+pub fn hour_cycle_to_js_string(v: HourCycle) -> String {
+  case v {
+    H11 -> "h11"
+    H12 -> "h12"
+    H23 -> "h23"
+    H24 -> "h24"
+  }
+}
+
+pub fn date_style_to_js_string(v: DateStyle) -> String {
+  case v {
+    DateFull -> "full"
+    DateLong -> "long"
+    DateMedium -> "medium"
+    DateShort -> "short"
+  }
+}
+
+pub fn time_style_to_js_string(v: TimeStyle) -> String {
+  case v {
+    TimeFull -> "full"
+    TimeLong -> "long"
+    TimeMedium -> "medium"
+    TimeShort -> "short"
+  }
+}
+
+pub fn plural_type_to_js_string(v: PluralType) -> String {
+  case v {
+    Cardinal -> "cardinal"
+    Ordinal -> "ordinal"
+  }
+}
+
+pub fn list_format_type_to_js_string(v: ListFormatType) -> String {
+  case v {
+    Conjunction -> "conjunction"
+    Disjunction -> "disjunction"
+    UnitList -> "unit"
+  }
+}
+
+pub fn list_format_style_to_js_string(v: ListFormatStyle) -> String {
+  case v {
+    ListLong -> "long"
+    ListShort -> "short"
+    ListNarrow -> "narrow"
+  }
+}
+
+pub fn rtf_style_to_js_string(v: RelativeTimeStyle) -> String {
+  case v {
+    RelativeLong -> "long"
+    RelativeShort -> "short"
+    RelativeNarrow -> "narrow"
+  }
+}
+
+pub fn rtf_numeric_to_js_string(v: RelativeTimeNumeric) -> String {
+  case v {
+    NumericAlways -> "always"
+    NumericAuto -> "auto"
+  }
+}
+
+pub fn granularity_to_js_string(v: Granularity) -> String {
+  case v {
+    GraphemeGranularity -> "grapheme"
+    WordGranularity -> "word"
+    SentenceGranularity -> "sentence"
+  }
+}
+
+pub fn display_names_type_to_js_string(v: DisplayNamesType) -> String {
+  case v {
+    LanguageNames -> "language"
+    RegionNames -> "region"
+    ScriptNames -> "script"
+    CurrencyNames -> "currency"
+    CalendarNames -> "calendar"
+    DateTimeFieldNames -> "dateTimeField"
+  }
+}
+
+pub fn display_names_fallback_to_js_string(v: DisplayNamesFallback) -> String {
+  case v {
+    CodeFallback -> "code"
+    NoFallback -> "none"
+  }
+}
+
+pub fn language_display_to_js_string(v: LanguageDisplay) -> String {
+  case v {
+    DialectNames -> "dialect"
+    StandardNames -> "standard"
+  }
+}
+
+pub fn duration_unit_style_to_js_string(v: DurationUnitStyle) -> String {
+  case v {
+    UnitStyleLong -> "long"
+    UnitStyleShort -> "short"
+    UnitStyleNarrow -> "narrow"
+    UnitStyleNumeric -> "numeric"
+    UnitStyleTwoDigit -> "2-digit"
+    UnitStyleFractional -> "numeric"
+  }
+}
+
+pub fn duration_display_to_js_string(v: DurationDisplay) -> String {
+  case v {
+    DisplayAuto -> "auto"
+    DisplayAlways -> "always"
+  }
+}
+
+pub fn duration_base_style_to_js_string(v: DurationBaseStyle) -> String {
+  case v {
+    BaseLong -> "long"
+    BaseShort -> "short"
+    BaseNarrow -> "narrow"
+    BaseDigital -> "digital"
+  }
 }

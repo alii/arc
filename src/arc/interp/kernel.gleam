@@ -1,136 +1,16 @@
 // exports may answer Miss, test with is(v, Miss) before use
 
-import arc/bytecode/binop.{type PureBinOp}
+import arc/bytecode/binop.{type ClassifiedBinOp, type PureBinOp}
 import arc/bytecode/key.{type PropertyKey}
 import arc/bytecode/lexical.{type LexicalSlots}
-import arc/bytecode/opcode.{type ClassifiedBinOp}
 import arc/internal/tuple_array.{type TupleArray}
-import arc/interp/state.{type State, type StepExit}
 import arc/rt/bytecode.{type EnvCapture, type EnvTuple}
 import arc/rt/types.{
   type Agent, type Cell, type Handle, type JsVal, type LexicalGlobal,
   type Property, type Store, type SymbolId,
 }
-import gleam
 import gleam/dict.{type Dict}
 import gleam/option.{type Option}
-
-pub type Guarded(v) {
-  Ok(value: v, agent: Agent)
-  Threw(agent: Agent, thrown: JsVal)
-}
-
-pub fn guarded(
-  outcome: Guarded(v),
-  state: State,
-) -> Result(#(v, State), StepExit) {
-  case outcome {
-    Ok(value:, agent:) -> gleam.Ok(#(value, state.with_agent(state, agent)))
-    Threw(agent:, thrown:) ->
-      Error(state.Threw(thrown, state.with_agent(state, agent)))
-  }
-}
-
-// pass a module function, never a fresh closure; st is the agent or state
-@external(erlang, "arc_interp_guard_ffi", "guard1")
-pub fn guard1(f: fn(st) -> #(v, Agent), st: st) -> Guarded(v)
-
-@external(erlang, "arc_interp_guard_ffi", "guard2")
-pub fn guard2(f: fn(st, a) -> #(v, Agent), st: st, a: a) -> Guarded(v)
-
-@external(erlang, "arc_interp_guard_ffi", "guard3")
-pub fn guard3(
-  f: fn(Agent, a, b) -> #(v, Agent),
-  agent: Agent,
-  a: a,
-  b: b,
-) -> Guarded(v)
-
-@external(erlang, "arc_interp_guard_ffi", "guard4")
-pub fn guard4(
-  f: fn(Agent, a, b, c) -> #(v, Agent),
-  agent: Agent,
-  a: a,
-  b: b,
-  c: c,
-) -> Guarded(v)
-
-@external(erlang, "arc_interp_guard_ffi", "guard5")
-pub fn guard5(
-  f: fn(Agent, a, b, c, d) -> #(v, Agent),
-  agent: Agent,
-  a: a,
-  b: b,
-  c: c,
-  d: d,
-) -> Guarded(v)
-
-@external(erlang, "arc_interp_guard_ffi", "guard6")
-pub fn guard6(
-  f: fn(Agent, a, b, c, d, e) -> #(v, Agent),
-  agent: Agent,
-  a: a,
-  b: b,
-  c: c,
-  d: d,
-  e: e,
-) -> Guarded(v)
-
-@external(erlang, "arc_interp_guard_ffi", "guard7")
-pub fn guard7(
-  f: fn(Agent, a, b, c, d, e, g) -> #(v, Agent),
-  agent: Agent,
-  a: a,
-  b: b,
-  c: c,
-  d: d,
-  e: e,
-  g: g,
-) -> Guarded(v)
-
-@external(erlang, "arc_interp_guard_ffi", "guard_unit1")
-pub fn guard_unit1(f: fn(Agent) -> Agent, agent: Agent) -> Guarded(Nil)
-
-@external(erlang, "arc_interp_guard_ffi", "guard_unit2")
-pub fn guard_unit2(f: fn(Agent, a) -> Agent, agent: Agent, a: a) -> Guarded(Nil)
-
-@external(erlang, "arc_interp_guard_ffi", "guard_unit3")
-pub fn guard_unit3(
-  f: fn(Agent, a, b) -> Agent,
-  agent: Agent,
-  a: a,
-  b: b,
-) -> Guarded(Nil)
-
-@external(erlang, "arc_interp_guard_ffi", "guard_unit4")
-pub fn guard_unit4(
-  f: fn(Agent, a, b, c) -> Agent,
-  agent: Agent,
-  a: a,
-  b: b,
-  c: c,
-) -> Guarded(Nil)
-
-@external(erlang, "arc_interp_guard_ffi", "guard_unit5")
-pub fn guard_unit5(
-  f: fn(Agent, a, b, c, d) -> Agent,
-  agent: Agent,
-  a: a,
-  b: b,
-  c: c,
-  d: d,
-) -> Guarded(Nil)
-
-@external(erlang, "arc_interp_guard_ffi", "guard_unit6")
-pub fn guard_unit6(
-  f: fn(Agent, a, b, c, d, e) -> Agent,
-  agent: Agent,
-  a: a,
-  b: b,
-  c: c,
-  d: d,
-  e: e,
-) -> Guarded(Nil)
 
 pub type Sentinel {
   Miss
@@ -157,11 +37,8 @@ pub fn capture_env(
   locals: TupleArray(JsVal),
 ) -> EnvTuple
 
-@external(erlang, "arc_interp_ffi", "ctor_prototype")
-pub fn ctor_prototype(agent: Agent, new_target: JsVal) -> Handle
-
-@external(erlang, "arc_interp_ffi", "list_of")
-pub fn list_of(agent: Agent, array_like: JsVal) -> List(JsVal)
+@external(erlang, "arc_interp_ffi", "list_from_array_like")
+pub fn list_from_array_like(agent: Agent, array_like: JsVal) -> List(JsVal)
 
 @external(erlang, "arc_rt_ops_ffi", "classified_binop")
 pub fn classified_binop(kind: ClassifiedBinOp, a: JsVal, b: JsVal) -> JsVal
@@ -297,7 +174,7 @@ pub fn put_elem(store: Store, obj: JsVal, index: JsVal, v: JsVal) -> Store
 
 @external(erlang, "arc_interp_locals_ffi", "frame_locals")
 pub fn frame_locals(
-  env: env,
+  env: EnvTuple,
   lexical: LexicalSlots,
   this: JsVal,
   active_func: JsVal,
@@ -311,8 +188,8 @@ pub fn frame_locals(
 @external(erlang, "arc_interp_locals_ffi", "sloppy_this")
 pub fn sloppy_this(this: JsVal, global: Handle) -> JsVal
 
-@external(erlang, "arc_interp_locals_ffi", "flush_regs")
-pub fn flush_regs(
+@external(erlang, "arc_interp_locals_ffi", "flush_registers")
+pub fn flush_registers(
   locals: TupleArray(JsVal),
   a: Int,
   b: Int,
@@ -322,13 +199,13 @@ pub fn flush_regs(
 
 // hd([atom]) folds to a constant, not a call
 @external(erlang, "erlang", "hd")
-pub fn val(of: List(Sentinel)) -> JsVal
+pub fn literal(of: List(Sentinel)) -> JsVal
 
 @external(erlang, "erlang", "hd")
-pub fn object(of: List(Handle)) -> JsVal
+pub fn object_val(of: List(Handle)) -> JsVal
 
 @external(erlang, "erlang", "hd")
-pub fn handle(of: List(JsVal)) -> Handle
+pub fn to_handle_unchecked(of: List(JsVal)) -> Handle
 
 pub type Accessor {
   Accessor(get: Option(JsVal), set: Option(JsVal))
@@ -350,3 +227,13 @@ pub fn for_in_list(keys: List(JsVal)) -> JsVal
 
 @external(erlang, "arc_interp_ffi", "for_in_next")
 pub fn for_in_next(iter: JsVal) -> ForInStep
+
+pub type IterPlan {
+  ArrayAdvanced(done: Bool, value: JsVal, store: Store)
+  ResumeGenerator(gen_h: Handle)
+  IterMiss
+}
+
+// §23.1.5.2.1 in the kernel only when the read observes nothing
+@external(erlang, "arc_interp_ffi", "iter_step")
+pub fn iter_step(store: Store, rec: JsVal) -> IterPlan

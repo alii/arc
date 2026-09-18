@@ -1,8 +1,9 @@
 // runtime-free resolve/parse/analyze walk over a module graph
 
-import arc/compiler/scope
-import arc/esm.{type Raw, type Resolved}
-import arc/module/load_error.{type LoadError, type ResolveError}
+import arc/compiler/scope_builder
+import arc/module/loader.{type LoadError, type ResolveError}
+import arc/module/specifier.{type Raw, type Resolved}
+import arc/module/summary
 import arc/parser
 import arc/parser/ast
 import gleam/bool
@@ -12,7 +13,7 @@ import gleam/result
 import gleam/set.{type Set}
 
 pub type Resolve =
-  fn(esm.ModuleRequest, Resolved) -> Result(Resolved, ResolveError)
+  fn(summary.ModuleRequest, Resolved) -> Result(Resolved, ResolveError)
 
 pub type Load =
   fn(Resolved) -> Result(String, LoadError)
@@ -22,24 +23,24 @@ pub type ParsedModule {
     specifier: Resolved,
     source: String,
     items: List(ast.ModuleItem),
-    sb: scope.ScopeBuilder,
-    summary: esm.ModuleSummary,
+    sb: scope_builder.ScopeBuilder,
+    summary: summary.ModuleSummary,
   )
 }
 
 pub type SourceModule {
   SourceModule(
     parsed: ParsedModule,
-    resolved: List(#(esm.ModuleRequest, Resolved)),
+    edges: List(#(summary.ModuleRequest, Resolved)),
   )
 }
 
-pub fn specifier_map(m: SourceModule) -> esm.SpecifierMap {
+pub fn specifier_map(m: SourceModule) -> specifier.SpecifierMap {
   use acc, #(request, resolved) <- list.fold(
-    m.resolved,
-    esm.new_specifier_map(),
+    m.edges,
+    specifier.new_specifier_map(),
   )
-  esm.insert_specifier(acc, request.specifier, resolved)
+  specifier.insert_specifier(acc, request.specifier, resolved)
 }
 
 pub type SourceGraph {
@@ -58,7 +59,7 @@ pub type GraphError {
   SourcePhaseUnsupported(specifier: Resolved)
 }
 
-pub fn prepare(
+fn parse_and_analyze(
   specifier: Resolved,
   source: String,
 ) -> Result(ParsedModule, GraphError) {
@@ -66,7 +67,13 @@ pub fn prepare(
     parser.parse_module(source)
     |> result.map_error(ParseFailed(specifier, _)),
   )
-  ParsedModule(specifier:, source:, items:, sb:, summary: esm.analyze(items))
+  ParsedModule(
+    specifier:,
+    source:,
+    items:,
+    sb:,
+    summary: summary.analyze(items),
+  )
 }
 
 type Walk {
@@ -86,7 +93,7 @@ pub fn load(
   load_source: Load,
   is_host: fn(Resolved) -> Bool,
 ) -> Result(SourceGraph, GraphError) {
-  use entry <- result.try(prepare(entry_specifier, entry_source))
+  use entry <- result.try(parse_and_analyze(entry_specifier, entry_source))
   use walk <- result.map(visit(
     entry,
     resolve,
@@ -128,7 +135,7 @@ fn visit(
       use source <- result.try(
         load_source(resolved) |> result.map_error(LoadFailed(resolved, _)),
       )
-      use dep <- result.try(prepare(resolved, source))
+      use dep <- result.try(parse_and_analyze(resolved, source))
       use walk <- result.map(visit(dep, resolve, load_source, is_host, walk))
       #(walk, edges)
     }),
@@ -144,7 +151,7 @@ fn visit(
       modules: dict.insert(
         walk.modules,
         specifier,
-        SourceModule(parsed: node, resolved: list.reverse(edges)),
+        SourceModule(parsed: node, edges: list.reverse(edges)),
       ),
       order: [specifier, ..walk.order],
     ),

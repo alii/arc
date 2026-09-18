@@ -6,11 +6,11 @@ import arc/rt/typed_array_bytes.{
 }
 import arc/rt/types.{
   type Agent, type BigIntKind, type BufferStorage, type Handle, type JsElements,
-  type JsNum, type JsVal, type NumberKind, type Property, type TypedArrayKind,
-  AccessorProperty, ArgumentsObj, ArrayBufferObj, ArrayObj, BigKind,
-  DataProperty, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KHandle, KNum,
-  NumKind, Ordinary, SObject, SShapedObject, classify, mk_bigint, mk_int,
-  mk_number,
+  type JsNum, type JsVal, type NumberKind, type Property, type SabOwner,
+  type TypedArrayKind, AccessorProperty, ArgumentsObj, ArrayBufferObj, ArrayObj,
+  BigKind, Bytes, DataProperty, Detached, Immutable, JFloat, JInt, JNan, JNegInf,
+  JPosInf, KBig, KHandle, KNum, LocalBlock, NumKind, Ordinary, OwnerBlock,
+  SObject, SShapedObject, Shared, classify, mk_bigint, mk_int, mk_number,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -21,6 +21,98 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
+@external(erlang, "arc_rt_sab_ffi", "byte_length")
+fn byte_length(owner: SabOwner) -> Int
+
+@external(erlang, "arc_rt_sab_ffi", "read")
+fn read(owner: SabOwner) -> BitArray
+
+@external(erlang, "arc_rt_sab_ffi", "write")
+fn write(owner: SabOwner, byte_offset: Int, chunk: BitArray) -> Nil
+
+pub fn buffer_is_shared(storage: BufferStorage) -> Bool {
+  case storage {
+    Shared(..) -> True
+    Bytes(..) | Immutable(..) | Detached(..) -> False
+  }
+}
+
+pub fn buffer_is_detached(storage: BufferStorage) -> Bool {
+  case storage {
+    Detached(..) -> True
+    Bytes(..) | Immutable(..) | Shared(..) -> False
+  }
+}
+
+pub fn buffer_is_immutable(storage: BufferStorage) -> Bool {
+  case storage {
+    Immutable(..) -> True
+    Bytes(..) | Shared(..) | Detached(..) -> False
+  }
+}
+
+pub fn buffer_max_byte_length(storage: BufferStorage) -> Option(Int) {
+  case storage {
+    Detached(max_byte_length:)
+    | Bytes(max_byte_length:, ..)
+    | Shared(max_byte_length:, ..) -> max_byte_length
+    Immutable(..) -> None
+  }
+}
+
+pub fn buffer_byte_size(storage: BufferStorage) -> Int {
+  case storage {
+    Detached(..) -> 0
+    Bytes(bytes:, ..)
+    | Immutable(bytes:)
+    | Shared(block: LocalBlock(bytes:), ..) -> bit_array.byte_size(bytes)
+    Shared(block: OwnerBlock(byte_length:, ..), max_byte_length: None) ->
+      byte_length
+    Shared(block: OwnerBlock(owner:, ..), max_byte_length: Some(_)) ->
+      byte_length(owner)
+  }
+}
+
+pub fn buffer_bits(storage: BufferStorage) -> Option(BitArray) {
+  case storage {
+    Detached(..) -> None
+    Bytes(bytes:, ..)
+    | Immutable(bytes:)
+    | Shared(block: LocalBlock(bytes:), ..) -> Some(bytes)
+    Shared(block: OwnerBlock(owner:, ..), ..) -> Some(read(owner))
+  }
+}
+
+pub fn buffer_store_region(
+  storage: BufferStorage,
+  new_bits: BitArray,
+  byte_offset: Int,
+  count: Int,
+) -> BufferStorage {
+  case storage {
+    Bytes(bytes: _, max_byte_length:) ->
+      Bytes(bytes: new_bits, max_byte_length:)
+    Shared(block:, max_byte_length:) -> {
+      let assert True =
+        byte_offset >= 0
+        && count >= 0
+        && byte_offset + count <= bit_array.byte_size(new_bits)
+        as "buffer_store_region: write range outside the new buffer image"
+      case block {
+        LocalBlock(_) ->
+          Shared(block: LocalBlock(bytes: new_bits), max_byte_length:)
+        OwnerBlock(owner:, ..) -> {
+          let assert Ok(chunk) = bit_array.slice(new_bits, byte_offset, count)
+            as "buffer_store_region: region checked above"
+          let Nil = write(owner, byte_offset, chunk)
+          storage
+        }
+      }
+    }
+    Immutable(..) | Detached(..) -> storage
+  }
+}
+
 pub fn storage(st: Agent, buffer: Handle) -> Option(BufferStorage) {
   case rt_store.t_cell_get(st, buffer) {
     SObject(kind: ArrayBufferObj(storage:), ..) -> Some(storage)
@@ -29,18 +121,18 @@ pub fn storage(st: Agent, buffer: Handle) -> Option(BufferStorage) {
 }
 
 pub fn bytes(st: Agent, buffer: Handle) -> Option(BitArray) {
-  storage(st, buffer) |> option.then(types.buffer_bits)
+  storage(st, buffer) |> option.then(buffer_bits)
 }
 
 pub fn is_immutable(st: Agent, buffer: Handle) -> Bool {
   storage(st, buffer)
-  |> option.map(types.buffer_is_immutable)
+  |> option.map(buffer_is_immutable)
   |> option.unwrap(False)
 }
 
 fn live_byte_size(st: Agent, buffer: Handle) -> Int {
   storage(st, buffer)
-  |> option.map(types.buffer_byte_size)
+  |> option.map(buffer_byte_size)
   |> option.unwrap(0)
 }
 
@@ -63,7 +155,7 @@ pub fn store_region(
     as "buffer.store_region: handle does not hold an ArrayBuffer"
   SObject(
     ..cell,
-    kind: ArrayBufferObj(storage: types.buffer_store_region(
+    kind: ArrayBufferObj(storage: buffer_store_region(
       storage,
       new_bits,
       byte_offset,
@@ -372,20 +464,20 @@ fn write_typed_element(
           // bounds taken here: coercion may have resized the buffer
           let bounds =
             view_bounds(
-              types.buffer_byte_size(storage),
+              buffer_byte_size(storage),
               view.elem_kind,
               view.byte_offset,
               view.length,
             )
           let off = view_element_offset(bounds, i)
           use <- bool.guard(!valid_integer_index(bounds, i), #(True, st))
-          use <- bool.guard(types.buffer_is_immutable(storage), #(False, st))
-          case types.buffer_bits(storage) {
+          use <- bool.guard(buffer_is_immutable(storage), #(False, st))
+          case buffer_bits(storage) {
             None -> #(True, st)
             Some(data) -> {
               let new_bits = write(data, off)
               let new_storage =
-                types.buffer_store_region(storage, new_bits, off, size)
+                buffer_store_region(storage, new_bits, off, size)
               let st =
                 rt_store.t_cell_set(
                   st,

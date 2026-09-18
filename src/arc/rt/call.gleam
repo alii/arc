@@ -1,5 +1,6 @@
 import arc/bytecode/key.{type PropertyKey, Named}
 import arc/internal/tree_array
+import arc/internal/unsafe
 import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -7,8 +8,8 @@ import arc/rt/types.{
   type Agent, type CompiledCode, type DirectEntry, type FnFlags, type Handle,
   type JsVal, type NativeToken, type ObjKind, type Property, type Realm, Agent,
   ArrayObj, BirthPending, BirthSettled, BoundFn, BytecodeFn, CompiledFn,
-  DataProperty, Dense, JInt, JPosInf, KHandle, KNull, KNum, KStr, KTdz, KUndef,
-  NativeFn, NoElements, ProxyObj, SObject, StringKey, classify, mk_int,
+  DataProperty, Dense, FnFlags, JInt, JPosInf, KHandle, KNull, KNum, KStr, KTdz,
+  KUndef, NativeFn, NoElements, ProxyObj, SObject, StringKey, classify, mk_int,
   mk_number, mk_object, mk_tdz, mk_undefined,
 }
 import arc/rt/val as rt_val
@@ -42,7 +43,7 @@ pub type Completion(a) {
   ThrowCompletion(JsVal)
 }
 
-@external(erlang, "arc_rt_call_ffi", "t_call_protected")
+@external(erlang, "arc_rt_call_ffi", "try_call_code")
 fn try_call_code(
   st: Agent,
   code: CompiledCode,
@@ -50,13 +51,13 @@ fn try_call_code(
   args: List(JsVal),
 ) -> #(Completion(JsVal), Agent)
 
-@external(erlang, "arc_rt_call_ffi", "t_apply_protected")
+@external(erlang, "arc_rt_call_ffi", "try_run")
 pub fn try_run(
   st: Agent,
   body: fn(Agent) -> #(a, Agent),
 ) -> #(Completion(a), Agent)
 
-@external(erlang, "arc_rt_call_ffi", "t_native_protected")
+@external(erlang, "arc_rt_call_ffi", "try_call_native")
 fn try_call_native(
   st: Agent,
   token: NativeToken,
@@ -781,6 +782,33 @@ fn alloc_fn_cell(
       extensible: True,
     ),
   )
+}
+
+pub fn builtin_function_flags() -> FnFlags {
+  FnFlags(
+    is_constructor: False,
+    is_class_constructor: False,
+    is_derived_constructor: False,
+    is_arrow: True,
+    is_method: False,
+    is_generator: False,
+    is_async: False,
+    is_strict: True,
+  )
+}
+
+// a host closure callable as a compiled function, frame ignored
+pub fn t_new_builtin_function(
+  st: Agent,
+  name: String,
+  arity: Int,
+  body: fn(Agent, List(JsVal)) -> #(JsVal, Agent),
+) -> #(Handle, Agent) {
+  let code: CompiledCode =
+    unsafe.coerce(fn(st: Agent, _frame: Frame, args: List(JsVal)) {
+      body(st, args)
+    })
+  t_fn_new(st, code, builtin_function_flags(), name, arity, None, None)
 }
 
 // no .prototype here, makeconstructor is separate

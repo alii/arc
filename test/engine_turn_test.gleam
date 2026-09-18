@@ -1,6 +1,6 @@
 import arc/engine.{type Engine, ModuleThrew, Returned, Threw}
 import arc/host.{Context}
-import arc/module_host
+import arc/module/loader
 import arc/rt/async as rt_async
 import arc/rt/gc as rt_gc
 import arc/rt/types.{
@@ -148,8 +148,8 @@ pub fn eval_module_keeps_thrown_value_test() {
       eng,
       "/main.js",
       source,
-      module_host.forbid_resolve,
-      module_host.forbid_load,
+      loader.forbid_resolve,
+      loader.forbid_load,
     )
   assert show(eng, global(eng, "ran")) == "'yes'"
   assert is_live_and_unpinned(eng, e)
@@ -178,8 +178,8 @@ pub fn drain_runs_once_per_turn_test() {
       eng,
       "/m.js",
       "export const y = await Promise.resolve(2);",
-      module_host.forbid_resolve,
-      module_host.forbid_load,
+      loader.forbid_resolve,
+      loader.forbid_load,
       recording,
     )
   assert rt_helpers.recorded() == ["drain"]

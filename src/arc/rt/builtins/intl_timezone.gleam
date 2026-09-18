@@ -1,13 +1,12 @@
-import arc/internal/host_time
 import arc/rt/builtins/intl_format
-import arc/rt/builtins/temporal_common
-import arc/rt/builtins/temporal_tz
+import arc/rt/builtins/temporal_time_zone
 import arc/rt/intl_data.{
   type FormatTimeZone, type TimeZoneNameWidth, FixedZone, HostZone, NamedZone,
   ZoneLong, ZoneLongGeneric, ZoneLongOffset, ZoneShort, ZoneShortGeneric,
   ZoneShortOffset,
 }
 import arc/rt/types.{type Agent}
+import arc/time_zone
 import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/string
@@ -24,21 +23,21 @@ pub fn lookup(st: Agent, s: String) -> #(Option(FormatTimeZone), Agent) {
 }
 
 fn is_utc(name: String) -> Bool {
-  case temporal_tz.known_identifier(name) {
-    Some(identifier) -> temporal_tz.primary_identifier(identifier) == "UTC"
+  case time_zone.known_identifier(name) {
+    Some(identifier) -> time_zone.primary_identifier(identifier) == "UTC"
     None -> False
   }
 }
 
 // a zone the host has no data for is not offered
 fn named_zone(st: Agent, s: String) -> #(Option(FormatTimeZone), Agent) {
-  case temporal_tz.known_identifier(s) {
+  case time_zone.known_identifier(s) {
     None -> #(None, st)
     Some(identifier) ->
-      case temporal_tz.primary_identifier(identifier) {
+      case time_zone.primary_identifier(identifier) {
         "UTC" -> #(Some(FixedZone(identifier, 0)), st)
         _ ->
-          case temporal_common.lookup_zone(st, identifier) {
+          case temporal_time_zone.lookup_zone(st, identifier) {
             #(Ok(zone), st) -> #(Some(NamedZone(zone:)), st)
             #(Error(_host_lacks_data), st) -> #(None, st)
           }
@@ -48,10 +47,10 @@ fn named_zone(st: Agent, s: String) -> #(Option(FormatTimeZone), Agent) {
 
 pub fn offset_at(tz: FormatTimeZone, instant_ms: Int) -> Int {
   case tz {
-    HostZone(zone:) -> host_time.zone_offset_at_utc_ms(zone, instant_ms)
+    HostZone(zone:) -> time_zone.zone_offset_at_utc_ms(zone, instant_ms)
     FixedZone(offset_minutes:, ..) -> offset_minutes
     NamedZone(zone:) ->
-      temporal_tz.offset_ns_at(zone, instant_ms * 1_000_000) / 60_000_000_000
+      time_zone.offset_ns_at(zone, instant_ms * 1_000_000) / 60_000_000_000
   }
 }
 

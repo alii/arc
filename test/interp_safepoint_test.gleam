@@ -7,6 +7,7 @@ import arc/rt/bytecode.{
   type FuncTemplate, FuncTemplate, ParkedOp, SuspendedFrame,
 }
 import arc/rt/gc as rt_gc
+import arc/rt/lang as rt_lang
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -281,7 +282,7 @@ pub fn closure_environment_and_constants_are_traced_test() {
         dict.new(),
       ),
     )
-  let st = rt_obj.t_global_set(st, <<"f">>, mk_object(fn_h))
+  let st = rt_lang.t_global_set(st, <<"f">>, mk_object(fn_h))
   let st = rt_gc.t_collect(st, [])
   assert rt_gc.t_is_live(st, captured_h)
   assert rt_gc.t_is_live(st, pooled_h)

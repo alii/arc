@@ -1,4 +1,4 @@
-import arc/repl/examples
+import arc/cli/examples
 import gleam/option.{None, Some}
 
 // examples.get is 1-based

@@ -2,7 +2,7 @@
 -module(arc_interp_ffi).
 -export([for_in_list/1, for_in_next/1,
          type_of/2,
-         box_get/2, cell_of/2, ctor_prototype/2, list_of/2, instance_of/4,
+         box_get/2, cell_of/2, list_from_array_like/2, instance_of/4,
          capture_env/2, iter_step/2]).
 
 -include("../rt/arc_rt_layout.hrl").
@@ -47,33 +47,8 @@ cell_of(St, {?HANDLE_TAG, Id}) ->
     end;
 cell_of(_, _) -> miss.
 
-%% §10.1.13 step 2 when own data "prototype" is an object
-ctor_prototype(St, {?HANDLE_TAG, Id}) ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, St))) of
-        Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
-            Kind = kind_tag(element(?SOBJECT_KIND, Cell)),
-            case
-                Kind =:= ?BYTECODEFN_TAG orelse Kind =:= ?COMPILEDFN_TAG
-                orelse Kind =:= ?NATIVEFN_TAG
-            of
-                true ->
-                    case element(?SOBJECT_PROPS, Cell) of
-                        #{{?KEY_NAMED, <<"prototype">>} := Prop}
-                          when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
-                            case element(?DATAPROPERTY_VALUE, Prop) of
-                                {?HANDLE_TAG, _} = P -> P;
-                                _ -> miss
-                            end;
-                        _ -> miss
-                    end;
-                false -> miss
-            end;
-        _ -> miss
-    end;
-ctor_prototype(_, _) -> miss.
-
 %% §7.3.20 for plain arrays and unmapped arguments, holes miss
-list_of(St, {?HANDLE_TAG, Id}) ->
+list_from_array_like(St, {?HANDLE_TAG, Id}) ->
     case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, St))) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, Props, _, {?ELEMS_DENSE, A}, _}
           when map_size(Props) =:= 0 ->
@@ -94,7 +69,7 @@ list_of(St, {?HANDLE_TAG, Id}) ->
             [];
         _ -> miss
     end;
-list_of(_, _) -> miss.
+list_from_array_like(_, _) -> miss.
 
 dense_list(A, Len) ->
     case arc_tree_array_ffi:size(A) of

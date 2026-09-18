@@ -3,13 +3,13 @@ import arc/host_hooks.{type HostHooks, HostHooks}
 import arc/internal/unsafe
 import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
+import arc/rt/lang as rt_lang
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type CompiledCode, type JsVal, type JsValKind, FnFlags, JFloat,
-  JInt, KNum, StringKey,
+  type Agent, type CompiledCode, type JsVal, type JsValKind, JFloat, JInt, KNum,
+  StringKey,
 }
 import gleam/int
-import gleam/option.{None}
 
 pub fn quiet_hooks() -> HostHooks {
   HostHooks(
@@ -36,7 +36,7 @@ pub fn agent() -> Agent {
 }
 
 pub fn global(st: Agent, name: String) -> #(JsVal, Agent) {
-  rt_obj.t_global_get(st, <<name:utf8>>)
+  rt_lang.t_global_get(st, <<name:utf8>>)
 }
 
 pub fn get(st: Agent, recv: JsVal, name: String) -> #(JsVal, Agent) {
@@ -83,18 +83,6 @@ pub fn func(
   st: Agent,
   body: fn(Agent, List(JsVal)) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
-  let flags =
-    FnFlags(
-      is_constructor: False,
-      is_class_constructor: False,
-      is_derived_constructor: False,
-      is_arrow: True,
-      is_method: False,
-      is_generator: False,
-      is_async: False,
-      is_strict: True,
-    )
-  let code = as_code(fn(st, _frame, args) { body(st, args) })
-  let #(h, st) = rt_call.t_fn_new(st, code, flags, "f", 0, None, None)
+  let #(h, st) = rt_call.t_new_builtin_function(st, "f", 0, body)
   #(types.mk_object(h), st)
 }

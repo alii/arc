@@ -57,7 +57,7 @@ detected_zone() ->
 
 -spec time_zone_named(binary()) -> {ok, arc_tz_ffi:local_zone()} | {error, nil}.
 time_zone_named(Name) when is_binary(Name) ->
-    case arc_tz_ffi:lookup(Name) of
+    case arc_tz_ffi:known_identifier(Name) of
         none -> {error, nil};
         {some, Id} ->
             case zone_for_id(Id) of
@@ -137,7 +137,7 @@ zone_from_path_or_posix(Tz) ->
 
 known_zone("") -> none;
 known_zone(Name) ->
-    case arc_tz_ffi:lookup(unicode:characters_to_binary(Name)) of
+    case arc_tz_ffi:known_identifier(unicode:characters_to_binary(Name)) of
         {some, Id} -> zone_for_id(Id);
         none -> host_only_zone(Name)
     end.

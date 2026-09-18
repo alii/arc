@@ -106,7 +106,7 @@ t_get_named_ic(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
         _ -> miss
     end;
 t_get_named_ic(_, S, <<"length">>, _) when ?IS_STR(S) ->
-    arc_rt_js_string_ffi:len(S);
+    arc_rt_js_string_ffi:length(S);
 t_get_named_ic(_, _, _, _) -> miss.
 
 %% own overwrite only, size guards keep setelement inline

@@ -2,23 +2,11 @@ import arc/bytecode/error_kind.{JsError, RangeError}
 import arc/internal/int_math.{floor_div}
 import arc/internal/temporal_calendar
 import arc/rt/builtins/helpers
+import arc/rt/builtins/options.{get_options_object}
 import arc/rt/builtins/temporal_common.{
-  Compatible, DayUnit, Hour, InvalidIdentifier, Nanosecond, OffsetShowAuto,
-  OffsetShowNever, PreferOffset, Trunc, UnknownIdentifier, ZoneNameAuto,
-  ZoneNameCritical, ZoneNameNever, apply_since_duration, apply_since_mode,
-  apply_since_ns, as_if_positive_mode, balance_time_ns, calendar_suffix,
-  check_diff_setup, date_part, epoch_ns_to_iso_in, format_offset_full,
-  format_offset_rounded, get_calendar_name_option, get_difference_settings,
-  get_disambiguation_option, get_enum_option, get_fractional_digits,
-  get_offset_option, get_options_object, get_overflow_option,
-  get_rounding_mode_option, get_show_offset_option, get_time_zone_name_option,
-  get_unit_option, has_date_units, is_valid_epoch_ns, make_date_cal,
-  make_date_time_cal, make_duration, make_instant, make_time, make_zoned_cal,
-  max_rounding_increment, max_unit, parse_time_zone_identifier, require_temporal,
-  require_time_unit, round_options, round_to_increment, seconds_string_precision,
-  static_name, time_part_ns, time_unit_ns, time_zone_equals, time_zone_id,
-  to_temporal_time_zone, tz_offset_ns_at, unit_rank, valid_rounding_increment,
-  validate_epoch_ns, zoned_slot_of,
+  date_part, has_date_units, make_date_cal, make_date_time_cal, make_duration,
+  make_instant, make_time, make_zoned_cal, require_temporal, static_name,
+  time_part_ns, zoned_slot_of,
 }
 import arc/rt/builtins/temporal_diff.{diff_date_time_core}
 import arc/rt/builtins/temporal_fields.{
@@ -30,28 +18,47 @@ import arc/rt/builtins/temporal_iso.{
   epoch_ns_to_iso, format_iso_date, format_iso_time, int_sign,
   iso_date_from_epoch_days, ns_per_day, ns_per_hour, ns_per_ms,
 }
+import arc/rt/builtins/temporal_options.{
+  Compatible, OffsetShowAuto, OffsetShowNever, PreferOffset, ZoneNameAuto,
+  ZoneNameCritical, ZoneNameNever, calendar_suffix, get_calendar_name_option,
+  get_disambiguation_option, get_enum_option, get_offset_option,
+  get_overflow_option, get_show_offset_option, get_time_zone_name_option,
+}
 import arc/rt/builtins/temporal_plain_date.{date_field_cal, date_getter_name}
 import arc/rt/builtins/temporal_plain_time.{
   regulate_time, time_field, time_fields_apply, time_getter_name,
   to_temporal_time,
 }
-import arc/rt/builtins/temporal_tz
+import arc/rt/builtins/temporal_rounding.{
+  DayUnit, Hour, Nanosecond, Trunc, apply_since_duration, apply_since_mode,
+  apply_since_ns, as_if_positive_mode, balance_time_ns, check_diff_setup,
+  get_difference_settings, get_fractional_digits, get_rounding_mode_option,
+  get_unit_option, max_rounding_increment, max_unit, require_time_unit,
+  round_options, round_to_increment, seconds_string_precision, time_unit_ns,
+  unit_rank, valid_rounding_increment,
+}
+import arc/rt/builtins/temporal_time_zone.{
+  InvalidIdentifier, UnknownIdentifier, epoch_ns_to_iso_in, format_offset_full,
+  format_offset_rounded, is_valid_epoch_ns, parse_time_zone_identifier,
+  time_zone_equals, time_zone_id, to_temporal_time_zone, tz_offset_ns_at,
+  validate_epoch_ns,
+}
 import arc/rt/builtins/temporal_zoned_ops.{
   OptionOffset, date_time_fields_all_none, get_epoch_ns_for, interpret_offset,
   read_date_time_fields, start_of_day_ns, to_temporal_zoned,
 }
+import arc/rt/temporal_data.{type TemporalZone, IanaZone, OffsetZone, UtcZone}
 import arc/rt/types.{
   type Agent, type JsVal, type NativeToken, type TemporalProtos,
-  type TemporalStaticName, type TemporalZone, type TemporalZonedGetter,
-  type ZonedDateTimeMethod, CompareStatic, DateCalendarId, DateDay,
-  DateDayOfWeek, DateDayOfYear, DateDaysInMonth, DateDaysInWeek, DateDaysInYear,
-  DateEra, DateEraYear, DateInLeapYear, DateMonth, DateMonthCode,
-  DateMonthsInYear, DateWeekOfYear, DateYear, DateYearOfWeek, FromStatic,
-  IanaZone, JFloat, KHandle, KStr, KUndef, OffsetZone, TemporalN,
+  type TemporalStaticName, type TemporalZonedGetter, type ZonedDateTimeMethod,
+  CompareStatic, DateCalendarId, DateDay, DateDayOfWeek, DateDayOfYear,
+  DateDaysInMonth, DateDaysInWeek, DateDaysInYear, DateEra, DateEraYear,
+  DateInLeapYear, DateMonth, DateMonthCode, DateMonthsInYear, DateWeekOfYear,
+  DateYear, DateYearOfWeek, FromStatic, JFloat, KHandle, KStr, KUndef, TemporalN,
   TemporalZonedDateTimeCtor, TemporalZonedDateTimeGetter,
   TemporalZonedDateTimeMethod, TemporalZonedDateTimeStatic, TimeHour,
   TimeMicrosecond, TimeMillisecond, TimeMinute, TimeNanosecond, TimeSecond,
-  UtcZone, ZonedDate, ZonedDateTimeAdd, ZonedDateTimeEquals,
+  ZonedDate, ZonedDateTimeAdd, ZonedDateTimeEquals,
   ZonedDateTimeGetTimeZoneTransition, ZonedDateTimeRound, ZonedDateTimeSince,
   ZonedDateTimeStartOfDay, ZonedDateTimeSubtract, ZonedDateTimeToInstant,
   ZonedDateTimeToJson, ZonedDateTimeToLocaleString, ZonedDateTimeToPlainDate,
@@ -64,6 +71,7 @@ import arc/rt/types.{
   mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
+import arc/time_zone
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
@@ -518,8 +526,8 @@ pub fn method(
         UtcZone | OffsetZone(_) -> #(mk_null(), st)
         IanaZone(zone:) -> {
           let found = case dir {
-            Next -> temporal_tz.next_transition_ns(zone, ns)
-            Previous -> temporal_tz.previous_transition_ns(zone, ns)
+            Next -> time_zone.next_transition_ns(zone, ns)
+            Previous -> time_zone.previous_transition_ns(zone, ns)
           }
           let in_range = option.map(found, is_valid_epoch_ns) == Some(True)
           case found {

@@ -3,11 +3,11 @@ import arc/compiler/compile_task
 import arc/host
 import arc/host_hooks
 import arc/interp/entry
-import arc/interp/safepoint.{type Drain}
+import arc/interp/safepoint
 import arc/module
-import arc/module_host
+import arc/module/loader
 import arc/parser
-import arc/rt/async as rt_async
+import arc/rt/async.{type Drain} as rt_async
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
@@ -226,8 +226,8 @@ pub fn eval_module(
   engine: Engine(host),
   specifier: String,
   source: String,
-  resolve: module_host.ResolveFn,
-  load: module_host.LoadFn,
+  resolve: loader.ResolveFn,
+  load: loader.LoadFn,
 ) -> Result(#(EvaluatedModule, Engine(host)), EvalError(host)) {
   eval_module_with(engine, specifier, source, resolve, load, rt_async.drain)
 }
@@ -236,8 +236,8 @@ pub fn eval_module_with(
   engine: Engine(host),
   specifier: String,
   source: String,
-  resolve: module_host.ResolveFn,
-  load: module_host.LoadFn,
+  resolve: loader.ResolveFn,
+  load: loader.LoadFn,
   drain: Drain,
 ) -> Result(#(EvaluatedModule, Engine(host)), EvalError(host)) {
   use bundle <- result.try(

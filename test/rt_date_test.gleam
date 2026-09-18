@@ -1,5 +1,4 @@
 import arc/host_hooks.{HostHooks}
-import arc/internal/host_time
 import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
 import arc/rt/types.{
@@ -21,7 +20,7 @@ fn new_york() -> Agent {
 }
 
 fn utc() -> Agent {
-  agent_in(host_time.utc_time_zone())
+  agent_in(time_zone.utc_time_zone())
 }
 
 fn ints(ns: List(Int)) -> List(JsVal) {

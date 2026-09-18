@@ -14,19 +14,19 @@ fn status_property() -> PropertyKey {
   key.private("arc_module_status")
 }
 
-fn error_cache_property() -> PropertyKey {
+fn errors_property() -> PropertyKey {
   key.private("arc_module_errors")
 }
 
-fn namespace_cache_property() -> PropertyKey {
-  key.private("arc_module_cache")
+fn namespaces_property() -> PropertyKey {
+  key.private("arc_module_namespaces")
 }
 
-fn deferred_cache_property() -> PropertyKey {
+fn deferred_property() -> PropertyKey {
   key.private("arc_module_deferred")
 }
 
-fn pending_cache_property() -> PropertyKey {
+fn pending_property() -> PropertyKey {
   key.private("arc_module_pending")
 }
 
@@ -84,27 +84,27 @@ pub fn clear_module_status(st: Agent, spec: String) -> Agent {
 
 // §16.2.1.5.3 sticky; key presence, not value, marks a cached error
 pub fn read_module_error(st: Agent, spec: String) -> Option(JsVal) {
-  read_entry(st, error_cache_property(), spec)
+  read_entry(st, errors_property(), spec)
 }
 
 pub fn write_module_error(st: Agent, spec: String, err: JsVal) -> Agent {
-  write_entry(st, error_cache_property(), spec, err)
+  write_entry(st, errors_property(), spec, err)
 }
 
 pub fn read_namespace(st: Agent, spec: String) -> Option(Handle) {
-  read_object_entry(st, namespace_cache_property(), spec)
+  read_object_entry(st, namespaces_property(), spec)
 }
 
 pub fn write_namespace(st: Agent, spec: String, namespace: Handle) -> Agent {
-  write_entry(st, namespace_cache_property(), spec, mk_object(namespace))
+  write_entry(st, namespaces_property(), spec, mk_object(namespace))
 }
 
 fn clear_namespace(st: Agent, spec: String) -> Agent {
-  clear_entry(st, namespace_cache_property(), spec)
+  clear_entry(st, namespaces_property(), spec)
 }
 
 pub fn read_deferred_namespace(st: Agent, spec: String) -> Option(Handle) {
-  read_object_entry(st, deferred_cache_property(), spec)
+  read_object_entry(st, deferred_property(), spec)
 }
 
 pub fn write_deferred_namespace(
@@ -112,15 +112,15 @@ pub fn write_deferred_namespace(
   spec: String,
   namespace: Handle,
 ) -> Agent {
-  write_entry(st, deferred_cache_property(), spec, mk_object(namespace))
+  write_entry(st, deferred_property(), spec, mk_object(namespace))
 }
 
 fn clear_deferred_namespace(st: Agent, spec: String) -> Agent {
-  clear_entry(st, deferred_cache_property(), spec)
+  clear_entry(st, deferred_property(), spec)
 }
 
 pub fn read_pending_promise(st: Agent, spec: String) -> Option(Handle) {
-  read_object_entry(st, pending_cache_property(), spec)
+  read_object_entry(st, pending_property(), spec)
 }
 
 pub fn write_pending_promise(
@@ -128,23 +128,23 @@ pub fn write_pending_promise(
   spec: String,
   promise: Handle,
 ) -> Agent {
-  write_entry(st, pending_cache_property(), spec, mk_object(promise))
+  write_entry(st, pending_property(), spec, mk_object(promise))
 }
 
 pub fn clear_pending_promise(st: Agent, spec: String) -> Agent {
-  clear_entry(st, pending_cache_property(), spec)
+  clear_entry(st, pending_property(), spec)
 }
 
-pub type CachedModule {
+pub type Entry {
   Failed(error: JsVal)
   Pending(promise: Handle, deferred: Option(Handle))
-  Started(namespace: Handle, deferred: Option(Handle))
+  EvaluationStarted(namespace: Handle, deferred: Option(Handle))
   LinkedOnly(namespace: Handle, deferred: Option(Handle))
   Absent(deferred: Option(Handle))
 }
 
 // precedence: sticky error, then tla promise, then namespace
-pub fn read_cached_module(st: Agent, spec: String) -> CachedModule {
+pub fn lookup(st: Agent, spec: String) -> Entry {
   case read_module_error(st, spec) {
     Some(error) -> Failed(error:)
     None -> {
@@ -154,7 +154,8 @@ pub fn read_cached_module(st: Agent, spec: String) -> CachedModule {
         None, None -> Absent(deferred:)
         None, Some(namespace) ->
           case read_module_status(st, spec) {
-            Some(Evaluating) | Some(Evaluated) -> Started(namespace:, deferred:)
+            Some(Evaluating) | Some(Evaluated) ->
+              EvaluationStarted(namespace:, deferred:)
             None -> LinkedOnly(namespace:, deferred:)
           }
       }

@@ -1,70 +1,12 @@
 import arc/bytecode/opcode.{type Op}
-import arc/compiler
-import arc/esm
 import arc/internal/tuple_array.{type TupleArray}
-import arc/parser
 import arc/rt/bytecode.{type FuncTemplate}
 import arc/rt/types.{type JsVal}
 import arc/rt/val as rt_val
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/result
 import gleam/string
-
-pub type Goal {
-  Script
-  Module
-  ReplInput
-}
-
-pub type SourceError {
-  Syntax(parser.ParseError)
-  Compile(compiler.CompileError)
-}
-
-pub fn format_source_error(err: SourceError) -> String {
-  case err {
-    Syntax(parse_err) ->
-      "SyntaxError: " <> parser.parse_error_to_string(parse_err)
-    Compile(compile_err) ->
-      "compile error: " <> compiler.error_message(compile_err)
-  }
-}
-
-pub fn compile(
-  goal: Goal,
-  source: String,
-) -> Result(FuncTemplate, SourceError) {
-  case goal {
-    Script -> {
-      use #(body, sb) <- result.try(
-        parser.parse_script(source) |> result.map_error(Syntax),
-      )
-      compiler.compile_script(body, sb) |> result.map_error(Compile)
-    }
-    ReplInput -> {
-      use #(body, sb) <- result.try(
-        parser.parse_script(source) |> result.map_error(Syntax),
-      )
-      compiler.compile_repl(body, sb) |> result.map_error(Compile)
-    }
-    Module -> {
-      use #(items, sb) <- result.try(
-        parser.parse_module(source) |> result.map_error(Syntax),
-      )
-      use compiled <- result.map(
-        compiler.compile_module(items, sb, esm.analyze(items))
-        |> result.map_error(Compile),
-      )
-      compiled.template
-    }
-  }
-}
-
-pub fn source(goal: Goal, source: String) -> Result(String, SourceError) {
-  compile(goal, source) |> result.map(disassemble)
-}
 
 pub fn disassemble(template: FuncTemplate) -> String {
   render(template, "<main>", "")

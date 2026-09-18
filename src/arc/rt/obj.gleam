@@ -8,7 +8,7 @@ import arc/rt/limits
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Cell, type Handle, type JsElements, type JsVal, type ObjKind,
-  type ObjectKey, type ParsedDesc, type Property, type SymbolId,
+  type ObjectKey, type ParsedDesc, type Property, type ShapeSlots, type SymbolId,
   type TypedArrayKind, AccessorProperty, Agent, ArgumentsObj, ArrayObj,
   BirthPending, BirthSettled, BytecodeFn, CompiledFn, DataProperty, Dense,
   KHandle, KNull, KTdz, KUndef, ModuleNamespace, NoElements, Ordinary,
@@ -27,6 +27,18 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
 import gleam/string
+
+@external(erlang, "arc_rt_obj_ffi", "shape_slots_new")
+pub fn shape_slots_new() -> ShapeSlots
+
+@external(erlang, "arc_rt_obj_ffi", "shape_slots_get")
+pub fn shape_slots_get(slots: ShapeSlots, off: Int) -> JsVal
+
+@external(erlang, "arc_rt_obj_ffi", "shape_slots_set")
+pub fn shape_slots_set(slots: ShapeSlots, off: Int, v: JsVal) -> ShapeSlots
+
+@external(erlang, "arc_rt_obj_ffi", "shape_slots_append")
+pub fn shape_slots_append(slots: ShapeSlots, v: JsVal) -> ShapeSlots
 
 // returns SObject or SShapedObject only
 fn read_object(st: Agent, h: Handle) -> Cell {
@@ -54,7 +66,7 @@ fn own_property_shaped(
       case dict.get(offsets, bit_array.from_string(key.to_text(pk))) {
         Ok(off) ->
           Some(DataProperty(
-            value: types.shape_slots_get(slots, off),
+            value: shape_slots_get(slots, off),
             writable: True,
             enumerable: True,
             configurable: True,
@@ -112,7 +124,7 @@ pub fn as_sobject(cell: Cell) -> Cell {
     SShapedObject(proto:, slots:, offsets:, ..) -> {
       let props =
         dict.fold(offsets, dict.new(), fn(acc, key_bin, off) {
-          let value = types.shape_slots_get(slots, off)
+          let value = shape_slots_get(slots, off)
           let key = case bit_array.to_string(key_bin) {
             Ok(s) -> key.canonical(s)
             Error(Nil) -> Named("")
@@ -413,7 +425,7 @@ pub fn t_new_receiver(st: Agent, proto: Handle) -> #(Handle, Agent) {
     SShapedObject(
       shape_id: 0,
       proto: Some(proto),
-      slots: types.shape_slots_new(),
+      slots: shape_slots_new(),
       offsets: dict.new(),
     ),
   )
@@ -988,7 +1000,7 @@ fn set_own_shaped(
   let key_bin = bit_array.from_string(name)
   case dict.get(offsets, key_bin) {
     Ok(off) -> {
-      let slots = types.shape_slots_set(slots, off, v)
+      let slots = shape_slots_set(slots, off, v)
       #(
         True,
         rt_store.t_cell_set(
@@ -1037,7 +1049,7 @@ fn set_own_shaped(
               )
             }
           }
-          let slots = types.shape_slots_append(slots, v)
+          let slots = shape_slots_append(slots, v)
           #(
             True,
             rt_store.t_cell_set(
@@ -3307,75 +3319,6 @@ pub fn t_create_data_prop_general(
           _ -> "primitive"
         },
       )
-  }
-}
-
-// absent name throws referenceerror; called by name from arc_rt_obj_ffi
-pub fn t_global_get(st: Agent, name: BitArray) -> #(JsVal, Agent) {
-  let g = types.mk_object(st.realm.global_object)
-  let key = StringKey(binary_key(name))
-  let #(has, st) = t_has_prop(st, g, key)
-  case has {
-    True -> t_get_prop(st, g, key)
-    False -> {
-      let text = bit_array.to_string(name) |> result.unwrap("")
-      rt_val.t_throw_reference_error(st, text <> " is not defined")
-    }
-  }
-}
-
-pub fn t_global_this(st: Agent) -> JsVal {
-  types.mk_object(st.realm.global_object)
-}
-
-// sloppy: failed set ignored
-pub fn t_global_set(st: Agent, name: BitArray, v: JsVal) -> Agent {
-  let g = st.realm.global_object
-  let #(_, st) =
-    t_set_prop(st, types.mk_object(g), StringKey(binary_key(name)), v)
-  st
-}
-
-// strict: unresolvable throws referenceerror, failed set typeerror
-pub fn t_global_set_strict(st: Agent, name: BitArray, v: JsVal) -> Agent {
-  let g = types.mk_object(st.realm.global_object)
-  let key = StringKey(binary_key(name))
-  let text = bit_array.to_string(name) |> result.unwrap("")
-  let #(has, st) = t_has_prop(st, g, key)
-  case has {
-    False -> rt_val.t_throw_reference_error(st, text <> " is not defined")
-    True -> {
-      let #(ok, st) = t_set_prop(st, g, key, v)
-      case ok {
-        True -> st
-        False ->
-          rt_val.t_throw_type_error(
-            st,
-            "Cannot assign to read only property '" <> text <> "'",
-          )
-      }
-    }
-  }
-}
-
-// unresolvable global yields "undefined" without throwing
-pub fn t_global_typeof(st: Agent, name: BitArray) -> #(String, Agent) {
-  let g = st.realm.global_object
-  let key = StringKey(binary_key(name))
-  let #(has, st) = t_has_prop(st, types.mk_object(g), key)
-  case has {
-    False -> #("undefined", st)
-    True -> {
-      let #(v, st) = t_get_prop(st, types.mk_object(g), key)
-      #(rt_val.type_of(st, v), st)
-    }
-  }
-}
-
-fn binary_key(name: BitArray) -> PropertyKey {
-  case bit_array.to_string(name) {
-    Ok(s) -> key.canonical(s)
-    Error(_) -> Named("")
   }
 }
 

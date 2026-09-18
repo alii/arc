@@ -1,11 +1,10 @@
 import arc/bytecode/key.{Named}
-import arc/interp/dynamic_import
 import arc/interp/entry
-import arc/interp/safepoint
 import arc/module
-import arc/module/load_error
+import arc/module/dynamic_import
+import arc/module/import_hook
+import arc/module/loader
 import arc/module/registry
-import arc/module_host
 import arc/rt/async as rt_async
 import arc/rt/builtins as rt_builtins
 import arc/rt/inspect as rt_inspect
@@ -30,7 +29,7 @@ fn dance_resolve(raw: String, _referrer: String) {
 }
 
 fn no_source_loads(_resolved: String) {
-  Error(load_error.LoadNotFound)
+  Error(loader.LoadNotFound)
 }
 
 fn hosts() {
@@ -85,7 +84,7 @@ pub fn missing_import_is_a_link_time_syntax_error_test() {
 pub fn evaluation_marks_the_registry_test() {
   let b = bundle("import { greet } from 'dance'; export const r = greet;")
   let assert #(Ok(module.EvaluatedBundle(value:, namespace: _)), st) =
-    module.evaluate_bundle(agent(), b, safepoint.no_drain)
+    module.evaluate_bundle(agent(), b, rt_async.no_drain)
   assert classify(value) == KUndef
   assert registry.read_module_status(st, "entry") == Some(registry.Evaluated)
   assert registry.read_module_error(st, "entry") == None
@@ -94,7 +93,7 @@ pub fn evaluation_marks_the_registry_test() {
 pub fn a_throwing_body_caches_its_error_test() {
   let b = bundle("throw 'boom'; export const r = 1;")
   let assert #(Error(module.EvaluationError(thrown)), st) =
-    module.evaluate_bundle(agent(), b, safepoint.no_drain)
+    module.evaluate_bundle(agent(), b, rt_async.no_drain)
   assert classify(thrown) == KStr("boom")
   assert registry.read_module_status(st, "entry") == None
   let assert Some(cached) = registry.read_module_error(st, "entry")
@@ -160,16 +159,16 @@ pub fn import_through_the_hook_yields_the_registered_namespace_test() {
   let load = fn(resolved) {
     case resolved {
       "/lib.js" -> Ok("export var v; export function f() {}")
-      _ -> Error(load_error.LoadNotFound)
+      _ -> Error(loader.LoadNotFound)
     }
   }
   let resolve = fn(raw: String, _referrer: String) {
     case raw {
       "./lib.js" -> Ok("/lib.js")
-      _ -> Error(load_error.ResolveNotFound)
+      _ -> Error(loader.ResolveNotFound)
     }
   }
-  let st = module_host.install_import_hook(agent(), "/main.js", resolve, load)
+  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
   let #(p, st) =
     dynamic_import.import_call(st, mk_string("./lib.js"), mk_undefined())
   let st = rt_async.drain(st)
@@ -182,8 +181,8 @@ pub fn import_through_the_hook_yields_the_registered_namespace_test() {
   let assert Some(f) = module.read_export(st, ns, "f")
   let assert types.KHandle(_) = classify(f)
   let st =
-    module_host.install_import_hook(st, "/main.js", resolve, fn(_) {
-      Error(load_error.LoadNotFound)
+    import_hook.install_import_hook(st, "/main.js", resolve, fn(_) {
+      Error(loader.LoadNotFound)
     })
   let #(p2, st) =
     dynamic_import.import_call(st, mk_string("./lib.js"), mk_undefined())
@@ -193,8 +192,8 @@ pub fn import_through_the_hook_yields_the_registered_namespace_test() {
 }
 
 pub fn import_of_an_unresolvable_specifier_rejects_test() {
-  let #(resolve, load) = module_host.no_imports()
-  let st = module_host.install_import_hook(agent(), "/main.js", resolve, load)
+  let #(resolve, load) = loader.no_imports()
+  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
   let #(p, st) =
     dynamic_import.import_call(st, mk_string("./lib.js"), mk_undefined())
   let st = rt_async.drain(st)

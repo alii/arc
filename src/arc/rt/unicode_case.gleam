@@ -1,14 +1,24 @@
+import arc/rt/utf8
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/string
 
-// final_sigma rule; scans codepoints, not graphemes
+// final sigma rule, which string.lowercase lacks
 pub fn to_lower_case(s: String) -> String {
-  let cps = string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
-  case list.contains(cps, 0x03A3) {
-    False -> string.lowercase(s)
-    True -> sigma_assemble(split_cps_on_sigma(cps, [], []), is_first: True)
+  use <- option.lazy_unwrap(utf8.ascii_lower(s))
+  case utf8.index_of(s, "\u{03A3}", 0) {
+    None -> string.lowercase(s)
+    Some(_) -> {
+      let cps =
+        string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
+      sigma_assemble(split_cps_on_sigma(cps, [], []), is_first: True)
+    }
   }
+}
+
+pub fn to_upper_case(s: String) -> String {
+  use <- option.lazy_unwrap(utf8.ascii_upper(s))
+  string.uppercase(s)
 }
 
 fn split_cps_on_sigma(
@@ -56,7 +66,7 @@ fn lowercase_cps(cps: List(Int)) -> String {
   |> string.lowercase
 }
 
-fn first_non_ignorable_cased(cps: List(Int)) -> option.Option(Bool) {
+fn first_non_ignorable_cased(cps: List(Int)) -> Option(Bool) {
   case cps {
     [] -> None
     [cp, ..rest] ->
@@ -67,7 +77,6 @@ fn first_non_ignorable_cased(cps: List(Int)) -> option.Option(Bool) {
   }
 }
 
-// approximates the unicode Cased property
 fn is_cased_cp(cp: Int) -> Bool {
   case cp {
     _ if cp >= 0x41 && cp <= 0x5A -> True
@@ -111,7 +120,6 @@ fn is_cased_cp(cp: Int) -> Bool {
   }
 }
 
-// approximates the unicode Case_Ignorable property
 fn is_case_ignorable_cp(cp: Int) -> Bool {
   case cp {
     0x27
@@ -176,8 +184,4 @@ fn is_case_ignorable_cp(cp: Int) -> Bool {
     _ if cp >= 0xE0001 && cp <= 0xE01EF -> True
     _ -> False
   }
-}
-
-pub fn to_upper_case(s: String) -> String {
-  string.uppercase(s)
 }

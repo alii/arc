@@ -140,7 +140,7 @@ spawn_worker({Name, {t262, Ctx, File, Expected}}, Slot, Parent, Ref) ->
         Mods = [binary_to_atom(<<Base/binary, Sfx/binary>>)
                 || Sfx <- [<<"_0">>, <<"_1">>]],
         %% a test killed mid-run leaves the slot's modules loaded
-        [arc_aot_exec_ffi:unload(M) || M <- Mods],
+        [arc_aot_run_ffi:unload(M) || M <- Mods],
         Fun = fun() -> test262_aot_exec:run_file(Ctx, File, Base) end,
         Outcome = case run_capped(Name, Fun) of
             {ok, O} -> O;
@@ -148,7 +148,7 @@ spawn_worker({Name, {t262, Ctx, File, Expected}}, Slot, Parent, Ref) ->
             {error, {error, heap_limit_exceeded, _}} -> {fail, <<"heap limit exceeded">>};
             {error, {C, R, S}} -> {fail, render_crash(C, R, S)}
         end,
-        [arc_aot_exec_ffi:unload(M) || M <- Mods],
+        [arc_aot_run_ffi:unload(M) || M <- Mods],
         Parent ! {Ref, Name, {t262, File, Expected, Outcome}}
     end);
 spawn_worker({Name, Fun}, _Slot, Parent, Ref) ->
@@ -326,7 +326,7 @@ timeout_for(Name) ->
     end.
 
 max_heap_for(Name) ->
-    case binary:match(Name, [<<"emit_2core_test:">>, <<"test262/">>]) of
+    case binary:match(Name, [<<"emit_test:">>, <<"test262/">>]) of
         nomatch -> 10000000;
         _ -> 30000000
     end.

@@ -2,6 +2,7 @@ import arc/bytecode/key.{Named}
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
+import arc/rt/lang as rt_lang
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -62,7 +63,7 @@ pub fn tdz_binding_is_a_reference_error_test() {
   assert throws(st, rt_obj.t_get_own_property(_, ns_h, key("b")))
     == "ReferenceError"
   assert throws(st, rt_obj.t_for_in_keys(_, ns)) == "ReferenceError"
-  let #(object, st) = rt_obj.t_global_get(st, <<"Object">>)
+  let #(object, st) = rt_lang.t_global_get(st, <<"Object">>)
   assert throws(st, rt_call.t_call_method(_, object, key("keys"), [ns]))
     == "ReferenceError"
   let #(has, st) = rt_obj.t_has_prop(st, ns, key("b"))
@@ -86,7 +87,7 @@ pub fn own_keys_are_sorted_exports_then_to_string_tag_test() {
   let st = rt_store.t_cell_set(st, box_b, SBox(mk_int(3)))
   let #(names, st) = rt_obj.t_for_in_keys(st, ns)
   assert list.map(names, classify) == [KStr("a"), KStr("b")]
-  let #(object, st) = rt_obj.t_global_get(st, <<"Object">>)
+  let #(object, st) = rt_lang.t_global_get(st, <<"Object">>)
   let #(object_proto, st) = rt_obj.t_get_prop(st, object, key("prototype"))
   let #(to_string, st) = rt_obj.t_get_prop(st, object_proto, key("toString"))
   let #(tag, _) = rt_call.t_call(st, to_string, ns, [])
@@ -227,7 +228,7 @@ pub fn define_own_property_only_accepts_no_ops_test() {
       value_desc(mk_int(1)),
     ))
     == "ReferenceError"
-  let #(object, st) = rt_obj.t_global_get(st, <<"Object">>)
+  let #(object, st) = rt_lang.t_global_get(st, <<"Object">>)
   let #(desc, st) = rt_obj.t_new_object_literal(st)
   let #(_, st) = rt_obj.t_set_prop(st, desc, key("value"), mk_int(9))
   assert throws(
@@ -243,7 +244,7 @@ pub fn define_own_property_only_accepts_no_ops_test() {
 
 pub fn binding_cells_survive_collection_test() {
   let #(ns_h, ns, box_a, box_b, st) = fixture()
-  let st = rt_obj.t_global_set(st, <<"ns">>, ns)
+  let st = rt_lang.t_global_set(st, <<"ns">>, ns)
   let st = rt_gc.t_collect(st, [])
   assert rt_gc.t_is_live(st, ns_h)
   assert rt_gc.t_is_live(st, box_a)

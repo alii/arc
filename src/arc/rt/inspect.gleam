@@ -5,19 +5,22 @@ import arc/rt/elements
 import arc/rt/intl_data
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
+import arc/rt/temporal_data.{
+  type TemporalData, TemporalDate, TemporalDateTime, TemporalDuration,
+  TemporalInstant, TemporalMonthDay, TemporalTime, TemporalYearMonth,
+  TemporalZonedDateTime,
+}
 import arc/rt/types.{
   type Agent, type Handle, type JsElements, type JsVal, type Property,
-  type TemporalData, ArgumentsObj, ArrayBufferObj, ArrayIterator, ArrayObj,
-  AsyncFromSyncIterator, AsyncGeneratorObj, BigIntObj, BooleanObj, BoundFn,
-  BytecodeFn, CompiledFn, DataProperty, DataViewObj, DateObj, DisposableStackObj,
-  ErrorObj, FinalizationRegistryObj, GeneratorObj, HostObj, IntlObj,
-  IteratorHelperObj, KBig, KBool, KHandle, KNull, KNum, KStr, KSym, KTdz, KUndef,
-  MapIterator, MapObj, ModuleNamespace, NativeFn, NumberObj, Ordinary,
-  PromiseObj, ProxyObj, RawJsonObj, RegExpObj, SObject, SetIterator, SetObj,
-  Shared, StringIterator, StringObj, SymbolObj, TemporalDate, TemporalDateTime,
-  TemporalDuration, TemporalInstant, TemporalMonthDay, TemporalObj, TemporalTime,
-  TemporalYearMonth, TemporalZonedDateTime, TypedArrayObj, WeakMapObj,
-  WeakSetObj, WrapForValidIteratorObj, classify,
+  ArgumentsObj, ArrayBufferObj, ArrayIterator, ArrayObj, AsyncFromSyncIterator,
+  AsyncGeneratorObj, BigIntObj, BooleanObj, BoundFn, BytecodeFn, CompiledFn,
+  DataProperty, DataViewObj, DateObj, DisposableStackObj, ErrorObj,
+  FinalizationRegistryObj, GeneratorObj, HostObj, IntlObj, IteratorHelperObj,
+  KBig, KBool, KHandle, KNull, KNum, KStr, KSym, KTdz, KUndef, MapIterator,
+  MapObj, ModuleNamespace, NativeFn, NumberObj, Ordinary, PromiseObj, ProxyObj,
+  RawJsonObj, RegExpObj, SObject, SetIterator, SetObj, Shared, StringIterator,
+  StringObj, SymbolObj, TemporalObj, TypedArrayObj, WeakMapObj, WeakSetObj,
+  WrapForValidIteratorObj, classify,
 }
 import arc/rt/val as rt_val
 import gleam/bool
@@ -145,11 +148,11 @@ fn inspect_object(
         DataViewObj(..) -> "DataView {}"
         ArrayBufferObj(storage: Shared(..) as storage) ->
           "SharedArrayBuffer { byteLength: "
-          <> int.to_string(types.buffer_byte_size(storage))
+          <> int.to_string(buffer.buffer_byte_size(storage))
           <> " }"
         ArrayBufferObj(storage:) ->
           "ArrayBuffer { byteLength: "
-          <> int.to_string(types.buffer_byte_size(storage))
+          <> int.to_string(buffer.buffer_byte_size(storage))
           <> " }"
         TypedArrayObj(buffer: buf, elem_kind:, byte_offset:, length:) ->
           types.typed_array_name(elem_kind)

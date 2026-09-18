@@ -1,7 +1,7 @@
 #!/bin/bash
 # Strip the octane BenchmarkSuite wrapper and emit a self-contained script
 # that runs the entry function ONCE and prints "ok" (or throws). The
-# resulting *_run.js is what emit_2core / arc-interp / qjs / bun all execute.
+# resulting *_run.js is what aot / arc-interp / qjs / bun all execute.
 set -euo pipefail
 cd "$(dirname "$0")"
 

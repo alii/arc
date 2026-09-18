@@ -5,7 +5,6 @@ import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins/array_from_async
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
-import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as b_object
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
@@ -46,7 +45,6 @@ import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/string
 
 const iteration_budget_msg = "Invalid array length"
 
@@ -57,7 +55,7 @@ fn check_budget(st: Agent, exhausted exhausted: Bool) -> Nil {
   }
 }
 
-fn within_budget(st: Agent, length: Int, k: fn() -> a) -> a {
+pub fn within_budget(st: Agent, length: Int, k: fn() -> a) -> a {
   case length > limits.max_iteration {
     True -> rt_val.t_throw_range_error(st, iteration_budget_msg)
     False -> k()
@@ -189,7 +187,6 @@ pub fn dispatch(
   case native {
     ArrayConstructor -> construct(st, args)
     ArrayIsArray -> is_array(st, args)
-    ArrayFrom -> array_from(st, this, args)
     ArrayFromAsync -> array_from_async.from_async(st, this, args)
     ArrayFromAsyncOnNext(ctx:) -> array_from_async.on_next(st, ctx, args)
     ArrayFromAsyncOnMapped(ctx:) -> array_from_async.on_mapped(st, ctx, args)
@@ -201,7 +198,6 @@ pub fn dispatch(
       array_from_async.like_on_value(st, ctx, args)
     ArrayFromAsyncLikeOnMapped(ctx:) ->
       array_from_async.like_on_mapped(st, ctx, args)
-    ArrayOf -> array_of(st, this, args)
     ArrayPrototypeJoin -> array_join(st, this, args)
     ArrayPrototypePush -> array_push(st, this, args)
     ArrayPrototypePop -> array_pop(st, this, args)
@@ -226,20 +222,20 @@ pub fn dispatch(
     ArrayPrototypeFindIndex -> array_find_index(st, this, args)
     ArrayPrototypeFindLast -> array_find_last(st, this, args)
     ArrayPrototypeFindLastIndex -> array_find_last_index(st, this, args)
-    ArrayPrototypeSort -> array_sort(st, this, args)
     ArrayPrototypeSplice -> array_splice(st, this, args)
     ArrayPrototypeFlat -> array_flat(st, this, args)
     ArrayPrototypeFlatMap -> array_flat_map(st, this, args)
     ArrayPrototypeCopyWithin -> array_copy_within(st, this, args)
     ArrayPrototypeToSpliced -> array_to_spliced(st, this, args)
     ArrayPrototypeWith -> array_with(st, this, args)
-    ArrayPrototypeToSorted -> array_to_sorted(st, this, args)
     ArrayPrototypeToReversed -> array_to_reversed(st, this, args)
     ArrayPrototypeToString -> array_to_string(st, this)
     ArrayPrototypeToLocaleString -> array_to_locale_string(st, this, args)
     ArrayPrototypeKeys -> array_keys(st, this)
     ArrayPrototypeValues -> array_values(st, this)
     ArrayPrototypeEntries -> array_entries(st, this)
+    ArrayFrom | ArrayOf | ArrayPrototypeSort | ArrayPrototypeToSorted ->
+      panic as "routed by builtins.dispatch_native"
   }
 }
 
@@ -287,7 +283,7 @@ fn is_array(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   )
 }
 
-fn alloc_array(
+pub fn alloc_array(
   st: Agent,
   length: Int,
   elements: JsElements,
@@ -308,7 +304,7 @@ fn alloc_array(
   #(mk_object(h), st)
 }
 
-fn alloc_array_list(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
+pub fn alloc_array_list(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
   let #(h, st) = realm_ops.alloc_array(st, values)
   #(mk_object(h), st)
 }
@@ -337,7 +333,7 @@ fn require_length(
   cont(length, st)
 }
 
-fn require_array(
+pub fn require_array(
   st: Agent,
   this: JsVal,
   cont: fn(JsVal, Handle, Int, Agent) -> #(JsVal, Agent),
@@ -396,7 +392,7 @@ fn require_bound(
   }
 }
 
-fn not_a_function(st: Agent, v: JsVal) -> String {
+pub fn not_a_function(st: Agent, v: JsVal) -> String {
   rt_val.type_of(st, v) <> " is not a function"
 }
 
@@ -442,11 +438,11 @@ fn generic_set(st: Agent, h: Handle, pk: PropertyKey, val: JsVal) -> Agent {
   }
 }
 
-fn generic_set_index(st: Agent, h: Handle, idx: Int, val: JsVal) -> Agent {
+pub fn generic_set_index(st: Agent, h: Handle, idx: Int, val: JsVal) -> Agent {
   generic_set(st, h, key.index(idx), val)
 }
 
-fn generic_set_length(st: Agent, h: Handle, len: Int) -> Agent {
+pub fn generic_set_length(st: Agent, h: Handle, len: Int) -> Agent {
   generic_set(st, h, Named("length"), mk_int(len))
 }
 
@@ -462,7 +458,7 @@ fn generic_delete(st: Agent, h: Handle, pk: PropertyKey) -> Agent {
   }
 }
 
-fn generic_delete_index(st: Agent, h: Handle, idx: Int) -> Agent {
+pub fn generic_delete_index(st: Agent, h: Handle, idx: Int) -> Agent {
   generic_delete(st, h, key.index(idx))
 }
 
@@ -474,7 +470,7 @@ fn generic_get(st: Agent, h: Handle, idx: Int) -> #(JsVal, Agent) {
   rt_obj.t_get_prop(st, mk_object(h), StringKey(key.index(idx)))
 }
 
-fn get_index_if_present(
+pub fn get_index_if_present(
   st: Agent,
   this: JsVal,
   idx: Int,
@@ -540,7 +536,7 @@ fn generic_index_if_present(
 }
 
 // some only when reading elements cannot run user code
-fn dense_snapshot(
+pub fn dense_snapshot(
   st: Agent,
   this: JsVal,
 ) -> Option(#(JsElements, Option(Handle))) {
@@ -570,7 +566,7 @@ fn any_index_key(keys: List(PropertyKey)) -> Bool {
   }
 }
 
-fn with_plain_elements(
+pub fn with_plain_elements(
   st: Agent,
   h: Handle,
   expected_len: Int,
@@ -669,7 +665,7 @@ fn index_range_plain(
   count: Int,
 ) -> Bool
 
-fn hole_is_inherited(
+pub fn hole_is_inherited(
   st: Agent,
   proto: Option(Handle),
   idx: Int,
@@ -1473,7 +1469,7 @@ fn write_species_elements(
   }
 }
 
-fn write_species_element(
+pub fn write_species_element(
   st: Agent,
   target: Handle,
   idx: Int,
@@ -1913,7 +1909,7 @@ fn search_backward_generic(
 }
 
 // skip = hasproperty gated, visit = plain get
-type HoleMode {
+pub type HoleMode {
   SkipHoles
   VisitHoles
 }
@@ -2031,7 +2027,7 @@ fn iterate_array_loop(
   }
 }
 
-type ElementFn =
+pub type ElementFn =
   fn(Agent, List(JsVal)) -> #(JsVal, Agent)
 
 fn map_dense(
@@ -2471,394 +2467,12 @@ fn reduce_directed_loop(
   }
 }
 
-fn array_sort(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use comparefn, st <- with_comparefn(st, args)
-  use this, h, length, st <- require_array(st, this)
-  use <- within_budget(st, length)
-  case comparefn {
-    None -> sort_default(st, h, length, this)
-    Some(cmp) -> sort_with_comparefn(st, h, length, cmp, this)
-  }
-}
-
-fn with_comparefn(
-  st: Agent,
-  args: List(JsVal),
-  cont: fn(Option(JsVal), Agent) -> #(JsVal, Agent),
-) -> #(JsVal, Agent) {
-  let comparefn = helpers.first_arg_or_undefined(args)
-  case classify(comparefn) {
-    KUndef -> cont(None, st)
-    _ -> {
-      use comparefn <- helpers.require_callable(st, comparefn, fn() {
-        not_a_function(st, comparefn)
-      })
-      cont(Some(comparefn), st)
-    }
-  }
-}
-
-fn sort_default(
-  st: Agent,
-  h: Handle,
-  length: Int,
-  this: JsVal,
-) -> #(JsVal, Agent) {
-  let #(#(defined, undefs), st) =
-    collect_sort_elements(st, this, length, 0, [], 0, SkipHoles)
-  let #(pairs, st) = stringify_elements(st, defined, [])
-  let sorted = list.sort(pairs, fn(a, b) { string.compare(a.0, b.0) })
-  let sorted_values = list.map(sorted, fn(pair) { pair.1 })
-  let all_values =
-    list.append(sorted_values, list.repeat(mk_undefined(), undefs))
-  #(this, write_sort_result(st, h, all_values, length, 0))
-}
-
-fn sort_with_comparefn(
-  st: Agent,
-  h: Handle,
-  length: Int,
-  comparefn: JsVal,
-  this: JsVal,
-) -> #(JsVal, Agent) {
-  let #(#(defined, undefs), st) =
-    collect_sort_elements(st, this, length, 0, [], 0, SkipHoles)
-  let #(sorted, st) = merge_sort(st, defined, comparefn)
-  let all_values = list.append(sorted, list.repeat(mk_undefined(), undefs))
-  #(this, write_sort_result(st, h, all_values, length, 0))
-}
-
-fn collect_sort_elements(
-  st: Agent,
-  this: JsVal,
-  length: Int,
-  idx: Int,
-  acc: List(JsVal),
-  undefs: Int,
-  hole_mode: HoleMode,
-) -> #(#(List(JsVal), Int), Agent) {
-  case dense_snapshot(st, this) {
-    Some(#(els, proto)) ->
-      collect_sort_elements_snapshot(
-        st,
-        this,
-        els,
-        proto,
-        length,
-        idx,
-        acc,
-        undefs,
-        hole_mode,
-      )
-    None ->
-      collect_sort_elements_generic(
-        st,
-        this,
-        length,
-        idx,
-        acc,
-        undefs,
-        hole_mode,
-      )
-  }
-}
-
-fn collect_sort_elements_snapshot(
-  st: Agent,
-  this: JsVal,
-  els: JsElements,
-  proto: Option(Handle),
-  length: Int,
-  idx: Int,
-  acc: List(JsVal),
-  undefs: Int,
-  hole_mode: HoleMode,
-) -> #(#(List(JsVal), Int), Agent) {
-  case idx >= length {
-    True -> #(#(list.reverse(acc), undefs), st)
-    False ->
-      case elements.get_option(els, idx) {
-        Some(v) ->
-          case classify(v) {
-            KUndef ->
-              collect_sort_elements_snapshot(
-                st,
-                this,
-                els,
-                proto,
-                length,
-                idx + 1,
-                acc,
-                undefs + 1,
-                hole_mode,
-              )
-            _ ->
-              collect_sort_elements_snapshot(
-                st,
-                this,
-                els,
-                proto,
-                length,
-                idx + 1,
-                [v, ..acc],
-                undefs,
-                hole_mode,
-              )
-          }
-        None -> {
-          let #(inherited, st) = hole_is_inherited(st, proto, idx)
-          case inherited {
-            False ->
-              collect_sort_elements_snapshot(
-                st,
-                this,
-                els,
-                proto,
-                length,
-                idx + 1,
-                acc,
-                case hole_mode {
-                  VisitHoles -> undefs + 1
-                  SkipHoles -> undefs
-                },
-                hole_mode,
-              )
-            True ->
-              collect_sort_elements_generic(
-                st,
-                this,
-                length,
-                idx,
-                acc,
-                undefs,
-                hole_mode,
-              )
-          }
-        }
-      }
-  }
-}
-
-fn collect_sort_elements_generic(
-  st: Agent,
-  this: JsVal,
-  length: Int,
-  idx: Int,
-  acc: List(JsVal),
-  undefs: Int,
-  hole_mode: HoleMode,
-) -> #(#(List(JsVal), Int), Agent) {
-  case idx >= length {
-    True -> #(#(list.reverse(acc), undefs), st)
-    False -> {
-      let #(maybe_val, st) = get_index_if_present(st, this, idx)
-      case maybe_val {
-        None ->
-          collect_sort_elements_generic(
-            st,
-            this,
-            length,
-            idx + 1,
-            acc,
-            case hole_mode {
-              VisitHoles -> undefs + 1
-              SkipHoles -> undefs
-            },
-            hole_mode,
-          )
-        Some(val) ->
-          case classify(val) {
-            KUndef ->
-              collect_sort_elements_generic(
-                st,
-                this,
-                length,
-                idx + 1,
-                acc,
-                undefs + 1,
-                hole_mode,
-              )
-            _ ->
-              collect_sort_elements_generic(
-                st,
-                this,
-                length,
-                idx + 1,
-                [val, ..acc],
-                undefs,
-                hole_mode,
-              )
-          }
-      }
-    }
-  }
-}
-
-fn stringify_elements(
-  st: Agent,
-  values: List(JsVal),
-  acc: List(#(String, JsVal)),
-) -> #(List(#(String, JsVal)), Agent) {
-  case values {
-    [] -> #(list.reverse(acc), st)
-    [val, ..rest] -> {
-      let #(s, st) = rt_val.t_to_string(st, val)
-      stringify_elements(st, rest, [#(s, val), ..acc])
-    }
-  }
-}
-
-@external(erlang, "lists", "reverse")
-fn reverse_onto(items: List(a), tail: List(a)) -> List(a)
-
-fn merge_sort(
-  st: Agent,
-  items: List(JsVal),
-  comparefn: JsVal,
-) -> #(List(JsVal), Agent) {
-  case items {
-    [] | [_] -> #(items, st)
-    _ ->
-      merge_all(
-        st,
-        list.map(items, fn(x) { [x] }),
-        rt_call.t_prepare_call(st, comparefn, mk_undefined()),
-      )
-  }
-}
-
-fn merge_all(
-  st: Agent,
-  runs: List(List(JsVal)),
-  comparefn: ElementFn,
-) -> #(List(JsVal), Agent) {
-  case runs {
-    [] -> #([], st)
-    [done] -> #(done, st)
-    _ -> {
-      let #(next, st) = merge_pairs(st, runs, comparefn, [])
-      merge_all(st, next, comparefn)
-    }
-  }
-}
-
-fn merge_pairs(
-  st: Agent,
-  runs: List(List(JsVal)),
-  comparefn: ElementFn,
-  acc: List(List(JsVal)),
-) -> #(List(List(JsVal)), Agent) {
-  case runs {
-    [] -> #(list.reverse(acc), st)
-    [a] -> #(list.reverse([a, ..acc]), st)
-    [a, b, ..rest] -> {
-      let #(ab, st) = merge_two(st, a, b, comparefn, [])
-      merge_pairs(st, rest, comparefn, [ab, ..acc])
-    }
-  }
-}
-
-fn merge_two(
-  st: Agent,
-  left: List(JsVal),
-  right: List(JsVal),
-  comparefn: ElementFn,
-  acc: List(JsVal),
-) -> #(List(JsVal), Agent) {
-  case left, right {
-    [], _ -> #(reverse_onto(acc, right), st)
-    _, [] -> #(reverse_onto(acc, left), st)
-    [l, ..ls], [r, ..rs] -> {
-      let #(res, st) = comparefn(st, [l, r])
-      let #(num, st) = rt_val.t_to_number(st, res)
-      let cmp = case num {
-        JInt(n) -> int.to_float(n)
-        JFloat(f) -> f
-        JPosInf -> 1.0
-        JNegInf -> -1.0
-        JNan -> 0.0
-      }
-      case cmp <=. 0.0 {
-        True -> merge_two(st, ls, right, comparefn, [l, ..acc])
-        False -> merge_two(st, left, rs, comparefn, [r, ..acc])
-      }
-    }
-  }
-}
-
-fn write_sort_result(
-  st: Agent,
-  h: Handle,
-  values: List(JsVal),
-  length: Int,
-  idx: Int,
-) -> Agent {
-  let fast = case idx == 0 {
-    True -> {
-      use _els, len <- with_plain_elements(st, h, length, 0, length)
-      #(elements.from_list(values), len, Nil)
-    }
-    False -> None
-  }
-  case fast {
-    Some(#(Nil, st)) -> st
-    None ->
-      case values {
-        [val, ..rest] -> {
-          let st = generic_set_index(st, h, idx, val)
-          write_sort_result(st, h, rest, length, idx + 1)
-        }
-        [] -> delete_trailing(st, h, idx, length)
-      }
-  }
-}
-
-fn delete_trailing(st: Agent, h: Handle, idx: Int, length: Int) -> Agent {
+pub fn delete_trailing(st: Agent, h: Handle, idx: Int, length: Int) -> Agent {
   case idx >= length {
     True -> st
     False ->
       delete_trailing(generic_delete_index(st, h, idx), h, idx + 1, length)
   }
-}
-
-fn array_to_sorted(
-  st: Agent,
-  this: JsVal,
-  args: List(JsVal),
-) -> #(JsVal, Agent) {
-  use comparefn, st <- with_comparefn(st, args)
-  use this, _h, length, st <- require_array(st, this)
-  use <- within_budget(st, length)
-  case comparefn {
-    None -> to_sorted_with(st, length, this, sort_values_default)
-    Some(cmp) ->
-      to_sorted_with(st, length, this, fn(st, defined) {
-        merge_sort(st, defined, cmp)
-      })
-  }
-}
-
-fn to_sorted_with(
-  st: Agent,
-  length: Int,
-  this: JsVal,
-  sort: fn(Agent, List(JsVal)) -> #(List(JsVal), Agent),
-) -> #(JsVal, Agent) {
-  let array_proto = st.realm.array.prototype
-  let #(#(defined, undefs), st) =
-    collect_sort_elements(st, this, length, 0, [], 0, VisitHoles)
-  let #(sorted, st) = sort(st, defined)
-  let all_values = list.append(sorted, list.repeat(mk_undefined(), undefs))
-  alloc_array(st, length, elements.from_list(all_values), array_proto)
-}
-
-fn sort_values_default(
-  st: Agent,
-  defined: List(JsVal),
-) -> #(List(JsVal), Agent) {
-  let #(pairs, st) = stringify_elements(st, defined, [])
-  let sorted = list.sort(pairs, fn(a, b) { string.compare(a.0, b.0) })
-  #(list.map(sorted, fn(pair) { pair.1 }), st)
 }
 
 fn array_splice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
@@ -3168,194 +2782,6 @@ fn copy_within_step(
   }
 }
 
-type FromTarget {
-  FreshArray(acc: List(JsVal))
-  Constructed(target: Handle)
-}
-
-fn from_target(
-  st: Agent,
-  ctor: JsVal,
-  ctor_args: List(JsVal),
-) -> #(FromTarget, Agent) {
-  case classify(ctor) {
-    KHandle(h) if h != st.realm.array.constructor ->
-      case rt_call.is_constructor(st, ctor) {
-        True -> {
-          let #(a, st) = rt_call.t_construct(st, ctor, ctor_args, ctor)
-          #(Constructed(a), st)
-        }
-        False -> #(FreshArray([]), st)
-      }
-    _ -> #(FreshArray([]), st)
-  }
-}
-
-fn from_put(
-  st: Agent,
-  t: FromTarget,
-  idx: Int,
-  v: JsVal,
-) -> #(FromTarget, Agent) {
-  case t {
-    FreshArray(acc) -> #(FreshArray([v, ..acc]), st)
-    Constructed(target) -> #(t, write_species_element(st, target, idx, v))
-  }
-}
-
-fn from_finish(st: Agent, t: FromTarget, len: Int) -> #(JsVal, Agent) {
-  case t {
-    FreshArray(acc) -> {
-      let array_proto = st.realm.array.prototype
-      alloc_array(st, len, elements.from_list(list.reverse(acc)), array_proto)
-    }
-    Constructed(target) -> {
-      let st = generic_set_length(st, target, len)
-      #(mk_object(target), st)
-    }
-  }
-}
-
-fn array_from(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(items_val, map_fn, this_arg) = helpers.three_args_or_undefined(args)
-  case classify(map_fn) {
-    KUndef -> array_from_array_like(st, this, items_val, None, this_arg)
-    _ -> {
-      use mf <- helpers.require_callable(st, map_fn, fn() {
-        not_a_function(st, map_fn)
-      })
-      array_from_array_like(st, this, items_val, Some(mf), this_arg)
-    }
-  }
-}
-
-fn array_from_array_like(
-  st: Agent,
-  ctor: JsVal,
-  items: JsVal,
-  map_fn: Option(JsVal),
-  this_arg: JsVal,
-) -> #(JsVal, Agent) {
-  case classify(items) {
-    KNull | KUndef -> {
-      rt_val.t_throw_type_error(
-        st,
-        "Cannot create array from " <> rt_val.type_of(st, items),
-      )
-    }
-    _ -> {
-      // a plain array under the intrinsic constructor is a copy
-      let plain = case classify(ctor), map_fn {
-        KHandle(h), None if h == st.realm.array.constructor ->
-          rt_lang.array_spread(st, items)
-        _, _ -> rt_lang.SpreadMiss
-      }
-      use <- lazy_guard_spread(plain, fn(values) {
-        alloc_array_list(st, values)
-      })
-      let #(iter_method, st) =
-        rt_obj.t_get_prop(st, items, SymbolKey(symbol_iterator))
-      case classify(iter_method) {
-        KUndef | KNull -> {
-          let #(length, st) = rt_abstract_ops.length_of_array_like(st, items)
-          use <- within_budget(st, length)
-          let #(target, st) = from_target(st, ctor, [mk_int(length)])
-          array_from_loop(st, items, 0, length, map_fn, this_arg, target)
-        }
-        _ -> {
-          use m <- helpers.require_callable(st, iter_method, fn() {
-            not_a_function(st, iter_method)
-          })
-          let #(target, st) = from_target(st, ctor, [])
-          array_from_iterator(st, items, m, map_fn, this_arg, target)
-        }
-      }
-    }
-  }
-}
-
-fn array_from_iterator(
-  st: Agent,
-  items: JsVal,
-  iter_method: JsVal,
-  map_fn: Option(JsVal),
-  this_arg: JsVal,
-  target: FromTarget,
-) -> #(JsVal, Agent) {
-  let #(rec, st) =
-    iter_protocol.get_iterator_from_method(st, items, iter_method)
-  array_from_iterator_loop(st, rec, map_fn, this_arg, 0, target)
-}
-
-fn array_from_iterator_loop(
-  st: Agent,
-  rec: iter_protocol.IteratorRecord,
-  map_fn: Option(JsVal),
-  this_arg: JsVal,
-  k: Int,
-  target: FromTarget,
-) -> #(JsVal, Agent) {
-  let #(step, st) = iter_protocol.iterator_step_value(st, rec)
-  case step {
-    None -> from_finish(st, target, k)
-    Some(item) -> {
-      let #(mapped, st) = case map_fn {
-        Some(mf) -> {
-          use mapped, st <- iter_protocol.or_close(st, rec.iterator, fn(st) {
-            rt_call.t_call(st, mf, this_arg, [item, mk_int(k)])
-          })
-          #(mapped, st)
-        }
-        None -> #(item, st)
-      }
-      let #(target, st) = case target {
-        FreshArray(_) -> from_put(st, target, k, mapped)
-        Constructed(t) -> {
-          use _undef, st <- iter_protocol.or_close(st, rec.iterator, fn(st) {
-            #(mk_undefined(), write_species_element(st, t, k, mapped))
-          })
-          #(target, st)
-        }
-      }
-      array_from_iterator_loop(st, rec, map_fn, this_arg, k + 1, target)
-    }
-  }
-}
-
-fn array_from_loop(
-  st: Agent,
-  items: JsVal,
-  idx: Int,
-  length: Int,
-  map_fn: Option(JsVal),
-  this_arg: JsVal,
-  target: FromTarget,
-) -> #(JsVal, Agent) {
-  case idx >= length {
-    True -> from_finish(st, target, length)
-    False -> {
-      let #(elem, st) = rt_abstract_ops.get_index(st, items, idx)
-      let #(mapped, st) = case map_fn {
-        None -> #(elem, st)
-        Some(mf) -> rt_call.t_call(st, mf, this_arg, [elem, mk_int(idx)])
-      }
-      let #(target, st) = from_put(st, target, idx, mapped)
-      array_from_loop(st, items, idx + 1, length, map_fn, this_arg, target)
-    }
-  }
-}
-
-fn array_of(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  let len = list.length(args)
-  let #(target, st) = from_target(st, this, [mk_int(len)])
-  let #(target, st) =
-    list.index_fold(args, #(target, st), fn(acc, item, k) {
-      let #(target, st) = acc
-      from_put(st, target, k, item)
-    })
-  from_finish(st, target, len)
-}
-
 fn array_to_spliced(
   st: Agent,
   this: JsVal,
@@ -3552,7 +2978,7 @@ fn array_entries(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 }
 
 // every element of a plain hole-free array whose iteration observes nothing
-fn lazy_guard_spread(
+pub fn lazy_guard_spread(
   plain: rt_lang.PlainSpread,
   then: fn(List(JsVal)) -> a,
   otherwise: fn() -> a,

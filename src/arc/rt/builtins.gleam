@@ -3,6 +3,9 @@ import arc/host_hooks.{type HostHooks}
 import arc/rt/async as rt_async
 import arc/rt/builtins/array as b_array
 import arc/rt/builtins/array_buffer as b_array_buffer
+import arc/rt/builtins/array_from
+import arc/rt/builtins/array_sort
+import arc/rt/builtins/async_from_sync
 import arc/rt/builtins/atomics as b_atomics
 import arc/rt/builtins/bigint as b_bigint
 import arc/rt/builtins/boolean as b_boolean
@@ -30,6 +33,7 @@ import arc/rt/builtins/proxy as b_proxy
 import arc/rt/builtins/realm_ops
 import arc/rt/builtins/reflect as b_reflect
 import arc/rt/builtins/regexp as b_regexp
+import arc/rt/builtins/regexp_symbol
 import arc/rt/builtins/set as b_set
 import arc/rt/builtins/shadow_realm as b_shadow_realm
 import arc/rt/builtins/string as b_string
@@ -538,7 +542,14 @@ pub fn dispatch_native(
     ErrorN(n) -> b_error.dispatch(st, n, this, args, mk_undefined())
     DomExceptionN(n) ->
       b_dom_exception.dispatch(st, n, this, args, mk_undefined())
-    ArrayN(n) -> b_array.dispatch(st, n, this, args)
+    ArrayN(n) ->
+      case n {
+        types.ArrayPrototypeSort -> array_sort.sort(st, this, args)
+        types.ArrayPrototypeToSorted -> array_sort.to_sorted(st, this, args)
+        types.ArrayFrom -> array_from.from(st, this, args)
+        types.ArrayOf -> array_from.of(st, this, args)
+        _ -> b_array.dispatch(st, n, this, args)
+      }
     StringN(n) -> b_string.dispatch(st, n, this, args)
     NumberN(n) -> b_number.dispatch(st, n, this, args)
     BooleanN(n) -> b_boolean.dispatch(st, n, this, args)
@@ -550,10 +561,32 @@ pub fn dispatch_native(
     ConsoleN(n) -> b_console.dispatch(st, n, this, args)
     GlobalN(n) -> global_fns.dispatch(st, n, this, args)
     DateN(n) -> b_date.dispatch(st, n, this, args)
-    RegExpN(n) -> b_regexp.dispatch(st, n, this, args)
+    RegExpN(n) ->
+      case n {
+        types.RegExpSymbolMatch -> regexp_symbol.symbol_match(st, this, args)
+        types.RegExpSymbolMatchAll ->
+          regexp_symbol.symbol_match_all(st, this, args)
+        types.RegExpSymbolReplace ->
+          regexp_symbol.symbol_replace(st, this, args)
+        types.RegExpSymbolSearch -> regexp_symbol.symbol_search(st, this, args)
+        types.RegExpSymbolSplit -> regexp_symbol.symbol_split(st, this, args)
+        types.RegExpStringIteratorNext ->
+          regexp_symbol.string_iterator_next(st, this)
+        _ -> b_regexp.dispatch(st, n, this, args)
+      }
     PromiseN(n) -> b_promise.dispatch(st, n, this, args)
     ProxyN(n) -> b_proxy.dispatch(st, n, this, args)
-    IteratorN(n) -> b_iterator.dispatch(st, n, this, args)
+    IteratorN(n) ->
+      case n {
+        types.AsyncFromSyncNext -> async_from_sync.next(st, this, args)
+        types.AsyncFromSyncReturn -> async_from_sync.return(st, this, args)
+        types.AsyncFromSyncThrow -> async_from_sync.throw(st, this, args)
+        types.AsyncFromSyncUnwrap(done:) ->
+          async_from_sync.unwrap(st, args, done)
+        types.AsyncFromSyncClose(sync_iter:) ->
+          async_from_sync.close(st, args, sync_iter)
+        _ -> b_iterator.dispatch(st, n, this, args)
+      }
     GeneratorN(n) -> generator.dispatch(st, n, this, args)
     MapN(n) -> b_map.dispatch(st, n, this, args)
     SetN(n) -> b_set.dispatch(st, n, this, args)

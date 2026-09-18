@@ -4,6 +4,7 @@ import arc/internal/int_math.{floor_div}
 import arc/internal/temporal_calendar
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined}
+import arc/rt/builtins/intl_casing
 import arc/rt/builtins/intl_collate.{collator_compare}
 import arc/rt/builtins/intl_format.{
   PartDay, PartDayPeriod, PartElement, PartEra, PartFractionalSecond, PartHour,
@@ -13,29 +14,25 @@ import arc/rt/builtins/intl_format.{
 import arc/rt/builtins/intl_locale
 import arc/rt/builtins/intl_segment
 import arc/rt/builtins/intl_timezone
+import arc/rt/builtins/options.{
+  coerce_options_to_object, default_number_option, get_bool_opt, get_enum_opt,
+  get_num_opt, get_options_object, get_text_opt, opt_get,
+}
 import arc/rt/builtins/realm_ops
-import arc/rt/builtins/string as b_string
-import arc/rt/builtins/temporal_tz
 import arc/rt/call as rt_call
 import arc/rt/intl_data.{
-  type BoundGetterService, type CaseFirst, type CollatorSensitivity,
-  type CollatorState, type CollatorUsage, type CompactDisplay,
-  type ConstructibleService, type CurrencyDisplay, type CurrencySign,
+  type BoundGetterService, type CollatorState, type ConstructibleService,
   type DateStyle, type DateTimeComponent, type DateTimeComponents,
-  type DateTimeFormatState, type DisplayNamesFallback, type DisplayNamesState,
-  type DisplayNamesType, type DurationBaseStyle, type DurationDisplay,
+  type DateTimeFormatState, type DisplayNamesState, type DurationBaseStyle,
   type DurationFormatState, type DurationUnitOptions, type DurationUnitStyle,
   type Granularity, type HourCycle, type IntlData, type IntlDigitOptions,
-  type IntlService, type IntlUseGrouping, type LanguageDisplay,
-  type ListFormatState, type ListFormatStyle, type ListFormatType,
-  type LocaleState, type MonthWidth, type NameWidth, type Notation,
-  type NumberFormatState, type NumberStyle, type NumericWidth,
-  type PluralRulesState, type PluralType, type RelativeTimeFormatState,
-  type RelativeTimeNumeric, type RelativeTimeStyle, type RoundingMode,
-  type RoundingPriority, type Segment, type SegmentIteratorState,
-  type SegmenterState, type SegmentsState, type SignDisplay, type TimeStyle,
-  type TimeZoneNameWidth, type TrailingZeroDisplay, type UnitDisplay,
-  AccountingSign, BaseDigital, BaseLong, BaseNarrow, BaseShort, BoundCollator,
+  type IntlService, type IntlUseGrouping, type ListFormatState,
+  type ListFormatStyle, type LocaleState, type MonthWidth, type NameWidth,
+  type Notation, type NumberFormatState, type NumberStyle, type NumericWidth,
+  type PluralRulesState, type RelativeTimeFormatState, type Segment,
+  type SegmentIteratorState, type SegmenterState, type SegmentsState,
+  type TimeStyle, type TimeZoneNameWidth, type UnitDisplay, AccountingSign,
+  BaseDigital, BaseLong, BaseNarrow, BaseShort, BoundCollator,
   BoundDateTimeFormat, BoundNumberFormat, CalendarNames, Cardinal,
   CaseFirstFalse, CaseFirstLower, CaseFirstUpper, CodeFallback, CollatorData,
   CollatorService, CollatorState, CompactLong, CompactShort, Conjunction,
@@ -76,11 +73,16 @@ import arc/rt/intl_data.{
 }
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
+import arc/rt/temporal_data.{
+  type TemporalData, TemporalDate, TemporalDateTime, TemporalDuration,
+  TemporalInstant, TemporalMonthDay, TemporalTime, TemporalYearMonth,
+  TemporalZonedDateTime,
+}
 import arc/rt/types.{
   type Agent, type Handle, type IntlHostOverrideName, type IntlMethodName,
   type IntlNative, type JsNum, type JsVal, type LocaleGetterName,
-  type LocaleMethodName, type TemporalData, BigIntObj, BigIntToLocaleString,
-  DateObj, DateToLocaleDateString, DateToLocaleString, DateToLocaleTimeString,
+  type LocaleMethodName, BigIntObj, BigIntToLocaleString, DateObj,
+  DateToLocaleDateString, DateToLocaleString, DateToLocaleTimeString,
   IntlBoundGetter, IntlBoundMethod, IntlConstructor, IntlFormat, IntlFormatRange,
   IntlFormatRangeToParts, IntlFormatToParts, IntlGetCanonicalLocales,
   IntlHostOverride, IntlLocaleGetter, IntlLocaleMethod, IntlMethod, IntlN,
@@ -95,12 +97,12 @@ import arc/rt/types.{
   LocaleMaximize, LocaleMinimize, LocaleNumberingSystem, LocaleNumeric,
   LocaleRegion, LocaleScript, LocaleToString, LocaleVariants, NumberObj,
   NumberToLocaleString, SObject, StringKey, StringLocaleCompare,
-  StringToLocaleLowerCase, StringToLocaleUpperCase, SymbolKey, TemporalDate,
-  TemporalDateTime, TemporalDuration, TemporalInstant, TemporalMonthDay,
-  TemporalObj, TemporalTime, TemporalYearMonth, TemporalZonedDateTime, classify,
-  mk_bool, mk_int, mk_number, mk_object, mk_string, mk_undefined,
+  StringToLocaleLowerCase, StringToLocaleUpperCase, SymbolKey, TemporalObj,
+  classify, mk_bool, mk_int, mk_number, mk_object, mk_string, mk_undefined,
 }
+import arc/rt/unicode_case
 import arc/rt/val as rt_val
+import arc/time_zone
 import gleam/dict
 import gleam/float
 import gleam/int
@@ -165,7 +167,7 @@ pub fn init(
         },
       ),
     )
-  let st = add_named_properties(st, locale.prototype, locale_methods)
+  let st = common.add_named_properties(st, locale.prototype, locale_methods)
 
   let #(collator, st) =
     init_service(st, object_proto, function_proto, CollatorService, [], [
@@ -272,7 +274,7 @@ pub fn init(
     ])
   let #(segments_proto, st) =
     common.alloc_proto(st, Some(object_proto), dict.new())
-  let st = add_named_properties(st, segments_proto, seg_containing)
+  let st = common.add_named_properties(st, segments_proto, seg_containing)
   let #(seg_iter_fn, st) =
     common.alloc_rooted_native_fn(
       st,
@@ -296,7 +298,7 @@ pub fn init(
     ])
   let #(segmenter, st) =
     init_service(st, object_proto, function_proto, SegmenterService, [], [])
-  let st = add_named_properties(st, segmenter.prototype, segment_method)
+  let st = common.add_named_properties(st, segmenter.prototype, segment_method)
 
   let #(ns_methods, st) =
     common.alloc_methods(st, function_proto, [
@@ -338,12 +340,12 @@ pub fn init(
     common.alloc_methods(st, function_proto, [
       #("toLocaleString", IntlN(IntlHostOverride(NumberToLocaleString)), 0),
     ])
-  let st = add_named_properties(st, number_proto, number_methods)
+  let st = common.add_named_properties(st, number_proto, number_methods)
   let #(bigint_methods, st) =
     common.alloc_methods(st, function_proto, [
       #("toLocaleString", IntlN(IntlHostOverride(BigIntToLocaleString)), 0),
     ])
-  let st = add_named_properties(st, bigint_proto, bigint_methods)
+  let st = common.add_named_properties(st, bigint_proto, bigint_methods)
   let #(string_methods, st) =
     common.alloc_methods(st, function_proto, [
       #("localeCompare", IntlN(IntlHostOverride(StringLocaleCompare)), 1),
@@ -358,7 +360,7 @@ pub fn init(
         0,
       ),
     ])
-  let st = add_named_properties(st, string_proto, string_methods)
+  let st = common.add_named_properties(st, string_proto, string_methods)
   let #(date_methods, st) =
     common.alloc_methods(st, function_proto, [
       #("toLocaleString", IntlN(IntlHostOverride(DateToLocaleString)), 0),
@@ -373,7 +375,7 @@ pub fn init(
         0,
       ),
     ])
-  let st = add_named_properties(st, date_proto, date_methods)
+  let st = common.add_named_properties(st, date_proto, date_methods)
 
   #(namespace, st)
 }
@@ -470,14 +472,6 @@ fn locale_method_js_name(method: LocaleMethodName) -> String {
     LocaleGetTextInfo -> "getTextInfo"
     LocaleGetWeekInfo -> "getWeekInfo"
   }
-}
-
-fn add_named_properties(
-  st: Agent,
-  h: Handle,
-  props: List(#(String, types.Property)),
-) -> Agent {
-  list.fold(props, st, fn(st, p) { common.add_named_property(st, h, p.0, p.1) })
 }
 
 pub fn dispatch(
@@ -806,138 +800,6 @@ fn parts_to_js_with_unit(
   alloc_array(st, list.reverse(objs))
 }
 
-fn coerce_options(st: Agent, v: JsVal) -> #(Option(Handle), Agent) {
-  case classify(v) {
-    KUndef -> #(None, st)
-    _ -> {
-      let #(h, st) = rt_val.t_to_object(st, v)
-      #(Some(h), st)
-    }
-  }
-}
-
-fn strict_options(st: Agent, v: JsVal) -> #(Option(Handle), Agent) {
-  case classify(v) {
-    KUndef -> #(None, st)
-    KHandle(h) -> #(Some(h), st)
-    _ -> rt_val.t_throw_type_error(st, "options must be an object or undefined")
-  }
-}
-
-fn opt_get(st: Agent, opts: Option(Handle), name: String) -> #(JsVal, Agent) {
-  case opts {
-    None -> #(mk_undefined(), st)
-    Some(h) -> rt_obj.t_get_prop(st, mk_object(h), StringKey(Named(name)))
-  }
-}
-
-fn get_text_opt(
-  st: Agent,
-  opts: Option(Handle),
-  name: String,
-  allowed: List(String),
-  default: Option(String),
-) -> #(Option(String), Agent) {
-  let #(v, st) = opt_get(st, opts, name)
-  case classify(v) {
-    KUndef -> #(default, st)
-    _ -> {
-      let #(s, st) = rt_val.t_to_string(st, v)
-      case allowed == [] || list.contains(allowed, s) {
-        True -> #(Some(s), st)
-        False ->
-          rt_val.t_throw_range_error(
-            st,
-            "Value " <> s <> " out of range for options property " <> name,
-          )
-      }
-    }
-  }
-}
-
-fn get_enum_opt(
-  st: Agent,
-  opts: Option(Handle),
-  name: String,
-  variants: List(#(String, a)),
-  default: a,
-) -> #(a, Agent) {
-  let #(v, st) = opt_get(st, opts, name)
-  case classify(v) {
-    KUndef -> #(default, st)
-    _ -> {
-      let #(s, st) = rt_val.t_to_string(st, v)
-      case list.key_find(variants, s) {
-        Ok(variant) -> #(variant, st)
-        Error(Nil) ->
-          rt_val.t_throw_range_error(
-            st,
-            "Value " <> s <> " out of range for options property " <> name,
-          )
-      }
-    }
-  }
-}
-
-fn get_bool_opt(
-  st: Agent,
-  opts: Option(Handle),
-  name: String,
-  default: Option(Bool),
-) -> #(Option(Bool), Agent) {
-  let #(v, st) = opt_get(st, opts, name)
-  case classify(v) {
-    KUndef -> #(default, st)
-    _ -> #(Some(rt_val.to_boolean(v)), st)
-  }
-}
-
-fn get_num_opt(
-  st: Agent,
-  opts: Option(Handle),
-  name: String,
-  min: Int,
-  max: Int,
-  default: Option(Int),
-) -> #(Option(Int), Agent) {
-  let #(v, st) = opt_get(st, opts, name)
-  default_number_option(st, v, min, max, default, name)
-}
-
-fn default_number_option(
-  st: Agent,
-  v: JsVal,
-  min: Int,
-  max: Int,
-  default: Option(Int),
-  name: String,
-) -> #(Option(Int), Agent) {
-  case classify(v) {
-    KUndef -> #(default, st)
-    _ -> {
-      let #(n, st) = rt_val.t_to_number(st, v)
-      let f = case n {
-        JInt(i) -> Some(int.to_float(i))
-        JFloat(f) -> Some(f)
-        JNan | JPosInf | JNegInf -> None
-      }
-      case f {
-        Some(f) ->
-          // range check uses the unrounded value (§9.2.17)
-          case f >=. int.to_float(min) && f <=. int.to_float(max) {
-            True -> #(Some(float.truncate(float.floor(f))), st)
-            False ->
-              rt_val.t_throw_range_error(
-                st,
-                name <> " value is out of range: " <> float.to_string(f),
-              )
-          }
-        None -> rt_val.t_throw_range_error(st, name <> " value is out of range")
-      }
-    }
-  }
-}
-
 fn canonicalize_locale_list(
   st: Agent,
   locales: JsVal,
@@ -1044,7 +906,7 @@ fn supported_values_of(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
         "MXN", "RUB", "SEK", "USD",
       ])
     "numberingSystem" -> Some(intl_format.numbering_systems())
-    "timeZone" -> Some(temporal_tz.available_ids(st.hooks.time_zone_ids()))
+    "timeZone" -> Some(time_zone.available_ids(st.hooks.time_zone_ids()))
     "unit" -> Some(intl_format.sanctioned_units())
     _ -> None
   }
@@ -1080,7 +942,7 @@ fn supported_locales_of(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let locales = first_arg_or_undefined(args)
   let options_v = helpers.arg_at(args, 1)
   let #(requested, st) = canonicalize_locale_list(st, locales)
-  let #(opts, st) = coerce_options(st, options_v)
+  let #(opts, st) = coerce_options_to_object(st, options_v)
   let #(_matcher, st) =
     get_text_opt(
       st,
@@ -1256,7 +1118,7 @@ fn locale_state(
         "Intl.Locale tag must be a string or object",
       )
   }
-  let #(opts, st) = coerce_options(st, options_v)
+  let #(opts, st) = coerce_options_to_object(st, options_v)
   let lid = case intl_locale.parse(tag_text) {
     Ok(lid) -> lid
     Error(Nil) ->
@@ -1502,8 +1364,8 @@ fn constructor_prologue(
 ) -> #(List(String), Option(Handle), Agent) {
   let #(requested, st) = canonicalize_locale_list(st, locales_v)
   let #(opts, st) = case strict {
-    True -> strict_options(st, options_v)
-    False -> coerce_options(st, options_v)
+    True -> get_options_object(st, options_v)
+    False -> coerce_options_to_object(st, options_v)
   }
   let st = read_locale_matcher(st, opts)
   #(requested, opts, st)
@@ -1535,7 +1397,7 @@ fn collator_state(
   options_v: JsVal,
 ) -> #(CollatorState, Agent) {
   let #(requested, st) = canonicalize_locale_list(st, locales_v)
-  let #(opts, st) = coerce_options(st, options_v)
+  let #(opts, st) = coerce_options_to_object(st, options_v)
   let #(usage, st) =
     get_enum_opt(
       st,
@@ -1588,7 +1450,7 @@ fn collator_state(
       ext_kws,
       "kf",
       case_first_opt,
-      case_first_from_js_string,
+      intl_data.case_first_from_js_string,
       CaseFirstFalse,
     )
   let #(sensitivity, st) =
@@ -1614,7 +1476,7 @@ fn collator_state(
         True -> "true"
         False -> "false"
       }),
-      #("kf", kf_from_ext, case_first_to_js_string(case_first)),
+      #("kf", kf_from_ext, intl_data.case_first_to_js_string(case_first)),
     ])
   #(
     CollatorState(
@@ -2159,7 +2021,11 @@ fn dtf_state_required(
     build_resolved_locale(data_locale, [
       #("ca", ca_from_ext, calendar),
       #("nu", nu_from_ext, nu),
-      #("hc", hc_from_ext && hour12 == None, hour_cycle_to_js_string(hc)),
+      #(
+        "hc",
+        hc_from_ext && hour12 == None,
+        intl_data.hour_cycle_to_js_string(hc),
+      ),
     ])
   let #(tz_v, st) = opt_get(st, opts, "timeZone")
   let #(time_zone, st) = case classify(tz_v) {
@@ -3098,285 +2964,6 @@ fn duration_unit_list(
   ]
 }
 
-fn collator_usage_to_js_string(v: CollatorUsage) -> String {
-  case v {
-    UsageSort -> "sort"
-    UsageSearch -> "search"
-  }
-}
-
-fn collator_sensitivity_to_js_string(v: CollatorSensitivity) -> String {
-  case v {
-    SensBase -> "base"
-    SensAccent -> "accent"
-    SensCase -> "case"
-    SensVariant -> "variant"
-  }
-}
-
-fn case_first_to_js_string(v: CaseFirst) -> String {
-  case v {
-    CaseFirstUpper -> "upper"
-    CaseFirstLower -> "lower"
-    CaseFirstFalse -> "false"
-  }
-}
-
-fn case_first_from_js_string(s: String) -> Option(CaseFirst) {
-  case s {
-    "upper" -> Some(CaseFirstUpper)
-    "lower" -> Some(CaseFirstLower)
-    "false" -> Some(CaseFirstFalse)
-    _ -> None
-  }
-}
-
-fn num_style_to_js_string(v: NumberStyle) -> String {
-  case v {
-    StyleDecimal -> "decimal"
-    StylePercent -> "percent"
-    StyleCurrency(..) -> "currency"
-    StyleUnit(..) -> "unit"
-  }
-}
-
-fn notation_to_js_string(v: Notation) -> String {
-  case v {
-    NotationStandard -> "standard"
-    NotationScientific -> "scientific"
-    NotationEngineering -> "engineering"
-    NotationCompact(..) -> "compact"
-  }
-}
-
-fn compact_display_to_js_string(v: CompactDisplay) -> String {
-  case v {
-    CompactShort -> "short"
-    CompactLong -> "long"
-  }
-}
-
-fn sign_display_to_js_string(v: SignDisplay) -> String {
-  case v {
-    SignAuto -> "auto"
-    SignNever -> "never"
-    SignAlways -> "always"
-    SignExceptZero -> "exceptZero"
-    SignNegative -> "negative"
-  }
-}
-
-fn currency_display_to_js_string(v: CurrencyDisplay) -> String {
-  case v {
-    CurrencyCode -> "code"
-    CurrencySymbol -> "symbol"
-    CurrencyNarrowSymbol -> "narrowSymbol"
-    CurrencyName -> "name"
-  }
-}
-
-fn currency_sign_to_js_string(v: CurrencySign) -> String {
-  case v {
-    StandardSign -> "standard"
-    AccountingSign -> "accounting"
-  }
-}
-
-fn unit_display_to_js_string(v: UnitDisplay) -> String {
-  case v {
-    UnitShort -> "short"
-    UnitNarrow -> "narrow"
-    UnitLong -> "long"
-  }
-}
-
-fn rounding_mode_to_js_string(v: RoundingMode) -> String {
-  case v {
-    RoundCeil -> "ceil"
-    RoundFloor -> "floor"
-    RoundExpand -> "expand"
-    RoundTrunc -> "trunc"
-    RoundHalfCeil -> "halfCeil"
-    RoundHalfFloor -> "halfFloor"
-    RoundHalfExpand -> "halfExpand"
-    RoundHalfTrunc -> "halfTrunc"
-    RoundHalfEven -> "halfEven"
-  }
-}
-
-fn rounding_priority_to_js_string(v: RoundingPriority) -> String {
-  case v {
-    PriorityAuto -> "auto"
-    PriorityMorePrecision -> "morePrecision"
-    PriorityLessPrecision -> "lessPrecision"
-  }
-}
-
-fn trailing_zero_display_to_js_string(v: TrailingZeroDisplay) -> String {
-  case v {
-    TrailingZeroAuto -> "auto"
-    TrailingZeroStripIfInteger -> "stripIfInteger"
-  }
-}
-
-fn numeric_width_to_js_string(v: NumericWidth) -> String {
-  case v {
-    Numeric -> "numeric"
-    TwoDigit -> "2-digit"
-  }
-}
-
-fn name_width_to_js_string(v: NameWidth) -> String {
-  case v {
-    WidthLong -> "long"
-    WidthShort -> "short"
-    WidthNarrow -> "narrow"
-  }
-}
-
-fn month_width_to_js_string(v: MonthWidth) -> String {
-  case v {
-    MonthNum(w) -> numeric_width_to_js_string(w)
-    MonthName(w) -> name_width_to_js_string(w)
-  }
-}
-
-fn time_zone_name_width_to_js_string(v: TimeZoneNameWidth) -> String {
-  case v {
-    ZoneShort -> "short"
-    ZoneLong -> "long"
-    ZoneShortOffset -> "shortOffset"
-    ZoneLongOffset -> "longOffset"
-    ZoneShortGeneric -> "shortGeneric"
-    ZoneLongGeneric -> "longGeneric"
-  }
-}
-
-fn hour_cycle_to_js_string(v: HourCycle) -> String {
-  case v {
-    H11 -> "h11"
-    H12 -> "h12"
-    H23 -> "h23"
-    H24 -> "h24"
-  }
-}
-
-fn date_style_to_js_string(v: DateStyle) -> String {
-  case v {
-    DateFull -> "full"
-    DateLong -> "long"
-    DateMedium -> "medium"
-    DateShort -> "short"
-  }
-}
-
-fn time_style_to_js_string(v: TimeStyle) -> String {
-  case v {
-    TimeFull -> "full"
-    TimeLong -> "long"
-    TimeMedium -> "medium"
-    TimeShort -> "short"
-  }
-}
-
-fn plural_type_to_js_string(v: PluralType) -> String {
-  case v {
-    Cardinal -> "cardinal"
-    Ordinal -> "ordinal"
-  }
-}
-
-fn list_format_type_to_js_string(v: ListFormatType) -> String {
-  case v {
-    Conjunction -> "conjunction"
-    Disjunction -> "disjunction"
-    UnitList -> "unit"
-  }
-}
-
-fn list_format_style_to_js_string(v: ListFormatStyle) -> String {
-  case v {
-    ListLong -> "long"
-    ListShort -> "short"
-    ListNarrow -> "narrow"
-  }
-}
-
-fn rtf_style_to_js_string(v: RelativeTimeStyle) -> String {
-  case v {
-    RelativeLong -> "long"
-    RelativeShort -> "short"
-    RelativeNarrow -> "narrow"
-  }
-}
-
-fn rtf_numeric_to_js_string(v: RelativeTimeNumeric) -> String {
-  case v {
-    NumericAlways -> "always"
-    NumericAuto -> "auto"
-  }
-}
-
-fn granularity_to_js_string(v: Granularity) -> String {
-  case v {
-    GraphemeGranularity -> "grapheme"
-    WordGranularity -> "word"
-    SentenceGranularity -> "sentence"
-  }
-}
-
-fn display_names_type_to_js_string(v: DisplayNamesType) -> String {
-  case v {
-    LanguageNames -> "language"
-    RegionNames -> "region"
-    ScriptNames -> "script"
-    CurrencyNames -> "currency"
-    CalendarNames -> "calendar"
-    DateTimeFieldNames -> "dateTimeField"
-  }
-}
-
-fn display_names_fallback_to_js_string(v: DisplayNamesFallback) -> String {
-  case v {
-    CodeFallback -> "code"
-    NoFallback -> "none"
-  }
-}
-
-fn language_display_to_js_string(v: LanguageDisplay) -> String {
-  case v {
-    DialectNames -> "dialect"
-    StandardNames -> "standard"
-  }
-}
-
-fn duration_unit_style_to_js_string(v: DurationUnitStyle) -> String {
-  case v {
-    UnitStyleLong -> "long"
-    UnitStyleShort -> "short"
-    UnitStyleNarrow -> "narrow"
-    UnitStyleNumeric -> "numeric"
-    UnitStyleTwoDigit -> "2-digit"
-    UnitStyleFractional -> "numeric"
-  }
-}
-
-fn duration_display_to_js_string(v: DurationDisplay) -> String {
-  case v {
-    DisplayAuto -> "auto"
-    DisplayAlways -> "always"
-  }
-}
-
-fn duration_base_style_to_js_string(v: DurationBaseStyle) -> String {
-  case v {
-    BaseLong -> "long"
-    BaseShort -> "short"
-    BaseNarrow -> "narrow"
-    BaseDigital -> "digital"
-  }
-}
-
 fn present_pairs(pairs: List(#(k, Option(a)))) -> List(#(k, a)) {
   list.filter_map(pairs, fn(p) {
     case p.1 {
@@ -3403,15 +2990,18 @@ fn resolved_options(
     CollatorData(c) -> #(
       [
         #("locale", mk_string(c.locale)),
-        #("usage", mk_string(collator_usage_to_js_string(c.usage))),
+        #("usage", mk_string(intl_data.collator_usage_to_js_string(c.usage))),
         #(
           "sensitivity",
-          mk_string(collator_sensitivity_to_js_string(c.sensitivity)),
+          mk_string(intl_data.collator_sensitivity_to_js_string(c.sensitivity)),
         ),
         #("ignorePunctuation", mk_bool(c.ignore_punctuation)),
         #("collation", mk_string(c.collation)),
         #("numeric", mk_bool(c.numeric)),
-        #("caseFirst", mk_string(case_first_to_js_string(c.case_first))),
+        #(
+          "caseFirst",
+          mk_string(intl_data.case_first_to_js_string(c.case_first)),
+        ),
       ],
       st,
     )
@@ -3420,15 +3010,15 @@ fn resolved_options(
       let #(currency, currency_display, currency_sign) = case nf.style {
         StyleCurrency(currency:, display:, sign:) -> #(
           Some(mk_string(currency)),
-          Some(mk_string(currency_display_to_js_string(display))),
-          Some(mk_string(currency_sign_to_js_string(sign))),
+          Some(mk_string(intl_data.currency_display_to_js_string(display))),
+          Some(mk_string(intl_data.currency_sign_to_js_string(sign))),
         )
         StyleDecimal | StylePercent | StyleUnit(..) -> #(None, None, None)
       }
       let #(unit, unit_display) = case nf.style {
         StyleUnit(unit:, display:) -> #(
           Some(mk_string(unit)),
-          Some(mk_string(unit_display_to_js_string(display))),
+          Some(mk_string(intl_data.unit_display_to_js_string(display))),
         )
         StyleDecimal | StylePercent | StyleCurrency(..) -> #(None, None)
       }
@@ -3436,7 +3026,10 @@ fn resolved_options(
         present_pairs([
           #("locale", Some(mk_string(nf.locale))),
           #("numberingSystem", Some(mk_string(nf.numbering_system))),
-          #("style", Some(mk_string(num_style_to_js_string(nf.style)))),
+          #(
+            "style",
+            Some(mk_string(intl_data.num_style_to_js_string(nf.style))),
+          ),
           #("currency", currency),
           #("currencyDisplay", currency_display),
           #("currencySign", currency_sign),
@@ -3444,11 +3037,16 @@ fn resolved_options(
           #("unitDisplay", unit_display),
           ..digit_option_pairs(dg, [
             #("useGrouping", Some(use_grouping_js(nf.use_grouping))),
-            #("notation", Some(mk_string(notation_to_js_string(nf.notation)))),
+            #(
+              "notation",
+              Some(mk_string(intl_data.notation_to_js_string(nf.notation))),
+            ),
             #("compactDisplay", compact_display_of(nf.notation)),
             #(
               "signDisplay",
-              Some(mk_string(sign_display_to_js_string(nf.sign_display))),
+              Some(
+                mk_string(intl_data.sign_display_to_js_string(nf.sign_display)),
+              ),
             ),
             ..digit_rounding_pairs(dg)
           ])
@@ -3465,7 +3063,7 @@ fn resolved_options(
         #(
           "hourCycle",
           option.map(d.hour_cycle, fn(hc) {
-            mk_string(hour_cycle_to_js_string(hc))
+            mk_string(intl_data.hour_cycle_to_js_string(hc))
           }),
         ),
         #(
@@ -3494,13 +3092,13 @@ fn resolved_options(
         #(
           "dateStyle",
           option.map(d.date_style, fn(s) {
-            mk_string(date_style_to_js_string(s))
+            mk_string(intl_data.date_style_to_js_string(s))
           }),
         ),
         #(
           "timeStyle",
           option.map(d.time_style, fn(s) {
-            mk_string(time_style_to_js_string(s))
+            mk_string(intl_data.time_style_to_js_string(s))
           }),
         ),
       ]),
@@ -3518,8 +3116,14 @@ fn resolved_options(
       #(
         present_pairs([
           #("locale", Some(mk_string(p.locale))),
-          #("type", Some(mk_string(plural_type_to_js_string(p.plural_type)))),
-          #("notation", Some(mk_string(notation_to_js_string(p.notation)))),
+          #(
+            "type",
+            Some(mk_string(intl_data.plural_type_to_js_string(p.plural_type))),
+          ),
+          #(
+            "notation",
+            Some(mk_string(intl_data.notation_to_js_string(p.notation))),
+          ),
           #("compactDisplay", compact_display_of(p.notation)),
           ..digit_option_pairs(dg, [
             #("pluralCategories", Some(cats)),
@@ -3532,16 +3136,19 @@ fn resolved_options(
     ListFormatData(l) -> #(
       [
         #("locale", mk_string(l.locale)),
-        #("type", mk_string(list_format_type_to_js_string(l.list_type))),
-        #("style", mk_string(list_format_style_to_js_string(l.style))),
+        #(
+          "type",
+          mk_string(intl_data.list_format_type_to_js_string(l.list_type)),
+        ),
+        #("style", mk_string(intl_data.list_format_style_to_js_string(l.style))),
       ],
       st,
     )
     RelativeTimeFormatData(r) -> #(
       [
         #("locale", mk_string(r.locale)),
-        #("style", mk_string(rtf_style_to_js_string(r.style))),
-        #("numeric", mk_string(rtf_numeric_to_js_string(r.numeric))),
+        #("style", mk_string(intl_data.rtf_style_to_js_string(r.style))),
+        #("numeric", mk_string(intl_data.rtf_numeric_to_js_string(r.numeric))),
         #("numberingSystem", mk_string(r.numbering_system)),
       ],
       st,
@@ -3549,26 +3156,33 @@ fn resolved_options(
     SegmenterData(sg) -> #(
       [
         #("locale", mk_string(sg.locale)),
-        #("granularity", mk_string(granularity_to_js_string(sg.granularity))),
+        #(
+          "granularity",
+          mk_string(intl_data.granularity_to_js_string(sg.granularity)),
+        ),
       ],
       st,
     )
     DisplayNamesData(d) -> #(
       present_pairs([
         #("locale", Some(mk_string(d.locale))),
-        #("style", Some(mk_string(name_width_to_js_string(d.style)))),
+        #("style", Some(mk_string(intl_data.name_width_to_js_string(d.style)))),
         #(
           "type",
-          Some(mk_string(display_names_type_to_js_string(d.display_type))),
+          Some(
+            mk_string(intl_data.display_names_type_to_js_string(d.display_type)),
+          ),
         ),
         #(
           "fallback",
-          Some(mk_string(display_names_fallback_to_js_string(d.fallback))),
+          Some(
+            mk_string(intl_data.display_names_fallback_to_js_string(d.fallback)),
+          ),
         ),
         #(
           "languageDisplay",
           option.map(d.language_display, fn(ld) {
-            mk_string(language_display_to_js_string(ld))
+            mk_string(intl_data.language_display_to_js_string(ld))
           }),
         ),
       ]),
@@ -3579,16 +3193,22 @@ fn resolved_options(
         [
           #("locale", mk_string(df.locale)),
           #("numberingSystem", mk_string(df.numbering_system)),
-          #("style", mk_string(duration_base_style_to_js_string(df.style))),
+          #(
+            "style",
+            mk_string(intl_data.duration_base_style_to_js_string(df.style)),
+          ),
         ],
         list.flat_map(duration_unit_list(df), fn(u) {
           let #(unit, o) = u
           let name = duration_unit_js_name(unit)
           [
-            #(name, mk_string(duration_unit_style_to_js_string(o.style))),
+            #(
+              name,
+              mk_string(intl_data.duration_unit_style_to_js_string(o.style)),
+            ),
             #(
               name <> "Display",
-              mk_string(duration_display_to_js_string(o.display)),
+              mk_string(intl_data.duration_display_to_js_string(o.display)),
             ),
           ]
         }),
@@ -3616,25 +3236,25 @@ fn use_grouping_js(g: IntlUseGrouping) -> JsVal {
 fn compact_display_of(n: Notation) -> Option(JsVal) {
   case n {
     NotationCompact(display:) ->
-      Some(mk_string(compact_display_to_js_string(display)))
+      Some(mk_string(intl_data.compact_display_to_js_string(display)))
     NotationStandard | NotationScientific | NotationEngineering -> None
   }
 }
 
 fn name_width_js(v: NameWidth) -> JsVal {
-  mk_string(name_width_to_js_string(v))
+  mk_string(intl_data.name_width_to_js_string(v))
 }
 
 fn numeric_width_js(v: NumericWidth) -> JsVal {
-  mk_string(numeric_width_to_js_string(v))
+  mk_string(intl_data.numeric_width_to_js_string(v))
 }
 
 fn month_width_js(v: MonthWidth) -> JsVal {
-  mk_string(month_width_to_js_string(v))
+  mk_string(intl_data.month_width_to_js_string(v))
 }
 
 fn tz_name_width_js(v: TimeZoneNameWidth) -> JsVal {
-  mk_string(time_zone_name_width_to_js_string(v))
+  mk_string(intl_data.time_zone_name_width_to_js_string(v))
 }
 
 fn digit_option_pairs(
@@ -3671,16 +3291,20 @@ fn digit_rounding_pairs(
     #("roundingIncrement", Some(mk_int(dg.rounding_increment))),
     #(
       "roundingMode",
-      Some(mk_string(rounding_mode_to_js_string(dg.rounding_mode))),
+      Some(mk_string(intl_data.rounding_mode_to_js_string(dg.rounding_mode))),
     ),
     #(
       "roundingPriority",
-      Some(mk_string(rounding_priority_to_js_string(dg.rounding_priority))),
+      Some(
+        mk_string(intl_data.rounding_priority_to_js_string(dg.rounding_priority)),
+      ),
     ),
     #(
       "trailingZeroDisplay",
       Some(
-        mk_string(trailing_zero_display_to_js_string(dg.trailing_zero_display)),
+        mk_string(intl_data.trailing_zero_display_to_js_string(
+          dg.trailing_zero_display,
+        )),
       ),
     ),
   ]
@@ -5041,94 +4665,15 @@ fn host_locale_case(
   }
   // deliberately not a lookup of String.prototype.toLowerCase
   let pre = case lang {
-    "tr" | "az" -> turkic_case(s, upper)
-    "lt" -> lithuanian_case(s, upper)
+    "tr" | "az" -> intl_casing.turkic_case(s, upper)
+    "lt" -> intl_casing.lithuanian_case(s, upper)
     _ -> s
   }
   let cased = case upper {
     True -> string.uppercase(pre)
-    False -> b_string.to_lower_case(pre)
+    False -> unicode_case.to_lower_case(pre)
   }
   #(mk_string(cased), st)
-}
-
-fn turkic_case(s: String, upper upper: Bool) -> String {
-  case upper {
-    True ->
-      // i → İ (U+0130)
-      string.to_graphemes(s)
-      |> list.map(fn(g) {
-        case g {
-          "i" -> "İ"
-          _ -> g
-        }
-      })
-      |> string.join("")
-    False -> {
-      // İ → i, I → ı (U+0131), I + U+0307 → i
-      let cps =
-        string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
-      lower_turkic_cps(cps, [])
-    }
-  }
-}
-
-fn codepoint_text(c: Int) -> String {
-  case string.utf_codepoint(c) {
-    Ok(cp) -> string.from_utf_codepoints([cp])
-    Error(Nil) -> ""
-  }
-}
-
-fn lower_turkic_cps(cps: List(Int), acc: List(String)) -> String {
-  case cps {
-    [] -> string.join(list.reverse(acc), "")
-    [0x130, ..rest] -> lower_turkic_cps(rest, ["i", ..acc])
-    [0x49, 0x307, ..rest] -> lower_turkic_cps(rest, ["i", ..acc])
-    [0x49, ..rest] -> lower_turkic_cps(rest, ["ı", ..acc])
-    [c, ..rest] -> lower_turkic_cps(rest, [codepoint_text(c), ..acc])
-  }
-}
-
-fn lithuanian_case(s: String, upper upper: Bool) -> String {
-  let cps = string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
-  case upper {
-    // uppercasing drops U+0307 after i/j
-    True -> upper_lt_cps(cps, [])
-    False -> lower_lt_cps(cps, [])
-  }
-}
-
-fn upper_lt_cps(cps: List(Int), acc: List(String)) -> String {
-  case cps {
-    [] -> string.join(list.reverse(acc), "")
-    [0x69, 0x307, ..rest] -> upper_lt_cps(rest, ["I", ..acc])
-    [0x6a, 0x307, ..rest] -> upper_lt_cps(rest, ["J", ..acc])
-    [0x12f, 0x307, ..rest] -> upper_lt_cps(rest, ["Į", ..acc])
-    [c, ..rest] -> upper_lt_cps(rest, [codepoint_text(c), ..acc])
-  }
-}
-
-fn lower_lt_cps(cps: List(Int), acc: List(String)) -> String {
-  let is_mark = fn(c) { c >= 0x300 && c <= 0x36f && c != 0x307 }
-  case cps {
-    [] -> string.join(list.reverse(acc), "")
-    // I/J before a combining mark keep a dot above
-    [0x49, m, ..rest] ->
-      case is_mark(m) {
-        True -> lower_lt_cps(rest, [codepoint_text(m), "i\u{0307}", ..acc])
-        False -> lower_lt_cps([m, ..rest], ["i", ..acc])
-      }
-    [0x4a, m, ..rest] ->
-      case is_mark(m) {
-        True -> lower_lt_cps(rest, [codepoint_text(m), "j\u{0307}", ..acc])
-        False -> lower_lt_cps([m, ..rest], ["j", ..acc])
-      }
-    [0xcc, ..rest] -> lower_lt_cps(rest, ["i\u{0307}\u{0300}", ..acc])
-    [0xcd, ..rest] -> lower_lt_cps(rest, ["i\u{0307}\u{0301}", ..acc])
-    [0x128, ..rest] -> lower_lt_cps(rest, ["i\u{0307}\u{0303}", ..acc])
-    [c, ..rest] -> lower_lt_cps(rest, [codepoint_text(c), ..acc])
-  }
 }
 
 fn host_date_to_locale(

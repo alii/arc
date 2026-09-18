@@ -423,10 +423,10 @@ fn both_numbers(a: ir.Value, b: ir.Value) -> Build(#(ir.Value, Bool)) {
 
 pub fn num_binop(op: String, a: ir.Value, b: ir.Value) -> Build(ir.Value) {
   let on_overflow = host(op, [a, b])
-  then(int_or(op, a, b, on_overflow, on_overflow), mark_number)
+  then(with_small_int_kernel(op, a, b, on_overflow, on_overflow), mark_number)
 }
 
-fn int_or(
+fn with_small_int_kernel(
   op: String,
   a: ir.Value,
   b: ir.Value,
@@ -434,9 +434,9 @@ fn int_or(
   otherwise: Build(ir.Value),
 ) -> Build(ir.Value) {
   let arm = case op {
-    "add" -> Some(int_arm(ir.NAdd, a, b, zero_sign: False, on_overflow:))
-    "sub" -> Some(int_arm(ir.NSub, a, b, zero_sign: False, on_overflow:))
-    "mul" -> Some(int_arm(ir.NMul, a, b, zero_sign: True, on_overflow:))
+    "add" -> Some(small_int_arm(ir.NAdd, a, b, zero_sign: False, on_overflow:))
+    "sub" -> Some(small_int_arm(ir.NSub, a, b, zero_sign: False, on_overflow:))
+    "mul" -> Some(small_int_arm(ir.NMul, a, b, zero_sign: True, on_overflow:))
     _ -> None
   }
   case arm {
@@ -470,7 +470,7 @@ fn is_const_int(v: ir.Value) -> Bool {
   }
 }
 
-fn int_arm(
+fn small_int_arm(
   op: ir.NumTermOp,
   a: ir.Value,
   b: ir.Value,
@@ -523,7 +523,13 @@ pub fn guarded_binop(
               "add" -> miss_or(host("add", [a, b]), general)
               _ -> if_both_numbers(kernel_op, a, b, general)
             }
-            int_or(kernel_op, a, b, host(kernel_op, [a, b]), otherwise)(e, k)
+            with_small_int_kernel(
+              kernel_op,
+              a,
+              b,
+              host(kernel_op, [a, b]),
+              otherwise,
+            )(e, k)
           }
         }
       }

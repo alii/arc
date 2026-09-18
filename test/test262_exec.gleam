@@ -1,15 +1,13 @@
 import arc/bytecode/key.{Named}
 import arc/compiler
 import arc/compiler/compile_task
-import arc/esm
 import arc/host
 import arc/host_hooks.{HostHooks}
-import arc/internal/path
 import arc/interp/entry
 import arc/interp/safepoint
 import arc/module
-import arc/module/load_error
-import arc/module_host
+import arc/module/file_loader
+import arc/module/import_hook
 import arc/parser
 import arc/rt/async as rt_async
 import arc/rt/buffer
@@ -577,11 +575,18 @@ fn do_run_module(
     is_async,
   ))
 
-  case module.compile_bundle(path, source, test262_resolve, test262_load) {
+  case
+    module.compile_bundle(
+      path,
+      source,
+      file_loader.file_resolve,
+      file_loader.file_load,
+    )
+  {
     Error(err) -> Error("module: " <> string.inspect(err))
     Ok(bundle) -> {
       let #(res, st) =
-        module_host.evaluate_bundle_with_registry(
+        import_hook.evaluate_bundle_with_registry(
           st,
           bundle,
           settle_pending_wakes,
@@ -599,26 +604,6 @@ fn do_run_module(
         Error(err) -> Error("module: " <> string.inspect(err))
       }
     }
-  }
-}
-
-fn test262_resolve(
-  raw_specifier: String,
-  parent_specifier: String,
-) -> Result(String, module_host.ResolveError) {
-  let raw = esm.raw(raw_specifier)
-  let parent = esm.resolved_unchecked(parent_specifier)
-  case path.resolve_specifier(raw, parent) {
-    path.PathSpecifier(resolved) -> Ok(esm.resolved_text(resolved))
-    path.BareSpecifier(_bare) -> Error(load_error.UnsupportedBareSpecifier)
-  }
-}
-
-fn test262_load(resolved: String) -> Result(String, module_host.LoadError) {
-  case simplifile.read(resolved) {
-    Ok(source) -> Ok(source)
-    Error(simplifile.Enoent) -> Error(load_error.LoadNotFound)
-    Error(err) -> Error(load_error.ReadFailed(simplifile.describe_error(err)))
   }
 }
 
@@ -673,7 +658,12 @@ fn eval_harness(
     True -> Ok(st)
     False -> {
       let st =
-        module_host.install_import_hook(st, path, test262_resolve, test262_load)
+        import_hook.install_import_hook(
+          st,
+          path,
+          file_loader.file_resolve,
+          file_loader.file_load,
+        )
       let st = install_host_api(st, None)
 
       let harness_files = test262_suite.harness_files(metadata, is_async)
@@ -935,7 +925,7 @@ fn payload_to_value(st: Agent, payload: AgentPayload) -> #(JsVal, Agent) {
   case payload {
     AgentValuePayload(v) -> #(v, st)
     AgentSabPayload(storage:) -> {
-      let proto = case types.buffer_is_shared(storage) {
+      let proto = case buffer.buffer_is_shared(storage) {
         True -> st.realm.shared_array_buffer.prototype
         False -> st.realm.array_buffer.prototype
       }

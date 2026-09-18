@@ -1,7 +1,7 @@
 %% every offset here is local minus utc, in seconds; no io, see arc_zoneinfo_ffi
 -module(arc_tz_ffi).
 
--export([lookup/1, canonical_id/1, rules_offset_at/2, rules_next_transition/2,
+-export([known_identifier/1, canonical_id/1, rules_offset_at/2, rules_next_transition/2,
          rules_previous_transition/2, utc_time_zone/0, tzif_zone/2,
          posix_zone/1, time_zone_id/1, zone_offset_at_utc_ms/2,
          zone_offset_at_local_ms/2]).
@@ -12,8 +12,8 @@
                     | {posix, arc_posix_tz:posix_tz()}
                     | none.
 
--spec lookup(binary()) -> {some, binary()} | none.
-lookup(Id) when is_binary(Id) ->
+-spec known_identifier(binary()) -> {some, binary()} | none.
+known_identifier(Id) when is_binary(Id) ->
     case maps:find(ascii_lowercase(Id), arc_tz_links_ffi:names_by_lowercase()) of
         {ok, Proper} -> {some, Proper};
         error -> none
@@ -26,7 +26,7 @@ ascii_lower(C) -> C.
 
 -spec canonical_id(binary()) -> binary().
 canonical_id(Id) when is_binary(Id) ->
-    Proper = case lookup(Id) of
+    Proper = case known_identifier(Id) of
         {some, P} -> P;
         none -> Id
     end,

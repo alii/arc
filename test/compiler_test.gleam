@@ -4,7 +4,7 @@ import arc/host_hooks
 import arc/interp/entry
 import arc/interp/safepoint
 import arc/module
-import arc/module/load_error
+import arc/module/loader
 import arc/parser
 import arc/rt/async as rt_async
 import arc/rt/builtins as rt_builtins
@@ -7001,8 +7001,8 @@ fn run_module(
     module.compile_bundle(
       specifier,
       source,
-      fn(_dep, _parent) { Error(load_error.ResolveForbidden) },
-      fn(_resolved) { Error(load_error.LoadForbidden) },
+      fn(_dep, _parent) { Error(loader.ResolveForbidden) },
+      fn(_resolved) { Error(loader.LoadForbidden) },
     )
   {
     Error(err) -> Error("module error: " <> string.inspect(err))
@@ -7088,7 +7088,7 @@ pub fn module_diamond_deps_compiled_once_test() -> Nil {
       "./c.js" -> Ok("/c.js")
       "./d.js" -> Ok("/d.js")
       "./e.js" -> Ok("/e.js")
-      _ -> Error(load_error.ResolveNotFound)
+      _ -> Error(loader.ResolveNotFound)
     }
   }
   let load = fn(resolved: String) {
@@ -7098,7 +7098,7 @@ pub fn module_diamond_deps_compiled_once_test() -> Nil {
       "/c.js" -> Ok("import './d.js';")
       "/d.js" -> Ok("import './e.js';")
       "/e.js" -> Ok("export const e = 1;")
-      _ -> Error(load_error.LoadNotFound)
+      _ -> Error(loader.LoadNotFound)
     }
   }
   let entry = "import './b.js'; import './c.js';"
@@ -7133,8 +7133,8 @@ pub fn module_repl_harness_globals_test() -> Nil {
     module.compile_bundle(
       specifier,
       module_source,
-      fn(_dep, _parent) { Error(load_error.ResolveForbidden) },
-      fn(_resolved) { Error(load_error.LoadForbidden) },
+      fn(_dep, _parent) { Error(loader.ResolveForbidden) },
+      fn(_resolved) { Error(loader.LoadForbidden) },
     )
 
   case module.evaluate_bundle(st, bundle, rt_async.drain) {
@@ -7171,8 +7171,8 @@ pub fn run_export_namespace_call_test() -> Nil {
     module.compile_bundle(
       "<run_export-test>",
       source,
-      fn(_d, _p) { Error(load_error.ResolveForbidden) },
-      fn(_resolved) { Error(load_error.LoadForbidden) },
+      fn(_d, _p) { Error(loader.ResolveForbidden) },
+      fn(_resolved) { Error(loader.LoadForbidden) },
     )
   let assert #(Ok(module.EvaluatedBundle(namespace: ns_h, ..)), st) =
     module.evaluate_bundle(agent(), bundle, rt_async.drain)
@@ -7500,8 +7500,8 @@ pub fn direct_eval_at_top_level_vars_go_global_test() -> Nil {
 
 pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
   let spec = "/shared.js"
-  let no_resolve = fn(_dep, _parent) { Error(load_error.ResolveForbidden) }
-  let no_load = fn(_resolved) { Error(load_error.LoadForbidden) }
+  let no_resolve = fn(_dep, _parent) { Error(loader.ResolveForbidden) }
+  let no_load = fn(_resolved) { Error(loader.LoadForbidden) }
 
   let assert Ok(first) =
     module.compile_bundle(spec, "export const x = 1;", no_resolve, no_load)
@@ -7535,8 +7535,8 @@ pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
 
 pub fn reused_module_gaining_reexport_is_a_link_error_test() -> Nil {
   let spec = "/shared.js"
-  let no_resolve = fn(_dep, _parent) { Error(load_error.ResolveForbidden) }
-  let no_load = fn(_resolved) { Error(load_error.LoadForbidden) }
+  let no_resolve = fn(_dep, _parent) { Error(loader.ResolveForbidden) }
+  let no_load = fn(_resolved) { Error(loader.LoadForbidden) }
 
   let assert Ok(first) =
     module.compile_bundle(spec, "export const x = 1;", no_resolve, no_load)
@@ -7546,13 +7546,13 @@ pub fn reused_module_gaining_reexport_is_a_link_error_test() -> Nil {
   let dep_resolve = fn(dep, _parent) {
     case dep {
       "./dep.js" -> Ok("/dep.js")
-      _ -> Error(load_error.ResolveForbidden)
+      _ -> Error(loader.ResolveForbidden)
     }
   }
   let dep_load = fn(resolved) {
     case resolved {
       "/dep.js" -> Ok("export const y = 2;")
-      _ -> Error(load_error.LoadForbidden)
+      _ -> Error(loader.LoadForbidden)
     }
   }
   let assert Ok(second) =

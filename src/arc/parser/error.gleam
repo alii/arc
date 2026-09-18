@@ -1,29 +1,11 @@
-import arc/parser/lexer.{
-  type TokenKind, Ampersand, AmpersandAmpersand, AmpersandAmpersandEqual,
-  AmpersandEqual, Arrow, As, Async, Await, Bang, BangEqual, BangEqualEqual,
-  Break, Caret, CaretEqual, Case, Catch, Class, Colon, Comma, Const, Continue,
-  Debugger, Default, Delete, Do, Dot, DotDotDot, Else, Eof, Equal, EqualEqual,
-  EqualEqualEqual, Export, Extends, FalseLiteral, Finally, For, From, Function,
-  GreaterThan, GreaterThanEqual, GreaterThanGreaterThan,
-  GreaterThanGreaterThanEqual, GreaterThanGreaterThanGreaterThan,
-  GreaterThanGreaterThanGreaterThanEqual, Identifier, If, Illegal, Import, In,
-  Instanceof, LeftBrace, LeftBracket, LeftParen, LessThan, LessThanEqual,
-  LessThanLessThan, LessThanLessThanEqual, Let, LexFailure, Minus, MinusEqual,
-  MinusMinus, New, Null, Number, Of, Percent, PercentEqual, Pipe, PipeEqual,
-  PipePipe, PipePipeEqual, Plus, PlusEqual, PlusPlus, Question, QuestionDot,
-  QuestionQuestion, QuestionQuestionEqual, Return, RightBrace, RightBracket,
-  RightParen, Semicolon, Slash, SlashEqual, Star, StarEqual, StarStar,
-  StarStarEqual, Static, StringLiteral, Super, Switch, TemplateHead,
-  TemplateLiteral, This, Throw, Tilde, TrueLiteral, Try, Typeof, Undefined, Var,
-  Void, While, With, Yield,
-}
 import arc/parser/number
 import arc/parser/regex_error
+import arc/parser/token.{type TokenKind}
 import gleam/option.{type Option, None, Some}
 
 // pos first in every variant; the two wrappers copy the inner error's pos
 pub type ParseError {
-  LexError(pos: Int, error: lexer.LexError)
+  LexError(pos: Int, error: token.LexError)
   RegExpSyntaxError(pos: Int, error: regex_error.PatternError)
   ExpectedToken(pos: Int, expected: TokenKind, got: TokenKind)
   ExpectedIdentifier(pos: Int)
@@ -164,13 +146,13 @@ pub type ParseError {
 
 pub fn to_string(error: ParseError) -> String {
   case error {
-    LexError(error:, ..) -> lexer.lex_error_to_string(error)
+    LexError(error:, ..) -> token.lex_error_to_string(error)
     RegExpSyntaxError(error:, ..) -> regex_error.pattern_error_message(error)
     ExpectedToken(expected:, got:, ..) ->
       "Expected "
-      <> token_kind_to_string(expected)
+      <> token.token_kind_to_string(expected)
       <> " but got "
-      <> token_kind_to_string(got)
+      <> token.token_kind_to_string(got)
     ExpectedIdentifier(_) -> "Expected identifier"
     ExpectedSemicolon(_) -> "Expected ';'"
     ExpectedBindingPattern(_) -> "Expected binding pattern"
@@ -183,7 +165,7 @@ pub fn to_string(error: ParseError) -> String {
     UnexpectedSuper(_) -> "Unexpected 'super'"
     UnexpectedCloseParen(_) -> "Unexpected token ')'"
     UnexpectedToken(kind:, ..) ->
-      "Unexpected token: " <> token_kind_to_string(kind)
+      "Unexpected token: " <> token.token_kind_to_string(kind)
     MalformedNumericLiteral(error:, ..) -> number.parse_error_message(error)
     ReturnOutsideFunction(_) -> "'return' outside of function"
     BreakOutsideLoopOrSwitch(_) -> "'break' outside of loop or switch"
@@ -384,123 +366,10 @@ pub fn pos(error: ParseError) -> Int {
   error.pos
 }
 
-pub fn lex_error(err: lexer.LexError) -> ParseError {
+pub fn lex_error(err: token.LexError) -> ParseError {
   LexError(err.pos, err)
 }
 
 pub fn regexp_syntax_error(err: regex_error.PatternError) -> ParseError {
   RegExpSyntaxError(err.pos, err)
-}
-
-fn token_kind_to_string(kind: TokenKind) -> String {
-  case kind {
-    Number -> "number"
-    StringLiteral -> "string"
-    TemplateLiteral -> "template"
-    TemplateHead -> "template"
-    Identifier -> "identifier"
-    Var -> "'var'"
-    Let -> "'let'"
-    Const -> "'const'"
-    Function -> "'function'"
-    Return -> "'return'"
-    If -> "'if'"
-    Else -> "'else'"
-    While -> "'while'"
-    Do -> "'do'"
-    For -> "'for'"
-    Break -> "'break'"
-    Continue -> "'continue'"
-    Switch -> "'switch'"
-    Case -> "'case'"
-    Default -> "'default'"
-    Throw -> "'throw'"
-    Try -> "'try'"
-    Catch -> "'catch'"
-    Finally -> "'finally'"
-    New -> "'new'"
-    Delete -> "'delete'"
-    Typeof -> "'typeof'"
-    Void -> "'void'"
-    In -> "'in'"
-    Instanceof -> "'instanceof'"
-    This -> "'this'"
-    Class -> "'class'"
-    Extends -> "'extends'"
-    Super -> "'super'"
-    Import -> "'import'"
-    Export -> "'export'"
-    From -> "'from'"
-    As -> "'as'"
-    Of -> "'of'"
-    Async -> "'async'"
-    Await -> "'await'"
-    Yield -> "'yield'"
-    Null -> "'null'"
-    Undefined -> "'undefined'"
-    TrueLiteral -> "'true'"
-    FalseLiteral -> "'false'"
-    Debugger -> "'debugger'"
-    With -> "'with'"
-    Static -> "'static'"
-    LeftParen -> "'('"
-    RightParen -> "')'"
-    LeftBrace -> "'{'"
-    RightBrace -> "'}'"
-    LeftBracket -> "'['"
-    RightBracket -> "']'"
-    Semicolon -> "';'"
-    Comma -> "','"
-    Dot -> "'.'"
-    DotDotDot -> "'...'"
-    QuestionDot -> "'?.'"
-    QuestionQuestion -> "'??'"
-    Arrow -> "'=>'"
-    Colon -> "':'"
-    Plus -> "'+'"
-    Minus -> "'-'"
-    Star -> "'*'"
-    StarStar -> "'**'"
-    Slash -> "'/'"
-    Percent -> "'%'"
-    Ampersand -> "'&'"
-    AmpersandAmpersand -> "'&&'"
-    Pipe -> "'|'"
-    PipePipe -> "'||'"
-    Caret -> "'^'"
-    Tilde -> "'~'"
-    Bang -> "'!'"
-    Equal -> "'='"
-    EqualEqual -> "'=='"
-    EqualEqualEqual -> "'==='"
-    BangEqual -> "'!='"
-    BangEqualEqual -> "'!=='"
-    LessThan -> "'<'"
-    LessThanEqual -> "'<='"
-    GreaterThan -> "'>'"
-    GreaterThanEqual -> "'>='"
-    LessThanLessThan -> "'<<'"
-    GreaterThanGreaterThan -> "'>>'"
-    GreaterThanGreaterThanGreaterThan -> "'>>>'"
-    PlusEqual -> "'+='"
-    MinusEqual -> "'-='"
-    StarEqual -> "'*='"
-    StarStarEqual -> "'**='"
-    SlashEqual -> "'/='"
-    PercentEqual -> "'%='"
-    AmpersandEqual -> "'&='"
-    AmpersandAmpersandEqual -> "'&&='"
-    PipeEqual -> "'|='"
-    PipePipeEqual -> "'||='"
-    CaretEqual -> "'^='"
-    QuestionQuestionEqual -> "'??='"
-    LessThanLessThanEqual -> "'<<='"
-    GreaterThanGreaterThanEqual -> "'>>='"
-    GreaterThanGreaterThanGreaterThanEqual -> "'>>>='"
-    PlusPlus -> "'++'"
-    MinusMinus -> "'--'"
-    Question -> "'?'"
-    Eof -> "end of file"
-    Illegal | LexFailure(_) -> "illegal token"
-  }
 }

@@ -26,7 +26,7 @@ pub fn emit(source: String, module_name: String) -> Result(Emitted, String) {
   Emitted(ir: compile.ir_to_text(ir), core: core_text(cmod), erlang:)
 }
 
-@external(erlang, "arc_aot_pp_ffi", "forms_to_erl")
+@external(erlang, "arc_aot_playground_ffi", "forms_to_erl")
 fn forms_to_erl(forms: List(eaf.Form)) -> String
 
 fn core_text(cmod: CModule) -> String {
@@ -55,5 +55,5 @@ fn drop_lines(s: String, n: Int) -> String {
   }
 }
 
-@external(erlang, "arc_aot_pp_ffi", "pmap")
+@external(erlang, "arc_aot_playground_ffi", "pmap")
 fn pmap(items: List(a), f: fn(a) -> b) -> List(b)
