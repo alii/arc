@@ -103,22 +103,18 @@ pub fn parse_error_to_string(err: ParseError) -> String {
   error.parse_error_to_string(err)
 }
 
-pub fn parse_error_pos(err: ParseError) -> Int {
-  error.parse_error_pos(err)
+type DeclarationContext {
+  NotDeclaring
+  DeclaringVar
+  // bound_so_far: §14.3.1 BoundNames of this BindingList
+  DeclaringLexical(kind: scope.BindingKind, bound_so_far: Set(String))
+  DeclaringParam
 }
 
-type BindingKind {
-  BindingNone
-  BindingVar
-  // bound: names so far in this declaration (§14.3.1)
-  BindingLexical(kind: scope.BindingKind, bound: Set(String))
-  BindingParam
-}
-
-fn in_lexical_decl(ctx: Ctx) -> Bool {
-  case ctx.binding_kind {
-    BindingLexical(..) -> True
-    BindingNone | BindingVar | BindingParam -> False
+fn in_lexical_declaration(ctx: GrammarContext) -> Bool {
+  case ctx.declaring {
+    DeclaringLexical(..) -> True
+    NotDeclaring | DeclaringVar | DeclaringParam -> False
   }
 }
 
@@ -139,9 +135,23 @@ type AccessorPrefix {
   SetPrefix
 }
 
+type MethodPrefix {
+  MethodPrefix(is_async: Bool, accessor: AccessorPrefix, is_generator: Bool)
+}
+
+type AssignmentKind {
+  PlainAssign
+  CallTargetAssign
+  CompoundAssign
+}
+
+type PrivateNameRef {
+  PrivateNameRef(name: String, class_depth: Int, pos: Int)
+}
+
 // saved and restored whole at function boundaries, see restore_outer_context
-type Ctx {
-  Ctx(
+type GrammarContext {
+  GrammarContext(
     strict: Bool,
     // grammar [In] flag, false only in a for head init
     allow_in: Bool,
@@ -160,7 +170,7 @@ type Ctx {
     allow_new_target: Bool,
     allow_super_call: Bool,
     allow_super_property: Bool,
-    binding_kind: BindingKind,
+    declaring: DeclarationContext,
     in_block: Bool,
     module_top_level: Bool,
     in_single_stmt_pos: Bool,
@@ -178,8 +188,8 @@ type Ctx {
   )
 }
 
-type P {
-  P(
+type Parser {
+  Parser(
     // bounded prefetch window, not the whole file
     tokens: List(Token),
     scan: lexer.Scanner,
@@ -187,51 +197,69 @@ type P {
     prev_line: Int,
     prev_end: Int,
     bytes: BitArray,
-    ctx: Ctx,
+    ctx: GrammarContext,
     // §15.7.1 enclosing class body count, not reset by functions
-    class_private_depth: Int,
-    // unresolved #name refs: (name, depth, pos)
-    private_refs: List(#(String, Int, Int)),
+    class_body_depth: Int,
+    // unresolved #name refs
+    private_refs: List(PrivateNameRef),
     // direct eval only: the caller's private names (§19.2.1.1 step 5)
     outer_private_names: List(String),
     last_expr_assignable: Bool,
     // tells {a: b = 1} (pattern ok) from {a: 0}
     last_expr_is_assignment: Bool,
-    has_invalid_pattern: Bool,
+    literal_invalid_as_pattern: Bool,
     export_names: Set(String),
     export_local_refs: List(#(String, Int)),
     import_bindings: Set(String),
     last_expr_name: Option(String),
-    sb: scope.ScopeBuilder,
+    scopes: scope.ScopeBuilder,
   )
 }
 
-// the one place ctx.allow_in is restored
+// [+In] for the duration of then
+fn allowing_in(
+  p: Parser,
+  then: fn(Parser) -> Result(#(Parser, a), ParseError),
+) -> Result(#(Parser, a), ParseError) {
+  with_allow_in(p, True, then)
+}
+
+// [~In] for the duration of then, as in a for head
+fn disallowing_in(
+  p: Parser,
+  then: fn(Parser) -> Result(#(Parser, a), ParseError),
+) -> Result(#(Parser, a), ParseError) {
+  with_allow_in(p, False, then)
+}
+
 fn with_allow_in(
-  p: P,
-  value: Bool,
-  then: fn(P) -> Result(#(P, a), ParseError),
-) -> Result(#(P, a), ParseError) {
+  p: Parser,
+  allow_in: Bool,
+  then: fn(Parser) -> Result(#(Parser, a), ParseError),
+) -> Result(#(Parser, a), ParseError) {
   let saved = p.ctx.allow_in
-  use <- bool.lazy_guard(saved == value, fn() { then(p) })
+  use <- bool.lazy_guard(saved == allow_in, fn() { then(p) })
   use #(p, parsed) <- result.map(then(
-    P(..p, ctx: Ctx(..p.ctx, allow_in: value)),
+    Parser(..p, ctx: GrammarContext(..p.ctx, allow_in:)),
   ))
-  #(P(..p, ctx: Ctx(..p.ctx, allow_in: saved)), parsed)
+  #(Parser(..p, ctx: GrammarContext(..p.ctx, allow_in: saved)), parsed)
 }
 
 fn set_not_assignable(
-  res: Result(#(P, ast.Expression), ParseError),
-) -> Result(#(P, ast.Expression), ParseError) {
+  res: Result(#(Parser, ast.Expression), ParseError),
+) -> Result(#(Parser, ast.Expression), ParseError) {
   use #(p, expr) <- result.map(res)
-  #(P(..p, last_expr_assignable: False, last_expr_is_assignment: False), expr)
+  #(
+    Parser(..p, last_expr_assignable: False, last_expr_is_assignment: False),
+    expr,
+  )
 }
 
-fn ok_lit(
-  p: P,
+fn accept_literal(
+  p: Parser,
   expr: ast.Expression,
-) -> Result(#(P, ast.Expression), ParseError) {
-  Ok(#(P(..advance(p), last_expr_assignable: False), expr))
+) -> Result(#(Parser, ast.Expression), ParseError) {
+  Ok(#(Parser(..advance(p), last_expr_assignable: False), expr))
 }
 
 type DefaultExportDecl {
@@ -278,72 +306,64 @@ fn default_export_name(decl: DefaultExportDecl) -> Option(ast.NamedBinding) {
 fn init_parser(
   source: String,
   mode: ParseMode,
-  cont: fn(P) -> Result(a, ParseError),
+  cont: fn(Parser) -> Result(a, ParseError),
 ) -> Result(a, ParseError) {
   let bytes = bit_array.from_string(source)
-  let lex_mode = case mode {
-    Module -> lexer.LexModule
-    Script -> lexer.LexScript
+  let #(source_kind, code_kind) = case mode {
+    Module -> #(lexer.ModuleSource, scope.Module)
+    Script -> #(lexer.ScriptSource, scope.Script)
   }
-  {
-    cont(
-      ensure_current(P(
-        tokens: [],
-        scan: lexer.scanner_at(bytes, 0, 1, lex_mode),
-        mode: mode,
-        prev_line: 1,
-        prev_end: 0,
-        bytes:,
-        ctx: Ctx(
-          strict: mode == Module,
-          allow_in: True,
-          function_depth: 0,
-          loop_depth: 0,
-          switch_depth: 0,
-          label_set: [],
-          in_generator: False,
-          in_async: False,
-          in_static_block: False,
-          in_class_field_init: False,
-          in_method: False,
-          allow_new_target: False,
-          allow_super_call: False,
-          allow_super_property: False,
-          binding_kind: BindingNone,
-          in_block: False,
-          module_top_level: False,
-          in_single_stmt_pos: False,
-          has_cover_initializer: False,
-          dup_proto_pos: None,
-          in_formal_params: False,
-          in_catch_param: False,
-          in_arrow_params: False,
-          has_non_simple_param: False,
-          param_bound_names: [],
-          pending_strict_name: None,
-          in_export_decl: False,
-          in_case_clause: False,
-        ),
-        class_private_depth: 0,
-        private_refs: [],
-        outer_private_names: [],
-        last_expr_assignable: False,
-        last_expr_is_assignment: False,
-        has_invalid_pattern: False,
-        export_names: set.new(),
-        export_local_refs: [],
-        import_bindings: set.new(),
-        last_expr_name: None,
-        sb: scope.sb_init(
-          case mode {
-            Module -> scope.Module
-            Script -> scope.Script
-          },
-          mode == Module,
-        ),
-      )),
-    )
-  }
+  cont(
+    ensure_current(Parser(
+      tokens: [],
+      scan: lexer.scanner_at(bytes, 0, 1, source_kind),
+      mode:,
+      prev_line: 1,
+      prev_end: 0,
+      bytes:,
+      ctx: GrammarContext(
+        strict: mode == Module,
+        allow_in: True,
+        function_depth: 0,
+        loop_depth: 0,
+        switch_depth: 0,
+        label_set: [],
+        in_generator: False,
+        in_async: False,
+        in_static_block: False,
+        in_class_field_init: False,
+        in_method: False,
+        allow_new_target: False,
+        allow_super_call: False,
+        allow_super_property: False,
+        declaring: NotDeclaring,
+        in_block: False,
+        module_top_level: False,
+        in_single_stmt_pos: False,
+        has_cover_initializer: False,
+        dup_proto_pos: None,
+        in_formal_params: False,
+        in_catch_param: False,
+        in_arrow_params: False,
+        has_non_simple_param: False,
+        param_bound_names: [],
+        pending_strict_name: None,
+        in_export_decl: False,
+        in_case_clause: False,
+      ),
+      class_body_depth: 0,
+      private_refs: [],
+      outer_private_names: [],
+      last_expr_assignable: False,
+      last_expr_is_assignment: False,
+      literal_invalid_as_pattern: False,
+      export_names: set.new(),
+      export_local_refs: [],
+      import_bindings: set.new(),
+      last_expr_name: None,
+      scopes: scope.sb_init(code_kind, mode == Module),
+    )),
+  )
 }
 
 pub fn parse(
@@ -352,12 +372,12 @@ pub fn parse(
 ) -> Result(#(ast.Program, scope.ScopeBuilder), ParseError) {
   case mode {
     Script -> {
-      use #(body, sb) <- result.map(parse_script(source))
-      #(ast.Script(body:), sb)
+      use #(body, scopes) <- result.map(parse_script(source))
+      #(ast.Script(body:), scopes)
     }
     Module -> {
-      use #(items, sb) <- result.map(parse_module(source))
-      #(ast.Module(body: items), sb)
+      use #(items, scopes) <- result.map(parse_module(source))
+      #(ast.Module(body: items), scopes)
     }
   }
 }
@@ -387,9 +407,9 @@ pub fn parse_direct_eval(
 ) -> Result(#(List(ast.StmtWithLine), scope.ScopeBuilder), ParseError) {
   use p <- init_parser(source, Script)
   script_body(
-    P(
+    Parser(
       ..p,
-      ctx: Ctx(
+      ctx: GrammarContext(
         ..p.ctx,
         strict: p.ctx.strict || strict,
         allow_new_target:,
@@ -403,66 +423,55 @@ pub fn parse_direct_eval(
 }
 
 fn script_body(
-  p: P,
+  p: Parser,
 ) -> Result(#(List(ast.StmtWithLine), scope.ScopeBuilder), ParseError) {
-  use p <- result.try(check_use_strict_at_start(p))
-  use #(p_final, stmts) <- result.try(parse_statement_list(p, True, []))
+  use p <- result.try(apply_directive_prologue(p))
+  use #(p_final, stmts) <- result.try(
+    parse_statement_list(p, top_level: True, acc: []),
+  )
   use Nil <- result.try(check_unresolved_private_refs(p_final))
-  let sb = scope.sb_reorder_block_children(p_final.sb, scope.root_scope_id)
-  Ok(#(stmts, sb))
+  let scopes =
+    scope.sb_reorder_block_children(p_final.scopes, scope.root_scope_id)
+  Ok(#(stmts, scopes))
 }
 
 fn module_body(
-  p: P,
+  p: Parser,
 ) -> Result(#(List(ast.ModuleItem), scope.ScopeBuilder), ParseError) {
   use #(p_final, items) <- result.try(parse_module_body(p, []))
   use Nil <- result.try(validate_export_local_refs(p_final))
   use Nil <- result.try(check_unresolved_private_refs(p_final))
-  let sb = scope.sb_reorder_block_children(p_final.sb, scope.root_scope_id)
-  Ok(#(items, sb))
+  let scopes =
+    scope.sb_reorder_block_children(p_final.scopes, scope.root_scope_id)
+  Ok(#(items, scopes))
 }
 
 fn parse_module_body(
-  p: P,
+  p: Parser,
   acc: List(ast.ModuleItem),
-) -> Result(#(P, List(ast.ModuleItem)), ParseError) {
-  let p = P(..p, ctx: Ctx(..p.ctx, module_top_level: True))
-  case peek(p) {
-    Eof -> Ok(#(p, list.reverse(acc)))
+) -> Result(#(Parser, List(ast.ModuleItem)), ParseError) {
+  let p = Parser(..p, ctx: GrammarContext(..p.ctx, module_top_level: True))
+  let statement_item = fn() {
+    use #(p2, stmt) <- result.map(parse_statement(p))
+    #(p2, ast.StatementItem(ast.StmtWithLine(line_of(p), stmt)))
+  }
+  use <- bool.guard(peek(p) == Eof, Ok(#(p, list.reverse(acc))))
+  use #(p2, item) <- result.try(case peek(p) {
     Import ->
       case peek_at(p, 1) {
-        Dot | LeftParen -> {
-          let line = line_of(p)
-          use #(p2, stmt) <- result.try(parse_statement(p))
-          parse_module_body(p2, [
-            ast.StatementItem(ast.StmtWithLine(line, stmt)),
-            ..acc
-          ])
-        }
-        _ -> {
-          use #(p2, item) <- result.try(parse_import_declaration(p))
-          parse_module_body(p2, [item, ..acc])
-        }
+        Dot | LeftParen -> statement_item()
+        _ -> parse_import_declaration(p)
       }
-    Export -> {
-      use #(p2, item) <- result.try(parse_export_declaration(p))
-      parse_module_body(p2, [item, ..acc])
-    }
-    _ -> {
-      let line = line_of(p)
-      use #(p2, stmt) <- result.try(parse_statement(p))
-      parse_module_body(p2, [
-        ast.StatementItem(ast.StmtWithLine(line, stmt)),
-        ..acc
-      ])
-    }
-  }
+    Export -> parse_export_declaration(p)
+    _ -> statement_item()
+  })
+  parse_module_body(p2, [item, ..acc])
 }
 
-fn validate_export_local_refs(p: P) -> Result(Nil, ParseError) {
+fn validate_export_local_refs(p: Parser) -> Result(Nil, ParseError) {
   use #(name, pos) <- list.try_each(p.export_local_refs)
   let declared =
-    scope.sb_root_has(p.sb, name) || set.contains(p.import_bindings, name)
+    scope.sb_root_has(p.scopes, name) || set.contains(p.import_bindings, name)
   case declared {
     True -> Ok(Nil)
     False -> Error(UndeclaredExportBinding(pos, name))
@@ -470,10 +479,10 @@ fn validate_export_local_refs(p: P) -> Result(Nil, ParseError) {
 }
 
 fn parse_statement_list(
-  p: P,
-  top_level: Bool,
-  acc: List(ast.StmtWithLine),
-) -> Result(#(P, List(ast.StmtWithLine)), ParseError) {
+  p: Parser,
+  top_level top_level: Bool,
+  acc acc: List(ast.StmtWithLine),
+) -> Result(#(Parser, List(ast.StmtWithLine)), ParseError) {
   case peek(p) {
     Eof -> Ok(#(p, list.reverse(acc)))
     RightBrace -> {
@@ -483,26 +492,36 @@ fn parse_statement_list(
     _ -> {
       let line = line_of(p)
       use #(p2, stmt) <- result.try(parse_statement(p))
-      parse_statement_list(p2, top_level, [ast.StmtWithLine(line, stmt), ..acc])
+      parse_statement_list(p2, top_level:, acc: [
+        ast.StmtWithLine(line, stmt),
+        ..acc
+      ])
     }
   }
 }
 
-fn parse_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
+// let starts a declaration when a binding could follow
+fn let_starts_declaration(p: Parser) -> Bool {
+  let next = peek_at(p, 1)
+  next == LeftBrace || next == LeftBracket || is_identifier_or_keyword(next)
+}
+
+// §13.4: after a label or in single statement position; let [ always
+fn let_declaration_forbidden_here(p: Parser) -> Bool {
+  peek_at(p, 1) == LeftBracket
+  || { let_starts_declaration(p) && token_line_at(p, 1) <= token_line_at(p, 0) }
+}
+
+fn parse_statement(p: Parser) -> Result(#(Parser, ast.Statement), ParseError) {
   case peek(p) {
     Illegal | LexFailure(_) -> Error(illegal_token_error(p))
     LeftBrace -> parse_block_statement(p)
     Var | Const -> parse_variable_declaration(p)
-    Let -> {
-      case
-        peek_at(p, 1) == LeftBrace
-        || peek_at(p, 1) == LeftBracket
-        || is_identifier_or_keyword(peek_at(p, 1))
-      {
+    Let ->
+      case let_starts_declaration(p) {
         True -> parse_variable_declaration(p)
         False -> parse_expression_statement(p)
       }
-    }
     If -> parse_if_statement(p)
     While -> parse_while_statement(p)
     Do -> parse_do_while_statement(p)
@@ -513,72 +532,61 @@ fn parse_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
     Throw -> parse_throw_statement(p)
     Try -> parse_try_statement(p)
     Switch -> parse_switch_statement(p)
-    Function -> parse_function_declaration(p, True, False)
-    Class -> parse_class_declaration(p)
+    Function -> parse_function_statement(p, is_async: False)
+    Class -> parse_class_statement(p)
     Semicolon -> Ok(#(advance(p), ast.EmptyStatement))
     Debugger -> {
-      let p2 = advance(p)
-      use p3 <- result.try(eat_semicolon(p2))
-      Ok(#(p3, ast.DebuggerStatement))
+      use p2 <- result.map(eat_semicolon(advance(p)))
+      #(p2, ast.DebuggerStatement)
     }
     With -> parse_with_statement(p)
-    Async -> {
+    Async ->
       case async_function_start(p), peek_at(p, 1) {
-        True, _ -> parse_function_declaration(p, True, True)
-        False, Colon -> parse_labeled_statement(p)
+        True, _ -> parse_function_statement(p, is_async: True)
+        False, Colon -> parse_labeled_statement(p, [])
         False, _ -> parse_expression_statement(p)
       }
-    }
-    Yield | Await -> {
+    Yield | Await ->
       case peek_at(p, 1) {
-        Colon -> parse_labeled_statement(p)
+        Colon -> parse_labeled_statement(p, [])
         _ ->
           case peek(p) == Await && is_await_using_decl_start(p) {
             True -> parse_using_declaration(p, is_await: True)
             False -> parse_expression_statement(p)
           }
       }
-    }
-    Import -> {
-      case peek_at(p, 1) {
-        Dot | LeftParen -> parse_expression_statement(p)
-        _ -> {
-          case p.mode {
-            Module -> Error(ImportNotTopLevel(pos_of(p)))
-            Script -> parse_expression_statement(p)
-          }
-        }
+    Import ->
+      case peek_at(p, 1), p.mode {
+        Dot, _ | LeftParen, _ | _, Script -> parse_expression_statement(p)
+        _, Module -> Error(ImportNotTopLevel(pos_of(p)))
       }
-    }
-    Export -> {
+    Export ->
       case p.mode {
         Module -> Error(ExportNotTopLevel(pos_of(p)))
         Script -> Error(UnexpectedExport(pos_of(p)))
       }
-    }
-    Identifier -> {
+    Identifier ->
       case peek_at(p, 1) {
-        Colon -> parse_labeled_statement(p)
+        Colon -> parse_labeled_statement(p, [])
         _ ->
           case is_using_decl_start(p, 0) {
             True -> parse_using_declaration(p, is_await: False)
             False -> parse_expression_statement(p)
           }
       }
-    }
     _ -> parse_expression_statement(p)
   }
 }
 
 // using [ and using { are not declarations
-fn is_using_decl_start(p: P, at: Int) -> Bool {
+fn is_using_decl_start(p: Parser, at: Int) -> Bool {
   peek_at(p, at) == Identifier
   && peek_value_at(p, at) == "using"
   && token_line_at(p, at + 1) == token_line_at(p, at)
   && is_binding_ident_token(peek_at(p, at + 1))
 }
 
-fn is_await_using_decl_start(p: P) -> Bool {
+fn is_await_using_decl_start(p: Parser) -> Bool {
   { p.ctx.in_async || p.mode == Module }
   && !p.ctx.in_static_block
   && token_line_at(p, 1) == token_line_at(p, 0)
@@ -590,7 +598,7 @@ fn is_binding_ident_token(kind: TokenKind) -> Bool {
 }
 
 // script top level, case clauses and single statements reject using
-fn check_using_placement(p: P) -> Result(Nil, ParseError) {
+fn check_using_placement(p: Parser) -> Result(Nil, ParseError) {
   use <- bool.guard(
     p.ctx.in_single_stmt_pos,
     Error(LexicalDeclInSingleStatement(pos_of(p))),
@@ -606,9 +614,9 @@ fn check_using_placement(p: P) -> Result(Nil, ParseError) {
 }
 
 fn parse_using_declaration(
-  p: P,
+  p: Parser,
   is_await is_await: Bool,
-) -> Result(#(P, ast.Statement), ParseError) {
+) -> Result(#(Parser, ast.Statement), ParseError) {
   use Nil <- result.try(check_using_placement(p))
   let p2 = case is_await {
     True -> advance(advance(p))
@@ -616,16 +624,7 @@ fn parse_using_declaration(
   }
   let p2 = enter_lexical_decl_context(p2, scope.ConstBinding)
   use #(p3, declarations) <- result.try(parse_using_declarator_list(p2, []))
-  use p4 <- result.try(eat_semicolon(
-    P(
-      ..p3,
-      ctx: Ctx(
-        ..p3.ctx,
-        binding_kind: p.ctx.binding_kind,
-        in_export_decl: False,
-      ),
-    ),
-  ))
+  use p4 <- result.try(eat_semicolon(exit_declaration_context(p3, p)))
   let kind = case is_await {
     True -> ast.AwaitUsing
     False -> ast.Using
@@ -634,9 +633,9 @@ fn parse_using_declaration(
 }
 
 fn parse_using_declarator_list(
-  p: P,
+  p: Parser,
   acc: List(ast.VariableDeclarator),
-) -> Result(#(P, List(ast.VariableDeclarator)), ParseError) {
+) -> Result(#(Parser, List(ast.VariableDeclarator)), ParseError) {
   use #(p2, pattern) <- result.try(parse_using_binding(p))
   case peek(p2) {
     Equal -> {
@@ -653,11 +652,13 @@ fn parse_using_declarator_list(
   }
 }
 
-fn parse_using_binding(p: P) -> Result(#(P, ast.Pattern), ParseError) {
+fn parse_using_binding(
+  p: Parser,
+) -> Result(#(Parser, ast.Pattern), ParseError) {
   case peek(p) {
     LeftBracket | LeftBrace -> Error(UsingPatternBinding(pos_of(p)))
     kind ->
-      case kind == Identifier || is_contextual_keyword(kind) {
+      case is_binding_ident_token(kind) {
         True -> validate_and_register_binding(p, peek_value(p))
         False -> Error(error_at_current(p, ExpectedBindingPattern(pos_of(p))))
       }
@@ -665,56 +666,71 @@ fn parse_using_binding(p: P) -> Result(#(P, ast.Pattern), ParseError) {
 }
 
 fn parse_single_statement(
-  p: P,
-  allow_fn: Bool,
-) -> Result(#(P, ast.Statement), ParseError) {
+  p: Parser,
+  allow_annex_b_function allow_annex_b_function: Bool,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   // must not leak to later statements
   let saved = p.ctx.in_single_stmt_pos
-  use #(p_out, stmt) <- result.map(parse_single_statement_inner(p, allow_fn))
-  #(P(..p_out, ctx: Ctx(..p_out.ctx, in_single_stmt_pos: saved)), stmt)
+  use #(p_out, stmt) <- result.map(parse_single_statement_in_position(
+    Parser(
+      ..p,
+      ctx: GrammarContext(
+        ..p.ctx,
+        in_single_stmt_pos: True,
+        module_top_level: False,
+      ),
+    ),
+    allow_annex_b_function:,
+  ))
+  #(
+    Parser(..p_out, ctx: GrammarContext(..p_out.ctx, in_single_stmt_pos: saved)),
+    stmt,
+  )
 }
 
-fn parse_single_statement_inner(
-  p: P,
-  allow_fn: Bool,
-) -> Result(#(P, ast.Statement), ParseError) {
-  let p =
-    P(..p, ctx: Ctx(..p.ctx, in_single_stmt_pos: True, module_top_level: False))
+fn parse_single_statement_in_position(
+  p: Parser,
+  allow_annex_b_function allow_annex_b_function: Bool,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   case peek(p) {
     Const -> Error(LexicalDeclInSingleStatement(pos_of(p)))
     Let -> {
-      let next = peek_at(p, 1)
-      let decl_starter =
-        next == LeftBrace
-        || next == LeftBracket
-        || is_identifier_or_keyword(next)
-      // §13.4: only let [ is excluded outright
-      let newline_after_let = token_line_at(p, 1) > token_line_at(p, 0)
-      case next == LeftBracket || { decl_starter && !newline_after_let } {
-        True -> Error(LexicalDeclInSingleStatement(pos_of(p)))
-        False ->
-          case decl_starter {
-            True -> parse_expression_statement(p)
-            False -> parse_statement(p)
-          }
+      use <- bool.guard(
+        let_declaration_forbidden_here(p),
+        Error(LexicalDeclInSingleStatement(pos_of(p))),
+      )
+      case let_starts_declaration(p) {
+        True -> parse_expression_statement(p)
+        False -> parse_statement(p)
       }
     }
     Function ->
-      case allow_fn && !p.ctx.strict && peek_at(p, 1) != Star {
+      case allow_annex_b_function && !p.ctx.strict && peek_at(p, 1) != Star {
         // annex b §B.3.3: parse as if wrapped in a block
         True -> {
-          let #(sb, block_id) = scope.sb_push(p.sb, scope.Block)
+          let #(scopes, block_id) = scope.sb_push(p.scopes, scope.Block)
           let p_inner =
-            P(
+            Parser(
               ..p,
-              sb:,
-              ctx: Ctx(..p.ctx, in_block: True, in_single_stmt_pos: False),
+              scopes:,
+              ctx: GrammarContext(
+                ..p.ctx,
+                in_block: True,
+                in_single_stmt_pos: False,
+              ),
             )
           use #(p2, stmt) <- result.map(parse_statement(p_inner))
-          let sb =
-            scope.sb_close_block(p2.sb, block_id)
-            |> scope.sb_enter(p.sb.current)
-          #(P(..p2, sb:, ctx: Ctx(..p2.ctx, in_block: p.ctx.in_block)), stmt)
+          let scopes =
+            scope.sb_close_block(p2.scopes, block_id)
+            |> scope.sb_enter(p.scopes.current)
+          #(
+            Parser(
+              ..p2,
+              scopes:,
+              ctx: GrammarContext(..p2.ctx, in_block: p.ctx.in_block),
+            ),
+            stmt,
+          )
         }
         False -> Error(FunctionDeclInSingleStatement(pos_of(p)))
       }
@@ -729,56 +745,63 @@ fn parse_single_statement_inner(
   }
 }
 
-fn enter_block_scope(p: P) -> P {
-  let #(sb, _id) = scope.sb_push(p.sb, scope.Block)
-  P(..p, sb:, ctx: Ctx(..p.ctx, in_block: True))
+fn enter_block_scope(p: Parser) -> Parser {
+  let #(scopes, _id) = scope.sb_push(p.scopes, scope.Block)
+  Parser(..p, scopes:, ctx: GrammarContext(..p.ctx, in_block: True))
 }
 
-fn restore_block_scope(after p: P, before saved: P) -> P {
+fn restore_block_scope(after p: Parser, before saved: Parser) -> Parser {
   // flip for-head children to source order for finalize
-  let sb = scope.sb_reorder_block_children(p.sb, p.sb.current)
-  P(
+  let scopes = scope.sb_reorder_block_children(p.scopes, p.scopes.current)
+  Parser(
     ..p,
-    sb: scope.sb_enter(sb, saved.sb.current),
-    ctx: Ctx(..p.ctx, in_block: saved.ctx.in_block),
+    scopes: scope.sb_enter(scopes, saved.scopes.current),
+    ctx: GrammarContext(..p.ctx, in_block: saved.ctx.in_block),
   )
 }
 
-fn parse_block_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
+fn parse_block_statement(
+  p: Parser,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   use #(p2, stmts) <- result.map(parse_block_body(p))
   #(p2, ast.BlockStatement(body: stmts))
 }
 
-fn parse_block_body(p: P) -> Result(#(P, List(ast.StmtWithLine)), ParseError) {
+fn parse_block_body(
+  p: Parser,
+) -> Result(#(Parser, List(ast.StmtWithLine)), ParseError) {
   // fast path: an empty block declares nothing
   case peek(p), peek_at(p, 1) {
     LeftBrace, RightBrace -> {
       let p2 = advance(advance(p))
       Ok(
         #(
-          P(
+          Parser(
             ..p2,
-            ctx: Ctx(..p2.ctx, in_single_stmt_pos: False, in_case_clause: False),
+            ctx: GrammarContext(
+              ..p2.ctx,
+              in_single_stmt_pos: False,
+              in_case_clause: False,
+            ),
           ),
           [],
         ),
       )
     }
-    _, _ -> parse_block_body_slow(p)
+    _, _ -> parse_scoped_block_body(p)
   }
 }
 
-fn parse_block_body_slow(
-  p: P,
-) -> Result(#(P, List(ast.StmtWithLine)), ParseError) {
+fn parse_scoped_block_body(
+  p: Parser,
+) -> Result(#(Parser, List(ast.StmtWithLine)), ParseError) {
   use p2 <- result.try(expect(p, LeftBrace))
-  // only the direct body list conflicts with params
-  let #(sb, block_id) = scope.sb_push(p2.sb, scope.Block)
+  let #(scopes, block_id) = scope.sb_push(p2.scopes, scope.Block)
   let p_inner =
-    P(
+    Parser(
       ..p2,
-      sb:,
-      ctx: Ctx(
+      scopes:,
+      ctx: GrammarContext(
         ..p2.ctx,
         in_block: True,
         in_single_stmt_pos: False,
@@ -786,17 +809,19 @@ fn parse_block_body_slow(
         in_case_clause: False,
       ),
     )
-  use #(p3, stmts) <- result.try(parse_statement_list(p_inner, False, []))
+  use #(p3, stmts) <- result.try(
+    parse_statement_list(p_inner, top_level: False, acc: []),
+  )
   use p4 <- result.try(expect(p3, RightBrace))
   // prune or reorder in lockstep with emit_block
-  let sb =
-    scope.sb_close_block(p4.sb, block_id)
-    |> scope.sb_enter(p2.sb.current)
+  let scopes =
+    scope.sb_close_block(p4.scopes, block_id)
+    |> scope.sb_enter(p2.scopes.current)
   Ok(#(
-    P(
+    Parser(
       ..p4,
-      sb:,
-      ctx: Ctx(
+      scopes:,
+      ctx: GrammarContext(
         ..p4.ctx,
         in_block: p2.ctx.in_block,
         module_top_level: p2.ctx.module_top_level,
@@ -806,49 +831,63 @@ fn parse_block_body_slow(
   ))
 }
 
-fn parse_variable_declaration(p: P) -> Result(#(P, ast.Statement), ParseError) {
+fn parse_variable_declaration(
+  p: Parser,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   use #(p2, decl) <- result.map(parse_variable_declaration_decl(p))
   #(p2, ast.declaration_to_statement(decl))
 }
 
 fn parse_variable_declaration_decl(
-  p: P,
-) -> Result(#(P, ast.Declaration), ParseError) {
+  p: Parser,
+) -> Result(#(Parser, ast.Declaration), ParseError) {
+  let #(p2, kind) = variable_declaration_head(p)
+  use #(p3, declarations) <- result.try(
+    parse_variable_declarator_list(p2, kind, []),
+  )
+  use p4 <- result.try(eat_semicolon(exit_declaration_context(p3, p)))
+  Ok(#(p4, ast.DeclVariable(kind:, declarations:)))
+}
+
+// consumes var, let or const and enters its declaration context
+fn variable_declaration_head(p: Parser) -> #(Parser, ast.VariableKind) {
   let kind = case peek(p) {
     Let -> ast.Let
     Const -> ast.Const
     Var -> ast.Var
-    _ ->
-      panic as "parser: parse_variable_declaration_decl entered with non-var/let/const head token"
+    _ -> panic as "parser: declaration head is not var, let or const"
   }
-  let p2 = advance(p)
-  let p2 = case kind {
-    ast.Let -> enter_lexical_decl_context(p2, scope.LetBinding)
+  let p = advance(p)
+  let p = case kind {
+    ast.Let -> enter_lexical_decl_context(p, scope.LetBinding)
     ast.Const | ast.Using | ast.AwaitUsing ->
-      enter_lexical_decl_context(p2, scope.ConstBinding)
-    ast.Var -> P(..p2, ctx: Ctx(..p2.ctx, binding_kind: BindingVar))
+      enter_lexical_decl_context(p, scope.ConstBinding)
+    ast.Var ->
+      Parser(..p, ctx: GrammarContext(..p.ctx, declaring: DeclaringVar))
   }
-  use #(p3, declarations) <- result.try(
-    parse_variable_declarator_list(p2, kind, []),
-  )
-  use p4 <- result.try(eat_semicolon(
-    P(
-      ..p3,
-      ctx: Ctx(
-        ..p3.ctx,
-        binding_kind: p.ctx.binding_kind,
-        in_export_decl: False,
-      ),
+  #(p, kind)
+}
+
+fn enter_lexical_decl_context(p: Parser, kind: scope.BindingKind) -> Parser {
+  Parser(
+    ..p,
+    ctx: GrammarContext(
+      ..p.ctx,
+      declaring: DeclaringLexical(kind:, bound_so_far: set.new()),
     ),
-  ))
-  Ok(#(p4, ast.DeclVariable(kind:, declarations:)))
+  )
+}
+
+// drop the declaration context before what follows
+fn exit_declaration_context(p: Parser, outer: Parser) -> Parser {
+  Parser(..p, ctx: GrammarContext(..p.ctx, declaring: outer.ctx.declaring))
 }
 
 fn parse_variable_declarator_list(
-  p: P,
+  p: Parser,
   kind: ast.VariableKind,
   acc: List(ast.VariableDeclarator),
-) -> Result(#(P, List(ast.VariableDeclarator)), ParseError) {
+) -> Result(#(Parser, List(ast.VariableDeclarator)), ParseError) {
   use #(p2, decl) <- result.try(parse_variable_declarator(p, kind))
   case peek(p2) {
     Comma -> parse_variable_declarator_list(advance(p2), kind, [decl, ..acc])
@@ -857,9 +896,9 @@ fn parse_variable_declarator_list(
 }
 
 fn parse_variable_declarator(
-  p: P,
+  p: Parser,
   kind: ast.VariableKind,
-) -> Result(#(P, ast.VariableDeclarator), ParseError) {
+) -> Result(#(Parser, ast.VariableDeclarator), ParseError) {
   let is_destructuring = case peek(p) {
     LeftBracket | LeftBrace -> True
     _ -> False
@@ -872,7 +911,7 @@ fn parse_variable_declarator(
         parse_assignment_expression(advance(p2)),
       )
       use Nil <- result.try(check_cover_grammar_errors(p3, init_start))
-      let p3 = P(..p3, sb: sb_mark_pattern_assigned(p3.sb, pattern))
+      let p3 = Parser(..p3, scopes: mark_pattern_assigned(p3.scopes, pattern))
       Ok(#(p3, ast.VariableDeclarator(id: pattern, init: Some(init_expr))))
     }
     _ -> {
@@ -889,13 +928,14 @@ fn parse_variable_declarator(
   }
 }
 
-fn parse_binding_pattern(p: P) -> Result(#(P, ast.Pattern), ParseError) {
+fn parse_binding_pattern(
+  p: Parser,
+) -> Result(#(Parser, ast.Pattern), ParseError) {
   case peek(p) {
-    Identifier -> validate_and_register_binding(p, peek_value(p))
     LeftBracket -> parse_array_binding_pattern(p)
     LeftBrace -> parse_object_binding_pattern(p)
-    _ ->
-      case is_contextual_keyword(peek(p)) {
+    kind ->
+      case is_binding_ident_token(kind) {
         True -> validate_and_register_binding(p, peek_value(p))
         False -> Error(error_at_current(p, ExpectedBindingPattern(pos_of(p))))
       }
@@ -903,62 +943,55 @@ fn parse_binding_pattern(p: P) -> Result(#(P, ast.Pattern), ParseError) {
 }
 
 fn validate_and_register_binding(
-  p: P,
-  val: String,
-) -> Result(#(P, ast.Pattern), ParseError) {
-  use Nil <- result.try(check_binding_identifier(p, val))
-  use p <- result.try(check_duplicate_binding(p, val))
-  use p <- result.try(accumulate_param_name(p, val))
-  use p <- result.try(register_scope_binding(p, val))
-  use p <- result.try(check_export_binding(p, val))
-  Ok(#(advance(p), ast.IdentifierPattern(name: val, span: span_of(p))))
+  p: Parser,
+  name: String,
+) -> Result(#(Parser, ast.Pattern), ParseError) {
+  use #(p, pattern) <- result.map(register_binding_named_at(p, p, name))
+  #(advance(p), pattern)
 }
 
-fn validate_and_register_binding_no_advance(
-  check_p: P,
-  scope_p: P,
-  val: String,
-) -> Result(#(P, ast.Pattern), ParseError) {
-  use Nil <- result.try(check_binding_identifier(check_p, val))
-  use p <- result.try(check_duplicate_binding(scope_p, val))
-  use p <- result.try(accumulate_param_name(p, val))
-  use p <- result.try(register_scope_binding(p, val))
-  use p <- result.try(check_export_binding(p, val))
-  Ok(#(p, ast.IdentifierPattern(name: val, span: span_of(check_p))))
+// name_at supplies the error position and span, p the state
+fn register_binding_named_at(
+  name_at: Parser,
+  p: Parser,
+  name: String,
+) -> Result(#(Parser, ast.Pattern), ParseError) {
+  use Nil <- result.try(check_binding_identifier(name_at, name))
+  use p <- result.try(declare_in_binding_list(p, name))
+  use p <- result.try(accumulate_param_name(p, name))
+  use p <- result.try(register_scope_binding(p, name))
+  use p <- result.try(declare_export_if_exporting(p, name))
+  Ok(#(p, ast.IdentifierPattern(name:, span: span_of(name_at))))
 }
 
-// not gated on in_method: it stays true through the body
-fn accumulate_param_name(p: P, name: String) -> Result(P, ParseError) {
-  let bind = fn() {
-    Ok(
-      P(
-        ..p,
-        ctx: Ctx(..p.ctx, param_bound_names: [name, ..p.ctx.param_bound_names]),
-      ),
-    )
-  }
-  case p.ctx.in_formal_params || p.ctx.in_arrow_params {
-    True ->
-      case list.contains(p.ctx.param_bound_names, name) {
-        True ->
-          case
-            p.ctx.strict
-            || p.ctx.in_arrow_params
-            || p.ctx.in_method
-            || p.ctx.has_non_simple_param
-          {
-            True -> Error(DuplicateParameterName(pos_of(p), name))
-            False -> bind()
-          }
-        False -> bind()
-      }
-    False -> Ok(p)
-  }
+fn params_must_be_unique(ctx: GrammarContext) -> Bool {
+  ctx.strict || ctx.in_arrow_params || ctx.in_method || ctx.has_non_simple_param
+}
+
+// gated on the param flags: in_method stays set in the body
+fn accumulate_param_name(
+  p: Parser,
+  name: String,
+) -> Result(Parser, ParseError) {
+  use <- bool.guard(!p.ctx.in_formal_params && !p.ctx.in_arrow_params, Ok(p))
+  use <- bool.guard(
+    params_must_be_unique(p.ctx) && list.contains(p.ctx.param_bound_names, name),
+    Error(DuplicateParameterName(pos_of(p), name)),
+  )
+  Ok(
+    Parser(
+      ..p,
+      ctx: GrammarContext(..p.ctx, param_bound_names: [
+        name,
+        ..p.ctx.param_bound_names
+      ]),
+    ),
+  )
 }
 
 // an Identifier spelling a reserved word came from a \u escape
 fn check_not_escaped_reserved_word(
-  p: P,
+  p: Parser,
   name: String,
 ) -> Result(Nil, ParseError) {
   case is_reserved_word_kind(lexer.keyword_or_identifier(name)) {
@@ -969,7 +1002,7 @@ fn check_not_escaped_reserved_word(
 
 // §13.1.1 shared reserved-name checks
 fn check_reserved_identifier_common(
-  p: P,
+  p: Parser,
   name: String,
 ) -> Result(Nil, ParseError) {
   use Nil <- result.try(check_not_escaped_reserved_word(p, name))
@@ -1001,7 +1034,10 @@ fn check_reserved_identifier_common(
 }
 
 // §13.1.1 identifier reference
-fn check_identifier_reference(p: P, name: String) -> Result(Nil, ParseError) {
+fn check_identifier_reference(
+  p: Parser,
+  name: String,
+) -> Result(Nil, ParseError) {
   use Nil <- result.try(check_reserved_identifier_common(p, name))
   case name {
     "let" ->
@@ -1029,7 +1065,10 @@ fn check_identifier_reference(p: P, name: String) -> Result(Nil, ParseError) {
   }
 }
 
-fn check_binding_identifier(p: P, name: String) -> Result(Nil, ParseError) {
+fn check_binding_identifier(
+  p: Parser,
+  name: String,
+) -> Result(Nil, ParseError) {
   use Nil <- result.try(check_reserved_identifier_common(p, name))
   case name {
     "eval" | "arguments" ->
@@ -1038,7 +1077,7 @@ fn check_binding_identifier(p: P, name: String) -> Result(Nil, ParseError) {
         False -> Ok(Nil)
       }
     "let" ->
-      case p.ctx.strict || in_lexical_decl(p.ctx) {
+      case p.ctx.strict || in_lexical_declaration(p.ctx) {
         True -> Error(LetBindingInLexicalDecl(pos_of(p)))
         False -> Ok(Nil)
       }
@@ -1046,92 +1085,102 @@ fn check_binding_identifier(p: P, name: String) -> Result(Nil, ParseError) {
   }
 }
 
-fn check_duplicate_binding(p: P, name: String) -> Result(P, ParseError) {
-  case p.ctx.binding_kind {
-    BindingLexical(kind:, bound:) ->
-      case set.contains(bound, name) {
+fn declare_in_binding_list(
+  p: Parser,
+  name: String,
+) -> Result(Parser, ParseError) {
+  case p.ctx.declaring {
+    DeclaringLexical(kind:, bound_so_far:) ->
+      case set.contains(bound_so_far, name) {
         True -> Error(DuplicateBindingLexical(pos_of(p), name))
         False ->
           Ok(
-            P(
+            Parser(
               ..p,
-              ctx: Ctx(
+              ctx: GrammarContext(
                 ..p.ctx,
-                binding_kind: BindingLexical(
+                declaring: DeclaringLexical(
                   kind:,
-                  bound: set.insert(bound, name),
+                  bound_so_far: set.insert(bound_so_far, name),
                 ),
               ),
             ),
           )
       }
-    BindingNone | BindingVar | BindingParam -> Ok(p)
+    NotDeclaring | DeclaringVar | DeclaringParam -> Ok(p)
   }
 }
 
 // §14.2.1; the implicit arguments placeholder is exempt
 fn register_lexical_name(
-  p: P,
+  p: Parser,
   name: String,
   kind: scope.BindingKind,
   pos: Int,
-) -> Result(P, ParseError) {
+) -> Result(Parser, ParseError) {
   use <- bool.guard(
-    scope.sb_lexical_conflict(p.sb, name)
-      && !scope.sb_only_implicit_arguments(p.sb, name),
+    scope.sb_lexical_conflict(p.scopes, name)
+      && !scope.sb_only_implicit_arguments(p.scopes, name),
     Error(IdentifierAlreadyDeclared(pos, name)),
   )
-  Ok(P(..p, sb: scope.sb_declare(p.sb, name, kind, synthetic: False)))
+  Ok(
+    Parser(
+      ..p,
+      scopes: scope.sb_declare(p.scopes, name, kind, synthetic: False),
+    ),
+  )
 }
 
-fn register_scope_binding(p: P, name: String) -> Result(P, ParseError) {
-  case p.ctx.binding_kind {
-    BindingLexical(kind:, ..) -> register_lexical_name(p, name, kind, pos_of(p))
-    BindingParam ->
+fn register_scope_binding(
+  p: Parser,
+  name: String,
+) -> Result(Parser, ParseError) {
+  case p.ctx.declaring {
+    DeclaringLexical(kind:, ..) ->
+      register_lexical_name(p, name, kind, pos_of(p))
+    DeclaringParam ->
       Ok(
-        P(
+        Parser(
           ..p,
-          sb: scope.sb_declare(p.sb, name, scope.ParamBinding, synthetic: False),
+          scopes: scope.sb_declare(
+            p.scopes,
+            name,
+            scope.ParamBinding,
+            synthetic: False,
+          ),
         ),
       )
-    BindingVar -> {
+    DeclaringVar -> {
       // §14.3.2, and §16.2.1.1 at module root
       use <- bool.guard(
-        scope.sb_var_conflicts_lexical(p.sb, name)
-          || scope.sb_var_conflicts_module_fn(p.sb, name),
+        scope.sb_var_conflicts_lexical(p.scopes, name)
+          || scope.sb_var_conflicts_module_fn(p.scopes, name),
         Error(IdentifierAlreadyDeclared(pos_of(p), name)),
       )
-      Ok(P(..p, sb: scope.sb_declare_var(p.sb, name, synthetic: False)))
+      Ok(
+        Parser(
+          ..p,
+          scopes: scope.sb_declare_var(p.scopes, name, synthetic: False),
+        ),
+      )
     }
-    BindingNone -> Ok(p)
+    NotDeclaring -> Ok(p)
   }
 }
 
 // is_plain: annex b §B.3.2 applies to plain functions only
 fn register_function_name(
-  p: P,
+  p: Parser,
   name: String,
   name_pos: Int,
-  is_plain: Bool,
-) -> Result(P, ParseError) {
+  is_plain is_plain: Bool,
+) -> Result(Parser, ParseError) {
   // annex b §B.3.1: synthetic block, never clashes
   use <- bool.guard(!p.ctx.strict && p.ctx.in_single_stmt_pos, Ok(p))
   // §16.1.1 script vs §16.2.1.1 module top-level functions
   case p.ctx.in_block, p.ctx.module_top_level {
-    // plain sb_declare: no hoisted_vars entry marks a module function
-    False, True -> {
-      use <- bool.guard(
-        scope.sb_lexical_conflict(p.sb, name)
-          && !scope.sb_only_implicit_arguments(p.sb, name),
-        Error(IdentifierAlreadyDeclared(name_pos, name)),
-      )
-      Ok(
-        P(
-          ..p,
-          sb: scope.sb_declare(p.sb, name, scope.VarBinding, synthetic: False),
-        ),
-      )
-    }
+    // no hoisted_vars entry: that is what marks a module function
+    False, True -> register_lexical_name(p, name, scope.VarBinding, name_pos)
     // §14.2.2 lexical; annex b §B.3.2 var-hoist candidate
     True, _ -> {
       use p2 <- result.map(register_lexical_name(
@@ -1140,79 +1189,82 @@ fn register_function_name(
         scope.LetBinding,
         name_pos,
       ))
-      case p.ctx.in_block && !p.ctx.strict && is_plain {
+      case !p.ctx.strict && is_plain {
         False -> p2
-        True -> P(..p2, sb: scope.sb_annexb_candidate(p2.sb, name))
+        True -> Parser(..p2, scopes: scope.sb_annexb_candidate(p2.scopes, name))
       }
     }
     False, False -> {
       use <- bool.guard(
-        scope.sb_current_has_kind(p.sb, name, scope.LetBinding)
-          || scope.sb_current_has_kind(p.sb, name, scope.ConstBinding),
+        scope.sb_current_has_kind(p.scopes, name, scope.LetBinding)
+          || scope.sb_current_has_kind(p.scopes, name, scope.ConstBinding),
         Error(IdentifierAlreadyDeclared(name_pos, name)),
       )
-      Ok(P(..p, sb: scope.sb_declare_var(p.sb, name, synthetic: False)))
+      Ok(
+        Parser(
+          ..p,
+          scopes: scope.sb_declare_var(p.scopes, name, synthetic: False),
+        ),
+      )
     }
   }
 }
 
-fn check_duplicate_export(p: P, name: String) -> Result(P, ParseError) {
-  case p.mode {
-    Module ->
-      case set.contains(p.export_names, name) {
-        True -> Error(DuplicateExport(pos_of(p), name))
-        False -> Ok(P(..p, export_names: set.insert(p.export_names, name)))
-      }
-    Script -> Ok(p)
+fn declare_export_name(p: Parser, name: String) -> Result(Parser, ParseError) {
+  use <- bool.guard(p.mode == Script, Ok(p))
+  use <- bool.guard(
+    set.contains(p.export_names, name),
+    Error(DuplicateExport(pos_of(p), name)),
+  )
+  Ok(Parser(..p, export_names: set.insert(p.export_names, name)))
+}
+
+fn declare_import_binding(
+  p: Parser,
+  name: String,
+) -> Result(Parser, ParseError) {
+  use <- bool.guard(p.mode == Script, Ok(p))
+  use <- bool.guard(
+    set.contains(p.import_bindings, name),
+    Error(DuplicateImportBinding(pos_of(p), name)),
+  )
+  Ok(
+    Parser(
+      ..p,
+      scopes: scope.sb_declare(
+        p.scopes,
+        name,
+        scope.ConstBinding,
+        synthetic: False,
+      ),
+      import_bindings: set.insert(p.import_bindings, name),
+    ),
+  )
+}
+
+fn check_import_binding_name(p: Parser) -> Result(Nil, ParseError) {
+  let name = peek_value(p)
+  case is_reserved_word_kind(peek(p)) {
+    True -> Error(ReservedWordImportBinding(pos_of(p), name))
+    False -> check_binding_identifier(p, name)
   }
 }
 
-fn check_duplicate_import_binding(p: P, name: String) -> Result(P, ParseError) {
-  case p.mode {
-    Module ->
-      case set.contains(p.import_bindings, name) {
-        True -> Error(DuplicateImportBinding(pos_of(p), name))
-        False -> {
-          let p =
-            P(
-              ..p,
-              sb: scope.sb_declare(
-                p.sb,
-                name,
-                scope.ConstBinding,
-                synthetic: False,
-              ),
-            )
-          Ok(P(..p, import_bindings: set.insert(p.import_bindings, name)))
-        }
-      }
-    Script -> Ok(p)
-  }
-}
-
-fn check_import_binding_name(
-  p: P,
-  binding_name: String,
-  binding_token_kind: TokenKind,
-) -> Result(Nil, ParseError) {
-  case is_reserved_word_kind(binding_token_kind) {
-    True -> Error(ReservedWordImportBinding(pos_of(p), binding_name))
-    False -> check_binding_identifier(p, binding_name)
-  }
-}
-
-fn check_export_binding(p: P, name: String) -> Result(P, ParseError) {
+fn declare_export_if_exporting(
+  p: Parser,
+  name: String,
+) -> Result(Parser, ParseError) {
   case p.ctx.in_export_decl {
-    True -> check_duplicate_export(p, name)
+    True -> declare_export_name(p, name)
     False -> Ok(p)
   }
 }
 
 // = commits: errors propagate, no backtrack
 fn parse_pattern_default(
-  p: P,
+  p: Parser,
   pat: ast.Pattern,
-) -> Result(#(P, ast.Pattern), ParseError) {
+) -> Result(#(Parser, ast.Pattern), ParseError) {
   case peek(p) {
     Equal -> {
       use #(p2, default_expr) <- result.map(
@@ -1224,15 +1276,17 @@ fn parse_pattern_default(
   }
 }
 
-fn parse_array_binding_pattern(p: P) -> Result(#(P, ast.Pattern), ParseError) {
+fn parse_array_binding_pattern(
+  p: Parser,
+) -> Result(#(Parser, ast.Pattern), ParseError) {
   use p2 <- result.try(expect(p, LeftBracket))
   parse_array_binding_elements(p2, [])
 }
 
 fn parse_array_binding_elements(
-  p: P,
+  p: Parser,
   acc: List(Option(ast.Pattern)),
-) -> Result(#(P, ast.Pattern), ParseError) {
+) -> Result(#(Parser, ast.Pattern), ParseError) {
   case peek(p) {
     RightBracket ->
       Ok(#(advance(p), ast.ArrayPattern(elements: list.reverse(acc))))
@@ -1269,15 +1323,17 @@ fn parse_array_binding_elements(
   }
 }
 
-fn parse_object_binding_pattern(p: P) -> Result(#(P, ast.Pattern), ParseError) {
+fn parse_object_binding_pattern(
+  p: Parser,
+) -> Result(#(Parser, ast.Pattern), ParseError) {
   use p2 <- result.try(expect(p, LeftBrace))
   parse_object_binding_properties(p2, [])
 }
 
 fn parse_object_binding_properties(
-  p: P,
+  p: Parser,
   acc: List(ast.PatternProperty),
-) -> Result(#(P, ast.Pattern), ParseError) {
+) -> Result(#(Parser, ast.Pattern), ParseError) {
   case peek(p) {
     RightBrace ->
       Ok(#(advance(p), ast.ObjectPattern(properties: list.reverse(acc))))
@@ -1285,15 +1341,14 @@ fn parse_object_binding_properties(
       let p2 = advance(p)
       let kind = peek(p2)
       // §13.3.3: object rest is an identifier only
-      use Nil <- result.try(case kind {
-        LeftBrace | LeftBracket -> Error(InvalidRestBinding(pos_of(p2)))
-        Identifier -> Ok(Nil)
-        _ ->
-          case is_contextual_keyword(kind) {
-            True -> Ok(Nil)
-            False -> Error(ExpectedIdentifier(pos_of(p2)))
-          }
-      })
+      use <- bool.guard(
+        kind == LeftBrace || kind == LeftBracket,
+        Error(InvalidRestBinding(pos_of(p2))),
+      )
+      use <- bool.guard(
+        !is_binding_ident_token(kind),
+        Error(ExpectedIdentifier(pos_of(p2))),
+      )
       let name = peek_value(p2)
       let span = span_of(p2)
       use #(p3, _ident_pat) <- result.try(validate_and_register_binding(
@@ -1325,76 +1380,66 @@ fn parse_object_binding_properties(
 }
 
 fn parse_object_binding_property(
-  p: P,
-) -> Result(#(P, ast.PatternProperty), ParseError) {
-  let prop_kind = peek(p)
-  let prop_name = peek_value(p)
-  let is_valid_shorthand = case prop_kind {
-    Identifier -> True
-    _ -> is_contextual_keyword(prop_kind)
-  }
+  p: Parser,
+) -> Result(#(Parser, ast.PatternProperty), ParseError) {
+  let shorthand_name = simple_binding_name(p)
   use #(p2, key) <- result.try(parse_property_name(p))
   use Nil <- result.try(reject_private_property_key(p, key))
-  case peek(p2) {
-    Colon -> {
+  case peek(p2), shorthand_name {
+    Colon, _ -> {
       use #(p4, val_pat) <- result.try(parse_binding_pattern(advance(p2)))
       use #(p5, final_pat) <- result.map(parse_pattern_default(p4, val_pat))
       #(p5, ast.PatternProperty(key:, value: final_pat, shorthand: False))
     }
-    next -> {
-      case is_valid_shorthand {
-        False -> Error(UnexpectedToken(pos_of(p), prop_kind))
-        True -> {
-          use #(p3, _) <- result.try(validate_and_register_binding_no_advance(
-            p,
-            p2,
-            prop_name,
-          ))
-          let ident = ast.IdentifierPattern(name: prop_name, span: span_of(p))
-          use #(p4, value) <- result.map(case next {
-            Equal -> {
-              use #(p4, default) <- result.map(
-                parse_assignment_expression(advance(p3)),
-              )
-              #(p4, ast.AssignmentPattern(left: ident, right: default))
-            }
-            _ -> Ok(#(p3, ident))
-          })
-          #(p4, ast.PatternProperty(key:, value: value, shorthand: True))
-        }
-      }
+    _, None -> Error(UnexpectedToken(pos_of(p), peek(p)))
+    _, Some(prop_name) -> {
+      use #(p3, ident) <- result.try(register_binding_named_at(p, p2, prop_name))
+      use #(p4, value) <- result.map(parse_pattern_default(p3, ident))
+      #(p4, ast.PatternProperty(key:, value:, shorthand: True))
     }
   }
 }
 
-fn numeric_literal(p: P) -> Result(ast.Expression, ParseError) {
+// annex b legacy octal forms are strict mode errors
+fn check_legacy_octal_literal(p: Parser) -> Result(Nil, ParseError) {
+  use <- bool.guard(
+    p.ctx.strict && peek_annex_b_legacy(p),
+    Error(OctalLiteralStrictMode(pos_of(p))),
+  )
+  Ok(Nil)
+}
+
+fn numeric_literal(p: Parser) -> Result(ast.Expression, ParseError) {
   let span = span_of(p)
   case number.parse_numeric_literal(peek_value(p)) {
-    Ok(number.NumberValue(n)) -> Ok(ast.NumberLiteral(value: n, span:))
-    Ok(number.BigIntValue(i)) -> Ok(ast.BigIntLiteral(value: i, span:))
+    Ok(number.ParsedNumber(n)) -> Ok(ast.NumberLiteral(value: n, span:))
+    Ok(number.ParsedBigInt(i)) -> Ok(ast.BigIntLiteral(value: i, span:))
     Error(err) -> Error(MalformedNumericLiteral(pos_of(p), err))
   }
 }
 
 // the only place annex b string escapes are rejected
-fn string_literal_value(p: P) -> Result(String, ParseError) {
-  string_token_value(p, p.ctx.strict)
+fn string_literal_value(p: Parser) -> Result(String, ParseError) {
+  string_token_value(p, strict: p.ctx.strict)
 }
 
 // module code is always strict
-fn module_specifier_value(p: P) -> Result(String, ParseError) {
-  string_token_value(p, True)
+fn module_specifier_value(p: Parser) -> Result(String, ParseError) {
+  string_token_value(p, strict: True)
 }
 
 // string export names use their cooked value
-fn specifier_name_value(p: P) -> Result(String, ParseError) {
+fn specifier_name_value(p: Parser) -> Result(String, ParseError) {
   case peek(p) {
     KString -> module_specifier_value(p)
     _ -> Ok(peek_value(p))
   }
 }
 
-fn string_token_value(p: P, strict: Bool) -> Result(String, ParseError) {
+fn string_token_value(
+  p: Parser,
+  strict strict: Bool,
+) -> Result(String, ParseError) {
   use <- bool.guard(
     strict && peek_annex_b_legacy(p),
     Error(OctalEscapeStrictMode(pos_of(p))),
@@ -1402,11 +1447,11 @@ fn string_token_value(p: P, strict: Bool) -> Result(String, ParseError) {
   Ok(decode_string_escapes(peek_value(p)))
 }
 
-fn numeric_property_key(p: P) -> Result(ast.PropertyKey, ParseError) {
+fn numeric_property_key(p: Parser) -> Result(ast.PropertyKey, ParseError) {
   let span = span_of(p)
   case number.parse_numeric_literal(peek_value(p)) {
-    Ok(number.NumberValue(n)) -> Ok(ast.KeyNumber(value: n, span:))
-    Ok(number.BigIntValue(i)) -> Ok(ast.KeyBigInt(value: i, span:))
+    Ok(number.ParsedNumber(n)) -> Ok(ast.KeyNumber(value: n, span:))
+    Ok(number.ParsedBigInt(i)) -> Ok(ast.KeyBigInt(value: i, span:))
     Error(err) -> Error(MalformedNumericLiteral(pos_of(p), err))
   }
 }
@@ -1419,15 +1464,14 @@ fn identifier_property_key(name: String, span: ast.Span) -> ast.PropertyKey {
   }
 }
 
-fn parse_property_name(p: P) -> Result(#(P, ast.PropertyKey), ParseError) {
+fn parse_property_name(
+  p: Parser,
+) -> Result(#(Parser, ast.PropertyKey), ParseError) {
   case peek(p) {
     Identifier ->
       Ok(#(advance(p), identifier_property_key(peek_value(p), span_of(p))))
     Number -> {
-      use <- bool.guard(
-        p.ctx.strict && peek_annex_b_legacy(p),
-        Error(OctalLiteralStrictMode(pos_of(p))),
-      )
+      use Nil <- result.try(check_legacy_octal_literal(p))
       use key <- result.map(numeric_property_key(p))
       #(advance(p), key)
     }
@@ -1438,7 +1482,7 @@ fn parse_property_name(p: P) -> Result(#(P, ast.PropertyKey), ParseError) {
     LeftBracket -> {
       // computed key is [+In]
       use #(p4, expr) <- result.map({
-        use p2 <- with_allow_in(advance(p), True)
+        use p2 <- allowing_in(advance(p))
         use #(p3, expr) <- result.try(parse_assignment_expression(p2))
         use p4 <- result.map(expect(p3, RightBracket))
         #(p4, expr)
@@ -1454,49 +1498,57 @@ fn parse_property_name(p: P) -> Result(#(P, ast.PropertyKey), ParseError) {
   }
 }
 
-fn parse_if_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
+fn parse_if_statement(
+  p: Parser,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   let p2 = advance(p)
   use p3 <- result.try(expect(p2, LeftParen))
   use #(p4, condition) <- result.try(parse_expression(p3))
   use p5 <- result.try(expect(p4, RightParen))
-  use #(p6, consequent) <- result.try(parse_single_statement(p5, True))
-  case peek(p6) {
+  use #(p6, consequent) <- result.try(parse_single_statement(
+    p5,
+    allow_annex_b_function: True,
+  ))
+  use #(p7, alternate) <- result.map(case peek(p6) {
     Else -> {
-      use #(p7, alternate) <- result.try(parse_single_statement(
+      use #(p7, alternate) <- result.map(parse_single_statement(
         advance(p6),
-        True,
+        allow_annex_b_function: True,
       ))
-      Ok(#(
-        p7,
-        ast.IfStatement(
-          condition:,
-          consequent:,
-          alternate: option.Some(alternate),
-        ),
-      ))
+      #(p7, Some(alternate))
     }
-    _ ->
-      Ok(#(p6, ast.IfStatement(condition:, consequent:, alternate: option.None)))
-  }
+    _ -> Ok(#(p6, None))
+  })
+  #(p7, ast.IfStatement(condition:, consequent:, alternate:))
 }
 
-fn parse_while_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
+fn parse_while_statement(
+  p: Parser,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   let p2 = advance(p)
   use p3 <- result.try(expect(p2, LeftParen))
   use #(p4, condition) <- result.try(parse_expression(p3))
   use p5 <- result.try(expect(p4, RightParen))
   let p5 = set_loop_depth(p5, p5.ctx.loop_depth + 1)
-  use #(p6, body) <- result.try(parse_single_statement(p5, False))
+  use #(p6, body) <- result.try(parse_single_statement(
+    p5,
+    allow_annex_b_function: False,
+  ))
   Ok(#(
     set_loop_depth(p6, p.ctx.loop_depth),
     ast.WhileStatement(condition:, body:),
   ))
 }
 
-fn parse_do_while_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
+fn parse_do_while_statement(
+  p: Parser,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   let p2 = advance(p)
   let p2 = set_loop_depth(p2, p2.ctx.loop_depth + 1)
-  use #(p3, body) <- result.try(parse_single_statement(p2, False))
+  use #(p3, body) <- result.try(parse_single_statement(
+    p2,
+    allow_annex_b_function: False,
+  ))
   use p4 <- result.try(expect(p3, While))
   use p5 <- result.try(expect(p4, LeftParen))
   use #(p6, condition) <- result.try(parse_expression(p5))
@@ -1512,7 +1564,9 @@ fn parse_do_while_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   ))
 }
 
-fn parse_for_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
+fn parse_for_statement(
+  p: Parser,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   let p2 = advance(p)
   let #(p2, is_await) = case peek(p2) {
     Await -> #(advance(p2), True)
@@ -1520,34 +1574,32 @@ fn parse_for_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   }
   let p2 = set_loop_depth(p2, p2.ctx.loop_depth + 1)
   use p3 <- result.try(expect(p2, LeftParen))
-  use #(p4, stmt) <- result.try(parse_for_head(p3, is_await))
+  use #(p4, stmt) <- result.try(parse_for_head(p3, is_await:))
   Ok(#(set_loop_depth(p4, p.ctx.loop_depth), stmt))
 }
 
-fn set_loop_depth(p: P, depth: Int) -> P {
-  P(..p, ctx: Ctx(..p.ctx, loop_depth: depth))
+fn set_loop_depth(p: Parser, depth: Int) -> Parser {
+  Parser(..p, ctx: GrammarContext(..p.ctx, loop_depth: depth))
 }
 
 fn parse_for_head(
-  p: P,
-  is_await: Bool,
-) -> Result(#(P, ast.Statement), ParseError) {
+  p: Parser,
+  is_await is_await: Bool,
+) -> Result(#(Parser, ast.Statement), ParseError) {
+  let scoped_declaration = fn() {
+    in_for_head_scope(p, parse_for_declaration(_, is_await:))
+  }
   case peek(p) {
-    Semicolon -> {
-      let p2 = advance(p)
-      parse_for_classic_rest(p2, None)
-    }
-    Var -> parse_for_declaration(p, is_await)
-    Const -> parse_for_declaration_scoped(p, is_await)
+    Semicolon -> parse_for_classic_rest(advance(p), None)
+    Var -> parse_for_declaration(p, is_await:)
+    Const -> scoped_declaration()
     Let -> {
-      case peek_at(p, 1) {
-        Identifier | LeftBrace | LeftBracket ->
-          parse_for_declaration_scoped(p, is_await)
-        _ ->
-          case is_contextual_keyword(peek_at(p, 1)) {
-            True -> parse_for_declaration_scoped(p, is_await)
-            False -> parse_for_expression(p, is_await)
-          }
+      let next = peek_at(p, 1)
+      case
+        next == LeftBrace || next == LeftBracket || is_binding_ident_token(next)
+      {
+        True -> scoped_declaration()
+        False -> parse_for_expression(p, is_await:)
       }
     }
     // for (using of = ..;;) binds of, for (using of x) does not
@@ -1556,8 +1608,13 @@ fn parse_for_head(
         is_using_decl_start(p, 0)
         && { peek_at(p, 1) != Of || peek_at(p, 2) == Equal }
       {
-        True -> parse_for_using_scoped(p, is_await, is_await_using: False)
-        False -> parse_for_expression(p, is_await)
+        True ->
+          in_for_head_scope(p, parse_for_using_declaration(
+            _,
+            is_await:,
+            is_await_using: False,
+          ))
+        False -> parse_for_expression(p, is_await:)
       }
     // §14.7.5: literal async of is forbidden here
     Async ->
@@ -1568,36 +1625,37 @@ fn parse_for_head(
         && peek_at(p, 2) != Arrow
       {
         True -> Error(InvalidForOfLhs(pos_of(p)))
-        False -> parse_for_expression(p, is_await)
+        False -> parse_for_expression(p, is_await:)
       }
     // await using of IS a declaration binding of
     Await ->
       case is_await_using_decl_start(p) {
-        True -> parse_for_using_scoped(p, is_await, is_await_using: True)
-        False -> parse_for_expression(p, is_await)
+        True ->
+          in_for_head_scope(p, parse_for_using_declaration(
+            _,
+            is_await:,
+            is_await_using: True,
+          ))
+        False -> parse_for_expression(p, is_await:)
       }
-    _ -> parse_for_expression(p, is_await)
+    _ -> parse_for_expression(p, is_await:)
   }
 }
 
-fn parse_for_using_scoped(
-  p: P,
-  is_await: Bool,
-  is_await_using is_await_using: Bool,
-) -> Result(#(P, ast.Statement), ParseError) {
-  use #(p2, stmt) <- result.map(parse_for_using_declaration(
-    enter_block_scope(p),
-    is_await,
-    is_await_using,
-  ))
-  #(restore_block_scope(p2, p) |> exit_for_decl_context(p), stmt)
+// head names get their own scope: for(let a;;); let a; is valid
+fn in_for_head_scope(
+  p: Parser,
+  parse: fn(Parser) -> Result(#(Parser, ast.Statement), ParseError),
+) -> Result(#(Parser, ast.Statement), ParseError) {
+  use #(p2, stmt) <- result.map(parse(enter_block_scope(p)))
+  #(restore_block_scope(p2, p) |> exit_declaration_context(p), stmt)
 }
 
 fn parse_for_using_declaration(
-  p: P,
-  is_await: Bool,
-  is_await_using: Bool,
-) -> Result(#(P, ast.Statement), ParseError) {
+  p: Parser,
+  is_await is_await: Bool,
+  is_await_using is_await_using: Bool,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   let p2 = case is_await_using {
     True -> advance(advance(p))
     False -> advance(p)
@@ -1615,12 +1673,17 @@ fn parse_for_using_declaration(
         ast.ForInitDeclaration(kind:, declarations: [
           ast.VariableDeclarator(id: pattern, init: None),
         ])
-      parse_for_in_of_rest(exit_for_decl_context(p3, p), decl, True, is_await)
+      parse_for_in_of_rest(
+        exit_declaration_context(p3, p),
+        decl,
+        is_of: True,
+        is_await:,
+      )
     }
     Equal -> {
       // classic head declarators are [~In]
       use #(p6, declarators) <- result.try({
-        use p4 <- with_allow_in(advance(p3), False)
+        use p4 <- disallowing_in(advance(p3))
         use #(p5, init_expr) <- result.try(parse_assignment_expression(p4))
         let first = ast.VariableDeclarator(id: pattern, init: Some(init_expr))
         use #(p6, rest) <- result.map(parse_using_remaining_declarators(p5, []))
@@ -1628,100 +1691,53 @@ fn parse_for_using_declaration(
       })
       let decl = ast.ForInitDeclaration(kind:, declarations: declarators)
       use p7 <- result.try(expect(p6, Semicolon))
-      parse_for_classic_rest(exit_for_decl_context(p7, p), Some(decl))
+      parse_for_classic_rest(exit_declaration_context(p7, p), Some(decl))
     }
     _ -> Error(UsingMissingInitializer(pos_of(p3)))
   }
 }
 
 fn parse_using_remaining_declarators(
-  p: P,
+  p: Parser,
   acc: List(ast.VariableDeclarator),
-) -> Result(#(P, List(ast.VariableDeclarator)), ParseError) {
+) -> Result(#(Parser, List(ast.VariableDeclarator)), ParseError) {
   case peek(p) {
     Comma -> parse_using_declarator_list(advance(p), acc)
     _ -> Ok(#(p, list.reverse(acc)))
   }
 }
 
-fn parse_for_declaration_scoped(
-  p: P,
-  is_await: Bool,
-) -> Result(#(P, ast.Statement), ParseError) {
-  // head names get their own scope: for(let a;;); let a; is valid
-  use #(p2, stmt) <- result.map(parse_for_declaration(
-    enter_block_scope(p),
-    is_await,
-  ))
-  #(restore_block_scope(p2, p) |> exit_for_decl_context(p), stmt)
-}
-
-// drop the for-head binding context before the rest
-fn exit_for_decl_context(p: P, outer: P) -> P {
-  P(..p, ctx: Ctx(..p.ctx, binding_kind: outer.ctx.binding_kind))
-}
-
-fn enter_lexical_decl_context(p: P, kind: scope.BindingKind) -> P {
-  P(
-    ..p,
-    ctx: Ctx(..p.ctx, binding_kind: BindingLexical(kind:, bound: set.new())),
-  )
-}
-
 fn parse_for_declaration(
-  p: P,
-  is_await: Bool,
-) -> Result(#(P, ast.Statement), ParseError) {
-  let kind = case peek(p) {
-    Let -> ast.Let
-    Const -> ast.Const
-    Var -> ast.Var
-    _ ->
-      panic as "parser: parse_for_declaration entered with non-var/let/const head token"
-  }
-  let p2 = advance(p)
+  p: Parser,
+  is_await is_await: Bool,
+) -> Result(#(Parser, ast.Statement), ParseError) {
+  let #(p2, kind) = variable_declaration_head(p)
   let is_destr = peek(p2) == LeftBrace || peek(p2) == LeftBracket
-  let p2 = case kind {
-    ast.Let -> enter_lexical_decl_context(p2, scope.LetBinding)
-    ast.Const | ast.Using | ast.AwaitUsing ->
-      enter_lexical_decl_context(p2, scope.ConstBinding)
-    ast.Var -> P(..p2, ctx: Ctx(..p2.ctx, binding_kind: BindingVar))
-  }
   // B.3.4: for-of var names vs enclosing catch param
-  let catch_params = scope.sb_nearest_catch_params(p2.sb)
-  use #(p3, pattern) <- result.try(parse_for_binding_or_declarator(p2))
+  let catch_params = scope.sb_nearest_catch_params(p2.scopes)
+  use #(p3, pattern) <- result.try(parse_binding_pattern(p2))
   let decl =
     ast.ForInitDeclaration(kind:, declarations: [
       ast.VariableDeclarator(id: pattern, init: None),
     ])
   // §14.7.5.9: head binding written each iteration
-  let mark_assigned = fn(px: P) {
-    P(..px, sb: sb_mark_pattern_assigned(px.sb, pattern))
+  let p_in_of = fn() {
+    let p = exit_declaration_context(p3, p)
+    Parser(..p, scopes: mark_pattern_assigned(p.scopes, pattern))
   }
   case peek(p3) {
-    In ->
-      parse_for_in_of_rest(
-        mark_assigned(exit_for_decl_context(p3, p)),
-        decl,
-        False,
-        False,
-      )
+    In -> parse_for_in_of_rest(p_in_of(), decl, is_of: False, is_await: False)
     Of -> {
       use Nil <- result.try(case kind {
         ast.Var ->
-          check_new_vars_vs_params(
+          check_for_of_var_vs_catch_param(
             ast.pattern_bound_names(pattern),
             catch_params,
             pos_of(p3),
           )
         _ -> Ok(Nil)
       })
-      parse_for_in_of_rest(
-        mark_assigned(exit_for_decl_context(p3, p)),
-        decl,
-        True,
-        is_await,
-      )
+      parse_for_in_of_rest(p_in_of(), decl, is_of: True, is_await:)
     }
     Semicolon | Comma ->
       case kind {
@@ -1734,9 +1750,8 @@ fn parse_for_declaration(
       }
     Equal -> {
       // [~In] so for (var x = a in b) is for-in
-      use #(p5, init_expr) <- result.try(with_allow_in(
+      use #(p5, init_expr) <- result.try(disallowing_in(
         advance(p3),
-        False,
         parse_assignment_expression,
       ))
       case peek(p5) {
@@ -1755,20 +1770,20 @@ fn parse_for_declaration(
 
 // §14.7.4: the whole declarator list is [~In]
 fn finish_for_classic_decl(
-  p: P,
-  outer: P,
+  p: Parser,
+  outer: Parser,
   kind: ast.VariableKind,
   pattern: ast.Pattern,
   init: Option(ast.Expression),
-) -> Result(#(P, ast.Statement), ParseError) {
+) -> Result(#(Parser, ast.Statement), ParseError) {
   let first = ast.VariableDeclarator(id: pattern, init:)
   use #(p2, rest) <- result.try({
-    use p <- with_allow_in(p, False)
+    use p <- disallowing_in(p)
     parse_remaining_declarators(p, kind, [])
   })
   let decl = ast.ForInitDeclaration(kind:, declarations: [first, ..rest])
   use p3 <- result.try(expect(p2, Semicolon))
-  parse_for_classic_rest(exit_for_decl_context(p3, outer), Some(decl))
+  parse_for_classic_rest(exit_declaration_context(p3, outer), Some(decl))
 }
 
 // §13.15.1/§13.15.5 eval/arguments in target positions only
@@ -1805,52 +1820,52 @@ fn pattern_element_has_eval_args_target(expr: ast.Expression) -> Bool {
   }
 }
 
-fn sb_mark_assign_targets(
-  sb: scope.ScopeBuilder,
+fn mark_assign_targets(
+  scopes: scope.ScopeBuilder,
   lhs: ast.Expression,
 ) -> scope.ScopeBuilder {
   case lhs {
-    ast.Identifier(name:, ..) -> scope.sb_assign_ref(sb, name)
+    ast.Identifier(name:, ..) -> scope.sb_assign_ref(scopes, name)
     ast.ParenthesizedExpression(expression:, ..) ->
-      sb_mark_assign_targets(sb, expression)
+      mark_assign_targets(scopes, expression)
     ast.ArrayExpression(elements:, ..) ->
-      list.fold(elements, sb, fn(sb, elem) {
+      list.fold(elements, scopes, fn(scopes, elem) {
         case elem {
-          None -> sb
+          None -> scopes
           Some(ast.SpreadElement(argument:, ..)) ->
-            sb_mark_assign_targets(sb, argument)
-          Some(e) -> sb_mark_assign_element(sb, e)
+            mark_assign_targets(scopes, argument)
+          Some(e) -> mark_assign_element(scopes, e)
         }
       })
     ast.ObjectExpression(properties:, ..) ->
-      list.fold(properties, sb, fn(sb, prop) {
+      list.fold(properties, scopes, fn(scopes, prop) {
         case prop {
-          ast.InitProperty(value:, ..) -> sb_mark_assign_element(sb, value)
-          ast.SpreadProperty(argument:) -> sb_mark_assign_targets(sb, argument)
-          ast.MethodProperty(..) | ast.AccessorProperty(..) -> sb
+          ast.InitProperty(value:, ..) -> mark_assign_element(scopes, value)
+          ast.SpreadProperty(argument:) -> mark_assign_targets(scopes, argument)
+          ast.MethodProperty(..) | ast.AccessorProperty(..) -> scopes
         }
       })
-    _ -> sb
+    _ -> scopes
   }
 }
 
-fn sb_mark_assign_element(
-  sb: scope.ScopeBuilder,
+fn mark_assign_element(
+  scopes: scope.ScopeBuilder,
   expr: ast.Expression,
 ) -> scope.ScopeBuilder {
   case expr {
     ast.AssignmentExpression(operator: ast.Assign, left:, ..) ->
-      sb_mark_assign_targets(sb, left)
-    _ -> sb_mark_assign_targets(sb, expr)
+      mark_assign_targets(scopes, left)
+    _ -> mark_assign_targets(scopes, expr)
   }
 }
 
 // the only signal never_box_names sees for var/param collisions
-fn sb_mark_pattern_assigned(
-  sb: scope.ScopeBuilder,
+fn mark_pattern_assigned(
+  scopes: scope.ScopeBuilder,
   pattern: ast.Pattern,
 ) -> scope.ScopeBuilder {
-  list.fold(ast.pattern_bound_names(pattern), sb, scope.sb_assign_ref)
+  list.fold(ast.pattern_bound_names(pattern), scopes, scope.sb_assign_ref)
 }
 
 // eval.x stays legal (§13.15.5)
@@ -1867,88 +1882,68 @@ fn destructuring_target_is_eval_args(expr: ast.Expression) -> Bool {
 }
 
 fn parse_for_expression(
-  p: P,
-  is_await: Bool,
-) -> Result(#(P, ast.Statement), ParseError) {
+  p: Parser,
+  is_await is_await: Bool,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   let start_token = peek(p)
   // [~In] inside the for head
-  use #(p2, expr) <- result.try(with_allow_in(p, False, parse_expression))
-  {
-    case peek(p2) {
-      Semicolon ->
-        // for(;;) init is never a pattern: cover errors due
-        case p2.ctx.has_cover_initializer, p2.ctx.dup_proto_pos {
-          True, _ -> Error(InvalidDestructuringTarget(pos_of(p2)))
-          False, Some(pos) -> Error(DuplicateProtoProperty(pos))
-          False, None ->
-            parse_for_classic_rest(
-              advance(p2),
-              Some(ast.ForInitExpression(expr)),
-            )
-        }
-      In | Of -> {
-        let is_bare_pattern =
-          start_token == LeftBrace || start_token == LeftBracket
-        let let_of_forbidden = start_token == Let && peek(p2) == Of
-        let left = ast.ForInitExpression(expr)
-        case
-          !let_of_forbidden
-          && {
-            p2.last_expr_assignable
-            || { is_bare_pattern && !p2.has_invalid_pattern }
-            || is_web_compat_call_target(p2, expr)
-          }
-        {
-          True ->
-            case
-              is_bare_pattern
-              && p2.ctx.strict
-              && pattern_has_eval_args_target(expr)
-            {
-              True -> Error(EvalArgsAssignStrictMode(pos_of(p2)))
-              False -> {
-                // clear cover flags so they do not leak into the body
-                let p2 =
-                  P(
-                    ..p2,
-                    sb: sb_mark_assign_targets(p2.sb, expr),
-                    has_invalid_pattern: False,
-                    ctx: Ctx(
-                      ..p2.ctx,
-                      has_cover_initializer: False,
-                      dup_proto_pos: None,
-                    ),
-                  )
-                case peek(p2) {
-                  In -> parse_for_in_of_rest(p2, left, False, False)
-                  _ -> parse_for_in_of_rest(p2, left, True, is_await)
-                }
-              }
-            }
-          False ->
-            case peek(p2) {
-              In -> Error(InvalidForInLhs(pos_of(p2)))
-              _ -> Error(InvalidForOfLhs(pos_of(p2)))
-            }
-        }
+  use #(p2, expr) <- result.try(disallowing_in(p, parse_expression))
+  case peek(p2) {
+    Semicolon ->
+      // for(;;) init is never a pattern: cover errors due
+      case p2.ctx.has_cover_initializer, p2.ctx.dup_proto_pos {
+        True, _ -> Error(InvalidDestructuringTarget(pos_of(p2)))
+        False, Some(pos) -> Error(DuplicateProtoProperty(pos))
+        False, None ->
+          parse_for_classic_rest(advance(p2), Some(ast.ForInitExpression(expr)))
       }
-      _ -> Error(ExpectedForSeparator(pos_of(p2)))
+    In | Of -> {
+      let is_of = peek(p2) == Of
+      let is_bare_pattern =
+        start_token == LeftBrace || start_token == LeftBracket
+      let let_of_forbidden = start_token == Let && is_of
+      let valid_target =
+        !let_of_forbidden
+        && {
+          p2.last_expr_assignable
+          || { is_bare_pattern && !p2.literal_invalid_as_pattern }
+          || is_web_compat_call_target(p2, expr)
+        }
+      use <- bool.lazy_guard(!valid_target, fn() {
+        case is_of {
+          False -> Error(InvalidForInLhs(pos_of(p2)))
+          True -> Error(InvalidForOfLhs(pos_of(p2)))
+        }
+      })
+      use <- bool.guard(
+        is_bare_pattern && p2.ctx.strict && pattern_has_eval_args_target(expr),
+        Error(EvalArgsAssignStrictMode(pos_of(p2))),
+      )
+      // clear cover flags so they do not leak into the body
+      let p2 =
+        Parser(
+          ..p2,
+          scopes: mark_assign_targets(p2.scopes, expr),
+          literal_invalid_as_pattern: False,
+          ctx: GrammarContext(
+            ..p2.ctx,
+            has_cover_initializer: False,
+            dup_proto_pos: None,
+          ),
+        )
+      let left = ast.ForInitExpression(expr)
+      parse_for_in_of_rest(p2, left, is_of:, is_await: is_of && is_await)
     }
+    _ -> Error(ExpectedForSeparator(pos_of(p2)))
   }
-}
-
-fn parse_for_binding_or_declarator(
-  p: P,
-) -> Result(#(P, ast.Pattern), ParseError) {
-  parse_binding_pattern(p)
 }
 
 // , commits to another declarator: propagate errors
 fn parse_remaining_declarators(
-  p: P,
+  p: Parser,
   kind: ast.VariableKind,
   acc: List(ast.VariableDeclarator),
-) -> Result(#(P, List(ast.VariableDeclarator)), ParseError) {
+) -> Result(#(Parser, List(ast.VariableDeclarator)), ParseError) {
   case peek(p) {
     Comma -> {
       use #(p2, decl) <- result.try(parse_variable_declarator(advance(p), kind))
@@ -1959,18 +1954,21 @@ fn parse_remaining_declarators(
 }
 
 fn parse_for_in_of_rest(
-  p: P,
+  p: Parser,
   left: ast.ForInit,
-  is_of: Bool,
-  is_await: Bool,
-) -> Result(#(P, ast.Statement), ParseError) {
+  is_of is_of: Bool,
+  is_await is_await: Bool,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   let p2 = advance(p)
   use #(p3, right) <- result.try(case is_of {
     True -> parse_assignment_expression(p2)
     False -> parse_expression(p2)
   })
   use p4 <- result.try(expect(p3, RightParen))
-  use #(p5, body) <- result.map(parse_single_statement(p4, False))
+  use #(p5, body) <- result.map(parse_single_statement(
+    p4,
+    allow_annex_b_function: False,
+  ))
   case is_of {
     True -> #(p5, ast.ForOfStatement(left:, right:, body:, is_await:))
     False -> #(p5, ast.ForInStatement(left:, right:, body:))
@@ -1978,117 +1976,104 @@ fn parse_for_in_of_rest(
 }
 
 fn parse_for_classic_rest(
-  p: P,
+  p: Parser,
   init: Option(ast.ForInit),
-) -> Result(#(P, ast.Statement), ParseError) {
-  case peek(p) {
-    Semicolon -> parse_for_classic_update(advance(p), init, None)
+) -> Result(#(Parser, ast.Statement), ParseError) {
+  use #(p2, condition) <- result.try(case peek(p) {
+    Semicolon -> Ok(#(advance(p), None))
     _ -> {
       use #(p2, condition) <- result.try(parse_expression(p))
-      use p3 <- result.try(expect(p2, Semicolon))
-      parse_for_classic_update(p3, init, Some(condition))
+      use p3 <- result.map(expect(p2, Semicolon))
+      #(p3, Some(condition))
     }
-  }
-}
-
-fn parse_for_classic_update(
-  p: P,
-  init: Option(ast.ForInit),
-  condition: Option(ast.Expression),
-) -> Result(#(P, ast.Statement), ParseError) {
-  case peek(p) {
-    RightParen -> {
-      let p2 = advance(p)
-      use #(p3, body) <- result.try(parse_single_statement(p2, False))
-      Ok(#(p3, ast.ForStatement(init:, condition:, update: None, body:)))
-    }
+  })
+  use #(p3, update) <- result.try(case peek(p2) {
+    RightParen -> Ok(#(advance(p2), None))
     _ -> {
-      use #(p2, update) <- result.try(parse_expression(p))
-      use p3 <- result.try(expect(p2, RightParen))
-      use #(p4, body) <- result.try(parse_single_statement(p3, False))
-      Ok(#(p4, ast.ForStatement(init:, condition:, update: Some(update), body:)))
+      use #(p3, update) <- result.try(parse_expression(p2))
+      use p4 <- result.map(expect(p3, RightParen))
+      #(p4, Some(update))
     }
-  }
+  })
+  use #(p4, body) <- result.map(parse_single_statement(
+    p3,
+    allow_annex_b_function: False,
+  ))
+  #(p4, ast.ForStatement(init:, condition:, update:, body:))
 }
 
-fn parse_return_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
-  case p.ctx.function_depth > 0 {
-    False -> Error(ReturnOutsideFunction(pos_of(p)))
-    True -> parse_return_statement_body(p)
-  }
-}
-
-fn parse_return_statement_body(
-  p: P,
-) -> Result(#(P, ast.Statement), ParseError) {
+fn parse_return_statement(
+  p: Parser,
+) -> Result(#(Parser, ast.Statement), ParseError) {
+  use <- bool.guard(
+    p.ctx.function_depth <= 0,
+    Error(ReturnOutsideFunction(pos_of(p))),
+  )
   let p2 = advance(p)
+  let bare = Ok(#(p2, ast.ReturnStatement(argument: None)))
   case peek(p2) {
-    Semicolon -> Ok(#(advance(p2), ast.ReturnStatement(argument: option.None)))
-    RightBrace | Eof -> Ok(#(p2, ast.ReturnStatement(argument: option.None)))
-    _ ->
-      case has_line_break_before(p2) {
-        True -> Ok(#(p2, ast.ReturnStatement(argument: option.None)))
-        False -> {
-          let start = pos_of(p2)
-          use #(p3, expr) <- result.try(parse_expression(p2))
-          use Nil <- result.try(check_cover_grammar_errors(p3, start))
-          use p4 <- result.try(eat_semicolon(p3))
-          Ok(#(p4, ast.ReturnStatement(argument: option.Some(expr))))
-        }
-      }
+    Semicolon -> Ok(#(advance(p2), ast.ReturnStatement(argument: None)))
+    RightBrace | Eof -> bare
+    _ -> {
+      use <- bool.guard(has_line_break_before(p2), bare)
+      let start = pos_of(p2)
+      use #(p3, expr) <- result.try(parse_expression(p2))
+      use Nil <- result.try(check_cover_grammar_errors(p3, start))
+      use p4 <- result.map(eat_semicolon(p3))
+      #(p4, ast.ReturnStatement(argument: Some(expr)))
+    }
   }
 }
 
 fn parse_optional_label(
-  p: P,
+  p: Parser,
   label_use: LabelUse,
-) -> Result(#(P, Option(String)), ParseError) {
+) -> Result(#(Parser, Option(String)), ParseError) {
   case peek(p) {
-    Semicolon -> Ok(#(advance(p), option.None))
-    Identifier ->
-      case has_line_break_before(p) {
-        True -> Ok(#(p, option.None))
-        False -> {
-          let label = peek_value(p)
-          use Nil <- result.try(check_label_target(p, label, label_use))
-          use p2 <- result.map(eat_semicolon(advance(p)))
-          #(p2, option.Some(label))
-        }
-      }
+    Semicolon -> Ok(#(advance(p), None))
+    Identifier -> {
+      use <- bool.guard(has_line_break_before(p), Ok(#(p, None)))
+      let label = peek_value(p)
+      use Nil <- result.try(check_label_target(p, label, label_use))
+      use p2 <- result.map(eat_semicolon(advance(p)))
+      #(p2, Some(label))
+    }
     _ -> {
       use p2 <- result.map(eat_semicolon(p))
-      #(p2, option.None)
+      #(p2, None)
     }
   }
 }
 
 fn check_label_target(
-  p: P,
+  p: Parser,
   label: String,
   label_use: LabelUse,
 ) -> Result(Nil, ParseError) {
-  case find_label(p.ctx.label_set, label), label_use {
-    None, _ -> Error(UndefinedLabel(pos_of(p), label))
-    Some(_), BreakLabel -> Ok(Nil)
-    Some(LoopLabel), ContinueLabel -> Ok(Nil)
-    Some(PlainLabel), ContinueLabel ->
+  case list.key_find(p.ctx.label_set, label), label_use {
+    Error(Nil), _ -> Error(UndefinedLabel(pos_of(p), label))
+    Ok(_), BreakLabel -> Ok(Nil)
+    Ok(LoopLabel), ContinueLabel -> Ok(Nil)
+    Ok(PlainLabel), ContinueLabel ->
       Error(ContinueToNonIterationLabel(pos_of(p), label))
   }
 }
 
-fn parse_break_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
+fn parse_break_statement(
+  p: Parser,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   use #(p2, label) <- result.try(parse_optional_label(advance(p), BreakLabel))
-  case label {
-    option.None ->
-      case p.ctx.loop_depth > 0 || p.ctx.switch_depth > 0 {
-        False -> Error(BreakOutsideLoopOrSwitch(pos_of(p)))
-        True -> Ok(#(p2, ast.BreakStatement(label: option.None)))
-      }
-    option.Some(_) -> Ok(#(p2, ast.BreakStatement(label:)))
-  }
+  let inside_target = p.ctx.loop_depth > 0 || p.ctx.switch_depth > 0
+  use <- bool.guard(
+    option.is_none(label) && !inside_target,
+    Error(BreakOutsideLoopOrSwitch(pos_of(p))),
+  )
+  Ok(#(p2, ast.BreakStatement(label:)))
 }
 
-fn parse_continue_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
+fn parse_continue_statement(
+  p: Parser,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   use <- bool.guard(
     p.ctx.loop_depth <= 0,
     Error(ContinueOutsideLoop(pos_of(p))),
@@ -2097,7 +2082,9 @@ fn parse_continue_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   #(p2, ast.ContinueStatement(label:))
 }
 
-fn parse_throw_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
+fn parse_throw_statement(
+  p: Parser,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   let p2 = advance(p)
   // no line terminator after throw
   use <- bool.guard(
@@ -2111,128 +2098,139 @@ fn parse_throw_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   Ok(#(p4, ast.ThrowStatement(argument: expr)))
 }
 
-fn parse_try_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
+fn parse_try_statement(
+  p: Parser,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   let p2 = advance(p)
-  let p2 = P(..p2, sb: scope.sb_enter_try(p2.sb))
+  let p2 = Parser(..p2, scopes: scope.sb_enter_try(p2.scopes))
   use #(p3, block) <- result.try(parse_block_body(p2))
   use #(p4, handler) <- result.try(parse_catch_clause(p3))
   use #(p5, finalizer) <- result.try(case peek(p4) {
     Finally -> {
       use #(p, b) <- result.map(parse_block_body(advance(p4)))
-      #(p, option.Some(b))
+      #(p, Some(b))
     }
-    _ -> Ok(#(p4, option.None))
+    _ -> Ok(#(p4, None))
   })
-  let p5 = P(..p5, sb: scope.sb_leave_try(p5.sb))
+  let p5 = Parser(..p5, scopes: scope.sb_leave_try(p5.scopes))
   use tail <- result.map(case handler, finalizer {
-    option.None, option.None -> Error(MissingCatchOrFinally(pos_of(p5)))
-    option.Some(handler), option.None -> Ok(ast.TryCatch(handler:))
-    option.None, option.Some(finalizer) -> Ok(ast.TryFinally(finalizer:))
-    option.Some(handler), option.Some(finalizer) ->
+    None, None -> Error(MissingCatchOrFinally(pos_of(p5)))
+    Some(handler), None -> Ok(ast.TryCatch(handler:))
+    None, Some(finalizer) -> Ok(ast.TryFinally(finalizer:))
+    Some(handler), Some(finalizer) ->
       Ok(ast.TryCatchFinally(handler:, finalizer:))
   })
   #(p5, ast.TryStatement(block:, tail:))
 }
 
 fn parse_catch_clause(
-  p: P,
-) -> Result(#(P, option.Option(ast.CatchClause)), ParseError) {
-  use <- bool.guard(peek(p) != Catch, Ok(#(p, option.None)))
+  p: Parser,
+) -> Result(#(Parser, Option(ast.CatchClause)), ParseError) {
+  use <- bool.guard(peek(p) != Catch, Ok(#(p, None)))
   let p2 = advance(p)
   case peek(p2) {
     LeftParen -> {
       let p3 = advance(p2)
-      let #(sb, catch_id) = scope.sb_push(p3.sb, scope.Catch)
-      let p_inner =
-        P(
-          ..p3,
-          sb:,
-          ctx: Ctx(
-            ..p3.ctx,
-            in_block: True,
-            binding_kind: BindingParam,
-            in_formal_params: True,
-            in_catch_param: True,
-            param_bound_names: [],
-            has_non_simple_param: True,
-          ),
-        )
-      use #(p4, param) <- result.try(parse_binding_pattern(p_inner))
-      // §B.3.4: destructured catch param blocks annex b promotion
-      let simple = case param {
-        ast.IdentifierPattern(..) -> True
-        _ -> False
-      }
-      let p4 =
-        P(
-          ..p4,
-          sb: scope.sb_update_current(p4.sb, fn(s) {
-            scope.RawScope(..s, catch_param_simple: simple)
-          }),
-        )
-      // catch is not a function boundary; hand param state back
-      use p5 <- result.try(expect(
-        P(
-          ..p4,
-          ctx: Ctx(
-            ..p4.ctx,
-            binding_kind: BindingNone,
-            in_formal_params: p3.ctx.in_formal_params,
-            in_catch_param: p3.ctx.in_catch_param,
-            param_bound_names: p3.ctx.param_bound_names,
-            has_non_simple_param: p3.ctx.has_non_simple_param,
-          ),
-        ),
-        RightParen,
+      let #(scopes, catch_id) = scope.sb_push(p3.scopes, scope.Catch)
+      use #(p4, param) <- result.try(parse_catch_parameter(
+        Parser(..p3, scopes:),
       ))
+      use p5 <- result.try(expect(p4, RightParen))
       // §14.15.2: catch param scope is separate from the block
       use #(p6, body) <- result.map(parse_block_body(p5))
       #(
         // flip catch children to source order for finalize
-        P(
+        Parser(
           ..p6,
-          sb: scope.sb_reorder_block_children(p6.sb, catch_id)
-            |> scope.sb_enter(p3.sb.current),
-          ctx: Ctx(
+          scopes: scope.sb_reorder_block_children(p6.scopes, catch_id)
+            |> scope.sb_enter(p3.scopes.current),
+          ctx: GrammarContext(
             ..p6.ctx,
             in_block: p3.ctx.in_block,
-            binding_kind: p3.ctx.binding_kind,
+            declaring: p3.ctx.declaring,
           ),
         ),
-        option.Some(ast.CatchClause(param: option.Some(param), body:)),
+        Some(ast.CatchClause(param: Some(param), body:)),
       )
     }
     _ -> {
       use #(p3, body) <- result.map(parse_block_body(p2))
-      #(p3, option.Some(ast.CatchClause(param: option.None, body:)))
+      #(p3, Some(ast.CatchClause(param: None, body:)))
     }
   }
 }
 
-fn parse_switch_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
+// catch is not a function boundary; param state is handed back
+fn parse_catch_parameter(
+  p: Parser,
+) -> Result(#(Parser, ast.Pattern), ParseError) {
+  let p_inner =
+    Parser(
+      ..p,
+      ctx: GrammarContext(
+        ..p.ctx,
+        in_block: True,
+        declaring: DeclaringParam,
+        in_formal_params: True,
+        in_catch_param: True,
+        param_bound_names: [],
+        has_non_simple_param: True,
+      ),
+    )
+  use #(p2, param) <- result.map(parse_binding_pattern(p_inner))
+  // §B.3.4: destructured catch param blocks annex b promotion
+  let simple = case param {
+    ast.IdentifierPattern(..) -> True
+    _ -> False
+  }
+  let scopes =
+    scope.sb_update_current(p2.scopes, fn(s) {
+      scope.RawScope(..s, catch_param_simple: simple)
+    })
+  let ctx =
+    GrammarContext(
+      ..p2.ctx,
+      declaring: NotDeclaring,
+      in_formal_params: p.ctx.in_formal_params,
+      in_catch_param: p.ctx.in_catch_param,
+      param_bound_names: p.ctx.param_bound_names,
+      has_non_simple_param: p.ctx.has_non_simple_param,
+    )
+  #(Parser(..p2, scopes:, ctx:), param)
+}
+
+fn parse_switch_statement(
+  p: Parser,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   let p2 = advance(p)
   use p3 <- result.try(expect(p2, LeftParen))
   use #(p4, discriminant) <- result.try(parse_expression(p3))
   use p5 <- result.try(expect(p4, RightParen))
   use p6 <- result.try(expect(p5, LeftBrace))
   // one block scope around all cases; may shadow params
-  let #(sb, switch_id) = scope.sb_push(p6.sb, scope.Block)
+  let #(scopes, switch_id) = scope.sb_push(p6.scopes, scope.Block)
   let p_inner =
-    P(
+    Parser(
       ..p6,
-      sb:,
-      ctx: Ctx(..p6.ctx, in_block: True, switch_depth: p6.ctx.switch_depth + 1),
+      scopes:,
+      ctx: GrammarContext(
+        ..p6.ctx,
+        in_block: True,
+        switch_depth: p6.ctx.switch_depth + 1,
+      ),
     )
-  use #(p7, cases) <- result.try(parse_switch_cases(p_inner, False, []))
+  use #(p7, cases) <- result.try(
+    parse_switch_cases(p_inner, has_default: False, acc: []),
+  )
   // never pruned: emit_switch always enters this scope
-  let sb =
-    scope.sb_reorder_switch_children(p7.sb, switch_id)
-    |> scope.sb_enter(p6.sb.current)
+  let scopes =
+    scope.sb_reorder_switch_children(p7.scopes, switch_id)
+    |> scope.sb_enter(p6.scopes.current)
   Ok(#(
-    P(
+    Parser(
       ..p7,
-      sb:,
-      ctx: Ctx(
+      scopes:,
+      ctx: GrammarContext(
         ..p7.ctx,
         in_block: p6.ctx.in_block,
         switch_depth: p6.ctx.switch_depth,
@@ -2242,81 +2240,86 @@ fn parse_switch_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   ))
 }
 
+// acc is newest first; the caller reverses
 fn parse_switch_cases(
-  p: P,
-  has_default: Bool,
-  case_acc: List(ast.SwitchCase),
-) -> Result(#(P, List(ast.SwitchCase)), ParseError) {
+  p: Parser,
+  has_default has_default: Bool,
+  acc acc: List(ast.SwitchCase),
+) -> Result(#(Parser, List(ast.SwitchCase)), ParseError) {
   case peek(p) {
-    RightBrace -> Ok(#(advance(p), case_acc))
+    RightBrace -> Ok(#(advance(p), acc))
     Case -> {
       let p2 = advance(p)
       // §14.12.4: case tests run before any case body
-      let switch_id = p2.sb.current
-      let mark = scope.sb_children_raw(p2.sb, switch_id)
+      let switch_id = p2.scopes.current
+      let mark = scope.sb_children_raw(p2.scopes, switch_id)
       use #(p3, condition) <- result.try(parse_expression(p2))
       let p3 =
-        P(
+        Parser(
           ..p3,
-          sb: scope.sb_tag_children_since(
-            p3.sb,
+          scopes: scope.sb_tag_children_since(
+            p3.scopes,
             switch_id,
             mark,
             scope.TagSwitchTest,
           ),
         )
       use p4 <- result.try(expect(p3, Colon))
-      parse_switch_case_stmts(p4, has_default, Some(condition), [], case_acc)
+      use #(p5, consequent) <- result.try(parse_case_clause_body(p4, []))
+      parse_switch_cases(p5, has_default:, acc: [
+        ast.SwitchCase(condition: Some(condition), consequent:),
+        ..acc
+      ])
     }
     Default -> {
-      case has_default {
-        True -> Error(DuplicateDefaultCase(pos_of(p)))
-        False -> {
-          let p2 = advance(p)
-          use p3 <- result.try(expect(p2, Colon))
-          parse_switch_case_stmts(p3, True, None, [], case_acc)
-        }
-      }
+      use <- bool.guard(has_default, Error(DuplicateDefaultCase(pos_of(p))))
+      use p3 <- result.try(expect(advance(p), Colon))
+      use #(p4, consequent) <- result.try(parse_case_clause_body(p3, []))
+      parse_switch_cases(p4, has_default: True, acc: [
+        ast.SwitchCase(condition: None, consequent:),
+        ..acc
+      ])
     }
     _ -> Error(ExpectedCaseDefaultOrBrace(pos_of(p)))
   }
 }
 
-fn parse_switch_case_stmts(
-  p: P,
-  has_default: Bool,
-  condition: Option(ast.Expression),
-  stmt_acc: List(ast.StmtWithLine),
-  case_acc: List(ast.SwitchCase),
-) -> Result(#(P, List(ast.SwitchCase)), ParseError) {
+fn parse_case_clause_body(
+  p: Parser,
+  acc: List(ast.StmtWithLine),
+) -> Result(#(Parser, List(ast.StmtWithLine)), ParseError) {
   case peek(p) {
-    RightBrace | Case | Default -> {
-      let case_node =
-        ast.SwitchCase(condition: condition, consequent: list.reverse(stmt_acc))
-      parse_switch_cases(p, has_default, [case_node, ..case_acc])
-    }
+    RightBrace | Case | Default -> Ok(#(p, list.reverse(acc)))
     _ -> {
       let line = line_of(p)
       use #(p2, stmt) <- result.try(parse_statement(
-        P(..p, ctx: Ctx(..p.ctx, in_case_clause: True)),
+        Parser(..p, ctx: GrammarContext(..p.ctx, in_case_clause: True)),
       ))
-      parse_switch_case_stmts(
-        P(..p2, ctx: Ctx(..p2.ctx, in_case_clause: p.ctx.in_case_clause)),
-        has_default,
-        condition,
-        [ast.StmtWithLine(line, stmt), ..stmt_acc],
-        case_acc,
-      )
+      let p2 =
+        Parser(
+          ..p2,
+          ctx: GrammarContext(..p2.ctx, in_case_clause: p.ctx.in_case_clause),
+        )
+      parse_case_clause_body(p2, [ast.StmtWithLine(line, stmt), ..acc])
     }
   }
 }
 
-// inner_name_ctx: expressions validate the name with their own flags
+type FunctionHead {
+  FunctionHead(
+    after_name: Parser,
+    is_generator: Bool,
+    name: Option(String),
+    name_span: ast.Span,
+  )
+}
+
+// name_binds_inside: expressions validate the name with their own flags
 fn parse_function_head(
-  p: P,
-  is_async: Bool,
-  inner_name_ctx: Bool,
-) -> Result(#(P, P, Bool, String), ParseError) {
+  p: Parser,
+  is_async is_async: Bool,
+  name_binds_inside name_binds_inside: Bool,
+) -> Result(FunctionHead, ParseError) {
   let p2 = case is_async {
     True -> advance(advance(p))
     False -> advance(p)
@@ -2326,137 +2329,160 @@ fn parse_function_head(
     True -> advance(p2)
     False -> p2
   }
-  let func_name = get_simple_binding_name(p3)
-  let p_for_name = case inner_name_ctx {
+  let p_for_name = case name_binds_inside {
     True ->
-      P(
+      Parser(
         ..p3,
-        ctx: Ctx(..p3.ctx, in_generator: is_generator, in_async: is_async),
+        ctx: GrammarContext(
+          ..p3.ctx,
+          in_generator: is_generator,
+          in_async: is_async,
+        ),
       )
     False -> p3
   }
   use p4 <- result.map(eat_optional_name(p_for_name))
-  #(p4, p3, is_generator, func_name)
+  FunctionHead(
+    after_name: p4,
+    is_generator:,
+    name: simple_binding_name(p3),
+    name_span: span_of(p3),
+  )
 }
 
-fn parse_function_declaration(
-  p: P,
-  name_required: Bool,
-  is_async: Bool,
-) -> Result(#(P, ast.Statement), ParseError) {
-  use #(p2, function) <- result.map(parse_function_decl_impl(
+fn function_head_binding(head: FunctionHead) -> Option(ast.NamedBinding) {
+  use name <- option.map(head.name)
+  ast.NamedBinding(name:, span: head.name_span)
+}
+
+fn parse_function_statement(
+  p: Parser,
+  is_async is_async: Bool,
+) -> Result(#(Parser, ast.Statement), ParseError) {
+  use #(p2, function) <- result.map(parse_function_declaration(
     p,
-    name_required,
-    is_async,
+    name_required: True,
+    is_async:,
   ))
   #(p2, ast.declaration_to_statement(ast.DeclFunction(function:)))
 }
 
-fn parse_function_decl_impl(
-  p: P,
-  name_required: Bool,
-  is_async: Bool,
-) -> Result(#(P, ast.FunctionLiteral), ParseError) {
-  use #(p4, p3, is_generator, func_name) <- result.try(parse_function_head(
+fn parse_function_declaration(
+  p: Parser,
+  name_required name_required: Bool,
+  is_async is_async: Bool,
+) -> Result(#(Parser, ast.FunctionLiteral), ParseError) {
+  use head <- result.try(parse_function_head(
     p,
-    is_async,
-    False,
+    is_async:,
+    name_binds_inside: False,
   ))
+  let FunctionHead(after_name: p4, is_generator:, name:, name_span:) = head
   use <- bool.guard(
-    func_name == "" && name_required,
-    Error(ExpectedIdentifier(pos_of(p3))),
+    option.is_none(name) && name_required,
+    Error(ExpectedIdentifier(name_span.start)),
   )
   // tag only what emit's collect_hoisted_funcs hoists
-  let is_hoisted_decl = func_name != "" && !p4.ctx.in_single_stmt_pos
+  let is_hoisted_decl = option.is_some(name) && !p4.ctx.in_single_stmt_pos
   let p_fn =
-    enter_function_context(
-      p4,
-      is_generator,
-      is_async,
-      string.to_option(func_name),
-    )
+    enter_function_context(p4, is_generator:, is_async:, strict_name: name)
   let p_fn = case is_hoisted_decl {
     True ->
-      P(
+      Parser(
         ..p_fn,
-        sb: scope.sb_set_source_tag(p_fn.sb, p_fn.sb.current, scope.TagFnDecl),
+        scopes: scope.sb_set_source_tag(
+          p_fn.scopes,
+          p_fn.scopes.current,
+          scope.TagFnDecl,
+        ),
       )
     False -> p_fn
   }
   use #(p5, params, body) <- result.try(
     parse_function_params_and_body(p_fn) |> restore_context_fn(p),
   )
-  let p6 = case func_name {
-    "" -> Ok(p5)
-    name ->
-      register_function_name(p5, name, pos_of(p3), !is_generator && !is_async)
-  }
-  use p7 <- result.try(p6)
-  let name_opt = optional_named_binding(func_name, span_of(p3))
-  Ok(#(
-    p7,
+  use p6 <- result.map(case name {
+    None -> Ok(p5)
+    Some(name) ->
+      register_function_name(
+        p5,
+        name,
+        name_span.start,
+        is_plain: !is_generator && !is_async,
+      )
+  })
+  let function =
     ast.FunctionLiteral(
-      name: name_opt,
-      params: params,
-      body: body,
-      is_generator: is_generator,
-      is_async: is_async,
-    ),
-  ))
+      name: function_head_binding(head),
+      params:,
+      body:,
+      is_generator:,
+      is_async:,
+    )
+  #(p6, function)
 }
 
 fn parse_function_params_and_body(
-  p: P,
-) -> Result(#(P, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
+  p: Parser,
+) -> Result(#(Parser, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
   use p2 <- result.try(expect(p, LeftParen))
   let p2 =
-    P(
+    Parser(
       ..p2,
-      ctx: Ctx(..p2.ctx, in_formal_params: True, binding_kind: BindingParam),
+      ctx: GrammarContext(
+        ..p2.ctx,
+        in_formal_params: True,
+        declaring: DeclaringParam,
+      ),
     )
   use #(p3, params) <- result.try(parse_formal_parameters(p2))
   let p3 =
-    P(
+    Parser(
       ..p3,
-      ctx: Ctx(..p3.ctx, in_formal_params: False, binding_kind: BindingNone),
-    )
-  use p4 <- result.try(expect(p3, RightParen))
-  let was_strict = p4.ctx.strict
-  use p5 <- result.try(check_use_strict_in_body(p4))
-  // §10.2.11 step 28: shims take slots 0..arity-1
-  let p5 = P(..p5, sb: declare_param_shims(p5.sb, params))
-  // §10.2.11 step 18: implicit arguments, slot order matters
-  let p5 =
-    P(
-      ..p5,
-      sb: scope.sb_declare(
-        p5.sb,
-        "arguments",
-        scope.VarBinding,
-        synthetic: True,
+      ctx: GrammarContext(
+        ..p3.ctx,
+        in_formal_params: False,
+        declaring: NotDeclaring,
       ),
     )
-  use #(p6, body) <- result.try(case !was_strict && p5.ctx.strict {
+  use p4 <- result.try(expect(p3, RightParen))
+  use #(p5, body) <- result.map(begin_function_body(p4, params))
+  #(p5, params, body)
+}
+
+// p is at the body brace, params already consumed
+fn begin_function_body(
+  p: Parser,
+  params: List(ast.Pattern),
+) -> Result(#(Parser, List(ast.StmtWithLine)), ParseError) {
+  let was_strict = p.ctx.strict
+  use p <- result.try(apply_body_use_strict(p))
+  // §10.2.11 step 28: shims take slots 0..arity-1
+  let scopes = declare_param_shims(p.scopes, params)
+  // §10.2.11 step 18: implicit arguments, slot order matters
+  let scopes =
+    scope.sb_declare(scopes, "arguments", scope.VarBinding, synthetic: True)
+  let p = Parser(..p, scopes:)
+  use Nil <- result.try(case !was_strict && p.ctx.strict {
     True -> {
-      use Nil <- result.try(check_pending_strict_function_name(p5))
-      use Nil <- result.try(check_param_names_for_dups(p5))
-      parse_fn_body_maybe_var_boundary(p5, params)
+      use Nil <- result.try(check_pending_strict_function_name(p))
+      check_param_names_for_dups(p)
     }
-    False -> parse_fn_body_maybe_var_boundary(p5, params)
+    False -> Ok(Nil)
   })
-  Ok(#(p6, params, body))
+  parse_function_body(p, params)
 }
 
 // must agree with emit.compile_function_body
 fn declare_param_shims(
-  sb: scope.ScopeBuilder,
+  scopes: scope.ScopeBuilder,
   params: List(ast.Pattern),
 ) -> scope.ScopeBuilder {
   case fixed_params_non_simple(params) {
-    False -> sb
+    False -> scopes
     True -> {
       let #(fixed, _rest) = ast_util.split_trailing_rest(params)
-      scope.sb_insert_param_shims(sb, list.length(fixed))
+      scope.sb_insert_param_shims(scopes, list.length(fixed))
     }
   }
 }
@@ -2467,41 +2493,50 @@ fn fixed_params_non_simple(params: List(ast.Pattern)) -> Bool {
   !ast_util.all_simple_params(fixed)
 }
 
-fn parse_function_body_block(
-  p: P,
-) -> Result(#(P, List(ast.StmtWithLine)), ParseError) {
+fn parse_braced_body(
+  p: Parser,
+) -> Result(#(Parser, List(ast.StmtWithLine)), ParseError) {
   use p2 <- result.try(expect(p, LeftBrace))
   // snapshot so the reorder only moves body children
-  let body_id = p2.sb.current
-  let mark = scope.sb_children_raw(p2.sb, body_id)
-  use #(p3, stmts) <- result.try(parse_statement_list(p2, False, []))
+  let body_id = p2.scopes.current
+  let mark = scope.sb_children_raw(p2.scopes, body_id)
+  use #(p3, stmts) <- result.try(
+    parse_statement_list(p2, top_level: False, acc: []),
+  )
   // backstop for deferred cover-grammar errors
   use Nil <- result.try(check_cover_grammar_errors(p3, pos_of(p3)))
   use p4 <- result.try(expect(p3, RightBrace))
   // the one chokepoint for bodies without their own block scope
-  let p4 = P(..p4, sb: scope.sb_reorder_body_children(p4.sb, body_id, mark))
+  let p4 =
+    Parser(
+      ..p4,
+      scopes: scope.sb_reorder_body_children(p4.scopes, body_id, mark),
+    )
   Ok(#(p4, stmts))
 }
 
 // §10.2.11 step 28 body scope; lockstep with emit, never pruned
-fn parse_fn_body_maybe_var_boundary(
-  p: P,
+fn parse_function_body(
+  p: Parser,
   params: List(ast.Pattern),
-) -> Result(#(P, List(ast.StmtWithLine)), ParseError) {
+) -> Result(#(Parser, List(ast.StmtWithLine)), ParseError) {
   case fixed_params_non_simple(params) {
-    False -> parse_function_body_block(p)
+    False -> parse_braced_body(p)
     True -> {
-      let fn_id = p.sb.current
-      let #(sb, _body_id) = scope.sb_push_var_boundary(p.sb)
-      use #(p2, body) <- result.map(parse_function_body_block(P(..p, sb:)))
+      let fn_id = p.scopes.current
+      let #(scopes, _body_id) = scope.sb_push_var_boundary(p.scopes)
+      use #(p2, body) <- result.map(parse_braced_body(Parser(..p, scopes:)))
       // flip fn root children to source order
-      let sb = scope.sb_enter(p2.sb, fn_id)
-      #(P(..p2, sb: scope.sb_reorder_block_children(sb, fn_id)), body)
+      let scopes = scope.sb_enter(p2.scopes, fn_id)
+      #(
+        Parser(..p2, scopes: scope.sb_reorder_block_children(scopes, fn_id)),
+        body,
+      )
     }
   }
 }
 
-fn check_pending_strict_function_name(p: P) -> Result(Nil, ParseError) {
+fn check_pending_strict_function_name(p: Parser) -> Result(Nil, ParseError) {
   case p.ctx.pending_strict_name {
     None -> Ok(Nil)
     Some(name) ->
@@ -2512,53 +2547,51 @@ fn check_pending_strict_function_name(p: P) -> Result(Nil, ParseError) {
   }
 }
 
-fn check_param_names_for_dups(p: P) -> Result(Nil, ParseError) {
-  check_param_names_list(p, p.ctx.param_bound_names, set.new())
+// the prologue already rejected reserved names; only dups remain
+fn check_param_names_for_dups(p: Parser) -> Result(Nil, ParseError) {
+  case first_duplicate(p.ctx.param_bound_names) {
+    Some(name) -> Error(DuplicateParamNameStrictMode(pos_of(p), name))
+    None -> Ok(Nil)
+  }
 }
 
-fn check_param_names_list(
-  p: P,
+// a non-simple list makes earlier duplicates an error too
+fn mark_non_simple_params(p: Parser) -> Result(Parser, ParseError) {
+  case first_duplicate(p.ctx.param_bound_names) {
+    Some(name) -> Error(DuplicateParameterName(pos_of(p), name))
+    None ->
+      Ok(Parser(..p, ctx: GrammarContext(..p.ctx, has_non_simple_param: True)))
+  }
+}
+
+fn first_duplicate(names: List(String)) -> Option(String) {
+  first_duplicate_loop(names, set.new())
+}
+
+fn first_duplicate_loop(
   names: List(String),
   seen: Set(String),
-) -> Result(Nil, ParseError) {
+) -> Option(String) {
   case names {
-    [] -> Ok(Nil)
-    [name, ..rest] -> {
-      case strict_binding_violation(name) {
-        Some(kind) -> Error(strict_name_error(kind, name, pos_of(p)))
-        None ->
-          case set.contains(seen, name) {
-            True -> Error(DuplicateParamNameStrictMode(pos_of(p), name))
-            False -> check_param_names_list(p, rest, set.insert(seen, name))
-          }
-      }
-    }
-  }
-}
-
-fn mark_non_simple_params(p: P) -> Result(P, ParseError) {
-  let p = P(..p, ctx: Ctx(..p.ctx, has_non_simple_param: True))
-  use Nil <- result.try(check_param_names_for_dups_only(p))
-  Ok(p)
-}
-
-fn check_param_names_for_dups_only(p: P) -> Result(Nil, ParseError) {
-  check_names_for_dups_loop(p, p.ctx.param_bound_names, set.new())
-}
-
-fn check_names_for_dups_loop(
-  p: P,
-  remaining: List(String),
-  seen: Set(String),
-) -> Result(Nil, ParseError) {
-  case remaining {
-    [] -> Ok(Nil)
+    [] -> None
     [name, ..rest] ->
       case set.contains(seen, name) {
-        True -> Error(DuplicateParameterName(pos_of(p), name))
-        False -> check_names_for_dups_loop(p, rest, set.insert(seen, name))
+        True -> Some(name)
+        False -> first_duplicate_loop(rest, set.insert(seen, name))
       }
   }
+}
+
+fn first_strict_violation(
+  names: List(String),
+) -> Option(#(String, StrictNameKind)) {
+  list.find_map(names, fn(name) {
+    case strict_binding_violation(name) {
+      Some(kind) -> Ok(#(name, kind))
+      None -> Error(Nil)
+    }
+  })
+  |> option.from_result
 }
 
 type StrictNameKind {
@@ -2594,84 +2627,54 @@ fn strict_name_error(
 }
 
 fn parse_getter_params_and_body(
-  p: P,
-) -> Result(#(P, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
+  p: Parser,
+) -> Result(#(Parser, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
   use p2 <- result.try(expect(p, LeftParen))
-  case peek(p2) {
-    RightParen -> {
-      let p3 = advance(p2)
-      use p3 <- result.try(check_use_strict_in_body(p3))
-      let p3 =
-        P(
-          ..p3,
-          sb: scope.sb_declare(
-            p3.sb,
-            "arguments",
-            scope.VarBinding,
-            synthetic: True,
-          ),
-        )
-      use #(p4, body) <- result.try(parse_function_body_block(p3))
-      Ok(#(p4, [], body))
-    }
-    _ -> Error(GetterNoParams(pos_of(p2)))
-  }
+  use <- bool.guard(peek(p2) != RightParen, Error(GetterNoParams(pos_of(p2))))
+  use #(p3, body) <- result.map(begin_function_body(advance(p2), []))
+  #(p3, [], body)
 }
 
 fn parse_setter_params_and_body(
-  p: P,
-) -> Result(#(P, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
+  p: Parser,
+) -> Result(#(Parser, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
   use p2 <- result.try(expect(p, LeftParen))
   let p2 =
-    P(
+    Parser(
       ..p2,
-      ctx: Ctx(..p2.ctx, in_formal_params: True, binding_kind: BindingParam),
+      ctx: GrammarContext(
+        ..p2.ctx,
+        in_formal_params: True,
+        declaring: DeclaringParam,
+      ),
     )
+  let set_non_simple = fn(p: Parser, non_simple) {
+    use <- bool.guard(!non_simple, p)
+    Parser(..p, ctx: GrammarContext(..p.ctx, has_non_simple_param: True))
+  }
   case peek(p2) {
     RightParen -> Error(SetterExactlyOneParam(pos_of(p2)))
     DotDotDot -> Error(SetterNoRest(pos_of(p2)))
     _ -> {
-      let param_name = get_simple_binding_name(p2)
-      let p2 = case param_name == "" {
-        True -> P(..p2, ctx: Ctx(..p2.ctx, has_non_simple_param: True))
-        False -> p2
-      }
+      let p2 = set_non_simple(p2, option.is_none(simple_binding_name(p2)))
       use #(p3, pat) <- result.try(parse_binding_pattern(p2))
-      let p3 = case peek(p3) {
-        Equal -> P(..p3, ctx: Ctx(..p3.ctx, has_non_simple_param: True))
-        _ -> p3
-      }
+      let p3 = set_non_simple(p3, peek(p3) == Equal)
       let default_pos = pos_of(p3)
       use #(p4, final_pat) <- result.try(parse_pattern_default(p3, pat))
       use Nil <- result.try(check_cover_grammar_errors(p4, default_pos))
       case peek(p4) {
         RightParen -> {
           let p5 =
-            P(
+            Parser(
               ..advance(p4),
-              ctx: Ctx(
+              ctx: GrammarContext(
                 ..p4.ctx,
                 in_formal_params: False,
-                binding_kind: BindingNone,
+                declaring: NotDeclaring,
               ),
             )
-          use p5 <- result.try(check_use_strict_in_body(p5))
-          // §10.2.11 steps 28 and 18, as parse_function_params_and_body
-          let p5 = P(..p5, sb: declare_param_shims(p5.sb, [final_pat]))
-          let p5 =
-            P(
-              ..p5,
-              sb: scope.sb_declare(
-                p5.sb,
-                "arguments",
-                scope.VarBinding,
-                synthetic: True,
-              ),
-            )
-          use #(p6, body) <- result.try(
-            parse_fn_body_maybe_var_boundary(p5, [final_pat]),
-          )
-          Ok(#(p6, [final_pat], body))
+          use #(p6, body) <- result.map(begin_function_body(p5, [final_pat]))
+          #(p6, [final_pat], body)
         }
         Comma -> Error(SetterExactlyOneParam(pos_of(p4)))
         _ -> Error(ExpectedCloseAfterSetter(pos_of(p4)))
@@ -2681,24 +2684,22 @@ fn parse_setter_params_and_body(
 }
 
 fn parse_method_params_body(
-  p: P,
-  outer: P,
-  accessor_kind: AccessorPrefix,
-  is_generator: Bool,
-  is_async: Bool,
-  is_constructor: Bool,
-  has_extends: Bool,
-) -> Result(#(P, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
-  let is_accessor = accessor_kind != NoAccessor
+  p: Parser,
+  outer: Parser,
+  prefix: MethodPrefix,
+  is_constructor is_constructor: Bool,
+  has_extends has_extends: Bool,
+) -> Result(#(Parser, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
+  let is_plain = prefix.accessor == NoAccessor
   let ctx =
     enter_method_context(
       p,
-      is_generator && !is_accessor,
-      is_async && !is_accessor,
-      is_constructor && !is_accessor,
-      has_extends,
+      is_generator: prefix.is_generator && is_plain,
+      is_async: prefix.is_async && is_plain,
+      is_constructor: is_constructor && is_plain,
+      has_super_class: has_extends,
     )
-  case accessor_kind {
+  case prefix.accessor {
     GetPrefix -> parse_getter_params_and_body(ctx)
     SetPrefix -> parse_setter_params_and_body(ctx)
     NoAccessor -> parse_function_params_and_body(ctx)
@@ -2707,8 +2708,8 @@ fn parse_method_params_body(
 }
 
 fn parse_formal_parameters(
-  p: P,
-) -> Result(#(P, List(ast.Pattern)), ParseError) {
+  p: Parser,
+) -> Result(#(Parser, List(ast.Pattern)), ParseError) {
   case peek(p) {
     RightParen -> Ok(#(p, []))
     _ -> {
@@ -2724,16 +2725,19 @@ fn parse_formal_parameters(
 }
 
 fn parse_formal_parameter_list(
-  p: P,
+  p: Parser,
   seen: Set(String),
   acc: List(ast.Pattern),
-) -> Result(#(P, List(ast.Pattern)), ParseError) {
+) -> Result(#(Parser, List(ast.Pattern)), ParseError) {
   case peek(p) {
     DotDotDot -> {
-      use p <- result.try(mark_non_simple_params(p))
+      use p <- result.try(ensure_non_simple_params(p))
       let p2 = advance(p)
-      let param_name = get_simple_binding_name(p2)
-      use Nil <- result.try(check_duplicate_param(p2, param_name, seen))
+      use Nil <- result.try(check_duplicate_param(
+        p2,
+        simple_binding_name(p2),
+        seen,
+      ))
       use #(p3, inner_pat) <- result.try(parse_binding_pattern(p2))
       case peek(p3) {
         Equal -> Error(RestDefaultInitializer(pos_of(p3)))
@@ -2745,58 +2749,39 @@ fn parse_formal_parameter_list(
       }
     }
     _ -> {
-      let param_name = get_simple_binding_name(p)
-      let is_non_simple = param_name == ""
-      let p = case is_non_simple && !p.ctx.has_non_simple_param {
-        True -> mark_non_simple_params(p)
-        False -> Ok(p)
+      let param_name = simple_binding_name(p)
+      use p <- result.try(case param_name {
+        None -> ensure_non_simple_params(p)
+        Some(_) -> Ok(p)
+      })
+      use Nil <- result.try(check_duplicate_param(p, param_name, seen))
+      let seen = case param_name {
+        None -> seen
+        Some(name) -> set.insert(seen, name)
       }
-      use p <- result.try(p)
-      parse_formal_param_after_dup_check(p, param_name, seen, acc)
+      use #(p2, pat) <- result.try(parse_binding_pattern(p))
+      use p2 <- result.try(case peek(p2) {
+        Equal -> ensure_non_simple_params(p2)
+        _ -> Ok(p2)
+      })
+      use #(p3, final_pat) <- result.try(parse_pattern_default(p2, pat))
+      parse_formal_param_rest(p3, seen, [final_pat, ..acc])
     }
   }
 }
 
-fn parse_formal_param_after_dup_check(
-  p: P,
-  param_name: String,
-  seen: Set(String),
-  acc: List(ast.Pattern),
-) -> Result(#(P, List(ast.Pattern)), ParseError) {
-  use Nil <- result.try(check_duplicate_param(p, param_name, seen))
-  let new_seen = case param_name {
-    "" -> seen
-    name -> set.insert(seen, name)
+fn ensure_non_simple_params(p: Parser) -> Result(Parser, ParseError) {
+  case p.ctx.has_non_simple_param {
+    True -> Ok(p)
+    False -> mark_non_simple_params(p)
   }
-  use #(p2, pat) <- result.try(parse_binding_pattern(p))
-  case peek(p2) {
-    Equal -> {
-      let p2 = case !p2.ctx.has_non_simple_param {
-        True -> mark_non_simple_params(p2)
-        False -> Ok(p2)
-      }
-      use p2b <- result.try(p2)
-      parse_formal_param_default(p2b, new_seen, pat, acc)
-    }
-    _ -> parse_formal_param_rest(p2, new_seen, [pat, ..acc])
-  }
-}
-
-fn parse_formal_param_default(
-  p: P,
-  seen: Set(String),
-  pat: ast.Pattern,
-  acc: List(ast.Pattern),
-) -> Result(#(P, List(ast.Pattern)), ParseError) {
-  use #(p2, final_pat) <- result.try(parse_pattern_default(p, pat))
-  parse_formal_param_rest(p2, seen, [final_pat, ..acc])
 }
 
 fn parse_formal_param_rest(
-  p: P,
+  p: Parser,
   seen: Set(String),
   acc: List(ast.Pattern),
-) -> Result(#(P, List(ast.Pattern)), ParseError) {
+) -> Result(#(Parser, List(ast.Pattern)), ParseError) {
   case peek(p) {
     Comma ->
       case peek_at(p, 1) {
@@ -2807,47 +2792,32 @@ fn parse_formal_param_rest(
   }
 }
 
-fn get_simple_binding_name(p: P) -> String {
-  case peek(p) {
-    Identifier -> peek_value(p)
-    _ ->
-      case is_contextual_keyword(peek(p)) {
-        True -> peek_value(p)
-        False -> ""
-      }
-  }
-}
-
-fn optional_named_binding(
-  name: String,
-  span: ast.Span,
-) -> Option(ast.NamedBinding) {
-  case name {
-    "" -> None
-    n -> Some(ast.NamedBinding(name: n, span:))
+fn simple_binding_name(p: Parser) -> Option(String) {
+  case is_binding_ident_token(peek(p)) {
+    True -> Some(peek_value(p))
+    False -> None
   }
 }
 
 fn check_duplicate_param(
-  p: P,
-  name: String,
+  p: Parser,
+  name: Option(String),
   seen: Set(String),
 ) -> Result(Nil, ParseError) {
-  use <- bool.guard(name == "", Ok(Nil))
-  let must_be_unique =
-    p.ctx.strict
-    || p.ctx.in_arrow_params
-    || p.ctx.in_method
-    || p.ctx.has_non_simple_param
-  use <- bool.guard(
-    must_be_unique && set.contains(seen, name),
-    Error(DuplicateParameterName(pos_of(p), name)),
-  )
-  Ok(Nil)
+  case name {
+    None -> Ok(Nil)
+    Some(name) -> {
+      use <- bool.guard(
+        params_must_be_unique(p.ctx) && set.contains(seen, name),
+        Error(DuplicateParameterName(pos_of(p), name)),
+      )
+      Ok(Nil)
+    }
+  }
 }
 
 // annex b §B.3.4
-fn check_new_vars_vs_params(
+fn check_for_of_var_vs_catch_param(
   head_names: List(String),
   catch_params: List(String),
   pos: Int,
@@ -2859,36 +2829,43 @@ fn check_new_vars_vs_params(
   }
 }
 
-fn parse_class_declaration(p: P) -> Result(#(P, ast.Statement), ParseError) {
-  use #(p2, decl) <- result.map(parse_class_decl_impl(p))
+fn parse_class_statement(
+  p: Parser,
+) -> Result(#(Parser, ast.Statement), ParseError) {
+  use #(p2, decl) <- result.map(parse_class_declaration(p))
   #(p2, ast.declaration_to_statement(decl))
 }
 
-fn parse_class_decl_impl(p: P) -> Result(#(P, ast.Declaration), ParseError) {
+fn parse_class_declaration(
+  p: Parser,
+) -> Result(#(Parser, ast.Declaration), ParseError) {
   use #(p2, name, super_class, body) <- result.map(parse_class_head_and_tail(
     p,
-    True,
-    True,
+    name_required: True,
+    register_name: True,
   ))
   #(p2, ast.DeclClass(name:, super_class:, body:))
 }
 
 fn parse_class_head_and_tail(
-  p: P,
-  name_required: Bool,
-  register_name: Bool,
+  p: Parser,
+  name_required name_required: Bool,
+  register_name register_name: Bool,
 ) -> Result(
-  #(P, Option(ast.NamedBinding), Option(ast.Expression), List(ast.ClassElement)),
+  #(
+    Parser,
+    Option(ast.NamedBinding),
+    Option(ast.Expression),
+    List(ast.ClassElement),
+  ),
   ParseError,
 ) {
   let p2 = advance(p)
-  let is_name = peek(p2) == Identifier || is_contextual_keyword(peek(p2))
-  case is_name {
-    True -> {
-      let name = peek_value(p2)
+  case simple_binding_name(p2) {
+    Some(name) -> {
       let name_span = span_of(p2)
       use Nil <- result.try(check_binding_identifier(
-        P(..p2, ctx: Ctx(..p2.ctx, strict: True)),
+        Parser(..p2, ctx: GrammarContext(..p2.ctx, strict: True)),
         name,
       ))
       use p3 <- result.try(case register_name {
@@ -2901,7 +2878,7 @@ fn parse_class_head_and_tail(
       ))
       #(p4, Some(ast.NamedBinding(name:, span: name_span)), super_class, body)
     }
-    False -> {
+    None -> {
       use <- bool.guard(name_required, Error(ExpectedIdentifier(pos_of(p2))))
       use #(p3, super_class, body) <- result.map(parse_class_tail(p2, None))
       #(p3, None, super_class, body)
@@ -2910,8 +2887,8 @@ fn parse_class_head_and_tail(
 }
 
 // matches scope.declare_class fold_class_body order
-type ClassScopeCtx {
-  ClassScopeCtx(
+type ClassScopeIds {
+  ClassScopeIds(
     class_id: scope.ScopeId,
     init_id: scope.ScopeId,
     static_id: scope.ScopeId,
@@ -2924,27 +2901,44 @@ type ClassElementScopes {
   NonMethodScopes(key_scopes: List(scope.ScopeId))
 }
 
-const no_element_scopes = NonMethodScopes(key_scopes: [])
+type ParsedClassElement {
+  ParsedClassElement(element: ast.ClassElement, scopes: ClassElementScopes)
+}
+
+// private names declared in one class body (§15.7.1)
+type DeclaredPrivateName {
+  DeclaredPrivateName(is_static: Bool, kind: PrivateNameKind)
+}
+
+type PrivateNameKind {
+  PrivateGet
+  PrivateSet
+  PrivateGetSet
+  PrivateOther
+}
 
 // children_at is newest-first, so new ids are the prefix
 fn class_new_children(
-  sb: scope.ScopeBuilder,
+  scopes: scope.ScopeBuilder,
   parent_id: scope.ScopeId,
   before: List(scope.ScopeId),
 ) -> List(scope.ScopeId) {
-  let now = scope.sb_children_raw(sb, parent_id)
+  let now = scope.sb_children_raw(scopes, parent_id)
   list.take(now, list.length(now) - list.length(before)) |> list.reverse
 }
 
 fn parse_class_tail(
-  p: P,
+  p: Parser,
   name: Option(String),
-) -> Result(#(P, Option(ast.Expression), List(ast.ClassElement)), ParseError) {
+) -> Result(
+  #(Parser, Option(ast.Expression), List(ast.ClassElement)),
+  ParseError,
+) {
   let saved_strict = p.ctx.strict
-  let outer_current = p.sb.current
+  let outer_current = p.scopes.current
   // §15.7.14: class scope is pushed before the heritage
-  let #(sb, class_id) = scope.sb_push(p.sb, scope.ClassBody)
-  let p = P(..p, sb:, ctx: Ctx(..p.ctx, strict: True))
+  let #(scopes, class_id) = scope.sb_push(p.scopes, scope.ClassBody)
+  let p = Parser(..p, scopes:, ctx: GrammarContext(..p.ctx, strict: True))
   // once extends is consumed errors propagate, no backtrack
   let has_extends = peek(p) == Extends
   use #(p2, super_class) <- result.try(case has_extends {
@@ -2954,33 +2948,48 @@ fn parse_class_tail(
     }
     False -> Ok(#(p, None))
   })
-  let heritage_scopes = scope.sb_children_raw(p2.sb, class_id) |> list.reverse
+  let heritage_scopes =
+    scope.sb_children_raw(p2.scopes, class_id) |> list.reverse
   use p3 <- result.try(expect(p2, LeftBrace))
   // pre-create init shells; unneeded ones dropped at }
-  let #(sb, init_id) = scope.sb_push(p3.sb, scope.Function)
-  let sb = scope.sb_enter(sb, class_id)
-  let #(sb, static_id) = scope.sb_push(sb, scope.Function)
-  let sb = scope.sb_enter(sb, class_id)
-  let ctx = ClassScopeCtx(class_id:, init_id:, static_id:)
+  let #(scopes, init_id) = scope.sb_push(p3.scopes, scope.Function)
+  let scopes = scope.sb_enter(scopes, class_id)
+  let #(scopes, static_id) = scope.sb_push(scopes, scope.Function)
+  let scopes = scope.sb_enter(scopes, class_id)
+  let ids = ClassScopeIds(class_id:, init_id:, static_id:)
   // §15.7.14: heritage uses the outer private depth
-  let outer_depth = p3.class_private_depth
-  let p3 = P(..p3, sb:, class_private_depth: outer_depth + 1)
-  use #(p4, rev_tagged, declared) <- result.try(
-    parse_class_body(p3, ctx, has_extends, False, dict.new(), []),
+  let outer_depth = p3.class_body_depth
+  let p3 = Parser(..p3, scopes:, class_body_depth: outer_depth + 1)
+  use #(p4, rev_parsed, declared) <- result.try(
+    parse_class_body(
+      p3,
+      ids,
+      has_extends:,
+      has_constructor: False,
+      private_names: dict.new(),
+      acc: [],
+    ),
   )
   use p4 <- result.try(resolve_private_refs(p4, outer_depth, declared))
-  let tagged = list.reverse(rev_tagged)
-  let elements = list.map(tagged, fn(pair) { pair.0 })
+  let parsed = list.reverse(rev_parsed)
+  let elements = list.map(parsed, fn(el) { el.element })
   // child order must match declare_class for emit's cursor
-  let sb =
-    class_scope_finalize(p4.sb, ctx, name, has_extends, heritage_scopes, tagged)
-  let sb = scope.sb_enter(sb, outer_current)
+  let scopes =
+    class_scope_finalize(
+      p4.scopes,
+      ids,
+      name,
+      has_super_class: has_extends,
+      heritage_scopes:,
+      parsed:,
+    )
+  let scopes = scope.sb_enter(scopes, outer_current)
   Ok(#(
-    P(
+    Parser(
       ..p4,
-      sb:,
-      ctx: Ctx(..p4.ctx, strict: saved_strict),
-      class_private_depth: outer_depth,
+      scopes:,
+      ctx: GrammarContext(..p4.ctx, strict: saved_strict),
+      class_body_depth: outer_depth,
     ),
     super_class,
     elements,
@@ -2989,46 +2998,33 @@ fn parse_class_tail(
 
 // 7-step child order of scope.declare_class; emit reads it positionally
 fn class_scope_finalize(
-  sb: scope.ScopeBuilder,
-  ctx: ClassScopeCtx,
+  scopes: scope.ScopeBuilder,
+  ids: ClassScopeIds,
   name: Option(String),
-  has_super_class: Bool,
-  heritage_scopes: List(scope.ScopeId),
-  tagged: List(#(ast.ClassElement, ClassElementScopes)),
+  has_super_class has_super_class: Bool,
+  heritage_scopes heritage_scopes: List(scope.ScopeId),
+  parsed parsed: List(ParsedClassElement),
 ) -> scope.ScopeBuilder {
-  let elements = list.map(tagged, fn(pair) { pair.0 })
+  let elements = list.map(parsed, fn(el) { el.element })
   // same slot order the emitter looks up
-  let sb =
-    list.fold(ast_util.class_body_bindings(name, elements), sb, fn(sb, n) {
-      scope.sb_declare_in(
-        sb,
-        ctx.class_id,
-        n,
-        scope.ConstBinding,
-        synthetic: True,
-      )
-    })
+  let scopes =
+    list.fold(
+      ast_util.class_body_bindings(name, elements),
+      scopes,
+      fn(scopes, n) {
+        scope.sb_declare_in(
+          scopes,
+          ids.class_id,
+          n,
+          scope.ConstBinding,
+          synthetic: True,
+        )
+      },
+    )
   // (4) computed keys, source order
-  let key_scopes = list.flat_map(tagged, fn(pair) { { pair.1 }.key_scopes })
-  // (5)(6)(2) buckets must match ast_util.classify_class_body
-  let #(ctor_fn, instance_methods, static_methods) =
-    list.fold(tagged, #(None, [], []), fn(acc, pair) {
-      let #(ctor, im, sm) = acc
-      let #(element, scopes) = pair
-      case scopes {
-        NonMethodScopes(..) -> acc
-        MethodScopes(method_fn_id: id, ..) ->
-          case ast_util.class_element_bucket(element) {
-            ast_util.CeCtor -> #(Some(id), im, sm)
-            ast_util.CeInstanceMethod -> #(ctor, [id, ..im], sm)
-            ast_util.CeStaticMethod -> #(ctor, im, [id, ..sm])
-            // unreachable in practice
-            ast_util.CeInstanceField | ast_util.CeStaticElement -> acc
-          }
-      }
-    })
-  let instance_methods = list.reverse(instance_methods)
-  let static_methods = list.reverse(static_methods)
+  let key_scopes = list.flat_map(parsed, fn(el) { el.scopes.key_scopes })
+  let MethodScopeBuckets(constructor:, instance_methods:, static_methods:) =
+    method_scope_buckets(parsed)
   // (1) instance init needed (§7.3.29)
   let needs_instance_init =
     list.any(elements, fn(el) {
@@ -3039,48 +3035,41 @@ fn class_scope_finalize(
     })
   // (7) static init needed
   let needs_static_init = list.any(elements, ast_util.is_static_element)
-  // drop unneeded shells, flip kept ones, seed synthetic refs
-  let sb = case needs_instance_init {
-    True ->
-      class_seed_field_shell(sb, ctx.init_id, tagged, False)
-      |> scope.sb_set_children(
-        ctx.init_id,
-        scope.sb_children_raw(sb, ctx.init_id) |> list.reverse,
-      )
-    False -> scope.sb_discard(sb, ctx.init_id)
-  }
-  let sb = case needs_static_init {
-    True ->
-      class_seed_field_shell(sb, ctx.static_id, tagged, True)
-      |> scope.sb_set_children(
-        ctx.static_id,
-        scope.sb_children_raw(sb, ctx.static_id) |> list.reverse,
-      )
-    False -> scope.sb_discard(sb, ctx.static_id)
-  }
+  let scopes =
+    finalize_field_shell(
+      scopes,
+      ids.init_id,
+      elements,
+      is_static: False,
+      needed: needs_instance_init,
+    )
+  let scopes =
+    finalize_field_shell(
+      scopes,
+      ids.static_id,
+      elements,
+      is_static: True,
+      needed: needs_static_init,
+    )
   // (2) constructor: always one function child
-  let #(sb, ctor_id) = case ctor_fn {
-    Some(id) -> #(sb, id)
-    None -> {
-      let sb = scope.sb_enter(sb, ctx.class_id)
-      let #(sb, id) = scope.sb_push(sb, scope.Function)
-      #(sb, id)
-    }
+  let #(scopes, ctor_id) = case constructor {
+    Some(id) -> #(scopes, id)
+    None -> scope.sb_push(scope.sb_enter(scopes, ids.class_id), scope.Function)
   }
-  let sb =
+  let scopes =
     class_seed_ctor_shell(
-      sb,
+      scopes,
       ctor_id,
-      needs_instance_init,
-      option.is_none(ctor_fn),
-      has_super_class,
+      needs_instance_init:,
+      is_synthetic: option.is_none(constructor),
+      has_super_class:,
     )
   let init_part = case needs_instance_init {
-    True -> [ctx.init_id]
+    True -> [ids.init_id]
     False -> []
   }
   let static_part = case needs_static_init {
-    True -> [ctx.static_id]
+    True -> [ids.static_id]
     False -> []
   }
   let ordered =
@@ -3093,133 +3082,184 @@ fn class_scope_finalize(
       static_methods,
       static_part,
     ])
-  scope.sb_set_children(sb, ctx.class_id, ordered)
-  |> scope.sb_enter(ctx.class_id)
+  scope.sb_set_children(scopes, ids.class_id, ordered)
+  |> scope.sb_enter(ids.class_id)
+}
+
+type MethodScopeBuckets {
+  MethodScopeBuckets(
+    constructor: Option(scope.ScopeId),
+    instance_methods: List(scope.ScopeId),
+    static_methods: List(scope.ScopeId),
+  )
+}
+
+// (2)(5)(6) buckets must match ast_util.classify_class_body
+fn method_scope_buckets(
+  parsed: List(ParsedClassElement),
+) -> MethodScopeBuckets {
+  let empty =
+    MethodScopeBuckets(
+      constructor: None,
+      instance_methods: [],
+      static_methods: [],
+    )
+  // parsed is in source order, so fold from the right to keep it
+  use buckets, ParsedClassElement(element:, scopes:) <- list.fold_right(
+    parsed,
+    empty,
+  )
+  case scopes {
+    NonMethodScopes(..) -> buckets
+    MethodScopes(method_fn_id: id, ..) ->
+      case ast_util.class_element_bucket(element) {
+        ast_util.CeCtor -> MethodScopeBuckets(..buckets, constructor: Some(id))
+        ast_util.CeInstanceMethod ->
+          MethodScopeBuckets(..buckets, instance_methods: [
+            id,
+            ..buckets.instance_methods
+          ])
+        ast_util.CeStaticMethod ->
+          MethodScopeBuckets(..buckets, static_methods: [
+            id,
+            ..buckets.static_methods
+          ])
+        // unreachable in practice
+        ast_util.CeInstanceField | ast_util.CeStaticElement -> buckets
+      }
+  }
+}
+
+// drop an unneeded shell, else flip its children and seed refs
+fn finalize_field_shell(
+  scopes: scope.ScopeBuilder,
+  shell_id: scope.ScopeId,
+  elements: List(ast.ClassElement),
+  is_static is_static: Bool,
+  needed needed: Bool,
+) -> scope.ScopeBuilder {
+  use <- bool.lazy_guard(!needed, fn() { scope.sb_discard(scopes, shell_id) })
+  let children = scope.sb_children_raw(scopes, shell_id) |> list.reverse
+  class_seed_field_shell(scopes, shell_id, elements, is_static:)
+  |> scope.sb_set_children(shell_id, children)
 }
 
 // ref to the field-key stash const emit reads
 fn class_ref_field_key(
-  sb: scope.ScopeBuilder,
+  scopes: scope.ScopeBuilder,
   key: ast.PropertyKey,
   idx: Int,
 ) -> scope.ScopeBuilder {
   case key {
-    ast.KeyComputed(..) -> scope.sb_ref(sb, ast_util.computed_field_const(idx))
-    ast.KeyPrivate(name:, ..) -> scope.sb_ref(sb, name)
-    ast.KeyIdentifier(..) | ast.KeyString(..) | ast.KeyNumber(..) -> sb
-    ast.KeyBigInt(..) -> sb
+    ast.KeyComputed(..) ->
+      scope.sb_ref(scopes, ast_util.computed_field_const(idx))
+    ast.KeyPrivate(name:, ..) -> scope.sb_ref(scopes, name)
+    ast.KeyIdentifier(..) | ast.KeyString(..) | ast.KeyNumber(..) -> scopes
+    ast.KeyBigInt(..) -> scopes
   }
 }
 
 // seed synthetic refs emit's compile_class_init_fn reads
 fn class_seed_field_shell(
-  sb: scope.ScopeBuilder,
+  scopes: scope.ScopeBuilder,
   shell_id: scope.ScopeId,
-  tagged: List(#(ast.ClassElement, ClassElementScopes)),
-  is_static: Bool,
+  elements: List(ast.ClassElement),
+  is_static is_static: Bool,
 ) -> scope.ScopeBuilder {
-  let sb = scope.sb_enter(sb, shell_id)
+  let scopes = scope.sb_enter(scopes, shell_id)
   // §10.2.11 step 22
-  let sb =
+  let scopes =
     scope.sb_declare_in(
-      sb,
+      scopes,
       shell_id,
       "arguments",
       scope.VarBinding,
       synthetic: True,
     )
-  let sb = scope.sb_lexical_ref(sb, lexical.RefThis)
+  let scopes = scope.sb_lexical_ref(scopes, lexical.RefThis)
   // §7.3.29 private methods read #x and its stash
-  let sb = case is_static {
-    True -> sb
+  let scopes = case is_static {
+    True -> scopes
     False ->
-      list.fold(tagged, sb, fn(sb, pair) {
-        case pair.0 {
+      list.fold(elements, scopes, fn(scopes, element) {
+        case element {
           ast.ClassMethod(
             key: ast.KeyPrivate(name:, ..),
             kind:,
             is_static: False,
             ..,
           ) ->
-            sb
+            scopes
             |> scope.sb_ref(name)
             |> scope.sb_ref(ast_util.private_fn_const(kind, name))
-          _ -> sb
+          _ -> scopes
         }
       })
   }
-  list.index_fold(tagged, sb, fn(sb, pair, idx) {
-    case pair.0 {
+  list.index_fold(elements, scopes, fn(scopes, element, idx) {
+    case element {
       ast.ClassField(key:, is_static: s, ..) if s == is_static ->
-        class_ref_field_key(sb, key, idx)
-      _ -> sb
+        class_ref_field_key(scopes, key, idx)
+      _ -> scopes
     }
   })
 }
 
+// what super(...) reads: the active function, new.target and this
+fn super_call_refs(scopes: scope.ScopeBuilder) -> scope.ScopeBuilder {
+  scopes
+  |> scope.sb_lexical_ref(lexical.RefActiveFunc)
+  |> scope.sb_lexical_ref(lexical.RefNewTarget)
+  |> scope.sb_lexical_ref(lexical.RefThis)
+}
+
 // synthetic refs the emitter adds to the constructor
 fn class_seed_ctor_shell(
-  sb: scope.ScopeBuilder,
+  scopes: scope.ScopeBuilder,
   ctor_id: scope.ScopeId,
-  needs_instance_init: Bool,
-  is_synthetic: Bool,
-  has_super_class: Bool,
+  needs_instance_init needs_instance_init: Bool,
+  is_synthetic is_synthetic: Bool,
+  has_super_class has_super_class: Bool,
 ) -> scope.ScopeBuilder {
-  let sb =
-    scope.sb_enter(sb, ctor_id)
+  let scopes =
+    scope.sb_enter(scopes, ctor_id)
     |> scope.sb_update_current_fn(fn(fi) {
       scope.RawFunctionInfo(..fi, is_derived_constructor: has_super_class)
     })
   // synthetic ctor never declared arguments
-  let sb = case is_synthetic {
+  let scopes = case is_synthetic {
     True ->
       scope.sb_declare_in(
-        sb,
+        scopes,
         ctor_id,
         "arguments",
         scope.VarBinding,
         synthetic: True,
       )
-    False -> sb
+    False -> scopes
   }
-  let sb = case needs_instance_init {
+  let scopes = case needs_instance_init {
     True ->
-      sb
+      scopes
       |> scope.sb_ref(ast_util.class_fields_init)
       |> scope.sb_lexical_ref(lexical.RefThis)
-    False -> sb
+    False -> scopes
   }
   case is_synthetic && has_super_class {
-    True ->
-      sb
-      |> scope.sb_lexical_ref(lexical.RefActiveFunc)
-      |> scope.sb_lexical_ref(lexical.RefNewTarget)
-      |> scope.sb_lexical_ref(lexical.RefThis)
-      |> scope.sb_ref("arguments")
-    False -> sb
+    True -> super_call_refs(scopes) |> scope.sb_ref("arguments")
+    False -> scopes
   }
-}
-
-type PrivateNameKind {
-  PrivateGet
-  PrivateSet
-  PrivateGetSet
-  PrivateOther
 }
 
 fn parse_class_body(
-  p: P,
-  ctx: ClassScopeCtx,
-  has_extends: Bool,
-  has_constructor: Bool,
-  private_names: Dict(String, #(Bool, PrivateNameKind)),
-  acc: List(#(ast.ClassElement, ClassElementScopes)),
+  p: Parser,
+  ids: ClassScopeIds,
+  has_extends has_extends: Bool,
+  has_constructor has_constructor: Bool,
+  private_names private_names: Dict(String, DeclaredPrivateName),
+  acc acc: List(ParsedClassElement),
 ) -> Result(
-  #(
-    P,
-    List(#(ast.ClassElement, ClassElementScopes)),
-    Dict(String, #(Bool, PrivateNameKind)),
-  ),
+  #(Parser, List(ParsedClassElement), Dict(String, DeclaredPrivateName)),
   ParseError,
 ) {
   case peek(p) {
@@ -3227,28 +3267,35 @@ fn parse_class_body(
     Semicolon ->
       parse_class_body(
         advance(p),
-        ctx,
-        has_extends,
-        has_constructor,
-        private_names,
-        acc,
+        ids,
+        has_extends:,
+        has_constructor:,
+        private_names:,
+        acc:,
       )
     _ -> {
-      use #(p2, found_constructor, element, el_scopes) <- result.try(
-        parse_class_element(p, ctx, has_extends, has_constructor),
-      )
+      use #(p2, parsed) <- result.try(parse_class_element(
+        p,
+        ids,
+        has_extends:,
+        has_constructor:,
+      ))
       use private_names <- result.try(register_private_name(
         p2,
         private_names,
-        element,
+        parsed.element,
       ))
+      let found_constructor = case parsed.element {
+        ast.ClassMethod(kind: ast.MethodConstructor, ..) -> True
+        _ -> False
+      }
       parse_class_body(
         p2,
-        ctx,
-        has_extends,
-        has_constructor || found_constructor,
-        private_names,
-        [#(element, el_scopes), ..acc],
+        ids,
+        has_extends:,
+        has_constructor: has_constructor || found_constructor,
+        private_names:,
+        acc: [parsed, ..acc],
       )
     }
   }
@@ -3256,284 +3303,292 @@ fn parse_class_body(
 
 // §15.7.1: only a getter+setter pair may share a private name
 fn register_private_name(
-  p: P,
-  private_names: Dict(String, #(Bool, PrivateNameKind)),
+  p: Parser,
+  private_names: Dict(String, DeclaredPrivateName),
   element: ast.ClassElement,
-) -> Result(Dict(String, #(Bool, PrivateNameKind)), ParseError) {
-  case private_element_info(element) {
+) -> Result(Dict(String, DeclaredPrivateName), ParseError) {
+  case private_element_name(element) {
     None -> Ok(private_names)
-    Some(#(name, is_static, kind)) ->
+    Some(#(name, declared)) ->
       case dict.get(private_names, name) {
-        Error(Nil) -> Ok(dict.insert(private_names, name, #(is_static, kind)))
-        Ok(#(prev_static, prev_kind)) ->
-          case prev_static == is_static, prev_kind, kind {
+        Error(Nil) -> Ok(dict.insert(private_names, name, declared))
+        Ok(previous) ->
+          case
+            previous.is_static == declared.is_static,
+            previous.kind,
+            declared.kind
+          {
             True, PrivateGet, PrivateSet | True, PrivateSet, PrivateGet ->
-              Ok(dict.insert(private_names, name, #(is_static, PrivateGetSet)))
+              Ok(dict.insert(
+                private_names,
+                name,
+                DeclaredPrivateName(..declared, kind: PrivateGetSet),
+              ))
             _, _, _ -> Error(DuplicatePrivateName(pos_of(p), name))
           }
       }
   }
 }
 
-fn private_element_info(
+fn private_element_name(
   element: ast.ClassElement,
-) -> Option(#(String, Bool, PrivateNameKind)) {
+) -> Option(#(String, DeclaredPrivateName)) {
   case element {
     ast.ClassMethod(key: ast.KeyPrivate(name:, ..), kind:, is_static:, ..) -> {
-      let private_kind = case kind {
+      let kind = case kind {
         ast.MethodGet -> PrivateGet
         ast.MethodSet -> PrivateSet
         ast.MethodMethod | ast.MethodConstructor -> PrivateOther
       }
-      Some(#(name, is_static, private_kind))
+      Some(#(name, DeclaredPrivateName(is_static:, kind:)))
     }
     ast.ClassField(key: ast.KeyPrivate(name:, ..), is_static:, ..) ->
-      Some(#(name, is_static, PrivateOther))
+      Some(#(name, DeclaredPrivateName(is_static:, kind: PrivateOther)))
     ast.ClassMethod(..) | ast.ClassField(..) | ast.StaticBlock(..) -> None
   }
 }
 
-fn parse_class_element(
-  p: P,
-  ctx: ClassScopeCtx,
-  has_extends: Bool,
-  has_constructor: Bool,
-) -> Result(#(P, Bool, ast.ClassElement, ClassElementScopes), ParseError) {
-  let is_static = case peek(p) {
-    Static ->
-      case peek_at(p, 1) {
-        // static is a name when followed by ( = ; }
-        LeftParen | Equal | Semicolon | RightBrace -> False
-        _ -> True
-      }
+// in a class body a keyword is a name when followed by ( = ; }
+fn ends_class_element_name(kind: TokenKind) -> Bool {
+  case kind {
+    LeftParen | Equal | Semicolon | RightBrace -> True
     _ -> False
   }
+}
+
+fn parse_class_element(
+  p: Parser,
+  ids: ClassScopeIds,
+  has_extends has_extends: Bool,
+  has_constructor has_constructor: Bool,
+) -> Result(#(Parser, ParsedClassElement), ParseError) {
+  let is_static = peek(p) == Static && !ends_class_element_name(peek_at(p, 1))
   let p2 = case is_static {
     True -> advance(p)
     False -> p
   }
   // §15.7.1 static block, not a method named static
   use <- bool.lazy_guard(is_static && peek(p2) == LeftBrace, fn() {
-    // step (7): static block is an arrow child of the static shell
-    let p2_static = P(..p2, sb: scope.sb_enter(p2.sb, ctx.static_id))
-    let p_body = enter_static_block_context(p2_static)
-    let sb =
-      scope.sb_update_current(p_body.sb, fn(s) {
-        scope.RawScope(..s, kind: scope.Function)
-      })
-      |> scope.sb_update_current_fn(fn(fi) {
-        scope.RawFunctionInfo(..fi, is_arrow: True)
-      })
-    let p_body = P(..p_body, sb:)
-    // not parse_block_body: no block between arrow scope and body
-    use #(p3, block) <- result.map(parse_function_body_block(p_body))
-    // re-enter class_id so the next element parents correctly
-    let p3 =
-      P(
-        ..restore_outer_context(p3, p2_static),
-        sb: scope.sb_enter(p3.sb, ctx.class_id),
-      )
-    #(p3, False, ast.StaticBlock(body: block), no_element_scopes)
+    parse_static_block(p2, ids)
   })
   // get * is a field named get plus an asi generator
-  let #(p5, is_method_async, class_accessor_kind, is_generator) =
-    parse_method_prefix(
-      p2,
-      fn(t) {
-        case t {
-          LeftParen | Equal | Semicolon | RightBrace -> True
-          _ -> False
-        }
-      },
-      True,
-    )
-  parse_class_element_body(
-    p,
-    p5,
-    ctx,
-    has_extends,
-    has_constructor,
-    is_method_async,
-    is_generator,
-    class_accessor_kind,
-    is_static,
-  )
-}
-
-fn parse_class_element_body(
-  outer_p: P,
-  p5: P,
-  ctx: ClassScopeCtx,
-  has_extends: Bool,
-  has_constructor: Bool,
-  is_method_async: Bool,
-  is_generator: Bool,
-  class_accessor_kind: AccessorPrefix,
-  is_static: Bool,
-) -> Result(#(P, Bool, ast.ClassElement, ClassElementScopes), ParseError) {
+  let #(p3, prefix) =
+    parse_method_prefix(p2, ends_class_element_name, star_ends_accessor: True)
   // snapshot to diff out computed-key scopes
-  let key_before = scope.sb_children_raw(p5.sb, ctx.class_id)
-  use #(p6, key) <- result.try(parse_property_name(p5))
-  let key_scopes = class_new_children(p6.sb, ctx.class_id, key_before)
+  let key_before = scope.sb_children_raw(p3.scopes, ids.class_id)
+  use #(p4, key) <- result.try(parse_property_name(p3))
+  let key_scopes = class_new_children(p4.scopes, ids.class_id, key_before)
   // §15.7.1 checks use the decoded key
   let static_name = ast.property_key_static_name(key)
-  // §15.7.1: static prototype is forbidden
   use <- bool.guard(
     is_static && static_name == Some("prototype"),
-    Error(StaticPrototype(pos_of(p5))),
+    Error(StaticPrototype(pos_of(p3))),
   )
-  // §15.7.1: constructor must be a plain method, once
   let is_constructor_name = static_name == Some("constructor")
   let is_constructor = !is_static && is_constructor_name
   use Nil <- result.try(case is_constructor {
-    True ->
-      case class_accessor_kind {
-        GetPrefix -> Error(ClassConstructorNotGetter(pos_of(p5)))
-        SetPrefix -> Error(ClassConstructorNotSetter(pos_of(p5)))
-        NoAccessor -> {
-          use <- bool.guard(
-            is_generator,
-            Error(ClassConstructorGenerator(pos_of(p5))),
-          )
-          use <- bool.guard(
-            is_method_async,
-            Error(ClassConstructorAsync(pos_of(p5))),
-          )
-          use <- bool.guard(
-            has_constructor,
-            Error(ClassDuplicateConstructor(pos_of(p5))),
-          )
-          Ok(Nil)
-        }
-      }
+    True -> check_constructor_prefix(prefix, has_constructor:, pos: pos_of(p3))
     False -> Ok(Nil)
   })
-  // §15.7.1: #constructor is forbidden
-  let is_private_constructor = case key {
-    ast.KeyPrivate(name: "#constructor", ..)
-    | ast.KeyString(value: "#constructor", ..) -> True
-    _ -> False
-  }
   use <- bool.guard(
-    is_private_constructor,
-    Error(PrivateNameConstructor(pos_of(p6))),
+    is_private_constructor_key(key),
+    Error(PrivateNameConstructor(pos_of(p4))),
   )
-  case peek(p6) {
+  case peek(p4) {
     LeftParen -> {
-      let method_kind = case is_constructor {
-        True -> ast.MethodConstructor
-        False ->
-          case class_accessor_kind {
-            GetPrefix -> ast.MethodGet
-            SetPrefix -> ast.MethodSet
-            NoAccessor -> ast.MethodMethod
-          }
+      use #(p5, value, method_fn_id) <- result.map(parse_class_method_value(
+        p4,
+        p,
+        ids,
+        prefix,
+        is_constructor:,
+        has_extends:,
+      ))
+      let kind = case is_constructor, prefix.accessor {
+        True, _ -> ast.MethodConstructor
+        False, GetPrefix -> ast.MethodGet
+        False, SetPrefix -> ast.MethodSet
+        False, NoAccessor -> ast.MethodMethod
       }
-      // method scope is a direct child of class_id; capture by diff
-      let body_before = scope.sb_children_raw(p6.sb, ctx.class_id)
-      use #(p7, params, body) <- result.try(parse_method_params_body(
-        p6,
-        outer_p,
-        class_accessor_kind,
-        is_generator,
-        is_method_async,
-        is_constructor,
-        has_extends,
-      ))
-      // never empty: a method pushed exactly one function scope
-      let assert [method_fn_id, ..] =
-        class_new_children(p7.sb, ctx.class_id, body_before)
-        as "parser: class method body pushed no Function scope"
-      Ok(#(
-        p7,
-        is_constructor,
-        ast.ClassMethod(
-          key:,
-          value: ast.FunctionLiteral(
-            name: None,
-            params: params,
-            body: body,
-            is_generator: is_generator,
-            is_async: is_method_async,
-          ),
-          kind: method_kind,
-          is_static: is_static,
-        ),
-        MethodScopes(key_scopes:, method_fn_id:),
-      ))
+      let element = ast.ClassMethod(key:, value:, kind:, is_static:)
+      #(
+        p5,
+        ParsedClassElement(element, MethodScopes(key_scopes:, method_fn_id:)),
+      )
     }
     _ -> {
       // §15.7.1: field named constructor is forbidden
       use <- bool.guard(
         is_constructor_name,
-        Error(FieldNamedConstructor(pos_of(p6))),
+        Error(FieldNamedConstructor(pos_of(p4))),
       )
-      // initializer scopes parent under the init shell, not the class body
-      use #(p8, value) <- result.try(case peek(p6) {
-        Equal -> {
-          let shell_id = case is_static {
-            True -> ctx.static_id
-            False -> ctx.init_id
-          }
-          let p7 =
-            P(
-              ..advance(p6),
-              sb: scope.sb_enter(p6.sb, shell_id),
-              ctx: Ctx(
-                ..p6.ctx,
-                allow_super_property: True,
-                allow_super_call: False,
-                allow_new_target: True,
-                in_class_field_init: True,
-              ),
-            )
-          // field initializer is [+In]
-          use #(p8, init) <- result.map(with_allow_in(
-            p7,
-            True,
-            parse_assignment_expression,
-          ))
-          #(
-            P(
-              ..p8,
-              sb: scope.sb_enter(p8.sb, ctx.class_id),
-              ctx: Ctx(
-                ..p8.ctx,
-                allow_super_property: outer_p.ctx.allow_super_property,
-                allow_super_call: outer_p.ctx.allow_super_call,
-                allow_new_target: outer_p.ctx.allow_new_target,
-                in_class_field_init: outer_p.ctx.in_class_field_init,
-              ),
-            ),
-            Some(init),
-          )
-        }
-        _ -> Ok(#(p6, None))
-      })
-      use p9 <- result.try(eat_semicolon(p8))
-      Ok(#(
-        p9,
-        False,
-        ast.ClassField(key:, value: value, is_static: is_static),
-        NonMethodScopes(key_scopes:),
+      use #(p5, value) <- result.map(parse_class_field_rest(
+        p4,
+        p,
+        ids,
+        is_static:,
       ))
+      let element = ast.ClassField(key:, value:, is_static:)
+      #(p5, ParsedClassElement(element, NonMethodScopes(key_scopes:)))
     }
   }
 }
 
-fn check_label_identifier(p: P, label: String) -> Result(Nil, ParseError) {
-  check_reserved_identifier_common(p, label)
+// step (7): a static block is an arrow child of the static shell
+fn parse_static_block(
+  p: Parser,
+  ids: ClassScopeIds,
+) -> Result(#(Parser, ParsedClassElement), ParseError) {
+  let p_static = Parser(..p, scopes: scope.sb_enter(p.scopes, ids.static_id))
+  let p_body = enter_static_block_context(p_static)
+  let scopes =
+    scope.sb_update_current(p_body.scopes, fn(s) {
+      scope.RawScope(..s, kind: scope.Function)
+    })
+    |> scope.sb_update_current_fn(fn(fi) {
+      scope.RawFunctionInfo(..fi, is_arrow: True)
+    })
+  // not parse_block_body: no block between arrow scope and body
+  use #(p2, block) <- result.map(parse_braced_body(Parser(..p_body, scopes:)))
+  // re-enter class_id so the next element parents correctly
+  let p2 =
+    Parser(
+      ..restore_outer_context(p2, p_static),
+      scopes: scope.sb_enter(p2.scopes, ids.class_id),
+    )
+  #(p2, ParsedClassElement(ast.StaticBlock(body: block), NonMethodScopes([])))
 }
 
-fn parse_labeled_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
-  parse_label_chain(p, [])
+// §15.7.1: constructor must be a plain method, declared once
+fn check_constructor_prefix(
+  prefix: MethodPrefix,
+  has_constructor has_constructor: Bool,
+  pos pos: Int,
+) -> Result(Nil, ParseError) {
+  case prefix.accessor {
+    GetPrefix -> Error(ClassConstructorNotGetter(pos))
+    SetPrefix -> Error(ClassConstructorNotSetter(pos))
+    NoAccessor -> {
+      use <- bool.guard(
+        prefix.is_generator,
+        Error(ClassConstructorGenerator(pos)),
+      )
+      use <- bool.guard(prefix.is_async, Error(ClassConstructorAsync(pos)))
+      use <- bool.guard(has_constructor, Error(ClassDuplicateConstructor(pos)))
+      Ok(Nil)
+    }
+  }
 }
 
-fn async_function_start(p: P) -> Bool {
+// §15.7.1: #constructor is forbidden
+fn is_private_constructor_key(key: ast.PropertyKey) -> Bool {
+  case key {
+    ast.KeyPrivate(name: "#constructor", ..)
+    | ast.KeyString(value: "#constructor", ..) -> True
+    _ -> False
+  }
+}
+
+// p is at the ( after the method name
+fn parse_class_method_value(
+  p: Parser,
+  outer: Parser,
+  ids: ClassScopeIds,
+  prefix: MethodPrefix,
+  is_constructor is_constructor: Bool,
+  has_extends has_extends: Bool,
+) -> Result(#(Parser, ast.FunctionLiteral, scope.ScopeId), ParseError) {
+  // method scope is a direct child of class_id; capture by diff
+  let body_before = scope.sb_children_raw(p.scopes, ids.class_id)
+  use #(p2, params, body) <- result.map(parse_method_params_body(
+    p,
+    outer,
+    prefix,
+    is_constructor:,
+    has_extends:,
+  ))
+  // never empty: a method pushed exactly one function scope
+  let assert [method_fn_id, ..] =
+    class_new_children(p2.scopes, ids.class_id, body_before)
+    as "parser: class method body pushed no Function scope"
+  let value =
+    ast.FunctionLiteral(
+      name: None,
+      params:,
+      body:,
+      is_generator: prefix.is_generator,
+      is_async: prefix.is_async,
+    )
+  #(p2, value, method_fn_id)
+}
+
+// p is just past the field name; consumes through the terminator
+fn parse_class_field_rest(
+  p: Parser,
+  outer: Parser,
+  ids: ClassScopeIds,
+  is_static is_static: Bool,
+) -> Result(#(Parser, Option(ast.Expression)), ParseError) {
+  use #(p2, value) <- result.try(case peek(p) {
+    Equal -> {
+      let shell_id = case is_static {
+        True -> ids.static_id
+        False -> ids.init_id
+      }
+      // field initializer is [+In]
+      use #(p2, init) <- result.map(allowing_in(
+        enter_field_initializer_context(advance(p), shell_id),
+        parse_assignment_expression,
+      ))
+      #(exit_field_initializer_context(p2, outer, ids.class_id), Some(init))
+    }
+    _ -> Ok(#(p, None))
+  })
+  use p3 <- result.map(eat_semicolon(p2))
+  #(p3, value)
+}
+
+// initializer scopes parent under the init shell, not the class body
+fn enter_field_initializer_context(
+  p: Parser,
+  shell_id: scope.ScopeId,
+) -> Parser {
+  Parser(
+    ..p,
+    scopes: scope.sb_enter(p.scopes, shell_id),
+    ctx: GrammarContext(
+      ..p.ctx,
+      allow_super_property: True,
+      allow_super_call: False,
+      allow_new_target: True,
+      in_class_field_init: True,
+    ),
+  )
+}
+
+fn exit_field_initializer_context(
+  p: Parser,
+  outer: Parser,
+  class_id: scope.ScopeId,
+) -> Parser {
+  Parser(
+    ..p,
+    scopes: scope.sb_enter(p.scopes, class_id),
+    ctx: GrammarContext(
+      ..p.ctx,
+      allow_super_property: outer.ctx.allow_super_property,
+      allow_super_call: outer.ctx.allow_super_call,
+      allow_new_target: outer.ctx.allow_new_target,
+      in_class_field_init: outer.ctx.in_class_field_init,
+    ),
+  )
+}
+
+fn async_function_start(p: Parser) -> Bool {
   peek_at(p, 1) == Function && token_line_at(p, 1) == token_line_at(p, 0)
 }
 
-fn at_label_start(p: P) -> Bool {
+fn at_label_start(p: Parser) -> Bool {
   case peek(p) {
     Identifier | Async | Yield | Await -> peek_at(p, 1) == Colon
     _ -> False
@@ -3541,128 +3596,118 @@ fn at_label_start(p: P) -> Bool {
 }
 
 // continue may target any label of a loop's chain (§14.13.1)
-fn parse_label_chain(
-  p: P,
+fn parse_labeled_statement(
+  p: Parser,
   collected: List(String),
-) -> Result(#(P, ast.Statement), ParseError) {
+) -> Result(#(Parser, ast.Statement), ParseError) {
   let label = peek_value(p)
-  use Nil <- result.try(check_label_identifier(p, label))
+  use Nil <- result.try(check_reserved_identifier_common(p, label))
   let duplicate =
-    option.is_some(find_label(p.ctx.label_set, label))
+    result.is_ok(list.key_find(p.ctx.label_set, label))
     || list.contains(collected, label)
   use <- bool.guard(duplicate, Error(DuplicateLabel(pos_of(p), label)))
   let p2 = advance(p)
   use p3 <- result.try(expect(p2, Colon))
   let collected = [label, ..collected]
   case at_label_start(p3) {
-    True -> parse_label_chain(p3, collected)
+    True -> parse_labeled_statement(p3, collected)
     False -> parse_labeled_statement_body(p3, collected)
   }
 }
 
 fn parse_labeled_statement_body(
-  p3: P,
+  p: Parser,
   labels: List(String),
-) -> Result(#(P, ast.Statement), ParseError) {
-  {
-    let kind = case peek(p3) {
-      While | Do | For -> LoopLabel
-      _ -> PlainLabel
-    }
-    let outer_labels = p3.ctx.label_set
-    let p3 =
-      P(
-        ..p3,
-        ctx: Ctx(
-          ..p3.ctx,
-          label_set: list.append(
-            list.map(labels, fn(label) { #(label, kind) }),
-            outer_labels,
-          ),
-        ),
+) -> Result(#(Parser, ast.Statement), ParseError) {
+  let kind = case peek(p) {
+    While | Do | For -> LoopLabel
+    _ -> PlainLabel
+  }
+  let outer_labels = p.ctx.label_set
+  let label_set =
+    list.append(list.map(labels, fn(label) { #(label, kind) }), outer_labels)
+  let p = Parser(..p, ctx: GrammarContext(..p.ctx, label_set:))
+  let wrap_label = fn(res) {
+    use #(inner_p, stmt) <- result.map(res)
+    let labeled =
+      list.fold(labels, stmt, fn(body, label) {
+        ast.LabeledStatement(label:, body:)
+      })
+    #(
+      Parser(
+        ..inner_p,
+        ctx: GrammarContext(..inner_p.ctx, label_set: outer_labels),
+      ),
+      labeled,
+    )
+  }
+  case peek(p) {
+    Const -> Error(LexicalDeclInLabel(pos_of(p)))
+    Let -> {
+      use <- bool.guard(
+        let_declaration_forbidden_here(p),
+        Error(LexicalDeclInLabel(pos_of(p))),
       )
-    let wrap_label = fn(res) {
-      use #(inner_p, stmt) <- result.map(res)
-      let labeled =
-        list.fold(labels, stmt, fn(body, label) {
-          ast.LabeledStatement(label:, body:)
-        })
-      #(P(..inner_p, ctx: Ctx(..inner_p.ctx, label_set: outer_labels)), labeled)
-    }
-    case peek(p3) {
-      Const -> Error(LexicalDeclInLabel(pos_of(p3)))
-      // same let lookahead as single-statement position
-      Let -> {
-        let next = peek_at(p3, 1)
-        let decl_starter =
-          next == LeftBrace
-          || next == LeftBracket
-          || is_identifier_or_keyword(next)
-        let newline_after_let = token_line_at(p3, 1) > token_line_at(p3, 0)
-        case next == LeftBracket || { decl_starter && !newline_after_let } {
-          True -> Error(LexicalDeclInLabel(pos_of(p3)))
-          False ->
-            case decl_starter {
-              True -> wrap_label(parse_expression_statement(p3))
-              False -> wrap_label(parse_statement(p3))
-            }
-        }
+      case let_starts_declaration(p) {
+        True -> wrap_label(parse_expression_statement(p))
+        False -> wrap_label(parse_statement(p))
       }
-      Function -> {
-        use <- bool.guard(
-          peek_at(p3, 1) == Star,
-          Error(GeneratorDeclLabeled(pos_of(p3))),
-        )
-        use <- bool.guard(
-          p3.ctx.strict || p3.ctx.in_single_stmt_pos,
-          Error(FunctionDeclInLabelBody(pos_of(p3))),
-        )
-        wrap_label(parse_statement(p3))
-      }
-      Class -> Error(LexicalDeclInLabel(pos_of(p3)))
-      // only a plain function may be a labelled item
-      Async ->
-        case async_function_start(p3) {
-          True -> Error(FunctionDeclInLabelBody(pos_of(p3)))
-          False -> wrap_label(parse_statement(p3))
-        }
-      Identifier ->
-        case is_using_decl_start(p3, 0) {
-          True -> Error(LexicalDeclInLabel(pos_of(p3)))
-          False -> wrap_label(parse_statement(p3))
-        }
-      Await ->
-        case is_await_using_decl_start(p3) {
-          True -> Error(LexicalDeclInLabel(pos_of(p3)))
-          False -> wrap_label(parse_statement(p3))
-        }
-      _ -> wrap_label(parse_statement(p3))
     }
+    Function -> {
+      use <- bool.guard(
+        peek_at(p, 1) == Star,
+        Error(GeneratorDeclLabeled(pos_of(p))),
+      )
+      use <- bool.guard(
+        p.ctx.strict || p.ctx.in_single_stmt_pos,
+        Error(FunctionDeclInLabelBody(pos_of(p))),
+      )
+      wrap_label(parse_statement(p))
+    }
+    Class -> Error(LexicalDeclInLabel(pos_of(p)))
+    // only a plain function may be a labelled item
+    Async ->
+      case async_function_start(p) {
+        True -> Error(FunctionDeclInLabelBody(pos_of(p)))
+        False -> wrap_label(parse_statement(p))
+      }
+    Identifier ->
+      case is_using_decl_start(p, 0) {
+        True -> Error(LexicalDeclInLabel(pos_of(p)))
+        False -> wrap_label(parse_statement(p))
+      }
+    Await ->
+      case is_await_using_decl_start(p) {
+        True -> Error(LexicalDeclInLabel(pos_of(p)))
+        False -> wrap_label(parse_statement(p))
+      }
+    _ -> wrap_label(parse_statement(p))
   }
 }
 
-fn parse_with_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
+fn parse_with_statement(
+  p: Parser,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   use <- bool.guard(p.ctx.strict, Error(WithNotAllowedStrictMode(pos_of(p))))
-  parse_with_statement_body(p)
-}
-
-fn parse_with_statement_body(p: P) -> Result(#(P, ast.Statement), ParseError) {
   let p2 = advance(p)
   use p3 <- result.try(expect(p2, LeftParen))
   use #(p4, object) <- result.try(parse_expression(p3))
   use p5 <- result.try(expect(p4, RightParen))
-  let #(sb, with_id) = scope.sb_push_with(p5.sb)
-  use #(p6, body) <- result.try(parse_single_statement(P(..p5, sb:), False))
+  let #(scopes, with_id) = scope.sb_push_with(p5.scopes)
+  use #(p6, body) <- result.try(parse_single_statement(
+    Parser(..p5, scopes:),
+    allow_annex_b_function: False,
+  ))
   // flip children to source order for finalize
-  let sb = scope.sb_reorder_block_children(p6.sb, with_id)
+  let scopes = scope.sb_reorder_block_children(p6.scopes, with_id)
   Ok(#(
-    P(..p6, sb: scope.sb_enter(sb, p5.sb.current)),
+    Parser(..p6, scopes: scope.sb_enter(scopes, p5.scopes.current)),
     ast.WithStatement(object:, body:),
   ))
 }
 
 // raise deferred cover-grammar errors once known not a pattern
-fn check_cover_grammar_errors(p: P, pos: Int) -> Result(Nil, ParseError) {
+fn check_cover_grammar_errors(p: Parser, pos: Int) -> Result(Nil, ParseError) {
   case p.ctx.has_cover_initializer, p.ctx.dup_proto_pos {
     True, _ -> Error(ShorthandDefaultOutsideDestructuring(pos))
     False, Some(dup_pos) -> Error(DuplicateProtoProperty(dup_pos))
@@ -3670,11 +3715,13 @@ fn check_cover_grammar_errors(p: P, pos: Int) -> Result(Nil, ParseError) {
   }
 }
 
-fn parse_expression_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
+fn parse_expression_statement(
+  p: Parser,
+) -> Result(#(Parser, ast.Statement), ParseError) {
   // raw text needed for directives
   let directive_raw = case peek(p) {
-    KString -> option.Some(peek_value(p))
-    _ -> option.None
+    KString -> Some(peek_value(p))
+    _ -> None
   }
   use #(p2, expr) <- result.try(parse_expression(p))
   use Nil <- result.try(check_cover_grammar_errors(p2, pos_of(p)))
@@ -3682,12 +3729,14 @@ fn parse_expression_statement(p: P) -> Result(#(P, ast.Statement), ParseError) {
   // directive only if exactly a string literal
   let directive = case expr {
     ast.StringExpression(..) -> directive_raw
-    _ -> option.None
+    _ -> None
   }
   Ok(#(p3, ast.ExpressionStatement(expression: expr, directive:)))
 }
 
-fn parse_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
+fn parse_expression(
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   use #(p2, first_expr) <- result.try(parse_assignment_expression(p))
   case peek(p2) {
     Comma ->
@@ -3697,7 +3746,7 @@ fn parse_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
           let p3 = advance(p2)
           use #(p4, rest_expr) <- result.try(parse_expression(p3))
           Ok(#(
-            P(..p4, last_expr_assignable: False),
+            Parser(..p4, last_expr_assignable: False),
             ast.SequenceExpression(
               expressions: [first_expr, rest_expr],
               span: ast.Span(ast.expression_span(first_expr).start, p4.prev_end),
@@ -3710,12 +3759,12 @@ fn parse_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
 }
 
 fn parse_assignment_expression(
-  p: P,
-) -> Result(#(P, ast.Expression), ParseError) {
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   case peek(p) {
     Yield -> {
       case p.ctx.in_generator {
-        False -> parse_assignment_expression_inner(p)
+        False -> parse_arrow_or_assignment(p)
         True ->
           case peek_at(p, 1) {
             Equal
@@ -3735,126 +3784,135 @@ fn parse_assignment_expression(
             | QuestionQuestionEqual
             | Dot
             | QuestionDot
-            | Arrow -> parse_assignment_expression_inner(p)
+            | Arrow -> parse_arrow_or_assignment(p)
             // no LeftBracket: yield [..] is a yield expression
             _ -> parse_yield_expression(p)
           }
       }
     }
-    _ -> parse_assignment_expression_inner(p)
+    _ -> parse_arrow_or_assignment(p)
   }
 }
 
-fn parse_assignment_expression_inner(
-  p: P,
-) -> Result(#(P, ast.Expression), ParseError) {
+fn parse_arrow_or_assignment(
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   case try_arrow_function(p) {
     Ok(#(p2, arrow_expr)) -> Ok(#(p2, arrow_expr))
     // error after => is committed, never backtrack
     Error(ArrowError(e)) -> Error(e)
     Error(NotAnArrow) -> {
-      case p.ctx.strict {
-        True ->
-          case peek(p) {
-            Identifier ->
-              case peek_value(p) {
-                "eval" | "arguments" -> {
-                  let name = peek_value(p)
-                  case option.is_some(assignment_op(peek_at(p, 1))) {
-                    True -> Error(StrictModeAssignment(pos_of(p), name))
-                    False -> parse_assignment_rhs(p)
-                  }
-                }
-                _ -> parse_assignment_rhs(p)
-              }
-            _ -> parse_assignment_rhs(p)
-          }
-        False -> parse_assignment_rhs(p)
-      }
+      let name = peek_value(p)
+      let strict_eval_assignment =
+        p.ctx.strict
+        && peek(p) == Identifier
+        && { name == "eval" || name == "arguments" }
+        && option.is_some(assignment_op(peek_at(p, 1)))
+      use <- bool.guard(
+        strict_eval_assignment,
+        Error(StrictModeAssignment(pos_of(p), name)),
+      )
+      parse_assignment_or_conditional(p)
     }
   }
 }
 
-fn parse_assignment_rhs(p: P) -> Result(#(P, ast.Expression), ParseError) {
+fn parse_assignment_or_conditional(
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   let lhs_start = peek(p)
-  use #(p2, lhs_expr) <- result.try(parse_conditional_expression(p))
-  case peek(p2) {
-    Equal ->
-      case p2.last_expr_assignable {
-        True -> {
-          use Nil <- result.try(check_strict_restricted_target(p2, lhs_expr))
-          // not assignable but covers target = default
-          finish_assignment(p2, lhs_expr, ast.Assign, Some(True))
-        }
-        False ->
-          case lhs_start {
-            LeftBrace | LeftBracket ->
-              case p2.has_invalid_pattern {
-                True -> Error(InvalidDestructuringTarget(pos_of(p2)))
-                False ->
-                  case p.ctx.strict && pattern_has_eval_args_target(lhs_expr) {
-                    True -> Error(EvalArgsAssignStrictMode(pos_of(p2)))
-                    False ->
-                      finish_assignment(
-                        P(
-                          ..p2,
-                          has_invalid_pattern: False,
-                          ctx: Ctx(..p2.ctx, dup_proto_pos: None),
-                        ),
-                        lhs_expr,
-                        ast.Assign,
-                        Some(True),
-                      )
-                  }
-              }
-            _ ->
-              case is_web_compat_call_target(p2, lhs_expr) {
-                True -> finish_assignment(p2, lhs_expr, ast.Assign, Some(False))
-                False -> Error(InvalidAssignmentLhs(pos_of(p2)))
-              }
-          }
+  use #(p2, lhs) <- result.try(parse_conditional_expression(p))
+  case peek(p2), assignment_op(peek(p2)) {
+    Equal, _ -> {
+      use #(p2, kind) <- result.try(check_plain_assignment_target(
+        p2,
+        lhs,
+        lhs_start,
+      ))
+      finish_assignment(p2, lhs, ast.Assign, kind)
+    }
+    _, Some(op) -> {
+      // annex b call targets ok for op= but not logical assignment
+      let web_compat_ok = case op {
+        ast.LogicalAndAssign
+        | ast.LogicalOrAssign
+        | ast.NullishCoalesceAssign -> False
+        _ -> is_web_compat_call_target(p2, lhs)
       }
-    _ ->
-      case assignment_op(peek(p2)) {
-        Some(op) -> {
-          // annex b call targets ok for op= but not logical assignment
-          let web_compat_ok = case op {
-            ast.LogicalAndAssign
-            | ast.LogicalOrAssign
-            | ast.NullishCoalesceAssign -> False
-            _ -> is_web_compat_call_target(p2, lhs_expr)
-          }
-          case p2.last_expr_assignable || web_compat_ok {
-            True -> {
-              use Nil <- result.try(check_strict_restricted_target(p2, lhs_expr))
-              finish_assignment(p2, lhs_expr, op, None)
-            }
-            False -> Error(InvalidAssignmentLhs(pos_of(p2)))
-          }
-        }
-        // clear so it does not leak from a sibling
-        None ->
-          case p2.last_expr_is_assignment {
-            True -> Ok(#(P(..p2, last_expr_is_assignment: False), lhs_expr))
-            False -> Ok(#(p2, lhs_expr))
-          }
+      use <- bool.guard(
+        !p2.last_expr_assignable && !web_compat_ok,
+        Error(InvalidAssignmentLhs(pos_of(p2))),
+      )
+      use Nil <- result.try(check_strict_restricted_target(p2, lhs))
+      finish_assignment(p2, lhs, op, CompoundAssign)
+    }
+    // clear so it does not leak from a sibling
+    _, None ->
+      case p2.last_expr_is_assignment {
+        True -> Ok(#(Parser(..p2, last_expr_is_assignment: False), lhs))
+        False -> Ok(#(p2, lhs))
       }
   }
 }
 
+// lhs must be a reference, a literal pattern or an annex b call
+fn check_plain_assignment_target(
+  p: Parser,
+  lhs: ast.Expression,
+  lhs_start: TokenKind,
+) -> Result(#(Parser, AssignmentKind), ParseError) {
+  use <- bool.lazy_guard(p.last_expr_assignable, fn() {
+    use Nil <- result.map(check_strict_restricted_target(p, lhs))
+    #(p, PlainAssign)
+  })
+  case lhs_start {
+    LeftBrace | LeftBracket -> {
+      use <- bool.guard(
+        p.literal_invalid_as_pattern,
+        Error(InvalidDestructuringTarget(pos_of(p))),
+      )
+      use <- bool.guard(
+        p.ctx.strict && pattern_has_eval_args_target(lhs),
+        Error(EvalArgsAssignStrictMode(pos_of(p))),
+      )
+      let p =
+        Parser(
+          ..p,
+          literal_invalid_as_pattern: False,
+          ctx: GrammarContext(..p.ctx, dup_proto_pos: None),
+        )
+      Ok(#(p, PlainAssign))
+    }
+    _ -> {
+      use <- bool.guard(
+        !is_web_compat_call_target(p, lhs),
+        Error(InvalidAssignmentLhs(pos_of(p))),
+      )
+      Ok(#(p, CallTargetAssign))
+    }
+  }
+}
+
+// p is at the operator; PlainAssign lets {a: b = 1} cover a pattern
 fn finish_assignment(
-  p2: P,
+  p: Parser,
   lhs: ast.Expression,
   op: ast.AssignmentOp,
-  last_is_assignment: Option(Bool),
-) -> Result(#(P, ast.Expression), ParseError) {
-  let p2 = P(..p2, sb: sb_mark_assign_targets(p2.sb, lhs))
-  let p3 = advance(P(..p2, ctx: Ctx(..p2.ctx, has_cover_initializer: False)))
-  use #(p4, rhs) <- result.map(parse_assignment_expression(p3))
-  let p_out = case last_is_assignment {
-    Some(flag) ->
-      P(..p4, last_expr_assignable: False, last_expr_is_assignment: flag)
-    None -> P(..p4, last_expr_assignable: False)
+  kind: AssignmentKind,
+) -> Result(#(Parser, ast.Expression), ParseError) {
+  let p =
+    Parser(
+      ..p,
+      scopes: mark_assign_targets(p.scopes, lhs),
+      ctx: GrammarContext(..p.ctx, has_cover_initializer: False),
+    )
+  use #(p2, rhs) <- result.map(parse_assignment_expression(advance(p)))
+  let p_out = case kind {
+    PlainAssign ->
+      Parser(..p2, last_expr_assignable: False, last_expr_is_assignment: True)
+    CallTargetAssign ->
+      Parser(..p2, last_expr_assignable: False, last_expr_is_assignment: False)
+    CompoundAssign -> Parser(..p2, last_expr_assignable: False)
   }
   #(
     p_out,
@@ -3862,14 +3920,14 @@ fn finish_assignment(
       operator: op,
       left: lhs,
       right: rhs,
-      span: ast.Span(ast.expression_span(lhs).start, p4.prev_end),
+      span: ast.Span(ast.expression_span(lhs).start, p2.prev_end),
     ),
   )
 }
 
 // §13.15.1, including (eval) = 1
 fn check_strict_restricted_target(
-  p: P,
+  p: Parser,
   lhs: ast.Expression,
 ) -> Result(Nil, ParseError) {
   case p.ctx.strict, ast_util.unwrap_parens(lhs) {
@@ -3883,7 +3941,7 @@ fn check_strict_restricted_target(
 }
 
 // annex b web-compat call target; never optional chains (§13.3.1.1)
-fn is_web_compat_call_target(p: P, lhs: ast.Expression) -> Bool {
+fn is_web_compat_call_target(p: Parser, lhs: ast.Expression) -> Bool {
   case p.ctx.strict, ast_util.unwrap_parens(lhs) {
     False, ast.CallExpression(callee:, ..) ->
       !ast_util.chain_has_optional(callee)
@@ -3897,7 +3955,9 @@ type ArrowAttempt {
   ArrowError(ParseError)
 }
 
-fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ArrowAttempt) {
+fn try_arrow_function(
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ArrowAttempt) {
   case peek(p) {
     // §15.9: no line terminator after async
     Async -> {
@@ -3905,13 +3965,13 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ArrowAttempt) {
       case peek_at(p, 1) {
         LeftParen if same_line ->
           case paren_arrow_ahead(look_skip(look_skip(look_from(p)))) {
-            True -> try_paren_arrow(p, advance(advance(p)), True)
+            True -> try_paren_arrow(p, advance(advance(p)), is_async: True)
             False -> Error(NotAnArrow)
           }
-        Arrow -> try_single_ident_arrow(p, p, False)
+        Arrow -> try_single_ident_arrow(p, p, is_async: False)
         next if same_line ->
           case is_arrow_param_name(next), peek_at(p, 2) {
-            True, Arrow -> try_single_ident_arrow(p, advance(p), True)
+            True, Arrow -> try_single_ident_arrow(p, advance(p), is_async: True)
             _, _ -> Error(NotAnArrow)
           }
         _ -> Error(NotAnArrow)
@@ -3919,12 +3979,12 @@ fn try_arrow_function(p: P) -> Result(#(P, ast.Expression), ArrowAttempt) {
     }
     Identifier | Yield | Await | Of | From | As | Let | Static ->
       case peek_at(p, 1) {
-        Arrow -> try_single_ident_arrow(p, p, False)
+        Arrow -> try_single_ident_arrow(p, p, is_async: False)
         _ -> Error(NotAnArrow)
       }
     LeftParen ->
       case paren_arrow_ahead(look_skip(look_from(p))) {
-        True -> try_paren_arrow(p, advance(p), False)
+        True -> try_paren_arrow(p, advance(p), is_async: False)
         False -> Error(NotAnArrow)
       }
     _ -> Error(NotAnArrow)
@@ -3973,14 +4033,14 @@ fn is_arrow_param_name(kind: TokenKind) -> Bool {
 }
 
 fn try_single_ident_arrow(
-  outer: P,
-  ident_p: P,
-  is_async: Bool,
-) -> Result(#(P, ast.Expression), ArrowAttempt) {
+  outer: Parser,
+  ident_p: Parser,
+  is_async is_async: Bool,
+) -> Result(#(Parser, ast.Expression), ArrowAttempt) {
   let name = peek_value(ident_p)
   // async arrow params are [+Await]
   let check_p = case is_async {
-    True -> P(..outer, ctx: Ctx(..outer.ctx, in_async: True))
+    True -> Parser(..outer, ctx: GrammarContext(..outer.ctx, in_async: True))
     False -> outer
   }
   // => not consumed yet, so not-a-binding means not an arrow
@@ -3989,34 +4049,32 @@ fn try_single_ident_arrow(
     |> result.replace_error(NotAnArrow),
   )
   let p2 = advance(ident_p)
-  case has_line_break_before(p2) {
-    True -> Error(NotAnArrow)
-    False -> {
-      let p3 = enter_arrow_context(advance(p2), is_async, [name])
-      // set after entering context, which zeroes param state
-      let p3 = P(..p3, ctx: Ctx(..p3.ctx, param_bound_names: [name]))
-      let params = [ast.IdentifierPattern(name: name, span: span_of(ident_p))]
-      finish_arrow(parse_arrow_body(p3, params), outer, is_async, params)
-    }
-  }
+  use <- bool.guard(has_line_break_before(p2), Error(NotAnArrow))
+  let p3 = enter_arrow_context(advance(p2), is_async:, param_names: [name])
+  // set after entering context, which zeroes param state
+  let p3 =
+    Parser(..p3, ctx: GrammarContext(..p3.ctx, param_bound_names: [name]))
+  let params = [ast.IdentifierPattern(name:, span: span_of(ident_p))]
+  finish_arrow(parse_arrow_body(p3, params), outer, is_async:, params:)
 }
 
+// any failure before => means not an arrow: backtrack
 fn try_paren_arrow(
-  outer: P,
-  p_params: P,
-  is_async: Bool,
-) -> Result(#(P, ast.Expression), ArrowAttempt) {
+  outer: Parser,
+  p_params: Parser,
+  is_async is_async: Bool,
+) -> Result(#(Parser, ast.Expression), ArrowAttempt) {
   // push arrow scope before params; failure discards it for free
-  let p_ctx = enter_arrow_context(p_params, is_async, [])
+  let p_ctx = enter_arrow_context(p_params, is_async:, param_names: [])
   // arrow params always reject duplicates
   let p_arrow =
-    P(
+    Parser(
       ..p_ctx,
-      ctx: Ctx(
+      ctx: GrammarContext(
         ..p_ctx.ctx,
         in_arrow_params: True,
         in_formal_params: True,
-        binding_kind: BindingParam,
+        declaring: DeclaringParam,
         // §15.3: arrow params use the enclosing yield/await context
         in_generator: p_params.ctx.in_generator,
         in_async: p_params.ctx.in_async || is_async,
@@ -4026,70 +4084,59 @@ fn try_paren_arrow(
         allow_in: True,
       ),
     )
-  case parse_formal_parameters(p_arrow) {
-    Ok(#(p3, params)) ->
-      case
-        expect(
-          P(
-            ..p3,
-            ctx: Ctx(
-              ..p3.ctx,
-              in_arrow_params: False,
-              in_formal_params: False,
-              binding_kind: BindingNone,
-            ),
-          ),
-          RightParen,
-        )
-      {
-        Ok(p4) ->
-          case peek(p4) {
-            Arrow ->
-              case has_line_break_before(p4) {
-                True -> Error(NotAnArrow)
-                False -> {
-                  // switch the borrowed flags back to the arrow body values
-                  let p5 =
-                    P(
-                      ..advance(p4),
-                      sb: declare_param_shims(p4.sb, params),
-                      ctx: Ctx(
-                        ..p4.ctx,
-                        in_generator: p_ctx.ctx.in_generator,
-                        in_async: p_ctx.ctx.in_async,
-                        in_static_block: p_ctx.ctx.in_static_block,
-                        in_class_field_init: p_ctx.ctx.in_class_field_init,
-                        allow_in: p_ctx.ctx.allow_in,
-                      ),
-                    )
-                  finish_arrow(
-                    parse_arrow_body(p5, params),
-                    outer,
-                    is_async,
-                    params,
-                  )
-                }
-              }
-            _ -> Error(NotAnArrow)
-          }
-        Error(_speculative_error) -> Error(NotAnArrow)
-      }
-    Error(_speculative_error) -> Error(NotAnArrow)
-  }
+  use #(p3, params) <- result.try(
+    parse_formal_parameters(p_arrow) |> result.replace_error(NotAnArrow),
+  )
+  let p3 =
+    Parser(
+      ..p3,
+      ctx: GrammarContext(
+        ..p3.ctx,
+        in_arrow_params: False,
+        in_formal_params: False,
+        declaring: NotDeclaring,
+      ),
+    )
+  use p4 <- result.try(
+    expect(p3, RightParen) |> result.replace_error(NotAnArrow),
+  )
+  use <- bool.guard(
+    peek(p4) != Arrow || has_line_break_before(p4),
+    Error(NotAnArrow),
+  )
+  // switch the borrowed flags back to the arrow body values
+  let p5 =
+    Parser(
+      ..advance(p4),
+      scopes: declare_param_shims(p4.scopes, params),
+      ctx: GrammarContext(
+        ..p4.ctx,
+        in_generator: p_ctx.ctx.in_generator,
+        in_async: p_ctx.ctx.in_async,
+        in_static_block: p_ctx.ctx.in_static_block,
+        in_class_field_init: p_ctx.ctx.in_class_field_init,
+        allow_in: p_ctx.ctx.allow_in,
+      ),
+    )
+  finish_arrow(parse_arrow_body(p5, params), outer, is_async:, params:)
 }
 
 fn finish_arrow(
-  body_result: Result(#(P, ast.ArrowBody), ParseError),
-  outer: P,
-  is_async: Bool,
-  params: List(ast.Pattern),
-) -> Result(#(P, ast.Expression), ArrowAttempt) {
+  body_result: Result(#(Parser, ast.ArrowBody), ParseError),
+  outer: Parser,
+  is_async is_async: Bool,
+  params params: List(ast.Pattern),
+) -> Result(#(Parser, ast.Expression), ArrowAttempt) {
   use #(p_body, body) <- result.try(result.map_error(body_result, ArrowError))
   let body_end = p_body.prev_end
   let p_restored = restore_outer_context(p_body, outer)
   // §13.15.1: (x => x) = 1 is invalid
   Ok(#(
-    P(..p_restored, last_expr_assignable: False, last_expr_is_assignment: False),
+    Parser(
+      ..p_restored,
+      last_expr_assignable: False,
+      last_expr_is_assignment: False,
+    ),
     ast.ArrowFunctionExpression(
       params:,
       body:,
@@ -4100,18 +4147,15 @@ fn finish_arrow(
 }
 
 fn parse_arrow_body(
-  p: P,
+  p: Parser,
   params: List(ast.Pattern),
-) -> Result(#(P, ast.ArrowBody), ParseError) {
+) -> Result(#(Parser, ast.ArrowBody), ParseError) {
   case peek(p) {
     LeftBrace -> {
       // block body is [+In]; expression body inherits
-      let p = P(..p, ctx: Ctx(..p.ctx, allow_in: True))
-      use p <- result.try(check_use_strict_in_body(p))
-      use #(p2, body_stmt) <- result.try(parse_fn_body_maybe_var_boundary(
-        p,
-        params,
-      ))
+      let p = Parser(..p, ctx: GrammarContext(..p.ctx, allow_in: True))
+      use p <- result.try(apply_body_use_strict(p))
+      use #(p2, body_stmt) <- result.try(parse_function_body(p, params))
       Ok(#(p2, ast.ArrowBodyBlock(body_stmt)))
     }
     _ -> {
@@ -4120,22 +4164,19 @@ fn parse_arrow_body(
       // raise deferred cover errors before the context is dropped
       use Nil <- result.try(check_cover_grammar_errors(p2, start))
       // flip arrow children to source order for finalize
-      let sb = scope.sb_reorder_block_children(p2.sb, p.sb.current)
-      Ok(#(P(..p2, sb:), ast.ArrowBodyExpression(expr)))
+      let scopes = scope.sb_reorder_block_children(p2.scopes, p.scopes.current)
+      Ok(#(Parser(..p2, scopes:), ast.ArrowBodyExpression(expr)))
     }
   }
 }
 
-fn parse_yield_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
-  case p.ctx.in_formal_params && !p.ctx.in_catch_param {
-    True -> Error(YieldInFormalParameter(pos_of(p)))
-    False -> parse_yield_expression_inner(p)
-  }
-}
-
-fn parse_yield_expression_inner(
-  p: P,
-) -> Result(#(P, ast.Expression), ParseError) {
+fn parse_yield_expression(
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
+  use <- bool.guard(
+    p.ctx.in_formal_params && !p.ctx.in_catch_param,
+    Error(YieldInFormalParameter(pos_of(p))),
+  )
   let start = pos_of(p)
   let p2 = advance(p)
   let bare =
@@ -4150,18 +4191,22 @@ fn parse_yield_expression_inner(
     Semicolon | RightParen | RightBracket | RightBrace | Eof | Comma | Colon ->
       Ok(#(p2, bare))
     Star ->
-      yield_with_arg(start, True, parse_assignment_expression(advance(p2)))
+      parse_assignment_expression(advance(p2))
+      |> yield_with_arg(start, is_delegate: True)
     // slash after yield starts a regex
-    Slash | SlashEqual -> yield_with_arg(start, False, parse_regex_literal(p2))
-    _ -> yield_with_arg(start, False, parse_assignment_expression(p2))
+    Slash | SlashEqual ->
+      parse_regex_literal(p2) |> yield_with_arg(start, is_delegate: False)
+    _ ->
+      parse_assignment_expression(p2)
+      |> yield_with_arg(start, is_delegate: False)
   }
 }
 
 fn yield_with_arg(
+  parsed: Result(#(Parser, ast.Expression), ParseError),
   start: Int,
-  is_delegate: Bool,
-  parsed: Result(#(P, ast.Expression), ParseError),
-) -> Result(#(P, ast.Expression), ParseError) {
+  is_delegate is_delegate: Bool,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   use #(p, arg) <- result.map(parsed)
   #(
     p,
@@ -4174,22 +4219,25 @@ fn yield_with_arg(
 }
 
 fn parse_conditional_expression(
-  p: P,
-) -> Result(#(P, ast.Expression), ParseError) {
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   use #(p2, test_expr) <- result.try(parse_binary_expression(p, 0))
   case peek(p2) {
     Question -> {
       let p3 = advance(p2)
       // §13.14: middle operand is always [+In]
-      use #(p4, consequent) <- result.try(with_allow_in(
+      use #(p4, consequent) <- result.try(allowing_in(
         p3,
-        True,
         parse_assignment_expression,
       ))
       use p5 <- result.try(expect(p4, Colon))
       use #(p6, alternate) <- result.try(parse_assignment_expression(p5))
       Ok(#(
-        P(..p6, last_expr_assignable: False, last_expr_is_assignment: False),
+        Parser(
+          ..p6,
+          last_expr_assignable: False,
+          last_expr_is_assignment: False,
+        ),
         ast.ConditionalExpression(
           condition: test_expr,
           consequent:,
@@ -4203,86 +4251,89 @@ fn parse_conditional_expression(
 }
 
 fn parse_binary_expression(
-  p: P,
+  p: Parser,
   min_prec: Int,
-) -> Result(#(P, ast.Expression), ParseError) {
+) -> Result(#(Parser, ast.Expression), ParseError) {
   use #(p2, left) <- result.try(parse_unary_expression(p))
   parse_binary_rhs(p2, left, min_prec)
 }
 
 fn parse_binary_rhs(
-  p: P,
+  p: Parser,
   left: ast.Expression,
   min_prec: Int,
-) -> Result(#(P, ast.Expression), ParseError) {
+) -> Result(#(Parser, ast.Expression), ParseError) {
   let tok = peek(p)
   // §13.10: bare #x is only valid left of in
-  let bare_private = case left {
-    ast.Identifier(name: "#" <> _, ..) -> True
-    _ -> False
-  }
+  let bare_private = is_bare_private_name(left)
   case binary_operator(tok, p.ctx.allow_in) {
-    None ->
-      case bare_private {
-        True -> Error(PrivateNameNotInBrandCheck(pos_of(p)))
-        False -> Ok(#(p, left))
+    Some(BinaryOperator(precedence:, op:)) if precedence > min_prec -> {
+      let op_pos = pos_of(p)
+      use <- bool.guard(
+        bare_private && tok != In,
+        Error(PrivateNameNotInBrandCheck(op_pos)),
+      )
+      // §13.6: unary/await left of ** is an error
+      use <- bool.guard(
+        tok == StarStar && is_unary_operand(left),
+        Error(UnaryBeforeExponentiation(op_pos)),
+      )
+      let p2 = advance(p)
+      // ** is right-associative
+      let next_min = case tok {
+        StarStar -> precedence - 1
+        _ -> precedence
       }
-    Some(BinaryOperator(precedence:, op:)) ->
-      case precedence > min_prec {
-        False ->
-          case bare_private {
-            True -> Error(PrivateNameNotInBrandCheck(pos_of(p)))
-            False -> Ok(#(p, left))
-          }
-        True -> {
-          let op_pos = pos_of(p)
-          use <- bool.guard(
-            bare_private && tok != In,
-            Error(PrivateNameNotInBrandCheck(op_pos)),
-          )
-          // §13.6: unary/await left of ** is an error
-          use <- bool.guard(
-            tok == StarStar && is_unary_operand(left),
-            Error(UnaryBeforeExponentiation(op_pos)),
-          )
-          let p2 = advance(p)
-          // ** is right-associative
-          let next_min = case tok {
-            StarStar -> precedence - 1
-            _ -> precedence
-          }
-          use #(p3, right) <- result.try(parse_binary_expression(p2, next_min))
-          let span = ast.Span(ast.expression_span(left).start, p3.prev_end)
-          // split so the §13.13.1 check cannot be dropped
-          use expr <- result.try(case op {
-            Binary(op) ->
-              Ok(ast.BinaryExpression(operator: op, left:, right:, span:))
-            ShortCircuit(op) ->
-              // §13.13.1: no unparenthesized ?? mixed with || &&
-              case left {
-                ast.LogicalExpression(operator: ast.NullishCoalescing, ..) ->
-                  Error(CoalesceMixedWithLogical(op_pos))
-                _ ->
-                  Ok(ast.LogicalExpression(operator: op, left:, right:, span:))
-              }
-            Coalesce ->
-              case left, right {
-                ast.LogicalExpression(operator: ast.LogicalOr, ..), _
-                | ast.LogicalExpression(operator: ast.LogicalAnd, ..), _
-                | _, ast.LogicalExpression(operator: ast.LogicalOr, ..)
-                | _, ast.LogicalExpression(operator: ast.LogicalAnd, ..)
-                -> Error(CoalesceMixedWithLogical(op_pos))
-                _, _ ->
-                  Ok(ast.LogicalExpression(
-                    operator: ast.NullishCoalescing,
-                    left:,
-                    right:,
-                    span:,
-                  ))
-              }
-          })
-          parse_binary_rhs(P(..p3, last_expr_assignable: False), expr, min_prec)
-        }
+      use #(p3, right) <- result.try(parse_binary_expression(p2, next_min))
+      let span = ast.Span(ast.expression_span(left).start, p3.prev_end)
+      use expr <- result.try(binary_node(op, left, right, span, op_pos))
+      parse_binary_rhs(
+        Parser(..p3, last_expr_assignable: False),
+        expr,
+        min_prec,
+      )
+    }
+    _ -> {
+      use <- bool.guard(
+        bare_private,
+        Error(PrivateNameNotInBrandCheck(pos_of(p))),
+      )
+      Ok(#(p, left))
+    }
+  }
+}
+
+// separate so the §13.13.1 check cannot be dropped
+fn binary_node(
+  op: token.BinOrLogical,
+  left: ast.Expression,
+  right: ast.Expression,
+  span: ast.Span,
+  op_pos: Int,
+) -> Result(ast.Expression, ParseError) {
+  case op {
+    Binary(op) -> Ok(ast.BinaryExpression(operator: op, left:, right:, span:))
+    ShortCircuit(op) ->
+      // §13.13.1: no unparenthesized ?? mixed with || &&
+      case left {
+        ast.LogicalExpression(operator: ast.NullishCoalescing, ..) ->
+          Error(CoalesceMixedWithLogical(op_pos))
+        _ -> Ok(ast.LogicalExpression(operator: op, left:, right:, span:))
+      }
+    Coalesce ->
+      case left, right {
+        ast.LogicalExpression(operator: ast.LogicalOr, ..), _
+        | ast.LogicalExpression(operator: ast.LogicalAnd, ..), _
+        | _, ast.LogicalExpression(operator: ast.LogicalOr, ..)
+        | _, ast.LogicalExpression(operator: ast.LogicalAnd, ..)
+        -> Error(CoalesceMixedWithLogical(op_pos))
+        _, _ ->
+          Ok(ast.LogicalExpression(
+            operator: ast.NullishCoalescing,
+            left:,
+            right:,
+            span:,
+          ))
       }
   }
 }
@@ -4301,7 +4352,9 @@ fn is_unary_operand(expr: ast.Expression) -> Bool {
   }
 }
 
-fn parse_unary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
+fn parse_unary_expression(
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   let start = pos_of(p)
   let unary = fn(p2, op) {
     use #(p3, arg) <- result.try(parse_unary_expression(p2))
@@ -4310,7 +4363,7 @@ fn parse_unary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       Error(PrivateNameNotInBrandCheck(pos_of(p2))),
     )
     Ok(#(
-      P(..p3, last_expr_assignable: False, last_expr_is_assignment: False),
+      Parser(..p3, last_expr_assignable: False, last_expr_is_assignment: False),
       ast.UnaryExpression(
         operator: op,
         argument: arg,
@@ -4347,33 +4400,41 @@ fn parse_unary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       }
       let p2 = advance(p)
       use #(p3, arg) <- result.try(parse_unary_expression(p2))
-      finish_update_expr(p3, arg, op, True, start, start)
+      finish_update_expr(
+        p3,
+        arg,
+        op,
+        prefix: True,
+        span_start: start,
+        at: start,
+      )
     }
     Await ->
       case p.ctx.in_async || p.mode == Module {
-        True -> {
-          // §15.7.1: no await in a static block
-          use <- bool.guard(
-            p.ctx.in_static_block,
-            Error(AwaitInStaticBlock(start)),
-          )
-          // §15.8.1: no await in formal parameters
-          use <- bool.guard(
-            p.ctx.in_formal_params && !p.ctx.in_catch_param,
-            Error(AwaitInFormalParameter(start)),
-          )
-          let p2 = advance(p)
-          use #(p3, arg) <- result.try(parse_unary_expression(p2))
-          Ok(#(
-            P(..p3, last_expr_assignable: False, last_expr_is_assignment: False),
-            ast.AwaitExpression(argument: arg, span: span_from(start, p3)),
-          ))
-        }
+        True -> parse_await_expression(p)
         // await is an identifier outside async and modules
         False -> parse_postfix_expression(p)
       }
     _ -> parse_postfix_expression(p)
   }
+}
+
+fn parse_await_expression(
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
+  let start = pos_of(p)
+  // §15.7.1: no await in a static block
+  use <- bool.guard(p.ctx.in_static_block, Error(AwaitInStaticBlock(start)))
+  // §15.8.1: no await in formal parameters
+  use <- bool.guard(
+    p.ctx.in_formal_params && !p.ctx.in_catch_param,
+    Error(AwaitInFormalParameter(start)),
+  )
+  use #(p2, arg) <- result.map(parse_unary_expression(advance(p)))
+  #(
+    Parser(..p2, last_expr_assignable: False, last_expr_is_assignment: False),
+    ast.AwaitExpression(argument: arg, span: span_from(start, p2)),
+  )
 }
 
 fn delete_operand(expr: ast.Expression) -> ast.Expression {
@@ -4401,20 +4462,20 @@ fn is_private_name_access(expr: ast.Expression) -> Bool {
 }
 
 // §15.7.1 AllPrivateIdentifiersValid ref recording
-fn note_private_ref(p: P, name: String) -> P {
+fn note_private_ref(p: Parser, name: String) -> Parser {
   case name {
-    "#" <> _ ->
-      P(..p, private_refs: [
-        #(name, p.class_private_depth, pos_of(p)),
-        ..p.private_refs
-      ])
+    "#" <> _ -> {
+      let ref =
+        PrivateNameRef(name:, class_depth: p.class_body_depth, pos: pos_of(p))
+      Parser(..p, private_refs: [ref, ..p.private_refs])
+    }
     _ -> p
   }
 }
 
 // super.#x is always a syntax error (§13.3)
 fn check_super_private(
-  p: P,
+  p: Parser,
   object: ast.Expression,
   name: String,
 ) -> Result(Nil, ParseError) {
@@ -4426,7 +4487,7 @@ fn check_super_private(
 
 // { #x: 1 } is a syntax error
 fn reject_private_property_key(
-  p: P,
+  p: Parser,
   key: ast.PropertyKey,
 ) -> Result(Nil, ParseError) {
   case key {
@@ -4441,52 +4502,47 @@ fn reject_private_property_key(
 
 // end of class body step of AllPrivateIdentifiersValid
 fn resolve_private_refs(
-  p: P,
+  p: Parser,
   outer_depth: Int,
-  declared: Dict(String, #(Bool, PrivateNameKind)),
-) -> Result(P, ParseError) {
+  declared: Dict(String, DeclaredPrivateName),
+) -> Result(Parser, ParseError) {
   let my_depth = outer_depth + 1
+  // unresolved refs now belong to the enclosing class
   let remaining =
     list.filter_map(p.private_refs, fn(ref) {
-      let #(name, depth, pos) = ref
-      case depth >= my_depth {
-        True ->
-          case dict.has_key(declared, name) {
-            True -> Error(Nil)
-            False -> Ok(#(name, outer_depth, pos))
-          }
-        False -> Ok(ref)
+      case ref.class_depth >= my_depth, dict.has_key(declared, ref.name) {
+        True, True -> Error(Nil)
+        True, False -> Ok(PrivateNameRef(..ref, class_depth: outer_depth))
+        False, _ -> Ok(ref)
       }
     })
   case outer_depth {
     // only direct eval's private environment can still legitimize these
-    0 ->
-      case unresolved_outside_eval_env(p, remaining) {
-        [#(name, _, pos), ..] -> Error(UndeclaredPrivateName(pos, name))
-        [] -> Ok(P(..p, private_refs: []))
-      }
-    _ -> Ok(P(..p, private_refs: remaining))
+    0 -> {
+      use Nil <- result.map(check_unresolved_private_refs(
+        Parser(..p, private_refs: remaining),
+      ))
+      Parser(..p, private_refs: [])
+    }
+    _ -> Ok(Parser(..p, private_refs: remaining))
   }
 }
 
-fn check_unresolved_private_refs(p: P) -> Result(Nil, ParseError) {
-  case unresolved_outside_eval_env(p, p.private_refs) {
+fn check_unresolved_private_refs(p: Parser) -> Result(Nil, ParseError) {
+  let unresolved = case p.outer_private_names {
+    [] -> p.private_refs
+    outer ->
+      list.filter(p.private_refs, fn(ref) { !list.contains(outer, ref.name) })
+  }
+  case unresolved {
     [] -> Ok(Nil)
-    [#(name, _, pos), ..] -> Error(UndeclaredPrivateName(pos, name))
+    [ref, ..] -> Error(UndeclaredPrivateName(ref.pos, ref.name))
   }
 }
 
-fn unresolved_outside_eval_env(
-  p: P,
-  refs: List(#(String, Int, Int)),
-) -> List(#(String, Int, Int)) {
-  case p.outer_private_names {
-    [] -> refs
-    outer -> list.filter(refs, fn(ref) { !list.contains(outer, ref.0) })
-  }
-}
-
-fn parse_postfix_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
+fn parse_postfix_expression(
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   use #(p2, expr) <- result.try(parse_left_hand_side_expression(p))
   case peek(p2) {
     PlusPlus | MinusMinus -> {
@@ -4495,8 +4551,14 @@ fn parse_postfix_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
         PlusPlus -> ast.Increment
         _ -> ast.Decrement
       }
-      let err_pos = pos_of(p2)
-      finish_update_expr(advance(p2), expr, op, False, expr.span.start, err_pos)
+      finish_update_expr(
+        advance(p2),
+        expr,
+        op,
+        prefix: False,
+        span_start: expr.span.start,
+        at: pos_of(p2),
+      )
     }
     _ -> Ok(#(p2, expr))
   }
@@ -4504,13 +4566,13 @@ fn parse_postfix_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
 
 // advance preserves last_expr_*, so postfix callers advance first
 fn finish_update_expr(
-  p: P,
+  p: Parser,
   arg: ast.Expression,
   op: ast.UpdateOp,
-  prefix: Bool,
-  span_start: Int,
-  err_pos: Int,
-) -> Result(#(P, ast.Expression), ParseError) {
+  prefix prefix: Bool,
+  span_start span_start: Int,
+  at err_pos: Int,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   case p.last_expr_assignable || is_web_compat_call_target(p, arg), prefix {
     False, True -> Error(InvalidLhsPrefixOp(err_pos))
     False, False -> Error(InvalidPostfixLhs(err_pos))
@@ -4520,10 +4582,10 @@ fn finish_update_expr(
           Error(StrictModeModification(err_pos, n))
         _, _ ->
           Ok(#(
-            P(
+            Parser(
               ..p,
               last_expr_assignable: False,
-              sb: sb_mark_assign_targets(p.sb, arg),
+              scopes: mark_assign_targets(p.scopes, arg),
             ),
             ast.UpdateExpression(
               operator: op,
@@ -4537,47 +4599,22 @@ fn finish_update_expr(
 }
 
 fn parse_left_hand_side_expression(
-  p: P,
-) -> Result(#(P, ast.Expression), ParseError) {
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   case peek(p) {
     New -> parse_new_expression(p)
     _ -> parse_call_expression(p)
   }
 }
 
-fn parse_new_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
+fn parse_new_expression(
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   let p2 = advance(p)
   case peek(p2) {
     Dot -> {
-      let p3 = advance(p2)
-      case peek(p3) {
-        Identifier -> {
-          case peek_value(p3), peek_raw_len(p3) != 6 {
-            // no unicode escapes in new.target
-            "target", True -> Error(UnicodeEscapeInMetaProperty(pos_of(p3)))
-            "target", False ->
-              case p.ctx.allow_new_target {
-                True -> {
-                  let p4 = advance(p3)
-                  let p4 =
-                    P(
-                      ..p4,
-                      sb: scope.sb_lexical_ref(p4.sb, lexical.RefNewTarget),
-                    )
-                  let meta =
-                    ast.MetaProperty(
-                      kind: ast.NewTarget,
-                      span: span_from(pos_of(p), p4),
-                    )
-                  parse_call_chain(p4, meta)
-                }
-                False -> Error(NewTargetOutsideFunction(pos_of(p)))
-              }
-            other, _ -> Error(ExpectedNewTarget(pos_of(p3), Some(other)))
-          }
-        }
-        _ -> Error(ExpectedNewTarget(pos_of(p3), None))
-      }
+      use #(p3, meta) <- result.try(parse_new_target(advance(p2), pos_of(p)))
+      parse_call_chain(p3, meta)
     }
     New -> {
       use #(p3, inner) <- result.try(parse_new_expression(p2))
@@ -4599,148 +4636,59 @@ fn parse_new_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
   }
 }
 
+// p is past new . and start is the position of new
+fn parse_new_target(
+  p: Parser,
+  start: Int,
+) -> Result(#(Parser, ast.Expression), ParseError) {
+  case peek(p), peek_value(p) {
+    Identifier, "target" -> {
+      // no unicode escapes in new.target
+      use <- bool.guard(
+        peek_had_escape(p),
+        Error(UnicodeEscapeInMetaProperty(pos_of(p))),
+      )
+      use <- bool.guard(
+        !p.ctx.allow_new_target,
+        Error(NewTargetOutsideFunction(start)),
+      )
+      let p2 = advance(p)
+      let scopes = scope.sb_lexical_ref(p2.scopes, lexical.RefNewTarget)
+      let meta =
+        ast.MetaProperty(kind: ast.NewTarget, span: span_from(start, p2))
+      Ok(#(Parser(..p2, scopes:), meta))
+    }
+    Identifier, other -> Error(ExpectedNewTarget(pos_of(p), Some(other)))
+    _, _ -> Error(ExpectedNewTarget(pos_of(p), None))
+  }
+}
+
 fn finish_new(
-  p: P,
+  p: Parser,
   start: Int,
   callee: ast.Expression,
-) -> Result(#(P, ast.Expression), ParseError) {
+) -> Result(#(Parser, ast.Expression), ParseError) {
   case peek(p) {
     LeftParen -> {
       use #(p2, args) <- result.try(parse_arguments(p))
       let new_expr =
         ast.NewExpression(callee:, arguments: args, span: span_from(start, p2))
-      parse_call_chain(P(..p2, last_expr_assignable: False), new_expr)
+      parse_call_chain(Parser(..p2, last_expr_assignable: False), new_expr)
     }
     _ ->
       Ok(#(
-        P(..p, last_expr_assignable: False),
+        Parser(..p, last_expr_assignable: False),
         ast.NewExpression(callee:, arguments: [], span: span_from(start, p)),
       ))
   }
 }
 
-fn parse_call_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
+fn parse_call_expression(
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   let parsed = case peek(p) {
-    Super -> {
-      let super_span = span_of(p)
-      let p2 = advance(p)
-      case peek(p2) {
-        LeftParen ->
-          case p.ctx.allow_super_call {
-            True -> {
-              use #(p3, args) <- result.try(parse_arguments(p2))
-              // record <class_fields_init> ref so arrows in derived ctors capture it
-              let sb =
-                p3.sb
-                |> scope.sb_lexical_ref(lexical.RefActiveFunc)
-                |> scope.sb_lexical_ref(lexical.RefNewTarget)
-                |> scope.sb_lexical_ref(lexical.RefThis)
-                |> scope.sb_ref(ast_util.class_fields_init)
-              Ok(#(
-                P(..p3, sb:),
-                ast.CallExpression(
-                  callee: ast.SuperExpression(span: super_span),
-                  arguments: args,
-                  span: span_from(super_span.start, p3),
-                ),
-              ))
-            }
-            False -> Error(SuperCallNotInDerivedConstructor(pos_of(p)))
-          }
-        Dot | LeftBracket ->
-          case p.ctx.allow_super_property {
-            True -> {
-              let sb =
-                p2.sb
-                |> scope.sb_lexical_ref(lexical.RefHomeObject)
-                |> scope.sb_lexical_ref(lexical.RefThis)
-              Ok(#(P(..p2, sb:), ast.SuperExpression(span: super_span)))
-            }
-            False -> Error(SuperPropertyNotInMethod(pos_of(p)))
-          }
-        _ -> Error(UnexpectedSuper(pos_of(p)))
-      }
-    }
-    Import -> {
-      let import_start = pos_of(p)
-      let p2 = advance(p)
-      case peek(p2) {
-        LeftParen -> {
-          // import() arguments are [+In]
-          use p3 <- with_allow_in(advance(p2), True)
-          use #(p4, source_expr) <- result.try(parse_assignment_expression(p3))
-          use #(p5, options) <- result.try(case peek(p4) {
-            Comma ->
-              case peek_at(p4, 1) {
-                RightParen -> Ok(#(advance(p4), None))
-                _ -> {
-                  use #(p_attrs, attrs) <- result.map(
-                    parse_assignment_expression(advance(p4)),
-                  )
-                  // import(x, opts,) is allowed
-                  let p_attrs = case peek(p_attrs) {
-                    Comma ->
-                      case peek_at(p_attrs, 1) {
-                        RightParen -> advance(p_attrs)
-                        _ -> p_attrs
-                      }
-                    _ -> p_attrs
-                  }
-                  #(p_attrs, Some(attrs))
-                }
-              }
-            _ -> Ok(#(p4, None))
-          })
-          use p6 <- result.map(expect(p5, RightParen))
-          #(
-            p6,
-            ast.ImportExpression(
-              source: source_expr,
-              options:,
-              phase: ast.PhaseEvaluation,
-              span: span_from(import_start, p6),
-            ),
-          )
-        }
-        Dot -> {
-          let p3 = advance(p2)
-          // meta/source/defer must be unescaped (§5.1.5)
-          case peek(p3), peek_value(p3), peek_had_escape(p3) {
-            Identifier, "meta", False -> {
-              use <- bool.guard(
-                p.mode == Script,
-                Error(ImportMetaOutsideModule(pos_of(p))),
-              )
-              let p4 = advance(p3)
-              Ok(#(
-                p4,
-                ast.MetaProperty(
-                  kind: ast.ImportMeta,
-                  span: span_from(pos_of(p), p4),
-                ),
-              ))
-            }
-            // bare import.source is a syntax error
-            Identifier, "source", False ->
-              case peek_at(p3, 1) {
-                LeftParen ->
-                  parse_phase_import_call(p3, import_start, ast.PhaseSource)
-                _ -> Error(ExpectedImportMeta(pos_of(p3), Some("source")))
-              }
-            Identifier, "defer", False ->
-              case peek_at(p3, 1) {
-                LeftParen ->
-                  parse_phase_import_call(p3, import_start, ast.PhaseDefer)
-                _ -> Error(ExpectedImportMeta(pos_of(p3), Some("defer")))
-              }
-            Identifier, other, _ ->
-              Error(ExpectedImportMeta(pos_of(p3), Some(other)))
-            _, _, _ -> Error(ExpectedImportMeta(pos_of(p3), None))
-          }
-        }
-        _ -> Error(ExpectedCallOrDotAfterImport(pos_of(p2)))
-      }
-    }
+    Super -> parse_super_expression(p)
+    Import -> parse_import_call_or_meta(p)
     _ -> parse_primary_expression(p)
   }
   use #(p2, expr) <- result.try(parsed)
@@ -4760,7 +4708,137 @@ fn parse_call_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
   parse_call_chain(p2, expr)
 }
 
-fn at_suffix_start(p: P) -> Bool {
+fn parse_super_expression(
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
+  let super_span = span_of(p)
+  let p2 = advance(p)
+  case peek(p2) {
+    LeftParen -> {
+      use <- bool.guard(
+        !p.ctx.allow_super_call,
+        Error(SuperCallNotInDerivedConstructor(pos_of(p))),
+      )
+      use #(p3, args) <- result.map(parse_arguments(p2))
+      // class_fields_init too, so arrows in derived ctors capture it
+      let scopes =
+        super_call_refs(p3.scopes) |> scope.sb_ref(ast_util.class_fields_init)
+      let call =
+        ast.CallExpression(
+          callee: ast.SuperExpression(span: super_span),
+          arguments: args,
+          span: span_from(super_span.start, p3),
+        )
+      #(Parser(..p3, scopes:), call)
+    }
+    Dot | LeftBracket ->
+      super_property_reference(
+        p2,
+        super_span,
+        SuperPropertyNotInMethod(pos_of(p)),
+      )
+    _ -> Error(UnexpectedSuper(pos_of(p)))
+  }
+}
+
+// p is past super, at . or [
+fn super_property_reference(
+  p: Parser,
+  span: ast.Span,
+  not_allowed: ParseError,
+) -> Result(#(Parser, ast.Expression), ParseError) {
+  use <- bool.guard(!p.ctx.allow_super_property, Error(not_allowed))
+  let scopes =
+    p.scopes
+    |> scope.sb_lexical_ref(lexical.RefHomeObject)
+    |> scope.sb_lexical_ref(lexical.RefThis)
+  Ok(#(Parser(..p, scopes:), ast.SuperExpression(span:)))
+}
+
+fn parse_import_call_or_meta(
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
+  let import_start = pos_of(p)
+  let p2 = advance(p)
+  case peek(p2) {
+    LeftParen -> parse_import_call(p2, import_start)
+    Dot -> {
+      let p3 = advance(p2)
+      // meta/source/defer must be unescaped (§5.1.5)
+      case peek(p3), peek_value(p3), peek_had_escape(p3) {
+        Identifier, "meta", False -> {
+          use <- bool.guard(
+            p.mode == Script,
+            Error(ImportMetaOutsideModule(import_start)),
+          )
+          let p4 = advance(p3)
+          let meta =
+            ast.MetaProperty(
+              kind: ast.ImportMeta,
+              span: span_from(import_start, p4),
+            )
+          Ok(#(p4, meta))
+        }
+        // bare import.source is a syntax error
+        Identifier, "source", False ->
+          case peek_at(p3, 1) {
+            LeftParen ->
+              parse_phase_import_call(p3, import_start, ast.PhaseSource)
+            _ -> Error(ExpectedImportMeta(pos_of(p3), Some("source")))
+          }
+        Identifier, "defer", False ->
+          case peek_at(p3, 1) {
+            LeftParen ->
+              parse_phase_import_call(p3, import_start, ast.PhaseDefer)
+            _ -> Error(ExpectedImportMeta(pos_of(p3), Some("defer")))
+          }
+        Identifier, other, _ ->
+          Error(ExpectedImportMeta(pos_of(p3), Some(other)))
+        _, _, _ -> Error(ExpectedImportMeta(pos_of(p3), None))
+      }
+    }
+    _ -> Error(ExpectedCallOrDotAfterImport(pos_of(p2)))
+  }
+}
+
+// §13.3.10 import(x) / import(x, options); p is at (
+fn parse_import_call(
+  p: Parser,
+  import_start: Int,
+) -> Result(#(Parser, ast.Expression), ParseError) {
+  // import() arguments are [+In]
+  use p2 <- allowing_in(advance(p))
+  use #(p3, source_expr) <- result.try(parse_assignment_expression(p2))
+  use #(p4, options) <- result.try(case peek(p3), peek_at(p3, 1) {
+    Comma, RightParen -> Ok(#(advance(p3), None))
+    Comma, _ -> {
+      use #(p4, attrs) <- result.map(parse_assignment_expression(advance(p3)))
+      // import(x, opts,) is allowed
+      #(skip_trailing_comma(p4), Some(attrs))
+    }
+    _, _ -> Ok(#(p3, None))
+  })
+  use p5 <- result.map(expect(p4, RightParen))
+  #(
+    p5,
+    ast.ImportExpression(
+      source: source_expr,
+      options:,
+      phase: ast.PhaseEvaluation,
+      span: span_from(import_start, p5),
+    ),
+  )
+}
+
+// a , directly before ) is consumed
+fn skip_trailing_comma(p: Parser) -> Parser {
+  case peek(p), peek_at(p, 1) {
+    Comma, RightParen -> advance(p)
+    _, _ -> p
+  }
+}
+
+fn at_suffix_start(p: Parser) -> Bool {
   case peek(p) {
     Dot
     | LeftBracket
@@ -4774,20 +4852,13 @@ fn at_suffix_start(p: P) -> Bool {
 
 // §13.3.10 import.source(x) / import.defer(x)
 fn parse_phase_import_call(
-  p: P,
+  p: Parser,
   import_start: Int,
   phase: ast.ImportPhase,
-) -> Result(#(P, ast.Expression), ParseError) {
-  use p2 <- with_allow_in(advance(advance(p)), True)
+) -> Result(#(Parser, ast.Expression), ParseError) {
+  use p2 <- allowing_in(advance(advance(p)))
   use #(p3, source_expr) <- result.try(parse_assignment_expression(p2))
-  let p4 = case peek(p3) {
-    Comma ->
-      case peek_at(p3, 1) {
-        RightParen -> advance(p3)
-        _ -> p3
-      }
-    _ -> p3
-  }
+  let p4 = skip_trailing_comma(p3)
   use p5 <- result.map(expect(p4, RightParen))
   #(
     p5,
@@ -4801,9 +4872,9 @@ fn parse_phase_import_call(
 }
 
 fn parse_call_chain(
-  p: P,
+  p: Parser,
   callee: ast.Expression,
-) -> Result(#(P, ast.Expression), ParseError) {
+) -> Result(#(Parser, ast.Expression), ParseError) {
   let start = callee.span.start
   case peek(p) {
     LeftParen -> {
@@ -4811,16 +4882,12 @@ fn parse_call_chain(
       // §19.2.1 direct eval poisons the scope
       let p2 = case ast_util.unwrap_parens(callee) {
         ast.Identifier(name: "eval", ..) ->
-          P(..p2, sb: scope.sb_mark_eval(p2.sb))
+          Parser(..p2, scopes: scope.sb_mark_eval(p2.scopes))
         _ -> p2
       }
       let expr =
-        ast.CallExpression(
-          callee: callee,
-          arguments: args,
-          span: span_from(start, p2),
-        )
-      parse_call_chain(P(..p2, last_expr_assignable: False), expr)
+        ast.CallExpression(callee:, arguments: args, span: span_from(start, p2))
+      parse_call_chain(Parser(..p2, last_expr_assignable: False), expr)
     }
     Dot | LeftBracket -> {
       use #(p2, expr) <- result.try(parse_member_suffix(p, callee, start))
@@ -4834,11 +4901,11 @@ fn parse_call_chain(
           use #(p3, args) <- result.try(parse_arguments(p2))
           let expr =
             ast.OptionalCallExpression(
-              callee: callee,
+              callee:,
               arguments: args,
               span: span_from(start, p3),
             )
-          parse_call_chain(P(..p3, last_expr_assignable: False), expr)
+          parse_call_chain(Parser(..p3, last_expr_assignable: False), expr)
         }
         _ -> {
           use #(p2, expr) <- result.try(parse_member_suffix(p, callee, start))
@@ -4848,7 +4915,7 @@ fn parse_call_chain(
     TemplateLiteral | TemplateHead -> {
       // §13.3.1.1: no tagged template in an optional chain
       use <- bool.guard(
-        in_optional_chain(callee),
+        ast_util.chain_has_optional(callee),
         Error(TemplateInOptionalChain(pos_of(p))),
       )
       use #(p2, expr) <- result.try(parse_tagged_template(p, callee))
@@ -4858,21 +4925,12 @@ fn parse_call_chain(
   }
 }
 
-fn in_optional_chain(expr: ast.Expression) -> Bool {
-  case expr {
-    ast.OptionalMemberExpression(..) | ast.OptionalCallExpression(..) -> True
-    ast.MemberExpression(object:, ..) -> in_optional_chain(object)
-    ast.CallExpression(callee:, ..) -> in_optional_chain(callee)
-    ast.TaggedTemplateExpression(tag:, ..) -> in_optional_chain(tag)
-    _ -> False
-  }
-}
-
+// p is at . [ or ?.
 fn parse_member_suffix(
-  p: P,
+  p: Parser,
   object: ast.Expression,
   start: Int,
-) -> Result(#(P, ast.Expression), ParseError) {
+) -> Result(#(Parser, ast.Expression), ParseError) {
   case peek(p) {
     Dot -> {
       let p2 = advance(p)
@@ -4880,65 +4938,66 @@ fn parse_member_suffix(
         True -> {
           let prop_name = peek_value(p2)
           use Nil <- result.try(check_super_private(p2, object, prop_name))
-          Ok(finish_dot_member(p2, object, start, prop_name, False))
+          Ok(finish_dot_member(p2, object, start, prop_name, optional: False))
         }
         False ->
           Error(error_at_current(p2, ExpectedIdentifierAfterDot(pos_of(p2))))
       }
     }
-    LeftBracket -> parse_bracket_member(p, object, start, False)
+    LeftBracket -> parse_bracket_member(p, object, start, optional: False)
     QuestionDot -> {
       let p2 = advance(p)
       case peek(p2) {
-        LeftBracket -> parse_bracket_member(p2, object, start, True)
+        LeftBracket -> parse_bracket_member(p2, object, start, optional: True)
         _ ->
           case is_identifier_or_keyword(peek(p2)) {
-            True ->
-              Ok(finish_dot_member(p2, object, start, peek_value(p2), True))
+            True -> {
+              let prop_name = peek_value(p2)
+              Ok(finish_dot_member(p2, object, start, prop_name, optional: True))
+            }
             False ->
               Error(error_at_current(p2, ExpectedAfterOptionalChain(pos_of(p2))))
           }
       }
     }
-    // unreachable
-    _ -> Ok(#(p, object))
+    _ -> panic as "parser: parse_member_suffix called off a member suffix"
   }
 }
 
 fn parse_bracket_member(
-  p: P,
+  p: Parser,
   object: ast.Expression,
   start: Int,
-  optional: Bool,
-) -> Result(#(P, ast.Expression), ParseError) {
-  use p2 <- with_allow_in(advance(p), True)
+  optional optional: Bool,
+) -> Result(#(Parser, ast.Expression), ParseError) {
+  use p2 <- allowing_in(advance(p))
   use #(p3, expression) <- result.try(parse_expression(p2))
   use p4 <- result.map(expect(p3, RightBracket))
   let span = span_from(start, p4)
   let property = ast.Bracket(expression:)
   case optional {
     False -> #(
-      P(..p4, last_expr_assignable: True),
+      Parser(..p4, last_expr_assignable: True),
       ast.MemberExpression(object:, property:, span:),
     )
     True -> #(
-      P(..p4, last_expr_assignable: False),
+      Parser(..p4, last_expr_assignable: False),
       ast.OptionalMemberExpression(object:, property:, span:),
     )
   }
 }
 
 fn finish_dot_member(
-  p: P,
+  p: Parser,
   object: ast.Expression,
   start: Int,
   prop_name: String,
-  optional: Bool,
-) -> #(P, ast.Expression) {
+  optional optional: Bool,
+) -> #(Parser, ast.Expression) {
   let p = note_private_ref(p, prop_name)
   // obj.#x is a ref to the class-scope #x const
   let p = case prop_name {
-    "#" <> _ -> P(..p, sb: scope.sb_ref(p.sb, prop_name))
+    "#" <> _ -> Parser(..p, scopes: scope.sb_ref(p.scopes, prop_name))
     _ -> p
   }
   let property = ast.Dot(name: prop_name, span: span_of(p))
@@ -4946,20 +5005,20 @@ fn finish_dot_member(
   let span = span_from(start, p2)
   case optional {
     False -> #(
-      P(..p2, last_expr_assignable: True),
+      Parser(..p2, last_expr_assignable: True),
       ast.MemberExpression(object:, property:, span:),
     )
     True -> #(
-      P(..p2, last_expr_assignable: False),
+      Parser(..p2, last_expr_assignable: False),
       ast.OptionalMemberExpression(object:, property:, span:),
     )
   }
 }
 
 fn parse_tagged_template(
-  p: P,
+  p: Parser,
   tag: ast.Expression,
-) -> Result(#(P, ast.Expression), ParseError) {
+) -> Result(#(Parser, ast.Expression), ParseError) {
   use #(p2, raw_parts) <- result.map(parse_template_spans(p))
   // §12.9.6: invalid escape is legal in tagged templates
   let parts =
@@ -4975,13 +5034,90 @@ fn parse_tagged_template(
       parts:,
       span: span_from(tag.span.start, p2),
     )
-  #(P(..p2, last_expr_assignable: False), expr)
+  #(Parser(..p2, last_expr_assignable: False), expr)
+}
+
+// §13.2.8: substitutions are [+In]; spans are rescanned from source
+fn parse_template_spans(
+  p: Parser,
+) -> Result(#(Parser, ast.TemplateParts(String)), ParseError) {
+  case peek(p) {
+    TemplateLiteral ->
+      Ok(#(
+        advance(p),
+        ast.TemplateParts(head: template_span_raw(p, 1), tail: []),
+      ))
+    // restore last-expr flags and [In] after the whole template
+    _ -> {
+      let saved_assignable = p.last_expr_assignable
+      let saved_is_assignment = p.last_expr_is_assignment
+      let head = template_span_raw(p, 2)
+      use #(p, rev_tail) <- result.map({
+        use p <- allowing_in(advance(p))
+        parse_template_substitutions(p, [])
+      })
+      #(
+        Parser(
+          ..p,
+          last_expr_assignable: saved_assignable,
+          last_expr_is_assignment: saved_is_assignment,
+        ),
+        ast.TemplateParts(head:, tail: list.reverse(rev_tail)),
+      )
+    }
+  }
+}
+
+fn parse_template_substitutions(
+  p: Parser,
+  rev_tail: List(#(ast.Expression, String)),
+) -> Result(#(Parser, List(#(ast.Expression, String))), ParseError) {
+  use #(p, expr) <- result.try(parse_expression(
+    Parser(..p, last_expr_assignable: False, last_expr_is_assignment: False),
+  ))
+  case peek(p) {
+    RightBrace -> {
+      let p = template_continuation(p)
+      case peek(p) {
+        TemplateHead ->
+          parse_template_substitutions(advance(p), [
+            #(expr, template_span_raw(p, 2)),
+            ..rev_tail
+          ])
+        TemplateLiteral ->
+          Ok(#(advance(p), [#(expr, template_span_raw(p, 1)), ..rev_tail]))
+        // unterminated template
+        _ -> Error(UnterminatedTemplateSubstitution(pos_of(p)))
+      }
+    }
+    other ->
+      Error(error_at_current(p, ExpectedToken(pos_of(p), RightBrace, other)))
+  }
+}
+
+// window past } is garbage, rescan like a regex
+fn template_continuation(p: Parser) -> Parser {
+  let #(token, scan) =
+    lexer.scan_template_continuation(
+      p.bytes,
+      pos_of(p),
+      line_of(p),
+      p.scan.source_kind,
+    )
+  Parser(..p, tokens: [token], scan:)
+}
+
+// raw quasi text, line terminators normalized (§12.9.6 trv)
+fn template_span_raw(p: Parser, trailing: Int) -> String {
+  source_bytes.slice(p.bytes, pos_of(p) + 1, peek_raw_len(p) - 1 - trailing)
+  |> string.replace("\r\n", "\n")
+  |> string.replace("\r", "\n")
 }
 
 fn parse_member_templates(
-  p: P,
+  p: Parser,
   callee: ast.Expression,
-) -> Result(#(P, ast.Expression), ParseError) {
+) -> Result(#(Parser, ast.Expression), ParseError) {
   case peek(p) {
     TemplateLiteral | TemplateHead -> {
       use #(p2, expr) <- result.try(parse_tagged_template(p, callee))
@@ -4992,19 +5128,25 @@ fn parse_member_templates(
   }
 }
 
-fn parse_member_chain(p: P, object: ast.Expression) -> #(P, ast.Expression) {
+fn parse_member_chain(
+  p: Parser,
+  object: ast.Expression,
+) -> #(Parser, ast.Expression) {
   // no ?. here: new a?.b must fail downstream (§13.3)
   case peek(p) {
     Dot | LeftBracket ->
       case parse_member_suffix(p, object, object.span.start) {
         Ok(#(p2, expr)) -> parse_member_chain(p2, expr)
-        Error(_) -> #(p, object)
+        // the caller reparses this suffix and reports it
+        Error(_reported_by_caller) -> #(p, object)
       }
     _ -> #(p, object)
   }
 }
 
-fn parse_arguments(p: P) -> Result(#(P, List(ast.Expression)), ParseError) {
+fn parse_arguments(
+  p: Parser,
+) -> Result(#(Parser, List(ast.Expression)), ParseError) {
   use p2 <- result.try(expect(p, LeftParen))
   parse_comma_list(
     p2,
@@ -5015,9 +5157,9 @@ fn parse_arguments(p: P) -> Result(#(P, List(ast.Expression)), ParseError) {
   )
 }
 
-fn parse_argument(p: P) -> Result(#(P, ast.Expression), ParseError) {
+fn parse_argument(p: Parser) -> Result(#(Parser, ast.Expression), ParseError) {
   // arguments are [+In]
-  use p <- with_allow_in(p, True)
+  use p <- allowing_in(p)
   case peek(p) {
     DotDotDot -> {
       let start = pos_of(p)
@@ -5028,7 +5170,9 @@ fn parse_argument(p: P) -> Result(#(P, ast.Expression), ParseError) {
   }
 }
 
-fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
+fn parse_primary_expression(
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   case peek(p) {
     Identifier -> {
       let val = peek_value(p)
@@ -5038,25 +5182,26 @@ fn parse_primary_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
       case val {
         "#" <> _ ->
           case peek_at(p, 1) {
-            In -> identifier_reference(note_private_ref(p, val), val)
+            In -> identifier_reference(note_private_ref(p, val))
             _ -> Error(PrivateNameNotInBrandCheck(pos_of(p)))
           }
-        _ -> identifier_reference(p, val)
+        _ -> identifier_reference(p)
       }
     }
-    _ -> parse_primary_non_identifier(P(..p, last_expr_name: None))
+    _ -> parse_primary_non_identifier(Parser(..p, last_expr_name: None))
   }
 }
 
+// also used for contextual keywords, never eval or arguments
 fn identifier_reference(
-  p: P,
-  name: String,
-) -> Result(#(P, ast.Expression), ParseError) {
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
+  let name = peek_value(p)
   Ok(#(
     advance(
-      P(
+      Parser(
         ..p,
-        sb: scope.sb_ref(p.sb, name),
+        scopes: scope.sb_ref(p.scopes, name),
         last_expr_assignable: True,
         last_expr_name: Some(name),
       ),
@@ -5066,30 +5211,29 @@ fn identifier_reference(
 }
 
 fn parse_primary_non_identifier(
-  p: P,
-) -> Result(#(P, ast.Expression), ParseError) {
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   case peek(p) {
     // hard lexer error token: report its message
     Illegal | LexFailure(_) -> Error(illegal_token_error(p))
     Number -> {
-      use <- bool.guard(
-        p.ctx.strict && peek_annex_b_legacy(p),
-        Error(OctalLiteralStrictMode(pos_of(p))),
-      )
+      use Nil <- result.try(check_legacy_octal_literal(p))
       use lit <- result.map(numeric_literal(p))
-      #(P(..advance(p), last_expr_assignable: False), lit)
+      #(Parser(..advance(p), last_expr_assignable: False), lit)
     }
     KString -> {
       use value <- result.map(string_literal_value(p))
       #(
-        P(..advance(p), last_expr_assignable: False),
+        Parser(..advance(p), last_expr_assignable: False),
         ast.StringExpression(value:, span: span_of(p)),
       )
     }
-    KTrue -> ok_lit(p, ast.BooleanLiteral(value: True, span: span_of(p)))
-    KFalse -> ok_lit(p, ast.BooleanLiteral(value: False, span: span_of(p)))
-    Null -> ok_lit(p, ast.NullLiteral(span: span_of(p)))
-    Undefined -> ok_lit(p, ast.UndefinedExpression(span: span_of(p)))
+    KTrue ->
+      accept_literal(p, ast.BooleanLiteral(value: True, span: span_of(p)))
+    KFalse ->
+      accept_literal(p, ast.BooleanLiteral(value: False, span: span_of(p)))
+    Null -> accept_literal(p, ast.NullLiteral(span: span_of(p)))
+    Undefined -> accept_literal(p, ast.UndefinedExpression(span: span_of(p)))
     TemplateLiteral | TemplateHead -> {
       let start = pos_of(p)
       use #(p, raw_parts) <- result.try(parse_template_spans(p))
@@ -5103,55 +5247,44 @@ fn parse_primary_non_identifier(
         }),
       )
       #(
-        P(..p, last_expr_assignable: False),
+        Parser(..p, last_expr_assignable: False),
         ast.TemplateLiteral(parts:, span: ast.Span(start:, end: p.prev_end)),
       )
     }
     This ->
-      ok_lit(
-        P(..p, sb: scope.sb_lexical_ref(p.sb, lexical.RefThis)),
+      accept_literal(
+        Parser(..p, scopes: scope.sb_lexical_ref(p.scopes, lexical.RefThis)),
         ast.ThisExpression(span: span_of(p)),
       )
-    Super -> {
-      let next = peek_at(p, 1)
-      case next {
+    Super ->
+      case peek_at(p, 1) {
         Dot | LeftBracket ->
-          case p.ctx.allow_super_property {
-            True -> {
-              let sb =
-                p.sb
-                |> scope.sb_lexical_ref(lexical.RefHomeObject)
-                |> scope.sb_lexical_ref(lexical.RefThis)
-              Ok(#(P(..advance(p), sb:), ast.SuperExpression(span: span_of(p))))
-            }
-            False -> Error(UnexpectedSuper(pos_of(p)))
-          }
+          super_property_reference(
+            advance(p),
+            span_of(p),
+            UnexpectedSuper(pos_of(p)),
+          )
         _ -> Error(UnexpectedSuper(pos_of(p)))
       }
-    }
     LeftParen -> {
       let start = pos_of(p)
       let p2 = advance(p)
-      case peek(p2) {
-        RightParen -> {
-          // () without => is an error
-          Error(UnexpectedCloseParen(pos_of(p)))
-        }
-        _ -> {
-          // parenthesized expression is [+In]
-          use p2 <- with_allow_in(p2, True)
-          use #(p3, expr) <- result.try(parse_expression(p2))
-          use p4 <- result.map(expect(p3, RightParen))
-          // keep parens for IsIdentifierRef (§13.15.2)
-          #(
-            p4,
-            ast.ParenthesizedExpression(
-              expression: expr,
-              span: span_from(start, p4),
-            ),
-          )
-        }
-      }
+      // () without => is an error
+      use <- bool.guard(
+        peek(p2) == RightParen,
+        Error(UnexpectedCloseParen(pos_of(p))),
+      )
+      // parenthesized expression is [+In]
+      use p2 <- allowing_in(p2)
+      use #(p3, expr) <- result.try(parse_expression(p2))
+      use p4 <- result.map(expect(p3, RightParen))
+      // keep parens for IsIdentifierRef (§13.15.2)
+      let expr =
+        ast.ParenthesizedExpression(
+          expression: expr,
+          span: span_from(start, p4),
+        )
+      #(p4, expr)
     }
     LeftBracket -> parse_array_literal(p) |> set_not_assignable
     LeftBrace -> parse_object_literal(p) |> set_not_assignable
@@ -5160,71 +5293,49 @@ fn parse_primary_non_identifier(
     Async ->
       case async_function_start(p) {
         True -> parse_function_expression(p, is_async: True)
-        False -> contextual_ident_ok(p)
+        False -> identifier_reference(p)
       }
-    Slash -> {
-      // slash here starts a regex: relex it
-      parse_regex_literal(p)
-    }
-    SlashEqual -> {
-      // /= starts a regex beginning with =
-      parse_regex_literal(p)
-    }
+    // / and /= here start a regex: relex it
+    Slash | SlashEqual -> parse_regex_literal(p)
     New -> parse_new_expression(p)
-    _ ->
-      case is_contextual_keyword(peek(p)) {
-        True ->
-          case peek(p) {
-            Yield ->
-              case p.ctx.strict {
-                True -> Error(YieldReservedStrictMode(pos_of(p)))
-                False ->
-                  case p.ctx.in_generator {
-                    True -> Error(YieldInGenerator(pos_of(p)))
-                    False -> contextual_ident_ok(p)
-                  }
-              }
-            Await ->
-              case p.mode {
-                Module -> Error(AwaitInModule(pos_of(p)))
-                Script ->
-                  case p.ctx.in_async {
-                    True -> Error(AwaitInAsyncFunction(pos_of(p)))
-                    False -> contextual_ident_ok(p)
-                  }
-              }
-            Let ->
-              case p.ctx.strict {
-                True -> Error(LetIdentifierStrictMode(pos_of(p)))
-                False -> contextual_ident_ok(p)
-              }
-            Static ->
-              case p.ctx.strict {
-                True -> Error(StaticReservedStrictMode(pos_of(p)))
-                False -> contextual_ident_ok(p)
-              }
-            _ -> contextual_ident_ok(p)
-          }
-        False -> Error(UnexpectedToken(pos_of(p), peek(p)))
+    Yield -> {
+      use <- bool.guard(p.ctx.strict, Error(YieldReservedStrictMode(pos_of(p))))
+      use <- bool.guard(p.ctx.in_generator, Error(YieldInGenerator(pos_of(p))))
+      identifier_reference(p)
+    }
+    Await -> {
+      use <- bool.guard(p.mode == Module, Error(AwaitInModule(pos_of(p))))
+      use <- bool.guard(p.ctx.in_async, Error(AwaitInAsyncFunction(pos_of(p))))
+      identifier_reference(p)
+    }
+    Let -> {
+      use <- bool.guard(p.ctx.strict, Error(LetIdentifierStrictMode(pos_of(p))))
+      identifier_reference(p)
+    }
+    Static -> {
+      use <- bool.guard(
+        p.ctx.strict,
+        Error(StaticReservedStrictMode(pos_of(p))),
+      )
+      identifier_reference(p)
+    }
+    other ->
+      case is_contextual_keyword(other) {
+        True -> identifier_reference(p)
+        False -> Error(UnexpectedToken(pos_of(p), other))
       }
   }
 }
 
-fn contextual_ident_ok(p: P) -> Result(#(P, ast.Expression), ParseError) {
-  let name = peek_value(p)
-  Ok(#(
-    P(..advance(p), last_expr_assignable: True, sb: scope.sb_ref(p.sb, name)),
-    ast.Identifier(name:, span: span_of(p)),
-  ))
-}
-
-fn parse_array_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
+fn parse_array_literal(
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   let start = pos_of(p)
   let p2 = advance(p)
   // elements are [+In]
-  use p2 <- with_allow_in(p2, True)
+  use p2 <- allowing_in(p2)
   // pattern flags are per literal: reset
-  let p2 = P(..p2, has_invalid_pattern: False)
+  let p2 = Parser(..p2, literal_invalid_as_pattern: False)
   use #(p3, elems) <- result.map(parse_array_elements(p2, []))
   #(
     p3,
@@ -5235,45 +5346,56 @@ fn parse_array_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
   )
 }
 
-fn cover_elem_invalid(
-  p: P,
+// does the element just parsed break the enclosing pattern
+fn element_breaks_pattern(
+  p: Parser,
   start_token: TokenKind,
-  allow_default: Bool,
+  allow_default allow_default: Bool,
 ) -> Bool {
-  case
+  let valid_target =
     p.last_expr_assignable || { allow_default && p.last_expr_is_assignment }
-  {
-    True -> False
-    False ->
-      case start_token {
-        LeftBrace | LeftBracket -> p.has_invalid_pattern
-        _ -> True
-      }
+  case valid_target, start_token {
+    True, _ -> False
+    False, LeftBrace | False, LeftBracket -> p.literal_invalid_as_pattern
+    False, _ -> True
   }
 }
 
+// one element, folding its verdict into the literal's flag
+fn parse_cover_element(
+  p: Parser,
+  invalid_before invalid_before: Bool,
+  allow_default allow_default: Bool,
+) -> Result(#(Parser, ast.Expression), ParseError) {
+  let start_token = peek(p)
+  use #(p2, expr) <- result.map(parse_assignment_expression(p))
+  let invalid =
+    invalid_before || element_breaks_pattern(p2, start_token, allow_default:)
+  #(Parser(..p2, literal_invalid_as_pattern: invalid), expr)
+}
+
 fn parse_array_elements(
-  p: P,
+  p: Parser,
   acc: List(Option(ast.Expression)),
-) -> Result(#(P, List(Option(ast.Expression))), ParseError) {
+) -> Result(#(Parser, List(Option(ast.Expression))), ParseError) {
+  let invalid_before = p.literal_invalid_as_pattern
   case peek(p) {
     RightBracket -> Ok(#(advance(p), acc))
     Comma -> parse_array_elements(advance(p), [None, ..acc])
     DotDotDot -> {
-      let saved_invalid = p.has_invalid_pattern
       let spread_pos = pos_of(p)
-      let spread_start = peek_at(p, 1)
-      let p2 = advance(p)
-      use #(p3, expr) <- result.try(parse_assignment_expression(p2))
       // rest cannot take a default
-      let elem_invalid = cover_elem_invalid(p3, spread_start, False)
-      let p3 = P(..p3, has_invalid_pattern: saved_invalid || elem_invalid)
+      use #(p3, expr) <- result.try(parse_cover_element(
+        advance(p),
+        invalid_before:,
+        allow_default: False,
+      ))
       let elem =
         Some(ast.SpreadElement(argument: expr, span: span_from(spread_pos, p3)))
       case peek(p3) {
         Comma -> {
           // spread not last: fine as expression, invalid as pattern
-          let p4 = P(..advance(p3), has_invalid_pattern: True)
+          let p4 = Parser(..advance(p3), literal_invalid_as_pattern: True)
           parse_array_elements(p4, [elem, ..acc])
         }
         RightBracket -> Ok(#(advance(p3), [elem, ..acc]))
@@ -5281,11 +5403,11 @@ fn parse_array_elements(
       }
     }
     _ -> {
-      let saved_invalid = p.has_invalid_pattern
-      let elem_start = peek(p)
-      use #(p2, expr) <- result.try(parse_assignment_expression(p))
-      let elem_invalid = cover_elem_invalid(p2, elem_start, True)
-      let p2 = P(..p2, has_invalid_pattern: saved_invalid || elem_invalid)
+      use #(p2, expr) <- result.try(parse_cover_element(
+        p,
+        invalid_before:,
+        allow_default: True,
+      ))
       case peek(p2) {
         Comma -> parse_array_elements(advance(p2), [Some(expr), ..acc])
         RightBracket -> Ok(#(advance(p2), [Some(expr), ..acc]))
@@ -5295,14 +5417,18 @@ fn parse_array_elements(
   }
 }
 
-fn parse_object_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
+fn parse_object_literal(
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   let start = pos_of(p)
   let p2 = advance(p)
   // values are [+In]
-  use p2 <- with_allow_in(p2, True)
+  use p2 <- allowing_in(p2)
   // pattern flags are per literal: reset
-  let p2 = P(..p2, has_invalid_pattern: False)
-  use #(p3, props) <- result.map(parse_object_properties(p2, False, []))
+  let p2 = Parser(..p2, literal_invalid_as_pattern: False)
+  use #(p3, props) <- result.map(
+    parse_object_properties(p2, has_proto: False, acc: []),
+  )
   #(
     p3,
     ast.ObjectExpression(
@@ -5313,27 +5439,30 @@ fn parse_object_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
 }
 
 fn parse_object_properties(
-  p: P,
-  has_proto: Bool,
-  acc: List(ast.Property),
-) -> Result(#(P, List(ast.Property)), ParseError) {
+  p: Parser,
+  has_proto has_proto: Bool,
+  acc acc: List(ast.Property),
+) -> Result(#(Parser, List(ast.Property)), ParseError) {
   case peek(p) {
     RightBrace -> Ok(#(advance(p), acc))
     DotDotDot -> {
       // §13.15.5: object rest must be a simple target
-      let saved_invalid = p.has_invalid_pattern
+      let invalid_before = p.literal_invalid_as_pattern
       let p2 = advance(p)
       use #(p3, expr) <- result.try(parse_assignment_expression(p2))
       let p3 =
-        P(..p3, has_invalid_pattern: saved_invalid || !p3.last_expr_assignable)
+        Parser(
+          ..p3,
+          literal_invalid_as_pattern: invalid_before || !p3.last_expr_assignable,
+        )
       let prop = ast.SpreadProperty(argument: expr)
       case peek(p3) {
         // anything after spread invalidates the pattern
         Comma ->
           parse_object_properties(
-            advance(P(..p3, has_invalid_pattern: True)),
-            has_proto,
-            [prop, ..acc],
+            advance(Parser(..p3, literal_invalid_as_pattern: True)),
+            has_proto:,
+            acc: [prop, ..acc],
           )
         RightBrace -> Ok(#(advance(p3), [prop, ..acc]))
         _ -> Error(ExpectedCommaOrBraceInObject(pos_of(p3)))
@@ -5349,15 +5478,16 @@ fn parse_object_properties(
       }
       let p2 = case is_proto && has_proto, p2.ctx.dup_proto_pos {
         True, None ->
-          P(..p2, ctx: Ctx(..p2.ctx, dup_proto_pos: Some(pos_of(p))))
+          Parser(
+            ..p2,
+            ctx: GrammarContext(..p2.ctx, dup_proto_pos: Some(pos_of(p))),
+          )
         _, _ -> p2
       }
+      let has_proto = has_proto || is_proto
       case peek(p2) {
         Comma ->
-          parse_object_properties(advance(p2), has_proto || is_proto, [
-            prop,
-            ..acc
-          ])
+          parse_object_properties(advance(p2), has_proto:, acc: [prop, ..acc])
         RightBrace -> Ok(#(advance(p2), [prop, ..acc]))
         _ -> Error(ExpectedCommaOrBraceInObject(pos_of(p2)))
       }
@@ -5366,43 +5496,36 @@ fn parse_object_properties(
 }
 
 // star_ends_accessor: in classes get * is a field named get
-// escaped get/set is never the keyword (§12.7.2)
 fn parse_method_prefix(
-  p: P,
-  is_terminator: fn(TokenKind) -> Bool,
-  star_ends_accessor: Bool,
-) -> #(P, Bool, AccessorPrefix, Bool) {
-  let is_async = case peek(p) {
-    Async ->
-      !is_terminator(peek_at(p, 1))
-      && token_line_at(p, 1) == token_line_at(p, 0)
-    _ -> False
-  }
+  p: Parser,
+  ends_name: fn(TokenKind) -> Bool,
+  star_ends_accessor star_ends_accessor: Bool,
+) -> #(Parser, MethodPrefix) {
+  let is_async =
+    peek(p) == Async
+    && !ends_name(peek_at(p, 1))
+    && token_line_at(p, 1) == token_line_at(p, 0)
   let p = case is_async {
     True -> advance(p)
     False -> p
   }
-  let accessor_kind = case peek(p), peek_had_escape(p) {
-    Identifier, False -> {
-      let prefix = case peek_value(p) {
-        "get" -> GetPrefix
-        "set" -> SetPrefix
-        _ -> NoAccessor
-      }
-      case prefix {
-        NoAccessor -> NoAccessor
-        GetPrefix | SetPrefix -> {
-          let next = peek_at(p, 1)
-          case is_terminator(next) || { star_ends_accessor && next == Star } {
-            True -> NoAccessor
-            False -> prefix
-          }
-        }
+  // escaped get/set is never the keyword (§12.7.2)
+  let accessor = case peek(p), peek_value(p), peek_had_escape(p) {
+    Identifier, "get", False -> GetPrefix
+    Identifier, "set", False -> SetPrefix
+    _, _, _ -> NoAccessor
+  }
+  let accessor = case accessor {
+    NoAccessor -> NoAccessor
+    GetPrefix | SetPrefix -> {
+      let next = peek_at(p, 1)
+      case ends_name(next) || { star_ends_accessor && next == Star } {
+        True -> NoAccessor
+        False -> accessor
       }
     }
-    _, _ -> NoAccessor
   }
-  let p = case accessor_kind {
+  let p = case accessor {
     NoAccessor -> p
     GetPrefix | SetPrefix -> advance(p)
   }
@@ -5411,160 +5534,130 @@ fn parse_method_prefix(
     True -> advance(p)
     False -> p
   }
-  #(p, is_async, accessor_kind, is_generator)
+  #(p, MethodPrefix(is_async:, accessor:, is_generator:))
 }
 
-fn parse_object_property(p: P) -> Result(#(P, ast.Property), ParseError) {
-  // keyword is a name when followed by ( , } :
-  let #(p4, has_async, accessor_kind, is_generator) =
-    parse_method_prefix(
-      p,
-      fn(t) {
-        case t {
-          LeftParen | Comma | RightBrace | Colon -> True
-          _ -> False
-        }
-      },
-      False,
-    )
-  let prop_name_kind = peek(p4)
-  let prop_name_value = peek_value(p4)
-  let is_valid_shorthand = case prop_name_kind {
-    Identifier -> True
-    _ -> is_contextual_keyword(prop_name_kind)
+// in an object literal a keyword is a name when followed by ( , } :
+fn ends_object_property_name(kind: TokenKind) -> Bool {
+  case kind {
+    LeftParen | Comma | RightBrace | Colon -> True
+    _ -> False
   }
-  use #(p5, key) <- result.try(parse_property_name(p4))
-  use Nil <- result.try(reject_private_property_key(p4, key))
+}
+
+fn parse_object_property(
+  p: Parser,
+) -> Result(#(Parser, ast.Property), ParseError) {
+  let #(p2, prefix) =
+    parse_method_prefix(p, ends_object_property_name, star_ends_accessor: False)
+  let key_token = peek(p2)
+  let shorthand_name = simple_binding_name(p2)
+  use #(p3, key) <- result.try(parse_property_name(p2))
+  use Nil <- result.try(reject_private_property_key(p2, key))
   // *name must be a method
-  case is_generator && peek(p5) != LeftParen {
-    True -> Error(UnexpectedToken(pos_of(p5), peek(p5)))
-    False ->
-      parse_object_property_value(
-        p,
-        p5,
-        has_async,
-        accessor_kind,
-        is_generator,
-        prop_name_kind,
-        prop_name_value,
-        is_valid_shorthand,
-        key,
-      )
-  }
-}
-
-fn parse_object_property_value(
-  p: P,
-  p5: P,
-  has_async: Bool,
-  accessor_kind: AccessorPrefix,
-  is_generator: Bool,
-  prop_name_kind: TokenKind,
-  prop_name_value: String,
-  is_valid_shorthand: Bool,
-  key: ast.PropertyKey,
-) -> Result(#(P, ast.Property), ParseError) {
-  case peek(p5) {
+  use <- bool.lazy_guard(prefix.is_generator && peek(p3) != LeftParen, fn() {
+    Error(UnexpectedToken(pos_of(p3), peek(p3)))
+  })
+  case peek(p3) {
     LeftParen -> {
-      let p5 = P(..p5, has_invalid_pattern: True)
-      use #(p6, params, body) <- result.map(parse_method_params_body(
-        p5,
+      let p3 = Parser(..p3, literal_invalid_as_pattern: True)
+      use #(p4, params, body) <- result.map(parse_method_params_body(
+        p3,
         p,
-        accessor_kind,
-        is_generator,
-        has_async,
-        False,
-        False,
+        prefix,
+        is_constructor: False,
+        has_extends: False,
       ))
-      let fn_lit =
+      let value =
         ast.FunctionLiteral(
           name: None,
-          params: params,
-          body: body,
-          is_generator: is_generator,
-          is_async: has_async,
+          params:,
+          body:,
+          is_generator: prefix.is_generator,
+          is_async: prefix.is_async,
         )
-      let prop = case accessor_kind {
-        GetPrefix ->
-          ast.AccessorProperty(key:, value: fn_lit, kind: ast.GetAccessor)
-        SetPrefix ->
-          ast.AccessorProperty(key:, value: fn_lit, kind: ast.SetAccessor)
-        NoAccessor -> ast.MethodProperty(key:, value: fn_lit)
+      let prop = case prefix.accessor {
+        GetPrefix -> ast.AccessorProperty(key:, value:, kind: ast.GetAccessor)
+        SetPrefix -> ast.AccessorProperty(key:, value:, kind: ast.SetAccessor)
+        NoAccessor -> ast.MethodProperty(key:, value:)
       }
-      #(p6, prop)
+      #(p4, prop)
     }
     Colon -> {
       // simple target shadows inner invalid-pattern flags
-      let saved_invalid = p5.has_invalid_pattern
-      let p6 = advance(p5)
-      let value_start = peek(p6)
-      use #(p7, expr) <- result.try(parse_assignment_expression(p6))
-      let elem_invalid = cover_elem_invalid(p7, value_start, True)
-      let p7 = P(..p7, has_invalid_pattern: saved_invalid || elem_invalid)
-      Ok(#(p7, ast.InitProperty(key:, value: expr, shorthand: False)))
+      use #(p4, value) <- result.map(parse_cover_element(
+        advance(p3),
+        invalid_before: p3.literal_invalid_as_pattern,
+        allow_default: True,
+      ))
+      #(p4, ast.InitProperty(key:, value:, shorthand: False))
     }
-    tok -> {
-      let modified = has_async || accessor_kind != NoAccessor
-      case is_valid_shorthand && !modified {
-        False -> Error(UnexpectedToken(pos_of(p5), prop_name_kind))
-        True -> {
-          // shorthand is an identifier reference (§13.1.1)
-          use Nil <- result.try(check_identifier_reference(p5, prop_name_value))
-          let p5 = P(..p5, sb: scope.sb_ref(p5.sb, prop_name_value))
-          let key_span = ast.property_key_span(key)
-          let key_ident = ast.Identifier(name: prop_name_value, span: key_span)
-          use #(p7, value) <- result.map(case tok {
-            Equal -> {
-              let p6 = advance(p5)
-              use #(p7, rhs) <- result.map(parse_assignment_expression(p6))
-              #(
-                P(..p7, ctx: Ctx(..p7.ctx, has_cover_initializer: True)),
-                ast.AssignmentExpression(
-                  operator: ast.Assign,
-                  left: key_ident,
-                  right: rhs,
-                  span: ast.Span(key_span.start, p7.prev_end),
-                ),
-              )
-            }
-            _ -> Ok(#(p5, key_ident))
-          })
-          #(p7, ast.InitProperty(key:, value:, shorthand: True))
-        }
+    next -> {
+      let modified = prefix.is_async || prefix.accessor != NoAccessor
+      case shorthand_name, modified {
+        Some(name), False ->
+          parse_shorthand_property(p3, name, key, has_default: next == Equal)
+        _, _ -> Error(UnexpectedToken(pos_of(p3), key_token))
       }
     }
   }
 }
 
+// { a } or { a = 1 }: p is past the name
+fn parse_shorthand_property(
+  p: Parser,
+  name: String,
+  key: ast.PropertyKey,
+  has_default has_default: Bool,
+) -> Result(#(Parser, ast.Property), ParseError) {
+  // shorthand is an identifier reference (§13.1.1)
+  use Nil <- result.try(check_identifier_reference(p, name))
+  let p = Parser(..p, scopes: scope.sb_ref(p.scopes, name))
+  let key_span = ast.property_key_span(key)
+  let key_ident = ast.Identifier(name:, span: key_span)
+  use #(p2, value) <- result.map(case has_default {
+    True -> {
+      use #(p2, rhs) <- result.map(parse_assignment_expression(advance(p)))
+      let value =
+        ast.AssignmentExpression(
+          operator: ast.Assign,
+          left: key_ident,
+          right: rhs,
+          span: ast.Span(key_span.start, p2.prev_end),
+        )
+      let ctx = GrammarContext(..p2.ctx, has_cover_initializer: True)
+      #(Parser(..p2, ctx:), value)
+    }
+    False -> Ok(#(p, key_ident))
+  })
+  #(p2, ast.InitProperty(key:, value:, shorthand: True))
+}
+
 fn parse_function_expression(
-  p: P,
+  p: Parser,
   is_async is_async: Bool,
-) -> Result(#(P, ast.Expression), ParseError) {
+) -> Result(#(Parser, ast.Expression), ParseError) {
   let start = pos_of(p)
-  use #(p4, p3, is_generator, func_name) <- result.try(parse_function_head(
+  use head <- result.try(parse_function_head(
     p,
-    is_async,
-    True,
+    is_async:,
+    name_binds_inside: True,
   ))
+  let FunctionHead(after_name: p4, is_generator:, name:, ..) = head
   let p_inner =
-    enter_function_context(
-      p4,
-      is_generator,
-      is_async,
-      string.to_option(func_name),
-    )
-  let fn_scope = p_inner.sb.current
-  use #(p5, params, body) <- result.try(
+    enter_function_context(p4, is_generator:, is_async:, strict_name: name)
+  let fn_scope = p_inner.scopes.current
+  use #(p5, params, body) <- result.map(
     parse_function_params_and_body(p_inner) |> restore_context_fn(p),
   )
   // §15.2.6 nfe name: own scope, declared after body, first wins
-  let p5 = case func_name {
-    "" -> p5
-    name ->
-      P(
+  let p5 = case name {
+    None -> p5
+    Some(name) ->
+      Parser(
         ..p5,
-        sb: scope.sb_declare_in(
-          p5.sb,
+        scopes: scope.sb_declare_in(
+          p5.scopes,
           fn_scope,
           name,
           scope.FnNameBinding,
@@ -5572,26 +5665,26 @@ fn parse_function_expression(
         ),
       )
   }
-  let name_opt = optional_named_binding(func_name, span_of(p3))
-  Ok(#(
-    p5,
+  let function =
     ast.FunctionExpression(
-      name: name_opt,
-      params: params,
-      body: body,
-      is_generator: is_generator,
-      is_async: is_async,
+      name: function_head_binding(head),
+      params:,
+      body:,
+      is_generator:,
+      is_async:,
       span: span_from(start, p5),
-    ),
-  ))
+    )
+  #(p5, function)
 }
 
-fn parse_class_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
+fn parse_class_expression(
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   let start = pos_of(p)
   use #(p2, name, super_class, body) <- result.map(parse_class_head_and_tail(
     p,
-    False,
-    False,
+    name_required: False,
+    register_name: False,
   ))
   #(
     p2,
@@ -5599,65 +5692,71 @@ fn parse_class_expression(p: P) -> Result(#(P, ast.Expression), ParseError) {
   )
 }
 
-fn parse_regex_literal(p: P) -> Result(#(P, ast.Expression), ParseError) {
+fn parse_regex_literal(
+  p: Parser,
+) -> Result(#(Parser, ast.Expression), ParseError) {
   // relex from source as a regex literal
   let start_pos = pos_of(p)
   let body_start = start_pos + 1
-  case regex.scan_regex_source(p.bytes, body_start) {
-    Ok(end_pos) -> {
-      use #(flags_end, flags) <- result.try(
-        regex.skip_regex_flags(p.bytes, end_pos)
-        |> result.map_error(regexp_syntax_error),
-      )
-      // pattern early errors; annex b grammar unless u/v
-      use Nil <- result.try(
-        regex.validate_pattern(p.bytes, body_start, end_pos - 1, flags)
-        |> result.map_error(regexp_syntax_error),
-      )
-      let pattern =
-        source_bytes.slice(p.bytes, body_start, end_pos - 1 - body_start)
-      let flags_str = string.join(flags.flags, "")
-      // window past / is garbage; relex after the flags
-      let p2 = jump_to(p, flags_end)
-      let span = ast.Span(start: start_pos, end: flags_end)
-      Ok(#(p2, ast.RegExpLiteral(pattern: pattern, flags: flags_str, span:)))
-    }
-    Error(e) -> Error(regexp_syntax_error(e))
-  }
+  use end_pos <- result.try(
+    regex.skip_regex_body(p.bytes, body_start)
+    |> result.map_error(regexp_syntax_error),
+  )
+  use #(flags_end, flags) <- result.try(
+    regex.skip_regex_flags(p.bytes, end_pos)
+    |> result.map_error(regexp_syntax_error),
+  )
+  // pattern early errors; annex b grammar unless u/v
+  use Nil <- result.try(
+    regex.validate_pattern(p.bytes, body_start, end_pos - 1, flags)
+    |> result.map_error(regexp_syntax_error),
+  )
+  let pattern =
+    source_bytes.slice(p.bytes, body_start, end_pos - 1 - body_start)
+  // window past / is garbage; relex after the flags
+  let p2 = rescan_from(p, flags_end)
+  let span = ast.Span(start: start_pos, end: flags_end)
+  Ok(#(p2, ast.RegExpLiteral(pattern:, flags: flags.text, span:)))
 }
 
-// from is on the current line; rescanned constructs never span lines
-fn jump_to(p: P, from: Int) -> P {
+// pos is on the current line; rescanned constructs never span lines
+fn rescan_from(p: Parser, pos: Int) -> Parser {
   let line = line_of(p)
   ensure_current(
-    P(
+    Parser(
       ..p,
       tokens: [],
-      scan: lexer.scanner_at(p.bytes, from, line, p.scan.mode),
+      scan: lexer.scanner_at(p.bytes, pos, line, p.scan.source_kind),
       prev_line: line,
-      prev_end: from,
+      prev_end: pos,
     ),
   )
 }
 
+// the "x" after from: its cooked value and end position
+fn parse_module_specifier(
+  p: Parser,
+) -> Result(#(Parser, String, Int), ParseError) {
+  use <- bool.guard(
+    peek(p) != KString,
+    Error(ExpectedModuleSpecifier(pos_of(p))),
+  )
+  use value <- result.map(module_specifier_value(p))
+  #(advance(p), value, pos_of(p) + peek_raw_len(p))
+}
+
 fn expect_from_module_specifier(
-  p: P,
-) -> Result(#(P, ast.StringLiteral, Int), ParseError) {
+  p: Parser,
+) -> Result(#(Parser, ast.StringLiteral, Int), ParseError) {
   use p2 <- result.try(expect(p, From))
-  case peek(p2) {
-    KString -> {
-      use value <- result.try(module_specifier_value(p2))
-      let spec_end = pos_of(p2) + peek_raw_len(p2)
-      use p3 <- result.try(skip_import_attributes(advance(p2)))
-      use p4 <- result.map(eat_semicolon(p3))
-      #(p4, ast.StringLit(value:), spec_end)
-    }
-    _ -> Error(ExpectedModuleSpecifier(pos_of(p2)))
-  }
+  use #(p3, value, spec_end) <- result.try(parse_module_specifier(p2))
+  use p4 <- result.try(skip_import_attributes(p3))
+  use p5 <- result.map(eat_semicolon(p4))
+  #(p5, ast.StringLit(value:), spec_end)
 }
 
 // no import attributes supported: only an empty with {} parses
-fn skip_import_attributes(p: P) -> Result(P, ParseError) {
+fn skip_import_attributes(p: Parser) -> Result(Parser, ParseError) {
   case peek(p) {
     With -> {
       use p2 <- result.try(expect(advance(p), LeftBrace))
@@ -5668,11 +5767,11 @@ fn skip_import_attributes(p: P) -> Result(P, ParseError) {
 }
 
 fn finish_import_from(
-  p: P,
+  p: Parser,
   span_start: Int,
   phase: ast.ImportPhase,
   specifiers: List(ast.ImportSpecifier),
-) -> Result(#(P, ast.ModuleItem), ParseError) {
+) -> Result(#(Parser, ast.ModuleItem), ParseError) {
   use #(p2, source, span_end) <- result.map(expect_from_module_specifier(p))
   #(
     p2,
@@ -5686,22 +5785,24 @@ fn finish_import_from(
 }
 
 fn parse_namespace_import_tail(
-  p: P,
+  p: Parser,
   span_start: Int,
   phase: ast.ImportPhase,
   leading: List(ast.ImportSpecifier),
-) -> Result(#(P, ast.ModuleItem), ParseError) {
+) -> Result(#(Parser, ast.ModuleItem), ParseError) {
   use p2 <- result.try(expect(p, As))
   let binding_name = peek_value(p2)
   let binding_span = span_of(p2)
   use p3 <- result.try(expect_identifier(p2))
-  use p4 <- result.try(check_duplicate_import_binding(p3, binding_name))
+  use p4 <- result.try(declare_import_binding(p3, binding_name))
   let ns =
     ast.ImportNamespaceSpecifier(local: binding_name, local_span: binding_span)
   finish_import_from(p4, span_start, phase, list.append(leading, [ns]))
 }
 
-fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
+fn parse_import_declaration(
+  p: Parser,
+) -> Result(#(Parser, ast.ModuleItem), ParseError) {
   let span_start = pos_of(p)
   let p2 = advance(p)
   // import source x from: only when a binding then from follow
@@ -5729,11 +5830,10 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
   })
   case peek(p2) {
     KString -> {
-      use value <- result.try(module_specifier_value(p2))
-      let span_end = pos_of(p2) + peek_raw_len(p2)
-      use p3 <- result.map(eat_semicolon(advance(p2)))
+      use #(p3, value, span_end) <- result.try(parse_module_specifier(p2))
+      use p4 <- result.map(eat_semicolon(p3))
       #(
-        p3,
+        p4,
         ast.ImportDeclaration(
           specifiers: [],
           source: ast.StringLit(value:),
@@ -5754,78 +5854,67 @@ fn parse_import_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
       use #(p4, specifiers) <- result.try(parse_import_specifiers(p3))
       finish_import_from(p4, span_start, ast.PhaseEvaluation, specifiers)
     }
-    other_kind -> {
-      // default binding may be a contextual keyword like from
-      use <- bool.guard(
-        !is_identifier_or_keyword(other_kind),
-        Error(ExpectedImportSpecifier(pos_of(p2))),
+    _ -> parse_default_import(p2, span_start)
+  }
+}
+
+// import x from / import x, * as ns from / import x, { .. } from
+fn parse_default_import(
+  p: Parser,
+  span_start: Int,
+) -> Result(#(Parser, ast.ModuleItem), ParseError) {
+  // default binding may be a contextual keyword like from
+  use <- bool.guard(
+    !is_identifier_or_keyword(peek(p)),
+    Error(ExpectedImportSpecifier(pos_of(p))),
+  )
+  let default_name = peek_value(p)
+  use Nil <- result.try(check_import_binding_name(p))
+  use p2 <- result.try(declare_import_binding(p, default_name))
+  let default_spec =
+    ast.ImportDefaultSpecifier(local: default_name, local_span: span_of(p))
+  let p3 = advance(p2)
+  case peek(p3), peek_at(p3, 1) {
+    Comma, Star ->
+      parse_namespace_import_tail(
+        advance(advance(p3)),
+        span_start,
+        ast.PhaseEvaluation,
+        [default_spec],
       )
-      let default_name = peek_value(p2)
-      use Nil <- result.try(check_import_binding_name(
-        p2,
-        default_name,
-        other_kind,
-      ))
-      use p2b <- result.try(check_duplicate_import_binding(p2, default_name))
-      let default_spec =
-        ast.ImportDefaultSpecifier(local: default_name, local_span: span_of(p2))
-      let p3 = advance(p2b)
-      case peek(p3) {
-        Comma -> {
-          let p4 = advance(p3)
-          case peek(p4) {
-            Star ->
-              parse_namespace_import_tail(
-                advance(p4),
-                span_start,
-                ast.PhaseEvaluation,
-                [default_spec],
-              )
-            LeftBrace -> {
-              let p5 = advance(p4)
-              use #(p6, named_specs) <- result.try(parse_import_specifiers(p5))
-              finish_import_from(p6, span_start, ast.PhaseEvaluation, [
-                default_spec,
-                ..named_specs
-              ])
-            }
-            _ -> Error(ExpectedBraceOrStarAfterComma(pos_of(p4)))
-          }
-        }
-        From ->
-          finish_import_from(p3, span_start, ast.PhaseEvaluation, [
-            default_spec,
-          ])
-        _ -> Error(ExpectedFromOrComma(pos_of(p3)))
-      }
+    Comma, LeftBrace -> {
+      let p5 = advance(advance(p3))
+      use #(p6, named_specs) <- result.try(parse_import_specifiers(p5))
+      finish_import_from(p6, span_start, ast.PhaseEvaluation, [
+        default_spec,
+        ..named_specs
+      ])
     }
+    Comma, _ -> Error(ExpectedBraceOrStarAfterComma(pos_of(advance(p3))))
+    From, _ ->
+      finish_import_from(p3, span_start, ast.PhaseEvaluation, [default_spec])
+    _, _ -> Error(ExpectedFromOrComma(pos_of(p3)))
   }
 }
 
 // source phase import; binding not modeled in the ast yet
 fn parse_source_phase_import(
-  p: P,
+  p: Parser,
   span_start: Int,
-) -> Result(#(P, ast.ModuleItem), ParseError) {
+) -> Result(#(Parser, ast.ModuleItem), ParseError) {
   let p2 = advance(p)
-  let binding_name = peek_value(p2)
-  let binding_kind = peek(p2)
-  use Nil <- result.try(check_import_binding_name(
-    p2,
-    binding_name,
-    binding_kind,
-  ))
-  use p3 <- result.try(check_duplicate_import_binding(p2, binding_name))
+  use Nil <- result.try(check_import_binding_name(p2))
+  use p3 <- result.try(declare_import_binding(p2, peek_value(p2)))
   finish_import_from(advance(p3), span_start, ast.PhaseSource, [])
 }
 
 fn parse_comma_list(
-  p: P,
+  p: Parser,
   acc: List(a),
   close: TokenKind,
-  parse_one: fn(P) -> Result(#(P, a), ParseError),
+  parse_one: fn(Parser) -> Result(#(Parser, a), ParseError),
   err: fn(Int) -> ParseError,
-) -> Result(#(P, List(a)), ParseError) {
+) -> Result(#(Parser, List(a)), ParseError) {
   case peek(p) {
     t if t == close -> Ok(#(advance(p), list.reverse(acc)))
     _ -> {
@@ -5845,8 +5934,8 @@ fn parse_comma_list(
 }
 
 fn parse_import_specifiers(
-  p: P,
-) -> Result(#(P, List(ast.ImportSpecifier)), ParseError) {
+  p: Parser,
+) -> Result(#(Parser, List(ast.ImportSpecifier)), ParseError) {
   parse_comma_list(
     p,
     [],
@@ -5861,41 +5950,41 @@ fn is_specifier_name(kind: TokenKind) -> Bool {
 }
 
 fn parse_import_specifier(
-  p: P,
-) -> Result(#(P, ast.ImportSpecifier), ParseError) {
-  case is_specifier_name(peek(p)) {
-    False -> Error(ExpectedImportSpecifierName(pos_of(p)))
-    True -> {
-      use imported_name <- result.try(specifier_name_value(p))
-      let p2 = advance(p)
-      case peek(p2) {
-        As -> {
-          let p3 = advance(p2)
-          use p4 <- result.try(expect_identifier(p3))
-          finish_import_named_specifier(p3, p4, imported_name)
-        }
-        _ -> finish_import_named_specifier(p, p2, imported_name)
-      }
+  p: Parser,
+) -> Result(#(Parser, ast.ImportSpecifier), ParseError) {
+  use <- bool.guard(
+    !is_specifier_name(peek(p)),
+    Error(ExpectedImportSpecifierName(pos_of(p))),
+  )
+  use imported_name <- result.try(specifier_name_value(p))
+  let p2 = advance(p)
+  case peek(p2) {
+    As -> {
+      let p3 = advance(p2)
+      use p4 <- result.try(expect_identifier(p3))
+      finish_import_named_specifier(p3, p4, imported_name)
     }
+    _ -> finish_import_named_specifier(p, p2, imported_name)
   }
 }
 
+// name_at is at the local name; p carries the state past it
 fn finish_import_named_specifier(
-  check_p: P,
-  state_p: P,
+  name_at: Parser,
+  p: Parser,
   imported: String,
-) -> Result(#(P, ast.ImportSpecifier), ParseError) {
-  let local = peek_value(check_p)
-  let local_span = span_of(check_p)
-  use Nil <- result.try(check_import_binding_name(check_p, local, peek(check_p)))
-  use p <- result.map(check_duplicate_import_binding(state_p, local))
+) -> Result(#(Parser, ast.ImportSpecifier), ParseError) {
+  let local = peek_value(name_at)
+  let local_span = span_of(name_at)
+  use Nil <- result.try(check_import_binding_name(name_at))
+  use p <- result.map(declare_import_binding(p, local))
   #(p, ast.ImportNamedSpecifier(imported:, local:, local_span:))
 }
 
 fn parse_export_named_function(
-  p: P,
-  is_async: Bool,
-) -> Result(#(P, ast.Declaration), ParseError) {
+  p: Parser,
+  is_async is_async: Bool,
+) -> Result(#(Parser, ast.Declaration), ParseError) {
   let name_offset = case is_async {
     True -> 2
     False -> 1
@@ -5904,20 +5993,30 @@ fn parse_export_named_function(
     True -> name_offset + 1
     False -> name_offset
   }
-  let export_name = peek_value_at(p, name_offset)
-  let checked = case export_name != "" {
-    True -> check_duplicate_export(p, export_name)
-    False -> Ok(p)
-  }
-  use p2 <- result.try(checked)
-  use #(p3, function) <- result.map(parse_function_decl_impl(p2, True, is_async))
+  use p2 <- result.try(declare_export_name_ahead(p, name_offset))
+  use #(p3, function) <- result.map(parse_function_declaration(
+    p2,
+    name_required: True,
+    is_async:,
+  ))
   #(p3, ast.DeclFunction(function:))
 }
 
+// the declaration parse that follows reports a missing name
+fn declare_export_name_ahead(
+  p: Parser,
+  offset: Int,
+) -> Result(Parser, ParseError) {
+  case peek_value_at(p, offset) {
+    "" -> Ok(p)
+    name -> declare_export_name(p, name)
+  }
+}
+
 fn export_named_decl(
-  before: P,
-  parsed: #(P, ast.Declaration),
-) -> #(P, ast.ModuleItem) {
+  before: Parser,
+  parsed: #(Parser, ast.Declaration),
+) -> #(Parser, ast.ModuleItem) {
   let #(p, declaration) = parsed
   #(
     p,
@@ -5929,54 +6028,58 @@ fn export_named_decl(
   )
 }
 
-fn parse_export_named_class(p: P) -> Result(#(P, ast.Declaration), ParseError) {
-  let export_name = peek_value_at(p, 1)
-  case export_name != "" {
-    True -> {
-      use p2 <- result.try(check_duplicate_export(p, export_name))
-      parse_class_decl_impl(p2)
-    }
-    False -> parse_class_decl_impl(p)
-  }
+fn parse_export_named_class(
+  p: Parser,
+) -> Result(#(Parser, ast.Declaration), ParseError) {
+  use p2 <- result.try(declare_export_name_ahead(p, 1))
+  parse_class_declaration(p2)
 }
 
 fn parse_default_fn(
-  p: P,
-  is_async: Bool,
-) -> Result(#(P, DefaultExportDecl), ParseError) {
-  use #(p2, function) <- result.map(parse_function_decl_impl(p, False, is_async))
+  p: Parser,
+  is_async is_async: Bool,
+) -> Result(#(Parser, DefaultExportDecl), ParseError) {
+  use #(p2, function) <- result.map(parse_function_declaration(
+    p,
+    name_required: False,
+    is_async:,
+  ))
   #(p2, DefaultFn(function:))
 }
 
-fn parse_default_class(p: P) -> Result(#(P, DefaultExportDecl), ParseError) {
+fn parse_default_class(
+  p: Parser,
+) -> Result(#(Parser, DefaultExportDecl), ParseError) {
   use #(p2, name, super_class, body) <- result.map(parse_class_head_and_tail(
     p,
-    False,
-    True,
+    name_required: False,
+    register_name: True,
   ))
   #(p2, DefaultClass(name:, super_class:, body:))
 }
 
+// §16.2.3.7 *default* binding, VarBinding per emit
+fn declare_default_export(p: Parser) -> Parser {
+  let scopes =
+    scope.sb_declare(
+      p.scopes,
+      scope.default_export,
+      scope.VarBinding,
+      synthetic: True,
+    )
+  Parser(..p, scopes:)
+}
+
 fn finish_export_default_decl(
-  p_export: P,
-  p_decl: P,
-  parse: fn(P) -> Result(#(P, DefaultExportDecl), ParseError),
-) -> Result(#(P, ast.ModuleItem), ParseError) {
+  p_export: Parser,
+  p_decl: Parser,
+  parse: fn(Parser) -> Result(#(Parser, DefaultExportDecl), ParseError),
+) -> Result(#(Parser, ast.ModuleItem), ParseError) {
   let decl_start = pos_of(p_decl)
   use #(p4, decl) <- result.map(parse(p_decl))
   let decl_span = span_from(decl_start, p4)
-  // §16.2.3.7: anonymous default declares *default*; VarBinding per emit
   let p4 = case default_export_name(decl) {
-    None ->
-      P(
-        ..p4,
-        sb: scope.sb_declare(
-          p4.sb,
-          scope.default_export,
-          scope.VarBinding,
-          synthetic: True,
-        ),
-      )
+    None -> declare_default_export(p4)
     Some(_) -> p4
   }
   #(
@@ -5990,22 +6093,12 @@ fn finish_export_default_decl(
 }
 
 fn finish_export_default_expr(
-  p_export: P,
-  p_expr: P,
-) -> Result(#(P, ast.ModuleItem), ParseError) {
+  p_export: Parser,
+  p_expr: Parser,
+) -> Result(#(Parser, ast.ModuleItem), ParseError) {
   use #(p4, expr) <- result.try(parse_assignment_expression(p_expr))
   use p5 <- result.map(eat_semicolon(p4))
-  // §16.2.3.7 *default* binding, VarBinding per emit
-  let p5 =
-    P(
-      ..p5,
-      sb: scope.sb_declare(
-        p5.sb,
-        scope.default_export,
-        scope.VarBinding,
-        synthetic: True,
-      ),
-    )
+  let p5 = declare_default_export(p5)
   #(
     p5,
     ast.ExportDefaultDeclaration(
@@ -6018,129 +6111,128 @@ fn finish_export_default_expr(
 
 // p is at the module specifier string
 fn finish_export_all(
-  p: P,
+  p: Parser,
   span_start: Int,
   exported: Option(String),
-) -> Result(#(P, ast.ModuleItem), ParseError) {
-  case peek(p) {
-    KString -> {
-      use value <- result.try(module_specifier_value(p))
-      let span_end = pos_of(p) + peek_raw_len(p)
-      use p2 <- result.map(eat_semicolon(advance(p)))
-      #(
-        p2,
-        ast.ExportAllDeclaration(
-          exported:,
-          source: ast.StringLit(value:),
-          span: ast.Span(start: span_start, end: span_end),
-        ),
-      )
-    }
-    _ -> Error(ExpectedModuleSpecifier(pos_of(p)))
-  }
+) -> Result(#(Parser, ast.ModuleItem), ParseError) {
+  use #(p2, value, span_end) <- result.try(parse_module_specifier(p))
+  use p3 <- result.map(eat_semicolon(p2))
+  #(
+    p3,
+    ast.ExportAllDeclaration(
+      exported:,
+      source: ast.StringLit(value:),
+      span: ast.Span(start: span_start, end: span_end),
+    ),
+  )
 }
 
-fn parse_export_declaration(p: P) -> Result(#(P, ast.ModuleItem), ParseError) {
+fn parse_export_declaration(
+  p: Parser,
+) -> Result(#(Parser, ast.ModuleItem), ParseError) {
   let p2 = advance(p)
   case peek(p2) {
     Default -> {
-      use p2b <- result.try(check_duplicate_export(p2, "default"))
+      use p2b <- result.try(declare_export_name(p2, "default"))
       let p3 = advance(p2b)
       case peek(p3) {
         Function ->
-          finish_export_default_decl(p, p3, parse_default_fn(_, False))
+          finish_export_default_decl(p, p3, parse_default_fn(_, is_async: False))
         Class -> finish_export_default_decl(p, p3, parse_default_class)
         Async ->
           case peek_at(p3, 1) {
             Function ->
-              finish_export_default_decl(p, p3, parse_default_fn(_, True))
+              finish_export_default_decl(p, p3, parse_default_fn(
+                _,
+                is_async: True,
+              ))
             _ -> finish_export_default_expr(p, p3)
           }
         _ -> finish_export_default_expr(p, p3)
       }
     }
-    Var | Let | Const ->
-      result.map(
-        parse_variable_declaration_decl(
-          P(..p2, ctx: Ctx(..p2.ctx, in_export_decl: True)),
-        ),
-        export_named_decl(p, _),
-      )
+    Var | Let | Const -> {
+      // bindings declared under this flag also become export names
+      let exporting =
+        Parser(..p2, ctx: GrammarContext(..p2.ctx, in_export_decl: True))
+      use #(p3, declaration) <- result.map(parse_variable_declaration_decl(
+        exporting,
+      ))
+      let p3 =
+        Parser(..p3, ctx: GrammarContext(..p3.ctx, in_export_decl: False))
+      export_named_decl(p, #(p3, declaration))
+    }
     Function ->
-      result.map(parse_export_named_function(p2, False), export_named_decl(p, _))
+      parse_export_named_function(p2, is_async: False)
+      |> result.map(export_named_decl(p, _))
     Class -> result.map(parse_export_named_class(p2), export_named_decl(p, _))
     Async ->
       case peek_at(p2, 1) {
         Function ->
-          result.map(parse_export_named_function(p2, True), export_named_decl(
-            p,
-            _,
-          ))
+          parse_export_named_function(p2, is_async: True)
+          |> result.map(export_named_decl(p, _))
         _ -> Error(ExpectedFunctionAfterAsync(pos_of(p2)))
       }
-    Star -> {
-      let span_start = pos_of(p)
-      let p3 = advance(p2)
-      case peek(p3) {
-        As -> {
-          let p4 = advance(p3)
-          use exported_value <- result.try(specifier_name_value(p4))
-          let p5 = case is_specifier_name(peek(p4)) {
-            True -> advance(p4)
-            False -> p4
-          }
-          use p5b <- result.try(check_duplicate_export(p5, exported_value))
-          use p6 <- result.try(expect(p5b, From))
-          finish_export_all(p6, span_start, Some(exported_value))
-        }
-        From -> finish_export_all(advance(p3), span_start, None)
-        _ -> Error(ExpectedAsOrFromAfterExportStar(pos_of(p3)))
-      }
-    }
-    LeftBrace -> {
-      let p3 = advance(p2)
-      let saved_local_refs = p3.export_local_refs
-      use #(p4, specifiers) <- result.try(parse_export_specifiers(p3))
-      case peek(p4) {
-        From -> {
-          let p4 = P(..p4, export_local_refs: saved_local_refs)
-          let p5 = advance(p4)
-          case peek(p5) {
-            KString -> {
-              use value <- result.try(module_specifier_value(p5))
-              use p6 <- result.map(eat_semicolon(advance(p5)))
-              #(
-                p6,
-                ast.ExportNamed(
-                  specifiers:,
-                  source: Some(ast.StringLit(value:)),
-                  span: ast.Span(start: pos_of(p), end: consumed_end(p, p6)),
-                ),
-              )
-            }
-            _ -> Error(ExpectedModuleSpecifier(pos_of(p5)))
-          }
-        }
-        _ -> {
-          use p5 <- result.try(eat_semicolon(p4))
-          Ok(#(
-            p5,
-            ast.ExportNamed(
-              specifiers:,
-              source: None,
-              span: ast.Span(start: pos_of(p), end: consumed_end(p, p5)),
-            ),
-          ))
-        }
-      }
-    }
+    Star -> parse_export_star(advance(p2), pos_of(p))
+    LeftBrace -> parse_export_list(advance(p2), p)
     _ -> Error(UnexpectedAfterExport(pos_of(p2)))
   }
 }
 
+// export * from / export * as name from; p is past the *
+fn parse_export_star(
+  p: Parser,
+  span_start: Int,
+) -> Result(#(Parser, ast.ModuleItem), ParseError) {
+  case peek(p) {
+    As -> {
+      let p2 = advance(p)
+      use exported <- result.try(specifier_name_value(p2))
+      let p3 = case is_specifier_name(peek(p2)) {
+        True -> advance(p2)
+        False -> p2
+      }
+      use p4 <- result.try(declare_export_name(p3, exported))
+      use p5 <- result.try(expect(p4, From))
+      finish_export_all(p5, span_start, Some(exported))
+    }
+    From -> finish_export_all(advance(p), span_start, None)
+    _ -> Error(ExpectedAsOrFromAfterExportStar(pos_of(p)))
+  }
+}
+
+// export { .. } or export { .. } from; p is past the {
+fn parse_export_list(
+  p: Parser,
+  p_export: Parser,
+) -> Result(#(Parser, ast.ModuleItem), ParseError) {
+  use #(p2, specifiers) <- result.try(parse_export_specifiers(p))
+  let span = fn(p_end) {
+    ast.Span(start: pos_of(p_export), end: consumed_end(p_export, p_end))
+  }
+  case peek(p2) {
+    From -> {
+      use #(p3, value, _) <- result.try(parse_module_specifier(advance(p2)))
+      use p4 <- result.map(eat_semicolon(p3))
+      let source = Some(ast.StringLit(value:))
+      #(p4, ast.ExportNamed(specifiers:, source:, span: span(p4)))
+    }
+    _ -> {
+      use p3 <- result.map(eat_semicolon(p2))
+      // only local exports must resolve to module bindings
+      let export_local_refs =
+        list.fold(specifiers, p3.export_local_refs, fn(refs, specifier) {
+          [#(specifier.local, specifier.local_span.start), ..refs]
+        })
+      let p3 = Parser(..p3, export_local_refs:)
+      #(p3, ast.ExportNamed(specifiers:, source: None, span: span(p3)))
+    }
+  }
+}
+
 fn parse_export_specifiers(
-  p: P,
-) -> Result(#(P, List(ast.ExportSpecifier)), ParseError) {
+  p: Parser,
+) -> Result(#(Parser, List(ast.ExportSpecifier)), ParseError) {
   parse_comma_list(
     p,
     [],
@@ -6151,56 +6243,46 @@ fn parse_export_specifiers(
 }
 
 fn parse_export_specifier(
-  p: P,
-) -> Result(#(P, ast.ExportSpecifier), ParseError) {
-  case is_specifier_name(peek(p)) {
-    False -> Error(ExpectedExportSpecifierName(pos_of(p)))
-    True -> {
-      use local <- result.try(specifier_name_value(p))
-      let local_span = span_of(p)
-      let local_pos = pos_of(p)
-      use #(p3, exported) <- result.try(case peek(advance(p)) {
-        As -> {
-          let p3 = advance(advance(p))
-          case is_specifier_name(peek(p3)) {
-            True -> {
-              use exported <- result.map(specifier_name_value(p3))
-              #(p3, exported)
-            }
-            False ->
-              Error(error_at_current(p3, ExpectedExportAlias(pos_of(p3))))
-          }
-        }
-        _ -> Ok(#(p, local))
+  p: Parser,
+) -> Result(#(Parser, ast.ExportSpecifier), ParseError) {
+  use <- bool.guard(
+    !is_specifier_name(peek(p)),
+    Error(ExpectedExportSpecifierName(pos_of(p))),
+  )
+  use local <- result.try(specifier_name_value(p))
+  let local_span = span_of(p)
+  let p2 = advance(p)
+  // p3 stays on the last token of the specifier
+  use #(p3, exported) <- result.try(case peek(p2) {
+    As -> {
+      let p3 = advance(p2)
+      use <- bool.lazy_guard(!is_specifier_name(peek(p3)), fn() {
+        Error(error_at_current(p3, ExpectedExportAlias(pos_of(p3))))
       })
-      use p4 <- result.try(check_duplicate_export(p3, exported))
-      let p5 =
-        P(..p4, export_local_refs: [#(local, local_pos), ..p4.export_local_refs])
-      Ok(#(advance(p5), ast.ExportSpecifier(local:, exported:, local_span:)))
+      use exported <- result.map(specifier_name_value(p3))
+      #(p3, exported)
     }
-  }
+    _ -> Ok(#(p, local))
+  })
+  use p4 <- result.map(declare_export_name(p3, exported))
+  #(advance(p4), ast.ExportSpecifier(local:, exported:, local_span:))
 }
 
-fn check_use_strict_in_body(p: P) -> Result(P, ParseError) {
-  case p.ctx.strict {
-    True ->
-      // use strict + non-simple params errors even if already strict
-      case p.ctx.has_non_simple_param {
-        True ->
-          case
-            peek(p) == LeftBrace
-            && prologue_has_use_strict(look_skip(look_from(p)))
-          {
-            True -> Error(MisplacedUseStrictDirective(pos_of(p)))
-            False -> Ok(p)
-          }
-        False -> Ok(p)
-      }
-    False ->
-      case peek(p) {
-        LeftBrace -> scan_directive_prologue(p, look_skip(look_from(p)))
-        _ -> Ok(p)
-      }
+// p is at a body {: apply its directive prologue
+fn apply_body_use_strict(p: Parser) -> Result(Parser, ParseError) {
+  use <- bool.guard(peek(p) != LeftBrace, Ok(p))
+  let body = look_skip(look_from(p))
+  case p.ctx.strict, p.ctx.has_non_simple_param {
+    False, _ -> scan_directive_prologue(p, body)
+    // use strict + non-simple params errors even if already strict
+    True, True -> {
+      use <- bool.guard(
+        prologue_has_use_strict(body),
+        Error(MisplacedUseStrictDirective(pos_of(p))),
+      )
+      Ok(p)
+    }
+    True, False -> Ok(p)
   }
 }
 
@@ -6209,7 +6291,7 @@ type Look {
   Look(tokens: List(Token), scan: lexer.Scanner)
 }
 
-fn look_from(p: P) -> Look {
+fn look_from(p: Parser) -> Look {
   Look(tokens: p.tokens, scan: p.scan)
 }
 
@@ -6262,19 +6344,22 @@ fn prologue_has_use_strict(look: Look) -> Bool {
   option.is_some(prologue_use_strict(look, []))
 }
 
-fn check_use_strict_at_start(p: P) -> Result(P, ParseError) {
+fn apply_directive_prologue(p: Parser) -> Result(Parser, ParseError) {
   case p.ctx.strict {
     True -> Ok(p)
     False -> scan_directive_prologue(p, look_from(p))
   }
 }
 
-fn scan_directive_prologue(p: P, look: Look) -> Result(P, ParseError) {
+fn scan_directive_prologue(
+  p: Parser,
+  look: Look,
+) -> Result(Parser, ParseError) {
   case prologue_use_strict(look, []) {
     None -> Ok(p)
     Some(seen_directives) -> {
       use Nil <- result.try(check_retroactive_octals(p, seen_directives))
-      let p = P(..p, ctx: Ctx(..p.ctx, strict: True))
+      let p = Parser(..p, ctx: GrammarContext(..p.ctx, strict: True))
       check_retroactive_params(p)
     }
   }
@@ -6282,7 +6367,7 @@ fn scan_directive_prologue(p: P, look: Look) -> Result(P, ParseError) {
 
 // annex b escapes before use strict are retroactively illegal
 fn check_retroactive_octals(
-  p: P,
+  p: Parser,
   seen_directives: List(Token),
 ) -> Result(Nil, ParseError) {
   use <- bool.guard(
@@ -6292,38 +6377,29 @@ fn check_retroactive_octals(
   Ok(Nil)
 }
 
-fn check_retroactive_params(p: P) -> Result(P, ParseError) {
-  case p.ctx.has_non_simple_param {
-    True -> Error(MisplacedUseStrictDirective(pos_of(p)))
-    False -> validate_retroactive_param_names(p, p.ctx.param_bound_names)
-  }
-}
-
-fn validate_retroactive_param_names(
-  p: P,
-  names: List(String),
-) -> Result(P, ParseError) {
-  case names {
-    [] -> Ok(p)
-    [name, ..rest] ->
-      case strict_binding_violation(name) {
-        Some(kind) -> Error(strict_name_error(kind, name, pos_of(p)))
-        None -> validate_retroactive_param_names(p, rest)
-      }
+// params already parsed become strict retroactively
+fn check_retroactive_params(p: Parser) -> Result(Parser, ParseError) {
+  use <- bool.guard(
+    p.ctx.has_non_simple_param,
+    Error(MisplacedUseStrictDirective(pos_of(p))),
+  )
+  case first_strict_violation(p.ctx.param_bound_names) {
+    Some(#(name, kind)) -> Error(strict_name_error(kind, name, pos_of(p)))
+    None -> Ok(p)
   }
 }
 
 // the one place nested function state is initialised; only strict carries in
 fn enter_function_context(
-  p: P,
-  is_generator: Bool,
-  is_async: Bool,
-  strict_name: Option(String),
-) -> P {
-  let #(sb, _id) = scope.sb_push(p.sb, scope.Function)
-  P(
+  p: Parser,
+  is_generator is_generator: Bool,
+  is_async is_async: Bool,
+  strict_name strict_name: Option(String),
+) -> Parser {
+  let #(scopes, _id) = scope.sb_push(p.scopes, scope.Function)
+  Parser(
     ..p,
-    ctx: Ctx(
+    ctx: GrammarContext(
       strict: p.ctx.strict,
       allow_in: True,
       function_depth: p.ctx.function_depth + 1,
@@ -6338,7 +6414,7 @@ fn enter_function_context(
       allow_new_target: True,
       allow_super_call: False,
       allow_super_property: False,
-      binding_kind: BindingNone,
+      declaring: NotDeclaring,
       in_block: False,
       module_top_level: False,
       in_single_stmt_pos: False,
@@ -6353,26 +6429,31 @@ fn enter_function_context(
       in_export_decl: False,
       in_case_clause: False,
     ),
-    sb:,
+    scopes:,
   )
 }
 
 // arrows inherit super/new.target and the arguments restriction
-fn enter_arrow_context(p: P, is_async: Bool, param_names: List(String)) -> P {
-  let inner = enter_function_context(p, False, is_async, None)
+fn enter_arrow_context(
+  p: Parser,
+  is_async is_async: Bool,
+  param_names param_names: List(String),
+) -> Parser {
+  let inner =
+    enter_function_context(p, is_generator: False, is_async:, strict_name: None)
   // arrow scopes own no lexical pseudo-slots
-  let sb =
-    scope.sb_update_current_fn(inner.sb, fn(fi) {
+  let scopes =
+    scope.sb_update_current_fn(inner.scopes, fn(fi) {
       scope.RawFunctionInfo(..fi, is_arrow: True)
     })
-  let sb =
-    list.fold(param_names, sb, fn(acc, name) {
+  let scopes =
+    list.fold(param_names, scopes, fn(acc, name) {
       scope.sb_declare(acc, name, scope.ParamBinding, synthetic: False)
     })
-  P(
+  Parser(
     ..inner,
-    sb:,
-    ctx: Ctx(
+    scopes:,
+    ctx: GrammarContext(
       ..inner.ctx,
       allow_super_call: p.ctx.allow_super_call,
       allow_super_property: p.ctx.allow_super_property,
@@ -6385,16 +6466,17 @@ fn enter_arrow_context(p: P, is_async: Bool, param_names: List(String)) -> P {
 }
 
 fn enter_method_context(
-  p: P,
-  is_generator: Bool,
-  is_async: Bool,
-  is_constructor: Bool,
-  has_super_class: Bool,
-) -> P {
-  let inner = enter_function_context(p, is_generator, is_async, None)
-  P(
+  p: Parser,
+  is_generator is_generator: Bool,
+  is_async is_async: Bool,
+  is_constructor is_constructor: Bool,
+  has_super_class has_super_class: Bool,
+) -> Parser {
+  let inner =
+    enter_function_context(p, is_generator:, is_async:, strict_name: None)
+  Parser(
     ..inner,
-    ctx: Ctx(
+    ctx: GrammarContext(
       ..inner.ctx,
       allow_super_call: is_constructor && has_super_class,
       allow_super_property: True,
@@ -6404,17 +6486,23 @@ fn enter_method_context(
 }
 
 // §15.7.1 static block: [~Yield, +Await, ~Return]
-fn enter_static_block_context(p: P) -> P {
+fn enter_static_block_context(p: Parser) -> Parser {
   // §15.7.14: retag as ClassStaticBlock scope
-  let inner = enter_function_context(p, False, True, None)
-  let sb =
-    scope.sb_update_current(inner.sb, fn(s) {
+  let inner =
+    enter_function_context(
+      p,
+      is_generator: False,
+      is_async: True,
+      strict_name: None,
+    )
+  let scopes =
+    scope.sb_update_current(inner.scopes, fn(s) {
       scope.RawScope(..s, kind: scope.ClassStaticBlock, is_strict: True)
     })
-  P(
+  Parser(
     ..inner,
-    sb:,
-    ctx: Ctx(
+    scopes:,
+    ctx: GrammarContext(
       ..inner.ctx,
       function_depth: 0,
       in_static_block: True,
@@ -6424,30 +6512,23 @@ fn enter_static_block_context(p: P) -> P {
 }
 
 fn restore_context_fn(
-  res: Result(#(P, List(ast.Pattern), List(ast.StmtWithLine)), ParseError),
-  outer: P,
-) -> Result(#(P, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
+  res: Result(#(Parser, List(ast.Pattern), List(ast.StmtWithLine)), ParseError),
+  outer: Parser,
+) -> Result(#(Parser, List(ast.Pattern), List(ast.StmtWithLine)), ParseError) {
   use #(p, params, body) <- result.map(res)
   #(restore_outer_context(p, outer), params, body)
 }
 
-// restore ctx whole; sb flows forward, only the cursor moves back
-fn restore_outer_context(p: P, outer: P) -> P {
-  P(..p, ctx: outer.ctx, sb: scope.sb_enter(p.sb, outer.sb.current))
+// restore ctx whole; scopes flow forward, only the cursor moves back
+fn restore_outer_context(p: Parser, outer: Parser) -> Parser {
+  Parser(
+    ..p,
+    ctx: outer.ctx,
+    scopes: scope.sb_enter(p.scopes, outer.scopes.current),
+  )
 }
 
-fn find_label(
-  labels: List(#(String, LabelKind)),
-  name: String,
-) -> Option(LabelKind) {
-  case labels {
-    [] -> None
-    [#(n, kind), ..] if n == name -> Some(kind)
-    [_, ..rest] -> find_label(rest, name)
-  }
-}
-
-fn peek(p: P) -> TokenKind {
+fn peek(p: Parser) -> TokenKind {
   case p.tokens {
     [lexer.Token(kind: k, ..), ..] -> k
     [] -> Eof
@@ -6455,120 +6536,43 @@ fn peek(p: P) -> TokenKind {
 }
 
 // bounded pure lookahead; deepest grammar lookahead is 3
-fn upcoming(p: P, n: Int) -> Token {
+fn peek_token_at(p: Parser, n: Int) -> Token {
   look_at(look_from(p), n)
 }
 
-fn peek_at(p: P, n: Int) -> TokenKind {
+fn peek_at(p: Parser, n: Int) -> TokenKind {
   case n, p.tokens {
     0, _ -> peek(p)
     1, [_, lexer.Token(kind: k, ..), ..] -> k
     _, _ -> {
-      let lexer.Token(kind: k, ..) = upcoming(p, n)
+      let lexer.Token(kind: k, ..) = peek_token_at(p, n)
       k
     }
   }
 }
 
-// §13.2.8: substitutions are [+In]; spans are rescanned from source
-fn parse_template_spans(
-  p: P,
-) -> Result(#(P, ast.TemplateParts(String)), ParseError) {
-  case peek(p) {
-    TemplateLiteral ->
-      Ok(#(
-        advance(p),
-        ast.TemplateParts(head: template_span_raw(p, 1), tail: []),
-      ))
-    // restore last-expr flags and [In] after the whole template
-    _ -> {
-      let saved_assignable = p.last_expr_assignable
-      let saved_is_assignment = p.last_expr_is_assignment
-      let head = template_span_raw(p, 2)
-      use #(p, rev_tail) <- result.map({
-        use p <- with_allow_in(advance(p), True)
-        parse_template_substitutions(p, [])
-      })
-      #(
-        P(
-          ..p,
-          last_expr_assignable: saved_assignable,
-          last_expr_is_assignment: saved_is_assignment,
-        ),
-        ast.TemplateParts(head:, tail: list.reverse(rev_tail)),
-      )
-    }
-  }
-}
-
-fn parse_template_substitutions(
-  p: P,
-  rev_tail: List(#(ast.Expression, String)),
-) -> Result(#(P, List(#(ast.Expression, String))), ParseError) {
-  use #(p, expr) <- result.try(parse_expression(
-    P(..p, last_expr_assignable: False, last_expr_is_assignment: False),
-  ))
-  case peek(p) {
-    RightBrace -> {
-      let p = template_continuation(p)
-      case peek(p) {
-        TemplateHead ->
-          parse_template_substitutions(advance(p), [
-            #(expr, template_span_raw(p, 2)),
-            ..rev_tail
-          ])
-        TemplateLiteral ->
-          Ok(#(advance(p), [#(expr, template_span_raw(p, 1)), ..rev_tail]))
-        // unterminated template
-        _ -> Error(UnterminatedTemplateSubstitution(pos_of(p)))
-      }
-    }
-    other ->
-      Error(error_at_current(p, ExpectedToken(pos_of(p), RightBrace, other)))
-  }
-}
-
-// window past } is garbage, rescan like a regex
-fn template_continuation(p: P) -> P {
-  let #(token, scan) =
-    lexer.scan_template_continuation(
-      p.bytes,
-      pos_of(p),
-      line_of(p),
-      p.scan.mode,
-    )
-  P(..p, tokens: [token], scan:)
-}
-
-// raw quasi text, line terminators normalized (§12.9.6 trv)
-fn template_span_raw(p: P, trailing: Int) -> String {
-  source_bytes.slice(p.bytes, pos_of(p) + 1, peek_raw_len(p) - 1 - trailing)
-  |> string.replace("\r\n", "\n")
-  |> string.replace("\r", "\n")
-}
-
-fn peek_value(p: P) -> String {
+fn peek_value(p: Parser) -> String {
   case p.tokens {
     [lexer.Token(value: v, ..), ..] -> v
     [] -> ""
   }
 }
 
-fn peek_value_at(p: P, n: Int) -> String {
+fn peek_value_at(p: Parser, n: Int) -> String {
   case n {
     0 -> peek_value(p)
     _ -> {
-      let lexer.Token(kind: kind, value: v, ..) = upcoming(p, n)
+      let lexer.Token(kind:, value:, ..) = peek_token_at(p, n)
       case kind {
         Eof -> ""
-        _ -> v
+        _ -> value
       }
     }
   }
 }
 
 // escaped contextual keywords are not keywords (§12.7.2)
-fn peek_had_escape(p: P) -> Bool {
+fn peek_had_escape(p: Parser) -> Bool {
   case p.tokens {
     [lexer.Token(had_escape: e, ..), ..] -> e
     [] -> False
@@ -6576,100 +6580,86 @@ fn peek_had_escape(p: P) -> Bool {
 }
 
 // annex b legacy forms strict code forbids; decided by the lexer
-fn peek_annex_b_legacy(p: P) -> Bool {
+fn peek_annex_b_legacy(p: Parser) -> Bool {
   case p.tokens {
     [lexer.Token(annex_b_legacy: legacy, ..), ..] -> legacy
     [] -> False
   }
 }
 
-fn peek_raw_len(p: P) -> Int {
+fn peek_raw_len(p: Parser) -> Int {
   case p.tokens {
     [lexer.Token(raw_len: rl, ..), ..] -> rl
     [] -> 0
   }
 }
 
-fn pos_of(p: P) -> Int {
+fn pos_of(p: Parser) -> Int {
   case p.tokens {
-    [lexer.Token(pos: pos, ..), ..] -> pos
+    [lexer.Token(pos:, ..), ..] -> pos
     [] -> 0
   }
 }
 
-fn span_of(p: P) -> ast.Span {
+fn span_of(p: Parser) -> ast.Span {
   case p.tokens {
-    [lexer.Token(pos: pos, raw_len: raw_len, ..), ..] ->
+    [lexer.Token(pos:, raw_len:, ..), ..] ->
       ast.Span(start: pos, end: pos + raw_len)
     [] -> ast.Span(start: 0, end: 0)
   }
 }
 
 // after.prev_end, or next token start when nothing was consumed
-fn consumed_end(before: P, after: P) -> Int {
+fn consumed_end(before: Parser, after: Parser) -> Int {
   case after.prev_end == before.prev_end {
     True -> pos_of(after)
     False -> after.prev_end
   }
 }
 
-fn span_from(start: Int, p_after: P) -> ast.Span {
+fn span_from(start: Int, p_after: Parser) -> ast.Span {
   ast.Span(start:, end: p_after.prev_end)
 }
 
 // falls back to the previous line at eof
-fn line_of(p: P) -> Int {
+fn line_of(p: Parser) -> Int {
   case p.tokens {
-    [lexer.Token(line: line, ..), ..] -> line
+    [lexer.Token(line:, ..), ..] -> line
     [] -> p.prev_line
   }
 }
 
-// never lex past a token the parser may rescan
-fn advance(p: P) -> P {
+fn advance(p: Parser) -> Parser {
   case p.tokens {
-    [lexer.Token(line: line, pos: pos, raw_len: rl, ..), ..rest] ->
+    [lexer.Token(line:, pos:, raw_len:, ..), ..rest] -> {
+      let prev_end = pos + raw_len
       case rest {
         [] -> {
           let #(token, scan) = lexer.scan_next(p.scan)
-          case may_rescan(token.kind) {
-            True ->
-              P(
-                ..p,
-                tokens: [token],
-                scan:,
-                prev_line: line,
-                prev_end: pos + rl,
-              )
-            False -> {
-              let #(next, scan) = lexer.scan_next(scan)
-              P(
-                ..p,
-                tokens: [token, next],
-                scan:,
-                prev_line: line,
-                prev_end: pos + rl,
-              )
-            }
-          }
+          refill_window(p, token, scan, line, prev_end)
         }
-        [token] ->
-          case may_rescan(token.kind) {
-            True -> P(..p, tokens: rest, prev_line: line, prev_end: pos + rl)
-            False -> {
-              let #(next, scan) = lexer.scan_next(p.scan)
-              P(
-                ..p,
-                tokens: [token, next],
-                scan:,
-                prev_line: line,
-                prev_end: pos + rl,
-              )
-            }
-          }
-        _ -> P(..p, tokens: rest, prev_line: line, prev_end: pos + rl)
+        [token] -> refill_window(p, token, p.scan, line, prev_end)
+        _ -> Parser(..p, tokens: rest, prev_line: line, prev_end:)
       }
+    }
     [] -> p
+  }
+}
+
+// one token of lookahead, never past a token the parser may rescan
+fn refill_window(
+  p: Parser,
+  token: Token,
+  scan: lexer.Scanner,
+  prev_line: Int,
+  prev_end: Int,
+) -> Parser {
+  case may_rescan(token.kind) {
+    True -> Parser(..p, tokens: [token], scan:, prev_line:, prev_end:)
+    False -> {
+      let #(next, scan) = lexer.scan_next(scan)
+      Parser(..p, tokens: [token, next], scan:, prev_line:, prev_end:)
+    }
   }
 }
 
@@ -6682,41 +6672,32 @@ fn may_rescan(kind: TokenKind) -> Bool {
 }
 
 // lexer errors arrive as a zero-length LexFailure token
-fn ensure_current(p: P) -> P {
+fn ensure_current(p: Parser) -> Parser {
   case p.tokens {
     [] -> {
       let #(token, scan) = lexer.scan_next(p.scan)
-      P(..p, tokens: [token], scan:)
+      Parser(..p, tokens: [token], scan:)
     }
     _ -> p
   }
 }
 
-fn expect(p: P, kind: TokenKind) -> Result(P, ParseError) {
-  case peek(p) == kind {
-    True -> Ok(advance(p))
-    False ->
-      case peek(p) {
-        Illegal | LexFailure(_) -> Error(illegal_token_error(p))
-        found -> Error(ExpectedToken(pos_of(p), kind, found))
-      }
+fn expect(p: Parser, kind: TokenKind) -> Result(Parser, ParseError) {
+  case peek(p) {
+    found if found == kind -> Ok(advance(p))
+    found -> Error(error_at_current(p, ExpectedToken(pos_of(p), kind, found)))
   }
 }
 
-fn expect_identifier(p: P) -> Result(P, ParseError) {
-  case peek(p) {
-    Identifier -> Ok(advance(p))
-    Illegal | LexFailure(_) -> Error(illegal_token_error(p))
-    _ ->
-      case is_keyword_as_identifier(peek(p)) {
-        True -> Ok(advance(p))
-        False -> Error(ExpectedIdentifier(pos_of(p)))
-      }
+fn expect_identifier(p: Parser) -> Result(Parser, ParseError) {
+  case is_identifier_or_keyword(peek(p)) {
+    True -> Ok(advance(p))
+    False -> Error(error_at_current(p, ExpectedIdentifier(pos_of(p))))
   }
 }
 
 // LexFailure carries the lexer error; Illegal does not
-fn illegal_token_error(p: P) -> ParseError {
+fn illegal_token_error(p: Parser) -> ParseError {
   case peek(p) {
     LexFailure(err) -> lex_error(err)
     kind -> UnexpectedToken(pos_of(p), kind)
@@ -6724,14 +6705,14 @@ fn illegal_token_error(p: P) -> ParseError {
 }
 
 // route unexpected tokens here or lexer errors get masked
-fn error_at_current(p: P, otherwise: ParseError) -> ParseError {
+fn error_at_current(p: Parser, otherwise: ParseError) -> ParseError {
   case peek(p) {
     Illegal | LexFailure(_) -> illegal_token_error(p)
     _ -> otherwise
   }
 }
 
-fn eat_semicolon(p: P) -> Result(P, ParseError) {
+fn eat_semicolon(p: Parser) -> Result(Parser, ParseError) {
   case peek(p) {
     Semicolon -> Ok(advance(p))
     RightBrace | Eof -> Ok(p)
@@ -6749,15 +6730,15 @@ fn eat_semicolon(p: P) -> Result(P, ParseError) {
   }
 }
 
-fn has_line_break_before(p: P) -> Bool {
+fn has_line_break_before(p: Parser) -> Bool {
   case p.tokens {
     [lexer.Token(line: current_line, ..), ..] -> current_line > p.prev_line
     [] -> True
   }
 }
 
-fn token_line_at(p: P, n: Int) -> Int {
-  let lexer.Token(kind: kind, line: line, ..) = upcoming(p, n)
+fn token_line_at(p: Parser, n: Int) -> Int {
+  let lexer.Token(kind:, line:, ..) = peek_token_at(p, n)
   case kind {
     // -1 past eof so line comparisons never match
     Eof -> -1
@@ -6765,14 +6746,12 @@ fn token_line_at(p: P, n: Int) -> Int {
   }
 }
 
-fn eat_optional_name(p: P) -> Result(P, ParseError) {
-  let is_name = peek(p) == Identifier || is_contextual_keyword(peek(p))
-  case is_name {
-    True -> {
-      let name = peek_value(p)
-      use Nil <- result.try(check_binding_identifier(p, name))
-      Ok(advance(p))
+fn eat_optional_name(p: Parser) -> Result(Parser, ParseError) {
+  case simple_binding_name(p) {
+    Some(name) -> {
+      use Nil <- result.map(check_binding_identifier(p, name))
+      advance(p)
     }
-    False -> Ok(p)
+    None -> Ok(p)
   }
 }

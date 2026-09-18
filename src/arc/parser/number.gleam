@@ -2,13 +2,13 @@ import arc/internal/digits
 import arc/parser/ast.{type LiteralNumber, FiniteNumber, InfiniteNumber}
 import gleam/bit_array
 import gleam/int
-import gleam/option.{Some}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-pub type NumericLiteral {
-  NumberValue(value: LiteralNumber)
-  BigIntValue(value: Int)
+pub type ParsedNumeric {
+  ParsedNumber(value: LiteralNumber)
+  ParsedBigInt(value: Int)
 }
 
 pub type NumberParseError {
@@ -23,7 +23,7 @@ pub fn parse_error_message(err: NumberParseError) -> String {
   }
 }
 
-pub type FloatParseError {
+type FloatParseError {
   OutOfRange
   Invalid
 }
@@ -39,18 +39,18 @@ type LiteralForm {
 
 pub fn parse_numeric_literal(
   raw: String,
-) -> Result(NumericLiteral, NumberParseError) {
+) -> Result(ParsedNumeric, NumberParseError) {
   case classify(raw) {
     Radix(digits:, radix:) -> integer_number(digits, radix)
     LegacyOctal(digits) -> integer_number(digits, 8)
     NonOctalDecimal(digits) -> integer_number(digits, 10)
     Decimal(text:, is_float:) -> {
       use n <- result.map(parse_decimal(text, is_float))
-      NumberValue(n)
+      ParsedNumber(n)
     }
     BigInt(digits:, radix:) -> {
       use i <- result.map(parse_digits(digits, radix))
-      BigIntValue(i)
+      ParsedBigInt(i)
     }
   }
 }
@@ -58,51 +58,54 @@ pub fn parse_numeric_literal(
 fn integer_number(
   digits: String,
   radix: Int,
-) -> Result(NumericLiteral, NumberParseError) {
+) -> Result(ParsedNumeric, NumberParseError) {
   use i <- result.map(parse_digits(digits, radix))
-  NumberValue(nonneg_int_to_number(i))
+  ParsedNumber(rounded_int_to_number(i))
 }
 
 type Shape {
   Shape(has_separator: Bool, is_float: Bool, is_bigint: Bool)
 }
 
-// 0x5f _ 0x2e . 0x65 0x45 e E 0x6e n
-fn shape(bytes: BitArray, sep: Bool, float: Bool) -> Shape {
+fn shape(
+  bytes: BitArray,
+  has_separator has_separator: Bool,
+  is_float is_float: Bool,
+) -> Shape {
   case bytes {
-    <<0x5F, rest:bytes>> -> shape(rest, True, float)
-    <<0x2E, rest:bytes>> | <<0x65, rest:bytes>> | <<0x45, rest:bytes>> ->
-      shape(rest, sep, True)
-    <<0x6E>> -> Shape(sep, float, True)
-    <<_, rest:bytes>> -> shape(rest, sep, float)
-    _ -> Shape(sep, float, False)
+    <<"_", rest:bytes>> -> shape(rest, has_separator: True, is_float:)
+    <<".", rest:bytes>> | <<"e", rest:bytes>> | <<"E", rest:bytes>> ->
+      shape(rest, has_separator:, is_float: True)
+    <<"n">> -> Shape(has_separator:, is_float:, is_bigint: True)
+    <<_, rest:bytes>> -> shape(rest, has_separator:, is_float:)
+    _ -> Shape(has_separator:, is_float:, is_bigint: False)
   }
 }
 
 fn classify(raw: String) -> LiteralForm {
   let Shape(has_separator:, is_float:, is_bigint:) =
-    shape(bit_array.from_string(raw), False, False)
+    shape(bit_array.from_string(raw), has_separator: False, is_float: False)
   let clean = case has_separator {
     True -> string.replace(raw, "_", "")
     False -> raw
   }
-  case is_bigint {
-    True -> {
-      let #(digits, radix) = split_radix(string.drop_end(clean, 1))
-      BigInt(digits:, radix:)
-    }
-    False ->
-      case clean {
-        "0x" <> hex | "0X" <> hex -> Radix(hex, 16)
-        "0o" <> oct | "0O" <> oct -> Radix(oct, 8)
-        "0b" <> bin | "0B" <> bin -> Radix(bin, 2)
+  let body = case is_bigint {
+    True -> string.drop_end(clean, 1)
+    False -> clean
+  }
+  case radix_prefix(body), is_bigint {
+    Some(#(digits, radix)), True -> BigInt(digits:, radix:)
+    Some(#(digits, radix)), False -> Radix(digits:, radix:)
+    None, True -> BigInt(digits: body, radix: 10)
+    None, False ->
+      case body {
         "0" -> Decimal("0", False)
         "0" <> rest ->
           case is_float {
-            True -> Decimal(clean, True)
+            True -> Decimal(body, True)
             False -> classify_leading_zero(rest)
           }
-        _ -> Decimal(clean, is_float)
+        _ -> Decimal(body, is_float)
       }
   }
 }
@@ -122,12 +125,12 @@ fn all_octal(bytes: BitArray) -> Bool {
   }
 }
 
-fn split_radix(digits: String) -> #(String, Int) {
-  case digits {
-    "0x" <> hex | "0X" <> hex -> #(hex, 16)
-    "0o" <> oct | "0O" <> oct -> #(oct, 8)
-    "0b" <> bin | "0B" <> bin -> #(bin, 2)
-    _ -> #(digits, 10)
+fn radix_prefix(text: String) -> Option(#(String, Int)) {
+  case text {
+    "0x" <> hex | "0X" <> hex -> Some(#(hex, 16))
+    "0o" <> oct | "0O" <> oct -> Some(#(oct, 8))
+    "0b" <> bin | "0B" <> bin -> Some(#(bin, 2))
+    _ -> None
   }
 }
 
@@ -145,7 +148,7 @@ fn parse_decimal(
       }
     False -> {
       use i <- result.map(parse_digits(text, 10))
-      nonneg_int_to_number(i)
+      rounded_int_to_number(i)
     }
   }
 }
@@ -155,7 +158,7 @@ const two52 = 4_503_599_627_370_496
 const two53 = 9_007_199_254_740_992
 
 // float/1 mis-rounds past 53 bits, so round to nearest even ourselves
-fn nonneg_int_to_number(a: Int) -> LiteralNumber {
+fn rounded_int_to_number(a: Int) -> LiteralNumber {
   case a < two53 {
     True -> FiniteNumber(int.to_float(a))
     False -> {
@@ -187,7 +190,7 @@ fn bit_length(n: Int, acc: Int) -> Int {
 }
 
 @external(erlang, "arc_float_ffi", "parse_float")
-pub fn parse_float(s: String) -> Result(Float, FloatParseError)
+fn parse_float(s: String) -> Result(Float, FloatParseError)
 
 fn parse_digits(s: String, radix: Int) -> Result(Int, NumberParseError) {
   case bit_array.from_string(s) {
