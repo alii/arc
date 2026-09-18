@@ -78,6 +78,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
     import_hook: _,
     waiters:,
     call_depth: _,
+    tz_zones: _,
   ) = st
   use Nil <- result.try(case waiters {
     [] -> Ok(Nil)
@@ -157,6 +158,7 @@ pub fn deserialize(
     import_hook: None,
     waiters: [],
     call_depth: 0,
+    tz_zones: dict.new(),
   )
   |> rt_builtins.seed_ops
 }

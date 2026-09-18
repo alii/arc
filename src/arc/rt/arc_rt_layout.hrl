@@ -8,7 +8,7 @@
 -define(AGENT_REALM, 3).
 -define(AGENT_HOST_FNS, 7).
 -define(AGENT_REALMS, 8).
--define(AGENT_ARITY, 11).
+-define(AGENT_ARITY, 12).
 -define(SOME, some).
 -define(NONE, none).
 

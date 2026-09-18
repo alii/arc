@@ -6,7 +6,7 @@ import arc/rt/builtins/temporal_common.{
   epoch_ns_to_iso_in, get_disambiguation_option, get_offset_option,
   get_options_object, get_overflow_option, parse_time_zone_id, read_int_field,
   read_pos_int_field, round_to_increment, terr, time_only_ns,
-  to_temporal_time_zone, tz_offset_ns_at, unloadable_tz, validate_epoch_ns,
+  to_temporal_time_zone, tz_offset_ns_at, validate_epoch_ns,
 }
 import arc/rt/builtins/temporal_fields.{
   type DateFields, DateFields, calendar_date_add, check_parsed_calendar,
@@ -66,12 +66,8 @@ pub fn get_possible_epoch_ns(
     }
     TzNamed(zone:) -> {
       use Nil <- result.try(check_iso_days_range(d))
-      let named_offset = fn(at) {
-        temporal_tz.offset_ns_at(zone, at)
-        |> result.map_error(unloadable_tz(tz, _))
-      }
-      use before <- result.try(named_offset(utc - ns_per_day))
-      use after <- result.try(named_offset(utc + ns_per_day))
+      let before = temporal_tz.offset_ns_at(zone, utc - ns_per_day)
+      let after = temporal_tz.offset_ns_at(zone, utc + ns_per_day)
       let candidates = case before == after {
         True -> [before]
         False -> [before, after]
@@ -79,7 +75,7 @@ pub fn get_possible_epoch_ns(
       Ok(
         list.filter_map(candidates, fn(off) {
           let ens = utc - off
-          case temporal_tz.offset_ns_at(zone, ens) == Ok(off) {
+          case temporal_tz.offset_ns_at(zone, ens) == off {
             True -> Ok(ens)
             False -> Error(Nil)
           }
@@ -161,9 +157,8 @@ pub fn start_of_day_ns(tz: TimeZone, d: IsoDate) -> Result(Int, TErr) {
             utc_epoch_ns(d, midnight) - ns_per_day,
           ))
           case temporal_tz.next_transition_ns(zone, day_before) {
-            Ok(Some(transition)) -> validate_epoch_ns(transition)
-            Ok(None) -> Error(RangeE("no start of day for skipped midnight"))
-            Error(err) -> Error(unloadable_tz(tz, err))
+            Some(transition) -> validate_epoch_ns(transition)
+            None -> Error(RangeE("no start of day for skipped midnight"))
           }
         }
       }
@@ -317,7 +312,9 @@ pub fn to_temporal_zoned(
         _ -> zoned_from_bag(st, h, options)
       }
     KStr(s) -> {
-      let #(d, t_opt, offset, tz, cal) = terr(st, parse_zoned_string(s))
+      let #(d, t_opt, offset, tz_str, cal) = terr(st, parse_zoned_string(s))
+      let #(tz, st) = parse_time_zone_id(st, tz_str)
+      let tz = terr(st, tz)
       let #(#(dis, offset_opt, _ov), st) = validated_zdt_options(st, options)
       let ns =
         terr(st, zoned_string_epoch_ns(d, t_opt, offset, tz, dis, offset_opt))
@@ -345,7 +342,7 @@ pub fn validated_zdt_options(
 pub fn parse_zoned_string(
   s: String,
 ) -> Result(
-  #(IsoDate, Option(TimeRec), ParsedOffset, TimeZone, tcal.Calendar),
+  #(IsoDate, Option(TimeRec), ParsedOffset, String, tcal.Calendar),
   TErr,
 ) {
   case parse_iso_datetime_string(s) {
@@ -355,9 +352,8 @@ pub fn parse_zoned_string(
       case p.tz {
         None -> Error(RangeE("ZonedDateTime string requires a [TimeZone]"))
         Some(tz_str) -> {
-          use tz <- result.try(parse_time_zone_id(tz_str))
           use cal <- result.map(parsed_calendar_id(p))
-          #(p.date, p.time, p.offset, tz, cal)
+          #(p.date, p.time, p.offset, tz_str, cal)
         }
       }
     }
@@ -463,7 +459,8 @@ pub fn convert_relative_to(st: Agent, v: JsVal) -> #(RelTo, Agent) {
           let d = p.date
           case p.tz {
             Some(tz_str) -> {
-              let tz = terr(st, parse_time_zone_id(tz_str))
+              let #(tz, st) = parse_time_zone_id(st, tz_str)
+              let tz = terr(st, tz)
               let ens =
                 terr(
                   st,

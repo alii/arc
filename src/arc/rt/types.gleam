@@ -2753,6 +2753,8 @@ pub type Agent {
     waiters: List(AsyncWaiter),
     // gc only collects when this is 0
     call_depth: Int,
+    // zones resolved through hooks.load_time_zone, by proper id
+    tz_zones: Dict(String, temporal_tz.Zone),
   )
 }
 

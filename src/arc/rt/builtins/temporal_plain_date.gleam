@@ -402,7 +402,8 @@ pub fn method(
       let arg = helpers.arg_at(args, 0)
       case classify(arg) {
         KStr(tz_str) -> {
-          let tz = terr(st, parse_time_zone_id(tz_str))
+          let #(tz, st) = parse_time_zone_id(st, tz_str)
+          let tz = terr(st, tz)
           let ns = terr(st, start_of_day_ns(tz, d))
           make_zoned_cal(st, protos, ns, tz, cal)
         }
@@ -411,7 +412,8 @@ pub fn method(
           case classify(tz_val) {
             KUndef -> rt_val.t_throw_type_error(st, "time zone is required")
             KStr(tz_str) -> {
-              let tz = terr(st, parse_time_zone_id(tz_str))
+              let #(tz, st) = parse_time_zone_id(st, tz_str)
+              let tz = terr(st, tz)
               let #(pt_val, st) = get_named(st, oh, "plainTime")
               case classify(pt_val) {
                 KUndef -> {

@@ -1,11 +1,15 @@
 import arc/internal/int_math.{floor_div}
+import gleam/dict.{type Dict}
 import gleam/list
-import gleam/option.{type Option, None, Some}
+import gleam/option.{type Option}
 import gleam/result
 import gleam/string
 
+// parsed transition data for one zone, host supplied
+pub type Rules
+
 pub opaque type Zone {
-  Zone(id: String)
+  Zone(id: String, rules: Rules)
 }
 
 pub fn zone_id(zone: Zone) -> String {
@@ -13,21 +17,20 @@ pub fn zone_id(zone: Zone) -> String {
 }
 
 @external(erlang, "arc_tz_ffi", "lookup")
-fn ffi_lookup(id: String) -> Result(String, Nil)
-
-pub fn lookup(id: String) -> Result(Zone, Nil) {
-  use proper <- result.map(ffi_lookup(id))
-  Zone(proper)
-}
+pub fn lookup_name(id: String) -> Result(String, Nil)
 
 @external(erlang, "arc_tz_ffi", "canonical_id")
 fn ffi_canonical(id: String) -> String
 
-pub fn canonical(zone: Zone) -> String {
-  case ffi_canonical(zone.id) {
+pub fn canonical_id(proper: String) -> String {
+  case ffi_canonical(proper) {
     "Etc/UTC" | "Etc/GMT" | "GMT" -> "UTC"
     c -> c
   }
+}
+
+pub fn canonical(zone: Zone) -> String {
+  canonical_id(zone.id)
 }
 
 @external(erlang, "arc_tz_ffi", "available_zones")
@@ -56,56 +59,64 @@ pub fn describe(error: TzError) -> String {
   }
 }
 
-@external(erlang, "arc_tz_ffi", "offset_at")
-fn ffi_offset_at(id: String, epoch_seconds: Int) -> Result(Int, TzError)
-
-type FfiTransition {
-  Found(Int)
-  NoTransition
-  LoadFailed(TzError)
+pub type ResolveError {
+  UnknownZone
+  LoadFailed(id: String, error: TzError)
 }
 
-@external(erlang, "arc_tz_ffi", "next_transition")
-fn ffi_next_transition(id: String, epoch_seconds: Int) -> FfiTransition
+// zoneinfo on disk, keyed by canonical id
+@external(erlang, "arc_tz_ffi", "load")
+pub fn host_loader(canonical: String) -> Result(Rules, TzError)
 
-@external(erlang, "arc_tz_ffi", "previous_transition")
-fn ffi_previous_transition(id: String, epoch_seconds: Int) -> FfiTransition
-
-const ns_per_second = 1_000_000_000
-
-pub fn offset_ns_at(zone: Zone, epoch_ns: Int) -> Result(Int, TzError) {
-  use offset_s <- result.map(ffi_offset_at(
-    zone.id,
-    floor_div(epoch_ns, ns_per_second),
-  ))
-  offset_s * ns_per_second
-}
-
-fn transition_ns(t: FfiTransition) -> Result(Option(Int), TzError) {
-  case t {
-    Found(sec) -> Ok(Some(sec * ns_per_second))
-    NoTransition -> Ok(None)
-    LoadFailed(error) -> Error(error)
+// a known name becomes a zone with its rules, loading each proper id once
+pub fn resolve(
+  name: String,
+  zones: Dict(String, Zone),
+  load: fn(String) -> Result(Rules, TzError),
+) -> Result(#(Zone, Dict(String, Zone)), ResolveError) {
+  use proper <- result.try(
+    lookup_name(name) |> result.replace_error(UnknownZone),
+  )
+  case dict.get(zones, proper) {
+    Ok(zone) -> Ok(#(zone, zones))
+    Error(Nil) -> {
+      use rules <- result.map(
+        load(ffi_canonical(proper)) |> result.map_error(LoadFailed(proper, _)),
+      )
+      let zone = Zone(id: proper, rules:)
+      #(zone, dict.insert(zones, proper, zone))
+    }
   }
 }
 
-pub fn next_transition_ns(
-  zone: Zone,
-  epoch_ns: Int,
-) -> Result(Option(Int), TzError) {
-  // transitions are whole seconds
-  transition_ns(ffi_next_transition(zone.id, floor_div(epoch_ns, ns_per_second)))
+@external(erlang, "arc_tz_ffi", "rules_offset_at")
+fn ffi_offset_at(rules: Rules, epoch_seconds: Int) -> Int
+
+@external(erlang, "arc_tz_ffi", "rules_next_transition")
+fn ffi_next_transition(rules: Rules, epoch_seconds: Int) -> Option(Int)
+
+@external(erlang, "arc_tz_ffi", "rules_previous_transition")
+fn ffi_previous_transition(rules: Rules, epoch_seconds: Int) -> Option(Int)
+
+const ns_per_second = 1_000_000_000
+
+pub fn offset_ns_at(zone: Zone, epoch_ns: Int) -> Int {
+  ffi_offset_at(zone.rules, floor_div(epoch_ns, ns_per_second)) * ns_per_second
 }
 
-pub fn prev_transition_ns(
-  zone: Zone,
-  epoch_ns: Int,
-) -> Result(Option(Int), TzError) {
+// transitions are whole seconds
+pub fn next_transition_ns(zone: Zone, epoch_ns: Int) -> Option(Int) {
+  ffi_next_transition(zone.rules, floor_div(epoch_ns, ns_per_second))
+  |> option.map(fn(sec) { sec * ns_per_second })
+}
+
+pub fn prev_transition_ns(zone: Zone, epoch_ns: Int) -> Option(Int) {
   let sec = floor_div(epoch_ns, ns_per_second)
   // mid-second: the transition at sec itself is before us
   let arg = case epoch_ns % ns_per_second == 0 {
     True -> sec
     False -> sec + 1
   }
-  transition_ns(ffi_previous_transition(zone.id, arg))
+  ffi_previous_transition(zone.rules, arg)
+  |> option.map(fn(s) { s * ns_per_second })
 }

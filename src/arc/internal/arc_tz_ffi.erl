@@ -1,7 +1,8 @@
 %% every offset here is local minus utc, in seconds
 -module(arc_tz_ffi).
 
--export([lookup/1, offset_at/2, next_transition/2, previous_transition/2,
+-export([lookup/1, load/1, rules_offset_at/2, rules_next_transition/2,
+         rules_previous_transition/2,
          canonical_id/1, available_zones/0, host_zone/0, zone_named/1,
          utc_zone/0, zone_id/1, zone_offset_at_utc_ms/2,
          zone_offset_at_local_ms/2]).
@@ -13,8 +14,6 @@
 -type local_zone() :: {tzif, binary(), arc_tzif:tz()}
                     | {posix, arc_posix_tz:footer()}
                     | none.
-
--type transition() :: {found, integer()} | no_transition | {load_failed, tz_error()}.
 
 -spec lookup(binary()) -> {ok, binary()} | {error, nil}.
 lookup(Id) when is_binary(Id) ->
@@ -28,33 +27,25 @@ ascii_lowercase(Bin) -> << <<(ascii_lower(C))>> || <<C>> <= Bin >>.
 ascii_lower(C) when C >= $A, C =< $Z -> C + 32;
 ascii_lower(C) -> C.
 
--spec offset_at(binary(), integer()) -> {ok, integer()} | {error, tz_error()}.
-offset_at(Id, Sec) ->
-    case load_zone(Id) of
-        {error, Reason} -> {error, Reason};
-        {ok, Zone} -> {ok, arc_tzif:offset_at(Zone, Sec)}
+%% rules for a canonical id, read and parsed from the host's zoneinfo
+-spec load(binary()) -> {ok, arc_tzif:tz()} | {error, tz_error()}.
+load(Id) when is_binary(Id) -> load_zone(Id).
+
+-spec rules_offset_at(arc_tzif:tz(), integer()) -> integer().
+rules_offset_at(Rules, Sec) -> arc_tzif:offset_at(Rules, Sec).
+
+-spec rules_next_transition(arc_tzif:tz(), integer()) -> {some, integer()} | none.
+rules_next_transition(Rules, Sec) ->
+    case arc_tzif:first_transition_after(Rules, Sec) of
+        none -> none;
+        T -> {some, T}
     end.
 
--spec next_transition(binary(), integer()) -> transition().
-next_transition(Id, Sec) ->
-    case load_zone(Id) of
-        {error, Reason} -> {load_failed, Reason};
-        {ok, Zone} ->
-            case arc_tzif:first_transition_after(Zone, Sec) of
-                none -> no_transition;
-                T -> {found, T}
-            end
-    end.
-
--spec previous_transition(binary(), integer()) -> transition().
-previous_transition(Id, Sec) ->
-    case load_zone(Id) of
-        {error, Reason} -> {load_failed, Reason};
-        {ok, Zone} ->
-            case arc_tzif:last_transition_before(Zone, Sec) of
-                none -> no_transition;
-                T -> {found, T}
-            end
+-spec rules_previous_transition(arc_tzif:tz(), integer()) -> {some, integer()} | none.
+rules_previous_transition(Rules, Sec) ->
+    case arc_tzif:last_transition_before(Rules, Sec) of
+        none -> none;
+        T -> {some, T}
     end.
 
 -spec canonical_id(binary()) -> binary().

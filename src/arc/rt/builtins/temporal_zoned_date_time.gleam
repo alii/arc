@@ -14,9 +14,9 @@ import arc/rt/builtins/temporal_common.{
   make_date_cal, make_date_time_cal, make_duration, make_instant, make_time,
   make_zoned_cal, max_unit, parse_time_zone_id_strict, require_temporal,
   require_time_unit, round_options, round_to_increment, seconds_string_precision,
-  terr, throw_terr, time_only_ns, time_unit_ns, time_zone_equals, time_zone_id,
-  to_temporal_time_zone, tz_offset_ns_at, unit_rank, unloadable_tz,
-  valid_time_increment, zoned_slot_of,
+  terr, time_only_ns, time_unit_ns, time_zone_equals, time_zone_id,
+  to_temporal_time_zone, tz_offset_ns_at, unit_rank, valid_time_increment,
+  zoned_slot_of,
 }
 import arc/rt/builtins/temporal_diff.{diff_date_time_core}
 import arc/rt/builtins/temporal_fields.{
@@ -202,8 +202,9 @@ pub fn ctor(
   case classify(helpers.arg_at(args, 1)) {
     KStr(tz_str) -> {
       // only bare identifiers, not iso date-time strings
+      let #(parsed, st) = parse_time_zone_id_strict(st, tz_str)
       let tz =
-        terr(st, case parse_time_zone_id_strict(tz_str) {
+        terr(st, case parsed {
           Ok(tz) -> Ok(tz)
           Error(temporal_common.StrictUnknown) ->
             Error(RangeE("invalid time zone identifier: " <> tz_str))
@@ -542,14 +543,12 @@ pub fn method(
             Previous -> temporal_tz.prev_transition_ns(zone, ns)
           }
           case found {
-            Ok(None) -> #(mk_null(), st)
-            Ok(Some(t_ns)) ->
+            None -> #(mk_null(), st)
+            Some(t_ns) ->
               case int.absolute_value(t_ns) <= ns_max_instant {
                 True -> make_zoned_cal(st, protos, t_ns, tz, zcal)
                 False -> #(mk_null(), st)
               }
-            // broken zoneinfo is an error, not "no transition"
-            Error(err) -> throw_terr(st, unloadable_tz(tz, err))
           }
         }
       }

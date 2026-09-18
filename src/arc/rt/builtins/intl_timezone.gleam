@@ -1,37 +1,49 @@
 import arc/internal/host_time
 import arc/rt/builtins/intl_format as fmt
+import arc/rt/builtins/temporal_common
 import arc/rt/builtins/temporal_tz
 import arc/rt/intl_data.{
   type DtfTimeZone, type TimeZoneNameWidth, FixedZone, HostZone, NamedZone,
   TzLong, TzLongGeneric, TzLongOffset, TzShort, TzShortGeneric, TzShortOffset,
 }
+import arc/rt/types.{type Agent}
 import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
-pub fn canonical(s: String) -> Option(DtfTimeZone) {
+pub fn canonical(st: Agent, s: String) -> #(Option(DtfTimeZone), Agent) {
   case parse_offset_zone(s) {
-    Some(minutes) -> Some(FixedZone(format_offset_zone(minutes), minutes))
+    Some(minutes) -> #(
+      Some(FixedZone(format_offset_zone(minutes), minutes)),
+      st,
+    )
     None ->
-      option.lazy_or(etc_gmt_zone(string.lowercase(s)), fn() { named_zone(s) })
+      case etc_gmt_zone(string.lowercase(s)) {
+        Some(zone) -> #(Some(zone), st)
+        None -> named_zone(st, s)
+      }
   }
 }
 
 fn is_utc(name: String) -> Bool {
-  case temporal_tz.lookup(name) {
-    Ok(zone) -> temporal_tz.canonical(zone) == "UTC"
+  case temporal_tz.lookup_name(name) {
+    Ok(proper) -> temporal_tz.canonical_id(proper) == "UTC"
     Error(Nil) -> False
   }
 }
 
-fn named_zone(s: String) -> Option(DtfTimeZone) {
-  use zone <- option.then(option.from_result(temporal_tz.lookup(s)))
-  case temporal_tz.canonical(zone) {
-    "UTC" -> Some(FixedZone(temporal_tz.zone_id(zone), 0))
-    _ ->
-      case temporal_tz.offset_ns_at(zone, 0) {
-        Ok(_) -> Some(NamedZone(zone:))
-        Error(_host_lacks_data) -> None
+// a zone the host has no data for is not offered
+fn named_zone(st: Agent, s: String) -> #(Option(DtfTimeZone), Agent) {
+  case temporal_tz.lookup_name(s) {
+    Error(Nil) -> #(None, st)
+    Ok(proper) ->
+      case temporal_tz.canonical_id(proper) {
+        "UTC" -> #(Some(FixedZone(proper, 0)), st)
+        _ ->
+          case temporal_common.resolve_zone(st, proper) {
+            #(Ok(zone), st) -> #(Some(NamedZone(zone:)), st)
+            #(Error(_host_lacks_data), st) -> #(None, st)
+          }
       }
   }
 }
@@ -40,12 +52,8 @@ pub fn offset_at(tz: DtfTimeZone, instant_ms: Int) -> Int {
   case tz {
     HostZone(zone:) -> host_time.zone_offset_at_utc_ms(zone, instant_ms)
     FixedZone(offset_minutes:, ..) -> offset_minutes
-    NamedZone(zone:) -> {
-      let assert Ok(offset_ns) =
-        temporal_tz.offset_ns_at(zone, instant_ms * 1_000_000)
-        as "intl: tzdata offset lookup failed for a zone lookup accepted"
-      offset_ns / 60_000_000_000
-    }
+    NamedZone(zone:) ->
+      temporal_tz.offset_ns_at(zone, instant_ms * 1_000_000) / 60_000_000_000
   }
 }
 

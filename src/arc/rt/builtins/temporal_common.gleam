@@ -18,11 +18,11 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type ObjKind, type TemporalProtos,
-  type TimeZone, HintString, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KNum,
-  KStr, KUndef, Named, SObject, StringKey, TemporalDate, TemporalDateTime,
-  TemporalDuration, TemporalInstant, TemporalMonthDay, TemporalObj, TemporalTime,
-  TemporalYearMonth, TemporalZonedDateTime, TzNamed, TzOffset, TzUtc, classify,
-  mk_object, mk_undefined,
+  type TimeZone, Agent, HintString, JFloat, JInt, JNan, JNegInf, JPosInf,
+  KHandle, KNum, KStr, KUndef, Named, SObject, StringKey, TemporalDate,
+  TemporalDateTime, TemporalDuration, TemporalInstant, TemporalMonthDay,
+  TemporalObj, TemporalTime, TemporalYearMonth, TemporalZonedDateTime, TzNamed,
+  TzOffset, TzUtc, classify, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/float
@@ -1630,11 +1630,14 @@ fn parse_dur_time_unit(
   }
 }
 
-pub fn parse_time_zone_id(id: String) -> Result(TimeZone, TErr) {
-  case parse_time_zone_id_strict(id) {
-    Ok(tz) -> Ok(tz)
-    Error(StrictUnknown) -> tz_from_datetime_string(id)
-    Error(StrictInvalid(e)) -> Error(e)
+pub fn parse_time_zone_id(
+  st: Agent,
+  id: String,
+) -> #(Result(TimeZone, TErr), Agent) {
+  case parse_time_zone_id_strict(st, id) {
+    #(Ok(tz), st) -> #(Ok(tz), st)
+    #(Error(StrictUnknown), st) -> tz_from_datetime_string(st, id)
+    #(Error(StrictInvalid(e)), st) -> #(Error(e), st)
   }
 }
 
@@ -1644,54 +1647,86 @@ pub type StrictTzError {
 }
 
 pub fn parse_time_zone_id_strict(
+  st: Agent,
   id: String,
-) -> Result(TimeZone, StrictTzError) {
+) -> #(Result(TimeZone, StrictTzError), Agent) {
   case string.uppercase(id) == "UTC" {
-    True -> Ok(TzUtc)
+    True -> #(Ok(TzUtc), st)
     False ->
       case parse_offset_tz_id(id) {
-        Some(ns) -> Ok(TzOffset(ns:))
+        Some(ns) -> #(Ok(TzOffset(ns:)), st)
         None ->
-          case temporal_tz.lookup(id) {
-            Ok(zone) -> Ok(TzNamed(zone:))
-            Error(Nil) ->
+          case resolve_zone(st, id) {
+            #(Ok(zone), st) -> #(Ok(TzNamed(zone:)), st)
+            #(Error(temporal_tz.LoadFailed(id:, error:)), st) -> #(
+              Error(StrictInvalid(unloadable_tz(id, error))),
+              st,
+            )
+            #(Error(temporal_tz.UnknownZone), st) ->
               case is_tz_annotation(id) {
-                True -> Error(StrictInvalid(unsupported_tz(id)))
-                False -> Error(StrictUnknown)
+                True -> #(Error(StrictInvalid(unsupported_tz(id))), st)
+                False -> #(Error(StrictUnknown), st)
               }
           }
       }
   }
 }
 
-fn tz_from_datetime_string(s: String) -> Result(TimeZone, TErr) {
+// the agent keeps each zone the host loaded, see HostHooks.load_time_zone
+pub fn resolve_zone(
+  st: Agent,
+  name: String,
+) -> #(Result(temporal_tz.Zone, temporal_tz.ResolveError), Agent) {
+  case temporal_tz.resolve(name, st.tz_zones, st.hooks.load_time_zone) {
+    Ok(#(zone, tz_zones)) -> #(Ok(zone), Agent(..st, tz_zones:))
+    Error(err) -> #(Error(err), st)
+  }
+}
+
+fn tz_from_datetime_string(
+  st: Agent,
+  s: String,
+) -> #(Result(TimeZone, TErr), Agent) {
   case parse_iso_datetime_string(s) {
-    None -> Error(RangeE("invalid time zone: " <> s))
+    None -> #(Error(RangeE("invalid time zone: " <> s)), st)
     Some(p) ->
       case p.tz {
         Some(tz_str) ->
           case string.uppercase(tz_str) == "UTC" {
-            True -> Ok(TzUtc)
+            True -> #(Ok(TzUtc), st)
             False ->
               case parse_offset_tz_id(tz_str) {
-                Some(ns) -> Ok(TzOffset(ns:))
+                Some(ns) -> #(Ok(TzOffset(ns:)), st)
                 None ->
-                  temporal_tz.lookup(tz_str)
-                  |> result.map(fn(zone) { TzNamed(zone:) })
-                  |> result.replace_error(unsupported_tz(tz_str))
+                  case resolve_zone(st, tz_str) {
+                    #(Ok(zone), st) -> #(Ok(TzNamed(zone:)), st)
+                    #(Error(temporal_tz.LoadFailed(id:, error:)), st) -> #(
+                      Error(unloadable_tz(id, error)),
+                      st,
+                    )
+                    #(Error(temporal_tz.UnknownZone), st) -> #(
+                      Error(unsupported_tz(tz_str)),
+                      st,
+                    )
+                  }
               }
           }
         None ->
           case p.offset {
-            Zulu -> Ok(TzUtc)
+            Zulu -> #(Ok(TzUtc), st)
             NumericOffset(off, sub_minute) ->
               // seconds component not allowed, even ":00"
               case !sub_minute && off % ns_per_minute == 0 {
-                True -> Ok(TzOffset(ns: off))
-                False ->
-                  Error(RangeE("sub-minute offset not valid as a time zone"))
+                True -> #(Ok(TzOffset(ns: off)), st)
+                False -> #(
+                  Error(RangeE("sub-minute offset not valid as a time zone")),
+                  st,
+                )
               }
-            NoOffset -> Error(RangeE("no time zone found in string: " <> s))
+            NoOffset -> #(
+              Error(RangeE("no time zone found in string: " <> s)),
+              st,
+            )
           }
       }
   }
@@ -1729,12 +1764,9 @@ pub fn unsupported_tz(tz: String) -> TErr {
   RangeE("time zone " <> tz <> " is not supported")
 }
 
-pub fn unloadable_tz(tz: TimeZone, error: temporal_tz.TzError) -> TErr {
+pub fn unloadable_tz(id: String, error: temporal_tz.TzError) -> TErr {
   RangeE(
-    "time zone "
-    <> time_zone_id(tz)
-    <> " cannot be loaded: "
-    <> temporal_tz.describe(error),
+    "time zone " <> id <> " cannot be loaded: " <> temporal_tz.describe(error),
   )
 }
 
@@ -1742,9 +1774,7 @@ pub fn tz_offset_ns_at(tz: TimeZone, epoch_ns: Int) -> Result(Int, TErr) {
   case tz {
     TzUtc -> Ok(0)
     TzOffset(ns:) -> Ok(ns)
-    TzNamed(zone:) ->
-      temporal_tz.offset_ns_at(zone, epoch_ns)
-      |> result.map_error(unloadable_tz(tz, _))
+    TzNamed(zone:) -> Ok(temporal_tz.offset_ns_at(zone, epoch_ns))
   }
 }
 
@@ -1794,7 +1824,10 @@ pub fn time_zone_equals(a: TimeZone, b: TimeZone) -> Bool {
 
 pub fn to_temporal_time_zone(st: Agent, v: JsVal) -> #(TimeZone, Agent) {
   case classify(v) {
-    KStr(s) -> #(terr(st, parse_time_zone_id(s)), st)
+    KStr(s) -> {
+      let #(tz, st) = parse_time_zone_id(st, s)
+      #(terr(st, tz), st)
+    }
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
         SObject(
@@ -1807,14 +1840,17 @@ pub fn to_temporal_time_zone(st: Agent, v: JsVal) -> #(TimeZone, Agent) {
   }
 }
 
-pub fn system_time_zone(st: Agent) -> TimeZone {
+pub fn system_time_zone(st: Agent) -> #(TimeZone, Agent) {
   case arc_host_time_zone_id(st) {
     Some(id) ->
-      case parse_time_zone_id_strict(id) {
-        Ok(tz) -> tz
-        Error(StrictUnknown) | Error(StrictInvalid(_)) -> TzUtc
+      case parse_time_zone_id_strict(st, id) {
+        #(Ok(tz), st) -> #(tz, st)
+        #(Error(StrictUnknown), st) | #(Error(StrictInvalid(_)), st) -> #(
+          TzUtc,
+          st,
+        )
       }
-    None -> TzUtc
+    None -> #(TzUtc, st)
   }
 }
 
