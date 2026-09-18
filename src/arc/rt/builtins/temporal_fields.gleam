@@ -13,16 +13,16 @@ import arc/rt/builtins/temporal_iso.{
   type Duration, type IsoDate, type Overflow, type ParsedIso, type TErr,
   Constrain, NoOffset, NumericOffset, RangeE, Reject, TypeE, Zulu,
   check_date_limits, epoch_days, int_sign, is_valid_iso_date,
-  iso_date_from_epoch_days, iso_date_within_limits, iso_year_month_within_limits,
-  pad2, parse_annotations, parse_iso_datetime_string, parse_offset_part,
+  iso_date_from_epoch_days, iso_year_month_within_limits, pad2,
+  parse_annotations, parse_iso_datetime_string, parse_offset_part,
   parse_time_part, parse_year_part, regulate_iso_date,
 }
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, type TemporalData, HintString, JInt,
-  KHandle, KStr, KUndef, Named, StringKey, TemporalDate, TemporalDateTime,
+  type Agent, type Handle, type JsVal, type TemporalData, HintString, KHandle,
+  KStr, KUndef, Named, StringKey, TemporalDate, TemporalDateTime,
   TemporalDuration, TemporalInstant, TemporalMonthDay, TemporalTime,
-  TemporalYearMonth, TemporalZonedDateTime, classify, mk_number, mk_object,
+  TemporalYearMonth, TemporalZonedDateTime, classify, mk_int, mk_object,
   mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
@@ -30,10 +30,6 @@ import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
-
-pub fn int_val(i: Int) -> JsVal {
-  mk_number(JInt(i))
-}
 
 pub fn get_named(st: Agent, h: Handle, key: String) -> #(JsVal, Agent) {
   rt_obj.t_get_prop(st, mk_object(h), StringKey(Named(key)))
@@ -951,10 +947,7 @@ fn try_month_day_as_datetime(
   case cal_id {
     tcal.Iso8601 -> Ok(#(d.month, d.day, 1972, tcal.Iso8601))
     cal -> {
-      use Nil <- result.try(case iso_date_within_limits(d) {
-        False -> Error(RangeE("date outside of supported range"))
-        True -> Ok(Nil)
-      })
+      use d <- result.try(check_date_limits(d))
       let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
       let mc = tcal.month_code_of(cal, cd.year, cd.month)
       use iso <- result.try(month_day_reference_iso(cal, mc, cd.day, Constrain))
@@ -1096,6 +1089,6 @@ pub fn era_field(cal: tcal.Calendar, cd: tcal.CalDate) -> JsVal {
 
 pub fn era_year_field(cal: tcal.Calendar, cd: tcal.CalDate) -> JsVal {
   tcal.era_for(cal, cd.year, cd.month, cd.day)
-  |> option.map(fn(e: tcal.Era) { int_val(e.year) })
+  |> option.map(fn(e: tcal.Era) { mk_int(e.year) })
   |> option.unwrap(mk_undefined())
 }

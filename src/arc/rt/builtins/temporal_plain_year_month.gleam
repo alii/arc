@@ -5,18 +5,18 @@ import arc/internal/int_math.{trunc_div, trunc_mod}
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
-  type CalendarNameMode, type RoundingMode, CalAlways, CalAuto, CalCritical,
-  CalNever, Month, Year, apply_since_duration, apply_since_mode, calendar_suffix,
-  get_calendar_name_option, get_difference_settings,
+  type CalendarNameMode, type RoundingMode, CalAuto, Month, Year,
+  apply_since_duration, apply_since_mode, format_with_reference,
+  get_calendar_name_option, get_difference_settings, get_options_object,
   get_overflow_option_from_value, make_date_cal, make_duration, make_year_month,
   make_year_month_cal, max_unit, read_pos_int_field, require_largest_ge_smallest,
-  require_temporal, round_to_increment, terr, truncated_int_arg,
+  require_temporal, round_to_increment, static_name, terr, truncated_int_arg,
   truncated_int_arg_or, unit_rank, year_month_slot_of,
 }
 import arc/rt/builtins/temporal_fields.{
   type DateFields, DateFields, add_sub_args, balance_year_month,
   calendar_date_add, calendar_years_months_until, check_ym_limits,
-  compare_iso_date, era_field, era_year_field, int_val, merge_year_month_code,
+  compare_iso_date, era_field, era_year_field, merge_year_month_code,
   month_code_str, parse_year_month_string, read_bag_calendar,
   read_year_month_fields, regulate_calendar_day, require_nonempty_fields,
   require_partial_bag, resolve_calendar_month, resolve_calendar_year,
@@ -24,7 +24,7 @@ import arc/rt/builtins/temporal_fields.{
 }
 import arc/rt/builtins/temporal_iso.{
   type IsoDate, type Overflow, type TErr, Constrain, Duration, IsoDate, RangeE,
-  Reject, TypeE, check_date_limits, epoch_days, format_iso_date, format_iso_year,
+  Reject, TypeE, check_date_limits, epoch_days, format_iso_year,
   is_valid_iso_date, iso_date_from_epoch_days, iso_year_month_within_limits,
   pad2, regulate_iso_date, zero_duration,
 }
@@ -37,8 +37,8 @@ import arc/rt/types.{
   SObject, TemporalN, TemporalPlainYearMonthCtor, TemporalPlainYearMonthGetter,
   TemporalPlainYearMonthMethod, TemporalPlainYearMonthStatic, TsCompare, TsFrom,
   YmCalendarId, YmDaysInMonth, YmDaysInYear, YmEra, YmEraYear, YmInLeapYear,
-  YmMonth, YmMonthCode, YmMonthsInYear, YmYear, classify, mk_bool, mk_string,
-  mk_undefined,
+  YmMonth, YmMonthCode, YmMonthsInYear, YmYear, classify, mk_bool, mk_int,
+  mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/int
@@ -101,13 +101,6 @@ pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
       m.1,
     )
   })
-}
-
-fn static_name(s: TemporalStaticName) -> String {
-  case s {
-    TsFrom -> "from"
-    TsCompare -> "compare"
-  }
 }
 
 pub fn getter_name(g: TemporalYearMonthGetter) -> String {
@@ -186,7 +179,7 @@ pub fn static(
       let #(b, st) =
         to_temporal_year_month(st, helpers.arg_at(args, 1), mk_undefined())
       let n = compare_iso_date(IsoDate(a.0, a.1, a.2), IsoDate(b.0, b.1, b.2))
-      #(int_val(n), st)
+      #(mk_int(n), st)
     }
   }
 }
@@ -290,12 +283,12 @@ fn year_month_field(y: Int, m: Int, g: TemporalYearMonthGetter) -> JsVal {
     YmCalendarId -> mk_string("iso8601")
     YmEra -> mk_undefined()
     YmEraYear -> mk_undefined()
-    YmYear -> int_val(y)
-    YmMonth -> int_val(m)
+    YmYear -> mk_int(y)
+    YmMonth -> mk_int(m)
     YmMonthCode -> mk_string(month_code_str(m))
-    YmDaysInYear -> int_val(days_in_iso_year(y))
-    YmDaysInMonth -> int_val(days_in_month(y, m))
-    YmMonthsInYear -> int_val(12)
+    YmDaysInYear -> mk_int(days_in_iso_year(y))
+    YmDaysInMonth -> mk_int(days_in_month(y, m))
+    YmMonthsInYear -> mk_int(12)
     YmInLeapYear -> mk_bool(is_leap_year(y))
   }
 }
@@ -315,12 +308,12 @@ fn year_month_field_cal(
         YmCalendarId -> mk_string(tcal.identifier(cal))
         YmEra -> era_field(cal, cd)
         YmEraYear -> era_year_field(cal, cd)
-        YmYear -> int_val(cd.year)
-        YmMonth -> int_val(cd.month)
+        YmYear -> mk_int(cd.year)
+        YmMonth -> mk_int(cd.month)
         YmMonthCode -> mk_string(tcal.month_code(cal, cd.year, cd.month))
-        YmDaysInYear -> int_val(tcal.days_in_year(cal, cd.year))
-        YmDaysInMonth -> int_val(tcal.days_in_month(cal, cd.year, cd.month))
-        YmMonthsInYear -> int_val(tcal.months_in_year(cal, cd.year))
+        YmDaysInYear -> mk_int(tcal.days_in_year(cal, cd.year))
+        YmDaysInMonth -> mk_int(tcal.days_in_month(cal, cd.year, cd.month))
+        YmMonthsInYear -> mk_int(tcal.months_in_year(cal, cd.year))
         YmInLeapYear -> mk_bool(tcal.in_leap_year(cal, cd.year))
       }
     }
@@ -348,8 +341,8 @@ pub fn method(
       st,
     )
     PymToString -> {
-      let #(#(cal_name, _), st) =
-        get_calendar_name_option(st, helpers.arg_at(args, 0))
+      let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
+      let #(cal_name, st) = get_calendar_name_option(st, opts)
       #(mk_string(format_ym_cal(y, m, rd, cal, cal_name)), st)
     }
     PymValueOf ->
@@ -409,7 +402,7 @@ fn add_subtract(
     || dur.milliseconds != 0
     || dur.microseconds != 0
     || dur.nanoseconds != 0
-  case has_lower_units {
+  let Nil = case has_lower_units {
     True ->
       rt_val.t_throw_range_error(
         st,
@@ -476,14 +469,15 @@ fn with(
   let #(bag, st) = require_partial_bag(st, helpers.arg_at(args, 0))
   let #(fields, st) = read_year_month_fields(st, bag, cal)
   let DateFields(era:, era_year:, month:, month_code:, year:, ..) = fields
-  require_nonempty_fields(
-    st,
-    month == None
-      && month_code == None
-      && year == None
-      && era == None
-      && era_year == None,
-  )
+  let Nil =
+    require_nonempty_fields(
+      st,
+      month == None
+        && month_code == None
+        && year == None
+        && era == None
+        && era_year == None,
+    )
   let #(overflow, st) =
     get_overflow_option_from_value(st, helpers.arg_at(args, 1))
   let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(y, m, rd)))
@@ -542,20 +536,12 @@ fn format_ym_cal(
   cal: tcal.Calendar,
   mode: CalendarNameMode,
 ) -> String {
-  case cal {
-    tcal.Iso8601 ->
-      case mode {
-        CalAlways | CalCritical ->
-          format_iso_date(IsoDate(y, m, rd)) <> calendar_suffix(mode, cal)
-        CalAuto | CalNever -> format_iso_year(y) <> "-" <> pad2(m)
-      }
-    _ ->
-      case mode {
-        CalNever -> format_iso_date(IsoDate(y, m, rd))
-        CalAuto | CalAlways | CalCritical ->
-          format_iso_date(IsoDate(y, m, rd)) <> calendar_suffix(mode, cal)
-      }
-  }
+  format_with_reference(
+    IsoDate(y, m, rd),
+    cal,
+    mode,
+    short: format_iso_year(y) <> "-" <> pad2(m),
+  )
 }
 
 fn year_month_until_since(
@@ -570,11 +556,11 @@ fn year_month_until_since(
   let #(#(largest, smallest, inc, mode), st) = get_difference_settings(st, args)
   let smallest = option.unwrap(smallest, Month)
   let largest = option.unwrap(largest, max_unit(smallest, Year))
-  case unit_rank(smallest) < unit_rank(Month) {
+  let Nil = case unit_rank(smallest) < unit_rank(Month) {
     True -> rt_val.t_throw_range_error(st, "smallestUnit must be year or month")
     False -> Nil
   }
-  require_largest_ge_smallest(st, largest, smallest)
+  let Nil = require_largest_ge_smallest(st, largest, smallest)
   let mode = apply_since_mode(mode, is_since)
   let ia = IsoDate(a.0, a.1, a.2)
   let ib = IsoDate(b.0, b.1, b.2)

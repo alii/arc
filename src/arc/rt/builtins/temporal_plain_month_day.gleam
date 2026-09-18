@@ -2,13 +2,13 @@ import arc/internal/gregorian.{days_in_month}
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
-  type CalendarNameMode, CalAlways, CalAuto, CalCritical, CalNever,
-  calendar_suffix, get_calendar_name_option, get_overflow_option_from_value,
+  type CalendarNameMode, CalAuto, format_with_reference,
+  get_calendar_name_option, get_options_object, get_overflow_option_from_value,
   make_date_cal, make_month_day_cal, month_day_slot_of, read_int_field,
   require_temporal, terr, truncated_int_arg, truncated_int_arg_or,
 }
 import arc/rt/builtins/temporal_fields.{
-  type DateFields, DateFields, int_val, max_reference_epoch_days, month_code_str,
+  type DateFields, DateFields, max_reference_epoch_days, month_code_str,
   month_day_reference_iso, no_date_fields, parse_month_day_string,
   read_bag_calendar, read_date_fields, read_era_fields, regulate_calendar_day,
   require_nonempty_fields, require_partial_bag, resolve_calendar_date,
@@ -17,8 +17,8 @@ import arc/rt/builtins/temporal_fields.{
 }
 import arc/rt/builtins/temporal_iso.{
   type Overflow, type TErr, Constrain, IsoDate, RangeE, Reject, TypeE,
-  check_date_limits, epoch_days, format_iso_date, is_valid_iso_date,
-  max_epoch_days, min_epoch_days, pad2, regulate_iso_date,
+  check_date_limits, epoch_days, is_valid_iso_date, max_epoch_days,
+  min_epoch_days, pad2, regulate_iso_date,
 }
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -28,7 +28,7 @@ import arc/rt/types.{
   PmdToLocaleString, PmdToPlainDate, PmdToString, PmdValueOf, PmdWith, SObject,
   TemporalN, TemporalPlainMonthDayCtor, TemporalPlainMonthDayGetter,
   TemporalPlainMonthDayMethod, TemporalPlainMonthDayStatic, TsCompare, TsFrom,
-  classify, mk_bool, mk_string, mk_undefined,
+  classify, mk_bool, mk_int, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/int
@@ -320,10 +320,10 @@ fn month_day_field_cal(
       }
     MdDay ->
       case cal {
-        tcal.Iso8601 -> int_val(d)
+        tcal.Iso8601 -> mk_int(d)
         _ -> {
           let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(ry, m, d)))
-          int_val(cd.day)
+          mk_int(cd.day)
         }
       }
   }
@@ -350,8 +350,8 @@ pub fn method(
       st,
     )
     PmdToString -> {
-      let #(#(cal_name, _), st) =
-        get_calendar_name_option(st, helpers.arg_at(args, 0))
+      let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
+      let #(cal_name, st) = get_calendar_name_option(st, opts)
       #(mk_string(format_md_cal(m, d, ry, cal, cal_name)), st)
     }
     PmdValueOf ->
@@ -380,16 +380,15 @@ fn with(
 ) -> #(JsVal, Agent) {
   let #(bag, st) = require_partial_bag(st, helpers.arg_at(args, 0))
   let #(fields, st) = read_date_fields(st, bag, cal)
-  require_nonempty_fields(st, fields == no_date_fields)
+  let Nil = require_nonempty_fields(st, fields == no_date_fields)
   let #(overflow, st) =
     get_overflow_option_from_value(st, helpers.arg_at(args, 1))
   let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(ry, m, d)))
-  let f = fields
-  let f = case f.month != None || f.month_code != None {
-    True -> f
+  let f = case fields.month != None || fields.month_code != None {
+    True -> fields
     False ->
       DateFields(
-        ..f,
+        ..fields,
         month_code: Some(tcal.month_code_of(cal, cd.year, cd.month)),
       )
   }
@@ -455,18 +454,10 @@ fn format_md_cal(
   cal: tcal.Calendar,
   mode: CalendarNameMode,
 ) -> String {
-  case cal {
-    tcal.Iso8601 ->
-      case mode {
-        CalAlways | CalCritical ->
-          format_iso_date(IsoDate(ry, m, d)) <> calendar_suffix(mode, cal)
-        CalAuto | CalNever -> pad2(m) <> "-" <> pad2(d)
-      }
-    _ ->
-      case mode {
-        CalNever -> format_iso_date(IsoDate(ry, m, d))
-        CalAuto | CalAlways | CalCritical ->
-          format_iso_date(IsoDate(ry, m, d)) <> calendar_suffix(mode, cal)
-      }
-  }
+  format_with_reference(
+    IsoDate(ry, m, d),
+    cal,
+    mode,
+    short: pad2(m) <> "-" <> pad2(d),
+  )
 }

@@ -2,26 +2,27 @@ import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   CalAuto, Day, DayUnit, Nanosecond, apply_since_duration, apply_since_mode,
-  calendar_suffix, check_diff_setup, date_time_slot_of, epoch_ns_to_iso_in,
-  get_calendar_name_option, get_difference_settings, get_disambiguation_option,
-  get_options_object, get_overflow_option_from_value, make_date_cal,
-  make_date_time_cal, make_duration, make_time, make_zoned_cal, max_unit,
-  require_temporal, round_options, round_to_increment, temporal_data_of, terr,
-  time_part_ns, time_unit_ns, time_zone_from_string, to_string_time_options,
-  truncated_int_arg, truncated_int_arg_or, valid_time_increment,
+  calendar_suffix, check_diff_setup, date_part, date_time_slot_of,
+  epoch_ns_to_iso_in, get_calendar_name_option, get_difference_settings,
+  get_disambiguation_option, get_options_object, get_overflow_option_from_value,
+  make_date_cal, make_date_time_cal, make_duration, make_time, make_zoned_cal,
+  max_unit, require_temporal, round_options, round_to_increment, static_name,
+  temporal_data_of, terr, time_part_ns, time_unit_ns, time_zone_from_string,
+  to_string_time_options, truncated_int_arg, truncated_int_arg_or,
+  valid_rounding_increment, validate_epoch_ns,
 }
 import arc/rt/builtins/temporal_diff.{compare_iso_date_time, diff_date_time_core}
 import arc/rt/builtins/temporal_fields.{
-  add_sub_args, calendar_date_add, calendar_with_fields, int_val,
+  add_sub_args, calendar_date_add, calendar_with_fields,
   parse_plain_datetime_string, parsed_calendar_id, read_bag_calendar,
   require_nonempty_fields, require_partial_bag, resolve_calendar_date,
   to_calendar_arg, to_temporal_calendar_identifier,
 }
 import arc/rt/builtins/temporal_iso.{
   type IsoDate, type IsoTime, AutoPrecision, Duration, IsoDate, IsoTime,
-  epoch_days, epoch_ns_to_iso, format_iso_date, format_iso_time,
+  check_date_time_limits, epoch_ns_to_iso, format_iso_date, format_iso_time,
   is_valid_iso_date, is_valid_time, iso_datetime_within_limits, midnight,
-  ns_max_instant, ns_per_day, time_to_ns, zero_duration,
+  ns_per_day, utc_epoch_ns,
 }
 import arc/rt/builtins/temporal_plain_date.{date_field_cal, date_getter_name}
 import arc/rt/builtins/temporal_plain_time.{
@@ -41,10 +42,9 @@ import arc/rt/types.{
   TemporalDateTime, TemporalN, TemporalPlainDateTimeCtor,
   TemporalPlainDateTimeGetter, TemporalPlainDateTimeMethod,
   TemporalPlainDateTimeStatic, TemporalZonedDateTime, TsCompare, TsFrom,
-  classify, mk_bool, mk_string, mk_undefined,
+  classify, mk_bool, mk_int, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
-import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 
@@ -121,13 +121,6 @@ pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
       )
     },
   )
-}
-
-fn static_name(s: TemporalStaticName) -> String {
-  case s {
-    TsFrom -> "from"
-    TsCompare -> "compare"
-  }
 }
 
 pub fn date_time_getter_name(g: TemporalDateTimeGetter) -> String {
@@ -209,7 +202,7 @@ pub fn static(
         to_temporal_date_time(st, helpers.arg_at(args, 0), mk_undefined())
       let #(#(bd, bt, _), st) =
         to_temporal_date_time(st, helpers.arg_at(args, 1), mk_undefined())
-      #(int_val(compare_iso_date_time(#(ad, at), #(bd, bt))), st)
+      #(mk_int(compare_iso_date_time(#(ad, at), #(bd, bt))), st)
     }
   }
 }
@@ -245,7 +238,7 @@ pub fn to_temporal_date_time(
         }
         Some(TemporalZonedDateTime(epoch_ns:, time_zone:, calendar:)) -> {
           let #(_o, st) = get_overflow_option_from_value(st, options)
-          let #(d, t) = terr(st, epoch_ns_to_iso_in(time_zone, epoch_ns))
+          let #(d, t) = epoch_ns_to_iso_in(time_zone, epoch_ns)
           #(#(d, t, calendar), st)
         }
         Some(_) | None -> date_time_from_bag(st, h, options)
@@ -255,11 +248,8 @@ pub fn to_temporal_date_time(
       let t = option.unwrap(p.time, midnight)
       let cal = terr(st, parsed_calendar_id(p))
       let #(_o, st) = get_overflow_option_from_value(st, options)
-      case iso_datetime_within_limits(p.date, t) {
-        True -> #(#(p.date, t, cal), st)
-        False ->
-          rt_val.t_throw_range_error(st, "date-time outside supported range")
-      }
+      let #(d, t) = terr(st, check_date_time_limits(p.date, t))
+      #(#(d, t, cal), st)
     }
     _ ->
       rt_val.t_throw_type_error(
@@ -281,10 +271,8 @@ pub fn date_time_from_bag(
   let date = terr(st, resolve_calendar_date(cal, f.date, overflow))
   let t0 = time_fields_apply(f.time, midnight)
   let t = terr(st, regulate_time(t0, overflow))
-  case iso_datetime_within_limits(date, t) {
-    True -> #(#(date, t, cal), st)
-    False -> rt_val.t_throw_range_error(st, "date-time outside supported range")
-  }
+  let #(date, t) = terr(st, check_date_time_limits(date, t))
+  #(#(date, t, cal), st)
 }
 
 pub fn getter(
@@ -336,15 +324,15 @@ pub fn method(
       st,
     )
     PdtToString -> {
-      let #(#(cal_name, opts), st) =
-        get_calendar_name_option(st, helpers.arg_at(args, 0))
+      let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
+      let #(cal_name, st) = get_calendar_name_option(st, opts)
       let #(#(precision, smallest_time_unit, inc, mode), st) =
         to_string_time_options(st, opts)
       let #(d2, t2) = case smallest_time_unit {
         None -> #(d, t)
         Some(u) -> {
-          let total = epoch_days(d) * ns_per_day + time_to_ns(t)
-          let rounded = round_to_increment(total, inc * time_unit_ns(u), mode)
+          let rounded =
+            round_to_increment(utc_epoch_ns(d, t), inc * time_unit_ns(u), mode)
           epoch_ns_to_iso(rounded, 0)
         }
       }
@@ -368,20 +356,10 @@ pub fn method(
     PdtAdd | PdtSubtract -> {
       let #(dur, overflow, st) = add_sub_args(st, args, m == PdtSubtract)
       let #(carry, t2) = add_time(t, time_part_ns(dur))
-      let date_dur =
-        Duration(
-          ..zero_duration,
-          years: dur.years,
-          months: dur.months,
-          weeks: dur.weeks,
-          days: dur.days + carry,
-        )
+      let date_dur = Duration(..date_part(dur), days: dur.days + carry)
       let d2 = terr(st, calendar_date_add(cal, d, date_dur, overflow))
-      case iso_datetime_within_limits(d2, t2) {
-        False ->
-          rt_val.t_throw_range_error(st, "date-time outside supported range")
-        True -> make_date_time_cal(st, protos, d2, t2, cal)
-      }
+      let #(d2, t2) = terr(st, check_date_time_limits(d2, t2))
+      make_date_time_cal(st, protos, d2, t2, cal)
     }
     PdtWithPlainTime -> {
       let arg = helpers.arg_at(args, 0)
@@ -406,11 +384,8 @@ pub fn method(
       let date = terr(st, calendar_with_fields(cal, d, f.date, overflow))
       let t0 = time_fields_apply(f.time, t)
       let t2 = terr(st, regulate_time(t0, overflow))
-      case iso_datetime_within_limits(date, t2) {
-        False ->
-          rt_val.t_throw_range_error(st, "date-time outside supported range")
-        True -> make_date_time_cal(st, protos, date, t2, cal)
-      }
+      let #(date, t2) = terr(st, check_date_time_limits(date, t2))
+      make_date_time_cal(st, protos, date, t2, cal)
     }
     PdtRound -> {
       let #(#(smallest_time_unit, inc, mode), st) =
@@ -420,20 +395,14 @@ pub fn method(
         DayUnit -> 1
         _ -> ns_per_day / unit_ns
       }
-      case valid_time_increment(inc, max) {
+      case valid_rounding_increment(inc, max, inclusive: False) {
         False -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
         True -> {
-          let total = epoch_days(d) * ns_per_day + time_to_ns(t)
-          let rounded = round_to_increment(total, inc * unit_ns, mode)
+          let rounded =
+            round_to_increment(utc_epoch_ns(d, t), inc * unit_ns, mode)
           let #(d2, t2) = epoch_ns_to_iso(rounded, 0)
-          case iso_datetime_within_limits(d2, t2) {
-            False ->
-              rt_val.t_throw_range_error(
-                st,
-                "date-time outside supported range",
-              )
-            True -> make_date_time_cal(st, protos, d2, t2, cal)
-          }
+          let #(d2, t2) = terr(st, check_date_time_limits(d2, t2))
+          make_date_time_cal(st, protos, d2, t2, cal)
         }
       }
     }
@@ -447,11 +416,8 @@ pub fn method(
           let #(opts, st) = get_options_object(st, helpers.arg_at(args, 1))
           let #(dis, st) = get_disambiguation_option(st, opts)
           let ns = terr(st, get_epoch_ns_for(tz, d, t, dis))
-          case int.absolute_value(ns) <= ns_max_instant {
-            False ->
-              rt_val.t_throw_range_error(st, "instant outside valid range")
-            True -> make_zoned_cal(st, protos, ns, tz, cal)
-          }
+          let ns = terr(st, validate_epoch_ns(ns))
+          make_zoned_cal(st, protos, ns, tz, cal)
         }
         KUndef -> rt_val.t_throw_type_error(st, "time zone is required")
         _ -> rt_val.t_throw_type_error(st, "time zone must be a string")

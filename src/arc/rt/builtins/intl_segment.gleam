@@ -16,12 +16,13 @@ pub fn segment_string(s: String, granularity: Granularity) -> List(Segment) {
 }
 
 fn segment_graphemes(s: String) -> List(Segment) {
-  string.to_graphemes(s)
-  |> list.fold(#([], 0), fn(acc, g) {
-    let #(parts, idx) = acc
-    #([Segment(g, idx, False), ..parts], idx + utf16_len(g))
-  })
-  |> fn(acc) { list.reverse(acc.0) }
+  let #(segments, _) =
+    list.fold(string.to_graphemes(s), #([], 0), fn(acc, g) {
+      let #(segments, idx) = acc
+      let segment = Segment(text: g, index: idx, word_like: False)
+      #([segment, ..segments], idx + utf16_len(g))
+    })
+  list.reverse(segments)
 }
 
 pub fn utf16_len(s: String) -> Int {
@@ -63,7 +64,11 @@ fn segment_words_loop(
         "" -> list.reverse(acc)
         _ ->
           list.reverse([
-            Segment(current, current_start, option.unwrap(current_kind, False)),
+            Segment(
+              text: current,
+              index: current_start,
+              word_like: option.unwrap(current_kind, False),
+            ),
             ..acc
           ])
       }
@@ -83,7 +88,7 @@ fn segment_words_loop(
           segment_words_loop(
             gs,
             idx + utf16_len(g),
-            [Segment(current, current_start, k), ..acc],
+            [Segment(text: current, index: current_start, word_like: k), ..acc],
             g,
             idx,
             Some(kind),
@@ -114,7 +119,11 @@ fn segment_sentences_loop(
     [] ->
       case current {
         "" -> list.reverse(acc)
-        _ -> list.reverse([Segment(current, current_start, False), ..acc])
+        _ ->
+          list.reverse([
+            Segment(text: current, index: current_start, word_like: False),
+            ..acc
+          ])
       }
     [g, ..gs] -> {
       let next_idx = idx + utf16_len(g)
@@ -124,7 +133,10 @@ fn segment_sentences_loop(
           segment_sentences_loop(
             gs,
             next_idx,
-            [Segment(current, current_start, False), ..acc],
+            [
+              Segment(text: current, index: current_start, word_like: False),
+              ..acc
+            ],
             g,
             idx,
             False,

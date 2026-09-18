@@ -22,6 +22,7 @@ import gleam/float
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/order.{type Order}
 import gleam/result
 import gleam/string
 
@@ -183,17 +184,16 @@ pub fn format_range_combine(
   x_parts: List(Part),
   y_parts: List(Part),
 ) -> List(RangePart) {
-  let js = fn(p: Part, source) { RangePart(p.0, p.1, source) }
-  let start3 = fn(p: Part) { js(p, SourceStart) }
-  let end3 = fn(p: Part) { js(p, SourceEnd) }
-  let shared3 = fn(p: Part) { js(p, SourceShared) }
-  let sep3 = fn(spaced) {
-    js(#(PLiteral, range_sep(key, spaced)), SourceShared)
+  let as_start = fn(p: Part) { RangePart(p.0, p.1, SourceStart) }
+  let as_end = fn(p: Part) { RangePart(p.0, p.1, SourceEnd) }
+  let shared = fn(p: Part) { RangePart(p.0, p.1, SourceShared) }
+  let separator = fn(spaced) {
+    RangePart(PLiteral, range_sep(key, spaced), SourceShared)
   }
   case parts_to_string(x_parts) == parts_to_string(y_parts) {
     True -> [
       RangePart(PApproximatelySign, "~", SourceShared),
-      ..list.map(x_parts, shared3)
+      ..list.map(x_parts, shared)
     ]
     False -> {
       let #(x_pre, x_core, x_suf) = split_range_affixes(x_parts)
@@ -205,18 +205,18 @@ pub fn format_range_combine(
       case x_pre == y_pre && x_suf == y_suf && affix_cp != 1 {
         True ->
           list.flatten([
-            list.map(x_pre, shared3),
-            list.map(x_core, start3),
-            [sep3(False)],
-            list.map(y_core, end3),
-            list.map(x_suf, shared3),
+            list.map(x_pre, shared),
+            list.map(x_core, as_start),
+            [separator(False)],
+            list.map(y_core, as_end),
+            list.map(x_suf, shared),
           ])
         False -> {
           let spaced = x_suf != [] || y_pre != []
           list.flatten([
-            list.map(x_parts, start3),
-            [sep3(spaced)],
-            list.map(y_parts, end3),
+            list.map(x_parts, as_start),
+            [separator(spaced)],
+            list.map(y_parts, as_end),
           ])
         }
       }
@@ -240,7 +240,7 @@ fn split_range_affixes(
 }
 
 fn range_sep(key: LocaleKey, spaced: Bool) -> String {
-  case loc_lang(key) {
+  case base_language(key) {
     "pt" -> " - "
     _ ->
       case spaced {
@@ -289,7 +289,7 @@ pub fn default_num_opts() -> NumOpts {
 }
 
 pub opaque type LocaleKey {
-  LocaleKey(key: String)
+  LocaleKey(base_tag: String)
 }
 
 pub fn locale_key(tag: String) -> LocaleKey {
@@ -303,25 +303,25 @@ pub fn locale_key(tag: String) -> LocaleKey {
   }
 }
 
-fn loc_lang(key: LocaleKey) -> String {
-  case string.split_once(key.key, "-") {
-    Ok(#(lang, _)) -> lang
-    Error(Nil) -> key.key
+fn base_language(key: LocaleKey) -> String {
+  case string.split_once(key.base_tag, "-") {
+    Ok(#(language, _)) -> language
+    Error(Nil) -> key.base_tag
   }
 }
 
 fn decimal_sep(key: LocaleKey) -> String {
-  case loc_lang(key) {
+  case base_language(key) {
     "de" | "pt" | "it" | "nl" -> ","
     _ -> "."
   }
 }
 
 fn group_sep(key: LocaleKey) -> String {
-  case key.key {
+  case key.base_tag {
     "pt-PT" -> "\u{00A0}"
     _ ->
-      case loc_lang(key) {
+      case base_language(key) {
         "de" | "pt" | "it" | "nl" -> "."
         _ -> ","
       }
@@ -329,34 +329,34 @@ fn group_sep(key: LocaleKey) -> String {
 }
 
 fn nan_str(key: LocaleKey) -> String {
-  case key.key {
+  case key.base_tag {
     "zh-TW" | "zh-Hant" -> "非數值"
     _ -> "NaN"
   }
 }
 
 fn indian_grouping(key: LocaleKey) -> Bool {
-  case key.key {
+  case key.base_tag {
     "en-IN" -> True
-    _ -> loc_lang(key) == "hi"
+    _ -> base_language(key) == "hi"
   }
 }
 
 fn currency_suffixed(key: LocaleKey) -> Bool {
-  case loc_lang(key) {
+  case base_language(key) {
     "de" | "pt" -> True
     _ -> False
   }
 }
 
 fn accounting_parens(key: LocaleKey) -> Bool {
-  loc_lang(key) != "de"
+  base_language(key) != "de"
 }
 
 pub fn format_number_parts(opts: NumOpts, x: Float) -> List(Part) {
   let negative = is_negative_float(x)
-  let dec = decompose(float.absolute_value(x))
-  format_dec_parts(opts, negative, dec)
+  let dec = decimal_of_float(float.absolute_value(x))
+  format_decimal_parts(opts, negative, dec)
 }
 
 pub fn format_decimal_string_parts(opts: NumOpts, s: String) -> List(Part) {
@@ -364,45 +364,40 @@ pub fn format_decimal_string_parts(opts: NumOpts, s: String) -> List(Part) {
     Ok(#("-", rest)) -> #(True, rest)
     _ -> #(False, s)
   }
-  format_dec_parts(opts, negative, parse_decimal(rest))
+  format_decimal_parts(opts, negative, parse_decimal(rest))
 }
 
-fn format_dec_parts(opts: NumOpts, negative: Bool, dec: Dec) -> List(Part) {
+fn format_decimal_parts(
+  opts: NumOpts,
+  negative: Bool,
+  dec: Decimal,
+) -> List(Part) {
   let opts = case opts.notation, opts.use_grouping {
     NotationCompact(..), GroupingAuto ->
       NumOpts(..opts, use_grouping: GroupingMin2)
     _, _ -> opts
   }
   let dec = case opts.style {
-    StylePercent -> Dec(..dec, exp: dec.exp + 2)
+    StylePercent -> Decimal(..dec, exponent: dec.exponent + 2)
     StyleDecimal | StyleCurrency(..) | StyleUnit(..) -> dec
   }
   let dec = normalize(dec)
   let key = opts.locale
-  let #(mantissa, exponent, compact_one, compact_other) = case opts.notation {
-    NotationScientific ->
-      case dec.digits {
-        "" -> #(dec, 0, [], [])
-        _ -> #(Dec(..dec, exp: 1), dec.exp - 1, [], [])
-      }
-    NotationEngineering ->
-      case dec.digits {
-        "" -> #(dec, 0, [], [])
-        _ -> {
-          let e = 3 * floor_div(dec.exp - 1, 3)
-          #(Dec(..dec, exp: dec.exp - e), e, [], [])
-        }
-      }
-    NotationCompact(display:) ->
-      case dec.digits {
-        "" -> #(dec, 0, [], [])
-        _ -> {
-          let #(div_exp, one_p, other_p) =
-            compact_entry(key, display, dec.exp - 1)
-          #(Dec(..dec, exp: dec.exp - div_exp), 0, one_p, other_p)
-        }
-      }
-    NotationStandard -> #(dec, 0, [], [])
+  let #(mantissa, exponent, suffix) = case opts.notation, dec.digits {
+    _, "" | NotationStandard, _ -> #(dec, 0, no_compact_suffix)
+    NotationScientific, _ -> #(
+      Decimal(..dec, exponent: 1),
+      dec.exponent - 1,
+      no_compact_suffix,
+    )
+    NotationEngineering, _ -> {
+      let e = 3 * floor_div(dec.exponent - 1, 3)
+      #(Decimal(..dec, exponent: dec.exponent - e), e, no_compact_suffix)
+    }
+    NotationCompact(display:), _ -> {
+      let suffix = compact_suffix(key, display, dec.exponent - 1)
+      #(Decimal(..dec, exponent: dec.exponent - suffix.shift), 0, suffix)
+    }
   }
   let digit_parts = format_digits(opts, mantissa, negative)
   let digit_parts = case opts.notation {
@@ -421,12 +416,12 @@ fn format_dec_parts(opts: NumOpts, negative: Bool, dec: Dec) -> List(Part) {
       list.append(digit_parts, exp_parts)
     }
     NotationCompact(..) ->
-      case compact_other {
+      case suffix.plural {
         [] -> digit_parts
         _ ->
           case is_one_parts(digit_parts) {
-            True -> list.append(digit_parts, compact_one)
-            False -> list.append(digit_parts, compact_other)
+            True -> list.append(digit_parts, suffix.singular)
+            False -> list.append(digit_parts, suffix.plural)
           }
       }
     NotationStandard -> digit_parts
@@ -434,19 +429,52 @@ fn format_dec_parts(opts: NumOpts, negative: Bool, dec: Dec) -> List(Part) {
   wrap_affixes(opts, digit_parts, negative, False)
 }
 
-// e is floor(log10 x); returns #(divisor exp, one suffix, other suffix)
-fn compact_entry(
+type CompactSuffix {
+  CompactSuffix(shift: Int, singular: List(Part), plural: List(Part))
+}
+
+const no_compact_suffix = CompactSuffix(shift: 0, singular: [], plural: [])
+
+fn same_suffix(shift: Int, parts: List(Part)) -> CompactSuffix {
+  CompactSuffix(shift:, singular: parts, plural: parts)
+}
+
+// e is floor(log10(x))
+fn compact_suffix(
   key: LocaleKey,
   display: CompactDisplay,
   e: Int,
-) -> #(Int, List(Part), List(Part)) {
-  use <- bool.lazy_guard(key.key == "en-IN", fn() { in_compact(e, display) })
-  case loc_lang(key) {
-    "ja" -> cjk_compact(e, "万", "億", "兆", None)
-    "ko" -> cjk_compact(e, "만", "억", "조", Some("천"))
+) -> CompactSuffix {
+  use <- bool.lazy_guard(key.base_tag == "en-IN", fn() {
+    indian_compact(e, display)
+  })
+  case base_language(key) {
+    "ja" ->
+      cjk_compact(
+        e,
+        ten_thousand: "万",
+        hundred_million: "億",
+        trillion: "兆",
+        thousand: None,
+      )
+    "ko" ->
+      cjk_compact(
+        e,
+        ten_thousand: "만",
+        hundred_million: "억",
+        trillion: "조",
+        thousand: Some("천"),
+      )
     "zh" ->
-      case key.key {
-        "zh-TW" | "zh-Hant" -> cjk_compact(e, "萬", "億", "兆", None)
+      case key.base_tag {
+        "zh-TW" | "zh-Hant" ->
+          cjk_compact(
+            e,
+            ten_thousand: "萬",
+            hundred_million: "億",
+            trillion: "兆",
+            thousand: None,
+          )
         _ -> en_compact(e, display)
       }
     "de" -> de_compact(e, display)
@@ -454,11 +482,8 @@ fn compact_entry(
   }
 }
 
-fn en_compact(
-  e: Int,
-  display: CompactDisplay,
-) -> #(Int, List(Part), List(Part)) {
-  use <- bool.guard(e < 3, #(0, [], []))
+fn en_compact(e: Int, display: CompactDisplay) -> CompactSuffix {
+  use <- bool.guard(e < 3, no_compact_suffix)
   let k = int.min(4, e / 3)
   let suffix = case k, display {
     1, CompactShort -> [#(PCompact, "K")]
@@ -470,69 +495,63 @@ fn en_compact(
     3, CompactLong -> [#(PLiteral, " "), #(PCompact, "billion")]
     _, CompactLong -> [#(PLiteral, " "), #(PCompact, "trillion")]
   }
-  #(3 * k, suffix, suffix)
+  same_suffix(3 * k, suffix)
 }
 
-fn in_compact(
-  e: Int,
-  display: CompactDisplay,
-) -> #(Int, List(Part), List(Part)) {
-  let entry = fn(div: Int, short: String, long: String) {
-    let suffix = case display {
-      CompactShort -> [#(PCompact, short)]
-      CompactLong -> [#(PLiteral, " "), #(PCompact, long)]
+fn indian_compact(e: Int, display: CompactDisplay) -> CompactSuffix {
+  let entry = fn(shift: Int, short: String, long: String) {
+    case display {
+      CompactShort -> same_suffix(shift, [#(PCompact, short)])
+      CompactLong -> same_suffix(shift, [#(PLiteral, " "), #(PCompact, long)])
     }
-    #(div, suffix, suffix)
   }
   case e {
     _ if e >= 3 && e <= 4 -> entry(3, "K", "thousand")
     _ if e >= 5 && e <= 6 -> entry(5, "L", "lakh")
     _ if e >= 7 -> entry(7, "Cr", "crore")
-    _ -> #(0, [], [])
+    _ -> no_compact_suffix
   }
 }
 
 fn cjk_compact(
   e: Int,
-  m4: String,
-  m8: String,
-  m12: String,
-  m3: Option(String),
-) -> #(Int, List(Part), List(Part)) {
+  ten_thousand ten_thousand: String,
+  hundred_million hundred_million: String,
+  trillion trillion: String,
+  thousand thousand: Option(String),
+) -> CompactSuffix {
+  let unit = fn(shift: Int, name: String) {
+    same_suffix(shift, [#(PCompact, name)])
+  }
   case e {
-    3 ->
-      case m3 {
-        Some(s) -> #(3, [#(PCompact, s)], [#(PCompact, s)])
-        None -> #(0, [], [])
-      }
-    _ if e >= 4 && e <= 7 -> #(4, [#(PCompact, m4)], [#(PCompact, m4)])
-    _ if e >= 8 && e <= 11 -> #(8, [#(PCompact, m8)], [#(PCompact, m8)])
-    _ if e >= 12 -> #(12, [#(PCompact, m12)], [#(PCompact, m12)])
-    _ -> #(0, [], [])
+    3 -> option.map(thousand, unit(3, _)) |> option.unwrap(no_compact_suffix)
+    _ if e >= 4 && e <= 7 -> unit(4, ten_thousand)
+    _ if e >= 8 && e <= 11 -> unit(8, hundred_million)
+    _ if e >= 12 -> unit(12, trillion)
+    _ -> no_compact_suffix
   }
 }
 
-fn de_compact(
-  e: Int,
-  display: CompactDisplay,
-) -> #(Int, List(Part), List(Part)) {
+fn de_compact(e: Int, display: CompactDisplay) -> CompactSuffix {
   let short = fn(s: String) { [#(PLiteral, "\u{00A0}"), #(PCompact, s)] }
   let long = fn(s: String) { [#(PLiteral, " "), #(PCompact, s)] }
   case display {
     CompactShort ->
       case e {
-        _ if e >= 6 && e <= 8 -> #(6, short("Mio."), short("Mio."))
-        _ if e >= 9 && e <= 11 -> #(9, short("Mrd."), short("Mrd."))
-        _ if e >= 12 -> #(12, short("Bio."), short("Bio."))
-        _ -> #(0, [], [])
+        _ if e >= 6 && e <= 8 -> same_suffix(6, short("Mio."))
+        _ if e >= 9 && e <= 11 -> same_suffix(9, short("Mrd."))
+        _ if e >= 12 -> same_suffix(12, short("Bio."))
+        _ -> no_compact_suffix
       }
     CompactLong ->
       case e {
-        _ if e >= 3 && e <= 5 -> #(3, long("Tausend"), long("Tausend"))
-        _ if e >= 6 && e <= 8 -> #(6, long("Million"), long("Millionen"))
-        _ if e >= 9 && e <= 11 -> #(9, long("Milliarde"), long("Milliarden"))
-        _ if e >= 12 -> #(12, long("Billion"), long("Billionen"))
-        _ -> #(0, [], [])
+        _ if e >= 3 && e <= 5 -> same_suffix(3, long("Tausend"))
+        _ if e >= 6 && e <= 8 ->
+          CompactSuffix(6, long("Million"), long("Millionen"))
+        _ if e >= 9 && e <= 11 ->
+          CompactSuffix(9, long("Milliarde"), long("Milliarden"))
+        _ if e >= 12 -> CompactSuffix(12, long("Billion"), long("Billionen"))
+        _ -> no_compact_suffix
       }
   }
 }
@@ -627,8 +646,8 @@ fn unit_affixes(
   display: UnitDisplay,
   one: Bool,
 ) -> #(List(Part), List(Part)) {
-  let lang = loc_lang(key)
-  let hant = key.key == "zh-TW" || key.key == "zh-Hant"
+  let lang = base_language(key)
+  let hant = key.base_tag == "zh-TW" || key.base_tag == "zh-Hant"
   case unit, lang {
     "kilometer-per-hour", "de" ->
       case display {
@@ -710,7 +729,7 @@ fn currency_text(
   code: String,
   display: CurrencyDisplay,
 ) -> #(String, Bool) {
-  let usd_prefixed = case key.key {
+  let usd_prefixed = case key.base_tag {
     "ko" | "ko-KR" | "zh-TW" | "zh-Hant" -> True
     _ -> False
   }
@@ -787,10 +806,6 @@ fn unit_name_long(unit: String, one: Bool) -> String {
       "celsius" -> "degree Celsius"
       "fahrenheit" -> "degree Fahrenheit"
       "fluid-ounce" -> "fluid ounce"
-      "foot" -> "foot"
-      "inch" -> "inch"
-      "mile-scandinavian" -> "mile-scandinavian"
-      "percent" -> "percent"
       other -> other
     }
   }
@@ -822,12 +837,10 @@ fn unit_name_long(unit: String, one: Bool) -> String {
 fn unit_name(unit: String, narrow narrow: Bool) -> String {
   let simple = fn(u: String) -> String {
     case u, narrow {
-      "acre", True -> "ac"
-      "acre", False -> "ac"
+      "acre", _ -> "ac"
       "bit", _ -> "bit"
       "byte", _ -> "byte"
-      "celsius", True -> "°C"
-      "celsius", False -> "°C"
+      "celsius", _ -> "°C"
       "centimeter", _ -> "cm"
       "day", True -> "d"
       "day", False -> "day"
@@ -840,8 +853,7 @@ fn unit_name(unit: String, narrow narrow: Bool) -> String {
       "gallon", _ -> "gal"
       "gigabit", _ -> "Gb"
       "gigabyte", _ -> "GB"
-      "gram", True -> "g"
-      "gram", False -> "g"
+      "gram", _ -> "g"
       "hectare", _ -> "ha"
       "hour", True -> "h"
       "hour", False -> "hr"
@@ -849,11 +861,9 @@ fn unit_name(unit: String, narrow narrow: Bool) -> String {
       "inch", False -> "in"
       "kilobit", _ -> "kb"
       "kilobyte", _ -> "kB"
-      "kilogram", True -> "kg"
-      "kilogram", False -> "kg"
+      "kilogram", _ -> "kg"
       "kilometer", _ -> "km"
-      "liter", True -> "L"
-      "liter", False -> "L"
+      "liter", _ -> "L"
       "megabit", _ -> "Mb"
       "megabyte", _ -> "MB"
       "meter", _ -> "m"
@@ -862,8 +872,7 @@ fn unit_name(unit: String, narrow narrow: Bool) -> String {
       "mile-scandinavian", _ -> "smi"
       "milliliter", _ -> "mL"
       "millimeter", _ -> "mm"
-      "millisecond", True -> "ms"
-      "millisecond", False -> "ms"
+      "millisecond", _ -> "ms"
       "minute", True -> "m"
       "minute", False -> "min"
       "month", True -> "m"
@@ -925,16 +934,18 @@ pub fn is_well_formed_unit(unit: String) -> Bool {
   }
 }
 
-// value = 0.digits * 10^exp, digits "" is zero
-pub type Dec {
-  Dec(digits: String, exp: Int)
+// value = 0.digits * 10^exponent, digits "" is zero
+pub type Decimal {
+  Decimal(digits: String, exponent: Int)
 }
 
-fn decompose(x: Float) -> Dec {
+const zero_decimal = Decimal(digits: "", exponent: 0)
+
+fn decimal_of_float(x: Float) -> Decimal {
   parse_decimal(js_format_number(x))
 }
 
-fn parse_decimal(s: String) -> Dec {
+fn parse_decimal(s: String) -> Decimal {
   let #(base, e) = case string.split_once(s, "e") {
     Ok(#(b, ex)) -> #(b, parse_exp(ex))
     Error(Nil) ->
@@ -948,23 +959,23 @@ fn parse_decimal(s: String) -> Dec {
     Error(Nil) -> #(base, "")
   }
   let digits = int_part <> frac_part
-  let exp = string.length(int_part) + e
-  normalize(Dec(digits:, exp:))
+  let exponent = string.length(int_part) + e
+  normalize(Decimal(digits:, exponent:))
 }
 
 fn parse_exp(s: String) -> Int {
   case string.pop_grapheme(s) {
-    Ok(#("+", rest)) -> int.parse(rest) |> result.unwrap(0)
-    _ -> int.parse(s) |> result.unwrap(0)
+    Ok(#("+", rest)) -> parse_int_or_zero(rest)
+    _ -> parse_int_or_zero(s)
   }
 }
 
-fn normalize(dec: Dec) -> Dec {
-  let #(digits, exp) = strip_leading(dec.digits, dec.exp)
+fn normalize(dec: Decimal) -> Decimal {
+  let #(digits, exponent) = strip_leading(dec.digits, dec.exponent)
   let digits = strip_trailing(digits)
   case digits {
-    "" -> Dec(digits: "", exp: 0)
-    _ -> Dec(digits:, exp:)
+    "" -> zero_decimal
+    _ -> Decimal(digits:, exponent:)
   }
 }
 
@@ -982,211 +993,167 @@ fn strip_trailing(digits: String) -> String {
   }
 }
 
-fn round_dec(dec: Dec, keep: Int, mode: RoundingMode, negative: Bool) -> Dec {
+fn round_to_leading_digits(
+  dec: Decimal,
+  keep keep: Int,
+  mode mode: RoundingMode,
+  negative negative: Bool,
+) -> Decimal {
   let n_digits = string.length(dec.digits)
-  case dec.digits == "" || keep >= n_digits {
-    True -> dec
-    False -> {
-      let #(kept, rem) = case keep <= 0 {
-        True -> #("", dec.digits)
-        False -> #(
-          string.slice(dec.digits, 0, keep),
-          string.slice(dec.digits, keep, n_digits - keep),
-        )
-      }
-      let n = parse_int_or_zero(kept)
-      let lead_zeros = case keep < 0 {
-        True -> -keep
-        False -> 0
-      }
-      let cmp = half_cmp(rem, lead_zeros)
-      let rem_nonzero = string.to_graphemes(rem) |> list.any(fn(c) { c != "0" })
-      let up = case rem_nonzero {
-        False -> False
-        True -> round_up_cmp(mode, negative, cmp, odd: n % 2 == 1)
-      }
-      let n2 = case up {
+  use <- bool.guard(dec.digits == "" || keep >= n_digits, dec)
+  let #(kept, dropped) = case keep <= 0 {
+    True -> #("", dec.digits)
+    False -> #(
+      string.slice(dec.digits, 0, keep),
+      string.slice(dec.digits, keep, n_digits - keep),
+    )
+  }
+  let n = parse_int_or_zero(kept)
+  let lead_zeros = int.max(-keep, 0)
+  let rounded = case has_nonzero_digit(dropped) {
+    False -> n
+    True -> {
+      let vs_half = compare_remainder_to_half(dropped, lead_zeros)
+      case rounds_up(mode, negative, vs_half, odd: n % 2 == 1) {
         True -> n + 1
         False -> n
       }
-      rebuild_rounded(dec, keep, n2)
     }
   }
+  rebuild_rounded(dec, keep, rounded)
 }
 
-// cmp: -1 below half, 0 tie, 1 above; odd only for halfeven
-fn round_up_cmp(
+// odd only matters for halfeven
+fn rounds_up(
   mode: RoundingMode,
   negative: Bool,
-  cmp: Int,
+  vs_half: Order,
   odd odd: Bool,
 ) -> Bool {
-  case mode {
-    RoundCeil -> !negative
-    RoundFloor -> negative
-    RoundExpand -> True
-    RoundTrunc -> False
-    RoundHalfCeil ->
-      case cmp {
-        1 -> True
-        0 -> !negative
-        _ -> False
-      }
-    RoundHalfFloor ->
-      case cmp {
-        1 -> True
-        0 -> negative
-        _ -> False
-      }
-    RoundHalfTrunc -> cmp == 1
-    RoundHalfExpand -> cmp >= 0
-    RoundHalfEven ->
-      case cmp {
-        1 -> True
-        0 -> odd
-        _ -> False
-      }
+  case vs_half, mode {
+    _, RoundCeil -> !negative
+    _, RoundFloor -> negative
+    _, RoundExpand -> True
+    _, RoundTrunc -> False
+    order.Gt, _ -> True
+    order.Lt, _ -> False
+    order.Eq, RoundHalfCeil -> !negative
+    order.Eq, RoundHalfFloor -> negative
+    order.Eq, RoundHalfTrunc -> False
+    order.Eq, RoundHalfExpand -> True
+    order.Eq, RoundHalfEven -> odd
   }
 }
 
-fn half_cmp(rem: String, lead_zeros: Int) -> Int {
-  let rem_nonzero = string.to_graphemes(rem) |> list.any(fn(c) { c != "0" })
-  case rem_nonzero {
-    False -> -1
-    True ->
-      case lead_zeros > 0 {
-        True -> -1
-        False ->
-          case string.pop_grapheme(rem) {
-            Ok(#(first, rest)) -> {
-              let d = parse_int_or_zero(first)
-              case d < 5 {
-                True -> -1
-                False ->
-                  case d > 5 {
-                    True -> 1
-                    False ->
-                      case
-                        string.to_graphemes(rest)
-                        |> list.any(fn(c) { c != "0" })
-                      {
-                        True -> 1
-                        False -> 0
-                      }
-                  }
-              }
-            }
-            Error(Nil) -> -1
-          }
-      }
+fn has_nonzero_digit(digits: String) -> Bool {
+  string.to_graphemes(digits) |> list.any(fn(c) { c != "0" })
+}
+
+// compares 0.{lead_zeros zeros}{dropped} against one half
+fn compare_remainder_to_half(dropped: String, lead_zeros: Int) -> Order {
+  use <- bool.guard(lead_zeros > 0 || !has_nonzero_digit(dropped), order.Lt)
+  case string.pop_grapheme(dropped) {
+    Error(Nil) -> order.Lt
+    Ok(#(first, rest)) ->
+      int.compare(parse_int_or_zero(first), 5)
+      |> order.lazy_break_tie(fn() {
+        case has_nonzero_digit(rest) {
+          True -> order.Gt
+          False -> order.Eq
+        }
+      })
   }
 }
 
-fn rebuild_rounded(dec: Dec, keep: Int, n2: Int) -> Dec {
-  case n2 == 0 {
-    True -> Dec(digits: "", exp: 0)
+fn rebuild_rounded(dec: Decimal, keep: Int, rounded: Int) -> Decimal {
+  case rounded == 0 {
+    True -> zero_decimal
     False -> {
-      let s = int.to_string(n2)
+      let s = int.to_string(rounded)
       let kept_len = int.max(keep, 0)
-      let exp = dec.exp - kept_len + string.length(s)
-      normalize(Dec(digits: s, exp:))
+      let exponent = dec.exponent - kept_len + string.length(s)
+      normalize(Decimal(digits: s, exponent:))
     }
   }
 }
 
 fn round_fraction(
-  dec: Dec,
-  f: Int,
+  dec: Decimal,
+  fraction_digits: Int,
   inc: Int,
   mode: RoundingMode,
   negative: Bool,
-) -> Dec {
-  let keep = dec.exp + f
-  case inc {
-    1 -> round_dec(dec, keep, mode, negative)
-    _ -> {
-      let n_digits = string.length(dec.digits)
-      let #(n, rem_nonzero) = case keep >= n_digits {
-        True -> #(
-          parse_int_or_zero(dec.digits) * pow10_int(keep - n_digits),
-          False,
-        )
-        False ->
-          case keep <= 0 {
-            True -> #(0, dec.digits != "")
-            False -> #(
-              parse_int_or_zero(string.slice(dec.digits, 0, keep)),
-              string.slice(dec.digits, keep, n_digits - keep)
-                |> string.to_graphemes
-                |> list.any(fn(c) { c != "0" }),
-            )
-          }
+) -> Decimal {
+  let keep = dec.exponent + fraction_digits
+  use <- bool.lazy_guard(inc == 1, fn() {
+    round_to_leading_digits(dec, keep:, mode:, negative:)
+  })
+  let n_digits = string.length(dec.digits)
+  let dropped = dropped_digits(dec, keep)
+  let #(n, remainder_nonzero) = case keep >= n_digits, keep <= 0 {
+    True, _ -> #(
+      parse_int_or_zero(dec.digits) * pow10_int(keep - n_digits),
+      False,
+    )
+    False, True -> #(0, dec.digits != "")
+    False, False -> #(
+      parse_int_or_zero(string.slice(dec.digits, 0, keep)),
+      has_nonzero_digit(dropped),
+    )
+  }
+  let r = n % inc
+  let rounded = case r == 0 && !remainder_nonzero {
+    True -> n
+    False -> {
+      let vs_half =
+        remainder_vs_half_increment(r, inc, remainder_nonzero:, dropped:)
+      case rounds_up(mode, negative, vs_half, odd: { n / inc } % 2 == 1) {
+        True -> n - r + inc
+        False -> n - r
       }
-      let r = n % inc
-      let n2 = case r == 0 && !rem_nonzero {
-        True -> n
-        False -> {
-          // compare 2 * (r + leftover fraction) against inc
-          let doubled = 2 * r
-          let cmp = case doubled > inc {
-            True -> 1
-            False ->
-              case doubled == inc {
-                True ->
-                  case rem_nonzero {
-                    True -> 1
-                    False -> 0
-                  }
-                False ->
-                  case doubled + 1 == inc {
-                    True -> half_cmp(rem_digits_of(dec, keep), 0)
-                    False ->
-                      case doubled + 2 <= inc {
-                        True -> -1
-                        False ->
-                          case rem_nonzero {
-                            True -> 1
-                            False -> -1
-                          }
-                      }
-                  }
-              }
-          }
-          let up = round_up_cmp(mode, negative, cmp, odd: { n / inc } % 2 == 1)
-          case up {
-            True -> n - r + inc
-            False -> n - r
-          }
-        }
-      }
-      case n2 == 0 {
-        True -> Dec(digits: "", exp: 0)
-        False -> {
-          let s = int.to_string(n2)
-          normalize(Dec(digits: s, exp: string.length(s) - f))
-        }
-      }
+    }
+  }
+  case rounded == 0 {
+    True -> zero_decimal
+    False -> {
+      let s = int.to_string(rounded)
+      normalize(Decimal(digits: s, exponent: string.length(s) - fraction_digits))
     }
   }
 }
 
-fn rem_digits_of(dec: Dec, keep: Int) -> String {
-  let n = string.length(dec.digits)
-  case keep >= n {
-    True -> ""
-    False ->
-      case keep <= 0 {
-        True -> dec.digits
-        False -> string.slice(dec.digits, keep, n - keep)
+fn remainder_vs_half_increment(
+  r: Int,
+  inc: Int,
+  remainder_nonzero remainder_nonzero: Bool,
+  dropped dropped: String,
+) -> Order {
+  case int.compare(2 * r, inc) {
+    order.Gt -> order.Gt
+    order.Eq ->
+      case remainder_nonzero {
+        True -> order.Gt
+        False -> order.Eq
+      }
+    order.Lt ->
+      case 2 * r + 1 == inc {
+        True -> compare_remainder_to_half(dropped, 0)
+        False -> order.Lt
       }
   }
 }
 
-fn parse_int_or_zero(s: String) -> Int {
-  case int.parse(s) {
-    Ok(v) -> v
-    Error(Nil) -> 0
+fn dropped_digits(dec: Decimal, keep: Int) -> String {
+  let n = string.length(dec.digits)
+  case keep >= n, keep <= 0 {
+    True, _ -> ""
+    False, True -> dec.digits
+    False, False -> string.slice(dec.digits, keep, n - keep)
   }
+}
+
+fn parse_int_or_zero(s: String) -> Int {
+  int.parse(s) |> result.unwrap(0)
 }
 
 fn pow10_int(e: Int) -> Int {
@@ -1196,22 +1163,17 @@ fn pow10_int(e: Int) -> Int {
   }
 }
 
-fn render_dec(dec: Dec, frac_len: Int) -> #(String, String) {
+fn split_integer_fraction(dec: Decimal, frac_len: Int) -> #(String, String) {
   let n = string.length(dec.digits)
-  let #(int_str, frac_str) = case dec.digits {
-    "" -> #("0", "")
-    _ ->
-      case dec.exp <= 0 {
-        True -> #("0", string.repeat("0", -dec.exp) <> dec.digits)
-        False ->
-          case n <= dec.exp {
-            True -> #(dec.digits <> string.repeat("0", dec.exp - n), "")
-            False -> #(
-              string.slice(dec.digits, 0, dec.exp),
-              string.slice(dec.digits, dec.exp, n - dec.exp),
-            )
-          }
-      }
+  let exponent = dec.exponent
+  let #(int_str, frac_str) = case dec.digits, exponent <= 0, n <= exponent {
+    "", _, _ -> #("0", "")
+    _, True, _ -> #("0", string.repeat("0", -exponent) <> dec.digits)
+    _, False, True -> #(dec.digits <> string.repeat("0", exponent - n), "")
+    _, False, False -> #(
+      string.slice(dec.digits, 0, exponent),
+      string.slice(dec.digits, exponent, n - exponent),
+    )
   }
   let flen = string.length(frac_str)
   let frac_str = case flen < frac_len {
@@ -1221,7 +1183,7 @@ fn render_dec(dec: Dec, frac_len: Int) -> #(String, String) {
   #(int_str, frac_str)
 }
 
-fn format_digits(opts: NumOpts, dec: Dec, negative: Bool) -> List(Part) {
+fn format_digits(opts: NumOpts, dec: Decimal, negative: Bool) -> List(Part) {
   let mode = opts.rounding_mode
   let by_sig = fn(sig: Precision) { render_sig(dec, sig, mode, negative) }
   let by_frac = fn(frac: Precision) {
@@ -1260,29 +1222,25 @@ fn format_digits(opts: NumOpts, dec: Dec, negative: Bool) -> List(Part) {
 
 fn prefer_sig(
   priority: RoundingPriority,
-  dec: Dec,
+  dec: Decimal,
   sig: Precision,
   frac: Precision,
 ) -> Bool {
+  let sig_magnitude = case dec.digits {
+    "" -> -sig.max
+    _ -> dec.exponent - sig.max
+  }
+  let frac_magnitude = -frac.max
   case priority {
     PriorityAuto -> True
-    PriorityMorePrecision | PriorityLessPrecision -> {
-      let m_s = case dec.digits {
-        "" -> 0 - sig.max
-        _ -> dec.exp - sig.max
-      }
-      let m_f = 0 - frac.max
-      case priority == PriorityMorePrecision {
-        True -> m_s <= m_f
-        False -> m_s >= m_f
-      }
-    }
+    PriorityMorePrecision -> sig_magnitude <= frac_magnitude
+    PriorityLessPrecision -> sig_magnitude >= frac_magnitude
   }
 }
 
 // §15.1.3 torawprecision
 fn render_sig(
-  dec: Dec,
+  dec: Decimal,
   sig: Precision,
   mode: RoundingMode,
   negative: Bool,
@@ -1290,9 +1248,11 @@ fn render_sig(
   case dec.digits {
     "" -> #("0", string.repeat("0", sig.min - 1))
     _ -> {
-      let rounded = round_dec(dec, sig.max, mode, negative)
-      let frac_len = int.max(0, string.length(rounded.digits) - rounded.exp)
-      let #(i, f) = render_dec(rounded, frac_len)
+      let rounded =
+        round_to_leading_digits(dec, keep: sig.max, mode:, negative:)
+      let frac_len =
+        int.max(0, string.length(rounded.digits) - rounded.exponent)
+      let #(i, f) = split_integer_fraction(rounded, frac_len)
       let count = count_sig(i, f)
       let f = case count < sig.min {
         True -> f <> string.repeat("0", sig.min - count)
@@ -1305,7 +1265,7 @@ fn render_sig(
 
 // §15.1.4 torawfixed
 fn render_frac(
-  dec: Dec,
+  dec: Decimal,
   frac: Precision,
   rounding_increment: Int,
   mode: RoundingMode,
@@ -1313,7 +1273,7 @@ fn render_frac(
 ) -> #(String, String) {
   let rounded =
     round_fraction(dec, frac.max, rounding_increment, mode, negative)
-  let #(i, f) = render_dec(rounded, frac.max)
+  let #(i, f) = split_integer_fraction(rounded, frac.max)
   #(i, strip_frac_to_min(f, frac.min))
 }
 
@@ -1436,7 +1396,7 @@ pub fn plural_select_en(
 ) -> PluralCategory {
   case type_ {
     Ordinal -> {
-      let n = int.parse(int_digits) |> option.from_result |> option.unwrap(0)
+      let n = parse_int_or_zero(int_digits)
       let n = int.absolute_value(n)
       let r10 = n % 10
       let r100 = n % 100
@@ -1538,15 +1498,15 @@ pub fn rtf_parts_en(
     RtfAuto -> True
     RtfAlways -> False
   }
-  let js3 = fn(p: Part, unit) { UnitPart(p.0, p.1, Some(unit)) }
-  let literal3 = fn(text) { UnitPart(PLiteral, text, None) }
+  let with_unit = fn(p: Part) { UnitPart(p.0, p.1, Some(unit)) }
+  let literal = fn(text) { UnitPart(PLiteral, text, None) }
   // normalize -0.0 so the 0.0 patterns match
   let v = case is_neg_zero(value) {
     True -> 0.0
     False -> value
   }
   case is_auto, rtf_auto_name(unit, v) {
-    True, Some(name) -> [literal3(name)]
+    True, Some(name) -> [literal(name)]
     _, _ -> {
       let plural = case float.absolute_value(value) {
         1.0 -> PcOne
@@ -1557,18 +1517,14 @@ pub fn rtf_parts_en(
       let tagged =
         list.map(value_parts, fn(p: Part) {
           case p.0 {
-            PLiteral -> literal3(p.1)
-            _ -> js3(p, unit)
+            PLiteral -> literal(p.1)
+            _ -> with_unit(p)
           }
         })
       case past {
-        True -> list.flatten([tagged, [literal3(" " <> unit_text <> " ago")]])
+        True -> list.append(tagged, [literal(" " <> unit_text <> " ago")])
         False ->
-          list.flatten([
-            [literal3("in ")],
-            tagged,
-            [literal3(" " <> unit_text)],
-          ])
+          list.flatten([[literal("in ")], tagged, [literal(" " <> unit_text)]])
       }
     }
   }
@@ -1642,7 +1598,7 @@ pub type DateFields {
 }
 
 pub fn fields_from_epoch_ms(ms: Float, offset_minutes: Int) -> DateFields {
-  let total_ms = float_to_int_trunc(ms) + offset_minutes * 60_000
+  let total_ms = float.truncate(ms) + offset_minutes * 60_000
   let days = floor_div(total_ms, 86_400_000)
   let ms_in_day = total_ms - days * 86_400_000
   let millisecond = ms_in_day % 1000
@@ -1664,10 +1620,6 @@ pub fn fields_from_epoch_ms(ms: Float, offset_minutes: Int) -> DateFields {
   )
 }
 
-fn float_to_int_trunc(x: Float) -> Int {
-  float.truncate(x)
-}
-
 pub fn month_name(m: Int, width: NameWidth) -> String {
   let long = case m {
     1 -> "January"
@@ -1686,11 +1638,7 @@ pub fn month_name(m: Int, width: NameWidth) -> String {
   }
   case width {
     WLong -> long
-    WShort ->
-      case m {
-        9 -> "Sep"
-        _ -> string.slice(long, 0, 3)
-      }
+    WShort -> string.slice(long, 0, 3)
     WNarrow -> string.slice(long, 0, 1)
   }
 }
@@ -1726,14 +1674,10 @@ pub fn era_name(year: Int, width: NameWidth) -> String {
 }
 
 pub fn day_period_name(hour: Int, minute: Int, width: NameWidth) -> String {
-  let mins = hour * 60 + minute
-  let noon = case width {
-    WNarrow -> "n"
-    WLong | WShort -> "noon"
-  }
-  case mins == 720 {
-    True -> noon
-    False ->
+  case hour * 60 + minute == 720, width {
+    True, WNarrow -> "n"
+    True, WLong | True, WShort -> "noon"
+    False, _ ->
       case hour {
         h if h < 6 -> "at night"
         h if h < 12 -> "in the morning"

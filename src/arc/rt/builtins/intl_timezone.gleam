@@ -11,12 +11,9 @@ import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
-pub fn canonical(st: Agent, s: String) -> #(Option(DtfTimeZone), Agent) {
-  case parse_offset_zone(s) {
-    Some(minutes) -> #(
-      Some(FixedZone(format_offset_zone(minutes), minutes)),
-      st,
-    )
+pub fn resolve(st: Agent, s: String) -> #(Option(DtfTimeZone), Agent) {
+  case parse_utc_offset_minutes(s) {
+    Some(minutes) -> #(Some(FixedZone(offset_zone_name(minutes), minutes)), st)
     None ->
       case etc_gmt_zone(string.lowercase(s)) {
         Some(zone) -> #(Some(zone), st)
@@ -59,114 +56,104 @@ pub fn offset_at(tz: DtfTimeZone, instant_ms: Int) -> Int {
 
 // etc/gmt+n is utc-n and etc/gmt-n is utc+n
 fn etc_gmt_zone(lower: String) -> Option(DtfTimeZone) {
-  case string.split_once(lower, "etc/gmt") {
-    Ok(#("", rest)) -> {
-      let #(sign, num) = case string.pop_grapheme(rest) {
-        Ok(#("+", n)) -> #(-1, n)
-        Ok(#("-", n)) -> #(1, n)
-        _ -> #(0, "")
-      }
-      case sign != 0, int.parse(num) {
-        True, Ok(n) if n >= 1 && n <= 14 -> {
-          let name = case sign < 0 {
-            True -> "Etc/GMT+" <> int.to_string(n)
-            False -> "Etc/GMT-" <> int.to_string(n)
-          }
-          case sign < 0 && n > 12 {
-            True -> None
-            False -> Some(FixedZone(name, sign * n * 60))
-          }
-        }
-        _, _ -> None
-      }
-    }
+  case lower {
+    "etc/gmt+" <> digits ->
+      etc_gmt_fixed("Etc/GMT+", digits, sign: -1, max_hours: 12)
+    "etc/gmt-" <> digits ->
+      etc_gmt_fixed("Etc/GMT-", digits, sign: 1, max_hours: 14)
     _ -> None
   }
 }
 
-fn parse_offset_zone(s: String) -> Option(Int) {
-  let #(sign, rest) = case string.pop_grapheme(s) {
-    Ok(#("+", rest)) -> #(1, rest)
-    Ok(#("-", rest)) -> #(-1, rest)
-    _ -> #(0, s)
-  }
-  case sign {
-    0 -> None
-    _ ->
-      case string.split(rest, ":") {
-        [hh, mm] -> {
-          let hh_len = string.length(hh)
-          let mm_len = string.length(mm)
-          case int.parse(hh), int.parse(mm) {
-            Ok(h), Ok(m)
-              if h >= 0
-              && h <= 23
-              && m >= 0
-              && m <= 59
-              && hh_len == 2
-              && mm_len == 2
-            -> Some(sign * { h * 60 + m })
-            _, _ -> None
-          }
-        }
-        [hhmm] ->
-          case string.length(hhmm), int.parse(hhmm) {
-            2, Ok(h) if h >= 0 && h <= 23 -> Some(sign * h * 60)
-            4, Ok(v) -> {
-              let h = v / 100
-              let m = v % 100
-              case h <= 23 && m <= 59 {
-                True -> Some(sign * { h * 60 + m })
-                False -> None
-              }
-            }
-            _, _ -> None
-          }
-        _ -> None
-      }
+fn etc_gmt_fixed(
+  prefix: String,
+  digits: String,
+  sign sign: Int,
+  max_hours max_hours: Int,
+) -> Option(DtfTimeZone) {
+  case int.parse(digits) {
+    Ok(hours) if hours >= 1 && hours <= max_hours ->
+      Some(FixedZone(prefix <> int.to_string(hours), sign * hours * 60))
+    _ -> None
   }
 }
 
-fn format_offset_zone(minutes: Int) -> String {
-  let sign = case minutes < 0 {
+fn parse_utc_offset_minutes(s: String) -> Option(Int) {
+  use #(sign, rest) <- option.then(case string.pop_grapheme(s) {
+    Ok(#("+", rest)) -> Some(#(1, rest))
+    Ok(#("-", rest)) -> Some(#(-1, rest))
+    _ -> None
+  })
+  let minutes = case string.split(rest, ":") {
+    [hh, mm] ->
+      case string.length(hh), int.parse(hh), string.length(mm), int.parse(mm) {
+        2, Ok(h), 2, Ok(m) if h >= 0 && h <= 23 && m >= 0 && m <= 59 ->
+          Some(h * 60 + m)
+        _, _, _, _ -> None
+      }
+    [hhmm] ->
+      case string.length(hhmm), int.parse(hhmm) {
+        2, Ok(h) if h >= 0 && h <= 23 -> Some(h * 60)
+        4, Ok(v) -> {
+          let h = v / 100
+          let m = v % 100
+          case h <= 23 && m <= 59 {
+            True -> Some(h * 60 + m)
+            False -> None
+          }
+        }
+        _, _ -> None
+      }
+    _ -> None
+  }
+  option.map(minutes, fn(m) { sign * m })
+}
+
+fn offset_sign(minutes: Int) -> String {
+  case minutes < 0 {
     True -> "-"
     False -> "+"
   }
-  let m = int.absolute_value(minutes)
-  sign <> intl_format.pad2(m / 60) <> ":" <> intl_format.pad2(m % 60)
 }
 
-pub fn display(name: String, width: TimeZoneNameWidth, offset: Int) -> String {
+fn offset_zone_name(minutes: Int) -> String {
+  let m = int.absolute_value(minutes)
+  offset_sign(minutes)
+  <> intl_format.pad2(m / 60)
+  <> ":"
+  <> intl_format.pad2(m % 60)
+}
+
+pub fn display_name(
+  name: String,
+  width: TimeZoneNameWidth,
+  offset_minutes: Int,
+) -> String {
   case is_utc(name), width {
     True, TzShort | True, TzShortGeneric -> "UTC"
     True, TzLong | True, TzLongGeneric -> "Coordinated Universal Time"
-    _, TzLong | _, TzLongOffset | _, TzLongGeneric -> gmt_offset(offset, True)
+    _, TzLong | _, TzLongOffset | _, TzLongGeneric ->
+      gmt_offset_label(offset_minutes, long: True)
     _, TzShort | _, TzShortOffset | _, TzShortGeneric ->
-      gmt_offset(offset, False)
+      gmt_offset_label(offset_minutes, long: False)
   }
 }
 
-fn gmt_offset(offset: Int, long: Bool) -> String {
-  case offset {
-    0 -> "GMT"
-    _ -> {
-      let sign = case offset < 0 {
-        True -> "-"
-        False -> "+"
-      }
-      let m = int.absolute_value(offset)
-      let h = m / 60
-      let mm = m % 60
-      case long {
-        True ->
-          "GMT" <> sign <> intl_format.pad2(h) <> ":" <> intl_format.pad2(mm)
-        False ->
-          case mm {
-            0 -> "GMT" <> sign <> int.to_string(h)
-            _ ->
-              "GMT" <> sign <> int.to_string(h) <> ":" <> intl_format.pad2(mm)
-          }
-      }
-    }
+fn gmt_offset_label(offset_minutes: Int, long long: Bool) -> String {
+  let m = int.absolute_value(offset_minutes)
+  let sign = offset_sign(offset_minutes)
+  let hours = m / 60
+  let minutes = m % 60
+  case offset_minutes, long, minutes {
+    0, _, _ -> "GMT"
+    _, True, _ ->
+      "GMT"
+      <> sign
+      <> intl_format.pad2(hours)
+      <> ":"
+      <> intl_format.pad2(minutes)
+    _, False, 0 -> "GMT" <> sign <> int.to_string(hours)
+    _, False, _ ->
+      "GMT" <> sign <> int.to_string(hours) <> ":" <> intl_format.pad2(minutes)
   }
 }

@@ -2,23 +2,24 @@ import arc/internal/int_math.{floor_div}
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/temporal_common.{
   type Disambiguation, type OffsetOption, Compatible, Earlier, HalfExpand,
-  IgnoreOffset, Later, RejectDisambiguation, RejectOffset, UseOffset,
+  IgnoreOffset, Later, RejectDisambiguation, RejectOffset, UseOffset, date_part,
   epoch_ns_to_iso_in, get_disambiguation_option, get_offset_option,
-  get_options_object, get_overflow_option, read_int_field, read_pos_int_field,
-  round_to_increment, terr, time_part_ns, time_zone_from_string,
-  to_temporal_time_zone, tz_offset_ns_at, validate_epoch_ns,
+  get_options_object, get_overflow_option, has_calendar_units, has_date_units,
+  read_int_field, read_pos_int_field, round_to_increment, terr, time_part_ns,
+  time_zone_from_string, to_temporal_time_zone, tz_offset_ns_at,
+  validate_epoch_ns,
 }
 import arc/rt/builtins/temporal_fields.{
   type DateFields, DateFields, calendar_date_add, check_parsed_calendar,
-  get_named, no_date_fields, parsed_calendar_id, read_bag_calendar, read_bag_era,
-  read_month_code, resolve_calendar_date,
+  get_named, no_date_fields, parsed_calendar_id, read_bag_calendar,
+  read_era_fields, read_month_code, resolve_calendar_date,
 }
 import arc/rt/builtins/temporal_iso.{
   type Duration, type IsoDate, type IsoTime, type Overflow, type ParsedOffset,
   type TErr, Constrain, Duration, IsoDate, NoOffset, NumericOffset, RangeE, Zulu,
-  epoch_days, epoch_ns_to_iso, iso_date_from_epoch_days, iso_date_within_limits,
-  midnight, ns_per_day, ns_per_minute, parse_iso_datetime_string,
-  parse_offset_part, utc_epoch_ns, zero_duration,
+  check_date_limits, epoch_days, epoch_ns_to_iso, iso_date_from_epoch_days,
+  iso_days_range, midnight, ns_per_day, ns_per_minute, parse_iso_datetime_string,
+  parse_offset_part, utc_epoch_ns,
 }
 import arc/rt/builtins/temporal_plain_time.{
   type TimeFields, TimeFields, no_time_fields, regulate_time, time_fields_apply,
@@ -36,9 +37,8 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
-// checkisodaysrange, within 1e8 days
 pub fn check_iso_days_range(d: IsoDate) -> Result(Nil, TErr) {
-  case int.absolute_value(epoch_days(d)) <= 100_000_000 {
+  case int.absolute_value(epoch_days(d)) <= iso_days_range {
     True -> Ok(Nil)
     False -> Error(RangeE("date outside of supported range"))
   }
@@ -110,8 +110,8 @@ pub fn disambiguate_epoch_ns(
         Compatible | Earlier | Later -> {
           // gap: shift by gap size and retry
           let utc = utc_epoch_ns(d, t)
-          use before <- result.try(tz_offset_ns_at(tz, utc - ns_per_day))
-          use after <- result.try(tz_offset_ns_at(tz, utc + ns_per_day))
+          let before = tz_offset_ns_at(tz, utc - ns_per_day)
+          let after = tz_offset_ns_at(tz, utc + ns_per_day)
           let gap = after - before
           let shifted = case dis {
             Earlier -> utc - gap
@@ -236,14 +236,7 @@ pub fn read_date_time_fields(
   read_tz read_tz: Bool,
 ) -> #(DateTimeFields, Agent) {
   let #(day, st) = read_pos_int_field(st, bag, "day")
-  let #(era, st) = case tcal.has_eras(cal) {
-    True -> read_bag_era(st, bag)
-    False -> #(None, st)
-  }
-  let #(era_year, st) = case tcal.has_eras(cal) {
-    True -> read_int_field(st, bag, "eraYear")
-    False -> #(None, st)
-  }
+  let #(era, era_year, st) = read_era_fields(st, bag, cal)
   let #(hour, st) = read_int_field(st, bag, "hour")
   let #(microsecond, st) = read_int_field(st, bag, "microsecond")
   let #(millisecond, st) = read_int_field(st, bag, "millisecond")
@@ -503,15 +496,10 @@ pub fn convert_relative_to(st: Agent, v: JsVal) -> #(RelativeTo, Agent) {
                     st,
                     "Z designator requires a bracketed time zone in relativeTo",
                   )
-                NoOffset | NumericOffset(_, _) ->
-                  case iso_date_within_limits(d) {
-                    True -> #(RelativeDate(d, cal), st)
-                    False ->
-                      rt_val.t_throw_range_error(
-                        st,
-                        "date outside of supported range",
-                      )
-                  }
+                NoOffset | NumericOffset(_, _) -> #(
+                  RelativeDate(terr(st, check_date_limits(d)), cal),
+                  st,
+                )
               }
           }
         }
@@ -529,12 +517,7 @@ fn relative_from_bag(st: Agent, bag: Handle) -> #(RelativeTo, Agent) {
   let t0 = time_fields_apply(f.time, midnight)
   let t = terr(st, regulate_time(t0, Constrain))
   case classify(f.time_zone_value) {
-    KUndef ->
-      case iso_date_within_limits(date) {
-        True -> #(RelativeDate(date, cal), st)
-        False ->
-          rt_val.t_throw_range_error(st, "date outside of supported range")
-      }
+    KUndef -> #(RelativeDate(terr(st, check_date_limits(date)), cal), st)
     _ -> {
       let #(tz, st) = to_temporal_time_zone(st, f.time_zone_value)
       let behaviour = case f.offset {
@@ -565,24 +548,14 @@ pub fn add_zoned_ns(
   cal: tcal.Calendar,
   dur: Duration,
 ) -> Result(Int, TErr) {
-  use base <- result.try(
-    case dur.years == 0 && dur.months == 0 && dur.weeks == 0 && dur.days == 0 {
-      True -> Ok(ns)
-      False -> {
-        use #(d0, t0) <- result.try(epoch_ns_to_iso_in(tz, ns))
-        let date_dur =
-          Duration(
-            ..zero_duration,
-            years: dur.years,
-            months: dur.months,
-            weeks: dur.weeks,
-            days: dur.days,
-          )
-        use d2 <- result.try(calendar_date_add(cal, d0, date_dur, Constrain))
-        get_epoch_ns_for(tz, d2, t0, Compatible)
-      }
-    },
-  )
+  use base <- result.try(case has_date_units(dur) {
+    False -> Ok(ns)
+    True -> {
+      let #(d0, t0) = epoch_ns_to_iso_in(tz, ns)
+      use d2 <- result.try(calendar_date_add(cal, d0, date_part(dur), Constrain))
+      get_epoch_ns_for(tz, d2, t0, Compatible)
+    }
+  })
   validate_epoch_ns(base + time_part_ns(dur))
 }
 
@@ -591,20 +564,14 @@ pub fn date_duration_days(
   relative_date: IsoDate,
   cal: tcal.Calendar,
 ) -> Result(Int, TErr) {
-  case dur.years == 0 && dur.months == 0 && dur.weeks == 0 {
-    True -> Ok(dur.days)
-    False -> {
-      let ymw =
-        Duration(
-          ..zero_duration,
-          years: dur.years,
-          months: dur.months,
-          weeks: dur.weeks,
-        )
+  case has_calendar_units(dur) {
+    False -> Ok(dur.days)
+    True -> {
+      let calendar_part = Duration(..date_part(dur), days: 0)
       use later <- result.map(calendar_date_add(
         cal,
         relative_date,
-        ymw,
+        calendar_part,
         Constrain,
       ))
       epoch_days(later) - epoch_days(relative_date) + dur.days

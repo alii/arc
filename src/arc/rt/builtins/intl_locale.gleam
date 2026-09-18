@@ -21,7 +21,7 @@ pub type Extension {
   OtherExt(singleton: String, subtags: List(String))
 }
 
-pub fn all_codepoints(s: String, pred: fn(Int) -> Bool) -> Bool {
+fn all_codepoints(s: String, pred: fn(Int) -> Bool) -> Bool {
   string.to_utf_codepoints(s)
   |> list.all(fn(cp) { pred(string.utf_codepoint_to_int(cp)) })
 }
@@ -30,7 +30,7 @@ pub fn is_alpha(s: String) -> Bool {
   s != "" && all_codepoints(s, digits.is_ascii_alpha_code)
 }
 
-pub fn is_digits(s: String) -> Bool {
+fn is_digits(s: String) -> Bool {
   s != "" && all_codepoints(s, digits.is_decimal_code)
 }
 
@@ -38,25 +38,22 @@ pub fn is_alnum(s: String) -> Bool {
   s != "" && all_codepoints(s, digits.is_ascii_alnum_code)
 }
 
-fn len(s: String) -> Int {
-  string.length(s)
-}
-
 pub fn is_language(s: String) -> Bool {
-  let n = len(s)
+  let n = string.length(s)
   is_alpha(s) && { n == 2 || n == 3 || { n >= 5 && n <= 8 } }
 }
 
 pub fn is_script(s: String) -> Bool {
-  is_alpha(s) && len(s) == 4
+  is_alpha(s) && string.length(s) == 4
 }
 
 pub fn is_region(s: String) -> Bool {
-  { is_alpha(s) && len(s) == 2 } || { is_digits(s) && len(s) == 3 }
+  { is_alpha(s) && string.length(s) == 2 }
+  || { is_digits(s) && string.length(s) == 3 }
 }
 
 pub fn is_variant(s: String) -> Bool {
-  let n = len(s)
+  let n = string.length(s)
   case is_alnum(s) {
     False -> False
     True ->
@@ -72,7 +69,7 @@ pub fn is_variant(s: String) -> Bool {
 }
 
 fn is_ukey(s: String) -> Bool {
-  len(s) == 2
+  string.length(s) == 2
   && case string.to_utf_codepoints(s) {
     [a, b] ->
       digits.is_ascii_alnum_code(string.utf_codepoint_to_int(a))
@@ -82,7 +79,7 @@ fn is_ukey(s: String) -> Bool {
 }
 
 fn is_tkey(s: String) -> Bool {
-  len(s) == 2
+  string.length(s) == 2
   && case string.to_utf_codepoints(s) {
     [a, b] ->
       digits.is_ascii_alpha_code(string.utf_codepoint_to_int(a))
@@ -92,12 +89,18 @@ fn is_tkey(s: String) -> Bool {
 }
 
 fn is_type_subtag(s: String) -> Bool {
-  let n = len(s)
+  let n = string.length(s)
   is_alnum(s) && n >= 3 && n <= 8
 }
 
+// (3*8alphanum) ("-" (3*8alphanum))*
+pub fn is_type_sequence(s: String) -> Bool {
+  let parts = string.split(s, "-")
+  parts != [] && list.all(parts, is_type_subtag)
+}
+
 fn is_singleton(s: String) -> Bool {
-  len(s) == 1 && is_alnum(s)
+  string.length(s) == 1 && is_alnum(s)
 }
 
 pub fn parse(tag: String) -> Result(LocaleId, Nil) {
@@ -196,7 +199,10 @@ fn parse_extensions(
   case parts {
     [] -> Ok(#(list.reverse(exts), []))
     ["x", ..rest] ->
-      case rest != [] && list.all(rest, fn(s) { is_alnum(s) && len(s) <= 8 }) {
+      case
+        rest != []
+        && list.all(rest, fn(s) { is_alnum(s) && string.length(s) <= 8 })
+      {
         True -> Ok(#(list.reverse(exts), rest))
         False -> Error(Nil)
       }
@@ -215,7 +221,8 @@ fn parse_extensions(
                   case
                     body != []
                     && list.all(body, fn(p) {
-                      is_alnum(p) && len(p) >= 2 && len(p) <= 8
+                      let n = string.length(p)
+                      is_alnum(p) && n >= 2 && n <= 8
                     })
                   {
                     True -> Ok(OtherExt(singleton: s, subtags: body))
@@ -236,7 +243,7 @@ fn take_until_singleton(
   case parts {
     [] -> #(list.reverse(acc), [])
     [p, ..rest] ->
-      case len(p) == 1 {
+      case string.length(p) == 1 {
         True -> #(list.reverse(acc), parts)
         False -> take_until_singleton(rest, [p, ..acc])
       }
@@ -674,14 +681,9 @@ fn variant_alias(variant: String) -> Option(String) {
 }
 
 fn likely_region(language: String, script: Option(String)) -> Option(String) {
-  case option.map(script, string.lowercase) {
-    Some(sc) ->
-      case likely_region_of_script(sc) {
-        Some(r) -> Some(r)
-        None -> likely_region_of_language(language)
-      }
-    None -> likely_region_of_language(language)
-  }
+  option.map(script, string.lowercase)
+  |> option.then(likely_region_of_script)
+  |> option.lazy_or(fn() { likely_region_of_language(language) })
 }
 
 fn likely_region_of_language(language: String) -> Option(String) {
@@ -724,11 +726,7 @@ fn likely_region_of_script(script: String) -> Option(String) {
   }
 }
 
-pub fn canonical_u_value(key: String, v: String) -> String {
-  u_type_alias(key, v)
-}
-
-fn u_type_alias(key: String, value: String) -> String {
+pub fn canonical_keyword_value(key: String, value: String) -> String {
   case key, value {
     "ca", "islamicc" -> "islamic-civil"
     "ca", "ethiopic-amete-alem" -> "ethioaa"
@@ -798,7 +796,7 @@ fn canonicalize_extension(ext: Extension) -> Extension {
         keywords
         |> list.map(fn(kv) {
           let #(k, v) = kv
-          let v = u_type_alias(k, v)
+          let v = canonical_keyword_value(k, v)
           // uts 35: "true" values are dropped
           let v = case v {
             "true" -> ""
@@ -840,74 +838,59 @@ type AliasCandidate {
 }
 
 fn apply_language_alias(lid: LocaleId) -> LocaleId {
-  let sorted_variants = list.sort(lid.variants, string.compare)
-  let candidates = [
-    AliasCandidate(
-      key: key_join([lid.language], lid.script, lid.region, sorted_variants),
-      consumes_script: True,
-      consumes_region: True,
-      consumes_variants: True,
-    ),
-    AliasCandidate(
-      key: key_join([lid.language], lid.script, None, sorted_variants),
-      consumes_script: True,
-      consumes_region: False,
-      consumes_variants: True,
-    ),
-    AliasCandidate(
-      key: key_join([lid.language], None, lid.region, sorted_variants),
-      consumes_script: False,
-      consumes_region: True,
-      consumes_variants: True,
-    ),
-    AliasCandidate(
-      key: key_join([lid.language], None, None, sorted_variants),
-      consumes_script: False,
-      consumes_region: False,
-      consumes_variants: True,
-    ),
-    AliasCandidate(
-      key: key_join([lid.language], lid.script, lid.region, []),
-      consumes_script: True,
-      consumes_region: True,
-      consumes_variants: False,
-    ),
-    AliasCandidate(
-      key: key_join([lid.language], None, lid.region, []),
-      consumes_script: False,
-      consumes_region: True,
-      consumes_variants: False,
-    ),
-    AliasCandidate(
-      key: key_join([lid.language], lid.script, None, []),
-      consumes_script: True,
-      consumes_region: False,
-      consumes_variants: False,
-    ),
-    AliasCandidate(
-      key: key_join([lid.language], None, None, []),
-      consumes_script: False,
-      consumes_region: False,
-      consumes_variants: False,
-    ),
-  ]
-  find_language_alias(lid, candidates)
+  let sorted = list.sort(lid.variants, string.compare)
+  find_language_alias(lid, [
+    candidate(lid, sorted, script: True, region: True, variants: True),
+    candidate(lid, sorted, script: True, region: False, variants: True),
+    candidate(lid, sorted, script: False, region: True, variants: True),
+    candidate(lid, sorted, script: False, region: False, variants: True),
+    candidate(lid, sorted, script: True, region: True, variants: False),
+    candidate(lid, sorted, script: False, region: True, variants: False),
+    candidate(lid, sorted, script: True, region: False, variants: False),
+    candidate(lid, sorted, script: False, region: False, variants: False),
+  ])
 }
 
-fn key_join(
-  lang: List(String),
+fn candidate(
+  lid: LocaleId,
+  sorted_variants: List(String),
+  script script: Bool,
+  region region: Bool,
+  variants variants: Bool,
+) -> AliasCandidate {
+  let key =
+    alias_lookup_key(
+      lid.language,
+      case script {
+        True -> lid.script
+        False -> None
+      },
+      case region {
+        True -> lid.region
+        False -> None
+      },
+      case variants {
+        True -> sorted_variants
+        False -> []
+      },
+    )
+  AliasCandidate(
+    key:,
+    consumes_script: script,
+    consumes_region: region,
+    consumes_variants: variants,
+  )
+}
+
+fn alias_lookup_key(
+  language: String,
   script: Option(String),
   region: Option(String),
   variants: List(String),
 ) -> String {
-  let parts =
-    list.flatten([
-      lang,
-      option.map(script, fn(s) { [s] }) |> option.unwrap([]),
-      option.map(region, fn(r) { [r] }) |> option.unwrap([]),
-      variants,
-    ])
-  string.join(parts, "-")
+  [[language], option.values([script, region]), variants]
+  |> list.flatten
+  |> string.join("-")
 }
 
 fn find_language_alias(
@@ -943,32 +926,23 @@ fn find_language_alias(
 }
 
 fn apply_region_alias(lid: LocaleId) -> LocaleId {
-  case lid.region {
+  case option.then(lid.region, region_replacement(lid, _)) {
+    Some(replacement) ->
+      LocaleId(..lid, region: Some(string.lowercase(replacement)))
     None -> lid
-    Some(region) -> {
-      let region = string.lowercase(region)
-      case region_alias(region) {
-        Some(rep) -> LocaleId(..lid, region: Some(string.lowercase(rep)))
-        None ->
-          case region_multi_alias(region) {
-            None -> lid
-            Some([first, ..] as reps) -> {
-              let likely = likely_region(lid.language, lid.script)
-              let chosen = case likely {
-                Some(r) ->
-                  case list.contains(reps, r) {
-                    True -> r
-                    False -> first
-                  }
-                None -> first
-              }
-              LocaleId(..lid, region: Some(string.lowercase(chosen)))
-            }
-            Some([]) -> lid
-          }
-      }
-    }
   }
+}
+
+fn region_replacement(lid: LocaleId, region: String) -> Option(String) {
+  let region = string.lowercase(region)
+  use <- option.lazy_or(region_alias(region))
+  use successors <- option.then(region_multi_alias(region))
+  use first <- option.map(option.from_result(list.first(successors)))
+  likely_region(lid.language, lid.script)
+  |> option.then(fn(likely) {
+    list.find(successors, fn(r) { r == likely }) |> option.from_result
+  })
+  |> option.unwrap(first)
 }
 
 fn apply_variant_alias(lid: LocaleId) -> LocaleId {
@@ -1082,6 +1056,13 @@ pub fn strip_extensions(tag: String) -> String {
   case parse(tag) {
     Ok(lid) -> base_name(lid)
     Error(Nil) -> tag
+  }
+}
+
+pub fn language_of(tag: String) -> String {
+  case parse(tag) {
+    Ok(lid) -> lid.language
+    Error(Nil) -> "en"
   }
 }
 

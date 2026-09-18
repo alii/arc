@@ -6,24 +6,25 @@ import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   CalAuto, Compatible, Day, apply_since_duration, apply_since_mode,
   calendar_suffix, date_slot_of, epoch_ns_to_iso_in, get_calendar_name_option,
-  get_difference_settings, get_overflow_option_from_value, make_date_cal,
-  make_date_time_cal, make_duration, make_month_day_cal, make_year_month_cal,
-  make_zoned_cal, max_unit, require_largest_ge_smallest, require_temporal,
-  temporal_data_of, terr, time_zone_from_string, truncated_int_arg, unit_rank,
+  get_difference_settings, get_options_object, get_overflow_option_from_value,
+  make_date_cal, make_date_time_cal, make_duration, make_month_day_cal,
+  make_year_month_cal, make_zoned_cal, max_unit, require_largest_ge_smallest,
+  require_temporal, static_name, temporal_data_of, terr, time_zone_from_string,
+  truncated_int_arg, unit_rank,
 }
 import arc/rt/builtins/temporal_diff.{difference_calendar_date}
 import arc/rt/builtins/temporal_fields.{
   add_sub_args, calendar_date_add, calendar_with_fields, compare_iso_date,
-  era_field, era_year_field, get_named, int_val, month_code_str,
-  month_day_reference_iso, no_date_fields, parse_plain_datetime_string,
-  parsed_calendar_id, read_bag_calendar, read_date_fields,
-  require_nonempty_fields, require_partial_bag, resolve_calendar_date,
-  to_calendar_arg, to_temporal_calendar_identifier,
+  era_field, era_year_field, get_named, month_code_str, month_day_reference_iso,
+  no_date_fields, parse_plain_datetime_string, parsed_calendar_id,
+  read_bag_calendar, read_date_fields, require_nonempty_fields,
+  require_partial_bag, resolve_calendar_date, to_calendar_arg,
+  to_temporal_calendar_identifier,
 }
 import arc/rt/builtins/temporal_iso.{
-  type IsoDate, type IsoTime, Constrain, IsoDate, day_of_week, day_of_year,
-  epoch_days, format_iso_date, is_valid_iso_date, iso_date_from_epoch_days,
-  iso_date_within_limits, midnight, week_of_year,
+  type IsoDate, type IsoTime, Constrain, IsoDate, check_date_limits, day_of_week,
+  day_of_year, epoch_days, format_iso_date, is_valid_iso_date,
+  iso_date_from_epoch_days, midnight, week_of_year,
 }
 import arc/rt/builtins/temporal_plain_time.{to_temporal_time}
 import arc/rt/builtins/temporal_zoned_ops.{get_epoch_ns_for, start_of_day_ns}
@@ -38,7 +39,7 @@ import arc/rt/types.{
   PdToZonedDateTime, PdUntil, PdValueOf, PdWith, PdWithCalendar, TemporalDate,
   TemporalDateTime, TemporalN, TemporalPlainDateCtor, TemporalPlainDateGetter,
   TemporalPlainDateMethod, TemporalPlainDateStatic, TemporalZonedDateTime,
-  TsCompare, TsFrom, classify, mk_bool, mk_string, mk_undefined,
+  TsCompare, TsFrom, classify, mk_bool, mk_int, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/list
@@ -108,13 +109,6 @@ pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
   )
 }
 
-fn static_name(s: TemporalStaticName) -> String {
-  case s {
-    TsFrom -> "from"
-    TsCompare -> "compare"
-  }
-}
-
 pub fn date_getter_name(g: TemporalDateGetter) -> String {
   case g {
     DgCalendarId -> "calendarId"
@@ -168,12 +162,8 @@ pub fn ctor(
   case is_valid_iso_date(y, m, d) {
     False -> rt_val.t_throw_range_error(st, "invalid ISO date")
     True -> {
-      let date = IsoDate(y, m, d)
-      case iso_date_within_limits(date) {
-        False ->
-          rt_val.t_throw_range_error(st, "date outside of supported range")
-        True -> make_date_cal(st, protos, date, cal)
-      }
+      let date = terr(st, check_date_limits(IsoDate(y, m, d)))
+      make_date_cal(st, protos, date, cal)
     }
   }
 }
@@ -195,7 +185,7 @@ pub fn static(
         to_temporal_date(st, helpers.arg_at(args, 0), mk_undefined())
       let #(#(b, _), st) =
         to_temporal_date(st, helpers.arg_at(args, 1), mk_undefined())
-      #(int_val(compare_iso_date(a, b)), st)
+      #(mk_int(compare_iso_date(a, b)), st)
     }
   }
 }
@@ -215,7 +205,7 @@ pub fn to_temporal_date(
         }
         option.Some(TemporalZonedDateTime(epoch_ns:, time_zone:, calendar:)) -> {
           let #(_opts, st) = get_overflow_option_from_value(st, options)
-          let #(d, _) = terr(st, epoch_ns_to_iso_in(time_zone, epoch_ns))
+          let #(d, _) = epoch_ns_to_iso_in(time_zone, epoch_ns)
           #(#(d, calendar), st)
         }
         _ -> date_from_bag(st, h, options)
@@ -224,11 +214,7 @@ pub fn to_temporal_date(
       let p = terr(st, parse_plain_datetime_string(s))
       let cal = terr(st, parsed_calendar_id(p))
       let #(_opts, st) = get_overflow_option_from_value(st, options)
-      case iso_date_within_limits(p.date) {
-        True -> #(#(p.date, cal), st)
-        False ->
-          rt_val.t_throw_range_error(st, "date outside of supported range")
-      }
+      #(#(terr(st, check_date_limits(p.date)), cal), st)
     }
     _ -> rt_val.t_throw_type_error(st, "cannot convert to a Temporal.PlainDate")
   }
@@ -243,10 +229,7 @@ pub fn date_from_bag(
   let #(fields, st) = read_date_fields(st, h, cal)
   let #(overflow, st) = get_overflow_option_from_value(st, options)
   let date = terr(st, resolve_calendar_date(cal, fields, overflow))
-  case iso_date_within_limits(date) {
-    True -> #(#(date, cal), st)
-    False -> rt_val.t_throw_range_error(st, "date outside of supported range")
-  }
+  #(#(terr(st, check_date_limits(date)), cal), st)
 }
 
 pub fn getter(
@@ -264,18 +247,18 @@ pub fn date_field(d: IsoDate, g: TemporalDateGetter) -> JsVal {
     DgCalendarId -> mk_string("iso8601")
     DgEra -> mk_undefined()
     DgEraYear -> mk_undefined()
-    DgYear -> int_val(d.year)
-    DgMonth -> int_val(d.month)
+    DgYear -> mk_int(d.year)
+    DgMonth -> mk_int(d.month)
     DgMonthCode -> mk_string(month_code_str(d.month))
-    DgDay -> int_val(d.day)
-    DgDayOfWeek -> int_val(day_of_week(d))
-    DgDayOfYear -> int_val(day_of_year(d))
-    DgWeekOfYear -> int_val(week_of_year(d).0)
-    DgYearOfWeek -> int_val(week_of_year(d).1)
-    DgDaysInWeek -> int_val(7)
-    DgDaysInMonth -> int_val(days_in_month(d.year, d.month))
-    DgDaysInYear -> int_val(days_in_iso_year(d.year))
-    DgMonthsInYear -> int_val(12)
+    DgDay -> mk_int(d.day)
+    DgDayOfWeek -> mk_int(day_of_week(d))
+    DgDayOfYear -> mk_int(day_of_year(d))
+    DgWeekOfYear -> mk_int(week_of_year(d).0)
+    DgYearOfWeek -> mk_int(week_of_year(d).1)
+    DgDaysInWeek -> mk_int(7)
+    DgDaysInMonth -> mk_int(days_in_month(d.year, d.month))
+    DgDaysInYear -> mk_int(days_in_iso_year(d.year))
+    DgMonthsInYear -> mk_int(12)
     DgInLeapYear -> mk_bool(is_leap_year(d.year))
   }
 }
@@ -293,18 +276,18 @@ pub fn date_field_cal(
         DgCalendarId -> mk_string(tcal.identifier(cal))
         DgEra -> era_field(cal, cd)
         DgEraYear -> era_year_field(cal, cd)
-        DgYear -> int_val(cd.year)
-        DgMonth -> int_val(cd.month)
+        DgYear -> mk_int(cd.year)
+        DgMonth -> mk_int(cd.month)
         DgMonthCode -> mk_string(tcal.month_code(cal, cd.year, cd.month))
-        DgDay -> int_val(cd.day)
-        DgDayOfWeek -> int_val(day_of_week(d))
-        DgDayOfYear -> int_val(tcal.day_of_year(cal, cd.year, cd.month, cd.day))
+        DgDay -> mk_int(cd.day)
+        DgDayOfWeek -> mk_int(day_of_week(d))
+        DgDayOfYear -> mk_int(tcal.day_of_year(cal, cd.year, cd.month, cd.day))
         DgWeekOfYear -> mk_undefined()
         DgYearOfWeek -> mk_undefined()
-        DgDaysInWeek -> int_val(7)
-        DgDaysInMonth -> int_val(tcal.days_in_month(cal, cd.year, cd.month))
-        DgDaysInYear -> int_val(tcal.days_in_year(cal, cd.year))
-        DgMonthsInYear -> int_val(tcal.months_in_year(cal, cd.year))
+        DgDaysInWeek -> mk_int(7)
+        DgDaysInMonth -> mk_int(tcal.days_in_month(cal, cd.year, cd.month))
+        DgDaysInYear -> mk_int(tcal.days_in_year(cal, cd.year))
+        DgMonthsInYear -> mk_int(tcal.months_in_year(cal, cd.year))
         DgInLeapYear -> mk_bool(tcal.in_leap_year(cal, cd.year))
       }
     }
@@ -332,8 +315,8 @@ pub fn method(
       st,
     )
     PdToString -> {
-      let #(#(cal_name, _), st) =
-        get_calendar_name_option(st, helpers.arg_at(args, 0))
+      let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
+      let #(cal_name, st) = get_calendar_name_option(st, opts)
       #(mk_string(format_iso_date(d) <> calendar_suffix(cal_name, cal)), st)
     }
     PdValueOf ->
@@ -358,7 +341,7 @@ pub fn method(
       let #(overflow, st) =
         get_overflow_option_from_value(st, helpers.arg_at(args, 1))
       let date = terr(st, calendar_with_fields(cal, d, fields, overflow))
-      let date = terr(st, temporal_iso.check_date_limits(date))
+      let date = terr(st, check_date_limits(date))
       make_date_cal(st, protos, date, cal)
     }
     PdWithCalendar -> {
@@ -401,36 +384,31 @@ pub fn method(
       }
     PdToZonedDateTime -> {
       let arg = helpers.arg_at(args, 0)
-      case classify(arg) {
+      let #(tz, plain_time, st) = case classify(arg) {
         KStr(tz_str) -> {
           let #(tz, st) = time_zone_from_string(st, tz_str)
-          let ns = terr(st, start_of_day_ns(tz, d))
-          make_zoned_cal(st, protos, ns, tz, cal)
+          #(tz, mk_undefined(), st)
         }
         KHandle(oh) -> {
           let #(tz_val, st) = get_named(st, oh, "timeZone")
-          case classify(tz_val) {
+          let #(tz, st) = case classify(tz_val) {
             KUndef -> rt_val.t_throw_type_error(st, "time zone is required")
-            KStr(tz_str) -> {
-              let #(tz, st) = time_zone_from_string(st, tz_str)
-              let #(pt_val, st) = get_named(st, oh, "plainTime")
-              case classify(pt_val) {
-                KUndef -> {
-                  let ns = terr(st, start_of_day_ns(tz, d))
-                  make_zoned_cal(st, protos, ns, tz, cal)
-                }
-                _ -> {
-                  let #(t, st) = to_temporal_time(st, pt_val, mk_undefined())
-                  let ns = terr(st, get_epoch_ns_for(tz, d, t, Compatible))
-                  make_zoned_cal(st, protos, ns, tz, cal)
-                }
-              }
-            }
+            KStr(tz_str) -> time_zone_from_string(st, tz_str)
             _ -> rt_val.t_throw_type_error(st, "time zone must be a string")
           }
+          let #(plain_time, st) = get_named(st, oh, "plainTime")
+          #(tz, plain_time, st)
         }
         _ -> rt_val.t_throw_type_error(st, "time zone must be a string")
       }
+      let #(ns, st) = case classify(plain_time) {
+        KUndef -> #(terr(st, start_of_day_ns(tz, d)), st)
+        _ -> {
+          let #(t, st) = to_temporal_time(st, plain_time, mk_undefined())
+          #(terr(st, get_epoch_ns_for(tz, d, t, Compatible)), st)
+        }
+      }
+      make_zoned_cal(st, protos, ns, tz, cal)
     }
     PdUntil | PdSince -> {
       let #(#(other, other_cal), st) =

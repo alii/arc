@@ -927,16 +927,6 @@ fn default_number_option(
   }
 }
 
-// (3*8alphanum) ("-" (3*8alphanum))*
-fn is_type_sequence(s: String) -> Bool {
-  let parts = string.split(s, "-")
-  parts != []
-  && list.all(parts, fn(p) {
-    let n = string.length(p)
-    n >= 3 && n <= 8 && intl_locale.is_alnum(p)
-  })
-}
-
 fn canonicalize_locale_list(
   st: Agent,
   locales: JsVal,
@@ -1384,7 +1374,7 @@ fn weekday_string(fd: String) -> Option(String) {
     "6" | "sat" -> Some("sat")
     "7" -> Some("sun")
     other ->
-      case is_type_sequence(string.lowercase(other)) {
+      case intl_locale.is_type_sequence(string.lowercase(other)) {
         True -> Some(string.lowercase(other))
         False -> None
       }
@@ -1394,7 +1384,7 @@ fn weekday_string(fd: String) -> Option(String) {
 fn require_type_seq(st: Agent, v: Option(String), name: String) -> Agent {
   case v {
     Some(s) ->
-      case is_type_sequence(s) {
+      case intl_locale.is_type_sequence(s) {
         True -> st
         False -> rt_val.t_throw_range_error(st, "Invalid " <> name <> ": " <> s)
       }
@@ -2120,7 +2110,7 @@ fn dtf_state_required(
       ext_kws,
       "ca",
       option.map(calendar_opt, fn(v) {
-        intl_locale.canonical_u_value("ca", string.lowercase(v))
+        intl_locale.canonical_keyword_value("ca", string.lowercase(v))
       }),
       valid_dtf_calendar,
       "gregory",
@@ -2133,10 +2123,7 @@ fn dtf_state_required(
       intl_format.is_numbering_system,
       "latn",
     )
-  let lang = case intl_locale.parse(data_locale) {
-    Ok(lid) -> lid.language
-    Error(Nil) -> "en"
-  }
+  let lang = intl_locale.language_of(data_locale)
   let hc_locale_default = case lang {
     "ja" -> H11
     _ -> H12
@@ -2165,7 +2152,7 @@ fn dtf_state_required(
     KUndef -> #(HostZone(st.hooks.time_zone), st)
     _ -> {
       let #(s, st) = rt_val.t_to_string(st, tz_v)
-      case intl_timezone.canonical(st, s) {
+      case intl_timezone.resolve(st, s) {
         #(Some(tz), st) -> #(tz, st)
         #(None, st) ->
           rt_val.t_throw_range_error(st, "Invalid time zone specified: " <> s)
@@ -4314,10 +4301,7 @@ fn build_dtf_parts(
         Some(MonthNum(mw)) -> Some(numeric_width_str(mw, fields.month))
         Some(MonthName(_)) | None -> None
       }
-      let lang = case intl_locale.parse(d.locale) {
-        Ok(lid) -> lid.language
-        Error(Nil) -> "en"
-      }
+      let lang = intl_locale.language_of(d.locale)
       let dotted =
         list.contains(
           ["de", "fi", "ru", "cs", "tr", "nb", "pl", "uk", "bg", "sr", "lv"],
@@ -4447,7 +4431,7 @@ fn build_dtf_parts(
   let tz_parts = case tz_name {
     Some(width) -> {
       let name =
-        intl_timezone.display(
+        intl_timezone.display_name(
           intl_data.dtf_time_zone_id(d.time_zone),
           width,
           offset,
@@ -4934,11 +4918,7 @@ fn host_locale_case(
   let #(s, st) = rt_val.t_to_string(st, this)
   let #(tag_list, st) = canonicalize_locale_list(st, locales)
   let lang = case tag_list {
-    [first, ..] ->
-      case intl_locale.parse(first) {
-        Ok(lid) -> string.lowercase(lid.language)
-        Error(Nil) -> "en"
-      }
+    [first, ..] -> intl_locale.language_of(first)
     [] -> "en"
   }
   // deliberately not a lookup of String.prototype.toLowerCase
@@ -5241,7 +5221,7 @@ fn display_names_of(
           rt_val.t_throw_range_error(st, "invalid currency code: " <> code)
       }
     DnCalendar ->
-      case is_type_sequence(string.lowercase(code)) {
+      case intl_locale.is_type_sequence(string.lowercase(code)) {
         True -> {
           let c = string.lowercase(code)
           let name = case c {
@@ -6060,10 +6040,7 @@ fn locale_method(
         _ -> #(mk_undefined(), st)
       }
     LocaleGetTextInfo -> {
-      let lang = case locale_lid(l) {
-        Some(l) -> string.lowercase(l.language)
-        None -> "en"
-      }
+      let lang = intl_locale.language_of(l.locale)
       let dir = case list.contains(["ar", "he", "fa", "ur", "ps", "yi"], lang) {
         True -> "rtl"
         False -> "ltr"

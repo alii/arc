@@ -30,6 +30,9 @@ pub const min_epoch_days = -100_000_001
 
 pub const max_epoch_days = 100_000_000
 
+// spec checkisodaysrange
+pub const iso_days_range = 100_000_000
+
 pub type IsoDate {
   IsoDate(year: Int, month: Int, day: Int)
 }
@@ -94,6 +97,10 @@ pub fn iso_date_from_epoch_days(days: Int) -> IsoDate {
   IsoDate(year:, month:, day:)
 }
 
+pub fn add_days(d: IsoDate, days: Int) -> IsoDate {
+  iso_date_from_epoch_days(epoch_days(d) + days)
+}
+
 pub fn day_of_week(d: IsoDate) -> Int {
   gregorian.iso_weekday_from_days(epoch_days(d))
 }
@@ -106,29 +113,15 @@ pub fn week_of_year(d: IsoDate) -> #(Int, Int) {
   let doy = day_of_year(d)
   let dow = day_of_week(d)
   let week = { doy - dow + 10 } / 7
-  case week < 1 {
-    True -> {
-      let py = d.year - 1
-      let pdoy = doy + days_in_iso_year(py)
-      #({ pdoy - dow + 10 } / 7, py)
+  let days_left = days_in_iso_year(d.year) - doy
+  case week < 1, days_left < 4 - dow {
+    True, _ -> {
+      let prev_year = d.year - 1
+      let day_of_prev_year = doy + days_in_iso_year(prev_year)
+      #({ day_of_prev_year - dow + 10 } / 7, prev_year)
     }
-    False -> {
-      let weeks_in_year = case { days_in_iso_year(d.year) - doy < 4 - dow } {
-        True -> {
-          let nyd = doy - days_in_iso_year(d.year)
-          let nweek = { nyd - dow + 10 } / 7
-          case nweek >= 1 {
-            True -> -1
-            False -> week
-          }
-        }
-        False -> week
-      }
-      case weeks_in_year == -1 {
-        True -> #(1, d.year + 1)
-        False -> #(week, d.year)
-      }
-    }
+    False, True -> #(1, d.year + 1)
+    False, False -> #(week, d.year)
   }
 }
 
@@ -142,7 +135,7 @@ pub fn iso_date_within_limits(d: IsoDate) -> Bool {
 }
 
 pub fn iso_datetime_within_limits(d: IsoDate, t: IsoTime) -> Bool {
-  let ns = epoch_days(d) * ns_per_day + time_to_ns(t)
+  let ns = utc_epoch_ns(d, t)
   ns > { 0 - ns_max_instant } - ns_per_day && ns < ns_max_instant + ns_per_day
 }
 
@@ -221,6 +214,16 @@ pub fn check_date_limits(d: IsoDate) -> Result(IsoDate, TErr) {
   case iso_date_within_limits(d) {
     True -> Ok(d)
     False -> Error(RangeE("date outside of supported range"))
+  }
+}
+
+pub fn check_date_time_limits(
+  d: IsoDate,
+  t: IsoTime,
+) -> Result(#(IsoDate, IsoTime), TErr) {
+  case iso_datetime_within_limits(d, t) {
+    True -> Ok(#(d, t))
+    False -> Error(RangeE("date-time outside supported range"))
   }
 }
 
@@ -388,36 +391,7 @@ pub fn parse_year_part(s: String) -> Option(#(Int, String)) {
 
 pub fn parse_time_part(s: String) -> Option(#(IsoTime, String)) {
   use #(h, rest) <- option.then(take_digits(s, 2))
-  let #(mi, sec, frac_ns, rest) = case rest {
-    ":" <> r1 ->
-      case take_digits(r1, 2) {
-        Some(#(mi, r2)) ->
-          case r2 {
-            ":" <> r3 ->
-              case take_digits(r3, 2) {
-                Some(#(sec, r4)) -> {
-                  let #(f, r5) = parse_fraction(r4)
-                  #(mi, sec, f, r5)
-                }
-                None -> #(mi, 0, 0, r2)
-              }
-            _ -> #(mi, 0, 0, r2)
-          }
-        None -> #(0, 0, 0, rest)
-      }
-    _ ->
-      case take_digits(rest, 2) {
-        Some(#(mi, r2)) ->
-          case take_digits(r2, 2) {
-            Some(#(sec, r3)) -> {
-              let #(f, r4) = parse_fraction(r3)
-              #(mi, sec, f, r4)
-            }
-            None -> #(mi, 0, 0, r2)
-          }
-        None -> #(0, 0, 0, rest)
-      }
-  }
+  let #(mi, sec, frac_ns, _has_seconds, rest) = parse_minutes_seconds(rest)
   let t =
     IsoTime(
       hour: h,
@@ -431,6 +405,31 @@ pub fn parse_time_part(s: String) -> Option(#(IsoTime, String)) {
   case h <= 23 && mi <= 59 && sec <= 60 {
     True -> Some(#(t, rest))
     False -> None
+  }
+}
+
+// minutes then seconds after an hour, extended or basic format
+fn parse_minutes_seconds(s: String) -> #(Int, Int, Int, Bool, String) {
+  let #(extended, after_sep) = case s {
+    ":" <> r -> #(True, r)
+    _ -> #(False, s)
+  }
+  case take_digits(after_sep, 2) {
+    None -> #(0, 0, 0, False, s)
+    Some(#(mi, rest)) -> {
+      let seconds_start = case extended, rest {
+        True, ":" <> r -> Some(r)
+        True, _ -> None
+        False, _ -> Some(rest)
+      }
+      case option.then(seconds_start, take_digits(_, 2)) {
+        Some(#(sec, rest)) -> {
+          let #(frac, rest) = parse_fraction(rest)
+          #(mi, sec, frac, True, rest)
+        }
+        None -> #(mi, 0, 0, False, rest)
+      }
+    }
   }
 }
 
@@ -463,36 +462,7 @@ pub fn parse_offset_part(s: String) -> Option(#(ParsedOffset, String)) {
 
 fn parse_offset_value(s: String, sign: Int) -> Option(#(ParsedOffset, String)) {
   use #(h, rest) <- option.then(take_digits(s, 2))
-  let #(mi, sec, frac, sub_minute, rest) = case rest {
-    ":" <> r1 ->
-      case take_digits(r1, 2) {
-        Some(#(mi, r2)) ->
-          case r2 {
-            ":" <> r3 ->
-              case take_digits(r3, 2) {
-                Some(#(sec, r4)) -> {
-                  let #(f, r5) = parse_fraction(r4)
-                  #(mi, sec, f, True, r5)
-                }
-                None -> #(mi, 0, 0, False, r2)
-              }
-            _ -> #(mi, 0, 0, False, r2)
-          }
-        None -> #(0, 0, 0, False, rest)
-      }
-    _ ->
-      case take_digits(rest, 2) {
-        Some(#(mi, r2)) ->
-          case take_digits(r2, 2) {
-            Some(#(sec, r3)) -> {
-              let #(f, r4) = parse_fraction(r3)
-              #(mi, sec, f, True, r4)
-            }
-            None -> #(mi, 0, 0, False, r2)
-          }
-        None -> #(0, 0, 0, False, rest)
-      }
-  }
+  let #(mi, sec, frac, sub_minute, rest) = parse_minutes_seconds(rest)
   case h <= 23 && mi <= 59 && sec <= 59 {
     True -> {
       let ns =
@@ -644,6 +614,8 @@ fn is_time_prefix(s: String) -> Bool {
     _ -> False
   }
 }
+
+pub const pow2_32 = 4_294_967_296
 
 pub const pow2_52 = 4_503_599_627_370_496
 
