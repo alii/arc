@@ -22,8 +22,8 @@ fn now_us() -> Int
 @external(erlang, "arc_gc_oracle_ffi", "keep")
 fn keep(a: a) -> a
 
-type Prog {
-  Prog(name: String, src: String)
+type Program {
+  Program(name: String, src: String)
 }
 
 fn make_adder(n: Int) -> String {
@@ -50,15 +50,15 @@ fn obj_keep_all(n: Int) -> String {
   <> "].x"
 }
 
-fn programs() -> List(Prog) {
+fn programs() -> List(Program) {
   [
-    Prog("adder_10k", make_adder(10_000)),
-    Prog("adder_100k", make_adder(100_000)),
-    Prog("obj_nocall_100k", obj_no_call(100_000)),
-    Prog("obj_call_100k", obj_via_call(100_000)),
-    Prog("obj_call_200k", obj_via_call(200_000)),
-    Prog("obj_keep_100k", obj_keep_all(100_000)),
-    Prog("adder_500k", make_adder(500_000)),
+    Program("adder_10k", make_adder(10_000)),
+    Program("adder_100k", make_adder(100_000)),
+    Program("obj_nocall_100k", obj_no_call(100_000)),
+    Program("obj_call_100k", obj_via_call(100_000)),
+    Program("obj_call_200k", obj_via_call(200_000)),
+    Program("obj_keep_100k", obj_keep_all(100_000)),
+    Program("adder_500k", make_adder(500_000)),
   ]
 }
 
@@ -66,7 +66,7 @@ fn pad(s: String, w: Int) -> String {
   s <> string.repeat(" ", int.max(0, w - string.length(s)))
 }
 
-fn run_one(p: Prog) -> Nil {
+fn run_one(p: Program) -> Nil {
   reset()
   let m0 = self_mem()
   let t0 = now_us()
@@ -99,9 +99,9 @@ fn run_one(p: Prog) -> Nil {
     <> " max_grown="
     <> pad(int.to_string(max_grown), 8)
     <> " next="
-    <> pad(int.to_string(hs.next), 8)
+    <> pad(int.to_string(hs.next_id), 8)
     <> " live="
-    <> pad(int.to_string(hs.live), 8)
+    <> pad(int.to_string(hs.live_count), 8)
     <> " wall_us="
     <> pad(int.to_string(t1 - t0), 10)
     <> " mem_delta="

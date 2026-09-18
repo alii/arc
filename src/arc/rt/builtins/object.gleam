@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Index, Named, key_to_text}
 import arc/rt/abstract_ops as rt_abstract
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
@@ -10,8 +11,8 @@ import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type ObjectKey,
   type ObjectNative, type ParsedDesc, type Property, AccessorProperty,
   ArgumentsObj, BooleanObj, BytecodeFn, CompiledFn, DataProperty, DateObj,
-  ErrorObj, Index, KBig, KBool, KHandle, KNull, KNum, KStr, KSym, KUndef, Named,
-  NativeFn, NumberObj, ObjectAssign, ObjectConstructor, ObjectCreate,
+  ErrorObj, KBig, KBool, KHandle, KNull, KNum, KStr, KSym, KUndef, NativeFn,
+  NumberObj, ObjectAssign, ObjectConstructor, ObjectCreate,
   ObjectDefineProperties, ObjectDefineProperty, ObjectEntries, ObjectFreeze,
   ObjectFromEntries, ObjectGetOwnPropertyDescriptor,
   ObjectGetOwnPropertyDescriptors, ObjectGetOwnPropertyNames,
@@ -117,8 +118,9 @@ pub fn dispatch(
     ObjectGetOwnPropertyDescriptor -> get_own_prop_desc(st, args)
     ObjectDefineProperty -> define_property(st, args)
     ObjectDefineProperties -> define_properties(st, args)
-    ObjectGetOwnPropertyNames -> own_keys_impl(st, args, enumerable_only: False)
-    ObjectKeys -> own_keys_impl(st, args, enumerable_only: True)
+    ObjectGetOwnPropertyNames ->
+      own_string_keys(st, args, enumerable_only: False)
+    ObjectKeys -> own_string_keys(st, args, enumerable_only: True)
     ObjectValues -> values(st, args)
     ObjectEntries -> entries(st, args)
     ObjectCreate -> create(st, args)
@@ -351,7 +353,7 @@ fn apply_descriptors(
   }
 }
 
-fn own_keys_impl(
+fn own_string_keys(
   st: Agent,
   args: List(JsVal),
   enumerable_only enumerable_only: Bool,
@@ -379,7 +381,7 @@ fn own_keys_impl(
           #(names, st)
         }
       }
-      ok_array(st, list.map(names, fn(pk) { mk_string(types.key_to_text(pk)) }))
+      ok_array(st, list.map(names, fn(pk) { mk_string(key_to_text(pk)) }))
     }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
     KStr(s) -> {
@@ -473,7 +475,7 @@ fn collect_enumerable(
         False -> collect_enumerable(st, h, rest, acc)
         True -> {
           let #(v, st) = rt_obj.t_get_prop(st, mk_object(h), k)
-          collect_enumerable(st, h, rest, [#(types.key_to_text(pk), v), ..acc])
+          collect_enumerable(st, h, rest, [#(key_to_text(pk), v), ..acc])
         }
       }
     }
@@ -1181,7 +1183,7 @@ fn ok_array(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
 
 fn key_text(key: ObjectKey) -> String {
   case key {
-    StringKey(pk) -> types.key_to_text(pk)
+    StringKey(pk) -> key_to_text(pk)
     SymbolKey(sym) -> types.symbol_descriptive_string(sym)
   }
 }

@@ -9,31 +9,31 @@
 -define(K(Name), {?KEY_NAMED, <<Name>>}).
 
 plain_iter_record(St, {?HANDLE_TAG, Id}) ->
-    Data = element(?STORE_DATA, element(?AGENT_STORE, St)),
-    case arc_rt_arena_ffi:get(Id, Data) of
+    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
+    case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, ?ORDINARY, _,
          #{?K("done") := DoneP, ?K("iterator") := IterP, ?K("next") := NextP},
          _, _, _}
-          when element(1, DoneP) =:= ?DATAPROP_TAG,
-               element(1, IterP) =:= ?DATAPROP_TAG,
-               element(1, NextP) =:= ?DATAPROP_TAG ->
-            Iter = element(?DATAPROP_VALUE, IterP),
-            Next = element(?DATAPROP_VALUE, NextP),
-            Done = arc_rt_val_ffi:to_boolean(element(?DATAPROP_VALUE, DoneP)),
-            {plain_record, Done, {?ITERATOR_RECORD_TAG, Iter, Next},
-             native(Data, Iter, Next)};
+          when element(1, DoneP) =:= ?DATAPROPERTY_TAG,
+               element(1, IterP) =:= ?DATAPROPERTY_TAG,
+               element(1, NextP) =:= ?DATAPROPERTY_TAG ->
+            Iter = element(?DATAPROPERTY_VALUE, IterP),
+            Next = element(?DATAPROPERTY_VALUE, NextP),
+            Done = arc_rt_val_ffi:to_boolean(element(?DATAPROPERTY_VALUE, DoneP)),
+            {plain_record, Done, {?ITERATORRECORD_TAG, Iter, Next},
+             native(Cells, Iter, Next)};
         _ -> record_miss
     end;
 plain_iter_record(_, _) -> record_miss.
 
-native(Data, {?HANDLE_TAG, IId} = IterH, {?HANDLE_TAG, NId}) ->
-    case arc_rt_arena_ffi:probe(NId, Data) of
+native(Cells, {?HANDLE_TAG, IId} = IterH, {?HANDLE_TAG, NId}) ->
+    case arc_rt_arena_ffi:probe(NId, Cells) of
         NCell when element(1, NCell) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, NCell) of
-                {?NATIVEFN_TAG, {iterator_n, Which}, _, _, _} ->
+                {?NATIVEFN_TAG, {?ITERATORN_TAG, Which}, _, _, _} ->
                     {native_next, Which, IterH};
                 {?NATIVEFN_TAG, ?TOKEN_GENERATOR_NEXT, _, _, _} ->
-                    case arc_rt_arena_ffi:probe(IId, Data) of
+                    case arc_rt_arena_ffi:probe(IId, Cells) of
                         ICell when element(1, ICell) =:= ?SOBJECT_TAG,
                                    element(1, element(?SOBJECT_KIND, ICell))
                                        =:= ?GENERATOROBJ_TAG ->
@@ -48,51 +48,49 @@ native(Data, {?HANDLE_TAG, IId} = IterH, {?HANDLE_TAG, NId}) ->
     end;
 native(_, _, _) -> native_miss.
 
--define(ITER_SYM, {well_known_symbol, sym_iterator}).
-
 %% for-of over a plain array or string keeps the iterator on the stack as
 %% {arc_iter, Target, Index, NextFn} while nothing can observe the objects;
 %% for strings the index is a byte offset
 array_iter_start(Agent, {?HANDLE_TAG, Id} = V) ->
     Realm = element(?AGENT_REALM, Agent),
-    Data = element(?STORE_DATA, element(?AGENT_STORE, Agent)),
-    case arc_rt_arena_ffi:get(Id, Data) of
+    Cells = element(?STORE_CELLS, element(?AGENT_STORE, Agent)),
+    case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, _}, Proto, _, [], _, _} ->
-            pristine(Realm, Data, V, Proto, ?REALM_ARRAY, ?REALM_ARRAY_ITER_PROTO,
+            pristine(Realm, Cells, V, Proto, ?REALM_ARRAY, ?REALM_ARRAY_ITER_PROTO,
                      ?TOKEN_ARRAY_VALUES, ?TOKEN_ARRAY_ITER_NEXT);
         {?SOBJECT_TAG, {?MAPOBJ_TAG, _}, Proto, _, [], _, _} ->
-            pristine(Realm, Data, V, Proto, ?REALM_MAP, ?REALM_MAP_ITER_PROTO,
+            pristine(Realm, Cells, V, Proto, ?REALM_MAP, ?REALM_MAP_ITER_PROTO,
                      ?TOKEN_MAP_ENTRIES, ?TOKEN_MAP_ITER_NEXT);
         {?SOBJECT_TAG, {?SETOBJ_TAG, _}, Proto, _, [], _, _} ->
-            pristine(Realm, Data, V, Proto, ?REALM_SET, ?REALM_SET_ITER_PROTO,
+            pristine(Realm, Cells, V, Proto, ?REALM_SET, ?REALM_SET_ITER_PROTO,
                      ?TOKEN_SET_VALUES, ?TOKEN_SET_ITER_NEXT);
         _ -> miss
     end;
 array_iter_start(Agent, S) when ?IS_STR(S) ->
     Realm = element(?AGENT_REALM, Agent),
-    Data = element(?STORE_DATA, element(?AGENT_STORE, Agent)),
-    Proto = {?SOME, element(?PAIR_PROTO, element(?REALM_STRING, Realm))},
-    pristine(Realm, Data, S, Proto, ?REALM_STRING, ?REALM_STRING_ITER_PROTO,
+    Cells = element(?STORE_CELLS, element(?AGENT_STORE, Agent)),
+    Proto = {?SOME, element(?BUILTINPAIR_PROTO, element(?REALM_STRING, Realm))},
+    pristine(Realm, Cells, S, Proto, ?REALM_STRING, ?REALM_STRING_ITER_PROTO,
              ?TOKEN_STRING_ITER, ?TOKEN_STRING_ITER_NEXT);
 array_iter_start(_, _) -> miss.
 
 %% V inherits @@iterator straight from the class prototype and both that and
 %% the iterator prototype's next are still the intrinsics
-pristine(Realm, Data, V, Proto, Class, IterProto, IterTok, NextTok) ->
-    {?HANDLE_TAG, CP} = element(?PAIR_PROTO, element(Class, Realm)),
+pristine(Realm, Cells, V, Proto, Class, IterProto, IterTok, NextTok) ->
+    {?HANDLE_TAG, CP} = element(?BUILTINPAIR_PROTO, element(Class, Realm)),
     {?HANDLE_TAG, IP} = element(IterProto, Realm),
     case Proto =:= {?SOME, {?HANDLE_TAG, CP}} of
         false -> miss;
         true ->
-            case {arc_rt_arena_ffi:get(CP, Data), arc_rt_arena_ffi:get(IP, Data)} of
+            case {arc_rt_arena_ffi:get(CP, Cells), arc_rt_arena_ffi:get(IP, Cells)} of
                 {{?SOBJECT_TAG, _, _, _, Syms, _, _},
                  {?SOBJECT_TAG, _, _, #{?K("next") := NP}, _, _, _}}
-                  when element(1, NP) =:= ?DATAPROP_TAG ->
-                    N = element(?DATAPROP_VALUE, NP),
-                    case lists:keyfind(?ITER_SYM, 1, Syms) of
-                        {_, VP} when element(1, VP) =:= ?DATAPROP_TAG ->
-                            case token_of(Data, element(?DATAPROP_VALUE, VP)) =:= IterTok
-                                 andalso token_of(Data, N) =:= NextTok of
+                  when element(1, NP) =:= ?DATAPROPERTY_TAG ->
+                    N = element(?DATAPROPERTY_VALUE, NP),
+                    case lists:keyfind(?SYMBOL_ITERATOR, 1, Syms) of
+                        {_, VP} when element(1, VP) =:= ?DATAPROPERTY_TAG ->
+                            case token_of(Cells, element(?DATAPROPERTY_VALUE, VP)) =:= IterTok
+                                 andalso token_of(Cells, N) =:= NextTok of
                                 true -> {?ARC_ITER, V, 0, N};
                                 false -> miss
                             end;
@@ -102,7 +100,7 @@ pristine(Realm, Data, V, Proto, Class, IterProto, IterTok, NextTok) ->
             end
     end.
 
-token_of(Data, {?HANDLE_TAG, Id}) -> native_token(arc_rt_arena_ffi:get(Id, Data));
+token_of(Cells, {?HANDLE_TAG, Id}) -> native_token(arc_rt_arena_ffi:get(Id, Cells));
 token_of(_, _) -> none.
 
 native_token(Cell) -> ?NATIVE_TOKEN(Cell).
@@ -114,16 +112,16 @@ is_array_iter(_) -> false.
 
 %% holes and index props go the long way
 array_iter_next(Store, {?ARC_ITER, {?HANDLE_TAG, T}, I, _} = R) ->
-    case arc_rt_arena_ffi:get(T, element(?STORE_DATA, Store)) of
+    case arc_rt_arena_ffi:get(T, element(?STORE_CELLS, Store)) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, _, _, _, _} when I >= Len ->
             {iter_step, true, undefined, undefined};
         {?SOBJECT_TAG, {Tag, Entries}, _, _, _, _, _}
           when Tag =:= ?MAPOBJ_TAG; Tag =:= ?SETOBJ_TAG ->
             case 'arc@internal@ordered_entries':next_from(Entries, I) of
-                none -> {iter_step, true, undefined, undefined};
-                {some, {Next, _, V}} when Tag =:= ?SETOBJ_TAG ->
+                ?NONE -> {iter_step, true, undefined, undefined};
+                {?SOME, {Next, _, V}} when Tag =:= ?SETOBJ_TAG ->
                     {iter_step, false, V, setelement(3, R, Next)};
-                {some, {Next, MK, V}} ->
+                {?SOME, {Next, MK, V}} ->
                     {iter_pair, 'arc@rt@types':map_key_to_js(MK), V,
                      setelement(3, R, Next)}
             end;
@@ -156,8 +154,8 @@ array_iter_proto(Agent, R) ->
 
 iter_proto_ix(_, {?ARC_ITER, S, _, _}) when ?IS_STR(S) -> ?REALM_STRING_ITER_PROTO;
 iter_proto_ix(Agent, {?ARC_ITER, {?HANDLE_TAG, T}, _, _}) ->
-    Data = element(?STORE_DATA, element(?AGENT_STORE, Agent)),
-    case element(?SOBJECT_KIND, arc_rt_arena_ffi:get(T, Data)) of
+    Cells = element(?STORE_CELLS, element(?AGENT_STORE, Agent)),
+    case element(?SOBJECT_KIND, arc_rt_arena_ffi:get(T, Cells)) of
         {?MAPOBJ_TAG, _} -> ?REALM_MAP_ITER_PROTO;
         {?SETOBJ_TAG, _} -> ?REALM_SET_ITER_PROTO;
         _ -> ?REALM_ARRAY_ITER_PROTO
@@ -172,8 +170,8 @@ array_iter_record(T, I, N) -> {?ARC_ITER, T, I, N}.
 array_spread(Agent, V) ->
     case array_iter_start(Agent, V) of
         {?ARC_ITER, {?HANDLE_TAG, T}, _, _} ->
-            Data = element(?STORE_DATA, element(?AGENT_STORE, Agent)),
-            case arc_rt_arena_ffi:get(T, Data) of
+            Cells = element(?STORE_CELLS, element(?AGENT_STORE, Agent)),
+            case arc_rt_arena_ffi:get(T, Cells) of
                 {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, Props, _, Els, _}
                   when map_size(Props) =:= 0 ->
                     dense_list(Els, Len);

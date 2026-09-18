@@ -544,7 +544,7 @@ pub fn sb_insert_param_shims(sb: ScopeBuilder, count: Int) -> ScopeBuilder {
     dict.map_values(scope.bindings, fn(_name, rb) {
       RawBinding(..rb, decl_order: rb.decl_order + count)
     })
-  let with_shims = insert_param_shims_loop(shifted, 0, count)
+  let with_shims = sb_insert_param_shims_loop(shifted, 0, count)
   let scope =
     RawScope(
       ..scope,
@@ -555,7 +555,7 @@ pub fn sb_insert_param_shims(sb: ScopeBuilder, count: Int) -> ScopeBuilder {
   ScopeBuilder(..sb, scopes: dict.insert(sb.scopes, fn_id, scope))
 }
 
-fn insert_param_shims_loop(
+fn sb_insert_param_shims_loop(
   bindings: Dict(String, RawBinding),
   i: Int,
   count: Int,
@@ -563,7 +563,7 @@ fn insert_param_shims_loop(
   case i >= count {
     True -> bindings
     False ->
-      insert_param_shims_loop(
+      sb_insert_param_shims_loop(
         dict.insert(
           bindings,
           param_shim(i),
@@ -1286,10 +1286,10 @@ pub fn param_shim(idx: Int) -> String {
 }
 
 pub fn lookup(tree: ScopeTree, scope_id: ScopeId, name: String) -> Resolution {
-  do_lookup(tree, scope_id, name, [])
+  lookup_crossing(tree, scope_id, name, [])
 }
 
-fn do_lookup(
+fn lookup_crossing(
   tree: ScopeTree,
   scope_id: ScopeId,
   name: String,
@@ -1318,7 +1318,8 @@ fn do_lookup(
       }
       // stop at the function boundary but still probe inherited withs
       case is_function_kind(scope.kind), scope.parent {
-        False, Some(parent_id) -> do_lookup(tree, parent_id, name, crossed)
+        False, Some(parent_id) ->
+          lookup_crossing(tree, parent_id, name, crossed)
         True, _ | False, None -> {
           let crossed = list.append(inherited_with_slots(tree, scope), crossed)
           let info = function_info(tree, scope.function_scope)

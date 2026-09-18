@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Index, Named}
 import arc/rt/abstract_ops as rt_abstract
 import arc/rt/buffer
 import arc/rt/builtins/array_buffer
@@ -15,9 +16,9 @@ import arc/rt/types.{
   type Agent, type ArrayIterKind, type BuiltinPair, type Handle, type JsNum,
   type JsVal, type Realm, type TypedArrayKind, type TypedArrayNative,
   type TypedArrays, ArrayIterEntries, ArrayIterKeys, ArrayIterValues,
-  ArrayIterator, BigKind, Index, JFloat, JInt, JNan, JNegInf, JPosInf, KBig,
-  KHandle, KNull, KNum, KUndef, Named, NumKind, ReturnThis, SObject, StringKey,
-  SymbolKey, TypedArrayConstructor, TypedArrayFrom, TypedArrayGetBuffer,
+  ArrayIterator, BigKind, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KHandle,
+  KNull, KNum, KUndef, NumKind, ReturnThis, SObject, StringKey, SymbolKey,
+  TypedArrayConstructor, TypedArrayFrom, TypedArrayGetBuffer,
   TypedArrayGetByteLength, TypedArrayGetByteOffset, TypedArrayGetLength,
   TypedArrayGetToStringTag, TypedArrayIntrinsicConstructor, TypedArrayN,
   TypedArrayObj, TypedArrayOf, TypedArrayPrototypeAt,
@@ -399,8 +400,7 @@ fn ta_from(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
       }
       case bulk {
         Some(st) -> #(target, st)
-        None ->
-          from_store_loop(st, target, target_h, values, 0, mapping, this_arg)
+        None -> fill_target(st, target, target_h, values, 0, mapping, this_arg)
       }
     }
     False -> {
@@ -415,7 +415,7 @@ fn ta_from(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
       case bulk {
         Some(st) -> #(target, st)
         None ->
-          from_array_like_loop(
+          fill_target_from_array_like(
             st,
             target,
             target_h,
@@ -430,7 +430,7 @@ fn ta_from(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-fn from_store_loop(
+fn fill_target(
   st: Agent,
   target: JsVal,
   target_h: Handle,
@@ -443,12 +443,12 @@ fn from_store_loop(
     [] -> #(target, st)
     [v, ..rest] -> {
       let st = map_and_store(st, target, target_h, v, k, mapping, this_arg)
-      from_store_loop(st, target, target_h, rest, k + 1, mapping, this_arg)
+      fill_target(st, target, target_h, rest, k + 1, mapping, this_arg)
     }
   }
 }
 
-fn from_array_like_loop(
+fn fill_target_from_array_like(
   st: Agent,
   target: JsVal,
   target_h: Handle,
@@ -463,7 +463,7 @@ fn from_array_like_loop(
     False -> {
       let #(v, st) = rt_obj.t_get_prop(st, source, StringKey(Index(k)))
       let st = map_and_store(st, target, target_h, v, k, mapping, this_arg)
-      from_array_like_loop(
+      fill_target_from_array_like(
         st,
         target,
         target_h,
@@ -501,7 +501,7 @@ fn ta_of(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(target, target_h, st) = ta_create(st, this, list.length(args))
   case try_bulk_store(st, target_h, 0, args) {
     Some(st) -> #(target, st)
-    None -> from_store_loop(st, target, target_h, args, 0, None, mk_undefined())
+    None -> fill_target(st, target, target_h, args, 0, None, mk_undefined())
   }
 }
 
@@ -560,11 +560,11 @@ fn ta_construct(
   }
 }
 
-type FreshTa {
-  FreshTa(value: JsVal, ta: Handle, buffer: Handle)
+type FreshTypedArray {
+  FreshTypedArray(value: JsVal, ta: Handle, buffer: Handle)
 }
 
-fn fresh_handle(r: #(FreshTa, Agent)) -> #(Handle, Agent) {
+fn fresh_handle(r: #(FreshTypedArray, Agent)) -> #(Handle, Agent) {
   let #(fresh, st) = r
   #(fresh.ta, st)
 }
@@ -575,22 +575,22 @@ fn alloc_ta_with_length(
   kind: TypedArrayKind,
   proto: Handle,
   len: Int,
-) -> #(FreshTa, Agent) {
+) -> #(FreshTypedArray, Agent) {
   let size = typed_array_bytes.elem_size(kind)
   let byte_len = len * size
   use <- bool.lazy_guard(byte_len > max_byte_length, fn() {
     rt_val.t_throw_range_error(st, "Invalid typed array length")
   })
-  alloc_fresh_ta(st, kind, proto, byte_len, len)
+  alloc_fresh_typed_array(st, kind, proto, byte_len, len)
 }
 
-fn alloc_fresh_ta(
+fn alloc_fresh_typed_array(
   st: Agent,
   kind: TypedArrayKind,
   proto: Handle,
   byte_len: Int,
   len: Int,
-) -> #(FreshTa, Agent) {
+) -> #(FreshTypedArray, Agent) {
   let #(buf, st) =
     array_buffer.alloc_buffer(st, st.realm.array_buffer.prototype, byte_len)
   let #(ta, st) =
@@ -604,7 +604,7 @@ fn alloc_fresh_ta(
       ),
       proto,
     )
-  #(FreshTa(value: mk_object(ta), ta:, buffer: buf), st)
+  #(FreshTypedArray(value: mk_object(ta), ta:, buffer: buf), st)
 }
 
 // §23.2.5.1.3 initializetypedarrayfromarraybuffer
@@ -752,7 +752,8 @@ fn from_typed_array(
         False ->
           convert_elements(st, src_buf, src_kind, src_off, src_len, kind, size)
       }
-      let #(fresh, st) = alloc_fresh_ta(st, kind, proto, byte_len, src_len)
+      let #(fresh, st) =
+        alloc_fresh_typed_array(st, kind, proto, byte_len, src_len)
       let st = buffer.store_region(st, fresh.buffer, new_data, 0, byte_len)
       #(fresh.ta, st)
     }
@@ -855,7 +856,7 @@ fn from_object(
 
 fn store_list(
   st: Agent,
-  fresh: FreshTa,
+  fresh: FreshTypedArray,
   values: List(JsVal),
   idx: Int,
 ) -> Agent {
@@ -870,7 +871,7 @@ fn store_list(
 
 fn store_array_like(
   st: Agent,
-  fresh: FreshTa,
+  fresh: FreshTypedArray,
   obj_val: JsVal,
   k: Int,
   len: Int,
@@ -891,28 +892,28 @@ fn to_index(st: Agent, val: JsVal) -> #(Int, Agent) {
 }
 
 type IntOrInf {
-  IInt(Int)
-  IPosInf
-  INegInf
+  FiniteInteger(Int)
+  PositiveInfinity
+  NegativeInfinity
 }
 
 fn to_int_or_inf(st: Agent, val: JsVal) -> #(IntOrInf, Agent) {
   let #(n, st) = rt_val.t_to_number(st, val)
   let i = case n {
-    JNan -> IInt(0)
-    JInt(i) -> IInt(i)
-    JFloat(f) -> IInt(rt_val.float_to_int(f))
-    JPosInf -> IPosInf
-    JNegInf -> INegInf
+    JNan -> FiniteInteger(0)
+    JInt(i) -> FiniteInteger(i)
+    JFloat(f) -> FiniteInteger(rt_val.float_to_int(f))
+    JPosInf -> PositiveInfinity
+    JNegInf -> NegativeInfinity
   }
   #(i, st)
 }
 
 fn relative_index(i: IntOrInf, length: Int) -> Int {
   case i {
-    IPosInf -> length
-    INegInf -> 0
-    IInt(n) ->
+    PositiveInfinity -> length
+    NegativeInfinity -> 0
+    FiniteInteger(n) ->
       case n < 0 {
         True -> int.max(length + n, 0)
         False -> int.min(n, length)
@@ -921,8 +922,8 @@ fn relative_index(i: IntOrInf, length: Int) -> Int {
 }
 
 // declared fields; length None = length-tracking view
-type TaView {
-  TaView(
+type TypedArrayView {
+  TypedArrayView(
     ta: Handle,
     buffer: Handle,
     kind: TypedArrayKind,
@@ -932,8 +933,8 @@ type TaView {
 }
 
 // length is a snapshot, ta is live; element reads go through ta
-type TaWitness {
-  TaWitness(
+type TypedArrayWitness {
+  TypedArrayWitness(
     ta: Handle,
     buffer: Handle,
     kind: TypedArrayKind,
@@ -942,17 +943,17 @@ type TaWitness {
   )
 }
 
-fn ta_view(st: Agent, v: JsVal) -> Option(TaView) {
+fn ta_view(st: Agent, v: JsVal) -> Option(TypedArrayView) {
   case classify(v) {
     KHandle(h) -> ta_view_of(st, h)
     _ -> None
   }
 }
 
-fn ta_view_of(st: Agent, ta: Handle) -> Option(TaView) {
+fn ta_view_of(st: Agent, ta: Handle) -> Option(TypedArrayView) {
   case rt_store.t_cell_get(st, ta) {
     SObject(kind: TypedArrayObj(buffer:, elem_kind:, byte_offset:, length:), ..) ->
-      Some(TaView(ta:, buffer:, kind: elem_kind, byte_offset:, length:))
+      Some(TypedArrayView(ta:, buffer:, kind: elem_kind, byte_offset:, length:))
     _ -> None
   }
 }
@@ -965,7 +966,7 @@ fn try_bulk_store(
   values: List(JsVal),
 ) -> Option(Agent) {
   use view <- option.then(ta_view_of(st, ta_h))
-  let TaView(buffer: buf, kind:, byte_offset:, length:, ..) = view
+  let TypedArrayView(buffer: buf, kind:, byte_offset:, length:, ..) = view
   use region <- option.then(buffer.typed_array_encode_primitives(kind, values))
   case buffer.buffer_bytes(st, buf) {
     None -> Some(st)
@@ -993,10 +994,10 @@ fn try_bulk_store(
   }
 }
 
-fn require_ta(st: Agent, this: JsVal) -> TaWitness {
+fn require_ta(st: Agent, this: JsVal) -> TypedArrayWitness {
   case ta_view(st, this) {
-    Some(TaView(ta:, buffer: buf, kind:, byte_offset:, length:)) ->
-      TaWitness(
+    Some(TypedArrayView(ta:, buffer: buf, kind:, byte_offset:, length:)) ->
+      TypedArrayWitness(
         ta:,
         buffer: buf,
         kind:,
@@ -1018,9 +1019,10 @@ fn require_ta(st: Agent, this: JsVal) -> TaWitness {
 }
 
 // §23.2.4.4 validatetypedarray
-fn validate_ta(st: Agent, this: JsVal) -> TaWitness {
+fn validate_ta(st: Agent, this: JsVal) -> TypedArrayWitness {
   let view = require_ta(st, this)
-  let TaWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) = view
+  let TypedArrayWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) =
+    view
   case buffer.buffer_bytes(st, buf) {
     None -> witness_type_error(st, buffer.BufferDetached)
     Some(data) -> {
@@ -1050,8 +1052,8 @@ fn get_buffer(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   #(mk_object(view.buffer), st)
 }
 
-fn witness_in_bounds(st: Agent, witness: TaWitness) -> Bool {
-  let TaWitness(buffer: buf, kind:, byte_offset:, length:, ..) = witness
+fn witness_in_bounds(st: Agent, witness: TypedArrayWitness) -> Bool {
+  let TypedArrayWitness(buffer: buf, kind:, byte_offset:, length:, ..) = witness
   let view =
     buffer.View(
       buffer: buf,
@@ -1102,16 +1104,17 @@ fn get_to_string_tag(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 // §23.2.3.1 at
 fn proto_at(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
-  let TaWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) = view
+  let TypedArrayWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) =
+    view
   let #(rel, st) = to_int_or_inf(st, helpers.first_arg_or_undefined(args))
   let k = case rel {
-    IInt(n) ->
+    FiniteInteger(n) ->
       case n < 0 {
         True -> len + n
         False -> n
       }
-    IPosInf -> len
-    INegInf -> -1
+    PositiveInfinity -> len
+    NegativeInfinity -> -1
   }
   let v =
     buffer.typed_array_element(st, buf, kind, off, len, k)
@@ -1122,7 +1125,8 @@ fn proto_at(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
 // §23.2.3.8 fill
 fn proto_fill(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
-  let TaWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) = view
+  let TypedArrayWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) =
+    view
   require_mutable(st, buf)
   let value_arg = helpers.first_arg_or_undefined(args)
   let start_arg = helpers.arg_at(args, 1)
@@ -1130,7 +1134,7 @@ fn proto_fill(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(converted, st) = convert_for_kind(st, kind, value_arg)
   let #(s, st) = to_int_or_inf(st, start_arg)
   let #(e, st) = case classify(end_arg) {
-    KUndef -> #(IPosInf, st)
+    KUndef -> #(PositiveInfinity, st)
     _ -> to_int_or_inf(st, end_arg)
   }
   let start = relative_index(s, len)
@@ -1171,9 +1175,9 @@ fn proto_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let src = helpers.first_arg_or_undefined(args)
   let #(off_i, st) = to_int_or_inf(st, helpers.arg_at(args, 1))
   let offset = case off_i {
-    IInt(n) -> n
-    IPosInf -> limits.max_safe_integer
-    INegInf -> -1
+    FiniteInteger(n) -> n
+    PositiveInfinity -> limits.max_safe_integer
+    NegativeInfinity -> -1
   }
   use <- bool.lazy_guard(offset < 0, fn() {
     rt_val.t_throw_range_error(st, "offset is out of bounds")
@@ -1184,7 +1188,7 @@ fn proto_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     KHandle(src_h) ->
       case ta_view_of(st, src_h) {
         Some(src_view) -> {
-          let TaView(
+          let TypedArrayView(
             buffer: src_buf,
             kind: src_kind,
             byte_offset: src_off,
@@ -1236,7 +1240,7 @@ fn witness_bytes(st: Agent, this: JsVal) -> BitArray {
 
 fn set_from_typed_array(
   st: Agent,
-  view: TaWitness,
+  view: TypedArrayWitness,
   data: BitArray,
   offset: Int,
   len: Int,
@@ -1245,7 +1249,7 @@ fn set_from_typed_array(
   src_off: Int,
   src_len: Int,
 ) -> #(JsVal, Agent) {
-  let TaWitness(buffer: dst_buf, kind:, byte_offset: dst_off, ..) = view
+  let TypedArrayWitness(buffer: dst_buf, kind:, byte_offset: dst_off, ..) = view
   let src_live = option.is_some(buffer.buffer_bytes(st, src_buf))
   use <- bool.lazy_guard(!src_live, fn() {
     rt_val.t_throw_type_error(
@@ -1288,7 +1292,7 @@ fn set_from_typed_array(
 
 fn set_from_array_like(
   st: Agent,
-  view: TaWitness,
+  view: TypedArrayWitness,
   offset: Int,
   len: Int,
   src: JsVal,
@@ -1307,14 +1311,14 @@ fn set_from_array_like(
     Some(st) -> #(mk_undefined(), st)
     None -> #(
       mk_undefined(),
-      set_array_like_loop(st, view, offset, src, 0, src_len),
+      set_from_array_like_loop(st, view, offset, src, 0, src_len),
     )
   }
 }
 
-fn set_array_like_loop(
+fn set_from_array_like_loop(
   st: Agent,
-  view: TaWitness,
+  view: TypedArrayWitness,
   offset: Int,
   src: JsVal,
   k: Int,
@@ -1325,7 +1329,7 @@ fn set_array_like_loop(
     False -> {
       let #(v, st) = rt_obj.t_get_prop(st, src, StringKey(Index(k)))
       let st = set_index(st, view.ta, mk_object(view.ta), offset + k, v)
-      set_array_like_loop(st, view, offset, src, k + 1, src_len)
+      set_from_array_like_loop(st, view, offset, src, k + 1, src_len)
     }
   }
 }
@@ -1337,7 +1341,7 @@ fn proto_subarray(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case ta_view(st, this) {
-    Some(view) -> do_subarray(st, this, args, view)
+    Some(view) -> subarray_of_view(st, this, args, view)
     None ->
       rt_val.t_throw_type_error(
         st,
@@ -1346,19 +1350,20 @@ fn proto_subarray(
   }
 }
 
-fn do_subarray(
+fn subarray_of_view(
   st: Agent,
   this: JsVal,
   args: List(JsVal),
-  view: TaView,
+  view: TypedArrayView,
 ) -> #(JsVal, Agent) {
-  let TaView(buffer: buf, kind:, byte_offset: off, length: declared, ..) = view
+  let TypedArrayView(buffer: buf, kind:, byte_offset: off, length: declared, ..) =
+    view
   let b_arg = helpers.first_arg_or_undefined(args)
   let e_arg = helpers.arg_at(args, 1)
   // length snapshotted before observable start/end coercions
   let src_length = buffer.typed_array_live_count(st, buf, kind, off, declared)
   let #(b, st) = case classify(b_arg) {
-    KUndef -> #(IInt(0), st)
+    KUndef -> #(FiniteInteger(0), st)
     _ -> to_int_or_inf(st, b_arg)
   }
   let begin = relative_index(b, src_length)
@@ -1369,7 +1374,7 @@ fn do_subarray(
     None, KUndef -> #([mk_object(buf), mk_int(new_off)], st)
     _, _ -> {
       let #(e, st) = case classify(e_arg) {
-        KUndef -> #(IInt(src_length), st)
+        KUndef -> #(FiniteInteger(src_length), st)
         _ -> to_int_or_inf(st, e_arg)
       }
       let end = relative_index(e, src_length)
@@ -1395,15 +1400,16 @@ fn do_subarray(
 // §23.2.3.27 slice, copies into a fresh buffer
 fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
-  let TaWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) = view
+  let TypedArrayWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) =
+    view
   let s_arg = helpers.first_arg_or_undefined(args)
   let e_arg = helpers.arg_at(args, 1)
   let #(s, st) = case classify(s_arg) {
-    KUndef -> #(IInt(0), st)
+    KUndef -> #(FiniteInteger(0), st)
     _ -> to_int_or_inf(st, s_arg)
   }
   let #(e, st) = case classify(e_arg) {
-    KUndef -> #(IPosInf, st)
+    KUndef -> #(PositiveInfinity, st)
     _ -> to_int_or_inf(st, e_arg)
   }
   let start = relative_index(s, len)
@@ -1414,7 +1420,7 @@ fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   // revalidate source, species ctor may have detached or shrunk it
   let _source_bytes = witness_bytes(st, this)
   case ta_view(st, target) {
-    Some(TaView(
+    Some(TypedArrayView(
       buffer: target_buf,
       kind: target_kind,
       byte_offset: target_off,
@@ -1528,7 +1534,7 @@ fn proto_join(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
 
 fn join_parts(
   st: Agent,
-  view: TaWitness,
+  view: TypedArrayWitness,
   i: Int,
   acc: List(String),
 ) -> List(String) {
@@ -1590,22 +1596,22 @@ fn proto_search(
   let search = helpers.first_arg_or_undefined(args)
   let #(n, st) = to_int_or_inf(st, helpers.arg_at(args, 1))
   let k = case n {
-    INegInf -> 0
-    IPosInf -> len
-    IInt(i) ->
+    NegativeInfinity -> 0
+    PositiveInfinity -> len
+    FiniteInteger(i) ->
       case i >= 0 {
         True -> i
         False -> int.max(len + i, 0)
       }
   }
-  let found = search_loop(st, view, k, search, eq, missing_undefined)
+  let found = proto_search_loop(st, view, k, search, eq, missing_undefined)
   #(done(found), st)
 }
 
 // includes treats an invalid index as undefined, indexof skips it
-fn search_loop(
+fn proto_search_loop(
   st: Agent,
-  view: TaWitness,
+  view: TypedArrayWitness,
   i: Int,
   search: JsVal,
   eq: fn(JsVal, JsVal) -> Bool,
@@ -1620,7 +1626,8 @@ fn search_loop(
       }
       case matched {
         True -> i
-        False -> search_loop(st, view, i + 1, search, eq, missing_undefined)
+        False ->
+          proto_search_loop(st, view, i + 1, search, eq, missing_undefined)
       }
     }
   }
@@ -1645,7 +1652,7 @@ fn proto_iter(
 // reversed, stops at first invalid index (user code shrunk buffer)
 fn join_collect(
   st: Agent,
-  view: TaWitness,
+  view: TypedArrayWitness,
   i: Int,
   acc: List(JsVal),
 ) -> List(JsVal) {
@@ -1694,7 +1701,7 @@ fn set_index(
 // §10.4.5.15 against the live view, None = invalid index
 fn ta_read(st: Agent, ta_h: Handle, k: Int) -> Option(JsVal) {
   use view <- option.then(ta_view_of(st, ta_h))
-  let TaView(buffer: buf, kind:, byte_offset:, length:, ..) = view
+  let TypedArrayView(buffer: buf, kind:, byte_offset:, length:, ..) = view
   buffer.typed_array_element_live(st, buf, kind, byte_offset, length, k)
 }
 
@@ -1709,9 +1716,10 @@ fn witness_type_error(st: Agent, err: buffer.ViewWitnessError) -> a {
 // §23.2.4.4 witness checks; ok carries the live bytes as proof
 fn view_witness_bytes(
   st: Agent,
-  view: TaView,
+  view: TypedArrayView,
 ) -> Result(BitArray, buffer.ViewWitnessError) {
-  let TaView(buffer: buf, kind:, byte_offset: off, length: declared, ..) = view
+  let TypedArrayView(buffer: buf, kind:, byte_offset: off, length: declared, ..) =
+    view
   case buffer.buffer_bytes(st, buf) {
     None -> Error(buffer.BufferDetached)
     Some(data) -> {
@@ -1742,7 +1750,7 @@ fn ta_witness_bytes(
 // §10.4.5.14 bound: current count of valid indices
 fn ta_live_length(st: Agent, this: JsVal) -> Int {
   case ta_view(st, this) {
-    Some(TaView(buffer: buf, kind:, byte_offset:, length:, ..)) ->
+    Some(TypedArrayView(buffer: buf, kind:, byte_offset:, length:, ..)) ->
       buffer.typed_array_live_count(st, buf, kind, byte_offset, length)
     None -> 0
   }
@@ -1769,7 +1777,7 @@ fn direction_start(dir: Direction, len: Int) -> Int {
 
 fn iterate_calls(
   st: Agent,
-  view: TaWitness,
+  view: TypedArrayWitness,
   k: Int,
   dir: Direction,
   cb: JsVal,
@@ -1869,12 +1877,12 @@ fn proto_map(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(cb, this_arg) = require_cb(st, args)
   let #(#(target, target_h), st) =
     ta_species_create(st, this, view.kind, view.length)
-  #(target, map_loop(st, view, 0, cb, this_arg, target, target_h))
+  #(target, proto_map_loop(st, view, 0, cb, this_arg, target, target_h))
 }
 
-fn map_loop(
+fn proto_map_loop(
   st: Agent,
-  view: TaWitness,
+  view: TypedArrayWitness,
   k: Int,
   cb: JsVal,
   this_arg: JsVal,
@@ -1890,7 +1898,7 @@ fn map_loop(
       mk_object(view.ta),
     ])
   let st = set_index(st, target_h, target, k, mapped)
-  map_loop(st, view, k + 1, cb, this_arg, target, target_h)
+  proto_map_loop(st, view, k + 1, cb, this_arg, target, target_h)
 }
 
 fn proto_filter(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
@@ -1905,7 +1913,7 @@ fn proto_filter(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
 
 fn filter_collect(
   st: Agent,
-  view: TaWitness,
+  view: TypedArrayWitness,
   k: Int,
   cb: JsVal,
   this_arg: JsVal,
@@ -1959,7 +1967,7 @@ fn proto_reduce(
   })
   let start = direction_start(dir, len)
   case helpers.list_at(args, 1) {
-    Some(init) -> reduce_loop(st, view, start, dir, cb, init)
+    Some(init) -> proto_reduce_loop(st, view, start, dir, cb, init)
     None ->
       case len == 0 {
         True ->
@@ -1969,15 +1977,15 @@ fn proto_reduce(
           )
         False -> {
           let acc = ta_get(st, view.ta, start)
-          reduce_loop(st, view, start + direction_step(dir), dir, cb, acc)
+          proto_reduce_loop(st, view, start + direction_step(dir), dir, cb, acc)
         }
       }
   }
 }
 
-fn reduce_loop(
+fn proto_reduce_loop(
   st: Agent,
-  view: TaWitness,
+  view: TypedArrayWitness,
   k: Int,
   dir: Direction,
   cb: JsVal,
@@ -1992,7 +2000,7 @@ fn reduce_loop(
       mk_int(k),
       mk_object(view.ta),
     ])
-  reduce_loop(st, view, k + direction_step(dir), dir, cb, res)
+  proto_reduce_loop(st, view, k + direction_step(dir), dir, cb, res)
 }
 
 // §23.2.3.5 copywithin
@@ -2002,7 +2010,8 @@ fn proto_copy_within(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
-  let TaWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) = view
+  let TypedArrayWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) =
+    view
   require_mutable(st, buf)
   let target_arg = helpers.first_arg_or_undefined(args)
   let start_arg = helpers.arg_at(args, 1)
@@ -2010,7 +2019,7 @@ fn proto_copy_within(
   let #(t, st) = to_int_or_inf(st, target_arg)
   let #(s, st) = to_int_or_inf(st, start_arg)
   let #(e, st) = case classify(end_arg) {
-    KUndef -> #(IPosInf, st)
+    KUndef -> #(PositiveInfinity, st)
     _ -> to_int_or_inf(st, end_arg)
   }
   let to = relative_index(t, len)
@@ -2057,7 +2066,8 @@ fn reversed_bytes_loop(
 
 fn proto_reverse(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
-  let TaWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) = view
+  let TypedArrayWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) =
+    view
   require_mutable(st, buf)
   case buffer.buffer_bytes(st, buf) {
     None -> #(this, st)
@@ -2075,7 +2085,7 @@ fn ta_same_type_create(
   st: Agent,
   kind: TypedArrayKind,
   len: Int,
-) -> #(FreshTa, Agent) {
+) -> #(FreshTypedArray, Agent) {
   alloc_ta_with_length(st, kind, default_proto_for(st, kind), len)
 }
 
@@ -2093,10 +2103,11 @@ fn write_fresh_buffer(
 
 fn proto_to_reversed(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
-  let TaWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) = view
+  let TypedArrayWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) =
+    view
   let size = typed_array_bytes.elem_size(kind)
   let #(fresh, st) = ta_same_type_create(st, kind, len)
-  let FreshTa(value: ta_val, buffer: new_buf, ..) = fresh
+  let FreshTypedArray(value: ta_val, buffer: new_buf, ..) = fresh
   let src = copy_region(st, buf, off, len * size)
   let new_data = reversed_bytes(src, 0, len, size)
   write_fresh_buffer(st, new_buf, new_data, ta_val)
@@ -2105,18 +2116,19 @@ fn proto_to_reversed(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 // §23.2.3.36 with
 fn proto_with(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
-  let TaWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) = view
+  let TypedArrayWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) =
+    view
   let index_arg = helpers.first_arg_or_undefined(args)
   let value_arg = helpers.arg_at(args, 1)
   let #(rel, st) = to_int_or_inf(st, index_arg)
   let actual = case rel {
-    IInt(i) ->
+    FiniteInteger(i) ->
       case i >= 0 {
         True -> i
         False -> len + i
       }
-    IPosInf -> limits.max_safe_integer
-    INegInf -> -1
+    PositiveInfinity -> limits.max_safe_integer
+    NegativeInfinity -> -1
   }
   // conversion before range check, valueof may resize
   let #(converted, st) = convert_for_kind(st, kind, value_arg)
@@ -2127,7 +2139,7 @@ fn proto_with(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   })
   // snapshot length; value lands only if index inside it
   let #(fresh, st) = ta_same_type_create(st, kind, len)
-  let FreshTa(value: ta_val, buffer: new_buf, ..) = fresh
+  let FreshTypedArray(value: ta_val, buffer: new_buf, ..) = fresh
   let data = copy_region(st, buf, off, len * size)
   let new_data = case actual < len {
     True -> buffer.typed_array_encode_value(data, actual * size, converted)
@@ -2147,20 +2159,20 @@ fn proto_last_index_of(
   let search = helpers.first_arg_or_undefined(args)
   // fromindex present (even undefined) differs from absent
   let #(n, st) = case helpers.list_at(args, 1) {
-    None -> #(IInt(len - 1), st)
+    None -> #(FiniteInteger(len - 1), st)
     Some(v) -> to_int_or_inf(st, v)
   }
   case n {
-    INegInf -> #(mk_int(-1), st)
+    NegativeInfinity -> #(mk_int(-1), st)
     _ -> {
       let k = case n {
-        IPosInf -> len - 1
-        IInt(i) ->
+        PositiveInfinity -> len - 1
+        FiniteInteger(i) ->
           case i >= 0 {
             True -> int.min(i, len - 1)
             False -> len + i
           }
-        INegInf -> -1
+        NegativeInfinity -> -1
       }
       #(mk_int(search_down(st, view.ta, k, search)), st)
     }
@@ -2320,7 +2332,7 @@ fn sorted_snapshot(
   st: Agent,
   this: JsVal,
   args: List(JsVal),
-) -> #(TaWitness, List(JsVal), Agent) {
+) -> #(TypedArrayWitness, List(JsVal), Agent) {
   let cmp = helpers.first_arg_or_undefined(args)
   use <- bool.lazy_guard(
     classify(cmp) != KUndef && !rt_val.is_callable(st, cmp),
@@ -2342,7 +2354,8 @@ fn proto_sort(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let view_w = require_ta(st, this)
   require_mutable(st, view_w.buffer)
   let #(view, sorted, st) = sorted_snapshot(st, this, args)
-  let TaWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) = view
+  let TypedArrayWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) =
+    view
   case buffer.buffer_bytes(st, buf) {
     None -> #(this, st)
     Some(data) -> {
@@ -2372,9 +2385,9 @@ fn proto_to_sorted(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(view, sorted, st) = sorted_snapshot(st, this, args)
-  let TaWitness(kind:, length: len, ..) = view
+  let TypedArrayWitness(kind:, length: len, ..) = view
   let #(fresh, st) = ta_same_type_create(st, kind, len)
-  let FreshTa(value: ta_val, buffer: new_buf, ..) = fresh
+  let FreshTypedArray(value: ta_val, buffer: new_buf, ..) = fresh
   let size = typed_array_bytes.elem_size(kind)
   let new_data = case buffer.buffer_bytes(st, new_buf) {
     Some(_fresh) -> encode_region(kind, size, sorted)
@@ -2390,7 +2403,7 @@ fn proto_to_locale_string(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
-  locale_loop(
+  proto_to_locale_string_loop(
     st,
     view,
     0,
@@ -2400,9 +2413,9 @@ fn proto_to_locale_string(
   )
 }
 
-fn locale_loop(
+fn proto_to_locale_string_loop(
   st: Agent,
-  view: TaWitness,
+  view: TypedArrayWitness,
   k: Int,
   locales_v: JsVal,
   options_v: JsVal,
@@ -2414,13 +2427,20 @@ fn locale_loop(
   ))
   let el = ta_get(st, view.ta, k)
   case rt_val.is_nullish(el) {
-    True -> locale_loop(st, view, k + 1, locales_v, options_v, ["", ..acc])
+    True ->
+      proto_to_locale_string_loop(st, view, k + 1, locales_v, options_v, [
+        "",
+        ..acc
+      ])
     False -> {
       let #(m, st) =
         rt_obj.t_get_prop(st, el, StringKey(Named("toLocaleString")))
       let #(res, st) = rt_call.t_call(st, m, el, [locales_v, options_v])
       let #(s, st) = rt_val.t_to_string(st, res)
-      locale_loop(st, view, k + 1, locales_v, options_v, [s, ..acc])
+      proto_to_locale_string_loop(st, view, k + 1, locales_v, options_v, [
+        s,
+        ..acc
+      ])
     }
   }
 }
@@ -2472,7 +2492,7 @@ fn check_content_type(
   kind: TypedArrayKind,
 ) -> #(JsVal, Handle) {
   case ta_view_of(st, obj_h) {
-    Some(TaView(kind: result_kind, ..)) ->
+    Some(TypedArrayView(kind: result_kind, ..)) ->
       case same_content_type(result_kind, kind) {
         True -> #(obj, obj_h)
         False ->

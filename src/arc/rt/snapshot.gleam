@@ -4,11 +4,11 @@ import arc/rt/builtins as rt_builtins
 import arc/rt/builtins/regexp as b_regexp
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Cell, type Handle, type Job, type JsStore, type Realm,
-  type ShapeDesc, Agent, CompiledFn, Handle, HostJob, JsStore, NativeFn,
-  ReactionJob, RegExpConstructor, RegExpN, RegExpObj, ResolveThenableJob,
-  ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen, SBox,
-  SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
+  type Agent, type Cell, type Handle, type Job, type Realm, type ShapeDesc,
+  type Store, Agent, CompiledFn, Handle, HostJob, NativeFn, ReactionJob,
+  RegExpConstructor, RegExpN, RegExpObj, ResolveThenableJob, ResumeCompiled,
+  ResumeFrame, SAsyncContext, SAsyncGen, SBox, SDisposeCapability, SGenerator,
+  SObject, SPromiseData, SShapedObject, Store,
 }
 import gleam/dict.{type Dict}
 import gleam/list
@@ -17,7 +17,7 @@ import gleam/result
 import gleam/set.{type Set}
 
 // bump on any change to the image or runtime records
-pub const abi_version = 12
+pub const abi_version = 13
 
 pub type SnapshotError {
   SnapshotContainsCompiledCode(handle: Handle)
@@ -32,20 +32,20 @@ pub type DeserializeError {
 
 type StoreImage {
   StoreImage(
-    data: Dict(Int, Cell),
+    cells: Dict(Int, Cell),
     free: List(Int),
-    next: Int,
+    next_id: Int,
     pinned_roots: Set(Int),
     alloc_since_gc: Int,
     gc_threshold: Int,
     prop_seq: Int,
-    private_uid: Int,
-    symbol_uid: Int,
+    next_private_id: Int,
+    next_symbol_id: Int,
     microtasks: List(Job),
     unhandled_rejections: List(Int),
     shapes: Dict(Int, ShapeDesc),
     next_shape: Int,
-    unit_uid: Int,
+    next_unit_id: Int,
   )
 }
 
@@ -84,58 +84,58 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
     [] -> Ok(Nil)
     [_, ..] -> Error(SnapshotContainsWaiter)
   })
-  let JsStore(
-    data:,
-    next:,
+  let Store(
+    cells:,
+    next_id:,
     alloc_since_gc:,
     gc_threshold:,
     prop_seq:,
     shapes:,
     next_shape:,
     ics: _,
-    free_protos: _,
+    plain_write_protos: _,
     global_epoch: _,
     ops: _,
     microtasks:,
     pinned_roots:,
     meta: types.StoreMeta(
-      gc_live: _,
-      private_uid:,
-      symbol_uid:,
-      unit_uid:,
+      live_count: _,
+      next_private_id:,
+      next_symbol_id:,
+      next_unit_id:,
       unhandled_rejections:,
-      old: _,
-      old_next: _,
-      weak_old: _,
+      old_gen: _,
+      young_start: _,
+      old_weak_ids: _,
       major_live: _,
       minors_since_major: _,
     ),
   ) = store
   let microtasks = types.job_queue_to_list(microtasks)
-  let data =
+  let cells =
     arena.fold(
       fn(id, cell, acc) { dict.insert(acc, id, drop_regexp_matcher(cell)) },
       dict.new(),
-      data,
+      cells,
     )
-  use Nil <- result.try(check_cells(data))
+  use Nil <- result.try(check_cells(cells))
   use Nil <- result.try(check_jobs(microtasks))
   let store =
     StoreImage(
-      data:,
+      cells:,
       free: [],
-      next:,
+      next_id:,
       pinned_roots:,
       alloc_since_gc:,
       gc_threshold:,
       prop_seq:,
-      private_uid:,
-      symbol_uid:,
+      next_private_id:,
+      next_symbol_id:,
       microtasks:,
       unhandled_rejections:,
       shapes:,
       next_shape:,
-      unit_uid:,
+      next_unit_id:,
     )
   let realms = RealmImage(current: realm, realms:, template_objects:)
   Ok(encode(abi_version, store, realms))
@@ -163,30 +163,30 @@ pub fn deserialize(
   |> rt_builtins.seed_ops
 }
 
-fn restore(image: StoreImage) -> JsStore(Agent) {
+fn restore(image: StoreImage) -> Store {
   let StoreImage(
-    data:,
+    cells:,
     free: _,
-    next:,
+    next_id:,
     pinned_roots:,
     alloc_since_gc:,
     gc_threshold:,
     prop_seq:,
-    private_uid:,
-    symbol_uid:,
+    next_private_id:,
+    next_symbol_id:,
     microtasks:,
     unhandled_rejections:,
     shapes:,
     next_shape:,
-    unit_uid:,
+    next_unit_id:,
   ) = image
   let fresh = rt_store.new()
-  JsStore(
+  Store(
     ..fresh,
-    data: dict.fold(data, arena.new(), fn(acc, id, cell) {
+    cells: dict.fold(cells, arena.new(), fn(acc, id, cell) {
       arena.set(id, cell, acc)
     }),
-    next:,
+    next_id:,
     alloc_since_gc:,
     gc_threshold:,
     prop_seq:,
@@ -200,16 +200,16 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     pinned_roots:,
     meta: types.StoreMeta(
       ..fresh.meta,
-      private_uid:,
-      symbol_uid:,
-      unit_uid:,
+      next_private_id:,
+      next_symbol_id:,
+      next_unit_id:,
       unhandled_rejections:,
     ),
   )
 }
 
-fn check_cells(data: Dict(Int, Cell)) -> Result(Nil, SnapshotError) {
-  dict.fold(data, Ok(Nil), fn(found, id, cell) {
+fn check_cells(cells: Dict(Int, Cell)) -> Result(Nil, SnapshotError) {
+  dict.fold(cells, Ok(Nil), fn(found, id, cell) {
     case found, holds_compiled_code(cell) {
       Ok(Nil), True -> Error(SnapshotContainsCompiledCode(Handle(id)))
       _, _ -> found

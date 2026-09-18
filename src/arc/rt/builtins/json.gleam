@@ -1,3 +1,6 @@
+import arc/bytecode/key.{
+  type PropertyKey, Index, Named, Private, canonical_key, index_key, key_to_text,
+}
 import arc/rt/abstract_ops as rt_abstract
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -8,12 +11,12 @@ import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsNum, type JsVal, type JsonNative,
-  type PropertyKey, BigIntObj, BooleanObj, Index, JFloat, JInt, JNan, JNegInf,
-  JPosInf, JsonIsRawJson, JsonN, JsonParse, JsonRawJson, JsonStringify, KBig,
-  KBool, KHandle, KNull, KNum, KStr, KSym, KUndef, Named, NumberObj, Ordinary,
-  RawJsonObj, SObject, SShapedObject, StringKey, StringObj, classify, index_key,
-  mk_bool, mk_null, mk_number, mk_object, mk_string, mk_undefined, plain_object,
+  type Agent, type Handle, type JsNum, type JsVal, type JsonNative, BigIntObj,
+  BooleanObj, JFloat, JInt, JNan, JNegInf, JPosInf, JsonIsRawJson, JsonN,
+  JsonParse, JsonRawJson, JsonStringify, KBig, KBool, KHandle, KNull, KNum, KStr,
+  KSym, KUndef, NumberObj, Ordinary, RawJsonObj, SObject, SShapedObject,
+  StringKey, StringObj, classify, mk_bool, mk_null, mk_number, mk_object,
+  mk_string, mk_undefined, plain_object,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -90,7 +93,7 @@ fn json_parse(args: List(JsVal), caller: Int, st: Agent) -> #(JsVal, Agent) {
             True -> {
               let #(record, st) = materialize(st, val)
               let #(root, st) = alloc_holder(st, record_value(record))
-              let ctx = ReviveCtx(reviver:, caller:)
+              let ctx = ReviveContext(reviver:, caller:)
               internalize_json_property(st, ctx, root, "", Some(record))
             }
           }
@@ -104,17 +107,13 @@ fn json_parse(args: List(JsVal), caller: Int, st: Agent) -> #(JsVal, Agent) {
 // §25.5.1.1 internalizejsonproperty
 fn internalize_json_property(
   st: Agent,
-  ctx: ReviveCtx,
+  ctx: ReviveContext,
   holder: Handle,
   name: String,
   node: Option(ParseRecord),
 ) -> #(JsVal, Agent) {
   let #(val, st) =
-    rt_obj.t_get_prop(
-      st,
-      mk_object(holder),
-      StringKey(types.canonical_key(name)),
-    )
+    rt_obj.t_get_prop(st, mk_object(holder), StringKey(canonical_key(name)))
   let node = fresh_record(node, val)
   let st = case classify(val) {
     KHandle(h) ->
@@ -125,7 +124,7 @@ fn internalize_json_property(
         }
         False -> {
           let #(keys, st) = enumerable_string_keys(st, h)
-          let keys = list.map(keys, types.key_to_text)
+          let keys = list.map(keys, key_to_text)
           internalize_keys(st, ctx, h, keys, record_members(node))
         }
       }
@@ -139,8 +138,8 @@ fn internalize_json_property(
   ])
 }
 
-type ReviveCtx {
-  ReviveCtx(reviver: JsVal, caller: Int)
+type ReviveContext {
+  ReviveContext(reviver: JsVal, caller: Int)
 }
 
 // stale record must leak neither source nor children
@@ -154,7 +153,7 @@ fn fresh_record(node: Option(ParseRecord), val: JsVal) -> Option(ParseRecord) {
 
 fn internalize_elements(
   st: Agent,
-  ctx: ReviveCtx,
+  ctx: ReviveContext,
   h: Handle,
   i: Int,
   len: Int,
@@ -178,7 +177,7 @@ fn internalize_elements(
 
 fn internalize_keys(
   st: Agent,
-  ctx: ReviveCtx,
+  ctx: ReviveContext,
   h: Handle,
   keys: List(String),
   members: dict.Dict(String, ParseRecord),
@@ -207,7 +206,7 @@ fn replace_or_delete(
   name: String,
   new_element: JsVal,
 ) -> Agent {
-  let key = StringKey(types.canonical_key(name))
+  let key = StringKey(canonical_key(name))
   case classify(new_element) {
     KUndef -> {
       let #(_, st) = rt_obj.t_delete_prop(st, h, key)
@@ -445,7 +444,7 @@ fn materialize_plain_entries(
 }
 
 type PlainProps {
-  PlainProps(props: dict.Dict(types.PropertyKey, types.Property), seq: Int)
+  PlainProps(props: dict.Dict(PropertyKey, types.Property), seq: Int)
   PropsMiss
 }
 
@@ -454,13 +453,13 @@ fn plain_prop_dict(entries: List(#(String, JsVal)), seq: Int) -> PlainProps
 
 fn plain_props(
   entries: List(#(String, JsVal)),
-  acc: dict.Dict(types.PropertyKey, types.Property),
+  acc: dict.Dict(PropertyKey, types.Property),
   seq: Int,
-) -> dict.Dict(types.PropertyKey, types.Property) {
+) -> dict.Dict(PropertyKey, types.Property) {
   case entries {
     [] -> acc
     [#(name, value), ..rest] -> {
-      let key = types.canonical_key(name)
+      let key = canonical_key(name)
       case dict.get(acc, key) {
         Ok(first) -> {
           let prop = types.plain_property(value, types.prop_seq(first))
@@ -507,12 +506,12 @@ fn materialize_object_entries(
 fn props_from_entries(
   st: Agent,
   entries: List(#(String, ParseRecord)),
-  acc: dict.Dict(types.PropertyKey, types.Property),
-) -> #(dict.Dict(types.PropertyKey, types.Property), Agent) {
+  acc: dict.Dict(PropertyKey, types.Property),
+) -> #(dict.Dict(PropertyKey, types.Property), Agent) {
   case entries {
     [] -> #(acc, st)
     [#(name, record), ..rest] -> {
-      let key = types.canonical_key(name)
+      let key = canonical_key(name)
       let value = record_value(record)
       case dict.get(acc, key) {
         Ok(first) -> {
@@ -630,8 +629,8 @@ type Replacer {
   PropertyList(names: List(String))
 }
 
-type StringifyCtx {
-  StringifyCtx(replacer: Replacer, gap: String, caller: Int)
+type StringifyContext {
+  StringifyContext(replacer: Replacer, gap: String, caller: Int)
 }
 
 const circular_msg = "Converting circular structure to JSON"
@@ -662,7 +661,7 @@ fn json_stringify(
     }
   })
   let #(wrapper, st) = alloc_holder(st, val)
-  let ctx = StringifyCtx(replacer:, gap:, caller:)
+  let ctx = StringifyContext(replacer:, gap:, caller:)
   case serialize_property(st, ctx, [], "", Named(""), wrapper) {
     #(Some(tree), st) ->
       case string_tree.byte_size(tree) > limits.max_string_bytes {
@@ -780,7 +779,7 @@ fn compute_gap(st: Agent, space: JsVal) -> #(String, Agent) {
 // §25.5.2.1 serializejsonproperty
 fn serialize_property(
   st: Agent,
-  ctx: StringifyCtx,
+  ctx: StringifyContext,
   stack: List(Int),
   indent: String,
   key: PropertyKey,
@@ -790,7 +789,7 @@ fn serialize_property(
   let #(val, st) = case key {
     Named(name) -> helpers.get_named(st, mk_object(holder), name)
     Index(i) -> rt_abstract.get_index(st, mk_object(holder), i)
-    types.Private(_) -> #(mk_undefined(), st)
+    Private(_) -> #(mk_undefined(), st)
   }
   let #(val, st) = case classify(val) {
     KHandle(_) | KBig(_) -> {
@@ -798,7 +797,7 @@ fn serialize_property(
       case rt_val.is_callable(st, to_json) {
         True ->
           call_in_caller_realm(st, ctx.caller, to_json, val, [
-            mk_string(types.key_to_text(key)),
+            mk_string(key_to_text(key)),
           ])
         False -> #(val, st)
       }
@@ -808,7 +807,7 @@ fn serialize_property(
   let #(val, st) = case ctx.replacer {
     ReplacerFn(rf) ->
       call_in_caller_realm(st, ctx.caller, rf, mk_object(holder), [
-        mk_string(types.key_to_text(key)),
+        mk_string(key_to_text(key)),
         val,
       ])
     NoReplacer | PropertyList(_) -> #(val, st)
@@ -818,7 +817,7 @@ fn serialize_property(
 
 fn serialize_value(
   st: Agent,
-  ctx: StringifyCtx,
+  ctx: StringifyContext,
   stack: List(Int),
   indent: String,
   val: JsVal,
@@ -845,7 +844,7 @@ fn serialize_value(
 
 fn serialize_handle(
   st: Agent,
-  ctx: StringifyCtx,
+  ctx: StringifyContext,
   stack: List(Int),
   indent: String,
   val: JsVal,
@@ -880,7 +879,7 @@ fn serialize_handle(
 
 fn serialize_object(
   st: Agent,
-  ctx: StringifyCtx,
+  ctx: StringifyContext,
   stack: List(Int),
   indent: String,
   h: Handle,
@@ -891,7 +890,7 @@ fn serialize_object(
       let stack = [h.id, ..stack]
       let step_indent = indent <> ctx.gap
       let #(keys, st) = case ctx.replacer {
-        PropertyList(names) -> #(list.map(names, types.canonical_key), st)
+        PropertyList(names) -> #(list.map(names, canonical_key), st)
         NoReplacer | ReplacerFn(_) -> enumerable_string_keys(st, h)
       }
       let #(partial, st) =
@@ -903,7 +902,7 @@ fn serialize_object(
 
 fn serialize_members(
   st: Agent,
-  ctx: StringifyCtx,
+  ctx: StringifyContext,
   stack: List(Int),
   step_indent: String,
   h: Handle,
@@ -921,7 +920,7 @@ fn serialize_members(
             _ -> ": "
           }
           let member =
-            quote_tree(types.key_to_text(k))
+            quote_tree(key_to_text(k))
             |> string_tree.append(sep)
             |> string_tree.append_tree(tree)
           serialize_members(st, ctx, stack, step_indent, h, rest, [
@@ -937,7 +936,7 @@ fn serialize_members(
 
 fn serialize_array(
   st: Agent,
-  ctx: StringifyCtx,
+  ctx: StringifyContext,
   stack: List(Int),
   indent: String,
   h: Handle,
@@ -957,7 +956,7 @@ fn serialize_array(
 
 fn serialize_elements(
   st: Agent,
-  ctx: StringifyCtx,
+  ctx: StringifyContext,
   stack: List(Int),
   step_indent: String,
   h: Handle,

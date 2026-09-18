@@ -58,15 +58,16 @@ import arc/parser/lexer.{
   type Token, type TokenKind, AmpersandAmpersandEqual, AmpersandEqual, Arrow, As,
   Async, Await, Bang, Break, CaretEqual, Case, Catch, Class, Colon, Comma, Const,
   Continue, Debugger, Default, Delete, Do, Dot, DotDotDot, Else, Eof, Equal,
-  Export, Extends, Finally, For, From, Function, GreaterThanGreaterThanEqual,
-  GreaterThanGreaterThanGreaterThanEqual, Identifier, If, Illegal, Import, In,
-  KFalse, KString, KTrue, LeftBrace, LeftBracket, LeftParen,
+  Export, Extends, FalseLiteral, Finally, For, From, Function,
+  GreaterThanGreaterThanEqual, GreaterThanGreaterThanGreaterThanEqual,
+  Identifier, If, Illegal, Import, In, LeftBrace, LeftBracket, LeftParen,
   LessThanLessThanEqual, Let, LexFailure, Minus, MinusEqual, MinusMinus, New,
   Null, Number, Of, PercentEqual, PipeEqual, PipePipeEqual, Plus, PlusEqual,
   PlusPlus, Question, QuestionDot, QuestionQuestionEqual, Return, RightBrace,
   RightBracket, RightParen, Semicolon, Slash, SlashEqual, Star, StarEqual,
-  StarStar, StarStarEqual, Static, Super, Switch, TemplateHead, TemplateLiteral,
-  This, Throw, Tilde, Try, Typeof, Undefined, Var, Void, While, With, Yield,
+  StarStar, StarStarEqual, Static, StringLiteral, Super, Switch, TemplateHead,
+  TemplateLiteral, This, Throw, Tilde, TrueLiteral, Try, Typeof, Undefined, Var,
+  Void, While, With, Yield,
 }
 import arc/parser/number
 import arc/parser/regex
@@ -1432,7 +1433,7 @@ fn module_specifier_value(p: Parser) -> Result(String, ParseError) {
 // string export names use their cooked value
 fn specifier_name_value(p: Parser) -> Result(String, ParseError) {
   case peek(p) {
-    KString -> module_specifier_value(p)
+    StringLiteral -> module_specifier_value(p)
     _ -> Ok(peek_value(p))
   }
 }
@@ -1476,7 +1477,7 @@ fn parse_property_name(
       use key <- result.map(numeric_property_key(p))
       #(advance(p), key)
     }
-    KString -> {
+    StringLiteral -> {
       use value <- result.map(string_literal_value(p))
       #(advance(p), ast.KeyString(value:, span: span_of(p)))
     }
@@ -3287,7 +3288,7 @@ fn parse_class_body(
         parsed.element,
       ))
       let found_constructor = case parsed.element {
-        ast.ClassMethod(kind: ast.MethodConstructor, ..) -> True
+        ast.ClassMethod(kind: ast.ConstructorMethod, ..) -> True
         _ -> False
       }
       parse_class_body(
@@ -3337,9 +3338,9 @@ fn private_element_name(
   case element {
     ast.ClassMethod(key: ast.KeyPrivate(name:, ..), kind:, is_static:, ..) -> {
       let kind = case kind {
-        ast.MethodGet -> PrivateGet
-        ast.MethodSet -> PrivateSet
-        ast.MethodMethod | ast.MethodConstructor -> PrivateOther
+        ast.GetterMethod -> PrivateGet
+        ast.SetterMethod -> PrivateSet
+        ast.PlainMethod | ast.ConstructorMethod -> PrivateOther
       }
       Some(#(name, DeclaredPrivateName(is_static:, kind:)))
     }
@@ -3406,10 +3407,10 @@ fn parse_class_element(
         has_extends:,
       ))
       let kind = case is_constructor, prefix.accessor {
-        True, _ -> ast.MethodConstructor
-        False, GetPrefix -> ast.MethodGet
-        False, SetPrefix -> ast.MethodSet
-        False, NoAccessor -> ast.MethodMethod
+        True, _ -> ast.ConstructorMethod
+        False, GetPrefix -> ast.GetterMethod
+        False, SetPrefix -> ast.SetterMethod
+        False, NoAccessor -> ast.PlainMethod
       }
       let element = ast.ClassMethod(key:, value:, kind:, is_static:)
       #(
@@ -3721,7 +3722,7 @@ fn parse_expression_statement(
 ) -> Result(#(Parser, ast.Statement), ParseError) {
   // raw text needed for directives
   let directive_raw = case peek(p) {
-    KString -> Some(peek_value(p))
+    StringLiteral -> Some(peek_value(p))
     _ -> None
   }
   use #(p2, expr) <- result.try(parse_expression(p))
@@ -3729,7 +3730,7 @@ fn parse_expression_statement(
   use p3 <- result.try(eat_semicolon(p2))
   // directive only if exactly a string literal
   let directive = case expr {
-    ast.StringExpression(..) -> directive_raw
+    ast.StringLiteral(..) -> directive_raw
     _ -> None
   }
   Ok(#(p3, ast.ExpressionStatement(expression: expr, directive:)))
@@ -5199,16 +5200,16 @@ fn parse_primary_non_identifier(
       use lit <- result.map(numeric_literal(p))
       #(Parser(..advance(p), last_expr_assignable: False), lit)
     }
-    KString -> {
+    StringLiteral -> {
       use value <- result.map(string_literal_value(p))
       #(
         Parser(..advance(p), last_expr_assignable: False),
-        ast.StringExpression(value:, span: span_of(p)),
+        ast.StringLiteral(value:, span: span_of(p)),
       )
     }
-    KTrue ->
+    TrueLiteral ->
       accept_literal(p, ast.BooleanLiteral(value: True, span: span_of(p)))
-    KFalse ->
+    FalseLiteral ->
       accept_literal(p, ast.BooleanLiteral(value: False, span: span_of(p)))
     Null -> accept_literal(p, ast.NullLiteral(span: span_of(p)))
     Undefined -> accept_literal(p, ast.UndefinedExpression(span: span_of(p)))
@@ -5716,7 +5717,7 @@ fn parse_module_specifier(
   p: Parser,
 ) -> Result(#(Parser, String, Int), ParseError) {
   use <- bool.guard(
-    peek(p) != KString,
+    peek(p) != StringLiteral,
     Error(ExpectedModuleSpecifier(pos_of(p))),
   )
   use value <- result.map(module_specifier_value(p))
@@ -5725,12 +5726,12 @@ fn parse_module_specifier(
 
 fn expect_from_module_specifier(
   p: Parser,
-) -> Result(#(Parser, ast.StringLiteral, Int), ParseError) {
+) -> Result(#(Parser, String, Int), ParseError) {
   use p2 <- result.try(expect(p, From))
   use #(p3, value, spec_end) <- result.try(parse_module_specifier(p2))
   use p4 <- result.try(skip_import_attributes(p3))
   use p5 <- result.map(eat_semicolon(p4))
-  #(p5, ast.StringLit(value:), spec_end)
+  #(p5, value, spec_end)
 }
 
 // no import attributes supported: only an empty with {} parses
@@ -5807,14 +5808,14 @@ fn parse_import_declaration(
     )
   })
   case peek(p2) {
-    KString -> {
+    StringLiteral -> {
       use #(p3, value, span_end) <- result.try(parse_module_specifier(p2))
       use p4 <- result.map(eat_semicolon(p3))
       #(
         p4,
         ast.ImportDeclaration(
           specifiers: [],
-          source: ast.StringLit(value:),
+          source: value,
           phase: ast.PhaseEvaluation,
           span: ast.Span(start: span_start, end: span_end),
         ),
@@ -5924,7 +5925,7 @@ fn parse_import_specifiers(
 }
 
 fn is_specifier_name(kind: TokenKind) -> Bool {
-  kind == Identifier || kind == KString || is_keyword_as_identifier(kind)
+  kind == Identifier || kind == StringLiteral || is_keyword_as_identifier(kind)
 }
 
 fn parse_import_specifier(
@@ -6099,7 +6100,7 @@ fn finish_export_all(
     p3,
     ast.ExportAllDeclaration(
       exported:,
-      source: ast.StringLit(value:),
+      source: value,
       span: ast.Span(start: span_start, end: span_end),
     ),
   )
@@ -6192,7 +6193,7 @@ fn parse_export_list(
     From -> {
       use #(p3, value, _) <- result.try(parse_module_specifier(advance(p2)))
       use p4 <- result.map(eat_semicolon(p3))
-      let source = Some(ast.StringLit(value:))
+      let source = Some(value)
       #(p4, ast.ExportNamed(specifiers:, source:, span: span(p4)))
     }
     _ -> {
@@ -6309,7 +6310,7 @@ fn look_skip_semicolon(look: Look) -> Look {
 fn prologue_use_strict(look: Look, seen: List(Token)) -> Option(List(Token)) {
   let #(token, look) = look_next(look)
   case token.kind {
-    KString ->
+    StringLiteral ->
       case token.value {
         "use strict" -> Some(seen)
         _ -> prologue_use_strict(look_skip_semicolon(look), [token, ..seen])

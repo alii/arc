@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named, index_key, max_array_length}
 import arc/rt/abstract_ops as rt_abstract
 import arc/rt/async as rt_async
 import arc/rt/builtins/helpers
@@ -6,13 +7,12 @@ import arc/rt/builtins/realm_ops
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type FromAsyncCtx, type FromAsyncLikeCtx, type JsVal,
+  type Agent, type FromAsyncContext, type FromAsyncLikeContext, type JsVal,
   type NativeToken, ArrayFromAsyncCloseReject, ArrayFromAsyncLikeOnMapped,
   ArrayFromAsyncLikeOnValue, ArrayFromAsyncOnMapped, ArrayFromAsyncOnNext,
-  ArrayFromAsyncRejectWith, ArrayN, ArrayObj, FromAsyncCtx, FromAsyncLikeCtx,
-  KHandle, KNull, KUndef, Named, StringKey, SymbolKey, classify, index_key,
-  max_array_length, mk_int, mk_object, mk_undefined, symbol_async_iterator,
-  symbol_iterator,
+  ArrayFromAsyncRejectWith, ArrayN, ArrayObj, FromAsyncContext,
+  FromAsyncLikeContext, KHandle, KNull, KUndef, StringKey, SymbolKey, classify,
+  mk_int, mk_object, mk_undefined, symbol_async_iterator, symbol_iterator,
 }
 import arc/rt/val as rt_val
 import gleam/int
@@ -211,7 +211,7 @@ fn from_async_iterate(
   }
   from_async_request_next(
     st,
-    FromAsyncCtx(
+    FromAsyncContext(
       iter:,
       next_method:,
       map_fn:,
@@ -224,7 +224,7 @@ fn from_async_iterate(
   )
 }
 
-fn from_async_request_next(st: Agent, ctx: FromAsyncCtx) -> Agent {
+fn from_async_request_next(st: Agent, ctx: FromAsyncContext) -> Agent {
   let #(next_result, st) = rt_call.t_call(st, ctx.next_method, ctx.iter, [])
   from_async_await(
     st,
@@ -248,7 +248,7 @@ fn from_async_await(
 
 pub fn on_next(
   st: Agent,
-  ctx: FromAsyncCtx,
+  ctx: FromAsyncContext,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   use next_result, st <- from_async_handler(st, args, ctx.reject)
@@ -257,7 +257,7 @@ pub fn on_next(
 
 fn from_async_next_steps(
   st: Agent,
-  ctx: FromAsyncCtx,
+  ctx: FromAsyncContext,
   next_result: JsVal,
 ) -> Agent {
   let st = case classify(next_result) {
@@ -311,7 +311,7 @@ fn from_async_next_steps(
 
 pub fn on_mapped(
   st: Agent,
-  ctx: FromAsyncCtx,
+  ctx: FromAsyncContext,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   use mapped, st <- from_async_handler(st, args, ctx.reject)
@@ -320,13 +320,13 @@ pub fn on_mapped(
 
 fn from_async_define_and_continue(
   st: Agent,
-  ctx: FromAsyncCtx,
+  ctx: FromAsyncContext,
   v: JsVal,
 ) -> Agent {
   case attempt(st, fn(st) { from_async_define_own(st, ctx.target, ctx.k, v) }) {
     Error(#(thrown, st)) ->
       from_async_close_then_reject(st, ctx.iter, thrown, ctx.reject)
-    Ok(st) -> from_async_request_next(st, FromAsyncCtx(..ctx, k: ctx.k + 1))
+    Ok(st) -> from_async_request_next(st, FromAsyncContext(..ctx, k: ctx.k + 1))
   }
 }
 
@@ -413,7 +413,7 @@ fn from_async_array_like(
   }
   from_async_like_step(
     st,
-    FromAsyncLikeCtx(
+    FromAsyncLikeContext(
       items:,
       map_fn:,
       this_arg:,
@@ -426,7 +426,7 @@ fn from_async_array_like(
   )
 }
 
-fn from_async_like_step(st: Agent, ctx: FromAsyncLikeCtx) -> Agent {
+fn from_async_like_step(st: Agent, ctx: FromAsyncLikeContext) -> Agent {
   case ctx.k < ctx.len {
     False -> {
       let st = from_async_set_length(st, ctx.target, ctx.len)
@@ -447,7 +447,7 @@ fn from_async_like_step(st: Agent, ctx: FromAsyncLikeCtx) -> Agent {
 
 pub fn like_on_value(
   st: Agent,
-  ctx: FromAsyncLikeCtx,
+  ctx: FromAsyncLikeContext,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   use v, st <- from_async_handler(st, args, ctx.reject)
@@ -456,7 +456,7 @@ pub fn like_on_value(
 
 fn from_async_like_value_steps(
   st: Agent,
-  ctx: FromAsyncLikeCtx,
+  ctx: FromAsyncLikeContext,
   v: JsVal,
 ) -> Agent {
   case ctx.map_fn {
@@ -476,7 +476,7 @@ fn from_async_like_value_steps(
 
 pub fn like_on_mapped(
   st: Agent,
-  ctx: FromAsyncLikeCtx,
+  ctx: FromAsyncLikeContext,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   use mapped, st <- from_async_handler(st, args, ctx.reject)
@@ -485,11 +485,11 @@ pub fn like_on_mapped(
 
 fn from_async_like_define_and_continue(
   st: Agent,
-  ctx: FromAsyncLikeCtx,
+  ctx: FromAsyncLikeContext,
   v: JsVal,
 ) -> Agent {
   let st = from_async_define_own(st, ctx.target, ctx.k, v)
-  from_async_like_step(st, FromAsyncLikeCtx(..ctx, k: ctx.k + 1))
+  from_async_like_step(st, FromAsyncLikeContext(..ctx, k: ctx.k + 1))
 }
 
 fn from_async_array_create(st: Agent, len: Int) -> #(JsVal, Agent) {

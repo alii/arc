@@ -71,10 +71,10 @@ fn profile(label: String, source: String, runs: Int, iters: Int) -> Nil {
 
   apply_js_main(mod, seed)
 
-  let js_before = seed.store
+  let store_before = seed.store
   let #(_v, st_after) = apply_js_main(mod, seed)
-  let js_after = st_after.store
-  let cells = js_after.alloc_since_gc - js_before.alloc_since_gc
+  let store_after = st_after.store
+  let cells = store_after.alloc_since_gc - store_before.alloc_since_gc
 
   let t0 = monotonic_time(Microsecond)
   repeat(runs, fn() { apply_js_main(mod, seed) })
@@ -205,10 +205,10 @@ pub fn profile_file(label: String, path: String, runs: Int) -> Nil {
 
   apply_js_main(mod, seed)
 
-  let js_before = seed.store
+  let store_before = seed.store
   let #(_v, st_after) = apply_js_main(mod, seed)
-  let js_after = st_after.store
-  let cells = js_after.alloc_since_gc - js_before.alloc_since_gc
+  let store_after = st_after.store
+  let cells = store_after.alloc_since_gc - store_before.alloc_since_gc
 
   let t0 = monotonic_time(Microsecond)
   repeat(runs, fn() { apply_js_main(mod, seed) })
@@ -381,10 +381,10 @@ fn microbench() {
   trace_reset()
   let #(mod, seed) = compile_and_seed(adder_js, "arc_prof_micro_adder")
   let #(_v, st_adder) = apply_js_main(mod, seed)
-  let js = st_adder.store
+  let adder_store = st_adder.store
   // inner fn is last cell, captured x is next-3
-  let add5_h = to_dynamic(#(atom.create("handle"), js.next - 1))
-  let x_h = to_dynamic(#(atom.create("handle"), js.next - 3))
+  let add5_h = to_dynamic(#(atom.create("handle"), adder_store.next_id - 1))
+  let x_h = to_dynamic(#(atom.create("handle"), adder_store.next_id - 3))
   micro(
     "direct_callee (via Gleam wrapper)",
     "direct_callee",
@@ -404,8 +404,8 @@ fn microbench() {
 
   let #(mod2, seed2) = compile_and_seed(obj_js, "arc_prof_micro_obj")
   let #(_v2, st_obj) = apply_js_main(mod2, seed2)
-  let js2 = st_obj.store
-  let o_h = to_dynamic(#(atom.create("handle"), js2.next - 1))
+  let obj_store = st_obj.store
+  let o_h = to_dynamic(#(atom.create("handle"), obj_store.next_id - 1))
   let key =
     to_dynamic(#(
       atom.create("string_key"),

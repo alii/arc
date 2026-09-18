@@ -4,20 +4,21 @@ import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   Compatible, DayUnit, Hour, InvalidIdentifier, Nanosecond, OffsetShowAuto,
-  OffsetShowNever, PreferOffset, Trunc, TzAuto, TzCritical, TzNever,
-  UnknownIdentifier, apply_since_duration, apply_since_mode, apply_since_ns,
-  as_if_positive_mode, balance_time_ns, calendar_suffix, check_diff_setup,
-  date_part, epoch_ns_to_iso_in, format_offset_full, format_offset_rounded,
-  get_calendar_name_option, get_difference_settings, get_disambiguation_option,
-  get_enum_option, get_fractional_digits, get_offset_option, get_options_object,
-  get_overflow_option, get_rounding_mode_option, get_show_offset_option,
-  get_time_zone_name_option, get_unit_option, has_date_units, is_valid_epoch_ns,
-  make_date_cal, make_date_time_cal, make_duration, make_instant, make_time,
-  make_zoned_cal, max_rounding_increment, max_unit, parse_time_zone_identifier,
-  require_temporal, require_time_unit, round_options, round_to_increment,
-  seconds_string_precision, static_name, time_part_ns, time_unit_ns,
-  time_zone_equals, time_zone_id, to_temporal_time_zone, tz_offset_ns_at,
-  unit_rank, valid_rounding_increment, validate_epoch_ns, zoned_slot_of,
+  OffsetShowNever, PreferOffset, Trunc, UnknownIdentifier, ZoneNameAuto,
+  ZoneNameCritical, ZoneNameNever, apply_since_duration, apply_since_mode,
+  apply_since_ns, as_if_positive_mode, balance_time_ns, calendar_suffix,
+  check_diff_setup, date_part, epoch_ns_to_iso_in, format_offset_full,
+  format_offset_rounded, get_calendar_name_option, get_difference_settings,
+  get_disambiguation_option, get_enum_option, get_fractional_digits,
+  get_offset_option, get_options_object, get_overflow_option,
+  get_rounding_mode_option, get_show_offset_option, get_time_zone_name_option,
+  get_unit_option, has_date_units, is_valid_epoch_ns, make_date_cal,
+  make_date_time_cal, make_duration, make_instant, make_time, make_zoned_cal,
+  max_rounding_increment, max_unit, parse_time_zone_identifier, require_temporal,
+  require_time_unit, round_options, round_to_increment, seconds_string_precision,
+  static_name, time_part_ns, time_unit_ns, time_zone_equals, time_zone_id,
+  to_temporal_time_zone, tz_offset_ns_at, unit_rank, valid_rounding_increment,
+  validate_epoch_ns, zoned_slot_of,
 }
 import arc/rt/builtins/temporal_diff.{diff_date_time_core}
 import arc/rt/builtins/temporal_fields.{
@@ -42,20 +43,25 @@ import arc/rt/builtins/temporal_zoned_ops.{
 import arc/rt/types.{
   type Agent, type JsVal, type NativeToken, type TemporalProtos,
   type TemporalStaticName, type TemporalZonedGetter, type TimeZone,
-  type ZonedDateTimeMethod, DgCalendarId, DgDay, DgDayOfWeek, DgDayOfYear,
-  DgDaysInMonth, DgDaysInWeek, DgDaysInYear, DgEra, DgEraYear, DgInLeapYear,
-  DgMonth, DgMonthCode, DgMonthsInYear, DgWeekOfYear, DgYear, DgYearOfWeek,
+  type ZonedDateTimeMethod, CompareStatic, DateCalendarId, DateDay,
+  DateDayOfWeek, DateDayOfYear, DateDaysInMonth, DateDaysInWeek, DateDaysInYear,
+  DateEra, DateEraYear, DateInLeapYear, DateMonth, DateMonthCode,
+  DateMonthsInYear, DateWeekOfYear, DateYear, DateYearOfWeek, FromStatic,
   IanaZone, JFloat, KHandle, KStr, KUndef, OffsetZone, TemporalN,
   TemporalZonedDateTimeCtor, TemporalZonedDateTimeGetter,
-  TemporalZonedDateTimeMethod, TemporalZonedDateTimeStatic, TgHour,
-  TgMicrosecond, TgMillisecond, TgMinute, TgNanosecond, TgSecond, TsCompare,
-  TsFrom, UtcZone, ZgDate, ZgEpochMilliseconds, ZgEpochNanoseconds, ZgHoursInDay,
-  ZgOffset, ZgOffsetNanoseconds, ZgTime, ZgTimeZoneId, ZmAdd, ZmEquals,
-  ZmGetTimeZoneTransition, ZmRound, ZmSince, ZmStartOfDay, ZmSubtract,
-  ZmToInstant, ZmToJson, ZmToLocaleString, ZmToPlainDate, ZmToPlainDateTime,
-  ZmToPlainTime, ZmToString, ZmUntil, ZmValueOf, ZmWith, ZmWithCalendar,
-  ZmWithPlainTime, ZmWithTimeZone, classify, mk_bigint, mk_bool, mk_int, mk_null,
-  mk_number, mk_string, mk_undefined,
+  TemporalZonedDateTimeMethod, TemporalZonedDateTimeStatic, TimeHour,
+  TimeMicrosecond, TimeMillisecond, TimeMinute, TimeNanosecond, TimeSecond,
+  UtcZone, ZonedDate, ZonedDateTimeAdd, ZonedDateTimeEquals,
+  ZonedDateTimeGetTimeZoneTransition, ZonedDateTimeRound, ZonedDateTimeSince,
+  ZonedDateTimeStartOfDay, ZonedDateTimeSubtract, ZonedDateTimeToInstant,
+  ZonedDateTimeToJson, ZonedDateTimeToLocaleString, ZonedDateTimeToPlainDate,
+  ZonedDateTimeToPlainDateTime, ZonedDateTimeToPlainTime, ZonedDateTimeToString,
+  ZonedDateTimeUntil, ZonedDateTimeValueOf, ZonedDateTimeWith,
+  ZonedDateTimeWithCalendar, ZonedDateTimeWithPlainTime,
+  ZonedDateTimeWithTimeZone, ZonedEpochMilliseconds, ZonedEpochNanoseconds,
+  ZonedHoursInDay, ZonedOffset, ZonedOffsetNanoseconds, ZonedTime,
+  ZonedTimeZoneId, classify, mk_bigint, mk_bool, mk_int, mk_null, mk_number,
+  mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/list
@@ -63,34 +69,34 @@ import gleam/option.{None, Some}
 import gleam/result
 
 const all_getters = [
-  ZgDate(DgCalendarId),
-  ZgTimeZoneId,
-  ZgDate(DgEra),
-  ZgDate(DgEraYear),
-  ZgDate(DgYear),
-  ZgDate(DgMonth),
-  ZgDate(DgMonthCode),
-  ZgDate(DgDay),
-  ZgTime(TgHour),
-  ZgTime(TgMinute),
-  ZgTime(TgSecond),
-  ZgTime(TgMillisecond),
-  ZgTime(TgMicrosecond),
-  ZgTime(TgNanosecond),
-  ZgEpochMilliseconds,
-  ZgEpochNanoseconds,
-  ZgDate(DgDayOfWeek),
-  ZgDate(DgDayOfYear),
-  ZgDate(DgWeekOfYear),
-  ZgDate(DgYearOfWeek),
-  ZgHoursInDay,
-  ZgDate(DgDaysInWeek),
-  ZgDate(DgDaysInMonth),
-  ZgDate(DgDaysInYear),
-  ZgDate(DgMonthsInYear),
-  ZgDate(DgInLeapYear),
-  ZgOffsetNanoseconds,
-  ZgOffset,
+  ZonedDate(DateCalendarId),
+  ZonedTimeZoneId,
+  ZonedDate(DateEra),
+  ZonedDate(DateEraYear),
+  ZonedDate(DateYear),
+  ZonedDate(DateMonth),
+  ZonedDate(DateMonthCode),
+  ZonedDate(DateDay),
+  ZonedTime(TimeHour),
+  ZonedTime(TimeMinute),
+  ZonedTime(TimeSecond),
+  ZonedTime(TimeMillisecond),
+  ZonedTime(TimeMicrosecond),
+  ZonedTime(TimeNanosecond),
+  ZonedEpochMilliseconds,
+  ZonedEpochNanoseconds,
+  ZonedDate(DateDayOfWeek),
+  ZonedDate(DateDayOfYear),
+  ZonedDate(DateWeekOfYear),
+  ZonedDate(DateYearOfWeek),
+  ZonedHoursInDay,
+  ZonedDate(DateDaysInWeek),
+  ZonedDate(DateDaysInMonth),
+  ZonedDate(DateDaysInYear),
+  ZonedDate(DateMonthsInYear),
+  ZonedDate(DateInLeapYear),
+  ZonedOffsetNanoseconds,
+  ZonedOffset,
 ]
 
 pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
@@ -98,7 +104,7 @@ pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
 }
 
 pub fn statics(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
-  list.map([#(TsFrom, 1), #(TsCompare, 2)], fn(s) {
+  list.map([#(FromStatic, 1), #(CompareStatic, 2)], fn(s) {
     #(
       static_name(s.0),
       TemporalN(TemporalZonedDateTimeStatic(s.0, protos)),
@@ -116,26 +122,26 @@ pub fn getters() -> List(#(String, NativeToken)) {
 pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
   list.map(
     [
-      #(ZmWithTimeZone, 1),
-      #(ZmWithCalendar, 1),
-      #(ZmWithPlainTime, 0),
-      #(ZmWith, 1),
-      #(ZmAdd, 1),
-      #(ZmSubtract, 1),
-      #(ZmUntil, 1),
-      #(ZmSince, 1),
-      #(ZmRound, 1),
-      #(ZmEquals, 1),
-      #(ZmToString, 0),
-      #(ZmToLocaleString, 0),
-      #(ZmToJson, 0),
-      #(ZmValueOf, 0),
-      #(ZmStartOfDay, 0),
-      #(ZmGetTimeZoneTransition, 1),
-      #(ZmToInstant, 0),
-      #(ZmToPlainDate, 0),
-      #(ZmToPlainTime, 0),
-      #(ZmToPlainDateTime, 0),
+      #(ZonedDateTimeWithTimeZone, 1),
+      #(ZonedDateTimeWithCalendar, 1),
+      #(ZonedDateTimeWithPlainTime, 0),
+      #(ZonedDateTimeWith, 1),
+      #(ZonedDateTimeAdd, 1),
+      #(ZonedDateTimeSubtract, 1),
+      #(ZonedDateTimeUntil, 1),
+      #(ZonedDateTimeSince, 1),
+      #(ZonedDateTimeRound, 1),
+      #(ZonedDateTimeEquals, 1),
+      #(ZonedDateTimeToString, 0),
+      #(ZonedDateTimeToLocaleString, 0),
+      #(ZonedDateTimeToJson, 0),
+      #(ZonedDateTimeValueOf, 0),
+      #(ZonedDateTimeStartOfDay, 0),
+      #(ZonedDateTimeGetTimeZoneTransition, 1),
+      #(ZonedDateTimeToInstant, 0),
+      #(ZonedDateTimeToPlainDate, 0),
+      #(ZonedDateTimeToPlainTime, 0),
+      #(ZonedDateTimeToPlainDateTime, 0),
     ],
     fn(m) {
       #(
@@ -149,39 +155,39 @@ pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
 
 pub fn zoned_getter_name(g: TemporalZonedGetter) -> String {
   case g {
-    ZgTimeZoneId -> "timeZoneId"
-    ZgEpochMilliseconds -> "epochMilliseconds"
-    ZgEpochNanoseconds -> "epochNanoseconds"
-    ZgOffsetNanoseconds -> "offsetNanoseconds"
-    ZgOffset -> "offset"
-    ZgHoursInDay -> "hoursInDay"
-    ZgDate(dg) -> date_getter_name(dg)
-    ZgTime(tg) -> time_getter_name(tg)
+    ZonedTimeZoneId -> "timeZoneId"
+    ZonedEpochMilliseconds -> "epochMilliseconds"
+    ZonedEpochNanoseconds -> "epochNanoseconds"
+    ZonedOffsetNanoseconds -> "offsetNanoseconds"
+    ZonedOffset -> "offset"
+    ZonedHoursInDay -> "hoursInDay"
+    ZonedDate(dg) -> date_getter_name(dg)
+    ZonedTime(tg) -> time_getter_name(tg)
   }
 }
 
 pub fn method_name(m: ZonedDateTimeMethod) -> String {
   case m {
-    ZmWithTimeZone -> "withTimeZone"
-    ZmWithCalendar -> "withCalendar"
-    ZmWithPlainTime -> "withPlainTime"
-    ZmWith -> "with"
-    ZmAdd -> "add"
-    ZmSubtract -> "subtract"
-    ZmUntil -> "until"
-    ZmSince -> "since"
-    ZmRound -> "round"
-    ZmEquals -> "equals"
-    ZmToString -> "toString"
-    ZmToLocaleString -> "toLocaleString"
-    ZmToJson -> "toJSON"
-    ZmValueOf -> "valueOf"
-    ZmStartOfDay -> "startOfDay"
-    ZmGetTimeZoneTransition -> "getTimeZoneTransition"
-    ZmToInstant -> "toInstant"
-    ZmToPlainDate -> "toPlainDate"
-    ZmToPlainTime -> "toPlainTime"
-    ZmToPlainDateTime -> "toPlainDateTime"
+    ZonedDateTimeWithTimeZone -> "withTimeZone"
+    ZonedDateTimeWithCalendar -> "withCalendar"
+    ZonedDateTimeWithPlainTime -> "withPlainTime"
+    ZonedDateTimeWith -> "with"
+    ZonedDateTimeAdd -> "add"
+    ZonedDateTimeSubtract -> "subtract"
+    ZonedDateTimeUntil -> "until"
+    ZonedDateTimeSince -> "since"
+    ZonedDateTimeRound -> "round"
+    ZonedDateTimeEquals -> "equals"
+    ZonedDateTimeToString -> "toString"
+    ZonedDateTimeToLocaleString -> "toLocaleString"
+    ZonedDateTimeToJson -> "toJSON"
+    ZonedDateTimeValueOf -> "valueOf"
+    ZonedDateTimeStartOfDay -> "startOfDay"
+    ZonedDateTimeGetTimeZoneTransition -> "getTimeZoneTransition"
+    ZonedDateTimeToInstant -> "toInstant"
+    ZonedDateTimeToPlainDate -> "toPlainDate"
+    ZonedDateTimeToPlainTime -> "toPlainTime"
+    ZonedDateTimeToPlainDateTime -> "toPlainDateTime"
   }
 }
 
@@ -223,12 +229,12 @@ pub fn static(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case name {
-    TsFrom -> {
+    FromStatic -> {
       let #(#(ns, tz, cal), st) =
         to_temporal_zoned(st, helpers.arg_at(args, 0), helpers.arg_at(args, 1))
       make_zoned_cal(st, protos, ns, tz, cal)
     }
-    TsCompare -> {
+    CompareStatic -> {
       let #(#(a, _, _), st) =
         to_temporal_zoned(st, helpers.arg_at(args, 0), mk_undefined())
       let #(#(b, _, _), st) =
@@ -255,18 +261,18 @@ pub fn getter(
   let offset = tz_offset_ns_at(tz, ns)
   let #(d, t) = epoch_ns_to_iso(ns, offset)
   case g {
-    ZgTimeZoneId -> #(mk_string(time_zone_id(tz)), st)
-    ZgEpochMilliseconds -> #(mk_int(floor_div(ns, ns_per_ms)), st)
-    ZgEpochNanoseconds -> #(mk_bigint(ns), st)
-    ZgOffsetNanoseconds -> #(mk_int(offset), st)
-    ZgOffset -> #(mk_string(format_offset_full(offset)), st)
-    ZgHoursInDay -> {
+    ZonedTimeZoneId -> #(mk_string(time_zone_id(tz)), st)
+    ZonedEpochMilliseconds -> #(mk_int(floor_div(ns, ns_per_ms)), st)
+    ZonedEpochNanoseconds -> #(mk_bigint(ns), st)
+    ZonedOffsetNanoseconds -> #(mk_int(offset), st)
+    ZonedOffset -> #(mk_string(format_offset_full(offset)), st)
+    ZonedHoursInDay -> {
       let s1 = rt_val.or_throw(st, start_of_day_ns(tz, d))
       let s2 = rt_val.or_throw(st, start_of_day_ns(tz, add_days(d, 1)))
       #(mk_number(JFloat(divide_as_float(s2 - s1, ns_per_hour))), st)
     }
-    ZgTime(tg) -> #(time_field(t, tg), st)
-    ZgDate(dg) -> #(date_field_cal(zcal, d, dg), st)
+    ZonedTime(tg) -> #(time_field(t, tg), st)
+    ZonedDate(dg) -> #(date_field_cal(zcal, d, dg), st)
   }
 }
 
@@ -286,11 +292,11 @@ pub fn method(
   let off = tz_offset_ns_at(tz, ns)
   let #(d, t) = epoch_ns_to_iso(ns, off)
   case m {
-    ZmToJson | ZmToLocaleString -> #(
+    ZonedDateTimeToJson | ZonedDateTimeToLocaleString -> #(
       mk_string(format_zoned(ns, tz, AutoPrecision)),
       st,
     )
-    ZmToString -> {
+    ZonedDateTimeToString -> {
       let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
       let #(cal_name, st) = get_calendar_name_option(st, opts)
       let #(digits, st) = get_fractional_digits(st, opts)
@@ -318,24 +324,25 @@ pub fn method(
         OffsetShowAuto -> base <> format_offset_rounded(off2)
       }
       let with_tz = case tz_mode {
-        TzNever -> with_offset
-        TzCritical -> with_offset <> "[!" <> time_zone_id(tz) <> "]"
-        TzAuto -> with_offset <> "[" <> time_zone_id(tz) <> "]"
+        ZoneNameNever -> with_offset
+        ZoneNameCritical -> with_offset <> "[!" <> time_zone_id(tz) <> "]"
+        ZoneNameAuto -> with_offset <> "[" <> time_zone_id(tz) <> "]"
       }
       #(mk_string(with_tz <> calendar_suffix(cal_name, zcal)), st)
     }
-    ZmValueOf ->
+    ZonedDateTimeValueOf ->
       rt_val.t_throw_type_error(
         st,
         "Temporal.ZonedDateTime cannot be converted with valueOf",
       )
-    ZmEquals -> {
+    ZonedDateTimeEquals -> {
       let #(#(ons, otz, ocal), st) =
         to_temporal_zoned(st, helpers.arg_at(args, 0), mk_undefined())
       #(mk_bool(ns == ons && time_zone_equals(tz, otz) && zcal == ocal), st)
     }
-    ZmAdd | ZmSubtract -> {
-      let #(dur, overflow, st) = add_sub_args(st, args, m == ZmSubtract)
+    ZonedDateTimeAdd | ZonedDateTimeSubtract -> {
+      let #(dur, overflow, st) =
+        add_sub_args(st, args, m == ZonedDateTimeSubtract)
       let base_ns =
         rt_val.or_throw(st, case has_date_units(dur) {
           False -> Ok(ns)
@@ -353,11 +360,11 @@ pub fn method(
         rt_val.or_throw(st, validate_epoch_ns(base_ns + time_part_ns(dur)))
       make_zoned_cal(st, protos, ns2, tz, zcal)
     }
-    ZmWithTimeZone -> {
+    ZonedDateTimeWithTimeZone -> {
       let #(tz2, st) = to_temporal_time_zone(st, helpers.arg_at(args, 0))
       make_zoned_cal(st, protos, ns, tz2, zcal)
     }
-    ZmUntil | ZmSince -> {
+    ZonedDateTimeUntil | ZonedDateTimeSince -> {
       let #(#(ons, otz, ocal), st) =
         to_temporal_zoned(st, helpers.arg_at(args, 0), mk_undefined())
       case ocal == zcal {
@@ -376,11 +383,11 @@ pub fn method(
             ons,
             otz,
             args,
-            m == ZmSince,
+            m == ZonedDateTimeSince,
           )
       }
     }
-    ZmRound -> {
+    ZonedDateTimeRound -> {
       let #(#(smallest_time_unit, inc, mode), st) =
         round_options(st, helpers.arg_at(args, 0), allow_day: True)
       let unit_ns = time_unit_ns(smallest_time_unit)
@@ -430,7 +437,7 @@ pub fn method(
         }
       }
     }
-    ZmWith -> {
+    ZonedDateTimeWith -> {
       let #(bag, st) = require_partial_bag(st, helpers.arg_at(args, 0))
       let #(f, st) =
         read_date_time_fields(st, bag, zcal, read_offset: True, read_tz: False)
@@ -458,12 +465,12 @@ pub fn method(
         )
       make_zoned_cal(st, protos, ns2, tz, zcal)
     }
-    ZmWithCalendar -> {
+    ZonedDateTimeWithCalendar -> {
       let #(new_cal, st) =
         to_temporal_calendar_identifier(st, helpers.arg_at(args, 0))
       make_zoned_cal(st, protos, ns, tz, new_cal)
     }
-    ZmWithPlainTime -> {
+    ZonedDateTimeWithPlainTime -> {
       // explicit midnight differs from start of day when midnight is skipped
       let arg = helpers.arg_at(args, 0)
       case classify(arg) {
@@ -478,11 +485,11 @@ pub fn method(
         }
       }
     }
-    ZmStartOfDay -> {
+    ZonedDateTimeStartOfDay -> {
       let ns2 = rt_val.or_throw(st, start_of_day_ns(tz, d))
       make_zoned_cal(st, protos, ns2, tz, zcal)
     }
-    ZmGetTimeZoneTransition -> {
+    ZonedDateTimeGetTimeZoneTransition -> {
       let arg = helpers.arg_at(args, 0)
       let #(dir, st) = case classify(arg) {
         KUndef ->
@@ -522,10 +529,10 @@ pub fn method(
         }
       }
     }
-    ZmToInstant -> make_instant(st, protos, ns)
-    ZmToPlainDate -> make_date_cal(st, protos, d, zcal)
-    ZmToPlainTime -> make_time(st, protos, t)
-    ZmToPlainDateTime -> make_date_time_cal(st, protos, d, t, zcal)
+    ZonedDateTimeToInstant -> make_instant(st, protos, ns)
+    ZonedDateTimeToPlainDate -> make_date_cal(st, protos, d, zcal)
+    ZonedDateTimeToPlainTime -> make_time(st, protos, t)
+    ZonedDateTimeToPlainDateTime -> make_date_time_cal(st, protos, d, t, zcal)
   }
 }
 

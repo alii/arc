@@ -6,7 +6,7 @@ import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion} as rt_call
 import arc/rt/gc as rt_gc
 import arc/rt/inspect as rt_inspect
-import arc/rt/types.{type Agent, type JsVal, Agent, JsStore}
+import arc/rt/types.{type Agent, type JsVal, Agent, Store}
 import rt_helpers
 
 const threshold = 256
@@ -14,7 +14,7 @@ const threshold = 256
 fn small_agent() -> Agent {
   let st = rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
   let st = rt_gc.t_collect(st, [])
-  Agent(..st, store: JsStore(..st.store, gc_threshold: threshold))
+  Agent(..st, store: Store(..st.store, gc_threshold: threshold))
 }
 
 fn run(st: Agent, source: String) -> #(rt_call.Completion(JsVal), Agent) {
@@ -25,7 +25,7 @@ fn run(st: Agent, source: String) -> #(rt_call.Completion(JsVal), Agent) {
 
 pub fn allocating_loop_is_bounded_and_keeps_frame_values_test() {
   let st = small_agent()
-  let base = rt_gc.stats(st).live
+  let base = rt_gc.stats(st).live_count
   let source =
     "
     let keep = { tag: 42 };
@@ -37,9 +37,9 @@ pub fn allocating_loop_is_bounded_and_keeps_frame_values_test() {
   let #(completion, st) = run(st, source)
   let assert NormalCompletion(v) = completion
   assert rt_inspect.inspect(st, v) == "'42:7998000'"
-  assert rt_gc.stats(st).live <= base + 4 * threshold
+  assert rt_gc.stats(st).live_count <= base + 4 * threshold
   let st = safepoint.end_turn(st, [v])
-  assert rt_gc.stats(st).live <= base + 4 * threshold
+  assert rt_gc.stats(st).live_count <= base + 4 * threshold
 }
 
 pub fn closures_made_in_the_loop_keep_their_captures_test() {

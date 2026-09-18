@@ -28,39 +28,45 @@ pub fn main() -> Nil {
   Nil
 }
 
-fn print(args, _this, s: host.State(Nil)) {
-  io.println(list.map(args, display(s, _)) |> string.join(" "))
-  #(s, Ok(mk_undefined()))
+fn print(args, _this, ctx: host.Context(Nil)) {
+  io.println(list.map(args, display(ctx, _)) |> string.join(" "))
+  #(ctx, Ok(mk_undefined()))
 }
 
-fn uppercase(args, _this, s) {
-  use str, s <- host.validate_string(s, host.first_arg(args), "str")
-  #(s, Ok(mk_string(string.uppercase(str))))
+fn uppercase(args, _this, ctx) {
+  use str, ctx <- host.validate_string(ctx, host.first_arg(args), "str")
+  #(ctx, Ok(mk_string(string.uppercase(str))))
 }
 
-fn map_range(args, _this, s) {
-  use n, s <- host.validate_integer(s, host.first_arg(args), "n", 0, 1_000_000)
-  map_range_loop(s, host.arg_at(args, 1), 0, n, [])
+fn map_range(args, _this, ctx) {
+  use n, ctx <- host.validate_integer(
+    ctx,
+    host.first_arg(args),
+    "n",
+    0,
+    1_000_000,
+  )
+  map_range_loop(ctx, host.arg_at(args, 1), 0, n, [])
 }
 
-fn map_range_loop(s, cb, i, n, acc) {
+fn map_range_loop(ctx, cb, i, n, acc) {
   case i >= n {
     True -> {
-      let #(s, arr) = host.array(s, list.reverse(acc))
-      #(s, Ok(arr))
+      let #(ctx, arr) = host.array(ctx, list.reverse(acc))
+      #(ctx, Ok(arr))
     }
     False -> {
-      use r, s <- host.try_call(s, cb, "callback", mk_undefined(), [
+      use r, ctx <- host.try_call(ctx, cb, "callback", mk_undefined(), [
         mk_int(i),
       ])
-      map_range_loop(s, cb, i + 1, n, [r, ..acc])
+      map_range_loop(ctx, cb, i + 1, n, [r, ..acc])
     }
   }
 }
 
-fn display(s: host.State(Nil), v) {
+fn display(ctx: host.Context(Nil), v) {
   case engine.classify(v) {
     JsString(str) -> str
-    _ -> rt_inspect.inspect(s.agent, v)
+    _ -> rt_inspect.inspect(ctx.agent, v)
   }
 }

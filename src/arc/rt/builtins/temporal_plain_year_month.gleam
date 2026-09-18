@@ -6,7 +6,7 @@ import arc/internal/int_math.{trunc_div, trunc_mod}
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
-  type CalendarNameMode, type RoundingMode, CalAuto, Month, Year,
+  type CalendarNameMode, type RoundingMode, CalendarNameAuto, Month, Year,
   apply_since_duration, apply_since_mode, format_with_reference,
   get_calendar_name_option, get_difference_settings, get_options_object,
   get_overflow_option_from_value, make_date_cal, make_duration, make_year_month,
@@ -33,13 +33,16 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type JsVal, type NativeToken, type PlainYearMonthMethod,
   type TemporalProtos, type TemporalStaticName, type TemporalYearMonthGetter,
-  KHandle, KStr, PymAdd, PymEquals, PymSince, PymSubtract, PymToJson,
-  PymToLocaleString, PymToPlainDate, PymToString, PymUntil, PymValueOf, PymWith,
-  SObject, TemporalN, TemporalPlainYearMonthCtor, TemporalPlainYearMonthGetter,
-  TemporalPlainYearMonthMethod, TemporalPlainYearMonthStatic, TsCompare, TsFrom,
-  YmCalendarId, YmDaysInMonth, YmDaysInYear, YmEra, YmEraYear, YmInLeapYear,
-  YmMonth, YmMonthCode, YmMonthsInYear, YmYear, classify, mk_bool, mk_int,
-  mk_string, mk_undefined,
+  CompareStatic, FromStatic, KHandle, KStr, PlainYearMonthAdd,
+  PlainYearMonthEquals, PlainYearMonthSince, PlainYearMonthSubtract,
+  PlainYearMonthToJson, PlainYearMonthToLocaleString, PlainYearMonthToPlainDate,
+  PlainYearMonthToString, PlainYearMonthUntil, PlainYearMonthValueOf,
+  PlainYearMonthWith, SObject, TemporalN, TemporalPlainYearMonthCtor,
+  TemporalPlainYearMonthGetter, TemporalPlainYearMonthMethod,
+  TemporalPlainYearMonthStatic, YearMonthCalendarId, YearMonthDaysInMonth,
+  YearMonthDaysInYear, YearMonthEra, YearMonthEraYear, YearMonthInLeapYear,
+  YearMonthMonth, YearMonthMonthCode, YearMonthMonthsInYear, YearMonthYear,
+  classify, mk_bool, mk_int, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/int
@@ -48,30 +51,30 @@ import gleam/option.{None, Some}
 import gleam/result
 
 const all_getters = [
-  YmCalendarId,
-  YmEra,
-  YmEraYear,
-  YmYear,
-  YmMonth,
-  YmMonthCode,
-  YmDaysInYear,
-  YmDaysInMonth,
-  YmMonthsInYear,
-  YmInLeapYear,
+  YearMonthCalendarId,
+  YearMonthEra,
+  YearMonthEraYear,
+  YearMonthYear,
+  YearMonthMonth,
+  YearMonthMonthCode,
+  YearMonthDaysInYear,
+  YearMonthDaysInMonth,
+  YearMonthMonthsInYear,
+  YearMonthInLeapYear,
 ]
 
 const all_methods = [
-  #(PymWith, 1),
-  #(PymAdd, 1),
-  #(PymSubtract, 1),
-  #(PymUntil, 1),
-  #(PymSince, 1),
-  #(PymEquals, 1),
-  #(PymToString, 0),
-  #(PymToLocaleString, 0),
-  #(PymToJson, 0),
-  #(PymValueOf, 0),
-  #(PymToPlainDate, 1),
+  #(PlainYearMonthWith, 1),
+  #(PlainYearMonthAdd, 1),
+  #(PlainYearMonthSubtract, 1),
+  #(PlainYearMonthUntil, 1),
+  #(PlainYearMonthSince, 1),
+  #(PlainYearMonthEquals, 1),
+  #(PlainYearMonthToString, 0),
+  #(PlainYearMonthToLocaleString, 0),
+  #(PlainYearMonthToJson, 0),
+  #(PlainYearMonthValueOf, 0),
+  #(PlainYearMonthToPlainDate, 1),
 ]
 
 pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
@@ -79,7 +82,7 @@ pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
 }
 
 pub fn statics(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
-  list.map([#(TsFrom, 1), #(TsCompare, 2)], fn(s) {
+  list.map([#(FromStatic, 1), #(CompareStatic, 2)], fn(s) {
     #(
       static_name(s.0),
       TemporalN(TemporalPlainYearMonthStatic(s.0, protos)),
@@ -106,32 +109,32 @@ pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
 
 pub fn getter_name(g: TemporalYearMonthGetter) -> String {
   case g {
-    YmCalendarId -> "calendarId"
-    YmEra -> "era"
-    YmEraYear -> "eraYear"
-    YmYear -> "year"
-    YmMonth -> "month"
-    YmMonthCode -> "monthCode"
-    YmDaysInYear -> "daysInYear"
-    YmDaysInMonth -> "daysInMonth"
-    YmMonthsInYear -> "monthsInYear"
-    YmInLeapYear -> "inLeapYear"
+    YearMonthCalendarId -> "calendarId"
+    YearMonthEra -> "era"
+    YearMonthEraYear -> "eraYear"
+    YearMonthYear -> "year"
+    YearMonthMonth -> "month"
+    YearMonthMonthCode -> "monthCode"
+    YearMonthDaysInYear -> "daysInYear"
+    YearMonthDaysInMonth -> "daysInMonth"
+    YearMonthMonthsInYear -> "monthsInYear"
+    YearMonthInLeapYear -> "inLeapYear"
   }
 }
 
 pub fn method_name(m: PlainYearMonthMethod) -> String {
   case m {
-    PymWith -> "with"
-    PymAdd -> "add"
-    PymSubtract -> "subtract"
-    PymUntil -> "until"
-    PymSince -> "since"
-    PymEquals -> "equals"
-    PymToString -> "toString"
-    PymToLocaleString -> "toLocaleString"
-    PymToJson -> "toJSON"
-    PymValueOf -> "valueOf"
-    PymToPlainDate -> "toPlainDate"
+    PlainYearMonthWith -> "with"
+    PlainYearMonthAdd -> "add"
+    PlainYearMonthSubtract -> "subtract"
+    PlainYearMonthUntil -> "until"
+    PlainYearMonthSince -> "since"
+    PlainYearMonthEquals -> "equals"
+    PlainYearMonthToString -> "toString"
+    PlainYearMonthToLocaleString -> "toLocaleString"
+    PlainYearMonthToJson -> "toJSON"
+    PlainYearMonthValueOf -> "valueOf"
+    PlainYearMonthToPlainDate -> "toPlainDate"
   }
 }
 
@@ -165,7 +168,7 @@ pub fn static(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case name {
-    TsFrom -> {
+    FromStatic -> {
       let #(IsoDateSlots(IsoDate(y, m, rd), cal), st) =
         to_temporal_year_month(
           st,
@@ -174,7 +177,7 @@ pub fn static(
         )
       make_year_month_cal(st, protos, y, m, rd, cal)
     }
-    TsCompare -> {
+    CompareStatic -> {
       let #(a, st) =
         to_temporal_year_month(st, helpers.arg_at(args, 0), mk_undefined())
       let #(b, st) =
@@ -281,16 +284,16 @@ pub fn getter(
 
 fn year_month_field(y: Int, m: Int, g: TemporalYearMonthGetter) -> JsVal {
   case g {
-    YmCalendarId -> mk_string("iso8601")
-    YmEra -> mk_undefined()
-    YmEraYear -> mk_undefined()
-    YmYear -> mk_int(y)
-    YmMonth -> mk_int(m)
-    YmMonthCode -> mk_string(month_code_str(m))
-    YmDaysInYear -> mk_int(days_in_iso_year(y))
-    YmDaysInMonth -> mk_int(days_in_month(y, m))
-    YmMonthsInYear -> mk_int(12)
-    YmInLeapYear -> mk_bool(is_leap_year(y))
+    YearMonthCalendarId -> mk_string("iso8601")
+    YearMonthEra -> mk_undefined()
+    YearMonthEraYear -> mk_undefined()
+    YearMonthYear -> mk_int(y)
+    YearMonthMonth -> mk_int(m)
+    YearMonthMonthCode -> mk_string(month_code_str(m))
+    YearMonthDaysInYear -> mk_int(days_in_iso_year(y))
+    YearMonthDaysInMonth -> mk_int(days_in_month(y, m))
+    YearMonthMonthsInYear -> mk_int(12)
+    YearMonthInLeapYear -> mk_bool(is_leap_year(y))
   }
 }
 
@@ -306,16 +309,17 @@ fn year_month_field_cal(
     _ -> {
       let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(y, m, rd)))
       case g {
-        YmCalendarId -> mk_string(tcal.identifier(cal))
-        YmEra -> era_field(cal, cd)
-        YmEraYear -> era_year_field(cal, cd)
-        YmYear -> mk_int(cd.year)
-        YmMonth -> mk_int(cd.month)
-        YmMonthCode -> mk_string(tcal.month_code(cal, cd.year, cd.month))
-        YmDaysInYear -> mk_int(tcal.days_in_year(cal, cd.year))
-        YmDaysInMonth -> mk_int(tcal.days_in_month(cal, cd.year, cd.month))
-        YmMonthsInYear -> mk_int(tcal.months_in_year(cal, cd.year))
-        YmInLeapYear -> mk_bool(tcal.in_leap_year(cal, cd.year))
+        YearMonthCalendarId -> mk_string(tcal.identifier(cal))
+        YearMonthEra -> era_field(cal, cd)
+        YearMonthEraYear -> era_year_field(cal, cd)
+        YearMonthYear -> mk_int(cd.year)
+        YearMonthMonth -> mk_int(cd.month)
+        YearMonthMonthCode -> mk_string(tcal.month_code(cal, cd.year, cd.month))
+        YearMonthDaysInYear -> mk_int(tcal.days_in_year(cal, cd.year))
+        YearMonthDaysInMonth ->
+          mk_int(tcal.days_in_month(cal, cd.year, cd.month))
+        YearMonthMonthsInYear -> mk_int(tcal.months_in_year(cal, cd.year))
+        YearMonthInLeapYear -> mk_bool(tcal.in_leap_year(cal, cd.year))
       }
     }
   }
@@ -337,29 +341,30 @@ pub fn method(
       year_month_slot_of,
     )
   case meth {
-    PymToJson | PymToLocaleString -> #(
-      mk_string(format_ym_cal(y, m, rd, cal, CalAuto)),
+    PlainYearMonthToJson | PlainYearMonthToLocaleString -> #(
+      mk_string(format_ym_cal(y, m, rd, cal, CalendarNameAuto)),
       st,
     )
-    PymToString -> {
+    PlainYearMonthToString -> {
       let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
       let #(cal_name, st) = get_calendar_name_option(st, opts)
       #(mk_string(format_ym_cal(y, m, rd, cal, cal_name)), st)
     }
-    PymValueOf ->
+    PlainYearMonthValueOf ->
       rt_val.t_throw_type_error(
         st,
         "Temporal.PlainYearMonth cannot be converted with valueOf",
       )
-    PymEquals -> {
+    PlainYearMonthEquals -> {
       let #(other, st) =
         to_temporal_year_month(st, helpers.arg_at(args, 0), mk_undefined())
       #(mk_bool(IsoDateSlots(IsoDate(y, m, rd), cal) == other), st)
     }
-    PymAdd | PymSubtract -> add_subtract(st, protos, y, m, rd, cal, args, meth)
-    PymWith -> with(st, protos, y, m, rd, cal, args)
-    PymToPlainDate -> to_plain_date(st, protos, y, m, rd, cal, args)
-    PymUntil | PymSince -> {
+    PlainYearMonthAdd | PlainYearMonthSubtract ->
+      add_subtract(st, protos, y, m, rd, cal, args, meth)
+    PlainYearMonthWith -> with(st, protos, y, m, rd, cal, args)
+    PlainYearMonthToPlainDate -> to_plain_date(st, protos, y, m, rd, cal, args)
+    PlainYearMonthUntil | PlainYearMonthSince -> {
       let #(other, st) =
         to_temporal_year_month(st, helpers.arg_at(args, 0), mk_undefined())
       case other.calendar == cal {
@@ -376,7 +381,7 @@ pub fn method(
             IsoDate(y, m, rd),
             other.iso_date,
             args,
-            meth == PymSince,
+            meth == PlainYearMonthSince,
           )
       }
     }
@@ -393,7 +398,8 @@ fn add_subtract(
   args: List(JsVal),
   meth: PlainYearMonthMethod,
 ) -> #(JsVal, Agent) {
-  let #(dur, overflow, st) = add_sub_args(st, args, meth == PymSubtract)
+  let #(dur, overflow, st) =
+    add_sub_args(st, args, meth == PlainYearMonthSubtract)
   let has_lower_units =
     dur.weeks != 0
     || dur.days != 0

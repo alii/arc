@@ -64,7 +64,7 @@ pub fn notify(owner: SabOwner, byte_offset: Int, count: Int) -> Int
 @external(erlang, "arc_rt_sab_ffi", "make_waiter_ref")
 fn make_waiter_ref() -> WaiterRef
 
-type Registration {
+type AsyncWaitOutcome {
   Waiting
   NotEqualNow
 }
@@ -75,7 +75,7 @@ fn wait_async(
   ref: WaiterRef,
   byte_offset: Int,
   expected: BitArray,
-) -> Registration
+) -> AsyncWaitOutcome
 
 // §25.4.3.14 dowait async, none means not-equal
 pub fn register_async(

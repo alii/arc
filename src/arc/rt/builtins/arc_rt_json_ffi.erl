@@ -18,12 +18,12 @@ plain_enumerable_keys(Props) ->
     end.
 
 %% enumerable and seq sit at the same positions in both property records
-plain_key(_, Prop, Acc) when element(?DATAPROP_ENUMERABLE, Prop) =:= false ->
+plain_key(_, Prop, Acc) when element(?DATAPROPERTY_ENUMERABLE, Prop) =:= false ->
     Acc;
 plain_key({?KEY_INDEX, I}, _, {Idx, Named}) ->
     {[I | Idx], Named};
 plain_key({?KEY_NAMED, _} = K, Prop, {Idx, Named}) ->
-    {Idx, [{element(?DATAPROP_SEQ, Prop), K} | Named]};
+    {Idx, [{element(?DATAPROPERTY_SEQ, Prop), K} | Named]};
 plain_key(_, _, Acc) ->
     Acc.
 
@@ -352,12 +352,12 @@ object(Bin, P, Src, Acc) ->
 %% as does a top level that serializes to undefined
 plain_stringify(Agent, V, Gap) ->
     Realm = element(?AGENT_REALM, Agent),
-    Data = element(?STORE_DATA, element(?AGENT_STORE, Agent)),
-    {?HANDLE_TAG, OP} = element(?PAIR_PROTO, element(?REALM_OBJECT, Realm)),
-    {?HANDLE_TAG, AP} = element(?PAIR_PROTO, element(?REALM_ARRAY, Realm)),
+    Cells = element(?STORE_CELLS, element(?AGENT_STORE, Agent)),
+    {?HANDLE_TAG, OP} = element(?BUILTINPAIR_PROTO, element(?REALM_OBJECT, Realm)),
+    {?HANDLE_TAG, AP} = element(?BUILTINPAIR_PROTO, element(?REALM_ARRAY, Realm)),
     TJ = {?KEY_NAMED, <<"toJSON">>},
     Clean = fun(Id) ->
-        case arc_rt_arena_ffi:get(Id, Data) of
+        case arc_rt_arena_ffi:get(Id, Cells) of
             {?SOBJECT_TAG, _, _, Props, _, _, _} -> not is_map_key(TJ, Props);
             _ -> false
         end
@@ -365,7 +365,7 @@ plain_stringify(Agent, V, Gap) ->
     case Clean(OP) andalso Clean(AP) of
         false -> json_miss;
         true ->
-            try enc(V, {Data, OP, AP, Gap}, <<>>, []) of
+            try enc(V, {Cells, OP, AP, Gap}, <<>>, []) of
                 skip -> json_miss;
                 Io -> {json_done, iolist_to_binary(Io)}
             catch throw:json_miss -> json_miss
@@ -381,13 +381,13 @@ enc(A, _, _, _) when A =:= js_nan; A =:= js_inf; A =:= js_neg_inf -> <<"null">>;
 enc(undefined, _, _, _) -> skip;
 enc({js_sym, _}, _, _, _) -> skip;
 enc(S, _, _, _) when ?IS_STR(S) -> quote_tree(arc_rt_js_string_ffi:bin(S));
-enc({?HANDLE_TAG, Id}, {Data, OP, AP, _} = Cx, Ind, Seen) ->
+enc({?HANDLE_TAG, Id}, {Cells, OP, AP, _} = Cx, Ind, Seen) ->
     case lists:member(Id, Seen) of
         true -> throw(json_miss);
         false -> ok
     end,
-    case arc_rt_arena_ffi:get(Id, Data) of
-        {?SSHAPED_TAG, _, Proto, Slots, Offs}
+    case arc_rt_arena_ffi:get(Id, Cells) of
+        {?SSHAPEDOBJECT_TAG, _, Proto, Slots, Offs}
           when (Proto =:= {?SOME, {?HANDLE_TAG, OP}} orelse Proto =:= ?NONE),
                not is_map_key(<<"toJSON">>, Offs) ->
             Pairs = [{KB, ?SLOT_AT(Slots, Off)}
@@ -413,25 +413,25 @@ plain_pairs(Props) ->
     L = maps:to_list(Props),
     Idx = lists:sort([{N, P} || {{?KEY_INDEX, N}, P} <- L]),
     Named = lists:sort(fun({_, A}, {_, B}) ->
-                element(?DATAPROP_SEQ, A) =< element(?DATAPROP_SEQ, B) end,
+                element(?DATAPROPERTY_SEQ, A) =< element(?DATAPROPERTY_SEQ, B) end,
                        [{B, P} || {{?KEY_NAMED, B}, P} <- L]),
     [{key_text(K), value_of(P)} || {K, P} <- Idx ++ Named, enumerable(P)].
 
 key_text(N) when is_integer(N) -> integer_to_binary(N);
 key_text(B) -> B.
 
-value_of(P) when element(1, P) =:= ?DATAPROP_TAG -> element(?DATAPROP_VALUE, P);
+value_of(P) when element(1, P) =:= ?DATAPROPERTY_TAG -> element(?DATAPROPERTY_VALUE, P);
 value_of(_) -> throw(json_miss).
 
-enumerable(P) when element(1, P) =:= ?DATAPROP_TAG ->
-    element(?DATAPROP_ENUMERABLE, P) =:= true;
+enumerable(P) when element(1, P) =:= ?DATAPROPERTY_TAG ->
+    element(?DATAPROPERTY_ENUMERABLE, P) =:= true;
 enumerable(_) -> throw(json_miss).
 
 elems(_, 0) -> [];
 elems({?ELEMS_DENSE, A}, Len) ->
     case arc_tree_array_ffi:dense_list(A, Len) of
-        {some, L} -> L;
-        none -> throw(json_miss)
+        {?SOME, L} -> L;
+        ?NONE -> throw(json_miss)
     end;
 elems(_, _) -> throw(json_miss).
 

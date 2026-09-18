@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/internal/ordered_entries
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined}
@@ -9,12 +10,12 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type MapKey,
   type ObjKind, type SetIterKind, type SetNative, JFloat, JNan, KNull, KNum,
-  KUndef, Named, SObject, SetAdd, SetClear, SetConstructor, SetDelete,
-  SetDifference, SetEntries, SetForEach, SetGetSize, SetHas, SetIntersection,
-  SetIsDisjointFrom, SetIsSubsetOf, SetIsSupersetOf, SetIterEntries,
-  SetIterValues, SetIterator, SetN, SetObj, SetSymmetricDifference, SetUnion,
-  SetValues, StringKey, classify, js_to_map_key, mk_bool, mk_int, mk_number,
-  mk_object, mk_undefined, symbol_iterator,
+  KUndef, SObject, SetAdd, SetClear, SetConstructor, SetDelete, SetDifference,
+  SetEntries, SetForEach, SetGetSize, SetHas, SetIntersection, SetIsDisjointFrom,
+  SetIsSubsetOf, SetIsSupersetOf, SetIterEntries, SetIterValues, SetIterator,
+  SetN, SetObj, SetSymmetricDifference, SetUnion, SetValues, StringKey, classify,
+  js_to_map_key, mk_bool, mk_int, mk_number, mk_object, mk_undefined,
+  symbol_iterator,
 }
 import arc/rt/val as rt_val
 import gleam/list
@@ -146,99 +147,99 @@ fn set_constructor(
 }
 
 fn set_add(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use ref <- require_set(st, this, "add")
-  let store = read_set_store(st, ref)
+  use set <- require_set(st, this, "add")
+  let store = read_set_store(st, set)
   let store = set_data_append(store, first_arg_or_undefined(args))
-  #(this, update_set(st, ref, store))
+  #(this, update_set(st, set, store))
 }
 
 fn set_has(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use ref <- require_set(st, this, "has")
+  use set <- require_set(st, this, "has")
   let key = js_to_map_key(first_arg_or_undefined(args))
-  #(mk_bool(ordered_entries.has(read_set_store(st, ref), key)), st)
+  #(mk_bool(ordered_entries.has(read_set_store(st, set), key)), st)
 }
 
 fn set_delete(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use ref <- require_set(st, this, "delete")
-  let store = read_set_store(st, ref)
+  use set <- require_set(st, this, "delete")
+  let store = read_set_store(st, set)
   let key = js_to_map_key(first_arg_or_undefined(args))
   case ordered_entries.delete(store, key) {
     #(_store, False) -> #(mk_bool(False), st)
-    #(store, True) -> #(mk_bool(True), update_set(st, ref, store))
+    #(store, True) -> #(mk_bool(True), update_set(st, set, store))
   }
 }
 
 fn set_clear(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  use ref <- require_set(st, this, "clear")
-  let store = read_set_store(st, ref)
-  #(mk_undefined(), update_set(st, ref, ordered_entries.clear(store)))
+  use set <- require_set(st, this, "clear")
+  let store = read_set_store(st, set)
+  #(mk_undefined(), update_set(st, set, ordered_entries.clear(store)))
 }
 
 fn set_size(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  use ref <- require_set(st, this, "size")
-  #(mk_int(ordered_entries.size(read_set_store(st, ref))), st)
+  use set <- require_set(st, this, "size")
+  #(mk_int(ordered_entries.size(read_set_store(st, set))), st)
 }
 
 fn set_for_each(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use ref <- require_set(st, this, "forEach")
+  use set <- require_set(st, this, "forEach")
   let #(cb, this_arg) = helpers.two_args_or_undefined(args)
   use cb <- helpers.require_callable(st, cb, fn() {
     "Set.prototype.forEach callback is not a function"
   })
-  for_each_loop(st, ref, 0, cb, this_arg, this)
+  set_for_each_loop(st, set, 0, cb, this_arg, this)
 }
 
 // live: store is re-read each step
-fn for_each_loop(
+fn set_for_each_loop(
   st: Agent,
-  ref: SetRef,
+  set: SetHandle,
   cursor: Int,
   cb: JsVal,
   this_arg: JsVal,
   set_this: JsVal,
 ) -> #(JsVal, Agent) {
-  let store = read_set_store(st, ref)
+  let store = read_set_store(st, set)
   case ordered_entries.next_from(store, cursor) {
     None -> #(mk_undefined(), st)
     Some(#(next_cursor, _key, val)) -> {
       let #(_r, st) = rt_call.t_call(st, cb, this_arg, [val, val, set_this])
-      for_each_loop(st, ref, next_cursor, cb, this_arg, set_this)
+      set_for_each_loop(st, set, next_cursor, cb, this_arg, set_this)
     }
   }
 }
 
 fn set_values(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  use ref <- require_set(st, this, "values")
-  alloc_set_iterator(st, ref, SetIterValues)
+  use set <- require_set(st, this, "values")
+  alloc_set_iterator(st, set, SetIterValues)
 }
 
 fn set_entries(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  use ref <- require_set(st, this, "entries")
-  alloc_set_iterator(st, ref, SetIterEntries)
+  use set <- require_set(st, this, "entries")
+  alloc_set_iterator(st, set, SetIterEntries)
 }
 
 fn alloc_set_iterator(
   st: Agent,
-  source: SetRef,
+  source: SetHandle,
   kind: SetIterKind,
 ) -> #(JsVal, Agent) {
   let #(iter_h, st) =
     realm_ops.alloc_object(
       st,
-      SetIterator(target: set_ref_handle(source), index: 0, kind:),
+      SetIterator(target: source.handle, index: 0, kind:),
       st.realm.set_iter_proto,
     )
   #(mk_object(iter_h), st)
 }
 
 fn set_union(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use ref <- require_set(st, this, "union")
+  use set <- require_set(st, this, "union")
   use rec, st <- get_set_record(st, first_arg_or_undefined(args))
   let #(keys, st) = get_keys_iterator(st, rec)
-  union_loop(st, keys, read_set_store(st, ref))
+  set_union_loop(st, keys, read_set_store(st, set))
 }
 
-fn union_loop(
+fn set_union_loop(
   st: Agent,
   keys: IteratorRecord,
   result: ordered_entries.OrderedEntries(MapKey, JsVal),
@@ -246,7 +247,7 @@ fn union_loop(
   let #(next, st) = step_keys(st, keys)
   case next {
     None -> alloc_new_set(st, result)
-    Some(v) -> union_loop(st, keys, set_data_append(result, v))
+    Some(v) -> set_union_loop(st, keys, set_data_append(result, v))
   }
 }
 
@@ -255,25 +256,25 @@ fn set_intersection(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use ref <- require_set(st, this, "intersection")
+  use set <- require_set(st, this, "intersection")
   use rec, st <- get_set_record(st, first_arg_or_undefined(args))
-  case ordered_entries.size(read_set_store(st, ref)) <= rec.size {
-    True -> intersection_this_loop(st, ref, rec, 0, ordered_entries.new())
+  case ordered_entries.size(read_set_store(st, set)) <= rec.size {
+    True -> intersect_walking_this(st, set, rec, 0, ordered_entries.new())
     False -> {
       let #(keys, st) = get_keys_iterator(st, rec)
-      intersection_other_loop(st, ref, keys, ordered_entries.new())
+      intersect_walking_other(st, set, keys, ordered_entries.new())
     }
   }
 }
 
-fn intersection_this_loop(
+fn intersect_walking_this(
   st: Agent,
-  ref: SetRef,
+  set: SetHandle,
   rec: SetRecord,
   cursor: Int,
   result: ordered_entries.OrderedEntries(MapKey, JsVal),
 ) -> #(JsVal, Agent) {
-  let store = read_set_store(st, ref)
+  let store = read_set_store(st, set)
   case ordered_entries.next_from(store, cursor) {
     None -> alloc_new_set(st, result)
     Some(#(next_cursor, _key, e)) -> {
@@ -282,14 +283,14 @@ fn intersection_this_loop(
         True -> set_data_append(result, e)
         False -> result
       }
-      intersection_this_loop(st, ref, rec, next_cursor, result)
+      intersect_walking_this(st, set, rec, next_cursor, result)
     }
   }
 }
 
-fn intersection_other_loop(
+fn intersect_walking_other(
   st: Agent,
-  ref: SetRef,
+  set: SetHandle,
   keys: IteratorRecord,
   result: ordered_entries.OrderedEntries(MapKey, JsVal),
 ) -> #(JsVal, Agent) {
@@ -297,12 +298,12 @@ fn intersection_other_loop(
   case next {
     None -> alloc_new_set(st, result)
     Some(v) -> {
-      let store = read_set_store(st, ref)
+      let store = read_set_store(st, set)
       let result = case ordered_entries.has(store, js_to_map_key(v)) {
         True -> set_data_append(result, v)
         False -> result
       }
-      intersection_other_loop(st, ref, keys, result)
+      intersect_walking_other(st, set, keys, result)
     }
   }
 }
@@ -312,20 +313,25 @@ fn set_difference(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use ref <- require_set(st, this, "difference")
+  use set <- require_set(st, this, "difference")
   use rec, st <- get_set_record(st, first_arg_or_undefined(args))
-  let result = read_set_store(st, ref)
+  let result = read_set_store(st, set)
   case ordered_entries.size(result) <= rec.size {
     True ->
-      difference_this_loop(st, rec, ordered_entries.live_values(result), result)
+      subtract_walking_this(
+        st,
+        rec,
+        ordered_entries.live_values(result),
+        result,
+      )
     False -> {
       let #(keys, st) = get_keys_iterator(st, rec)
-      difference_other_loop(st, keys, result)
+      subtract_walking_other(st, keys, result)
     }
   }
 }
 
-fn difference_this_loop(
+fn subtract_walking_this(
   st: Agent,
   rec: SetRecord,
   remaining: List(JsVal),
@@ -339,12 +345,12 @@ fn difference_this_loop(
         True -> ordered_entries.delete(result, js_to_map_key(e)).0
         False -> result
       }
-      difference_this_loop(st, rec, rest, result)
+      subtract_walking_this(st, rec, rest, result)
     }
   }
 }
 
-fn difference_other_loop(
+fn subtract_walking_other(
   st: Agent,
   keys: IteratorRecord,
   result: ordered_entries.OrderedEntries(MapKey, JsVal),
@@ -354,7 +360,7 @@ fn difference_other_loop(
     None -> alloc_new_set(st, result)
     Some(v) -> {
       let result = ordered_entries.delete(result, js_to_map_key(v)).0
-      difference_other_loop(st, keys, result)
+      subtract_walking_other(st, keys, result)
     }
   }
 }
@@ -364,15 +370,15 @@ fn set_symmetric_difference(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use ref <- require_set(st, this, "symmetricDifference")
+  use set <- require_set(st, this, "symmetricDifference")
   use rec, st <- get_set_record(st, first_arg_or_undefined(args))
   let #(keys, st) = get_keys_iterator(st, rec)
-  symmetric_difference_loop(st, ref, keys, read_set_store(st, ref))
+  set_symmetric_difference_loop(st, set, keys, read_set_store(st, set))
 }
 
-fn symmetric_difference_loop(
+fn set_symmetric_difference_loop(
   st: Agent,
-  ref: SetRef,
+  set: SetHandle,
   keys: IteratorRecord,
   result: ordered_entries.OrderedEntries(MapKey, JsVal),
 ) -> #(JsVal, Agent) {
@@ -382,12 +388,12 @@ fn symmetric_difference_loop(
     Some(v) -> {
       let key = js_to_map_key(v)
       // spec step 5.b.iii is a live read
-      let in_this = ordered_entries.has(read_set_store(st, ref), key)
+      let in_this = ordered_entries.has(read_set_store(st, set), key)
       let result = case in_this {
         True -> ordered_entries.delete(result, key).0
         False -> set_data_append(result, v)
       }
-      symmetric_difference_loop(st, ref, keys, result)
+      set_symmetric_difference_loop(st, set, keys, result)
     }
   }
 }
@@ -397,29 +403,29 @@ fn set_is_subset_of(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use ref <- require_set(st, this, "isSubsetOf")
+  use set <- require_set(st, this, "isSubsetOf")
   use rec, st <- get_set_record(st, first_arg_or_undefined(args))
-  case ordered_entries.size(read_set_store(st, ref)) > rec.size {
+  case ordered_entries.size(read_set_store(st, set)) > rec.size {
     True -> #(mk_bool(False), st)
-    False -> this_step_loop(st, ref, rec, 0, false_when: False)
+    False -> check_each_of_this(st, set, rec, 0, false_when: False)
   }
 }
 
-fn this_step_loop(
+fn check_each_of_this(
   st: Agent,
-  ref: SetRef,
+  set: SetHandle,
   rec: SetRecord,
   cursor: Int,
   false_when false_when: Bool,
 ) -> #(JsVal, Agent) {
-  let store = read_set_store(st, ref)
+  let store = read_set_store(st, set)
   case ordered_entries.next_from(store, cursor) {
     None -> #(mk_bool(True), st)
     Some(#(next_cursor, _key, e)) -> {
       let #(in_other, st) = set_record_has(st, rec, e)
       case in_other == false_when {
         True -> #(mk_bool(False), st)
-        False -> this_step_loop(st, ref, rec, next_cursor, false_when)
+        False -> check_each_of_this(st, set, rec, next_cursor, false_when)
       }
     }
   }
@@ -430,20 +436,20 @@ fn set_is_superset_of(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use ref <- require_set(st, this, "isSupersetOf")
+  use set <- require_set(st, this, "isSupersetOf")
   use rec, st <- get_set_record(st, first_arg_or_undefined(args))
-  case ordered_entries.size(read_set_store(st, ref)) < rec.size {
+  case ordered_entries.size(read_set_store(st, set)) < rec.size {
     True -> #(mk_bool(False), st)
     False -> {
       let #(keys, st) = get_keys_iterator(st, rec)
-      other_step_loop(st, ref, keys, false_when: False)
+      check_each_of_other(st, set, keys, false_when: False)
     }
   }
 }
 
-fn other_step_loop(
+fn check_each_of_other(
   st: Agent,
-  ref: SetRef,
+  set: SetHandle,
   keys: IteratorRecord,
   false_when false_when: Bool,
 ) -> #(JsVal, Agent) {
@@ -451,13 +457,13 @@ fn other_step_loop(
   case next {
     None -> #(mk_bool(True), st)
     Some(v) -> {
-      let store = read_set_store(st, ref)
+      let store = read_set_store(st, set)
       case ordered_entries.has(store, js_to_map_key(v)) == false_when {
         True -> {
           let st = iter_protocol.iterator_close_normal(st, keys.iterator)
           #(mk_bool(False), st)
         }
-        False -> other_step_loop(st, ref, keys, false_when)
+        False -> check_each_of_other(st, set, keys, false_when)
       }
     }
   }
@@ -468,13 +474,13 @@ fn set_is_disjoint_from(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use ref <- require_set(st, this, "isDisjointFrom")
+  use set <- require_set(st, this, "isDisjointFrom")
   use rec, st <- get_set_record(st, first_arg_or_undefined(args))
-  case ordered_entries.size(read_set_store(st, ref)) <= rec.size {
-    True -> this_step_loop(st, ref, rec, 0, false_when: True)
+  case ordered_entries.size(read_set_store(st, set)) <= rec.size {
+    True -> check_each_of_this(st, set, rec, 0, false_when: True)
     False -> {
       let #(keys, st) = get_keys_iterator(st, rec)
-      other_step_loop(st, ref, keys, false_when: True)
+      check_each_of_other(st, set, keys, false_when: True)
     }
   }
 }
@@ -558,20 +564,15 @@ fn alloc_new_set(
   #(mk_object(h), st)
 }
 
-type SetRef {
-  SetRef(Handle)
-}
-
-fn set_ref_handle(r: SetRef) -> Handle {
-  let SetRef(h) = r
-  h
+type SetHandle {
+  SetHandle(handle: Handle)
 }
 
 fn require_set(
   st: Agent,
   this: JsVal,
   method: String,
-  cont: fn(SetRef) -> #(JsVal, Agent),
+  cont: fn(SetHandle) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   use _nil, h <- helpers.require_brand(
     st,
@@ -581,7 +582,7 @@ fn require_set(
     },
     set_brand_of,
   )
-  cont(SetRef(h))
+  cont(SetHandle(h))
 }
 
 fn set_brand_of(kind: ObjKind) -> Option(Nil) {
@@ -593,20 +594,20 @@ fn set_brand_of(kind: ObjKind) -> Option(Nil) {
 
 fn read_set_store(
   st: Agent,
-  ref: SetRef,
+  set: SetHandle,
 ) -> ordered_entries.OrderedEntries(MapKey, JsVal) {
   let assert SObject(kind: SetObj(entries:), ..) =
-    rt_store.t_cell_get(st, set_ref_handle(ref))
-    as "set: SetRef does not point at a Set cell"
+    rt_store.t_cell_get(st, set.handle)
+    as "set: SetHandle does not point at a Set cell"
   entries
 }
 
 fn update_set(
   st: Agent,
-  ref: SetRef,
+  set: SetHandle,
   entries: ordered_entries.OrderedEntries(MapKey, JsVal),
 ) -> Agent {
-  rt_store.t_cell_update(st, set_ref_handle(ref), fn(cell) {
+  rt_store.t_cell_update(st, set.handle, fn(cell) {
     let assert SObject(..) = cell
     SObject(..cell, kind: SetObj(entries:))
   })

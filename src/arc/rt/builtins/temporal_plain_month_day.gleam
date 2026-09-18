@@ -3,7 +3,7 @@ import arc/internal/gregorian.{days_in_month}
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
-  type CalendarNameMode, CalAuto, format_with_reference,
+  type CalendarNameMode, CalendarNameAuto, format_with_reference,
   get_calendar_name_option, get_options_object, get_overflow_option_from_value,
   make_date_cal, make_month_day_cal, month_day_slot_of, read_int_field,
   require_temporal, truncated_int_arg, truncated_int_arg_or,
@@ -25,11 +25,13 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type JsVal, type NativeToken, type PlainMonthDayMethod,
   type TemporalMonthDayGetter, type TemporalProtos, type TemporalStaticName,
-  KHandle, KStr, MdCalendarId, MdDay, MdMonthCode, PmdEquals, PmdToJson,
-  PmdToLocaleString, PmdToPlainDate, PmdToString, PmdValueOf, PmdWith, SObject,
-  TemporalN, TemporalPlainMonthDayCtor, TemporalPlainMonthDayGetter,
-  TemporalPlainMonthDayMethod, TemporalPlainMonthDayStatic, TsCompare, TsFrom,
-  classify, mk_bool, mk_int, mk_string, mk_undefined,
+  CompareStatic, FromStatic, KHandle, KStr, MonthDayCalendarId, MonthDayDay,
+  MonthDayMonthCode, PlainMonthDayEquals, PlainMonthDayToJson,
+  PlainMonthDayToLocaleString, PlainMonthDayToPlainDate, PlainMonthDayToString,
+  PlainMonthDayValueOf, PlainMonthDayWith, SObject, TemporalN,
+  TemporalPlainMonthDayCtor, TemporalPlainMonthDayGetter,
+  TemporalPlainMonthDayMethod, TemporalPlainMonthDayStatic, classify, mk_bool,
+  mk_int, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/int
@@ -37,16 +39,16 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
 
-const all_getters = [MdCalendarId, MdMonthCode, MdDay]
+const all_getters = [MonthDayCalendarId, MonthDayMonthCode, MonthDayDay]
 
 const all_methods = [
-  #(PmdWith, 1),
-  #(PmdEquals, 1),
-  #(PmdToString, 0),
-  #(PmdToLocaleString, 0),
-  #(PmdToJson, 0),
-  #(PmdValueOf, 0),
-  #(PmdToPlainDate, 1),
+  #(PlainMonthDayWith, 1),
+  #(PlainMonthDayEquals, 1),
+  #(PlainMonthDayToString, 0),
+  #(PlainMonthDayToLocaleString, 0),
+  #(PlainMonthDayToJson, 0),
+  #(PlainMonthDayValueOf, 0),
+  #(PlainMonthDayToPlainDate, 1),
 ]
 
 pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
@@ -54,7 +56,7 @@ pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
 }
 
 pub fn statics(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
-  [#("from", TemporalN(TemporalPlainMonthDayStatic(TsFrom, protos)), 1)]
+  [#("from", TemporalN(TemporalPlainMonthDayStatic(FromStatic, protos)), 1)]
 }
 
 pub fn getters() -> List(#(String, NativeToken)) {
@@ -75,21 +77,21 @@ pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
 
 pub fn getter_name(g: TemporalMonthDayGetter) -> String {
   case g {
-    MdCalendarId -> "calendarId"
-    MdMonthCode -> "monthCode"
-    MdDay -> "day"
+    MonthDayCalendarId -> "calendarId"
+    MonthDayMonthCode -> "monthCode"
+    MonthDayDay -> "day"
   }
 }
 
 pub fn method_name(m: PlainMonthDayMethod) -> String {
   case m {
-    PmdWith -> "with"
-    PmdEquals -> "equals"
-    PmdToString -> "toString"
-    PmdToLocaleString -> "toLocaleString"
-    PmdToJson -> "toJSON"
-    PmdValueOf -> "valueOf"
-    PmdToPlainDate -> "toPlainDate"
+    PlainMonthDayWith -> "with"
+    PlainMonthDayEquals -> "equals"
+    PlainMonthDayToString -> "toString"
+    PlainMonthDayToLocaleString -> "toLocaleString"
+    PlainMonthDayToJson -> "toJSON"
+    PlainMonthDayValueOf -> "valueOf"
+    PlainMonthDayToPlainDate -> "toPlainDate"
   }
 }
 
@@ -115,7 +117,7 @@ pub fn static(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case name {
-    TsFrom -> {
+    FromStatic -> {
       let #(IsoDateSlots(IsoDate(ry, m, d), cal), st) =
         to_temporal_month_day(
           st,
@@ -125,7 +127,7 @@ pub fn static(
       make_month_day_cal(st, protos, m, d, ry, cal)
     }
     // unreachable, plainmonthday has no compare
-    TsCompare ->
+    CompareStatic ->
       rt_val.t_throw_type_error(st, "Temporal.PlainMonthDay has no compare")
   }
 }
@@ -172,7 +174,7 @@ fn month_day_from_bag(
   #(rt_val.or_throw(st, resolve_calendar_month_day(cal, fields, overflow)), st)
 }
 
-type MdAnchor {
+type MonthDayAnchor {
   AnchorFromYear
   AnchorFromCode(tcal.MonthCode)
 }
@@ -320,8 +322,8 @@ fn month_day_field_cal(
   g: TemporalMonthDayGetter,
 ) -> JsVal {
   case g {
-    MdCalendarId -> mk_string(tcal.identifier(cal))
-    MdMonthCode ->
+    MonthDayCalendarId -> mk_string(tcal.identifier(cal))
+    MonthDayMonthCode ->
       case cal {
         tcal.Iso8601 -> mk_string(month_code_str(m))
         _ -> {
@@ -329,7 +331,7 @@ fn month_day_field_cal(
           mk_string(tcal.month_code(cal, cd.year, cd.month))
         }
       }
-    MdDay ->
+    MonthDayDay ->
       case cal {
         tcal.Iso8601 -> mk_int(d)
         _ -> {
@@ -356,27 +358,27 @@ pub fn method(
       month_day_slot_of,
     )
   case meth {
-    PmdToJson | PmdToLocaleString -> #(
-      mk_string(format_md_cal(m, d, ry, cal, CalAuto)),
+    PlainMonthDayToJson | PlainMonthDayToLocaleString -> #(
+      mk_string(format_md_cal(m, d, ry, cal, CalendarNameAuto)),
       st,
     )
-    PmdToString -> {
+    PlainMonthDayToString -> {
       let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
       let #(cal_name, st) = get_calendar_name_option(st, opts)
       #(mk_string(format_md_cal(m, d, ry, cal, cal_name)), st)
     }
-    PmdValueOf ->
+    PlainMonthDayValueOf ->
       rt_val.t_throw_type_error(
         st,
         "Temporal.PlainMonthDay cannot be converted with valueOf",
       )
-    PmdEquals -> {
+    PlainMonthDayEquals -> {
       let #(other, st) =
         to_temporal_month_day(st, helpers.arg_at(args, 0), mk_undefined())
       #(mk_bool(IsoDateSlots(IsoDate(ry, m, d), cal) == other), st)
     }
-    PmdWith -> with(st, protos, m, d, ry, cal, args)
-    PmdToPlainDate -> to_plain_date(st, protos, m, d, ry, cal, args)
+    PlainMonthDayWith -> with(st, protos, m, d, ry, cal, args)
+    PlainMonthDayToPlainDate -> to_plain_date(st, protos, m, d, ry, cal, args)
   }
 }
 

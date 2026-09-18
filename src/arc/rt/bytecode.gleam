@@ -90,7 +90,7 @@ pub type SuspendedFrame {
     parked: ParkedAt,
     call_args: List(JsVal),
     realm: Int,
-    unit: Int,
+    unit_id: Int,
   )
 }
 

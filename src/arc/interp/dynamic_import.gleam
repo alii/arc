@@ -1,6 +1,7 @@
 // §13.3.10 import calls, failures reject the promise
 
 import arc/bytecode/error_kind.{SyntaxError, TypeError}
+import arc/bytecode/key.{Named, key_to_text}
 import arc/module/registry
 import arc/rt/async as rt_async
 import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion} as rt_call
@@ -8,8 +9,8 @@ import arc/rt/gc as rt_gc
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, HostJob, KHandle, KStr, KUndef, Named,
-  StringKey, classify, mk_object, mk_string, mk_undefined,
+  type Agent, type Handle, type JsVal, HostJob, KHandle, KStr, KUndef, StringKey,
+  classify, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/list
@@ -239,7 +240,7 @@ fn validate_attributes(st: Agent, attributes: Handle) -> Agent {
     [key, ..] ->
       rt_val.t_throw_type_error(
         st,
-        "Import attribute '" <> types.key_to_text(key) <> "' is not supported",
+        "Import attribute '" <> key_to_text(key) <> "' is not supported",
       )
   }
 }

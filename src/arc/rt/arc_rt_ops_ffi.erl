@@ -274,24 +274,24 @@ neq(A, B) ->
 
 -define(PURE_BINOP(Op, A, B),
     case Op of
-        {arith, arith_sub} -> sub(A, B);
-        {arith, arith_mul} -> mul(A, B);
-        {arith, arith_div} -> 'div'(A, B);
-        {arith, arith_mod} -> mod(A, B);
-        {bitwise, and_op} -> bitand(A, B);
-        {bitwise, or_op} -> bitor(A, B);
-        {bitwise, xor_op} -> bitxor(A, B);
-        {bitwise, shl_op} -> shl(A, B);
-        {bitwise, shr_op} -> shr(A, B);
-        {bitwise, u_shr_op} -> ushr(A, B);
-        {compare, lt_cmp} -> lt(A, B);
-        {compare, lt_eq_cmp} -> le(A, B);
-        {compare, gt_cmp} -> gt(A, B);
-        {compare, gt_eq_cmp} -> ge(A, B);
-        {equality, strict_eq_op} -> strict_eq(A, B);
-        {equality, strict_not_eq_op} -> strict_neq(A, B);
-        {equality, eq_op} -> eq(A, B);
-        {equality, not_eq_op} -> neq(A, B);
+        {arith, sub} -> sub(A, B);
+        {arith, mul} -> mul(A, B);
+        {arith, 'div'} -> 'div'(A, B);
+        {arith, mod} -> mod(A, B);
+        {bitwise, bit_and} -> bitand(A, B);
+        {bitwise, bit_or} -> bitor(A, B);
+        {bitwise, bit_xor} -> bitxor(A, B);
+        {bitwise, shift_left} -> shl(A, B);
+        {bitwise, shift_right} -> shr(A, B);
+        {bitwise, shift_right_unsigned} -> ushr(A, B);
+        {compare, less} -> lt(A, B);
+        {compare, less_eq} -> le(A, B);
+        {compare, greater} -> gt(A, B);
+        {compare, greater_eq} -> ge(A, B);
+        {equality, strict_eq} -> strict_eq(A, B);
+        {equality, strict_not_eq} -> strict_neq(A, B);
+        {equality, loose_eq} -> eq(A, B);
+        {equality, loose_not_eq} -> neq(A, B);
         _ -> miss
     end).
 

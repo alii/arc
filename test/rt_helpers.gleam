@@ -1,10 +1,11 @@
+import arc/bytecode/key.{Named}
 import arc/host_hooks.{type HostHooks, HostHooks}
 import arc/internal/unsafe
 import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type CompiledCode, type JsVal, FnFlags, Named, StringKey,
+  type Agent, type CompiledCode, type JsVal, FnFlags, StringKey,
 }
 import gleam/option.{None}
 

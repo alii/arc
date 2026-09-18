@@ -39,7 +39,7 @@ pub fn literal_truthy(expr: ast.Expression) -> Option(Bool) {
     ast.NumberLiteral(_, ast.FiniteNumber(f)) -> Some(f != 0.0)
     ast.NumberLiteral(_, ast.InfiniteNumber) -> Some(True)
     ast.BigIntLiteral(_, n) -> Some(n != 0)
-    ast.StringExpression(_, s) -> Some(s != "")
+    ast.StringLiteral(_, s) -> Some(s != "")
     ast.NullLiteral(_) | ast.UndefinedExpression(_) -> Some(False)
     _ -> None
   }

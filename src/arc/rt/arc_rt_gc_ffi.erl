@@ -26,8 +26,8 @@ push_symbol_props_refs([], Acc) -> Acc.
 push_prop_list_refs([P | T], Acc) -> push_prop_list_refs(T, push_prop_refs(P, Acc));
 push_prop_list_refs([], Acc) -> Acc.
 
-push_prop_refs({?DATAPROP_TAG, V, _, _, _, _}, Acc) -> push_refs(V, Acc);
-push_prop_refs({?ACCESSORPROP_TAG, G, S, _, _, _}, Acc) -> push_refs(G, push_refs(S, Acc));
+push_prop_refs({?DATAPROPERTY_TAG, V, _, _, _, _}, Acc) -> push_refs(V, Acc);
+push_prop_refs({?ACCESSORPROPERTY_TAG, G, S, _, _, _}, Acc) -> push_refs(G, push_refs(S, Acc));
 push_prop_refs(P, Acc) -> push_refs(P, Acc).
 
 %% refs in the parts of New that differ from Old; what Old already held can
@@ -35,22 +35,22 @@ push_prop_refs(P, Acc) -> push_refs(P, Acc).
 diff_refs(Old, New, Acc) ->
     case Old =:= New of
         true -> Acc;
-        false -> diff1(Old, New, Acc)
+        false -> diff_changed(Old, New, Acc)
     end.
 
-diff1(_, {?HANDLE_TAG, N}, Acc) when is_integer(N) -> [N | Acc];
-diff1(Old, New, Acc) when is_tuple(Old), is_tuple(New),
+diff_changed(_, {?HANDLE_TAG, N}, Acc) when is_integer(N) -> [N | Acc];
+diff_changed(Old, New, Acc) when is_tuple(Old), is_tuple(New),
                           tuple_size(Old) =:= tuple_size(New) ->
     diff_tuple(Old, New, tuple_size(New), Acc);
-diff1([OH | OT], [NH | NT], Acc) -> diff_refs(OT, NT, diff_refs(OH, NH, Acc));
-diff1(Old, New, Acc) when is_map(Old), is_map(New) ->
+diff_changed([OH | OT], [NH | NT], Acc) -> diff_refs(OT, NT, diff_refs(OH, NH, Acc));
+diff_changed(Old, New, Acc) when is_map(Old), is_map(New) ->
     maps:fold(fun(K, V, A) ->
                   case Old of
                       #{K := OV} -> diff_refs(OV, V, A);
                       _ -> push_refs(V, push_refs(K, A))
                   end
               end, Acc, New);
-diff1(_, New, Acc) -> push_refs(New, Acc).
+diff_changed(_, New, Acc) -> push_refs(New, Acc).
 
 diff_tuple(_, _, 0, Acc) -> Acc;
 diff_tuple(O, N, I, Acc) ->

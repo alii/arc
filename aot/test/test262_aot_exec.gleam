@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/host
 import arc/host_hooks.{type HostHooks, HostHooks}
 import arc/parser
@@ -6,8 +7,8 @@ import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, DataProperty, KStr, KUndef, Named,
-  ProxyObj, SObject, SShapedObject, StringKey, classify, mk_object, mk_string,
+  type Agent, type Handle, type JsVal, DataProperty, KStr, KUndef, ProxyObj,
+  SObject, SShapedObject, StringKey, classify, mk_object, mk_string,
   mk_undefined,
 }
 import arc/rt/val as rt_val
@@ -48,8 +49,8 @@ pub type HarnessEntry {
   Broken(reason: String)
 }
 
-pub type Ctx {
-  Ctx(
+pub type RunnerContext {
+  RunnerContext(
     harness: Dict(String, HarnessEntry),
     update_mode: Bool,
     has_snapshot: Bool,
@@ -58,7 +59,7 @@ pub type Ctx {
 }
 
 pub type Setup {
-  Setup(ctx: Ctx, entries: List(#(String, Bool)))
+  Setup(ctx: RunnerContext, entries: List(#(String, Bool)))
 }
 
 pub type TestResult {
@@ -74,7 +75,12 @@ pub fn setup() -> Setup {
   check_atom_headroom(list.length(files))
   let harness = compile_harness(harness_needed(files))
   let ctx =
-    Ctx(harness:, update_mode:, has_snapshot: set.size(snapshot) > 0, fail_log:)
+    RunnerContext(
+      harness:,
+      update_mode:,
+      has_snapshot: set.size(snapshot) > 0,
+      fail_log:,
+    )
   Setup(
     ctx:,
     entries: list.map(files, fn(f) { #(f, set.contains(snapshot, f)) }),
@@ -178,7 +184,11 @@ fn sanitize(name: String) -> String {
   |> string.replace("/", "_")
 }
 
-pub fn run_file(ctx: Ctx, relative: String, module_base: String) -> Outcome {
+pub fn run_file(
+  ctx: RunnerContext,
+  relative: String,
+  module_base: String,
+) -> Outcome {
   case simplifile.read(test_dir <> "/" <> relative) {
     Error(err) -> Fail("could not read file: " <> string.inspect(err))
     Ok(source) -> {
@@ -192,7 +202,7 @@ pub fn run_file(ctx: Ctx, relative: String, module_base: String) -> Outcome {
 }
 
 fn run_variants(
-  ctx: Ctx,
+  ctx: RunnerContext,
   metadata: TestMetadata,
   source: String,
   module_base: String,
@@ -227,7 +237,7 @@ fn run_parse_negative(source: String, variant: StrictnessVariant) -> Outcome {
 }
 
 fn run_compiled(
-  ctx: Ctx,
+  ctx: RunnerContext,
   metadata: TestMetadata,
   source: String,
   variant: StrictnessVariant,
@@ -253,7 +263,7 @@ fn run_compiled(
 }
 
 fn prepare_agent(
-  ctx: Ctx,
+  ctx: RunnerContext,
   metadata: TestMetadata,
   is_async is_async: Bool,
 ) -> Result(Agent, Outcome) {
@@ -268,7 +278,11 @@ fn prepare_agent(
   }
 }
 
-fn run_harness(ctx: Ctx, st: Agent, name: String) -> Result(Agent, Outcome) {
+fn run_harness(
+  ctx: RunnerContext,
+  st: Agent,
+  name: String,
+) -> Result(Agent, Outcome) {
   case dict.get(ctx.harness, name) {
     Error(Nil) -> Error(Fail("harness " <> name <> " was not compiled"))
     Ok(Unsupported(feature)) ->
@@ -447,18 +461,18 @@ fn hooks_for(metadata: TestMetadata) -> HostHooks {
 
 fn install_host_api(st: Agent) -> Agent {
   let #(_dollar_262, st) = rt_realm.install_262(st, st.realm)
-  let s: host.State(Nil) = host.from_agent(st, host.new_key())
-  let s = host.define_global(s, print_output, mk_undefined())
-  let s = host.define_fn(s, "print", 1, print_native)
-  s.agent
+  let ctx: host.Context(Nil) = host.from_agent(st, host.new_key())
+  let ctx = host.define_global(ctx, print_output, mk_undefined())
+  let ctx = host.define_fn(ctx, "print", 1, print_native)
+  ctx.agent
 }
 
 fn print_native(
   args: List(JsVal),
   _this: JsVal,
-  s: host.State(Nil),
-) -> #(host.State(Nil), Result(JsVal, JsVal)) {
-  let #(str, st) = rt_val.t_to_string(s.agent, host.first_arg(args))
+  ctx: host.Context(Nil),
+) -> #(host.Context(Nil), Result(JsVal, JsVal)) {
+  let #(str, st) = rt_val.t_to_string(ctx.agent, host.first_arg(args))
   let #(_ok, st) =
     rt_obj.t_set_prop(
       st,
@@ -466,7 +480,7 @@ fn print_native(
       StringKey(Named(print_output)),
       mk_string(str),
     )
-  #(host.State(..s, agent: st), Ok(mk_undefined()))
+  #(host.Context(..ctx, agent: st), Ok(mk_undefined()))
 }
 
 fn ordinary_proto(st: Agent, h: Handle) -> Option(Handle) {
@@ -503,7 +517,7 @@ fn inspect_thrown(val: JsVal, st: Agent) -> String {
   option.lazy_unwrap(described, fn() { rt_inspect.inspect(st, val) })
 }
 
-pub fn finish(ctx: Ctx, results: List(TestResult)) -> Int {
+pub fn finish(ctx: RunnerContext, results: List(TestResult)) -> Int {
   let passes =
     list.filter(results, fn(r) { r.outcome == Pass })
     |> list.map(fn(r) { r.path })
@@ -555,7 +569,7 @@ pub fn finish(ctx: Ctx, results: List(TestResult)) -> Int {
   count_mismatches(ctx, results)
 }
 
-fn write_fail_log(ctx: Ctx, fails: List(#(String, String))) -> Nil {
+fn write_fail_log(ctx: RunnerContext, fails: List(#(String, String))) -> Nil {
   case ctx.fail_log {
     None -> Nil
     Some(path) -> {
@@ -571,7 +585,7 @@ fn write_fail_log(ctx: Ctx, fails: List(#(String, String))) -> Nil {
   }
 }
 
-fn write_snapshot(ctx: Ctx, passes: List(String)) -> Nil {
+fn write_snapshot(ctx: RunnerContext, passes: List(String)) -> Nil {
   case ctx.update_mode {
     False -> Nil
     True ->
@@ -620,7 +634,7 @@ fn write_results(pass: Int, fail: Int, skip: Int) -> Nil {
   }
 }
 
-pub fn is_mismatch(ctx: Ctx, result: TestResult) -> Bool {
+pub fn is_mismatch(ctx: RunnerContext, result: TestResult) -> Bool {
   case ctx.update_mode || !ctx.has_snapshot {
     True -> False
     False ->
@@ -632,7 +646,7 @@ pub fn is_mismatch(ctx: Ctx, result: TestResult) -> Bool {
   }
 }
 
-fn count_mismatches(ctx: Ctx, results: List(TestResult)) -> Int {
+fn count_mismatches(ctx: RunnerContext, results: List(TestResult)) -> Int {
   list.count(results, is_mismatch(ctx, _))
 }
 

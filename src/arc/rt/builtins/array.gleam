@@ -1,3 +1,7 @@
+import arc/bytecode/key.{
+  type PropertyKey, Index, Named, index_key, key_display_string, max_array_index,
+  max_array_length,
+}
 import arc/rt/abstract_ops as rt_abstract
 import arc/rt/builtins/array_from_async
 import arc/rt/builtins/common
@@ -14,30 +18,28 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ArrayNative, type BuiltinPair, type Cell, type Handle,
-  type JsElements, type JsVal, type Property, type PropertyKey, ArrayConstructor,
-  ArrayFrom, ArrayFromAsync, ArrayFromAsyncCloseReject,
-  ArrayFromAsyncLikeOnMapped, ArrayFromAsyncLikeOnValue, ArrayFromAsyncOnMapped,
-  ArrayFromAsyncOnNext, ArrayFromAsyncRejectWith, ArrayIsArray, ArrayIterEntries,
-  ArrayIterKeys, ArrayIterValues, ArrayIterator, ArrayN, ArrayObj, ArrayOf,
-  ArrayPrototypeAt, ArrayPrototypeConcat, ArrayPrototypeCopyWithin,
-  ArrayPrototypeEntries, ArrayPrototypeEvery, ArrayPrototypeFill,
-  ArrayPrototypeFilter, ArrayPrototypeFind, ArrayPrototypeFindIndex,
-  ArrayPrototypeFindLast, ArrayPrototypeFindLastIndex, ArrayPrototypeFlat,
-  ArrayPrototypeFlatMap, ArrayPrototypeForEach, ArrayPrototypeIncludes,
-  ArrayPrototypeIndexOf, ArrayPrototypeJoin, ArrayPrototypeKeys,
-  ArrayPrototypeLastIndexOf, ArrayPrototypeMap, ArrayPrototypePop,
-  ArrayPrototypePush, ArrayPrototypeReduce, ArrayPrototypeReduceRight,
-  ArrayPrototypeReverse, ArrayPrototypeShift, ArrayPrototypeSlice,
-  ArrayPrototypeSome, ArrayPrototypeSort, ArrayPrototypeSplice,
-  ArrayPrototypeToLocaleString, ArrayPrototypeToReversed, ArrayPrototypeToSorted,
-  ArrayPrototypeToSpliced, ArrayPrototypeToString, ArrayPrototypeUnshift,
-  ArrayPrototypeValues, ArrayPrototypeWith, DataProperty, Index, JFloat, JInt,
-  JNan, JNegInf, JPosInf, KHandle, KNull, KNum, KStr, KUndef, Named,
+  type JsElements, type JsVal, type Property, ArrayConstructor, ArrayFrom,
+  ArrayFromAsync, ArrayFromAsyncCloseReject, ArrayFromAsyncLikeOnMapped,
+  ArrayFromAsyncLikeOnValue, ArrayFromAsyncOnMapped, ArrayFromAsyncOnNext,
+  ArrayFromAsyncRejectWith, ArrayIsArray, ArrayIterEntries, ArrayIterKeys,
+  ArrayIterValues, ArrayIterator, ArrayN, ArrayObj, ArrayOf, ArrayPrototypeAt,
+  ArrayPrototypeConcat, ArrayPrototypeCopyWithin, ArrayPrototypeEntries,
+  ArrayPrototypeEvery, ArrayPrototypeFill, ArrayPrototypeFilter,
+  ArrayPrototypeFind, ArrayPrototypeFindIndex, ArrayPrototypeFindLast,
+  ArrayPrototypeFindLastIndex, ArrayPrototypeFlat, ArrayPrototypeFlatMap,
+  ArrayPrototypeForEach, ArrayPrototypeIncludes, ArrayPrototypeIndexOf,
+  ArrayPrototypeJoin, ArrayPrototypeKeys, ArrayPrototypeLastIndexOf,
+  ArrayPrototypeMap, ArrayPrototypePop, ArrayPrototypePush, ArrayPrototypeReduce,
+  ArrayPrototypeReduceRight, ArrayPrototypeReverse, ArrayPrototypeShift,
+  ArrayPrototypeSlice, ArrayPrototypeSome, ArrayPrototypeSort,
+  ArrayPrototypeSplice, ArrayPrototypeToLocaleString, ArrayPrototypeToReversed,
+  ArrayPrototypeToSorted, ArrayPrototypeToSpliced, ArrayPrototypeToString,
+  ArrayPrototypeUnshift, ArrayPrototypeValues, ArrayPrototypeWith, DataProperty,
+  JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KNull, KNum, KStr, KUndef,
   ObjectPrototypeToString, Ordinary, ParsedDesc, ProxyObj, ReturnThis, SObject,
-  StringKey, StringObj, SymbolKey, classify, index_key, key_display_string,
-  max_array_length, mk_bool, mk_int, mk_object, mk_string, mk_undefined,
-  plain_object, symbol_is_concat_spreadable, symbol_iterator, symbol_species,
-  symbol_unscopables,
+  StringKey, StringObj, SymbolKey, classify, mk_bool, mk_int, mk_object,
+  mk_string, mk_undefined, plain_object, symbol_is_concat_spreadable,
+  symbol_iterator, symbol_species, symbol_unscopables,
 }
 import arc/rt/val as rt_val
 import gleam/bool
@@ -486,7 +488,7 @@ fn probe_index_if_present(
   this: JsVal,
   idx: Int,
 ) -> #(Option(JsVal), Agent) {
-  case classify(this), idx >= 0 && idx <= types.max_array_index {
+  case classify(this), idx >= 0 && idx <= max_array_index {
     KHandle(h), True ->
       case rt_obj.t_get_own_index(st, h, idx) {
         rt_obj.OwnIndexValue(v) -> #(Some(v), st)
@@ -1949,7 +1951,7 @@ fn iterate_array(
   cont: fn(FoundAt, Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   let #(start, end, step) = bounds(dir, length)
-  iterate_loop(
+  iterate_array_loop(
     st,
     arr,
     start,
@@ -1963,7 +1965,7 @@ fn iterate_array(
   )
 }
 
-fn iterate_loop(
+fn iterate_array_loop(
   st: Agent,
   arr: JsVal,
   idx: Int,
@@ -1991,7 +1993,7 @@ fn iterate_loop(
       }
       case maybe_elem {
         None ->
-          iterate_loop(
+          iterate_array_loop(
             st,
             arr,
             idx + step,
@@ -2008,7 +2010,7 @@ fn iterate_loop(
           case stop_on(result) {
             True -> cont(Found(elem, idx), st)
             False ->
-              iterate_loop(
+              iterate_array_loop(
                 st,
                 arr,
                 idx + step,
@@ -2105,7 +2107,7 @@ fn map_sparse(
   }
 }
 
-fn filter_loop(
+fn array_filter_loop(
   st: Agent,
   arr: JsVal,
   idx: Int,
@@ -2122,7 +2124,7 @@ fn filter_loop(
           case probe_index_if_present(st, arr, idx) {
             #(Some(elem), st) ->
               filter_step(st, arr, idx, length, cb, kept, elem)
-            #(None, st) -> filter_loop(st, arr, idx + 1, length, cb, kept)
+            #(None, st) -> array_filter_loop(st, arr, idx + 1, length, cb, kept)
           }
       }
   }
@@ -2139,8 +2141,8 @@ fn filter_step(
 ) -> #(List(JsVal), Agent) {
   let #(result, st) = cb(st, [elem, mk_int(idx), arr])
   case rt_val.to_boolean(result) {
-    True -> filter_loop(st, arr, idx + 1, length, cb, [elem, ..kept])
-    False -> filter_loop(st, arr, idx + 1, length, cb, kept)
+    True -> array_filter_loop(st, arr, idx + 1, length, cb, [elem, ..kept])
+    False -> array_filter_loop(st, arr, idx + 1, length, cb, kept)
   }
 }
 
@@ -2151,10 +2153,10 @@ fn array_for_each(
 ) -> #(JsVal, Agent) {
   use this, _h, length, st <- require_array(st, this)
   use call, st <- require_callback(st, args)
-  #(mk_undefined(), for_each_loop(st, this, 0, length, call))
+  #(mk_undefined(), array_for_each_loop(st, this, 0, length, call))
 }
 
-fn for_each_loop(
+fn array_for_each_loop(
   st: Agent,
   arr: JsVal,
   idx: Int,
@@ -2173,7 +2175,7 @@ fn for_each_loop(
             #(None, st) -> st
           }
       }
-      for_each_loop(st, arr, idx + 1, length, cb)
+      array_for_each_loop(st, arr, idx + 1, length, cb)
     }
   }
 }
@@ -2207,7 +2209,7 @@ fn array_filter(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use call, st <- require_callback(st, args)
   let #(species, st) = array_species_create(st, this, 0)
   use <- within_budget(st, length)
-  let #(kept_rev, st) = filter_loop(st, this, 0, length, call, [])
+  let #(kept_rev, st) = array_filter_loop(st, this, 0, length, call, [])
   case species {
     None -> alloc_array_list(st, list.reverse(kept_rev))
     Some(target) -> {
@@ -2323,7 +2325,7 @@ fn array_find_last_index(
 }
 
 fn array_reduce(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  reduce_impl(st, this, args, Ascending)
+  reduce_directed(st, this, args, Ascending)
 }
 
 fn array_reduce_right(
@@ -2331,10 +2333,10 @@ fn array_reduce_right(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  reduce_impl(st, this, args, Descending)
+  reduce_directed(st, this, args, Descending)
 }
 
-fn reduce_impl(
+fn reduce_directed(
   st: Agent,
   this: JsVal,
   args: List(JsVal),
@@ -2350,7 +2352,16 @@ fn reduce_impl(
   }
   case has_init {
     True ->
-      reduce_loop(st, this, start, end, call, init, dir, limits.max_iteration)
+      reduce_directed_loop(
+        st,
+        this,
+        start,
+        end,
+        call,
+        init,
+        dir,
+        limits.max_iteration,
+      )
     False -> {
       let #(found, st) =
         find_present(st, this, start, end, dir, limits.max_iteration)
@@ -2361,7 +2372,7 @@ fn reduce_impl(
             "Reduce of empty array with no initial value",
           )
         Some(#(first_idx, first_val)) ->
-          reduce_loop(
+          reduce_directed_loop(
             st,
             this,
             first_idx + step,
@@ -2397,7 +2408,7 @@ fn find_present(
   }
 }
 
-fn reduce_loop(
+fn reduce_directed_loop(
   st: Agent,
   arr: JsVal,
   idx: Int,
@@ -2415,16 +2426,43 @@ fn reduce_loop(
       case elements.own_element(st, arr, idx) {
         elements.Hit(elem) -> {
           let #(result, st) = cb(st, [acc, elem, mk_int(idx), arr])
-          reduce_loop(st, arr, idx + step, end, cb, result, dir, fuel - 1)
+          reduce_directed_loop(
+            st,
+            arr,
+            idx + step,
+            end,
+            cb,
+            result,
+            dir,
+            fuel - 1,
+          )
         }
         elements.Miss ->
           case probe_index_if_present(st, arr, idx) {
             #(Some(elem), st) -> {
               let #(result, st) = cb(st, [acc, elem, mk_int(idx), arr])
-              reduce_loop(st, arr, idx + step, end, cb, result, dir, fuel - 1)
+              reduce_directed_loop(
+                st,
+                arr,
+                idx + step,
+                end,
+                cb,
+                result,
+                dir,
+                fuel - 1,
+              )
             }
             #(None, st) ->
-              reduce_loop(st, arr, idx + step, end, cb, acc, dir, fuel - 1)
+              reduce_directed_loop(
+                st,
+                arr,
+                idx + step,
+                end,
+                cb,
+                acc,
+                dir,
+                fuel - 1,
+              )
           }
       }
     }
@@ -2790,15 +2828,15 @@ fn array_to_sorted(
   use this, _h, length, st <- require_array(st, this)
   use <- within_budget(st, length)
   case comparefn {
-    None -> to_sorted_impl(st, length, this, sort_values_default)
+    None -> to_sorted_with(st, length, this, sort_values_default)
     Some(cmp) ->
-      to_sorted_impl(st, length, this, fn(st, defined) {
+      to_sorted_with(st, length, this, fn(st, defined) {
         merge_sort(st, defined, cmp)
       })
   }
 }
 
-fn to_sorted_impl(
+fn to_sorted_with(
   st: Agent,
   length: Int,
   this: JsVal,
@@ -3022,11 +3060,11 @@ fn array_flat_map(
   use call, st <- require_callback(st, args)
   use <- within_budget(st, length)
   let #(species, st) = array_species_create(st, this, 0)
-  let #(kept_rev, st) = flat_map_loop(st, this, 0, length, call, [])
+  let #(kept_rev, st) = array_flat_map_loop(st, this, 0, length, call, [])
   finish_species_list(st, kept_rev, species)
 }
 
-fn flat_map_loop(
+fn array_flat_map_loop(
   st: Agent,
   arr: JsVal,
   idx: Int,
@@ -3039,16 +3077,17 @@ fn flat_map_loop(
     False -> {
       let #(maybe_elem, st) = get_index_if_present(st, arr, idx)
       case maybe_elem {
-        None -> flat_map_loop(st, arr, idx + 1, length, cb, acc)
+        None -> array_flat_map_loop(st, arr, idx + 1, length, cb, acc)
         Some(elem) -> {
           let #(mapped, st) = cb(st, [elem, mk_int(idx), arr])
           case classify(mapped), rt_abstract.is_array(st, mapped) {
             KHandle(sub_h), True -> {
               let #(sub_len, st) = object_length(st, sub_h)
               let #(new_acc, st) = flatten_into(st, mapped, sub_len, 0, acc)
-              flat_map_loop(st, arr, idx + 1, length, cb, new_acc)
+              array_flat_map_loop(st, arr, idx + 1, length, cb, new_acc)
             }
-            _, _ -> flat_map_loop(st, arr, idx + 1, length, cb, [mapped, ..acc])
+            _, _ ->
+              array_flat_map_loop(st, arr, idx + 1, length, cb, [mapped, ..acc])
           }
         }
       }
@@ -3419,7 +3458,7 @@ fn array_to_locale_string(
 ) -> #(JsVal, Agent) {
   use this, _h, length, st <- require_array(st, this)
   use <- within_budget(st, length)
-  to_locale_string_loop(
+  array_to_locale_string_loop(
     st,
     this,
     0,
@@ -3430,7 +3469,7 @@ fn array_to_locale_string(
   )
 }
 
-fn to_locale_string_loop(
+fn array_to_locale_string_loop(
   st: Agent,
   this: JsVal,
   idx: Int,
@@ -3449,7 +3488,7 @@ fn to_locale_string_loop(
       let #(elem, st) = rt_abstract.get_index(st, this, idx)
       case classify(elem) {
         KUndef | KNull ->
-          to_locale_string_loop(
+          array_to_locale_string_loop(
             st,
             this,
             idx + 1,
@@ -3467,7 +3506,7 @@ fn to_locale_string_loop(
           let #(locale_val, st) =
             rt_call.t_call(st, method, elem, [locales_v, options_v])
           let #(s, st) = rt_val.t_to_string(st, locale_val)
-          to_locale_string_loop(
+          array_to_locale_string_loop(
             st,
             this,
             idx + 1,

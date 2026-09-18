@@ -21,7 +21,7 @@ pub fn park(state: State, parked: ParkedAt) -> SuspendedFrame {
     parked:,
     call_args: state.call_args,
     realm: state.agent.realm.id,
-    unit: state.unit,
+    unit_id: state.unit_id,
   )
 }
 
@@ -46,7 +46,7 @@ pub fn unpark_with(
     parked: _,
     call_args:,
     realm: _,
-    unit:,
+    unit_id:,
   ) = frame
   let line = tuple_array.element(pc + 1, template.lines)
   // callers push this frame first
@@ -61,7 +61,7 @@ pub fn unpark_with(
     stack:,
     locals:,
     func: template,
-    unit:,
+    unit_id:,
     call_stack: [],
     outer_depth: agent.call_depth,
     depth: agent.call_depth,

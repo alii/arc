@@ -17,7 +17,7 @@ pub type State {
     stack: List(JsVal),
     locals: TupleArray(JsVal),
     func: FuncTemplate,
-    unit: Int,
+    unit_id: Int,
     call_stack: List(SavedFrame),
     outer_depth: Int,
     // agent.call_depth may lag this inside the loop
@@ -74,7 +74,7 @@ pub fn frame_roots(state: State) -> List(Handle) {
     stack:,
     locals:,
     func: _,
-    unit: _,
+    unit_id: _,
     call_stack:,
     outer_depth: _,
     depth: _,

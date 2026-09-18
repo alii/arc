@@ -12,5 +12,5 @@ apply_sm(St, Sm, Rs, Sent, Loc) ->
 
 step(_Sm, {return, V}) -> {?STEP_RETURN, V};
 step(_Sm, {throw, V}) -> {?STEP_THROW, V};
-step(Sm, {yield, V, Ns, Loc}) -> {?STEP_YIELD, V, {?RESUME_COMPILED_TAG, Sm, Ns, Loc}};
-step(Sm, {await, V, Ns, Loc}) -> {?STEP_AWAIT, V, {?RESUME_COMPILED_TAG, Sm, Ns, Loc}}.
+step(Sm, {yield, V, Ns, Loc}) -> {?STEP_YIELD, V, {?RESUMECOMPILED_TAG, Sm, Ns, Loc}};
+step(Sm, {await, V, Ns, Loc}) -> {?STEP_AWAIT, V, {?RESUMECOMPILED_TAG, Sm, Ns, Loc}}.

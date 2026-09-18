@@ -112,16 +112,16 @@ fn register(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     rt_val.t_throw_type_error(st, "target and holdings must not be same")
   })
   case can_be_held_weakly(token_arg), classify(token_arg) {
-    False, KUndef -> do_register(st, registry, target, held, None)
+    False, KUndef -> add_registration(st, registry, target, held, None)
     False, _ ->
       rt_val.t_throw_type_error(st, "Invalid value used as unregister token")
-    True, _ -> do_register(st, registry, target, held, Some(token_arg))
+    True, _ -> add_registration(st, registry, target, held, Some(token_arg))
   }
 }
 
-fn do_register(
+fn add_registration(
   st: Agent,
-  registry: RegistryRef,
+  registry: RegistryHandle,
   target: JsVal,
   held: JsVal,
   unregister_token: Option(JsVal),
@@ -152,15 +152,15 @@ fn unregister(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
 }
 
 // only built by require_registry
-type RegistryRef {
-  RegistryRef(Handle)
+type RegistryHandle {
+  RegistryHandle(Handle)
 }
 
 fn require_registry(
   st: Agent,
   this: JsVal,
   method: String,
-  cont: fn(RegistryRef) -> #(JsVal, Agent),
+  cont: fn(RegistryHandle) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   use _nil, h <- helpers.require_brand(
     st,
@@ -177,23 +177,26 @@ fn require_registry(
       }
     },
   )
-  cont(RegistryRef(h))
+  cont(RegistryHandle(h))
 }
 
-fn read_registrations(st: Agent, registry: RegistryRef) -> List(Registration) {
-  let RegistryRef(h) = registry
+fn read_registrations(
+  st: Agent,
+  registry: RegistryHandle,
+) -> List(Registration) {
+  let RegistryHandle(h) = registry
   let assert SObject(kind: FinalizationRegistryObj(registrations:, ..), ..) =
     rt_store.t_cell_get(st, h)
-    as "finalization_registry: RegistryRef does not point at a registry cell"
+    as "finalization_registry: RegistryHandle does not point at a registry cell"
   registrations
 }
 
 fn update_registrations(
   st: Agent,
-  registry: RegistryRef,
+  registry: RegistryHandle,
   f: fn(List(Registration)) -> List(Registration),
 ) -> Agent {
-  let RegistryRef(h) = registry
+  let RegistryHandle(h) = registry
   rt_store.t_cell_update(st, h, fn(cell) {
     let assert SObject(
       kind: FinalizationRegistryObj(callback:, registrations:),

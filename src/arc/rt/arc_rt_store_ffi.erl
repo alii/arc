@@ -6,14 +6,14 @@
 
 t_cell_get(St, {?HANDLE_TAG, Id}) ->
     Store = element(?AGENT_STORE, St),
-    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
+    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, Store)) of
         ?STORE_FREE_CELL -> dangling(<<"t_cell_get">>);
         Cell -> Cell
     end.
 
 t_box_get(St, {?HANDLE_TAG, Id}) ->
     Store = element(?AGENT_STORE, St),
-    case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
+    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, Store)) of
         ?STORE_FREE_CELL -> dangling(<<"t_box_get">>);
         {?SBOX_TAG, V} -> V
     end.

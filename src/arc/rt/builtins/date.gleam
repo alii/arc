@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/internal/digits.{take_digits}
 import arc/internal/gregorian.{civil_from_days, days_from_year}
 import arc/internal/host_time.{
@@ -31,8 +32,8 @@ import arc/rt/types.{
   DatePrototypeToLocaleString, DatePrototypeToLocaleTimeString,
   DatePrototypeToString, DatePrototypeToTimeString, DatePrototypeToUTCString,
   DatePrototypeValueOf, DateUTC, HintDefault, HintNumber, HintString, JFloat,
-  JInt, JNan, JNegInf, JPosInf, KHandle, KNum, KStr, Named, StringKey, classify,
-  mk_int, mk_null, mk_number, mk_object, mk_string,
+  JInt, JNan, JNegInf, JPosInf, KHandle, KNum, KStr, StringKey, classify, mk_int,
+  mk_null, mk_number, mk_object, mk_string,
 }
 import arc/rt/val as rt_val
 import gleam/int
@@ -150,7 +151,7 @@ pub fn dispatch(
   case native {
     DateConstructor(..) -> {
       let fields = get_date_fields(now_ms(st), local)
-      #(mk_string(format_date(FmtLocal(DateAndTime), fields)), st)
+      #(mk_string(format_date(LocalFormat(DateAndTime), fields)), st)
     }
     DateNow -> #(mk_int(now_ms(st)), st)
     DateParse -> date_parse(st, args, local)
@@ -215,19 +216,21 @@ pub fn dispatch(
     DatePrototypeGetYear -> date_get_year(st, this, name, local)
     DatePrototypeSetYear -> date_set_year(st, this, args, name, local)
     DatePrototypeToString ->
-      date_to_string(st, this, name, FmtLocal(DateAndTime), local)
+      date_to_string(st, this, name, LocalFormat(DateAndTime), local)
     DatePrototypeToDateString ->
-      date_to_string(st, this, name, FmtLocal(DateOnly), local)
+      date_to_string(st, this, name, LocalFormat(DateOnly), local)
     DatePrototypeToTimeString ->
-      date_to_string(st, this, name, FmtLocal(TimeOnly), local)
-    DatePrototypeToISOString -> date_to_string(st, this, name, FmtIso, UtcTime)
-    DatePrototypeToUTCString -> date_to_string(st, this, name, FmtUtc, UtcTime)
+      date_to_string(st, this, name, LocalFormat(TimeOnly), local)
+    DatePrototypeToISOString ->
+      date_to_string(st, this, name, IsoFormat, UtcTime)
+    DatePrototypeToUTCString ->
+      date_to_string(st, this, name, UtcFormat, UtcTime)
     DatePrototypeToLocaleString ->
-      date_to_string(st, this, name, FmtLocale(DateAndTime), local)
+      date_to_string(st, this, name, LocaleFormat(DateAndTime), local)
     DatePrototypeToLocaleDateString ->
-      date_to_string(st, this, name, FmtLocale(DateOnly), local)
+      date_to_string(st, this, name, LocaleFormat(DateOnly), local)
     DatePrototypeToLocaleTimeString ->
-      date_to_string(st, this, name, FmtLocale(TimeOnly), local)
+      date_to_string(st, this, name, LocaleFormat(TimeOnly), local)
     DatePrototypeToJSON -> date_to_json(st, this)
     DatePrototypeSymbolToPrimitive -> date_to_primitive(st, this, args)
   }
@@ -784,10 +787,10 @@ fn make_date_from_components(c: DateComponents, time_ref: TimeRef) -> JsNum {
 }
 
 type DateFmt {
-  FmtLocal(DatePart)
-  FmtUtc
-  FmtIso
-  FmtLocale(DatePart)
+  LocalFormat(DatePart)
+  UtcFormat
+  IsoFormat
+  LocaleFormat(DatePart)
 }
 
 type DatePart {
@@ -830,7 +833,7 @@ fn date_to_string(
     }
     None ->
       case fmt {
-        FmtIso -> rt_val.t_throw_range_error(st, "Invalid time value")
+        IsoFormat -> rt_val.t_throw_range_error(st, "Invalid time value")
         _ -> #(mk_string("Invalid Date"), st)
       }
   }
@@ -838,10 +841,10 @@ fn date_to_string(
 
 fn format_date(fmt: DateFmt, f: DateFields) -> String {
   case fmt {
-    FmtIso -> format_iso(f)
-    FmtUtc -> format_utc(f)
-    FmtLocal(part) -> format_local(part, f)
-    FmtLocale(part) -> format_locale(part, f)
+    IsoFormat -> format_iso(f)
+    UtcFormat -> format_utc(f)
+    LocalFormat(part) -> format_local(part, f)
+    LocaleFormat(part) -> format_locale(part, f)
   }
 }
 

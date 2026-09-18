@@ -27,9 +27,9 @@ pub fn disassemble_fused_ops_test() {
       "function f(o) { if (o === 1) return; while (o != null) o = o.next; this.count = o.size; o.run(1) }",
     )
   assert string.contains(text, "[regs 4]")
-  assert string.contains(text, "CmpLocalConstJump(-1, 0, Equality(StrictEqOp)")
+  assert string.contains(text, "CmpLocalConstJump(-1, 0, Equality(StrictEq)")
   assert string.contains(text, "GetLocalField(-1, Named(\"next\"))")
   assert string.contains(text, "GetLocalField(-1, Named(\"size\"))")
   assert string.contains(text, "PutFieldPop(Named(\"count\"))")
-  assert string.contains(text, "GetLocalField2(-1, Named(\"run\"))")
+  assert string.contains(text, "GetLocalFieldKeep(-1, Named(\"run\"))")
 }

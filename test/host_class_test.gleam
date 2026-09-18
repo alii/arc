@@ -1,34 +1,39 @@
+import arc/bytecode/key.{Named}
 import arc/engine.{Finite, JsNumber, JsString, ModuleReturned, Returned}
-import arc/host.{type State, State}
+import arc/host.{type Context, Context}
 import arc/module/load_error
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type JsVal, Named, StringKey, mk_int, mk_object, mk_string, mk_undefined,
+  type JsVal, StringKey, mk_int, mk_object, mk_string, mk_undefined,
 }
 import gleam/option.{Some}
 
-fn get(s: State(host), recv: JsVal, name: String) -> #(JsVal, State(host)) {
-  let #(v, agent) = rt_obj.t_get_prop(s.agent, recv, StringKey(Named(name)))
-  #(v, State(..s, agent:))
+fn get(
+  ctx: Context(host),
+  recv: JsVal,
+  name: String,
+) -> #(JsVal, Context(host)) {
+  let #(v, agent) = rt_obj.t_get_prop(ctx.agent, recv, StringKey(Named(name)))
+  #(v, Context(..ctx, agent:))
 }
 
-fn service_ctor(_args, _this, s: State(host)) {
-  let #(s, obj) = host.object(s, [#("id", mk_string("svc-1"))])
-  #(s, Ok(obj))
+fn service_ctor(_args, _this, ctx: Context(host)) {
+  let #(ctx, obj) = host.object(ctx, [#("id", mk_string("svc-1"))])
+  #(ctx, Ok(obj))
 }
 
-fn service_who(_args, this, s: State(host)) {
-  let #(v, s) = get(s, this, "id")
-  #(s, Ok(v))
+fn service_who(_args, this, ctx: Context(host)) {
+  let #(v, ctx) = get(ctx, this, "id")
+  #(ctx, Ok(v))
 }
 
-fn service_kind(_args, _this, s: State(host)) {
-  #(s, Ok(mk_string("service")))
+fn service_kind(_args, _this, ctx: Context(host)) {
+  #(ctx, Ok(mk_string("service")))
 }
 
-fn service_named(_args, this, s: State(host)) {
-  let #(v, s) = get(s, this, "name")
-  #(s, Ok(v))
+fn service_named(_args, this, ctx: Context(host)) {
+  let #(v, ctx) = get(ctx, this, "name")
+  #(ctx, Ok(v))
 }
 
 fn engine_with_service() {
@@ -91,24 +96,24 @@ pub fn host_class_not_a_global_until_placed_test() {
 
 pub fn host_fn_mints_callable_value_test() {
   let #(eng, greet) =
-    engine.host_fn(engine.new(), "greet", 0, fn(_a, _t, s) {
-      #(s, Ok(mk_string("hi")))
+    engine.host_fn(engine.new(), "greet", 0, fn(_a, _t, ctx) {
+      #(ctx, Ok(mk_string("hi")))
     })
   let eng = engine.define_global(eng, "greet", greet)
   let assert Ok(#(Returned(value:), _)) = engine.eval(eng, "greet()")
   assert engine.classify(value) == JsString("hi")
 }
 
-pub fn with_state_calls_js_function_test() {
+pub fn with_context_calls_js_function_test() {
   let assert Ok(#(_c, eng)) =
     engine.eval(engine.new(), "globalThis.double = (x) => x * 2;")
   let global = mk_object(engine.global(eng))
   let #(_eng, result) =
-    engine.with_state(eng, fn(s) {
-      let #(double, s) = get(s, global, "double")
-      let assert #(s, Ok(out)) =
-        host.call(s, double, mk_undefined(), [mk_int(21)])
-      #(s, out)
+    engine.with_context(eng, fn(ctx) {
+      let #(double, ctx) = get(ctx, global, "double")
+      let assert #(ctx, Ok(out)) =
+        host.call(ctx, double, mk_undefined(), [mk_int(21)])
+      #(ctx, out)
     })
   assert engine.classify(result) == JsNumber(Finite(42.0))
 }
@@ -127,8 +132,8 @@ fn read_export(eng, ns, name: String) {
 
 pub fn host_module_named_import_test() {
   let #(eng, greet) =
-    engine.host_fn(engine.new(), "greet", 0, fn(_a, _t, s) {
-      #(s, Ok(mk_string("hi")))
+    engine.host_fn(engine.new(), "greet", 0, fn(_a, _t, ctx) {
+      #(ctx, Ok(mk_string("hi")))
     })
   let eng = engine.register_host_module(eng, "dance", [#("greet", greet)])
   let assert Ok(#(evaluated, eng)) =
@@ -145,8 +150,8 @@ pub fn host_module_named_import_test() {
 
 pub fn host_module_namespace_import_test() {
   let #(eng, greet) =
-    engine.host_fn(engine.new(), "greet", 0, fn(_a, _t, s) {
-      #(s, Ok(mk_string("yo")))
+    engine.host_fn(engine.new(), "greet", 0, fn(_a, _t, ctx) {
+      #(ctx, Ok(mk_string("yo")))
     })
   let eng = engine.register_host_module(eng, "dance", [#("greet", greet)])
   let assert Ok(#(evaluated, eng)) =
@@ -184,15 +189,15 @@ pub fn host_module_class_extends_test() {
   assert read_export(eng, ns, "default") == Some(JsString("svc-1"))
 }
 
-pub fn with_state_threads_heap_back_test() {
+pub fn with_context_threads_heap_back_test() {
   let #(eng, holder) =
-    engine.with_state(engine.new(), fn(s) {
-      host.object(s, [#("v", mk_int(9))])
+    engine.with_context(engine.new(), fn(ctx) {
+      host.object(ctx, [#("v", mk_int(9))])
     })
   let #(_eng, out) =
-    engine.with_state(eng, fn(s) {
-      let #(v, s) = get(s, holder, "v")
-      #(s, v)
+    engine.with_context(eng, fn(ctx) {
+      let #(v, ctx) = get(ctx, holder, "v")
+      #(ctx, v)
     })
   assert engine.classify(out) == JsNumber(Finite(9.0))
 }

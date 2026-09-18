@@ -67,7 +67,7 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
       )
       anf.make_tuple([ir.ConstAtom("js_bigint"), boxed])
     }
-    ast.StringExpression(_, s) -> anf.str_lit(s)
+    ast.StringLiteral(_, s) -> anf.str_lit(s)
     ast.BooleanLiteral(_, b) -> {
       use rc <- anf.then(consts())
       anf.pure(case b {
@@ -932,7 +932,7 @@ fn ex_assigned(acc: Uses, ex: ast.Expression) -> Uses {
     ast.Identifier(name:, ..) -> uses_name(acc, name)
     ast.NumberLiteral(..)
     | ast.BigIntLiteral(..)
-    | ast.StringExpression(..)
+    | ast.StringLiteral(..)
     | ast.BooleanLiteral(..)
     | ast.NullLiteral(..)
     | ast.UndefinedExpression(..)
@@ -963,7 +963,7 @@ fn ex_assigned(acc: Uses, ex: ast.Expression) -> Uses {
     | ast.OptionalMemberExpression(object:, property:, ..) -> {
       let acc = ex_assigned(acc, object)
       case property {
-        ast.Bracket(expression: ast.StringExpression(value:, ..)) ->
+        ast.Bracket(expression: ast.StringLiteral(value:, ..)) ->
           uses_name(acc, value)
         ast.Bracket(expression:) -> ex_assigned(acc, expression)
         ast.Dot(name:, ..) -> uses_name(acc, name)
@@ -1576,7 +1576,7 @@ fn is_plain_unboxed_local(e: Emitter, name: String) -> Bool {
 fn is_reorder_safe(e: Emitter, ex: ast.Expression) -> Bool {
   case ex {
     ast.NumberLiteral(..)
-    | ast.StringExpression(..)
+    | ast.StringLiteral(..)
     | ast.BooleanLiteral(..)
     | ast.NullLiteral(..)
     | ast.UndefinedExpression(..) -> True
@@ -2636,7 +2636,7 @@ fn emit_object_property(obj: ir.Value, p: ast.Property) -> Build(ir.Value) {
           obj,
           k,
           f,
-          ir.ConstAtom("m_i_method"),
+          ir.ConstAtom("install_method"),
           rc.true_,
         ]),
       )
@@ -2664,8 +2664,8 @@ fn emit_object_property(obj: ir.Value, p: ast.Property) -> Build(ir.Value) {
 
 fn accessor_kind(kind: ast.AccessorKind) -> #(String, ir.Value) {
   case kind {
-    ast.GetAccessor -> #("get ", ir.ConstAtom("m_i_getter"))
-    ast.SetAccessor -> #("set ", ir.ConstAtom("m_i_setter"))
+    ast.GetAccessor -> #("get ", ir.ConstAtom("install_getter"))
+    ast.SetAccessor -> #("set ", ir.ConstAtom("install_setter"))
   }
 }
 
@@ -2820,7 +2820,7 @@ fn const_leaf(ex: ast.Expression) -> Option(#(types.JsVal, Int)) {
           Some(num_leaf(const_num(ast.FiniteNumber(float.negate(f)))))
         _ -> None
       }
-    ast.StringExpression(_, s) -> Some(#(types.mk_string(s), 0))
+    ast.StringLiteral(_, s) -> Some(#(types.mk_string(s), 0))
     ast.BooleanLiteral(_, b) -> Some(#(types.mk_bool(b), 0))
     ast.NullLiteral(_) -> Some(#(types.mk_null(), 0))
     ast.UndefinedExpression(_) -> Some(#(types.mk_undefined(), 0))
@@ -2965,7 +2965,7 @@ fn emit_update(
         }
         False -> {
           use is_num <- anf.then(anf.bind(ir.TermTest(ir.IsNumber, old)))
-          use #(old_n, new) <- anf.then(anf.bind_if2(
+          use #(old_n, new) <- anf.then(anf.bind_if_pair(
             is_num,
             anf.map(anf.num_binop(kernel_op, old, one), fn(new) { #(old, new) }),
             anf.then(anf.host("to_numeric", [old]), fn(old_n) {

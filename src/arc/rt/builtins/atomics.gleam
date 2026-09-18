@@ -81,8 +81,8 @@ type AtomicAccess {
   NotifyAccess
 }
 
-type TaInfo {
-  TaInfo(
+type AtomicsTarget {
+  AtomicsTarget(
     buffer: Handle,
     elem_kind: TypedArrayKind,
     byte_offset: Int,
@@ -110,7 +110,7 @@ fn atomics_elem(
   }
 }
 
-fn elem_size(info: TaInfo) -> Int {
+fn elem_size(info: AtomicsTarget) -> Int {
   int_elem_size(info.elem)
 }
 
@@ -119,7 +119,7 @@ fn with_ta_and_index(
   st: Agent,
   args: List(JsVal),
   mode mode: AtomicAccess,
-) -> #(TaInfo, Int, Agent) {
+) -> #(AtomicsTarget, Int, Agent) {
   let waitable = case mode {
     WaitAccess | NotifyAccess -> True
     RmwAccess | LoadAccess -> False
@@ -170,7 +170,7 @@ fn with_ta_and_index(
   let avail = { buf.byte_size - view.byte_offset } / size
   let live = int.clamp(avail, 0, view.length)
   let info =
-    TaInfo(
+    AtomicsTarget(
       buffer: view.buffer,
       elem_kind: view.elem_kind,
       byte_offset: view.byte_offset,
@@ -188,8 +188,8 @@ fn with_ta_and_index(
   #(info, idx, st)
 }
 
-type TaView {
-  TaView(
+type TypedArrayView {
+  TypedArrayView(
     buffer: Handle,
     elem_kind: TypedArrayKind,
     byte_offset: Int,
@@ -197,7 +197,7 @@ type TaView {
   )
 }
 
-fn read_typed_array(st: Agent, val: JsVal) -> Option(TaView) {
+fn read_typed_array(st: Agent, val: JsVal) -> Option(TypedArrayView) {
   case classify(val) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
@@ -205,7 +205,7 @@ fn read_typed_array(st: Agent, val: JsVal) -> Option(TaView) {
           kind: TypedArrayObj(buffer:, elem_kind:, byte_offset:, length:),
           ..,
         ) ->
-          Some(TaView(
+          Some(TypedArrayView(
             buffer:,
             elem_kind:,
             byte_offset:,
@@ -253,7 +253,7 @@ fn live_buffer(storage: BufferStorage) -> Option(BufferInfo) {
 }
 
 // §25.4.3.4 coercion may have detached or shrunk buffer
-fn revalidate(st: Agent, info: TaInfo, idx: Int) -> BufferInfo {
+fn revalidate(st: Agent, info: AtomicsTarget, idx: Int) -> BufferInfo {
   use storage <- helpers.some_or(buffer.buffer_storage(st, info.buffer), fn() {
     rt_val.t_throw_type_error(st, "TypedArray is not attached")
   })
@@ -269,7 +269,7 @@ fn revalidate(st: Agent, info: TaInfo, idx: Int) -> BufferInfo {
 }
 
 // non-finite maps to +0, match before saturating
-fn to_operand(st: Agent, info: TaInfo, val: JsVal) -> #(Int, Agent) {
+fn to_operand(st: Agent, info: AtomicsTarget, val: JsVal) -> #(Int, Agent) {
   case info.elem_kind {
     BigKind(_) -> rt_val.t_to_bigint(st, val)
     NumKind(_) -> {
@@ -292,15 +292,15 @@ fn wrap_to_kind(v: Int, elem: IntElem) -> Int {
   }
 }
 
-fn element_offset(info: TaInfo, idx: Int) -> Int {
+fn element_offset(info: AtomicsTarget, idx: Int) -> Int {
   info.byte_offset + idx * elem_size(info)
 }
 
-fn element_bytes(info: TaInfo, v: Int) -> BitArray {
+fn element_bytes(info: AtomicsTarget, v: Int) -> BitArray {
   set_int(zeroed(elem_size(info)), 0, info.elem, v)
 }
 
-fn read_element(buf: BufferInfo, info: TaInfo, idx: Int) -> Int {
+fn read_element(buf: BufferInfo, info: AtomicsTarget, idx: Int) -> Int {
   let off = element_offset(info, idx)
   case buf.data {
     StoreData(bits:, ..) -> get_int(bits, off, info.elem)
@@ -311,7 +311,7 @@ fn read_element(buf: BufferInfo, info: TaInfo, idx: Int) -> Int {
 
 fn write_element(
   st: Agent,
-  info: TaInfo,
+  info: AtomicsTarget,
   buf: BufferInfo,
   idx: Int,
   v: Int,
@@ -339,7 +339,7 @@ fn write_element(
 
 fn modify_element(
   st: Agent,
-  info: TaInfo,
+  info: AtomicsTarget,
   buf: BufferInfo,
   idx: Int,
   op: fn(Int) -> Option(Int),
@@ -370,7 +370,7 @@ fn modify_element(
   }
 }
 
-fn element_to_js(info: TaInfo, raw: Int) -> JsVal {
+fn element_to_js(info: AtomicsTarget, raw: Int) -> JsVal {
   case info.elem_kind {
     BigKind(_) -> mk_bigint(raw)
     NumKind(_) -> mk_int(raw)
@@ -511,7 +511,7 @@ fn do_wait(st: Agent, args: List(JsVal), sync sync: Bool) -> #(JsVal, Agent) {
   }
 }
 
-fn wait_value(st: Agent, info: TaInfo, val: JsVal) -> #(Int, Agent) {
+fn wait_value(st: Agent, info: AtomicsTarget, val: JsVal) -> #(Int, Agent) {
   case info.elem_kind {
     BigKind(_) -> {
       let #(n, st) = rt_val.t_to_bigint(st, val)

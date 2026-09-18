@@ -4,7 +4,7 @@ import arc/bytecode/lexical
 import arc/bytecode/opcode.{
   type IrOp, type LabelId, CatchOnly, Finally, IrAsyncYieldStarNext,
   IrAsyncYieldStarResume, IrBinOp, IrDefineAccessor, IrDefineField,
-  IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetField2, IrGosub,
+  IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetFieldKeep, IrGosub,
   IrJump, IrJumpIfFalse, IrJumpIfNotNullish, IrJumpIfNullish, IrJumpIfTrue,
   IrLabel, IrPushTry, IrPutField, IterCloseGuard,
 }
@@ -729,7 +729,7 @@ fn safe_to_emit_twice(expr: ast.Expression) -> Bool {
     ast.Identifier(..)
     | ast.NumberLiteral(..)
     | ast.BigIntLiteral(..)
-    | ast.StringExpression(..)
+    | ast.StringLiteral(..)
     | ast.BooleanLiteral(..)
     | ast.NullLiteral(..)
     | ast.UndefinedExpression(..)
@@ -1539,13 +1539,13 @@ fn emit_get_field(e: Emitter, name: String) -> Emitter {
 }
 
 // [obj, ..] -> [val, obj, ..]
-fn emit_get_field2(e: Emitter, name: String) -> Emitter {
+fn emit_get_field_keep(e: Emitter, name: String) -> Emitter {
   case name {
     "#" <> _ ->
       e
       |> emit_var_get(name)
-      |> emit_op(opcode.GetPrivateFieldDyn2)
-    _ -> emit_ir(e, IrGetField2(name))
+      |> emit_op(opcode.GetPrivateFieldDynKeep)
+    _ -> emit_ir(e, IrGetFieldKeep(name))
   }
 }
 
@@ -1780,7 +1780,7 @@ fn emit_async_iterator_close(e: Emitter) -> Emitter {
   let #(e, no_ret) = fresh_label(e)
   let #(e, closed) = fresh_label(e)
   e
-  |> emit_ir(IrGetField2("return"))
+  |> emit_ir(IrGetFieldKeep("return"))
   |> emit_op(opcode.Dup)
   |> emit_ir(IrJumpIfNullish(no_ret))
   |> emit_op(opcode.CallMethod(0))
@@ -1970,16 +1970,16 @@ fn emit_member_get_keep(
   case target {
     SuperMember(property:) -> {
       use e <- result.map(emit_super_ref(e, property))
-      #(emit_op(e, opcode.GetSuperValue2), emit_op(_, opcode.PutSuperValue))
+      #(emit_op(e, opcode.GetSuperValueKeep), emit_op(_, opcode.PutSuperValue))
     }
     StaticMember(object:, prop:) -> {
       use e <- result.map(emit_expr(e, object))
-      #(emit_get_field2(e, prop), emit_put_field(_, prop))
+      #(emit_get_field_keep(e, prop), emit_put_field(_, prop))
     }
     ComputedMember(object:, key:) -> {
       use e <- result.try(emit_expr(e, object))
       use e <- result.map(emit_expr(e, key))
-      #(emit_op(e, opcode.GetElem2), emit_op(_, opcode.PutElem))
+      #(emit_op(e, opcode.GetElemKeep), emit_op(_, opcode.PutElem))
     }
     PlainTarget(_) -> Error(NonMemberLValue)
   }
@@ -3084,7 +3084,7 @@ fn emit_chain_callee(
     ast.MemberExpression(_, obj, ast.Dot(name:, ..))
     | ast.OptionalMemberExpression(_, obj, ast.Dot(name:, ..)) -> {
       use e <- result.map(emit_chain_object(e, callee, obj, exits))
-      #(emit_get_field2(e, name), MethodCall)
+      #(emit_get_field_keep(e, name), MethodCall)
     }
     ast.MemberExpression(_, obj, ast.Bracket(key))
     | ast.OptionalMemberExpression(_, obj, ast.Bracket(key)) -> {
@@ -3099,10 +3099,10 @@ fn emit_chain_callee(
   }
 }
 
-// [key, obj] -> GetElem2 [method, key, obj] -> [method, obj]
+// [key, obj] -> GetElemKeep [method, key, obj] -> [method, obj]
 fn emit_get_elem_method(e: Emitter) -> Emitter {
   e
-  |> emit_op(opcode.GetElem2)
+  |> emit_op(opcode.GetElemKeep)
   |> emit_op(opcode.Swap)
   |> emit_op(opcode.Pop)
 }
@@ -3112,7 +3112,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.NumberLiteral(_, value) ->
       Ok(push_const(e, const_fold.number_const(value)))
     ast.BigIntLiteral(value: n, ..) -> Ok(push_const(e, mk_bigint(n)))
-    ast.StringExpression(_, value) -> Ok(push_const(e, mk_string(value)))
+    ast.StringLiteral(_, value) -> Ok(push_const(e, mk_string(value)))
     ast.BooleanLiteral(_, value) -> Ok(push_const(e, mk_bool(value)))
     ast.NullLiteral(_) -> Ok(push_const(e, mk_null()))
     ast.UndefinedExpression(_) -> Ok(push_const(e, mk_undefined()))
@@ -3597,7 +3597,7 @@ fn emit_call(
     ast.MemberExpression(_, obj, ast.Dot(name: method_name, ..)) -> {
       let forwarding = apply_arguments_forwarding(e, expr)
       use e <- result.try(emit_expr(e, obj))
-      let e = emit_get_field2(e, method_name)
+      let e = emit_get_field_keep(e, method_name)
       case forwarding {
         Some(ApplyArgumentsForwarding(this_arg:, arguments_slot:)) -> {
           use e <- result.map(emit_expr(e, this_arg))
@@ -4377,7 +4377,7 @@ fn emit_for_await_of(
   // F_next: errors in next/await/unwrap must not close (§14.7.5.6)
   let e = emit_ir(e, IrPushTry(catch_next, CatchOnly))
   let e = emit_op(e, opcode.Dup)
-  let e = emit_ir(e, IrGetField2("next"))
+  let e = emit_ir(e, IrGetFieldKeep("next"))
   let e = emit_op(e, opcode.CallMethod(0))
   let e = emit_op(e, opcode.Await)
   let e = emit_op(e, opcode.IteratorCheckObject)
@@ -4409,7 +4409,7 @@ fn emit_for_await_of(
   let e = emit_op(e, opcode.Swap)
   let e = emit_op(e, opcode.Dup)
   // [iter, iter, thrown, ..base]
-  let e = emit_ir(e, IrGetField2("return"))
+  let e = emit_ir(e, IrGetFieldKeep("return"))
   let e = emit_op(e, opcode.Dup)
   let e = emit_ir(e, IrJumpIfNullish(no_ret_thr))
   // [ret_fn, iter, iter, thrown, ..base]
@@ -4624,7 +4624,7 @@ fn emit_single_object_prop(
   }
 }
 
-// with rest, GetElem2 keeps the key for the exclusion set (evaluated once)
+// with rest, GetElemKeep keeps the key for the exclusion set (evaluated once)
 fn emit_computed_key_prop(
   e: Emitter,
   emit_key: fn(Emitter) -> Result(Emitter, EmitError),
@@ -4642,7 +4642,7 @@ fn emit_computed_key_prop(
       #(e, excluded_key_count)
     }
     True -> {
-      let e = emit_op(e, opcode.GetElem2)
+      let e = emit_op(e, opcode.GetElemKeep)
       use e <- result.map(emit_destructuring_bind(e, inner, binding_kind))
       #(emit_keep_computed_key(e), excluded_key_count + 1)
     }
@@ -4958,7 +4958,7 @@ fn emit_elem_key_assign(
       #(e, excluded_key_count)
     }
     True -> {
-      let e = emit_op(e, opcode.GetElem2)
+      let e = emit_op(e, opcode.GetElemKeep)
       use e <- result.map(emit_destructuring_assign(e, value))
       #(emit_keep_computed_key(e), excluded_key_count + 1)
     }
@@ -5143,15 +5143,15 @@ fn translate_binop(op: ast.BinaryOp) -> opcode.BinOpKind {
     ast.Exponentiation -> opcode.Exp
     ast.StrictEqual -> opcode.StrictEq
     ast.StrictNotEqual -> opcode.StrictNotEq
-    ast.Equal -> opcode.Eq
-    ast.NotEqual -> opcode.NotEq
-    ast.LessThan -> opcode.Lt
-    ast.GreaterThan -> opcode.Gt
-    ast.LessThanEqual -> opcode.LtEq
-    ast.GreaterThanEqual -> opcode.GtEq
+    ast.Equal -> opcode.LooseEq
+    ast.NotEqual -> opcode.LooseNotEq
+    ast.LessThan -> opcode.Less
+    ast.GreaterThan -> opcode.Greater
+    ast.LessThanEqual -> opcode.LessEq
+    ast.GreaterThanEqual -> opcode.GreaterEq
     ast.LeftShift -> opcode.ShiftLeft
     ast.RightShift -> opcode.ShiftRight
-    ast.UnsignedRightShift -> opcode.UShiftRight
+    ast.UnsignedRightShift -> opcode.ShiftRightUnsigned
     ast.BitwiseAnd -> opcode.BitAnd
     ast.BitwiseOr -> opcode.BitOr
     ast.BitwiseXor -> opcode.BitXor
@@ -5189,7 +5189,7 @@ fn compound_to_binop(op: ast.AssignmentOp) -> Result(opcode.BinOpKind, Nil) {
     ast.ExponentiationAssign -> Ok(opcode.Exp)
     ast.LeftShiftAssign -> Ok(opcode.ShiftLeft)
     ast.RightShiftAssign -> Ok(opcode.ShiftRight)
-    ast.UnsignedRightShiftAssign -> Ok(opcode.UShiftRight)
+    ast.UnsignedRightShiftAssign -> Ok(opcode.ShiftRightUnsigned)
     ast.BitwiseAndAssign -> Ok(opcode.BitAnd)
     ast.BitwiseOrAssign -> Ok(opcode.BitOr)
     ast.BitwiseXorAssign -> Ok(opcode.BitXor)
@@ -5582,18 +5582,18 @@ fn with_method_target(
 // §10.2.9 SetFunctionName prefix for accessors
 fn method_display_name(kind: ast.MethodKind, name: String) -> String {
   case kind {
-    ast.MethodGet -> "get " <> name
-    ast.MethodSet -> "set " <> name
-    ast.MethodMethod | ast.MethodConstructor -> name
+    ast.GetterMethod -> "get " <> name
+    ast.SetterMethod -> "set " <> name
+    ast.PlainMethod | ast.ConstructorMethod -> name
   }
 }
 
 // [fn, #name, target] -> [target]
 fn private_define_op(kind: ast.MethodKind) -> opcode.Op {
   case kind {
-    ast.MethodGet -> opcode.DefinePrivateAccessor(opcode.Getter)
-    ast.MethodSet -> opcode.DefinePrivateAccessor(opcode.Setter)
-    ast.MethodMethod | ast.MethodConstructor -> opcode.DefinePrivateMethod
+    ast.GetterMethod -> opcode.DefinePrivateAccessor(opcode.Getter)
+    ast.SetterMethod -> opcode.DefinePrivateAccessor(opcode.Setter)
+    ast.PlainMethod | ast.ConstructorMethod -> opcode.DefinePrivateMethod
   }
 }
 
@@ -5624,11 +5624,11 @@ fn emit_class_methods(
       let display_name = method_display_name(kind, name)
       use e <- result.map(emit_method_value(e, fun, Some(display_name)))
       case kind {
-        ast.MethodGet ->
+        ast.GetterMethod ->
           emit_ir(e, IrDefineAccessor(name, opcode.Getter, enumerable: False))
-        ast.MethodSet ->
+        ast.SetterMethod ->
           emit_ir(e, IrDefineAccessor(name, opcode.Setter, enumerable: False))
-        ast.MethodMethod | ast.MethodConstructor ->
+        ast.PlainMethod | ast.ConstructorMethod ->
           emit_ir(e, IrDefineMethod(name))
       }
     }
@@ -5637,17 +5637,17 @@ fn emit_class_methods(
       use e <- result.try(emit_class_element_key(e, key, body_index))
       use e <- result.map(emit_method_value(e, fun, None))
       case kind {
-        ast.MethodGet ->
+        ast.GetterMethod ->
           emit_op(
             e,
             opcode.DefineAccessorComputed(opcode.Getter, enumerable: False),
           )
-        ast.MethodSet ->
+        ast.SetterMethod ->
           emit_op(
             e,
             opcode.DefineAccessorComputed(opcode.Setter, enumerable: False),
           )
-        ast.MethodMethod | ast.MethodConstructor ->
+        ast.PlainMethod | ast.ConstructorMethod ->
           emit_op(e, opcode.DefineMethodComputed)
       }
     }

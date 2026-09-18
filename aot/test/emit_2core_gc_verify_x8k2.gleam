@@ -79,19 +79,19 @@ fn compile_load(source: String, name: String) -> Result(Atom, String) {
 }
 
 fn stats_line(label: String, s: rt_gc.GcStats) -> String {
-  let rt_gc.GcStats(live:, next:, since_gc:) = s
+  let rt_gc.GcStats(live_count:, next_id:, alloc_since_gc:) = s
   "  "
   <> label
   <> " next="
-  <> int.to_string(next)
+  <> int.to_string(next_id)
   <> " live="
-  <> int.to_string(live)
+  <> int.to_string(live_count)
   <> " since_gc="
-  <> int.to_string(since_gc)
+  <> int.to_string(alloc_since_gc)
 }
 
 fn swept(before: rt_gc.GcStats, after: rt_gc.GcStats) -> Int {
-  { after.next - before.next } - { after.live - before.live }
+  { after.next_id - before.next_id } - { after.live_count - before.live_count }
 }
 
 fn stdout_str(_st: Agent) -> String {
@@ -167,11 +167,16 @@ fn run_a() {
           let st2 = rt_gc.t_collect(st1, [])
           let s2 = rt_gc.stats(st2)
           io.println(stats_line("post-gc:  ", s2))
-          let dropped = s1.live - s2.live
+          let dropped = s1.live_count - s2.live_count
           io.println("  dropped=" <> int.to_string(dropped))
-          assert_in_range("live-after-gc", s2.live, s0.live, s0.live + 200)
+          assert_in_range(
+            "live-after-gc",
+            s2.live_count,
+            s0.live_count,
+            s0.live_count + 200,
+          )
           assert_in_range("dropped      ", dropped, 99_000, 101_000)
-          assert_eq("since_gc reset", int.to_string(s2.since_gc), "0")
+          assert_eq("since_gc reset", int.to_string(s2.alloc_since_gc), "0")
           let #(out2, st3) = run.apply_js_main(m_read, st2)
           io.println(
             "  read outcome: " <> string.slice(string.inspect(out2), 0, 120),
@@ -205,7 +210,12 @@ fn run_b() {
       io.println("  outcome  : " <> string.slice(string.inspect(out), 0, 200))
       let out_str = stdout_str(st1)
       io.println("  stdout   : " <> string.inspect(out_str))
-      assert_in_range("since_gc-after (< threshold)", s1.since_gc, 0, 65_535)
+      assert_in_range(
+        "since_gc-after (< threshold)",
+        s1.alloc_since_gc,
+        0,
+        65_535,
+      )
       assert_in_range(
         "swept (~100K)              ",
         swept(s0, s1),

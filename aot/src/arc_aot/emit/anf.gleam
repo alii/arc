@@ -62,13 +62,13 @@ pub fn is_known_number(e: Emitter, v: ir.Value) -> Bool {
   }
 }
 
-type StrParts {
+type StringParts {
   Ascii
   Tagged(BitArray, Int, List(Int))
 }
 
 @external(erlang, "arc_aot_anf_ffi", "str_parts")
-fn str_parts(s: String) -> StrParts
+fn str_parts(s: String) -> StringParts
 
 // non-ascii text takes the runtime's tagged form, built from constants so
 // the beam compiler folds it back into a literal
@@ -224,7 +224,7 @@ fn bind_if_typed(
   v
 }
 
-pub fn bind_if2(
+pub fn bind_if_pair(
   cond: ir.Value,
   t: Build(#(ir.Value, ir.Value)),
   f: Build(#(ir.Value, ir.Value)),

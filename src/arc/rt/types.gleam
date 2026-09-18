@@ -1,4 +1,14 @@
+//// the only one-letter constructor families:
+////   K* JsValKind, the view classify gives of a JsVal
+////   J* JsNum, the number cases inside KNum
+////   S* Cell, what the store holds at a handle
+//// mk_* builds the JsVal a K* case reads back: mk_undefined <-> KUndef,
+//// mk_null <-> KNull, mk_bool <-> KBool, mk_number/mk_int <-> KNum,
+//// mk_string <-> KStr, mk_bigint <-> KBig, mk_symbol <-> KSym,
+//// mk_object(h) <-> KHandle(h), mk_tdz <-> KTdz
+
 import arc/bytecode/error_kind.{type ErrorKind}
+import arc/bytecode/key.{type PropertyKey}
 import arc/host_hooks.{type ConsoleLevel, type HostHooks}
 import arc/internal/ordered_entries.{type OrderedEntries}
 import arc/internal/temporal_calendar.{type Calendar}
@@ -92,111 +102,9 @@ pub type ToPrimHint {
   HintNumber
 }
 
-// 2^32 - 2 (§6.1.7)
-pub const max_array_index = 4_294_967_294
-
-// 2^32 - 1
-pub const max_array_length = 4_294_967_295
-
-pub type PropertyKey {
-  Index(n: Int)
-  Named(name: String)
-  Private(text: BitArray)
-}
-
 pub type ObjectKey {
   StringKey(PropertyKey)
   SymbolKey(SymbolId)
-}
-
-pub fn canonical_key(s: String) -> PropertyKey {
-  case bit_array.from_string(s) {
-    // digit guard avoids int.parse badarg cost on every key
-    <<c, _:bytes>> if c >= 48 && c <= 57 ->
-      case int.parse(s) {
-        Ok(n) if n >= 0 && n <= max_array_index ->
-          case int.to_string(n) == s {
-            True -> Index(n)
-            False -> Named(s)
-          }
-        _ -> Named(s)
-      }
-    _ -> Named(s)
-  }
-}
-
-pub fn index_key(n: Int) -> PropertyKey {
-  case n >= 0 && n <= max_array_index {
-    True -> Index(n)
-    False -> Named(int.to_string(n))
-  }
-}
-
-pub fn array_index_of_float(f: Float) -> Option(Int) {
-  let n = f +. 0.0
-  let i = float.truncate(n)
-  case int.to_float(i) == n && i >= 0 && i <= max_array_index {
-    True -> Some(i)
-    False -> None
-  }
-}
-
-pub fn key_to_text(key: PropertyKey) -> String {
-  case key {
-    Index(n) -> int.to_string(n)
-    Named(s) -> s
-    Private(text) ->
-      case bit_array.to_string(text) {
-        Ok(s) -> s
-        Error(Nil) -> ""
-      }
-  }
-}
-
-pub fn key_display_string(key: PropertyKey) -> String {
-  case key {
-    Index(n) -> int.to_string(n)
-    Named(name) -> name
-    Private(text) -> private_display_name(text)
-  }
-}
-
-pub fn is_private_key(key: PropertyKey) -> Bool {
-  case key {
-    Private(_) -> True
-    Index(_) | Named(_) -> False
-  }
-}
-
-pub fn private_key(name: String) -> PropertyKey {
-  Private(bit_array.from_string(name))
-}
-
-pub fn private_key_text(name: String, uid: Int) -> BitArray {
-  <<name:utf8, 0, int.to_string(uid):utf8>>
-}
-
-pub fn private_display_name(key_text: BitArray) -> String {
-  case split_at_nul(key_text, <<>>) {
-    Some(name) -> name
-    None ->
-      case bit_array.to_string(key_text) {
-        Ok(s) -> s
-        Error(Nil) -> ""
-      }
-  }
-}
-
-fn split_at_nul(rest: BitArray, acc: BitArray) -> Option(String) {
-  case rest {
-    <<0, _:bytes>> ->
-      case bit_array.to_string(acc) {
-        Ok(s) -> Some(s)
-        Error(Nil) -> None
-      }
-    <<b, tail:bytes>> -> split_at_nul(tail, <<acc:bits, b>>)
-    _ -> None
-  }
 }
 
 pub type WellKnown {
@@ -327,25 +235,25 @@ pub type TypedArrayKind {
 }
 
 pub type ViewNumElement {
-  VInt8
-  VUint8
-  VInt16
-  VUint16
-  VInt32
-  VUint32
-  VFloat16
-  VFloat32
-  VFloat64
+  ViewInt8
+  ViewUint8
+  ViewInt16
+  ViewUint16
+  ViewInt32
+  ViewUint32
+  ViewFloat16
+  ViewFloat32
+  ViewFloat64
 }
 
 pub type ViewBigElement {
-  VBigInt64
-  VBigUint64
+  ViewBigInt64
+  ViewBigUint64
 }
 
 pub type ViewElementType {
-  VNum(ViewNumElement)
-  VBig(ViewBigElement)
+  ViewNum(ViewNumElement)
+  ViewBig(ViewBigElement)
 }
 
 pub type BufferStorage {
@@ -570,34 +478,34 @@ pub type FnFlags {
 }
 
 pub type MapKey {
-  MKString(String)
-  MKNumber(Float)
-  MKNan
-  MKInfinity
-  MKNegInfinity
-  MKBool(Bool)
-  MKNull
-  MKUndefined
-  MKObject(Handle)
-  MKSymbol(SymbolId)
-  MKBigInt(Int)
+  MapKeyString(String)
+  MapKeyNumber(Float)
+  MapKeyNan
+  MapKeyInfinity
+  MapKeyNegInfinity
+  MapKeyBool(Bool)
+  MapKeyNull
+  MapKeyUndefined
+  MapKeyObject(Handle)
+  MapKeySymbol(SymbolId)
+  MapKeyBigInt(Int)
 }
 
 pub fn js_to_map_key(v: JsVal) -> MapKey {
   case classify(v) {
-    KStr(s) -> MKString(s)
-    KNum(JNan) -> MKNan
-    KNum(JPosInf) -> MKInfinity
-    KNum(JNegInf) -> MKNegInfinity
+    KStr(s) -> MapKeyString(s)
+    KNum(JNan) -> MapKeyNan
+    KNum(JPosInf) -> MapKeyInfinity
+    KNum(JNegInf) -> MapKeyNegInfinity
     // +. 0.0 turns -0.0 into +0.0
-    KNum(JFloat(f)) -> MKNumber(f +. 0.0)
-    KNum(JInt(n)) -> MKNumber(int.to_float(n) +. 0.0)
-    KBool(b) -> MKBool(b)
-    KNull -> MKNull
-    KUndef -> MKUndefined
-    KHandle(h) -> MKObject(h)
-    KSym(id) -> MKSymbol(id)
-    KBig(n) -> MKBigInt(n)
+    KNum(JFloat(f)) -> MapKeyNumber(f +. 0.0)
+    KNum(JInt(n)) -> MapKeyNumber(int.to_float(n) +. 0.0)
+    KBool(b) -> MapKeyBool(b)
+    KNull -> MapKeyNull
+    KUndef -> MapKeyUndefined
+    KHandle(h) -> MapKeyObject(h)
+    KSym(id) -> MapKeySymbol(id)
+    KBig(n) -> MapKeyBigInt(n)
     KTdz -> panic as "js_to_map_key on the TDZ sentinel"
   }
 }
@@ -605,17 +513,17 @@ pub fn js_to_map_key(v: JsVal) -> MapKey {
 // called by name from arc_rt_lang_ffi
 pub fn map_key_to_js(key: MapKey) -> JsVal {
   case key {
-    MKString(s) -> mk_string(s)
-    MKNumber(f) -> mk_number(integral_key_number(f))
-    MKNan -> mk_number(JNan)
-    MKInfinity -> mk_number(JPosInf)
-    MKNegInfinity -> mk_number(JNegInf)
-    MKBool(b) -> mk_bool(b)
-    MKNull -> mk_null()
-    MKUndefined -> mk_undefined()
-    MKObject(h) -> mk_object(h)
-    MKSymbol(id) -> mk_symbol(id)
-    MKBigInt(n) -> mk_bigint(n)
+    MapKeyString(s) -> mk_string(s)
+    MapKeyNumber(f) -> mk_number(integral_key_number(f))
+    MapKeyNan -> mk_number(JNan)
+    MapKeyInfinity -> mk_number(JPosInf)
+    MapKeyNegInfinity -> mk_number(JNegInf)
+    MapKeyBool(b) -> mk_bool(b)
+    MapKeyNull -> mk_null()
+    MapKeyUndefined -> mk_undefined()
+    MapKeyObject(h) -> mk_object(h)
+    MapKeySymbol(id) -> mk_symbol(id)
+    MapKeyBigInt(n) -> mk_bigint(n)
   }
 }
 
@@ -649,18 +557,19 @@ pub type SetIterKind {
 }
 
 pub type MethodInstallKind {
-  MIMethod
-  MIGetter
-  MISetter
-  MIStatic
-  MIStaticGetter
-  MIStaticSetter
+  InstallMethod
+  InstallGetter
+  InstallSetter
+  InstallStatic
+  InstallStaticGetter
+  InstallStaticSetter
 }
 
+// new tokens: prototype methods are <Type><Method>, statics end in Static
 pub type NativeToken {
   PromiseResolveFn(promise: Handle, already_resolved: Handle)
   PromiseRejectFn(promise: Handle, already_resolved: Handle)
-  AsyncGenResume(gen: Handle, is_throw: Bool, kind: AGResumeKind)
+  AsyncGenResume(gen: Handle, is_throw: Bool, kind: AsyncGenResumeKind)
   ObjectN(ObjectNative)
   FunctionN(FunctionNative)
   ErrorN(ErrorNative)
@@ -990,14 +899,14 @@ pub type DateNative {
 }
 
 pub type RegExpFlag {
-  RFHasIndices
-  RFGlobal
-  RFIgnoreCase
-  RFMultiline
-  RFDotAll
-  RFUnicode
-  RFUnicodeSets
-  RFSticky
+  HasIndicesFlag
+  GlobalFlag
+  IgnoreCaseFlag
+  MultilineFlag
+  DotAllFlag
+  UnicodeFlag
+  UnicodeSetsFlag
+  StickyFlag
 }
 
 pub type LegacyStatic {
@@ -1317,8 +1226,8 @@ pub type WeakNative {
   WeakSetDelete
 }
 
-pub type FromAsyncCtx {
-  FromAsyncCtx(
+pub type FromAsyncContext {
+  FromAsyncContext(
     iter: JsVal,
     next_method: JsVal,
     map_fn: Option(JsVal),
@@ -1330,8 +1239,8 @@ pub type FromAsyncCtx {
   )
 }
 
-pub type FromAsyncLikeCtx {
-  FromAsyncLikeCtx(
+pub type FromAsyncLikeContext {
+  FromAsyncLikeContext(
     items: JsVal,
     map_fn: Option(JsVal),
     this_arg: JsVal,
@@ -1348,12 +1257,12 @@ pub type ArrayNative {
   ArrayIsArray
   ArrayFrom
   ArrayFromAsync
-  ArrayFromAsyncOnNext(ctx: FromAsyncCtx)
-  ArrayFromAsyncOnMapped(ctx: FromAsyncCtx)
+  ArrayFromAsyncOnNext(ctx: FromAsyncContext)
+  ArrayFromAsyncOnMapped(ctx: FromAsyncContext)
   ArrayFromAsyncCloseReject(iter: JsVal, reject: JsVal)
   ArrayFromAsyncRejectWith(error: JsVal, reject: JsVal)
-  ArrayFromAsyncLikeOnValue(ctx: FromAsyncLikeCtx)
-  ArrayFromAsyncLikeOnMapped(ctx: FromAsyncLikeCtx)
+  ArrayFromAsyncLikeOnValue(ctx: FromAsyncLikeContext)
+  ArrayFromAsyncLikeOnMapped(ctx: FromAsyncLikeContext)
   ArrayOf
   ArrayPrototypeJoin
   ArrayPrototypePush
@@ -1606,112 +1515,112 @@ pub type TemporalNative {
 }
 
 pub type TemporalZonedGetter {
-  ZgTimeZoneId
-  ZgEpochMilliseconds
-  ZgEpochNanoseconds
-  ZgOffsetNanoseconds
-  ZgOffset
-  ZgHoursInDay
-  ZgDate(TemporalDateGetter)
-  ZgTime(TemporalTimeGetter)
+  ZonedTimeZoneId
+  ZonedEpochMilliseconds
+  ZonedEpochNanoseconds
+  ZonedOffsetNanoseconds
+  ZonedOffset
+  ZonedHoursInDay
+  ZonedDate(TemporalDateGetter)
+  ZonedTime(TemporalTimeGetter)
 }
 
 pub type ZonedDateTimeMethod {
-  ZmWithTimeZone
-  ZmWithCalendar
-  ZmWithPlainTime
-  ZmWith
-  ZmAdd
-  ZmSubtract
-  ZmUntil
-  ZmSince
-  ZmRound
-  ZmEquals
-  ZmToString
-  ZmToLocaleString
-  ZmToJson
-  ZmValueOf
-  ZmStartOfDay
-  ZmGetTimeZoneTransition
-  ZmToInstant
-  ZmToPlainDate
-  ZmToPlainTime
-  ZmToPlainDateTime
+  ZonedDateTimeWithTimeZone
+  ZonedDateTimeWithCalendar
+  ZonedDateTimeWithPlainTime
+  ZonedDateTimeWith
+  ZonedDateTimeAdd
+  ZonedDateTimeSubtract
+  ZonedDateTimeUntil
+  ZonedDateTimeSince
+  ZonedDateTimeRound
+  ZonedDateTimeEquals
+  ZonedDateTimeToString
+  ZonedDateTimeToLocaleString
+  ZonedDateTimeToJson
+  ZonedDateTimeValueOf
+  ZonedDateTimeStartOfDay
+  ZonedDateTimeGetTimeZoneTransition
+  ZonedDateTimeToInstant
+  ZonedDateTimeToPlainDate
+  ZonedDateTimeToPlainTime
+  ZonedDateTimeToPlainDateTime
 }
 
 pub type TemporalYearMonthGetter {
-  YmCalendarId
-  YmEra
-  YmEraYear
-  YmYear
-  YmMonth
-  YmMonthCode
-  YmDaysInYear
-  YmDaysInMonth
-  YmMonthsInYear
-  YmInLeapYear
+  YearMonthCalendarId
+  YearMonthEra
+  YearMonthEraYear
+  YearMonthYear
+  YearMonthMonth
+  YearMonthMonthCode
+  YearMonthDaysInYear
+  YearMonthDaysInMonth
+  YearMonthMonthsInYear
+  YearMonthInLeapYear
 }
 
 pub type TemporalMonthDayGetter {
-  MdCalendarId
-  MdMonthCode
-  MdDay
+  MonthDayCalendarId
+  MonthDayMonthCode
+  MonthDayDay
 }
 
 pub type PlainYearMonthMethod {
-  PymWith
-  PymAdd
-  PymSubtract
-  PymUntil
-  PymSince
-  PymEquals
-  PymToString
-  PymToLocaleString
-  PymToJson
-  PymValueOf
-  PymToPlainDate
+  PlainYearMonthWith
+  PlainYearMonthAdd
+  PlainYearMonthSubtract
+  PlainYearMonthUntil
+  PlainYearMonthSince
+  PlainYearMonthEquals
+  PlainYearMonthToString
+  PlainYearMonthToLocaleString
+  PlainYearMonthToJson
+  PlainYearMonthValueOf
+  PlainYearMonthToPlainDate
 }
 
 pub type PlainMonthDayMethod {
-  PmdWith
-  PmdEquals
-  PmdToString
-  PmdToLocaleString
-  PmdToJson
-  PmdValueOf
-  PmdToPlainDate
+  PlainMonthDayWith
+  PlainMonthDayEquals
+  PlainMonthDayToString
+  PlainMonthDayToLocaleString
+  PlainMonthDayToJson
+  PlainMonthDayValueOf
+  PlainMonthDayToPlainDate
 }
 
 pub type PlainDateMethod {
-  PdToPlainYearMonth
-  PdToPlainMonthDay
-  PdToPlainDateTime
-  PdToZonedDateTime
-  PdAdd
-  PdSubtract
-  PdWith
-  PdWithCalendar
-  PdUntil
-  PdSince
-  PdEquals
-  PdToString
-  PdToLocaleString
-  PdToJson
-  PdValueOf
+  PlainDateToPlainYearMonth
+  PlainDateToPlainMonthDay
+  PlainDateToPlainDateTime
+  PlainDateToZonedDateTime
+  PlainDateAdd
+  PlainDateSubtract
+  PlainDateWith
+  PlainDateWithCalendar
+  PlainDateUntil
+  PlainDateSince
+  PlainDateEquals
+  PlainDateToString
+  PlainDateToLocaleString
+  PlainDateToJson
+  PlainDateValueOf
 }
 
 pub type PlainTimeMethod {
-  PtAdd
-  PtSubtract
-  PtWith
-  PtUntil
-  PtSince
-  PtRound
-  PtEquals
-  PtToString
-  PtToLocaleString
-  PtToJson
-  PtValueOf
+  PlainTimeAdd
+  PlainTimeSubtract
+  PlainTimeWith
+  PlainTimeUntil
+  PlainTimeSince
+  PlainTimeRound
+  PlainTimeEquals
+  PlainTimeToString
+  PlainTimeToLocaleString
+  PlainTimeToJson
+  PlainTimeValueOf
 }
 
 pub type TemporalProtos {
@@ -1728,89 +1637,89 @@ pub type TemporalProtos {
 }
 
 pub type TemporalDurationGetter {
-  DrYears
-  DrMonths
-  DrWeeks
-  DrDays
-  DrHours
-  DrMinutes
-  DrSeconds
-  DrMilliseconds
-  DrMicroseconds
-  DrNanoseconds
-  DrSign
-  DrBlank
+  DurationYears
+  DurationMonths
+  DurationWeeks
+  DurationDays
+  DurationHours
+  DurationMinutes
+  DurationSeconds
+  DurationMilliseconds
+  DurationMicroseconds
+  DurationNanoseconds
+  DurationSign
+  DurationBlank
 }
 
 pub type DurationMethod {
-  DmWith
-  DmNegated
-  DmAbs
-  DmAdd
-  DmSubtract
-  DmRound
-  DmTotal
-  DmToString
-  DmToJson
-  DmToLocaleString
-  DmValueOf
+  DurationWith
+  DurationNegated
+  DurationAbs
+  DurationAdd
+  DurationSubtract
+  DurationRound
+  DurationTotal
+  DurationToString
+  DurationToJson
+  DurationToLocaleString
+  DurationValueOf
 }
 
 pub type TemporalStaticName {
-  TsFrom
-  TsCompare
+  FromStatic
+  CompareStatic
 }
 
 pub type TemporalDateGetter {
-  DgCalendarId
-  DgEra
-  DgEraYear
-  DgYear
-  DgMonth
-  DgMonthCode
-  DgDay
-  DgDayOfWeek
-  DgDayOfYear
-  DgWeekOfYear
-  DgYearOfWeek
-  DgDaysInWeek
-  DgDaysInMonth
-  DgDaysInYear
-  DgMonthsInYear
-  DgInLeapYear
+  DateCalendarId
+  DateEra
+  DateEraYear
+  DateYear
+  DateMonth
+  DateMonthCode
+  DateDay
+  DateDayOfWeek
+  DateDayOfYear
+  DateWeekOfYear
+  DateYearOfWeek
+  DateDaysInWeek
+  DateDaysInMonth
+  DateDaysInYear
+  DateMonthsInYear
+  DateInLeapYear
 }
 
 pub type TemporalTimeGetter {
-  TgHour
-  TgMinute
-  TgSecond
-  TgMillisecond
-  TgMicrosecond
-  TgNanosecond
+  TimeHour
+  TimeMinute
+  TimeSecond
+  TimeMillisecond
+  TimeMicrosecond
+  TimeNanosecond
 }
 
 pub type TemporalDateTimeGetter {
-  DtDate(TemporalDateGetter)
-  DtTime(TemporalTimeGetter)
+  DateTimeDate(TemporalDateGetter)
+  DateTimeTime(TemporalTimeGetter)
 }
 
 pub type PlainDateTimeMethod {
-  PdtWith
-  PdtWithPlainTime
-  PdtWithCalendar
-  PdtAdd
-  PdtSubtract
-  PdtUntil
-  PdtSince
-  PdtRound
-  PdtEquals
-  PdtToString
-  PdtToLocaleString
-  PdtToJson
-  PdtValueOf
-  PdtToPlainDate
-  PdtToPlainTime
-  PdtToZonedDateTime
+  PlainDateTimeWith
+  PlainDateTimeWithPlainTime
+  PlainDateTimeWithCalendar
+  PlainDateTimeAdd
+  PlainDateTimeSubtract
+  PlainDateTimeUntil
+  PlainDateTimeSince
+  PlainDateTimeRound
+  PlainDateTimeEquals
+  PlainDateTimeToString
+  PlainDateTimeToLocaleString
+  PlainDateTimeToJson
+  PlainDateTimeValueOf
+  PlainDateTimeToPlainDate
+  PlainDateTimeToPlainTime
+  PlainDateTimeToZonedDateTime
 }
 
 pub type TimeZone {
@@ -1894,9 +1803,9 @@ pub type TemporalData {
   TemporalZonedDateTime(epoch_ns: Int, time_zone: TimeZone, calendar: Calendar)
 }
 
-pub type AGResumeKind {
-  AGResumeAwaitingReturn
-  AGResumeReturnUnwind
+pub type AsyncGenResumeKind {
+  AwaitingReturnKind
+  ReturnUnwindKind
 }
 
 pub type IteratorRecord {
@@ -1968,7 +1877,7 @@ pub type ObjKind {
     flags: FnFlags,
     fields_init: Option(Handle),
     realm: Int,
-    unit: Int,
+    unit_id: Int,
     birth: FnBirth,
   )
   NativeFn(token: NativeToken, name: String, length: Int, constructible: Bool)
@@ -2078,7 +1987,7 @@ pub fn shape_slots_append(slots: ShapeSlots, v: JsVal) -> ShapeSlots
 
 pub type ShapeDesc {
   ShapeDesc(
-    arity: Int,
+    slot_count: Int,
     offsets: Dict(BitArray, Int),
     transitions: Dict(BitArray, Int),
   )
@@ -2097,9 +2006,9 @@ pub type IcEntry {
   IcOff
 }
 
-pub type IcCallWay {
-  IcCallWay(chain: List(#(Int, Cell)), callee: Handle, kind: ObjKind)
-}
+// bare {chain, callee, kind} tuple as arc_rt_call_ic_ffi ic_fill builds it
+pub type IcCallWay =
+  #(List(#(Int, Cell)), Handle, ObjKind)
 
 // shaped receivers key by shape id then proto id in IcCall.shaped
 pub type IcCallMatch {
@@ -2159,11 +2068,11 @@ pub type GeneratorState {
 }
 
 pub type AsyncGenState {
-  AGSuspendedStart
-  AGSuspendedYield
-  AGExecuting
-  AGAwaitingReturn
-  AGCompleted
+  AsyncGenSuspendedStart
+  AsyncGenSuspendedYield
+  AsyncGenExecuting
+  AsyncGenAwaitingReturn
+  AsyncGenCompleted
 }
 
 pub type AsyncGenRequest {
@@ -2358,27 +2267,29 @@ pub type EvalKind {
   ScriptEval
 }
 
-pub type JsOps(st) {
+// late-bound upcalls seeded by builtins.seed_ops and interp entry
+pub type JsOps {
   JsOps(
-    get_prop: fn(st, JsVal, ObjectKey) -> #(JsVal, st),
-    call: fn(st, JsVal, JsVal, List(JsVal)) -> #(JsVal, st),
-    to_object: fn(st, JsVal) -> #(Handle, st),
-    new_error: fn(st, ErrorKind, String) -> #(JsVal, st),
-    eval_hook: fn(st, String, EvalKind) -> #(JsVal, st),
-    call_bytecode: fn(st, Handle, ObjKind, JsVal, List(JsVal)) ->
-      #(Result(JsVal, JsVal), st),
-    prepare_call: fn(st, Handle, ObjKind, JsVal) ->
-      fn(st, List(JsVal)) -> #(JsVal, st),
-    construct_bytecode: fn(st, Handle, List(JsVal), JsVal) -> #(Handle, st),
-    resume_frame: fn(st, SuspendedFrame, #(Int, JsVal)) -> #(Step, st),
+    get_prop: fn(Agent, JsVal, ObjectKey) -> #(JsVal, Agent),
+    call: fn(Agent, JsVal, JsVal, List(JsVal)) -> #(JsVal, Agent),
+    to_object: fn(Agent, JsVal) -> #(Handle, Agent),
+    new_error: fn(Agent, ErrorKind, String) -> #(JsVal, Agent),
+    eval_hook: fn(Agent, String, EvalKind) -> #(JsVal, Agent),
+    call_bytecode: fn(Agent, Handle, ObjKind, JsVal, List(JsVal)) ->
+      #(Result(JsVal, JsVal), Agent),
+    prepare_call: fn(Agent, Handle, ObjKind, JsVal) ->
+      fn(Agent, List(JsVal)) -> #(JsVal, Agent),
+    construct_bytecode: fn(Agent, Handle, List(JsVal), JsVal) ->
+      #(Handle, Agent),
+    resume_frame: fn(Agent, SuspendedFrame, #(Int, JsVal)) -> #(Step, Agent),
   )
 }
 
 // field order is abi (arc_rt_layout.hrl); hot fields only, rest in meta
-pub type JsStore(st) {
-  JsStore(
-    data: Arena(Cell),
-    next: Int,
+pub type Store {
+  Store(
+    cells: Arena(Cell),
+    next_id: Int,
     alloc_since_gc: Int,
     gc_threshold: Int,
     prop_seq: Int,
@@ -2386,10 +2297,10 @@ pub type JsStore(st) {
     next_shape: Int,
     ics: Dict(Int, IcEntry),
     // proto id to whether its chain takes plain named writes
-    free_protos: Dict(Int, Nil),
+    plain_write_protos: Dict(Int, Nil),
     // bumped on any write to a global object cell, for global read caches
     global_epoch: Int,
-    ops: JsOps(st),
+    ops: JsOps,
     microtasks: JobQueue,
     pinned_roots: Set(Int),
     meta: StoreMeta,
@@ -2399,17 +2310,17 @@ pub type JsStore(st) {
 // rarely written, kept out of the record every heap write copies
 pub type StoreMeta {
   StoreMeta(
-    gc_live: Int,
-    private_uid: Int,
-    symbol_uid: Int,
-    unit_uid: Int,
+    live_count: Int,
+    next_private_id: Int,
+    next_symbol_id: Int,
+    next_unit_id: Int,
     unhandled_rejections: List(Int),
-    // data as of the last gc, ids below old_next are the old generation
-    old: Arena(Cell),
-    old_next: Int,
+    // cells as of the last gc, ids below young_start are the old generation
+    old_gen: Arena(Cell),
+    young_start: Int,
     // old cells holding weak refs, pruned each minor gc
-    weak_old: List(Int),
-    // gc_live right after the last major gc
+    old_weak_ids: List(Int),
+    // live_count right after the last major gc
     major_live: Int,
     minors_since_major: Int,
   )
@@ -2418,7 +2329,7 @@ pub type StoreMeta {
 // field order is abi (arc_rt_layout.hrl), append only
 pub type Agent {
   Agent(
-    store: JsStore(Agent),
+    store: Store,
     realm: Realm,
     template_objects: Dict(String, Handle),
     frames: List(FrameInfo),

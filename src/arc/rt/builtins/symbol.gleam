@@ -161,7 +161,7 @@ pub fn new_symbol(
   st: Agent,
   description: Option(String),
 ) -> #(SymbolId, Agent) {
-  let #(uid, st) = rt_store.t_next_symbol_uid(st)
+  let #(uid, st) = rt_store.t_next_symbol_id(st)
   #(UserSymbol(uid:, description:), st)
 }
 

@@ -136,12 +136,7 @@ pub fn analyze(items: List(ast.ModuleItem)) -> ModuleSummary {
 
 fn analyze_item(acc: Analysis, item: ast.ModuleItem) -> Analysis {
   case item {
-    ast.ImportDeclaration(
-      specifiers:,
-      source: ast.StringLit(source),
-      phase:,
-      ..,
-    ) -> {
+    ast.ImportDeclaration(specifiers:, source:, phase:, ..) -> {
       let request_phase = case phase {
         ast.PhaseDefer -> Deferred
         ast.PhaseEvaluation | ast.PhaseSource -> Evaluation
@@ -171,7 +166,7 @@ fn analyze_item(acc: Analysis, item: ast.ModuleItem) -> Analysis {
         })
       // §16.2.1.3: `export {} from "m"` still requests m
       let requests = case item {
-        ast.ExportNamed(source: Some(ast.StringLit(source)), ..) -> [
+        ast.ExportNamed(source: Some(source), ..) -> [
           ModuleRequest(specifier: Raw(source), phase: Evaluation),
           ..acc.requests
         ]
@@ -270,7 +265,7 @@ fn export_entries(item: ast.ModuleItem) -> List(ExportEntry) {
     ast.ExportDefaultDeclaration(..) -> [
       LocalExport(export_name: "default", local_name: default_export_local_name),
     ]
-    ast.ExportNamed(specifiers:, source: Some(ast.StringLit(source)), ..) ->
+    ast.ExportNamed(specifiers:, source: Some(source), ..) ->
       list.map(specifiers, fn(spec) {
         case spec {
           ast.ExportSpecifier(local:, exported:, ..) ->
@@ -281,14 +276,10 @@ fn export_entries(item: ast.ModuleItem) -> List(ExportEntry) {
             )
         }
       })
-    ast.ExportAllDeclaration(
-      exported: Some(name),
-      source: ast.StringLit(source),
-      ..,
-    ) -> [
+    ast.ExportAllDeclaration(exported: Some(name), source:, ..) -> [
       ReExportNamespace(export_name: name, source_specifier: Raw(source)),
     ]
-    ast.ExportAllDeclaration(exported: None, source: ast.StringLit(source), ..) -> [
+    ast.ExportAllDeclaration(exported: None, source:, ..) -> [
       ReExportAll(source_specifier: Raw(source)),
     ]
     ast.StatementItem(_) | ast.ImportDeclaration(..) -> []

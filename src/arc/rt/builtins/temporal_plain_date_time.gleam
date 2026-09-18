@@ -1,15 +1,15 @@
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
-  CalAuto, Day, DayUnit, Nanosecond, apply_since_duration, apply_since_mode,
-  calendar_suffix, check_diff_setup, date_part, date_time_slot_of,
-  epoch_ns_to_iso_in, get_calendar_name_option, get_difference_settings,
-  get_disambiguation_option, get_options_object, get_overflow_option_from_value,
-  make_date_cal, make_date_time_cal, make_duration, make_time, make_zoned_cal,
-  max_unit, require_temporal, round_options, round_to_increment, static_name,
-  temporal_data_of, time_part_ns, time_unit_ns, time_zone_from_string,
-  to_string_time_options, truncated_int_arg, truncated_int_arg_or,
-  valid_rounding_increment, validate_epoch_ns,
+  CalendarNameAuto, Day, DayUnit, Nanosecond, apply_since_duration,
+  apply_since_mode, calendar_suffix, check_diff_setup, date_part,
+  date_time_slot_of, epoch_ns_to_iso_in, get_calendar_name_option,
+  get_difference_settings, get_disambiguation_option, get_options_object,
+  get_overflow_option_from_value, make_date_cal, make_date_time_cal,
+  make_duration, make_time, make_zoned_cal, max_unit, require_temporal,
+  round_options, round_to_increment, static_name, temporal_data_of, time_part_ns,
+  time_unit_ns, time_zone_from_string, to_string_time_options, truncated_int_arg,
+  truncated_int_arg_or, valid_rounding_increment, validate_epoch_ns,
 }
 import arc/rt/builtins/temporal_diff.{compare_iso_date_time, diff_date_time_core}
 import arc/rt/builtins/temporal_fields.{
@@ -35,42 +35,45 @@ import arc/rt/builtins/temporal_zoned_ops.{
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type NativeToken,
   type PlainDateTimeMethod, type TemporalDateTimeGetter, type TemporalProtos,
-  type TemporalStaticName, DtDate, DtTime, KHandle, KStr, KUndef, PdtAdd,
-  PdtEquals, PdtRound, PdtSince, PdtSubtract, PdtToJson, PdtToLocaleString,
-  PdtToPlainDate, PdtToPlainTime, PdtToString, PdtToZonedDateTime, PdtUntil,
-  PdtValueOf, PdtWith, PdtWithCalendar, PdtWithPlainTime, TemporalDate,
+  type TemporalStaticName, CompareStatic, DateTimeDate, DateTimeTime, FromStatic,
+  KHandle, KStr, KUndef, PlainDateTimeAdd, PlainDateTimeEquals,
+  PlainDateTimeRound, PlainDateTimeSince, PlainDateTimeSubtract,
+  PlainDateTimeToJson, PlainDateTimeToLocaleString, PlainDateTimeToPlainDate,
+  PlainDateTimeToPlainTime, PlainDateTimeToString, PlainDateTimeToZonedDateTime,
+  PlainDateTimeUntil, PlainDateTimeValueOf, PlainDateTimeWith,
+  PlainDateTimeWithCalendar, PlainDateTimeWithPlainTime, TemporalDate,
   TemporalDateTime, TemporalN, TemporalPlainDateTimeCtor,
   TemporalPlainDateTimeGetter, TemporalPlainDateTimeMethod,
-  TemporalPlainDateTimeStatic, TemporalZonedDateTime, TsCompare, TsFrom,
-  classify, mk_bool, mk_int, mk_string, mk_undefined,
+  TemporalPlainDateTimeStatic, TemporalZonedDateTime, classify, mk_bool, mk_int,
+  mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/list
 import gleam/option.{None, Some}
 
 const all_getters = [
-  DtDate(types.DgCalendarId),
-  DtDate(types.DgEra),
-  DtDate(types.DgEraYear),
-  DtDate(types.DgYear),
-  DtDate(types.DgMonth),
-  DtDate(types.DgMonthCode),
-  DtDate(types.DgDay),
-  DtTime(types.TgHour),
-  DtTime(types.TgMinute),
-  DtTime(types.TgSecond),
-  DtTime(types.TgMillisecond),
-  DtTime(types.TgMicrosecond),
-  DtTime(types.TgNanosecond),
-  DtDate(types.DgDayOfWeek),
-  DtDate(types.DgDayOfYear),
-  DtDate(types.DgWeekOfYear),
-  DtDate(types.DgYearOfWeek),
-  DtDate(types.DgDaysInWeek),
-  DtDate(types.DgDaysInMonth),
-  DtDate(types.DgDaysInYear),
-  DtDate(types.DgMonthsInYear),
-  DtDate(types.DgInLeapYear),
+  DateTimeDate(types.DateCalendarId),
+  DateTimeDate(types.DateEra),
+  DateTimeDate(types.DateEraYear),
+  DateTimeDate(types.DateYear),
+  DateTimeDate(types.DateMonth),
+  DateTimeDate(types.DateMonthCode),
+  DateTimeDate(types.DateDay),
+  DateTimeTime(types.TimeHour),
+  DateTimeTime(types.TimeMinute),
+  DateTimeTime(types.TimeSecond),
+  DateTimeTime(types.TimeMillisecond),
+  DateTimeTime(types.TimeMicrosecond),
+  DateTimeTime(types.TimeNanosecond),
+  DateTimeDate(types.DateDayOfWeek),
+  DateTimeDate(types.DateDayOfYear),
+  DateTimeDate(types.DateWeekOfYear),
+  DateTimeDate(types.DateYearOfWeek),
+  DateTimeDate(types.DateDaysInWeek),
+  DateTimeDate(types.DateDaysInMonth),
+  DateTimeDate(types.DateDaysInYear),
+  DateTimeDate(types.DateMonthsInYear),
+  DateTimeDate(types.DateInLeapYear),
 ]
 
 pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
@@ -78,7 +81,7 @@ pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
 }
 
 pub fn statics(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
-  list.map([#(TsFrom, 1), #(TsCompare, 2)], fn(s) {
+  list.map([#(FromStatic, 1), #(CompareStatic, 2)], fn(s) {
     #(
       static_name(s.0),
       TemporalN(TemporalPlainDateTimeStatic(s.0, protos)),
@@ -96,22 +99,22 @@ pub fn getters() -> List(#(String, NativeToken)) {
 pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
   list.map(
     [
-      #(PdtWith, 1),
-      #(PdtWithPlainTime, 0),
-      #(PdtWithCalendar, 1),
-      #(PdtAdd, 1),
-      #(PdtSubtract, 1),
-      #(PdtUntil, 1),
-      #(PdtSince, 1),
-      #(PdtRound, 1),
-      #(PdtEquals, 1),
-      #(PdtToString, 0),
-      #(PdtToLocaleString, 0),
-      #(PdtToJson, 0),
-      #(PdtValueOf, 0),
-      #(PdtToPlainDate, 0),
-      #(PdtToPlainTime, 0),
-      #(PdtToZonedDateTime, 1),
+      #(PlainDateTimeWith, 1),
+      #(PlainDateTimeWithPlainTime, 0),
+      #(PlainDateTimeWithCalendar, 1),
+      #(PlainDateTimeAdd, 1),
+      #(PlainDateTimeSubtract, 1),
+      #(PlainDateTimeUntil, 1),
+      #(PlainDateTimeSince, 1),
+      #(PlainDateTimeRound, 1),
+      #(PlainDateTimeEquals, 1),
+      #(PlainDateTimeToString, 0),
+      #(PlainDateTimeToLocaleString, 0),
+      #(PlainDateTimeToJson, 0),
+      #(PlainDateTimeValueOf, 0),
+      #(PlainDateTimeToPlainDate, 0),
+      #(PlainDateTimeToPlainTime, 0),
+      #(PlainDateTimeToZonedDateTime, 1),
     ],
     fn(m) {
       #(
@@ -125,29 +128,29 @@ pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
 
 pub fn date_time_getter_name(g: TemporalDateTimeGetter) -> String {
   case g {
-    DtDate(g) -> date_getter_name(g)
-    DtTime(g) -> time_getter_name(g)
+    DateTimeDate(g) -> date_getter_name(g)
+    DateTimeTime(g) -> time_getter_name(g)
   }
 }
 
 pub fn plain_date_time_method_name(m: PlainDateTimeMethod) -> String {
   case m {
-    PdtWith -> "with"
-    PdtWithPlainTime -> "withPlainTime"
-    PdtWithCalendar -> "withCalendar"
-    PdtAdd -> "add"
-    PdtSubtract -> "subtract"
-    PdtUntil -> "until"
-    PdtSince -> "since"
-    PdtRound -> "round"
-    PdtEquals -> "equals"
-    PdtToString -> "toString"
-    PdtToLocaleString -> "toLocaleString"
-    PdtToJson -> "toJSON"
-    PdtValueOf -> "valueOf"
-    PdtToPlainDate -> "toPlainDate"
-    PdtToPlainTime -> "toPlainTime"
-    PdtToZonedDateTime -> "toZonedDateTime"
+    PlainDateTimeWith -> "with"
+    PlainDateTimeWithPlainTime -> "withPlainTime"
+    PlainDateTimeWithCalendar -> "withCalendar"
+    PlainDateTimeAdd -> "add"
+    PlainDateTimeSubtract -> "subtract"
+    PlainDateTimeUntil -> "until"
+    PlainDateTimeSince -> "since"
+    PlainDateTimeRound -> "round"
+    PlainDateTimeEquals -> "equals"
+    PlainDateTimeToString -> "toString"
+    PlainDateTimeToLocaleString -> "toLocaleString"
+    PlainDateTimeToJson -> "toJSON"
+    PlainDateTimeValueOf -> "valueOf"
+    PlainDateTimeToPlainDate -> "toPlainDate"
+    PlainDateTimeToPlainTime -> "toPlainTime"
+    PlainDateTimeToZonedDateTime -> "toZonedDateTime"
   }
 }
 
@@ -188,7 +191,7 @@ pub fn static(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case name {
-    TsFrom -> {
+    FromStatic -> {
       let #(#(d, t, cal), st) =
         to_temporal_date_time(
           st,
@@ -197,7 +200,7 @@ pub fn static(
         )
       make_date_time_cal(st, protos, d, t, cal)
     }
-    TsCompare -> {
+    CompareStatic -> {
       let #(#(ad, at, _), st) =
         to_temporal_date_time(st, helpers.arg_at(args, 0), mk_undefined())
       let #(#(bd, bt, _), st) =
@@ -289,8 +292,8 @@ pub fn getter(
       date_time_slot_of,
     )
   case g {
-    DtTime(tg) -> #(time_field(t, tg), st)
-    DtDate(dg) -> #(date_field_cal(cal, d, dg), st)
+    DateTimeTime(tg) -> #(time_field(t, tg), st)
+    DateTimeDate(dg) -> #(date_field_cal(cal, d, dg), st)
   }
 }
 
@@ -310,20 +313,20 @@ pub fn method(
       date_time_slot_of,
     )
   case m {
-    PdtToJson -> #(
+    PlainDateTimeToJson -> #(
       mk_string(
         format_iso_date(d)
         <> "T"
         <> format_iso_time(t, AutoPrecision)
-        <> calendar_suffix(CalAuto, cal),
+        <> calendar_suffix(CalendarNameAuto, cal),
       ),
       st,
     )
-    PdtToLocaleString -> #(
+    PlainDateTimeToLocaleString -> #(
       mk_string(format_iso_date(d) <> " " <> format_iso_time(t, AutoPrecision)),
       st,
     )
-    PdtToString -> {
+    PlainDateTimeToString -> {
       let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
       let #(cal_name, st) = get_calendar_name_option(st, opts)
       let #(#(precision, smallest_time_unit, inc, mode), st) =
@@ -343,18 +346,19 @@ pub fn method(
         <> calendar_suffix(cal_name, cal)
       #(mk_string(s), st)
     }
-    PdtValueOf ->
+    PlainDateTimeValueOf ->
       rt_val.t_throw_type_error(
         st,
         "Temporal.PlainDateTime cannot be converted with valueOf",
       )
-    PdtEquals -> {
+    PlainDateTimeEquals -> {
       let #(#(od, ot, ocal), st) =
         to_temporal_date_time(st, helpers.arg_at(args, 0), mk_undefined())
       #(mk_bool(#(d, t) == #(od, ot) && cal == ocal), st)
     }
-    PdtAdd | PdtSubtract -> {
-      let #(dur, overflow, st) = add_sub_args(st, args, m == PdtSubtract)
+    PlainDateTimeAdd | PlainDateTimeSubtract -> {
+      let #(dur, overflow, st) =
+        add_sub_args(st, args, m == PlainDateTimeSubtract)
       let #(carry, t2) = add_time(t, time_part_ns(dur))
       let date_dur = Duration(..date_part(dur), days: dur.days + carry)
       let d2 =
@@ -362,7 +366,7 @@ pub fn method(
       let #(d2, t2) = rt_val.or_throw(st, check_date_time_limits(d2, t2))
       make_date_time_cal(st, protos, d2, t2, cal)
     }
-    PdtWithPlainTime -> {
+    PlainDateTimeWithPlainTime -> {
       let arg = helpers.arg_at(args, 0)
       let #(t2, st) = case classify(arg) {
         KUndef -> #(midnight, st)
@@ -370,12 +374,12 @@ pub fn method(
       }
       make_date_time_cal(st, protos, d, t2, cal)
     }
-    PdtWithCalendar -> {
+    PlainDateTimeWithCalendar -> {
       let #(new_cal, st) =
         to_temporal_calendar_identifier(st, helpers.arg_at(args, 0))
       make_date_time_cal(st, protos, d, t, new_cal)
     }
-    PdtWith -> {
+    PlainDateTimeWith -> {
       let #(bag, st) = require_partial_bag(st, helpers.arg_at(args, 0))
       let #(f, st) =
         read_date_time_fields(st, bag, cal, read_offset: False, read_tz: False)
@@ -389,7 +393,7 @@ pub fn method(
       let #(date, t2) = rt_val.or_throw(st, check_date_time_limits(date, t2))
       make_date_time_cal(st, protos, date, t2, cal)
     }
-    PdtRound -> {
+    PlainDateTimeRound -> {
       let #(#(smallest_time_unit, inc, mode), st) =
         round_options(st, helpers.arg_at(args, 0), allow_day: True)
       let unit_ns = time_unit_ns(smallest_time_unit)
@@ -408,9 +412,9 @@ pub fn method(
         }
       }
     }
-    PdtToPlainDate -> make_date_cal(st, protos, d, cal)
-    PdtToPlainTime -> make_time(st, protos, t)
-    PdtToZonedDateTime -> {
+    PlainDateTimeToPlainDate -> make_date_cal(st, protos, d, cal)
+    PlainDateTimeToPlainTime -> make_time(st, protos, t)
+    PlainDateTimeToZonedDateTime -> {
       let arg = helpers.arg_at(args, 0)
       case classify(arg) {
         KStr(tz_str) -> {
@@ -425,7 +429,7 @@ pub fn method(
         _ -> rt_val.t_throw_type_error(st, "time zone must be a string")
       }
     }
-    PdtUntil | PdtSince -> {
+    PlainDateTimeUntil | PlainDateTimeSince -> {
       let #(#(od, ot, ocal), st) =
         to_temporal_date_time(st, helpers.arg_at(args, 0), mk_undefined())
       case ocal == cal {
@@ -442,7 +446,7 @@ pub fn method(
             #(d, t),
             #(od, ot),
             args,
-            m == PdtSince,
+            m == PlainDateTimeSince,
           )
       }
     }

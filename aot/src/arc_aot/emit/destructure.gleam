@@ -16,13 +16,17 @@ pub fn emit_pattern(
   mode: BindMode,
 ) -> EmitResult {
   Ok(
-    anf.run_to(go(pat, source, mode), e, fn(ef, _) {
+    anf.run_to(build_pattern(pat, source, mode), e, fn(ef, _) {
       ir.Values([ef.consts.undef])
     }),
   )
 }
 
-fn go(pat: ast.Pattern, source: ir.Value, mode: BindMode) -> Build(Nil) {
+fn build_pattern(
+  pat: ast.Pattern,
+  source: ir.Value,
+  mode: BindMode,
+) -> Build(Nil) {
   case pat {
     ast.IdentifierPattern(name:, ..) -> bind_identifier(name, source, mode)
     ast.ArrayPattern(elements:) -> emit_array_pattern(elements, source, mode)
@@ -42,10 +46,10 @@ fn go(pat: ast.Pattern, source: ir.Value, mode: BindMode) -> Build(Nil) {
         }),
         anf.pure(source),
       ))
-      go(left, v, mode)
+      build_pattern(left, v, mode)
     }
     // bare rest only reaches here as a rest parameter
-    ast.RestElement(argument:) -> go(argument, source, mode)
+    ast.RestElement(argument:) -> build_pattern(argument, source, mode)
   }
 }
 
@@ -148,13 +152,13 @@ fn emit_array_elements(
     // done is true once draining starts, so no close after this
     [Some(ast.RestElement(argument:)), ..] -> {
       use arr <- anf.then(anf.host("iter_rest", [iter]))
-      use _ <- anf.then(go(argument, arr, mode))
+      use _ <- anf.then(build_pattern(argument, arr, mode))
       anf.pure(True)
     }
     [Some(p), ..rest] -> {
       use pair <- anf.then(anf.host("iter_next", [iter]))
       use v <- anf.then(anf.bind(anf.tuple_get(pair, 1)))
-      use _ <- anf.then(go(p, v, mode))
+      use _ <- anf.then(build_pattern(p, v, mode))
       emit_array_elements(rest, iter, mode)
     }
   }
@@ -189,12 +193,12 @@ fn emit_object_props(
     [ast.RestProperty(name:, span:), ..] -> {
       use excl <- anf.then(anf.cons_list(list.reverse(seen)))
       use rest <- anf.then(anf.host("object_rest", [source, excl]))
-      go(ast.IdentifierPattern(name:, span:), rest, mode)
+      build_pattern(ast.IdentifierPattern(name:, span:), rest, mode)
     }
     [ast.PatternProperty(key:, value:, ..), ..tail] -> {
       use k <- anf.then(expr.emit_key(key))
       use v <- anf.then(anf.host("get_prop_untyped_key", [source, k]))
-      use _ <- anf.then(go(value, v, mode))
+      use _ <- anf.then(build_pattern(value, v, mode))
       let seen = case has_rest {
         True -> [k, ..seen]
         False -> seen

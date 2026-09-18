@@ -1,11 +1,10 @@
 import arc/engine.{type Engine, ModuleThrew, Returned, Threw}
-import arc/host.{State}
+import arc/host.{Context}
 import arc/module_host
 import arc/rt/async as rt_async
 import arc/rt/gc as rt_gc
 import arc/rt/types.{
-  type Agent, type JsVal, Agent, JsStore, KHandle, classify, mk_int,
-  mk_undefined,
+  type Agent, type JsVal, Agent, KHandle, Store, classify, mk_int, mk_undefined,
 }
 import gleam/set
 import gleam/string
@@ -16,10 +15,10 @@ const threshold = 256
 fn small_engine() -> Engine(Nil) {
   let eng = engine.new() |> engine.with_host_hooks(rt_helpers.quiet_hooks())
   let #(eng, Nil) =
-    engine.with_state(eng, fn(s) {
-      let st = rt_gc.t_collect(s.agent, [])
-      let st = Agent(..st, store: JsStore(..st.store, gc_threshold: threshold))
-      #(State(..s, agent: st), Nil)
+    engine.with_context(eng, fn(ctx) {
+      let st = rt_gc.t_collect(ctx.agent, [])
+      let st = Agent(..st, store: Store(..st.store, gc_threshold: threshold))
+      #(Context(..ctx, agent: st), Nil)
     })
   eng
 }
@@ -45,7 +44,7 @@ fn is_live_and_unpinned(eng: Engine(host), v: JsVal) -> Bool {
 
 pub fn eval_is_bounded_drains_and_keeps_its_value_test() {
   let eng = small_engine()
-  let base = stats(eng).live
+  let base = stats(eng).live_count
   let source =
     "
     function alloc(i) { return { a: [i, i + 1], s: 'x' + i, o: { i: i } }; }
@@ -64,7 +63,7 @@ pub fn eval_is_bounded_drains_and_keeps_its_value_test() {
   assert show(eng, seen) == "'undefined'"
   assert show(eng, global(eng, "done")) == "1000"
   // cells that die old wait for the next major
-  assert stats(eng).live <= base + rt_gc.minors_per_major * threshold
+  assert stats(eng).live_count <= base + rt_gc.minors_per_major * threshold
 }
 
 pub fn eval_keeps_thrown_value_test() {
@@ -96,10 +95,10 @@ pub fn call_is_bounded_drains_and_keeps_its_value_test() {
     "
   let assert Ok(#(Returned(_), eng)) = engine.eval(eng, source)
   let work = global(eng, "work")
-  let base = stats(eng).live
+  let base = stats(eng).live_count
   let eng = call_many(eng, work, 20)
   assert show(eng, global(eng, "runs")) == "20"
-  assert stats(eng).live <= base + 4 * threshold
+  assert stats(eng).live_count <= base + 4 * threshold
 }
 
 fn call_many(eng: Engine(host), work: JsVal, left: Int) -> Engine(host) {
@@ -184,6 +183,7 @@ pub fn drivers_run_once_per_turn_test() {
       recording,
     )
   assert rt_helpers.recorded() == ["finish"]
-  let #(_, Nil) = engine.with_state_with(eng, fn(s) { #(s, Nil) }, recording)
+  let #(_, Nil) =
+    engine.with_context_with(eng, fn(ctx) { #(ctx, Nil) }, recording)
   assert rt_helpers.recorded() == ["finish"]
 }

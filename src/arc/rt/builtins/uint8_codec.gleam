@@ -1,3 +1,4 @@
+import arc/bytecode/key.{Named}
 import arc/internal/digits
 import arc/rt/buffer
 import arc/rt/builtins/common
@@ -10,7 +11,7 @@ import arc/rt/store as rt_store
 import arc/rt/typed_array_bytes.{splice_clamped}
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, ArrayBufferObj, Bytes, KHandle, KStr,
-  KUndef, Named, NumKind, SObject, StringKey, TypedArrayObj, Uint8Kind, classify,
+  KUndef, NumKind, SObject, StringKey, TypedArrayObj, Uint8Kind, classify,
   mk_int, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
@@ -24,7 +25,7 @@ import gleam/string
 
 const max_byte_length = 2_147_483_647
 
-type B64Alphabet {
+type Base64Alphabet {
   Base64
   Base64Url
 }
@@ -40,7 +41,7 @@ type Codec {
   HexCodec
 }
 
-fn parse_b64_alphabet(s: String) -> Option(B64Alphabet) {
+fn parse_b64_alphabet(s: String) -> Option(Base64Alphabet) {
   case s {
     "base64" -> Some(Base64)
     "base64url" -> Some(Base64Url)
@@ -64,11 +65,11 @@ fn codec_name(codec: Codec) -> String {
   }
 }
 
-type U8View {
-  U8View(buffer: Handle, byte_offset: Int, length: Option(Int))
+type Uint8View {
+  Uint8View(buffer: Handle, byte_offset: Int, length: Option(Int))
 }
 
-fn u8_view(st: Agent, v: JsVal) -> Option(U8View) {
+fn uint8_view(st: Agent, v: JsVal) -> Option(Uint8View) {
   case classify(v) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
@@ -80,7 +81,7 @@ fn u8_view(st: Agent, v: JsVal) -> Option(U8View) {
             length:,
           ),
           ..,
-        ) -> Some(U8View(buffer:, byte_offset:, length:))
+        ) -> Some(Uint8View(buffer:, byte_offset:, length:))
         _ -> None
       }
     _ -> None
@@ -88,7 +89,7 @@ fn u8_view(st: Agent, v: JsVal) -> Option(U8View) {
 }
 
 fn validate_u8(st: Agent, this: JsVal) -> Nil {
-  case u8_view(st, this) {
+  case uint8_view(st, this) {
     Some(_) -> Nil
     None ->
       rt_val.t_throw_type_error(st, "Method must be called on a Uint8Array")
@@ -96,8 +97,8 @@ fn validate_u8(st: Agent, this: JsVal) -> Nil {
 }
 
 fn u8_require_mutable(st: Agent, this: JsVal) -> Nil {
-  let immutable = case u8_view(st, this) {
-    Some(U8View(buffer:, ..)) -> buffer.buffer_is_immutable(st, buffer)
+  let immutable = case uint8_view(st, this) {
+    Some(Uint8View(buffer:, ..)) -> buffer.buffer_is_immutable(st, buffer)
     None -> False
   }
   case immutable {
@@ -110,14 +111,14 @@ fn u8_require_mutable(st: Agent, this: JsVal) -> Nil {
   }
 }
 
-type U8LiveView {
-  U8LiveView(buffer: Handle, data: BitArray, byte_offset: Int, length: Int)
+type Uint8LiveView {
+  Uint8LiveView(buffer: Handle, data: BitArray, byte_offset: Int, length: Int)
 }
 
 // resolve length from the same read as data, never re-read
-fn u8_live_view(st: Agent, this: JsVal) -> U8LiveView {
-  case u8_view(st, this) {
-    Some(U8View(buffer:, byte_offset:, length:)) ->
+fn u8_live_view(st: Agent, this: JsVal) -> Uint8LiveView {
+  case uint8_view(st, this) {
+    Some(Uint8View(buffer:, byte_offset:, length:)) ->
       case buffer.buffer_bytes(st, buffer) {
         None ->
           rt_val.t_throw_type_error(
@@ -144,7 +145,7 @@ fn u8_live_view(st: Agent, this: JsVal) -> U8LiveView {
                   byte_offset,
                   length,
                 )
-              U8LiveView(
+              Uint8LiveView(
                 buffer:,
                 data:,
                 byte_offset:,
@@ -208,7 +209,7 @@ fn get_enum_option(
 fn read_b64_options(
   st: Agent,
   opt_arg: JsVal,
-) -> #(B64Alphabet, LastChunkHandling, Agent) {
+) -> #(Base64Alphabet, LastChunkHandling, Agent) {
   let opts = get_opts_object(st, opt_arg)
   let #(alphabet, st) =
     get_enum_option(st, opts, "alphabet", parse_b64_alphabet, Base64)
@@ -336,11 +337,11 @@ fn decode_error(st: Agent, codec: Codec) -> a {
 // partial bytes are written before the syntaxerror throws
 fn decode_into_view(
   st: Agent,
-  view: U8LiveView,
+  view: Uint8LiveView,
   res: DecodeResult,
   codec: Codec,
 ) -> #(JsVal, Agent) {
-  let U8LiveView(buffer:, data:, byte_offset: off, ..) = view
+  let Uint8LiveView(buffer:, data:, byte_offset: off, ..) = view
   case res {
     DecodeFailed(partial:) ->
       decode_error(u8_write_bytes(st, buffer, data, off, partial), codec)
@@ -406,12 +407,12 @@ fn decode_bytes(acc: List(BitArray)) -> BitArray {
 
 fn from_base64(
   s: String,
-  alphabet: B64Alphabet,
+  alphabet: Base64Alphabet,
   handling: LastChunkHandling,
   max_len: Int,
 ) -> DecodeResult {
   use <- bool.guard(max_len == 0, Decoded(0, <<>>))
-  b64_loop(
+  from_base64_loop(
     bit_array.from_string(s),
     0,
     0,
@@ -434,7 +435,7 @@ fn b64_skip_ws(bin: BitArray, index: Int) -> #(BitArray, Int) {
   }
 }
 
-fn b64_loop(
+fn from_base64_loop(
   bin: BitArray,
   index: Int,
   read: Int,
@@ -442,7 +443,7 @@ fn b64_loop(
   written: Int,
   chunk: Int,
   chunk_len: Int,
-  alphabet: B64Alphabet,
+  alphabet: Base64Alphabet,
   handling: LastChunkHandling,
   max_len: Int,
 ) -> DecodeResult {
@@ -494,7 +495,7 @@ fn b64_loop(
                   case written == max_len {
                     True -> Decoded(index + 1, decode_bytes(acc))
                     False ->
-                      b64_loop(
+                      from_base64_loop(
                         rest,
                         index + 1,
                         index + 1,
@@ -509,7 +510,7 @@ fn b64_loop(
                   }
                 }
                 False ->
-                  b64_loop(
+                  from_base64_loop(
                     rest,
                     index + 1,
                     read,
@@ -603,7 +604,7 @@ fn b64_decode_partial(
   }
 }
 
-fn b64_value(c: Int, alphabet: B64Alphabet) -> Option(Int) {
+fn b64_value(c: Int, alphabet: Base64Alphabet) -> Option(Int) {
   let url = alphabet == Base64Url
   case c {
     _ if c >= 65 && c <= 90 -> Some(c - 65)
@@ -621,11 +622,11 @@ fn from_hex(s: String, max_len: Int) -> DecodeResult {
   // odd check is on utf-16 length, not bytes
   case js_string.length(s) % 2 != 0 {
     True -> DecodeFailed(<<>>)
-    False -> hex_loop(bit_array.from_string(s), 0, [], 0, max_len)
+    False -> from_hex_loop(bit_array.from_string(s), 0, [], 0, max_len)
   }
 }
 
-fn hex_loop(
+fn from_hex_loop(
   bin: BitArray,
   read: Int,
   acc: List(BitArray),
@@ -639,7 +640,7 @@ fn hex_loop(
       case digits.hex_value_code(h1), digits.hex_value_code(h2) {
         Some(a), Some(b) -> {
           let byte = a * 16 + b
-          hex_loop(rest, read + 2, [<<byte>>, ..acc], written + 1, max_len)
+          from_hex_loop(rest, read + 2, [<<byte>>, ..acc], written + 1, max_len)
         }
         _, _ -> DecodeFailed(decode_bytes(acc))
       }

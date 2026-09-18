@@ -64,8 +64,8 @@ pub type FieldInitMode {
   FieldInitAfterSuper
 }
 
-pub type ClassCtx {
-  ClassCtx(
+pub type ClassContext {
+  ClassContext(
     brand_vars: Dict(String, ir.Value),
     proto_home_box: ir.Value,
     static_home_box: ir.Value,
@@ -106,7 +106,7 @@ pub type FnSave {
     derived_ctor: Bool,
     default_ctor: Bool,
     this_tdz: Bool,
-    class_stack: List(ClassCtx),
+    class_stack: List(ClassContext),
     slot_vars: Dict(Int, String),
     cap_names: List(String),
     initialized_slots: Set(Int),
@@ -283,7 +283,7 @@ pub type Emitter {
     invariant_callees: Dict(InvariantCallee, ir.Value),
     const_globals: Dict(String, ir.Value),
     slotted_globals: Dict(String, Int),
-    class_stack: List(ClassCtx),
+    class_stack: List(ClassContext),
     machine_abrupt: Option(MachineAbrupt),
     raw_args_var: Option(String),
     dispatch: EmitDispatch,

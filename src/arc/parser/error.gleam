@@ -3,18 +3,19 @@ import arc/parser/lexer.{
   AmpersandEqual, Arrow, As, Async, Await, Bang, BangEqual, BangEqualEqual,
   Break, Caret, CaretEqual, Case, Catch, Class, Colon, Comma, Const, Continue,
   Debugger, Default, Delete, Do, Dot, DotDotDot, Else, Eof, Equal, EqualEqual,
-  EqualEqualEqual, Export, Extends, Finally, For, From, Function, GreaterThan,
-  GreaterThanEqual, GreaterThanGreaterThan, GreaterThanGreaterThanEqual,
-  GreaterThanGreaterThanGreaterThan, GreaterThanGreaterThanGreaterThanEqual,
-  Identifier, If, Illegal, Import, In, Instanceof, KFalse, KString, KTrue,
-  LeftBrace, LeftBracket, LeftParen, LessThan, LessThanEqual, LessThanLessThan,
-  LessThanLessThanEqual, Let, LexFailure, Minus, MinusEqual, MinusMinus, New,
-  Null, Number, Of, Percent, PercentEqual, Pipe, PipeEqual, PipePipe,
-  PipePipeEqual, Plus, PlusEqual, PlusPlus, Question, QuestionDot,
+  EqualEqualEqual, Export, Extends, FalseLiteral, Finally, For, From, Function,
+  GreaterThan, GreaterThanEqual, GreaterThanGreaterThan,
+  GreaterThanGreaterThanEqual, GreaterThanGreaterThanGreaterThan,
+  GreaterThanGreaterThanGreaterThanEqual, Identifier, If, Illegal, Import, In,
+  Instanceof, LeftBrace, LeftBracket, LeftParen, LessThan, LessThanEqual,
+  LessThanLessThan, LessThanLessThanEqual, Let, LexFailure, Minus, MinusEqual,
+  MinusMinus, New, Null, Number, Of, Percent, PercentEqual, Pipe, PipeEqual,
+  PipePipe, PipePipeEqual, Plus, PlusEqual, PlusPlus, Question, QuestionDot,
   QuestionQuestion, QuestionQuestionEqual, Return, RightBrace, RightBracket,
   RightParen, Semicolon, Slash, SlashEqual, Star, StarEqual, StarStar,
-  StarStarEqual, Static, Super, Switch, TemplateHead, TemplateLiteral, This,
-  Throw, Tilde, Try, Typeof, Undefined, Var, Void, While, With, Yield,
+  StarStarEqual, Static, StringLiteral, Super, Switch, TemplateHead,
+  TemplateLiteral, This, Throw, Tilde, TrueLiteral, Try, Typeof, Undefined, Var,
+  Void, While, With, Yield,
 }
 import arc/parser/number
 import arc/parser/regex_error
@@ -394,7 +395,7 @@ pub fn regexp_syntax_error(err: regex_error.PatternError) -> ParseError {
 fn token_kind_to_string(kind: TokenKind) -> String {
   case kind {
     Number -> "number"
-    KString -> "string"
+    StringLiteral -> "string"
     TemplateLiteral -> "template"
     TemplateHead -> "template"
     Identifier -> "identifier"
@@ -437,8 +438,8 @@ fn token_kind_to_string(kind: TokenKind) -> String {
     Yield -> "'yield'"
     Null -> "'null'"
     Undefined -> "'undefined'"
-    KTrue -> "'true'"
-    KFalse -> "'false'"
+    TrueLiteral -> "'true'"
+    FalseLiteral -> "'false'"
     Debugger -> "'debugger'"
     With -> "'with'"
     Static -> "'static'"

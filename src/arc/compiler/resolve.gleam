@@ -4,7 +4,7 @@ import arc/bytecode/opcode.{
   type IrOp, type LabelId, type Op, type Pc, IrAsyncYieldStarNext,
   IrAsyncYieldStarResume, IrBinOp, IrCmpConstJump, IrCmpJump,
   IrCmpLocalConstJump, IrCmpLocalLocalJump, IrDefineAccessor, IrDefineField,
-  IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetField2, IrGosub,
+  IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetFieldKeep, IrGosub,
   IrIncLocalCmpConstJump, IrIncLocalCmpLocalJump, IrIncLocalJump, IrJump,
   IrJumpIfFalse, IrJumpIfLocal, IrJumpIfNotNullish, IrJumpIfNullish,
   IrJumpIfTrue, IrLabel, IrLine, IrPushTry, IrPutField, IrWithDeleteVar,
@@ -339,7 +339,7 @@ fn peephole(
 
     // field access superinstructions
     [
-      IrGetField2(name),
+      IrGetFieldKeep(name),
       IrFinal(opcode.GetLocal(a)),
       IrFinal(opcode.CallMethod(1)),
       ..rest
@@ -351,20 +351,20 @@ fn peephole(
           peephole(rest, consts, [
             IrFinal(opcode.CallMethod(1)),
             IrFinal(opcode.GetLocal(a)),
-            IrFinal(opcode.GetField2(k)),
+            IrFinal(opcode.GetFieldKeep(k)),
             ..acc
           ])
       }
     [
       IrFinal(opcode.GetLocal(_)) as recv,
-      IrGetField2(_) as get,
+      IrGetFieldKeep(_) as get,
       IrFinal(opcode.GetLocal(_)) as arg,
       IrFinal(opcode.CallMethod(1)) as call,
       ..rest
     ] -> peephole([get, arg, call, ..rest], consts, [recv, ..acc])
     [
       IrFinal(opcode.GetLocal(i)),
-      IrGetField2(name),
+      IrGetFieldKeep(name),
       IrFinal(opcode.CallMethod(0)),
       ..rest
     ] ->
@@ -377,18 +377,18 @@ fn peephole(
         k ->
           peephole(rest, consts, [
             IrFinal(opcode.CallMethod(0)),
-            IrFinal(opcode.GetLocalField2(i, k)),
+            IrFinal(opcode.GetLocalFieldKeep(i, k)),
             ..acc
           ])
       }
-    [IrGetField2(name), IrFinal(opcode.CallMethod(0)), ..rest] ->
+    [IrGetFieldKeep(name), IrFinal(opcode.CallMethod(0)), ..rest] ->
       case key.canonical_key(name) {
         key.Named(_) as k ->
           peephole(rest, consts, [IrFinal(opcode.GetFieldCall(k)), ..acc])
         k ->
           peephole(rest, consts, [
             IrFinal(opcode.CallMethod(0)),
-            IrFinal(opcode.GetField2(k)),
+            IrFinal(opcode.GetFieldKeep(k)),
             ..acc
           ])
       }
@@ -397,9 +397,9 @@ fn peephole(
         IrFinal(opcode.GetLocalField(i, key.canonical_key(name))),
         ..acc
       ])
-    [IrFinal(opcode.GetLocal(i)), IrGetField2(name), ..rest] ->
+    [IrFinal(opcode.GetLocal(i)), IrGetFieldKeep(name), ..rest] ->
       peephole(rest, consts, [
-        IrFinal(opcode.GetLocalField2(i, key.canonical_key(name))),
+        IrFinal(opcode.GetLocalFieldKeep(i, key.canonical_key(name))),
         ..acc
       ])
     [
@@ -486,14 +486,14 @@ fn put_local(acc: List(IrOp), dst: Int) -> List(IrOp) {
 
 pub fn fusable_cmp(kind: opcode.BinOpKind) -> Option(binop.PureBinOp) {
   case kind {
-    opcode.Lt -> Some(binop.Compare(binop.LtCmp))
-    opcode.LtEq -> Some(binop.Compare(binop.LtEqCmp))
-    opcode.Gt -> Some(binop.Compare(binop.GtCmp))
-    opcode.GtEq -> Some(binop.Compare(binop.GtEqCmp))
-    opcode.StrictEq -> Some(binop.Equality(binop.StrictEqOp))
-    opcode.StrictNotEq -> Some(binop.Equality(binop.StrictNotEqOp))
-    opcode.Eq -> Some(binop.Equality(binop.EqOp))
-    opcode.NotEq -> Some(binop.Equality(binop.NotEqOp))
+    opcode.Less -> Some(binop.Compare(binop.Less))
+    opcode.LessEq -> Some(binop.Compare(binop.LessEq))
+    opcode.Greater -> Some(binop.Compare(binop.Greater))
+    opcode.GreaterEq -> Some(binop.Compare(binop.GreaterEq))
+    opcode.StrictEq -> Some(binop.Equality(binop.StrictEq))
+    opcode.StrictNotEq -> Some(binop.Equality(binop.StrictNotEq))
+    opcode.LooseEq -> Some(binop.Equality(binop.LooseEq))
+    opcode.LooseNotEq -> Some(binop.Equality(binop.LooseNotEq))
     _ -> None
   }
 }
@@ -687,10 +687,10 @@ fn may_allocate(op: IrOp) -> Bool {
         | opcode.GetGlobal(_)
         | opcode.PutGlobal(_)
         | opcode.GetField(_)
-        | opcode.GetField2(_)
+        | opcode.GetFieldKeep(_)
         | opcode.PutField(_)
         | opcode.GetElem
-        | opcode.GetElem2
+        | opcode.GetElemKeep
         | opcode.PutElem
         | opcode.DeleteField(_)
         | opcode.DeleteElem
@@ -725,7 +725,7 @@ fn may_allocate(op: IrOp) -> Bool {
         | opcode.CmpJump(..)
         | opcode.CmpConstJump(..)
         | opcode.GetLocalField(..)
-        | opcode.GetLocalField2(..)
+        | opcode.GetLocalFieldKeep(..)
         | opcode.PutFieldPop(_)
         | opcode.PutLocalLocalField(..)
         | opcode.PutLocalConstField(..)
@@ -764,7 +764,7 @@ fn may_allocate(op: IrOp) -> Bool {
     | IrPushTry(..)
     | IrGosub(_)
     | IrGetField(_)
-    | IrGetField2(_)
+    | IrGetFieldKeep(_)
     | IrPutField(_)
     | IrDeleteField(_)
     | IrBinOp(_)
@@ -831,7 +831,7 @@ fn label_refs(op: IrOp) -> List(LabelId) {
     | IrLabel(_)
     | IrLine(_)
     | IrGetField(_)
-    | IrGetField2(_)
+    | IrGetFieldKeep(_)
     | IrPutField(_)
     | IrDeleteField(_)
     | IrDefineField(_)
@@ -935,7 +935,7 @@ fn resolve_op(op: IrOp, labels: Dict(LabelId, Pc)) -> Op {
       opcode.WithPutRefValue(name, label_pc(labels, l))
 
     IrGetField(name) -> opcode.GetField(key.canonical_key(name))
-    IrGetField2(name) -> opcode.GetField2(key.canonical_key(name))
+    IrGetFieldKeep(name) -> opcode.GetFieldKeep(key.canonical_key(name))
     IrPutField(name) -> opcode.PutField(key.canonical_key(name))
     IrDeleteField(name) -> opcode.DeleteField(key.canonical_key(name))
     IrDefineField(name) -> opcode.DefineField(key.canonical_key(name))

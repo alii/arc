@@ -1,3 +1,4 @@
+import arc/bytecode/key.{canonical_key}
 import arc/internal/unsafe
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{type Frame, NormalCompletion, ThrowCompletion} as rt_call
@@ -6,8 +7,8 @@ import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/types.{
   type Agent, type CompiledCode, type JsVal, FnFlags, JInt, KBool, KHandle, KNum,
-  KStr, KUndef, StringKey, canonical_key, classify, mk_bool, mk_int, mk_null,
-  mk_object, mk_string, mk_undefined,
+  KStr, KUndef, StringKey, classify, mk_bool, mk_int, mk_null, mk_object,
+  mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/list

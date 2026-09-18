@@ -8,7 +8,7 @@ import gleam/result
 import gleam/string
 
 pub type Token {
-  // had_escape: identifiers only; annex_b_legacy: Number/KString only
+  // had_escape: identifiers only; annex_b_legacy: Number/StringLiteral only
   Token(
     kind: TokenKind,
     value: String,
@@ -22,7 +22,7 @@ pub type Token {
 
 pub type TokenKind {
   Number
-  KString
+  StringLiteral
   TemplateLiteral
   TemplateHead
 
@@ -66,8 +66,8 @@ pub type TokenKind {
   Yield
   Null
   Undefined
-  KTrue
-  KFalse
+  TrueLiteral
+  FalseLiteral
   Debugger
   With
   Static
@@ -203,7 +203,7 @@ pub fn scanner_at(
 pub fn scan_next(s: Scanner) -> #(Token, Scanner) {
   let Scanner(bytes:, pos:, line:, source_kind:, rest:) = s
   case skip_ws(rest, pos, source_kind) {
-    WsEnd(consumed, ws_newlines, rest) -> {
+    WhitespaceDone(consumed, ws_newlines, rest) -> {
       let new_pos = pos + consumed
       let token_line = line + ws_newlines
       case read_token(bytes, new_pos, token_line, rest) {
@@ -212,7 +212,7 @@ pub fn scan_next(s: Scanner) -> #(Token, Scanner) {
         Ok(token) -> {
           let raw_len = token.raw_len
           let end_line = case token.kind {
-            KString | TemplateLiteral | TemplateHead ->
+            StringLiteral | TemplateLiteral | TemplateHead ->
               token_line + count_newlines_in(bytes, new_pos, raw_len)
             _ -> token_line
           }
@@ -229,7 +229,7 @@ pub fn scan_next(s: Scanner) -> #(Token, Scanner) {
         }
       }
     }
-    WsBlockUnterminated(at) ->
+    BlockCommentUnterminated(at) ->
       hard_error_token(
         UnterminatedBlockComment(pos + at),
         bytes,
@@ -237,7 +237,7 @@ pub fn scan_next(s: Scanner) -> #(Token, Scanner) {
         line,
         source_kind,
       )
-    WsHtmlInModule(at) ->
+    HtmlCommentNotAllowed(at) ->
       hard_error_token(
         HtmlCommentInModule(pos + at),
         bytes,
@@ -295,13 +295,17 @@ fn count_newlines(bytes: BitArray, count: Int) -> Int {
   }
 }
 
-type WsScan {
-  WsEnd(consumed: Int, newlines: Int, rest: BitArray)
-  WsBlockUnterminated(at: Int)
-  WsHtmlInModule(at: Int)
+type WhitespaceScan {
+  WhitespaceDone(consumed: Int, newlines: Int, rest: BitArray)
+  BlockCommentUnterminated(at: Int)
+  HtmlCommentNotAllowed(at: Int)
 }
 
-fn skip_ws(rest: BitArray, pos: Int, source_kind: SourceKind) -> WsScan {
+fn skip_ws(
+  rest: BitArray,
+  pos: Int,
+  source_kind: SourceKind,
+) -> WhitespaceScan {
   case pos, rest {
     // #! hashbang
     0, <<0x23, 0x21, tail:bytes>> -> skip_line_comment(tail, 2, 0, source_kind)
@@ -315,7 +319,7 @@ fn skip_ws_loop(
   newlines: Int,
   at_line_start at_line_start: Bool,
   source_kind source_kind: SourceKind,
-) -> WsScan {
+) -> WhitespaceScan {
   case rest {
     <<0x20, tail:bytes>>
     | <<0x09, tail:bytes>>
@@ -351,14 +355,14 @@ fn skip_ws_loop(
     // <!-- html comment, script only
     <<0x3C, 0x21, 0x2D, 0x2D, tail:bytes>> ->
       case source_kind {
-        ModuleSource -> WsHtmlInModule(consumed)
+        ModuleSource -> HtmlCommentNotAllowed(consumed)
         ScriptSource ->
           skip_line_comment(tail, consumed + 4, newlines, source_kind)
       }
     // --> html comment, line start, script only
     <<0x2D, 0x2D, 0x3E, tail:bytes>> if at_line_start ->
       case source_kind {
-        ModuleSource -> WsHtmlInModule(consumed)
+        ModuleSource -> HtmlCommentNotAllowed(consumed)
         ScriptSource ->
           skip_line_comment(tail, consumed + 3, newlines, source_kind)
       }
@@ -383,7 +387,7 @@ fn skip_ws_loop(
       skip_ws_loop(tail, consumed + 3, newlines, at_line_start, source_kind)
     <<0xE2, 0x80, b, tail:bytes>> if b >= 0x80 && b <= 0x8A ->
       skip_ws_loop(tail, consumed + 3, newlines, at_line_start, source_kind)
-    other -> WsEnd(consumed, newlines, other)
+    other -> WhitespaceDone(consumed, newlines, other)
   }
 }
 
@@ -392,7 +396,7 @@ fn skip_line_comment(
   consumed: Int,
   newlines: Int,
   source_kind: SourceKind,
-) -> WsScan {
+) -> WhitespaceScan {
   let comment_len = line_comment_length(rest, 0)
   let after = drop_start(rest, comment_len)
   skip_ws_loop(
@@ -426,7 +430,7 @@ fn skip_block_comment(
   newlines: Int,
   at_line_start at_line_start: Bool,
   source_kind source_kind: SourceKind,
-) -> WsScan {
+) -> WhitespaceScan {
   case rest {
     <<0x2A, 0x2F, tail:bytes>> ->
       skip_ws_loop(tail, consumed + 2, newlines, at_line_start, source_kind)
@@ -494,7 +498,7 @@ fn skip_block_comment(
         at_line_start,
         source_kind,
       )
-    _ -> WsBlockUnterminated(consumed)
+    _ -> BlockCommentUnterminated(consumed)
   }
 }
 
@@ -826,17 +830,17 @@ fn read_string_body(
   line line: Int,
 ) -> Result(Token, LexError) {
   case scan_to_closing_quote(rest, 0, quote) {
-    StrQuote(consumed) -> {
+    ClosingQuote(consumed) -> {
       let raw_len = pos + consumed - start + 1
       let content = unsafe_slice(bytes, start + 1, raw_len - 2)
       Ok(
         Token(
-          ..plain_token(KString, content, start, raw_len, line),
+          ..plain_token(StringLiteral, content, start, raw_len, line),
           annex_b_legacy:,
         ),
       )
     }
-    StrEscape(consumed) -> {
+    EscapeSequence(consumed) -> {
       let backslash_pos = pos + consumed
       use escape <- result.try(validate_escape(
         bytes,
@@ -854,7 +858,7 @@ fn read_string_body(
         line,
       )
     }
-    StrUnterminated -> Ok(unterminated_quote_token(bytes, start, line))
+    UnterminatedQuote -> Ok(unterminated_quote_token(bytes, start, line))
   }
 }
 
@@ -862,18 +866,22 @@ fn unterminated_quote_token(bytes: BitArray, start: Int, line: Int) -> Token {
   plain_token(Illegal, unsafe_slice(bytes, start, 1), start, 1, line)
 }
 
-type StrScan {
-  StrQuote(consumed: Int)
-  StrEscape(consumed: Int)
-  StrUnterminated
+type StringScan {
+  ClosingQuote(consumed: Int)
+  EscapeSequence(consumed: Int)
+  UnterminatedQuote
 }
 
-fn scan_to_closing_quote(rest: BitArray, consumed: Int, quote: Int) -> StrScan {
+fn scan_to_closing_quote(
+  rest: BitArray,
+  consumed: Int,
+  quote: Int,
+) -> StringScan {
   case rest {
-    <<b, _:bytes>> if b == quote -> StrQuote(consumed)
-    <<0x5C>> -> StrUnterminated
-    <<0x5C, _:bytes>> -> StrEscape(consumed)
-    <<0x0A, _:bytes>> | <<0x0D, _:bytes>> -> StrUnterminated
+    <<b, _:bytes>> if b == quote -> ClosingQuote(consumed)
+    <<0x5C>> -> UnterminatedQuote
+    <<0x5C, _:bytes>> -> EscapeSequence(consumed)
+    <<0x0A, _:bytes>> | <<0x0D, _:bytes>> -> UnterminatedQuote
     <<b, tail:bytes>> if b < 0x80 ->
       scan_to_closing_quote(tail, consumed + 1, quote)
     <<b, _, tail:bytes>> if b >= 0xC0 && b < 0xE0 ->
@@ -883,7 +891,7 @@ fn scan_to_closing_quote(rest: BitArray, consumed: Int, quote: Int) -> StrScan {
     <<b, _, _, _, tail:bytes>> if b >= 0xF0 && b < 0xF8 ->
       scan_to_closing_quote(tail, consumed + 4, quote)
     <<_, tail:bytes>> -> scan_to_closing_quote(tail, consumed + 1, quote)
-    _ -> StrUnterminated
+    _ -> UnterminatedQuote
   }
 }
 
@@ -1504,8 +1512,8 @@ pub fn keyword_or_identifier(word: String) -> TokenKind {
     "yield" -> Yield
     "null" -> Null
     "undefined" -> Undefined
-    "true" -> KTrue
-    "false" -> KFalse
+    "true" -> TrueLiteral
+    "false" -> FalseLiteral
     "debugger" -> Debugger
     "with" -> With
     "static" -> Static

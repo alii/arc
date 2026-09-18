@@ -1,4 +1,5 @@
 import arc/bytecode/error_kind.{TypeError}
+import arc/bytecode/key.{type PropertyKey, Index, Named}
 import arc/internal/ordered_entries
 import arc/rt/builtins/common
 import arc/rt/call.{NormalCompletion, ThrowCompletion, t_call, t_try_call}
@@ -8,12 +9,11 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Cell, type Handle, type JsElements, type JsVal, type Property,
-  type PropertyKey, ArrayObj, AsyncFromSyncIterator, DataProperty, Index,
-  IteratorRecord, KHandle, KNull, KStr, KUndef, MapIterEntries, MapIterKeys,
-  MapIterValues, MapIterator, MapObj, Named, SObject, SetIterEntries,
-  SetIterValues, SetIterator, SetObj, StringIterator, StringKey, SymbolKey,
-  classify, map_key_to_js, mk_int, mk_object, mk_string, mk_undefined,
-  plain_object, symbol_async_iterator, symbol_iterator,
+  ArrayObj, AsyncFromSyncIterator, DataProperty, IteratorRecord, KHandle, KNull,
+  KStr, KUndef, MapIterEntries, MapIterKeys, MapIterValues, MapIterator, MapObj,
+  SObject, SetIterEntries, SetIterValues, SetIterator, SetObj, StringIterator,
+  StringKey, SymbolKey, classify, map_key_to_js, mk_int, mk_object, mk_string,
+  mk_undefined, plain_object, symbol_async_iterator, symbol_iterator,
 }
 import arc/rt/val.{is_callable} as rt_val
 import gleam/dict.{type Dict}
@@ -659,11 +659,11 @@ pub fn add_entries_with_sink(
   add_entry: EntrySink,
 ) -> #(JsVal, Agent) {
   let #(rec, st) = get_iterator_sync(st, iterable)
-  add_entries_loop(st, target, rec, add_entry)
+  add_entries_with_sink_loop(st, target, rec, add_entry)
 }
 
 // next/done/value throws skip close; entry reads and sink close first
-fn add_entries_loop(
+fn add_entries_with_sink_loop(
   st: Agent,
   target: JsVal,
   rec: IteratorRecord,
@@ -685,7 +685,7 @@ fn add_entries_loop(
           use _, st <- or_close(st, rec.iterator, fn(st) {
             #(mk_undefined(), add_entry(st, k, v))
           })
-          add_entries_loop(st, target, rec, add_entry)
+          add_entries_with_sink_loop(st, target, rec, add_entry)
         }
         False ->
           close_throw_type(
@@ -719,10 +719,10 @@ pub fn add_values_from_iterable(
   adder: JsVal,
 ) -> #(JsVal, Agent) {
   let #(rec, st) = get_iterator_sync(st, iterable)
-  add_values_loop(st, target, rec, adder)
+  add_values_from_iterable_loop(st, target, rec, adder)
 }
 
-fn add_values_loop(
+fn add_values_from_iterable_loop(
   st: Agent,
   target: JsVal,
   rec: IteratorRecord,
@@ -736,7 +736,7 @@ fn add_values_loop(
       use _add_result, st <- or_close(st, rec.iterator, fn(st) {
         t_call(st, adder, target, [v])
       })
-      add_values_loop(st, target, rec, adder)
+      add_values_from_iterable_loop(st, target, rec, adder)
     }
   }
 }
