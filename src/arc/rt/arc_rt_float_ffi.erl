@@ -1,7 +1,6 @@
 %% fallbacks are for atomvm: no [short], precision capped at 57
 -module(arc_rt_float_ffi).
--export([shortest/1, scientific/2]).
--export([shortest_digits/1, split_exponent/1, split_dot/1]).
+-export([shortest_digits/1, scientific/2, split_exponent/1, split_dot/1]).
 
 shortest(X) when is_float(X) ->
     try float_to_list(X, [short])

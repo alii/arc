@@ -20,7 +20,7 @@ fn t_apply_protected(
   body: fn(Agent) -> #(JsVal, Agent),
 ) -> #(rt_call.Completion, Agent)
 
-@external(erlang, "arc_rt_store_ffi", "identity")
+@external(erlang, "gleam_stdlib", "identity")
 fn as_code(f: fn(Agent, Frame, List(JsVal)) -> #(JsVal, Agent)) -> CompiledFn
 
 fn agent() -> Agent {
@@ -198,8 +198,8 @@ pub fn each_internal_method_reaches_its_trap_test() {
   let #(seen, st) = drain(st, log)
   assert seen == "getPrototypeOf"
 
-  let #(ok, st) = rt_obj.t_set_prototype(st, ph, None)
-  assert ok
+  let #(res, st) = rt_obj.t_set_prototype_of(st, ph, None)
+  assert res == Ok(Nil)
   let #(seen, st) = drain(st, log)
   assert seen == "setPrototypeOf"
   let #(proto, st) = rt_obj.t_get_prototype_of(st, handle(target))
@@ -436,7 +436,7 @@ pub fn revoked_proxy_throws_on_every_operation_test() {
     })
     == "TypeError"
   assert throws(st, rt_obj.t_get_prototype_of(_, ph)) == "TypeError"
-  assert throws(st, rt_obj.t_set_prototype(_, ph, None)) == "TypeError"
+  assert throws(st, rt_obj.t_set_prototype_of(_, ph, None)) == "TypeError"
   assert throws(st, rt_obj.t_is_extensible(_, ph)) == "TypeError"
   assert throws(st, rt_obj.t_prevent_extensions(_, ph)) == "TypeError"
   assert throws(st, fn(st) { rt_call.t_call(st, p, mk_undefined(), []) |> ok })
@@ -633,7 +633,8 @@ pub fn prototype_and_extensibility_invariants_test() {
   assert throws(st, rt_obj.t_get_prototype_of(_, handle(p))) == "TypeError"
   let #(h, st) = handler_of(st, "setPrototypeOf", mk_bool(True))
   let #(p, st) = proxy(st, t, h)
-  assert throws(st, rt_obj.t_set_prototype(_, handle(p), None)) == "TypeError"
+  assert throws(st, rt_obj.t_set_prototype_of(_, handle(p), None))
+    == "TypeError"
   assert throws(st, static(_, "Object", "setPrototypeOf", [p, mk_null()]))
     == "TypeError"
   let #(h, st) = handler_of(st, "isExtensible", mk_bool(True))

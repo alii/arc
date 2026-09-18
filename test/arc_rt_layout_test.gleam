@@ -103,7 +103,7 @@ pub fn agent_test() {
 }
 
 pub fn js_store_test() {
-  let base = rt_store.t_store_new()
+  let base = rt_store.new()
   let desc =
     ShapeDesc(
       arity: 1,

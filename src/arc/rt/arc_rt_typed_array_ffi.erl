@@ -72,28 +72,16 @@ ta_set_float(Bin, Off, f32, N) ->
 ta_set_float(Bin, Off, f64, N) ->
     set_int(Bin, Off, 64, f64_bits(N)).
 
-as_float({j_int, I}) ->
-    try {j_float, float(I)}
-    catch error:badarith ->
-        case I > 0 of true -> j_pos_inf; false -> j_neg_inf end
-    end;
-as_float(N) -> N.
+%% gleam callers convert j_int first
+f32_bits(j_nan) -> 16#7FC00000;
+f32_bits(j_pos_inf) -> 16#7F800000;
+f32_bits(j_neg_inf) -> 16#FF800000;
+f32_bits({j_float, V}) -> <<B:32>> = <<V:32/float>>, B.
 
-f32_bits(N) ->
-    case as_float(N) of
-        j_nan -> 16#7FC00000;
-        j_pos_inf -> 16#7F800000;
-        j_neg_inf -> 16#FF800000;
-        {j_float, V} -> <<B:32>> = <<V:32/float>>, B
-    end.
-
-f64_bits(N) ->
-    case as_float(N) of
-        j_nan -> 16#7FF8000000000000;
-        j_pos_inf -> 16#7FF0000000000000;
-        j_neg_inf -> 16#FFF0000000000000;
-        {j_float, V} -> <<B:64>> = <<V:64/float>>, B
-    end.
+f64_bits(j_nan) -> 16#7FF8000000000000;
+f64_bits(j_pos_inf) -> 16#7FF0000000000000;
+f64_bits(j_neg_inf) -> 16#FFF0000000000000;
+f64_bits({j_float, V}) -> <<B:64>> = <<V:64/float>>, B.
 
 %% §7.1.12 touint8clamp, round half to even
 ta_clamp_uint8(j_nan) -> 0;

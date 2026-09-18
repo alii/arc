@@ -9,7 +9,7 @@ import arc/rt/types.{
 import gleam/dict
 import gleam/option.{None, Some}
 
-pub fn template_flags(template: FuncTemplate) -> FnFlags {
+fn template_flags(template: FuncTemplate) -> FnFlags {
   FnFlags(
     is_constructor: template.is_constructor,
     is_class_constructor: template.is_class_constructor,
@@ -65,11 +65,11 @@ pub fn t_new_bytecode_function(
         ),
       )
     }
-    _, _ -> new_with_prototype(st, template, env, unit, flags)
+    _, _ -> new_with_eager_prototype(st, template, env, unit, flags)
   }
 }
 
-fn new_with_prototype(
+fn new_with_eager_prototype(
   st: Agent,
   template: FuncTemplate,
   env: EnvTuple,

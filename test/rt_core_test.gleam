@@ -1,32 +1,29 @@
+import arc/internal/unsafe
 import arc/rt/builtins as rt_builtins
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
-import arc/rt/call.{type Frame, NormalCompletion, ThrowCompletion} as rt_call
+import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type CompiledFn, type JsVal, Agent, BirthSettled, FnFlags,
-  FrameInfo, JFloat, JInt, JNegInf, JPosInf, JsOps, JsStore, KBool, KBytecode,
-  KHandle, KNum, KStr, NoElements, SObject, StringKey, canonical_key, classify,
-  mk_null, mk_number, mk_object, mk_string, mk_undefined,
+  type Agent, type JsVal, Agent, BirthSettled, FnFlags, FrameInfo, JFloat, JInt,
+  JNegInf, JPosInf, JsOps, JsStore, KBool, KBytecode, KHandle, KNum, KStr,
+  NoElements, SObject, StringKey, canonical_key, classify, mk_null, mk_number,
+  mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
 import gleam/option.{None}
-import rt_helpers
+import rt_helpers.{as_code, frame_at}
 
-@external(erlang, "arc_rt_store_ffi", "identity")
-fn as_code(f: fn(Agent, Frame, List(JsVal)) -> #(JsVal, Agent)) -> CompiledFn
+fn template(label: String) -> FuncTemplate {
+  unsafe.coerce(label)
+}
 
-@external(erlang, "erlang", "element")
-fn frame_at(n: Int, frame: Frame) -> JsVal
-
-@external(erlang, "arc_rt_store_ffi", "identity")
-fn template(label: String) -> FuncTemplate
-
-@external(erlang, "arc_rt_store_ffi", "identity")
-fn env(vals: List(JsVal)) -> EnvTuple
+fn env(vals: List(JsVal)) -> EnvTuple {
+  unsafe.coerce(vals)
+}
 
 fn agent() -> Agent {
   rt_builtins.new_agent(rt_helpers.quiet_hooks())

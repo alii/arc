@@ -1,12 +1,11 @@
 %% indexes by codepoint; invalid utf-8 crashes on purpose, no fallback clauses
 %% TODO(Deviation): js indexes by utf-16 code unit
 -module(arc_string_ffi).
--export([string_char_at/2, string_codepoint_at/2, string_codepoint_length/1,
+-export([string_char_at/2, string_codepoint_length/1,
          string_char_at_offset/2, replacement_codepoint/0]).
 -export([string_index_of/3, string_last_index_of/3, string_contains/2,
          has_byte/2, string_last_index_of_all/2]).
 -export([string_cp_slice/3, string_cp_drop/2, string_cp_explode/1]).
--export([slice_known/4, drop_known/3, index_of_known/4]).
 -export([string_split/3, string_repeat/2, string_replace_literal/4]).
 -export([string_ascii_upper/1, string_ascii_lower/1]).
 -export([trim_js_ws/1, trim_leading_js_ws/1, trim_trailing_js_ws/1]).
@@ -21,7 +20,7 @@ string_char_at(Bin, Idx) ->
     end.
 
 string_codepoint_at(Bin, Idx) when Idx >= 0 ->
-    Off = cp_off(Bin, Idx, 0),
+    Off = cp_off(Bin, Idx),
     case Bin of
         <<_:Off/binary, C/utf8, _/binary>> -> {some, C};
         _ -> none
@@ -71,7 +70,7 @@ string_contains(Hay, Needle) -> binary:match(Hay, Needle) =/= nomatch.
 string_index_of(Hay, <<>>, From) ->
     {some, clamp_cp(Hay, From)};
 string_index_of(Hay, Needle, From) ->
-    Start = cp_byte_offset(Hay, max(From, 0)),
+    Start = cp_off(Hay, max(From, 0)),
     case binary:match(Hay, Needle, [{scope, {Start, byte_size(Hay) - Start}}]) of
         nomatch -> none;
         {BytePos, _} -> {some, cp_length(binary:part(Hay, 0, BytePos), 0)}
@@ -85,7 +84,7 @@ string_last_index_of_all(Hay, Needle) ->
 string_last_index_of(Hay, <<>>, From) ->
     {some, clamp_cp(Hay, From)};
 string_last_index_of(Hay, Needle, From) ->
-    Limit = cp_byte_offset(Hay, max(From, 0)),
+    Limit = cp_off(Hay, max(From, 0)),
     last_index_of(Hay, Needle, min(Limit + byte_size(Needle), byte_size(Hay))).
 
 last_index_of(_Hay, Needle, End) when End < byte_size(Needle) -> none;
@@ -116,49 +115,14 @@ latest_overlap(Hay, Needle, L, Pos) ->
 
 clamp_cp(Hay, From) -> min(max(From, 0), string_codepoint_length(Hay)).
 
-%% cp length already computed; ascii when it equals byte size
-slice_known(Bin, CpLen, Start, Len) when CpLen =:= byte_size(Bin) ->
-    case Start >= 0 andalso Len > 0 andalso Start < CpLen of
-        true -> binary:part(Bin, Start, min(Len, CpLen - Start));
-        false -> <<>>
-    end;
-slice_known(Bin, _CpLen, Start, Len) ->
-    string_cp_slice(Bin, Start, Len).
-
-drop_known(Bin, CpLen, N) when CpLen =:= byte_size(Bin) ->
-    case N > 0 of
-        true when N >= CpLen -> <<>>;
-        true -> binary:part(Bin, N, CpLen - N);
-        false -> Bin
-    end;
-drop_known(Bin, _CpLen, N) ->
-    string_cp_drop(Bin, N).
-
-index_of_known(Hay, CpLen, Needle, From) when CpLen =:= byte_size(Hay) ->
-    case Needle of
-        <<>> -> {some, min(max(From, 0), CpLen)};
-        _ ->
-            Start = max(From, 0),
-            case Start > CpLen of
-                true -> none;
-                false ->
-                    case binary:match(Hay, Needle, [{scope, {Start, CpLen - Start}}]) of
-                        nomatch -> none;
-                        {BytePos, _} -> {some, BytePos}
-                    end
-            end
-    end;
-index_of_known(Hay, _CpLen, Needle, From) ->
-    string_index_of(Hay, Needle, From).
-
 string_cp_slice(Bin, Start, Len) when Start >= 0, Len > 0 ->
-    Off = cp_off(Bin, Start, 0),
+    Off = cp_off(Bin, Start),
     <<_:Off/binary, Rest/binary>> = Bin,
-    binary:part(Bin, Off, cp_off(Rest, Len, 0));
+    binary:part(Bin, Off, cp_off(Rest, Len));
 string_cp_slice(_, _, _) -> <<>>.
 
 string_cp_drop(Bin, N) when N > 0 ->
-    Off = cp_off(Bin, N, 0),
+    Off = cp_off(Bin, N),
     binary:part(Bin, Off, byte_size(Bin) - Off);
 string_cp_drop(Bin, _) -> Bin.
 
@@ -187,7 +151,7 @@ string_repeat(Bin, N) when N > 1024, byte_size(Bin) < 1024 ->
 string_repeat(Bin, N) when N > 0 -> binary:copy(Bin, N);
 string_repeat(_, _) -> <<>>.
 
-cp_byte_offset(Bin, N) -> cp_off(Bin, N, 0).
+cp_off(Bin, N) -> cp_off(Bin, N, 0).
 
 cp_off(<<W1:56, W2:56, W3:56, W4:56, R/binary>>, N, Off)
     when N >= 28, (W1 bor W2 bor W3 bor W4) band 16#80808080808080 =:= 0 ->

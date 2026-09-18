@@ -190,7 +190,7 @@ pub fn table() -> DirectHost {
       #("private_define", HostOp(class, "t_private_define", MutUnit)),
       #("private_in", HostOp(class, "t_private_in", Read)),
       #("fn_home_object", HostOp(class, "t_fn_home_object", Read)),
-      #("is_constructor", HostOp(class, "t_is_constructor", Read)),
+      #("is_constructor", HostOp(call, "is_constructor", Read)),
       #("super_get", HostOp(class, "t_super_get", Mut)),
       #("super_set", HostOp(class, "t_super_set", Mut)),
       #("super_call", HostOp(class, "t_super_call", Mut)),

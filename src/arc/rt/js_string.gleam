@@ -42,21 +42,6 @@ pub fn length(s: String) -> Int
 @external(erlang, "arc_string_ffi", "string_cp_slice")
 pub fn slice(s: String, start: Int, len: Int) -> String
 
-// cp_len must be length(s), lets ascii strings skip the rescan
-@external(erlang, "arc_string_ffi", "slice_known")
-pub fn slice_known(s: String, cp_len: Int, start: Int, len: Int) -> String
-
-@external(erlang, "arc_string_ffi", "drop_known")
-pub fn drop_known(s: String, cp_len: Int, n: Int) -> String
-
-@external(erlang, "arc_string_ffi", "index_of_known")
-pub fn index_of_known(
-  haystack: String,
-  cp_len: Int,
-  needle: String,
-  from: Int,
-) -> Option(Int)
-
 @external(erlang, "arc_string_ffi", "string_cp_drop")
 pub fn drop_start(s: String, n: Int) -> String
 
@@ -76,9 +61,6 @@ pub fn replace_literal(
 
 @external(erlang, "arc_string_ffi", "string_repeat")
 pub fn repeat(s: String, n: Int) -> String
-
-@external(erlang, "arc_string_ffi", "string_codepoint_at")
-pub fn codepoint_at(s: String, pos: Int) -> Option(Int)
 
 @external(erlang, "arc_string_ffi", "string_char_at_offset")
 pub fn char_at_offset(s: String, off: Int) -> Option(#(String, Int))

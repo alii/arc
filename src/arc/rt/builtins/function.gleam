@@ -279,7 +279,7 @@ fn apply_new_target_prototype(
               rt_call.async_generator_fn_prototype(st, realm)
           }
         })
-      let #(_set, st) = rt_obj.t_set_prototype(st, h, Some(proto))
+      let #(_res, st) = rt_obj.t_set_prototype_of(st, h, Some(proto))
       st
     }
     _ -> st

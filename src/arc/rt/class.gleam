@@ -2,25 +2,16 @@ import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type FnFlags, type Handle, type JsOps, type JsVal,
-  type MethodInstallKind, type ObjectKey, type Property, type PropertyKey,
-  AccessorProperty, DataProperty, KBytecode, KCompiled, KHandle, KNull, KStr,
-  KTdz, MIGetter, MIMethod, MISetter, MIStatic, MIStaticGetter, MIStaticSetter,
-  Named, Private, SObject, StringKey, SymbolKey, classify, mk_object, mk_string,
-  mk_undefined,
+  type Agent, type Handle, type JsVal, type MethodInstallKind, type ObjectKey,
+  type Property, type PropertyKey, AccessorProperty, DataProperty, KBytecode,
+  KCompiled, KHandle, KNull, KStr, KTdz, MIGetter, MIMethod, MISetter, MIStatic,
+  MIStaticGetter, MIStaticSetter, Named, Private, SObject, StringKey, SymbolKey,
+  classify, mk_object, mk_string, mk_undefined,
 } as rt_types
+import arc/rt/val as rt_val
 import gleam/bit_array
 import gleam/dict
 import gleam/option.{type Option, None, Some}
-
-fn js_ops(st: Agent) -> JsOps(Agent) {
-  st.store.ops
-}
-
-fn throw_type_error(st: Agent, msg: String) -> a {
-  let #(e, st) = js_ops(st).new_error(st, rt_types.TypeErr, msg)
-  rt_store.t_throw(st, e)
-}
 
 fn priv_key_bytes(v: JsVal) -> BitArray {
   case classify(v) {
@@ -80,7 +71,7 @@ fn class_heritage(st: Agent, super: JsVal) -> #(Option(Handle), Handle, Agent) {
     KHandle(parent_h) ->
       case rt_call.is_constructor(st, super) {
         False ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "Class extends value is not a constructor or null",
           )
@@ -91,7 +82,7 @@ fn class_heritage(st: Agent, super: JsVal) -> #(Option(Handle), Handle, Agent) {
             KHandle(pph) -> #(Some(pph), parent_h, st)
             KNull -> #(None, parent_h, st)
             _ ->
-              throw_type_error(
+              rt_val.t_throw_type_error(
                 st,
                 "Class extends value does not have valid prototype property",
               )
@@ -99,7 +90,10 @@ fn class_heritage(st: Agent, super: JsVal) -> #(Option(Handle), Handle, Agent) {
         }
       }
     _ ->
-      throw_type_error(st, "Class extends value is not a constructor or null")
+      rt_val.t_throw_type_error(
+        st,
+        "Class extends value is not a constructor or null",
+      )
   }
 }
 
@@ -165,7 +159,7 @@ pub fn t_define_method(
     Some(prop) ->
       case rt_types.prop_configurable(prop) {
         False ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "Cannot redefine property: " <> object_key_display(key),
           )
@@ -180,7 +174,7 @@ pub fn t_define_method(
     MISetter | MIStaticSetter -> "set "
     MIMethod | MIStatic -> ""
   }
-  let st = set_fn_name_if_empty(st, fn_h, prefix, key_fn_name(key))
+  let st = rt_obj.t_name_if_anonymous(st, fn_h, prefix <> key_fn_name(key))
   let fn_v = mk_object(fn_h)
   case kind {
     MIMethod | MIStatic -> {
@@ -227,15 +221,6 @@ fn key_fn_name(key: ObjectKey) -> String {
         None -> ""
       }
   }
-}
-
-fn set_fn_name_if_empty(
-  st: Agent,
-  fn_h: Handle,
-  prefix: String,
-  name: String,
-) -> Agent {
-  rt_obj.t_name_if_anonymous(st, fn_h, prefix <> name)
 }
 
 // §7.3.28 privatefieldadd, bypasses defineownproperty
@@ -299,7 +284,7 @@ fn check_private_add(st: Agent, obj: Handle, bytes: BitArray) -> Agent {
     None ->
       case rt_obj.t_ordinary_is_extensible(st, obj) {
         False ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "Cannot define private member "
               <> rt_types.private_display_name(bytes)
@@ -311,7 +296,7 @@ fn check_private_add(st: Agent, obj: Handle, bytes: BitArray) -> Agent {
 }
 
 fn throw_private_double_init(st: Agent, bytes: BitArray, kind: String) -> a {
-  throw_type_error(
+  rt_val.t_throw_type_error(
     st,
     "Cannot initialize "
       <> kind
@@ -401,11 +386,14 @@ pub fn t_private_get(
       case rt_obj.t_ordinary_own_property(st, h, StringKey(Private(bytes))) {
         Some(DataProperty(value:, ..)) -> #(value, st)
         Some(AccessorProperty(get: Some(getter), ..)) ->
-          js_ops(st).call(st, getter, obj, [])
+          st.store.ops.call(st, getter, obj, [])
         Some(AccessorProperty(get: None, ..)) ->
-          throw_type_error(st, "'" <> name <> "' was defined without a getter")
+          rt_val.t_throw_type_error(
+            st,
+            "'" <> name <> "' was defined without a getter",
+          )
         None ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "Cannot read private member "
               <> name
@@ -413,7 +401,7 @@ pub fn t_private_get(
           )
       }
     _ ->
-      throw_type_error(
+      rt_val.t_throw_type_error(
         st,
         "Cannot read private member " <> name <> " on non-object",
       )
@@ -459,19 +447,19 @@ pub fn t_private_set(
           #(v, st)
         }
         Some(AccessorProperty(set: Some(setter), ..)) -> {
-          let #(_, st) = js_ops(st).call(st, setter, obj, [v])
+          let #(_, st) = st.store.ops.call(st, setter, obj, [v])
           #(v, st)
         }
         Some(DataProperty(writable: False, ..))
         | Some(AccessorProperty(set: None, ..)) ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "Cannot write private member "
               <> name
               <> ": it is a method or has no setter",
           )
         None ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "Cannot write private member "
               <> name
@@ -479,7 +467,7 @@ pub fn t_private_set(
           )
       }
     _ ->
-      throw_type_error(
+      rt_val.t_throw_type_error(
         st,
         "Cannot write private member " <> name <> " on non-object",
       )
@@ -497,7 +485,7 @@ pub fn t_private_in(st: Agent, obj: JsVal, priv_key: JsVal) -> Bool {
         StringKey(Private(bytes)),
       ))
     _ ->
-      throw_type_error(
+      rt_val.t_throw_type_error(
         st,
         "Cannot use 'in' operator to search for private name "
           <> rt_types.private_display_name(bytes)
@@ -513,11 +501,14 @@ pub fn t_super_get(
   receiver: JsVal,
   key: ObjectKey,
 ) -> #(JsVal, Agent) {
-  case rt_obj.t_get_proto(st, home) {
+  case rt_obj.t_get_prototype_of(st, home) {
     #(Some(base), st) ->
       rt_obj.t_get_prop_with_receiver(st, base, key, receiver)
     #(None, st) ->
-      throw_type_error(st, "Cannot read super property when prototype is null")
+      rt_val.t_throw_type_error(
+        st,
+        "Cannot read super property when prototype is null",
+      )
   }
 }
 
@@ -530,18 +521,24 @@ pub fn t_super_set(
   v: JsVal,
   strict strict: Bool,
 ) -> #(JsVal, Agent) {
-  case rt_obj.t_get_proto(st, home) {
+  case rt_obj.t_get_prototype_of(st, home) {
     #(Some(base), st) -> {
       let #(ok, st) =
         rt_obj.t_set_prop_with_receiver(st, base, key, v, receiver)
       case ok || !strict {
         True -> #(v, st)
         False ->
-          throw_type_error(st, "Cannot assign to read-only super property")
+          rt_val.t_throw_type_error(
+            st,
+            "Cannot assign to read-only super property",
+          )
       }
     }
     #(None, st) ->
-      throw_type_error(st, "Cannot write super property when prototype is null")
+      rt_val.t_throw_type_error(
+        st,
+        "Cannot write super property when prototype is null",
+      )
   }
 }
 
@@ -552,12 +549,12 @@ pub fn t_super_call(
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Handle, Agent) {
-  case rt_obj.t_get_proto(st, active_func) {
+  case rt_obj.t_get_prototype_of(st, active_func) {
     #(Some(parent), st) ->
       rt_call.t_construct(st, mk_object(parent), args, new_target)
     // null proto means setprototypeof(ctor, null): typeerror
     #(None, st) ->
-      throw_type_error(
+      rt_val.t_throw_type_error(
         st,
         "Super constructor null of derived class is not a constructor",
       )
@@ -570,17 +567,4 @@ pub fn t_fn_home_object(st: Agent, fn_h: Handle) -> JsVal {
     | SObject(kind: KBytecode(home_object: Some(h), ..), ..) -> mk_object(h)
     _ -> mk_undefined()
   }
-}
-
-// panics on native/bound, emitter guarantees a closure
-pub fn t_fn_flags(st: Agent, fn_h: Handle) -> FnFlags {
-  case rt_store.t_cell_get(st, fn_h) {
-    SObject(kind: KCompiled(flags:, ..), ..)
-    | SObject(kind: KBytecode(flags:, ..), ..) -> flags
-    _ -> panic as "t_fn_flags: Handle is not a function closure cell"
-  }
-}
-
-pub fn t_is_constructor(st: Agent, v: JsVal) -> Bool {
-  rt_call.is_constructor(st, v)
 }

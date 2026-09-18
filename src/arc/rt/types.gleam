@@ -91,11 +91,6 @@ pub type ToPrimHint {
   HintNumber
 }
 
-pub type IterHint {
-  IterSync
-  IterAsync
-}
-
 // 2^32 - 2 (§6.1.7)
 pub const max_array_index = 4_294_967_294
 
@@ -174,10 +169,6 @@ pub fn is_private_key(key: PropertyKey) -> Bool {
 
 pub fn private_key(name: String) -> PropertyKey {
   Private(bit_array.from_string(name))
-}
-
-pub fn private_key_from_text(text: BitArray) -> PropertyKey {
-  Private(text)
 }
 
 pub fn private_key_text(name: String, uid: Int) -> BitArray {
@@ -502,16 +493,6 @@ pub fn prop_configurable(prop: Property) -> Bool {
   case prop {
     DataProperty(configurable: c, ..) | AccessorProperty(configurable: c, ..) ->
       c
-  }
-}
-
-pub fn with_seq_of(prop: Property, old: Property) -> Property {
-  let seq = prop_seq(old)
-  case prop {
-    DataProperty(value:, writable:, enumerable:, configurable:, ..) ->
-      DataProperty(value:, writable:, enumerable:, configurable:, seq:)
-    AccessorProperty(get:, set:, enumerable:, configurable:, ..) ->
-      AccessorProperty(get:, set:, enumerable:, configurable:, seq:)
   }
 }
 
@@ -1879,348 +1860,6 @@ pub type AGResumeKind {
   AGResumeReturnUnwind
 }
 
-// gc: every handle a token closes over
-pub fn native_token_refs(tok: NativeToken) -> List(Handle) {
-  case tok {
-    PromiseResolveFn(promise:, already_resolved:)
-    | PromiseRejectFn(promise:, already_resolved:) -> [
-      promise,
-      already_resolved,
-    ]
-    AsyncGenResume(gen:, ..) -> [gen]
-    ObjectN(_) | FunctionN(_) | ReturnThis -> []
-    ErrorN(n) -> error_native_refs(n)
-    DomExceptionN(DomExceptionConstructor(proto:)) -> [proto]
-    DomExceptionN(DomExceptionGetCode) -> []
-    IntlN(n) -> intl_native_refs(n)
-    TemporalN(n) -> temporal_native_refs(n)
-    DisposableStackN(n) -> disposable_stack_native_refs(n)
-    FinalizationRegistryN(FinalizationRegistryConstructor(proto:)) -> [proto]
-    FinalizationRegistryN(FinalizationRegistryPrototypeRegister)
-    | FinalizationRegistryN(FinalizationRegistryPrototypeUnregister) -> []
-    WeakRefN(_) -> []
-    ShadowRealmN(n) -> shadow_realm_native_refs(n)
-    DateN(n) -> date_native_refs(n)
-    RegExpN(n) -> regexp_native_refs(n)
-    AtomicsN(_) -> []
-    ArrayBufferN(n) -> array_buffer_native_refs(n)
-    TypedArrayN(n) -> typed_array_native_refs(n)
-    DataViewN(n) -> data_view_native_refs(n)
-    ProxyN(n) -> proxy_native_refs(n)
-    PromiseN(n) -> promise_native_refs(n)
-    IteratorN(n) -> iterator_native_refs(n)
-    GeneratorN(_) -> []
-    MapN(n) -> map_native_refs(n)
-    SetN(n) -> set_native_refs(n)
-    WeakN(n) -> weak_native_refs(n)
-    ArrayN(_)
-    | StringN(_)
-    | NumberN(_)
-    | BooleanN(_)
-    | SymbolN(_)
-    | BigIntN(_)
-    | MathN(_)
-    | JsonN(_)
-    | ReflectN(_)
-    | ConsoleN(_)
-    | GlobalN(_)
-    | ThrowTypeErrorPoison
-    | HostFn(_)
-    | Test262N(_) -> []
-  }
-}
-
-pub fn shadow_realm_native_refs(n: ShadowRealmNative) -> List(Handle) {
-  case n {
-    ShadowRealmConstructor(proto:) -> [proto]
-    WrappedFunctionCall(target:, ..) -> [target]
-    ShadowRealmEvaluate(_) | ShadowRealmImportValue(_) -> []
-  }
-}
-
-pub fn map_native_refs(n: MapNative) -> List(Handle) {
-  case n {
-    MapConstructor(proto:) -> [proto]
-    MapGroupBy
-    | MapGet
-    | MapSet
-    | MapHas
-    | MapDelete
-    | MapClear
-    | MapForEach
-    | MapGetOrInsert
-    | MapGetOrInsertComputed
-    | MapGetSize
-    | MapKeys
-    | MapValues
-    | MapEntries -> []
-  }
-}
-
-pub fn set_native_refs(n: SetNative) -> List(Handle) {
-  case n {
-    SetConstructor(proto:) -> [proto]
-    SetAdd
-    | SetHas
-    | SetDelete
-    | SetClear
-    | SetForEach
-    | SetGetSize
-    | SetValues
-    | SetEntries
-    | SetUnion
-    | SetIntersection
-    | SetDifference
-    | SetSymmetricDifference
-    | SetIsSubsetOf
-    | SetIsSupersetOf
-    | SetIsDisjointFrom -> []
-  }
-}
-
-pub fn weak_native_refs(n: WeakNative) -> List(Handle) {
-  case n {
-    WeakMapConstructor(proto:) | WeakSetConstructor(proto:) -> [proto]
-    WeakMapGet
-    | WeakMapSet
-    | WeakMapHas
-    | WeakMapDelete
-    | WeakMapGetOrInsert
-    | WeakMapGetOrInsertComputed
-    | WeakSetAdd
-    | WeakSetHas
-    | WeakSetDelete -> []
-  }
-}
-
-pub fn promise_native_refs(n: PromiseNative) -> List(Handle) {
-  case n {
-    PromiseCapabilityExecutor(resolve_box:, reject_box:) -> [
-      resolve_box,
-      reject_box,
-    ]
-    PromiseAllResolveElement(remaining:, values:, already_called:, ..) -> [
-      remaining,
-      values,
-      already_called,
-    ]
-    PromiseAllSettledElement(remaining:, values:, already_called:, ..) -> [
-      remaining,
-      values,
-      already_called,
-    ]
-    PromiseAnyRejectElement(remaining:, errors:, already_called:, ..) -> [
-      remaining,
-      errors,
-      already_called,
-    ]
-    PromiseKeyedElement(remaining:, keys:, values:, already_called:, ..) -> [
-      remaining,
-      keys,
-      values,
-      already_called,
-    ]
-    PromiseConstructor
-    | PromiseThen
-    | PromiseCatch
-    | PromiseFinally
-    | PromiseResolveStatic
-    | PromiseRejectStatic
-    | PromiseAllStatic
-    | PromiseRaceStatic
-    | PromiseAllSettledStatic
-    | PromiseAnyStatic
-    | PromiseAllKeyedStatic
-    | PromiseAllSettledKeyedStatic
-    | PromiseFinallyFn(..)
-    | PromiseFinallyValueThunk(..)
-    | PromiseFinallyThrower(..) -> []
-  }
-}
-
-pub fn iterator_native_refs(n: IteratorNative) -> List(Handle) {
-  case n {
-    AsyncFromSyncClose(sync_iter:) -> [sync_iter]
-    AsyncFromSyncNext
-    | AsyncFromSyncReturn
-    | AsyncFromSyncThrow
-    | AsyncFromSyncUnwrap(..)
-    | IteratorConstructor
-    | IteratorFrom
-    | IteratorZip
-    | IteratorZipKeyed
-    | IteratorConcat
-    | IteratorPrototypeToArray
-    | IteratorPrototypeForEach
-    | IteratorPrototypeReduce
-    | IteratorPrototypeSome
-    | IteratorPrototypeEvery
-    | IteratorPrototypeFind
-    | IteratorPrototypeMap
-    | IteratorPrototypeFilter
-    | IteratorPrototypeTake
-    | IteratorPrototypeDrop
-    | IteratorPrototypeFlatMap
-    | IteratorHelperNext
-    | IteratorHelperReturn
-    | WrapForValidIteratorNext
-    | WrapForValidIteratorReturn
-    | IteratorProtoGetToStringTag
-    | IteratorProtoSetToStringTag
-    | IteratorProtoGetConstructor
-    | IteratorProtoSetConstructor
-    | ArrayIteratorNext
-    | MapIteratorNext
-    | SetIteratorNext
-    | StringIteratorNext -> []
-  }
-}
-
-pub fn error_native_refs(n: ErrorNative) -> List(Handle) {
-  case n {
-    ErrorConstructor(proto:)
-    | AggregateErrorConstructor(proto:)
-    | SuppressedErrorConstructor(proto:) -> [proto]
-    ErrorPrototypeToString
-    | ErrorCaptureStackTrace
-    | ErrorStackGetter
-    | ErrorStackSetter(_)
-    | ErrorIsError -> []
-  }
-}
-
-pub fn disposable_stack_native_refs(n: DisposableStackNative) -> List(Handle) {
-  case n {
-    DisposableStackConstructor(proto:)
-    | DisposableStackPrototypeMove(proto:)
-    | AsyncDisposableStackConstructor(proto:)
-    | AsyncDisposableStackPrototypeMove(proto:) -> [proto]
-    DisposableStackPrototypeDispose
-    | DisposableStackPrototypeUse
-    | DisposableStackPrototypeAdopt
-    | DisposableStackPrototypeDefer
-    | DisposableStackDisposedGetter
-    | AsyncDisposableStackPrototypeDisposeAsync
-    | AsyncDisposableStackPrototypeUse
-    | AsyncDisposableStackPrototypeAdopt
-    | AsyncDisposableStackPrototypeDefer
-    | AsyncDisposableStackDisposedGetter
-    | AsyncDisposeContinue(..) -> []
-  }
-}
-
-pub fn regexp_native_refs(n: RegExpNative) -> List(Handle) {
-  case n {
-    RegExpLegacyGetter(ctor:, ..) | RegExpLegacyInputSetter(ctor:) -> [ctor]
-    _ -> []
-  }
-}
-
-pub fn date_native_refs(n: DateNative) -> List(Handle) {
-  case n {
-    DateConstructor(proto:) -> [proto]
-    _ -> []
-  }
-}
-
-pub fn intl_native_refs(n: IntlNative) -> List(Handle) {
-  case n {
-    IntlConstructor(proto:, ..) -> [proto]
-    IntlBoundMethod(target:, ..) -> [target]
-    IntlSegmenterSegment(segments_proto:) -> [segments_proto]
-    IntlSegmentsIterator(iter_proto:) -> [iter_proto]
-    IntlLocaleMethod(proto:, ..) -> [proto]
-    IntlGetCanonicalLocales
-    | IntlSupportedValuesOf
-    | IntlSupportedLocalesOf(_)
-    | IntlResolvedOptions(_)
-    | IntlBoundGetter(_)
-    | IntlMethod(..)
-    | IntlHostOverride(_)
-    | IntlLocaleGetter(_) -> []
-  }
-}
-
-pub fn temporal_native_refs(n: TemporalNative) -> List(Handle) {
-  case n {
-    TemporalInstantCtor(protos:)
-    | TemporalInstantStatic(protos:, ..)
-    | TemporalInstantMethod(protos:, ..)
-    | TemporalNowFn(protos:, ..) -> temporal_protos_refs(protos)
-    TemporalInstantGetter(_)
-    | TemporalPlainDateTimeGetter(_)
-    | TemporalPlainTimeGetter(_) -> []
-    TemporalPlainDateTimeCtor(protos:)
-    | TemporalPlainDateTimeStatic(protos:, ..)
-    | TemporalPlainDateTimeMethod(protos:, ..)
-    | TemporalPlainTimeCtor(protos:)
-    | TemporalPlainTimeStatic(protos:, ..)
-    | TemporalPlainTimeMethod(protos:, ..) -> temporal_protos_refs(protos)
-    TemporalDurationGetter(_) -> []
-    TemporalDurationCtor(protos:)
-    | TemporalDurationStatic(protos:, ..)
-    | TemporalDurationMethod(protos:, ..) -> temporal_protos_refs(protos)
-    TemporalPlainDateGetter(_) -> []
-    TemporalPlainDateCtor(protos:)
-    | TemporalPlainDateStatic(protos:, ..)
-    | TemporalPlainDateMethod(protos:, ..) -> temporal_protos_refs(protos)
-    TemporalPlainYearMonthGetter(_) | TemporalPlainMonthDayGetter(_) -> []
-    TemporalPlainYearMonthCtor(protos:)
-    | TemporalPlainYearMonthStatic(protos:, ..)
-    | TemporalPlainYearMonthMethod(protos:, ..)
-    | TemporalPlainMonthDayCtor(protos:)
-    | TemporalPlainMonthDayStatic(protos:, ..)
-    | TemporalPlainMonthDayMethod(protos:, ..) -> temporal_protos_refs(protos)
-    TemporalZonedDateTimeGetter(_) -> []
-    TemporalZonedDateTimeCtor(protos:)
-    | TemporalZonedDateTimeStatic(protos:, ..)
-    | TemporalZonedDateTimeMethod(protos:, ..) -> temporal_protos_refs(protos)
-  }
-}
-
-pub fn temporal_protos_refs(p: TemporalProtos) -> List(Handle) {
-  [
-    p.plain_date,
-    p.plain_time,
-    p.plain_date_time,
-    p.plain_year_month,
-    p.plain_month_day,
-    p.duration,
-    p.instant,
-    p.zoned_date_time,
-  ]
-}
-
-pub fn array_buffer_native_refs(n: ArrayBufferNative) -> List(Handle) {
-  case n {
-    ArrayBufferConstructor(proto:) | SharedArrayBufferConstructor(proto:) -> [
-      proto,
-    ]
-    _ -> []
-  }
-}
-
-pub fn typed_array_native_refs(n: TypedArrayNative) -> List(Handle) {
-  case n {
-    TypedArrayConstructor(proto:, ..) -> [proto]
-    _ -> []
-  }
-}
-
-pub fn data_view_native_refs(n: DataViewNative) -> List(Handle) {
-  case n {
-    DataViewConstructor(proto:) -> [proto]
-    _ -> []
-  }
-}
-
-pub fn proxy_native_refs(n: ProxyNative) -> List(Handle) {
-  case n {
-    ProxyRevoke(proxy:) -> [proxy]
-    ProxyConstructor | ProxyRevocable -> []
-  }
-}
-
 pub type IteratorRecord {
   IteratorRecord(iterator: JsVal, next_method: JsVal)
 }
@@ -2382,13 +2021,6 @@ pub fn shape_slots_set(slots: ShapeSlots, off: Int, v: JsVal) -> ShapeSlots
 @external(erlang, "arc_rt_obj_ffi", "shape_slots_append")
 pub fn shape_slots_append(slots: ShapeSlots, v: JsVal) -> ShapeSlots
 
-@external(erlang, "arc_rt_obj_ffi", "shape_slots_fold")
-pub fn shape_slots_fold(
-  slots: ShapeSlots,
-  acc: a,
-  f: fn(Int, JsVal, a) -> a,
-) -> a
-
 pub type ShapeDesc {
   ShapeDesc(
     arity: Int,
@@ -2514,9 +2146,6 @@ pub fn jq_push(queue: JobQueue, item: Job) -> JobQueue
 
 @external(erlang, "arc_job_queue_ffi", "job_queue_pop")
 pub fn jq_pop(queue: JobQueue) -> Option(#(Job, JobQueue))
-
-@external(erlang, "arc_job_queue_ffi", "job_queue_is_empty")
-pub fn jq_is_empty(queue: JobQueue) -> Bool
 
 @external(erlang, "arc_job_queue_ffi", "job_queue_to_list")
 pub fn jq_to_list(queue: JobQueue) -> List(Job)

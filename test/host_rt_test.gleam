@@ -224,7 +224,7 @@ pub fn subclass_new_target_picks_the_prototype_test() {
   let #(p, st) = rt_call.t_construct(st, point, [int(5)], sub)
   assert rt_obj.t_get_prototype_of(st, p).0 == Some(sub_proto)
   assert get(st, mk_object(p), "nt").0 == sub
-  let #(_, st) = rt_obj.t_set_prototype(st, handle(sub), Some(handle(point)))
+  let #(_, st) = rt_obj.t_set_prototype_of(st, handle(sub), Some(handle(point)))
   let #(o, st) = rt_helpers.call_method(st, sub, "origin", [])
   assert rt_obj.t_get_prototype_of(st, handle(o)).0 == Some(sub_proto)
 }

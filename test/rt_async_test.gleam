@@ -153,13 +153,13 @@ pub fn promise_subclass_test() {
     })
   let #(inst_h, st) = rt_call.t_construct(st, p_ctor, [executor], p_ctor)
   let inst = mk_object(inst_h)
-  assert rt_obj.t_get_proto(st, inst_h).0 == Some(p_proto_h)
+  assert rt_obj.t_get_prototype_of(st, inst_h).0 == Some(p_proto_h)
   let #(is_p, st) = rt_ops.t_instance_of(st, inst, p_ctor)
   assert is_p == 1
   let #(noop, st) = rt_helpers.func(st, fn(st, _) { #(mk_undefined(), st) })
   let #(child, st) = rt_helpers.call_method(st, inst, "then", [noop])
   let assert KHandle(child_h) = classify(child)
-  assert rt_obj.t_get_proto(st, child_h).0 == Some(p_proto_h)
+  assert rt_obj.t_get_prototype_of(st, child_h).0 == Some(p_proto_h)
   let #(seen, st) = recorder(st, "settled")
   let #(_, st) = rt_helpers.call_method(st, inst, "then", [seen])
   let _ = rt_async.drain(st)
@@ -183,7 +183,8 @@ pub fn generator_object_is_extensible_with_own_props_test() {
       loc,
     )
   let gen = mk_object(gen_h)
-  assert rt_obj.t_get_proto(st, gen_h).0 == Some(st.realm.generator.prototype)
+  assert rt_obj.t_get_prototype_of(st, gen_h).0
+    == Some(st.realm.generator.prototype)
   assert is_extensible(st, gen)
   let #(_, st) =
     rt_obj.t_set_prop(st, gen, StringKey(Named("x")), mk_number(JInt(5)))

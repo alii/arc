@@ -1,16 +1,13 @@
 import arc/rt/arena
 import arc/rt/limits
 import arc/rt/types.{
-  type Agent, type Handle, type JobQueue, type JsOps, type JsSlot, type JsStore,
-  type JsVal, Agent, JsCell, JsOps, JsStore, RangeErr, SBox, StoreMeta,
+  type Agent, type Handle, type JsOps, type JsSlot, type JsStore, type JsVal,
+  type StoreMeta, Agent, JsCell, JsOps, JsStore, RangeErr, SBox, StoreMeta,
 } as rt_types
 import gleam/dict
 import gleam/set
 
-@external(erlang, "arc_job_queue_ffi", "job_queue_new")
-fn jq_new() -> JobQueue
-
-pub fn t_store_new() -> JsStore(Agent) {
+pub fn new() -> JsStore(Agent) {
   JsStore(
     data: arena.new(),
     next: 0,
@@ -27,7 +24,7 @@ pub fn t_store_new() -> JsStore(Agent) {
     free_protos: dict.new(),
     global_epoch: 0,
     ops: unseeded_ops(),
-    microtasks: jq_new(),
+    microtasks: rt_types.jq_new(),
     pinned_roots: set.new(),
     meta: StoreMeta(
       gc_live: 0,
@@ -61,14 +58,6 @@ fn unseeded_ops() -> JsOps(Agent) {
 // named fn so each stub gets its own type
 fn unseeded() -> a {
   panic as "JsOps unseeded — init_realm fills"
-}
-
-fn require_js(st: Agent) -> JsStore(Agent) {
-  st.store
-}
-
-fn with_js(st: Agent, js: JsStore(Agent)) -> Agent {
-  Agent(..st, store: js)
 }
 
 pub fn t_cell_new(st: Agent, slot: JsSlot) -> #(Handle, Agent) {
@@ -132,14 +121,11 @@ pub fn t_cell_set(st: Agent, h: Handle, slot: JsSlot) -> Agent {
     rt_types.SObject(kind: rt_types.GlobalObj, ..) -> js.global_epoch + 1
     _ -> js.global_epoch
   }
-  case dict.has_key(js.free_protos, id) {
-    True ->
-      Agent(
-        ..st,
-        store: JsStore(..js, data:, free_protos: dict.new(), global_epoch:),
-      )
-    False -> Agent(..st, store: JsStore(..js, data:, global_epoch:))
+  let free_protos = case dict.has_key(js.free_protos, id) {
+    True -> dict.new()
+    False -> js.free_protos
   }
+  Agent(..st, store: JsStore(..js, data:, free_protos:, global_epoch:))
 }
 
 // boxes must be sbox so gc traces them
@@ -159,59 +145,51 @@ pub fn t_cell_update(st: Agent, h: Handle, f: fn(JsSlot) -> JsSlot) -> Agent {
 }
 
 pub fn t_cell_free(st: Agent, h: Handle) -> Agent {
-  let js = require_js(st)
+  let js = st.store
   let JsCell(id) = h
-  with_js(st, JsStore(..js, data: arena.reset(id, js.data)))
+  Agent(..st, store: JsStore(..js, data: arena.reset(id, js.data)))
 }
 
 pub fn t_pin_root(st: Agent, h: Handle) -> Agent {
-  let js = require_js(st)
+  let js = st.store
   let JsCell(id) = h
-  with_js(st, JsStore(..js, pinned_roots: set.insert(js.pinned_roots, id)))
+  Agent(
+    ..st,
+    store: JsStore(..js, pinned_roots: set.insert(js.pinned_roots, id)),
+  )
 }
 
 pub fn t_next_prop_seq(st: Agent) -> #(Int, Agent) {
-  let js = require_js(st)
-  #(js.prop_seq, with_js(st, JsStore(..js, prop_seq: js.prop_seq + 1)))
+  let js = st.store
+  #(js.prop_seq, Agent(..st, store: JsStore(..js, prop_seq: js.prop_seq + 1)))
 }
 
 pub fn t_next_private_uid(st: Agent) -> #(Int, Agent) {
-  let js = require_js(st)
+  let meta = st.store.meta
   #(
-    js.meta.private_uid,
-    with_js(
-      st,
-      JsStore(
-        ..js,
-        meta: StoreMeta(..js.meta, private_uid: js.meta.private_uid + 1),
-      ),
-    ),
+    meta.private_uid,
+    with_meta(st, StoreMeta(..meta, private_uid: meta.private_uid + 1)),
   )
 }
 
 pub fn t_next_symbol_uid(st: Agent) -> #(Int, Agent) {
-  let js = require_js(st)
+  let meta = st.store.meta
   #(
-    js.meta.symbol_uid,
-    with_js(
-      st,
-      JsStore(
-        ..js,
-        meta: StoreMeta(..js.meta, symbol_uid: js.meta.symbol_uid + 1),
-      ),
-    ),
+    meta.symbol_uid,
+    with_meta(st, StoreMeta(..meta, symbol_uid: meta.symbol_uid + 1)),
   )
 }
 
 pub fn t_next_unit_uid(st: Agent) -> #(Int, Agent) {
-  let js = require_js(st)
+  let meta = st.store.meta
   #(
-    js.meta.unit_uid,
-    with_js(
-      st,
-      JsStore(..js, meta: StoreMeta(..js.meta, unit_uid: js.meta.unit_uid + 1)),
-    ),
+    meta.unit_uid,
+    with_meta(st, StoreMeta(..meta, unit_uid: meta.unit_uid + 1)),
   )
+}
+
+fn with_meta(st: Agent, meta: StoreMeta) -> Agent {
+  Agent(..st, store: JsStore(..st.store, meta:))
 }
 
 pub fn t_enter_call(st: Agent) -> Agent {
@@ -226,11 +204,7 @@ pub fn t_enter_call(st: Agent) -> Agent {
 
 pub fn stack_overflow(st: Agent) -> #(JsVal, Agent) {
   let #(e, st) =
-    require_js(st).ops.new_error(
-      st,
-      RangeErr,
-      "Maximum call stack size exceeded",
-    )
+    st.store.ops.new_error(st, RangeErr, "Maximum call stack size exceeded")
   t_throw(st, e)
 }
 

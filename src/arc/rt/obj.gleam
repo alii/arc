@@ -6,15 +6,14 @@ import arc/rt/js_string
 import arc/rt/limits
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsElements, type JsOps, type JsSlot,
-  type JsStore, type JsVal, type ObjKind, type ObjectKey, type ParsedDesc,
-  type Property, type PropertyKey, type SymbolId, type TypedArrayKind,
-  AccessorProperty, Agent, ArgumentsObj, ArrayObj, BirthPending, BirthSettled,
-  DataProperty, Dense, Index, JsStore, KBytecode, KCompiled, KHandle, KNull,
-  KTdz, KUndef, ModuleNamespace, Named, NoElements, Ordinary, ParsedDesc,
-  Private, ProxyObj, SAsyncContext, SAsyncGen, SBox, SDisposeCapability,
-  SGenerator, SObject, SPromiseData, SShapedObject, ShapeDesc, StringKey,
-  StringObj, SymbolKey, TypeErr, TypedArrayObj,
+  type Agent, type Handle, type JsElements, type JsSlot, type JsVal,
+  type ObjKind, type ObjectKey, type ParsedDesc, type Property, type PropertyKey,
+  type SymbolId, type TypedArrayKind, AccessorProperty, Agent, ArgumentsObj,
+  ArrayObj, BirthPending, BirthSettled, DataProperty, Dense, Index, JsStore,
+  KBytecode, KCompiled, KHandle, KNull, KTdz, KUndef, ModuleNamespace, Named,
+  NoElements, Ordinary, ParsedDesc, Private, ProxyObj, SAsyncContext, SAsyncGen,
+  SBox, SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
+  ShapeDesc, StringKey, StringObj, SymbolKey, TypedArrayObj,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -26,20 +25,6 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
 import gleam/string
-
-fn require_js(st: Agent) -> JsStore(Agent) {
-  st.store
-}
-
-// upcall table seeded by init_realm
-fn js_ops(st: Agent) -> JsOps(Agent) {
-  require_js(st).ops
-}
-
-fn throw_type_error(st: Agent, msg: String) -> a {
-  let #(e, st) = js_ops(st).new_error(st, TypeErr, msg)
-  rt_store.t_throw(st, e)
-}
 
 // returns SObject or SShapedObject only
 fn read_object(st: Agent, h: Handle) -> JsSlot {
@@ -334,22 +319,23 @@ fn string_index_property(s: String, i: Int) -> Option(Property) {
   )
 }
 
-// §7.2.10 samevalue; float == is =:= so 0.0 != -0.0
+// §7.2.10 samevalue, non-numbers by classified kind not raw term
 fn same_value(a: JsVal, b: JsVal) -> Bool {
   case rt_types.classify(a), rt_types.classify(b) {
-    rt_types.KNum(x), rt_types.KNum(y) -> num_same_value(x, y)
+    rt_types.KNum(_), rt_types.KNum(_) -> rt_val.same_value(a, b)
     ka, kb -> ka == kb
   }
 }
 
-fn num_same_value(a: rt_types.JsNum, b: rt_types.JsNum) -> Bool {
-  case a, b {
-    rt_types.JNan, rt_types.JNan -> True
-    rt_types.JInt(x), rt_types.JInt(y) -> x == y
-    rt_types.JFloat(x), rt_types.JFloat(y) -> x == y
-    rt_types.JInt(x), rt_types.JFloat(y) -> int.to_float(x) == y
-    rt_types.JFloat(x), rt_types.JInt(y) -> x == int.to_float(y)
-    _, _ -> a == b
+// §10.4.3.5 stringgetownproperty
+pub fn string_exotic_own_property(
+  s: String,
+  key: ObjectKey,
+) -> Option(Property) {
+  case key {
+    StringKey(Named("length")) -> Some(string_length_property(s))
+    StringKey(Index(i)) -> string_index_property(s, i)
+    _ -> None
   }
 }
 
@@ -390,11 +376,6 @@ fn object_key_of_value(v: JsVal) -> Option(ObjectKey) {
     rt_types.KSym(sym) -> Some(SymbolKey(sym))
     _ -> None
   }
-}
-
-fn throw_reference_error(st: Agent, msg: String) -> a {
-  let #(e, st) = js_ops(st).new_error(st, rt_types.ReferenceErr, msg)
-  rt_store.t_throw(st, e)
 }
 
 fn alloc_plain(st: Agent, entries: List(#(String, JsVal))) -> #(Handle, Agent) {
@@ -642,27 +623,15 @@ pub fn t_set_prototype_of(
   #(Ok(Nil), st)
 }
 
-pub fn t_set_prototype(
-  st: Agent,
-  obj: Handle,
-  new_proto: Option(Handle),
-) -> #(Bool, Agent) {
-  let #(res, st) = t_set_prototype_of(st, obj, new_proto)
-  case res {
-    Ok(Nil) -> #(True, st)
-    Error(_refused) -> #(False, st)
-  }
-}
-
-pub fn t_get_proto(st: Agent, obj: Handle) -> #(Option(Handle), Agent) {
-  t_get_prototype_of(st, obj)
-}
-
 // annex b §b.3.1 __proto__ in object literal
 pub fn t_set_proto(st: Agent, obj: Handle, v: JsVal) -> #(Bool, Agent) {
+  let set_to = fn(new_proto) {
+    let #(res, st) = t_set_prototype_of(st, obj, new_proto)
+    #(result.is_ok(res), st)
+  }
   case rt_types.classify(v) {
-    KHandle(p) -> t_set_prototype(st, obj, Some(p))
-    KNull -> t_set_prototype(st, obj, None)
+    KHandle(p) -> set_to(Some(p))
+    KNull -> set_to(None)
     _ -> #(False, st)
   }
 }
@@ -691,7 +660,7 @@ pub fn t_get_prop(st: Agent, recv: JsVal, key: ObjectKey) -> #(JsVal, Agent) {
   case rt_types.classify(recv) {
     KHandle(h) -> get_from(st, h, key, recv)
     KUndef | KNull ->
-      throw_type_error(
+      rt_val.t_throw_type_error(
         st,
         "Cannot read properties of "
           <> case rt_types.classify(recv) {
@@ -717,12 +686,7 @@ fn primitive_string_get(
   key: ObjectKey,
   recv: JsVal,
 ) -> #(JsVal, Agent) {
-  let own = case key {
-    StringKey(Named("length")) -> Some(string_length_property(s))
-    StringKey(Index(i)) -> string_index_property(s, i)
-    _ -> None
-  }
-  case own {
+  case string_exotic_own_property(s, key) {
     Some(prop) -> t_property_get_value(st, prop, recv)
     None -> get_from(st, st.realm.string.prototype, key, recv)
   }
@@ -803,7 +767,7 @@ pub fn t_property_get_value(
   case prop {
     DataProperty(value: v, ..) -> #(v, st)
     AccessorProperty(get: Some(getter), ..) ->
-      js_ops(st).call(st, getter, receiver, [])
+      st.store.ops.call(st, getter, receiver, [])
     AccessorProperty(get: None, ..) -> #(rt_types.mk_undefined(), st)
   }
 }
@@ -818,7 +782,7 @@ pub fn t_set_prop(
   case rt_types.classify(recv) {
     KHandle(h) -> set_from(st, h, key, v, recv)
     KUndef | KNull ->
-      throw_type_error(
+      rt_val.t_throw_type_error(
         st,
         "Cannot set properties of "
           <> case rt_types.classify(recv) {
@@ -947,7 +911,7 @@ fn ordinary_set(
       set_on_receiver(st, receiver, key, v)
     Some(AccessorProperty(set: None, ..)) -> #(False, st)
     Some(AccessorProperty(set: Some(setter), ..)) -> {
-      let #(_, st) = js_ops(st).call(st, setter, receiver, [v])
+      let #(_, st) = st.store.ops.call(st, setter, receiver, [v])
       #(True, st)
     }
   }
@@ -1018,7 +982,7 @@ fn set_own_shaped(
   name: String,
   v: JsVal,
 ) -> #(Bool, Agent) {
-  let js = require_js(st)
+  let store = st.store
   let key_bin = bit_array.from_string(name)
   case dict.get(offsets, key_bin) {
     Ok(off) -> {
@@ -1033,22 +997,22 @@ fn set_own_shaped(
       )
     }
     Error(Nil) ->
-      case dict.get(js.shapes, shape_id) {
+      case dict.get(store.shapes, shape_id) {
         Error(Nil) -> #(False, st)
         Ok(ShapeDesc(arity:, transitions:, ..) as from) -> {
           let known =
             dict.get(transitions, key_bin)
             |> result.try(fn(to) {
-              dict.get(js.shapes, to)
+              dict.get(store.shapes, to)
               |> result.map(fn(desc) { #(to, desc.offsets, st) })
             })
           let #(to, offsets, st) = case known {
             Ok(hit) -> hit
             Error(Nil) -> {
-              let to = js.next_shape
+              let to = store.next_shape
               let offsets = dict.insert(offsets, key_bin, arity)
               let shapes =
-                js.shapes
+                store.shapes
                 |> dict.insert(
                   shape_id,
                   ShapeDesc(
@@ -1063,7 +1027,10 @@ fn set_own_shaped(
               #(
                 to,
                 offsets,
-                Agent(..st, store: JsStore(..js, shapes:, next_shape: to + 1)),
+                Agent(
+                  ..st,
+                  store: JsStore(..store, shapes:, next_shape: to + 1),
+                ),
               )
             }
           }
@@ -1327,7 +1294,7 @@ fn to_array_length(st: Agent, v: JsVal) -> #(Int, Agent) {
   }
   case same {
     True -> #(new_len, st)
-    False -> throw_range_error(st, "Invalid array length")
+    False -> rt_val.t_throw_range_error(st, "Invalid array length")
   }
 }
 
@@ -1398,11 +1365,6 @@ fn array_set_length(
       #(option.is_none(blocked), st)
     }
   }
-}
-
-fn throw_range_error(st: Agent, msg: String) -> a {
-  let #(e, st) = js_ops(st).new_error(st, rt_types.RangeErr, msg)
-  rt_store.t_throw(st, e)
 }
 
 // §10.1.6 trap-aware, returns the raw boolean
@@ -1517,15 +1479,6 @@ pub fn t_define_own_prop(
       #(True, st)
     }
   }
-}
-
-pub fn t_define_prop(
-  st: Agent,
-  obj: Handle,
-  key: ObjectKey,
-  desc: ParsedDesc,
-) -> #(Bool, Agent) {
-  t_define_own_prop(st, obj, key, desc)
 }
 
 // exotic arms absorb their keys, rest is ordinary
@@ -1768,7 +1721,7 @@ pub fn t_has_prop(st: Agent, recv: JsVal, key: ObjectKey) -> #(Bool, Agent) {
   case rt_types.classify(recv) {
     KHandle(h) -> has_from(st, h, key)
     KUndef | KNull ->
-      throw_type_error(
+      rt_val.t_throw_type_error(
         st,
         "Cannot use 'in' operator to search for '"
           <> key_text(key)
@@ -1779,7 +1732,7 @@ pub fn t_has_prop(st: Agent, recv: JsVal, key: ObjectKey) -> #(Bool, Agent) {
         },
       )
     _ -> {
-      let #(h, st) = js_ops(st).to_object(st, recv)
+      let #(h, st) = st.store.ops.to_object(st, recv)
       has_from(st, h, key)
     }
   }
@@ -2045,7 +1998,7 @@ pub fn t_for_in_keys(st: Agent, obj: JsVal) -> #(List(JsVal), Agent) {
           )
       }
     _ -> {
-      let #(h, st) = js_ops(st).to_object(st, obj)
+      let #(h, st) = st.store.ops.to_object(st, obj)
       for_in_keys_loop(st, Some(h), set.new(), [], limits.max_prototype_depth)
     }
   }
@@ -2187,7 +2140,7 @@ pub fn t_is_array(st: Agent, h: Handle) -> Bool {
   case rt_store.t_cell_get(st, h) {
     SObject(kind: ArrayObj(_), ..) -> True
     SObject(kind: ProxyObj(revoked: True, ..), ..) ->
-      throw_type_error(
+      rt_val.t_throw_type_error(
         st,
         "Cannot perform 'IsArray' on a proxy that has been revoked",
       )
@@ -2243,7 +2196,7 @@ fn namespace_binding_value(st: Agent, name: String, cell: Handle) -> JsVal {
   }
   case rt_types.classify(v) {
     KTdz ->
-      throw_reference_error(
+      rt_val.t_throw_reference_error(
         st,
         "Cannot access '" <> name <> "' before initialization",
       )
@@ -2329,7 +2282,7 @@ fn proxy_or(
 // §10.5.14 + §7.3.10 getmethod, none means forward to target
 fn proxy_trap(st: Agent, p: Proxy, name: String) -> #(Option(JsVal), Agent) {
   use <- bool.lazy_guard(p.revoked, fn() {
-    throw_type_error(
+    rt_val.t_throw_type_error(
       st,
       "Cannot perform '" <> name <> "' on a proxy that has been revoked",
     )
@@ -2343,7 +2296,7 @@ fn proxy_trap(st: Agent, p: Proxy, name: String) -> #(Option(JsVal), Agent) {
       case callable {
         True -> #(Some(trap), st)
         False ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "'" <> name <> "' trap of proxy handler is not a function",
           )
@@ -2358,7 +2311,7 @@ fn call_trap(
   trap: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  js_ops(st).call(st, trap, rt_types.mk_object(p.handler), args)
+  st.store.ops.call(st, trap, rt_types.mk_object(p.handler), args)
 }
 
 // §10.5.1
@@ -2372,7 +2325,7 @@ fn proxy_get_prototype_of(st: Agent, p: Proxy) -> #(Option(Handle), Agent) {
         KHandle(h) -> Some(h)
         KNull -> None
         _ ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "'getPrototypeOf' on proxy: trap returned neither object nor null",
           )
@@ -2383,7 +2336,7 @@ fn proxy_get_prototype_of(st: Agent, p: Proxy) -> #(Option(Handle), Agent) {
       case proto == target_proto {
         True -> #(proto, st)
         False ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "'getPrototypeOf' on proxy: proxy target is non-extensible but the trap did not return its actual prototype",
           )
@@ -2400,7 +2353,10 @@ fn proxy_set_prototype_of(
 ) -> #(Bool, Agent) {
   let #(trap, st) = proxy_trap(st, p, "setPrototypeOf")
   case trap {
-    None -> t_set_prototype(st, p.target, new_proto)
+    None -> {
+      let #(res, st) = t_set_prototype_of(st, p.target, new_proto)
+      #(result.is_ok(res), st)
+    }
     Some(trap_fn) -> {
       let proto_val = case new_proto {
         Some(h) -> rt_types.mk_object(h)
@@ -2415,7 +2371,7 @@ fn proxy_set_prototype_of(
       case new_proto == target_proto {
         True -> #(True, st)
         False ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "'setPrototypeOf' on proxy: trap returned truish for setting a new prototype on the non-extensible proxy target",
           )
@@ -2436,7 +2392,7 @@ fn proxy_is_extensible(st: Agent, p: Proxy) -> #(Bool, Agent) {
       case b == target_ext {
         True -> #(b, st)
         False ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "'isExtensible' on proxy: trap result does not reflect extensibility of proxy target (which is '"
               <> case target_ext {
@@ -2461,7 +2417,7 @@ fn proxy_prevent_extensions(st: Agent, p: Proxy) -> #(Bool, Agent) {
       let #(target_ext, st) = t_is_extensible(st, p.target)
       case target_ext {
         True ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "'preventExtensions' on proxy: trap returned truish but the proxy target is extensible",
           )
@@ -2494,7 +2450,7 @@ fn proxy_get_own_property(
             Some(prop) ->
               case rt_types.prop_configurable(prop) {
                 False ->
-                  throw_type_error(
+                  rt_val.t_throw_type_error(
                     st,
                     "'getOwnPropertyDescriptor' on proxy: trap returned undefined for property "
                       <> key_quoted(key)
@@ -2504,7 +2460,7 @@ fn proxy_get_own_property(
                   let #(ext, st) = t_is_extensible(st, p.target)
                   case ext {
                     False ->
-                      throw_type_error(
+                      rt_val.t_throw_type_error(
                         st,
                         "'getOwnPropertyDescriptor' on proxy: trap returned undefined for property "
                           <> key_quoted(key)
@@ -2528,7 +2484,7 @@ fn proxy_get_own_property(
               target_desc,
             ),
             fn() {
-              throw_type_error(
+              rt_val.t_throw_type_error(
                 st,
                 "'getOwnPropertyDescriptor' on proxy: trap returned descriptor for property "
                   <> key_quoted(key)
@@ -2539,7 +2495,7 @@ fn proxy_get_own_property(
           case rt_types.prop_configurable(completed), target_desc {
             True, _ -> #(Some(completed), st)
             False, None ->
-              throw_type_error(
+              rt_val.t_throw_type_error(
                 st,
                 "'getOwnPropertyDescriptor' on proxy: trap reported non-configurability for property "
                   <> key_quoted(key)
@@ -2548,7 +2504,7 @@ fn proxy_get_own_property(
             False, Some(td) ->
               case rt_types.prop_configurable(td) {
                 True ->
-                  throw_type_error(
+                  rt_val.t_throw_type_error(
                     st,
                     "'getOwnPropertyDescriptor' on proxy: trap reported non-configurability for property "
                       <> key_quoted(key)
@@ -2560,7 +2516,7 @@ fn proxy_get_own_property(
                     DataProperty(writable: False, ..),
                       DataProperty(writable: True, ..)
                     ->
-                      throw_type_error(
+                      rt_val.t_throw_type_error(
                         st,
                         "'getOwnPropertyDescriptor' on proxy: trap reported non-writability for property "
                           <> key_quoted(key)
@@ -2572,7 +2528,7 @@ fn proxy_get_own_property(
           }
         }
         _ ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "'getOwnPropertyDescriptor' on proxy: trap returned neither object nor undefined for property "
               <> key_quoted(key),
@@ -2608,7 +2564,7 @@ fn proxy_define_own_property(
       case target_desc {
         None -> {
           use <- bool.lazy_guard(!ext, fn() {
-            throw_type_error(
+            rt_val.t_throw_type_error(
               st,
               "'defineProperty' on proxy: trap returned truish for adding property "
                 <> key_quoted(key)
@@ -2616,7 +2572,7 @@ fn proxy_define_own_property(
             )
           })
           use <- bool.lazy_guard(setting_config_false, fn() {
-            throw_type_error(
+            rt_val.t_throw_type_error(
               st,
               "'defineProperty' on proxy: trap returned truish for defining non-configurable property "
                 <> key_quoted(key)
@@ -2629,7 +2585,7 @@ fn proxy_define_own_property(
           use <- bool.lazy_guard(
             !compatible_descriptor(ext, desc, Some(cur)),
             fn() {
-              throw_type_error(
+              rt_val.t_throw_type_error(
                 st,
                 "'defineProperty' on proxy: trap returned truish for adding property "
                   <> key_quoted(key)
@@ -2640,7 +2596,7 @@ fn proxy_define_own_property(
           use <- bool.lazy_guard(
             setting_config_false && rt_types.prop_configurable(cur),
             fn() {
-              throw_type_error(
+              rt_val.t_throw_type_error(
                 st,
                 "'defineProperty' on proxy: trap returned truish for defining non-configurable property "
                   <> key_quoted(key)
@@ -2651,7 +2607,7 @@ fn proxy_define_own_property(
           case cur, desc.writable {
             DataProperty(configurable: False, writable: True, ..), Some(False)
             ->
-              throw_type_error(
+              rt_val.t_throw_type_error(
                 st,
                 "'defineProperty' on proxy: trap returned truish for defining non-writable property "
                   <> key_quoted(key)
@@ -2683,7 +2639,7 @@ fn proxy_has(st: Agent, p: Proxy, key: ObjectKey) -> #(Bool, Agent) {
         Some(prop) ->
           case rt_types.prop_configurable(prop) {
             False ->
-              throw_type_error(
+              rt_val.t_throw_type_error(
                 st,
                 "'has' on proxy: trap returned falsish for property "
                   <> key_quoted(key)
@@ -2693,7 +2649,7 @@ fn proxy_has(st: Agent, p: Proxy, key: ObjectKey) -> #(Bool, Agent) {
               let #(ext, st) = t_is_extensible(st, p.target)
               case ext {
                 False ->
-                  throw_type_error(
+                  rt_val.t_throw_type_error(
                     st,
                     "'has' on proxy: trap returned falsish for property "
                       <> key_quoted(key)
@@ -2731,7 +2687,7 @@ fn proxy_get(
           case same_value(res, tv) {
             True -> #(res, st)
             False ->
-              throw_type_error(
+              rt_val.t_throw_type_error(
                 st,
                 "'get' on proxy: property "
                   <> key_quoted(key)
@@ -2742,7 +2698,7 @@ fn proxy_get(
           case rt_types.classify(res) {
             KUndef -> #(res, st)
             _ ->
-              throw_type_error(
+              rt_val.t_throw_type_error(
                 st,
                 "'get' on proxy: property "
                   <> key_quoted(key)
@@ -2781,7 +2737,7 @@ fn proxy_set(
           case same_value(v, tv) {
             True -> #(True, st)
             False ->
-              throw_type_error(
+              rt_val.t_throw_type_error(
                 st,
                 "'set' on proxy: trap returned truish for property "
                   <> key_quoted(key)
@@ -2789,7 +2745,7 @@ fn proxy_set(
               )
           }
         Some(AccessorProperty(set: None, configurable: False, ..)) ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "'set' on proxy: trap returned truish for property "
               <> key_quoted(key)
@@ -2848,7 +2804,7 @@ fn proxy_delete(st: Agent, p: Proxy, key: ObjectKey) -> #(Bool, Agent) {
         Some(prop) ->
           case rt_types.prop_configurable(prop) {
             False ->
-              throw_type_error(
+              rt_val.t_throw_type_error(
                 st,
                 "'deleteProperty' on proxy: trap returned truish for property "
                   <> key_quoted(key)
@@ -2858,7 +2814,7 @@ fn proxy_delete(st: Agent, p: Proxy, key: ObjectKey) -> #(Bool, Agent) {
               let #(ext, st) = t_is_extensible(st, p.target)
               case ext {
                 False ->
-                  throw_type_error(
+                  rt_val.t_throw_type_error(
                     st,
                     "'deleteProperty' on proxy: trap returned truish but the proxy target is not extensible",
                   )
@@ -2880,7 +2836,7 @@ fn proxy_own_keys(st: Agent, p: Proxy) -> #(List(ObjectKey), Agent) {
       let #(res, st) = call_trap(st, p, trap_fn, [rt_types.mk_object(p.target)])
       let #(keys, st) = keys_from_array_like(st, res)
       use <- bool.lazy_guard(has_duplicate_keys(keys, []), fn() {
-        throw_type_error(
+        rt_val.t_throw_type_error(
           st,
           "'ownKeys' on proxy: trap returned duplicate entries",
         )
@@ -2894,7 +2850,7 @@ fn proxy_own_keys(st: Agent, p: Proxy) -> #(List(ObjectKey), Agent) {
         list.find(required, fn(k) { !list.contains(keys, k) })
       }
       use <- lazy_guard_found(missing(nonconf), fn(k) {
-        throw_type_error(
+        rt_val.t_throw_type_error(
           st,
           "'ownKeys' on proxy: trap result did not include "
             <> key_quoted(k)
@@ -2903,7 +2859,7 @@ fn proxy_own_keys(st: Agent, p: Proxy) -> #(List(ObjectKey), Agent) {
       })
       use <- bool.guard(ext, #(keys, st))
       use <- lazy_guard_found(missing(conf), fn(k) {
-        throw_type_error(
+        rt_val.t_throw_type_error(
           st,
           "'ownKeys' on proxy: trap result did not include "
             <> key_quoted(k)
@@ -2912,7 +2868,7 @@ fn proxy_own_keys(st: Agent, p: Proxy) -> #(List(ObjectKey), Agent) {
       })
       case list.find(keys, fn(k) { !list.contains(target_keys, k) }) {
         Ok(_) ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "'ownKeys' on proxy: trap returned extra keys but proxy target is non-extensible",
           )
@@ -2974,14 +2930,18 @@ fn keys_from_array_like(st: Agent, v: JsVal) -> #(List(ObjectKey), Agent) {
       let #(len_v, st) = t_get_prop(st, v, StringKey(Named("length")))
       let #(len, st) = rt_val.t_to_length(st, len_v)
       use <- bool.lazy_guard(len > limits.max_iteration, fn() {
-        throw_range_error(
+        rt_val.t_throw_range_error(
           st,
           "'ownKeys' on proxy: trap result length exceeds iteration budget",
         )
       })
       gather_keys_via_get(st, v, 0, len, [])
     }
-    _ -> throw_type_error(st, "CreateListFromArrayLike called on non-object")
+    _ ->
+      rt_val.t_throw_type_error(
+        st,
+        "CreateListFromArrayLike called on non-object",
+      )
   }
 }
 
@@ -2997,7 +2957,7 @@ fn gather_keys_via_get(
   case object_key_of_value(item) {
     Some(k) -> gather_keys_via_get(st, obj, idx + 1, len, [k, ..acc])
     None ->
-      throw_type_error(
+      rt_val.t_throw_type_error(
         st,
         "'ownKeys' on proxy: trap returned a non-String, non-Symbol key",
       )
@@ -3008,7 +2968,7 @@ fn gather_keys_via_get(
 pub fn t_to_property_descriptor(st: Agent, obj: JsVal) -> #(ParsedDesc, Agent) {
   case rt_types.classify(obj) {
     KHandle(_) -> Nil
-    _ -> throw_type_error(st, "Property description must be an object")
+    _ -> rt_val.t_throw_type_error(st, "Property description must be an object")
   }
   let #(enumerable, st) = read_desc_bool(st, obj, "enumerable")
   let #(configurable, st) = read_desc_bool(st, obj, "configurable")
@@ -3022,7 +2982,7 @@ pub fn t_to_property_descriptor(st: Agent, obj: JsVal) -> #(ParsedDesc, Agent) {
     ParsedDesc(get:, set:, value:, writable:, enumerable:, configurable:)
   case desc_is_accessor(desc) && desc_is_data(desc) {
     True ->
-      throw_type_error(
+      rt_val.t_throw_type_error(
         st,
         "Invalid property descriptor. Cannot both specify accessors and a value or writable attribute",
       )
@@ -3070,7 +3030,8 @@ fn require_callable_accessor(
           let #(callable, st) = rt_val.t_is_callable(st, f)
           case callable {
             True -> st
-            False -> throw_type_error(st, role <> " must be a function")
+            False ->
+              rt_val.t_throw_type_error(st, role <> " must be a function")
           }
         }
       }
@@ -3173,14 +3134,14 @@ pub fn t_define_own_data(
       case rt_store.t_cell_get(st, h) {
         SShapedObject(shape_id:, proto:, slots:, offsets:) ->
           set_own_shaped(st, h, shape_id, proto, slots, offsets, name, value)
-        _ -> define_own_data(st, h, key, value, True, True, True)
+        _ -> write_own_data(st, h, key, value, True, True, True)
       }
     _, _ ->
-      define_own_data(st, h, key, value, writable, enumerable, configurable)
+      write_own_data(st, h, key, value, writable, enumerable, configurable)
   }
 }
 
-fn define_own_data(
+fn write_own_data(
   st: Agent,
   h: Handle,
   key: ObjectKey,
@@ -3232,7 +3193,7 @@ pub fn t_define_own_accessor(
 @external(erlang, "arc_rt_store_ffi", "as_object_key")
 fn as_object_key(key: k) -> ObjectKey
 
-@external(erlang, "arc_rt_store_ffi", "identity")
+@external(erlang, "gleam_stdlib", "identity")
 fn unsafe_coerce(a: a) -> b
 
 @external(erlang, "erlang", "is_list")
@@ -3263,7 +3224,7 @@ pub fn t_set_prop_strict(
   case ok {
     True -> #(True, st)
     False ->
-      throw_type_error(
+      rt_val.t_throw_type_error(
         st,
         "Cannot assign to read only property '" <> key_text(okey) <> "'",
       )
@@ -3280,7 +3241,10 @@ pub fn t_delete_prop_strict(
   case deleted {
     True -> #(True, st)
     False ->
-      throw_type_error(st, "Cannot delete property '" <> key_text(key) <> "'")
+      rt_val.t_throw_type_error(
+        st,
+        "Cannot delete property '" <> key_text(key) <> "'",
+      )
   }
 }
 
@@ -3306,14 +3270,14 @@ pub fn t_create_data_prop_slow(
       case ok {
         True -> #(True, st)
         False ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "Cannot define property '" <> key_text(okey) <> "'",
           )
       }
     }
     _ ->
-      throw_type_error(
+      rt_val.t_throw_type_error(
         st,
         "Cannot define property '"
           <> key_text(as_object_key(key))
@@ -3336,7 +3300,7 @@ pub fn t_global_get(st: Agent, name: BitArray) -> #(JsVal, Agent) {
     True -> t_get_prop(st, g, key)
     False -> {
       let text = bit_array.to_string(name) |> result.unwrap("")
-      throw_reference_error(st, text <> " is not defined")
+      rt_val.t_throw_reference_error(st, text <> " is not defined")
     }
   }
 }
@@ -3360,13 +3324,13 @@ pub fn t_global_set_strict(st: Agent, name: BitArray, v: JsVal) -> Agent {
   let text = bit_array.to_string(name) |> result.unwrap("")
   let #(has, st) = t_has_prop(st, g, key)
   case has {
-    False -> throw_reference_error(st, text <> " is not defined")
+    False -> rt_val.t_throw_reference_error(st, text <> " is not defined")
     True -> {
       let #(ok, st) = t_set_prop(st, g, key, v)
       case ok {
         True -> st
         False ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "Cannot assign to read only property '" <> text <> "'",
           )

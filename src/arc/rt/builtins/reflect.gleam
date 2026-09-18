@@ -14,6 +14,7 @@ import arc/rt/types.{
 import arc/rt/val as rt_val
 import gleam/list
 import gleam/option.{None, Some}
+import gleam/result
 
 pub fn init(
   st: Agent,
@@ -244,8 +245,8 @@ fn reflect_set_prototype_of(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
         "Object prototype may only be an Object or null",
       )
     Ok(new_proto) -> {
-      let #(ok, st) = rt_obj.t_set_prototype(st, h, new_proto)
-      #(mk_bool(ok), st)
+      let #(res, st) = rt_obj.t_set_prototype_of(st, h, new_proto)
+      #(mk_bool(result.is_ok(res)), st)
     }
   }
 }
