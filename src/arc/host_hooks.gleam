@@ -1,6 +1,7 @@
 import arc/internal/clock
 import arc/internal/host_time
 import arc/rt/builtins/temporal_tz
+import arc/zoneinfo
 import gleam/float
 import gleam/io
 
@@ -21,8 +22,7 @@ pub type HostHooks {
     sleep_ms: fn(Int) -> Nil,
     report_uncaught: fn(String) -> Nil,
     wall_clock_ms: fn() -> Int,
-    // local time for Date; arc/zoneinfo has the os backed versions of
-    // this and the next two, the defaults here know only utc
+    // local time for Date
     time_zone: host_time.TimeZone,
     // tz database rules for a canonical iana id, asked once per zone
     load_time_zone: fn(String) -> Result(temporal_tz.Rules, temporal_tz.TzError),
@@ -48,9 +48,9 @@ pub fn default_host_hooks() -> HostHooks {
     sleep_ms: clock.sleep_ms,
     report_uncaught: io.println_error,
     wall_clock_ms: host_time.now_ms,
-    time_zone: host_time.utc_time_zone(),
-    load_time_zone: fn(_) { Error(temporal_tz.NoZoneinfo) },
-    time_zone_ids: fn() { [] },
+    time_zone: zoneinfo.system_time_zone(),
+    load_time_zone: zoneinfo.load,
+    time_zone_ids: zoneinfo.available_ids,
     random: float.random,
     print: default_print,
   )

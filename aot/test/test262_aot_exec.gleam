@@ -11,7 +11,6 @@ import arc/rt/types.{
   mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
-import arc/zoneinfo
 import arc_aot/compile
 import arc_aot/emit/state as emit_state
 import arc_aot/run
@@ -439,7 +438,7 @@ fn verify_negative_type(
 
 fn hooks_for(metadata: TestMetadata) -> HostHooks {
   HostHooks(
-    ..zoneinfo.hooks(host_hooks.default_host_hooks()),
+    ..host_hooks.default_host_hooks(),
     can_block: !list.contains(metadata.flags, "CanBlockIsFalse"),
     report_uncaught: fn(_report) { Nil },
     print: fn(_level, _line) { Nil },

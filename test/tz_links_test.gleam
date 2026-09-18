@@ -1,5 +1,4 @@
 import arc/engine.{JsBool, JsString, Returned}
-import arc/host_hooks
 import arc/rt/builtins/temporal_tz
 import arc/zoneinfo
 import gleam/dict.{type Dict}
@@ -23,10 +22,7 @@ fn proper(id: String) -> String {
 }
 
 fn js(source: String) -> engine.JsValueKind {
-  let eng =
-    engine.new()
-    |> engine.with_host_hooks(zoneinfo.hooks(host_hooks.default_host_hooks()))
-  let assert Ok(#(Returned(value:), _)) = engine.eval(eng, source)
+  let assert Ok(#(Returned(value:), _)) = engine.eval(engine.new(), source)
   engine.classify(value)
 }
 
