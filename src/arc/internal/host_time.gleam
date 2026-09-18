@@ -1,12 +1,9 @@
-@external(erlang, "arc_host_time_ffi", "now_ms")
-pub fn now_ms() -> Int
-
 pub type TimeZone
 
-@external(erlang, "arc_tz_ffi", "utc_zone")
+@external(erlang, "arc_tz_ffi", "utc_time_zone")
 pub fn utc_time_zone() -> TimeZone
 
-@external(erlang, "arc_tz_ffi", "zone_id")
+@external(erlang, "arc_tz_ffi", "time_zone_id")
 pub fn time_zone_id(zone: TimeZone) -> Result(String, Nil)
 
 // minutes, local minus utc, at a utc instant

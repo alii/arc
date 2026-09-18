@@ -88,33 +88,34 @@ pub fn resolve(
 }
 
 @external(erlang, "arc_tz_ffi", "rules_offset_at")
-fn ffi_offset_at(rules: Rules, epoch_seconds: Int) -> Int
+fn rules_offset_at(rules: Rules, epoch_seconds: Int) -> Int
 
 @external(erlang, "arc_tz_ffi", "rules_next_transition")
-fn ffi_next_transition(rules: Rules, epoch_seconds: Int) -> Option(Int)
+fn rules_next_transition(rules: Rules, epoch_seconds: Int) -> Option(Int)
 
 @external(erlang, "arc_tz_ffi", "rules_previous_transition")
-fn ffi_previous_transition(rules: Rules, epoch_seconds: Int) -> Option(Int)
+fn rules_previous_transition(rules: Rules, epoch_seconds: Int) -> Option(Int)
 
 const ns_per_second = 1_000_000_000
 
 pub fn offset_ns_at(zone: Zone, epoch_ns: Int) -> Int {
-  ffi_offset_at(zone.rules, floor_div(epoch_ns, ns_per_second)) * ns_per_second
+  rules_offset_at(zone.rules, floor_div(epoch_ns, ns_per_second))
+  * ns_per_second
 }
 
 // transitions are whole seconds
 pub fn next_transition_ns(zone: Zone, epoch_ns: Int) -> Option(Int) {
-  ffi_next_transition(zone.rules, floor_div(epoch_ns, ns_per_second))
-  |> option.map(fn(sec) { sec * ns_per_second })
+  rules_next_transition(zone.rules, floor_div(epoch_ns, ns_per_second))
+  |> option.map(fn(transition_sec) { transition_sec * ns_per_second })
 }
 
-pub fn prev_transition_ns(zone: Zone, epoch_ns: Int) -> Option(Int) {
+pub fn previous_transition_ns(zone: Zone, epoch_ns: Int) -> Option(Int) {
   let sec = floor_div(epoch_ns, ns_per_second)
   // mid-second: the transition at sec itself is before us
   let arg = case epoch_ns % ns_per_second == 0 {
     True -> sec
     False -> sec + 1
   }
-  ffi_previous_transition(zone.rules, arg)
-  |> option.map(fn(s) { s * ns_per_second })
+  rules_previous_transition(zone.rules, arg)
+  |> option.map(fn(transition_sec) { transition_sec * ns_per_second })
 }

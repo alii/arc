@@ -1,15 +1,18 @@
 %% tzif files (rfc 8536) and transition search
 -module(arc_tzif).
 
--export([parse/1, offset_at/2, first_transition_after/2,
-         last_transition_before/2]).
+-export([parse/1, offset_at/2, next_transition/2, previous_transition/2]).
 
--export_type([tz/0, footer/0]).
+-export_type([tz/0]).
 
--type footer() :: none | arc_posix_tz:footer().
+-type footer() :: none | arc_posix_tz:posix_tz().
 
-%% {tz, first offset, transitions tuple, footer, last transition sec}
--type tz() :: {tz, integer(), tuple(), footer(), integer() | none}.
+-record(tz, {initial_offset :: integer(),
+             transitions :: tuple(),
+             footer :: footer(),
+             last_transition :: integer() | none}).
+
+-type tz() :: #tz{}.
 
 %% throws on malformed input, caller catches
 -spec parse(binary()) -> tz().
@@ -40,7 +43,8 @@ make_zone(First, Trans, Footer) ->
         [] -> none;
         _ -> element(1, lists:last(Trans))
     end,
-    {tz, First, list_to_tuple(Trans), Footer, LastT}.
+    #tz{initial_offset = First, transitions = list_to_tuple(Trans),
+        footer = Footer, last_transition = LastT}.
 
 parse_block(Bin, Timecnt, Typecnt, Charcnt, TSize) ->
     TransBytes = Timecnt * TSize,
@@ -86,38 +90,39 @@ parse_footer(<<"\n", Rest/binary>>) ->
 parse_footer(_) -> none.
 
 -spec offset_at(tz(), integer()) -> integer().
-offset_at({tz, First, Trans, Footer, LastT}, Sec) ->
+offset_at(#tz{footer = Footer, last_transition = LastT} = Tz, Sec) ->
     UseFooter = Footer =/= none andalso
         (LastT =:= none orelse Sec >= LastT),
     case UseFooter of
         true -> arc_posix_tz:offset_at(Footer, Sec);
-        false -> offset_from_transitions(First, Trans, Sec)
+        false ->
+            Trans = Tz#tz.transitions,
+            offset_at_or_before(Tz#tz.initial_offset, Trans, Sec,
+                                1, tuple_size(Trans))
     end.
 
-offset_from_transitions(First, Trans, Sec) ->
-    search_transitions(First, Trans, Sec, 1, tuple_size(Trans)).
-
-search_transitions(Acc, _Trans, _Sec, Lo, Hi) when Lo > Hi -> Acc;
-search_transitions(Acc, Trans, Sec, Lo, Hi) ->
+offset_at_or_before(Best, _Trans, _Sec, Lo, Hi) when Lo > Hi -> Best;
+offset_at_or_before(Best, Trans, Sec, Lo, Hi) ->
     Mid = (Lo + Hi) div 2,
     case element(Mid, Trans) of
-        {T, Off} when T =< Sec -> search_transitions(Off, Trans, Sec, Mid + 1, Hi);
-        _ -> search_transitions(Acc, Trans, Sec, Lo, Mid - 1)
+        {T, Off} when T =< Sec -> offset_at_or_before(Off, Trans, Sec, Mid + 1, Hi);
+        _ -> offset_at_or_before(Best, Trans, Sec, Lo, Mid - 1)
     end.
 
--spec first_transition_after(tz(), integer()) -> integer() | none.
-first_transition_after({tz, _First, Trans, Footer, LastT}, Sec) ->
-    case search_after(none, Trans, Sec, 1, tuple_size(Trans)) of
+-spec next_transition(tz(), integer()) -> {some, integer()} | none.
+next_transition(#tz{transitions = Trans, footer = Footer,
+                    last_transition = LastT}, Sec) ->
+    case first_after(none, Trans, Sec, 1, tuple_size(Trans)) of
         none -> footer_next(Footer, LastT, Sec);
-        T -> T
+        Found -> Found
     end.
 
-search_after(Best, _Trans, _Sec, Lo, Hi) when Lo > Hi -> Best;
-search_after(Best, Trans, Sec, Lo, Hi) ->
+first_after(Best, _Trans, _Sec, Lo, Hi) when Lo > Hi -> Best;
+first_after(Best, Trans, Sec, Lo, Hi) ->
     Mid = (Lo + Hi) div 2,
     case element(Mid, Trans) of
-        {T, _} when T > Sec -> search_after(T, Trans, Sec, Lo, Mid - 1);
-        _ -> search_after(Best, Trans, Sec, Mid + 1, Hi)
+        {T, _} when T > Sec -> first_after({some, T}, Trans, Sec, Lo, Mid - 1);
+        _ -> first_after(Best, Trans, Sec, Mid + 1, Hi)
     end.
 
 footer_next(none, _LastT, _Sec) -> none;
@@ -131,22 +136,23 @@ footer_next(Footer, LastT, Sec) ->
                   LastT =:= none orelse T > LastT],
     case Cands of
         [] -> none;
-        _ -> lists:min(Cands)
+        _ -> {some, lists:min(Cands)}
     end.
 
--spec last_transition_before(tz(), integer()) -> integer() | none.
-last_transition_before({tz, _First, Trans, Footer, LastT}, Sec) ->
+-spec previous_transition(tz(), integer()) -> {some, integer()} | none.
+previous_transition(#tz{transitions = Trans, footer = Footer,
+                        last_transition = LastT}, Sec) ->
     case footer_previous(Footer, LastT, Sec) of
-        none -> search_before(none, Trans, Sec, 1, tuple_size(Trans));
-        T -> T
+        none -> last_before(none, Trans, Sec, 1, tuple_size(Trans));
+        Found -> Found
     end.
 
-search_before(Best, _Trans, _Sec, Lo, Hi) when Lo > Hi -> Best;
-search_before(Best, Trans, Sec, Lo, Hi) ->
+last_before(Best, _Trans, _Sec, Lo, Hi) when Lo > Hi -> Best;
+last_before(Best, Trans, Sec, Lo, Hi) ->
     Mid = (Lo + Hi) div 2,
     case element(Mid, Trans) of
-        {T, _} when T < Sec -> search_before(T, Trans, Sec, Mid + 1, Hi);
-        _ -> search_before(Best, Trans, Sec, Lo, Mid - 1)
+        {T, _} when T < Sec -> last_before({some, T}, Trans, Sec, Mid + 1, Hi);
+        _ -> last_before(Best, Trans, Sec, Lo, Mid - 1)
     end.
 
 footer_previous(none, _LastT, _Sec) -> none;
@@ -160,6 +166,6 @@ footer_previous(Footer, LastT, Sec) ->
                           LastT =:= none orelse T > LastT],
             case Cands of
                 [] -> none;
-                _ -> lists:max(Cands)
+                _ -> {some, lists:max(Cands)}
             end
     end.
