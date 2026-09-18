@@ -1,9 +1,9 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError, TypeError}
 import arc/bytecode/key.{Named}
-import arc/internal/digits.{take_digits}
+import arc/internal/digits
 import arc/internal/gregorian.{days_in_month}
 import arc/internal/int_math.{floor_div, floor_mod, trunc_div}
-import arc/internal/temporal_calendar as tcal
+import arc/internal/temporal_calendar
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   type RoundingMode, UnsignedHalfEven, UnsignedHalfInfinity, UnsignedHalfZero,
@@ -36,7 +36,9 @@ pub fn get_named(st: Agent, h: Handle, key: String) -> #(JsVal, Agent) {
   rt_obj.t_get_prop(st, mk_object(h), StringKey(Named(key)))
 }
 
-pub fn calendar_slot_of(data: TemporalData) -> Option(tcal.Calendar) {
+pub fn calendar_slot_of(
+  data: TemporalData,
+) -> Option(temporal_calendar.Calendar) {
   case data {
     TemporalDate(calendar:, ..)
     | TemporalDateTime(calendar:, ..)
@@ -62,15 +64,19 @@ pub fn add_sub_args(
   #(dur, overflow, st)
 }
 
-pub fn canonicalize_calendar(id: String) -> Result(tcal.Calendar, JsError) {
-  case tcal.canonicalize(id) {
+pub fn canonicalize_calendar(
+  id: String,
+) -> Result(temporal_calendar.Calendar, JsError) {
+  case temporal_calendar.canonicalize(id) {
     Ok(c) -> Ok(c)
     Error(Nil) ->
       Error(JsError(RangeError, "calendar " <> id <> " is not supported"))
   }
 }
 
-pub fn calendar_from_string(s: String) -> Result(tcal.Calendar, JsError) {
+pub fn calendar_from_string(
+  s: String,
+) -> Result(temporal_calendar.Calendar, JsError) {
   case canonicalize_calendar(s) {
     Ok(c) -> Ok(c)
     Error(e) ->
@@ -116,9 +122,11 @@ fn try_ym_md_calendar(s: String) -> Option(String) {
   }
 }
 
-pub fn to_calendar_arg(v: JsVal) -> Result(tcal.Calendar, JsError) {
+pub fn to_calendar_arg(
+  v: JsVal,
+) -> Result(temporal_calendar.Calendar, JsError) {
   case classify(v) {
-    KUndef -> Ok(tcal.Iso8601)
+    KUndef -> Ok(temporal_calendar.Iso8601)
     KStr(s) -> canonicalize_calendar(s)
     _ -> Error(JsError(TypeError, "calendar must be a string"))
   }
@@ -152,21 +160,23 @@ pub fn parse_plain_datetime_string(s: String) -> Result(ParsedIso, JsError) {
   }
 }
 
-pub fn parsed_calendar_id(p: ParsedIso) -> Result(tcal.Calendar, JsError) {
+pub fn parsed_calendar_id(
+  p: ParsedIso,
+) -> Result(temporal_calendar.Calendar, JsError) {
   case p.calendar {
-    None -> Ok(tcal.Iso8601)
+    None -> Ok(temporal_calendar.Iso8601)
     Some(c) -> canonicalize_calendar(c)
   }
 }
 
-pub fn month_code_str(m: Int) -> String {
+pub fn month_code_text(m: Int) -> String {
   "M" <> pad2(m)
 }
 
 pub fn read_month_code(
   st: Agent,
   h: Handle,
-) -> #(Option(tcal.MonthCode), Agent) {
+) -> #(Option(temporal_calendar.MonthCode), Agent) {
   let #(v, st) = get_named(st, h, "monthCode")
   case classify(v) {
     KUndef -> #(None, st)
@@ -185,7 +195,9 @@ pub fn read_month_code(
   }
 }
 
-fn parse_month_code_grammar(s: String) -> Result(tcal.MonthCode, Nil) {
+fn parse_month_code_grammar(
+  s: String,
+) -> Result(temporal_calendar.MonthCode, Nil) {
   case s {
     "M" <> rest -> {
       let #(ds, leap) = case string.ends_with(rest, "L") {
@@ -193,7 +205,8 @@ fn parse_month_code_grammar(s: String) -> Result(tcal.MonthCode, Nil) {
         False -> #(rest, False)
       }
       case two_decimal_digits(ds) {
-        Ok(n) if n >= 1 || leap -> Ok(tcal.MonthCode(number: n, leap:))
+        Ok(n) if n >= 1 || leap ->
+          Ok(temporal_calendar.MonthCode(number: n, leap:))
         Ok(_) | Error(Nil) -> Error(Nil)
       }
     }
@@ -237,9 +250,9 @@ pub fn read_bag_era(st: Agent, h: Handle) -> #(Option(String), Agent) {
 pub fn read_era_fields(
   st: Agent,
   h: Handle,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
 ) -> #(Option(String), Option(Int), Agent) {
-  case tcal.has_eras(cal) {
+  case temporal_calendar.has_eras(cal) {
     False -> #(None, None, st)
     True -> {
       let #(era, st) = read_bag_era(st, h)
@@ -249,10 +262,13 @@ pub fn read_era_fields(
   }
 }
 
-pub fn read_bag_calendar(st: Agent, h: Handle) -> #(tcal.Calendar, Agent) {
+pub fn read_bag_calendar(
+  st: Agent,
+  h: Handle,
+) -> #(temporal_calendar.Calendar, Agent) {
   let #(v, st) = get_named(st, h, "calendar")
   case classify(v) {
-    KUndef -> #(tcal.Iso8601, st)
+    KUndef -> #(temporal_calendar.Iso8601, st)
     KStr(s) -> #(rt_val.or_throw(st, calendar_from_string(s)), st)
     KHandle(_) ->
       case temporal_data_of(st, v) |> option.then(calendar_slot_of) {
@@ -266,7 +282,7 @@ pub fn read_bag_calendar(st: Agent, h: Handle) -> #(tcal.Calendar, Agent) {
 pub fn to_temporal_calendar_identifier(
   st: Agent,
   v: JsVal,
-) -> #(tcal.Calendar, Agent) {
+) -> #(temporal_calendar.Calendar, Agent) {
   case classify(v) {
     KStr(s) -> #(rt_val.or_throw(st, calendar_from_string(s)), st)
     KHandle(_) ->
@@ -284,7 +300,7 @@ pub type DateFields {
     era: Option(String),
     era_year: Option(Int),
     month: Option(Int),
-    month_code: Option(tcal.MonthCode),
+    month_code: Option(temporal_calendar.MonthCode),
     year: Option(Int),
   )
 }
@@ -294,7 +310,7 @@ pub const no_date_fields = DateFields(None, None, None, None, None, None)
 pub fn read_date_fields(
   st: Agent,
   h: Handle,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
 ) -> #(DateFields, Agent) {
   let #(day, st) = read_pos_int_field(st, h, "day")
   let #(era, era_year, st) = read_era_fields(st, h, cal)
@@ -307,7 +323,7 @@ pub fn read_date_fields(
 pub fn read_year_month_fields(
   st: Agent,
   h: Handle,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
 ) -> #(DateFields, Agent) {
   let #(era, era_year, st) = read_era_fields(st, h, cal)
   let #(month, st) = read_pos_int_field(st, h, "month")
@@ -359,7 +375,7 @@ pub fn require_nonempty_fields(st: Agent, is_empty is_empty: Bool) -> Nil {
 }
 
 pub fn resolve_calendar_year(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   f: DateFields,
 ) -> Result(Int, JsError) {
   use Nil <- result.try(case f.era, f.era_year {
@@ -370,13 +386,15 @@ pub fn resolve_calendar_year(
   case f.year, f.era, f.era_year {
     _, Some(era), Some(ey) ->
       case
-        tcal.parse_era_code(era)
-        |> result.try(tcal.year_for_era(cal, _, ey))
+        temporal_calendar.parse_era_code(era)
+        |> result.try(temporal_calendar.year_for_era(cal, _, ey))
       {
         Error(Nil) ->
           Error(JsError(
             RangeError,
-            era <> " is not a valid era for calendar " <> tcal.identifier(cal),
+            era
+              <> " is not a valid era for calendar "
+              <> temporal_calendar.identifier(cal),
           ))
         Ok(y2) ->
           case f.year {
@@ -391,27 +409,30 @@ pub fn resolve_calendar_year(
 }
 
 pub fn resolve_calendar_month(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   year: Int,
   f: DateFields,
   overflow: Overflow,
 ) -> Result(Int, JsError) {
   case f.month_code {
     Some(mc) -> {
-      use ordinal <- result.try(case tcal.month_for_code(cal, year, mc) {
-        Ok(o) -> Ok(o)
-        Error(tcal.NeverValid) ->
-          Error(JsError(
-            RangeError,
-            "monthCode is not valid for calendar " <> tcal.identifier(cal),
-          ))
-        Error(tcal.NotInThisYear(skip_to)) ->
-          case overflow {
-            Reject ->
-              Error(JsError(RangeError, "monthCode not present in year"))
-            Constrain -> Ok(skip_to)
-          }
-      })
+      use ordinal <- result.try(
+        case temporal_calendar.month_for_code(cal, year, mc) {
+          Ok(o) -> Ok(o)
+          Error(temporal_calendar.NeverValid) ->
+            Error(JsError(
+              RangeError,
+              "monthCode is not valid for calendar "
+                <> temporal_calendar.identifier(cal),
+            ))
+          Error(temporal_calendar.NotInThisYear(skip_to)) ->
+            case overflow {
+              Reject ->
+                Error(JsError(RangeError, "monthCode not present in year"))
+              Constrain -> Ok(skip_to)
+            }
+        },
+      )
       case f.month {
         Some(m) if m != ordinal ->
           Error(JsError(RangeError, "month and monthCode must agree"))
@@ -422,7 +443,7 @@ pub fn resolve_calendar_month(
       case f.month {
         None -> Error(JsError(TypeError, "month or monthCode is required"))
         Some(m) -> {
-          let max = tcal.months_in_year(cal, year)
+          let max = temporal_calendar.months_in_year(cal, year)
           case m > max {
             True ->
               case overflow {
@@ -437,7 +458,7 @@ pub fn resolve_calendar_month(
 }
 
 pub fn resolve_calendar_date(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   f: DateFields,
   overflow: Overflow,
 ) -> Result(IsoDate, JsError) {
@@ -455,21 +476,28 @@ pub fn resolve_calendar_date(
   })
   use y <- result.try(resolve_calendar_year(cal, f))
   case cal {
-    tcal.Iso8601 -> {
+    temporal_calendar.Iso8601 -> {
       use m <- result.try(resolve_iso_month(f))
       regulate_iso_date(y, m, day, overflow)
     }
     _ -> {
       use m <- result.try(resolve_calendar_month(cal, y, f, overflow))
       use d <- result.try(regulate_calendar_day(cal, y, m, day, overflow))
-      Ok(iso_date_from_epoch_days(tcal.date_to_epoch_days(cal, y, m, d)))
+      Ok(
+        iso_date_from_epoch_days(temporal_calendar.date_to_epoch_days(
+          cal,
+          y,
+          m,
+          d,
+        )),
+      )
     }
   }
 }
 
 pub fn resolve_iso_month(f: DateFields) -> Result(Int, JsError) {
   case f.month_code {
-    Some(tcal.MonthCode(number: num, leap:)) ->
+    Some(temporal_calendar.MonthCode(number: num, leap:)) ->
       case leap || num > 12 {
         True ->
           Error(JsError(
@@ -492,13 +520,13 @@ pub fn resolve_iso_month(f: DateFields) -> Result(Int, JsError) {
 }
 
 pub fn regulate_calendar_day(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   year: Int,
   month: Int,
   day: Int,
   overflow: Overflow,
 ) -> Result(Int, JsError) {
-  let max = tcal.days_in_month(cal, year, month)
+  let max = temporal_calendar.days_in_month(cal, year, month)
   case day >= 1 && day <= max {
     True -> Ok(day)
     False ->
@@ -510,12 +538,12 @@ pub fn regulate_calendar_day(
 }
 
 pub fn calendar_with_fields(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   d: IsoDate,
   f: DateFields,
   overflow: Overflow,
 ) -> Result(IsoDate, JsError) {
-  let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
+  let cd = temporal_calendar.date_from_epoch_days(cal, epoch_days(d))
   let f = merge_year_month_code(cal, cd, f)
   let f = case f.day {
     Some(_) -> f
@@ -525,8 +553,8 @@ pub fn calendar_with_fields(
 }
 
 pub fn merge_year_month_code(
-  cal: tcal.Calendar,
-  cd: tcal.CalendarDate,
+  cal: temporal_calendar.Calendar,
+  cd: temporal_calendar.CalendarDate,
   f: DateFields,
 ) -> DateFields {
   let has_year = f.year != None || f.era != None || f.era_year != None
@@ -539,7 +567,7 @@ pub fn merge_year_month_code(
     False ->
       DateFields(
         ..f,
-        month_code: Some(tcal.month_code_of(cal, cd.year, cd.month)),
+        month_code: Some(temporal_calendar.month_code_of(cal, cd.year, cd.month)),
       )
   }
 }
@@ -567,21 +595,21 @@ pub fn iso_date_add(
 }
 
 pub fn calendar_date_add(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   d: IsoDate,
   dur: Duration,
   overflow: Overflow,
 ) -> Result(IsoDate, JsError) {
   case cal {
-    tcal.Iso8601 -> iso_date_add(d, dur, overflow)
+    temporal_calendar.Iso8601 -> iso_date_add(d, dur, overflow)
     _ -> {
-      let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
+      let cd = temporal_calendar.date_from_epoch_days(cal, epoch_days(d))
       let y1 = cd.year + dur.years
       use m1 <- result.try(case dur.years == 0 {
         True -> Ok(cd.month)
         False -> {
-          let mc = tcal.month_code_of(cal, cd.year, cd.month)
-          case tcal.carry_month_code(cal, y1, mc) {
+          let mc = temporal_calendar.month_code_of(cal, cd.year, cd.month)
+          case temporal_calendar.carry_month_code(cal, y1, mc) {
             Ok(o) -> Ok(o)
             Error(skip_to) ->
               case overflow {
@@ -594,7 +622,7 @@ pub fn calendar_date_add(
       })
       let #(y2, m2) = balance_calendar_month(cal, y1, m1 + dur.months)
       use d2 <- result.try(regulate_calendar_day(cal, y2, m2, cd.day, overflow))
-      let days = tcal.date_to_epoch_days(cal, y2, m2, d2)
+      let days = temporal_calendar.date_to_epoch_days(cal, y2, m2, d2)
       let extra =
         dur.weeks
         * 7
@@ -607,7 +635,7 @@ pub fn calendar_date_add(
 }
 
 pub fn balance_calendar_month(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   year: Int,
   month: Int,
 ) -> #(Int, Int) {
@@ -616,10 +644,10 @@ pub fn balance_calendar_month(
       balance_calendar_month(
         cal,
         year - 1,
-        month + tcal.months_in_year(cal, year - 1),
+        month + temporal_calendar.months_in_year(cal, year - 1),
       )
     False -> {
-      let max = tcal.months_in_year(cal, year)
+      let max = temporal_calendar.months_in_year(cal, year)
       case month > max {
         True -> balance_calendar_month(cal, year + 1, month - max)
         False -> #(year, month)
@@ -629,7 +657,7 @@ pub fn balance_calendar_month(
 }
 
 pub fn calendar_years_months_until(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   from: IsoDate,
   to: IsoDate,
   whole_years whole_years: Bool,
@@ -640,8 +668,8 @@ pub fn calendar_years_months_until(
     True -> 1
     False -> -1
   }
-  let cd1 = tcal.date_from_epoch_days(cal, from_days)
-  let cd2 = tcal.date_from_epoch_days(cal, to_days)
+  let cd1 = temporal_calendar.date_from_epoch_days(cal, from_days)
+  let cd2 = temporal_calendar.date_from_epoch_days(cal, to_days)
   let years = case whole_years {
     True -> count_calendar_years(cal, cd1, cd2, cd2.year - cd1.year, sign)
     False -> 0
@@ -650,10 +678,10 @@ pub fn calendar_years_months_until(
   let months = count_calendar_months(cal, after_years, cd1.day, cd2, sign, 0)
   let #(ym, mm) =
     balance_calendar_month(cal, after_years.year, after_years.month + months)
-  let dmax = tcal.days_in_month(cal, ym, mm)
+  let dmax = temporal_calendar.days_in_month(cal, ym, mm)
   // constrain the original day once, not per step
   let dd = int.min(cd1.day, dmax)
-  let intermediate = tcal.date_to_epoch_days(cal, ym, mm, dd)
+  let intermediate = temporal_calendar.date_to_epoch_days(cal, ym, mm, dd)
   #(years, months, to_days - intermediate)
 }
 
@@ -667,8 +695,13 @@ pub fn compare_triple(a: #(Int, Int, Int), b: #(Int, Int, Int)) -> Int {
   }
 }
 
-fn month_code_pos(cal: tcal.Calendar, year: Int, month: Int) -> Int {
-  let tcal.MonthCode(number: num, leap:) = tcal.month_code_of(cal, year, month)
+fn month_code_pos(
+  cal: temporal_calendar.Calendar,
+  year: Int,
+  month: Int,
+) -> Int {
+  let temporal_calendar.MonthCode(number: num, leap:) =
+    temporal_calendar.month_code_of(cal, year, month)
   case leap {
     True -> num * 2 + 1
     False -> num * 2
@@ -676,24 +709,24 @@ fn month_code_pos(cal: tcal.Calendar, year: Int, month: Int) -> Int {
 }
 
 fn add_calendar_years_constrain(
-  cal: tcal.Calendar,
-  cd: tcal.CalendarDate,
+  cal: temporal_calendar.Calendar,
+  cd: temporal_calendar.CalendarDate,
   years: Int,
-) -> tcal.CalendarDate {
+) -> temporal_calendar.CalendarDate {
   let y = cd.year + years
-  let mc = tcal.month_code_of(cal, cd.year, cd.month)
-  let m = case tcal.carry_month_code(cal, y, mc) {
+  let mc = temporal_calendar.month_code_of(cal, cd.year, cd.month)
+  let m = case temporal_calendar.carry_month_code(cal, y, mc) {
     Ok(o) -> o
     Error(skip_to) -> skip_to
   }
-  let d = int.min(cd.day, tcal.days_in_month(cal, y, m))
-  tcal.CalendarDate(y, m, d)
+  let d = int.min(cd.day, temporal_calendar.days_in_month(cal, y, m))
+  temporal_calendar.CalendarDate(y, m, d)
 }
 
 fn count_calendar_years(
-  cal: tcal.Calendar,
-  cd1: tcal.CalendarDate,
-  cd2: tcal.CalendarDate,
+  cal: temporal_calendar.Calendar,
+  cd1: temporal_calendar.CalendarDate,
+  cd2: temporal_calendar.CalendarDate,
   candidate: Int,
   sign: Int,
 ) -> Int {
@@ -717,17 +750,17 @@ fn count_calendar_years(
 }
 
 fn stepped_month_pos(
-  cal: tcal.Calendar,
-  cd1: tcal.CalendarDate,
+  cal: temporal_calendar.Calendar,
+  cd1: temporal_calendar.CalendarDate,
   target_year: Int,
   sign: Int,
 ) -> Int {
-  let mc = tcal.month_code_of(cal, cd1.year, cd1.month)
-  let tcal.MonthCode(number: num, leap:) = mc
+  let mc = temporal_calendar.month_code_of(cal, cd1.year, cd1.month)
+  let temporal_calendar.MonthCode(number: num, leap:) = mc
   case leap {
     False -> num * 2
     True ->
-      case tcal.carry_month_code(cal, target_year, mc) {
+      case temporal_calendar.carry_month_code(cal, target_year, mc) {
         Ok(_) -> num * 2 + 1
         Error(_) ->
           case sign > 0 {
@@ -739,10 +772,10 @@ fn stepped_month_pos(
 }
 
 fn count_calendar_months(
-  cal: tcal.Calendar,
-  cd: tcal.CalendarDate,
+  cal: temporal_calendar.Calendar,
+  cd: temporal_calendar.CalendarDate,
   day_cmp: Int,
-  cd2: tcal.CalendarDate,
+  cd2: temporal_calendar.CalendarDate,
   sign: Int,
   acc: Int,
 ) -> Int {
@@ -751,11 +784,11 @@ fn count_calendar_months(
 }
 
 fn count_calendar_months_loop(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   y: Int,
   m: Int,
   day_cmp: Int,
-  cd2: tcal.CalendarDate,
+  cd2: temporal_calendar.CalendarDate,
   sign: Int,
   acc: Int,
 ) -> Int {
@@ -769,20 +802,20 @@ fn count_calendar_months_loop(
 }
 
 fn step_calendar_month(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   y: Int,
   m: Int,
   sign: Int,
 ) -> #(Int, Int) {
   case sign > 0 {
     True ->
-      case m >= tcal.months_in_year(cal, y) {
+      case m >= temporal_calendar.months_in_year(cal, y) {
         True -> #(y + 1, 1)
         False -> #(y, m + 1)
       }
     False ->
       case m <= 1 {
-        True -> #(y - 1, tcal.months_in_year(cal, y - 1))
+        True -> #(y - 1, temporal_calendar.months_in_year(cal, y - 1))
         False -> #(y, m - 1)
       }
   }
@@ -835,8 +868,8 @@ pub fn parse_year_month_string(s: String) -> Result(IsoDateSlots, JsError) {
   let ym = case parse_year_part(s) {
     Some(#(y, rest)) -> {
       let mm = case rest {
-        "-" <> r -> take_digits(r, 2)
-        _ -> take_digits(rest, 2)
+        "-" <> r -> digits.take(r, 2)
+        _ -> digits.take(rest, 2)
       }
       case mm {
         Some(#(m, rest2)) ->
@@ -855,11 +888,12 @@ pub fn parse_year_month_string(s: String) -> Result(IsoDateSlots, JsError) {
         False -> Error(JsError(RangeError, "invalid year-month string"))
         True ->
           case cal {
-            None -> check_ym_limits(y, m, 1, tcal.Iso8601)
+            None -> check_ym_limits(y, m, 1, temporal_calendar.Iso8601)
             Some(c) -> {
               use canon <- result.try(canonicalize_calendar(c))
               case canon {
-                tcal.Iso8601 -> check_ym_limits(y, m, 1, tcal.Iso8601)
+                temporal_calendar.Iso8601 ->
+                  check_ym_limits(y, m, 1, temporal_calendar.Iso8601)
                 _ ->
                   Error(JsError(
                     RangeError,
@@ -874,11 +908,12 @@ pub fn parse_year_month_string(s: String) -> Result(IsoDateSlots, JsError) {
       let d = p.date
       use cal_id <- result.try(parsed_calendar_id(p))
       case cal_id {
-        tcal.Iso8601 -> check_ym_limits(d.year, d.month, d.day, tcal.Iso8601)
+        temporal_calendar.Iso8601 ->
+          check_ym_limits(d.year, d.month, d.day, temporal_calendar.Iso8601)
         cal -> {
-          let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
+          let cd = temporal_calendar.date_from_epoch_days(cal, epoch_days(d))
           let first =
-            iso_date_from_epoch_days(tcal.date_to_epoch_days(
+            iso_date_from_epoch_days(temporal_calendar.date_to_epoch_days(
               cal,
               cd.year,
               cd.month,
@@ -895,7 +930,7 @@ pub fn check_ym_limits(
   y: Int,
   m: Int,
   rd: Int,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
 ) -> Result(IsoDateSlots, JsError) {
   case iso_year_month_within_limits(y, m) {
     True -> Ok(IsoDateSlots(IsoDate(y, m, rd), cal))
@@ -908,11 +943,11 @@ pub fn parse_month_day_string(s: String) -> Result(IsoDateSlots, JsError) {
     "--" <> r -> r
     _ -> s
   }
-  let md = case take_digits(body, 2) {
+  let md = case digits.take(body, 2) {
     Some(#(m, rest)) -> {
       let dd = case rest {
-        "-" <> r -> take_digits(r, 2)
-        _ -> take_digits(rest, 2)
+        "-" <> r -> digits.take(r, 2)
+        _ -> digits.take(rest, 2)
       }
       case dd {
         Some(#(d, rest2)) ->
@@ -931,12 +966,16 @@ pub fn parse_month_day_string(s: String) -> Result(IsoDateSlots, JsError) {
         False -> try_month_day_as_datetime(s)
         True ->
           case cal {
-            None -> Ok(IsoDateSlots(IsoDate(1972, m, d), tcal.Iso8601))
+            None ->
+              Ok(IsoDateSlots(IsoDate(1972, m, d), temporal_calendar.Iso8601))
             Some(c) -> {
               use canon <- result.try(canonicalize_calendar(c))
               case canon {
-                tcal.Iso8601 ->
-                  Ok(IsoDateSlots(IsoDate(1972, m, d), tcal.Iso8601))
+                temporal_calendar.Iso8601 ->
+                  Ok(IsoDateSlots(
+                    IsoDate(1972, m, d),
+                    temporal_calendar.Iso8601,
+                  ))
                 _ ->
                   Error(JsError(
                     RangeError,
@@ -955,12 +994,12 @@ fn try_month_day_as_datetime(s: String) -> Result(IsoDateSlots, JsError) {
   let d = p.date
   use cal_id <- result.try(parsed_calendar_id(p))
   case cal_id {
-    tcal.Iso8601 ->
-      Ok(IsoDateSlots(IsoDate(1972, d.month, d.day), tcal.Iso8601))
+    temporal_calendar.Iso8601 ->
+      Ok(IsoDateSlots(IsoDate(1972, d.month, d.day), temporal_calendar.Iso8601))
     cal -> {
       use d <- result.try(check_date_limits(d))
-      let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
-      let mc = tcal.month_code_of(cal, cd.year, cd.month)
+      let cd = temporal_calendar.date_from_epoch_days(cal, epoch_days(d))
+      let mc = temporal_calendar.month_code_of(cal, cd.year, cd.month)
       use iso <- result.try(month_day_reference_iso(cal, mc, cd.day, Constrain))
       Ok(IsoDateSlots(iso, cal))
     }
@@ -971,12 +1010,13 @@ fn try_month_day_as_datetime(s: String) -> Result(IsoDateSlots, JsError) {
 pub const max_reference_epoch_days = 1095
 
 pub fn month_day_reference_iso(
-  cal: tcal.Calendar,
-  mc: tcal.MonthCode,
+  cal: temporal_calendar.Calendar,
+  mc: temporal_calendar.MonthCode,
   day: Int,
   overflow: Overflow,
 ) -> Result(IsoDate, JsError) {
-  let boundary_cd = tcal.date_from_epoch_days(cal, max_reference_epoch_days)
+  let boundary_cd =
+    temporal_calendar.date_from_epoch_days(cal, max_reference_epoch_days)
   case find_reference_date(cal, mc, day, boundary_cd.year, 300) {
     Ok(iso) -> Ok(iso)
     Error(Nil) ->
@@ -996,8 +1036,8 @@ pub fn month_day_reference_iso(
 }
 
 fn find_reference_date(
-  cal: tcal.Calendar,
-  mc: tcal.MonthCode,
+  cal: temporal_calendar.Calendar,
+  mc: temporal_calendar.MonthCode,
   day: Int,
   year: Int,
   tries: Int,
@@ -1005,16 +1045,16 @@ fn find_reference_date(
   case tries <= 0 {
     True -> Error(Nil)
     False ->
-      case tcal.month_for_code(cal, year, mc) {
+      case temporal_calendar.month_for_code(cal, year, mc) {
         // never valid in any year, stop instead of looping
-        Error(tcal.NeverValid) -> Error(Nil)
-        Error(tcal.NotInThisYear(_)) ->
+        Error(temporal_calendar.NeverValid) -> Error(Nil)
+        Error(temporal_calendar.NotInThisYear(_)) ->
           find_reference_date(cal, mc, day, year - 1, tries - 1)
         Ok(m) ->
-          case day <= tcal.days_in_month(cal, year, m) {
+          case day <= temporal_calendar.days_in_month(cal, year, m) {
             False -> find_reference_date(cal, mc, day, year - 1, tries - 1)
             True -> {
-              let days = tcal.date_to_epoch_days(cal, year, m, day)
+              let days = temporal_calendar.date_to_epoch_days(cal, year, m, day)
               case days <= max_reference_epoch_days {
                 True -> Ok(iso_date_from_epoch_days(days))
                 False -> find_reference_date(cal, mc, day, year - 1, tries - 1)
@@ -1026,8 +1066,8 @@ fn find_reference_date(
 }
 
 fn max_day_for_month_code(
-  cal: tcal.Calendar,
-  mc: tcal.MonthCode,
+  cal: temporal_calendar.Calendar,
+  mc: temporal_calendar.MonthCode,
   year: Int,
   tries: Int,
   best: Int,
@@ -1035,9 +1075,9 @@ fn max_day_for_month_code(
   case tries <= 0 {
     True -> best
     False ->
-      case tcal.month_for_code(cal, year, mc) {
-        Error(tcal.NeverValid) -> best
-        Error(tcal.NotInThisYear(_)) ->
+      case temporal_calendar.month_for_code(cal, year, mc) {
+        Error(temporal_calendar.NeverValid) -> best
+        Error(temporal_calendar.NotInThisYear(_)) ->
           max_day_for_month_code(cal, mc, year - 1, tries - 1, best)
         Ok(m) ->
           max_day_for_month_code(
@@ -1045,7 +1085,7 @@ fn max_day_for_month_code(
             mc,
             year - 1,
             tries - 1,
-            int.max(best, tcal.days_in_month(cal, year, m)),
+            int.max(best, temporal_calendar.days_in_month(cal, year, m)),
           )
       }
   }
@@ -1056,13 +1096,13 @@ pub fn is_month_day_like(s: String) -> Bool {
     "--" <> r -> r
     _ -> s
   }
-  case take_digits(s, 2) {
+  case digits.take(s, 2) {
     Some(#(m, rest)) -> {
       let rest = case rest {
         "-" <> r -> r
         _ -> rest
       }
-      case take_digits(rest, 2) {
+      case digits.take(rest, 2) {
         Some(#(d, "")) ->
           m >= 1 && m <= 12 && d >= 1 && d <= days_in_month(1972, m)
         _ -> False
@@ -1073,17 +1113,17 @@ pub fn is_month_day_like(s: String) -> Bool {
 }
 
 pub fn is_year_month_like(s: String) -> Bool {
-  case take_digits(s, 4) {
+  case digits.take(s, 4) {
     Some(#(_, "")) -> False
     Some(#(_, rest)) ->
       case rest {
         "-" <> r ->
-          case take_digits(r, 2) {
+          case digits.take(r, 2) {
             Some(#(m, "")) -> m >= 1 && m <= 12
             _ -> False
           }
         _ ->
-          case take_digits(rest, 2) {
+          case digits.take(rest, 2) {
             Some(#(m, "")) -> m >= 1 && m <= 12
             _ -> False
           }
@@ -1092,14 +1132,22 @@ pub fn is_year_month_like(s: String) -> Bool {
   }
 }
 
-pub fn era_field(cal: tcal.Calendar, cd: tcal.CalendarDate) -> JsVal {
-  tcal.era_for(cal, cd.year, cd.month, cd.day)
-  |> option.map(fn(e: tcal.Era) { mk_string(tcal.era_code_string(e.code)) })
+pub fn era_field(
+  cal: temporal_calendar.Calendar,
+  cd: temporal_calendar.CalendarDate,
+) -> JsVal {
+  temporal_calendar.era_for(cal, cd.year, cd.month, cd.day)
+  |> option.map(fn(e: temporal_calendar.Era) {
+    mk_string(temporal_calendar.era_code_string(e.code))
+  })
   |> option.unwrap(mk_undefined())
 }
 
-pub fn era_year_field(cal: tcal.Calendar, cd: tcal.CalendarDate) -> JsVal {
-  tcal.era_for(cal, cd.year, cd.month, cd.day)
-  |> option.map(fn(e: tcal.Era) { mk_int(e.year) })
+pub fn era_year_field(
+  cal: temporal_calendar.Calendar,
+  cd: temporal_calendar.CalendarDate,
+) -> JsVal {
+  temporal_calendar.era_for(cal, cd.year, cd.month, cd.day)
+  |> option.map(fn(e: temporal_calendar.Era) { mk_int(e.year) })
   |> option.unwrap(mk_undefined())
 }

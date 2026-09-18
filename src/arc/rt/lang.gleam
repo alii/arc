@@ -1,10 +1,10 @@
 import arc/bytecode/error_kind.{TypeError}
-import arc/bytecode/key.{type PropertyKey, Named, canonical_key}
+import arc/bytecode/key.{type PropertyKey, Named}
 import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as b_object
 import arc/rt/builtins/regexp as b_regexp
-import arc/rt/call.{NormalCompletion, ThrowCompletion, t_call}
+import arc/rt/call.{NormalCompletion, ThrowCompletion, t_call} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -188,7 +188,7 @@ fn generator_step(
   data: Handle,
 ) -> #(Option(JsVal), Agent) {
   let step = fn(st) { rt_async.t_gen_step(st, data, mk_undefined()) }
-  case call.try_run(st, step) {
+  case rt_call.try_run(st, step) {
     #(NormalCompletion(#(True, _)), st) -> #(None, st)
     #(NormalCompletion(#(False, v)), st) -> #(Some(v), st)
     #(ThrowCompletion(thrown), st) ->
@@ -246,7 +246,7 @@ fn protocol_step(
       }
     }
   }
-  case call.try_run(st, step) {
+  case rt_call.try_run(st, step) {
     #(NormalCompletion(#(True, _) as pair), st) -> #(pair, mark_done(st, rec))
     #(NormalCompletion(pair), st) -> #(pair, st)
     #(ThrowCompletion(thrown), st) ->
@@ -392,7 +392,7 @@ pub fn t_regexp_new(
   pattern: String,
   flags: String,
 ) -> #(JsVal, Agent) {
-  b_regexp.regexp_create_literal(st, pattern, flags)
+  b_regexp.create_literal(st, pattern, flags)
 }
 
 // §13.2.8.4 gettemplateobject, cached per realm and site
@@ -438,7 +438,7 @@ pub fn t_global_delete(st: Agent, name: String) -> #(Bool, Agent) {
   rt_obj.t_delete_prop(
     st,
     st.realm.global_object,
-    StringKey(canonical_key(name)),
+    StringKey(key.canonical(name)),
   )
 }
 
@@ -451,7 +451,7 @@ pub type ArrayIterStep {
 }
 
 @external(erlang, "arc_rt_lang_ffi", "array_iter_start")
-pub fn array_iter_start(agent: Agent, iterable: JsVal) -> JsVal
+pub fn array_iter_start(st: Agent, iterable: JsVal) -> JsVal
 
 @external(erlang, "arc_rt_lang_ffi", "array_iter_next")
 pub fn array_iter_next(store: Store, rec: JsVal) -> ArrayIterStep
@@ -463,7 +463,7 @@ pub fn is_array_iter(v: JsVal) -> Bool
 pub fn array_iter_parts(rec: JsVal) -> #(JsVal, Int, JsVal)
 
 @external(erlang, "arc_rt_lang_ffi", "array_iter_proto")
-pub fn array_iter_proto(agent: Agent, rec: JsVal) -> Handle
+pub fn array_iter_proto(st: Agent, rec: JsVal) -> Handle
 
 @external(erlang, "arc_rt_lang_ffi", "array_iter_record")
 pub fn array_iter_record(target: JsVal, index: Int, next_fn: JsVal) -> JsVal

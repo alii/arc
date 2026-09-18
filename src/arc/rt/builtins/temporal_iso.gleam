@@ -1,11 +1,11 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError}
-import arc/internal/digits.{take_digits}
+import arc/internal/digits
 import arc/internal/gregorian.{
   civil_from_days, days_from_year, days_in_month,
   days_in_year as days_in_iso_year,
 }
 import arc/internal/int_math.{floor_div}
-import arc/internal/temporal_calendar as tcal
+import arc/internal/temporal_calendar
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -41,7 +41,7 @@ pub type IsoDate {
 
 // [[isodate]] and [[calendar]] slots of plaindate, plainyearmonth, plainmonthday
 pub type IsoDateSlots {
-  IsoDateSlots(iso_date: IsoDate, calendar: tcal.Calendar)
+  IsoDateSlots(iso_date: IsoDate, calendar: temporal_calendar.Calendar)
 }
 
 pub type IsoTime {
@@ -361,18 +361,18 @@ pub fn parse_date_part(s: String) -> Option(#(Int, Int, Int, String)) {
   use #(year, rest) <- option.then(parse_year_part(s))
   case rest {
     "-" <> r1 -> {
-      use #(m, r2) <- option.then(take_digits(r1, 2))
+      use #(m, r2) <- option.then(digits.take(r1, 2))
       case r2 {
         "-" <> r3 -> {
-          use #(d, r4) <- option.then(take_digits(r3, 2))
+          use #(d, r4) <- option.then(digits.take(r3, 2))
           Some(#(year, m, d, r4))
         }
         _ -> None
       }
     }
     _ -> {
-      use #(m, r2) <- option.then(take_digits(rest, 2))
-      use #(d, r3) <- option.then(take_digits(r2, 2))
+      use #(m, r2) <- option.then(digits.take(rest, 2))
+      use #(d, r3) <- option.then(digits.take(r2, 2))
       Some(#(year, m, d, r3))
     }
   }
@@ -380,19 +380,19 @@ pub fn parse_date_part(s: String) -> Option(#(Int, Int, Int, String)) {
 
 pub fn parse_year_part(s: String) -> Option(#(Int, String)) {
   case s {
-    "+" <> rest -> take_digits(rest, 6) |> option.map(fn(p) { #(p.0, p.1) })
+    "+" <> rest -> digits.take(rest, 6) |> option.map(fn(p) { #(p.0, p.1) })
     "-" <> rest ->
-      case take_digits(rest, 6) {
+      case digits.take(rest, 6) {
         Some(#(0, _)) -> None
         Some(#(y, r)) -> Some(#(0 - y, r))
         None -> None
       }
-    _ -> take_digits(s, 4)
+    _ -> digits.take(s, 4)
   }
 }
 
 pub fn parse_time_part(s: String) -> Option(#(IsoTime, String)) {
-  use #(h, rest) <- option.then(take_digits(s, 2))
+  use #(h, rest) <- option.then(digits.take(s, 2))
   let #(mi, sec, frac_ns, _has_seconds, rest) = parse_minutes_seconds(rest)
   let t =
     IsoTime(
@@ -416,7 +416,7 @@ fn parse_minutes_seconds(s: String) -> #(Int, Int, Int, Bool, String) {
     ":" <> r -> #(True, r)
     _ -> #(False, s)
   }
-  case take_digits(after_sep, 2) {
+  case digits.take(after_sep, 2) {
     None -> #(0, 0, 0, False, s)
     Some(#(mi, rest)) -> {
       let seconds_start = case extended, rest {
@@ -424,7 +424,7 @@ fn parse_minutes_seconds(s: String) -> #(Int, Int, Int, Bool, String) {
         True, _ -> None
         False, _ -> Some(rest)
       }
-      case option.then(seconds_start, take_digits(_, 2)) {
+      case option.then(seconds_start, digits.take(_, 2)) {
         Some(#(sec, rest)) -> {
           let #(frac, rest) = parse_fraction(rest)
           #(mi, sec, frac, True, rest)
@@ -463,7 +463,7 @@ pub fn parse_offset_part(s: String) -> Option(#(ParsedOffset, String)) {
 }
 
 fn parse_offset_value(s: String, sign: Int) -> Option(#(ParsedOffset, String)) {
-  use #(h, rest) <- option.then(take_digits(s, 2))
+  use #(h, rest) <- option.then(digits.take(s, 2))
   let #(mi, sec, frac, sub_minute, rest) = parse_minutes_seconds(rest)
   case h <= 23 && mi <= 59 && sec <= 59 {
     True -> {

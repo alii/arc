@@ -10,8 +10,7 @@
 
 -define(IC_GLOBAL_REFILLS, 16).
 
-%% site cache of a global object data property, valid while the epoch holds;
-%% keyed like the read and call ics so a site can never answer for another name
+%% global data property cache, valid while the epoch holds, keyed by site and name
 t_global_get_ic(St, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
     case element(?STORE_ICS, Store) of

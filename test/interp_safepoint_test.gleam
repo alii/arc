@@ -67,18 +67,18 @@ fn empty_template() -> FuncTemplate {
   )
 }
 
-fn root_state(agent: Agent, locals: List(JsVal), stack: List(JsVal)) -> State {
+fn root_state(st: Agent, locals: List(JsVal), stack: List(JsVal)) -> State {
   let func = empty_template()
   State(
-    agent:,
+    agent: st,
     pc: 0,
     stack:,
     locals: tuple_array.from_list(locals),
     func:,
     unit_id: 0,
     call_stack: [],
-    outer_depth: agent.call_depth,
-    depth: agent.call_depth,
+    outer_depth: st.call_depth,
+    depth: st.call_depth,
     try_stack: [],
     this: mk_undefined(),
     new_target: mk_undefined(),
@@ -94,42 +94,43 @@ pub fn toplevel_return_collects_and_keeps_frame_values_test() {
   let #(stacked_h, stacked, st) = new_object(st)
   let #(dead_h, _, st) = new_object(st)
   let st = churn(st, threshold)
-  let s = safepoint.maybe_collect_at_return(root_state(st, [local], [stacked]))
-  assert rt_gc.t_is_live(s.agent, local_h)
-  assert rt_gc.t_is_live(s.agent, stacked_h)
-  assert !rt_gc.t_is_live(s.agent, dead_h)
-  assert rt_gc.stats(s.agent).alloc_since_gc == 0
+  let state =
+    safepoint.maybe_collect_at_return(root_state(st, [local], [stacked]))
+  assert rt_gc.t_is_live(state.agent, local_h)
+  assert rt_gc.t_is_live(state.agent, stacked_h)
+  assert !rt_gc.t_is_live(state.agent, dead_h)
+  assert rt_gc.stats(state.agent).alloc_since_gc == 0
 }
 
 pub fn below_threshold_does_not_collect_test() {
   let st = small_agent()
   let #(dead_h, _, st) = new_object(st)
-  let s = safepoint.maybe_collect_at_return(root_state(st, [], []))
-  assert rt_gc.t_is_live(s.agent, dead_h)
+  let state = safepoint.maybe_collect_at_return(root_state(st, [], []))
+  assert rt_gc.t_is_live(state.agent, dead_h)
 }
 
 pub fn nested_activation_never_collects_test() {
   let st = rt_store.t_enter_call(small_agent())
   let #(dead_h, _, st) = new_object(st)
   let st = churn(st, threshold)
-  let s = safepoint.maybe_collect_at_return(root_state(st, [], []))
-  assert rt_gc.t_is_live(s.agent, dead_h)
+  let state = safepoint.maybe_collect_at_return(root_state(st, [], []))
+  assert rt_gc.t_is_live(state.agent, dead_h)
 }
 
-fn with_caller_frame(s: State, held: JsVal) -> State {
+fn with_caller_frame(state: State, held: JsVal) -> State {
   let caller =
     SavedFrame(
-      caller: s,
+      caller: state,
       pc: 0,
       stack: [held],
-      locals: s.locals,
+      locals: state.locals,
       constructor_this: None,
     )
   State(
-    ..s,
+    ..state,
     call_stack: [caller],
-    depth: s.depth + 1,
-    agent: Agent(..s.agent, call_depth: s.agent.call_depth + 1),
+    depth: state.depth + 1,
+    agent: Agent(..state.agent, call_depth: state.agent.call_depth + 1),
   )
 }
 
@@ -138,44 +139,44 @@ pub fn inner_frame_return_collects_and_keeps_caller_values_test() {
   let #(held_h, held, st) = new_object(st)
   let #(dead_h, _, st) = new_object(st)
   let st = churn(st, threshold)
-  let s =
+  let state =
     safepoint.maybe_collect_at_return(with_caller_frame(
       root_state(st, [], []),
       held,
     ))
-  assert rt_gc.t_is_live(s.agent, held_h)
-  assert !rt_gc.t_is_live(s.agent, dead_h)
+  assert rt_gc.t_is_live(state.agent, held_h)
+  assert !rt_gc.t_is_live(state.agent, dead_h)
 }
 
 pub fn inner_frame_under_nested_entry_never_collects_test() {
   let st = rt_store.t_enter_call(small_agent())
   let #(dead_h, _, st) = new_object(st)
   let st = churn(st, threshold)
-  let s =
+  let state =
     safepoint.maybe_collect_at_return(with_caller_frame(
       root_state(st, [], []),
       mk_undefined(),
     ))
-  assert rt_gc.t_is_live(s.agent, dead_h)
+  assert rt_gc.t_is_live(state.agent, dead_h)
 }
 
 pub fn allocation_loop_stays_bounded_test() {
   let st = small_agent()
   let #(kept_h, kept, st) = new_object(st)
   let base = rt_gc.stats(st).live_count
-  let s = stress(root_state(st, [kept], []), 200, base)
-  assert rt_gc.t_is_live(s.agent, kept_h)
-  assert rt_gc.stats(s.agent).live_count <= base + 2 * threshold
+  let state = stress(root_state(st, [kept], []), 200, base)
+  assert rt_gc.t_is_live(state.agent, kept_h)
+  assert rt_gc.stats(state.agent).live_count <= base + 2 * threshold
 }
 
-fn stress(s: State, rounds: Int, base: Int) -> State {
+fn stress(state: State, rounds: Int, base: Int) -> State {
   case rounds {
-    0 -> s
+    0 -> state
     _ -> {
-      let s = State(..s, agent: churn(s.agent, 2 * threshold))
-      let s = safepoint.maybe_collect_at_return(s)
-      assert rt_gc.stats(s.agent).live_count <= base + 2 * threshold
-      stress(s, rounds - 1, base)
+      let state = State(..state, agent: churn(state.agent, 2 * threshold))
+      let state = safepoint.maybe_collect_at_return(state)
+      assert rt_gc.stats(state.agent).live_count <= base + 2 * threshold
+      stress(state, rounds - 1, base)
     }
   }
 }

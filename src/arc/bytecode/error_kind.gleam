@@ -1,4 +1,4 @@
-//// a js error not yet thrown, shared by compiler, rt and builtins
+// a js error not yet thrown, shared by compiler, rt and builtins
 
 pub type ErrorKind {
   TypeError

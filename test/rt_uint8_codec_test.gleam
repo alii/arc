@@ -1,4 +1,4 @@
-import arc/bytecode/key.{canonical_key}
+import arc/bytecode/key
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
@@ -29,13 +29,13 @@ fn u8_of(st: Agent, bytes: List(Int)) -> #(JsVal, Agent) {
   u8(st, [src])
 }
 
-fn get_(st: Agent, obj: JsVal, key: String) -> JsVal {
-  let #(v, _) = rt_obj.t_get_prop(st, obj, StringKey(canonical_key(key)))
+fn get_(st: Agent, obj: JsVal, name: String) -> JsVal {
+  let #(v, _) = rt_obj.t_get_prop(st, obj, StringKey(key.canonical(name)))
   v
 }
 
-fn set(st: Agent, obj: JsVal, key: String, v: JsVal) -> Agent {
-  let #(_, st) = rt_obj.t_set_prop(st, obj, StringKey(canonical_key(key)), v)
+fn set(st: Agent, obj: JsVal, name: String, v: JsVal) -> Agent {
+  let #(_, st) = rt_obj.t_set_prop(st, obj, StringKey(key.canonical(name)), v)
   st
 }
 

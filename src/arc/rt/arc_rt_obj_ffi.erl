@@ -845,8 +845,7 @@ for_in_add(Cells, Proto, Enum, Hidden, Seen, Acc, Fuel) ->
             for_in_chain(Cells, arc_rt_arena_ffi:get(P, Cells), Seen1, Acc1, Fuel - 1)
     end.
 
-%% enumerable named keys by seq plus the hidden ones; both property records
-%% keep enumerable and seq at the same positions
+%% enumerable named keys by seq plus hidden; both records share those positions
 for_in_named([], Enum, Hidden) ->
     Sorted = lists:sort(fun({A, _}, {B, _}) -> A =< B end, Enum),
     {[K || {_, K} <- Sorted], Hidden};

@@ -8,7 +8,7 @@ import arc/module_host
 import arc/parser
 import arc/rt/async as rt_async
 import arc/rt/builtins as rt_builtins
-import arc/rt/call.{NormalCompletion} as _
+import arc/rt/call.{NormalCompletion}
 import arc/rt/gc as rt_gc
 import arc/rt/inspect as rt_inspect
 import arc/rt/types.{

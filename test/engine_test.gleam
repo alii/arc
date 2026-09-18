@@ -5,7 +5,7 @@ import arc/engine.{
 import arc/host.{Context}
 import arc/module/load_error
 import arc/module_host
-import arc/rt/builtins/console
+import arc/rt/builtins/console as b_console
 import arc/rt/snapshot.{IncompatibleSnapshot, MalformedBinary}
 import arc/rt/types.{
   type JsVal, JFloat, mk_bool, mk_int, mk_null, mk_number, mk_string,
@@ -243,14 +243,14 @@ fn with_import_hook(
 ) -> engine.Engine(host) {
   let #(eng, Nil) =
     engine.with_context(eng, fn(ctx) {
-      let agent =
+      let st =
         module_host.install_import_hook(
           ctx.agent,
           "/main.js",
           fn(raw, _referrer) { Ok(raw) },
           fn(_resolved) { Ok(source) },
         )
-      #(Context(..ctx, agent:), Nil)
+      #(Context(..ctx, agent: st), Nil)
     })
   eng
 }
@@ -517,8 +517,8 @@ pub fn eval_module_syntax_error_test() {
 fn fmt_engine() -> engine.Engine(host) {
   engine.new()
   |> engine.define_fn("fmt", 0, fn(args, _this, ctx) {
-    let #(line, agent) = console.format(ctx.agent, args)
-    #(Context(..ctx, agent:), Ok(mk_string(line)))
+    let #(line, st) = b_console.format(ctx.agent, args)
+    #(Context(..ctx, agent: st), Ok(mk_string(line)))
   })
 }
 

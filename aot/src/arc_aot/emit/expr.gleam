@@ -41,10 +41,10 @@ pub fn throw_at_rt(op: String, msg: String) -> Build(ir.Value) {
 
 // parser-unreachable shapes throw at runtime too
 fn unreachable(why: String) -> Build(ir.Value) {
-  throw_at_rt("throw_type_error", "emit_2core/expr: unreachable: " <> why)
+  throw_at_rt("throw_type_error", "emit/expr: unreachable: " <> why)
 }
 
-pub fn bridge_expr(call: Next) -> Build(ir.Value) {
+pub fn bridge(call: Next) -> Build(ir.Value) {
   fn(e, k) {
     case call(e) {
       Ok(#(tree, e)) -> {
@@ -249,7 +249,7 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
         Some(_) -> self
         None -> named
       }
-      bridge_expr(fn(e) {
+      bridge(fn(e) {
         e.dispatch.emit_class(e, self, inferred, super_class, body)
       })
     }
@@ -309,7 +309,7 @@ pub fn emit_expr(e: Emitter, ex: ast.Expression) -> EmitResult {
   Ok(anf.run(expr(ex), e))
 }
 
-pub fn emit_expr_named(
+pub fn emit_named(
   e: Emitter,
   ex: ast.Expression,
   named: Option(String),
@@ -1294,7 +1294,7 @@ fn resolve_lexical(
   ref: lexical.LexicalRef,
 ) -> Option(#(Int, Bool)) {
   let info = state.fn_info(e)
-  case lexical.lexical_slot(info.lexical, ref) {
+  case lexical.slot_of(info.lexical, ref) {
     Some(slot) -> Some(#(slot, state.lexical_is_boxed(e, info, ref)))
     None ->
       case dict.get(info.lexical_captures, ref) {
@@ -1431,7 +1431,6 @@ fn static_dot_key(prop: ast.MemberProperty) -> Option(BitArray) {
   }
 }
 
-// probe is get_named_ic, or get_named_ic_shaped when obj is `this`;
 // compare against the miss atom since undefined and null are valid hits
 fn get_named(
   probe: String,
@@ -2676,7 +2675,7 @@ fn emit_method_closure(
   let ast.FunctionLiteral(_, params, body, is_gen, is_async) = lit
   fn(e: Emitter, k) {
     let #(fn_scope, e) = state.pop_child_fn(e)
-    bridge_expr(fn(e) {
+    bridge(fn(e) {
       e.dispatch.emit_function(
         e,
         state.Method(is_gen:, is_async:),
@@ -2704,7 +2703,7 @@ fn emit_function_expr(
 ) -> Build(ir.Value) {
   fn(e, k) {
     let #(fn_id, e) = state.pop_child_fn(e)
-    bridge_expr(fn(e) {
+    bridge(fn(e) {
       e.dispatch.emit_function(e, shape, named, params, body, fn_id)
     })(e, k)
   }
@@ -2765,7 +2764,7 @@ fn plain_member_name(key: ast.PropertyKey) -> Option(String) {
     // identifier names never start with a digit
     ast.KeyIdentifier(name:, ..) -> Some(name)
     ast.KeyString(value:, ..) ->
-      case key.canonical_key(value) {
+      case key.canonical(value) {
         key.Named(_) -> Some(value)
         _ -> None
       }
@@ -2999,8 +2998,7 @@ fn emit_logical_assign(
     }
   }
   case lhs {
-    // no in-arm write for unboxed locals, rebind once at the join
-    // const/fnname puts throw so they must stay guarded
+    // unboxed locals rebind once at the join; const puts throw so stay guarded
     IdentTarget(_, scope.Local(boxed: False, declared_kind:, ..))
       if declared_kind != scope.ConstBinding
       && declared_kind != scope.FnNameBinding

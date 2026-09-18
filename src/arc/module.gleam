@@ -13,7 +13,7 @@ import arc/module/load_error.{type LoadError, type ResolveError}
 import arc/module/registry
 import arc/parser
 import arc/rt/async as rt_async
-import arc/rt/builtins/reflect as rt_reflect
+import arc/rt/builtins/reflect as b_reflect
 import arc/rt/bytecode.{type FuncTemplate}
 import arc/rt/call as rt_call
 import arc/rt/closure as rt_closure
@@ -348,8 +348,8 @@ fn set_eval_status(
   )
 }
 
-fn with_agent(evaluation: GraphEvaluation, agent: Agent) -> GraphEvaluation {
-  GraphEvaluation(..evaluation, agent:)
+fn with_agent(evaluation: GraphEvaluation, st: Agent) -> GraphEvaluation {
+  GraphEvaluation(..evaluation, agent: st)
 }
 
 fn try_fold_state(
@@ -390,7 +390,7 @@ pub fn link_for_evaluation_reusing(
   case link.validate(lg) {
     Error(link_error) -> {
       let #(err, st) =
-        rt_val.t_new_error(st, SyntaxError, link.link_error_message(link_error))
+        rt_val.t_new_error(st, SyntaxError, link.error_message(link_error))
       #(st, Error(EvaluationError(err)))
     }
     Ok(Nil) -> {
@@ -722,21 +722,21 @@ fn module_locals(
 }
 
 fn module_activation(
-  agent: Agent,
+  st: Agent,
   template: FuncTemplate,
   unit_id: Int,
   seeds: List(#(Int, JsVal)),
 ) -> State {
   State(
-    agent:,
+    agent: st,
     pc: 0,
     stack: [],
     locals: module_locals(template, seeds),
     func: template,
     unit_id:,
     call_stack: [],
-    outer_depth: agent.call_depth,
-    depth: agent.call_depth,
+    outer_depth: st.call_depth,
+    depth: st.call_depth,
     try_stack: [],
     this: mk_undefined(),
     new_target: mk_undefined(),
@@ -1288,10 +1288,10 @@ fn alloc_deferred_trap(
   case triggers, native, string_key {
     // "then" is never observable via get
     False, ReflectGet, Some("then") -> #(mk_undefined(), st)
-    False, _, _ -> rt_reflect.dispatch(st, native, mk_undefined(), args)
+    False, _, _ -> b_reflect.dispatch(st, native, mk_undefined(), args)
     True, _, _ -> {
       let st = ensure_deferred_evaluated(st, bundle, linked, spec)
-      rt_reflect.dispatch(st, native, mk_undefined(), args)
+      b_reflect.dispatch(st, native, mk_undefined(), args)
     }
   }
 }

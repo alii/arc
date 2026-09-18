@@ -3,7 +3,7 @@ import arc/host_hooks.{
 }
 import arc/rt/builtins/common
 import arc/rt/builtins/global_fns
-import arc/rt/inspect
+import arc/rt/inspect as rt_inspect
 import arc/rt/types.{
   type Agent, type ConsoleNative, type Handle, type JsNum, type JsVal, ConsoleN,
   ConsolePrint, JFloat, KBig, KStr, KSym, classify, mk_int, mk_undefined,
@@ -123,7 +123,7 @@ fn spec(
         }
       }
     "o", [head, ..rest] | "O", [head, ..rest] ->
-      Some(#(inspect.inspect(st, head), rest, st))
+      Some(#(rt_inspect.inspect(st, head), rest, st))
     "c", [_, ..rest] -> Some(#("", rest, st))
     _, _ -> None
   }
@@ -143,6 +143,6 @@ fn number_substitution(n: JsNum) -> String {
 fn display(st: Agent, val: JsVal) -> String {
   case classify(val) {
     KStr(s) -> s
-    _ -> inspect.inspect(st, val)
+    _ -> rt_inspect.inspect(st, val)
   }
 }

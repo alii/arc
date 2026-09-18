@@ -1,6 +1,6 @@
 import arc/bytecode/error_kind.{JsError, RangeError}
 import arc/internal/int_math.{floor_div}
-import arc/internal/temporal_calendar as tcal
+import arc/internal/temporal_calendar
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   Compatible, DayUnit, Hour, InvalidIdentifier, Nanosecond, OffsetShowAuto,
@@ -198,16 +198,16 @@ pub fn ctor(
 ) -> #(JsVal, Agent) {
   let #(ns, st) = rt_val.t_to_bigint(st, helpers.arg_at(args, 0))
   case classify(helpers.arg_at(args, 1)) {
-    KStr(tz_str) -> {
+    KStr(tz_text) -> {
       // only bare identifiers, not iso date-time strings
-      let #(parsed, st) = parse_time_zone_identifier(st, tz_str)
+      let #(parsed, st) = parse_time_zone_identifier(st, tz_text)
       let tz =
         rt_val.or_throw(st, case parsed {
           Ok(tz) -> Ok(tz)
           Error(UnknownIdentifier) ->
             Error(JsError(
               RangeError,
-              "invalid time zone identifier: " <> tz_str,
+              "invalid time zone identifier: " <> tz_text,
             ))
           Error(InvalidIdentifier(e)) -> Error(e)
         })
@@ -248,7 +248,7 @@ fn require_zoned(
   st: Agent,
   this: JsVal,
   name: String,
-) -> #(Int, TimeZone, tcal.Calendar) {
+) -> #(Int, TimeZone, temporal_calendar.Calendar) {
   require_temporal(st, this, "ZonedDateTime", name, zoned_slot_of)
 }
 
@@ -539,7 +539,7 @@ pub fn method(
 fn zoned_until_since(
   st: Agent,
   protos: TemporalProtos,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   a_ns: Int,
   a_tz: TimeZone,
   b_ns: Int,

@@ -238,10 +238,7 @@ fn holds_compiled_code(cell: Cell) -> Bool {
 fn drop_regexp_matcher(cell: Cell) -> Cell {
   case cell {
     SObject(kind: RegExpObj(..) as kind, ..) ->
-      SObject(
-        ..cell,
-        kind: RegExpObj(..kind, compiled: b_regexp.uncompiled_regexp()),
-      )
+      SObject(..cell, kind: RegExpObj(..kind, compiled: b_regexp.uncompiled()))
     SObject(
       kind: NativeFn(token: RegExpN(RegExpConstructor(..) as ctor), ..) as kind,
       ..,

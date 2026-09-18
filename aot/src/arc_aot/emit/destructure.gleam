@@ -41,7 +41,7 @@ fn build_pattern(
       use is_undef <- anf.then(anf.bind(ir.NumTerm(ir.NEq, source, rc.undef)))
       use v <- anf.then(anf.bind_if(
         is_undef,
-        expr.bridge_expr(fn(e: Emitter) {
+        expr.bridge(fn(e: Emitter) {
           e.dispatch.emit_expr_named(e, default_expr, named)
         }),
         anf.pure(source),

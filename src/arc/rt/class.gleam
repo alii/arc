@@ -1,7 +1,4 @@
-import arc/bytecode/key.{
-  type PropertyKey, Named, Private, key_display_string, private_display_name,
-  private_key_text,
-}
+import arc/bytecode/key.{type PropertyKey, Named, Private, private_display_name}
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -23,9 +20,9 @@ fn priv_key_text(v: JsVal) -> String {
   }
 }
 
-fn object_key_display(key: ObjectKey) -> String {
-  case key {
-    StringKey(pk) -> key_display_string(pk)
+fn object_key_display(k: ObjectKey) -> String {
+  case k {
+    StringKey(pk) -> key.display_string(pk)
     SymbolKey(sym) -> types.symbol_descriptive_string(sym)
   }
 }
@@ -33,7 +30,7 @@ fn object_key_display(key: ObjectKey) -> String {
 // §15.7.14 mint a fresh private name
 pub fn t_new_private_name(st: Agent, source: String) -> #(JsVal, Agent) {
   let #(uid, st) = rt_store.t_next_private_id(st)
-  #(mk_string(private_key_text(source, uid)), st)
+  #(mk_string(key.private_text(source, uid)), st)
 }
 
 // §15.4.4 makemethod, no-op on native/bound
@@ -97,11 +94,7 @@ fn class_heritage(st: Agent, super: JsVal) -> #(Option(Handle), Handle, Agent) {
 }
 
 // §15.7.14 steps 8-18
-pub fn t_class_setup(
-  st: Agent,
-  ctor: Handle,
-  super: JsVal,
-) -> #(Handle, Agent) {
+pub fn t_setup(st: Agent, ctor: Handle, super: JsVal) -> #(Handle, Agent) {
   let #(proto_parent, ctor_parent, st) = class_heritage(st, super)
   let #(proto, st) = rt_obj.t_new_object(st, proto_parent)
   let st =
@@ -221,7 +214,7 @@ pub fn t_define_method(
 // symbol key names the fn "[description]"
 fn key_fn_name(key: ObjectKey) -> String {
   case key {
-    StringKey(pk) -> key_display_string(pk)
+    StringKey(pk) -> key.display_string(pk)
     SymbolKey(sym) ->
       case types.symbol_description(sym) {
         Some(d) -> "[" <> d <> "]"

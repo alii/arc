@@ -64,32 +64,33 @@ const drive = call.Drive(start_coroutine:)
 
 fn execute(state: State) -> Outcome {
   case interpreter.execute(state, drive) {
-    Ok(#(Completed(NormalCompletion(v)), s)) -> Finished(Ok(v), s)
-    Ok(#(Completed(ThrowCompletion(e)), s)) -> Finished(Error(e), s)
-    Ok(#(Suspended(kind, v), s)) -> Parked(kind, v, s)
+    Ok(#(Completed(NormalCompletion(v)), state)) -> Finished(Ok(v), state)
+    Ok(#(Completed(ThrowCompletion(e)), state)) -> Finished(Error(e), state)
+    Ok(#(Suspended(kind, v), state)) -> Parked(kind, v, state)
     Error(err) -> to_outcome(state.internal_fault(state, err))
   }
 }
 
 fn complete(state: State, site: String) -> #(Result(JsVal, JsVal), State) {
   case execute(state) {
-    Finished(res, s) -> #(res, s)
-    Parked(kind, _, s) -> state.internal_fault(s, SuspensionLeak(site:, kind:))
+    Finished(res, state) -> #(res, state)
+    Parked(kind, _, state) ->
+      state.internal_fault(state, SuspensionLeak(site:, kind:))
   }
 }
 
 fn complete_call(state: State) -> #(Result(JsVal, JsVal), Agent) {
   case interpreter.execute(state, drive) {
-    Ok(#(Completed(NormalCompletion(v)), s)) -> #(Ok(v), s.agent)
-    Ok(#(Completed(ThrowCompletion(e)), s)) -> #(Error(e), s.agent)
-    Ok(#(Suspended(kind, _), s)) -> {
-      let #(res, s) =
-        state.internal_fault(s, SuspensionLeak(site: "run_bytecode", kind:))
-      #(res, s.agent)
+    Ok(#(Completed(NormalCompletion(v)), state)) -> #(Ok(v), state.agent)
+    Ok(#(Completed(ThrowCompletion(e)), state)) -> #(Error(e), state.agent)
+    Ok(#(Suspended(kind, _), state)) -> {
+      let #(res, state) =
+        state.internal_fault(state, SuspensionLeak(site: "run_bytecode", kind:))
+      #(res, state.agent)
     }
     Error(err) -> {
-      let #(res, s) = state.internal_fault(state, err)
-      #(res, s.agent)
+      let #(res, state) = state.internal_fault(state, err)
+      #(res, state.agent)
     }
   }
 }
@@ -131,8 +132,8 @@ pub fn run(state: State) -> #(Result(JsVal, JsVal), Agent) {
   let m = mark(state.agent)
   let agent = call.push_frame_info(state.agent, state.func)
   let body = fn(agent) {
-    let #(res, s) = complete(State(..state, agent:), "run")
-    #(res, s.agent)
+    let #(res, state) = complete(State(..state, agent:), "run")
+    #(res, state.agent)
   }
   backstopped(agent, m, body, Error)
 }
@@ -153,7 +154,7 @@ pub fn run_script(
 }
 
 pub fn call_bytecode(
-  st: Agent,
+  agent: Agent,
   fn_h: Handle,
   kind: types.ObjKind,
   this: JsVal,
@@ -169,19 +170,39 @@ pub fn call_bytecode(
     ..,
   ) = kind
     as "call_bytecode: not a BytecodeFn kind"
-  case st.call_depth >= limits.max_call_depth, realm == st.realm.id {
-    True, _ -> depth_exceeded(st)
+  case agent.call_depth >= limits.max_call_depth, realm == agent.realm.id {
+    True, _ -> depth_exceeded(agent)
     False, True ->
-      run_call(st, fn_h, template, env, home_object, flags, unit_id, this, args)
+      run_call(
+        agent,
+        fn_h,
+        template,
+        env,
+        home_object,
+        flags,
+        unit_id,
+        this,
+        args,
+      )
     False, False -> {
-      use st <- rt_realm.with_realm(st, realm)
-      run_call(st, fn_h, template, env, home_object, flags, unit_id, this, args)
+      use agent <- rt_realm.with_realm(agent, realm)
+      run_call(
+        agent,
+        fn_h,
+        template,
+        env,
+        home_object,
+        flags,
+        unit_id,
+        this,
+        args,
+      )
     }
   }
 }
 
 pub fn prepare_call(
-  st: Agent,
+  agent: Agent,
   fn_h: Handle,
   kind: types.ObjKind,
   this: JsVal,
@@ -197,7 +218,7 @@ pub fn prepare_call(
   ) = kind
     as "prepare_call: not a BytecodeFn kind"
   case
-    realm == st.realm.id
+    realm == agent.realm.id
     && !template.is_generator
     && !template.is_async
     && !template.is_class_constructor
@@ -206,25 +227,27 @@ pub fn prepare_call(
       let callee =
         call.root_callee(fn_h, template, env, home_object, flags, unit_id)
       let new_target = mk_undefined()
-      fn(st, args) { call_prepared(st, callee, this, args, new_target) }
+      fn(agent, args) { call_prepared(agent, callee, this, args, new_target) }
     }
-    False -> fn(st, args) { raised(call_bytecode(st, fn_h, kind, this, args)) }
+    False -> fn(agent, args) {
+      raised(call_bytecode(agent, fn_h, kind, this, args))
+    }
   }
 }
 
 fn call_prepared(
-  st: Agent,
+  agent: Agent,
   callee: call.RootCallee,
   this: JsVal,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(JsVal, Agent) {
-  let frames = st.frames
-  let depth = st.call_depth
+  let frames = agent.frames
+  let depth = agent.call_depth
   case depth >= limits.max_call_depth {
-    True -> raised(depth_exceeded(st))
+    True -> raised(depth_exceeded(agent))
     False -> {
-      let state = call.root_state(st, callee, this, args, new_target)
+      let state = call.root_state(agent, callee, this, args, new_target)
       case kernel.guard1(complete_call, state) {
         kernel.Ok(value: Ok(v), agent:) -> #(v, resettle(agent, frames, depth))
         kernel.Ok(value: Error(e), agent:) ->
@@ -238,18 +261,18 @@ fn call_prepared(
 
 fn raised(outcome: #(Result(JsVal, JsVal), Agent)) -> #(JsVal, Agent) {
   case outcome {
-    #(Ok(v), st) -> #(v, st)
-    #(Error(e), st) -> rt_store.t_throw(st, e)
+    #(Ok(v), agent) -> #(v, agent)
+    #(Error(e), agent) -> rt_store.t_throw(agent, e)
   }
 }
 
-fn depth_exceeded(st: Agent) -> #(Result(JsVal, JsVal), Agent) {
-  let #(e, st) = state.stack_overflow_error(st)
-  #(Error(e), st)
+fn depth_exceeded(agent: Agent) -> #(Result(JsVal, JsVal), Agent) {
+  let #(e, agent) = state.stack_overflow_error(agent)
+  #(Error(e), agent)
 }
 
 fn run_call(
-  st: Agent,
+  agent: Agent,
   fn_h: Handle,
   template: FuncTemplate,
   env: bytecode.EnvTuple,
@@ -262,20 +285,20 @@ fn run_call(
   let callee =
     call.root_callee(fn_h, template, env, home_object, flags, unit_id)
   case template.is_generator || template.is_async {
-    False -> run_plain_call(st, callee, this, args)
+    False -> run_plain_call(agent, callee, this, args)
     True -> {
-      let m = mark(st)
-      case call.enter_root(st, callee, this, args, mk_undefined()) {
-        Error(#(thrown, st)) -> #(Error(thrown), st)
+      let m = mark(agent)
+      case call.enter_root(agent, callee, this, args, mk_undefined()) {
+        Error(#(thrown, agent)) -> #(Error(thrown), agent)
         Ok(state) -> {
           let agent = state.agent
           let body = fn(agent) {
-            let #(res, s) =
+            let #(res, state) =
               start_coroutine_root(
                 State(..state, agent:),
                 call.root_coroutine(state, fn_h),
               )
-            #(res, s.agent)
+            #(res, state.agent)
           }
           backstopped(agent, m, body, Error)
         }
@@ -285,15 +308,15 @@ fn run_call(
 }
 
 fn run_plain_call(
-  st: Agent,
+  agent: Agent,
   callee: call.RootCallee,
   this: JsVal,
   args: List(JsVal),
 ) -> #(Result(JsVal, JsVal), Agent) {
-  let frames = st.frames
-  let depth = st.call_depth
-  case call.enter_root(st, callee, this, args, mk_undefined()) {
-    Error(#(thrown, st)) -> #(Error(thrown), st)
+  let frames = agent.frames
+  let depth = agent.call_depth
+  case call.enter_root(agent, callee, this, args, mk_undefined()) {
+    Error(#(thrown, agent)) -> #(Error(thrown), agent)
     Ok(state) ->
       case kernel.guard1(complete_call, state) {
         kernel.Ok(value:, agent:) -> #(value, resettle(agent, frames, depth))
@@ -306,36 +329,36 @@ fn run_plain_call(
 }
 
 pub fn construct_bytecode(
-  st: Agent,
+  agent: Agent,
   fn_h: Handle,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Handle, Agent) {
-  use <- bool.lazy_guard(st.call_depth >= limits.max_call_depth, fn() {
-    let #(e, st) = state.stack_overflow_error(st)
-    rt_store.t_throw(st, e)
+  use <- bool.lazy_guard(agent.call_depth >= limits.max_call_depth, fn() {
+    let #(e, agent) = state.stack_overflow_error(agent)
+    rt_store.t_throw(agent, e)
   })
-  let #(completion, st) = run_construct(st, fn_h, args, new_target)
-  let #(v, st) = case completion {
-    NormalCompletion(v) -> #(v, st)
-    ThrowCompletion(e) -> rt_store.t_throw(st, e)
+  let #(completion, agent) = run_construct(agent, fn_h, args, new_target)
+  let #(v, agent) = case completion {
+    NormalCompletion(v) -> #(v, agent)
+    ThrowCompletion(e) -> rt_store.t_throw(agent, e)
   }
   case classify(v) {
-    KHandle(h) -> #(h, st)
+    KHandle(h) -> #(h, agent)
     _ -> {
-      let #(e, st) =
+      let #(e, agent) =
         rt_val.t_new_error(
-          st,
+          agent,
           TypeError,
           "internal error: constructor completed with a non-object",
         )
-      rt_store.t_throw(st, e)
+      rt_store.t_throw(agent, e)
     }
   }
 }
 
 fn run_construct(
-  st: Agent,
+  agent: Agent,
   callee_h: Handle,
   args: List(JsVal),
   new_target: JsVal,
@@ -351,27 +374,28 @@ fn run_construct(
       ..,
     ),
     ..,
-  ) = rt_store.t_cell_get(st, callee_h)
+  ) = rt_store.t_cell_get(agent, callee_h)
     as "construct_bytecode: handle is not a BytecodeFn cell"
-  let m = mark(st)
-  case call.root_this(st, template, new_target) {
-    Error(#(thrown, st)) -> #(ThrowCompletion(thrown), settle(st, m))
-    Ok(#(this, kind, st)) -> {
-      let #(outcome, st) = {
-        use st <- rt_realm.with_realm(st, realm)
+  let m = mark(agent)
+  case call.root_this(agent, template, new_target) {
+    Error(#(thrown, agent)) -> #(ThrowCompletion(thrown), settle(agent, m))
+    Ok(#(this, kind, agent)) -> {
+      let #(outcome, agent) = {
+        use agent <- rt_realm.with_realm(agent, realm)
         let callee =
           call.root_callee(callee_h, template, env, home_object, flags, unit_id)
-        case call.enter_root(st, callee, this, args, new_target) {
+        case call.enter_root(agent, callee, this, args, new_target) {
           Error(#(thrown, agent)) -> #(
             RootSettled(ThrowCompletion(thrown)),
             agent,
           )
           Ok(state) -> {
             let body = fn(agent) {
-              let #(res, s) = complete(State(..state, agent:), "run_bytecode")
+              let #(res, state) =
+                complete(State(..state, agent:), "run_bytecode")
               case res {
-                Ok(v) -> #(RootReturned(v, s), s.agent)
-                Error(e) -> #(RootSettled(ThrowCompletion(e)), s.agent)
+                Ok(v) -> #(RootReturned(v, state), state.agent)
+                Error(e) -> #(RootSettled(ThrowCompletion(e)), state.agent)
               }
             }
             backstopped(state.agent, m, body, escaped)
@@ -379,9 +403,9 @@ fn run_construct(
         }
       }
       case outcome {
-        RootSettled(c) -> #(c, st)
+        RootSettled(c) -> #(c, agent)
         RootReturned(v, final) ->
-          case call.finish_root(kind, v, State(..final, agent: st)) {
+          case call.finish_root(kind, v, State(..final, agent:)) {
             Ok(#(v, agent)) -> #(NormalCompletion(v), agent)
             Error(#(e, agent)) -> #(ThrowCompletion(e), agent)
           }
@@ -400,22 +424,22 @@ fn escaped(thrown: JsVal) -> RootOutcome {
 }
 
 fn start_coroutine_root(
-  st: State,
+  state: State,
   coroutine: call.CoroutineCall,
 ) -> #(Result(JsVal, JsVal), State) {
-  case start_coroutine(st, coroutine) {
-    Ok(s) ->
-      case s.stack {
-        [v, ..] -> #(Ok(v), s)
-        [] -> #(Ok(mk_undefined()), s)
+  case start_coroutine(state, coroutine) {
+    Ok(state) ->
+      case state.stack {
+        [v, ..] -> #(Ok(v), state)
+        [] -> #(Ok(mk_undefined()), state)
       }
-    Error(state.Threw(e, s)) -> #(Error(e), s)
-    Error(state.Returned(v, s)) -> #(Ok(v), s)
-    Error(state.VmFailed(err, s)) -> state.internal_fault(s, err)
-    Error(state.Yielded(_, _, s)) ->
-      state.internal_fault(s, SuspensionLeak("run_bytecode", state.Yield))
-    Error(state.Awaited(_, s)) ->
-      state.internal_fault(s, SuspensionLeak("run_bytecode", state.Await))
+    Error(state.Threw(e, state)) -> #(Error(e), state)
+    Error(state.Returned(v, state)) -> #(Ok(v), state)
+    Error(state.VmFailed(err, state)) -> state.internal_fault(state, err)
+    Error(state.Yielded(_, _, state)) ->
+      state.internal_fault(state, SuspensionLeak("run_bytecode", state.Yield))
+    Error(state.Awaited(_, state)) ->
+      state.internal_fault(state, SuspensionLeak("run_bytecode", state.Await))
   }
 }
 
@@ -465,27 +489,27 @@ fn start_coroutine(
   case template.is_generator {
     False -> {
       let frame = park.park(body, ParkedStart)
-      case kernel.guard2(rt_async.t_async_run, agent, ResumeFrame(frame)) {
+      case kernel.guard2(rt_async.t_run, agent, ResumeFrame(frame)) {
         kernel.Ok(value: promise, agent:) -> resume(agent, mk_object(promise))
         kernel.Threw(agent:, thrown:) -> threw(agent, thrown)
       }
     }
     True ->
       case execute(body) {
-        Parked(state.Yield, _, s) -> {
-          let frame = ResumeFrame(park.park(s, ParkedStart))
-          let agent = settle(s.agent, m)
+        Parked(state.Yield, _, state) -> {
+          let frame = ResumeFrame(park.park(state, ParkedStart))
+          let agent = settle(state.agent, m)
           let #(obj, agent) = case template.is_async {
             False -> rt_async.t_gen_new(agent, callee, frame)
             True -> rt_async.t_asyncgen_new(agent, callee, frame)
           }
           resume(agent, mk_object(obj))
         }
-        Finished(Error(thrown), s) -> threw(s.agent, thrown)
-        Finished(Ok(_), s) | Parked(state.Await, _, s) ->
+        Finished(Error(thrown), state) -> threw(state.agent, thrown)
+        Finished(Ok(_), state) | Parked(state.Await, _, state) ->
           Error(state.VmFailed(
             InternalError("start_coroutine", "body missed InitialYield"),
-            State(..caller, agent: settle(s.agent, m)),
+            State(..caller, agent: settle(state.agent, m)),
           ))
       }
   }
@@ -504,39 +528,39 @@ fn nested(
 }
 
 pub fn eval_source(
-  st: Agent,
+  agent: Agent,
   source: String,
   kind: EvalKind,
 ) -> #(JsVal, Agent) {
-  eval.eval_hook(st, source, kind, run)
+  eval.hook(agent, source, kind, run)
 }
 
 // mode 0 next, 1 throw, 2 return
 pub fn resume_frame(
-  st: Agent,
+  agent: Agent,
   frame: SuspendedFrame,
   sent: #(Int, JsVal),
 ) -> #(Step, Agent) {
-  use st <- rt_realm.with_realm(st, frame.realm)
-  let m = mark(st)
-  let agent = call.push_frame_info(st, frame.template)
+  use agent <- rt_realm.with_realm(agent, frame.realm)
+  let m = mark(agent)
+  let agent = call.push_frame_info(agent, frame.template)
   let #(mode, value) = sent
   let turn = fn(agent) {
-    let s = park.unpark(agent, frame)
+    let state = park.unpark(agent, frame)
     case frame.parked, mode {
-      ParkedStart, m if m == rt_async.sent_next -> step_of(execute(s))
+      ParkedStart, m if m == rt_async.sent_next -> step_of(execute(state))
       ParkedOp, m if m == rt_async.sent_next ->
-        step_of(execute(State(..s, stack: [value, ..s.stack])))
-      ParkedOp, m if m == rt_async.sent_throw -> inject_throw(s, value)
-      ParkedOp, _ -> inject_return(s, value)
+        step_of(execute(State(..state, stack: [value, ..state.stack])))
+      ParkedOp, m if m == rt_async.sent_throw -> inject_throw(state, value)
+      ParkedOp, _ -> inject_return(state, value)
       ParkedDelegateReturn, m if m == rt_async.sent_next ->
-        delegate_returned(s, value)
+        delegate_returned(state, value)
       ParkedReturnValue, m if m == rt_async.sent_next ->
-        step_of(return_into(s, value))
+        step_of(return_into(state, value))
       ParkedDelegateClose, m if m == rt_async.sent_next ->
-        delegate_closed(s, value)
-      _, m if m == rt_async.sent_throw -> step_of(throw_into(s, value))
-      _, _ -> step_of(return_into(s, value))
+        delegate_closed(state, value)
+      _, m if m == rt_async.sent_throw -> step_of(throw_into(state, value))
+      _, _ -> step_of(return_into(state, value))
     }
   }
   backstopped(agent, m, turn, StepThrow)
@@ -544,18 +568,18 @@ pub fn resume_frame(
 
 fn step_of(outcome: Outcome) -> #(Step, Agent) {
   case outcome {
-    Finished(Ok(v), s) -> #(StepReturn(v), s.agent)
-    Finished(Error(e), s) -> #(StepThrow(e), s.agent)
-    Parked(state.Yield, v, s) -> #(
-      StepYield(v, ResumeFrame(park.park(s, ParkedOp))),
-      s.agent,
+    Finished(Ok(v), state) -> #(StepReturn(v), state.agent)
+    Finished(Error(e), state) -> #(StepThrow(e), state.agent)
+    Parked(state.Yield, v, state) -> #(
+      StepYield(v, ResumeFrame(park.park(state, ParkedOp))),
+      state.agent,
     )
-    Parked(state.Await, v, s) -> await_at(s, v, ParkedOp)
+    Parked(state.Await, v, state) -> await_at(state, v, ParkedOp)
   }
 }
 
-fn await_at(s: State, v: JsVal, parked: ParkedAt) -> #(Step, Agent) {
-  #(StepAwait(v, ResumeFrame(park.park(s, parked))), s.agent)
+fn await_at(state: State, v: JsVal, parked: ParkedAt) -> #(Step, Agent) {
+  #(StepAwait(v, ResumeFrame(park.park(state, parked))), state.agent)
 }
 
 pub fn run_turn(state: State) -> #(Step, Agent) {
@@ -565,16 +589,16 @@ pub fn run_turn(state: State) -> #(Step, Agent) {
   backstopped(agent, m, turn, StepThrow)
 }
 
-fn throw_into(s: State, thrown: JsVal) -> Outcome {
-  case interpreter.unwind_to_catch(s, thrown) {
+fn throw_into(state: State, thrown: JsVal) -> Outcome {
+  case interpreter.unwind_to_catch(state, thrown) {
     Some(caught) -> execute(caught)
-    None -> Finished(Error(thrown), s)
+    None -> Finished(Error(thrown), state)
   }
 }
 
-fn throw_type_into(s: State, msg: String) -> #(Step, Agent) {
-  let #(e, s) = state.new_error(s, TypeError, msg)
-  step_of(throw_into(s, e))
+fn throw_type_into(state: State, msg: String) -> #(Step, Agent) {
+  let #(e, state) = state.new_error(state, TypeError, msg)
+  step_of(throw_into(state, e))
 }
 
 // §27.5.3.8 step 7.b/7.c yield* delegation
@@ -586,14 +610,14 @@ type DelegateSite {
   AsyncSite(record: IteratorRecord, rest: List(JsVal), await_pc: Int)
 }
 
-fn delegate_site(s: State) -> Option(DelegateSite) {
-  case tuple_array.get_unchecked(s.pc, s.func.bytecode), s.stack {
+fn delegate_site(state: State) -> Option(DelegateSite) {
+  case tuple_array.get_unchecked(state.pc, state.func.bytecode), state.stack {
     YieldStar, [rec, ..rest] ->
-      rt_lang.record_parts(s.agent, rec)
+      rt_lang.record_parts(state.agent, rec)
       |> option.map(SyncSite(_, rest))
     AsyncYieldStarNext(..), [rec, ..rest] ->
-      rt_lang.record_parts(s.agent, rec)
-      |> option.map(AsyncSite(_, rest, s.pc + 1))
+      rt_lang.record_parts(state.agent, rec)
+      |> option.map(AsyncSite(_, rest, state.pc + 1))
     _, _ -> None
   }
 }
@@ -606,61 +630,69 @@ fn site_record(site: DelegateSite) -> IteratorRecord {
 }
 
 fn delegate_method(
-  s: State,
+  state: State,
   site: DelegateSite,
   name: String,
 ) -> Result(#(Option(JsVal), State), StepExit) {
   let iterator = site_record(site).iterator
-  use #(method, s) <- result.map(kernel.guarded(
-    kernel.guard3(rt_obj.t_get_prop, s.agent, iterator, StringKey(Named(name))),
-    s,
+  use #(method, state) <- result.map(kernel.guarded(
+    kernel.guard3(
+      rt_obj.t_get_prop,
+      state.agent,
+      iterator,
+      StringKey(Named(name)),
+    ),
+    state,
   ))
   case classify(method) {
-    KUndef | KNull -> #(None, s)
-    _ -> #(Some(method), s)
+    KUndef | KNull -> #(None, state)
+    _ -> #(Some(method), state)
   }
 }
 
 fn call_delegate(
-  s: State,
+  state: State,
   site: DelegateSite,
   method: JsVal,
   value: JsVal,
 ) -> Result(#(JsVal, State), StepExit) {
   let iterator = site_record(site).iterator
   kernel.guarded(
-    kernel.guard4(rt_call.t_call, s.agent, method, iterator, [value]),
-    s,
+    kernel.guard4(rt_call.t_call, state.agent, method, iterator, [value]),
+    state,
   )
 }
 
-fn inject_throw(s: State, thrown: JsVal) -> #(Step, Agent) {
-  case delegate_site(s) {
-    None -> step_of(throw_into(s, thrown))
-    Some(site) -> forward_throw(s, site, thrown)
+fn inject_throw(state: State, thrown: JsVal) -> #(Step, Agent) {
+  case delegate_site(state) {
+    None -> step_of(throw_into(state, thrown))
+    Some(site) -> forward_throw(state, site, thrown)
   }
 }
 
-fn inject_return(s: State, value: JsVal) -> #(Step, Agent) {
-  case delegate_site(s) {
-    None -> step_of(return_into(s, value))
-    Some(site) -> forward_return(s, site, value)
+fn inject_return(state: State, value: JsVal) -> #(Step, Agent) {
+  case delegate_site(state) {
+    None -> step_of(return_into(state, value))
+    Some(site) -> forward_return(state, site, value)
   }
 }
 
 fn delegate_exit(exit: StepExit) -> #(Step, Agent) {
   case exit {
-    state.Threw(thrown, s) -> step_of(throw_into(s, thrown))
-    state.Returned(_, s)
-    | state.Yielded(_, _, s)
-    | state.Awaited(_, s)
-    | state.VmFailed(_, s) ->
-      step_of(to_outcome(unexpected_exit(s, "yield* delegate")))
+    state.Threw(thrown, state) -> step_of(throw_into(state, thrown))
+    state.Returned(_, state)
+    | state.Yielded(_, _, state)
+    | state.Awaited(_, state)
+    | state.VmFailed(_, state) ->
+      step_of(to_outcome(unexpected_exit(state, "yield* delegate")))
   }
 }
 
-fn unexpected_exit(s: State, site: String) -> #(Result(JsVal, JsVal), State) {
-  state.internal_fault(s, InternalError(site, "unexpected step exit"))
+fn unexpected_exit(
+  state: State,
+  site: String,
+) -> #(Result(JsVal, JsVal), State) {
+  state.internal_fault(state, InternalError(site, "unexpected step exit"))
 }
 
 fn or_delegate_exit(
@@ -674,93 +706,122 @@ fn or_delegate_exit(
 }
 
 fn forward_throw(
-  s: State,
+  state: State,
   site: DelegateSite,
   thrown: JsVal,
 ) -> #(Step, Agent) {
-  use #(method, s) <- or_delegate_exit(delegate_method(s, site, "throw"))
+  use #(method, state) <- or_delegate_exit(delegate_method(state, site, "throw"))
   case method, site {
     Some(method), SyncSite(rest:, ..) -> {
-      use #(res, s) <- or_delegate_exit(call_delegate(s, site, method, thrown))
-      delegate_result(s, res, rest, fn(s, val) {
-        step_of(execute(State(..s, stack: [val, ..rest], pc: s.pc + 1)))
+      use #(res, state) <- or_delegate_exit(call_delegate(
+        state,
+        site,
+        method,
+        thrown,
+      ))
+      delegate_result(state, res, rest, fn(state, val) {
+        step_of(execute(State(..state, stack: [val, ..rest], pc: state.pc + 1)))
       })
     }
     Some(method), AsyncSite(await_pc:, ..) -> {
-      use #(res, s) <- or_delegate_exit(call_delegate(s, site, method, thrown))
-      step_of(execute(State(..s, stack: [res, ..s.stack], pc: await_pc)))
+      use #(res, state) <- or_delegate_exit(call_delegate(
+        state,
+        site,
+        method,
+        thrown,
+      ))
+      step_of(execute(State(..state, stack: [res, ..state.stack], pc: await_pc)))
     }
     None, SyncSite(record:, ..) -> {
-      use s <- or_delegate_exit(
-        call.guarded_unit(s, iter_protocol.iterator_close_normal(
+      use state <- or_delegate_exit(
+        call.guarded_unit(state, iter_protocol.iterator_close_normal(
           _,
           record.iterator,
         )),
       )
-      throw_type_into(s, missing_throw)
+      throw_type_into(state, missing_throw)
     }
     None, AsyncSite(record:, ..) -> {
-      use #(closed, s) <- or_delegate_exit(
-        call.guarded(s, iter_protocol.call_return(_, record.iterator)),
+      use #(closed, state) <- or_delegate_exit(
+        call.guarded(state, iter_protocol.call_return(_, record.iterator)),
       )
       case closed {
-        Ok(iter_protocol.NoReturnMethod) -> throw_type_into(s, missing_throw)
+        Ok(iter_protocol.NoReturnMethod) ->
+          throw_type_into(state, missing_throw)
         Ok(iter_protocol.Returned(result)) ->
-          await_at(s, result, ParkedDelegateClose)
-        Error(thrown) -> step_of(throw_into(s, thrown))
+          await_at(state, result, ParkedDelegateClose)
+        Error(thrown) -> step_of(throw_into(state, thrown))
       }
     }
   }
 }
 
 fn forward_return(
-  s: State,
+  state: State,
   site: DelegateSite,
   value: JsVal,
 ) -> #(Step, Agent) {
-  use #(method, s) <- or_delegate_exit(delegate_method(s, site, "return"))
+  use #(method, state) <- or_delegate_exit(delegate_method(
+    state,
+    site,
+    "return",
+  ))
   case method, site {
-    None, SyncSite(..) -> step_of(return_into(s, value))
-    None, AsyncSite(..) -> await_at(s, value, ParkedReturnValue)
+    None, SyncSite(..) -> step_of(return_into(state, value))
+    None, AsyncSite(..) -> await_at(state, value, ParkedReturnValue)
     Some(method), SyncSite(rest:, ..) -> {
-      use #(res, s) <- or_delegate_exit(call_delegate(s, site, method, value))
-      delegate_result(s, res, rest, fn(s, val) { step_of(return_into(s, val)) })
+      use #(res, state) <- or_delegate_exit(call_delegate(
+        state,
+        site,
+        method,
+        value,
+      ))
+      delegate_result(state, res, rest, fn(state, val) {
+        step_of(return_into(state, val))
+      })
     }
     Some(method), AsyncSite(..) -> {
-      use #(res, s) <- or_delegate_exit(call_delegate(s, site, method, value))
-      await_at(s, res, ParkedDelegateReturn)
+      use #(res, state) <- or_delegate_exit(call_delegate(
+        state,
+        site,
+        method,
+        value,
+      ))
+      await_at(state, res, ParkedDelegateReturn)
     }
   }
 }
 
 fn delegate_result(
-  s: State,
+  state: State,
   res: JsVal,
   rest: List(JsVal),
   on_done: fn(State, JsVal) -> #(Step, Agent),
 ) -> #(Step, Agent) {
-  use #(#(done, val), s) <- or_delegate_exit(kernel.guarded(
-    kernel.guard2(iter_protocol.read_iter_result, s.agent, res),
-    s,
+  use #(#(done, val), state) <- or_delegate_exit(kernel.guarded(
+    kernel.guard2(iter_protocol.read_iter_result, state.agent, res),
+    state,
   ))
   case done {
-    False -> step_of(Parked(state.Yield, val, s))
-    True -> on_done(State(..s, stack: rest), val)
+    False -> step_of(Parked(state.Yield, val, state))
+    True -> on_done(State(..state, stack: rest), val)
   }
 }
 
-fn delegate_returned(s: State, settled: JsVal) -> #(Step, Agent) {
-  let rest = case s.stack {
+fn delegate_returned(state: State, settled: JsVal) -> #(Step, Agent) {
+  let rest = case state.stack {
     [_rec, ..rest] -> rest
     [] -> []
   }
-  delegate_result(s, settled, rest, fn(s, val) { step_of(return_into(s, val)) })
+  delegate_result(state, settled, rest, fn(state, val) {
+    step_of(return_into(state, val))
+  })
 }
 
-fn delegate_closed(s: State, settled: JsVal) -> #(Step, Agent) {
+fn delegate_closed(state: State, settled: JsVal) -> #(Step, Agent) {
   case rt_val.is_object(settled) {
-    True -> throw_type_into(s, missing_throw)
-    False -> throw_type_into(s, "Iterator result is not an object")
+    True -> throw_type_into(state, missing_throw)
+    False -> throw_type_into(state, "Iterator result is not an object")
   }
 }
 
@@ -783,44 +844,46 @@ fn find_return_handler(
 }
 
 // §27.5.3.4 return: run finallys, close iterators outwards
-fn return_into(s: State, value: JsVal) -> Outcome {
-  case find_return_handler(s.try_stack) {
-    None -> Finished(Ok(value), s)
+fn return_into(state: State, value: JsVal) -> Outcome {
+  case find_return_handler(state.try_stack) {
+    None -> Finished(Ok(value), state)
     Some(IterCloseHandler(stack_depth, rest)) ->
-      case state.truncate_stack(s.stack, stack_depth) {
+      case state.truncate_stack(state.stack, stack_depth) {
         [iter, ..base] -> {
-          let s = State(..s, try_stack: rest, stack: base)
-          case interpreter.closable_record(s, iter) {
-            Ok(#(iter, s)) ->
+          let state = State(..state, try_stack: rest, stack: base)
+          case interpreter.closable_record(state, iter) {
+            Ok(#(iter, state)) ->
               case classify(iter) {
-                KHandle(_) -> close_for_return(s, iter, value)
-                _ -> return_into(s, value)
+                KHandle(_) -> close_for_return(state, iter, value)
+                _ -> return_into(state, value)
               }
             Error(exit) -> exit_outcome(exit, "return_into")
           }
         }
-        [] -> return_into(State(..s, try_stack: rest, stack: []), value)
+        [] -> return_into(State(..state, try_stack: rest, stack: []), value)
       }
     Some(FinallyHandler(fin_pc, stack_depth, rest)) -> {
-      let base = state.truncate_stack(s.stack, stack_depth)
+      let base = state.truncate_stack(state.stack, stack_depth)
       let fin =
         State(
-          ..s,
+          ..state,
           try_stack: rest,
           stack: [mk_int(bytecode.return_retpc), value, ..base],
           pc: fin_pc,
         )
       case execute(fin) {
-        Finished(Ok(v), s) -> return_into(s, v)
+        Finished(Ok(v), state) -> return_into(state, v)
         other -> other
       }
     }
   }
 }
 
-fn close_for_return(s: State, record: JsVal, value: JsVal) -> Outcome {
-  case call.guarded_unit(s, rt_lang.t_iter_close(_, record, abrupt: False)) {
-    Ok(s) -> return_into(s, value)
+fn close_for_return(state: State, record: JsVal, value: JsVal) -> Outcome {
+  case
+    call.guarded_unit(state, rt_lang.t_iter_close(_, record, abrupt: False))
+  {
+    Ok(state) -> return_into(state, value)
     Error(exit) -> exit_outcome(exit, "close_for_return")
   }
 }
@@ -828,9 +891,10 @@ fn close_for_return(s: State, record: JsVal, value: JsVal) -> Outcome {
 // a step exit met while completing a return outside the loop
 fn exit_outcome(exit: StepExit, site: String) -> Outcome {
   case exit {
-    state.Threw(thrown, s) -> throw_into(s, thrown)
-    state.Returned(v, s) -> Finished(Ok(v), s)
-    state.Yielded(_, _, s) | state.Awaited(_, s) | state.VmFailed(_, s) ->
-      to_outcome(unexpected_exit(s, site))
+    state.Threw(thrown, state) -> throw_into(state, thrown)
+    state.Returned(v, state) -> Finished(Ok(v), state)
+    state.Yielded(_, _, state)
+    | state.Awaited(_, state)
+    | state.VmFailed(_, state) -> to_outcome(unexpected_exit(state, site))
   }
 }

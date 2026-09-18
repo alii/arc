@@ -1,4 +1,4 @@
-import arc/internal/temporal_calendar as tcal
+import arc/internal/temporal_calendar
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   CalendarNameAuto, Day, DayUnit, Nanosecond, apply_since_duration,
@@ -214,7 +214,7 @@ pub fn to_temporal_date_time(
   st: Agent,
   item: JsVal,
   options: JsVal,
-) -> #(#(IsoDate, IsoTime, tcal.Calendar), Agent) {
+) -> #(#(IsoDate, IsoTime, temporal_calendar.Calendar), Agent) {
   case classify(item) {
     KHandle(h) ->
       case temporal_data_of(st, item) {
@@ -266,7 +266,7 @@ pub fn date_time_from_bag(
   st: Agent,
   h: Handle,
   options: JsVal,
-) -> #(#(IsoDate, IsoTime, tcal.Calendar), Agent) {
+) -> #(#(IsoDate, IsoTime, temporal_calendar.Calendar), Agent) {
   let #(cal, st) = read_bag_calendar(st, h)
   let #(f, st) =
     read_date_time_fields(st, h, cal, read_offset: False, read_tz: False)
@@ -417,8 +417,8 @@ pub fn method(
     PlainDateTimeToZonedDateTime -> {
       let arg = helpers.arg_at(args, 0)
       case classify(arg) {
-        KStr(tz_str) -> {
-          let #(tz, st) = time_zone_from_string(st, tz_str)
+        KStr(tz_text) -> {
+          let #(tz, st) = time_zone_from_string(st, tz_text)
           let #(opts, st) = get_options_object(st, helpers.arg_at(args, 1))
           let #(dis, st) = get_disambiguation_option(st, opts)
           let ns = rt_val.or_throw(st, get_epoch_ns_for(tz, d, t, dis))
@@ -456,7 +456,7 @@ pub fn method(
 fn date_time_until_since(
   st: Agent,
   protos: TemporalProtos,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   a: #(IsoDate, IsoTime),
   b: #(IsoDate, IsoTime),
   args: List(JsVal),

@@ -1,6 +1,4 @@
-import arc/bytecode/key.{
-  type PropertyKey, Index, Named, Private, key_display_string,
-}
+import arc/bytecode/key.{type PropertyKey, Index, Named, Private}
 import arc/internal/ordered_entries
 import arc/rt/buffer
 import arc/rt/elements
@@ -263,8 +261,8 @@ fn inspect_plain_object(
       let entries =
         list.take(visible, max_items)
         |> list.map(fn(pair) {
-          let #(key, val) = pair
-          key_display_string(key)
+          let #(pk, val) = pair
+          key.display_string(pk)
           <> ": "
           <> inspect_at_depth(st, val, depth + 1, visited)
         })

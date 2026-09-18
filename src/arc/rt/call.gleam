@@ -290,8 +290,7 @@ fn not_a_function_raise(st: Agent, callee: JsVal) -> a {
   )
 }
 
-// rethrows; the fn seeded into jsops.call
-// called by name from arc_rt_call_ic_ffi
+// rethrows; seeds jsops.call; called by name from arc_rt_call_ic_ffi
 pub fn t_call(
   st: Agent,
   callee: JsVal,
@@ -750,8 +749,7 @@ fn alloc_args_array(st: Agent, items: List(JsVal)) -> #(Handle, Agent) {
   )
 }
 
-// birth props take seq 0,1,2; prop_seq starts past them
-// length is a jsval so bind can install +infinity
+// birth props take seq 0,1,2; length is a jsval so bind can pass +infinity
 pub fn fn_own_prop(value: JsVal, seq: Int) -> Property {
   DataProperty(
     value:,

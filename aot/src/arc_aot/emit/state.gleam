@@ -607,9 +607,7 @@ pub fn lookup_invariant_callee(
   option.from_result(dict.get(e.invariant_callees, callee))
 }
 
-// ics live in one per-agent map keyed by site, so modules loaded into the
-// same agent must not number their sites alike: each module counts up from a
-// base drawn from its name (2^30 bases, 2^24 sites each, all small ints)
+// one ic map per agent, so each module numbers sites from a name-derived base
 fn site_base(module_name: String) -> Int {
   phash2(module_name, 1_073_741_824) * 16_777_216
 }
@@ -842,7 +840,7 @@ pub fn find_continue_target(
 
 pub fn block_child_scopes(tree: ScopeTree, id: ScopeId) -> List(ScopeId) {
   use c <- list.filter(scope.child_scopes(tree, id))
-  !scope.is_function_kind(scope.get_scope(tree, c).kind)
+  !scope.is_function_kind(scope.get(tree, c).kind)
 }
 
 pub fn new_emitter(
@@ -902,7 +900,7 @@ pub fn lexical_is_boxed(
   info: scope.FunctionInfo,
   ref: lexical.LexicalRef,
 ) -> Bool {
-  lexical.lexical_refs_get(info.lexical_boxed, ref)
+  lexical.refs_get(info.lexical_boxed, ref)
   || { ref == lexical.RefThis && e.derived_ctor }
 }
 
@@ -911,9 +909,7 @@ pub fn resolve(e: Emitter, name: String) -> scope.Resolution {
 }
 
 pub fn arguments_is_implicit(e: Emitter) -> Bool {
-  case
-    dict.get(scope.get_scope(e.scope_tree, e.fn_scope).bindings, "arguments")
-  {
+  case dict.get(scope.get(e.scope_tree, e.fn_scope).bindings, "arguments") {
     Ok(scope.Binding(slot: fs, kind: scope.VarBinding, ..)) ->
       case resolve(e, "arguments") {
         scope.Plain(scope.Local(slot:, kind: scope.VarBinding, ..)) ->
@@ -994,7 +990,7 @@ fn scope_within(tree: ScopeTree, id: ScopeId, ancestor: ScopeId) -> Bool {
   case id == ancestor {
     True -> True
     False ->
-      case scope.get_scope(tree, id).parent {
+      case scope.get(tree, id).parent {
         Some(parent) -> scope_within(tree, parent, ancestor)
         None -> False
       }

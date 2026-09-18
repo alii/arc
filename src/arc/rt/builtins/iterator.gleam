@@ -1,8 +1,8 @@
 import arc/bytecode/error_kind.{RangeError, TypeError}
-import arc/bytecode/key.{Named, index_key}
-import arc/rt/abstract_ops as rt_abstract
+import arc/bytecode/key.{Named}
+import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/async as rt_async
-import arc/rt/buffer as rt_buffer
+import arc/rt/buffer
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{arg_at, first_arg_or_undefined}
 import arc/rt/builtins/iter_protocol.{
@@ -352,7 +352,7 @@ fn array_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
                 rt_obj.t_get_prop(
                   st,
                   mk_object(target),
-                  StringKey(index_key(index)),
+                  StringKey(key.index(index)),
                 )
               case kind {
                 ArrayIterValues -> #(elem, st)
@@ -396,7 +396,7 @@ fn array_source_length(st: Agent, target: Handle) -> #(Int, Agent) {
     SObject(kind: ArgumentsObj(length:, ..), ..) -> #(length, st)
     SObject(kind: TypedArrayObj(buffer:, elem_kind:, byte_offset:, length:), ..) ->
       case
-        rt_buffer.typed_array_iter_length(
+        buffer.typed_array_iter_length(
           st,
           buffer,
           elem_kind,
@@ -406,13 +406,11 @@ fn array_source_length(st: Agent, target: Handle) -> #(Int, Agent) {
       {
         Ok(len) -> #(len, st)
         Error(err) ->
-          rt_val.t_throw_type_error(
-            st,
-            rt_buffer.view_witness_error_message(err),
-          )
+          rt_val.t_throw_type_error(st, buffer.view_witness_error_message(err))
       }
     _ -> {
-      let #(len, st) = rt_abstract.length_of_array_like(st, mk_object(target))
+      let #(len, st) =
+        rt_abstract_ops.length_of_array_like(st, mk_object(target))
       case len > limits.max_iteration {
         True -> rt_val.t_throw_range_error(st, iteration_budget_msg)
         False -> #(len, st)

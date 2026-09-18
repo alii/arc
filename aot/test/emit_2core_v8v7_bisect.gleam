@@ -1,11 +1,11 @@
-import emit_2core_harness as harness
+import emit_2core_harness
 import gleam/io
 import gleam/string
 
 fn t(name: String, source: String) {
   let src = source <> ";console.log(\"ok\")"
-  case harness.run_compiled(src) {
-    harness.DiffRun(result: Ok(_), stdout:) ->
+  case emit_2core_harness.run_compiled(src) {
+    emit_2core_harness.DiffRun(result: Ok(_), stdout:) ->
       case stdout {
         <<"ok\n":utf8>> -> io.println("  pass  " <> name)
         _ ->
@@ -13,7 +13,7 @@ fn t(name: String, source: String) {
             "  BAD   " <> name <> " → stdout=" <> string.inspect(stdout),
           )
       }
-    harness.DiffRun(result: Error(e), stdout:) ->
+    emit_2core_harness.DiffRun(result: Error(e), stdout:) ->
       io.println(
         "  FAIL  "
         <> name

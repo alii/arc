@@ -1,10 +1,10 @@
 import arc/bytecode/key.{Named}
-import arc/internal/digits.{take_digits}
+import arc/internal/digits
 import arc/internal/gregorian.{civil_from_days, days_from_year}
 import arc/internal/host_time.{
   type TimeZone, zone_offset_at_local_ms, zone_offset_at_utc_ms,
 }
-import arc/internal/int_math.{floor_div, floor_mod as math_mod}
+import arc/internal/int_math.{floor_div, floor_mod}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
@@ -419,13 +419,13 @@ fn get_date_fields(tv: Int, time_ref: TimeRef) -> DateFields {
     UtcTime -> 0
   }
   let d = tv + tz * 60_000
-  let h = math_mod(d, ms_per_day)
+  let h = floor_mod(d, ms_per_day)
   let days = { d - h } / ms_per_day
-  let ms = math_mod(h, 1000)
+  let ms = floor_mod(h, 1000)
   let h = { h - ms } / 1000
-  let seconds = math_mod(h, 60)
+  let seconds = floor_mod(h, 60)
   let h = { h - seconds } / 60
-  let minutes = math_mod(h, 60)
+  let minutes = floor_mod(h, 60)
   let hours = { h - minutes } / 60
   let weekday = gregorian.weekday_from_days(days)
   let #(year, month1, date) = civil_from_days(days)
@@ -454,7 +454,7 @@ fn make_date(
   time_ref: TimeRef,
 ) -> JsNum {
   let ym = y + floor_div(mon, 12)
-  let mn = math_mod(mon, 12)
+  let mn = floor_mod(mon, 12)
   // years outside this can never be in range
   case ym < -285_426 || ym > 285_426 {
     True -> JNan
@@ -1025,39 +1025,39 @@ fn validate_iso(
 
 fn parse_year(s: String) -> Option(#(Int, String)) {
   case s {
-    "+" <> rest -> take_digits(rest, 6)
+    "+" <> rest -> digits.take(rest, 6)
     // -000000 is invalid, year zero is positive
     "-" <> rest ->
-      take_digits(rest, 6)
+      digits.take(rest, 6)
       |> option.then(fn(p) {
         case p.0 {
           0 -> None
           y -> Some(#(0 - y, p.1))
         }
       })
-    _ -> take_digits(s, 4)
+    _ -> digits.take(s, 4)
   }
 }
 
 fn parse_dash_int(s: String, n: Int) -> Option(#(Int, String)) {
   case s {
-    "-" <> rest -> take_digits(rest, n)
+    "-" <> rest -> digits.take(rest, n)
     _ -> None
   }
 }
 
 fn parse_time(s: String) -> Option(#(IsoTime, String)) {
-  use #(h, rest) <- option.then(take_digits(s, 2))
+  use #(h, rest) <- option.then(digits.take(s, 2))
   use #(mi, rest) <- option.then(case rest {
-    ":" <> r -> take_digits(r, 2)
+    ":" <> r -> digits.take(r, 2)
     _ -> None
   })
   use #(sec, rest) <- option.then(case rest {
-    ":" <> r -> take_digits(r, 2)
+    ":" <> r -> digits.take(r, 2)
     _ -> Some(#(0, rest))
   })
   use #(ms, rest) <- option.then(case rest {
-    "." <> r -> take_digits(r, 3)
+    "." <> r -> digits.take(r, 3)
     _ -> Some(#(0, rest))
   })
   Some(#(IsoTime(h, mi, sec, ms), rest))
@@ -1090,10 +1090,10 @@ fn parse_zone(s: String, has_time has_time: Bool) -> Option(#(Zone, String)) {
 }
 
 fn parse_hhmm(s: String) -> Option(#(Int, String)) {
-  use #(h, rest) <- option.then(take_digits(s, 2))
+  use #(h, rest) <- option.then(digits.take(s, 2))
   use #(m, rest) <- option.then(case rest {
-    ":" <> r -> take_digits(r, 2)
-    _ -> take_digits(rest, 2)
+    ":" <> r -> digits.take(r, 2)
+    _ -> digits.take(rest, 2)
   })
   case h <= 23 && m <= 59 {
     True -> Some(#(h * 60 + m, rest))

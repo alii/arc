@@ -1256,7 +1256,7 @@ fn find_declaring_scope(
   scope_id: ScopeId,
   name: String,
 ) -> Option(Scope) {
-  let scope = get_scope(tree, scope_id)
+  let scope = get(tree, scope_id)
   case dict.has_key(scope.bindings, name), scope.parent {
     True, _ -> Some(scope)
     False, Some(parent) -> find_declaring_scope(tree, parent, name)
@@ -1295,7 +1295,7 @@ fn lookup_crossing(
   name: String,
   crossed: List(SlotRef),
 ) -> Resolution {
-  let scope = get_scope(tree, scope_id)
+  let scope = get(tree, scope_id)
   case dict.get(scope.bindings, name) {
     Ok(Binding(slot:, kind:, boxed:, declared_kind:)) -> {
       // §9.1.2.1 inherited withs are probed before the closure env
@@ -1346,7 +1346,7 @@ pub fn binding_ref(b: Binding) -> SlotRef {
 
 // owned slot first, else the capture slot; None at a script or module root
 pub fn lexical_slot_in(info: FunctionInfo, ref: LexicalRef) -> Option(Int) {
-  case lexical.lexical_slot(info.lexical, ref) {
+  case lexical.slot_of(info.lexical, ref) {
     Some(slot) -> Some(slot)
     None -> dict.get(info.lexical_captures, ref) |> option.from_result
   }
@@ -1359,7 +1359,7 @@ pub fn lexical_capture_parent_slots(
 ) -> List(Int) {
   use ref <- list.filter_map(lexical.all_lexical_refs)
   use <- bool.guard(!dict.has_key(child.lexical_captures, ref), Error(Nil))
-  case lexical.lexical_slot(parent.lexical, ref) {
+  case lexical.slot_of(parent.lexical, ref) {
     Some(parent_slot) -> Ok(parent_slot)
     None ->
       panic as "scope analyzer recorded a lexical capture the parent has no slot for"
@@ -1398,7 +1398,7 @@ fn fold_enclosing_withs(
   case scope_id {
     None -> acc
     Some(id) -> {
-      let scope = get_scope(tree, id)
+      let scope = get(tree, id)
       let acc = case scope.kind {
         With(holder:) -> f(acc, holder)
         _ -> acc
@@ -1429,9 +1429,9 @@ pub fn function_info(tree: ScopeTree, scope_id: ScopeId) -> FunctionInfo {
   info
 }
 
-pub fn get_scope(tree: ScopeTree, scope_id: ScopeId) -> Scope {
+pub fn get(tree: ScopeTree, scope_id: ScopeId) -> Scope {
   let assert Ok(scope) = dict.get(tree.scopes, scope_id)
-    as "scope.get_scope: unknown ScopeId"
+    as "scope.get: unknown ScopeId"
   scope
 }
 
@@ -1453,7 +1453,7 @@ fn collect_child_fns(
   acc: List(ScopeId),
 ) -> List(ScopeId) {
   use acc, child_id <- list.fold(child_scopes(tree, scope_id), acc)
-  let child = get_scope(tree, child_id)
+  let child = get(tree, child_id)
   case is_function_kind(child.kind) {
     True -> [child_id, ..acc]
     False -> collect_child_fns(tree, child_id, acc)
@@ -1634,7 +1634,7 @@ fn collect_own_facts(
     list.fold(children, own_refs, fn(refs, child_id) {
       let child_own = own_facts(acc, child_id)
       case child_own.is_arrow {
-        True -> lexical.lexical_refs_or(refs, child_own.lexical_refs)
+        True -> lexical.refs_or(refs, child_own.lexical_refs)
         False -> refs
       }
     })
@@ -1643,7 +1643,7 @@ fn collect_own_facts(
     fn_id,
     OwnFacts(
       is_arrow: function_info(tree, fn_id).is_arrow,
-      is_strict: get_scope(tree, fn_id).is_strict,
+      is_strict: get(tree, fn_id).is_strict,
       lexical_refs:,
       free_own: dict.get(free_by_fn, fn_id) |> result.unwrap(set.new()),
     ),
@@ -1663,7 +1663,7 @@ fn collect_subtree_facts(
       collect_subtree_facts(tree, own_by_fn, scopes_by_fn, child_id, acc)
     })
   let own_scopes =
-    fn_member_scopes(scopes_by_fn, fn_id) |> list.map(get_scope(tree, _))
+    fn_member_scopes(scopes_by_fn, fn_id) |> list.map(get(tree, _))
   let own_eval = list.any(own_scopes, fn(s) { s.contains_direct_eval })
   let eval_in_subtree =
     own_eval
@@ -1704,7 +1704,7 @@ fn fold_child_functions(
 ) -> a {
   let #(acc, _memo) = {
     use #(acc, memo), child_id <- list.fold(children, #(acc, dict.new()))
-    let site = get_scope(tree, child_id).parent
+    let site = get(tree, child_id).parent
     let #(value, memo) = case dict.get(memo, site) {
       Ok(value) -> #(value, memo)
       Error(Nil) -> {
@@ -1845,7 +1845,7 @@ fn derive_lexical_layout(
   let own = own_facts(analysis.own_by_fn, fn_id)
   let subtree = subtree_facts(analysis.subtree_by_fn, fn_id)
   let is_root = fn_id == root_scope_id
-  let kind = get_scope(tree, fn_id).kind
+  let kind = get(tree, fn_id).kind
   let seeded = function_info(tree, fn_id)
   let seeded_root_owns_lexical = case seeded.lexical {
     lexical.OwnedLexicalSlots(_) -> True
@@ -1857,7 +1857,7 @@ fn derive_lexical_layout(
       let seeded_captures = seeded.lexical_captures
       let available = case script_root_owns {
         True -> lexical.every_lexical_ref
-        False -> lexical.lexical_refs_present(seeded_captures)
+        False -> lexical.refs_present(seeded_captures)
       }
       #(seeded_captures, available)
     }
@@ -1867,11 +1867,10 @@ fn derive_lexical_layout(
       let slot_by_ref = {
         use ref <- lexical.number_refs(from: name_capture_count)
         let needed =
-          subtree.eval_in_subtree
-          || lexical.lexical_refs_get(own.lexical_refs, ref)
-        needed && lexical.lexical_refs_get(parent.lexical_available, ref)
+          subtree.eval_in_subtree || lexical.refs_get(own.lexical_refs, ref)
+        needed && lexical.refs_get(parent.lexical_available, ref)
       }
-      #(slot_by_ref, lexical.lexical_refs_present(slot_by_ref))
+      #(slot_by_ref, lexical.refs_present(slot_by_ref))
     }
   }
 
@@ -1889,7 +1888,7 @@ fn derive_lexical_layout(
         dict.get(lexical_captures, ref) |> option.from_result
       }
       #(
-        lexical.captured_lexical_slots(
+        lexical.captured_slots(
           this: captured(RefThis),
           active_func: captured(RefActiveFunc),
           home_object: captured(RefHomeObject),
@@ -1917,8 +1916,8 @@ fn derive_lexical_layout(
       lexical.LexicalRefs(..lexical.no_lexical_refs, this: this_captured)
     }
     False, False ->
-      lexical.lexical_refs_and(
-        lexical.lexical_refs_present(lexical_captures),
+      lexical.refs_and(
+        lexical.refs_present(lexical_captures),
         parent.lexical_boxed,
       )
   }
@@ -1942,7 +1941,7 @@ fn derive_vars_to_box(
   let children = child_function_scopes(tree, fn_id)
   let own_scopes =
     fn_member_scopes(analysis.scopes_by_fn, fn_id)
-    |> list.map(get_scope(tree, _))
+    |> list.map(get(tree, _))
   let declared = declared_in(own_scopes)
   let forced_box =
     case fn_id == root_scope_id {
@@ -2072,8 +2071,7 @@ fn insert_captures(
         })
       dict.insert(scopes, sid, Scope(..scope, bindings:))
     })
-  // a capture also declared here is shadowed by the own binding
-  // names_shadowed also counts the var-boundary body block
+  // an own binding shadows a capture; counts the var-boundary body block too
   let scope_bindings = fn(sid) { scopes_get_or_panic(scopes, sid).bindings }
   let root_bindings = scope_bindings(fn_id)
   let root_shadowed = fn(name) { dict.has_key(root_bindings, name) }
@@ -2250,12 +2248,7 @@ fn fn_with_stack_free(
   fn_id: ScopeId,
   declared: Set(String),
 ) -> Set(String) {
-  fold_enclosing_withs(
-    tree,
-    get_scope(tree, fn_id).parent,
-    set.new(),
-    set.insert,
-  )
+  fold_enclosing_withs(tree, get(tree, fn_id).parent, set.new(), set.insert)
   |> set.difference(declared)
 }
 
@@ -2263,10 +2256,10 @@ fn visible_at_creation(
   tree: ScopeTree,
   child_fn_id: ScopeId,
 ) -> Dict(String, Binding) {
-  case get_scope(tree, child_fn_id).parent {
+  case get(tree, child_fn_id).parent {
     None -> dict.new()
     Some(parent_id) -> {
-      let parent_fn = get_scope(tree, parent_id).function_scope
+      let parent_fn = get(tree, parent_id).function_scope
       collect_visible(tree, parent_id, parent_fn, dict.new())
     }
   }
@@ -2278,7 +2271,7 @@ fn collect_visible(
   stop_at_fn: ScopeId,
   acc: Dict(String, Binding),
 ) -> Dict(String, Binding) {
-  let scope = get_scope(tree, scope_id)
+  let scope = get(tree, scope_id)
   let acc =
     dict.fold(scope.bindings, acc, fn(d, name, b) {
       case dict.has_key(d, name) {
@@ -2289,7 +2282,7 @@ fn collect_visible(
   case scope_id == stop_at_fn, scope.parent {
     True, _ | False, None -> acc
     False, Some(p) ->
-      case get_scope(tree, p).function_scope == stop_at_fn {
+      case get(tree, p).function_scope == stop_at_fn {
         True -> collect_visible(tree, p, stop_at_fn, acc)
         False -> acc
       }

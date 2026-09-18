@@ -1,7 +1,7 @@
-//// spec abstract operations shared by rt and builtins
+// spec abstract operations shared by rt and builtins
 
-import arc/bytecode/key.{Named, index_key}
-import arc/rt/elements as rt_elements
+import arc/bytecode/key.{Named}
+import arc/rt/elements
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -14,9 +14,9 @@ import gleam/list
 
 // §7.3.2 get for an index, own dense elements first
 pub fn get_index(st: Agent, this: JsVal, idx: Int) -> #(JsVal, Agent) {
-  case rt_elements.own_element(st, this, idx) {
-    rt_elements.Hit(v) -> #(v, st)
-    rt_elements.Miss -> rt_obj.t_get_prop(st, this, StringKey(index_key(idx)))
+  case elements.own_element(st, this, idx) {
+    elements.Hit(v) -> #(v, st)
+    elements.Miss -> rt_obj.t_get_prop(st, this, StringKey(key.index(idx)))
   }
 }
 

@@ -44,7 +44,7 @@ pub type Resolved {
   )
 }
 
-/// runs before label resolution so fusion can't break jumps
+// runs before label resolution so fusion can't break jumps
 fn peephole(
   code: List(IrOp),
   consts: tuple_array.TupleArray(JsVal),
@@ -332,7 +332,7 @@ fn peephole(
         IrFinal(opcode.BinOpLocalField(
           opcode.classify(kind),
           i,
-          key.canonical_key(name),
+          key.canonical(name),
         )),
         ..acc
       ])
@@ -344,7 +344,7 @@ fn peephole(
       IrFinal(opcode.CallMethod(1)),
       ..rest
     ] ->
-      case key.canonical_key(name) {
+      case key.canonical(name) {
         key.Named(_) as k ->
           peephole(rest, consts, [IrFinal(opcode.GetFieldCall1(k, a)), ..acc])
         k ->
@@ -368,7 +368,7 @@ fn peephole(
       IrFinal(opcode.CallMethod(0)),
       ..rest
     ] ->
-      case key.canonical_key(name) {
+      case key.canonical(name) {
         key.Named(_) as k ->
           peephole(rest, consts, [
             IrFinal(opcode.GetLocalFieldCall(i, k)),
@@ -382,7 +382,7 @@ fn peephole(
           ])
       }
     [IrGetFieldKeep(name), IrFinal(opcode.CallMethod(0)), ..rest] ->
-      case key.canonical_key(name) {
+      case key.canonical(name) {
         key.Named(_) as k ->
           peephole(rest, consts, [IrFinal(opcode.GetFieldCall(k)), ..acc])
         k ->
@@ -394,12 +394,12 @@ fn peephole(
       }
     [IrFinal(opcode.GetLocal(i)), IrGetField(name), ..rest] ->
       peephole(rest, consts, [
-        IrFinal(opcode.GetLocalField(i, key.canonical_key(name))),
+        IrFinal(opcode.GetLocalField(i, key.canonical(name))),
         ..acc
       ])
     [IrFinal(opcode.GetLocal(i)), IrGetFieldKeep(name), ..rest] ->
       peephole(rest, consts, [
-        IrFinal(opcode.GetLocalFieldKeep(i, key.canonical_key(name))),
+        IrFinal(opcode.GetLocalFieldKeep(i, key.canonical(name))),
         ..acc
       ])
     [
@@ -409,7 +409,7 @@ fn peephole(
       IrFinal(opcode.Pop),
       ..rest
     ] ->
-      case key.canonical_key(name) {
+      case key.canonical(name) {
         key.Named(_) as k ->
           peephole(rest, consts, [
             IrFinal(opcode.PutLocalLocalField(o, v, k)),
@@ -430,7 +430,7 @@ fn peephole(
       IrFinal(opcode.Pop),
       ..rest
     ] ->
-      case key.canonical_key(name) {
+      case key.canonical(name) {
         key.Named(_) as k ->
           peephole(rest, consts, [
             IrFinal(opcode.PutLocalConstField(o, c, k)),
@@ -446,7 +446,7 @@ fn peephole(
       }
     [IrPutField(name), IrFinal(opcode.Pop), ..rest] ->
       peephole(rest, consts, [
-        IrFinal(opcode.PutFieldPop(key.canonical_key(name))),
+        IrFinal(opcode.PutFieldPop(key.canonical(name))),
         ..acc
       ])
 
@@ -564,8 +564,7 @@ fn skip_markers(code: List(IrOp)) -> List(IrOp) {
   }
 }
 
-// a label jumped to from below heads a loop; it gets a safepoint unless
-// nothing between it and the jump can allocate a cell
+// a backward jump target gets a safepoint unless nothing before it allocates
 fn add_safepoints(code: List(IrOp)) -> List(IrOp) {
   let heads = loop_heads(code, 0, dict.new(), dict.new())
   case dict.is_empty(heads) {
@@ -887,7 +886,7 @@ fn resolve_try_kind(
   }
 }
 
-/// appends a sentinel return so fetch stays unchecked
+// appends a sentinel return so fetch stays unchecked
 fn resolve_ops(
   code: List(IrOp),
   labels: Dict(LabelId, Pc),
@@ -934,14 +933,14 @@ fn resolve_op(op: IrOp, labels: Dict(LabelId, Pc)) -> Op {
     IrWithPutRefValue(name, l) ->
       opcode.WithPutRefValue(name, label_pc(labels, l))
 
-    IrGetField(name) -> opcode.GetField(key.canonical_key(name))
-    IrGetFieldKeep(name) -> opcode.GetFieldKeep(key.canonical_key(name))
-    IrPutField(name) -> opcode.PutField(key.canonical_key(name))
-    IrDeleteField(name) -> opcode.DeleteField(key.canonical_key(name))
-    IrDefineField(name) -> opcode.DefineField(key.canonical_key(name))
-    IrDefineMethod(name) -> opcode.DefineMethod(key.canonical_key(name))
+    IrGetField(name) -> opcode.GetField(key.canonical(name))
+    IrGetFieldKeep(name) -> opcode.GetFieldKeep(key.canonical(name))
+    IrPutField(name) -> opcode.PutField(key.canonical(name))
+    IrDeleteField(name) -> opcode.DeleteField(key.canonical(name))
+    IrDefineField(name) -> opcode.DefineField(key.canonical(name))
+    IrDefineMethod(name) -> opcode.DefineMethod(key.canonical(name))
     IrDefineAccessor(name, kind, enumerable) ->
-      opcode.DefineAccessor(key.canonical_key(name), kind, enumerable)
+      opcode.DefineAccessor(key.canonical(name), kind, enumerable)
 
     IrBinOp(kind) -> opcode.bin_op(kind)
 

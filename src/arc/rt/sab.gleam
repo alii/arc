@@ -7,7 +7,7 @@ import arc/rt/types.{
 import gleam/option.{type Option, None, Some}
 
 pub fn share(st: Agent, buffer_h: Handle) -> #(Option(SabOwner), Agent) {
-  case buffer.buffer_storage(st, buffer_h) {
+  case buffer.storage(st, buffer_h) {
     Some(Shared(block: OwnerBlock(owner:, ..), ..)) -> #(Some(owner), st)
     Some(Shared(block: LocalBlock(bytes:), max_byte_length:)) -> {
       let owner = spawn_owner(bytes)

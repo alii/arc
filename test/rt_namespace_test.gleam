@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named, canonical_key}
+import arc/bytecode/key.{Named}
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
@@ -18,7 +18,7 @@ fn agent() -> Agent {
 }
 
 fn key(name: String) {
-  StringKey(canonical_key(name))
+  StringKey(key.canonical(name))
 }
 
 fn throws(st: Agent, body: fn(Agent) -> #(a, Agent)) -> String {

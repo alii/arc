@@ -1,4 +1,4 @@
-import arc/rt/js_string
+import arc/rt/utf8
 import gleam/bool
 import gleam/result
 import gleam/string
@@ -22,7 +22,7 @@ pub const max_prototype_depth = 1000
 pub fn repeat(s: String, count: Int) -> Result(String, Nil) {
   case string.byte_size(s) * count > max_string_bytes {
     True -> Error(Nil)
-    False -> Ok(js_string.repeat(s, count))
+    False -> Ok(utf8.repeat(s, count))
   }
 }
 
@@ -37,11 +37,11 @@ pub fn pad_end(s: String, to: Int, with: String) -> Result(String, Nil) {
 }
 
 fn pad_filler(s: String, to: Int, with: String) -> Result(String, Nil) {
-  let needed = to - js_string.length(s)
+  let needed = to - utf8.length(s)
   use <- bool.guard(needed <= 0 || with == "", Ok(""))
-  let with_len = js_string.length(with)
+  let with_len = utf8.length(with)
   let copies = needed / with_len
-  let tail = js_string.slice(with, 0, needed % with_len)
+  let tail = utf8.slice(with, 0, needed % with_len)
   let bytes =
     string.byte_size(s)
     + copies
@@ -49,7 +49,7 @@ fn pad_filler(s: String, to: Int, with: String) -> Result(String, Nil) {
     + string.byte_size(tail)
   case bytes > max_string_bytes {
     True -> Error(Nil)
-    False -> Ok(js_string.repeat(with, copies) <> tail)
+    False -> Ok(utf8.repeat(with, copies) <> tail)
   }
 }
 

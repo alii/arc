@@ -4,7 +4,6 @@ import arc/rt/buffer
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
-import arc/rt/js_string
 import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -14,6 +13,7 @@ import arc/rt/types.{
   KUndef, NumKind, SObject, StringKey, TypedArrayObj, Uint8Kind, classify,
   mk_int, mk_object, mk_string, mk_undefined,
 }
+import arc/rt/utf8
 import arc/rt/val as rt_val
 import gleam/bit_array
 import gleam/bool
@@ -98,7 +98,7 @@ fn validate_u8(st: Agent, this: JsVal) -> Nil {
 
 fn u8_require_mutable(st: Agent, this: JsVal) -> Nil {
   let immutable = case uint8_view(st, this) {
-    Some(Uint8View(buffer:, ..)) -> buffer.buffer_is_immutable(st, buffer)
+    Some(Uint8View(buffer:, ..)) -> buffer.is_immutable(st, buffer)
     None -> False
   }
   case immutable {
@@ -119,7 +119,7 @@ type Uint8LiveView {
 fn u8_live_view(st: Agent, this: JsVal) -> Uint8LiveView {
   case uint8_view(st, this) {
     Some(Uint8View(buffer:, byte_offset:, length:)) ->
-      case buffer.buffer_bytes(st, buffer) {
+      case buffer.bytes(st, buffer) {
         None ->
           rt_val.t_throw_type_error(
             st,
@@ -620,7 +620,7 @@ fn b64_value(c: Int, alphabet: Base64Alphabet) -> Option(Int) {
 
 fn from_hex(s: String, max_len: Int) -> DecodeResult {
   // odd check is on utf-16 length, not bytes
-  case js_string.length(s) % 2 != 0 {
+  case utf8.length(s) % 2 != 0 {
     True -> DecodeFailed(<<>>)
     False -> from_hex_loop(bit_array.from_string(s), 0, [], 0, max_len)
   }

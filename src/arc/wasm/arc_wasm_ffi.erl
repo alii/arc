@@ -49,8 +49,7 @@ handle_call(Promise, Src0, Eng) ->
             reject_quietly(Promise, fun() -> format_crash(C, R, St) end)
     end.
 
-%% fresh process per run so garbage never piles up here
-%% fibonacci growth measured 2-3x faster; never add min_heap_size
+%% fresh process per run so garbage never piles up; never add min_heap_size
 in_worker(Eval) ->
     Self = self(),
     Ref = make_ref(),

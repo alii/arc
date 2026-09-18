@@ -30,8 +30,7 @@ push_prop_refs({?DATAPROPERTY_TAG, V, _, _, _, _}, Acc) -> push_refs(V, Acc);
 push_prop_refs({?ACCESSORPROPERTY_TAG, G, S, _, _, _}, Acc) -> push_refs(G, push_refs(S, Acc));
 push_prop_refs(P, Acc) -> push_refs(P, Acc).
 
-%% refs in the parts of New that differ from Old; what Old already held can
-%% only name cells at least as old as Old itself, and =:= is cheap on shared parts
+%% refs in the parts of New that differ from Old; =:= is cheap on shared parts
 diff_refs(Old, New, Acc) ->
     case Old =:= New of
         true -> Acc;

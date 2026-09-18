@@ -1,6 +1,6 @@
 // module registry caches live as private-keyed props on the global
 
-import arc/bytecode/key.{type PropertyKey, Named, private_key}
+import arc/bytecode/key.{type PropertyKey, Named}
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -11,27 +11,27 @@ import gleam/dict
 import gleam/option.{type Option, None, Some}
 
 fn status_property() -> PropertyKey {
-  private_key("arc_module_status")
+  key.private("arc_module_status")
 }
 
 fn error_cache_property() -> PropertyKey {
-  private_key("arc_module_errors")
+  key.private("arc_module_errors")
 }
 
 fn namespace_cache_property() -> PropertyKey {
-  private_key("arc_module_cache")
+  key.private("arc_module_cache")
 }
 
 fn deferred_cache_property() -> PropertyKey {
-  private_key("arc_module_deferred")
+  key.private("arc_module_deferred")
 }
 
 fn pending_cache_property() -> PropertyKey {
-  private_key("arc_module_pending")
+  key.private("arc_module_pending")
 }
 
 fn referrer_property() -> PropertyKey {
-  private_key("arc_module_referrer")
+  key.private("arc_module_referrer")
 }
 
 const referrer_key = "active"

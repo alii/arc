@@ -1,7 +1,7 @@
 import arc/bytecode/error_kind.{type JsError}
 import arc/internal/gregorian.{days_in_month}
 import arc/internal/int_math.{trunc_div, trunc_mod}
-import arc/internal/temporal_calendar as tcal
+import arc/internal/temporal_calendar
 import arc/rt/builtins/temporal_common.{
   type RoundingMode, type Unit, Compatible, Day, Hour, Microsecond, Millisecond,
   Minute, Month, Nanosecond, Second, Week, Year, balance_time_ns,
@@ -33,13 +33,13 @@ pub fn compare_iso_date_time(
 }
 
 pub fn calendar_date_until(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   d1: IsoDate,
   d2: IsoDate,
   largest: Unit,
 ) -> #(Int, Int, Int, Int) {
   case cal {
-    tcal.Iso8601 -> iso_date_until(d1, d2, largest)
+    temporal_calendar.Iso8601 -> iso_date_until(d1, d2, largest)
     _ ->
       case largest {
         Year | Month -> {
@@ -58,7 +58,7 @@ pub fn calendar_date_until(
 }
 
 pub fn difference_calendar_date(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   d1: IsoDate,
   d2: IsoDate,
   largest: Unit,
@@ -144,7 +144,7 @@ pub fn add_calendar_units(d: IsoDate, unit: Unit, n: Int) -> IsoDate {
   }
 }
 
-// step the end date toward the start when the time remainder has the other sign
+// step the end date back when the time remainder has the other sign
 pub fn adjust_date_for_time_sign(
   sign: Int,
   date: IsoDate,
@@ -328,7 +328,7 @@ pub fn round_relative_date_duration(
 }
 
 pub fn diff_date_time_core(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   a: #(IsoDate, IsoTime),
   b: #(IsoDate, IsoTime),
   largest: Unit,
@@ -404,7 +404,7 @@ pub fn diff_date_time_core(
 }
 
 pub fn zoned_diff_round_time(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   tz: TimeZone,
   a_ns: Int,
   b_ns: Int,

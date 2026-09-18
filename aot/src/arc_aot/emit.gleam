@@ -44,12 +44,12 @@ fn init_emitter(
   let dispatch =
     state.EmitDispatch(
       emit_expr: expr.emit_expr,
-      emit_expr_named: expr.emit_expr_named,
+      emit_expr_named: expr.emit_named,
       emit_stmts: stmt.emit_stmts,
       emit_destructure: destructure.emit_pattern,
       emit_function: func.emit_function,
       emit_function_callable: func.emit_function_callable,
-      emit_class: class.emit_class,
+      emit_class: class.emit,
       emit_coroutine_fn: async.emit_coroutine_fn,
     )
   state.new_emitter(tree, scope.root_scope_id, strict, module_name, dispatch)
@@ -59,7 +59,7 @@ fn root_binding_prologue(
   e: state.Emitter,
 ) -> #(fn(ir.Expr) -> ir.Expr, state.Emitter) {
   let bindings =
-    dict.to_list(scope.get_scope(e.scope_tree, scope.root_scope_id).bindings)
+    dict.to_list(scope.get(e.scope_tree, scope.root_scope_id).bindings)
     |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
   let #(wrap, e) = root_lexical_prologue(e)
   list.fold(bindings, #(wrap, e), fn(acc, entry) {
@@ -135,7 +135,7 @@ fn root_lexical_prologue(
     lexical.OwnedLexicalSlots(base:) ->
       list.fold(lexical.all_lexical_refs, #(id, e), fn(acc, ref) {
         let #(wrap, e) = acc
-        let slot = base + lexical.lexical_ref_offset(ref)
+        let slot = base + lexical.ref_offset(ref)
         let sv = state.slot_base_name(e, slot)
         let e = state.set_slot_var(e, slot, sv)
         let init = case ref {

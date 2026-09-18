@@ -1,4 +1,4 @@
-//// receiver and argument coercion with builtin error messages
+// receiver and argument coercion with builtin error messages
 
 import arc/rt/store as rt_store
 import arc/rt/types.{

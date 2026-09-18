@@ -223,7 +223,7 @@ type ViewRecord {
 
 fn require_data_view(st: Agent, this: JsVal) -> ViewRecord {
   case helpers.brand_of(st, this, view_record_of) {
-    Some(#(view, _ref)) -> view
+    Some(#(view, _h)) -> view
     None ->
       rt_val.t_throw_type_error(
         st,
@@ -241,7 +241,7 @@ fn view_record_of(kind: ObjKind) -> Option(ViewRecord) {
 }
 
 fn require_mutable_buffer(st: Agent, buf: Handle) -> Nil {
-  case buffer.buffer_is_immutable(st, buf) {
+  case buffer.is_immutable(st, buf) {
     True ->
       rt_val.t_throw_type_error(
         st,
@@ -286,7 +286,7 @@ fn checked_view_bytes(
 fn as_array_buffer(st: Agent, val: JsVal) -> Option(Handle) {
   case classify(val) {
     KHandle(h) ->
-      case buffer.buffer_storage(st, h) {
+      case buffer.storage(st, h) {
         Some(_) -> Some(h)
         None -> None
       }
@@ -295,7 +295,7 @@ fn as_array_buffer(st: Agent, val: JsVal) -> Option(Handle) {
 }
 
 fn live_buffer_info(st: Agent, buf: Handle) -> #(Int, Bool) {
-  case buffer.buffer_storage(st, buf) {
+  case buffer.storage(st, buf) {
     Some(Detached(..)) ->
       rt_val.t_throw_type_error(
         st,
@@ -311,7 +311,7 @@ fn live_buffer_info(st: Agent, buf: Handle) -> #(Int, Bool) {
 }
 
 fn buffer_data(st: Agent, buf: Handle) -> BitArray {
-  case buffer.buffer_bytes(st, buf) {
+  case buffer.bytes(st, buf) {
     Some(bits) -> bits
     None ->
       rt_val.t_throw_type_error(

@@ -1,5 +1,5 @@
 import arc/bytecode/key.{Named}
-import arc/rt/abstract_ops as rt_abstract
+import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
@@ -142,7 +142,7 @@ pub fn dispatch(
       let #(this_arg, arg_array) = helpers.two_args_or_undefined(args)
       let #(call_args, st) = case classify(arg_array) {
         KUndef | KNull -> #([], st)
-        _ -> rt_abstract.create_list_from_array_like(st, arg_array)
+        _ -> rt_abstract_ops.create_list_from_array_like(st, arg_array)
       }
       rt_call.t_call(st, this, this_arg, call_args)
     }
@@ -209,9 +209,7 @@ pub type DynamicFunctionKind {
   DynamicAsyncGenerator
 }
 
-// §20.2.1.1.1 createdynamicfunction
-// anonymous expression: the body must not see a self name
-// newline before ) so a param line comment can't eat it
+// §20.2.1.1.1; no self name, and a newline before ) guards line comments
 pub fn create_dynamic_function(
   st: Agent,
   realm: Int,

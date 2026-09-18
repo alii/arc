@@ -3,7 +3,7 @@ import arc/internal/gregorian.{
   days_in_month, days_in_year as days_in_iso_year, is_leap_year,
 }
 import arc/internal/int_math.{trunc_div, trunc_mod}
-import arc/internal/temporal_calendar as tcal
+import arc/internal/temporal_calendar
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   type CalendarNameMode, type RoundingMode, CalendarNameAuto, Month, Year,
@@ -18,7 +18,7 @@ import arc/rt/builtins/temporal_fields.{
   type DateFields, DateFields, add_sub_args, balance_year_month,
   calendar_date_add, calendar_years_months_until, check_ym_limits,
   compare_iso_date, era_field, era_year_field, merge_year_month_code,
-  month_code_str, parse_year_month_string, read_bag_calendar,
+  month_code_text, parse_year_month_string, read_bag_calendar,
   read_year_month_fields, regulate_calendar_day, require_nonempty_fields,
   require_partial_bag, resolve_calendar_month, resolve_calendar_year,
   resolve_iso_month, round_between, to_calendar_arg,
@@ -231,7 +231,7 @@ fn year_month_from_bag(
 }
 
 pub fn resolve_calendar_year_month(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   f: DateFields,
   overflow: Overflow,
 ) -> Result(IsoDateSlots, JsError) {
@@ -245,7 +245,7 @@ pub fn resolve_calendar_year_month(
   })
   use y <- result.try(resolve_calendar_year(cal, f))
   case cal {
-    tcal.Iso8601 -> {
+    temporal_calendar.Iso8601 -> {
       use m <- result.try(resolve_iso_month(f))
       use m <- result.try(case m >= 1 && m <= 12 {
         True -> Ok(m)
@@ -260,7 +260,12 @@ pub fn resolve_calendar_year_month(
     _ -> {
       use m <- result.try(resolve_calendar_month(cal, y, f, overflow))
       let first =
-        iso_date_from_epoch_days(tcal.date_to_epoch_days(cal, y, m, 1))
+        iso_date_from_epoch_days(temporal_calendar.date_to_epoch_days(
+          cal,
+          y,
+          m,
+          1,
+        ))
       check_ym_limits(first.year, first.month, first.day, cal)
     }
   }
@@ -289,7 +294,7 @@ fn year_month_field(y: Int, m: Int, g: TemporalYearMonthGetter) -> JsVal {
     YearMonthEraYear -> mk_undefined()
     YearMonthYear -> mk_int(y)
     YearMonthMonth -> mk_int(m)
-    YearMonthMonthCode -> mk_string(month_code_str(m))
+    YearMonthMonthCode -> mk_string(month_code_text(m))
     YearMonthDaysInYear -> mk_int(days_in_iso_year(y))
     YearMonthDaysInMonth -> mk_int(days_in_month(y, m))
     YearMonthMonthsInYear -> mk_int(12)
@@ -298,28 +303,36 @@ fn year_month_field(y: Int, m: Int, g: TemporalYearMonthGetter) -> JsVal {
 }
 
 fn year_month_field_cal(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   y: Int,
   m: Int,
   rd: Int,
   g: TemporalYearMonthGetter,
 ) -> JsVal {
   case cal {
-    tcal.Iso8601 -> year_month_field(y, m, g)
+    temporal_calendar.Iso8601 -> year_month_field(y, m, g)
     _ -> {
-      let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(y, m, rd)))
+      let cd =
+        temporal_calendar.date_from_epoch_days(
+          cal,
+          epoch_days(IsoDate(y, m, rd)),
+        )
       case g {
-        YearMonthCalendarId -> mk_string(tcal.identifier(cal))
+        YearMonthCalendarId -> mk_string(temporal_calendar.identifier(cal))
         YearMonthEra -> era_field(cal, cd)
         YearMonthEraYear -> era_year_field(cal, cd)
         YearMonthYear -> mk_int(cd.year)
         YearMonthMonth -> mk_int(cd.month)
-        YearMonthMonthCode -> mk_string(tcal.month_code(cal, cd.year, cd.month))
-        YearMonthDaysInYear -> mk_int(tcal.days_in_year(cal, cd.year))
+        YearMonthMonthCode ->
+          mk_string(temporal_calendar.month_code(cal, cd.year, cd.month))
+        YearMonthDaysInYear ->
+          mk_int(temporal_calendar.days_in_year(cal, cd.year))
         YearMonthDaysInMonth ->
-          mk_int(tcal.days_in_month(cal, cd.year, cd.month))
-        YearMonthMonthsInYear -> mk_int(tcal.months_in_year(cal, cd.year))
-        YearMonthInLeapYear -> mk_bool(tcal.in_leap_year(cal, cd.year))
+          mk_int(temporal_calendar.days_in_month(cal, cd.year, cd.month))
+        YearMonthMonthsInYear ->
+          mk_int(temporal_calendar.months_in_year(cal, cd.year))
+        YearMonthInLeapYear ->
+          mk_bool(temporal_calendar.in_leap_year(cal, cd.year))
       }
     }
   }
@@ -394,7 +407,7 @@ fn add_subtract(
   y: Int,
   m: Int,
   rd: Int,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   args: List(JsVal),
   meth: PlainYearMonthMethod,
 ) -> #(JsVal, Agent) {
@@ -418,7 +431,7 @@ fn add_subtract(
     False -> Nil
   }
   case cal {
-    tcal.Iso8601 -> {
+    temporal_calendar.Iso8601 -> {
       // day-1 intermediate must be within iso limits, even for zero duration
       let _day1 = rt_val.or_throw(st, check_date_limits(IsoDate(y, m, 1)))
       let #(y2, m2) = balance_year_month(y + dur.years, m + dur.months)
@@ -429,9 +442,13 @@ fn add_subtract(
       }
     }
     _ -> {
-      let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(y, m, rd)))
+      let cd =
+        temporal_calendar.date_from_epoch_days(
+          cal,
+          epoch_days(IsoDate(y, m, rd)),
+        )
       let start =
-        iso_date_from_epoch_days(tcal.date_to_epoch_days(
+        iso_date_from_epoch_days(temporal_calendar.date_to_epoch_days(
           cal,
           cd.year,
           cd.month,
@@ -439,9 +456,9 @@ fn add_subtract(
         ))
       let start = rt_val.or_throw(st, check_date_limits(start))
       let d2 = rt_val.or_throw(st, calendar_date_add(cal, start, dur, overflow))
-      let cd2 = tcal.date_from_epoch_days(cal, epoch_days(d2))
+      let cd2 = temporal_calendar.date_from_epoch_days(cal, epoch_days(d2))
       let first =
-        iso_date_from_epoch_days(tcal.date_to_epoch_days(
+        iso_date_from_epoch_days(temporal_calendar.date_to_epoch_days(
           cal,
           cd2.year,
           cd2.month,
@@ -470,7 +487,7 @@ fn with(
   y: Int,
   m: Int,
   rd: Int,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(bag, st) = require_partial_bag(st, helpers.arg_at(args, 0))
@@ -487,7 +504,8 @@ fn with(
     )
   let #(overflow, st) =
     get_overflow_option_from_value(st, helpers.arg_at(args, 1))
-  let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(y, m, rd)))
+  let cd =
+    temporal_calendar.date_from_epoch_days(cal, epoch_days(IsoDate(y, m, rd)))
   let f = merge_year_month_code(cal, cd, fields)
   let IsoDateSlots(IsoDate(y2, m2, rd2), _) =
     rt_val.or_throw(st, resolve_calendar_year_month(cal, f, overflow))
@@ -500,7 +518,7 @@ fn to_plain_date(
   y: Int,
   m: Int,
   rd: Int,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case classify(helpers.arg_at(args, 0)) {
@@ -509,17 +527,20 @@ fn to_plain_date(
       case day {
         Some(dd) -> {
           let date = case cal {
-            tcal.Iso8601 ->
+            temporal_calendar.Iso8601 ->
               rt_val.or_throw(st, regulate_iso_date(y, m, dd, Constrain))
             _ -> {
               let cd =
-                tcal.date_from_epoch_days(cal, epoch_days(IsoDate(y, m, rd)))
+                temporal_calendar.date_from_epoch_days(
+                  cal,
+                  epoch_days(IsoDate(y, m, rd)),
+                )
               let d2 =
                 rt_val.or_throw(
                   st,
                   regulate_calendar_day(cal, cd.year, cd.month, dd, Constrain),
                 )
-              iso_date_from_epoch_days(tcal.date_to_epoch_days(
+              iso_date_from_epoch_days(temporal_calendar.date_to_epoch_days(
                 cal,
                 cd.year,
                 cd.month,
@@ -541,7 +562,7 @@ fn format_ym_cal(
   y: Int,
   m: Int,
   rd: Int,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   mode: CalendarNameMode,
 ) -> String {
   format_with_reference(
@@ -555,7 +576,7 @@ fn format_ym_cal(
 fn year_month_until_since(
   st: Agent,
   protos: TemporalProtos,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   ia: IsoDate,
   ib: IsoDate,
   args: List(JsVal),
@@ -571,7 +592,8 @@ fn year_month_until_since(
   let Nil = require_largest_ge_smallest(st, largest, smallest)
   let mode = apply_since_mode(mode, is_since)
   let total_months = case cal {
-    tcal.Iso8601 -> { ib.year - ia.year } * 12 + ib.month - ia.month
+    temporal_calendar.Iso8601 ->
+      { ib.year - ia.year } * 12 + ib.month - ia.month
     _ -> {
       let #(_, months, _) =
         calendar_years_months_until(cal, ia, ib, whole_years: False)
@@ -583,7 +605,7 @@ fn year_month_until_since(
     _ -> round_to_increment(total_months, inc, mode)
   }
   let dur = case cal {
-    tcal.Iso8601 ->
+    temporal_calendar.Iso8601 ->
       case smallest, largest {
         Year, _ -> Duration(..zero_duration, years: rounded)
         _, Year ->
@@ -628,7 +650,7 @@ fn year_month_until_since(
 
 // round year count of ib - ia by day progress between year marks
 fn round_calendar_year_total(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   ia: IsoDate,
   ib: IsoDate,
   inc: Int,

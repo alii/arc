@@ -1,9 +1,9 @@
-import arc/bytecode/key.{Named, canonical_key}
-import arc/rt/abstract_ops as rt_abstract
+import arc/bytecode/key.{Named}
+import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
-import arc/rt/builtins/regexp
+import arc/rt/builtins/regexp as b_regexp
 import arc/rt/builtins/substitution
 import arc/rt/call as rt_call
 import arc/rt/js_string
@@ -35,6 +35,7 @@ import arc/rt/types.{
   mk_int, mk_number, mk_object, mk_string, mk_undefined, plain_object,
   well_known_symbol_description,
 }
+import arc/rt/utf8
 import arc/rt/val as rt_val
 import gleam/int
 import gleam/list
@@ -160,11 +161,11 @@ pub fn dispatch(
       string_transform(st, this, to_lower_case)
     StringPrototypeToUpperCase | StringPrototypeToLocaleUpperCase ->
       string_transform(st, this, to_upper_case)
-    StringPrototypeTrim -> string_transform(st, this, js_string.trim_js_ws)
+    StringPrototypeTrim -> string_transform(st, this, utf8.trim_js_ws)
     StringPrototypeTrimStart ->
-      string_transform(st, this, js_string.trim_leading_js_ws)
+      string_transform(st, this, utf8.trim_leading_js_ws)
     StringPrototypeTrimEnd ->
-      string_transform(st, this, js_string.trim_trailing_js_ws)
+      string_transform(st, this, utf8.trim_trailing_js_ws)
     StringPrototypeSplit -> string_split(st, this, args)
     StringPrototypeConcat -> string_concat(st, this, args)
     StringPrototypeToString -> string_this_value(st, this, "toString")
@@ -219,7 +220,7 @@ fn call_as_function(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 }
 
 fn string_symbol_iterator(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
+  let #(s, st) = with_this_text(st, this)
   let realm = st.realm
   let #(iter_h, st) =
     rt_store.t_cell_new(
@@ -241,7 +242,7 @@ fn string_char_at(
   let #(s, st) = with_this_str(st, this)
   let #(idx, st) =
     rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
-  case js_string.char_at_val(s, idx) {
+  case js_string.char_at(s, idx) {
     Some(ch) -> #(ch, st)
     None -> #(mk_string(""), st)
   }
@@ -255,7 +256,7 @@ fn string_char_code_at(
   let #(s, st) = with_this_str(st, this)
   let #(idx, st) =
     rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
-  case js_string.cp_at(s, idx) {
+  case js_string.codepoint_at(s, idx) {
     Some(cp) -> #(mk_int(cp), st)
     None -> #(mk_number(JNan), st)
   }
@@ -270,8 +271,8 @@ fn string_index_of(
   let #(search, st) =
     rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   let #(pos, st) = rt_val.t_to_integer_or_infinity(st, helpers.arg_at(args, 1))
-  let from = int.clamp(pos, 0, js_string.len(s))
-  let result = js_string.index_of_val(s, mk_string(search), from)
+  let from = int.clamp(pos, 0, js_string.length(s))
+  let result = js_string.index_of(s, mk_string(search), from)
   #(mk_int(option.unwrap(result, -1)), st)
 }
 
@@ -281,16 +282,16 @@ fn string_last_index_of(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(v, st) = with_this_str(st, this)
-  let s = js_string.bin(v)
+  let s = js_string.text(v)
   let #(search, st) =
     rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   let #(num, st) = rt_val.t_to_number(st, helpers.arg_at(args, 1))
   let result = case num {
-    JNan | types.JPosInf -> js_string.last_index_of_all(s, search)
+    JNan | types.JPosInf -> utf8.last_index_of_all(s, search)
     _ -> {
-      let len = js_string.len(v)
+      let len = js_string.length(v)
       let from = int.clamp(rt_val.jsnum_to_integer_or_infinity(num), 0, len)
-      js_string.last_index_of(s, search, from)
+      utf8.last_index_of(s, search, from)
     }
   }
   #(mk_int(option.unwrap(result, -1)), st)
@@ -301,7 +302,7 @@ fn string_includes(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  string_search_bool(st, this, args, "includes", js_string.contains)
+  string_search_bool(st, this, args, "includes", utf8.contains)
 }
 
 fn string_starts_with(
@@ -320,9 +321,9 @@ fn string_search_bool(
   predicate: fn(String, String) -> Bool,
 ) -> #(JsVal, Agent) {
   let #(v, st) = with_this_str(st, this)
-  let s = js_string.bin(v)
+  let s = js_string.text(v)
   let search_val = helpers.first_arg_or_undefined(args)
-  let #(is_re, st) = regexp.is_regexp(st, search_val)
+  let #(is_re, st) = b_regexp.is_regexp(st, search_val)
   case is_re {
     True ->
       rt_val.t_throw_type_error(
@@ -338,9 +339,9 @@ fn string_search_bool(
       let sub = case pos <= 0 {
         True -> s
         False -> {
-          let len = js_string.len(v)
+          let len = js_string.length(v)
           let pos = int.min(pos, len)
-          js_string.bin(js_string.sub(v, pos, len - pos))
+          js_string.text(js_string.substring(v, pos, len - pos))
         }
       }
       #(mk_bool(predicate(sub, search)), st)
@@ -354,9 +355,9 @@ fn string_ends_with(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(v, st) = with_this_str(st, this)
-  let s = js_string.bin(v)
+  let s = js_string.text(v)
   let search_val = helpers.first_arg_or_undefined(args)
-  let #(is_re, st) = regexp.is_regexp(st, search_val)
+  let #(is_re, st) = b_regexp.is_regexp(st, search_val)
   case is_re {
     True ->
       rt_val.t_throw_type_error(
@@ -365,11 +366,11 @@ fn string_ends_with(
       )
     False -> {
       let #(search, st) = rt_val.t_to_string(st, search_val)
-      let len = js_string.len(v)
+      let len = js_string.length(v)
       let #(end_pos, st) = second_arg_index_or_len(st, args, len, int.clamp)
       let sub = case end_pos == len {
         True -> s
-        False -> js_string.bin(js_string.sub(v, 0, end_pos))
+        False -> js_string.text(js_string.substring(v, 0, end_pos))
       }
       #(mk_bool(string.ends_with(sub, search)), st)
     }
@@ -397,13 +398,18 @@ fn second_arg_index_or_len(
 
 fn string_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(s, st) = with_this_str(st, this)
-  let len = js_string.len(s)
+  let len = js_string.length(s)
   let #(start, st) =
-    rt_abstract.relative_index(st, helpers.first_arg_or_undefined(args), len, 0)
+    rt_abstract_ops.relative_index(
+      st,
+      helpers.first_arg_or_undefined(args),
+      len,
+      0,
+    )
   let #(end, st) =
-    rt_abstract.relative_index(st, helpers.arg_at(args, 1), len, len)
+    rt_abstract_ops.relative_index(st, helpers.arg_at(args, 1), len, len)
   case end > start {
-    True -> #(js_string.sub(s, start, end - start), st)
+    True -> #(js_string.substring(s, start, end - start), st)
     False -> #(mk_string(""), st)
   }
 }
@@ -414,7 +420,7 @@ fn string_substring(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(s, st) = with_this_str(st, this)
-  let len = js_string.len(s)
+  let len = js_string.length(s)
   let #(raw_start, st) =
     rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
   let #(raw_end, st) = second_arg_index_or_len(st, args, len, fn(n, _, _) { n })
@@ -424,11 +430,11 @@ fn string_substring(
     True -> #(end, start)
     False -> #(start, end)
   }
-  #(js_string.sub(s, start, end - start), st)
+  #(js_string.substring(s, start, end - start), st)
 }
 
 fn string_concat(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
+  let #(s, st) = with_this_text(st, this)
   string_concat_loop(st, args, [s])
 }
 
@@ -447,7 +453,7 @@ fn string_concat_loop(
 }
 
 fn string_repeat(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
+  let #(s, st) = with_this_text(st, this)
   let #(num, st) = rt_val.t_to_number(st, helpers.first_arg_or_undefined(args))
   case num {
     types.JPosInf | types.JNegInf ->
@@ -478,7 +484,7 @@ fn string_pad(
   args: List(JsVal),
   pad_fn: fn(String, Int, String) -> Result(String, Nil),
 ) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
+  let #(s, st) = with_this_text(st, this)
   let #(max_len, st) =
     rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
   let target_len = int.max(max_len, 0)
@@ -501,10 +507,10 @@ fn string_at(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(idx, st) =
     rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
   let actual = case idx < 0 {
-    True -> js_string.len(s) + idx
+    True -> js_string.length(s) + idx
     False -> idx
   }
-  case js_string.char_at_val(s, actual) {
+  case js_string.char_at(s, actual) {
     Some(ch) -> #(ch, st)
     None -> #(mk_undefined(), st)
   }
@@ -518,7 +524,7 @@ fn string_code_point_at(
   let #(s, st) = with_this_str(st, this)
   let #(pos, st) =
     rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
-  case js_string.cp_at(s, pos) {
+  case js_string.codepoint_at(s, pos) {
     Some(cp) -> #(mk_int(cp), st)
     None -> #(mk_undefined(), st)
   }
@@ -529,7 +535,7 @@ fn string_normalize(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
+  let #(s, st) = with_this_text(st, this)
   case classify(helpers.first_arg_or_undefined(args)) {
     KUndef -> #(mk_string(ffi_nfc(s)), st)
     _ -> {
@@ -553,9 +559,9 @@ fn string_normalize(
 // annex b §b.2.2.1
 fn string_substr(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(s, st) = with_this_str(st, this)
-  let size = js_string.len(s)
+  let size = js_string.length(s)
   let #(start, st) =
-    rt_abstract.relative_index(
+    rt_abstract_ops.relative_index(
       st,
       helpers.first_arg_or_undefined(args),
       size,
@@ -567,7 +573,7 @@ fn string_substr(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let end = int.min(start + len, size)
   case start >= end {
     True -> #(mk_string(""), st)
-    False -> #(js_string.sub(s, start, end - start), st)
+    False -> #(js_string.substring(s, start, end - start), st)
   }
 }
 
@@ -577,7 +583,7 @@ fn string_locale_compare(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
+  let #(s, st) = with_this_text(st, this)
   let #(that, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   let n = case string.compare(ffi_nfc(s), ffi_nfc(that)) {
     order.Lt -> -1
@@ -588,7 +594,7 @@ fn string_locale_compare(
 }
 
 fn string_is_well_formed(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  let #(_s, st) = with_this_string(st, this)
+  let #(_s, st) = with_this_text(st, this)
   #(mk_bool(True), st)
 }
 
@@ -640,7 +646,7 @@ fn delegate_or_regexp(
     Some(method) -> rt_call.t_call(st, method, val, [this])
     None -> {
       let #(s, st) = rt_val.t_to_string(st, this)
-      let #(rx, st) = regexp.regexp_create(st, val, mk_undefined())
+      let #(rx, st) = b_regexp.create(st, val, mk_undefined())
       let #(method_opt, st) = get_method(st, rx, symbol)
       case method_opt {
         Some(method) -> rt_call.t_call(st, method, rx, [mk_string(s)])
@@ -683,8 +689,8 @@ fn string_replace(
     Some(method) -> rt_call.t_call(st, method, search_val, [this, replace_val])
     None -> {
       let #(s, st) = rt_val.t_to_string(st, this)
-      let #(search_str, st) = rt_val.t_to_string(st, search_val)
-      replace_string_search(st, s, search_str, replace_val, all: False)
+      let #(search_text, st) = rt_val.t_to_string(st, search_val)
+      replace_string_search(st, s, search_text, replace_val, all: False)
     }
   }
 }
@@ -697,15 +703,15 @@ fn string_replace_all(
   let st = require_object_coercible(st, this, "replaceAll")
   let search_val = helpers.first_arg_or_undefined(args)
   let replace_val = helpers.arg_at(args, 1)
-  let #(is_re, st) = regexp.is_regexp(st, search_val)
+  let #(is_re, st) = b_regexp.is_regexp(st, search_val)
   let st = require_global_when_regexp(st, search_val, is_re, "replaceAll")
   let #(method_opt, st) = get_method(st, search_val, types.symbol_replace)
   case method_opt {
     Some(method) -> rt_call.t_call(st, method, search_val, [this, replace_val])
     None -> {
       let #(s, st) = rt_val.t_to_string(st, this)
-      let #(search_str, st) = rt_val.t_to_string(st, search_val)
-      replace_string_search(st, s, search_str, replace_val, all: True)
+      let #(search_text, st) = rt_val.t_to_string(st, search_val)
+      replace_string_search(st, s, search_text, replace_val, all: True)
     }
   }
 }
@@ -717,14 +723,14 @@ fn string_match_all(
 ) -> #(JsVal, Agent) {
   let st = require_object_coercible(st, this, "matchAll")
   let regexp_arg = helpers.first_arg_or_undefined(args)
-  let #(is_re, st) = regexp.is_regexp(st, regexp_arg)
+  let #(is_re, st) = b_regexp.is_regexp(st, regexp_arg)
   let st = require_global_when_regexp(st, regexp_arg, is_re, "matchAll")
   let #(method_opt, st) = get_method(st, regexp_arg, types.symbol_match_all)
   case method_opt {
     Some(method) -> rt_call.t_call(st, method, regexp_arg, [this])
     None -> {
       let #(s, st) = rt_val.t_to_string(st, this)
-      let #(rx, st) = regexp.regexp_create(st, regexp_arg, mk_string("g"))
+      let #(rx, st) = b_regexp.create(st, regexp_arg, mk_string("g"))
       let #(method_opt, st) = get_method(st, rx, types.symbol_match_all)
       case method_opt {
         Some(method) -> rt_call.t_call(st, method, rx, [mk_string(s)])
@@ -743,7 +749,7 @@ fn string_split(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   case method_opt {
     Some(method) -> rt_call.t_call(st, method, sep_val, [this, limit_val])
     None -> {
-      let #(s, st) = with_this_string(st, this)
+      let #(s, st) = with_this_text(st, this)
       let #(lim, st) = case classify(limit_val) {
         KUndef -> #(4_294_967_295, st)
         _ -> rt_val.t_to_uint32(st, limit_val)
@@ -772,10 +778,10 @@ fn string_split_parts(
         0 -> ok_array(st, [])
         _ -> {
           let parts = case sep {
-            "" -> js_string.explode(s) |> list.take(lim)
-            _ -> js_string.split(s, sep, lim)
+            "" -> utf8.explode(s) |> list.take(lim)
+            _ -> utf8.split(s, sep, lim)
           }
-          ok_array(st, js_string.mk_list(parts))
+          ok_array(st, js_string.from_texts(parts))
         }
       }
     }
@@ -786,18 +792,18 @@ fn string_split_parts(
 fn replace_string_search(
   st: Agent,
   s: String,
-  search_str: String,
+  search_text: String,
   replace_val: JsVal,
   all all: Bool,
 ) -> #(JsVal, Agent) {
-  let search_len = js_string.length(search_str)
+  let search_len = utf8.length(search_text)
   case rt_val.is_callable(st, replace_val) {
     True ->
       replace_loop_functional(
         st,
         s,
         s,
-        search_str,
+        search_text,
         search_len,
         0,
         [],
@@ -812,18 +818,18 @@ fn replace_string_search(
         [substitution.LiteralSeg(text)] -> Some(text)
         _ -> None
       }
-      case literal, search_str {
-        Some(text), _ if search_str != "" ->
+      case literal, search_text {
+        Some(text), _ if search_text != "" ->
           string_within_limit(
             st,
-            js_string.replace_literal(s, search_str, text, all),
+            utf8.replace_literal(s, search_text, text, all),
           )
         _, _ -> {
           let needs_before = list.contains(segments, substitution.BeforeSeg)
           let parts =
             replace_loop_template(
               s,
-              search_str,
+              search_text,
               search_len,
               segments,
               needs_before,
@@ -849,22 +855,22 @@ fn replace_loop_functional(
   st: Agent,
   tail: String,
   s: String,
-  search_str: String,
+  search_text: String,
   search_len: Int,
   abs_pos: Int,
   acc: List(String),
   replace_fn: JsVal,
   all all: Bool,
 ) -> #(JsVal, Agent) {
-  case js_string.index_of(tail, search_str, 0) {
+  case utf8.index_of(tail, search_text, 0) {
     None -> concat_within_limit(st, [tail, ..acc])
     Some(rel) -> {
-      let preserved = js_string.slice(tail, 0, rel)
-      let after = js_string.drop_start(tail, rel + search_len)
+      let preserved = utf8.slice(tail, 0, rel)
+      let after = utf8.drop_start(tail, rel + search_len)
       let p = abs_pos + rel
       let #(result, st) =
         rt_call.t_call(st, replace_fn, mk_undefined(), [
-          mk_string(search_str),
+          mk_string(search_text),
           mk_int(p),
           mk_string(s),
         ])
@@ -878,12 +884,12 @@ fn replace_loop_functional(
             _ ->
               replace_loop_functional(
                 st,
-                js_string.drop_start(after, 1),
+                utf8.drop_start(after, 1),
                 s,
-                search_str,
+                search_text,
                 search_len,
                 p + 1,
-                [js_string.slice(after, 0, 1), ..acc],
+                [utf8.slice(after, 0, 1), ..acc],
                 replace_fn,
                 all,
               )
@@ -893,7 +899,7 @@ fn replace_loop_functional(
             st,
             after,
             s,
-            search_str,
+            search_text,
             search_len,
             p + search_len,
             acc,
@@ -907,7 +913,7 @@ fn replace_loop_functional(
 
 fn replace_loop_template(
   tail: String,
-  search_str: String,
+  search_text: String,
   search_len: Int,
   segments: List(substitution.PlainSegment),
   needs_before needs_before: Bool,
@@ -915,18 +921,18 @@ fn replace_loop_template(
   acc acc: List(String),
   all all: Bool,
 ) -> List(String) {
-  case js_string.index_of(tail, search_str, 0) {
+  case utf8.index_of(tail, search_text, 0) {
     None -> [tail, ..acc]
     Some(rel) -> {
-      let preserved = js_string.slice(tail, 0, rel)
-      let after = js_string.drop_start(tail, rel + search_len)
+      let preserved = utf8.slice(tail, 0, rel)
+      let after = utf8.drop_start(tail, rel + search_len)
       let replacement = case segments {
         [substitution.LiteralSeg(text)] -> text
         _ ->
           substitution.resolve_without_named(
             segments,
             substitution.MatchContext(
-              matched: search_str,
+              matched: search_text,
               before: fn() { before <> preserved },
               after: fn() { after },
               capture: fn(_) { "" },
@@ -941,14 +947,14 @@ fn replace_loop_template(
           case after {
             "" -> acc
             _ -> {
-              let cp = js_string.slice(after, 0, 1)
+              let cp = utf8.slice(after, 0, 1)
               let before = case needs_before {
                 True -> before <> cp
                 False -> ""
               }
               replace_loop_template(
-                js_string.drop_start(after, 1),
-                search_str,
+                utf8.drop_start(after, 1),
+                search_text,
                 search_len,
                 segments,
                 needs_before,
@@ -960,12 +966,12 @@ fn replace_loop_template(
           }
         True, _ -> {
           let before = case needs_before {
-            True -> before <> preserved <> search_str
+            True -> before <> preserved <> search_text
             False -> ""
           }
           replace_loop_template(
             after,
-            search_str,
+            search_text,
             search_len,
             segments,
             needs_before,
@@ -986,7 +992,7 @@ fn string_raw(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
     [] -> []
   }
   let #(raw_val, st) = rt_obj.t_get_prop(st, template, StringKey(Named("raw")))
-  let #(literal_count, st) = rt_abstract.length_of_array_like(st, raw_val)
+  let #(literal_count, st) = rt_abstract_ops.length_of_array_like(st, raw_val)
   case literal_count {
     0 -> #(mk_string(""), st)
     _ -> string_raw_loop(st, raw_val, subs, literal_count, 0, [])
@@ -1005,7 +1011,7 @@ fn string_raw_loop(
     rt_obj.t_get_prop(
       st,
       raw_val,
-      StringKey(canonical_key(int.to_string(index))),
+      StringKey(key.canonical(int.to_string(index))),
     )
   let #(lit, st) = rt_val.t_to_string(st, lit_val)
   let acc_rev = [lit, ..acc_rev]
@@ -1114,7 +1120,7 @@ fn string_from_code_point_loop(
 
 // annex b §b.2.2 html methods
 fn html_wrap(st: Agent, this: JsVal, tag: String) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
+  let #(s, st) = with_this_text(st, this)
   #(mk_string("<" <> tag <> ">" <> s <> "</" <> tag <> ">"), st)
 }
 
@@ -1125,7 +1131,7 @@ fn html_wrap_attr(
   tag: String,
   attr: String,
 ) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
+  let #(s, st) = with_this_text(st, this)
   let #(attr_val, st) =
     rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   let escaped = string.replace(attr_val, "\"", "&quot;")
@@ -1160,7 +1166,7 @@ fn require_global_when_regexp(
       let #(flags, st) = rt_obj.t_get_prop(st, val, StringKey(Named("flags")))
       let #(flags, st) = rt_val.t_require_object_coercible(st, flags)
       let #(s, st) = rt_val.t_to_string(st, flags)
-      case regexp.has_flag(s, "g") {
+      case b_regexp.has_flag(s, "g") {
         True -> st
         False ->
           rt_val.t_throw_type_error(
@@ -1185,10 +1191,10 @@ fn require_object_coercible(st: Agent, this: JsVal, name: String) -> Agent {
   }
 }
 
-fn with_this_string(st: Agent, this: JsVal) -> #(String, Agent) {
+fn with_this_text(st: Agent, this: JsVal) -> #(String, Agent) {
   case js_string.is_str(this) {
-    True -> #(js_string.bin(this), st)
-    False -> coerce_this_string(st, this)
+    True -> #(js_string.text(this), st)
+    False -> coerce_this_text(st, this)
   }
 }
 
@@ -1197,13 +1203,13 @@ fn with_this_str(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case js_string.is_str(this) {
     True -> #(this, st)
     False -> {
-      let #(s, st) = coerce_this_string(st, this)
+      let #(s, st) = coerce_this_text(st, this)
       #(mk_string(s), st)
     }
   }
 }
 
-fn coerce_this_string(st: Agent, this: JsVal) -> #(String, Agent) {
+fn coerce_this_text(st: Agent, this: JsVal) -> #(String, Agent) {
   case classify(this) {
     KNull -> rt_val.t_throw_type_error(st, "Cannot read properties of null")
     KUndef ->
@@ -1217,7 +1223,7 @@ fn string_transform(
   this: JsVal,
   transform: fn(String) -> String,
 ) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
+  let #(s, st) = with_this_text(st, this)
   #(mk_string(transform(s)), st)
 }
 
@@ -1279,14 +1285,14 @@ fn modulo_uint16(n: Int) -> Int {
 fn codepoint_or_replacement(i: Int) -> UtfCodepoint {
   case string.utf_codepoint(i) {
     Ok(cp) -> cp
-    Error(Nil) -> js_string.replacement_codepoint()
+    Error(Nil) -> utf8.replacement_codepoint()
   }
 }
 
 // final sigma rule, which string.lowercase lacks
 pub fn to_lower_case(s: String) -> String {
-  use <- option.lazy_unwrap(js_string.ascii_lower(s))
-  case js_string.index_of(s, "\u{03A3}", 0) {
+  use <- option.lazy_unwrap(utf8.ascii_lower(s))
+  case utf8.index_of(s, "\u{03A3}", 0) {
     None -> string.lowercase(s)
     Some(_) -> {
       let cps =
@@ -1297,7 +1303,7 @@ pub fn to_lower_case(s: String) -> String {
 }
 
 pub fn to_upper_case(s: String) -> String {
-  use <- option.lazy_unwrap(js_string.ascii_upper(s))
+  use <- option.lazy_unwrap(utf8.ascii_upper(s))
   string.uppercase(s)
 }
 

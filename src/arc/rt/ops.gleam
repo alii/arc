@@ -15,8 +15,7 @@ import gleam/option.{None, Some}
 import gleam/order
 import gleam/string
 
-// §13.10.2 instanceof operator
-// called by name from arc_rt_obj_ffi
+// §13.10.2 instanceof; called by name from arc_rt_obj_ffi
 pub fn t_instance_of(st: Agent, v: JsVal, target: JsVal) -> #(Bool, Agent) {
   case classify(target) {
     KHandle(ctor_h) -> {
@@ -194,8 +193,8 @@ fn t_relational_cmp(st: Agent, a: JsVal, b: JsVal) -> #(Cmp, Agent) {
   let #(pb, st) = rt_val.t_to_primitive(st, b, HintNumber)
   case classify(pa), classify(pb) {
     KStr(sa), KStr(sb) -> #(order_to_cmp(string.compare(sa, sb)), st)
-    KBig(x), KStr(sb) -> #(cmp_bigint_str(x, sb), st)
-    KStr(sa), KBig(y) -> #(cmp_negate(cmp_bigint_str(y, sa)), st)
+    KBig(x), KStr(sb) -> #(cmp_bigint_text(x, sb), st)
+    KStr(sa), KBig(y) -> #(cmp_negate(cmp_bigint_text(y, sa)), st)
     _, _ -> {
       let #(na, st) = rt_val.t_to_numeric(st, pa)
       let #(nb, st) = rt_val.t_to_numeric(st, pb)
@@ -210,7 +209,7 @@ fn t_relational_cmp(st: Agent, a: JsVal, b: JsVal) -> #(Cmp, Agent) {
   }
 }
 
-fn cmp_bigint_str(x: Int, s: String) -> Cmp {
+fn cmp_bigint_text(x: Int, s: String) -> Cmp {
   case rt_val.string_to_bigint(s) {
     Some(y) -> order_to_cmp(int.compare(x, y))
     None -> Undef

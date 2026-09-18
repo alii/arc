@@ -2,7 +2,7 @@ import arc/engine
 import arc/host_hooks.{type ConsoleLevel, DebugLevel, InfoLevel, LogLevel}
 import arc/internal/host_time
 import arc/rt/types.{type Agent}
-import arc_aot/emit as emit_2core
+import arc_aot/emit
 import arc_aot/run.{type RunResult}
 import carder/pipeline
 import gleam/dynamic.{type Dynamic}
@@ -97,21 +97,17 @@ pub fn seed() -> Agent {
 
 pub fn run_loaded(module: Atom, st: Agent) -> #(Agent, DiffRun) {
   buf_reset()
-  let #(st, result) = run.run_loaded(module, st)
+  let #(st, result) = run.main(module, st)
   #(st, DiffRun(stdout: buf_read(), result:))
 }
 
 pub fn run_compiled(source: String) -> DiffRun {
   let mod_name = "arc_emit2c_test_" <> int.to_string(unique_integer([Positive]))
-  let opts =
-    emit_2core.CompileOpts(
-      module_name: mod_name,
-      source_kind: emit_2core.AsScript,
-    )
-  case emit_2core.compile_source(source, opts) {
+  let opts = emit.CompileOpts(module_name: mod_name, source_kind: emit.AsScript)
+  case emit.compile_source(source, opts) {
     Error(e) -> DiffRun(stdout: <<>>, result: Error(string.inspect(e)))
     Ok(ir_module) ->
-      case pipeline.compile_ir(ir_module, emit_2core.binding()) {
+      case pipeline.compile_ir(ir_module, emit.binding()) {
         Error(e) -> DiffRun(stdout: <<>>, result: Error(string.inspect(e)))
         Ok(beam) ->
           case run.load(beam, mod_name) {

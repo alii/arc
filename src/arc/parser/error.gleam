@@ -162,7 +162,7 @@ pub type ParseError {
   PrivateNameNotInBrandCheck(pos: Int)
 }
 
-pub fn parse_error_to_string(error: ParseError) -> String {
+pub fn to_string(error: ParseError) -> String {
   case error {
     LexError(error:, ..) -> lexer.lex_error_to_string(error)
     RegExpSyntaxError(error:, ..) -> regex_error.pattern_error_message(error)
@@ -380,7 +380,7 @@ pub fn parse_error_to_string(error: ParseError) -> String {
   }
 }
 
-pub fn parse_error_pos(error: ParseError) -> Int {
+pub fn pos(error: ParseError) -> Int {
   error.pos
 }
 

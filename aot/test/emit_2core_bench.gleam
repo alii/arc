@@ -2,10 +2,10 @@
 
 import arc/engine
 import arc/rt/types.{type Agent}
-import arc_aot/emit as emit_2core
+import arc_aot/emit
 import arc_aot/run
 import carder/pipeline
-import emit_2core_harness as harness
+import emit_2core_harness
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
 import gleam/int
@@ -37,16 +37,15 @@ type Loaded {
 }
 
 fn compile_load(source: String, name: String) -> #(Int, Int, Loaded) {
-  let opts =
-    emit_2core.CompileOpts(module_name: name, source_kind: emit_2core.AsScript)
+  let opts = emit.CompileOpts(module_name: name, source_kind: emit.AsScript)
   let #(compile_us, beam) =
     time_us(fn() {
-      let assert Ok(ir_module) = emit_2core.compile_source(source, opts)
-      let assert Ok(beam) = pipeline.compile_ir(ir_module, emit_2core.binding())
+      let assert Ok(ir_module) = emit.compile_source(source, opts)
+      let assert Ok(beam) = pipeline.compile_ir(ir_module, emit.binding())
       beam
     })
   let assert Ok(mod) = run.load(beam, name)
-  let #(realm_us, seed) = time_us(fn() { harness.seed() })
+  let #(realm_us, seed) = time_us(fn() { emit_2core_harness.seed() })
   #(compile_us, realm_us, Loaded(mod:, seed:))
 }
 
@@ -125,8 +124,8 @@ fn bench(
 
   let logged = source <> ";console.log(s)"
   let want = <<{ int.to_string(expected) <> "\n" }:utf8>>
-  let c = harness.run_compiled(logged)
-  let i = harness.run_interpreted(logged)
+  let c = emit_2core_harness.run_compiled(logged)
+  let i = emit_2core_harness.run_interpreted(logged)
   let correctness = case c.stdout == want, i.stdout == want, c.result {
     True, True, _ -> "ok"
     _, _, Error(e) -> "FAIL compiled: " <> e

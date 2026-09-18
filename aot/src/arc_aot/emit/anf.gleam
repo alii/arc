@@ -1,6 +1,6 @@
 import arc/bytecode/key
 import arc/parser/ast
-import arc/rt/val
+import arc/rt/val as rt_val
 import arc_aot/emit/state.{type Emitter, Emitter}
 import carder/ir
 import gleam/bit_array
@@ -70,8 +70,7 @@ type StringParts {
 @external(erlang, "arc_aot_anf_ffi", "str_parts")
 fn str_parts(s: String) -> StringParts
 
-// non-ascii text takes the runtime's tagged form, built from constants so
-// the beam compiler folds it back into a literal
+// non-ascii text builds the tagged form from constants so beam folds it
 pub fn str_lit(s: String) -> Build(ir.Value) {
   case str_parts(s) {
     Ascii -> pure(ir.ConstBinary(bit_array.from_string(s)))
@@ -687,14 +686,14 @@ fn cond_cmp_numeric(
 pub fn object_key_lit(pk: ast.PropertyKey) -> Build(ir.Value) {
   let inner = case pk {
     ast.KeyIdentifier(name:, ..) -> wire_named(name)
-    ast.KeyString(value: s, ..) -> wire_prop_key(key.canonical_key(s))
+    ast.KeyString(value: s, ..) -> wire_prop_key(key.canonical(s))
     ast.KeyNumber(value: ast.FiniteNumber(f), ..) ->
       case key.array_index_of_float(f) {
         Some(i) -> wire_index(i)
-        None -> wire_named(val.js_format_float(f))
+        None -> wire_named(rt_val.js_format_float(f))
       }
     ast.KeyNumber(value: ast.InfiniteNumber, ..) -> wire_named("Infinity")
-    ast.KeyBigInt(value: n, ..) -> wire_prop_key(key.index_key(n))
+    ast.KeyBigInt(value: n, ..) -> wire_prop_key(key.index(n))
     ast.KeyPrivate(name:, ..) ->
       ir.TermOp(ir.MakeTuple, [
         ir.ConstAtom("private"),

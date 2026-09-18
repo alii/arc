@@ -2,10 +2,10 @@
 
 import arc/rt/gc as rt_gc
 import arc/rt/types.{type Agent}
-import arc_aot/emit as emit_2core
+import arc_aot/emit
 import arc_aot/run
 import carder/pipeline
-import emit_2core_harness as harness
+import emit_2core_harness
 import gleam/bit_array
 import gleam/erlang/atom.{type Atom}
 import gleam/int
@@ -58,16 +58,15 @@ console.log('sync');
 "
 
 fn seed() -> Agent {
-  harness.seed()
+  emit_2core_harness.seed()
 }
 
 fn compile_load(source: String, name: String) -> Result(Atom, String) {
-  let opts =
-    emit_2core.CompileOpts(module_name: name, source_kind: emit_2core.AsScript)
-  case emit_2core.compile_source(source, opts) {
+  let opts = emit.CompileOpts(module_name: name, source_kind: emit.AsScript)
+  case emit.compile_source(source, opts) {
     Error(e) -> Error("emit: " <> string.inspect(e))
     Ok(ir_module) ->
-      case pipeline.compile_ir(ir_module, emit_2core.binding()) {
+      case pipeline.compile_ir(ir_module, emit.binding()) {
         Error(e) -> Error("lower: " <> string.inspect(e))
         Ok(beam) ->
           case run.load(beam, name) {
@@ -94,8 +93,8 @@ fn swept(before: rt_gc.GcStats, after: rt_gc.GcStats) -> Int {
   { after.next_id - before.next_id } - { after.live_count - before.live_count }
 }
 
-fn stdout_str(_st: Agent) -> String {
-  case bit_array.to_string(harness.buf_read()) {
+fn stdout_text(_st: Agent) -> String {
+  case bit_array.to_string(emit_2core_harness.buf_read()) {
     Ok(s) -> s
     Error(Nil) -> "<non-utf8>"
   }
@@ -153,7 +152,7 @@ fn run_a() {
       case compile_load(prog_a_read, "gcv_a_read") {
         Error(e) -> io.println("  ABORT (read): " <> e)
         Ok(m_read) -> {
-          harness.buf_reset()
+          emit_2core_harness.buf_reset()
           let st0 = seed()
           let s0 = rt_gc.stats(st0)
           io.println(stats_line("seed:     ", s0))
@@ -163,7 +162,7 @@ fn run_a() {
           io.println(
             "  outcome  : " <> string.slice(string.inspect(out1), 0, 80),
           )
-          io.println("  stdout   : " <> string.inspect(stdout_str(st1)))
+          io.println("  stdout   : " <> string.inspect(stdout_text(st1)))
           let st2 = rt_gc.t_collect(st1, [])
           let s2 = rt_gc.stats(st2)
           io.println(stats_line("post-gc:  ", s2))
@@ -181,11 +180,11 @@ fn run_a() {
           io.println(
             "  read outcome: " <> string.slice(string.inspect(out2), 0, 120),
           )
-          let out_str = stdout_str(st3)
-          io.println("  read stdout : " <> string.inspect(out_str))
+          let out_text = stdout_text(st3)
+          io.println("  read stdout : " <> string.inspect(out_text))
           assert_eq(
             "survivor[5][0]",
-            string.trim(string.replace(out_str, "alloc-done 10\n", "")),
+            string.trim(string.replace(out_text, "alloc-done 10\n", "")),
             "read 50000",
           )
         }
@@ -200,7 +199,7 @@ fn run_b() {
   case compile_load(prog_b, "gcv_b") {
     Error(e) -> io.println("  ABORT: " <> e)
     Ok(m) -> {
-      harness.buf_reset()
+      emit_2core_harness.buf_reset()
       let st0 = seed()
       let s0 = rt_gc.stats(st0)
       let #(out, st1) = run.apply_js_main(m, st0)
@@ -208,8 +207,8 @@ fn run_b() {
       io.println(stats_line("seed:     ", s0))
       io.println(stats_line("post-run: ", s1))
       io.println("  outcome  : " <> string.slice(string.inspect(out), 0, 200))
-      let out_str = stdout_str(st1)
-      io.println("  stdout   : " <> string.inspect(out_str))
+      let out_text = stdout_text(st1)
+      io.println("  stdout   : " <> string.inspect(out_text))
       assert_in_range(
         "since_gc-after (< threshold)",
         s1.alloc_since_gc,
@@ -222,7 +221,7 @@ fn run_b() {
         99_000,
         101_000,
       )
-      assert_eq("stdout", string.trim(out_str), "sync\nthen1 10\nthen2 50000")
+      assert_eq("stdout", string.trim(out_text), "sync\nthen1 10\nthen2 50000")
     }
   }
 }
@@ -233,17 +232,17 @@ fn run_c() {
   case compile_load(prog_c, "gcv_c") {
     Error(e) -> io.println("  ABORT: " <> e)
     Ok(m) -> {
-      harness.buf_reset()
+      emit_2core_harness.buf_reset()
       let st0 = seed()
       let s0 = rt_gc.stats(st0)
       let #(out, st1) = run.apply_js_main(m, st0)
       let s1 = rt_gc.stats(st1)
       io.println(stats_line("post-run: ", s1))
       io.println("  outcome  : " <> string.slice(string.inspect(out), 0, 200))
-      let out_str = stdout_str(st1)
-      io.println("  stdout   : " <> string.inspect(out_str))
+      let out_text = stdout_text(st1)
+      io.println("  stdout   : " <> string.inspect(out_text))
       assert_in_range("swept (~100K)", swept(s0, s1), 99_000, 101_000)
-      assert_eq("stdout", string.trim(out_str), "sync\ncaptured 42 99")
+      assert_eq("stdout", string.trim(out_text), "sync\ncaptured 42 99")
     }
   }
 }

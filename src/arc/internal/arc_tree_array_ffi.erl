@@ -195,7 +195,6 @@ fold_node(F, Acc, N, S, Base, Ix, Size) when Ix =< ?FANOUT ->
     fold_node(F, Acc1, N, S, Base, Ix + 1, Size);
 fold_node(_, Acc, _, _, _, _, _) -> Acc.
 
-%% every slot below size, holes included
 %% the first Len values when all are set, else none
 dense_list(A, Len) ->
     case size(A) of

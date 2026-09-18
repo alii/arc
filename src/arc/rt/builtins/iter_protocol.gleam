@@ -2,9 +2,8 @@ import arc/bytecode/error_kind.{TypeError}
 import arc/bytecode/key.{type PropertyKey, Index, Named}
 import arc/internal/ordered_entries
 import arc/rt/builtins/common
-import arc/rt/call.{NormalCompletion, ThrowCompletion, t_call, t_try_call}
-import arc/rt/elements as rt_elements
-import arc/rt/js_string
+import arc/rt/call.{NormalCompletion, ThrowCompletion, t_call, t_try_call} as rt_call
+import arc/rt/elements
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -15,6 +14,7 @@ import arc/rt/types.{
   StringKey, SymbolKey, classify, map_key_to_js, mk_int, mk_object, mk_string,
   mk_undefined, plain_object, symbol_async_iterator, symbol_iterator,
 }
+import arc/rt/utf8
 import arc/rt/val.{is_callable} as rt_val
 import gleam/dict.{type Dict}
 import gleam/list
@@ -334,7 +334,7 @@ fn array_values_to_list(
 }
 
 fn walk_elements(
-  elements: JsElements,
+  els: JsElements,
   props: Dict(PropertyKey, Property),
   i: Int,
   length: Int,
@@ -343,9 +343,8 @@ fn walk_elements(
   case i < length {
     False -> #(acc, i)
     True ->
-      case dict.has_key(props, Index(i)), rt_elements.get_option(elements, i) {
-        False, Some(v) ->
-          walk_elements(elements, props, i + 1, length, [v, ..acc])
+      case dict.has_key(props, Index(i)), elements.get_option(els, i) {
+        False, Some(v) -> walk_elements(els, props, i + 1, length, [v, ..acc])
         _, _ -> #(acc, i)
       }
   }
@@ -413,15 +412,15 @@ fn array_iterator_step(
           let out = case kind {
             types.ArrayIterKeys -> Some(#(mk_int(index), st))
             types.ArrayIterValues ->
-              case rt_elements.own_element(st, mk_object(target), index) {
-                rt_elements.Hit(v) -> Some(#(v, st))
-                rt_elements.Miss -> None
+              case elements.own_element(st, mk_object(target), index) {
+                elements.Hit(v) -> Some(#(v, st))
+                elements.Miss -> None
               }
             types.ArrayIterEntries ->
-              case rt_elements.own_element(st, mk_object(target), index) {
-                rt_elements.Hit(v) ->
+              case elements.own_element(st, mk_object(target), index) {
+                elements.Hit(v) ->
                   Some(rt_obj.t_new_array(st, [mk_int(index), v]))
-                rt_elements.Miss -> None
+                elements.Miss -> None
               }
           }
           use #(v, st) <- option.map(out)
@@ -536,7 +535,7 @@ pub fn string_iterator_step(
 ) -> #(Option(JsVal), Agent) {
   case cell {
     SObject(kind: StringIterator(source:, index:), ..) if index >= 0 ->
-      case js_string.char_at_offset(source, index) {
+      case utf8.char_at_offset(source, index) {
         None -> #(
           None,
           rt_store.t_cell_set(
@@ -569,7 +568,7 @@ pub fn call_return(
   obj: JsVal,
 ) -> #(Result(ReturnCall, JsVal), Agent) {
   let #(get_c, st) =
-    call.try_run(st, fn(st) {
+    rt_call.try_run(st, fn(st) {
       rt_obj.t_get_prop(st, obj, StringKey(Named("return")))
     })
   case get_c {
@@ -642,7 +641,7 @@ pub fn or_close(
   body: fn(Agent) -> #(JsVal, Agent),
   cont: fn(JsVal, Agent) -> #(a, Agent),
 ) -> #(a, Agent) {
-  case call.try_run(st, body) {
+  case rt_call.try_run(st, body) {
     #(NormalCompletion(v), st) -> cont(v, st)
     #(ThrowCompletion(thrown), st) -> close_throw(st, iter, thrown)
   }

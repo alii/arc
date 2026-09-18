@@ -1,4 +1,4 @@
-import arc/rt/abstract_ops as rt_abstract
+import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
@@ -101,7 +101,7 @@ fn reflect_apply(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
       rt_val.t_throw_type_error(st, "Reflect.apply: target is not a function")
     True -> {
       let #(call_args, st) =
-        rt_abstract.create_list_from_array_like(st, args_list)
+        rt_abstract_ops.create_list_from_array_like(st, args_list)
       rt_call.t_call(st, target, this_arg, call_args)
     }
   }
@@ -129,7 +129,7 @@ fn reflect_construct(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
           )
         True -> {
           let #(ctor_args, st) =
-            rt_abstract.create_list_from_array_like(st, args_list)
+            rt_abstract_ops.create_list_from_array_like(st, args_list)
           let #(h, st) = rt_call.t_construct(st, target, ctor_args, new_target)
           #(mk_object(h), st)
         }

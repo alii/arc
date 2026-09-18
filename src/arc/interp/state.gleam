@@ -50,8 +50,7 @@ pub type SavedFrame {
     r0: JsVal,
     r1: JsVal,
   )
-  // an op that had to call user code midway; cont finishes it with the
-  // result; locals already hold the registers like SavedFrame
+  // an op paused on user code; cont finishes it, locals hold the registers
   SavedCont(
     caller: State,
     pc: Int,
@@ -218,13 +217,13 @@ pub type YieldKind {
   AsyncDelegateResume(next_pc: Int)
 }
 
-pub fn map_exit_state(exit: StepExit, f: fn(State) -> State) -> StepExit {
+pub fn map_exit(exit: StepExit, f: fn(State) -> State) -> StepExit {
   case exit {
-    Threw(v, s) -> Threw(v, f(s))
-    Returned(v, s) -> Returned(v, f(s))
-    Yielded(k, v, s) -> Yielded(k, v, f(s))
-    Awaited(v, s) -> Awaited(v, f(s))
-    VmFailed(e, s) -> VmFailed(e, f(s))
+    Threw(v, state) -> Threw(v, f(state))
+    Returned(v, state) -> Returned(v, f(state))
+    Yielded(k, v, state) -> Yielded(k, v, f(state))
+    Awaited(v, state) -> Awaited(v, f(state))
+    VmFailed(e, state) -> VmFailed(e, f(state))
   }
 }
 

@@ -1,4 +1,4 @@
-import arc/bytecode/key.{canonical_key}
+import arc/bytecode/key
 import arc/internal/unsafe
 import arc/interp/kernel
 import arc/rt/builtins as rt_builtins
@@ -89,16 +89,16 @@ pub fn call_depth_range_error_test() {
     as_code(fn(st, frame, _args) {
       let self = frame_at(2, frame)
       let #(arr, st) = rt_obj.t_new_array(st, [mk_int(1)])
-      rt_call.t_call_method(st, arr, StringKey(canonical_key("map")), [self])
+      rt_call.t_call_method(st, arr, StringKey(key.canonical("map")), [self])
     })
   let #(h, st) =
     rt_call.t_fn_new(st, code, flags(strict: True), "f", 0, None, None)
   let assert #(ThrowCompletion(e), st) =
     rt_call.t_try_call(st, mk_object(h), mk_undefined(), [])
   let assert KHandle(_) = classify(e)
-  let #(name, st) = rt_obj.t_get_prop(st, e, StringKey(canonical_key("name")))
+  let #(name, st) = rt_obj.t_get_prop(st, e, StringKey(key.canonical("name")))
   assert classify(name) == KStr("RangeError")
-  let #(msg, st) = rt_obj.t_get_prop(st, e, StringKey(canonical_key("message")))
+  let #(msg, st) = rt_obj.t_get_prop(st, e, StringKey(key.canonical("message")))
   assert classify(msg) == KStr("Maximum call stack size exceeded")
   assert st.call_depth == 0
   let #(f, st) = this_fn(st, strict: True)
@@ -212,7 +212,7 @@ fn global(st: Agent, name: String) -> JsVal {
 }
 
 fn get(st: Agent, obj: JsVal, name: String) -> JsVal {
-  rt_obj.t_get_prop(st, obj, StringKey(canonical_key(name))).0
+  rt_obj.t_get_prop(st, obj, StringKey(key.canonical(name))).0
 }
 
 fn error_stack(st: Agent, msg: String) -> String {
@@ -240,7 +240,7 @@ pub fn error_stack_renders_frames_test() {
     rt_obj.t_set_prop(
       st,
       global(st, "Error"),
-      StringKey(canonical_key("stackTraceLimit")),
+      StringKey(key.canonical("stackTraceLimit")),
       mk_int(1),
     )
   assert error_stack(st, "y") == "Error: y\n    at inner (script:3)"
@@ -301,23 +301,23 @@ pub fn weak_map_value_traced_until_key_dies_test() {
   let #(k, st) = rt_obj.t_new_object_literal(st)
   let #(v, st) = rt_obj.t_new_object_literal(st)
   let #(_, st) =
-    rt_call.t_call_method(st, wm, StringKey(canonical_key("set")), [k, v])
+    rt_call.t_call_method(st, wm, StringKey(key.canonical("set")), [k, v])
   let st = rt_gc.t_collect(st, [wm_h, handle(k)])
   assert rt_gc.t_is_live(st, handle(v))
   let #(got, st) =
-    rt_call.t_call_method(st, wm, StringKey(canonical_key("get")), [k])
+    rt_call.t_call_method(st, wm, StringKey(key.canonical("get")), [k])
   assert got == v
   let st = rt_gc.t_collect(st, [wm_h])
   assert !rt_gc.t_is_live(st, handle(k))
   let #(has, st) =
-    rt_call.t_call_method(st, wm, StringKey(canonical_key("has")), [k])
+    rt_call.t_call_method(st, wm, StringKey(key.canonical("has")), [k])
   assert classify(has) == KBool(False)
   let st = rt_gc.t_collect(st, [wm_h])
   assert !rt_gc.t_is_live(st, handle(v))
 }
 
 fn call_method(st: Agent, recv: JsVal, name: String, args: List(JsVal)) {
-  rt_call.t_call_method(st, recv, StringKey(canonical_key(name)), args)
+  rt_call.t_call_method(st, recv, StringKey(key.canonical(name)), args)
 }
 
 pub fn map_get_or_insert_test() {
@@ -333,7 +333,7 @@ pub fn map_get_or_insert_test() {
   let #(_, st) = call_method(st, m, "getOrInsert", [mz, mk_string("z")])
   let #(r, st) = call_method(st, m, "get", [mk_int(0)])
   assert classify(r) == KStr("z")
-  let #(size, st) = rt_obj.t_get_prop(st, m, StringKey(canonical_key("size")))
+  let #(size, st) = rt_obj.t_get_prop(st, m, StringKey(key.canonical("size")))
   assert classify(size) == KNum(JInt(2))
   let assert #(ThrowCompletion(_), _) =
     rt_call.t_try_call(
@@ -381,7 +381,7 @@ pub fn map_get_or_insert_computed_test() {
   assert classify(r) == KStr("outer")
   let #(r, st) = call_method(st, m, "get", [mk_string("k")])
   assert classify(r) == KStr("outer")
-  let #(size, st) = rt_obj.t_get_prop(st, m, StringKey(canonical_key("size")))
+  let #(size, st) = rt_obj.t_get_prop(st, m, StringKey(key.canonical("size")))
   assert classify(size) == KNum(JInt(2))
   let assert #(ThrowCompletion(_), _) =
     rt_call.t_try_call(st, get(st, m, "getOrInsertComputed"), m, [
@@ -415,7 +415,7 @@ pub fn map_group_by_test() {
     rt_call.t_fn_new(st, parity, flags(strict: True), "p", 1, None, None)
   let #(g, st) = call_method(st, map_ctor, "groupBy", [items, mk_object(ph)])
   assert type_of(st, g) == "object"
-  let #(size, st) = rt_obj.t_get_prop(st, g, StringKey(canonical_key("size")))
+  let #(size, st) = rt_obj.t_get_prop(st, g, StringKey(key.canonical("size")))
   assert classify(size) == KNum(JInt(3))
   let #(odd, st) = call_method(st, g, "get", [mk_string("odd")])
   let #(joined, st) = call_method(st, odd, "join", [])

@@ -345,7 +345,7 @@ fn dispose_resources(
             NormalCompletion(_) ->
               dispose_resources(st, rest, ThrowCompletion(thrown))
             ThrowCompletion(prev) -> {
-              let #(err, st) = b_error.make_suppressed_error(st, thrown, prev)
+              let #(err, st) = b_error.make_suppressed(st, thrown, prev)
               dispose_resources(st, rest, ThrowCompletion(err))
             }
           }
@@ -669,7 +669,7 @@ fn fold_error(
   case pending {
     None -> #(Some(thrown), st)
     Some(prev) -> {
-      let #(err, st) = b_error.make_suppressed_error(st, thrown, prev)
+      let #(err, st) = b_error.make_suppressed(st, thrown, prev)
       #(Some(err), st)
     }
   }

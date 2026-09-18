@@ -346,13 +346,10 @@ object(Bin, P, Src, Acc) ->
             object(Bin, ws(Bin, P4), Src, [{Key, V} | Acc])
     end.
 
-%% §25.5.2 for plain data with no replacer: shaped and ordinary objects under
-%% Object.prototype, dense arrays under Array.prototype, primitives; anything
-%% that could run user code or needs the full algorithm answers json_miss,
-%% as does a top level that serializes to undefined
-plain_stringify(Agent, V, Gap) ->
-    Realm = element(?AGENT_REALM, Agent),
-    Cells = element(?STORE_CELLS, element(?AGENT_STORE, Agent)),
+%% §25.5.2 for plain data with no replacer; anything observable answers json_miss
+plain_stringify(St, V, Gap) ->
+    Realm = element(?AGENT_REALM, St),
+    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     {?HANDLE_TAG, OP} = element(?BUILTINPAIR_PROTO, element(?REALM_OBJECT, Realm)),
     {?HANDLE_TAG, AP} = element(?BUILTINPAIR_PROTO, element(?REALM_ARRAY, Realm)),
     TJ = {?KEY_NAMED, <<"toJSON">>},

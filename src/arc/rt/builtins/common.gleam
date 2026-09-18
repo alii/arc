@@ -1,4 +1,4 @@
-//// alloc and install kit for builtin objects
+// alloc and install kit for builtin objects
 
 import arc/bytecode/key.{type PropertyKey, Named}
 import arc/internal/tree_array

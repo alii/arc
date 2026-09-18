@@ -105,11 +105,11 @@ fn create_realm_262(
   let #(realm, st) = create_realm(st)
   let #(dollar, st) = install_262(st, realm)
   let parent_global = rt_call.realm_by_id(st, parent).global_object
-  let agent =
+  let agent_obj =
     own_data(st, parent_global, "$262")
     |> option.then(rt_val.handle_of)
     |> option.then(own_data(st, _, "agent"))
-  let st = case agent {
+  let st = case agent_obj {
     Some(v) -> {
       let #(prop, st) = rt_store.t_builtin_property(st, v)
       common.add_named_property(st, dollar, "agent", prop)

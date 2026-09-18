@@ -267,7 +267,7 @@ fn construct_regexp(
   alloc_regexp_with_proto(st, source, flags, proto)
 }
 
-pub fn regexp_create(st: Agent, p: JsVal, f: JsVal) -> #(JsVal, Agent) {
+pub fn create(st: Agent, p: JsVal, f: JsVal) -> #(JsVal, Agent) {
   let #(source, flags, st) = pattern_and_flags_from_strings(st, p, f)
   validate_pattern_and_flags(st, source, flags)
   let #(h, st) =
@@ -621,7 +621,7 @@ fn pattern_and_flags_from_strings(
   #(source, flags, st)
 }
 
-pub fn regexp_create_literal(
+pub fn create_literal(
   st: Agent,
   source: String,
   flags: String,
@@ -656,7 +656,7 @@ fn alloc_regexp_with_proto(
         },
         flags: canonical_flags(flags),
         last_index: 0,
-        compiled: uncompiled_regexp(),
+        compiled: uncompiled(),
       ),
       option.Some(proto),
       common.named_props([#("lastIndex", li_prop)]),
@@ -1170,7 +1170,7 @@ fn prototype_compile(
               source:,
               flags: canonical_flags(flags),
               last_index: 0,
-              compiled: uncompiled_regexp(),
+              compiled: uncompiled(),
             ),
           )
         _ -> cell
@@ -1278,9 +1278,16 @@ fn collect_global_matches(
       }
     _ -> {
       let #(m_v, st) = rt_obj.t_get_prop(st, result, StringKey(Index(0)))
-      let #(match_str, st) = rt_val.t_to_string(st, m_v)
-      let st = advance_if_empty(st, h, s, match_str)
-      collect_global_matches(st, rx, h, s, [mk_string(match_str), ..acc], n + 1)
+      let #(match_text, st) = rt_val.t_to_string(st, m_v)
+      let st = advance_if_empty(st, h, s, match_text)
+      collect_global_matches(
+        st,
+        rx,
+        h,
+        s,
+        [mk_string(match_text), ..acc],
+        n + 1,
+      )
     }
   }
 }
@@ -1289,9 +1296,9 @@ fn advance_if_empty(
   st: Agent,
   h: Handle,
   s: String,
-  match_str: String,
+  match_text: String,
 ) -> Agent {
-  case match_str {
+  case match_text {
     "" -> {
       let #(li_v, st) = get_named(st, mk_object(h), "lastIndex")
       let #(this_index, st) = rt_val.t_to_length(st, li_v)
@@ -1501,8 +1508,8 @@ fn collect_replace_results(
     KNull -> #(list.reverse(acc), st)
     _ -> {
       let #(m_v, st) = rt_obj.t_get_prop(st, result, StringKey(Index(0)))
-      let #(match_str, st) = rt_val.t_to_string(st, m_v)
-      let st = advance_if_empty(st, h, s, match_str)
+      let #(match_text, st) = rt_val.t_to_string(st, m_v)
+      let st = advance_if_empty(st, h, s, match_text)
       collect_replace_results(st, rx, h, s, [result, ..acc])
     }
   }
@@ -1567,9 +1574,9 @@ fn collect_coerced_captures(
             ..acc
           ])
         _ -> {
-          let #(cap_str, st) = rt_val.t_to_string(st, cap)
+          let #(cap_text, st) = rt_val.t_to_string(st, cap)
           collect_coerced_captures(st, result, n + 1, n_captures, [
-            mk_string(cap_str),
+            mk_string(cap_text),
             ..acc
           ])
         }
@@ -1646,8 +1653,8 @@ fn resolve_segments(
           case classify(cap) {
             KUndef -> resolve_segments(st, rest, ctx, nc, ["", ..acc])
             _ -> {
-              let #(cap_str, st) = rt_val.t_to_string(st, cap)
-              resolve_segments(st, rest, ctx, nc, [cap_str, ..acc])
+              let #(cap_text, st) = rt_val.t_to_string(st, cap)
+              resolve_segments(st, rest, ctx, nc, [cap_text, ..acc])
             }
           }
         }
@@ -2110,8 +2117,8 @@ fn regexp_string_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
             }
             True -> {
               let #(m_v, st) = rt_obj.t_get_prop(st, match, StringKey(Index(0)))
-              let #(match_str, st) = rt_val.t_to_string(st, m_v)
-              let st = advance_if_empty(st, matcher, s, match_str)
+              let #(match_text, st) = rt_val.t_to_string(st, m_v)
+              let st = advance_if_empty(st, matcher, s, match_text)
               iter_result(st, match, done: False)
             }
           }
@@ -2249,6 +2256,6 @@ fn flag_char(f: RegExpFlag) -> String {
 }
 
 // sentinel until first exec compiles the real matcher
-pub fn uncompiled_regexp() -> types.CompiledRegExp {
+pub fn uncompiled() -> types.CompiledRegExp {
   unsafe.coerce(types.mk_undefined())
 }

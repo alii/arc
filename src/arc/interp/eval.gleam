@@ -47,7 +47,7 @@ fn compile_source(
   compile: Compile,
 ) -> Result(FuncTemplate, #(JsVal, Agent)) {
   let compiled =
-    compile_task.run_compile_task(string.byte_size(source), fn() {
+    compile_task.run(string.byte_size(source), fn() {
       case parse(source) {
         Error(err) -> Error(parser.parse_error_to_string(err))
         Ok(#(body, sb)) ->
@@ -62,7 +62,7 @@ fn compile_source(
 
 fn top_level_locals(template: FuncTemplate, this: JsVal) -> TupleArray(JsVal) {
   let locals = tuple_array.repeat(mk_undefined(), template.local_count)
-  case lexical.lexical_slot(template.lexical, lexical.RefThis) {
+  case lexical.slot_of(template.lexical, lexical.RefThis) {
     Some(idx) -> tuple_array.set_unchecked(idx, this, locals)
     None -> locals
   }
@@ -122,7 +122,7 @@ fn run_bracketed(
   }
 }
 
-pub fn eval_hook(
+pub fn hook(
   agent: Agent,
   source: String,
   kind: EvalKind,
@@ -179,7 +179,7 @@ fn name_anonymous(agent: Agent, f: JsVal) -> Agent {
   }
 }
 
-pub fn direct_eval(
+pub fn direct(
   caller: State,
   args: List(JsVal),
   param_scope_names: List(String),
@@ -314,7 +314,7 @@ fn caller_boxes(
     use lex <- result.map(
       lexical.all_lexical_refs
       |> list.filter_map(fn(ref) {
-        lexical.lexical_slot(caller.func.lexical, ref) |> option.to_result(Nil)
+        lexical.slot_of(caller.func.lexical, ref) |> option.to_result(Nil)
       })
       |> list.try_map(read),
     )

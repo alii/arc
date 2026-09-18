@@ -1,7 +1,7 @@
 import arc/internal/gregorian.{
   days_in_month, days_in_year as days_in_iso_year, is_leap_year,
 }
-import arc/internal/temporal_calendar as tcal
+import arc/internal/temporal_calendar
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   CalendarNameAuto, Compatible, Day, apply_since_duration, apply_since_mode,
@@ -15,7 +15,7 @@ import arc/rt/builtins/temporal_common.{
 import arc/rt/builtins/temporal_diff.{difference_calendar_date}
 import arc/rt/builtins/temporal_fields.{
   add_sub_args, calendar_date_add, calendar_with_fields, compare_iso_date,
-  era_field, era_year_field, get_named, month_code_str, month_day_reference_iso,
+  era_field, era_year_field, get_named, month_code_text, month_day_reference_iso,
   no_date_fields, parse_plain_datetime_string, parsed_calendar_id,
   read_bag_calendar, read_date_fields, require_nonempty_fields,
   require_partial_bag, resolve_calendar_date, to_calendar_arg,
@@ -196,7 +196,7 @@ pub fn to_temporal_date(
   st: Agent,
   item: JsVal,
   options: JsVal,
-) -> #(#(IsoDate, tcal.Calendar), Agent) {
+) -> #(#(IsoDate, temporal_calendar.Calendar), Agent) {
   case classify(item) {
     KHandle(h) ->
       case temporal_data_of(st, item) {
@@ -226,7 +226,7 @@ pub fn date_from_bag(
   st: Agent,
   h: Handle,
   options: JsVal,
-) -> #(#(IsoDate, tcal.Calendar), Agent) {
+) -> #(#(IsoDate, temporal_calendar.Calendar), Agent) {
   let #(cal, st) = read_bag_calendar(st, h)
   let #(fields, st) = read_date_fields(st, h, cal)
   let #(overflow, st) = get_overflow_option_from_value(st, options)
@@ -251,7 +251,7 @@ pub fn date_field(d: IsoDate, g: TemporalDateGetter) -> JsVal {
     DateEraYear -> mk_undefined()
     DateYear -> mk_int(d.year)
     DateMonth -> mk_int(d.month)
-    DateMonthCode -> mk_string(month_code_str(d.month))
+    DateMonthCode -> mk_string(month_code_text(d.month))
     DateDay -> mk_int(d.day)
     DateDayOfWeek -> mk_int(day_of_week(d))
     DateDayOfYear -> mk_int(day_of_year(d))
@@ -266,32 +266,35 @@ pub fn date_field(d: IsoDate, g: TemporalDateGetter) -> JsVal {
 }
 
 pub fn date_field_cal(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   d: IsoDate,
   g: TemporalDateGetter,
 ) -> JsVal {
   case cal {
-    tcal.Iso8601 -> date_field(d, g)
+    temporal_calendar.Iso8601 -> date_field(d, g)
     _ -> {
-      let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
+      let cd = temporal_calendar.date_from_epoch_days(cal, epoch_days(d))
       case g {
-        DateCalendarId -> mk_string(tcal.identifier(cal))
+        DateCalendarId -> mk_string(temporal_calendar.identifier(cal))
         DateEra -> era_field(cal, cd)
         DateEraYear -> era_year_field(cal, cd)
         DateYear -> mk_int(cd.year)
         DateMonth -> mk_int(cd.month)
-        DateMonthCode -> mk_string(tcal.month_code(cal, cd.year, cd.month))
+        DateMonthCode ->
+          mk_string(temporal_calendar.month_code(cal, cd.year, cd.month))
         DateDay -> mk_int(cd.day)
         DateDayOfWeek -> mk_int(day_of_week(d))
         DateDayOfYear ->
-          mk_int(tcal.day_of_year(cal, cd.year, cd.month, cd.day))
+          mk_int(temporal_calendar.day_of_year(cal, cd.year, cd.month, cd.day))
         DateWeekOfYear -> mk_undefined()
         DateYearOfWeek -> mk_undefined()
         DateDaysInWeek -> mk_int(7)
-        DateDaysInMonth -> mk_int(tcal.days_in_month(cal, cd.year, cd.month))
-        DateDaysInYear -> mk_int(tcal.days_in_year(cal, cd.year))
-        DateMonthsInYear -> mk_int(tcal.months_in_year(cal, cd.year))
-        DateInLeapYear -> mk_bool(tcal.in_leap_year(cal, cd.year))
+        DateDaysInMonth ->
+          mk_int(temporal_calendar.days_in_month(cal, cd.year, cd.month))
+        DateDaysInYear -> mk_int(temporal_calendar.days_in_year(cal, cd.year))
+        DateMonthsInYear ->
+          mk_int(temporal_calendar.months_in_year(cal, cd.year))
+        DateInLeapYear -> mk_bool(temporal_calendar.in_leap_year(cal, cd.year))
       }
     }
   }
@@ -359,10 +362,10 @@ pub fn method(
     }
     PlainDateToPlainYearMonth -> {
       let first = case cal {
-        tcal.Iso8601 -> IsoDate(..d, day: 1)
+        temporal_calendar.Iso8601 -> IsoDate(..d, day: 1)
         _ -> {
-          let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
-          iso_date_from_epoch_days(tcal.date_to_epoch_days(
+          let cd = temporal_calendar.date_from_epoch_days(cal, epoch_days(d))
+          iso_date_from_epoch_days(temporal_calendar.date_to_epoch_days(
             cal,
             cd.year,
             cd.month,
@@ -374,11 +377,11 @@ pub fn method(
     }
     PlainDateToPlainMonthDay ->
       case cal {
-        tcal.Iso8601 ->
+        temporal_calendar.Iso8601 ->
           make_month_day_cal(st, protos, d.month, d.day, 1972, cal)
         _ -> {
-          let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
-          let mc = tcal.month_code_of(cal, cd.year, cd.month)
+          let cd = temporal_calendar.date_from_epoch_days(cal, epoch_days(d))
+          let mc = temporal_calendar.month_code_of(cal, cd.year, cd.month)
           let iso =
             rt_val.or_throw(
               st,
@@ -390,15 +393,15 @@ pub fn method(
     PlainDateToZonedDateTime -> {
       let arg = helpers.arg_at(args, 0)
       let #(tz, plain_time, st) = case classify(arg) {
-        KStr(tz_str) -> {
-          let #(tz, st) = time_zone_from_string(st, tz_str)
+        KStr(tz_text) -> {
+          let #(tz, st) = time_zone_from_string(st, tz_text)
           #(tz, mk_undefined(), st)
         }
         KHandle(oh) -> {
           let #(tz_val, st) = get_named(st, oh, "timeZone")
           let #(tz, st) = case classify(tz_val) {
             KUndef -> rt_val.t_throw_type_error(st, "time zone is required")
-            KStr(tz_str) -> time_zone_from_string(st, tz_str)
+            KStr(tz_text) -> time_zone_from_string(st, tz_text)
             _ -> rt_val.t_throw_type_error(st, "time zone must be a string")
           }
           let #(plain_time, st) = get_named(st, oh, "plainTime")
@@ -441,7 +444,7 @@ fn optional_time_arg(st: Agent, v: JsVal) -> #(IsoTime, Agent) {
 fn date_until_since(
   st: Agent,
   protos: TemporalProtos,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   d1: IsoDate,
   d2: IsoDate,
   args: List(JsVal),

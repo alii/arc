@@ -95,20 +95,20 @@ fn warm_caches() -> Nil {
 }
 
 fn boot_agent(metadata: TestMetadata) -> Agent {
-  let agent = boot_base_agent()
+  let st = boot_base_agent()
   case list.contains(metadata.flags, "CanBlockIsFalse") {
-    True -> Agent(..agent, hooks: HostHooks(..agent.hooks, can_block: False))
-    False -> agent
+    True -> Agent(..st, hooks: HostHooks(..st.hooks, can_block: False))
+    False -> st
   }
 }
 
 fn boot_base_agent() -> Agent {
   case agent_cache_get(agent_cache_key) {
-    Some(agent) -> agent
+    Some(st) -> st
     None -> {
-      let agent = rt_builtins.new_agent(harness_host_hooks()) |> entry.link
-      agent_cache_put(agent_cache_key, agent)
-      agent
+      let st = rt_builtins.new_agent(harness_host_hooks()) |> entry.link
+      agent_cache_put(agent_cache_key, st)
+      st
     }
   }
 }
@@ -767,8 +767,8 @@ fn extend_262_with_agent(
   dollar_262: Handle,
   parent: Option(AgentPid),
 ) -> HostContext {
-  let #(ctx, agent) = build_agent(ctx, parent)
-  let #(prop, st) = rt_store.t_builtin_property(ctx.agent, agent)
+  let #(ctx, agent_obj) = build_agent(ctx, parent)
+  let #(prop, st) = rt_store.t_builtin_property(ctx.agent, agent_obj)
   let st = common.add_named_property(st, dollar_262, "agent", prop)
   host.Context(..ctx, agent: st)
 }
@@ -871,7 +871,7 @@ fn run_agent_child(source: String, parent: AgentPid) -> Nil {
     }
     |> option.unwrap(mk_undefined())
   let compiled =
-    compile_task.run_compile_task(string.byte_size(source), fn() {
+    compile_task.run(string.byte_size(source), fn() {
       case parser.parse_script(source) {
         Error(err) -> Error(parser.parse_error_to_string(err))
         Ok(#(body, sb)) ->
@@ -991,11 +991,11 @@ fn make_broadcast_payload(
 ) -> #(Option(AgentPayload), Agent) {
   case classify(v) {
     KHandle(h) ->
-      case buffer.buffer_storage(st, h) {
+      case buffer.storage(st, h) {
         Some(Detached(..)) | None -> #(None, st)
         Some(Shared(..)) -> {
           let #(_owner, st) = sab.share(st, h)
-          #(option.map(buffer.buffer_storage(st, h), AgentSabPayload), st)
+          #(option.map(buffer.storage(st, h), AgentSabPayload), st)
         }
         Some(storage) -> #(Some(AgentSabPayload(storage:)), st)
       }
@@ -1173,7 +1173,7 @@ fn agent_cache_get(_key: String) -> Option(Agent) {
 }
 
 @external(erlang, "test262_exec_ffi", "cache_put")
-fn agent_cache_put(_key: String, _agent: Agent) -> Nil {
+fn agent_cache_put(_key: String, _st: Agent) -> Nil {
   panic as beam_only_test
 }
 

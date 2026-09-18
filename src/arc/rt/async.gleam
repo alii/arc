@@ -2,9 +2,9 @@ import arc/bytecode/error_kind.{RangeError, TypeError}
 import arc/bytecode/key.{Named}
 import arc/rt/call.{
   type Completion, type Frame, NormalCompletion, ThrowCompletion, t_try_call,
-}
+} as rt_call
 import arc/rt/gc as rt_gc
-import arc/rt/inspect
+import arc/rt/inspect as rt_inspect
 import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -69,7 +69,7 @@ fn alloc_native_fn(
   name: String,
   length: Int,
 ) -> #(Handle, Agent) {
-  call.t_native_new(
+  rt_call.t_native_new(
     st,
     Some(st.realm.function.prototype),
     token,
@@ -108,8 +108,7 @@ pub fn t_enqueue_job(st: Agent, job: Job) -> Agent {
   )
 }
 
-// the gc safepoint: collects only between jobs, never mid-expression
-// called by name from arc_aot_exec_ffi
+// gc safepoint between jobs only; called by name from arc_aot_exec_ffi
 pub fn drain(st: Agent) -> Agent {
   let st = case st.waiters {
     [] -> st
@@ -314,7 +313,8 @@ fn sent_of(side: Side, value: JsVal) -> #(Int, JsVal) {
 
 fn resume_from_job(st: Agent, turn: fn(Agent) -> Agent) -> Agent {
   let st = rt_store.t_enter_call(st)
-  let #(outcome, st) = call.try_run(st, fn(st) { #(mk_undefined(), turn(st)) })
+  let #(outcome, st) =
+    rt_call.try_run(st, fn(st) { #(mk_undefined(), turn(st)) })
   report_job_throw(#(outcome, rt_store.t_leave_call(st)))
 }
 
@@ -335,7 +335,7 @@ fn report_job_throw(outcome: #(Completion(JsVal), Agent)) -> Agent {
 }
 
 fn describe_thrown(st: Agent, thrown: JsVal) -> String {
-  inspect.format_error(st, thrown)
+  rt_inspect.format_error(st, thrown)
 }
 
 fn execute_job(st: Agent, job: Job) -> Agent {
@@ -356,7 +356,9 @@ fn execute_job(st: Agent, job: Job) -> Agent {
         #(ThrowCompletion(e), st) -> call_settle(st, reject, [e])
       }
     HostJob(run:) ->
-      report_job_throw(call.try_run(st, fn(st) { #(mk_undefined(), run(st)) }))
+      report_job_throw(
+        rt_call.try_run(st, fn(st) { #(mk_undefined(), run(st)) }),
+      )
   }
 }
 
@@ -464,7 +466,7 @@ pub fn t_gen_start(
 ) -> #(Handle, Agent) {
   t_gen_new(
     st,
-    call.frame_active_func(frame),
+    rt_call.frame_active_func(frame),
     ResumeCompiled(sm:, rs: 0, loc: loc0),
   )
 }
@@ -490,9 +492,9 @@ fn generator_prototype(
         Some(DataProperty(value:, ..)) ->
           case classify(value) {
             KHandle(p) -> p
-            _ -> intrinsic(call.function_realm(st, fn_h))
+            _ -> intrinsic(rt_call.function_realm(st, fn_h))
           }
-        _ -> intrinsic(call.function_realm(st, fn_h))
+        _ -> intrinsic(rt_call.function_realm(st, fn_h))
       }
     _ -> intrinsic(st.realm)
   }
@@ -740,7 +742,7 @@ fn resolve_with_handle(
   case rt_store.t_cell_get(st, h) {
     SObject(..) | types.SShapedObject(..) -> {
       let #(outcome, st) =
-        call.try_run(st, fn(st) {
+        rt_call.try_run(st, fn(st) {
           rt_obj.t_get_prop(st, resolution, StringKey(Named("then")))
         })
       case outcome {
@@ -908,7 +910,7 @@ pub fn t_asyncgen_start(
 ) -> #(Handle, Agent) {
   t_asyncgen_new(
     st,
-    call.frame_active_func(frame),
+    rt_call.frame_active_func(frame),
     ResumeCompiled(sm:, rs: 0, loc: loc0),
   )
 }
@@ -1264,23 +1266,23 @@ fn first_arg(args: List(JsVal)) -> JsVal {
 }
 
 // §27.7.5.1 asyncfunctionstart
-pub fn t_async_start(
+pub fn t_start(
   st: Agent,
   sm: SmFn,
   _frame: Frame,
   _args: List(JsVal),
   loc0: Loc,
 ) -> #(Handle, Agent) {
-  t_async_run(st, ResumeCompiled(sm:, rs: 0, loc: loc0))
+  t_run(st, ResumeCompiled(sm:, rs: 0, loc: loc0))
 }
 
-pub fn t_async_reject(st: Agent, reason: JsVal) -> #(Handle, Agent) {
+pub fn t_reject(st: Agent, reason: JsVal) -> #(Handle, Agent) {
   let #(promise_h, st) = t_new_promise(st)
   let st = t_promise_reject(st, promise_h, reason)
   #(promise_h, st)
 }
 
-pub fn t_async_run(st: Agent, resume: Resume) -> #(Handle, Agent) {
+pub fn t_run(st: Agent, resume: Resume) -> #(Handle, Agent) {
   let #(promise_h, st) = t_new_promise(st)
   let #(step, st) = apply_resume(st, resume, sent_start())
   #(promise_h, drive_async_step(st, None, promise_h, step))

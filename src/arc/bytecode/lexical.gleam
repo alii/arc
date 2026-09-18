@@ -31,7 +31,7 @@ pub type LexicalSlots {
 
 pub const owned_lexical_slot_count = 4
 
-pub fn captured_lexical_slots(
+pub fn captured_slots(
   this this: Option(Int),
   active_func active_func: Option(Int),
   home_object home_object: Option(Int),
@@ -44,10 +44,10 @@ pub fn captured_lexical_slots(
   }
 }
 
-pub fn lexical_slot(slots: LexicalSlots, ref: LexicalRef) -> Option(Int) {
+pub fn slot_of(slots: LexicalSlots, ref: LexicalRef) -> Option(Int) {
   case slots {
     NoLexicalSlots -> None
-    OwnedLexicalSlots(base) -> Some(base + lexical_ref_offset(ref))
+    OwnedLexicalSlots(base) -> Some(base + ref_offset(ref))
     CapturedLexicalSlots(this:, active_func:, home_object:, new_target:) ->
       case ref {
         RefThis -> this
@@ -58,7 +58,7 @@ pub fn lexical_slot(slots: LexicalSlots, ref: LexicalRef) -> Option(Int) {
   }
 }
 
-pub fn lexical_ref_offset(ref: LexicalRef) -> Int {
+pub fn ref_offset(ref: LexicalRef) -> Int {
   case ref {
     RefThis -> 0
     RefActiveFunc -> 1
@@ -90,7 +90,7 @@ pub const every_lexical_ref = LexicalRefs(
   new_target: True,
 )
 
-pub fn lexical_refs_or(a: LexicalRefs, b: LexicalRefs) -> LexicalRefs {
+pub fn refs_or(a: LexicalRefs, b: LexicalRefs) -> LexicalRefs {
   LexicalRefs(
     this: a.this || b.this,
     active_func: a.active_func || b.active_func,
@@ -99,7 +99,7 @@ pub fn lexical_refs_or(a: LexicalRefs, b: LexicalRefs) -> LexicalRefs {
   )
 }
 
-pub fn lexical_refs_and(a: LexicalRefs, b: LexicalRefs) -> LexicalRefs {
+pub fn refs_and(a: LexicalRefs, b: LexicalRefs) -> LexicalRefs {
   LexicalRefs(
     this: a.this && b.this,
     active_func: a.active_func && b.active_func,
@@ -108,7 +108,7 @@ pub fn lexical_refs_and(a: LexicalRefs, b: LexicalRefs) -> LexicalRefs {
   )
 }
 
-pub fn lexical_refs_present(d: Dict(LexicalRef, a)) -> LexicalRefs {
+pub fn refs_present(d: Dict(LexicalRef, a)) -> LexicalRefs {
   LexicalRefs(
     this: dict.has_key(d, RefThis),
     active_func: dict.has_key(d, RefActiveFunc),
@@ -117,7 +117,7 @@ pub fn lexical_refs_present(d: Dict(LexicalRef, a)) -> LexicalRefs {
   )
 }
 
-pub fn lexical_refs_get(refs: LexicalRefs, ref: LexicalRef) -> Bool {
+pub fn refs_get(refs: LexicalRefs, ref: LexicalRef) -> Bool {
   case ref {
     RefThis -> refs.this
     RefActiveFunc -> refs.active_func

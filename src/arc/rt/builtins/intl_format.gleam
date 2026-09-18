@@ -336,7 +336,7 @@ fn group_sep(key: LocaleKey) -> String {
   }
 }
 
-fn nan_str(key: LocaleKey) -> String {
+fn nan_text(key: LocaleKey) -> String {
   case key.base_tag {
     "zh-TW" | "zh-Hant" -> "非數值"
     _ -> "NaN"
@@ -571,7 +571,7 @@ fn de_compact(e: Int, display: CompactDisplay) -> CompactSuffix {
 pub fn format_nan_parts(opts: NumberFormatOptions) -> List(Part) {
   wrap_affixes(
     opts,
-    [#(PartNan, nan_str(opts.locale))],
+    [#(PartNan, nan_text(opts.locale))],
     negative: False,
     is_nan: True,
   )
@@ -1194,7 +1194,7 @@ fn pow10_int(e: Int) -> Int {
 fn split_integer_fraction(dec: Decimal, frac_len: Int) -> #(String, String) {
   let n = string.length(dec.digits)
   let exponent = dec.exponent
-  let #(int_str, frac_str) = case dec.digits, exponent <= 0, n <= exponent {
+  let #(int_text, frac_text) = case dec.digits, exponent <= 0, n <= exponent {
     "", _, _ -> #("0", "")
     _, True, _ -> #("0", string.repeat("0", -exponent) <> dec.digits)
     _, False, True -> #(dec.digits <> string.repeat("0", exponent - n), "")
@@ -1203,12 +1203,12 @@ fn split_integer_fraction(dec: Decimal, frac_len: Int) -> #(String, String) {
       string.slice(dec.digits, exponent, n - exponent),
     )
   }
-  let flen = string.length(frac_str)
-  let frac_str = case flen < frac_len {
-    True -> frac_str <> string.repeat("0", frac_len - flen)
-    False -> frac_str
+  let flen = string.length(frac_text)
+  let frac_text = case flen < frac_len {
+    True -> frac_text <> string.repeat("0", frac_len - flen)
+    False -> frac_text
   }
-  #(int_str, frac_str)
+  #(int_text, frac_text)
 }
 
 fn format_digits(
@@ -1221,7 +1221,7 @@ fn format_digits(
   let by_frac = fn(frac: Precision) {
     render_frac(dec, frac, opts.rounding_increment, mode, negative)
   }
-  let #(int_str, frac_str) = case opts.sig, opts.frac {
+  let #(int_text, frac_text) = case opts.sig, opts.frac {
     Some(sig), None -> by_sig(sig)
     Some(sig), Some(frac) ->
       case prefer_sig(opts.rounding_priority, dec, sig, frac) {
@@ -1231,23 +1231,23 @@ fn format_digits(
     None, Some(frac) -> by_frac(frac)
     None, None -> by_frac(Precision(min: 0, max: 3))
   }
-  let frac_str = case opts.trailing_zero_display {
+  let frac_text = case opts.trailing_zero_display {
     TrailingZeroStripIfInteger ->
-      case string.to_graphemes(frac_str) |> list.all(fn(c) { c == "0" }) {
+      case string.to_graphemes(frac_text) |> list.all(fn(c) { c == "0" }) {
         True -> ""
-        False -> frac_str
+        False -> frac_text
       }
-    TrailingZeroAuto -> frac_str
+    TrailingZeroAuto -> frac_text
   }
   let key = opts.locale
-  let int_str = string.pad_start(int_str, opts.min_int, "0")
-  let int_parts = group_integer(opts, int_str)
-  case frac_str {
+  let int_text = string.pad_start(int_text, opts.min_int, "0")
+  let int_parts = group_integer(opts, int_text)
+  case frac_text {
     "" -> int_parts
     _ ->
       list.append(int_parts, [
         #(PartDecimal, decimal_sep(key)),
-        #(PartFraction, frac_str),
+        #(PartFraction, frac_text),
       ])
   }
 }
@@ -1309,8 +1309,8 @@ fn render_frac(
   #(i, strip_frac_to_min(f, frac.min))
 }
 
-fn count_sig(int_str: String, frac_str: String) -> Int {
-  let all = int_str <> frac_str
+fn count_sig(int_text: String, frac_text: String) -> Int {
+  let all = int_text <> frac_text
   let #(stripped, _) = strip_leading(all, 0)
   string.length(stripped)
 }
@@ -1323,9 +1323,9 @@ fn strip_frac_to_min(frac: String, min: Int) -> String {
   }
 }
 
-fn group_integer(opts: NumberFormatOptions, int_str: String) -> List(Part) {
+fn group_integer(opts: NumberFormatOptions, int_text: String) -> List(Part) {
   let key = opts.locale
-  let n = string.length(int_str)
+  let n = string.length(int_text)
   let grouped = case opts.use_grouping {
     GroupingNever -> False
     GroupingAlways -> n > 3
@@ -1333,11 +1333,11 @@ fn group_integer(opts: NumberFormatOptions, int_str: String) -> List(Part) {
     GroupingAuto -> n > 3
   }
   case grouped {
-    False -> [#(PartInteger, int_str)]
+    False -> [#(PartInteger, int_text)]
     True -> {
       let groups = case indian_grouping(key) {
-        True -> split_groups_indian(int_str)
-        False -> split_groups(int_str)
+        True -> split_groups_indian(int_text)
+        False -> split_groups(int_text)
       }
       let sep = group_sep(key)
       groups

@@ -1,4 +1,4 @@
-//// flat bytecode calls; other callees nest via rt/call
+// flat bytecode calls; other callees nest via rt/call
 
 import arc/bytecode/error_kind.{ReferenceError, TypeError}
 import arc/bytecode/lexical
@@ -10,11 +10,11 @@ import arc/interp/state.{
   type SavedFrame, type State, type StepExit, Returned, SavedCont, SavedFrame,
   SavedRegFrame, State, Threw,
 }
-import arc/rt/abstract_ops as rt_abstract
+import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins as rt_builtins
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call as rt_call
-import arc/rt/elements as rt_elements
+import arc/rt/elements
 import arc/rt/inspect as rt_inspect
 import arc/rt/limits
 import arc/rt/obj as rt_obj
@@ -56,7 +56,7 @@ pub fn frame_info_at(template: FuncTemplate, line: Int) -> types.FrameInfo {
   FrameInfo(name: option.unwrap(template.name, ""), script: stack_source, line:)
 }
 
-/// no depth bump, caller already counted it
+// no depth bump, caller already counted it
 pub fn push_frame_info(agent: Agent, template: FuncTemplate) -> Agent {
   Agent(..agent, frames: [frame_info_at(template, 0), ..agent.frames])
 }
@@ -68,7 +68,7 @@ pub fn pop_frame_info(agent: Agent) -> Agent {
   }
 }
 
-/// catch frames and call_depth up with the loop's fast calls
+// catch frames and call_depth up with the loop's fast calls
 pub fn sync(state: State, agent: Agent, pc: Int, bump: Int) -> Agent {
   let depth = state.depth
   let line = tuple_array.element(pc + 1, state.func.lines)
@@ -149,12 +149,12 @@ pub type CoroutineCall {
   )
 }
 
-/// callbacks into interpreter parts this module cannot import
+// callbacks into interpreter parts this module cannot import
 pub type Drive {
   Drive(start_coroutine: fn(State, CoroutineCall) -> Result(State, StepExit))
 }
 
-/// §10.2.1.2 bind this, then lay out locals
+// §10.2.1.2 bind this, then lay out locals
 fn setup_frame(
   agent: Agent,
   env: EnvTuple,
@@ -217,7 +217,7 @@ fn class_constructor_call_error(
   )
 }
 
-/// §10.2.1 flat entry: park caller, switch to callee
+// §10.2.1 flat entry: park caller, switch to callee
 fn call_function(
   state: State,
   fn_h: Handle,
@@ -356,7 +356,7 @@ pub fn call_function_then(
   }
 }
 
-/// §15.10 isintailposition
+// §15.10 isintailposition
 pub fn is_tail_call(state: State, pc: Int, callee: FuncTemplate) -> Bool {
   let frame_eligible = case state.try_stack, state.call_stack {
     [], [SavedCont(..), ..] -> False
@@ -377,7 +377,7 @@ pub fn is_tail_call(state: State, pc: Int, callee: FuncTemplate) -> Bool {
   }
 }
 
-/// §15.10.3 drop the just-parked caller frame
+// §15.10.3 drop the just-parked caller frame
 pub fn elide_tail_frame(new_state: State) -> State {
   case new_state.call_stack {
     [saved, ..rest_frames] ->
@@ -533,7 +533,7 @@ pub fn call_cell(
   }
 }
 
-/// §7.3.20 createlistfromarraylike
+// §7.3.20 createlistfromarraylike
 fn list_from_array_like(
   state: State,
   array_like: JsVal,
@@ -544,12 +544,12 @@ fn list_from_array_like(
     False -> Ok(#(args, state))
     True ->
       guarded(State(..state, stack: rest_stack), fn(agent) {
-        rt_abstract.create_list_from_array_like(agent, array_like)
+        rt_abstract_ops.create_list_from_array_like(agent, array_like)
       })
   }
 }
 
-/// at the depth limit the nested t_try_call raises rangeerror
+// at the depth limit the nested t_try_call raises rangeerror
 fn call_native(
   state: State,
   token: NativeToken,
@@ -599,7 +599,7 @@ fn require_callable(
   }
 }
 
-/// stack left as is; unwind truncates it
+// stack left as is; unwind truncates it
 fn not_a_function(state: State, callee: JsVal) -> Result(State, StepExit) {
   state.throw_type_error(
     state,
@@ -622,17 +622,15 @@ fn call_nested(
   }
 }
 
-/// holes as undefined
+// holes as undefined
 pub fn array_values(agent: Agent, v: JsVal) -> List(JsVal) {
   case classify(v) {
     KHandle(h) ->
       case rt_obj.as_sobject(rt_store.t_cell_get(agent, h)) {
-        SObject(kind: ArrayObj(length:), elements:, ..)
-        | SObject(kind: ArgumentsObj(length:, ..), elements:, ..) ->
-          rt_elements.dense_list(elements, length)
-          |> option.lazy_unwrap(fn() {
-            padded_elements(elements, length - 1, [])
-          })
+        SObject(kind: ArrayObj(length:), elements: els, ..)
+        | SObject(kind: ArgumentsObj(length:, ..), elements: els, ..) ->
+          elements.dense_list(els, length)
+          |> option.lazy_unwrap(fn() { padded_elements(els, length - 1, []) })
         _ -> []
       }
     _ -> []
@@ -640,18 +638,17 @@ pub fn array_values(agent: Agent, v: JsVal) -> List(JsVal) {
 }
 
 fn padded_elements(
-  elements: types.JsElements,
+  els: types.JsElements,
   i: Int,
   acc: List(JsVal),
 ) -> List(JsVal) {
   case i < 0 {
     True -> acc
-    False ->
-      padded_elements(elements, i - 1, [rt_elements.get(elements, i), ..acc])
+    False -> padded_elements(els, i - 1, [elements.get(els, i), ..acc])
   }
 }
 
-/// §10.1.13, reading prototype may raise
+// §10.1.13, reading prototype may raise
 fn new_base_this(agent: Agent, new_target: JsVal) -> #(Handle, Agent) {
   let #(proto, agent) =
     rt_call.get_prototype_from_constructor(
@@ -662,7 +659,7 @@ fn new_base_this(agent: Agent, new_target: JsVal) -> #(Handle, Agent) {
   rt_obj.t_new_receiver(agent, proto)
 }
 
-/// §10.2.2 construct
+// §10.2.2 construct
 pub fn construct(
   state: State,
   ctor: JsVal,
@@ -788,7 +785,7 @@ fn construct_handle(
 }
 
 fn read_lexical_local(state: State, ref: lexical.LexicalRef) -> JsVal {
-  case lexical.lexical_slot(state.func.lexical, ref) {
+  case lexical.slot_of(state.func.lexical, ref) {
     None -> mk_undefined()
     Some(idx) -> {
       let raw = tuple_array.get_unchecked(idx, state.locals)
@@ -808,7 +805,7 @@ fn read_this_local(state: State) -> JsVal {
   read_lexical_local(state, lexical.RefThis)
 }
 
-/// §10.2.2 steps 10-12 constructor return override
+// §10.2.2 steps 10-12 constructor return override
 fn resolve_return(
   state: State,
   return_value: JsVal,
@@ -875,8 +872,7 @@ fn return_to(state: State, saved: SavedFrame, value: JsVal) -> State {
   )
 }
 
-// the callee ran for an op that was midway; its cont finishes the op
-// no safepoint first: what cont captured lives only in the popped frame
+// cont finishes the midway op; no safepoint, its captures live only here
 pub fn cont_return(
   agent: Agent,
   depth: Int,
@@ -903,7 +899,7 @@ pub fn restore_frame(
   State(..caller, agent:, stack:, locals:, pc: saved.pc)
 }
 
-/// out of handlers here; continue the search in the caller
+// out of handlers here; continue the search in the caller
 pub fn unwind_frame(state: State) -> Option(State) {
   case state.call_stack {
     [] -> None
@@ -916,7 +912,7 @@ pub fn unwind_frame(state: State) -> Option(State) {
   }
 }
 
-/// §10.4.4.7 unmapped when strict or non-simple params
+// §10.4.4.7 unmapped when strict or non-simple params
 pub fn create_arguments(
   state: State,
   simple_params simple_params: Bool,
@@ -956,7 +952,7 @@ pub type RootKind {
   RootDerivedConstruct
 }
 
-/// §10.2.2 steps 1-3, taken in the caller's realm
+// §10.2.2 steps 1-3, taken in the caller's realm
 pub fn root_this(
   agent: Agent,
   template: FuncTemplate,
@@ -973,7 +969,7 @@ pub fn root_this(
   }
 }
 
-/// same per cell, so callers making many build it once
+// same per cell, so callers making many build it once
 pub type RootCallee {
   RootCallee(
     callee: JsVal,
@@ -1003,7 +999,7 @@ pub fn root_callee(
   )
 }
 
-/// caller has already checked the depth limit
+// caller has already checked the depth limit
 pub fn enter_root(
   agent: Agent,
   callee: RootCallee,
@@ -1074,7 +1070,7 @@ pub fn root_coroutine(state: State, fn_h: Handle) -> CoroutineCall {
   )
 }
 
-/// §10.2.2 steps 10-13 for a root construct
+// §10.2.2 steps 10-13 for a root construct
 pub fn finish_root(
   kind: RootKind,
   value: JsVal,
@@ -1086,6 +1082,6 @@ pub fn finish_root(
   }
   case resolve_return(final_state, value, constructor_this) {
     Ok(v) -> Ok(#(v, final_state.agent))
-    Error(#(thrown, s)) -> Error(#(thrown, s.agent))
+    Error(#(thrown, state)) -> Error(#(thrown, state.agent))
   }
 }

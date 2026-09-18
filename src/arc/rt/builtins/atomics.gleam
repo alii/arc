@@ -145,7 +145,7 @@ fn with_ta_and_index(
       "Invalid TypedArray element type for Atomics operation",
     )
   })
-  use storage <- helpers.some_or(buffer.buffer_storage(st, view.buffer), fn() {
+  use storage <- helpers.some_or(buffer.storage(st, view.buffer), fn() {
     rt_val.t_throw_type_error(st, "TypedArray is not attached")
   })
   use Nil <- helpers.guard(
@@ -254,7 +254,7 @@ fn live_buffer(storage: BufferStorage) -> Option(BufferInfo) {
 
 // §25.4.3.4 coercion may have detached or shrunk buffer
 fn revalidate(st: Agent, info: AtomicsTarget, idx: Int) -> BufferInfo {
-  use storage <- helpers.some_or(buffer.buffer_storage(st, info.buffer), fn() {
+  use storage <- helpers.some_or(buffer.storage(st, info.buffer), fn() {
     rt_val.t_throw_type_error(st, "TypedArray is not attached")
   })
   use buf <- helpers.some_or(live_buffer(storage), fn() {
@@ -553,7 +553,7 @@ fn wait_result_object(
 fn notify(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(info, idx, st) = with_ta_and_index(st, args, mode: NotifyAccess)
   let #(count, st) = notify_count(st, helpers.arg_at(args, 2))
-  case buffer.buffer_storage(st, info.buffer) {
+  case buffer.storage(st, info.buffer) {
     Some(Shared(block: OwnerBlock(owner:, ..), ..)) -> {
       let n = sab.notify(owner, element_offset(info, idx), count)
       #(mk_int(n), st)

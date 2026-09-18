@@ -1,4 +1,4 @@
-import arc/bytecode/key.{canonical_key}
+import arc/bytecode/key
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
@@ -11,7 +11,7 @@ import gleam/option.{type Option, None, Some}
 import rt_helpers
 
 fn key(name: String) {
-  StringKey(canonical_key(name))
+  StringKey(key.canonical(name))
 }
 
 fn json(st: Agent, method: String, args: List(JsVal)) -> #(JsVal, Agent) {

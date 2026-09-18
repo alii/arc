@@ -240,8 +240,8 @@ pub fn guard_catches_js_throw_test() {
   let assert kernel.Ok(value:, agent: _) =
     kernel.guard3(rt_obj.t_get_prop, st, obj, StringKey(Named("nope")))
   assert classify(value) == KUndef
-  let assert kernel.Threw(agent:, thrown:) =
+  let assert kernel.Threw(agent: st, thrown:) =
     kernel.guard3(rt_obj.t_get_prop, st, mk_undefined(), StringKey(Named("x")))
-  let #(msg, _) = rt_val.t_to_string(agent, thrown)
+  let #(msg, _) = rt_val.t_to_string(st, thrown)
   assert msg == "TypeError: Cannot read properties of undefined (reading 'x')"
 }

@@ -103,7 +103,7 @@ pub fn compile_module(
       linker_seeded_exports: set.from_list(local_export_names(summary.exports)),
     )
   let tree = scope.finalize(sb, opts)
-  use out <- result.map(emit.emit_module(items, tree))
+  use out <- result.map(emit.module(items, tree))
   let template = finish_top_level(out, lexical.ScriptCode, eval_var_env: None)
   let has_tla =
     tuple_array.to_list(template.bytecode)
@@ -172,7 +172,7 @@ pub fn compile_eval_direct(
     caller.is_strict && contains_with(tree),
     Error(emit.EarlySyntaxError("'with' not allowed in strict mode")),
   )
-  use out <- result.try(emit.emit_eval_direct(
+  use out <- result.try(emit.eval_direct(
     body,
     tree,
     caller.is_strict,
@@ -197,7 +197,7 @@ fn direct_eval_opts(
   // lexical box refs follow the names, one slot per ref the caller has
   let lexical_captures = {
     use ref <- lexical.number_refs(from: list.length(caller.slot_names))
-    option.is_some(lexical.lexical_slot(caller.lexical, ref))
+    option.is_some(lexical.slot_of(caller.lexical, ref))
   }
   // every with holder must be one of caller.slot_names
   let with_stack =
@@ -233,7 +233,7 @@ fn compile_top_level(
 ) -> Result(FuncTemplate, CompileError) {
   let opts = scope.AnalyzeOpts(..scope.default_analyze_opts(), top_lex:)
   let tree = scope.finalize(sb, opts)
-  use out <- result.map(emit.emit_program(stmts, tree, deletable_global_vars:))
+  use out <- result.map(emit.program(stmts, tree, deletable_global_vars:))
   finish_top_level(out, lexical.ScriptCode, eval_var_env: Some(GlobalVarEnv))
 }
 

@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Named, canonical_key}
+import arc/bytecode/key.{Named}
 import arc/internal/tree_array
 import arc/rt/async as rt_async
 import arc/rt/builtins/common
@@ -780,7 +780,7 @@ fn create_keyed_result(
 
 fn key_of_value(v: JsVal) -> option.Option(ObjectKey) {
   case classify(v) {
-    types.KStr(s) -> Some(StringKey(canonical_key(s)))
+    types.KStr(s) -> Some(StringKey(key.canonical(s)))
     types.KSym(sym) -> Some(SymbolKey(sym))
     _ -> None
   }
