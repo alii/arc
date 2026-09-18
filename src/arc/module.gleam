@@ -1115,7 +1115,7 @@ fn namespace_slot(exports: Dict(String, Handle), tag: String) -> types.JsSlot {
   )
 }
 
-@external(erlang, "arc_rt_store_ffi", "identity")
+@external(erlang, "gleam_stdlib", "identity")
 fn as_code(
   f: fn(Agent, rt_call.Frame, List(JsVal)) -> #(JsVal, Agent),
 ) -> CompiledFn

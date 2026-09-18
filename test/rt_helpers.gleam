@@ -1,4 +1,5 @@
 import arc/host_hooks.{type HostHooks, HostHooks}
+import arc/internal/unsafe
 import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
@@ -47,19 +48,22 @@ pub fn record(term: a) -> Nil
 @external(erlang, "rt_helpers_ffi", "recorded")
 pub fn recorded() -> List(a)
 
-@external(erlang, "arc_rt_store_ffi", "identity")
 pub fn as_code(
   f: fn(Agent, rt_call.Frame, List(JsVal)) -> #(JsVal, Agent),
-) -> CompiledFn
+) -> CompiledFn {
+  unsafe.coerce(f)
+}
 
 @external(erlang, "erlang", "element")
 pub fn frame_at(n: Int, frame: rt_call.Frame) -> JsVal
 
-@external(erlang, "arc_rt_store_ffi", "identity")
-pub fn as_frame(t: a) -> rt_call.Frame
+pub fn as_frame(t: a) -> rt_call.Frame {
+  unsafe.coerce(t)
+}
 
-@external(erlang, "arc_rt_store_ffi", "identity")
-pub fn as_loc(t: a) -> types.Loc
+pub fn as_loc(t: a) -> types.Loc {
+  unsafe.coerce(t)
+}
 
 @external(erlang, "rt_helpers_ffi", "counter_sm")
 pub fn counter_sm() -> types.SmFn

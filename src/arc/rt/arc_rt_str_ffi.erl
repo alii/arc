@@ -2,9 +2,8 @@
 %% crumbs: byte offsets of codepoints 0, K, 2K.., or none past MAXCRUMB
 %% TODO(Deviation): indexes by codepoint, js wants utf-16 code units
 -module(arc_rt_str_ffi).
--export([mk/1, mk_list/1, bin/1, len/1, is_str/1, off/2, cp_at/2,
-         char_at/2, sub/3, concat/2, concat_loose/2, index_of/3,
-         cp_index/2]).
+-export([mk/1, mk_list/1, bin/1, len/1, is_str/1, cp_at/2, char_at/2,
+         sub/3, concat/2, concat_loose/2, index_of/3]).
 
 -include("arc_rt_layout.hrl").
 
@@ -149,13 +148,11 @@ concat(A, B) ->
 %% keep A's crumbs, rescan from its last one through the appended tail
 extend(A, LA, New) ->
     J = LA div ?K,
-    Kept = case A of
-        _ when is_binary(A) -> [I * ?K || I <- lists:seq(0, J - 1)];
-        {?STR_TAG, _, _, Cr} -> lists:sublist(tuple_to_list(Cr), J)
-    end,
-    Base = case A of
-        _ when is_binary(A) -> J * ?K;
-        {?STR_TAG, _, _, Cr1} -> element(J + 1, Cr1)
+    {Kept, Base} = case A of
+        _ when is_binary(A) ->
+            {[I * ?K || I <- lists:seq(0, J - 1)], J * ?K};
+        {?STR_TAG, _, _, Cr} ->
+            {lists:sublist(tuple_to_list(Cr), J), element(J + 1, Cr)}
     end,
     <<_:Base/binary, Rest/binary>> = New,
     {_, More} = walk(Rest, Base, J * ?K, []),

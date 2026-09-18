@@ -1,5 +1,5 @@
 -module(arc_rt_store_ffi).
--export([t_throw/2, is_handle/1, identity/1, as_object_key/1,
+-export([t_throw/2, is_handle/1, as_object_key/1,
          t_cell_get/2, t_var_get/2]).
 
 -include("arc_rt_layout.hrl").
@@ -24,8 +24,6 @@ t_throw(St, V) -> erlang:error({wasm_exn, 0, [St, V]}).
 
 is_handle({js_cell, N}) when is_integer(N) -> true;
 is_handle(_) -> false.
-
-identity(X) -> X.
 
 as_object_key({string_key, _} = K) -> K;
 as_object_key({symbol_key, _} = K) -> K;

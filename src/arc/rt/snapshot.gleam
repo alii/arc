@@ -5,14 +5,14 @@ import arc/rt/builtins/regexp as b_regexp
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type Job, type JsSlot, type JsStore, type Realm,
-  type ShapeDesc, Agent, HostJob, JsCell, JsStore, KCompiled, ReactionJob,
-  RegExpObj, ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext,
-  SAsyncGen, SBox, SDisposeCapability, SGenerator, SObject, SPromiseData,
-  SShapedObject,
+  type ShapeDesc, Agent, HostJob, JsCell, JsStore, KCompiled, KNative,
+  ReactionJob, RegExpConstructor, RegExpN, RegExpObj, ResolveThenableJob,
+  ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen, SBox,
+  SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
 }
 import gleam/dict.{type Dict}
 import gleam/list
-import gleam/option.{type Option, None, Some}
+import gleam/option.{None}
 import gleam/result
 import gleam/set.{type Set}
 
@@ -180,7 +180,9 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     next_shape:,
     unit_uid:,
   ) = image
+  let fresh = rt_store.new()
   JsStore(
+    ..fresh,
     data: dict.fold(data, arena.new(), fn(acc, id, slot) {
       arena.set(id, slot, acc)
     }),
@@ -190,40 +192,25 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     prop_seq:,
     shapes:,
     next_shape:,
-    ics: dict.new(),
-    free_protos: dict.new(),
-    global_epoch: 0,
-    ops: rt_store.t_store_new().ops,
     microtasks: list.fold(microtasks, types.jq_new(), types.jq_push),
     pinned_roots:,
     meta: types.StoreMeta(
-      gc_live: 0,
+      ..fresh.meta,
       private_uid:,
       symbol_uid:,
       unit_uid:,
       unhandled_rejections:,
-      old: arena.new(),
-      old_next: 0,
-      weak_old: [],
-      major_live: 0,
-      minors_since_major: 0,
     ),
   )
 }
 
 fn check_cells(data: Dict(Int, JsSlot)) -> Result(Nil, SnapshotError) {
-  let offender: Option(Int) =
-    dict.fold(data, None, fn(found, id, slot) {
-      case found, holds_compiled_code(slot) {
-        Some(_), _ -> found
-        None, True -> Some(id)
-        None, False -> None
-      }
-    })
-  case offender {
-    Some(id) -> Error(SnapshotContainsCompiledCode(JsCell(id)))
-    None -> Ok(Nil)
-  }
+  dict.fold(data, Ok(Nil), fn(found, id, slot) {
+    case found, holds_compiled_code(slot) {
+      Ok(Nil), True -> Error(SnapshotContainsCompiledCode(JsCell(id)))
+      _, _ -> found
+    }
+  })
 }
 
 fn holds_compiled_code(slot: JsSlot) -> Bool {
@@ -246,36 +233,22 @@ fn holds_compiled_code(slot: JsSlot) -> Bool {
 // compiled re pattern is otp-release specific
 fn drop_regexp_matcher(slot: JsSlot) -> JsSlot {
   case slot {
-    SObject(kind: RegExpObj(source:, flags:, last_index:, compiled: _), ..) ->
+    SObject(kind: RegExpObj(..) as kind, ..) ->
       SObject(
         ..slot,
-        kind: RegExpObj(
-          source:,
-          flags:,
-          last_index:,
-          compiled: b_regexp.uncompiled_regexp(),
-        ),
+        kind: RegExpObj(..kind, compiled: b_regexp.uncompiled_regexp()),
       )
     SObject(
-      kind: types.KNative(
-        tag: types.RegExpN(types.RegExpConstructor(legacy:, ..)),
-        name:,
-        length:,
-        constructible:,
-      ),
+      kind: KNative(tag: RegExpN(RegExpConstructor(..) as ctor), ..) as kind,
       ..,
     ) ->
       SObject(
         ..slot,
-        kind: types.KNative(
-          tag: types.RegExpN(types.RegExpConstructor(
-            legacy:,
-            proto_props: None,
-            compiled: dict.new(),
-          )),
-          name:,
-          length:,
-          constructible:,
+        kind: KNative(
+          ..kind,
+          tag: RegExpN(
+            RegExpConstructor(..ctor, proto_props: None, compiled: dict.new()),
+          ),
         ),
       )
     _ -> slot

@@ -2,7 +2,7 @@
 -module(arc_rt_obj_ffi).
 -export([t_get_prop_own_data/3, t_set_prop_own_data/4, t_set_prop_named/5,
          t_copy_data_fast/3, t_for_in_fast/2, t_own_enum_fast/2,
-         t_create_data_prop/4, store_put_seq/3,
+         t_create_data_prop/4,
          t_get_prop_ic/4, t_get_prop_ic_miss/4, t_get_prop_slow/4,
          t_get_prop_site/4,
          t_instanceof_fast/3,
@@ -11,8 +11,7 @@
          t_global_get_fast/2, t_global_get/2,
          named_free/5, free_chain/4, named_plain/2,
          shape_slots_new/0, shape_slots_get/2, shape_slots_set/3,
-         shape_slots_append/2,
-         shape_slots_fold/3]).
+         shape_slots_append/2]).
 
 -include("arc_rt_layout.hrl").
 
@@ -709,12 +708,6 @@ shape_slots_new() -> {}.
 shape_slots_set(Slots, Off, V) -> setelement(Off + 1, Slots, V).
 
 shape_slots_append(Slots, V) -> erlang:append_element(Slots, V).
-
-shape_slots_fold(Slots, Acc, F) ->
-    shape_slots_fold_1(Slots, Acc, F, 1, tuple_size(Slots)).
-shape_slots_fold_1(_, Acc, _, I, N) when I > N -> Acc;
-shape_slots_fold_1(Slots, Acc, F, I, N) ->
-    shape_slots_fold_1(Slots, F(I - 1, element(I, Slots), Acc), F, I + 1, N).
 
 shaped_write(Data, Shapes, {?SSHAPED_TAG, Sid, P, Slots, Offs} = Shaped, KeyBin,
              V) ->

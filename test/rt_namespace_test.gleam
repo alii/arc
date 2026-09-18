@@ -165,11 +165,11 @@ pub fn prototype_and_extensibility_test() {
   assert !ext
   let #(ok, st) = rt_obj.t_prevent_extensions(st, ns_h)
   assert ok
-  let #(ok, st) = rt_obj.t_set_prototype(st, ns_h, None)
-  assert ok
-  let #(ok, _) =
-    rt_obj.t_set_prototype(st, ns_h, Some(st.realm.object.prototype))
-  assert !ok
+  let #(res, st) = rt_obj.t_set_prototype_of(st, ns_h, None)
+  assert res == Ok(Nil)
+  let #(res, _) =
+    rt_obj.t_set_prototype_of(st, ns_h, Some(st.realm.object.prototype))
+  assert res != Ok(Nil)
 }
 
 fn value_desc(v: JsVal) -> ParsedDesc {

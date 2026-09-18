@@ -63,7 +63,7 @@ import gleam/option.{None, Some}
 pub fn new_agent(hooks: HostHooks) -> Agent {
   let st =
     Agent(
-      store: rt_store.t_store_new(),
+      store: rt_store.new(),
       realm: rt_types.unset_realm(),
       template_objects: dict.new(),
       frames: [],
@@ -573,7 +573,7 @@ pub fn dispatch_native_construct(
         })
       let #(v, st) = b_array.dispatch(st, n, mk_undefined(), args)
       let #(h, st) = require_handle(st, v)
-      let #(_ok, st) = rt_obj.t_set_prototype(st, h, Some(proto))
+      let #(_res, st) = rt_obj.t_set_prototype_of(st, h, Some(proto))
       #(h, st)
     }
     StringN(StringConstructor) -> {
@@ -680,7 +680,7 @@ fn construct_host_fn(
   let #(proto, st) = own_data_prototype(st, new_target)
   case classify(v), proto {
     KHandle(h), Some(proto) -> {
-      let #(_changed, st) = rt_obj.t_set_prototype(st, h, Some(proto))
+      let #(_res, st) = rt_obj.t_set_prototype_of(st, h, Some(proto))
       #(h, st)
     }
     KHandle(h), None -> #(h, st)

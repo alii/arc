@@ -7,24 +7,22 @@ import arc/rt/bytecode.{
   SuspendedFrame,
 }
 import arc/rt/types.{
-  type Agent, type AsyncGenRequest, type Handle, type IcEntry, type Job,
-  type JsElements, type JsSlot, type JsStore, type JsVal, type ObjKind,
-  type PromiseReaction, type PromiseState, type Property, type ReactionHandler,
-  type Resume, type WeakKey, Agent, ArgumentsObj, ArrayBufferObj, ArrayIterator,
-  ArrayObj, AsyncFromSyncIterator, AsyncGenRequest, AsyncGeneratorObj, BigIntObj,
+  type Agent, type AsyncGenRequest, type Handle, type IcEntry, type JsElements,
+  type JsSlot, type JsStore, type JsVal, type ObjKind, type PromiseReaction,
+  type PromiseState, type Property, type ReactionHandler, type Resume,
+  type WeakKey, Agent, ArgumentsObj, ArrayBufferObj, ArrayIterator, ArrayObj,
+  AsyncFromSyncIterator, AsyncGenRequest, AsyncGeneratorObj, BigIntObj,
   BooleanObj, DataViewObj, DateObj, Dense, DisposableStackObj, ErrorObj,
-  FinRegCell, FinalizationRegistryObj, GeneratorObj, Handler, HostJob, IcCall,
-  IcGlobal, IcInit, IcOff, IcRead, IdentityPassThrough, IntlObj,
-  IteratorHelperObj, JsCell, JsStore, KBound, KBytecode, KCompiled, KHandle,
-  KHost, KNative, MapIterator, MapObj, ModuleNamespace, NoElements, NumberObj,
-  Ordinary, PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction,
-  PromiseRejected, ProxyObj, RawJsonObj, ReactionJob, RegExpObj,
-  ResolveThenableJob, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
+  FinRegCell, FinalizationRegistryObj, GeneratorObj, Handler, IcCall, IcGlobal,
+  IcInit, IcOff, IcRead, IdentityPassThrough, IntlObj, IteratorHelperObj, JsCell,
+  JsStore, KBound, KBytecode, KCompiled, KHandle, KHost, KNative, MapIterator,
+  MapObj, ModuleNamespace, NoElements, NumberObj, Ordinary, PromiseFulfilled,
+  PromiseObj, PromisePending, PromiseReaction, PromiseRejected, ProxyObj,
+  RawJsonObj, RegExpObj, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
   SBox, SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
   SetIterator, SetObj, Sparse, StringIterator, StringObj, SymbolObj, TemporalObj,
   ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakObjKey, WeakRefObj,
   WeakSetObj, WeakSymKey, WrapForValidIteratorObj, classify, jq_to_list,
-  native_token_refs,
 } as rt_types
 import gleam/dict.{type Dict}
 import gleam/dynamic.{type Dynamic}
@@ -56,10 +54,6 @@ pub fn push_val_refs(v: JsVal, acc: List(Int)) -> List(Int) {
   push_term_refs(to_dynamic(v), acc)
 }
 
-fn require_js(st: Agent) -> JsStore(Agent) {
-  st.store
-}
-
 // exhaustive destructure: a new store field must be rooted here
 pub fn roots_of_state(st: Agent) -> List(Int) {
   let JsStore(
@@ -89,7 +83,7 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
       major_live: _,
       minors_since_major: _,
     ),
-  ) = require_js(st)
+  ) = st.store
   let acc = set.to_list(pinned_roots)
   let acc = list.append(unhandled_rejections, acc)
   let acc = push_term_refs(to_dynamic(jq_to_list(microtasks)), acc)
@@ -106,7 +100,7 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
 }
 
 // exhaustive, no wildcard: a new variant must be traced
-pub fn refs_in_cell(slot: JsSlot, acc: List(Int)) -> List(Int) {
+fn refs_in_cell(slot: JsSlot, acc: List(Int)) -> List(Int) {
   case slot {
     SObject(kind:, proto:, props:, symbol_props:, elements:, extensible: _) ->
       push_objkind_refs(kind, push_opt_handle(proto, acc))
@@ -137,7 +131,7 @@ fn push_resume_refs(resume: Resume, acc: List(Int)) -> List(Int) {
   }
 }
 
-pub fn push_suspended_frame_refs(
+fn push_suspended_frame_refs(
   frame: SuspendedFrame,
   acc: List(Int),
 ) -> List(Int) {
@@ -256,10 +250,8 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       let acc = push_template_refs(template, acc)
       push_env_refs(env, acc)
     }
-    KNative(tag:, name: _, length: _, constructible: _) -> {
-      let acc = list.fold(native_token_refs(tag), acc, fn(a, h) { [h.id, ..a] })
+    KNative(tag:, name: _, length: _, constructible: _) ->
       push_term_refs(to_dynamic(tag), acc)
-    }
     KBound(target:, bound_this:, bound_args:) -> {
       let acc = push_val_refs(bound_this, [target.id, ..acc])
       list.fold(bound_args, acc, fn(a, v) { push_val_refs(v, a) })
@@ -348,24 +340,6 @@ fn push_reaction_handler_refs(h: ReactionHandler, acc: List(Int)) -> List(Int) {
   }
 }
 
-pub fn push_job_refs(job: Job, acc: List(Int)) -> List(Int) {
-  case job {
-    ReactionJob(handler:, arg:, resolve:, reject:) ->
-      acc
-      |> push_reaction_handler_refs(handler, _)
-      |> push_val_refs(arg, _)
-      |> push_val_refs(resolve, _)
-      |> push_val_refs(reject, _)
-    ResolveThenableJob(thenable:, then_fn:, resolve:, reject:) ->
-      acc
-      |> push_val_refs(thenable, _)
-      |> push_val_refs(then_fn, _)
-      |> push_val_refs(resolve, _)
-      |> push_val_refs(reject, _)
-    HostJob(run:) -> push_term_refs(to_dynamic(run), acc)
-  }
-}
-
 fn push_opt_handle(oh: Option(Handle), acc: List(Int)) -> List(Int) {
   case oh {
     Some(h) -> [h.id, ..acc]
@@ -383,12 +357,8 @@ fn push_birth_refs(birth: rt_types.FnBirth, acc: List(Int)) -> List(Int) {
 
 // turn boundary only (call_depth == 0), never at fn entry
 pub fn t_maybe_collect(st: Agent) -> Agent {
-  t_maybe_collect_with(st, [])
-}
-
-pub fn t_maybe_collect_with(st: Agent, extra_roots: List(Handle)) -> Agent {
-  case st.call_depth == 0 && due(require_js(st)) {
-    True -> t_collect_some(st, extra_roots)
+  case st.call_depth == 0 && due(st.store) {
+    True -> t_collect_some(st, [])
     False -> st
   }
 }
@@ -399,7 +369,7 @@ pub fn due(js: JsStore(st)) -> Bool {
 }
 
 pub fn t_hold_roots(st: Agent, held: List(JsVal)) -> #(Agent, List(Int)) {
-  let js = require_js(st)
+  let js = st.store
   let ids =
     list.fold(held, [], fn(acc, v) { push_val_refs(v, acc) })
     |> list.filter(fn(id) { !set.contains(js.pinned_roots, id) })
@@ -409,7 +379,7 @@ pub fn t_hold_roots(st: Agent, held: List(JsVal)) -> #(Agent, List(Int)) {
 }
 
 pub fn t_release_roots(st: Agent, ids: List(Int)) -> Agent {
-  let js = require_js(st)
+  let js = st.store
   let pinned = list.fold(ids, js.pinned_roots, set.delete)
   Agent(..st, store: JsStore(..js, pinned_roots: pinned))
 }
@@ -418,7 +388,7 @@ pub fn t_release_roots(st: Agent, ids: List(Int)) -> Agent {
 pub const minors_per_major: Int = 16
 
 pub fn t_collect_some(st: Agent, extra_roots: List(Handle)) -> Agent {
-  let js = require_js(st)
+  let js = st.store
   let meta = js.meta
   let floor = meta.major_live / 2
   case
@@ -434,7 +404,7 @@ pub fn t_collect_some(st: Agent, extra_roots: List(Handle)) -> Agent {
 
 // full; no renumbering, dead ids dropped, next falls past highest survivor
 pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {
-  let js = require_js(st)
+  let js = st.store
   let roots =
     list.fold(extra_roots, roots_of_state(st), fn(a, h) { [h.id, ..a] })
   let live = mark_loop(js.data, roots, dict.new())
@@ -464,7 +434,7 @@ pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {
 
 // young ids are old_next and up; old cells reach them only if written since
 fn collect_minor(st: Agent, extra_roots: List(Handle)) -> Agent {
-  let js = require_js(st)
+  let js = st.store
   let meta = js.meta
   let w = meta.old_next
   let data = js.data
@@ -705,7 +675,7 @@ pub type GcStats {
 }
 
 pub fn stats(st: Agent) -> GcStats {
-  let js = require_js(st)
+  let js = st.store
   GcStats(
     live: arena.count(js.data),
     next: js.next,
@@ -714,7 +684,7 @@ pub fn stats(st: Agent) -> GcStats {
 }
 
 pub fn t_is_live(st: Agent, h: Handle) -> Bool {
-  let js = require_js(st)
+  let js = st.store
   let JsCell(id) = h
   option.is_some(arena.get_option(id, js.data))
 }

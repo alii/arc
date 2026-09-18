@@ -293,9 +293,9 @@ mono(St, Recv = {?HANDLE_TAG, RId}, RSlot, KeyBin, Args, Site)
                 false -> {mono_own_value(RSlot, KeyBin), none}
             end;
         ?SSHAPED_TAG when Site =:= none ->
-            {mono_shaped_own(Store, RSlot, KeyBin), none};
+            {mono_shaped_own(RSlot, KeyBin), none};
         ?SSHAPED_TAG ->
-            {mono_shaped_own(Store, RSlot, KeyBin),
+            {mono_shaped_own(RSlot, KeyBin),
              {Site, {ic_shaped, element(?SSHAPED_SID, RSlot)}, []}};
         _ -> {miss, none}
     end,
@@ -323,7 +323,7 @@ mono_proto_walk(St, Data, Id, KeyBin, Recv, Args, Fuel, Ic) ->
             mono_hop(St, Data, Id, Slot, mono_own_value(Slot, KeyBin),
                      KeyBin, Recv, Args, Fuel, Ic);
         Slot when element(1, Slot) =:= ?SSHAPED_TAG ->
-            Own = mono_shaped_own(element(?AGENT_STORE, St), Slot, KeyBin),
+            Own = mono_shaped_own(Slot, KeyBin),
             mono_hop(St, Data, Id, Slot, Own, KeyBin, Recv, Args, Fuel, Ic);
         _ -> {miss, St}
     end.
@@ -408,7 +408,7 @@ mono_own_value(Slot, KeyBin) ->
         _ -> absent
     end.
 
-mono_shaped_own(_, RSlot, KeyBin) ->
+mono_shaped_own(RSlot, KeyBin) ->
     case element(?SSHAPED_OFFSETS, RSlot) of
         #{KeyBin := Off} -> element(Off + 1, element(?SSHAPED_SLOTS, RSlot));
         _ -> absent

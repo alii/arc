@@ -38,15 +38,6 @@ pub fn has(elements: JsElements, i: Int) -> Bool {
   option.is_some(get_option(elements, i))
 }
 
-pub fn is_empty(elements: JsElements) -> Bool {
-  case elements {
-    NoElements -> True
-    Dense(data) ->
-      tree_array.sparse_fold(fn(_i, _v, _acc) { False }, True, data)
-    Sparse(data) -> dict.size(data) == 0
-  }
-}
-
 pub fn set(elements: JsElements, i: Int, v: JsVal) -> JsElements {
   case elements {
     NoElements -> set(Dense(tree_array.new()), i, v)
