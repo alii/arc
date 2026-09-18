@@ -1,10 +1,12 @@
+import gleam/option.{type Option}
+
 pub type TimeZone
 
 @external(erlang, "arc_tz_ffi", "utc_time_zone")
 pub fn utc_time_zone() -> TimeZone
 
 @external(erlang, "arc_tz_ffi", "time_zone_id")
-pub fn time_zone_id(zone: TimeZone) -> Result(String, Nil)
+pub fn time_zone_id(zone: TimeZone) -> Option(String)
 
 // minutes, local minus utc, at a utc instant
 @external(erlang, "arc_tz_ffi", "zone_offset_at_utc_ms")

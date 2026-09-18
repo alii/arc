@@ -218,7 +218,7 @@ pub fn has_use_strict_directive(stmts: List(ast.StmtWithLine)) -> Bool {
       ast.StmtWithLine(
         statement: ast.ExpressionStatement(
           expression: ast.StringExpression(_, _),
-          directive: directive,
+          directive:,
         ),
         ..,
       ),

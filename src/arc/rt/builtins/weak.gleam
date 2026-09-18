@@ -144,7 +144,7 @@ fn weak_construct(
       let iterable = first_arg_or_undefined(args)
       let #(adder, st) =
         rt_obj.t_get_prop(st, coll, StringKey(Named(adder_name)))
-      case rt_call.is_callable(st, adder) {
+      case rt_val.is_callable(st, adder) {
         False ->
           rt_val.t_throw_type_error(
             st,
@@ -230,14 +230,12 @@ fn weak_map_get_or_insert_computed(
   use wk <- require_weak_key(st, key, "Invalid value used as weak map key")
   let callback = arg_at(args, 1)
   use callback <- helpers.require_callable(st, callback, fn() {
-    let #(ty, _) = rt_val.t_type_of(st, callback)
-    ty <> " is not a function"
+    rt_val.type_of(st, callback) <> " is not a function"
   })
   case dict.get(read_wm(st, ref), wk) {
     Ok(existing) -> #(existing, st)
     Error(Nil) -> {
-      let #(computed, st) =
-        rt_call.t_call_checked(st, callback, mk_undefined(), [key])
+      let #(computed, st) = rt_call.t_call(st, callback, mk_undefined(), [key])
       #(computed, update_wm(st, ref, dict.insert(_, wk, computed)))
     }
   }

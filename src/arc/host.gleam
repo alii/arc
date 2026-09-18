@@ -1,5 +1,6 @@
 //// helpers for writing host functions; validators modeled on node's
 
+import arc/bytecode/error_kind.{type ErrorKind, RangeError, TypeError}
 import arc/host_hooks
 import arc/internal/unsafe
 import arc/rt/async as rt_async
@@ -11,10 +12,9 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type HostTerm, type JsVal, type Property, Agent,
-  HostFnEntry, HostJob, HostObj, JFloat, JInt, KBool, KHandle, KNum, KStr,
-  NoElements, PromiseObj, RangeErr, SObject, StringKey, TypeErr, classify,
-  mk_object, mk_undefined,
-} as rt_types
+  HostFnEntry, HostJob, HostObj, JFloat, JInt, KBool, KNum, KStr, NoElements,
+  PromiseObj, SObject, StringKey, classify, mk_object, mk_undefined,
+}
 import arc/rt/val as rt_val
 import gleam/bool
 import gleam/dict
@@ -73,23 +73,23 @@ pub fn type_error(
   s: State(host),
   msg: String,
 ) -> #(State(host), Result(JsVal, JsVal)) {
-  throw_new(s, TypeErr, msg)
+  throw_new(s, TypeError, msg)
 }
 
 pub fn range_error(
   s: State(host),
   msg: String,
 ) -> #(State(host), Result(JsVal, JsVal)) {
-  throw_new(s, RangeErr, msg)
+  throw_new(s, RangeError, msg)
 }
 
 fn throw_new(
   s: State(host),
-  kind: rt_types.ErrorKind,
+  kind: ErrorKind,
   msg: String,
 ) -> #(State(host), Result(JsVal, JsVal)) {
   let st = s.agent
-  let #(err, st) = st.store.ops.new_error(st, kind, msg)
+  let #(err, st) = rt_val.t_new_error(st, kind, msg)
   #(State(..s, agent: st), Error(err))
 }
 
@@ -112,7 +112,7 @@ pub fn validate_function(
   name: String,
   cont: fn(JsVal, State(host)) -> #(State(host), Result(JsVal, JsVal)),
 ) -> #(State(host), Result(JsVal, JsVal)) {
-  case rt_call.is_callable(s.agent, val) {
+  case rt_val.is_callable(s.agent, val) {
     True -> cont(val, s)
     False -> invalid_arg_type(s, name, "function", val)
   }
@@ -125,7 +125,7 @@ pub fn call(
   this_val: JsVal,
   args: List(JsVal),
 ) -> #(State(host), Result(JsVal, JsVal)) {
-  let #(completion, st) = rt_call.t_call(s.agent, callee, this_val, args)
+  let #(completion, st) = rt_call.t_try_call(s.agent, callee, this_val, args)
   let s = State(..s, agent: st)
   case completion {
     NormalCompletion(v) -> #(s, Ok(v))
@@ -141,7 +141,7 @@ pub fn try_call(
   args: List(JsVal),
   cont: fn(JsVal, State(host)) -> #(State(host), Result(JsVal, JsVal)),
 ) -> #(State(host), Result(JsVal, JsVal)) {
-  case rt_call.is_callable(s.agent, callee) {
+  case rt_val.is_callable(s.agent, callee) {
     False -> invalid_arg_type(s, name, "function", callee)
     True -> {
       let #(s, result) = call(s, callee, this_val, args)
@@ -231,7 +231,7 @@ type TicketRoot {
 pub fn suspend(s: State(host)) -> #(State(host), JsVal, Ticket) {
   let #(promise, st) = rt_async.t_new_promise(s.agent)
   let root_cell =
-    host_cell(tag(ticket_key(), TicketRoot(promise:)), None, False)
+    host_cell(tag(ticket_key(), TicketRoot(promise:)), None, extensible: False)
   let #(root, st) = rt_store.t_cell_new(st, root_cell)
   let st = rt_store.t_pin_root(st, root)
   #(State(..s, agent: st), mk_object(promise), Ticket(promise:, root:))
@@ -349,8 +349,8 @@ fn untag(key: Key(host), term: HostTerm) -> Option(host) {
 fn host_cell(
   payload: HostTerm,
   proto: Option(Handle),
-  extensible: Bool,
-) -> rt_types.Cell {
+  extensible extensible: Bool,
+) -> types.Cell {
   SObject(
     kind: HostObj(payload:),
     proto:,
@@ -368,22 +368,18 @@ pub fn alloc_host_object(
   prototype: Option(Handle),
 ) -> #(State(host), JsVal) {
   let #(h, st) =
-    rt_store.t_cell_new(s.agent, host_cell(tag(s.key, value), prototype, True))
+    rt_store.t_cell_new(
+      s.agent,
+      host_cell(tag(s.key, value), prototype, extensible: True),
+    )
   #(State(..s, agent: st), mk_object(h))
 }
 
 /// none if not a host object or written under another key
 pub fn read_host(s: State(host), val: JsVal) -> Option(host) {
-  use h <- option.then(handle_of(val))
+  use h <- option.then(rt_val.handle_of(val))
   case rt_store.t_cell_get(s.agent, h) {
     SObject(kind: HostObj(payload:), ..) -> untag(s.key, payload)
-    _ -> None
-  }
-}
-
-fn handle_of(val: JsVal) -> Option(Handle) {
-  case classify(val) {
-    KHandle(h) -> Some(h)
     _ -> None
   }
 }
@@ -400,7 +396,7 @@ pub fn function(
     common.alloc_rooted_native_fn(
       st,
       st.realm.function.prototype,
-      rt_types.HostFn(id),
+      types.HostFn(id),
       name,
       arity,
     )
@@ -424,11 +420,11 @@ pub fn define_global(s: State(host), name: String, val: JsVal) -> State(host) {
     rt_obj.t_define_own_data(
       st,
       st.realm.global_object,
-      StringKey(rt_types.canonical_key(name)),
+      StringKey(types.canonical_key(name)),
       val,
-      True,
-      False,
-      True,
+      writable: True,
+      enumerable: False,
+      configurable: True,
     )
   State(..s, agent: st)
 }
@@ -465,7 +461,7 @@ pub fn class(
       realm.object.prototype,
       realm.function.prototype,
       proto_props,
-      fn(_proto) { rt_types.HostFn(id) },
+      fn(_proto) { types.HostFn(id) },
       name,
       arity,
       static_props,
@@ -504,11 +500,11 @@ fn alloc_host_methods(
         common.alloc_rooted_native_fn(
           st,
           st.realm.function.prototype,
-          rt_types.HostFn(id),
+          types.HostFn(id),
           name,
           arity,
         )
-      let #(prop, st) = common.builtin_property(st, mk_object(h))
+      let #(prop, st) = rt_store.t_builtin_property(st, mk_object(h))
       #([#(name, prop), ..props], st)
     })
   #(list.reverse(props), st)
@@ -534,7 +530,7 @@ fn invalid_arg_type(
   expected: String,
   received: JsVal,
 ) -> #(State(host), Result(JsVal, JsVal)) {
-  let #(actual, _) = rt_val.t_type_of(s.agent, received)
+  let actual = rt_val.type_of(s.agent, received)
   type_error(
     s,
     "The \""

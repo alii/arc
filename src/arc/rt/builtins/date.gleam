@@ -33,7 +33,7 @@ import arc/rt/types.{
   DatePrototypeValueOf, DateUTC, HintDefault, HintNumber, HintString, JFloat,
   JInt, JNan, JNegInf, JPosInf, KHandle, KNum, KStr, Named, StringKey, classify,
   mk_int, mk_null, mk_number, mk_object, mk_string,
-} as rt_types
+}
 import arc/rt/val as rt_val
 import gleam/int
 import gleam/list
@@ -127,12 +127,12 @@ pub fn init(
       "[Symbol.toPrimitive]",
       1,
     )
-  let #(prop, st) = common.frozen_property(st, mk_object(to_prim_h))
+  let #(prop, st) = rt_store.t_frozen_property(st, mk_object(to_prim_h))
   let st =
     common.add_symbol_property(
       st,
       bt.prototype,
-      rt_types.symbol_to_primitive,
+      types.symbol_to_primitive,
       common.make_configurable(prop),
     )
 
@@ -517,7 +517,7 @@ fn this_time_value(st: Agent, this: JsVal) -> Option(#(Handle, JsNum)) {
   case classify(this) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        rt_types.SObject(kind: DateObj(ms:), ..) -> Some(#(h, ms))
+        types.SObject(kind: DateObj(ms:), ..) -> Some(#(h, ms))
         _ -> None
       }
     _ -> None
@@ -542,9 +542,9 @@ fn require_time_value(
 
 fn set_this_time_value(st: Agent, h: Handle, tv: JsNum) -> Agent {
   rt_store.t_cell_update(st, h, fn(cell) {
-    let assert rt_types.SObject(kind: DateObj(_), ..) as obj = cell
+    let assert types.SObject(kind: DateObj(_), ..) as obj = cell
       as "date: cell is not a Date object"
-    rt_types.SObject(..obj, kind: DateObj(ms: tv))
+    types.SObject(..obj, kind: DateObj(ms: tv))
   })
 }
 
@@ -1067,7 +1067,7 @@ type Zone {
 }
 
 // no designator: date-only is utc, date-time is local
-fn parse_zone(s: String, has_time: Bool) -> Option(#(Zone, String)) {
+fn parse_zone(s: String, has_time has_time: Bool) -> Option(#(Zone, String)) {
   case s {
     "Z" <> rest -> Some(#(FixedOffset(0), rest))
     "+" <> rest ->
@@ -1218,9 +1218,8 @@ fn date_to_json(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 fn invoke_to_iso_string(st: Agent, obj: JsVal) -> #(JsVal, Agent) {
   let #(method, st) =
     rt_obj.t_get_prop(st, obj, StringKey(Named("toISOString")))
-  let #(callable, st) = rt_val.t_is_callable(st, method)
-  case callable {
-    True -> rt_call.t_call_checked(st, method, obj, [])
+  case rt_val.is_callable(st, method) {
+    True -> rt_call.t_call(st, method, obj, [])
     False -> rt_val.t_throw_type_error(st, "toISOString is not a function")
   }
 }

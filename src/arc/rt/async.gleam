@@ -1,6 +1,6 @@
+import arc/bytecode/error_kind.{RangeError, TypeError}
 import arc/rt/call.{
-  type Completion, type Frame, NormalCompletion, ThrowCompletion, is_callable,
-  t_call,
+  type Completion, type Frame, NormalCompletion, ThrowCompletion, t_try_call,
 }
 import arc/rt/gc as rt_gc
 import arc/rt/inspect
@@ -19,12 +19,13 @@ import arc/rt/types.{
   GenSuspendedStart, GenSuspendedYield, GenThrow, GeneratorObj, Handle, Handler,
   HostJob, IdentityPassThrough, JsStore, KHandle, Named, NoElements, Ordinary,
   PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction, PromiseRejectFn,
-  PromiseRejected, PromiseResolveFn, RangeErr, ReactionJob, ResolveThenableJob,
+  PromiseRejected, PromiseResolveFn, ReactionJob, ResolveThenableJob,
   ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen, SBox, SGenerator,
   SObject, SPromiseData, StepAwait, StepReturn, StepThrow, StepYield, StoreMeta,
-  StringKey, ThrowerPassThrough, TypeErr, classify, job_queue_pop,
-  job_queue_push, mk_bool, mk_object, mk_string, mk_undefined,
-} as rt_types
+  StringKey, ThrowerPassThrough, classify, job_queue_pop, job_queue_push,
+  mk_bool, mk_object, mk_string, mk_undefined,
+}
+import arc/rt/val.{is_callable} as rt_val
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -63,17 +64,17 @@ pub fn apply_resume(
 
 fn alloc_native_fn(
   st: Agent,
-  tag: NativeToken,
+  token: NativeToken,
   name: String,
   length: Int,
 ) -> #(Handle, Agent) {
   call.t_native_new(
     st,
     Some(st.realm.function.prototype),
-    tag,
+    token,
     name,
     length,
-    False,
+    constructible: False,
   )
 }
 
@@ -92,8 +93,8 @@ pub fn alloc_resolving_fns(
 fn alloc_asyncgen_resume(
   st: Agent,
   gen_h: Handle,
-  is_throw: Bool,
-  kind: AGResumeKind,
+  is_throw is_throw: Bool,
+  kind kind: AGResumeKind,
 ) -> #(Handle, Agent) {
   alloc_native_fn(st, AsyncGenResume(gen: gen_h, is_throw:, kind:), "", 1)
 }
@@ -283,7 +284,7 @@ type Side {
 // target: undefined, child promise, coroutine data cell, or user fn
 fn settle(st: Agent, target: JsVal, side: Side, value: JsVal) -> Agent {
   case classify(target) {
-    rt_types.KUndef -> st
+    types.KUndef -> st
     KHandle(h) ->
       case rt_store.t_cell_get(st, h), side {
         SObject(kind: PromiseObj(..), ..), Fulfil ->
@@ -314,13 +315,12 @@ fn sent_of(side: Side, value: JsVal) -> #(Int, JsVal) {
 
 fn resume_from_job(st: Agent, turn: fn(Agent) -> Agent) -> Agent {
   let st = rt_store.t_enter_call(st)
-  let #(outcome, st) =
-    call.t_apply_protected(st, fn(st) { #(mk_undefined(), turn(st)) })
+  let #(outcome, st) = call.try_run(st, fn(st) { #(mk_undefined(), turn(st)) })
   report_job_throw(#(outcome, rt_store.t_leave_call(st)))
 }
 
 fn call_settle(st: Agent, target: JsVal, args: List(JsVal)) -> Agent {
-  report_job_throw(t_call(st, target, mk_undefined(), args))
+  report_job_throw(t_try_call(st, target, mk_undefined(), args))
 }
 
 fn report_job_throw(outcome: #(Completion(JsVal), Agent)) -> Agent {
@@ -346,33 +346,26 @@ fn execute_job(st: Agent, job: Job) -> Agent {
         IdentityPassThrough -> settle(st, resolve, Fulfil, arg)
         ThrowerPassThrough -> settle(st, reject, Reject, arg)
         Handler(fun) ->
-          case t_call(st, fun, mk_undefined(), [arg]) {
+          case t_try_call(st, fun, mk_undefined(), [arg]) {
             #(NormalCompletion(v), st) -> settle(st, resolve, Fulfil, v)
             #(ThrowCompletion(e), st) -> settle(st, reject, Reject, e)
           }
       }
     ResolveThenableJob(thenable:, then_fn:, resolve:, reject:) ->
-      case t_call(st, then_fn, thenable, [resolve, reject]) {
+      case t_try_call(st, then_fn, thenable, [resolve, reject]) {
         #(NormalCompletion(_), st) -> st
         #(ThrowCompletion(e), st) -> call_settle(st, reject, [e])
       }
     HostJob(run:) ->
-      report_job_throw(
-        call.t_apply_protected(st, fn(st) { #(mk_undefined(), run(st)) }),
-      )
+      report_job_throw(call.try_run(st, fn(st) { #(mk_undefined(), run(st)) }))
   }
-}
-
-fn throw_type_error(st: Agent, msg: String) -> a {
-  let #(e, st) = require_js(st).ops.new_error(st, TypeErr, msg)
-  rt_store.t_throw(st, e)
 }
 
 // §7.4.11 createiterresultobject
 pub fn alloc_iter_result(
   st: Agent,
   value: JsVal,
-  done: Bool,
+  done done: Bool,
 ) -> #(Handle, Agent) {
   let object_proto = st.realm.object.prototype
   use seq <- rt_store.t_cell_new_with(st, 2)
@@ -380,8 +373,26 @@ pub fn alloc_iter_result(
     kind: Ordinary,
     proto: Some(object_proto),
     props: dict.from_list([
-      #(Named("value"), DataProperty(value, True, True, True, seq)),
-      #(Named("done"), DataProperty(mk_bool(done), True, True, True, seq + 1)),
+      #(
+        Named("value"),
+        DataProperty(
+          value:,
+          writable: True,
+          enumerable: True,
+          configurable: True,
+          seq:,
+        ),
+      ),
+      #(
+        Named("done"),
+        DataProperty(
+          value: mk_bool(done),
+          writable: True,
+          enumerable: True,
+          configurable: True,
+          seq: seq + 1,
+        ),
+      ),
     ]),
     symbol_props: [],
     elements: NoElements,
@@ -391,7 +402,7 @@ pub fn alloc_iter_result(
 
 fn alloc_shell(
   st: Agent,
-  kind: rt_types.ObjKind,
+  kind: types.ObjKind,
   proto: Option(Handle),
 ) -> #(Handle, Agent) {
   rt_store.t_cell_new(
@@ -420,7 +431,7 @@ pub fn generator_data(st: Agent, this: JsVal) -> Handle {
   case data {
     Some(data) -> data
     None ->
-      throw_type_error(
+      rt_val.t_throw_type_error(
         st,
         "Generator.prototype method called on incompatible receiver",
       )
@@ -438,7 +449,7 @@ fn set_gen_state(
   st: Agent,
   gen_h: Handle,
   gen: Cell,
-  new_state: rt_types.GeneratorState,
+  new_state: types.GeneratorState,
 ) -> Agent {
   let assert SGenerator(resume:, ..) = gen
   rt_store.t_cell_set(st, gen_h, SGenerator(state: new_state, resume:))
@@ -470,7 +481,7 @@ pub fn t_gen_new(st: Agent, callee: JsVal, resume: Resume) -> #(Handle, Agent) {
 fn generator_prototype(
   st: Agent,
   callee: JsVal,
-  intrinsic: fn(rt_types.Realm) -> Handle,
+  intrinsic: fn(types.Realm) -> Handle,
 ) -> Handle {
   case classify(callee) {
     KHandle(fn_h) ->
@@ -503,7 +514,8 @@ pub fn t_gen_step(
   let assert SGenerator(state:, resume:) = gen
   case state {
     GenCompleted -> #(#(True, mk_undefined()), st)
-    GenExecuting -> throw_type_error(st, "Generator is already running")
+    GenExecuting ->
+      rt_val.t_throw_type_error(st, "Generator is already running")
     GenSuspendedStart | GenSuspendedYield ->
       gen_resume(st, gen_h, gen, resume, #(sent_next, sent))
   }
@@ -514,10 +526,11 @@ pub fn t_gen_return(st: Agent, gen_h: Handle, v: JsVal) -> #(Handle, Agent) {
   let gen = read_generator(st, gen_h)
   let assert SGenerator(state:, resume:) = gen
   case state {
-    GenExecuting -> throw_type_error(st, "Generator is already running")
+    GenExecuting ->
+      rt_val.t_throw_type_error(st, "Generator is already running")
     GenCompleted | GenSuspendedStart -> {
       let st = set_gen_state(st, gen_h, gen, GenCompleted)
-      alloc_iter_result(st, v, True)
+      alloc_iter_result(st, v, done: True)
     }
     GenSuspendedYield -> {
       let #(#(done, v), st) =
@@ -532,7 +545,8 @@ pub fn t_gen_throw(st: Agent, gen_h: Handle, e: JsVal) -> #(Handle, Agent) {
   let gen = read_generator(st, gen_h)
   let assert SGenerator(state:, resume:) = gen
   case state {
-    GenExecuting -> throw_type_error(st, "Generator is already running")
+    GenExecuting ->
+      rt_val.t_throw_type_error(st, "Generator is already running")
     GenCompleted | GenSuspendedStart -> {
       let st = set_gen_state(st, gen_h, gen, GenCompleted)
       rt_store.t_throw(st, e)
@@ -608,7 +622,7 @@ pub fn t_new_promise_with_proto(
   proto: Option(Handle),
 ) -> #(Handle, Agent) {
   let #(data, st) =
-    rt_store.t_cell_new(st, SPromiseData(PromisePending([]), False))
+    rt_store.t_cell_new(st, SPromiseData(PromisePending([]), is_handled: False))
   alloc_shell(st, PromiseObj(data:), proto)
 }
 
@@ -633,7 +647,7 @@ fn fulfill_promise(st: Agent, promise_h: Handle, value: JsVal) -> Agent {
         rt_store.t_cell_set(
           st,
           data,
-          SPromiseData(PromiseFulfilled(value), is_handled),
+          SPromiseData(PromiseFulfilled(value), is_handled:),
         )
       enqueue_reactions(st, reactions, value, on_fulfill_handler)
     }
@@ -649,7 +663,7 @@ pub fn t_promise_reject(st: Agent, promise_h: Handle, reason: JsVal) -> Agent {
         rt_store.t_cell_set(
           st,
           data,
-          SPromiseData(PromiseRejected(reason), is_handled),
+          SPromiseData(PromiseRejected(reason), is_handled:),
         )
       let st = case is_handled {
         False -> {
@@ -710,11 +724,7 @@ pub fn t_promise_resolve(
   case classify(resolution) {
     KHandle(h) if h == promise_h -> {
       let #(e, st) =
-        require_js(st).ops.new_error(
-          st,
-          TypeErr,
-          "Chaining cycle detected for promise",
-        )
+        rt_val.t_new_error(st, TypeError, "Chaining cycle detected for promise")
       t_promise_reject(st, promise_h, e)
     }
     KHandle(h) -> resolve_with_handle(st, promise_h, resolution, h)
@@ -729,9 +739,9 @@ fn resolve_with_handle(
   h: Handle,
 ) -> Agent {
   case rt_store.t_cell_get(st, h) {
-    SObject(..) | rt_types.SShapedObject(..) -> {
+    SObject(..) | types.SShapedObject(..) -> {
       let #(outcome, st) =
-        call.t_apply_protected(st, fn(st) {
+        call.try_run(st, fn(st) {
           rt_obj.t_get_prop(st, resolution, StringKey(Named("then")))
         })
       case outcome {
@@ -835,18 +845,20 @@ fn perform_then(
             ),
             ..reactions
           ]),
-          True,
+          is_handled: True,
         ),
       )
     #(data, PromiseFulfilled(value) as state, _) -> {
-      let st = rt_store.t_cell_set(st, data, SPromiseData(state, True))
+      let st =
+        rt_store.t_cell_set(st, data, SPromiseData(state, is_handled: True))
       t_enqueue_job(
         st,
         ReactionJob(handler: fulfill_handler, arg: value, resolve:, reject:),
       )
     }
     #(data, PromiseRejected(reason) as state, is_handled) -> {
-      let st = rt_store.t_cell_set(st, data, SPromiseData(state, True))
+      let st =
+        rt_store.t_cell_set(st, data, SPromiseData(state, is_handled: True))
       let st = case is_handled {
         False -> untrack_rejection(st, data)
         True -> st
@@ -950,9 +962,9 @@ fn asyncgen_method(
   case asyncgen_data_of(st, this) {
     Error(Nil) -> {
       let #(e, st) =
-        require_js(st).ops.new_error(
+        rt_val.t_new_error(
           st,
-          TypeErr,
+          TypeError,
           "AsyncGenerator method called on incompatible receiver",
         )
       #(promise_h, t_promise_reject(st, promise_h, e))
@@ -995,7 +1007,7 @@ fn drain_queue(st: Agent, gen_h: Handle) -> Agent {
           case req.completion {
             GenNext -> {
               let st = put_asyncgen(st, gen_h, ag_drop_head(ag))
-              let st = fulfill_iter(st, req.resolve, mk_undefined(), True)
+              let st = fulfill_iter(st, req.resolve, mk_undefined(), done: True)
               drain_queue(st, gen_h)
             }
             GenThrow -> {
@@ -1053,11 +1065,7 @@ fn asyncgen_turn(
   case st.call_depth >= limits.max_call_depth {
     True -> {
       let #(e, st) =
-        require_js(st).ops.new_error(
-          st,
-          RangeErr,
-          "Maximum call stack size exceeded",
-        )
+        rt_val.t_new_error(st, RangeError, "Maximum call stack size exceeded")
       #(StepThrow(e), st)
     }
     False -> {
@@ -1077,7 +1085,7 @@ fn drive_asyncgen_step(
   case step {
     StepReturn(v) -> {
       let st = write_asyncgen(st, gen_h, ag_complete_drop_head)
-      let st = fulfill_iter(st, req.resolve, v, True)
+      let st = fulfill_iter(st, req.resolve, v, done: True)
       drain_queue(st, gen_h)
     }
     StepThrow(e) -> {
@@ -1090,7 +1098,7 @@ fn drive_asyncgen_step(
         write_asyncgen(st, gen_h, fn(ag) {
           AGLive(..ag, resume:, state: AGSuspendedYield) |> ag_drop_head
         })
-      let st = fulfill_iter(st, req.resolve, value, False)
+      let st = fulfill_iter(st, req.resolve, value, done: False)
       drain_queue(st, gen_h)
     }
     StepAwait(value:, resume:) -> {
@@ -1122,9 +1130,9 @@ fn redrive_asyncgen(
 pub fn t_asyncgen_resume(
   st: Agent,
   gen_h: Handle,
-  is_throw: Bool,
-  kind: AGResumeKind,
-  settled: JsVal,
+  is_throw is_throw: Bool,
+  kind kind: AGResumeKind,
+  settled settled: JsVal,
 ) -> Agent {
   let ag = ag_normalize(read_asyncgen(st, gen_h))
   case ag.front {
@@ -1134,7 +1142,7 @@ pub fn t_asyncgen_resume(
         AGResumeAwaitingReturn, _ -> {
           let st = put_asyncgen(st, gen_h, ag_complete_drop_head(ag))
           let st = case is_throw {
-            False -> fulfill_iter(st, req.resolve, settled, True)
+            False -> fulfill_iter(st, req.resolve, settled, done: True)
             True -> settle(st, req.reject, Reject, settled)
           }
           drain_queue(st, gen_h)
@@ -1154,8 +1162,9 @@ fn setup_return_await(
   kind: AGResumeKind,
 ) -> Agent {
   let #(promise_h, st) = promise_resolve_static(st, awaited)
-  let #(on_fulfill, st) = alloc_asyncgen_resume(st, gen_h, False, kind)
-  let #(on_reject, st) = alloc_asyncgen_resume(st, gen_h, True, kind)
+  let #(on_fulfill, st) =
+    alloc_asyncgen_resume(st, gen_h, is_throw: False, kind:)
+  let #(on_reject, st) = alloc_asyncgen_resume(st, gen_h, is_throw: True, kind:)
   perform_then(
     st,
     promise_h,
@@ -1166,7 +1175,12 @@ fn setup_return_await(
   )
 }
 
-fn fulfill_iter(st: Agent, resolve: JsVal, value: JsVal, done: Bool) -> Agent {
+fn fulfill_iter(
+  st: Agent,
+  resolve: JsVal,
+  value: JsVal,
+  done done: Bool,
+) -> Agent {
   let #(result_h, st) = alloc_iter_result(st, value, done)
   settle(st, resolve, Fulfil, mk_object(result_h))
 }
@@ -1320,7 +1334,7 @@ fn check_already_resolved(st: Agent, already_h: Handle) -> #(Bool, Agent) {
   case rt_store.t_cell_get(st, already_h) {
     SBox(value: v) ->
       case classify(v) {
-        rt_types.KBool(True) -> #(True, st)
+        types.KBool(True) -> #(True, st)
         _ -> #(
           False,
           rt_store.t_cell_set(st, already_h, SBox(value: mk_bool(True))),

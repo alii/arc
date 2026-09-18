@@ -26,7 +26,7 @@ pub const frame_param = "_frame"
 
 pub const args_param = "_args"
 
-const simple_this_param = "_this"
+const direct_this_param = "_this"
 
 fn let_(e: Emitter, rhs: ir.Expr, k: NextWith(ir.Value)) -> EmitResult {
   state.let_(e, rhs, k)
@@ -101,32 +101,59 @@ fn derive_flags(shape: FnShape) -> ShapeFlags {
   case shape {
     FnDecl(is_gen:, is_async:) ->
       ShapeFlags(
-        False,
-        is_gen,
-        is_async,
-        !is_gen && !is_async,
-        False,
-        False,
-        False,
-        None,
+        is_arrow: False,
+        is_generator: is_gen,
+        is_async:,
+        is_constructor: !is_gen && !is_async,
+        is_class_constructor: False,
+        is_derived_constructor: False,
+        is_method: False,
+        self_name: None,
       )
     FnExpr(self_name:, is_gen:, is_async:) ->
       ShapeFlags(
-        False,
-        is_gen,
-        is_async,
-        !is_gen && !is_async,
-        False,
-        False,
-        False,
-        self_name,
+        is_arrow: False,
+        is_generator: is_gen,
+        is_async:,
+        is_constructor: !is_gen && !is_async,
+        is_class_constructor: False,
+        is_derived_constructor: False,
+        is_method: False,
+        self_name:,
       )
     Arrow(is_async:) ->
-      ShapeFlags(True, False, is_async, False, False, False, False, None)
+      ShapeFlags(
+        is_arrow: True,
+        is_generator: False,
+        is_async:,
+        is_constructor: False,
+        is_class_constructor: False,
+        is_derived_constructor: False,
+        is_method: False,
+        self_name: None,
+      )
     Method(is_gen:, is_async:) ->
-      ShapeFlags(False, is_gen, is_async, False, False, False, True, None)
+      ShapeFlags(
+        is_arrow: False,
+        is_generator: is_gen,
+        is_async:,
+        is_constructor: False,
+        is_class_constructor: False,
+        is_derived_constructor: False,
+        is_method: True,
+        self_name: None,
+      )
     ClassCtor(derived:, ..) ->
-      ShapeFlags(False, False, False, True, True, derived, False, None)
+      ShapeFlags(
+        is_arrow: False,
+        is_generator: False,
+        is_async: False,
+        is_constructor: True,
+        is_class_constructor: True,
+        is_derived_constructor: derived,
+        is_method: False,
+        self_name: None,
+      )
   }
 }
 
@@ -250,9 +277,9 @@ fn store_slot(e: Emitter, b: Binding, val: ir.Value, k: Next) -> EmitResult {
 
 pub fn unpack_frame(
   e: Emitter,
-  is_arrow: Bool,
-  info: FunctionInfo,
-  k: Next,
+  is_arrow is_arrow: Bool,
+  info info: FunctionInfo,
+  k k: Next,
 ) -> EmitResult {
   case is_arrow, info.lexical {
     False, lexical.OwnedLexicalSlots(base:) -> {
@@ -309,9 +336,9 @@ pub fn binding_prologue(e: Emitter, scope_id: ScopeId, k: Next) -> EmitResult {
 fn body_param_copies(
   e: Emitter,
   declared_param_names: List(String),
-  is_arrow: Bool,
-  stmts: List(ast.StmtWithLine),
-  k: Next,
+  is_arrow is_arrow: Bool,
+  stmts stmts: List(ast.StmtWithLine),
+  k k: Next,
 ) -> EmitResult {
   let body_id = e.cur_scope
   case body_id == e.fn_scope {
@@ -384,8 +411,8 @@ fn init_self_name(
 fn unpack_args(
   e: Emitter,
   fixed: List(ast.Pattern),
-  non_simple: Bool,
-  k: NextWith(ir.Value),
+  non_simple non_simple: Bool,
+  k k: NextWith(ir.Value),
 ) -> EmitResult {
   unpack_args_loop(e, fixed, non_simple, ir.Var(args_param), k)
 }
@@ -393,9 +420,9 @@ fn unpack_args(
 fn unpack_args_loop(
   e: Emitter,
   params: List(ast.Pattern),
-  non_simple: Bool,
-  tail: ir.Value,
-  k: NextWith(ir.Value),
+  non_simple non_simple: Bool,
+  tail tail: ir.Value,
+  k k: NextWith(ir.Value),
 ) -> EmitResult {
   case params {
     [] -> k(e, tail)
@@ -430,8 +457,8 @@ fn bind_one_param(
   e: Emitter,
   p: ast.Pattern,
   raw: ir.Value,
-  non_simple: Bool,
-  k: Next,
+  non_simple non_simple: Bool,
+  k k: Next,
 ) -> EmitResult {
   case non_simple {
     False -> {
@@ -468,8 +495,8 @@ fn bind_rest(
   e: Emitter,
   rest: Option(ast.Pattern),
   tail: ir.Value,
-  non_simple: Bool,
-  k: Next,
+  non_simple non_simple: Bool,
+  k k: Next,
 ) -> EmitResult {
   case rest {
     None -> k(e)
@@ -706,7 +733,7 @@ fn refs_args_stmts(stmts: List(ast.StmtWithLine)) -> Bool {
   list.any(stmts, fn(s) { refs_args_stmt(s.statement) })
 }
 
-// gates init_arguments only, never simple abi eligibility
+// gates init_arguments only, never direct abi eligibility
 
 fn needs_args_object_opt(oe: Option(ast.Expression)) -> Bool {
   case oe {
@@ -909,16 +936,19 @@ fn needs_args_object_stmts(stmts: List(ast.StmtWithLine)) -> Bool {
   list.any(stmts, fn(s) { needs_args_object_stmt(s.statement) })
 }
 
-fn refs_frame_opt(oe: Option(ast.Expression), ct: Bool) -> Bool {
+fn refs_frame_opt(
+  oe: Option(ast.Expression),
+  count_this count_this: Bool,
+) -> Bool {
   case oe {
-    Some(e) -> refs_frame_expr(e, ct)
+    Some(e) -> refs_frame_expr(e, count_this)
     None -> False
   }
 }
 
-fn refs_frame_key(k: ast.PropertyKey, ct: Bool) -> Bool {
+fn refs_frame_key(k: ast.PropertyKey, count_this count_this: Bool) -> Bool {
   case k {
-    ast.KeyComputed(expression:) -> refs_frame_expr(expression, ct)
+    ast.KeyComputed(expression:) -> refs_frame_expr(expression, count_this)
     ast.KeyIdentifier(..)
     | ast.KeyString(..)
     | ast.KeyNumber(..)
@@ -927,23 +957,26 @@ fn refs_frame_key(k: ast.PropertyKey, ct: Bool) -> Bool {
   }
 }
 
-fn refs_frame_mprop(p: ast.MemberProperty, ct: Bool) -> Bool {
+fn refs_frame_mprop(
+  p: ast.MemberProperty,
+  count_this count_this: Bool,
+) -> Bool {
   case p {
-    ast.Bracket(expression:) -> refs_frame_expr(expression, ct)
+    ast.Bracket(expression:) -> refs_frame_expr(expression, count_this)
     ast.Dot(..) -> False
   }
 }
 
-fn refs_frame_pattern(p: ast.Pattern, ct: Bool) -> Bool {
+fn refs_frame_pattern(p: ast.Pattern, count_this count_this: Bool) -> Bool {
   case p {
     ast.IdentifierPattern(..) -> False
     ast.AssignmentPattern(left:, right:) ->
-      refs_frame_pattern(left, ct) || refs_frame_expr(right, ct)
-    ast.RestElement(argument:) -> refs_frame_pattern(argument, ct)
+      refs_frame_pattern(left, count_this) || refs_frame_expr(right, count_this)
+    ast.RestElement(argument:) -> refs_frame_pattern(argument, count_this)
     ast.ArrayPattern(elements:) ->
       list.any(elements, fn(el) {
         case el {
-          Some(ep) -> refs_frame_pattern(ep, ct)
+          Some(ep) -> refs_frame_pattern(ep, count_this)
           None -> False
         }
       })
@@ -951,41 +984,48 @@ fn refs_frame_pattern(p: ast.Pattern, ct: Bool) -> Bool {
       list.any(properties, fn(pp) {
         case pp {
           ast.PatternProperty(key:, value:, ..) ->
-            refs_frame_key(key, ct) || refs_frame_pattern(value, ct)
+            refs_frame_key(key, count_this)
+            || refs_frame_pattern(value, count_this)
           ast.RestProperty(..) -> False
         }
       })
   }
 }
 
-fn refs_frame_decls(ds: List(ast.VariableDeclarator), ct: Bool) -> Bool {
+fn refs_frame_decls(
+  ds: List(ast.VariableDeclarator),
+  count_this count_this: Bool,
+) -> Bool {
   list.any(ds, fn(d) {
-    refs_frame_pattern(d.id, ct) || refs_frame_opt(d.init, ct)
+    refs_frame_pattern(d.id, count_this) || refs_frame_opt(d.init, count_this)
   })
 }
 
-fn refs_frame_for_init(fi: ast.ForInit, ct: Bool) -> Bool {
+fn refs_frame_for_init(fi: ast.ForInit, count_this count_this: Bool) -> Bool {
   case fi {
-    ast.ForInitExpression(e) -> refs_frame_expr(e, ct)
+    ast.ForInitExpression(e) -> refs_frame_expr(e, count_this)
     ast.ForInitDeclaration(declarations:, ..) ->
-      refs_frame_decls(declarations, ct)
-    ast.ForInitPattern(p) -> refs_frame_pattern(p, ct)
+      refs_frame_decls(declarations, count_this)
+    ast.ForInitPattern(p) -> refs_frame_pattern(p, count_this)
   }
 }
 
-fn refs_frame_class_body(body: List(ast.ClassElement), ct: Bool) -> Bool {
+fn refs_frame_class_body(
+  body: List(ast.ClassElement),
+  count_this count_this: Bool,
+) -> Bool {
   list.any(body, fn(el) {
     case el {
-      ast.ClassMethod(key:, ..) -> refs_frame_key(key, ct)
-      ast.ClassField(key:, ..) -> refs_frame_key(key, ct)
+      ast.ClassMethod(key:, ..) -> refs_frame_key(key, count_this)
+      ast.ClassField(key:, ..) -> refs_frame_key(key, count_this)
       ast.StaticBlock(..) -> False
     }
   })
 }
 
-fn refs_frame_expr(e: ast.Expression, ct: Bool) -> Bool {
+fn refs_frame_expr(e: ast.Expression, count_this count_this: Bool) -> Bool {
   case e {
-    ast.ThisExpression(..) -> ct
+    ast.ThisExpression(..) -> count_this
     ast.SuperExpression(..) -> True
     ast.MetaProperty(kind: ast.NewTarget, ..) -> True
     ast.MetaProperty(kind: ast.ImportMeta, ..) -> False
@@ -999,34 +1039,36 @@ fn refs_frame_expr(e: ast.Expression, ct: Bool) -> Bool {
     | ast.RegExpLiteral(..)
     | ast.IntrinsicTemplateObject(..) -> False
     ast.ParenthesizedExpression(expression:, ..) ->
-      refs_frame_expr(expression, ct)
+      refs_frame_expr(expression, count_this)
     ast.BinaryExpression(left:, right:, ..)
     | ast.LogicalExpression(left:, right:, ..)
     | ast.AssignmentExpression(left:, right:, ..) ->
-      refs_frame_expr(left, ct) || refs_frame_expr(right, ct)
+      refs_frame_expr(left, count_this) || refs_frame_expr(right, count_this)
     ast.UnaryExpression(argument:, ..)
     | ast.UpdateExpression(argument:, ..)
     | ast.AwaitExpression(argument:, ..)
-    | ast.SpreadElement(argument:, ..) -> refs_frame_expr(argument, ct)
-    ast.YieldExpression(argument:, ..) -> refs_frame_opt(argument, ct)
+    | ast.SpreadElement(argument:, ..) -> refs_frame_expr(argument, count_this)
+    ast.YieldExpression(argument:, ..) -> refs_frame_opt(argument, count_this)
     ast.ConditionalExpression(condition:, consequent:, alternate:, ..) ->
-      refs_frame_expr(condition, ct)
-      || refs_frame_expr(consequent, ct)
-      || refs_frame_expr(alternate, ct)
+      refs_frame_expr(condition, count_this)
+      || refs_frame_expr(consequent, count_this)
+      || refs_frame_expr(alternate, count_this)
     ast.SequenceExpression(expressions:, ..) ->
-      list.any(expressions, refs_frame_expr(_, ct))
+      list.any(expressions, refs_frame_expr(_, count_this))
     ast.CallExpression(callee: ast.Identifier(name: "eval", ..), ..) -> True
     ast.CallExpression(callee:, arguments:, ..)
     | ast.OptionalCallExpression(callee:, arguments:, ..)
     | ast.NewExpression(callee:, arguments:, ..) ->
-      refs_frame_expr(callee, ct) || list.any(arguments, refs_frame_expr(_, ct))
+      refs_frame_expr(callee, count_this)
+      || list.any(arguments, refs_frame_expr(_, count_this))
     ast.MemberExpression(object:, property:, ..)
     | ast.OptionalMemberExpression(object:, property:, ..) ->
-      refs_frame_expr(object, ct) || refs_frame_mprop(property, ct)
+      refs_frame_expr(object, count_this)
+      || refs_frame_mprop(property, count_this)
     ast.ArrayExpression(elements:, ..) ->
       list.any(elements, fn(el) {
         case el {
-          Some(x) -> refs_frame_expr(x, ct)
+          Some(x) -> refs_frame_expr(x, count_this)
           None -> False
         }
       })
@@ -1034,32 +1076,37 @@ fn refs_frame_expr(e: ast.Expression, ct: Bool) -> Bool {
       list.any(properties, fn(p) {
         case p {
           ast.InitProperty(key:, value:, ..) ->
-            refs_frame_key(key, ct) || refs_frame_expr(value, ct)
+            refs_frame_key(key, count_this)
+            || refs_frame_expr(value, count_this)
           ast.MethodProperty(key:, ..) | ast.AccessorProperty(key:, ..) ->
-            refs_frame_key(key, ct)
-          ast.SpreadProperty(argument:) -> refs_frame_expr(argument, ct)
+            refs_frame_key(key, count_this)
+          ast.SpreadProperty(argument:) -> refs_frame_expr(argument, count_this)
         }
       })
     ast.TemplateLiteral(parts:, ..) ->
-      list.any(ast.template_expressions(parts), refs_frame_expr(_, ct))
+      list.any(ast.template_expressions(parts), refs_frame_expr(_, count_this))
     ast.TaggedTemplateExpression(tag:, parts:, ..) ->
-      refs_frame_expr(tag, ct)
-      || list.any(ast.template_expressions(parts), refs_frame_expr(_, ct))
+      refs_frame_expr(tag, count_this)
+      || list.any(ast.template_expressions(parts), refs_frame_expr(
+        _,
+        count_this,
+      ))
     ast.ImportExpression(source:, options:, ..) ->
-      refs_frame_expr(source, ct) || refs_frame_opt(options, ct)
+      refs_frame_expr(source, count_this) || refs_frame_opt(options, count_this)
     ast.FunctionExpression(..) -> False
     ast.ArrowFunctionExpression(params:, body:, ..) ->
-      list.any(params, refs_frame_pattern(_, ct))
+      list.any(params, refs_frame_pattern(_, count_this))
       || case body {
-        ast.ArrowBodyExpression(x) -> refs_frame_expr(x, ct)
-        ast.ArrowBodyBlock(stmts) -> refs_frame_stmts(stmts, ct)
+        ast.ArrowBodyExpression(x) -> refs_frame_expr(x, count_this)
+        ast.ArrowBodyBlock(stmts) -> refs_frame_stmts(stmts, count_this)
       }
     ast.ClassExpression(super_class:, body:, ..) ->
-      refs_frame_opt(super_class, ct) || refs_frame_class_body(body, ct)
+      refs_frame_opt(super_class, count_this)
+      || refs_frame_class_body(body, count_this)
   }
 }
 
-fn refs_frame_stmt(s: ast.Statement, ct: Bool) -> Bool {
+fn refs_frame_stmt(s: ast.Statement, count_this count_this: Bool) -> Bool {
   case s {
     ast.EmptyStatement
     | ast.BreakStatement(..)
@@ -1067,71 +1114,79 @@ fn refs_frame_stmt(s: ast.Statement, ct: Bool) -> Bool {
     | ast.DebuggerStatement -> False
     ast.FunctionDeclaration(..) -> False
     ast.ClassDeclaration(super_class:, body:, ..) ->
-      refs_frame_opt(super_class, ct) || refs_frame_class_body(body, ct)
-    ast.ExpressionStatement(expression:, ..) -> refs_frame_expr(expression, ct)
-    ast.ReturnStatement(argument:) -> refs_frame_opt(argument, ct)
-    ast.ThrowStatement(argument:) -> refs_frame_expr(argument, ct)
-    ast.BlockStatement(body:) -> refs_frame_stmts(body, ct)
-    ast.LabeledStatement(body:, ..) -> refs_frame_stmt(body, ct)
+      refs_frame_opt(super_class, count_this)
+      || refs_frame_class_body(body, count_this)
+    ast.ExpressionStatement(expression:, ..) ->
+      refs_frame_expr(expression, count_this)
+    ast.ReturnStatement(argument:) -> refs_frame_opt(argument, count_this)
+    ast.ThrowStatement(argument:) -> refs_frame_expr(argument, count_this)
+    ast.BlockStatement(body:) -> refs_frame_stmts(body, count_this)
+    ast.LabeledStatement(body:, ..) -> refs_frame_stmt(body, count_this)
     ast.VariableDeclaration(declarations:, ..) ->
-      refs_frame_decls(declarations, ct)
+      refs_frame_decls(declarations, count_this)
     ast.IfStatement(condition:, consequent:, alternate:) ->
-      refs_frame_expr(condition, ct)
-      || refs_frame_stmt(consequent, ct)
+      refs_frame_expr(condition, count_this)
+      || refs_frame_stmt(consequent, count_this)
       || case alternate {
-        Some(a) -> refs_frame_stmt(a, ct)
+        Some(a) -> refs_frame_stmt(a, count_this)
         None -> False
       }
     ast.WhileStatement(condition:, body:)
     | ast.DoWhileStatement(condition:, body:) ->
-      refs_frame_expr(condition, ct) || refs_frame_stmt(body, ct)
+      refs_frame_expr(condition, count_this)
+      || refs_frame_stmt(body, count_this)
     ast.WithStatement(object:, body:) ->
-      refs_frame_expr(object, ct) || refs_frame_stmt(body, ct)
+      refs_frame_expr(object, count_this) || refs_frame_stmt(body, count_this)
     ast.ForStatement(init:, condition:, update:, body:) ->
       case init {
-        Some(fi) -> refs_frame_for_init(fi, ct)
+        Some(fi) -> refs_frame_for_init(fi, count_this)
         None -> False
       }
-      || refs_frame_opt(condition, ct)
-      || refs_frame_opt(update, ct)
-      || refs_frame_stmt(body, ct)
+      || refs_frame_opt(condition, count_this)
+      || refs_frame_opt(update, count_this)
+      || refs_frame_stmt(body, count_this)
     ast.ForInStatement(left:, right:, body:)
     | ast.ForOfStatement(left:, right:, body:, ..) ->
-      refs_frame_for_init(left, ct)
-      || refs_frame_expr(right, ct)
-      || refs_frame_stmt(body, ct)
+      refs_frame_for_init(left, count_this)
+      || refs_frame_expr(right, count_this)
+      || refs_frame_stmt(body, count_this)
     ast.SwitchStatement(discriminant:, cases:) ->
-      refs_frame_expr(discriminant, ct)
+      refs_frame_expr(discriminant, count_this)
       || list.any(cases, fn(c: ast.SwitchCase) {
-        refs_frame_opt(c.condition, ct) || refs_frame_stmts(c.consequent, ct)
+        refs_frame_opt(c.condition, count_this)
+        || refs_frame_stmts(c.consequent, count_this)
       })
     ast.TryStatement(block:, tail:) ->
-      refs_frame_stmts(block, ct)
+      refs_frame_stmts(block, count_this)
       || case tail {
-        ast.TryCatch(handler:) -> refs_frame_catch(handler, ct)
-        ast.TryFinally(finalizer:) -> refs_frame_stmts(finalizer, ct)
+        ast.TryCatch(handler:) -> refs_frame_catch(handler, count_this)
+        ast.TryFinally(finalizer:) -> refs_frame_stmts(finalizer, count_this)
         ast.TryCatchFinally(handler:, finalizer:) ->
-          refs_frame_catch(handler, ct) || refs_frame_stmts(finalizer, ct)
+          refs_frame_catch(handler, count_this)
+          || refs_frame_stmts(finalizer, count_this)
       }
   }
 }
 
-fn refs_frame_catch(h: ast.CatchClause, ct: Bool) -> Bool {
+fn refs_frame_catch(h: ast.CatchClause, count_this count_this: Bool) -> Bool {
   case h.param {
-    Some(p) -> refs_frame_pattern(p, ct)
+    Some(p) -> refs_frame_pattern(p, count_this)
     None -> False
   }
-  || refs_frame_stmts(h.body, ct)
+  || refs_frame_stmts(h.body, count_this)
 }
 
-fn refs_frame_stmts(stmts: List(ast.StmtWithLine), ct: Bool) -> Bool {
-  list.any(stmts, fn(s) { refs_frame_stmt(s.statement, ct) })
+fn refs_frame_stmts(
+  stmts: List(ast.StmtWithLine),
+  count_this count_this: Bool,
+) -> Bool {
+  list.any(stmts, fn(s) { refs_frame_stmt(s.statement, count_this) })
 }
 
-fn refs_frame_body(body: FnBody, ct: Bool) -> Bool {
+fn refs_frame_body(body: FnBody, count_this count_this: Bool) -> Bool {
   case body {
-    StmtBody(stmts) -> refs_frame_stmts(stmts, ct)
-    ExprBody(x) -> refs_frame_expr(x, ct)
+    StmtBody(stmts) -> refs_frame_stmts(stmts, count_this)
+    ExprBody(x) -> refs_frame_expr(x, count_this)
   }
 }
 
@@ -1143,11 +1198,11 @@ fn refs_args_body(body: FnBody) -> Bool {
 }
 
 // callers must also gate on lexical_boxed == no_lexical_refs
-fn is_simple_abi_eligible(
+fn direct_abi_shape(
   shape: FnShape,
   params: List(ast.Pattern),
   body: FnBody,
-) -> Option(#(Int, Bool)) {
+) -> Option(DirectAbi) {
   let #(shape_ok, is_arrow) = case shape {
     FnDecl(is_gen: False, is_async: False) -> #(True, False)
     FnExpr(is_gen: False, is_async: False, self_name: None) -> #(True, False)
@@ -1163,12 +1218,15 @@ fn is_simple_abi_eligible(
       case rest == None && ast_util.all_simple_params(fixed) {
         False -> None
         True ->
-          case refs_args_body(body) || refs_frame_body(body, False) {
+          case
+            refs_args_body(body) || refs_frame_body(body, count_this: False)
+          {
             True -> None
             False ->
-              case is_arrow, refs_frame_body(body, True) {
+              case is_arrow, refs_frame_body(body, count_this: True) {
                 True, True -> None
-                _, takes_this -> Some(#(list.length(fixed), takes_this))
+                _, takes_this ->
+                  Some(DirectAbi(arity: list.length(fixed), takes_this:))
               }
           }
       }
@@ -1178,12 +1236,12 @@ fn is_simple_abi_eligible(
 
 fn init_arguments(
   e: Emitter,
-  is_arrow: Bool,
-  uses_args: Bool,
-  fixed: List(ast.Pattern),
-  non_simple: Bool,
-  has_rest: Bool,
-  k: Next,
+  is_arrow is_arrow: Bool,
+  uses_args uses_args: Bool,
+  fixed fixed: List(ast.Pattern),
+  non_simple non_simple: Bool,
+  has_rest has_rest: Bool,
+  k k: Next,
 ) -> EmitResult {
   case is_arrow || !uses_args {
     True -> k(e)
@@ -1216,8 +1274,8 @@ fn init_arguments(
 fn build_mapped_boxes(
   e: Emitter,
   fixed: List(ast.Pattern),
-  unmapped: Bool,
-  k: NextWith(ir.Value),
+  unmapped unmapped: Bool,
+  k k: NextWith(ir.Value),
 ) -> EmitResult {
   case unmapped || e.strict {
     True -> k(e, e.consts.undef)
@@ -1283,12 +1341,12 @@ pub fn body_stmts(body: FnBody) -> List(ast.StmtWithLine) {
 pub fn emit_prologue(
   e: Emitter,
   self_name: Option(String),
-  is_arrow: Bool,
-  own_args: Bool,
-  params: List(ast.Pattern),
-  stmts: List(ast.StmtWithLine),
-  info: FunctionInfo,
-  k: fn(Emitter, fn(Emitter) -> Emitter) -> EmitResult,
+  is_arrow is_arrow: Bool,
+  own_args own_args: Bool,
+  params params: List(ast.Pattern),
+  stmts stmts: List(ast.StmtWithLine),
+  info info: FunctionInfo,
+  k k: fn(Emitter, fn(Emitter) -> Emitter) -> EmitResult,
 ) -> EmitResult {
   let #(fixed, rest_param) = ast_util.split_trailing_rest(params)
   let non_simple = !ast_util.all_simple_params(fixed)
@@ -1361,20 +1419,20 @@ fn emit_body(
     e,
     sf.self_name,
     sf.is_arrow,
-    True,
-    params,
-    stmts,
-    info,
+    own_args: True,
+    params:,
+    stmts:,
+    info:,
   )
   use #(tree, ef) <- result.map(e.dispatch.emit_stmts(e, stmts, ret_undef))
   #(tree, finish(ef))
 }
 
-fn simple_param_name(i: Int) -> String {
+fn direct_param_name(i: Int) -> String {
   "_p" <> int.to_string(i)
 }
 
-fn simple_param_ir_name(
+fn direct_param_ir_name(
   e: Emitter,
   fixed: List(ast.Pattern),
   i: Int,
@@ -1384,7 +1442,7 @@ fn simple_param_ir_name(
       let b = fn_scope_binding(e, name)
       state.slot_base_name(e, b.slot)
     }
-    _ -> simple_param_name(i)
+    _ -> direct_param_name(i)
   }
 }
 
@@ -1396,30 +1454,30 @@ fn list_at(xs: List(a), i: Int) -> Option(a) {
   }
 }
 
-fn build_simple_ir_params(
+fn build_direct_ir_params(
   e: Emitter,
   fixed: List(ast.Pattern),
   i: Int,
   ncap: Int,
   arity: Int,
-  takes_this: Bool,
+  takes_this takes_this: Bool,
 ) -> List(ir.Local) {
   case i < ncap {
     True -> [
       ir.Local(state.cap_param_name(e, i), ir.TTerm),
-      ..build_simple_ir_params(e, fixed, i + 1, ncap, arity, takes_this)
+      ..build_direct_ir_params(e, fixed, i + 1, ncap, arity, takes_this)
     ]
     False -> {
-      let ps = build_simple_pos_params(e, fixed, 0, arity)
+      let ps = build_direct_pos_params(e, fixed, 0, arity)
       case takes_this {
-        True -> [ir.Local(simple_this_param, ir.TTerm), ..ps]
+        True -> [ir.Local(direct_this_param, ir.TTerm), ..ps]
         False -> ps
       }
     }
   }
 }
 
-fn build_simple_pos_params(
+fn build_direct_pos_params(
   e: Emitter,
   fixed: List(ast.Pattern),
   i: Int,
@@ -1427,14 +1485,14 @@ fn build_simple_pos_params(
 ) -> List(ir.Local) {
   case i < arity {
     True -> [
-      ir.Local(simple_param_ir_name(e, fixed, i), ir.TTerm),
-      ..build_simple_pos_params(e, fixed, i + 1, arity)
+      ir.Local(direct_param_ir_name(e, fixed, i), ir.TTerm),
+      ..build_direct_pos_params(e, fixed, i + 1, arity)
     ]
     False -> []
   }
 }
 
-fn bind_simple_params(
+fn bind_direct_params(
   e: Emitter,
   fixed_all: List(ast.Pattern),
   fixed: List(ast.Pattern),
@@ -1445,12 +1503,12 @@ fn bind_simple_params(
     [] -> k(e)
     [p, ..rest] -> {
       let assert ast.IdentifierPattern(name:, ..) = p
-        as "aot/func: simple-abi param not IdentifierPattern"
+        as "aot/func: direct-abi param not IdentifierPattern"
       let b = fn_scope_binding(e, name)
-      let pn = simple_param_ir_name(e, fixed_all, i)
+      let pn = direct_param_ir_name(e, fixed_all, i)
       let raw = ir.Var(pn)
       let vn = state.slot_base_name(e, b.slot)
-      let next = fn(e) { bind_simple_params(e, fixed_all, rest, i + 1, k) }
+      let next = fn(e) { bind_direct_params(e, fixed_all, rest, i + 1, k) }
       case b.boxed {
         False if pn == vn -> next(state.set_slot_var(e, b.slot, vn))
         False -> {
@@ -1467,54 +1525,54 @@ fn bind_simple_params(
   }
 }
 
-fn seed_simple_this(
+fn seed_direct_this(
   e: Emitter,
-  takes_this: Bool,
-  info: FunctionInfo,
-  k: Next,
+  takes_this takes_this: Bool,
+  info info: FunctionInfo,
+  k k: Next,
 ) -> EmitResult {
   case takes_this, info.lexical {
     True, lexical.OwnedLexicalSlots(base:) -> {
       let slot = base + lexical.lexical_ref_offset(lexical.RefThis)
-      k(state.set_slot_var(e, slot, simple_this_param))
+      k(state.set_slot_var(e, slot, direct_this_param))
     }
     _, _ -> k(e)
   }
 }
 
-fn emit_simple_body(
+fn emit_direct_body(
   e: Emitter,
   fixed: List(ast.Pattern),
   body: FnBody,
-  takes_this: Bool,
-  info: FunctionInfo,
+  takes_this takes_this: Bool,
+  info info: FunctionInfo,
 ) -> EmitResult {
   let stmts = body_stmts(body)
   let ret_undef = fn(ef: Emitter) { Ok(#(ir.Return([ef.consts.undef]), ef)) }
   with_done(e, fn(e, done) {
-    use e <- seed_simple_this(e, takes_this, info)
+    use e <- seed_direct_this(e, takes_this, info)
     use e <- binding_prologue(e, e.fn_scope)
-    use e <- bind_simple_params(e, fixed, fixed, 0)
+    use e <- bind_direct_params(e, fixed, fixed, 0)
     use e <- hoist_fn_decls(e, stmts)
     use #(tree, ef) <- result.try(e.dispatch.emit_stmts(e, stmts, ret_undef))
     done(ef, tree)
   })
 }
 
-fn simple_shim_body(
+fn direct_shim_body(
   e: Emitter,
   target: String,
   ncap: Int,
   arity: Int,
-  takes_this: Bool,
-  undef: ir.Value,
+  takes_this takes_this: Bool,
+  undef undef: ir.Value,
 ) -> ir.Expr {
   let caps =
     build_ir_params(e, 0, ncap)
     |> list.take(ncap)
     |> list.map(fn(l) { ir.Var(l.name) })
   let this = case takes_this {
-    True -> [ir.Var(simple_this_param)]
+    True -> [ir.Var(direct_this_param)]
     False -> []
   }
   let lead = list.append(caps, this)
@@ -1522,7 +1580,7 @@ fn simple_shim_body(
   case takes_this {
     True ->
       ir.Let(
-        [simple_this_param],
+        [direct_this_param],
         ir.TermOp(ir.TupleGet(0), [ir.Var(frame_param)]),
         unpack,
       )
@@ -1543,7 +1601,7 @@ fn shim_walk(
   case i < arity {
     False -> call(list.reverse(bound))
     True -> {
-      let p = simple_param_name(i)
+      let p = direct_param_name(i)
       let short =
         list.append(list.reverse(bound), list.repeat(undef, arity - i))
       let more = case i + 1 < arity {
@@ -1578,7 +1636,7 @@ fn shim_walk(
   }
 }
 
-fn atom_bool(rc: state.IrConsts, b: Bool) -> ir.Value {
+fn atom_bool(rc: state.IrConsts, value b: Bool) -> ir.Value {
   case b {
     True -> rc.true_
     False -> rc.false_
@@ -1589,11 +1647,11 @@ fn emit_closure_alloc(
   e: Emitter,
   fn_name: String,
   sf: ShapeFlags,
-  is_strict: Bool,
-  js_name: Option(String),
-  expected_length: Int,
-  capture_vals: List(ir.Value),
-  direct_entry: Option(#(String, Int, Bool)),
+  is_strict is_strict: Bool,
+  js_name js_name: Option(String),
+  expected_length expected_length: Int,
+  capture_vals capture_vals: List(ir.Value),
+  direct_entry direct_entry: Option(DirectEntryFn),
 ) -> #(ir.Expr, Emitter) {
   let rc = e.consts
   // must match arc/rt/types.FnFlags field order
@@ -1618,7 +1676,7 @@ fn emit_closure_alloc(
       use flags_t <- anf.then(anf.make_tuple(flags))
       use direct_entry_v <- anf.then(case direct_entry {
         None -> anf.pure(ir.ConstAtom("none"))
-        Some(#(sfn, arity, takes_this)) -> {
+        Some(DirectEntryFn(name: sfn, arity:, takes_this:)) -> {
           let cls_arity = case takes_this {
             True -> arity + 1
             False -> arity
@@ -1720,15 +1778,14 @@ fn compile_function(
         )
       let e_child = seed_capture_slots(e_child, child_info)
       let ncap = capture_count(child_info)
-      let simple_arity = case
+      let direct_abi = case
         sf.self_name,
-        child_info.lexical_boxed == lexical.no_lexical_refs,
-        is_simple_abi_eligible(shape, params, body)
+        child_info.lexical_boxed == lexical.no_lexical_refs
       {
-        None, True, Some(n) -> Some(n)
-        _, _, _ -> None
+        None, True -> direct_abi_shape(shape, params, body)
+        _, _ -> None
       }
-      use #(e, direct_entry) <- result.try(case simple_arity {
+      use #(e, direct_entry) <- result.try(case direct_abi {
         None -> {
           use #(body_expr, e_child) <- result.try(emit_body(
             e_child,
@@ -1750,12 +1807,12 @@ fn compile_function(
             )
           Ok(#(state.leave_function(e_child, save), None))
         }
-        Some(#(arity, takes_this)) -> {
-          let simple_fn_name = case takes_this {
+        Some(DirectAbi(arity:, takes_this:)) -> {
+          let direct_fn_name = case takes_this {
             True -> fn_name <> "_t"
             False -> fn_name <> "_s"
           }
-          use #(sbody, e_child) <- result.try(emit_simple_body(
+          use #(sbody, e_child) <- result.try(emit_direct_body(
             e_child,
             fixed,
             body,
@@ -1766,8 +1823,8 @@ fn compile_function(
             state.add_function(
               e_child,
               ir.Function(
-                name: simple_fn_name,
-                params: build_simple_ir_params(
+                name: direct_fn_name,
+                params: build_direct_ir_params(
                   e_child,
                   fixed,
                   0,
@@ -1788,9 +1845,9 @@ fn compile_function(
                 params: build_ir_params(e_child, 0, ncap),
                 result: [ir.TTerm],
                 locals: [],
-                body: simple_shim_body(
+                body: direct_shim_body(
                   e_child,
-                  simple_fn_name,
+                  direct_fn_name,
                   ncap,
                   arity,
                   takes_this,
@@ -1800,7 +1857,7 @@ fn compile_function(
             )
           Ok(#(
             state.leave_function(e_child, save),
-            Some(#(simple_fn_name, arity, takes_this)),
+            Some(DirectEntryFn(direct_fn_name, arity, takes_this:)),
           ))
         }
       })
@@ -1817,7 +1874,7 @@ fn compile_function(
         )
       }
       case direct_entry {
-        Some(#(name, arity, takes_this)) ->
+        Some(DirectEntryFn(name:, arity:, takes_this:)) ->
           Ok(#(
             EmittedClosure(
               alloc,
@@ -1835,6 +1892,15 @@ fn compile_function(
       }
     }
   }
+}
+
+// the fixed-arity shim closure installed beside the frame abi closure
+type DirectAbi {
+  DirectAbi(arity: Int, takes_this: Bool)
+}
+
+type DirectEntryFn {
+  DirectEntryFn(name: String, arity: Int, takes_this: Bool)
 }
 
 type EmittedClosure {

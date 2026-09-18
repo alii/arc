@@ -94,8 +94,19 @@ pub type SuspendedFrame {
   )
 }
 
-// loop-hot slots the interpreter keeps in loop arguments, -1 unused
+// loop-hot slots the interpreter keeps in loop arguments
 pub type Regs {
   NoRegs
   Regs(a: Int, b: Int)
 }
+
+// Regs.b when only one slot was picked
+pub const no_register = -1
+
+// negative op slot operands name a register instead of a local
+pub const reg_a_slot = -1
+
+pub const reg_b_slot = -2
+
+// a negative retpc makes Ret return the value under it
+pub const return_retpc = -1

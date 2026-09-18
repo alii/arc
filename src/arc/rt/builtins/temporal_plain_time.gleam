@@ -1,3 +1,4 @@
+import arc/bytecode/error_kind.{type JsError, JsError, RangeError}
 import arc/internal/int_math.{floor_div, floor_mod}
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
@@ -5,7 +6,7 @@ import arc/rt/builtins/temporal_common.{
   epoch_ns_to_iso_in, get_difference_settings, get_options_object,
   get_overflow_option_from_value, make_duration, make_time, max_unit,
   negate_duration, read_int_field, require_largest_ge_smallest, require_temporal,
-  require_time_unit, round_options, round_to_increment, static_name, terr,
+  require_time_unit, round_options, round_to_increment, static_name,
   time_part_ns, time_slot_of, time_unit_ns, to_string_time_options,
   to_temporal_duration, truncated_int_arg_or, unit_rank,
   valid_rounding_increment,
@@ -15,22 +16,22 @@ import arc/rt/builtins/temporal_fields.{
   require_nonempty_fields, require_partial_bag,
 }
 import arc/rt/builtins/temporal_iso.{
-  type IsoTime, type Overflow, type TErr, AutoPrecision, Constrain, IsoTime,
-  NoOffset, NumericOffset, RangeE, Reject, Zulu, format_iso_time, int_sign,
-  is_valid_time, midnight, ns_per_day, ns_to_time, parse_annotations,
-  parse_iso_datetime_string, parse_offset_part, parse_time_part, time_to_ns,
+  type IsoTime, type Overflow, AutoPrecision, Constrain, IsoTime, NoOffset,
+  NumericOffset, Reject, Zulu, format_iso_time, int_sign, is_valid_time,
+  midnight, ns_per_day, ns_to_time, parse_annotations, parse_iso_datetime_string,
+  parse_offset_part, parse_time_part, time_to_ns,
 }
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type NativeToken, type PlainTimeMethod,
-  type TemporalProtos, type TemporalStaticName, type TemporalTimeGetter, JInt,
-  KHandle, KStr, PtAdd, PtEquals, PtRound, PtSince, PtSubtract, PtToJson,
+  type TemporalProtos, type TemporalStaticName, type TemporalTimeGetter, KHandle,
+  KStr, PtAdd, PtEquals, PtRound, PtSince, PtSubtract, PtToJson,
   PtToLocaleString, PtToString, PtUntil, PtValueOf, PtWith, SObject,
   TemporalDateTime, TemporalN, TemporalObj, TemporalPlainTimeCtor,
   TemporalPlainTimeGetter, TemporalPlainTimeMethod, TemporalPlainTimeStatic,
   TemporalTime, TemporalZonedDateTime, TgHour, TgMicrosecond, TgMillisecond,
-  TgMinute, TgNanosecond, TgSecond, TsCompare, TsFrom, classify, mk_bool,
-  mk_number, mk_string,
+  TgMinute, TgNanosecond, TgSecond, TsCompare, TsFrom, classify, mk_bool, mk_int,
+  mk_string,
 }
 import arc/rt/val as rt_val
 import gleam/int
@@ -152,7 +153,7 @@ pub fn static(
         to_temporal_time(st, helpers.arg_at(args, 0), types.mk_undefined())
       let #(b, st) =
         to_temporal_time(st, helpers.arg_at(args, 1), types.mk_undefined())
-      #(mk_number(JInt(int_sign(time_to_ns(a) - time_to_ns(b)))), st)
+      #(mk_int(int_sign(time_to_ns(a) - time_to_ns(b))), st)
     }
   }
 }
@@ -176,7 +177,7 @@ pub fn time_field(t: IsoTime, g: TemporalTimeGetter) -> JsVal {
     TgMicrosecond -> t.microsecond
     TgNanosecond -> t.nanosecond
   }
-  mk_number(JInt(n))
+  mk_int(n)
 }
 
 pub fn method(
@@ -239,7 +240,7 @@ pub fn method(
       let #(overflow, st) =
         get_overflow_option_from_value(st, helpers.arg_at(args, 1))
       let t2 = time_fields_apply(f, t)
-      let t3 = terr(st, regulate_time(t2, overflow))
+      let t3 = rt_val.or_throw(st, regulate_time(t2, overflow))
       make_time(st, protos, t3)
     }
     PtRound -> {
@@ -270,7 +271,7 @@ fn time_until_since(
   t1: IsoTime,
   t2: IsoTime,
   args: List(JsVal),
-  is_since: Bool,
+  is_since is_since: Bool,
 ) -> #(JsVal, Agent) {
   let #(#(largest, smallest, inc, mode), st) = get_difference_settings(st, args)
   let smallest = option.unwrap(smallest, Nanosecond)
@@ -283,7 +284,7 @@ fn time_until_since(
       rt_val.t_throw_range_error(st, "units must be time units for PlainTime")
     False -> {
       let Nil = require_largest_ge_smallest(st, largest, smallest)
-      let smallest_time_unit = terr(st, require_time_unit(smallest))
+      let smallest_time_unit = rt_val.or_throw(st, require_time_unit(smallest))
       let mode = apply_since_mode(mode, is_since)
       let diff = time_to_ns(t2) - time_to_ns(t1)
       let rounded =
@@ -332,12 +333,15 @@ pub fn read_time_fields(st: Agent, bag: Handle) -> #(TimeFields, Agent) {
   )
 }
 
-pub fn regulate_time(t: IsoTime, overflow: Overflow) -> Result(IsoTime, TErr) {
+pub fn regulate_time(
+  t: IsoTime,
+  overflow: Overflow,
+) -> Result(IsoTime, JsError) {
   case overflow {
     Reject ->
       case is_valid_time(t) {
         True -> Ok(t)
-        False -> Error(RangeE("time out of range"))
+        False -> Error(JsError(RangeError, "time out of range"))
       }
     Constrain ->
       Ok(IsoTime(
@@ -403,7 +407,7 @@ pub fn to_temporal_time(
         _ -> time_from_bag(st, h, options)
       }
     KStr(s) -> {
-      let t = terr(st, parse_time_string(s))
+      let t = rt_val.or_throw(st, parse_time_string(s))
       let #(_o, st) = get_overflow_option_from_value(st, options)
       #(t, st)
     }
@@ -411,18 +415,19 @@ pub fn to_temporal_time(
   }
 }
 
-pub fn parse_time_string(s: String) -> Result(IsoTime, TErr) {
+pub fn parse_time_string(s: String) -> Result(IsoTime, JsError) {
   case parse_iso_datetime_string(s) {
     Some(p) ->
       case p.offset {
-        Zulu -> Error(RangeE("Z designator not valid for PlainTime"))
+        Zulu ->
+          Error(JsError(RangeError, "Z designator not valid for PlainTime"))
         NoOffset | NumericOffset(_, _) ->
           case p.time {
             Some(t) -> {
               use Nil <- result.map(check_parsed_calendar(p))
               t
             }
-            None -> Error(RangeE("no time in string"))
+            None -> Error(JsError(RangeError, "no time in string"))
           }
       }
     None -> {
@@ -433,10 +438,10 @@ pub fn parse_time_string(s: String) -> Result(IsoTime, TErr) {
       case parse_time_with_annotations(body) {
         Some(t) ->
           case !explicit_t && time_string_is_ambiguous(body) {
-            True -> Error(RangeE("ambiguous time string"))
+            True -> Error(JsError(RangeError, "ambiguous time string"))
             False -> Ok(t)
           }
-        None -> Error(RangeE("invalid time string: " <> s))
+        None -> Error(JsError(RangeError, "invalid time string: " <> s))
       }
     }
   }
@@ -453,7 +458,7 @@ fn parse_time_with_annotations(s: String) -> Option(IsoTime) {
     rest,
     None,
     None,
-    False,
+    cal_critical: False,
   ))
   case rest2 {
     "" -> Some(t)
@@ -485,7 +490,7 @@ pub fn time_from_bag(
     False -> {
       let #(overflow, st) = get_overflow_option_from_value(st, options)
       let t0 = time_fields_apply(f, midnight)
-      #(terr(st, regulate_time(t0, overflow)), st)
+      #(rt_val.or_throw(st, regulate_time(t0, overflow)), st)
     }
   }
 }

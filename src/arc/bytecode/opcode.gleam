@@ -1,15 +1,11 @@
 import arc/bytecode/binop.{type PureBinOp}
+import arc/bytecode/error_kind.{type ErrorKind}
 import arc/bytecode/key.{type PropertyKey}
-import gleam/option.{type Option}
+import gleam/option.{type Option, None, Some}
 
 pub type TemplateQuasi {
   // cooked is none for an invalid escape
   TemplateQuasi(cooked: Option(String), raw: String)
-}
-
-pub type ErrorKind {
-  ReferenceErrorKind
-  TypeErrorKind
 }
 
 pub type LabelId {
@@ -555,7 +551,7 @@ pub fn map_slots(op: Op, f: fn(Int) -> Int) -> Op {
 }
 
 // backward edges only, enough to find loops
-pub fn jump_target(op: Op) -> Int {
+pub fn jump_target(op: Op) -> Option(Int) {
   case op {
     Jump(Pc(t))
     | JumpIfFalse(Pc(t))
@@ -569,7 +565,7 @@ pub fn jump_target(op: Op) -> Int {
     | CmpLocalLocalJump(_, _, _, Pc(t), _)
     | CmpLocalConstJump(_, _, _, Pc(t), _)
     | CmpJump(_, Pc(t), _)
-    | CmpConstJump(_, _, Pc(t), _) -> t
-    _ -> -1
+    | CmpConstJump(_, _, Pc(t), _) -> Some(t)
+    _ -> None
   }
 }

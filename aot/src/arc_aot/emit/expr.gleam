@@ -3,7 +3,7 @@ import arc/bytecode/lexical
 import arc/compiler/ast_util
 import arc/compiler/scope
 import arc/parser/ast
-import arc/rt/types as rt_types
+import arc/rt/types
 import arc/rt/val as rt_val
 import arc_aot/emit/anf.{type Build}
 import arc_aot/emit/state.{type EmitResult, type Emitter, type Next}
@@ -1117,32 +1117,32 @@ fn shift_small_const(
 // consti32 carries unsigned bits, negatives box as w64
 fn number_literal(n: ast.LiteralNumber) -> Build(ir.Value) {
   case const_num(n) {
-    rt_types.JInt(i) if i >= 0 ->
+    types.JInt(i) if i >= 0 ->
       anf.bind_number(ir.Convert(ir.BoxInt(ir.W32), ir.ConstI32(i)))
-    rt_types.JInt(i) ->
+    types.JInt(i) ->
       anf.bind_number(ir.Convert(ir.BoxInt(ir.W64), ir.ConstI64(i)))
-    rt_types.JFloat(f) ->
+    types.JFloat(f) ->
       anf.then(
         anf.host("binary_to_float", [
           ir.ConstBinary(bit_array.from_string(float.to_string(f))),
         ]),
         anf.mark_number,
       )
-    rt_types.JPosInf -> anf.then(consts(), fn(rc) { anf.pure(rc.pos_inf) })
-    rt_types.JNegInf -> anf.then(consts(), fn(rc) { anf.pure(rc.neg_inf) })
-    rt_types.JNan -> anf.then(consts(), fn(rc) { anf.pure(rc.nan) })
+    types.JPosInf -> anf.then(consts(), fn(rc) { anf.pure(rc.pos_inf) })
+    types.JNegInf -> anf.then(consts(), fn(rc) { anf.pure(rc.neg_inf) })
+    types.JNan -> anf.then(consts(), fn(rc) { anf.pure(rc.nan) })
   }
 }
 
-fn const_num(n: ast.LiteralNumber) -> rt_types.JsNum {
+fn const_num(n: ast.LiteralNumber) -> types.JsNum {
   case n {
-    ast.InfiniteNumber -> rt_types.JPosInf
+    ast.InfiniteNumber -> types.JPosInf
     ast.FiniteNumber(f) -> {
       let i = float.truncate(f)
       let integral = int.to_float(i) == f && !rt_val.is_neg_zero(f)
       case integral && i > -2_147_483_648 && i < 2_147_483_648 {
-        True -> rt_types.JInt(i)
-        False -> rt_types.JFloat(f)
+        True -> types.JInt(i)
+        False -> types.JFloat(f)
       }
     }
   }
@@ -1202,7 +1202,7 @@ fn emit_template_object(
   anf.host("get_template_object", [site_key, cooked_l, raw_l])
 }
 
-fn read_slot(slot: Int, boxed: Bool) -> Build(ir.Value) {
+fn read_slot(slot: Int, boxed boxed: Bool) -> Build(ir.Value) {
   use e <- anf.then(ask)
   let v = ir.Var(state.get_slot_var(e, slot))
   case boxed {
@@ -1253,7 +1253,7 @@ fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
     scope.Global(name: g) -> {
       use e <- anf.then(ask)
       case state.lookup_slotted_global(e, g) {
-        Some(slot) -> read_slot(slot, True)
+        Some(slot) -> read_slot(slot, boxed: True)
         None ->
           case const_global(e, g) {
             Some(lit) -> anf.pure(lit)
@@ -1342,7 +1342,7 @@ fn set_lexical_this(v: ir.Value) -> Build(Nil) {
   }
 }
 
-fn this_check_init(slot: Int, boxed: Bool) -> Build(Nil) {
+fn this_check_init(slot: Int, boxed boxed: Bool) -> Build(Nil) {
   use rc <- anf.then(consts())
   use cur <- anf.then(read_slot(slot, boxed))
   // term identity, the sentinel is not a js value
@@ -1477,7 +1477,7 @@ pub type PropWriteRun {
   )
 }
 
-// later values must be simple so reordering is unobservable
+// later values must be reorder-safe so reordering is unobservable
 pub fn prop_write_run(
   e: Emitter,
   ss: List(ast.StmtWithLine),
@@ -1813,7 +1813,7 @@ fn emit_call_with_direct_callee(
   }
   anf.bind_if(is_direct, direct_call, {
     use args_l <- anf.then(cons_args)
-    anf.host("call_checked", [f, this, args_l])
+    anf.host("call", [f, this, args_l])
   })
 }
 
@@ -2334,7 +2334,7 @@ fn emit_iife(
 
 // §13.15.2 base and key evaluate once, in order, before rhs
 
-fn write_slot(slot: Int, boxed: Bool, v: ir.Value) -> Build(ir.Value) {
+fn write_slot(slot: Int, boxed boxed: Bool, v v: ir.Value) -> Build(ir.Value) {
   fn(e: Emitter, k) {
     case boxed {
       True ->
@@ -2361,9 +2361,9 @@ fn write_slot(slot: Int, boxed: Bool, v: ir.Value) -> Build(ir.Value) {
 // §9.1.1.1.5 reads do not throw on tdz, check before store
 fn write_slot_checked(
   slot: Int,
-  boxed: Bool,
-  name: String,
-  v: ir.Value,
+  boxed boxed: Bool,
+  name name: String,
+  v v: ir.Value,
 ) -> Build(ir.Value) {
   use cur <- anf.then(read_slot(slot, boxed))
   use _ <- anf.then(
@@ -2407,7 +2407,7 @@ pub fn emit_direct_put(
     scope.Global(_) -> {
       use e <- anf.then(ask)
       case state.lookup_slotted_global(e, name) {
-        Some(slot) -> write_slot(slot, True, v)
+        Some(slot) -> write_slot(slot, boxed: True, v:)
         None -> {
           use _ <- anf.then(
             anf.host(global_set_op(e.strict), [
@@ -2786,7 +2786,7 @@ fn emit_array(elements: List(Option(ast.Expression))) -> Build(ir.Value) {
 
 type ConstElem {
   ConstHole
-  ConstLeaf(ex: ast.Expression, term: rt_types.JsVal, floats: Int)
+  ConstLeaf(ex: ast.Expression, term: types.JsVal, floats: Int)
   ConstNest(elems: List(ConstElem))
 }
 
@@ -2811,7 +2811,7 @@ fn const_element(el: Option(ast.Expression)) -> Option(ConstElem) {
   }
 }
 
-fn const_leaf(ex: ast.Expression) -> Option(#(rt_types.JsVal, Int)) {
+fn const_leaf(ex: ast.Expression) -> Option(#(types.JsVal, Int)) {
   case ex {
     ast.NumberLiteral(_, n) -> Some(num_leaf(const_num(n)))
     ast.UnaryExpression(operator: ast.Negate, argument:, ..) ->
@@ -2820,18 +2820,18 @@ fn const_leaf(ex: ast.Expression) -> Option(#(rt_types.JsVal, Int)) {
           Some(num_leaf(const_num(ast.FiniteNumber(float.negate(f)))))
         _ -> None
       }
-    ast.StringExpression(_, s) -> Some(#(rt_types.mk_string(s), 0))
-    ast.BooleanLiteral(_, b) -> Some(#(rt_types.mk_bool(b), 0))
-    ast.NullLiteral(_) -> Some(#(rt_types.mk_null(), 0))
-    ast.UndefinedExpression(_) -> Some(#(rt_types.mk_undefined(), 0))
+    ast.StringExpression(_, s) -> Some(#(types.mk_string(s), 0))
+    ast.BooleanLiteral(_, b) -> Some(#(types.mk_bool(b), 0))
+    ast.NullLiteral(_) -> Some(#(types.mk_null(), 0))
+    ast.UndefinedExpression(_) -> Some(#(types.mk_undefined(), 0))
     _ -> None
   }
 }
 
-fn num_leaf(n: rt_types.JsNum) -> #(rt_types.JsVal, Int) {
+fn num_leaf(n: types.JsNum) -> #(types.JsVal, Int) {
   case n {
-    rt_types.JFloat(_) -> #(rt_types.mk_number(n), 1)
-    _ -> #(rt_types.mk_number(n), 0)
+    types.JFloat(_) -> #(types.mk_number(n), 1)
+    _ -> #(types.mk_number(n), 0)
   }
 }
 
@@ -2888,16 +2888,16 @@ fn const_spec(elems: List(ConstElem)) -> Build(ir.Value) {
   anf.cons_list(vs)
 }
 
-fn const_term(c: ConstElem) -> rt_types.JsVal {
+fn const_term(c: ConstElem) -> types.JsVal {
   case c {
-    ConstHole -> rt_types.mk_hole()
+    ConstHole -> types.mk_hole()
     ConstLeaf(term:, ..) -> term
-    ConstNest(sub) -> rt_types.mk_array_lit(list.map(sub, const_term))
+    ConstNest(sub) -> types.mk_array_lit(list.map(sub, const_term))
   }
 }
 
 @external(erlang, "erlang", "term_to_binary")
-fn pack_term(elems: List(rt_types.JsVal)) -> BitArray
+fn pack_term(elems: List(types.JsVal)) -> BitArray
 
 pub fn compound_binop(op: ast.AssignmentOp) -> Option(ast.BinaryOp) {
   case op {
@@ -2932,8 +2932,8 @@ pub fn logical_assign_op(op: ast.AssignmentOp) -> Option(ast.LogicalOp) {
 // §13.4 tonumeric on the old value
 fn emit_update(
   op: ast.UpdateOp,
-  prefix: Bool,
-  target: ast.Expression,
+  prefix prefix: Bool,
+  target target: ast.Expression,
 ) -> Build(ir.Value) {
   case ast_util.unwrap_parens(target) {
     // annex b: f()++ evaluates the call then throws

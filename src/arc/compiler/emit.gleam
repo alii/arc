@@ -1,3 +1,4 @@
+import arc/bytecode/error_kind
 import arc/bytecode/key
 import arc/bytecode/lexical
 import arc/bytecode/opcode.{
@@ -18,7 +19,7 @@ import arc/compiler/scope.{
 import arc/esm
 import arc/parser/ast
 import arc/rt/types.{
-  type JsVal, JInt, mk_bigint, mk_bool, mk_null, mk_number, mk_string, mk_tdz,
+  type JsVal, mk_bigint, mk_bool, mk_int, mk_null, mk_string, mk_tdz,
   mk_undefined,
 }
 import arc/rt/val as rt_val
@@ -200,9 +201,9 @@ pub fn emit_program(
 pub fn emit_eval_direct(
   stmts: List(ast.StmtWithLine),
   tree: scope.ScopeTree,
-  caller_is_strict: Bool,
-  inherit_param_scope: List(String),
-  inherit_private_env: List(String),
+  caller_is_strict caller_is_strict: Bool,
+  inherit_param_scope inherit_param_scope: List(String),
+  inherit_private_env inherit_private_env: List(String),
 ) -> Result(EmitOutput, EmitError) {
   let script_strict =
     caller_is_strict || ast_util.has_use_strict_directive(stmts)
@@ -613,7 +614,7 @@ fn emit_using_record_error(e: Emitter, slots: UsingSlots) -> Emitter {
 
 fn single_using_slots(
   e: Emitter,
-  is_async: Bool,
+  is_async is_async: Bool,
 ) -> #(Emitter, UsingSlots, Int) {
   let #(e, slot) = fresh_slot(e)
   let #(e, slots) = make_using_slots(e, [Disposer(slot:, is_async:)])
@@ -951,7 +952,7 @@ fn in_child_scope(
 // only let/const/using heads have a scope; None makes leave a no-op
 fn enter_for_scope(
   e: Emitter,
-  has_lex_head: Bool,
+  has_lex_head has_lex_head: Bool,
 ) -> #(Emitter, Option(ScopeSave)) {
   case has_lex_head {
     True -> {
@@ -1703,7 +1704,7 @@ fn emit_try_catch_finally(
 fn frame_target(
   frame: Frame,
   name: Option(String),
-  is_continue: Bool,
+  is_continue is_continue: Bool,
 ) -> Option(LabelId) {
   case frame, is_continue {
     LoopFrame(continue_target:, label:, ..), True ->
@@ -1805,7 +1806,7 @@ fn emit_goto_loop_walk(
   e: Emitter,
   stack: List(Frame),
   name: Option(String),
-  is_continue: Bool,
+  is_continue is_continue: Bool,
 ) -> Result(Emitter, EmitError) {
   case stack {
     [] ->
@@ -2391,7 +2392,10 @@ type ParamLayout {
   )
 }
 
-fn param_layout(params: List(ast.Pattern), is_arrow: Bool) -> ParamLayout {
+fn param_layout(
+  params: List(ast.Pattern),
+  is_arrow is_arrow: Bool,
+) -> ParamLayout {
   let #(fixed, rest) = ast_util.split_trailing_rest(params)
   let declared_names = list.flat_map(params, ast.pattern_bound_names)
   let bindings = case is_arrow {
@@ -2648,7 +2652,7 @@ fn splice_arguments_setup(
 fn for_effect(expr: ast.Expression) -> ast.Expression {
   case expr {
     ast.UpdateExpression(span, op, False, arg) ->
-      ast.UpdateExpression(span, op, True, arg)
+      ast.UpdateExpression(span, op, prefix: True, argument: arg)
     ast.SequenceExpression(span, exprs) ->
       case list.reverse(exprs) {
         [last, ..init] ->
@@ -3358,7 +3362,7 @@ fn emit_delete(e: Emitter, arg: ast.Expression) -> Result(Emitter, EmitError) {
       emit_op(
         e,
         opcode.ThrowError(
-          opcode.ReferenceErrorKind,
+          error_kind.ReferenceError,
           "Unsupported reference to 'super'",
         ),
       )
@@ -3390,7 +3394,7 @@ fn emit_call_then_reference_error(
   use e <- result.map(emit_expr(e, call))
   e
   |> emit_op(opcode.Pop)
-  |> emit_op(opcode.ThrowError(opcode.ReferenceErrorKind, message))
+  |> emit_op(opcode.ThrowError(error_kind.ReferenceError, message))
 }
 
 // argument arrives with parens already unwrapped
@@ -3400,7 +3404,7 @@ fn emit_update(
   prefix prefix: Bool,
   argument argument: ast.Expression,
 ) -> Result(Emitter, EmitError) {
-  let one = mk_number(JInt(1))
+  let one = mk_int(1)
   let bin_kind = update_binop(op)
   case argument {
     ast.CallExpression(..) ->
@@ -3906,8 +3910,8 @@ fn emit_function_closure(
   name: Option(String),
   params: List(ast.Pattern),
   body: List(ast.StmtWithLine),
-  is_gen: Bool,
-  is_async: Bool,
+  is_gen is_gen: Bool,
+  is_async is_async: Bool,
   // only syntactically named expressions get the self-name binding
   bind_self bind_self: Bool,
 ) -> Result(Emitter, EmitError) {
@@ -3930,7 +3934,7 @@ fn emit_arrow_closure(
   name: Option(String),
   params: List(ast.Pattern),
   body: ast.ArrowBody,
-  is_async: Bool,
+  is_async is_async: Bool,
 ) -> Result(Emitter, EmitError) {
   let body_stmts = case body {
     ast.ArrowBodyExpression(expr) -> [
@@ -4038,14 +4042,14 @@ fn emit_object_property(
     | ast.AccessorProperty(key: ast.KeyString(value: name, ..), value:, kind:) -> {
       let #(prefix, accessor) = property_accessor(kind)
       use e <- result.map(emit_method_value(e, value, Some(prefix <> name)))
-      emit_ir(e, IrDefineAccessor(name, accessor, True))
+      emit_ir(e, IrDefineAccessor(name, accessor, enumerable: True))
     }
 
     ast.AccessorProperty(key:, value:, kind:) -> {
       let #(_, accessor) = property_accessor(kind)
       use e <- result.try(emit_property_key(e, key))
       use e <- result.map(emit_method_value(e, value, None))
-      emit_op(e, opcode.DefineAccessorComputed(accessor, True))
+      emit_op(e, opcode.DefineAccessorComputed(accessor, enumerable: True))
     }
 
     ast.SpreadProperty(argument:) -> {
@@ -4570,8 +4574,8 @@ fn emit_object_pattern(
 fn stash_excluded_key(
   e: Emitter,
   name: String,
-  has_rest: Bool,
-  excluded_key_count: Int,
+  has_rest has_rest: Bool,
+  excluded_key_count excluded_key_count: Int,
 ) -> #(Emitter, Int) {
   case has_rest {
     False -> #(e, excluded_key_count)
@@ -4587,8 +4591,8 @@ fn emit_single_object_prop(
   e: Emitter,
   prop: ast.PatternProperty,
   binding_kind: BindingKind,
-  has_rest: Bool,
-  excluded_key_count: Int,
+  has_rest has_rest: Bool,
+  excluded_key_count excluded_key_count: Int,
 ) -> Result(#(Emitter, Int), EmitError) {
   case prop {
     ast.PatternProperty(key: ast.KeyIdentifier(name:, ..), value:, ..)
@@ -4626,8 +4630,8 @@ fn emit_computed_key_prop(
   emit_key: fn(Emitter) -> Result(Emitter, EmitError),
   inner: ast.Pattern,
   binding_kind: BindingKind,
-  has_rest: Bool,
-  excluded_key_count: Int,
+  has_rest has_rest: Bool,
+  excluded_key_count excluded_key_count: Int,
 ) -> Result(#(Emitter, Int), EmitError) {
   let e = emit_op(e, opcode.Dup)
   use e <- result.try(emit_key(e))
@@ -4864,8 +4868,8 @@ fn emit_array_assign_rest(
 fn emit_single_object_assign_prop(
   e: Emitter,
   prop: ast.Property,
-  has_rest: Bool,
-  excluded_key_count: Int,
+  has_rest has_rest: Bool,
+  excluded_key_count excluded_key_count: Int,
 ) -> Result(#(Emitter, Int), EmitError) {
   case prop {
     ast.InitProperty(key: ast.KeyComputed(expression:), value:, ..) -> {
@@ -4942,8 +4946,8 @@ fn emit_keyed_destructure_assign(
 fn emit_elem_key_assign(
   e: Emitter,
   value: ast.Expression,
-  has_rest: Bool,
-  excluded_key_count: Int,
+  has_rest has_rest: Bool,
+  excluded_key_count excluded_key_count: Int,
 ) -> Result(#(Emitter, Int), EmitError) {
   case has_rest {
     False -> {
@@ -5297,8 +5301,8 @@ fn emit_test(
 fn emit_value_test(
   e: Emitter,
   expr: ast.Expression,
-  jump_when: Bool,
-  target: LabelId,
+  jump_when jump_when: Bool,
+  target target: LabelId,
 ) -> Result(Emitter, EmitError) {
   use e <- result.map(emit_expr(e, expr))
   case jump_when {
@@ -5317,8 +5321,8 @@ fn nullish_literal(expr: ast.Expression) -> Bool {
 fn emit_nullish_test(
   e: Emitter,
   operand: ast.Expression,
-  jump_when_nullish: Bool,
-  target: LabelId,
+  jump_when_nullish jump_when_nullish: Bool,
+  target target: LabelId,
 ) -> Result(Emitter, EmitError) {
   use e <- result.map(emit_expr(e, operand))
   case jump_when_nullish {
@@ -5563,8 +5567,8 @@ fn emit_attach_field_init(e: Emitter, init_idx: Option(Int)) -> Emitter {
 // [ctor] -> [target] for body -> [ctor]
 fn with_method_target(
   e: Emitter,
-  on_prototype: Bool,
-  body: fn(Emitter) -> Result(Emitter, EmitError),
+  on_prototype on_prototype: Bool,
+  body body: fn(Emitter) -> Result(Emitter, EmitError),
 ) -> Result(Emitter, EmitError) {
   let e = emit_op(e, opcode.Dup)
   let e = case on_prototype {
@@ -5621,9 +5625,9 @@ fn emit_class_methods(
       use e <- result.map(emit_method_value(e, fun, Some(display_name)))
       case kind {
         ast.MethodGet ->
-          emit_ir(e, IrDefineAccessor(name, opcode.Getter, False))
+          emit_ir(e, IrDefineAccessor(name, opcode.Getter, enumerable: False))
         ast.MethodSet ->
-          emit_ir(e, IrDefineAccessor(name, opcode.Setter, False))
+          emit_ir(e, IrDefineAccessor(name, opcode.Setter, enumerable: False))
         ast.MethodMethod | ast.MethodConstructor ->
           emit_ir(e, IrDefineMethod(name))
       }
@@ -5634,9 +5638,15 @@ fn emit_class_methods(
       use e <- result.map(emit_method_value(e, fun, None))
       case kind {
         ast.MethodGet ->
-          emit_op(e, opcode.DefineAccessorComputed(opcode.Getter, False))
+          emit_op(
+            e,
+            opcode.DefineAccessorComputed(opcode.Getter, enumerable: False),
+          )
         ast.MethodSet ->
-          emit_op(e, opcode.DefineAccessorComputed(opcode.Setter, False))
+          emit_op(
+            e,
+            opcode.DefineAccessorComputed(opcode.Setter, enumerable: False),
+          )
         ast.MethodMethod | ast.MethodConstructor ->
           emit_op(e, opcode.DefineMethodComputed)
       }

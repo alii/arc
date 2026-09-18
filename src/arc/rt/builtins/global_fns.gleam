@@ -1,3 +1,4 @@
+import arc/bytecode/error_kind.{JsError, UriError}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/js_string
@@ -9,8 +10,8 @@ import arc/rt/types.{
   GlobalEncodeUriComponent, GlobalEscape, GlobalEval, GlobalIsFinite,
   GlobalIsNaN, GlobalN, GlobalParseFloat, GlobalParseInt, GlobalUnescape,
   IndirectEval, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KStr, NativeFn,
-  SObject, mk_bool, mk_number, mk_object, mk_string,
-} as rt_types
+  SObject, mk_bool, mk_number, mk_string,
+}
 import arc/rt/val as rt_val
 import gleam/bit_array
 import gleam/int
@@ -43,8 +44,8 @@ pub fn init(
   is_nan is_nan: Handle,
   is_finite is_finite: Handle,
 ) -> #(GlobalFns, Agent) {
-  let alloc = fn(st, tag, name, len) {
-    common.alloc_rooted_native_fn(st, function_proto, GlobalN(tag), name, len)
+  let alloc = fn(st, token, name, len) {
+    common.alloc_rooted_native_fn(st, function_proto, GlobalN(token), name, len)
   }
   let #(eval, st) = alloc(st, GlobalEval(realm:), "eval", 1)
   let #(encode_uri, st) = alloc(st, GlobalEncodeUri, "encodeURI", 1)
@@ -93,10 +94,10 @@ pub fn dispatch(
     }
     GlobalIsNaN -> global_is_nan(args, st)
     GlobalIsFinite -> global_is_finite(args, st)
-    GlobalEncodeUri -> uri_encode_dispatch(args, st, True)
-    GlobalEncodeUriComponent -> uri_encode_dispatch(args, st, False)
-    GlobalDecodeUri -> uri_decode_dispatch(args, st, True)
-    GlobalDecodeUriComponent -> uri_decode_dispatch(args, st, False)
+    GlobalEncodeUri -> uri_encode_dispatch(args, st, WholeUri)
+    GlobalEncodeUriComponent -> uri_encode_dispatch(args, st, UriComponent)
+    GlobalDecodeUri -> uri_decode_dispatch(args, st, WholeUri)
+    GlobalDecodeUriComponent -> uri_decode_dispatch(args, st, UriComponent)
     GlobalEscape -> {
       let #(s, st) =
         rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
@@ -112,7 +113,7 @@ pub fn dispatch(
 
 fn indirect_eval(st: Agent, realm: Int, args: List(JsVal)) -> #(JsVal, Agent) {
   let x = helpers.first_arg_or_undefined(args)
-  case rt_types.classify(x) {
+  case types.classify(x) {
     KStr(source) -> {
       use st <- rt_realm.with_realm(st, realm)
       st.store.ops.eval_hook(st, source, IndirectEval)
@@ -123,7 +124,7 @@ fn indirect_eval(st: Agent, realm: Int, args: List(JsVal)) -> #(JsVal, Agent) {
 
 // §13.3.6.1 step 6.a: is callee this realm's %eval%
 pub fn is_intrinsic_eval(st: Agent, callee: JsVal) -> Bool {
-  case rt_types.classify(callee) {
+  case types.classify(callee) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
         SObject(kind: NativeFn(token: GlobalN(GlobalEval(realm:)), ..), ..) ->
@@ -167,7 +168,11 @@ pub fn parse_float_value(st: Agent, val: JsVal) -> #(JsNum, Agent) {
   #(parse_decimal_string(js_string.trim_leading_js_ws(s)), st)
 }
 
-fn parse_int_digits(bytes: BitArray, radix: Int, negative: Bool) -> JsNum {
+fn parse_int_digits(
+  bytes: BitArray,
+  radix: Int,
+  negative negative: Bool,
+) -> JsNum {
   case scan_radix_digits(bytes, radix, 0, 0) {
     #(0, _) -> JNan
     #(_, math_int) ->
@@ -298,41 +303,42 @@ fn global_is_finite(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   #(mk_bool(result), st)
 }
 
+// whole uris keep the reserved set ;/?:@&=+$,# as is
+pub type UriKind {
+  WholeUri
+  UriComponent
+}
+
 fn uri_encode_dispatch(
   args: List(JsVal),
   st: Agent,
-  preserve_uri_chars: Bool,
+  kind: UriKind,
 ) -> #(JsVal, Agent) {
   let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
-  #(mk_string(uri_encode(s, preserve_uri_chars)), st)
+  #(mk_string(uri_encode(s, kind)), st)
 }
 
 fn uri_decode_dispatch(
   args: List(JsVal),
   st: Agent,
-  preserve_reserved: Bool,
+  kind: UriKind,
 ) -> #(JsVal, Agent) {
   let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
-  case uri_decode(s, preserve_reserved) {
+  case uri_decode(s, kind) {
     Ok(decoded) -> #(mk_string(decoded), st)
     Error(offset) ->
-      throw_uri_error(st, "URI malformed at position " <> int.to_string(offset))
+      rt_val.t_throw(
+        st,
+        JsError(UriError, "URI malformed at position " <> int.to_string(offset)),
+      )
   }
 }
 
-fn throw_uri_error(st: Agent, msg: String) -> a {
-  let proto = st.realm.uri_error.prototype
-  let #(msg_prop, st) = common.builtin_property(st, mk_string(msg))
-  let #(h, st) = common.alloc_error_object(st, proto, [#("message", msg_prop)])
-  rt_store.t_throw(st, mk_object(h))
-}
-
-// true = encodeURI, false = encodeURIComponent
-pub fn uri_encode(str: String, preserve_uri_chars: Bool) -> String {
+pub fn uri_encode(str: String, kind: UriKind) -> String {
   string.to_utf_codepoints(str)
   |> list.map(fn(cp) {
     let c = string.utf_codepoint_to_int(cp)
-    case is_uri_unescaped(c, preserve_uri_chars) {
+    case is_uri_unescaped(c, kind) {
       True -> string.from_utf_codepoints([cp])
       False -> percent_encode_utf8(c)
     }
@@ -340,7 +346,7 @@ pub fn uri_encode(str: String, preserve_uri_chars: Bool) -> String {
   |> string.concat
 }
 
-fn is_uri_unescaped(c: Int, preserve_uri_chars: Bool) -> Bool {
+fn is_uri_unescaped(c: Int, kind: UriKind) -> Bool {
   { c >= 65 && c <= 90 }
   || { c >= 97 && c <= 122 }
   || { c >= 48 && c <= 57 }
@@ -354,7 +360,7 @@ fn is_uri_unescaped(c: Int, preserve_uri_chars: Bool) -> Bool {
   || c == 40
   || c == 41
   || {
-    preserve_uri_chars
+    kind == WholeUri
     && {
       c == 59
       || c == 47
@@ -386,14 +392,13 @@ fn percent_encode_bytes(bytes: BitArray, acc: String) -> String {
   }
 }
 
-// true = decodeURI, false = decodeURIComponent
-pub fn uri_decode(str: String, preserve_reserved: Bool) -> Result(String, Int) {
-  uri_decode_loop(<<str:utf8>>, preserve_reserved, 0, "")
+pub fn uri_decode(str: String, kind: UriKind) -> Result(String, Int) {
+  uri_decode_loop(<<str:utf8>>, kind, 0, "")
 }
 
 fn uri_decode_loop(
   bytes: BitArray,
-  preserve_reserved: Bool,
+  kind: UriKind,
   offset: Int,
   acc: String,
 ) -> Result(String, Int) {
@@ -404,7 +409,7 @@ fn uri_decode_loop(
         Error(e) -> Error(e)
         Ok(#(cp, consumed, rest)) -> {
           let reserved =
-            preserve_reserved && cp < 128 && is_uri_reserved_byte(cp)
+            kind == WholeUri && cp < 128 && is_uri_reserved_byte(cp)
           let sub = case reserved, bytes {
             True, <<0x25, h1, h2, _:bytes>> -> {
               let assert Ok(original) = bit_array.to_string(<<0x25, h1, h2>>)
@@ -415,22 +420,12 @@ fn uri_decode_loop(
               string.from_utf_codepoints([ucp])
             }
           }
-          uri_decode_loop(
-            rest,
-            preserve_reserved,
-            offset + consumed,
-            acc <> sub,
-          )
+          uri_decode_loop(rest, kind, offset + consumed, acc <> sub)
         }
       }
     <<cp:utf8_codepoint, rest:bytes>> -> {
       let ch = string.from_utf_codepoints([cp])
-      uri_decode_loop(
-        rest,
-        preserve_reserved,
-        offset + string.byte_size(ch),
-        acc <> ch,
-      )
+      uri_decode_loop(rest, kind, offset + string.byte_size(ch), acc <> ch)
     }
     _ -> Error(offset)
   }

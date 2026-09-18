@@ -360,7 +360,8 @@ pub fn call_with(
   args: List(JsValue),
   finish: fn(Agent) -> Agent,
 ) -> #(Outcome, Engine(host)) {
-  let #(completion, agent) = rt_call.t_call(engine.agent, callee, this, args)
+  let #(completion, agent) =
+    rt_call.t_try_call(engine.agent, callee, this, args)
   settle(engine, completion, agent, finish)
 }
 

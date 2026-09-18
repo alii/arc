@@ -103,7 +103,15 @@ fn segment_words_loop(
 fn segment_sentences(s: String) -> List(Segment) {
   case s {
     "" -> []
-    _ -> segment_sentences_loop(string.to_graphemes(s), 0, [], "", 0, False)
+    _ ->
+      segment_sentences_loop(
+        string.to_graphemes(s),
+        0,
+        [],
+        "",
+        0,
+        after_terminator: False,
+      )
   }
 }
 
@@ -113,7 +121,7 @@ fn segment_sentences_loop(
   acc: List(Segment),
   current: String,
   current_start: Int,
-  after_terminator: Bool,
+  after_terminator after_terminator: Bool,
 ) -> List(Segment) {
   case rest {
     [] ->
@@ -139,7 +147,7 @@ fn segment_sentences_loop(
             ],
             g,
             idx,
-            False,
+            after_terminator: False,
           )
         False ->
           segment_sentences_loop(

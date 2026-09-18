@@ -5,9 +5,9 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type Realm, type Test262Native, Agent,
-  ArrayBufferDetach262, ArrayBufferN, DataProperty, KHandle, Named, NoElements,
-  Ordinary, SObject, ScriptEval, StringKey, Test262CreateRealm,
-  Test262EvalScript, Test262Gc, Test262N, classify, mk_object, mk_undefined,
+  ArrayBufferDetach262, ArrayBufferN, DataProperty, Named, Ordinary, ScriptEval,
+  StringKey, Test262CreateRealm, Test262EvalScript, Test262Gc, Test262N,
+  mk_object, mk_undefined, plain_object,
 }
 import arc/rt/val as rt_val
 import gleam/bool
@@ -23,7 +23,7 @@ pub fn with_realm(
 ) -> #(a, Agent) {
   use <- bool.lazy_guard(id == st.realm.id, fn() { body(st) })
   let origin = st.realm.id
-  let #(outcome, after) = rt_call.t_apply_protected(enter(st, id), body)
+  let #(outcome, after) = rt_call.try_run(enter(st, id), body)
   let restored = enter(after, origin)
   case outcome {
     NormalCompletion(v) -> #(v, restored)
@@ -50,17 +50,14 @@ pub fn install_262(st: Agent, realm: Realm) -> #(Handle, Agent) {
       #("detachArrayBuffer", ArrayBufferN(ArrayBufferDetach262), 1),
     ])
   let #(global_prop, st) =
-    common.builtin_property(st, mk_object(realm.global_object))
+    rt_store.t_builtin_property(st, mk_object(realm.global_object))
   let #(h, st) =
     rt_store.t_cell_new(
       st,
-      SObject(
-        kind: Ordinary,
-        proto: Some(realm.object.prototype),
-        props: common.named_props([#("global", global_prop), ..methods]),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
+      plain_object(
+        Ordinary,
+        Some(realm.object.prototype),
+        common.named_props([#("global", global_prop), ..methods]),
       ),
     )
   let st = rt_store.t_pin_root(st, h)
@@ -70,9 +67,9 @@ pub fn install_262(st: Agent, realm: Realm) -> #(Handle, Agent) {
       realm.global_object,
       StringKey(Named("$262")),
       mk_object(h),
-      True,
-      True,
-      True,
+      writable: True,
+      enumerable: True,
+      configurable: True,
     )
   #(h, st)
 }
@@ -109,11 +106,11 @@ fn create_realm_262(
   let parent_global = rt_call.realm_by_id(st, parent).global_object
   let agent =
     own_data(st, parent_global, "$262")
-    |> option.then(as_handle)
+    |> option.then(rt_val.handle_of)
     |> option.then(own_data(st, _, "agent"))
   let st = case agent {
     Some(v) -> {
-      let #(prop, st) = common.builtin_property(st, v)
+      let #(prop, st) = rt_store.t_builtin_property(st, v)
       common.add_named_property(st, dollar, "agent", prop)
     }
     None -> st
@@ -124,13 +121,6 @@ fn create_realm_262(
 fn own_data(st: Agent, h: Handle, name: String) -> Option(JsVal) {
   case rt_obj.t_ordinary_own_property(st, h, StringKey(Named(name))) {
     Some(DataProperty(value:, ..)) -> Some(value)
-    _ -> None
-  }
-}
-
-fn as_handle(v: JsVal) -> Option(Handle) {
-  case classify(v) {
-    KHandle(h) -> Some(h)
     _ -> None
   }
 }

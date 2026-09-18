@@ -1,3 +1,4 @@
+import arc/bytecode/error_kind.{TypeError}
 import arc/bytecode/opcode.{
   AsyncYieldStarNext, CatchOnly, Finally, IterCloseGuard, Pc, YieldStar,
 }
@@ -24,10 +25,9 @@ import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type EvalKind, type FrameInfo, type Handle, type IteratorRecord,
-  type JsOps, type JsVal, type Step, Agent, BytecodeFn, JInt, JsOps, JsStore,
-  KHandle, KNull, KUndef, Named, ResumeFrame, SObject, StepAwait, StepReturn,
-  StepThrow, StepYield, StringKey, TypeErr, classify, mk_number, mk_object,
-  mk_undefined,
+  type JsOps, type JsVal, type Step, Agent, BytecodeFn, JsOps, JsStore, KHandle,
+  KNull, KUndef, Named, ResumeFrame, SObject, StepAwait, StepReturn, StepThrow,
+  StepYield, StringKey, classify, mk_int, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bool
@@ -44,7 +44,7 @@ fn linked_ops(ops: JsOps(Agent)) -> JsOps(Agent) {
     ..ops,
     eval_hook: eval_source,
     call_bytecode:,
-    bind_call:,
+    prepare_call:,
     construct_bytecode:,
     resume_frame:,
   )
@@ -179,7 +179,7 @@ pub fn call_bytecode(
   }
 }
 
-pub fn bind_call(
+pub fn prepare_call(
   st: Agent,
   fn_h: Handle,
   kind: types.ObjKind,
@@ -194,7 +194,7 @@ pub fn bind_call(
     unit:,
     ..,
   ) = kind
-    as "bind_call: not a BytecodeFn kind"
+    as "prepare_call: not a BytecodeFn kind"
   case
     realm == st.realm.id
     && !template.is_generator
@@ -205,13 +205,13 @@ pub fn bind_call(
       let callee =
         call.root_callee(fn_h, template, env, home_object, flags, unit)
       let new_target = mk_undefined()
-      fn(st, args) { call_bound(st, callee, this, args, new_target) }
+      fn(st, args) { call_prepared(st, callee, this, args, new_target) }
     }
     False -> fn(st, args) { raised(call_bytecode(st, fn_h, kind, this, args)) }
   }
 }
 
-fn call_bound(
+fn call_prepared(
   st: Agent,
   callee: call.RootCallee,
   this: JsVal,
@@ -322,9 +322,9 @@ pub fn construct_bytecode(
     KHandle(h) -> #(h, st)
     _ -> {
       let #(e, st) =
-        st.store.ops.new_error(
+        rt_val.t_new_error(
           st,
-          TypeErr,
+          TypeError,
           "internal error: constructor completed with a non-object",
         )
       rt_store.t_throw(st, e)
@@ -514,14 +514,18 @@ pub fn resume_frame(
   let turn = fn(agent) {
     let s = park.unpark(agent, frame)
     case frame.parked, mode {
-      ParkedStart, 0 -> step_of(execute(s))
-      ParkedOp, 0 -> step_of(execute(State(..s, stack: [value, ..s.stack])))
-      ParkedOp, 1 -> inject_throw(s, value)
+      ParkedStart, m if m == rt_async.sent_next -> step_of(execute(s))
+      ParkedOp, m if m == rt_async.sent_next ->
+        step_of(execute(State(..s, stack: [value, ..s.stack])))
+      ParkedOp, m if m == rt_async.sent_throw -> inject_throw(s, value)
       ParkedOp, _ -> inject_return(s, value)
-      ParkedDelegateReturn, 0 -> delegate_returned(s, value)
-      ParkedReturnValue, 0 -> step_of(return_into(s, value))
-      ParkedDelegateClose, 0 -> delegate_closed(s, value)
-      _, 1 -> step_of(throw_into(s, value))
+      ParkedDelegateReturn, m if m == rt_async.sent_next ->
+        delegate_returned(s, value)
+      ParkedReturnValue, m if m == rt_async.sent_next ->
+        step_of(return_into(s, value))
+      ParkedDelegateClose, m if m == rt_async.sent_next ->
+        delegate_closed(s, value)
+      _, m if m == rt_async.sent_throw -> step_of(throw_into(s, value))
       _, _ -> step_of(return_into(s, value))
     }
   }
@@ -559,7 +563,7 @@ fn throw_into(s: State, thrown: JsVal) -> Outcome {
 }
 
 fn throw_type_into(s: State, msg: String) -> #(Step, Agent) {
-  let #(e, s) = state.new_error(s, TypeErr, msg)
+  let #(e, s) = state.new_error(s, TypeError, msg)
   step_of(throw_into(s, e))
 }
 
@@ -615,7 +619,7 @@ fn call_delegate(
 ) -> Result(#(JsVal, State), StepExit) {
   let iterator = site_record(site).iterator
   kernel.guarded(
-    kernel.guard4(rt_call.t_call_checked, s.agent, method, iterator, [value]),
+    kernel.guard4(rt_call.t_call, s.agent, method, iterator, [value]),
     s,
   )
 }
@@ -793,8 +797,7 @@ fn return_into(s: State, value: JsVal) -> Outcome {
         State(
           ..s,
           try_stack: rest,
-          // retpc -1 tells Ret to complete with the value
-          stack: [mk_number(JInt(-1)), value, ..base],
+          stack: [mk_int(bytecode.return_retpc), value, ..base],
           pc: fin_pc,
         )
       case execute(fin) {
@@ -806,7 +809,7 @@ fn return_into(s: State, value: JsVal) -> Outcome {
 }
 
 fn close_for_return(s: State, record: JsVal, value: JsVal) -> Outcome {
-  case call.guarded_unit(s, rt_lang.t_iter_close(_, record, False)) {
+  case call.guarded_unit(s, rt_lang.t_iter_close(_, record, abrupt: False)) {
     Ok(s) -> return_into(s, value)
     Error(exit) -> exit_outcome(exit, "close_for_return")
   }

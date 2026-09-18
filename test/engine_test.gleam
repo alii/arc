@@ -8,7 +8,8 @@ import arc/module_host
 import arc/rt/builtins/console
 import arc/rt/snapshot.{IncompatibleSnapshot, MalformedBinary}
 import arc/rt/types.{
-  type JsVal, JFloat, JInt, mk_bool, mk_null, mk_number, mk_string, mk_undefined,
+  type JsVal, JFloat, mk_bool, mk_int, mk_null, mk_number, mk_string,
+  mk_undefined,
 }
 import gleam/int
 import gleam/list
@@ -17,7 +18,7 @@ import gleam/option.{Some}
 fn num(f: Float) -> JsVal {
   let i = truncate(f)
   case int.to_float(i) == f {
-    True -> mk_number(JInt(i))
+    True -> mk_int(i)
     False -> mk_number(JFloat(f))
   }
 }

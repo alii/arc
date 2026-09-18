@@ -1,18 +1,18 @@
+import arc/bytecode/error_kind.{type JsError, JsError, RangeError}
 import arc/internal/host_time
 import arc/internal/int_math.{floor_div, floor_mod}
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
 import arc/rt/builtins/temporal_iso.{
-  type Duration, type IsoDate, type IsoTime, type Overflow,
-  type SecondsPrecision, type TErr, AutoPrecision, Constrain, Duration, IsoDate,
-  IsoTime, MinutePrecision, NoOffset, NumericOffset, RangeE, Reject,
-  SubsecondDigits, TypeE, Zulu, epoch_ns_to_iso, format_iso_date,
-  format_offset_minutes, int_sign, is_tz_annotation, max_time_duration_ns,
-  ns_max_instant, ns_per_day, ns_per_hour, ns_per_minute, ns_per_ms,
-  ns_per_second, ns_per_us, pad2, parse_iso_datetime_string, parse_offset_part,
-  pow10, pow2_32, round_to_float_precision, take_some_digits, utc_epoch_ns,
-  zero_duration,
+  type Duration, type IsoDate, type IsoDateSlots, type IsoTime, type Overflow,
+  type SecondsPrecision, AutoPrecision, Constrain, Duration, IsoDate,
+  IsoDateSlots, IsoTime, MinutePrecision, NoOffset, NumericOffset, Reject,
+  SubsecondDigits, Zulu, epoch_ns_to_iso, format_iso_date, format_offset_minutes,
+  int_sign, is_tz_annotation, max_time_duration_ns, ns_max_instant, ns_per_day,
+  ns_per_hour, ns_per_minute, ns_per_ms, ns_per_second, ns_per_us, pad2,
+  parse_iso_datetime_string, parse_offset_part, pow10, pow2_32,
+  round_to_float_precision, take_some_digits, utc_epoch_ns, zero_duration,
 }
 import arc/rt/builtins/temporal_tz
 import arc/rt/call as rt_call
@@ -34,20 +34,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/order
 import gleam/string
-
-pub fn throw_terr(st: Agent, e: TErr) -> a {
-  case e {
-    RangeE(msg) -> rt_val.t_throw_range_error(st, msg)
-    TypeE(msg) -> rt_val.t_throw_type_error(st, msg)
-  }
-}
-
-pub fn terr(st: Agent, r: Result(a, TErr)) -> a {
-  case r {
-    Ok(v) -> v
-    Error(e) -> throw_terr(st, e)
-  }
-}
 
 pub fn require_temporal(
   st: Agent,
@@ -136,22 +122,18 @@ pub fn date_time_slot_of(
   }
 }
 
-pub fn year_month_slot_of(
-  kind: ObjKind,
-) -> Option(#(Int, Int, Int, tcal.Calendar)) {
+pub fn year_month_slot_of(kind: ObjKind) -> Option(IsoDateSlots) {
   case kind {
     TemporalObj(data: TemporalYearMonth(year:, month:, day:, calendar:)) ->
-      Some(#(year, month, day, calendar))
+      Some(IsoDateSlots(IsoDate(year:, month:, day:), calendar))
     _ -> None
   }
 }
 
-pub fn month_day_slot_of(
-  kind: ObjKind,
-) -> Option(#(Int, Int, Int, tcal.Calendar)) {
+pub fn month_day_slot_of(kind: ObjKind) -> Option(IsoDateSlots) {
   case kind {
     TemporalObj(data: TemporalMonthDay(month:, day:, ref_year:, calendar:)) ->
-      Some(#(month, day, ref_year, calendar))
+      Some(IsoDateSlots(IsoDate(year: ref_year, month:, day:), calendar))
     _ -> None
   }
 }
@@ -319,7 +301,7 @@ pub fn make_month_day_cal(
 ) -> #(JsVal, Agent) {
   alloc_value(
     st,
-    TemporalMonthDay(month: m, day: d, ref_year: ref_year, calendar: cal),
+    TemporalMonthDay(month: m, day: d, ref_year:, calendar: cal),
     protos.plain_month_day,
   )
 }
@@ -798,11 +780,12 @@ pub fn as_time_unit(u: Unit) -> Option(TimeUnit) {
   }
 }
 
-pub fn require_time_unit(u: Unit) -> Result(TimeUnit, TErr) {
+pub fn require_time_unit(u: Unit) -> Result(TimeUnit, JsError) {
   case as_time_unit(u) {
     Some(t) -> Ok(t)
     None ->
-      Error(RangeE(
+      Error(JsError(
+        RangeError,
         unit_to_string(u) <> " has no fixed length; expected a time unit",
       ))
   }
@@ -965,7 +948,7 @@ pub fn round_to_increment(x: Int, inc: Int, mode: RoundingMode) -> Int {
 
 pub fn unsigned_rounding_mode(
   mode: RoundingMode,
-  negative: Bool,
+  negative negative: Bool,
 ) -> UnsignedRoundingMode {
   case mode, negative {
     Ceil, False -> RInfinity
@@ -988,8 +971,8 @@ pub fn unsigned_rounding_mode(
 pub fn apply_unsigned_rounding(
   num: Int,
   den: Int,
-  r1_even: Bool,
-  mode: UnsignedRoundingMode,
+  r1_even r1_even: Bool,
+  mode mode: UnsignedRoundingMode,
 ) -> Bool {
   case num == 0 {
     True -> False
@@ -1046,21 +1029,27 @@ pub fn require_largest_ge_smallest(
   }
 }
 
-pub fn apply_since_mode(mode: RoundingMode, is_since: Bool) -> RoundingMode {
+pub fn apply_since_mode(
+  mode: RoundingMode,
+  is_since is_since: Bool,
+) -> RoundingMode {
   case is_since {
     True -> negate_rounding_mode(mode)
     False -> mode
   }
 }
 
-pub fn apply_since_duration(dur: Duration, is_since: Bool) -> Duration {
+pub fn apply_since_duration(
+  dur: Duration,
+  is_since is_since: Bool,
+) -> Duration {
   case is_since {
     True -> negate_duration(dur)
     False -> dur
   }
 }
 
-pub fn apply_since_ns(ns: Int, is_since: Bool) -> Int {
+pub fn apply_since_ns(ns: Int, is_since is_since: Bool) -> Int {
   case is_since {
     True -> 0 - ns
     False -> ns
@@ -1115,7 +1104,7 @@ pub fn round_options(
   }
 }
 
-pub fn round_unit(u: Unit, allow_day: Bool) -> Option(TimeUnit) {
+pub fn round_unit(u: Unit, allow_day allow_day: Bool) -> Option(TimeUnit) {
   case as_time_unit(u) {
     Some(DayUnit) if !allow_day -> None
     other -> other
@@ -1211,7 +1200,7 @@ pub fn to_string_time_options(
   let #(smallest, st) =
     get_unit_option(st, opts, "smallestUnit", allow_auto: False)
   let #(precision, unit, inc) =
-    terr(st, seconds_string_precision(digits, smallest))
+    rt_val.or_throw(st, seconds_string_precision(digits, smallest))
   #(#(precision, unit, inc, mode), st)
 }
 
@@ -1223,10 +1212,10 @@ pub type FractionalDigits {
 pub fn seconds_string_precision(
   digits: FractionalDigits,
   smallest: Option(Unit),
-) -> Result(#(SecondsPrecision, Option(TimeUnit), Int), TErr) {
+) -> Result(#(SecondsPrecision, Option(TimeUnit), Int), JsError) {
   case smallest {
     Some(Year) | Some(Month) | Some(Week) | Some(Day) | Some(Hour) ->
-      Error(RangeE("smallestUnit must be a time unit"))
+      Error(JsError(RangeError, "smallestUnit must be a time unit"))
     Some(Minute) -> Ok(#(MinutePrecision, Some(MinuteUnit), 1))
     Some(Second) -> Ok(#(SubsecondDigits(0), Some(SecondUnit), 1))
     Some(Millisecond) -> Ok(#(SubsecondDigits(3), Some(MillisecondUnit), 1))
@@ -1365,9 +1354,9 @@ pub fn time_part_ns(d: Duration) -> Int {
   + d.nanoseconds
 }
 
-pub fn check_time_duration_range(ns: Int) -> Result(Nil, TErr) {
+pub fn check_time_duration_range(ns: Int) -> Result(Nil, JsError) {
   case int.absolute_value(ns) > max_time_duration_ns {
-    True -> Error(RangeE("duration time units out of range"))
+    True -> Error(JsError(RangeError, "duration time units out of range"))
     False -> Ok(Nil)
   }
 }
@@ -1700,15 +1689,15 @@ pub fn time_zone_from_string(st: Agent, id: String) -> #(TimeZone, Agent) {
     #(Ok(tz), st) -> #(tz, st)
     #(Error(UnknownIdentifier), st) -> {
       let #(tz, st) = tz_from_datetime_string(st, id)
-      #(terr(st, tz), st)
+      #(rt_val.or_throw(st, tz), st)
     }
-    #(Error(InvalidIdentifier(e)), st) -> throw_terr(st, e)
+    #(Error(InvalidIdentifier(e)), st) -> rt_val.t_throw(st, e)
   }
 }
 
 pub type TimeZoneIdError {
   UnknownIdentifier
-  InvalidIdentifier(TErr)
+  InvalidIdentifier(JsError)
 }
 
 pub fn parse_time_zone_identifier(
@@ -1751,9 +1740,9 @@ pub fn resolve_zone(
 fn tz_from_datetime_string(
   st: Agent,
   s: String,
-) -> #(Result(TimeZone, TErr), Agent) {
+) -> #(Result(TimeZone, JsError), Agent) {
   case parse_iso_datetime_string(s) {
-    None -> #(Error(RangeE("invalid time zone: " <> s)), st)
+    None -> #(Error(JsError(RangeError, "invalid time zone: " <> s)), st)
     Some(p) ->
       case p.tz {
         Some(tz_str) ->
@@ -1773,12 +1762,15 @@ fn tz_from_datetime_string(
               case !sub_minute && off % ns_per_minute == 0 {
                 True -> #(Ok(OffsetZone(ns: off)), st)
                 False -> #(
-                  Error(RangeE("sub-minute offset not valid as a time zone")),
+                  Error(JsError(
+                    RangeError,
+                    "sub-minute offset not valid as a time zone",
+                  )),
                   st,
                 )
               }
             NoOffset -> #(
-              Error(RangeE("no time zone found in string: " <> s)),
+              Error(JsError(RangeError, "no time zone found in string: " <> s)),
               st,
             )
           }
@@ -1814,12 +1806,13 @@ pub fn time_zone_id(tz: TimeZone) -> String {
   }
 }
 
-pub fn unsupported_tz(tz: String) -> TErr {
-  RangeE("time zone " <> tz <> " is not supported")
+pub fn unsupported_tz(tz: String) -> JsError {
+  JsError(RangeError, "time zone " <> tz <> " is not supported")
 }
 
-pub fn unloadable_tz(id: String, error: temporal_tz.TzError) -> TErr {
-  RangeE(
+pub fn unloadable_tz(id: String, error: temporal_tz.TzError) -> JsError {
+  JsError(
+    RangeError,
     "time zone " <> id <> " cannot be loaded: " <> temporal_tz.describe(error),
   )
 }
@@ -1840,10 +1833,10 @@ pub fn is_valid_epoch_ns(ns: Int) -> Bool {
   int.absolute_value(ns) <= ns_max_instant
 }
 
-pub fn validate_epoch_ns(ns: Int) -> Result(Int, TErr) {
+pub fn validate_epoch_ns(ns: Int) -> Result(Int, JsError) {
   case is_valid_epoch_ns(ns) {
     True -> Ok(ns)
-    False -> Error(RangeE("instant outside valid range"))
+    False -> Error(JsError(RangeError, "instant outside valid range"))
   }
 }
 
@@ -1895,7 +1888,7 @@ pub fn to_temporal_time_zone(st: Agent, v: JsVal) -> #(TimeZone, Agent) {
 
 pub fn system_time_zone(st: Agent) -> #(TimeZone, Agent) {
   case host_time.time_zone_id(st.hooks.time_zone) {
-    Ok(id) ->
+    Some(id) ->
       case parse_time_zone_identifier(st, id) {
         #(Ok(tz), st) -> #(tz, st)
         #(Error(UnknownIdentifier), st) | #(Error(InvalidIdentifier(_)), st) -> #(
@@ -1903,7 +1896,7 @@ pub fn system_time_zone(st: Agent) -> #(TimeZone, Agent) {
           st,
         )
       }
-    Error(Nil) -> #(UtcZone, st)
+    None -> #(UtcZone, st)
   }
 }
 
@@ -1960,7 +1953,7 @@ fn parse_instant_to_ns(st: Agent, s: String) -> #(Int, Agent) {
                 Zulu | NoOffset -> 0
               }
               let ns = utc_epoch_ns(p.date, t) - off
-              #(terr(st, validate_epoch_ns(ns)), st)
+              #(rt_val.or_throw(st, validate_epoch_ns(ns)), st)
             }
           }
         None, True ->

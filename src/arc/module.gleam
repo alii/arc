@@ -1,3 +1,4 @@
+import arc/bytecode/error_kind.{SyntaxError, TypeError}
 import arc/compiler.{type ExportSeed}
 import arc/esm
 import arc/internal/tuple_array.{type TupleArray}
@@ -20,13 +21,12 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type CompiledCode, type Handle, type JsVal, type ReflectNative,
-  DataProperty, FnFlags, KHandle, KStr, KTdz, ModuleNamespace, NoElements,
-  PromiseFulfilled, PromisePending, PromiseRejected, ProxyObj,
-  ReflectDefineProperty, ReflectDeleteProperty, ReflectGet,
-  ReflectGetOwnPropertyDescriptor, ReflectHas, ReflectOwnKeys, SAsyncContext,
-  SBox, SObject, SPromiseData, StepAwait, StepReturn, StepThrow, StepYield,
-  StringKey, SyntaxErr, TypeErr, classify, mk_object, mk_string, mk_tdz,
-  mk_undefined,
+  FnFlags, KHandle, KStr, KTdz, ModuleNamespace, NoElements, PromiseFulfilled,
+  PromisePending, PromiseRejected, ProxyObj, ReflectDefineProperty,
+  ReflectDeleteProperty, ReflectGet, ReflectGetOwnPropertyDescriptor, ReflectHas,
+  ReflectOwnKeys, SAsyncContext, SBox, SObject, SPromiseData, StepAwait,
+  StepReturn, StepThrow, StepYield, StringKey, classify, mk_object, mk_string,
+  mk_tdz, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bool
@@ -383,7 +383,7 @@ pub fn link_for_evaluation_reusing(
   case link.validate(lg) {
     Error(link_error) -> {
       let #(err, st) =
-        new_error(st, SyntaxErr, link.link_error_message(link_error))
+        rt_val.t_new_error(st, SyntaxError, link.link_error_message(link_error))
       #(st, Error(EvaluationError(err)))
     }
     Ok(Nil) -> {
@@ -391,7 +391,7 @@ pub fn link_for_evaluation_reusing(
         dict.fold(preexisting, dict.new(), fn(acc, spec, ns) {
           case rt_store.t_cell_get(st, ns) {
             SObject(kind: ModuleNamespace(exports:), ..) ->
-              dict.insert(acc, spec, #(ns, exports))
+              dict.insert(acc, spec, ReusedNamespace(ns, exports))
             _ ->
               assert_link_invariant(Error(PreexistingNotANamespace(spec, ns)))
           }
@@ -399,7 +399,11 @@ pub fn link_for_evaluation_reusing(
       case stale_reused_export(bundle, lg, pre) {
         Some(#(spec, name)) -> {
           let #(err, st) =
-            new_error(st, SyntaxErr, stale_reused_export_message(spec, name))
+            rt_val.t_new_error(
+              st,
+              SyntaxError,
+              stale_reused_export_message(spec, name),
+            )
           #(st, Error(EvaluationError(err)))
         }
         None -> {
@@ -433,7 +437,8 @@ pub fn evaluate_linked(
     evaluate_linked_tracking(linked_bundle, st, finish, set.new())
   case res {
     Error(EvaluationPending(promise: _)) -> {
-      let #(err, st) = new_error(st, TypeErr, tla_never_settled_message)
+      let #(err, st) =
+        rt_val.t_new_error(st, TypeError, tla_never_settled_message)
       #(st, Error(EvaluationError(value: err)))
     }
     other -> #(st, other)
@@ -625,7 +630,7 @@ fn eval_module_body(
       let #(error_val, st) = case err {
         EvaluationError(value: v) -> #(v, es.agent)
         NotInBundle(..) | EvaluationPending(..) ->
-          new_error(es.agent, TypeErr, error_message(err, es.agent))
+          rt_val.t_new_error(es.agent, TypeError, error_message(err, es.agent))
       }
       let st = registry.write_module_error(st, specifier, error_val)
       let es =
@@ -739,7 +744,7 @@ fn run_module_turns(
       drive_top_level_await(st, awaited, resume, finish)
     StepYield(..) -> {
       let #(err, st) =
-        new_error(st, TypeErr, "InternalError: module body yielded")
+        rt_val.t_new_error(st, TypeError, "InternalError: module body yielded")
       #(BodyThrew(err), safepoint.finish_turn(st, [err], finish))
     }
   }
@@ -757,7 +762,7 @@ fn drive_top_level_await(
   let st = rt_store.t_pin_root(st, promise)
   let #(data, pstate, _) = rt_async.promise_data(st, promise)
   // mark handled, the host inspects it below
-  let st = rt_store.t_cell_set(st, data, SPromiseData(pstate, True))
+  let st = rt_store.t_cell_set(st, data, SPromiseData(pstate, is_handled: True))
   let #(ctx, st) = rt_store.t_cell_new(st, SAsyncContext(resume:, promise:))
   let st = rt_async.t_await(st, ctx, awaited)
   let st = safepoint.finish_turn(st, [], finish)
@@ -766,10 +771,6 @@ fn drive_top_level_await(
     #(_, PromiseRejected(reason), _) -> #(BodyThrew(reason), st)
     #(_, PromisePending(_), _) -> #(BodyPending(promise), st)
   }
-}
-
-fn new_error(st: Agent, kind: types.ErrorKind, msg: String) -> #(JsVal, Agent) {
-  st.store.ops.new_error(st, kind, msg)
 }
 
 // pinned: binding cells are held from gleam
@@ -801,17 +802,32 @@ fn reserve_ns_boxes(
   }
 }
 
+// a namespace object kept from an earlier load of the same specifier
+type ReusedNamespace {
+  ReusedNamespace(namespace: Handle, exports: Dict(String, Handle))
+}
+
+// a proxy trap on a deferred namespace that forwards to reflect
+type DeferredTrap {
+  DeferredTrap(
+    name: String,
+    arity: Int,
+    native: ReflectNative,
+    always_triggers: Bool,
+  )
+}
+
 fn build_linked(
   bundle: ModuleBundle,
   st: Agent,
-  preexisting: Dict(String, #(Handle, Dict(String, Handle))),
+  preexisting: Dict(String, ReusedNamespace),
   preexisting_deferred: Dict(String, Handle),
 ) -> #(Agent, Linked, List(#(String, Handle))) {
   let #(st, local_boxes) = preallocate_local_boxes(bundle, st, preexisting)
   let specs = dict.keys(bundle.modules)
   let #(st, namespace_boxes, ns_to_fill) =
     reserve_ns_boxes(st, specs, fn(spec) {
-      dict.get(preexisting, spec) |> result.map(fn(p) { p.0 })
+      dict.get(preexisting, spec) |> result.map(fn(p) { p.namespace })
     })
   let #(st, deferred_boxes, deferred_to_fill) =
     reserve_ns_boxes(st, needed_deferred_specs(bundle), dict.get(
@@ -822,7 +838,8 @@ fn build_linked(
   let exports =
     list.fold(specs, dict.new(), fn(all, spec) {
       case dict.get(preexisting, spec) {
-        Ok(#(_, existing_exports)) -> dict.insert(all, spec, existing_exports)
+        Ok(ReusedNamespace(exports: existing_exports, ..)) ->
+          dict.insert(all, spec, existing_exports)
         Error(Nil) -> {
           let key = esm.resolved_unchecked(spec)
           let map =
@@ -1009,13 +1026,13 @@ fn instantiate_hoisted_functions(
 fn stale_reused_export(
   bundle: ModuleBundle,
   lg: link.LinkableGraph,
-  preexisting: Dict(String, #(Handle, Dict(String, Handle))),
+  preexisting: Dict(String, ReusedNamespace),
 ) -> Option(#(String, String)) {
   dict.to_list(bundle.modules)
   |> list.find_map(fn(entry) {
     let #(spec, bundle_module) = entry
     case bundle_module, dict.get(preexisting, spec) {
-      SourceModule(_), Ok(#(_, existing_exports)) -> {
+      SourceModule(_), Ok(ReusedNamespace(exports: existing_exports, ..)) -> {
         let key = esm.resolved_unchecked(spec)
         link.exported_names(lg, key)
         |> list.find_map(fn(name) {
@@ -1049,14 +1066,14 @@ fn stale_reused_export_message(specifier: String, name: String) -> String {
 fn preallocate_local_boxes(
   bundle: ModuleBundle,
   st: Agent,
-  preexisting: Dict(String, #(Handle, Dict(String, Handle))),
+  preexisting: Dict(String, ReusedNamespace),
 ) -> #(Agent, Dict(String, Dict(String, Handle))) {
   dict.fold(bundle.modules, #(st, dict.new()), fn(acc, spec, bundle_module) {
     let #(st, all) = acc
     let existing =
       dict.get(preexisting, spec)
       |> option.from_result
-      |> option.map(fn(p) { p.1 })
+      |> option.map(fn(p) { p.exports })
     let #(st, boxes) = case bundle_module, existing {
       SourceModule(m), Some(existing_exports) -> #(
         st,
@@ -1105,16 +1122,7 @@ fn namespace_cell(exports: Dict(String, Handle), tag: String) -> types.Cell {
     proto: None,
     props: dict.new(),
     symbol_props: [
-      #(
-        types.symbol_to_string_tag,
-        DataProperty(
-          value: mk_string(tag),
-          writable: False,
-          enumerable: False,
-          configurable: False,
-          seq: 0,
-        ),
-      ),
+      #(types.symbol_to_string_tag, types.frozen_property(mk_string(tag), 0)),
     ],
     elements: NoElements,
     extensible: False,
@@ -1167,12 +1175,27 @@ fn fill_deferred_namespace(
   let #(handler, st) = rt_obj.t_new_object(st, Some(st.realm.object.prototype))
   let st =
     [
-      #("get", 3, ReflectGet, False),
-      #("has", 2, ReflectHas, False),
-      #("deleteProperty", 2, ReflectDeleteProperty, False),
-      #("defineProperty", 3, ReflectDefineProperty, False),
-      #("getOwnPropertyDescriptor", 2, ReflectGetOwnPropertyDescriptor, False),
-      #("ownKeys", 1, ReflectOwnKeys, True),
+      DeferredTrap("get", 3, ReflectGet, always_triggers: False),
+      DeferredTrap("has", 2, ReflectHas, always_triggers: False),
+      DeferredTrap(
+        "deleteProperty",
+        2,
+        ReflectDeleteProperty,
+        always_triggers: False,
+      ),
+      DeferredTrap(
+        "defineProperty",
+        3,
+        ReflectDefineProperty,
+        always_triggers: False,
+      ),
+      DeferredTrap(
+        "getOwnPropertyDescriptor",
+        2,
+        ReflectGetOwnPropertyDescriptor,
+        always_triggers: False,
+      ),
+      DeferredTrap("ownKeys", 1, ReflectOwnKeys, always_triggers: True),
     ]
     |> list.fold(st, fn(st, t) {
       let #(fn_h, st) = alloc_deferred_trap(st, t, bundle, linked, spec)
@@ -1180,11 +1203,11 @@ fn fill_deferred_namespace(
         rt_obj.t_define_own_data(
           st,
           handler,
-          StringKey(types.Named(t.0)),
+          StringKey(types.Named(t.name)),
           mk_object(fn_h),
-          True,
-          True,
-          True,
+          writable: True,
+          enumerable: True,
+          configurable: True,
         )
       st
     })
@@ -1205,12 +1228,12 @@ fn fill_deferred_namespace(
 
 fn alloc_deferred_trap(
   st: Agent,
-  trap: #(String, Int, ReflectNative, Bool),
+  trap: DeferredTrap,
   bundle: ModuleBundle,
   linked: Linked,
   spec: String,
 ) -> #(Handle, Agent) {
-  let #(name, arity, native, always_triggers) = trap
+  let DeferredTrap(name:, arity:, native:, always_triggers:) = trap
   use st, args <- alloc_host_fn(
     st,
     "%DeferredNamespace[" <> name <> "]%",

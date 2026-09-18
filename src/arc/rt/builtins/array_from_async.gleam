@@ -1,3 +1,4 @@
+import arc/rt/abstract_ops as rt_abstract
 import arc/rt/async as rt_async
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
@@ -12,7 +13,7 @@ import arc/rt/types.{
   KHandle, KNull, KUndef, Named, StringKey, SymbolKey, classify, index_key,
   max_array_length, mk_int, mk_object, mk_undefined, symbol_async_iterator,
   symbol_iterator,
-} as rt_types
+}
 import arc/rt/val as rt_val
 import gleam/int
 import gleam/option.{type Option, None, Some}
@@ -21,7 +22,7 @@ fn attempt(
   st: Agent,
   body: fn(Agent) -> Agent,
 ) -> Result(Agent, #(JsVal, Agent)) {
-  case rt_call.t_apply_protected(st, fn(st) { #(Nil, body(st)) }) {
+  case rt_call.try_run(st, fn(st) { #(Nil, body(st)) }) {
     #(NormalCompletion(Nil), st) -> Ok(st)
     #(ThrowCompletion(thrown), st) -> Error(#(thrown, st))
   }
@@ -31,26 +32,26 @@ fn attempt_value(
   st: Agent,
   body: fn(Agent) -> #(a, Agent),
 ) -> Result(#(a, Agent), #(JsVal, Agent)) {
-  case rt_call.t_apply_protected(st, body) {
+  case rt_call.try_run(st, body) {
     #(NormalCompletion(v), st) -> Ok(#(v, st))
     #(ThrowCompletion(thrown), st) -> Error(#(thrown, st))
   }
 }
 
 fn settle(st: Agent, target: JsVal, arg: JsVal) -> Agent {
-  let #(_, st) = rt_call.t_call_checked(st, target, mk_undefined(), [arg])
+  let #(_, st) = rt_call.t_call(st, target, mk_undefined(), [arg])
   st
 }
 
-fn alloc_closure(st: Agent, tag: NativeToken) -> #(JsVal, Agent) {
+fn alloc_closure(st: Agent, token: NativeToken) -> #(JsVal, Agent) {
   let #(h, st) =
     rt_call.t_native_new(
       st,
       Some(st.realm.function.prototype),
-      tag,
+      token,
       "",
       1,
-      False,
+      constructible: False,
     )
   #(mk_object(h), st)
 }
@@ -58,10 +59,7 @@ fn alloc_closure(st: Agent, tag: NativeToken) -> #(JsVal, Agent) {
 fn type_name(st: Agent, v: JsVal) -> String {
   case classify(v) {
     KNull -> "null"
-    _ -> {
-      let #(ty, _) = rt_val.t_type_of(st, v)
-      ty
-    }
+    _ -> rt_val.type_of(st, v)
   }
 }
 
@@ -109,7 +107,7 @@ fn from_async_closure(
   let map_fn = case classify(map_fn) {
     KUndef -> None
     _ ->
-      case rt_call.is_callable(st, map_fn) {
+      case rt_val.is_callable(st, map_fn) {
         True -> Some(map_fn)
         False ->
           rt_val.t_throw_type_error(
@@ -153,7 +151,7 @@ fn from_async_closure(
       }
     }
     _ -> {
-      let #(iter_val, st) = rt_call.t_call_checked(st, async_method, items, [])
+      let #(iter_val, st) = rt_call.t_call(st, async_method, items, [])
       let st = case classify(iter_val) {
         KHandle(_) -> st
         _ -> rt_val.t_throw_type_error(st, "The iterator is not an object")
@@ -177,13 +175,13 @@ fn from_async_closure(
 fn from_async_get_method(
   st: Agent,
   v: JsVal,
-  key: rt_types.ObjectKey,
+  key: types.ObjectKey,
 ) -> #(JsVal, Agent) {
   let #(method, st) = rt_obj.t_get_prop(st, v, key)
   case classify(method) {
     KUndef | KNull -> #(mk_undefined(), st)
     _ ->
-      case rt_call.is_callable(st, method) {
+      case rt_val.is_callable(st, method) {
         True -> #(method, st)
         False ->
           rt_val.t_throw_type_error(
@@ -227,8 +225,7 @@ fn from_async_iterate(
 }
 
 fn from_async_request_next(st: Agent, ctx: FromAsyncCtx) -> Agent {
-  let #(next_result, st) =
-    rt_call.t_call_checked(st, ctx.next_method, ctx.iter, [])
+  let #(next_result, st) = rt_call.t_call(st, ctx.next_method, ctx.iter, [])
   from_async_await(
     st,
     next_result,
@@ -282,7 +279,7 @@ fn from_async_next_steps(
         Some(map_fn) ->
           case
             attempt_value(st, fn(st) {
-              rt_call.t_call_checked(st, map_fn, ctx.this_arg, [
+              rt_call.t_call(st, map_fn, ctx.this_arg, [
                 next_value,
                 mk_int(ctx.k),
               ])
@@ -387,10 +384,10 @@ fn call_if_callable(
   ret_fn: JsVal,
   iter: JsVal,
 ) -> #(Option(JsVal), Agent) {
-  case rt_call.is_callable(st, ret_fn) {
+  case rt_val.is_callable(st, ret_fn) {
     False -> #(None, st)
     True ->
-      case rt_call.t_call(st, ret_fn, iter, []) {
+      case rt_call.t_try_call(st, ret_fn, iter, []) {
         #(rt_call.ThrowCompletion(_inner_thrown), st) -> #(None, st)
         #(rt_call.NormalCompletion(inner), st) -> #(Some(inner), st)
       }
@@ -406,8 +403,7 @@ fn from_async_array_like(
   resolve: JsVal,
   reject: JsVal,
 ) -> Agent {
-  let #(len_val, st) = rt_obj.t_get_prop(st, items, StringKey(Named("length")))
-  let #(len, st) = rt_val.t_to_length(st, len_val)
+  let #(len, st) = rt_abstract.length_of_array_like(st, items)
   let #(target, st) = case rt_call.is_constructor(st, c) {
     True -> {
       let #(h, st) = rt_call.t_construct(st, c, [mk_int(len)], c)
@@ -467,7 +463,7 @@ fn from_async_like_value_steps(
     None -> from_async_like_define_and_continue(st, ctx, v)
     Some(map_fn) -> {
       let #(mapped, st) =
-        rt_call.t_call_checked(st, map_fn, ctx.this_arg, [v, mk_int(ctx.k)])
+        rt_call.t_call(st, map_fn, ctx.this_arg, [v, mk_int(ctx.k)])
       from_async_await(
         st,
         mapped,
@@ -518,9 +514,9 @@ fn from_async_define_own(st: Agent, target: JsVal, k: Int, v: JsVal) -> Agent {
       h,
       StringKey(index_key(k)),
       v,
-      True,
-      True,
-      True,
+      writable: True,
+      enumerable: True,
+      configurable: True,
     )
   case ok {
     True -> st

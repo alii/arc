@@ -1,9 +1,11 @@
+import arc/bytecode/error_kind.{type JsError, JsError, RangeError}
 import arc/internal/digits.{take_digits}
 import arc/internal/gregorian.{
   civil_from_days, days_from_year, days_in_month,
   days_in_year as days_in_iso_year,
 }
 import arc/internal/int_math.{floor_div}
+import arc/internal/temporal_calendar as tcal
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -37,6 +39,11 @@ pub type IsoDate {
   IsoDate(year: Int, month: Int, day: Int)
 }
 
+// [[isodate]] and [[calendar]] slots of plaindate, plainyearmonth, plainmonthday
+pub type IsoDateSlots {
+  IsoDateSlots(iso_date: IsoDate, calendar: tcal.Calendar)
+}
+
 pub type IsoTime {
   IsoTime(
     hour: Int,
@@ -66,11 +73,6 @@ pub type Duration {
 pub const midnight = IsoTime(0, 0, 0, 0, 0, 0)
 
 pub const zero_duration = Duration(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-
-pub type TErr {
-  RangeE(String)
-  TypeE(String)
-}
 
 pub type Overflow {
   Constrain
@@ -195,12 +197,12 @@ pub fn regulate_iso_date(
   m: Int,
   d: Int,
   overflow: Overflow,
-) -> Result(IsoDate, TErr) {
+) -> Result(IsoDate, JsError) {
   case overflow {
     Reject ->
       case is_valid_iso_date(y, m, d) {
         True -> Ok(IsoDate(y, m, d))
-        False -> Error(RangeE("invalid ISO date"))
+        False -> Error(JsError(RangeError, "invalid ISO date"))
       }
     Constrain -> {
       let m = int.clamp(m, 1, 12)
@@ -210,20 +212,20 @@ pub fn regulate_iso_date(
   }
 }
 
-pub fn check_date_limits(d: IsoDate) -> Result(IsoDate, TErr) {
+pub fn check_date_limits(d: IsoDate) -> Result(IsoDate, JsError) {
   case iso_date_within_limits(d) {
     True -> Ok(d)
-    False -> Error(RangeE("date outside of supported range"))
+    False -> Error(JsError(RangeError, "date outside of supported range"))
   }
 }
 
 pub fn check_date_time_limits(
   d: IsoDate,
   t: IsoTime,
-) -> Result(#(IsoDate, IsoTime), TErr) {
+) -> Result(#(IsoDate, IsoTime), JsError) {
   case iso_datetime_within_limits(d, t) {
     True -> Ok(#(d, t))
-    False -> Error(RangeE("date-time outside supported range"))
+    False -> Error(JsError(RangeError, "date-time outside supported range"))
   }
 }
 
@@ -478,7 +480,7 @@ pub fn parse_annotations(
   s: String,
   tz: Option(String),
   cal: Option(String),
-  cal_critical: Bool,
+  cal_critical cal_critical: Bool,
 ) -> Option(#(Option(String), Option(String), String)) {
   case s {
     "[" <> r -> {
@@ -596,7 +598,7 @@ pub fn parse_iso_datetime_string(s: String) -> Option(ParsedIso) {
             rest,
             None,
             None,
-            False,
+            cal_critical: False,
           ))
           case rest2 {
             "" -> Some(ParsedIso(date:, time:, offset:, tz:, calendar: cal))

@@ -1,8 +1,9 @@
+import arc/bytecode/error_kind.{TypeError}
 import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as b_object
 import arc/rt/builtins/regexp as b_regexp
-import arc/rt/call.{NormalCompletion, ThrowCompletion, t_call_checked}
+import arc/rt/call.{NormalCompletion, ThrowCompletion, t_call}
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -10,7 +11,7 @@ import arc/rt/types.{
   type JsStore, type JsVal, type ObjectKey, Agent, DataProperty, GeneratorN,
   GeneratorNext, GeneratorObj, IteratorN, IteratorRecord, JsStore, KHandle,
   KNull, KUndef, Named, NativeFn, NoElements, Ordinary, SObject, StringKey,
-  TypeErr, classify, mk_bool, mk_object, mk_string, mk_undefined,
+  classify, mk_bool, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bool
@@ -19,8 +20,8 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-pub fn t_new_error(st: Agent, message: String) -> #(JsVal, Agent) {
-  st.store.ops.new_error(st, TypeErr, message)
+pub fn t_new_type_error(st: Agent, message: String) -> #(JsVal, Agent) {
+  rt_val.t_new_error(st, TypeError, message)
 }
 
 // iterator record is a null-proto object: iterator, next, done
@@ -40,9 +41,36 @@ fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
   let seq = js.prop_seq
   let props =
     dict.from_list([
-      #(Named("iterator"), DataProperty(rec.iterator, True, True, True, seq)),
-      #(Named("next"), DataProperty(rec.next_method, True, True, True, seq + 1)),
-      #(Named("done"), DataProperty(mk_bool(False), True, True, True, seq + 2)),
+      #(
+        Named("iterator"),
+        DataProperty(
+          value: rec.iterator,
+          writable: True,
+          enumerable: True,
+          configurable: True,
+          seq:,
+        ),
+      ),
+      #(
+        Named("next"),
+        DataProperty(
+          value: rec.next_method,
+          writable: True,
+          enumerable: True,
+          configurable: True,
+          seq: seq + 1,
+        ),
+      ),
+      #(
+        Named("done"),
+        DataProperty(
+          value: mk_bool(False),
+          writable: True,
+          enumerable: True,
+          configurable: True,
+          seq: seq + 2,
+        ),
+      ),
     ])
   let st = Agent(..st, store: JsStore(..js, prop_seq: seq + 3))
   let #(h, st) =
@@ -159,7 +187,7 @@ fn generator_step(
   data: Handle,
 ) -> #(Option(JsVal), Agent) {
   let step = fn(st) { rt_async.t_gen_step(st, data, mk_undefined()) }
-  case call.t_apply_protected(st, step) {
+  case call.try_run(st, step) {
     #(NormalCompletion(#(True, _)), st) -> #(None, st)
     #(NormalCompletion(#(False, v)), st) -> #(Some(v), st)
     #(ThrowCompletion(thrown), st) ->
@@ -217,7 +245,7 @@ fn protocol_step(
       }
     }
   }
-  case call.t_apply_protected(st, step) {
+  case call.try_run(st, step) {
     #(NormalCompletion(#(True, _) as pair), st) -> #(pair, mark_done(st, rec))
     #(NormalCompletion(pair), st) -> #(pair, st)
     #(ThrowCompletion(thrown), st) ->
@@ -226,7 +254,7 @@ fn protocol_step(
 }
 
 // §7.4.11 iteratorclose; abrupt swallows what return() does
-pub fn t_iter_close(st: Agent, rec: JsVal, abrupt: Bool) -> Agent {
+pub fn t_iter_close(st: Agent, rec: JsVal, abrupt abrupt: Bool) -> Agent {
   let #(done, record, st) = read_record(st, rec)
   case done {
     True -> st
@@ -283,7 +311,7 @@ pub fn array_spread(st: Agent, iterable: JsVal) -> PlainSpread
 // §14.7.5.7 step 6.a, not awaited here
 pub fn t_async_iter_next(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
   let #(_done, record, st) = read_record(st, rec)
-  t_call_checked(st, record.next_method, record.iterator, [])
+  t_call(st, record.next_method, record.iterator, [])
 }
 
 // §7.3.25 copydataproperties for {...source}
@@ -342,7 +370,15 @@ fn copy_data_properties(
         True -> {
           let #(v, st) = rt_obj.t_get_prop(st, mk_object(from), key)
           let #(_, st) =
-            rt_obj.t_define_own_data(st, target, key, v, True, True, True)
+            rt_obj.t_define_own_data(
+              st,
+              target,
+              key,
+              v,
+              writable: True,
+              enumerable: True,
+              configurable: True,
+            )
           st
         }
       }
@@ -380,9 +416,9 @@ pub fn t_get_template_object(
           tpl_h,
           StringKey(Named("raw")),
           raw_v,
-          False,
-          False,
-          False,
+          writable: False,
+          enumerable: False,
+          configurable: False,
         )
       let st = b_object.freeze(st, tpl_h)
       let st = rt_store.t_pin_root(st, tpl_h)

@@ -9,7 +9,7 @@ import arc/rt/builtins/temporal_common.{
   get_difference_settings, get_options_object, get_overflow_option_from_value,
   make_date_cal, make_date_time_cal, make_duration, make_month_day_cal,
   make_year_month_cal, make_zoned_cal, max_unit, require_largest_ge_smallest,
-  require_temporal, static_name, temporal_data_of, terr, time_zone_from_string,
+  require_temporal, static_name, temporal_data_of, time_zone_from_string,
   truncated_int_arg, unit_rank,
 }
 import arc/rt/builtins/temporal_diff.{difference_calendar_date}
@@ -158,11 +158,11 @@ pub fn ctor(
   let #(y, st) = truncated_int_arg(st, args, 0)
   let #(m, st) = truncated_int_arg(st, args, 1)
   let #(d, st) = truncated_int_arg(st, args, 2)
-  let cal = terr(st, to_calendar_arg(helpers.arg_at(args, 3)))
+  let cal = rt_val.or_throw(st, to_calendar_arg(helpers.arg_at(args, 3)))
   case is_valid_iso_date(y, m, d) {
     False -> rt_val.t_throw_range_error(st, "invalid ISO date")
     True -> {
-      let date = terr(st, check_date_limits(IsoDate(y, m, d)))
+      let date = rt_val.or_throw(st, check_date_limits(IsoDate(y, m, d)))
       make_date_cal(st, protos, date, cal)
     }
   }
@@ -211,10 +211,10 @@ pub fn to_temporal_date(
         _ -> date_from_bag(st, h, options)
       }
     KStr(s) -> {
-      let p = terr(st, parse_plain_datetime_string(s))
-      let cal = terr(st, parsed_calendar_id(p))
+      let p = rt_val.or_throw(st, parse_plain_datetime_string(s))
+      let cal = rt_val.or_throw(st, parsed_calendar_id(p))
       let #(_opts, st) = get_overflow_option_from_value(st, options)
-      #(#(terr(st, check_date_limits(p.date)), cal), st)
+      #(#(rt_val.or_throw(st, check_date_limits(p.date)), cal), st)
     }
     _ -> rt_val.t_throw_type_error(st, "cannot convert to a Temporal.PlainDate")
   }
@@ -228,8 +228,8 @@ pub fn date_from_bag(
   let #(cal, st) = read_bag_calendar(st, h)
   let #(fields, st) = read_date_fields(st, h, cal)
   let #(overflow, st) = get_overflow_option_from_value(st, options)
-  let date = terr(st, resolve_calendar_date(cal, fields, overflow))
-  #(#(terr(st, check_date_limits(date)), cal), st)
+  let date = rt_val.or_throw(st, resolve_calendar_date(cal, fields, overflow))
+  #(#(rt_val.or_throw(st, check_date_limits(date)), cal), st)
 }
 
 pub fn getter(
@@ -331,7 +331,7 @@ pub fn method(
     }
     PdAdd | PdSubtract -> {
       let #(dur, overflow, st) = add_sub_args(st, args, m == PdSubtract)
-      let d2 = terr(st, calendar_date_add(cal, d, dur, overflow))
+      let d2 = rt_val.or_throw(st, calendar_date_add(cal, d, dur, overflow))
       make_date_cal(st, protos, d2, cal)
     }
     PdWith -> {
@@ -340,8 +340,9 @@ pub fn method(
       let Nil = require_nonempty_fields(st, fields == no_date_fields)
       let #(overflow, st) =
         get_overflow_option_from_value(st, helpers.arg_at(args, 1))
-      let date = terr(st, calendar_with_fields(cal, d, fields, overflow))
-      let date = terr(st, check_date_limits(date))
+      let date =
+        rt_val.or_throw(st, calendar_with_fields(cal, d, fields, overflow))
+      let date = rt_val.or_throw(st, check_date_limits(date))
       make_date_cal(st, protos, date, cal)
     }
     PdWithCalendar -> {
@@ -354,21 +355,19 @@ pub fn method(
       make_date_time_cal(st, protos, d, t, cal)
     }
     PdToPlainYearMonth -> {
-      let #(ymy, ymm, ymd) = case cal {
-        tcal.Iso8601 -> #(d.year, d.month, 1)
+      let first = case cal {
+        tcal.Iso8601 -> IsoDate(..d, day: 1)
         _ -> {
           let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
-          let first =
-            iso_date_from_epoch_days(tcal.date_to_epoch_days(
-              cal,
-              cd.year,
-              cd.month,
-              1,
-            ))
-          #(first.year, first.month, first.day)
+          iso_date_from_epoch_days(tcal.date_to_epoch_days(
+            cal,
+            cd.year,
+            cd.month,
+            1,
+          ))
         }
       }
-      make_year_month_cal(st, protos, ymy, ymm, ymd, cal)
+      make_year_month_cal(st, protos, first.year, first.month, first.day, cal)
     }
     PdToPlainMonthDay ->
       case cal {
@@ -378,7 +377,10 @@ pub fn method(
           let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
           let mc = tcal.month_code_of(cal, cd.year, cd.month)
           let iso =
-            terr(st, month_day_reference_iso(cal, mc, cd.day, Constrain))
+            rt_val.or_throw(
+              st,
+              month_day_reference_iso(cal, mc, cd.day, Constrain),
+            )
           make_month_day_cal(st, protos, iso.month, iso.day, iso.year, cal)
         }
       }
@@ -402,10 +404,10 @@ pub fn method(
         _ -> rt_val.t_throw_type_error(st, "time zone must be a string")
       }
       let #(ns, st) = case classify(plain_time) {
-        KUndef -> #(terr(st, start_of_day_ns(tz, d)), st)
+        KUndef -> #(rt_val.or_throw(st, start_of_day_ns(tz, d)), st)
         _ -> {
           let #(t, st) = to_temporal_time(st, plain_time, mk_undefined())
-          #(terr(st, get_epoch_ns_for(tz, d, t, Compatible)), st)
+          #(rt_val.or_throw(st, get_epoch_ns_for(tz, d, t, Compatible)), st)
         }
       }
       make_zoned_cal(st, protos, ns, tz, cal)
@@ -439,7 +441,7 @@ fn date_until_since(
   d1: IsoDate,
   d2: IsoDate,
   args: List(JsVal),
-  is_since: Bool,
+  is_since is_since: Bool,
 ) -> #(JsVal, Agent) {
   let #(#(largest, smallest, inc, mode), st) = get_difference_settings(st, args)
   let smallest = option.unwrap(smallest, Day)
@@ -454,7 +456,7 @@ fn date_until_since(
       let Nil = require_largest_ge_smallest(st, largest, smallest)
       let mode = apply_since_mode(mode, is_since)
       let dur =
-        terr(
+        rt_val.or_throw(
           st,
           difference_calendar_date(cal, d1, d2, largest, smallest, inc, mode),
         )

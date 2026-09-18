@@ -1,5 +1,6 @@
 // §19.2.1.1 performeval, direct eval aliases caller box cells
 
+import arc/bytecode/error_kind.{SyntaxError, TypeError}
 import arc/bytecode/lexical
 import arc/compiler
 import arc/compiler/compile_task
@@ -17,9 +18,10 @@ import arc/rt/limits
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type EvalKind, type Handle, type JsVal, Agent, BytecodeFn,
-  DynamicFunction, IndirectEval, KHandle, KStr, SObject, ScriptEval, SyntaxErr,
-  TypeErr, classify, mk_object, mk_undefined,
+  DynamicFunction, IndirectEval, KHandle, KStr, SObject, ScriptEval, classify,
+  mk_object, mk_undefined,
 }
+import arc/rt/val as rt_val
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -54,7 +56,7 @@ fn compile_source(
       }
     })
   result.map_error(compiled, fn(msg) {
-    agent.store.ops.new_error(agent, SyntaxErr, msg)
+    rt_val.t_new_error(agent, SyntaxError, msg)
   })
 }
 
@@ -319,9 +321,9 @@ fn caller_boxes(
     list.append(named, lex)
   }
   result.map_error(boxes, fn(idx) {
-    caller.agent.store.ops.new_error(
+    rt_val.t_new_error(
       caller.agent,
-      TypeErr,
+      TypeError,
       "direct eval: local slot " <> int.to_string(idx) <> " missing",
     )
   })

@@ -1,10 +1,11 @@
+import arc/bytecode/error_kind.{RangeError}
 import arc/rt/arena
 import arc/rt/limits
 import arc/rt/types.{
   type Agent, type Cell, type Handle, type JsOps, type JsStore, type JsVal,
-  type ObjectKey, type StoreMeta, Agent, Handle, JsOps, JsStore, RangeErr, SBox,
-  StoreMeta,
-} as rt_types
+  type ObjectKey, type Property, type StoreMeta, Agent, DataProperty, Handle,
+  JsOps, JsStore, SBox, StoreMeta,
+}
 import gleam/dict
 import gleam/set
 
@@ -18,14 +19,14 @@ pub fn new() -> JsStore(Agent) {
     // past the constant birth seqs
     prop_seq: 3,
     shapes: dict.from_list([
-      #(0, rt_types.ShapeDesc(0, dict.new(), dict.new())),
+      #(0, types.ShapeDesc(0, dict.new(), dict.new())),
     ]),
     next_shape: 1,
     ics: dict.new(),
     free_protos: dict.new(),
     global_epoch: 0,
     ops: unseeded_ops(),
-    microtasks: rt_types.job_queue_new(),
+    microtasks: types.job_queue_new(),
     pinned_roots: set.new(),
     meta: StoreMeta(
       gc_live: 0,
@@ -50,7 +51,7 @@ fn unseeded_ops() -> JsOps(Agent) {
     new_error: fn(_, _, _) { unseeded() },
     eval_hook: fn(_, _, _) { unseeded() },
     call_bytecode: fn(_, _, _, _, _) { unseeded() },
-    bind_call: fn(_, _, _, _) { unseeded() },
+    prepare_call: fn(_, _, _, _) { unseeded() },
     construct_bytecode: fn(_, _, _, _) { unseeded() },
     resume_frame: fn(_, _, _) { unseeded() },
   )
@@ -119,7 +120,7 @@ pub fn t_cell_set(st: Agent, h: Handle, cell: Cell) -> Agent {
   let Handle(id) = h
   let data = arena.set(id, cell, js.data)
   let global_epoch = case cell {
-    rt_types.SObject(kind: rt_types.GlobalObj, ..) -> js.global_epoch + 1
+    types.SObject(kind: types.GlobalObj, ..) -> js.global_epoch + 1
     _ -> js.global_epoch
   }
   let free_protos = case dict.has_key(js.free_protos, id) {
@@ -165,6 +166,46 @@ pub fn t_next_prop_seq(st: Agent) -> #(Int, Agent) {
   #(js.prop_seq, Agent(..st, store: JsStore(..js, prop_seq: js.prop_seq + 1)))
 }
 
+// spelled out rather than via types.*_property: one call per property made
+pub fn t_frozen_property(st: Agent, value: JsVal) -> #(Property, Agent) {
+  let #(seq, st) = t_next_prop_seq(st)
+  let prop =
+    DataProperty(
+      value:,
+      writable: False,
+      enumerable: False,
+      configurable: False,
+      seq:,
+    )
+  #(prop, st)
+}
+
+pub fn t_plain_property(st: Agent, value: JsVal) -> #(Property, Agent) {
+  let #(seq, st) = t_next_prop_seq(st)
+  let prop =
+    DataProperty(
+      value:,
+      writable: True,
+      enumerable: True,
+      configurable: True,
+      seq:,
+    )
+  #(prop, st)
+}
+
+pub fn t_builtin_property(st: Agent, value: JsVal) -> #(Property, Agent) {
+  let #(seq, st) = t_next_prop_seq(st)
+  let prop =
+    DataProperty(
+      value:,
+      writable: True,
+      enumerable: False,
+      configurable: True,
+      seq:,
+    )
+  #(prop, st)
+}
+
 pub fn t_next_private_uid(st: Agent) -> #(Int, Agent) {
   let meta = st.store.meta
   #(
@@ -205,7 +246,7 @@ pub fn t_enter_call(st: Agent) -> Agent {
 
 pub fn stack_overflow(st: Agent) -> #(JsVal, Agent) {
   let #(e, st) =
-    st.store.ops.new_error(st, RangeErr, "Maximum call stack size exceeded")
+    st.store.ops.new_error(st, RangeError, "Maximum call stack size exceeded")
   t_throw(st, e)
 }
 

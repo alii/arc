@@ -17,11 +17,7 @@ pub fn zone_id(zone: Zone) -> String {
 }
 
 @external(erlang, "arc_tz_ffi", "lookup")
-fn lookup(id: String) -> Result(String, Nil)
-
-pub fn known_identifier(id: String) -> Option(String) {
-  lookup(id) |> option.from_result
-}
+pub fn known_identifier(id: String) -> Option(String)
 
 @external(erlang, "arc_tz_ffi", "canonical_id")
 fn canonical_id(id: String) -> String

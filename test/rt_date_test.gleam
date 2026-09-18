@@ -3,8 +3,8 @@ import arc/internal/host_time
 import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
 import arc/rt/types.{
-  type Agent, type JsVal, JInt, JNan, KNum, KStr, classify, mk_number, mk_object,
-  mk_string,
+  type Agent, type JsVal, JInt, JNan, KNum, KStr, classify, mk_int, mk_number,
+  mk_object, mk_string,
 }
 import arc/zoneinfo
 import gleam/list
@@ -24,7 +24,7 @@ fn utc() -> Agent {
 }
 
 fn ints(ns: List(Int)) -> List(JsVal) {
-  list.map(ns, fn(n) { mk_number(JInt(n)) })
+  list.map(ns, fn(n) { mk_int(n) })
 }
 
 fn date_utc(st: Agent, fields: List(Int)) -> Int {

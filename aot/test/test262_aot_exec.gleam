@@ -6,9 +6,9 @@ import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, DataProperty, KHandle, KStr, KUndef,
-  Named, ProxyObj, SObject, SShapedObject, StringKey, classify, mk_object,
-  mk_string, mk_undefined,
+  type Agent, type Handle, type JsVal, DataProperty, KStr, KUndef, Named,
+  ProxyObj, SObject, SShapedObject, StringKey, classify, mk_object, mk_string,
+  mk_undefined,
 }
 import arc/rt/val as rt_val
 import arc_aot/compile
@@ -255,7 +255,7 @@ fn run_compiled(
 fn prepare_agent(
   ctx: Ctx,
   metadata: TestMetadata,
-  is_async: Bool,
+  is_async is_async: Bool,
 ) -> Result(Agent, Outcome) {
   let st = run.new_linked_agent(hooks_for(metadata))
   case list.contains(metadata.flags, "raw") {
@@ -308,9 +308,9 @@ fn compile_test(source: String, module_name: String) -> Result(Atom, Outcome) {
 
 fn judge(
   metadata: TestMetadata,
-  is_async: Bool,
-  exec: run.JsExecOutcome,
-  st: Agent,
+  is_async is_async: Bool,
+  exec exec: run.JsExecOutcome,
+  st st: Agent,
 ) -> Outcome {
   let rejected = case exec {
     run.JsThrew(thrown) -> emitter_rejection(thrown, st)
@@ -330,7 +330,7 @@ fn judge(
 
 // runtime "unsupported:" TypeError is the same static rejection
 fn emitter_rejection(thrown: JsVal, st: Agent) -> Option(String) {
-  use h <- option.then(as_handle(thrown))
+  use h <- option.then(rt_val.handle_of(thrown))
   use name <- option.then(get_data(st, h, "name"))
   use message <- option.then(get_data(st, h, "message"))
   case classify(name), classify(message) {
@@ -341,9 +341,9 @@ fn emitter_rejection(thrown: JsVal, st: Agent) -> Option(String) {
 
 fn judge_completion(
   metadata: TestMetadata,
-  is_async: Bool,
-  exec: run.JsExecOutcome,
-  st: Agent,
+  is_async is_async: Bool,
+  exec exec: run.JsExecOutcome,
+  st st: Agent,
 ) -> Outcome {
   case metadata.negative_phase, exec {
     _, run.JsCrashed(reason) -> Fail("crashed: " <> reason)
@@ -404,9 +404,9 @@ fn verify_negative_type(
     None -> Pass
     Some(expected) -> {
       let actual = {
-        use h <- option.then(as_handle(thrown))
+        use h <- option.then(rt_val.handle_of(thrown))
         use ctor <- option.then(get_data(st, h, "constructor"))
-        use ctor <- option.then(as_handle(ctor))
+        use ctor <- option.then(rt_val.handle_of(ctor))
         use name <- option.then(get_data(st, ctor, "name"))
         case classify(name) {
           KStr(n) -> Some(n)
@@ -469,13 +469,6 @@ fn print_native(
   #(host.State(..s, agent: st), Ok(mk_undefined()))
 }
 
-fn as_handle(v: JsVal) -> Option(Handle) {
-  case classify(v) {
-    KHandle(h) -> Some(h)
-    _ -> None
-  }
-}
-
 fn ordinary_proto(st: Agent, h: Handle) -> Option(Handle) {
   case rt_store.t_cell_get(st, h) {
     SObject(kind: ProxyObj(..), ..) -> None
@@ -494,7 +487,7 @@ fn get_data(st: Agent, h: Handle, key: String) -> Option(JsVal) {
 
 fn inspect_thrown(val: JsVal, st: Agent) -> String {
   let described = {
-    use h <- option.then(as_handle(val))
+    use h <- option.then(rt_val.handle_of(val))
     use message <- option.then(get_data(st, h, "message"))
     case classify(message) {
       KStr(msg) -> {

@@ -181,8 +181,8 @@ fn emit_object_props(
   props: List(ast.PatternProperty),
   source: ir.Value,
   mode: BindMode,
-  has_rest: Bool,
-  seen: List(ir.Value),
+  has_rest has_rest: Bool,
+  seen seen: List(ir.Value),
 ) -> Build(Nil) {
   case props {
     [] -> anf.pure(Nil)

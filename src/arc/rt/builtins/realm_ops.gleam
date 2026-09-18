@@ -1,22 +1,28 @@
+import arc/bytecode/error_kind.{
+  type ErrorKind, EvalError, RangeError, ReferenceError, SyntaxError, TypeError,
+  UriError,
+}
 import arc/rt/builtins/common
 import arc/rt/builtins/error as b_error
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type ErrorKind, type Handle, type JsVal, type ObjKind, type Realm,
-  BigIntObj, BooleanObj, KBig, KBool, KHandle, KNull, KNum, KStr, KSym, KTdz,
-  KUndef, NoElements, NumberObj, RangeErr, ReferenceErr, SObject, StringObj,
-  SymbolObj, SyntaxErr, TypeErr, classify, mk_bool, mk_object, mk_string,
+  type Agent, type Handle, type JsVal, type ObjKind, type Realm, BigIntObj,
+  BooleanObj, KBig, KBool, KHandle, KNull, KNum, KStr, KSym, KTdz, KUndef,
+  NumberObj, StringObj, SymbolObj, classify, mk_bool, mk_object, mk_string,
+  plain_object,
 }
 import arc/rt/val as rt_val
 import gleam/dict
 import gleam/option.{Some}
 
-pub fn error_kind_intrinsics(r: Realm, kind: ErrorKind) -> #(Handle, String) {
+pub fn error_kind_prototype(r: Realm, kind: ErrorKind) -> Handle {
   case kind {
-    TypeErr -> #(r.type_error.prototype, "TypeError")
-    RangeErr -> #(r.range_error.prototype, "RangeError")
-    ReferenceErr -> #(r.reference_error.prototype, "ReferenceError")
-    SyntaxErr -> #(r.syntax_error.prototype, "SyntaxError")
+    TypeError -> r.type_error.prototype
+    RangeError -> r.range_error.prototype
+    ReferenceError -> r.reference_error.prototype
+    SyntaxError -> r.syntax_error.prototype
+    UriError -> r.uri_error.prototype
+    EvalError -> r.eval_error.prototype
   }
 }
 
@@ -25,8 +31,9 @@ pub fn t_new_error(
   kind: ErrorKind,
   message: String,
 ) -> #(JsVal, Agent) {
-  let #(proto, name) = error_kind_intrinsics(st.realm, kind)
-  let #(msg_prop, st) = common.builtin_property(st, mk_string(message))
+  let proto = error_kind_prototype(st.realm, kind)
+  let name = error_kind.name(kind)
+  let #(msg_prop, st) = rt_store.t_builtin_property(st, mk_string(message))
   let #(h, st) = common.alloc_error_object(st, proto, [#("message", msg_prop)])
   let st = b_error.attach_stack(st, h, name, message)
   #(mk_object(h), st)
@@ -37,17 +44,7 @@ pub fn alloc_object(
   kind: ObjKind,
   proto: Handle,
 ) -> #(Handle, Agent) {
-  rt_store.t_cell_new(
-    st,
-    SObject(
-      kind:,
-      proto: Some(proto),
-      props: dict.new(),
-      symbol_props: [],
-      elements: NoElements,
-      extensible: True,
-    ),
-  )
+  rt_store.t_cell_new(st, plain_object(kind, Some(proto), dict.new()))
 }
 
 // §7.1.18 toobject
@@ -71,7 +68,7 @@ pub fn t_wrap_primitive(st: Agent, v: JsVal) -> #(Handle, Agent) {
 pub fn alloc_iter_result(
   st: Agent,
   value: JsVal,
-  done: Bool,
+  done done: Bool,
 ) -> #(JsVal, Agent) {
   let #(h, st) =
     common.alloc_plain_object(st, st.realm.object.prototype, [

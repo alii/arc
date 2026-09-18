@@ -240,7 +240,7 @@ fn split_range_affixes(
   #(pre, list.reverse(rev_core), list.reverse(rev_suf))
 }
 
-fn range_sep(key: LocaleKey, spaced: Bool) -> String {
+fn range_sep(key: LocaleKey, spaced spaced: Bool) -> String {
   case base_language(key) {
     "pt" -> " - "
     _ ->
@@ -370,8 +370,8 @@ pub fn format_decimal_string_parts(opts: NumOpts, s: String) -> List(Part) {
 
 fn format_decimal_parts(
   opts: NumOpts,
-  negative: Bool,
-  dec: Decimal,
+  negative negative: Bool,
+  dec dec: Decimal,
 ) -> List(Part) {
   let opts = case opts.notation, opts.use_grouping {
     NotationCompact(..), GroupingAuto ->
@@ -427,7 +427,7 @@ fn format_decimal_parts(
       }
     NotationStandard -> digit_parts
   }
-  wrap_affixes(opts, digit_parts, negative, False)
+  wrap_affixes(opts, digit_parts, negative, is_nan: False)
 }
 
 type CompactSuffix {
@@ -558,18 +558,26 @@ fn de_compact(e: Int, display: CompactDisplay) -> CompactSuffix {
 }
 
 pub fn format_nan_parts(opts: NumOpts) -> List(Part) {
-  wrap_affixes(opts, [#(PNaN, nan_str(opts.locale))], False, True)
+  wrap_affixes(
+    opts,
+    [#(PNaN, nan_str(opts.locale))],
+    negative: False,
+    is_nan: True,
+  )
 }
 
-pub fn format_infinity_parts(opts: NumOpts, negative: Bool) -> List(Part) {
-  wrap_affixes(opts, [#(PInfinity, "∞")], negative, False)
+pub fn format_infinity_parts(
+  opts: NumOpts,
+  negative negative: Bool,
+) -> List(Part) {
+  wrap_affixes(opts, [#(PInfinity, "∞")], negative, is_nan: False)
 }
 
 fn wrap_affixes(
   opts: NumOpts,
   core: List(Part),
-  negative: Bool,
-  is_nan: Bool,
+  negative negative: Bool,
+  is_nan is_nan: Bool,
 ) -> List(Part) {
   let key = opts.locale
   let zero = !is_nan && !negative && is_zero_parts(core)
@@ -645,7 +653,7 @@ fn unit_affixes(
   key: LocaleKey,
   unit: String,
   display: UnitDisplay,
-  one: Bool,
+  one one: Bool,
 ) -> #(List(Part), List(Part)) {
   let lang = base_language(key)
   let hant = key.base_tag == "zh-TW" || key.base_tag == "zh-Hant"
@@ -801,7 +809,7 @@ pub fn currency_digits(code: String) -> Int {
   }
 }
 
-fn unit_name_long(unit: String, one: Bool) -> String {
+fn unit_name_long(unit: String, one one: Bool) -> String {
   let singular = fn(u: String) -> String {
     case u {
       "celsius" -> "degree Celsius"
@@ -1027,8 +1035,8 @@ fn round_to_leading_digits(
 // odd only matters for halfeven
 fn rounds_up(
   mode: RoundingMode,
-  negative: Bool,
-  vs_half: Order,
+  negative negative: Bool,
+  vs_half vs_half: Order,
   odd odd: Bool,
 ) -> Bool {
   case vs_half, mode {
@@ -1083,7 +1091,7 @@ fn round_fraction(
   fraction_digits: Int,
   inc: Int,
   mode: RoundingMode,
-  negative: Bool,
+  negative negative: Bool,
 ) -> Decimal {
   let keep = dec.exponent + fraction_digits
   use <- bool.lazy_guard(inc == 1, fn() {
@@ -1184,7 +1192,11 @@ fn split_integer_fraction(dec: Decimal, frac_len: Int) -> #(String, String) {
   #(int_str, frac_str)
 }
 
-fn format_digits(opts: NumOpts, dec: Decimal, negative: Bool) -> List(Part) {
+fn format_digits(
+  opts: NumOpts,
+  dec: Decimal,
+  negative negative: Bool,
+) -> List(Part) {
   let mode = opts.rounding_mode
   let by_sig = fn(sig: Precision) { render_sig(dec, sig, mode, negative) }
   let by_frac = fn(frac: Precision) {
@@ -1244,7 +1256,7 @@ fn render_sig(
   dec: Decimal,
   sig: Precision,
   mode: RoundingMode,
-  negative: Bool,
+  negative negative: Bool,
 ) -> #(String, String) {
   case dec.digits {
     "" -> #("0", string.repeat("0", sig.min - 1))
@@ -1270,7 +1282,7 @@ fn render_frac(
   frac: Precision,
   rounding_increment: Int,
   mode: RoundingMode,
-  negative: Bool,
+  negative negative: Bool,
 ) -> #(String, String) {
   let rounded =
     round_fraction(dec, frac.max, rounding_increment, mode, negative)

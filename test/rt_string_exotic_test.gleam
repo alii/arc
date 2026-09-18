@@ -4,7 +4,7 @@ import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type JsVal, type ParsedDesc, DataProperty, Index, JInt, KNum, KStr,
   KUndef, Named, ParsedDesc, StringKey, SymbolKey, canonical_key, classify,
-  mk_number, mk_object, mk_string,
+  mk_int, mk_object, mk_string,
 }
 import gleam/list
 import gleam/option.{None, Some}
@@ -16,10 +16,6 @@ fn agent() -> Agent {
 
 fn key(name: String) {
   StringKey(canonical_key(name))
-}
-
-fn int(i: Int) -> JsVal {
-  mk_number(JInt(i))
 }
 
 fn wrapper(st: Agent, s: String) -> #(JsVal, Agent) {
@@ -84,13 +80,13 @@ pub fn synthesized_properties_are_read_only_test() {
   let sh = handle(s)
   let #(ok, st) = rt_obj.t_set_prop(st, s, key("0"), mk_string("z"))
   assert !ok
-  let #(ok, st) = rt_obj.t_set_prop(st, s, key("length"), int(9))
+  let #(ok, st) = rt_obj.t_set_prop(st, s, key("length"), mk_int(9))
   assert !ok
   let #(v, st) = rt_obj.t_get_prop(st, s, key("0"))
   assert classify(v) == KStr("a")
   let #(other, st) = rt_obj.t_new_object_literal(st)
   let #(ok, st) =
-    rt_obj.t_set_prop_with_receiver(st, handle(other), key("1"), int(1), s)
+    rt_obj.t_set_prop_with_receiver(st, handle(other), key("1"), mk_int(1), s)
   assert !ok
   let #(ok, st) = rt_obj.t_set_prop(st, s, key("5"), mk_string("x"))
   assert ok
@@ -115,10 +111,10 @@ pub fn define_own_property_validates_against_fixed_descriptors_test() {
     rt_obj.t_define_own_prop(st, sh, key("0"), value_desc(mk_string("z")))
   assert !ok
   let #(ok, st) =
-    rt_obj.t_define_own_prop(st, sh, key("length"), value_desc(int(3)))
+    rt_obj.t_define_own_prop(st, sh, key("length"), value_desc(mk_int(3)))
   assert ok
   let #(ok, st) =
-    rt_obj.t_define_own_prop(st, sh, key("length"), value_desc(int(4)))
+    rt_obj.t_define_own_prop(st, sh, key("length"), value_desc(mk_int(4)))
   assert !ok
   let widen =
     ParsedDesc(..value_desc(mk_string("a")), value: None, writable: Some(True))
@@ -136,11 +132,11 @@ pub fn own_property_keys_order_test() {
   let st = agent()
   let #(s, st) = wrapper(st, "abc")
   let sh = handle(s)
-  let #(_, st) = rt_obj.t_set_prop(st, s, key("foo"), int(1))
-  let #(_, st) = rt_obj.t_set_prop(st, s, key("7"), int(2))
-  let #(_, st) = rt_obj.t_set_prop(st, s, key("bar"), int(3))
+  let #(_, st) = rt_obj.t_set_prop(st, s, key("foo"), mk_int(1))
+  let #(_, st) = rt_obj.t_set_prop(st, s, key("7"), mk_int(2))
+  let #(_, st) = rt_obj.t_set_prop(st, s, key("bar"), mk_int(3))
   let sym = types.symbol_iterator
-  let #(_, st) = rt_obj.t_set_prop(st, s, SymbolKey(sym), int(4))
+  let #(_, st) = rt_obj.t_set_prop(st, s, SymbolKey(sym), mk_int(4))
   let #(keys, st) = rt_obj.t_own_keys(st, sh)
   assert keys
     == [

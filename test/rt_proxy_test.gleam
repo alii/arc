@@ -6,7 +6,7 @@ import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/types.{
   type Agent, type CompiledCode, type JsVal, FnFlags, JInt, KBool, KHandle, KNum,
-  KStr, KUndef, StringKey, canonical_key, classify, mk_bool, mk_null, mk_number,
+  KStr, KUndef, StringKey, canonical_key, classify, mk_bool, mk_int, mk_null,
   mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
@@ -23,14 +23,6 @@ fn as_code(
 
 fn agent() -> Agent {
   rt_builtins.new_agent(rt_helpers.quiet_hooks())
-}
-
-fn int(i: Int) -> JsVal {
-  mk_number(JInt(i))
-}
-
-fn str(s: String) -> JsVal {
-  mk_string(s)
 }
 
 fn key(name: String) {
@@ -96,7 +88,7 @@ fn static(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(f, st) = get(st, global(st, ns), name)
-  rt_call.t_call_checked(st, f, global(st, ns), args)
+  rt_call.t_call(st, f, global(st, ns), args)
 }
 
 fn proxy(st: Agent, target: JsVal, handler: JsVal) -> #(JsVal, Agent) {
@@ -117,7 +109,7 @@ fn logging_handler(st: Agent, log: JsVal) -> #(JsVal, Agent) {
       let #(trap, st) =
         func(st, fn(st, args) {
           let #(_, st) =
-            rt_call.t_call_method(st, log, key("push"), [str(name)])
+            rt_call.t_call_method(st, log, key("push"), [mk_string(name)])
           static(st, "Reflect", name, args)
         })
       set(st, h, name, trap)
@@ -126,15 +118,16 @@ fn logging_handler(st: Agent, log: JsVal) -> #(JsVal, Agent) {
 }
 
 fn drain(st: Agent, log: JsVal) -> #(String, Agent) {
-  let #(joined, st) = rt_call.t_call_method(st, log, key("join"), [str(",")])
-  let st = set(st, log, "length", int(0))
+  let #(joined, st) =
+    rt_call.t_call_method(st, log, key("join"), [mk_string(",")])
+  let st = set(st, log, "length", mk_int(0))
   let assert KStr(s) = classify(joined)
   #(s, st)
 }
 
 fn throws(st: Agent, body: fn(Agent) -> #(a, Agent)) -> String {
   let #(c, st) =
-    rt_call.t_apply_protected(st, fn(st) {
+    rt_call.try_run(st, fn(st) {
       let #(_, st) = body(st)
       #(mk_undefined(), st)
     })
@@ -152,7 +145,7 @@ fn as_string(v: JsVal) -> String {
 pub fn each_internal_method_reaches_its_trap_test() {
   let st = agent()
   let #(log, st) = rt_obj.t_new_array(st, [])
-  let #(target, st) = record(st, [#("a", int(1))])
+  let #(target, st) = record(st, [#("a", mk_int(1))])
   let #(handler, st) = logging_handler(st, log)
   let #(p, st) = proxy(st, target, handler)
   let ph = handle(p)
@@ -162,7 +155,7 @@ pub fn each_internal_method_reaches_its_trap_test() {
   let #(seen, st) = drain(st, log)
   assert seen == "get"
 
-  let st = set(st, p, "b", int(2))
+  let st = set(st, p, "b", mk_int(2))
   let #(seen, st) = drain(st, log)
   assert seen == "set,getOwnPropertyDescriptor,defineProperty"
   assert classify(get_(st, target, "b")) == KNum(JInt(2))
@@ -187,7 +180,15 @@ pub fn each_internal_method_reaches_its_trap_test() {
   assert seen == "getOwnPropertyDescriptor"
 
   let #(ok, st) =
-    rt_obj.t_define_own_data(st, ph, key("c"), int(3), True, True, True)
+    rt_obj.t_define_own_data(
+      st,
+      ph,
+      key("c"),
+      mk_int(3),
+      writable: True,
+      enumerable: True,
+      configurable: True,
+    )
   assert ok
   let #(seen, st) = drain(st, log)
   assert seen == "defineProperty"
@@ -225,43 +226,45 @@ pub fn call_and_construct_traps_test() {
     func(st, fn(st, args) {
       let assert [x, ..] = args
       let assert KNum(JInt(n)) = classify(x)
-      #(int(n + 1), st)
+      #(mk_int(n + 1), st)
     })
   let #(p, st) = proxy(st, target, handler)
-  let #(v, st) = rt_call.t_call_checked(st, p, mk_undefined(), [int(41)])
+  let #(v, st) = rt_call.t_call(st, p, mk_undefined(), [mk_int(41)])
   assert classify(v) == KNum(JInt(42))
   let #(seen, st) = drain(st, log)
   assert seen == "apply"
   let #(pa, st) = proxy(st, global(st, "Array"), handler)
-  let #(arr_h, st) = rt_call.t_construct(st, pa, [int(3)], pa)
+  let #(arr_h, st) = rt_call.t_construct(st, pa, [mk_int(3)], pa)
   let #(seen, st) = drain(st, log)
   assert seen == "construct,get"
   assert classify(get_(st, mk_object(arr_h), "length")) == KNum(JInt(3))
-  let #(bad, st) = handler_of(st, "construct", int(1))
+  let #(bad, st) = handler_of(st, "construct", mk_int(1))
   let #(pb, st) = proxy(st, global(st, "Array"), bad)
   assert throws(st, fn(st) { rt_call.t_construct(st, pb, [], pb) })
     == "TypeError"
   let #(plain, st) = object(st)
   let #(pp, st) = proxy(st, plain, handler)
-  assert throws(st, fn(st) { rt_call.t_call(st, pp, mk_undefined(), []) |> ok })
+  assert throws(st, fn(st) {
+      rt_call.t_try_call(st, pp, mk_undefined(), []) |> ok
+    })
     == "TypeError"
 }
 
 fn ok(r: #(rt_call.Completion(JsVal), Agent)) -> #(JsVal, Agent) {
   case r {
     #(NormalCompletion(v), st) -> #(v, st)
-    #(ThrowCompletion(e), st) -> rt_call.t_call_checked(st, e, e, [])
+    #(ThrowCompletion(e), st) -> rt_call.t_call(st, e, e, [])
   }
 }
 
 pub fn absent_traps_forward_to_target_test() {
   let st = agent()
-  let #(target, st) = record(st, [#("a", int(1))])
+  let #(target, st) = record(st, [#("a", mk_int(1))])
   let #(handler, st) = object(st)
   let #(p, st) = proxy(st, target, handler)
   let ph = handle(p)
   assert classify(get_(st, p, "a")) == KNum(JInt(1))
-  let st = set(st, p, "b", int(2))
+  let st = set(st, p, "b", mk_int(2))
   assert classify(get_(st, target, "b")) == KNum(JInt(2))
   let #(has, st) = rt_obj.t_has_prop(st, p, key("b"))
   assert has
@@ -278,7 +281,7 @@ pub fn absent_traps_forward_to_target_test() {
 pub fn non_callable_trap_is_type_error_test() {
   let st = agent()
   let #(target, st) = object(st)
-  let #(handler, st) = record(st, [#("get", int(1))])
+  let #(handler, st) = record(st, [#("get", mk_int(1))])
   let #(p, st) = proxy(st, target, handler)
   assert throws(st, get(_, p, "x")) == "TypeError"
   let #(handler2, st) = record(st, [#("get", mk_null())])
@@ -289,11 +292,12 @@ pub fn non_callable_trap_is_type_error_test() {
 pub fn object_keys_uses_own_keys_then_descriptors_test() {
   let st = agent()
   let #(log, st) = rt_obj.t_new_array(st, [])
-  let #(target, st) = record(st, [#("a", int(1)), #("b", int(2))])
+  let #(target, st) = record(st, [#("a", mk_int(1)), #("b", mk_int(2))])
   let #(handler, st) = logging_handler(st, log)
   let #(p, st) = proxy(st, target, handler)
   let #(keys, st) = static(st, "Object", "keys", [p])
-  let #(joined, st) = rt_call.t_call_method(st, keys, key("join"), [str(",")])
+  let #(joined, st) =
+    rt_call.t_call_method(st, keys, key("join"), [mk_string(",")])
   assert as_string(joined) == "a,b"
   let #(seen, st) = drain(st, log)
   assert seen == "ownKeys,getOwnPropertyDescriptor,getOwnPropertyDescriptor"
@@ -324,7 +328,7 @@ pub fn object_keys_uses_own_keys_then_descriptors_test() {
 pub fn for_in_and_spread_go_through_traps_test() {
   let st = agent()
   let #(log, st) = rt_obj.t_new_array(st, [])
-  let #(target, st) = record(st, [#("x", int(1)), #("y", int(2))])
+  let #(target, st) = record(st, [#("x", mk_int(1)), #("y", mk_int(2))])
   let #(handler, st) = logging_handler(st, log)
   let #(p, st) = proxy(st, target, handler)
   let #(keys, st) = rt_obj.t_for_in_keys(st, p)
@@ -343,7 +347,7 @@ pub fn for_in_and_spread_go_through_traps_test() {
 pub fn json_stringify_through_proxy_test() {
   let st = agent()
   let #(log, st) = rt_obj.t_new_array(st, [])
-  let #(target, st) = record(st, [#("a", int(1)), #("b", str("s"))])
+  let #(target, st) = record(st, [#("a", mk_int(1)), #("b", mk_string("s"))])
   let #(handler, st) = logging_handler(st, log)
   let #(p, st) = proxy(st, target, handler)
   let #(out, st) = static(st, "JSON", "stringify", [p])
@@ -353,7 +357,7 @@ pub fn json_stringify_through_proxy_test() {
     seen,
     "get,ownKeys,getOwnPropertyDescriptor,getOwnPropertyDescriptor,get,get",
   )
-  let #(arr, st) = rt_obj.t_new_array(st, [int(1), int(2)])
+  let #(arr, st) = rt_obj.t_new_array(st, [mk_int(1), mk_int(2)])
   let #(empty, st) = object(st)
   let #(pa, st) = proxy(st, arr, empty)
   let #(out, _) = static(st, "JSON", "stringify", [pa])
@@ -405,10 +409,10 @@ pub fn descriptor_argument_is_read_through_traps_test() {
   let #(log, st) = rt_obj.t_new_array(st, [])
   let #(handler, st) = logging_handler(st, log)
   let #(desc, st) =
-    record(st, [#("value", int(7)), #("enumerable", mk_bool(True))])
+    record(st, [#("value", mk_int(7)), #("enumerable", mk_bool(True))])
   let #(pd, st) = proxy(st, desc, handler)
   let #(o, st) = object(st)
-  let #(_, st) = static(st, "Object", "defineProperty", [o, str("k"), pd])
+  let #(_, st) = static(st, "Object", "defineProperty", [o, mk_string("k"), pd])
   assert classify(get_(st, o, "k")) == KNum(JInt(7))
   let #(seen, _) = drain(st, log)
   assert seen == "has,get,has,has,get,has,has,has"
@@ -424,39 +428,49 @@ pub fn revoked_proxy_throws_on_every_operation_test() {
   let #(_, st) = rt_call.t_call_method(st, rv, key("revoke"), [])
   let #(_, st) = rt_call.t_call_method(st, rv, key("revoke"), [])
   assert throws(st, get(_, p, "x")) == "TypeError"
-  assert throws(st, rt_obj.t_set_prop(_, p, key("x"), int(1))) == "TypeError"
+  assert throws(st, rt_obj.t_set_prop(_, p, key("x"), mk_int(1))) == "TypeError"
   assert throws(st, rt_obj.t_has_prop(_, p, key("x"))) == "TypeError"
   assert throws(st, rt_obj.t_delete_prop(_, ph, key("x"))) == "TypeError"
   assert throws(st, rt_obj.t_own_keys(_, ph)) == "TypeError"
   assert throws(st, rt_obj.t_get_own_property(_, ph, key("x"))) == "TypeError"
   assert throws(st, fn(st) {
-      rt_obj.t_define_own_data(st, ph, key("x"), int(1), True, True, True)
+      rt_obj.t_define_own_data(
+        st,
+        ph,
+        key("x"),
+        mk_int(1),
+        writable: True,
+        enumerable: True,
+        configurable: True,
+      )
     })
     == "TypeError"
   assert throws(st, rt_obj.t_get_prototype_of(_, ph)) == "TypeError"
   assert throws(st, rt_obj.t_set_prototype_of(_, ph, None)) == "TypeError"
   assert throws(st, rt_obj.t_is_extensible(_, ph)) == "TypeError"
   assert throws(st, rt_obj.t_prevent_extensions(_, ph)) == "TypeError"
-  assert throws(st, fn(st) { rt_call.t_call(st, p, mk_undefined(), []) |> ok })
+  assert throws(st, fn(st) {
+      rt_call.t_try_call(st, p, mk_undefined(), []) |> ok
+    })
     == "TypeError"
   assert throws(st, rt_call.t_construct(_, p, [], p)) == "TypeError"
   assert throws(st, rt_obj.t_for_in_keys(_, p)) == "TypeError"
   assert throws(st, static(_, "Object", "keys", [p])) == "TypeError"
-  let #(ty, _) = rt_val.t_type_of(st, p)
+  let ty = rt_val.type_of(st, p)
   assert ty == "function"
 }
 
-fn locked_target(st: Agent, sealed: Bool) -> #(JsVal, Agent) {
+fn locked_target(st: Agent, sealed sealed: Bool) -> #(JsVal, Agent) {
   let #(t, st) = object(st)
   let #(_, st) =
     rt_obj.t_define_own_data(
       st,
       handle(t),
       key("k"),
-      int(1),
-      False,
-      True,
-      False,
+      mk_int(1),
+      writable: False,
+      enumerable: True,
+      configurable: False,
     )
   let st = case sealed {
     True -> rt_obj.t_prevent_extensions(st, handle(t)).1
@@ -472,36 +486,36 @@ fn handler_of(st: Agent, name: String, result: JsVal) -> #(JsVal, Agent) {
 
 pub fn get_invariant_test() {
   let st = agent()
-  let #(t, st) = locked_target(st, False)
-  let #(h, st) = handler_of(st, "get", int(2))
+  let #(t, st) = locked_target(st, sealed: False)
+  let #(h, st) = handler_of(st, "get", mk_int(2))
   let #(p, st) = proxy(st, t, h)
   assert throws(st, get(_, p, "k")) == "TypeError"
-  let #(h, st) = handler_of(st, "get", int(1))
+  let #(h, st) = handler_of(st, "get", mk_int(1))
   let #(p, st) = proxy(st, t, h)
   assert classify(get_(st, p, "k")) == KNum(JInt(1))
 }
 
 pub fn set_invariant_test() {
   let st = agent()
-  let #(t, st) = locked_target(st, False)
+  let #(t, st) = locked_target(st, sealed: False)
   let #(h, st) = handler_of(st, "set", mk_bool(True))
   let #(p, st) = proxy(st, t, h)
-  assert throws(st, rt_obj.t_set_prop(_, p, key("k"), int(2))) == "TypeError"
-  let #(ok, st) = rt_obj.t_set_prop(st, p, key("k"), int(1))
+  assert throws(st, rt_obj.t_set_prop(_, p, key("k"), mk_int(2))) == "TypeError"
+  let #(ok, st) = rt_obj.t_set_prop(st, p, key("k"), mk_int(1))
   assert ok
   let #(h, st) = handler_of(st, "set", mk_bool(False))
   let #(p, st) = proxy(st, t, h)
-  let #(ok, _) = rt_obj.t_set_prop(st, p, key("other"), int(2))
+  let #(ok, _) = rt_obj.t_set_prop(st, p, key("other"), mk_int(2))
   assert !ok
 }
 
 pub fn has_invariant_test() {
   let st = agent()
-  let #(t, st) = locked_target(st, False)
+  let #(t, st) = locked_target(st, sealed: False)
   let #(h, st) = handler_of(st, "has", mk_bool(False))
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_has_prop(_, p, key("k"))) == "TypeError"
-  let #(t2, st) = record(st, [#("j", int(1))])
+  let #(t2, st) = record(st, [#("j", mk_int(1))])
   let st = rt_obj.t_prevent_extensions(st, handle(t2)).1
   let #(p2, st) = proxy(st, t2, h)
   assert throws(st, rt_obj.t_has_prop(_, p2, key("j"))) == "TypeError"
@@ -511,11 +525,11 @@ pub fn has_invariant_test() {
 
 pub fn delete_invariant_test() {
   let st = agent()
-  let #(t, st) = locked_target(st, False)
+  let #(t, st) = locked_target(st, sealed: False)
   let #(h, st) = handler_of(st, "deleteProperty", mk_bool(True))
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_delete_prop(_, handle(p), key("k"))) == "TypeError"
-  let #(t2, st) = record(st, [#("j", int(1))])
+  let #(t2, st) = record(st, [#("j", mk_int(1))])
   let st = rt_obj.t_prevent_extensions(st, handle(t2)).1
   let #(p2, st) = proxy(st, t2, h)
   assert throws(st, rt_obj.t_delete_prop(_, handle(p2), key("j")))
@@ -524,28 +538,28 @@ pub fn delete_invariant_test() {
 
 pub fn get_own_property_descriptor_invariants_test() {
   let st = agent()
-  let #(t, st) = locked_target(st, False)
+  let #(t, st) = locked_target(st, sealed: False)
   let #(h, st) = handler_of(st, "getOwnPropertyDescriptor", mk_undefined())
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_get_own_property(_, handle(p), key("k")))
     == "TypeError"
-  let #(h, st) = handler_of(st, "getOwnPropertyDescriptor", int(1))
+  let #(h, st) = handler_of(st, "getOwnPropertyDescriptor", mk_int(1))
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_get_own_property(_, handle(p), key("k")))
     == "TypeError"
   let #(fake, st) =
-    record(st, [#("value", int(1)), #("configurable", mk_bool(False))])
+    record(st, [#("value", mk_int(1)), #("configurable", mk_bool(False))])
   let #(h, st) = handler_of(st, "getOwnPropertyDescriptor", fake)
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_get_own_property(_, handle(p), key("nope")))
     == "TypeError"
-  let #(fake2, st) = record(st, [#("value", int(2))])
+  let #(fake2, st) = record(st, [#("value", mk_int(2))])
   let #(h, st) = handler_of(st, "getOwnPropertyDescriptor", fake2)
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_get_own_property(_, handle(p), key("k")))
     == "TypeError"
   let #(real, st) =
-    record(st, [#("value", int(1)), #("enumerable", mk_bool(True))])
+    record(st, [#("value", mk_int(1)), #("enumerable", mk_bool(True))])
   let #(h, st) = handler_of(st, "getOwnPropertyDescriptor", real)
   let #(p, st) = proxy(st, t, h)
   let #(desc, _) = rt_obj.t_get_own_property(st, handle(p), key("k"))
@@ -556,17 +570,17 @@ pub fn get_own_property_descriptor_invariants_test() {
 pub fn define_property_invariants_test() {
   let st = agent()
   let #(h, st) = handler_of(st, "defineProperty", mk_bool(True))
-  let #(t, st) = locked_target(st, True)
+  let #(t, st) = locked_target(st, sealed: True)
   let #(p, st) = proxy(st, t, h)
   assert throws(st, fn(st) {
       rt_obj.t_define_own_data(
         st,
         handle(p),
         key("new"),
-        int(1),
-        True,
-        True,
-        True,
+        mk_int(1),
+        writable: True,
+        enumerable: True,
+        configurable: True,
       )
     })
     == "TypeError"
@@ -577,43 +591,47 @@ pub fn define_property_invariants_test() {
         st,
         handle(p2),
         key("x"),
-        int(1),
-        True,
-        True,
-        False,
+        mk_int(1),
+        writable: True,
+        enumerable: True,
+        configurable: False,
       )
     })
     == "TypeError"
   let #(hf, st) = handler_of(st, "defineProperty", mk_bool(False))
   let #(pf, st) = proxy(st, t2, hf)
-  let #(desc, st) = record(st, [#("value", int(1))])
-  assert throws(st, static(_, "Object", "defineProperty", [pf, str("x"), desc]))
+  let #(desc, st) = record(st, [#("value", mk_int(1))])
+  assert throws(
+      st,
+      static(_, "Object", "defineProperty", [pf, mk_string("x"), desc]),
+    )
     == "TypeError"
-  let #(r, _) = static(st, "Reflect", "defineProperty", [pf, str("x"), desc])
+  let #(r, _) =
+    static(st, "Reflect", "defineProperty", [pf, mk_string("x"), desc])
   assert classify(r) == KBool(False)
 }
 
 pub fn own_keys_invariants_test() {
   let st = agent()
-  let #(t, st) = locked_target(st, False)
+  let #(t, st) = locked_target(st, sealed: False)
   let #(empty_arr, st) = rt_obj.t_new_array(st, [])
   let #(h, st) = handler_of(st, "ownKeys", empty_arr)
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_own_keys(_, handle(p))) == "TypeError"
-  let #(dups, st) = rt_obj.t_new_array(st, [str("k"), str("k")])
+  let #(dups, st) = rt_obj.t_new_array(st, [mk_string("k"), mk_string("k")])
   let #(h, st) = handler_of(st, "ownKeys", dups)
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_own_keys(_, handle(p))) == "TypeError"
-  let #(bad, st) = rt_obj.t_new_array(st, [str("k"), int(1)])
+  let #(bad, st) = rt_obj.t_new_array(st, [mk_string("k"), mk_int(1)])
   let #(h, st) = handler_of(st, "ownKeys", bad)
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_own_keys(_, handle(p))) == "TypeError"
-  let #(t2, st) = locked_target(st, True)
-  let #(extra, st) = rt_obj.t_new_array(st, [str("k"), str("zz")])
+  let #(t2, st) = locked_target(st, sealed: True)
+  let #(extra, st) = rt_obj.t_new_array(st, [mk_string("k"), mk_string("zz")])
   let #(h, st) = handler_of(st, "ownKeys", extra)
   let #(p, st) = proxy(st, t2, h)
   assert throws(st, rt_obj.t_own_keys(_, handle(p))) == "TypeError"
-  let #(like, st) = record(st, [#("length", int(1)), #("0", str("k"))])
+  let #(like, st) = record(st, [#("length", mk_int(1)), #("0", mk_string("k"))])
   let #(h, st) = handler_of(st, "ownKeys", like)
   let #(p, st) = proxy(st, t2, h)
   let #(keys, _) = rt_obj.t_own_keys(st, handle(p))
@@ -622,11 +640,11 @@ pub fn own_keys_invariants_test() {
 
 pub fn prototype_and_extensibility_invariants_test() {
   let st = agent()
-  let #(t, st) = locked_target(st, True)
+  let #(t, st) = locked_target(st, sealed: True)
   let #(h, st) = handler_of(st, "getPrototypeOf", mk_null())
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_get_prototype_of(_, handle(p))) == "TypeError"
-  let #(h, st) = handler_of(st, "getPrototypeOf", int(1))
+  let #(h, st) = handler_of(st, "getPrototypeOf", mk_int(1))
   let #(p, st) = proxy(st, t, h)
   assert throws(st, rt_obj.t_get_prototype_of(_, handle(p))) == "TypeError"
   let #(h, st) = handler_of(st, "setPrototypeOf", mk_bool(True))
@@ -653,7 +671,7 @@ pub fn prototype_and_extensibility_invariants_test() {
 pub fn proxy_as_prototype_traps_on_inherited_access_test() {
   let st = agent()
   let #(log, st) = rt_obj.t_new_array(st, [])
-  let #(target, st) = record(st, [#("inherited", int(9))])
+  let #(target, st) = record(st, [#("inherited", mk_int(9))])
   let #(handler, st) = logging_handler(st, log)
   let #(p, st) = proxy(st, target, handler)
   let #(child_h, st) = rt_obj.t_new_object(st, Some(handle(p)))
@@ -666,7 +684,7 @@ pub fn proxy_as_prototype_traps_on_inherited_access_test() {
   assert has
   let #(seen, st) = drain(st, log)
   assert seen == "has"
-  let st = set(st, child, "fresh", int(1))
+  let st = set(st, child, "fresh", mk_int(1))
   let #(seen, st) = drain(st, log)
   assert seen == "set"
   let #(own, _) = rt_obj.t_get_own_property(st, child_h, key("fresh"))

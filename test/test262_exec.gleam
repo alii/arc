@@ -26,8 +26,8 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BufferStorage, type Handle, type JsVal, type WaiterRef, Agent,
   ArrayBufferObj, ArrayObj, DataProperty, Detached, JFloat, JInt, KHandle, KStr,
-  KUndef, Named, NoElements, Ordinary, ProxyObj, SObject, SShapedObject, Shared,
-  StringKey, classify, mk_null, mk_number, mk_object, mk_string, mk_undefined,
+  KUndef, Named, Ordinary, ProxyObj, SObject, SShapedObject, Shared, StringKey,
+  classify, mk_int, mk_null, mk_object, mk_string, mk_undefined, plain_object,
 }
 import arc/rt/val as rt_val
 import gleam/float
@@ -351,13 +351,13 @@ fn run_parse_negative_test(
 fn run_test_completion(
   metadata: TestMetadata,
   source: String,
-  is_module: Bool,
-  path: String,
-  variant: StrictnessVariant,
-  is_async: Bool,
-  on_error: fn(String) -> TestOutcome,
-  completion_outcome: fn(Settled) -> TestOutcome,
-  async_outcome: fn(Settled) -> TestOutcome,
+  is_module is_module: Bool,
+  path path: String,
+  variant variant: StrictnessVariant,
+  is_async is_async: Bool,
+  on_error on_error: fn(String) -> TestOutcome,
+  completion_outcome completion_outcome: fn(Settled) -> TestOutcome,
+  async_outcome async_outcome: fn(Settled) -> TestOutcome,
 ) -> TestOutcome {
   let run = case is_module {
     True -> fn() { do_run_module(metadata, source, path, is_async) }
@@ -385,10 +385,10 @@ fn run_test_completion(
 fn run_runtime_negative_test(
   metadata: TestMetadata,
   source: String,
-  is_module: Bool,
-  path: String,
-  variant: StrictnessVariant,
-  is_async: Bool,
+  is_module is_module: Bool,
+  path path: String,
+  variant variant: StrictnessVariant,
+  is_async is_async: Bool,
 ) -> TestOutcome {
   run_test_completion(
     metadata,
@@ -417,10 +417,10 @@ fn run_runtime_negative_test(
 fn run_resolution_negative_test(
   metadata: TestMetadata,
   source: String,
-  is_module: Bool,
-  path: String,
-  variant: StrictnessVariant,
-  is_async: Bool,
+  is_module is_module: Bool,
+  path path: String,
+  variant variant: StrictnessVariant,
+  is_async is_async: Bool,
 ) -> TestOutcome {
   run_test_completion(
     metadata,
@@ -479,10 +479,10 @@ fn positive_completion_outcome(settled: Settled) -> TestOutcome {
 fn run_positive_test(
   metadata: TestMetadata,
   source: String,
-  is_module: Bool,
-  path: String,
-  variant: StrictnessVariant,
-  is_async: Bool,
+  is_module is_module: Bool,
+  path path: String,
+  variant variant: StrictnessVariant,
+  is_async is_async: Bool,
 ) -> TestOutcome {
   run_test_completion(
     metadata,
@@ -537,7 +537,7 @@ fn verify_negative_type(
     None -> Pass
     Some(expected_type) -> {
       let actual_name = {
-        use h <- option.then(as_handle(thrown))
+        use h <- option.then(rt_val.handle_of(thrown))
         use name <- option.then(get_data(st, h, "name"))
         case classify(name) {
           KStr(n) -> Some(n)
@@ -567,7 +567,7 @@ fn do_run_module(
   metadata: TestMetadata,
   source: String,
   path: String,
-  is_async: Bool,
+  is_async is_async: Bool,
 ) -> Result(Settled, String) {
   use st <- result.try(eval_harness(
     metadata,
@@ -626,7 +626,7 @@ fn do_run_script_with_harness(
   source: String,
   path: String,
   variant: StrictnessVariant,
-  is_async: Bool,
+  is_async is_async: Bool,
 ) -> Result(Settled, String) {
   use st <- result.try(eval_harness(
     metadata,
@@ -665,7 +665,7 @@ fn eval_harness(
   metadata: TestMetadata,
   st: Agent,
   path: String,
-  is_async: Bool,
+  is_async is_async: Bool,
 ) -> Result(Agent, String) {
   let is_raw = list.contains(metadata.flags, "raw")
   case is_raw {
@@ -727,13 +727,6 @@ fn eval_harness_template(
   }
 }
 
-fn as_handle(v: JsVal) -> Option(Handle) {
-  case classify(v) {
-    KHandle(h) -> Some(h)
-    _ -> None
-  }
-}
-
 fn ordinary_proto(st: Agent, h: Handle) -> Option(Handle) {
   case rt_store.t_cell_get(st, h) {
     SObject(kind: ProxyObj(..), ..) -> None
@@ -752,7 +745,7 @@ fn get_data(st: Agent, h: Handle, key: String) -> Option(JsVal) {
 
 fn inspect_thrown(val: JsVal, st: Agent) -> String {
   let described = {
-    use h <- option.then(as_handle(val))
+    use h <- option.then(rt_val.handle_of(val))
     use message <- option.then(get_data(st, h, "message"))
     case classify(message) {
       KStr(msg) -> {
@@ -774,7 +767,7 @@ fn extend_262_with_agent(
   parent: Option(AgentPid),
 ) -> HostState {
   let #(s, agent) = build_agent(s, parent)
-  let #(prop, st) = common.builtin_property(s.agent, agent)
+  let #(prop, st) = rt_store.t_builtin_property(s.agent, agent)
   let st = common.add_named_property(st, dollar_262, "agent", prop)
   host.State(..s, agent: st)
 }
@@ -796,7 +789,7 @@ fn build_agent(s: HostState, parent: Option(AgentPid)) -> #(HostState, JsVal) {
       let #(s, props) = acc
       let #(name, impl, arity) = method
       let #(s, f) = host.function(s, name, arity, impl)
-      let #(prop, st) = common.builtin_property(s.agent, f)
+      let #(prop, st) = rt_store.t_builtin_property(s.agent, f)
       #(host.State(..s, agent: st), [#(name, prop), ..props])
     })
   let st = s.agent
@@ -804,9 +797,9 @@ fn build_agent(s: HostState, parent: Option(AgentPid)) -> #(HostState, JsVal) {
   let #(children, st) = common.alloc_array(st, [], array_proto)
   let #(reports, st) = common.alloc_array(st, [], array_proto)
   let #(agents, st) = common.alloc_array(st, [], array_proto)
-  let #(children_prop, st) = common.frozen_property(st, mk_object(children))
-  let #(reports_prop, st) = common.frozen_property(st, mk_object(reports))
-  let #(agents_prop, st) = common.frozen_property(st, mk_object(agents))
+  let #(children_prop, st) = rt_store.t_frozen_property(st, mk_object(children))
+  let #(reports_prop, st) = rt_store.t_frozen_property(st, mk_object(reports))
+  let #(agents_prop, st) = rt_store.t_frozen_property(st, mk_object(agents))
   let hidden = [
     #("__children__", common.make_configurable(children_prop)),
     #("__reports__", common.make_configurable(reports_prop)),
@@ -815,13 +808,10 @@ fn build_agent(s: HostState, parent: Option(AgentPid)) -> #(HostState, JsVal) {
   let #(h, st) =
     rt_store.t_cell_new(
       st,
-      SObject(
-        kind: Ordinary,
-        proto: Some(st.realm.object.prototype),
-        props: common.named_props(list.append(method_props, hidden)),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
+      plain_object(
+        Ordinary,
+        Some(st.realm.object.prototype),
+        common.named_props(list.append(method_props, hidden)),
       ),
     )
   #(host.State(..s, agent: st), mk_object(h))
@@ -867,7 +857,7 @@ fn run_agent_child(source: String, parent: AgentPid) -> Nil {
   let agent_this =
     {
       use dollar <- option.then(get_data(st, st.realm.global_object, "$262"))
-      use dollar <- option.then(as_handle(dollar))
+      use dollar <- option.then(rt_val.handle_of(dollar))
       get_data(st, dollar, "agent")
     }
     |> option.unwrap(mk_undefined())
@@ -914,7 +904,7 @@ fn agent_child_loop(st: Agent, agent_this: JsVal, parent: AgentPid) -> Nil {
       let st = case agent_queue(st, agent_this, "__agents__") {
         Some(#(_arr, callbacks)) ->
           list.fold(callbacks, st, fn(st, cb) {
-            case rt_call.t_call(st, cb, mk_undefined(), [msg]) {
+            case rt_call.t_try_call(st, cb, mk_undefined(), [msg]) {
               #(NormalCompletion(_), st) -> st
               #(ThrowCompletion(thrown), st) -> {
                 io.println_error(
@@ -1074,7 +1064,7 @@ fn agent_monotonic_now_native(
   _this: JsVal,
   s: HostState,
 ) -> #(HostState, Result(JsVal, JsVal)) {
-  #(s, Ok(mk_number(JInt(s.agent.hooks.monotonic_now()))))
+  #(s, Ok(mk_int(s.agent.hooks.monotonic_now())))
 }
 
 fn agent_leaving_native(
@@ -1086,9 +1076,9 @@ fn agent_leaving_native(
 }
 
 fn agent_hidden_handle(st: Agent, this: JsVal, name: String) -> Option(Handle) {
-  use this_h <- option.then(as_handle(this))
+  use this_h <- option.then(rt_val.handle_of(this))
   case rt_obj.t_ordinary_own_property(st, this_h, StringKey(Named(name))) {
-    Some(DataProperty(value:, ..)) -> as_handle(value)
+    Some(DataProperty(value:, ..)) -> rt_val.handle_of(value)
     _ -> None
   }
 }
@@ -1191,8 +1181,8 @@ fn template_cache_put(_key: String, _template: FuncTemplate) -> Nil {
 @external(erlang, "test262_exec_ffi", "init_config")
 fn init_config(
   _update_mode: Bool,
-  _has_snapshot: Bool,
-  _fail_log: Option(String),
+  has_snapshot _has_snapshot: Bool,
+  fail_log _fail_log: Option(String),
 ) -> Nil {
   panic as beam_only_test
 }

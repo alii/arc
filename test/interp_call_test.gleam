@@ -5,7 +5,7 @@ import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/inspect as rt_inspect
 import arc/rt/types.{
-  type Agent, type JsVal, JInt, KBool, KNum, KStr, classify, mk_number,
+  type Agent, type JsVal, JInt, KBool, KNum, KStr, classify, mk_int,
   mk_undefined,
 }
 import gleam/string
@@ -338,8 +338,7 @@ pub fn embedder_calls_bytecode_value_test() {
     )
   let #(twice, st) = rt_helpers.global(st, "twice")
   let #(inc, st) = rt_helpers.global(st, "inc")
-  let #(v, _) =
-    rt_call.t_call_checked(st, twice, mk_undefined(), [inc, mk_number(JInt(40))])
+  let #(v, _) = rt_call.t_call(st, twice, mk_undefined(), [inc, mk_int(40)])
   assert classify(v) == KNum(JInt(42))
 }
 

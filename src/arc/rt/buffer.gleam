@@ -9,7 +9,7 @@ import arc/rt/types.{
   type TypedArrayKind, AccessorProperty, ArgumentsObj, ArrayBufferObj, ArrayObj,
   BigKind, DataProperty, Index, JFloat, JInt, JNan, JNegInf, JPosInf, KBig,
   KHandle, KNum, NumKind, Ordinary, SObject, SShapedObject, classify, mk_bigint,
-  mk_number,
+  mk_int, mk_number,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -296,7 +296,7 @@ fn decode_typed_element(
       mk_bigint(get_int(data, off, typed_array_bytes.bigint_elem(k)))
     NumKind(_) ->
       case typed_array_bytes.elem_of_kind(elem_kind) {
-        typed_array_bytes.Int(e) -> mk_number(JInt(get_int(data, off, e)))
+        typed_array_bytes.Int(e) -> mk_int(get_int(data, off, e))
         typed_array_bytes.Float(e) -> mk_number(get_float(data, off, e))
       }
   }

@@ -212,7 +212,7 @@ fn new_raw_scope(
   parent: Option(ScopeId),
   function_scope: ScopeId,
   kind: ScopeKind,
-  is_strict: Bool,
+  is_strict is_strict: Bool,
 ) -> RawScope {
   RawScope(
     id:,
@@ -262,7 +262,7 @@ pub type ScopeBuilder {
   )
 }
 
-pub fn sb_init(root_kind: ScopeKind, strict: Bool) -> ScopeBuilder {
+pub fn sb_init(root_kind: ScopeKind, strict strict: Bool) -> ScopeBuilder {
   let root =
     new_raw_scope(
       root_scope_id,
@@ -972,7 +972,7 @@ fn finalize_scope(
   st: FinalizeState,
   scope_id: ScopeId,
   seed_bindings: Dict(String, Binding),
-  inherited_strict: Bool,
+  inherited_strict inherited_strict: Bool,
 ) -> FinalizeState {
   let raw = sb_scope(sb, scope_id)
   let is_strict = raw.is_strict || inherited_strict

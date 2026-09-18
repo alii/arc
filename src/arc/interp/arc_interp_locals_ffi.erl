@@ -1,6 +1,6 @@
-%% frame locals and registers; bind_this may answer miss
+%% frame locals and registers; sloppy_this may answer miss
 -module(arc_interp_locals_ffi).
--export([frame_locals/9, bind_this/2, flush_regs/5]).
+-export([frame_locals/9, sloppy_this/2, flush_regs/5]).
 
 -include("../rt/arc_rt_layout.hrl").
 
@@ -119,11 +119,11 @@ pad(3) -> [undefined, undefined, undefined];
 pad(N) when N > 3 -> [undefined, undefined, undefined, undefined | pad(N - 4)].
 
 %% §10.2.1.2 sloppy this, miss means primitive needs a wrapper
-bind_this({?HANDLE_TAG, _} = This, _Global) -> This;
-bind_this(undefined, Global) -> Global;
-bind_this(null, Global) -> Global;
-bind_this(js_tdz, _Global) -> js_tdz;
-bind_this(_, _) -> miss.
+sloppy_this({?HANDLE_TAG, _} = This, _Global) -> This;
+sloppy_this(undefined, Global) -> Global;
+sloppy_this(null, Global) -> Global;
+sloppy_this(js_tdz, _Global) -> js_tdz;
+sloppy_this(_, _) -> miss.
 
 flush_regs(L, A, B, R0, R1) ->
     put_reg(put_reg(L, A, R0), B, R1).

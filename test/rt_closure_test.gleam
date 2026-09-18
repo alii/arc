@@ -96,9 +96,9 @@ pub fn birth_props_precede_later_props_test() {
       f,
       StringKey(Named("sooner")),
       types.mk_undefined(),
-      True,
-      True,
-      True,
+      writable: True,
+      enumerable: True,
+      configurable: True,
     )
   let #(prototype, st) =
     rt_obj.t_get_prop(st, types.mk_object(f), StringKey(Named("prototype")))
@@ -116,9 +116,9 @@ pub fn birth_props_precede_later_props_test() {
       f,
       StringKey(Named("later")),
       types.mk_undefined(),
-      True,
-      True,
-      True,
+      writable: True,
+      enumerable: True,
+      configurable: True,
     )
   let #(_, st) =
     rt_obj.t_define_own_data(
@@ -126,9 +126,9 @@ pub fn birth_props_precede_later_props_test() {
       proto,
       StringKey(Named("method")),
       types.mk_undefined(),
-      True,
-      True,
-      True,
+      writable: True,
+      enumerable: True,
+      configurable: True,
     )
   let #(keys, st) = rt_obj.t_own_keys(st, f)
   assert keys
@@ -150,9 +150,9 @@ pub fn birth_props_precede_later_props_test() {
       g,
       StringKey(Named("z")),
       types.mk_undefined(),
-      True,
-      True,
-      True,
+      writable: True,
+      enumerable: True,
+      configurable: True,
     )
   let #(gkeys, _) = rt_obj.t_own_keys(st, g)
   assert gkeys

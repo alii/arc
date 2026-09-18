@@ -259,7 +259,15 @@ fn hard_error_token(
   let error_pos = err.pos
   let error_line = line + count_newlines_in(bytes, from, error_pos - from)
   #(
-    Token(LexFailure(err), "", error_pos, error_line, 0, False, False),
+    Token(
+      LexFailure(err),
+      "",
+      error_pos,
+      error_line,
+      0,
+      had_escape: False,
+      annex_b_legacy: False,
+    ),
     Scanner(
       bytes:,
       pos: bit_array.byte_size(bytes),
@@ -305,8 +313,8 @@ fn skip_ws_loop(
   rest: BitArray,
   consumed: Int,
   newlines: Int,
-  at_line_start: Bool,
-  source_kind: SourceKind,
+  at_line_start at_line_start: Bool,
+  source_kind source_kind: SourceKind,
 ) -> WsScan {
   case rest {
     <<0x20, tail:bytes>>
@@ -315,9 +323,21 @@ fn skip_ws_loop(
     | <<0x0C, tail:bytes>> ->
       skip_ws_loop(tail, consumed + 1, newlines, at_line_start, source_kind)
     <<0x0D, 0x0A, tail:bytes>> ->
-      skip_ws_loop(tail, consumed + 2, newlines + 1, True, source_kind)
+      skip_ws_loop(
+        tail,
+        consumed + 2,
+        newlines + 1,
+        at_line_start: True,
+        source_kind:,
+      )
     <<0x0A, tail:bytes>> | <<0x0D, tail:bytes>> ->
-      skip_ws_loop(tail, consumed + 1, newlines + 1, True, source_kind)
+      skip_ws_loop(
+        tail,
+        consumed + 1,
+        newlines + 1,
+        at_line_start: True,
+        source_kind:,
+      )
     <<0x2F, 0x2F, tail:bytes>> ->
       skip_line_comment(tail, consumed + 2, newlines, source_kind)
     <<0x2F, 0x2A, tail:bytes>> ->
@@ -347,7 +367,13 @@ fn skip_ws_loop(
       skip_ws_loop(tail, consumed + 2, newlines, at_line_start, source_kind)
     // u+2028, u+2029 line separators
     <<0xE2, 0x80, 0xA8, tail:bytes>> | <<0xE2, 0x80, 0xA9, tail:bytes>> ->
-      skip_ws_loop(tail, consumed + 3, newlines + 1, True, source_kind)
+      skip_ws_loop(
+        tail,
+        consumed + 3,
+        newlines + 1,
+        at_line_start: True,
+        source_kind:,
+      )
     // bom u+feff, u+1680, u+2000..u+200a, u+202f, u+205f, u+3000
     <<0xEF, 0xBB, 0xBF, tail:bytes>>
     | <<0xE1, 0x9A, 0x80, tail:bytes>>
@@ -369,7 +395,13 @@ fn skip_line_comment(
 ) -> WsScan {
   let comment_len = line_comment_length(rest, 0)
   let after = drop_start(rest, comment_len)
-  skip_ws_loop(after, consumed + comment_len, newlines, False, source_kind)
+  skip_ws_loop(
+    after,
+    consumed + comment_len,
+    newlines,
+    at_line_start: False,
+    source_kind:,
+  )
 }
 
 fn line_comment_length(rest: BitArray, len: Int) -> Int {
@@ -392,18 +424,36 @@ fn skip_block_comment(
   rest: BitArray,
   consumed: Int,
   newlines: Int,
-  at_line_start: Bool,
-  source_kind: SourceKind,
+  at_line_start at_line_start: Bool,
+  source_kind source_kind: SourceKind,
 ) -> WsScan {
   case rest {
     <<0x2A, 0x2F, tail:bytes>> ->
       skip_ws_loop(tail, consumed + 2, newlines, at_line_start, source_kind)
     <<0x0D, 0x0A, tail:bytes>> ->
-      skip_block_comment(tail, consumed + 2, newlines + 1, True, source_kind)
+      skip_block_comment(
+        tail,
+        consumed + 2,
+        newlines + 1,
+        at_line_start: True,
+        source_kind:,
+      )
     <<0x0A, tail:bytes>> | <<0x0D, tail:bytes>> ->
-      skip_block_comment(tail, consumed + 1, newlines + 1, True, source_kind)
+      skip_block_comment(
+        tail,
+        consumed + 1,
+        newlines + 1,
+        at_line_start: True,
+        source_kind:,
+      )
     <<0xE2, 0x80, 0xA8, tail:bytes>> | <<0xE2, 0x80, 0xA9, tail:bytes>> ->
-      skip_block_comment(tail, consumed + 3, newlines + 1, True, source_kind)
+      skip_block_comment(
+        tail,
+        consumed + 3,
+        newlines + 1,
+        at_line_start: True,
+        source_kind:,
+      )
     <<b, tail:bytes>> if b < 0x80 ->
       skip_block_comment(
         tail,
@@ -577,9 +627,25 @@ fn read_token(
     <<0x3F, _:bytes>> -> Ok(plain_token(Question, "?", pos, 1, line))
 
     <<0x22, tail:bytes>> ->
-      read_string_body(bytes, tail, pos + 1, pos, 0x22, False, line)
+      read_string_body(
+        bytes,
+        tail,
+        pos + 1,
+        pos,
+        0x22,
+        annex_b_legacy: False,
+        line:,
+      )
     <<0x27, tail:bytes>> ->
-      read_string_body(bytes, tail, pos + 1, pos, 0x27, False, line)
+      read_string_body(
+        bytes,
+        tail,
+        pos + 1,
+        pos,
+        0x27,
+        annex_b_legacy: False,
+        line:,
+      )
 
     <<0x60, tail:bytes>> ->
       Ok(read_template_span(bytes, tail, pos + 1, pos, line))
@@ -635,36 +701,38 @@ fn validate_escape(
       legacy_digit_escape(backslash_pos, in_template)
     <<d, _:bytes>> if d >= 0x31 && d <= 0x39 ->
       legacy_digit_escape(backslash_pos, in_template)
-    <<0x30, _:bytes>> -> Ok(Escape(2, False))
+    <<0x30, _:bytes>> -> Ok(Escape(2, annex_b_legacy: False))
 
     <<0x78, h1, h2, _:bytes>> ->
       case is_hex_byte(h1) && is_hex_byte(h2) {
-        True -> Ok(Escape(4, False))
+        True -> Ok(Escape(4, annex_b_legacy: False))
         False -> Error(InvalidHexEscapeSequence(backslash_pos))
       }
     <<0x78, _:bytes>> -> Error(InvalidHexEscapeSequence(backslash_pos))
 
     <<0x75, _:bytes>> ->
       case valid_unicode_escape(bytes, backslash_pos) {
-        Some(escape) -> Ok(Escape(escape.end - backslash_pos, False))
+        Some(escape) ->
+          Ok(Escape(escape.end - backslash_pos, annex_b_legacy: False))
         None -> Error(InvalidUnicodeEscapeSequence(backslash_pos))
       }
 
     // line continuations, crlf spans 3 bytes
-    <<0x0D, 0x0A, _:bytes>> -> Ok(Escape(3, False))
-    <<0x0D, _:bytes>> | <<0x0A, _:bytes>> -> Ok(Escape(2, False))
+    <<0x0D, 0x0A, _:bytes>> -> Ok(Escape(3, annex_b_legacy: False))
+    <<0x0D, _:bytes>> | <<0x0A, _:bytes>> ->
+      Ok(Escape(2, annex_b_legacy: False))
 
-    _ -> Ok(Escape(1 + char_width_at(bytes, pos), False))
+    _ -> Ok(Escape(1 + char_width_at(bytes, pos), annex_b_legacy: False))
   }
 }
 
 fn legacy_digit_escape(
   backslash_pos: Int,
-  in_template: Bool,
+  in_template in_template: Bool,
 ) -> Result(Escape, LexError) {
   case in_template {
     True -> Error(InvalidEscapeSequence(backslash_pos))
-    False -> Ok(Escape(2, True))
+    False -> Ok(Escape(2, annex_b_legacy: True))
   }
 }
 
@@ -754,8 +822,8 @@ fn read_string_body(
   pos: Int,
   start: Int,
   quote: Int,
-  annex_b_legacy: Bool,
-  line: Int,
+  annex_b_legacy annex_b_legacy: Bool,
+  line line: Int,
 ) -> Result(Token, LexError) {
   case scan_to_closing_quote(rest, 0, quote) {
     StrQuote(consumed) -> {
@@ -978,8 +1046,8 @@ fn read_decimal_body(
   rest: BitArray,
   start: Int,
   pos: Int,
-  has_leading_zero: Bool,
-  line: Int,
+  has_leading_zero has_leading_zero: Bool,
+  line line: Int,
 ) -> Result(Token, LexError) {
   use <- bool.guard(
     has_leading_zero && digits_contain(bytes, start, pos, is_separator_byte),
@@ -1064,8 +1132,8 @@ fn read_radix_number(
     rest,
     pos,
     pos,
-    False,
-    prefix.is_digit,
+    prev_was_separator: False,
+    is_digit: prefix.is_digit,
   ))
   case end == pos, tail {
     True, _ -> Error(prefix.missing_digits(start))
@@ -1110,26 +1178,46 @@ fn number_token(
 }
 
 fn skip_digits(rest: BitArray, pos: Int) -> Result(#(Int, BitArray), LexError) {
-  skip_digits_loop(rest, pos, pos, False, digits.is_decimal_code)
+  skip_digits_loop(
+    rest,
+    pos,
+    pos,
+    prev_was_separator: False,
+    is_digit: digits.is_decimal_code,
+  )
 }
 
 fn skip_digits_loop(
   rest: BitArray,
   pos: Int,
   start: Int,
-  prev_was_separator: Bool,
-  is_digit: fn(Int) -> Bool,
+  prev_was_separator prev_was_separator: Bool,
+  is_digit is_digit: fn(Int) -> Bool,
 ) -> Result(#(Int, BitArray), LexError) {
   case rest {
     <<0x5F, tail:bytes>> ->
       case prev_was_separator, pos == start {
         True, _ -> Error(ConsecutiveNumericSeparator(pos))
         False, True -> Error(LeadingNumericSeparator(pos))
-        False, False -> skip_digits_loop(tail, pos + 1, start, True, is_digit)
+        False, False ->
+          skip_digits_loop(
+            tail,
+            pos + 1,
+            start,
+            prev_was_separator: True,
+            is_digit:,
+          )
       }
     <<b, tail:bytes>> ->
       case is_digit(b) {
-        True -> skip_digits_loop(tail, pos + 1, start, False, is_digit)
+        True ->
+          skip_digits_loop(
+            tail,
+            pos + 1,
+            start,
+            prev_was_separator: False,
+            is_digit:,
+          )
         False -> digits_end(rest, pos, prev_was_separator)
       }
     _ -> digits_end(rest, pos, prev_was_separator)
@@ -1139,7 +1227,7 @@ fn skip_digits_loop(
 fn digits_end(
   rest: BitArray,
   pos: Int,
-  prev_was_separator: Bool,
+  prev_was_separator prev_was_separator: Bool,
 ) -> Result(#(Int, BitArray), LexError) {
   case prev_was_separator {
     True -> Error(TrailingNumericSeparator(pos - 1))
@@ -1243,14 +1331,14 @@ fn decode_identifier_escape(
   }
 }
 
-fn identifier_char(code: Int, is_start: Bool) -> Option(String) {
+fn identifier_char(code: Int, is_start is_start: Bool) -> Option(String) {
   use <- bool.guard(!validate_identifier_codepoint(code, is_start), None)
   string.utf_codepoint(code)
   |> option.from_result
   |> option.map(fn(codepoint) { string.from_utf_codepoints([codepoint]) })
 }
 
-pub fn validate_identifier_codepoint(cp: Int, is_start: Bool) -> Bool {
+pub fn validate_identifier_codepoint(cp: Int, is_start is_start: Bool) -> Bool {
   case is_start {
     True -> is_identifier_start_code(cp)
     False -> is_identifier_part_code(cp)

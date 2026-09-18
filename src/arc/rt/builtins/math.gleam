@@ -1,5 +1,6 @@
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
+import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsNum, type JsVal, type MathNative, JFloat, JInt,
   JNan, JNegInf, JPosInf, MathAbs, MathAcos, MathAcosh, MathAsin, MathAsinh,
@@ -36,7 +37,7 @@ pub fn init(
       fn(acc, entry) {
         let #(props, st) = acc
         let #(name, f) = entry
-        let #(prop, st) = common.frozen_property(st, mk_number(JFloat(f)))
+        let #(prop, st) = rt_store.t_frozen_property(st, mk_number(JFloat(f)))
         #([#(name, prop), ..props], st)
       },
     )

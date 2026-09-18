@@ -16,8 +16,8 @@ import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type JsVal, JInt, Named, PromiseFulfilled, PromisePending,
-  PromiseRejected, StringKey, mk_number, mk_object, mk_undefined,
+  type Agent, type JsVal, Named, PromiseFulfilled, PromisePending,
+  PromiseRejected, StringKey, mk_int, mk_object, mk_undefined,
 }
 import gleam/dict
 import gleam/option.{None, Some}
@@ -7215,13 +7215,9 @@ fn run_export(
   callee: JsVal,
   args: List(JsVal),
 ) -> #(Result(JsValueKind, JsValueKind), Agent) {
-  let #(completion, st) = rt_call.t_call(st, callee, mk_undefined(), args)
+  let #(completion, st) = rt_call.t_try_call(st, callee, mk_undefined(), args)
   let st = safepoint.end_turn(st, [completion_value(completion)])
   #(classify_outcome(completion), st)
-}
-
-fn from_int(n: Int) -> JsVal {
-  mk_number(JInt(n))
 }
 
 pub fn run_export_namespace_call_test() -> Nil {
@@ -7247,10 +7243,10 @@ pub fn run_export_namespace_call_test() -> Nil {
 
   let assert Some(receive) = module.read_export(st, namespace, "receive")
 
-  let assert #(Ok(v1), st) = run_export(st, receive, [from_int(5)])
+  let assert #(Ok(v1), st) = run_export(st, receive, [mk_int(5)])
   let assert True = v1 == JsNumber(Finite(5.0))
 
-  let assert #(Ok(v2), st) = run_export(st, receive, [from_int(3)])
+  let assert #(Ok(v2), st) = run_export(st, receive, [mk_int(3)])
   let assert True = v2 == JsNumber(Finite(8.0))
 
   let assert Some(get_drained) = module.read_export(st, namespace, "getDrained")

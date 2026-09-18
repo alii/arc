@@ -1,9 +1,7 @@
+import arc/bytecode/error_kind.{TypeError}
 import arc/internal/ordered_entries
 import arc/rt/builtins/common
-import arc/rt/builtins/helpers
-import arc/rt/call.{
-  NormalCompletion, ThrowCompletion, is_callable, t_call, t_call_checked,
-}
+import arc/rt/call.{NormalCompletion, ThrowCompletion, t_call, t_try_call}
 import arc/rt/elements as rt_elements
 import arc/rt/js_string
 import arc/rt/obj as rt_obj
@@ -12,33 +10,23 @@ import arc/rt/types.{
   type Agent, type Cell, type Handle, type JsElements, type JsVal, type Property,
   type PropertyKey, ArrayObj, AsyncFromSyncIterator, DataProperty, Index,
   IteratorRecord, KHandle, KNull, KStr, KUndef, MapIterEntries, MapIterKeys,
-  MapIterValues, MapIterator, MapObj, Named, NoElements, SObject, SetIterEntries,
+  MapIterValues, MapIterator, MapObj, Named, SObject, SetIterEntries,
   SetIterValues, SetIterator, SetObj, StringIterator, StringKey, SymbolKey,
-  TypeErr, classify, map_key_to_js, mk_int, mk_object, mk_string, mk_undefined,
-  symbol_async_iterator, symbol_iterator,
-} as rt_types
-import arc/rt/val as rt_val
+  classify, map_key_to_js, mk_int, mk_object, mk_string, mk_undefined,
+  plain_object, symbol_async_iterator, symbol_iterator,
+}
+import arc/rt/val.{is_callable} as rt_val
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
 pub type IteratorRecord =
-  rt_types.IteratorRecord
+  types.IteratorRecord
 
 // polarity for every/some style consumers
 pub type Quantifier {
   Every
   AtLeastOne
-}
-
-// catches js throws like t_call
-fn new_type_error(st: Agent, msg: String) -> #(JsVal, Agent) {
-  st.store.ops.new_error(st, TypeErr, msg)
-}
-
-fn describe(st: Agent, v: JsVal) -> String {
-  let #(ty, _) = rt_val.t_type_of(st, v)
-  ty
 }
 
 // §7.4.9, next is read once and cached
@@ -61,7 +49,10 @@ pub fn get_iterator_sync(st: Agent, obj: JsVal) -> #(IteratorRecord, Agent) {
   let #(method, st) = rt_obj.t_get_prop(st, obj, SymbolKey(symbol_iterator))
   case is_callable(st, method) {
     False ->
-      rt_val.t_throw_type_error(st, describe(st, obj) <> " is not iterable")
+      rt_val.t_throw_type_error(
+        st,
+        rt_val.type_of(st, obj) <> " is not iterable",
+      )
     True -> get_iterator_from_method(st, obj, method)
   }
 }
@@ -72,7 +63,7 @@ pub fn get_iterator_from_method(
   obj: JsVal,
   method: JsVal,
 ) -> #(IteratorRecord, Agent) {
-  let #(iter, st) = t_call_checked(st, method, obj, [])
+  let #(iter, st) = t_call(st, method, obj, [])
   get_iterator_direct(
     st,
     iter,
@@ -92,7 +83,7 @@ pub fn get_iterator_async(st: Agent, obj: JsVal) -> #(IteratorRecord, Agent) {
         False ->
           rt_val.t_throw_type_error(
             st,
-            describe(st, obj) <> " is not async iterable",
+            rt_val.type_of(st, obj) <> " is not async iterable",
           )
         True -> {
           let #(sync_rec, st) = get_iterator_from_method(st, obj, sync_method)
@@ -105,7 +96,7 @@ pub fn get_iterator_async(st: Agent, obj: JsVal) -> #(IteratorRecord, Agent) {
         False ->
           rt_val.t_throw_type_error(
             st,
-            describe(st, obj) <> " is not async iterable",
+            rt_val.type_of(st, obj) <> " is not async iterable",
           )
         True -> get_iterator_from_method(st, obj, method)
       }
@@ -128,9 +119,9 @@ pub fn create_async_from_sync(
       sync_rec,
       k_iterator,
       sync.iterator,
-      True,
-      True,
-      True,
+      writable: True,
+      enumerable: True,
+      configurable: True,
     )
   let #(_, st) =
     rt_obj.t_define_own_data(
@@ -138,20 +129,17 @@ pub fn create_async_from_sync(
       sync_rec,
       k_next,
       sync.next_method,
-      True,
-      True,
-      True,
+      writable: True,
+      enumerable: True,
+      configurable: True,
     )
   let #(wrapper_h, st) =
     rt_store.t_cell_new(
       st,
-      SObject(
-        kind: AsyncFromSyncIterator(sync_rec:),
-        proto: Some(st.realm.async_from_sync_proto),
-        props: dict.new(),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
+      plain_object(
+        AsyncFromSyncIterator(sync_rec:),
+        Some(st.realm.async_from_sync_proto),
+        dict.new(),
       ),
     )
   let wrapper = mk_object(wrapper_h)
@@ -197,7 +185,7 @@ pub fn get_iterator_flattenable(
         _ ->
           case is_callable(st, method) {
             False -> rt_val.t_throw_type_error(st, what <> " is not iterable")
-            True -> t_call_checked(st, method, obj, [])
+            True -> t_call(st, method, obj, [])
           }
       }
       get_iterator_direct(st, iter, what <> " is not iterable")
@@ -211,7 +199,7 @@ pub fn iterator_step_result(
   rec: IteratorRecord,
   cont: fn(JsVal, Bool, Agent) -> #(a, Agent),
 ) -> #(a, Agent) {
-  let #(result, st) = t_call_checked(st, rec.next_method, rec.iterator, [])
+  let #(result, st) = t_call(st, rec.next_method, rec.iterator, [])
   case rt_val.is_object(result) {
     True -> {
       let #(done, st) = rt_obj.t_get_prop(st, result, StringKey(Named("done")))
@@ -260,7 +248,7 @@ pub fn iterator_to_list(
 fn native_to_list(
   st: Agent,
   rec: IteratorRecord,
-  next: rt_types.IteratorNative,
+  next: types.IteratorNative,
   iter_h: Handle,
   acc: List(JsVal),
 ) -> #(List(JsVal), Agent) {
@@ -291,14 +279,14 @@ fn array_values_iterator(st: Agent, rec: IteratorRecord) -> Option(Handle) {
     KHandle(next_h), KHandle(iter_h) ->
       case rt_store.t_cell_get(st, next_h), rt_store.t_cell_get(st, iter_h) {
         SObject(
-          kind: rt_types.NativeFn(
-            token: rt_types.IteratorN(rt_types.ArrayIteratorNext),
+          kind: types.NativeFn(
+            token: types.IteratorN(types.ArrayIteratorNext),
             ..,
           ),
           ..,
         ),
           SObject(
-            kind: rt_types.ArrayIterator(kind: rt_types.ArrayIterValues, ..),
+            kind: types.ArrayIterator(kind: types.ArrayIterValues, ..),
             ..,
           )
         -> Some(iter_h)
@@ -315,7 +303,7 @@ fn array_values_to_list(
   iter_h: Handle,
   acc: List(JsVal),
 ) -> #(List(JsVal), Agent) {
-  let assert SObject(kind: rt_types.ArrayIterator(target:, index:, kind:), ..) as iter_cell =
+  let assert SObject(kind: types.ArrayIterator(target:, index:, kind:), ..) as iter_cell =
     rt_store.t_cell_get(st, iter_h)
   case index < 0 {
     True -> #(list.reverse(acc), st)
@@ -333,7 +321,7 @@ fn array_values_to_list(
             iter_h,
             SObject(
               ..iter_cell,
-              kind: rt_types.ArrayIterator(target:, index: stop, kind:),
+              kind: types.ArrayIterator(target:, index: stop, kind:),
             ),
           )
       }
@@ -367,14 +355,12 @@ fn walk_elements(
 pub fn intrinsic_next(
   st: Agent,
   rec: IteratorRecord,
-) -> Option(#(rt_types.IteratorNative, Handle)) {
+) -> Option(#(types.IteratorNative, Handle)) {
   case classify(rec.next_method), classify(rec.iterator) {
     KHandle(next_h), KHandle(iter_h) ->
       case rt_store.t_cell_get(st, next_h) {
-        SObject(
-          kind: rt_types.NativeFn(token: rt_types.IteratorN(next), ..),
-          ..,
-        ) -> Some(#(next, iter_h))
+        SObject(kind: types.NativeFn(token: types.IteratorN(next), ..), ..) ->
+          Some(#(next, iter_h))
         _ -> None
       }
     _, _ -> None
@@ -384,18 +370,18 @@ pub fn intrinsic_next(
 // none means caller takes the protocol step; never throws
 pub fn native_step(
   st: Agent,
-  next: rt_types.IteratorNative,
+  next: types.IteratorNative,
   iter_h: Handle,
 ) -> Option(#(Option(JsVal), Agent)) {
   let cell = rt_store.t_cell_get(st, iter_h)
   case next, cell {
-    rt_types.ArrayIteratorNext, SObject(kind: rt_types.ArrayIterator(..), ..) ->
+    types.ArrayIteratorNext, SObject(kind: types.ArrayIterator(..), ..) ->
       array_iterator_step(st, iter_h, cell)
-    rt_types.MapIteratorNext, SObject(kind: MapIterator(..), ..) ->
+    types.MapIteratorNext, SObject(kind: MapIterator(..), ..) ->
       Some(map_iterator_step(st, iter_h, cell))
-    rt_types.SetIteratorNext, SObject(kind: SetIterator(..), ..) ->
+    types.SetIteratorNext, SObject(kind: SetIterator(..), ..) ->
       Some(set_iterator_step(st, iter_h, cell))
-    rt_types.StringIteratorNext, SObject(kind: StringIterator(..), ..) ->
+    types.StringIteratorNext, SObject(kind: StringIterator(..), ..) ->
       Some(string_iterator_step(st, iter_h, cell))
     _, _ -> None
   }
@@ -407,7 +393,7 @@ fn array_iterator_step(
   cell: Cell,
 ) -> Option(#(Option(JsVal), Agent)) {
   case cell {
-    SObject(kind: rt_types.ArrayIterator(target:, index:, kind:), ..)
+    SObject(kind: types.ArrayIterator(target:, index:, kind:), ..)
       if index >= 0
     ->
       case rt_store.t_cell_get(st, target) {
@@ -419,23 +405,23 @@ fn array_iterator_step(
               iter_h,
               SObject(
                 ..cell,
-                kind: rt_types.ArrayIterator(target:, index: -1, kind:),
+                kind: types.ArrayIterator(target:, index: -1, kind:),
               ),
             ),
           ))
         SObject(kind: ArrayObj(_), ..) -> {
           let out = case kind {
-            rt_types.ArrayIterKeys -> Some(#(mk_int(index), st))
-            rt_types.ArrayIterValues ->
-              case helpers.own_element(st, mk_object(target), index) {
-                helpers.Hit(v) -> Some(#(v, st))
-                helpers.Miss -> None
+            types.ArrayIterKeys -> Some(#(mk_int(index), st))
+            types.ArrayIterValues ->
+              case rt_elements.own_element(st, mk_object(target), index) {
+                rt_elements.Hit(v) -> Some(#(v, st))
+                rt_elements.Miss -> None
               }
-            rt_types.ArrayIterEntries ->
-              case helpers.own_element(st, mk_object(target), index) {
-                helpers.Hit(v) ->
+            types.ArrayIterEntries ->
+              case rt_elements.own_element(st, mk_object(target), index) {
+                rt_elements.Hit(v) ->
                   Some(rt_obj.t_new_array(st, [mk_int(index), v]))
-                helpers.Miss -> None
+                rt_elements.Miss -> None
               }
           }
           use #(v, st) <- option.map(out)
@@ -445,7 +431,7 @@ fn array_iterator_step(
               iter_h,
               SObject(
                 ..cell,
-                kind: rt_types.ArrayIterator(target:, index: index + 1, kind:),
+                kind: types.ArrayIterator(target:, index: index + 1, kind:),
               ),
             )
           #(Some(v), st)
@@ -583,7 +569,7 @@ pub fn call_return(
   obj: JsVal,
 ) -> #(Result(ReturnCall, JsVal), Agent) {
   let #(get_c, st) =
-    call.t_apply_protected(st, fn(st) {
+    call.try_run(st, fn(st) {
       rt_obj.t_get_prop(st, obj, StringKey(Named("return")))
     })
   case get_c {
@@ -595,11 +581,15 @@ pub fn call_return(
           case is_callable(st, ret_fn) {
             False -> {
               let #(e, st) =
-                new_type_error(st, "iterator.return is not a function")
+                rt_val.t_new_error(
+                  st,
+                  TypeError,
+                  "iterator.return is not a function",
+                )
               #(Error(e), st)
             }
             True ->
-              case t_call(st, ret_fn, obj, []) {
+              case t_try_call(st, ret_fn, obj, []) {
                 #(NormalCompletion(v), st) -> #(Ok(Returned(v)), st)
                 #(ThrowCompletion(e), st) -> #(Error(e), st)
               }
@@ -624,7 +614,7 @@ pub fn close_throw(st: Agent, obj: JsVal, original: JsVal) -> a {
 }
 
 pub fn close_throw_type(st: Agent, obj: JsVal, msg: String) -> a {
-  let #(err, st) = new_type_error(st, msg)
+  let #(err, st) = rt_val.t_new_error(st, TypeError, msg)
   close_throw(st, obj, err)
 }
 
@@ -652,7 +642,7 @@ pub fn or_close(
   body: fn(Agent) -> #(JsVal, Agent),
   cont: fn(JsVal, Agent) -> #(a, Agent),
 ) -> #(a, Agent) {
-  case call.t_apply_protected(st, body) {
+  case call.try_run(st, body) {
     #(NormalCompletion(v), st) -> cont(v, st)
     #(ThrowCompletion(thrown), st) -> close_throw(st, iter, thrown)
   }
@@ -702,7 +692,7 @@ fn add_entries_loop(
             st,
             rec.iterator,
             "Iterator value "
-              <> describe(st, entry)
+              <> rt_val.type_of(st, entry)
               <> " is not an entry object",
           )
       }
@@ -717,7 +707,7 @@ pub fn add_entries_from_iterable(
   adder: JsVal,
 ) -> #(JsVal, Agent) {
   use st, k, v <- add_entries_with_sink(st, target, iterable)
-  let #(_, st) = t_call_checked(st, adder, target, [k, v])
+  let #(_, st) = t_call(st, adder, target, [k, v])
   st
 }
 
@@ -744,7 +734,7 @@ fn add_values_loop(
     False -> {
       let #(v, st) = rt_obj.t_get_prop(st, step, StringKey(Named("value")))
       use _add_result, st <- or_close(st, rec.iterator, fn(st) {
-        t_call_checked(st, adder, target, [v])
+        t_call(st, adder, target, [v])
       })
       add_values_loop(st, target, rec, adder)
     }

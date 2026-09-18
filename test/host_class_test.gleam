@@ -3,8 +3,7 @@ import arc/host.{type State, State}
 import arc/module/load_error
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type JsVal, JInt, Named, StringKey, mk_number, mk_object, mk_string,
-  mk_undefined,
+  type JsVal, Named, StringKey, mk_int, mk_object, mk_string, mk_undefined,
 }
 import gleam/option.{Some}
 
@@ -108,7 +107,7 @@ pub fn with_state_calls_js_function_test() {
     engine.with_state(eng, fn(s) {
       let #(double, s) = get(s, global, "double")
       let assert #(s, Ok(out)) =
-        host.call(s, double, mk_undefined(), [mk_number(JInt(21))])
+        host.call(s, double, mk_undefined(), [mk_int(21)])
       #(s, out)
     })
   assert engine.classify(result) == JsNumber(Finite(42.0))
@@ -188,7 +187,7 @@ pub fn host_module_class_extends_test() {
 pub fn with_state_threads_heap_back_test() {
   let #(eng, holder) =
     engine.with_state(engine.new(), fn(s) {
-      host.object(s, [#("v", mk_number(JInt(9)))])
+      host.object(s, [#("v", mk_int(9))])
     })
   let #(_eng, out) =
     engine.with_state(eng, fn(s) {

@@ -1,3 +1,4 @@
+import arc/bytecode/error_kind.{SyntaxError, TypeError}
 import arc/interp/dynamic_import
 import arc/module
 import arc/module/graph
@@ -7,9 +8,10 @@ import arc/rt/async as rt_async
 import arc/rt/call as rt_call
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, Agent, HostFnEntry, SyntaxErr, TypeErr,
-  mk_object, mk_undefined,
+  type Agent, type Handle, type JsVal, Agent, HostFnEntry, mk_object,
+  mk_undefined,
 }
+import arc/rt/val as rt_val
 import gleam/dict
 import gleam/list
 import gleam/option
@@ -62,12 +64,12 @@ fn no_drain(st: Agent) -> Agent {
 }
 
 fn type_error(st: Agent, msg: String) -> #(Agent, Result(JsVal, JsVal)) {
-  let #(err, st) = st.store.ops.new_error(st, TypeErr, msg)
+  let #(err, st) = rt_val.t_new_error(st, TypeError, msg)
   #(st, Error(err))
 }
 
 fn syntax_error(st: Agent, msg: String) -> #(Agent, Result(JsVal, JsVal)) {
-  let #(err, st) = st.store.ops.new_error(st, SyntaxErr, msg)
+  let #(err, st) = rt_val.t_new_error(st, SyntaxError, msg)
   #(st, Error(err))
 }
 
@@ -329,7 +331,7 @@ fn first_or_undefined(args: List(JsVal)) -> JsVal {
 
 // §27.2.1.3 resolving functions never throw
 fn call_import_settle_fn(st: Agent, settle_fn: JsVal, arg: JsVal) -> Agent {
-  case rt_call.t_call(st, settle_fn, mk_undefined(), [arg]) {
+  case rt_call.t_try_call(st, settle_fn, mk_undefined(), [arg]) {
     #(rt_call.NormalCompletion(_), st) -> st
     #(rt_call.ThrowCompletion(thrown), st) -> {
       st.hooks.report_uncaught(

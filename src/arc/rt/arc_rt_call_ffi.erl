@@ -40,8 +40,8 @@ t_direct_callee(_, _, _) -> miss.
 
 t_call_protected(St, Code, Frame, Args) -> ?PROTECT(Code(St, Frame, Args)).
 
-t_native_protected(St, Tag, This, Args) ->
-    ?PROTECT('arc@rt@builtins':dispatch_native(St, Tag, This, Args)).
+t_native_protected(St, Token, This, Args) ->
+    ?PROTECT('arc@rt@builtins':dispatch_native(St, Token, This, Args)).
 
 t_apply_protected(St, Body) -> ?PROTECT(Body(St)).
 

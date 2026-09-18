@@ -47,13 +47,13 @@ import arc/rt/types.{
   BooleanConstructor, BooleanN, BooleanObj, ConsoleN, DataProperty, DataViewN,
   DateN, DisposableStackN, DomExceptionN, ErrorN, FinalizationRegistryN,
   FunctionN, GeneratorN, GlobalN, HostFn, HostFnEntry, IntlN, IteratorN, JInt,
-  JNan, JPosInf, JsOps, JsStore, JsonN, KHandle, MapN, MathN, Named, NoElements,
+  JNan, JPosInf, JsOps, JsStore, JsonN, KHandle, MapN, MathN, Named,
   NumberConstructor, NumberN, NumberObj, ObjectN, PromiseN, PromiseRejectFn,
-  PromiseResolveFn, ProxyN, Realm, ReflectN, RegExpN, ReturnThis, SObject, SetN,
+  PromiseResolveFn, ProxyN, Realm, ReflectN, RegExpN, ReturnThis, SetN,
   StringConstructor, StringKey, StringN, StringObj, SymbolConstructor, SymbolN,
   TemporalN, Test262N, ThrowTypeErrorPoison, TypedArrayN, WeakN, WeakRefN,
-  classify, mk_number, mk_object, mk_undefined,
-} as rt_types
+  classify, mk_number, mk_object, mk_undefined, plain_object,
+}
 import arc/rt/val as rt_val
 import gleam/dict
 import gleam/int
@@ -65,7 +65,7 @@ pub fn new_agent(hooks: HostHooks) -> Agent {
   let st =
     Agent(
       store: rt_store.new(),
-      realm: rt_types.unset_realm(),
+      realm: types.unset_realm(),
       template_objects: dict.new(),
       frames: [],
       hooks:,
@@ -331,7 +331,7 @@ fn realm_handles(r: Realm) -> List(Handle) {
 
 pub fn create_realm(st: Agent) -> #(Realm, Agent) {
   let origin = st.realm
-  let #(realm, st) = init_realm(Agent(..st, realm: rt_types.unset_realm()))
+  let #(realm, st) = init_realm(Agent(..st, realm: types.unset_realm()))
   #(realm, Agent(..st, realm: origin))
 }
 
@@ -343,14 +343,14 @@ pub fn seed_ops(st: Agent) -> Agent {
       ..store,
       ops: JsOps(
         get_prop: rt_obj.t_get_prop,
-        call: rt_call.t_call_checked,
+        call: rt_call.t_call,
         to_object: realm_ops.t_wrap_primitive,
         new_error: realm_ops.t_new_error,
         eval_hook: no_eval,
         call_bytecode: fn(_, _, _, _, _) {
           interpreter_not_linked("call_bytecode")
         },
-        bind_call: fn(_, _, _, _) { interpreter_not_linked("bind_call") },
+        prepare_call: fn(_, _, _, _) { interpreter_not_linked("prepare_call") },
         construct_bytecode: fn(_, _, _, _) {
           interpreter_not_linked("construct_bytecode")
         },
@@ -360,7 +360,7 @@ pub fn seed_ops(st: Agent) -> Agent {
   )
 }
 
-fn no_eval(st: Agent, _source: String, _kind: rt_types.EvalKind) -> a {
+fn no_eval(st: Agent, _source: String, _kind: types.EvalKind) -> a {
   rt_val.t_throw_type_error(
     st,
     "eval is not supported in this environment: no interpreter linked",
@@ -400,7 +400,7 @@ type GlobalRefs {
     array_buffer: BuiltinPair,
     shared_array_buffer: BuiltinPair,
     data_view: BuiltinPair,
-    typed_arrays: rt_types.TypedArrays,
+    typed_arrays: types.TypedArrays,
     math: Handle,
     json: Handle,
     reflect: Handle,
@@ -485,33 +485,30 @@ fn alloc_global_object(
   let entries =
     list.append(
       entries,
-      list.filter_map(rt_types.all_typed_array_kinds, fn(kind) {
+      list.filter_map(types.all_typed_array_kinds, fn(kind) {
         use bt <- result.map(dict.get(r.typed_arrays.by_kind, kind))
-        Builtin(rt_types.typed_array_name(kind), ctor(bt))
+        Builtin(types.typed_array_name(kind), ctor(bt))
       }),
     )
   let #(props, st) = {
     use st, entry <- helpers.map_threaded(st, entries)
     let #(prop, st) = case entry {
-      Immutable(val:, ..) -> common.frozen_property(st, val)
-      Builtin(val:, ..) -> common.builtin_property(st, val)
+      Immutable(val:, ..) -> rt_store.t_frozen_property(st, val)
+      Builtin(val:, ..) -> rt_store.t_builtin_property(st, val)
     }
     #(#(entry.name, prop), st)
   }
   let #(global_h, st) =
     rt_store.t_cell_new(
       st,
-      SObject(
-        kind: rt_types.GlobalObj,
-        proto: Some(object_proto),
-        props: common.named_props(props),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
+      plain_object(
+        types.GlobalObj,
+        Some(object_proto),
+        common.named_props(props),
       ),
     )
   let st = rt_store.t_pin_root(st, global_h)
-  let #(self_prop, st) = common.builtin_property(st, mk_object(global_h))
+  let #(self_prop, st) = rt_store.t_builtin_property(st, mk_object(global_h))
   let st = common.add_named_property(st, global_h, "globalThis", self_prop)
   #(global_h, st)
 }
@@ -519,11 +516,11 @@ fn alloc_global_object(
 // called by name from arc_rt_call_ffi and arc_rt_call_ic_ffi
 pub fn dispatch_native(
   st: Agent,
-  tag: NativeToken,
+  token: NativeToken,
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  case tag {
+  case token {
     PromiseResolveFn(promise:, already_resolved:) ->
       rt_async.do_resolve_fn(st, promise, already_resolved, args)
     PromiseRejectFn(promise:, already_resolved:) ->
@@ -540,7 +537,7 @@ pub fn dispatch_native(
     )
     ReturnThis -> #(this, st)
     ThrowTypeErrorPoison ->
-      b_function.dispatch(st, rt_types.ThrowTypeErrorFn, this, args)
+      b_function.dispatch(st, types.ThrowTypeErrorFn, this, args)
     HostFn(id:) -> call_host_fn(st, id, this, args, mk_undefined())
     ObjectN(n) -> b_object.dispatch(st, n, this, args)
     FunctionN(n) -> b_function.dispatch(st, n, this, args)
@@ -571,7 +568,7 @@ pub fn dispatch_native(
       b_finalization_registry.dispatch(st, n, this, args)
     WeakRefN(n) -> b_weak_ref.dispatch(st, n, this, args)
     DisposableStackN(n) -> b_disposable_stack.dispatch(st, n, this, args)
-    rt_types.ShadowRealmN(n) -> b_shadow_realm.dispatch(st, n, this, args)
+    types.ShadowRealmN(n) -> b_shadow_realm.dispatch(st, n, this, args)
     ArrayBufferN(n) -> b_array_buffer.dispatch(st, n, this, args)
     DataViewN(n) -> b_data_view.dispatch(st, n, this, args)
     TypedArrayN(n) -> b_typed_array.dispatch(st, n, this, args)
@@ -585,11 +582,11 @@ pub fn dispatch_native(
 // called by name from rt/call.gleam
 pub fn dispatch_native_construct(
   st: Agent,
-  tag: NativeToken,
+  token: NativeToken,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Handle, Agent) {
-  case tag {
+  case token {
     ObjectN(n) -> b_object.dispatch_construct(st, n, args, new_target)
     ErrorN(n) -> {
       let #(v, st) = b_error.dispatch(st, n, mk_undefined(), args, new_target)
@@ -609,7 +606,7 @@ pub fn dispatch_native_construct(
     WeakRefN(n) -> b_weak_ref.dispatch_construct(st, n, args, new_target)
     DisposableStackN(n) ->
       b_disposable_stack.dispatch_construct(st, n, args, new_target)
-    rt_types.ShadowRealmN(n) ->
+    types.ShadowRealmN(n) ->
       b_shadow_realm.dispatch_construct(st, n, new_target, create_realm)
     DateN(n) -> b_date.dispatch_construct(st, n, args, new_target)
     RegExpN(n) -> b_regexp.dispatch_construct(st, n, args, new_target)
@@ -646,7 +643,7 @@ pub fn dispatch_native_construct(
       let #(v, st) =
         b_number.dispatch(st, NumberConstructor, mk_undefined(), args)
       let n = case classify(v) {
-        rt_types.KNum(n) -> n
+        types.KNum(n) -> n
         _ -> JInt(0)
       }
       let #(proto, st) =
@@ -745,22 +742,15 @@ fn construct_host_fn(
 }
 
 fn own_data_prototype(st: Agent, ctor: JsVal) -> #(Option(Handle), Agent) {
-  case as_handle(ctor) {
+  case rt_val.handle_of(ctor) {
     None -> #(None, st)
     Some(h) -> {
       let #(prop, st) =
         rt_obj.t_own_property(st, h, StringKey(Named("prototype")))
       case prop {
-        Some(DataProperty(value:, ..)) -> #(as_handle(value), st)
+        Some(DataProperty(value:, ..)) -> #(rt_val.handle_of(value), st)
         _ -> #(None, st)
       }
     }
-  }
-}
-
-fn as_handle(v: JsVal) -> Option(Handle) {
-  case classify(v) {
-    KHandle(h) -> Some(h)
-    _ -> None
   }
 }

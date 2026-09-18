@@ -4,7 +4,7 @@
          t_call_by_kind3/6,
          t_call_method_mono/4, t_call_method_ic/6, t_call_method_ic0/5,
          t_call_method_ic1/6, t_call_method_ic2/7, t_call_method_ic3/8,
-         t_new_direct/3, t_bind_compiled/4]).
+         t_new_direct/3, t_prepare_compiled_call/4]).
 
 -include("arc_rt_layout.hrl").
 
@@ -51,7 +51,7 @@ dispatch_kind(St, F = {?HANDLE_TAG, Id}, This, N, A, B, C) ->
 dispatch_kind(St, F, This, N, A, B, C) -> call_general(St, F, This, N, A, B, C).
 
 call_general(St, F, This, N, A, B, C) ->
-    'arc@rt@call':t_call_checked(St, F, This, arg_list(N, A, B, C)).
+    'arc@rt@call':t_call(St, F, This, arg_list(N, A, B, C)).
 
 enter_compiled(St, _, _, _, {?SOME, ?DIRECT_ENTRY(CodeS, Arity, TakesThis)},
                ThisR, Args, _, _, _)
@@ -231,8 +231,8 @@ call_kind(St, ?COMPILEDFN(Code, Home, _, _, DirectEntry), Fn, Recv, N, A, B, C) 
             Code(St, ?FRAME(Recv, Fn, home_or_undefined(Home), undefined),
                  arg_list(N, A, B, C))
     end;
-call_kind(St, {?NATIVEFN_TAG, Tag, _, _, _}, _, Recv, N, A, B, C) ->
-    'arc@rt@builtins':dispatch_native(St, Tag, Recv, arg_list(N, A, B, C)).
+call_kind(St, {?NATIVEFN_TAG, Token, _, _, _}, _, Recv, N, A, B, C) ->
+    'arc@rt@builtins':dispatch_native(St, Token, Recv, arg_list(N, A, B, C)).
 
 %% {hit, Fn, Kind} | miss | stale when a cached chain changed | spent when
 %% the own way no longer matches the receiver
@@ -444,8 +444,8 @@ call_kind_list(St, ?COMPILEDFN(Code, Home, _, _, DirectEntry), Fn, Recv, Args) -
             erlang:apply(CodeS, [St | Args]);
         _ -> Code(St, ?FRAME(Recv, Fn, home_or_undefined(Home), undefined), Args)
     end;
-call_kind_list(St, {?NATIVEFN_TAG, Tag, _, _, _}, _, Recv, Args) ->
-    'arc@rt@builtins':dispatch_native(St, Tag, Recv, Args).
+call_kind_list(St, {?NATIVEFN_TAG, Token, _, _, _}, _, Recv, Args) ->
+    'arc@rt@builtins':dispatch_native(St, Token, Recv, Args).
 
 apply_this(CodeT, St, Recv, []) -> CodeT(St, Recv);
 apply_this(CodeT, St, Recv, [A]) -> CodeT(St, Recv, A);
@@ -504,8 +504,8 @@ new_direct_apply(St, Store, Data, Ctor, ?COMPILEDFN(Code, Home, _, _, DirectEntr
         _ -> {NewThis, St3}
     end.
 
-%% bind once for natives that call back per element, none takes the frame path
-t_bind_compiled(St, F, ?COMPILEDFN(Code, Home, Flags, _, DirectEntry), This)
+%% prepare once for natives that call back per element, none takes the frame path
+t_prepare_compiled_call(St, F, ?COMPILEDFN(Code, Home, Flags, _, DirectEntry), This)
   when ?IS_PLAIN_FN(Flags) ->
     ThisR = case element(?FNFLAGS_IS_ARROW, Flags)
                  orelse element(?FNFLAGS_IS_STRICT, Flags) of
@@ -522,7 +522,7 @@ t_bind_compiled(St, F, ?COMPILEDFN(Code, Home, Flags, _, DirectEntry), This)
             General = fun(S, Args) -> Code(S, Frame, Args) end,
             {?SOME, prepared_direct_entry(DirectEntry, ThisR, General)}
     end;
-t_bind_compiled(_, _, _, _) -> ?NONE.
+t_prepare_compiled_call(_, _, _, _) -> ?NONE.
 
 prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 0, true)}, T, _) ->
     fun(S, _) -> CodeS(S, T) end;

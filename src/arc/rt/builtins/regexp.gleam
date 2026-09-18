@@ -13,21 +13,21 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type LegacyStatic,
-  type LegacyStatics, type ObjectKey, type Property, type PropertyKey,
-  type RegExpFlag, type RegExpNative, ArrayObj, DataProperty, Index, KHandle,
-  KNull, KUndef, LegacyInput, LegacyLastMatch, LegacyLastParen,
-  LegacyLeftContext, LegacyParen1, LegacyParen2, LegacyParen3, LegacyParen4,
-  LegacyParen5, LegacyParen6, LegacyParen7, LegacyParen8, LegacyParen9,
-  LegacyRightContext, LegacyStatics, Named, NativeFn, NoElements, Ordinary,
-  RFDotAll, RFGlobal, RFHasIndices, RFIgnoreCase, RFMultiline, RFSticky,
-  RFUnicode, RFUnicodeSets, RegExpConstructor, RegExpGetFlag, RegExpGetFlags,
-  RegExpGetSource, RegExpLegacyGetter, RegExpLegacyInputSetter, RegExpN,
-  RegExpObj, RegExpPrototypeCompile, RegExpPrototypeExec, RegExpPrototypeTest,
-  RegExpPrototypeToString, RegExpStringIteratorNext, RegExpSymbolMatch,
-  RegExpSymbolMatchAll, RegExpSymbolReplace, RegExpSymbolSearch,
-  RegExpSymbolSplit, ReturnThis, SObject, StringKey, classify, mk_bool, mk_int,
-  mk_null, mk_object, mk_string, mk_undefined,
-} as rt_types
+  type LegacyStatics, type Property, type PropertyKey, type RegExpFlag,
+  type RegExpNative, ArrayObj, DataProperty, Index, KHandle, KNull, KUndef,
+  LegacyInput, LegacyLastMatch, LegacyLastParen, LegacyLeftContext, LegacyParen1,
+  LegacyParen2, LegacyParen3, LegacyParen4, LegacyParen5, LegacyParen6,
+  LegacyParen7, LegacyParen8, LegacyParen9, LegacyRightContext, LegacyStatics,
+  Named, NativeFn, Ordinary, RFDotAll, RFGlobal, RFHasIndices, RFIgnoreCase,
+  RFMultiline, RFSticky, RFUnicode, RFUnicodeSets, RegExpConstructor,
+  RegExpGetFlag, RegExpGetFlags, RegExpGetSource, RegExpLegacyGetter,
+  RegExpLegacyInputSetter, RegExpN, RegExpObj, RegExpPrototypeCompile,
+  RegExpPrototypeExec, RegExpPrototypeTest, RegExpPrototypeToString,
+  RegExpStringIteratorNext, RegExpSymbolMatch, RegExpSymbolMatchAll,
+  RegExpSymbolReplace, RegExpSymbolSearch, RegExpSymbolSplit, ReturnThis,
+  SObject, StringKey, classify, mk_bool, mk_int, mk_null, mk_object, mk_string,
+  mk_undefined, plain_object,
+}
 import arc/rt/val as rt_val
 import gleam/bit_array
 import gleam/bool
@@ -73,7 +73,7 @@ pub fn init(
       proto_props,
       fn(_) {
         RegExpN(RegExpConstructor(
-          rt_types.empty_legacy_statics(),
+          types.empty_legacy_statics(),
           None,
           dict.new(),
         ))
@@ -86,16 +86,11 @@ pub fn init(
   let #(st, _) =
     list.fold(
       [
-        #(rt_types.symbol_match, RegExpSymbolMatch, "[Symbol.match]", 1),
-        #(
-          rt_types.symbol_match_all,
-          RegExpSymbolMatchAll,
-          "[Symbol.matchAll]",
-          1,
-        ),
-        #(rt_types.symbol_replace, RegExpSymbolReplace, "[Symbol.replace]", 2),
-        #(rt_types.symbol_search, RegExpSymbolSearch, "[Symbol.search]", 1),
-        #(rt_types.symbol_split, RegExpSymbolSplit, "[Symbol.split]", 2),
+        #(types.symbol_match, RegExpSymbolMatch, "[Symbol.match]", 1),
+        #(types.symbol_match_all, RegExpSymbolMatchAll, "[Symbol.matchAll]", 1),
+        #(types.symbol_replace, RegExpSymbolReplace, "[Symbol.replace]", 2),
+        #(types.symbol_search, RegExpSymbolSearch, "[Symbol.search]", 1),
+        #(types.symbol_split, RegExpSymbolSplit, "[Symbol.split]", 2),
       ],
       #(st, Nil),
       fn(acc, spec) {
@@ -103,7 +98,7 @@ pub fn init(
         let #(sym, tok, name, arity) = spec
         let #(fn_h, st) =
           common.alloc_rooted_native_fn(st, fn_proto, RegExpN(tok), name, arity)
-        let #(prop, st) = common.builtin_property(st, mk_object(fn_h))
+        let #(prop, st) = rt_store.t_builtin_property(st, mk_object(fn_h))
         #(common.add_symbol_property(st, bt.prototype, sym, prop), Nil)
       },
     )
@@ -158,7 +153,7 @@ fn install_legacy_accessors(
         0,
       )
     let #(prop, st) =
-      common.accessor_prop(
+      common.accessor_property(
         st,
         get: Some(mk_object(get_h)),
         set: None,
@@ -237,9 +232,9 @@ fn regexp_call(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 fn construct_regexp(
   st: Agent,
   pattern: JsVal,
-  pattern_is_regexp: Bool,
-  flags: JsVal,
-  new_target: JsVal,
+  pattern_is_regexp pattern_is_regexp: Bool,
+  flags flags: JsVal,
+  new_target new_target: JsVal,
 ) -> #(Handle, Agent) {
   let #(p, f, st) = case regexp_source_flags(st, pattern) {
     Some(#(source, orig_flags)) ->
@@ -282,7 +277,7 @@ pub fn regexp_create(st: Agent, p: JsVal, f: JsVal) -> #(JsVal, Agent) {
 pub fn is_regexp(st: Agent, val: JsVal) -> #(Bool, Agent) {
   case classify(val) {
     KHandle(_) -> {
-      let #(matcher, st) = helpers.get_symbol(st, val, rt_types.symbol_match)
+      let #(matcher, st) = helpers.get_symbol(st, val, types.symbol_match)
       case classify(matcher) {
         KUndef -> #(is_regexp_object(st, val), st)
         _ -> #(rt_val.to_boolean(matcher), st)
@@ -364,15 +359,15 @@ fn write_legacy_statics(
   ctor: Handle,
   update: fn(LegacyStatics) -> LegacyStatics,
 ) -> Agent {
-  use tag <- update_constructor(st, ctor)
-  CtorState(..tag, legacy: update(tag.legacy))
+  use state <- update_constructor(st, ctor)
+  CtorState(..state, legacy: update(state.legacy))
 }
 
 type CtorState {
   CtorState(
     legacy: LegacyStatics,
     proto_props: Option(Dict(PropertyKey, Property)),
-    compiled: Dict(String, rt_types.CompiledRegExp),
+    compiled: Dict(String, types.CompiledRegExp),
   )
 }
 
@@ -461,8 +456,8 @@ fn verify_pristine(
     False -> #(False, st)
     True -> {
       let st = {
-        use tag <- update_constructor(st, st.realm.regexp.constructor)
-        CtorState(..tag, proto_props: Some(props))
+        use state <- update_constructor(st, st.realm.regexp.constructor)
+        CtorState(..state, proto_props: Some(props))
       }
       #(True, st)
     }
@@ -487,23 +482,23 @@ fn legacy_static_value(statics: LegacyStatics, which: LegacyStatic) -> String {
     |> option.unwrap("")
   }
   case which {
-    rt_types.LegacyInput -> input
-    rt_types.LegacyLastMatch -> bytes.unsafe_slice(s, start, len)
-    rt_types.LegacyLastParen ->
+    types.LegacyInput -> input
+    types.LegacyLastMatch -> bytes.unsafe_slice(s, start, len)
+    types.LegacyLastParen ->
       list.last(groups)
       |> result.map(capture_to_legacy_string(s, _))
       |> result.unwrap("")
-    rt_types.LegacyLeftContext -> bytes.unsafe_slice(s, 0, start)
-    rt_types.LegacyRightContext -> bytes.drop_start(s, start + len)
-    rt_types.LegacyParen1 -> paren(1)
-    rt_types.LegacyParen2 -> paren(2)
-    rt_types.LegacyParen3 -> paren(3)
-    rt_types.LegacyParen4 -> paren(4)
-    rt_types.LegacyParen5 -> paren(5)
-    rt_types.LegacyParen6 -> paren(6)
-    rt_types.LegacyParen7 -> paren(7)
-    rt_types.LegacyParen8 -> paren(8)
-    rt_types.LegacyParen9 -> paren(9)
+    types.LegacyLeftContext -> bytes.unsafe_slice(s, 0, start)
+    types.LegacyRightContext -> bytes.drop_start(s, start + len)
+    types.LegacyParen1 -> paren(1)
+    types.LegacyParen2 -> paren(2)
+    types.LegacyParen3 -> paren(3)
+    types.LegacyParen4 -> paren(4)
+    types.LegacyParen5 -> paren(5)
+    types.LegacyParen6 -> paren(6)
+    types.LegacyParen7 -> paren(7)
+    types.LegacyParen8 -> paren(8)
+    types.LegacyParen9 -> paren(9)
   }
 }
 
@@ -615,11 +610,11 @@ fn pattern_and_flags_from_strings(
   flags_v: JsVal,
 ) -> #(String, String, Agent) {
   let #(source, st) = case classify(pattern_v) {
-    rt_types.KUndef -> #("", st)
+    types.KUndef -> #("", st)
     _ -> rt_val.t_to_string(st, pattern_v)
   }
   let #(flags, st) = case classify(flags_v) {
-    rt_types.KUndef -> #("", st)
+    types.KUndef -> #("", st)
     _ -> rt_val.t_to_string(st, flags_v)
   }
   #(source, flags, st)
@@ -632,7 +627,7 @@ pub fn regexp_create_literal(
 ) -> #(JsVal, Agent) {
   let #(h, st) =
     alloc_regexp_with_proto(st, source, flags, st.realm.regexp.prototype)
-  #(rt_types.mk_object(h), st)
+  #(types.mk_object(h), st)
 }
 
 fn alloc_regexp_with_proto(
@@ -643,7 +638,7 @@ fn alloc_regexp_with_proto(
 ) -> #(Handle, Agent) {
   let #(seq, st) = rt_store.t_next_prop_seq(st)
   let li_prop =
-    rt_types.DataProperty(
+    types.DataProperty(
       value: mk_int(0),
       writable: True,
       enumerable: False,
@@ -652,8 +647,8 @@ fn alloc_regexp_with_proto(
     )
   rt_store.t_cell_new(
     st,
-    SObject(
-      kind: RegExpObj(
+    plain_object(
+      RegExpObj(
         source: case source {
           "" -> "(?:)"
           _ -> source
@@ -662,11 +657,8 @@ fn alloc_regexp_with_proto(
         last_index: 0,
         compiled: uncompiled_regexp(),
       ),
-      proto: option.Some(proto),
-      props: common.named_props([#("lastIndex", li_prop)]),
-      symbol_props: [],
-      elements: rt_types.NoElements,
-      extensible: True,
+      option.Some(proto),
+      common.named_props([#("lastIndex", li_prop)]),
     ),
   )
 }
@@ -737,32 +729,28 @@ type ExecFailure {
 pub fn has_flag(flags: String, flag: String) -> Bool
 
 @external(erlang, "arc_regexp_ffi", "regexp_compile")
-fn regexp_compile(pattern: String, flags: String) -> rt_types.CompiledRegExp
+fn regexp_compile(pattern: String, flags: String) -> types.CompiledRegExp
 
 @external(erlang, "arc_regexp_ffi", "is_compiled")
-fn is_compiled(compiled: rt_types.CompiledRegExp) -> Bool
+fn is_compiled(compiled: types.CompiledRegExp) -> Bool
 
 @external(erlang, "arc_regexp_ffi", "regexp_exec_compiled")
 fn regexp_exec_compiled(
-  compiled: rt_types.CompiledRegExp,
+  compiled: types.CompiledRegExp,
   s: String,
   offset: Int,
-  sticky: Bool,
+  sticky sticky: Bool,
 ) -> Result(
   #(#(Int, Int), List(#(Int, Int)), Int, List(#(String, Int))),
   ExecFailure,
 )
-
-fn try_get(st: Agent, o: JsVal, key: ObjectKey) -> #(JsVal, Agent) {
-  rt_obj.t_get_prop(st, o, key)
-}
 
 fn get_named(st: Agent, o: JsVal, name: String) -> #(JsVal, Agent) {
   helpers.get_named(st, o, name)
 }
 
 fn set_throw(st: Agent, h: Handle, name: String, v: JsVal) -> Agent {
-  helpers.t_set_named(st, mk_object(h), name, v, True)
+  helpers.t_set_named(st, mk_object(h), name, v, strict: True)
 }
 
 fn require_object(st: Agent, v: JsVal, op: String) -> Handle {
@@ -792,8 +780,7 @@ fn regexp_exec_mode(
   case receiver, is_intrinsic_exec(st, exec_fn) {
     SObject(kind: RegExpObj(..), ..), True -> builtin_exec_mode(st, h, s, mode)
     _, _ -> {
-      let #(is_call, st) = rt_val.t_is_callable(st, exec_fn)
-      case is_call {
+      case rt_val.is_callable(st, exec_fn) {
         True -> {
           let js = st.store
           let #(result, st) = js.ops.call(st, exec_fn, rx, [mk_string(s)])
@@ -902,7 +889,7 @@ fn builtin_exec_mode(
 fn regexp_matcher(
   st: Agent,
   h: Handle,
-) -> #(String, rt_types.CompiledRegExp, Agent) {
+) -> #(String, types.CompiledRegExp, Agent) {
   case rt_store.t_cell_get(st, h) {
     SObject(kind: RegExpObj(source:, flags:, last_index:, compiled:), ..) as cell ->
       case is_compiled(compiled) {
@@ -926,7 +913,7 @@ fn compile_cached(
   st: Agent,
   source: String,
   flags: String,
-) -> #(rt_types.CompiledRegExp, Agent) {
+) -> #(types.CompiledRegExp, Agent) {
   let key = flags <> "/" <> source
   let cached = case ctor_state(st) {
     Some(CtorState(compiled:, ..)) -> dict.get(compiled, key)
@@ -937,12 +924,12 @@ fn compile_cached(
     Error(Nil) -> {
       let fresh = regexp_compile(source, flags)
       let st = {
-        use tag <- update_constructor(st, st.realm.regexp.constructor)
-        let cache = case dict.size(tag.compiled) < 256 {
-          True -> tag.compiled
+        use state <- update_constructor(st, st.realm.regexp.constructor)
+        let cache = case dict.size(state.compiled) < 256 {
+          True -> state.compiled
           False -> dict.new()
         }
-        CtorState(..tag, compiled: dict.insert(cache, key, fresh))
+        CtorState(..state, compiled: dict.insert(cache, key, fresh))
       }
       #(fresh, st)
     }
@@ -955,7 +942,7 @@ fn build_exec_result(
   whole: #(Int, Int),
   groups: List(#(Int, Int)),
   names: List(#(String, Int)),
-  has_indices: Bool,
+  has_indices has_indices: Bool,
 ) -> #(JsVal, Agent) {
   let #(match_start, match_len) = whole
   let match_values = [
@@ -1072,20 +1059,13 @@ fn alloc_null_proto_object(
     list.fold(entries, #([], st), fn(acc, kv) {
       let #(ps, st) = acc
       let #(k, v) = kv
-      let #(prop, st) = common.plain_property(st, v)
+      let #(prop, st) = rt_store.t_plain_property(st, v)
       #([#(k, prop), ..ps], st)
     })
   let #(h, st) =
     rt_store.t_cell_new(
       st,
-      SObject(
-        kind: Ordinary,
-        proto: None,
-        props: common.named_props(list.reverse(props)),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
-      ),
+      plain_object(Ordinary, None, common.named_props(list.reverse(props))),
     )
   #(mk_object(h), st)
 }
@@ -1107,7 +1087,7 @@ fn alloc_array_with_props(
   use seq <- rt_store.t_cell_new_with(st, list.length(entries))
   let props =
     list.index_map(entries, fn(kv, i) {
-      #(Named(kv.0), DataProperty(kv.1, True, True, True, seq + i))
+      #(Named(kv.0), types.plain_property(kv.1, seq + i))
     })
   SObject(
     kind: ArrayObj(list.length(values)),
@@ -1261,11 +1241,11 @@ fn global_hits(
 }
 
 fn scan_hits(
-  compiled: rt_types.CompiledRegExp,
+  compiled: types.CompiledRegExp,
   s: String,
-  sticky: Bool,
-  q: Int,
-  acc: List(#(Int, Int, List(#(Int, Int)), List(#(String, Int)))),
+  sticky sticky: Bool,
+  q q: Int,
+  acc acc: List(#(Int, Int, List(#(Int, Int)), List(#(String, Int)))),
 ) -> List(#(Int, Int, List(#(Int, Int)), List(#(String, Int)))) {
   case regexp_exec_compiled(compiled, s, q, sticky) {
     Error(NoMatch) | Error(OffsetOutOfRange) | Error(PatternCompileFailed(_)) ->
@@ -1296,7 +1276,7 @@ fn match_global_loop(
         _ -> ok_array(st, list.reverse(acc))
       }
     _ -> {
-      let #(m_v, st) = try_get(st, result, StringKey(Index(0)))
+      let #(m_v, st) = rt_obj.t_get_prop(st, result, StringKey(Index(0)))
       let #(match_str, st) = rt_val.t_to_string(st, m_v)
       let st = advance_if_empty(st, h, s, match_str)
       match_global_loop(st, rx, h, s, [mk_string(match_str), ..acc], n + 1)
@@ -1389,8 +1369,7 @@ fn regexp_symbol_replace(
   let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   let length_s = string.byte_size(s)
   let replace_value = helpers.arg_at(args, 1)
-  let #(is_fn, st) = rt_val.t_is_callable(st, replace_value)
-  let #(replacer, st) = case is_fn {
+  let #(replacer, st) = case rt_val.is_callable(st, replace_value) {
     True -> #(FunctionalReplacer(replace_value), st)
     False -> {
       let #(tpl, st) = rt_val.t_to_string(st, replace_value)
@@ -1435,7 +1414,7 @@ fn collect_raw_results(
   st: Agent,
   h: Handle,
   s: String,
-  global: Bool,
+  global global: Bool,
 ) -> #(List(RawExec), Agent) {
   case global {
     True -> {
@@ -1520,7 +1499,7 @@ fn collect_replace_results(
   case classify(result) {
     KNull -> #(list.reverse(acc), st)
     _ -> {
-      let #(m_v, st) = try_get(st, result, StringKey(Index(0)))
+      let #(m_v, st) = rt_obj.t_get_prop(st, result, StringKey(Index(0)))
       let #(match_str, st) = rt_val.t_to_string(st, m_v)
       let st = advance_if_empty(st, h, s, match_str)
       collect_replace_results(st, rx, h, s, [result, ..acc])
@@ -1543,7 +1522,7 @@ fn process_replace_results(
       let #(len_v, st) = get_named(st, result, "length")
       let #(result_length, st) = rt_val.t_to_length(st, len_v)
       let n_captures = int.max(result_length - 1, 0)
-      let #(m_v, st) = try_get(st, result, StringKey(Index(0)))
+      let #(m_v, st) = rt_obj.t_get_prop(st, result, StringKey(Index(0)))
       let #(matched, st) = rt_val.t_to_string(st, m_v)
       let #(pos_v, st) = get_named(st, result, "index")
       let #(pos_raw, st) = rt_val.t_to_integer_or_infinity(st, pos_v)
@@ -1579,7 +1558,7 @@ fn collect_coerced_captures(
   case n > n_captures {
     True -> #(list.reverse(acc), st)
     False -> {
-      let #(cap, st) = try_get(st, result, StringKey(Index(n)))
+      let #(cap, st) = rt_obj.t_get_prop(st, result, StringKey(Index(n)))
       case classify(cap) {
         KUndef ->
           collect_coerced_captures(st, result, n + 1, n_captures, [
@@ -1691,7 +1670,7 @@ fn capture_or_empty(captures: List(JsVal), idx: Int) -> String {
       case helpers.list_at(captures, idx - 1) {
         Some(v) ->
           case classify(v) {
-            rt_types.KStr(s) -> s
+            types.KStr(s) -> s
             _ -> ""
           }
         None -> ""
@@ -1784,17 +1763,17 @@ fn canonical_flags(flags: String) -> String {
 
 fn intrinsic_getter(
   st: Agent,
-  props: dict.Dict(rt_types.PropertyKey, rt_types.Property),
+  props: dict.Dict(types.PropertyKey, types.Property),
   name: String,
   expected: RegExpNative,
 ) -> Bool {
   case dict.get(props, Named(name)) {
-    Ok(rt_types.AccessorProperty(get: Some(g), ..)) ->
+    Ok(types.AccessorProperty(get: Some(g), ..)) ->
       case classify(g) {
         KHandle(gh) ->
           case rt_store.t_cell_get(st, gh) {
-            SObject(kind: NativeFn(token: RegExpN(tag), ..), ..) ->
-              tag == expected
+            SObject(kind: NativeFn(token: RegExpN(native), ..), ..) ->
+              native == expected
             _ -> False
           }
         _ -> False
@@ -1834,7 +1813,7 @@ fn pristine_exec(st: Agent, h: Handle) -> #(Bool, Agent) {
 // unanchored search replaces the per-index sticky probe, same matches
 fn split_pristine(
   st: Agent,
-  compiled: rt_types.CompiledRegExp,
+  compiled: types.CompiledRegExp,
   s: String,
   size: Int,
   lim: Int,
@@ -1847,7 +1826,7 @@ fn split_pristine(
     ok_array(st, list.reverse([mk_string(bytes.drop_start(s, p)), ..acc]))
   }
   use <- bool.lazy_guard(q >= size, fn() { rest(st) })
-  case regexp_exec_compiled(compiled, s, q, False) {
+  case regexp_exec_compiled(compiled, s, q, sticky: False) {
     Error(NoMatch) | Error(OffsetOutOfRange) | Error(PatternCompileFailed(_)) ->
       rest(st)
     // the spec never probes at size itself, so a match there is a miss
@@ -2007,7 +1986,7 @@ fn split_captures(
   case i > n_caps {
     True -> #(acc, count, False, st)
     False -> {
-      let #(cap, st) = try_get(st, z, StringKey(Index(i)))
+      let #(cap, st) = rt_obj.t_get_prop(st, z, StringKey(Index(i)))
       let acc = [cap, ..acc]
       let count = count + 1
       case count == lim {
@@ -2041,7 +2020,7 @@ fn create_regexp_string_iterator(
   st: Agent,
   matcher: Handle,
   s: String,
-  global: Bool,
+  global global: Bool,
 ) -> #(JsVal, Agent) {
   let realm = st.realm
   let #(next_h, st) =
@@ -2051,29 +2030,26 @@ fn create_regexp_string_iterator(
       RegExpN(RegExpStringIteratorNext),
       "next",
       0,
-      False,
+      constructible: False,
     )
-  let #(next_prop, st) = common.builtin_property(st, mk_object(next_h))
-  let #(matcher_prop, st) = common.frozen_property(st, mk_object(matcher))
-  let #(string_prop, st) = common.frozen_property(st, mk_string(s))
-  let #(global_prop, st) = common.frozen_property(st, mk_bool(global))
-  let #(done_prop, st) = common.plain_property(st, mk_bool(False))
+  let #(next_prop, st) = rt_store.t_builtin_property(st, mk_object(next_h))
+  let #(matcher_prop, st) = rt_store.t_frozen_property(st, mk_object(matcher))
+  let #(string_prop, st) = rt_store.t_frozen_property(st, mk_string(s))
+  let #(global_prop, st) = rt_store.t_frozen_property(st, mk_bool(global))
+  let #(done_prop, st) = rt_store.t_plain_property(st, mk_bool(False))
   let #(iter_h, st) =
     rt_store.t_cell_new(
       st,
-      SObject(
-        kind: Ordinary,
-        proto: Some(realm.iterator_proto),
-        props: common.named_props([
+      plain_object(
+        Ordinary,
+        Some(realm.iterator_proto),
+        common.named_props([
           #("next", next_prop),
           #(rsi_matcher, matcher_prop),
           #(rsi_string, string_prop),
           #(rsi_global, global_prop),
           #(rsi_done, done_prop),
         ]),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
       ),
     )
   #(mk_object(iter_h), st)
@@ -2105,25 +2081,25 @@ fn regexp_string_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
       )
   }
   case done {
-    True -> iter_result(st, mk_undefined(), True)
+    True -> iter_result(st, mk_undefined(), done: True)
     False -> {
       let #(match, st) = regexp_exec_abstract(st, mk_object(matcher), s)
       case classify(match) {
         KNull -> {
           let st = mark_iter_done(st, h)
-          iter_result(st, mk_undefined(), True)
+          iter_result(st, mk_undefined(), done: True)
         }
         _ ->
           case global {
             False -> {
               let st = mark_iter_done(st, h)
-              iter_result(st, match, False)
+              iter_result(st, match, done: False)
             }
             True -> {
-              let #(m_v, st) = try_get(st, match, StringKey(Index(0)))
+              let #(m_v, st) = rt_obj.t_get_prop(st, match, StringKey(Index(0)))
               let #(match_str, st) = rt_val.t_to_string(st, m_v)
               let st = advance_if_empty(st, matcher, s, match_str)
-              iter_result(st, match, False)
+              iter_result(st, match, done: False)
             }
           }
       }
@@ -2138,7 +2114,7 @@ fn read_rsi_state(
   case rt_store.t_cell_get(st, h) {
     SObject(props:, ..) -> {
       use m <- option.then(case dict.get(props, Named(rsi_matcher)) {
-        Ok(rt_types.DataProperty(value:, ..)) ->
+        Ok(types.DataProperty(value:, ..)) ->
           case classify(value) {
             KHandle(mh) -> Some(mh)
             _ -> None
@@ -2146,19 +2122,19 @@ fn read_rsi_state(
         _ -> None
       })
       use s <- option.then(case dict.get(props, Named(rsi_string)) {
-        Ok(rt_types.DataProperty(value:, ..)) ->
+        Ok(types.DataProperty(value:, ..)) ->
           case classify(value) {
-            rt_types.KStr(s) -> Some(s)
+            types.KStr(s) -> Some(s)
             _ -> None
           }
         _ -> None
       })
       use g <- option.then(case dict.get(props, Named(rsi_global)) {
-        Ok(rt_types.DataProperty(value:, ..)) -> Some(rt_val.to_boolean(value))
+        Ok(types.DataProperty(value:, ..)) -> Some(rt_val.to_boolean(value))
         _ -> None
       })
       use d <- option.map(case dict.get(props, Named(rsi_done)) {
-        Ok(rt_types.DataProperty(value:, ..)) -> Some(rt_val.to_boolean(value))
+        Ok(types.DataProperty(value:, ..)) -> Some(rt_val.to_boolean(value))
         _ -> None
       })
       #(m, s, g, d)
@@ -2172,19 +2148,13 @@ fn mark_iter_done(st: Agent, h: Handle) -> Agent {
     case cell {
       SObject(props:, ..) ->
         case dict.get(props, Named(rsi_done)) {
-          Ok(rt_types.DataProperty(seq:, ..)) ->
+          Ok(types.DataProperty(seq:, ..)) ->
             SObject(
               ..cell,
               props: dict.insert(
                 props,
                 Named(rsi_done),
-                rt_types.DataProperty(
-                  value: mk_bool(True),
-                  writable: True,
-                  enumerable: True,
-                  configurable: True,
-                  seq:,
-                ),
+                types.plain_property(mk_bool(True), seq),
               ),
             )
           _ -> cell
@@ -2194,7 +2164,7 @@ fn mark_iter_done(st: Agent, h: Handle) -> Agent {
   })
 }
 
-fn iter_result(st: Agent, v: JsVal, done: Bool) -> #(JsVal, Agent) {
+fn iter_result(st: Agent, v: JsVal, done done: Bool) -> #(JsVal, Agent) {
   let #(h, st) = rt_async.alloc_iter_result(st, v, done)
   #(mk_object(h), st)
 }
@@ -2213,7 +2183,7 @@ fn species_constructor(
   case classify(c) {
     KUndef -> #(mk_object(default_ctor), st)
     KHandle(_) -> {
-      let #(s, st) = helpers.get_symbol(st, c, rt_types.symbol_species)
+      let #(s, st) = helpers.get_symbol(st, c, types.symbol_species)
       case classify(s) {
         KUndef | KNull -> #(mk_object(default_ctor), st)
         KHandle(_) -> #(s, st)
@@ -2266,6 +2236,6 @@ fn flag_char(f: RegExpFlag) -> String {
 }
 
 // sentinel until first exec compiles the real matcher
-pub fn uncompiled_regexp() -> rt_types.CompiledRegExp {
-  unsafe.coerce(rt_types.mk_undefined())
+pub fn uncompiled_regexp() -> types.CompiledRegExp {
+  unsafe.coerce(types.mk_undefined())
 }

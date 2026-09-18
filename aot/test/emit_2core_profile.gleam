@@ -138,8 +138,7 @@ fn profile(label: String, source: String, runs: Int, iters: Int) -> Nil {
 
   let direct =
     count_of(atom.create("arc_rt_call_ffi"), atom.create("t_direct_callee"), 3)
-  let general =
-    count_of(atom.create("arc@rt@call"), atom.create("t_call_checked"), 4)
+  let general = count_of(atom.create("arc@rt@call"), atom.create("t_call"), 4)
   case direct + general {
     0 -> Nil
     _ ->
@@ -148,7 +147,7 @@ fn profile(label: String, source: String, runs: Int, iters: Int) -> Nil {
         <> int.to_string(direct)
         <> " ("
         <> int.to_string(direct / runs)
-        <> "/run)  t_call_checked(general)="
+        <> "/run)  t_call(general)="
         <> int.to_string(general)
         <> " → direct callee "
         <> case general {
@@ -313,7 +312,7 @@ pub fn profile_file(label: String, path: String, runs: Int) -> Nil {
   let targets = [
     #(rt("obj"), "t_get_prop_untyped_key", 3),
     #(rt("obj"), "t_set_prop_untyped_key", 4),
-    #(rt("call"), "t_call_checked", 4),
+    #(rt("call"), "t_call", 4),
     #(rt("call"), "t_direct_callee", 3),
     #(rt("call"), "t_construct", 4),
     #(rt("ops"), "t_instance_of", 3),
@@ -680,7 +679,7 @@ pub fn raytrace_apply_verify() -> Bool {
   let rt = fn(m: String) { atom.create("arc@rt@" <> m) }
   let ffi = fn(m: String) { atom.create("arc_" <> m) }
   let n_new_args = count_of(rt("obj"), atom.create("t_new_arguments"), 4)
-  let n_call_chk = count_of(rt("call"), atom.create("t_call_checked"), 4)
+  let n_call = count_of(rt("call"), atom.create("t_call"), 4)
   let n_new_direct =
     count_of(ffi("rt_call_ic_ffi"), atom.create("t_new_direct"), 3)
   let n_ns_apply =
@@ -697,14 +696,14 @@ pub fn raytrace_apply_verify() -> Bool {
     )
   }
   row("t_new_arguments/4", n_new_args)
-  row("t_call_checked/4", n_call_chk)
+  row("t_call/4", n_call)
   row("t_new_direct/3", n_new_direct)
   row("new_direct_apply/7", n_ns_apply)
   row("t_call_method_ic/6", n_method_ic)
   row("t_construct/4 (new_direct miss)", n_construct)
 
   let args_ok = n_new_args < 100
-  let chk_ok = n_call_chk < 100
+  let chk_ok = n_call < 100
   let reaches = n_method_ic >= n_ns_apply - n_construct - 10
   io.println("  ── verdict ──")
   io.println(
@@ -721,15 +720,13 @@ pub fn raytrace_apply_verify() -> Bool {
     },
   )
   io.println(
-    "    (2) t_call_checked ≈0:        "
+    "    (2) t_call ≈0:        "
     <> case chk_ok {
       True ->
-        "✓ FIRES (.apply → call_method_ic; "
-        <> int.to_string(n_call_chk)
-        <> "/run)"
+        "✓ FIRES (.apply → call_method_ic; " <> int.to_string(n_call) <> "/run)"
       False ->
         "✗ REGRESSED ("
-        <> int.to_string(n_call_chk)
+        <> int.to_string(n_call)
         <> "/run — emit_apply_arguments miss)"
     },
   )

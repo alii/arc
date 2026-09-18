@@ -2,7 +2,7 @@ import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, AccessorProperty, DataProperty, KHandle,
   Named, StringKey, SymbolKey, classify, mk_object, mk_undefined,
-} as rt_types
+}
 import arc/rt/val as rt_val
 import gleam/option.{type Option, None, Some}
 
@@ -18,7 +18,7 @@ pub fn t_with_has_binding(
     False -> #(False, st)
     True -> {
       let #(unscopables, st) =
-        rt_obj.t_get_prop(st, recv, SymbolKey(rt_types.symbol_unscopables))
+        rt_obj.t_get_prop(st, recv, SymbolKey(types.symbol_unscopables))
       case classify(unscopables) {
         KHandle(_) -> {
           let #(blocked, st) =
@@ -36,7 +36,7 @@ pub fn t_with_get_binding_value(
   st: Agent,
   obj: Handle,
   name: String,
-  strict: Bool,
+  strict strict: Bool,
 ) -> #(JsVal, Agent) {
   let recv = mk_object(obj)
   let key = StringKey(Named(name))
@@ -54,7 +54,7 @@ pub fn t_with_set_mutable_binding(
   obj: Handle,
   name: String,
   value: JsVal,
-  strict: Bool,
+  strict strict: Bool,
 ) -> Agent {
   let recv = mk_object(obj)
   let key = StringKey(Named(name))
@@ -87,7 +87,7 @@ pub fn t_with_delete_binding(
 pub fn t_create_global_var_binding(
   st: Agent,
   name: String,
-  deletable: Bool,
+  deletable deletable: Bool,
 ) -> Agent {
   let global = st.realm.global_object
   let key = StringKey(Named(name))
@@ -101,9 +101,9 @@ pub fn t_create_global_var_binding(
           global,
           key,
           mk_undefined(),
-          True,
-          True,
-          deletable,
+          writable: True,
+          enumerable: True,
+          configurable: deletable,
         )
       st
     }
@@ -114,7 +114,7 @@ pub fn t_create_global_var_binding(
 pub fn t_create_global_fn_binding(
   st: Agent,
   name: String,
-  deletable: Bool,
+  deletable deletable: Bool,
 ) -> Agent {
   let global = st.realm.global_object
   let key = StringKey(Named(name))
@@ -126,9 +126,9 @@ pub fn t_create_global_fn_binding(
         global,
         key,
         mk_undefined(),
-        True,
-        True,
-        deletable,
+        writable: True,
+        enumerable: True,
+        configurable: deletable,
       )
     st
   }
@@ -188,9 +188,9 @@ pub fn t_eval_env_set(
       env,
       StringKey(Named(name)),
       value,
-      True,
-      True,
-      True,
+      writable: True,
+      enumerable: True,
+      configurable: True,
     )
   st
 }

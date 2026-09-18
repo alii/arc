@@ -8,9 +8,9 @@ import arc/rt/types.{
   type PropertyKey, type Realm, Agent, ArrayObj, BirthPending, BirthSettled,
   BoundFn, BytecodeFn, CompiledFn, DataProperty, Dense, JInt, JPosInf, KHandle,
   KNull, KNum, KStr, KTdz, KUndef, Named, NativeFn, NoElements, ProxyObj,
-  ReferenceErr, SObject, StringKey, TypeErr, classify, mk_number, mk_object,
-  mk_tdz, mk_undefined,
-} as rt_types
+  SObject, StringKey, classify, mk_int, mk_number, mk_object, mk_tdz,
+  mk_undefined,
+}
 import arc/rt/val as rt_val
 import gleam/bool
 import gleam/dict.{type Dict}
@@ -43,7 +43,7 @@ pub type Completion(a) {
 }
 
 @external(erlang, "arc_rt_call_ffi", "t_call_protected")
-fn t_call_protected(
+fn try_call_code(
   st: Agent,
   code: CompiledCode,
   frame: Frame,
@@ -51,13 +51,13 @@ fn t_call_protected(
 ) -> #(Completion(JsVal), Agent)
 
 @external(erlang, "arc_rt_call_ffi", "t_apply_protected")
-pub fn t_apply_protected(
+pub fn try_run(
   st: Agent,
   body: fn(Agent) -> #(a, Agent),
 ) -> #(Completion(a), Agent)
 
 @external(erlang, "arc_rt_call_ffi", "t_native_protected")
-fn t_native_protected(
+fn try_call_native(
   st: Agent,
   token: NativeToken,
   this: JsVal,
@@ -76,22 +76,12 @@ fn js_ops(st: Agent) -> JsOps(Agent) {
   st.store.ops
 }
 
-fn throw_error(st: Agent, kind: rt_types.ErrorKind, msg: String) -> a {
-  let #(e, st) = js_ops(st).new_error(st, kind, msg)
-  rt_store.t_throw(st, e)
-}
-
 fn read_obj_kind(st: Agent, h: Handle) -> Option(ObjKind) {
   case rt_store.t_cell_get(st, h) {
     SObject(kind:, ..) -> Some(kind)
-    rt_types.SShapedObject(..) -> Some(rt_types.Ordinary)
+    types.SShapedObject(..) -> Some(types.Ordinary)
     _ -> None
   }
-}
-
-pub fn is_callable(st: Agent, v: JsVal) -> Bool {
-  let #(b, _) = rt_val.t_is_callable(st, v)
-  b
 }
 
 // §7.2.4 isconstructor
@@ -119,7 +109,7 @@ fn handle_is_constructor(st: Agent, h: Handle) -> Bool {
 pub fn t_direct_callee(st: Agent, callee: JsVal, this: JsVal) -> Dynamic
 
 // §10.2.1 [[call]], catches a throw into a completion
-pub fn t_call(
+pub fn t_try_call(
   st: Agent,
   callee: JsVal,
   this: JsVal,
@@ -145,21 +135,26 @@ fn call_cell(
   st: Agent,
   callee: JsVal,
   h: Handle,
-  cell: rt_types.Cell,
+  cell: types.Cell,
   this: JsVal,
   args: List(JsVal),
 ) -> #(Completion(JsVal), Agent) {
   case cell {
     SObject(kind: CompiledFn(code:, home_object:, flags:, ..), ..) -> {
       use st <- bracketed(st)
-      call_kfunction(st, h, code, home_object, flags, this, args)
+      try_call_compiled(st, h, code, home_object, flags, this, args)
     }
     SObject(kind: NativeFn(token:, ..), ..) -> {
       use st <- bracketed(st)
-      t_native_protected(st, token, this, args)
+      try_call_native(st, token, this, args)
     }
     SObject(kind: BoundFn(target:, bound_this:, bound_args:), ..) ->
-      t_call(st, mk_object(target), bound_this, list.append(bound_args, args))
+      t_try_call(
+        st,
+        mk_object(target),
+        bound_this,
+        list.append(bound_args, args),
+      )
     SObject(kind: ProxyObj(target:, handler:, revoked:), ..) -> {
       use st <- bracketed(st)
       call_proxy(st, callee, target, handler, revoked, this, args)
@@ -174,7 +169,7 @@ fn bracketed(
 ) -> #(Completion(JsVal), Agent) {
   let depth = st.call_depth
   case depth >= limits.max_call_depth {
-    True -> t_apply_protected(st, rt_store.stack_overflow)
+    True -> try_run(st, rt_store.stack_overflow)
     False -> {
       let #(c, st) = body(Agent(..st, call_depth: depth + 1))
       #(c, Agent(..st, call_depth: st.call_depth - 1))
@@ -182,7 +177,7 @@ fn bracketed(
   }
 }
 
-fn call_kfunction(
+fn try_call_compiled(
   st: Agent,
   callee_h: Handle,
   code: CompiledCode,
@@ -193,10 +188,9 @@ fn call_kfunction(
 ) -> #(Completion(JsVal), Agent) {
   case flags.is_class_constructor {
     True ->
-      t_apply_protected(st, fn(st) {
-        throw_error(
+      try_run(st, fn(st) {
+        rt_val.t_throw_type_error(
           st,
-          TypeErr,
           "Class constructor cannot be invoked without 'new'",
         )
       })
@@ -208,7 +202,7 @@ fn call_kfunction(
       let #(this_resolved, st) = resolve_this(st, flags, this)
       let frame =
         mk_frame(this_resolved, mk_object(callee_h), home, mk_undefined())
-      t_call_protected(st, code, frame, args)
+      try_call_code(st, code, frame, args)
     }
   }
 }
@@ -237,20 +231,20 @@ fn call_proxy(
   callee: JsVal,
   target: Handle,
   handler: Handle,
-  revoked: Bool,
-  this: JsVal,
-  args: List(JsVal),
+  revoked revoked: Bool,
+  this this: JsVal,
+  args args: List(JsVal),
 ) -> #(Completion(JsVal), Agent) {
-  t_apply_protected(st, fn(st) {
-    use <- bool.lazy_guard(!is_callable(st, mk_object(target)), fn() {
+  try_run(st, fn(st) {
+    use <- bool.lazy_guard(!rt_val.is_callable(st, mk_object(target)), fn() {
       not_a_function_raise(st, callee)
     })
     let #(trap, st) = proxy_trap(st, handler, revoked, "apply")
     case trap {
-      None -> t_call_checked(st, mk_object(target), this, args)
+      None -> t_call(st, mk_object(target), this, args)
       Some(trap_fn) -> {
         let #(args_arr, st) = alloc_args_array(st, args)
-        t_call_checked(st, trap_fn, mk_object(handler), [
+        t_call(st, trap_fn, mk_object(handler), [
           mk_object(target),
           this,
           mk_object(args_arr),
@@ -264,13 +258,12 @@ fn call_proxy(
 fn proxy_trap(
   st: Agent,
   handler: Handle,
-  revoked: Bool,
-  name: String,
+  revoked revoked: Bool,
+  name name: String,
 ) -> #(Option(JsVal), Agent) {
   use <- bool.lazy_guard(revoked, fn() {
-    throw_error(
+    rt_val.t_throw_type_error(
       st,
-      TypeErr,
       "Cannot perform '" <> name <> "' on a proxy that has been revoked",
     )
   })
@@ -279,12 +272,11 @@ fn proxy_trap(
   case classify(trap) {
     KUndef | KNull -> #(None, st)
     _ ->
-      case is_callable(st, trap) {
+      case rt_val.is_callable(st, trap) {
         True -> #(Some(trap), st)
         False ->
-          throw_error(
+          rt_val.t_throw_type_error(
             st,
-            TypeErr,
             "'" <> name <> "' trap of proxy handler is not a function",
           )
       }
@@ -292,17 +284,19 @@ fn proxy_trap(
 }
 
 fn not_a_function(st: Agent, callee: JsVal) -> #(Completion(JsVal), Agent) {
-  t_apply_protected(st, fn(st) { not_a_function_raise(st, callee) })
+  try_run(st, fn(st) { not_a_function_raise(st, callee) })
 }
 
 fn not_a_function_raise(st: Agent, callee: JsVal) -> a {
-  let #(ty, _) = rt_val.t_type_of(st, callee)
-  throw_error(st, TypeErr, ty <> " is not a function")
+  rt_val.t_throw_type_error(
+    st,
+    rt_val.type_of(st, callee) <> " is not a function",
+  )
 }
 
 // rethrows; the fn seeded into jsops.call
 // called by name from arc_rt_call_ic_ffi
-pub fn t_call_checked(
+pub fn t_call(
   st: Agent,
   callee: JsVal,
   this: JsVal,
@@ -322,17 +316,17 @@ pub fn t_call_checked(
   }
 }
 
-pub fn t_bind_call(
+pub fn t_prepare_call(
   st: Agent,
   callee: JsVal,
   this: JsVal,
 ) -> fn(Agent, List(JsVal)) -> #(JsVal, Agent) {
-  let generic = fn(st, args) { t_call_checked(st, callee, this, args) }
+  let generic = fn(st, args) { t_call(st, callee, this, args) }
   case classify(callee) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
         SObject(kind: BytecodeFn(..) as kind, ..) ->
-          js_ops(st).bind_call(st, h, kind, this)
+          js_ops(st).prepare_call(st, h, kind, this)
         SObject(kind: NativeFn(token:, ..), ..) -> fn(st, args) {
           call_native(st, token, this, args)
         }
@@ -358,7 +352,7 @@ fn call_compiled(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   use st <- rethrown_bracket(st)
-  call_kfunction(st, h, code, home_object, flags, this, args)
+  try_call_compiled(st, h, code, home_object, flags, this, args)
 }
 
 fn call_native(
@@ -368,7 +362,7 @@ fn call_native(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   use st <- rethrown_bracket(st)
-  t_native_protected(st, token, this, args)
+  try_call_native(st, token, this, args)
 }
 
 fn rethrown_bracket(
@@ -378,21 +372,21 @@ fn rethrown_bracket(
   rethrown(bracketed(st, body))
 }
 
-pub fn t_bind_callable(
+pub fn t_try_prepare_call(
   st: Agent,
   callee: JsVal,
   this: JsVal,
 ) -> Option(fn(Agent, List(JsVal)) -> #(JsVal, Agent)) {
-  let generic = fn(st, args) { t_call_checked(st, callee, this, args) }
+  let generic = fn(st, args) { t_call(st, callee, this, args) }
   case classify(callee) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
         SObject(kind: BytecodeFn(..) as kind, ..) ->
-          Some(js_ops(st).bind_call(st, h, kind, this))
+          Some(js_ops(st).prepare_call(st, h, kind, this))
         SObject(kind: NativeFn(token:, ..), ..) ->
           Some(fn(st, args) { call_native(st, token, this, args) })
         SObject(kind: CompiledFn(code:, home_object:, flags:, ..) as kind, ..) ->
-          t_bind_compiled(st, callee, kind, this)
+          t_prepare_compiled_call(st, callee, kind, this)
           |> option.or(
             Some(fn(st, args) {
               call_compiled(st, h, code, home_object, flags, this, args)
@@ -400,7 +394,7 @@ pub fn t_bind_callable(
           )
         SObject(kind: BoundFn(..), ..) -> Some(generic)
         SObject(kind: ProxyObj(target:, ..), ..) ->
-          case is_callable(st, mk_object(target)) {
+          case rt_val.is_callable(st, mk_object(target)) {
             True -> Some(generic)
             False -> None
           }
@@ -410,8 +404,8 @@ pub fn t_bind_callable(
   }
 }
 
-@external(erlang, "arc_rt_call_ic_ffi", "t_bind_compiled")
-fn t_bind_compiled(
+@external(erlang, "arc_rt_call_ic_ffi", "t_prepare_compiled_call")
+fn t_prepare_compiled_call(
   st: Agent,
   callee: JsVal,
   kind: ObjKind,
@@ -428,11 +422,11 @@ fn rethrown(outcome: #(Completion(JsVal), Agent)) -> #(JsVal, Agent) {
 pub fn t_call_method(
   st: Agent,
   recv: JsVal,
-  key: rt_types.ObjectKey,
+  key: types.ObjectKey,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(callee, st) = rt_obj.t_get_prop(st, recv, key)
-  t_call_checked(st, callee, recv, args)
+  t_call(st, callee, recv, args)
 }
 
 // §10.2.2 [[construct]], isconstructor gate first
@@ -453,8 +447,10 @@ pub fn t_construct(
 }
 
 fn not_a_constructor(st: Agent, callee: JsVal) -> a {
-  let #(ty, _) = rt_val.t_type_of(st, callee)
-  throw_error(st, TypeErr, ty <> " is not a constructor")
+  rt_val.t_throw_type_error(
+    st,
+    rt_val.type_of(st, callee) <> " is not a constructor",
+  )
 }
 
 fn construct_by_kind(
@@ -465,7 +461,7 @@ fn construct_by_kind(
 ) -> #(Handle, Agent) {
   case read_obj_kind(st, callee_h) {
     Some(CompiledFn(code:, home_object:, flags:, fields_init:, ..)) ->
-      construct_kfunction(
+      construct_compiled(
         st,
         callee_h,
         code,
@@ -493,7 +489,7 @@ fn construct_by_kind(
   }
 }
 
-fn construct_kfunction(
+fn construct_compiled(
   st: Agent,
   callee_h: Handle,
   code: CompiledCode,
@@ -533,7 +529,7 @@ fn apply_ctor(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let st = rt_store.t_enter_call(st)
-  let #(c, st) = t_call_protected(st, code, frame, args)
+  let #(c, st) = try_call_code(st, code, frame, args)
   let st = rt_store.t_leave_call(st)
   case c {
     NormalCompletion(v) -> #(v, st)
@@ -557,17 +553,15 @@ fn derived_return_override(st: Agent, result: JsVal) -> #(Handle, Agent) {
   case classify(result) {
     KHandle(h) -> #(h, st)
     KTdz ->
-      throw_error(
+      rt_val.t_throw_reference_error(
         st,
-        ReferenceErr,
         "Must call super constructor in derived class before returning from derived constructor",
       )
     KUndef ->
       panic as "derived ctor returned KUndef — M18 return-lowering contract violated"
     _ ->
-      throw_error(
+      rt_val.t_throw_type_error(
         st,
-        TypeErr,
         "Derived constructors may only return object or undefined",
       )
   }
@@ -615,9 +609,8 @@ pub fn get_function_realm(st: Agent, obj: Handle) -> Int {
     SObject(kind: BytecodeFn(realm:, ..), ..) -> realm
     SObject(kind: BoundFn(target:, ..), ..) -> get_function_realm(st, target)
     SObject(kind: ProxyObj(revoked: True, ..), ..) ->
-      throw_error(
+      rt_val.t_throw_type_error(
         st,
-        TypeErr,
         "Cannot perform 'getFunctionRealm' on a proxy that has been revoked",
       )
     SObject(kind: ProxyObj(target:, ..), ..) -> get_function_realm(st, target)
@@ -633,24 +626,22 @@ pub fn get_function_realm(st: Agent, obj: Handle) -> Int {
 
 fn native_realm(token: NativeToken) -> Option(Int) {
   case token {
-    rt_types.GlobalN(rt_types.GlobalEval(realm:))
-    | rt_types.FunctionN(rt_types.FunctionConstructor(realm:))
-    | rt_types.GeneratorN(rt_types.GeneratorFunctionCtor(realm:))
-    | rt_types.GeneratorN(rt_types.AsyncFunctionCtor(realm:))
-    | rt_types.GeneratorN(rt_types.AsyncGeneratorFunctionCtor(realm:))
-    | rt_types.JsonN(rt_types.JsonParse(realm:))
-    | rt_types.JsonN(rt_types.JsonStringify(realm:))
-    | rt_types.JsonN(rt_types.JsonRawJson(realm:))
-    | rt_types.JsonN(rt_types.JsonIsRawJson(realm:))
-    | rt_types.ErrorN(rt_types.ErrorStackSetter(realm:))
-    | rt_types.Test262N(rt_types.Test262EvalScript(realm:))
-    | rt_types.Test262N(rt_types.Test262CreateRealm(realm:))
-    | rt_types.ShadowRealmN(rt_types.ShadowRealmEvaluate(realm:))
-    | rt_types.ShadowRealmN(rt_types.ShadowRealmImportValue(realm:))
-    | rt_types.ShadowRealmN(rt_types.WrappedFunctionCall(
-        caller_realm: realm,
-        ..,
-      )) -> Some(realm)
+    types.GlobalN(types.GlobalEval(realm:))
+    | types.FunctionN(types.FunctionConstructor(realm:))
+    | types.GeneratorN(types.GeneratorFunctionCtor(realm:))
+    | types.GeneratorN(types.AsyncFunctionCtor(realm:))
+    | types.GeneratorN(types.AsyncGeneratorFunctionCtor(realm:))
+    | types.JsonN(types.JsonParse(realm:))
+    | types.JsonN(types.JsonStringify(realm:))
+    | types.JsonN(types.JsonRawJson(realm:))
+    | types.JsonN(types.JsonIsRawJson(realm:))
+    | types.ErrorN(types.ErrorStackSetter(realm:))
+    | types.Test262N(types.Test262EvalScript(realm:))
+    | types.Test262N(types.Test262CreateRealm(realm:))
+    | types.ShadowRealmN(types.ShadowRealmEvaluate(realm:))
+    | types.ShadowRealmN(types.ShadowRealmImportValue(realm:))
+    | types.ShadowRealmN(types.WrappedFunctionCall(caller_realm: realm, ..)) ->
+      Some(realm)
     _ -> None
   }
 }
@@ -673,17 +664,14 @@ fn realm_of_function_proto(st: Agent, proto: Option(Handle)) -> Int {
   }
 }
 
-fn is_function_proto_of(st: Agent, realm: rt_types.Realm, p: Handle) -> Bool {
+fn is_function_proto_of(st: Agent, realm: types.Realm, p: Handle) -> Bool {
   p == realm.function.prototype
   || p == realm.generator_fn.prototype
   || p == realm.async_fn.prototype
   || p == async_generator_fn_prototype(st, realm)
 }
 
-pub fn async_generator_fn_prototype(
-  st: Agent,
-  realm: rt_types.Realm,
-) -> Handle {
+pub fn async_generator_fn_prototype(st: Agent, realm: types.Realm) -> Handle {
   case
     rt_obj.t_ordinary_own_property(
       st,
@@ -709,8 +697,7 @@ fn run_fields_init(
   case fields_init {
     None -> st
     Some(init_h) -> {
-      let #(_, st) =
-        t_call_checked(st, mk_object(init_h), mk_object(new_this), [])
+      let #(_, st) = t_call(st, mk_object(init_h), mk_object(new_this), [])
       st
     }
   }
@@ -721,9 +708,9 @@ fn construct_proxy(
   st: Agent,
   target: Handle,
   handler: Handle,
-  revoked: Bool,
-  args: List(JsVal),
-  new_target: JsVal,
+  revoked revoked: Bool,
+  args args: List(JsVal),
+  new_target new_target: JsVal,
 ) -> #(Handle, Agent) {
   let #(trap, st) = proxy_trap(st, handler, revoked, "construct")
   case trap {
@@ -731,7 +718,7 @@ fn construct_proxy(
     Some(trap_fn) -> {
       let #(args_arr, st) = alloc_args_array(st, args)
       let #(res, st) =
-        t_call_checked(st, trap_fn, mk_object(handler), [
+        t_call(st, trap_fn, mk_object(handler), [
           mk_object(target),
           mk_object(args_arr),
           new_target,
@@ -739,9 +726,8 @@ fn construct_proxy(
       case classify(res) {
         KHandle(h) -> #(h, st)
         _ ->
-          throw_error(
+          rt_val.t_throw_type_error(
             st,
-            TypeErr,
             "'construct' on proxy: trap returned non-object",
           )
       }
@@ -826,7 +812,7 @@ pub fn t_fn_new(
       length: len,
       birth: BirthSettled,
     ),
-    mk_number(JInt(len)),
+    mk_int(len),
     name,
   )
 }
@@ -888,9 +874,9 @@ pub fn t_new_function(
           h,
           StringKey(Named("prototype")),
           mk_object(own_proto),
-          True,
-          False,
-          False,
+          writable: True,
+          enumerable: False,
+          configurable: False,
         )
       st
     }
@@ -905,13 +891,13 @@ pub fn t_native_new(
   token: NativeToken,
   name: String,
   len: Int,
-  constructible: Bool,
+  constructible constructible: Bool,
 ) -> #(Handle, Agent) {
   alloc_fn_cell(
     st,
     proto,
     NativeFn(token:, name:, length: len, constructible:),
-    mk_number(JInt(len)),
+    mk_int(len),
     name,
   )
 }
@@ -955,10 +941,8 @@ pub fn t_bound_new(
   let length_v = case classify(target_len) {
     KNum(JPosInf) -> mk_number(JPosInf)
     KNum(n) ->
-      mk_number(
-        JInt(int.max(rt_val.jsnum_to_integer_or_infinity(n) - n_args, 0)),
-      )
-    _ -> mk_number(JInt(0))
+      mk_int(int.max(rt_val.jsnum_to_integer_or_infinity(n) - n_args, 0))
+    _ -> mk_int(0)
   }
   let #(target_name, st) =
     rt_obj.t_get_prop(st, target_v, StringKey(Named("name")))

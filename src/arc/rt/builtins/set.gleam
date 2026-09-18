@@ -15,7 +15,7 @@ import arc/rt/types.{
   SetIterValues, SetIterator, SetN, SetObj, SetSymmetricDifference, SetUnion,
   SetValues, StringKey, classify, js_to_map_key, mk_bool, mk_int, mk_number,
   mk_object, mk_undefined, symbol_iterator,
-} as rt_types
+}
 import arc/rt/val as rt_val
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -44,7 +44,7 @@ pub fn init(
   // keys and @@iterator must alias the same values function
   let #(values_h, st) =
     common.alloc_rooted_native_fn(st, fn_proto, SetN(SetValues), "values", 0)
-  let #(values_prop, st) = common.builtin_property(st, mk_object(values_h))
+  let #(values_prop, st) = rt_store.t_builtin_property(st, mk_object(values_h))
   let #(keys_prop, st) = common.restamp(st, values_prop)
   let #(size_props, st) =
     common.alloc_getters(st, fn_proto, [#("size", SetN(SetGetSize))])
@@ -129,7 +129,7 @@ fn set_constructor(
     _ -> {
       let iterable = first_arg_or_undefined(args)
       let #(adder, st) = rt_obj.t_get_prop(st, set_v, StringKey(Named("add")))
-      case rt_call.is_callable(st, adder) {
+      case rt_val.is_callable(st, adder) {
         False ->
           rt_val.t_throw_type_error(
             st,
@@ -201,8 +201,7 @@ fn for_each_loop(
   case ordered_entries.next_from(store, cursor) {
     None -> #(mk_undefined(), st)
     Some(#(next_cursor, _key, val)) -> {
-      let #(_r, st) =
-        rt_call.t_call_checked(st, cb, this_arg, [val, val, set_this])
+      let #(_r, st) = rt_call.t_call(st, cb, this_arg, [val, val, set_this])
       for_each_loop(st, ref, next_cursor, cb, this_arg, set_this)
     }
   }
@@ -402,7 +401,7 @@ fn set_is_subset_of(
   use rec, st <- get_set_record(st, first_arg_or_undefined(args))
   case ordered_entries.size(read_set_store(st, ref)) > rec.size {
     True -> #(mk_bool(False), st)
-    False -> this_step_loop(st, ref, rec, 0, False)
+    False -> this_step_loop(st, ref, rec, 0, false_when: False)
   }
 }
 
@@ -411,7 +410,7 @@ fn this_step_loop(
   ref: SetRef,
   rec: SetRecord,
   cursor: Int,
-  false_when: Bool,
+  false_when false_when: Bool,
 ) -> #(JsVal, Agent) {
   let store = read_set_store(st, ref)
   case ordered_entries.next_from(store, cursor) {
@@ -437,7 +436,7 @@ fn set_is_superset_of(
     True -> #(mk_bool(False), st)
     False -> {
       let #(keys, st) = get_keys_iterator(st, rec)
-      other_step_loop(st, ref, keys, False)
+      other_step_loop(st, ref, keys, false_when: False)
     }
   }
 }
@@ -446,7 +445,7 @@ fn other_step_loop(
   st: Agent,
   ref: SetRef,
   keys: IteratorRecord,
-  false_when: Bool,
+  false_when false_when: Bool,
 ) -> #(JsVal, Agent) {
   let #(next, st) = step_keys(st, keys)
   case next {
@@ -472,10 +471,10 @@ fn set_is_disjoint_from(
   use ref <- require_set(st, this, "isDisjointFrom")
   use rec, st <- get_set_record(st, first_arg_or_undefined(args))
   case ordered_entries.size(read_set_store(st, ref)) <= rec.size {
-    True -> this_step_loop(st, ref, rec, 0, True)
+    True -> this_step_loop(st, ref, rec, 0, false_when: True)
     False -> {
       let #(keys, st) = get_keys_iterator(st, rec)
-      other_step_loop(st, ref, keys, True)
+      other_step_loop(st, ref, keys, false_when: True)
     }
   }
 }
@@ -513,15 +512,15 @@ fn get_set_record(
 
 // §24.2.1.3 getkeysiterator
 fn get_keys_iterator(st: Agent, rec: SetRecord) -> #(IteratorRecord, Agent) {
-  let #(iter, st) = rt_call.t_call_checked(st, rec.keys, rec.obj, [])
+  let #(iter, st) = rt_call.t_call(st, rec.keys, rec.obj, [])
   use Nil <- helpers.guard(rt_val.is_object(iter), fn() {
     rt_val.t_throw_type_error(st, "keys() did not return an object")
   })
   let #(next_fn, st) = rt_obj.t_get_prop(st, iter, StringKey(Named("next")))
-  use Nil <- helpers.guard(rt_call.is_callable(st, next_fn), fn() {
+  use Nil <- helpers.guard(rt_val.is_callable(st, next_fn), fn() {
     rt_val.t_throw_type_error(st, "iterator.next is not a function")
   })
-  #(rt_types.IteratorRecord(iterator: iter, next_method: next_fn), st)
+  #(types.IteratorRecord(iterator: iter, next_method: next_fn), st)
 }
 
 fn step_keys(st: Agent, keys: IteratorRecord) -> #(Option(JsVal), Agent) {
@@ -530,7 +529,7 @@ fn step_keys(st: Agent, keys: IteratorRecord) -> #(Option(JsVal), Agent) {
 }
 
 fn set_record_has(st: Agent, rec: SetRecord, v: JsVal) -> #(Bool, Agent) {
-  let #(r, st) = rt_call.t_call_checked(st, rec.has, rec.obj, [v])
+  let #(r, st) = rt_call.t_call(st, rec.has, rec.obj, [v])
   #(rt_val.to_boolean(r), st)
 }
 

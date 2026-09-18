@@ -1,3 +1,4 @@
+import arc/bytecode/error_kind.{type JsError, JsError, RangeError, TypeError}
 import arc/internal/gregorian.{days_in_month}
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
@@ -5,7 +6,7 @@ import arc/rt/builtins/temporal_common.{
   type CalendarNameMode, CalAuto, format_with_reference,
   get_calendar_name_option, get_options_object, get_overflow_option_from_value,
   make_date_cal, make_month_day_cal, month_day_slot_of, read_int_field,
-  require_temporal, terr, truncated_int_arg, truncated_int_arg_or,
+  require_temporal, truncated_int_arg, truncated_int_arg_or,
 }
 import arc/rt/builtins/temporal_fields.{
   type DateFields, DateFields, max_reference_epoch_days, month_code_str,
@@ -16,7 +17,7 @@ import arc/rt/builtins/temporal_fields.{
   to_calendar_arg,
 }
 import arc/rt/builtins/temporal_iso.{
-  type Overflow, type TErr, Constrain, IsoDate, RangeE, Reject, TypeE,
+  type IsoDateSlots, type Overflow, Constrain, IsoDate, IsoDateSlots, Reject,
   check_date_limits, epoch_days, is_valid_iso_date, max_epoch_days,
   min_epoch_days, pad2, regulate_iso_date,
 }
@@ -99,7 +100,7 @@ pub fn ctor(
 ) -> #(JsVal, Agent) {
   let #(m, st) = truncated_int_arg(st, args, 0)
   let #(d, st) = truncated_int_arg(st, args, 1)
-  let cal = terr(st, to_calendar_arg(helpers.arg_at(args, 2)))
+  let cal = rt_val.or_throw(st, to_calendar_arg(helpers.arg_at(args, 2)))
   let #(y, st) = truncated_int_arg_or(st, args, 3, 1972)
   case is_valid_iso_date(y, m, d) {
     False -> rt_val.t_throw_range_error(st, "invalid ISO month-day")
@@ -115,7 +116,7 @@ pub fn static(
 ) -> #(JsVal, Agent) {
   case name {
     TsFrom -> {
-      let #(#(m, d, ry, cal), st) =
+      let #(IsoDateSlots(IsoDate(ry, m, d), cal), st) =
         to_temporal_month_day(
           st,
           helpers.arg_at(args, 0),
@@ -133,7 +134,7 @@ pub fn to_temporal_month_day(
   st: Agent,
   item: JsVal,
   options: JsVal,
-) -> #(#(Int, Int, Int, tcal.Calendar), Agent) {
+) -> #(IsoDateSlots, Agent) {
   case classify(item) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
@@ -148,7 +149,7 @@ pub fn to_temporal_month_day(
         _ -> month_day_from_bag(st, h, options)
       }
     KStr(s) -> {
-      let md = terr(st, parse_month_day_string(s))
+      let md = rt_val.or_throw(st, parse_month_day_string(s))
       let #(_o, st) = get_overflow_option_from_value(st, options)
       #(md, st)
     }
@@ -164,11 +165,11 @@ fn month_day_from_bag(
   st: Agent,
   h: types.Handle,
   options: JsVal,
-) -> #(#(Int, Int, Int, tcal.Calendar), Agent) {
+) -> #(IsoDateSlots, Agent) {
   let #(cal, st) = read_bag_calendar(st, h)
   let #(fields, st) = read_date_fields(st, h, cal)
   let #(overflow, st) = get_overflow_option_from_value(st, options)
-  #(terr(st, resolve_calendar_month_day(cal, fields, overflow)), st)
+  #(rt_val.or_throw(st, resolve_calendar_month_day(cal, fields, overflow)), st)
 }
 
 type MdAnchor {
@@ -180,13 +181,13 @@ pub fn resolve_calendar_month_day(
   cal: tcal.Calendar,
   f: DateFields,
   overflow: Overflow,
-) -> Result(#(Int, Int, Int, tcal.Calendar), TErr) {
+) -> Result(IsoDateSlots, JsError) {
   use day <- result.try(case f.day {
-    None -> Error(TypeE("day is required"))
+    None -> Error(JsError(TypeError, "day is required"))
     Some(d) -> Ok(d)
   })
   use Nil <- result.try(case f.month, f.month_code {
-    None, None -> Error(TypeE("month or monthCode is required"))
+    None, None -> Error(JsError(TypeError, "month or monthCode is required"))
     _, _ -> Ok(Nil)
   })
   let has_year = f.year != None || { f.era != None && f.era_year != None }
@@ -199,14 +200,17 @@ pub fn resolve_calendar_month_day(
       }
       use date <- result.try(regulate_iso_date(ref_year, m, day, overflow))
       let d2 = int.min(date.day, days_in_month(1972, date.month))
-      Ok(#(date.month, d2, 1972, cal))
+      Ok(IsoDateSlots(IsoDate(1972, date.month, d2), cal))
     }
     _ -> {
       use anchor <- result.try(case has_year, f.month_code {
         True, _ -> Ok(AnchorFromYear)
         False, Some(mc) -> Ok(AnchorFromCode(mc))
         False, None ->
-          Error(TypeE("either year or monthCode required with month"))
+          Error(JsError(
+            TypeError,
+            "either year or monthCode required with month",
+          ))
       })
       use #(mc, day) <- result.try(case anchor {
         AnchorFromYear -> {
@@ -215,7 +219,8 @@ pub fn resolve_calendar_month_day(
           let year_last = tcal.date_to_epoch_days(cal, y + 1, 1, 1) - 1
           use Nil <- result.try(
             case year_first > max_epoch_days || year_last < min_epoch_days {
-              True -> Error(RangeE("year outside of supported range"))
+              True ->
+                Error(JsError(RangeError, "year outside of supported range"))
               False -> Ok(Nil)
             },
           )
@@ -233,14 +238,16 @@ pub fn resolve_calendar_month_day(
               )
             {
               Error(tcal.NeverValid) ->
-                Error(RangeE(
+                Error(JsError(
+                  RangeError,
                   "monthCode is not valid for calendar " <> tcal.identifier(cal),
                 ))
               _ -> Ok(Nil)
             },
           )
           case f.month {
-            Some(_) -> Error(TypeE("year is required when month is present"))
+            Some(_) ->
+              Error(JsError(TypeError, "year is required when month is present"))
             None -> Ok(#(mc, day))
           }
         }
@@ -254,14 +261,18 @@ pub fn resolve_calendar_month_day(
         {
           True ->
             case overflow {
-              Reject -> Error(RangeE("no reference year for monthCode and day"))
+              Reject ->
+                Error(JsError(
+                  RangeError,
+                  "no reference year for monthCode and day",
+                ))
               Constrain -> Ok(tcal.MonthCode(number: mc.number, leap: False))
             }
           False -> Ok(mc)
         },
       )
       use iso <- result.try(month_day_reference_iso(cal, mc, day, overflow))
-      Ok(#(iso.month, iso.day, iso.year, cal))
+      Ok(IsoDateSlots(iso, cal))
     }
   }
 }
@@ -275,7 +286,7 @@ fn chinese_ref_year_missing(num: Int, day: Int) -> Bool {
   }
 }
 
-fn probe_year_for_month_code(cal: tcal.Calendar, leap: Bool) -> Int {
+fn probe_year_for_month_code(cal: tcal.Calendar, leap leap: Bool) -> Int {
   case cal == tcal.Hebrew && leap {
     True -> 5779
     False -> {
@@ -290,7 +301,7 @@ pub fn getter(
   g: TemporalMonthDayGetter,
   this: JsVal,
 ) -> #(JsVal, Agent) {
-  let #(m, d, ry, cal) =
+  let IsoDateSlots(IsoDate(ry, m, d), cal) =
     require_temporal(
       st,
       this,
@@ -336,7 +347,7 @@ pub fn method(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(m, d, ry, cal) =
+  let IsoDateSlots(IsoDate(ry, m, d), cal) =
     require_temporal(
       st,
       this,
@@ -362,7 +373,7 @@ pub fn method(
     PmdEquals -> {
       let #(other, st) =
         to_temporal_month_day(st, helpers.arg_at(args, 0), mk_undefined())
-      #(mk_bool(#(m, d, ry, cal) == other), st)
+      #(mk_bool(IsoDateSlots(IsoDate(ry, m, d), cal) == other), st)
     }
     PmdWith -> with(st, protos, m, d, ry, cal, args)
     PmdToPlainDate -> to_plain_date(st, protos, m, d, ry, cal, args)
@@ -396,8 +407,9 @@ fn with(
     Some(_) -> f
     None -> DateFields(..f, day: Some(cd.day))
   }
-  let md = terr(st, resolve_calendar_month_day(cal, f, overflow))
-  make_month_day_cal(st, protos, md.0, md.1, md.2, md.3)
+  let md = rt_val.or_throw(st, resolve_calendar_month_day(cal, f, overflow))
+  let IsoDateSlots(IsoDate(year: ry2, month: m2, day: d2), cal2) = md
+  make_month_day_cal(st, protos, m2, d2, ry2, cal2)
 }
 
 fn to_plain_date(
@@ -415,8 +427,8 @@ fn to_plain_date(
       let #(year, st) = read_int_field(st, h, "year")
       case cal, year {
         tcal.Iso8601, Some(y) -> {
-          let date = terr(st, regulate_iso_date(y, m, d, Constrain))
-          let date = terr(st, check_date_limits(date))
+          let date = rt_val.or_throw(st, regulate_iso_date(y, m, d, Constrain))
+          let date = rt_val.or_throw(st, check_date_limits(date))
           make_date_cal(st, protos, date, cal)
         }
         tcal.Iso8601, None -> rt_val.t_throw_type_error(st, "year is required")
@@ -435,8 +447,9 @@ fn to_plain_date(
                   month_code: Some(mc),
                   year:,
                 )
-              let date = terr(st, resolve_calendar_date(cal, f, Constrain))
-              let date = terr(st, check_date_limits(date))
+              let date =
+                rt_val.or_throw(st, resolve_calendar_date(cal, f, Constrain))
+              let date = rt_val.or_throw(st, check_date_limits(date))
               make_date_cal(st, protos, date, cal)
             }
             False -> rt_val.t_throw_type_error(st, "year is required")

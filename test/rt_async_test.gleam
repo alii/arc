@@ -8,7 +8,7 @@ import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type JsVal, FnFlags, HostJob, JInt, KBool, KHandle, KNum, KStr,
-  Named, StringKey, classify, mk_number, mk_object, mk_string, mk_undefined,
+  Named, StringKey, classify, mk_int, mk_object, mk_string, mk_undefined,
 }
 import gleam/option.{None, Some}
 import rt_helpers
@@ -109,7 +109,7 @@ fn is_extensible(st: Agent, v: JsVal) -> Bool {
 
 pub fn promise_takes_own_properties_test() {
   let st = rt_helpers.agent()
-  let #(p, st) = promise_static(st, "resolve", mk_number(JInt(1)))
+  let #(p, st) = promise_static(st, "resolve", mk_int(1))
   let #(_, st) =
     rt_obj.t_set_prop(st, p, StringKey(Named("tag")), mk_string("t"))
   let #(tag, st) = rt_helpers.get(st, p, "tag")
@@ -149,7 +149,7 @@ pub fn promise_subclass_test() {
   let #(executor, st) =
     rt_helpers.func(st, fn(st, args) {
       let assert [resolve, ..] = args
-      rt_call.t_call_checked(st, resolve, mk_undefined(), [mk_number(JInt(1))])
+      rt_call.t_call(st, resolve, mk_undefined(), [mk_int(1)])
     })
   let #(inst_h, st) = rt_call.t_construct(st, p_ctor, [executor], p_ctor)
   let inst = mk_object(inst_h)
@@ -186,8 +186,7 @@ pub fn generator_object_is_extensible_with_own_props_test() {
   assert rt_obj.t_get_prototype_of(st, gen_h).0
     == Some(st.realm.generator.prototype)
   assert is_extensible(st, gen)
-  let #(_, st) =
-    rt_obj.t_set_prop(st, gen, StringKey(Named("x")), mk_number(JInt(5)))
+  let #(_, st) = rt_obj.t_set_prop(st, gen, StringKey(Named("x")), mk_int(5))
   let #(x, st) = rt_helpers.get(st, gen, "x")
   assert classify(x) == KNum(JInt(5))
   let next_value = fn(st) {

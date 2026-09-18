@@ -7,9 +7,9 @@ import arc/rt/types.{
   type Agent, type BuiltinPair, type GeneratorNative, type Handle, type JsVal,
   AsyncFunctionCtor, AsyncGeneratorFunctionCtor, AsyncGeneratorNext,
   AsyncGeneratorReturn, AsyncGeneratorThrow, BuiltinPair, GeneratorFunctionCtor,
-  GeneratorN, GeneratorNext, GeneratorReturn, GeneratorThrow, NativeFn,
-  NoElements, SObject, mk_object, mk_undefined,
-} as rt_types
+  GeneratorN, GeneratorNext, GeneratorReturn, GeneratorThrow, NativeFn, SObject,
+  mk_object, mk_undefined, plain_object,
+}
 import arc/rt/val as rt_val
 import gleam/dict
 import gleam/option.{type Option, None, Some}
@@ -99,7 +99,7 @@ pub fn init_async_function(
 fn init_function_intrinsic(
   st: Agent,
   name: String,
-  ctor_tag: rt_types.NativeToken,
+  ctor_token: types.NativeToken,
   fn_proto: Handle,
   fn_ctor: Handle,
   generator_proto: option.Option(Handle),
@@ -111,25 +111,22 @@ fn init_function_intrinsic(
   let #(ctor_h, st) =
     rt_store.t_cell_new(
       st,
-      SObject(
-        kind: NativeFn(token: ctor_tag, name:, length: 1, constructible: True),
-        proto: Some(fn_ctor),
-        props: common.named_props([
+      plain_object(
+        NativeFn(token: ctor_token, name:, length: 1, constructible: True),
+        Some(fn_ctor),
+        common.named_props([
           #("length", len_p),
           #("name", name_p),
           #("prototype", proto_p),
         ]),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
       ),
     )
   let st = rt_store.t_pin_root(st, ctor_h)
-  let #(ctor_prop, st) = common.frozen_property(st, mk_object(ctor_h))
+  let #(ctor_prop, st) = rt_store.t_frozen_property(st, mk_object(ctor_h))
   let ctor_prop = common.make_configurable(ctor_prop)
   let #(proto_props, st) = case generator_proto {
     Some(gp) -> {
-      let #(gp_prop, st) = common.frozen_property(st, mk_object(gp))
+      let #(gp_prop, st) = rt_store.t_frozen_property(st, mk_object(gp))
       #(
         [
           #("constructor", ctor_prop),
@@ -150,7 +147,7 @@ fn init_function_intrinsic(
     })
   let st = case generator_proto {
     Some(gp) -> {
-      let #(bp, st) = common.frozen_property(st, mk_object(gfn_proto))
+      let #(bp, st) = rt_store.t_frozen_property(st, mk_object(gfn_proto))
       common.add_named_property(
         st,
         gp,

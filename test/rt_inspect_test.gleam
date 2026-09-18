@@ -2,14 +2,14 @@ import arc/rt/builtins/console as b_console
 import arc/rt/inspect
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  JFloat, JInt, Named, StringKey, mk_bigint, mk_hole, mk_number, mk_string,
+  JFloat, Named, StringKey, mk_bigint, mk_hole, mk_int, mk_number, mk_string,
   mk_undefined,
 }
 import rt_helpers
 
 pub fn renders_structures_test() {
   let st = rt_helpers.agent()
-  let #(inner, st) = rt_obj.t_new_array(st, [mk_number(JInt(1)), mk_hole()])
+  let #(inner, st) = rt_obj.t_new_array(st, [mk_int(1), mk_hole()])
   let #(o, st) = rt_obj.t_new_object_literal(st)
   let #(_, st) = rt_obj.t_set_prop(st, o, StringKey(Named("a")), inner)
   let #(_, st) = rt_obj.t_set_prop(st, o, StringKey(Named("self")), o)

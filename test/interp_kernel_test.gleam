@@ -3,15 +3,11 @@ import arc/interp/kernel
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type JsVal, Index, JFloat, JInt, KHandle, KNum, KStr, KUndef, Named, StringKey,
-  classify, mk_number, mk_string, mk_undefined,
+  classify, mk_int, mk_number, mk_string, mk_undefined,
 }
 import arc/rt/val.{is_miss} as rt_val
 import gleam/option.{None, Some}
 import rt_helpers
-
-fn mk_int(i: Int) -> JsVal {
-  mk_number(JInt(i))
-}
 
 pub fn add_numbers_and_strings_test() {
   assert classify(kernel.add(mk_int(1), mk_int(2))) == KNum(JInt(3))
@@ -67,12 +63,14 @@ pub fn get_and_put_field_test() {
   assert is_miss(kernel.get_field(st, mk_undefined(), key.Named("x")))
   assert kernel.type_of(st.store, obj) == "object"
   assert kernel.type_of(st.store, mk_int(0)) == "number"
-  let store = kernel.put_field(st.store, obj, key.Named("x"), mk_int(43), True)
+  let store =
+    kernel.put_field(st.store, obj, key.Named("x"), mk_int(43), create: True)
   assert !is_miss(store)
   let st = types.Agent(..st, store:)
   let #(v, st) = rt_obj.t_get_prop(st, obj, StringKey(Named("x")))
   assert classify(v) == KNum(JInt(43))
-  let store = kernel.put_field(st.store, obj, key.Named("y"), mk_int(1), True)
+  let store =
+    kernel.put_field(st.store, obj, key.Named("y"), mk_int(1), create: True)
   assert !is_miss(store)
   let st = types.Agent(..st, store:)
   let #(keys, st) = rt_obj.t_own_keys(st, handle_of(obj))
@@ -90,7 +88,7 @@ pub fn get_and_put_field_test() {
     obj,
     key.Named("__proto__"),
     mk_int(1),
-    True,
+    create: True,
   ))
   let #(_, st) = rt_obj.t_prevent_extensions(st, handle_of(obj))
   assert is_miss(kernel.put_field(
@@ -98,7 +96,7 @@ pub fn get_and_put_field_test() {
     obj,
     key.Named("z"),
     mk_int(1),
-    True,
+    create: True,
   ))
 }
 
@@ -144,8 +142,8 @@ pub fn put_elem_inherited_setter_on_append_misses_test() {
       StringKey(Index(2)),
       None,
       Some(setter),
-      True,
-      True,
+      enumerable: True,
+      configurable: True,
     )
   assert is_miss(kernel.put_elem(st.store, arr, mk_int(2), mk_int(30)))
   assert !is_miss(kernel.put_elem(st.store, arr, mk_int(1), mk_int(21)))
@@ -163,9 +161,9 @@ pub fn put_elem_inherited_readonly_on_hole_fill_misses_test() {
       proto,
       StringKey(Index(1)),
       mk_string("proto"),
-      False,
-      True,
-      True,
+      writable: False,
+      enumerable: True,
+      configurable: True,
     )
   assert is_miss(kernel.put_elem(st.store, arr, mk_int(1), mk_int(9)))
 }
@@ -179,9 +177,9 @@ pub fn put_elem_frozen_length_on_append_misses_test() {
       handle_of(arr),
       StringKey(Named("length")),
       mk_int(2),
-      False,
-      False,
-      False,
+      writable: False,
+      enumerable: False,
+      configurable: False,
     )
   assert is_miss(kernel.put_elem(st.store, arr, mk_int(2), mk_int(3)))
   assert !is_miss(kernel.put_elem(st.store, arr, mk_int(0), mk_int(7)))
@@ -204,8 +202,8 @@ pub fn put_elem_sparse_hole_walks_chain_test() {
       StringKey(Index(5)),
       None,
       Some(setter),
-      True,
-      True,
+      enumerable: True,
+      configurable: True,
     )
   assert is_miss(kernel.put_elem(st.store, arr, mk_int(5), mk_int(7)))
 }

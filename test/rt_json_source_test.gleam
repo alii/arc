@@ -2,7 +2,7 @@ import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type JsVal, DataProperty, FnFlags, JFloat, JInt, KBool, KHandle,
-  KNum, KStr, StringKey, canonical_key, classify, mk_number, mk_string,
+  KNum, KStr, StringKey, canonical_key, classify, mk_int, mk_string,
 }
 import gleam/int
 import gleam/list
@@ -226,7 +226,7 @@ fn forward_modifier(
 // test262: reviver-forward-modifies-object.js
 pub fn array_forward_modification_drops_source_test() {
   let st = rt_helpers.agent()
-  let #(f, st) = forward_modifier(st, "0", "1", mk_number(JInt(42)))
+  let #(f, st) = forward_modifier(st, "0", "1", mk_int(42))
   let #(o, st) = json(st, "parse", [mk_string("[1, 2]"), f])
   assert calls() == [#("0", Some("1")), #("1", None), #("", None)]
   let #(second, st) = rt_obj.t_get_prop(st, o, key("1"))
@@ -260,10 +260,10 @@ pub fn chained_forward_modifications_test() {
       let assert KStr(name) = classify(k)
       let st = record_call(st, args)
       let st = case name {
-        "a" -> rt_obj.t_set_prop(st, this, key("b"), mk_number(JInt(2))).1
+        "a" -> rt_obj.t_set_prop(st, this, key("b"), mk_int(2)).1
         "b" -> {
           assert num(v) == 2.0
-          rt_obj.t_set_prop(st, this, key("c"), mk_number(JInt(3))).1
+          rt_obj.t_set_prop(st, this, key("c"), mk_int(3)).1
         }
         "c" -> {
           assert num(v) == 3.0

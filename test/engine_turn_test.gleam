@@ -4,7 +4,7 @@ import arc/module_host
 import arc/rt/async as rt_async
 import arc/rt/gc as rt_gc
 import arc/rt/types.{
-  type Agent, type JsVal, Agent, JInt, JsStore, KHandle, classify, mk_number,
+  type Agent, type JsVal, Agent, JsStore, KHandle, classify, mk_int,
   mk_undefined,
 }
 import gleam/set
@@ -107,8 +107,7 @@ fn call_many(eng: Engine(host), work: JsVal, left: Int) -> Engine(host) {
     0 -> eng
     _ -> {
       let n = 300 + left
-      let #(outcome, eng) =
-        engine.call(eng, work, mk_undefined(), [mk_number(JInt(n))])
+      let #(outcome, eng) = engine.call(eng, work, mk_undefined(), [mk_int(n)])
       let assert Returned(v) = outcome
       assert is_live_and_unpinned(eng, v)
       let #(last, _) = rt_helpers.get(engine.heap(eng), v, "last")
@@ -130,7 +129,7 @@ pub fn call_folds_throws_test() {
   let assert Threw(e) = outcome
   assert is_live_and_unpinned(eng, e)
   assert string.contains(engine.format_error(eng, e), "TypeError: kept 123")
-  let #(outcome, eng) = engine.call(eng, mk_number(JInt(3)), mk_undefined(), [])
+  let #(outcome, eng) = engine.call(eng, mk_int(3), mk_undefined(), [])
   let assert Threw(e) = outcome
   assert string.contains(engine.format_error(eng, e), "TypeError")
 }

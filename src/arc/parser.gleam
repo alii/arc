@@ -222,7 +222,7 @@ fn allowing_in(
   p: Parser,
   then: fn(Parser) -> Result(#(Parser, a), ParseError),
 ) -> Result(#(Parser, a), ParseError) {
-  with_allow_in(p, True, then)
+  with_allow_in(p, allow_in: True, then:)
 }
 
 // [~In] for the duration of then, as in a for head
@@ -230,13 +230,13 @@ fn disallowing_in(
   p: Parser,
   then: fn(Parser) -> Result(#(Parser, a), ParseError),
 ) -> Result(#(Parser, a), ParseError) {
-  with_allow_in(p, False, then)
+  with_allow_in(p, allow_in: False, then:)
 }
 
 fn with_allow_in(
   p: Parser,
-  allow_in: Bool,
-  then: fn(Parser) -> Result(#(Parser, a), ParseError),
+  allow_in allow_in: Bool,
+  then then: fn(Parser) -> Result(#(Parser, a), ParseError),
 ) -> Result(#(Parser, a), ParseError) {
   let saved = p.ctx.allow_in
   use <- bool.lazy_guard(saved == allow_in, fn() { then(p) })

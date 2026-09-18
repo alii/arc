@@ -3,10 +3,11 @@ import arc/rt/builtins/error as b_error
 import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
+import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type DomExceptionNative, type Handle, type JsVal,
-  DomExceptionConstructor, DomExceptionGetCode, DomExceptionN, JInt, KHandle,
-  KUndef, Named, StringKey, classify, mk_number, mk_object, mk_string,
+  DomExceptionConstructor, DomExceptionGetCode, DomExceptionN, KHandle, KUndef,
+  Named, StringKey, classify, mk_int, mk_object, mk_string,
 }
 import arc/rt/val as rt_val
 
@@ -64,8 +65,8 @@ fn construct(
       let #(msg_arg, name_arg) = helpers.two_args_or_undefined(args)
       let #(message, st) = arg_string(st, msg_arg, "")
       let #(name, st) = arg_string(st, name_arg, "Error")
-      let #(msg_prop, st) = common.builtin_property(st, mk_string(message))
-      let #(name_prop, st) = common.builtin_property(st, mk_string(name))
+      let #(msg_prop, st) = rt_store.t_builtin_property(st, mk_string(message))
+      let #(name_prop, st) = rt_store.t_builtin_property(st, mk_string(name))
       let #(h, st) =
         common.alloc_error_object(st, proto, [
           #("message", msg_prop),
@@ -90,9 +91,9 @@ fn get_code(st: Agent, this: JsVal) -> #(JsVal, Agent) {
       let #(name_val, st) =
         rt_obj.t_get_prop(st, this, StringKey(Named("name")))
       let #(name, st) = rt_val.t_to_string(st, name_val)
-      #(mk_number(JInt(legacy_code(name))), st)
+      #(mk_int(legacy_code(name)), st)
     }
-    _ -> #(mk_number(JInt(0)), st)
+    _ -> #(mk_int(0), st)
   }
 }
 

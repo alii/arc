@@ -1,3 +1,4 @@
+import arc/bytecode/error_kind.{type JsError}
 import arc/internal/gregorian.{days_in_month}
 import arc/internal/int_math.{trunc_div, trunc_mod}
 import arc/internal/temporal_calendar as tcal
@@ -12,9 +13,9 @@ import arc/rt/builtins/temporal_fields.{
   compare_iso_date, compare_triple, iso_date_add, round_between,
 }
 import arc/rt/builtins/temporal_iso.{
-  type Duration, type IsoDate, type IsoTime, type TErr, Constrain, Duration,
-  IsoDate, add_days, epoch_days, int_sign, midnight, ns_per_day, time_to_ns,
-  utc_epoch_ns, zero_duration,
+  type Duration, type IsoDate, type IsoTime, Constrain, Duration, IsoDate,
+  add_days, epoch_days, int_sign, midnight, ns_per_day, time_to_ns, utc_epoch_ns,
+  zero_duration,
 }
 import arc/rt/builtins/temporal_zoned_ops.{
   check_iso_days_range, get_epoch_ns_for,
@@ -64,7 +65,7 @@ pub fn difference_calendar_date(
   smallest: Unit,
   inc: Int,
   mode: RoundingMode,
-) -> Result(Duration, TErr) {
+) -> Result(Duration, JsError) {
   let sign = compare_iso_date(d2, d1)
   case sign == 0 {
     True -> Ok(zero_duration)
@@ -173,8 +174,8 @@ pub fn find_enclosing_window(
   count: Int,
   step: Int,
   dest_ns: Int,
-  bound_ns: fn(Int) -> Result(Int, TErr),
-) -> Result(Window, TErr) {
+  bound_ns: fn(Int) -> Result(Int, JsError),
+) -> Result(Window, JsError) {
   use start_ns <- result.try(bound_ns(count))
   let next = count + step * sign
   use end_ns <- result.try(bound_ns(next))
@@ -196,7 +197,7 @@ fn nudge_calendar_unit(
   inc: Int,
   mode: RoundingMode,
   zoned zoned: Bool,
-) -> Result(#(Duration, Bool, Int), TErr) {
+) -> Result(#(Duration, Bool, Int), JsError) {
   let #(years, months, weeks, days) = ymwd
   let #(whole, with_count) = case unit {
     Year -> #(years, fn(r) { Duration(..zero_duration, years: r) })
@@ -296,7 +297,7 @@ pub fn round_relative_date_duration(
   inc: Int,
   mode: RoundingMode,
   zoned zoned: Bool,
-) -> Result(Duration, TErr) {
+) -> Result(Duration, JsError) {
   let sign = case int_sign(dest_ns - utc_epoch_ns(origin.0, origin.1)) {
     -1 -> -1
     _ -> 1
@@ -334,7 +335,7 @@ pub fn diff_date_time_core(
   inc: Int,
   mode: RoundingMode,
   zoned zoned: Bool,
-) -> Result(Duration, TErr) {
+) -> Result(Duration, JsError) {
   let date_sign = compare_iso_date(b.0, a.0)
   let #(b_date, time_diff) =
     adjust_date_for_time_sign(date_sign, b.0, time_to_ns(b.1) - time_to_ns(a.1))
@@ -410,7 +411,7 @@ pub fn zoned_diff_round_time(
   smallest: Unit,
   inc: Int,
   mode: RoundingMode,
-) -> Result(Duration, TErr) {
+) -> Result(Duration, JsError) {
   let #(a_d, a_t) = epoch_ns_to_iso_in(tz, a_ns)
   let #(b_d, b_t) = epoch_ns_to_iso_in(tz, b_ns)
   let sign = case b_ns < a_ns {
@@ -460,7 +461,7 @@ fn zoned_nudge_time(
   smallest: Unit,
   inc: Int,
   mode: RoundingMode,
-) -> Result(Duration, TErr) {
+) -> Result(Duration, JsError) {
   let #(a_d, a_t) = a_dt
   let #(years, months, weeks, days) = ymwd
   use smallest_time_unit <- result.try(require_time_unit(smallest))

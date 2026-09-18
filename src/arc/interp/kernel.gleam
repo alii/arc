@@ -144,7 +144,7 @@ pub type Sentinel {
 pub fn is(v: a, s: Sentinel) -> Bool
 
 @external(erlang, "erlang", "=:=")
-pub fn is_bool(v: JsVal, b: Bool) -> Bool
+pub fn is_bool(v: JsVal, expected expected: Bool) -> Bool
 
 @external(erlang, "erlang", "=:=")
 pub fn same(a: JsVal, b: JsVal) -> Bool
@@ -255,7 +255,7 @@ pub fn put_global(
   global: Handle,
   name: String,
   v: JsVal,
-  strict: Bool,
+  strict strict: Bool,
 ) -> JsStore(Agent)
 
 @external(erlang, "arc_interp_prop_ffi", "get_elem")
@@ -270,7 +270,7 @@ pub fn put_field(
   obj: JsVal,
   key: PropertyKey,
   v: JsVal,
-  create: Bool,
+  create create: Bool,
 ) -> JsStore(Agent)
 
 @external(erlang, "arc_interp_prop_ffi", "new_object")
@@ -314,8 +314,8 @@ pub fn frame_locals(
   local_count: Int,
 ) -> TupleArray(JsVal)
 
-@external(erlang, "arc_interp_locals_ffi", "bind_this")
-pub fn bind_this(this: JsVal, global: Handle) -> JsVal
+@external(erlang, "arc_interp_locals_ffi", "sloppy_this")
+pub fn sloppy_this(this: JsVal, global: Handle) -> JsVal
 
 @external(erlang, "arc_interp_locals_ffi", "flush_regs")
 pub fn flush_regs(

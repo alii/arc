@@ -7,7 +7,7 @@ pub fn to_lower_case(s: String) -> String {
   let cps = string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
   case list.contains(cps, 0x03A3) {
     False -> string.lowercase(s)
-    True -> sigma_assemble(split_cps_on_sigma(cps, [], []), True)
+    True -> sigma_assemble(split_cps_on_sigma(cps, [], []), is_first: True)
   }
 }
 
@@ -23,7 +23,7 @@ fn split_cps_on_sigma(
   }
 }
 
-fn sigma_assemble(parts: List(List(Int)), is_first: Bool) -> String {
+fn sigma_assemble(parts: List(List(Int)), is_first is_first: Bool) -> String {
   case parts {
     [] -> ""
     [last] -> lowercase_cps(last)
@@ -44,7 +44,7 @@ fn sigma_assemble(parts: List(List(Int)), is_first: Bool) -> String {
         True -> "\u{03C2}"
         False -> "\u{03C3}"
       }
-      lowercase_cps(part) <> sigma <> sigma_assemble(rest, False)
+      lowercase_cps(part) <> sigma <> sigma_assemble(rest, is_first: False)
     }
   }
 }

@@ -848,9 +848,9 @@ pub fn block_child_scopes(tree: ScopeTree, id: ScopeId) -> List(ScopeId) {
 pub fn new_emitter(
   tree: ScopeTree,
   root: ScopeId,
-  strict: Bool,
-  module_name: String,
-  dispatch: EmitDispatch,
+  strict strict: Bool,
+  module_name module_name: String,
+  dispatch dispatch: EmitDispatch,
 ) -> Emitter {
   Emitter(
     scope_tree: tree,
@@ -1003,7 +1003,7 @@ fn scope_within(tree: ScopeTree, id: ScopeId, ancestor: ScopeId) -> Bool {
 
 pub fn enter_for_scope(
   e: Emitter,
-  has_lex_head: Bool,
+  has_lex_head has_lex_head: Bool,
 ) -> #(Emitter, Option(ScopeSnapshot)) {
   case has_lex_head {
     True -> {

@@ -48,9 +48,9 @@ pub fn raw_json_is_a_brand_not_a_shape_test() {
       fake_h,
       key("rawJSON"),
       mk_string("12"),
-      False,
-      True,
-      False,
+      writable: False,
+      enumerable: True,
+      configurable: False,
     )
   let #(_, st) = rt_obj.t_prevent_extensions(st, fake_h)
   let fake = mk_object(fake_h)

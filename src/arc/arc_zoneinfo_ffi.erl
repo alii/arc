@@ -59,8 +59,8 @@ detected_zone() ->
 -spec time_zone_named(binary()) -> {ok, arc_tz_ffi:local_zone()} | {error, nil}.
 time_zone_named(Name) when is_binary(Name) ->
     case arc_tz_ffi:lookup(Name) of
-        {error, nil} -> {error, nil};
-        {ok, Id} ->
+        none -> {error, nil};
+        {some, Id} ->
             case zone_for_id(Id) of
                 none -> {error, nil};
                 Zone -> {ok, Zone}
@@ -130,8 +130,8 @@ zone_from_path_or_posix(Tz) ->
     case zone_from_path(Tz) of
         none ->
             case arc_tz_ffi:posix_zone(unicode:characters_to_binary(Tz)) of
-                {ok, Zone} -> Zone;
-                {error, nil} -> none
+                {some, Zone} -> Zone;
+                none -> none
             end;
         Zone -> Zone
     end.
@@ -139,8 +139,8 @@ zone_from_path_or_posix(Tz) ->
 known_zone("") -> none;
 known_zone(Name) ->
     case arc_tz_ffi:lookup(unicode:characters_to_binary(Name)) of
-        {ok, Id} -> zone_for_id(Id);
-        {error, nil} -> host_only_zone(Name)
+        {some, Id} -> zone_for_id(Id);
+        none -> host_only_zone(Name)
     end.
 
 %% a zone the os ships but the bundled table doesn't know

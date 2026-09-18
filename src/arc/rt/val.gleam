@@ -1,15 +1,19 @@
 //// §7.1 type conversion and §7.2 comparison
 
+import arc/bytecode/error_kind.{
+  type ErrorKind, type JsError, JsError, RangeError, ReferenceError, SyntaxError,
+  TypeError,
+}
 import arc/rt/js_string
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type ErrorKind, type Handle, type JsNum, type JsOps, type JsVal,
-  type ObjectKey, type SymbolId, type ToPrimHint, BoundFn, BytecodeFn,
-  CompiledFn, HintDefault, HintNumber, HintString, Index, JFloat, JInt, JNan,
-  JNegInf, JPosInf, KBig, KBool, KHandle, KNull, KNum, KStr, KSym, KTdz, KUndef,
-  Named, NativeFn, ProxyObj, RangeErr, ReferenceErr, SObject, StringKey,
-  SymbolKey, SyntaxErr, TypeErr, array_index_of_float, canonical_key, classify,
-  index_key, mk_number, mk_object, mk_string, symbol_to_primitive,
+  type Agent, type Handle, type JsNum, type JsOps, type JsVal, type ObjectKey,
+  type SymbolId, type ToPrimHint, BoundFn, BytecodeFn, CompiledFn, HintDefault,
+  HintNumber, HintString, Index, JFloat, JInt, JNan, JNegInf, JPosInf, KBig,
+  KBool, KHandle, KNull, KNum, KStr, KSym, KTdz, KUndef, Named, NativeFn,
+  ProxyObj, SObject, StringKey, SymbolKey, array_index_of_float, canonical_key,
+  classify, index_key, mk_int, mk_number, mk_object, mk_string,
+  symbol_to_primitive,
 }
 import gleam/bit_array
 import gleam/float
@@ -22,25 +26,42 @@ fn require_ops(st: Agent) -> JsOps(Agent) {
   st.store.ops
 }
 
-fn t_throw_error(st: Agent, kind: ErrorKind, msg: String) -> a {
+// allocates the realm's error object without throwing it
+pub fn t_new_error(st: Agent, kind: ErrorKind, msg: String) -> #(JsVal, Agent) {
+  require_ops(st).new_error(st, kind, msg)
+}
+
+pub fn t_throw(st: Agent, error: JsError) -> a {
+  let JsError(kind:, message:) = error
+  throw_kind(st, kind, message)
+}
+
+pub fn or_throw(st: Agent, r: Result(a, JsError)) -> a {
+  case r {
+    Ok(v) -> v
+    Error(e) -> t_throw(st, e)
+  }
+}
+
+fn throw_kind(st: Agent, kind: ErrorKind, msg: String) -> a {
   let #(err, st) = require_ops(st).new_error(st, kind, msg)
   rt_store.t_throw(st, err)
 }
 
 pub fn t_throw_type_error(st: Agent, msg: String) -> a {
-  t_throw_error(st, TypeErr, msg)
+  throw_kind(st, TypeError, msg)
 }
 
 pub fn t_throw_range_error(st: Agent, msg: String) -> a {
-  t_throw_error(st, RangeErr, msg)
+  throw_kind(st, RangeError, msg)
 }
 
 pub fn t_throw_reference_error(st: Agent, msg: String) -> a {
-  t_throw_error(st, ReferenceErr, msg)
+  throw_kind(st, ReferenceError, msg)
 }
 
 pub fn t_throw_syntax_error(st: Agent, msg: String) -> a {
-  t_throw_error(st, SyntaxErr, msg)
+  throw_kind(st, SyntaxError, msg)
 }
 
 // §9.1.1.1.5/6 tdz read throws referenceerror
@@ -93,6 +114,13 @@ pub fn is_object(v: JsVal) -> Bool {
   }
 }
 
+pub fn handle_of(v: JsVal) -> Option(Handle) {
+  case classify(v) {
+    KHandle(h) -> Some(h)
+    _ -> None
+  }
+}
+
 // §7.1.2 toboolean
 @external(erlang, "arc_rt_val_ffi", "to_boolean")
 pub fn to_boolean(v: JsVal) -> Bool
@@ -122,10 +150,10 @@ pub fn nullish_label(v: JsVal) -> String {
 }
 
 // §7.2.3 iscallable, call survives proxy revocation so ignore revoked
-pub fn t_is_callable(st: Agent, v: JsVal) -> #(Bool, Agent) {
+pub fn is_callable(st: Agent, v: JsVal) -> Bool {
   case classify(v) {
-    KHandle(h) -> #(handle_is_callable(st, h), st)
-    _ -> #(False, st)
+    KHandle(h) -> handle_is_callable(st, h)
+    _ -> False
   }
 }
 
@@ -141,21 +169,21 @@ fn handle_is_callable(st: Agent, h: Handle) -> Bool {
 }
 
 // §13.5.3 typeof
-pub fn t_type_of(st: Agent, v: JsVal) -> #(String, Agent) {
+pub fn type_of(st: Agent, v: JsVal) -> String {
   case classify(v) {
-    KUndef -> #("undefined", st)
-    KNull -> #("object", st)
-    KBool(_) -> #("boolean", st)
-    KNum(_) -> #("number", st)
-    KStr(_) -> #("string", st)
-    KBig(_) -> #("bigint", st)
-    KSym(_) -> #("symbol", st)
+    KUndef -> "undefined"
+    KNull -> "object"
+    KBool(_) -> "boolean"
+    KNum(_) -> "number"
+    KStr(_) -> "string"
+    KBig(_) -> "bigint"
+    KSym(_) -> "symbol"
     KHandle(h) ->
       case handle_is_callable(st, h) {
-        True -> #("function", st)
-        False -> #("object", st)
+        True -> "function"
+        False -> "object"
       }
-    KTdz -> #("undefined", st)
+    KTdz -> "undefined"
   }
 }
 
@@ -186,8 +214,7 @@ pub fn t_to_primitive(
       case is_nullish(exotic) {
         True -> t_ordinary_to_primitive(st, h, hint)
         False -> {
-          let #(callable, st) = t_is_callable(st, exotic)
-          case callable {
+          case is_callable(st, exotic) {
             True -> {
               let hint_str = case hint {
                 HintString -> "string"
@@ -251,10 +278,10 @@ pub fn t_ordinary_to_primitive(
     HintString -> ["toString", "valueOf"]
     HintNumber | HintDefault -> ["valueOf", "toString"]
   }
-  try_primitive_methods(st, h, method_names)
+  call_primitive_methods(st, h, method_names)
 }
 
-fn try_primitive_methods(
+fn call_primitive_methods(
   st: Agent,
   h: Handle,
   method_names: List(String),
@@ -265,16 +292,15 @@ fn try_primitive_methods(
     [name, ..rest] -> {
       let ops = require_ops(st)
       let #(method, st) = get_named(st, receiver, name)
-      let #(callable, st) = t_is_callable(st, method)
-      case callable {
+      case is_callable(st, method) {
         True -> {
           let #(result, st) = ops.call(st, method, receiver, [])
           case is_object(result) {
             False -> #(result, st)
-            True -> try_primitive_methods(st, h, rest)
+            True -> call_primitive_methods(st, h, rest)
           }
         }
-        False -> try_primitive_methods(st, h, rest)
+        False -> call_primitive_methods(st, h, rest)
       }
     }
   }
@@ -610,9 +636,9 @@ pub fn t_to_numeric(st: Agent, v: JsVal) -> #(JsVal, Agent) {
     KBig(_) -> #(v, st)
     KNum(_) -> #(v, st)
     KStr(s) -> #(mk_number(string_to_number(s)), st)
-    KBool(True) -> #(mk_number(JInt(1)), st)
-    KBool(False) -> #(mk_number(JInt(0)), st)
-    KNull -> #(mk_number(JInt(0)), st)
+    KBool(True) -> #(mk_int(1), st)
+    KBool(False) -> #(mk_int(0), st)
+    KNull -> #(mk_int(0), st)
     KUndef -> #(mk_number(JNan), st)
     KSym(_) -> t_throw_type_error(st, "Cannot convert Symbol to number")
     KHandle(_) -> {
