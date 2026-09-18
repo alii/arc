@@ -6,6 +6,7 @@ import arc/rt/types.{
   type Agent, type JsVal, JInt, JNan, KNum, KStr, classify, mk_number, mk_object,
   mk_string,
 }
+import arc/zoneinfo
 import gleam/list
 import rt_helpers
 
@@ -14,7 +15,7 @@ fn agent_in(zone: host_time.TimeZone) -> Agent {
 }
 
 fn new_york() -> Agent {
-  let assert Ok(zone) = host_time.time_zone_named("America/New_York")
+  let assert Ok(zone) = zoneinfo.time_zone_named("America/New_York")
   agent_in(zone)
 }
 
