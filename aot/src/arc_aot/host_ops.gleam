@@ -8,6 +8,7 @@ pub fn table() -> DirectHost {
   let store = "arc@rt@store"
   let val = "arc@rt@val"
   let val_ffi = "arc_rt_val_ffi"
+  let str_ffi = "arc_rt_str_ffi"
   let obj = "arc@rt@obj"
   let obj_ffi = "arc_rt_obj_ffi"
   let obj_fast_ffi = "arc_rt_obj_fast_ffi"
@@ -57,7 +58,7 @@ pub fn table() -> DirectHost {
       #("float_lit", HostOp(erl, "binary_to_float", Pure)),
       #("empty_list", HostOp(val, "empty_list", Pure)),
       #("list_append_one", HostOp(val, "list_append_one", Pure)),
-      #("string_concat", HostOp(val, "string_concat", Pure)),
+      #("string_concat", HostOp(str_ffi, "concat_loose", Pure)),
       #("to_numeric", HostOp(val, "t_to_numeric", Mut)),
       #("tdz_check", HostOp(val, "t_tdz_check", MutUnit)),
       #("check_this", HostOp(val, "t_check_this", MutUnit)),

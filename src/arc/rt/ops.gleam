@@ -1,3 +1,4 @@
+import arc/rt/js_string
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -745,14 +746,25 @@ fn bigint_pow_loop(base: Int, exp: Int, acc: Int) -> Int {
   }
 }
 
+// keeps a string as is so concat never rescans it
+fn string_val(st: Agent, v: JsVal) -> #(JsVal, Agent) {
+  case classify(v) {
+    KStr(_) -> #(v, st)
+    _ -> {
+      let #(s, st) = rt_val.t_to_string(st, v)
+      #(mk_string(s), st)
+    }
+  }
+}
+
 pub fn t_add(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(pa, st) = rt_val.t_to_primitive(st, a, HintDefault)
   let #(pb, st) = rt_val.t_to_primitive(st, b, HintDefault)
   case classify(pa), classify(pb) {
     KStr(_), _ | _, KStr(_) -> {
-      let #(sa, st) = rt_val.t_to_string(st, pa)
-      let #(sb, st) = rt_val.t_to_string(st, pb)
-      #(mk_string(sa <> sb), st)
+      let #(sa, st) = string_val(st, pa)
+      let #(sb, st) = string_val(st, pb)
+      #(js_string.concat(sa, sb), st)
     }
     _, _ -> {
       let #(na, st) = rt_val.t_to_numeric(st, pa)

@@ -9,6 +9,8 @@
          t_bitand_fast/2, t_bitor_fast/2, t_bitxor_fast/2,
          t_shl_fast/2, t_shr_fast/2, t_ushr_fast/2, t_bitnot_fast/1]).
 
+-include("arc_rt_layout.hrl").
+
 -define(MAX_SAFE_INT, 9007199254740991).
 -define(IS_INF(X), (X =:= js_inf orelse X =:= js_neg_inf)).
 -define(IS_NUM(X), (is_float(X) orelse is_integer(X) orelse X =:= js_nan
@@ -30,15 +32,15 @@ add(A, B) when is_number(A), is_number(B) ->
     catch error:badarith -> inf_val(A < 0)
     end;
 add(A, B) when is_binary(A), is_binary(B) -> <<A/binary, B/binary>>;
-add(A, B) when is_binary(A) ->
+add(A, B) when ?IS_STR(A) ->
     case str_of(B) of
         miss -> miss;
-        S -> <<A/binary, S/binary>>
+        S -> arc_rt_str_ffi:concat(A, S)
     end;
-add(A, B) when is_binary(B) ->
+add(A, B) when ?IS_STR(B) ->
     case str_of(A) of
         miss -> miss;
-        S -> <<S/binary, B/binary>>
+        S -> arc_rt_str_ffi:concat(S, B)
     end;
 add({js_bigint, A}, {js_bigint, B}) -> {js_bigint, A + B};
 add(A, B) -> nonfinite_add(A, B).
@@ -53,6 +55,7 @@ nonfinite_add(A, js_inf) when is_number(A) -> js_inf;
 nonfinite_add(A, js_neg_inf) when is_number(A) -> js_neg_inf;
 nonfinite_add(_, _) -> miss.
 
+str_of(S) when ?IS_STR(S) -> S;
 str_of(N) when is_integer(N) -> integer_to_binary(N);
 str_of(F) when is_float(F) -> arc_rt_val_ffi:js_number_to_string(F);
 str_of(undefined) -> <<"undefined">>;
@@ -184,21 +187,25 @@ step(_, _) -> miss.
 
 lt(A, B) when is_number(A), is_number(B) -> A < B;
 lt(A, B) when is_binary(A), is_binary(B) -> A < B;
+lt(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_str_ffi:bin(A) < arc_rt_str_ffi:bin(B);
 lt({js_bigint, A}, {js_bigint, B}) -> A < B;
 lt(A, B) -> cmp_nonfinite(A, B, lt).
 
 le(A, B) when is_number(A), is_number(B) -> A =< B;
 le(A, B) when is_binary(A), is_binary(B) -> A =< B;
+le(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_str_ffi:bin(A) =< arc_rt_str_ffi:bin(B);
 le({js_bigint, A}, {js_bigint, B}) -> A =< B;
 le(A, B) -> cmp_nonfinite(A, B, le).
 
 gt(A, B) when is_number(A), is_number(B) -> A > B;
 gt(A, B) when is_binary(A), is_binary(B) -> A > B;
+gt(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_str_ffi:bin(A) > arc_rt_str_ffi:bin(B);
 gt({js_bigint, A}, {js_bigint, B}) -> A > B;
 gt(A, B) -> cmp_nonfinite(A, B, gt).
 
 ge(A, B) when is_number(A), is_number(B) -> A >= B;
 ge(A, B) when is_binary(A), is_binary(B) -> A >= B;
+ge(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_str_ffi:bin(A) >= arc_rt_str_ffi:bin(B);
 ge({js_bigint, A}, {js_bigint, B}) -> A >= B;
 ge(A, B) -> cmp_nonfinite(A, B, ge).
 
@@ -247,7 +254,7 @@ eq({js_cell, A}, {js_cell, B}) -> A =:= B;
 eq({js_cell, _}, _) -> miss;
 eq(_, {js_cell, _}) -> miss;
 eq(A, B) when is_number(A), is_number(B) -> A == B;
-eq(A, B) when is_binary(A), is_binary(B) -> A =:= B;
+eq(A, B) when ?IS_STR(A), ?IS_STR(B) -> A =:= B;
 eq(A, B) when is_boolean(A), is_boolean(B) -> A =:= B;
 eq({js_bigint, A}, {js_bigint, B}) -> A =:= B;
 eq({js_sym, A}, {js_sym, B}) -> A =:= B;
@@ -373,7 +380,7 @@ t_eq_fast(A, undefined) -> nul_eq(A);
 t_eq_fast(A, null) -> nul_eq(A);
 t_eq_fast(A, B) when is_number(A), is_number(B) ->
     case A == B of true -> 1; false -> 0 end;
-t_eq_fast(A, B) when is_binary(A), is_binary(B) ->
+t_eq_fast(A, B) when ?IS_STR(A), ?IS_STR(B) ->
     case A =:= B of true -> 1; false -> 0 end;
 t_eq_fast({js_cell, A}, {js_cell, B}) ->
     case A =:= B of true -> 1; false -> 0 end;

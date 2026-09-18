@@ -62,6 +62,34 @@ pub fn is_known_number(e: Emitter2, v: ir.Value) -> Bool {
   }
 }
 
+type StrParts {
+  Ascii
+  Tagged(BitArray, Int, List(Int))
+}
+
+@external(erlang, "arc_aot_anf_ffi", "str_parts")
+fn str_parts(s: String) -> StrParts
+
+// non-ascii text takes the runtime's tagged form, built from constants so
+// the beam compiler folds it back into a literal
+pub fn str_lit(s: String) -> Build(ir.Value) {
+  case str_parts(s) {
+    Ascii -> pure(ir.ConstBinary(bit_array.from_string(s)))
+    Tagged(bin, len, crumbs) -> {
+      use crumbs <- then(make_tuple(list.map(crumbs, ir.ConstI64)))
+      use v <- then(
+        make_tuple([
+          ir.ConstAtom("js_str"),
+          ir.ConstBinary(bin),
+          ir.ConstI64(len),
+          crumbs,
+        ]),
+      )
+      mark_string(v)
+    }
+  }
+}
+
 pub fn mark_string(v: ir.Value) -> Build(ir.Value) {
   fn(e, k) {
     case v {

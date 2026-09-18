@@ -12,8 +12,10 @@
 get_field(Agent, {?HANDLE_TAG, Id}, K) ->
     cell_field(element(?AGENT_STORE, Agent), Id, K, undefined);
 get_field(_, Bin, ?LENGTH_KEY) when is_binary(Bin) ->
-    arc_string_ffi:string_codepoint_length(Bin);
-get_field(Agent, Bin, K) when is_binary(Bin) ->
+    byte_size(Bin);
+get_field(_, {?STR_TAG, _, Len, _}, ?LENGTH_KEY) ->
+    Len;
+get_field(Agent, S, K) when ?IS_STR(S) ->
     proto_field(Agent, ?REALM_STRING, K);
 get_field(Agent, N, K) when is_number(N) ->
     proto_field(Agent, ?REALM_NUMBER, K);
@@ -170,7 +172,12 @@ get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
             end;
         _ -> miss
     end;
-get_elem(Store, {?HANDLE_TAG, _} = Obj, Key) when is_binary(Key) ->
+get_elem(_, S, Idx) when is_integer(Idx), ?IS_STR(S) ->
+    case arc_rt_str_ffi:char_at(S, Idx) of
+        {some, Ch} -> Ch;
+        none -> miss
+    end;
+get_elem(Store, {?HANDLE_TAG, _} = Obj, Key) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:t_to_property_key_fast(Key) of
         {?OKEY_STRING, {?KEY_NAMED, _} = K} ->
             cell_field(Store, element(?HANDLE_ID, Obj), K, undefined);
@@ -427,7 +434,7 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
             put_prop(Store, Data, Id, Slot, {?KEY_INDEX, Idx}, V, true);
         _ -> miss
     end;
-put_elem(Store, {?HANDLE_TAG, _} = Obj, Key, V) when is_binary(Key) ->
+put_elem(Store, {?HANDLE_TAG, _} = Obj, Key, V) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:t_to_property_key_fast(Key) of
         {?OKEY_STRING, {?KEY_NAMED, _} = K} -> put_field(Store, Obj, K, V, true);
         {?OKEY_STRING, {?KEY_INDEX, Idx}} -> put_elem(Store, Obj, Idx, V);

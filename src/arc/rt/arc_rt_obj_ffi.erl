@@ -131,10 +131,10 @@ read_proto(St, Data, Shapes, Proto, Recv, KeyBin) ->
         V -> {V, St}
     end.
 
-read_prim(St, Bin, <<"length">>) when is_binary(Bin) ->
-    {arc_string_ffi:string_codepoint_length(Bin), St};
-read_prim(St, Bin, KeyBin) when is_binary(Bin) ->
-    read_wrapper(St, ?REALM_STRING, Bin, KeyBin);
+read_prim(St, S, <<"length">>) when ?IS_STR(S) ->
+    {arc_rt_str_ffi:len(S), St};
+read_prim(St, S, KeyBin) when ?IS_STR(S) ->
+    read_wrapper(St, ?REALM_STRING, S, KeyBin);
 read_prim(St, N, KeyBin) when is_number(N) ->
     read_wrapper(St, ?REALM_NUMBER, N, KeyBin);
 read_prim(St, Recv, KeyBin) -> get_any(St, Recv, KeyBin).
@@ -476,7 +476,7 @@ t_get_elem_fast(St, {?HANDLE_TAG, Id}, Idx)
 t_get_elem_fast(St, Recv, Idx)
   when is_float(Idx), Idx >= 0.0, Idx == trunc(Idx) ->
     t_get_elem_fast(St, Recv, trunc(Idx));
-t_get_elem_fast(St, {?HANDLE_TAG, Id}, Key) when is_binary(Key) ->
+t_get_elem_fast(St, {?HANDLE_TAG, Id}, Key) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:t_to_property_key_fast(Key) of
         {?OKEY_STRING, {?KEY_NAMED, KeyBin}} ->
             Store = element(?AGENT_STORE, St),
@@ -565,7 +565,7 @@ t_set_elem_fast(St, {?HANDLE_TAG, Id}, Idx, V)
 t_set_elem_fast(St, Recv, Idx, V)
   when is_float(Idx), Idx >= 0.0, Idx == trunc(Idx) ->
     t_set_elem_fast(St, Recv, trunc(Idx), V);
-t_set_elem_fast(St, Recv = {?HANDLE_TAG, Id}, Key, V) when is_binary(Key) ->
+t_set_elem_fast(St, Recv = {?HANDLE_TAG, Id}, Key, V) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:t_to_property_key_fast(Key) of
         {?OKEY_STRING, {?KEY_NAMED, KeyBin}} ->
             t_set_prop_own_data(St, Recv, KeyBin, V);

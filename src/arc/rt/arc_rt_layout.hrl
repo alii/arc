@@ -45,6 +45,11 @@
 -define(HANDLE_TAG, js_cell).
 -define(HANDLE_ID, 2).
 
+-define(STR_TAG, js_str).
+-define(IS_STR(V), (is_binary(V) orelse
+                    (is_tuple(V) andalso tuple_size(V) =:= 4
+                     andalso element(1, V) =:= ?STR_TAG))).
+
 -define(SBOX_TAG, s_box).
 -define(SBOX_VALUE, 2).
 
