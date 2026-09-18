@@ -1,4 +1,4 @@
-%% aot iterator record fast read, none falls back to the gleam path
+%% iterator kernels for aot and the interpreter; none, miss or iter_miss decline
 -module(arc_rt_lang_ffi).
 -export([iter_fast/2, array_iter_start/2, array_iter_next/2, is_array_iter/1,
          array_iter_parts/1, array_iter_record/3, array_iter_proto/2,
@@ -20,7 +20,7 @@ iter_fast(St, {?HANDLE_TAG, Id}) ->
             Iter = element(?DATAPROP_VALUE, IterP),
             Next = element(?DATAPROP_VALUE, NextP),
             Done = arc_rt_val_ffi:to_boolean(element(?DATAPROP_VALUE, DoneP)),
-            {?SOME, {Done, {iterator_record, Iter, Next},
+            {?SOME, {Done, {?ITERATOR_RECORD_TAG, Iter, Next},
                      native(Data, Iter, Next)}};
         _ -> ?NONE
     end;
@@ -28,18 +28,18 @@ iter_fast(_, _) -> ?NONE.
 
 native(Data, {?HANDLE_TAG, IId} = IterH, {?HANDLE_TAG, NId}) ->
     case arc_rt_arena_ffi:probe(NId, Data) of
-        NSlot when element(1, NSlot) =:= ?SOBJECT_TAG ->
-            case element(?SOBJECT_KIND, NSlot) of
+        NCell when element(1, NCell) =:= ?SOBJECT_TAG ->
+            case element(?SOBJECT_KIND, NCell) of
                 {?KNATIVE_TAG, {iterator_n, Which}, _, _, _} ->
                     {native_next, Which, IterH};
                 {?KNATIVE_TAG, ?TOKEN_GENERATOR_NEXT, _, _, _} ->
                     case arc_rt_arena_ffi:probe(IId, Data) of
-                        ISlot when element(1, ISlot) =:= ?SOBJECT_TAG,
-                                   element(1, element(?SOBJECT_KIND, ISlot))
+                        ICell when element(1, ICell) =:= ?SOBJECT_TAG,
+                                   element(1, element(?SOBJECT_KIND, ICell))
                                        =:= ?GENERATOROBJ_TAG ->
                             {native_generator,
                              element(?GENERATOROBJ_DATA,
-                                     element(?SOBJECT_KIND, ISlot))};
+                                     element(?SOBJECT_KIND, ICell))};
                         _ -> not_native
                     end;
                 _ -> not_native

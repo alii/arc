@@ -1,4 +1,4 @@
-%% fast paths return miss and the caller takes the full path
+%% object model kernels; exports may answer miss for the general path
 -module(arc_rt_obj_ffi).
 -export([t_get_prop_own_data/3, t_set_prop_own_data/4, t_set_prop_named/5,
          t_copy_data_fast/3, t_for_in_fast/2, t_own_enum_fast/2,
@@ -9,24 +9,24 @@
          t_get_elem_fast/3, t_set_elem_fast/4, t_array_lit/2,
          t_array_lit_packed/2,
          t_global_get_fast/2, t_global_get/2,
-         named_free/5, free_chain/4, named_plain/2,
+         named_write_walk/5, chain_takes_named_write/4, named_plain/2,
          shape_slots_new/0, shape_slots_get/2, shape_slots_set/3,
          shape_slots_append/2]).
 
 -include("arc_rt_layout.hrl").
 
--compile({inline, [peek_get/3, slot_of/2, get_any/3,
+-compile({inline, [peek_named_at/3, peek_named/3, live_cell/2, get_any/3,
                    named_plain/2, birth_plain/2, store_put_seq/3, index_read/2,
-                   peek_slot/3, index_write/4, elem_write/3,
-                   named_free_next/5, set_prop_new/7, free_chain/4,
-                   in_store/2, in_agent/2, in_props/2, in_value/2, touched/2]}).
+                   index_write/4, elem_write/3, named_write_walk_next/5,
+                   set_prop_new/7, chain_takes_named_write/4, with_store/2,
+                   with_data/2, with_props/2, with_value/2,
+                   bump_epoch_if_global/2]}).
 
--define(IC_READ, ic_read).
 -define(PROTO_KEY, {?KEY_NAMED, <<"__proto__">>}).
 -define(IC_READ_WAYS, 8).
 
 t_get_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin) ->
-    peek_get(St, Id, KeyBin);
+    peek_named_at(St, Id, KeyBin);
 t_get_prop_own_data(_, _, _) -> miss.
 
 %% nested constant array literals arrive as {js_alit, Elems}
@@ -49,7 +49,7 @@ t_get_prop_ic(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
             case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
                 {?SSHAPED_TAG, Sid, _, Slots, _} ->
                     case Offs of
-                        #{Sid := Off} -> element(Off + 1, Slots);
+                        #{Sid := Off} -> ?SLOT_AT(Slots, Off);
                         _ -> miss
                     end;
                 _ -> miss
@@ -64,11 +64,11 @@ t_get_prop_ic_miss(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
         {?SSHAPED_TAG, Sid, _, Slots, Offs} ->
             case Offs of
                 #{KeyBin := Off} ->
-                    {element(Off + 1, Slots),
+                    {?SLOT_AT(Slots, Off),
                      ic_fill(St, Store, Site, Sid, Off, KeyBin)};
                 _ -> {miss, St}
             end;
-        Slot -> {peek_slot(St, Slot, KeyBin), St}
+        Cell -> {peek_named(St, Cell, KeyBin), St}
     end;
 t_get_prop_ic_miss(St, _, _, _) -> {miss, St}.
 
@@ -81,18 +81,18 @@ t_get_prop_slow(St, Recv, KeyBin, _) -> read_prim(St, Recv, KeyBin).
 t_get_prop_site(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
-    Slot = arc_rt_arena_ffi:get(Id, Data),
-    case Slot of
+    Cell = arc_rt_arena_ffi:get(Id, Data),
+    case Cell of
         {?SSHAPED_TAG, Sid, _, Slots, _} ->
             case element(?STORE_ICS, Store) of
                 #{Site := {?IC_READ, KeyBin, #{Sid := Off}}} ->
-                    {element(Off + 1, Slots), St};
-                _ -> read_named(St, Store, Data, Recv, Slot, KeyBin, Site)
+                    {?SLOT_AT(Slots, Off), St};
+                _ -> read_named(St, Store, Data, Recv, Cell, KeyBin, Site)
             end;
         {?SOBJECT_TAG, ?ORDINARY, _, #{{?KEY_NAMED, KeyBin} := Prop}, _, _, _}
           when element(1, Prop) =:= ?DATAPROP_TAG ->
             {element(?DATAPROP_VALUE, Prop), St};
-        _ -> read_named(St, Store, Data, Recv, Slot, KeyBin, Site)
+        _ -> read_named(St, Store, Data, Recv, Cell, KeyBin, Site)
     end;
 t_get_prop_site(St, Recv, KeyBin, _) -> read_prim(St, Recv, KeyBin).
 
@@ -100,24 +100,24 @@ read_named(St, Store, Data, Recv, {?SSHAPED_TAG, Sid, Proto, Slots, Offs},
            KeyBin, Site) ->
     case Offs of
         #{KeyBin := Off} ->
-            {element(Off + 1, Slots), ic_fill(St, Store, Site, Sid, Off, KeyBin)};
+            {?SLOT_AT(Slots, Off), ic_fill(St, Store, Site, Sid, Off, KeyBin)};
         _ ->
             read_proto(St, Data, element(?STORE_SHAPES, Store), Proto, Recv,
                        KeyBin)
     end;
-read_named(St, Store, Data, Recv, Slot, KeyBin, _)
-  when element(1, Slot) =:= ?SOBJECT_TAG ->
-    Kind = element(?SOBJECT_KIND, Slot),
+read_named(St, Store, Data, Recv, Cell, KeyBin, _)
+  when element(1, Cell) =:= ?SOBJECT_TAG ->
+    Kind = element(?SOBJECT_KIND, Cell),
     case named_plain(Kind, KeyBin) of
         true ->
-            case element(?SOBJECT_PROPS, Slot) of
+            case element(?SOBJECT_PROPS, Cell) of
                 #{{?KEY_NAMED, KeyBin} := Prop}
                   when element(1, Prop) =:= ?DATAPROP_TAG ->
                     {element(?DATAPROP_VALUE, Prop), St};
                 #{{?KEY_NAMED, KeyBin} := _} -> get_any(St, Recv, KeyBin);
                 _ ->
                     read_proto(St, Data, element(?STORE_SHAPES, Store),
-                               element(?SOBJECT_PROTO, Slot), Recv, KeyBin)
+                               element(?SOBJECT_PROTO, Cell), Recv, KeyBin)
             end;
         false when element(1, Kind) =:= ?ARRAYOBJ_TAG ->
             {element(?ARRAYOBJ_LENGTH, Kind), St};
@@ -126,7 +126,7 @@ read_named(St, Store, Data, Recv, Slot, KeyBin, _)
 read_named(St, _, _, Recv, _, KeyBin, _) -> get_any(St, Recv, KeyBin).
 
 read_proto(St, Data, Shapes, Proto, Recv, KeyBin) ->
-    case proto_read(Data, Shapes, Proto, KeyBin, 64) of
+    case proto_read(Data, Shapes, Proto, KeyBin, ?MAX_PROTO_HOPS) of
         miss -> get_any(St, Recv, KeyBin);
         V -> {V, St}
     end.
@@ -155,21 +155,21 @@ proto_read(Data, Shapes, {?SOME, {?HANDLE_TAG, Id}}, KeyBin, Fuel) ->
     case arc_rt_arena_ffi:get(Id, Data) of
         {?SSHAPED_TAG, _, Proto, Slots, Offs} ->
             case Offs of
-                #{KeyBin := Off} -> element(Off + 1, Slots);
+                #{KeyBin := Off} -> ?SLOT_AT(Slots, Off);
                 _ -> proto_read(Data, Shapes, Proto, KeyBin, Fuel - 1)
             end;
-        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case named_plain(element(?SOBJECT_KIND, Slot), KeyBin) of
+        Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
+            case named_plain(element(?SOBJECT_KIND, Cell), KeyBin) of
                 false -> miss;
                 true ->
-                    case element(?SOBJECT_PROPS, Slot) of
+                    case element(?SOBJECT_PROPS, Cell) of
                         #{{?KEY_NAMED, KeyBin} := Prop}
                           when element(1, Prop) =:= ?DATAPROP_TAG ->
                             element(?DATAPROP_VALUE, Prop);
                         #{{?KEY_NAMED, KeyBin} := _} -> miss;
                         _ ->
                             proto_read(Data, Shapes,
-                                       element(?SOBJECT_PROTO, Slot), KeyBin,
+                                       element(?SOBJECT_PROTO, Cell), KeyBin,
                                        Fuel - 1)
                     end
             end;
@@ -182,10 +182,10 @@ named_plain(Kind, _) when is_atom(Kind) -> true;
 named_plain(Kind, KeyBin) ->
     case element(1, Kind) of
         ?PROXYOBJ_TAG -> false;
-        module_namespace -> false;
-        typed_array_obj -> false;
+        ?MODULENS_TAG -> false;
+        ?TYPEDARRAYOBJ_TAG -> false;
         ?ARRAYOBJ_TAG -> KeyBin =/= <<"length">>;
-        string_obj -> KeyBin =/= <<"length">>;
+        ?STRINGOBJ_TAG -> KeyBin =/= <<"length">>;
         ?KBYTECODE_TAG -> birth_plain(element(?KBYTECODE_BIRTH, Kind), KeyBin);
         ?KFN_TAG -> birth_plain(element(?KFN_BIRTH, Kind), KeyBin);
         _ -> true
@@ -204,13 +204,13 @@ ic_fill(St, Store, Site, Sid, Off, KeyBin) ->
     case Ics of
         #{Site := {?IC_READ, KeyBin, Offs}}
           when map_size(Offs) < ?IC_READ_WAYS ->
-            in_agent(St,
+            with_store(St,
                        setelement(?STORE_ICS, Store,
                                   Ics#{Site := {?IC_READ, KeyBin,
                                                 Offs#{Sid => Off}}}));
         #{Site := _} -> St;
         _ ->
-            in_agent(St,
+            with_store(St,
                        setelement(?STORE_ICS, Store,
                                   Ics#{Site => {?IC_READ, KeyBin,
                                                 #{Sid => Off}}}))
@@ -219,26 +219,26 @@ ic_fill(St, Store, Site, Sid, Off, KeyBin) ->
 t_global_get_fast(St, KeyBin) ->
     {?HANDLE_TAG, GId} = element(?REALM_GLOBAL, element(?AGENT_REALM, St)),
     Store = element(?AGENT_STORE, St),
-    peek_slot(St, arc_rt_arena_ffi:get(GId, element(?STORE_DATA, Store)), KeyBin).
+    peek_named(St, arc_rt_arena_ffi:get(GId, element(?STORE_DATA, Store)), KeyBin).
 
 t_global_get(St, KeyBin) ->
     case t_global_get_fast(St, KeyBin) of
-        miss -> arc@rt@obj:t_global_get(St, KeyBin);
+        miss -> 'arc@rt@obj':t_global_get(St, KeyBin);
         V -> {V, St}
     end.
 
-peek_get(St, Id, KeyBin) ->
-    peek_slot(St, slot_of(St, Id), KeyBin).
+peek_named_at(St, Id, KeyBin) ->
+    peek_named(St, live_cell(St, Id), KeyBin).
 
-peek_slot(_, {?SSHAPED_TAG, _, _, Slots, Offs}, KeyBin) ->
+peek_named(_, {?SSHAPED_TAG, _, _, Slots, Offs}, KeyBin) ->
     case Offs of
-        #{KeyBin := Off} -> element(Off + 1, Slots);
+        #{KeyBin := Off} -> ?SLOT_AT(Slots, Off);
         _ -> miss
     end;
-peek_slot(_, Slot, KeyBin) when element(1, Slot) =:= ?SOBJECT_TAG ->
-    case named_plain(element(?SOBJECT_KIND, Slot), KeyBin) of
+peek_named(_, Cell, KeyBin) when element(1, Cell) =:= ?SOBJECT_TAG ->
+    case named_plain(element(?SOBJECT_KIND, Cell), KeyBin) of
         true ->
-            case element(?SOBJECT_PROPS, Slot) of
+            case element(?SOBJECT_PROPS, Cell) of
                 #{{?KEY_NAMED, KeyBin} := Prop}
                   when element(1, Prop) =:= ?DATAPROP_TAG ->
                     element(?DATAPROP_VALUE, Prop);
@@ -246,7 +246,7 @@ peek_slot(_, Slot, KeyBin) when element(1, Slot) =:= ?SOBJECT_TAG ->
             end;
         false -> miss
     end;
-peek_slot(_, _, _) -> miss.
+peek_named(_, _, _) -> miss.
 
 %% §10.1.9.1 ordinary set when it lands as plain data
 t_set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
@@ -257,35 +257,34 @@ t_set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
             Shapes = element(?STORE_SHAPES, Store),
             case shaped_write(Data, Shapes, Shaped, KeyBin, V) of
                 miss -> miss;
-                NewSlot ->
-                    in_agent(St,
-                        in_store(Store,
-                                   arc_rt_arena_ffi:set(Id, NewSlot, Data)))
+                NewCell ->
+                    with_store(St,
+                        with_data(Store,
+                                  arc_rt_arena_ffi:set(Id, NewCell, Data)))
             end;
-        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case named_plain(element(?SOBJECT_KIND, Slot), KeyBin) of
+        Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
+            case named_plain(element(?SOBJECT_KIND, Cell), KeyBin) of
                 false -> miss;
                 true ->
-                    Props = element(?SOBJECT_PROPS, Slot),
+                    Props = element(?SOBJECT_PROPS, Cell),
                     K = {?KEY_NAMED, KeyBin},
                     case Props of
                         #{K := Prop}
                           when element(1, Prop) =:= ?DATAPROP_TAG,
                                element(?DATAPROP_WRITABLE, Prop) =:= true ->
-                            NewProp = in_value(Prop, V),
-                            NewSlot = in_props(Slot,
-                                                 Props#{K := NewProp}),
-                            in_agent(St,
-                                touched(in_store(Store,
-                                           arc_rt_arena_ffi:set(Id, NewSlot, Data)), Slot));
+                            NewProp = with_value(Prop, V),
+                            NewCell = with_props(Cell, Props#{K := NewProp}),
+                            Store1 = with_data(Store,
+                                               arc_rt_arena_ffi:set(Id, NewCell, Data)),
+                            with_store(St, bump_epoch_if_global(Store1, Cell));
                         #{K := _} -> miss;
-                        _ when element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
-                            case free_chain(Store, Data,
-                                            element(?SOBJECT_PROTO, Slot), K) of
+                        _ when element(?SOBJECT_EXTENSIBLE, Cell) =:= true ->
+                            case chain_takes_named_write(
+                                   Store, Data, element(?SOBJECT_PROTO, Cell), K) of
                                 false -> miss;
-                                true -> set_prop_new(St, Store, Data, Id, Slot, K, V);
+                                true -> set_prop_new(St, Store, Data, Id, Cell, K, V);
                                 {true, Store1} ->
-                                    set_prop_new(St, Store1, Data, Id, Slot, K, V)
+                                    set_prop_new(St, Store1, Data, Id, Cell, K, V)
                             end;
                         _ -> miss
                     end
@@ -294,48 +293,46 @@ t_set_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin, V) ->
     end;
 t_set_prop_own_data(_, _, _, _) -> miss.
 
-set_prop_new(St, Store, Data, Id, Slot, K, V)
-  when tuple_size(Store) =:= ?STORE_ARITY ->
+set_prop_new(St, Store, Data, Id, Cell, K, V)
+  when tuple_size(Store) =:= ?STORE_SIZE ->
     Seq = element(?STORE_PROP_SEQ, Store),
-    Props = element(?SOBJECT_PROPS, Slot),
-    NewSlot = in_props(Slot,
-                         Props#{K => {?DATAPROP_TAG, V, true, true, true, Seq}}),
-    in_agent(St,
-             touched(store_put_seq(Store, arc_rt_arena_ffi:set(Id, NewSlot, Data),
-                                   Seq + 1), Slot)).
+    Props = element(?SOBJECT_PROPS, Cell),
+    NewCell = with_props(Cell, Props#{K => ?PLAIN_PROPERTY(V, Seq)}),
+    Store1 = store_put_seq(Store, arc_rt_arena_ffi:set(Id, NewCell, Data), Seq + 1),
+    with_store(St, bump_epoch_if_global(Store1, Cell)).
 
-%% proto chain takes a plain named write at k, filling the store memo
-free_chain(_, _, ?NONE, _) -> true;
-free_chain(Store, Data, {?SOME, {?HANDLE_TAG, PId}} = Proto,
-           {?KEY_NAMED, KB} = K)
+%% true when no proto can intercept a plain write at k, memo in free_protos
+chain_takes_named_write(_, _, ?NONE, _) -> true;
+chain_takes_named_write(Store, Data, {?SOME, {?HANDLE_TAG, PId}} = Proto,
+                        {?KEY_NAMED, KB} = K)
   when byte_size(KB) =/= 9; KB =/= <<"__proto__">> ->
     case is_map_key(PId, element(?STORE_FREE_PROTOS, Store)) of
         true -> true;
-        false -> named_free_cached(Store, Data, Proto, K)
+        false -> remember_plain_chain(Store, Data, Proto, K)
     end;
-free_chain(Store, Data, Proto, K) ->
-    named_free(Data, element(?STORE_SHAPES, Store), Proto, K, 64).
+chain_takes_named_write(Store, Data, Proto, K) ->
+    named_write_walk(Data, element(?STORE_SHAPES, Store), Proto, K, ?MAX_PROTO_HOPS).
 
-store_put_seq(Store, Data, Seq) when tuple_size(Store) =:= ?STORE_ARITY ->
+store_put_seq(Store, Data, Seq) when tuple_size(Store) =:= ?STORE_SIZE ->
     setelement(?STORE_PROP_SEQ, setelement(?STORE_DATA, Store, Data), Seq).
 
-%% arity guards make these record updates instead of bif calls
-in_store(Store, Data) when tuple_size(Store) =:= ?STORE_ARITY ->
+%% size guards make these record updates instead of bif calls
+with_data(Store, Data) when tuple_size(Store) =:= ?STORE_SIZE ->
     setelement(?STORE_DATA, Store, Data).
 
 %% global object readers watch the epoch
-touched(Store, Slot) when tuple_size(Store) =:= ?STORE_ARITY,
-                          element(?SOBJECT_KIND, Slot) =:= ?GLOBALOBJ ->
+bump_epoch_if_global(Store, Cell) when tuple_size(Store) =:= ?STORE_SIZE,
+                                       element(?SOBJECT_KIND, Cell) =:= ?GLOBALOBJ ->
     setelement(?STORE_GLOBAL_EPOCH, Store, element(?STORE_GLOBAL_EPOCH, Store) + 1);
-touched(Store, _) -> Store.
+bump_epoch_if_global(Store, _) -> Store.
 
-in_agent(St, Store) when tuple_size(St) =:= ?AGENT_ARITY ->
+with_store(St, Store) when tuple_size(St) =:= ?AGENT_SIZE ->
     setelement(?AGENT_STORE, St, Store).
 
-in_props(Slot, Props) when tuple_size(Slot) =:= ?SOBJECT_ARITY ->
-    setelement(?SOBJECT_PROPS, Slot, Props).
+with_props(Cell, Props) when tuple_size(Cell) =:= ?SOBJECT_SIZE ->
+    setelement(?SOBJECT_PROPS, Cell, Props).
 
-in_value(Prop, V) when tuple_size(Prop) =:= ?DATAPROP_ARITY ->
+with_value(Prop, V) when tuple_size(Prop) =:= ?DATAPROP_SIZE ->
     setelement(?DATAPROP_VALUE, Prop, V).
 
 t_set_prop_named(St, Obj, KeyBin, V, Strict) ->
@@ -358,51 +355,50 @@ t_create_data_prop(St, Recv = {?HANDLE_TAG, Id}, Key, V) ->
     end,
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
-    Slot = arc_rt_arena_ffi:get(Id, Data),
+    Cell = arc_rt_arena_ffi:get(Id, Data),
     R = case PK of
-        {?KEY_NAMED, KeyBin} when element(1, Slot) =:= ?SSHAPED_TAG ->
-            shaped_define(element(?STORE_SHAPES, Store), Slot, KeyBin, V);
-        {?KEY_NAMED, KeyBin} when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case named_plain(element(?SOBJECT_KIND, Slot), KeyBin) of
-                true -> plain_define(Slot, PK, V, Store);
+        {?KEY_NAMED, KeyBin} when element(1, Cell) =:= ?SSHAPED_TAG ->
+            shaped_define(element(?STORE_SHAPES, Store), Cell, KeyBin, V);
+        {?KEY_NAMED, KeyBin} when element(1, Cell) =:= ?SOBJECT_TAG ->
+            case named_plain(element(?SOBJECT_KIND, Cell), KeyBin) of
+                true -> plain_define(Cell, PK, V, Store);
                 false -> miss
             end;
-        {?KEY_INDEX, _} when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case index_in_props(element(?SOBJECT_KIND, Slot)) of
-                true -> plain_define(Slot, PK, V, Store);
+        {?KEY_INDEX, _} when element(1, Cell) =:= ?SOBJECT_TAG ->
+            case index_keys_in_props(element(?SOBJECT_KIND, Cell)) of
+                true -> plain_define(Cell, PK, V, Store);
                 false -> miss
             end;
         _ -> miss
     end,
     case R of
         miss -> 'arc@rt@obj':t_create_data_prop_slow(St, Recv, Key, V);
-        {seq, NewSlot, Seq} ->
-            Store1 = store_put_seq(Store, arc_rt_arena_ffi:set(Id, NewSlot, Data), Seq),
-            {true, in_agent(St, touched(Store1, NewSlot))};
-        NewSlot ->
-            Store1 = in_store(Store, arc_rt_arena_ffi:set(Id, NewSlot, Data)),
-            {true, in_agent(St, touched(Store1, NewSlot))}
+        {seq, NewCell, Seq} ->
+            Store1 = store_put_seq(Store, arc_rt_arena_ffi:set(Id, NewCell, Data), Seq),
+            {true, with_store(St, bump_epoch_if_global(Store1, NewCell))};
+        NewCell ->
+            Store1 = with_data(Store, arc_rt_arena_ffi:set(Id, NewCell, Data)),
+            {true, with_store(St, bump_epoch_if_global(Store1, NewCell))}
     end;
 t_create_data_prop(St, Recv, Key, V) ->
     'arc@rt@obj':t_create_data_prop_slow(St, Recv, Key, V).
 
-plain_define(Slot, PK, V, Store) ->
+plain_define(Cell, PK, V, Store) ->
     Seq = element(?STORE_PROP_SEQ, Store),
-    Props = element(?SOBJECT_PROPS, Slot),
+    Props = element(?SOBJECT_PROPS, Cell),
     case is_map_key(PK, Props) orelse
-         element(?SOBJECT_EXTENSIBLE, Slot) =/= true of
+         element(?SOBJECT_EXTENSIBLE, Cell) =/= true of
         true -> miss;
         false ->
-            {seq, in_props(Slot,
-                             Props#{PK => {?DATAPROP_TAG, V, true, true, true,
-                                           Seq}}),
+            {seq, with_props(Cell,
+                             Props#{PK => ?PLAIN_PROPERTY(V, Seq)}),
              Seq + 1}
     end.
 
 shaped_define(Shapes, {?SSHAPED_TAG, Sid, P, Slots, Offs} = Shaped, KeyBin, V) ->
     case Offs of
         #{KeyBin := Off} ->
-            setelement(?SSHAPED_SLOTS, Shaped, setelement(Off + 1, Slots, V));
+            setelement(?SSHAPED_SLOTS, Shaped, ?SLOT_SET(Slots, Off, V));
         _ ->
             case shaped_next(Shapes, Sid, KeyBin) of
                 miss -> miss;
@@ -424,18 +420,18 @@ shaped_next(Shapes, Sid, KeyBin) ->
         _ -> miss
     end.
 
-%% §7.3.22 ordinary has instance, depth capped at 64
+%% §7.3.22 ordinary has instance
 t_instanceof_fast(St, V, {?HANDLE_TAG, CId}) ->
-    case slot_of(St, CId) of
-        Slot when element(1, Slot) =:= ?SOBJECT_TAG,
-                  element(?SOBJECT_SYMBOL_PROPS, Slot) =:= [] ->
-            case element(?SOBJECT_KIND, Slot) of
+    case live_cell(St, CId) of
+        Cell when element(1, Cell) =:= ?SOBJECT_TAG,
+                  element(?SOBJECT_SYMBOL_PROPS, Cell) =:= [] ->
+            case element(?SOBJECT_KIND, Cell) of
                 Kind when element(1, Kind) =:= ?KFN_TAG ->
-                    case element(?SOBJECT_PROPS, Slot) of
+                    case element(?SOBJECT_PROPS, Cell) of
                         #{{?KEY_NAMED, <<"prototype">>} := Prop}
                           when element(1, Prop) =:= ?DATAPROP_TAG ->
                             case element(?DATAPROP_VALUE, Prop) of
-                                {?HANDLE_TAG, PId} -> proto_has(St, V, PId, 64);
+                                {?HANDLE_TAG, PId} -> proto_has(St, V, PId, ?MAX_PROTO_HOPS);
                                 _ -> miss
                             end;
                         _ -> miss
@@ -446,15 +442,15 @@ t_instanceof_fast(St, V, {?HANDLE_TAG, CId}) ->
     end;
 t_instanceof_fast(_, _, _) -> miss.
 
+%% 1 | 0 | miss
 proto_has(St, {?HANDLE_TAG, VId}, PId, Fuel) when Fuel > 0 ->
-    case slot_of(St, VId) of
-        Slot when element(1, Slot) =:= ?SOBJECT_TAG,
-                  element(1, element(?SOBJECT_KIND, Slot)) =:= ?PROXYOBJ_TAG ->
+    case live_cell(St, VId) of
+        Cell when element(1, Cell) =:= ?SOBJECT_TAG,
+                  element(1, element(?SOBJECT_KIND, Cell)) =:= ?PROXYOBJ_TAG ->
             miss;
-        Slot when element(1, Slot) =:= ?SOBJECT_TAG;
-                  element(1, Slot) =:= ?SSHAPED_TAG ->
-            %% proto is element 3 in both slot kinds
-            case element(?SOBJECT_PROTO, Slot) of
+        Cell when element(1, Cell) =:= ?SOBJECT_TAG;
+                  element(1, Cell) =:= ?SSHAPED_TAG ->
+            case element(?CELL_PROTO, Cell) of
                 ?NONE -> 0;
                 {?SOME, {?HANDLE_TAG, PId}} -> 1;
                 {?SOME, {?HANDLE_TAG, Next}} ->
@@ -465,9 +461,6 @@ proto_has(St, {?HANDLE_TAG, VId}, PId, Fuel) when Fuel > 0 ->
     end;
 proto_has(_, {?HANDLE_TAG, _}, _, _) -> miss;
 proto_has(_, _, _, _) -> 0.
-
-%% 2^32-2, rt_types.max_array_index
--define(MAX_ARRAY_INDEX, 4294967294).
 
 t_get_elem_fast(St, {?HANDLE_TAG, Id}, Idx)
   when is_integer(Idx), Idx >= 0, Idx =< ?MAX_ARRAY_INDEX ->
@@ -493,13 +486,13 @@ t_get_elem_fast(St, {?HANDLE_TAG, Id}, Key) when ?IS_STR(Key) ->
     end;
 t_get_elem_fast(_, _, _) -> miss.
 
-index_read(Slot, Idx) when element(1, Slot) =:= ?SOBJECT_TAG ->
-    case element(?SOBJECT_KIND, Slot) of
+index_read(Cell, Idx) when element(1, Cell) =:= ?SOBJECT_TAG ->
+    case element(?SOBJECT_KIND, Cell) of
         {?ARRAYOBJ_TAG, Length} when Idx < Length ->
-            case element(?SOBJECT_PROPS, Slot) of
+            case element(?SOBJECT_PROPS, Cell) of
                 #{{?KEY_INDEX, Idx} := _} -> miss;
                 _ ->
-                    case element(?SOBJECT_ELEMENTS, Slot) of
+                    case element(?SOBJECT_ELEMENTS, Cell) of
                         {?ELEMS_DENSE, A} ->
                             case arc_tree_array_ffi:get(Idx, A) of
                                 ?ELEMS_HOLE -> miss;
@@ -510,9 +503,9 @@ index_read(Slot, Idx) when element(1, Slot) =:= ?SOBJECT_TAG ->
                     end
             end;
         Kind ->
-            case index_in_props(Kind) of
+            case index_keys_in_props(Kind) of
                 true ->
-                    case element(?SOBJECT_PROPS, Slot) of
+                    case element(?SOBJECT_PROPS, Cell) of
                         #{{?KEY_INDEX, Idx} := Prop}
                           when element(1, Prop) =:= ?DATAPROP_TAG ->
                             element(?DATAPROP_VALUE, Prop);
@@ -525,21 +518,21 @@ index_read(_, _) -> miss.
 
 named_read(Data, Shapes, {?SSHAPED_TAG, _, Proto, Slots, Offs}, KeyBin) ->
     case Offs of
-        #{KeyBin := Off} -> element(Off + 1, Slots);
-        _ -> proto_read(Data, Shapes, Proto, KeyBin, 64)
+        #{KeyBin := Off} -> ?SLOT_AT(Slots, Off);
+        _ -> proto_read(Data, Shapes, Proto, KeyBin, ?MAX_PROTO_HOPS)
     end;
-named_read(Data, Shapes, Slot, KeyBin) when element(1, Slot) =:= ?SOBJECT_TAG ->
-    Kind = element(?SOBJECT_KIND, Slot),
+named_read(Data, Shapes, Cell, KeyBin) when element(1, Cell) =:= ?SOBJECT_TAG ->
+    Kind = element(?SOBJECT_KIND, Cell),
     case named_plain(Kind, KeyBin) of
         true ->
-            case element(?SOBJECT_PROPS, Slot) of
+            case element(?SOBJECT_PROPS, Cell) of
                 #{{?KEY_NAMED, KeyBin} := Prop}
                   when element(1, Prop) =:= ?DATAPROP_TAG ->
                     element(?DATAPROP_VALUE, Prop);
                 #{{?KEY_NAMED, KeyBin} := _} -> miss;
                 _ ->
-                    proto_read(Data, Shapes, element(?SOBJECT_PROTO, Slot),
-                               KeyBin, 64)
+                    proto_read(Data, Shapes, element(?SOBJECT_PROTO, Cell),
+                               KeyBin, ?MAX_PROTO_HOPS)
             end;
         false when element(1, Kind) =:= ?ARRAYOBJ_TAG ->
             element(?ARRAYOBJ_LENGTH, Kind);
@@ -547,15 +540,15 @@ named_read(Data, Shapes, Slot, KeyBin) when element(1, Slot) =:= ?SOBJECT_TAG ->
     end;
 named_read(_, _, _, _) -> miss.
 
-index_in_props(Kind) when is_atom(Kind) -> true;
-index_in_props(Kind) ->
+index_keys_in_props(Kind) when is_atom(Kind) -> true;
+index_keys_in_props(Kind) ->
     case element(1, Kind) of
         ?ARRAYOBJ_TAG -> false;
         ?ARGUMENTSOBJ_TAG -> false;
-        string_obj -> false;
-        typed_array_obj -> false;
+        ?STRINGOBJ_TAG -> false;
+        ?TYPEDARRAYOBJ_TAG -> false;
         ?PROXYOBJ_TAG -> false;
-        module_namespace -> false;
+        ?MODULENS_TAG -> false;
         _ -> true
     end.
 
@@ -578,52 +571,52 @@ index_write(St, Id, Idx, V) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     case arc_rt_arena_ffi:get(Id, Data) of
-        Slot when tuple_size(Slot) =:= ?SOBJECT_ARITY,
-                  element(1, Slot) =:= ?SOBJECT_TAG,
-                  element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
-            case element(?SOBJECT_KIND, Slot) of
+        Cell when tuple_size(Cell) =:= ?SOBJECT_SIZE,
+                  element(1, Cell) =:= ?SOBJECT_TAG,
+                  element(?SOBJECT_EXTENSIBLE, Cell) =:= true ->
+            case element(?SOBJECT_KIND, Cell) of
                 {?ARRAYOBJ_TAG, Length} when Idx < Length ->
-                    case element(?SOBJECT_PROPS, Slot) of
+                    case element(?SOBJECT_PROPS, Cell) of
                         #{{?KEY_INDEX, Idx} := _} -> miss;
                         _ ->
-                            case elem_write(element(?SOBJECT_ELEMENTS, Slot), Idx, V) of
+                            case elem_write(element(?SOBJECT_ELEMENTS, Cell), Idx, V) of
                                 miss -> miss;
                                 NewE ->
-                                    NewSlot = setelement(?SOBJECT_ELEMENTS, Slot, NewE),
-                                    in_agent(St,
-                                        in_store(Store,
-                                            arc_rt_arena_ffi:set(Id, NewSlot, Data)))
+                                    NewCell = setelement(?SOBJECT_ELEMENTS, Cell, NewE),
+                                    with_store(St,
+                                        with_data(Store,
+                                            arc_rt_arena_ffi:set(Id, NewCell, Data)))
                             end
                     end;
                 {?ARRAYOBJ_TAG, Length} when Idx =:= Length ->
-                    case element(?SOBJECT_PROPS, Slot) of
+                    case element(?SOBJECT_PROPS, Cell) of
                         #{{?KEY_INDEX, Idx} := _} -> miss;
                         _ ->
-                            case elem_write_grow(element(?SOBJECT_ELEMENTS, Slot), Idx, V) of
+                            case elem_write_grow(element(?SOBJECT_ELEMENTS, Cell), Idx, V) of
                                 miss -> miss;
                                 NewE ->
-                                    NewSlot = setelement(?SOBJECT_ELEMENTS,
-                                        setelement(?SOBJECT_KIND, Slot,
+                                    NewCell = setelement(?SOBJECT_ELEMENTS,
+                                        setelement(?SOBJECT_KIND, Cell,
                                             {?ARRAYOBJ_TAG, Length + 1}),
                                         NewE),
-                                    in_agent(St,
-                                        in_store(Store,
-                                            arc_rt_arena_ffi:set(Id, NewSlot, Data)))
+                                    with_store(St,
+                                        with_data(Store,
+                                            arc_rt_arena_ffi:set(Id, NewCell, Data)))
                             end
                     end;
                 Kind ->
-                    case index_in_props(Kind) of
+                    case index_keys_in_props(Kind) of
                         true ->
-                            index_prop_write(St, Store, Data, Id, Slot, Idx, V);
+                            index_prop_write(St, Store, Data, Id, Cell, Idx, V);
                         false -> miss
                     end
             end;
-        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case index_in_props(element(?SOBJECT_KIND, Slot)) of
+        Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
+            case index_keys_in_props(element(?SOBJECT_KIND, Cell)) of
                 true ->
-                    case element(?SOBJECT_PROPS, Slot) of
+                    case element(?SOBJECT_PROPS, Cell) of
                         #{{?KEY_INDEX, Idx} := _} ->
-                            index_prop_write(St, Store, Data, Id, Slot, Idx, V);
+                            index_prop_write(St, Store, Data, Id, Cell, Idx, V);
                         _ -> miss
                     end;
                 false -> miss
@@ -631,60 +624,61 @@ index_write(St, Id, Idx, V) ->
         _ -> miss
     end.
 
-index_prop_write(St, Store, Data, Id, Slot, Idx, V) ->
-    Props = element(?SOBJECT_PROPS, Slot),
+index_prop_write(St, Store, Data, Id, Cell, Idx, V) ->
+    Props = element(?SOBJECT_PROPS, Cell),
     K = {?KEY_INDEX, Idx},
     case Props of
         #{K := Prop}
           when element(1, Prop) =:= ?DATAPROP_TAG,
                element(?DATAPROP_WRITABLE, Prop) =:= true ->
-            NewProp = in_value(Prop, V),
-            NewSlot = in_props(Slot, Props#{K := NewProp}),
-            in_agent(St,
-                     touched(in_store(Store, arc_rt_arena_ffi:set(Id, NewSlot, Data)),
-                             Slot));
+            NewProp = with_value(Prop, V),
+            NewCell = with_props(Cell, Props#{K := NewProp}),
+            Store1 = with_data(Store, arc_rt_arena_ffi:set(Id, NewCell, Data)),
+            with_store(St, bump_epoch_if_global(Store1, Cell));
         #{K := _} -> miss;
-        _ when element(?SOBJECT_EXTENSIBLE, Slot) =:= true ->
-            case index_free(Data, element(?SOBJECT_PROTO, Slot), Idx, 64) of
+        _ when element(?SOBJECT_EXTENSIBLE, Cell) =:= true ->
+            case chain_takes_index_write(Data, element(?SOBJECT_PROTO, Cell), Idx,
+                                         ?MAX_PROTO_HOPS) of
                 false -> miss;
                 true ->
                     Seq = element(?STORE_PROP_SEQ, Store),
-                    Prop = {?DATAPROP_TAG, V, true, true, true, Seq},
-                    NewSlot =
-                        in_props(Slot, Props#{K => Prop}),
-                    in_agent(St,
-                             touched(store_put_seq(Store,
-                                                   arc_rt_arena_ffi:set(Id, NewSlot, Data),
-                                                   Seq + 1), Slot))
+                    Prop = ?PLAIN_PROPERTY(V, Seq),
+                    NewCell = with_props(Cell, Props#{K => Prop}),
+                    Store1 = store_put_seq(Store,
+                                           arc_rt_arena_ffi:set(Id, NewCell, Data),
+                                           Seq + 1),
+                    with_store(St, bump_epoch_if_global(Store1, Cell))
             end;
         _ -> miss
     end.
 
-index_free(_, ?NONE, _, _) -> true;
-index_free(_, _, _, 0) -> false;
-index_free(Data, {?SOME, {?HANDLE_TAG, PId}}, Idx, Fuel) ->
+chain_takes_index_write(_, ?NONE, _, _) -> true;
+chain_takes_index_write(_, _, _, 0) -> false;
+chain_takes_index_write(Data, {?SOME, {?HANDLE_TAG, PId}}, Idx, Fuel) ->
     case arc_rt_arena_ffi:get(PId, Data) of
-        {?SSHAPED_TAG, _, P2, _, _} -> index_free(Data, P2, Idx, Fuel - 1);
-        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            Kind = element(?SOBJECT_KIND, Slot),
-            Walk = index_in_props(Kind) orelse element(1, Kind) =:= ?ARRAYOBJ_TAG
+        {?SSHAPED_TAG, _, P2, _, _} ->
+            chain_takes_index_write(Data, P2, Idx, Fuel - 1);
+        Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
+            Kind = element(?SOBJECT_KIND, Cell),
+            Walk = index_keys_in_props(Kind) orelse element(1, Kind) =:= ?ARRAYOBJ_TAG
                 orelse (element(1, Kind) =:= ?ARGUMENTSOBJ_TAG
                         andalso element(?ARGUMENTSOBJ_MAPPED, Kind) =:= ?NONE),
             case Walk of
                 false -> false;
                 true ->
-                    case element(?SOBJECT_PROPS, Slot) of
+                    case element(?SOBJECT_PROPS, Cell) of
                         #{{?KEY_INDEX, Idx} := Prop} ->
                             element(1, Prop) =:= ?DATAPROP_TAG andalso
                                 element(?DATAPROP_WRITABLE, Prop) =:= true;
                         _ ->
-                            index_free(Data, element(?SOBJECT_PROTO, Slot),
-                                       Idx, Fuel - 1)
+                            chain_takes_index_write(Data,
+                                                    element(?SOBJECT_PROTO, Cell),
+                                                    Idx, Fuel - 1)
                     end
             end;
         _ -> false
     end;
-index_free(_, _, _, _) -> false.
+chain_takes_index_write(_, _, _, _) -> false.
 
 elem_write({?ELEMS_DENSE, A}, Idx, V) ->
     case Idx < arc_tree_array_ffi:size(A) of
@@ -701,11 +695,11 @@ elem_write_grow({?ELEMS_SPARSE, M}, Idx, V) ->
     {?ELEMS_SPARSE, M#{Idx => V}};
 elem_write_grow(_, _, _) -> miss.
 
-shape_slots_get(Slots, Off) -> element(Off + 1, Slots).
+shape_slots_get(Slots, Off) -> ?SLOT_AT(Slots, Off).
 
 shape_slots_new() -> {}.
 
-shape_slots_set(Slots, Off, V) -> setelement(Off + 1, Slots, V).
+shape_slots_set(Slots, Off, V) -> ?SLOT_SET(Slots, Off, V).
 
 shape_slots_append(Slots, V) -> erlang:append_element(Slots, V).
 
@@ -713,12 +707,13 @@ shaped_write(Data, Shapes, {?SSHAPED_TAG, Sid, P, Slots, Offs} = Shaped, KeyBin,
              V) ->
     case Offs of
         #{KeyBin := Off} ->
-            setelement(?SSHAPED_SLOTS, Shaped, setelement(Off + 1, Slots, V));
+            setelement(?SSHAPED_SLOTS, Shaped, ?SLOT_SET(Slots, Off, V));
         _ ->
             case shaped_next(Shapes, Sid, KeyBin) of
                 miss -> miss;
                 {To, ToOffs} ->
-                    case named_free(Data, Shapes, P, {?KEY_NAMED, KeyBin}, 64) of
+                    case named_write_walk(Data, Shapes, P, {?KEY_NAMED, KeyBin},
+                                          ?MAX_PROTO_HOPS) of
                         true ->
                             {?SSHAPED_TAG, To, P, erlang:append_element(Slots, V),
                              ToOffs};
@@ -727,93 +722,93 @@ shaped_write(Data, Shapes, {?SSHAPED_TAG, Sid, P, Slots, Offs} = Shaped, KeyBin,
             end
     end.
 
-%% true | false | {true, Store1} once a clean chain is remembered
-named_free_cached(Store, Data, Proto, K) ->
+%% true | false | {true, Store1} once a plain chain is remembered
+remember_plain_chain(Store, Data, Proto, K) ->
     Shapes = element(?STORE_SHAPES, Store),
-    case clean_chain(Data, Shapes, Proto, 64, []) of
+    case plain_chain_ids(Data, Shapes, Proto, ?MAX_PROTO_HOPS, []) of
         Ids when is_list(Ids) ->
             Free = lists:foldl(fun(Id, M) -> M#{Id => nil} end,
                                element(?STORE_FREE_PROTOS, Store), Ids),
             {true, setelement(?STORE_FREE_PROTOS, Store, Free)};
-        false -> named_free(Data, Shapes, Proto, K, 64)
+        false -> named_write_walk(Data, Shapes, Proto, K, ?MAX_PROTO_HOPS)
     end.
 
 %% every hop ordinary or shaped with only writable named data, bar __proto__
-clean_chain(_, _, ?NONE, _, Ids) -> Ids;
-clean_chain(Data, Shapes, {?SOME, {?HANDLE_TAG, PId}}, Fuel, Ids) when Fuel > 0 ->
+plain_chain_ids(_, _, ?NONE, _, Ids) -> Ids;
+plain_chain_ids(Data, Shapes, {?SOME, {?HANDLE_TAG, PId}}, Fuel, Ids) when Fuel > 0 ->
     case arc_rt_arena_ffi:get(PId, Data) of
         {?SSHAPED_TAG, _, P2, _, _} ->
-            clean_chain(Data, Shapes, P2, Fuel - 1, [PId | Ids]);
+            plain_chain_ids(Data, Shapes, P2, Fuel - 1, [PId | Ids]);
         {?SOBJECT_TAG, ?ORDINARY, P2, Props, _, _, _} ->
-            clean_props(maps:next(maps:iterator(Props)))
-                andalso clean_chain(Data, Shapes, P2, Fuel - 1, [PId | Ids]);
+            props_all_plain_writable(maps:next(maps:iterator(Props)))
+                andalso plain_chain_ids(Data, Shapes, P2, Fuel - 1, [PId | Ids]);
         _ -> false
     end;
-clean_chain(_, _, _, _, _) -> false.
+plain_chain_ids(_, _, _, _, _) -> false.
 
-clean_props(none) -> true;
-clean_props({{?KEY_NAMED, _} = K, Prop, I}) ->
+props_all_plain_writable(none) -> true;
+props_all_plain_writable({{?KEY_NAMED, _} = K, Prop, I}) ->
     case Prop of
-        {?DATAPROP_TAG, _, true, _, _, _} -> clean_props(maps:next(I));
-        _ when K =:= ?PROTO_KEY -> clean_props(maps:next(I));
+        {?DATAPROP_TAG, _, true, _, _, _} -> props_all_plain_writable(maps:next(I));
+        _ when K =:= ?PROTO_KEY -> props_all_plain_writable(maps:next(I));
         _ -> false
     end;
-clean_props({_, _, I}) -> clean_props(maps:next(I)).
+props_all_plain_writable({_, _, I}) -> props_all_plain_writable(maps:next(I)).
 
-%% true when the proto chain cannot intercept a write at k
-named_free(_, _, ?NONE, _, _) -> true;
-named_free(_, _, _, _, 0) -> false;
-named_free(Data, Shapes, {?SOME, {?HANDLE_TAG, PId}}, K, Fuel) ->
+%% uncached walk behind chain_takes_named_write
+named_write_walk(_, _, ?NONE, _, _) -> true;
+named_write_walk(_, _, _, _, 0) -> false;
+named_write_walk(Data, Shapes, {?SOME, {?HANDLE_TAG, PId}}, K, Fuel) ->
     case arc_rt_arena_ffi:get(PId, Data) of
         {?SSHAPED_TAG, _, P2, _, Offs} ->
             case Offs of
                 #{element(2, K) := _} -> true;
-                _ -> named_free_next(Data, Shapes, P2, K, Fuel)
+                _ -> named_write_walk_next(Data, Shapes, P2, K, Fuel)
             end;
-        Slot when element(1, Slot) =:= ?SOBJECT_TAG ->
-            case named_plain(element(?SOBJECT_KIND, Slot), element(2, K)) of
+        Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
+            case named_plain(element(?SOBJECT_KIND, Cell), element(2, K)) of
                 true ->
-                    case element(?SOBJECT_PROPS, Slot) of
+                    case element(?SOBJECT_PROPS, Cell) of
                         #{K := Prop} ->
                             element(1, Prop) =:= ?DATAPROP_TAG andalso
                                 element(?DATAPROP_WRITABLE, Prop) =:= true;
                         _ ->
-                            named_free_next(Data, Shapes,
-                                            element(?SOBJECT_PROTO, Slot), K, Fuel)
+                            named_write_walk_next(Data, Shapes,
+                                                  element(?SOBJECT_PROTO, Cell), K,
+                                                  Fuel)
                     end;
                 false -> false
             end;
         _ -> false
     end;
-named_free(_, _, _, _, _) -> false.
+named_write_walk(_, _, _, _, _) -> false.
 
-named_free_next(_, _, ?NONE, _, _) -> true;
-named_free_next(Data, Shapes, P, K, Fuel) ->
-    named_free(Data, Shapes, P, K, Fuel - 1).
+named_write_walk_next(_, _, ?NONE, _, _) -> true;
+named_write_walk_next(Data, Shapes, P, K, Fuel) ->
+    named_write_walk(Data, Shapes, P, K, Fuel - 1).
 
-slot_of(St, Id) ->
+live_cell(St, Id) ->
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, element(?AGENT_STORE, St))) of
-        ?STORE_FREE_SLOT -> miss;
-        Slot -> Slot
+        ?STORE_FREE_CELL -> miss;
+        Cell -> Cell
     end.
-
 
 %% object spread onto a fresh literal when the source holds only plain data
 t_copy_data_fast(St, {?HANDLE_TAG, TId}, {?HANDLE_TAG, SId})
-  when tuple_size(St) =:= ?AGENT_ARITY ->
+  when tuple_size(St) =:= ?AGENT_SIZE ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     case arc_rt_arena_ffi:get(TId, Data) of
-        {?SOBJECT_TAG, ?ORDINARY, _, TProps, _, _, true} = TSlot ->
+        {?SOBJECT_TAG, ?ORDINARY, _, TProps, _, _, true} = TCell ->
             case source_pairs(arc_rt_arena_ffi:get(SId, Data)) of
                 miss -> none;
                 Pairs ->
                     case merge_pairs(Pairs, TProps, element(?STORE_PROP_SEQ, Store)) of
                         miss -> none;
                         {TProps2, Seq} ->
-                            NewSlot = setelement(?SOBJECT_PROPS, TSlot, TProps2),
-                            {some, in_agent(St, store_put_seq(Store,
-                                arc_rt_arena_ffi:set(TId, NewSlot, Data), Seq))}
+                            NewCell = setelement(?SOBJECT_PROPS, TCell, TProps2),
+                            {some, with_store(St, store_put_seq(Store,
+                                arc_rt_arena_ffi:set(TId, NewCell, Data), Seq))}
                     end
             end;
         _ -> none
@@ -831,7 +826,7 @@ source_pairs({?SOBJECT_TAG, ?ORDINARY, _, Props, [], ?ELEMS_NONE, _}) ->
              || {K, P} <- Sorted, element(?DATAPROP_ENUMERABLE, P) =:= true]
     end;
 source_pairs({?SSHAPED_TAG, _, _, Slots, Offs}) ->
-    [{{?KEY_NAMED, KB}, element(Off + 1, Slots)}
+    [{{?KEY_NAMED, KB}, ?SLOT_AT(Slots, Off)}
      || {KB, Off} <- lists:keysort(2, maps:to_list(Offs))];
 source_pairs(_) -> miss.
 
@@ -842,18 +837,18 @@ merge_pairs([], Props, Seq) -> {Props, Seq};
 merge_pairs([{K, V} | Rest], Props, Seq) ->
     case Props of
         #{K := Old} when element(1, Old) =:= ?DATAPROP_TAG ->
-            merge_pairs(Rest, Props#{K := {?DATAPROP_TAG, V, true, true, true,
-                                           element(?DATAPROP_SEQ, Old)}}, Seq);
+            merge_pairs(Rest,
+                        Props#{K := ?PLAIN_PROPERTY(V, element(?DATAPROP_SEQ, Old))},
+                        Seq);
         #{K := _} -> miss;
         _ ->
-            merge_pairs(Rest, Props#{K => {?DATAPROP_TAG, V, true, true, true, Seq}},
-                        Seq + 1)
+            merge_pairs(Rest, Props#{K => ?PLAIN_PROPERTY(V, Seq)}, Seq + 1)
     end.
 
 %% §14.7.5.9 key list when the whole chain is plain named data, else none
-t_for_in_fast(St, {?HANDLE_TAG, Id}) when tuple_size(St) =:= ?AGENT_ARITY ->
+t_for_in_fast(St, {?HANDLE_TAG, Id}) when tuple_size(St) =:= ?AGENT_SIZE ->
     Data = element(?STORE_DATA, element(?AGENT_STORE, St)),
-    for_in_chain(Data, arc_rt_arena_ffi:get(Id, Data), #{}, [], 64);
+    for_in_chain(Data, arc_rt_arena_ffi:get(Id, Data), #{}, [], ?MAX_PROTO_HOPS);
 t_for_in_fast(_, _) -> none.
 
 for_in_chain(_, _, _, _, 0) -> none;
@@ -879,8 +874,8 @@ for_in_add(Data, Proto, Enum, Hidden, Seen, Acc, Fuel) ->
             for_in_chain(Data, arc_rt_arena_ffi:get(P, Data), Seen1, Acc1, Fuel - 1)
     end.
 
-%% enumerable named keys by seq plus the hidden ones; both records keep
-%% enumerable and seq in the same slots
+%% enumerable named keys by seq plus the hidden ones; both property records
+%% keep enumerable and seq at the same positions
 for_in_named([], Enum, Hidden) ->
     Sorted = lists:sort(fun({A, _}, {B, _}) -> A =< B end, Enum),
     {[K || {_, K} <- Sorted], Hidden};
@@ -892,14 +887,12 @@ for_in_named([{{?KEY_NAMED, K}, P} | Rest], Enum, Hidden) ->
     end;
 for_in_named(_, _, _) -> none.
 
-
-
 %% §7.3.24 own enumerable named data pairs in order, none for anything else
-t_own_enum_fast(St, {?HANDLE_TAG, Id}) when tuple_size(St) =:= ?AGENT_ARITY ->
+t_own_enum_fast(St, {?HANDLE_TAG, Id}) when tuple_size(St) =:= ?AGENT_SIZE ->
     Data = element(?STORE_DATA, element(?AGENT_STORE, St)),
     case arc_rt_arena_ffi:get(Id, Data) of
         {?SSHAPED_TAG, _, _, Slots, Offs} ->
-            {some, [{KB, element(Off + 1, Slots)}
+            {some, [{KB, ?SLOT_AT(Slots, Off)}
                     || {KB, Off} <- lists:keysort(2, maps:to_list(Offs))]};
         {?SOBJECT_TAG, ?ORDINARY, _, Props, _, ?ELEMS_NONE, _} ->
             case lists:all(fun plain_named/1, maps:to_list(Props)) of

@@ -5,6 +5,7 @@ pub type Arena(a)
 @external(erlang, "arc_rt_arena_ffi", "new")
 pub fn new() -> Arena(a)
 
+// freed ids answer the untyped free marker, ids never set crash
 @external(erlang, "arc_rt_arena_ffi", "get")
 pub fn get(id: Int, arena: Arena(a)) -> a
 
@@ -14,8 +15,8 @@ pub fn get_option(id: Int, arena: Arena(a)) -> Option(a)
 @external(erlang, "arc_rt_arena_ffi", "set")
 pub fn set(id: Int, value: a, arena: Arena(a)) -> Arena(a)
 
-@external(erlang, "arc_rt_arena_ffi", "reset")
-pub fn reset(id: Int, arena: Arena(a)) -> Arena(a)
+@external(erlang, "arc_rt_arena_ffi", "free")
+pub fn free(id: Int, arena: Arena(a)) -> Arena(a)
 
 @external(erlang, "arc_rt_arena_ffi", "fold")
 pub fn fold(f: fn(Int, a, b) -> b, initial: b, arena: Arena(a)) -> b

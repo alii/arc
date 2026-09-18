@@ -1,4 +1,4 @@
-%% kernels answer miss when the slow path is needed
+%% kernels answer miss when the general path is needed
 %% float ops raise badarith past 1.8e308, caught as infinity
 -module(arc_rt_ops_ffi).
 -export([add/2, sub/2, mul/2, 'div'/2, mod/2, neg/1, plus/1, step/2,
@@ -11,11 +11,7 @@
 
 -include("arc_rt_layout.hrl").
 
--define(MAX_SAFE_INT, 9007199254740991).
--define(IS_INF(X), (X =:= js_inf orelse X =:= js_neg_inf)).
--define(IS_NUM(X), (is_float(X) orelse is_integer(X) orelse X =:= js_nan
-                    orelse ?IS_INF(X))).
--compile({inline, [norm/1, inf_val/1, nul/1, add/2, sub/2, mul/2,
+-compile({inline, [norm/1, inf_jsval/1, is_nullish/1, add/2, sub/2, mul/2,
                    'div'/2, mod/2, lt/2, le/2, gt/2, ge/2,
                    eq/2, neq/2, strict_eq/2, strict_neq/2,
                    t_bitand_fast/2, t_bitor_fast/2, t_bitxor_fast/2,
@@ -23,13 +19,13 @@
 norm(R) when R > ?MAX_SAFE_INT; R < -?MAX_SAFE_INT -> arc_rt_val_ffi:mk_int(R);
 norm(R) -> R.
 
-inf_val(false) -> js_inf;
-inf_val(true) -> js_neg_inf.
+inf_jsval(false) -> js_inf;
+inf_jsval(true) -> js_neg_inf.
 
 add(A, B) when is_integer(A), is_integer(B) -> norm(A + B);
 add(A, B) when is_number(A), is_number(B) ->
     try A + B
-    catch error:badarith -> inf_val(A < 0)
+    catch error:badarith -> inf_jsval(A < 0)
     end;
 add(A, B) when is_binary(A), is_binary(B) -> <<A/binary, B/binary>>;
 add(A, B) when ?IS_STR(A) ->
@@ -45,8 +41,8 @@ add(A, B) when ?IS_STR(B) ->
 add({js_bigint, A}, {js_bigint, B}) -> {js_bigint, A + B};
 add(A, B) -> nonfinite_add(A, B).
 
-nonfinite_add(js_nan, B) when ?IS_NUM(B) -> js_nan;
-nonfinite_add(A, js_nan) when ?IS_NUM(A) -> js_nan;
+nonfinite_add(js_nan, B) when ?IS_JS_NUMBER(B) -> js_nan;
+nonfinite_add(A, js_nan) when ?IS_JS_NUMBER(A) -> js_nan;
 nonfinite_add(js_inf, js_neg_inf) -> js_nan;
 nonfinite_add(js_neg_inf, js_inf) -> js_nan;
 nonfinite_add(js_inf, B) when is_number(B); B =:= js_inf -> js_inf;
@@ -71,7 +67,7 @@ str_of(_) -> miss.
 sub(A, B) when is_integer(A), is_integer(B) -> norm(A - B);
 sub(A, B) when is_number(A), is_number(B) ->
     try A - B
-    catch error:badarith -> inf_val(A < 0)
+    catch error:badarith -> inf_jsval(A < 0)
     end;
 sub({js_bigint, A}, {js_bigint, B}) -> {js_bigint, A - B};
 sub(A, js_inf) -> nonfinite_add(A, js_neg_inf);
@@ -86,11 +82,11 @@ mul(A, B) when is_integer(A), is_integer(B) ->
     end;
 mul(A, B) when is_number(A), is_number(B) ->
     try A * B
-    catch error:badarith -> inf_val((A < 0) =/= (B < 0))
+    catch error:badarith -> inf_jsval((A < 0) =/= (B < 0))
     end;
 mul({js_bigint, A}, {js_bigint, B}) -> {js_bigint, A * B};
-mul(js_nan, B) when ?IS_NUM(B) -> js_nan;
-mul(A, js_nan) when ?IS_NUM(A) -> js_nan;
+mul(js_nan, B) when ?IS_JS_NUMBER(B) -> js_nan;
+mul(A, js_nan) when ?IS_JS_NUMBER(A) -> js_nan;
 mul(A, B) when ?IS_INF(A) -> inf_times(A, B);
 mul(A, B) when ?IS_INF(B) -> inf_times(B, A);
 mul(_, _) -> miss.
@@ -98,7 +94,7 @@ mul(_, _) -> miss.
 inf_times(Inf, B) when is_number(B) ->
     case B == 0 of
         true -> js_nan;
-        false -> inf_val((Inf =:= js_neg_inf) =/= num_is_negative(B))
+        false -> inf_jsval((Inf =:= js_neg_inf) =/= num_is_negative(B))
     end;
 inf_times(Inf, Inf) -> js_inf;
 inf_times(_, B) when ?IS_INF(B) -> js_neg_inf;
@@ -121,7 +117,7 @@ num_is_negative(N) -> N < 0.
         false ->
             try A / B
             catch error:badarith ->
-                inf_val(num_is_negative(A) =/= num_is_negative(B))
+                inf_jsval(num_is_negative(A) =/= num_is_negative(B))
             end
     end;
 'div'(A, B) -> nonfinite_div(A, B).
@@ -129,14 +125,14 @@ num_is_negative(N) -> N < 0.
 zero_divisor(A, DivisorNeg) ->
     case A == 0 of
         true -> js_nan;
-        false -> inf_val(num_is_negative(A) =/= DivisorNeg)
+        false -> inf_jsval(num_is_negative(A) =/= DivisorNeg)
     end.
 
-nonfinite_div(js_nan, B) when ?IS_NUM(B) -> js_nan;
-nonfinite_div(A, js_nan) when ?IS_NUM(A) -> js_nan;
+nonfinite_div(js_nan, B) when ?IS_JS_NUMBER(B) -> js_nan;
+nonfinite_div(A, js_nan) when ?IS_JS_NUMBER(A) -> js_nan;
 nonfinite_div(A, B) when ?IS_INF(A), ?IS_INF(B) -> js_nan;
 nonfinite_div(A, B) when ?IS_INF(A), is_number(B) ->
-    inf_val((A =:= js_neg_inf) =/= num_is_negative(B));
+    inf_jsval((A =:= js_neg_inf) =/= num_is_negative(B));
 nonfinite_div(A, B) when is_number(A), ?IS_INF(B) ->
     case (B =:= js_neg_inf) =/= num_is_negative(A) of
         true -> -0.0;
@@ -246,13 +242,13 @@ strict_neq(A, B) -> A =/= B.
 
 eq(js_tdz, _) -> miss;
 eq(_, js_tdz) -> miss;
-eq(undefined, B) -> nul(B);
-eq(null, B) -> nul(B);
-eq(A, undefined) -> nul(A);
-eq(A, null) -> nul(A);
-eq({js_cell, A}, {js_cell, B}) -> A =:= B;
-eq({js_cell, _}, _) -> miss;
-eq(_, {js_cell, _}) -> miss;
+eq(undefined, B) -> is_nullish(B);
+eq(null, B) -> is_nullish(B);
+eq(A, undefined) -> is_nullish(A);
+eq(A, null) -> is_nullish(A);
+eq({?HANDLE_TAG, A}, {?HANDLE_TAG, B}) -> A =:= B;
+eq({?HANDLE_TAG, _}, _) -> miss;
+eq(_, {?HANDLE_TAG, _}) -> miss;
 eq(A, B) when is_number(A), is_number(B) -> A == B;
 eq(A, B) when ?IS_STR(A), ?IS_STR(B) -> A =:= B;
 eq(A, B) when is_boolean(A), is_boolean(B) -> A =:= B;
@@ -276,9 +272,9 @@ neq(A, B) ->
         R -> not R
     end.
 
-nul(undefined) -> true;
-nul(null) -> true;
-nul(_) -> false.
+is_nullish(undefined) -> true;
+is_nullish(null) -> true;
+is_nullish(_) -> false.
 
 -define(PURE_BINOP(Op, A, B),
     case Op of
@@ -327,32 +323,31 @@ t_mod(St, A, B) -> 'arc@rt@ops':t_mod(St, A, B).
 t_neg(St, A) when is_number(A) -> {neg(A), St};
 t_neg(St, A) -> 'arc@rt@ops':t_neg(St, A).
 
+%% a float sum only overflows when both terms share the sign of x
 fadd(X, Y) ->
     try {j_float, X + Y}
-    catch error:badarith -> inf_num(sum_is_negative(X, Y))
+    catch error:badarith -> inf_jsnum(is_negative(X))
     end.
 
 fsub(X, Y) ->
     try {j_float, X - Y}
-    catch error:badarith -> inf_num(sum_is_negative(X, -Y))
+    catch error:badarith -> inf_jsnum(is_negative(X))
     end.
 
 fmul(X, Y) ->
     try {j_float, X * Y}
-    catch error:badarith -> inf_num(is_negative(X) =/= is_negative(Y))
+    catch error:badarith -> inf_jsnum(is_negative(X) =/= is_negative(Y))
     end.
 
 fdiv(X, Y) ->
     try {j_float, X / Y}
-    catch error:badarith -> inf_num(is_negative(X) =/= is_negative(Y))
+    catch error:badarith -> inf_jsnum(is_negative(X) =/= is_negative(Y))
     end.
-
-sum_is_negative(A, _B) -> is_negative(A).
 
 is_negative(X) -> X < 0.
 
-inf_num(false) -> j_pos_inf;
-inf_num(true) -> j_neg_inf.
+inf_jsnum(false) -> j_pos_inf;
+inf_jsnum(true) -> j_neg_inf.
 
 pow_total(Base, Exp) ->
     try {j_float, math:pow(Base, Exp)}
@@ -382,7 +377,7 @@ t_eq_fast(A, B) when is_number(A), is_number(B) ->
     case A == B of true -> 1; false -> 0 end;
 t_eq_fast(A, B) when ?IS_STR(A), ?IS_STR(B) ->
     case A =:= B of true -> 1; false -> 0 end;
-t_eq_fast({js_cell, A}, {js_cell, B}) ->
+t_eq_fast({?HANDLE_TAG, A}, {?HANDLE_TAG, B}) ->
     case A =:= B of true -> 1; false -> 0 end;
 t_eq_fast(A, B) when is_boolean(A), is_boolean(B) ->
     case A =:= B of true -> 1; false -> 0 end;
@@ -410,29 +405,29 @@ u32(X) -> int_of(X) band 16#FFFFFFFF.
 
 t_bitand_fast(A, B) when is_integer(A), is_integer(B) ->
     w32(A) band w32(B);
-t_bitand_fast(A, B) when ?IS_NUM(A), ?IS_NUM(B) -> i32(A) band i32(B);
+t_bitand_fast(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> i32(A) band i32(B);
 t_bitand_fast(_, _) -> miss.
 t_bitor_fast(A, B) when is_integer(A), is_integer(B) ->
     w32(A) bor w32(B);
-t_bitor_fast(A, B) when ?IS_NUM(A), ?IS_NUM(B) -> i32(A) bor i32(B);
+t_bitor_fast(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> i32(A) bor i32(B);
 t_bitor_fast(_, _) -> miss.
 t_bitxor_fast(A, B) when is_integer(A), is_integer(B) ->
     w32(A) bxor w32(B);
-t_bitxor_fast(A, B) when ?IS_NUM(A), ?IS_NUM(B) -> i32(A) bxor i32(B);
+t_bitxor_fast(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> i32(A) bxor i32(B);
 t_bitxor_fast(_, _) -> miss.
 t_shr_fast(A, B) when is_integer(A), is_integer(B) ->
     w32(A) bsr (B band 31);
-t_shr_fast(A, B) when ?IS_NUM(A), ?IS_NUM(B) -> i32(A) bsr (u32(B) band 31);
+t_shr_fast(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> i32(A) bsr (u32(B) band 31);
 t_shr_fast(_, _) -> miss.
 t_shl_fast(A, B) when is_integer(A), is_integer(B) ->
     w32(w32(A) bsl (B band 31));
-t_shl_fast(A, B) when ?IS_NUM(A), ?IS_NUM(B) ->
+t_shl_fast(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) ->
     w32(i32(A) bsl (u32(B) band 31));
 t_shl_fast(_, _) -> miss.
 t_ushr_fast(A, B) when is_integer(A), is_integer(B) ->
     (A band 16#FFFFFFFF) bsr (B band 31);
-t_ushr_fast(A, B) when ?IS_NUM(A), ?IS_NUM(B) -> u32(A) bsr (u32(B) band 31);
+t_ushr_fast(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> u32(A) bsr (u32(B) band 31);
 t_ushr_fast(_, _) -> miss.
 t_bitnot_fast(A) when is_integer(A) -> bnot w32(A);
-t_bitnot_fast(A) when ?IS_NUM(A) -> bnot i32(A);
+t_bitnot_fast(A) when ?IS_JS_NUMBER(A) -> bnot i32(A);
 t_bitnot_fast(_) -> miss.

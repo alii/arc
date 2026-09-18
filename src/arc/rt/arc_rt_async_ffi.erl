@@ -7,7 +7,7 @@ apply_sm(St, Sm, Rs, Sent, Loc) ->
     try Sm(St, Rs, Sent, Loc) of
         {StepWire, St2} -> {step(Sm, StepWire), St2}
     catch
-        error:{wasm_exn, 0, [St2, E]} -> {{?STEP_THROW, E}, St2}
+        error:?JS_THROW(St2, E) -> {{?STEP_THROW, E}, St2}
     end.
 
 step(_Sm, {return, V}) -> {?STEP_RETURN, V};

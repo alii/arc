@@ -5,7 +5,7 @@
 -include("arc_rt_layout.hrl").
 
 %% walks fun env too so closures keep captured handles alive
-refs_in_term({js_cell, N}, Acc) when is_integer(N) -> [N | Acc];
+refs_in_term({?HANDLE_TAG, N}, Acc) when is_integer(N) -> [N | Acc];
 refs_in_term(F, Acc) when is_function(F) ->
     {env, Env} = erlang:fun_info(F, env),
     lists:foldl(fun refs_in_term/2, Acc, Env);
@@ -38,7 +38,7 @@ diff_refs(Old, New, Acc) ->
         false -> diff1(Old, New, Acc)
     end.
 
-diff1(_, {js_cell, N}, Acc) when is_integer(N) -> [N | Acc];
+diff1(_, {?HANDLE_TAG, N}, Acc) when is_integer(N) -> [N | Acc];
 diff1(Old, New, Acc) when is_tuple(Old), is_tuple(New),
                           tuple_size(Old) =:= tuple_size(New) ->
     diff_tuple(Old, New, tuple_size(New), Acc);

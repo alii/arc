@@ -1,9 +1,11 @@
 -module(arc_rt_layout_root_ffi).
--export([idx/1, tag/1, element/2, tuple_size/1, dyn/1, slots/1]).
+-export([idx/1, tag/1, element_of/2, size_of/1, dyn/1, slots/1,
+         kfn_parts/1, direct_entry/3, is_plain_fn/1, plain_property/2,
+         slot_at/2, slot_set/3, frame/4, is_js_number/1, is_str/1]).
 
 -include("arc/rt/arc_rt_layout.hrl").
 
-idx(<<"AGENT_ARITY">>) -> ?AGENT_ARITY;
+idx(<<"AGENT_SIZE">>) -> ?AGENT_SIZE;
 idx(<<"AGENT_STORE">>) -> ?AGENT_STORE;
 idx(<<"AGENT_REALM">>) -> ?AGENT_REALM;
 idx(<<"AGENT_HOST_FNS">>) -> ?AGENT_HOST_FNS;
@@ -11,11 +13,11 @@ idx(<<"AGENT_REALMS">>) -> ?AGENT_REALMS;
 idx(<<"STORE_DATA">>) -> ?STORE_DATA;
 idx(<<"STORE_NEXT">>) -> ?STORE_NEXT;
 idx(<<"STORE_PINNED_ROOTS">>) -> ?STORE_PINNED_ROOTS;
-idx(<<"STORE_ALLOC">>) -> ?STORE_ALLOC;
+idx(<<"STORE_ALLOC_SINCE_GC">>) -> ?STORE_ALLOC_SINCE_GC;
 idx(<<"STORE_PROP_SEQ">>) -> ?STORE_PROP_SEQ;
 idx(<<"STORE_SHAPES">>) -> ?STORE_SHAPES;
 idx(<<"STORE_NEXT_SHAPE">>) -> ?STORE_NEXT_SHAPE;
-idx(<<"STORE_ARITY">>) -> ?STORE_ARITY;
+idx(<<"STORE_SIZE">>) -> ?STORE_SIZE;
 idx(<<"STORE_ICS">>) -> ?STORE_ICS;
 idx(<<"STORE_FREE_PROTOS">>) -> ?STORE_FREE_PROTOS;
 idx(<<"STORE_GLOBAL_EPOCH">>) -> ?STORE_GLOBAL_EPOCH;
@@ -32,7 +34,7 @@ idx(<<"REALM_MAP_ITER_PROTO">>) -> ?REALM_MAP_ITER_PROTO;
 idx(<<"REALM_SET_ITER_PROTO">>) -> ?REALM_SET_ITER_PROTO;
 idx(<<"REALM_GLOBAL">>) -> ?REALM_GLOBAL;
 idx(<<"REALM_ID">>) -> ?REALM_ID;
-idx(<<"REALM_ARITY">>) -> ?REALM_ARITY;
+idx(<<"REALM_SIZE">>) -> ?REALM_SIZE;
 idx(<<"PAIR_PROTO">>) -> ?PAIR_PROTO;
 idx(<<"PAIR_CTOR">>) -> ?PAIR_CTOR;
 idx(<<"HANDLE_ID">>) -> ?HANDLE_ID;
@@ -42,16 +44,16 @@ idx(<<"SOBJECT_PROPS">>) -> ?SOBJECT_PROPS;
 idx(<<"SOBJECT_SYMBOL_PROPS">>) -> ?SOBJECT_SYMBOL_PROPS;
 idx(<<"SOBJECT_ELEMENTS">>) -> ?SOBJECT_ELEMENTS;
 idx(<<"SOBJECT_EXTENSIBLE">>) -> ?SOBJECT_EXTENSIBLE;
-idx(<<"SOBJECT_ARITY">>) -> ?SOBJECT_ARITY;
+idx(<<"SOBJECT_SIZE">>) -> ?SOBJECT_SIZE;
 idx(<<"SSHAPED_SID">>) -> ?SSHAPED_SID;
 idx(<<"SSHAPED_PROTO">>) -> ?SSHAPED_PROTO;
 idx(<<"SSHAPED_SLOTS">>) -> ?SSHAPED_SLOTS;
 idx(<<"SSHAPED_OFFSETS">>) -> ?SSHAPED_OFFSETS;
-idx(<<"SSHAPED_ARITY">>) -> ?SSHAPED_ARITY;
-idx(<<"SHAPE_ARITY_F">>) -> ?SHAPE_ARITY_F;
+idx(<<"SSHAPED_SIZE">>) -> ?SSHAPED_SIZE;
+idx(<<"SHAPE_SLOT_COUNT">>) -> ?SHAPE_SLOT_COUNT;
 idx(<<"SHAPE_OFFSETS">>) -> ?SHAPE_OFFSETS;
 idx(<<"SHAPE_TRANSITIONS">>) -> ?SHAPE_TRANSITIONS;
-idx(<<"SHAPE_ARITY">>) -> ?SHAPE_ARITY;
+idx(<<"SHAPE_SIZE">>) -> ?SHAPE_SIZE;
 idx(<<"KFN_CODE">>) -> ?KFN_CODE;
 idx(<<"KFN_HOME">>) -> ?KFN_HOME;
 idx(<<"KFN_FLAGS">>) -> ?KFN_FLAGS;
@@ -60,26 +62,26 @@ idx(<<"KFN_SIMPLE">>) -> ?KFN_SIMPLE;
 idx(<<"KFN_NAME">>) -> ?KFN_NAME;
 idx(<<"KFN_LENGTH">>) -> ?KFN_LENGTH;
 idx(<<"KFN_BIRTH">>) -> ?KFN_BIRTH;
-idx(<<"KFN_ARITY">>) -> ?KFN_ARITY;
+idx(<<"KFN_SIZE">>) -> ?KFN_SIZE;
 idx(<<"KBYTECODE_BIRTH">>) -> ?KBYTECODE_BIRTH;
 idx(<<"BIRTH_PROTOTYPE_PARENT">>) -> ?BIRTH_PROTOTYPE_PARENT;
-idx(<<"KBYTECODE_ARITY">>) -> ?KBYTECODE_ARITY;
+idx(<<"KBYTECODE_SIZE">>) -> ?KBYTECODE_SIZE;
 idx(<<"KNATIVE_TOKEN">>) -> ?KNATIVE_TOKEN;
 idx(<<"KNATIVE_NAME">>) -> ?KNATIVE_NAME;
 idx(<<"KNATIVE_LENGTH">>) -> ?KNATIVE_LENGTH;
 idx(<<"KNATIVE_CONSTRUCTIBLE">>) -> ?KNATIVE_CONSTRUCTIBLE;
-idx(<<"KNATIVE_ARITY">>) -> ?KNATIVE_ARITY;
+idx(<<"KNATIVE_SIZE">>) -> ?KNATIVE_SIZE;
 idx(<<"ARRAYOBJ_LENGTH">>) -> ?ARRAYOBJ_LENGTH;
-idx(<<"ARRAYOBJ_ARITY">>) -> ?ARRAYOBJ_ARITY;
+idx(<<"ARRAYOBJ_SIZE">>) -> ?ARRAYOBJ_SIZE;
 idx(<<"ARGUMENTSOBJ_MAPPED">>) -> ?ARGUMENTSOBJ_MAPPED;
-idx(<<"ARGUMENTSOBJ_ARITY">>) -> ?ARGUMENTSOBJ_ARITY;
+idx(<<"ARGUMENTSOBJ_SIZE">>) -> ?ARGUMENTSOBJ_SIZE;
 idx(<<"STRINGOBJ_VALUE">>) -> ?STRINGOBJ_VALUE;
 idx(<<"ARRAYITER_TARGET">>) -> ?ARRAYITER_TARGET;
 idx(<<"ARRAYITER_INDEX">>) -> ?ARRAYITER_INDEX;
 idx(<<"ARRAYITER_KIND">>) -> ?ARRAYITER_KIND;
-idx(<<"ARRAYITER_ARITY">>) -> ?ARRAYITER_ARITY;
+idx(<<"ARRAYITER_SIZE">>) -> ?ARRAYITER_SIZE;
 idx(<<"GENERATOROBJ_DATA">>) -> ?GENERATOROBJ_DATA;
-idx(<<"GENERATOROBJ_ARITY">>) -> ?GENERATOROBJ_ARITY;
+idx(<<"GENERATOROBJ_SIZE">>) -> ?GENERATOROBJ_SIZE;
 idx(<<"SBOX_VALUE">>) -> ?SBOX_VALUE;
 idx(<<"FNFLAGS_IS_CTOR">>) -> ?FNFLAGS_IS_CTOR;
 idx(<<"FNFLAGS_IS_CLASS_CTOR">>) -> ?FNFLAGS_IS_CLASS_CTOR;
@@ -89,16 +91,21 @@ idx(<<"FNFLAGS_IS_METHOD">>) -> ?FNFLAGS_IS_METHOD;
 idx(<<"FNFLAGS_IS_GEN">>) -> ?FNFLAGS_IS_GEN;
 idx(<<"FNFLAGS_IS_ASYNC">>) -> ?FNFLAGS_IS_ASYNC;
 idx(<<"FNFLAGS_IS_STRICT">>) -> ?FNFLAGS_IS_STRICT;
-idx(<<"FNFLAGS_ARITY">>) -> ?FNFLAGS_ARITY;
+idx(<<"FNFLAGS_SIZE">>) -> ?FNFLAGS_SIZE;
 idx(<<"DATAPROP_VALUE">>) -> ?DATAPROP_VALUE;
 idx(<<"DATAPROP_WRITABLE">>) -> ?DATAPROP_WRITABLE;
 idx(<<"DATAPROP_ENUMERABLE">>) -> ?DATAPROP_ENUMERABLE;
 idx(<<"DATAPROP_CONFIGURABLE">>) -> ?DATAPROP_CONFIGURABLE;
 idx(<<"DATAPROP_SEQ">>) -> ?DATAPROP_SEQ;
-idx(<<"DATAPROP_ARITY">>) -> ?DATAPROP_ARITY;
+idx(<<"DATAPROP_SIZE">>) -> ?DATAPROP_SIZE;
 idx(<<"ACCESSORPROP_GET">>) -> ?ACCESSORPROP_GET;
 idx(<<"ACCESSORPROP_SET">>) -> ?ACCESSORPROP_SET;
-idx(<<"ACCESSORPROP_ARITY">>) -> ?ACCESSORPROP_ARITY.
+idx(<<"ACCESSORPROP_SIZE">>) -> ?ACCESSORPROP_SIZE;
+idx(<<"LEXICAL_GLOBAL_VALUE">>) -> ?LEXICAL_GLOBAL_VALUE;
+idx(<<"CELL_PROTO">>) -> ?CELL_PROTO;
+idx(<<"MAX_ARRAY_INDEX">>) -> ?MAX_ARRAY_INDEX;
+idx(<<"MAX_SAFE_INT">>) -> ?MAX_SAFE_INT;
+idx(<<"MAX_DENSE_INDEX">>) -> ?MAX_DENSE_INDEX.
 
 tag(<<"AGENT_TAG">>) -> ?AGENT_TAG;
 tag(<<"SOME">>) -> ?SOME;
@@ -107,6 +114,7 @@ tag(<<"STORE_TAG">>) -> ?STORE_TAG;
 tag(<<"REALM_TAG">>) -> ?REALM_TAG;
 tag(<<"PAIR_TAG">>) -> ?PAIR_TAG;
 tag(<<"HANDLE_TAG">>) -> ?HANDLE_TAG;
+tag(<<"STR_TAG">>) -> ?STR_TAG;
 tag(<<"SBOX_TAG">>) -> ?SBOX_TAG;
 tag(<<"SOBJECT_TAG">>) -> ?SOBJECT_TAG;
 tag(<<"SSHAPED_TAG">>) -> ?SSHAPED_TAG;
@@ -145,13 +153,46 @@ tag(<<"ELEMS_DENSE">>) -> ?ELEMS_DENSE;
 tag(<<"ELEMS_SPARSE">>) -> ?ELEMS_SPARSE;
 tag(<<"ELEMS_HOLE">>) -> ?ELEMS_HOLE;
 tag(<<"COMPLETION_NORMAL">>) -> ?COMPLETION_NORMAL;
-tag(<<"COMPLETION_THROW">>) -> ?COMPLETION_THROW.
+tag(<<"COMPLETION_THROW">>) -> ?COMPLETION_THROW;
+tag(<<"STORE_FREE_CELL">>) -> ?STORE_FREE_CELL;
+tag(<<"BOUNDFN_TAG">>) -> ?BOUNDFN_TAG;
+tag(<<"TYPEDARRAYOBJ_TAG">>) -> ?TYPEDARRAYOBJ_TAG;
+tag(<<"MODULENS_TAG">>) -> ?MODULENS_TAG;
+tag(<<"MAPOBJ_TAG">>) -> ?MAPOBJ_TAG;
+tag(<<"SETOBJ_TAG">>) -> ?SETOBJ_TAG;
+tag(<<"GLOBALOBJ">>) -> ?GLOBALOBJ;
+tag(<<"ITERATOR_RECORD_TAG">>) -> ?ITERATOR_RECORD_TAG;
+tag(<<"LENGTH_KEY">>) -> ?LENGTH_KEY;
+tag(<<"IC_READ">>) -> ?IC_READ;
+tag(<<"IC_CALL">>) -> ?IC_CALL;
+tag(<<"IC_INIT">>) -> ?IC_INIT;
+tag(<<"IC_GLOBAL">>) -> ?IC_GLOBAL;
+tag(<<"IC_OFF">>) -> ?IC_OFF.
 
-element(N, T) -> erlang:element(N, T).
+element_of(N, T) -> element(N, T).
 
-tuple_size(T) when is_tuple(T) -> erlang:tuple_size(T);
-tuple_size(_) -> 0.
+size_of(T) when is_tuple(T) -> tuple_size(T);
+size_of(_) -> 0.
 
 dyn(X) -> X.
 
 slots(L) -> list_to_tuple(L).
+
+kfn_parts(?KFN(Code, Home, Flags, FieldsInit, Simple)) ->
+    {Code, Home, Flags, FieldsInit, Simple}.
+
+direct_entry(Code, Arity, TakesThis) -> ?DIRECT_ENTRY(Code, Arity, TakesThis).
+
+is_plain_fn(Flags) -> ?IS_PLAIN_FN(Flags).
+
+plain_property(V, Seq) -> ?PLAIN_PROPERTY(V, Seq).
+
+slot_at(Slots, Off) -> ?SLOT_AT(Slots, Off).
+
+slot_set(Slots, Off, V) -> ?SLOT_SET(Slots, Off, V).
+
+frame(This, Fn, Home, NewTarget) -> ?FRAME(This, Fn, Home, NewTarget).
+
+is_js_number(V) -> ?IS_JS_NUMBER(V).
+
+is_str(V) -> ?IS_STR(V).

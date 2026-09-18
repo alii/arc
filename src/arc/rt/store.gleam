@@ -147,7 +147,7 @@ pub fn t_cell_update(st: Agent, h: Handle, f: fn(JsSlot) -> JsSlot) -> Agent {
 pub fn t_cell_free(st: Agent, h: Handle) -> Agent {
   let js = st.store
   let JsCell(id) = h
-  Agent(..st, store: JsStore(..js, data: arena.reset(id, js.data)))
+  Agent(..st, store: JsStore(..js, data: arena.free(id, js.data)))
 }
 
 pub fn t_pin_root(st: Agent, h: Handle) -> Agent {

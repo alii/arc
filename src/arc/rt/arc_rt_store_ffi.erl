@@ -7,24 +7,26 @@
 t_cell_get(St, {?HANDLE_TAG, Id}) ->
     Store = element(?AGENT_STORE, St),
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
-        ?STORE_FREE_SLOT -> erlang:error(#{gleam_error => panic, message =>
-            <<"t_cell_get: dangling Handle (use-after-free)"/utf8>>});
-        Slot -> Slot
+        ?STORE_FREE_CELL -> dangling(<<"t_cell_get">>);
+        Cell -> Cell
     end.
 
 t_var_get(St, {?HANDLE_TAG, Id}) ->
     Store = element(?AGENT_STORE, St),
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
-        ?STORE_FREE_SLOT -> erlang:error(#{gleam_error => panic, message =>
-            <<"t_var_get: dangling Handle (use-after-free)"/utf8>>});
-        {s_box, V} -> V
+        ?STORE_FREE_CELL -> dangling(<<"t_var_get">>);
+        {?SBOX_TAG, V} -> V
     end.
 
-t_throw(St, V) -> erlang:error({wasm_exn, 0, [St, V]}).
+dangling(Who) ->
+    erlang:error(#{gleam_error => panic, message =>
+        <<Who/binary, ": dangling Handle (use-after-free)">>}).
 
-is_handle({js_cell, N}) when is_integer(N) -> true;
+t_throw(St, V) -> erlang:error(?JS_THROW(St, V)).
+
+is_handle({?HANDLE_TAG, N}) when is_integer(N) -> true;
 is_handle(_) -> false.
 
-as_object_key({string_key, _} = K) -> K;
-as_object_key({symbol_key, _} = K) -> K;
-as_object_key(K) -> {string_key, K}.
+as_object_key({?OKEY_STRING, _} = K) -> K;
+as_object_key({?OKEY_SYMBOL, _} = K) -> K;
+as_object_key(K) -> {?OKEY_STRING, K}.

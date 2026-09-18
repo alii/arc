@@ -29,16 +29,16 @@ pub fn set_get_across_levels_test() {
   assert arena.count(a) == list.length(ids)
 }
 
-pub fn overwrite_and_reset_test() {
+pub fn overwrite_and_free_test() {
   let a =
     int.range(from: 0, to: 300, with: arena.new(), run: fn(a, id) {
       arena.set(id, id, a)
     })
   let a = arena.set(5, -5, a)
   let a = arena.set(299, -299, a)
-  let a = arena.reset(6, a)
-  let a = arena.reset(298, a)
-  let a = arena.reset(10_000, a)
+  let a = arena.free(6, a)
+  let a = arena.free(298, a)
+  let a = arena.free(10_000, a)
   assert arena.get(5, a) == -5
   assert arena.get(299, a) == -299
   assert arena.get_option(6, a) == None
