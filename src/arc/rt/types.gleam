@@ -1,3 +1,4 @@
+import arc/bytecode/error_kind.{type ErrorKind}
 import arc/host_hooks.{type ConsoleLevel, type HostHooks}
 import arc/internal/ordered_entries.{type OrderedEntries}
 import arc/internal/temporal_calendar.{type Calendar}
@@ -478,6 +479,39 @@ pub type Property {
     enumerable: Bool,
     configurable: Bool,
     seq: Int,
+  )
+}
+
+// writable, enumerable, configurable all false
+pub fn frozen_property(value: JsVal, seq: Int) -> Property {
+  DataProperty(
+    value:,
+    writable: False,
+    enumerable: False,
+    configurable: False,
+    seq:,
+  )
+}
+
+// writable, enumerable, configurable all true
+pub fn plain_property(value: JsVal, seq: Int) -> Property {
+  DataProperty(
+    value:,
+    writable: True,
+    enumerable: True,
+    configurable: True,
+    seq:,
+  )
+}
+
+// §18 builtin data property: writable, not enumerable, configurable
+pub fn builtin_property(value: JsVal, seq: Int) -> Property {
+  DataProperty(
+    value:,
+    writable: True,
+    enumerable: False,
+    configurable: True,
+    seq:,
   )
 }
 
@@ -2012,6 +2046,22 @@ pub type Cell {
   )
 }
 
+// extensible ordinary-shaped cell with no symbol props or elements
+pub fn plain_object(
+  kind: ObjKind,
+  proto: Option(Handle),
+  props: Dict(PropertyKey, Property),
+) -> Cell {
+  SObject(
+    kind:,
+    proto:,
+    props:,
+    symbol_props: [],
+    elements: NoElements,
+    extensible: True,
+  )
+}
+
 pub type ShapeSlots
 
 @external(erlang, "arc_rt_obj_ffi", "shape_slots_new")
@@ -2302,13 +2352,6 @@ pub fn unset_realm() -> Realm {
   )
 }
 
-pub type ErrorKind {
-  TypeErr
-  RangeErr
-  ReferenceErr
-  SyntaxErr
-}
-
 pub type EvalKind {
   IndirectEval
   DynamicFunction
@@ -2324,7 +2367,7 @@ pub type JsOps(st) {
     eval_hook: fn(st, String, EvalKind) -> #(JsVal, st),
     call_bytecode: fn(st, Handle, ObjKind, JsVal, List(JsVal)) ->
       #(Result(JsVal, JsVal), st),
-    bind_call: fn(st, Handle, ObjKind, JsVal) ->
+    prepare_call: fn(st, Handle, ObjKind, JsVal) ->
       fn(st, List(JsVal)) -> #(JsVal, st),
     construct_bytecode: fn(st, Handle, List(JsVal), JsVal) -> #(Handle, st),
     resume_frame: fn(st, SuspendedFrame, #(Int, JsVal)) -> #(Step, st),

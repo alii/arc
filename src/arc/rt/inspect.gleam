@@ -18,7 +18,7 @@ import arc/rt/types.{
   TemporalMonthDay, TemporalObj, TemporalTime, TemporalYearMonth,
   TemporalZonedDateTime, TypedArrayObj, WeakMapObj, WeakSetObj,
   WrapForValidIteratorObj, classify,
-} as rt_types
+}
 import arc/rt/val as rt_val
 import gleam/bool
 import gleam/dict.{type Dict}
@@ -49,7 +49,7 @@ fn inspect_inner(
     KNum(n) -> rt_val.jsnum_to_string(n)
     KStr(s) -> "'" <> escape_string(s) <> "'"
     KSym(id) ->
-      "Symbol(" <> option.unwrap(rt_types.symbol_description(id), "") <> ")"
+      "Symbol(" <> option.unwrap(types.symbol_description(id), "") <> ")"
     KBig(n) -> int.to_string(n) <> "n"
     KTdz -> "<uninitialized>"
     KHandle(h) ->
@@ -84,7 +84,7 @@ fn inspect_object(
             rt_obj.t_ordinary_own_property(
               st,
               h,
-              rt_types.StringKey(Named("name")),
+              types.StringKey(Named("name")),
             )
           {
             Some(DataProperty(value:, ..)) ->
@@ -101,7 +101,7 @@ fn inspect_object(
         }
         PromiseObj(_) -> "Promise {}"
         ProxyObj(..) ->
-          case rt_val.t_is_callable(st, rt_types.mk_object(h)).0 {
+          case rt_val.is_callable(st, types.mk_object(h)) {
             True -> "[Function (Proxy)]"
             False -> "Proxy {}"
           }
@@ -116,7 +116,7 @@ fn inspect_object(
         BigIntObj(value: bi) -> "[BigInt: " <> int.to_string(bi) <> "n]"
         SymbolObj(value: sym) ->
           "[Symbol: "
-          <> inspect_inner(st, rt_types.mk_symbol(sym), depth, visited)
+          <> inspect_inner(st, types.mk_symbol(sym), depth, visited)
           <> "]"
         MapObj(entries:) ->
           "Map(" <> int.to_string(ordered_entries.size(entries)) <> ")"
@@ -131,7 +131,7 @@ fn inspect_object(
         AsyncFromSyncIterator(..) -> "Object [Async-from-Sync Iterator] {}"
         DateObj(ms:) ->
           case ms {
-            rt_types.JInt(_) | rt_types.JFloat(_) ->
+            types.JInt(_) | types.JFloat(_) ->
               "Date(" <> rt_val.jsnum_to_string(ms) <> ")"
             _ -> "Invalid Date"
           }
@@ -145,14 +145,14 @@ fn inspect_object(
         DataViewObj(..) -> "DataView {}"
         ArrayBufferObj(storage: Shared(..) as storage) ->
           "SharedArrayBuffer { byteLength: "
-          <> int.to_string(rt_types.buffer_byte_size(storage))
+          <> int.to_string(types.buffer_byte_size(storage))
           <> " }"
         ArrayBufferObj(storage:) ->
           "ArrayBuffer { byteLength: "
-          <> int.to_string(rt_types.buffer_byte_size(storage))
+          <> int.to_string(types.buffer_byte_size(storage))
           <> " }"
         TypedArrayObj(buffer: buf, elem_kind:, byte_offset:, length:) ->
-          rt_types.typed_array_name(elem_kind)
+          types.typed_array_name(elem_kind)
           <> "("
           <> int.to_string(buffer.view_length(
             st,
@@ -175,11 +175,11 @@ fn inspect_object(
         DisposableStackObj(async: False, ..) -> "DisposableStack {}"
         DisposableStackObj(async: True, ..) -> "AsyncDisposableStack {}"
         FinalizationRegistryObj(..) -> "FinalizationRegistry {}"
-        rt_types.WeakRefObj(..) -> "WeakRef {}"
-        rt_types.ShadowRealmObj(..) -> "ShadowRealm {}"
-        Ordinary | rt_types.GlobalObj | HostObj(_) -> {
+        types.WeakRefObj(..) -> "WeakRef {}"
+        types.ShadowRealmObj(..) -> "ShadowRealm {}"
+        Ordinary | types.GlobalObj | HostObj(_) -> {
           let body = inspect_plain_object(st, props, depth, visited)
-          case list.key_find(symbol_props, rt_types.symbol_to_string_tag) {
+          case list.key_find(symbol_props, types.symbol_to_string_tag) {
             Ok(DataProperty(value:, ..)) ->
               case classify(value) {
                 KStr(t) -> "Object [" <> t <> "] " <> body
@@ -262,7 +262,7 @@ fn inspect_plain_object(
         list.take(visible, max_items)
         |> list.map(fn(pair) {
           let #(key, val) = pair
-          rt_types.key_display_string(key)
+          types.key_display_string(key)
           <> ": "
           <> inspect_inner(st, val, depth + 1, visited)
         })
@@ -297,7 +297,7 @@ fn ordered_property_pairs(
     |> list.map(fn(pair) { #(Index(pair.0), pair.1) })
   let named =
     list.sort(named, fn(a, b) {
-      int.compare(rt_types.prop_seq(a.1), rt_types.prop_seq(b.1))
+      int.compare(types.prop_seq(a.1), types.prop_seq(b.1))
     })
   list.append(idx, named)
 }

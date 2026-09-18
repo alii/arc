@@ -1,10 +1,11 @@
+import arc/bytecode/error_kind.{
+  type ErrorKind, RangeError, ReferenceError, TypeError,
+}
 import arc/internal/tuple_array.{type TupleArray}
 import arc/rt/bytecode.{type FuncTemplate, type TryFrame}
 import arc/rt/gc as rt_gc
-import arc/rt/types.{
-  type Agent, type ErrorKind, type Handle, type JsVal, Handle, RangeErr,
-  ReferenceErr, TypeErr,
-}
+import arc/rt/types.{type Agent, type Handle, type JsVal, Handle}
+import arc/rt/val as rt_val
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -241,11 +242,11 @@ pub fn new_error(
   msg: String,
 ) -> #(JsVal, State) {
   let agent = state.agent
-  let #(err, agent) = agent.store.ops.new_error(agent, kind, msg)
+  let #(err, agent) = rt_val.t_new_error(agent, kind, msg)
   #(err, State(..state, agent:))
 }
 
-fn throw_error(
+pub fn throw_error(
   state: State,
   kind: ErrorKind,
   msg: String,
@@ -255,15 +256,15 @@ fn throw_error(
 }
 
 pub fn throw_type_error(state: State, msg: String) -> Result(a, StepExit) {
-  throw_error(state, TypeErr, msg)
+  throw_error(state, TypeError, msg)
 }
 
 pub fn throw_reference_error(state: State, msg: String) -> Result(a, StepExit) {
-  throw_error(state, ReferenceErr, msg)
+  throw_error(state, ReferenceError, msg)
 }
 
 pub fn stack_overflow_error(agent: Agent) -> #(JsVal, Agent) {
-  agent.store.ops.new_error(agent, RangeErr, "Maximum call stack size exceeded")
+  rt_val.t_new_error(agent, RangeError, "Maximum call stack size exceeded")
 }
 
 pub fn throw_stack_overflow(state: State) -> Result(a, StepExit) {
@@ -277,6 +278,6 @@ pub fn internal_fault(
   err: VmError,
 ) -> #(Result(JsVal, JsVal), State) {
   let #(e, state) =
-    new_error(state, TypeErr, "internal error: " <> vm_error_message(err))
+    new_error(state, TypeError, "internal error: " <> vm_error_message(err))
   #(Error(e), state)
 }

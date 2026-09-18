@@ -1,3 +1,5 @@
+import arc/bytecode/error_kind.{RangeError, TypeError}
+import arc/rt/abstract_ops as rt_abstract
 import arc/rt/async as rt_async
 import arc/rt/buffer as rt_buffer
 import arc/rt/builtins/common
@@ -22,13 +24,13 @@ import arc/rt/types.{
   ConcatHelper, ConcatItem, GenCompleted, GenExecuting, GenSuspendedStart,
   GenSuspendedYield, HelperDrop, HelperFilter, HelperFlatMap, HelperMap,
   HelperTake, IteratorConstructor, IteratorHelperObj, IteratorN, JNan, KHandle,
-  KNull, KStr, KUndef, MapIterator, Named, NoElements, Ordinary, RangeErr,
-  ReturnThis, SObject, SetIterator, StringIterator, StringKey, SymbolKey,
-  TypeErr, TypedArrayObj, WrapForValidIteratorObj, ZipExhausted, ZipHelper,
-  ZipLongest, ZipOpen, ZipShortest, ZipStrict, classify, index_key, mk_bool,
-  mk_int, mk_object, mk_string, mk_undefined, symbol_async_iterator,
-  symbol_iterator, symbol_to_string_tag,
-} as rt_types
+  KNull, KStr, KUndef, MapIterator, Named, NoElements, Ordinary, ReturnThis,
+  SObject, SetIterator, StringIterator, StringKey, SymbolKey, TypedArrayObj,
+  WrapForValidIteratorObj, ZipExhausted, ZipHelper, ZipLongest, ZipOpen,
+  ZipShortest, ZipStrict, classify, index_key, mk_bool, mk_int, mk_object,
+  mk_string, mk_undefined, symbol_async_iterator, symbol_iterator,
+  symbol_to_string_tag,
+}
 import arc/rt/val as rt_val
 import gleam/dict
 import gleam/list
@@ -69,7 +71,7 @@ pub fn init(
       st,
       fn_proto,
       iterator_proto,
-      IteratorN(rt_types.ArrayIteratorNext),
+      IteratorN(types.ArrayIteratorNext),
       "Array Iterator",
     )
   let #(string_iter_proto, st) =
@@ -77,7 +79,7 @@ pub fn init(
       st,
       fn_proto,
       iterator_proto,
-      IteratorN(rt_types.StringIteratorNext),
+      IteratorN(types.StringIteratorNext),
       "String Iterator",
     )
   let #(map_iter_proto, st) =
@@ -85,7 +87,7 @@ pub fn init(
       st,
       fn_proto,
       iterator_proto,
-      IteratorN(rt_types.MapIteratorNext),
+      IteratorN(types.MapIteratorNext),
       "Map Iterator",
     )
   let #(set_iter_proto, st) =
@@ -93,7 +95,7 @@ pub fn init(
       st,
       fn_proto,
       iterator_proto,
-      IteratorN(rt_types.SetIteratorNext),
+      IteratorN(types.SetIteratorNext),
       "Set Iterator",
     )
   let #(async_sym_fn, st) =
@@ -125,24 +127,24 @@ pub fn init(
     )
   let #(proto_methods, st) =
     common.alloc_methods(st, fn_proto, [
-      #("map", IteratorN(rt_types.IteratorPrototypeMap), 1),
-      #("filter", IteratorN(rt_types.IteratorPrototypeFilter), 1),
-      #("take", IteratorN(rt_types.IteratorPrototypeTake), 1),
-      #("drop", IteratorN(rt_types.IteratorPrototypeDrop), 1),
-      #("flatMap", IteratorN(rt_types.IteratorPrototypeFlatMap), 1),
-      #("toArray", IteratorN(rt_types.IteratorPrototypeToArray), 0),
-      #("forEach", IteratorN(rt_types.IteratorPrototypeForEach), 1),
-      #("reduce", IteratorN(rt_types.IteratorPrototypeReduce), 1),
-      #("some", IteratorN(rt_types.IteratorPrototypeSome), 1),
-      #("every", IteratorN(rt_types.IteratorPrototypeEvery), 1),
-      #("find", IteratorN(rt_types.IteratorPrototypeFind), 1),
+      #("map", IteratorN(types.IteratorPrototypeMap), 1),
+      #("filter", IteratorN(types.IteratorPrototypeFilter), 1),
+      #("take", IteratorN(types.IteratorPrototypeTake), 1),
+      #("drop", IteratorN(types.IteratorPrototypeDrop), 1),
+      #("flatMap", IteratorN(types.IteratorPrototypeFlatMap), 1),
+      #("toArray", IteratorN(types.IteratorPrototypeToArray), 0),
+      #("forEach", IteratorN(types.IteratorPrototypeForEach), 1),
+      #("reduce", IteratorN(types.IteratorPrototypeReduce), 1),
+      #("some", IteratorN(types.IteratorPrototypeSome), 1),
+      #("every", IteratorN(types.IteratorPrototypeEvery), 1),
+      #("find", IteratorN(types.IteratorPrototypeFind), 1),
     ])
   let #(ctor_props, st) =
     common.alloc_methods(st, fn_proto, [
-      #("from", IteratorN(rt_types.IteratorFrom), 1),
-      #("concat", IteratorN(rt_types.IteratorConcat), 0),
-      #("zip", IteratorN(rt_types.IteratorZip), 1),
-      #("zipKeyed", IteratorN(rt_types.IteratorZipKeyed), 1),
+      #("from", IteratorN(types.IteratorFrom), 1),
+      #("concat", IteratorN(types.IteratorConcat), 0),
+      #("zip", IteratorN(types.IteratorZip), 1),
+      #("zipKeyed", IteratorN(types.IteratorZipKeyed), 1),
     ])
   let #(iterator, st) =
     common.init_type_on(
@@ -160,16 +162,16 @@ pub fn init(
     common.alloc_get_set_accessor(
       st,
       fn_proto,
-      IteratorN(rt_types.IteratorProtoGetConstructor),
-      IteratorN(rt_types.IteratorProtoSetConstructor),
+      IteratorN(types.IteratorProtoGetConstructor),
+      IteratorN(types.IteratorProtoSetConstructor),
       "constructor",
     )
   let #(tag_acc, st) =
     common.alloc_get_set_accessor(
       st,
       fn_proto,
-      IteratorN(rt_types.IteratorProtoGetToStringTag),
-      IteratorN(rt_types.IteratorProtoSetToStringTag),
+      IteratorN(types.IteratorProtoGetToStringTag),
+      IteratorN(types.IteratorProtoSetToStringTag),
       "[Symbol.toStringTag]",
     )
   let st =
@@ -183,15 +185,15 @@ pub fn init(
     )
   let #(helper_methods, st) =
     common.alloc_methods(st, fn_proto, [
-      #("next", IteratorN(rt_types.IteratorHelperNext), 0),
-      #("return", IteratorN(rt_types.IteratorHelperReturn), 0),
+      #("next", IteratorN(types.IteratorHelperNext), 0),
+      #("return", IteratorN(types.IteratorHelperReturn), 0),
     ])
   let #(iterator_helper_proto, st) =
     common.init_namespace(st, iterator_proto, "Iterator Helper", helper_methods)
   let #(wrap_methods, st) =
     common.alloc_methods(st, fn_proto, [
-      #("next", IteratorN(rt_types.WrapForValidIteratorNext), 0),
-      #("return", IteratorN(rt_types.WrapForValidIteratorReturn), 0),
+      #("next", IteratorN(types.WrapForValidIteratorNext), 0),
+      #("return", IteratorN(types.WrapForValidIteratorReturn), 0),
     ])
   let #(wrap_for_valid_proto, st) =
     common.alloc_proto(
@@ -219,10 +221,10 @@ pub fn init(
 fn alloc_proto_with_symbol(
   st: Agent,
   parent: Handle,
-  sym: rt_types.SymbolId,
+  sym: types.SymbolId,
   fn_h: Handle,
 ) -> #(Handle, Agent) {
-  let #(prop, st) = common.builtin_property(st, mk_object(fn_h))
+  let #(prop, st) = rt_store.t_builtin_property(st, mk_object(fn_h))
   let #(h, st) =
     rt_store.t_cell_new(
       st,
@@ -282,15 +284,14 @@ pub fn dispatch(
         st,
         "Abstract class Iterator not directly constructable",
       )
-    rt_types.IteratorFrom -> from(st, args)
-    rt_types.IteratorZip -> zip(st, args)
-    rt_types.IteratorZipKeyed -> zip_keyed(st, args)
-    rt_types.IteratorConcat -> concat(st, args)
-    rt_types.IteratorPrototypeMap ->
-      lazy_helper(st, this, args, HelperMap, "map")
-    rt_types.IteratorPrototypeFilter ->
+    types.IteratorFrom -> from(st, args)
+    types.IteratorZip -> zip(st, args)
+    types.IteratorZipKeyed -> zip_keyed(st, args)
+    types.IteratorConcat -> concat(st, args)
+    types.IteratorPrototypeMap -> lazy_helper(st, this, args, HelperMap, "map")
+    types.IteratorPrototypeFilter ->
       lazy_helper(st, this, args, HelperFilter, "filter")
-    rt_types.IteratorPrototypeFlatMap ->
+    types.IteratorPrototypeFlatMap ->
       lazy_helper(
         st,
         this,
@@ -298,35 +299,34 @@ pub fn dispatch(
         fn(func) { HelperFlatMap(func:, inner: None) },
         "flatMap",
       )
-    rt_types.IteratorPrototypeTake ->
+    types.IteratorPrototypeTake ->
       take_or_drop(st, this, args, HelperTake, "take")
-    rt_types.IteratorPrototypeDrop ->
+    types.IteratorPrototypeDrop ->
       take_or_drop(st, this, args, HelperDrop, "drop")
-    rt_types.IteratorPrototypeToArray -> to_array(st, this)
-    rt_types.IteratorPrototypeForEach -> for_each(st, this, args)
-    rt_types.IteratorPrototypeReduce -> reduce(st, this, args)
-    rt_types.IteratorPrototypeSome ->
+    types.IteratorPrototypeToArray -> to_array(st, this)
+    types.IteratorPrototypeForEach -> for_each(st, this, args)
+    types.IteratorPrototypeReduce -> reduce(st, this, args)
+    types.IteratorPrototypeSome ->
       every_some(st, this, args, AtLeastOne, "some")
-    rt_types.IteratorPrototypeEvery ->
-      every_some(st, this, args, Every, "every")
-    rt_types.IteratorPrototypeFind -> find(st, this, args)
-    rt_types.IteratorHelperNext -> helper_next(st, this)
-    rt_types.IteratorHelperReturn -> helper_return(st, this)
-    rt_types.WrapForValidIteratorNext -> wrap_next(st, this)
-    rt_types.WrapForValidIteratorReturn -> wrap_return(st, this)
-    rt_types.IteratorProtoGetToStringTag -> #(mk_string("Iterator"), st)
-    rt_types.IteratorProtoGetConstructor -> #(
+    types.IteratorPrototypeEvery -> every_some(st, this, args, Every, "every")
+    types.IteratorPrototypeFind -> find(st, this, args)
+    types.IteratorHelperNext -> helper_next(st, this)
+    types.IteratorHelperReturn -> helper_return(st, this)
+    types.WrapForValidIteratorNext -> wrap_next(st, this)
+    types.WrapForValidIteratorReturn -> wrap_return(st, this)
+    types.IteratorProtoGetToStringTag -> #(mk_string("Iterator"), st)
+    types.IteratorProtoGetConstructor -> #(
       mk_object(st.realm.iterator.constructor),
       st,
     )
-    rt_types.IteratorProtoSetToStringTag ->
+    types.IteratorProtoSetToStringTag ->
       ignore_proto_setter(st, this, args, IgnoreSetTag)
-    rt_types.IteratorProtoSetConstructor ->
+    types.IteratorProtoSetConstructor ->
       ignore_proto_setter(st, this, args, IgnoreSetCtor)
-    rt_types.ArrayIteratorNext -> array_iterator_next(st, this)
-    rt_types.MapIteratorNext -> map_iterator_next(st, this)
-    rt_types.SetIteratorNext -> set_iterator_next(st, this)
-    rt_types.StringIteratorNext -> string_iterator_next(st, this)
+    types.ArrayIteratorNext -> array_iterator_next(st, this)
+    types.MapIteratorNext -> map_iterator_next(st, this)
+    types.SetIteratorNext -> set_iterator_next(st, this)
+    types.StringIteratorNext -> string_iterator_next(st, this)
   }
 }
 
@@ -412,9 +412,7 @@ fn array_source_length(st: Agent, target: Handle) -> #(Int, Agent) {
           )
       }
     _ -> {
-      let #(len_v, st) =
-        rt_obj.t_get_prop(st, mk_object(target), StringKey(Named("length")))
-      let #(len, st) = rt_val.t_to_length(st, len_v)
+      let #(len, st) = rt_abstract.length_of_array_like(st, mk_object(target))
       case len > limits.max_iteration {
         True -> rt_val.t_throw_range_error(st, iteration_budget_msg)
         False -> #(len, st)
@@ -472,12 +470,12 @@ fn yield_step(step: #(Option(JsVal), Agent)) -> #(JsVal, Agent) {
 }
 
 fn iter_done(st: Agent) -> #(JsVal, Agent) {
-  let #(h, st) = rt_async.alloc_iter_result(st, mk_undefined(), True)
+  let #(h, st) = rt_async.alloc_iter_result(st, mk_undefined(), done: True)
   #(mk_object(h), st)
 }
 
 fn iter_yield(st: Agent, value: JsVal) -> #(JsVal, Agent) {
-  let #(h, st) = rt_async.alloc_iter_result(st, value, False)
+  let #(h, st) = rt_async.alloc_iter_result(st, value, done: False)
   #(mk_object(h), st)
 }
 
@@ -515,7 +513,7 @@ fn async_from_sync(
   let cap_resolve = mk_object(resolve_h)
   let cap_reject = mk_object(reject_h)
   let #(outcome, st) =
-    rt_call.t_apply_protected(st, fn(st) {
+    rt_call.try_run(st, fn(st) {
       do_async_from_sync(st, this, args, kind, cap_resolve, cap_reject)
     })
   let st = case outcome {
@@ -545,12 +543,12 @@ fn do_async_from_sync(
     AfsReturn -> rt_obj.t_get_prop(st, sync_iter, StringKey(Named("return")))
     AfsThrow -> rt_obj.t_get_prop(st, sync_iter, StringKey(Named("throw")))
   }
-  case kind, rt_call.is_callable(st, method) {
+  case kind, rt_val.is_callable(st, method) {
     AfsReturn, False -> {
       let arg = first_arg_or_undefined(args)
-      let #(ir_h, st) = rt_async.alloc_iter_result(st, arg, True)
+      let #(ir_h, st) = rt_async.alloc_iter_result(st, arg, done: True)
       let #(_, st) =
-        rt_call.t_call_checked(st, cap_resolve, mk_undefined(), [
+        rt_call.t_call(st, cap_resolve, mk_undefined(), [
           mk_object(ir_h),
         ])
       #(mk_undefined(), st)
@@ -563,8 +561,7 @@ fn do_async_from_sync(
       )
     }
     _, _ -> {
-      let #(result_val, st) =
-        rt_call.t_call_checked(st, method, sync_iter, args)
+      let #(result_val, st) = rt_call.t_call(st, method, sync_iter, args)
       case classify(result_val) {
         KHandle(result_h) -> {
           let close_on_rejection = case kind {
@@ -591,9 +588,9 @@ fn afs_continuation(
   st: Agent,
   result_h: Handle,
   sync_rec: Handle,
-  close_on_rejection: Bool,
-  cap_resolve: JsVal,
-  cap_reject: JsVal,
+  close_on_rejection close_on_rejection: Bool,
+  cap_resolve cap_resolve: JsVal,
+  cap_reject cap_reject: JsVal,
 ) -> #(JsVal, Agent) {
   let result = mk_object(result_h)
   let #(done_v, st) = rt_obj.t_get_prop(st, result, StringKey(Named("done")))
@@ -619,15 +616,15 @@ fn afs_continuation(
   #(mk_undefined(), st)
 }
 
-fn alloc_closure(st: Agent, tag: NativeToken) -> #(JsVal, Agent) {
+fn alloc_closure(st: Agent, token: NativeToken) -> #(JsVal, Agent) {
   let #(h, st) =
     rt_call.t_native_new(
       st,
       Some(st.realm.function.prototype),
-      tag,
+      token,
       "",
       1,
-      False,
+      constructible: False,
     )
   #(mk_object(h), st)
 }
@@ -641,14 +638,6 @@ fn require_async_from_sync(st: Agent, this: JsVal) -> Handle {
       }
     _ -> rt_val.t_throw_type_error(st, "not an Async-from-Sync Iterator")
   }
-}
-
-fn new_type_error(st: Agent, msg: String) -> #(JsVal, Agent) {
-  st.store.ops.new_error(st, TypeErr, msg)
-}
-
-fn new_range_error(st: Agent, msg: String) -> #(JsVal, Agent) {
-  st.store.ops.new_error(st, RangeErr, msg)
 }
 
 pub fn dispatch_construct(
@@ -748,10 +737,10 @@ fn coerce_limit(
   name: String,
 ) -> #(Int, Agent) {
   let arg = first_arg_or_undefined(args)
-  let #(nout, st) =
-    rt_call.t_apply_protected(st, fn(st) { rt_val.t_to_number(st, arg) })
+  let #(nout, st) = rt_call.try_run(st, fn(st) { rt_val.t_to_number(st, arg) })
   let range_error = fn(st, problem) {
-    let #(e, st) = new_range_error(st, name <> " limit is " <> problem)
+    let #(e, st) =
+      rt_val.t_new_error(st, RangeError, name <> " limit is " <> problem)
     iter_protocol.close_throw(st, this, e)
   }
   case nout {
@@ -830,7 +819,7 @@ fn resume(
     GenCompleted -> iter_done(st)
     GenSuspendedStart | GenSuspendedYield -> {
       let st = set_gen_state(st, helper_h, GenExecuting)
-      let #(out, st) = rt_call.t_apply_protected(st, body)
+      let #(out, st) = rt_call.try_run(st, body)
       let st = map_gen_state(st, helper_h, suspend_if_executing)
       case out {
         NormalCompletion(v) -> #(v, st)
@@ -949,7 +938,7 @@ fn step_map(
     Some(v) -> {
       let st = write_counter(st, helper_h, count + 1)
       let idx = mk_int(count)
-      case rt_call.t_call(st, func, mk_undefined(), [v, idx]) {
+      case rt_call.t_try_call(st, func, mk_undefined(), [v, idx]) {
         #(rt_call.NormalCompletion(mapped), st) -> iter_yield(st, mapped)
         #(rt_call.ThrowCompletion(thrown), st) ->
           close_throw_done(st, helper_h, underlying, thrown)
@@ -971,7 +960,7 @@ fn step_filter(
     Some(v) -> {
       let st = write_counter(st, helper_h, count + 1)
       let idx = mk_int(count)
-      case rt_call.t_call(st, func, mk_undefined(), [v, idx]) {
+      case rt_call.t_try_call(st, func, mk_undefined(), [v, idx]) {
         #(rt_call.ThrowCompletion(thrown), st) ->
           close_throw_done(st, helper_h, underlying, thrown)
         #(rt_call.NormalCompletion(selected), st) ->
@@ -1039,7 +1028,7 @@ fn step_flat_map(
   case inner {
     Some(inner_rec) -> {
       let #(step, st) =
-        rt_call.t_apply_protected(st, fn(st) {
+        rt_call.try_run(st, fn(st) {
           iter_protocol.iterator_step_value(st, inner_rec)
         })
       case step {
@@ -1059,12 +1048,12 @@ fn step_flat_map(
         Some(v) -> {
           let idx = mk_int(count)
           let st = write_counter(st, helper_h, count + 1)
-          case rt_call.t_call(st, func, mk_undefined(), [v, idx]) {
+          case rt_call.t_try_call(st, func, mk_undefined(), [v, idx]) {
             #(rt_call.ThrowCompletion(thrown), st) ->
               close_throw_done(st, helper_h, underlying, thrown)
             #(rt_call.NormalCompletion(mapped), st) -> {
               let #(open, st) =
-                rt_call.t_apply_protected(st, fn(st) {
+                rt_call.try_run(st, fn(st) {
                   iter_protocol.get_iterator_flattenable(
                     st,
                     mapped,
@@ -1102,7 +1091,7 @@ fn step_flat_map(
 
 fn wrap_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   use rec <- require_wrap(st, this)
-  rt_call.t_call_checked(st, rec.next_method, rec.iterator, [])
+  rt_call.t_call(st, rec.next_method, rec.iterator, [])
 }
 
 fn wrap_return(st: Agent, this: JsVal) -> #(JsVal, Agent) {
@@ -1152,7 +1141,7 @@ fn for_each_loop(
     #(None, st) -> #(mk_undefined(), st)
     #(Some(v), st) -> {
       let idx = mk_int(counter)
-      case rt_call.t_call(st, func, mk_undefined(), [v, idx]) {
+      case rt_call.t_try_call(st, func, mk_undefined(), [v, idx]) {
         #(rt_call.ThrowCompletion(thrown), st) ->
           iter_protocol.close_throw(st, rec.iterator, thrown)
         #(rt_call.NormalCompletion(_result), st) ->
@@ -1189,7 +1178,7 @@ fn reduce_loop(
     #(None, st) -> #(acc, st)
     #(Some(v), st) -> {
       let idx = mk_int(counter)
-      case rt_call.t_call(st, func, mk_undefined(), [acc, v, idx]) {
+      case rt_call.t_try_call(st, func, mk_undefined(), [acc, v, idx]) {
         #(rt_call.ThrowCompletion(thrown), st) ->
           iter_protocol.close_throw(st, rec.iterator, thrown)
         #(rt_call.NormalCompletion(new_acc), st) ->
@@ -1231,7 +1220,7 @@ fn predicate_loop(
     #(None, st) -> #(None, st)
     #(Some(v), st) -> {
       let idx = mk_int(counter)
-      case rt_call.t_call(st, func, mk_undefined(), [v, idx]) {
+      case rt_call.t_try_call(st, func, mk_undefined(), [v, idx]) {
         #(rt_call.ThrowCompletion(thrown), st) ->
           iter_protocol.close_throw(st, rec.iterator, thrown)
         #(rt_call.NormalCompletion(result), st) ->
@@ -1281,7 +1270,15 @@ fn ignore_proto_setter(
             IgnoreSetTag -> SymbolKey(symbol_to_string_tag)
           }
           let #(ok, st) =
-            rt_obj.t_define_own_data(st, h, key, val, True, True, True)
+            rt_obj.t_define_own_data(
+              st,
+              h,
+              key,
+              val,
+              writable: True,
+              enumerable: True,
+              configurable: True,
+            )
           case ok {
             True -> #(mk_undefined(), st)
             False ->
@@ -1327,7 +1324,7 @@ fn consumer_with_callback(
     "Iterator.prototype." <> name <> " called on non-object",
   )
   let func = first_arg_or_undefined(args)
-  case rt_call.is_callable(st, func) {
+  case rt_val.is_callable(st, func) {
     False ->
       iter_protocol.close_throw_type(
         st,
@@ -1361,9 +1358,7 @@ fn after_step(
   cont: fn(Option(JsVal), Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   let #(step, st) =
-    rt_call.t_apply_protected(st, fn(st) {
-      iter_protocol.iterator_step_value(st, rec)
-    })
+    rt_call.try_run(st, fn(st) { iter_protocol.iterator_step_value(st, rec) })
   case step {
     NormalCompletion(v) -> cont(v, st)
     ThrowCompletion(thrown) -> rt_store.t_throw(mark_done(st, helper_h), thrown)
@@ -1387,7 +1382,7 @@ fn close_throw_done(
 
 fn close_normal_catch(st: Agent, iter: JsVal) -> #(Result(Nil, JsVal), Agent) {
   let #(out, st) =
-    rt_call.t_apply_protected(st, fn(st) {
+    rt_call.try_run(st, fn(st) {
       #(Nil, iter_protocol.iterator_close_normal(st, iter))
     })
   case out {
@@ -1554,7 +1549,7 @@ fn zip_collect(
   acc: List(IteratorRecord),
 ) -> #(List(IteratorRecord), Agent) {
   let #(step, st) =
-    rt_call.t_apply_protected(st, fn(st) {
+    rt_call.try_run(st, fn(st) {
       iter_protocol.iterator_step_value(st, input_rec)
     })
   case step {
@@ -1617,7 +1612,7 @@ fn zip_padding_loop(
     }
     False -> {
       let #(step, st) =
-        rt_call.t_apply_protected(st, fn(st) {
+        rt_call.try_run(st, fn(st) {
           iter_protocol.iterator_step_value(st, pad_rec)
         })
       case step {
@@ -1649,7 +1644,7 @@ fn zip_keyed_collect(
         rt_obj.t_get_own_property(st, iterables_h, key)
       })
       let enumerable = case desc {
-        Some(prop) -> rt_types.prop_enumerable(prop)
+        Some(prop) -> types.prop_enumerable(prop)
         None -> False
       }
       case enumerable {
@@ -1785,7 +1780,7 @@ fn zip_round(
           ])
         ZipOpen(record:, padding:) -> {
           let #(step, st) =
-            rt_call.t_apply_protected(st, fn(st) {
+            rt_call.try_run(st, fn(st) {
               iter_protocol.iterator_step_value(st, record)
             })
           case step {
@@ -1844,7 +1839,7 @@ fn zip_strict_check(
     [ZipExhausted(padding: _), ..tail] -> zip_strict_check(st, helper_h, tail)
     [ZipOpen(record:, padding: _), ..tail] -> {
       let #(step, st) =
-        rt_call.t_apply_protected(st, fn(st) {
+        rt_call.try_run(st, fn(st) {
           iter_protocol.iterator_step_done(st, record)
         })
       case step {
@@ -1864,8 +1859,9 @@ fn zip_strict_throw(
   open: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(terr, st) =
-    new_type_error(
+    rt_val.t_new_error(
       st,
+      TypeError,
       "Iterator.zip strict mode: iterators have different lengths",
     )
   close_all_throw_done(st, helper_h, open, terr)
@@ -1901,7 +1897,16 @@ fn alloc_zip_keyed_result(
     list.zip(keys, results)
     |> list.fold(st, fn(st, pair) {
       let #(key, v) = pair
-      let #(_ok, st) = rt_obj.t_define_own_data(st, h, key, v, True, True, True)
+      let #(_ok, st) =
+        rt_obj.t_define_own_data(
+          st,
+          h,
+          key,
+          v,
+          writable: True,
+          enumerable: True,
+          configurable: True,
+        )
       st
     })
   #(h, st)
@@ -1935,7 +1940,7 @@ fn or_close_all(
   body: fn(Agent) -> #(a, Agent),
   cont: fn(a, Agent) -> #(b, Agent),
 ) -> #(b, Agent) {
-  case rt_call.t_apply_protected(st, body) {
+  case rt_call.try_run(st, body) {
     #(NormalCompletion(v), st) -> cont(v, st)
     #(ThrowCompletion(thrown), st) -> close_all_throw(st, iters(), thrown)
   }
@@ -2019,7 +2024,7 @@ fn concat_validate(
                 "Iterator.concat argument is not iterable",
               )
             _ ->
-              case rt_call.is_callable(st, method) {
+              case rt_val.is_callable(st, method) {
                 True ->
                   concat_validate(st, rest, [
                     ConcatItem(open_method: method, iterable: item),
@@ -2051,7 +2056,7 @@ fn concat_next(
   case inner {
     Some(inner_rec) -> {
       let #(step, st) =
-        rt_call.t_apply_protected(st, fn(st) {
+        rt_call.try_run(st, fn(st) {
           iter_protocol.iterator_step_value(st, inner_rec)
         })
       case step {
@@ -2076,12 +2081,12 @@ fn concat_open_next(
   case remaining {
     [] -> iter_done(concat_mark_done(st, helper_h))
     [ConcatItem(open_method: method, iterable:), ..rest] ->
-      case rt_call.t_call(st, method, iterable, []) {
+      case rt_call.t_try_call(st, method, iterable, []) {
         #(rt_call.ThrowCompletion(thrown), st) ->
           rt_store.t_throw(concat_mark_done(st, helper_h), thrown)
         #(rt_call.NormalCompletion(iter), st) -> {
           let #(open, st) =
-            rt_call.t_apply_protected(st, fn(st) {
+            rt_call.try_run(st, fn(st) {
               iter_protocol.get_iterator_direct(
                 st,
                 iter,

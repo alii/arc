@@ -6,7 +6,7 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type ParsedDesc, DataProperty, JInt, KNum,
   KStr, KUndef, Named, ParsedDesc, SBox, StringKey, SymbolKey, canonical_key,
-  classify, mk_number, mk_object, mk_string, mk_tdz, mk_undefined,
+  classify, mk_int, mk_object, mk_string, mk_tdz, mk_undefined,
 }
 import gleam/list
 import gleam/option.{None, Some}
@@ -20,13 +20,9 @@ fn key(name: String) {
   StringKey(canonical_key(name))
 }
 
-fn int(i: Int) -> JsVal {
-  mk_number(JInt(i))
-}
-
 fn throws(st: Agent, body: fn(Agent) -> #(a, Agent)) -> String {
   let #(c, st) =
-    rt_call.t_apply_protected(st, fn(st) {
+    rt_call.try_run(st, fn(st) {
       let #(_, st) = body(st)
       #(mk_undefined(), st)
     })
@@ -39,7 +35,7 @@ fn throws(st: Agent, body: fn(Agent) -> #(a, Agent)) -> String {
 
 fn fixture() -> #(Agent, Handle, JsVal, Handle, Handle) {
   let st = agent()
-  let #(box_a, st) = rt_store.t_cell_new(st, SBox(int(1)))
+  let #(box_a, st) = rt_store.t_cell_new(st, SBox(mk_int(1)))
   let #(box_b, st) = rt_store.t_cell_new(st, SBox(mk_tdz()))
   let #(ns_h, st) =
     rt_obj.t_new_module_namespace(st, [#("b", box_b), #("a", box_a)])
@@ -50,7 +46,7 @@ pub fn get_reads_the_live_binding_test() {
   let #(st, _, ns, box_a, _) = fixture()
   let #(v, st) = rt_obj.t_get_prop(st, ns, key("a"))
   assert classify(v) == KNum(JInt(1))
-  let st = rt_store.t_cell_set(st, box_a, SBox(int(2)))
+  let st = rt_store.t_cell_set(st, box_a, SBox(mk_int(2)))
   let #(v, st) = rt_obj.t_get_prop(st, ns, key("a"))
   assert classify(v) == KNum(JInt(2))
   let #(v, st) = rt_obj.t_get_prop(st, ns, key("toString"))
@@ -72,7 +68,7 @@ pub fn tdz_binding_is_a_reference_error_test() {
   assert has
   let #(keys, st) = rt_obj.t_own_keys(st, ns_h)
   assert list.length(keys) == 3
-  let st = rt_store.t_cell_set(st, box_b, SBox(int(3)))
+  let st = rt_store.t_cell_set(st, box_b, SBox(mk_int(3)))
   let #(v, _) = rt_obj.t_get_prop(st, ns, key("b"))
   assert classify(v) == KNum(JInt(3))
 }
@@ -86,13 +82,13 @@ pub fn own_keys_are_sorted_exports_then_to_string_tag_test() {
       StringKey(Named("b")),
       SymbolKey(types.symbol_to_string_tag),
     ]
-  let st = rt_store.t_cell_set(st, box_b, SBox(int(3)))
+  let st = rt_store.t_cell_set(st, box_b, SBox(mk_int(3)))
   let #(names, st) = rt_obj.t_for_in_keys(st, ns)
   assert list.map(names, classify) == [KStr("a"), KStr("b")]
   let #(object, st) = rt_obj.t_global_get(st, <<"Object">>)
   let #(object_proto, st) = rt_obj.t_get_prop(st, object, key("prototype"))
   let #(to_string, st) = rt_obj.t_get_prop(st, object_proto, key("toString"))
-  let #(tag, _) = rt_call.t_call_checked(st, to_string, ns, [])
+  let #(tag, _) = rt_call.t_call(st, to_string, ns, [])
   assert classify(tag) == KStr("[object Module]")
 }
 
@@ -123,9 +119,9 @@ pub fn descriptor_shape_test() {
 
 pub fn writes_and_deletes_fail_test() {
   let #(st, ns_h, ns, box_a, _) = fixture()
-  let #(ok, st) = rt_obj.t_set_prop(st, ns, key("a"), int(9))
+  let #(ok, st) = rt_obj.t_set_prop(st, ns, key("a"), mk_int(9))
   assert !ok
-  let #(ok, st) = rt_obj.t_set_prop(st, ns, key("fresh"), int(9))
+  let #(ok, st) = rt_obj.t_set_prop(st, ns, key("fresh"), mk_int(9))
   assert !ok
   let assert SBox(value:) = rt_store.t_cell_get(st, box_a)
   assert classify(value) == KNum(JInt(1))
@@ -135,12 +131,12 @@ pub fn writes_and_deletes_fail_test() {
       _,
       other_h,
       key("b"),
-      int(1),
+      mk_int(1),
       ns,
     ))
     == "ReferenceError"
   let #(ok, st) =
-    rt_obj.t_set_prop_with_receiver(st, other_h, key("a"), int(1), ns)
+    rt_obj.t_set_prop_with_receiver(st, other_h, key("a"), mk_int(1), ns)
   assert !ok
   let #(ok, st) = rt_obj.t_delete_prop(st, ns_h, key("a"))
   assert !ok
@@ -179,12 +175,12 @@ fn value_desc(v: JsVal) -> ParsedDesc {
 
 pub fn define_own_property_only_accepts_no_ops_test() {
   let #(st, ns_h, _, _, _) = fixture()
-  let none = ParsedDesc(..value_desc(int(0)), value: None)
+  let none = ParsedDesc(..value_desc(mk_int(0)), value: None)
   let #(ok, st) =
-    rt_obj.t_define_own_prop(st, ns_h, key("a"), value_desc(int(1)))
+    rt_obj.t_define_own_prop(st, ns_h, key("a"), value_desc(mk_int(1)))
   assert ok
   let #(ok, st) =
-    rt_obj.t_define_own_prop(st, ns_h, key("a"), value_desc(int(9)))
+    rt_obj.t_define_own_prop(st, ns_h, key("a"), value_desc(mk_int(9)))
   assert !ok
   let #(ok, st) = rt_obj.t_define_own_prop(st, ns_h, key("a"), none)
   assert ok
@@ -221,18 +217,18 @@ pub fn define_own_property_only_accepts_no_ops_test() {
     )
   assert !ok
   let #(ok, st) =
-    rt_obj.t_define_own_prop(st, ns_h, key("nope"), value_desc(int(1)))
+    rt_obj.t_define_own_prop(st, ns_h, key("nope"), value_desc(mk_int(1)))
   assert !ok
   assert throws(st, rt_obj.t_define_own_prop(
       _,
       ns_h,
       key("b"),
-      value_desc(int(1)),
+      value_desc(mk_int(1)),
     ))
     == "ReferenceError"
   let #(object, st) = rt_obj.t_global_get(st, <<"Object">>)
   let #(desc, st) = rt_obj.t_new_object_literal(st)
-  let #(_, st) = rt_obj.t_set_prop(st, desc, key("value"), int(9))
+  let #(_, st) = rt_obj.t_set_prop(st, desc, key("value"), mk_int(9))
   assert throws(
       st,
       rt_call.t_call_method(_, object, key("defineProperty"), [

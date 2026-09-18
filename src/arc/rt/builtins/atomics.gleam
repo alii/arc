@@ -90,7 +90,10 @@ type TaInfo {
   )
 }
 
-fn atomics_elem(kind: TypedArrayKind, waitable: Bool) -> Option(IntElem) {
+fn atomics_elem(
+  kind: TypedArrayKind,
+  waitable waitable: Bool,
+) -> Option(IntElem) {
   case waitable, kind {
     True, NumKind(Int32Kind) -> Some(I32)
     True, BigKind(BigInt64Kind) -> Some(I64)
@@ -485,18 +488,23 @@ fn do_wait(st: Agent, args: List(JsVal), sync sync: Bool) -> #(JsVal, Agent) {
         True -> rt_async.TimedOut
         False -> rt_async.NotEqual
       }
-      wait_result_object(st, False, rt_async.wait_result_js(outcome))
+      wait_result_object(
+        st,
+        is_async: False,
+        value: rt_async.wait_result_js(outcome),
+      )
     }
     False, _ -> {
       let deadline =
         option.map(timeout_ms, fn(ms) { st.hooks.monotonic_now() + ms })
       case sab.register_async(st, owner, byte_off, expected, deadline) {
-        #(Some(promise), st) -> wait_result_object(st, True, mk_object(promise))
+        #(Some(promise), st) ->
+          wait_result_object(st, is_async: True, value: mk_object(promise))
         #(None, st) ->
           wait_result_object(
             st,
-            False,
-            rt_async.wait_result_js(rt_async.NotEqual),
+            is_async: False,
+            value: rt_async.wait_result_js(rt_async.NotEqual),
           )
       }
     }
@@ -530,8 +538,8 @@ fn wait_timeout(st: Agent, val: JsVal) -> #(Option(Int), Agent) {
 
 fn wait_result_object(
   st: Agent,
-  is_async: Bool,
-  value: JsVal,
+  is_async is_async: Bool,
+  value value: JsVal,
 ) -> #(JsVal, Agent) {
   let #(h, st) =
     common.alloc_plain_object(st, st.realm.object.prototype, [

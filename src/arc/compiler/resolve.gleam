@@ -13,7 +13,7 @@ import arc/bytecode/opcode.{
 }
 import arc/internal/tuple_array
 import arc/rt/bytecode
-import arc/rt/types.{type JsVal, JInt}
+import arc/rt/types.{type JsVal}
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
@@ -252,9 +252,9 @@ fn peephole(
     }
 
     [IrFinal(opcode.GetLocal(i)), IrJumpIfFalse(l), ..rest] ->
-      peephole(rest, consts, [IrJumpIfLocal(i, l, False), ..acc])
+      peephole(rest, consts, [IrJumpIfLocal(i, l, when: False), ..acc])
     [IrFinal(opcode.GetLocal(i)), IrJumpIfTrue(l), ..rest] ->
-      peephole(rest, consts, [IrJumpIfLocal(i, l, True), ..acc])
+      peephole(rest, consts, [IrJumpIfLocal(i, l, when: True), ..acc])
 
     // binops with folded operand loads
     [IrFinal(opcode.GetLocal(i)), IrBinOp(kind), ..rest] ->
@@ -499,7 +499,7 @@ pub fn fusable_cmp(kind: opcode.BinOpKind) -> Option(binop.PureBinOp) {
 }
 
 fn is_const_one(consts: tuple_array.TupleArray(JsVal), index: Int) -> Bool {
-  tuple_array.get_unchecked(index, consts) == types.mk_number(JInt(1))
+  tuple_array.get_unchecked(index, consts) == types.mk_int(1)
 }
 
 fn lands_here(rest: List(IrOp), l: LabelId) -> Bool {
@@ -980,12 +980,12 @@ pub fn assign_regs(
     [a, ..rest] -> {
       let b = case rest {
         [b, ..] -> b
-        [] -> -1
+        [] -> bytecode.no_register
       }
       let remap = fn(i) {
         case i == a, i == b {
-          True, _ -> -1
-          _, True -> -2
+          True, _ -> bytecode.reg_a_slot
+          _, True -> bytecode.reg_b_slot
           _, _ -> i
         }
       }
@@ -1000,7 +1000,7 @@ fn loop_depths(ops: List(Op)) -> List(Int) {
   let deltas =
     list.index_fold(ops, dict.new(), fn(acc, op, pc) {
       case opcode.jump_target(op) {
-        t if t >= 0 && t <= pc ->
+        Some(t) if t <= pc ->
           acc
           |> dict.upsert(t, fn(v) { option.unwrap(v, 0) + 1 })
           |> dict.upsert(pc + 1, fn(v) { option.unwrap(v, 0) - 1 })

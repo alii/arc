@@ -5,7 +5,8 @@ import arc/rt/types.{
   type Agent, type Handle, type JsNum, type JsOps, type JsVal, BoundFn,
   HintDefault, HintNumber, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KBool,
   KHandle, KNull, KNum, KStr, KSym, KUndef, Named, SObject, StringKey, SymbolKey,
-  classify, mk_bigint, mk_number, mk_object, mk_string, symbol_has_instance,
+  classify, mk_bigint, mk_int, mk_number, mk_object, mk_string,
+  symbol_has_instance,
 }
 import arc/rt/val as rt_val
 import gleam/float
@@ -28,8 +29,7 @@ pub fn t_instance_of(st: Agent, v: JsVal, target: JsVal) -> #(Bool, Agent) {
         ops.get_prop(st, target, SymbolKey(symbol_has_instance))
       case rt_val.is_nullish(handler) {
         True -> {
-          let #(callable, st) = rt_val.t_is_callable(st, target)
-          case callable {
+          case rt_val.is_callable(st, target) {
             True -> t_ordinary_has_instance(st, ctor_h, v)
             False ->
               rt_val.t_throw_type_error(
@@ -39,8 +39,7 @@ pub fn t_instance_of(st: Agent, v: JsVal, target: JsVal) -> #(Bool, Agent) {
           }
         }
         False -> {
-          let #(callable, st) = rt_val.t_is_callable(st, handler)
-          case callable {
+          case rt_val.is_callable(st, handler) {
             True -> {
               let #(res, st) = ops.call(st, handler, target, [v])
               #(rt_val.to_boolean(res), st)
@@ -279,7 +278,7 @@ fn int32_binop(
     KBig(_), _ | _, KBig(_) -> rt_val.t_throw_type_error(st, bigint_mix_error)
     KNum(x), KNum(y) -> {
       let r = op(rt_val.num_to_int32(x), rt_val.num_to_int32(y))
-      #(mk_number(JInt(rt_val.wrap_int32(r))), st)
+      #(mk_int(rt_val.wrap_int32(r)), st)
     }
     _, _ -> panic as "ToNumeric returned non-numeric"
   }
@@ -324,7 +323,7 @@ pub fn t_ushr(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
           rt_val.num_to_uint32(x),
           int.bitwise_and(rt_val.num_to_uint32(y), 31),
         )
-      #(mk_number(JInt(rt_val.wrap_uint32(r))), st)
+      #(mk_int(rt_val.wrap_uint32(r)), st)
     }
     _, _ -> panic as "ToNumeric returned non-numeric"
   }
@@ -334,7 +333,7 @@ pub fn t_bitnot(st: Agent, a: JsVal) -> #(JsVal, Agent) {
   let #(an, st) = rt_val.t_to_numeric(st, a)
   case classify(an) {
     KBig(x) -> #(mk_bigint(-1 - x), st)
-    KNum(n) -> #(mk_number(JInt(int.bitwise_not(rt_val.num_to_int32(n)))), st)
+    KNum(n) -> #(mk_int(int.bitwise_not(rt_val.num_to_int32(n))), st)
     _ -> panic as "ToNumeric returned non-numeric"
   }
 }
@@ -447,7 +446,7 @@ pub fn t_in(st: Agent, key: JsVal, obj: JsVal) -> #(Bool, Agent) {
       rt_obj.t_has_prop(st, obj, pk)
     }
     _ -> {
-      let #(tag, st) = rt_val.t_type_of(st, obj)
+      let tag = rt_val.type_of(st, obj)
       rt_val.t_throw_type_error(
         st,
         "Cannot use 'in' operator to search for property in " <> tag,

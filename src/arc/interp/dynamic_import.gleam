@@ -1,5 +1,6 @@
 // §13.3.10 import calls, failures reject the promise
 
+import arc/bytecode/error_kind.{SyntaxError, TypeError}
 import arc/module/registry
 import arc/rt/async as rt_async
 import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion} as rt_call
@@ -8,7 +9,7 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, HostJob, KHandle, KStr, KUndef, Named,
-  StringKey, SyntaxErr, TypeErr, classify, mk_object, mk_string, mk_undefined,
+  StringKey, classify, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/list
@@ -154,9 +155,9 @@ pub fn source_import_call(st: Agent, specifier: JsVal) -> #(JsVal, Agent) {
   )
   use st <- enqueue_import_job(st, promise)
   let #(err, st) =
-    st.store.ops.new_error(
+    rt_val.t_new_error(
       st,
-      SyntaxErr,
+      SyntaxError,
       "Module has no source phase representation",
     )
   #(st, Error(err))
@@ -191,7 +192,7 @@ fn import_request(
   specifier: JsVal,
   options: JsVal,
 ) -> #(Completion(JsVal), Agent) {
-  use st <- rt_call.t_apply_protected(st)
+  use st <- rt_call.try_run(st)
   let #(specifier_string, st) = rt_val.t_to_string(st, specifier)
   let st = validate_options(st, options)
   #(mk_string(specifier_string), st)
@@ -267,7 +268,7 @@ fn enqueue_host_job(
   let job = fn(st) {
     let #(st, held) = rt_gc.t_hold_roots(st, capability)
     let #(outcome, st) =
-      rt_call.t_apply_protected(st, fn(st) { #(mk_undefined(), run(st)) })
+      rt_call.try_run(st, fn(st) { #(mk_undefined(), run(st)) })
     let st = rt_gc.t_release_roots(st, held)
     case outcome {
       NormalCompletion(_) -> st
@@ -278,7 +279,7 @@ fn enqueue_host_job(
 }
 
 fn call_settle_fn(st: Agent, settle_fn: JsVal, arg: JsVal) -> Agent {
-  let #(_, st) = rt_call.t_call(st, settle_fn, mk_undefined(), [arg])
+  let #(_, st) = rt_call.t_try_call(st, settle_fn, mk_undefined(), [arg])
   st
 }
 
@@ -289,16 +290,16 @@ fn call_host_hook(
   case st.import_hook {
     None -> {
       let #(err, st) =
-        st.store.ops.new_error(
+        rt_val.t_new_error(
           st,
-          TypeErr,
+          TypeError,
           "Dynamic import is not supported in this context",
         )
       #(st, Error(err))
     }
     Some(types.HostFnEntry(call:, ..)) -> {
       let outcome =
-        rt_call.t_apply_protected(st, fn(st) {
+        rt_call.try_run(st, fn(st) {
           case call(st, hook_args, mk_undefined(), mk_undefined()) {
             #(st, Ok(v)) -> #(v, st)
             #(st, Error(thrown)) -> rt_store.t_throw(st, thrown)

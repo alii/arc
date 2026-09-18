@@ -1,7 +1,7 @@
 import arc/parser/ast
 import arc/rt/types.{
   type JsNum, type JsVal, JFloat, JInt, JNegInf, JPosInf, mk_bigint, mk_bool,
-  mk_number, mk_undefined,
+  mk_int, mk_number, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/float
@@ -61,7 +61,7 @@ pub fn fold_unary(op: ast.UnaryOp, arg: ast.Expression) -> Option(JsVal) {
     // already an int32
     ast.BitwiseNot, ast.NumberLiteral(_, n) ->
       case literal_num(n) {
-        JInt(x) -> Some(mk_number(JInt(-x - 1)))
+        JInt(x) -> Some(mk_int(-x - 1))
         _ -> None
       }
     ast.LogicalNot, _ ->

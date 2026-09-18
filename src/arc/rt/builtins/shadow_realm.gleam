@@ -1,3 +1,4 @@
+import arc/bytecode/error_kind.{TypeError}
 import arc/compiler
 import arc/parser
 import arc/rt/async as rt_async
@@ -12,8 +13,8 @@ import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type Realm,
   type ShadowRealmNative, IndirectEval, JPosInf, KHandle, KNum, KStr, Named,
   ShadowRealmConstructor, ShadowRealmEvaluate, ShadowRealmImportValue,
-  ShadowRealmN, ShadowRealmObj, StringKey, TypeErr, WrappedFunctionCall,
-  classify, mk_int, mk_number, mk_object, mk_undefined,
+  ShadowRealmN, ShadowRealmObj, StringKey, WrappedFunctionCall, classify, mk_int,
+  mk_number, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/int
@@ -119,7 +120,7 @@ fn protected_in_realm(
   id: Int,
   body: fn(Agent) -> #(a, Agent),
 ) -> #(rt_call.Completion(a), Agent) {
-  use st <- rt_call.t_apply_protected(st)
+  use st <- rt_call.try_run(st)
   rt_realm.with_realm(st, id, body)
 }
 
@@ -132,7 +133,7 @@ fn get_wrapped_value(
 ) -> #(JsVal, Agent) {
   case classify(val) {
     KHandle(h) ->
-      case rt_call.is_callable(st, val) {
+      case rt_val.is_callable(st, val) {
         True -> wrapped_function_create(st, from, into, h)
         False ->
           rt_val.t_throw_type_error(
@@ -291,7 +292,7 @@ fn wrapped_function_call(
     get_wrapped_value(st, caller_realm, target_realm, this)
   let #(outcome, st) =
     protected_in_realm(st, target_realm, fn(st) {
-      rt_call.t_call_checked(st, mk_object(target), wrapped_this, wrapped_args)
+      rt_call.t_call(st, mk_object(target), wrapped_this, wrapped_args)
     })
   case outcome {
     NormalCompletion(v) -> get_wrapped_value(st, target_realm, caller_realm, v)
@@ -317,9 +318,9 @@ fn import_value(
   case classify(export_name) {
     KStr(_) -> {
       let #(err, st) =
-        st.store.ops.new_error(
+        rt_val.t_new_error(
           st,
-          TypeErr,
+          TypeError,
           "ShadowRealm.prototype.importValue: module loading is not "
             <> "available in this host",
         )

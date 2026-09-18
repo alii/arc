@@ -435,9 +435,9 @@ fn int_or(
   otherwise: Build(ir.Value),
 ) -> Build(ir.Value) {
   let arm = case op {
-    "add" -> Some(int_arm(ir.NAdd, a, b, False, on_overflow))
-    "sub" -> Some(int_arm(ir.NSub, a, b, False, on_overflow))
-    "mul" -> Some(int_arm(ir.NMul, a, b, True, on_overflow))
+    "add" -> Some(int_arm(ir.NAdd, a, b, zero_sign: False, on_overflow:))
+    "sub" -> Some(int_arm(ir.NSub, a, b, zero_sign: False, on_overflow:))
+    "mul" -> Some(int_arm(ir.NMul, a, b, zero_sign: True, on_overflow:))
     _ -> None
   }
   case arm {
@@ -475,8 +475,8 @@ fn int_arm(
   op: ir.NumTermOp,
   a: ir.Value,
   b: ir.Value,
-  zero_sign: Bool,
-  on_overflow: Build(ir.Value),
+  zero_sign zero_sign: Bool,
+  on_overflow on_overflow: Build(ir.Value),
 ) -> Build(ir.Value) {
   use r <- then(bind(ir.NumTerm(op, a, b)))
   use hi <- then(bind(ir.NumTerm(ir.NLe, r, ir.ConstI64(max_safe_int))))

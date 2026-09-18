@@ -56,7 +56,7 @@ pub fn replace_literal(
   s: String,
   search: String,
   replacement: String,
-  all: Bool,
+  all all: Bool,
 ) -> String
 
 @external(erlang, "arc_rt_utf8_ffi", "repeat")

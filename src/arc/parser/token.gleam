@@ -85,7 +85,7 @@ pub type BinOrLogical {
 
 pub fn binary_operator(
   kind: TokenKind,
-  allow_in: Bool,
+  allow_in allow_in: Bool,
 ) -> Option(BinaryOperator) {
   case kind {
     QuestionQuestion -> Some(BinaryOperator(1, Coalesce))

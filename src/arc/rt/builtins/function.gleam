@@ -1,3 +1,4 @@
+import arc/rt/abstract_ops as rt_abstract
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
@@ -9,11 +10,11 @@ import arc/rt/types.{
   type Agent, type BuiltinPair, type FunctionNative, type Handle, type JsVal,
   BoundFn, BytecodeFn, CompiledFn, DataProperty, DynamicFunction, FunctionApply,
   FunctionBind, FunctionCall, FunctionConstructor, FunctionHasInstance,
-  FunctionN, FunctionPrototypeCall, FunctionToString, JInt, KHandle, KNull, KStr,
+  FunctionN, FunctionPrototypeCall, FunctionToString, KHandle, KNull, KStr,
   KUndef, Named, NativeFn, NoElements, ProxyObj, SObject, StringKey,
-  ThrowTypeErrorFn, classify, mk_bool, mk_number, mk_object, mk_string,
+  ThrowTypeErrorFn, classify, mk_bool, mk_int, mk_object, mk_string,
   mk_undefined,
-} as rt_types
+}
 import arc/rt/val as rt_val
 import gleam/dict
 import gleam/list
@@ -34,8 +35,8 @@ pub fn init(
       #("toString", FunctionN(FunctionToString), 0),
     ])
   // §10.2.4.1 %ThrowTypeError%, frozen
-  let #(len_p, st) = common.frozen_property(st, mk_number(JInt(0)))
-  let #(name_p, st) = common.frozen_property(st, mk_string(""))
+  let #(len_p, st) = rt_store.t_frozen_property(st, mk_int(0))
+  let #(name_p, st) = rt_store.t_frozen_property(st, mk_string(""))
   let #(thrower_h, st) =
     rt_store.t_cell_new(
       st,
@@ -56,7 +57,7 @@ pub fn init(
   let st = rt_store.t_pin_root(st, thrower_h)
   // §10.2.4 caller and arguments share the one thrower
   let #(restricted, st) =
-    common.accessor_prop(
+    common.accessor_property(
       st,
       get: Some(mk_object(thrower_h)),
       set: Some(mk_object(thrower_h)),
@@ -77,12 +78,12 @@ pub fn init(
       1,
     )
   let #(has_instance_prop, st) =
-    common.frozen_property(st, mk_object(has_instance_h))
+    rt_store.t_frozen_property(st, mk_object(has_instance_h))
   let st =
     common.add_symbol_property(
       st,
       func_proto,
-      rt_types.symbol_has_instance,
+      types.symbol_has_instance,
       has_instance_prop,
     )
   let #(proto_len, st) = common.fn_length_property(st, 0)
@@ -135,22 +136,22 @@ pub fn dispatch(
         [t, ..rest] -> #(t, rest)
         [] -> #(mk_undefined(), [])
       }
-      rt_call.t_call_checked(st, this, this_arg, call_args)
+      rt_call.t_call(st, this, this_arg, call_args)
     }
     FunctionApply -> {
       let #(this_arg, arg_array) = helpers.two_args_or_undefined(args)
       let #(call_args, st) = case classify(arg_array) {
         KUndef | KNull -> #([], st)
-        _ -> create_list_from_array_like(st, arg_array)
+        _ -> rt_abstract.create_list_from_array_like(st, arg_array)
       }
-      rt_call.t_call_checked(st, this, this_arg, call_args)
+      rt_call.t_call(st, this, this_arg, call_args)
     }
     FunctionBind -> {
       let #(this_arg, bound_args) = case args {
         [t, ..rest] -> #(t, rest)
         [] -> #(mk_undefined(), [])
       }
-      case rt_call.is_callable(st, this), classify(this) {
+      case rt_val.is_callable(st, this), classify(this) {
         True, KHandle(target_h) -> {
           let #(h, st) = rt_call.t_bound_new(st, target_h, this_arg, bound_args)
           #(mk_object(h), st)
@@ -164,7 +165,7 @@ pub fn dispatch(
       let v = helpers.first_arg_or_undefined(args)
       case classify(this) {
         KHandle(h) ->
-          case rt_call.is_callable(st, this) {
+          case rt_val.is_callable(st, this) {
             True -> {
               let #(b, st) = rt_ops.t_ordinary_has_instance(st, h, v)
               #(mk_bool(b), st)
@@ -252,9 +253,9 @@ pub fn create_dynamic_function(
           h,
           StringKey(Named("name")),
           mk_string("anonymous"),
-          False,
-          False,
-          True,
+          writable: False,
+          enumerable: False,
+          configurable: True,
         )
       #(f, apply_new_target_prototype(st, h, kind, new_target))
     }
@@ -287,59 +288,6 @@ fn apply_new_target_prototype(
   }
 }
 
-pub fn create_list_from_array_like(
-  st: Agent,
-  arr: JsVal,
-) -> #(List(JsVal), Agent) {
-  case arg_list(st, arr), classify(arr) {
-    DenseArgs(args), _ -> #(args, st)
-    Miss, KHandle(h) -> {
-      let #(len, st) = case rt_store.t_cell_get(st, h) {
-        SObject(kind: rt_types.ArrayObj(length:), ..) -> #(length, st)
-        _ -> {
-          let #(len_v, st) =
-            rt_obj.t_get_prop(st, arr, StringKey(Named("length")))
-          rt_val.t_to_length(st, len_v)
-        }
-      }
-      collect_array_like(st, arr, 0, len, [])
-    }
-    Miss, _ ->
-      rt_val.t_throw_type_error(
-        st,
-        "CreateListFromArrayLike called on non-object",
-      )
-  }
-}
-
-type ArgList {
-  DenseArgs(List(JsVal))
-  Miss
-}
-
-@external(erlang, "arc_rt_array_ffi", "arg_list")
-fn arg_list(st: Agent, arr: JsVal) -> ArgList
-
-fn collect_array_like(
-  st: Agent,
-  arr: JsVal,
-  i: Int,
-  len: Int,
-  acc: List(JsVal),
-) -> #(List(JsVal), Agent) {
-  case i >= len {
-    True -> #(list.reverse(acc), st)
-    False -> {
-      let #(v, st) = case helpers.own_element(st, arr, i) {
-        helpers.Hit(v) -> #(v, st)
-        helpers.Miss ->
-          rt_obj.t_get_prop(st, arr, StringKey(rt_types.index_key(i)))
-      }
-      collect_array_like(st, arr, i + 1, len, [v, ..acc])
-    }
-  }
-}
-
 fn function_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
@@ -364,7 +312,7 @@ fn function_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
           st,
         )
         SObject(kind: ProxyObj(target:, ..), ..) ->
-          case rt_call.is_callable(st, mk_object(target)) {
+          case rt_val.is_callable(st, mk_object(target)) {
             True -> #(mk_string("function () { [native code] }"), st)
             False -> to_string_type_error(st)
           }

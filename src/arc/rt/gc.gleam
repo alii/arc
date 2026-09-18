@@ -22,7 +22,7 @@ import arc/rt/types.{
   StringObj, SymbolObj, TemporalObj, ThrowerPassThrough, TypedArrayObj,
   WeakMapObj, WeakObjKey, WeakRefObj, WeakSetObj, WeakSymKey,
   WrapForValidIteratorObj, classify, job_queue_to_list,
-} as rt_types
+}
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
@@ -63,7 +63,7 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
     ops: _,
     microtasks:,
     pinned_roots:,
-    meta: rt_types.StoreMeta(
+    meta: types.StoreMeta(
       gc_live: _,
       private_uid: _,
       symbol_uid: _,
@@ -86,7 +86,7 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
   let realms = dict.insert(st.realms, st.realm.id, st.realm)
   dict.fold(realms, acc, fn(acc, _id, realm) {
     dict.fold(realm.lexical_globals, acc, fn(acc, _name, binding) {
-      push_refs(rt_types.lexical_global_value(binding), acc)
+      push_refs(types.lexical_global_value(binding), acc)
     })
   })
 }
@@ -189,7 +189,7 @@ fn push_request_refs(acc: List(Int), req: AsyncGenRequest) -> List(Int) {
 // exhaustive; weak keys not traced, see prune_weak_cell
 fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
   case kind {
-    Ordinary | rt_types.GlobalObj -> acc
+    Ordinary | types.GlobalObj -> acc
     ArrayObj(length: _) -> acc
     ArgumentsObj(length: _, mapped:) ->
       case mapped {
@@ -274,17 +274,17 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     WrapForValidIteratorObj(record:) -> push_refs(record, acc)
     IntlObj(data: _, bound:) -> push_optional_handle(bound, acc)
     TemporalObj(data: _) -> acc
-    DisposableStackObj(async: _, state: rt_types.Pending(capability:)) -> [
+    DisposableStackObj(async: _, state: types.Pending(capability:)) -> [
       capability.id,
       ..acc
     ]
-    DisposableStackObj(async: _, state: rt_types.Disposed) -> acc
+    DisposableStackObj(async: _, state: types.Disposed) -> acc
     FinalizationRegistryObj(callback:, registrations:) ->
       list.fold(registrations, push_refs(callback, acc), fn(a, r) {
         push_refs(r.held, a)
       })
     WeakRefObj(target: _) -> acc
-    rt_types.ShadowRealmObj(realm: _) -> acc
+    types.ShadowRealmObj(realm: _) -> acc
   }
 }
 
@@ -327,11 +327,11 @@ fn push_optional_handle(oh: Option(Handle), acc: List(Int)) -> List(Int) {
   }
 }
 
-fn push_birth_refs(birth: rt_types.FnBirth, acc: List(Int)) -> List(Int) {
+fn push_birth_refs(birth: types.FnBirth, acc: List(Int)) -> List(Int) {
   case birth {
-    rt_types.BirthPending(prototype_parent:) ->
+    types.BirthPending(prototype_parent:) ->
       push_optional_handle(prototype_parent, acc)
-    rt_types.BirthSettled -> acc
+    types.BirthSettled -> acc
   }
 }
 
@@ -400,7 +400,7 @@ pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {
       alloc_since_gc: 0,
       ics: dict.filter(js.ics, fn(_, entry) { is_read_ic(entry) }),
       free_protos: dict.new(),
-      meta: rt_types.StoreMeta(
+      meta: types.StoreMeta(
         ..js.meta,
         gc_live: live_count,
         old: data,
@@ -460,7 +460,7 @@ fn collect_minor(st: Agent, extra_roots: List(Handle)) -> Agent {
       ..js,
       data: kept,
       alloc_since_gc: 0,
-      meta: rt_types.StoreMeta(
+      meta: types.StoreMeta(
         ..meta,
         gc_live: meta.gc_live + dict.size(live),
         old: kept,

@@ -168,8 +168,8 @@ fn run_file(path: String, hooks: HostHooks) -> Result(Nil, CliError) {
 fn build_file(
   path: String,
   out: Option(String),
-  core: Bool,
-  ir: Bool,
+  core core: Bool,
+  ir ir: Bool,
 ) -> Result(Nil, CliError) {
   use source <- result.try(read_source(path))
   let out = option.lazy_unwrap(out, fn() { strip_js(path) <> ".beam" })

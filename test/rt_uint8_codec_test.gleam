@@ -2,18 +2,14 @@ import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type JsVal, JInt, KNum, KStr, StringKey, canonical_key, classify,
-  mk_bool, mk_number, mk_object, mk_string,
+  mk_bool, mk_int, mk_object, mk_string,
 }
 import gleam/list
 import gleam/option.{Some}
 import rt_helpers
 
-fn int(i: Int) -> JsVal {
-  mk_number(JInt(i))
-}
-
 fn ints(xs: List(Int)) -> List(JsVal) {
-  list.map(xs, int)
+  list.map(xs, mk_int)
 }
 
 fn global(st: Agent, name: String) -> JsVal {
@@ -56,7 +52,7 @@ fn attempt(
   args: List(JsVal),
 ) -> #(rt_call.Completion(JsVal), Agent) {
   let #(f, st) = rt_helpers.get(st, obj, name)
-  rt_call.t_call(st, f, obj, args)
+  rt_call.t_try_call(st, f, obj, args)
 }
 
 fn invoke(
@@ -108,7 +104,7 @@ pub fn to_hex_test() {
   let st = rt_helpers.agent()
   let #(ta, st) = u8_of(st, [0, 15, 16, 171, 255])
   assert str(st, ta, "toHex", []) == "000f10abff"
-  let #(empty, st) = u8(st, [int(0)])
+  let #(empty, st) = u8(st, [mk_int(0)])
   assert str(st, empty, "toHex", []) == ""
 }
 
@@ -121,7 +117,7 @@ pub fn from_hex_round_trip_and_errors_test() {
   assert classify(get_(st, ta, "length")) == KNum(JInt(4))
   assert throws(st, ctor, "fromHex", [mk_string("abc")]) == "SyntaxError"
   assert throws(st, ctor, "fromHex", [mk_string("zz")]) == "SyntaxError"
-  assert throws(st, ctor, "fromHex", [int(1)]) == "TypeError"
+  assert throws(st, ctor, "fromHex", [mk_int(1)]) == "TypeError"
 }
 
 pub fn from_base64_whitespace_and_strict_padding_test() {
@@ -147,7 +143,7 @@ pub fn from_base64_whitespace_and_strict_padding_test() {
 
 pub fn set_from_base64_stop_before_partial_short_target_test() {
   let st = rt_helpers.agent()
-  let #(target, st) = u8(st, [int(4)])
+  let #(target, st) = u8(st, [mk_int(4)])
   let #(opts, st) =
     options(st, [#("lastChunkHandling", mk_string("stop-before-partial"))])
   let #(res, st) =
@@ -155,11 +151,11 @@ pub fn set_from_base64_stop_before_partial_short_target_test() {
   assert classify(get_(st, res, "read")) == KNum(JInt(4))
   assert classify(get_(st, res, "written")) == KNum(JInt(3))
   assert joined(st, target) == "1,2,3,0"
-  let #(t2, st) = u8(st, [int(8)])
+  let #(t2, st) = u8(st, [mk_int(8)])
   let #(res2, st) = invoke(st, t2, "setFromBase64", [mk_string("AQIDB"), opts])
   assert classify(get_(st, res2, "read")) == KNum(JInt(4))
   assert classify(get_(st, res2, "written")) == KNum(JInt(3))
-  let #(t3, st) = u8(st, [int(8)])
+  let #(t3, st) = u8(st, [mk_int(8)])
   let #(c, st) = attempt(st, t3, "setFromBase64", [mk_string("AQID$$$$")])
   let assert ThrowCompletion(err) = c
   assert error_name(st, err) == "SyntaxError"
@@ -168,7 +164,7 @@ pub fn set_from_base64_stop_before_partial_short_target_test() {
 
 pub fn set_from_hex_written_count_test() {
   let st = rt_helpers.agent()
-  let #(target, st) = u8(st, [int(3)])
+  let #(target, st) = u8(st, [mk_int(3)])
   let #(res, st) = invoke(st, target, "setFromHex", [mk_string("a0b1c2d3")])
   assert classify(get_(st, res, "read")) == KNum(JInt(6))
   assert classify(get_(st, res, "written")) == KNum(JInt(3))
@@ -178,7 +174,7 @@ pub fn set_from_hex_written_count_test() {
   let #(i8_h, st) = rt_call.t_construct(st, i8_ctor, [src], i8_ctor)
   let set_from_hex = get_(st, target, "setFromHex")
   let #(c, _) =
-    rt_call.t_call(st, set_from_hex, mk_object(i8_h), [mk_string("00")])
+    rt_call.t_try_call(st, set_from_hex, mk_object(i8_h), [mk_string("00")])
   let assert ThrowCompletion(_) = c
 }
 
@@ -187,11 +183,11 @@ pub fn invalid_option_value_type_error_test() {
   let #(ta, st) = u8_of(st, [1, 2, 3])
   let #(bad_alphabet, st) = options(st, [#("alphabet", mk_string("nope"))])
   assert throws(st, ta, "toBase64", [bad_alphabet]) == "TypeError"
-  let #(num_alphabet, st) = options(st, [#("alphabet", int(64))])
+  let #(num_alphabet, st) = options(st, [#("alphabet", mk_int(64))])
   assert throws(st, ta, "toBase64", [num_alphabet]) == "TypeError"
   let #(bad_handling, st) =
     options(st, [#("lastChunkHandling", mk_string("sloppy"))])
   assert throws(st, ta, "setFromBase64", [mk_string("QQ=="), bad_handling])
     == "TypeError"
-  assert throws(st, ta, "toBase64", [int(1)]) == "TypeError"
+  assert throws(st, ta, "toBase64", [mk_int(1)]) == "TypeError"
 }

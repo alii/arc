@@ -3,13 +3,12 @@ import arc/rt/builtins/helpers
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type SymbolId,
-  type SymbolNative, BuiltinPair, KHandle, KSym, KUndef, NativeFn, NoElements,
-  Ordinary, RegisteredSymbol, SObject, SymbolConstructor,
-  SymbolDescriptionGetter, SymbolFor, SymbolKeyFor, SymbolN, SymbolObj,
-  SymbolToPrimitive, SymbolToString, SymbolValueOf, UserSymbol, classify,
-  mk_object, mk_string, mk_symbol, mk_undefined, symbol_description,
-  symbol_descriptive_string,
-} as rt_types
+  type SymbolNative, BuiltinPair, KHandle, KSym, KUndef, NativeFn, Ordinary,
+  RegisteredSymbol, SObject, SymbolConstructor, SymbolDescriptionGetter,
+  SymbolFor, SymbolKeyFor, SymbolN, SymbolObj, SymbolToPrimitive, SymbolToString,
+  SymbolValueOf, UserSymbol, classify, mk_object, mk_string, mk_symbol,
+  mk_undefined, plain_object, symbol_description, symbol_descriptive_string,
+}
 import arc/rt/val as rt_val
 import gleam/dict
 import gleam/option.{type Option, None, Some}
@@ -33,25 +32,25 @@ pub fn init(
   let #(len_p, st) = common.fn_length_property(st, 0)
   let #(name_p, st) = common.fn_name_property(st, "Symbol")
   let #(proto_p, st) = common.fn_prototype_property(st, prototype)
-  let #(for_p, st) = common.builtin_property(st, mk_object(for_h))
-  let #(key_for_p, st) = common.builtin_property(st, mk_object(key_for_h))
+  let #(for_p, st) = rt_store.t_builtin_property(st, mk_object(for_h))
+  let #(key_for_p, st) = rt_store.t_builtin_property(st, mk_object(key_for_h))
   let #(wk_props, st) =
     well_known_properties(st, [
-      #("toStringTag", rt_types.symbol_to_string_tag),
-      #("iterator", rt_types.symbol_iterator),
-      #("hasInstance", rt_types.symbol_has_instance),
-      #("isConcatSpreadable", rt_types.symbol_is_concat_spreadable),
-      #("toPrimitive", rt_types.symbol_to_primitive),
-      #("species", rt_types.symbol_species),
-      #("asyncIterator", rt_types.symbol_async_iterator),
-      #("match", rt_types.symbol_match),
-      #("matchAll", rt_types.symbol_match_all),
-      #("replace", rt_types.symbol_replace),
-      #("search", rt_types.symbol_search),
-      #("split", rt_types.symbol_split),
-      #("unscopables", rt_types.symbol_unscopables),
-      #("dispose", rt_types.symbol_dispose),
-      #("asyncDispose", rt_types.symbol_async_dispose),
+      #("toStringTag", types.symbol_to_string_tag),
+      #("iterator", types.symbol_iterator),
+      #("hasInstance", types.symbol_has_instance),
+      #("isConcatSpreadable", types.symbol_is_concat_spreadable),
+      #("toPrimitive", types.symbol_to_primitive),
+      #("species", types.symbol_species),
+      #("asyncIterator", types.symbol_async_iterator),
+      #("match", types.symbol_match),
+      #("matchAll", types.symbol_match_all),
+      #("replace", types.symbol_replace),
+      #("search", types.symbol_search),
+      #("split", types.symbol_split),
+      #("unscopables", types.symbol_unscopables),
+      #("dispose", types.symbol_dispose),
+      #("asyncDispose", types.symbol_async_dispose),
     ])
   let ctor_props =
     common.named_props([
@@ -65,18 +64,15 @@ pub fn init(
   let #(constructor, st) =
     rt_store.t_cell_new(
       st,
-      SObject(
-        kind: NativeFn(
+      plain_object(
+        NativeFn(
           token: SymbolN(SymbolConstructor),
           name: "Symbol",
           length: 0,
           constructible: True,
         ),
-        proto: Some(fn_proto),
-        props: ctor_props,
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
+        Some(fn_proto),
+        ctor_props,
       ),
     )
   let st = rt_store.t_pin_root(st, constructor)
@@ -112,11 +108,11 @@ pub fn init(
       "get description",
       0,
     )
-  let #(ctor_p, st) = common.builtin_property(st, mk_object(constructor))
-  let #(ts_p, st) = common.builtin_property(st, mk_object(to_string_h))
-  let #(vo_p, st) = common.builtin_property(st, mk_object(value_of_h))
+  let #(ctor_p, st) = rt_store.t_builtin_property(st, mk_object(constructor))
+  let #(ts_p, st) = rt_store.t_builtin_property(st, mk_object(to_string_h))
+  let #(vo_p, st) = rt_store.t_builtin_property(st, mk_object(value_of_h))
   let #(desc_p, st) =
-    common.accessor_prop(
+    common.accessor_property(
       st,
       get: Some(mk_object(description_get_h)),
       set: None,
@@ -124,7 +120,8 @@ pub fn init(
       configurable: True,
     )
   let #(tag_pair, st) = common.string_tag_property(st, "Symbol")
-  let #(to_prim_p, st) = common.frozen_property(st, mk_object(to_primitive_h))
+  let #(to_prim_p, st) =
+    rt_store.t_frozen_property(st, mk_object(to_primitive_h))
   let st =
     rt_store.t_cell_update(st, prototype, fn(cell) {
       let assert SObject(..) = cell
@@ -139,7 +136,7 @@ pub fn init(
         ]),
         symbol_props: [
           tag_pair,
-          #(rt_types.symbol_to_primitive, common.make_configurable(to_prim_p)),
+          #(types.symbol_to_primitive, common.make_configurable(to_prim_p)),
         ],
       )
     })
@@ -149,11 +146,11 @@ pub fn init(
 fn well_known_properties(
   st: Agent,
   specs: List(#(String, SymbolId)),
-) -> #(List(#(String, rt_types.Property)), Agent) {
+) -> #(List(#(String, types.Property)), Agent) {
   case specs {
     [] -> #([], st)
     [#(name, id), ..rest] -> {
-      let #(prop, st) = common.frozen_property(st, mk_symbol(id))
+      let #(prop, st) = rt_store.t_frozen_property(st, mk_symbol(id))
       let #(tail, st) = well_known_properties(st, rest)
       #([#(name, prop), ..tail], st)
     }

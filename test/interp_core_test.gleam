@@ -212,8 +212,8 @@ pub fn run_bytecode_from_gleam_test() {
   let #(_, st) = run_on(agent(), "function triple(n) { return n * 3 }")
   let #(f, st) = rt_helpers.global(st, "triple")
   let #(v, _) =
-    rt_call.t_call_checked(st, f, types.mk_undefined(), [
-      types.mk_number(JInt(14)),
+    rt_call.t_call(st, f, types.mk_undefined(), [
+      types.mk_int(14),
     ])
   assert classify(v) == KNum(JInt(42))
   let #(g, st) = rt_helpers.global(st, "globalThis")

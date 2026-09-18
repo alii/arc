@@ -120,7 +120,8 @@ fn regs(template: FuncTemplate) -> String {
     bytecode.Regs(a, b) ->
       " [regs "
       <> string.join(
-        list.filter(list.map([a, b], int.to_string), fn(s) { s != "-1" }),
+        list.filter([a, b], fn(r) { r != bytecode.no_register })
+          |> list.map(int.to_string),
         " ",
       )
       <> "]"

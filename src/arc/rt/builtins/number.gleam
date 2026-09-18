@@ -12,7 +12,7 @@ import arc/rt/types.{
   NumberPrototypeToLocaleString, NumberPrototypeToPrecision,
   NumberPrototypeToString, NumberPrototypeValueOf, SObject, classify, mk_bool,
   mk_int, mk_number, mk_object, mk_string,
-} as rt_types
+}
 import arc/rt/val as rt_val
 import gleam/float
 import gleam/int
@@ -74,8 +74,8 @@ pub fn init(
       #("isSafeInteger", NumberN(NumberIsSafeInteger), 1),
     ])
   // number.parseint must be === the global parseint
-  let #(pi_p, st) = common.builtin_property(st, mk_object(parse_int_h))
-  let #(pf_p, st) = common.builtin_property(st, mk_object(parse_float_h))
+  let #(pi_p, st) = rt_store.t_builtin_property(st, mk_object(parse_int_h))
+  let #(pf_p, st) = rt_store.t_builtin_property(st, mk_object(parse_float_h))
   let shared_globals = [#("parseInt", pi_p), #("parseFloat", pf_p)]
   let #(constants, st) =
     data_constants(st, [
@@ -126,11 +126,11 @@ pub fn init(
 fn data_constants(
   st: Agent,
   specs: List(#(String, JsNum)),
-) -> #(List(#(String, rt_types.Property)), Agent) {
+) -> #(List(#(String, types.Property)), Agent) {
   case specs {
     [] -> #([], st)
     [#(name, n), ..rest] -> {
-      let #(prop, st) = common.frozen_property(st, mk_number(n))
+      let #(prop, st) = rt_store.t_frozen_property(st, mk_number(n))
       let #(tail, st) = data_constants(st, rest)
       #([#(name, prop), ..tail], st)
     }

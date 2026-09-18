@@ -8,7 +8,7 @@ import arc/rt/snapshot.{
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, HostJob, JInt, KBool, KHandle, KNum, KStr, Named, RegExpObj,
-  SObject, StringKey, classify, mk_number, mk_string,
+  SObject, StringKey, classify, mk_int, mk_string,
 }
 import gleam/dict
 import rt_helpers
@@ -21,11 +21,10 @@ fn roundtrip(st: Agent) -> Agent {
 
 pub fn roundtrip_keeps_globals_and_properties_test() {
   let st = rt_helpers.agent()
-  let st = rt_obj.t_global_set(st, <<"n">>, mk_number(JInt(42)))
+  let st = rt_obj.t_global_set(st, <<"n">>, mk_int(42))
   let st = rt_obj.t_global_set(st, <<"s">>, mk_string("hello"))
   let #(obj, st) = rt_obj.t_new_object_literal(st)
-  let #(_, st) =
-    rt_obj.t_set_prop(st, obj, StringKey(Named("a")), mk_number(JInt(1)))
+  let #(_, st) = rt_obj.t_set_prop(st, obj, StringKey(Named("a")), mk_int(1))
   let #(inner, st) = rt_obj.t_new_object_literal(st)
   let #(_, st) =
     rt_obj.t_set_prop(st, inner, StringKey(Named("c")), mk_string("deep"))
@@ -49,9 +48,9 @@ pub fn roundtrip_keeps_arrays_test() {
   let st = rt_helpers.agent()
   let #(arr, st) =
     rt_obj.t_new_array(st, [
-      mk_number(JInt(10)),
-      mk_number(JInt(20)),
-      mk_number(JInt(30)),
+      mk_int(10),
+      mk_int(20),
+      mk_int(30),
     ])
   let st = rt_obj.t_global_set(st, <<"arr">>, arr)
 
@@ -68,9 +67,9 @@ pub fn natives_work_after_roundtrip_test() {
   let #(math, st) = rt_helpers.global(st, "Math")
   let #(max, st) =
     rt_helpers.call_method(st, math, "max", [
-      mk_number(JInt(1)),
-      mk_number(JInt(5)),
-      mk_number(JInt(3)),
+      mk_int(1),
+      mk_int(5),
+      mk_int(3),
     ])
   assert classify(max) == KNum(JInt(5))
   let #(array, st) = rt_helpers.global(st, "Array")
@@ -81,11 +80,11 @@ pub fn natives_work_after_roundtrip_test() {
 
 pub fn roundtrip_is_repeatable_test() {
   let st = rt_helpers.agent()
-  let st = rt_obj.t_global_set(st, <<"x">>, mk_number(JInt(1)))
+  let st = rt_obj.t_global_set(st, <<"x">>, mk_int(1))
   let st = roundtrip(st)
   let #(x, st) = rt_helpers.global(st, "x")
   let assert KNum(JInt(x)) = classify(x)
-  let st = rt_obj.t_global_set(st, <<"x">>, mk_number(JInt(x + 10)))
+  let st = rt_obj.t_global_set(st, <<"x">>, mk_int(x + 10))
   let st = roundtrip(st)
   let #(x, _st) = rt_helpers.global(st, "x")
   assert classify(x) == KNum(JInt(11))
@@ -121,9 +120,7 @@ pub fn regexp_matcher_is_dropped_and_rebuilt_test() {
 pub fn deserialize_rebinds_hooks_and_drops_host_fns_test() {
   let st = rt_helpers.agent()
   let entry =
-    types.HostFnEntry(name: "f", call: fn(st, _, _, _) {
-      #(st, Ok(mk_number(JInt(0))))
-    })
+    types.HostFnEntry(name: "f", call: fn(st, _, _, _) { #(st, Ok(mk_int(0))) })
   let st = types.Agent(..st, host_fns: dict.from_list([#(0, entry)]))
   let st = roundtrip(st)
   assert st.host_fns == dict.new()
@@ -139,7 +136,7 @@ pub fn same_agent_same_bytes_test() {
 
 pub fn compiled_function_is_refused_test() {
   let st = rt_helpers.agent()
-  let #(f, st) = rt_helpers.func(st, fn(st, _) { #(mk_number(JInt(1)), st) })
+  let #(f, st) = rt_helpers.func(st, fn(st, _) { #(mk_int(1), st) })
   let assert KHandle(h) = classify(f)
   let st = rt_obj.t_global_set(st, <<"f">>, f)
   assert snapshot.serialize(st) == Error(SnapshotContainsCompiledCode(h))

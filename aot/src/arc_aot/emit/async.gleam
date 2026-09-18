@@ -242,9 +242,9 @@ fn new_machine_ctx(
   plan: SplitPlan,
 ) -> MachineCtx {
   MachineCtx(
-    kind: kind,
-    layout: layout,
-    resume_loop_label: resume_loop_label,
+    kind:,
+    layout:,
+    resume_loop_label:,
     resume_mode: ir.Var(mode_var),
     sent_value: ir.Var(sent_var),
     saved_locals: ir.Var(locals_var),
@@ -309,6 +309,13 @@ const pend_return = 2
 const pend_goto = 3
 
 // fixed ir names bound by emit_machine_function and read through MachineCtx
+// mirror rt_async sent modes, compared numerically in emitted code
+const resume_next = rt_async.sent_next
+
+const resume_throw = rt_async.sent_throw
+
+const resume_return = rt_async.sent_return
+
 const mode_var = "_mode"
 
 const sent_var = "_sv"
@@ -621,9 +628,9 @@ fn expr_has_split(e: ast.Expression) -> Bool {
     ast.SequenceExpression(expressions: xs, ..) -> list.any(xs, expr_has_split)
     ast.ArrayExpression(elements: xs, ..) -> list.any(xs, opt_expr_has_split)
     ast.ObjectExpression(properties: ps, ..) -> list.any(ps, prop_has_split)
-    ast.TemplateLiteral(parts: parts, ..) ->
+    ast.TemplateLiteral(parts:, ..) ->
       list.any(ast.template_expressions(parts), expr_has_split)
-    ast.TaggedTemplateExpression(tag: t, parts: parts, ..) ->
+    ast.TaggedTemplateExpression(tag: t, parts:, ..) ->
       expr_has_split(t)
       || list.any(ast.template_expressions(parts), expr_has_split)
     ast.ImportExpression(source: s, options: o, ..) ->
@@ -750,7 +757,7 @@ fn stmt_has_split(s: ast.Statement) -> Bool {
       for_init_has_split(l) || expr_has_split(r) || stmt_has_split(b)
     ast.ForOfStatement(left: l, right: r, body: b, is_await: aw) ->
       aw || for_init_has_split(l) || expr_has_split(r) || stmt_has_split(b)
-    ast.SwitchStatement(discriminant: discriminant, cases: cases) ->
+    ast.SwitchStatement(discriminant:, cases:) ->
       expr_has_split(discriminant)
       || list.any(cases, fn(c: ast.SwitchCase) {
         opt_expr_has_split(c.condition) || stmts_have_split(c.consequent)
@@ -846,7 +853,7 @@ fn finish_arm(
       entry_cursor: p.open_cursor,
       resume: p.open_resume,
       body_fragment: list.reverse(p.pending_stmts_rev),
-      tail: tail,
+      tail:,
       machine_frames: p.open_frames,
     )
   SplitPlanner(
@@ -995,8 +1002,8 @@ fn in_child_scope(
 // false means the analyzer pruned the scope; entering would steal a sibling's id
 fn in_child_scope_if(
   p: SplitPlanner,
-  cond: Bool,
-  f: fn(SplitPlanner) -> SplitPlanner,
+  cond cond: Bool,
+  f f: fn(SplitPlanner) -> SplitPlanner,
 ) -> SplitPlanner {
   case cond {
     True -> in_child_scope(p, f)
@@ -1078,9 +1085,9 @@ fn plan_expr(p: SplitPlanner, e: ast.Expression) -> SplitPlanner {
           ast.SpreadProperty(argument: x) -> plan_expr(p, x)
         }
       })
-    ast.TemplateLiteral(parts: parts, ..) ->
+    ast.TemplateLiteral(parts:, ..) ->
       list.fold(ast.template_expressions(parts), p, plan_expr)
-    ast.TaggedTemplateExpression(tag: t, parts: parts, ..) ->
+    ast.TaggedTemplateExpression(tag: t, parts:, ..) ->
       list.fold(ast.template_expressions(parts), plan_expr(p, t), plan_expr)
     ast.ImportExpression(source: s, options: o, ..) ->
       plan_opt_expr(plan_expr(p, s), o)
@@ -1210,7 +1217,7 @@ fn plan_split_stmt(p: SplitPlanner, sl: ast.StmtWithLine) -> SplitPlanner {
       plan_for_of(p, line, None, l, r, b, is_await:)
     ast.ForInStatement(left: l, right: r, body: b) ->
       plan_for_of(p, line, None, l, r, b, is_await: False)
-    ast.SwitchStatement(discriminant: discriminant, cases: cases) ->
+    ast.SwitchStatement(discriminant:, cases:) ->
       plan_switch(p, None, discriminant, cases)
     ast.ExpressionStatement(..)
     | ast.ThrowStatement(..)
@@ -1308,7 +1315,7 @@ fn cursor_only_walk(p: SplitPlanner, s: ast.Statement) -> SplitPlanner {
         let p = plan_expr(p, r)
         plan_stmt_cursor_only(p, b)
       })
-    ast.SwitchStatement(discriminant: discriminant, cases: cases) -> {
+    ast.SwitchStatement(discriminant:, cases:) -> {
       use p <- in_child_scope(plan_expr(p, discriminant))
       use p, c <- list.fold(cases, p)
       plan_stmts_cursor_only(plan_opt_expr(p, c.condition), c.consequent)
@@ -1715,7 +1722,7 @@ fn plan_labeled(
       plan_for_of(p, line, Some(label), l, r, b, is_await:)
     ast.ForInStatement(left: l, right: r, body: b) ->
       plan_for_of(p, line, Some(label), l, r, b, is_await: False)
-    ast.SwitchStatement(discriminant: discriminant, cases: cases) ->
+    ast.SwitchStatement(discriminant:, cases:) ->
       plan_switch(p, Some(label), discriminant, cases)
     ast.LabeledStatement(label: inner, body: b) -> {
       let #(after, p) = alloc_state(p)
@@ -2193,7 +2200,9 @@ fn repack_saved_locals_loop(
 
 fn machine_default_arm(e: Emitter) -> #(ir.Expr, Emitter) {
   let msg = ir.ConstBinary(bit_array.from_string("invalid gen state"))
-  anf.run_to(anf.host("new_error", [msg]), e, fn(_e, err) { step_throw(err) })
+  anf.run_to(anf.host("new_type_error", [msg]), e, fn(_e, err) {
+    step_throw(err)
+  })
 }
 
 fn build_machine_params(e: Emitter, i: Int, ncap: Int) -> List(ir.Local) {
@@ -2250,7 +2259,7 @@ fn emit_machine_function(
       params: build_machine_params(e, 0, ncap),
       result: [ir.TTerm],
       locals: [],
-      body: body,
+      body:,
     ),
   )
 }
@@ -2275,7 +2284,7 @@ fn cap_vars(e: Emitter, i: Int, n: Int) -> List(ir.Value) {
   }
 }
 
-fn atom_bool(rc: state.IrConsts, b: Bool) -> ir.Value {
+fn atom_bool(rc: state.IrConsts, value b: Bool) -> ir.Value {
   case b {
     True -> rc.true_
     False -> rc.false_
@@ -2333,10 +2342,10 @@ fn emit_closure_alloc(
   outer_name: String,
   kind: state.CoroutineKind,
   shape: state.FnShape,
-  is_strict: Bool,
-  js_name: Option(String),
-  params: List(ast.Pattern),
-  captures: List(ir.Value),
+  is_strict is_strict: Bool,
+  js_name js_name: Option(String),
+  params params: List(ast.Pattern),
+  captures captures: List(ir.Value),
 ) -> #(ir.Expr, Emitter) {
   let rc = e.consts
   let flags = [
@@ -2508,7 +2517,7 @@ fn emit_mode_dispatch(
           ["_is_thr"],
           ir.Num(ir.IEq(ir.W32), [
             ir.Var("_i32m"),
-            ir.ConstI32(rt_async.sent_throw),
+            ir.ConstI32(resume_throw),
           ]),
           ir.If(
             ir.Var("_is_thr"),
@@ -2518,7 +2527,7 @@ fn emit_mode_dispatch(
               ["_is_ret"],
               ir.Num(ir.IEq(ir.W32), [
                 ir.Var("_i32m"),
-                ir.ConstI32(rt_async.sent_return),
+                ir.ConstI32(resume_return),
               ]),
               ir.If(
                 ir.Var("_is_ret"),
@@ -2636,7 +2645,7 @@ fn emit_delegate_arm(
     )
     use resume_mode <- anf.then(anf.bind_if(
       first,
-      rs_box(rt_async.sent_next),
+      rs_box(resume_next),
       anf.pure(ctx.resume_mode),
     ))
     use sent_value <- anf.then(anf.bind_if(
@@ -2649,9 +2658,7 @@ fn emit_delegate_arm(
       anf.bind(ir.Convert(ir.UnboxInt(ir.W32), ctx.resume_mode)),
     )
     use mode_ne0 <- anf.then(
-      anf.bind(
-        ir.Num(ir.INe(ir.W32), [mode_i32, ir.ConstI32(rt_async.sent_next)]),
-      ),
+      anf.bind(ir.Num(ir.INe(ir.W32), [mode_i32, ir.ConstI32(resume_next)])),
     )
     let mbin = fn(s) { ir.Values([ir.ConstBinary(bit_array.from_string(s))]) }
     use meth <- anf.then(anf.bind_if(
@@ -2679,9 +2686,7 @@ fn emit_delegate_arm(
       anf.bind(ir.Num(ir.IAnd(ir.W32), [mode_ne0, is_nullish])),
     )
     use is_throw <- anf.then(
-      anf.bind(
-        ir.Num(ir.IEq(ir.W32), [mode_i32, ir.ConstI32(rt_async.sent_throw)]),
-      ),
+      anf.bind(ir.Num(ir.IEq(ir.W32), [mode_i32, ir.ConstI32(resume_throw)])),
     )
     let on_missing =
       if_terminal(
@@ -2706,7 +2711,7 @@ fn emit_delegate_arm(
       )
     let on_call = {
       use argl <- anf.then(anf.cons_list([ctx.sent_value]))
-      use res <- anf.then(anf.host("call_checked", [meth, inner, argl]))
+      use res <- anf.then(anf.host("call", [meth, inner, argl]))
       case delegate_spec.await_state {
         Some(await_state) -> {
           use loc2 <- anf.then(repack_saved_locals(
@@ -2759,9 +2764,7 @@ fn delegate_result(
 ) -> anf.Build(ir.Expr) {
   use is_obj <- anf.then(anf.host_bool("is_object", [res]))
   use is_return <- anf.then(
-    anf.bind(
-      ir.Num(ir.IEq(ir.W32), [mode_i32, ir.ConstI32(rt_async.sent_return)]),
-    ),
+    anf.bind(ir.Num(ir.IEq(ir.W32), [mode_i32, ir.ConstI32(resume_return)])),
   )
   if_terminal(
     is_obj,
@@ -3683,10 +3686,10 @@ pub fn emit_coroutine_fn(
       e_outer,
       func.shape_self_name(shape),
       func.shape_is_arrow(shape),
-      False,
-      params,
-      stmts,
-      info,
+      own_args: False,
+      params:,
+      stmts:,
+      info:,
     )
     let cur0 = capture_cursor(e_pro)
     let plan = analyze_splits(e_pro.scope_tree, cur0, body, kind)
@@ -4010,8 +4013,10 @@ fn hoist_keeping_top_split(
           let span = ex.span
           let rebuilt = case kind {
             AwaitSplit -> ast.AwaitExpression(span, op2)
-            YieldSplit -> ast.YieldExpression(span, Some(op2), False)
-            YieldStarSplit -> ast.YieldExpression(span, Some(op2), True)
+            YieldSplit ->
+              ast.YieldExpression(span, Some(op2), is_delegate: False)
+            YieldStarSplit ->
+              ast.YieldExpression(span, Some(op2), is_delegate: True)
             ForAwaitSplit -> ex
           }
           #(p, pre, rebuilt)
@@ -4152,7 +4157,8 @@ fn hoist_subexprs(
     ast.UpdateExpression(span, op, prefix, arg) ->
       case arg {
         ast.MemberExpression(mspan, obj, prop) -> {
-          let #(p, pre, obj2, prop2) = hoist_member(p, line, obj, prop, False)
+          let #(p, pre, obj2, prop2) =
+            hoist_member(p, line, obj, prop, later: False)
           #(
             p,
             pre,
@@ -4187,7 +4193,8 @@ fn hoist_subexprs(
       )
     }
     ast.MemberExpression(span, obj, prop) -> {
-      let #(p, pre, obj2, prop2) = hoist_member(p, line, obj, prop, False)
+      let #(p, pre, obj2, prop2) =
+        hoist_member(p, line, obj, prop, later: False)
       #(p, pre, ast.MemberExpression(span, obj2, prop2))
     }
     ast.ArrayExpression(span, elems) -> {
@@ -4389,7 +4396,7 @@ fn hoist_member(
   line: Int,
   obj: ast.Expression,
   prop: ast.MemberProperty,
-  later: Bool,
+  later later: Bool,
 ) -> #(SplitPlanner, List(ast.StmtWithLine), ast.Expression, ast.MemberProperty) {
   case obj {
     ast.SuperExpression(..) -> {
@@ -4412,7 +4419,7 @@ fn hoist_prop(
   p: SplitPlanner,
   line: Int,
   prop: ast.MemberProperty,
-  later: Bool,
+  later later: Bool,
 ) -> #(SplitPlanner, List(ast.StmtWithLine), ast.MemberProperty) {
   case prop {
     ast.Dot(..) -> #(p, [], prop)
@@ -4467,7 +4474,8 @@ fn hoist_assign(
       case obj {
         ast.SuperExpression(..) -> None
         _ -> {
-          let #(p, pre, obj2, prop2) = hoist_member(p, line, obj, prop, True)
+          let #(p, pre, obj2, prop2) =
+            hoist_member(p, line, obj, prop, later: True)
           Some(#(p, pre, ast.MemberExpression(mspan, obj2, prop2)))
         }
       }
@@ -4730,7 +4738,7 @@ fn explode_stmt(
           done(p, pre, ast.ForInStatement(l, r2, b))
         }
       }
-    ast.SwitchStatement(discriminant: discriminant, cases: cases) ->
+    ast.SwitchStatement(discriminant:, cases:) ->
       case needs_explode(discriminant) {
         False -> None
         True -> {

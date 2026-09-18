@@ -1,5 +1,7 @@
 import arc/internal/tree_array
-import arc/rt/types.{type JsElements, type JsVal, Dense, NoElements, Sparse}
+import arc/rt/types.{
+  type Agent, type JsElements, type JsVal, Dense, NoElements, Sparse,
+}
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
@@ -10,6 +12,15 @@ const max_gap = 1024
 
 // ffi :array backing tops out here
 const max_dense_index = 10_000_000
+
+pub type OwnElement {
+  Hit(JsVal)
+  Miss
+}
+
+// own read of a plain array or arguments object, miss defers to [[get]]
+@external(erlang, "arc_rt_array_ffi", "own_element")
+pub fn own_element(st: Agent, this: JsVal, idx: Int) -> OwnElement
 
 pub fn new() -> JsElements {
   NoElements

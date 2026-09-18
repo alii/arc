@@ -3,7 +3,7 @@
 import arc/engine.{JsString, Returned}
 import arc/host
 import arc/rt/inspect as rt_inspect
-import arc/rt/types.{JInt, mk_number, mk_string, mk_undefined}
+import arc/rt/types.{mk_int, mk_string, mk_undefined}
 import gleam/io
 import gleam/list
 import gleam/string
@@ -51,7 +51,7 @@ fn map_range_loop(s, cb, i, n, acc) {
     }
     False -> {
       use r, s <- host.try_call(s, cb, "callback", mk_undefined(), [
-        mk_number(JInt(i)),
+        mk_int(i),
       ])
       map_range_loop(s, cb, i + 1, n, [r, ..acc])
     }

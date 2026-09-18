@@ -3,7 +3,7 @@ import arc/rt/lang
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, JInt, KHandle, KNum, KStr, KUndef, Named, StringKey, classify,
-  mk_number, mk_string, mk_undefined,
+  mk_int, mk_string, mk_undefined,
 }
 import gleam/list
 import gleam/option.{Some}
@@ -14,7 +14,7 @@ fn agent() -> Agent {
 }
 
 fn ints(xs: List(Int)) {
-  list.map(xs, fn(i) { mk_number(JInt(i)) })
+  list.map(xs, fn(i) { mk_int(i) })
 }
 
 pub fn iterator_record_steps_then_stays_done_test() {
@@ -29,8 +29,8 @@ pub fn iterator_record_steps_then_stays_done_test() {
   assert classify(v1) == KNum(JInt(7))
   assert classify(v2) == KNum(JInt(8))
   assert classify(v3) == KUndef
-  let st = lang.t_iter_close(st, rec, False)
-  let _st = lang.t_iter_close(st, rec, True)
+  let st = lang.t_iter_close(st, rec, abrupt: False)
+  let _st = lang.t_iter_close(st, rec, abrupt: True)
 }
 
 pub fn iter_rest_and_spread_test() {

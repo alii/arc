@@ -43,7 +43,8 @@ pub fn init(
     common.alloc_methods(st, fn_proto, [#("groupBy", MapN(MapGroupBy), 2)])
   let #(entries_h, st) =
     common.alloc_rooted_native_fn(st, fn_proto, MapN(MapEntries), "entries", 0)
-  let #(entries_prop, st) = common.builtin_property(st, mk_object(entries_h))
+  let #(entries_prop, st) =
+    rt_store.t_builtin_property(st, mk_object(entries_h))
   let #(size_props, st) =
     common.alloc_getters(st, fn_proto, [#("size", MapN(MapGetSize))])
   let proto_props =
@@ -121,7 +122,7 @@ fn map_constructor(
     _ -> {
       let iterable = first_arg_or_undefined(args)
       let #(adder, st) = rt_obj.t_get_prop(st, map, StringKey(Named("set")))
-      case rt_call.is_callable(st, adder) {
+      case rt_val.is_callable(st, adder) {
         False ->
           rt_val.t_throw_type_error(
             st,
@@ -159,7 +160,7 @@ fn group_by_loop(
     #(None, st) -> group_by_finish(st, groups, list.reverse(order))
     #(Some(item), st) -> {
       use kv, st <- iter_protocol.or_close(st, rec.iterator, fn(st) {
-        rt_call.t_call_checked(st, callback, mk_undefined(), [
+        rt_call.t_call(st, callback, mk_undefined(), [
           item,
           mk_int(index),
         ])
@@ -244,15 +245,14 @@ fn map_get_or_insert_computed(
   let #(key_arg, callback) = two_args_or_undefined(args)
   use ref <- require_map(st, this, "getOrInsertComputed")
   use callback <- helpers.require_callable(st, callback, fn() {
-    let #(ty, _) = rt_val.t_type_of(st, callback)
-    ty <> " is not a function"
+    rt_val.type_of(st, callback) <> " is not a function"
   })
   let map_key = js_to_map_key(key_arg)
   case ordered_entries.get(read_map_store(st, ref), map_key) {
     Some(existing) -> #(existing, st)
     None -> {
       let #(value, st) =
-        rt_call.t_call_checked(st, callback, mk_undefined(), [
+        rt_call.t_call(st, callback, mk_undefined(), [
           map_key_to_js(map_key),
         ])
       let store =
@@ -295,8 +295,7 @@ fn map_for_each(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   // brand check before callable check, observable
   use ref <- require_map(st, this, "forEach")
   use cb <- helpers.require_callable(st, cb, fn() {
-    let #(ty, _) = rt_val.t_type_of(st, cb)
-    ty <> " is not a function"
+    rt_val.type_of(st, cb) <> " is not a function"
   })
   for_each_loop(st, ref, 0, cb, this_arg, this)
 }
@@ -315,7 +314,7 @@ fn for_each_loop(
     Some(#(next_cursor, map_key, val)) -> {
       let original_key = map_key_to_js(map_key)
       let #(_result, st) =
-        rt_call.t_call_checked(st, cb, this_arg, [
+        rt_call.t_call(st, cb, this_arg, [
           val,
           original_key,
           map_this,

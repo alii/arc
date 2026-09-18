@@ -1,3 +1,4 @@
+import arc/rt/abstract_ops as rt_abstract
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
 import arc/rt/builtins/iter_protocol
@@ -25,7 +26,7 @@ import arc/rt/types.{
   ObjectSeal, ObjectSetPrototypeOf, ObjectValues, ParsedDesc, ProxyObj,
   RegExpObj, SObject, StringKey, StringObj, SymbolKey, classify, mk_bool, mk_int,
   mk_null, mk_object, mk_string, mk_symbol, mk_undefined,
-} as rt_types
+}
 import arc/rt/val as rt_val
 import gleam/bool
 import gleam/dict
@@ -116,8 +117,8 @@ pub fn dispatch(
     ObjectGetOwnPropertyDescriptor -> get_own_prop_desc(st, args)
     ObjectDefineProperty -> define_property(st, args)
     ObjectDefineProperties -> define_properties(st, args)
-    ObjectGetOwnPropertyNames -> own_keys_impl(st, args, False)
-    ObjectKeys -> own_keys_impl(st, args, True)
+    ObjectGetOwnPropertyNames -> own_keys_impl(st, args, enumerable_only: False)
+    ObjectKeys -> own_keys_impl(st, args, enumerable_only: True)
     ObjectValues -> values(st, args)
     ObjectEntries -> entries(st, args)
     ObjectCreate -> create(st, args)
@@ -316,7 +317,7 @@ fn collect_descriptors(
     [k, ..rest] -> {
       let #(prop, st) = rt_obj.t_get_own_property(st, props_h, k)
       let enumerable =
-        option.map(prop, rt_types.prop_enumerable) |> option.unwrap(False)
+        option.map(prop, types.prop_enumerable) |> option.unwrap(False)
       case enumerable {
         False -> collect_descriptors(st, props_h, props_v, rest, acc)
         True -> {
@@ -353,7 +354,7 @@ fn apply_descriptors(
 fn own_keys_impl(
   st: Agent,
   args: List(JsVal),
-  enumerable_only: Bool,
+  enumerable_only enumerable_only: Bool,
 ) -> #(JsVal, Agent) {
   case classify(first_arg_or_undefined(args)) {
     KHandle(h) -> {
@@ -378,10 +379,7 @@ fn own_keys_impl(
           #(names, st)
         }
       }
-      ok_array(
-        st,
-        list.map(names, fn(pk) { mk_string(rt_types.key_to_text(pk)) }),
-      )
+      ok_array(st, list.map(names, fn(pk) { mk_string(types.key_to_text(pk)) }))
     }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
     KStr(s) -> {
@@ -470,15 +468,12 @@ fn collect_enumerable(
     [StringKey(pk) as k, ..rest] -> {
       let #(prop, st) = rt_obj.t_get_own_property(st, h, k)
       let enumerable =
-        option.map(prop, rt_types.prop_enumerable) |> option.unwrap(False)
+        option.map(prop, types.prop_enumerable) |> option.unwrap(False)
       case enumerable {
         False -> collect_enumerable(st, h, rest, acc)
         True -> {
           let #(v, st) = rt_obj.t_get_prop(st, mk_object(h), k)
-          collect_enumerable(st, h, rest, [
-            #(rt_types.key_to_text(pk), v),
-            ..acc
-          ])
+          collect_enumerable(st, h, rest, [#(types.key_to_text(pk), v), ..acc])
         }
       }
     }
@@ -530,9 +525,9 @@ fn get_own_prop_descriptors(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
                   result_h,
                   k,
                   desc_v,
-                  True,
-                  True,
-                  True,
+                  writable: True,
+                  enumerable: True,
+                  configurable: True,
                 )
               st
             }
@@ -562,7 +557,15 @@ fn descriptors_from_keys(
         Some(prop) -> {
           let #(desc_v, st) = from_property_descriptor(st, prop)
           let #(_ok, st) =
-            rt_obj.t_define_own_data(st, result_h, k, desc_v, True, True, True)
+            rt_obj.t_define_own_data(
+              st,
+              result_h,
+              k,
+              desc_v,
+              writable: True,
+              enumerable: True,
+              configurable: True,
+            )
           descriptors_from_keys(st, src_h, result_h, rest)
         }
       }
@@ -614,7 +617,7 @@ fn assign_one(st: Agent, target_h: Handle, src: JsVal) -> Agent {
       list.fold(keys, st, fn(st, k) {
         let #(prop, st) = rt_obj.t_get_own_property(st, src_h, k)
         let enumerable =
-          option.map(prop, rt_types.prop_enumerable) |> option.unwrap(False)
+          option.map(prop, types.prop_enumerable) |> option.unwrap(False)
         case enumerable {
           False -> st
           True -> {
@@ -668,7 +671,7 @@ fn property_is_enumerable(
   let #(key, st) = rt_val.t_to_property_key(st, first_arg_or_undefined(args))
   let #(desc, st) = own_property_of(st, this, key)
   let enumerable =
-    option.map(desc, rt_types.prop_enumerable) |> option.unwrap(False)
+    option.map(desc, types.prop_enumerable) |> option.unwrap(False)
   #(mk_bool(enumerable), st)
 }
 
@@ -680,7 +683,7 @@ fn object_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
       // isarray in builtin_tag must run before the get
       let fallback = builtin_tag(st, this)
       let #(tag_val, st) =
-        rt_obj.t_get_prop(st, this, SymbolKey(rt_types.symbol_to_string_tag))
+        rt_obj.t_get_prop(st, this, SymbolKey(types.symbol_to_string_tag))
       let t = case classify(tag_val) {
         KStr(s) -> s
         _ -> fallback
@@ -698,15 +701,15 @@ fn builtin_tag(st: Agent, this: JsVal) -> String {
     KSym(_) -> "Symbol"
     KBig(_) -> "Object"
     KHandle(h) -> {
-      use <- bool.guard(rt_obj.t_is_array(st, h), "Array")
+      use <- bool.guard(rt_abstract.is_array_handle(st, h), "Array")
       case rt_store.t_cell_get(st, h) {
         SObject(kind:, ..) ->
           case kind {
             ArgumentsObj(..) -> "Arguments"
             CompiledFn(..) | BytecodeFn(..) | NativeFn(..) -> "Function"
-            rt_types.BoundFn(..) -> "Function"
+            types.BoundFn(..) -> "Function"
             ProxyObj(target:, ..) ->
-              case rt_call.is_callable(st, mk_object(target)) {
+              case rt_val.is_callable(st, mk_object(target)) {
                 True -> "Function"
                 False -> "Object"
               }
@@ -985,7 +988,15 @@ fn from_entries(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
       )
       let #(key, st) = rt_val.t_to_property_key(st, k)
       let #(_ok, st) =
-        rt_obj.t_define_own_data(st, obj_h, key, v, True, True, True)
+        rt_obj.t_define_own_data(
+          st,
+          obj_h,
+          key,
+          v,
+          writable: True,
+          enumerable: True,
+          configurable: True,
+        )
       st
     }
   }
@@ -993,7 +1004,7 @@ fn from_entries(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 
 fn group_by(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(items, callback) = two_args_or_undefined(args)
-  case rt_call.is_callable(st, callback) {
+  case rt_val.is_callable(st, callback) {
     False ->
       rt_val.t_throw_type_error(st, "Object.groupBy callback is not callable")
     True -> {
@@ -1016,7 +1027,7 @@ fn group_by_loop(
     #(Some(item), st) -> {
       use key_prim, st <- iter_protocol.or_close(st, rec.iterator, fn(st) {
         let #(kv, st) =
-          rt_call.t_call_checked(st, callback, mk_undefined(), [
+          rt_call.t_call(st, callback, mk_undefined(), [
             item,
             mk_int(index),
           ])
@@ -1052,9 +1063,9 @@ fn group_by_finish(
           obj_h,
           key,
           mk_object(arr_h),
-          True,
-          True,
-          True,
+          writable: True,
+          enumerable: True,
+          configurable: True,
         )
       st
     })
@@ -1074,7 +1085,7 @@ fn define_getter_setter(
 ) -> #(JsVal, Agent) {
   let #(key_val, accessor) = two_args_or_undefined(args)
   let #(h, st) = rt_val.t_to_object(st, this)
-  case rt_call.is_callable(st, accessor) {
+  case rt_val.is_callable(st, accessor) {
     False ->
       rt_val.t_throw_type_error(st, case kind {
         AsGetter -> "Getter must be a function"
@@ -1170,7 +1181,7 @@ fn ok_array(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
 
 fn key_text(key: ObjectKey) -> String {
   case key {
-    StringKey(pk) -> rt_types.key_to_text(pk)
-    SymbolKey(sym) -> rt_types.symbol_descriptive_string(sym)
+    StringKey(pk) -> types.key_to_text(pk)
+    SymbolKey(sym) -> types.symbol_descriptive_string(sym)
   }
 }

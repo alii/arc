@@ -1,3 +1,4 @@
+import arc/rt/abstract_ops as rt_abstract
 import arc/rt/buffer
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -198,7 +199,7 @@ fn allocate(
   new_target: JsVal,
   byte_length: Int,
   max: Option(Int),
-  shared: Bool,
+  shared shared: Bool,
 ) -> #(Handle, Agent) {
   case max {
     Some(m) if byte_length > m ->
@@ -371,8 +372,9 @@ fn buffer_slice(
   let storage = require_live(st, buf, "slice")
   let len = types.buffer_byte_size(storage)
   let #(first, st) =
-    relative_index(st, helpers.first_arg_or_undefined(args), len, 0)
-  let #(final, st) = relative_index(st, helpers.arg_at(args, 1), len, len)
+    rt_abstract.relative_index(st, helpers.first_arg_or_undefined(args), len, 0)
+  let #(final, st) =
+    rt_abstract.relative_index(st, helpers.arg_at(args, 1), len, len)
   let new_len = int.max(final - first, 0)
   let default_ctor = case shared {
     True -> st.realm.shared_array_buffer.constructor
@@ -426,8 +428,9 @@ fn slice_to_immutable(
   let bytes = require_unshared_bytes(st, buf, "sliceToImmutable")
   let len = bit_array.byte_size(bytes)
   let #(first, st) =
-    relative_index(st, helpers.first_arg_or_undefined(args), len, 0)
-  let #(final, st) = relative_index(st, helpers.arg_at(args, 1), len, len)
+    rt_abstract.relative_index(st, helpers.first_arg_or_undefined(args), len, 0)
+  let #(final, st) =
+    rt_abstract.relative_index(st, helpers.arg_at(args, 1), len, len)
   let new_len = int.max(final - first, 0)
   let buf = require_buffer(st, mk_object(buf.h), "sliceToImmutable")
   let bytes = require_unshared_bytes(st, buf, "sliceToImmutable")
@@ -629,7 +632,12 @@ fn require_shared(st: Agent, buf: Buf, method: String) -> types.SharedBlock {
   }
 }
 
-fn require_family(st: Agent, buf: Buf, method: String, shared: Bool) -> Buf {
+fn require_family(
+  st: Agent,
+  buf: Buf,
+  method: String,
+  shared shared: Bool,
+) -> Buf {
   case shared {
     True -> {
       let _bytes = require_shared(st, buf, method)
@@ -733,25 +741,6 @@ fn copy_into(
   let assert Ok(part) = bit_array.slice(source, offset, count)
   let assert Ok(rest) = bit_array.slice(target, count, target_len - count)
   bit_array.append(part, rest)
-}
-
-fn relative_index(
-  st: Agent,
-  val: JsVal,
-  len: Int,
-  default: Int,
-) -> #(Int, Agent) {
-  case classify(val) {
-    KUndef -> #(default, st)
-    _ -> {
-      let #(raw, st) = rt_val.t_to_integer_or_infinity(st, val)
-      let k = case raw < 0 {
-        True -> int.max(len + raw, 0)
-        False -> int.min(raw, len)
-      }
-      #(k, st)
-    }
-  }
 }
 
 // §7.3.22 speciesconstructor

@@ -3,9 +3,7 @@ import arc/host_hooks.{
 }
 import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
-import arc/rt/types.{
-  JFloat, JInt, KNum, classify, mk_number, mk_object, mk_string,
-}
+import arc/rt/types.{JFloat, JInt, KNum, classify, mk_int, mk_object, mk_string}
 import gleam/list
 import rt_helpers
 
@@ -50,7 +48,7 @@ pub fn console_levels_test() {
       let #(_, st) =
         rt_helpers.call_method(st, console, m, [
           mk_string(m),
-          mk_number(JInt(1)),
+          mk_int(1),
         ])
       st
     })

@@ -38,8 +38,8 @@ pub fn binding() -> instance.Binding {
 
 fn init_emitter(
   tree: scope.ScopeTree,
-  strict: Bool,
-  module_name: String,
+  strict strict: Bool,
+  module_name module_name: String,
 ) -> state.Emitter {
   let dispatch =
     state.EmitDispatch(
@@ -93,8 +93,8 @@ fn root_binding_prologue(
 fn global_var_prologue(
   e: state.Emitter,
   body: List(ast.StmtWithLine),
-  strict: Bool,
-  wrap: fn(ir.Expr) -> ir.Expr,
+  strict strict: Bool,
+  wrap wrap: fn(ir.Expr) -> ir.Expr,
 ) -> #(fn(ir.Expr) -> ir.Expr, state.Emitter) {
   let annexb = case strict {
     True -> []

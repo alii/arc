@@ -52,10 +52,10 @@ pub fn init(
       #("captureStackTrace", ErrorN(ErrorCaptureStackTrace), 2),
       #("isError", ErrorN(ErrorIsError), 1),
     ])
-  let #(stl_prop, st) = common.builtin_property(st, mk_number(JFloat(10.0)))
+  let #(stl_prop, st) = rt_store.t_builtin_property(st, mk_number(JFloat(10.0)))
   let error_static = [#("stackTraceLimit", stl_prop), ..capture_methods]
-  let #(name_prop, st) = common.builtin_property(st, mk_string("Error"))
-  let #(msg_prop, st) = common.builtin_property(st, mk_string(""))
+  let #(name_prop, st) = rt_store.t_builtin_property(st, mk_string("Error"))
+  let #(msg_prop, st) = rt_store.t_builtin_property(st, mk_string(""))
   let #(error, st) =
     common.init_type(
       st,
@@ -113,7 +113,7 @@ fn subclass(
   arity: Int,
   native: fn(Handle) -> ErrorNative,
 ) -> #(BuiltinPair, Agent) {
-  let #(name_prop, st) = common.builtin_property(st, mk_string(name))
+  let #(name_prop, st) = rt_store.t_builtin_property(st, mk_string(name))
   common.init_type(
     st,
     base.prototype,
@@ -191,7 +191,7 @@ fn aggregate_error_ctor(
   let #(rec, st) = iter_protocol.get_iterator_sync(st, errors)
   let #(collected, st) = iter_protocol.iterator_to_list(st, rec)
   let #(arr_h, st) = common.alloc_array(st, collected, st.realm.array.prototype)
-  let #(errors_prop, st) = common.builtin_property(st, mk_object(arr_h))
+  let #(errors_prop, st) = rt_store.t_builtin_property(st, mk_object(arr_h))
   let st = common.add_named_property(st, h, "errors", errors_prop)
   #(mk_object(h), st)
 }
@@ -223,13 +223,13 @@ fn alloc_suppressed(
 ) -> #(JsVal, Agent) {
   let #(msg_props, st) = case message {
     Some(msg) -> {
-      let #(mp, st) = common.builtin_property(st, mk_string(msg))
+      let #(mp, st) = rt_store.t_builtin_property(st, mk_string(msg))
       #([#("message", mp)], st)
     }
     None -> #([], st)
   }
-  let #(err_prop, st) = common.builtin_property(st, err)
-  let #(sup_prop, st) = common.builtin_property(st, suppressed)
+  let #(err_prop, st) = rt_store.t_builtin_property(st, err)
+  let #(sup_prop, st) = rt_store.t_builtin_property(st, suppressed)
   let props =
     list.append(msg_props, [#("error", err_prop), #("suppressed", sup_prop)])
   let #(h, st) = common.alloc_error_object(st, proto, props)
@@ -299,7 +299,7 @@ fn alloc_error(
 ) -> #(Handle, Agent) {
   let #(props, st) = case message {
     Some(msg) -> {
-      let #(mp, st) = common.builtin_property(st, mk_string(msg))
+      let #(mp, st) = rt_store.t_builtin_property(st, mk_string(msg))
       #([#("message", mp)], st)
     }
     None -> #([], st)
@@ -323,7 +323,7 @@ fn install_error_cause(
         True -> {
           let #(cause, st) =
             rt_obj.t_get_prop(st, options, StringKey(Named("cause")))
-          let #(cp, st) = common.builtin_property(st, cause)
+          let #(cp, st) = rt_store.t_builtin_property(st, cause)
           let st = common.add_named_property(st, h, "cause", cp)
           #(h, st)
         }
@@ -400,7 +400,7 @@ pub fn attach_stack(st: Agent, h: Handle, name: String, msg: String) -> Agent {
     _ -> name <> ": " <> msg
   }
   let trace = build_stack_trace(st, header)
-  let #(stack_prop, st) = common.builtin_property(st, mk_string(trace))
+  let #(stack_prop, st) = rt_store.t_builtin_property(st, mk_string(trace))
   let st = rt_obj.devolve(st, h)
   rt_store.t_cell_update(st, h, fn(cell) {
     case cell {

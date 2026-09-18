@@ -36,7 +36,8 @@ pub type RegexFlags {
 // returns the position just past the closing /
 pub fn skip_regex_body(bytes: BitArray, pos: Int) -> Result(Int, PatternError) {
   case bytes {
-    <<_:bytes-size(pos), rest:bytes>> -> skip_regex_body_loop(rest, pos, False)
+    <<_:bytes-size(pos), rest:bytes>> ->
+      skip_regex_body_loop(rest, pos, in_class: False)
     _ -> Error(UnterminatedRegex(pos))
   }
 }
@@ -45,7 +46,7 @@ pub fn skip_regex_body(bytes: BitArray, pos: Int) -> Result(Int, PatternError) {
 fn skip_regex_body_loop(
   rest: BitArray,
   pos: Int,
-  in_class: Bool,
+  in_class in_class: Bool,
 ) -> Result(Int, PatternError) {
   case rest {
     <<0x5c, 0x0a, _:bytes>> | <<0x5c, 0x0d, _:bytes>> ->
@@ -54,8 +55,8 @@ fn skip_regex_body_loop(
       Error(UnterminatedRegex(pos + 1))
     <<0x5c, _, rest:bytes>> -> skip_regex_body_loop(rest, pos + 2, in_class)
     <<0x5c, _:bytes>> -> Error(UnterminatedRegex(pos + 1))
-    <<0x5b, rest:bytes>> -> skip_regex_body_loop(rest, pos + 1, True)
-    <<0x5d, rest:bytes>> -> skip_regex_body_loop(rest, pos + 1, False)
+    <<0x5b, rest:bytes>> -> skip_regex_body_loop(rest, pos + 1, in_class: True)
+    <<0x5d, rest:bytes>> -> skip_regex_body_loop(rest, pos + 1, in_class: False)
     <<0x2f, _:bytes>> if !in_class -> Ok(pos + 1)
     <<0x0a, _:bytes>> | <<0x0d, _:bytes>> -> Error(UnterminatedRegex(pos))
     <<0xe2, 0x80, 0xa8, _:bytes>> | <<0xe2, 0x80, 0xa9, _:bytes>> ->
@@ -704,7 +705,7 @@ fn parse_character_escape(
 fn control_letter_at(
   ctx: PatternContext,
   pos: Int,
-  annex_b_class: Bool,
+  annex_b_class annex_b_class: Bool,
 ) -> Option(Int) {
   use ch <- option.then(ascii_at(ctx, pos))
   let accepted =
@@ -999,14 +1000,14 @@ fn parse_group_name(
   ctx: PatternContext,
   pos: Int,
 ) -> Result(#(String, Int), PatternError) {
-  group_name_loop(ctx, pos, True, [])
+  group_name_loop(ctx, pos, is_first: True, acc: [])
 }
 
 fn group_name_loop(
   ctx: PatternContext,
   pos: Int,
-  is_first: Bool,
-  acc: List(UtfCodepoint),
+  is_first is_first: Bool,
+  acc acc: List(UtfCodepoint),
 ) -> Result(#(String, Int), PatternError) {
   case codepoint_at(ctx, pos), is_first {
     None, _ -> Error(UnterminatedGroupName(pos))
@@ -1031,8 +1032,8 @@ fn group_name_char(
   pos: Int,
   code: Int,
   next: Int,
-  is_first: Bool,
-  acc: List(UtfCodepoint),
+  is_first is_first: Bool,
+  acc acc: List(UtfCodepoint),
 ) -> Result(#(String, Int), PatternError) {
   let invalid = InvalidGroupName(pos)
   use <- bool.guard(
@@ -1042,7 +1043,7 @@ fn group_name_char(
   use encoded <- result.try(
     string.utf_codepoint(code) |> result.replace_error(invalid),
   )
-  group_name_loop(ctx, next, False, [encoded, ..acc])
+  group_name_loop(ctx, next, is_first: False, acc: [encoded, ..acc])
 }
 
 // group names always take the u flag escape forms

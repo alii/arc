@@ -1,4 +1,5 @@
 import arc/bytecode/binop
+import arc/bytecode/error_kind.{TypeError}
 import arc/bytecode/key
 import arc/bytecode/lexical
 import arc/bytecode/opcode.{
@@ -238,8 +239,8 @@ fn inspect(state: State, v: JsVal) -> String {
 fn using_disposer(
   agent: Agent,
   val: JsVal,
-  is_async: Bool,
-  unit: Int,
+  is_async is_async: Bool,
+  unit unit: Int,
 ) -> #(JsVal, Agent) {
   case classify(val) {
     KUndef | KNull -> #(mk_undefined(), agent)
@@ -448,7 +449,7 @@ fn load_register(locals: TupleArray(JsVal), local: Int) -> JsVal {
   }
 }
 
-// tail-calls fast_loop with r0 (-1) or r1 (-2) replaced
+// -1 is reg_a_slot; the literal keeps these arms inlinable
 fn continue_with_register(
   state: State,
   drive: Drive,
@@ -747,7 +748,7 @@ fn fast_loop(
     JumpIfFalse(Pc(target)) ->
       case stack {
         [top, ..rest] ->
-          case kernel.is_bool(top, True) {
+          case kernel.is_bool(top, expected: True) {
             True ->
               fast_loop(
                 state,
@@ -762,7 +763,7 @@ fn fast_loop(
                 r1,
               )
             False ->
-              case kernel.is_bool(top, False) {
+              case kernel.is_bool(top, expected: False) {
                 True ->
                   fast_loop(
                     state,
@@ -813,7 +814,7 @@ fn fast_loop(
     JumpIfTrue(Pc(target)) ->
       case stack {
         [top, ..rest] ->
-          case kernel.is_bool(top, True) {
+          case kernel.is_bool(top, expected: True) {
             True ->
               fast_loop(
                 state,
@@ -828,7 +829,7 @@ fn fast_loop(
                 r1,
               )
             False ->
-              case kernel.is_bool(top, False) {
+              case kernel.is_bool(top, expected: False) {
                 True ->
                   fast_loop(
                     state,
@@ -2228,7 +2229,7 @@ fn fast_loop(
     PutField(key.Named(_) as k) ->
       case stack {
         [val, recv, ..rest] -> {
-          let store = kernel.put_field(agent.store, recv, k, val, True)
+          let store = kernel.put_field(agent.store, recv, k, val, create: True)
           case kernel.is(store, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
@@ -2252,7 +2253,7 @@ fn fast_loop(
     PutFieldPop(key.Named(_) as k) ->
       case stack {
         [val, recv, ..rest] -> {
-          let store = kernel.put_field(agent.store, recv, k, val, True)
+          let store = kernel.put_field(agent.store, recv, k, val, create: True)
           case kernel.is(store, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
@@ -2298,7 +2299,7 @@ fn fast_loop(
               },
               k,
               val,
-              True,
+              create: True,
             )
           case kernel.is(store, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
@@ -2334,7 +2335,7 @@ fn fast_loop(
           },
           k,
           tuple_array.element(const_index + 1, constants),
-          True,
+          create: True,
         )
       case kernel.is(store, kernel.Miss) {
         True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
@@ -3560,7 +3561,7 @@ fn fast_call(
                     True -> #(kernel.object([agent.realm.global_object]), agent)
                     False -> {
                       let bound =
-                        kernel.bind_this(this, agent.realm.global_object)
+                        kernel.sloppy_this(this, agent.realm.global_object)
                       case kernel.is(bound, kernel.Miss) {
                         False -> #(bound, agent)
                         True -> rt_call.resolve_this(agent, flags, this)
@@ -4397,7 +4398,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     TypeofEvalVar(name) ->
       case lookup_eval_env(state, name) {
         Some(v) -> {
-          let #(t, _) = rt_val.t_type_of(state.agent, v)
+          let t = rt_val.type_of(state.agent, v)
           Ok(
             State(
               ..state,
@@ -4709,7 +4710,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     TypeOf ->
       case state.stack {
         [val, ..rest] -> {
-          let #(t, _) = rt_val.t_type_of(state.agent, val)
+          let t = rt_val.type_of(state.agent, val)
           Ok(State(..state, stack: [mk_string(t), ..rest], pc: state.pc + 1))
         }
         [] -> underflow(state, "TypeOf")
@@ -4727,7 +4728,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 "Cannot access '" <> name <> "' before initialization",
               )
             False -> {
-              let #(t, _) = rt_val.t_type_of(state.agent, value)
+              let t = rt_val.type_of(state.agent, value)
               Ok(
                 State(
                   ..state,
@@ -4793,8 +4794,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       )
     }
 
-    PostIncLocal(index) -> fused_postfix_local(state, index, True)
-    PostDecLocal(index) -> fused_postfix_local(state, index, False)
+    PostIncLocal(index) -> fused_postfix_local(state, index, increment: True)
+    PostDecLocal(index) -> fused_postfix_local(state, index, increment: False)
 
     BinOpPut(kind, dst) ->
       case state.stack {
@@ -4856,10 +4857,10 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "UnaryOp")
       }
 
-    IncLocal(index) -> fused_update_local(state, index, True)
-    DecLocal(index) -> fused_update_local(state, index, False)
+    IncLocal(index) -> fused_update_local(state, index, increment: True)
+    DecLocal(index) -> fused_update_local(state, index, increment: False)
     IncLocalJump(index, Pc(target)) -> {
-      use state <- result.map(fused_update_local(state, index, True))
+      use state <- result.map(fused_update_local(state, index, increment: True))
       State(..state, pc: target)
     }
     IncLocalCmpConstJump(index, by, const_index, kind, Pc(target), when) -> {
@@ -5022,11 +5023,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     ThrowConstAssign(_name) ->
       state.throw_type_error(state, "Assignment to constant variable.")
 
-    ThrowError(kind, msg) ->
-      case kind {
-        opcode.ReferenceErrorKind -> state.throw_reference_error(state, msg)
-        opcode.TypeErrorKind -> state.throw_type_error(state, msg)
-      }
+    ThrowError(kind, msg) -> state.throw_error(state, kind, msg)
 
     NewObject -> {
       let #(h, agent) =
@@ -5698,7 +5695,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     }
     GetElemPostInc(obj, key_idx) -> {
       use receiver <- local_or_tdz(state, obj)
-      use stepped <- result.try(fused_postfix_local(state, key_idx, True))
+      use stepped <- result.try(fused_postfix_local(
+        state,
+        key_idx,
+        increment: True,
+      ))
       case stepped.stack {
         [k, ..rest] ->
           get_elem_step(State(..stepped, pc: state.pc), receiver, k, rest)
@@ -5965,9 +5966,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "GetPrototypeOf")
       }
 
-    GetSuperValue -> get_super_value(state, False, "GetSuperValue")
+    GetSuperValue ->
+      get_super_value(state, keep_base: False, op: "GetSuperValue")
 
-    GetSuperValue2 -> get_super_value(state, True, "GetSuperValue2")
+    GetSuperValue2 ->
+      get_super_value(state, keep_base: True, op: "GetSuperValue2")
 
     PutSuperValue ->
       case state.stack {
@@ -6290,7 +6293,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             record,
           ))
           use #(res, state) <- result.map(
-            rt4(state, rt_call.t_call_checked, next_fn, iterator, [arg]),
+            rt4(state, rt_call.t_call, next_fn, iterator, [arg]),
           )
           State(..state, stack: [res, record, ..rest], pc: state.pc + 1)
         }
@@ -6651,7 +6654,7 @@ fn unaryop_general(
 fn fused_update_local(
   state: State,
   index: Int,
-  increment: Bool,
+  increment increment: Bool,
 ) -> Result(State, StepExit) {
   let next_pc = state.pc + 1
   let v = tuple_array.get_unchecked(index, state.locals)
@@ -6741,7 +6744,7 @@ fn put_elem_step(
 fn fused_postfix_local(
   state: State,
   index: Int,
-  increment: Bool,
+  increment increment: Bool,
 ) -> Result(State, StepExit) {
   let next_pc = state.pc + 1
   use v <- local_or_tdz(state, index)
@@ -6833,7 +6836,7 @@ fn fused_cmp_jump(
   left: JsVal,
   right: JsVal,
   target: Int,
-  when: Bool,
+  when when: Bool,
 ) -> Result(State, StepExit) {
   let next_pc = state.pc + 1
   use #(r, state) <- result.map(pure_binop_general(state, kind, left, right))
@@ -7166,7 +7169,7 @@ fn resume_inline(
       let #(e, s) =
         state.new_error(
           State(..state, agent:),
-          types.TypeErr,
+          TypeError,
           "internal error: " <> state.vm_error_message(err),
         )
       Error(Threw(
@@ -7225,7 +7228,7 @@ fn delegate_step(
     Some(gen_h) -> gen_step(state, drive, gen_h, arg)
     None -> {
       use #(res, state) <- result.try(
-        rt4(state, rt_call.t_call_checked, next_fn, iterator, [arg]),
+        rt4(state, rt_call.t_call, next_fn, iterator, [arg]),
       )
       rt2(state, iter_protocol.read_iter_result, res)
     }
@@ -7261,8 +7264,8 @@ fn prop_key_value(pk: ObjectKey) -> JsVal {
 
 fn get_super_value(
   state: State,
-  keep_base: Bool,
-  op: String,
+  keep_base keep_base: Bool,
+  op op: String,
 ) -> Result(State, StepExit) {
   case state.stack {
     [k, base, this_val, ..rest] ->
@@ -7300,15 +7303,11 @@ fn async_iterator_object(agent: Agent, iterable: JsVal) -> #(JsVal, Agent) {
     KUndef | KNull -> {
       let #(sync_method, agent) =
         rt_obj.t_get_prop(agent, iterable, SymbolKey(types.symbol_iterator))
-      case rt_call.is_callable(agent, sync_method) {
+      case rt_val.is_callable(agent, sync_method) {
         False -> {
-          let #(ty, agent) = rt_val.t_type_of(agent, iterable)
+          let ty = rt_val.type_of(agent, iterable)
           let #(err, agent) =
-            agent.store.ops.new_error(
-              agent,
-              types.TypeErr,
-              ty <> " is not async iterable",
-            )
+            rt_val.t_new_error(agent, TypeError, ty <> " is not async iterable")
           rt_store.t_throw(agent, err)
         }
         True -> {
@@ -7321,15 +7320,14 @@ fn async_iterator_object(agent: Agent, iterable: JsVal) -> #(JsVal, Agent) {
       }
     }
     _ -> {
-      let #(iterator, agent) =
-        rt_call.t_call_checked(agent, method, iterable, [])
+      let #(iterator, agent) = rt_call.t_call(agent, method, iterable, [])
       case rt_val.is_object(iterator) {
         True -> #(iterator, agent)
         False -> {
           let #(err, agent) =
-            agent.store.ops.new_error(
+            rt_val.t_new_error(
               agent,
-              types.TypeErr,
+              TypeError,
               "Result of the Symbol.asyncIterator method is not an object",
             )
           rt_store.t_throw(agent, err)

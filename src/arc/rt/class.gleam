@@ -7,7 +7,7 @@ import arc/rt/types.{
   DataProperty, KHandle, KNull, KStr, KTdz, MIGetter, MIMethod, MISetter,
   MIStatic, MIStaticGetter, MIStaticSetter, Named, Private, SObject, StringKey,
   SymbolKey, classify, mk_object, mk_string, mk_undefined,
-} as rt_types
+}
 import arc/rt/val as rt_val
 import gleam/bit_array
 import gleam/dict
@@ -22,15 +22,15 @@ fn priv_key_bytes(v: JsVal) -> BitArray {
 
 fn object_key_display(key: ObjectKey) -> String {
   case key {
-    StringKey(pk) -> rt_types.key_display_string(pk)
-    SymbolKey(sym) -> rt_types.symbol_descriptive_string(sym)
+    StringKey(pk) -> types.key_display_string(pk)
+    SymbolKey(sym) -> types.symbol_descriptive_string(sym)
   }
 }
 
 // §15.7.14 mint a fresh private name
 pub fn t_new_private_name(st: Agent, source: String) -> #(JsVal, Agent) {
   let #(uid, st) = rt_store.t_next_private_uid(st)
-  let bytes = rt_types.private_key_text(source, uid)
+  let bytes = types.private_key_text(source, uid)
   // valid utf-8 since nul is a codepoint
   let assert Ok(text) = bit_array.to_string(bytes)
     as "private_key_text is UTF-8 by construction"
@@ -129,9 +129,9 @@ pub fn t_class_setup(
       ctor,
       StringKey(Named("prototype")),
       mk_object(proto),
-      False,
-      False,
-      False,
+      writable: False,
+      enumerable: False,
+      configurable: False,
     )
   let #(_, st) =
     rt_obj.t_define_own_data(
@@ -139,9 +139,9 @@ pub fn t_class_setup(
       proto,
       StringKey(Named("constructor")),
       mk_object(ctor),
-      True,
-      False,
-      True,
+      writable: True,
+      enumerable: False,
+      configurable: True,
     )
   #(proto, st)
 }
@@ -153,11 +153,11 @@ pub fn t_define_method(
   key: ObjectKey,
   fn_h: Handle,
   kind: MethodInstallKind,
-  enumerable: Bool,
+  enumerable enumerable: Bool,
 ) -> Agent {
   let _ = case rt_obj.t_ordinary_own_property(st, target, key) {
     Some(prop) ->
-      case rt_types.prop_configurable(prop) {
+      case types.prop_configurable(prop) {
         False ->
           rt_val.t_throw_type_error(
             st,
@@ -179,7 +179,15 @@ pub fn t_define_method(
   case kind {
     MIMethod | MIStatic -> {
       let #(_, st) =
-        rt_obj.t_define_own_data(st, target, key, fn_v, True, enumerable, True)
+        rt_obj.t_define_own_data(
+          st,
+          target,
+          key,
+          fn_v,
+          writable: True,
+          enumerable:,
+          configurable: True,
+        )
       st
     }
     MIGetter | MIStaticGetter -> {
@@ -191,7 +199,7 @@ pub fn t_define_method(
           Some(fn_v),
           None,
           enumerable,
-          True,
+          configurable: True,
         )
       st
     }
@@ -204,7 +212,7 @@ pub fn t_define_method(
           None,
           Some(fn_v),
           enumerable,
-          True,
+          configurable: True,
         )
       st
     }
@@ -214,9 +222,9 @@ pub fn t_define_method(
 // symbol key names the fn "[description]"
 fn key_fn_name(key: ObjectKey) -> String {
   case key {
-    StringKey(pk) -> rt_types.key_display_string(pk)
+    StringKey(pk) -> types.key_display_string(pk)
     SymbolKey(sym) ->
-      case rt_types.symbol_description(sym) {
+      case types.symbol_description(sym) {
         Some(d) -> "[" <> d <> "]"
         None -> ""
       }
@@ -232,7 +240,7 @@ pub fn t_private_define(
 ) -> Agent {
   let bytes = priv_key_bytes(priv_key)
   let st = check_private_add(st, obj, bytes)
-  raw_define_private_data(st, obj, Private(bytes), v, True)
+  raw_define_private_data(st, obj, Private(bytes), v, writable: True)
 }
 
 // §7.3.29; home_object already set at class definition
@@ -249,7 +257,7 @@ pub fn t_define_private(
     // non-writable so private set rejects methods
     MIMethod | MIStatic -> {
       let st = check_private_add(st, obj, bytes)
-      raw_define_private_data(st, obj, key, fn_v, False)
+      raw_define_private_data(st, obj, key, fn_v, writable: False)
     }
     // same accessor half twice is a typeerror
     MIGetter | MIStaticGetter | MISetter | MIStaticSetter -> {
@@ -287,7 +295,7 @@ fn check_private_add(st: Agent, obj: Handle, bytes: BitArray) -> Agent {
           rt_val.t_throw_type_error(
             st,
             "Cannot define private member "
-              <> rt_types.private_display_name(bytes)
+              <> types.private_display_name(bytes)
               <> " on a non-extensible object",
           )
         True -> st
@@ -300,7 +308,7 @@ fn throw_private_double_init(st: Agent, bytes: BitArray, kind: String) -> a {
     st,
     "Cannot initialize "
       <> kind
-      <> rt_types.private_display_name(bytes)
+      <> types.private_display_name(bytes)
       <> " twice on the same object",
   )
 }
@@ -310,7 +318,7 @@ fn raw_define_private_data(
   obj: Handle,
   key: PropertyKey,
   v: JsVal,
-  writable: Bool,
+  writable writable: Bool,
 ) -> Agent {
   let #(seq, st) = rt_store.t_next_prop_seq(st)
   rt_store.t_cell_update(st, obj, fn(cell) {
@@ -339,10 +347,10 @@ fn raw_merge_private_accessor(
   key: PropertyKey,
   existing: Option(Property),
   fn_v: JsVal,
-  is_getter: Bool,
+  is_getter is_getter: Bool,
 ) -> Agent {
   let #(seq, st) = case existing {
-    Some(old) -> #(rt_types.prop_seq(old), st)
+    Some(old) -> #(types.prop_seq(old), st)
     None -> rt_store.t_next_prop_seq(st)
   }
   let #(get, set) = case existing {
@@ -380,7 +388,7 @@ pub fn t_private_get(
   priv_key: JsVal,
 ) -> #(JsVal, Agent) {
   let bytes = priv_key_bytes(priv_key)
-  let name = rt_types.private_display_name(bytes)
+  let name = types.private_display_name(bytes)
   case classify(obj) {
     KHandle(h) ->
       case rt_obj.t_ordinary_own_property(st, h, StringKey(Private(bytes))) {
@@ -416,7 +424,7 @@ pub fn t_private_set(
   v: JsVal,
 ) -> #(JsVal, Agent) {
   let bytes = priv_key_bytes(priv_key)
-  let name = rt_types.private_display_name(bytes)
+  let name = types.private_display_name(bytes)
   let key = Private(bytes)
   case classify(obj) {
     KHandle(h) ->
@@ -488,7 +496,7 @@ pub fn t_private_in(st: Agent, obj: JsVal, priv_key: JsVal) -> Bool {
       rt_val.t_throw_type_error(
         st,
         "Cannot use 'in' operator to search for private name "
-          <> rt_types.private_display_name(bytes)
+          <> types.private_display_name(bytes)
           <> " in non-object",
       )
   }

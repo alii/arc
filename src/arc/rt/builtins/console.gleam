@@ -6,9 +6,8 @@ import arc/rt/builtins/global_fns
 import arc/rt/inspect
 import arc/rt/types.{
   type Agent, type ConsoleNative, type Handle, type JsNum, type JsVal, ConsoleN,
-  ConsolePrint, JFloat, JInt, KBig, KStr, KSym, classify, mk_number,
-  mk_undefined,
-} as rt_types
+  ConsolePrint, JFloat, KBig, KStr, KSym, classify, mk_int, mk_undefined,
+}
 import arc/rt/val as rt_val
 import gleam/int
 import gleam/list
@@ -97,7 +96,7 @@ fn spec(
     _, [] -> None
     "s", [head, ..rest] ->
       case classify(head) {
-        KSym(id) -> Some(#(rt_types.symbol_descriptive_string(id), rest, st))
+        KSym(id) -> Some(#(types.symbol_descriptive_string(id), rest, st))
         _ -> {
           let #(s, st) = rt_val.t_to_string(st, head)
           Some(#(s, rest, st))
@@ -109,7 +108,7 @@ fn spec(
         KBig(n) -> Some(#(int.to_string(n) <> "n", rest, st))
         _ -> {
           let #(n, st) = case sp {
-            "i" -> global_fns.parse_int_value(st, head, mk_number(JInt(10)))
+            "i" -> global_fns.parse_int_value(st, head, mk_int(10))
             _ -> rt_val.t_to_number(st, head)
           }
           Some(#(number_substitution(n), rest, st))

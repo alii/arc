@@ -14,8 +14,8 @@ import arc/rt/types.{
   Dense, Index, JsStore, KHandle, KNull, KTdz, KUndef, ModuleNamespace, Named,
   NoElements, Ordinary, ParsedDesc, Private, ProxyObj, SAsyncContext, SAsyncGen,
   SBox, SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
-  ShapeDesc, StringKey, StringObj, SymbolKey, TypedArrayObj,
-} as rt_types
+  ShapeDesc, StringKey, StringObj, SymbolKey, TypedArrayObj, plain_object,
+}
 import arc/rt/val as rt_val
 import gleam/bit_array
 import gleam/bool
@@ -44,16 +44,16 @@ fn read_object(st: Agent, h: Handle) -> Cell {
 
 fn own_property_shaped(
   offsets: Dict(BitArray, Int),
-  slots: rt_types.ShapeSlots,
+  slots: types.ShapeSlots,
   key: PropertyKey,
 ) -> Option(Property) {
   case key {
     Private(_) -> None
     _ ->
-      case dict.get(offsets, bit_array.from_string(rt_types.key_to_text(key))) {
+      case dict.get(offsets, bit_array.from_string(types.key_to_text(key))) {
         Ok(off) ->
           Some(DataProperty(
-            value: rt_types.shape_slots_get(slots, off),
+            value: types.shape_slots_get(slots, off),
             writable: True,
             enumerable: True,
             configurable: True,
@@ -111,9 +111,9 @@ pub fn as_sobject(cell: Cell) -> Cell {
     SShapedObject(proto:, slots:, offsets:, ..) -> {
       let props =
         dict.fold(offsets, dict.new(), fn(acc, key_bin, off) {
-          let value = rt_types.shape_slots_get(slots, off)
+          let value = types.shape_slots_get(slots, off)
           let key = case bit_array.to_string(key_bin) {
-            Ok(s) -> rt_types.canonical_key(s)
+            Ok(s) -> types.canonical_key(s)
             Error(Nil) -> Named("")
           }
           dict.insert(
@@ -147,20 +147,6 @@ pub fn devolve(st: Agent, h: Handle) -> Agent {
     SShapedObject(..) as s -> rt_store.t_cell_set(st, h, as_sobject(s))
     _ -> st
   }
-}
-
-fn new_data_property(st: Agent, v: JsVal) -> #(Property, Agent) {
-  let #(seq, st) = rt_store.t_next_prop_seq(st)
-  #(
-    DataProperty(
-      value: v,
-      writable: True,
-      enumerable: True,
-      configurable: True,
-      seq:,
-    ),
-    st,
-  )
 }
 
 // props dict wins over dense elements, check it first
@@ -213,7 +199,7 @@ fn own_property_of(
       case dict.get(props, key) {
         Ok(DataProperty(writable:, enumerable:, configurable:, ..)) ->
           Some(DataProperty(
-            value: rt_types.mk_number(rt_types.JInt(length)),
+            value: types.mk_int(length),
             writable:,
             enumerable:,
             configurable:,
@@ -221,7 +207,7 @@ fn own_property_of(
           ))
         _ ->
           Some(DataProperty(
-            value: rt_types.mk_number(rt_types.JInt(length)),
+            value: types.mk_int(length),
             writable: True,
             enumerable: False,
             configurable: False,
@@ -249,13 +235,13 @@ fn own_property_of(
           })
       }
     BytecodeFn(template:, birth: BirthPending(_), ..), Named("length") ->
-      Some(birth_prop(rt_types.mk_int(template.length), 0))
+      Some(birth_prop(types.mk_int(template.length), 0))
     BytecodeFn(template:, birth: BirthPending(_), ..), Named("name") ->
-      Some(birth_prop(rt_types.mk_string(option.unwrap(template.name, "")), 1))
+      Some(birth_prop(types.mk_string(option.unwrap(template.name, "")), 1))
     CompiledFn(length:, birth: BirthPending(_), ..), Named("length") ->
-      Some(birth_prop(rt_types.mk_int(length), 0))
+      Some(birth_prop(types.mk_int(length), 0))
     CompiledFn(name:, birth: BirthPending(_), ..), Named("name") ->
-      Some(birth_prop(rt_types.mk_string(name), 1))
+      Some(birth_prop(types.mk_string(name), 1))
     _, _ -> dict.get(props, key) |> option.from_result
   }
 }
@@ -300,7 +286,7 @@ fn own_symbol_property_of(
 // §10.4.3.4 step 10
 fn string_length_property(s: String) -> Property {
   DataProperty(
-    value: rt_types.mk_number(rt_types.JInt(js_string.length(s))),
+    value: types.mk_int(js_string.length(s)),
     writable: False,
     enumerable: False,
     configurable: False,
@@ -312,7 +298,7 @@ fn string_length_property(s: String) -> Property {
 fn string_index_property(s: String, i: Int) -> Option(Property) {
   use ch <- option.map(js_string.char_at(s, i))
   DataProperty(
-    value: rt_types.mk_string(ch),
+    value: types.mk_string(ch),
     writable: False,
     enumerable: True,
     configurable: False,
@@ -322,8 +308,8 @@ fn string_index_property(s: String, i: Int) -> Option(Property) {
 
 // §7.2.10 samevalue, non-numbers by classified kind not raw term
 fn same_value(a: JsVal, b: JsVal) -> Bool {
-  case rt_types.classify(a), rt_types.classify(b) {
-    rt_types.KNum(_), rt_types.KNum(_) -> rt_val.same_value(a, b)
+  case types.classify(a), types.classify(b) {
+    types.KNum(_), types.KNum(_) -> rt_val.same_value(a, b)
     ka, kb -> ka == kb
   }
 }
@@ -352,29 +338,29 @@ fn desc_is_data(d: ParsedDesc) -> Bool {
 
 fn key_text(key: ObjectKey) -> String {
   case key {
-    StringKey(pk) -> rt_types.key_to_text(pk)
-    SymbolKey(sym) -> rt_types.symbol_descriptive_string(sym)
+    StringKey(pk) -> types.key_to_text(pk)
+    SymbolKey(sym) -> types.symbol_descriptive_string(sym)
   }
 }
 
 fn key_quoted(key: ObjectKey) -> String {
   case key {
-    StringKey(pk) -> "'" <> rt_types.key_to_text(pk) <> "'"
+    StringKey(pk) -> "'" <> types.key_to_text(pk) <> "'"
     SymbolKey(_) -> "[symbol]"
   }
 }
 
 pub fn object_key_value(key: ObjectKey) -> JsVal {
   case key {
-    StringKey(pk) -> rt_types.mk_string(rt_types.key_to_text(pk))
-    SymbolKey(sym) -> rt_types.mk_symbol(sym)
+    StringKey(pk) -> types.mk_string(types.key_to_text(pk))
+    SymbolKey(sym) -> types.mk_symbol(sym)
   }
 }
 
 fn object_key_of_value(v: JsVal) -> Option(ObjectKey) {
-  case rt_types.classify(v) {
-    rt_types.KStr(s) -> Some(StringKey(rt_types.canonical_key(s)))
-    rt_types.KSym(sym) -> Some(SymbolKey(sym))
+  case types.classify(v) {
+    types.KStr(s) -> Some(StringKey(types.canonical_key(s)))
+    types.KSym(sym) -> Some(SymbolKey(sym))
     _ -> None
   }
 }
@@ -384,7 +370,16 @@ fn alloc_plain(st: Agent, entries: List(#(String, JsVal))) -> #(Handle, Agent) {
   use seq <- rt_store.t_cell_new_with(st, list.length(entries))
   let props =
     list.index_map(entries, fn(entry, i) {
-      #(Named(entry.0), DataProperty(entry.1, True, True, True, seq + i))
+      #(
+        Named(entry.0),
+        DataProperty(
+          value: entry.1,
+          writable: True,
+          enumerable: True,
+          configurable: True,
+          seq: seq + i,
+        ),
+      )
     })
   SObject(
     kind: Ordinary,
@@ -417,7 +412,7 @@ pub fn t_new_receiver(st: Agent, proto: Handle) -> #(Handle, Agent) {
     SShapedObject(
       shape_id: 0,
       proto: Some(proto),
-      slots: rt_types.shape_slots_new(),
+      slots: types.shape_slots_new(),
       offsets: dict.new(),
     ),
   )
@@ -425,21 +420,33 @@ pub fn t_new_receiver(st: Agent, proto: Handle) -> #(Handle, Agent) {
 
 pub fn t_new_object_literal(st: Agent) -> #(JsVal, Agent) {
   let #(h, st) = t_new_object(st, Some(st.realm.object.prototype))
-  #(rt_types.mk_object(h), st)
+  #(types.mk_object(h), st)
 }
 
 // fn birth props: length seq 0, name seq 1, prototype seq 2
 pub const prototype_seq = 2
 
 fn birth_prop(value: JsVal, seq: Int) -> Property {
-  DataProperty(value, False, False, True, seq)
+  DataProperty(
+    value:,
+    writable: False,
+    enumerable: False,
+    configurable: True,
+    seq:,
+  )
 }
 
 pub fn constructor_props(f: Handle) -> Dict(PropertyKey, Property) {
   dict.from_list([
     #(
       Named("constructor"),
-      DataProperty(rt_types.mk_object(f), True, False, True, 0),
+      DataProperty(
+        value: types.mk_object(f),
+        writable: True,
+        enumerable: False,
+        configurable: True,
+        seq: 0,
+      ),
     ),
   ])
 }
@@ -476,30 +483,23 @@ fn settle_birth(
   let assert SObject(kind:, props:, ..) = cell
   let props =
     props
-    |> dict.insert(Named("length"), birth_prop(rt_types.mk_int(length), 0))
-    |> dict.insert(Named("name"), birth_prop(rt_types.mk_string(name), 1))
+    |> dict.insert(Named("length"), birth_prop(types.mk_int(length), 0))
+    |> dict.insert(Named("name"), birth_prop(types.mk_string(name), 1))
   let #(props, st) = case parent {
     None -> #(props, st)
     Some(parent) -> {
       let #(proto, st) =
         rt_store.t_cell_new(
           st,
-          SObject(
-            kind: Ordinary,
-            proto: Some(parent),
-            props: constructor_props(f),
-            symbol_props: [],
-            elements: NoElements,
-            extensible: True,
-          ),
+          plain_object(Ordinary, Some(parent), constructor_props(f)),
         )
       let prototype =
         DataProperty(
-          rt_types.mk_object(proto),
-          True,
-          False,
-          False,
-          prototype_seq,
+          value: types.mk_object(proto),
+          writable: True,
+          enumerable: False,
+          configurable: False,
+          seq: prototype_seq,
         )
       #(dict.insert(props, Named("prototype"), prototype), st)
     }
@@ -551,14 +551,14 @@ pub fn t_name_if_anonymous(st: Agent, f: Handle, name: String) -> Agent {
     | SObject(kind: CompiledFn(..), props:, ..) ->
       case dict.get(props, Named("name")) {
         Ok(DataProperty(value: v, seq:, ..)) ->
-          case rt_types.classify(v) {
-            rt_types.KStr("") ->
+          case types.classify(v) {
+            types.KStr("") ->
               SObject(
                 ..cell,
                 props: dict.insert(
                   props,
                   Named("name"),
-                  birth_prop(rt_types.mk_string(name), seq),
+                  birth_prop(types.mk_string(name), seq),
                 ),
               )
             _ -> cell
@@ -630,7 +630,7 @@ pub fn t_set_proto(st: Agent, obj: Handle, v: JsVal) -> #(Bool, Agent) {
     let #(res, st) = t_set_prototype_of(st, obj, new_proto)
     #(result.is_ok(res), st)
   }
-  case rt_types.classify(v) {
+  case types.classify(v) {
     KHandle(p) -> set_to(Some(p))
     KNull -> set_to(None)
     _ -> #(False, st)
@@ -658,13 +658,13 @@ fn would_create_cycle(
 
 // §10.1.8.1 ordinaryget; primitives read without wrapping
 pub fn t_get_prop(st: Agent, recv: JsVal, key: ObjectKey) -> #(JsVal, Agent) {
-  case rt_types.classify(recv) {
+  case types.classify(recv) {
     KHandle(h) -> get_from(st, h, key, recv)
     KUndef | KNull ->
       rt_val.t_throw_type_error(
         st,
         "Cannot read properties of "
-          <> case rt_types.classify(recv) {
+          <> case types.classify(recv) {
           KNull -> "null"
           _ -> "undefined"
         }
@@ -672,11 +672,11 @@ pub fn t_get_prop(st: Agent, recv: JsVal, key: ObjectKey) -> #(JsVal, Agent) {
           <> key_text(key)
           <> "')",
       )
-    rt_types.KStr(s) -> primitive_string_get(st, s, key, recv)
-    rt_types.KNum(_) -> get_from(st, st.realm.number.prototype, key, recv)
-    rt_types.KBool(_) -> get_from(st, st.realm.boolean.prototype, key, recv)
-    rt_types.KSym(_) -> get_from(st, st.realm.symbol.prototype, key, recv)
-    rt_types.KBig(_) -> get_from(st, st.realm.bigint.prototype, key, recv)
+    types.KStr(s) -> primitive_string_get(st, s, key, recv)
+    types.KNum(_) -> get_from(st, st.realm.number.prototype, key, recv)
+    types.KBool(_) -> get_from(st, st.realm.boolean.prototype, key, recv)
+    types.KSym(_) -> get_from(st, st.realm.symbol.prototype, key, recv)
+    types.KBig(_) -> get_from(st, st.realm.bigint.prototype, key, recv)
     KTdz -> panic as "t_get_prop: TDZ sentinel escaped into a JsVal"
   }
 }
@@ -722,12 +722,12 @@ fn get_from(
         length,
         idx,
       )
-        |> option.unwrap(rt_types.mk_undefined()),
+        |> option.unwrap(types.mk_undefined()),
       st,
     )
     SObject(kind: TypedArrayObj(..), ..) as cell, StringKey(Named(s)) ->
       case buffer.is_canonical_numeric_string(s) {
-        True -> #(rt_types.mk_undefined(), st)
+        True -> #(types.mk_undefined(), st)
         False -> ordinary_get(st, cell, key, receiver)
       }
     SObject(kind: BytecodeFn(birth: BirthPending(Some(_)), ..), ..) as cell,
@@ -754,7 +754,7 @@ fn ordinary_get(
     None ->
       case proto {
         Some(parent) -> get_from(st, parent, key, receiver)
-        None -> #(rt_types.mk_undefined(), st)
+        None -> #(types.mk_undefined(), st)
       }
   }
 }
@@ -769,7 +769,7 @@ pub fn t_property_get_value(
     DataProperty(value: v, ..) -> #(v, st)
     AccessorProperty(get: Some(getter), ..) ->
       st.store.ops.call(st, getter, receiver, [])
-    AccessorProperty(get: None, ..) -> #(rt_types.mk_undefined(), st)
+    AccessorProperty(get: None, ..) -> #(types.mk_undefined(), st)
   }
 }
 
@@ -780,13 +780,13 @@ pub fn t_set_prop(
   key: ObjectKey,
   v: JsVal,
 ) -> #(Bool, Agent) {
-  case rt_types.classify(recv) {
+  case types.classify(recv) {
     KHandle(h) -> set_from(st, h, key, v, recv)
     KUndef | KNull ->
       rt_val.t_throw_type_error(
         st,
         "Cannot set properties of "
-          <> case rt_types.classify(recv) {
+          <> case types.classify(recv) {
           KNull -> "null"
           _ -> "undefined"
         }
@@ -795,7 +795,7 @@ pub fn t_set_prop(
           <> "')",
       )
     // receiver stays the primitive so no setter means false
-    rt_types.KStr(s) ->
+    types.KStr(s) ->
       case key {
         StringKey(Named("length")) -> #(False, st)
         StringKey(Index(i)) ->
@@ -805,10 +805,10 @@ pub fn t_set_prop(
           }
         _ -> set_from(st, st.realm.string.prototype, key, v, recv)
       }
-    rt_types.KNum(_) -> set_from(st, st.realm.number.prototype, key, v, recv)
-    rt_types.KBool(_) -> set_from(st, st.realm.boolean.prototype, key, v, recv)
-    rt_types.KSym(_) -> set_from(st, st.realm.symbol.prototype, key, v, recv)
-    rt_types.KBig(_) -> set_from(st, st.realm.bigint.prototype, key, v, recv)
+    types.KNum(_) -> set_from(st, st.realm.number.prototype, key, v, recv)
+    types.KBool(_) -> set_from(st, st.realm.boolean.prototype, key, v, recv)
+    types.KSym(_) -> set_from(st, st.realm.symbol.prototype, key, v, recv)
+    types.KBig(_) -> set_from(st, st.realm.bigint.prototype, key, v, recv)
     KTdz -> panic as "t_set_prop: TDZ sentinel escaped into a JsVal"
   }
 }
@@ -886,7 +886,7 @@ fn set_from(
 }
 
 fn same_receiver(receiver: JsVal, h: Handle) -> Bool {
-  case rt_types.classify(receiver) {
+  case types.classify(receiver) {
     KHandle(r) -> r == h
     _ -> False
   }
@@ -925,7 +925,7 @@ fn set_on_receiver(
   key: ObjectKey,
   v: JsVal,
 ) -> #(Bool, Agent) {
-  case rt_types.classify(receiver) {
+  case types.classify(receiver) {
     KHandle(recv_h) -> {
       case read_object(st, recv_h), key {
         SShapedObject(shape_id:, proto:, slots:, offsets:),
@@ -978,7 +978,7 @@ fn set_own_shaped(
   h: Handle,
   shape_id: Int,
   proto: Option(Handle),
-  slots: rt_types.ShapeSlots,
+  slots: types.ShapeSlots,
   offsets: Dict(BitArray, Int),
   name: String,
   v: JsVal,
@@ -987,7 +987,7 @@ fn set_own_shaped(
   let key_bin = bit_array.from_string(name)
   case dict.get(offsets, key_bin) {
     Ok(off) -> {
-      let slots = rt_types.shape_slots_set(slots, off, v)
+      let slots = types.shape_slots_set(slots, off, v)
       #(
         True,
         rt_store.t_cell_set(
@@ -1035,7 +1035,7 @@ fn set_own_shaped(
               )
             }
           }
-          let slots = rt_types.shape_slots_append(slots, v)
+          let slots = types.shape_slots_append(slots, v)
           #(
             True,
             rt_store.t_cell_set(
@@ -1055,9 +1055,9 @@ fn set_own_string(
   kind: ObjKind,
   props: Dict(PropertyKey, Property),
   elements: JsElements,
-  extensible: Bool,
-  key: PropertyKey,
-  v: JsVal,
+  extensible extensible: Bool,
+  key key: PropertyKey,
+  v v: JsVal,
 ) -> #(Bool, Agent) {
   case kind, key {
     ArrayObj(_), Named("length") ->
@@ -1180,9 +1180,9 @@ fn set_ordinary_string(
   st: Agent,
   h: Handle,
   props: Dict(PropertyKey, Property),
-  extensible: Bool,
-  key: PropertyKey,
-  v: JsVal,
+  extensible extensible: Bool,
+  key key: PropertyKey,
+  v v: JsVal,
 ) -> #(Bool, Agent) {
   case dict.get(props, key) {
     Ok(DataProperty(writable: True, enumerable:, configurable:, seq:, ..)) ->
@@ -1206,7 +1206,7 @@ fn set_ordinary_string(
       case extensible {
         False -> #(False, st)
         True -> {
-          let #(prop, st) = new_data_property(st, v)
+          let #(prop, st) = rt_store.t_plain_property(st, v)
           write_props(st, h, dict.insert(props, key, prop))
         }
       }
@@ -1217,9 +1217,9 @@ fn set_own_symbol(
   st: Agent,
   h: Handle,
   symbol_props: List(#(SymbolId, Property)),
-  extensible: Bool,
-  sym: SymbolId,
-  v: JsVal,
+  extensible extensible: Bool,
+  sym sym: SymbolId,
+  v v: JsVal,
 ) -> #(Bool, Agent) {
   case list.key_find(symbol_props, sym) {
     Ok(DataProperty(writable: True, enumerable:, configurable:, seq:, ..)) ->
@@ -1243,7 +1243,7 @@ fn set_own_symbol(
       case extensible {
         False -> #(False, st)
         True -> {
-          let #(prop, st) = new_data_property(st, v)
+          let #(prop, st) = rt_store.t_plain_property(st, v)
           write_symbol_props(st, h, list.key_set(symbol_props, sym, prop))
         }
       }
@@ -1288,10 +1288,10 @@ fn to_array_length(st: Agent, v: JsVal) -> #(Int, Agent) {
   let #(new_len, st) = rt_val.t_to_uint32(st, v)
   let #(number_len, st) = rt_val.t_to_number(st, v)
   let same = case number_len {
-    rt_types.JInt(n) -> n == new_len
+    types.JInt(n) -> n == new_len
     // +. 0.0 folds -0.0 to 0.0
-    rt_types.JFloat(f) -> f +. 0.0 == int.to_float(new_len)
-    rt_types.JNan | rt_types.JPosInf | rt_types.JNegInf -> False
+    types.JFloat(f) -> f +. 0.0 == int.to_float(new_len)
+    types.JNan | types.JPosInf | types.JNegInf -> False
   }
   case same {
     True -> #(new_len, st)
@@ -1333,7 +1333,7 @@ fn array_set_length(
         dict.fold(props, None, fn(acc, k, prop) {
           case k {
             Index(i) if i >= new_len ->
-              case rt_types.prop_configurable(prop) {
+              case types.prop_configurable(prop) {
                 False ->
                   Some(case acc {
                     Some(m) -> int.max(m, i)
@@ -1380,7 +1380,7 @@ pub fn t_define_own_prop(
   let #(desc, new_len, st) = case read_object(st, obj), key, desc.value {
     SObject(kind: ArrayObj(_), ..), StringKey(Named("length")), Some(v) -> {
       let #(n, st) = to_array_length(st, v)
-      let value = Some(rt_types.mk_number(rt_types.JInt(n)))
+      let value = Some(types.mk_int(n))
       #(ParsedDesc(..desc, value:), Some(n), st)
     }
     _, _, _ -> #(desc, None, st)
@@ -1409,17 +1409,17 @@ pub fn t_define_own_prop(
   }
   use <- bool.guard(!ok, #(False, st))
   let #(seq, st) = case existing {
-    Some(old) -> #(rt_types.prop_seq(old), st)
+    Some(old) -> #(types.prop_seq(old), st)
     None -> rt_store.t_next_prop_seq(st)
   }
   let enumerable =
     option.unwrap(desc.enumerable, case existing {
-      Some(p) -> rt_types.prop_enumerable(p)
+      Some(p) -> types.prop_enumerable(p)
       None -> False
     })
   let configurable =
     option.unwrap(desc.configurable, case existing {
-      Some(p) -> rt_types.prop_configurable(p)
+      Some(p) -> types.prop_configurable(p)
       None -> False
     })
   let new_prop = merge_descriptor(desc, existing, enumerable, configurable, seq)
@@ -1584,12 +1584,12 @@ fn typed_array_define_index(
 
 // §10.1.6.2
 fn is_compatible_descriptor(desc: ParsedDesc, cur: Property) -> Bool {
-  case rt_types.prop_configurable(cur) {
+  case types.prop_configurable(cur) {
     True -> True
     False -> {
       let bad_configurable = desc.configurable == Some(True)
       let bad_enumerable = case desc.enumerable {
-        Some(e) -> e != rt_types.prop_enumerable(cur)
+        Some(e) -> e != types.prop_enumerable(cur)
         None -> False
       }
       use <- bool.guard(bad_configurable || bad_enumerable, False)
@@ -1615,7 +1615,7 @@ fn is_compatible_descriptor(desc: ParsedDesc, cur: Property) -> Bool {
           case is_dat {
             True -> False
             False -> {
-              let undef = rt_types.mk_undefined()
+              let undef = types.mk_undefined()
               let g_ok = case desc.get {
                 Some(g) -> same_value(g, option.unwrap(cur_g, undef))
                 None -> True
@@ -1635,9 +1635,9 @@ fn is_compatible_descriptor(desc: ParsedDesc, cur: Property) -> Bool {
 fn merge_descriptor(
   desc: ParsedDesc,
   existing: Option(Property),
-  enumerable: Bool,
-  configurable: Bool,
-  seq: Int,
+  enumerable enumerable: Bool,
+  configurable configurable: Bool,
+  seq seq: Int,
 ) -> Property {
   case desc_is_accessor(desc), desc_is_data(desc) {
     False, False ->
@@ -1648,7 +1648,7 @@ fn merge_descriptor(
           AccessorProperty(get: g, set: s, enumerable:, configurable:, seq:)
         None ->
           DataProperty(
-            value: rt_types.mk_undefined(),
+            value: types.mk_undefined(),
             writable: False,
             enumerable:,
             configurable:,
@@ -1680,7 +1680,7 @@ fn merge_descriptor(
         None ->
           case existing {
             Some(DataProperty(value: v, ..)) -> v
-            _ -> rt_types.mk_undefined()
+            _ -> types.mk_undefined()
           }
       }
       let final_writable = case desc.writable {
@@ -1709,7 +1709,7 @@ fn accessor_field(
 ) -> Option(JsVal) {
   case field {
     Some(v) ->
-      case rt_types.classify(v) {
+      case types.classify(v) {
         KUndef -> None
         _ -> Some(v)
       }
@@ -1719,7 +1719,7 @@ fn accessor_field(
 
 // §10.1.7.1; private keys are invisible here
 pub fn t_has_prop(st: Agent, recv: JsVal, key: ObjectKey) -> #(Bool, Agent) {
-  case rt_types.classify(recv) {
+  case types.classify(recv) {
     KHandle(h) -> has_from(st, h, key)
     KUndef | KNull ->
       rt_val.t_throw_type_error(
@@ -1727,7 +1727,7 @@ pub fn t_has_prop(st: Agent, recv: JsVal, key: ObjectKey) -> #(Bool, Agent) {
         "Cannot use 'in' operator to search for '"
           <> key_text(key)
           <> "' in "
-          <> case rt_types.classify(recv) {
+          <> case types.classify(recv) {
           KNull -> "null"
           _ -> "undefined"
         },
@@ -1751,7 +1751,7 @@ fn has_from(st: Agent, h: Handle, key: ObjectKey) -> #(Bool, Agent) {
     -> #(True, st)
     SObject(kind: ModuleNamespace(exports:), symbol_props:, ..), _ -> #(
       case key {
-        StringKey(pk) -> dict.has_key(exports, rt_types.key_to_text(pk))
+        StringKey(pk) -> dict.has_key(exports, types.key_to_text(pk))
         SymbolKey(sym) ->
           option.is_some(own_symbol_property_of(symbol_props, sym))
       },
@@ -1789,7 +1789,7 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
         _ ->
           case list.key_pop(symbol_props, sym) {
             Ok(#(prop, rest)) ->
-              case rt_types.prop_configurable(prop) {
+              case types.prop_configurable(prop) {
                 False -> #(False, st)
                 True -> write_symbol_props(st, obj, rest)
               }
@@ -1800,7 +1800,7 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
       let ordinary_delete = fn() {
         case dict.get(props, pk) {
           Ok(prop) ->
-            case rt_types.prop_configurable(prop) {
+            case types.prop_configurable(prop) {
               False -> #(False, st)
               True -> write_props(st, obj, dict.delete(props, pk))
             }
@@ -1812,14 +1812,14 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
         ProxyObj(target:, handler:, revoked:), _ ->
           proxy_delete(st, Proxy(target:, handler:, revoked:), key)
         ModuleNamespace(exports:), _ -> #(
-          !dict.has_key(exports, rt_types.key_to_text(pk)),
+          !dict.has_key(exports, types.key_to_text(pk)),
           st,
         )
         ArrayObj(_), Named("length") -> #(False, st)
         ArrayObj(_), Index(i) | ArgumentsObj(..), Index(i) ->
           case dict.get(props, pk) {
             Ok(prop) ->
-              case rt_types.prop_configurable(prop) {
+              case types.prop_configurable(prop) {
                 False -> #(False, st)
                 True -> {
                   let st =
@@ -1931,7 +1931,7 @@ fn sobject_own_keys(st: Agent, cell: Cell) -> #(List(ObjectKey), Agent) {
         Index(i) -> #([i, ..idx], named)
         Named("length") if has_virtual_length -> acc
         Private(_) -> acc
-        Named(_) -> #(idx, [#(rt_types.prop_seq(prop), k), ..named])
+        Named(_) -> #(idx, [#(types.prop_seq(prop), k), ..named])
       }
     })
   let named = case kind {
@@ -1970,7 +1970,7 @@ pub fn t_enumerable_own_keys(
           let #(prop, st) = t_get_own_property(st, obj, key)
           case prop {
             Some(p) ->
-              case rt_types.prop_enumerable(p) {
+              case types.prop_enumerable(p) {
                 True -> #([pk, ..found], st)
                 False -> #(found, st)
               }
@@ -1984,7 +1984,7 @@ pub fn t_enumerable_own_keys(
 
 // §14.7.5.9 enumerateobjectproperties
 pub fn t_for_in_keys(st: Agent, obj: JsVal) -> #(List(JsVal), Agent) {
-  case rt_types.classify(obj) {
+  case types.classify(obj) {
     KUndef | KNull -> #([], st)
     KHandle(h) ->
       case plain_for_in_keys(st, obj) {
@@ -2031,17 +2031,17 @@ fn for_in_keys_loop(
           case key {
             SymbolKey(_) -> state
             StringKey(pk) -> {
-              let name = rt_types.key_to_text(pk)
+              let name = types.key_to_text(pk)
               case set.contains(s, name) {
                 True -> state
                 False -> {
                   let s = set.insert(s, name)
                   let #(prop, st) = t_get_own_property(st, h, key)
                   let enumerable =
-                    option.map(prop, rt_types.prop_enumerable)
+                    option.map(prop, types.prop_enumerable)
                     |> option.unwrap(False)
                   case enumerable {
-                    True -> #([rt_types.mk_string(name), ..a], s, st)
+                    True -> #([types.mk_string(name), ..a], s, st)
                     False -> #(a, s, st)
                   }
                 }
@@ -2141,20 +2141,6 @@ fn cell_extensible(cell: Cell) -> Bool {
   }
 }
 
-// §7.2.2, throws on revoked proxy
-pub fn t_is_array(st: Agent, h: Handle) -> Bool {
-  case rt_store.t_cell_get(st, h) {
-    SObject(kind: ArrayObj(_), ..) -> True
-    SObject(kind: ProxyObj(revoked: True, ..), ..) ->
-      rt_val.t_throw_type_error(
-        st,
-        "Cannot perform 'IsArray' on a proxy that has been revoked",
-      )
-    SObject(kind: ProxyObj(target:, ..), ..) -> t_is_array(st, target)
-    _ -> False
-  }
-}
-
 // §10.5.4 / §10.1.4.1
 pub fn t_prevent_extensions(st: Agent, h: Handle) -> #(Bool, Agent) {
   let st = devolve(st, h)
@@ -2176,7 +2162,7 @@ pub fn t_new_module_namespace(
 ) -> #(Handle, Agent) {
   let to_string_tag =
     DataProperty(
-      value: rt_types.mk_string("Module"),
+      value: types.mk_string("Module"),
       writable: False,
       enumerable: False,
       configurable: False,
@@ -2188,7 +2174,7 @@ pub fn t_new_module_namespace(
       kind: ModuleNamespace(exports: dict.from_list(exports)),
       proto: None,
       props: dict.new(),
-      symbol_props: [#(rt_types.symbol_to_string_tag, to_string_tag)],
+      symbol_props: [#(types.symbol_to_string_tag, to_string_tag)],
       elements: NoElements,
       extensible: False,
     ),
@@ -2198,9 +2184,9 @@ pub fn t_new_module_namespace(
 fn namespace_binding_value(st: Agent, name: String, box: Handle) -> JsVal {
   let v = case rt_store.t_cell_get(st, box) {
     SBox(value:) -> value
-    _ -> rt_types.mk_undefined()
+    _ -> types.mk_undefined()
   }
-  case rt_types.classify(v) {
+  case types.classify(v) {
     KTdz ->
       rt_val.t_throw_reference_error(
         st,
@@ -2215,9 +2201,9 @@ fn namespace_get(
   exports: Dict(String, Handle),
   key: PropertyKey,
 ) -> #(JsVal, Agent) {
-  let name = rt_types.key_to_text(key)
+  let name = types.key_to_text(key)
   case dict.get(exports, name) {
-    Error(Nil) -> #(rt_types.mk_undefined(), st)
+    Error(Nil) -> #(types.mk_undefined(), st)
     Ok(box) -> #(namespace_binding_value(st, name, box), st)
   }
 }
@@ -2228,7 +2214,7 @@ fn namespace_own_property(
   exports: Dict(String, Handle),
   key: PropertyKey,
 ) -> Option(Property) {
-  let name = rt_types.key_to_text(key)
+  let name = types.key_to_text(key)
   use box <- option.map(dict.get(exports, name) |> option.from_result)
   DataProperty(
     value: namespace_binding_value(st, name, box),
@@ -2246,7 +2232,7 @@ fn namespace_define(
   key: PropertyKey,
   desc: ParsedDesc,
 ) -> #(Bool, Agent) {
-  let name = rt_types.key_to_text(key)
+  let name = types.key_to_text(key)
   case dict.get(exports, name) {
     Error(Nil) -> #(False, st)
     Ok(box) -> {
@@ -2294,12 +2280,11 @@ fn proxy_trap(st: Agent, p: Proxy, name: String) -> #(Option(JsVal), Agent) {
     )
   })
   let #(trap, st) =
-    t_get_prop(st, rt_types.mk_object(p.handler), StringKey(Named(name)))
-  case rt_types.classify(trap) {
+    t_get_prop(st, types.mk_object(p.handler), StringKey(Named(name)))
+  case types.classify(trap) {
     KUndef | KNull -> #(None, st)
     _ -> {
-      let #(callable, st) = rt_val.t_is_callable(st, trap)
-      case callable {
+      case rt_val.is_callable(st, trap) {
         True -> #(Some(trap), st)
         False ->
           rt_val.t_throw_type_error(
@@ -2317,7 +2302,7 @@ fn call_trap(
   trap: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  st.store.ops.call(st, trap, rt_types.mk_object(p.handler), args)
+  st.store.ops.call(st, trap, types.mk_object(p.handler), args)
 }
 
 // §10.5.1
@@ -2326,8 +2311,8 @@ fn proxy_get_prototype_of(st: Agent, p: Proxy) -> #(Option(Handle), Agent) {
   case trap {
     None -> t_get_prototype_of(st, p.target)
     Some(trap_fn) -> {
-      let #(res, st) = call_trap(st, p, trap_fn, [rt_types.mk_object(p.target)])
-      let proto = case rt_types.classify(res) {
+      let #(res, st) = call_trap(st, p, trap_fn, [types.mk_object(p.target)])
+      let proto = case types.classify(res) {
         KHandle(h) -> Some(h)
         KNull -> None
         _ ->
@@ -2365,11 +2350,11 @@ fn proxy_set_prototype_of(
     }
     Some(trap_fn) -> {
       let proto_val = case new_proto {
-        Some(h) -> rt_types.mk_object(h)
-        None -> rt_types.mk_null()
+        Some(h) -> types.mk_object(h)
+        None -> types.mk_null()
       }
       let #(res, st) =
-        call_trap(st, p, trap_fn, [rt_types.mk_object(p.target), proto_val])
+        call_trap(st, p, trap_fn, [types.mk_object(p.target), proto_val])
       use <- bool.guard(!rt_val.to_boolean(res), #(False, st))
       let #(ext, st) = t_is_extensible(st, p.target)
       use <- bool.guard(ext, #(True, st))
@@ -2392,7 +2377,7 @@ fn proxy_is_extensible(st: Agent, p: Proxy) -> #(Bool, Agent) {
   case trap {
     None -> t_is_extensible(st, p.target)
     Some(trap_fn) -> {
-      let #(res, st) = call_trap(st, p, trap_fn, [rt_types.mk_object(p.target)])
+      let #(res, st) = call_trap(st, p, trap_fn, [types.mk_object(p.target)])
       let b = rt_val.to_boolean(res)
       let #(target_ext, st) = t_is_extensible(st, p.target)
       case b == target_ext {
@@ -2418,7 +2403,7 @@ fn proxy_prevent_extensions(st: Agent, p: Proxy) -> #(Bool, Agent) {
   case trap {
     None -> t_prevent_extensions(st, p.target)
     Some(trap_fn) -> {
-      let #(res, st) = call_trap(st, p, trap_fn, [rt_types.mk_object(p.target)])
+      let #(res, st) = call_trap(st, p, trap_fn, [types.mk_object(p.target)])
       use <- bool.guard(!rt_val.to_boolean(res), #(False, st))
       let #(target_ext, st) = t_is_extensible(st, p.target)
       case target_ext {
@@ -2445,16 +2430,16 @@ fn proxy_get_own_property(
     Some(trap_fn) -> {
       let #(res, st) =
         call_trap(st, p, trap_fn, [
-          rt_types.mk_object(p.target),
+          types.mk_object(p.target),
           object_key_value(key),
         ])
-      case rt_types.classify(res) {
+      case types.classify(res) {
         KUndef -> {
           let #(target_desc, st) = t_get_own_property(st, p.target, key)
           case target_desc {
             None -> #(None, st)
             Some(prop) ->
-              case rt_types.prop_configurable(prop) {
+              case types.prop_configurable(prop) {
                 False ->
                   rt_val.t_throw_type_error(
                     st,
@@ -2498,7 +2483,7 @@ fn proxy_get_own_property(
               )
             },
           )
-          case rt_types.prop_configurable(completed), target_desc {
+          case types.prop_configurable(completed), target_desc {
             True, _ -> #(Some(completed), st)
             False, None ->
               rt_val.t_throw_type_error(
@@ -2508,7 +2493,7 @@ fn proxy_get_own_property(
                   <> " which is non-existent in the proxy target",
               )
             False, Some(td) ->
-              case rt_types.prop_configurable(td) {
+              case types.prop_configurable(td) {
                 True ->
                   rt_val.t_throw_type_error(
                     st,
@@ -2559,9 +2544,9 @@ fn proxy_define_own_property(
       let #(desc_obj, st) = t_from_property_descriptor(st, desc)
       let #(res, st) =
         call_trap(st, p, trap_fn, [
-          rt_types.mk_object(p.target),
+          types.mk_object(p.target),
           object_key_value(key),
-          rt_types.mk_object(desc_obj),
+          types.mk_object(desc_obj),
         ])
       use <- bool.guard(!rt_val.to_boolean(res), #(False, st))
       let #(target_desc, st) = t_get_own_property(st, p.target, key)
@@ -2600,7 +2585,7 @@ fn proxy_define_own_property(
             },
           )
           use <- bool.lazy_guard(
-            setting_config_false && rt_types.prop_configurable(cur),
+            setting_config_false && types.prop_configurable(cur),
             fn() {
               rt_val.t_throw_type_error(
                 st,
@@ -2635,7 +2620,7 @@ fn proxy_has(st: Agent, p: Proxy, key: ObjectKey) -> #(Bool, Agent) {
     Some(trap_fn) -> {
       let #(res, st) =
         call_trap(st, p, trap_fn, [
-          rt_types.mk_object(p.target),
+          types.mk_object(p.target),
           object_key_value(key),
         ])
       use <- bool.guard(rt_val.to_boolean(res), #(True, st))
@@ -2643,7 +2628,7 @@ fn proxy_has(st: Agent, p: Proxy, key: ObjectKey) -> #(Bool, Agent) {
       case target_desc {
         None -> #(False, st)
         Some(prop) ->
-          case rt_types.prop_configurable(prop) {
+          case types.prop_configurable(prop) {
             False ->
               rt_val.t_throw_type_error(
                 st,
@@ -2683,7 +2668,7 @@ fn proxy_get(
     Some(trap_fn) -> {
       let #(res, st) =
         call_trap(st, p, trap_fn, [
-          rt_types.mk_object(p.target),
+          types.mk_object(p.target),
           object_key_value(key),
           receiver,
         ])
@@ -2701,7 +2686,7 @@ fn proxy_get(
               )
           }
         Some(AccessorProperty(get: None, configurable: False, ..)) ->
-          case rt_types.classify(res) {
+          case types.classify(res) {
             KUndef -> #(res, st)
             _ ->
               rt_val.t_throw_type_error(
@@ -2731,7 +2716,7 @@ fn proxy_set(
     Some(trap_fn) -> {
       let #(res, st) =
         call_trap(st, p, trap_fn, [
-          rt_types.mk_object(p.target),
+          types.mk_object(p.target),
           object_key_value(key),
           v,
           receiver,
@@ -2788,7 +2773,16 @@ fn set_on_proxy_receiver(
           configurable: None,
         ),
       )
-    None -> t_define_own_data(st, recv_h, key, v, True, True, True)
+    None ->
+      t_define_own_data(
+        st,
+        recv_h,
+        key,
+        v,
+        writable: True,
+        enumerable: True,
+        configurable: True,
+      )
   }
 }
 
@@ -2800,7 +2794,7 @@ fn proxy_delete(st: Agent, p: Proxy, key: ObjectKey) -> #(Bool, Agent) {
     Some(trap_fn) -> {
       let #(res, st) =
         call_trap(st, p, trap_fn, [
-          rt_types.mk_object(p.target),
+          types.mk_object(p.target),
           object_key_value(key),
         ])
       use <- bool.guard(!rt_val.to_boolean(res), #(False, st))
@@ -2808,7 +2802,7 @@ fn proxy_delete(st: Agent, p: Proxy, key: ObjectKey) -> #(Bool, Agent) {
       case target_desc {
         None -> #(True, st)
         Some(prop) ->
-          case rt_types.prop_configurable(prop) {
+          case types.prop_configurable(prop) {
             False ->
               rt_val.t_throw_type_error(
                 st,
@@ -2839,7 +2833,7 @@ fn proxy_own_keys(st: Agent, p: Proxy) -> #(List(ObjectKey), Agent) {
   case trap {
     None -> t_own_keys(st, p.target)
     Some(trap_fn) -> {
-      let #(res, st) = call_trap(st, p, trap_fn, [rt_types.mk_object(p.target)])
+      let #(res, st) = call_trap(st, p, trap_fn, [types.mk_object(p.target)])
       let #(keys, st) = keys_from_array_like(st, res)
       use <- bool.lazy_guard(has_duplicate_keys(keys, []), fn() {
         rt_val.t_throw_type_error(
@@ -2908,7 +2902,7 @@ fn partition_configurable(
     [k, ..rest] -> {
       let #(prop, st) = t_get_own_property(st, target, k)
       let is_nonconf =
-        option.map(prop, fn(p) { !rt_types.prop_configurable(p) })
+        option.map(prop, fn(p) { !types.prop_configurable(p) })
         |> option.unwrap(False)
       case is_nonconf {
         True -> partition_configurable(st, target, rest, [k, ..nonconf], conf)
@@ -2931,7 +2925,7 @@ fn has_duplicate_keys(keys: List(ObjectKey), seen: List(ObjectKey)) -> Bool {
 
 // §7.3.20 createlistfromarraylike, property-key
 fn keys_from_array_like(st: Agent, v: JsVal) -> #(List(ObjectKey), Agent) {
-  case rt_types.classify(v) {
+  case types.classify(v) {
     KHandle(_) -> {
       let #(len_v, st) = t_get_prop(st, v, StringKey(Named("length")))
       let #(len, st) = rt_val.t_to_length(st, len_v)
@@ -2959,7 +2953,7 @@ fn gather_keys_via_get(
   acc: List(ObjectKey),
 ) -> #(List(ObjectKey), Agent) {
   use <- bool.guard(idx >= len, #(list.reverse(acc), st))
-  let #(item, st) = t_get_prop(st, obj, StringKey(rt_types.index_key(idx)))
+  let #(item, st) = t_get_prop(st, obj, StringKey(types.index_key(idx)))
   case object_key_of_value(item) {
     Some(k) -> gather_keys_via_get(st, obj, idx + 1, len, [k, ..acc])
     None ->
@@ -2972,7 +2966,7 @@ fn gather_keys_via_get(
 
 // §6.2.6.5, field read order is observable
 pub fn t_to_property_descriptor(st: Agent, obj: JsVal) -> #(ParsedDesc, Agent) {
-  case rt_types.classify(obj) {
+  case types.classify(obj) {
     KHandle(_) -> Nil
     _ -> rt_val.t_throw_type_error(st, "Property description must be an object")
   }
@@ -3030,11 +3024,10 @@ fn require_callable_accessor(
   case field {
     None -> st
     Some(f) ->
-      case rt_types.classify(f) {
+      case types.classify(f) {
         KUndef -> st
         _ -> {
-          let #(callable, st) = rt_val.t_is_callable(st, f)
-          case callable {
+          case rt_val.is_callable(st, f) {
             True -> st
             False ->
               rt_val.t_throw_type_error(st, role <> " must be a function")
@@ -3053,7 +3046,7 @@ pub fn t_from_property_descriptor(
     option.map(v, fn(x) { [#(name, x)] }) |> option.unwrap([])
   }
   let flag = fn(name, b: Option(Bool)) {
-    field(name, option.map(b, rt_types.mk_bool))
+    field(name, option.map(b, types.mk_bool))
   }
   alloc_plain(
     st,
@@ -3083,8 +3076,8 @@ pub fn parsed_of_property(prop: Property) -> ParsedDesc {
       ParsedDesc(
         value: None,
         writable: None,
-        get: Some(option.unwrap(get, rt_types.mk_undefined())),
-        set: Some(option.unwrap(set, rt_types.mk_undefined())),
+        get: Some(option.unwrap(get, types.mk_undefined())),
+        set: Some(option.unwrap(set, types.mk_undefined())),
         enumerable: Some(enumerable),
         configurable: Some(configurable),
       )
@@ -3104,7 +3097,7 @@ fn complete_descriptor(desc: ParsedDesc) -> Property {
       )
     False ->
       DataProperty(
-        value: option.unwrap(desc.value, rt_types.mk_undefined()),
+        value: option.unwrap(desc.value, types.mk_undefined()),
         writable: option.unwrap(desc.writable, False),
         enumerable: option.unwrap(desc.enumerable, False),
         configurable: option.unwrap(desc.configurable, False),
@@ -3131,16 +3124,25 @@ pub fn t_define_own_data(
   h: Handle,
   key: ObjectKey,
   value: JsVal,
-  writable: Bool,
-  enumerable: Bool,
-  configurable: Bool,
+  writable writable: Bool,
+  enumerable enumerable: Bool,
+  configurable configurable: Bool,
 ) -> #(Bool, Agent) {
   case key, writable && enumerable && configurable {
     StringKey(Named(name)), True ->
       case rt_store.t_cell_get(st, h) {
         SShapedObject(shape_id:, proto:, slots:, offsets:) ->
           set_own_shaped(st, h, shape_id, proto, slots, offsets, name, value)
-        _ -> write_own_data(st, h, key, value, True, True, True)
+        _ ->
+          write_own_data(
+            st,
+            h,
+            key,
+            value,
+            writable: True,
+            enumerable: True,
+            configurable: True,
+          )
       }
     _, _ ->
       write_own_data(st, h, key, value, writable, enumerable, configurable)
@@ -3152,15 +3154,15 @@ fn write_own_data(
   h: Handle,
   key: ObjectKey,
   value: JsVal,
-  writable: Bool,
-  enumerable: Bool,
-  configurable: Bool,
+  writable writable: Bool,
+  enumerable enumerable: Bool,
+  configurable configurable: Bool,
 ) -> #(Bool, Agent) {
   t_define_own_prop(
     st,
     h,
     key,
-    rt_types.ParsedDesc(
+    types.ParsedDesc(
       value: Some(value),
       get: None,
       set: None,
@@ -3177,14 +3179,14 @@ pub fn t_define_own_accessor(
   key: ObjectKey,
   get: Option(JsVal),
   set: Option(JsVal),
-  enumerable: Bool,
-  configurable: Bool,
+  enumerable enumerable: Bool,
+  configurable configurable: Bool,
 ) -> #(Bool, Agent) {
   t_define_own_prop(
     st,
     h,
     key,
-    rt_types.ParsedDesc(
+    types.ParsedDesc(
       value: None,
       get:,
       set:,
@@ -3270,10 +3272,19 @@ pub fn t_create_data_prop_general(
   key: k,
   v: JsVal,
 ) -> #(Bool, Agent) {
-  case rt_types.classify(recv) {
+  case types.classify(recv) {
     KHandle(h) -> {
       let okey = rt_store.as_object_key(key)
-      let #(ok, st) = t_define_own_data(st, h, okey, v, True, True, True)
+      let #(ok, st) =
+        t_define_own_data(
+          st,
+          h,
+          okey,
+          v,
+          writable: True,
+          enumerable: True,
+          configurable: True,
+        )
       case ok {
         True -> #(True, st)
         False ->
@@ -3289,7 +3300,7 @@ pub fn t_create_data_prop_general(
         "Cannot define property '"
           <> key_text(rt_store.as_object_key(key))
           <> "' on "
-          <> case rt_types.classify(recv) {
+          <> case types.classify(recv) {
           KNull -> "null"
           KUndef -> "undefined"
           _ -> "primitive"
@@ -3301,7 +3312,7 @@ pub fn t_create_data_prop_general(
 // absent name throws referenceerror
 // called by name from arc_rt_obj_ffi
 pub fn t_global_get(st: Agent, name: BitArray) -> #(JsVal, Agent) {
-  let g = rt_types.mk_object(st.realm.global_object)
+  let g = types.mk_object(st.realm.global_object)
   let key = StringKey(binary_key(name))
   let #(has, st) = t_has_prop(st, g, key)
   case has {
@@ -3314,20 +3325,20 @@ pub fn t_global_get(st: Agent, name: BitArray) -> #(JsVal, Agent) {
 }
 
 pub fn t_global_this(st: Agent) -> JsVal {
-  rt_types.mk_object(st.realm.global_object)
+  types.mk_object(st.realm.global_object)
 }
 
 // sloppy: failed set ignored
 pub fn t_global_set(st: Agent, name: BitArray, v: JsVal) -> Agent {
   let g = st.realm.global_object
   let #(_, st) =
-    t_set_prop(st, rt_types.mk_object(g), StringKey(binary_key(name)), v)
+    t_set_prop(st, types.mk_object(g), StringKey(binary_key(name)), v)
   st
 }
 
 // strict: unresolvable throws referenceerror, failed set typeerror
 pub fn t_global_set_strict(st: Agent, name: BitArray, v: JsVal) -> Agent {
-  let g = rt_types.mk_object(st.realm.global_object)
+  let g = types.mk_object(st.realm.global_object)
   let key = StringKey(binary_key(name))
   let text = bit_array.to_string(name) |> result.unwrap("")
   let #(has, st) = t_has_prop(st, g, key)
@@ -3351,19 +3362,19 @@ pub fn t_global_set_strict(st: Agent, name: BitArray, v: JsVal) -> Agent {
 pub fn t_global_typeof(st: Agent, name: BitArray) -> #(String, Agent) {
   let g = st.realm.global_object
   let key = StringKey(binary_key(name))
-  let #(has, st) = t_has_prop(st, rt_types.mk_object(g), key)
+  let #(has, st) = t_has_prop(st, types.mk_object(g), key)
   case has {
     False -> #("undefined", st)
     True -> {
-      let #(v, st) = t_get_prop(st, rt_types.mk_object(g), key)
-      rt_val.t_type_of(st, v)
+      let #(v, st) = t_get_prop(st, types.mk_object(g), key)
+      #(rt_val.type_of(st, v), st)
     }
   }
 }
 
 fn binary_key(name: BitArray) -> PropertyKey {
   case bit_array.to_string(name) {
-    Ok(s) -> rt_types.canonical_key(s)
+    Ok(s) -> types.canonical_key(s)
     Error(_) -> Named("")
   }
 }
@@ -3387,17 +3398,17 @@ pub fn t_new_arguments(
     t_ordinary_own_property(
       st,
       realm.array.prototype,
-      SymbolKey(rt_types.symbol_iterator),
+      SymbolKey(types.symbol_iterator),
     )
   {
-    Some(values_prop) -> [#(rt_types.symbol_iterator, values_prop)]
+    Some(values_prop) -> [#(types.symbol_iterator, values_prop)]
     None -> []
   }
   let #(h, st) = {
     use seq <- rt_store.t_cell_new_with(st, 2)
     let length_prop =
       DataProperty(
-        value: rt_types.mk_number(rt_types.JInt(len)),
+        value: types.mk_int(len),
         writable: True,
         enumerable: False,
         configurable: True,
@@ -3413,7 +3424,7 @@ pub fn t_new_arguments(
           seq: seq + 1,
         )
       None -> {
-        let thrower = Some(rt_types.mk_object(realm.throw_type_error))
+        let thrower = Some(types.mk_object(realm.throw_type_error))
         AccessorProperty(
           get: thrower,
           set: thrower,
@@ -3435,7 +3446,7 @@ pub fn t_new_arguments(
       extensible: True,
     )
   }
-  #(rt_types.mk_object(h), st)
+  #(types.mk_object(h), st)
 }
 
 // holes arrive as mk_hole() and stay holes
@@ -3455,5 +3466,5 @@ pub fn t_new_array(st: Agent, elems: List(JsVal)) -> #(JsVal, Agent) {
         extensible: True,
       ),
     )
-  #(rt_types.mk_object(h), st)
+  #(types.mk_object(h), st)
 }

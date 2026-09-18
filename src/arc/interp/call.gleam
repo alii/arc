@@ -1,5 +1,6 @@
 //// flat bytecode calls; other callees nest via rt/call
 
+import arc/bytecode/error_kind.{ReferenceError, TypeError}
 import arc/bytecode/lexical
 import arc/bytecode/opcode
 import arc/internal/tuple_array.{type TupleArray}
@@ -9,8 +10,8 @@ import arc/interp/state.{
   type SavedFrame, type State, type StepExit, Returned, SavedCont, SavedFrame,
   SavedRegFrame, State, Threw,
 }
+import arc/rt/abstract_ops as rt_abstract
 import arc/rt/builtins as rt_builtins
-import arc/rt/builtins/function as b_function
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call as rt_call
 import arc/rt/elements as rt_elements
@@ -25,6 +26,7 @@ import arc/rt/types.{
   ProxyObj, ReflectApply, ReflectN, SBox, SObject, classify, mk_object, mk_tdz,
   mk_undefined,
 }
+import arc/rt/val as rt_val
 import gleam/bool
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -170,7 +172,7 @@ fn setup_frame(
       case kernel.is(this_arg, kernel.Undefined) {
         True -> #(kernel.object([agent.realm.global_object]), agent)
         False -> {
-          let bound = kernel.bind_this(this_arg, agent.realm.global_object)
+          let bound = kernel.sloppy_this(this_arg, agent.realm.global_object)
           case kernel.is(bound, kernel.Miss) {
             False -> #(bound, agent)
             True -> rt_call.resolve_this(agent, flags, this_arg)
@@ -206,9 +208,9 @@ fn class_constructor_call_error(
   agent: Agent,
   template: FuncTemplate,
 ) -> #(JsVal, Agent) {
-  agent.store.ops.new_error(
+  rt_val.t_new_error(
     agent,
-    types.TypeErr,
+    TypeError,
     "Class constructor "
       <> option.unwrap(template.name, "")
       <> " cannot be invoked without 'new'",
@@ -534,15 +536,15 @@ fn list_from_array_like(
     False -> Ok(#(args, state))
     True ->
       guarded(State(..state, stack: rest_stack), fn(agent) {
-        b_function.create_list_from_array_like(agent, array_like)
+        rt_abstract.create_list_from_array_like(agent, array_like)
       })
   }
 }
 
-/// at the depth limit the nested t_call raises rangeerror
+/// at the depth limit the nested t_try_call raises rangeerror
 fn call_native(
   state: State,
-  tag: NativeToken,
+  token: NativeToken,
   callee: JsVal,
   this: JsVal,
   args: List(JsVal),
@@ -552,7 +554,9 @@ fn call_native(
     True -> call_nested(state, callee, this, args, rest_stack)
     False -> {
       let agent = rt_store.t_enter_call(state.agent)
-      case kernel.guard4(rt_builtins.dispatch_native, agent, tag, this, args) {
+      case
+        kernel.guard4(rt_builtins.dispatch_native, agent, token, this, args)
+      {
         kernel.Ok(value: v, agent:) ->
           Ok(
             State(
@@ -581,7 +585,7 @@ fn require_callable(
   v: JsVal,
   k: fn() -> Result(State, StepExit),
 ) -> Result(State, StepExit) {
-  case rt_call.is_callable(state.agent, v) {
+  case rt_val.is_callable(state.agent, v) {
     True -> k()
     False -> not_a_function(state, v)
   }
@@ -602,7 +606,7 @@ fn call_nested(
   args: List(JsVal),
   rest_stack: List(JsVal),
 ) -> Result(State, StepExit) {
-  case rt_call.t_call(state.agent, callee, this, args) {
+  case rt_call.t_try_call(state.agent, callee, this, args) {
     #(rt_call.NormalCompletion(v), agent) ->
       Ok(State(..state, agent:, stack: [v, ..rest_stack], pc: state.pc + 1))
     #(rt_call.ThrowCompletion(thrown), agent) ->
@@ -812,7 +816,7 @@ fn resolve_return(
                 KTdz ->
                   Error(state.new_error(
                     state,
-                    types.ReferenceErr,
+                    ReferenceError,
                     "Must call super constructor in derived class before returning from derived constructor",
                   ))
                 _ -> Ok(this_val)
@@ -821,7 +825,7 @@ fn resolve_return(
             _ ->
               Error(state.new_error(
                 state,
-                types.TypeErr,
+                TypeError,
                 "Derived constructors may only return object or undefined",
               ))
           }
@@ -897,12 +901,18 @@ pub fn unwind_frame(state: State) -> Option(State) {
 }
 
 /// §10.4.4.7 unmapped when strict or non-simple params
-pub fn create_arguments(state: State, simple_params: Bool) -> State {
+pub fn create_arguments(
+  state: State,
+  simple_params simple_params: Bool,
+) -> State {
   let #(obj, agent) = arguments_object(state, simple_params)
   State(..state, agent:, stack: [obj, ..state.stack], pc: state.pc + 1)
 }
 
-pub fn arguments_object(state: State, simple_params: Bool) -> #(JsVal, Agent) {
+pub fn arguments_object(
+  state: State,
+  simple_params simple_params: Bool,
+) -> #(JsVal, Agent) {
   let callee = read_lexical_local(state, lexical.RefActiveFunc)
   case state.func.is_strict || !simple_params {
     True ->

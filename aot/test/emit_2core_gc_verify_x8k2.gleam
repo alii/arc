@@ -1,7 +1,7 @@
 // run: cd aot && gleam run -m emit_2core_gc_verify_x8k2
 
 import arc/rt/gc as rt_gc
-import arc/rt/types.{type Agent} as rt_types
+import arc/rt/types.{type Agent}
 import arc_aot/emit as emit_2core
 import arc_aot/run
 import carder/pipeline
@@ -242,7 +242,7 @@ fn inspect_roots() {
   io.println("")
   io.println("═══ roots_of_state includes global object? ═══")
   let st = seed()
-  let rt_types.Handle(global_id) = st.realm.global_object
+  let types.Handle(global_id) = st.realm.global_object
   let roots = rt_gc.roots_of_state(st)
   let n = list.length(roots)
   let has_global = list.contains(roots, global_id)

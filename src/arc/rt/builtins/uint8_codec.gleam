@@ -200,14 +200,9 @@ fn get_enum_option(
     _ ->
       rt_val.t_throw_type_error(
         st,
-        "option " <> key <> " must be a string, got " <> type_of(st, got),
+        "option " <> key <> " must be a string, got " <> rt_val.type_of(st, got),
       )
   }
-}
-
-fn type_of(st: Agent, v: JsVal) -> String {
-  let #(ty, _) = rt_val.t_type_of(st, v)
-  ty
 }
 
 fn read_b64_options(
@@ -234,7 +229,7 @@ fn require_string(st: Agent, v: JsVal) -> String {
     _ ->
       rt_val.t_throw_type_error(
         st,
-        "expected input to be a string, got " <> type_of(st, v),
+        "expected input to be a string, got " <> rt_val.type_of(st, v),
       )
   }
 }
@@ -462,7 +457,13 @@ fn b64_loop(
               case chunk_len == 1 {
                 True -> DecodeFailed(decode_bytes(acc))
                 False ->
-                  case b64_decode_partial(chunk, chunk_len, False) {
+                  case
+                    b64_decode_partial(
+                      chunk,
+                      chunk_len,
+                      throw_on_extra_bits: False,
+                    )
+                  {
                     Some(tail) -> Decoded(index, decode_bytes([tail, ..acc]))
                     None -> DecodeFailed(decode_bytes(acc))
                   }
@@ -580,7 +581,7 @@ fn b64_finish_padding(
 fn b64_decode_partial(
   chunk: Int,
   chunk_len: Int,
-  throw_on_extra_bits: Bool,
+  throw_on_extra_bits throw_on_extra_bits: Bool,
 ) -> Option(BitArray) {
   case chunk_len {
     2 -> {

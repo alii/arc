@@ -4,9 +4,9 @@ import arc/rt/call as rt_call
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type ProxyNative,
-  BuiltinPair, KHandle, NoElements, ProxyConstructor, ProxyN, ProxyObj,
-  ProxyRevocable, ProxyRevoke, SObject, classify, mk_object, mk_undefined,
-} as rt_types
+  BuiltinPair, KHandle, ProxyConstructor, ProxyN, ProxyObj, ProxyRevocable,
+  ProxyRevoke, SObject, classify, mk_object, mk_undefined, plain_object,
+}
 import arc/rt/val as rt_val
 import gleam/dict
 import gleam/option.{None, Some}
@@ -25,28 +25,25 @@ pub fn init(
       2,
     )
   let #(revocable_prop, st) =
-    common.builtin_property(st, mk_object(revocable_h))
+    rt_store.t_builtin_property(st, mk_object(revocable_h))
   let #(len_p, st) = common.fn_length_property(st, 2)
   let #(name_p, st) = common.fn_name_property(st, "Proxy")
   let #(ctor_h, st) =
     rt_store.t_cell_new(
       st,
-      SObject(
-        kind: rt_types.NativeFn(
+      plain_object(
+        types.NativeFn(
           token: ProxyN(ProxyConstructor),
           name: "Proxy",
           length: 2,
           constructible: True,
         ),
-        proto: Some(fn_proto),
-        props: common.named_props([
+        Some(fn_proto),
+        common.named_props([
           #("length", len_p),
           #("name", name_p),
           #("revocable", revocable_prop),
         ]),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
       ),
     )
   let st = rt_store.t_pin_root(st, ctor_h)
@@ -85,14 +82,7 @@ fn proxy_create(st: Agent, args: List(JsVal)) -> #(Handle, Agent) {
   let handler = require_object(st, handler_v, "Proxy handler")
   rt_store.t_cell_new(
     st,
-    SObject(
-      kind: ProxyObj(target:, handler:, revoked: False),
-      proto: None,
-      props: dict.new(),
-      symbol_props: [],
-      elements: NoElements,
-      extensible: True,
-    ),
+    plain_object(ProxyObj(target:, handler:, revoked: False), None, dict.new()),
   )
 }
 
@@ -107,7 +97,7 @@ fn proxy_revocable(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
       ProxyN(ProxyRevoke(proxy: proxy_h)),
       "",
       0,
-      False,
+      constructible: False,
     )
   let #(result_h, st) =
     common.alloc_plain_object(st, realm.object.prototype, [

@@ -1,7 +1,7 @@
 import arc/rt/types.{
   Handle, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KBool, KHandle, KNull,
   KNum, KStr, KSym, KTdz, KUndef, SymIterator, UserSymbol, WellKnownSymbol,
-  classify, mk_bigint, mk_bool, mk_null, mk_number, mk_object, mk_string,
+  classify, mk_bigint, mk_bool, mk_int, mk_null, mk_number, mk_object, mk_string,
   mk_symbol, mk_tdz, mk_undefined,
 }
 import gleam/option.{None, Some}
@@ -23,15 +23,15 @@ pub fn bool_false_round_trips_test() {
 }
 
 pub fn number_jint_round_trips_test() {
-  assert classify(mk_number(JInt(42))) == KNum(JInt(42))
+  assert classify(mk_int(42)) == KNum(JInt(42))
 }
 
 pub fn number_jint_zero_round_trips_test() {
-  assert classify(mk_number(JInt(0))) == KNum(JInt(0))
+  assert classify(mk_int(0)) == KNum(JInt(0))
 }
 
 pub fn number_jint_negative_round_trips_test() {
-  assert classify(mk_number(JInt(-17))) == KNum(JInt(-17))
+  assert classify(mk_int(-17)) == KNum(JInt(-17))
 }
 
 pub fn number_jfloat_round_trips_test() {
@@ -106,7 +106,7 @@ pub fn tdz_round_trips_test() {
 
 pub fn bigint_is_not_number_test() {
   assert classify(mk_bigint(1)) == KBig(1)
-  assert classify(mk_number(JInt(1))) == KNum(JInt(1))
+  assert classify(mk_int(1)) == KNum(JInt(1))
 }
 
 pub fn bool_is_not_undefined_or_null_test() {

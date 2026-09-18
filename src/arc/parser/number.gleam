@@ -99,10 +99,10 @@ fn classify(raw: String) -> LiteralForm {
     None, True -> BigInt(digits: body, radix: 10)
     None, False ->
       case body {
-        "0" -> Decimal("0", False)
+        "0" -> Decimal("0", is_float: False)
         "0" <> rest ->
           case is_float {
-            True -> Decimal(body, True)
+            True -> Decimal(body, is_float: True)
             False -> classify_leading_zero(rest)
           }
         _ -> Decimal(body, is_float)
@@ -136,7 +136,7 @@ fn radix_prefix(text: String) -> Option(#(String, Int)) {
 
 fn parse_decimal(
   text: String,
-  is_float: Bool,
+  is_float is_float: Bool,
 ) -> Result(LiteralNumber, NumberParseError) {
   case is_float {
     True ->

@@ -39,7 +39,7 @@ pub fn call_method(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(f, st) = get(st, recv, name)
-  rt_call.t_call_checked(st, f, recv, args)
+  rt_call.t_call(st, f, recv, args)
 }
 
 @external(erlang, "rt_helpers_ffi", "record")

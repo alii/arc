@@ -1,3 +1,4 @@
+import arc/rt/abstract_ops as rt_abstract
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
@@ -11,29 +12,28 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type StringNative,
   type SymbolId, JFloat, JInt, JNan, KHandle, KNull, KStr, KUndef, Named,
-  NoElements, SObject, StringConstructor, StringFromCharCode,
-  StringFromCodePoint, StringIterator, StringKey, StringN, StringObj,
-  StringPrototypeAnchor, StringPrototypeAt, StringPrototypeBig,
-  StringPrototypeBlink, StringPrototypeBold, StringPrototypeCharAt,
-  StringPrototypeCharCodeAt, StringPrototypeCodePointAt, StringPrototypeConcat,
-  StringPrototypeEndsWith, StringPrototypeFixed, StringPrototypeFontcolor,
-  StringPrototypeFontsize, StringPrototypeIncludes, StringPrototypeIndexOf,
-  StringPrototypeIsWellFormed, StringPrototypeItalics,
-  StringPrototypeLastIndexOf, StringPrototypeLink, StringPrototypeLocaleCompare,
-  StringPrototypeMatch, StringPrototypeMatchAll, StringPrototypeNormalize,
-  StringPrototypePadEnd, StringPrototypePadStart, StringPrototypeRepeat,
-  StringPrototypeReplace, StringPrototypeReplaceAll, StringPrototypeSearch,
-  StringPrototypeSlice, StringPrototypeSmall, StringPrototypeSplit,
-  StringPrototypeStartsWith, StringPrototypeStrike, StringPrototypeSub,
-  StringPrototypeSubstr, StringPrototypeSubstring, StringPrototypeSup,
-  StringPrototypeSymbolIterator, StringPrototypeToLocaleLowerCase,
-  StringPrototypeToLocaleUpperCase, StringPrototypeToLowerCase,
-  StringPrototypeToString, StringPrototypeToUpperCase,
-  StringPrototypeToWellFormed, StringPrototypeTrim, StringPrototypeTrimEnd,
-  StringPrototypeTrimStart, StringPrototypeValueOf, StringRaw, classify, mk_bool,
-  mk_int, mk_number, mk_object, mk_string, mk_undefined,
-  well_known_symbol_description,
-} as rt_types
+  SObject, StringConstructor, StringFromCharCode, StringFromCodePoint,
+  StringIterator, StringKey, StringN, StringObj, StringPrototypeAnchor,
+  StringPrototypeAt, StringPrototypeBig, StringPrototypeBlink,
+  StringPrototypeBold, StringPrototypeCharAt, StringPrototypeCharCodeAt,
+  StringPrototypeCodePointAt, StringPrototypeConcat, StringPrototypeEndsWith,
+  StringPrototypeFixed, StringPrototypeFontcolor, StringPrototypeFontsize,
+  StringPrototypeIncludes, StringPrototypeIndexOf, StringPrototypeIsWellFormed,
+  StringPrototypeItalics, StringPrototypeLastIndexOf, StringPrototypeLink,
+  StringPrototypeLocaleCompare, StringPrototypeMatch, StringPrototypeMatchAll,
+  StringPrototypeNormalize, StringPrototypePadEnd, StringPrototypePadStart,
+  StringPrototypeRepeat, StringPrototypeReplace, StringPrototypeReplaceAll,
+  StringPrototypeSearch, StringPrototypeSlice, StringPrototypeSmall,
+  StringPrototypeSplit, StringPrototypeStartsWith, StringPrototypeStrike,
+  StringPrototypeSub, StringPrototypeSubstr, StringPrototypeSubstring,
+  StringPrototypeSup, StringPrototypeSymbolIterator,
+  StringPrototypeToLocaleLowerCase, StringPrototypeToLocaleUpperCase,
+  StringPrototypeToLowerCase, StringPrototypeToString,
+  StringPrototypeToUpperCase, StringPrototypeToWellFormed, StringPrototypeTrim,
+  StringPrototypeTrimEnd, StringPrototypeTrimStart, StringPrototypeValueOf,
+  StringRaw, classify, mk_bool, mk_int, mk_number, mk_object, mk_string,
+  mk_undefined, plain_object, well_known_symbol_description,
+}
 import arc/rt/val as rt_val
 import gleam/int
 import gleam/list
@@ -126,12 +126,12 @@ pub fn init(
       "[Symbol.iterator]",
       0,
     )
-  let #(iter_prop, st) = common.builtin_property(st, mk_object(iter_fn))
+  let #(iter_prop, st) = rt_store.t_builtin_property(st, mk_object(iter_fn))
   let st =
     common.add_symbol_property(
       st,
       bt.prototype,
-      rt_types.symbol_iterator,
+      types.symbol_iterator,
       iter_prop,
     )
   #(bt, st)
@@ -208,10 +208,7 @@ fn call_as_function(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
     [] -> #(mk_string(""), st)
     [v, ..] ->
       case classify(v) {
-        rt_types.KSym(id) -> #(
-          mk_string(rt_types.symbol_descriptive_string(id)),
-          st,
-        )
+        types.KSym(id) -> #(mk_string(types.symbol_descriptive_string(id)), st)
         _ -> {
           let #(s, st) = rt_val.t_to_string(st, v)
           #(mk_string(s), st)
@@ -226,13 +223,10 @@ fn string_symbol_iterator(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let #(iter_h, st) =
     rt_store.t_cell_new(
       st,
-      SObject(
-        kind: StringIterator(source: s, index: 0),
-        proto: Some(realm.string_iter_proto),
-        props: common.named_props([]),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
+      plain_object(
+        StringIterator(source: s, index: 0),
+        Some(realm.string_iter_proto),
+        common.named_props([]),
       ),
     )
   #(mk_object(iter_h), st)
@@ -291,7 +285,7 @@ fn string_last_index_of(
     rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   let #(num, st) = rt_val.t_to_number(st, helpers.arg_at(args, 1))
   let result = case num {
-    JNan | rt_types.JPosInf -> js_string.last_index_of_all(s, search)
+    JNan | types.JPosInf -> js_string.last_index_of_all(s, search)
     _ -> {
       let len = js_string.len(v)
       let from = int.clamp(rt_val.jsnum_to_integer_or_infinity(num), 0, len)
@@ -404,8 +398,9 @@ fn string_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(s, st) = with_this_str(st, this)
   let len = js_string.len(s)
   let #(start, st) =
-    relative_index(st, helpers.first_arg_or_undefined(args), len, 0)
-  let #(end, st) = relative_index(st, helpers.arg_at(args, 1), len, len)
+    rt_abstract.relative_index(st, helpers.first_arg_or_undefined(args), len, 0)
+  let #(end, st) =
+    rt_abstract.relative_index(st, helpers.arg_at(args, 1), len, len)
   case end > start {
     True -> #(js_string.sub(s, start, end - start), st)
     False -> #(mk_string(""), st)
@@ -454,7 +449,7 @@ fn string_repeat(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(s, st) = with_this_string(st, this)
   let #(num, st) = rt_val.t_to_number(st, helpers.first_arg_or_undefined(args))
   case num {
-    rt_types.JPosInf | rt_types.JNegInf ->
+    types.JPosInf | types.JNegInf ->
       rt_val.t_throw_range_error(st, "Invalid count value: Infinity")
     _ -> {
       let count = rt_val.jsnum_to_integer_or_infinity(num)
@@ -559,7 +554,12 @@ fn string_substr(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(s, st) = with_this_str(st, this)
   let size = js_string.len(s)
   let #(start, st) =
-    relative_index(st, helpers.first_arg_or_undefined(args), size, 0)
+    rt_abstract.relative_index(
+      st,
+      helpers.first_arg_or_undefined(args),
+      size,
+      0,
+    )
   let #(raw_len, st) =
     second_arg_index_or_len(st, args, size, fn(n, _, _) { n })
   let len = int.clamp(raw_len, 0, size)
@@ -611,8 +611,7 @@ fn get_method(
       case rt_val.is_nullish(func) {
         True -> #(None, st)
         False -> {
-          let #(callable, st) = rt_val.t_is_callable(st, func)
-          case callable {
+          case rt_val.is_callable(st, func) {
             True -> #(Some(func), st)
             False -> rt_val.t_throw_type_error(st, not_a_function(symbol))
           }
@@ -637,13 +636,13 @@ fn delegate_or_regexp(
 ) -> #(JsVal, Agent) {
   let #(method_opt, st) = get_method(st, val, symbol)
   case method_opt {
-    Some(method) -> rt_call.t_call_checked(st, method, val, [this])
+    Some(method) -> rt_call.t_call(st, method, val, [this])
     None -> {
       let #(s, st) = rt_val.t_to_string(st, this)
       let #(rx, st) = regexp.regexp_create(st, val, mk_undefined())
       let #(method_opt, st) = get_method(st, rx, symbol)
       case method_opt {
-        Some(method) -> rt_call.t_call_checked(st, method, rx, [mk_string(s)])
+        Some(method) -> rt_call.t_call(st, method, rx, [mk_string(s)])
         None -> rt_val.t_throw_type_error(st, not_a_function(symbol))
       }
     }
@@ -655,7 +654,7 @@ fn string_match(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   delegate_or_regexp(
     st,
     helpers.first_arg_or_undefined(args),
-    rt_types.symbol_match,
+    types.symbol_match,
     this,
   )
 }
@@ -665,7 +664,7 @@ fn string_search(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   delegate_or_regexp(
     st,
     helpers.first_arg_or_undefined(args),
-    rt_types.symbol_search,
+    types.symbol_search,
     this,
   )
 }
@@ -678,14 +677,13 @@ fn string_replace(
   let st = require_object_coercible(st, this, "replace")
   let search_val = helpers.first_arg_or_undefined(args)
   let replace_val = helpers.arg_at(args, 1)
-  let #(method_opt, st) = get_method(st, search_val, rt_types.symbol_replace)
+  let #(method_opt, st) = get_method(st, search_val, types.symbol_replace)
   case method_opt {
-    Some(method) ->
-      rt_call.t_call_checked(st, method, search_val, [this, replace_val])
+    Some(method) -> rt_call.t_call(st, method, search_val, [this, replace_val])
     None -> {
       let #(s, st) = rt_val.t_to_string(st, this)
       let #(search_str, st) = rt_val.t_to_string(st, search_val)
-      replace_string_search(st, s, search_str, replace_val, False)
+      replace_string_search(st, s, search_str, replace_val, all: False)
     }
   }
 }
@@ -700,14 +698,13 @@ fn string_replace_all(
   let replace_val = helpers.arg_at(args, 1)
   let #(is_re, st) = regexp.is_regexp(st, search_val)
   let st = require_global_when_regexp(st, search_val, is_re, "replaceAll")
-  let #(method_opt, st) = get_method(st, search_val, rt_types.symbol_replace)
+  let #(method_opt, st) = get_method(st, search_val, types.symbol_replace)
   case method_opt {
-    Some(method) ->
-      rt_call.t_call_checked(st, method, search_val, [this, replace_val])
+    Some(method) -> rt_call.t_call(st, method, search_val, [this, replace_val])
     None -> {
       let #(s, st) = rt_val.t_to_string(st, this)
       let #(search_str, st) = rt_val.t_to_string(st, search_val)
-      replace_string_search(st, s, search_str, replace_val, True)
+      replace_string_search(st, s, search_str, replace_val, all: True)
     }
   }
 }
@@ -721,20 +718,17 @@ fn string_match_all(
   let regexp_arg = helpers.first_arg_or_undefined(args)
   let #(is_re, st) = regexp.is_regexp(st, regexp_arg)
   let st = require_global_when_regexp(st, regexp_arg, is_re, "matchAll")
-  let #(method_opt, st) = get_method(st, regexp_arg, rt_types.symbol_match_all)
+  let #(method_opt, st) = get_method(st, regexp_arg, types.symbol_match_all)
   case method_opt {
-    Some(method) -> rt_call.t_call_checked(st, method, regexp_arg, [this])
+    Some(method) -> rt_call.t_call(st, method, regexp_arg, [this])
     None -> {
       let #(s, st) = rt_val.t_to_string(st, this)
       let #(rx, st) = regexp.regexp_create(st, regexp_arg, mk_string("g"))
-      let #(method_opt, st) = get_method(st, rx, rt_types.symbol_match_all)
+      let #(method_opt, st) = get_method(st, rx, types.symbol_match_all)
       case method_opt {
-        Some(method) -> rt_call.t_call_checked(st, method, rx, [mk_string(s)])
+        Some(method) -> rt_call.t_call(st, method, rx, [mk_string(s)])
         None ->
-          rt_val.t_throw_type_error(
-            st,
-            not_a_function(rt_types.symbol_match_all),
-          )
+          rt_val.t_throw_type_error(st, not_a_function(types.symbol_match_all))
       }
     }
   }
@@ -744,10 +738,9 @@ fn string_split(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let st = require_object_coercible(st, this, "split")
   let sep_val = helpers.first_arg_or_undefined(args)
   let limit_val = helpers.arg_at(args, 1)
-  let #(method_opt, st) = get_method(st, sep_val, rt_types.symbol_split)
+  let #(method_opt, st) = get_method(st, sep_val, types.symbol_split)
   case method_opt {
-    Some(method) ->
-      rt_call.t_call_checked(st, method, sep_val, [this, limit_val])
+    Some(method) -> rt_call.t_call(st, method, sep_val, [this, limit_val])
     None -> {
       let #(s, st) = with_this_string(st, this)
       let #(lim, st) = case classify(limit_val) {
@@ -794,11 +787,10 @@ fn replace_string_search(
   s: String,
   search_str: String,
   replace_val: JsVal,
-  all: Bool,
+  all all: Bool,
 ) -> #(JsVal, Agent) {
   let search_len = js_string.length(search_str)
-  let #(callable, st) = rt_val.t_is_callable(st, replace_val)
-  case callable {
+  case rt_val.is_callable(st, replace_val) {
     True ->
       replace_loop_functional(
         st,
@@ -861,7 +853,7 @@ fn replace_loop_functional(
   abs_pos: Int,
   acc: List(String),
   replace_fn: JsVal,
-  all: Bool,
+  all all: Bool,
 ) -> #(JsVal, Agent) {
   case js_string.index_of(tail, search_str, 0) {
     None -> concat_within_limit(st, [tail, ..acc])
@@ -870,7 +862,7 @@ fn replace_loop_functional(
       let after = js_string.drop_start(tail, rel + search_len)
       let p = abs_pos + rel
       let #(result, st) =
-        rt_call.t_call_checked(st, replace_fn, mk_undefined(), [
+        rt_call.t_call(st, replace_fn, mk_undefined(), [
           mk_string(search_str),
           mk_int(p),
           mk_string(s),
@@ -917,10 +909,10 @@ fn replace_loop_template(
   search_str: String,
   search_len: Int,
   segments: List(substitution.PlainSegment),
-  needs_before: Bool,
-  before: String,
-  acc: List(String),
-  all: Bool,
+  needs_before needs_before: Bool,
+  before before: String,
+  acc acc: List(String),
+  all all: Bool,
 ) -> List(String) {
   case js_string.index_of(tail, search_str, 0) {
     None -> [tail, ..acc]
@@ -993,9 +985,7 @@ fn string_raw(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
     [] -> []
   }
   let #(raw_val, st) = rt_obj.t_get_prop(st, template, StringKey(Named("raw")))
-  let #(len_val, st) =
-    rt_obj.t_get_prop(st, raw_val, StringKey(Named("length")))
-  let #(literal_count, st) = rt_val.t_to_length(st, len_val)
+  let #(literal_count, st) = rt_abstract.length_of_array_like(st, raw_val)
   case literal_count {
     0 -> #(mk_string(""), st)
     _ -> string_raw_loop(st, raw_val, subs, literal_count, 0, [])
@@ -1014,7 +1004,7 @@ fn string_raw_loop(
     rt_obj.t_get_prop(
       st,
       raw_val,
-      StringKey(rt_types.canonical_key(int.to_string(index))),
+      StringKey(types.canonical_key(int.to_string(index))),
     )
   let #(lit, st) = rt_val.t_to_string(st, lit_val)
   let acc_rev = [lit, ..acc_rev]
@@ -1157,8 +1147,8 @@ fn html_wrap_attr(
 fn require_global_when_regexp(
   st: Agent,
   val: JsVal,
-  is_re: Bool,
-  method: String,
+  is_re is_re: Bool,
+  method method: String,
 ) -> Agent {
   case is_re {
     False -> st
@@ -1247,24 +1237,6 @@ fn not_a_string(st: Agent, method: String) -> a {
   )
 }
 
-fn relative_index(
-  st: Agent,
-  v: JsVal,
-  len: Int,
-  default: Int,
-) -> #(Int, Agent) {
-  case classify(v) {
-    KUndef -> #(default, st)
-    _ -> {
-      let #(n, st) = rt_val.t_to_integer_or_infinity(st, v)
-      case n < 0 {
-        True -> #(int.max(len + n, 0), st)
-        False -> #(int.min(n, len), st)
-      }
-    }
-  }
-}
-
 fn concat_within_limit(st: Agent, parts_rev: List(String)) -> #(JsVal, Agent) {
   let parts = list.reverse(parts_rev)
   let total =
@@ -1315,7 +1287,7 @@ pub fn to_lower_case(s: String) -> String {
     Some(_) -> {
       let cps =
         string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
-      sigma_assemble(split_cps_on_sigma(cps, [], []), True)
+      sigma_assemble(split_cps_on_sigma(cps, [], []), is_first: True)
     }
   }
 }
@@ -1337,7 +1309,7 @@ fn split_cps_on_sigma(
   }
 }
 
-fn sigma_assemble(parts: List(List(Int)), is_first: Bool) -> String {
+fn sigma_assemble(parts: List(List(Int)), is_first is_first: Bool) -> String {
   case parts {
     [] -> ""
     [last] -> lowercase_cps(last)
@@ -1358,7 +1330,7 @@ fn sigma_assemble(parts: List(List(Int)), is_first: Bool) -> String {
         True -> "\u{03C2}"
         False -> "\u{03C3}"
       }
-      lowercase_cps(part) <> sigma <> sigma_assemble(rest, False)
+      lowercase_cps(part) <> sigma <> sigma_assemble(rest, is_first: False)
     }
   }
 }

@@ -523,8 +523,8 @@ fn store_declared(
   e: Emitter,
   name: String,
   v: ir.Value,
-  lexical: Bool,
-  k: Next,
+  lexical lexical: Bool,
+  k k: Next,
 ) -> EmitResult {
   case state.resolve(e, name) {
     scope.Plain(scope.Local(slot:, boxed:, ..)) -> {

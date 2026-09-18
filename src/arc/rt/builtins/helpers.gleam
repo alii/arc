@@ -1,29 +1,13 @@
-//// small shared helpers for builtin natives
+//// receiver and argument coercion with builtin error messages
 
-import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type ObjKind, type SymbolId, KHandle,
-  KSym, SObject, StringKey, classify, mk_undefined,
-} as rt_types
+  KSym, SObject, classify, mk_undefined,
+}
 import arc/rt/val as rt_val
 import gleam/list
 import gleam/option.{type Option, None, Some}
-
-pub type OwnElement {
-  Hit(JsVal)
-  Miss
-}
-
-@external(erlang, "arc_rt_array_ffi", "own_element")
-pub fn own_element(st: Agent, this: JsVal, idx: Int) -> OwnElement
-
-pub fn get_index(st: Agent, this: JsVal, idx: Int) -> #(JsVal, Agent) {
-  case own_element(st, this, idx) {
-    Hit(v) -> #(v, st)
-    Miss -> rt_obj.t_get_prop(st, this, StringKey(rt_types.index_key(idx)))
-  }
-}
 
 pub fn get_named(st: Agent, recv: JsVal, key: String) -> #(JsVal, Agent) {
   rt_val.get_named(st, recv, key)
@@ -40,7 +24,7 @@ pub fn t_set_named(
   obj: JsVal,
   key: String,
   v: JsVal,
-  strict: Bool,
+  strict strict: Bool,
 ) -> Agent
 
 pub fn list_at(lst: List(a), idx: Int) -> Option(a) {
@@ -156,8 +140,7 @@ pub fn require_callable(
   msg: fn() -> String,
   cont: fn(JsVal) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
-  let #(callable, _) = rt_val.t_is_callable(st, val)
-  case callable {
+  case rt_val.is_callable(st, val) {
     True -> cont(val)
     False -> rt_val.t_throw_type_error(st, msg())
   }
@@ -166,7 +149,7 @@ pub fn require_callable(
 pub fn can_be_held_weakly(v: JsVal) -> Bool {
   case classify(v) {
     KHandle(_) -> True
-    KSym(id) -> !rt_types.is_registered_symbol(id)
+    KSym(id) -> !types.is_registered_symbol(id)
     _ -> False
   }
 }

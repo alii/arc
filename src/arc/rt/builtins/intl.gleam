@@ -90,7 +90,7 @@ import arc/rt/types.{
   StringToLocaleLowerCase, StringToLocaleUpperCase, SymbolKey, TemporalDate,
   TemporalDateTime, TemporalDuration, TemporalInstant, TemporalMonthDay,
   TemporalObj, TemporalTime, TemporalYearMonth, TemporalZonedDateTime, classify,
-  mk_bool, mk_number, mk_object, mk_string, mk_undefined,
+  mk_bool, mk_int, mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -273,7 +273,8 @@ pub fn init(
       "[Symbol.iterator]",
       0,
     )
-  let #(seg_iter_prop, st) = common.builtin_property(st, mk_object(seg_iter_fn))
+  let #(seg_iter_prop, st) =
+    rt_store.t_builtin_property(st, mk_object(seg_iter_fn))
   let st =
     common.add_symbol_property(
       st,
@@ -312,7 +313,8 @@ pub fn init(
       fn(acc, entry: #(String, types.BuiltinPair)) {
         let #(props, st) = acc
         let #(name, bt) = entry
-        let #(prop, st) = common.builtin_property(st, mk_object(bt.constructor))
+        let #(prop, st) =
+          rt_store.t_builtin_property(st, mk_object(bt.constructor))
         #([#(name, prop), ..props], st)
       },
     )
@@ -2066,8 +2068,8 @@ fn time_defaults() -> DtfComponents {
 fn public_component(
   user: Option(a),
   default: Option(a),
-  styled: Bool,
-  required_group_present: Bool,
+  styled styled: Bool,
+  required_group_present required_group_present: Bool,
 ) -> Option(a) {
   case user, styled || required_group_present {
     Some(_), _ -> user
@@ -3439,7 +3441,7 @@ fn resolved_options(
         #("second", option.map(d.second, numeric_width_js)),
         #(
           "fractionalSecondDigits",
-          option.map(d.fractional_second_digits, fn(n) { mk_number(JInt(n)) }),
+          option.map(d.fractional_second_digits, fn(n) { mk_int(n) }),
         ),
         #("timeZoneName", option.map(d.time_zone_name, tz_name_width_js)),
         #(
@@ -3544,7 +3546,7 @@ fn resolved_options(
           ]
         }),
         case df.fractional_digits {
-          Some(f) -> [#("fractionalDigits", mk_number(JInt(f)))]
+          Some(f) -> [#("fractionalDigits", mk_int(f))]
           None -> []
         },
       ]),
@@ -3592,7 +3594,7 @@ fn digit_option_pairs(
   dg: IntlDigitOptions,
   rest: List(#(String, Option(JsVal))),
 ) -> List(#(String, Option(JsVal))) {
-  let num = fn(i) { mk_number(JInt(i)) }
+  let num = fn(i) { mk_int(i) }
   [
     #("minimumIntegerDigits", Some(num(dg.minimum_integer_digits))),
     #(
@@ -3619,7 +3621,7 @@ fn digit_rounding_pairs(
   dg: IntlDigitOptions,
 ) -> List(#(String, Option(JsVal))) {
   [
-    #("roundingIncrement", Some(mk_number(JInt(dg.rounding_increment)))),
+    #("roundingIncrement", Some(mk_int(dg.rounding_increment))),
     #(
       "roundingMode",
       Some(mk_string(rounding_mode_to_js_string(dg.rounding_mode))),
@@ -3671,7 +3673,7 @@ fn bound_getter(
           IntlN(IntlBoundMethod(service:, target:)),
           "",
           arity,
-          False,
+          constructible: False,
         )
       let st =
         rt_store.t_cell_update(st, target, fn(cell) {
@@ -3709,7 +3711,7 @@ fn bound_method(
       let #(_h, c, _bound) = branded_collator(st, this, method)
       let #(a, st) = rt_val.t_to_string(st, first_arg_or_undefined(args))
       let #(b, st) = rt_val.t_to_string(st, helpers.arg_at(args, 1))
-      #(mk_number(JInt(collator_compare(c, a, b))), st)
+      #(mk_int(collator_compare(c, a, b)), st)
     }
   }
 }
@@ -3807,8 +3809,8 @@ fn nf_format_number(
   let #(n, st) = to_intl_number(st, x)
   let parts = case n {
     JNan -> intl_format.format_nan_parts(opts)
-    JPosInf -> intl_format.format_infinity_parts(opts, False)
-    JNegInf -> intl_format.format_infinity_parts(opts, True)
+    JPosInf -> intl_format.format_infinity_parts(opts, negative: False)
+    JNegInf -> intl_format.format_infinity_parts(opts, negative: True)
     JFloat(f) -> intl_format.format_number_parts(opts, f)
     JInt(i) -> intl_format.format_number_parts(opts, int.to_float(i))
   }
@@ -4825,8 +4827,8 @@ fn run_host_override(
       let arg2 = helpers.arg_at(args, 2)
       host_locale_compare(st, this, arg0, arg1, arg2)
     }
-    StringToLocaleLowerCase -> host_locale_case(st, this, arg0, False)
-    StringToLocaleUpperCase -> host_locale_case(st, this, arg0, True)
+    StringToLocaleLowerCase -> host_locale_case(st, this, arg0, upper: False)
+    StringToLocaleUpperCase -> host_locale_case(st, this, arg0, upper: True)
     DateToLocaleString -> host_date_to_locale(st, this, arg0, arg1, DateAndTime)
     DateToLocaleDateString ->
       host_date_to_locale(st, this, arg0, arg1, DateOnly)
@@ -4903,14 +4905,14 @@ fn host_locale_compare(
   let #(s, st) = rt_val.t_to_string(st, this)
   let #(that, st) = rt_val.t_to_string(st, that_v)
   let #(c, st) = collator_state(st, locales, options)
-  #(mk_number(JInt(collator_compare(c, s, that))), st)
+  #(mk_int(collator_compare(c, s, that)), st)
 }
 
 fn host_locale_case(
   st: Agent,
   this: JsVal,
   locales: JsVal,
-  upper: Bool,
+  upper upper: Bool,
 ) -> #(JsVal, Agent) {
   use Nil <- helpers.guard(!rt_val.is_nullish(this), fn() {
     rt_val.t_throw_type_error(st, "method called on null or undefined")
@@ -4934,7 +4936,7 @@ fn host_locale_case(
   #(mk_string(cased), st)
 }
 
-fn turkic_case(s: String, upper: Bool) -> String {
+fn turkic_case(s: String, upper upper: Bool) -> String {
   case upper {
     True ->
       // i → İ (U+0130)
@@ -4972,7 +4974,7 @@ fn lower_turkic_cps(cps: List(Int), acc: List(String)) -> String {
   }
 }
 
-fn lithuanian_case(s: String, upper: Bool) -> String {
+fn lithuanian_case(s: String, upper upper: Bool) -> String {
   let cps = string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
   case upper {
     // uppercasing drops U+0307 after i/j
@@ -5132,10 +5134,10 @@ fn string_list_from_iterable(
     _ -> {
       let #(method, st) =
         rt_obj.t_get_prop(st, iterable, SymbolKey(types.symbol_iterator))
-      use Nil <- helpers.guard(rt_call.is_callable(st, method), fn() {
+      use Nil <- helpers.guard(rt_val.is_callable(st, method), fn() {
         rt_val.t_throw_type_error(st, "object is not iterable")
       })
-      let #(iter, st) = rt_call.t_call_checked(st, method, iterable, [])
+      let #(iter, st) = rt_call.t_call(st, method, iterable, [])
       use Nil <- helpers.guard(rt_val.is_object(iter), fn() {
         rt_val.t_throw_type_error(st, "iterator result is not an object")
       })
@@ -5151,7 +5153,7 @@ fn iterate_strings(
   next_fn: JsVal,
   acc: List(String),
 ) -> #(List(String), Agent) {
-  let #(step, st) = rt_call.t_call_checked(st, next_fn, iter, [])
+  let #(step, st) = rt_call.t_call(st, next_fn, iter, [])
   use Nil <- helpers.guard(rt_val.is_object(step), fn() {
     rt_val.t_throw_type_error(st, "iterator result is not an object")
   })
@@ -5391,7 +5393,7 @@ fn parse_iso_duration(str: String) -> Result(DurationRecord, Nil) {
   use date_fields <- result.try(parse_duration_section(
     date_part,
     [#("Y", DuYears), #("M", DuMonths), #("W", DuWeeks), #("D", DuDays)],
-    False,
+    allow_fraction: False,
   ))
   use time_fields <- result.try(case time_part {
     None -> Ok([])
@@ -5400,7 +5402,7 @@ fn parse_iso_duration(str: String) -> Result(DurationRecord, Nil) {
       parse_duration_section(
         t,
         [#("H", DuHours), #("M", DuMinutes), #("S", DuSeconds)],
-        True,
+        allow_fraction: True,
       )
   })
   let all = list.append(date_fields, time_fields)
@@ -5437,7 +5439,7 @@ fn parse_iso_duration(str: String) -> Result(DurationRecord, Nil) {
 fn parse_duration_section(
   part: String,
   designators: List(#(String, DurationUnit)),
-  allow_fraction: Bool,
+  allow_fraction allow_fraction: Bool,
 ) -> Result(List(#(DurationUnit, Float)), Nil) {
   case part {
     "" -> Ok([])
@@ -5455,9 +5457,9 @@ fn parse_duration_section(
 fn parse_duration_loop(
   gs: List(String),
   designators: List(#(String, DurationUnit)),
-  allow_fraction: Bool,
-  num_acc: String,
-  out: List(#(DurationUnit, Float)),
+  allow_fraction allow_fraction: Bool,
+  num_acc num_acc: String,
+  out out: List(#(DurationUnit, Float)),
 ) -> Result(List(#(DurationUnit, Float)), Nil) {
   case gs {
     [] ->
@@ -5618,7 +5620,7 @@ fn build_duration_parts(
               let opts =
                 intl_format.NumOpts(
                   ..intl_format.default_num_opts(),
-                  sign_display: sign_display,
+                  sign_display:,
                   min_int: case style {
                     DurTwoDigit -> 2
                     DurLong
@@ -5832,7 +5834,7 @@ fn make_segment_data(
 ) -> #(JsVal, Agent) {
   let base = [
     #("segment", mk_string(seg.text)),
-    #("index", mk_number(JInt(seg.index))),
+    #("index", mk_int(seg.index)),
     #("input", mk_string(input)),
   ]
   let props = case granularity {
@@ -5883,7 +5885,7 @@ fn segment_iterator_next(
   it: SegmentIteratorState,
 ) -> #(JsVal, Agent) {
   case it.remaining {
-    [] -> realm_ops.alloc_iter_result(st, mk_undefined(), True)
+    [] -> realm_ops.alloc_iter_result(st, mk_undefined(), done: True)
     [seg, ..rest] -> {
       let st =
         write_intl_data(
@@ -5892,7 +5894,7 @@ fn segment_iterator_next(
           SegmentIteratorData(SegmentIteratorState(..it, remaining: rest)),
         )
       let #(data, st) = make_segment_data(st, it.string, it.granularity, seg)
-      realm_ops.alloc_iter_result(st, data, False)
+      realm_ops.alloc_iter_result(st, data, done: False)
     }
   }
 }
@@ -6048,8 +6050,7 @@ fn locale_method(
       alloc_pojo(st, [#("direction", mk_string(dir))])
     }
     LocaleGetWeekInfo -> {
-      let #(weekend, st) =
-        alloc_array(st, [mk_number(JInt(6)), mk_number(JInt(7))])
+      let #(weekend, st) = alloc_array(st, [mk_int(6), mk_int(7)])
       let first_day = case locale_u_kw(l, "fw") {
         Some("mon") -> 1
         Some("tue") -> 2
@@ -6061,7 +6062,7 @@ fn locale_method(
         _ -> 7
       }
       alloc_pojo(st, [
-        #("firstDay", mk_number(JInt(first_day))),
+        #("firstDay", mk_int(first_day)),
         #("weekend", weekend),
       ])
     }

@@ -3,7 +3,7 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type JsVal, JInt, KHandle, KNum, KStr, Named, StringKey, classify,
-  mk_number, mk_object, mk_string,
+  mk_int, mk_object, mk_string,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -18,13 +18,13 @@ pub fn array_join_via_t_call_test() {
   let st = agent()
   let #(arr, st) =
     rt_obj.t_new_array(st, [
-      mk_number(JInt(1)),
-      mk_number(JInt(2)),
-      mk_number(JInt(3)),
+      mk_int(1),
+      mk_int(2),
+      mk_int(3),
     ])
   let #(join, st) = rt_obj.t_get_prop(st, arr, StringKey(Named("join")))
   let assert KHandle(_) = classify(join)
-  let #(result, _st) = rt_call.t_call(st, join, arr, [])
+  let #(result, _st) = rt_call.t_try_call(st, join, arr, [])
   let assert NormalCompletion(v) = result
   assert classify(v) == KStr("1,2,3")
 }
@@ -33,9 +33,9 @@ pub fn array_length_test() {
   let st = agent()
   let #(arr, st) =
     rt_obj.t_new_array(st, [
-      mk_number(JInt(1)),
-      mk_number(JInt(2)),
-      mk_number(JInt(3)),
+      mk_int(1),
+      mk_int(2),
+      mk_int(3),
     ])
   let #(len, _st) = rt_obj.t_get_prop(st, arr, StringKey(Named("length")))
   assert classify(len) == KNum(JInt(3))
@@ -55,9 +55,7 @@ pub fn object_set_get_round_trip_test() {
 pub fn type_error_is_caught_as_throw_completion_test() {
   let st = agent()
   let #(completion, st) =
-    rt_call.t_apply_protected(st, fn(st) {
-      rt_val.t_throw_type_error(st, "boom")
-    })
+    rt_call.try_run(st, fn(st) { rt_val.t_throw_type_error(st, "boom") })
   let assert ThrowCompletion(err) = completion
   let assert KHandle(_) = classify(err)
   let #(msg, _st) = rt_obj.t_get_prop(st, err, StringKey(Named("message")))
@@ -92,13 +90,13 @@ pub fn shaped_set_transitions_test() {
     )
   let x = StringKey(Named("x"))
   let y = StringKey(Named("y"))
-  let #(ok, st) = rt_obj.t_set_prop(st, mk_object(a), x, mk_number(JInt(1)))
+  let #(ok, st) = rt_obj.t_set_prop(st, mk_object(a), x, mk_int(1))
   assert ok
-  let #(ok, st) = rt_obj.t_set_prop(st, mk_object(a), y, mk_number(JInt(2)))
+  let #(ok, st) = rt_obj.t_set_prop(st, mk_object(a), y, mk_int(2))
   assert ok
-  let #(ok, st) = rt_obj.t_set_prop(st, mk_object(b), x, mk_number(JInt(3)))
+  let #(ok, st) = rt_obj.t_set_prop(st, mk_object(b), x, mk_int(3))
   assert ok
-  let #(ok, st) = rt_obj.t_set_prop(st, mk_object(a), x, mk_number(JInt(4)))
+  let #(ok, st) = rt_obj.t_set_prop(st, mk_object(a), x, mk_int(4))
   assert ok
   let assert types.SShapedObject(shape_id: sa, ..) = rt_store.t_cell_get(st, a)
   let assert types.SShapedObject(shape_id: sb, ..) = rt_store.t_cell_get(st, b)

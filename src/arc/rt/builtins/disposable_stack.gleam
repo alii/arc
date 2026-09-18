@@ -1,3 +1,4 @@
+import arc/bytecode/error_kind.{TypeError}
 import arc/rt/async as rt_async
 import arc/rt/builtins/common
 import arc/rt/builtins/error as b_error
@@ -18,7 +19,7 @@ import arc/rt/types.{
   DisposableStackPrototypeDefer, DisposableStackPrototypeDispose,
   DisposableStackPrototypeMove, DisposableStackPrototypeUse, DisposeCallback,
   Disposed, KHandle, KNull, KUndef, MethodDispose, NullDispose, Pending,
-  SDisposeCapability, SObject, SymbolKey, TypeErr, classify, mk_bool, mk_object,
+  SDisposeCapability, SObject, SymbolKey, classify, mk_bool, mk_object,
   mk_undefined,
 }
 import arc/rt/val as rt_val
@@ -103,7 +104,8 @@ fn init_stack_type(
       dispose_name,
       0,
     )
-  let #(dispose_prop, st) = common.builtin_property(st, mk_object(dispose_h))
+  let #(dispose_prop, st) =
+    rt_store.t_builtin_property(st, mk_object(dispose_h))
   let #(getters, st) =
     common.alloc_getters(st, function_proto, [
       #("disposed", DisposableStackN(disposed_fn)),
@@ -233,7 +235,7 @@ fn alloc_stack(
 fn read_stack(
   st: Agent,
   this: JsVal,
-  async: Bool,
+  async async: Bool,
 ) -> Option(#(Handle, DisposableState)) {
   case classify(this) {
     KHandle(h) ->
@@ -257,9 +259,9 @@ fn stack_type_name(async: Bool) -> String {
 fn require_stack(
   st: Agent,
   this: JsVal,
-  async: Bool,
-  method: String,
-  cont: fn(Handle, DisposableState) -> #(a, Agent),
+  async async: Bool,
+  method method: String,
+  cont cont: fn(Handle, DisposableState) -> #(a, Agent),
 ) -> #(a, Agent) {
   case read_stack(st, this, async) {
     Some(#(h, disposable_state)) -> cont(h, disposable_state)
@@ -296,7 +298,12 @@ fn disposed_getter(
 }
 
 fn dispose(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  use h, disposable_state <- require_stack(st, this, False, "dispose")
+  use h, disposable_state <- require_stack(
+    st,
+    this,
+    async: False,
+    method: "dispose",
+  )
   case disposable_state {
     Disposed -> #(mk_undefined(), st)
     Pending(capability:) -> {
@@ -324,10 +331,10 @@ fn dispose_resources(
         MethodDispose(value: v, method:) ->
           case classify(method) {
             KUndef -> #(NormalCompletion(mk_undefined()), st)
-            _ -> rt_call.t_call(st, method, v, [])
+            _ -> rt_call.t_try_call(st, method, v, [])
           }
         DisposeCallback(callback:, args:) ->
-          rt_call.t_call(st, callback, mk_undefined(), args)
+          rt_call.t_try_call(st, callback, mk_undefined(), args)
         AsyncFallbackDispose(..) | NullDispose ->
           panic as "sync DisposableStack holds async-only resource variant — engine invariant"
       }
@@ -348,8 +355,13 @@ fn dispose_resources(
 }
 
 fn use_resource(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use _h, disposable_state <- require_stack(st, this, False, "use")
-  use capability <- try_pending(st, disposable_state, async: False)
+  use _h, disposable_state <- require_stack(
+    st,
+    this,
+    async: False,
+    method: "use",
+  )
+  use capability <- require_pending(st, disposable_state, async: False)
   let val = first_arg_or_undefined(args)
   case classify(val) {
     KUndef | KNull -> #(val, st)
@@ -374,8 +386,13 @@ fn use_resource_async(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use _h, disposable_state <- require_stack(st, this, True, "use")
-  use capability <- try_pending(st, disposable_state, async: True)
+  use _h, disposable_state <- require_stack(
+    st,
+    this,
+    async: True,
+    method: "use",
+  )
+  use capability <- require_pending(st, disposable_state, async: True)
   let val = first_arg_or_undefined(args)
   case classify(val) {
     KUndef | KNull -> #(val, push_resource(st, capability, NullDispose))
@@ -406,7 +423,7 @@ fn get_method(
   case classify(method) {
     KUndef | KNull -> #(None, st)
     KHandle(h) ->
-      case rt_call.is_callable(st, method) {
+      case rt_val.is_callable(st, method) {
         True -> #(Some(h), st)
         False ->
           rt_val.t_throw_type_error(
@@ -455,7 +472,7 @@ pub fn get_dispose_method(
   }
 }
 
-fn no_dispose_method(st: Agent, is_async: Bool) -> a {
+fn no_dispose_method(st: Agent, is_async is_async: Bool) -> a {
   case is_async {
     True ->
       rt_val.t_throw_type_error(
@@ -477,9 +494,9 @@ fn adopt(
   async async: Bool,
 ) -> #(JsVal, Agent) {
   use _h, disposable_state <- require_stack(st, this, async, "adopt")
-  use capability <- try_pending(st, disposable_state, async:)
+  use capability <- require_pending(st, disposable_state, async:)
   let #(val, on_dispose) = two_args_or_undefined(args)
-  case rt_call.is_callable(st, on_dispose) {
+  case rt_val.is_callable(st, on_dispose) {
     False -> rt_val.t_throw_type_error(st, "onDispose is not a function")
     True -> {
       let resource = DisposeCallback(callback: on_dispose, args: [val])
@@ -495,9 +512,9 @@ fn defer(
   async async: Bool,
 ) -> #(JsVal, Agent) {
   use _h, disposable_state <- require_stack(st, this, async, "defer")
-  use capability <- try_pending(st, disposable_state, async:)
+  use capability <- require_pending(st, disposable_state, async:)
   let on_dispose = first_arg_or_undefined(args)
-  case rt_call.is_callable(st, on_dispose) {
+  case rt_val.is_callable(st, on_dispose) {
     False -> rt_val.t_throw_type_error(st, "onDispose is not a function")
     True -> {
       let resource = DisposeCallback(callback: on_dispose, args: [])
@@ -513,14 +530,14 @@ fn move(
   async async: Bool,
 ) -> #(JsVal, Agent) {
   use h, disposable_state <- require_stack(st, this, async, "move")
-  use capability <- try_pending(st, disposable_state, async:)
+  use capability <- require_pending(st, disposable_state, async:)
   let #(new_h, st) =
     alloc_stack(st, proto, async:, disposable_state: Pending(capability:))
   let st = mark_disposed(st, h)
   #(mk_object(new_h), st)
 }
 
-fn try_pending(
+fn require_pending(
   st: Agent,
   disposable_state: DisposableState,
   async async: Bool,
@@ -542,12 +559,12 @@ fn dispose_async(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let promise = mk_object(promise_h)
   let resolve = mk_object(resolve_h)
   let reject = mk_object(reject_h)
-  case read_stack(st, this, True) {
+  case read_stack(st, this, async: True) {
     None -> {
       let #(err, st) =
-        st.store.ops.new_error(
+        rt_val.t_new_error(
           st,
-          TypeErr,
+          TypeError,
           "Method "
             <> stack_type_name(True)
             <> ".prototype.disposeAsync called on incompatible receiver",
@@ -599,7 +616,7 @@ fn async_dispose_loop(
       }
     [resource, ..rest] -> {
       let call_then_await = fn(callee, this, args) {
-        case rt_call.t_call(st, callee, this, args) {
+        case rt_call.t_try_call(st, callee, this, args) {
           #(NormalCompletion(result), st) ->
             attach_await(st, result, rest, pending, resolve, reject)
           #(ThrowCompletion(thrown), st) -> {
@@ -623,7 +640,7 @@ fn async_dispose_loop(
           call_then_await(callback, mk_undefined(), args)
         // sync throw becomes a rejected promise, folded after a hop
         AsyncFallbackDispose(value: v, method:) ->
-          case rt_call.t_call(st, method, v, []) {
+          case rt_call.t_try_call(st, method, v, []) {
             #(NormalCompletion(_discarded), st) ->
               attach_await(st, mk_undefined(), rest, pending, resolve, reject)
             #(ThrowCompletion(thrown), st) ->
@@ -725,7 +742,7 @@ fn alloc_continue(
     )),
     "",
     1,
-    False,
+    constructible: False,
   )
 }
 
@@ -736,7 +753,7 @@ fn async_dispose_continue(
   pending: Option(JsVal),
   resolve: JsVal,
   reject: JsVal,
-  is_reject: Bool,
+  is_reject is_reject: Bool,
 ) -> #(JsVal, Agent) {
   let #(pending, st) = case is_reject {
     True -> fold_error(st, pending, first_arg_or_undefined(args))
@@ -757,6 +774,6 @@ fn async_dispose_continue(
 
 // intrinsic resolving functions never throw
 fn settle_capability(st: Agent, fun: JsVal, arg: JsVal) -> Agent {
-  let #(_val, st) = rt_call.t_call_checked(st, fun, mk_undefined(), [arg])
+  let #(_val, st) = rt_call.t_call(st, fun, mk_undefined(), [arg])
   st
 }

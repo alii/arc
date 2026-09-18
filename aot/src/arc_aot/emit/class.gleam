@@ -115,7 +115,10 @@ fn emit_computed_keys(
 }
 
 // atoms must match gleam's erlang spelling of MIMethod etc
-fn method_install_atom(kind: ast.MethodKind, is_static: Bool) -> ir.Value {
+fn method_install_atom(
+  kind: ast.MethodKind,
+  is_static is_static: Bool,
+) -> ir.Value {
   ir.ConstAtom(case kind, is_static {
     ast.MethodGet, False -> "m_i_getter"
     ast.MethodSet, False -> "m_i_setter"
@@ -166,8 +169,8 @@ fn emit_methods(
   e: Emitter,
   methods: List(ast_util.ClassMethodElement),
   target: ir.Value,
-  is_static: Bool,
-  k: Next,
+  is_static is_static: Bool,
+  k k: Next,
 ) -> EmitResult {
   use e, method, next <- each_(e, methods, then: k)
   let ast_util.ClassMethodElement(body_index:, key:, kind:, fun:) = method
@@ -199,7 +202,7 @@ fn emit_methods(
       host_unit_(
         e,
         "define_private",
-        [target, pk, method_fn, method_install_atom(kind, False)],
+        [target, pk, method_fn, method_install_atom(kind, is_static: False)],
         next,
       )
     }
@@ -236,10 +239,10 @@ fn emit_ctor_and_create(
   parts: ast_util.ClassBodyParts,
   display_name: Option(String),
   parent_class: ir.Value,
-  is_derived: Bool,
-  has_field_init: Bool,
-  ctor_child_id: scope.ScopeId,
-  k: NextWith(#(ir.Value, ir.Value)),
+  is_derived is_derived: Bool,
+  has_field_init has_field_init: Bool,
+  ctor_child_id ctor_child_id: scope.ScopeId,
+  k k: NextWith(#(ir.Value, ir.Value)),
 ) -> EmitResult {
   let #(ctor_params, ctor_body, default) = case parts.constructor {
     Some(ast_util.ClassMethodElement(
@@ -378,8 +381,8 @@ pub fn emit_class(
     ctor_child_id,
   )
   use e <- emit_computed_keys(e, body)
-  use e <- emit_methods(e, parts.instance_methods, proto, False)
-  use e <- emit_methods(e, parts.static_methods, ctor, True)
+  use e <- emit_methods(e, parts.instance_methods, proto, is_static: False)
+  use e <- emit_methods(e, parts.static_methods, ctor, is_static: True)
   use e, init_fn <- emit_field_init_fn(e, parts, proto, init_child_id)
   // inner name bound after elements but before statics
   let with_inner_name = fn(e, then: Next) {
@@ -546,7 +549,7 @@ fn emit_one_init(
       host_unit_(
         e,
         "define_private",
-        [this, pk, closure, method_install_atom(kind, False)],
+        [this, pk, closure, method_install_atom(kind, is_static: False)],
         next,
       )
     }
@@ -627,7 +630,7 @@ fn build_class_init_closure(
   let e_child = func.seed_capture_slots(e_child, child_info)
   use #(body_expr, e_child) <- result.try(
     with_done(e_child, fn(ec, done) {
-      use ec <- func.unpack_frame(ec, False, child_info)
+      use ec <- func.unpack_frame(ec, is_arrow: False, info: child_info)
       use ec <- func.binding_prologue(ec, ec.fn_scope)
       let with_this = fn(ec, k) {
         case lexical.lexical_slot(child_info.lexical, lexical.RefThis) {
@@ -717,7 +720,7 @@ fn emit_static_init(
       let #(child_id, e) = state.pop_child_fn(e)
       use e, static_init <- build_class_init_closure(e, child_id, inits, ctor)
       use e, empty <- host_(e, "empty_list", [])
-      host_unit_(e, "call_checked", [static_init, ctor, empty], k)
+      host_unit_(e, "call", [static_init, ctor, empty], k)
     }
   }
 }

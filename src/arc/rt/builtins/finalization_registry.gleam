@@ -88,7 +88,7 @@ fn construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   let callback = helpers.first_arg_or_undefined(args)
-  use Nil <- helpers.guard(rt_call.is_callable(st, callback), fn() {
+  use Nil <- helpers.guard(rt_val.is_callable(st, callback), fn() {
     rt_val.t_throw_type_error(st, "cleanup must be callable")
   })
   let #(proto_h, st) =

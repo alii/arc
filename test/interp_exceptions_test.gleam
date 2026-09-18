@@ -306,7 +306,7 @@ pub fn host_native_throw_and_reentry_test() {
   let #(reenter, st) =
     rt_helpers.func(st, fn(st, args) {
       case args {
-        [f, x, ..] -> rt_call.t_call_checked(st, f, types.mk_undefined(), [x])
+        [f, x, ..] -> rt_call.t_call(st, f, types.mk_undefined(), [x])
         _ -> #(types.mk_undefined(), st)
       }
     })
@@ -315,7 +315,7 @@ pub fn host_native_throw_and_reentry_test() {
     rt_helpers.func(st, fn(st, args) {
       case args {
         [f, ..] ->
-          case rt_call.t_call(st, f, types.mk_undefined(), []) {
+          case rt_call.t_try_call(st, f, types.mk_undefined(), []) {
             #(NormalCompletion(v), st) -> #(
               types.mk_string("ok:" <> show(v)),
               st,

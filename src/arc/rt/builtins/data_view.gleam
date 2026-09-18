@@ -11,7 +11,7 @@ import arc/rt/types.{
   DataViewGetByteLength, DataViewGetByteOffset, DataViewN, DataViewObj,
   DataViewSet, Detached, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KUndef,
   VBig, VBigInt64, VBigUint64, VFloat16, VFloat32, VFloat64, VInt16, VInt32,
-  VInt8, VNum, VUint16, VUint32, VUint8, classify, mk_bigint, mk_number,
+  VInt8, VNum, VUint16, VUint32, VUint8, classify, mk_bigint, mk_int, mk_number,
   mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
@@ -170,13 +170,13 @@ fn get_buffer(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 
 fn get_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let view = require_data_view(st, this)
-  #(mk_number(JInt(view_size(st, view))), st)
+  #(mk_int(view_size(st, view)), st)
 }
 
 fn get_byte_offset(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let view = require_data_view(st, this)
   let _size = view_size(st, view)
-  #(mk_number(JInt(view.byte_offset)), st)
+  #(mk_int(view.byte_offset), st)
 }
 
 // §25.3.1.1 getviewvalue
@@ -354,7 +354,7 @@ fn element_size(element: ViewElementType) -> Int {
   }
 }
 
-fn read_uint(chunk: BitArray, little: Bool) -> Int {
+fn read_uint(chunk: BitArray, little little: Bool) -> Int {
   case little, chunk {
     _, <<v:size(8)>> -> v
     True, <<v:size(16)-little>> -> v
@@ -375,7 +375,11 @@ fn to_signed(u: Int, bits: Int) -> Int {
   }
 }
 
-fn decode(element: ViewElementType, chunk: BitArray, little: Bool) -> JsVal {
+fn decode(
+  element: ViewElementType,
+  chunk: BitArray,
+  little little: Bool,
+) -> JsVal {
   let u = read_uint(chunk, little)
   case element {
     VNum(e) -> decode_number(e, u)
@@ -385,12 +389,12 @@ fn decode(element: ViewElementType, chunk: BitArray, little: Bool) -> JsVal {
 
 fn decode_number(element: ViewNumElement, u: Int) -> JsVal {
   case element {
-    VUint8 -> mk_number(JInt(u))
-    VUint16 -> mk_number(JInt(u))
-    VUint32 -> mk_number(JInt(u))
-    VInt8 -> mk_number(JInt(to_signed(u, 8)))
-    VInt16 -> mk_number(JInt(to_signed(u, 16)))
-    VInt32 -> mk_number(JInt(to_signed(u, 32)))
+    VUint8 -> mk_int(u)
+    VUint16 -> mk_int(u)
+    VUint32 -> mk_int(u)
+    VInt8 -> mk_int(to_signed(u, 8))
+    VInt16 -> mk_int(to_signed(u, 16))
+    VInt32 -> mk_int(to_signed(u, 32))
     VFloat16 -> mk_number(f16_from_bits(u))
     VFloat32 -> mk_number(typed_array_bytes.decode_f32_bits(u))
     VFloat64 -> mk_number(typed_array_bytes.decode_f64_bits(u))
@@ -534,7 +538,7 @@ fn f16_to_bits(num: JsNum) -> Int {
   }
 }
 
-fn to_endian(chunk: BitArray, little: Bool, size: Int) -> BitArray {
+fn to_endian(chunk: BitArray, little little: Bool, size size: Int) -> BitArray {
   case little, size {
     False, _ -> chunk
     True, 1 -> chunk

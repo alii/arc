@@ -9,10 +9,10 @@ import arc/rt/builtins/temporal_common.{
   get_unit_option, has_date_units, instant_slot_of, is_valid_epoch_ns, make_date,
   make_date_time, make_duration, make_instant, make_time, make_zoned, max_unit,
   opt_get, require_temporal, require_time_unit, round_options,
-  round_to_increment, seconds_string_precision, system_time_zone, terr,
-  time_part_ns, time_unit_ns, time_zone_id, to_temporal_duration,
-  to_temporal_instant, to_temporal_time_zone, tz_offset_ns_at, unit_rank,
-  valid_rounding_increment, validate_epoch_ns,
+  round_to_increment, seconds_string_precision, system_time_zone, time_part_ns,
+  time_unit_ns, time_zone_id, to_temporal_duration, to_temporal_instant,
+  to_temporal_time_zone, tz_offset_ns_at, unit_rank, valid_rounding_increment,
+  validate_epoch_ns,
 }
 import arc/rt/builtins/temporal_duration
 import arc/rt/builtins/temporal_iso.{
@@ -25,6 +25,7 @@ import arc/rt/builtins/temporal_plain_month_day
 import arc/rt/builtins/temporal_plain_time
 import arc/rt/builtins/temporal_plain_year_month
 import arc/rt/builtins/temporal_zoned_date_time
+import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type InstantGetterName, type InstantMethodName,
   type InstantStaticName, type JsVal, type NativeToken, type TemporalNative,
@@ -49,8 +50,8 @@ import arc/rt/types.{
   TemporalPlainYearMonthGetter, TemporalPlainYearMonthMethod,
   TemporalPlainYearMonthStatic, TemporalProtos, TemporalZonedDateTimeCtor,
   TemporalZonedDateTimeGetter, TemporalZonedDateTimeMethod,
-  TemporalZonedDateTimeStatic, classify, mk_bigint, mk_bool, mk_number,
-  mk_object, mk_string,
+  TemporalZonedDateTimeStatic, classify, mk_bigint, mk_bool, mk_int, mk_object,
+  mk_string,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -244,15 +245,15 @@ pub fn init(
   let #(now_h, st) =
     common.init_namespace(st, object_proto, "Temporal.Now", now_props)
 
-  let #(pd_prop, st) = common.builtin_property(st, mk_object(pd_ctor))
-  let #(pt_prop, st) = common.builtin_property(st, mk_object(pt_ctor))
-  let #(pdt_prop, st) = common.builtin_property(st, mk_object(pdt_ctor))
-  let #(pym_prop, st) = common.builtin_property(st, mk_object(pym_ctor))
-  let #(pmd_prop, st) = common.builtin_property(st, mk_object(pmd_ctor))
-  let #(dur_prop, st) = common.builtin_property(st, mk_object(dur_ctor))
-  let #(ins_prop, st) = common.builtin_property(st, mk_object(ins_ctor))
-  let #(zdt_prop, st) = common.builtin_property(st, mk_object(zdt_ctor))
-  let #(now_prop, st) = common.builtin_property(st, mk_object(now_h))
+  let #(pd_prop, st) = rt_store.t_builtin_property(st, mk_object(pd_ctor))
+  let #(pt_prop, st) = rt_store.t_builtin_property(st, mk_object(pt_ctor))
+  let #(pdt_prop, st) = rt_store.t_builtin_property(st, mk_object(pdt_ctor))
+  let #(pym_prop, st) = rt_store.t_builtin_property(st, mk_object(pym_ctor))
+  let #(pmd_prop, st) = rt_store.t_builtin_property(st, mk_object(pmd_ctor))
+  let #(dur_prop, st) = rt_store.t_builtin_property(st, mk_object(dur_ctor))
+  let #(ins_prop, st) = rt_store.t_builtin_property(st, mk_object(ins_ctor))
+  let #(zdt_prop, st) = rt_store.t_builtin_property(st, mk_object(zdt_ctor))
+  let #(now_prop, st) = rt_store.t_builtin_property(st, mk_object(now_h))
   common.init_namespace(st, object_proto, "Temporal", [
     #("PlainDate", pd_prop),
     #("PlainTime", pt_prop),
@@ -272,7 +273,7 @@ pub fn init_temporal_type(
   name: String,
   arity: Int,
   proto: Handle,
-  ctor_tag: NativeToken,
+  ctor_token: NativeToken,
   statics: List(#(String, NativeToken, Int)),
   getters: List(#(String, NativeToken)),
   methods: List(#(String, NativeToken, Int)),
@@ -286,7 +287,7 @@ pub fn init_temporal_type(
       proto,
       function_proto,
       list.append(getter_props, method_props),
-      fn(_proto) { ctor_tag },
+      fn(_proto) { ctor_token },
       name,
       arity,
       static_props,
@@ -479,7 +480,7 @@ fn instant_static(
     InstantCompare -> {
       let #(a, st) = to_temporal_instant(st, helpers.arg_at(args, 0))
       let #(b, st) = to_temporal_instant(st, helpers.arg_at(args, 1))
-      #(mk_number(JInt(int.compare(a, b) |> order_to_int)), st)
+      #(mk_int(int.compare(a, b) |> order_to_int), st)
     }
     InstantFromEpochMilliseconds -> {
       let #(n, st) = rt_val.t_to_number(st, helpers.arg_at(args, 0))
@@ -522,7 +523,7 @@ fn instant_getter(
 ) -> #(JsVal, Agent) {
   let ns = require_instant(st, this, instant_getter_name(g))
   case g {
-    InstantEpochMilliseconds -> #(mk_number(JInt(floor_div(ns, ns_per_ms))), st)
+    InstantEpochMilliseconds -> #(mk_int(floor_div(ns, ns_per_ms)), st)
     InstantEpochNanoseconds -> #(mk_bigint(ns), st)
   }
 }
@@ -548,7 +549,7 @@ fn instant_method(
         get_unit_option(st, opts, "smallestUnit", allow_auto: False)
       let #(tz_opt, st) = opt_get(st, opts, "timeZone")
       let #(precision, smallest_time_unit, inc) =
-        terr(st, seconds_string_precision(digits, smallest))
+        rt_val.or_throw(st, seconds_string_precision(digits, smallest))
       let rounded = case smallest_time_unit {
         None -> ns
         Some(u) ->
@@ -595,7 +596,11 @@ fn instant_method(
             InstantSubtract -> 0 - time_part_ns(dur)
             _ -> time_part_ns(dur)
           }
-          make_instant(st, protos, terr(st, validate_epoch_ns(ns + delta)))
+          make_instant(
+            st,
+            protos,
+            rt_val.or_throw(st, validate_epoch_ns(ns + delta)),
+          )
         }
       }
     }
@@ -610,7 +615,11 @@ fn instant_method(
           // rounds as if positive: down is toward the big bang
           let rounded =
             round_to_increment(ns, inc * unit_ns, as_if_positive_mode(mode))
-          make_instant(st, protos, terr(st, validate_epoch_ns(rounded)))
+          make_instant(
+            st,
+            protos,
+            rt_val.or_throw(st, validate_epoch_ns(rounded)),
+          )
         }
       }
     }
@@ -636,7 +645,7 @@ fn instant_until_since(
   a: Int,
   b: Int,
   args: List(JsVal),
-  is_since: Bool,
+  is_since is_since: Bool,
 ) -> #(JsVal, Agent) {
   let #(#(largest, smallest, inc, mode), st) = get_difference_settings(st, args)
   let smallest = option.unwrap(smallest, Nanosecond)
@@ -649,7 +658,7 @@ fn instant_until_since(
       rt_val.t_throw_range_error(st, "units must be time units for Instant")
     False -> {
       let Nil = check_diff_setup(st, largest, smallest, inc)
-      let smallest_time_unit = terr(st, require_time_unit(smallest))
+      let smallest_time_unit = rt_val.or_throw(st, require_time_unit(smallest))
       let mode = apply_since_mode(mode, is_since)
       let diff = b - a
       let rounded =

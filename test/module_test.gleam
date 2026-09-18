@@ -10,8 +10,8 @@ import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type JsVal, JInt, KNum, KStr, KUndef, Named, PromiseFulfilled,
-  PromiseRejected, StringKey, SymbolKey, classify, mk_number, mk_object,
-  mk_string, mk_undefined,
+  PromiseRejected, StringKey, SymbolKey, classify, mk_int, mk_object, mk_string,
+  mk_undefined,
 }
 import gleam/dict
 import gleam/list
@@ -37,7 +37,7 @@ fn no_source_loads(_resolved: String) {
 
 fn hosts() {
   dict.from_list([
-    #("dance", module.HostModule("dance", [#("greet", mk_number(JInt(7)))])),
+    #("dance", module.HostModule("dance", [#("greet", mk_int(7))])),
   ])
 }
 
@@ -146,7 +146,7 @@ pub fn import_without_a_hook_rejects_with_type_error_test() {
 
 pub fn import_with_bad_options_rejects_synchronously_test() {
   let #(p, st) =
-    dynamic_import.import_call(agent(), mk_string("./x.js"), mk_number(JInt(1)))
+    dynamic_import.import_call(agent(), mk_string("./x.js"), mk_int(1))
   let assert Error(e) = settled(st, p)
   assert string.contains(rt_inspect.format_error(st, e), "must be an object")
 }
@@ -211,7 +211,7 @@ pub fn hook_args_round_trip_test() {
     dynamic_import.encode_hook_args(
       "./a.js",
       Some("/m.js"),
-      dynamic_import.DeferPhase(mk_number(JInt(1)), mk_number(JInt(2))),
+      dynamic_import.DeferPhase(mk_int(1), mk_int(2)),
     )
   let assert Ok(dynamic_import.HookCall(specifier:, referrer:, phase:)) =
     dynamic_import.parse_hook_args(args)

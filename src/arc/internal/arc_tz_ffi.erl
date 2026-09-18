@@ -12,11 +12,11 @@
                     | {posix, arc_posix_tz:posix_tz()}
                     | none.
 
--spec lookup(binary()) -> {ok, binary()} | {error, nil}.
+-spec lookup(binary()) -> {some, binary()} | none.
 lookup(Id) when is_binary(Id) ->
     case maps:find(ascii_lowercase(Id), arc_tz_links_ffi:names_by_lowercase()) of
-        {ok, Proper} -> {ok, Proper};
-        error -> {error, nil}
+        {ok, Proper} -> {some, Proper};
+        error -> none
     end.
 
 ascii_lowercase(Bin) -> << <<(ascii_lower(C))>> || <<C>> <= Bin >>.
@@ -27,8 +27,8 @@ ascii_lower(C) -> C.
 -spec canonical_id(binary()) -> binary().
 canonical_id(Id) when is_binary(Id) ->
     Proper = case lookup(Id) of
-        {ok, P} -> P;
-        {error, nil} -> Id
+        {some, P} -> P;
+        none -> Id
     end,
     maps:get(Proper, arc_tz_links_ffi:links(), Proper).
 
@@ -50,16 +50,16 @@ utc_time_zone() -> none.
 tzif_zone(Id, Rules) -> {tzif, Id, Rules}.
 
 %% a posix tz rule string such as "EST5EDT,M3.2.0,M11.1.0"
--spec posix_zone(binary()) -> {ok, local_zone()} | {error, nil}.
+-spec posix_zone(binary()) -> {some, local_zone()} | none.
 posix_zone(Tz) when is_binary(Tz) ->
     case arc_posix_tz:parse(binary_to_list(Tz)) of
-        none -> {error, nil};
-        PosixTz -> {ok, {posix, PosixTz}}
+        none -> none;
+        PosixTz -> {some, {posix, PosixTz}}
     end.
 
--spec time_zone_id(local_zone()) -> {ok, binary()} | {error, nil}.
-time_zone_id({tzif, Id, _Tz}) -> {ok, Id};
-time_zone_id(_PosixOrNone) -> {error, nil}.
+-spec time_zone_id(local_zone()) -> {some, binary()} | none.
+time_zone_id({tzif, Id, _Tz}) -> {some, Id};
+time_zone_id(_PosixOrNone) -> none.
 
 -spec zone_offset_at_utc_ms(local_zone(), integer()) -> integer().
 zone_offset_at_utc_ms(none, _EpochMs) -> 0;

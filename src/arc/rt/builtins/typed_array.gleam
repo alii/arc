@@ -1,3 +1,4 @@
+import arc/rt/abstract_ops as rt_abstract
 import arc/rt/buffer
 import arc/rt/builtins/array_buffer
 import arc/rt/builtins/common
@@ -81,7 +82,7 @@ pub fn init(
       "values",
       0,
     )
-  let #(values_prop, st) = common.builtin_property(st, mk_object(values_h))
+  let #(values_prop, st) = rt_store.t_builtin_property(st, mk_object(values_h))
   // tostring is the same object as array.prototype.tostring
   let #(array_to_string, st) =
     rt_obj.t_get_prop(
@@ -89,7 +90,7 @@ pub fn init(
       mk_object(array.prototype),
       StringKey(Named("toString")),
     )
-  let #(to_string_prop, st) = common.builtin_property(st, array_to_string)
+  let #(to_string_prop, st) = rt_store.t_builtin_property(st, array_to_string)
   let #(methods, st) =
     common.alloc_methods(st, function_proto, [
       #("at", TypedArrayN(TypedArrayPrototypeAt), 1),
@@ -156,7 +157,7 @@ pub fn init(
       0,
     )
   let #(tag_prop, st) =
-    common.accessor_prop(
+    common.accessor_property(
       st,
       get: Some(mk_object(tag_get)),
       set: None,
@@ -183,7 +184,7 @@ fn init_ctor(
   kind: TypedArrayKind,
 ) -> #(BuiltinPair, Agent) {
   let size = typed_array_bytes.elem_size(kind)
-  let #(size_prop, st) = common.frozen_property(st, mk_int(size))
+  let #(size_prop, st) = rt_store.t_frozen_property(st, mk_int(size))
   let #(size_prop2, st) = common.restamp(st, size_prop)
   let #(bt, st) =
     common.init_type(
@@ -262,8 +263,8 @@ pub fn dispatch(
     TypedArrayPrototypeValues -> proto_iter(st, this, ArrayIterValues)
     TypedArrayPrototypeEntries -> proto_iter(st, this, ArrayIterEntries)
     TypedArrayPrototypeCopyWithin -> proto_copy_within(st, this, args)
-    TypedArrayPrototypeEvery -> proto_every_some(st, this, args, True)
-    TypedArrayPrototypeSome -> proto_every_some(st, this, args, False)
+    TypedArrayPrototypeEvery -> proto_every_some(st, this, args, is_every: True)
+    TypedArrayPrototypeSome -> proto_every_some(st, this, args, is_every: False)
     TypedArrayPrototypeForEach -> proto_for_each(st, this, args)
     TypedArrayPrototypeMap -> proto_map(st, this, args)
     TypedArrayPrototypeFilter -> proto_filter(st, this, args)
@@ -377,7 +378,7 @@ fn ta_from(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let mapping = case classify(mapfn) {
     KUndef -> None
     _ ->
-      case rt_call.is_callable(st, mapfn) {
+      case rt_val.is_callable(st, mapfn) {
         True -> Some(mapfn)
         False -> rt_val.t_throw_type_error(st, "mapfn is not a function")
       }
@@ -386,7 +387,7 @@ fn ta_from(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     rt_val.t_throw_type_error(st, "Cannot convert undefined or null to object")
   })
   let #(iter_fn, st) = rt_obj.t_get_prop(st, source, SymbolKey(symbol_iterator))
-  case rt_call.is_callable(st, iter_fn) {
+  case rt_val.is_callable(st, iter_fn) {
     True -> {
       let #(rec, st) =
         iter_protocol.get_iterator_from_method(st, source, iter_fn)
@@ -403,9 +404,7 @@ fn ta_from(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
       }
     }
     False -> {
-      let #(len_val, st) =
-        rt_obj.t_get_prop(st, source, StringKey(Named("length")))
-      let #(len, st) = rt_val.t_to_length(st, len_val)
+      let #(len, st) = rt_abstract.length_of_array_like(st, source)
       let #(target, target_h, st) = ta_create(st, this, len)
       let bulk = case mapping, classify(source) {
         None, KHandle(src_h) ->
@@ -488,7 +487,7 @@ fn map_and_store(
   this_arg: JsVal,
 ) -> Agent {
   let #(mapped, st) = case mapping {
-    Some(f) -> rt_call.t_call_checked(st, f, this_arg, [v, mk_int(k)])
+    Some(f) -> rt_call.t_call(st, f, this_arg, [v, mk_int(k)])
     None -> #(v, st)
   }
   set_index(st, target_h, target, k, mapped)
@@ -828,7 +827,7 @@ fn from_object(
 ) -> #(Handle, Agent) {
   let #(iter_fn, st) =
     rt_obj.t_get_prop(st, obj_val, SymbolKey(symbol_iterator))
-  case rt_call.is_callable(st, iter_fn) {
+  case rt_val.is_callable(st, iter_fn) {
     True -> {
       let #(rec, st) =
         iter_protocol.get_iterator_from_method(st, obj_val, iter_fn)
@@ -841,9 +840,7 @@ fn from_object(
       }
     }
     False -> {
-      let #(len_val, st) =
-        rt_obj.t_get_prop(st, obj_val, StringKey(Named("length")))
-      let #(len, st) = rt_val.t_to_length(st, len_val)
+      let #(len, st) = rt_abstract.length_of_array_like(st, obj_val)
       let #(fresh, st) = alloc_ta_with_length(st, kind, proto, len)
       let bulk =
         buffer.plain_indexed_values(st, obj_h, len)
@@ -1296,8 +1293,7 @@ fn set_from_array_like(
   len: Int,
   src: JsVal,
 ) -> #(JsVal, Agent) {
-  let #(len_val, st) = rt_obj.t_get_prop(st, src, StringKey(Named("length")))
-  let #(src_len, st) = rt_val.t_to_length(st, len_val)
+  let #(src_len, st) = rt_abstract.length_of_array_like(st, src)
   use <- bool.lazy_guard(src_len + offset > len, fn() {
     rt_val.t_throw_range_error(st, "offset is out of bounds")
   })
@@ -1555,7 +1551,14 @@ fn proto_index_of(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  proto_search(st, this, args, rt_val.strict_eq, False, mk_int)
+  proto_search(
+    st,
+    this,
+    args,
+    rt_val.strict_eq,
+    missing_undefined: False,
+    done: mk_int,
+  )
 }
 
 fn proto_includes(
@@ -1563,7 +1566,13 @@ fn proto_includes(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use found <- proto_search(st, this, args, rt_val.same_value_zero, True)
+  use found <- proto_search(
+    st,
+    this,
+    args,
+    rt_val.same_value_zero,
+    missing_undefined: True,
+  )
   mk_bool(found >= 0)
 }
 
@@ -1572,8 +1581,8 @@ fn proto_search(
   this: JsVal,
   args: List(JsVal),
   eq: fn(JsVal, JsVal) -> Bool,
-  missing_undefined: Bool,
-  done: fn(Int) -> JsVal,
+  missing_undefined missing_undefined: Bool,
+  done done: fn(Int) -> JsVal,
 ) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
   let len = view.length
@@ -1600,7 +1609,7 @@ fn search_loop(
   i: Int,
   search: JsVal,
   eq: fn(JsVal, JsVal) -> Bool,
-  missing_undefined: Bool,
+  missing_undefined missing_undefined: Bool,
 ) -> Int {
   case i >= view.length {
     True -> -1
@@ -1653,16 +1662,14 @@ fn join_collect(
 fn require_cb(st: Agent, args: List(JsVal)) -> #(JsVal, JsVal) {
   let cb = helpers.first_arg_or_undefined(args)
   let this_arg = helpers.arg_at(args, 1)
-  case rt_call.is_callable(st, cb) {
+  case rt_val.is_callable(st, cb) {
     True -> #(cb, this_arg)
     False ->
-      rt_val.t_throw_type_error(st, describe(st, cb) <> " is not a function")
+      rt_val.t_throw_type_error(
+        st,
+        rt_val.type_of(st, cb) <> " is not a function",
+      )
   }
-}
-
-fn describe(st: Agent, v: JsVal) -> String {
-  let #(ty, _) = rt_val.t_type_of(st, v)
-  ty
 }
 
 // bool dropped: only false for immutable buffers, already rejected
@@ -1772,7 +1779,7 @@ fn iterate_calls(
   use <- bool.guard(k < 0 || k >= view.length, #(None, st))
   let el = ta_get(st, view.ta, k)
   let #(res, st) =
-    rt_call.t_call_checked(st, cb, this_arg, [
+    rt_call.t_call(st, cb, this_arg, [
       el,
       mk_int(k),
       mk_object(view.ta),
@@ -1796,7 +1803,7 @@ fn proto_every_some(
   st: Agent,
   this: JsVal,
   args: List(JsVal),
-  is_every: Bool,
+  is_every is_every: Bool,
 ) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
   let #(cb, this_arg) = require_cb(st, args)
@@ -1877,7 +1884,7 @@ fn map_loop(
   use <- bool.guard(k >= view.length, st)
   let el = ta_get(st, view.ta, k)
   let #(mapped, st) =
-    rt_call.t_call_checked(st, cb, this_arg, [
+    rt_call.t_call(st, cb, this_arg, [
       el,
       mk_int(k),
       mk_object(view.ta),
@@ -1907,7 +1914,7 @@ fn filter_collect(
   use <- bool.guard(k >= view.length, #(acc, st))
   let el = ta_get(st, view.ta, k)
   let #(res, st) =
-    rt_call.t_call_checked(st, cb, this_arg, [
+    rt_call.t_call(st, cb, this_arg, [
       el,
       mk_int(k),
       mk_object(view.ta),
@@ -1944,8 +1951,11 @@ fn proto_reduce(
   let view = validate_ta(st, this)
   let len = view.length
   let cb = helpers.first_arg_or_undefined(args)
-  use <- bool.lazy_guard(!rt_call.is_callable(st, cb), fn() {
-    rt_val.t_throw_type_error(st, describe(st, cb) <> " is not a function")
+  use <- bool.lazy_guard(!rt_val.is_callable(st, cb), fn() {
+    rt_val.t_throw_type_error(
+      st,
+      rt_val.type_of(st, cb) <> " is not a function",
+    )
   })
   let start = direction_start(dir, len)
   case helpers.list_at(args, 1) {
@@ -1976,7 +1986,7 @@ fn reduce_loop(
   use <- bool.guard(k < 0 || k >= view.length, #(acc, st))
   let el = ta_get(st, view.ta, k)
   let #(res, st) =
-    rt_call.t_call_checked(st, cb, mk_undefined(), [
+    rt_call.t_call(st, cb, mk_undefined(), [
       acc,
       el,
       mk_int(k),
@@ -2230,7 +2240,7 @@ fn compare_with(st: Agent, cmp: JsVal, x: JsVal, y: JsVal) -> #(Int, Agent) {
   case classify(cmp) {
     KUndef -> #(default_ta_compare(x, y), st)
     _ -> {
-      let #(res, st) = rt_call.t_call_checked(st, cmp, mk_undefined(), [x, y])
+      let #(res, st) = rt_call.t_call(st, cmp, mk_undefined(), [x, y])
       let #(n, st) = rt_val.t_to_number(st, res)
       let c = case n {
         JNan -> 0
@@ -2313,7 +2323,7 @@ fn sorted_snapshot(
 ) -> #(TaWitness, List(JsVal), Agent) {
   let cmp = helpers.first_arg_or_undefined(args)
   use <- bool.lazy_guard(
-    classify(cmp) != KUndef && !rt_call.is_callable(st, cmp),
+    classify(cmp) != KUndef && !rt_val.is_callable(st, cmp),
     fn() {
       rt_val.t_throw_type_error(
         st,
@@ -2408,7 +2418,7 @@ fn locale_loop(
     False -> {
       let #(m, st) =
         rt_obj.t_get_prop(st, el, StringKey(Named("toLocaleString")))
-      let #(res, st) = rt_call.t_call_checked(st, m, el, [locales_v, options_v])
+      let #(res, st) = rt_call.t_call(st, m, el, [locales_v, options_v])
       let #(s, st) = rt_val.t_to_string(st, res)
       locale_loop(st, view, k + 1, locales_v, options_v, [s, ..acc])
     }

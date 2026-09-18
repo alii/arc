@@ -7,7 +7,7 @@ import arc/rt/builtins as rt_builtins
 import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion}
 import arc/rt/inspect as rt_inspect
 import arc/rt/types.{
-  type Agent, type JsVal, JFloat, JInt, KBool, KNum, KStr, classify, mk_number,
+  type Agent, type JsVal, JFloat, JInt, KBool, KNum, KStr, classify, mk_int,
   mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
@@ -141,7 +141,7 @@ pub fn validate_integer_accepts_in_range_test() {
   let s =
     state_with_validator("f", fn(v, s) {
       use n, s <- host.validate_integer(s, v, "port", 0, 65_535)
-      #(s, Ok(mk_number(JInt(n))))
+      #(s, Ok(mk_int(n)))
     })
   assert eval_number(s, "f(8080)") == 8080.0
 }
@@ -346,7 +346,7 @@ pub fn host_object_typed_roundtrip_test() {
     })
     |> host.define_fn("readHost", 1, fn(args, _this, s) {
       case host.read_host(s, host.first_arg(args)) {
-        option.Some(Pid(n)) -> #(s, Ok(mk_number(JInt(n))))
+        option.Some(Pid(n)) -> #(s, Ok(mk_int(n)))
         option.Some(Socket(name)) -> #(s, Ok(mk_string("socket:" <> name)))
         option.None -> #(s, Ok(mk_string("not-a-host-object")))
       }

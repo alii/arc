@@ -11,8 +11,8 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, Agent, BirthSettled, BytecodeFn, FnFlags,
-  GenSuspendedYield, HostJob, JsStore, KHandle, NoElements, ResumeFrame,
-  SGenerator, SObject, classify, mk_object, mk_undefined,
+  GenSuspendedYield, HostJob, JsStore, KHandle, ResumeFrame, SGenerator,
+  classify, mk_object, mk_undefined, plain_object,
 }
 import gleam/dict
 import gleam/option.{None, Some}
@@ -265,8 +265,8 @@ pub fn closure_environment_and_constants_are_traced_test() {
   let #(fn_h, st) =
     rt_store.t_cell_new(
       st,
-      SObject(
-        kind: BytecodeFn(
+      plain_object(
+        BytecodeFn(
           template:,
           env: bytecode.env_from_list([captured]),
           home_object: None,
@@ -276,11 +276,8 @@ pub fn closure_environment_and_constants_are_traced_test() {
           unit: 0,
           birth: BirthSettled,
         ),
-        proto: None,
-        props: dict.new(),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
+        None,
+        dict.new(),
       ),
     )
   let st = rt_obj.t_global_set(st, <<"f">>, mk_object(fn_h))
