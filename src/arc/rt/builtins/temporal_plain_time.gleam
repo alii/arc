@@ -1,20 +1,21 @@
-import arc/internal/int_math.{floor_div, floor_mod as math_mod}
+import arc/internal/int_math.{floor_div, floor_mod}
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   Hour, Nanosecond, apply_since_mode, apply_since_ns, balance_time_ns,
-  epoch_ns_to_iso_in, get_difference_settings, get_options_object, make_duration,
-  make_time, max_unit, negate_dur, read_int_field, require_largest_ge_smallest,
-  require_temporal, require_time_unit, round_options, round_to_increment, terr,
-  time_only_ns, time_slot_of, time_unit_ns, to_string_time_options,
-  to_temporal_duration, unit_rank, valid_time_increment,
-} as tc
+  epoch_ns_to_iso_in, get_difference_settings, get_options_object,
+  get_overflow_option_from_value, make_duration, make_time, max_unit,
+  negate_duration, read_int_field, require_largest_ge_smallest, require_temporal,
+  require_time_unit, round_options, round_to_increment, terr, time_part_ns,
+  time_slot_of, time_unit_ns, to_string_time_options, to_temporal_duration,
+  truncated_int_arg_or, unit_rank, valid_time_increment,
+}
 import arc/rt/builtins/temporal_fields.{
   check_parsed_calendar, is_month_day_like, is_year_month_like,
-  require_nonempty_fields, require_partial_bag, validated_overflow,
+  require_nonempty_fields, require_partial_bag,
 }
 import arc/rt/builtins/temporal_iso.{
-  type Overflow, type TErr, type TimeRec, AutoPrec, Constrain, NoOffset,
-  NumericOffset, RangeE, Reject, TimeRec, Zulu, format_iso_time, int_sign,
+  type IsoTime, type Overflow, type TErr, AutoPrecision, Constrain, IsoTime,
+  NoOffset, NumericOffset, RangeE, Reject, Zulu, format_iso_time, int_sign,
   is_valid_time, midnight, ns_per_day, ns_to_time, parse_annotations,
   parse_iso_datetime_string, parse_offset_part, parse_time_part, time_to_ns,
 }
@@ -126,13 +127,14 @@ pub fn ctor(
   protos: TemporalProtos,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(h, st) = tc.opt_int_arg(st, args, 0)
-  let #(mi, st) = tc.opt_int_arg(st, args, 1)
-  let #(s, st) = tc.opt_int_arg(st, args, 2)
-  let #(ms, st) = tc.opt_int_arg(st, args, 3)
-  let #(us, st) = tc.opt_int_arg(st, args, 4)
-  let #(ns, st) = tc.opt_int_arg(st, args, 5)
-  let t = TimeRec(h, mi, s, ms, us, ns)
+  let #(hour, st) = truncated_int_arg_or(st, args, 0, 0)
+  let #(minute, st) = truncated_int_arg_or(st, args, 1, 0)
+  let #(second, st) = truncated_int_arg_or(st, args, 2, 0)
+  let #(millisecond, st) = truncated_int_arg_or(st, args, 3, 0)
+  let #(microsecond, st) = truncated_int_arg_or(st, args, 4, 0)
+  let #(nanosecond, st) = truncated_int_arg_or(st, args, 5, 0)
+  let t =
+    IsoTime(hour:, minute:, second:, millisecond:, microsecond:, nanosecond:)
   case is_valid_time(t) {
     False -> rt_val.t_throw_range_error(st, "invalid time")
     True -> make_time(st, protos, t)
@@ -171,14 +173,14 @@ pub fn getter(
   #(time_field(t, g), st)
 }
 
-pub fn time_field(t: TimeRec, g: TemporalTimeGetter) -> JsVal {
+pub fn time_field(t: IsoTime, g: TemporalTimeGetter) -> JsVal {
   let n = case g {
     TgHour -> t.hour
     TgMinute -> t.minute
     TgSecond -> t.second
-    TgMillisecond -> t.ms
-    TgMicrosecond -> t.us
-    TgNanosecond -> t.ns
+    TgMillisecond -> t.millisecond
+    TgMicrosecond -> t.microsecond
+    TgNanosecond -> t.nanosecond
   }
   mk_number(JInt(n))
 }
@@ -200,21 +202,22 @@ pub fn method(
     )
   case m {
     PtToJson | PtToLocaleString -> #(
-      mk_string(format_iso_time(t, AutoPrec)),
+      mk_string(format_iso_time(t, AutoPrecision)),
       st,
     )
     PtToString -> {
       let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
-      let #(#(prec, su, sinc, mode), st) = to_string_time_options(st, opts)
-      let t2 = case su {
+      let #(#(precision, smallest_time_unit, inc, mode), st) =
+        to_string_time_options(st, opts)
+      let t2 = case smallest_time_unit {
         None -> t
         Some(u) -> {
           let rounded =
-            round_to_increment(time_to_ns(t), sinc * time_unit_ns(u), mode)
-          ns_to_time(math_mod(rounded, ns_per_day))
+            round_to_increment(time_to_ns(t), inc * time_unit_ns(u), mode)
+          ns_to_time(floor_mod(rounded, ns_per_day))
         }
       }
-      #(mk_string(format_iso_time(t2, prec)), st)
+      #(mk_string(format_iso_time(t2, precision)), st)
     }
     PtValueOf ->
       rt_val.t_throw_type_error(
@@ -229,31 +232,32 @@ pub fn method(
     PtAdd | PtSubtract -> {
       let #(dur, st) = to_temporal_duration(st, helpers.arg_at(args, 0))
       let dur = case m {
-        PtSubtract -> negate_dur(dur)
+        PtSubtract -> negate_duration(dur)
         _ -> dur
       }
-      let #(_, t2) = add_time(t, time_only_ns(dur))
+      let #(_, t2) = add_time(t, time_part_ns(dur))
       make_time(st, protos, t2)
     }
     PtWith -> {
       let #(bag, st) = require_partial_bag(st, helpers.arg_at(args, 0))
       let #(f, st) = read_time_fields(st, bag)
       let Nil = require_nonempty_fields(st, f == no_time_fields)
-      let #(overflow, st) = validated_overflow(st, helpers.arg_at(args, 1))
+      let #(overflow, st) =
+        get_overflow_option_from_value(st, helpers.arg_at(args, 1))
       let t2 = time_fields_apply(f, t)
       let t3 = terr(st, regulate_time(t2, overflow))
       make_time(st, protos, t3)
     }
     PtRound -> {
-      let #(#(su, inc, mode), st) =
+      let #(#(smallest_time_unit, inc, mode), st) =
         round_options(st, helpers.arg_at(args, 0), allow_day: False)
-      let u_ns = time_unit_ns(su)
-      let max = ns_per_day / u_ns
+      let unit_ns = time_unit_ns(smallest_time_unit)
+      let max = ns_per_day / unit_ns
       case valid_time_increment(inc, max) {
         False -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
         True -> {
-          let rounded = round_to_increment(time_to_ns(t), inc * u_ns, mode)
-          let t2 = ns_to_time(math_mod(rounded, ns_per_day))
+          let rounded = round_to_increment(time_to_ns(t), inc * unit_ns, mode)
+          let t2 = ns_to_time(floor_mod(rounded, ns_per_day))
           make_time(st, protos, t2)
         }
       }
@@ -269,8 +273,8 @@ pub fn method(
 fn time_until_since(
   st: Agent,
   protos: TemporalProtos,
-  t1: TimeRec,
-  t2: TimeRec,
+  t1: IsoTime,
+  t2: IsoTime,
   args: List(JsVal),
   is_since: Bool,
 ) -> #(JsVal, Agent) {
@@ -285,10 +289,11 @@ fn time_until_since(
       rt_val.t_throw_range_error(st, "units must be time units for PlainTime")
     False -> {
       let Nil = require_largest_ge_smallest(st, largest, smallest)
-      let su = terr(st, require_time_unit(smallest))
-      let mode2 = apply_since_mode(mode, is_since)
+      let smallest_time_unit = terr(st, require_time_unit(smallest))
+      let mode = apply_since_mode(mode, is_since)
       let diff = time_to_ns(t2) - time_to_ns(t1)
-      let rounded = round_to_increment(diff, inc * time_unit_ns(su), mode2)
+      let rounded =
+        round_to_increment(diff, inc * time_unit_ns(smallest_time_unit), mode)
       let rounded = apply_since_ns(rounded, is_since)
       let dur = balance_time_ns(rounded, largest)
       make_duration(st, protos, dur)
@@ -301,36 +306,39 @@ pub type TimeFields {
     hour: Option(Int),
     minute: Option(Int),
     second: Option(Int),
-    ms: Option(Int),
-    us: Option(Int),
-    ns: Option(Int),
+    millisecond: Option(Int),
+    microsecond: Option(Int),
+    nanosecond: Option(Int),
   )
 }
 
 pub const no_time_fields = TimeFields(None, None, None, None, None, None)
 
-pub fn time_fields_apply(f: TimeFields, base: TimeRec) -> TimeRec {
-  TimeRec(
+pub fn time_fields_apply(f: TimeFields, base: IsoTime) -> IsoTime {
+  IsoTime(
     hour: option.unwrap(f.hour, base.hour),
     minute: option.unwrap(f.minute, base.minute),
     second: option.unwrap(f.second, base.second),
-    ms: option.unwrap(f.ms, base.ms),
-    us: option.unwrap(f.us, base.us),
-    ns: option.unwrap(f.ns, base.ns),
+    millisecond: option.unwrap(f.millisecond, base.millisecond),
+    microsecond: option.unwrap(f.microsecond, base.microsecond),
+    nanosecond: option.unwrap(f.nanosecond, base.nanosecond),
   )
 }
 
 pub fn read_time_fields(st: Agent, bag: Handle) -> #(TimeFields, Agent) {
   let #(hour, st) = read_int_field(st, bag, "hour")
-  let #(us, st) = read_int_field(st, bag, "microsecond")
-  let #(ms, st) = read_int_field(st, bag, "millisecond")
+  let #(microsecond, st) = read_int_field(st, bag, "microsecond")
+  let #(millisecond, st) = read_int_field(st, bag, "millisecond")
   let #(minute, st) = read_int_field(st, bag, "minute")
-  let #(ns, st) = read_int_field(st, bag, "nanosecond")
+  let #(nanosecond, st) = read_int_field(st, bag, "nanosecond")
   let #(second, st) = read_int_field(st, bag, "second")
-  #(TimeFields(hour:, minute:, second:, ms:, us:, ns:), st)
+  #(
+    TimeFields(hour:, minute:, second:, millisecond:, microsecond:, nanosecond:),
+    st,
+  )
 }
 
-pub fn regulate_time(t: TimeRec, overflow: Overflow) -> Result(TimeRec, TErr) {
+pub fn regulate_time(t: IsoTime, overflow: Overflow) -> Result(IsoTime, TErr) {
   case overflow {
     Reject ->
       case is_valid_time(t) {
@@ -338,13 +346,13 @@ pub fn regulate_time(t: TimeRec, overflow: Overflow) -> Result(TimeRec, TErr) {
         False -> Error(RangeE("time out of range"))
       }
     Constrain ->
-      Ok(TimeRec(
+      Ok(IsoTime(
         hour: int.clamp(t.hour, 0, 23),
         minute: int.clamp(t.minute, 0, 59),
         second: int.clamp(t.second, 0, 59),
-        ms: int.clamp(t.ms, 0, 999),
-        us: int.clamp(t.us, 0, 999),
-        ns: int.clamp(t.ns, 0, 999),
+        millisecond: int.clamp(t.millisecond, 0, 999),
+        microsecond: int.clamp(t.microsecond, 0, 999),
+        nanosecond: int.clamp(t.nanosecond, 0, 999),
       ))
   }
 }
@@ -353,7 +361,7 @@ pub fn to_temporal_time(
   st: Agent,
   item: JsVal,
   options: JsVal,
-) -> #(TimeRec, Agent) {
+) -> #(IsoTime, Agent) {
   case classify(item) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
@@ -380,9 +388,9 @@ pub fn to_temporal_time(
             )),
             ..,
           ) -> {
-          let #(_o, st) = validated_overflow(st, options)
+          let #(_o, st) = get_overflow_option_from_value(st, options)
           #(
-            TimeRec(hour, minute, second, millisecond, microsecond, nanosecond),
+            IsoTime(hour, minute, second, millisecond, microsecond, nanosecond),
             st,
           )
         }
@@ -394,7 +402,7 @@ pub fn to_temporal_time(
           )),
           ..,
         ) -> {
-          let #(_o, st) = validated_overflow(st, options)
+          let #(_o, st) = get_overflow_option_from_value(st, options)
           let #(_, t) = terr(st, epoch_ns_to_iso_in(time_zone, epoch_ns))
           #(t, st)
         }
@@ -402,14 +410,14 @@ pub fn to_temporal_time(
       }
     KStr(s) -> {
       let t = terr(st, parse_time_string(s))
-      let #(_o, st) = validated_overflow(st, options)
+      let #(_o, st) = get_overflow_option_from_value(st, options)
       #(t, st)
     }
     _ -> rt_val.t_throw_type_error(st, "cannot convert to a Temporal.PlainTime")
   }
 }
 
-pub fn parse_time_string(s: String) -> Result(TimeRec, TErr) {
+pub fn parse_time_string(s: String) -> Result(IsoTime, TErr) {
   case parse_iso_datetime_string(s) {
     Some(p) ->
       case p.offset {
@@ -440,7 +448,7 @@ pub fn parse_time_string(s: String) -> Result(TimeRec, TErr) {
   }
 }
 
-fn parse_time_with_annotations(s: String) -> Option(TimeRec) {
+fn parse_time_with_annotations(s: String) -> Option(IsoTime) {
   use #(t, rest) <- option.then(parse_time_part(s))
   let rest = case parse_offset_part(rest) {
     Some(#(Zulu, _)) -> "###invalid###"
@@ -472,7 +480,7 @@ pub fn time_from_bag(
   st: Agent,
   bag: Handle,
   options: JsVal,
-) -> #(TimeRec, Agent) {
+) -> #(IsoTime, Agent) {
   let #(f, st) = read_time_fields(st, bag)
   case f == no_time_fields {
     True ->
@@ -481,14 +489,14 @@ pub fn time_from_bag(
         "invalid property bag for Temporal.PlainTime",
       )
     False -> {
-      let #(overflow, st) = validated_overflow(st, options)
+      let #(overflow, st) = get_overflow_option_from_value(st, options)
       let t0 = time_fields_apply(f, midnight)
       #(terr(st, regulate_time(t0, overflow)), st)
     }
   }
 }
 
-pub fn add_time(t: TimeRec, add_ns: Int) -> #(Int, TimeRec) {
+pub fn add_time(t: IsoTime, add_ns: Int) -> #(Int, IsoTime) {
   let total = time_to_ns(t) + add_ns
   let days = floor_div(total, ns_per_day)
   let rem = total - days * ns_per_day

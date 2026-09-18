@@ -1,26 +1,27 @@
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
-  CalAuto, Day, Nanosecond, UDay, apply_since_dur, apply_since_mode,
+  CalAuto, Day, DayUnit, Nanosecond, apply_since_duration, apply_since_mode,
   calendar_suffix, check_diff_setup, date_time_slot_of, epoch_ns_to_iso_in,
   get_calendar_name_option, get_difference_settings, get_disambiguation_option,
-  get_options_object, make_date_cal, make_date_time_cal, make_duration,
-  make_time, make_zoned_cal, max_unit, parse_time_zone_id, require_temporal,
-  round_options, round_to_increment, temporal_data_of, terr, time_only_ns,
-  time_unit_ns, to_string_time_options, valid_time_increment,
-} as tc
+  get_options_object, get_overflow_option_from_value, make_date_cal,
+  make_date_time_cal, make_duration, make_time, make_zoned_cal, max_unit,
+  require_temporal, round_options, round_to_increment, temporal_data_of, terr,
+  time_part_ns, time_unit_ns, time_zone_from_string, to_string_time_options,
+  truncated_int_arg, truncated_int_arg_or, valid_time_increment,
+}
 import arc/rt/builtins/temporal_diff.{compare_iso_date_time, diff_date_time_core}
 import arc/rt/builtins/temporal_fields.{
   add_sub_args, calendar_date_add, calendar_with_fields, int_val,
   parse_plain_datetime_string, parsed_calendar_id, read_bag_calendar,
   require_nonempty_fields, require_partial_bag, resolve_calendar_date,
-  to_calendar_arg, to_temporal_calendar_identifier, validated_overflow,
+  to_calendar_arg, to_temporal_calendar_identifier,
 }
 import arc/rt/builtins/temporal_iso.{
-  type IsoDate, type TimeRec, AutoPrec, DurRec, IsoDate, TimeRec, epoch_days,
-  epoch_ns_to_iso, format_iso_date, format_iso_time, is_valid_iso_date,
-  is_valid_time, iso_datetime_within_limits, midnight, ns_max_instant,
-  ns_per_day, time_to_ns, zero_dur,
+  type IsoDate, type IsoTime, AutoPrecision, Duration, IsoDate, IsoTime,
+  epoch_days, epoch_ns_to_iso, format_iso_date, format_iso_time,
+  is_valid_iso_date, is_valid_time, iso_datetime_within_limits, midnight,
+  ns_max_instant, ns_per_day, time_to_ns, zero_duration,
 }
 import arc/rt/builtins/temporal_plain_date.{date_field_cal, date_getter_name}
 import arc/rt/builtins/temporal_plain_time.{
@@ -162,21 +163,22 @@ pub fn ctor(
   protos: TemporalProtos,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(y, st) = tc.arg_trunc_int(st, args, 0)
-  let #(mo, st) = tc.arg_trunc_int(st, args, 1)
-  let #(d, st) = tc.arg_trunc_int(st, args, 2)
-  let #(h, st) = tc.opt_int_arg(st, args, 3)
-  let #(mi, st) = tc.opt_int_arg(st, args, 4)
-  let #(s, st) = tc.opt_int_arg(st, args, 5)
-  let #(ms, st) = tc.opt_int_arg(st, args, 6)
-  let #(us, st) = tc.opt_int_arg(st, args, 7)
-  let #(ns, st) = tc.opt_int_arg(st, args, 8)
+  let #(year, st) = truncated_int_arg(st, args, 0)
+  let #(month, st) = truncated_int_arg(st, args, 1)
+  let #(day, st) = truncated_int_arg(st, args, 2)
+  let #(hour, st) = truncated_int_arg_or(st, args, 3, 0)
+  let #(minute, st) = truncated_int_arg_or(st, args, 4, 0)
+  let #(second, st) = truncated_int_arg_or(st, args, 5, 0)
+  let #(millisecond, st) = truncated_int_arg_or(st, args, 6, 0)
+  let #(microsecond, st) = truncated_int_arg_or(st, args, 7, 0)
+  let #(nanosecond, st) = truncated_int_arg_or(st, args, 8, 0)
   let cal = terr(st, to_calendar_arg(helpers.arg_at(args, 9)))
-  let t = TimeRec(h, mi, s, ms, us, ns)
-  case is_valid_iso_date(y, mo, d) && is_valid_time(t) {
+  let t =
+    IsoTime(hour:, minute:, second:, millisecond:, microsecond:, nanosecond:)
+  case is_valid_iso_date(year, month, day) && is_valid_time(t) {
     False -> rt_val.t_throw_range_error(st, "invalid ISO date-time")
     True -> {
-      let date = IsoDate(y, mo, d)
+      let date = IsoDate(year:, month:, day:)
       case iso_datetime_within_limits(date, t) {
         False ->
           rt_val.t_throw_range_error(st, "date-time outside of supported range")
@@ -216,7 +218,7 @@ pub fn to_temporal_date_time(
   st: Agent,
   item: JsVal,
   options: JsVal,
-) -> #(#(IsoDate, TimeRec, tcal.Calendar), Agent) {
+) -> #(#(IsoDate, IsoTime, tcal.Calendar), Agent) {
   case classify(item) {
     KHandle(h) ->
       case temporal_data_of(st, item) {
@@ -232,17 +234,17 @@ pub fn to_temporal_date_time(
           nanosecond:,
           calendar:,
         )) -> {
-          let #(_o, st) = validated_overflow(st, options)
+          let #(_o, st) = get_overflow_option_from_value(st, options)
           let t =
-            TimeRec(hour, minute, second, millisecond, microsecond, nanosecond)
+            IsoTime(hour, minute, second, millisecond, microsecond, nanosecond)
           #(#(IsoDate(year, month, day), t, calendar), st)
         }
         Some(TemporalDate(year:, month:, day:, calendar:)) -> {
-          let #(_o, st) = validated_overflow(st, options)
+          let #(_o, st) = get_overflow_option_from_value(st, options)
           #(#(IsoDate(year, month, day), midnight, calendar), st)
         }
         Some(TemporalZonedDateTime(epoch_ns:, time_zone:, calendar:)) -> {
-          let #(_o, st) = validated_overflow(st, options)
+          let #(_o, st) = get_overflow_option_from_value(st, options)
           let #(d, t) = terr(st, epoch_ns_to_iso_in(time_zone, epoch_ns))
           #(#(d, t, calendar), st)
         }
@@ -252,7 +254,7 @@ pub fn to_temporal_date_time(
       let p = terr(st, parse_plain_datetime_string(s))
       let t = option.unwrap(p.time, midnight)
       let cal = terr(st, parsed_calendar_id(p))
-      let #(_o, st) = validated_overflow(st, options)
+      let #(_o, st) = get_overflow_option_from_value(st, options)
       case iso_datetime_within_limits(p.date, t) {
         True -> #(#(p.date, t, cal), st)
         False ->
@@ -271,11 +273,11 @@ pub fn date_time_from_bag(
   st: Agent,
   h: Handle,
   options: JsVal,
-) -> #(#(IsoDate, TimeRec, tcal.Calendar), Agent) {
+) -> #(#(IsoDate, IsoTime, tcal.Calendar), Agent) {
   let #(cal, st) = read_bag_calendar(st, h)
   let #(f, st) =
     read_date_time_fields(st, h, cal, read_offset: False, read_tz: False)
-  let #(overflow, st) = validated_overflow(st, options)
+  let #(overflow, st) = get_overflow_option_from_value(st, options)
   let date = terr(st, resolve_calendar_date(cal, f.date, overflow))
   let t0 = time_fields_apply(f.time, midnight)
   let t = terr(st, regulate_time(t0, overflow))
@@ -324,31 +326,32 @@ pub fn method(
       mk_string(
         format_iso_date(d)
         <> "T"
-        <> format_iso_time(t, AutoPrec)
+        <> format_iso_time(t, AutoPrecision)
         <> calendar_suffix(CalAuto, cal),
       ),
       st,
     )
     PdtToLocaleString -> #(
-      mk_string(format_iso_date(d) <> " " <> format_iso_time(t, AutoPrec)),
+      mk_string(format_iso_date(d) <> " " <> format_iso_time(t, AutoPrecision)),
       st,
     )
     PdtToString -> {
       let #(#(cal_name, opts), st) =
         get_calendar_name_option(st, helpers.arg_at(args, 0))
-      let #(#(prec, su, sinc, mode), st) = to_string_time_options(st, opts)
-      let #(d2, t2) = case su {
+      let #(#(precision, smallest_time_unit, inc, mode), st) =
+        to_string_time_options(st, opts)
+      let #(d2, t2) = case smallest_time_unit {
         None -> #(d, t)
         Some(u) -> {
           let total = epoch_days(d) * ns_per_day + time_to_ns(t)
-          let rounded = round_to_increment(total, sinc * time_unit_ns(u), mode)
+          let rounded = round_to_increment(total, inc * time_unit_ns(u), mode)
           epoch_ns_to_iso(rounded, 0)
         }
       }
       let s =
         format_iso_date(d2)
         <> "T"
-        <> format_iso_time(t2, prec)
+        <> format_iso_time(t2, precision)
         <> calendar_suffix(cal_name, cal)
       #(mk_string(s), st)
     }
@@ -364,10 +367,10 @@ pub fn method(
     }
     PdtAdd | PdtSubtract -> {
       let #(dur, overflow, st) = add_sub_args(st, args, m == PdtSubtract)
-      let #(carry, t2) = add_time(t, time_only_ns(dur))
+      let #(carry, t2) = add_time(t, time_part_ns(dur))
       let date_dur =
-        DurRec(
-          ..zero_dur,
+        Duration(
+          ..zero_duration,
           years: dur.years,
           months: dur.months,
           weeks: dur.weeks,
@@ -398,7 +401,8 @@ pub fn method(
       let #(f, st) =
         read_date_time_fields(st, bag, cal, read_offset: False, read_tz: False)
       let Nil = require_nonempty_fields(st, date_time_fields_all_none(f))
-      let #(overflow, st) = validated_overflow(st, helpers.arg_at(args, 1))
+      let #(overflow, st) =
+        get_overflow_option_from_value(st, helpers.arg_at(args, 1))
       let date = terr(st, calendar_with_fields(cal, d, f.date, overflow))
       let t0 = time_fields_apply(f.time, t)
       let t2 = terr(st, regulate_time(t0, overflow))
@@ -409,18 +413,18 @@ pub fn method(
       }
     }
     PdtRound -> {
-      let #(#(su, inc, mode), st) =
+      let #(#(smallest_time_unit, inc, mode), st) =
         round_options(st, helpers.arg_at(args, 0), allow_day: True)
-      let u_ns = time_unit_ns(su)
-      let max = case su {
-        UDay -> 1
-        _ -> ns_per_day / u_ns
+      let unit_ns = time_unit_ns(smallest_time_unit)
+      let max = case smallest_time_unit {
+        DayUnit -> 1
+        _ -> ns_per_day / unit_ns
       }
       case valid_time_increment(inc, max) {
         False -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
         True -> {
           let total = epoch_days(d) * ns_per_day + time_to_ns(t)
-          let rounded = round_to_increment(total, inc * u_ns, mode)
+          let rounded = round_to_increment(total, inc * unit_ns, mode)
           let #(d2, t2) = epoch_ns_to_iso(rounded, 0)
           case iso_datetime_within_limits(d2, t2) {
             False ->
@@ -439,8 +443,7 @@ pub fn method(
       let arg = helpers.arg_at(args, 0)
       case classify(arg) {
         KStr(tz_str) -> {
-          let #(tz, st) = parse_time_zone_id(st, tz_str)
-          let tz = terr(st, tz)
+          let #(tz, st) = time_zone_from_string(st, tz_str)
           let #(opts, st) = get_options_object(st, helpers.arg_at(args, 1))
           let #(dis, st) = get_disambiguation_option(st, opts)
           let ns = terr(st, get_epoch_ns_for(tz, d, t, dis))
@@ -482,8 +485,8 @@ fn date_time_until_since(
   st: Agent,
   protos: TemporalProtos,
   cal: tcal.Calendar,
-  a: #(IsoDate, TimeRec),
-  b: #(IsoDate, TimeRec),
+  a: #(IsoDate, IsoTime),
+  b: #(IsoDate, IsoTime),
   args: List(JsVal),
   is_since: Bool,
 ) -> #(JsVal, Agent) {
@@ -491,12 +494,12 @@ fn date_time_until_since(
   let smallest = option.unwrap(smallest, Nanosecond)
   let largest = option.unwrap(largest, max_unit(smallest, Day))
   let Nil = check_diff_setup(st, largest, smallest, inc)
-  let mode2 = apply_since_mode(mode, is_since)
+  let mode = apply_since_mode(mode, is_since)
   let final =
     terr(
       st,
-      diff_date_time_core(cal, a, b, largest, smallest, inc, mode2, False),
+      diff_date_time_core(cal, a, b, largest, smallest, inc, mode, zoned: False),
     )
-  let final = apply_since_dur(final, is_since)
+  let final = apply_since_duration(final, is_since)
   make_duration(st, protos, final)
 }

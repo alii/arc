@@ -2,21 +2,21 @@ import arc/internal/int_math.{floor_div}
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
-  Compatible, Hour, Nanosecond, OffsetShowAuto, OffsetShowNever, PreferOffset,
-  Trunc, TzAuto, TzCritical, TzNever, UDay, UHour, UMicrosecond, UMillisecond,
-  UMinute, UNanosecond, USecond, apply_since_dur, apply_since_mode,
-  apply_since_ns, as_if_positive_mode, balance_time_ns, calendar_suffix,
-  check_diff_setup, epoch_ns_to_iso_in, format_offset_full,
-  format_offset_rounded, get_calendar_name_option, get_difference_settings,
-  get_disambiguation_option, get_enum_option, get_fractional_digits,
-  get_offset_option, get_options_object, get_overflow_option,
-  get_show_offset_option, get_time_zone_name_option, get_unit_option,
-  make_date_cal, make_date_time_cal, make_duration, make_instant, make_time,
-  make_zoned_cal, max_unit, parse_time_zone_id_strict, require_temporal,
-  require_time_unit, round_options, round_to_increment, seconds_string_precision,
-  terr, time_only_ns, time_unit_ns, time_zone_equals, time_zone_id,
-  to_temporal_time_zone, tz_offset_ns_at, unit_rank, valid_time_increment,
-  zoned_slot_of,
+  Compatible, DayUnit, Hour, HourUnit, InvalidIdentifier, MicrosecondUnit,
+  MillisecondUnit, MinuteUnit, Nanosecond, NanosecondUnit, OffsetShowAuto,
+  OffsetShowNever, PreferOffset, SecondUnit, Trunc, TzAuto, TzCritical, TzNever,
+  UnknownIdentifier, apply_since_duration, apply_since_mode, apply_since_ns,
+  as_if_positive_mode, balance_time_ns, calendar_suffix, check_diff_setup,
+  epoch_ns_to_iso_in, format_offset_full, format_offset_rounded,
+  get_calendar_name_option, get_difference_settings, get_disambiguation_option,
+  get_enum_option, get_fractional_digits, get_offset_option, get_options_object,
+  get_overflow_option, get_rounding_mode_option, get_show_offset_option,
+  get_time_zone_name_option, get_unit_option, make_date_cal, make_date_time_cal,
+  make_duration, make_instant, make_time, make_zoned_cal, max_unit,
+  parse_time_zone_identifier, require_temporal, require_time_unit, round_options,
+  round_to_increment, seconds_string_precision, terr, time_part_ns, time_unit_ns,
+  time_zone_equals, time_zone_id, to_temporal_time_zone, tz_offset_ns_at,
+  unit_rank, valid_time_increment, zoned_slot_of,
 }
 import arc/rt/builtins/temporal_diff.{diff_date_time_core}
 import arc/rt/builtins/temporal_fields.{
@@ -24,10 +24,10 @@ import arc/rt/builtins/temporal_fields.{
   require_partial_bag, to_calendar_arg, to_temporal_calendar_identifier,
 }
 import arc/rt/builtins/temporal_iso.{
-  type Precision, type TErr, AutoPrec, DurRec, RangeE, epoch_days,
-  epoch_ns_to_iso, format_iso_date, format_iso_time, int_sign,
-  iso_date_from_epoch_days, ns_div_float, ns_max_instant, ns_per_day,
-  ns_per_hour, ns_per_ms, zero_dur,
+  type SecondsPrecision, type TErr, AutoPrecision, Duration, RangeE,
+  divide_as_float, epoch_days, epoch_ns_to_iso, format_iso_date, format_iso_time,
+  int_sign, iso_date_from_epoch_days, ns_max_instant, ns_per_day, ns_per_hour,
+  ns_per_ms, zero_duration,
 }
 import arc/rt/builtins/temporal_plain_date.{date_field_cal, date_getter_name}
 import arc/rt/builtins/temporal_plain_time.{
@@ -45,12 +45,12 @@ import arc/rt/types.{
   type ZonedDateTimeMethod, DgCalendarId, DgDay, DgDayOfWeek, DgDayOfYear,
   DgDaysInMonth, DgDaysInWeek, DgDaysInYear, DgEra, DgEraYear, DgInLeapYear,
   DgMonth, DgMonthCode, DgMonthsInYear, DgWeekOfYear, DgYear, DgYearOfWeek,
-  JFloat, JInt, KHandle, KStr, KUndef, TemporalN, TemporalZonedDateTimeCtor,
-  TemporalZonedDateTimeGetter, TemporalZonedDateTimeMethod,
-  TemporalZonedDateTimeStatic, TgHour, TgMicrosecond, TgMillisecond, TgMinute,
-  TgNanosecond, TgSecond, TsCompare, TsFrom, TzNamed, TzOffset, TzUtc, ZgDate,
-  ZgEpochMilliseconds, ZgEpochNanoseconds, ZgHoursInDay, ZgOffset,
-  ZgOffsetNanoseconds, ZgTime, ZgTimeZoneId, ZmAdd, ZmEquals,
+  IanaZone, JFloat, JInt, KHandle, KStr, KUndef, OffsetZone, TemporalN,
+  TemporalZonedDateTimeCtor, TemporalZonedDateTimeGetter,
+  TemporalZonedDateTimeMethod, TemporalZonedDateTimeStatic, TgHour,
+  TgMicrosecond, TgMillisecond, TgMinute, TgNanosecond, TgSecond, TsCompare,
+  TsFrom, UtcZone, ZgDate, ZgEpochMilliseconds, ZgEpochNanoseconds, ZgHoursInDay,
+  ZgOffset, ZgOffsetNanoseconds, ZgTime, ZgTimeZoneId, ZmAdd, ZmEquals,
   ZmGetTimeZoneTransition, ZmRound, ZmSince, ZmStartOfDay, ZmSubtract,
   ZmToInstant, ZmToJson, ZmToLocaleString, ZmToPlainDate, ZmToPlainDateTime,
   ZmToPlainTime, ZmToString, ZmUntil, ZmValueOf, ZmWith, ZmWithCalendar,
@@ -202,13 +202,13 @@ pub fn ctor(
   case classify(helpers.arg_at(args, 1)) {
     KStr(tz_str) -> {
       // only bare identifiers, not iso date-time strings
-      let #(parsed, st) = parse_time_zone_id_strict(st, tz_str)
+      let #(parsed, st) = parse_time_zone_identifier(st, tz_str)
       let tz =
         terr(st, case parsed {
           Ok(tz) -> Ok(tz)
-          Error(temporal_common.StrictUnknown) ->
+          Error(UnknownIdentifier) ->
             Error(RangeE("invalid time zone identifier: " <> tz_str))
-          Error(temporal_common.StrictInvalid(e)) -> Error(e)
+          Error(InvalidIdentifier(e)) -> Error(e)
         })
       let cal = terr(st, to_calendar_arg(helpers.arg_at(args, 2)))
       case int.absolute_value(ns) <= ns_max_instant {
@@ -269,7 +269,7 @@ pub fn getter(
       let tomorrow = iso_date_from_epoch_days(epoch_days(d) + 1)
       let s1 = terr(st, start_of_day_ns(tz, d))
       let s2 = terr(st, start_of_day_ns(tz, tomorrow))
-      #(mk_number(JFloat(ns_div_float(s2 - s1, ns_per_hour))), st)
+      #(mk_number(JFloat(divide_as_float(s2 - s1, ns_per_hour))), st)
     }
     ZgTime(tg) -> #(time_field(t, tg), st)
     ZgDate(dg) -> #(date_field_cal(zcal, d, dg), st)
@@ -293,7 +293,7 @@ pub fn method(
   let #(d, t) = epoch_ns_to_iso(ns, off)
   case m {
     ZmToJson | ZmToLocaleString -> #(
-      mk_string(terr(st, format_zoned(ns, tz, AutoPrec))),
+      mk_string(terr(st, format_zoned(ns, tz, AutoPrecision))),
       st,
     )
     ZmToString -> {
@@ -301,25 +301,24 @@ pub fn method(
         get_calendar_name_option(st, helpers.arg_at(args, 0))
       let #(digits, st) = get_fractional_digits(st, opts)
       let #(offset_mode, st) = get_show_offset_option(st, opts)
-      let #(mode, st) =
-        temporal_common.get_rounding_mode_option(st, opts, Trunc)
-      let #(su_opt, st) =
+      let #(mode, st) = get_rounding_mode_option(st, opts, Trunc)
+      let #(smallest, st) =
         get_unit_option(st, opts, "smallestUnit", allow_auto: False)
       let #(tz_mode, st) = get_time_zone_name_option(st, opts)
-      let #(prec, su, sinc, mode) =
-        terr(st, seconds_string_precision(digits, su_opt, mode))
-      let rounded = case su {
+      let #(precision, smallest_time_unit, inc, mode) =
+        terr(st, seconds_string_precision(digits, smallest, mode))
+      let rounded = case smallest_time_unit {
         None -> ns
         Some(u) ->
           round_to_increment(
             ns,
-            sinc * time_unit_ns(u),
+            inc * time_unit_ns(u),
             as_if_positive_mode(mode),
           )
       }
       let off2 = terr(st, tz_offset_ns_at(tz, rounded))
       let #(d2, t2) = epoch_ns_to_iso(rounded, off2)
-      let base = format_iso_date(d2) <> "T" <> format_iso_time(t2, prec)
+      let base = format_iso_date(d2) <> "T" <> format_iso_time(t2, precision)
       let with_offset = case offset_mode {
         OffsetShowNever -> base
         OffsetShowAuto -> base <> format_offset_rounded(off2)
@@ -344,8 +343,8 @@ pub fn method(
     ZmAdd | ZmSubtract -> {
       let #(dur, overflow, st) = add_sub_args(st, args, m == ZmSubtract)
       let date_dur =
-        DurRec(
-          ..zero_dur,
+        Duration(
+          ..zero_duration,
           years: dur.years,
           months: dur.months,
           weeks: dur.weeks,
@@ -369,7 +368,7 @@ pub fn method(
             }
           },
         )
-      let ns2 = base_ns + time_only_ns(dur)
+      let ns2 = base_ns + time_part_ns(dur)
       case int.absolute_value(ns2) <= ns_max_instant {
         False -> rt_val.t_throw_range_error(st, "instant outside valid range")
         True -> make_zoned_cal(st, protos, ns2, tz, zcal)
@@ -403,14 +402,14 @@ pub fn method(
       }
     }
     ZmRound -> {
-      let #(#(su, inc, mode), st) =
+      let #(#(smallest_time_unit, inc, mode), st) =
         round_options(st, helpers.arg_at(args, 0), allow_day: True)
-      let u_ns = time_unit_ns(su)
-      let max = case su {
-        UDay -> 1
-        UHour -> 24
-        UMinute | USecond -> 60
-        UMillisecond | UMicrosecond | UNanosecond -> 1000
+      let unit_ns = time_unit_ns(smallest_time_unit)
+      let max = case smallest_time_unit {
+        DayUnit -> 1
+        HourUnit -> 24
+        MinuteUnit | SecondUnit -> 60
+        MillisecondUnit | MicrosecondUnit | NanosecondUnit -> 1000
       }
       case valid_time_increment(inc, max) {
         False -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
@@ -418,7 +417,7 @@ pub fn method(
           let local = ns + off
           let day_part = floor_div(local, ns_per_day)
           let local_date = iso_date_from_epoch_days(day_part)
-          case su == UDay {
+          case smallest_time_unit == DayUnit {
             True -> {
               let day_start = terr(st, start_of_day_ns(tz, local_date))
               let day_end =
@@ -433,7 +432,7 @@ pub fn method(
             }
             False -> {
               let tod = local - day_part * ns_per_day
-              let rounded_tod = round_to_increment(tod, inc * u_ns, mode)
+              let rounded_tod = round_to_increment(tod, inc * unit_ns, mode)
               let #(rd, rt) =
                 epoch_ns_to_iso(day_part * ns_per_day + rounded_tod, 0)
               let ns2 =
@@ -446,7 +445,7 @@ pub fn method(
                     tz,
                     Compatible,
                     PreferOffset,
-                    False,
+                    match_minutes: False,
                   ),
                 )
               case int.absolute_value(ns2) <= ns_max_instant {
@@ -481,7 +480,7 @@ pub fn method(
             tz,
             dis_opt,
             off_opt,
-            False,
+            match_minutes: False,
           ),
         )
       make_zoned_cal(st, protos, ns2, tz, zcal)
@@ -536,8 +535,8 @@ pub fn method(
         _ -> rt_val.t_throw_type_error(st, "invalid direction")
       }
       case tz {
-        TzUtc | TzOffset(_) -> #(mk_null(), st)
-        TzNamed(zone:) -> {
+        UtcZone | OffsetZone(_) -> #(mk_null(), st)
+        IanaZone(zone:) -> {
           let found = case dir {
             Next -> temporal_tz.next_transition_ns(zone, ns)
             Previous -> temporal_tz.prev_transition_ns(zone, ns)
@@ -575,12 +574,13 @@ fn zoned_until_since(
   let smallest = option.unwrap(smallest, Nanosecond)
   let largest = option.unwrap(largest, max_unit(smallest, Hour))
   let Nil = check_diff_setup(st, largest, smallest, inc)
-  let mode2 = apply_since_mode(mode, is_since)
+  let mode = apply_since_mode(mode, is_since)
   case unit_rank(largest) <= unit_rank(Hour) {
     True -> {
-      let su = terr(st, require_time_unit(smallest))
+      let smallest_time_unit = terr(st, require_time_unit(smallest))
       let diff = b_ns - a_ns
-      let rounded = round_to_increment(diff, inc * time_unit_ns(su), mode2)
+      let rounded =
+        round_to_increment(diff, inc * time_unit_ns(smallest_time_unit), mode)
       let rounded = apply_since_ns(rounded, is_since)
       make_duration(st, protos, balance_time_ns(rounded, largest))
     }
@@ -604,11 +604,11 @@ fn zoned_until_since(
                 largest,
                 smallest,
                 inc,
-                mode2,
-                True,
+                mode,
+                zoned: True,
               ),
             )
-          make_duration(st, protos, apply_since_dur(final, is_since))
+          make_duration(st, protos, apply_since_duration(final, is_since))
         }
       }
   }
@@ -617,13 +617,13 @@ fn zoned_until_since(
 fn format_zoned(
   ns: Int,
   tz: TimeZone,
-  prec: Precision,
+  precision: SecondsPrecision,
 ) -> Result(String, TErr) {
   use off <- result.map(tz_offset_ns_at(tz, ns))
   let #(d, t) = epoch_ns_to_iso(ns, off)
   format_iso_date(d)
   <> "T"
-  <> format_iso_time(t, prec)
+  <> format_iso_time(t, precision)
   <> format_offset_rounded(off)
   <> "["
   <> time_zone_id(tz)

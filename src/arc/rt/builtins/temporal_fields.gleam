@@ -1,20 +1,21 @@
 import arc/internal/digits.{take_digits}
 import arc/internal/gregorian.{days_in_month}
-import arc/internal/int_math.{floor_div, floor_mod as math_mod, trunc_div}
+import arc/internal/int_math.{floor_div, floor_mod, trunc_div}
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   type RoundingMode, RHalfEven, RHalfInfinity, RHalfZero, RInfinity, RZero,
-  negate_dur, read_int_field, read_pos_int_field, temporal_data_of, terr,
-  time_only_ns, to_temporal_duration, unsigned_rounding_mode,
+  get_overflow_option_from_value, negate_duration, read_int_field,
+  read_pos_int_field, temporal_data_of, terr, time_part_ns, to_temporal_duration,
+  unsigned_rounding_mode,
 }
 import arc/rt/builtins/temporal_iso.{
-  type DurRec, type IsoDate, type Overflow, type ParsedIso, type TErr, Constrain,
-  NoOffset, NumericOffset, RangeE, Reject, TypeE, Zulu, check_date_limits,
-  epoch_days, int_sign, is_valid_iso_date, iso_date_from_epoch_days,
-  iso_date_within_limits, iso_year_month_within_limits, pad2, parse_annotations,
-  parse_iso_datetime_string, parse_offset_part, parse_time_part, parse_year_part,
-  regulate_iso_date,
+  type Duration, type IsoDate, type Overflow, type ParsedIso, type TErr,
+  Constrain, NoOffset, NumericOffset, RangeE, Reject, TypeE, Zulu,
+  check_date_limits, epoch_days, int_sign, is_valid_iso_date,
+  iso_date_from_epoch_days, iso_date_within_limits, iso_year_month_within_limits,
+  pad2, parse_annotations, parse_iso_datetime_string, parse_offset_part,
+  parse_time_part, parse_year_part, regulate_iso_date,
 }
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
@@ -49,20 +50,16 @@ pub fn calendar_slot_of(data: TemporalData) -> Option(tcal.Calendar) {
   }
 }
 
-pub fn validated_overflow(st: Agent, options: JsVal) -> #(Overflow, Agent) {
-  let #(opts, st) = temporal_common.get_options_object(st, options)
-  temporal_common.get_overflow_option(st, opts)
-}
-
 pub fn add_sub_args(
   st: Agent,
   args: List(JsVal),
   is_subtract: Bool,
-) -> #(DurRec, Overflow, Agent) {
+) -> #(Duration, Overflow, Agent) {
   let #(dur, st) = to_temporal_duration(st, helpers.arg_at(args, 0))
-  let #(overflow, st) = validated_overflow(st, helpers.arg_at(args, 1))
+  let #(overflow, st) =
+    get_overflow_option_from_value(st, helpers.arg_at(args, 1))
   let dur = case is_subtract {
-    True -> negate_dur(dur)
+    True -> negate_duration(dur)
     False -> dur
   }
   #(dur, overflow, st)
@@ -541,12 +538,12 @@ pub fn merge_year_month_code(
 
 pub fn balance_year_month(y: Int, m: Int) -> #(Int, Int) {
   let total = y * 12 + m - 1
-  #(floor_div(total, 12), math_mod(total, 12) + 1)
+  #(floor_div(total, 12), floor_mod(total, 12) + 1)
 }
 
-pub fn add_duration_to_date(
+pub fn iso_date_add(
   d: IsoDate,
-  dur: DurRec,
+  dur: Duration,
   overflow: Overflow,
 ) -> Result(IsoDate, TErr) {
   let #(y2, m2) = balance_year_month(d.year + dur.years, d.month + dur.months)
@@ -555,7 +552,7 @@ pub fn add_duration_to_date(
     dur.weeks
     * 7
     + dur.days
-    + trunc_div(time_only_ns(dur), temporal_iso.ns_per_day)
+    + trunc_div(time_part_ns(dur), temporal_iso.ns_per_day)
   let final_days = epoch_days(intermediate) + extra_days
   let final = iso_date_from_epoch_days(final_days)
   check_date_limits(final)
@@ -564,11 +561,11 @@ pub fn add_duration_to_date(
 pub fn calendar_date_add(
   cal: tcal.Calendar,
   d: IsoDate,
-  dur: DurRec,
+  dur: Duration,
   overflow: Overflow,
 ) -> Result(IsoDate, TErr) {
   case cal {
-    tcal.Iso8601 -> add_duration_to_date(d, dur, overflow)
+    tcal.Iso8601 -> iso_date_add(d, dur, overflow)
     _ -> {
       let cd = tcal.date_from_epoch_days(cal, epoch_days(d))
       let y1 = cd.year + dur.years
@@ -593,7 +590,7 @@ pub fn calendar_date_add(
         dur.weeks
         * 7
         + dur.days
-        + trunc_div(time_only_ns(dur), temporal_iso.ns_per_day)
+        + trunc_div(time_part_ns(dur), temporal_iso.ns_per_day)
       let final = iso_date_from_epoch_days(days + extra)
       check_date_limits(final)
     }
@@ -622,7 +619,7 @@ pub fn balance_calendar_month(
   }
 }
 
-pub fn calendar_date_until(
+pub fn calendar_years_months_until(
   cal: tcal.Calendar,
   from: IsoDate,
   to: IsoDate,
@@ -800,7 +797,7 @@ pub fn round_between(
     _, True -> abs_r2
     _, _ -> {
       let cmp = int_sign(2 * int.absolute_value(num) - int.absolute_value(den))
-      let r1_even = math_mod(abs_r1 / inc, 2) == 0
+      let r1_even = floor_mod(abs_r1 / inc, 2) == 0
       let umode = unsigned_rounding_mode(mode, sign < 0)
       case umode {
         RZero -> abs_r1
@@ -966,8 +963,8 @@ fn try_month_day_as_datetime(
   }
 }
 
-// epoch days of 1972-12-31
-pub const md_reference_boundary = 1095
+// 1972-12-31
+pub const max_reference_epoch_days = 1095
 
 pub fn month_day_reference_iso(
   cal: tcal.Calendar,
@@ -975,17 +972,17 @@ pub fn month_day_reference_iso(
   day: Int,
   overflow: Overflow,
 ) -> Result(IsoDate, TErr) {
-  let boundary_cd = tcal.date_from_epoch_days(cal, md_reference_boundary)
-  case md_search(cal, mc, day, boundary_cd.year, 300) {
+  let boundary_cd = tcal.date_from_epoch_days(cal, max_reference_epoch_days)
+  case find_reference_date(cal, mc, day, boundary_cd.year, 300) {
     Ok(iso) -> Ok(iso)
     Error(Nil) ->
       case overflow {
         Reject -> Error(RangeE("day out of range for month"))
         Constrain -> {
-          let dmax = md_max_day(cal, mc, boundary_cd.year, 300, 0)
+          let dmax = max_day_for_month_code(cal, mc, boundary_cd.year, 300, 0)
           case dmax > 0 {
             True ->
-              md_search(cal, mc, dmax, boundary_cd.year, 300)
+              find_reference_date(cal, mc, dmax, boundary_cd.year, 300)
               |> result.replace_error(RangeE("invalid month-day"))
             False -> Error(RangeE("invalid month-day"))
           }
@@ -994,7 +991,7 @@ pub fn month_day_reference_iso(
   }
 }
 
-fn md_search(
+fn find_reference_date(
   cal: tcal.Calendar,
   mc: tcal.MonthCode,
   day: Int,
@@ -1008,15 +1005,15 @@ fn md_search(
         // never valid in any year, stop instead of looping
         Error(tcal.NeverValid) -> Error(Nil)
         Error(tcal.NotInThisYear(_)) ->
-          md_search(cal, mc, day, year - 1, tries - 1)
+          find_reference_date(cal, mc, day, year - 1, tries - 1)
         Ok(m) ->
           case day <= tcal.days_in_month(cal, year, m) {
-            False -> md_search(cal, mc, day, year - 1, tries - 1)
+            False -> find_reference_date(cal, mc, day, year - 1, tries - 1)
             True -> {
               let days = tcal.date_to_epoch_days(cal, year, m, day)
-              case days <= md_reference_boundary {
+              case days <= max_reference_epoch_days {
                 True -> Ok(iso_date_from_epoch_days(days))
-                False -> md_search(cal, mc, day, year - 1, tries - 1)
+                False -> find_reference_date(cal, mc, day, year - 1, tries - 1)
               }
             }
           }
@@ -1024,7 +1021,7 @@ fn md_search(
   }
 }
 
-fn md_max_day(
+fn max_day_for_month_code(
   cal: tcal.Calendar,
   mc: tcal.MonthCode,
   year: Int,
@@ -1037,9 +1034,9 @@ fn md_max_day(
       case tcal.month_for_code(cal, year, mc) {
         Error(tcal.NeverValid) -> best
         Error(tcal.NotInThisYear(_)) ->
-          md_max_day(cal, mc, year - 1, tries - 1, best)
+          max_day_for_month_code(cal, mc, year - 1, tries - 1, best)
         Ok(m) ->
-          md_max_day(
+          max_day_for_month_code(
             cal,
             mc,
             year - 1,

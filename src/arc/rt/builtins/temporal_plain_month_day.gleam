@@ -3,17 +3,17 @@ import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   type CalendarNameMode, CalAlways, CalAuto, CalCritical, CalNever,
-  arg_trunc_int, arg_trunc_int_or, calendar_suffix, get_calendar_name_option,
+  calendar_suffix, get_calendar_name_option, get_overflow_option_from_value,
   make_date_cal, make_month_day_cal, month_day_slot_of, read_int_field,
-  require_temporal, terr,
+  require_temporal, terr, truncated_int_arg, truncated_int_arg_or,
 }
 import arc/rt/builtins/temporal_fields.{
-  type DateFields, DateFields, int_val, md_reference_boundary, month_code_str,
+  type DateFields, DateFields, int_val, max_reference_epoch_days, month_code_str,
   month_day_reference_iso, no_date_fields, parse_month_day_string,
   read_bag_calendar, read_date_fields, read_era_fields, regulate_calendar_day,
   require_nonempty_fields, require_partial_bag, resolve_calendar_date,
   resolve_calendar_month, resolve_calendar_year, resolve_iso_month,
-  to_calendar_arg, validated_overflow,
+  to_calendar_arg,
 }
 import arc/rt/builtins/temporal_iso.{
   type Overflow, type TErr, Constrain, IsoDate, RangeE, Reject, TypeE,
@@ -97,10 +97,10 @@ pub fn ctor(
   protos: TemporalProtos,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(m, st) = arg_trunc_int(st, args, 0)
-  let #(d, st) = arg_trunc_int(st, args, 1)
+  let #(m, st) = truncated_int_arg(st, args, 0)
+  let #(d, st) = truncated_int_arg(st, args, 1)
   let cal = terr(st, to_calendar_arg(helpers.arg_at(args, 2)))
-  let #(y, st) = arg_trunc_int_or(st, args, 3, 1972)
+  let #(y, st) = truncated_int_arg_or(st, args, 3, 1972)
   case is_valid_iso_date(y, m, d) {
     False -> rt_val.t_throw_range_error(st, "invalid ISO month-day")
     True -> make_month_day_cal(st, protos, m, d, y, cal)
@@ -140,7 +140,7 @@ pub fn to_temporal_month_day(
         SObject(kind:, ..) ->
           case month_day_slot_of(kind) {
             Some(md) -> {
-              let #(_o, st) = validated_overflow(st, options)
+              let #(_o, st) = get_overflow_option_from_value(st, options)
               #(md, st)
             }
             None -> month_day_from_bag(st, h, options)
@@ -149,7 +149,7 @@ pub fn to_temporal_month_day(
       }
     KStr(s) -> {
       let md = terr(st, parse_month_day_string(s))
-      let #(_o, st) = validated_overflow(st, options)
+      let #(_o, st) = get_overflow_option_from_value(st, options)
       #(md, st)
     }
     _ ->
@@ -167,7 +167,7 @@ fn month_day_from_bag(
 ) -> #(#(Int, Int, Int, tcal.Calendar), Agent) {
   let #(cal, st) = read_bag_calendar(st, h)
   let #(fields, st) = read_date_fields(st, h, cal)
-  let #(overflow, st) = validated_overflow(st, options)
+  let #(overflow, st) = get_overflow_option_from_value(st, options)
   #(terr(st, resolve_calendar_month_day(cal, fields, overflow)), st)
 }
 
@@ -225,7 +225,13 @@ pub fn resolve_calendar_month_day(
         }
         AnchorFromCode(mc) -> {
           use Nil <- result.try(
-            case tcal.month_for_code(cal, md_probe_year(cal, mc.leap), mc) {
+            case
+              tcal.month_for_code(
+                cal,
+                probe_year_for_month_code(cal, mc.leap),
+                mc,
+              )
+            {
               Error(tcal.NeverValid) ->
                 Error(RangeE(
                   "monthCode is not valid for calendar " <> tcal.identifier(cal),
@@ -269,11 +275,11 @@ fn chinese_ref_year_missing(num: Int, day: Int) -> Bool {
   }
 }
 
-fn md_probe_year(cal: tcal.Calendar, leap: Bool) -> Int {
+fn probe_year_for_month_code(cal: tcal.Calendar, leap: Bool) -> Int {
   case cal == tcal.Hebrew && leap {
     True -> 5779
     False -> {
-      let cd = tcal.date_from_epoch_days(cal, md_reference_boundary)
+      let cd = tcal.date_from_epoch_days(cal, max_reference_epoch_days)
       cd.year
     }
   }
@@ -375,7 +381,8 @@ fn with(
   let #(bag, st) = require_partial_bag(st, helpers.arg_at(args, 0))
   let #(fields, st) = read_date_fields(st, bag, cal)
   require_nonempty_fields(st, fields == no_date_fields)
-  let #(overflow, st) = validated_overflow(st, helpers.arg_at(args, 1))
+  let #(overflow, st) =
+    get_overflow_option_from_value(st, helpers.arg_at(args, 1))
   let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(ry, m, d)))
   let f = fields
   let f = case f.month != None || f.month_code != None {

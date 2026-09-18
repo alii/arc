@@ -4,8 +4,8 @@ import arc/rt/builtins/temporal_common.{
   type Disambiguation, type OffsetOption, Compatible, Earlier, HalfExpand,
   IgnoreOffset, Later, RejectDisambiguation, RejectOffset, UseOffset,
   epoch_ns_to_iso_in, get_disambiguation_option, get_offset_option,
-  get_options_object, get_overflow_option, parse_time_zone_id, read_int_field,
-  read_pos_int_field, round_to_increment, terr, time_only_ns,
+  get_options_object, get_overflow_option, read_int_field, read_pos_int_field,
+  round_to_increment, terr, time_part_ns, time_zone_from_string,
   to_temporal_time_zone, tz_offset_ns_at, validate_epoch_ns,
 }
 import arc/rt/builtins/temporal_fields.{
@@ -14,11 +14,11 @@ import arc/rt/builtins/temporal_fields.{
   read_month_code, resolve_calendar_date,
 }
 import arc/rt/builtins/temporal_iso.{
-  type DurRec, type IsoDate, type Overflow, type ParsedOffset, type TErr,
-  type TimeRec, Constrain, DurRec, IsoDate, NoOffset, NumericOffset, RangeE,
-  Zulu, epoch_days, epoch_ns_to_iso, iso_date_from_epoch_days,
-  iso_date_within_limits, midnight, ns_per_day, ns_per_minute,
-  parse_iso_datetime_string, parse_offset_part, utc_epoch_ns, zero_dur,
+  type Duration, type IsoDate, type IsoTime, type Overflow, type ParsedOffset,
+  type TErr, Constrain, Duration, IsoDate, NoOffset, NumericOffset, RangeE, Zulu,
+  epoch_days, epoch_ns_to_iso, iso_date_from_epoch_days, iso_date_within_limits,
+  midnight, ns_per_day, ns_per_minute, parse_iso_datetime_string,
+  parse_offset_part, utc_epoch_ns, zero_duration,
 }
 import arc/rt/builtins/temporal_plain_time.{
   type TimeFields, TimeFields, no_time_fields, regulate_time, time_fields_apply,
@@ -26,9 +26,9 @@ import arc/rt/builtins/temporal_plain_time.{
 import arc/rt/builtins/temporal_tz
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, type TimeZone, HintString, KHandle, KStr,
-  KUndef, SObject, TemporalDate, TemporalDateTime, TemporalObj,
-  TemporalZonedDateTime, TzNamed, TzOffset, TzUtc, classify, mk_undefined,
+  type Agent, type Handle, type JsVal, type TimeZone, HintString, IanaZone,
+  KHandle, KStr, KUndef, OffsetZone, SObject, TemporalDate, TemporalDateTime,
+  TemporalObj, TemporalZonedDateTime, UtcZone, classify, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/int
@@ -47,16 +47,16 @@ pub fn check_iso_days_range(d: IsoDate) -> Result(Nil, TErr) {
 pub fn get_possible_epoch_ns(
   tz: TimeZone,
   d: IsoDate,
-  t: TimeRec,
+  t: IsoTime,
 ) -> Result(List(Int), TErr) {
   let utc = utc_epoch_ns(d, t)
   case tz {
-    TzUtc -> {
+    UtcZone -> {
       use Nil <- result.try(check_iso_days_range(d))
       use ns <- result.map(validate_epoch_ns(utc))
       [ns]
     }
-    TzOffset(ns: off) -> {
+    OffsetZone(ns: off) -> {
       let shifted_day = floor_div(utc - off, ns_per_day)
       use Nil <- result.try(
         check_iso_days_range(iso_date_from_epoch_days(shifted_day)),
@@ -64,7 +64,7 @@ pub fn get_possible_epoch_ns(
       use ns <- result.map(validate_epoch_ns(utc - off))
       [ns]
     }
-    TzNamed(zone:) -> {
+    IanaZone(zone:) -> {
       use Nil <- result.try(check_iso_days_range(d))
       let before = temporal_tz.offset_ns_at(zone, utc - ns_per_day)
       let after = temporal_tz.offset_ns_at(zone, utc + ns_per_day)
@@ -89,7 +89,7 @@ pub fn disambiguate_epoch_ns(
   possible: List(Int),
   tz: TimeZone,
   d: IsoDate,
-  t: TimeRec,
+  t: IsoTime,
   dis: Disambiguation,
 ) -> Result(Int, TErr) {
   case possible {
@@ -136,7 +136,7 @@ pub fn disambiguate_epoch_ns(
 pub fn get_epoch_ns_for(
   tz: TimeZone,
   d: IsoDate,
-  t: TimeRec,
+  t: IsoTime,
   dis: Disambiguation,
 ) -> Result(Int, TErr) {
   use possible <- result.try(get_possible_epoch_ns(tz, d, t))
@@ -150,9 +150,9 @@ pub fn start_of_day_ns(tz: TimeZone, d: IsoDate) -> Result(Int, TErr) {
     [] ->
       // midnight in a dst gap: day starts when the gap ends
       case tz {
-        TzUtc | TzOffset(_) ->
+        UtcZone | OffsetZone(_) ->
           Error(RangeE("no start of day for skipped midnight"))
-        TzNamed(zone:) -> {
+        IanaZone(zone:) -> {
           use day_before <- result.try(validate_epoch_ns(
             utc_epoch_ns(d, midnight) - ns_per_day,
           ))
@@ -172,12 +172,12 @@ pub type OffsetBehaviour {
 
 pub fn interpret_offset(
   d: IsoDate,
-  t: TimeRec,
+  t: IsoTime,
   behaviour: OffsetBehaviour,
   tz: TimeZone,
   dis: Disambiguation,
   offset_opt: OffsetOption,
-  match_minutes: Bool,
+  match_minutes match_minutes: Bool,
 ) -> Result(Int, TErr) {
   case behaviour {
     WallOffset -> get_epoch_ns_for(tz, d, t, dis)
@@ -219,7 +219,7 @@ pub type DateTimeFields {
     date: DateFields,
     time: TimeFields,
     offset: Option(Int),
-    tz: JsVal,
+    time_zone_value: JsVal,
   )
 }
 
@@ -245,18 +245,18 @@ pub fn read_date_time_fields(
     False -> #(None, st)
   }
   let #(hour, st) = read_int_field(st, bag, "hour")
-  let #(us, st) = read_int_field(st, bag, "microsecond")
-  let #(ms, st) = read_int_field(st, bag, "millisecond")
+  let #(microsecond, st) = read_int_field(st, bag, "microsecond")
+  let #(millisecond, st) = read_int_field(st, bag, "millisecond")
   let #(minute, st) = read_int_field(st, bag, "minute")
   let #(month, st) = read_pos_int_field(st, bag, "month")
   let #(month_code, st) = read_month_code(st, bag)
-  let #(ns, st) = read_int_field(st, bag, "nanosecond")
+  let #(nanosecond, st) = read_int_field(st, bag, "nanosecond")
   let #(offset, st) = case read_offset {
     True -> read_bag_offset(st, bag)
     False -> #(None, st)
   }
   let #(second, st) = read_int_field(st, bag, "second")
-  let #(tz, st) = case read_tz {
+  let #(time_zone_value, st) = case read_tz {
     True -> get_named(st, bag, "timeZone")
     False -> #(mk_undefined(), st)
   }
@@ -264,9 +264,16 @@ pub fn read_date_time_fields(
   #(
     DateTimeFields(
       date: DateFields(day:, era:, era_year:, month:, month_code:, year:),
-      time: TimeFields(hour:, minute:, second:, ms:, us:, ns:),
+      time: TimeFields(
+        hour:,
+        minute:,
+        second:,
+        millisecond:,
+        microsecond:,
+        nanosecond:,
+      ),
       offset:,
-      tz:,
+      time_zone_value:,
     ),
     st,
   )
@@ -313,8 +320,7 @@ pub fn to_temporal_zoned(
       }
     KStr(s) -> {
       let #(d, t_opt, offset, tz_str, cal) = terr(st, parse_zoned_string(s))
-      let #(tz, st) = parse_time_zone_id(st, tz_str)
-      let tz = terr(st, tz)
+      let #(tz, st) = time_zone_from_string(st, tz_str)
       let #(#(dis, offset_opt, _ov), st) = validated_zdt_options(st, options)
       let ns =
         terr(st, zoned_string_epoch_ns(d, t_opt, offset, tz, dis, offset_opt))
@@ -342,7 +348,7 @@ pub fn validated_zdt_options(
 pub fn parse_zoned_string(
   s: String,
 ) -> Result(
-  #(IsoDate, Option(TimeRec), ParsedOffset, String, tcal.Calendar),
+  #(IsoDate, Option(IsoTime), ParsedOffset, String, tcal.Calendar),
   TErr,
 ) {
   case parse_iso_datetime_string(s) {
@@ -362,7 +368,7 @@ pub fn parse_zoned_string(
 
 pub fn zoned_string_epoch_ns(
   d: IsoDate,
-  t_opt: Option(TimeRec),
+  t_opt: Option(IsoTime),
   offset: ParsedOffset,
   tz: TimeZone,
   dis: Disambiguation,
@@ -382,10 +388,18 @@ pub fn zoned_string_epoch_ns(
             tz,
             dis,
             offset_opt,
-            !sub_minute,
+            match_minutes: !sub_minute,
           )
         NoOffset ->
-          interpret_offset(d, t, WallOffset, tz, dis, offset_opt, True)
+          interpret_offset(
+            d,
+            t,
+            WallOffset,
+            tz,
+            dis,
+            offset_opt,
+            match_minutes: True,
+          )
       }
     }
   }
@@ -399,10 +413,10 @@ pub fn zoned_from_bag(
   let #(cal, st) = read_bag_calendar(st, bag)
   let #(f, st) =
     read_date_time_fields(st, bag, cal, read_offset: True, read_tz: True)
-  case classify(f.tz) {
+  case classify(f.time_zone_value) {
     KUndef -> rt_val.t_throw_type_error(st, "timeZone is required")
     _ -> {
-      let #(tz, st) = to_temporal_time_zone(st, f.tz)
+      let #(tz, st) = to_temporal_time_zone(st, f.time_zone_value)
       let #(#(dis, offset_opt, ov), st) = validated_zdt_options(st, options)
       let date = terr(st, resolve_calendar_date(cal, f.date, ov))
       let t0 = time_fields_apply(f.time, midnight)
@@ -414,22 +428,30 @@ pub fn zoned_from_bag(
       let ens =
         terr(
           st,
-          interpret_offset(date, t, behaviour, tz, dis, offset_opt, False),
+          interpret_offset(
+            date,
+            t,
+            behaviour,
+            tz,
+            dis,
+            offset_opt,
+            match_minutes: False,
+          ),
         )
       #(#(ens, tz, cal), st)
     }
   }
 }
 
-pub type RelTo {
-  RelNone
-  RelPlain(date: IsoDate, cal: tcal.Calendar)
-  RelZoned(epoch_ns: Int, tz: TimeZone, cal: tcal.Calendar)
+pub type RelativeTo {
+  NoRelativeTo
+  RelativeDate(date: IsoDate, calendar: tcal.Calendar)
+  RelativeZoned(epoch_ns: Int, time_zone: TimeZone, calendar: tcal.Calendar)
 }
 
-pub fn convert_relative_to(st: Agent, v: JsVal) -> #(RelTo, Agent) {
+pub fn convert_relative_to(st: Agent, v: JsVal) -> #(RelativeTo, Agent) {
   case classify(v) {
-    KUndef -> #(RelNone, st)
+    KUndef -> #(NoRelativeTo, st)
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
         SObject(
@@ -439,15 +461,15 @@ pub fn convert_relative_to(st: Agent, v: JsVal) -> #(RelTo, Agent) {
             calendar:,
           )),
           ..,
-        ) -> #(RelZoned(epoch_ns, time_zone, calendar), st)
+        ) -> #(RelativeZoned(epoch_ns, time_zone, calendar), st)
         SObject(
           kind: TemporalObj(TemporalDate(year:, month:, day:, calendar:)),
           ..,
-        ) -> #(RelPlain(IsoDate(year, month, day), calendar), st)
+        ) -> #(RelativeDate(IsoDate(year, month, day), calendar), st)
         SObject(
           kind: TemporalObj(TemporalDateTime(year:, month:, day:, calendar:, ..)),
           ..,
-        ) -> #(RelPlain(IsoDate(year, month, day), calendar), st)
+        ) -> #(RelativeDate(IsoDate(year, month, day), calendar), st)
         _ -> relative_from_bag(st, h)
       }
     KStr(s) ->
@@ -459,8 +481,7 @@ pub fn convert_relative_to(st: Agent, v: JsVal) -> #(RelTo, Agent) {
           let d = p.date
           case p.tz {
             Some(tz_str) -> {
-              let #(tz, st) = parse_time_zone_id(st, tz_str)
-              let tz = terr(st, tz)
+              let #(tz, st) = time_zone_from_string(st, tz_str)
               let ens =
                 terr(
                   st,
@@ -473,7 +494,7 @@ pub fn convert_relative_to(st: Agent, v: JsVal) -> #(RelTo, Agent) {
                     RejectOffset,
                   ),
                 )
-              #(RelZoned(ens, tz, cal), st)
+              #(RelativeZoned(ens, tz, cal), st)
             }
             None ->
               case p.offset {
@@ -484,7 +505,7 @@ pub fn convert_relative_to(st: Agent, v: JsVal) -> #(RelTo, Agent) {
                   )
                 NoOffset | NumericOffset(_, _) ->
                   case iso_date_within_limits(d) {
-                    True -> #(RelPlain(d, cal), st)
+                    True -> #(RelativeDate(d, cal), st)
                     False ->
                       rt_val.t_throw_range_error(
                         st,
@@ -500,22 +521,22 @@ pub fn convert_relative_to(st: Agent, v: JsVal) -> #(RelTo, Agent) {
   }
 }
 
-fn relative_from_bag(st: Agent, bag: Handle) -> #(RelTo, Agent) {
+fn relative_from_bag(st: Agent, bag: Handle) -> #(RelativeTo, Agent) {
   let #(cal, st) = read_bag_calendar(st, bag)
   let #(f, st) =
     read_date_time_fields(st, bag, cal, read_offset: True, read_tz: True)
   let date = terr(st, resolve_calendar_date(cal, f.date, Constrain))
   let t0 = time_fields_apply(f.time, midnight)
   let t = terr(st, regulate_time(t0, Constrain))
-  case classify(f.tz) {
+  case classify(f.time_zone_value) {
     KUndef ->
       case iso_date_within_limits(date) {
-        True -> #(RelPlain(date, cal), st)
+        True -> #(RelativeDate(date, cal), st)
         False ->
           rt_val.t_throw_range_error(st, "date outside of supported range")
       }
     _ -> {
-      let #(tz, st) = to_temporal_time_zone(st, f.tz)
+      let #(tz, st) = to_temporal_time_zone(st, f.time_zone_value)
       let behaviour = case f.offset {
         Some(o) -> OptionOffset(o)
         None -> WallOffset
@@ -530,10 +551,10 @@ fn relative_from_bag(st: Agent, bag: Handle) -> #(RelTo, Agent) {
             tz,
             Compatible,
             RejectOffset,
-            False,
+            match_minutes: False,
           ),
         )
-      #(RelZoned(ens, tz, cal), st)
+      #(RelativeZoned(ens, tz, cal), st)
     }
   }
 }
@@ -542,7 +563,7 @@ pub fn add_zoned_ns(
   ns: Int,
   tz: TimeZone,
   cal: tcal.Calendar,
-  dur: DurRec,
+  dur: Duration,
 ) -> Result(Int, TErr) {
   use base <- result.try(
     case dur.years == 0 && dur.months == 0 && dur.weeks == 0 && dur.days == 0 {
@@ -550,8 +571,8 @@ pub fn add_zoned_ns(
       False -> {
         use #(d0, t0) <- result.try(epoch_ns_to_iso_in(tz, ns))
         let date_dur =
-          DurRec(
-            ..zero_dur,
+          Duration(
+            ..zero_duration,
             years: dur.years,
             months: dur.months,
             weeks: dur.weeks,
@@ -562,26 +583,31 @@ pub fn add_zoned_ns(
       }
     },
   )
-  validate_epoch_ns(base + time_only_ns(dur))
+  validate_epoch_ns(base + time_part_ns(dur))
 }
 
 pub fn date_duration_days(
-  dur: DurRec,
-  rel: IsoDate,
+  dur: Duration,
+  relative_date: IsoDate,
   cal: tcal.Calendar,
 ) -> Result(Int, TErr) {
   case dur.years == 0 && dur.months == 0 && dur.weeks == 0 {
     True -> Ok(dur.days)
     False -> {
       let ymw =
-        DurRec(
-          ..zero_dur,
+        Duration(
+          ..zero_duration,
           years: dur.years,
           months: dur.months,
           weeks: dur.weeks,
         )
-      use later <- result.map(calendar_date_add(cal, rel, ymw, Constrain))
-      epoch_days(later) - epoch_days(rel) + dur.days
+      use later <- result.map(calendar_date_add(
+        cal,
+        relative_date,
+        ymw,
+        Constrain,
+      ))
+      epoch_days(later) - epoch_days(relative_date) + dur.days
     }
   }
 }

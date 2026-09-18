@@ -1,16 +1,17 @@
 import arc/internal/host_time
-import arc/internal/int_math.{floor_div, floor_mod as math_mod}
+import arc/internal/int_math.{floor_div, floor_mod}
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
 import arc/rt/builtins/temporal_iso.{
-  type DurRec, type IsoDate, type Overflow, type Precision, type TErr,
-  type TimeRec, AutoPrec, Constrain, DurRec, FixedPrec, IsoDate, MinutePrec,
-  NoOffset, NumericOffset, RangeE, Reject, TimeRec, TypeE, Zulu, epoch_ns_to_iso,
-  f64_int, format_offset_minutes, int_sign, is_tz_annotation,
-  max_time_duration_ns, ns_max_instant, ns_per_day, ns_per_hour, ns_per_minute,
-  ns_per_ms, ns_per_second, ns_per_us, pad2, parse_iso_datetime_string,
-  parse_offset_part, pow10, take_some_digits, utc_epoch_ns,
+  type Duration, type IsoDate, type IsoTime, type Overflow,
+  type SecondsPrecision, type TErr, AutoPrecision, Constrain, Duration, IsoDate,
+  IsoTime, MinutePrecision, NoOffset, NumericOffset, RangeE, Reject,
+  SubsecondDigits, TypeE, Zulu, epoch_ns_to_iso, format_offset_minutes, int_sign,
+  is_tz_annotation, max_time_duration_ns, ns_max_instant, ns_per_day,
+  ns_per_hour, ns_per_minute, ns_per_ms, ns_per_second, ns_per_us, pad2,
+  parse_iso_datetime_string, parse_offset_part, pow10, round_to_float_precision,
+  take_some_digits, utc_epoch_ns,
 }
 import arc/rt/builtins/temporal_tz
 import arc/rt/call as rt_call
@@ -18,11 +19,11 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type ObjKind, type TemporalProtos,
-  type TimeZone, Agent, HintString, JFloat, JInt, JNan, JNegInf, JPosInf,
-  KHandle, KNum, KStr, KUndef, Named, SObject, StringKey, TemporalDate,
-  TemporalDateTime, TemporalDuration, TemporalInstant, TemporalMonthDay,
-  TemporalObj, TemporalTime, TemporalYearMonth, TemporalZonedDateTime, TzNamed,
-  TzOffset, TzUtc, classify, mk_object, mk_undefined,
+  type TimeZone, Agent, HintString, IanaZone, JFloat, JInt, JNan, JNegInf,
+  JPosInf, KHandle, KNum, KStr, KUndef, Named, OffsetZone, SObject, StringKey,
+  TemporalDate, TemporalDateTime, TemporalDuration, TemporalInstant,
+  TemporalMonthDay, TemporalObj, TemporalTime, TemporalYearMonth,
+  TemporalZonedDateTime, UtcZone, classify, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/float
@@ -87,7 +88,7 @@ pub fn date_slot_of(kind: ObjKind) -> Option(#(IsoDate, tcal.Calendar)) {
   }
 }
 
-pub fn time_slot_of(kind: ObjKind) -> Option(TimeRec) {
+pub fn time_slot_of(kind: ObjKind) -> Option(IsoTime) {
   case kind {
     TemporalObj(data: TemporalTime(
       hour:,
@@ -97,14 +98,14 @@ pub fn time_slot_of(kind: ObjKind) -> Option(TimeRec) {
       microsecond:,
       nanosecond:,
     )) ->
-      Some(TimeRec(hour, minute, second, millisecond, microsecond, nanosecond))
+      Some(IsoTime(hour, minute, second, millisecond, microsecond, nanosecond))
     _ -> None
   }
 }
 
 pub fn date_time_slot_of(
   kind: ObjKind,
-) -> Option(#(IsoDate, TimeRec, tcal.Calendar)) {
+) -> Option(#(IsoDate, IsoTime, tcal.Calendar)) {
   case kind {
     TemporalObj(data: TemporalDateTime(
       year:,
@@ -120,7 +121,7 @@ pub fn date_time_slot_of(
     )) ->
       Some(#(
         IsoDate(year, month, day),
-        TimeRec(hour, minute, second, millisecond, microsecond, nanosecond),
+        IsoTime(hour, minute, second, millisecond, microsecond, nanosecond),
         calendar,
       ))
     _ -> None
@@ -147,7 +148,7 @@ pub fn month_day_slot_of(
   }
 }
 
-pub fn duration_slot_of(kind: ObjKind) -> Option(DurRec) {
+pub fn duration_slot_of(kind: ObjKind) -> Option(Duration) {
   case kind {
     TemporalObj(data: TemporalDuration(
       years:,
@@ -161,7 +162,7 @@ pub fn duration_slot_of(kind: ObjKind) -> Option(DurRec) {
       microseconds:,
       nanoseconds:,
     )) ->
-      Some(DurRec(
+      Some(Duration(
         years,
         months,
         weeks,
@@ -225,7 +226,7 @@ pub fn make_date_cal(
 pub fn make_time(
   st: Agent,
   protos: TemporalProtos,
-  t: TimeRec,
+  t: IsoTime,
 ) -> #(JsVal, Agent) {
   alloc_value(
     st,
@@ -233,9 +234,9 @@ pub fn make_time(
       hour: t.hour,
       minute: t.minute,
       second: t.second,
-      millisecond: t.ms,
-      microsecond: t.us,
-      nanosecond: t.ns,
+      millisecond: t.millisecond,
+      microsecond: t.microsecond,
+      nanosecond: t.nanosecond,
     ),
     protos.plain_time,
   )
@@ -245,7 +246,7 @@ pub fn make_date_time(
   st: Agent,
   protos: TemporalProtos,
   d: IsoDate,
-  t: TimeRec,
+  t: IsoTime,
 ) -> #(JsVal, Agent) {
   make_date_time_cal(st, protos, d, t, tcal.Iso8601)
 }
@@ -254,7 +255,7 @@ pub fn make_date_time_cal(
   st: Agent,
   protos: TemporalProtos,
   d: IsoDate,
-  t: TimeRec,
+  t: IsoTime,
   cal: tcal.Calendar,
 ) -> #(JsVal, Agent) {
   alloc_value(
@@ -266,9 +267,9 @@ pub fn make_date_time_cal(
       hour: t.hour,
       minute: t.minute,
       second: t.second,
-      millisecond: t.ms,
-      microsecond: t.us,
-      nanosecond: t.ns,
+      millisecond: t.millisecond,
+      microsecond: t.microsecond,
+      nanosecond: t.nanosecond,
       calendar: cal,
     ),
     protos.plain_date_time,
@@ -318,21 +319,21 @@ pub fn make_month_day_cal(
 pub fn make_duration(
   st: Agent,
   protos: TemporalProtos,
-  dur: DurRec,
+  dur: Duration,
 ) -> #(JsVal, Agent) {
   alloc_value(
     st,
     TemporalDuration(
-      years: f64_int(dur.years),
-      months: f64_int(dur.months),
-      weeks: f64_int(dur.weeks),
-      days: f64_int(dur.days),
-      hours: f64_int(dur.hours),
-      minutes: f64_int(dur.minutes),
-      seconds: f64_int(dur.seconds),
-      milliseconds: f64_int(dur.ms),
-      microseconds: f64_int(dur.us),
-      nanoseconds: f64_int(dur.ns),
+      years: round_to_float_precision(dur.years),
+      months: round_to_float_precision(dur.months),
+      weeks: round_to_float_precision(dur.weeks),
+      days: round_to_float_precision(dur.days),
+      hours: round_to_float_precision(dur.hours),
+      minutes: round_to_float_precision(dur.minutes),
+      seconds: round_to_float_precision(dur.seconds),
+      milliseconds: round_to_float_precision(dur.milliseconds),
+      microseconds: round_to_float_precision(dur.microseconds),
+      nanoseconds: round_to_float_precision(dur.nanoseconds),
     ),
     protos.duration,
   )
@@ -341,7 +342,7 @@ pub fn make_duration(
 pub fn finish_duration(
   st: Agent,
   protos: TemporalProtos,
-  dur: DurRec,
+  dur: Duration,
 ) -> #(JsVal, Agent) {
   case is_valid_duration(dur) {
     False -> rt_val.t_throw_range_error(st, "invalid duration")
@@ -442,23 +443,28 @@ pub fn to_integer_if_integral(st: Agent, v: JsVal) -> #(Int, Agent) {
   }
 }
 
-pub fn opt_integral_arg(
+pub fn integral_int_arg_or(
   st: Agent,
   args: List(JsVal),
   idx: Int,
+  default: Int,
 ) -> #(Int, Agent) {
   let v = helpers.arg_at(args, idx)
   case classify(v) {
-    KUndef -> #(0, st)
+    KUndef -> #(default, st)
     _ -> to_integer_if_integral(st, v)
   }
 }
 
-pub fn arg_trunc_int(st: Agent, args: List(JsVal), idx: Int) -> #(Int, Agent) {
+pub fn truncated_int_arg(
+  st: Agent,
+  args: List(JsVal),
+  idx: Int,
+) -> #(Int, Agent) {
   to_integer_with_truncation(st, helpers.arg_at(args, idx))
 }
 
-pub fn arg_trunc_int_or(
+pub fn truncated_int_arg_or(
   st: Agent,
   args: List(JsVal),
   idx: Int,
@@ -469,10 +475,6 @@ pub fn arg_trunc_int_or(
     KUndef -> #(default, st)
     _ -> to_integer_with_truncation(st, v)
   }
-}
-
-pub fn opt_int_arg(st: Agent, args: List(JsVal), idx: Int) -> #(Int, Agent) {
-  arg_trunc_int_or(st, args, idx, 0)
 }
 
 pub fn get_options_object(st: Agent, v: JsVal) -> #(Option(Handle), Agent) {
@@ -543,6 +545,14 @@ pub fn get_overflow_option(
     [#("constrain", Constrain), #("reject", Reject)],
     Constrain,
   )
+}
+
+pub fn get_overflow_option_from_value(
+  st: Agent,
+  options: JsVal,
+) -> #(Overflow, Agent) {
+  let #(opts, st) = get_options_object(st, options)
+  get_overflow_option(st, opts)
 }
 
 pub fn get_disambiguation_option(
@@ -747,25 +757,25 @@ pub fn unit_rank(u: Unit) -> Int {
 }
 
 pub type TimeUnit {
-  UDay
-  UHour
-  UMinute
-  USecond
-  UMillisecond
-  UMicrosecond
-  UNanosecond
+  DayUnit
+  HourUnit
+  MinuteUnit
+  SecondUnit
+  MillisecondUnit
+  MicrosecondUnit
+  NanosecondUnit
 }
 
 pub fn as_time_unit(u: Unit) -> Option(TimeUnit) {
   case u {
     Year | Month | Week -> None
-    Day -> Some(UDay)
-    Hour -> Some(UHour)
-    Minute -> Some(UMinute)
-    Second -> Some(USecond)
-    Millisecond -> Some(UMillisecond)
-    Microsecond -> Some(UMicrosecond)
-    Nanosecond -> Some(UNanosecond)
+    Day -> Some(DayUnit)
+    Hour -> Some(HourUnit)
+    Minute -> Some(MinuteUnit)
+    Second -> Some(SecondUnit)
+    Millisecond -> Some(MillisecondUnit)
+    Microsecond -> Some(MicrosecondUnit)
+    Nanosecond -> Some(NanosecondUnit)
   }
 }
 
@@ -781,13 +791,13 @@ pub fn require_time_unit(u: Unit) -> Result(TimeUnit, TErr) {
 
 pub fn time_unit_ns(u: TimeUnit) -> Int {
   case u {
-    UDay -> ns_per_day
-    UHour -> ns_per_hour
-    UMinute -> ns_per_minute
-    USecond -> ns_per_second
-    UMillisecond -> ns_per_ms
-    UMicrosecond -> ns_per_us
-    UNanosecond -> 1
+    DayUnit -> ns_per_day
+    HourUnit -> ns_per_hour
+    MinuteUnit -> ns_per_minute
+    SecondUnit -> ns_per_second
+    MillisecondUnit -> ns_per_ms
+    MicrosecondUnit -> ns_per_us
+    NanosecondUnit -> 1
   }
 }
 
@@ -797,26 +807,18 @@ pub fn get_unit_option(
   key: String,
   allow_auto allow_auto: Bool,
 ) -> #(Option(Unit), Agent) {
-  let #(u, st) = get_unit_option_impl(st, opts, key, allow_auto)
+  let #(u, st) = read_unit_option(st, opts, key, allow_auto:)
   case u {
     UnitValue(v) -> #(Some(v), st)
     UnitAuto | UnitAbsent -> #(None, st)
   }
 }
 
-pub fn get_unit_option_keep(
+pub fn read_unit_option(
   st: Agent,
   opts: Option(Handle),
   key: String,
-) -> #(UnitOption, Agent) {
-  get_unit_option_impl(st, opts, key, True)
-}
-
-fn get_unit_option_impl(
-  st: Agent,
-  opts: Option(Handle),
-  key: String,
-  allow_auto: Bool,
+  allow_auto allow_auto: Bool,
 ) -> #(UnitOption, Agent) {
   let #(v, st) = opt_get(st, opts, key)
   case classify(v) {
@@ -920,7 +922,7 @@ pub fn round_to_increment(x: Int, inc: Int, mode: RoundingMode) -> Int {
           }
         HalfEven ->
           case twice == inc {
-            True -> math_mod(q, 2) != 0
+            True -> floor_mod(q, 2) != 0
             False -> twice > inc
           }
       }
@@ -1022,9 +1024,9 @@ pub fn apply_since_mode(mode: RoundingMode, is_since: Bool) -> RoundingMode {
   }
 }
 
-pub fn apply_since_dur(dur: DurRec, is_since: Bool) -> DurRec {
+pub fn apply_since_duration(dur: Duration, is_since: Bool) -> Duration {
   case is_since {
-    True -> negate_dur(dur)
+    True -> negate_duration(dur)
     False -> dur
   }
 }
@@ -1069,13 +1071,13 @@ pub fn round_options(
       let opts = Some(h)
       let #(inc, st) = get_rounding_increment_option(st, opts)
       let #(mode, st) = get_rounding_mode_option(st, opts, HalfExpand)
-      let #(su, st) =
+      let #(smallest, st) =
         get_unit_option(st, opts, "smallestUnit", allow_auto: False)
-      case su {
+      case smallest {
         None -> rt_val.t_throw_range_error(st, "smallestUnit is required")
         Some(u) ->
           case round_unit(u, allow_day) {
-            Some(tu) -> #(#(tu, inc, mode), st)
+            Some(unit) -> #(#(unit, inc, mode), st)
             None -> rt_val.t_throw_range_error(st, "invalid smallestUnit")
           }
       }
@@ -1086,7 +1088,7 @@ pub fn round_options(
 
 pub fn round_unit(u: Unit, allow_day: Bool) -> Option(TimeUnit) {
   case as_time_unit(u) {
-    Some(UDay) if !allow_day -> None
+    Some(DayUnit) if !allow_day -> None
     other -> other
   }
 }
@@ -1123,7 +1125,7 @@ pub fn check_diff_setup(
   }
 }
 
-pub fn balance_time_ns(total: Int, largest: Unit) -> DurRec {
+pub fn balance_time_ns(total: Int, largest: Unit) -> Duration {
   let sign = int_sign(total)
   let a = int.absolute_value(total)
   let lr = unit_rank(largest)
@@ -1143,16 +1145,16 @@ pub fn balance_time_ns(total: Int, largest: Unit) -> DurRec {
     True -> #(a / ns_per_second, a % ns_per_second)
     False -> #(0, a)
   }
-  let #(ms, a) = case lr >= unit_rank(Millisecond) {
+  let #(milliseconds, a) = case lr >= unit_rank(Millisecond) {
     True -> #(a / ns_per_ms, a % ns_per_ms)
     False -> #(0, a)
   }
-  let #(us, a) = case lr >= unit_rank(Microsecond) {
+  let #(microseconds, a) = case lr >= unit_rank(Microsecond) {
     True -> #(a / ns_per_us, a % ns_per_us)
     False -> #(0, a)
   }
-  apply_dur_sign(
-    DurRec(
+  apply_duration_sign(
+    Duration(
       years: 0,
       months: 0,
       weeks: 0,
@@ -1160,9 +1162,9 @@ pub fn balance_time_ns(total: Int, largest: Unit) -> DurRec {
       hours:,
       minutes:,
       seconds:,
-      ms:,
-      us:,
-      ns: a,
+      milliseconds:,
+      microseconds:,
+      nanoseconds: a,
     ),
     sign,
   )
@@ -1171,11 +1173,12 @@ pub fn balance_time_ns(total: Int, largest: Unit) -> DurRec {
 pub fn to_string_time_options(
   st: Agent,
   opts: Option(Handle),
-) -> #(#(Precision, Option(TimeUnit), Int, RoundingMode), Agent) {
+) -> #(#(SecondsPrecision, Option(TimeUnit), Int, RoundingMode), Agent) {
   let #(digits, st) = get_fractional_digits(st, opts)
   let #(mode, st) = get_rounding_mode_option(st, opts, Trunc)
-  let #(su, st) = get_unit_option(st, opts, "smallestUnit", allow_auto: False)
-  #(terr(st, seconds_string_precision(digits, su, mode)), st)
+  let #(smallest, st) =
+    get_unit_option(st, opts, "smallestUnit", allow_auto: False)
+  #(terr(st, seconds_string_precision(digits, smallest, mode)), st)
 }
 
 pub type FractionalDigits {
@@ -1185,23 +1188,25 @@ pub type FractionalDigits {
 
 pub fn seconds_string_precision(
   digits: FractionalDigits,
-  su: Option(Unit),
+  smallest: Option(Unit),
   mode: RoundingMode,
-) -> Result(#(Precision, Option(TimeUnit), Int, RoundingMode), TErr) {
-  case su {
+) -> Result(#(SecondsPrecision, Option(TimeUnit), Int, RoundingMode), TErr) {
+  case smallest {
     Some(Year) | Some(Month) | Some(Week) | Some(Day) | Some(Hour) ->
       Error(RangeE("smallestUnit must be a time unit"))
-    Some(Minute) -> Ok(#(MinutePrec, Some(UMinute), 1, mode))
-    Some(Second) -> Ok(#(FixedPrec(0), Some(USecond), 1, mode))
-    Some(Millisecond) -> Ok(#(FixedPrec(3), Some(UMillisecond), 1, mode))
-    Some(Microsecond) -> Ok(#(FixedPrec(6), Some(UMicrosecond), 1, mode))
-    Some(Nanosecond) -> Ok(#(FixedPrec(9), Some(UNanosecond), 1, mode))
+    Some(Minute) -> Ok(#(MinutePrecision, Some(MinuteUnit), 1, mode))
+    Some(Second) -> Ok(#(SubsecondDigits(0), Some(SecondUnit), 1, mode))
+    Some(Millisecond) ->
+      Ok(#(SubsecondDigits(3), Some(MillisecondUnit), 1, mode))
+    Some(Microsecond) ->
+      Ok(#(SubsecondDigits(6), Some(MicrosecondUnit), 1, mode))
+    Some(Nanosecond) -> Ok(#(SubsecondDigits(9), Some(NanosecondUnit), 1, mode))
     None ->
       case digits {
-        DigitsAuto -> Ok(#(AutoPrec, None, 1, mode))
-        DigitsFixed(0) -> Ok(#(FixedPrec(0), Some(USecond), 1, mode))
+        DigitsAuto -> Ok(#(AutoPrecision, None, 1, mode))
+        DigitsFixed(0) -> Ok(#(SubsecondDigits(0), Some(SecondUnit), 1, mode))
         DigitsFixed(n) ->
-          Ok(#(FixedPrec(n), Some(UNanosecond), pow10(9 - n), mode))
+          Ok(#(SubsecondDigits(n), Some(NanosecondUnit), pow10(9 - n), mode))
       }
   }
 }
@@ -1238,10 +1243,10 @@ pub fn get_fractional_digits(
   }
 }
 
-pub fn duration_sign(d: DurRec) -> Int {
+pub fn duration_sign(d: Duration) -> Int {
   let fields = [
-    d.years, d.months, d.weeks, d.days, d.hours, d.minutes, d.seconds, d.ms,
-    d.us, d.ns,
+    d.years, d.months, d.weeks, d.days, d.hours, d.minutes, d.seconds,
+    d.milliseconds, d.microseconds, d.nanoseconds,
   ]
   list.fold(fields, 0, fn(acc, f) {
     case acc != 0 {
@@ -1251,12 +1256,12 @@ pub fn duration_sign(d: DurRec) -> Int {
   })
 }
 
-pub fn is_valid_duration(d: DurRec) -> Bool {
+pub fn is_valid_duration(d: Duration) -> Bool {
   let sign = duration_sign(d)
   // validity is checked on float-rounded components per spec
-  let fr = f64_int
+  let fr = round_to_float_precision
   let d =
-    DurRec(
+    Duration(
       years: fr(d.years),
       months: fr(d.months),
       weeks: fr(d.weeks),
@@ -1264,13 +1269,13 @@ pub fn is_valid_duration(d: DurRec) -> Bool {
       hours: fr(d.hours),
       minutes: fr(d.minutes),
       seconds: fr(d.seconds),
-      ms: fr(d.ms),
-      us: fr(d.us),
-      ns: fr(d.ns),
+      milliseconds: fr(d.milliseconds),
+      microseconds: fr(d.microseconds),
+      nanoseconds: fr(d.nanoseconds),
     )
   let fields = [
-    d.years, d.months, d.weeks, d.days, d.hours, d.minutes, d.seconds, d.ms,
-    d.us, d.ns,
+    d.years, d.months, d.weeks, d.days, d.hours, d.minutes, d.seconds,
+    d.milliseconds, d.microseconds, d.nanoseconds,
   ]
   let consistent =
     list.all(fields, fn(f) {
@@ -1281,38 +1286,26 @@ pub fn is_valid_duration(d: DurRec) -> Bool {
     int.absolute_value(d.years) < two32
     && int.absolute_value(d.months) < two32
     && int.absolute_value(d.weeks) < two32
-  let total = time_duration_ns(d)
+  let total = days_and_time_ns(d)
   consistent && cal_ok && int.absolute_value(total) <= max_time_duration_ns
 }
 
-pub fn time_duration_ns(d: DurRec) -> Int {
-  d.days
-  * ns_per_day
-  + d.hours
-  * ns_per_hour
-  + d.minutes
-  * ns_per_minute
-  + d.seconds
-  * ns_per_second
-  + d.ms
-  * ns_per_ms
-  + d.us
-  * ns_per_us
-  + d.ns
+pub fn days_and_time_ns(d: Duration) -> Int {
+  d.days * ns_per_day + time_part_ns(d)
 }
 
-pub fn time_only_ns(d: DurRec) -> Int {
+pub fn time_part_ns(d: Duration) -> Int {
   d.hours
   * ns_per_hour
   + d.minutes
   * ns_per_minute
   + d.seconds
   * ns_per_second
-  + d.ms
+  + d.milliseconds
   * ns_per_ms
-  + d.us
+  + d.microseconds
   * ns_per_us
-  + d.ns
+  + d.nanoseconds
 }
 
 pub fn check_time_duration_range(ns: Int) -> Result(Nil, TErr) {
@@ -1322,11 +1315,11 @@ pub fn check_time_duration_range(ns: Int) -> Result(Nil, TErr) {
   }
 }
 
-pub fn apply_dur_sign(d: DurRec, sign: Int) -> DurRec {
+pub fn apply_duration_sign(d: Duration, sign: Int) -> Duration {
   case sign < 0 {
     False -> d
     True ->
-      DurRec(
+      Duration(
         years: 0 - d.years,
         months: 0 - d.months,
         weeks: 0 - d.weeks,
@@ -1334,15 +1327,15 @@ pub fn apply_dur_sign(d: DurRec, sign: Int) -> DurRec {
         hours: 0 - d.hours,
         minutes: 0 - d.minutes,
         seconds: 0 - d.seconds,
-        ms: 0 - d.ms,
-        us: 0 - d.us,
-        ns: 0 - d.ns,
+        milliseconds: 0 - d.milliseconds,
+        microseconds: 0 - d.microseconds,
+        nanoseconds: 0 - d.nanoseconds,
       )
   }
 }
 
-pub fn negate_dur(d: DurRec) -> DurRec {
-  apply_dur_sign(d, -1)
+pub fn negate_duration(d: Duration) -> Duration {
+  apply_duration_sign(d, -1)
 }
 
 pub fn read_bag_int_field(
@@ -1385,7 +1378,7 @@ pub fn read_integral_int_field(
   read_bag_int_field(st, bag, key, to_integer_if_integral)
 }
 
-pub fn to_temporal_duration(st: Agent, item: JsVal) -> #(DurRec, Agent) {
+pub fn to_temporal_duration(st: Agent, item: JsVal) -> #(Duration, Agent) {
   case classify(item) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
@@ -1415,24 +1408,49 @@ pub fn read_duration_fields(
 ) -> #(List(Option(Int)), Agent) {
   let #(days, st) = read_integral_int_field(st, bag, "days")
   let #(hours, st) = read_integral_int_field(st, bag, "hours")
-  let #(us, st) = read_integral_int_field(st, bag, "microseconds")
-  let #(ms, st) = read_integral_int_field(st, bag, "milliseconds")
+  let #(microseconds, st) = read_integral_int_field(st, bag, "microseconds")
+  let #(milliseconds, st) = read_integral_int_field(st, bag, "milliseconds")
   let #(minutes, st) = read_integral_int_field(st, bag, "minutes")
   let #(months, st) = read_integral_int_field(st, bag, "months")
-  let #(ns, st) = read_integral_int_field(st, bag, "nanoseconds")
+  let #(nanoseconds, st) = read_integral_int_field(st, bag, "nanoseconds")
   let #(seconds, st) = read_integral_int_field(st, bag, "seconds")
   let #(weeks, st) = read_integral_int_field(st, bag, "weeks")
   let #(years, st) = read_integral_int_field(st, bag, "years")
-  #([years, months, weeks, days, hours, minutes, seconds, ms, us, ns], st)
+  #(
+    [
+      years,
+      months,
+      weeks,
+      days,
+      hours,
+      minutes,
+      seconds,
+      milliseconds,
+      microseconds,
+      nanoseconds,
+    ],
+    st,
+  )
 }
 
 pub fn apply_duration_fields(
-  base: DurRec,
+  base: Duration,
   fields: List(Option(Int)),
-) -> DurRec {
+) -> Duration {
   case fields {
-    [years, months, weeks, days, hours, minutes, seconds, ms, us, ns] ->
-      DurRec(
+    [
+      years,
+      months,
+      weeks,
+      days,
+      hours,
+      minutes,
+      seconds,
+      milliseconds,
+      microseconds,
+      nanoseconds,
+    ] ->
+      Duration(
         years: option.unwrap(years, base.years),
         months: option.unwrap(months, base.months),
         weeks: option.unwrap(weeks, base.weeks),
@@ -1440,15 +1458,15 @@ pub fn apply_duration_fields(
         hours: option.unwrap(hours, base.hours),
         minutes: option.unwrap(minutes, base.minutes),
         seconds: option.unwrap(seconds, base.seconds),
-        ms: option.unwrap(ms, base.ms),
-        us: option.unwrap(us, base.us),
-        ns: option.unwrap(ns, base.ns),
+        milliseconds: option.unwrap(milliseconds, base.milliseconds),
+        microseconds: option.unwrap(microseconds, base.microseconds),
+        nanoseconds: option.unwrap(nanoseconds, base.nanoseconds),
       )
     _ -> base
   }
 }
 
-pub fn duration_from_bag(st: Agent, bag: Handle) -> #(DurRec, Agent) {
+pub fn duration_from_bag(st: Agent, bag: Handle) -> #(Duration, Agent) {
   let #(fields, st) = read_duration_fields(st, bag)
   case list.all(fields, option.is_none) {
     True ->
@@ -1457,7 +1475,7 @@ pub fn duration_from_bag(st: Agent, bag: Handle) -> #(DurRec, Agent) {
         "invalid property bag for Temporal.Duration",
       )
     False -> {
-      let d = apply_duration_fields(temporal_iso.zero_dur, fields)
+      let d = apply_duration_fields(temporal_iso.zero_duration, fields)
       case is_valid_duration(d) {
         True -> #(d, st)
         False -> rt_val.t_throw_range_error(st, "invalid duration")
@@ -1466,7 +1484,7 @@ pub fn duration_from_bag(st: Agent, bag: Handle) -> #(DurRec, Agent) {
   }
 }
 
-pub fn parse_duration_string(s: String) -> Option(DurRec) {
+pub fn parse_duration_string(s: String) -> Option(Duration) {
   let #(sign, rest) = case s {
     "+" <> r -> #(1, r)
     "-" <> r -> #(-1, r)
@@ -1478,18 +1496,18 @@ pub fn parse_duration_string(s: String) -> Option(DurRec) {
   }
 }
 
-fn parse_duration_date_units(s: String, sign: Int) -> Option(DurRec) {
-  let #(years, s) = parse_dur_unit(s, ["Y", "y"])
-  let #(months, s) = parse_dur_unit(s, ["M", "m"])
-  let #(weeks, s) = parse_dur_unit(s, ["W", "w"])
-  let #(days, s) = parse_dur_unit(s, ["D", "d"])
+fn parse_duration_date_units(s: String, sign: Int) -> Option(Duration) {
+  let #(years, s) = parse_duration_unit(s, ["Y", "y"])
+  let #(months, s) = parse_duration_unit(s, ["M", "m"])
+  let #(weeks, s) = parse_duration_unit(s, ["W", "w"])
+  let #(days, s) = parse_duration_unit(s, ["D", "d"])
   case s {
     "" ->
       case years == None && months == None && weeks == None && days == None {
         True -> None
         False ->
-          Some(apply_dur_sign(
-            DurRec(
+          Some(apply_duration_sign(
+            Duration(
               years: option.unwrap(years, 0),
               months: option.unwrap(months, 0),
               weeks: option.unwrap(weeks, 0),
@@ -1497,17 +1515,17 @@ fn parse_duration_date_units(s: String, sign: Int) -> Option(DurRec) {
               hours: 0,
               minutes: 0,
               seconds: 0,
-              ms: 0,
-              us: 0,
-              ns: 0,
+              milliseconds: 0,
+              microseconds: 0,
+              nanoseconds: 0,
             ),
             sign,
           ))
       }
     "T" <> r | "t" <> r -> {
       use #(h, mi, sec, sub_ns) <- option.then(parse_duration_time_units(r))
-      Some(apply_dur_sign(
-        DurRec(
+      Some(apply_duration_sign(
+        Duration(
           years: option.unwrap(years, 0),
           months: option.unwrap(months, 0),
           weeks: option.unwrap(weeks, 0),
@@ -1515,9 +1533,9 @@ fn parse_duration_date_units(s: String, sign: Int) -> Option(DurRec) {
           hours: h,
           minutes: mi,
           seconds: sec,
-          ms: sub_ns / ns_per_ms,
-          us: { sub_ns % ns_per_ms } / ns_per_us,
-          ns: sub_ns % ns_per_us,
+          milliseconds: sub_ns / ns_per_ms,
+          microseconds: { sub_ns % ns_per_ms } / ns_per_us,
+          nanoseconds: sub_ns % ns_per_us,
         ),
         sign,
       ))
@@ -1526,7 +1544,7 @@ fn parse_duration_date_units(s: String, sign: Int) -> Option(DurRec) {
   }
 }
 
-fn parse_dur_unit(
+fn parse_duration_unit(
   s: String,
   designators: List(String),
 ) -> #(Option(Int), String) {
@@ -1541,7 +1559,7 @@ fn parse_dur_unit(
 }
 
 fn parse_duration_time_units(s: String) -> Option(#(Int, Int, Int, Int)) {
-  use #(h, h_frac, s1) <- option.then(parse_dur_time_unit(s, ["H", "h"]))
+  use #(h, h_frac, s1) <- option.then(parse_duration_time_unit(s, ["H", "h"]))
   case h_frac {
     Some(f) ->
       case s1 {
@@ -1555,7 +1573,9 @@ fn parse_duration_time_units(s: String) -> Option(#(Int, Int, Int, Int)) {
         _ -> None
       }
     None -> {
-      use #(mi, mi_frac, s2) <- option.then(parse_dur_time_unit(s1, ["M", "m"]))
+      use #(mi, mi_frac, s2) <- option.then(
+        parse_duration_time_unit(s1, ["M", "m"]),
+      )
       case mi_frac {
         Some(f) ->
           case s2 {
@@ -1573,7 +1593,7 @@ fn parse_duration_time_units(s: String) -> Option(#(Int, Int, Int, Int)) {
           }
         None -> {
           use #(sec, s_frac, s3) <- option.then(
-            parse_dur_time_unit(s2, ["S", "s"]),
+            parse_duration_time_unit(s2, ["S", "s"]),
           )
           case s3 {
             "" ->
@@ -1595,7 +1615,7 @@ fn parse_duration_time_units(s: String) -> Option(#(Int, Int, Int, Int)) {
   }
 }
 
-fn parse_dur_time_unit(
+fn parse_duration_time_unit(
   s: String,
   designators: List(String),
 ) -> Option(#(Option(Int), Option(Int), String)) {
@@ -1630,42 +1650,42 @@ fn parse_dur_time_unit(
   }
 }
 
-pub fn parse_time_zone_id(
-  st: Agent,
-  id: String,
-) -> #(Result(TimeZone, TErr), Agent) {
-  case parse_time_zone_id_strict(st, id) {
-    #(Ok(tz), st) -> #(Ok(tz), st)
-    #(Error(StrictUnknown), st) -> tz_from_datetime_string(st, id)
-    #(Error(StrictInvalid(e)), st) -> #(Error(e), st)
+pub fn time_zone_from_string(st: Agent, id: String) -> #(TimeZone, Agent) {
+  case parse_time_zone_identifier(st, id) {
+    #(Ok(tz), st) -> #(tz, st)
+    #(Error(UnknownIdentifier), st) -> {
+      let #(tz, st) = tz_from_datetime_string(st, id)
+      #(terr(st, tz), st)
+    }
+    #(Error(InvalidIdentifier(e)), st) -> throw_terr(st, e)
   }
 }
 
-pub type StrictTzError {
-  StrictUnknown
-  StrictInvalid(TErr)
+pub type TimeZoneIdError {
+  UnknownIdentifier
+  InvalidIdentifier(TErr)
 }
 
-pub fn parse_time_zone_id_strict(
+pub fn parse_time_zone_identifier(
   st: Agent,
   id: String,
-) -> #(Result(TimeZone, StrictTzError), Agent) {
+) -> #(Result(TimeZone, TimeZoneIdError), Agent) {
   case string.uppercase(id) == "UTC" {
-    True -> #(Ok(TzUtc), st)
+    True -> #(Ok(UtcZone), st)
     False ->
       case parse_offset_tz_id(id) {
-        Some(ns) -> #(Ok(TzOffset(ns:)), st)
+        Some(ns) -> #(Ok(OffsetZone(ns:)), st)
         None ->
           case resolve_zone(st, id) {
-            #(Ok(zone), st) -> #(Ok(TzNamed(zone:)), st)
+            #(Ok(zone), st) -> #(Ok(IanaZone(zone:)), st)
             #(Error(temporal_tz.LoadFailed(id:, error:)), st) -> #(
-              Error(StrictInvalid(unloadable_tz(id, error))),
+              Error(InvalidIdentifier(unloadable_tz(id, error))),
               st,
             )
             #(Error(temporal_tz.UnknownZone), st) ->
               case is_tz_annotation(id) {
-                True -> #(Error(StrictInvalid(unsupported_tz(id))), st)
-                False -> #(Error(StrictUnknown), st)
+                True -> #(Error(InvalidIdentifier(unsupported_tz(id))), st)
+                False -> #(Error(UnknownIdentifier), st)
               }
           }
       }
@@ -1693,13 +1713,13 @@ fn tz_from_datetime_string(
       case p.tz {
         Some(tz_str) ->
           case string.uppercase(tz_str) == "UTC" {
-            True -> #(Ok(TzUtc), st)
+            True -> #(Ok(UtcZone), st)
             False ->
               case parse_offset_tz_id(tz_str) {
-                Some(ns) -> #(Ok(TzOffset(ns:)), st)
+                Some(ns) -> #(Ok(OffsetZone(ns:)), st)
                 None ->
                   case resolve_zone(st, tz_str) {
-                    #(Ok(zone), st) -> #(Ok(TzNamed(zone:)), st)
+                    #(Ok(zone), st) -> #(Ok(IanaZone(zone:)), st)
                     #(Error(temporal_tz.LoadFailed(id:, error:)), st) -> #(
                       Error(unloadable_tz(id, error)),
                       st,
@@ -1713,11 +1733,11 @@ fn tz_from_datetime_string(
           }
         None ->
           case p.offset {
-            Zulu -> #(Ok(TzUtc), st)
+            Zulu -> #(Ok(UtcZone), st)
             NumericOffset(off, sub_minute) ->
               // seconds component not allowed, even ":00"
               case !sub_minute && off % ns_per_minute == 0 {
-                True -> #(Ok(TzOffset(ns: off)), st)
+                True -> #(Ok(OffsetZone(ns: off)), st)
                 False -> #(
                   Error(RangeE("sub-minute offset not valid as a time zone")),
                   st,
@@ -1754,9 +1774,9 @@ pub fn parse_offset_tz_id(id: String) -> Option(Int) {
 
 pub fn time_zone_id(tz: TimeZone) -> String {
   case tz {
-    TzUtc -> "UTC"
-    TzOffset(ns:) -> format_offset_minutes(ns)
-    TzNamed(zone:) -> temporal_tz.zone_id(zone)
+    UtcZone -> "UTC"
+    OffsetZone(ns:) -> format_offset_minutes(ns)
+    IanaZone(zone:) -> temporal_tz.zone_id(zone)
   }
 }
 
@@ -1772,16 +1792,16 @@ pub fn unloadable_tz(id: String, error: temporal_tz.TzError) -> TErr {
 
 pub fn tz_offset_ns_at(tz: TimeZone, epoch_ns: Int) -> Result(Int, TErr) {
   case tz {
-    TzUtc -> Ok(0)
-    TzOffset(ns:) -> Ok(ns)
-    TzNamed(zone:) -> Ok(temporal_tz.offset_ns_at(zone, epoch_ns))
+    UtcZone -> Ok(0)
+    OffsetZone(ns:) -> Ok(ns)
+    IanaZone(zone:) -> Ok(temporal_tz.offset_ns_at(zone, epoch_ns))
   }
 }
 
 pub fn epoch_ns_to_iso_in(
   tz: TimeZone,
   epoch_ns: Int,
-) -> Result(#(IsoDate, TimeRec), TErr) {
+) -> Result(#(IsoDate, IsoTime), TErr) {
   use off <- result.map(tz_offset_ns_at(tz, epoch_ns))
   epoch_ns_to_iso(epoch_ns, off)
 }
@@ -1814,20 +1834,19 @@ pub fn format_offset_rounded(offset_ns: Int) -> String {
 pub fn time_zone_equals(a: TimeZone, b: TimeZone) -> Bool {
   a == b
   || case a, b {
-    TzOffset(_), _ | _, TzOffset(_) -> False
-    TzUtc, TzUtc -> True
-    TzUtc, TzNamed(z) | TzNamed(z), TzUtc -> temporal_tz.canonical(z) == "UTC"
-    TzNamed(za), TzNamed(zb) ->
-      temporal_tz.canonical(za) == temporal_tz.canonical(zb)
+    OffsetZone(_), _ | _, OffsetZone(_) -> False
+    UtcZone, UtcZone -> True
+    UtcZone, IanaZone(z) | IanaZone(z), UtcZone ->
+      temporal_tz.primary_identifier_of(z) == "UTC"
+    IanaZone(za), IanaZone(zb) ->
+      temporal_tz.primary_identifier_of(za)
+      == temporal_tz.primary_identifier_of(zb)
   }
 }
 
 pub fn to_temporal_time_zone(st: Agent, v: JsVal) -> #(TimeZone, Agent) {
   case classify(v) {
-    KStr(s) -> {
-      let #(tz, st) = parse_time_zone_id(st, s)
-      #(terr(st, tz), st)
-    }
+    KStr(s) -> time_zone_from_string(st, s)
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
         SObject(
@@ -1843,14 +1862,14 @@ pub fn to_temporal_time_zone(st: Agent, v: JsVal) -> #(TimeZone, Agent) {
 pub fn system_time_zone(st: Agent) -> #(TimeZone, Agent) {
   case arc_host_time_zone_id(st) {
     Some(id) ->
-      case parse_time_zone_id_strict(st, id) {
+      case parse_time_zone_identifier(st, id) {
         #(Ok(tz), st) -> #(tz, st)
-        #(Error(StrictUnknown), st) | #(Error(StrictInvalid(_)), st) -> #(
-          TzUtc,
+        #(Error(UnknownIdentifier), st) | #(Error(InvalidIdentifier(_)), st) -> #(
+          UtcZone,
           st,
         )
       }
-    None -> #(TzUtc, st)
+    None -> #(UtcZone, st)
   }
 }
 

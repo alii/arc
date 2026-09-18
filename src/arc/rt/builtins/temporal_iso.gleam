@@ -34,12 +34,19 @@ pub type IsoDate {
   IsoDate(year: Int, month: Int, day: Int)
 }
 
-pub type TimeRec {
-  TimeRec(hour: Int, minute: Int, second: Int, ms: Int, us: Int, ns: Int)
+pub type IsoTime {
+  IsoTime(
+    hour: Int,
+    minute: Int,
+    second: Int,
+    millisecond: Int,
+    microsecond: Int,
+    nanosecond: Int,
+  )
 }
 
-pub type DurRec {
-  DurRec(
+pub type Duration {
+  Duration(
     years: Int,
     months: Int,
     weeks: Int,
@@ -47,15 +54,15 @@ pub type DurRec {
     hours: Int,
     minutes: Int,
     seconds: Int,
-    ms: Int,
-    us: Int,
-    ns: Int,
+    milliseconds: Int,
+    microseconds: Int,
+    nanoseconds: Int,
   )
 }
 
-pub const midnight = TimeRec(0, 0, 0, 0, 0, 0)
+pub const midnight = IsoTime(0, 0, 0, 0, 0, 0)
 
-pub const zero_dur = DurRec(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+pub const zero_duration = Duration(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
 pub type TErr {
   RangeE(String)
@@ -134,7 +141,7 @@ pub fn iso_date_within_limits(d: IsoDate) -> Bool {
   ed >= min_epoch_days && ed <= max_epoch_days
 }
 
-pub fn iso_datetime_within_limits(d: IsoDate, t: TimeRec) -> Bool {
+pub fn iso_datetime_within_limits(d: IsoDate, t: IsoTime) -> Bool {
   let ns = epoch_days(d) * ns_per_day + time_to_ns(t)
   ns > { 0 - ns_max_instant } - ns_per_day && ns < ns_max_instant + ns_per_day
 }
@@ -147,47 +154,47 @@ pub fn iso_year_month_within_limits(y: Int, m: Int) -> Bool {
   }
 }
 
-pub fn time_to_ns(t: TimeRec) -> Int {
+pub fn time_to_ns(t: IsoTime) -> Int {
   t.hour
   * ns_per_hour
   + t.minute
   * ns_per_minute
   + t.second
   * ns_per_second
-  + t.ms
+  + t.millisecond
   * ns_per_ms
-  + t.us
+  + t.microsecond
   * ns_per_us
-  + t.ns
+  + t.nanosecond
 }
 
-pub fn ns_to_time(total: Int) -> TimeRec {
+pub fn ns_to_time(total: Int) -> IsoTime {
   let hour = total / ns_per_hour
   let rem = total - hour * ns_per_hour
   let minute = rem / ns_per_minute
   let rem = rem - minute * ns_per_minute
   let second = rem / ns_per_second
   let rem = rem - second * ns_per_second
-  let ms = rem / ns_per_ms
-  let rem = rem - ms * ns_per_ms
-  let us = rem / ns_per_us
-  let ns = rem - us * ns_per_us
-  TimeRec(hour:, minute:, second:, ms:, us:, ns:)
+  let millisecond = rem / ns_per_ms
+  let rem = rem - millisecond * ns_per_ms
+  let microsecond = rem / ns_per_us
+  let nanosecond = rem - microsecond * ns_per_us
+  IsoTime(hour:, minute:, second:, millisecond:, microsecond:, nanosecond:)
 }
 
-pub fn is_valid_time(t: TimeRec) -> Bool {
+pub fn is_valid_time(t: IsoTime) -> Bool {
   t.hour >= 0
   && t.hour <= 23
   && t.minute >= 0
   && t.minute <= 59
   && t.second >= 0
   && t.second <= 59
-  && t.ms >= 0
-  && t.ms <= 999
-  && t.us >= 0
-  && t.us <= 999
-  && t.ns >= 0
-  && t.ns <= 999
+  && t.millisecond >= 0
+  && t.millisecond <= 999
+  && t.microsecond >= 0
+  && t.microsecond <= 999
+  && t.nanosecond >= 0
+  && t.nanosecond <= 999
 }
 
 pub fn regulate_iso_date(
@@ -217,11 +224,11 @@ pub fn check_date_limits(d: IsoDate) -> Result(IsoDate, TErr) {
   }
 }
 
-pub fn utc_epoch_ns(d: IsoDate, t: TimeRec) -> Int {
+pub fn utc_epoch_ns(d: IsoDate, t: IsoTime) -> Int {
   epoch_days(d) * ns_per_day + time_to_ns(t)
 }
 
-pub fn epoch_ns_to_iso(epoch_ns: Int, offset_ns: Int) -> #(IsoDate, TimeRec) {
+pub fn epoch_ns_to_iso(epoch_ns: Int, offset_ns: Int) -> #(IsoDate, IsoTime) {
   let local = epoch_ns + offset_ns
   let days = floor_div(local, ns_per_day)
   let rem = local - days * ns_per_day
@@ -250,23 +257,23 @@ pub fn format_iso_date(d: IsoDate) -> String {
   format_iso_year(d.year) <> "-" <> pad2(d.month) <> "-" <> pad2(d.day)
 }
 
-pub type Precision {
-  AutoPrec
-  FixedPrec(Int)
-  MinutePrec
+pub type SecondsPrecision {
+  AutoPrecision
+  SubsecondDigits(Int)
+  MinutePrecision
 }
 
-pub fn format_fraction(sub_ns: Int, precision: Precision) -> String {
+pub fn format_fraction(sub_ns: Int, precision: SecondsPrecision) -> String {
   let digits9 = int.to_string(sub_ns) |> string.pad_start(9, "0")
   case precision {
-    AutoPrec ->
+    AutoPrecision ->
       case sub_ns == 0 {
         True -> ""
         False -> "." <> trim_trailing_zeros(digits9)
       }
-    FixedPrec(0) -> ""
-    FixedPrec(n) -> "." <> string.slice(digits9, 0, n)
-    MinutePrec -> ""
+    SubsecondDigits(0) -> ""
+    SubsecondDigits(n) -> "." <> string.slice(digits9, 0, n)
+    MinutePrecision -> ""
   }
 }
 
@@ -277,11 +284,11 @@ pub fn trim_trailing_zeros(s: String) -> String {
   }
 }
 
-pub fn format_iso_time(t: TimeRec, precision: Precision) -> String {
-  let sub = t.ms * ns_per_ms + t.us * ns_per_us + t.ns
+pub fn format_iso_time(t: IsoTime, precision: SecondsPrecision) -> String {
+  let sub = t.millisecond * ns_per_ms + t.microsecond * ns_per_us + t.nanosecond
   let base = pad2(t.hour) <> ":" <> pad2(t.minute)
   case precision {
-    MinutePrec -> base
+    MinutePrecision -> base
     _ -> base <> ":" <> pad2(t.second) <> format_fraction(sub, precision)
   }
 }
@@ -305,7 +312,7 @@ pub type ParsedOffset {
 pub type ParsedIso {
   ParsedIso(
     date: IsoDate,
-    time: Option(TimeRec),
+    time: Option(IsoTime),
     offset: ParsedOffset,
     tz: Option(String),
     calendar: Option(String),
@@ -379,7 +386,7 @@ pub fn parse_year_part(s: String) -> Option(#(Int, String)) {
   }
 }
 
-pub fn parse_time_part(s: String) -> Option(#(TimeRec, String)) {
+pub fn parse_time_part(s: String) -> Option(#(IsoTime, String)) {
   use #(h, rest) <- option.then(take_digits(s, 2))
   let #(mi, sec, frac_ns, rest) = case rest {
     ":" <> r1 ->
@@ -412,14 +419,14 @@ pub fn parse_time_part(s: String) -> Option(#(TimeRec, String)) {
       }
   }
   let t =
-    TimeRec(
+    IsoTime(
       hour: h,
       minute: mi,
       // clamp leap second only after the range check
       second: int.min(sec, 59),
-      ms: frac_ns / ns_per_ms,
-      us: { frac_ns % ns_per_ms } / ns_per_us,
-      ns: frac_ns % ns_per_us,
+      millisecond: frac_ns / ns_per_ms,
+      microsecond: { frac_ns % ns_per_ms } / ns_per_us,
+      nanosecond: frac_ns % ns_per_us,
     )
   case h <= 23 && mi <= 59 && sec <= 60 {
     True -> Some(#(t, rest))
@@ -638,9 +645,9 @@ fn is_time_prefix(s: String) -> Bool {
   }
 }
 
-pub const two52 = 4_503_599_627_370_496
+pub const pow2_52 = 4_503_599_627_370_496
 
-pub const two53 = 9_007_199_254_740_992
+pub const pow2_53 = 9_007_199_254_740_992
 
 pub fn int_sign(n: Int) -> Int {
   case n > 0 {
@@ -654,8 +661,8 @@ pub fn int_sign(n: Int) -> Int {
 }
 
 // integer-space rounding, erlang float/1 misrounds past 53 bits
-pub fn f64_int(n: Int) -> Int {
-  case int.absolute_value(n) < two53 {
+pub fn round_to_float_precision(n: Int) -> Int {
+  case int.absolute_value(n) < pow2_53 {
     True -> n
     False -> {
       let #(m, s) = scale_ratio(int.absolute_value(n), 1, 0)
@@ -669,9 +676,9 @@ pub fn f64_int(n: Int) -> Int {
 }
 
 // scale into [2^52, 2^53) and round once, no double rounding
-pub fn ns_div_float(a: Int, b: Int) -> Float {
+pub fn divide_as_float(a: Int, b: Int) -> Float {
   case b < 0 {
-    True -> ns_div_float(0 - a, 0 - b)
+    True -> divide_as_float(0 - a, 0 - b)
     False ->
       case a == 0 {
         True -> 0.0
@@ -693,10 +700,10 @@ pub fn ns_div_float(a: Int, b: Int) -> Float {
 }
 
 fn scale_ratio(a: Int, b: Int, s: Int) -> #(Int, Int) {
-  case a >= b * two53 {
+  case a >= b * pow2_53 {
     True -> scale_ratio(a, b * 2, s + 1)
     False ->
-      case a < b * two52 {
+      case a < b * pow2_52 {
         True -> scale_ratio(a * 2, b, s - 1)
         False -> {
           let q0 = a / b
@@ -710,8 +717,8 @@ fn scale_ratio(a: Int, b: Int, s: Int) -> #(Int, Int) {
             True -> q0 + 1
             False -> q0
           }
-          case q == two53 {
-            True -> #(two52, s + 1)
+          case q == pow2_53 {
+            True -> #(pow2_52, s + 1)
             False -> #(q, s)
           }
         }

@@ -3,6 +3,7 @@ import arc/rt/builtins/temporal_tz
 import arc/zoneinfo
 import gleam/dict.{type Dict}
 import gleam/list
+import gleam/option.{None, Some}
 import gleam/string
 
 @external(erlang, "arc_tz_links_ffi", "links")
@@ -11,14 +12,14 @@ fn bundled_links() -> Dict(String, String)
 @external(erlang, "arc_tz_links_ffi", "version")
 fn bundled_version() -> String
 
-fn canonical(id: String) -> String {
-  let assert Ok(proper) = temporal_tz.lookup_name(id)
-  temporal_tz.canonical_id(proper)
+fn primary(id: String) -> String {
+  let assert Some(identifier) = temporal_tz.known_identifier(id)
+  temporal_tz.primary_identifier(identifier)
 }
 
-fn proper(id: String) -> String {
-  let assert Ok(proper) = temporal_tz.lookup_name(id)
-  proper
+fn identifier(id: String) -> String {
+  let assert Some(identifier) = temporal_tz.known_identifier(id)
+  identifier
 }
 
 fn js(source: String) -> engine.JsValueKind {
@@ -26,42 +27,42 @@ fn js(source: String) -> engine.JsValueKind {
   engine.classify(value)
 }
 
-pub fn link_resolves_to_canonical_test() {
-  assert canonical("Asia/Calcutta") == "Asia/Kolkata"
-  assert canonical("US/Eastern") == "America/New_York"
-  assert canonical("Europe/Kiev") == "Europe/Kyiv"
-  assert canonical("Asia/Kolkata") == "Asia/Kolkata"
-  assert canonical("UTC") == "UTC"
-  assert canonical("Etc/UTC") == "UTC"
-  assert canonical("Etc/UCT") == "UTC"
-  assert canonical("Zulu") == "UTC"
-  assert canonical("GMT") == "UTC"
-  assert canonical("Etc/GMT0") == "UTC"
-  assert canonical("Etc/GMT+1") == "Etc/GMT+1"
+pub fn link_resolves_to_primary_test() {
+  assert primary("Asia/Calcutta") == "Asia/Kolkata"
+  assert primary("US/Eastern") == "America/New_York"
+  assert primary("Europe/Kiev") == "Europe/Kyiv"
+  assert primary("Asia/Kolkata") == "Asia/Kolkata"
+  assert primary("UTC") == "UTC"
+  assert primary("Etc/UTC") == "UTC"
+  assert primary("Etc/UCT") == "UTC"
+  assert primary("Zulu") == "UTC"
+  assert primary("GMT") == "UTC"
+  assert primary("Etc/GMT0") == "UTC"
+  assert primary("Etc/GMT+1") == "Etc/GMT+1"
 }
 
 pub fn lookup_keeps_link_name_test() {
-  assert proper("Asia/Calcutta") == "Asia/Calcutta"
-  assert proper("US/Eastern") == "US/Eastern"
+  assert identifier("Asia/Calcutta") == "Asia/Calcutta"
+  assert identifier("US/Eastern") == "US/Eastern"
 }
 
 pub fn lookup_is_ascii_case_insensitive_test() {
-  assert proper("asia/calcutta") == "Asia/Calcutta"
-  assert proper("ASIA/CALCUTTA") == "Asia/Calcutta"
-  assert proper("eTc/gMt+1") == "Etc/GMT+1"
-  assert proper("utc") == "UTC"
-  assert proper("america/argentina/buenos_aires")
+  assert identifier("asia/calcutta") == "Asia/Calcutta"
+  assert identifier("ASIA/CALCUTTA") == "Asia/Calcutta"
+  assert identifier("eTc/gMt+1") == "Etc/GMT+1"
+  assert identifier("utc") == "UTC"
+  assert identifier("america/argentina/buenos_aires")
     == "America/Argentina/Buenos_Aires"
   // U+212A kelvin sign folds to k under unicode rules but not ascii
-  assert temporal_tz.lookup_name("Asia/Kol\u{212A}ata") == Error(Nil)
+  assert temporal_tz.known_identifier("Asia/Kol\u{212A}ata") == None
 }
 
 pub fn unknown_id_rejected_test() {
-  assert temporal_tz.lookup_name("Asia/Nowhere") == Error(Nil)
-  assert temporal_tz.lookup_name("IST") == Error(Nil)
-  assert temporal_tz.lookup_name("Factory") == Error(Nil)
-  assert temporal_tz.lookup_name("posixrules") == Error(Nil)
-  assert temporal_tz.lookup_name("") == Error(Nil)
+  assert temporal_tz.known_identifier("Asia/Nowhere") == None
+  assert temporal_tz.known_identifier("IST") == None
+  assert temporal_tz.known_identifier("Factory") == None
+  assert temporal_tz.known_identifier("posixrules") == None
+  assert temporal_tz.known_identifier("") == None
 }
 
 pub fn bundled_table_drives_resolution_test() {
@@ -70,17 +71,17 @@ pub fn bundled_table_drives_resolution_test() {
   assert list.length(links) > 200
   list.each(links, fn(pair) {
     let #(link, target) = pair
-    assert proper(link) == link
-    assert proper(string.uppercase(link)) == link
+    assert identifier(link) == link
+    assert identifier(string.uppercase(link)) == link
     let expected = case target {
       "Etc/UTC" | "Etc/GMT" -> "UTC"
       t -> t
     }
-    assert canonical(link) == expected
+    assert primary(link) == expected
   })
 }
 
-pub fn available_ids_are_canonical_and_sorted_test() {
+pub fn available_ids_are_primary_and_sorted_test() {
   let ids = temporal_tz.available_ids(zoneinfo.available_ids())
   assert ids == list.sort(ids, string.compare)
   assert list.contains(ids, "UTC")
@@ -92,7 +93,7 @@ pub fn available_ids_are_canonical_and_sorted_test() {
   assert !list.contains(ids, "US/Eastern")
   assert !list.contains(ids, "Factory")
   list.each(ids, fn(id) {
-    assert canonical(id) == id
+    assert primary(id) == id
   })
 }
 
