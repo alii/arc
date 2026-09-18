@@ -62,7 +62,7 @@ fn to_outcome(outcome: #(Result(JsVal, JsVal), State)) -> Outcome {
 const drive = call.Drive(start_coroutine:)
 
 fn execute(state: State) -> Outcome {
-  case interpreter.execute_inner(state, drive) {
+  case interpreter.execute(state, drive) {
     Ok(#(Completed(NormalCompletion(v)), s)) -> Finished(Ok(v), s)
     Ok(#(Completed(ThrowCompletion(e)), s)) -> Finished(Error(e), s)
     Ok(#(Suspended(kind, v), s)) -> Parked(kind, v, s)
@@ -78,7 +78,7 @@ fn complete(state: State, site: String) -> #(Result(JsVal, JsVal), State) {
 }
 
 fn complete_call(state: State) -> #(Result(JsVal, JsVal), Agent) {
-  case interpreter.execute_inner(state, drive) {
+  case interpreter.execute(state, drive) {
     Ok(#(Completed(NormalCompletion(v)), s)) -> #(Ok(v), s.agent)
     Ok(#(Completed(ThrowCompletion(e)), s)) -> #(Error(e), s.agent)
     Ok(#(Suspended(kind, _), s)) -> {
