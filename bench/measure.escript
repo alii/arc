@@ -29,7 +29,7 @@ run_once(T) ->
     Self = self(),
     Pid = spawn_opt(fun() ->
         E = arc@engine:new(),
-        A = arc@engine:heap(E),
+        A = arc@engine:agent(E),
         erlang:garbage_collect(),
         {reductions, R0} = process_info(self(), reductions),
         {garbage_collection, GI0} = process_info(self(), garbage_collection),

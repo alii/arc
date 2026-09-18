@@ -1,6 +1,7 @@
 import arc/compiler
 import arc/interp/dynamic_import
 import arc/interp/entry
+import arc/interp/safepoint
 import arc/module
 import arc/module/load_error
 import arc/module/registry
@@ -38,10 +39,6 @@ fn churning_module(tag: String) -> String {
   <> "' + churn() + churn();"
 }
 
-fn no_drain(st: Agent) -> Agent {
-  st
-}
-
 fn files(
   table: List(#(String, String)),
 ) -> #(module_host.ResolveFn, module_host.LoadFn) {
@@ -60,13 +57,13 @@ fn result_or(r: Result(a, Nil), e: e) -> Result(a, e) {
 
 fn evaluate(
   table: List(#(String, String)),
-  finish: module.Finish,
-) -> #(Agent, Result(module.EvaluatedBundle, module.ModuleError)) {
+  drain: safepoint.Drain,
+) -> #(Result(module.EvaluatedBundle, module.ModuleError), Agent) {
   let assert [#(entry_spec, entry_source), ..] = table
   let #(resolve, load) = files(table)
   let assert Ok(bundle) =
     module.compile_bundle(entry_spec, entry_source, resolve, load)
-  module.evaluate_bundle(bundle, agent(), finish)
+  module.evaluate_bundle(agent(), bundle, drain)
 }
 
 fn export(st: Agent, evaluated: module.EvaluatedBundle, name: String) -> JsVal {
@@ -77,7 +74,7 @@ fn export(st: Agent, evaluated: module.EvaluatedBundle, name: String) -> JsVal {
 }
 
 pub fn imported_binding_is_read_through_the_live_cell_test() {
-  let assert #(st, Ok(evaluated)) =
+  let assert #(Ok(evaluated), st) =
     evaluate(
       [
         #(
@@ -92,7 +89,7 @@ pub fn imported_binding_is_read_through_the_live_cell_test() {
 }
 
 pub fn template_objects_are_per_module_test() {
-  let assert #(st, Ok(evaluated)) =
+  let assert #(Ok(evaluated), st) =
     evaluate(
       [
         #(
@@ -114,7 +111,7 @@ pub fn template_objects_are_per_module_test() {
 }
 
 pub fn cyclic_function_imports_are_callable_test() {
-  let assert #(st, Ok(evaluated)) =
+  let assert #(Ok(evaluated), st) =
     evaluate(
       [
         #(
@@ -132,7 +129,7 @@ pub fn cyclic_function_imports_are_callable_test() {
 }
 
 pub fn namespace_import_sees_the_module_object_test() {
-  let assert #(st, Ok(evaluated)) =
+  let assert #(Ok(evaluated), st) =
     evaluate(
       [
         #(
@@ -148,7 +145,7 @@ pub fn namespace_import_sees_the_module_object_test() {
 }
 
 pub fn a_thrown_body_is_an_evaluation_error_test() {
-  let assert #(st, Error(module.EvaluationError(thrown))) =
+  let assert #(Error(module.EvaluationError(thrown)), st) =
     evaluate([#("/main.js", "throw new TypeError('nope')")], rt_async.drain)
   assert rt_inspect.format_error(st, thrown)
     |> string.starts_with("TypeError: nope")
@@ -156,7 +153,7 @@ pub fn a_thrown_body_is_an_evaluation_error_test() {
 }
 
 pub fn top_level_await_settles_through_the_drain_test() {
-  let assert #(st, Ok(evaluated)) =
+  let assert #(Ok(evaluated), st) =
     evaluate(
       [
         #(
@@ -172,7 +169,7 @@ pub fn top_level_await_settles_through_the_drain_test() {
 }
 
 pub fn a_rejected_top_level_await_is_an_evaluation_error_test() {
-  let assert #(st, Error(module.EvaluationError(thrown))) =
+  let assert #(Error(module.EvaluationError(thrown)), st) =
     evaluate(
       [#("/main.js", "await Promise.reject(new RangeError('late'))")],
       rt_async.drain,
@@ -190,21 +187,21 @@ pub fn top_level_await_without_a_drain_is_pending_test() {
       resolve,
       load,
     )
-  let assert #(st, Ok(linked)) = module.link_for_evaluation(bundle, agent())
-  let assert #(st, _, Error(module.EvaluationPending(promise))) =
-    module.evaluate_linked_tracking(linked, st, no_drain, set.new())
+  let assert #(Ok(linked), st) = module.link_for_evaluation(agent(), bundle)
+  let assert #(_, Error(module.EvaluationPending(promise)), st) =
+    module.evaluate_linked_tracking(st, linked, safepoint.no_drain, set.new())
   let assert #(_, PromisePending(_), _) = rt_async.promise_data(st, promise)
   assert registry.read_module_status(st, "/main.js")
     == Some(registry.Evaluating)
   let st = rt_async.drain(st)
   let assert #(_, PromiseFulfilled(_), _) = rt_async.promise_data(st, promise)
-  let ns = mk_object(module.entry_namespace_of(linked, st))
+  let ns = mk_object(module.entry_namespace_of(st, linked))
   let assert Some(v) = module.read_export(st, ns, "v")
   assert classify(v) == KNum(JInt(7))
 }
 
 pub fn a_never_settling_await_is_reported_test() {
-  let assert #(st, Error(module.EvaluationError(thrown))) =
+  let assert #(Error(module.EvaluationError(thrown)), st) =
     evaluate([#("/main.js", "await new Promise(() => {})")], rt_async.drain)
   assert rt_inspect.format_error(st, thrown)
     |> string.contains("top-level await promise never settled")
@@ -350,7 +347,7 @@ pub fn dynamic_import_after_top_level_await_keeps_the_module_referrer_test() {
       resolve,
       load,
     )
-  let assert #(st, Ok(evaluated)) =
+  let assert #(Ok(evaluated), st) =
     module_host.evaluate_bundle_with_registry(st, bundle, rt_async.drain)
   let st = rt_async.drain(st)
   assert classify(export(st, evaluated, "out")) == KStr("sib")
@@ -376,8 +373,8 @@ pub fn static_module_survives_a_frozen_global_test() {
   let #(resolve, load) = files([])
   let assert Ok(bundle) =
     module.compile_bundle("/main.js", "export const v = 1;", resolve, load)
-  let assert #(st, Ok(evaluated)) =
-    module.evaluate_bundle(bundle, st, rt_async.drain)
+  let assert #(Ok(evaluated), st) =
+    module.evaluate_bundle(st, bundle, rt_async.drain)
   assert classify(export(st, evaluated, "v")) == KNum(JInt(1))
 }
 

@@ -3,6 +3,15 @@ import arc/rt/async as rt_async
 import arc/rt/gc as rt_gc
 import arc/rt/types.{type Agent, type JsVal}
 
+/// what runs when a turn ends: drain microtasks plus any embedder loop
+pub type Drain =
+  fn(Agent) -> Agent
+
+/// for code already inside a job
+pub fn no_drain(agent: Agent) -> Agent {
+  agent
+}
+
 // only the outermost activation can see every frame root
 pub fn maybe_collect_at_return(state: State) -> State {
   let store = state.agent.store
@@ -17,12 +26,8 @@ pub fn maybe_collect_at_return(state: State) -> State {
 }
 
 // held stays rooted while drain collects between jobs
-pub fn finish_turn(
-  agent: Agent,
-  held: List(JsVal),
-  drain: fn(Agent) -> Agent,
-) -> Agent {
-  let #(agent, ids) = rt_gc.t_hold_roots(agent, held)
+pub fn finish_turn(agent: Agent, held: List(JsVal), drain: Drain) -> Agent {
+  let #(ids, agent) = rt_gc.t_hold_roots(agent, held)
   let agent = rt_gc.t_maybe_collect(agent)
   let agent = drain(agent)
   rt_gc.t_release_roots(agent, ids)

@@ -21,30 +21,30 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set.{type Set}
 
-pub fn resolve(code: List(IrOp), constants: List(JsVal)) -> Resolved {
+pub fn assemble(code: List(IrOp), constants: List(JsVal)) -> Assembled {
   let const_arr = tuple_array.from_list(constants)
   let code = thread_jumps(code, label_suffixes(code, dict.new()), [])
   let code = drop_dead_labels(code, referenced_labels(code, set.new()), [])
   let code = peephole(code, const_arr, [])
   let code = add_safepoints(code)
   let label_map = build_label_map(code, 0, dict.new())
-  let #(ops, lines) = resolve_ops(code, label_map, 0, [], [])
-  Resolved(
+  let #(ops, lines) = assemble_ops(code, label_map, 0, [], [])
+  Assembled(
     bytecode: tuple_array.from_list(ops),
     constants: const_arr,
     lines: tuple_array.from_list(lines),
   )
 }
 
-pub type Resolved {
-  Resolved(
+pub type Assembled {
+  Assembled(
     bytecode: tuple_array.TupleArray(Op),
     constants: tuple_array.TupleArray(JsVal),
     lines: tuple_array.TupleArray(Int),
   )
 }
 
-// runs before label resolution so fusion can't break jumps
+// runs before labels become pcs so fusion can't break jumps
 fn peephole(
   code: List(IrOp),
   consts: tuple_array.TupleArray(JsVal),
@@ -875,7 +875,7 @@ fn label_pc(labels: Dict(LabelId, Pc), label: LabelId) -> Pc {
   pc
 }
 
-fn resolve_try_kind(
+fn assemble_try_kind(
   labels: Dict(LabelId, Pc),
   kind: opcode.TryKind(LabelId),
 ) -> opcode.TryKind(Pc) {
@@ -887,7 +887,7 @@ fn resolve_try_kind(
 }
 
 // appends a sentinel return so fetch stays unchecked
-fn resolve_ops(
+fn assemble_ops(
   code: List(IrOp),
   labels: Dict(LabelId, Pc),
   line: Int,
@@ -896,17 +896,17 @@ fn resolve_ops(
 ) -> #(List(Op), List(Int)) {
   case code {
     [] -> #(list.reverse([opcode.Return, ..acc]), list.reverse([line, ..lines]))
-    [IrLabel(_), ..rest] -> resolve_ops(rest, labels, line, acc, lines)
-    [IrLine(l), ..rest] -> resolve_ops(rest, labels, l, acc, lines)
+    [IrLabel(_), ..rest] -> assemble_ops(rest, labels, line, acc, lines)
+    [IrLine(l), ..rest] -> assemble_ops(rest, labels, l, acc, lines)
     [op, ..rest] ->
-      resolve_ops(rest, labels, line, [resolve_op(op, labels), ..acc], [
+      assemble_ops(rest, labels, line, [assemble_op(op, labels), ..acc], [
         line,
         ..lines
       ])
   }
 }
 
-fn resolve_op(op: IrOp, labels: Dict(LabelId, Pc)) -> Op {
+fn assemble_op(op: IrOp, labels: Dict(LabelId, Pc)) -> Op {
   case op {
     IrFinal(op) -> op
 
@@ -916,7 +916,7 @@ fn resolve_op(op: IrOp, labels: Dict(LabelId, Pc)) -> Op {
     IrJumpIfNullish(l) -> opcode.JumpIfNullish(label_pc(labels, l))
     IrJumpIfNotNullish(l) -> opcode.JumpIfNotNullish(label_pc(labels, l))
     IrPushTry(l, kind) ->
-      opcode.PushTry(label_pc(labels, l), resolve_try_kind(labels, kind))
+      opcode.PushTry(label_pc(labels, l), assemble_try_kind(labels, kind))
     IrGosub(l) -> opcode.Gosub(label_pc(labels, l))
     IrAsyncYieldStarNext(l) -> opcode.AsyncYieldStarNext(label_pc(labels, l))
     IrAsyncYieldStarResume(l) ->

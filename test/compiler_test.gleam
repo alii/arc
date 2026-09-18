@@ -1,9 +1,5 @@
 import arc/bytecode/key.{Named}
 import arc/compiler
-import arc/engine.{
-  type JsValueKind, Finite, Infinity, JsBool, JsNull, JsNumber, JsObject,
-  JsString, JsUndefined, NaN, NegInfinity,
-}
 import arc/host_hooks
 import arc/interp/entry
 import arc/interp/safepoint
@@ -17,13 +13,15 @@ import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type JsVal, PromiseFulfilled, PromisePending, PromiseRejected,
-  StringKey, mk_int, mk_object, mk_undefined,
+  type Agent, type JsVal, type JsValKind, JFloat, JNan, JNegInf, JPosInf, KBool,
+  KHandle, KNull, KNum, KStr, KUndef, PromiseFulfilled, PromisePending,
+  PromiseRejected, StringKey, mk_int, mk_object, mk_undefined,
 }
 import gleam/dict
 import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
+import rt_helpers
 
 fn agent() -> Agent {
   rt_builtins.new_agent(host_hooks.default_host_hooks()) |> entry.link
@@ -31,10 +29,10 @@ fn agent() -> Agent {
 
 fn classify_outcome(
   completion: rt_call.Completion(JsVal),
-) -> Result(JsValueKind, JsValueKind) {
+) -> Result(JsValKind, JsValKind) {
   case completion {
-    NormalCompletion(v) -> Ok(engine.classify(v))
-    ThrowCompletion(e) -> Error(engine.classify(e))
+    NormalCompletion(v) -> Ok(rt_helpers.classify(v))
+    ThrowCompletion(e) -> Error(rt_helpers.classify(e))
   }
 }
 
@@ -45,9 +43,9 @@ fn completion_value(completion: rt_call.Completion(JsVal)) -> JsVal {
   }
 }
 
-fn render(st: Agent, val: JsValueKind) -> String {
+fn render(st: Agent, val: JsValKind) -> String {
   case val {
-    JsObject(h) -> rt_inspect.format_error(st, mk_object(h))
+    KHandle(h) -> rt_inspect.format_error(st, mk_object(h))
     _ -> string.inspect(val)
   }
 }
@@ -55,7 +53,7 @@ fn render(st: Agent, val: JsValueKind) -> String {
 fn run_template(
   st: Agent,
   template: FuncTemplate,
-) -> #(Result(JsValueKind, JsValueKind), Agent) {
+) -> #(Result(JsValKind, JsValKind), Agent) {
   let #(completion, st) = entry.run_script(st, template)
   let st = safepoint.end_turn(st, [completion_value(completion)])
   #(classify_outcome(completion), st)
@@ -63,7 +61,7 @@ fn run_template(
 
 fn run_js(
   source: String,
-) -> Result(#(Result(JsValueKind, JsValueKind), Agent), String) {
+) -> Result(#(Result(JsValKind, JsValKind), Agent), String) {
   case parser.parse_script(source) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
     Ok(#(body, sb)) ->
@@ -76,23 +74,23 @@ fn run_js(
 
 fn promise_settlement(
   st: Agent,
-  val: JsValueKind,
-) -> option.Option(Result(JsValueKind, JsValueKind)) {
+  val: JsValKind,
+) -> option.Option(Result(JsValKind, JsValKind)) {
   use h <- option.then(case val {
-    JsObject(h) -> Some(h)
+    KHandle(h) -> Some(h)
     _ -> None
   })
   use promise <- option.then(rt_async.as_promise(st, mk_object(h)))
   case rt_async.promise_data(st, promise) {
-    #(_, PromiseFulfilled(v), _) -> Some(Ok(engine.classify(v)))
-    #(_, PromiseRejected(r), _) -> Some(Error(engine.classify(r)))
+    #(_, PromiseFulfilled(v), _) -> Some(Ok(rt_helpers.classify(v)))
+    #(_, PromiseRejected(r), _) -> Some(Error(rt_helpers.classify(r)))
     #(_, PromisePending(_), _) -> None
   }
 }
 
 fn assert_promise_settles(
   source: String,
-  expected: Result(JsValueKind, JsValueKind),
+  expected: Result(JsValKind, JsValKind),
   label: String,
 ) -> Nil {
   case run_js(source) {
@@ -122,15 +120,15 @@ fn assert_promise_settles(
   }
 }
 
-fn assert_promise_resolves(source: String, expected: JsValueKind) -> Nil {
+fn assert_promise_resolves(source: String, expected: JsValKind) -> Nil {
   assert_promise_settles(source, Ok(expected), "fulfilled")
 }
 
-fn assert_promise_rejects(source: String, expected: JsValueKind) -> Nil {
+fn assert_promise_rejects(source: String, expected: JsValKind) -> Nil {
   assert_promise_settles(source, Error(expected), "rejected")
 }
 
-fn assert_normal(source: String, expected: JsValueKind) -> Nil {
+fn assert_normal(source: String, expected: JsValKind) -> Nil {
   case run_js(source) {
     Ok(#(Ok(val), _)) -> {
       assert val == expected
@@ -142,7 +140,7 @@ fn assert_normal(source: String, expected: JsValueKind) -> Nil {
 }
 
 fn assert_normal_number(source: String, expected: Float) -> Nil {
-  assert_normal(source, JsNumber(Finite(expected)))
+  assert_normal(source, KNum(JFloat(expected)))
 }
 
 fn assert_thrown(source: String) -> Nil {
@@ -172,23 +170,23 @@ pub fn number_literal_test() -> Nil {
 }
 
 pub fn string_literal_test() -> Nil {
-  assert_normal("\"hello\"", JsString("hello"))
+  assert_normal("\"hello\"", KStr("hello"))
 }
 
 pub fn boolean_true_test() -> Nil {
-  assert_normal("true", JsBool(True))
+  assert_normal("true", KBool(True))
 }
 
 pub fn boolean_false_test() -> Nil {
-  assert_normal("false", JsBool(False))
+  assert_normal("false", KBool(False))
 }
 
 pub fn null_literal_test() -> Nil {
-  assert_normal("null", JsNull)
+  assert_normal("null", KNull)
 }
 
 pub fn undefined_literal_test() -> Nil {
-  assert_normal("undefined", JsUndefined)
+  assert_normal("undefined", KUndef)
 }
 
 pub fn addition_test() -> Nil {
@@ -212,23 +210,23 @@ pub fn modulo_test() -> Nil {
 }
 
 pub fn comparison_less_than_test() -> Nil {
-  assert_normal("1 < 2", JsBool(True))
+  assert_normal("1 < 2", KBool(True))
 }
 
 pub fn comparison_greater_than_test() -> Nil {
-  assert_normal("2 > 1", JsBool(True))
+  assert_normal("2 > 1", KBool(True))
 }
 
 pub fn strict_equal_test() -> Nil {
-  assert_normal("1 === 1", JsBool(True))
+  assert_normal("1 === 1", KBool(True))
 }
 
 pub fn strict_not_equal_test() -> Nil {
-  assert_normal("1 !== 2", JsBool(True))
+  assert_normal("1 !== 2", KBool(True))
 }
 
 pub fn string_concat_test() -> Nil {
-  assert_normal("\"hello\" + \" world\"", JsString("hello world"))
+  assert_normal("\"hello\" + \" world\"", KStr("hello world"))
 }
 
 pub fn nested_arithmetic_test() -> Nil {
@@ -240,7 +238,7 @@ pub fn negate_test() -> Nil {
 }
 
 pub fn logical_not_test() -> Nil {
-  assert_normal("!true", JsBool(False))
+  assert_normal("!true", KBool(False))
 }
 
 pub fn unary_plus_test() -> Nil {
@@ -248,7 +246,7 @@ pub fn unary_plus_test() -> Nil {
 }
 
 pub fn void_test() -> Nil {
-  assert_normal("void 0", JsUndefined)
+  assert_normal("void 0", KUndef)
 }
 
 pub fn var_declaration_test() -> Nil {
@@ -276,7 +274,7 @@ pub fn compound_assignment_test() -> Nil {
 }
 
 pub fn var_no_init_test() -> Nil {
-  assert_normal("var x; x", JsUndefined)
+  assert_normal("var x; x", KUndef)
 }
 
 pub fn if_true_test() -> Nil {
@@ -329,7 +327,7 @@ pub fn block_scope_let_test() -> Nil {
 }
 
 pub fn logical_and_short_circuit_test() -> Nil {
-  assert_normal("false && true", JsBool(False))
+  assert_normal("false && true", KBool(False))
 }
 
 pub fn logical_and_evaluates_both_test() -> Nil {
@@ -337,7 +335,7 @@ pub fn logical_and_evaluates_both_test() -> Nil {
 }
 
 pub fn logical_or_short_circuit_test() -> Nil {
-  assert_normal("true || false", JsBool(True))
+  assert_normal("true || false", KBool(True))
 }
 
 pub fn logical_or_evaluates_second_test() -> Nil {
@@ -362,7 +360,7 @@ pub fn ternary_false_test() -> Nil {
 
 pub fn empty_object_test() -> Nil {
   case run_js("({})") {
-    Ok(#(Ok(JsObject(_)), _)) -> Nil
+    Ok(#(Ok(KHandle(_)), _)) -> Nil
     _other -> panic as { "expected object, got something else" }
   }
 }
@@ -376,7 +374,7 @@ pub fn object_multiple_properties_test() -> Nil {
 }
 
 pub fn object_property_undefined_test() -> Nil {
-  assert_normal("var obj = {}; obj.x", JsUndefined)
+  assert_normal("var obj = {}; obj.x", KUndef)
 }
 
 pub fn object_computed_key_basic_test() -> Nil {
@@ -420,7 +418,7 @@ pub fn object_computed_key_symbol_test() -> Nil {
 pub fn object_computed_key_symbol_not_string_key_test() -> Nil {
   assert_normal(
     "var s = Symbol('k'); var o = {[s]: 1}; Object.keys(o).length",
-    JsNumber(Finite(0.0)),
+    KNum(JFloat(0.0)),
   )
 }
 
@@ -433,13 +431,13 @@ pub fn object_numeric_key_test() -> Nil {
 }
 
 pub fn object_numeric_key_access_test() -> Nil {
-  assert_normal("var o = {1: 'a', 2: 'b'}; o[1] + o[2]", JsString("ab"))
+  assert_normal("var o = {1: 'a', 2: 'b'}; o[1] + o[2]", KStr("ab"))
 }
 
 pub fn object_numeric_key_keys_test() -> Nil {
   assert_normal(
     "var o = {1: 'a', 2: 'b'}; Object.keys(o).join(',')",
-    JsString("1,2"),
+    KStr("1,2"),
   )
 }
 
@@ -470,28 +468,25 @@ pub fn object_spread_multiple_test() -> Nil {
 }
 
 pub fn object_spread_null_test() -> Nil {
-  assert_normal(
-    "var o = {...null}; Object.keys(o).length",
-    JsNumber(Finite(0.0)),
-  )
+  assert_normal("var o = {...null}; Object.keys(o).length", KNum(JFloat(0.0)))
 }
 
 pub fn object_spread_undefined_test() -> Nil {
   assert_normal(
     "var o = {...undefined}; Object.keys(o).length",
-    JsNumber(Finite(0.0)),
+    KNum(JFloat(0.0)),
   )
 }
 
 pub fn object_spread_primitive_number_test() -> Nil {
-  assert_normal("var o = {...42}; Object.keys(o).length", JsNumber(Finite(0.0)))
+  assert_normal("var o = {...42}; Object.keys(o).length", KNum(JFloat(0.0)))
 }
 
 pub fn object_spread_only_own_test() -> Nil {
   assert_normal(
     "var proto = {inherited: 1}; var src = Object.create(proto); src.own = 2; "
       <> "var o = {...src}; o.inherited === undefined && o.own === 2",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -500,21 +495,21 @@ pub fn object_spread_only_enumerable_test() -> Nil {
     "var src = {}; Object.defineProperty(src, 'hidden', {value: 1, enumerable: false}); "
       <> "src.visible = 2; var o = {...src}; "
       <> "o.hidden === undefined && o.visible === 2",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn object_spread_array_test() -> Nil {
   assert_normal(
     "var o = {...[10, 20, 30]}; o['0'] + o['1'] + o['2']",
-    JsNumber(Finite(60.0)),
+    KNum(JFloat(60.0)),
   )
 }
 
 pub fn object_spread_array_sparse_test() -> Nil {
   assert_normal(
     "var o = {...[1, , 3]}; o['0'] === 1 && o['1'] === undefined && o['2'] === 3",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -529,12 +524,12 @@ pub fn object_spread_with_computed_key_test() -> Nil {
   assert_normal(
     "var s = {a: 1}; var k = 'b'; var o = {...s, [k]: 2, c: 3}; "
       <> "o.a + ',' + o.b + ',' + o.c",
-    JsString("1,2,3"),
+    KStr("1,2,3"),
   )
 }
 
 pub fn array_spread_basic_test() -> Nil {
-  assert_normal("[...[1,2,3]].join(',')", JsString("1,2,3"))
+  assert_normal("[...[1,2,3]].join(',')", KStr("1,2,3"))
 }
 
 pub fn array_spread_empty_test() -> Nil {
@@ -542,21 +537,21 @@ pub fn array_spread_empty_test() -> Nil {
 }
 
 pub fn array_spread_leading_trailing_test() -> Nil {
-  assert_normal("[0, ...[1,2], 3].join(',')", JsString("0,1,2,3"))
+  assert_normal("[0, ...[1,2], 3].join(',')", KStr("0,1,2,3"))
 }
 
 pub fn array_spread_leading_only_test() -> Nil {
-  assert_normal("[10, 20, ...[30, 40]].join(',')", JsString("10,20,30,40"))
+  assert_normal("[10, 20, ...[30, 40]].join(',')", KStr("10,20,30,40"))
 }
 
 pub fn array_spread_trailing_only_test() -> Nil {
-  assert_normal("[...[1,2], 3, 4].join(',')", JsString("1,2,3,4"))
+  assert_normal("[...[1,2], 3, 4].join(',')", KStr("1,2,3,4"))
 }
 
 pub fn array_spread_multiple_test() -> Nil {
   assert_normal(
     "[1, ...[2,3], 4, ...[5,6], 7].join(',')",
-    JsString("1,2,3,4,5,6,7"),
+    KStr("1,2,3,4,5,6,7"),
   )
 }
 
@@ -565,7 +560,7 @@ pub fn array_spread_length_test() -> Nil {
 }
 
 pub fn array_spread_source_holes_test() -> Nil {
-  assert_normal("[...[1,,3]].join(',')", JsString("1,,3"))
+  assert_normal("[...[1,,3]].join(',')", KStr("1,,3"))
 }
 
 pub fn array_spread_source_holes_length_test() -> Nil {
@@ -575,7 +570,7 @@ pub fn array_spread_source_holes_length_test() -> Nil {
 pub fn array_spread_source_holes_value_test() -> Nil {
   assert_normal(
     "var a = [...[1,,3]]; 1 in a && a[1] === undefined",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -596,20 +591,20 @@ pub fn array_spread_non_iterable_object_throws_test() -> Nil {
 }
 
 pub fn array_spread_nested_test() -> Nil {
-  assert_normal("[...[1, ...[2, 3], 4]].join(',')", JsString("1,2,3,4"))
+  assert_normal("[...[1, ...[2, 3], 4]].join(',')", KStr("1,2,3,4"))
 }
 
 pub fn array_spread_generator_test() -> Nil {
   assert_normal(
     "function* g() { yield 1; yield 2; yield 3; } [...g()].join(',')",
-    JsString("1,2,3"),
+    KStr("1,2,3"),
   )
 }
 
 pub fn array_spread_generator_interleaved_test() -> Nil {
   assert_normal(
     "function* g() { yield 2; yield 3; } [1, ...g(), 4].join(',')",
-    JsString("1,2,3,4"),
+    KStr("1,2,3,4"),
   )
 }
 
@@ -618,13 +613,13 @@ pub fn array_spread_generator_empty_test() -> Nil {
 }
 
 pub fn array_spread_does_not_mutate_source_test() -> Nil {
-  assert_normal("var s = [1,2,3]; [...s]; s.join(',')", JsString("1,2,3"))
+  assert_normal("var s = [1,2,3]; [...s]; s.join(',')", KStr("1,2,3"))
 }
 
 pub fn array_spread_copies_not_shares_test() -> Nil {
   assert_normal(
     "var s = [1,2,3]; var t = [...s]; t.push(4); s.length",
-    JsNumber(Finite(3.0)),
+    KNum(JFloat(3.0)),
   )
 }
 
@@ -645,15 +640,15 @@ pub fn huge_sparse_fill_throws_test() -> Nil {
 }
 
 pub fn huge_sparse_keys_creates_lazily_test() -> Nil {
-  assert_normal("typeof Array(100000000).keys()", JsString("object"))
+  assert_normal("typeof Array(100000000).keys()", KStr("object"))
 }
 
 pub fn huge_sparse_values_creates_lazily_test() -> Nil {
-  assert_normal("typeof Array(100000000).values()", JsString("object"))
+  assert_normal("typeof Array(100000000).values()", KStr("object"))
 }
 
 pub fn huge_sparse_entries_creates_lazily_test() -> Nil {
-  assert_normal("typeof Array(100000000).entries()", JsString("object"))
+  assert_normal("typeof Array(100000000).entries()", KStr("object"))
 }
 
 pub fn create_array_iterator_reads_no_length_test() -> Nil {
@@ -677,11 +672,11 @@ pub fn huge_sparse_tosorted_throws_test() -> Nil {
 }
 
 pub fn under_limit_join_works_test() -> Nil {
-  assert_normal("Array(5).join('-')", JsString("----"))
+  assert_normal("Array(5).join('-')", KStr("----"))
 }
 
 pub fn under_limit_fill_works_test() -> Nil {
-  assert_normal("Array(3).fill(7).join(',')", JsString("7,7,7"))
+  assert_normal("Array(3).fill(7).join(',')", KStr("7,7,7"))
 }
 
 pub fn call_spread_basic_test() -> Nil {
@@ -711,7 +706,7 @@ pub fn call_spread_extra_args_test() -> Nil {
 }
 
 pub fn call_spread_fewer_args_test() -> Nil {
-  assert_normal("function f(a,b,c){ return c } f(...[1,2])", JsUndefined)
+  assert_normal("function f(a,b,c){ return c } f(...[1,2])", KUndef)
 }
 
 pub fn call_spread_null_throws_test() -> Nil {
@@ -745,7 +740,7 @@ pub fn method_spread_mixed_test() -> Nil {
 pub fn method_spread_native_test() -> Nil {
   assert_normal(
     "var a = [1,2]; a.push(...[3,4,5]); a.join(',')",
-    JsString("1,2,3,4,5"),
+    KStr("1,2,3,4,5"),
   )
 }
 
@@ -782,7 +777,7 @@ pub fn optional_call_spread_test() -> Nil {
 }
 
 pub fn optional_call_spread_nullish_test() -> Nil {
-  assert_normal("var f = undefined; f?.(...[1,2])", JsUndefined)
+  assert_normal("var f = undefined; f?.(...[1,2])", KUndef)
 }
 
 pub fn call_spread_catch_test() -> Nil {
@@ -803,7 +798,7 @@ pub fn call_spread_evaluation_order_test() -> Nil {
   assert_normal(
     "var log = []; function t(x){ log.push(x); return x } "
       <> "function f(){} f(t(1), ...[t(2),t(3)], t(4)); log.join(',')",
-    JsString("1,2,3,4"),
+    KStr("1,2,3,4"),
   )
 }
 
@@ -811,7 +806,7 @@ pub fn array_spread_evaluation_order_test() -> Nil {
   assert_normal(
     "var log = []; function t(x){ log.push(x); return x } "
       <> "var a = [t(1), ...[t(2),t(3)], t(4)]; log.join(',')",
-    JsString("1,2,3,4"),
+    KStr("1,2,3,4"),
   )
 }
 
@@ -820,11 +815,11 @@ pub fn optional_chaining_dot_test() -> Nil {
 }
 
 pub fn optional_chaining_null_test() -> Nil {
-  assert_normal("var obj = null; obj?.x", JsUndefined)
+  assert_normal("var obj = null; obj?.x", KUndef)
 }
 
 pub fn optional_chaining_undefined_test() -> Nil {
-  assert_normal("var obj = undefined; obj?.x", JsUndefined)
+  assert_normal("var obj = undefined; obj?.x", KUndef)
 }
 
 pub fn optional_chaining_computed_test() -> Nil {
@@ -832,7 +827,7 @@ pub fn optional_chaining_computed_test() -> Nil {
 }
 
 pub fn optional_chaining_computed_null_test() -> Nil {
-  assert_normal("var obj = null; obj?.['x']", JsUndefined)
+  assert_normal("var obj = null; obj?.['x']", KUndef)
 }
 
 pub fn optional_call_test() -> Nil {
@@ -840,7 +835,7 @@ pub fn optional_call_test() -> Nil {
 }
 
 pub fn optional_call_null_test() -> Nil {
-  assert_normal("var fn = null; fn?.()", JsUndefined)
+  assert_normal("var fn = null; fn?.()", KUndef)
 }
 
 pub fn expression_result_test() -> Nil {
@@ -848,7 +843,7 @@ pub fn expression_result_test() -> Nil {
 }
 
 pub fn empty_program_test() -> Nil {
-  assert_normal("", JsUndefined)
+  assert_normal("", KUndef)
 }
 
 pub fn prefix_increment_test() -> Nil {
@@ -864,13 +859,13 @@ pub fn postfix_increment_side_effect_test() -> Nil {
 }
 
 pub fn postfix_member_string_tonumeric_test() -> Nil {
-  assert_normal("var o = {x: '5'}; String([o.x++, o.x])", JsString("5,6"))
+  assert_normal("var o = {x: '5'}; String([o.x++, o.x])", KStr("5,6"))
 }
 
 pub fn postfix_member_valueof_tonumeric_test() -> Nil {
   assert_normal(
     "var o = {x: {valueOf: function() { return 3 }}}; String([o.x--, o.x])",
-    JsString("3,2"),
+    KStr("3,2"),
   )
 }
 
@@ -879,10 +874,7 @@ pub fn prefix_member_string_tonumeric_test() -> Nil {
 }
 
 pub fn prefix_identifier_string_tonumeric_test() -> Nil {
-  assert_normal(
-    "var x = '5'; String([++x, x, typeof x])",
-    JsString("6,6,number"),
-  )
+  assert_normal("var x = '5'; String([++x, x, typeof x])", KStr("6,6,number"))
 }
 
 pub fn prefix_identifier_string_decrement_tonumeric_test() -> Nil {
@@ -892,12 +884,12 @@ pub fn prefix_identifier_string_decrement_tonumeric_test() -> Nil {
 pub fn postfix_computed_member_string_tonumeric_test() -> Nil {
   assert_normal(
     "var o = {x: '5'}; var k = 'x'; String([o[k]++, o[k]])",
-    JsString("5,6"),
+    KStr("5,6"),
   )
 }
 
 pub fn postfix_member_negative_zero_test() -> Nil {
-  assert_normal("var o = {x: -0}; 1 / o.x++", JsNumber(NegInfinity))
+  assert_normal("var o = {x: -0}; 1 / o.x++", KNum(JNegInf))
 }
 
 pub fn try_catch_basic_test() -> Nil {
@@ -914,7 +906,7 @@ pub fn try_finally_normal_test() -> Nil {
 
 pub fn try_finally_throw_test() -> Nil {
   case run_js("var x = 0; try { x = 1; throw 42; } finally { x = 10; }") {
-    Ok(#(Error(JsNumber(Finite(42.0))), _)) -> Nil
+    Ok(#(Error(KNum(JFloat(42.0))), _)) -> Nil
     other -> panic as { "expected throw of 42: " <> string.inspect(other) }
   }
 }
@@ -939,7 +931,7 @@ pub fn try_catch_finally_rethrow_test() -> Nil {
       "var x = 0; try { throw 42; } catch(e) { throw e + 1; } finally { x = 99; }",
     )
   {
-    Ok(#(Error(JsNumber(Finite(43.0))), _)) -> Nil
+    Ok(#(Error(KNum(JFloat(43.0))), _)) -> Nil
     other -> panic as { "expected throw of 43: " <> string.inspect(other) }
   }
 }
@@ -977,13 +969,13 @@ pub fn try_finally_break_swallows_throw_test() -> Nil {
 pub fn try_finally_nested_order_test() -> Nil {
   assert_normal(
     "var s=''; try{try{throw 0}finally{s+='a'}}catch(e){s+='c'}finally{s+='b'} s",
-    JsString("acb"),
+    KStr("acb"),
   )
 }
 
 pub fn uncaught_throw_test() -> Nil {
   case run_js("throw 42") {
-    Ok(#(Error(JsNumber(Finite(42.0))), _)) -> Nil
+    Ok(#(Error(KNum(JFloat(42.0))), _)) -> Nil
     Ok(#(Ok(_), _)) -> panic as "expected a throw, got a normal completion"
     other -> panic as { "unexpected result: " <> string.inspect(other) }
   }
@@ -1002,7 +994,7 @@ pub fn function_no_args_test() -> Nil {
 }
 
 pub fn function_implicit_return_test() -> Nil {
-  assert_normal("function f() {} f()", JsUndefined)
+  assert_normal("function f() {} f()", KUndef)
 }
 
 pub fn function_expression_test() -> Nil {
@@ -1021,7 +1013,7 @@ pub fn function_extra_args_ignored_test() -> Nil {
 }
 
 pub fn function_missing_args_undefined_test() -> Nil {
-  assert_normal("function f(a, b) { return b; } f(1)", JsUndefined)
+  assert_normal("function f(a, b) { return b; } f(1)", KUndef)
 }
 
 pub fn function_with_locals_test() -> Nil {
@@ -1185,7 +1177,7 @@ pub fn closure_sibling_block_let_shadow_test() -> Nil {
 pub fn closure_sibling_catch_shadow_test() -> Nil {
   assert_normal(
     "(function(){ try{throw 1}catch(e){var g=()=>e} try{throw 2}catch(e){var h=()=>e} return g()+','+h() })()",
-    JsString("1,2"),
+    KStr("1,2"),
   )
 }
 
@@ -1219,7 +1211,7 @@ pub fn closure_const_by_value_test() -> Nil {
        return r.join();
      }
      f()",
-    JsString("ReferenceError,ReferenceError,1,1,1,2,3,ReferenceError"),
+    KStr("ReferenceError,ReferenceError,1,1,1,2,3,ReferenceError"),
   )
 }
 
@@ -1230,7 +1222,7 @@ pub fn closure_this_by_value_test() -> Nil {
      class A { constructor() { this.a = 5 } }
      class B extends A { constructor() { const g = () => this; super(); this.ok = g() === this } }
      [f.get()(), f.nt(), new B().ok, new B().a].join()",
-    JsString("4,true,true,5"),
+    KStr("4,true,true,5"),
   )
 }
 
@@ -1243,13 +1235,13 @@ pub fn class_this_by_value_test() -> Nil {
        class I { constructor() { this.i = 7 } get() { return (() => this.i)() } } r.push(new I().get()) } };
      new B(); class C extends A {} r.push(new C().m());
      r.join()",
-    JsString("true,5,10,true,true,ReferenceError,true,7,10"),
+    KStr("true,5,10,true,true,ReferenceError,true,7,10"),
   )
 }
 
 pub fn array_literal_test() -> Nil {
   case run_js("[1, 2, 3]") {
-    Ok(#(Ok(JsObject(_)), _)) -> Nil
+    Ok(#(Ok(KHandle(_)), _)) -> Nil
     _other -> panic as "expected array object"
   }
 }
@@ -1271,7 +1263,7 @@ pub fn array_empty_length_test() -> Nil {
 }
 
 pub fn array_out_of_bounds_test() -> Nil {
-  assert_normal("[1, 2][5]", JsUndefined)
+  assert_normal("[1, 2][5]", KUndef)
 }
 
 pub fn array_index_assignment_test() -> Nil {
@@ -1287,32 +1279,32 @@ pub fn array_sparse_hole_test() -> Nil {
 }
 
 pub fn array_sparse_hole_value_test() -> Nil {
-  assert_normal("[1, , 3][1]", JsUndefined)
+  assert_normal("[1, , 3][1]", KUndef)
 }
 
 pub fn array_sparse_hole_in_operator_test() -> Nil {
-  assert_normal("var a = [1, , 3]; 1 in a", JsBool(False))
+  assert_normal("var a = [1, , 3]; 1 in a", KBool(False))
 }
 
 pub fn array_sparse_hole_in_operator_present_test() -> Nil {
-  assert_normal("var a = [1, , 3]; 0 in a && 2 in a", JsBool(True))
+  assert_normal("var a = [1, , 3]; 0 in a && 2 in a", KBool(True))
 }
 
 pub fn array_sparse_hole_leading_test() -> Nil {
-  assert_normal("var a = [, 2, 3]; 0 in a", JsBool(False))
+  assert_normal("var a = [, 2, 3]; 0 in a", KBool(False))
 }
 
 pub fn array_sparse_hole_all_holes_test() -> Nil {
   assert_normal(
     "var a = [,,]; a.length === 2 && !(0 in a) && !(1 in a)",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn array_sparse_hole_multiple_test() -> Nil {
   assert_normal(
     "var a = [1,,3,,5]; !(1 in a) && !(3 in a) && (0 in a) && (4 in a)",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -1326,26 +1318,26 @@ pub fn array_sparse_hole_foreach_skips_test() -> Nil {
 pub fn array_sparse_hole_spread_prefix_test() -> Nil {
   assert_normal(
     "var a = [, ...[1,2], 3]; !(0 in a) && a.length === 4 && a[1] === 1",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn array_sparse_hole_spread_tail_test() -> Nil {
   assert_normal(
     "var a = [1, ...[], , 3]; a.length === 3 && !(1 in a) && a[2] === 3",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn array_sparse_hole_spread_sandwich_test() -> Nil {
   assert_normal(
     "var a = [, ...[1,2], , 3]; a.length === 5 && !(0 in a) && !(3 in a) && a[4] === 3",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn array_string_elements_test() -> Nil {
-  assert_normal("['a', 'b', 'c'][2]", JsString("c"))
+  assert_normal("['a', 'b', 'c'][2]", KStr("c"))
 }
 
 pub fn array_nested_access_test() -> Nil {
@@ -1377,7 +1369,7 @@ pub fn function_prototype_exists_test() -> Nil {
   assert_normal(
     "function Foo() {}
      typeof Foo.prototype",
-    JsString("object"),
+    KStr("object"),
   )
 }
 
@@ -1431,7 +1423,7 @@ pub fn sta_js_pattern_test() -> Nil {
      };
      var e = new Test262Error('hello');
      e.toString()",
-    JsString("Test262Error: hello"),
+    KStr("Test262Error: hello"),
   )
 }
 
@@ -1449,7 +1441,7 @@ pub fn this_global_in_plain_sloppy_call_test() -> Nil {
   assert_normal(
     "function f() { return this === globalThis; }
      f()",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -1457,7 +1449,7 @@ pub fn this_undefined_in_plain_strict_call_test() -> Nil {
   assert_normal(
     "function f() { 'use strict'; return this; }
      f()",
-    JsUndefined,
+    KUndef,
   )
 }
 
@@ -1470,30 +1462,30 @@ pub fn method_call_binds_this_test() -> Nil {
 }
 
 pub fn template_literal_no_expressions_test() -> Nil {
-  assert_normal("`hello world`", JsString("hello world"))
+  assert_normal("`hello world`", KStr("hello world"))
 }
 
 pub fn template_literal_with_expression_test() -> Nil {
-  assert_normal("var x = 42; `value is ${x}`", JsString("value is 42"))
+  assert_normal("var x = 42; `value is ${x}`", KStr("value is 42"))
 }
 
 pub fn template_literal_multiple_expressions_test() -> Nil {
   assert_normal(
     "var a = 1; var b = 2; `${a} + ${b} = ${a + b}`",
-    JsString("1 + 2 = 3"),
+    KStr("1 + 2 = 3"),
   )
 }
 
 pub fn template_literal_empty_test() -> Nil {
-  assert_normal("``", JsString(""))
+  assert_normal("``", KStr(""))
 }
 
 pub fn template_literal_nested_template_test() -> Nil {
-  assert_normal("var x = 'y'; `${`inner${x}`}`", JsString("innery"))
+  assert_normal("var x = 'y'; `${`inner${x}`}`", KStr("innery"))
 }
 
 pub fn template_literal_nested_template_brace_quasi_test() -> Nil {
-  assert_normal("`${`}`}`", JsString("}"))
+  assert_normal("`${`}`}`", KStr("}"))
 }
 
 pub fn template_literal_substitution_trailing_tokens_test() -> Nil {
@@ -1505,10 +1497,7 @@ pub fn template_literal_unterminated_substitution_test() -> Nil {
 }
 
 pub fn template_literal_substitution_in_operator_for_head_test() -> Nil {
-  assert_normal(
-    "var r; for (r = `${'x' in {x:1}}`; false; ) ; r",
-    JsString("true"),
-  )
+  assert_normal("var r; for (r = `${'x' in {x:1}}`; false; ) ; r", KStr("true"))
 }
 
 pub fn switch_basic_match_test() -> Nil {
@@ -1586,7 +1575,7 @@ pub fn assert_js_harness_basic_test() -> Nil {
      assert.sameValue(1 + 1, 2);
      assert.sameValue(typeof 42, 'number');
      42",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -1673,7 +1662,7 @@ pub fn full_assert_js_compiles_test() -> Nil {
      assert.sameValue(typeof 42, 'number');
      assert.sameValue(typeof undefined, 'undefined');
      42",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -1686,31 +1675,31 @@ pub fn switch_string_cases_test() -> Nil {
        default: r = 'other';
      }
      r",
-    JsString("is string"),
+    KStr("is string"),
   )
 }
 
 pub fn function_declaration_name_test() -> Nil {
-  assert_normal("function foo() {} foo.name", JsString("foo"))
+  assert_normal("function foo() {} foo.name", KStr("foo"))
 }
 
 pub fn function_expression_named_name_test() -> Nil {
-  assert_normal("var f = function bar() {}; f.name", JsString("bar"))
+  assert_normal("var f = function bar() {}; f.name", KStr("bar"))
 }
 
 pub fn function_expression_anonymous_name_test() -> Nil {
-  assert_normal("var f = function() {}; f.name", JsString("f"))
+  assert_normal("var f = function() {}; f.name", KStr("f"))
 }
 
 pub fn arrow_function_name_test() -> Nil {
-  assert_normal("var f = () => 1; f.name", JsString("f"))
+  assert_normal("var f = () => 1; f.name", KStr("f"))
 }
 
 pub fn prototype_constructor_backlink_test() -> Nil {
   assert_normal(
     "function Foo() {}
      Foo.prototype.constructor === Foo",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -1718,7 +1707,7 @@ pub fn prototype_is_object_test() -> Nil {
   assert_normal(
     "function Foo() {}
      typeof Foo.prototype",
-    JsString("object"),
+    KStr("object"),
   )
 }
 
@@ -1727,7 +1716,7 @@ pub fn constructor_via_new_test() -> Nil {
     "function Foo() {}
      var o = new Foo();
      o.constructor === Foo",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -1735,7 +1724,7 @@ pub fn arrow_has_no_prototype_test() -> Nil {
   assert_normal(
     "var f = () => 1;
      typeof f.prototype",
-    JsString("undefined"),
+    KStr("undefined"),
   )
 }
 
@@ -1744,7 +1733,7 @@ pub fn constructor_return_object_overrides_test() -> Nil {
     "function Foo() { return {x: 99}; }
      var o = new Foo();
      o.x",
-    JsNumber(Finite(99.0)),
+    KNum(JFloat(99.0)),
   )
 }
 
@@ -1753,7 +1742,7 @@ pub fn constructor_return_primitive_ignored_test() -> Nil {
     "function Foo() { this.x = 42; return 5; }
      var o = new Foo();
      o.x",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -1763,7 +1752,7 @@ pub fn prototype_chain_inheritance_test() -> Nil {
      Foo.prototype.hello = 'world';
      var o = new Foo();
      o.hello",
-    JsString("world"),
+    KStr("world"),
   )
 }
 
@@ -1773,7 +1762,7 @@ pub fn constructor_non_object_prototype_fallback_test() -> Nil {
      Foo.prototype = 42;
      var o = new Foo();
      o.x",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
@@ -1899,7 +1888,7 @@ pub fn for_in_object_basic_test() -> Nil {
 pub fn for_in_let_binding_test() -> Nil {
   assert_normal(
     "var result = ''; var obj = {x: 1, y: 2}; for (let k in obj) { result += k; } result",
-    JsString("xy"),
+    KStr("xy"),
   )
 }
 
@@ -1914,7 +1903,7 @@ pub fn for_in_undefined_test() -> Nil {
 pub fn for_in_array_test() -> Nil {
   assert_normal(
     "var result = ''; for (var k in [10, 20, 30]) { result += k; } result",
-    JsString("012"),
+    KStr("012"),
   )
 }
 
@@ -1933,10 +1922,7 @@ pub fn for_in_continue_test() -> Nil {
 }
 
 pub fn for_in_existing_var_test() -> Nil {
-  assert_normal(
-    "var k; for (k in {hello: 1, world: 2}) {} k",
-    JsString("world"),
-  )
+  assert_normal("var k; for (k in {hello: 1, world: 2}) {} k", KStr("world"))
 }
 
 pub fn for_of_array_basic_test() -> Nil {
@@ -2053,7 +2039,7 @@ pub fn for_of_break_close_non_object_test() -> Nil {
      }; } };
      try { for (var x of it) break; } catch (e) { caught = e; }
      caught instanceof TypeError",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -2090,7 +2076,7 @@ pub fn for_await_of_break_closes_iterator_test() -> Nil {
        return() { closed++; return Promise.resolve({}); }
      }; } };
      (async () => { for await (var x of it) break; return closed; })()",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
@@ -2105,7 +2091,7 @@ pub fn for_await_of_throw_closes_iterator_test() -> Nil {
        try { for await (var x of it) throw 7; } catch (e) {}
        return closed;
      })()",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
@@ -2119,7 +2105,7 @@ pub fn for_await_of_throw_swallows_close_error_test() -> Nil {
        try { for await (var x of it) throw 'orig'; }
        catch (e) { return e; }
      })()",
-    JsString("orig"),
+    KStr("orig"),
   )
 }
 
@@ -2134,7 +2120,7 @@ pub fn for_await_of_next_reject_no_close_test() -> Nil {
        try { for await (var x of it) {} } catch (e) {}
        return closed;
      })()",
-    JsNumber(Finite(0.0)),
+    KNum(JFloat(0.0)),
   )
 }
 
@@ -2146,7 +2132,7 @@ pub fn for_await_of_exhausted_no_close_test() -> Nil {
        return() { closed++; return Promise.resolve({}); }
      }; } };
      (async () => { for await (var x of it) {} return closed; })()",
-    JsNumber(Finite(0.0)),
+    KNum(JFloat(0.0)),
   )
 }
 
@@ -2160,7 +2146,7 @@ pub fn for_await_of_break_close_non_object_throws_test() -> Nil {
        try { for await (var x of it) break; return 0; }
        catch (e) { return e instanceof TypeError ? 1 : 2; }
      })()",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
@@ -2170,7 +2156,7 @@ pub fn for_await_of_break_no_return_ok_test() -> Nil {
        next() { return Promise.resolve({value: 1, done: false}); }
      }; } };
      (async () => { for await (var x of it) break; return 9; })()",
-    JsNumber(Finite(9.0)),
+    KNum(JFloat(9.0)),
   )
 }
 
@@ -2241,44 +2227,41 @@ pub fn for_of_destructuring_test() -> Nil {
 pub fn for_of_string_values_test() -> Nil {
   assert_normal(
     "var result = ''; for (var x of ['a', 'b', 'c']) { result += x; } result",
-    JsString("abc"),
+    KStr("abc"),
   )
 }
 
 pub fn delete_property_test() -> Nil {
-  assert_normal("var obj = {x: 1, y: 2}; delete obj.x; obj.x", JsUndefined)
+  assert_normal("var obj = {x: 1, y: 2}; delete obj.x; obj.x", KUndef)
 }
 
 pub fn delete_returns_true_test() -> Nil {
-  assert_normal("var obj = {x: 1}; delete obj.x", JsBool(True))
+  assert_normal("var obj = {x: 1}; delete obj.x", KBool(True))
 }
 
 pub fn delete_nonexistent_test() -> Nil {
-  assert_normal("var obj = {}; delete obj.x", JsBool(True))
+  assert_normal("var obj = {}; delete obj.x", KBool(True))
 }
 
 pub fn delete_computed_test() -> Nil {
-  assert_normal(
-    "var obj = {a: 10}; var k = 'a'; delete obj[k]; obj.a",
-    JsUndefined,
-  )
+  assert_normal("var obj = {a: 10}; var k = 'a'; delete obj[k]; obj.a", KUndef)
 }
 
 pub fn delete_variable_test() -> Nil {
-  assert_normal("var x = 1; [delete x, x].join()", JsString("false,1"))
+  assert_normal("var x = 1; [delete x, x].join()", KStr("false,1"))
 }
 
 pub fn delete_hoisted_function_test() -> Nil {
   assert_normal(
     "function f() {}; [delete f, typeof f].join()",
-    JsString("false,function"),
+    KStr("false,function"),
   )
 }
 
 pub fn delete_sloppy_direct_eval_var_test() -> Nil {
   assert_normal(
     "eval('var ev = 1'); [delete ev, typeof ev].join()",
-    JsString("true,undefined"),
+    KStr("true,undefined"),
   )
 }
 
@@ -2287,67 +2270,67 @@ pub fn global_var_descriptor_test() -> Nil {
     "var d = 1;"
       <> "var pd = Object.getOwnPropertyDescriptor(globalThis, 'd');"
       <> "[pd.value, pd.writable, pd.enumerable, pd.configurable].join()",
-    JsString("1,true,true,false"),
+    KStr("1,true,true,false"),
   )
 }
 
 pub fn delete_implicit_global_removes_binding_test() -> Nil {
-  assert_normal("x = 5; delete x; typeof x", JsString("undefined"))
+  assert_normal("x = 5; delete x; typeof x", KStr("undefined"))
 }
 
 pub fn delete_var_in_function_test() -> Nil {
   assert_normal(
     "(function () { var y = 1; return [delete y, y]; })().join()",
-    JsString("false,1"),
+    KStr("false,1"),
   )
 }
 
 pub fn delete_let_in_function_test() -> Nil {
-  assert_normal("(function () { let z; return delete z; })()", JsBool(False))
+  assert_normal("(function () { let z; return delete z; })()", KBool(False))
 }
 
 pub fn delete_top_level_let_test() -> Nil {
-  assert_normal("let z = 3; [delete z, z].join()", JsString("false,3"))
+  assert_normal("let z = 3; [delete z, z].join()", KStr("false,3"))
 }
 
 pub fn delete_arguments_binding_test() -> Nil {
-  assert_normal("(function () { return delete arguments; })()", JsBool(False))
+  assert_normal("(function () { return delete arguments; })()", KBool(False))
 }
 
 pub fn delete_catch_parameter_test() -> Nil {
-  assert_normal("try { throw 1; } catch (e) { delete e; }", JsBool(False))
+  assert_normal("try { throw 1; } catch (e) { delete e; }", KBool(False))
 }
 
 pub fn delete_undeclared_global_test() -> Nil {
-  assert_normal("delete definitelyNotDeclared", JsBool(True))
+  assert_normal("delete definitelyNotDeclared", KBool(True))
 }
 
 pub fn delete_non_configurable_global_test() -> Nil {
-  assert_normal("[delete NaN, typeof NaN].join()", JsString("false,number"))
+  assert_normal("[delete NaN, typeof NaN].join()", KStr("false,number"))
 }
 
 pub fn delete_non_object_test() -> Nil {
-  assert_normal("delete 42", JsBool(True))
+  assert_normal("delete 42", KBool(True))
 }
 
 pub fn in_own_property_test() -> Nil {
-  assert_normal("'x' in {x: 1}", JsBool(True))
+  assert_normal("'x' in {x: 1}", KBool(True))
 }
 
 pub fn in_missing_property_test() -> Nil {
-  assert_normal("'y' in {x: 1}", JsBool(False))
+  assert_normal("'y' in {x: 1}", KBool(False))
 }
 
 pub fn in_prototype_chain_test() -> Nil {
-  assert_normal("'constructor' in {}", JsBool(True))
+  assert_normal("'constructor' in {}", KBool(True))
 }
 
 pub fn in_array_index_test() -> Nil {
-  assert_normal("0 in [10, 20]", JsBool(True))
+  assert_normal("0 in [10, 20]", KBool(True))
 }
 
 pub fn in_array_length_test() -> Nil {
-  assert_normal("'length' in []", JsBool(True))
+  assert_normal("'length' in []", KBool(True))
 }
 
 pub fn in_throws_for_non_object_test() -> Nil {
@@ -2357,121 +2340,115 @@ pub fn in_throws_for_non_object_test() -> Nil {
 pub fn for_in_skips_non_enumerable_test() -> Nil {
   assert_normal(
     "function Foo() {} var result = ''; for (var k in new Foo()) { result += k; } result",
-    JsString(""),
+    KStr(""),
   )
 }
 
 pub fn for_in_includes_own_enumerable_test() -> Nil {
   assert_normal(
     "function Foo() { this.x = 1; this.y = 2; } var result = ''; for (var k in new Foo()) { result += k; } result",
-    JsString("xy"),
+    KStr("xy"),
   )
 }
 
 pub fn for_in_prototype_enumerable_test() -> Nil {
   assert_normal(
     "function Foo() {} Foo.prototype.bar = 42; var result = ''; for (var k in new Foo()) { result += k; } result",
-    JsString("bar"),
+    KStr("bar"),
   )
 }
 
 pub fn function_name_not_enumerable_test() -> Nil {
   assert_normal(
     "function foo() {} var result = ''; for (var k in foo) { result += k; } result",
-    JsString(""),
+    KStr(""),
   )
 }
 
 pub fn function_prototype_not_enumerable_test() -> Nil {
   assert_normal(
     "function foo() {} var keys = []; for (var k in foo) { keys.push(k); } keys.length",
-    JsNumber(Finite(0.0)),
+    KNum(JFloat(0.0)),
   )
 }
 
 pub fn delete_then_in_test() -> Nil {
-  assert_normal("var obj = {x: 1}; delete obj.x; 'x' in obj", JsBool(False))
+  assert_normal("var obj = {x: 1}; delete obj.x; 'x' in obj", KBool(False))
 }
 
 pub fn class_basic_constructor_test() -> Nil {
   assert_normal(
     "class Foo { constructor(x) { this.x = x; } } var f = new Foo(42); f.x",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
 pub fn class_instance_method_test() -> Nil {
   assert_normal(
     "class Foo { greet() { return 'hi'; } } var f = new Foo(); f.greet()",
-    JsString("hi"),
+    KStr("hi"),
   )
 }
 
 pub fn class_method_accesses_this_test() -> Nil {
   assert_normal(
     "class Foo { constructor(x) { this.x = x; } getX() { return this.x; } } var f = new Foo(10); f.getX()",
-    JsNumber(Finite(10.0)),
+    KNum(JFloat(10.0)),
   )
 }
 
 pub fn class_static_method_test() -> Nil {
   assert_normal(
     "class Foo { static create() { return 99; } } Foo.create()",
-    JsNumber(Finite(99.0)),
+    KNum(JFloat(99.0)),
   )
 }
 
 pub fn class_typeof_test() -> Nil {
-  assert_normal("class Foo {} typeof Foo", JsString("function"))
+  assert_normal("class Foo {} typeof Foo", KStr("function"))
 }
 
 pub fn class_instanceof_test() -> Nil {
-  assert_normal(
-    "class Foo {} var f = new Foo(); f instanceof Foo",
-    JsBool(True),
-  )
+  assert_normal("class Foo {} var f = new Foo(); f instanceof Foo", KBool(True))
 }
 
 pub fn class_expression_test() -> Nil {
   assert_normal(
     "var Foo = class { constructor(x) { this.x = x; } }; var f = new Foo(5); f.x",
-    JsNumber(Finite(5.0)),
+    KNum(JFloat(5.0)),
   )
 }
 
 pub fn class_field_initializer_test() -> Nil {
   assert_normal(
     "class Foo { x = 42; } var f = new Foo(); f.x",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
 pub fn class_field_with_constructor_test() -> Nil {
   assert_normal(
     "class Foo { x = 1; constructor(y) { this.y = y; } } var f = new Foo(2); f.x + f.y",
-    JsNumber(Finite(3.0)),
+    KNum(JFloat(3.0)),
   )
 }
 
 pub fn class_multiple_methods_test() -> Nil {
   assert_normal(
     "class Calc { add(a, b) { return a + b; } mul(a, b) { return a * b; } } var c = new Calc(); c.add(2, 3) + c.mul(4, 5)",
-    JsNumber(Finite(25.0)),
+    KNum(JFloat(25.0)),
   )
 }
 
 pub fn class_method_not_enumerable_test() -> Nil {
   assert_normal(
     "class Foo { bar() {} } var f = new Foo(); var keys = []; for (var k in f) { keys.push(k); } keys.length",
-    JsNumber(Finite(0.0)),
+    KNum(JFloat(0.0)),
   )
 }
 
 pub fn class_no_constructor_test() -> Nil {
-  assert_normal(
-    "class Empty {} var e = new Empty(); typeof e",
-    JsString("object"),
-  )
+  assert_normal("class Empty {} var e = new Empty(); typeof e", KStr("object"))
 }
 
 pub fn rest_param_function_test() -> Nil {
@@ -2488,7 +2465,7 @@ pub fn rest_param_empty_test() -> Nil {
 pub fn rest_param_collects_values_test() -> Nil {
   assert_normal(
     "function f(...xs) { return xs.join(',') } f('a', 'b', 'c')",
-    JsString("a,b,c"),
+    KStr("a,b,c"),
   )
 }
 
@@ -2534,7 +2511,7 @@ pub fn rest_param_arguments_independent_test() -> Nil {
 pub fn super_method_override_test() -> Nil {
   assert_normal(
     "class A { greet() { return 'A' } } class B extends A { greet() { return super.greet() + 'B' } } new B().greet()",
-    JsString("AB"),
+    KStr("AB"),
   )
 }
 
@@ -2544,7 +2521,7 @@ pub fn super_method_multi_level_test() -> Nil {
      class B extends A { who() { return 'B<' + super.who() + '>' } }
      class C extends B { who() { return 'C<' + super.who() + '>' } }
      new C().who()",
-    JsString("C<B<A>>"),
+    KStr("C<B<A>>"),
   )
 }
 
@@ -2565,21 +2542,21 @@ pub fn super_method_with_args_test() -> Nil {
 pub fn super_computed_test() -> Nil {
   assert_normal(
     "class A { m() { return 'base' } } class B extends A { call(n) { return super[n]() } } new B().call('m')",
-    JsString("base"),
+    KStr("base"),
   )
 }
 
 pub fn super_in_constructor_test() -> Nil {
   assert_normal(
     "class A { hi() { return 'hello' } } class B extends A { constructor() { super(); this.g = super.hi() } } new B().g",
-    JsString("hello"),
+    KStr("hello"),
   )
 }
 
 pub fn super_static_method_test() -> Nil {
   assert_normal(
     "class A { static make() { return 'A' } } class B extends A { static make() { return super.make() + 'B' } } B.make()",
-    JsString("AB"),
+    KStr("AB"),
   )
 }
 
@@ -2596,7 +2573,7 @@ pub fn super_object_literal_test() -> Nil {
      const child = { greet() { return super.greet() + '+child' } };
      Object.setPrototypeOf(child, parent);
      child.greet()",
-    JsString("parent+child"),
+    KStr("parent+child"),
   )
 }
 
@@ -2605,7 +2582,7 @@ pub fn super_property_uninitialized_this_test() -> Nil {
     "class A { get x() { return 1 } }
      class B extends A { constructor() { super.x; super() } }
      (function(){ try { new B() } catch (e) { return e.constructor.name } })()",
-    JsString("ReferenceError"),
+    KStr("ReferenceError"),
   )
 }
 
@@ -2614,14 +2591,14 @@ pub fn super_property_eval_order_test() -> Nil {
     "class A { m() { return 1 } }
      class B extends A { constructor() { super[super()]() } }
      (function(){ try { new B() } catch (e) { return e.constructor.name } })()",
-    JsString("ReferenceError"),
+    KStr("ReferenceError"),
   )
 }
 
 pub fn object_literal_method_enumerable_test() -> Nil {
   assert_normal(
     "const o = { m() {}, x: 2 }; Object.keys(o).sort().join(',')",
-    JsString("m,x"),
+    KStr("m,x"),
   )
 }
 
@@ -2675,10 +2652,10 @@ pub fn class_static_field_derived_test() -> Nil {
 }
 
 pub fn class_static_field_this_is_ctor_test() -> Nil {
-  assert_normal("class C { static x = this }; C.x === C", JsBool(True))
+  assert_normal("class C { static x = this }; C.x === C", KBool(True))
   assert_normal(
     "class A {}; class B extends A { static x = this }; B.x === B",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -2697,7 +2674,7 @@ pub fn class_static_block_test() -> Nil {
 pub fn class_static_elements_source_order_test() -> Nil {
   assert_normal(
     "var s=''; class C { static { s+='a' } static x = (s+='b',1); static { s+='c' } }; s",
-    JsString("abc"),
+    KStr("abc"),
   )
 }
 
@@ -2732,28 +2709,28 @@ pub fn class_static_block_early_errors_test() -> Nil {
 pub fn class_static_block_nested_function_boundary_test() -> Nil {
   assert_normal(
     "class C{static{(function f(){return arguments[0]})(1)}}; 1",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
   assert_normal(
     "class C{static{(function await(await){})}}; 1",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
-  assert_normal("class C{static{({await:0})}}; 1", JsNumber(Finite(1.0)))
-  assert_normal("class C{static{l:for(;;)break l}}; 1", JsNumber(Finite(1.0)))
-  assert_normal("class C{static{(()=>{var await})}}; 1", JsNumber(Finite(1.0)))
+  assert_normal("class C{static{({await:0})}}; 1", KNum(JFloat(1.0)))
+  assert_normal("class C{static{l:for(;;)break l}}; 1", KNum(JFloat(1.0)))
+  assert_normal("class C{static{(()=>{var await})}}; 1", KNum(JFloat(1.0)))
 }
 
 pub fn class_private_in_self_test() -> Nil {
   assert_normal(
     "class A { #x = 1; has() { return #x in this } } new A().has()",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn class_private_in_foreign_test() -> Nil {
   assert_normal(
     "class A { #x = 1; has(o) { return #x in o } } new A().has({})",
-    JsBool(False),
+    KBool(False),
   )
 }
 
@@ -2761,7 +2738,7 @@ pub fn class_private_get_brand_check_test() -> Nil {
   assert_normal(
     "class A { #x = 1; get(o) { return o.#x } }
      try { new A().get({}); false } catch (e) { e instanceof TypeError }",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -2769,7 +2746,7 @@ pub fn class_private_set_brand_check_test() -> Nil {
   assert_normal(
     "class A { #x = 1; set(o) { o.#x = 9 } }
      try { new A().set({}); false } catch (e) { e instanceof TypeError }",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -2792,7 +2769,7 @@ pub fn function_call_basic_test() -> Nil {
     "function greet(x) { return this.prefix + x; }
      var obj = { prefix: 'Hello ' };
      greet.call(obj, 'world')",
-    JsString("Hello world"),
+    KStr("Hello world"),
   )
 }
 
@@ -2801,7 +2778,7 @@ pub fn function_call_no_args_test() -> Nil {
     "function getThis() { return this; }
      let t = getThis.call(42);
      t.valueOf() === 42 && t instanceof Number && typeof t === 'object'",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -2809,24 +2786,24 @@ pub fn function_call_primitive_this_strict_test() -> Nil {
   assert_normal(
     "function getThis() { 'use strict'; return this; }
      getThis.call(42)",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
 pub fn number_tostring_radix_test() -> Nil {
-  assert_normal("(255).toString(16)", JsString("ff"))
+  assert_normal("(255).toString(16)", KStr("ff"))
 }
 
 pub fn number_tostring_radix_negative_test() -> Nil {
-  assert_normal("(-255).toString(16)", JsString("-ff"))
+  assert_normal("(-255).toString(16)", KStr("-ff"))
 }
 
 pub fn number_tostring_default_radix_test() -> Nil {
-  assert_normal("(255).toString()", JsString("255"))
+  assert_normal("(255).toString()", KStr("255"))
 }
 
 pub fn number_tostring_radix_undefined_test() -> Nil {
-  assert_normal("(255).toString(undefined)", JsString("255"))
+  assert_normal("(255).toString(undefined)", KStr("255"))
 }
 
 pub fn number_tostring_radix_out_of_range_throws_test() -> Nil {
@@ -2838,15 +2815,15 @@ pub fn number_tostring_radix_37_throws_test() -> Nil {
 }
 
 pub fn number_tostring_nan_ignores_radix_test() -> Nil {
-  assert_normal("NaN.toString(16)", JsString("NaN"))
+  assert_normal("NaN.toString(16)", KStr("NaN"))
 }
 
 pub fn number_valueof_on_primitive_test() -> Nil {
-  assert_normal("(42).valueOf()", JsNumber(Finite(42.0)))
+  assert_normal("(42).valueOf()", KNum(JFloat(42.0)))
 }
 
 pub fn number_valueof_on_wrapper_test() -> Nil {
-  assert_normal("new Number(42).valueOf()", JsNumber(Finite(42.0)))
+  assert_normal("new Number(42).valueOf()", KNum(JFloat(42.0)))
 }
 
 pub fn number_valueof_cross_type_throws_test() -> Nil {
@@ -2854,15 +2831,15 @@ pub fn number_valueof_cross_type_throws_test() -> Nil {
 }
 
 pub fn boolean_tostring_on_primitive_test() -> Nil {
-  assert_normal("true.toString()", JsString("true"))
+  assert_normal("true.toString()", KStr("true"))
 }
 
 pub fn boolean_tostring_on_wrapper_test() -> Nil {
-  assert_normal("new Boolean(false).toString()", JsString("false"))
+  assert_normal("new Boolean(false).toString()", KStr("false"))
 }
 
 pub fn boolean_valueof_on_primitive_test() -> Nil {
-  assert_normal("false.valueOf()", JsBool(False))
+  assert_normal("false.valueOf()", KBool(False))
 }
 
 pub fn boolean_valueof_cross_type_throws_test() -> Nil {
@@ -2874,23 +2851,23 @@ pub fn string_valueof_cross_type_throws_test() -> Nil {
 }
 
 pub fn string_valueof_on_wrapper_test() -> Nil {
-  assert_normal("new String('hi').valueOf()", JsString("hi"))
+  assert_normal("new String('hi').valueOf()", KStr("hi"))
 }
 
 pub fn number_primitive_computed_field_test() -> Nil {
-  assert_normal("typeof (5)['toString']", JsString("function"))
+  assert_normal("typeof (5)['toString']", KStr("function"))
 }
 
 pub fn computed_method_call_binds_this_test() -> Nil {
   assert_normal(
     "let o = { x: 42, get: function() { return this.x; } };
      o['get']()",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
 pub fn computed_method_call_on_primitive_test() -> Nil {
-  assert_normal("(255)['toString'](16)", JsString("ff"))
+  assert_normal("(255)['toString'](16)", KStr("ff"))
 }
 
 pub fn computed_method_call_with_dynamic_key_test() -> Nil {
@@ -2898,7 +2875,7 @@ pub fn computed_method_call_with_dynamic_key_test() -> Nil {
     "let k = 'get';
      let o = { x: 7, get: function() { return this.x; } };
      o[k]()",
-    JsNumber(Finite(7.0)),
+    KNum(JFloat(7.0)),
   )
 }
 
@@ -2907,18 +2884,18 @@ pub fn computed_method_call_with_spread_test() -> Nil {
     "let o = { sum: function(a, b, c) { return this.base + a + b + c; }, base: 100 };
      let args = [1, 2, 3];
      o['sum'](...args)",
-    JsNumber(Finite(106.0)),
+    KNum(JFloat(106.0)),
   )
 }
 
 pub fn array_like_join_on_string_primitive_test() -> Nil {
-  assert_normal("Array.prototype.join.call('abc', '-')", JsString("a-b-c"))
+  assert_normal("Array.prototype.join.call('abc', '-')", KStr("a-b-c"))
 }
 
 pub fn array_like_join_on_string_wrapper_test() -> Nil {
   assert_normal(
     "Array.prototype.join.call(new String('xyz'), ',')",
-    JsString("x,y,z"),
+    KStr("x,y,z"),
   )
 }
 
@@ -2926,7 +2903,7 @@ pub fn array_like_join_on_plain_object_test() -> Nil {
   assert_normal(
     "let o = {length: 3, 0: 'a', 1: 'b', 2: 'c'};
      Array.prototype.join.call(o, '+')",
-    JsString("a+b+c"),
+    KStr("a+b+c"),
   )
 }
 
@@ -2934,30 +2911,27 @@ pub fn array_like_join_sparse_object_test() -> Nil {
   assert_normal(
     "let o = {length: 4, 0: 'a', 2: 'c'};
      Array.prototype.join.call(o, '-')",
-    JsString("a--c-"),
+    KStr("a--c-"),
   )
 }
 
 pub fn array_like_join_on_number_test() -> Nil {
-  assert_normal("Array.prototype.join.call(42)", JsString(""))
+  assert_normal("Array.prototype.join.call(42)", KStr(""))
 }
 
 pub fn array_like_indexof_on_string_test() -> Nil {
-  assert_normal(
-    "Array.prototype.indexOf.call('hello', 'l')",
-    JsNumber(Finite(2.0)),
-  )
+  assert_normal("Array.prototype.indexOf.call('hello', 'l')", KNum(JFloat(2.0)))
 }
 
 pub fn array_like_includes_on_string_test() -> Nil {
-  assert_normal("Array.prototype.includes.call('hello', 'e')", JsBool(True))
+  assert_normal("Array.prototype.includes.call('hello', 'e')", KBool(True))
 }
 
 pub fn array_like_slice_on_string_returns_array_test() -> Nil {
   assert_normal(
     "let r = Array.prototype.slice.call('hello', 1, 4);
      Array.isArray(r) && r.join('') === 'ell'",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -2965,7 +2939,7 @@ pub fn array_like_map_on_plain_object_test() -> Nil {
   assert_normal(
     "let o = {length: 3, 0: 10, 1: 20, 2: 30};
      Array.prototype.map.call(o, x => x * 2).join(',')",
-    JsString("20,40,60"),
+    KStr("20,40,60"),
   )
 }
 
@@ -2973,7 +2947,7 @@ pub fn array_like_filter_on_plain_object_test() -> Nil {
   assert_normal(
     "let o = {length: 5, 0: 1, 1: 2, 2: 3, 3: 4, 4: 5};
      Array.prototype.filter.call(o, x => x > 2).join(',')",
-    JsString("3,4,5"),
+    KStr("3,4,5"),
   )
 }
 
@@ -2981,7 +2955,7 @@ pub fn array_like_reduce_on_plain_object_test() -> Nil {
   assert_normal(
     "let o = {length: 4, 0: 1, 1: 2, 2: 3, 3: 4};
      Array.prototype.reduce.call(o, (a, b) => a + b, 0)",
-    JsNumber(Finite(10.0)),
+    KNum(JFloat(10.0)),
   )
 }
 
@@ -2989,7 +2963,7 @@ pub fn array_like_slice_on_arguments_test() -> Nil {
   assert_normal(
     "function f() { return Array.prototype.slice.call(arguments, 1).join(','); }
      f(1, 2, 3, 4)",
-    JsString("2,3,4"),
+    KStr("2,3,4"),
   )
 }
 
@@ -3001,29 +2975,26 @@ pub fn array_like_foreach_on_arguments_test() -> Nil {
        return sum;
      }
      f(1, 2, 3, 4)",
-    JsNumber(Finite(10.0)),
+    KNum(JFloat(10.0)),
   )
 }
 
 pub fn array_like_every_on_string_test() -> Nil {
   assert_normal(
     "Array.prototype.every.call('aaa', c => c === 'a')",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn array_like_some_on_string_test() -> Nil {
-  assert_normal(
-    "Array.prototype.some.call('abc', c => c === 'b')",
-    JsBool(True),
-  )
+  assert_normal("Array.prototype.some.call('abc', c => c === 'b')", KBool(True))
 }
 
 pub fn array_like_find_on_plain_object_test() -> Nil {
   assert_normal(
     "let o = {length: 3, 0: 5, 1: 10, 2: 15};
      Array.prototype.find.call(o, x => x > 7)",
-    JsNumber(Finite(10.0)),
+    KNum(JFloat(10.0)),
   )
 }
 
@@ -3032,7 +3003,7 @@ pub fn push_on_plain_object_test() -> Nil {
     "let o = {length: 2, 0: 'a', 1: 'b'};
      let r = Array.prototype.push.call(o, 'c', 'd');
      '' + r + ',' + o.length + ',' + o[2] + ',' + o[3]",
-    JsString("4,4,c,d"),
+    KStr("4,4,c,d"),
   )
 }
 
@@ -3043,7 +3014,7 @@ pub fn push_on_arguments_test() -> Nil {
        return '' + arguments[3] + ',' + arguments.length;
      }
      f('a', 'b', 'c')",
-    JsString("d,4"),
+    KStr("d,4"),
   )
 }
 
@@ -3052,7 +3023,7 @@ pub fn pop_on_plain_object_test() -> Nil {
     "let o = {length: 3, 0: 'a', 1: 'b', 2: 'c'};
      let v = Array.prototype.pop.call(o);
      '' + v + ',' + o.length",
-    JsString("c,2"),
+    KStr("c,2"),
   )
 }
 
@@ -3063,7 +3034,7 @@ pub fn pop_on_arguments_test() -> Nil {
        return '' + v + ',' + arguments.length;
      }
      f(1, 2, 3)",
-    JsString("3,2"),
+    KStr("3,2"),
   )
 }
 
@@ -3072,7 +3043,7 @@ pub fn shift_on_plain_object_test() -> Nil {
     "let o = {length: 3, 0: 'a', 1: 'b', 2: 'c'};
      let v = Array.prototype.shift.call(o);
      '' + v + ',' + o.length + ',' + o[0] + ',' + o[1]",
-    JsString("a,2,b,c"),
+    KStr("a,2,b,c"),
   )
 }
 
@@ -3081,7 +3052,7 @@ pub fn unshift_on_plain_object_test() -> Nil {
     "let o = {length: 2, 0: 'b', 1: 'c'};
      let r = Array.prototype.unshift.call(o, 'a');
      '' + r + ',' + o[0] + ',' + o[1] + ',' + o[2]",
-    JsString("3,a,b,c"),
+    KStr("3,a,b,c"),
   )
 }
 
@@ -3090,7 +3061,7 @@ pub fn reverse_on_plain_object_test() -> Nil {
     "let o = {length: 3, 0: 'a', 1: 'b', 2: 'c'};
      Array.prototype.reverse.call(o);
      '' + o[0] + o[1] + o[2]",
-    JsString("cba"),
+    KStr("cba"),
   )
 }
 
@@ -3099,7 +3070,7 @@ pub fn fill_on_plain_object_test() -> Nil {
     "let o = {length: 4, 0: 'a', 1: 'b', 2: 'c', 3: 'd'};
      Array.prototype.fill.call(o, 'x', 1, 3);
      '' + o[0] + o[1] + o[2] + o[3]",
-    JsString("axxd"),
+    KStr("axxd"),
   )
 }
 
@@ -3110,7 +3081,7 @@ pub fn reverse_on_arguments_test() -> Nil {
        return '' + arguments[0] + arguments[1] + arguments[2];
      }
      f(1, 2, 3)",
-    JsString("321"),
+    KStr("321"),
   )
 }
 
@@ -3118,7 +3089,7 @@ pub fn push_returns_new_length_on_empty_object_test() -> Nil {
   assert_normal(
     "let o = {};
      Array.prototype.push.call(o, 'x')",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
@@ -3127,7 +3098,7 @@ pub fn pop_on_empty_object_test() -> Nil {
     "let o = {};
      let v = Array.prototype.pop.call(o);
      '' + v + ',' + o.length",
-    JsString("undefined,0"),
+    KStr("undefined,0"),
   )
 }
 
@@ -3136,7 +3107,7 @@ pub fn shift_on_empty_object_test() -> Nil {
     "let o = {};
      let v = Array.prototype.shift.call(o);
      '' + v + ',' + o.length",
-    JsString("undefined,0"),
+    KStr("undefined,0"),
   )
 }
 
@@ -3145,7 +3116,7 @@ pub fn accessor_getter_via_define_property_test() -> Nil {
     "let o = {};
      Object.defineProperty(o, 'x', { get: function() { return 42; } });
      o.x",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -3158,7 +3129,7 @@ pub fn accessor_setter_via_define_property_test() -> Nil {
      });
      o.x = 5;
      o.x",
-    JsNumber(Finite(10.0)),
+    KNum(JFloat(10.0)),
   )
 }
 
@@ -3170,7 +3141,7 @@ pub fn accessor_setter_this_binding_test() -> Nil {
      });
      o.x = 99;
      o.stored",
-    JsNumber(Finite(99.0)),
+    KNum(JFloat(99.0)),
   )
 }
 
@@ -3180,7 +3151,7 @@ pub fn accessor_no_setter_silently_fails_test() -> Nil {
      Object.defineProperty(o, 'x', { get: function() { return 1; } });
      o.x = 999;
      o.x",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
@@ -3189,7 +3160,7 @@ pub fn accessor_no_getter_returns_undefined_test() -> Nil {
     "let o = {};
      Object.defineProperty(o, 'x', { set: function(v) {} });
      o.x",
-    JsUndefined,
+    KUndef,
   )
 }
 
@@ -3202,7 +3173,7 @@ pub fn accessor_on_prototype_getter_test() -> Nil {
      let child = Object.create(proto);
      child.val = 42;
      child.x",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -3216,7 +3187,7 @@ pub fn accessor_on_prototype_setter_test() -> Nil {
      let child = Object.create(proto);
      child.x = 5;
      child.x",
-    JsNumber(Finite(10.0)),
+    KNum(JFloat(10.0)),
   )
 }
 
@@ -3227,7 +3198,7 @@ pub fn non_writable_proto_blocks_set_test() -> Nil {
      let child = Object.create(proto);
      child.x = 99;
      child.x",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -3238,7 +3209,7 @@ pub fn writable_proto_allows_own_property_test() -> Nil {
      let child = Object.create(proto);
      child.x = 99;
      '' + child.x + ',' + proto.x",
-    JsString("99,42"),
+    KStr("99,42"),
   )
 }
 
@@ -3246,7 +3217,7 @@ pub fn object_literal_getter_test() -> Nil {
   assert_normal(
     "let o = { get x() { return 42; } };
      o.x",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -3259,7 +3230,7 @@ pub fn object_literal_setter_test() -> Nil {
      };
      o.v = 7;
      o.v",
-    JsNumber(Finite(21.0)),
+    KNum(JFloat(21.0)),
   )
 }
 
@@ -3270,7 +3241,7 @@ pub fn object_literal_getter_this_binding_test() -> Nil {
        get upper() { return this.name.toUpperCase(); }
      };
      o.upper",
-    JsString("HELLO"),
+    KStr("HELLO"),
   )
 }
 
@@ -3281,7 +3252,7 @@ pub fn arrow_captured_this_through_getter_test() -> Nil {
        return { get x() { return a(); } }.x;
      }
      m.call({tag: 'OK'}).tag",
-    JsString("OK"),
+    KStr("OK"),
   )
 }
 
@@ -3294,7 +3265,7 @@ pub fn get_own_property_descriptor_accessor_test() -> Nil {
      });
      let d = Object.getOwnPropertyDescriptor(o, 'x');
      typeof d.get === 'function' && d.set === undefined && d.configurable === true",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -3302,7 +3273,7 @@ pub fn function_call_undefined_this_sloppy_test() -> Nil {
   assert_normal(
     "function f() { return typeof this; }
      f.call(undefined)",
-    JsString("object"),
+    KStr("object"),
   )
 }
 
@@ -3310,7 +3281,7 @@ pub fn function_call_undefined_this_strict_test() -> Nil {
   assert_normal(
     "function f() { 'use strict'; return typeof this; }
      f.call(undefined)",
-    JsString("undefined"),
+    KStr("undefined"),
   )
 }
 
@@ -3318,7 +3289,7 @@ pub fn function_call_null_this_sloppy_test() -> Nil {
   assert_normal(
     "function f() { return this === globalThis; }
      f.call(null)",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -3326,7 +3297,7 @@ pub fn function_apply_basic_test() -> Nil {
   assert_normal(
     "function add(a, b) { return a + b; }
      add.apply(null, [3, 4])",
-    JsNumber(Finite(7.0)),
+    KNum(JFloat(7.0)),
   )
 }
 
@@ -3335,7 +3306,7 @@ pub fn function_apply_with_this_test() -> Nil {
     "function greet(x) { return this.prefix + x; }
      var obj = { prefix: 'Hi ' };
      greet.apply(obj, ['there'])",
-    JsString("Hi there"),
+    KStr("Hi there"),
   )
 }
 
@@ -3343,7 +3314,7 @@ pub fn function_apply_no_args_test() -> Nil {
   assert_normal(
     "function f() { return 42; }
      f.apply(null)",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -3353,7 +3324,7 @@ pub fn function_bind_basic_test() -> Nil {
      var obj = { name: 'Alice' };
      var bound = greet.bind(obj);
      bound('hello')",
-    JsString("Alice: hello"),
+    KStr("Alice: hello"),
   )
 }
 
@@ -3362,7 +3333,7 @@ pub fn function_bind_with_args_test() -> Nil {
     "function add(a, b) { return a + b; }
      var add5 = add.bind(null, 5);
      add5(3)",
-    JsNumber(Finite(8.0)),
+    KNum(JFloat(8.0)),
   )
 }
 
@@ -3372,14 +3343,14 @@ pub fn function_bind_preserves_this_test() -> Nil {
      var obj = { x: 99 };
      var bound = getX.bind(obj);
      bound()",
-    JsNumber(Finite(99.0)),
+    KNum(JFloat(99.0)),
   )
 }
 
 pub fn function_bind_name_test() -> Nil {
   assert_normal(
     "function foo() {} var b = foo.bind(null); b.name",
-    JsString("bound foo"),
+    KStr("bound foo"),
   )
 }
 
@@ -3389,7 +3360,7 @@ pub fn function_bind_constructor_test() -> Nil {
      var BoundPoint = Point.bind(null, 10);
      var p = new BoundPoint(20);
      p.x + p.y",
-    JsNumber(Finite(30.0)),
+    KNum(JFloat(30.0)),
   )
 }
 
@@ -3398,7 +3369,7 @@ pub fn function_call_chained_test() -> Nil {
     "function add(a, b) { return a + b; }
      var result = add.call(null, 10, 20);
      result",
-    JsNumber(Finite(30.0)),
+    KNum(JFloat(30.0)),
   )
 }
 
@@ -3406,7 +3377,7 @@ pub fn function_apply_empty_array_test() -> Nil {
   assert_normal(
     "function f() { return 'ok'; }
      f.apply(null, [])",
-    JsString("ok"),
+    KStr("ok"),
   )
 }
 
@@ -3415,7 +3386,7 @@ pub fn function_bind_multiple_args_test() -> Nil {
     "function sum(a, b, c) { return a + b + c; }
      var bound = sum.bind(null, 1, 2);
      bound(3)",
-    JsNumber(Finite(6.0)),
+    KNum(JFloat(6.0)),
   )
 }
 
@@ -3424,7 +3395,7 @@ pub fn object_gopd_basic_test() -> Nil {
     "var obj = {x: 42};
      var desc = Object.getOwnPropertyDescriptor(obj, 'x');
      desc.value",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -3433,7 +3404,7 @@ pub fn object_gopd_flags_test() -> Nil {
     "var obj = {x: 1};
      var desc = Object.getOwnPropertyDescriptor(obj, 'x');
      '' + desc.writable + ',' + desc.enumerable + ',' + desc.configurable",
-    JsString("true,true,true"),
+    KStr("true,true,true"),
   )
 }
 
@@ -3441,7 +3412,7 @@ pub fn object_gopd_missing_key_test() -> Nil {
   assert_normal(
     "var obj = {x: 1};
      Object.getOwnPropertyDescriptor(obj, 'y')",
-    JsUndefined,
+    KUndef,
   )
 }
 
@@ -3451,7 +3422,7 @@ pub fn object_gopd_after_define_test() -> Nil {
      Object.defineProperty(obj, 'x', {value: 10, writable: false, enumerable: false, configurable: false});
      var desc = Object.getOwnPropertyDescriptor(obj, 'x');
      '' + desc.value + ',' + desc.writable + ',' + desc.enumerable + ',' + desc.configurable",
-    JsString("10,false,false,false"),
+    KStr("10,false,false,false"),
   )
 }
 
@@ -3460,7 +3431,7 @@ pub fn object_define_property_basic_test() -> Nil {
     "var obj = {};
      Object.defineProperty(obj, 'x', {value: 42, writable: true, enumerable: true, configurable: true});
      obj.x",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -3470,7 +3441,7 @@ pub fn object_define_property_non_writable_test() -> Nil {
      Object.defineProperty(obj, 'x', {value: 42, writable: false});
      obj.x = 100;
      obj.x",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -3481,7 +3452,7 @@ pub fn object_define_property_non_enumerable_test() -> Nil {
      var keys = '';
      for (var k in obj) { keys = keys + k; }
      keys",
-    JsString("a"),
+    KStr("a"),
   )
 }
 
@@ -3490,7 +3461,7 @@ pub fn object_define_property_returns_obj_test() -> Nil {
     "var obj = {};
      var result = Object.defineProperty(obj, 'x', {value: 1});
      result === obj",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -3518,7 +3489,7 @@ pub fn object_define_property_throws_type_error_test() -> Nil {
   assert_normal(
     "try { Object.defineProperty(undefined, 'x', {}); 'no throw' }
      catch (e) { e.constructor === TypeError }",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -3531,7 +3502,7 @@ pub fn object_gopd_throws_on_null_test() -> Nil {
 }
 
 pub fn object_gopd_coerces_number_test() -> Nil {
-  assert_normal("Object.getOwnPropertyDescriptor(5, 'x')", JsUndefined)
+  assert_normal("Object.getOwnPropertyDescriptor(5, 'x')", KUndef)
 }
 
 pub fn object_keys_throws_on_undefined_test() -> Nil {
@@ -3543,7 +3514,7 @@ pub fn object_keys_throws_on_null_test() -> Nil {
 }
 
 pub fn object_keys_coerces_number_test() -> Nil {
-  assert_normal("Object.keys(5).length", JsNumber(Finite(0.0)))
+  assert_normal("Object.keys(5).length", KNum(JFloat(0.0)))
 }
 
 pub fn object_gopn_throws_on_null_test() -> Nil {
@@ -3551,10 +3522,7 @@ pub fn object_gopn_throws_on_null_test() -> Nil {
 }
 
 pub fn object_gopn_coerces_boolean_test() -> Nil {
-  assert_normal(
-    "Object.getOwnPropertyNames(true).length",
-    JsNumber(Finite(0.0)),
-  )
+  assert_normal("Object.getOwnPropertyNames(true).length", KNum(JFloat(0.0)))
 }
 
 pub fn has_own_property_throws_on_null_this_test() -> Nil {
@@ -3566,7 +3534,7 @@ pub fn has_own_property_throws_on_undefined_this_test() -> Nil {
 }
 
 pub fn has_own_property_coerces_number_this_test() -> Nil {
-  assert_normal("Object.prototype.hasOwnProperty.call(5, 'x')", JsBool(False))
+  assert_normal("Object.prototype.hasOwnProperty.call(5, 'x')", KBool(False))
 }
 
 pub fn array_join_throws_on_null_this_test() -> Nil {
@@ -3582,31 +3550,31 @@ pub fn array_push_throws_on_null_this_test() -> Nil {
 }
 
 pub fn strict_equal_pos_neg_zero_test() -> Nil {
-  assert_normal("0 === -0", JsBool(True))
+  assert_normal("0 === -0", KBool(True))
 }
 
 pub fn strict_equal_neg_zero_pos_zero_test() -> Nil {
-  assert_normal("-0 === 0", JsBool(True))
+  assert_normal("-0 === 0", KBool(True))
 }
 
 pub fn object_is_still_distinguishes_zeros_test() -> Nil {
-  assert_normal("Object.is(0, -0)", JsBool(False))
+  assert_normal("Object.is(0, -0)", KBool(False))
 }
 
 pub fn array_pop_basic_test() -> Nil {
-  assert_normal("var a = [1,2,3]; a.pop()", JsNumber(Finite(3.0)))
+  assert_normal("var a = [1,2,3]; a.pop()", KNum(JFloat(3.0)))
 }
 
 pub fn array_pop_mutates_test() -> Nil {
-  assert_normal("var a = [1,2,3]; a.pop(); a.length", JsNumber(Finite(2.0)))
+  assert_normal("var a = [1,2,3]; a.pop(); a.length", KNum(JFloat(2.0)))
 }
 
 pub fn array_pop_empty_test() -> Nil {
-  assert_normal("[].pop()", JsUndefined)
+  assert_normal("[].pop()", KUndef)
 }
 
 pub fn array_pop_empty_length_test() -> Nil {
-  assert_normal("var a = []; a.pop(); a.length", JsNumber(Finite(0.0)))
+  assert_normal("var a = []; a.pop(); a.length", KNum(JFloat(0.0)))
 }
 
 pub fn array_pop_throws_on_null_test() -> Nil {
@@ -3614,195 +3582,192 @@ pub fn array_pop_throws_on_null_test() -> Nil {
 }
 
 pub fn array_shift_basic_test() -> Nil {
-  assert_normal("var a = [1,2,3]; a.shift()", JsNumber(Finite(1.0)))
+  assert_normal("var a = [1,2,3]; a.shift()", KNum(JFloat(1.0)))
 }
 
 pub fn array_shift_mutates_test() -> Nil {
-  assert_normal("var a = [1,2,3]; a.shift(); a.join(',')", JsString("2,3"))
+  assert_normal("var a = [1,2,3]; a.shift(); a.join(',')", KStr("2,3"))
 }
 
 pub fn array_shift_empty_test() -> Nil {
-  assert_normal("[].shift()", JsUndefined)
+  assert_normal("[].shift()", KUndef)
 }
 
 pub fn array_unshift_basic_test() -> Nil {
-  assert_normal(
-    "var a = [3,4]; a.unshift(1,2); a.join(',')",
-    JsString("1,2,3,4"),
-  )
+  assert_normal("var a = [3,4]; a.unshift(1,2); a.join(',')", KStr("1,2,3,4"))
 }
 
 pub fn array_unshift_returns_length_test() -> Nil {
-  assert_normal("var a = [3]; a.unshift(1,2)", JsNumber(Finite(3.0)))
+  assert_normal("var a = [3]; a.unshift(1,2)", KNum(JFloat(3.0)))
 }
 
 pub fn array_unshift_empty_args_test() -> Nil {
-  assert_normal("var a = [1,2]; a.unshift()", JsNumber(Finite(2.0)))
+  assert_normal("var a = [1,2]; a.unshift()", KNum(JFloat(2.0)))
 }
 
 pub fn array_slice_basic_test() -> Nil {
-  assert_normal("[1,2,3,4].slice(1,3).join(',')", JsString("2,3"))
+  assert_normal("[1,2,3,4].slice(1,3).join(',')", KStr("2,3"))
 }
 
 pub fn array_slice_negative_start_test() -> Nil {
-  assert_normal("[1,2,3,4].slice(-2).join(',')", JsString("3,4"))
+  assert_normal("[1,2,3,4].slice(-2).join(',')", KStr("3,4"))
 }
 
 pub fn array_slice_negative_end_test() -> Nil {
-  assert_normal("[1,2,3,4].slice(0,-1).join(',')", JsString("1,2,3"))
+  assert_normal("[1,2,3,4].slice(0,-1).join(',')", KStr("1,2,3"))
 }
 
 pub fn array_slice_no_args_test() -> Nil {
-  assert_normal("[1,2,3].slice().join(',')", JsString("1,2,3"))
+  assert_normal("[1,2,3].slice().join(',')", KStr("1,2,3"))
 }
 
 pub fn array_slice_does_not_mutate_test() -> Nil {
-  assert_normal("var a = [1,2,3]; a.slice(1); a.length", JsNumber(Finite(3.0)))
+  assert_normal("var a = [1,2,3]; a.slice(1); a.length", KNum(JFloat(3.0)))
 }
 
 pub fn array_slice_out_of_bounds_test() -> Nil {
-  assert_normal("[1,2,3].slice(5).length", JsNumber(Finite(0.0)))
+  assert_normal("[1,2,3].slice(5).length", KNum(JFloat(0.0)))
 }
 
 pub fn array_concat_basic_test() -> Nil {
-  assert_normal("[1,2].concat([3,4]).join(',')", JsString("1,2,3,4"))
+  assert_normal("[1,2].concat([3,4]).join(',')", KStr("1,2,3,4"))
 }
 
 pub fn array_concat_non_array_test() -> Nil {
-  assert_normal("[1].concat(2, 3).join(',')", JsString("1,2,3"))
+  assert_normal("[1].concat(2, 3).join(',')", KStr("1,2,3"))
 }
 
 pub fn array_concat_mixed_test() -> Nil {
-  assert_normal("[1].concat([2], 3, [4,5]).join(',')", JsString("1,2,3,4,5"))
+  assert_normal("[1].concat([2], 3, [4,5]).join(',')", KStr("1,2,3,4,5"))
 }
 
 pub fn array_concat_does_not_mutate_test() -> Nil {
-  assert_normal("var a = [1,2]; a.concat([3]); a.length", JsNumber(Finite(2.0)))
+  assert_normal("var a = [1,2]; a.concat([3]); a.length", KNum(JFloat(2.0)))
 }
 
 pub fn array_reverse_basic_test() -> Nil {
-  assert_normal("var a = [1,2,3]; a.reverse().join(',')", JsString("3,2,1"))
+  assert_normal("var a = [1,2,3]; a.reverse().join(',')", KStr("3,2,1"))
 }
 
 pub fn array_reverse_mutates_test() -> Nil {
-  assert_normal("var a = [1,2,3]; a.reverse(); a.join(',')", JsString("3,2,1"))
+  assert_normal("var a = [1,2,3]; a.reverse(); a.join(',')", KStr("3,2,1"))
 }
 
 pub fn array_reverse_returns_this_test() -> Nil {
-  assert_normal("var a = [1,2]; a.reverse() === a", JsBool(True))
+  assert_normal("var a = [1,2]; a.reverse() === a", KBool(True))
 }
 
 pub fn array_reverse_even_length_test() -> Nil {
-  assert_normal("[1,2,3,4].reverse().join(',')", JsString("4,3,2,1"))
+  assert_normal("[1,2,3,4].reverse().join(',')", KStr("4,3,2,1"))
 }
 
 pub fn array_fill_basic_test() -> Nil {
-  assert_normal("[1,2,3].fill(0).join(',')", JsString("0,0,0"))
+  assert_normal("[1,2,3].fill(0).join(',')", KStr("0,0,0"))
 }
 
 pub fn array_fill_range_test() -> Nil {
-  assert_normal("[1,2,3,4].fill(9,1,3).join(',')", JsString("1,9,9,4"))
+  assert_normal("[1,2,3,4].fill(9,1,3).join(',')", KStr("1,9,9,4"))
 }
 
 pub fn array_fill_negative_test() -> Nil {
-  assert_normal("[1,2,3,4].fill(9,-2).join(',')", JsString("1,2,9,9"))
+  assert_normal("[1,2,3,4].fill(9,-2).join(',')", KStr("1,2,9,9"))
 }
 
 pub fn array_fill_returns_this_test() -> Nil {
-  assert_normal("var a = [1]; a.fill(0) === a", JsBool(True))
+  assert_normal("var a = [1]; a.fill(0) === a", KBool(True))
 }
 
 pub fn array_at_positive_test() -> Nil {
-  assert_normal("[1,2,3].at(1)", JsNumber(Finite(2.0)))
+  assert_normal("[1,2,3].at(1)", KNum(JFloat(2.0)))
 }
 
 pub fn array_at_negative_test() -> Nil {
-  assert_normal("[1,2,3].at(-1)", JsNumber(Finite(3.0)))
+  assert_normal("[1,2,3].at(-1)", KNum(JFloat(3.0)))
 }
 
 pub fn array_at_out_of_bounds_test() -> Nil {
-  assert_normal("[1,2,3].at(5)", JsUndefined)
+  assert_normal("[1,2,3].at(5)", KUndef)
 }
 
 pub fn array_at_negative_out_of_bounds_test() -> Nil {
-  assert_normal("[1,2,3].at(-5)", JsUndefined)
+  assert_normal("[1,2,3].at(-5)", KUndef)
 }
 
 pub fn array_index_of_basic_test() -> Nil {
-  assert_normal("[1,2,3,2].indexOf(2)", JsNumber(Finite(1.0)))
+  assert_normal("[1,2,3,2].indexOf(2)", KNum(JFloat(1.0)))
 }
 
 pub fn array_index_of_not_found_test() -> Nil {
-  assert_normal("[1,2,3].indexOf(5)", JsNumber(Finite(-1.0)))
+  assert_normal("[1,2,3].indexOf(5)", KNum(JFloat(-1.0)))
 }
 
 pub fn array_index_of_from_index_test() -> Nil {
-  assert_normal("[1,2,3,2].indexOf(2, 2)", JsNumber(Finite(3.0)))
+  assert_normal("[1,2,3,2].indexOf(2, 2)", KNum(JFloat(3.0)))
 }
 
 pub fn array_index_of_nan_test() -> Nil {
-  assert_normal("[NaN].indexOf(NaN)", JsNumber(Finite(-1.0)))
+  assert_normal("[NaN].indexOf(NaN)", KNum(JFloat(-1.0)))
 }
 
 pub fn array_index_of_neg_zero_test() -> Nil {
-  assert_normal("[-0].indexOf(0)", JsNumber(Finite(0.0)))
+  assert_normal("[-0].indexOf(0)", KNum(JFloat(0.0)))
 }
 
 pub fn array_index_of_negative_from_test() -> Nil {
-  assert_normal("[1,2,3,4].indexOf(3, -2)", JsNumber(Finite(2.0)))
+  assert_normal("[1,2,3,4].indexOf(3, -2)", KNum(JFloat(2.0)))
 }
 
 pub fn array_last_index_of_basic_test() -> Nil {
-  assert_normal("[1,2,3,2].lastIndexOf(2)", JsNumber(Finite(3.0)))
+  assert_normal("[1,2,3,2].lastIndexOf(2)", KNum(JFloat(3.0)))
 }
 
 pub fn array_last_index_of_from_index_test() -> Nil {
-  assert_normal("[1,2,3,2].lastIndexOf(2, 2)", JsNumber(Finite(1.0)))
+  assert_normal("[1,2,3,2].lastIndexOf(2, 2)", KNum(JFloat(1.0)))
 }
 
 pub fn array_last_index_of_undefined_from_test() -> Nil {
-  assert_normal("[1,2,1].lastIndexOf(1, undefined)", JsNumber(Finite(0.0)))
+  assert_normal("[1,2,1].lastIndexOf(1, undefined)", KNum(JFloat(0.0)))
 }
 
 pub fn array_last_index_of_no_second_arg_test() -> Nil {
-  assert_normal("[1,2,1].lastIndexOf(1)", JsNumber(Finite(2.0)))
+  assert_normal("[1,2,1].lastIndexOf(1)", KNum(JFloat(2.0)))
 }
 
 pub fn array_includes_basic_test() -> Nil {
-  assert_normal("[1,2,3].includes(2)", JsBool(True))
+  assert_normal("[1,2,3].includes(2)", KBool(True))
 }
 
 pub fn array_includes_not_found_test() -> Nil {
-  assert_normal("[1,2,3].includes(5)", JsBool(False))
+  assert_normal("[1,2,3].includes(5)", KBool(False))
 }
 
 pub fn array_includes_nan_test() -> Nil {
-  assert_normal("[NaN].includes(NaN)", JsBool(True))
+  assert_normal("[NaN].includes(NaN)", KBool(True))
 }
 
 pub fn array_includes_neg_zero_test() -> Nil {
-  assert_normal("[-0].includes(0)", JsBool(True))
+  assert_normal("[-0].includes(0)", KBool(True))
 }
 
 pub fn array_includes_from_index_test() -> Nil {
-  assert_normal("[1,2,3].includes(1, 1)", JsBool(False))
+  assert_normal("[1,2,3].includes(1, 1)", KBool(False))
 }
 
 pub fn array_for_each_basic_test() -> Nil {
   assert_normal(
     "var sum = 0; [1,2,3].forEach(function(x) { sum += x }); sum",
-    JsNumber(Finite(6.0)),
+    KNum(JFloat(6.0)),
   )
 }
 
 pub fn array_for_each_returns_undefined_test() -> Nil {
-  assert_normal("[1,2,3].forEach(function(){})", JsUndefined)
+  assert_normal("[1,2,3].forEach(function(){})", KUndef)
 }
 
 pub fn array_for_each_index_arg_test() -> Nil {
   assert_normal(
     "var idxs = []; [10,20,30].forEach(function(v,i) { idxs.push(i) }); idxs.join(',')",
-    JsString("0,1,2"),
+    KStr("0,1,2"),
   )
 }
 
@@ -3810,7 +3775,7 @@ pub fn array_for_each_this_arg_test() -> Nil {
   assert_normal(
     "var ctx = {n: 100}; var out = 0; "
       <> "[1].forEach(function() { out = this.n }, ctx); out",
-    JsNumber(Finite(100.0)),
+    KNum(JFloat(100.0)),
   )
 }
 
@@ -3821,35 +3786,35 @@ pub fn array_for_each_throws_non_callable_test() -> Nil {
 pub fn array_for_each_non_callable_message_test() -> Nil {
   assert_normal(
     "try { [1].forEach(5) } catch (e) { e.message }",
-    JsString("number is not a function"),
+    KStr("number is not a function"),
   )
 }
 
 pub fn array_map_basic_test() -> Nil {
   assert_normal(
     "[1,2,3].map(function(x) { return x * 2 }).join(',')",
-    JsString("2,4,6"),
+    KStr("2,4,6"),
   )
 }
 
 pub fn array_map_index_arg_test() -> Nil {
   assert_normal(
     "[10,20].map(function(v,i) { return i }).join(',')",
-    JsString("0,1"),
+    KStr("0,1"),
   )
 }
 
 pub fn array_map_preserves_length_test() -> Nil {
   assert_normal(
     "[1,2,3].map(function(x) { return x }).length",
-    JsNumber(Finite(3.0)),
+    KNum(JFloat(3.0)),
   )
 }
 
 pub fn array_map_does_not_mutate_test() -> Nil {
   assert_normal(
     "var a = [1,2]; a.map(function(x) { return x*10 }); a.join(',')",
-    JsString("1,2"),
+    KStr("1,2"),
   )
 }
 
@@ -3864,105 +3829,102 @@ pub fn array_map_propagates_throw_test() -> Nil {
 pub fn array_filter_basic_test() -> Nil {
   assert_normal(
     "[1,2,3,4].filter(function(x) { return x % 2 === 0 }).join(',')",
-    JsString("2,4"),
+    KStr("2,4"),
   )
 }
 
 pub fn array_filter_all_false_test() -> Nil {
   assert_normal(
     "[1,2,3].filter(function() { return false }).length",
-    JsNumber(Finite(0.0)),
+    KNum(JFloat(0.0)),
   )
 }
 
 pub fn array_filter_truthy_coercion_test() -> Nil {
   assert_normal(
     "[0,1,2,0,3].filter(function(x) { return x }).join(',')",
-    JsString("1,2,3"),
+    KStr("1,2,3"),
   )
 }
 
 pub fn array_every_all_true_test() -> Nil {
-  assert_normal("[1,2,3].every(function(x) { return x > 0 })", JsBool(True))
+  assert_normal("[1,2,3].every(function(x) { return x > 0 })", KBool(True))
 }
 
 pub fn array_every_one_false_test() -> Nil {
-  assert_normal("[1,2,-1,3].every(function(x) { return x > 0 })", JsBool(False))
+  assert_normal("[1,2,-1,3].every(function(x) { return x > 0 })", KBool(False))
 }
 
 pub fn array_every_empty_test() -> Nil {
-  assert_normal("[].every(function() { return false })", JsBool(True))
+  assert_normal("[].every(function() { return false })", KBool(True))
 }
 
 pub fn array_every_short_circuit_test() -> Nil {
   assert_normal(
     "var n = 0; [1,0,1,1].every(function(x) { n++; return x }); n",
-    JsNumber(Finite(2.0)),
+    KNum(JFloat(2.0)),
   )
 }
 
 pub fn array_some_one_true_test() -> Nil {
-  assert_normal("[1,2,3].some(function(x) { return x === 2 })", JsBool(True))
+  assert_normal("[1,2,3].some(function(x) { return x === 2 })", KBool(True))
 }
 
 pub fn array_some_all_false_test() -> Nil {
-  assert_normal("[1,2,3].some(function(x) { return x > 5 })", JsBool(False))
+  assert_normal("[1,2,3].some(function(x) { return x > 5 })", KBool(False))
 }
 
 pub fn array_some_empty_test() -> Nil {
-  assert_normal("[].some(function() { return true })", JsBool(False))
+  assert_normal("[].some(function() { return true })", KBool(False))
 }
 
 pub fn array_some_short_circuit_test() -> Nil {
   assert_normal(
     "var n = 0; [0,0,1,1].some(function(x) { n++; return x }); n",
-    JsNumber(Finite(3.0)),
+    KNum(JFloat(3.0)),
   )
 }
 
 pub fn array_find_basic_test() -> Nil {
-  assert_normal(
-    "[1,2,3].find(function(x) { return x > 1 })",
-    JsNumber(Finite(2.0)),
-  )
+  assert_normal("[1,2,3].find(function(x) { return x > 1 })", KNum(JFloat(2.0)))
 }
 
 pub fn array_find_not_found_test() -> Nil {
-  assert_normal("[1,2,3].find(function(x) { return x > 5 })", JsUndefined)
+  assert_normal("[1,2,3].find(function(x) { return x > 5 })", KUndef)
 }
 
 pub fn array_find_index_basic_test() -> Nil {
   assert_normal(
     "[1,2,3].findIndex(function(x) { return x > 1 })",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
 pub fn array_find_index_not_found_test() -> Nil {
   assert_normal(
     "[1,2,3].findIndex(function(x) { return x > 5 })",
-    JsNumber(Finite(-1.0)),
+    KNum(JFloat(-1.0)),
   )
 }
 
 pub fn array_reduce_basic_test() -> Nil {
   assert_normal(
     "[1,2,3,4].reduce(function(a,b) { return a + b })",
-    JsNumber(Finite(10.0)),
+    KNum(JFloat(10.0)),
   )
 }
 
 pub fn array_reduce_with_init_test() -> Nil {
   assert_normal(
     "[1,2,3].reduce(function(a,b) { return a + b }, 10)",
-    JsNumber(Finite(16.0)),
+    KNum(JFloat(16.0)),
   )
 }
 
 pub fn array_reduce_empty_with_init_test() -> Nil {
   assert_normal(
     "[].reduce(function(a,b) { return a + b }, 42)",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -3973,42 +3935,39 @@ pub fn array_reduce_empty_no_init_throws_test() -> Nil {
 pub fn array_reduce_empty_error_message_test() -> Nil {
   assert_normal(
     "try { [].reduce(function(){}) } catch (e) { e.message }",
-    JsString("Reduce of empty array with no initial value"),
+    KStr("Reduce of empty array with no initial value"),
   )
 }
 
 pub fn array_reduce_single_no_init_test() -> Nil {
-  assert_normal(
-    "[5].reduce(function(a,b) { return a + b })",
-    JsNumber(Finite(5.0)),
-  )
+  assert_normal("[5].reduce(function(a,b) { return a + b })", KNum(JFloat(5.0)))
 }
 
 pub fn array_reduce_index_arg_test() -> Nil {
   assert_normal(
     "[10,20,30].reduce(function(a,b,i) { return a + i }, 0)",
-    JsNumber(Finite(3.0)),
+    KNum(JFloat(3.0)),
   )
 }
 
 pub fn array_reduce_right_basic_test() -> Nil {
   assert_normal(
     "[1,2,3].reduceRight(function(a,b) { return a - b })",
-    JsNumber(Finite(0.0)),
+    KNum(JFloat(0.0)),
   )
 }
 
 pub fn array_reduce_right_with_init_test() -> Nil {
   assert_normal(
     "[1,2,3].reduceRight(function(a,b) { return a - b }, 10)",
-    JsNumber(Finite(4.0)),
+    KNum(JFloat(4.0)),
   )
 }
 
 pub fn array_reduce_right_order_test() -> Nil {
   assert_normal(
     "['a','b','c'].reduceRight(function(a,b) { return a + b })",
-    JsString("cba"),
+    KStr("cba"),
   )
 }
 
@@ -4019,98 +3978,95 @@ pub fn array_reduce_right_empty_throws_test() -> Nil {
 pub fn array_map_callback_can_read_array_test() -> Nil {
   assert_normal(
     "[1,2,3].map(function(v,i,a) { return a.length }).join(',')",
-    JsString("3,3,3"),
+    KStr("3,3,3"),
   )
 }
 
 pub fn array_map_on_plain_object_test() -> Nil {
   assert_normal(
     "Array.prototype.map.call({0:1, 1:2, length:2}, function(x){return x*10}).join(',')",
-    JsString("10,20"),
+    KStr("10,20"),
   )
 }
 
 pub fn array_for_each_on_plain_object_test() -> Nil {
   assert_normal(
     "var s = ''; Array.prototype.forEach.call({0:'a', 1:'b', 2:'c', length:3}, function(v,i){s += i + v}); s",
-    JsString("0a1b2c"),
+    KStr("0a1b2c"),
   )
 }
 
 pub fn array_join_on_plain_object_test() -> Nil {
   assert_normal(
     "Array.prototype.join.call({0:'x', 1:'y', length:2}, '-')",
-    JsString("x-y"),
+    KStr("x-y"),
   )
 }
 
 pub fn array_like_skips_holes_test() -> Nil {
   assert_normal(
     "var r = []; Array.prototype.forEach.call({0:'a', 2:'c', length:3}, function(v,i){r.push(i)}); r.join(',')",
-    JsString("0,2"),
+    KStr("0,2"),
   )
 }
 
 pub fn array_like_length_coercion_test() -> Nil {
   assert_normal(
     "Array.prototype.map.call({0:'a', 1:'b', 2:'c', length:'2.9'}, function(v){return v.toUpperCase()}).join(',')",
-    JsString("A,B"),
+    KStr("A,B"),
   )
 }
 
 pub fn array_like_negative_length_test() -> Nil {
   assert_normal(
     "Array.prototype.map.call({0:'x', length:-5}, function(v){return v}).length",
-    JsNumber(Finite(0.0)),
+    KNum(JFloat(0.0)),
   )
 }
 
 pub fn array_like_missing_length_test() -> Nil {
   assert_normal(
     "Array.prototype.map.call({0:'x', 1:'y'}, function(v){return v}).length",
-    JsNumber(Finite(0.0)),
+    KNum(JFloat(0.0)),
   )
 }
 
 pub fn array_index_of_on_string_test() -> Nil {
-  assert_normal(
-    "Array.prototype.indexOf.call('abc', 'b')",
-    JsNumber(Finite(1.0)),
-  )
+  assert_normal("Array.prototype.indexOf.call('abc', 'b')", KNum(JFloat(1.0)))
 }
 
 pub fn array_map_on_string_test() -> Nil {
   assert_normal(
     "Array.prototype.map.call('abc', function(c){return c.toUpperCase()}).join('')",
-    JsString("ABC"),
+    KStr("ABC"),
   )
 }
 
 pub fn array_slice_on_arguments_test() -> Nil {
   assert_normal(
     "(function(){ return Array.prototype.slice.call(arguments).join(',') })(10, 20, 30)",
-    JsString("10,20,30"),
+    KStr("10,20,30"),
   )
 }
 
 pub fn array_map_on_arguments_test() -> Nil {
   assert_normal(
     "(function(){ return Array.prototype.map.call(arguments, function(x){return x+1}).join(',') })(1, 2, 3)",
-    JsString("2,3,4"),
+    KStr("2,3,4"),
   )
 }
 
 pub fn array_filter_on_plain_object_test() -> Nil {
   assert_normal(
     "Array.prototype.filter.call({0:1, 1:2, 2:3, length:3}, function(x){return x > 1}).join(',')",
-    JsString("2,3"),
+    KStr("2,3"),
   )
 }
 
 pub fn array_method_on_number_this_test() -> Nil {
   assert_normal(
     "Array.prototype.map.call(5, function(x){return x}).length",
-    JsNumber(Finite(0.0)),
+    KNum(JFloat(0.0)),
   )
 }
 
@@ -4121,101 +4077,98 @@ pub fn array_from_closes_iterator_when_mapfn_throws_test() -> Nil {
      try { Array.from(g(), function () { throw 'boom'; }); }
      catch (e) { log.push('caught:' + e); }
      log.join('|')",
-    JsString("finally|caught:boom"),
+    KStr("finally|caught:boom"),
   )
 }
 
 pub fn array_reduce_on_plain_object_test() -> Nil {
   assert_normal(
     "Array.prototype.reduce.call({0:1, 1:2, 2:3, length:3}, function(a,b){return a+b})",
-    JsNumber(Finite(6.0)),
+    KNum(JFloat(6.0)),
   )
 }
 
 pub fn array_pop_on_plain_object_reads_correctly_test() -> Nil {
-  assert_normal(
-    "Array.prototype.pop.call({0:'a', 1:'b', length:2})",
-    JsString("b"),
-  )
+  assert_normal("Array.prototype.pop.call({0:'a', 1:'b', length:2})", KStr("b"))
 }
 
 pub fn array_pop_on_plain_object_does_not_corrupt_kind_test() -> Nil {
   assert_normal(
     "var o = {0:'a', 1:'b', length:2}; Array.prototype.pop.call(o); Array.isArray(o)",
-    JsBool(False),
+    KBool(False),
   )
 }
 
 pub fn object_is_nan_test() -> Nil {
-  assert_normal("Object.is(NaN, NaN)", JsBool(True))
+  assert_normal("Object.is(NaN, NaN)", KBool(True))
 }
 
 pub fn object_is_pos_neg_zero_test() -> Nil {
-  assert_normal("Object.is(0, -0)", JsBool(False))
+  assert_normal("Object.is(0, -0)", KBool(False))
 }
 
 pub fn object_is_neg_neg_zero_test() -> Nil {
-  assert_normal("Object.is(-0, -0)", JsBool(True))
+  assert_normal("Object.is(-0, -0)", KBool(True))
 }
 
 pub fn object_is_pos_pos_zero_test() -> Nil {
-  assert_normal("Object.is(0, 0)", JsBool(True))
+  assert_normal("Object.is(0, 0)", KBool(True))
 }
 
 pub fn object_is_equal_numbers_test() -> Nil {
-  assert_normal("Object.is(42, 42)", JsBool(True))
+  assert_normal("Object.is(42, 42)", KBool(True))
 }
 
 pub fn object_is_unequal_numbers_test() -> Nil {
-  assert_normal("Object.is(1, 2)", JsBool(False))
+  assert_normal("Object.is(1, 2)", KBool(False))
 }
 
 pub fn object_is_strings_test() -> Nil {
-  assert_normal("Object.is('a', 'a')", JsBool(True))
+  assert_normal("Object.is('a', 'a')", KBool(True))
 }
 
 pub fn object_is_null_null_test() -> Nil {
-  assert_normal("Object.is(null, null)", JsBool(True))
+  assert_normal("Object.is(null, null)", KBool(True))
 }
 
 pub fn object_is_undefined_undefined_test() -> Nil {
-  assert_normal("Object.is(undefined, undefined)", JsBool(True))
+  assert_normal("Object.is(undefined, undefined)", KBool(True))
 }
 
 pub fn object_is_no_args_test() -> Nil {
-  assert_normal("Object.is()", JsBool(True))
+  assert_normal("Object.is()", KBool(True))
 }
 
 pub fn object_is_different_types_test() -> Nil {
-  assert_normal("Object.is(1, '1')", JsBool(False))
+  assert_normal("Object.is(1, '1')", KBool(False))
 }
 
 pub fn object_is_same_ref_test() -> Nil {
-  assert_normal("var o = {}; Object.is(o, o)", JsBool(True))
+  assert_normal("var o = {}; Object.is(o, o)", KBool(True))
 }
 
 pub fn object_is_different_ref_test() -> Nil {
-  assert_normal("Object.is({}, {})", JsBool(False))
+  assert_normal("Object.is({}, {})", KBool(False))
 }
 
 pub fn object_create_null_proto_test() -> Nil {
   assert_normal(
     "Object.getPrototypeOf(Object.create(null)) === null",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn object_create_object_proto_test() -> Nil {
   assert_normal(
     "var p = {x: 1}; var o = Object.create(p); o.x",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
 pub fn object_create_with_props_test() -> Nil {
   assert_normal(
     "Object.create(null, {a: {value: 42, enumerable: true}}).a",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -4234,51 +4187,48 @@ pub fn object_create_throws_on_string_test() -> Nil {
 pub fn object_create_returns_type_error_test() -> Nil {
   assert_normal(
     "try { Object.create(5) } catch (e) { e instanceof TypeError }",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn instanceof_native_constructor_test() -> Nil {
-  assert_normal("[] instanceof Array", JsBool(True))
+  assert_normal("[] instanceof Array", KBool(True))
 }
 
 pub fn instanceof_native_constructor_error_test() -> Nil {
-  assert_normal("new TypeError('x') instanceof TypeError", JsBool(True))
+  assert_normal("new TypeError('x') instanceof TypeError", KBool(True))
 }
 
 pub fn instanceof_native_constructor_error_chain_test() -> Nil {
-  assert_normal("new TypeError('x') instanceof Error", JsBool(True))
+  assert_normal("new TypeError('x') instanceof Error", KBool(True))
 }
 
 pub fn instanceof_native_constructor_false_test() -> Nil {
-  assert_normal("[] instanceof TypeError", JsBool(False))
+  assert_normal("[] instanceof TypeError", KBool(False))
 }
 
 pub fn object_assign_basic_test() -> Nil {
-  assert_normal("Object.assign({a:1}, {b:2}).b", JsNumber(Finite(2.0)))
+  assert_normal("Object.assign({a:1}, {b:2}).b", KNum(JFloat(2.0)))
 }
 
 pub fn object_assign_overwrite_test() -> Nil {
-  assert_normal("Object.assign({a:1}, {a:2}).a", JsNumber(Finite(2.0)))
+  assert_normal("Object.assign({a:1}, {a:2}).a", KNum(JFloat(2.0)))
 }
 
 pub fn object_assign_multiple_sources_test() -> Nil {
-  assert_normal(
-    "Object.assign({}, {a:1}, {b:2}, {c:3}).c",
-    JsNumber(Finite(3.0)),
-  )
+  assert_normal("Object.assign({}, {a:1}, {b:2}, {c:3}).c", KNum(JFloat(3.0)))
 }
 
 pub fn object_assign_returns_target_test() -> Nil {
-  assert_normal("var t = {}; Object.assign(t, {a:1}) === t", JsBool(True))
+  assert_normal("var t = {}; Object.assign(t, {a:1}) === t", KBool(True))
 }
 
 pub fn object_assign_skips_null_source_test() -> Nil {
-  assert_normal("Object.assign({}, null, {a:1}).a", JsNumber(Finite(1.0)))
+  assert_normal("Object.assign({}, null, {a:1}).a", KNum(JFloat(1.0)))
 }
 
 pub fn object_assign_skips_undefined_source_test() -> Nil {
-  assert_normal("Object.assign({}, undefined, {a:1}).a", JsNumber(Finite(1.0)))
+  assert_normal("Object.assign({}, undefined, {a:1}).a", KNum(JFloat(1.0)))
 }
 
 pub fn object_assign_throws_on_null_target_test() -> Nil {
@@ -4290,18 +4240,15 @@ pub fn object_assign_throws_on_undefined_target_test() -> Nil {
 }
 
 pub fn object_assign_later_overrides_earlier_test() -> Nil {
-  assert_normal(
-    "Object.assign({}, {a:1}, {a:2}, {a:3}).a",
-    JsNumber(Finite(3.0)),
-  )
+  assert_normal("Object.assign({}, {a:1}, {a:2}, {a:3}).a", KNum(JFloat(3.0)))
 }
 
 pub fn object_values_basic_test() -> Nil {
-  assert_normal("Object.values({a:1, b:2, c:3}).join(',')", JsString("1,2,3"))
+  assert_normal("Object.values({a:1, b:2, c:3}).join(',')", KStr("1,2,3"))
 }
 
 pub fn object_values_empty_test() -> Nil {
-  assert_normal("Object.values({}).length", JsNumber(Finite(0.0)))
+  assert_normal("Object.values({}).length", KNum(JFloat(0.0)))
 }
 
 pub fn object_values_throws_on_null_test() -> Nil {
@@ -4309,22 +4256,22 @@ pub fn object_values_throws_on_null_test() -> Nil {
 }
 
 pub fn object_values_coerces_number_test() -> Nil {
-  assert_normal("Object.values(5).length", JsNumber(Finite(0.0)))
+  assert_normal("Object.values(5).length", KNum(JFloat(0.0)))
 }
 
 pub fn object_entries_basic_test() -> Nil {
-  assert_normal("Object.entries({a:1}).length", JsNumber(Finite(1.0)))
+  assert_normal("Object.entries({a:1}).length", KNum(JFloat(1.0)))
 }
 
 pub fn object_entries_pair_test() -> Nil {
   assert_normal(
     "var e = Object.entries({x:42})[0]; e[0] + '=' + e[1]",
-    JsString("x=42"),
+    KStr("x=42"),
   )
 }
 
 pub fn object_entries_multiple_test() -> Nil {
-  assert_normal("Object.entries({a:1, b:2}).length", JsNumber(Finite(2.0)))
+  assert_normal("Object.entries({a:1, b:2}).length", KNum(JFloat(2.0)))
 }
 
 pub fn object_entries_throws_on_undefined_test() -> Nil {
@@ -4332,17 +4279,17 @@ pub fn object_entries_throws_on_undefined_test() -> Nil {
 }
 
 pub fn object_has_own_true_test() -> Nil {
-  assert_normal("Object.hasOwn({a:1}, 'a')", JsBool(True))
+  assert_normal("Object.hasOwn({a:1}, 'a')", KBool(True))
 }
 
 pub fn object_has_own_false_test() -> Nil {
-  assert_normal("Object.hasOwn({a:1}, 'b')", JsBool(False))
+  assert_normal("Object.hasOwn({a:1}, 'b')", KBool(False))
 }
 
 pub fn object_has_own_not_inherited_test() -> Nil {
   assert_normal(
     "var p = {x:1}; var o = Object.create(p); Object.hasOwn(o, 'x')",
-    JsBool(False),
+    KBool(False),
   )
 }
 
@@ -4357,23 +4304,23 @@ pub fn object_has_own_throws_on_undefined_test() -> Nil {
 pub fn object_get_prototype_of_basic_test() -> Nil {
   assert_normal(
     "var p = {}; var o = Object.create(p); Object.getPrototypeOf(o) === p",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn object_get_prototype_of_null_proto_test() -> Nil {
   assert_normal(
     "Object.getPrototypeOf(Object.create(null)) === null",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn object_get_prototype_of_plain_test() -> Nil {
-  assert_normal("Object.getPrototypeOf({}) === Object.prototype", JsBool(True))
+  assert_normal("Object.getPrototypeOf({}) === Object.prototype", KBool(True))
 }
 
 pub fn object_get_prototype_of_number_test() -> Nil {
-  assert_normal("Object.getPrototypeOf(5) === Number.prototype", JsBool(True))
+  assert_normal("Object.getPrototypeOf(5) === Number.prototype", KBool(True))
 }
 
 pub fn object_get_prototype_of_throws_on_null_test() -> Nil {
@@ -4387,22 +4334,19 @@ pub fn object_get_prototype_of_throws_on_undefined_test() -> Nil {
 pub fn object_set_prototype_of_basic_test() -> Nil {
   assert_normal(
     "var p = {x:1}; var o = {}; Object.setPrototypeOf(o, p); o.x",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
 pub fn object_set_prototype_of_null_test() -> Nil {
   assert_normal(
     "var o = {}; Object.setPrototypeOf(o, null); Object.getPrototypeOf(o) === null",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn object_set_prototype_of_returns_target_test() -> Nil {
-  assert_normal(
-    "var o = {}; Object.setPrototypeOf(o, null) === o",
-    JsBool(True),
-  )
+  assert_normal("var o = {}; Object.setPrototypeOf(o, null) === o", KBool(True))
 }
 
 pub fn object_set_prototype_of_throws_on_null_target_test() -> Nil {
@@ -4418,7 +4362,7 @@ pub fn object_set_prototype_of_throws_on_invalid_proto_test() -> Nil {
 }
 
 pub fn object_set_prototype_of_primitive_target_passthrough_test() -> Nil {
-  assert_normal("Object.setPrototypeOf(5, null)", JsNumber(Finite(5.0)))
+  assert_normal("Object.setPrototypeOf(5, null)", KNum(JFloat(5.0)))
 }
 
 pub fn object_set_prototype_of_cycle_throws_test() -> Nil {
@@ -4434,14 +4378,14 @@ pub fn object_set_prototype_of_cycle_indirect_throws_test() -> Nil {
 pub fn object_set_prototype_of_cycle_error_message_test() -> Nil {
   assert_normal(
     "try { var a = {}; Object.setPrototypeOf(a, a) } catch (e) { e.message }",
-    JsString("Cyclic __proto__ value"),
+    KStr("Cyclic __proto__ value"),
   )
 }
 
 pub fn object_set_prototype_of_cycle_is_type_error_test() -> Nil {
   assert_normal(
     "try { var a = {}; Object.setPrototypeOf(a, a) } catch (e) { e instanceof TypeError }",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -4450,29 +4394,26 @@ pub fn object_set_prototype_of_no_false_positive_test() -> Nil {
     "var proto = {}; var a = Object.create(proto); var b = {}; "
       <> "Object.setPrototypeOf(b, proto); "
       <> "Object.getPrototypeOf(b) === proto",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn object_define_properties_basic_test() -> Nil {
   assert_normal(
     "var o = {}; Object.defineProperties(o, {a: {value: 1, enumerable: true}}); o.a",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
 pub fn object_define_properties_multiple_test() -> Nil {
   assert_normal(
     "var o = {}; Object.defineProperties(o, {a: {value: 1}, b: {value: 2}}); o.a + o.b",
-    JsNumber(Finite(3.0)),
+    KNum(JFloat(3.0)),
   )
 }
 
 pub fn object_define_properties_returns_target_test() -> Nil {
-  assert_normal(
-    "var o = {}; Object.defineProperties(o, {}) === o",
-    JsBool(True),
-  )
+  assert_normal("var o = {}; Object.defineProperties(o, {}) === o", KBool(True))
 }
 
 pub fn object_define_properties_throws_on_non_object_target_test() -> Nil {
@@ -4484,7 +4425,7 @@ pub fn object_define_properties_throws_on_null_props_test() -> Nil {
 }
 
 pub fn object_define_properties_primitive_props_no_throw_test() -> Nil {
-  assert_normal("var o = {}; Object.defineProperties(o, 5) === o", JsBool(True))
+  assert_normal("var o = {}; Object.defineProperties(o, 5) === o", KBool(True))
 }
 
 pub fn object_define_properties_throws_on_non_object_descriptor_test() -> Nil {
@@ -4492,118 +4433,118 @@ pub fn object_define_properties_throws_on_non_object_descriptor_test() -> Nil {
 }
 
 pub fn object_freeze_returns_arg_test() -> Nil {
-  assert_normal("var o = {}; Object.freeze(o) === o", JsBool(True))
+  assert_normal("var o = {}; Object.freeze(o) === o", KBool(True))
 }
 
 pub fn object_freeze_primitive_passthrough_test() -> Nil {
-  assert_normal("Object.freeze(5)", JsNumber(Finite(5.0)))
+  assert_normal("Object.freeze(5)", KNum(JFloat(5.0)))
 }
 
 pub fn object_freeze_null_passthrough_test() -> Nil {
-  assert_normal("Object.freeze(null)", JsNull)
+  assert_normal("Object.freeze(null)", KNull)
 }
 
 pub fn object_freeze_undefined_passthrough_test() -> Nil {
-  assert_normal("Object.freeze(undefined)", JsUndefined)
+  assert_normal("Object.freeze(undefined)", KUndef)
 }
 
 pub fn object_is_frozen_primitive_test() -> Nil {
-  assert_normal("Object.isFrozen(5)", JsBool(True))
+  assert_normal("Object.isFrozen(5)", KBool(True))
 }
 
 pub fn object_is_frozen_null_test() -> Nil {
-  assert_normal("Object.isFrozen(null)", JsBool(True))
+  assert_normal("Object.isFrozen(null)", KBool(True))
 }
 
 pub fn object_is_frozen_undefined_test() -> Nil {
-  assert_normal("Object.isFrozen(undefined)", JsBool(True))
+  assert_normal("Object.isFrozen(undefined)", KBool(True))
 }
 
 pub fn object_is_frozen_object_test() -> Nil {
-  assert_normal("Object.isFrozen({})", JsBool(False))
+  assert_normal("Object.isFrozen({})", KBool(False))
 }
 
 pub fn object_is_extensible_primitive_test() -> Nil {
-  assert_normal("Object.isExtensible(5)", JsBool(False))
+  assert_normal("Object.isExtensible(5)", KBool(False))
 }
 
 pub fn object_is_extensible_null_test() -> Nil {
-  assert_normal("Object.isExtensible(null)", JsBool(False))
+  assert_normal("Object.isExtensible(null)", KBool(False))
 }
 
 pub fn object_is_extensible_object_test() -> Nil {
-  assert_normal("Object.isExtensible({})", JsBool(True))
+  assert_normal("Object.isExtensible({})", KBool(True))
 }
 
 pub fn object_prevent_extensions_returns_arg_test() -> Nil {
-  assert_normal("var o = {}; Object.preventExtensions(o) === o", JsBool(True))
+  assert_normal("var o = {}; Object.preventExtensions(o) === o", KBool(True))
 }
 
 pub fn object_prevent_extensions_primitive_passthrough_test() -> Nil {
-  assert_normal("Object.preventExtensions(5)", JsNumber(Finite(5.0)))
+  assert_normal("Object.preventExtensions(5)", KNum(JFloat(5.0)))
 }
 
 pub fn object_prevent_extensions_null_passthrough_test() -> Nil {
-  assert_normal("Object.preventExtensions(null)", JsNull)
+  assert_normal("Object.preventExtensions(null)", KNull)
 }
 
 pub fn object_prevent_extensions_makes_non_extensible_test() -> Nil {
   assert_normal(
     "var o = {}; Object.preventExtensions(o); Object.isExtensible(o)",
-    JsBool(False),
+    KBool(False),
   )
 }
 
 pub fn object_freeze_makes_non_extensible_test() -> Nil {
   assert_normal(
     "var o = {a:1}; Object.freeze(o); Object.isExtensible(o)",
-    JsBool(False),
+    KBool(False),
   )
 }
 
 pub fn object_freeze_makes_frozen_test() -> Nil {
   assert_normal(
     "var o = {a:1}; Object.freeze(o); Object.isFrozen(o)",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn object_freeze_sets_non_writable_test() -> Nil {
   assert_normal(
     "var o = {a:1}; Object.freeze(o); Object.getOwnPropertyDescriptor(o,'a').writable",
-    JsBool(False),
+    KBool(False),
   )
 }
 
 pub fn object_freeze_sets_non_configurable_test() -> Nil {
   assert_normal(
     "var o = {a:1}; Object.freeze(o); Object.getOwnPropertyDescriptor(o,'a').configurable",
-    JsBool(False),
+    KBool(False),
   )
 }
 
 pub fn object_freeze_preserves_enumerable_test() -> Nil {
   assert_normal(
     "var o = {a:1}; Object.freeze(o); Object.getOwnPropertyDescriptor(o,'a').enumerable",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn object_prevent_extensions_empty_is_frozen_test() -> Nil {
-  assert_normal("Object.isFrozen(Object.preventExtensions({}))", JsBool(True))
+  assert_normal("Object.isFrozen(Object.preventExtensions({}))", KBool(True))
 }
 
 pub fn object_prevent_extensions_nonempty_not_frozen_test() -> Nil {
   assert_normal(
     "var o = {a:1}; Object.preventExtensions(o); Object.isFrozen(o)",
-    JsBool(False),
+    KBool(False),
   )
 }
 
 pub fn object_keys_error_message_test() -> Nil {
   assert_normal(
     "try { Object.keys(null) } catch (e) { e.message }",
-    JsString("Cannot convert undefined or null to object"),
+    KStr("Cannot convert undefined or null to object"),
   )
 }
 
@@ -4624,31 +4565,31 @@ pub fn reflect_set_test() -> Nil {
 }
 
 pub fn reflect_set_returns_bool_test() -> Nil {
-  assert_normal("Reflect.set({}, 'a', 1)", JsBool(True))
+  assert_normal("Reflect.set({}, 'a', 1)", KBool(True))
 }
 
 pub fn reflect_set_nonwritable_returns_false_test() -> Nil {
   assert_normal(
     "var o = {}; Object.defineProperty(o, 'a', {value:1, writable:false});
      Reflect.set(o, 'a', 2)",
-    JsBool(False),
+    KBool(False),
   )
 }
 
 pub fn reflect_has_test() -> Nil {
-  assert_normal("Reflect.has({a: 1}, 'a')", JsBool(True))
+  assert_normal("Reflect.has({a: 1}, 'a')", KBool(True))
 }
 
 pub fn reflect_has_proto_test() -> Nil {
-  assert_normal("Reflect.has({}, 'toString')", JsBool(True))
+  assert_normal("Reflect.has({}, 'toString')", KBool(True))
 }
 
 pub fn reflect_has_missing_test() -> Nil {
-  assert_normal("Reflect.has({a: 1}, 'b')", JsBool(False))
+  assert_normal("Reflect.has({a: 1}, 'b')", KBool(False))
 }
 
 pub fn reflect_own_keys_test() -> Nil {
-  assert_normal("Reflect.ownKeys({a:1, b:2}).sort().join(',')", JsString("a,b"))
+  assert_normal("Reflect.ownKeys({a:1, b:2}).sort().join(',')", KStr("a,b"))
 }
 
 pub fn reflect_own_keys_includes_symbols_test() -> Nil {
@@ -4660,71 +4601,71 @@ pub fn reflect_own_keys_includes_symbols_test() -> Nil {
 }
 
 pub fn reflect_is_extensible_test() -> Nil {
-  assert_normal("Reflect.isExtensible({})", JsBool(True))
+  assert_normal("Reflect.isExtensible({})", KBool(True))
 }
 
 pub fn reflect_prevent_extensions_test() -> Nil {
   assert_normal(
     "var o = {}; Reflect.preventExtensions(o); Reflect.isExtensible(o)",
-    JsBool(False),
+    KBool(False),
   )
 }
 
 pub fn reflect_prevent_extensions_returns_true_test() -> Nil {
-  assert_normal("Reflect.preventExtensions({})", JsBool(True))
+  assert_normal("Reflect.preventExtensions({})", KBool(True))
 }
 
 pub fn reflect_get_prototype_of_test() -> Nil {
-  assert_normal("Reflect.getPrototypeOf([]) === Array.prototype", JsBool(True))
+  assert_normal("Reflect.getPrototypeOf([]) === Array.prototype", KBool(True))
 }
 
 pub fn reflect_set_prototype_of_test() -> Nil {
   assert_normal(
     "var o = {}; Reflect.setPrototypeOf(o, null); Reflect.getPrototypeOf(o)",
-    JsNull,
+    KNull,
   )
 }
 
 pub fn reflect_set_prototype_of_returns_bool_test() -> Nil {
-  assert_normal("Reflect.setPrototypeOf({}, null)", JsBool(True))
+  assert_normal("Reflect.setPrototypeOf({}, null)", KBool(True))
 }
 
 pub fn reflect_set_prototype_of_nonextensible_test() -> Nil {
   assert_normal(
     "var o = {}; Object.preventExtensions(o);
      Reflect.setPrototypeOf(o, Array.prototype)",
-    JsBool(False),
+    KBool(False),
   )
 }
 
 pub fn reflect_define_property_returns_bool_test() -> Nil {
-  assert_normal("Reflect.defineProperty({}, 'a', {value: 1})", JsBool(True))
+  assert_normal("Reflect.defineProperty({}, 'a', {value: 1})", KBool(True))
 }
 
 pub fn reflect_define_property_failure_returns_false_test() -> Nil {
   assert_normal(
     "var o = Object.freeze({a:1});
      Reflect.defineProperty(o, 'b', {value: 2})",
-    JsBool(False),
+    KBool(False),
   )
 }
 
 pub fn reflect_delete_property_test() -> Nil {
   assert_normal(
     "var o = {a: 1}; Reflect.deleteProperty(o, 'a'); 'a' in o",
-    JsBool(False),
+    KBool(False),
   )
 }
 
 pub fn reflect_delete_property_returns_bool_test() -> Nil {
-  assert_normal("Reflect.deleteProperty({a:1}, 'a')", JsBool(True))
+  assert_normal("Reflect.deleteProperty({a:1}, 'a')", KBool(True))
 }
 
 pub fn reflect_delete_nonconfigurable_returns_false_test() -> Nil {
   assert_normal(
     "var o = {}; Object.defineProperty(o, 'a', {value:1, configurable:false});
      Reflect.deleteProperty(o, 'a')",
-    JsBool(False),
+    KBool(False),
   )
 }
 
@@ -4735,7 +4676,7 @@ pub fn reflect_apply_test() -> Nil {
 pub fn reflect_construct_basic_test() -> Nil {
   assert_normal(
     "class C { constructor(x) { this.x = x; } } Reflect.construct(C, [42]).x",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -4757,7 +4698,7 @@ pub fn reflect_throws_on_null_test() -> Nil {
 pub fn reflect_to_string_tag_test() -> Nil {
   assert_normal(
     "Object.prototype.toString.call(Reflect)",
-    JsString("[object Reflect]"),
+    KStr("[object Reflect]"),
   )
 }
 
@@ -4766,7 +4707,7 @@ pub fn object_gopn_basic_test() -> Nil {
     "var obj = {a: 1, b: 2};
      var names = Object.getOwnPropertyNames(obj);
      names.length",
-    JsNumber(Finite(2.0)),
+    KNum(JFloat(2.0)),
   )
 }
 
@@ -4775,7 +4716,7 @@ pub fn object_gopn_includes_non_enumerable_test() -> Nil {
     "var obj = {a: 1};
      Object.defineProperty(obj, 'b', {value: 2, enumerable: false});
      Object.getOwnPropertyNames(obj).length",
-    JsNumber(Finite(2.0)),
+    KNum(JFloat(2.0)),
   )
 }
 
@@ -4783,7 +4724,7 @@ pub fn object_keys_basic_test() -> Nil {
   assert_normal(
     "var obj = {a: 1, b: 2};
      Object.keys(obj).length",
-    JsNumber(Finite(2.0)),
+    KNum(JFloat(2.0)),
   )
 }
 
@@ -4792,7 +4733,7 @@ pub fn object_keys_excludes_non_enumerable_test() -> Nil {
     "var obj = {a: 1};
      Object.defineProperty(obj, 'b', {value: 2, enumerable: false});
      Object.keys(obj).length",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
@@ -4800,7 +4741,7 @@ pub fn has_own_property_basic_test() -> Nil {
   assert_normal(
     "var obj = {x: 1};
      obj.hasOwnProperty('x')",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -4808,7 +4749,7 @@ pub fn has_own_property_missing_test() -> Nil {
   assert_normal(
     "var obj = {x: 1};
      obj.hasOwnProperty('y')",
-    JsBool(False),
+    KBool(False),
   )
 }
 
@@ -4818,7 +4759,7 @@ pub fn has_own_property_inherited_test() -> Nil {
      Foo.prototype.bar = 1;
      var f = new Foo();
      '' + f.hasOwnProperty('bar') + ',' + ('bar' in f)",
-    JsString("false,true"),
+    KStr("false,true"),
   )
 }
 
@@ -4827,7 +4768,7 @@ pub fn has_own_property_via_call_test() -> Nil {
     "var hasOwn = Object.prototype.hasOwnProperty;
      var obj = {x: 1};
      hasOwn.call(obj, 'x')",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -4842,51 +4783,51 @@ pub fn test262_property_helper_pattern_test() -> Nil {
      var desc = __getOwnPropertyDescriptor(obj, 'b');
      var names = __getOwnPropertyNames(obj);
      '' + desc.value + ',' + desc.enumerable + ',' + __hasOwnProperty(obj, 'a') + ',' + names.length",
-    JsString("2,false,true,2"),
+    KStr("2,false,true,2"),
   )
 }
 
 pub fn array_join_default_separator_test() -> Nil {
-  assert_normal("[1,2,3].join()", JsString("1,2,3"))
+  assert_normal("[1,2,3].join()", KStr("1,2,3"))
 }
 
 pub fn array_join_custom_separator_test() -> Nil {
-  assert_normal("[1,2,3].join('-')", JsString("1-2-3"))
+  assert_normal("[1,2,3].join('-')", KStr("1-2-3"))
 }
 
 pub fn array_join_empty_array_test() -> Nil {
-  assert_normal("[].join()", JsString(""))
+  assert_normal("[].join()", KStr(""))
 }
 
 pub fn array_join_undefined_null_elements_test() -> Nil {
-  assert_normal("[1,undefined,null,2].join(',')", JsString("1,,,2"))
+  assert_normal("[1,undefined,null,2].join(',')", KStr("1,,,2"))
 }
 
 pub fn array_join_single_element_test() -> Nil {
-  assert_normal("[42].join(',')", JsString("42"))
+  assert_normal("[42].join(',')", KStr("42"))
 }
 
 pub fn array_join_empty_separator_test() -> Nil {
-  assert_normal("[1,2,3].join('')", JsString("123"))
+  assert_normal("[1,2,3].join('')", KStr("123"))
 }
 
 pub fn array_push_basic_test() -> Nil {
   assert_normal(
     "var a = [1,2]; a.push(3); '' + a[0] + ',' + a[1] + ',' + a[2] + ',' + a.length",
-    JsString("1,2,3,3"),
+    KStr("1,2,3,3"),
   )
 }
 
 pub fn array_push_multiple_args_test() -> Nil {
-  assert_normal("var a = []; a.push(1,2,3); a.length", JsNumber(Finite(3.0)))
+  assert_normal("var a = []; a.push(1,2,3); a.length", KNum(JFloat(3.0)))
 }
 
 pub fn array_push_returns_length_test() -> Nil {
-  assert_normal("var a = [10]; a.push(20)", JsNumber(Finite(2.0)))
+  assert_normal("var a = [10]; a.push(20)", KNum(JFloat(2.0)))
 }
 
 pub fn property_is_enumerable_own_enumerable_test() -> Nil {
-  assert_normal("var o = {a: 1}; o.propertyIsEnumerable('a')", JsBool(True))
+  assert_normal("var o = {a: 1}; o.propertyIsEnumerable('a')", KBool(True))
 }
 
 pub fn property_is_enumerable_non_enumerable_test() -> Nil {
@@ -4894,545 +4835,545 @@ pub fn property_is_enumerable_non_enumerable_test() -> Nil {
     "var o = {};
      Object.defineProperty(o, 'x', {value: 1, enumerable: false});
      o.propertyIsEnumerable('x')",
-    JsBool(False),
+    KBool(False),
   )
 }
 
 pub fn property_is_enumerable_inherited_test() -> Nil {
-  assert_normal("var o = {}; o.propertyIsEnumerable('toString')", JsBool(False))
+  assert_normal("var o = {}; o.propertyIsEnumerable('toString')", KBool(False))
 }
 
 pub fn property_is_enumerable_missing_test() -> Nil {
-  assert_normal("var o = {}; o.propertyIsEnumerable('nope')", JsBool(False))
+  assert_normal("var o = {}; o.propertyIsEnumerable('nope')", KBool(False))
 }
 
 pub fn math_pow_basic_test() -> Nil {
-  assert_normal("Math.pow(2, 10)", JsNumber(Finite(1024.0)))
+  assert_normal("Math.pow(2, 10)", KNum(JFloat(1024.0)))
 }
 
 pub fn math_pow_zero_exponent_test() -> Nil {
-  assert_normal("Math.pow(5, 0)", JsNumber(Finite(1.0)))
+  assert_normal("Math.pow(5, 0)", KNum(JFloat(1.0)))
 }
 
 pub fn math_pow_fractional_test() -> Nil {
-  assert_normal("Math.pow(4, 0.5)", JsNumber(Finite(2.0)))
+  assert_normal("Math.pow(4, 0.5)", KNum(JFloat(2.0)))
 }
 
 pub fn math_pow_two_32_test() -> Nil {
-  assert_normal("Math.pow(2, 32)", JsNumber(Finite(4_294_967_296.0)))
+  assert_normal("Math.pow(2, 32)", KNum(JFloat(4_294_967_296.0)))
 }
 
 pub fn string_length_test() -> Nil {
-  assert_normal("'hello'.length", JsNumber(Finite(5.0)))
+  assert_normal("'hello'.length", KNum(JFloat(5.0)))
 }
 
 pub fn string_length_empty_test() -> Nil {
-  assert_normal("''.length", JsNumber(Finite(0.0)))
+  assert_normal("''.length", KNum(JFloat(0.0)))
 }
 
 pub fn string_index_test() -> Nil {
-  assert_normal("'hello'[0]", JsString("h"))
+  assert_normal("'hello'[0]", KStr("h"))
 }
 
 pub fn string_index_last_test() -> Nil {
-  assert_normal("'hello'[4]", JsString("o"))
+  assert_normal("'hello'[4]", KStr("o"))
 }
 
 pub fn string_index_out_of_bounds_test() -> Nil {
-  assert_normal("'hello'[10]", JsUndefined)
+  assert_normal("'hello'[10]", KUndef)
 }
 
 pub fn string_index_negative_test() -> Nil {
-  assert_normal("'hello'[-1]", JsUndefined)
+  assert_normal("'hello'[-1]", KUndef)
 }
 
 pub fn string_length_via_var_test() -> Nil {
-  assert_normal("var s = 'abc'; s.length", JsNumber(Finite(3.0)))
+  assert_normal("var s = 'abc'; s.length", KNum(JFloat(3.0)))
 }
 
 pub fn string_char_at_test() -> Nil {
-  assert_normal("'hello'.charAt(1)", JsString("e"))
+  assert_normal("'hello'.charAt(1)", KStr("e"))
 }
 
 pub fn string_char_at_oob_test() -> Nil {
-  assert_normal("'hello'.charAt(10)", JsString(""))
+  assert_normal("'hello'.charAt(10)", KStr(""))
 }
 
 pub fn string_char_code_at_test() -> Nil {
-  assert_normal("'A'.charCodeAt(0)", JsNumber(Finite(65.0)))
+  assert_normal("'A'.charCodeAt(0)", KNum(JFloat(65.0)))
 }
 
 pub fn string_char_code_at_oob_test() -> Nil {
-  assert_normal("'A'.charCodeAt(5)", JsNumber(NaN))
+  assert_normal("'A'.charCodeAt(5)", KNum(JNan))
 }
 
 pub fn string_index_of_test() -> Nil {
-  assert_normal("'hello world'.indexOf('world')", JsNumber(Finite(6.0)))
+  assert_normal("'hello world'.indexOf('world')", KNum(JFloat(6.0)))
 }
 
 pub fn string_index_of_not_found_test() -> Nil {
-  assert_normal("'hello'.indexOf('xyz')", JsNumber(Finite(-1.0)))
+  assert_normal("'hello'.indexOf('xyz')", KNum(JFloat(-1.0)))
 }
 
 pub fn string_index_of_from_test() -> Nil {
-  assert_normal("'abcabc'.indexOf('abc', 1)", JsNumber(Finite(3.0)))
+  assert_normal("'abcabc'.indexOf('abc', 1)", KNum(JFloat(3.0)))
 }
 
 pub fn string_last_index_of_test() -> Nil {
-  assert_normal("'abcabc'.lastIndexOf('abc')", JsNumber(Finite(3.0)))
+  assert_normal("'abcabc'.lastIndexOf('abc')", KNum(JFloat(3.0)))
 }
 
 pub fn string_includes_test() -> Nil {
-  assert_normal("'hello world'.includes('world')", JsBool(True))
+  assert_normal("'hello world'.includes('world')", KBool(True))
 }
 
 pub fn string_includes_false_test() -> Nil {
-  assert_normal("'hello'.includes('xyz')", JsBool(False))
+  assert_normal("'hello'.includes('xyz')", KBool(False))
 }
 
 pub fn string_starts_with_test() -> Nil {
-  assert_normal("'hello'.startsWith('hel')", JsBool(True))
+  assert_normal("'hello'.startsWith('hel')", KBool(True))
 }
 
 pub fn string_starts_with_false_test() -> Nil {
-  assert_normal("'hello'.startsWith('ell')", JsBool(False))
+  assert_normal("'hello'.startsWith('ell')", KBool(False))
 }
 
 pub fn string_ends_with_test() -> Nil {
-  assert_normal("'hello'.endsWith('llo')", JsBool(True))
+  assert_normal("'hello'.endsWith('llo')", KBool(True))
 }
 
 pub fn string_ends_with_false_test() -> Nil {
-  assert_normal("'hello'.endsWith('hel')", JsBool(False))
+  assert_normal("'hello'.endsWith('hel')", KBool(False))
 }
 
 pub fn string_slice_test() -> Nil {
-  assert_normal("'hello'.slice(1, 3)", JsString("el"))
+  assert_normal("'hello'.slice(1, 3)", KStr("el"))
 }
 
 pub fn string_slice_negative_test() -> Nil {
-  assert_normal("'hello'.slice(-3)", JsString("llo"))
+  assert_normal("'hello'.slice(-3)", KStr("llo"))
 }
 
 pub fn string_slice_no_end_test() -> Nil {
-  assert_normal("'hello'.slice(2)", JsString("llo"))
+  assert_normal("'hello'.slice(2)", KStr("llo"))
 }
 
 pub fn string_substring_test() -> Nil {
-  assert_normal("'hello'.substring(1, 3)", JsString("el"))
+  assert_normal("'hello'.substring(1, 3)", KStr("el"))
 }
 
 pub fn string_substring_swap_test() -> Nil {
-  assert_normal("'hello'.substring(3, 1)", JsString("el"))
+  assert_normal("'hello'.substring(3, 1)", KStr("el"))
 }
 
 pub fn string_to_lower_case_test() -> Nil {
-  assert_normal("'HELLO'.toLowerCase()", JsString("hello"))
+  assert_normal("'HELLO'.toLowerCase()", KStr("hello"))
 }
 
 pub fn string_to_upper_case_test() -> Nil {
-  assert_normal("'hello'.toUpperCase()", JsString("HELLO"))
+  assert_normal("'hello'.toUpperCase()", KStr("HELLO"))
 }
 
 pub fn string_trim_test() -> Nil {
-  assert_normal("'  hello  '.trim()", JsString("hello"))
+  assert_normal("'  hello  '.trim()", KStr("hello"))
 }
 
 pub fn string_trim_start_test() -> Nil {
-  assert_normal("'  hello  '.trimStart()", JsString("hello  "))
+  assert_normal("'  hello  '.trimStart()", KStr("hello  "))
 }
 
 pub fn string_trim_end_test() -> Nil {
-  assert_normal("'  hello  '.trimEnd()", JsString("  hello"))
+  assert_normal("'  hello  '.trimEnd()", KStr("  hello"))
 }
 
 pub fn string_prototype_concat_test() -> Nil {
-  assert_normal("'hello'.concat(' ', 'world')", JsString("hello world"))
+  assert_normal("'hello'.concat(' ', 'world')", KStr("hello world"))
 }
 
 pub fn string_repeat_test() -> Nil {
-  assert_normal("'ab'.repeat(3)", JsString("ababab"))
+  assert_normal("'ab'.repeat(3)", KStr("ababab"))
 }
 
 pub fn string_pad_start_test() -> Nil {
-  assert_normal("'5'.padStart(3, '0')", JsString("005"))
+  assert_normal("'5'.padStart(3, '0')", KStr("005"))
 }
 
 pub fn string_pad_end_test() -> Nil {
-  assert_normal("'5'.padEnd(3, '0')", JsString("500"))
+  assert_normal("'5'.padEnd(3, '0')", KStr("500"))
 }
 
 pub fn string_at_test() -> Nil {
-  assert_normal("'hello'.at(0)", JsString("h"))
+  assert_normal("'hello'.at(0)", KStr("h"))
 }
 
 pub fn string_at_negative_test() -> Nil {
-  assert_normal("'hello'.at(-1)", JsString("o"))
+  assert_normal("'hello'.at(-1)", KStr("o"))
 }
 
 pub fn string_at_oob_test() -> Nil {
-  assert_normal("'hello'.at(10)", JsUndefined)
+  assert_normal("'hello'.at(10)", KUndef)
 }
 
 pub fn string_to_string_test() -> Nil {
-  assert_normal("'hello'.toString()", JsString("hello"))
+  assert_normal("'hello'.toString()", KStr("hello"))
 }
 
 pub fn string_value_of_test() -> Nil {
-  assert_normal("'hello'.valueOf()", JsString("hello"))
+  assert_normal("'hello'.valueOf()", KStr("hello"))
 }
 
 pub fn math_abs_positive_test() -> Nil {
-  assert_normal("Math.abs(5)", JsNumber(Finite(5.0)))
+  assert_normal("Math.abs(5)", KNum(JFloat(5.0)))
 }
 
 pub fn math_abs_negative_test() -> Nil {
-  assert_normal("Math.abs(-5)", JsNumber(Finite(5.0)))
+  assert_normal("Math.abs(-5)", KNum(JFloat(5.0)))
 }
 
 pub fn math_abs_zero_test() -> Nil {
-  assert_normal("Math.abs(0)", JsNumber(Finite(0.0)))
+  assert_normal("Math.abs(0)", KNum(JFloat(0.0)))
 }
 
 pub fn math_floor_test() -> Nil {
-  assert_normal("Math.floor(4.7)", JsNumber(Finite(4.0)))
+  assert_normal("Math.floor(4.7)", KNum(JFloat(4.0)))
 }
 
 pub fn math_floor_negative_test() -> Nil {
-  assert_normal("Math.floor(-4.1)", JsNumber(Finite(-5.0)))
+  assert_normal("Math.floor(-4.1)", KNum(JFloat(-5.0)))
 }
 
 pub fn math_ceil_test() -> Nil {
-  assert_normal("Math.ceil(4.1)", JsNumber(Finite(5.0)))
+  assert_normal("Math.ceil(4.1)", KNum(JFloat(5.0)))
 }
 
 pub fn math_ceil_negative_test() -> Nil {
-  assert_normal("Math.ceil(-4.7)", JsNumber(Finite(-4.0)))
+  assert_normal("Math.ceil(-4.7)", KNum(JFloat(-4.0)))
 }
 
 pub fn math_round_test() -> Nil {
-  assert_normal("Math.round(4.5)", JsNumber(Finite(5.0)))
+  assert_normal("Math.round(4.5)", KNum(JFloat(5.0)))
 }
 
 pub fn math_round_down_test() -> Nil {
-  assert_normal("Math.round(4.4)", JsNumber(Finite(4.0)))
+  assert_normal("Math.round(4.4)", KNum(JFloat(4.0)))
 }
 
 pub fn math_round_negative_half_test() -> Nil {
-  assert_normal("Math.round(-0.5)", JsNumber(Finite(-0.0)))
+  assert_normal("Math.round(-0.5)", KNum(JFloat(-0.0)))
 }
 
 pub fn mul_infinity_by_neg_zero_test() -> Nil {
-  assert_normal("Infinity * -0", JsNumber(NaN))
+  assert_normal("Infinity * -0", KNum(JNan))
 }
 
 pub fn mul_neg_zero_by_neg_infinity_test() -> Nil {
-  assert_normal("(-0) * -Infinity", JsNumber(NaN))
+  assert_normal("(-0) * -Infinity", KNum(JNan))
 }
 
 pub fn math_trunc_positive_test() -> Nil {
-  assert_normal("Math.trunc(4.9)", JsNumber(Finite(4.0)))
+  assert_normal("Math.trunc(4.9)", KNum(JFloat(4.0)))
 }
 
 pub fn math_trunc_negative_test() -> Nil {
-  assert_normal("Math.trunc(-4.9)", JsNumber(Finite(-4.0)))
+  assert_normal("Math.trunc(-4.9)", KNum(JFloat(-4.0)))
 }
 
 pub fn math_sqrt_test() -> Nil {
-  assert_normal("Math.sqrt(9)", JsNumber(Finite(3.0)))
+  assert_normal("Math.sqrt(9)", KNum(JFloat(3.0)))
 }
 
 pub fn math_sqrt_negative_test() -> Nil {
-  assert_normal("Math.sqrt(-1)", JsNumber(NaN))
+  assert_normal("Math.sqrt(-1)", KNum(JNan))
 }
 
 pub fn math_max_test() -> Nil {
-  assert_normal("Math.max(1, 3, 2)", JsNumber(Finite(3.0)))
+  assert_normal("Math.max(1, 3, 2)", KNum(JFloat(3.0)))
 }
 
 pub fn math_min_test() -> Nil {
-  assert_normal("Math.min(1, 3, 2)", JsNumber(Finite(1.0)))
+  assert_normal("Math.min(1, 3, 2)", KNum(JFloat(1.0)))
 }
 
 pub fn math_max_no_args_test() -> Nil {
-  assert_normal("Math.max()", JsNumber(NegInfinity))
+  assert_normal("Math.max()", KNum(JNegInf))
 }
 
 pub fn math_min_no_args_test() -> Nil {
-  assert_normal("Math.min()", JsNumber(Infinity))
+  assert_normal("Math.min()", KNum(JPosInf))
 }
 
 pub fn math_pi_test() -> Nil {
-  assert_normal("Math.PI", JsNumber(Finite(3.141592653589793)))
+  assert_normal("Math.PI", KNum(JFloat(3.141592653589793)))
 }
 
 pub fn math_e_test() -> Nil {
-  assert_normal("Math.E", JsNumber(Finite(2.718281828459045)))
+  assert_normal("Math.E", KNum(JFloat(2.718281828459045)))
 }
 
 pub fn math_pi_computation_test() -> Nil {
-  assert_normal("Math.floor(Math.PI)", JsNumber(Finite(3.0)))
+  assert_normal("Math.floor(Math.PI)", KNum(JFloat(3.0)))
 }
 
 pub fn math_exp_overflow_test() -> Nil {
-  assert_normal("Math.exp(1000)", JsNumber(Infinity))
+  assert_normal("Math.exp(1000)", KNum(JPosInf))
 }
 
 pub fn math_pow_overflow_test() -> Nil {
-  assert_normal("Math.pow(1e300, 2)", JsNumber(Infinity))
+  assert_normal("Math.pow(1e300, 2)", KNum(JPosInf))
 }
 
 pub fn exp_operator_overflow_test() -> Nil {
-  assert_normal("1e300 ** 2", JsNumber(Infinity))
+  assert_normal("1e300 ** 2", KNum(JPosInf))
 }
 
 pub fn exp_operator_overflow_negative_odd_test() -> Nil {
-  assert_normal("(-1e300) ** 3", JsNumber(NegInfinity))
+  assert_normal("(-1e300) ** 3", KNum(JNegInf))
 }
 
 pub fn math_cosh_overflow_test() -> Nil {
-  assert_normal("Math.cosh(1000)", JsNumber(Infinity))
+  assert_normal("Math.cosh(1000)", KNum(JPosInf))
 }
 
 pub fn math_sinh_overflow_test() -> Nil {
-  assert_normal("Math.sinh(1000)", JsNumber(Infinity))
+  assert_normal("Math.sinh(1000)", KNum(JPosInf))
 }
 
 pub fn math_sinh_overflow_negative_test() -> Nil {
-  assert_normal("Math.sinh(-1000)", JsNumber(NegInfinity))
+  assert_normal("Math.sinh(-1000)", KNum(JNegInf))
 }
 
 pub fn math_expm1_overflow_test() -> Nil {
-  assert_normal("Math.expm1(1000)", JsNumber(Infinity))
+  assert_normal("Math.expm1(1000)", KNum(JPosInf))
 }
 
 pub fn math_fround_overflow_test() -> Nil {
-  assert_normal("Math.fround(1e300)", JsNumber(Infinity))
+  assert_normal("Math.fround(1e300)", KNum(JPosInf))
 }
 
 pub fn math_fround_overflow_negative_test() -> Nil {
-  assert_normal("Math.fround(-1e300)", JsNumber(NegInfinity))
+  assert_normal("Math.fround(-1e300)", KNum(JNegInf))
 }
 
 pub fn math_fround_finite_test() -> Nil {
-  assert_normal("Math.fround(5.5)", JsNumber(Finite(5.5)))
+  assert_normal("Math.fround(5.5)", KNum(JFloat(5.5)))
 }
 
 pub fn math_fround_rounds_to_float32_test() -> Nil {
-  assert_normal("Math.fround(1.1)", JsNumber(Finite(1.100000023841858)))
+  assert_normal("Math.fround(1.1)", KNum(JFloat(1.100000023841858)))
 }
 
 pub fn math_expm1_tiny_test() -> Nil {
-  assert_normal("Math.expm1(1e-16)", JsNumber(Finite(1.0e-16)))
+  assert_normal("Math.expm1(1e-16)", KNum(JFloat(1.0e-16)))
 }
 
 pub fn math_log1p_tiny_test() -> Nil {
-  assert_normal("Math.log1p(1e-16)", JsNumber(Finite(1.0e-16)))
+  assert_normal("Math.log1p(1e-16)", KNum(JFloat(1.0e-16)))
 }
 
 pub fn math_expm1_large_no_intermediate_overflow_test() -> Nil {
   assert_normal(
     "Math.expm1(708) > 3.0e307 && Math.expm1(708) < 3.1e307",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn math_log1p_large_no_intermediate_overflow_test() -> Nil {
-  assert_normal("Math.log1p(1e308) === Math.log(1e308)", JsBool(True))
+  assert_normal("Math.log1p(1e308) === Math.log(1e308)", KBool(True))
 }
 
 pub fn math_expm1_small_precision_test() -> Nil {
   assert_normal(
     "Math.abs(Math.expm1(1e-10) / 1e-10 - 1 - 5e-11) < 1e-13",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn math_log1p_small_precision_test() -> Nil {
   assert_normal(
     "Math.abs(Math.log1p(1e-10) / 1e-10 - 1 + 5e-11) < 1e-13",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn string_split_length_test() -> Nil {
-  assert_normal("'a,b,c'.split(',').length", JsNumber(Finite(3.0)))
+  assert_normal("'a,b,c'.split(',').length", KNum(JFloat(3.0)))
 }
 
 pub fn string_split_rejoin_test() -> Nil {
-  assert_normal("'a,b,c'.split(',').join('-')", JsString("a-b-c"))
+  assert_normal("'a,b,c'.split(',').join('-')", KStr("a-b-c"))
 }
 
 pub fn string_split_empty_sep_test() -> Nil {
-  assert_normal("'abc'.split('').length", JsNumber(Finite(3.0)))
+  assert_normal("'abc'.split('').length", KNum(JFloat(3.0)))
 }
 
 pub fn string_split_no_match_test() -> Nil {
-  assert_normal("'abc'.split('x').length", JsNumber(Finite(1.0)))
+  assert_normal("'abc'.split('x').length", KNum(JFloat(1.0)))
 }
 
 pub fn compound_dot_member_add_test() -> Nil {
-  assert_normal("var o = {x: 1}; o.x += 2; o.x", JsNumber(Finite(3.0)))
+  assert_normal("var o = {x: 1}; o.x += 2; o.x", KNum(JFloat(3.0)))
 }
 
 pub fn compound_dot_member_sub_test() -> Nil {
-  assert_normal("var o = {x: 10}; o.x -= 3; o.x", JsNumber(Finite(7.0)))
+  assert_normal("var o = {x: 10}; o.x -= 3; o.x", KNum(JFloat(7.0)))
 }
 
 pub fn compound_dot_member_mul_test() -> Nil {
-  assert_normal("var o = {x: 5}; o.x *= 4; o.x", JsNumber(Finite(20.0)))
+  assert_normal("var o = {x: 5}; o.x *= 4; o.x", KNum(JFloat(20.0)))
 }
 
 pub fn string_constructor_coerce_number_test() -> Nil {
-  assert_normal("String(42)", JsString("42"))
+  assert_normal("String(42)", KStr("42"))
 }
 
 pub fn string_constructor_coerce_bool_test() -> Nil {
-  assert_normal("String(true)", JsString("true"))
+  assert_normal("String(true)", KStr("true"))
 }
 
 pub fn string_constructor_no_args_test() -> Nil {
-  assert_normal("String()", JsString(""))
+  assert_normal("String()", KStr(""))
 }
 
 pub fn string_constructor_coerce_undefined_test() -> Nil {
-  assert_normal("String(undefined)", JsString("undefined"))
+  assert_normal("String(undefined)", KStr("undefined"))
 }
 
 pub fn number_constructor_coerce_string_test() -> Nil {
-  assert_normal("Number('42')", JsNumber(Finite(42.0)))
+  assert_normal("Number('42')", KNum(JFloat(42.0)))
 }
 
 pub fn number_constructor_coerce_bool_test() -> Nil {
-  assert_normal("Number(true)", JsNumber(Finite(1.0)))
+  assert_normal("Number(true)", KNum(JFloat(1.0)))
 }
 
 pub fn number_constructor_no_args_test() -> Nil {
-  assert_normal("Number()", JsNumber(Finite(0.0)))
+  assert_normal("Number()", KNum(JFloat(0.0)))
 }
 
 pub fn number_constructor_nan_test() -> Nil {
-  assert_normal("Number('abc')", JsNumber(NaN))
+  assert_normal("Number('abc')", KNum(JNan))
 }
 
 pub fn boolean_constructor_truthy_test() -> Nil {
-  assert_normal("Boolean(1)", JsBool(True))
+  assert_normal("Boolean(1)", KBool(True))
 }
 
 pub fn boolean_constructor_falsy_test() -> Nil {
-  assert_normal("Boolean(0)", JsBool(False))
+  assert_normal("Boolean(0)", KBool(False))
 }
 
 pub fn boolean_constructor_empty_string_test() -> Nil {
-  assert_normal("Boolean('')", JsBool(False))
+  assert_normal("Boolean('')", KBool(False))
 }
 
 pub fn boolean_constructor_no_args_test() -> Nil {
-  assert_normal("Boolean()", JsBool(False))
+  assert_normal("Boolean()", KBool(False))
 }
 
 pub fn boolean_constructor_object_truthy_test() -> Nil {
-  assert_normal("Boolean({})", JsBool(True))
+  assert_normal("Boolean({})", KBool(True))
 }
 
 pub fn parse_int_basic_test() -> Nil {
-  assert_normal("parseInt('42')", JsNumber(Finite(42.0)))
+  assert_normal("parseInt('42')", KNum(JFloat(42.0)))
 }
 
 pub fn parse_int_hex_test() -> Nil {
-  assert_normal("parseInt('0xff', 16)", JsNumber(Finite(255.0)))
+  assert_normal("parseInt('0xff', 16)", KNum(JFloat(255.0)))
 }
 
 pub fn parse_int_leading_chars_test() -> Nil {
-  assert_normal("parseInt('123abc')", JsNumber(Finite(123.0)))
+  assert_normal("parseInt('123abc')", KNum(JFloat(123.0)))
 }
 
 pub fn parse_int_nan_test() -> Nil {
-  assert_normal("parseInt('abc')", JsNumber(NaN))
+  assert_normal("parseInt('abc')", KNum(JNan))
 }
 
 pub fn parse_float_basic_test() -> Nil {
-  assert_normal("parseFloat('3.14')", JsNumber(Finite(3.14)))
+  assert_normal("parseFloat('3.14')", KNum(JFloat(3.14)))
 }
 
 pub fn parse_float_nan_test() -> Nil {
-  assert_normal("parseFloat('abc')", JsNumber(NaN))
+  assert_normal("parseFloat('abc')", KNum(JNan))
 }
 
 pub fn is_nan_true_test() -> Nil {
-  assert_normal("isNaN(NaN)", JsBool(True))
+  assert_normal("isNaN(NaN)", KBool(True))
 }
 
 pub fn is_nan_false_test() -> Nil {
-  assert_normal("isNaN(42)", JsBool(False))
+  assert_normal("isNaN(42)", KBool(False))
 }
 
 pub fn is_nan_string_coerce_test() -> Nil {
-  assert_normal("isNaN('abc')", JsBool(True))
+  assert_normal("isNaN('abc')", KBool(True))
 }
 
 pub fn is_finite_true_test() -> Nil {
-  assert_normal("isFinite(42)", JsBool(True))
+  assert_normal("isFinite(42)", KBool(True))
 }
 
 pub fn is_finite_infinity_test() -> Nil {
-  assert_normal("isFinite(Infinity)", JsBool(False))
+  assert_normal("isFinite(Infinity)", KBool(False))
 }
 
 pub fn is_finite_nan_test() -> Nil {
-  assert_normal("isFinite(NaN)", JsBool(False))
+  assert_normal("isFinite(NaN)", KBool(False))
 }
 
 pub fn number_is_nan_true_test() -> Nil {
-  assert_normal("Number.isNaN(NaN)", JsBool(True))
+  assert_normal("Number.isNaN(NaN)", KBool(True))
 }
 
 pub fn number_is_nan_string_no_coerce_test() -> Nil {
-  assert_normal("Number.isNaN('abc')", JsBool(False))
+  assert_normal("Number.isNaN('abc')", KBool(False))
 }
 
 pub fn number_is_nan_undefined_no_coerce_test() -> Nil {
-  assert_normal("Number.isNaN(undefined)", JsBool(False))
+  assert_normal("Number.isNaN(undefined)", KBool(False))
 }
 
 pub fn number_is_nan_number_false_test() -> Nil {
-  assert_normal("Number.isNaN(42)", JsBool(False))
+  assert_normal("Number.isNaN(42)", KBool(False))
 }
 
 pub fn number_is_finite_true_test() -> Nil {
-  assert_normal("Number.isFinite(42)", JsBool(True))
+  assert_normal("Number.isFinite(42)", KBool(True))
 }
 
 pub fn number_is_finite_infinity_test() -> Nil {
-  assert_normal("Number.isFinite(Infinity)", JsBool(False))
+  assert_normal("Number.isFinite(Infinity)", KBool(False))
 }
 
 pub fn number_is_finite_string_no_coerce_test() -> Nil {
-  assert_normal("Number.isFinite('42')", JsBool(False))
+  assert_normal("Number.isFinite('42')", KBool(False))
 }
 
 pub fn number_is_integer_true_test() -> Nil {
-  assert_normal("Number.isInteger(42)", JsBool(True))
+  assert_normal("Number.isInteger(42)", KBool(True))
 }
 
 pub fn number_is_integer_float_test() -> Nil {
-  assert_normal("Number.isInteger(42.5)", JsBool(False))
+  assert_normal("Number.isInteger(42.5)", KBool(False))
 }
 
 pub fn number_is_integer_zero_test() -> Nil {
-  assert_normal("Number.isInteger(0)", JsBool(True))
+  assert_normal("Number.isInteger(0)", KBool(True))
 }
 
 pub fn number_is_integer_string_no_coerce_test() -> Nil {
-  assert_normal("Number.isInteger('42')", JsBool(False))
+  assert_normal("Number.isInteger('42')", KBool(False))
 }
 
 pub fn number_is_integer_nan_test() -> Nil {
-  assert_normal("Number.isInteger(NaN)", JsBool(False))
+  assert_normal("Number.isInteger(NaN)", KBool(False))
 }
 
 pub fn number_is_integer_infinity_test() -> Nil {
-  assert_normal("Number.isInteger(Infinity)", JsBool(False))
+  assert_normal("Number.isInteger(Infinity)", KBool(False))
 }
 
 pub fn class_extends_basic_test() -> Nil {
@@ -5441,7 +5382,7 @@ pub fn class_extends_basic_test() -> Nil {
      class Dog extends Animal { constructor(name) { super(name); this.type = 'dog'; } }
      var d = new Dog('Rex');
      d.name",
-    JsString("Rex"),
+    KStr("Rex"),
   )
 }
 
@@ -5451,7 +5392,7 @@ pub fn class_extends_type_field_test() -> Nil {
      class Dog extends Animal { constructor(name) { super(name); this.type = 'dog'; } }
      var d = new Dog('Rex');
      d.type",
-    JsString("dog"),
+    KStr("dog"),
   )
 }
 
@@ -5466,7 +5407,7 @@ pub fn class_extends_method_inheritance_test() -> Nil {
      }
      var d = new Dog('Rex');
      d.speak()",
-    JsString("Rex makes a noise"),
+    KStr("Rex makes a noise"),
   )
 }
 
@@ -5482,7 +5423,7 @@ pub fn class_extends_method_override_test() -> Nil {
      }
      var d = new Dog('Rex');
      d.speak()",
-    JsString("Rex barks"),
+    KStr("Rex barks"),
   )
 }
 
@@ -5492,7 +5433,7 @@ pub fn class_extends_instanceof_child_test() -> Nil {
      class Dog extends Animal { constructor() { super(); } }
      var d = new Dog();
      d instanceof Dog",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -5502,7 +5443,7 @@ pub fn class_extends_instanceof_parent_test() -> Nil {
      class Dog extends Animal { constructor() { super(); } }
      var d = new Dog();
      d instanceof Animal",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -5512,7 +5453,7 @@ pub fn class_extends_super_with_args_test() -> Nil {
      class Child extends Base { constructor(x, y) { super(x, y); } }
      var c = new Child(3, 4);
      c.sum",
-    JsNumber(Finite(7.0)),
+    KNum(JFloat(7.0)),
   )
 }
 
@@ -5522,7 +5463,7 @@ pub fn class_extends_default_constructor_test() -> Nil {
      class Child extends Base {}
      var c = new Child();
      c.x",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -5535,7 +5476,7 @@ pub fn class_extends_static_method_test() -> Nil {
        constructor() { super(); }
      }
      Child.greet()",
-    JsString("hello"),
+    KStr("hello"),
   )
 }
 
@@ -5566,7 +5507,7 @@ pub fn class_extends_multi_level_test() -> Nil {
      class C extends B { constructor() { super(); this.c = 3; } }
      var obj = new C();
      obj.a + obj.b + obj.c",
-    JsNumber(Finite(6.0)),
+    KNum(JFloat(6.0)),
   )
 }
 
@@ -5584,7 +5525,7 @@ pub fn class_extends_multi_level_method_test() -> Nil {
      }
      var c = new C();
      c.foo()",
-    JsString("A"),
+    KStr("A"),
   )
 }
 
@@ -5594,7 +5535,7 @@ pub fn class_extends_expression_test() -> Nil {
      var Child = class extends Base { constructor() { super(); } };
      var c = new Child();
      c.x",
-    JsNumber(Finite(10.0)),
+    KNum(JFloat(10.0)),
   )
 }
 
@@ -5615,7 +5556,7 @@ pub fn class_extends_return_override_identity_test() -> Nil {
      class C extends B {}
      var p = {};
      new C(p) === p",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -5855,7 +5796,7 @@ pub fn class_extends_arrow_sees_post_super_this_test() -> Nil {
      }
      new C();
      result",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -5874,29 +5815,29 @@ pub fn class_extends_arrow_this_tdz_before_super_test() -> Nil {
 }
 
 pub fn promise_typeof_test() -> Nil {
-  assert_normal("typeof Promise", JsString("function"))
+  assert_normal("typeof Promise", KStr("function"))
 }
 
 pub fn promise_resolve_typeof_test() -> Nil {
-  assert_normal("typeof Promise.resolve", JsString("function"))
+  assert_normal("typeof Promise.resolve", KStr("function"))
 }
 
 pub fn promise_reject_typeof_test() -> Nil {
-  assert_normal("typeof Promise.reject", JsString("function"))
+  assert_normal("typeof Promise.reject", KStr("function"))
 }
 
 pub fn promise_resolve_basic_test() -> Nil {
-  assert_promise_resolves("Promise.resolve(42)", JsNumber(Finite(42.0)))
+  assert_promise_resolves("Promise.resolve(42)", KNum(JFloat(42.0)))
 }
 
 pub fn promise_reject_basic_test() -> Nil {
-  assert_promise_rejects("Promise.reject('err')", JsString("err"))
+  assert_promise_rejects("Promise.reject('err')", KStr("err"))
 }
 
 pub fn promise_resolve_then_test() -> Nil {
   assert_promise_resolves(
     "Promise.resolve(1).then(function(x) { return x + 1; })",
-    JsNumber(Finite(2.0)),
+    KNum(JFloat(2.0)),
   )
 }
 
@@ -5905,14 +5846,14 @@ pub fn promise_chaining_test() -> Nil {
     "Promise.resolve(1)
        .then(function(x) { return x + 1; })
        .then(function(x) { return x + 1; })",
-    JsNumber(Finite(3.0)),
+    KNum(JFloat(3.0)),
   )
 }
 
 pub fn promise_reject_catch_test() -> Nil {
   assert_promise_resolves(
     "Promise.reject('e').catch(function(e) { return e; })",
-    JsString("e"),
+    KStr("e"),
   )
 }
 
@@ -5921,14 +5862,14 @@ pub fn promise_then_throw_catch_test() -> Nil {
     "Promise.resolve(1)
        .then(function() { throw 'fail'; })
        .catch(function(e) { return e; })",
-    JsString("fail"),
+    KStr("fail"),
   )
 }
 
 pub fn promise_constructor_resolve_test() -> Nil {
   assert_promise_resolves(
     "new Promise(function(resolve) { resolve(99); })",
-    JsNumber(Finite(99.0)),
+    KNum(JFloat(99.0)),
   )
 }
 
@@ -5936,14 +5877,14 @@ pub fn promise_constructor_then_test() -> Nil {
   assert_promise_resolves(
     "new Promise(function(resolve) { resolve(99); })
        .then(function(x) { return x + 1; })",
-    JsNumber(Finite(100.0)),
+    KNum(JFloat(100.0)),
   )
 }
 
 pub fn promise_constructor_reject_test() -> Nil {
   assert_promise_rejects(
     "new Promise(function(_, reject) { reject('no'); })",
-    JsString("no"),
+    KStr("no"),
   )
 }
 
@@ -5951,14 +5892,14 @@ pub fn promise_constructor_reject_catch_test() -> Nil {
   assert_promise_resolves(
     "new Promise(function(_, reject) { reject('no'); })
        .catch(function(e) { return e; })",
-    JsString("no"),
+    KStr("no"),
   )
 }
 
 pub fn promise_constructor_throws_test() -> Nil {
   assert_promise_rejects(
     "new Promise(function() { throw 'boom'; })",
-    JsString("boom"),
+    KStr("boom"),
   )
 }
 
@@ -5966,7 +5907,7 @@ pub fn promise_constructor_throws_catch_test() -> Nil {
   assert_promise_resolves(
     "new Promise(function() { throw 'boom'; })
        .catch(function(e) { return e; })",
-    JsString("boom"),
+    KStr("boom"),
   )
 }
 
@@ -5975,14 +5916,14 @@ pub fn promise_multiple_resolve_test() -> Nil {
     "new Promise(function(resolve, reject) {
        resolve(1); resolve(2); reject(3);
      })",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
 pub fn promise_thenable_resolution_test() -> Nil {
   assert_promise_resolves(
     "Promise.resolve(Promise.resolve(42))",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -5995,7 +5936,7 @@ pub fn promise_reject_propagation_test() -> Nil {
     "Promise.reject('err')
        .then(function(x) { return 'wrong'; })
        .catch(function(e) { return e; })",
-    JsString("err"),
+    KStr("err"),
   )
 }
 
@@ -6006,7 +5947,7 @@ pub fn promise_then_species_subclass_test() -> Nil {
      var b = P.resolve(1).catch(e => e) instanceof P;
      var c = P.resolve(1).finally(() => {}) instanceof P;
      '' + a + b + c",
-    JsString("truetruetrue"),
+    KStr("truetruetrue"),
   )
 }
 
@@ -6016,7 +5957,7 @@ pub fn promise_then_species_null_test() -> Nil {
      p.constructor = { [Symbol.species]: null };
      var child = p.then(x => x);
      '' + (child instanceof Promise) + (child.constructor === Promise)",
-    JsString("truetrue"),
+    KStr("truetrue"),
   )
 }
 
@@ -6043,57 +5984,57 @@ pub fn promise_then_non_promise_receiver_test() -> Nil {
 pub fn promise_executor_resolve_thenable_then_throw_test() -> Nil {
   assert_promise_resolves(
     "new Promise(res => { res({ then(r) { r(42); } }); throw new Error('x'); })",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
 pub fn promise_executor_resolve_then_throw_test() -> Nil {
   assert_promise_resolves(
     "new Promise(res => { res(7); throw 'boom'; })",
-    JsNumber(Finite(7.0)),
+    KNum(JFloat(7.0)),
   )
 }
 
 pub fn promise_executor_reject_then_throw_test() -> Nil {
   assert_promise_rejects(
     "new Promise((res, rej) => { rej(1); throw 2; })",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
 pub fn promise_resolve_identity_test() -> Nil {
-  assert_promise_resolves("Promise.resolve('hello')", JsString("hello"))
+  assert_promise_resolves("Promise.resolve('hello')", KStr("hello"))
 }
 
 pub fn promise_then_identity_test() -> Nil {
-  assert_promise_resolves("Promise.resolve(42).then()", JsNumber(Finite(42.0)))
+  assert_promise_resolves("Promise.resolve(42).then()", KNum(JFloat(42.0)))
 }
 
 pub fn promise_finally_passthrough_test() -> Nil {
   assert_promise_resolves(
     "Promise.resolve(42).finally(function() {}).then(function(x) { return x })",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
 pub fn promise_finally_reject_passthrough_test() -> Nil {
   assert_promise_rejects(
     "Promise.reject('err').finally(function() {})",
-    JsString("err"),
+    KStr("err"),
   )
 }
 
 pub fn promise_finally_return_ignored_test() -> Nil {
   assert_promise_resolves(
     "Promise.resolve(42).finally(function() { return 99 })",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
 pub fn promise_finally_non_callable_test() -> Nil {
   assert_promise_resolves(
     "Promise.resolve(42).finally(undefined)",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -6112,7 +6053,7 @@ pub fn generator_next_value_test() -> Nil {
     "function* g() { yield 1; yield 2; }
      var it = g();
      it.next().done",
-    JsBool(False),
+    KBool(False),
   )
 }
 
@@ -6122,7 +6063,7 @@ pub fn generator_done_test() -> Nil {
      var it = g();
      it.next();
      it.next().done",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -6166,7 +6107,7 @@ pub fn generator_completed_next_test() -> Nil {
      it.next();
      it.next();
      it.next().value",
-    JsUndefined,
+    KUndef,
   )
 }
 
@@ -6186,7 +6127,7 @@ pub fn generator_return_method_done_test() -> Nil {
      var it = g();
      it.next();
      it.return(42).done",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -6197,7 +6138,7 @@ pub fn generator_return_then_next_test() -> Nil {
      it.next();
      it.return(42);
      it.next().done",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -6308,25 +6249,25 @@ pub fn generator_fibonacci_test() -> Nil {
 pub fn async_return_value_test() -> Nil {
   assert_promise_resolves(
     "async function f() { return 42; } f()",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
 pub fn async_return_undefined_test() -> Nil {
-  assert_promise_resolves("async function f() {} f()", JsUndefined)
+  assert_promise_resolves("async function f() {} f()", KUndef)
 }
 
 pub fn async_await_resolved_promise_test() -> Nil {
   assert_promise_resolves(
     "async function f() { return await Promise.resolve(10); } f()",
-    JsNumber(Finite(10.0)),
+    KNum(JFloat(10.0)),
   )
 }
 
 pub fn async_await_plain_value_test() -> Nil {
   assert_promise_resolves(
     "async function f() { return await 5; } f()",
-    JsNumber(Finite(5.0)),
+    KNum(JFloat(5.0)),
   )
 }
 
@@ -6338,7 +6279,7 @@ pub fn async_multiple_awaits_test() -> Nil {
        return a + b;
      }
      f()",
-    JsNumber(Finite(3.0)),
+    KNum(JFloat(3.0)),
   )
 }
 
@@ -6348,21 +6289,21 @@ pub fn async_await_chain_test() -> Nil {
        return await Promise.resolve(3) + await Promise.resolve(4);
      }
      f()",
-    JsNumber(Finite(7.0)),
+    KNum(JFloat(7.0)),
   )
 }
 
 pub fn async_throw_rejects_test() -> Nil {
   assert_promise_rejects(
     "async function f() { throw 'error'; } f()",
-    JsString("error"),
+    KStr("error"),
   )
 }
 
 pub fn async_await_rejected_test() -> Nil {
   assert_promise_rejects(
     "async function f() { return await Promise.reject('fail'); } f()",
-    JsString("fail"),
+    KStr("fail"),
   )
 }
 
@@ -6376,26 +6317,26 @@ pub fn async_try_catch_test() -> Nil {
        }
      }
      f()",
-    JsString("caught: oops"),
+    KStr("caught: oops"),
   )
 }
 
 pub fn async_expression_test() -> Nil {
   assert_promise_resolves(
     "var f = async function() { return 99; }; f()",
-    JsNumber(Finite(99.0)),
+    KNum(JFloat(99.0)),
   )
 }
 
 pub fn async_arrow_test() -> Nil {
-  assert_promise_resolves("var f = async () => 77; f()", JsNumber(Finite(77.0)))
+  assert_promise_resolves("var f = async () => 77; f()", KNum(JFloat(77.0)))
 }
 
 pub fn async_arrow_await_test() -> Nil {
   assert_promise_resolves(
     "var f = async (x) => await Promise.resolve(x * 2);
      f(21)",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -6408,7 +6349,7 @@ pub fn async_sequential_test() -> Nil {
        return x + y + z;
      }
      f()",
-    JsNumber(Finite(6.0)),
+    KNum(JFloat(6.0)),
   )
 }
 
@@ -6421,7 +6362,7 @@ pub fn async_nested_call_test() -> Nil {
        return b;
      }
      main()",
-    JsNumber(Finite(20.0)),
+    KNum(JFloat(20.0)),
   )
 }
 
@@ -6437,7 +6378,7 @@ pub fn async_try_finally_test() -> Nil {
        return x;
      }
      f()",
-    JsNumber(Finite(11.0)),
+    KNum(JFloat(11.0)),
   )
 }
 
@@ -6447,7 +6388,7 @@ pub fn async_promise_chain_test() -> Nil {
        return await Promise.resolve(2).then(function(x) { return x * 3; });
      }
      f()",
-    JsNumber(Finite(6.0)),
+    KNum(JFloat(6.0)),
   )
 }
 
@@ -6462,7 +6403,7 @@ pub fn promise_ordering_sync_before_microtask_test() -> Nil {
        return log;
      }
      test()",
-    JsString("123"),
+    KStr("123"),
   )
 }
 
@@ -6482,7 +6423,7 @@ pub fn promise_ordering_then_chain_test() -> Nil {
        return log;
      }
      test()",
-    JsString("a|b|c"),
+    KStr("a|b|c"),
   )
 }
 
@@ -6498,7 +6439,7 @@ pub fn promise_ordering_multiple_resolves_test() -> Nil {
        return log;
      }
      test()",
-    JsString("123"),
+    KStr("123"),
   )
 }
 
@@ -6516,7 +6457,7 @@ pub fn promise_ordering_nested_then_test() -> Nil {
        return log;
      }
      test()",
-    JsString("123"),
+    KStr("123"),
   )
 }
 
@@ -6545,7 +6486,7 @@ pub fn promise_ordering_await_interleave_test() -> Nil {
        return log;
      }
      test()",
-    JsString("a1b1a2b2a3b3"),
+    KStr("a1b1a2b2a3b3"),
   )
 }
 
@@ -6560,7 +6501,7 @@ pub fn promise_ordering_resolve_vs_then_test() -> Nil {
        return log;
      }
      test()",
-    JsString("beforeafterx"),
+    KStr("beforeafterx"),
   )
 }
 
@@ -6575,7 +6516,7 @@ pub fn promise_ordering_reject_catch_test() -> Nil {
        return log;
      }
      test()",
-    JsString("123"),
+    KStr("123"),
   )
 }
 
@@ -6591,14 +6532,14 @@ pub fn promise_ordering_finally_timing_test() -> Nil {
        return log + ':' + result;
      }
      test()",
-    JsString("1324:val"),
+    KStr("1324:val"),
   )
 }
 
 fn run_repl_input(
   source: String,
   st: Agent,
-) -> Result(#(Result(JsValueKind, JsValueKind), Agent), String) {
+) -> Result(#(Result(JsValKind, JsValKind), Agent), String) {
   case parser.parse_script(source) {
     Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
     Ok(#(body, sb)) ->
@@ -6609,16 +6550,14 @@ fn run_repl_input(
   }
 }
 
-fn run_repl_lines(
-  lines: List(String),
-) -> Result(#(JsValueKind, Agent), String) {
+fn run_repl_lines(lines: List(String)) -> Result(#(JsValKind, Agent), String) {
   run_repl_lines_loop(lines, agent())
 }
 
 fn run_repl_lines_loop(
   lines: List(String),
   st: Agent,
-) -> Result(#(JsValueKind, Agent), String) {
+) -> Result(#(JsValKind, Agent), String) {
   case lines {
     [] -> Error("no lines to evaluate")
     [line] -> eval_repl_line(line, st)
@@ -6632,7 +6571,7 @@ fn run_repl_lines_loop(
 fn eval_repl_line(
   source: String,
   st: Agent,
-) -> Result(#(JsValueKind, Agent), String) {
+) -> Result(#(JsValKind, Agent), String) {
   use #(outcome, st) <- result.try(run_repl_input(source, st))
   case outcome {
     Ok(val) -> Ok(#(val, st))
@@ -6664,7 +6603,7 @@ fn run_repl_lines_expect_throw_loop(
   }
 }
 
-fn assert_repl(lines: List(String), expected: JsValueKind) -> Nil {
+fn assert_repl(lines: List(String), expected: JsValKind) -> Nil {
   case run_repl_lines(lines) {
     Ok(#(val, _h)) -> {
       assert val == expected
@@ -6677,35 +6616,35 @@ fn assert_repl(lines: List(String), expected: JsValueKind) -> Nil {
 }
 
 pub fn repl_let_persistence_test() -> Nil {
-  assert_repl(["let x = 10", "x"], JsNumber(Finite(10.0)))
+  assert_repl(["let x = 10", "x"], KNum(JFloat(10.0)))
 }
 
 pub fn repl_const_persistence_test() -> Nil {
-  assert_repl(["const x = 42", "x"], JsNumber(Finite(42.0)))
+  assert_repl(["const x = 42", "x"], KNum(JFloat(42.0)))
 }
 
 pub fn repl_var_persistence_test() -> Nil {
-  assert_repl(["var x = 5", "x"], JsNumber(Finite(5.0)))
+  assert_repl(["var x = 5", "x"], KNum(JFloat(5.0)))
 }
 
 pub fn repl_function_persistence_test() -> Nil {
-  assert_repl(["function f() { return 1; }", "f()"], JsNumber(Finite(1.0)))
+  assert_repl(["function f() { return 1; }", "f()"], KNum(JFloat(1.0)))
 }
 
 pub fn repl_delete_lexical_global_test() -> Nil {
-  assert_repl(["let dq = 1", "[delete dq, dq].join()"], JsString("false,1"))
+  assert_repl(["let dq = 1", "[delete dq, dq].join()"], KStr("false,1"))
 }
 
 pub fn repl_delete_implicit_global_test() -> Nil {
-  assert_repl(["dg = 1", "delete dg", "typeof dg"], JsString("undefined"))
+  assert_repl(["dg = 1", "delete dg", "typeof dg"], KStr("undefined"))
 }
 
 pub fn repl_redeclaration_let_test() -> Nil {
-  assert_repl(["let x = 1", "let x = 2", "x"], JsNumber(Finite(2.0)))
+  assert_repl(["let x = 1", "let x = 2", "x"], KNum(JFloat(2.0)))
 }
 
 pub fn repl_redeclaration_const_test() -> Nil {
-  assert_repl(["const x = 1", "const x = 2", "x"], JsNumber(Finite(2.0)))
+  assert_repl(["const x = 1", "const x = 2", "x"], KNum(JFloat(2.0)))
 }
 
 pub fn repl_const_assignment_throws_test() -> Result(Nil, String) {
@@ -6717,95 +6656,92 @@ pub fn repl_const_assignment_same_line_throws_test() -> Result(Nil, String) {
 }
 
 pub fn repl_let_reassignment_test() -> Nil {
-  assert_repl(["let y = 1", "y = 2", "y"], JsNumber(Finite(2.0)))
+  assert_repl(["let y = 1", "y = 2", "y"], KNum(JFloat(2.0)))
 }
 
 pub fn globalthis_typeof_test() -> Nil {
-  assert_normal("typeof globalThis", JsString("object"))
+  assert_normal("typeof globalThis", KStr("object"))
 }
 
 pub fn globalthis_has_builtins_test() -> Nil {
-  assert_normal("globalThis.Object === Object", JsBool(True))
+  assert_normal("globalThis.Object === Object", KBool(True))
 }
 
 pub fn typeof_symbol_test() -> Nil {
-  assert_normal("typeof Symbol.toStringTag", JsString("symbol"))
+  assert_normal("typeof Symbol.toStringTag", KStr("symbol"))
 }
 
 pub fn symbol_equality_test() -> Nil {
-  assert_normal("Symbol('x') === Symbol('x')", JsBool(False))
+  assert_normal("Symbol('x') === Symbol('x')", KBool(False))
 }
 
 pub fn symbol_equality_same_test() -> Nil {
-  assert_normal("var s = Symbol(); s === s", JsBool(True))
+  assert_normal("var s = Symbol(); s === s", KBool(True))
 }
 
 pub fn symbol_property_test() -> Nil {
   assert_normal(
     "var s = Symbol(); var o = {}; o[s] = 42; o[s]",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
 pub fn symbol_to_string_tag_math_test() -> Nil {
-  assert_normal("Math[Symbol.toStringTag]", JsString("Math"))
+  assert_normal("Math[Symbol.toStringTag]", KStr("Math"))
 }
 
 pub fn symbol_to_string_tag_custom_test() -> Nil {
   assert_normal(
     "var o = {}; o[Symbol.toStringTag] = 'Foo'; typeof o",
-    JsString("object"),
+    KStr("object"),
   )
 }
 
 pub fn symbol_well_known_iterator_test() -> Nil {
-  assert_normal("typeof Symbol.iterator", JsString("symbol"))
+  assert_normal("typeof Symbol.iterator", KStr("symbol"))
 }
 
 pub fn symbol_constructor_no_args_test() -> Nil {
-  assert_normal("typeof Symbol()", JsString("symbol"))
+  assert_normal("typeof Symbol()", KStr("symbol"))
 }
 
 pub fn object_to_string_plain_test() -> Nil {
-  assert_normal("var o = {}; o.toString()", JsString("[object Object]"))
+  assert_normal("var o = {}; o.toString()", KStr("[object Object]"))
 }
 
 pub fn object_to_string_array_test() -> Nil {
   assert_normal(
     "Object.prototype.toString.call([1,2,3])",
-    JsString("[object Array]"),
+    KStr("[object Array]"),
   )
 }
 
 pub fn object_to_string_function_test() -> Nil {
   assert_normal(
     "Object.prototype.toString.call(function(){})",
-    JsString("[object Function]"),
+    KStr("[object Function]"),
   )
 }
 
 pub fn object_to_string_null_test() -> Nil {
-  assert_normal(
-    "Object.prototype.toString.call(null)",
-    JsString("[object Null]"),
-  )
+  assert_normal("Object.prototype.toString.call(null)", KStr("[object Null]"))
 }
 
 pub fn object_to_string_undefined_test() -> Nil {
   assert_normal(
     "Object.prototype.toString.call(undefined)",
-    JsString("[object Undefined]"),
+    KStr("[object Undefined]"),
   )
 }
 
 pub fn object_value_of_test() -> Nil {
-  assert_normal("var o = {}; o.valueOf() === o", JsBool(True))
+  assert_normal("var o = {}; o.valueOf() === o", KBool(True))
 }
 
 pub fn to_primitive_custom_to_string_test() -> Nil {
   assert_normal(
     "var o = { toString: function() { return 'hello'; } }; '' + o",
-    JsString("hello"),
+    KStr("hello"),
   )
 }
 
@@ -6819,7 +6755,7 @@ pub fn to_primitive_custom_value_of_test() -> Nil {
 pub fn to_primitive_string_function_test() -> Nil {
   assert_normal(
     "var o = { toString: function() { return 'custom'; } }; String(o)",
-    JsString("custom"),
+    KStr("custom"),
   )
 }
 
@@ -6828,7 +6764,7 @@ pub fn to_primitive_add_both_objects_test() -> Nil {
     "var a = { valueOf: function() { return 1; } };
      var b = { valueOf: function() { return 2; } };
      a + b",
-    JsNumber(Finite(3.0)),
+    KNum(JFloat(3.0)),
   )
 }
 
@@ -6836,32 +6772,32 @@ pub fn to_primitive_add_string_concat_test() -> Nil {
   assert_normal(
     "var o = { toString: function() { return 'world'; } };
      'hello ' + o",
-    JsString("hello world"),
+    KStr("hello world"),
   )
 }
 
 pub fn to_primitive_default_to_string_test() -> Nil {
-  assert_normal("'' + {}", JsString("[object Object]"))
+  assert_normal("'' + {}", KStr("[object Object]"))
 }
 
 pub fn object_to_string_tag_test() -> Nil {
   assert_normal(
     "var o = {}; o[Symbol.toStringTag] = 'MyTag'; Object.prototype.toString.call(o)",
-    JsString("[object MyTag]"),
+    KStr("[object MyTag]"),
   )
 }
 
 pub fn arguments_is_not_array_test() -> Nil {
   assert_normal(
     "function f() { return Array.isArray(arguments); } f(1, 2)",
-    JsBool(False),
+    KBool(False),
   )
 }
 
 pub fn arguments_proto_is_object_proto_test() -> Nil {
   assert_normal(
     "function f() { return Object.getPrototypeOf(arguments) === Object.prototype; } f()",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -6882,7 +6818,7 @@ pub fn arguments_unmapped_param_write_no_alias_test() -> Nil {
 pub fn arguments_spread_test() -> Nil {
   assert_normal(
     "function f() { return [...arguments].join(','); } f(1, 2, 3)",
-    JsString("1,2,3"),
+    KStr("1,2,3"),
   )
 }
 
@@ -6908,31 +6844,28 @@ pub fn arguments_arrow_ignores_own_args_test() -> Nil {
 }
 
 pub fn arguments_typeof_test() -> Nil {
-  assert_normal(
-    "function f() { return typeof arguments; } f()",
-    JsString("object"),
-  )
+  assert_normal("function f() { return typeof arguments; } f()", KStr("object"))
 }
 
 pub fn arguments_in_operator_test() -> Nil {
-  assert_normal("function f() { return 0 in arguments; } f('a')", JsBool(True))
+  assert_normal("function f() { return 0 in arguments; } f('a')", KBool(True))
 }
 
 pub fn arguments_in_operator_missing_test() -> Nil {
-  assert_normal("function f() { return 5 in arguments; } f('a')", JsBool(False))
+  assert_normal("function f() { return 5 in arguments; } f('a')", KBool(False))
 }
 
 pub fn arguments_length_in_test() -> Nil {
   assert_normal(
     "function f() { return 'length' in arguments; } f()",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn arguments_delete_index_test() -> Nil {
   assert_normal(
     "function f() { delete arguments[1]; return arguments[1]; } f(1, 2, 3)",
-    JsUndefined,
+    KUndef,
   )
 }
 
@@ -7047,7 +6980,7 @@ pub fn strict_reference_error_message_test() -> Nil {
   assert_normal(
     "function f() { 'use strict'; try { undeclared = 1; } catch (e) { return e.message; } }
      f()",
-    JsString("undeclared is not defined"),
+    KStr("undeclared is not defined"),
   )
 }
 
@@ -7055,13 +6988,13 @@ pub fn strict_reference_error_type_test() -> Nil {
   assert_normal(
     "function f() { 'use strict'; try { undeclared = 1; } catch (e) { return e instanceof ReferenceError; } }
      f()",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 fn run_module(
   source: String,
-) -> Result(#(Result(JsValueKind, JsValueKind), Agent), String) {
+) -> Result(#(Result(JsValKind, JsValKind), Agent), String) {
   let specifier = "<test>"
 
   case
@@ -7074,18 +7007,18 @@ fn run_module(
   {
     Error(err) -> Error("module error: " <> string.inspect(err))
     Ok(bundle) ->
-      case module.evaluate_bundle(bundle, agent(), rt_async.drain) {
-        #(st, Ok(module.EvaluatedBundle(value: val, ..))) ->
-          Ok(#(Ok(engine.classify(val)), st))
-        #(st, Error(module.EvaluationError(value: val))) ->
-          Ok(#(Error(engine.classify(val)), st))
-        #(st, Error(err)) ->
-          Error("module error: " <> module.error_message(err, st))
+      case module.evaluate_bundle(agent(), bundle, rt_async.drain) {
+        #(Ok(module.EvaluatedBundle(value: val, ..)), st) ->
+          Ok(#(Ok(rt_helpers.classify(val)), st))
+        #(Error(module.EvaluationError(value: val)), st) ->
+          Ok(#(Error(rt_helpers.classify(val)), st))
+        #(Error(err), st) ->
+          Error("module error: " <> module.error_message(st, err))
       }
   }
 }
 
-fn assert_module_normal(source: String, expected: JsValueKind) -> Nil {
+fn assert_module_normal(source: String, expected: JsValKind) -> Nil {
   case run_module(source) {
     Ok(#(Ok(value), _)) -> {
       let assert True = value == expected
@@ -7100,28 +7033,28 @@ fn assert_module_normal(source: String, expected: JsValueKind) -> Nil {
 }
 
 pub fn module_basic_strict_mode_test() -> Nil {
-  assert_module_normal("typeof this", JsString("undefined"))
+  assert_module_normal("typeof this", KStr("undefined"))
 }
 
 pub fn module_variable_declaration_test() -> Nil {
-  assert_module_normal("let x = 42; x", JsNumber(Finite(42.0)))
+  assert_module_normal("let x = 42; x", KNum(JFloat(42.0)))
 }
 
 pub fn module_function_declaration_test() -> Nil {
   assert_module_normal(
     "function add(a, b) { return a + b; } add(1, 2)",
-    JsNumber(Finite(3.0)),
+    KNum(JFloat(3.0)),
   )
 }
 
 pub fn module_export_named_declaration_test() -> Nil {
-  assert_module_normal("export let x = 42; x", JsNumber(Finite(42.0)))
+  assert_module_normal("export let x = 42; x", KNum(JFloat(42.0)))
 }
 
 pub fn module_export_function_test() -> Nil {
   assert_module_normal(
     "export function greet() { return 'hello'; } greet()",
-    JsString("hello"),
+    KStr("hello"),
   )
 }
 
@@ -7204,13 +7137,13 @@ pub fn module_repl_harness_globals_test() -> Nil {
       fn(_resolved) { Error(load_error.LoadForbidden) },
     )
 
-  case module.evaluate_bundle(bundle, st, rt_async.drain) {
-    #(_st, Ok(module.EvaluatedBundle(value: val, ..))) -> {
-      let assert True = engine.classify(val) == JsString("hello from harness")
+  case module.evaluate_bundle(st, bundle, rt_async.drain) {
+    #(Ok(module.EvaluatedBundle(value: val, ..)), _st) -> {
+      let assert True = rt_helpers.classify(val) == KStr("hello from harness")
       Nil
     }
-    #(st, Error(err)) ->
-      panic as { "module failed: " <> module.error_message(err, st) }
+    #(Error(err), st) ->
+      panic as { "module failed: " <> module.error_message(st, err) }
   }
 }
 
@@ -7218,7 +7151,7 @@ fn run_export(
   st: Agent,
   callee: JsVal,
   args: List(JsVal),
-) -> #(Result(JsValueKind, JsValueKind), Agent) {
+) -> #(Result(JsValKind, JsValKind), Agent) {
   let #(completion, st) = rt_call.t_try_call(st, callee, mk_undefined(), args)
   let st = safepoint.end_turn(st, [completion_value(completion)])
   #(classify_outcome(completion), st)
@@ -7241,34 +7174,34 @@ pub fn run_export_namespace_call_test() -> Nil {
       fn(_d, _p) { Error(load_error.ResolveForbidden) },
       fn(_resolved) { Error(load_error.LoadForbidden) },
     )
-  let assert #(st, Ok(module.EvaluatedBundle(namespace: ns_h, ..))) =
-    module.evaluate_bundle(bundle, agent(), rt_async.drain)
+  let assert #(Ok(module.EvaluatedBundle(namespace: ns_h, ..)), st) =
+    module.evaluate_bundle(agent(), bundle, rt_async.drain)
   let namespace = mk_object(ns_h)
 
   let assert Some(receive) = module.read_export(st, namespace, "receive")
 
   let assert #(Ok(v1), st) = run_export(st, receive, [mk_int(5)])
-  let assert True = v1 == JsNumber(Finite(5.0))
+  let assert True = v1 == KNum(JFloat(5.0))
 
   let assert #(Ok(v2), st) = run_export(st, receive, [mk_int(3)])
-  let assert True = v2 == JsNumber(Finite(8.0))
+  let assert True = v2 == KNum(JFloat(8.0))
 
   let assert Some(get_drained) = module.read_export(st, namespace, "getDrained")
   let assert #(Ok(v3), _) = run_export(st, get_drained, [])
-  let assert True = v3 == JsNumber(Finite(8.0))
+  let assert True = v3 == KNum(JFloat(8.0))
   Nil
 }
 
 pub fn eval_basic_test() -> Nil {
-  assert_normal("eval('1+1')", JsNumber(Finite(2.0)))
+  assert_normal("eval('1+1')", KNum(JFloat(2.0)))
 }
 
 pub fn eval_global_write_test() -> Nil {
-  assert_normal("eval('var x=5'); x", JsNumber(Finite(5.0)))
+  assert_normal("eval('var x=5'); x", KNum(JFloat(5.0)))
 }
 
 pub fn eval_nonstring_passthrough_test() -> Nil {
-  assert_normal("eval(42)", JsNumber(Finite(42.0)))
+  assert_normal("eval(42)", KNum(JFloat(42.0)))
 }
 
 pub fn eval_syntax_error_test() -> Nil {
@@ -7276,90 +7209,87 @@ pub fn eval_syntax_error_test() -> Nil {
 }
 
 pub fn function_constructor_basic_test() -> Nil {
-  assert_normal(
-    "new Function('a','b','return a+b')(2,3)",
-    JsNumber(Finite(5.0)),
-  )
+  assert_normal("new Function('a','b','return a+b')(2,3)", KNum(JFloat(5.0)))
 }
 
 pub fn function_constructor_no_args_test() -> Nil {
-  assert_normal("new Function('return 42')()", JsNumber(Finite(42.0)))
+  assert_normal("new Function('return 42')()", KNum(JFloat(42.0)))
 }
 
 pub fn direct_eval_read_local_test() -> Nil {
   assert_normal(
     "function f() { let x = 5; return eval('x'); } f()",
-    JsNumber(Finite(5.0)),
+    KNum(JFloat(5.0)),
   )
 }
 
 pub fn direct_eval_write_local_test() -> Nil {
   assert_normal(
     "function f() { let x = 5; eval('x = 10'); return x; } f()",
-    JsNumber(Finite(10.0)),
+    KNum(JFloat(10.0)),
   )
 }
 
 pub fn direct_eval_shadowed_test() -> Nil {
   assert_normal(
     "function f() { let x=5; let eval=(s)=>99; return eval('x'); } f()",
-    JsNumber(Finite(99.0)),
+    KNum(JFloat(99.0)),
   )
 }
 
 pub fn direct_eval_this_test() -> Nil {
   assert_normal(
     "const o = {x:1, f(){ return eval('this.x'); }}; o.f()",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
 pub fn direct_eval_this_and_locals_test() -> Nil {
   assert_normal(
     "function f() { let x = 42; return eval('this; x'); } f.call({})",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
 pub fn direct_eval_this_identity_test() -> Nil {
   assert_normal(
     "function f() { return eval('this') === this; } f.call({})",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn direct_eval_nested_closure_read_test() -> Nil {
   assert_normal(
     "function outer(){let a=10;return(function(){return eval('a');})();} outer()",
-    JsNumber(Finite(10.0)),
+    KNum(JFloat(10.0)),
   )
 }
 
 pub fn direct_eval_nested_closure_write_test() -> Nil {
   assert_normal(
     "function outer(){let a=5;(function(){eval('a=20');})();return a;} outer()",
-    JsNumber(Finite(20.0)),
+    KNum(JFloat(20.0)),
   )
 }
 
 pub fn direct_eval_three_levels_deep_test() -> Nil {
   assert_normal(
     "function a(){let x=1;function b(){function c(){return eval('x');}return c();}return b();} a()",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
 pub fn direct_eval_multiple_outer_vars_test() -> Nil {
   assert_normal(
     "function f(){let a=1,b=2,c=3;return(function(){return eval('a+b+c');})();} f()",
-    JsNumber(Finite(6.0)),
+    KNum(JFloat(6.0)),
   )
 }
 
 pub fn direct_eval_var_injection_test() -> Nil {
   assert_normal(
     "function f(){eval('var y=1');return y;} f()",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
@@ -7374,7 +7304,7 @@ pub fn direct_eval_var_injection_strict_eval_test() -> Nil {
 pub fn direct_eval_var_persistence_test() -> Nil {
   assert_normal(
     "function f(){eval('var y=1');eval('y++');return y;} f()",
-    JsNumber(Finite(2.0)),
+    KNum(JFloat(2.0)),
   )
 }
 
@@ -7387,74 +7317,71 @@ pub fn direct_eval_var_not_leaked_to_callee_test() -> Nil {
 pub fn direct_eval_var_not_leaked_to_global_test() -> Nil {
   assert_normal(
     "function f(){eval('var y=1');} f(); typeof y",
-    JsString("undefined"),
+    KStr("undefined"),
   )
 }
 
 pub fn direct_eval_var_write_then_read_test() -> Nil {
   assert_normal(
     "function f(){eval('var y=1');y=y+5;return y;} f()",
-    JsNumber(Finite(6.0)),
+    KNum(JFloat(6.0)),
   )
 }
 
 pub fn direct_eval_var_survives_await_test() -> Nil {
   assert_promise_resolves(
     "async function f(){eval('var x=1');await 0;return x;} f()",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
 pub fn direct_eval_var_typeof_test() -> Nil {
   assert_normal(
     "function f(){eval('var y=1');return typeof y;} f()",
-    JsString("number"),
+    KStr("number"),
   )
 }
 
 pub fn direct_eval_var_survives_throw_test() -> Nil {
   assert_normal(
     "function f(){try{eval('var y=1;throw 0');}catch(e){}return y;} f()",
-    JsNumber(Finite(1.0)),
+    KNum(JFloat(1.0)),
   )
 }
 
 pub fn dom_exception_exists_test() -> Nil {
-  assert_normal("typeof DOMException", JsString("function"))
+  assert_normal("typeof DOMException", KStr("function"))
 }
 
 pub fn dom_exception_default_name_test() -> Nil {
-  assert_normal("new DOMException().name", JsString("Error"))
-  assert_normal("new DOMException().message", JsString(""))
-  assert_normal("new DOMException().code", JsNumber(Finite(0.0)))
+  assert_normal("new DOMException().name", KStr("Error"))
+  assert_normal("new DOMException().message", KStr(""))
+  assert_normal("new DOMException().code", KNum(JFloat(0.0)))
 }
 
 pub fn dom_exception_construct_test() -> Nil {
   assert_normal(
     "var e = new DOMException('m', 'SyntaxError');
      e.name === 'SyntaxError' && e.message === 'm' && e.code === 12",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn dom_exception_data_clone_code_test() -> Nil {
   assert_normal(
     "new DOMException('', 'DataCloneError').code",
-    JsNumber(Finite(25.0)),
+    KNum(JFloat(25.0)),
   )
 }
 
 pub fn dom_exception_unknown_name_code_test() -> Nil {
-  assert_normal(
-    "new DOMException('', 'NoSuchError').code",
-    JsNumber(Finite(0.0)),
-  )
+  assert_normal("new DOMException('', 'NoSuchError').code", KNum(JFloat(0.0)))
 }
 
 pub fn dom_exception_proto_chain_test() -> Nil {
   assert_normal(
     "Object.getPrototypeOf(DOMException.prototype) === Error.prototype",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -7463,21 +7390,21 @@ pub fn dom_exception_instanceof_error_test() -> Nil {
     "var e = new DOMException('m', 'AbortError');
      e instanceof DOMException && e instanceof Error
        && !(e instanceof TypeError)",
-    JsBool(True),
+    KBool(True),
   )
 }
 
 pub fn dom_exception_to_string_test() -> Nil {
   assert_normal(
     "new DOMException('boom', 'DataCloneError').toString()",
-    JsString("DataCloneError: boom"),
+    KStr("DataCloneError: boom"),
   )
 }
 
 pub fn dom_exception_to_string_tag_test() -> Nil {
   assert_normal(
     "Object.prototype.toString.call(new DOMException())",
-    JsString("[object DOMException]"),
+    KStr("[object DOMException]"),
   )
 }
 
@@ -7498,7 +7425,7 @@ pub fn default_derived_ctor_does_not_iterate_test() -> Nil {
     try { new C(3, 4); } catch (e) { explicitThrew = true; }
     '' + b.sum + ':' + hitsAfterDefault + ':' + explicitThrew;
     ",
-    JsString("3:0:true"),
+    KStr("3:0:true"),
   )
 }
 
@@ -7519,7 +7446,7 @@ pub fn super_member_destructuring_targets_test() -> Nil {
     new B().m();
     log.join('|');
     ",
-    JsString("x=1|x=2|x=3,4|x=5|x=k|body"),
+    KStr("x=1|x=2|x=3,4|x=5|x=k|body"),
   )
 }
 
@@ -7530,7 +7457,7 @@ pub fn template_quasi_combining_mark_after_substitution_test() -> Nil {
     function tag(s) { return '' + s.raw[1].length + s[1].length; }
     tag`a${0}\u{0301}e`;
     ",
-    JsString("22"),
+    KStr("22"),
   )
 }
 
@@ -7542,7 +7469,7 @@ pub fn direct_eval_inside_with_reads_holder_test() -> Nil {
     with (o) { out = eval('x + 1'); }
     out;
     ",
-    JsNumber(Finite(42.0)),
+    KNum(JFloat(42.0)),
   )
 }
 
@@ -7556,7 +7483,7 @@ pub fn direct_eval_inside_with_in_function_test() -> Nil {
     }
     f();
     ",
-    JsNumber(Finite(12.0)),
+    KNum(JFloat(12.0)),
   )
 }
 
@@ -7567,7 +7494,7 @@ pub fn direct_eval_at_top_level_vars_go_global_test() -> Nil {
     var ok = (gg === 9) && (delete gg === true) && (typeof gg === 'undefined');
     ok;
     ",
-    JsBool(True),
+    KBool(True),
   )
 }
 
@@ -7578,8 +7505,8 @@ pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
 
   let assert Ok(first) =
     module.compile_bundle(spec, "export const x = 1;", no_resolve, no_load)
-  let assert #(st, Ok(module.EvaluatedBundle(namespace: ns, ..))) =
-    module.evaluate_bundle(first, agent(), rt_async.drain)
+  let assert #(Ok(module.EvaluatedBundle(namespace: ns, ..)), st) =
+    module.evaluate_bundle(agent(), first, rt_async.drain)
 
   let assert Ok(second) =
     module.compile_bundle(
@@ -7588,17 +7515,17 @@ pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
       no_resolve,
       no_load,
     )
-  let assert #(st, Error(err)) =
+  let assert #(Error(err), st) =
     module.link_for_evaluation_reusing(
-      second,
       st,
+      second,
       dict.from_list([#(spec, ns)]),
       dict.new(),
     )
   let assert True = case err {
     module.EvaluationError(..) ->
       string.contains(
-        module.error_message(err, st),
+        module.error_message(st, err),
         "was re-loaded with an export",
       )
     _ -> False
@@ -7613,8 +7540,8 @@ pub fn reused_module_gaining_reexport_is_a_link_error_test() -> Nil {
 
   let assert Ok(first) =
     module.compile_bundle(spec, "export const x = 1;", no_resolve, no_load)
-  let assert #(st, Ok(module.EvaluatedBundle(namespace: ns, ..))) =
-    module.evaluate_bundle(first, agent(), rt_async.drain)
+  let assert #(Ok(module.EvaluatedBundle(namespace: ns, ..)), st) =
+    module.evaluate_bundle(agent(), first, rt_async.drain)
 
   let dep_resolve = fn(dep, _parent) {
     case dep {
@@ -7635,17 +7562,17 @@ pub fn reused_module_gaining_reexport_is_a_link_error_test() -> Nil {
       dep_resolve,
       dep_load,
     )
-  let assert #(st, Error(err)) =
+  let assert #(Error(err), st) =
     module.link_for_evaluation_reusing(
-      second,
       st,
+      second,
       dict.from_list([#(spec, ns)]),
       dict.new(),
     )
   let assert True = case err {
     module.EvaluationError(..) ->
       string.contains(
-        module.error_message(err, st),
+        module.error_message(st, err),
         "was re-loaded with an export",
       )
     _ -> False

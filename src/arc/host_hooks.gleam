@@ -1,6 +1,5 @@
 import arc/internal/clock
-import arc/internal/host_time
-import arc/rt/builtins/temporal_tz
+import arc/time_zone.{type Rules, type TimeZone, type TzError}
 import arc/zoneinfo
 import gleam/float
 import gleam/io
@@ -23,9 +22,9 @@ pub type HostHooks {
     report_uncaught: fn(String) -> Nil,
     wall_clock_ms: fn() -> Int,
     // local time for Date
-    time_zone: host_time.TimeZone,
+    time_zone: TimeZone,
     // tz database rules for a canonical iana id, asked once per zone
-    load_time_zone: fn(String) -> Result(temporal_tz.Rules, temporal_tz.TzError),
+    load_time_zone: fn(String) -> Result(Rules, TzError),
     // canonical ids the host has rules for
     time_zone_ids: fn() -> List(String),
     // [0, 1) behind Math.random

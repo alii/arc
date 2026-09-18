@@ -31,12 +31,12 @@ pub type MatchContext {
   )
 }
 
-pub type Resolved {
+pub type Expanded {
   Text(text: String)
   NamedRef(name: String)
 }
 
-pub fn resolve_plain(seg: PlainSegment, ctx: MatchContext) -> String {
+pub fn expand_plain(seg: PlainSegment, ctx: MatchContext) -> String {
   case seg {
     LiteralSeg(text) -> text
     MatchedSeg -> ctx.matched
@@ -61,27 +61,27 @@ pub fn resolve_plain(seg: PlainSegment, ctx: MatchContext) -> String {
   }
 }
 
-pub fn resolve(seg: NamedSegment, ctx: MatchContext) -> Resolved {
+pub fn expand(seg: NamedSegment, ctx: MatchContext) -> Expanded {
   case seg {
-    Plain(p) -> Text(resolve_plain(p, ctx))
+    Plain(p) -> Text(expand_plain(p, ctx))
     NamedSeg(name) -> NamedRef(name)
   }
 }
 
-pub fn resolve_without_named(
+pub fn expand_without_named(
   segments: List(PlainSegment),
   ctx: MatchContext,
 ) -> String {
   segments
-  |> resolve_plain_parts(ctx)
+  |> expand_plain_parts(ctx)
   |> string.concat
 }
 
-pub fn resolve_plain_parts(
+pub fn expand_plain_parts(
   segments: List(PlainSegment),
   ctx: MatchContext,
 ) -> List(String) {
-  list.map(segments, resolve_plain(_, ctx))
+  list.map(segments, expand_plain(_, ctx))
 }
 
 type Emit(seg) {

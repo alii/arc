@@ -23,14 +23,14 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-/// pins the payload type; a read under another key is none
-pub opaque type Key(host) {
-  Key(id: Int)
+/// pins the payload type; a read under another brand is none
+pub opaque type Brand(host) {
+  Brand(id: Int)
 }
 
 /// mint once per embedding
-pub fn new_key() -> Key(host) {
-  Key(id: unique_integer([Positive]))
+pub fn new_brand() -> Brand(host) {
+  Brand(id: unique_integer([Positive]))
 }
 
 type UniqueIntegerOption {
@@ -42,15 +42,15 @@ fn unique_integer(options: List(UniqueIntegerOption)) -> Int
 
 /// new_target is undefined under a plain call
 pub type Context(host) {
-  Context(agent: Agent, new_target: JsVal, key: Key(host))
+  Context(agent: Agent, new_target: JsVal, brand: Brand(host))
 }
 
 pub type HostFn(host) =
-  fn(List(JsVal), JsVal, Context(host)) ->
-    #(Context(host), Result(JsVal, JsVal))
+  fn(Context(host), List(JsVal), JsVal) ->
+    #(Result(JsVal, JsVal), Context(host))
 
-pub fn from_agent(st: Agent, key: Key(host)) -> Context(host) {
-  Context(agent: st, new_target: mk_undefined(), key:)
+pub fn from_agent(st: Agent, brand: Brand(host)) -> Context(host) {
+  Context(agent: st, new_target: mk_undefined(), brand:)
 }
 
 pub fn new_target(ctx: Context(host)) -> JsVal {
@@ -59,11 +59,11 @@ pub fn new_target(ctx: Context(host)) -> JsVal {
 
 pub fn with_context(
   st: Agent,
-  key: Key(host),
-  body: fn(Context(host)) -> #(Context(host), a),
-) -> #(Agent, a) {
-  let #(Context(agent: st, ..), result) = body(from_agent(st, key))
-  #(rt_async.drain(st), result)
+  brand: Brand(host),
+  body: fn(Context(host)) -> #(a, Context(host)),
+) -> #(a, Agent) {
+  let #(result, Context(agent: st, ..)) = body(from_agent(st, brand))
+  #(result, rt_async.drain(st))
 }
 
 /// missing args are undefined
@@ -74,14 +74,14 @@ pub const arg_at = helpers.arg_at
 pub fn type_error(
   ctx: Context(host),
   msg: String,
-) -> #(Context(host), Result(JsVal, JsVal)) {
+) -> #(Result(JsVal, JsVal), Context(host)) {
   throw_new(ctx, TypeError, msg)
 }
 
 pub fn range_error(
   ctx: Context(host),
   msg: String,
-) -> #(Context(host), Result(JsVal, JsVal)) {
+) -> #(Result(JsVal, JsVal), Context(host)) {
   throw_new(ctx, RangeError, msg)
 }
 
@@ -89,18 +89,18 @@ fn throw_new(
   ctx: Context(host),
   kind: ErrorKind,
   msg: String,
-) -> #(Context(host), Result(JsVal, JsVal)) {
+) -> #(Result(JsVal, JsVal), Context(host)) {
   let st = ctx.agent
   let #(err, st) = rt_val.t_new_error(st, kind, msg)
-  #(Context(..ctx, agent: st), Error(err))
+  #(Error(err), Context(..ctx, agent: st))
 }
 
 pub fn validate_string(
   ctx: Context(host),
   val: JsVal,
   name: String,
-  cont: fn(String, Context(host)) -> #(Context(host), Result(JsVal, JsVal)),
-) -> #(Context(host), Result(JsVal, JsVal)) {
+  cont: fn(String, Context(host)) -> #(Result(JsVal, JsVal), Context(host)),
+) -> #(Result(JsVal, JsVal), Context(host)) {
   case classify(val) {
     KStr(text) -> cont(text, ctx)
     _ -> invalid_arg_type(ctx, name, "string", val)
@@ -112,8 +112,8 @@ pub fn validate_function(
   ctx: Context(host),
   val: JsVal,
   name: String,
-  cont: fn(JsVal, Context(host)) -> #(Context(host), Result(JsVal, JsVal)),
-) -> #(Context(host), Result(JsVal, JsVal)) {
+  cont: fn(JsVal, Context(host)) -> #(Result(JsVal, JsVal), Context(host)),
+) -> #(Result(JsVal, JsVal), Context(host)) {
   case rt_val.is_callable(ctx.agent, val) {
     True -> cont(val, ctx)
     False -> invalid_arg_type(ctx, name, "function", val)
@@ -126,12 +126,12 @@ pub fn call(
   callee: JsVal,
   this_val: JsVal,
   args: List(JsVal),
-) -> #(Context(host), Result(JsVal, JsVal)) {
+) -> #(Result(JsVal, JsVal), Context(host)) {
   let #(completion, st) = rt_call.t_try_call(ctx.agent, callee, this_val, args)
   let ctx = Context(..ctx, agent: st)
   case completion {
-    NormalCompletion(v) -> #(ctx, Ok(v))
-    ThrowCompletion(thrown) -> #(ctx, Error(thrown))
+    NormalCompletion(v) -> #(Ok(v), ctx)
+    ThrowCompletion(thrown) -> #(Error(thrown), ctx)
   }
 }
 
@@ -141,15 +141,15 @@ pub fn try_call(
   name: String,
   this_val: JsVal,
   args: List(JsVal),
-  cont: fn(JsVal, Context(host)) -> #(Context(host), Result(JsVal, JsVal)),
-) -> #(Context(host), Result(JsVal, JsVal)) {
+  cont: fn(JsVal, Context(host)) -> #(Result(JsVal, JsVal), Context(host)),
+) -> #(Result(JsVal, JsVal), Context(host)) {
   case rt_val.is_callable(ctx.agent, callee) {
     False -> invalid_arg_type(ctx, name, "function", callee)
     True -> {
-      let #(ctx, result) = call(ctx, callee, this_val, args)
+      let #(result, ctx) = call(ctx, callee, this_val, args)
       case result {
         Ok(v) -> cont(v, ctx)
-        Error(thrown) -> #(ctx, Error(thrown))
+        Error(thrown) -> #(Error(thrown), ctx)
       }
     }
   }
@@ -162,8 +162,8 @@ pub fn validate_integer(
   name: String,
   min: Int,
   max: Int,
-  cont: fn(Int, Context(host)) -> #(Context(host), Result(JsVal, JsVal)),
-) -> #(Context(host), Result(JsVal, JsVal)) {
+  cont: fn(Int, Context(host)) -> #(Result(JsVal, JsVal), Context(host)),
+) -> #(Result(JsVal, JsVal), Context(host)) {
   case classify(val) {
     KNum(JInt(i)) -> check_range(ctx, name, i, min, max, cont)
     KNum(JFloat(f) as n) ->
@@ -183,8 +183,8 @@ fn check_range(
   i: Int,
   min: Int,
   max: Int,
-  cont: fn(Int, Context(host)) -> #(Context(host), Result(JsVal, JsVal)),
-) -> #(Context(host), Result(JsVal, JsVal)) {
+  cont: fn(Int, Context(host)) -> #(Result(JsVal, JsVal), Context(host)),
+) -> #(Result(JsVal, JsVal), Context(host)) {
   case i >= min && i <= max {
     True -> cont(i, ctx)
     False ->
@@ -206,8 +206,8 @@ pub fn validate_boolean(
   ctx: Context(host),
   val: JsVal,
   name: String,
-  cont: fn(Bool, Context(host)) -> #(Context(host), Result(JsVal, JsVal)),
-) -> #(Context(host), Result(JsVal, JsVal)) {
+  cont: fn(Bool, Context(host)) -> #(Result(JsVal, JsVal), Context(host)),
+) -> #(Result(JsVal, JsVal), Context(host)) {
   case classify(val) {
     KBool(b) -> cont(b, ctx)
     _ -> invalid_arg_type(ctx, name, "boolean", val)
@@ -230,13 +230,17 @@ type TicketRoot {
 }
 
 /// pending promise plus the ticket to resume it with later
-pub fn suspend(ctx: Context(host)) -> #(Context(host), JsVal, Ticket) {
+pub fn suspend(ctx: Context(host)) -> #(JsVal, Ticket, Context(host)) {
   let #(promise, st) = rt_async.t_new_promise(ctx.agent)
   let root_cell =
-    host_cell(tag(ticket_key(), TicketRoot(promise:)), None, extensible: False)
+    host_cell(
+      tag(ticket_brand(), TicketRoot(promise:)),
+      None,
+      extensible: False,
+    )
   let #(root, st) = rt_store.t_cell_new(st, root_cell)
   let st = rt_store.t_pin_root(st, root)
-  #(Context(..ctx, agent: st), mk_object(promise), Ticket(promise:, root:))
+  #(mk_object(promise), Ticket(promise:, root:), Context(..ctx, agent: st))
 }
 
 /// queues the settlement as a microtask; drops the ticket root
@@ -244,11 +248,11 @@ pub fn resume(
   ctx: Context(host),
   ticket: Ticket,
   outcome: Result(JsVal, JsVal),
-) -> #(Context(host), ResumeOutcome) {
+) -> #(ResumeOutcome, Context(host)) {
   let Ticket(promise:, root:) = ticket
   case ticket_state(ctx.agent, ticket) {
-    Stale -> #(ctx, StaleTicket)
-    Spent -> #(ctx, AlreadySettled)
+    Stale -> #(StaleTicket, ctx)
+    Spent -> #(AlreadySettled, ctx)
     Live -> {
       let st = rt_gc.t_release_roots(ctx.agent, [root.id])
       let st = rt_store.t_cell_free(st, root)
@@ -259,7 +263,7 @@ pub fn resume(
         }
       }
       let st = rt_async.t_enqueue_job(st, HostJob(run: settle))
-      #(Context(..ctx, agent: st), Resumed)
+      #(Resumed, Context(..ctx, agent: st))
     }
   }
 }
@@ -284,14 +288,14 @@ fn is_ticket_root(st: Agent, root: Handle, promise: Handle) -> Bool {
   use <- bool.guard(!rt_gc.t_is_live(st, root), False)
   case rt_store.t_cell_get(st, root) {
     SObject(kind: HostObj(payload:), ..) ->
-      payload == tag(ticket_key(), TicketRoot(promise:))
+      payload == tag(ticket_brand(), TicketRoot(promise:))
     _ -> False
   }
 }
 
-// new_key ids are positive so 0 is never an embedder key
-fn ticket_key() -> Key(TicketRoot) {
-  Key(id: 0)
+// new_brand ids are positive so 0 is never an embedder brand
+fn ticket_brand() -> Brand(TicketRoot) {
+  Brand(id: 0)
 }
 
 fn is_promise(st: Agent, h: Handle) -> Bool {
@@ -311,24 +315,24 @@ pub fn default_host_hooks() -> HostHooks {
 pub fn array(
   ctx: Context(host),
   values: List(JsVal),
-) -> #(Context(host), JsVal) {
+) -> #(JsVal, Context(host)) {
   let st = ctx.agent
   let #(h, st) = common.alloc_array(st, values, st.realm.array.prototype)
-  #(Context(..ctx, agent: st), mk_object(h))
+  #(mk_object(h), Context(..ctx, agent: st))
 }
 
 pub fn object(
   ctx: Context(host),
   props: List(#(String, JsVal)),
-) -> #(Context(host), JsVal) {
+) -> #(JsVal, Context(host)) {
   let st = ctx.agent
   let #(h, st) = common.alloc_plain_object(st, st.realm.object.prototype, props)
-  #(Context(..ctx, agent: st), mk_object(h))
+  #(mk_object(h), Context(..ctx, agent: st))
 }
 
-// the one place payload types are erased; value unread unless key matches
+// the one place payload types are erased; value unread unless brand matches
 type Tagged(host) {
-  Tagged(key: Int, value: host)
+  Tagged(brand: Int, value: host)
 }
 
 fn erase(tagged: Tagged(host)) -> HostTerm {
@@ -339,13 +343,13 @@ fn unerase(term: HostTerm) -> Tagged(host) {
   unsafe.coerce(term)
 }
 
-fn tag(key: Key(host), value: host) -> HostTerm {
-  erase(Tagged(key: key.id, value:))
+fn tag(brand: Brand(host), value: host) -> HostTerm {
+  erase(Tagged(brand: brand.id, value:))
 }
 
-fn untag(key: Key(host), term: HostTerm) -> Option(host) {
-  let Tagged(key: id, value:) = unerase(term)
-  case id == key.id {
+fn untag(brand: Brand(host), term: HostTerm) -> Option(host) {
+  let Tagged(brand: id, value:) = unerase(term)
+  case id == brand.id {
     True -> Some(value)
     False -> None
   }
@@ -371,20 +375,20 @@ pub fn alloc_host_object(
   ctx: Context(host),
   value: host,
   prototype: Option(Handle),
-) -> #(Context(host), JsVal) {
+) -> #(JsVal, Context(host)) {
   let #(h, st) =
     rt_store.t_cell_new(
       ctx.agent,
-      host_cell(tag(ctx.key, value), prototype, extensible: True),
+      host_cell(tag(ctx.brand, value), prototype, extensible: True),
     )
-  #(Context(..ctx, agent: st), mk_object(h))
+  #(mk_object(h), Context(..ctx, agent: st))
 }
 
-/// none if not a host object or written under another key
+/// none if not a host object or written under another brand
 pub fn read_host(ctx: Context(host), val: JsVal) -> Option(host) {
   use h <- option.then(rt_val.handle_of(val))
   case rt_store.t_cell_get(ctx.agent, h) {
-    SObject(kind: HostObj(payload:), ..) -> untag(ctx.key, payload)
+    SObject(kind: HostObj(payload:), ..) -> untag(ctx.brand, payload)
     _ -> None
   }
 }
@@ -395,8 +399,8 @@ pub fn function(
   name: String,
   arity: Int,
   impl: HostFn(host),
-) -> #(Context(host), JsVal) {
-  let #(id, st) = register(ctx.agent, ctx.key, name, impl)
+) -> #(JsVal, Context(host)) {
+  let #(id, st) = register(ctx.agent, ctx.brand, name, impl)
   let #(h, st) =
     common.alloc_rooted_native_fn(
       st,
@@ -405,7 +409,7 @@ pub fn function(
       name,
       arity,
     )
-  #(Context(..ctx, agent: st), mk_object(h))
+  #(mk_object(h), Context(..ctx, agent: st))
 }
 
 pub fn define_fn(
@@ -414,7 +418,7 @@ pub fn define_fn(
   arity: Int,
   impl: HostFn(host),
 ) -> Context(host) {
-  let #(ctx, f) = function(ctx, name, arity, impl)
+  let #(f, ctx) = function(ctx, name, arity, impl)
   define_global(ctx, name, f)
 }
 
@@ -444,7 +448,7 @@ pub fn define_namespace(
   methods: List(#(String, Int, HostFn(host))),
 ) -> Context(host) {
   let st = ctx.agent
-  let #(props, st) = alloc_host_methods(st, ctx.key, methods)
+  let #(props, st) = alloc_host_methods(st, ctx.brand, methods)
   let #(ns, st) =
     common.init_namespace(st, st.realm.object.prototype, name, props)
   define_global(Context(..ctx, agent: st), name, mk_object(ns))
@@ -458,12 +462,12 @@ pub fn class(
   constructor: HostFn(host),
   methods: List(#(String, Int, HostFn(host))),
   statics: List(#(String, Int, HostFn(host))),
-) -> #(Context(host), JsVal) {
+) -> #(JsVal, Context(host)) {
   let st = ctx.agent
   let realm = st.realm
-  let #(proto_props, st) = alloc_host_methods(st, ctx.key, methods)
-  let #(static_props, st) = alloc_host_methods(st, ctx.key, statics)
-  let #(id, st) = register(st, ctx.key, name, constructor)
+  let #(proto_props, st) = alloc_host_methods(st, ctx.brand, methods)
+  let #(static_props, st) = alloc_host_methods(st, ctx.brand, statics)
+  let #(id, st) = register(st, ctx.brand, name, constructor)
   let #(pair, st) =
     common.init_type(
       st,
@@ -475,36 +479,36 @@ pub fn class(
       arity,
       static_props,
     )
-  #(Context(..ctx, agent: st), mk_object(pair.constructor))
+  #(mk_object(pair.constructor), Context(..ctx, agent: st))
 }
 
 // only writer of host_fns, so ids are dense in registration order
 fn register(
   st: Agent,
-  key: Key(host),
+  brand: Brand(host),
   name: String,
   impl: HostFn(host),
 ) -> #(Int, Agent) {
   let id = dict.size(st.host_fns)
   let entry =
     HostFnEntry(name:, call: fn(st, args, this, new_target) {
-      let #(Context(agent: st, ..), result) =
-        impl(args, this, Context(agent: st, new_target:, key:))
-      #(st, result)
+      let #(result, Context(agent: st, ..)) =
+        impl(Context(agent: st, new_target:, brand:), args, this)
+      #(result, st)
     })
   #(id, Agent(..st, host_fns: dict.insert(st.host_fns, id, entry)))
 }
 
 fn alloc_host_methods(
   st: Agent,
-  key: Key(host),
+  brand: Brand(host),
   specs: List(#(String, Int, HostFn(host))),
 ) -> #(List(#(String, Property)), Agent) {
   let #(props, st) =
     list.fold(specs, #([], st), fn(acc, spec) {
       let #(props, st) = acc
       let #(name, arity, impl) = spec
-      let #(id, st) = register(st, key, name, impl)
+      let #(id, st) = register(st, brand, name, impl)
       let #(h, st) =
         common.alloc_rooted_native_fn(
           st,
@@ -523,7 +527,7 @@ fn not_an_integer(
   ctx: Context(host),
   name: String,
   received: String,
-) -> #(Context(host), Result(JsVal, JsVal)) {
+) -> #(Result(JsVal, JsVal), Context(host)) {
   range_error(
     ctx,
     "The value of \""
@@ -538,7 +542,7 @@ fn invalid_arg_type(
   name: String,
   expected: String,
   received: JsVal,
-) -> #(Context(host), Result(JsVal, JsVal)) {
+) -> #(Result(JsVal, JsVal), Context(host)) {
   let actual = rt_val.type_of(ctx.agent, received)
   type_error(
     ctx,

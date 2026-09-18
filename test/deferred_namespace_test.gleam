@@ -21,10 +21,10 @@ fn deferred_namespace_of(
   let ctx =
     rt_builtins.new_agent(rt_helpers.quiet_hooks())
     |> entry.link
-    |> host.from_agent(host.new_key())
-  let #(ctx, greet) =
-    host.function(ctx, "greet", 0, fn(_a, _t, ctx) {
-      #(ctx, Ok(mk_string("hi")))
+    |> host.from_agent(host.new_brand())
+  let #(greet, ctx) =
+    host.function(ctx, "greet", 0, fn(ctx, _a, _t) {
+      #(Ok(mk_string("hi")), ctx)
     })
   let hosts =
     dict.from_list([
@@ -38,13 +38,13 @@ fn deferred_namespace_of(
       no_source_loads,
       hosts,
     )
-  let #(_st, out) =
-    host.with_context(ctx.agent, ctx.key, fn(ctx) {
-      let assert #(st, Ok(linked)) =
-        module.link_for_evaluation(bundle, ctx.agent)
-      let #(st, deferred) =
+  let #(out, _st) =
+    host.with_context(ctx.agent, ctx.brand, fn(ctx) {
+      let assert #(Ok(linked), st) =
+        module.link_for_evaluation(ctx.agent, bundle)
+      let #(deferred, st) =
         module.get_or_create_deferred_namespace(st, linked, spec)
-      #(host.Context(..ctx, agent: st), deferred)
+      #(deferred, host.Context(..ctx, agent: st))
     })
   out
 }

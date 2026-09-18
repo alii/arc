@@ -929,7 +929,7 @@ fn replace_loop_template(
       let replacement = case segments {
         [substitution.LiteralSeg(text)] -> text
         _ ->
-          substitution.resolve_without_named(
+          substitution.expand_without_named(
             segments,
             substitution.MatchContext(
               matched: search_text,

@@ -79,11 +79,11 @@ fn run_one(p: Program) -> Nil {
   let #(result, hs) = case r {
     Ok(#(engine.Returned(v), eng2)) -> #(
       string.inspect(v),
-      rt_gc.stats(engine.heap(eng2)),
+      rt_gc.stats(engine.agent(eng2)),
     )
     Ok(#(engine.Threw(e), eng2)) -> #(
       "THREW " <> engine.format_error(eng2, e),
-      rt_gc.stats(engine.heap(eng2)),
+      rt_gc.stats(engine.agent(eng2)),
     )
     Error(e) -> #(
       "ERR " <> engine.eval_error_message(e),

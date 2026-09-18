@@ -19,7 +19,7 @@ import rt_helpers
 fn new_state() -> host.Context(host) {
   rt_builtins.new_agent(rt_helpers.quiet_hooks())
   |> entry.link
-  |> host.from_agent(host.new_key())
+  |> host.from_agent(host.new_brand())
 }
 
 fn run(ctx: host.Context(host), source: String) -> #(Completion(JsVal), Agent) {
@@ -70,10 +70,10 @@ fn extract_error_message(ctx: host.Context(host), source: String) -> String {
 
 fn state_with_validator(name, validate) -> host.Context(host) {
   new_state()
-  |> host.define_fn(name, 1, fn(args, _, ctx) {
+  |> host.define_fn(name, 1, fn(ctx, args, _) {
     case args {
       [v, ..] -> validate(v, ctx)
-      _ -> #(ctx, Ok(mk_undefined()))
+      _ -> #(Ok(mk_undefined()), ctx)
     }
   })
 }
@@ -82,7 +82,7 @@ pub fn validate_string_accepts_string_test() {
   let ctx =
     state_with_validator("upper", fn(v, ctx) {
       use str, ctx <- host.validate_string(ctx, v, "input")
-      #(ctx, Ok(mk_string(string.uppercase(str))))
+      #(Ok(mk_string(string.uppercase(str))), ctx)
     })
   assert eval_string(ctx, "upper('abc')") == "ABC"
 }
@@ -91,7 +91,7 @@ pub fn validate_string_rejects_number_test() {
   let ctx =
     state_with_validator("f", fn(v, ctx) {
       use _, ctx <- host.validate_string(ctx, v, "name")
-      #(ctx, Ok(mk_undefined()))
+      #(Ok(mk_undefined()), ctx)
     })
   assert extract_error_message(ctx, "f(42)")
     == "The \"name\" argument must be of type string. Received type number"
@@ -101,7 +101,7 @@ pub fn validate_string_rejects_null_test() {
   let ctx =
     state_with_validator("f", fn(v, ctx) {
       use _, ctx <- host.validate_string(ctx, v, "name")
-      #(ctx, Ok(mk_undefined()))
+      #(Ok(mk_undefined()), ctx)
     })
   assert extract_error_message(ctx, "f(null)")
     == "The \"name\" argument must be of type string. Received type object"
@@ -112,7 +112,7 @@ pub fn validate_function_accepts_arrow_test() {
     state_with_validator("callIt", fn(v, ctx) {
       use cb, ctx <- host.validate_function(ctx, v, "callback")
       host.try_call(ctx, cb, "callback", mk_undefined(), [], fn(r, ctx) {
-        #(ctx, Ok(r))
+        #(Ok(r), ctx)
       })
     })
   assert eval_number(ctx, "callIt(() => 42)") == 42.0
@@ -122,7 +122,7 @@ pub fn validate_function_rejects_string_test() {
   let ctx =
     state_with_validator("f", fn(v, ctx) {
       use _, ctx <- host.validate_function(ctx, v, "callback")
-      #(ctx, Ok(mk_undefined()))
+      #(Ok(mk_undefined()), ctx)
     })
   assert extract_error_message(ctx, "f('nope')")
     == "The \"callback\" argument must be of type function. Received type string"
@@ -132,7 +132,7 @@ pub fn validate_function_accepts_builtin_test() {
   let ctx =
     state_with_validator("check", fn(v, ctx) {
       use _, ctx <- host.validate_function(ctx, v, "fn")
-      #(ctx, Ok(mk_string("ok")))
+      #(Ok(mk_string("ok")), ctx)
     })
   assert eval_string(ctx, "check(Math.abs)") == "ok"
 }
@@ -141,7 +141,7 @@ pub fn validate_integer_accepts_in_range_test() {
   let ctx =
     state_with_validator("f", fn(v, ctx) {
       use n, ctx <- host.validate_integer(ctx, v, "port", 0, 65_535)
-      #(ctx, Ok(mk_int(n)))
+      #(Ok(mk_int(n)), ctx)
     })
   assert eval_number(ctx, "f(8080)") == 8080.0
 }
@@ -150,7 +150,7 @@ pub fn validate_integer_rejects_out_of_range_test() {
   let ctx =
     state_with_validator("f", fn(v, ctx) {
       use _, ctx <- host.validate_integer(ctx, v, "port", 0, 65_535)
-      #(ctx, Ok(mk_undefined()))
+      #(Ok(mk_undefined()), ctx)
     })
   assert extract_error_message(ctx, "f(70000)")
     == "The value of \"port\" is out of range. It must be >= 0 and <= 65535. Received 70000"
@@ -160,7 +160,7 @@ pub fn validate_integer_rejects_float_test() {
   let ctx =
     state_with_validator("f", fn(v, ctx) {
       use _, ctx <- host.validate_integer(ctx, v, "n", 0, 100)
-      #(ctx, Ok(mk_undefined()))
+      #(Ok(mk_undefined()), ctx)
     })
   assert extract_error_message(ctx, "f(3.14)")
     == "The value of \"n\" is out of range. It must be an integer. Received 3.14"
@@ -179,7 +179,7 @@ pub fn validate_integer_rejects_non_number_test() {
   let ctx =
     state_with_validator("f", fn(v, ctx) {
       use _, ctx <- host.validate_integer(ctx, v, "n", 0, 100)
-      #(ctx, Ok(mk_undefined()))
+      #(Ok(mk_undefined()), ctx)
     })
   assert extract_error_message(ctx, "f('3')")
     == "The \"n\" argument must be of type integer. Received type string"
@@ -194,7 +194,7 @@ pub fn validate_integer_range_error_is_rangeerror_test() {
   let ctx =
     state_with_validator("f", fn(v, ctx) {
       use _, ctx <- host.validate_integer(ctx, v, "n", 0, 10)
-      #(ctx, Ok(mk_undefined()))
+      #(Ok(mk_undefined()), ctx)
     })
   assert eval_string(
       ctx,
@@ -206,13 +206,13 @@ pub fn validate_integer_range_error_is_rangeerror_test() {
 pub fn try_call_invokes_callable_test() {
   let ctx =
     new_state()
-    |> host.define_fn("apply", 2, fn(args, _, ctx) {
+    |> host.define_fn("apply", 2, fn(ctx, args, _) {
       case args {
         [cb, x, ..] -> {
           use result, ctx <- host.try_call(ctx, cb, "fn", mk_undefined(), [x])
-          #(ctx, Ok(result))
+          #(Ok(result), ctx)
         }
-        _ -> #(ctx, Ok(mk_undefined()))
+        _ -> #(Ok(mk_undefined()), ctx)
       }
     })
   assert eval_number(ctx, "apply(x => x + 1, 9)") == 10.0
@@ -221,13 +221,13 @@ pub fn try_call_invokes_callable_test() {
 pub fn try_call_rejects_noncallable_with_arg_name_test() {
   let ctx =
     new_state()
-    |> host.define_fn("apply", 2, fn(args, _, ctx) {
+    |> host.define_fn("apply", 2, fn(ctx, args, _) {
       case args {
         [cb, x, ..] -> {
           use result, ctx <- host.try_call(ctx, cb, "fn", mk_undefined(), [x])
-          #(ctx, Ok(result))
+          #(Ok(result), ctx)
         }
-        _ -> #(ctx, Ok(mk_undefined()))
+        _ -> #(Ok(mk_undefined()), ctx)
       }
     })
   assert extract_error_message(ctx, "apply(42, 1)")
@@ -238,7 +238,7 @@ pub fn try_call_propagates_callback_throw_test() {
   let ctx =
     state_with_validator("apply", fn(cb, ctx) {
       use result, ctx <- host.try_call(ctx, cb, "fn", mk_undefined(), [])
-      #(ctx, Ok(result))
+      #(Ok(result), ctx)
     })
   assert eval_string(
       ctx,
@@ -252,13 +252,13 @@ pub fn validate_boolean_accepts_true_test() {
     state_with_validator("f", fn(v, ctx) {
       use b, ctx <- host.validate_boolean(ctx, v, "flag")
       #(
-        ctx,
         Ok(
           mk_string(case b {
             True -> "yes"
             False -> "no"
           }),
         ),
+        ctx,
       )
     })
   assert eval_string(ctx, "f(true)") == "yes"
@@ -268,7 +268,7 @@ pub fn validate_boolean_rejects_truthy_test() {
   let ctx =
     state_with_validator("f", fn(v, ctx) {
       use _, ctx <- host.validate_boolean(ctx, v, "flag")
-      #(ctx, Ok(mk_undefined()))
+      #(Ok(mk_undefined()), ctx)
     })
   assert extract_error_message(ctx, "f(1)")
     == "The \"flag\" argument must be of type boolean. Received type number"
@@ -277,8 +277,8 @@ pub fn validate_boolean_rejects_truthy_test() {
 pub fn array_builds_real_js_array_test() {
   let ctx =
     state_with_validator("triple", fn(v, ctx) {
-      let #(ctx, arr) = host.array(ctx, [v, v, v])
-      #(ctx, Ok(arr))
+      let #(arr, ctx) = host.array(ctx, [v, v, v])
+      #(Ok(arr), ctx)
     })
   assert eval_string(ctx, "Array.isArray(triple(7)) && triple(7).join('-')")
     == "7-7-7"
@@ -287,13 +287,13 @@ pub fn array_builds_real_js_array_test() {
 pub fn object_builds_plain_object_test() {
   let ctx =
     new_state()
-    |> host.define_fn("point", 2, fn(args, _, ctx) {
+    |> host.define_fn("point", 2, fn(ctx, args, _) {
       case args {
         [x, y, ..] -> {
-          let #(ctx, obj) = host.object(ctx, [#("x", x), #("y", y)])
-          #(ctx, Ok(obj))
+          let #(obj, ctx) = host.object(ctx, [#("x", x), #("y", y)])
+          #(Ok(obj), ctx)
         }
-        _ -> #(ctx, Ok(mk_undefined()))
+        _ -> #(Ok(mk_undefined()), ctx)
       }
     })
   assert eval_string(ctx, "let p = point(3, 4); p.x + ',' + p.y") == "3,4"
@@ -311,7 +311,7 @@ pub fn to_string_coerces_number_test() {
   let ctx =
     state_with_validator("str", fn(v, ctx) {
       let #(str, ctx) = to_string(ctx, v)
-      #(ctx, Ok(mk_string("got:" <> str)))
+      #(Ok(mk_string("got:" <> str)), ctx)
     })
   assert eval_string(ctx, "str(42)") == "got:42"
 }
@@ -320,7 +320,7 @@ pub fn to_string_calls_user_tostring_test() {
   let ctx =
     state_with_validator("str", fn(v, ctx) {
       let #(str, ctx) = to_string(ctx, v)
-      #(ctx, Ok(mk_string(str)))
+      #(Ok(mk_string(str)), ctx)
     })
   assert eval_string(ctx, "str({ toString() { return 'custom' } })") == "custom"
 }
@@ -329,7 +329,7 @@ pub fn to_string_propagates_throw_test() {
   let ctx =
     state_with_validator("str", fn(v, ctx) {
       let #(str, ctx) = to_string(ctx, v)
-      #(ctx, Ok(mk_string(str)))
+      #(Ok(mk_string(str)), ctx)
     })
   let assert #(ThrowCompletion(_), _) =
     run(ctx, "str({ toString() { throw new Error('nope') } })")
@@ -343,15 +343,15 @@ type MyHost {
 pub fn host_object_typed_roundtrip_test() {
   let ctx: host.Context(MyHost) =
     new_state()
-    |> host.define_fn("makePid", 0, fn(_args, _this, ctx) {
-      let #(ctx, val) = host.alloc_host_object(ctx, Pid(42), option.None)
-      #(ctx, Ok(val))
+    |> host.define_fn("makePid", 0, fn(ctx, _args, _this) {
+      let #(val, ctx) = host.alloc_host_object(ctx, Pid(42), option.None)
+      #(Ok(val), ctx)
     })
-    |> host.define_fn("readHost", 1, fn(args, _this, ctx) {
+    |> host.define_fn("readHost", 1, fn(ctx, args, _this) {
       case host.read_host(ctx, host.first_arg(args)) {
-        option.Some(Pid(n)) -> #(ctx, Ok(mk_int(n)))
-        option.Some(Socket(name)) -> #(ctx, Ok(mk_string("socket:" <> name)))
-        option.None -> #(ctx, Ok(mk_string("not-a-host-object")))
+        option.Some(Pid(n)) -> #(Ok(mk_int(n)), ctx)
+        option.Some(Socket(name)) -> #(Ok(mk_string("socket:" <> name)), ctx)
+        option.None -> #(Ok(mk_string("not-a-host-object")), ctx)
       }
     })
 

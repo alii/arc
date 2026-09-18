@@ -255,7 +255,7 @@ fn run_compiled(
   case prepared {
     Error(outcome) -> outcome
     Ok(#(st, module)) -> {
-      let #(exec, st) = run.apply_js_main(module, st)
+      let #(exec, st) = run.apply_js_main(st, module)
       run.unload(module)
       judge(metadata, is_async, exec, st)
     }
@@ -289,7 +289,7 @@ fn run_harness(
       Error(Skip("harness " <> name <> " unsupported: " <> feature))
     Ok(Broken(reason)) -> Error(Fail("harness " <> name <> ": " <> reason))
     Ok(Loaded(module)) ->
-      case run.apply_js_main(module, st) {
+      case run.apply_js_main(st, module) {
         #(run.JsReturned(_), st) -> Ok(st)
         #(run.JsThrew(thrown), st) ->
           case emitter_rejection(thrown, st) {
@@ -461,17 +461,17 @@ fn hooks_for(metadata: TestMetadata) -> HostHooks {
 
 fn install_host_api(st: Agent) -> Agent {
   let #(_dollar_262, st) = rt_realm.install_262(st, st.realm)
-  let ctx: host.Context(Nil) = host.from_agent(st, host.new_key())
+  let ctx: host.Context(Nil) = host.from_agent(st, host.new_brand())
   let ctx = host.define_global(ctx, print_output, mk_undefined())
   let ctx = host.define_fn(ctx, "print", 1, print_native)
   ctx.agent
 }
 
 fn print_native(
+  ctx: host.Context(Nil),
   args: List(JsVal),
   _this: JsVal,
-  ctx: host.Context(Nil),
-) -> #(host.Context(Nil), Result(JsVal, JsVal)) {
+) -> #(Result(JsVal, JsVal), host.Context(Nil)) {
   let #(str, st) = rt_val.t_to_string(ctx.agent, host.first_arg(args))
   let #(_ok, st) =
     rt_obj.t_set_prop(
@@ -480,7 +480,7 @@ fn print_native(
       StringKey(Named(print_output)),
       mk_string(str),
     )
-  #(host.Context(..ctx, agent: st), Ok(mk_undefined()))
+  #(Ok(mk_undefined()), host.Context(..ctx, agent: st))
 }
 
 fn ordinary_proto(st: Agent, h: Handle) -> Option(Handle) {

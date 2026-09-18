@@ -47,7 +47,7 @@ fn host_unit_(
   args: List(ir.Value),
   k: Next,
 ) -> EmitResult {
-  use e, _ <- host_(e, op, args)
+  use _, e <- host_(e, op, args)
   k(e)
 }
 
@@ -59,7 +59,7 @@ fn cons_list_(
   case vs {
     [] -> host_(e, "empty_list", [], k)
     [head, ..rest] -> {
-      use e, tail <- cons_list_(e, rest)
+      use tail, e <- cons_list_(e, rest)
       let_(e, ir.TermOp(ir.MakeCons, [head, tail]), k)
     }
   }
@@ -79,9 +79,9 @@ fn each_(
 
 fn with_done(
   e: Emitter,
-  f: fn(Emitter, NextWith(ir.Expr)) -> EmitResult,
+  f: fn(NextWith(ir.Expr), Emitter) -> EmitResult,
 ) -> EmitResult {
-  f(e, fn(ef, tree) { Ok(#(tree, ef)) })
+  f(fn(tree, ef) { Ok(#(tree, ef)) }, e)
 }
 
 type ShapeFlags {
@@ -286,7 +286,7 @@ pub fn unpack_frame(
       use e, ref, next <- each_(e, lexical.all_lexical_refs, then: k)
       let idx = lexical.ref_offset(ref)
       let slot = base + idx
-      use e, raw <- let_(e, ir.TermOp(ir.TupleGet(idx), [ir.Var(frame_param)]))
+      use raw, e <- let_(e, ir.TermOp(ir.TupleGet(idx), [ir.Var(frame_param)]))
       case state.lexical_is_boxed(e, info, ref) {
         False -> {
           let name = state.slot_base_name(e, slot)
@@ -294,7 +294,7 @@ pub fn unpack_frame(
           ir.Let([name], ir.Values([raw]), body)
         }
         True -> {
-          use e, box <- host_(e, "box_new", [raw])
+          use box, e <- host_(e, "box_new", [raw])
           let name = state.slot_base_name(e, slot)
           use body <- state.map_tree(next(state.set_slot_var(e, slot, name)))
           ir.Let([name], ir.Values([box]), body)
@@ -319,7 +319,7 @@ pub fn binding_prologue(e: Emitter, scope_id: ScopeId, k: Next) -> EmitResult {
         ir.Let([name], ir.Values([init]), body)
       }
       True -> {
-        use e, box <- host_(e, "box_new", [init])
+        use box, e <- host_(e, "box_new", [init])
         use body <- state.map_tree(next(state.set_slot_var(e, b.slot, name)))
         ir.Let([name], ir.Values([box]), body)
       }
@@ -367,7 +367,7 @@ fn body_param_copies(
               case src_boxed {
                 False -> store_slot(e, b, src_var, next)
                 True -> {
-                  use e, v <- host_(e, "box_get", [src_var])
+                  use v, e <- host_(e, "box_get", [src_var])
                   store_slot(e, b, v, next)
                 }
               }
@@ -425,11 +425,11 @@ fn unpack_args_loop(
   k k: NextWith(ir.Value),
 ) -> EmitResult {
   case params {
-    [] -> k(e, tail)
+    [] -> k(tail, e)
     [p, ..rest] -> {
       // hd/tl on [] traps, test empty first
-      use e, empty <- let_(e, ir.TermOp(ir.IsEmptyList, [tail]))
-      use e, raw <- let_(
+      use empty, e <- let_(e, ir.TermOp(ir.IsEmptyList, [tail]))
+      use raw, e <- let_(
         e,
         ir.If(
           empty,
@@ -438,7 +438,7 @@ fn unpack_args_loop(
           ir.TermOp(ir.ListHead, [tail]),
         ),
       )
-      use e, tail2 <- let_(
+      use tail2, e <- let_(
         e,
         ir.If(
           empty,
@@ -471,7 +471,7 @@ fn bind_one_param(
           ir.Let([vn], ir.Values([raw]), body)
         }
         True -> {
-          use e, box <- host_(e, "box_new", [raw])
+          use box, e <- host_(e, "box_new", [raw])
           let vn = state.slot_base_name(e, b.slot)
           use body <- state.map_tree(k(state.set_slot_var(e, b.slot, vn)))
           ir.Let([vn], ir.Values([box]), body)
@@ -485,7 +485,7 @@ fn bind_one_param(
         raw,
         state.BindLet,
       ))
-      use e, _ <- let_(e, dtree)
+      use _, e <- let_(e, dtree)
       k(e)
     }
   }
@@ -501,7 +501,7 @@ fn bind_rest(
   case rest {
     None -> k(e)
     Some(target) -> {
-      use e, arr <- host_(e, "new_array", [tail])
+      use arr, e <- host_(e, "new_array", [tail])
       let mode = case non_simple {
         True -> state.BindLet
         False -> state.BindVar
@@ -512,7 +512,7 @@ fn bind_rest(
         arr,
         mode,
       ))
-      use e, _ <- let_(e, dtree)
+      use _, e <- let_(e, dtree)
       k(e)
     }
   }
@@ -1250,12 +1250,12 @@ fn init_arguments(
         Error(Nil) -> k(e)
         Ok(b) -> {
           // mapped only for sloppy simple params, §10.2.11 step 18
-          use e, mapped <- build_mapped_boxes(e, fixed, non_simple || has_rest)
-          use e, callee <- let_(
+          use mapped, e <- build_mapped_boxes(e, fixed, non_simple || has_rest)
+          use callee, e <- let_(
             e,
             ir.TermOp(ir.TupleGet(1), [ir.Var(frame_param)]),
           )
-          use e, args_obj <- host_(e, "new_arguments", [
+          use args_obj, e <- host_(e, "new_arguments", [
             ir.Var(args_param),
             mapped,
             callee,
@@ -1273,7 +1273,7 @@ fn build_mapped_boxes(
   k k: NextWith(ir.Value),
 ) -> EmitResult {
   case unmapped || e.strict {
-    True -> k(e, e.consts.undef)
+    True -> k(e.consts.undef, e)
     False -> {
       let boxes =
         list.map(fixed, fn(p) {
@@ -1308,7 +1308,7 @@ fn hoist_fn_decls(
         StmtBody(body),
         child_id,
       ))
-      use e, closure <- let_(e, ctree)
+      use closure, e <- let_(e, ctree)
       let assert Ok(b) =
         dict.get(scope.get(e.scope_tree, e.cur_scope).bindings, name)
         as "aot/func: hoisted function missing from var-scope bindings"
@@ -1341,7 +1341,7 @@ pub fn emit_prologue(
   params params: List(ast.Pattern),
   stmts stmts: List(ast.StmtWithLine),
   info info: FunctionInfo,
-  k k: fn(Emitter, fn(Emitter) -> Emitter) -> EmitResult,
+  k k: fn(fn(Emitter) -> Emitter, Emitter) -> EmitResult,
 ) -> EmitResult {
   let #(fixed, rest_param) = ast_util.split_trailing_rest(params)
   let non_simple = !ast_util.all_simple_params(fixed)
@@ -1371,22 +1371,22 @@ pub fn emit_prologue(
     }
   }
   use e <- init_args(e, unmapped)
-  use e, tail <- unpack_args(e, fixed, non_simple)
+  use tail, e <- unpack_args(e, fixed, non_simple)
   use e <- bind_rest(e, rest_param, tail, non_simple)
   use e <- init_args(e, !unmapped)
   // §10.2.11 step 28, non-simple params get a body scope
   case non_simple {
     False -> {
       use e <- hoist_fn_decls(e, stmts)
-      k(e, fn(ef) { ef })
+      k(fn(ef) { ef }, e)
     }
     True -> {
-      let #(e, save) = state.enter_scope(e, in_block: False)
+      let #(save, e) = state.enter_scope(e, in_block: False)
       use e <- binding_prologue(e, e.cur_scope)
       let param_names = list.flat_map(params, ast.pattern_bound_names)
       use e <- body_param_copies(e, param_names, is_arrow, stmts)
       use e <- hoist_fn_decls(e, stmts)
-      k(e, state.leave_scope(_, save))
+      k(state.leave_scope(_, save), e)
     }
   }
 }
@@ -1405,12 +1405,12 @@ fn emit_body(
       True -> {
         let #(tree, ef) =
           anf.run(expr.derived_return_value(ef.consts.undef), ef)
-        use ef, v <- let_(ef, tree)
+        use v, ef <- let_(ef, tree)
         Ok(#(ir.Return([v]), ef))
       }
     }
   }
-  use e, finish <- emit_prologue(
+  use finish, e <- emit_prologue(
     e,
     sf.self_name,
     sf.is_arrow,
@@ -1511,7 +1511,7 @@ fn bind_direct_params(
           ir.Let([vn], ir.Values([raw]), body)
         }
         True -> {
-          use e, box <- host_(e, "box_new", [raw])
+          use box, e <- host_(e, "box_new", [raw])
           use body <- state.map_tree(next(state.set_slot_var(e, b.slot, vn)))
           ir.Let([vn], ir.Values([box]), body)
         }
@@ -1544,13 +1544,13 @@ fn emit_direct_body(
 ) -> EmitResult {
   let stmts = body_stmts(body)
   let ret_undef = fn(ef: Emitter) { Ok(#(ir.Return([ef.consts.undef]), ef)) }
-  with_done(e, fn(e, done) {
+  with_done(e, fn(done, e) {
     use e <- seed_direct_this(e, takes_this, info)
     use e <- binding_prologue(e, e.fn_scope)
     use e <- bind_direct_params(e, fixed, fixed, 0)
     use e <- hoist_fn_decls(e, stmts)
     use #(tree, ef) <- result.try(e.dispatch.emit_stmts(e, stmts, ret_undef))
-    done(ef, tree)
+    done(tree, ef)
   })
 }
 
@@ -1750,7 +1750,7 @@ fn compile_function(
     None -> {
       let #(fn_name, e) = state.fresh_fn_name(e, js_name)
       let field_init = derive_field_init(shape, e.field_init)
-      let #(e_child, save) =
+      let #(save, e_child) =
         state.enter_function(
           e,
           fn_scope_id,
@@ -1780,7 +1780,7 @@ fn compile_function(
         None, True -> direct_abi_shape(shape, params, body)
         _, _ -> None
       }
-      use #(e, direct_entry) <- result.try(case direct_abi {
+      use #(direct_entry, e) <- result.try(case direct_abi {
         None -> {
           use #(body_expr, e_child) <- result.try(emit_body(
             e_child,
@@ -1800,7 +1800,7 @@ fn compile_function(
                 body: body_expr,
               ),
             )
-          Ok(#(state.leave_function(e_child, save), None))
+          Ok(#(None, state.leave_function(e_child, save)))
         }
         Some(DirectAbi(arity:, takes_this:)) -> {
           let direct_fn_name = case takes_this {
@@ -1851,8 +1851,8 @@ fn compile_function(
               ),
             )
           Ok(#(
-            state.leave_function(e_child, save),
             Some(DirectEntryFn(direct_fn_name, arity, takes_this:)),
+            state.leave_function(e_child, save),
           ))
         }
       })

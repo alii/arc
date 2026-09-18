@@ -1716,7 +1716,7 @@ pub type PlainDateTimeMethod {
   PlainDateTimeToZonedDateTime
 }
 
-pub type TimeZone {
+pub type TemporalZone {
   UtcZone
   OffsetZone(ns: Int)
   IanaZone(zone: temporal_tz.Zone)
@@ -1794,7 +1794,11 @@ pub type TemporalData {
     microseconds: Int,
     nanoseconds: Int,
   )
-  TemporalZonedDateTime(epoch_ns: Int, time_zone: TimeZone, calendar: Calendar)
+  TemporalZonedDateTime(
+    epoch_ns: Int,
+    time_zone: TemporalZone,
+    calendar: Calendar,
+  )
 }
 
 pub type AsyncGenResumeKind {
@@ -2335,7 +2339,7 @@ pub type Agent {
     waiters: List(AsyncWaiter),
     // gc only collects when this is 0
     call_depth: Int,
-    // zones resolved through hooks.load_time_zone, by proper id
+    // zones loaded through hooks.load_time_zone, by proper id
     tz_zones: Dict(String, temporal_tz.Zone),
   )
 }
@@ -2360,6 +2364,6 @@ pub type HostTerm
 pub type HostFnEntry {
   HostFnEntry(
     name: String,
-    call: fn(Agent, List(JsVal), JsVal, JsVal) -> #(Agent, Result(JsVal, JsVal)),
+    call: fn(Agent, List(JsVal), JsVal, JsVal) -> #(Result(JsVal, JsVal), Agent),
   )
 }

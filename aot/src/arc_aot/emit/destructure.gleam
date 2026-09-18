@@ -16,7 +16,7 @@ pub fn emit_pattern(
   mode: BindMode,
 ) -> EmitResult {
   Ok(
-    anf.run_to(build_pattern(pat, source, mode), e, fn(ef, _) {
+    anf.run_to(build_pattern(pat, source, mode), e, fn(_, ef) {
       ir.Values([ef.consts.undef])
     }),
   )
@@ -80,7 +80,7 @@ fn bind_identifier(name: String, v: ir.Value, mode: BindMode) -> Build(Nil) {
               anf.host_unit("box_set", [ir.Var(state.get_slot_var(e, slot)), v])
             False -> fn(e, k) {
               let #(n, e) = state.fresh_slot_var(e, slot)
-              anf.wrap(k(state.set_slot_var(e, slot, n), Nil), ir.Let(
+              anf.wrap(k(Nil, state.set_slot_var(e, slot, n)), ir.Let(
                 [n],
                 ir.Values([v]),
                 _,

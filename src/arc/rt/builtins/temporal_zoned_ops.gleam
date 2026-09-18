@@ -28,7 +28,7 @@ import arc/rt/builtins/temporal_plain_time.{
 import arc/rt/builtins/temporal_tz
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, type TimeZone, HintString, IanaZone,
+  type Agent, type Handle, type JsVal, type TemporalZone, HintString, IanaZone,
   KHandle, KStr, KUndef, OffsetZone, SObject, TemporalDate, TemporalDateTime,
   TemporalObj, TemporalZonedDateTime, UtcZone, classify, mk_undefined,
 }
@@ -46,7 +46,7 @@ pub fn check_iso_days_range(d: IsoDate) -> Result(Nil, JsError) {
 }
 
 pub fn get_possible_epoch_ns(
-  tz: TimeZone,
+  tz: TemporalZone,
   d: IsoDate,
   t: IsoTime,
 ) -> Result(List(Int), JsError) {
@@ -88,7 +88,7 @@ pub fn get_possible_epoch_ns(
 
 pub fn disambiguate_epoch_ns(
   possible: List(Int),
-  tz: TimeZone,
+  tz: TemporalZone,
   d: IsoDate,
   t: IsoTime,
   dis: Disambiguation,
@@ -137,7 +137,7 @@ pub fn disambiguate_epoch_ns(
 }
 
 pub fn get_epoch_ns_for(
-  tz: TimeZone,
+  tz: TemporalZone,
   d: IsoDate,
   t: IsoTime,
   dis: Disambiguation,
@@ -146,7 +146,7 @@ pub fn get_epoch_ns_for(
   disambiguate_epoch_ns(possible, tz, d, t, dis)
 }
 
-pub fn start_of_day_ns(tz: TimeZone, d: IsoDate) -> Result(Int, JsError) {
+pub fn start_of_day_ns(tz: TemporalZone, d: IsoDate) -> Result(Int, JsError) {
   use possible <- result.try(get_possible_epoch_ns(tz, d, midnight))
   case possible {
     [first, ..] -> validate_epoch_ns(first)
@@ -178,7 +178,7 @@ pub fn interpret_offset(
   d: IsoDate,
   t: IsoTime,
   behaviour: OffsetBehaviour,
-  tz: TimeZone,
+  tz: TemporalZone,
   dis: Disambiguation,
   offset_opt: OffsetOption,
   match_minutes match_minutes: Bool,
@@ -299,7 +299,7 @@ pub fn to_temporal_zoned(
   st: Agent,
   item: JsVal,
   options: JsVal,
-) -> #(#(Int, TimeZone, temporal_calendar.Calendar), Agent) {
+) -> #(#(Int, TemporalZone, temporal_calendar.Calendar), Agent) {
   case classify(item) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
@@ -361,7 +361,7 @@ pub fn parse_zoned_string(
         None ->
           Error(JsError(
             RangeError,
-            "ZonedDateTime string requires a [TimeZone]",
+            "ZonedDateTime string requires a [TemporalZone]",
           ))
         Some(tz_text) -> {
           use cal <- result.map(parsed_calendar_id(p))
@@ -376,7 +376,7 @@ pub fn zoned_string_epoch_ns(
   d: IsoDate,
   t_opt: Option(IsoTime),
   offset: ParsedOffset,
-  tz: TimeZone,
+  tz: TemporalZone,
   dis: Disambiguation,
   offset_opt: OffsetOption,
 ) -> Result(Int, JsError) {
@@ -415,7 +415,7 @@ pub fn zoned_from_bag(
   st: Agent,
   bag: Handle,
   options: JsVal,
-) -> #(#(Int, TimeZone, temporal_calendar.Calendar), Agent) {
+) -> #(#(Int, TemporalZone, temporal_calendar.Calendar), Agent) {
   let #(cal, st) = read_bag_calendar(st, bag)
   let #(f, st) =
     read_date_time_fields(st, bag, cal, read_offset: True, read_tz: True)
@@ -454,7 +454,7 @@ pub type RelativeTo {
   RelativeDate(date: IsoDate, calendar: temporal_calendar.Calendar)
   RelativeZoned(
     epoch_ns: Int,
-    time_zone: TimeZone,
+    time_zone: TemporalZone,
     calendar: temporal_calendar.Calendar,
   )
 }
@@ -564,7 +564,7 @@ fn relative_from_bag(st: Agent, bag: Handle) -> #(RelativeTo, Agent) {
 
 pub fn add_zoned_ns(
   ns: Int,
-  tz: TimeZone,
+  tz: TemporalZone,
   cal: temporal_calendar.Calendar,
   dur: Duration,
 ) -> Result(Int, JsError) {

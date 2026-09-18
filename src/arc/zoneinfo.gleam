@@ -1,8 +1,7 @@
 //// the operating system's tz database; the runtime never calls this
 //// directly, it arrives through HostHooks (see default_host_hooks)
 
-import arc/internal/host_time.{type TimeZone}
-import arc/rt/builtins/temporal_tz.{type Rules, type TzError}
+import arc/time_zone.{type Rules, type TimeZone, type TzError}
 
 // tz env var, else /etc/localtime, else /etc/timezone, else utc
 @external(erlang, "arc_zoneinfo_ffi", "system_time_zone")

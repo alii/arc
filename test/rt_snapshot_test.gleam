@@ -121,7 +121,7 @@ pub fn regexp_matcher_is_dropped_and_rebuilt_test() {
 pub fn deserialize_rebinds_hooks_and_drops_host_fns_test() {
   let st = rt_helpers.agent()
   let entry =
-    types.HostFnEntry(name: "f", call: fn(st, _, _, _) { #(st, Ok(mk_int(0))) })
+    types.HostFnEntry(name: "f", call: fn(st, _, _, _) { #(Ok(mk_int(0)), st) })
   let st = types.Agent(..st, host_fns: dict.from_list([#(0, entry)]))
   let st = roundtrip(st)
   assert st.host_fns == dict.new()

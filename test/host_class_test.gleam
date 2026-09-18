@@ -1,12 +1,14 @@
 import arc/bytecode/key.{Named}
-import arc/engine.{Finite, JsNumber, JsString, ModuleReturned, Returned}
+import arc/engine.{ModuleReturned, Returned}
 import arc/host.{type Context, Context}
 import arc/module/load_error
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type JsVal, StringKey, mk_int, mk_object, mk_string, mk_undefined,
+  type JsVal, JFloat, KNum, KStr, StringKey, mk_int, mk_object, mk_string,
+  mk_undefined,
 }
 import gleam/option.{Some}
+import rt_helpers
 
 fn get(
   ctx: Context(host),
@@ -17,27 +19,27 @@ fn get(
   #(v, Context(..ctx, agent: st))
 }
 
-fn service_ctor(_args, _this, ctx: Context(host)) {
-  let #(ctx, obj) = host.object(ctx, [#("id", mk_string("svc-1"))])
-  #(ctx, Ok(obj))
+fn service_ctor(ctx: Context(host), _args, _this) {
+  let #(obj, ctx) = host.object(ctx, [#("id", mk_string("svc-1"))])
+  #(Ok(obj), ctx)
 }
 
-fn service_who(_args, this, ctx: Context(host)) {
+fn service_who(ctx: Context(host), _args, this) {
   let #(v, ctx) = get(ctx, this, "id")
-  #(ctx, Ok(v))
+  #(Ok(v), ctx)
 }
 
-fn service_kind(_args, _this, ctx: Context(host)) {
-  #(ctx, Ok(mk_string("service")))
+fn service_kind(ctx: Context(host), _args, _this) {
+  #(Ok(mk_string("service")), ctx)
 }
 
-fn service_named(_args, this, ctx: Context(host)) {
+fn service_named(ctx: Context(host), _args, this) {
   let #(v, ctx) = get(ctx, this, "name")
-  #(ctx, Ok(v))
+  #(Ok(v), ctx)
 }
 
 fn engine_with_service() {
-  let #(eng, service) =
+  let #(service, eng) =
     engine.host_class(
       engine.new(),
       "Service",
@@ -53,7 +55,7 @@ pub fn host_class_extends_instance_method_test() {
   let eng = engine_with_service()
   let assert Ok(#(Returned(value:), _)) =
     engine.eval(eng, "class Channel extends Service {} new Channel().who()")
-  assert engine.classify(value) == JsString("svc-1")
+  assert rt_helpers.classify(value) == KStr("svc-1")
 }
 
 pub fn host_class_instanceof_test() {
@@ -63,7 +65,7 @@ pub fn host_class_instanceof_test() {
       eng,
       "class Channel extends Service {} String(new Channel() instanceof Service)",
     )
-  assert engine.classify(value) == JsString("true")
+  assert rt_helpers.classify(value) == KStr("true")
 }
 
 pub fn host_class_static_inheritance_test() {
@@ -73,7 +75,7 @@ pub fn host_class_static_inheritance_test() {
       eng,
       "class Channel extends Service {} Channel.kind() + ',' + Channel.named()",
     )
-  assert engine.classify(value) == JsString("service,Channel")
+  assert rt_helpers.classify(value) == KStr("service,Channel")
 }
 
 pub fn host_class_subclass_fields_run_after_super_test() {
@@ -83,39 +85,39 @@ pub fn host_class_subclass_fields_run_after_super_test() {
       eng,
       "class Channel extends Service { count = 7 } const c = new Channel(); c.id + ':' + c.count",
     )
-  assert engine.classify(value) == JsString("svc-1:7")
+  assert rt_helpers.classify(value) == KStr("svc-1:7")
 }
 
 pub fn host_class_not_a_global_until_placed_test() {
-  let #(eng, _service) =
+  let #(_service, eng) =
     engine.host_class(engine.new(), "Service", 0, service_ctor, [], [])
   let assert Ok(#(Returned(value:), _)) =
     engine.eval(eng, "typeof globalThis.Service")
-  assert engine.classify(value) == JsString("undefined")
+  assert rt_helpers.classify(value) == KStr("undefined")
 }
 
 pub fn host_fn_mints_callable_value_test() {
-  let #(eng, greet) =
-    engine.host_fn(engine.new(), "greet", 0, fn(_a, _t, ctx) {
-      #(ctx, Ok(mk_string("hi")))
+  let #(greet, eng) =
+    engine.host_fn(engine.new(), "greet", 0, fn(ctx, _a, _t) {
+      #(Ok(mk_string("hi")), ctx)
     })
   let eng = engine.define_global(eng, "greet", greet)
   let assert Ok(#(Returned(value:), _)) = engine.eval(eng, "greet()")
-  assert engine.classify(value) == JsString("hi")
+  assert rt_helpers.classify(value) == KStr("hi")
 }
 
 pub fn with_context_calls_js_function_test() {
   let assert Ok(#(_c, eng)) =
     engine.eval(engine.new(), "globalThis.double = (x) => x * 2;")
   let global = mk_object(engine.global(eng))
-  let #(_eng, result) =
+  let #(result, _eng) =
     engine.with_context(eng, fn(ctx) {
       let #(double, ctx) = get(ctx, global, "double")
-      let assert #(ctx, Ok(out)) =
+      let assert #(Ok(out), ctx) =
         host.call(ctx, double, mk_undefined(), [mk_int(21)])
-      #(ctx, out)
+      #(out, ctx)
     })
-  assert engine.classify(result) == JsNumber(Finite(42.0))
+  assert rt_helpers.classify(result) == KNum(JFloat(42.0))
 }
 
 fn dance_resolve(raw: String, _ref: String) {
@@ -127,13 +129,13 @@ fn no_source_loads(_resolved: String) {
 }
 
 fn read_export(eng, ns, name: String) {
-  engine.read_export(eng, ns, name) |> option.map(engine.classify)
+  engine.read_export(eng, ns, name) |> option.map(rt_helpers.classify)
 }
 
 pub fn host_module_named_import_test() {
-  let #(eng, greet) =
-    engine.host_fn(engine.new(), "greet", 0, fn(_a, _t, ctx) {
-      #(ctx, Ok(mk_string("hi")))
+  let #(greet, eng) =
+    engine.host_fn(engine.new(), "greet", 0, fn(ctx, _a, _t) {
+      #(Ok(mk_string("hi")), ctx)
     })
   let eng = engine.register_host_module(eng, "dance", [#("greet", greet)])
   let assert Ok(#(evaluated, eng)) =
@@ -145,13 +147,13 @@ pub fn host_module_named_import_test() {
       no_source_loads,
     )
   let assert ModuleReturned(namespace: ns, ..) = evaluated
-  assert read_export(eng, ns, "default") == Some(JsString("hi"))
+  assert read_export(eng, ns, "default") == Some(KStr("hi"))
 }
 
 pub fn host_module_namespace_import_test() {
-  let #(eng, greet) =
-    engine.host_fn(engine.new(), "greet", 0, fn(_a, _t, ctx) {
-      #(ctx, Ok(mk_string("yo")))
+  let #(greet, eng) =
+    engine.host_fn(engine.new(), "greet", 0, fn(ctx, _a, _t) {
+      #(Ok(mk_string("yo")), ctx)
     })
   let eng = engine.register_host_module(eng, "dance", [#("greet", greet)])
   let assert Ok(#(evaluated, eng)) =
@@ -163,11 +165,11 @@ pub fn host_module_namespace_import_test() {
       no_source_loads,
     )
   let assert ModuleReturned(namespace: ns, ..) = evaluated
-  assert read_export(eng, ns, "r") == Some(JsString("yo"))
+  assert read_export(eng, ns, "r") == Some(KStr("yo"))
 }
 
 pub fn host_module_class_extends_test() {
-  let #(eng, service) =
+  let #(service, eng) =
     engine.host_class(
       engine.new(),
       "Service",
@@ -186,18 +188,18 @@ pub fn host_module_class_extends_test() {
       no_source_loads,
     )
   let assert ModuleReturned(namespace: ns, ..) = evaluated
-  assert read_export(eng, ns, "default") == Some(JsString("svc-1"))
+  assert read_export(eng, ns, "default") == Some(KStr("svc-1"))
 }
 
 pub fn with_context_threads_heap_back_test() {
-  let #(eng, holder) =
+  let #(holder, eng) =
     engine.with_context(engine.new(), fn(ctx) {
       host.object(ctx, [#("v", mk_int(9))])
     })
-  let #(_eng, out) =
+  let #(out, _eng) =
     engine.with_context(eng, fn(ctx) {
       let #(v, ctx) = get(ctx, holder, "v")
-      #(ctx, v)
+      #(v, ctx)
     })
-  assert engine.classify(out) == JsNumber(Finite(9.0))
+  assert rt_helpers.classify(out) == KNum(JFloat(9.0))
 }

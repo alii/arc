@@ -6,11 +6,12 @@ import arc/rt/types.{
   type Agent, type JsVal, JInt, JNan, KNum, KStr, classify, mk_int, mk_number,
   mk_object, mk_string,
 }
+import arc/time_zone
 import arc/zoneinfo
 import gleam/list
 import rt_helpers
 
-fn agent_in(zone: host_time.TimeZone) -> Agent {
+fn agent_in(zone: time_zone.TimeZone) -> Agent {
   rt_builtins.new_agent(HostHooks(..rt_helpers.quiet_hooks(), time_zone: zone))
 }
 

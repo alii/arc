@@ -1,12 +1,10 @@
 import arc/internal/int_math.{floor_div}
+import arc/time_zone.{type Rules, type TzError}
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option}
 import gleam/result
 import gleam/string
-
-// parsed transition data for one zone, host supplied
-pub type Rules
 
 pub opaque type Zone {
   Zone(id: String, rules: Rules)
@@ -42,31 +40,17 @@ pub fn available_ids(host_ids: List(String)) -> List(String) {
   list.sort(["UTC", ..zones], string.compare)
 }
 
-pub type TzError {
-  NoZoneinfo
-  Unreadable(detail: String)
-  Unparseable(detail: String)
-}
-
-pub fn describe(error: TzError) -> String {
-  case error {
-    NoZoneinfo -> "no time zone database on this host"
-    Unreadable(detail:) -> "unreadable time zone data (" <> detail <> ")"
-    Unparseable(detail:) -> "corrupt time zone data (" <> detail <> ")"
-  }
-}
-
-pub type ResolveError {
+pub type ZoneLookupError {
   UnknownZone
   LoadFailed(id: String, error: TzError)
 }
 
 // a known name becomes a zone with its rules, loading each identifier once
-pub fn resolve(
+pub fn lookup(
   name: String,
   zones: Dict(String, Zone),
   load: fn(String) -> Result(Rules, TzError),
-) -> Result(#(Zone, Dict(String, Zone)), ResolveError) {
+) -> Result(#(Zone, Dict(String, Zone)), ZoneLookupError) {
   use identifier <- result.try(
     known_identifier(name) |> option.to_result(UnknownZone),
   )

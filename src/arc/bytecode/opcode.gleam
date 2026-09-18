@@ -343,7 +343,7 @@ pub type BinOpKind {
   InstanceOf
 }
 
-// classified once at resolve time, not per execution
+// classified once at assemble time, not per execution
 pub type ClassifiedBinOp {
   PureOp(op: PureBinOp)
   AddOp
@@ -394,7 +394,7 @@ pub type UnaryOpKind {
 pub type IrOp {
   IrFinal(op: Op)
 
-  // no pc slot; resolve records it in functemplate.lines
+  // no pc slot; assemble records it in functemplate.lines
   IrLine(line: Int)
 
   // no pc slot

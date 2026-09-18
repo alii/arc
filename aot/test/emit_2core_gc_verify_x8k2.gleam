@@ -156,7 +156,7 @@ fn run_a() {
           let st0 = seed()
           let s0 = rt_gc.stats(st0)
           io.println(stats_line("seed:     ", s0))
-          let #(out1, st1) = run.apply_js_main(m_alloc, st0)
+          let #(out1, st1) = run.apply_js_main(st0, m_alloc)
           let s1 = rt_gc.stats(st1)
           io.println(stats_line("post-run: ", s1))
           io.println(
@@ -176,7 +176,7 @@ fn run_a() {
           )
           assert_in_range("dropped      ", dropped, 99_000, 101_000)
           assert_eq("since_gc reset", int.to_string(s2.alloc_since_gc), "0")
-          let #(out2, st3) = run.apply_js_main(m_read, st2)
+          let #(out2, st3) = run.apply_js_main(st2, m_read)
           io.println(
             "  read outcome: " <> string.slice(string.inspect(out2), 0, 120),
           )
@@ -202,7 +202,7 @@ fn run_b() {
       emit_2core_harness.buf_reset()
       let st0 = seed()
       let s0 = rt_gc.stats(st0)
-      let #(out, st1) = run.apply_js_main(m, st0)
+      let #(out, st1) = run.apply_js_main(st0, m)
       let s1 = rt_gc.stats(st1)
       io.println(stats_line("seed:     ", s0))
       io.println(stats_line("post-run: ", s1))
@@ -235,7 +235,7 @@ fn run_c() {
       emit_2core_harness.buf_reset()
       let st0 = seed()
       let s0 = rt_gc.stats(st0)
-      let #(out, st1) = run.apply_js_main(m, st0)
+      let #(out, st1) = run.apply_js_main(st0, m)
       let s1 = rt_gc.stats(st1)
       io.println(stats_line("post-run: ", s1))
       io.println("  outcome  : " <> string.slice(string.inspect(out), 0, 200))

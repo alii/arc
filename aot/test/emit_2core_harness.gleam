@@ -95,10 +95,10 @@ pub fn seed() -> Agent {
   run.new_linked_agent(test_hooks())
 }
 
-pub fn run_loaded(module: Atom, st: Agent) -> #(Agent, DiffRun) {
+pub fn run_loaded(module: Atom, st: Agent) -> #(DiffRun, Agent) {
   buf_reset()
-  let #(st, result) = run.main(module, st)
-  #(st, DiffRun(stdout: buf_read(), result:))
+  let #(result, st) = run.main(st, module)
+  #(DiffRun(stdout: buf_read(), result:), st)
 }
 
 pub fn run_compiled(source: String) -> DiffRun {
@@ -113,7 +113,7 @@ pub fn run_compiled(source: String) -> DiffRun {
           case run.load(beam, mod_name) {
             Error(reason) ->
               DiffRun(stdout: <<>>, result: Error("load failed: " <> reason))
-            Ok(module) -> run_loaded(module, seed()).1
+            Ok(module) -> run_loaded(module, seed()).0
           }
       }
   }

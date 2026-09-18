@@ -20,7 +20,7 @@ import arc/rt/builtins/temporal_iso.{
 import arc/rt/builtins/temporal_zoned_ops.{
   check_iso_days_range, get_epoch_ns_for,
 }
-import arc/rt/types.{type TimeZone}
+import arc/rt/types.{type TemporalZone}
 import gleam/int
 import gleam/list
 import gleam/result
@@ -405,7 +405,7 @@ pub fn diff_date_time_core(
 
 pub fn zoned_diff_round_time(
   cal: temporal_calendar.Calendar,
-  tz: TimeZone,
+  tz: TemporalZone,
   a_ns: Int,
   b_ns: Int,
   largest: Unit,
@@ -451,7 +451,7 @@ pub fn zoned_diff_round_time(
 }
 
 fn zoned_nudge_time(
-  tz: TimeZone,
+  tz: TemporalZone,
   a_dt: #(IsoDate, IsoTime),
   start_date: IsoDate,
   start_ns: Int,

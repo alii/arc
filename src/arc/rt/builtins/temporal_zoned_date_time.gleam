@@ -42,7 +42,7 @@ import arc/rt/builtins/temporal_zoned_ops.{
 }
 import arc/rt/types.{
   type Agent, type JsVal, type NativeToken, type TemporalProtos,
-  type TemporalStaticName, type TemporalZonedGetter, type TimeZone,
+  type TemporalStaticName, type TemporalZone, type TemporalZonedGetter,
   type ZonedDateTimeMethod, CompareStatic, DateCalendarId, DateDay,
   DateDayOfWeek, DateDayOfYear, DateDaysInMonth, DateDaysInWeek, DateDaysInYear,
   DateEra, DateEraYear, DateInLeapYear, DateMonth, DateMonthCode,
@@ -248,7 +248,7 @@ fn require_zoned(
   st: Agent,
   this: JsVal,
   name: String,
-) -> #(Int, TimeZone, temporal_calendar.Calendar) {
+) -> #(Int, TemporalZone, temporal_calendar.Calendar) {
   require_temporal(st, this, "ZonedDateTime", name, zoned_slot_of)
 }
 
@@ -541,9 +541,9 @@ fn zoned_until_since(
   protos: TemporalProtos,
   cal: temporal_calendar.Calendar,
   a_ns: Int,
-  a_tz: TimeZone,
+  a_tz: TemporalZone,
   b_ns: Int,
-  b_tz: TimeZone,
+  b_tz: TemporalZone,
   args: List(JsVal),
   is_since is_since: Bool,
 ) -> #(JsVal, Agent) {
@@ -589,7 +589,11 @@ fn zoned_until_since(
   }
 }
 
-fn format_zoned(ns: Int, tz: TimeZone, precision: SecondsPrecision) -> String {
+fn format_zoned(
+  ns: Int,
+  tz: TemporalZone,
+  precision: SecondsPrecision,
+) -> String {
   let off = tz_offset_ns_at(tz, ns)
   let #(d, t) = epoch_ns_to_iso(ns, off)
   format_iso_date(d)

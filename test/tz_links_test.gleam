@@ -1,10 +1,12 @@
-import arc/engine.{JsBool, JsString, Returned}
+import arc/engine.{Returned}
 import arc/rt/builtins/temporal_tz
+import arc/rt/types.{type JsValKind, KBool, KStr}
 import arc/zoneinfo
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
+import rt_helpers
 
 @external(erlang, "arc_tz_links_ffi", "links")
 fn links() -> Dict(String, String)
@@ -22,9 +24,9 @@ fn identifier(id: String) -> String {
   identifier
 }
 
-fn js(source: String) -> engine.JsValueKind {
+fn js(source: String) -> JsValKind {
   let assert Ok(#(Returned(value:), _)) = engine.eval(engine.new(), source)
-  engine.classify(value)
+  rt_helpers.classify(value)
 }
 
 pub fn link_resolves_to_primary_test() {
@@ -105,21 +107,21 @@ pub fn supported_values_of_excludes_links_test() {
       <> " && ids.join() === [...ids].sort().join()"
       <> " && new Set(ids).size === ids.length",
     )
-    == JsBool(True)
+    == KBool(True)
 }
 
 pub fn zoned_date_time_accepts_links_test() {
   assert js("new Temporal.ZonedDateTime(0n, 'asia/calcutta').timeZoneId")
-    == JsString("Asia/Calcutta")
+    == KStr("Asia/Calcutta")
   assert js(
       "const a = new Temporal.ZonedDateTime(0n, 'US/Eastern');"
       <> "const b = new Temporal.ZonedDateTime(0n, 'America/New_York');"
       <> "a.equals(b) && a.offsetNanoseconds === b.offsetNanoseconds",
     )
-    == JsBool(True)
+    == KBool(True)
   assert js(
       "new Intl.DateTimeFormat('en', { timeZone: 'Europe/Kiev' })"
       <> ".resolvedOptions().timeZone",
     )
-    == JsString("Europe/Kiev")
+    == KStr("Europe/Kiev")
 }

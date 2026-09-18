@@ -1,5 +1,4 @@
 import arc/compiler
-import arc/engine.{type JsValueKind, Finite, JsNumber, JsString}
 import arc/host_hooks
 import arc/interp/entry
 import arc/interp/safepoint
@@ -7,9 +6,11 @@ import arc/parser
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion, ThrowCompletion}
 import arc/rt/inspect as rt_inspect
+import arc/rt/types.{type JsValKind, JFloat, KNum, KStr}
 import gleam/string
+import rt_helpers
 
-fn run(source: String) -> Result(JsValueKind, String) {
+fn run(source: String) -> Result(JsValKind, String) {
   case parser.parse_script(source) {
     Error(err) -> Error("parse: " <> parser.parse_error_to_string(err))
     Ok(#(body, sb)) ->
@@ -22,7 +23,7 @@ fn run(source: String) -> Result(JsValueKind, String) {
           case entry.run_script(st, template) {
             #(NormalCompletion(v), st) -> {
               let _st = safepoint.end_turn(st, [v])
-              Ok(engine.classify(v))
+              Ok(rt_helpers.classify(v))
             }
             #(ThrowCompletion(v), st) ->
               Error("threw: " <> rt_inspect.inspect(st, v))
@@ -32,7 +33,7 @@ fn run(source: String) -> Result(JsValueKind, String) {
   }
 }
 
-fn expect(source: String, want: JsValueKind) -> Nil {
+fn expect(source: String, want: JsValKind) -> Nil {
   case run(source) {
     Ok(got) ->
       case got == want {
@@ -52,8 +53,8 @@ fn expect(source: String, want: JsValueKind) -> Nil {
   }
 }
 
-fn n(f: Float) -> JsValueKind {
-  JsNumber(Finite(f))
+fn n(f: Float) -> JsValKind {
+  KNum(JFloat(f))
 }
 
 fn parses(source: String) -> Bool {
@@ -139,7 +140,7 @@ pub fn fusion_class_seven_step_children_order_test() {
       <> "   static sf = C.sm() + 4;"
       <> " }"
       <> " new C().name() + '/' + C.sf",
-    JsString("B:3/14"),
+    KStr("B:3/14"),
   )
   expect("class K { static v; static { K.v = 6 * 7; } } K.v", n(42.0))
   expect(
@@ -150,37 +151,37 @@ pub fn fusion_class_seven_step_children_order_test() {
       <> "   who(){ return super.id(); }"
       <> " }"
       <> " new C().who()",
-    JsString("A"),
+    KStr("A"),
   )
 }
 
 pub fn fusion_template_substitution_refs_captured_test() {
   expect(
     "function o(){ let x = 'q'; return (function(){ return `[${x}]`; })(); } o()",
-    JsString("[q]"),
+    KStr("[q]"),
   )
   expect(
     "function o(){ let x = 1, y = 2;"
       <> " let f = () => `${x}-${y}`;"
       <> " x = 9; return f(); } o()",
-    JsString("9-2"),
+    KStr("9-2"),
   )
   expect(
     "function o(){ let n = 3;"
       <> " function tag(s, a){ return s[0] + (a * 2); }"
       <> " return (() => tag`v=${n}`)(); } o()",
-    JsString("v=6"),
+    KStr("v=6"),
   )
 }
 
 pub fn fusion_nfe_self_name_binding_test() {
-  expect("let g = function f(){ return typeof f; }; g()", JsString("function"))
-  expect("let g = function f(){ return 1; }; typeof f", JsString("undefined"))
+  expect("let g = function f(){ return typeof f; }; g()", KStr("function"))
+  expect("let g = function f(){ return 1; }; typeof f", KStr("undefined"))
   expect("(function f(n){ return n <= 1 ? 1 : n * f(n - 1); })(5)", n(120.0))
-  expect("(function f(){ f = 0; return typeof f; })()", JsString("function"))
+  expect("(function f(){ f = 0; return typeof f; })()", KStr("function"))
   expect(
     "let f = 7; let r = (function f(){ return typeof f; })(); r + ':' + f",
-    JsString("function:7"),
+    KStr("function:7"),
   )
 }
 
@@ -193,11 +194,11 @@ pub fn fusion_annexb_sloppy_fn_in_block_test() {
   )
   expect(
     "function t(){ let r = typeof f; { function f(){} } return r; } t()",
-    JsString("undefined"),
+    KStr("undefined"),
   )
   expect(
     "function t(){ 'use strict'; { function f(){ return 1; } } return typeof f; } t()",
-    JsString("undefined"),
+    KStr("undefined"),
   )
   expect(
     "function t(){ let f = 1; { function f(){ return 2; } } return f; } t()",
@@ -236,18 +237,18 @@ pub fn fusion_paramsbody_separate_var_env_test() {
       <> "   var x = 'inside'; pb = function(){ return x; };"
       <> " }());"
       <> " pp() + ' ' + pb()",
-    JsString("outside inside"),
+    KStr("outside inside"),
   )
   expect("function f(x = 1){ var x; return x; } f()", n(1.0))
   expect("function f(x = 1){ var x = 2; return x; } f()", n(2.0))
   expect(
     "function f(g = 1){ var r = typeof g; function g(){}; return r; } f()",
-    JsString("function"),
+    KStr("function"),
   )
   expect(
     "var q = 'out'; function f(a = function(){ return q; }){ var q;"
       <> " return a() + ':' + q; } f()",
-    JsString("out:undefined"),
+    KStr("out:undefined"),
   )
   expect("function f(a = 1, ...r){ var r; return r.length; } f(1,2,3)", n(2.0))
   expect(
@@ -257,7 +258,7 @@ pub fn fusion_paramsbody_separate_var_env_test() {
   expect(
     "var y = 'out'; var p;"
       <> " ((q = (p = () => y)) => { var y = 'in'; return p(); })()",
-    JsString("out"),
+    KStr("out"),
   )
   expect(
     "function f(a = 1){ return g(); function g(){ return a; } } f()",
@@ -282,7 +283,7 @@ pub fn fusion_catch_param_body_env_split_test() {
       <> "   pb = function(){ return x; }; let x = 'inside';"
       <> " }"
       <> " pp() + ' ' + pb()",
-    JsString("outside inside"),
+    KStr("outside inside"),
   )
   expect(
     "var o = [];"
@@ -290,13 +291,13 @@ pub fn fusion_catch_param_body_env_split_test() {
       <> "   { let v = 'a'; o.push(function(){ return v; }); }"
       <> "   { let v = 'b'; o.push(function(){ return v; }); } }"
       <> " o[0]() + o[1]()",
-    JsString("ab"),
+    KStr("ab"),
   )
   expect(
     "var o = []; try { throw 1; } catch { o.push(1); }"
       <> " { let z = 'sib'; o.push(function(){ return z; }); }"
       <> " '' + o[0] + o[1]()",
-    JsString("1sib"),
+    KStr("1sib"),
   )
   assert rejects("try {} catch (e) { let e; }")
   assert rejects("try {} catch (e) { class e {} }")
