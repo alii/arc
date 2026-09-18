@@ -31,7 +31,7 @@ run_once(Mod, Hooks) ->
         {garbage_collection, GI0} = process_info(self(), garbage_collection),
         G0 = proplists:get_value(minor_gcs, GI0),
         T0 = erlang:monotonic_time(microsecond),
-        {C, _A2} = arc_aot@run:apply_main(Mod, A),
+        {C, _A2} = arc_aot@run:apply_js_main(Mod, A),
         T1 = erlang:monotonic_time(microsecond),
         {reductions, R1} = process_info(self(), reductions),
         {garbage_collection, GI1} = process_info(self(), garbage_collection),

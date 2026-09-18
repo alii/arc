@@ -14,7 +14,7 @@ fn agent() -> Agent {
   st
 }
 
-fn run(source: String) -> #(rt_call.Completion, Agent) {
+fn run(source: String) -> #(rt_call.Completion(JsVal), Agent) {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
     as { "parse failed: " <> source }
   let assert Ok(template) = compiler.compile_script(body, sb)

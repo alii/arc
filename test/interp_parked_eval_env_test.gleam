@@ -6,10 +6,10 @@ import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion} as rt_call
 import arc/rt/gc as rt_gc
 import arc/rt/inspect as rt_inspect
-import arc/rt/types.{type Agent}
+import arc/rt/types.{type Agent, type JsVal}
 import rt_helpers
 
-fn run(st: Agent, source: String) -> #(rt_call.Completion, Agent) {
+fn run(st: Agent, source: String) -> #(rt_call.Completion(JsVal), Agent) {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
   let assert Ok(template) = compiler.compile_script(body, sb)
   entry.run_script(st, template)

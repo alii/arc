@@ -357,14 +357,12 @@ fn own_keys_impl(
 ) -> #(JsVal, Agent) {
   case classify(first_arg_or_undefined(args)) {
     KHandle(h) -> {
-      let fast = case enumerable_only {
-        True -> own_enum_fast(st, mk_object(h))
-        False -> None
+      let plain = case enumerable_only {
+        True -> plain_own_enum_pairs(st, mk_object(h))
+        False -> Miss
       }
-      use <- bool.lazy_guard(option.is_some(fast), fn() {
-        let names =
-          option.unwrap(fast, []) |> list.map(fn(kv) { mk_string(kv.0) })
-        ok_array(st, names)
+      use <- lazy_guard_pairs(plain, fn(pairs) {
+        ok_array(st, list.map(pairs, fn(kv) { mk_string(kv.0) }))
       })
       let #(names, st) = case enumerable_only {
         True -> rt_obj.t_enumerable_own_keys(st, h)
@@ -399,8 +397,24 @@ fn own_keys_impl(
 }
 
 // plain named data only, see arc_rt_obj_ffi
-@external(erlang, "arc_rt_obj_ffi", "t_own_enum_fast")
-fn own_enum_fast(st: Agent, obj: JsVal) -> Option(List(#(String, JsVal)))
+type PlainPairs {
+  PlainPairs(List(#(String, JsVal)))
+  Miss
+}
+
+@external(erlang, "arc_rt_obj_ffi", "plain_own_enum_pairs")
+fn plain_own_enum_pairs(st: Agent, obj: JsVal) -> PlainPairs
+
+fn lazy_guard_pairs(
+  plain: PlainPairs,
+  then: fn(List(#(String, JsVal))) -> a,
+  otherwise: fn() -> a,
+) -> a {
+  case plain {
+    PlainPairs(pairs) -> then(pairs)
+    Miss -> otherwise()
+  }
+}
 
 fn values(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(pairs, st) = own_enumerable_pairs(st, args)
@@ -426,9 +440,9 @@ fn own_enumerable_pairs(
 ) -> #(List(#(String, JsVal)), Agent) {
   case classify(first_arg_or_undefined(args)) {
     KHandle(h) ->
-      case own_enum_fast(st, mk_object(h)) {
-        Some(pairs) -> #(pairs, st)
-        None -> {
+      case plain_own_enum_pairs(st, mk_object(h)) {
+        PlainPairs(pairs) -> #(pairs, st)
+        Miss -> {
           let #(keys, st) = rt_obj.t_own_keys(st, h)
           collect_enumerable(st, h, keys, [])
         }

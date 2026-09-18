@@ -411,9 +411,9 @@ fn materialize_plain(st: Agent, val: JsonValue) -> #(JsVal, Agent) {
       let object_proto = st.realm.object.prototype
       let #(h, st) = {
         use seq <- rt_store.t_cell_new_with(st, list.length(entries))
-        let props = case ffi_plain_props(entries, seq) {
-          Some(#(props, _seq)) -> props
-          None -> plain_props(entries, dict.new(), seq)
+        let props = case plain_prop_dict(entries, seq) {
+          PlainProps(props:, ..) -> props
+          PropsMiss -> plain_props(entries, dict.new(), seq)
         }
         SObject(
           kind: Ordinary,
@@ -457,11 +457,16 @@ fn materialize_plain_entries(
   }
 }
 
-@external(erlang, "arc_rt_json_ffi", "plain_props")
-fn ffi_plain_props(
-  entries: List(#(String, JsVal)),
-  seq: Int,
-) -> Option(#(dict.Dict(rt_types.PropertyKey, rt_types.Property), Int))
+type PlainProps {
+  PlainProps(
+    props: dict.Dict(rt_types.PropertyKey, rt_types.Property),
+    seq: Int,
+  )
+  PropsMiss
+}
+
+@external(erlang, "arc_rt_json_ffi", "plain_prop_dict")
+fn plain_prop_dict(entries: List(#(String, JsVal)), seq: Int) -> PlainProps
 
 fn plain_props(
   entries: List(#(String, JsVal)),
@@ -665,12 +670,12 @@ fn json_stringify(
   let space = helpers.arg_at(args, 2)
   let #(replacer, st) = build_replacer(st, replacer_arg)
   let #(gap, st) = compute_gap(st, space)
-  let fast = case replacer {
-    NoReplacer -> stringify_fast(st, val, gap)
+  let plain = case replacer {
+    NoReplacer -> plain_stringify(st, val, gap)
     _ -> JsonMiss
   }
-  use <- bool.lazy_guard(fast != JsonMiss, fn() {
-    case fast {
+  use <- bool.lazy_guard(plain != JsonMiss, fn() {
+    case plain {
       JsonDone(text) ->
         case string.byte_size(text) > limits.max_string_bytes {
           True -> rt_val.t_throw_range_error(st, "Invalid string length")
@@ -1019,16 +1024,16 @@ fn finalize_brackets(
   }
 }
 
-type FastJson {
+type Stringified {
   JsonDone(String)
   JsonMiss
 }
 
 // whole value in one pass when nothing can run user code
-@external(erlang, "arc_rt_json_ffi", "stringify_fast")
-fn stringify_fast(st: Agent, value: JsVal, gap: String) -> FastJson
+@external(erlang, "arc_rt_json_ffi", "plain_stringify")
+fn plain_stringify(st: Agent, value: JsVal, gap: String) -> Stringified
 
-@external(erlang, "arc_rt_json_ffi", "quote")
+@external(erlang, "arc_rt_json_ffi", "quote_tree")
 fn quote_tree(s: String) -> StringTree
 
 // all utf-8 binaries already, skips the unicode rescan
@@ -1088,7 +1093,7 @@ fn string_key(key: rt_types.ObjectKey) -> Result(PropertyKey, Nil) {
   }
 }
 
-@external(erlang, "arc_rt_json_ffi", "plain_keys")
+@external(erlang, "arc_rt_json_ffi", "plain_enumerable_keys")
 fn plain_enumerable_keys(
   props: dict.Dict(PropertyKey, rt_types.Property),
 ) -> List(PropertyKey)

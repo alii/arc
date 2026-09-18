@@ -3,7 +3,7 @@
 import arc/bytecode/opcode
 import arc/internal/ordered_entries
 import arc/internal/tree_array
-import arc/interp/ffi
+import arc/interp/kernel
 import arc/rt/arena
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
@@ -69,14 +69,36 @@ fn slot_set(slots: ShapeSlots, off: Int, v: JsVal) -> ShapeSlots
 @external(erlang, "arc_rt_layout_root_ffi", "frame")
 fn frame_macro(this: JsVal, f: JsVal, home: JsVal, nt: JsVal) -> Dynamic
 
-@external(erlang, "arc_rt_call_ffi", "mk_frame")
-fn mk_frame(this: JsVal, f: JsVal, home: JsVal, nt: JsVal) -> rt_call.Frame
-
 @external(erlang, "arc_rt_layout_root_ffi", "is_js_number")
 fn is_js_number(v: JsVal) -> Bool
 
 @external(erlang, "arc_rt_layout_root_ffi", "is_str")
 fn is_str(v: JsVal) -> Bool
+
+@external(erlang, "arc_rt_layout_root_ffi", "is_nullish")
+fn is_nullish(v: JsVal) -> Bool
+
+@external(erlang, "arc_rt_layout_root_ffi", "elem_at")
+fn elem_at(els: rt_types.JsElements, idx: Int) -> JsVal
+
+@external(erlang, "arc_rt_layout_root_ffi", "elem_write_grow")
+fn elem_write_grow(els: rt_types.JsElements, idx: Int, v: JsVal) -> Dynamic
+
+@external(erlang, "arc_rt_layout_root_ffi", "native_token")
+fn native_token(cell: rt_types.Cell) -> Dynamic
+
+@external(erlang, "arc_rt_layout_root_ffi", "named_plain")
+fn named_plain(kind: rt_types.ObjKind, key: BitArray) -> Bool
+
+@external(erlang, "arc_rt_layout_root_ffi", "birth_plain")
+fn birth_plain(birth: rt_types.FnBirth, key: BitArray) -> Bool
+
+@external(erlang, "arc_rt_layout_root_ffi", "shaped_next")
+fn shaped_next(
+  shapes: dict.Dict(Int, rt_types.ShapeDesc),
+  sid: Int,
+  key: BitArray,
+) -> Dynamic
 
 @external(erlang, "arc_rt_layout_root_ffi", "dyn")
 fn template(label: String) -> FuncTemplate
@@ -222,6 +244,10 @@ pub fn jsval_predicates_test() {
   assert !is_js_number(str)
   assert !is_js_number(rt_types.mk_bigint(1))
   assert !is_js_number(rt_types.mk_undefined())
+  assert is_nullish(rt_types.mk_undefined())
+  assert is_nullish(rt_types.mk_null())
+  assert !is_nullish(rt_types.mk_number(rt_types.JInt(0)))
+  assert !is_nullish(str)
 }
 
 pub fn constants_test() {
@@ -340,6 +366,67 @@ pub fn keys_and_elements_test() {
   assert tag_of(Sparse(sparse)) == tag("ELEMS_SPARSE")
   assert element(2, dyn(Sparse(sparse))) == dyn(sparse)
   assert dyn(rt_types.mk_hole()) == tag("ELEMS_HOLE")
+}
+
+pub fn kernel_macros_test() {
+  let a = rt_types.mk_string("a")
+  let hole = rt_types.mk_hole()
+  let dense = Dense(tree_array.from_list([a]))
+  let sparse = Sparse(dict.from_list([#(3, a)]))
+  assert elem_at(dense, 0) == a
+  assert elem_at(dense, 1) == hole
+  assert elem_at(sparse, 3) == a
+  assert elem_at(sparse, 0) == hole
+  assert elem_at(NoElements, 0) == hole
+  assert elem_write_grow(dense, 1, a)
+    == dyn(Dense(tree_array.from_list([a, a])))
+  assert elem_write_grow(dense, idx("MAX_GAP") + 2, a) == dyn(Miss)
+  assert elem_write_grow(NoElements, 0, a)
+    == dyn(Dense(tree_array.from_list([a])))
+  assert elem_write_grow(sparse, 9, a)
+    == dyn(Sparse(dict.from_list([#(3, a), #(9, a)])))
+  let native =
+    SObject(
+      kind: NativeFn(
+        token: ReturnThis,
+        name: "n",
+        length: 0,
+        constructible: False,
+      ),
+      proto: None,
+      props: dict.new(),
+      symbol_props: [],
+      elements: NoElements,
+      extensible: True,
+    )
+  assert native_token(native) == dyn(ReturnThis)
+  assert native_token(SObject(..native, kind: Ordinary)) == tag("NONE")
+  assert named_plain(Ordinary, <<"length">>)
+  assert !named_plain(ArrayObj(0), <<"length">>)
+  assert named_plain(ArrayObj(0), <<"x">>)
+  assert birth_plain(BirthSettled, <<"name">>)
+  assert !birth_plain(BirthPending(None), <<"name">>)
+  assert !birth_plain(BirthPending(None), <<"length">>)
+  assert birth_plain(BirthPending(None), <<"prototype">>)
+  assert !birth_plain(BirthPending(Some(Handle(1))), <<"prototype">>)
+  assert birth_plain(BirthPending(Some(Handle(1))), <<"x">>)
+  let k = <<"k">>
+  let to =
+    ShapeDesc(
+      arity: 1,
+      offsets: dict.from_list([#(k, 0)]),
+      transitions: dict.new(),
+    )
+  let from =
+    ShapeDesc(
+      arity: 0,
+      offsets: dict.new(),
+      transitions: dict.from_list([#(k, 9)]),
+    )
+  let shapes = dict.from_list([#(7, from), #(9, to)])
+  assert shaped_next(shapes, 7, k) == dyn(#(9, to.offsets))
+  assert shaped_next(shapes, 7, <<"z">>) == dyn(Miss)
+  assert shaped_next(shapes, 3, k) == dyn(Miss)
 }
 
 pub fn sshaped_object_test() {
@@ -598,37 +685,42 @@ pub fn frame_test() {
   let f = rt_types.mk_string("fn")
   let home = rt_types.mk_string("home")
   let nt = rt_types.mk_undefined()
-  let frame = mk_frame(this, f, home, nt)
+  let frame = rt_call.mk_frame(this, f, home, nt)
   assert frame_macro(this, f, home, nt) == dyn(frame)
   assert dyn(frame) == dyn(#(this, f, home, nt))
   assert rt_call.frame_active_func(frame) == f
 }
 
-@external(erlang, "arc_rt_obj_ffi", "t_get_elem_fast")
-fn get_elem_fast(st: Agent, recv: JsVal, idx: Int) -> Dynamic
+@external(erlang, "arc_rt_obj_ffi", "t_get_elem")
+fn t_get_elem(st: Agent, recv: JsVal, idx: Int) -> Dynamic
 
-@external(erlang, "arc_rt_obj_ffi", "t_set_elem_fast")
-fn set_elem_fast(st: Agent, recv: JsVal, idx: Int, v: JsVal) -> Dynamic
+@external(erlang, "arc_rt_obj_ffi", "t_set_elem")
+fn t_set_elem(st: Agent, recv: JsVal, idx: Int, v: JsVal) -> Dynamic
 
 @external(erlang, "arc_rt_obj_ffi", "t_get_prop_own_data")
-fn get_prop_own_data(st: Agent, recv: JsVal, key: BitArray) -> Dynamic
+fn t_get_prop_own_data(st: Agent, recv: JsVal, key: BitArray) -> Dynamic
 
 @external(erlang, "arc_rt_obj_ffi", "t_set_prop_own_data")
-fn set_prop_own_data(st: Agent, recv: JsVal, key: BitArray, v: JsVal) -> Dynamic
+fn t_set_prop_own_data(
+  st: Agent,
+  recv: JsVal,
+  key: BitArray,
+  v: JsVal,
+) -> Dynamic
 
-@external(erlang, "arc_rt_obj_ffi", "t_instanceof_fast")
-fn instanceof_fast(st: Agent, v: JsVal, ctor: JsVal) -> Dynamic
+@external(erlang, "arc_rt_obj_ffi", "t_instanceof_i32")
+fn t_instanceof_i32(st: Agent, v: JsVal, ctor: JsVal) -> Dynamic
 
-@external(erlang, "arc_rt_call_fast_ffi", "t_call_method_mono")
-fn call_method_mono(
+@external(erlang, "arc_rt_call_ic_ffi", "t_call_method_mono")
+fn t_call_method_mono(
   st: Agent,
   recv: JsVal,
   key: BitArray,
   args: List(JsVal),
 ) -> #(Dynamic, Agent)
 
-@external(erlang, "arc_rt_call_fast_ffi", "t_new_simple")
-fn new_simple(st: Agent, ctor: JsVal, args: List(JsVal)) -> #(Dynamic, Agent)
+@external(erlang, "arc_rt_call_ic_ffi", "t_new_direct")
+fn t_new_direct(st: Agent, ctor: JsVal, args: List(JsVal)) -> #(Dynamic, Agent)
 
 type Probe {
   Miss
@@ -647,12 +739,12 @@ pub fn typed_array_fast_paths_miss_test() {
       StringKey(Named("extra")),
       rt_types.mk_string("x"),
     )
-  assert get_elem_fast(st, ta, 0) == dyn(Miss)
-  assert set_elem_fast(st, ta, 0, n) == dyn(Miss)
-  assert set_elem_fast(st, ta, 4, n) == dyn(Miss)
-  assert get_prop_own_data(st, ta, <<"length">>) == dyn(Miss)
-  assert get_prop_own_data(st, ta, <<"extra">>) == dyn(Miss)
-  assert set_prop_own_data(st, ta, <<"extra">>, n) == dyn(Miss)
+  assert t_get_elem(st, ta, 0) == dyn(Miss)
+  assert t_set_elem(st, ta, 0, n) == dyn(Miss)
+  assert t_set_elem(st, ta, 4, n) == dyn(Miss)
+  assert t_get_prop_own_data(st, ta, <<"length">>) == dyn(Miss)
+  assert t_get_prop_own_data(st, ta, <<"extra">>) == dyn(Miss)
+  assert t_set_prop_own_data(st, ta, <<"extra">>, n) == dyn(Miss)
 }
 
 pub fn proxy_fast_paths_miss_test() {
@@ -664,21 +756,21 @@ pub fn proxy_fast_paths_miss_test() {
   let #(ph, st) =
     rt_call.t_construct(st, proxy_ctor, [arr, handler], proxy_ctor)
   let p = rt_types.mk_object(ph)
-  assert get_elem_fast(st, p, 0) == dyn(Miss)
-  assert set_elem_fast(st, p, 0, n) == dyn(Miss)
-  assert get_prop_own_data(st, p, <<"length">>) == dyn(Miss)
-  assert set_prop_own_data(st, p, <<"length">>, n) == dyn(Miss)
-  assert call_method_mono(st, p, <<"push">>, [n]).0 == dyn(Miss)
+  assert t_get_elem(st, p, 0) == dyn(Miss)
+  assert t_set_elem(st, p, 0, n) == dyn(Miss)
+  assert t_get_prop_own_data(st, p, <<"length">>) == dyn(Miss)
+  assert t_set_prop_own_data(st, p, <<"length">>, n) == dyn(Miss)
+  assert t_call_method_mono(st, p, <<"push">>, [n]).0 == dyn(Miss)
   // instanceof over a proxy must reach the getprototypeof trap
   let ctor_flags = FnFlags(..no_flags(), is_constructor: True)
   let #(f, st) =
     rt_call.t_new_function(st, dummy_code("F"), ctor_flags, "F", 0, None)
   let #(_, st) = rt_obj.t_get_prop(st, f, StringKey(Named("prototype")))
   let #(plain, st) = rt_obj.t_new_object_literal(st)
-  assert instanceof_fast(st, plain, f) == dyn(0)
-  assert instanceof_fast(st, p, f) == dyn(Miss)
+  assert t_instanceof_i32(st, plain, f) == dyn(0)
+  assert t_instanceof_i32(st, p, f) == dyn(Miss)
   let #(child, st) = rt_obj.t_new_object(st, Some(ph))
-  assert instanceof_fast(st, rt_types.mk_object(child), f) == dyn(Miss)
+  assert t_instanceof_i32(st, rt_types.mk_object(child), f) == dyn(Miss)
 }
 
 pub fn string_object_fast_paths_miss_test() {
@@ -695,13 +787,13 @@ pub fn string_object_fast_paths_miss_test() {
   let s = rt_types.mk_object(sh)
   let #(_, st) =
     rt_obj.t_set_prop(st, s, StringKey(Named("extra")), rt_types.mk_string("x"))
-  assert get_elem_fast(st, s, 0) == dyn(Miss)
-  assert set_elem_fast(st, s, 0, n) == dyn(Miss)
-  assert set_elem_fast(st, s, 3, n) == dyn(Miss)
-  assert get_prop_own_data(st, s, <<"length">>) == dyn(Miss)
-  assert set_prop_own_data(st, s, <<"length">>, n) == dyn(Miss)
-  assert get_prop_own_data(st, s, <<"extra">>) == dyn(rt_types.mk_string("x"))
-  assert set_prop_own_data(st, s, <<"extra">>, n) != dyn(Miss)
+  assert t_get_elem(st, s, 0) == dyn(Miss)
+  assert t_set_elem(st, s, 0, n) == dyn(Miss)
+  assert t_set_elem(st, s, 3, n) == dyn(Miss)
+  assert t_get_prop_own_data(st, s, <<"length">>) == dyn(Miss)
+  assert t_set_prop_own_data(st, s, <<"length">>, n) == dyn(Miss)
+  assert t_get_prop_own_data(st, s, <<"extra">>) == dyn(rt_types.mk_string("x"))
+  assert t_set_prop_own_data(st, s, <<"extra">>, n) != dyn(Miss)
 }
 
 pub fn bytecode_function_fast_paths_miss_test() {
@@ -737,12 +829,12 @@ pub fn bytecode_function_fast_paths_miss_test() {
   assert rt_call.is_callable(st, f)
   assert rt_call.is_constructor(st, f)
   let undef = rt_types.mk_undefined()
-  assert dyn(rt_call.t_compiled_fn_code(st, f, undef)) == dyn(undef)
+  assert rt_call.t_direct_callee(st, f, undef) == dyn(Miss)
   let #(o, st) = rt_obj.t_new_object_literal(st)
   let #(_, st) = rt_obj.t_set_prop(st, o, StringKey(Named("m")), f)
-  assert call_method_mono(st, o, <<"m">>, []).0 == dyn(Miss)
-  assert new_simple(st, f, []).0 == dyn(Miss)
-  assert instanceof_fast(st, o, f) == dyn(Miss)
+  assert t_call_method_mono(st, o, <<"m">>, []).0 == dyn(Miss)
+  assert t_new_direct(st, f, []).0 == dyn(Miss)
+  assert t_instanceof_i32(st, o, f) == dyn(Miss)
 }
 
 @external(erlang, "arc_rt_layout_root_ffi", "dyn")
@@ -756,16 +848,13 @@ pub fn compiled_function_fast_paths_hit_test() {
   let code = compiled_code(fn(st, _frame, _args) { #(undef, st) })
   let flags = FnFlags(..no_flags(), is_constructor: True, is_strict: True)
   let #(f, st) = rt_call.t_new_function(st, code, flags, "F", 0, None)
-  assert dyn(rt_call.t_compiled_fn_code(st, f, undef)) != dyn(undef)
-  assert new_simple(st, f, []).0 == dyn(Miss)
+  assert rt_call.t_direct_callee(st, f, undef) != dyn(Miss)
+  assert t_new_direct(st, f, []).0 == dyn(Miss)
   let #(proto, st) = rt_obj.t_get_prop(st, f, StringKey(Named("prototype")))
-  let #(this, _) = new_simple(st, f, [])
+  let #(this, _) = t_new_direct(st, f, [])
   assert this != dyn(Miss)
   assert this != dyn(proto)
 }
-
-@external(erlang, "arc_rt_ops_ffi", "binop")
-fn k_binop(kind: opcode.Classified, a: JsVal, b: JsVal) -> Dynamic
 
 fn num(n: Int) -> JsVal {
   rt_types.mk_number(rt_types.JInt(n))
@@ -794,13 +883,14 @@ pub fn binop_kind_terms_test() {
     #(opcode.LtEq, dyn(False)),
     #(opcode.Gt, dyn(True)),
     #(opcode.GtEq, dyn(True)),
-    #(opcode.Exp, dyn(ffi.Miss)),
-    #(opcode.In, dyn(ffi.Miss)),
-    #(opcode.InstanceOf, dyn(ffi.Miss)),
+    #(opcode.Exp, dyn(kernel.Miss)),
+    #(opcode.In, dyn(kernel.Miss)),
+    #(opcode.InstanceOf, dyn(kernel.Miss)),
   ]
   list.each(answers, fn(row) {
     let #(kind, expected) = row
-    assert k_binop(opcode.classify(kind), six, three) == expected
+    assert dyn(kernel.classified_binop(opcode.classify(kind), six, three))
+      == expected
   })
 }
 

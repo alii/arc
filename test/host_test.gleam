@@ -22,7 +22,7 @@ fn new_state() -> host.State(host) {
   |> host.from_agent(host.new_key())
 }
 
-fn run(s: host.State(host), source: String) -> #(Completion, Agent) {
+fn run(s: host.State(host), source: String) -> #(Completion(JsVal), Agent) {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
     as { "parse failed: " <> source }
   let assert Ok(template) = compiler.compile_script(body, sb)

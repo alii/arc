@@ -8,15 +8,15 @@ pub fn from_list(items: List(a)) -> TupleArray(a)
 @external(erlang, "erlang", "tuple_to_list")
 pub fn to_list(arr: TupleArray(a)) -> List(a)
 
-@external(erlang, "arc_tuple_array_ffi", "array_get")
+@external(erlang, "arc_tuple_array_ffi", "get")
 pub fn get(index: Int, arr: TupleArray(a)) -> Option(a)
 
 /// badarg unless 0 <= index < size
-@external(erlang, "arc_tuple_array_ffi", "array_get_unchecked")
+@external(erlang, "arc_tuple_array_ffi", "get_unchecked")
 pub fn get_unchecked(index: Int, arr: TupleArray(a)) -> a
 
 /// badarg unless 0 <= index < size, o(n) copy
-@external(erlang, "arc_tuple_array_ffi", "array_set_unchecked")
+@external(erlang, "arc_tuple_array_ffi", "set_unchecked")
 pub fn set_unchecked(index: Int, value: a, arr: TupleArray(a)) -> TupleArray(a)
 
 /// 1-based, inlined bif
@@ -30,5 +30,5 @@ pub fn set_element(position: Int, arr: TupleArray(a), value: a) -> TupleArray(a)
 @external(erlang, "erlang", "tuple_size")
 pub fn size(arr: TupleArray(a)) -> Int
 
-@external(erlang, "arc_tuple_array_ffi", "array_repeat")
+@external(erlang, "arc_tuple_array_ffi", "repeat")
 pub fn repeat(value: a, count: Int) -> TupleArray(a)

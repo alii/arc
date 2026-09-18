@@ -3,7 +3,7 @@ import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{arg_at, first_arg_or_undefined}
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
-import arc/rt/typed_array_ffi.{splice_clamped}
+import arc/rt/typed_array_bytes.{splice_clamped}
 import arc/rt/types.{
   type Agent, type BuiltinPair, type DataViewNative, type Handle, type JsNum,
   type JsVal, type ObjKind, type ViewBigElement, type ViewElementType,
@@ -392,8 +392,8 @@ fn decode_number(element: ViewNumElement, u: Int) -> JsVal {
     VInt16 -> mk_number(JInt(to_signed(u, 16)))
     VInt32 -> mk_number(JInt(to_signed(u, 32)))
     VFloat16 -> mk_number(f16_from_bits(u))
-    VFloat32 -> mk_number(typed_array_ffi.decode_f32_bits(u))
-    VFloat64 -> mk_number(typed_array_ffi.decode_f64_bits(u))
+    VFloat32 -> mk_number(typed_array_bytes.decode_f32_bits(u))
+    VFloat64 -> mk_number(typed_array_bytes.decode_f64_bits(u))
   }
 }
 
@@ -462,8 +462,8 @@ fn encode_number(element: ViewNumElement, num: JsNum) -> BitArray {
     VInt8 | VUint8 -> <<to_int_wrap(num):size(8)>>
     VInt16 | VUint16 -> <<to_int_wrap(num):size(16)>>
     VInt32 | VUint32 -> <<to_int_wrap(num):size(32)>>
-    VFloat64 -> <<typed_array_ffi.f64_bits(num):size(64)>>
-    VFloat32 -> <<typed_array_ffi.f32_bits(num):size(32)>>
+    VFloat64 -> <<typed_array_bytes.f64_bits(num):size(64)>>
+    VFloat32 -> <<typed_array_bytes.f32_bits(num):size(32)>>
     VFloat16 -> <<f16_to_bits(num):size(16)>>
   }
 }

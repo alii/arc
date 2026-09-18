@@ -1,3 +1,4 @@
+%% value constructors and coercion heads; exports may answer miss
 -module(arc_rt_val_ffi).
 -include("arc_rt_layout.hrl").
 
@@ -5,14 +6,16 @@
     classify/1,
     mk_undefined/0, mk_hole/0, mk_array_lit/1, mk_null/0, mk_bool/1, mk_number/1, mk_int/1,
     mk_string/1, mk_bigint/1, mk_symbol/1, mk_object/1, mk_tdz/0,
-    to_boolean_i32/1, to_boolean/1,
+    to_boolean_i32/1, to_boolean/1, logical_not/1, is_nullish/1, is_nullish_i32/1,
     strict_eq/2, same_value_zero/2,
-    t_to_property_key_fast/1,
-    js_number_to_string/1,
+    property_key_of/1,
+    js_format_float/1,
     t_to_string/2, t_to_number/2, t_to_integer_or_infinity/2, t_to_length/2,
     string_to_number/1,
-    is_neg_zero/1, float_same_term/2
+    is_neg_zero/1, float_same_term/2, is_miss/1
 ]).
+
+is_miss(V) -> V =:= miss.
 
 %% no catch-all: a bad wire term should crash
 classify(undefined) -> k_undef;
@@ -71,6 +74,13 @@ to_boolean({js_sym, _}) -> true;
 to_boolean({?HANDLE_TAG, _}) -> true;
 to_boolean(js_tdz) -> false.
 
+logical_not(V) -> not to_boolean(V).
+
+is_nullish(V) -> ?IS_NULLISH(V).
+
+is_nullish_i32(V) ->
+    case ?IS_NULLISH(V) of true -> 1; false -> 0 end.
+
 strict_eq(js_nan, _) -> false;
 strict_eq(_, js_nan) -> false;
 strict_eq(A, B) when is_number(A), is_number(B) -> A == B;
@@ -79,16 +89,16 @@ strict_eq(A, B) -> A =:= B.
 same_value_zero(js_nan, js_nan) -> true;
 same_value_zero(A, B) -> strict_eq(A, B).
 
-t_to_property_key_fast(N)
+property_key_of(N)
   when is_integer(N), N >= 0, N =< ?MAX_ARRAY_INDEX ->
     {?OKEY_STRING, {?KEY_INDEX, N}};
-t_to_property_key_fast(B) when is_binary(B) ->
+property_key_of(B) when is_binary(B) ->
     {?OKEY_STRING, canonical_key_bin(B)};
-t_to_property_key_fast({?STR_TAG, B, _, _}) ->
+property_key_of({?STR_TAG, B, _, _}) ->
     {?OKEY_STRING, {?KEY_NAMED, B}};
-t_to_property_key_fast({js_sym, S}) ->
+property_key_of({js_sym, S}) ->
     {?OKEY_SYMBOL, S};
-t_to_property_key_fast(_) -> miss.
+property_key_of(_) -> miss.
 
 canonical_key_bin(<<C, _/binary>> = B) when C >= $0, C =< $9 ->
     try binary_to_integer(B) of
@@ -123,7 +133,7 @@ mk_int(N) when N > ?MAX_SAFE_INT; N < -?MAX_SAFE_INT ->
     mk_number('arc@rt@val':num_from_int(N));
 mk_int(N) -> N.
 
-mk_string(S) -> arc_rt_str_ffi:mk(S).
+mk_string(S) -> arc_rt_js_string_ffi:mk(S).
 
 mk_bigint(N) -> {js_bigint, N}.
 
@@ -137,24 +147,24 @@ mk_tdz() -> js_tdz.
 t_to_string(St, V) when is_binary(V) -> {V, St};
 t_to_string(St, {?STR_TAG, B, _, _}) -> {B, St};
 t_to_string(St, V) when is_integer(V) -> {integer_to_binary(V), St};
-t_to_string(St, V) when is_float(V) -> {js_number_to_string(V), St};
-t_to_string(St, V) -> 'arc@rt@val':t_to_string_slow(St, V).
+t_to_string(St, V) when is_float(V) -> {js_format_float(V), St};
+t_to_string(St, V) -> 'arc@rt@val':t_to_string_general(St, V).
 
 t_to_number(St, V) when is_integer(V) -> {{j_int, V}, St};
 t_to_number(St, V) when is_float(V) -> {{j_float, V}, St};
-t_to_number(St, V) -> 'arc@rt@val':t_to_number_slow(St, V).
+t_to_number(St, V) -> 'arc@rt@val':t_to_number_general(St, V).
 
 t_to_integer_or_infinity(St, V) when is_integer(V) -> {V, St};
 t_to_integer_or_infinity(St, V) when is_float(V) -> {trunc(V), St};
 t_to_integer_or_infinity(St, undefined) -> {0, St};
-t_to_integer_or_infinity(St, V) -> 'arc@rt@val':t_to_integer_or_infinity_slow(St, V).
+t_to_integer_or_infinity(St, V) -> 'arc@rt@val':t_to_integer_or_infinity_general(St, V).
 
 t_to_length(St, V) when is_integer(V), V >= 0 -> {V, St};
 t_to_length(St, V) when is_integer(V) -> {0, St};
-t_to_length(St, V) -> 'arc@rt@val':t_to_length_slow(St, V).
+t_to_length(St, V) -> 'arc@rt@val':t_to_length_general(St, V).
 
 %% §6.1.6.1.20 number tostring
-js_number_to_string(N) when is_float(N) ->
+js_format_float(N) when is_float(N) ->
     case N == 0.0 of
         true -> <<"0">>;
         false when N < 0.0 -> <<"-", (js_positive_to_string(-N))/binary>>;
@@ -220,7 +230,7 @@ float_same_term(A, B) -> A =:= B.
 
 %% §7.1.4.1.1 stringtonumber, one pass over the trimmed bytes
 string_to_number(S) ->
-    stn(arc_string_ffi:trim_js_ws(S)).
+    stn(arc_rt_utf8_ffi:trim_js_ws(S)).
 
 stn(<<>>) -> {j_float, 0.0};
 stn(<<$0, X, D/binary>>) when X =:= $x; X =:= $X -> stn_radix(D, 16);

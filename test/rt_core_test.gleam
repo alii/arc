@@ -1,4 +1,5 @@
 import arc/internal/unsafe
+import arc/interp/kernel
 import arc/rt/builtins as rt_builtins
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
@@ -127,7 +128,7 @@ pub fn integer_results_widen_past_2_53_test() {
   let #(a, st) = rt_ops.t_add(st, m, int(1))
   assert num(a) == JFloat(9_007_199_254_740_992.0)
   let #(b, st) = rt_ops.t_add(st, m, int(2))
-  assert rt_val.strict_equal(a, b)
+  assert rt_val.strict_eq(a, b)
   assert show(st, b) == "9007199254740992"
   let #(c, st) = rt_ops.t_add(st, b, int(1))
   assert show(st, c) == "9007199254740992"
@@ -162,21 +163,12 @@ pub fn float_overflow_is_infinity_test() {
   assert num(g) == JNegInf
   let #(h, st) = rt_ops.t_pow(st, int(-10), int(401))
   assert num(h) == JNegInf
-  assert num(pure_add(big, big)) == JPosInf
-  assert num(pure_sub(mk_number(JFloat(-1.0e308)), big)) == JNegInf
-  assert num(pure_mul(big, mk_number(JFloat(-10.0)))) == JNegInf
-  assert num(pure_mul(int(3), int(4))) == JInt(12)
+  assert num(kernel.add(big, big)) == JPosInf
+  assert num(kernel.sub(mk_number(JFloat(-1.0e308)), big)) == JNegInf
+  assert num(kernel.mul(big, mk_number(JFloat(-10.0)))) == JNegInf
+  assert num(kernel.mul(int(3), int(4))) == JInt(12)
   assert show(st, a) == "Infinity"
 }
-
-@external(erlang, "arc_rt_ops_ffi", "add")
-fn pure_add(a: JsVal, b: JsVal) -> JsVal
-
-@external(erlang, "arc_rt_ops_ffi", "sub")
-fn pure_sub(a: JsVal, b: JsVal) -> JsVal
-
-@external(erlang, "arc_rt_ops_ffi", "mul")
-fn pure_mul(a: JsVal, b: JsVal) -> JsVal
 
 pub fn minus_zero_survives_integer_arithmetic_test() {
   let st = agent()
@@ -202,7 +194,7 @@ pub fn minus_zero_survives_integer_arithmetic_test() {
   assert is_minus_zero(st, j)
   assert show(st, d) == "0"
   assert !rt_val.same_value(d, int(0))
-  assert rt_val.strict_equal(d, int(0))
+  assert rt_val.strict_eq(d, int(0))
   let object_is = global(st, "Object") |> get(st, _, "is")
   let #(r, st) = rt_call.t_call_checked(st, object_is, mk_undefined(), [d, c])
   assert classify(r) == KBool(False)

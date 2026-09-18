@@ -1,14 +1,15 @@
-%% §25.5.1 json text to json.gleam's JsonValue, by offset into one binary
+%% §25.5.1 json text to json.gleam's JsonValue, by offset into one binary;
+%% plain_stringify may answer json_miss
 -module(arc_rt_json_ffi).
--export([parse_value/2, plain_props/2, plain_keys/1, quote/1,
-         stringify_fast/3]).
+-export([parse_value/2, plain_prop_dict/2, plain_enumerable_keys/1, quote_tree/1,
+         plain_stringify/3]).
 
 -include("../arc_rt_layout.hrl").
 
 -define(DIGIT(C), (C >= $0 andalso C =< $9)).
 
 %% §10.1.11 order over a props map: indices ascending, names by seq
-plain_keys(Props) ->
+plain_enumerable_keys(Props) ->
     {Idx, Named} = maps:fold(fun plain_key/3, {[], []}, Props),
     NamedKeys = [K || {_, K} <- lists:keysort(1, Named)],
     case Idx of
@@ -27,7 +28,7 @@ plain_key(_, _, Acc) ->
     Acc.
 
 %% §25.5.2.3 quotejsonstring as iodata
-quote(Bin) ->
+quote_tree(Bin) ->
     case clean(Bin, 0) of
         true -> [$", Bin, $"];
         P -> [$", binary:part(Bin, 0, P) | quote_esc(Bin, P)]
@@ -71,8 +72,8 @@ quote_esc(Bin, P) ->
 hexc(N) when N < 10 -> $0 + N;
 hexc(N) -> $a + N - 10.
 
-%% own data props from parsed entries; miss on duplicate keys
-plain_props(Entries, Seq) -> plain_props(Entries, Seq, []).
+%% own data props from parsed entries; props_miss on duplicate keys
+plain_prop_dict(Entries, Seq) -> plain_props(Entries, Seq, []).
 
 plain_props([{Name, V} | Rest], Seq, Acc) ->
     Prop = ?PLAIN_PROPERTY(V, Seq),
@@ -80,8 +81,8 @@ plain_props([{Name, V} | Rest], Seq, Acc) ->
 plain_props([], Seq, Acc) ->
     Map = maps:from_list(Acc),
     case map_size(Map) =:= length(Acc) of
-        true -> {some, {Map, Seq}};
-        false -> none
+        true -> {plain_props, Map, Seq};
+        false -> props_miss
     end.
 
 key(<<C, _/binary>> = B) when ?DIGIT(C) ->
@@ -349,7 +350,7 @@ object(Bin, P, Src, Acc) ->
 %% Object.prototype, dense arrays under Array.prototype, primitives; anything
 %% that could run user code or needs the full algorithm answers json_miss,
 %% as does a top level that serializes to undefined
-stringify_fast(Agent, V, Gap) ->
+plain_stringify(Agent, V, Gap) ->
     Realm = element(?AGENT_REALM, Agent),
     Data = element(?STORE_DATA, element(?AGENT_STORE, Agent)),
     {?HANDLE_TAG, OP} = element(?PAIR_PROTO, element(?REALM_OBJECT, Realm)),
@@ -372,14 +373,14 @@ stringify_fast(Agent, V, Gap) ->
     end.
 
 enc(N, _, _, _) when is_integer(N) -> integer_to_binary(N);
-enc(F, _, _, _) when is_float(F) -> arc_rt_val_ffi:js_number_to_string(F);
+enc(F, _, _, _) when is_float(F) -> arc_rt_val_ffi:js_format_float(F);
 enc(true, _, _, _) -> <<"true">>;
 enc(false, _, _, _) -> <<"false">>;
 enc(null, _, _, _) -> <<"null">>;
 enc(A, _, _, _) when A =:= js_nan; A =:= js_inf; A =:= js_neg_inf -> <<"null">>;
 enc(undefined, _, _, _) -> skip;
 enc({js_sym, _}, _, _, _) -> skip;
-enc(S, _, _, _) when ?IS_STR(S) -> quote(arc_rt_str_ffi:bin(S));
+enc(S, _, _, _) when ?IS_STR(S) -> quote_tree(arc_rt_js_string_ffi:bin(S));
 enc({?HANDLE_TAG, Id}, {Data, OP, AP, _} = Cx, Ind, Seen) ->
     case lists:member(Id, Seen) of
         true -> throw(json_miss);
@@ -436,7 +437,7 @@ elems(_, _) -> throw(json_miss).
 
 enc_object(Pairs, {_, _, _, Gap} = Cx, Ind, Seen) ->
     Ind1 = <<Ind/binary, Gap/binary>>,
-    Members = [member(quote(K), enc(V, Cx, Ind1, Seen), Gap) || {K, V} <- Pairs],
+    Members = [member(quote_tree(K), enc(V, Cx, Ind1, Seen), Gap) || {K, V} <- Pairs],
     case [M || M <- Members, M =/= skip] of
         [] -> <<"{}">>;
         Ms when Gap =:= <<>> -> [${, lists:join($,, Ms), $}];

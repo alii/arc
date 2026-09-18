@@ -2,20 +2,20 @@
 %% float ops raise badarith past 1.8e308, caught as infinity
 -module(arc_rt_ops_ffi).
 -export([add/2, sub/2, mul/2, 'div'/2, mod/2, neg/1, plus/1, step/2,
-         lt/2, le/2, gt/2, ge/2, eq/2, neq/2, binop/3, pure_binop/3,
+         lt/2, le/2, gt/2, ge/2, eq/2, neq/2, classified_binop/3, pure_binop/3,
          t_add/3, t_sub/3, t_mul/3, t_div/3, t_mod/3, t_neg/2,
          pow_total/2, fmod_total/2, fadd/2, fsub/2, fmul/2, fdiv/2,
-         t_eq_fast/2, nul_eq/1, strict_eq/2, strict_neq/2, strict_eq_i32/2,
-         t_bitand_fast/2, t_bitor_fast/2, t_bitxor_fast/2,
-         t_shl_fast/2, t_shr_fast/2, t_ushr_fast/2, t_bitnot_fast/1]).
+         eq_i32/2, strict_eq/2, strict_neq/2, strict_eq_i32/2,
+         bitand/2, bitor/2, bitxor/2,
+         shl/2, shr/2, ushr/2, bitnot/1]).
 
 -include("arc_rt_layout.hrl").
 
--compile({inline, [norm/1, inf_jsval/1, is_nullish/1, add/2, sub/2, mul/2,
+-compile({inline, [norm/1, inf_jsval/1, add/2, sub/2, mul/2,
                    'div'/2, mod/2, lt/2, le/2, gt/2, ge/2,
                    eq/2, neq/2, strict_eq/2, strict_neq/2,
-                   t_bitand_fast/2, t_bitor_fast/2, t_bitxor_fast/2,
-                   t_shl_fast/2, t_shr_fast/2, t_ushr_fast/2]}).
+                   bitand/2, bitor/2, bitxor/2,
+                   shl/2, shr/2, ushr/2]}).
 norm(R) when R > ?MAX_SAFE_INT; R < -?MAX_SAFE_INT -> arc_rt_val_ffi:mk_int(R);
 norm(R) -> R.
 
@@ -31,12 +31,12 @@ add(A, B) when is_binary(A), is_binary(B) -> <<A/binary, B/binary>>;
 add(A, B) when ?IS_STR(A) ->
     case str_of(B) of
         miss -> miss;
-        S -> arc_rt_str_ffi:concat(A, S)
+        S -> arc_rt_js_string_ffi:concat(A, S)
     end;
 add(A, B) when ?IS_STR(B) ->
     case str_of(A) of
         miss -> miss;
-        S -> arc_rt_str_ffi:concat(S, B)
+        S -> arc_rt_js_string_ffi:concat(S, B)
     end;
 add({js_bigint, A}, {js_bigint, B}) -> {js_bigint, A + B};
 add(A, B) -> nonfinite_add(A, B).
@@ -53,7 +53,7 @@ nonfinite_add(_, _) -> miss.
 
 str_of(S) when ?IS_STR(S) -> S;
 str_of(N) when is_integer(N) -> integer_to_binary(N);
-str_of(F) when is_float(F) -> arc_rt_val_ffi:js_number_to_string(F);
+str_of(F) when is_float(F) -> arc_rt_val_ffi:js_format_float(F);
 str_of(undefined) -> <<"undefined">>;
 str_of(null) -> <<"null">>;
 str_of(true) -> <<"true">>;
@@ -183,25 +183,25 @@ step(_, _) -> miss.
 
 lt(A, B) when is_number(A), is_number(B) -> A < B;
 lt(A, B) when is_binary(A), is_binary(B) -> A < B;
-lt(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_str_ffi:bin(A) < arc_rt_str_ffi:bin(B);
+lt(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_js_string_ffi:bin(A) < arc_rt_js_string_ffi:bin(B);
 lt({js_bigint, A}, {js_bigint, B}) -> A < B;
 lt(A, B) -> cmp_nonfinite(A, B, lt).
 
 le(A, B) when is_number(A), is_number(B) -> A =< B;
 le(A, B) when is_binary(A), is_binary(B) -> A =< B;
-le(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_str_ffi:bin(A) =< arc_rt_str_ffi:bin(B);
+le(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_js_string_ffi:bin(A) =< arc_rt_js_string_ffi:bin(B);
 le({js_bigint, A}, {js_bigint, B}) -> A =< B;
 le(A, B) -> cmp_nonfinite(A, B, le).
 
 gt(A, B) when is_number(A), is_number(B) -> A > B;
 gt(A, B) when is_binary(A), is_binary(B) -> A > B;
-gt(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_str_ffi:bin(A) > arc_rt_str_ffi:bin(B);
+gt(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_js_string_ffi:bin(A) > arc_rt_js_string_ffi:bin(B);
 gt({js_bigint, A}, {js_bigint, B}) -> A > B;
 gt(A, B) -> cmp_nonfinite(A, B, gt).
 
 ge(A, B) when is_number(A), is_number(B) -> A >= B;
 ge(A, B) when is_binary(A), is_binary(B) -> A >= B;
-ge(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_str_ffi:bin(A) >= arc_rt_str_ffi:bin(B);
+ge(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_js_string_ffi:bin(A) >= arc_rt_js_string_ffi:bin(B);
 ge({js_bigint, A}, {js_bigint, B}) -> A >= B;
 ge(A, B) -> cmp_nonfinite(A, B, ge).
 
@@ -242,10 +242,10 @@ strict_neq(A, B) -> A =/= B.
 
 eq(js_tdz, _) -> miss;
 eq(_, js_tdz) -> miss;
-eq(undefined, B) -> is_nullish(B);
-eq(null, B) -> is_nullish(B);
-eq(A, undefined) -> is_nullish(A);
-eq(A, null) -> is_nullish(A);
+eq(undefined, B) -> ?IS_NULLISH(B);
+eq(null, B) -> ?IS_NULLISH(B);
+eq(A, undefined) -> ?IS_NULLISH(A);
+eq(A, null) -> ?IS_NULLISH(A);
 eq({?HANDLE_TAG, A}, {?HANDLE_TAG, B}) -> A =:= B;
 eq({?HANDLE_TAG, _}, _) -> miss;
 eq(_, {?HANDLE_TAG, _}) -> miss;
@@ -272,22 +272,18 @@ neq(A, B) ->
         R -> not R
     end.
 
-is_nullish(undefined) -> true;
-is_nullish(null) -> true;
-is_nullish(_) -> false.
-
 -define(PURE_BINOP(Op, A, B),
     case Op of
         {arith, arith_sub} -> sub(A, B);
         {arith, arith_mul} -> mul(A, B);
         {arith, arith_div} -> 'div'(A, B);
         {arith, arith_mod} -> mod(A, B);
-        {bitwise, and_op} -> t_bitand_fast(A, B);
-        {bitwise, or_op} -> t_bitor_fast(A, B);
-        {bitwise, xor_op} -> t_bitxor_fast(A, B);
-        {bitwise, shl_op} -> t_shl_fast(A, B);
-        {bitwise, shr_op} -> t_shr_fast(A, B);
-        {bitwise, u_shr_op} -> t_ushr_fast(A, B);
+        {bitwise, and_op} -> bitand(A, B);
+        {bitwise, or_op} -> bitor(A, B);
+        {bitwise, xor_op} -> bitxor(A, B);
+        {bitwise, shl_op} -> shl(A, B);
+        {bitwise, shr_op} -> shr(A, B);
+        {bitwise, u_shr_op} -> ushr(A, B);
         {compare, lt_cmp} -> lt(A, B);
         {compare, lt_eq_cmp} -> le(A, B);
         {compare, gt_cmp} -> gt(A, B);
@@ -299,9 +295,9 @@ is_nullish(_) -> false.
         _ -> miss
     end).
 
-binop(add_op, A, B) -> add(A, B);
-binop({pure_op, Op}, A, B) -> ?PURE_BINOP(Op, A, B);
-binop(_, _, _) -> miss.
+classified_binop(add_op, A, B) -> add(A, B);
+classified_binop({pure_op, Op}, A, B) -> ?PURE_BINOP(Op, A, B);
+classified_binop(_, _, _) -> miss.
 
 pure_binop(Op, A, B) -> ?PURE_BINOP(Op, A, B).
 
@@ -369,23 +365,22 @@ fmod_total(A, B) ->
     catch error:badarith -> j_nan
     end.
 
-t_eq_fast(undefined, B) -> nul_eq(B);
-t_eq_fast(null, B) -> nul_eq(B);
-t_eq_fast(A, undefined) -> nul_eq(A);
-t_eq_fast(A, null) -> nul_eq(A);
-t_eq_fast(A, B) when is_number(A), is_number(B) ->
+eq_i32(undefined, B) -> is_nullish_i32(B);
+eq_i32(null, B) -> is_nullish_i32(B);
+eq_i32(A, undefined) -> is_nullish_i32(A);
+eq_i32(A, null) -> is_nullish_i32(A);
+eq_i32(A, B) when is_number(A), is_number(B) ->
     case A == B of true -> 1; false -> 0 end;
-t_eq_fast(A, B) when ?IS_STR(A), ?IS_STR(B) ->
+eq_i32(A, B) when ?IS_STR(A), ?IS_STR(B) ->
     case A =:= B of true -> 1; false -> 0 end;
-t_eq_fast({?HANDLE_TAG, A}, {?HANDLE_TAG, B}) ->
+eq_i32({?HANDLE_TAG, A}, {?HANDLE_TAG, B}) ->
     case A =:= B of true -> 1; false -> 0 end;
-t_eq_fast(A, B) when is_boolean(A), is_boolean(B) ->
+eq_i32(A, B) when is_boolean(A), is_boolean(B) ->
     case A =:= B of true -> 1; false -> 0 end;
-t_eq_fast(_, _) -> miss.
+eq_i32(_, _) -> miss.
 
-nul_eq(undefined) -> 1;
-nul_eq(null) -> 1;
-nul_eq(_) -> 0.
+is_nullish_i32(V) ->
+    case ?IS_NULLISH(V) of true -> 1; false -> 0 end.
 
 strict_eq_i32(A, B) ->
     case arc_rt_val_ffi:strict_eq(A, B) of true -> 1; false -> 0 end.
@@ -403,31 +398,31 @@ int_of(_) -> 0.
 i32(X) -> w32(int_of(X)).
 u32(X) -> int_of(X) band 16#FFFFFFFF.
 
-t_bitand_fast(A, B) when is_integer(A), is_integer(B) ->
+bitand(A, B) when is_integer(A), is_integer(B) ->
     w32(A) band w32(B);
-t_bitand_fast(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> i32(A) band i32(B);
-t_bitand_fast(_, _) -> miss.
-t_bitor_fast(A, B) when is_integer(A), is_integer(B) ->
+bitand(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> i32(A) band i32(B);
+bitand(_, _) -> miss.
+bitor(A, B) when is_integer(A), is_integer(B) ->
     w32(A) bor w32(B);
-t_bitor_fast(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> i32(A) bor i32(B);
-t_bitor_fast(_, _) -> miss.
-t_bitxor_fast(A, B) when is_integer(A), is_integer(B) ->
+bitor(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> i32(A) bor i32(B);
+bitor(_, _) -> miss.
+bitxor(A, B) when is_integer(A), is_integer(B) ->
     w32(A) bxor w32(B);
-t_bitxor_fast(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> i32(A) bxor i32(B);
-t_bitxor_fast(_, _) -> miss.
-t_shr_fast(A, B) when is_integer(A), is_integer(B) ->
+bitxor(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> i32(A) bxor i32(B);
+bitxor(_, _) -> miss.
+shr(A, B) when is_integer(A), is_integer(B) ->
     w32(A) bsr (B band 31);
-t_shr_fast(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> i32(A) bsr (u32(B) band 31);
-t_shr_fast(_, _) -> miss.
-t_shl_fast(A, B) when is_integer(A), is_integer(B) ->
+shr(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> i32(A) bsr (u32(B) band 31);
+shr(_, _) -> miss.
+shl(A, B) when is_integer(A), is_integer(B) ->
     w32(w32(A) bsl (B band 31));
-t_shl_fast(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) ->
+shl(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) ->
     w32(i32(A) bsl (u32(B) band 31));
-t_shl_fast(_, _) -> miss.
-t_ushr_fast(A, B) when is_integer(A), is_integer(B) ->
+shl(_, _) -> miss.
+ushr(A, B) when is_integer(A), is_integer(B) ->
     (A band 16#FFFFFFFF) bsr (B band 31);
-t_ushr_fast(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> u32(A) bsr (u32(B) band 31);
-t_ushr_fast(_, _) -> miss.
-t_bitnot_fast(A) when is_integer(A) -> bnot w32(A);
-t_bitnot_fast(A) when ?IS_JS_NUMBER(A) -> bnot i32(A);
-t_bitnot_fast(_) -> miss.
+ushr(A, B) when ?IS_JS_NUMBER(A), ?IS_JS_NUMBER(B) -> u32(A) bsr (u32(B) band 31);
+ushr(_, _) -> miss.
+bitnot(A) when is_integer(A) -> bnot w32(A);
+bitnot(A) when ?IS_JS_NUMBER(A) -> bnot i32(A);
+bitnot(_) -> miss.

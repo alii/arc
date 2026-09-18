@@ -1,4 +1,4 @@
-// run with: gleam run -m arc/examples/host_ffi
+// run with: gleam run -m arc/examples/host_functions
 
 import arc/engine.{JsString, Returned}
 import arc/host

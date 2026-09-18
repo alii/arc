@@ -1,7 +1,9 @@
-// kernels may return atom `miss`, test is_miss before use
+// exports may answer Miss, test with is(v, Miss) before use
 
+import arc/bytecode/binop.{type PureBinOp}
 import arc/bytecode/key.{type PropertyKey}
 import arc/bytecode/lexical.{type LexicalSlots}
+import arc/bytecode/opcode.{type Classified}
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/state.{type State, type StepExit}
 import arc/rt/bytecode.{type EnvCapture, type EnvTuple}
@@ -12,7 +14,6 @@ import arc/rt/types.{
 }
 import gleam
 import gleam/dict.{type Dict}
-import gleam/dynamic.{type Dynamic}
 import gleam/option.{type Option}
 
 pub type Guarded(v) {
@@ -31,22 +32,12 @@ pub fn guarded(
   }
 }
 
-// pass a module function, never a fresh closure
+// pass a module function, never a fresh closure; st is the agent or state
 @external(erlang, "arc_interp_guard_ffi", "guard1")
-pub fn guard1(f: fn(Agent) -> #(v, Agent), agent: Agent) -> Guarded(v)
-
-@external(erlang, "arc_interp_guard_ffi", "guard1")
-pub fn guard_state(f: fn(State) -> #(v, Agent), state: State) -> Guarded(v)
+pub fn guard1(f: fn(st) -> #(v, Agent), st: st) -> Guarded(v)
 
 @external(erlang, "arc_interp_guard_ffi", "guard2")
-pub fn guard_state2(
-  f: fn(State, a) -> #(v, Agent),
-  state: State,
-  a: a,
-) -> Guarded(v)
-
-@external(erlang, "arc_interp_guard_ffi", "guard2")
-pub fn guard2(f: fn(Agent, a) -> #(v, Agent), agent: Agent, a: a) -> Guarded(v)
+pub fn guard2(f: fn(st, a) -> #(v, Agent), st: st, a: a) -> Guarded(v)
 
 @external(erlang, "arc_interp_guard_ffi", "guard3")
 pub fn guard3(
@@ -142,10 +133,6 @@ pub fn guard_unit6(
   e: e,
 ) -> Guarded(Nil)
 
-// only truthy, nullish, lnot are total, rest may miss
-@external(erlang, "arc_interp_ffi", "is_miss")
-pub fn is_miss(result: a) -> Bool
-
 pub type Sentinel {
   Miss
   JsTdz
@@ -176,6 +163,15 @@ pub fn ctor_prototype(agent: Agent, new_target: JsVal) -> Handle
 
 @external(erlang, "arc_interp_ffi", "list_of")
 pub fn list_of(agent: Agent, array_like: JsVal) -> List(JsVal)
+
+@external(erlang, "arc_rt_ops_ffi", "classified_binop")
+pub fn classified_binop(kind: Classified, a: JsVal, b: JsVal) -> JsVal
+
+@external(erlang, "arc_rt_ops_ffi", "pure_binop")
+pub fn pure_binop(op: PureBinOp, a: JsVal, b: JsVal) -> JsVal
+
+@external(erlang, "arc_rt_ops_ffi", "bitnot")
+pub fn bitnot(a: JsVal) -> JsVal
 
 @external(erlang, "arc_rt_ops_ffi", "add")
 pub fn add(a: JsVal, b: JsVal) -> JsVal
@@ -225,9 +221,6 @@ pub fn eq(a: JsVal, b: JsVal) -> JsVal
 @external(erlang, "arc_rt_ops_ffi", "neq")
 pub fn neq(a: JsVal, b: JsVal) -> JsVal
 
-@external(erlang, "arc_interp_ffi", "lnot")
-pub fn lnot(v: JsVal) -> JsVal
-
 @external(erlang, "arc_interp_ffi", "instance_of")
 pub fn instance_of(
   agent: Agent,
@@ -236,17 +229,8 @@ pub fn instance_of(
   has_instance: SymbolId,
 ) -> JsVal
 
-@external(erlang, "arc_interp_ffi", "truthy")
-pub fn truthy(v: JsVal) -> Bool
-
-@external(erlang, "arc_interp_ffi", "nullish")
-pub fn nullish(v: JsVal) -> Bool
-
-@external(erlang, "arc_interp_ffi", "typeof")
-pub fn type_of(v: JsVal) -> String
-
-@external(erlang, "arc_interp_ffi", "typeof")
-pub fn type_of_in(store: JsStore(Agent), v: JsVal) -> String
+@external(erlang, "arc_interp_ffi", "type_of")
+pub fn type_of(store: JsStore(Agent), v: JsVal) -> String
 
 @external(erlang, "arc_interp_ffi", "box_get")
 pub fn box_get(agent: Agent, box: JsVal) -> JsVal
@@ -352,54 +336,14 @@ pub fn object(of: List(Handle)) -> JsVal
 @external(erlang, "erlang", "hd")
 pub fn handle(of: List(JsVal)) -> Handle
 
-// for-of over plain arrays, see arc_interp_ffi:array_iter_start
-pub type ArrayIterStep {
-  IterStep(done: Bool, value: JsVal, rec: JsVal)
-  // a map entry that still needs its pair array
-  IterPair(key: JsVal, value: JsVal, rec: JsVal)
-  IterMiss
-}
-
-@external(erlang, "arc_rt_lang_ffi", "array_iter_start")
-pub fn array_iter_start(agent: Agent, iterable: JsVal) -> JsVal
-
-@external(erlang, "arc_rt_lang_ffi", "array_iter_next")
-pub fn array_iter_next(store: JsStore(Agent), rec: JsVal) -> ArrayIterStep
-
-@external(erlang, "arc_rt_lang_ffi", "is_array_iter")
-pub fn is_array_iter(v: JsVal) -> Bool
-
-@external(erlang, "arc_rt_lang_ffi", "array_iter_parts")
-pub fn array_iter_parts(rec: JsVal) -> #(JsVal, Int, JsVal)
-
-@external(erlang, "arc_rt_lang_ffi", "array_iter_proto")
-pub fn array_iter_proto(agent: Agent, rec: JsVal) -> Handle
-
-@external(erlang, "arc_rt_lang_ffi", "array_iter_record")
-pub fn array_iter_record(target: JsVal, index: Int, next_fn: JsVal) -> JsVal
-
 pub type Accessor {
   Accessor(get: Option(JsVal), set: Option(JsVal))
   NoAccessor
 }
 
-@external(erlang, "arc_interp_prop_ffi", "get_getter")
-fn find_accessor_raw(agent: Agent, obj: JsVal, key: PropertyKey) -> Dynamic
-
 // the accessor a plain chain resolves key to, if that is what it holds
-pub fn find_accessor(agent: Agent, obj: JsVal, key: PropertyKey) -> Accessor {
-  let r = find_accessor_raw(agent, obj, key)
-  case is_miss_term(r) {
-    True -> NoAccessor
-    False -> decode_accessor(r)
-  }
-}
-
-@external(erlang, "arc_interp_ffi", "is_miss")
-fn is_miss_term(v: Dynamic) -> Bool
-
-@external(erlang, "gleam_stdlib", "identity")
-fn decode_accessor(v: Dynamic) -> Accessor
+@external(erlang, "arc_interp_prop_ffi", "find_accessor")
+pub fn find_accessor(agent: Agent, obj: JsVal, key: PropertyKey) -> Accessor
 
 // for-in keeps its pending keys on the operand stack, never in the heap
 pub type ForInStep {

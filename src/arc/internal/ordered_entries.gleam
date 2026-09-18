@@ -112,6 +112,7 @@ pub fn live_entries_from(
   |> list.map(fn(p) { p.1 })
 }
 
+// called by name from arc_rt_lang_ffi
 pub fn next_from(
   store: OrderedEntries(k, v),
   cursor: Int,

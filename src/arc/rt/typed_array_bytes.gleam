@@ -23,11 +23,11 @@ pub type FloatElem {
   F64
 }
 
-@external(erlang, "arc_rt_typed_array_ffi", "ta_zeroed")
-pub fn ta_zeroed(byte_len: Int) -> BitArray
+@external(erlang, "arc_rt_typed_array_bytes_ffi", "zeroed")
+pub fn zeroed(byte_len: Int) -> BitArray
 
-@external(erlang, "arc_rt_typed_array_ffi", "ta_splice")
-fn ta_splice(data: BitArray, byte_off: Int, region: BitArray) -> BitArray
+@external(erlang, "arc_rt_typed_array_bytes_ffi", "splice")
+fn splice(data: BitArray, byte_off: Int, region: BitArray) -> BitArray
 
 @external(erlang, "binary", "copy")
 fn binary_copy(elem: BitArray, n: Int) -> BitArray
@@ -50,7 +50,7 @@ pub fn splice_clamped(
           region
         }
       }
-      #(ta_splice(data, byte_off, region), written)
+      #(splice(data, byte_off, region), written)
     }
   }
 }
@@ -149,36 +149,36 @@ pub fn int_elem_signed(elem: IntElem) -> Bool {
   }
 }
 
-@external(erlang, "arc_rt_typed_array_ffi", "ta_get_int")
-pub fn ta_get_int(data: BitArray, byte_off: Int, elem: IntElem) -> Int
+@external(erlang, "arc_rt_typed_array_bytes_ffi", "get_int")
+pub fn get_int(data: BitArray, byte_off: Int, elem: IntElem) -> Int
 
 // erlang wraps val mod 2^bits, matching toint8 etc
-@external(erlang, "arc_rt_typed_array_ffi", "ta_set_int")
-pub fn ta_set_int(
+@external(erlang, "arc_rt_typed_array_bytes_ffi", "set_int")
+pub fn set_int(
   data: BitArray,
   byte_off: Int,
   elem: IntElem,
   val: Int,
 ) -> BitArray
 
-@external(erlang, "arc_rt_typed_array_ffi", "ta_get_float")
-pub fn ta_get_float(data: BitArray, byte_off: Int, elem: FloatElem) -> JsNum
+@external(erlang, "arc_rt_typed_array_bytes_ffi", "get_float")
+pub fn get_float(data: BitArray, byte_off: Int, elem: FloatElem) -> JsNum
 
-@external(erlang, "arc_rt_typed_array_ffi", "ta_set_float")
-fn ffi_set_float(
+@external(erlang, "arc_rt_typed_array_bytes_ffi", "set_double")
+fn set_double(
   data: BitArray,
   byte_off: Int,
   elem: FloatElem,
   val: JsNum,
 ) -> BitArray
 
-pub fn ta_set_float(
+pub fn set_float(
   data: BitArray,
   byte_off: Int,
   elem: FloatElem,
   val: JsNum,
 ) -> BitArray {
-  ffi_set_float(data, byte_off, elem, as_double(val))
+  set_double(data, byte_off, elem, as_double(val))
 }
 
 fn as_double(n: JsNum) -> JsNum {
@@ -189,25 +189,25 @@ fn as_double(n: JsNum) -> JsNum {
 }
 
 // §7.1.12 touint8clamp, round half to even
-@external(erlang, "arc_rt_typed_array_ffi", "ta_clamp_uint8")
-pub fn ta_clamp_uint8(val: JsNum) -> Int
+@external(erlang, "arc_rt_typed_array_bytes_ffi", "clamp_uint8")
+pub fn clamp_uint8(val: JsNum) -> Int
 
-@external(erlang, "arc_rt_typed_array_ffi", "f32_bits")
-fn ffi_f32_bits(n: JsNum) -> Int
+@external(erlang, "arc_rt_typed_array_bytes_ffi", "f32_bits_of_double")
+fn f32_bits_of_double(n: JsNum) -> Int
 
 pub fn f32_bits(n: JsNum) -> Int {
-  ffi_f32_bits(as_double(n))
+  f32_bits_of_double(as_double(n))
 }
 
-@external(erlang, "arc_rt_typed_array_ffi", "f64_bits")
-fn ffi_f64_bits(n: JsNum) -> Int
+@external(erlang, "arc_rt_typed_array_bytes_ffi", "f64_bits_of_double")
+fn f64_bits_of_double(n: JsNum) -> Int
 
 pub fn f64_bits(n: JsNum) -> Int {
-  ffi_f64_bits(as_double(n))
+  f64_bits_of_double(as_double(n))
 }
 
-@external(erlang, "arc_rt_typed_array_ffi", "decode_f32_bits")
+@external(erlang, "arc_rt_typed_array_bytes_ffi", "decode_f32_bits")
 pub fn decode_f32_bits(bits: Int) -> JsNum
 
-@external(erlang, "arc_rt_typed_array_ffi", "decode_f64_bits")
+@external(erlang, "arc_rt_typed_array_bytes_ffi", "decode_f64_bits")
 pub fn decode_f64_bits(bits: Int) -> JsNum

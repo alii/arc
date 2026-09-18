@@ -3,7 +3,7 @@
 import arc/bytecode/lexical
 import arc/bytecode/opcode
 import arc/internal/tuple_array.{type TupleArray}
-import arc/interp/ffi
+import arc/interp/kernel
 import arc/interp/safepoint
 import arc/interp/state.{
   type SavedFrame, type State, type StepExit, Returned, SavedCont, SavedFrame,
@@ -34,15 +34,15 @@ pub fn guarded(
   state: State,
   body: fn(Agent) -> #(a, Agent),
 ) -> Result(#(a, State), StepExit) {
-  ffi.guarded(ffi.guard1(body, state.agent), state)
+  kernel.guarded(kernel.guard1(body, state.agent), state)
 }
 
 pub fn guarded_unit(
   state: State,
   body: fn(Agent) -> Agent,
 ) -> Result(State, StepExit) {
-  use #(_, state) <- result.map(ffi.guarded(
-    ffi.guard_unit1(body, state.agent),
+  use #(_, state) <- result.map(kernel.guarded(
+    kernel.guard_unit1(body, state.agent),
     state,
   ))
   state
@@ -167,11 +167,11 @@ fn setup_frame(
   let #(this_val, agent) = case template.is_arrow || flags.is_strict {
     True -> #(this_arg, agent)
     False ->
-      case ffi.is(this_arg, ffi.Undefined) {
-        True -> #(ffi.object([agent.realm.global_object]), agent)
+      case kernel.is(this_arg, kernel.Undefined) {
+        True -> #(kernel.object([agent.realm.global_object]), agent)
         False -> {
-          let bound = ffi.bind_this(this_arg, agent.realm.global_object)
-          case ffi.is(bound, ffi.Miss) {
+          let bound = kernel.bind_this(this_arg, agent.realm.global_object)
+          case kernel.is(bound, kernel.Miss) {
             False -> #(bound, agent)
             True -> rt_call.resolve_this(agent, flags, this_arg)
           }
@@ -179,7 +179,7 @@ fn setup_frame(
       }
   }
   #(
-    ffi.frame_locals(
+    kernel.frame_locals(
       env,
       template.lexical,
       this_val,
@@ -197,8 +197,8 @@ fn setup_frame(
 
 fn home_value(home_object: Option(Handle)) -> JsVal {
   case home_object {
-    Some(h) -> ffi.object([h])
-    None -> ffi.val([ffi.Undefined])
+    Some(h) -> kernel.object([h])
+    None -> kernel.val([kernel.Undefined])
   }
 }
 
@@ -266,7 +266,9 @@ pub fn call_function_then(
   drive: Drive,
   cont: Option(fn(State, JsVal) -> Result(State, StepExit)),
 ) -> Result(State, StepExit) {
-  case template.is_class_constructor && ffi.is(new_target, ffi.Undefined) {
+  case
+    template.is_class_constructor && kernel.is(new_target, kernel.Undefined)
+  {
     True -> {
       let #(err, agent) = class_constructor_call_error(state.agent, template)
       Error(Threw(err, State(..state, agent:, stack: rest_stack)))
@@ -277,7 +279,7 @@ pub fn call_function_then(
         setup_frame(
           state.agent,
           env,
-          ffi.object([fn_h]),
+          kernel.object([fn_h]),
           home,
           template,
           flags,
@@ -360,7 +362,7 @@ pub fn is_tail_call(state: State, pc: Int, callee: FuncTemplate) -> Bool {
       state.func.is_strict
       && !callee.is_generator
       && !callee.is_async
-      && ffi.is(state.new_target, ffi.Undefined)
+      && kernel.is(state.new_target, kernel.Undefined)
     _, _ -> False
   }
   case frame_eligible {
@@ -395,12 +397,12 @@ pub fn call(
   rest_stack: List(JsVal),
   drive: Drive,
 ) -> Result(State, StepExit) {
-  let cell = ffi.cell_of(state.agent, callee)
-  case ffi.is(cell, ffi.Miss) {
+  let cell = kernel.cell_of(state.agent, callee)
+  case kernel.is(cell, kernel.Miss) {
     False ->
       call_cell(
         state,
-        ffi.handle([callee]),
+        kernel.handle([callee]),
         cell,
         this,
         args,
@@ -454,7 +456,7 @@ pub fn call_cell(
           rest_stack,
           this,
           None,
-          ffi.val([ffi.Undefined]),
+          kernel.val([kernel.Undefined]),
           drive,
         )
       case state.func.is_strict && is_tail_call(state, state.pc, template) {
@@ -527,8 +529,8 @@ fn list_from_array_like(
   array_like: JsVal,
   rest_stack: List(JsVal),
 ) -> Result(#(List(JsVal), State), StepExit) {
-  let args = ffi.list_of(state.agent, array_like)
-  case ffi.is(args, ffi.Miss) {
+  let args = kernel.list_of(state.agent, array_like)
+  case kernel.is(args, kernel.Miss) {
     False -> Ok(#(args, state))
     True ->
       guarded(State(..state, stack: rest_stack), fn(agent) {
@@ -550,8 +552,8 @@ fn call_native(
     True -> call_nested(state, callee, this, args, rest_stack)
     False -> {
       let agent = rt_store.t_enter_call(state.agent)
-      case ffi.guard4(rt_builtins.dispatch_native, agent, tag, this, args) {
-        ffi.Ok(value: v, agent:) ->
+      case kernel.guard4(rt_builtins.dispatch_native, agent, tag, this, args) {
+        kernel.Ok(value: v, agent:) ->
           Ok(
             State(
               ..state,
@@ -560,7 +562,7 @@ fn call_native(
               pc: state.pc + 1,
             ),
           )
-        ffi.Threw(agent:, thrown:) ->
+        kernel.Threw(agent:, thrown:) ->
           Error(Threw(
             thrown,
             State(
@@ -703,8 +705,8 @@ fn construct_handle(
             drive,
           )
         False -> {
-          use #(new_obj, state) <- result.try(ffi.guarded(
-            ffi.guard2(new_base_this, state.agent, new_target),
+          use #(new_obj, state) <- result.try(kernel.guarded(
+            kernel.guard2(new_base_this, state.agent, new_target),
             State(..state, stack: rest_stack),
           ))
           let this_val = mk_object(new_obj)
@@ -742,24 +744,24 @@ fn construct_handle(
     }
     _ ->
       case
-        ffi.guard4(
+        kernel.guard4(
           rt_call.t_construct,
           state.agent,
-          ffi.object([ctor_h]),
+          kernel.object([ctor_h]),
           args,
           new_target,
         )
       {
-        ffi.Ok(value: h, agent:) ->
+        kernel.Ok(value: h, agent:) ->
           Ok(
             State(
               ..state,
               agent:,
-              stack: [ffi.object([h]), ..rest_stack],
+              stack: [kernel.object([h]), ..rest_stack],
               pc: state.pc + 1,
             ),
           )
-        ffi.Threw(agent:, thrown:) ->
+        kernel.Threw(agent:, thrown:) ->
           Error(Threw(thrown, State(..state, agent:, stack: rest_stack)))
       }
   }
@@ -875,7 +877,7 @@ pub fn restore_frame(
   let caller = saved.caller
   let locals = case saved, caller.func.regs {
     SavedRegFrame(locals:, r0:, r1:, ..), bytecode.Regs(a, b) ->
-      ffi.flush_regs(locals, a, b, r0, r1)
+      kernel.flush_regs(locals, a, b, r0, r1)
     _, _ -> saved.locals
   }
   State(..caller, agent:, stack:, locals:, pc: saved.pc)
@@ -938,9 +940,10 @@ pub fn root_this(
     template.is_derived_constructor,
     Ok(#(mk_tdz(), RootDerivedConstruct, agent)),
   )
-  case ffi.guard1(new_base_this(_, new_target), agent) {
-    ffi.Ok(value: h, agent:) -> Ok(#(mk_object(h), RootBaseConstruct(h), agent))
-    ffi.Threw(agent:, thrown:) -> Error(#(thrown, agent))
+  case kernel.guard1(new_base_this(_, new_target), agent) {
+    kernel.Ok(value: h, agent:) ->
+      Ok(#(mk_object(h), RootBaseConstruct(h), agent))
+    kernel.Threw(agent:, thrown:) -> Error(#(thrown, agent))
   }
 }
 
@@ -983,7 +986,9 @@ pub fn enter_root(
   new_target: JsVal,
 ) -> Result(State, #(JsVal, Agent)) {
   let template = callee.template
-  case template.is_class_constructor && ffi.is(new_target, ffi.Undefined) {
+  case
+    template.is_class_constructor && kernel.is(new_target, kernel.Undefined)
+  {
     True -> Error(class_constructor_call_error(agent, template))
     False -> Ok(root_state(agent, callee, this_arg, args, new_target))
   }

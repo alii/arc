@@ -1,6 +1,6 @@
-%% iterator kernels for aot and the interpreter; none, miss or iter_miss decline
+%% iterator kernels for aot and the interpreter; exports may answer miss
 -module(arc_rt_lang_ffi).
--export([iter_fast/2, array_iter_start/2, array_iter_next/2, is_array_iter/1,
+-export([plain_iter_record/2, array_iter_start/2, array_iter_next/2, is_array_iter/1,
          array_iter_parts/1, array_iter_record/3, array_iter_proto/2,
          array_spread/2]).
 
@@ -8,7 +8,7 @@
 
 -define(K(Name), {?KEY_NAMED, <<Name>>}).
 
-iter_fast(St, {?HANDLE_TAG, Id}) ->
+plain_iter_record(St, {?HANDLE_TAG, Id}) ->
     Data = element(?STORE_DATA, element(?AGENT_STORE, St)),
     case arc_rt_arena_ffi:get(Id, Data) of
         {?SOBJECT_TAG, ?ORDINARY, _,
@@ -20,11 +20,11 @@ iter_fast(St, {?HANDLE_TAG, Id}) ->
             Iter = element(?DATAPROP_VALUE, IterP),
             Next = element(?DATAPROP_VALUE, NextP),
             Done = arc_rt_val_ffi:to_boolean(element(?DATAPROP_VALUE, DoneP)),
-            {?SOME, {Done, {?ITERATOR_RECORD_TAG, Iter, Next},
-                     native(Data, Iter, Next)}};
-        _ -> ?NONE
+            {plain_record, Done, {?ITERATOR_RECORD_TAG, Iter, Next},
+             native(Data, Iter, Next)};
+        _ -> record_miss
     end;
-iter_fast(_, _) -> ?NONE.
+plain_iter_record(_, _) -> record_miss.
 
 native(Data, {?HANDLE_TAG, IId} = IterH, {?HANDLE_TAG, NId}) ->
     case arc_rt_arena_ffi:probe(NId, Data) of
@@ -40,13 +40,13 @@ native(Data, {?HANDLE_TAG, IId} = IterH, {?HANDLE_TAG, NId}) ->
                             {native_generator,
                              element(?GENERATOROBJ_DATA,
                                      element(?SOBJECT_KIND, ICell))};
-                        _ -> not_native
+                        _ -> native_miss
                     end;
-                _ -> not_native
+                _ -> native_miss
             end;
-        _ -> not_native
+        _ -> native_miss
     end;
-native(_, _, _) -> not_native.
+native(_, _, _) -> native_miss.
 
 -define(ITER_SYM, {well_known_symbol, sym_iterator}).
 
@@ -102,8 +102,12 @@ pristine(Realm, Data, V, Proto, Class, IterProto, IterTok, NextTok) ->
             end
     end.
 
-token_of(Data, {?HANDLE_TAG, Id}) -> arc_interp_ffi:native_token(arc_rt_arena_ffi:get(Id, Data));
+token_of(Data, {?HANDLE_TAG, Id}) -> native_token(arc_rt_arena_ffi:get(Id, Data));
 token_of(_, _) -> none.
+
+native_token(Cell) -> ?NATIVE_TOKEN(Cell).
+
+elem_at(Els, Idx) -> ?ELEM_AT(Els, Idx).
 
 is_array_iter({?ARC_ITER, _, _, _}) -> true;
 is_array_iter(_) -> false.
@@ -128,7 +132,7 @@ array_iter_next(Store, {?ARC_ITER, {?HANDLE_TAG, T}, I, _} = R) ->
                  andalso is_map_key({?KEY_INDEX, I}, Props) of
                 true -> iter_miss;
                 false ->
-                    case arc_interp_ffi:iter_elem(Els, I) of
+                    case elem_at(Els, I) of
                         ?ELEMS_HOLE -> iter_miss;
                         V -> {iter_step, false, V, setelement(3, R, I + 1)}
                     end
@@ -136,11 +140,11 @@ array_iter_next(Store, {?ARC_ITER, {?HANDLE_TAG, T}, I, _} = R) ->
         _ -> iter_miss
     end;
 array_iter_next(_, {?ARC_ITER, S, Off, _} = R) when ?IS_STR(S) ->
-    case arc_rt_str_ffi:bin(S) of
+    case arc_rt_js_string_ffi:bin(S) of
         <<_:Off/binary, C/utf8, _/binary>> ->
             Ch = <<C/utf8>>,
             {iter_step, false,
-             case C < 16#80 of true -> Ch; false -> arc_rt_str_ffi:mk(Ch) end,
+             case C < 16#80 of true -> Ch; false -> arc_rt_js_string_ffi:mk(Ch) end,
              setelement(3, R, Off + byte_size(Ch))};
         _ -> {iter_step, true, undefined, undefined}
     end;
@@ -173,20 +177,20 @@ array_spread(Agent, V) ->
                 {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, Props, _, Els, _}
                   when map_size(Props) =:= 0 ->
                     dense_list(Els, Len);
-                _ -> none
+                _ -> spread_miss
             end;
-        _ -> none
+        _ -> spread_miss
     end.
 
-dense_list(_, 0) -> {some, []};
+dense_list(_, 0) -> {spread, []};
 dense_list({?ELEMS_DENSE, A}, Len) ->
     case arc_tree_array_ffi:size(A) of
         Len ->
             L = arc_tree_array_ffi:to_list(A),
             case lists:member(?ELEMS_HOLE, L) of
-                true -> none;
-                false -> {some, L}
+                true -> spread_miss;
+                false -> {spread, L}
             end;
-        _ -> none
+        _ -> spread_miss
     end;
-dense_list(_, _) -> none.
+dense_list(_, _) -> spread_miss.

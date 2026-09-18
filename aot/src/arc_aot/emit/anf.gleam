@@ -322,7 +322,7 @@ pub fn close_iter_on_throw(iter: ir.Value, body: Build(Nil)) -> Build(Nil) {
 }
 
 pub fn truthy_i32(v: ir.Value) -> Build(ir.Value) {
-  host("truthy", [v])
+  host("to_boolean_i32", [v])
 }
 
 pub fn truthy_if(
@@ -423,29 +423,29 @@ fn both_numbers(a: ir.Value, b: ir.Value) -> Build(#(ir.Value, Bool)) {
 }
 
 pub fn num_binop(op: String, a: ir.Value, b: ir.Value) -> Build(ir.Value) {
-  let slow = host(op, [a, b])
-  then(int_or(op, a, b, slow, slow), mark_number)
+  let on_overflow = host(op, [a, b])
+  then(int_or(op, a, b, on_overflow, on_overflow), mark_number)
 }
 
 fn int_or(
   op: String,
   a: ir.Value,
   b: ir.Value,
-  slow: Build(ir.Value),
-  other: Build(ir.Value),
+  on_overflow: Build(ir.Value),
+  otherwise: Build(ir.Value),
 ) -> Build(ir.Value) {
   let arm = case op {
-    "num_add" -> Some(int_arm(ir.NAdd, a, b, False, slow))
-    "num_sub" -> Some(int_arm(ir.NSub, a, b, False, slow))
-    "num_mul" -> Some(int_arm(ir.NMul, a, b, True, slow))
+    "add" -> Some(int_arm(ir.NAdd, a, b, False, on_overflow))
+    "sub" -> Some(int_arm(ir.NSub, a, b, False, on_overflow))
+    "mul" -> Some(int_arm(ir.NMul, a, b, True, on_overflow))
     _ -> None
   }
   case arm {
-    Some(fast) -> {
+    Some(arm) -> {
       use ii <- then(both_ints(a, b))
-      bind_if(ii, fast, other)
+      bind_if(ii, arm, otherwise)
     }
-    None -> other
+    None -> otherwise
   }
 }
 
@@ -476,7 +476,7 @@ fn int_arm(
   a: ir.Value,
   b: ir.Value,
   zero_sign: Bool,
-  slow: Build(ir.Value),
+  on_overflow: Build(ir.Value),
 ) -> Build(ir.Value) {
   use r <- then(bind(ir.NumTerm(op, a, b)))
   use hi <- then(bind(ir.NumTerm(ir.NLe, r, ir.ConstI64(max_safe_int))))
@@ -486,45 +486,45 @@ fn int_arm(
     pure(ir.ConstI32(0)),
   ))
   case zero_sign {
-    False -> bind_if(fits, pure(r), slow)
+    False -> bind_if(fits, pure(r), on_overflow)
     True -> {
       use nz <- then(bind_if_i32(
         fits,
         bind(ir.NumTerm(ir.NEq, r, ir.ConstI32(0))),
         pure(ir.ConstI32(1)),
       ))
-      bind_if(nz, slow, pure(r))
+      bind_if(nz, on_overflow, pure(r))
     }
   }
 }
 
 pub fn guarded_binop(
-  fast_op: String,
-  slow_op: String,
+  kernel_op: String,
+  general_op: String,
   a: ir.Value,
   b: ir.Value,
 ) -> Build(ir.Value) {
   fn(e, k) {
-    let any = host(slow_op <> "_any", [a, b])
+    let general = host(general_op, [a, b])
     case is_known_number(e, a) && is_known_number(e, b) {
-      True -> num_binop(fast_op, a, b)(e, k)
+      True -> num_binop(kernel_op, a, b)(e, k)
       False -> {
         let str = is_known_string(e, a) || is_known_string(e, b)
-        case str || non_number_const(a) || non_number_const(b), fast_op {
-          True, "num_add" -> {
-            let add = miss_or(host("add_prim", [a, b]), any)
+        case str || non_number_const(a) || non_number_const(b), kernel_op {
+          True, "add" -> {
+            let add = miss_or(host("add", [a, b]), general)
             case str {
               True -> then(add, mark_string)(e, k)
               False -> add(e, k)
             }
           }
-          True, _ -> any(e, k)
+          True, _ -> general(e, k)
           False, _ -> {
-            let other = case fast_op {
-              "num_add" -> miss_or(host("add_prim", [a, b]), any)
-              _ -> num_or_any(fast_op, a, b, any)
+            let otherwise = case kernel_op {
+              "add" -> miss_or(host("add", [a, b]), general)
+              _ -> if_both_numbers(kernel_op, a, b, general)
             }
-            int_or(fast_op, a, b, host(fast_op, [a, b]), other)(e, k)
+            int_or(kernel_op, a, b, host(kernel_op, [a, b]), otherwise)(e, k)
           }
         }
       }
@@ -541,40 +541,40 @@ fn non_number_const(v: ir.Value) -> Bool {
 
 pub fn miss_or(
   probe: Build(ir.Value),
-  slow: Build(ir.Value),
+  general: Build(ir.Value),
 ) -> Build(ir.Value) {
   use r <- then(probe)
   use m <- then(bind(ir.NumTerm(ir.NEq, r, ir.ConstAtom("miss"))))
-  bind_if(m, slow, pure(r))
+  bind_if(m, general, pure(r))
 }
 
-fn num_or_any(
-  pure_op: String,
+fn if_both_numbers(
+  kernel_op: String,
   a: ir.Value,
   b: ir.Value,
-  slow: Build(ir.Value),
+  general: Build(ir.Value),
 ) -> Build(ir.Value) {
   use #(both, elided) <- then(both_numbers(a, b))
   case elided {
-    True -> host(pure_op, [a, b])
-    False -> bind_if(both, host(pure_op, [a, b]), slow)
+    True -> host(kernel_op, [a, b])
+    False -> bind_if(both, host(kernel_op, [a, b]), general)
   }
 }
 
 pub fn guarded_div(a: ir.Value, b: ir.Value) -> Build(ir.Value) {
-  num_or_any("num_div", a, b, host("div", [a, b]))
+  if_both_numbers("div", a, b, host("div_general", [a, b]))
 }
 
 // rem matches js % except the -0 of a negative dividend
 pub fn guarded_mod(a: ir.Value, b: ir.Value) -> Build(ir.Value) {
-  let kernel = miss_or(host("num_mod", [a, b]), host("mod", [a, b]))
+  let kernel = miss_or(host("mod", [a, b]), host("mod_general", [a, b]))
   case b {
     ir.ConstI32(c) if c > 0 -> {
       use is_i <- then(bind(ir.TermTest(ir.IsInt, a)))
       bind_if(
         is_i,
         {
-          use r <- then(host("erl_rem", [a, b]))
+          use r <- then(host("rem", [a, b]))
           use zero <- then(bind(ir.NumTerm(ir.NEq, r, ir.ConstI32(0))))
           use neg_zero <- then(bind_if_i32(
             zero,
@@ -593,49 +593,49 @@ pub fn guarded_mod(a: ir.Value, b: ir.Value) -> Build(ir.Value) {
 pub fn guarded_neg(v: ir.Value) -> Build(ir.Value) {
   fn(e, k) {
     case is_known_number(e, v) {
-      True -> then(host("num_neg", [v]), mark_number)(e, k)
+      True -> then(host("neg", [v]), mark_number)(e, k)
       False ->
         {
           use is_n <- then(bind(ir.TermTest(ir.IsNumber, v)))
-          bind_if(is_n, host("num_neg", [v]), host("neg", [v]))
+          bind_if(is_n, host("neg", [v]), host("neg_general", [v]))
         }(e, k)
     }
   }
 }
 
 pub fn guarded_cmp(
-  fast: ir.NumTermOp,
-  slow_op: String,
+  term_op: ir.NumTermOp,
+  general_op: String,
   a: ir.Value,
   b: ir.Value,
 ) -> Build(ir.Value) {
   fn(e, k) {
     case is_known_string(e, a) || is_known_string(e, b) {
-      True -> then(host(slow_op, [a, b]), i32_to_js_bool)(e, k)
-      False -> guarded_cmp_numeric(fast, slow_op, a, b)(e, k)
+      True -> then(host(general_op, [a, b]), i32_to_js_bool)(e, k)
+      False -> guarded_cmp_numeric(term_op, general_op, a, b)(e, k)
     }
   }
 }
 
 fn guarded_cmp_numeric(
-  fast: ir.NumTermOp,
-  slow_op: String,
+  term_op: ir.NumTermOp,
+  general_op: String,
   a: ir.Value,
   b: ir.Value,
 ) -> Build(ir.Value) {
   use #(both, elided) <- then(both_numbers(a, b))
-  let fast_arm = fn(e: Emitter, k) {
+  let inline_arm = fn(e: Emitter, k) {
     let rc = e.consts
-    then(bind(ir.NumTerm(fast, a, b)), bind_if(
+    then(bind(ir.NumTerm(term_op, a, b)), bind_if(
       _,
       pure(rc.true_),
       pure(rc.false_),
     ))(e, k)
   }
   case elided {
-    True -> fast_arm
+    True -> inline_arm
     False ->
-      bind_if(both, fast_arm, then(host(slow_op, [a, b]), i32_to_js_bool))
+      bind_if(both, inline_arm, then(host(general_op, [a, b]), i32_to_js_bool))
   }
 }
 
@@ -648,33 +648,37 @@ pub fn i32_to_js_bool(v: ir.Value) -> Build(ir.Value) {
 }
 
 pub fn cond_cmp(
-  fast: ir.NumTermOp,
-  slow_op: String,
+  term_op: ir.NumTermOp,
+  general_op: String,
   a: ir.Value,
   b: ir.Value,
 ) -> Build(ir.Value) {
   fn(e, k) {
     case is_known_string(e, a) || is_known_string(e, b) {
-      True -> then(host(slow_op, [a, b]), fn(v) { host("truthy", [v]) })(e, k)
-      False -> cond_cmp_numeric(fast, slow_op, a, b)(e, k)
+      True ->
+        then(host(general_op, [a, b]), fn(v) { host("to_boolean_i32", [v]) })(
+          e,
+          k,
+        )
+      False -> cond_cmp_numeric(term_op, general_op, a, b)(e, k)
     }
   }
 }
 
 fn cond_cmp_numeric(
-  fast: ir.NumTermOp,
-  slow_op: String,
+  term_op: ir.NumTermOp,
+  general_op: String,
   a: ir.Value,
   b: ir.Value,
 ) -> Build(ir.Value) {
   use #(both, elided) <- then(both_numbers(a, b))
   case elided {
-    True -> bind(ir.NumTerm(fast, a, b))
+    True -> bind(ir.NumTerm(term_op, a, b))
     False ->
       bind_if_i32(
         both,
-        bind(ir.NumTerm(fast, a, b)),
-        then(host(slow_op, [a, b]), fn(v) { host("truthy", [v]) }),
+        bind(ir.NumTerm(term_op, a, b)),
+        then(host(general_op, [a, b]), fn(v) { host("to_boolean_i32", [v]) }),
       )
   }
 }

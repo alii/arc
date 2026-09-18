@@ -1,21 +1,22 @@
 %% object model kernels; exports may answer miss for the general path
 -module(arc_rt_obj_ffi).
--export([t_get_prop_own_data/3, t_set_prop_own_data/4, t_set_prop_named/5,
-         t_copy_data_fast/3, t_for_in_fast/2, t_own_enum_fast/2,
+-export([t_get_prop_own_data/3, t_set_prop_own_data/4, t_set_named/5,
+         plain_copy_data_props/3, plain_for_in_keys/2, plain_own_enum_pairs/2,
          t_create_data_prop/4,
-         t_get_prop_ic/4, t_get_prop_ic_miss/4, t_get_prop_slow/4,
-         t_get_prop_site/4,
-         t_instanceof_fast/3,
-         t_get_elem_fast/3, t_set_elem_fast/4, t_array_lit/2,
+         t_get_named_ic_fill/4, t_get_named/4,
+         t_get_named_site/4,
+         t_instanceof_i32/3, t_instanceof_i32_general/3,
+         t_get_elem/3, t_set_elem/4, t_array_lit/2,
          t_array_lit_packed/2,
-         t_global_get_fast/2, t_global_get/2,
+         t_global_peek/2, t_global_get/2,
          named_write_walk/5, chain_takes_named_write/4, named_plain/2,
          shape_slots_new/0, shape_slots_get/2, shape_slots_set/3,
-         shape_slots_append/2]).
+         shape_slots_append/2, get_symbol_data/3, native_token/1, elem_at/2,
+         elem_write_grow/3, shaped_next/3]).
 
 -include("arc_rt_layout.hrl").
 
--compile({inline, [peek_named_at/3, peek_named/3, live_cell/2, get_any/3,
+-compile({inline, [peek_named_at/3, peek_named/3, live_cell/2, general_get/3,
                    named_plain/2, birth_plain/2, store_put_seq/3, index_read/2,
                    index_write/4, elem_write/3, named_write_walk_next/5,
                    set_prop_new/7, chain_takes_named_write/4, with_store/2,
@@ -42,23 +43,8 @@ array_lit_elems([], St, Acc) -> {lists:reverse(Acc), St}.
 
 t_array_lit_packed(St, Bin) -> t_array_lit(St, binary_to_term(Bin)).
 
-t_get_prop_ic(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
-    Store = element(?AGENT_STORE, St),
-    case element(?STORE_ICS, Store) of
-        #{Site := {?IC_READ, KeyBin, Offs}} ->
-            case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
-                {?SSHAPED_TAG, Sid, _, Slots, _} ->
-                    case Offs of
-                        #{Sid := Off} -> ?SLOT_AT(Slots, Off);
-                        _ -> miss
-                    end;
-                _ -> miss
-            end;
-        _ -> miss
-    end;
-t_get_prop_ic(_, _, _, _) -> miss.
 
-t_get_prop_ic_miss(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
+t_get_named_ic_fill(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
         {?SSHAPED_TAG, Sid, _, Slots, Offs} ->
@@ -70,15 +56,15 @@ t_get_prop_ic_miss(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
             end;
         Cell -> {peek_named(St, Cell, KeyBin), St}
     end;
-t_get_prop_ic_miss(St, _, _, _) -> {miss, St}.
+t_get_named_ic_fill(St, _, _, _) -> {miss, St}.
 
-t_get_prop_slow(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
+t_get_named(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     read_named(St, Store, Data, Recv, arc_rt_arena_ffi:get(Id, Data), KeyBin, Site);
-t_get_prop_slow(St, Recv, KeyBin, _) -> read_prim(St, Recv, KeyBin).
+t_get_named(St, Recv, KeyBin, _) -> read_prim(St, Recv, KeyBin).
 
-t_get_prop_site(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
+t_get_named_site(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     Cell = arc_rt_arena_ffi:get(Id, Data),
@@ -94,7 +80,7 @@ t_get_prop_site(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
             {element(?DATAPROP_VALUE, Prop), St};
         _ -> read_named(St, Store, Data, Recv, Cell, KeyBin, Site)
     end;
-t_get_prop_site(St, Recv, KeyBin, _) -> read_prim(St, Recv, KeyBin).
+t_get_named_site(St, Recv, KeyBin, _) -> read_prim(St, Recv, KeyBin).
 
 read_named(St, Store, Data, Recv, {?SSHAPED_TAG, Sid, Proto, Slots, Offs},
            KeyBin, Site) ->
@@ -114,30 +100,30 @@ read_named(St, Store, Data, Recv, Cell, KeyBin, _)
                 #{{?KEY_NAMED, KeyBin} := Prop}
                   when element(1, Prop) =:= ?DATAPROP_TAG ->
                     {element(?DATAPROP_VALUE, Prop), St};
-                #{{?KEY_NAMED, KeyBin} := _} -> get_any(St, Recv, KeyBin);
+                #{{?KEY_NAMED, KeyBin} := _} -> general_get(St, Recv, KeyBin);
                 _ ->
                     read_proto(St, Data, element(?STORE_SHAPES, Store),
                                element(?SOBJECT_PROTO, Cell), Recv, KeyBin)
             end;
         false when element(1, Kind) =:= ?ARRAYOBJ_TAG ->
             {element(?ARRAYOBJ_LENGTH, Kind), St};
-        false -> get_any(St, Recv, KeyBin)
+        false -> general_get(St, Recv, KeyBin)
     end;
-read_named(St, _, _, Recv, _, KeyBin, _) -> get_any(St, Recv, KeyBin).
+read_named(St, _, _, Recv, _, KeyBin, _) -> general_get(St, Recv, KeyBin).
 
 read_proto(St, Data, Shapes, Proto, Recv, KeyBin) ->
     case proto_read(Data, Shapes, Proto, KeyBin, ?MAX_PROTO_HOPS) of
-        miss -> get_any(St, Recv, KeyBin);
+        miss -> general_get(St, Recv, KeyBin);
         V -> {V, St}
     end.
 
 read_prim(St, S, <<"length">>) when ?IS_STR(S) ->
-    {arc_rt_str_ffi:len(S), St};
+    {arc_rt_js_string_ffi:len(S), St};
 read_prim(St, S, KeyBin) when ?IS_STR(S) ->
     read_wrapper(St, ?REALM_STRING, S, KeyBin);
 read_prim(St, N, KeyBin) when is_number(N) ->
     read_wrapper(St, ?REALM_NUMBER, N, KeyBin);
-read_prim(St, Recv, KeyBin) -> get_any(St, Recv, KeyBin).
+read_prim(St, Recv, KeyBin) -> general_get(St, Recv, KeyBin).
 
 read_wrapper(St, Which, Recv, KeyBin) ->
     Pair = element(Which, element(?AGENT_REALM, St)),
@@ -145,8 +131,8 @@ read_wrapper(St, Which, Recv, KeyBin) ->
     read_proto(St, element(?STORE_DATA, Store), element(?STORE_SHAPES, Store),
                {?SOME, element(?PAIR_PROTO, Pair)}, Recv, KeyBin).
 
-get_any(St, Recv, KeyBin) ->
-    'arc@rt@obj':t_get_prop_any(St, Recv, {?OKEY_STRING, {?KEY_NAMED, KeyBin}}).
+general_get(St, Recv, KeyBin) ->
+    'arc@rt@obj':t_get_prop_untyped_key(St, Recv, {?OKEY_STRING, {?KEY_NAMED, KeyBin}}).
 
 %% §10.1.8.1 ordinary get while every hop is plain data
 proto_read(_, _, ?NONE, _, _) -> undefined;
@@ -177,26 +163,10 @@ proto_read(Data, Shapes, {?SOME, {?HANDLE_TAG, Id}}, KeyBin, Fuel) ->
     end;
 proto_read(_, _, _, _, _) -> miss.
 
-named_plain(?ORDINARY, _) -> true;
-named_plain(Kind, _) when is_atom(Kind) -> true;
-named_plain(Kind, KeyBin) ->
-    case element(1, Kind) of
-        ?PROXYOBJ_TAG -> false;
-        ?MODULENS_TAG -> false;
-        ?TYPEDARRAYOBJ_TAG -> false;
-        ?ARRAYOBJ_TAG -> KeyBin =/= <<"length">>;
-        ?STRINGOBJ_TAG -> KeyBin =/= <<"length">>;
-        ?BYTECODEFN_TAG -> birth_plain(element(?BYTECODEFN_BIRTH, Kind), KeyBin);
-        ?COMPILEDFN_TAG -> birth_plain(element(?COMPILEDFN_BIRTH, Kind), KeyBin);
-        _ -> true
-    end.
+named_plain(Kind, KeyBin) -> ?NAMED_KEY_IS_PLAIN(Kind, KeyBin, <<"length">>).
 
-birth_plain(?BIRTH_SETTLED, _) -> true;
-birth_plain(_, <<"length">>) -> false;
-birth_plain(_, <<"name">>) -> false;
-birth_plain(Birth, <<"prototype">>) ->
-    element(?BIRTH_PROTOTYPE_PARENT, Birth) =:= ?NONE;
-birth_plain(_, _) -> true.
+birth_plain(Birth, KeyBin) ->
+    ?LAZY_KEY_IS_PLAIN(Birth, KeyBin, <<"length">>, <<"name">>, <<"prototype">>).
 
 ic_fill(St, _, none, _, _, _) -> St;
 ic_fill(St, Store, Site, Sid, Off, KeyBin) ->
@@ -216,13 +186,13 @@ ic_fill(St, Store, Site, Sid, Off, KeyBin) ->
                                                 #{Sid => Off}}}))
     end.
 
-t_global_get_fast(St, KeyBin) ->
+t_global_peek(St, KeyBin) ->
     {?HANDLE_TAG, GId} = element(?REALM_GLOBAL, element(?AGENT_REALM, St)),
     Store = element(?AGENT_STORE, St),
     peek_named(St, arc_rt_arena_ffi:get(GId, element(?STORE_DATA, Store)), KeyBin).
 
 t_global_get(St, KeyBin) ->
-    case t_global_get_fast(St, KeyBin) of
+    case t_global_peek(St, KeyBin) of
         miss -> 'arc@rt@obj':t_global_get(St, KeyBin);
         V -> {V, St}
     end.
@@ -335,13 +305,13 @@ with_props(Cell, Props) when tuple_size(Cell) =:= ?SOBJECT_SIZE ->
 with_value(Prop, V) when tuple_size(Prop) =:= ?DATAPROP_SIZE ->
     setelement(?DATAPROP_VALUE, Prop, V).
 
-t_set_prop_named(St, Obj, KeyBin, V, Strict) ->
+t_set_named(St, Obj, KeyBin, V, Strict) ->
     case t_set_prop_own_data(St, Obj, KeyBin, V) of
         miss ->
             Key = {?KEY_NAMED, KeyBin},
             {_, St1} = case Strict of
                 true -> 'arc@rt@obj':t_set_prop_strict(St, Obj, Key, V);
-                false -> 'arc@rt@obj':t_set_prop_any(St, Obj, Key, V)
+                false -> 'arc@rt@obj':t_set_prop_untyped_key(St, Obj, Key, V)
             end,
             St1;
         St1 -> St1
@@ -372,7 +342,7 @@ t_create_data_prop(St, Recv = {?HANDLE_TAG, Id}, Key, V) ->
         _ -> miss
     end,
     case R of
-        miss -> 'arc@rt@obj':t_create_data_prop_slow(St, Recv, Key, V);
+        miss -> 'arc@rt@obj':t_create_data_prop_general(St, Recv, Key, V);
         {seq, NewCell, Seq} ->
             Store1 = store_put_seq(Store, arc_rt_arena_ffi:set(Id, NewCell, Data), Seq),
             {true, with_store(St, bump_epoch_if_global(Store1, NewCell))};
@@ -381,7 +351,7 @@ t_create_data_prop(St, Recv = {?HANDLE_TAG, Id}, Key, V) ->
             {true, with_store(St, bump_epoch_if_global(Store1, NewCell))}
     end;
 t_create_data_prop(St, Recv, Key, V) ->
-    'arc@rt@obj':t_create_data_prop_slow(St, Recv, Key, V).
+    'arc@rt@obj':t_create_data_prop_general(St, Recv, Key, V).
 
 plain_define(Cell, PK, V, Store) ->
     Seq = element(?STORE_PROP_SEQ, Store),
@@ -407,21 +377,10 @@ shaped_define(Shapes, {?SSHAPED_TAG, Sid, P, Slots, Offs} = Shaped, KeyBin, V) -
             end
     end.
 
-%% known successor shape for adding keybin
-shaped_next(Shapes, Sid, KeyBin) ->
-    case Shapes of
-        #{Sid := Desc} ->
-            case element(?SHAPE_TRANSITIONS, Desc) of
-                #{KeyBin := To} ->
-                    #{To := ToDesc} = Shapes,
-                    {To, element(?SHAPE_OFFSETS, ToDesc)};
-                _ -> miss
-            end;
-        _ -> miss
-    end.
+shaped_next(Shapes, Sid, KeyBin) -> ?SHAPED_NEXT(Shapes, Sid, KeyBin).
 
 %% §7.3.22 ordinary has instance
-t_instanceof_fast(St, V, {?HANDLE_TAG, CId}) ->
+t_instanceof_i32(St, V, {?HANDLE_TAG, CId}) ->
     case live_cell(St, CId) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG,
                   element(?SOBJECT_SYMBOL_PROPS, Cell) =:= [] ->
@@ -440,7 +399,13 @@ t_instanceof_fast(St, V, {?HANDLE_TAG, CId}) ->
             end;
         _ -> miss
     end;
-t_instanceof_fast(_, _, _) -> miss.
+t_instanceof_i32(_, _, _) -> miss.
+
+t_instanceof_i32_general(St, V, Ctor) ->
+    case 'arc@rt@ops':t_instance_of(St, V, Ctor) of
+        {true, St1} -> {1, St1};
+        {false, St1} -> {0, St1}
+    end.
 
 %% 1 | 0 | miss
 proto_has(St, {?HANDLE_TAG, VId}, PId, Fuel) when Fuel > 0 ->
@@ -462,15 +427,15 @@ proto_has(St, {?HANDLE_TAG, VId}, PId, Fuel) when Fuel > 0 ->
 proto_has(_, {?HANDLE_TAG, _}, _, _) -> miss;
 proto_has(_, _, _, _) -> 0.
 
-t_get_elem_fast(St, {?HANDLE_TAG, Id}, Idx)
+t_get_elem(St, {?HANDLE_TAG, Id}, Idx)
   when is_integer(Idx), Idx >= 0, Idx =< ?MAX_ARRAY_INDEX ->
     Store = element(?AGENT_STORE, St),
     index_read(arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)), Idx);
-t_get_elem_fast(St, Recv, Idx)
+t_get_elem(St, Recv, Idx)
   when is_float(Idx), Idx >= 0.0, Idx == trunc(Idx) ->
-    t_get_elem_fast(St, Recv, trunc(Idx));
-t_get_elem_fast(St, {?HANDLE_TAG, Id}, Key) when ?IS_STR(Key) ->
-    case arc_rt_val_ffi:t_to_property_key_fast(Key) of
+    t_get_elem(St, Recv, trunc(Idx));
+t_get_elem(St, {?HANDLE_TAG, Id}, Key) when ?IS_STR(Key) ->
+    case arc_rt_val_ffi:property_key_of(Key) of
         {?OKEY_STRING, {?KEY_NAMED, KeyBin}} ->
             Store = element(?AGENT_STORE, St),
             Data = element(?STORE_DATA, Store),
@@ -484,7 +449,7 @@ t_get_elem_fast(St, {?HANDLE_TAG, Id}, Key) when ?IS_STR(Key) ->
             index_read(arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)), Idx);
         _ -> miss
     end;
-t_get_elem_fast(_, _, _) -> miss.
+t_get_elem(_, _, _) -> miss.
 
 index_read(Cell, Idx) when element(1, Cell) =:= ?SOBJECT_TAG ->
     case element(?SOBJECT_KIND, Cell) of
@@ -552,20 +517,20 @@ index_keys_in_props(Kind) ->
         _ -> true
     end.
 
-t_set_elem_fast(St, {?HANDLE_TAG, Id}, Idx, V)
+t_set_elem(St, {?HANDLE_TAG, Id}, Idx, V)
   when is_integer(Idx), Idx >= 0, Idx =< ?MAX_ARRAY_INDEX ->
     index_write(St, Id, Idx, V);
-t_set_elem_fast(St, Recv, Idx, V)
+t_set_elem(St, Recv, Idx, V)
   when is_float(Idx), Idx >= 0.0, Idx == trunc(Idx) ->
-    t_set_elem_fast(St, Recv, trunc(Idx), V);
-t_set_elem_fast(St, Recv = {?HANDLE_TAG, Id}, Key, V) when ?IS_STR(Key) ->
-    case arc_rt_val_ffi:t_to_property_key_fast(Key) of
+    t_set_elem(St, Recv, trunc(Idx), V);
+t_set_elem(St, Recv = {?HANDLE_TAG, Id}, Key, V) when ?IS_STR(Key) ->
+    case arc_rt_val_ffi:property_key_of(Key) of
         {?OKEY_STRING, {?KEY_NAMED, KeyBin}} ->
             t_set_prop_own_data(St, Recv, KeyBin, V);
         {?OKEY_STRING, {?KEY_INDEX, Idx}} -> index_write(St, Id, Idx, V);
         _ -> miss
     end;
-t_set_elem_fast(_, _, _, _) -> miss.
+t_set_elem(_, _, _, _) -> miss.
 
 index_write(St, Id, Idx, V) ->
     Store = element(?AGENT_STORE, St),
@@ -592,7 +557,7 @@ index_write(St, Id, Idx, V) ->
                     case element(?SOBJECT_PROPS, Cell) of
                         #{{?KEY_INDEX, Idx} := _} -> miss;
                         _ ->
-                            case elem_write_grow(element(?SOBJECT_ELEMENTS, Cell), Idx, V) of
+                            case elem_append(element(?SOBJECT_ELEMENTS, Cell), Idx, V) of
                                 miss -> miss;
                                 NewE ->
                                     NewCell = setelement(?SOBJECT_ELEMENTS,
@@ -689,11 +654,17 @@ elem_write({?ELEMS_SPARSE, M}, Idx, V) ->
     {?ELEMS_SPARSE, M#{Idx => V}};
 elem_write(_, _, _) -> miss.
 
-elem_write_grow({?ELEMS_DENSE, A}, Idx, V) ->
+elem_append({?ELEMS_DENSE, A}, Idx, V) ->
     {?ELEMS_DENSE, arc_tree_array_ffi:set(Idx, V, A)};
-elem_write_grow({?ELEMS_SPARSE, M}, Idx, V) ->
+elem_append({?ELEMS_SPARSE, M}, Idx, V) ->
     {?ELEMS_SPARSE, M#{Idx => V}};
-elem_write_grow(_, _, _) -> miss.
+elem_append(_, _, _) -> miss.
+
+elem_write_grow(Els, Idx, V) -> ?ELEM_WRITE_GROW(Els, Idx, V).
+
+native_token(Cell) -> ?NATIVE_TOKEN(Cell).
+
+elem_at(Els, Idx) -> ?ELEM_AT(Els, Idx).
 
 shape_slots_get(Slots, Off) -> ?SLOT_AT(Slots, Off).
 
@@ -794,26 +765,26 @@ live_cell(St, Id) ->
     end.
 
 %% object spread onto a fresh literal when the source holds only plain data
-t_copy_data_fast(St, {?HANDLE_TAG, TId}, {?HANDLE_TAG, SId})
+plain_copy_data_props(St, {?HANDLE_TAG, TId}, {?HANDLE_TAG, SId})
   when tuple_size(St) =:= ?AGENT_SIZE ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     case arc_rt_arena_ffi:get(TId, Data) of
         {?SOBJECT_TAG, ?ORDINARY, _, TProps, _, _, true} = TCell ->
             case source_pairs(arc_rt_arena_ffi:get(SId, Data)) of
-                miss -> none;
+                miss -> copy_miss;
                 Pairs ->
                     case merge_pairs(Pairs, TProps, element(?STORE_PROP_SEQ, Store)) of
-                        miss -> none;
+                        miss -> copy_miss;
                         {TProps2, Seq} ->
                             NewCell = setelement(?SOBJECT_PROPS, TCell, TProps2),
-                            {some, with_store(St, store_put_seq(Store,
+                            {copied, with_store(St, store_put_seq(Store,
                                 arc_rt_arena_ffi:set(TId, NewCell, Data), Seq))}
                     end
             end;
-        _ -> none
+        _ -> copy_miss
     end;
-t_copy_data_fast(_, _, _) -> none.
+plain_copy_data_props(_, _, _) -> copy_miss.
 
 source_pairs({?SOBJECT_TAG, ?ORDINARY, _, Props, [], ?ELEMS_NONE, _}) ->
     L = maps:to_list(Props),
@@ -845,23 +816,23 @@ merge_pairs([{K, V} | Rest], Props, Seq) ->
             merge_pairs(Rest, Props#{K => ?PLAIN_PROPERTY(V, Seq)}, Seq + 1)
     end.
 
-%% §14.7.5.9 key list when the whole chain is plain named data, else none
-t_for_in_fast(St, {?HANDLE_TAG, Id}) when tuple_size(St) =:= ?AGENT_SIZE ->
+%% §14.7.5.9 key list when the whole chain is plain named data
+plain_for_in_keys(St, {?HANDLE_TAG, Id}) when tuple_size(St) =:= ?AGENT_SIZE ->
     Data = element(?STORE_DATA, element(?AGENT_STORE, St)),
     for_in_chain(Data, arc_rt_arena_ffi:get(Id, Data), #{}, [], ?MAX_PROTO_HOPS);
-t_for_in_fast(_, _) -> none.
+plain_for_in_keys(_, _) -> miss.
 
-for_in_chain(_, _, _, _, 0) -> none;
+for_in_chain(_, _, _, _, 0) -> miss;
 for_in_chain(Data, {?SSHAPED_TAG, _, Proto, _, Offs}, Seen, Acc, Fuel) ->
     Keys = [KB || {KB, _} <- lists:keysort(2, maps:to_list(Offs))],
     for_in_add(Data, Proto, Keys, [], Seen, Acc, Fuel);
 for_in_chain(Data, {?SOBJECT_TAG, Kind, Proto, Props, _, ?ELEMS_NONE, _},
              Seen, Acc, Fuel) when Kind =:= ?ORDINARY; Kind =:= ?GLOBALOBJ ->
     case for_in_named(maps:to_list(Props), [], []) of
-        none -> none;
+        miss -> miss;
         {Enum, Hidden} -> for_in_add(Data, Proto, Enum, Hidden, Seen, Acc, Fuel)
     end;
-for_in_chain(_, _, _, _, _) -> none.
+for_in_chain(_, _, _, _, _) -> miss.
 
 for_in_add(Data, Proto, Enum, Hidden, Seen, Acc, Fuel) ->
     Acc1 = lists:foldl(fun(K, A) ->
@@ -869,7 +840,7 @@ for_in_add(Data, Proto, Enum, Hidden, Seen, Acc, Fuel) ->
            end, Acc, Enum),
     Seen1 = lists:foldl(fun(K, S) -> S#{K => []} end, Seen, Enum ++ Hidden),
     case Proto of
-        ?NONE -> {some, [arc_rt_str_ffi:mk(K) || K <- lists:reverse(Acc1)]};
+        ?NONE -> {plain_keys, [arc_rt_js_string_ffi:mk(K) || K <- lists:reverse(Acc1)]};
         {?SOME, {?HANDLE_TAG, P}} ->
             for_in_chain(Data, arc_rt_arena_ffi:get(P, Data), Seen1, Acc1, Fuel - 1)
     end.
@@ -885,26 +856,63 @@ for_in_named([{{?KEY_NAMED, K}, P} | Rest], Enum, Hidden) ->
             for_in_named(Rest, [{element(?DATAPROP_SEQ, P), K} | Enum], Hidden);
         false -> for_in_named(Rest, Enum, [K | Hidden])
     end;
-for_in_named(_, _, _) -> none.
+for_in_named(_, _, _) -> miss.
 
-%% §7.3.24 own enumerable named data pairs in order, none for anything else
-t_own_enum_fast(St, {?HANDLE_TAG, Id}) when tuple_size(St) =:= ?AGENT_SIZE ->
+%% §7.3.24 own enumerable named data pairs in order
+plain_own_enum_pairs(St, {?HANDLE_TAG, Id}) when tuple_size(St) =:= ?AGENT_SIZE ->
     Data = element(?STORE_DATA, element(?AGENT_STORE, St)),
     case arc_rt_arena_ffi:get(Id, Data) of
         {?SSHAPED_TAG, _, _, Slots, Offs} ->
-            {some, [{KB, ?SLOT_AT(Slots, Off)}
-                    || {KB, Off} <- lists:keysort(2, maps:to_list(Offs))]};
+            {plain_pairs, [{KB, ?SLOT_AT(Slots, Off)}
+                           || {KB, Off} <- lists:keysort(2, maps:to_list(Offs))]};
         {?SOBJECT_TAG, ?ORDINARY, _, Props, _, ?ELEMS_NONE, _} ->
             case lists:all(fun plain_named/1, maps:to_list(Props)) of
-                false -> none;
+                false -> miss;
                 true ->
                     L = lists:sort(fun({_, A}, {_, B}) ->
                             element(?DATAPROP_SEQ, A) =< element(?DATAPROP_SEQ, B)
                         end, maps:to_list(Props)),
-                    {some, [{KB, element(?DATAPROP_VALUE, P)}
-                            || {{?KEY_NAMED, KB}, P} <- L,
-                               element(?DATAPROP_ENUMERABLE, P) =:= true]}
+                    {plain_pairs, [{KB, element(?DATAPROP_VALUE, P)}
+                                  || {{?KEY_NAMED, KB}, P} <- L,
+                                     element(?DATAPROP_ENUMERABLE, P) =:= true]}
             end;
-        _ -> none
+        _ -> miss
     end;
-t_own_enum_fast(_, _) -> none.
+plain_own_enum_pairs(_, _) -> miss.
+
+%% §10.1.8.1 over data props; a getter that returns this is the receiver
+get_symbol_data(St, {?HANDLE_TAG, Id} = Recv, Sym) ->
+    Data = element(?STORE_DATA, element(?AGENT_STORE, St)),
+    symbol_walk(Data, Id, Sym, Recv, ?MAX_PROTO_HOPS);
+get_symbol_data(_, _, _) -> miss.
+
+symbol_walk(_, _, _, _, 0) -> miss;
+symbol_walk(Data, Id, Sym, Recv, Fuel) ->
+    case arc_rt_arena_ffi:get(Id, Data) of
+        {?SSHAPED_TAG, _, Proto, _} -> symbol_next(Data, Proto, Sym, Recv, Fuel);
+        {?SOBJECT_TAG, Kind, Proto, _, SymProps, _, _} ->
+            case is_tuple(Kind) andalso element(1, Kind) =:= ?PROXYOBJ_TAG of
+                true -> miss;
+                false ->
+                    case lists:keyfind(Sym, 1, SymProps) of
+                        {_, Prop} when element(1, Prop) =:= ?DATAPROP_TAG ->
+                            element(?DATAPROP_VALUE, Prop);
+                        {_, {?ACCESSORPROP_TAG, {?SOME, Getter}, _, _, _, _}} ->
+                            getter_returns_this(Data, Getter, Recv);
+                        {_, _} -> miss;
+                        false -> symbol_next(Data, Proto, Sym, Recv, Fuel)
+                    end
+            end;
+        _ -> miss
+    end.
+
+symbol_next(_, ?NONE, _, _, _) -> undefined;
+symbol_next(Data, {?SOME, {?HANDLE_TAG, Id}}, Sym, Recv, Fuel) ->
+    symbol_walk(Data, Id, Sym, Recv, Fuel - 1).
+
+getter_returns_this(Data, {?HANDLE_TAG, G}, Recv) ->
+    case arc_rt_arena_ffi:get(G, Data) of
+        {?SOBJECT_TAG, {?NATIVEFN_TAG, return_this, _, _, _}, _, _, _, _, _} -> Recv;
+        _ -> miss
+    end;
+getter_returns_this(_, _, _) -> miss.

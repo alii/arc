@@ -1,6 +1,6 @@
-%% property fast paths: answer or miss, never raise
+%% property kernels for the interpreter; exports may answer miss, never raise
 -module(arc_interp_prop_ffi).
--export([get_field/3, get_getter/3, own_data/2, get_elem/3, get_elem2/3, put_field/5, put_elem/4,
+-export([get_field/3, find_accessor/3, own_data/2, get_elem/3, get_elem2/3, put_field/5, put_elem/4,
          define_field/4, new_object/5, new_receiver/2, get_global/3,
          put_global/6]).
 
@@ -26,35 +26,35 @@ own_data(Props, K) ->
         _ -> miss
     end.
 
-%% the accessor K resolves to along a plain chain
-get_getter(Agent, {?HANDLE_TAG, Id}, K) ->
+%% the accessor K resolves to along a plain chain, else no_accessor
+find_accessor(Agent, {?HANDLE_TAG, Id}, K) ->
     Data = element(?STORE_DATA, element(?AGENT_STORE, Agent)),
-    getter_walk(Data, arc_rt_arena_ffi:get(Id, Data), K, ?MAX_PROTO_HOPS);
-get_getter(_, _, _) -> miss.
+    accessor_walk(Data, arc_rt_arena_ffi:get(Id, Data), K, ?MAX_PROTO_HOPS);
+find_accessor(_, _, _) -> no_accessor.
 
-getter_walk(_, _, _, 0) -> miss;
-getter_walk(Data, {?SSHAPED_TAG, _, Proto, _, Offs}, K, Fuel) ->
+accessor_walk(_, _, _, 0) -> no_accessor;
+accessor_walk(Data, {?SSHAPED_TAG, _, Proto, _, Offs}, K, Fuel) ->
     case is_map_key(element(2, K), Offs) of
-        true -> miss;
-        false -> getter_next(Data, Proto, K, Fuel)
+        true -> no_accessor;
+        false -> accessor_next(Data, Proto, K, Fuel)
     end;
-getter_walk(Data, Cell, K, Fuel) when element(1, Cell) =:= ?SOBJECT_TAG ->
+accessor_walk(Data, Cell, K, Fuel) when element(1, Cell) =:= ?SOBJECT_TAG ->
     case named_plain(element(?SOBJECT_KIND, Cell), K) of
-        false -> miss;
+        false -> no_accessor;
         true ->
             case element(?SOBJECT_PROPS, Cell) of
                 #{K := Prop} when element(1, Prop) =:= ?ACCESSORPROP_TAG ->
                     {accessor, element(?ACCESSORPROP_GET, Prop),
                      element(?ACCESSORPROP_SET, Prop)};
-                #{K := _} -> miss;
-                _ -> getter_next(Data, element(?SOBJECT_PROTO, Cell), K, Fuel)
+                #{K := _} -> no_accessor;
+                _ -> accessor_next(Data, element(?SOBJECT_PROTO, Cell), K, Fuel)
             end
     end;
-getter_walk(_, _, _, _) -> miss.
+accessor_walk(_, _, _, _) -> no_accessor.
 
-getter_next(Data, {?SOME, {?HANDLE_TAG, P}}, K, Fuel) ->
-    getter_walk(Data, arc_rt_arena_ffi:get(P, Data), K, Fuel - 1);
-getter_next(_, _, _, _) -> miss.
+accessor_next(Data, {?SOME, {?HANDLE_TAG, P}}, K, Fuel) ->
+    accessor_walk(Data, arc_rt_arena_ffi:get(P, Data), K, Fuel - 1);
+accessor_next(_, _, _, _) -> no_accessor.
 
 %% §9.1.1.4.6 global getbindingvalue, plain case
 get_global(Agent, Lex, Name) ->
@@ -76,7 +76,7 @@ put_global(Store, Lex, Global, Name, V, Strict) ->
         false -> put_field(Store, Global, {?KEY_NAMED, Name}, V, not Strict)
     end.
 
-%% getters miss so slow path passes primitive as this
+%% getters miss so the general path passes the primitive as this
 proto_field(Agent, Which, K) ->
     Pair = element(Which, element(?AGENT_REALM, Agent)),
     {?HANDLE_TAG, Id} = element(?PAIR_PROTO, Pair),
@@ -136,32 +136,15 @@ field_next(_, _, _, _, _) -> miss.
 named_virtual({?ARRAYOBJ_TAG, Length}, ?LENGTH_KEY) -> Length;
 named_virtual(_, _) -> miss.
 
-%% false when named keys on this kind are exotic or virtual
 -compile({inline, [named_plain/2, named_virtual/2, birth_plain/2, cell_field/4,
                    hop/5, proto_field/3, put_prop/7, put_new/6, set_plain/5,
                    shaped_grow/7, shaped_next/3, chain_takes_write/4,
                    literal_props/3]}).
-named_plain(?ORDINARY, _) -> true;
-named_plain(Kind, _) when is_atom(Kind) -> true;
-named_plain(Kind, K) ->
-    case element(1, Kind) of
-        ?PROXYOBJ_TAG -> false;
-        ?MODULENS_TAG -> false;
-        ?TYPEDARRAYOBJ_TAG -> false;
-        ?ARRAYOBJ_TAG -> K =/= ?LENGTH_KEY;
-        ?STRINGOBJ_TAG -> K =/= ?LENGTH_KEY;
-        ?BYTECODEFN_TAG -> birth_plain(element(?BYTECODEFN_BIRTH, Kind), K);
-        ?COMPILEDFN_TAG -> birth_plain(element(?COMPILEDFN_BIRTH, Kind), K);
-        _ -> true
-    end.
+named_plain(Kind, K) -> ?NAMED_KEY_IS_PLAIN(Kind, K, ?LENGTH_KEY).
 
-%% length/name/prototype not in props until birth settled
-birth_plain(?BIRTH_SETTLED, _) -> true;
-birth_plain(_, ?LENGTH_KEY) -> false;
-birth_plain(_, {?KEY_NAMED, <<"name">>}) -> false;
-birth_plain(Birth, {?KEY_NAMED, <<"prototype">>}) ->
-    element(?BIRTH_PROTOTYPE_PARENT, Birth) =:= ?NONE;
-birth_plain(_, _) -> true.
+birth_plain(Birth, K) ->
+    ?LAZY_KEY_IS_PLAIN(Birth, K, ?LENGTH_KEY, {?KEY_NAMED, <<"name">>},
+                       {?KEY_NAMED, <<"prototype">>}).
 
 %% holes miss so the full path walks the proto chain
 get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
@@ -200,12 +183,12 @@ get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
         _ -> miss
     end;
 get_elem(_, S, Idx) when is_integer(Idx), ?IS_STR(S) ->
-    case arc_rt_str_ffi:char_at(S, Idx) of
+    case arc_rt_js_string_ffi:char_at_val(S, Idx) of
         {some, Ch} -> Ch;
         none -> miss
     end;
 get_elem(Store, {?HANDLE_TAG, _} = Obj, Key) when ?IS_STR(Key) ->
-    case arc_rt_val_ffi:t_to_property_key_fast(Key) of
+    case arc_rt_val_ffi:property_key_of(Key) of
         {?OKEY_STRING, {?KEY_NAMED, _} = K} ->
             cell_field(Store, element(?HANDLE_ID, Obj), K, undefined);
         {?OKEY_STRING, {?KEY_INDEX, Idx}} -> get_elem(Store, Obj, Idx);
@@ -288,19 +271,8 @@ put_prop(Store, Data, Id, Cell, K, V, Create) ->
         _ -> miss
     end.
 
-%% known successor shape for adding keybin, as {To, ToOffsets}
 shaped_next(Store, Sid, KeyBin) ->
-    Shapes = element(?STORE_SHAPES, Store),
-    case Shapes of
-        #{Sid := Desc} ->
-            case element(?SHAPE_TRANSITIONS, Desc) of
-                #{KeyBin := To} ->
-                    #{To := ToDesc} = Shapes,
-                    {To, element(?SHAPE_OFFSETS, ToDesc)};
-                _ -> miss
-            end;
-        _ -> miss
-    end.
+    ?SHAPED_NEXT(element(?STORE_SHAPES, Store), Sid, KeyBin).
 
 shaped_grow(Store, Data, Id, {To, ToOffs}, P, Slots, V)
   when tuple_size(Store) =:= ?STORE_SIZE ->
@@ -464,7 +436,7 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
         _ -> miss
     end;
 put_elem(Store, {?HANDLE_TAG, _} = Obj, Key, V) when ?IS_STR(Key) ->
-    case arc_rt_val_ffi:t_to_property_key_fast(Key) of
+    case arc_rt_val_ffi:property_key_of(Key) of
         {?OKEY_STRING, {?KEY_NAMED, _} = K} -> put_field(Store, Obj, K, V, true);
         {?OKEY_STRING, {?KEY_INDEX, Idx}} -> put_elem(Store, Obj, Idx, V);
         _ -> miss
@@ -528,12 +500,4 @@ elem_overwrite({?ELEMS_SPARSE, M}, Idx, V) ->
     end;
 elem_overwrite(_, _, _) -> hole.
 
-elem_write_grow({?ELEMS_DENSE, A}, Idx, V) ->
-    case Idx - arc_tree_array_ffi:size(A) =< ?MAX_GAP andalso Idx < ?MAX_DENSE_INDEX of
-        true -> {?ELEMS_DENSE, arc_tree_array_ffi:set(Idx, V, A)};
-        false -> miss
-    end;
-elem_write_grow({?ELEMS_SPARSE, M}, Idx, V) -> {?ELEMS_SPARSE, M#{Idx => V}};
-elem_write_grow(?ELEMS_NONE, Idx, V) when Idx =< ?MAX_GAP ->
-    {?ELEMS_DENSE, arc_tree_array_ffi:set(Idx, V, {})};
-elem_write_grow(_, _, _) -> miss.
+elem_write_grow(Els, Idx, V) -> ?ELEM_WRITE_GROW(Els, Idx, V).

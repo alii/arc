@@ -2361,7 +2361,7 @@ fn emit_closure_alloc(
     {
       use fun <- anf.then(anf.bind(ir.MakeClosure(outer_name, captures, 2)))
       use flags_t <- anf.then(anf.make_tuple(flags))
-      anf.host("fn_new", [
+      anf.host("new_function", [
         fun,
         flags_t,
         name_bin,
@@ -2568,7 +2568,7 @@ fn get_named(obj: ir.Value, name: String) -> anf.Build(ir.Value) {
   use site <- anf.then(fn(e: Emitter, k) {
     k(state.Emitter(..e, next_ic_site: e.next_ic_site + 1), e.next_ic_site)
   })
-  anf.host("get_prop_site", [
+  anf.host("get_named_site", [
     obj,
     ir.ConstBinary(bit_array.from_string(name)),
     ir.ConstI32(site),
@@ -2601,7 +2601,7 @@ fn emit_delegate_setup(
       anf.host("get_iterator", [iterable, iter_hint(ctx.kind)]),
     )
     use k_iter <- anf.then(key_named("iterator"))
-    use inner <- anf.then(anf.host("get_prop", [iterator, k_iter]))
+    use inner <- anf.then(anf.host("get_prop_untyped_key", [iterator, k_iter]))
     let ov =
       dict.from_list([
         #(iter_idx, iterator),
@@ -2666,7 +2666,7 @@ fn emit_delegate_arm(
           )),
         )
         use key <- anf.then(key_named_dyn(mname))
-        anf.host("get_prop", [inner, key])
+        anf.host("get_prop_untyped_key", [inner, key])
       },
       get_named(iterator, "next"),
     ))
@@ -2706,7 +2706,7 @@ fn emit_delegate_arm(
       )
     let on_call = {
       use argl <- anf.then(anf.cons_list([ctx.sent_value]))
-      use res <- anf.then(anf.host("call", [meth, inner, argl]))
+      use res <- anf.then(anf.host("call_checked", [meth, inner, argl]))
       case delegate_spec.await_state {
         Some(await_state) -> {
           use loc2 <- anf.then(repack_saved_locals(
@@ -2767,7 +2767,7 @@ fn delegate_result(
     is_obj,
     {
       use done_t <- anf.then(get_named(res, "done"))
-      use done <- anf.then(anf.host("truthy", [done_t]))
+      use done <- anf.then(anf.host("to_boolean_i32", [done_t]))
       use v <- anf.then(get_named(res, "value"))
       if_terminal(
         done,
@@ -3219,7 +3219,7 @@ fn emit_seg_tail(e: Emitter, ctx: MachineCtx, tail: SegTail) -> EmitResult {
           state.splice_let(
             cond_tree,
             cv_n,
-            ir.Let([ti_n], ir.CallHost("js", "truthy", [cv]), t),
+            ir.Let([ti_n], ir.CallHost("js", "to_boolean_i32", [cv]), t),
           )
         }),
       )
@@ -3420,7 +3420,7 @@ fn switch_chain(
             ir.CallHost("js", "strict_eq", [dv, ir.Var(tv_n)]),
             ir.Let(
               [eqi_n],
-              ir.CallHost("js", "truthy", [ir.Var(eq_n)]),
+              ir.CallHost("js", "to_boolean_i32", [ir.Var(eq_n)]),
               ir.If(ir.Var(eqi_n), [ir.TTerm], hit, else_tree),
             ),
           ),
@@ -3858,7 +3858,7 @@ fn emit_for_await_check(
       run_terminal(
         {
           use done_jv <- anf.then(get_named(ctx.sent_value, "done"))
-          use done_i <- anf.then(anf.host("truthy", [done_jv]))
+          use done_i <- anf.then(anf.host("to_boolean_i32", [done_jv]))
           use value <- anf.then(get_named(ctx.sent_value, "value"))
           anf.pure(ir.Let(
             [val_name],

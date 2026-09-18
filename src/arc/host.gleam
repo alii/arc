@@ -1,6 +1,7 @@
 //// helpers for writing host functions; validators modeled on node's
 
 import arc/host_hooks
+import arc/internal/unsafe
 import arc/rt/async as rt_async
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -325,11 +326,13 @@ type Tagged(host) {
   Tagged(key: Int, value: host)
 }
 
-@external(erlang, "gleam_stdlib", "identity")
-fn erase(tagged: Tagged(host)) -> HostTerm
+fn erase(tagged: Tagged(host)) -> HostTerm {
+  unsafe.coerce(tagged)
+}
 
-@external(erlang, "gleam_stdlib", "identity")
-fn unerase(term: HostTerm) -> Tagged(host)
+fn unerase(term: HostTerm) -> Tagged(host) {
+  unsafe.coerce(term)
+}
 
 fn tag(key: Key(host), value: host) -> HostTerm {
   erase(Tagged(key: key.id, value:))

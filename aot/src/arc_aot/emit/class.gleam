@@ -573,7 +573,7 @@ fn emit_one_init(
         Some(name),
       ))
       use e, v <- let_(e, tree)
-      host_unit_(e, "define_prop", [this, key_value, v], next)
+      host_unit_(e, "create_data_prop", [this, key_value, v], next)
     }
     NumericFieldInit(value: n, init:) -> {
       let #(ktree, e) =
@@ -584,7 +584,7 @@ fn emit_one_init(
       use e, key_value <- let_(e, ktree)
       use #(tree, e) <- result.try(e.dispatch.emit_expr(e, init))
       use e, v <- let_(e, tree)
-      host_unit_(e, "define_prop", [this, key_value, v], next)
+      host_unit_(e, "create_data_prop", [this, key_value, v], next)
     }
     BigIntFieldInit(value: i, init:) -> {
       let #(ktree, e) =
@@ -595,13 +595,13 @@ fn emit_one_init(
       use e, key_value <- let_(e, ktree)
       use #(tree, e) <- result.try(e.dispatch.emit_expr(e, init))
       use e, v <- let_(e, tree)
-      host_unit_(e, "define_prop", [this, key_value, v], next)
+      host_unit_(e, "create_data_prop", [this, key_value, v], next)
     }
     ComputedFieldInit(key_const:, init:) -> {
       use e, key_value <- read_captured_const(e, key_const)
       use #(tree, e) <- result.try(e.dispatch.emit_expr(e, init))
       use e, v <- let_(e, tree)
-      host_unit_(e, "define_prop", [this, key_value, v], next)
+      host_unit_(e, "create_data_prop", [this, key_value, v], next)
     }
   }
 }
@@ -666,7 +666,7 @@ fn build_class_init_closure(
   let e = state.leave_function(e_child, save)
   use e, fun <- let_(e, ir.MakeClosure(fn_name, capture_vals, 2))
   use e, flags_t <- let_(e, ir.TermOp(ir.MakeTuple, init_fn_flags(e.consts)))
-  use e, init_fn <- host_(e, "fn_new", [
+  use e, init_fn <- host_(e, "new_function", [
     fun,
     flags_t,
     e.consts.empty_bin,
@@ -717,7 +717,7 @@ fn emit_static_init(
       let #(child_id, e) = state.pop_child_fn(e)
       use e, static_init <- build_class_init_closure(e, child_id, inits, ctor)
       use e, empty <- host_(e, "empty_list", [])
-      host_unit_(e, "call", [static_init, ctor, empty], k)
+      host_unit_(e, "call_checked", [static_init, ctor, empty], k)
     }
   }
 }

@@ -7,6 +7,7 @@ import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/elements
 import arc/rt/js_string
+import arc/rt/lang as rt_lang
 import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -537,7 +538,7 @@ fn get_index_if_present(
 ) -> #(Option(JsVal), Agent) {
   case helpers.own_element(st, this, idx) {
     helpers.Hit(v) -> #(Some(v), st)
-    helpers.Slow -> probe_index_if_present(st, this, idx)
+    helpers.Miss -> probe_index_if_present(st, this, idx)
   }
 }
 
@@ -626,7 +627,7 @@ fn any_index_key(keys: List(PropertyKey)) -> Bool {
   }
 }
 
-fn try_elements_fast_path(
+fn with_plain_elements(
   st: Agent,
   h: Handle,
   expected_len: Int,
@@ -651,7 +652,7 @@ fn try_elements_fast_path(
       let eligible =
         length == expected_len
         && length_writable
-        && index_free(st, props, proto, from, count)
+        && index_range_plain(st, props, proto, from, count)
       case eligible {
         False -> None
         True -> {
@@ -670,7 +671,7 @@ fn try_elements_fast_path(
   }
 }
 
-fn try_push_fast_path(
+fn push_dense(
   st: Agent,
   h: Handle,
   cell: Cell,
@@ -693,7 +694,7 @@ fn try_push_fast_path(
       let eligible =
         length + arg_count <= max_array_length
         && length_writable
-        && index_free(st, props, proto, length, arg_count)
+        && index_range_plain(st, props, proto, length, arg_count)
       case eligible {
         False -> None
         True -> {
@@ -716,8 +717,8 @@ fn try_push_fast_path(
   }
 }
 
-@external(erlang, "arc_rt_array_ffi", "index_free")
-fn index_free(
+@external(erlang, "arc_rt_array_ffi", "index_range_plain")
+fn index_range_plain(
   st: Agent,
   props: Dict(PropertyKey, Property),
   proto: Option(Handle),
@@ -876,28 +877,23 @@ fn join_elements_generic(
 }
 
 fn array_push(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  case push_fast(st, this, args) {
+  case push(st, this, args) {
     Pushed(new_length, st) -> #(mk_int(new_length), st)
-    PushSlow -> array_push_slow(st, this, args)
+    PushMiss -> push_general(st, this, args)
   }
 }
 
-type PushFast {
+type Push {
   Pushed(Int, Agent)
-  PushSlow
+  PushMiss
 }
 
 @external(erlang, "arc_rt_array_ffi", "push")
-fn push_fast(st: Agent, this: JsVal, args: List(JsVal)) -> PushFast
+fn push(st: Agent, this: JsVal, args: List(JsVal)) -> Push
 
-fn array_push_slow(
-  st: Agent,
-  this: JsVal,
-  args: List(JsVal),
-) -> #(JsVal, Agent) {
+fn push_general(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let fast = case classify(this), args {
-    KHandle(h), [_, ..] ->
-      try_push_fast_path(st, h, rt_store.t_cell_get(st, h), args)
+    KHandle(h), [_, ..] -> push_dense(st, h, rt_store.t_cell_get(st, h), args)
     _, _ -> None
   }
   case fast {
@@ -937,28 +933,28 @@ fn push_generic(
 }
 
 fn array_pop(st: Agent, this: JsVal, _args: List(JsVal)) -> #(JsVal, Agent) {
-  case pop_fast(st, this) {
+  case pop(st, this) {
     Popped(val, st) -> #(val, st)
-    PopSlow -> array_pop_slow(st, this)
+    PopMiss -> pop_general(st, this)
   }
 }
 
-type PopFast {
+type Pop {
   Popped(JsVal, Agent)
-  PopSlow
+  PopMiss
 }
 
 @external(erlang, "arc_rt_array_ffi", "pop")
-fn pop_fast(st: Agent, this: JsVal) -> PopFast
+fn pop(st: Agent, this: JsVal) -> Pop
 
-fn array_pop_slow(st: Agent, this: JsVal) -> #(JsVal, Agent) {
+fn pop_general(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   use _this, h, length, st <- require_array(st, this)
   case length == 0 {
     True -> #(mk_undefined(), generic_set_length(st, h, 0))
     False -> {
       let new_len = length - 1
       let fast = {
-        use els, len <- try_elements_fast_path(st, h, length, new_len, length)
+        use els, len <- with_plain_elements(st, h, length, new_len, length)
         #(elements.truncate(els, len - 1), len - 1, elements.get(els, len - 1))
       }
       case fast {
@@ -979,7 +975,7 @@ fn array_shift(st: Agent, this: JsVal, _args: List(JsVal)) -> #(JsVal, Agent) {
     True -> #(mk_undefined(), generic_set_length(st, h, 0))
     False -> {
       let fast = {
-        use els, len <- try_elements_fast_path(st, h, length, 0, length)
+        use els, len <- with_plain_elements(st, h, length, 0, length)
         let first = elements.get(els, 0)
         let els =
           elements.move_range(els, 1, len, -1) |> elements.truncate(len - 1)
@@ -1047,7 +1043,7 @@ fn array_unshift(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   })
   use <- guard_safe_length(st, new_len)
   let fast = {
-    use els, len <- try_elements_fast_path(st, h, length, 0, new_len)
+    use els, len <- with_plain_elements(st, h, length, 0, new_len)
     let els =
       elements.move_range(els, 0, len, arg_count)
       |> elements.write_list(0, args)
@@ -1598,7 +1594,7 @@ fn array_reverse(
 ) -> #(JsVal, Agent) {
   use this, h, length, st <- require_array(st, this)
   let fast = {
-    use els, len <- try_elements_fast_path(st, h, length, 0, length)
+    use els, len <- with_plain_elements(st, h, length, 0, length)
     #(elements.reverse_range(els, len), len, Nil)
   }
   case fast {
@@ -1642,7 +1638,7 @@ fn array_fill(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(end, st) = relative_index(st, helpers.arg_at(args, 2), length, length)
   use <- within_budget(st, end - start)
   let fast = {
-    use els, len <- try_elements_fast_path(st, h, length, start, end)
+    use els, len <- with_plain_elements(st, h, length, start, end)
     #(elements.fill_range(els, start, end, fill_val), len, Nil)
   }
   case fast {
@@ -1749,7 +1745,7 @@ type EqMode {
 
 fn eq_apply(eq: EqMode, a: JsVal, b: JsVal) -> Bool {
   case eq {
-    Strict -> rt_val.strict_equal(a, b)
+    Strict -> rt_val.strict_eq(a, b)
     SameValueZero -> rt_val.same_value_zero(a, b)
   }
 }
@@ -1960,7 +1956,7 @@ fn search_backward_generic(
       case maybe_val {
         None -> search_backward_generic(st, this, idx - 1, search, fuel - 1)
         Some(val) ->
-          case rt_val.strict_equal(val, search) {
+          case rt_val.strict_eq(val, search) {
             True -> #(idx, st)
             False ->
               search_backward_generic(st, this, idx - 1, search, fuel - 1)
@@ -2043,7 +2039,7 @@ fn iterate_loop(
     False, _ -> {
       let #(maybe_elem, st) = case helpers.own_element(st, arr, idx) {
         helpers.Hit(elem) -> #(Some(elem), st)
-        helpers.Slow -> {
+        helpers.Miss -> {
           let #(maybe_elem, st) = probe_index_if_present(st, arr, idx)
           case hole_mode {
             VisitHoles -> #(Some(option.unwrap(maybe_elem, mk_undefined())), st)
@@ -2105,7 +2101,7 @@ fn map_dense(
     False ->
       case helpers.own_element(st, arr, idx) {
         helpers.Hit(elem) -> map_dense_step(st, arr, idx, length, cb, acc, elem)
-        helpers.Slow ->
+        helpers.Miss ->
           case probe_index_if_present(st, arr, idx) {
             #(Some(elem), st) ->
               map_dense_step(st, arr, idx, length, cb, acc, elem)
@@ -2179,7 +2175,7 @@ fn filter_loop(
     False ->
       case helpers.own_element(st, arr, idx) {
         helpers.Hit(elem) -> filter_step(st, arr, idx, length, cb, kept, elem)
-        helpers.Slow ->
+        helpers.Miss ->
           case probe_index_if_present(st, arr, idx) {
             #(Some(elem), st) ->
               filter_step(st, arr, idx, length, cb, kept, elem)
@@ -2228,7 +2224,7 @@ fn for_each_loop(
     False, False -> {
       let st = case helpers.own_element(st, arr, idx) {
         helpers.Hit(elem) -> cb(st, [elem, mk_int(idx), arr]).1
-        helpers.Slow ->
+        helpers.Miss ->
           case probe_index_if_present(st, arr, idx) {
             #(Some(elem), st) -> cb(st, [elem, mk_int(idx), arr]).1
             #(None, st) -> st
@@ -2478,7 +2474,7 @@ fn reduce_loop(
           let #(result, st) = cb(st, [acc, elem, mk_int(idx), arr])
           reduce_loop(st, arr, idx + step, end, cb, result, dir, fuel - 1)
         }
-        helpers.Slow ->
+        helpers.Miss ->
           case probe_index_if_present(st, arr, idx) {
             #(Some(elem), st) -> {
               let #(result, st) = cb(st, [acc, elem, mk_int(idx), arr])
@@ -2816,7 +2812,7 @@ fn write_sort_result(
 ) -> Agent {
   let fast = case idx == 0 {
     True -> {
-      use _els, len <- try_elements_fast_path(st, h, length, 0, length)
+      use _els, len <- with_plain_elements(st, h, length, 0, length)
       #(elements.from_list(values), len, Nil)
     }
     False -> None
@@ -2923,7 +2919,7 @@ fn array_splice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
   let shift = item_count - actual_delete_count
   let fast = {
-    use els, len <- try_elements_fast_path(
+    use els, len <- with_plain_elements(
       st,
       h,
       length,
@@ -3134,7 +3130,7 @@ fn array_copy_within(
     True -> #(this, st)
     False -> {
       let fast = {
-        use els, len <- try_elements_fast_path(st, h, length, 0, length)
+        use els, len <- with_plain_elements(st, h, length, 0, length)
         #(elements.copy_within(els, from, target, count), len, Nil)
       }
       case fast {
@@ -3264,11 +3260,11 @@ fn array_from_array_like(
       // a plain array under the intrinsic constructor is a copy
       let plain = case classify(ctor), map_fn {
         KHandle(h), None if h == st.realm.array.constructor ->
-          array_spread(st, items)
-        _, _ -> None
+          rt_lang.array_spread(st, items)
+        _, _ -> rt_lang.SpreadMiss
       }
-      use <- bool.lazy_guard(option.is_some(plain), fn() {
-        alloc_array_list(st, option.unwrap(plain, []))
+      use <- lazy_guard_spread(plain, fn(values) {
+        alloc_array_list(st, values)
       })
       let #(iter_method, st) =
         rt_obj.t_get_prop(st, items, SymbolKey(symbol_iterator))
@@ -3573,5 +3569,13 @@ fn array_entries(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 }
 
 // every element of a plain hole-free array whose iteration observes nothing
-@external(erlang, "arc_rt_lang_ffi", "array_spread")
-fn array_spread(st: Agent, items: JsVal) -> Option(List(JsVal))
+fn lazy_guard_spread(
+  plain: rt_lang.PlainSpread,
+  then: fn(List(JsVal)) -> a,
+  otherwise: fn() -> a,
+) -> a {
+  case plain {
+    rt_lang.Spread(values) -> then(values)
+    rt_lang.SpreadMiss -> otherwise()
+  }
+}

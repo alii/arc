@@ -1,7 +1,11 @@
 -module(arc_rt_layout_root_ffi).
 -export([idx/1, tag/1, element_of/2, size_of/1, dyn/1, slots/1,
          compiled_fn_parts/1, direct_entry/3, is_plain_fn/1, plain_property/2,
-         slot_at/2, slot_set/3, frame/4, is_js_number/1, is_str/1]).
+         slot_at/2, slot_set/3, frame/4, is_js_number/1, is_str/1,
+         is_nullish/1, elem_at/2, elem_write_grow/3, native_token/1,
+         named_plain/2, birth_plain/2, shaped_next/3]).
+
+-compile({inline, [birth_plain/2]}).
 
 -include("arc/rt/arc_rt_layout.hrl").
 
@@ -106,7 +110,8 @@ idx(<<"LEXICAL_GLOBAL_VALUE">>) -> ?LEXICAL_GLOBAL_VALUE;
 idx(<<"CELL_PROTO">>) -> ?CELL_PROTO;
 idx(<<"MAX_ARRAY_INDEX">>) -> ?MAX_ARRAY_INDEX;
 idx(<<"MAX_SAFE_INT">>) -> ?MAX_SAFE_INT;
-idx(<<"MAX_DENSE_INDEX">>) -> ?MAX_DENSE_INDEX.
+idx(<<"MAX_DENSE_INDEX">>) -> ?MAX_DENSE_INDEX;
+idx(<<"MAX_GAP">>) -> ?MAX_GAP.
 
 tag(<<"AGENT_TAG">>) -> ?AGENT_TAG;
 tag(<<"SOME">>) -> ?SOME;
@@ -198,3 +203,18 @@ frame(This, Fn, Home, NewTarget) -> ?FRAME(This, Fn, Home, NewTarget).
 is_js_number(V) -> ?IS_JS_NUMBER(V).
 
 is_str(V) -> ?IS_STR(V).
+
+is_nullish(V) -> ?IS_NULLISH(V).
+
+elem_at(Els, Idx) -> ?ELEM_AT(Els, Idx).
+
+elem_write_grow(Els, Idx, V) -> ?ELEM_WRITE_GROW(Els, Idx, V).
+
+native_token(Cell) -> ?NATIVE_TOKEN(Cell).
+
+named_plain(Kind, KeyBin) -> ?NAMED_KEY_IS_PLAIN(Kind, KeyBin, <<"length">>).
+
+shaped_next(Shapes, Sid, KeyBin) -> ?SHAPED_NEXT(Shapes, Sid, KeyBin).
+
+birth_plain(Birth, KeyBin) ->
+    ?LAZY_KEY_IS_PLAIN(Birth, KeyBin, <<"length">>, <<"name">>, <<"prototype">>).

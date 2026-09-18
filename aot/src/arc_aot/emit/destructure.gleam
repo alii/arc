@@ -193,7 +193,7 @@ fn emit_object_props(
     }
     [ast.PatternProperty(key:, value:, ..), ..tail] -> {
       use k <- anf.then(expr.emit_key(key))
-      use v <- anf.then(anf.host("get_prop", [source, k]))
+      use v <- anf.then(anf.host("get_prop_untyped_key", [source, k]))
       use _ <- anf.then(go(value, v, mode))
       let seen = case has_rest {
         True -> [k, ..seen]

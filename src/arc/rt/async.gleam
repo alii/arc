@@ -22,8 +22,8 @@ import arc/rt/types.{
   PromiseRejected, PromiseResolveFn, RangeErr, ReactionJob, ResolveThenableJob,
   ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen, SBox, SGenerator,
   SObject, SPromiseData, StepAwait, StepReturn, StepThrow, StepYield, StoreMeta,
-  StringKey, ThrowerPassThrough, TypeErr, classify, jq_pop, jq_push, mk_bool,
-  mk_object, mk_string, mk_undefined,
+  StringKey, ThrowerPassThrough, TypeErr, classify, job_queue_pop,
+  job_queue_push, mk_bool, mk_object, mk_string, mk_undefined,
 } as rt_types
 import gleam/dict
 import gleam/int
@@ -108,17 +108,18 @@ fn with_js(st: Agent, js: JsStore(Agent)) -> Agent {
 
 pub fn t_enqueue_job(st: Agent, job: Job) -> Agent {
   let js = require_js(st)
-  with_js(st, JsStore(..js, microtasks: jq_push(js.microtasks, job)))
+  with_js(st, JsStore(..js, microtasks: job_queue_push(js.microtasks, job)))
 }
 
 // the gc safepoint: collects only between jobs, never mid-expression
+// called by name from arc_aot_exec_ffi
 pub fn drain(st: Agent) -> Agent {
   let st = case st.waiters {
     [] -> st
     [_, ..] -> service_waiters(st)
   }
   let js = require_js(st)
-  case jq_pop(js.microtasks) {
+  case job_queue_pop(js.microtasks) {
     None ->
       case earliest_deadline(st) {
         Some(deadline) -> drain(idle_until(st, deadline))
@@ -156,13 +157,13 @@ type Cancellation {
 }
 
 @external(erlang, "arc_rt_sab_ffi", "cancel")
-fn cancel_waiter(owner: SabOwner, ref: WaiterRef) -> Cancellation
+fn cancel(owner: SabOwner, ref: WaiterRef) -> Cancellation
 
 @external(erlang, "arc_rt_sab_ffi", "take_wake")
 fn take_wake(refs: List(WaiterRef), timeout_ms: Int) -> Option(WaiterRef)
 
 @external(erlang, "arc_rt_sab_ffi", "await_wake")
-fn consume_wake(ref: WaiterRef) -> Nil
+fn await_wake(ref: WaiterRef) -> Nil
 
 pub fn t_add_waiter(
   st: Agent,
@@ -237,10 +238,10 @@ fn fire_due_waiters(st: Agent, cutoff: Int) -> Agent {
       }
     })
   list.fold(due, Agent(..st, waiters: pending), fn(st, w) {
-    case cancel_waiter(w.owner, w.ref) {
+    case cancel(w.owner, w.ref) {
       Cancelled -> settle(st, w.resolve, Fulfil, wait_result_js(TimedOut))
       AlreadyWoken -> {
-        let Nil = consume_wake(w.ref)
+        let Nil = await_wake(w.ref)
         enqueue_resolve_ok(st, w)
       }
     }
@@ -313,7 +314,8 @@ fn sent_of(side: Side, value: JsVal) -> #(Int, JsVal) {
 
 fn resume_from_job(st: Agent, turn: fn(Agent) -> Agent) -> Agent {
   let st = rt_store.t_enter_call(st)
-  let #(outcome, st) = protected(st, fn(st) { #(mk_undefined(), turn(st)) })
+  let #(outcome, st) =
+    call.t_apply_protected(st, fn(st) { #(mk_undefined(), turn(st)) })
   report_job_throw(#(outcome, rt_store.t_leave_call(st)))
 }
 
@@ -321,7 +323,7 @@ fn call_settle(st: Agent, target: JsVal, args: List(JsVal)) -> Agent {
   report_job_throw(t_call(st, target, mk_undefined(), args))
 }
 
-fn report_job_throw(outcome: #(Completion, Agent)) -> Agent {
+fn report_job_throw(outcome: #(Completion(JsVal), Agent)) -> Agent {
   case outcome {
     #(NormalCompletion(_), st) -> st
     #(ThrowCompletion(thrown), st) -> {
@@ -355,7 +357,9 @@ fn execute_job(st: Agent, job: Job) -> Agent {
         #(ThrowCompletion(e), st) -> call_settle(st, reject, [e])
       }
     HostJob(run:) ->
-      report_job_throw(protected(st, fn(st) { #(mk_undefined(), run(st)) }))
+      report_job_throw(
+        call.t_apply_protected(st, fn(st) { #(mk_undefined(), run(st)) }),
+      )
   }
 }
 
@@ -572,12 +576,6 @@ fn gen_resume(
   }
 }
 
-@external(erlang, "arc_rt_call_ffi", "t_apply_protected")
-fn protected(
-  st: Agent,
-  body: fn(Agent) -> #(JsVal, Agent),
-) -> #(Completion, Agent)
-
 // §27.2.1.6 ispromise
 pub fn as_promise(st: Agent, v: JsVal) -> Option(Handle) {
   case classify(v) {
@@ -733,7 +731,7 @@ fn resolve_with_handle(
   case rt_store.t_cell_get(st, h) {
     SObject(..) | rt_types.SShapedObject(..) -> {
       let #(outcome, st) =
-        protected(st, fn(st) {
+        call.t_apply_protected(st, fn(st) {
           rt_obj.t_get_prop(st, resolution, StringKey(Named("then")))
         })
       case outcome {

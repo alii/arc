@@ -1,4 +1,4 @@
--module(arc_job_queue_ffi).
+-module(arc_rt_job_queue_ffi).
 -export([job_queue_new/0, job_queue_push/2, job_queue_pop/1,
          job_queue_to_list/1]).
 

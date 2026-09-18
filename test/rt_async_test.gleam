@@ -155,7 +155,7 @@ pub fn promise_subclass_test() {
   let inst = mk_object(inst_h)
   assert rt_obj.t_get_prototype_of(st, inst_h).0 == Some(p_proto_h)
   let #(is_p, st) = rt_ops.t_instance_of(st, inst, p_ctor)
-  assert is_p == 1
+  assert is_p
   let #(noop, st) = rt_helpers.func(st, fn(st, _) { #(mk_undefined(), st) })
   let #(child, st) = rt_helpers.call_method(st, inst, "then", [noop])
   let assert KHandle(child_h) = classify(child)

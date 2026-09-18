@@ -1,10 +1,10 @@
-%% aot call-site fast paths, {miss, St} falls back to the full path
--module(arc_rt_call_fast_ffi).
--export([t_call_fast/4, t_call_fast0/3, t_call_fast1/4, t_call_fast2/5,
-         t_call_fast3/6,
+%% aot call site ics and direct entry; exports may answer {miss, St}
+-module(arc_rt_call_ic_ffi).
+-export([t_call_by_kind/4, t_call_by_kind0/3, t_call_by_kind1/4, t_call_by_kind2/5,
+         t_call_by_kind3/6,
          t_call_method_mono/4, t_call_method_ic/6, t_call_method_ic0/5,
          t_call_method_ic1/6, t_call_method_ic2/7, t_call_method_ic3/8,
-         t_new_simple/3, t_bind_compiled/4]).
+         t_new_direct/3, t_bind_compiled/4]).
 
 -include("arc_rt_layout.hrl").
 
@@ -13,16 +13,16 @@
 -define(IC_CALL_WAYS, 16).
 
 %% args travel as a count n with a, b, c, or as a list in place of n
-t_call_fast(St, F, This, Args) ->
+t_call_by_kind(St, F, This, Args) ->
     dispatch_kind(St, F, This, Args, undefined, undefined, undefined).
 
-t_call_fast0(St, F, This) ->
+t_call_by_kind0(St, F, This) ->
     dispatch_kind(St, F, This, 0, undefined, undefined, undefined).
-t_call_fast1(St, F, This, A) ->
+t_call_by_kind1(St, F, This, A) ->
     dispatch_kind(St, F, This, 1, A, undefined, undefined).
-t_call_fast2(St, F, This, A, B) ->
+t_call_by_kind2(St, F, This, A, B) ->
     dispatch_kind(St, F, This, 2, A, B, undefined).
-t_call_fast3(St, F, This, A, B, C) ->
+t_call_by_kind3(St, F, This, A, B, C) ->
     dispatch_kind(St, F, This, 3, A, B, C).
 
 dispatch_kind(St, F = {?HANDLE_TAG, Id}, This, N, A, B, C) ->
@@ -199,7 +199,7 @@ ic_miss(St, Recv, RCell, KeyBin, FillSite, RSite, N, A, B, C) ->
                  Recv, KeyBin, RSite, N, A, B, C).
 
 after_lookup({miss, St}, Recv, KeyBin, RSite, N, A, B, C) ->
-    {F, St1} = arc_rt_obj_ffi:t_get_prop_site(St, Recv, KeyBin, RSite),
+    {F, St1} = arc_rt_obj_ffi:t_get_named_site(St, Recv, KeyBin, RSite),
     dispatch_kind(St1, F, Recv, N, A, B, C);
 after_lookup(Hit, _, _, _, _, _, _, _) -> Hit.
 
@@ -453,7 +453,7 @@ apply_this(CodeT, St, Recv, [A, B]) -> CodeT(St, Recv, A, B);
 apply_this(CodeT, St, Recv, [A, B, C]) -> CodeT(St, Recv, A, B, C);
 apply_this(CodeT, St, Recv, Args) -> erlang:apply(CodeT, [St, Recv | Args]).
 
-t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
+t_new_direct(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     case arc_rt_arena_ffi:get(CId, Data) of
@@ -469,7 +469,7 @@ t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
                           when element(1, Prop) =:= ?DATAPROP_TAG ->
                             case element(?DATAPROP_VALUE, Prop) of
                                 Proto = {?HANDLE_TAG, _} ->
-                                    new_simple_apply(St, Store, Data, Ctor,
+                                    new_direct_apply(St, Store, Data, Ctor,
                                                      Kind, Proto, Args);
                                 _ -> {miss, St}
                             end;
@@ -479,9 +479,9 @@ t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
             end;
         _ -> {miss, St}
     end;
-t_new_simple(St, _, _) -> {miss, St}.
+t_new_direct(St, _, _) -> {miss, St}.
 
-new_simple_apply(St, Store, Data, Ctor, ?COMPILEDFN(Code, Home, _, _, DirectEntry), Proto,
+new_direct_apply(St, Store, Data, Ctor, ?COMPILEDFN(Code, Home, _, _, DirectEntry), Proto,
                  Args)
   when tuple_size(St) =:= ?AGENT_SIZE, tuple_size(Store) =:= ?STORE_SIZE ->
     NewCell = {?SSHAPED_TAG, 0, {?SOME, Proto}, {}, #{}},

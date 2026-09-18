@@ -4,7 +4,7 @@ import arc/rt/async as rt_async
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined}
 import arc/rt/builtins/realm_ops
-import arc/rt/call as rt_call
+import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/inspect
 import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
@@ -114,20 +114,12 @@ fn require_shadow_realm(st: Agent, this: JsVal, method: String) -> Int {
   }
 }
 
-type Outcome(a) {
-  NormalCompletion(a)
-  ThrowCompletion(JsVal)
-}
-
-@external(erlang, "arc_rt_call_ffi", "t_apply_protected")
-fn protected(st: Agent, body: fn(Agent) -> #(a, Agent)) -> #(Outcome(a), Agent)
-
 fn protected_in_realm(
   st: Agent,
   id: Int,
   body: fn(Agent) -> #(a, Agent),
-) -> #(Outcome(a), Agent) {
-  use st <- protected(st)
+) -> #(rt_call.Completion(a), Agent) {
+  use st <- rt_call.t_apply_protected(st)
   rt_realm.with_realm(st, id, body)
 }
 

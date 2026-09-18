@@ -474,7 +474,7 @@ fn bind_rest(
   case rest {
     None -> k(e)
     Some(target) -> {
-      use e, arr <- host_(e, "array_from_list", [tail])
+      use e, arr <- host_(e, "new_array", [tail])
       let mode = case non_simple {
         True -> state.BindLet
         False -> state.BindVar
@@ -1637,7 +1637,7 @@ fn emit_closure_alloc(
           anf.make_tuple([ir.ConstAtom("some"), inner])
         }
       })
-      anf.host("fn_new", [
+      anf.host("new_function", [
         fun,
         flags_t,
         name_bin,

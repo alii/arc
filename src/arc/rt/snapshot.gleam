@@ -57,10 +57,10 @@ type RealmImage {
   )
 }
 
-@external(erlang, "arc_snapshot_ffi", "encode")
+@external(erlang, "arc_rt_snapshot_ffi", "encode")
 fn encode(version: Int, store: StoreImage, realms: RealmImage) -> BitArray
 
-@external(erlang, "arc_snapshot_ffi", "decode")
+@external(erlang, "arc_rt_snapshot_ffi", "decode")
 fn decode(
   version: Int,
   data: BitArray,
@@ -111,7 +111,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
       minors_since_major: _,
     ),
   ) = store
-  let microtasks = types.jq_to_list(microtasks)
+  let microtasks = types.job_queue_to_list(microtasks)
   let data =
     arena.fold(
       fn(id, cell, acc) { dict.insert(acc, id, drop_regexp_matcher(cell)) },
@@ -192,7 +192,11 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
     prop_seq:,
     shapes:,
     next_shape:,
-    microtasks: list.fold(microtasks, types.jq_new(), types.jq_push),
+    microtasks: list.fold(
+      microtasks,
+      types.job_queue_new(),
+      types.job_queue_push,
+    ),
     pinned_roots:,
     meta: types.StoreMeta(
       ..fresh.meta,

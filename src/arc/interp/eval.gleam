@@ -45,7 +45,7 @@ fn compile_source(
   compile: Compile,
 ) -> Result(FuncTemplate, #(JsVal, Agent)) {
   let compiled =
-    compile_task.run(string.byte_size(source), fn() {
+    compile_task.run_compile_task(string.byte_size(source), fn() {
       case parse(source) {
         Error(err) -> Error(parser.parse_error_to_string(err))
         Ok(#(body, sb)) ->

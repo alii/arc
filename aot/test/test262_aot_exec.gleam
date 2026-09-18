@@ -245,7 +245,7 @@ fn run_compiled(
   case prepared {
     Error(outcome) -> outcome
     Ok(#(st, module)) -> {
-      let #(exec, st) = run.apply_main(module, st)
+      let #(exec, st) = run.apply_js_main(module, st)
       run.unload(module)
       judge(metadata, is_async, exec, st)
     }
@@ -275,7 +275,7 @@ fn run_harness(ctx: Ctx, st: Agent, name: String) -> Result(Agent, Outcome) {
       Error(Skip("harness " <> name <> " unsupported: " <> feature))
     Ok(Broken(reason)) -> Error(Fail("harness " <> name <> ": " <> reason))
     Ok(Loaded(module)) ->
-      case run.apply_main(module, st) {
+      case run.apply_js_main(module, st) {
         #(run.JsReturned(_), st) -> Ok(st)
         #(run.JsThrew(thrown), st) ->
           case emitter_rejection(thrown, st) {

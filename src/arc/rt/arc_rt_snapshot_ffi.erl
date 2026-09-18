@@ -1,5 +1,5 @@
 %% no [safe]: only decode bytes this library produced
--module(arc_snapshot_ffi).
+-module(arc_rt_snapshot_ffi).
 -export([encode/3, decode/2]).
 
 -define(TAG, "arc-engine").

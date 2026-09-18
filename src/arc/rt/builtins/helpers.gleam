@@ -12,7 +12,7 @@ import gleam/option.{type Option, None, Some}
 
 pub type OwnElement {
   Hit(JsVal)
-  Slow
+  Miss
 }
 
 @external(erlang, "arc_rt_array_ffi", "own_element")
@@ -21,7 +21,7 @@ pub fn own_element(st: Agent, this: JsVal, idx: Int) -> OwnElement
 pub fn get_index(st: Agent, this: JsVal, idx: Int) -> #(JsVal, Agent) {
   case own_element(st, this, idx) {
     Hit(v) -> #(v, st)
-    Slow -> rt_obj.t_get_prop(st, this, StringKey(rt_types.index_key(idx)))
+    Miss -> rt_obj.t_get_prop(st, this, StringKey(rt_types.index_key(idx)))
   }
 }
 
@@ -29,23 +29,13 @@ pub fn get_named(st: Agent, recv: JsVal, key: String) -> #(JsVal, Agent) {
   rt_val.get_named(st, recv, key)
 }
 
-@external(erlang, "arc_rt_helpers_ffi", "get_symbol_data")
-fn get_symbol_data(st: Agent, recv: JsVal, sym: SymbolId) -> JsVal
-
-@external(erlang, "arc_rt_helpers_ffi", "is_miss")
-fn is_miss(v: JsVal) -> Bool
-
 pub fn get_symbol(st: Agent, recv: JsVal, sym: SymbolId) -> #(JsVal, Agent) {
-  let v = get_symbol_data(st, recv, sym)
-  case is_miss(v) {
-    True -> rt_obj.t_get_prop(st, recv, rt_types.SymbolKey(sym))
-    False -> #(v, st)
-  }
+  rt_val.get_symbol(st, recv, sym)
 }
 
 // strict set, throws on failure
-@external(erlang, "arc_rt_obj_ffi", "t_set_prop_named")
-pub fn set_named(
+@external(erlang, "arc_rt_obj_ffi", "t_set_named")
+pub fn t_set_named(
   st: Agent,
   obj: JsVal,
   key: String,

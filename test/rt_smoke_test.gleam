@@ -10,12 +10,6 @@ import gleam/dict
 import gleam/option.{Some}
 import rt_helpers
 
-@external(erlang, "arc_rt_call_ffi", "t_apply_protected")
-fn t_apply_protected(
-  st: Agent,
-  body: fn(Agent) -> #(JsVal, Agent),
-) -> #(rt_call.Completion, Agent)
-
 fn agent() -> Agent {
   rt_helpers.agent()
 }
@@ -61,7 +55,9 @@ pub fn object_set_get_round_trip_test() {
 pub fn type_error_is_caught_as_throw_completion_test() {
   let st = agent()
   let #(completion, st) =
-    t_apply_protected(st, fn(st) { rt_val.t_throw_type_error(st, "boom") })
+    rt_call.t_apply_protected(st, fn(st) {
+      rt_val.t_throw_type_error(st, "boom")
+    })
   let assert ThrowCompletion(err) = completion
   let assert KHandle(_) = classify(err)
   let #(msg, _st) = rt_obj.t_get_prop(st, err, StringKey(Named("message")))

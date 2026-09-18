@@ -2,7 +2,8 @@ import arc/rt/arena
 import arc/rt/limits
 import arc/rt/types.{
   type Agent, type Cell, type Handle, type JsOps, type JsStore, type JsVal,
-  type StoreMeta, Agent, Handle, JsOps, JsStore, RangeErr, SBox, StoreMeta,
+  type ObjectKey, type StoreMeta, Agent, Handle, JsOps, JsStore, RangeErr, SBox,
+  StoreMeta,
 } as rt_types
 import gleam/dict
 import gleam/set
@@ -24,7 +25,7 @@ pub fn new() -> JsStore(Agent) {
     free_protos: dict.new(),
     global_epoch: 0,
     ops: unseeded_ops(),
-    microtasks: rt_types.jq_new(),
+    microtasks: rt_types.job_queue_new(),
     pinned_roots: set.new(),
     meta: StoreMeta(
       gc_live: 0,
@@ -214,3 +215,10 @@ pub fn t_leave_call(st: Agent) -> Agent {
 
 @external(erlang, "arc_rt_store_ffi", "t_throw")
 pub fn t_throw(st: Agent, err_val: JsVal) -> a
+
+// wire key tuple as an object key, no copy
+@external(erlang, "arc_rt_store_ffi", "as_object_key")
+pub fn as_object_key(key: k) -> ObjectKey
+
+@external(erlang, "arc_rt_store_ffi", "is_handle")
+pub fn is_handle(v: JsVal) -> Bool

@@ -1,8 +1,7 @@
 import arc/rt/elements
 import arc/rt/store as rt_store
-import arc/rt/typed_array_ffi.{
-  U8, ta_clamp_uint8, ta_get_float, ta_get_int, ta_set_float, ta_set_int,
-  ta_zeroed,
+import arc/rt/typed_array_bytes.{
+  U8, clamp_uint8, get_float, get_int, set_float, set_int, zeroed,
 }
 import arc/rt/types.{
   type Agent, type BigIntKind, type BufferStorage, type Handle, type JsElements,
@@ -91,7 +90,7 @@ pub fn resolve_view(
   byte_offset: Int,
   length: Option(Int),
 ) -> ResolvedView {
-  let elem_size = typed_array_ffi.elem_size(elem_kind)
+  let elem_size = typed_array_bytes.elem_size(elem_kind)
   ResolvedView(
     byte_size:,
     elem_size:,
@@ -108,7 +107,7 @@ pub fn fixed_view(
 ) -> ResolvedView {
   ResolvedView(
     byte_size:,
-    elem_size: typed_array_ffi.elem_size(elem_kind),
+    elem_size: typed_array_bytes.elem_size(elem_kind),
     byte_offset:,
     len:,
   )
@@ -141,7 +140,7 @@ pub fn view_in_bounds(view: ResolvedView) -> Bool {
 pub fn view_length(st: Agent, view: View) -> Int {
   resolve_len(
     live_byte_size(st, view.buffer),
-    typed_array_ffi.elem_size(view.elem_kind),
+    typed_array_bytes.elem_size(view.elem_kind),
     view.byte_offset,
     view.length,
   )
@@ -294,11 +293,11 @@ fn decode_typed_element(
 ) -> JsVal {
   case elem_kind {
     BigKind(k) ->
-      mk_bigint(ta_get_int(data, off, typed_array_ffi.bigint_elem(k)))
+      mk_bigint(get_int(data, off, typed_array_bytes.bigint_elem(k)))
     NumKind(_) ->
-      case typed_array_ffi.elem_of_kind(elem_kind) {
-        typed_array_ffi.Int(e) -> mk_number(JInt(ta_get_int(data, off, e)))
-        typed_array_ffi.Float(e) -> mk_number(ta_get_float(data, off, e))
+      case typed_array_bytes.elem_of_kind(elem_kind) {
+        typed_array_bytes.Int(e) -> mk_number(JInt(get_int(data, off, e)))
+        typed_array_bytes.Float(e) -> mk_number(get_float(data, off, e))
       }
   }
 }
@@ -346,7 +345,7 @@ pub fn typed_array_store(
     BigKind(big_kind) -> {
       let #(n, st) = rt_val.t_to_bigint(st, val)
       do_typed_store(st, view, idx, fn(data, off) {
-        ta_set_int(data, off, typed_array_ffi.bigint_elem(big_kind), n)
+        set_int(data, off, typed_array_bytes.bigint_elem(big_kind), n)
       })
     }
     NumKind(num_kind) -> {
@@ -368,7 +367,7 @@ fn do_typed_store(
     Some(i) ->
       case rt_store.t_cell_get(st, view.buffer) {
         SObject(kind: ArrayBufferObj(storage:), ..) as cell -> {
-          let size = typed_array_ffi.elem_size(view.elem_kind)
+          let size = typed_array_bytes.elem_size(view.elem_kind)
           // bounds resolved here: coercion may have resized the buffer
           let resolved =
             resolve_view(
@@ -408,12 +407,11 @@ fn encode_typed_number(
   elem_kind: NumberKind,
   num: JsNum,
 ) -> BitArray {
-  case typed_array_ffi.store_elem_of_kind(NumKind(elem_kind)) {
-    typed_array_ffi.StoreClampedU8 ->
-      ta_set_int(data, off, U8, ta_clamp_uint8(num))
-    typed_array_ffi.StoreInt(e) ->
-      ta_set_int(data, off, e, jsnum_to_store_int(num))
-    typed_array_ffi.StoreFloat(e) -> ta_set_float(data, off, e, num)
+  case typed_array_bytes.store_elem_of_kind(NumKind(elem_kind)) {
+    typed_array_bytes.StoreClampedU8 -> set_int(data, off, U8, clamp_uint8(num))
+    typed_array_bytes.StoreInt(e) ->
+      set_int(data, off, e, jsnum_to_store_int(num))
+    typed_array_bytes.StoreFloat(e) -> set_float(data, off, e, num)
   }
 }
 
@@ -424,7 +422,7 @@ pub type TypedElement {
 
 fn element_size(el: TypedElement) -> Int {
   case el {
-    NumberElement(kind:, ..) -> typed_array_ffi.elem_size(NumKind(kind))
+    NumberElement(kind:, ..) -> typed_array_bytes.elem_size(NumKind(kind))
     BigIntElement(..) -> 8
   }
 }
@@ -449,7 +447,7 @@ pub fn typed_array_encode_value(
   case el {
     NumberElement(kind:, num:) -> encode_typed_number(data, off, kind, num)
     BigIntElement(kind:, int:) ->
-      ta_set_int(data, off, typed_array_ffi.bigint_elem(kind), int)
+      set_int(data, off, typed_array_bytes.bigint_elem(kind), int)
   }
 }
 
@@ -458,7 +456,7 @@ pub fn typed_array_encode_primitives(
   elem_kind: TypedArrayKind,
   values: List(JsVal),
 ) -> Option(BitArray) {
-  let size = typed_array_ffi.elem_size(elem_kind)
+  let size = typed_array_bytes.elem_size(elem_kind)
   encode_primitives_loop(elem_kind, size, values, [])
 }
 
@@ -473,12 +471,12 @@ fn encode_primitives_loop(
     [v, ..rest] -> {
       let seg = case elem_kind, classify(v) {
         BigKind(k), KBig(n) ->
-          Some(ta_set_int(ta_zeroed(size), 0, typed_array_ffi.bigint_elem(k), n))
+          Some(set_int(zeroed(size), 0, typed_array_bytes.bigint_elem(k), n))
         BigKind(_), _ -> None
         NumKind(_), KHandle(_) -> None
         NumKind(k), _ ->
           case rt_val.prim_to_number(v) {
-            Ok(num) -> Some(encode_typed_number(ta_zeroed(size), 0, k, num))
+            Ok(num) -> Some(encode_typed_number(zeroed(size), 0, k, num))
             Error(rt_val.BigIntToNumber)
             | Error(rt_val.SymbolToNumber)
             | Error(rt_val.NeedsToPrimitive) -> None

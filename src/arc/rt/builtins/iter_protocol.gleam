@@ -2,8 +2,7 @@ import arc/internal/ordered_entries
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/call.{
-  type Completion, NormalCompletion, ThrowCompletion, is_callable, t_call,
-  t_call_checked,
+  NormalCompletion, ThrowCompletion, is_callable, t_call, t_call_checked,
 }
 import arc/rt/elements as rt_elements
 import arc/rt/js_string
@@ -33,12 +32,6 @@ pub type Quantifier {
 }
 
 // catches js throws like t_call
-@external(erlang, "arc_rt_call_ffi", "t_apply_protected")
-fn protected(
-  st: Agent,
-  body: fn(Agent) -> #(JsVal, Agent),
-) -> #(Completion, Agent)
-
 fn new_type_error(st: Agent, msg: String) -> #(JsVal, Agent) {
   st.store.ops.new_error(st, TypeErr, msg)
 }
@@ -436,13 +429,13 @@ fn array_iterator_step(
             rt_types.ArrayIterValues ->
               case helpers.own_element(st, mk_object(target), index) {
                 helpers.Hit(v) -> Some(#(v, st))
-                helpers.Slow -> None
+                helpers.Miss -> None
               }
             rt_types.ArrayIterEntries ->
               case helpers.own_element(st, mk_object(target), index) {
                 helpers.Hit(v) ->
                   Some(rt_obj.t_new_array(st, [mk_int(index), v]))
-                helpers.Slow -> None
+                helpers.Miss -> None
               }
           }
           use #(v, st) <- option.map(out)
@@ -590,7 +583,7 @@ pub fn call_return(
   obj: JsVal,
 ) -> #(Result(ReturnCall, JsVal), Agent) {
   let #(get_c, st) =
-    protected(st, fn(st) {
+    call.t_apply_protected(st, fn(st) {
       rt_obj.t_get_prop(st, obj, StringKey(Named("return")))
     })
   case get_c {
@@ -659,7 +652,7 @@ pub fn or_close(
   body: fn(Agent) -> #(JsVal, Agent),
   cont: fn(JsVal, Agent) -> #(a, Agent),
 ) -> #(a, Agent) {
-  case protected(st, body) {
+  case call.t_apply_protected(st, body) {
     #(NormalCompletion(v), st) -> cont(v, st)
     #(ThrowCompletion(thrown), st) -> close_throw(st, iter, thrown)
   }

@@ -88,11 +88,8 @@ pub fn init(
   )
 }
 
-@external(erlang, "arc_rt_math_ffi", "fast")
-fn fast(native: MathNative, args: List(JsVal)) -> JsVal
-
-@external(erlang, "arc_rt_math_ffi", "is_miss")
-fn is_miss(v: JsVal) -> Bool
+@external(erlang, "arc_rt_math_ffi", "math_kernel")
+fn math_kernel(native: MathNative, args: List(JsVal)) -> JsVal
 
 pub fn dispatch(
   st: Agent,
@@ -100,14 +97,14 @@ pub fn dispatch(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let v = fast(native, args)
-  case is_miss(v) {
-    True -> dispatch_slow(st, native, this, args)
+  let v = math_kernel(native, args)
+  case rt_val.is_miss(v) {
+    True -> dispatch_general(st, native, this, args)
     False -> #(v, st)
   }
 }
 
-fn dispatch_slow(
+fn dispatch_general(
   st: Agent,
   native: MathNative,
   _this: JsVal,
@@ -421,7 +418,7 @@ fn log1p_finite(n: Float) -> JsNum {
 fn math_fround(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use x <- math_unary(args, st)
   case x {
-    JInt(_) | JFloat(_) -> ffi_fround(finite_to_float(x))
+    JInt(_) | JFloat(_) -> to_float32(finite_to_float(x))
     other -> other
   }
 }
@@ -744,23 +741,23 @@ fn num_negate(n: JsNum) -> JsNum {
 
 // overflow-capable math bifs badarith, keep them in the ffi
 
-@external(erlang, "arc_rt_math_ffi", "exp")
+@external(erlang, "arc_rt_math_ffi", "exp_total")
 fn exp_total(x: Float) -> JsNum
 
-@external(erlang, "arc_rt_math_ffi", "pow")
+@external(erlang, "arc_rt_math_ffi", "pow_total")
 fn pow_total(base: Float, exp: Float) -> JsNum
 
-@external(erlang, "arc_rt_math_ffi", "cosh")
+@external(erlang, "arc_rt_math_ffi", "cosh_total")
 fn cosh_total(x: Float) -> JsNum
 
-@external(erlang, "arc_rt_math_ffi", "sinh")
+@external(erlang, "arc_rt_math_ffi", "sinh_total")
 fn sinh_total(x: Float) -> JsNum
 
-@external(erlang, "arc_rt_math_ffi", "hypot")
+@external(erlang, "arc_rt_math_ffi", "hypot_total")
 fn hypot_total(values: List(Float)) -> JsNum
 
-@external(erlang, "arc_rt_math_ffi", "fround")
-fn ffi_fround(x: Float) -> JsNum
+@external(erlang, "arc_rt_math_ffi", "to_float32")
+fn to_float32(x: Float) -> JsNum
 
 @external(erlang, "math", "sqrt")
 fn ffi_math_sqrt(x: Float) -> Float

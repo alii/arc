@@ -7,10 +7,10 @@ import gleam/option.{None, Some}
 import gleam/string
 
 @external(erlang, "arc_tz_links_ffi", "links")
-fn bundled_links() -> Dict(String, String)
+fn links() -> Dict(String, String)
 
 @external(erlang, "arc_tz_links_ffi", "version")
-fn bundled_version() -> String
+fn version() -> String
 
 fn primary(id: String) -> String {
   let assert Some(identifier) = temporal_tz.known_identifier(id)
@@ -66,8 +66,8 @@ pub fn unknown_id_rejected_test() {
 }
 
 pub fn bundled_table_drives_resolution_test() {
-  assert bundled_version() != ""
-  let links = dict.to_list(bundled_links())
+  assert version() != ""
+  let links = dict.to_list(links())
   assert list.length(links) > 200
   list.each(links, fn(pair) {
     let #(link, target) = pair

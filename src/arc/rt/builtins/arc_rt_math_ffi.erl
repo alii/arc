@@ -1,41 +1,39 @@
-%% math:* badariths on overflow, so these return jsnum shapes
+%% math:* badariths on overflow, so these return jsnum shapes; math_kernel may answer miss
 -module(arc_rt_math_ffi).
--export([exp/1, pow/2, cosh/1, sinh/1, hypot/1, fround/1,
+-export([exp_total/1, pow_total/2, cosh_total/1, sinh_total/1, hypot_total/1, to_float32/1,
          t_math_sqrt/1, t_math_floor/1, t_math_abs/1,
-         t_math_pow/2, t_math_min/2, t_math_max/2, fast/2, is_miss/1]).
+         t_math_pow/2, t_math_min/2, t_math_max/2, math_kernel/2]).
 
 -include("../arc_rt_layout.hrl").
 
-is_miss(V) -> V =:= miss.
-
 %% plain number args straight to the kernels, else miss
-fast(math_floor, [X | _]) -> t_math_floor(X);
-fast(math_abs, [X | _]) -> t_math_abs(X);
-fast(math_sqrt, [X | _]) -> t_math_sqrt(X);
-fast(math_pow, [B, E | _]) -> t_math_pow(B, E);
-fast(math_max, [A, B]) -> t_math_max(A, B);
-fast(math_min, [A, B]) -> t_math_min(A, B);
-fast(math_ceil, [X | _]) when is_integer(X) -> X;
-fast(math_round, [X | _]) when is_integer(X) -> X;
-fast(math_trunc, [X | _]) when is_integer(X) -> X;
-fast(_, _) -> miss.
+math_kernel(math_floor, [X | _]) -> t_math_floor(X);
+math_kernel(math_abs, [X | _]) -> t_math_abs(X);
+math_kernel(math_sqrt, [X | _]) -> t_math_sqrt(X);
+math_kernel(math_pow, [B, E | _]) -> t_math_pow(B, E);
+math_kernel(math_max, [A, B]) -> t_math_max(A, B);
+math_kernel(math_min, [A, B]) -> t_math_min(A, B);
+math_kernel(math_ceil, [X | _]) when is_integer(X) -> X;
+math_kernel(math_round, [X | _]) when is_integer(X) -> X;
+math_kernel(math_trunc, [X | _]) when is_integer(X) -> X;
+math_kernel(_, _) -> miss.
 
-exp(X) ->
+exp_total(X) ->
     try {j_float, math:exp(X)}
     catch error:badarith -> j_pos_inf
     end.
 
-cosh(X) ->
+cosh_total(X) ->
     try {j_float, math:cosh(X)}
     catch error:badarith -> j_pos_inf
     end.
 
-sinh(X) ->
+sinh_total(X) ->
     try {j_float, math:sinh(X)}
     catch error:badarith -> signed_infinity(X)
     end.
 
-pow(Base, Exp) ->
+pow_total(Base, Exp) ->
     try {j_float, math:pow(Base, Exp)}
     catch error:badarith -> pow_non_finite(Base, Exp)
     end.
@@ -60,7 +58,7 @@ pow_non_finite(Base, Exp) ->
     end.
 
 %% scale by max so the squares cannot overflow
-hypot(Values) ->
+hypot_total(Values) ->
     Max = lists:foldl(fun(V, Acc) -> max(abs(V), Acc) end, 0.0, Values),
     case Max == 0.0 of
         true ->
@@ -77,15 +75,15 @@ hypot(Values) ->
     end.
 
 %% decoding inf bits as :32/float would badmatch
-fround(X) when is_float(X) ->
+to_float32(X) when is_float(X) ->
     case <<X:32/float>> of
         <<0:1, 255:8, 0:23>> -> j_pos_inf;
         <<1:1, 255:8, 0:23>> -> j_neg_inf;
         <<F32:32/float>> -> {j_float, F32};
         _ -> j_nan
     end;
-fround(X) when is_integer(X) ->
-    fround(float(X)).
+to_float32(X) when is_integer(X) ->
+    to_float32(float(X)).
 
 %% sign bit, because -0.0 < 0 is false
 neg_sign(X) when is_float(X) ->
@@ -127,7 +125,7 @@ t_math_abs(_) -> miss.
 
 t_math_pow(B, E) when is_number(B), is_number(E) ->
     Bf = as_float(B), Ef = as_float(E),
-    case pow(Bf, Ef) of
+    case pow_total(Bf, Ef) of
         {j_float, F} -> F;
         j_pos_inf -> js_inf;
         j_neg_inf -> js_neg_inf;

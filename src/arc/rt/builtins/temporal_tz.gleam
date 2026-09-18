@@ -24,10 +24,10 @@ pub fn known_identifier(id: String) -> Option(String) {
 }
 
 @external(erlang, "arc_tz_ffi", "canonical_id")
-fn link_target(id: String) -> String
+fn canonical_id(id: String) -> String
 
 pub fn primary_identifier(identifier: String) -> String {
-  case link_target(identifier) {
+  case canonical_id(identifier) {
     "Etc/UTC" | "Etc/GMT" | "GMT" -> "UTC"
     c -> c
   }
@@ -78,7 +78,7 @@ pub fn resolve(
     Ok(zone) -> Ok(#(zone, zones))
     Error(Nil) -> {
       use rules <- result.map(
-        load(link_target(identifier))
+        load(canonical_id(identifier))
         |> result.map_error(LoadFailed(identifier, _)),
       )
       let zone = Zone(id: identifier, rules:)

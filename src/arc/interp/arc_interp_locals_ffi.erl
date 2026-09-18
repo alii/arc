@@ -1,3 +1,4 @@
+%% frame locals and registers; bind_this may answer miss
 -module(arc_interp_locals_ffi).
 -export([frame_locals/9, bind_this/2, flush_regs/5]).
 

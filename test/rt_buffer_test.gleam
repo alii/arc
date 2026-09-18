@@ -11,12 +11,6 @@ import gleam/list
 import gleam/option.{Some}
 import rt_helpers
 
-@external(erlang, "arc_rt_call_ffi", "t_apply_protected")
-fn t_apply_protected(
-  st: Agent,
-  body: fn(Agent) -> #(JsVal, Agent),
-) -> #(rt_call.Completion, Agent)
-
 fn agent() -> Agent {
   rt_builtins.new_agent(rt_helpers.quiet_hooks())
 }
@@ -58,7 +52,7 @@ fn attempt(
   obj: JsVal,
   name: String,
   args: List(JsVal),
-) -> #(rt_call.Completion, Agent) {
+) -> #(rt_call.Completion(JsVal), Agent) {
   let #(f, st) = get(st, obj, name)
   rt_call.t_call(st, f, obj, args)
 }
@@ -216,7 +210,9 @@ pub fn bigint64_array_test() {
   assert classify(get_(st, ta, "0")) == KBig(-5)
   assert classify(get_(st, ta, "1")) == KBig(-9_223_372_036_854_775_808)
   let #(c, st) =
-    t_apply_protected(st, fn(st) { #(mk_undefined(), set(st, ta, "0", int(1))) })
+    rt_call.t_apply_protected(st, fn(st) {
+      #(mk_undefined(), set(st, ta, "0", int(1)))
+    })
   let assert ThrowCompletion(err) = c
   assert error_name(st, err) == "TypeError"
 }
@@ -321,7 +317,7 @@ pub fn constructor_reads_new_target_prototype_in_spec_order_test() {
   let nt = mk_object(nt_h)
   let ctor = global(st, "Int8Array")
   let #(c, st) =
-    t_apply_protected(st, fn(st) {
+    rt_call.t_apply_protected(st, fn(st) {
       let #(h, st) = rt_call.t_construct(st, ctor, [int(-1)], nt)
       #(mk_object(h), st)
     })
@@ -329,7 +325,7 @@ pub fn constructor_reads_new_target_prototype_in_spec_order_test() {
   assert error_name(st, err) == "RangeError"
   let #(src, st) = array(st, ints([1]))
   let #(c, st) =
-    t_apply_protected(st, fn(st) {
+    rt_call.t_apply_protected(st, fn(st) {
       let #(h, st) = rt_call.t_construct(st, ctor, [src], nt)
       #(mk_object(h), st)
     })

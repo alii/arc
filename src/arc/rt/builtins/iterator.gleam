@@ -6,7 +6,7 @@ import arc/rt/builtins/iter_protocol.{
   type Quantifier, AtLeastOne, Every, IterateStrings, RejectPrimitives,
 }
 import arc/rt/builtins/realm_ops
-import arc/rt/call as rt_call
+import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
@@ -515,7 +515,7 @@ fn async_from_sync(
   let cap_resolve = mk_object(resolve_h)
   let cap_reject = mk_object(reject_h)
   let #(outcome, st) =
-    protected_any(st, fn(st) {
+    rt_call.t_apply_protected(st, fn(st) {
       do_async_from_sync(st, this, args, kind, cap_resolve, cap_reject)
     })
   let st = case outcome {
@@ -651,18 +651,6 @@ fn new_range_error(st: Agent, msg: String) -> #(JsVal, Agent) {
   st.store.ops.new_error(st, RangeErr, msg)
 }
 
-// must match rt_call.Completion erlang tags
-type ProtOut(a) {
-  NormalCompletion(a)
-  ThrowCompletion(JsVal)
-}
-
-@external(erlang, "arc_rt_call_ffi", "t_apply_protected")
-fn protected_any(
-  st: Agent,
-  body: fn(Agent) -> #(a, Agent),
-) -> #(ProtOut(a), Agent)
-
 pub fn dispatch_construct(
   st: Agent,
   n: IteratorNative,
@@ -710,7 +698,7 @@ fn from(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
     )
   let ctor = st.realm.iterator.constructor
   let #(is_iter, st) = rt_ops.t_ordinary_has_instance(st, ctor, rec.iterator)
-  case is_iter != 0 {
+  case is_iter {
     True -> #(rec.iterator, st)
     False -> {
       let #(h, st) =
@@ -760,7 +748,8 @@ fn coerce_limit(
   name: String,
 ) -> #(Int, Agent) {
   let arg = first_arg_or_undefined(args)
-  let #(nout, st) = protected_any(st, fn(st) { rt_val.t_to_number(st, arg) })
+  let #(nout, st) =
+    rt_call.t_apply_protected(st, fn(st) { rt_val.t_to_number(st, arg) })
   let range_error = fn(st, problem) {
     let #(e, st) = new_range_error(st, name <> " limit is " <> problem)
     iter_protocol.close_throw(st, this, e)
@@ -841,7 +830,7 @@ fn resume(
     GenCompleted -> iter_done(st)
     GenSuspendedStart | GenSuspendedYield -> {
       let st = set_gen_state(st, helper_h, GenExecuting)
-      let #(out, st) = protected_any(st, body)
+      let #(out, st) = rt_call.t_apply_protected(st, body)
       let st = map_gen_state(st, helper_h, suspend_if_executing)
       case out {
         NormalCompletion(v) -> #(v, st)
@@ -1050,7 +1039,7 @@ fn step_flat_map(
   case inner {
     Some(inner_rec) -> {
       let #(step, st) =
-        protected_any(st, fn(st) {
+        rt_call.t_apply_protected(st, fn(st) {
           iter_protocol.iterator_step_value(st, inner_rec)
         })
       case step {
@@ -1075,7 +1064,7 @@ fn step_flat_map(
               close_throw_done(st, helper_h, underlying, thrown)
             #(rt_call.NormalCompletion(mapped), st) -> {
               let #(open, st) =
-                protected_any(st, fn(st) {
+                rt_call.t_apply_protected(st, fn(st) {
                   iter_protocol.get_iterator_flattenable(
                     st,
                     mapped,
@@ -1372,7 +1361,9 @@ fn after_step(
   cont: fn(Option(JsVal), Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   let #(step, st) =
-    protected_any(st, fn(st) { iter_protocol.iterator_step_value(st, rec) })
+    rt_call.t_apply_protected(st, fn(st) {
+      iter_protocol.iterator_step_value(st, rec)
+    })
   case step {
     NormalCompletion(v) -> cont(v, st)
     ThrowCompletion(thrown) -> rt_store.t_throw(mark_done(st, helper_h), thrown)
@@ -1396,7 +1387,7 @@ fn close_throw_done(
 
 fn close_normal_catch(st: Agent, iter: JsVal) -> #(Result(Nil, JsVal), Agent) {
   let #(out, st) =
-    protected_any(st, fn(st) {
+    rt_call.t_apply_protected(st, fn(st) {
       #(Nil, iter_protocol.iterator_close_normal(st, iter))
     })
   case out {
@@ -1563,7 +1554,7 @@ fn zip_collect(
   acc: List(IteratorRecord),
 ) -> #(List(IteratorRecord), Agent) {
   let #(step, st) =
-    protected_any(st, fn(st) {
+    rt_call.t_apply_protected(st, fn(st) {
       iter_protocol.iterator_step_value(st, input_rec)
     })
   case step {
@@ -1626,7 +1617,7 @@ fn zip_padding_loop(
     }
     False -> {
       let #(step, st) =
-        protected_any(st, fn(st) {
+        rt_call.t_apply_protected(st, fn(st) {
           iter_protocol.iterator_step_value(st, pad_rec)
         })
       case step {
@@ -1794,7 +1785,7 @@ fn zip_round(
           ])
         ZipOpen(record:, padding:) -> {
           let #(step, st) =
-            protected_any(st, fn(st) {
+            rt_call.t_apply_protected(st, fn(st) {
               iter_protocol.iterator_step_value(st, record)
             })
           case step {
@@ -1853,7 +1844,7 @@ fn zip_strict_check(
     [ZipExhausted(padding: _), ..tail] -> zip_strict_check(st, helper_h, tail)
     [ZipOpen(record:, padding: _), ..tail] -> {
       let #(step, st) =
-        protected_any(st, fn(st) {
+        rt_call.t_apply_protected(st, fn(st) {
           iter_protocol.iterator_step_done(st, record)
         })
       case step {
@@ -1944,7 +1935,7 @@ fn or_close_all(
   body: fn(Agent) -> #(a, Agent),
   cont: fn(a, Agent) -> #(b, Agent),
 ) -> #(b, Agent) {
-  case protected_any(st, body) {
+  case rt_call.t_apply_protected(st, body) {
     #(NormalCompletion(v), st) -> cont(v, st)
     #(ThrowCompletion(thrown), st) -> close_all_throw(st, iters(), thrown)
   }
@@ -2060,7 +2051,7 @@ fn concat_next(
   case inner {
     Some(inner_rec) -> {
       let #(step, st) =
-        protected_any(st, fn(st) {
+        rt_call.t_apply_protected(st, fn(st) {
           iter_protocol.iterator_step_value(st, inner_rec)
         })
       case step {
@@ -2090,7 +2081,7 @@ fn concat_open_next(
           rt_store.t_throw(concat_mark_done(st, helper_h), thrown)
         #(rt_call.NormalCompletion(iter), st) -> {
           let #(open, st) =
-            protected_any(st, fn(st) {
+            rt_call.t_apply_protected(st, fn(st) {
               iter_protocol.get_iterator_direct(
                 st,
                 iter,

@@ -2,15 +2,15 @@ import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as b_object
 import arc/rt/builtins/regexp as b_regexp
-import arc/rt/call.{t_call_checked}
+import arc/rt/call.{NormalCompletion, ThrowCompletion, t_call_checked}
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type IteratorNative, type IteratorRecord, type JsVal,
-  type ObjectKey, Agent, DataProperty, GeneratorN, GeneratorNext, GeneratorObj,
-  IteratorN, IteratorRecord, JsStore, KHandle, KNull, KUndef, Named, NativeFn,
-  NoElements, Ordinary, SObject, StringKey, TypeErr, classify, mk_bool,
-  mk_object, mk_string, mk_undefined,
+  type Agent, type Handle, type IteratorNative, type IteratorRecord,
+  type JsStore, type JsVal, type ObjectKey, Agent, DataProperty, GeneratorN,
+  GeneratorNext, GeneratorObj, IteratorN, IteratorRecord, JsStore, KHandle,
+  KNull, KUndef, Named, NativeFn, NoElements, Ordinary, SObject, StringKey,
+  TypeErr, classify, mk_bool, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bool
@@ -18,20 +18,6 @@ import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
-
-type StepOutcome {
-  NormalCompletion(#(Bool, JsVal))
-  ThrowCompletion(JsVal)
-}
-
-@external(erlang, "arc_rt_call_ffi", "t_apply_protected")
-fn protected_step(
-  st: Agent,
-  body: fn(Agent) -> #(#(Bool, JsVal), Agent),
-) -> #(StepOutcome, Agent)
-
-@external(erlang, "arc_rt_store_ffi", "as_object_key")
-fn as_object_key(key: k) -> ObjectKey
 
 pub fn t_new_error(st: Agent, message: String) -> #(JsVal, Agent) {
   st.store.ops.new_error(st, TypeErr, message)
@@ -107,11 +93,13 @@ fn parts_of(
   }
 }
 
-@external(erlang, "arc_rt_lang_ffi", "iter_fast")
-fn iter_fast(
-  st: Agent,
-  rec: JsVal,
-) -> Option(#(Bool, IteratorRecord, NativeIter))
+type PlainRecord {
+  PlainRecord(done: Bool, record: IteratorRecord, native: NativeIter)
+  RecordMiss
+}
+
+@external(erlang, "arc_rt_lang_ffi", "plain_iter_record")
+fn plain_iter_record(st: Agent, rec: JsVal) -> PlainRecord
 
 fn read_record(st: Agent, rec: JsVal) -> #(Bool, IteratorRecord, Agent) {
   case record_fields(st, rec) {
@@ -145,7 +133,7 @@ fn mark_done(st: Agent, rec: JsVal) -> Agent {
 type NativeIter {
   NativeNext(next: IteratorNative, iter_h: Handle)
   NativeGenerator(data: Handle)
-  NotNative
+  NativeMiss
 }
 
 fn native_iter(st: Agent, record: IteratorRecord) -> NativeIter {
@@ -157,11 +145,11 @@ fn native_iter(st: Agent, record: IteratorRecord) -> NativeIter {
         SObject(kind: NativeFn(token: GeneratorN(GeneratorNext), ..), ..) ->
           case rt_store.t_cell_get(st, iter_h) {
             SObject(kind: GeneratorObj(data:), ..) -> NativeGenerator(data)
-            _ -> NotNative
+            _ -> NativeMiss
           }
-        _ -> NotNative
+        _ -> NativeMiss
       }
-    _, _ -> NotNative
+    _, _ -> NativeMiss
   }
 }
 
@@ -171,7 +159,7 @@ fn generator_step(
   data: Handle,
 ) -> #(Option(JsVal), Agent) {
   let step = fn(st) { rt_async.t_gen_step(st, data, mk_undefined()) }
-  case protected_step(st, step) {
+  case call.t_apply_protected(st, step) {
     #(NormalCompletion(#(True, _)), st) -> #(None, st)
     #(NormalCompletion(#(False, v)), st) -> #(Some(v), st)
     #(ThrowCompletion(thrown), st) ->
@@ -194,9 +182,9 @@ pub fn t_get_iterator(
 
 // §7.4.8 iteratorstepvalue; a throw marks the record done first
 pub fn t_iter_next(st: Agent, rec: JsVal) -> #(#(Bool, JsVal), Agent) {
-  let #(done, record, native, st) = case iter_fast(st, rec) {
-    Some(#(done, record, native)) -> #(done, record, native, st)
-    None -> {
+  let #(done, record, native, st) = case plain_iter_record(st, rec) {
+    PlainRecord(done:, record:, native:) -> #(done, record, native, st)
+    RecordMiss -> {
       let #(done, record, st) = read_record(st, rec)
       #(done, record, native_iter(st, record), st)
     }
@@ -205,7 +193,7 @@ pub fn t_iter_next(st: Agent, rec: JsVal) -> #(#(Bool, JsVal), Agent) {
   let stepped = case native {
     NativeNext(next, iter_h) -> iter_protocol.native_step(st, next, iter_h)
     NativeGenerator(data) -> Some(generator_step(st, rec, data))
-    NotNative -> None
+    NativeMiss -> None
   }
   case stepped {
     Some(#(Some(v), st)) -> #(#(False, v), st)
@@ -229,7 +217,7 @@ fn protocol_step(
       }
     }
   }
-  case protected_step(st, step) {
+  case call.t_apply_protected(st, step) {
     #(NormalCompletion(#(True, _) as pair), st) -> #(pair, mark_done(st, rec))
     #(NormalCompletion(pair), st) -> #(pair, st)
     #(ThrowCompletion(thrown), st) ->
@@ -274,8 +262,8 @@ pub fn t_spread_into_list(
   iterable: JsVal,
 ) -> #(List(JsVal), Agent) {
   let #(values, st) = case array_spread(st, iterable) {
-    Some(values) -> #(values, st)
-    None -> {
+    Spread(values) -> #(values, st)
+    SpreadMiss -> {
       let #(record, st) = iter_protocol.get_iterator_sync(st, iterable)
       iter_protocol.iterator_to_list(st, record)
     }
@@ -283,9 +271,14 @@ pub fn t_spread_into_list(
   #(list.append(acc, values), st)
 }
 
+pub type PlainSpread {
+  Spread(List(JsVal))
+  SpreadMiss
+}
+
 // a plain array whose iteration observes nothing, holes excluded
 @external(erlang, "arc_rt_lang_ffi", "array_spread")
-fn array_spread(st: Agent, iterable: JsVal) -> Option(List(JsVal))
+pub fn array_spread(st: Agent, iterable: JsVal) -> PlainSpread
 
 // §14.7.5.7 step 6.a, not awaited here
 pub fn t_async_iter_next(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
@@ -299,9 +292,9 @@ pub fn t_copy_data_props(
   target: JsVal,
   source: JsVal,
 ) -> #(JsVal, Agent) {
-  case copy_data_fast(st, target, source) {
-    Some(st) -> #(target, st)
-    None -> {
+  case plain_copy_data_props(st, target, source) {
+    Copied(st) -> #(target, st)
+    CopyMiss -> {
       let assert KHandle(target_h) = classify(target)
       #(target, copy_data_properties(st, target_h, source, []))
     }
@@ -309,8 +302,13 @@ pub fn t_copy_data_props(
 }
 
 // spread of plain data onto a fresh literal in one write
-@external(erlang, "arc_rt_obj_ffi", "t_copy_data_fast")
-fn copy_data_fast(st: Agent, target: JsVal, source: JsVal) -> Option(Agent)
+type PlainCopy {
+  Copied(Agent)
+  CopyMiss
+}
+
+@external(erlang, "arc_rt_obj_ffi", "plain_copy_data_props")
+fn plain_copy_data_props(st: Agent, target: JsVal, source: JsVal) -> PlainCopy
 
 // object rest pattern, excluded keys skipped
 pub fn t_object_rest(
@@ -319,7 +317,7 @@ pub fn t_object_rest(
   excluded: List(k),
 ) -> #(JsVal, Agent) {
   let #(h, st) = rt_obj.t_new_object(st, Some(st.realm.object.prototype))
-  let excluded = list.map(excluded, as_object_key)
+  let excluded = list.map(excluded, rt_store.as_object_key)
   #(mk_object(h), copy_data_properties(st, h, source, excluded))
 }
 
@@ -406,3 +404,29 @@ pub fn t_global_delete(st: Agent, name: String) -> #(Bool, Agent) {
     StringKey(types.canonical_key(name)),
   )
 }
+
+// for-of over plain arrays and strings keeps this record on the operand stack
+pub type ArrayIterStep {
+  IterStep(done: Bool, value: JsVal, rec: JsVal)
+  // a map entry that still needs its pair array
+  IterPair(key: JsVal, value: JsVal, rec: JsVal)
+  IterMiss
+}
+
+@external(erlang, "arc_rt_lang_ffi", "array_iter_start")
+pub fn array_iter_start(agent: Agent, iterable: JsVal) -> JsVal
+
+@external(erlang, "arc_rt_lang_ffi", "array_iter_next")
+pub fn array_iter_next(store: JsStore(Agent), rec: JsVal) -> ArrayIterStep
+
+@external(erlang, "arc_rt_lang_ffi", "is_array_iter")
+pub fn is_array_iter(v: JsVal) -> Bool
+
+@external(erlang, "arc_rt_lang_ffi", "array_iter_parts")
+pub fn array_iter_parts(rec: JsVal) -> #(JsVal, Int, JsVal)
+
+@external(erlang, "arc_rt_lang_ffi", "array_iter_proto")
+pub fn array_iter_proto(agent: Agent, rec: JsVal) -> Handle
+
+@external(erlang, "arc_rt_lang_ffi", "array_iter_record")
+pub fn array_iter_record(target: JsVal, index: Int, next_fn: JsVal) -> JsVal

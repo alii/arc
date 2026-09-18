@@ -1,64 +1,27 @@
-%% fast-path kernels: total, answer `miss` when anything observable is needed
+%% interpreter kernels; exports may answer miss when anything observable is needed
 -module(arc_interp_ffi).
 -export([for_in_list/1, for_in_next/1,
-         native_token/1, iter_elem/2,
-         is_miss/1, is_tdz/1, is_undefined/1,
-         truthy/1, lnot/1, nullish/1, typeof/1, typeof/2,
+         type_of/2,
          box_get/2, cell_of/2, ctor_prototype/2, list_of/2, instance_of/4,
          capture_env/2, iter_step/2]).
 
 -include("../rt/arc_rt_layout.hrl").
 
-is_miss(miss) -> true;
-is_miss(_) -> false.
-
-is_tdz(js_tdz) -> true;
-is_tdz(_) -> false.
-
-is_undefined(undefined) -> true;
-is_undefined(_) -> false.
-
-%% §7.1.2 toboolean, keep in step with arc_rt_val_ffi:to_boolean_i32
-truthy(undefined) -> false;
-truthy(null) -> false;
-truthy(false) -> false;
-truthy(true) -> true;
-truthy(0) -> false;
-truthy(N) when is_integer(N) -> true;
-truthy(F) when is_float(F) -> F /= 0.0;
-truthy(js_nan) -> false;
-truthy(js_inf) -> true;
-truthy(js_neg_inf) -> true;
-truthy(<<>>) -> false;
-truthy(B) when is_binary(B) -> true;
-truthy({?STR_TAG, _, _, _}) -> true;
-truthy({js_bigint, 0}) -> false;
-truthy({js_bigint, _}) -> true;
-truthy({js_sym, _}) -> true;
-truthy({?HANDLE_TAG, _}) -> true;
-truthy(js_tdz) -> false.
-
-lnot(V) -> not truthy(V).
-
-nullish(undefined) -> true;
-nullish(null) -> true;
-nullish(_) -> false.
-
 %% §13.5.3 primitives only, objects miss
-typeof(undefined) -> <<"undefined">>;
-typeof(null) -> <<"object">>;
-typeof(B) when is_boolean(B) -> <<"boolean">>;
-typeof(N) when is_number(N) -> <<"number">>;
-typeof(A) when A =:= js_nan; A =:= js_inf; A =:= js_neg_inf -> <<"number">>;
-typeof(B) when is_binary(B) -> <<"string">>;
-typeof({?STR_TAG, _, _, _}) -> <<"string">>;
-typeof({js_bigint, _}) -> <<"bigint">>;
-typeof({js_sym, _}) -> <<"symbol">>;
-typeof(js_tdz) -> <<"undefined">>;
-typeof(_) -> miss.
+type_of(undefined) -> <<"undefined">>;
+type_of(null) -> <<"object">>;
+type_of(B) when is_boolean(B) -> <<"boolean">>;
+type_of(N) when is_number(N) -> <<"number">>;
+type_of(A) when A =:= js_nan; A =:= js_inf; A =:= js_neg_inf -> <<"number">>;
+type_of(B) when is_binary(B) -> <<"string">>;
+type_of({?STR_TAG, _, _, _}) -> <<"string">>;
+type_of({js_bigint, _}) -> <<"bigint">>;
+type_of({js_sym, _}) -> <<"symbol">>;
+type_of(js_tdz) -> <<"undefined">>;
+type_of(_) -> miss.
 
 %% proxy misses, §10.5.14
-typeof(Store, {?HANDLE_TAG, Id}) ->
+type_of(Store, {?HANDLE_TAG, Id}) ->
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             case kind_tag(element(?SOBJECT_KIND, Cell)) of
@@ -72,7 +35,7 @@ typeof(Store, {?HANDLE_TAG, Id}) ->
         Cell when element(1, Cell) =:= ?SSHAPED_TAG -> <<"object">>;
         _ -> miss
     end;
-typeof(_Store, V) -> typeof(V).
+type_of(_Store, V) -> type_of(V).
 
 kind_tag(Kind) when is_atom(Kind) -> Kind;
 kind_tag(Kind) -> element(1, Kind).
@@ -247,7 +210,7 @@ chain_reaches(Data, VId, PId, Fuel) ->
         _ -> miss
     end.
 
-%% §23.1.5.2.1 array iterator or generator resume, else `protocol`
+%% §23.1.5.2.1 array iterator or generator resume, else iter_miss
 %% index -1 marks exhausted
 -define(ITERATOR_KEY, {?KEY_NAMED, <<"iterator">>}).
 -define(NEXT_KEY, {?KEY_NAMED, <<"next">>}).
@@ -262,24 +225,20 @@ iter_step(Store, {?HANDLE_TAG, RecId}) ->
                 {{?HANDLE_TAG, NextId}, {?HANDLE_TAG, IterId}} ->
                     iter_step_with(Store, Data, native_token(arc_rt_arena_ffi:get(NextId, Data)),
                                    IterId, arc_rt_arena_ffi:get(IterId, Data));
-                _ -> protocol
+                _ -> iter_miss
             end;
-        _ -> protocol
+        _ -> iter_miss
     end;
-iter_step(_, _) -> protocol.
+iter_step(_, _) -> iter_miss.
 
 
-native_token(Cell)
-  when element(1, Cell) =:= ?SOBJECT_TAG,
-       element(1, element(?SOBJECT_KIND, Cell)) =:= ?NATIVEFN_TAG ->
-    element(?NATIVEFN_TOKEN, element(?SOBJECT_KIND, Cell));
-native_token(_) -> none.
+native_token(Cell) -> ?NATIVE_TOKEN(Cell).
 
 iter_step_with(Store, Data, ?TOKEN_ARRAY_ITER_NEXT, IterId, IterCell)
   when element(1, IterCell) =:= ?SOBJECT_TAG ->
     case element(?SOBJECT_KIND, IterCell) of
         {?ARRAYITER_TAG, _, Index, ?ARRAYITER_VALUES} when Index < 0 ->
-            {array_step, true, undefined, Store};
+            {array_advanced, true, undefined, Store};
         {?ARRAYITER_TAG, {?HANDLE_TAG, T} = Target, Index, ?ARRAYITER_VALUES} ->
             case arc_rt_arena_ffi:get(T, Data) of
                 {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, _, _, _, _} when Index >= Len ->
@@ -288,40 +247,34 @@ iter_step_with(Store, Data, ?TOKEN_ARRAY_ITER_NEXT, IterId, IterCell)
                 {?SOBJECT_TAG, {?ARRAYOBJ_TAG, _}, _, Props, _, Els, _} ->
                     case map_size(Props) =/= 0
                          andalso is_map_key({?KEY_INDEX, Index}, Props) of
-                        true -> protocol;
+                        true -> iter_miss;
                         false ->
-                            case iter_elem(Els, Index) of
-                                ?ELEMS_HOLE -> protocol;
+                            case elem_at(Els, Index) of
+                                ?ELEMS_HOLE -> iter_miss;
                                 V ->
                                     array_iter_advance(Store, Data, IterId, IterCell,
                                                        Target, Index + 1, false, V)
                             end
                     end;
-                _ -> protocol
+                _ -> iter_miss
             end;
-        _ -> protocol
+        _ -> iter_miss
     end;
 iter_step_with(_, _, ?TOKEN_GENERATOR_NEXT, _, IterCell)
   when element(1, IterCell) =:= ?SOBJECT_TAG ->
     case element(?SOBJECT_KIND, IterCell) of
-        {?GENERATOROBJ_TAG, DataH} -> {gen_step, DataH};
-        _ -> protocol
+        {?GENERATOROBJ_TAG, DataH} -> {resume_generator, DataH};
+        _ -> iter_miss
     end;
-iter_step_with(_, _, _, _, _) -> protocol.
+iter_step_with(_, _, _, _, _) -> iter_miss.
 
 array_iter_advance(Store, Data, IterId, IterCell, Target, Index, Done, V) ->
     NewCell = setelement(?SOBJECT_KIND, IterCell,
                          {?ARRAYITER_TAG, Target, Index, ?ARRAYITER_VALUES}),
-    {array_step, Done, V,
+    {array_advanced, Done, V,
      setelement(?STORE_DATA, Store, arc_rt_arena_ffi:set(IterId, NewCell, Data))}.
 
-iter_elem({?ELEMS_DENSE, A}, Idx) -> arc_tree_array_ffi:get(Idx, A);
-iter_elem({?ELEMS_SPARSE, M}, Idx) ->
-    case M of
-        #{Idx := V} -> V;
-        _ -> ?ELEMS_HOLE
-    end;
-iter_elem(_, _) -> ?ELEMS_HOLE.
+elem_at(Els, Idx) -> ?ELEM_AT(Els, Idx).
 
 for_in_list(Keys) -> {for_in, Keys}.
 

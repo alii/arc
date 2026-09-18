@@ -28,15 +28,15 @@ fn printed() -> List(#(ConsoleLevel, String)) {
   rt_helpers.recorded()
 }
 
-fn run(source: String) -> #(rt_call.Completion, Agent) {
+fn run(source: String) -> #(rt_call.Completion(JsVal), Agent) {
   run_on(agent(), source)
 }
 
-fn run_on(st: Agent, source: String) -> #(rt_call.Completion, Agent) {
+fn run_on(st: Agent, source: String) -> #(rt_call.Completion(JsVal), Agent) {
   run_with(st, source, compiler.compile_script)
 }
 
-fn repl_on(st: Agent, source: String) -> #(rt_call.Completion, Agent) {
+fn repl_on(st: Agent, source: String) -> #(rt_call.Completion(JsVal), Agent) {
   run_with(st, source, compiler.compile_repl)
 }
 
@@ -44,7 +44,7 @@ fn run_with(
   st: Agent,
   source: String,
   compile,
-) -> #(rt_call.Completion, Agent) {
+) -> #(rt_call.Completion(JsVal), Agent) {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
     as { "parse failed: " <> source }
   let assert Ok(template) = compile(body, sb)

@@ -159,9 +159,11 @@ pub fn dispatch(
       string_transform(st, this, to_lower_case)
     StringPrototypeToUpperCase | StringPrototypeToLocaleUpperCase ->
       string_transform(st, this, to_upper_case)
-    StringPrototypeTrim -> string_transform(st, this, trim_js_ws)
-    StringPrototypeTrimStart -> string_transform(st, this, trim_leading_js_ws)
-    StringPrototypeTrimEnd -> string_transform(st, this, trim_trailing_js_ws)
+    StringPrototypeTrim -> string_transform(st, this, js_string.trim_js_ws)
+    StringPrototypeTrimStart ->
+      string_transform(st, this, js_string.trim_leading_js_ws)
+    StringPrototypeTrimEnd ->
+      string_transform(st, this, js_string.trim_trailing_js_ws)
     StringPrototypeSplit -> string_split(st, this, args)
     StringPrototypeConcat -> string_concat(st, this, args)
     StringPrototypeToString -> string_this_value(st, this, "toString")
@@ -1487,15 +1489,6 @@ fn is_case_ignorable_cp(cp: Int) -> Bool {
     _ -> False
   }
 }
-
-@external(erlang, "arc_string_ffi", "trim_js_ws")
-fn trim_js_ws(s: String) -> String
-
-@external(erlang, "arc_string_ffi", "trim_leading_js_ws")
-fn trim_leading_js_ws(s: String) -> String
-
-@external(erlang, "arc_string_ffi", "trim_trailing_js_ws")
-fn trim_trailing_js_ws(s: String) -> String
 
 @external(erlang, "unicode", "characters_to_nfc_binary")
 fn ffi_nfc(s: String) -> String

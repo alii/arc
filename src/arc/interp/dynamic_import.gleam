@@ -108,12 +108,6 @@ fn parse_hook_tail(
   }
 }
 
-@external(erlang, "arc_rt_call_ffi", "t_apply_protected")
-fn protected(
-  st: Agent,
-  body: fn(Agent) -> #(JsVal, Agent),
-) -> #(Completion, Agent)
-
 pub fn import_call(
   st: Agent,
   specifier: JsVal,
@@ -196,8 +190,8 @@ fn import_request(
   st: Agent,
   specifier: JsVal,
   options: JsVal,
-) -> #(Completion, Agent) {
-  use st <- protected(st)
+) -> #(Completion(JsVal), Agent) {
+  use st <- rt_call.t_apply_protected(st)
   let #(specifier_string, st) = rt_val.t_to_string(st, specifier)
   let st = validate_options(st, options)
   #(mk_string(specifier_string), st)
@@ -272,7 +266,8 @@ fn enqueue_host_job(
 ) -> Agent {
   let job = fn(st) {
     let #(st, held) = rt_gc.t_hold_roots(st, capability)
-    let #(outcome, st) = protected(st, fn(st) { #(mk_undefined(), run(st)) })
+    let #(outcome, st) =
+      rt_call.t_apply_protected(st, fn(st) { #(mk_undefined(), run(st)) })
     let st = rt_gc.t_release_roots(st, held)
     case outcome {
       NormalCompletion(_) -> st
@@ -303,7 +298,7 @@ fn call_host_hook(
     }
     Some(types.HostFnEntry(call:, ..)) -> {
       let outcome =
-        protected(st, fn(st) {
+        rt_call.t_apply_protected(st, fn(st) {
           case call(st, hook_args, mk_undefined(), mk_undefined()) {
             #(st, Ok(v)) -> #(v, st)
             #(st, Error(thrown)) -> rt_store.t_throw(st, thrown)

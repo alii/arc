@@ -516,6 +516,7 @@ fn alloc_global_object(
   #(global_h, st)
 }
 
+// called by name from arc_rt_call_ffi and arc_rt_call_ic_ffi
 pub fn dispatch_native(
   st: Agent,
   tag: NativeToken,
@@ -581,6 +582,7 @@ pub fn dispatch_native(
   }
 }
 
+// called by name from rt/call.gleam
 pub fn dispatch_native_construct(
   st: Agent,
   tag: NativeToken,

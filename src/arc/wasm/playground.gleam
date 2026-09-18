@@ -1,9 +1,11 @@
 import arc/engine.{type Engine, Returned, Threw}
 
+// called by name from arc_wasm_ffi
 pub fn new_engine() -> Engine(host) {
   engine.new()
 }
 
+// called by name from arc_wasm_ffi
 pub fn eval(eng: Engine(host), source: String) -> Result(String, String) {
   case engine.eval(eng, source) {
     Ok(#(Returned(v), eng)) -> Ok(engine.inspect(eng, v))

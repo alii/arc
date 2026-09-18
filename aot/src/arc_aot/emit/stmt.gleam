@@ -717,7 +717,7 @@ fn bind_invariant_callees(
     [callee, ..rest] -> {
       let sv = ir.Var(state.get_slot_var(e, callee.slot))
       let go = fn(e, f) {
-        use e, pair <- host_(e, "compiled_fn_code", [f, e.consts.undef])
+        use e, pair <- host_(e, "direct_callee", [f, e.consts.undef])
         bind_invariant_callees(
           state.set_invariant_callee(e, callee, pair),
           rest,

@@ -1,9 +1,10 @@
+%% array kernels; exports may answer miss
 -module(arc_rt_array_ffi).
--export([own_element/3, arg_list/2, index_free/5, scan_forward/5, scan_backward/4,
+-export([own_element/3, arg_list/2, index_range_plain/5, scan_forward/5, scan_backward/4,
          push/3, pop/2]).
 
 -include("../arc_rt_layout.hrl").
--compile({inline, [own_read/2, elem_read/2]}).
+-compile({inline, [own_read/2, elem_at/2]}).
 
 own_element(St, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, element(?AGENT_STORE, St))) of
@@ -12,44 +13,38 @@ own_element(St, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
                element(1, Kind) =:= ?ARGUMENTSOBJ_TAG ->
             if
                 Props =:= #{} -> own_read(Els, Idx);
-                is_map_key({?KEY_INDEX, Idx}, Props) -> slow;
+                is_map_key({?KEY_INDEX, Idx}, Props) -> miss;
                 true -> own_read(Els, Idx)
             end;
-        _ -> slow
+        _ -> miss
     end;
-own_element(_, _, _) -> slow.
+own_element(_, _, _) -> miss.
 
 own_read({?ELEMS_DENSE, T}, Idx)
   when element(1, T) =/= ?VEC_TAG, Idx < tuple_size(T) ->
     case element(Idx + 1, T) of
-        ?ELEMS_HOLE -> slow;
+        ?ELEMS_HOLE -> miss;
         V -> {hit, V}
     end;
 own_read(Els, Idx) ->
-    case elem_read(Els, Idx) of
-        ?ELEMS_HOLE -> slow;
+    case elem_at(Els, Idx) of
+        ?ELEMS_HOLE -> miss;
         V -> {hit, V}
     end.
 
-elem_read({?ELEMS_DENSE, A}, Idx) -> arc_tree_array_ffi:get(Idx, A);
-elem_read({?ELEMS_SPARSE, M}, Idx) ->
-    case M of
-        #{Idx := V} -> V;
-        _ -> ?ELEMS_HOLE
-    end;
-elem_read(_, _) -> ?ELEMS_HOLE.
+elem_at(Els, Idx) -> ?ELEM_AT(Els, Idx).
 
-index_free(St, Props, Proto, Start, Count) ->
+index_range_plain(St, Props, Proto, Start, Count) ->
     (not props_have_index(Props, Start, Count))
-        andalso chain_free(element(?STORE_DATA, element(?AGENT_STORE, St)),
+        andalso chain_index_range_plain(element(?STORE_DATA, element(?AGENT_STORE, St)),
                            Proto, Start, Count).
 
-chain_free(_, ?NONE, _, _) -> true;
-chain_free(Data, {?SOME, {?HANDLE_TAG, Id}}, Start, Count) ->
+chain_index_range_plain(_, ?NONE, _, _) -> true;
+chain_index_range_plain(Data, {?SOME, {?HANDLE_TAG, Id}}, Start, Count) ->
     case arc_rt_arena_ffi:get(Id, Data) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Length}, Proto, _, _, _, _}
           when Start >= Length ->
-            chain_free(Data, Proto, Start, Count);
+            chain_index_range_plain(Data, Proto, Start, Count);
         {?SOBJECT_TAG, Kind, Proto, Props, _, Els, _} ->
             case Kind of
                 _ when element(1, Kind) =:= ?PROXYOBJ_TAG -> false;
@@ -58,10 +53,10 @@ chain_free(Data, {?SOME, {?HANDLE_TAG, Id}}, Start, Count) ->
                     (Els =:= ?ELEMS_NONE
                         orelse not elements_have_index(Els, Start, Count))
                     andalso (not props_have_index(Props, Start, Count))
-                    andalso chain_free(Data, Proto, Start, Count)
+                    andalso chain_index_range_plain(Data, Proto, Start, Count)
             end;
         Shaped when element(1, Shaped) =:= ?SSHAPED_TAG ->
-            chain_free(Data, element(?SSHAPED_PROTO, Shaped), Start, Count);
+            chain_index_range_plain(Data, element(?SSHAPED_PROTO, Shaped), Start, Count);
         _ -> true
     end.
 
@@ -97,7 +92,7 @@ probe_sparse(M, Idx, End) ->
 
 -define(CALLEE_KEY, {?KEY_NAMED, <<"callee">>}).
 
-%% §7.3.19 fast path, args_slow otherwise
+%% §7.3.19 createlistfromarraylike for plain arrays and arguments, else miss
 arg_list(St, {?HANDLE_TAG, Id}) ->
     Store = element(?AGENT_STORE, St),
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
@@ -110,29 +105,29 @@ arg_list(St, {?HANDLE_TAG, Id}) ->
                element(1, LenProp) =:= ?DATAPROP_TAG,
                is_integer(element(?DATAPROP_VALUE, LenProp)) ->
             dense_prefix(Els, element(?DATAPROP_VALUE, LenProp));
-        _ -> args_slow
+        _ -> miss
     end;
-arg_list(_, _) -> args_slow.
+arg_list(_, _) -> miss.
 
-dense_prefix(_, 0) -> {args_hit, []};
+dense_prefix(_, 0) -> {dense_args, []};
 dense_prefix({?ELEMS_DENSE, A}, Len) when Len > 0 ->
     case arc_tree_array_ffi:size(A) of
         Len -> hole_free(arc_tree_array_ffi:to_list(A));
         Size when Size > Len ->
             hole_free(lists:sublist(arc_tree_array_ffi:to_list(A), Len));
-        _ -> args_slow
+        _ -> miss
     end;
-dense_prefix(_, _) -> args_slow.
+dense_prefix(_, _) -> miss.
 
 hole_free(L) ->
     case lists:member(?ELEMS_HOLE, L) of
-        true -> args_slow;
-        false -> {args_hit, L}
+        true -> miss;
+        false -> {dense_args, L}
     end.
 
 scan_forward(_, _, Idx, End, _) when Idx >= End -> absent;
 scan_forward(Els, Search, Idx, End, Eq) ->
-    case elem_read(Els, Idx) of
+    case elem_at(Els, Idx) of
         ?ELEMS_HOLE -> {hole_at, Idx};
         V ->
             case eq(Eq, V, Search) of
@@ -143,7 +138,7 @@ scan_forward(Els, Search, Idx, End, Eq) ->
 
 scan_backward(_, _, Idx, _) when Idx < 0 -> absent;
 scan_backward(Els, Search, Idx, Eq) ->
-    case elem_read(Els, Idx) of
+    case elem_at(Els, Idx) of
         ?ELEMS_HOLE -> {hole_at, Idx};
         V ->
             case eq(Eq, V, Search) of
@@ -165,11 +160,11 @@ push(St, {?HANDLE_TAG, Id}, Args) ->
             N = length(Args),
             NewLen = Len + N,
             case NewLen =< ?MAX_DENSE_INDEX
-                 andalso chain_free(Data, Proto, Len, N) of
-                false -> push_slow;
+                 andalso chain_index_range_plain(Data, Proto, Len, N) of
+                false -> push_miss;
                 true ->
                     case append(Els, Len, Args) of
-                        slow -> push_slow;
+                        miss -> push_miss;
                         NewEls ->
                             Cell = {?SOBJECT_TAG, {?ARRAYOBJ_TAG, NewLen}, Proto, Props,
                                     Sym, NewEls, true},
@@ -179,9 +174,9 @@ push(St, {?HANDLE_TAG, Id}, Args) ->
                                                    arc_rt_arena_ffi:set(Id, Cell, Data)))}
                     end
             end;
-        _ -> push_slow
+        _ -> push_miss
     end;
-push(_, _, _) -> push_slow.
+push(_, _, _) -> push_miss.
 
 append(?ELEMS_NONE, 0, Args) -> {?ELEMS_DENSE, arc_tree_array_ffi:from_list(Args)};
 append(?ELEMS_NONE, Len, Args) when Len =< ?MAX_GAP ->
@@ -190,9 +185,9 @@ append({?ELEMS_DENSE, A}, Len, Args) ->
     case arc_tree_array_ffi:size(A) of
         Size when Size =< Len, Len - Size =< ?MAX_GAP ->
             {?ELEMS_DENSE, set_each(Args, Len, A)};
-        _ -> slow
+        _ -> miss
     end;
-append(_, _, _) -> slow.
+append(_, _, _) -> miss.
 
 set_each([V | Vs], I, A) -> set_each(Vs, I + 1, arc_tree_array_ffi:set(I, V, A));
 set_each([], _, A) -> A.
@@ -206,8 +201,8 @@ pop(St, {?HANDLE_TAG, Id}) ->
             Last = Len - 1,
             case arc_tree_array_ffi:size(A) =:= Len
                  andalso arc_tree_array_ffi:get(Last, A) of
-                false -> pop_slow;
-                ?ELEMS_HOLE -> pop_slow;
+                false -> pop_miss;
+                ?ELEMS_HOLE -> pop_miss;
                 V ->
                     Cell = {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Last}, Proto, Props, Sym,
                             {?ELEMS_DENSE, arc_tree_array_ffi:resize(A, Last)}, true},
@@ -216,6 +211,6 @@ pop(St, {?HANDLE_TAG, Id}) ->
                                 setelement(?STORE_DATA, Store,
                                            arc_rt_arena_ffi:set(Id, Cell, Data)))}
             end;
-        _ -> pop_slow
+        _ -> pop_miss
     end;
-pop(_, _) -> pop_slow.
+pop(_, _) -> pop_miss.

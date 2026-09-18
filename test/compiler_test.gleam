@@ -29,7 +29,7 @@ fn agent() -> Agent {
 }
 
 fn classify_outcome(
-  completion: rt_call.Completion,
+  completion: rt_call.Completion(JsVal),
 ) -> Result(JsValueKind, JsValueKind) {
   case completion {
     NormalCompletion(v) -> Ok(engine.classify(v))
@@ -37,7 +37,7 @@ fn classify_outcome(
   }
 }
 
-fn completion_value(completion: rt_call.Completion) -> JsVal {
+fn completion_value(completion: rt_call.Completion(JsVal)) -> JsVal {
   case completion {
     NormalCompletion(v) -> v
     ThrowCompletion(e) -> e

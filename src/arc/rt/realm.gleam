@@ -1,6 +1,6 @@
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
-import arc/rt/call as rt_call
+import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -15,14 +15,6 @@ import gleam/dict
 import gleam/int
 import gleam/option.{type Option, None, Some}
 
-type Outcome(a) {
-  NormalCompletion(a)
-  ThrowCompletion(JsVal)
-}
-
-@external(erlang, "arc_rt_call_ffi", "t_apply_protected")
-fn protected(st: Agent, body: fn(Agent) -> #(a, Agent)) -> #(Outcome(a), Agent)
-
 // restores the caller's realm even when body throws
 pub fn with_realm(
   st: Agent,
@@ -31,7 +23,7 @@ pub fn with_realm(
 ) -> #(a, Agent) {
   use <- bool.lazy_guard(id == st.realm.id, fn() { body(st) })
   let origin = st.realm.id
-  let #(outcome, after) = protected(enter(st, id), body)
+  let #(outcome, after) = rt_call.t_apply_protected(enter(st, id), body)
   let restored = enter(after, origin)
   case outcome {
     NormalCompletion(v) -> #(v, restored)
