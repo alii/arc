@@ -2,8 +2,8 @@ import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/obj.{constructor_props, prototype_seq} as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type FnFlags, type Handle, BirthPending, DataProperty, FnFlags,
-  KBytecode, KHandle, Named, NoElements, Ordinary, SObject, StringKey, classify,
+  type Agent, type FnFlags, type Handle, BirthPending, BytecodeFn, DataProperty,
+  FnFlags, KHandle, Named, NoElements, Ordinary, SObject, StringKey, classify,
   mk_object,
 }
 import gleam/dict
@@ -47,7 +47,7 @@ pub fn t_new_bytecode_function(
       rt_store.t_cell_new(
         st,
         SObject(
-          kind: KBytecode(
+          kind: BytecodeFn(
             template:,
             env:,
             home_object: None,
@@ -109,7 +109,7 @@ fn new_with_eager_prototype(
       )
     #(
       SObject(
-        kind: KBytecode(
+        kind: BytecodeFn(
           template:,
           env:,
           home_object: Some(proto),

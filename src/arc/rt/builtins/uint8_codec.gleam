@@ -64,14 +64,14 @@ fn codec_name(codec: Codec) -> String {
   }
 }
 
-type U8Slot {
-  U8Slot(buffer: Handle, byte_offset: Int, length: Option(Int))
+type U8View {
+  U8View(buffer: Handle, byte_offset: Int, length: Option(Int))
 }
 
-fn u8_slot(st: Agent, v: JsVal) -> Option(U8Slot) {
+fn u8_view(st: Agent, v: JsVal) -> Option(U8View) {
   case classify(v) {
-    KHandle(ref) ->
-      case rt_store.t_cell_get(st, ref) {
+    KHandle(h) ->
+      case rt_store.t_cell_get(st, h) {
         SObject(
           kind: TypedArrayObj(
             buffer:,
@@ -80,7 +80,7 @@ fn u8_slot(st: Agent, v: JsVal) -> Option(U8Slot) {
             length:,
           ),
           ..,
-        ) -> Some(U8Slot(buffer:, byte_offset:, length:))
+        ) -> Some(U8View(buffer:, byte_offset:, length:))
         _ -> None
       }
     _ -> None
@@ -88,7 +88,7 @@ fn u8_slot(st: Agent, v: JsVal) -> Option(U8Slot) {
 }
 
 fn validate_u8(st: Agent, this: JsVal) -> Nil {
-  case u8_slot(st, this) {
+  case u8_view(st, this) {
     Some(_) -> Nil
     None ->
       rt_val.t_throw_type_error(st, "Method must be called on a Uint8Array")
@@ -96,8 +96,8 @@ fn validate_u8(st: Agent, this: JsVal) -> Nil {
 }
 
 fn u8_require_mutable(st: Agent, this: JsVal) -> Nil {
-  let immutable = case u8_slot(st, this) {
-    Some(U8Slot(buffer:, ..)) -> buffer.buffer_is_immutable(st, buffer)
+  let immutable = case u8_view(st, this) {
+    Some(U8View(buffer:, ..)) -> buffer.buffer_is_immutable(st, buffer)
     None -> False
   }
   case immutable {
@@ -116,8 +116,8 @@ type U8LiveView {
 
 // resolve length from the same read as data, never re-read
 fn u8_live_view(st: Agent, this: JsVal) -> U8LiveView {
-  case u8_slot(st, this) {
-    Some(U8Slot(buffer:, byte_offset:, length:)) ->
+  case u8_view(st, this) {
+    Some(U8View(buffer:, byte_offset:, length:)) ->
       case buffer.buffer_bytes(st, buffer) {
         None ->
           rt_val.t_throw_type_error(
@@ -162,7 +162,7 @@ fn u8_live_view(st: Agent, this: JsVal) -> U8LiveView {
 fn get_opts_object(st: Agent, v: JsVal) -> Option(Handle) {
   case classify(v) {
     KUndef -> None
-    KHandle(ref) -> Some(ref)
+    KHandle(h) -> Some(h)
     _ -> rt_val.t_throw_type_error(st, "options must be an object or undefined")
   }
 }
@@ -174,7 +174,7 @@ fn get_option_value(
 ) -> #(JsVal, Agent) {
   case opts {
     None -> #(mk_undefined(), st)
-    Some(ref) -> rt_obj.t_get_prop(st, mk_object(ref), StringKey(Named(key)))
+    Some(h) -> rt_obj.t_get_prop(st, mk_object(h), StringKey(Named(key)))
   }
 }
 
@@ -309,12 +309,12 @@ pub fn u8_from_hex(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 }
 
 fn read_written_result(st: Agent, read: Int, written: Int) -> #(JsVal, Agent) {
-  let #(ref, st) =
+  let #(h, st) =
     common.alloc_plain_object(st, st.realm.object.prototype, [
       #("read", mk_int(read)),
       #("written", mk_int(written)),
     ])
-  #(mk_object(ref), st)
+  #(mk_object(h), st)
 }
 
 fn u8_write_bytes(
@@ -379,7 +379,7 @@ fn u8_alloc_from_bytes(st: Agent, bytes: BitArray) -> #(JsVal, Agent) {
       ArrayBufferObj(storage: Bytes(bytes:, max_byte_length: None)),
       st.realm.array_buffer.prototype,
     )
-  let #(ta_ref, st) =
+  let #(ta_h, st) =
     realm_ops.alloc_object(
       st,
       TypedArrayObj(
@@ -390,7 +390,7 @@ fn u8_alloc_from_bytes(st: Agent, bytes: BitArray) -> #(JsVal, Agent) {
       ),
       u8_prototype(st),
     )
-  #(mk_object(ta_ref), st)
+  #(mk_object(ta_h), st)
 }
 
 fn u8_prototype(st: Agent) -> Handle {

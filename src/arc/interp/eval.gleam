@@ -16,8 +16,8 @@ import arc/rt/env as rt_env
 import arc/rt/limits
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type EvalKind, type Handle, type JsVal, Agent, DynamicFunction,
-  IndirectEval, KBytecode, KHandle, KStr, SObject, ScriptEval, SyntaxErr,
+  type Agent, type EvalKind, type Handle, type JsVal, Agent, BytecodeFn,
+  DynamicFunction, IndirectEval, KHandle, KStr, SObject, ScriptEval, SyntaxErr,
   TypeErr, classify, mk_object, mk_undefined,
 }
 import gleam/int
@@ -157,12 +157,12 @@ pub fn eval_hook(
 fn name_anonymous(agent: Agent, f: JsVal) -> Agent {
   case classify(f) {
     KHandle(h) ->
-      rt_store.t_cell_update(agent, h, fn(slot) {
-        case slot {
-          SObject(kind: KBytecode(template:, ..) as kind, ..) ->
+      rt_store.t_cell_update(agent, h, fn(cell) {
+        case cell {
+          SObject(kind: BytecodeFn(template:, ..) as kind, ..) ->
             SObject(
-              ..slot,
-              kind: KBytecode(
+              ..cell,
+              kind: BytecodeFn(
                 ..kind,
                 template: bytecode.FuncTemplate(
                   ..template,
@@ -258,10 +258,10 @@ fn run_direct_eval(
       parse,
       compile,
     ))
-    use box_refs <- result.try(caller_box_refs(caller, name_table))
-    let padding = template.local_count - list.length(box_refs)
+    use boxes <- result.try(caller_boxes(caller, name_table))
+    let padding = template.local_count - list.length(boxes)
     let locals =
-      list.append(box_refs, list.repeat(mk_undefined(), padding))
+      list.append(boxes, list.repeat(mk_undefined(), padding))
       |> tuple_array.from_list
     let #(eval_env, agent) = case func.is_strict, var_env, caller.eval_env {
       True, _, _ | _, GlobalVarEnv, _ -> #(None, caller.agent)
@@ -300,14 +300,14 @@ fn adopt(
   }
 }
 
-fn caller_box_refs(
+fn caller_boxes(
   caller: State,
   name_table: List(#(String, Int)),
 ) -> Result(List(JsVal), #(JsVal, Agent)) {
   let read = fn(idx) {
     tuple_array.get(idx, caller.locals) |> option.to_result(idx)
   }
-  let refs = {
+  let boxes = {
     use named <- result.try(list.try_map(name_table, fn(pair) { read(pair.1) }))
     use lex <- result.map(
       lexical.all_lexical_refs
@@ -318,7 +318,7 @@ fn caller_box_refs(
     )
     list.append(named, lex)
   }
-  result.map_error(refs, fn(idx) {
+  result.map_error(boxes, fn(idx) {
     caller.agent.store.ops.new_error(
       caller.agent,
       TypeErr,

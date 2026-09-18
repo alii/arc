@@ -30,9 +30,9 @@ native(Data, {?HANDLE_TAG, IId} = IterH, {?HANDLE_TAG, NId}) ->
     case arc_rt_arena_ffi:probe(NId, Data) of
         NCell when element(1, NCell) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, NCell) of
-                {?KNATIVE_TAG, {iterator_n, Which}, _, _, _} ->
+                {?NATIVEFN_TAG, {iterator_n, Which}, _, _, _} ->
                     {native_next, Which, IterH};
-                {?KNATIVE_TAG, ?TOKEN_GENERATOR_NEXT, _, _, _} ->
+                {?NATIVEFN_TAG, ?TOKEN_GENERATOR_NEXT, _, _, _} ->
                     case arc_rt_arena_ffi:probe(IId, Data) of
                         ICell when element(1, ICell) =:= ?SOBJECT_TAG,
                                    element(1, element(?SOBJECT_KIND, ICell))

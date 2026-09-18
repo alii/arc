@@ -1,33 +1,33 @@
 -module(arc_rt_call_ffi).
 -export([t_call_protected/4, t_apply_protected/2, t_native_protected/4,
-         mk_frame/4, t_kfn_code/3, birth_props/2]).
+         mk_frame/4, t_compiled_fn_code/3, birth_props/2]).
 
 -include("arc_rt_layout.hrl").
 
-t_kfn_code(St, {?HANDLE_TAG, Id}, This) ->
+t_compiled_fn_code(St, {?HANDLE_TAG, Id}, This) ->
     Store = element(?AGENT_STORE, St),
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Cell) of
-                ?KFN(Code, ?NONE, Flags, _, Simple) when ?IS_PLAIN_FN(Flags) ->
+                ?COMPILEDFN(Code, ?NONE, Flags, _, DirectEntry) when ?IS_PLAIN_FN(Flags) ->
                     %% §10.2.1.2 bind this, sloppy primitive this misses
                     case element(?FNFLAGS_IS_ARROW, Flags)
                          orelse element(?FNFLAGS_IS_STRICT, Flags) of
-                        true -> {Code, This, Simple};
+                        true -> {Code, This, DirectEntry};
                         false when This =:= undefined; This =:= null ->
                             {Code,
                              element(?REALM_GLOBAL,
                                      element(?AGENT_REALM, St)),
-                             Simple};
+                             DirectEntry};
                         false when element(1, This) =:= ?HANDLE_TAG ->
-                            {Code, This, Simple};
+                            {Code, This, DirectEntry};
                         false -> undefined
                     end;
                 _ -> undefined
             end;
         _ -> undefined
     end;
-t_kfn_code(_, _, _) -> undefined.
+t_compiled_fn_code(_, _, _) -> undefined.
 
 %% runs body under the js guard, answering a Completion
 -define(PROTECT(Body),

@@ -344,7 +344,7 @@ pub fn seed_ops(st: Agent) -> Agent {
       ops: JsOps(
         get_prop: rt_obj.t_get_prop,
         call: rt_call.t_call_checked,
-        to_object: realm_ops.t_box_primitive,
+        to_object: realm_ops.t_wrap_primitive,
         new_error: realm_ops.t_new_error,
         eval_hook: no_eval,
         call_bytecode: fn(_, _, _, _, _) {

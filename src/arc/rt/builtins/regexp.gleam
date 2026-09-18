@@ -10,15 +10,15 @@ import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type BuiltinPair, type Handle, type JsVal, type LegacySlot,
+  type Agent, type BuiltinPair, type Handle, type JsVal, type LegacyStatic,
   type LegacyStatics, type ObjectKey, type Property, type PropertyKey,
   type RegExpFlag, type RegExpNative, ArrayObj, DataProperty, Index, KHandle,
-  KNative, KNull, KUndef, LegacyInput, LegacyLastMatch, LegacyLastParen,
+  KNull, KUndef, LegacyInput, LegacyLastMatch, LegacyLastParen,
   LegacyLeftContext, LegacyParen1, LegacyParen2, LegacyParen3, LegacyParen4,
   LegacyParen5, LegacyParen6, LegacyParen7, LegacyParen8, LegacyParen9,
-  LegacyRightContext, LegacyStatics, Named, NoElements, Ordinary, RFDotAll,
-  RFGlobal, RFHasIndices, RFIgnoreCase, RFMultiline, RFSticky, RFUnicode,
-  RFUnicodeSets, RegExpConstructor, RegExpGetFlag, RegExpGetFlags,
+  LegacyRightContext, LegacyStatics, Named, NativeFn, NoElements, Ordinary,
+  RFDotAll, RFGlobal, RFHasIndices, RFIgnoreCase, RFMultiline, RFSticky,
+  RFUnicode, RFUnicodeSets, RegExpConstructor, RegExpGetFlag, RegExpGetFlags,
   RegExpGetSource, RegExpLegacyGetter, RegExpLegacyInputSetter, RegExpN,
   RegExpObj, RegExpPrototypeCompile, RegExpPrototypeExec, RegExpPrototypeTest,
   RegExpPrototypeToString, RegExpStringIteratorNext, RegExpSymbolMatch,
@@ -146,12 +146,12 @@ fn install_legacy_accessors(
       common.add_named_property(st, ctor, name, prop)
     })
   list.fold(getter_only, st, fn(st, spec) {
-    let #(name, slot) = spec
+    let #(name, which) = spec
     let #(get_h, st) =
       common.alloc_rooted_native_fn(
         st,
         fn_proto,
-        RegExpN(RegExpLegacyGetter(ctor, slot)),
+        RegExpN(RegExpLegacyGetter(ctor, which)),
         "get " <> name,
         0,
       )
@@ -175,7 +175,8 @@ pub fn dispatch(
 ) -> #(JsVal, Agent) {
   case native {
     RegExpConstructor(..) -> regexp_call(st, args)
-    RegExpLegacyGetter(ctor:, slot:) -> legacy_static_get(st, this, ctor, slot)
+    RegExpLegacyGetter(ctor:, which:) ->
+      legacy_static_get(st, this, ctor, which)
     RegExpLegacyInputSetter(ctor:) ->
       legacy_static_set_input(st, this, args, ctor)
     RegExpGetSource -> get_source(st, this)
@@ -238,7 +239,7 @@ fn construct_regexp(
   flags: JsVal,
   new_target: JsVal,
 ) -> #(Handle, Agent) {
-  let #(p, f, st) = case regexp_slot(st, pattern) {
+  let #(p, f, st) = case regexp_source_flags(st, pattern) {
     Some(#(source, orig_flags)) ->
       case classify(flags) {
         KUndef -> #(mk_string(source), mk_string(orig_flags), st)
@@ -289,7 +290,7 @@ pub fn is_regexp(st: Agent, val: JsVal) -> #(Bool, Agent) {
   }
 }
 
-fn regexp_slot(st: Agent, v: JsVal) -> Option(#(String, String)) {
+fn regexp_source_flags(st: Agent, v: JsVal) -> Option(#(String, String)) {
   case classify(v) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
@@ -307,13 +308,13 @@ fn legacy_static_get(
   st: Agent,
   this: JsVal,
   ctor: Handle,
-  slot: LegacySlot,
+  which: LegacyStatic,
 ) -> #(JsVal, Agent) {
   case is_handle(this, ctor) {
     False -> rt_val.t_throw_type_error(st, legacy_receiver_error)
     True ->
       case read_legacy_statics(st, ctor) {
-        Some(statics) -> #(mk_string(legacy_slot(statics, slot)), st)
+        Some(statics) -> #(mk_string(legacy_static_value(statics, which)), st)
         None -> rt_val.t_throw_type_error(st, legacy_receiver_error)
       }
   }
@@ -348,8 +349,10 @@ fn is_handle(v: JsVal, h: Handle) -> Bool {
 
 fn read_legacy_statics(st: Agent, ctor: Handle) -> Option(LegacyStatics) {
   case rt_store.t_cell_get(st, ctor) {
-    SObject(kind: KNative(tag: RegExpN(RegExpConstructor(legacy:, ..)), ..), ..) ->
-      Some(legacy)
+    SObject(
+      kind: NativeFn(token: RegExpN(RegExpConstructor(legacy:, ..)), ..),
+      ..,
+    ) -> Some(legacy)
     _ -> None
   }
 }
@@ -374,8 +377,8 @@ type CtorState {
 fn ctor_state(st: Agent) -> Option(CtorState) {
   case rt_store.t_cell_get(st, st.realm.regexp.constructor) {
     SObject(
-      kind: KNative(
-        tag: RegExpN(RegExpConstructor(legacy:, proto_props:, compiled:)),
+      kind: NativeFn(
+        token: RegExpN(RegExpConstructor(legacy:, proto_props:, compiled:)),
         ..,
       ),
       ..,
@@ -389,11 +392,11 @@ fn update_constructor(
   ctor: Handle,
   update: fn(CtorState) -> CtorState,
 ) -> Agent {
-  use slot <- rt_store.t_cell_update(st, ctor)
-  case slot {
+  use cell <- rt_store.t_cell_update(st, ctor)
+  case cell {
     SObject(
-      kind: KNative(
-        tag: RegExpN(RegExpConstructor(legacy:, proto_props:, compiled:)),
+      kind: NativeFn(
+        token: RegExpN(RegExpConstructor(legacy:, proto_props:, compiled:)),
         name:,
         length:,
         constructible:,
@@ -403,9 +406,9 @@ fn update_constructor(
       let CtorState(legacy:, proto_props:, compiled:) =
         update(CtorState(legacy:, proto_props:, compiled:))
       SObject(
-        ..slot,
-        kind: KNative(
-          tag: RegExpN(RegExpConstructor(legacy:, proto_props:, compiled:)),
+        ..cell,
+        kind: NativeFn(
+          token: RegExpN(RegExpConstructor(legacy:, proto_props:, compiled:)),
           name:,
           length:,
           constructible:,
@@ -474,14 +477,14 @@ fn update_legacy_statics(
   LegacyStatics(input: s, subject: s, whole:, groups:)
 }
 
-fn legacy_slot(statics: LegacyStatics, slot: LegacySlot) -> String {
+fn legacy_static_value(statics: LegacyStatics, which: LegacyStatic) -> String {
   let LegacyStatics(input:, subject: s, whole: #(start, len), groups:) = statics
   let paren = fn(n) {
     helpers.list_at(groups, n - 1)
     |> option.map(capture_to_legacy_string(s, _))
     |> option.unwrap("")
   }
-  case slot {
+  case which {
     rt_types.LegacyInput -> input
     rt_types.LegacyLastMatch -> byte_slice(s, start, len)
     rt_types.LegacyLastParen ->
@@ -511,7 +514,7 @@ fn capture_to_legacy_string(s: String, cap: #(Int, Int)) -> String {
 
 fn get_source(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case require_regexp_or_proto(st, this, "source") {
-    RSlot(s, _, _) -> #(mk_string(source_string(s)), st)
+    RRegExp(s, _, _) -> #(mk_string(source_string(s)), st)
     RProto -> #(mk_string("(?:)"), st)
   }
 }
@@ -584,7 +587,7 @@ fn build_flags(
 
 fn get_flag(st: Agent, this: JsVal, flag: RegExpFlag) -> #(JsVal, Agent) {
   case require_regexp_or_proto(st, this, flag_property(flag)) {
-    RSlot(_, flags, _) -> #(mk_bool(has_flag(flags, flag_char(flag))), st)
+    RRegExp(_, flags, _) -> #(mk_bool(has_flag(flags, flag_char(flag))), st)
     RProto -> #(mk_undefined(), st)
   }
 }
@@ -684,7 +687,7 @@ fn validate_pattern_and_flags(
 }
 
 type RegExpRead {
-  RSlot(source: String, flags: String, last_index: Int)
+  RRegExp(source: String, flags: String, last_index: Int)
   RProto
 }
 
@@ -693,7 +696,7 @@ fn require_regexp_or_proto(st: Agent, v: JsVal, op: String) -> RegExpRead {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
         SObject(kind: RegExpObj(source:, flags:, last_index:, ..), ..) ->
-          RSlot(source, flags, last_index)
+          RRegExp(source, flags, last_index)
         _ ->
           case h == st.realm.regexp.prototype {
             True -> RProto
@@ -831,7 +834,7 @@ fn is_intrinsic_exec(st: Agent, f: JsVal) -> Bool {
   case classify(f) {
     KHandle(fh) ->
       case rt_store.t_cell_get(st, fh) {
-        SObject(kind: KNative(tag: RegExpN(RegExpPrototypeExec), ..), ..) ->
+        SObject(kind: NativeFn(token: RegExpN(RegExpPrototypeExec), ..), ..) ->
           True
         _ -> False
       }
@@ -910,13 +913,13 @@ fn regexp_matcher(
   h: Handle,
 ) -> #(String, rt_types.CompiledRegExp, Agent) {
   case rt_store.t_cell_get(st, h) {
-    SObject(kind: RegExpObj(source:, flags:, last_index:, compiled:), ..) as slot ->
+    SObject(kind: RegExpObj(source:, flags:, last_index:, compiled:), ..) as cell ->
       case ffi_is_compiled(compiled) {
         True -> #(flags, compiled, st)
         False -> {
           let #(compiled, st) = compile_cached(st, source, flags)
           let kind = RegExpObj(source:, flags:, last_index:, compiled:)
-          let st = rt_store.t_cell_set(st, h, SObject(..slot, kind:))
+          let st = rt_store.t_cell_set(st, h, SObject(..cell, kind:))
           #(flags, compiled, st)
         }
       }
@@ -1186,11 +1189,11 @@ fn regexp_compile(
     _ -> source
   }
   let st =
-    rt_store.t_cell_update(st, h, fn(slot) {
-      case slot {
+    rt_store.t_cell_update(st, h, fn(cell) {
+      case cell {
         SObject(kind: RegExpObj(..), ..) ->
           SObject(
-            ..slot,
+            ..cell,
             kind: RegExpObj(
               source:,
               flags: canonical_flags(flags),
@@ -1198,7 +1201,7 @@ fn regexp_compile(
               compiled: uncompiled_regexp(),
             ),
           )
-        _ -> slot
+        _ -> cell
       }
     })
   let st = set_throw(st, h, "lastIndex", mk_int(0))
@@ -1789,7 +1792,8 @@ fn intrinsic_getter(
       case classify(g) {
         KHandle(gh) ->
           case rt_store.t_cell_get(st, gh) {
-            SObject(kind: KNative(tag: RegExpN(tag), ..), ..) -> tag == expected
+            SObject(kind: NativeFn(token: RegExpN(tag), ..), ..) ->
+              tag == expected
             _ -> False
           }
         _ -> False
@@ -2162,13 +2166,13 @@ fn read_rsi_state(
 }
 
 fn mark_iter_done(st: Agent, h: Handle) -> Agent {
-  rt_store.t_cell_update(st, h, fn(slot) {
-    case slot {
+  rt_store.t_cell_update(st, h, fn(cell) {
+    case cell {
       SObject(props:, ..) ->
         case dict.get(props, Named(rsi_done)) {
           Ok(rt_types.DataProperty(seq:, ..)) ->
             SObject(
-              ..slot,
+              ..cell,
               props: dict.insert(
                 props,
                 Named(rsi_done),
@@ -2181,9 +2185,9 @@ fn mark_iter_done(st: Agent, h: Handle) -> Agent {
                 ),
               ),
             )
-          _ -> slot
+          _ -> cell
         }
-      _ -> slot
+      _ -> cell
     }
   })
 }

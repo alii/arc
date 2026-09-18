@@ -11,14 +11,14 @@ import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type CompiledFn, type FnFlags, type JsVal, type ShapeSlots,
-  AccessorProperty, ArgumentsObj, ArrayObj, BirthPending, BirthSettled,
-  DataProperty, Dense, FnFlags, GlobalObj, Index, IteratorRecord, JsCell,
-  JsStore, KBound, KBytecode, KCompiled, KHandle, KNative, MapObj,
-  ModuleNamespace, Named, NoElements, Ordinary, Private, ProxyObj,
-  ResumeCompiled, ResumeFrame, ReturnThis, SBox, SObject, SShapedObject, SetObj,
-  ShapeDesc, Sparse, StepAwait, StepReturn, StepThrow, StepYield, StringKey,
-  StringObj, SymbolKey, TypedArrayObj,
+  type Agent, type CompiledCode, type FnFlags, type JsVal, type ShapeSlots,
+  AccessorProperty, ArgumentsObj, ArrayObj, BirthPending, BirthSettled, BoundFn,
+  BytecodeFn, CompiledFn, DataProperty, Dense, DirectEntry, FnFlags, GlobalObj,
+  Handle, Index, IteratorRecord, JsStore, KHandle, MapObj, ModuleNamespace,
+  Named, NativeFn, NoElements, Ordinary, Private, ProxyObj, ResumeCompiled,
+  ResumeFrame, ReturnThis, SBox, SObject, SShapedObject, SetObj, ShapeDesc,
+  Sparse, StepAwait, StepReturn, StepThrow, StepYield, StringKey, StringObj,
+  SymbolKey, TypedArrayObj,
 } as rt_types
 import gleam/dict
 import gleam/dynamic.{type Dynamic}
@@ -43,16 +43,16 @@ fn tuple_size(of: Dynamic) -> Int
 fn dyn(x: a) -> Dynamic
 
 @external(erlang, "arc_rt_layout_root_ffi", "dyn")
-fn compiled_fn(label: String) -> CompiledFn
+fn dummy_code(label: String) -> CompiledCode
 
 @external(erlang, "arc_rt_layout_root_ffi", "slots")
 fn slots(vals: List(JsVal)) -> ShapeSlots
 
-@external(erlang, "arc_rt_layout_root_ffi", "kfn_parts")
-fn kfn_parts(kind: rt_types.ObjKind) -> Dynamic
+@external(erlang, "arc_rt_layout_root_ffi", "compiled_fn_parts")
+fn compiled_fn_parts(kind: rt_types.ObjKind) -> Dynamic
 
 @external(erlang, "arc_rt_layout_root_ffi", "direct_entry")
-fn direct_entry(code: CompiledFn, arity: Int, takes_this: Bool) -> Dynamic
+fn direct_entry(code: CompiledCode, arity: Int, takes_this: Bool) -> Dynamic
 
 @external(erlang, "arc_rt_layout_root_ffi", "is_plain_fn")
 fn is_plain_fn(flags: FnFlags) -> Bool
@@ -231,7 +231,7 @@ pub fn constants_test() {
 }
 
 pub fn handle_test() {
-  let h = JsCell(4242)
+  let h = Handle(4242)
   assert tag_of(h) == tag("HANDLE_TAG")
   assert size_of(h) == 2
   assert at(h, "HANDLE_ID") == dyn(4242)
@@ -243,7 +243,7 @@ pub fn handle_test() {
 }
 
 pub fn sobject_test() {
-  let proto = JsCell(1)
+  let proto = Handle(1)
   let vx = rt_types.mk_string("vx")
   let props =
     dict.from_list([
@@ -304,7 +304,7 @@ pub fn sobject_test() {
   assert tag_of(wrapper) == tag("STRINGOBJ_TAG")
   assert at(wrapper, "STRINGOBJ_VALUE") == dyn("s")
   assert dyn(GlobalObj) == tag("GLOBALOBJ")
-  assert tag_of(KBound(target: proto, bound_this: vx, bound_args: []))
+  assert tag_of(BoundFn(target: proto, bound_this: vx, bound_args: []))
     == tag("BOUNDFN_TAG")
   let view =
     TypedArrayObj(
@@ -350,14 +350,14 @@ pub fn sshaped_object_test() {
   let obj =
     SShapedObject(
       shape_id: 21,
-      proto: Some(JsCell(2)),
+      proto: Some(Handle(2)),
       slots: sl,
       offsets: offs,
     )
   assert tag_of(obj) == tag("SSHAPED_TAG")
   assert size_of(obj) == idx("SSHAPED_SIZE")
   assert at(obj, "SSHAPED_SID") == dyn(21)
-  assert at(obj, "SSHAPED_PROTO") == dyn(Some(JsCell(2)))
+  assert at(obj, "SSHAPED_PROTO") == dyn(Some(Handle(2)))
   assert at(obj, "SSHAPED_SLOTS") == dyn(sl)
   assert at(obj, "SSHAPED_OFFSETS") == dyn(offs)
   assert idx("CELL_PROTO") == idx("SSHAPED_PROTO")
@@ -419,74 +419,77 @@ pub fn is_plain_fn_test() {
   assert !is_plain_fn(FnFlags(..base, is_async: True))
 }
 
-pub fn kcompiled_test() {
-  let code = compiled_fn("code")
-  let code_s = compiled_fn("code_s")
+pub fn compiled_fn_test() {
+  let code = dummy_code("code")
+  let code_s = dummy_code("code_s")
   let flags = FnFlags(..no_flags(), is_arrow: True)
-  let kfn =
-    KCompiled(
+  let compiled =
+    CompiledFn(
       code:,
-      home_object: Some(JsCell(30)),
+      home_object: Some(Handle(30)),
       flags:,
-      fields_init: Some(JsCell(31)),
-      simple: Some(#(code_s, 2, True)),
+      fields_init: Some(Handle(31)),
+      direct_entry: Some(DirectEntry(code_s, 2, True)),
       name: "nm",
       length: 2,
-      birth: BirthPending(Some(JsCell(32))),
+      birth: BirthPending(Some(Handle(32))),
     )
-  assert tag_of(kfn) == tag("KFN_TAG")
-  assert size_of(kfn) == idx("KFN_SIZE")
-  assert at(kfn, "KFN_CODE") == dyn(code)
-  assert at(kfn, "KFN_HOME") == dyn(Some(JsCell(30)))
-  assert at(kfn, "KFN_FLAGS") == dyn(flags)
-  assert at(kfn, "KFN_FIELDS_INIT") == dyn(Some(JsCell(31)))
-  assert at(kfn, "KFN_NAME") == dyn("nm")
-  assert at(kfn, "KFN_LENGTH") == dyn(2)
-  let birth = at(kfn, "KFN_BIRTH")
-  assert birth == dyn(BirthPending(Some(JsCell(32))))
+  assert tag_of(compiled) == tag("COMPILEDFN_TAG")
+  assert size_of(compiled) == idx("COMPILEDFN_SIZE")
+  assert at(compiled, "COMPILEDFN_CODE") == dyn(code)
+  assert at(compiled, "COMPILEDFN_HOME") == dyn(Some(Handle(30)))
+  assert at(compiled, "COMPILEDFN_FLAGS") == dyn(flags)
+  assert at(compiled, "COMPILEDFN_FIELDS_INIT") == dyn(Some(Handle(31)))
+  assert at(compiled, "COMPILEDFN_NAME") == dyn("nm")
+  assert at(compiled, "COMPILEDFN_LENGTH") == dyn(2)
+  let birth = at(compiled, "COMPILEDFN_BIRTH")
+  assert birth == dyn(BirthPending(Some(Handle(32))))
   assert tag_of(birth) == tag("BIRTH_PENDING_TAG")
-  assert at(birth, "BIRTH_PROTOTYPE_PARENT") == dyn(Some(JsCell(32)))
-  let simple = at(kfn, "KFN_SIMPLE")
-  assert tag_of(simple) == tag("SOME")
-  let inner = element(2, simple)
-  assert tuple_size(inner) == 3
-  assert element(1, inner) == dyn(code_s)
-  assert element(2, inner) == dyn(2)
-  assert element(3, inner) == dyn(True)
+  assert at(birth, "BIRTH_PROTOTYPE_PARENT") == dyn(Some(Handle(32)))
+  let entry = at(compiled, "COMPILEDFN_DIRECT_ENTRY")
+  assert tag_of(entry) == tag("SOME")
+  let inner = element(2, entry)
+  assert tag_of(inner) == tag("DIRECT_ENTRY_TAG")
+  assert tuple_size(inner) == idx("DIRECT_ENTRY_SIZE")
+  assert element(2, inner) == dyn(code_s)
+  assert element(3, inner) == dyn(2)
+  assert element(4, inner) == dyn(True)
   assert inner == direct_entry(code_s, 2, True)
-  assert kfn_parts(kfn)
+  assert inner == dyn(DirectEntry(code_s, 2, True))
+  assert compiled_fn_parts(compiled)
     == dyn(#(
       code,
-      Some(JsCell(30)),
+      Some(Handle(30)),
       flags,
-      Some(JsCell(31)),
-      Some(#(code_s, 2, True)),
+      Some(Handle(31)),
+      Some(DirectEntry(code_s, 2, True)),
     ))
   let bare =
-    KCompiled(
+    CompiledFn(
       code:,
       home_object: None,
       flags:,
       fields_init: None,
-      simple: None,
+      direct_entry: None,
       name: "",
       length: 0,
       birth: BirthSettled,
     )
-  assert at(bare, "KFN_HOME") == tag("NONE")
-  assert at(bare, "KFN_FIELDS_INIT") == tag("NONE")
-  assert at(bare, "KFN_SIMPLE") == tag("NONE")
-  assert at(bare, "KFN_BIRTH") == tag("BIRTH_SETTLED")
+  assert at(bare, "COMPILEDFN_HOME") == tag("NONE")
+  assert at(bare, "COMPILEDFN_FIELDS_INIT") == tag("NONE")
+  assert at(bare, "COMPILEDFN_DIRECT_ENTRY") == tag("NONE")
+  assert at(bare, "COMPILEDFN_BIRTH") == tag("BIRTH_SETTLED")
 }
 
-pub fn knative_test() {
-  let kn = KNative(tag: ReturnThis, name: "nm", length: 3, constructible: True)
-  assert tag_of(kn) == tag("KNATIVE_TAG")
-  assert size_of(kn) == idx("KNATIVE_SIZE")
-  assert at(kn, "KNATIVE_TOKEN") == dyn(ReturnThis)
-  assert at(kn, "KNATIVE_NAME") == dyn("nm")
-  assert at(kn, "KNATIVE_LENGTH") == dyn(3)
-  assert at(kn, "KNATIVE_CONSTRUCTIBLE") == dyn(True)
+pub fn native_fn_test() {
+  let kn =
+    NativeFn(token: ReturnThis, name: "nm", length: 3, constructible: True)
+  assert tag_of(kn) == tag("NATIVEFN_TAG")
+  assert size_of(kn) == idx("NATIVEFN_SIZE")
+  assert at(kn, "NATIVEFN_TOKEN") == dyn(ReturnThis)
+  assert at(kn, "NATIVEFN_NAME") == dyn("nm")
+  assert at(kn, "NATIVEFN_LENGTH") == dyn(3)
+  assert at(kn, "NATIVEFN_CONSTRUCTIBLE") == dyn(True)
 }
 
 pub fn data_property_test() {
@@ -669,7 +672,7 @@ pub fn proxy_fast_paths_miss_test() {
   // instanceof over a proxy must reach the getprototypeof trap
   let ctor_flags = FnFlags(..no_flags(), is_constructor: True)
   let #(f, st) =
-    rt_call.t_new_function(st, compiled_fn("F"), ctor_flags, "F", 0, None)
+    rt_call.t_new_function(st, dummy_code("F"), ctor_flags, "F", 0, None)
   let #(_, st) = rt_obj.t_get_prop(st, f, StringKey(Named("prototype")))
   let #(plain, st) = rt_obj.t_new_object_literal(st)
   assert instanceof_fast(st, plain, f) == dyn(0)
@@ -705,7 +708,7 @@ pub fn bytecode_function_fast_paths_miss_test() {
   let st = seeded()
   let flags = FnFlags(..no_flags(), is_constructor: True, is_strict: True)
   let kind =
-    KBytecode(
+    BytecodeFn(
       template: template("tpl"),
       env: env([]),
       home_object: None,
@@ -715,9 +718,9 @@ pub fn bytecode_function_fast_paths_miss_test() {
       unit: 0,
       birth: BirthSettled,
     )
-  assert tag_of(kind) == tag("KBYTECODE_TAG")
-  assert size_of(kind) == idx("KBYTECODE_SIZE")
-  assert at(kind, "KBYTECODE_BIRTH") == tag("BIRTH_SETTLED")
+  assert tag_of(kind) == tag("BYTECODEFN_TAG")
+  assert size_of(kind) == idx("BYTECODEFN_SIZE")
+  assert at(kind, "BYTECODEFN_BIRTH") == tag("BIRTH_SETTLED")
   let #(fh, st) =
     rt_store.t_cell_new(
       st,
@@ -734,7 +737,7 @@ pub fn bytecode_function_fast_paths_miss_test() {
   assert rt_call.is_callable(st, f)
   assert rt_call.is_constructor(st, f)
   let undef = rt_types.mk_undefined()
-  assert dyn(rt_call.t_kfn_code(st, f, undef)) == dyn(undef)
+  assert dyn(rt_call.t_compiled_fn_code(st, f, undef)) == dyn(undef)
   let #(o, st) = rt_obj.t_new_object_literal(st)
   let #(_, st) = rt_obj.t_set_prop(st, o, StringKey(Named("m")), f)
   assert call_method_mono(st, o, <<"m">>, []).0 == dyn(Miss)
@@ -745,7 +748,7 @@ pub fn bytecode_function_fast_paths_miss_test() {
 @external(erlang, "arc_rt_layout_root_ffi", "dyn")
 fn compiled_code(
   code: fn(Agent, Dynamic, List(JsVal)) -> #(JsVal, Agent),
-) -> CompiledFn
+) -> CompiledCode
 
 pub fn compiled_function_fast_paths_hit_test() {
   let st = seeded()
@@ -753,7 +756,7 @@ pub fn compiled_function_fast_paths_hit_test() {
   let code = compiled_code(fn(st, _frame, _args) { #(undef, st) })
   let flags = FnFlags(..no_flags(), is_constructor: True, is_strict: True)
   let #(f, st) = rt_call.t_new_function(st, code, flags, "F", 0, None)
-  assert dyn(rt_call.t_kfn_code(st, f, undef)) != dyn(undef)
+  assert dyn(rt_call.t_compiled_fn_code(st, f, undef)) != dyn(undef)
   assert new_simple(st, f, []).0 == dyn(Miss)
   let #(proto, st) = rt_obj.t_get_prop(st, f, StringKey(Named("prototype")))
   let #(this, _) = new_simple(st, f, [])
@@ -802,7 +805,7 @@ pub fn binop_kind_terms_test() {
 }
 
 pub fn iterator_kinds_test() {
-  let h = JsCell(9)
+  let h = Handle(9)
   let it =
     rt_types.ArrayIterator(target: h, index: 4, kind: rt_types.ArrayIterValues)
   assert tag_of(it) == tag("ARRAYITER_TAG")

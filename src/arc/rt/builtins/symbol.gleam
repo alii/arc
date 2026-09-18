@@ -3,7 +3,7 @@ import arc/rt/builtins/helpers
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type SymbolId,
-  type SymbolNative, BuiltinPair, KHandle, KNative, KSym, KUndef, NoElements,
+  type SymbolNative, BuiltinPair, KHandle, KSym, KUndef, NativeFn, NoElements,
   Ordinary, RegisteredSymbol, SObject, SymbolConstructor,
   SymbolDescriptionGetter, SymbolFor, SymbolKeyFor, SymbolN, SymbolObj,
   SymbolToPrimitive, SymbolToString, SymbolValueOf, UserSymbol, classify,
@@ -20,9 +20,9 @@ pub fn init(
   fn_proto: Handle,
 ) -> #(BuiltinPair, Agent) {
   let #(prototype, st) = common.alloc_proto(st, Some(object_proto), dict.new())
-  let #(for_ref, st) =
+  let #(for_h, st) =
     common.alloc_rooted_native_fn(st, fn_proto, SymbolN(SymbolFor), "for", 1)
-  let #(key_for_ref, st) =
+  let #(key_for_h, st) =
     common.alloc_rooted_native_fn(
       st,
       fn_proto,
@@ -33,8 +33,8 @@ pub fn init(
   let #(len_p, st) = common.fn_length_property(st, 0)
   let #(name_p, st) = common.fn_name_property(st, "Symbol")
   let #(proto_p, st) = common.fn_prototype_property(st, prototype)
-  let #(for_p, st) = common.builtin_property(st, mk_object(for_ref))
-  let #(key_for_p, st) = common.builtin_property(st, mk_object(key_for_ref))
+  let #(for_p, st) = common.builtin_property(st, mk_object(for_h))
+  let #(key_for_p, st) = common.builtin_property(st, mk_object(key_for_h))
   let #(wk_props, st) =
     well_known_properties(st, [
       #("toStringTag", rt_types.symbol_to_string_tag),
@@ -66,8 +66,8 @@ pub fn init(
     rt_store.t_cell_new(
       st,
       SObject(
-        kind: KNative(
-          tag: SymbolN(SymbolConstructor),
+        kind: NativeFn(
+          token: SymbolN(SymbolConstructor),
           name: "Symbol",
           length: 0,
           constructible: True,
@@ -80,7 +80,7 @@ pub fn init(
       ),
     )
   let st = rt_store.t_pin_root(st, constructor)
-  let #(to_string_ref, st) =
+  let #(to_string_h, st) =
     common.alloc_rooted_native_fn(
       st,
       fn_proto,
@@ -88,7 +88,7 @@ pub fn init(
       "toString",
       0,
     )
-  let #(value_of_ref, st) =
+  let #(value_of_h, st) =
     common.alloc_rooted_native_fn(
       st,
       fn_proto,
@@ -96,7 +96,7 @@ pub fn init(
       "valueOf",
       0,
     )
-  let #(to_primitive_ref, st) =
+  let #(to_primitive_h, st) =
     common.alloc_rooted_native_fn(
       st,
       fn_proto,
@@ -104,7 +104,7 @@ pub fn init(
       "[Symbol.toPrimitive]",
       1,
     )
-  let #(description_get_ref, st) =
+  let #(description_get_h, st) =
     common.alloc_rooted_native_fn(
       st,
       fn_proto,
@@ -113,23 +113,23 @@ pub fn init(
       0,
     )
   let #(ctor_p, st) = common.builtin_property(st, mk_object(constructor))
-  let #(ts_p, st) = common.builtin_property(st, mk_object(to_string_ref))
-  let #(vo_p, st) = common.builtin_property(st, mk_object(value_of_ref))
+  let #(ts_p, st) = common.builtin_property(st, mk_object(to_string_h))
+  let #(vo_p, st) = common.builtin_property(st, mk_object(value_of_h))
   let #(desc_p, st) =
     common.accessor_prop(
       st,
-      get: Some(mk_object(description_get_ref)),
+      get: Some(mk_object(description_get_h)),
       set: None,
       enumerable: False,
       configurable: True,
     )
   let #(tag_pair, st) = common.string_tag_property(st, "Symbol")
-  let #(to_prim_p, st) = common.frozen_property(st, mk_object(to_primitive_ref))
+  let #(to_prim_p, st) = common.frozen_property(st, mk_object(to_primitive_h))
   let st =
-    rt_store.t_cell_update(st, prototype, fn(slot) {
-      let assert SObject(..) = slot
+    rt_store.t_cell_update(st, prototype, fn(cell) {
+      let assert SObject(..) = cell
       SObject(
-        ..slot,
+        ..cell,
         kind: Ordinary,
         props: common.named_props([
           #("constructor", ctor_p),

@@ -15,8 +15,8 @@ import arc/rt/inspect as rt_inspect
 import arc/rt/snapshot
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, type Realm, Agent, JFloat, JInt, JNan,
-  JNegInf, JPosInf, JsCell, KBig, KBool, KHandle, KNull, KNum, KStr, KSym, KTdz,
+  type Agent, type Handle, type JsVal, type Realm, Agent, Handle, JFloat, JInt,
+  JNan, JNegInf, JPosInf, KBig, KBool, KHandle, KNull, KNum, KStr, KSym, KTdz,
   KUndef, mk_object,
 }
 import gleam/dict.{type Dict}
@@ -200,7 +200,7 @@ pub fn with_state_with(
   let #(s, result) = body(host_state(engine))
   let held =
     rt_gc.push_term_refs(to_dynamic(result), [])
-    |> list.map(fn(id) { mk_object(JsCell(id)) })
+    |> list.map(fn(id) { mk_object(Handle(id)) })
   let agent = safepoint.finish_turn(s.agent, held, finish)
   #(Engine(..engine, agent:), result)
 }
@@ -391,7 +391,7 @@ pub fn format_error(engine: Engine(host), error: JsValue) -> String {
   rt_inspect.format_error(engine.agent, error)
 }
 
-/// debug view of the raw store slot
+/// debug view of the raw store cell
 pub fn dump_object(engine: Engine(host), val: JsValue) -> Option(String) {
   case types.classify(val) {
     KHandle(h) ->

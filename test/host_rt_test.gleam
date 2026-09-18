@@ -5,8 +5,8 @@ import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, JInt, JsCell, KHandle, KHost, KNative,
-  KStr, Named, SObject, StringKey, classify, mk_number, mk_object, mk_string,
+  type Agent, type Handle, type JsVal, Handle, HostObj, JInt, KHandle, KStr,
+  Named, NativeFn, SObject, StringKey, classify, mk_number, mk_object, mk_string,
   mk_undefined,
 }
 import arc/rt/val as rt_val
@@ -53,7 +53,7 @@ pub fn define_fn_installs_a_callable_global_test() {
   let st =
     host.define_fn(host.from_agent(agent(), key()), "twice", 1, twice).agent
   let #(f, st) = global(st, "twice")
-  let assert SObject(kind: KNative(tag: types.HostFn(0), ..), ..) =
+  let assert SObject(kind: NativeFn(token: types.HostFn(0), ..), ..) =
     rt_store.t_cell_get(st, handle(f))
   assert dict.size(st.host_fns) == 1
   let #(c, st) = rt_call.t_call(st, f, mk_undefined(), [int(21)])
@@ -270,7 +270,7 @@ pub fn host_object_round_trips_typed_test() {
   assert host.read_host(s, plain) == None
   assert host.read_host(s, int(3)) == None
   let st = s.agent
-  let assert SObject(kind: KHost(_), proto: None, ..) =
+  let assert SObject(kind: HostObj(_), proto: None, ..) =
     rt_store.t_cell_get(st, handle(bare))
   let #(to_string, st) =
     rt_helpers.call_method(
@@ -340,12 +340,12 @@ pub fn host_functions_see_the_key_they_were_defined_under_test() {
   let st = s.agent
   let assert Ok(root) =
     list.find(set.to_list(st.store.pinned_roots), fn(id) {
-      case rt_store.t_cell_get(st, JsCell(id:)) {
-        SObject(kind: KHost(_), ..) -> True
+      case rt_store.t_cell_get(st, Handle(id:)) {
+        SObject(kind: HostObj(_), ..) -> True
         _ -> False
       }
     })
-  assert host.read_host(s, mk_object(JsCell(id: root))) == None
+  assert host.read_host(s, mk_object(Handle(id: root))) == None
 }
 
 pub fn unregistered_id_is_a_type_error_test() {

@@ -404,9 +404,9 @@ pub fn apply_new_target_proto(
       intrinsic
     })
   let st =
-    rt_store.t_cell_update(st, obj, fn(slot) {
-      case slot {
-        SObject(..) -> SObject(..slot, proto: Some(proto))
+    rt_store.t_cell_update(st, obj, fn(cell) {
+      case cell {
+        SObject(..) -> SObject(..cell, proto: Some(proto))
         other -> other
       }
     })

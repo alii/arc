@@ -541,9 +541,9 @@ fn require_time_value(
 }
 
 fn set_this_time_value(st: Agent, h: Handle, tv: JsNum) -> Agent {
-  rt_store.t_cell_update(st, h, fn(slot) {
-    let assert rt_types.SObject(kind: DateObj(_), ..) as obj = slot
-      as "date: slot is not a Date object"
+  rt_store.t_cell_update(st, h, fn(cell) {
+    let assert rt_types.SObject(kind: DateObj(_), ..) as obj = cell
+      as "date: cell is not a Date object"
     rt_types.SObject(..obj, kind: DateObj(ms: tv))
   })
 }

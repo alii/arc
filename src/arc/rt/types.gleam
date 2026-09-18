@@ -29,7 +29,7 @@ pub type JsNum {
 }
 
 pub type Handle {
-  JsCell(id: Int)
+  Handle(id: Int)
 }
 
 pub type JsValKind {
@@ -456,7 +456,11 @@ pub fn buffer_store_region(
   }
 }
 
-pub type CompiledFn
+pub type CompiledCode
+
+pub type DirectEntry {
+  DirectEntry(code: CompiledCode, arity: Int, takes_this: Bool)
+}
 
 pub type CompiledRegExp
 
@@ -673,9 +677,9 @@ pub type FinalizationRegistryNative {
   FinalizationRegistryPrototypeUnregister
 }
 
-// target and token are weak (untraced), held is strong
-pub type FinRegCell {
-  FinRegCell(target: JsVal, held: JsVal, token: Option(JsVal))
+// target and unregister_token are weak (untraced), held is strong
+pub type Registration {
+  Registration(target: JsVal, held: JsVal, unregister_token: Option(JsVal))
 }
 
 pub type DisposableStackNative {
@@ -961,7 +965,7 @@ pub type RegExpFlag {
   RFSticky
 }
 
-pub type LegacySlot {
+pub type LegacyStatic {
   LegacyInput
   LegacyLastMatch
   LegacyLastParen
@@ -999,7 +1003,7 @@ pub type RegExpNative {
     proto_props: Option(Dict(PropertyKey, Property)),
     compiled: Dict(String, CompiledRegExp),
   )
-  RegExpLegacyGetter(ctor: Handle, slot: LegacySlot)
+  RegExpLegacyGetter(ctor: Handle, which: LegacyStatic)
   RegExpLegacyInputSetter(ctor: Handle)
   RegExpPrototypeExec
   RegExpPrototypeTest
@@ -1912,17 +1916,17 @@ pub type ObjKind {
   BooleanObj(value: Bool)
   BigIntObj(value: Int)
   SymbolObj(value: SymbolId)
-  KCompiled(
-    code: CompiledFn,
+  CompiledFn(
+    code: CompiledCode,
     home_object: Option(Handle),
     flags: FnFlags,
     fields_init: Option(Handle),
-    simple: Option(#(CompiledFn, Int, Bool)),
+    direct_entry: Option(DirectEntry),
     name: String,
     length: Int,
     birth: FnBirth,
   )
-  KBytecode(
+  BytecodeFn(
     template: FuncTemplate,
     env: EnvTuple,
     home_object: Option(Handle),
@@ -1932,9 +1936,9 @@ pub type ObjKind {
     unit: Int,
     birth: FnBirth,
   )
-  KNative(tag: NativeToken, name: String, length: Int, constructible: Bool)
-  KBound(target: Handle, bound_this: JsVal, bound_args: List(JsVal))
-  KHost(payload: HostTerm)
+  NativeFn(token: NativeToken, name: String, length: Int, constructible: Bool)
+  BoundFn(target: Handle, bound_this: JsVal, bound_args: List(JsVal))
+  HostObj(payload: HostTerm)
   ErrorObj(stack: String)
   MapObj(entries: OrderedEntries(MapKey, JsVal))
   SetObj(entries: OrderedEntries(MapKey, JsVal))
@@ -1973,13 +1977,13 @@ pub type ObjKind {
   IntlObj(data: IntlData, bound: Option(Handle))
   TemporalObj(data: TemporalData)
   DisposableStackObj(async: Bool, state: DisposableState)
-  FinalizationRegistryObj(callback: JsVal, cells: List(FinRegCell))
+  FinalizationRegistryObj(callback: JsVal, registrations: List(Registration))
   // weak: gc does not trace target
   WeakRefObj(target: Option(JsVal))
   ShadowRealmObj(realm: Int)
 }
 
-pub type JsSlot {
+pub type Cell {
   SObject(
     kind: ObjKind,
     proto: Option(Handle),
@@ -2037,13 +2041,13 @@ pub type IcEntry {
     ways: Dict(IcCallMatch, IcCallWay),
     shaped: Dict(Int, Dict(Int, IcCallWay)),
   )
-  IcInit(from: Int, to: Int, blank: JsSlot, chain: List(#(Int, JsSlot)))
+  IcInit(from: Int, to: Int, blank: Cell, chain: List(#(Int, Cell)))
   IcGlobal(key: BitArray, epoch: Int, value: JsVal, refills: Int)
   IcOff
 }
 
 pub type IcCallWay {
-  IcCallWay(chain: List(#(Int, JsSlot)), callee: Handle, kind: ObjKind)
+  IcCallWay(chain: List(#(Int, Cell)), callee: Handle, kind: ObjKind)
 }
 
 // shaped receivers key by shape id then proto id in IcCall.shaped
@@ -2237,7 +2241,7 @@ pub type Realm {
 }
 
 pub fn unset_realm() -> Realm {
-  let h = JsCell(-1)
+  let h = Handle(-1)
   let p = BuiltinPair(prototype: h, constructor: h)
   Realm(
     object: p,
@@ -2329,7 +2333,7 @@ pub type JsOps(st) {
 // field order is abi (arc_rt_layout.hrl); hot fields only, rest in meta
 pub type JsStore(st) {
   JsStore(
-    data: Arena(JsSlot),
+    data: Arena(Cell),
     next: Int,
     alloc_since_gc: Int,
     gc_threshold: Int,
@@ -2357,7 +2361,7 @@ pub type StoreMeta {
     unit_uid: Int,
     unhandled_rejections: List(Int),
     // data as of the last gc, ids below old_next are the old generation
-    old: Arena(JsSlot),
+    old: Arena(Cell),
     old_next: Int,
     // old cells holding weak refs, pruned each minor gc
     weak_old: List(Int),

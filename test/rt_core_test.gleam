@@ -7,8 +7,8 @@ import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type JsVal, Agent, BirthSettled, FnFlags, FrameInfo, JFloat, JInt,
-  JNegInf, JPosInf, JsOps, JsStore, KBool, KBytecode, KHandle, KNum, KStr,
+  type Agent, type JsVal, Agent, BirthSettled, BytecodeFn, FnFlags, FrameInfo,
+  JFloat, JInt, JNegInf, JPosInf, JsOps, JsStore, KBool, KHandle, KNum, KStr,
   NoElements, SObject, StringKey, canonical_key, classify, mk_null, mk_number,
   mk_object, mk_string, mk_undefined,
 }
@@ -275,7 +275,7 @@ pub fn bytecode_call_and_construct_use_js_ops_test() {
     )
   let st = Agent(..st, store: JsStore(..st.store, ops:))
   let kind =
-    KBytecode(
+    BytecodeFn(
       template: template("tpl"),
       env: env([]),
       home_object: None,

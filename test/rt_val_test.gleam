@@ -1,5 +1,5 @@
 import arc/rt/types.{
-  JFloat, JInt, JNan, JNegInf, JPosInf, JsCell, KBig, KBool, KHandle, KNull,
+  Handle, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KBool, KHandle, KNull,
   KNum, KStr, KSym, KTdz, KUndef, SymIterator, UserSymbol, WellKnownSymbol,
   classify, mk_bigint, mk_bool, mk_null, mk_number, mk_object, mk_string,
   mk_symbol, mk_tdz, mk_undefined,
@@ -91,12 +91,12 @@ pub fn symbol_well_known_round_trips_test() {
 }
 
 pub fn handle_round_trips_test() {
-  let h = JsCell(id: 5)
+  let h = Handle(id: 5)
   assert classify(mk_object(h)) == KHandle(h)
 }
 
 pub fn handle_zero_round_trips_test() {
-  let h = JsCell(id: 0)
+  let h = Handle(id: 0)
   assert classify(mk_object(h)) == KHandle(h)
 }
 

@@ -72,11 +72,11 @@ import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type LexicalGlobal, type ObjectKey,
-  AccessorProperty, Agent, DataProperty, FunctionApply, FunctionCall, FunctionN,
-  HintString, Index, JsStore, KBytecode, KHandle, KNative, KNull, KNum, KStr,
-  KSym, KUndef, Named, NoElements, Realm, ReflectApply, ReflectN, SBox, SObject,
-  SShapedObject, StringKey, SymbolKey, classify, mk_bool, mk_int, mk_object,
-  mk_string, mk_tdz, mk_undefined,
+  AccessorProperty, Agent, BytecodeFn, DataProperty, FunctionApply, FunctionCall,
+  FunctionN, HintString, Index, JsStore, KHandle, KNull, KNum, KStr, KSym,
+  KUndef, Named, NativeFn, NoElements, Realm, ReflectApply, ReflectN, SBox,
+  SObject, SShapedObject, StringKey, SymbolKey, classify, mk_bool, mk_int,
+  mk_object, mk_string, mk_tdz, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -284,7 +284,7 @@ fn direct_disposer(
     rt_store.t_cell_new(
       agent,
       SObject(
-        kind: types.KBound(target: method, bound_this: val, bound_args: []),
+        kind: types.BoundFn(target: method, bound_this: val, bound_args: []),
         proto: Some(agent.realm.function.prototype),
         props: dict.new(),
         symbol_props: [],
@@ -698,7 +698,7 @@ fn fast_loop(
     PutBoxed(index) ->
       case stack {
         [v, ..rest] -> {
-          let slot = case index < 0 {
+          let local = case index < 0 {
             True ->
               case index {
                 -1 -> r0
@@ -706,7 +706,7 @@ fn fast_loop(
               }
             False -> tuple_array.element(index + 1, locals)
           }
-          case is_handle(slot) {
+          case is_handle(local) {
             False -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             True ->
               fast_loop(
@@ -715,7 +715,7 @@ fn fast_loop(
                 pc + 1,
                 rest,
                 locals,
-                rt_store.t_cell_set(agent, ffi.handle([slot]), SBox(v)),
+                rt_store.t_cell_set(agent, ffi.handle([local]), SBox(v)),
                 code,
                 constants,
                 r0,
@@ -3464,7 +3464,7 @@ fn fast_call(
   constants: TupleArray(JsVal),
   r0: JsVal,
   r1: JsVal,
-  callee_cell: types.JsSlot,
+  callee_cell: types.Cell,
   callee: JsVal,
   this: JsVal,
   args: List(JsVal),
@@ -3476,10 +3476,10 @@ fn fast_call(
   case ffi.is(callee_cell, ffi.Miss) {
     False ->
       case callee_cell {
-        SObject(kind: KNative(tag:, ..), ..)
-          if tag != function_call
-          && tag != function_apply
-          && tag != reflect_apply
+        SObject(kind: NativeFn(token:, ..), ..)
+          if token != function_call
+          && token != function_apply
+          && token != reflect_apply
           && depth < limits.max_call_depth
         -> {
           let agent = case agent.call_depth == depth {
@@ -3496,7 +3496,9 @@ fn fast_call(
               Agent(..agent, frames:, call_depth: depth + 1)
             }
           }
-          case ffi.guard4(rt_builtins.dispatch_native, agent, tag, this, args) {
+          case
+            ffi.guard4(rt_builtins.dispatch_native, agent, token, this, args)
+          {
             ffi.Ok(value: v, agent:) ->
               fast_loop(
                 state,
@@ -3527,7 +3529,7 @@ fn fast_call(
           }
         }
         SObject(
-          kind: KBytecode(
+          kind: BytecodeFn(
             template:,
             env:,
             home_object:,
@@ -3749,7 +3751,7 @@ fn fast_construct(
   rest: List(JsVal),
 ) -> Result(#(Outcome, State), VmError) {
   case ffi.cell_of(agent, ctor) {
-    SObject(kind: KBytecode(template:, flags:, realm:, ..), props:, ..) as callee_cell
+    SObject(kind: BytecodeFn(template:, flags:, realm:, ..), props:, ..) as callee_cell
       if flags.is_constructor
       && realm == agent.realm.id
       && state.depth < limits.max_call_depth
@@ -3814,7 +3816,7 @@ fn fast_construct(
 
 fn is_intrinsic_apply(agent: Agent, v: JsVal) -> Bool {
   case ffi.cell_of(agent, v) {
-    SObject(kind: KNative(tag:, ..), ..) -> tag == function_apply
+    SObject(kind: NativeFn(token:, ..), ..) -> token == function_apply
     _ -> False
   }
 }
@@ -4242,8 +4244,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     PutBoxedCheckInit(index) ->
       case state.stack {
         [new_value, ..rest] -> {
-          let slot = tuple_array.get_unchecked(index, state.locals)
-          case handle_of(slot), read_box(state, slot) {
+          let local = tuple_array.get_unchecked(index, state.locals)
+          case handle_of(local), read_box(state, local) {
             Some(box), Some(current) ->
               case is_tdz(current) {
                 True -> {
@@ -4979,16 +4981,16 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         State(..state, stack: [mk_int(state.pc + 1), ..state.stack], pc: target),
       )
 
-    // quickjs op_ret; negative retpc: slot below is the return value
+    // quickjs op_ret; negative retpc: value below is the return value
     Ret ->
       case state.stack {
         [ret_pc, ..rest] ->
           case classify(ret_pc), rest {
-            KNum(types.JInt(n)), [slot, ..below] if n < 0 ->
-              Error(Returned(slot, State(..state, stack: below)))
+            KNum(types.JInt(n)), [v, ..below] if n < 0 ->
+              Error(Returned(v, State(..state, stack: below)))
             KNum(types.JInt(n)), _ -> Ok(State(..state, stack: rest, pc: n))
-            KNum(types.JFloat(f)), [slot, ..below] if f <. 0.0 ->
-              Error(Returned(slot, State(..state, stack: below)))
+            KNum(types.JFloat(f)), [v, ..below] if f <. 0.0 ->
+              Error(Returned(v, State(..state, stack: below)))
             KNum(types.JFloat(f)), _ ->
               Ok(State(..state, stack: rest, pc: rt_val.float_to_int(f)))
             _, _ -> underflow(state, "Ret")
@@ -5639,7 +5641,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 option.map(ctor_proto, rt_class.t_make_method(agent, ctor_h, _))
                 |> option.unwrap(agent)
               let agent =
-                option.map(ctor_proto, set_slot_prototype(
+                option.map(ctor_proto, set_cell_prototype(
                   agent,
                   _,
                   proto_parent,
@@ -5647,7 +5649,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 |> option.unwrap(agent)
               let agent = case handle_of(parent) {
                 Some(parent_h) ->
-                  set_slot_prototype(agent, ctor_h, Some(parent_h))
+                  set_cell_prototype(agent, ctor_h, Some(parent_h))
                 None -> agent
               }
               Ok(
@@ -5952,7 +5954,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [obj, ..rest] -> {
           let proto = case handle_of(obj) {
             Some(h) ->
-              slot_prototype(state.agent, h)
+              cell_prototype(state.agent, h)
               |> option.map(mk_object)
               |> option.unwrap(types.mk_null())
             None -> types.mk_null()
@@ -6397,8 +6399,8 @@ fn tdz_reference_error(state: State) -> Result(State, StepExit) {
   )
 }
 
-fn read_box(state: State, slot: JsVal) -> Option(JsVal) {
-  use h <- option.then(handle_of(slot))
+fn read_box(state: State, local: JsVal) -> Option(JsVal) {
+  use h <- option.then(handle_of(local))
   case rt_store.t_cell_get(state.agent, h) {
     SBox(value:) -> Some(value)
     _ -> None
@@ -6936,7 +6938,7 @@ fn own_prototype_handle(agent: Agent, h: Handle) -> Option(Handle) {
   }
 }
 
-fn slot_prototype(agent: Agent, h: Handle) -> Option(Handle) {
+fn cell_prototype(agent: Agent, h: Handle) -> Option(Handle) {
   case rt_store.t_cell_get(agent, h) {
     SObject(proto:, ..) | SShapedObject(proto:, ..) -> proto
     _ -> None
@@ -6944,44 +6946,44 @@ fn slot_prototype(agent: Agent, h: Handle) -> Option(Handle) {
 }
 
 // targets are fresh objects, so a direct write is safe
-fn set_slot_prototype(agent: Agent, h: Handle, proto: Option(Handle)) -> Agent {
-  rt_store.t_cell_update(agent, h, fn(slot) {
-    case slot {
-      SObject(..) -> SObject(..slot, proto:)
-      SShapedObject(..) -> SShapedObject(..slot, proto:)
-      _ -> slot
+fn set_cell_prototype(agent: Agent, h: Handle, proto: Option(Handle)) -> Agent {
+  rt_store.t_cell_update(agent, h, fn(cell) {
+    case cell {
+      SObject(..) -> SObject(..cell, proto:)
+      SShapedObject(..) -> SShapedObject(..cell, proto:)
+      _ -> cell
     }
   })
 }
 
 // fresh literal: extensible, writable length
 fn array_push(agent: Agent, h: Handle, value: Option(JsVal)) -> Agent {
-  rt_store.t_cell_update(agent, h, fn(slot) {
-    case slot {
+  rt_store.t_cell_update(agent, h, fn(cell) {
+    case cell {
       SObject(kind: types.ArrayObj(length:), elements:, ..) ->
         SObject(
-          ..slot,
+          ..cell,
           kind: types.ArrayObj(length: length + 1),
           elements: case value {
             Some(v) -> elements.set(elements, length, v)
             None -> elements
           },
         )
-      _ -> slot
+      _ -> cell
     }
   })
 }
 
 fn array_append(agent: Agent, h: Handle, items: List(JsVal)) -> Agent {
-  rt_store.t_cell_update(agent, h, fn(slot) {
-    case slot {
+  rt_store.t_cell_update(agent, h, fn(cell) {
+    case cell {
       SObject(kind: types.ArrayObj(length:), elements:, ..) ->
         SObject(
-          ..slot,
+          ..cell,
           kind: types.ArrayObj(length: length + list.length(items)),
           elements: elements.write_list(elements, length, items),
         )
-      _ -> slot
+      _ -> cell
     }
   })
 }
@@ -7190,7 +7192,7 @@ fn settle_generator(
   gen_h: Handle,
   depth: Int,
   frames: List(types.FrameInfo),
-  cell: types.JsSlot,
+  cell: types.Cell,
 ) -> Agent {
   let store = agent.store
   Agent(
@@ -7238,7 +7240,7 @@ fn native_generator(
   use iter_h <- option.then(handle_of(iterator))
   case rt_store.t_cell_get(agent, next_h), rt_store.t_cell_get(agent, iter_h) {
     SObject(
-      kind: types.KNative(tag: types.GeneratorN(types.GeneratorNext), ..),
+      kind: types.NativeFn(token: types.GeneratorN(types.GeneratorNext), ..),
       ..,
     ),
       SObject(kind: types.GeneratorObj(data: gen_h), ..)
@@ -7469,7 +7471,7 @@ fn call_as_frame(
 ) -> Result(State, StepExit) {
   case ffi.cell_of(state.agent, f) {
     SObject(
-      kind: KBytecode(template:, env:, home_object:, flags:, realm:, unit:, ..),
+      kind: BytecodeFn(template:, env:, home_object:, flags:, realm:, unit:, ..),
       ..,
     )
       if realm == state.agent.realm.id

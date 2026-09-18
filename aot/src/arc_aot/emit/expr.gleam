@@ -1202,7 +1202,7 @@ fn read_slot(slot: Int, boxed: Bool) -> Build(ir.Value) {
   use e <- anf.then(ask)
   let v = ir.Var(state.get_slot_var(e, slot))
   case boxed {
-    True -> anf.host("cell_get", [v])
+    True -> anf.host("box_get", [v])
     False -> anf.pure(v)
   }
 }
@@ -1329,7 +1329,7 @@ fn set_lexical_this(v: ir.Value) -> Build(Nil) {
     None -> anf.pure(Nil)
     Some(#(slot, boxed)) -> {
       use _ <- anf.then(this_check_init(slot, boxed))
-      anf.host_unit("cell_set", [ir.Var(state.get_slot_var(e, slot)), v])
+      anf.host_unit("box_set", [ir.Var(state.get_slot_var(e, slot)), v])
     }
   }
 }
@@ -1745,7 +1745,7 @@ type CallArgs {
   Positional(List(ir.Value))
 }
 
-// direct_callee = {Code, This, none | {some, {Code, Arity, TakesThis}}}
+// direct_callee = {Code, This, none | {some, {direct_entry, Code, Arity, TakesThis}}}
 fn emit_call_with_direct_callee(
   direct_callee: ir.Value,
   f: ir.Value,
@@ -1774,9 +1774,9 @@ fn emit_call_with_direct_callee(
         use is_some <- anf.then(anf.bind(ir.TermTest(ir.IsTuple, direct_entry)))
         let direct_path = {
           use inner <- anf.then(anf.bind(anf.tuple_get(direct_entry, 1)))
-          use direct_code <- anf.then(anf.bind(anf.tuple_get(inner, 0)))
-          use arity <- anf.then(anf.bind(anf.tuple_get(inner, 1)))
-          use takes_this <- anf.then(anf.bind(anf.tuple_get(inner, 2)))
+          use direct_code <- anf.then(anf.bind(anf.tuple_get(inner, 1)))
+          use arity <- anf.then(anf.bind(anf.tuple_get(inner, 2)))
+          use takes_this <- anf.then(anf.bind(anf.tuple_get(inner, 3)))
           use n <- anf.then(
             anf.bind(ir.Convert(
               ir.BoxInt(ir.W32),
@@ -2331,7 +2331,7 @@ fn write_slot(slot: Int, boxed: Bool, v: ir.Value) -> Build(ir.Value) {
     case boxed {
       True ->
         anf.then(
-          anf.host("cell_set", [ir.Var(state.get_slot_var(e, slot)), v]),
+          anf.host("box_set", [ir.Var(state.get_slot_var(e, slot)), v]),
           fn(_) { anf.pure(v) },
         )(e, k)
       False -> {

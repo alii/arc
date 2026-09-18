@@ -34,7 +34,7 @@ pub fn init(
   object_proto: Handle,
   fn_proto: Handle,
 ) -> #(NumberBuiltins, Agent) {
-  let #(parse_int_ref, st) =
+  let #(parse_int_h, st) =
     common.alloc_rooted_native_fn(
       st,
       fn_proto,
@@ -42,7 +42,7 @@ pub fn init(
       "parseInt",
       2,
     )
-  let #(parse_float_ref, st) =
+  let #(parse_float_h, st) =
     common.alloc_rooted_native_fn(
       st,
       fn_proto,
@@ -50,7 +50,7 @@ pub fn init(
       "parseFloat",
       1,
     )
-  let #(is_nan_ref, st) =
+  let #(is_nan_h, st) =
     common.alloc_rooted_native_fn(
       st,
       fn_proto,
@@ -58,7 +58,7 @@ pub fn init(
       "isNaN",
       1,
     )
-  let #(is_finite_ref, st) =
+  let #(is_finite_h, st) =
     common.alloc_rooted_native_fn(
       st,
       fn_proto,
@@ -74,8 +74,8 @@ pub fn init(
       #("isSafeInteger", NumberN(NumberIsSafeInteger), 1),
     ])
   // number.parseint must be === the global parseint
-  let #(pi_p, st) = common.builtin_property(st, mk_object(parse_int_ref))
-  let #(pf_p, st) = common.builtin_property(st, mk_object(parse_float_ref))
+  let #(pi_p, st) = common.builtin_property(st, mk_object(parse_int_h))
+  let #(pf_p, st) = common.builtin_property(st, mk_object(parse_float_h))
   let shared_globals = [#("parseInt", pi_p), #("parseFloat", pf_p)]
   let #(constants, st) =
     data_constants(st, [
@@ -114,10 +114,10 @@ pub fn init(
   #(
     NumberBuiltins(
       pair: bt,
-      parse_int: parse_int_ref,
-      parse_float: parse_float_ref,
-      is_nan: is_nan_ref,
-      is_finite: is_finite_ref,
+      parse_int: parse_int_h,
+      parse_float: parse_float_h,
+      is_nan: is_nan_h,
+      is_finite: is_finite_h,
     ),
     st,
   )

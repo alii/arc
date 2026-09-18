@@ -7,7 +7,7 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type NativeToken,
   type ObjKind, type Property, type PropertyKey, type SymbolId, AccessorProperty,
-  ArrayObj, BuiltinPair, DataProperty, Dense, ErrorObj, KNative, Named,
+  ArrayObj, BuiltinPair, DataProperty, Dense, ErrorObj, Named, NativeFn,
   NoElements, Ordinary, SObject, mk_int, mk_object, mk_string,
 } as rt_types
 import gleam/dict.{type Dict}
@@ -307,9 +307,9 @@ pub fn init_wrapper_type(
       ctor_props,
     )
   let st =
-    rt_store.t_cell_update(st, bt.prototype, fn(slot) {
-      let assert SObject(..) = slot
-      SObject(..slot, kind: proto_kind)
+    rt_store.t_cell_update(st, bt.prototype, fn(cell) {
+      let assert SObject(..) = cell
+      SObject(..cell, kind: proto_kind)
     })
   #(bt, st)
 }
@@ -354,8 +354,8 @@ pub fn init_type_on(
     rt_store.t_cell_new(
       st,
       SObject(
-        kind: KNative(
-          tag: ctor_tag(proto_h),
+        kind: NativeFn(
+          token: ctor_tag(proto_h),
           name:,
           length: arity,
           constructible:,
@@ -370,13 +370,13 @@ pub fn init_type_on(
   let st = rt_store.t_pin_root(st, ctor_h)
   let #(all_proto_props, st) = proto_properties(st, ctor_h, proto_props)
   let st =
-    rt_store.t_cell_update(st, proto_h, fn(slot) {
-      let assert SObject(props: existing, ..) = slot
+    rt_store.t_cell_update(st, proto_h, fn(cell) {
+      let assert SObject(props: existing, ..) = cell
       let merged = {
         use acc, #(k, v) <- list.fold(all_proto_props, existing)
         dict.insert(acc, Named(k), v)
       }
-      SObject(..slot, props: merged)
+      SObject(..cell, props: merged)
     })
   #(BuiltinPair(prototype: proto_h, constructor: ctor_h), st)
 }
@@ -387,9 +387,9 @@ pub fn add_named_property(
   name: String,
   prop: Property,
 ) -> Agent {
-  rt_store.t_cell_update(st, h, fn(slot) {
-    let assert SObject(props:, ..) = slot
-    SObject(..slot, props: dict.insert(props, Named(name), prop))
+  rt_store.t_cell_update(st, h, fn(cell) {
+    let assert SObject(props:, ..) = cell
+    SObject(..cell, props: dict.insert(props, Named(name), prop))
   })
 }
 
@@ -399,9 +399,9 @@ pub fn add_symbol_property(
   sym: SymbolId,
   prop: Property,
 ) -> Agent {
-  rt_store.t_cell_update(st, h, fn(slot) {
-    let assert SObject(symbol_props:, ..) = slot
-    SObject(..slot, symbol_props: list.key_set(symbol_props, sym, prop))
+  rt_store.t_cell_update(st, h, fn(cell) {
+    let assert SObject(symbol_props:, ..) = cell
+    SObject(..cell, symbol_props: list.key_set(symbol_props, sym, prop))
   })
 }
 
@@ -463,14 +463,14 @@ fn is_return_this(st: Agent, f: JsVal) -> Bool {
   case rt_types.classify(f) {
     rt_types.KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: KNative(tag: rt_types.ReturnThis, ..), ..) -> True
+        SObject(kind: NativeFn(token: rt_types.ReturnThis, ..), ..) -> True
         _ -> False
       }
     _ -> False
   }
 }
 
-pub fn alloc_error_slot(
+pub fn alloc_error_object(
   st: Agent,
   proto: Handle,
   props: List(#(String, Property)),

@@ -597,7 +597,7 @@ fn string_this_value(
   #(mk_string(this_string_value(st, this, method)), st)
 }
 
-// objects only, a primitive must not box and consult its prototype
+// objects only, a primitive is not wrapped to consult its prototype
 fn get_method(
   st: Agent,
   val: JsVal,

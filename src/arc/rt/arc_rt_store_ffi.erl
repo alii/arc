@@ -1,6 +1,6 @@
 -module(arc_rt_store_ffi).
 -export([t_throw/2, is_handle/1, as_object_key/1,
-         t_cell_get/2, t_var_get/2]).
+         t_cell_get/2, t_box_get/2]).
 
 -include("arc_rt_layout.hrl").
 
@@ -11,10 +11,10 @@ t_cell_get(St, {?HANDLE_TAG, Id}) ->
         Cell -> Cell
     end.
 
-t_var_get(St, {?HANDLE_TAG, Id}) ->
+t_box_get(St, {?HANDLE_TAG, Id}) ->
     Store = element(?AGENT_STORE, St),
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
-        ?STORE_FREE_CELL -> dangling(<<"t_var_get">>);
+        ?STORE_FREE_CELL -> dangling(<<"t_box_get">>);
         {?SBOX_TAG, V} -> V
     end.
 

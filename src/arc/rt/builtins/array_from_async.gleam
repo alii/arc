@@ -517,14 +517,14 @@ fn from_async_array_create(st: Agent, len: Int) -> #(JsVal, Agent) {
 }
 
 fn from_async_define_own(st: Agent, target: JsVal, k: Int, v: JsVal) -> Agent {
-  let ref = case classify(target) {
-    KHandle(r) -> r
+  let h = case classify(target) {
+    KHandle(target_h) -> target_h
     _ -> rt_val.t_throw_type_error(st, "Cannot define property on a primitive")
   }
   let #(ok, st) =
     rt_obj.t_define_own_data(
       st,
-      ref,
+      h,
       StringKey(index_key(k)),
       v,
       True,

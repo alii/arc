@@ -8,7 +8,7 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type IteratorNative, type IteratorRecord, type JsVal,
   type ObjectKey, Agent, DataProperty, GeneratorN, GeneratorNext, GeneratorObj,
-  IteratorN, IteratorRecord, JsStore, KHandle, KNative, KNull, KUndef, Named,
+  IteratorN, IteratorRecord, JsStore, KHandle, KNull, KUndef, Named, NativeFn,
   NoElements, Ordinary, SObject, StringKey, TypeErr, classify, mk_bool,
   mk_object, mk_string, mk_undefined,
 }
@@ -152,9 +152,9 @@ fn native_iter(st: Agent, record: IteratorRecord) -> NativeIter {
   case classify(record.next_method), classify(record.iterator) {
     KHandle(next_h), KHandle(iter_h) ->
       case rt_store.t_cell_get(st, next_h) {
-        SObject(kind: KNative(tag: IteratorN(next), ..), ..) ->
+        SObject(kind: NativeFn(token: IteratorN(next), ..), ..) ->
           NativeNext(next, iter_h)
-        SObject(kind: KNative(tag: GeneratorN(GeneratorNext), ..), ..) ->
+        SObject(kind: NativeFn(token: GeneratorN(GeneratorNext), ..), ..) ->
           case rt_store.t_cell_get(st, iter_h) {
             SObject(kind: GeneratorObj(data:), ..) -> NativeGenerator(data)
             _ -> NotNative

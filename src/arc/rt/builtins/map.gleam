@@ -385,7 +385,7 @@ fn read_map_store(
 ) -> ordered_entries.OrderedEntries(MapKey, JsVal) {
   let assert SObject(kind: MapObj(entries:), ..) =
     rt_store.t_cell_get(st, map_ref_handle(ref))
-    as "map: MapRef does not point at a Map slot"
+    as "map: MapRef does not point at a Map cell"
   entries
 }
 
@@ -394,8 +394,8 @@ fn update_map_data(
   ref: MapRef,
   entries: ordered_entries.OrderedEntries(MapKey, JsVal),
 ) -> Agent {
-  rt_store.t_cell_update(st, map_ref_handle(ref), fn(slot) {
-    let assert SObject(..) = slot
-    SObject(..slot, kind: MapObj(entries:))
+  rt_store.t_cell_update(st, map_ref_handle(ref), fn(cell) {
+    let assert SObject(..) = cell
+    SObject(..cell, kind: MapObj(entries:))
   })
 }

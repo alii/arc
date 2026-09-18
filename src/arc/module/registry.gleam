@@ -216,15 +216,20 @@ fn write_entry(
     None -> {
       let #(cache, st) = rt_obj.t_new_object(st, None)
       let st =
-        put_hidden_slot(st, st.realm.global_object, property, mk_object(cache))
+        put_hidden_property(
+          st,
+          st.realm.global_object,
+          property,
+          mk_object(cache),
+        )
       #(cache, st)
     }
   }
-  put_hidden_slot(st, cache, Named(key), val)
+  put_hidden_property(st, cache, Named(key), val)
 }
 
 // bypasses [[DefineOwnProperty]] so a frozen global cannot block it
-fn put_hidden_slot(
+fn put_hidden_property(
   st: Agent,
   target: Handle,
   key: PropertyKey,
@@ -232,11 +237,11 @@ fn put_hidden_slot(
 ) -> Agent {
   let st = rt_obj.devolve(st, target)
   let #(seq, st) = rt_store.t_next_prop_seq(st)
-  use slot <- rt_store.t_cell_update(st, target)
-  case slot {
+  use cell <- rt_store.t_cell_update(st, target)
+  case cell {
     SObject(props:, ..) ->
       SObject(
-        ..slot,
+        ..cell,
         props: dict.insert(
           props,
           key,
@@ -249,7 +254,7 @@ fn put_hidden_slot(
           ),
         ),
       )
-    _ -> panic as "arc/module/registry: hidden slot target is not an object"
+    _ -> panic as "arc/module/registry: hidden property target is not an object"
   }
 }
 

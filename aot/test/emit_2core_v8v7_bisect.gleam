@@ -253,7 +253,7 @@ pub fn main() {
     "var G={a:0};for(var i=0;i<1;i++){G.a=1;continue};if(G.a!==1)throw 1",
   )
   t(
-    "pg_proto_warm_kfn",
+    "pg_proto_warm_compiled_fn",
     "function F(){};F.prototype.v=7;var s=0;for(var i=0;i<3;i++)s+=F.prototype.v;if(s!==21)throw s",
   )
   t(

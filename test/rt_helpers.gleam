@@ -4,7 +4,7 @@ import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type CompiledFn, type JsVal, FnFlags, Named, StringKey,
+  type Agent, type CompiledCode, type JsVal, FnFlags, Named, StringKey,
 }
 import gleam/option.{None}
 
@@ -50,7 +50,7 @@ pub fn recorded() -> List(a)
 
 pub fn as_code(
   f: fn(Agent, rt_call.Frame, List(JsVal)) -> #(JsVal, Agent),
-) -> CompiledFn {
+) -> CompiledCode {
   unsafe.coerce(f)
 }
 

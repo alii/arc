@@ -27,7 +27,7 @@ pub fn t_new_error(
 ) -> #(JsVal, Agent) {
   let #(proto, name) = error_kind_intrinsics(st.realm, kind)
   let #(msg_prop, st) = common.builtin_property(st, mk_string(message))
-  let #(h, st) = common.alloc_error_slot(st, proto, [#("message", msg_prop)])
+  let #(h, st) = common.alloc_error_object(st, proto, [#("message", msg_prop)])
   let st = b_error.attach_stack(st, h, name, message)
   #(mk_object(h), st)
 }
@@ -51,7 +51,7 @@ pub fn alloc_object(
 }
 
 // §7.1.18 toobject
-pub fn t_box_primitive(st: Agent, v: JsVal) -> #(Handle, Agent) {
+pub fn t_wrap_primitive(st: Agent, v: JsVal) -> #(Handle, Agent) {
   case classify(v) {
     KHandle(h) -> #(h, st)
     KStr(s) -> alloc_object(st, StringObj(s), st.realm.string.prototype)
@@ -64,7 +64,7 @@ pub fn t_box_primitive(st: Agent, v: JsVal) -> #(Handle, Agent) {
         st,
         "Cannot convert undefined or null to object",
       )
-    KTdz -> panic as "t_box_primitive: TDZ sentinel escaped into a JsVal"
+    KTdz -> panic as "t_wrap_primitive: TDZ sentinel escaped into a JsVal"
   }
 }
 

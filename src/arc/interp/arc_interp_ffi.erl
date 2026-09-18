@@ -62,9 +62,9 @@ typeof(Store, {?HANDLE_TAG, Id}) ->
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             case kind_tag(element(?SOBJECT_KIND, Cell)) of
-                ?KFN_TAG -> <<"function">>;
-                ?KBYTECODE_TAG -> <<"function">>;
-                ?KNATIVE_TAG -> <<"function">>;
+                ?COMPILEDFN_TAG -> <<"function">>;
+                ?BYTECODEFN_TAG -> <<"function">>;
+                ?NATIVEFN_TAG -> <<"function">>;
                 ?BOUNDFN_TAG -> <<"function">>;
                 ?PROXYOBJ_TAG -> miss;
                 _ -> <<"object">>
@@ -90,8 +90,8 @@ ctor_prototype(Agent, {?HANDLE_TAG, Id}) ->
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             Kind = kind_tag(element(?SOBJECT_KIND, Cell)),
             case
-                Kind =:= ?KBYTECODE_TAG orelse Kind =:= ?KFN_TAG
-                orelse Kind =:= ?KNATIVE_TAG
+                Kind =:= ?BYTECODEFN_TAG orelse Kind =:= ?COMPILEDFN_TAG
+                orelse Kind =:= ?NATIVEFN_TAG
             of
                 true ->
                     case element(?SOBJECT_PROPS, Cell) of
@@ -175,8 +175,8 @@ instance_of(Agent, V, {?HANDLE_TAG, CId}, Sym) ->
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             Kind = kind_tag(element(?SOBJECT_KIND, Cell)),
             case
-                (Kind =:= ?KBYTECODE_TAG orelse Kind =:= ?KFN_TAG
-                 orelse Kind =:= ?KNATIVE_TAG)
+                (Kind =:= ?BYTECODEFN_TAG orelse Kind =:= ?COMPILEDFN_TAG
+                 orelse Kind =:= ?NATIVEFN_TAG)
                 andalso ordinary_has_instance(Data, Cell, FP, Sym, ?MAX_PROTO_HOPS)
             of
                 false -> miss;
@@ -271,8 +271,8 @@ iter_step(_, _) -> protocol.
 
 native_token(Cell)
   when element(1, Cell) =:= ?SOBJECT_TAG,
-       element(1, element(?SOBJECT_KIND, Cell)) =:= ?KNATIVE_TAG ->
-    element(?KNATIVE_TOKEN, element(?SOBJECT_KIND, Cell));
+       element(1, element(?SOBJECT_KIND, Cell)) =:= ?NATIVEFN_TAG ->
+    element(?NATIVEFN_TOKEN, element(?SOBJECT_KIND, Cell));
 native_token(_) -> none.
 
 iter_step_with(Store, Data, ?TOKEN_ARRAY_ITER_NEXT, IterId, IterCell)

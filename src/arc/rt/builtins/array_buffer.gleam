@@ -338,7 +338,7 @@ fn ab_resize(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
           helpers.first_arg_or_undefined(args),
           invalid_length_msg,
         )
-      let buf = require_buffer(st, mk_object(buf.ref), "resize")
+      let buf = require_buffer(st, mk_object(buf.h), "resize")
       let #(bytes, max) = require_resizable_bytes(st, buf, "resize")
       case new_len > max {
         True ->
@@ -352,7 +352,7 @@ fn ab_resize(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
               bytes: resize_data(bytes, new_len),
               max_byte_length: Some(max),
             )
-          #(mk_undefined(), buffer.set_storage(st, buf.ref, storage))
+          #(mk_undefined(), buffer.set_storage(st, buf.h, storage))
         }
       }
     }
@@ -385,7 +385,7 @@ fn buffer_slice(
   let new_buf = require_family(st, new_buf, "slice", shared)
   let new_storage = require_live(st, new_buf, "slice")
   let new_buf = require_not_immutable(st, new_buf, "slice")
-  case new_buf.ref == buf.ref {
+  case new_buf.h == buf.h {
     True ->
       rt_val.t_throw_type_error(
         st,
@@ -399,7 +399,7 @@ fn buffer_slice(
             "species constructor returned a buffer smaller than requested",
           )
         False -> {
-          let buf = require_buffer(st, mk_object(buf.ref), "slice")
+          let buf = require_buffer(st, mk_object(buf.h), "slice")
           let storage = require_live(st, buf, "slice")
           let current_len = types.buffer_byte_size(storage)
           case first < current_len {
@@ -409,7 +409,7 @@ fn buffer_slice(
               let new_bits = require_live_bits(st, new_buf, "slice")
               let count = int.min(new_len, current_len - first)
               let copied = copy_into(bits, first, count, new_bits)
-              #(new_val, buffer.store_region(st, new_buf.ref, copied, 0, count))
+              #(new_val, buffer.store_region(st, new_buf.h, copied, 0, count))
             }
           }
         }
@@ -429,7 +429,7 @@ fn slice_to_immutable(
     relative_index(st, helpers.first_arg_or_undefined(args), len, 0)
   let #(final, st) = relative_index(st, helpers.arg_at(args, 1), len, len)
   let new_len = int.max(final - first, 0)
-  let buf = require_buffer(st, mk_object(buf.ref), "sliceToImmutable")
+  let buf = require_buffer(st, mk_object(buf.h), "sliceToImmutable")
   let bytes = require_unshared_bytes(st, buf, "sliceToImmutable")
   let current_len = bit_array.byte_size(bytes)
   case current_len < final {
@@ -477,7 +477,7 @@ fn ab_transfer(
     KUndef -> #(live_byte_size(buf), st)
     _ -> rt_val.t_to_index(st, len_arg, invalid_length_msg)
   }
-  let buf = require_buffer(st, mk_object(buf.ref), "transfer")
+  let buf = require_buffer(st, mk_object(buf.h), "transfer")
   let old_bits = require_unshared_bytes(st, buf, "transfer")
   let buf = require_not_immutable(st, buf, "transfer")
   let new_max = case mode {
@@ -548,7 +548,7 @@ fn sab_grow(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
           helpers.first_arg_or_undefined(args),
           invalid_length_msg,
         )
-      let buf = require_buffer(st, mk_object(buf.ref), "grow")
+      let buf = require_buffer(st, mk_object(buf.h), "grow")
       let block = require_shared(st, buf, "grow")
       let invalid = fn() {
         rt_val.t_throw_range_error(
@@ -569,7 +569,7 @@ fn sab_grow(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
               )),
               max_byte_length: Some(max),
             )
-          #(mk_undefined(), buffer.set_storage(st, buf.ref, storage))
+          #(mk_undefined(), buffer.set_storage(st, buf.h, storage))
         }
         OwnerBlock(owner:, ..) ->
           case sab.grow(owner, new_len) {
@@ -582,7 +582,7 @@ fn sab_grow(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
 }
 
 type Buf {
-  Buf(ref: Handle, storage: BufferStorage)
+  Buf(h: Handle, storage: BufferStorage)
 }
 
 fn ctor_name(shared: Bool) -> String {
@@ -601,18 +601,14 @@ fn max_byte_length(buf: Buf) -> Option(Int) {
 }
 
 fn detach(st: Agent, buf: Buf) -> Agent {
-  buffer.set_storage(
-    st,
-    buf.ref,
-    Detached(max_byte_length: max_byte_length(buf)),
-  )
+  buffer.set_storage(st, buf.h, Detached(max_byte_length: max_byte_length(buf)))
 }
 
 fn require_buffer(st: Agent, this: JsVal, method: String) -> Buf {
   case classify(this) {
-    KHandle(ref) ->
-      case buffer.buffer_storage(st, ref) {
-        Some(storage) -> Buf(ref:, storage:)
+    KHandle(h) ->
+      case buffer.buffer_storage(st, h) {
+        Some(storage) -> Buf(h:, storage:)
         None -> incompatible(st, method)
       }
     _ -> incompatible(st, method)

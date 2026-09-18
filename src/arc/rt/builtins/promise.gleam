@@ -1087,15 +1087,15 @@ fn set_array_element(
   index: Int,
   val: JsVal,
 ) -> Agent {
-  rt_store.t_cell_update(st, arr_h, fn(slot) {
-    case slot {
+  rt_store.t_cell_update(st, arr_h, fn(cell) {
+    case cell {
       SObject(kind: ArrayObj(length:), elements:, ..) -> {
         let ta = case elements {
           Dense(t) -> t
           _ -> tree_array.new()
         }
         SObject(
-          ..slot,
+          ..cell,
           kind: ArrayObj(int.max(length, index + 1)),
           elements: Dense(tree_array.set(index, val, ta)),
         )
@@ -1130,7 +1130,7 @@ fn make_aggregate_error(st: Agent, errors_h: Handle) -> #(JsVal, Agent) {
     common.builtin_property(st, mk_string("All promises were rejected"))
   let #(errs_p, st) = common.builtin_property(st, mk_object(errors_h))
   let #(h, st) =
-    common.alloc_error_slot(st, realm.aggregate_error.prototype, [
+    common.alloc_error_object(st, realm.aggregate_error.prototype, [
       #("message", msg_p),
       #("errors", errs_p),
     ])

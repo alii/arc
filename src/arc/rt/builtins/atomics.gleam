@@ -196,8 +196,8 @@ type TaView {
 
 fn read_typed_array(st: Agent, val: JsVal) -> Option(TaView) {
   case classify(val) {
-    KHandle(ref) ->
-      case rt_store.t_cell_get(st, ref) {
+    KHandle(h) ->
+      case rt_store.t_cell_get(st, h) {
         SObject(
           kind: TypedArrayObj(buffer:, elem_kind:, byte_offset:, length:),
           ..,

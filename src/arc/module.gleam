@@ -18,7 +18,7 @@ import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type CompiledFn, type Handle, type JsVal, type ReflectNative,
+  type Agent, type CompiledCode, type Handle, type JsVal, type ReflectNative,
   DataProperty, FnFlags, KHandle, KStr, KTdz, ModuleNamespace, NoElements,
   PromiseFulfilled, PromisePending, PromiseRejected, ProxyObj,
   ReflectDefineProperty, ReflectDeleteProperty, ReflectGet,
@@ -861,7 +861,7 @@ fn build_linked(
     list.fold(ns_to_fill, st, fn(st, pair) {
       let #(spec, obj) = pair
       let assert Ok(exp) = dict.get(exports, spec)
-      rt_store.t_cell_set(st, obj, namespace_slot(exp, "Module"))
+      rt_store.t_cell_set(st, obj, namespace_cell(exp, "Module"))
     })
   let #(st, modules) =
     list.fold(specs, #(st, dict.new()), fn(acc, spec) {
@@ -1098,7 +1098,7 @@ fn preallocate_local_boxes(
 }
 
 // §10.4.6 module namespace exotic object
-fn namespace_slot(exports: Dict(String, Handle), tag: String) -> types.JsSlot {
+fn namespace_cell(exports: Dict(String, Handle), tag: String) -> types.Cell {
   SObject(
     kind: ModuleNamespace(exports:),
     proto: None,
@@ -1123,7 +1123,7 @@ fn namespace_slot(exports: Dict(String, Handle), tag: String) -> types.JsSlot {
 @external(erlang, "gleam_stdlib", "identity")
 fn as_code(
   f: fn(Agent, rt_call.Frame, List(JsVal)) -> #(JsVal, Agent),
-) -> CompiledFn
+) -> CompiledCode
 
 fn trap_flags() -> types.FnFlags {
   FnFlags(
@@ -1161,7 +1161,7 @@ fn fill_deferred_namespace(
     |> result.replace_error(ModuleNotLinked(spec))
     |> assert_link_invariant
   let #(target, st) =
-    rt_store.t_cell_new(st, namespace_slot(lm.exports, "Deferred Module"))
+    rt_store.t_cell_new(st, namespace_cell(lm.exports, "Deferred Module"))
   let #(handler, st) = rt_obj.t_new_object(st, Some(st.realm.object.prototype))
   let st =
     [

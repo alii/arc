@@ -6,7 +6,7 @@ import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/state.{type State, type StepExit}
 import arc/rt/bytecode.{type EnvCapture, type EnvTuple}
 import arc/rt/types.{
-  type Agent, type Handle, type JsSlot, type JsStore, type JsVal,
+  type Agent, type Cell, type Handle, type JsStore, type JsVal,
   type LexicalGlobal, type Property, type PropertyKey as RtPropertyKey,
   type SymbolId,
 }
@@ -163,7 +163,7 @@ pub fn is_bool(v: JsVal, b: Bool) -> Bool
 pub fn same(a: JsVal, b: JsVal) -> Bool
 
 @external(erlang, "arc_interp_ffi", "cell_of")
-pub fn cell_of(agent: Agent, v: JsVal) -> JsSlot
+pub fn cell_of(agent: Agent, v: JsVal) -> Cell
 
 @external(erlang, "arc_interp_ffi", "capture_env")
 pub fn capture_env(
@@ -249,7 +249,7 @@ pub fn type_of(v: JsVal) -> String
 pub fn type_of_in(store: JsStore(Agent), v: JsVal) -> String
 
 @external(erlang, "arc_interp_ffi", "box_get")
-pub fn box_get(agent: Agent, slot: JsVal) -> JsVal
+pub fn box_get(agent: Agent, box: JsVal) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "get_field")
 pub fn get_field(agent: Agent, obj: JsVal, key: PropertyKey) -> JsVal

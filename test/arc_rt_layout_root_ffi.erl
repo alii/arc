@@ -1,6 +1,6 @@
 -module(arc_rt_layout_root_ffi).
 -export([idx/1, tag/1, element_of/2, size_of/1, dyn/1, slots/1,
-         kfn_parts/1, direct_entry/3, is_plain_fn/1, plain_property/2,
+         compiled_fn_parts/1, direct_entry/3, is_plain_fn/1, plain_property/2,
          slot_at/2, slot_set/3, frame/4, is_js_number/1, is_str/1]).
 
 -include("arc/rt/arc_rt_layout.hrl").
@@ -54,23 +54,24 @@ idx(<<"SHAPE_SLOT_COUNT">>) -> ?SHAPE_SLOT_COUNT;
 idx(<<"SHAPE_OFFSETS">>) -> ?SHAPE_OFFSETS;
 idx(<<"SHAPE_TRANSITIONS">>) -> ?SHAPE_TRANSITIONS;
 idx(<<"SHAPE_SIZE">>) -> ?SHAPE_SIZE;
-idx(<<"KFN_CODE">>) -> ?KFN_CODE;
-idx(<<"KFN_HOME">>) -> ?KFN_HOME;
-idx(<<"KFN_FLAGS">>) -> ?KFN_FLAGS;
-idx(<<"KFN_FIELDS_INIT">>) -> ?KFN_FIELDS_INIT;
-idx(<<"KFN_SIMPLE">>) -> ?KFN_SIMPLE;
-idx(<<"KFN_NAME">>) -> ?KFN_NAME;
-idx(<<"KFN_LENGTH">>) -> ?KFN_LENGTH;
-idx(<<"KFN_BIRTH">>) -> ?KFN_BIRTH;
-idx(<<"KFN_SIZE">>) -> ?KFN_SIZE;
-idx(<<"KBYTECODE_BIRTH">>) -> ?KBYTECODE_BIRTH;
+idx(<<"COMPILEDFN_CODE">>) -> ?COMPILEDFN_CODE;
+idx(<<"COMPILEDFN_HOME">>) -> ?COMPILEDFN_HOME;
+idx(<<"COMPILEDFN_FLAGS">>) -> ?COMPILEDFN_FLAGS;
+idx(<<"COMPILEDFN_FIELDS_INIT">>) -> ?COMPILEDFN_FIELDS_INIT;
+idx(<<"COMPILEDFN_DIRECT_ENTRY">>) -> ?COMPILEDFN_DIRECT_ENTRY;
+idx(<<"DIRECT_ENTRY_SIZE">>) -> ?DIRECT_ENTRY_SIZE;
+idx(<<"COMPILEDFN_NAME">>) -> ?COMPILEDFN_NAME;
+idx(<<"COMPILEDFN_LENGTH">>) -> ?COMPILEDFN_LENGTH;
+idx(<<"COMPILEDFN_BIRTH">>) -> ?COMPILEDFN_BIRTH;
+idx(<<"COMPILEDFN_SIZE">>) -> ?COMPILEDFN_SIZE;
+idx(<<"BYTECODEFN_BIRTH">>) -> ?BYTECODEFN_BIRTH;
 idx(<<"BIRTH_PROTOTYPE_PARENT">>) -> ?BIRTH_PROTOTYPE_PARENT;
-idx(<<"KBYTECODE_SIZE">>) -> ?KBYTECODE_SIZE;
-idx(<<"KNATIVE_TOKEN">>) -> ?KNATIVE_TOKEN;
-idx(<<"KNATIVE_NAME">>) -> ?KNATIVE_NAME;
-idx(<<"KNATIVE_LENGTH">>) -> ?KNATIVE_LENGTH;
-idx(<<"KNATIVE_CONSTRUCTIBLE">>) -> ?KNATIVE_CONSTRUCTIBLE;
-idx(<<"KNATIVE_SIZE">>) -> ?KNATIVE_SIZE;
+idx(<<"BYTECODEFN_SIZE">>) -> ?BYTECODEFN_SIZE;
+idx(<<"NATIVEFN_TOKEN">>) -> ?NATIVEFN_TOKEN;
+idx(<<"NATIVEFN_NAME">>) -> ?NATIVEFN_NAME;
+idx(<<"NATIVEFN_LENGTH">>) -> ?NATIVEFN_LENGTH;
+idx(<<"NATIVEFN_CONSTRUCTIBLE">>) -> ?NATIVEFN_CONSTRUCTIBLE;
+idx(<<"NATIVEFN_SIZE">>) -> ?NATIVEFN_SIZE;
 idx(<<"ARRAYOBJ_LENGTH">>) -> ?ARRAYOBJ_LENGTH;
 idx(<<"ARRAYOBJ_SIZE">>) -> ?ARRAYOBJ_SIZE;
 idx(<<"ARGUMENTSOBJ_MAPPED">>) -> ?ARGUMENTSOBJ_MAPPED;
@@ -125,11 +126,12 @@ tag(<<"STEP_YIELD">>) -> ?STEP_YIELD;
 tag(<<"STEP_AWAIT">>) -> ?STEP_AWAIT;
 tag(<<"RESUME_COMPILED_TAG">>) -> ?RESUME_COMPILED_TAG;
 tag(<<"RESUME_FRAME_TAG">>) -> ?RESUME_FRAME_TAG;
-tag(<<"KFN_TAG">>) -> ?KFN_TAG;
+tag(<<"COMPILEDFN_TAG">>) -> ?COMPILEDFN_TAG;
+tag(<<"DIRECT_ENTRY_TAG">>) -> ?DIRECT_ENTRY_TAG;
 tag(<<"BIRTH_SETTLED">>) -> ?BIRTH_SETTLED;
 tag(<<"BIRTH_PENDING_TAG">>) -> ?BIRTH_PENDING_TAG;
-tag(<<"KBYTECODE_TAG">>) -> ?KBYTECODE_TAG;
-tag(<<"KNATIVE_TAG">>) -> ?KNATIVE_TAG;
+tag(<<"BYTECODEFN_TAG">>) -> ?BYTECODEFN_TAG;
+tag(<<"NATIVEFN_TAG">>) -> ?NATIVEFN_TAG;
 tag(<<"ARRAYOBJ_TAG">>) -> ?ARRAYOBJ_TAG;
 tag(<<"ARGUMENTSOBJ_TAG">>) -> ?ARGUMENTSOBJ_TAG;
 tag(<<"ARRAYITER_TAG">>) -> ?ARRAYITER_TAG;
@@ -178,8 +180,8 @@ dyn(X) -> X.
 
 slots(L) -> list_to_tuple(L).
 
-kfn_parts(?KFN(Code, Home, Flags, FieldsInit, Simple)) ->
-    {Code, Home, Flags, FieldsInit, Simple}.
+compiled_fn_parts(?COMPILEDFN(Code, Home, Flags, FieldsInit, DirectEntry)) ->
+    {Code, Home, Flags, FieldsInit, DirectEntry}.
 
 direct_entry(Code, Arity, TakesThis) -> ?DIRECT_ENTRY(Code, Arity, TakesThis).
 

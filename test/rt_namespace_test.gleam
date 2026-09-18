@@ -45,18 +45,18 @@ fn throws(st: Agent, body: fn(Agent) -> #(a, Agent)) -> String {
 
 fn fixture() -> #(Agent, Handle, JsVal, Handle, Handle) {
   let st = agent()
-  let #(cell_a, st) = rt_store.t_cell_new(st, SBox(int(1)))
-  let #(cell_b, st) = rt_store.t_cell_new(st, SBox(mk_tdz()))
+  let #(box_a, st) = rt_store.t_cell_new(st, SBox(int(1)))
+  let #(box_b, st) = rt_store.t_cell_new(st, SBox(mk_tdz()))
   let #(ns_h, st) =
-    rt_obj.t_new_module_namespace(st, [#("b", cell_b), #("a", cell_a)])
-  #(st, ns_h, mk_object(ns_h), cell_a, cell_b)
+    rt_obj.t_new_module_namespace(st, [#("b", box_b), #("a", box_a)])
+  #(st, ns_h, mk_object(ns_h), box_a, box_b)
 }
 
 pub fn get_reads_the_live_binding_test() {
-  let #(st, _, ns, cell_a, _) = fixture()
+  let #(st, _, ns, box_a, _) = fixture()
   let #(v, st) = rt_obj.t_get_prop(st, ns, key("a"))
   assert classify(v) == KNum(JInt(1))
-  let st = rt_store.t_cell_set(st, cell_a, SBox(int(2)))
+  let st = rt_store.t_cell_set(st, box_a, SBox(int(2)))
   let #(v, st) = rt_obj.t_get_prop(st, ns, key("a"))
   assert classify(v) == KNum(JInt(2))
   let #(v, st) = rt_obj.t_get_prop(st, ns, key("toString"))
@@ -66,7 +66,7 @@ pub fn get_reads_the_live_binding_test() {
 }
 
 pub fn tdz_binding_is_a_reference_error_test() {
-  let #(st, ns_h, ns, _, cell_b) = fixture()
+  let #(st, ns_h, ns, _, box_b) = fixture()
   assert throws(st, rt_obj.t_get_prop(_, ns, key("b"))) == "ReferenceError"
   assert throws(st, rt_obj.t_get_own_property(_, ns_h, key("b")))
     == "ReferenceError"
@@ -78,13 +78,13 @@ pub fn tdz_binding_is_a_reference_error_test() {
   assert has
   let #(keys, st) = rt_obj.t_own_keys(st, ns_h)
   assert list.length(keys) == 3
-  let st = rt_store.t_cell_set(st, cell_b, SBox(int(3)))
+  let st = rt_store.t_cell_set(st, box_b, SBox(int(3)))
   let #(v, _) = rt_obj.t_get_prop(st, ns, key("b"))
   assert classify(v) == KNum(JInt(3))
 }
 
 pub fn own_keys_are_sorted_exports_then_to_string_tag_test() {
-  let #(st, ns_h, ns, _, cell_b) = fixture()
+  let #(st, ns_h, ns, _, box_b) = fixture()
   let #(keys, st) = rt_obj.t_own_keys(st, ns_h)
   assert keys
     == [
@@ -92,7 +92,7 @@ pub fn own_keys_are_sorted_exports_then_to_string_tag_test() {
       StringKey(Named("b")),
       SymbolKey(types.symbol_to_string_tag),
     ]
-  let st = rt_store.t_cell_set(st, cell_b, SBox(int(3)))
+  let st = rt_store.t_cell_set(st, box_b, SBox(int(3)))
   let #(names, st) = rt_obj.t_for_in_keys(st, ns)
   assert list.map(names, classify) == [KStr("a"), KStr("b")]
   let #(object, st) = rt_obj.t_global_get(st, <<"Object">>)
@@ -128,12 +128,12 @@ pub fn descriptor_shape_test() {
 }
 
 pub fn writes_and_deletes_fail_test() {
-  let #(st, ns_h, ns, cell_a, _) = fixture()
+  let #(st, ns_h, ns, box_a, _) = fixture()
   let #(ok, st) = rt_obj.t_set_prop(st, ns, key("a"), int(9))
   assert !ok
   let #(ok, st) = rt_obj.t_set_prop(st, ns, key("fresh"), int(9))
   assert !ok
-  let assert SBox(value:) = rt_store.t_cell_get(st, cell_a)
+  let assert SBox(value:) = rt_store.t_cell_get(st, box_a)
   assert classify(value) == KNum(JInt(1))
   let #(other, st) = rt_obj.t_new_object_literal(st)
   let assert types.KHandle(other_h) = classify(other)
@@ -251,12 +251,12 @@ pub fn define_own_property_only_accepts_no_ops_test() {
 }
 
 pub fn binding_cells_survive_collection_test() {
-  let #(st, ns_h, ns, cell_a, cell_b) = fixture()
+  let #(st, ns_h, ns, box_a, box_b) = fixture()
   let st = rt_obj.t_global_set(st, <<"ns">>, ns)
   let st = rt_gc.t_collect(st, [])
   assert rt_gc.t_is_live(st, ns_h)
-  assert rt_gc.t_is_live(st, cell_a)
-  assert rt_gc.t_is_live(st, cell_b)
+  assert rt_gc.t_is_live(st, box_a)
+  assert rt_gc.t_is_live(st, box_b)
   let #(v, _) = rt_obj.t_get_prop(st, ns, key("a"))
   assert classify(v) == KNum(JInt(1))
 }

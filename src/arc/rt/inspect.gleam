@@ -8,13 +8,13 @@ import arc/rt/types.{
   type Agent, type Handle, type JsElements, type JsVal, type Property,
   type PropertyKey, type TemporalData, ArgumentsObj, ArrayBufferObj,
   ArrayIterator, ArrayObj, AsyncFromSyncIterator, AsyncGeneratorObj, BigIntObj,
-  BooleanObj, DataProperty, DataViewObj, DateObj, DisposableStackObj, ErrorObj,
-  FinalizationRegistryObj, GeneratorObj, Index, IntlObj, IteratorHelperObj, KBig,
-  KBool, KBound, KBytecode, KCompiled, KHandle, KHost, KNative, KNull, KNum,
+  BooleanObj, BoundFn, BytecodeFn, CompiledFn, DataProperty, DataViewObj,
+  DateObj, DisposableStackObj, ErrorObj, FinalizationRegistryObj, GeneratorObj,
+  HostObj, Index, IntlObj, IteratorHelperObj, KBig, KBool, KHandle, KNull, KNum,
   KStr, KSym, KTdz, KUndef, MapIterator, MapObj, ModuleNamespace, Named,
-  NumberObj, Ordinary, Private, PromiseObj, ProxyObj, RawJsonObj, RegExpObj,
-  SObject, SetIterator, SetObj, Shared, StringIterator, StringObj, SymbolObj,
-  TemporalDate, TemporalDateTime, TemporalDuration, TemporalInstant,
+  NativeFn, NumberObj, Ordinary, Private, PromiseObj, ProxyObj, RawJsonObj,
+  RegExpObj, SObject, SetIterator, SetObj, Shared, StringIterator, StringObj,
+  SymbolObj, TemporalDate, TemporalDateTime, TemporalDuration, TemporalInstant,
   TemporalMonthDay, TemporalObj, TemporalTime, TemporalYearMonth,
   TemporalZonedDateTime, TypedArrayObj, WeakMapObj, WeakSetObj,
   WrapForValidIteratorObj, classify,
@@ -79,7 +79,7 @@ fn inspect_object(
     SObject(kind:, props:, elements:, symbol_props:, ..) ->
       case kind {
         ArrayObj(length:) -> inspect_array(st, elements, length, depth, visited)
-        KCompiled(..) | KBytecode(..) | KNative(..) | KBound(..) -> {
+        CompiledFn(..) | BytecodeFn(..) | NativeFn(..) | BoundFn(..) -> {
           let name = case
             rt_obj.t_ordinary_own_property(
               st,
@@ -156,7 +156,7 @@ fn inspect_object(
           <> "("
           <> int.to_string(buffer.view_length(
             st,
-            buffer.ViewSlot(buffer: buf, elem_kind:, byte_offset:, length:),
+            buffer.View(buffer: buf, elem_kind:, byte_offset:, length:),
           ))
           <> ")"
         IteratorHelperObj(..) -> "[Iterator Helper]"
@@ -177,7 +177,7 @@ fn inspect_object(
         FinalizationRegistryObj(..) -> "FinalizationRegistry {}"
         rt_types.WeakRefObj(..) -> "WeakRef {}"
         rt_types.ShadowRealmObj(..) -> "ShadowRealm {}"
-        Ordinary | rt_types.GlobalObj | KHost(_) -> {
+        Ordinary | rt_types.GlobalObj | HostObj(_) -> {
           let body = inspect_plain_object(st, props, depth, visited)
           case list.key_find(symbol_props, rt_types.symbol_to_string_tag) {
             Ok(DataProperty(value:, ..)) ->
@@ -326,11 +326,11 @@ fn temporal_label(data: TemporalData) -> String {
 fn error_display(st: Agent, h: Handle) -> Option(String) {
   case rt_store.t_cell_get(st, h) {
     SObject(kind: ErrorObj(stack:), ..) -> {
-      let slot_stack = case stack {
+      let own_stack = case stack {
         "" -> None
         s -> Some(s)
       }
-      Some(case option.or(slot_stack, error_property(st, h, "stack", 100)) {
+      Some(case option.or(own_stack, error_property(st, h, "stack", 100)) {
         Some(s) -> s
         None -> {
           let name =

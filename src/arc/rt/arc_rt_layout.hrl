@@ -57,7 +57,7 @@
 -define(LEXICAL_GLOBAL_VALUE, 2).
 
 %% JsVal
--define(HANDLE_TAG, js_cell).
+-define(HANDLE_TAG, handle).
 -define(HANDLE_ID, 2).
 -define(STR_TAG, js_str).
 -define(IS_STR(V), (is_binary(V) orelse
@@ -103,38 +103,41 @@
 -define(ORDINARY, ordinary).
 -define(GLOBALOBJ, global_obj).
 
--define(KFN_TAG, k_compiled).
--define(KFN_CODE, 2).
--define(KFN_HOME, 3).
--define(KFN_FLAGS, 4).
--define(KFN_FIELDS_INIT, 5).
--define(KFN_SIMPLE, 6).
--define(KFN_NAME, 7).
--define(KFN_LENGTH, 8).
--define(KFN_BIRTH, 9).
--define(KFN_SIZE, 9).
+-define(COMPILEDFN_TAG, compiled_fn).
+-define(COMPILEDFN_CODE, 2).
+-define(COMPILEDFN_HOME, 3).
+-define(COMPILEDFN_FLAGS, 4).
+-define(COMPILEDFN_FIELDS_INIT, 5).
+-define(COMPILEDFN_DIRECT_ENTRY, 6).
+-define(COMPILEDFN_NAME, 7).
+-define(COMPILEDFN_LENGTH, 8).
+-define(COMPILEDFN_BIRTH, 9).
+-define(COMPILEDFN_SIZE, 9).
 %% pattern over the fields the call paths read
--define(KFN(Code, Home, Flags, FieldsInit, Simple),
-        {?KFN_TAG, Code, Home, Flags, FieldsInit, Simple, _, _, _}).
-%% the simple field holds some ?DIRECT_ENTRY or none
--define(DIRECT_ENTRY(Code, Arity, TakesThis), {Code, Arity, TakesThis}).
+-define(COMPILEDFN(Code, Home, Flags, FieldsInit, DirectEntry),
+        {?COMPILEDFN_TAG, Code, Home, Flags, FieldsInit, DirectEntry, _, _, _}).
+%% the direct_entry field holds some ?DIRECT_ENTRY or none
+-define(DIRECT_ENTRY_TAG, direct_entry).
+-define(DIRECT_ENTRY(Code, Arity, TakesThis),
+        {?DIRECT_ENTRY_TAG, Code, Arity, TakesThis}).
+-define(DIRECT_ENTRY_SIZE, 4).
 
--define(KBYTECODE_TAG, k_bytecode).
--define(KBYTECODE_BIRTH, 9).
--define(KBYTECODE_SIZE, 9).
+-define(BYTECODEFN_TAG, bytecode_fn).
+-define(BYTECODEFN_BIRTH, 9).
+-define(BYTECODEFN_SIZE, 9).
 
 -define(BIRTH_SETTLED, birth_settled).
 -define(BIRTH_PENDING_TAG, birth_pending).
 -define(BIRTH_PROTOTYPE_PARENT, 2).
 
--define(KNATIVE_TAG, k_native).
--define(KNATIVE_TOKEN, 2).
--define(KNATIVE_NAME, 3).
--define(KNATIVE_LENGTH, 4).
--define(KNATIVE_CONSTRUCTIBLE, 5).
--define(KNATIVE_SIZE, 5).
+-define(NATIVEFN_TAG, native_fn).
+-define(NATIVEFN_TOKEN, 2).
+-define(NATIVEFN_NAME, 3).
+-define(NATIVEFN_LENGTH, 4).
+-define(NATIVEFN_CONSTRUCTIBLE, 5).
+-define(NATIVEFN_SIZE, 5).
 
--define(BOUNDFN_TAG, k_bound).
+-define(BOUNDFN_TAG, bound_fn).
 
 -define(ARRAYOBJ_TAG, array_obj).
 -define(ARRAYOBJ_LENGTH, 2).

@@ -1084,7 +1084,7 @@ fn agent_leaving_native(
   #(s, Ok(mk_undefined()))
 }
 
-fn agent_hidden_ref(st: Agent, this: JsVal, name: String) -> Option(Handle) {
+fn agent_hidden_handle(st: Agent, this: JsVal, name: String) -> Option(Handle) {
   use this_h <- option.then(as_handle(this))
   case rt_obj.t_ordinary_own_property(st, this_h, StringKey(Named(name))) {
     Some(DataProperty(value:, ..)) -> as_handle(value)
@@ -1097,7 +1097,7 @@ fn agent_queue(
   this: JsVal,
   name: String,
 ) -> Option(#(Handle, List(JsVal))) {
-  use arr <- option.then(agent_hidden_ref(st, this, name))
+  use arr <- option.then(agent_hidden_handle(st, this, name))
   case rt_store.t_cell_get(st, arr) {
     SObject(kind: ArrayObj(length:), elements: els, ..) -> {
       let values =
@@ -1112,12 +1112,12 @@ fn agent_queue(
 
 fn agent_queue_write(st: Agent, arr: Handle, values: List(JsVal)) -> Agent {
   case rt_store.t_cell_get(st, arr) {
-    SObject(kind: ArrayObj(_), ..) as slot ->
+    SObject(kind: ArrayObj(_), ..) as cell ->
       rt_store.t_cell_set(
         st,
         arr,
         SObject(
-          ..slot,
+          ..cell,
           kind: ArrayObj(length: list.length(values)),
           elements: elements.from_list(values),
         ),

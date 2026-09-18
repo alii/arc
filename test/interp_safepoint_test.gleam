@@ -10,9 +10,9 @@ import arc/rt/gc as rt_gc
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, Agent, BirthSettled, FnFlags,
-  GenSuspendedYield, HostJob, JsStore, KBytecode, KHandle, NoElements,
-  ResumeFrame, SGenerator, SObject, classify, mk_object, mk_undefined,
+  type Agent, type Handle, type JsVal, Agent, BirthSettled, BytecodeFn, FnFlags,
+  GenSuspendedYield, HostJob, JsStore, KHandle, NoElements, ResumeFrame,
+  SGenerator, SObject, classify, mk_object, mk_undefined,
 }
 import gleam/dict
 import gleam/option.{None, Some}
@@ -266,7 +266,7 @@ pub fn closure_environment_and_constants_are_traced_test() {
     rt_store.t_cell_new(
       st,
       SObject(
-        kind: KBytecode(
+        kind: BytecodeFn(
           template:,
           env: bytecode.env_from_list([captured]),
           home_object: None,

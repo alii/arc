@@ -598,7 +598,7 @@ fn read_set_store(
 ) -> ordered_entries.OrderedEntries(MapKey, JsVal) {
   let assert SObject(kind: SetObj(entries:), ..) =
     rt_store.t_cell_get(st, set_ref_handle(ref))
-    as "set: SetRef does not point at a Set slot"
+    as "set: SetRef does not point at a Set cell"
   entries
 }
 
@@ -607,8 +607,8 @@ fn update_set(
   ref: SetRef,
   entries: ordered_entries.OrderedEntries(MapKey, JsVal),
 ) -> Agent {
-  rt_store.t_cell_update(st, set_ref_handle(ref), fn(slot) {
-    let assert SObject(..) = slot
-    SObject(..slot, kind: SetObj(entries:))
+  rt_store.t_cell_update(st, set_ref_handle(ref), fn(cell) {
+    let assert SObject(..) = cell
+    SObject(..cell, kind: SetObj(entries:))
   })
 }

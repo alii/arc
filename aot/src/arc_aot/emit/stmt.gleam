@@ -311,7 +311,7 @@ fn emit_stmt(e: Emitter, s: ast.Statement, k: Next) -> EmitResult {
 fn store_slot(e: Emitter, b: Binding, val: ir.Value, k: Next) -> EmitResult {
   case b.boxed {
     True ->
-      host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, b.slot)), val], k)
+      host_unit_(e, "box_set", [ir.Var(state.get_slot_var(e, b.slot)), val], k)
     False -> {
       let name = state.slot_base_name(e, b.slot)
       use body <- state.map_tree(k(state.set_slot_var(e, b.slot, name)))
@@ -334,7 +334,7 @@ fn binding_prologue(e: Emitter, scope_id: ScopeId, k: Next) -> EmitResult {
         ir.Let([name], ir.Values([init]), body)
       }
       True -> {
-        use e, box <- host_(e, "cell_new", [init])
+        use e, box <- host_(e, "box_new", [init])
         use body <- state.map_tree(next(state.set_slot_var(e, b.slot, name)))
         ir.Let([name], ir.Values([box]), body)
       }
@@ -468,7 +468,7 @@ fn read_binding(b: Binding) -> anf.Build(ir.Value) {
   fn(e: Emitter, k) {
     let v = ir.Var(state.get_slot_var(e, b.slot))
     case b.boxed {
-      True -> anf.host("cell_get", [v])(e, k)
+      True -> anf.host("box_get", [v])(e, k)
       False -> k(e, v)
     }
   }
@@ -538,7 +538,7 @@ fn store_declared(
       }
       case boxed {
         True ->
-          host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
+          host_unit_(e, "box_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
         False -> {
           let #(n, e) = state.fresh_slot_var(e, slot)
           let e = case v {
@@ -557,7 +557,7 @@ fn store_declared(
     scope.Plain(scope.Global(_)) ->
       case state.lookup_slotted_global(e, name) {
         Some(slot) ->
-          host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
+          host_unit_(e, "box_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
         None ->
           host_unit_(
             e,
@@ -717,7 +717,7 @@ fn bind_invariant_callees(
     [callee, ..rest] -> {
       let sv = ir.Var(state.get_slot_var(e, callee.slot))
       let go = fn(e, f) {
-        use e, pair <- host_(e, "kfn_code", [f, e.consts.undef])
+        use e, pair <- host_(e, "compiled_fn_code", [f, e.consts.undef])
         bind_invariant_callees(
           state.set_invariant_callee(e, callee, pair),
           rest,
@@ -726,7 +726,7 @@ fn bind_invariant_callees(
       }
       case callee {
         state.PlainSlot(_) -> go(e, sv)
-        state.BoxedSlot(_) -> host_(e, "cell_get", [sv], go)
+        state.BoxedSlot(_) -> host_(e, "box_get", [sv], go)
       }
     }
   }
@@ -1351,7 +1351,7 @@ fn for_lhs_ident_assign(
           True ->
             host_unit_(
               e,
-              "cell_set",
+              "box_set",
               [ir.Var(state.get_slot_var(e, slot)), v],
               k,
             )
@@ -1366,7 +1366,7 @@ fn for_lhs_ident_assign(
         let read = fn(e, kk) {
           case boxed {
             True ->
-              host_(e, "cell_get", [ir.Var(state.get_slot_var(e, slot))], kk)
+              host_(e, "box_get", [ir.Var(state.get_slot_var(e, slot))], kk)
             False -> kk(e, ir.Var(state.get_slot_var(e, slot)))
           }
         }
@@ -1390,7 +1390,7 @@ fn for_lhs_ident_assign(
     scope.Plain(scope.Global(_)) ->
       case state.lookup_slotted_global(e, name) {
         Some(slot) ->
-          host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
+          host_unit_(e, "box_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
         None ->
           host_unit_(
             e,
@@ -1470,7 +1470,7 @@ fn for_lhs_member_put(
             k,
           )
         scope.Plain(scope.Local(slot:, boxed: True, ..)) -> {
-          use e, key <- host_(e, "cell_get", [
+          use e, key <- host_(e, "box_get", [
             ir.Var(state.get_slot_var(e, slot)),
           ])
           host_unit_(e, "private_set", [base, key, v], k)
@@ -2024,8 +2024,8 @@ fn per_iter_rebox(
     False -> next(e)
     True -> {
       let old = ir.Var(state.get_slot_var(e, slot))
-      use e, v <- host_(e, "cell_get", [old])
-      use e, box <- host_(e, "cell_new", [v])
+      use e, v <- host_(e, "box_get", [old])
+      use e, box <- host_(e, "box_new", [v])
       let #(n, e) = state.fresh_slot_var(e, slot)
       use body <- state.map_tree(next(state.set_slot_var(e, slot, n)))
       ir.Let([n], ir.Values([box]), body)
