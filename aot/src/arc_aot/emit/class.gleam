@@ -628,7 +628,6 @@ fn build_class_init_closure(
       child_id,
       strict: True,
       is_async: False,
-      is_generator: False,
       is_arrow: False,
     )
   let e_child = func.seed_capture_slots(e_child, child_info)

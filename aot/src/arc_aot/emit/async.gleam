@@ -5,6 +5,7 @@ import arc/compiler/scope.{type ScopeId, type ScopeTree}
 import arc/parser/ast
 import arc_aot/emit/anf
 import arc_aot/emit/class
+import arc_aot/emit/expr
 import arc_aot/emit/func
 import arc_aot/emit/state.{type Emitter2}
 import carder/ir
@@ -19,7 +20,7 @@ import gleam/set.{type Set}
 import gleam/string
 
 // arms emit out of source order, so each snapshots its entry scope cursor
-pub type ArmCursor {
+type ArmCursor {
   ArmCursor(
     cur_scope: ScopeId,
     scope_cursor: List(ScopeId),
@@ -27,15 +28,7 @@ pub type ArmCursor {
   )
 }
 
-pub fn root_cursor(tree: ScopeTree, fn_scope: ScopeId) -> ArmCursor {
-  ArmCursor(
-    cur_scope: fn_scope,
-    scope_cursor: state.block_child_scopes(tree, fn_scope),
-    child_fn_cursor: scope.child_function_scopes(tree, fn_scope),
-  )
-}
-
-pub fn cursor_enter_scope(
+fn cursor_enter_scope(
   tree: ScopeTree,
   c: ArmCursor,
 ) -> #(ArmCursor, ArmCursor) {
@@ -52,21 +45,18 @@ pub fn cursor_enter_scope(
   }
 }
 
-pub fn cursor_pop_child_fn(c: ArmCursor) -> ArmCursor {
+fn cursor_pop_child_fn(c: ArmCursor) -> ArmCursor {
   case c.child_fn_cursor {
     [_, ..rest] -> ArmCursor(..c, child_fn_cursor: rest)
     [] -> c
   }
 }
 
-pub fn cursor_leave_scope(
-  resume: ArmCursor,
-  inner_after: ArmCursor,
-) -> ArmCursor {
+fn cursor_leave_scope(resume: ArmCursor, inner_after: ArmCursor) -> ArmCursor {
   ArmCursor(..resume, child_fn_cursor: inner_after.child_fn_cursor)
 }
 
-pub fn install_cursor(e: Emitter2, c: ArmCursor) -> Emitter2 {
+fn install_cursor(e: Emitter2, c: ArmCursor) -> Emitter2 {
   state.Emitter2(
     ..e,
     cur_scope: c.cur_scope,
@@ -75,7 +65,7 @@ pub fn install_cursor(e: Emitter2, c: ArmCursor) -> Emitter2 {
   )
 }
 
-pub fn capture_cursor(e: Emitter2) -> ArmCursor {
+fn capture_cursor(e: Emitter2) -> ArmCursor {
   ArmCursor(
     cur_scope: e.cur_scope,
     scope_cursor: e.scope_cursor,
@@ -83,18 +73,14 @@ pub fn capture_cursor(e: Emitter2) -> ArmCursor {
   )
 }
 
-pub type SplitKind {
+type SplitKind {
   SkAwait
   SkYield
   SkYieldStar
   SkForAwait
 }
 
-pub type SplitPoint {
-  SplitPoint(id: Int, kind: SplitKind, enclosing_try: Option(Int))
-}
-
-pub type TryEntry {
+type TryEntry {
   TryEntry(
     id: Int,
     // a catch-body view shares its parent try's pending slot
@@ -113,7 +99,7 @@ pub type TryEntry {
   )
 }
 
-pub type DelegateSpec {
+type DelegateSpec {
   DelegateSpec(
     state_id: Int,
     next_state: Int,
@@ -122,7 +108,7 @@ pub type DelegateSpec {
   )
 }
 
-pub type ForAwaitSpec {
+type ForAwaitSpec {
   ForAwaitSpec(
     head: Int,
     check: Int,
@@ -134,7 +120,7 @@ pub type ForAwaitSpec {
   )
 }
 
-pub type LocLayout {
+type LocLayout {
   LocLayout(
     slot_to_idx: Dict(Int, Int),
     size: Int,
@@ -143,13 +129,13 @@ pub type LocLayout {
   )
 }
 
-pub type ArmEntry {
+type ArmEntry {
   AeInitial
   AeResume(kind: SplitKind)
   AeJump
 }
 
-pub type ResumeWith {
+type ResumeWith {
   ResumeDiscard
   ResumeBind(pat: ast.Pattern, mode: state.BindMode)
   ResumeReturn
@@ -158,7 +144,7 @@ pub type ResumeWith {
   ResumeCatch(try_id: Int, param: Option(ast.Pattern))
 }
 
-pub type SegTail {
+type SegTail {
   FallTo(to: Int)
   FallToFinally(try_id: Int, to: Int)
   FinallyEnd(try_id: Int)
@@ -166,13 +152,7 @@ pub type SegTail {
   CondBranch(cond: Option(ast.Expression), then_s: Int, else_s: Int)
   ForUpdate(update: Option(ast.Expression), head: Int)
   ForOfSetup(right: ast.Expression, iter_key: String, head: Int)
-  ForOfStep(
-    left: ast.ForInit,
-    iter_key: String,
-    body_s: Int,
-    after: Int,
-    is_await: Bool,
-  )
+  ForOfStep(left: ast.ForInit, iter_key: String, body_s: Int, after: Int)
   SwitchDispatch(
     disc: Option(ast.Expression),
     tests: List(#(Option(ast.Expression), Int)),
@@ -184,7 +164,7 @@ pub type SegTail {
   SegDone
 }
 
-pub type ArmSpec {
+type ArmSpec {
   ArmSpec(
     state_id: Int,
     region: Option(Int),
@@ -197,9 +177,8 @@ pub type ArmSpec {
   )
 }
 
-pub type SplitPlan {
+type SplitPlan {
   SplitPlan(
-    n_states: Int,
     n_temps: Int,
     arms: List(ArmSpec),
     try_entries: List(TryEntry),
@@ -208,7 +187,7 @@ pub type SplitPlan {
   )
 }
 
-pub type SmLabel {
+type SmLabel {
   SmLoop(
     js_label: Option(String),
     brk_sentinel: String,
@@ -231,7 +210,7 @@ pub type SmLabel {
   )
 }
 
-pub type SmCtx {
+type SmCtx {
   SmCtx(
     kind: state.CoroutineKind,
     layout: LocLayout,
@@ -240,14 +219,13 @@ pub type SmCtx {
     sent_v: ir.Value,
     loc_v: ir.Value,
     try_entries: List(TryEntry),
-    next_state: Int,
     arms: List(ir.SwitchArm),
     try_stack: List(TryEntry),
     sm_labels: List(SmLabel),
   )
 }
 
-pub fn new_sm_ctx(
+fn new_sm_ctx(
   kind: state.CoroutineKind,
   layout: LocLayout,
   lresume: String,
@@ -261,60 +239,33 @@ pub fn new_sm_ctx(
     sent_v: ir.Var("_sv"),
     loc_v: ir.Var("_loc_i"),
     try_entries: plan.try_entries,
-    next_state: plan.n_states,
     arms: [],
     try_stack: [],
     sm_labels: [],
   )
 }
 
-pub fn sm_alloc_state(ctx: SmCtx) -> #(Int, SmCtx) {
-  #(ctx.next_state, SmCtx(..ctx, next_state: ctx.next_state + 1))
-}
-
-pub fn push_arm(ctx: SmCtx, n: Int, body: ir.Expr) -> SmCtx {
+fn push_arm(ctx: SmCtx, n: Int, body: ir.Expr) -> SmCtx {
   SmCtx(..ctx, arms: [ir.SwitchArm(n, body), ..ctx.arms])
 }
 
-pub fn finish_arms(ctx: SmCtx) -> List(ir.SwitchArm) {
+fn finish_arms(ctx: SmCtx) -> List(ir.SwitchArm) {
   list.reverse(ctx.arms)
 }
 
-pub fn push_try(ctx: SmCtx, region: TryEntry) -> SmCtx {
-  SmCtx(..ctx, try_stack: [region, ..ctx.try_stack])
-}
-
-pub fn pop_try(ctx: SmCtx) -> SmCtx {
-  case ctx.try_stack {
-    [_, ..rest] -> SmCtx(..ctx, try_stack: rest)
-    [] -> panic as "async.pop_try: try_stack empty"
-  }
-}
-
-pub fn current_try(ctx: SmCtx) -> Option(TryEntry) {
+fn current_try(ctx: SmCtx) -> Option(TryEntry) {
   case ctx.try_stack {
     [top, ..] -> Some(top)
     [] -> None
   }
 }
 
-pub fn push_label(ctx: SmCtx, label: SmLabel) -> SmCtx {
-  SmCtx(..ctx, sm_labels: [label, ..ctx.sm_labels])
-}
-
-pub fn pop_label(ctx: SmCtx) -> SmCtx {
-  case ctx.sm_labels {
-    [_, ..rest] -> SmCtx(..ctx, sm_labels: rest)
-    [] -> panic as "async.pop_label: sm_labels empty"
-  }
-}
-
-pub fn with_region(ctx: SmCtx, region: Option(Int)) -> SmCtx {
+fn with_region(ctx: SmCtx, region: Option(Int)) -> SmCtx {
   SmCtx(..ctx, try_stack: try_chain(ctx.try_entries, region))
 }
 
 // a throw in a catch body must not re-enter its own catch
-pub fn with_catch_body(ctx: SmCtx, entry: TryEntry) -> SmCtx {
+fn with_catch_body(ctx: SmCtx, entry: TryEntry) -> SmCtx {
   let outer = try_chain(ctx.try_entries, entry.outer)
   let stack = case entry.finally_state {
     Some(_) -> [TryEntry(..entry, catch_state: None), ..outer]
@@ -323,22 +274,18 @@ pub fn with_catch_body(ctx: SmCtx, entry: TryEntry) -> SmCtx {
   SmCtx(..ctx, try_stack: stack)
 }
 
-pub fn with_finally_body(ctx: SmCtx, entry: TryEntry) -> SmCtx {
+fn with_finally_body(ctx: SmCtx, entry: TryEntry) -> SmCtx {
   SmCtx(..ctx, try_stack: try_chain(ctx.try_entries, entry.outer))
 }
 
 fn try_chain(entries: List(TryEntry), region: Option(Int)) -> List(TryEntry) {
-  case region {
+  case find_try(entries, region) {
+    Some(entry) -> [entry, ..try_chain(entries, entry.outer)]
     None -> []
-    Some(id) ->
-      case list.find(entries, fn(t) { t.id == id }) {
-        Ok(entry) -> [entry, ..try_chain(entries, entry.outer)]
-        Error(_) -> []
-      }
   }
 }
 
-pub type PendingKind {
+type PendingKind {
   PkReturn(ir.Value)
   PkThrow(ir.Value)
   PkGoto(target: Int)
@@ -393,7 +340,7 @@ fn pack_loc_from(
     False ->
       case dict.get(overrides, i) {
         Ok(v) -> pack_loc_from(e, ctx, overrides, i + 1, [v, ..acc], k)
-        Error(_) ->
+        Error(Nil) ->
           case slot_at_loc_idx(ctx.layout, i) {
             Some(slot) -> {
               let v = ir.Var(state.get_slot_var(e, slot))
@@ -418,6 +365,29 @@ fn pack_loc_from(
   }
 }
 
+fn jump_state_leaf(
+  e: Emitter2,
+  ctx: SmCtx,
+  ns: Int,
+  overrides: Dict(Int, ir.Value),
+) -> #(ir.Expr, Emitter2) {
+  use e, loc <- pack_loc_cps(e, ctx, overrides)
+  #(sm_continue(ctx, ns, loc), e)
+}
+
+// parks pend in the finally's slot and jumps to it
+fn jump_to_finally(
+  e: Emitter2,
+  ctx: SmCtx,
+  entry: TryEntry,
+  finally_state: Int,
+  pend: ir.Expr,
+) -> #(ir.Expr, Emitter2) {
+  let #(pn, e) = state.fresh_var(e)
+  let over = dict.from_list([#(entry.pending_loc_idx, ir.Var(pn))])
+  anf.wrap(jump_state_leaf(e, ctx, finally_state, over), ir.Let([pn], pend, _))
+}
+
 fn slot_at_loc_idx(layout: LocLayout, idx: Int) -> Option(Int) {
   case dict.get(layout.slot_to_idx, idx) {
     Ok(at) if at == idx -> Some(idx)
@@ -431,7 +401,7 @@ fn slot_at_loc_idx(layout: LocLayout, idx: Int) -> Option(Int) {
   }
 }
 
-pub fn route_abrupt(
+fn route_abrupt(
   e: Emitter2,
   ctx: SmCtx,
   pk: PendingKind,
@@ -449,37 +419,22 @@ fn route_abrupt_walk(
 ) -> #(ir.Expr, Emitter2) {
   case stack {
     [] -> route_abrupt_tail(e, ctx, pk)
-    [entry, ..rest] ->
-      case stop_at == Some(entry.id) {
-        True -> route_abrupt_tail(e, ctx, pk)
-        False ->
-          case entry.finally_state {
-            Some(fs) -> {
-              let #(pv, e) = state.fresh_var(e)
-              let over = dict.from_list([#(entry.pending_loc_idx, ir.Var(pv))])
-              anf.wrap(
-                pack_loc_cps(e, ctx, over, fn(e, loc) {
-                  #(sm_continue(ctx, fs, loc), e)
-                }),
-                ir.Let([pv], pending_tuple(pk), _),
-              )
-            }
-            None ->
-              case pk {
-                PkThrow(v) ->
-                  case entry.catch_state {
-                    Some(cs) -> {
-                      let over = dict.from_list([#(entry.caught_loc_idx, v)])
-                      pack_loc_cps(e, ctx, over, fn(e, loc) {
-                        #(sm_continue(ctx, cs, loc), e)
-                      })
-                    }
-                    None -> route_abrupt_walk(e, ctx, rest, pk, stop_at)
-                  }
-                _ -> route_abrupt_walk(e, ctx, rest, pk, stop_at)
-              }
-          }
+    [entry, ..rest] -> {
+      use <- bool.lazy_guard(stop_at == Some(entry.id), fn() {
+        route_abrupt_tail(e, ctx, pk)
+      })
+      case entry.finally_state, entry.catch_state, pk {
+        Some(fs), _, _ -> jump_to_finally(e, ctx, entry, fs, pending_tuple(pk))
+        None, Some(cs), PkThrow(v) ->
+          jump_state_leaf(
+            e,
+            ctx,
+            cs,
+            dict.from_list([#(entry.caught_loc_idx, v)]),
+          )
+        None, _, _ -> route_abrupt_walk(e, ctx, rest, pk, stop_at)
       }
+    }
   }
 }
 
@@ -491,10 +446,7 @@ fn route_abrupt_tail(
   case pk {
     PkReturn(v) -> #(step_return(v), e)
     PkThrow(v) -> #(step_throw(v), e)
-    PkGoto(target) ->
-      pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
-        #(sm_continue(ctx, target, loc), e)
-      })
+    PkGoto(target) -> jump_state_leaf(e, ctx, target, dict.new())
   }
 }
 
@@ -549,7 +501,7 @@ fn make_on_goto(
   }
 }
 
-pub fn with_abrupt_intercept(
+fn with_abrupt_intercept(
   e: Emitter2,
   ctx: SmCtx,
   body: fn(Emitter2, fn(Emitter2) -> Emitter2) -> a,
@@ -594,7 +546,7 @@ fn pop_n_frames(e: Emitter2, n: Int) -> Emitter2 {
   }
 }
 
-pub fn expr_has_split(e: ast.Expression) -> Bool {
+fn expr_has_split(e: ast.Expression) -> Bool {
   case e {
     ast.AwaitExpression(..) | ast.YieldExpression(..) -> True
     ast.Identifier(..)
@@ -628,8 +580,7 @@ pub fn expr_has_split(e: ast.Expression) -> Bool {
     ast.ConditionalExpression(condition: c, consequent: t, alternate: f, ..) ->
       expr_has_split(c) || expr_has_split(t) || expr_has_split(f)
     ast.SequenceExpression(expressions: xs, ..) -> list.any(xs, expr_has_split)
-    ast.ArrayExpression(elements: xs, ..) ->
-      list.any(xs, fn(o) { opt_expr_has_split(o) })
+    ast.ArrayExpression(elements: xs, ..) -> list.any(xs, opt_expr_has_split)
     ast.ObjectExpression(properties: ps, ..) -> list.any(ps, prop_has_split)
     ast.TemplateLiteral(parts: parts, ..) ->
       list.any(ast.template_expressions(parts), expr_has_split)
@@ -723,7 +674,7 @@ fn declarator_has_split(d: ast.VariableDeclarator) -> Bool {
   pattern_has_split(d.id) || opt_expr_has_split(d.init)
 }
 
-pub fn stmt_has_split(s: ast.Statement) -> Bool {
+fn stmt_has_split(s: ast.Statement) -> Bool {
   case s {
     ast.EmptyStatement
     | ast.DebuggerStatement
@@ -806,7 +757,6 @@ type Ana {
     try_stack: List(Int),
     sm_labels: List(SmLabel),
     cur: ArmCursor,
-    splits: List(SplitPoint),
     tries: List(TryEntry),
     arms: List(ArmSpec),
     delegates: List(DelegateSpec),
@@ -886,13 +836,35 @@ fn record_split(
   kind: SplitKind,
   arg: Option(ast.Expression),
   resume: Option(ResumeWith),
-) -> #(Int, Ana) {
+) -> Ana {
+  case kind, a.kind {
+    SkYieldStar, _ -> record_delegate(a, arg, resume)
+    SkYield, state.CorAsyncGen -> record_async_gen_yield(a, arg, resume)
+    _, _ -> record_plain_split(a, kind, arg, resume)
+  }
+}
+
+fn record_plain_split(
+  a: Ana,
+  kind: SplitKind,
+  arg: Option(ast.Expression),
+  resume: Option(ResumeWith),
+) -> Ana {
   let #(ns, a) = alloc_state(a)
-  let region = ana_region(a)
-  let sp = SplitPoint(id: ns, kind:, enclosing_try: region)
-  let a = Ana(..a, splits: [sp, ..a.splits])
   let a = close_open(a, SplitAt(kind:, arg:, ns:), ns, AeResume(kind))
-  #(ns, Ana(..a, open_resume: resume))
+  Ana(..a, open_resume: resume)
+}
+
+// an async generator yield awaits its operand first
+fn record_async_gen_yield(
+  a: Ana,
+  arg: Option(ast.Expression),
+  resume: Option(ResumeWith),
+) -> Ana {
+  let a = record_plain_split(a, SkAwait, arg, None)
+  let #(ns, a) = alloc_state(a)
+  let a = close_open(a, AsyncGenYieldSent(ns:), ns, AeResume(SkYield))
+  Ana(..a, open_resume: resume)
 }
 
 fn record_delegate(
@@ -903,8 +875,6 @@ fn record_delegate(
   let #(nd, a) = alloc_state(a)
   let #(follow, a) = alloc_state(a)
   let region = ana_region(a)
-  let sp = SplitPoint(id: nd, kind: SkYieldStar, enclosing_try: region)
-  let a = Ana(..a, splits: [sp, ..a.splits])
   let a =
     close_open(
       a,
@@ -969,41 +939,21 @@ fn walk_catch_cur(a: Ana, h: ast.CatchClause, f: fn(Ana) -> Ana) -> Ana {
   }
 }
 
-fn ana_opt_expr(a: Ana, o: Option(ast.Expression), tail) -> Ana {
+fn ana_opt_expr(a: Ana, o: Option(ast.Expression)) -> Ana {
   case o {
-    Some(e) -> ana_expr(a, e, tail)
+    Some(e) -> ana_expr(a, e)
     None -> a
   }
 }
 
-fn ana_expr(a: Ana, e: ast.Expression, tail: List(ast.StmtWithLine)) -> Ana {
+fn ana_expr(a: Ana, e: ast.Expression) -> Ana {
   case e {
-    ast.AwaitExpression(argument: arg, ..) -> {
-      let a = ana_expr(a, arg, tail)
-      let #(_, a) = record_split(a, SkAwait, Some(arg), None)
-      a
-    }
-    ast.YieldExpression(argument: arg, is_delegate: del, ..) -> {
-      let a = ana_opt_expr(a, arg, tail)
-      case del {
-        True -> record_delegate(a, arg, None)
-        False ->
-          case a.kind {
-            state.CorAsyncGen -> {
-              let #(_, a) = record_split(a, SkAwait, arg, None)
-              let #(ns2, a) = alloc_state(a)
-              let sp =
-                SplitPoint(id: ns2, kind: SkYield, enclosing_try: ana_region(a))
-              let a = Ana(..a, splits: [sp, ..a.splits])
-              close_open(a, AsyncGenYieldSent(ns: ns2), ns2, AeResume(SkYield))
-            }
-            state.CorAsync | state.CorGenerator -> {
-              let #(_, a) = record_split(a, SkYield, arg, None)
-              a
-            }
-          }
-      }
-    }
+    ast.AwaitExpression(argument: arg, ..) ->
+      record_split(ana_expr(a, arg), SkAwait, Some(arg), None)
+    ast.YieldExpression(argument: arg, is_delegate: True, ..) ->
+      record_split(ana_opt_expr(a, arg), SkYieldStar, arg, None)
+    ast.YieldExpression(argument: arg, is_delegate: False, ..) ->
+      record_split(ana_opt_expr(a, arg), SkYield, arg, None)
     ast.Identifier(..)
     | ast.NumberLiteral(..)
     | ast.BigIntLiteral(..)
@@ -1017,63 +967,54 @@ fn ana_expr(a: Ana, e: ast.Expression, tail: List(ast.StmtWithLine)) -> Ana {
     | ast.RegExpLiteral(..)
     | ast.IntrinsicTemplateObject(..) -> a
     ast.FunctionExpression(..) | ast.ArrowFunctionExpression(..) ->
-      Ana(..a, cur: cursor_pop_child_fn(a.cur))
+      ana_pop_child_fn(a)
     ast.UnaryExpression(argument: x, ..)
     | ast.UpdateExpression(argument: x, ..)
     | ast.SpreadElement(argument: x, ..)
-    | ast.ParenthesizedExpression(expression: x, ..) -> ana_expr(a, x, tail)
+    | ast.ParenthesizedExpression(expression: x, ..) -> ana_expr(a, x)
     ast.BinaryExpression(left: l, right: r, ..)
     | ast.LogicalExpression(left: l, right: r, ..)
     | ast.AssignmentExpression(left: l, right: r, ..) ->
-      ana_expr(ana_expr(a, l, tail), r, tail)
+      ana_expr(ana_expr(a, l), r)
     ast.MemberExpression(object: o, property: p, ..)
     | ast.OptionalMemberExpression(object: o, property: p, ..) -> {
-      let a = ana_expr(a, o, tail)
+      let a = ana_expr(a, o)
       case p {
-        ast.Bracket(expression: pe) -> ana_expr(a, pe, tail)
+        ast.Bracket(expression: pe) -> ana_expr(a, pe)
         ast.Dot(..) -> a
       }
     }
     ast.CallExpression(callee: c, arguments: args, ..)
     | ast.OptionalCallExpression(callee: c, arguments: args, ..)
     | ast.NewExpression(callee: c, arguments: args, ..) ->
-      list.fold(args, ana_expr(a, c, tail), fn(a, x) { ana_expr(a, x, tail) })
+      list.fold(args, ana_expr(a, c), ana_expr)
     ast.ConditionalExpression(condition: c, consequent: t, alternate: f, ..) ->
-      ana_expr(ana_expr(ana_expr(a, c, tail), t, tail), f, tail)
-    ast.SequenceExpression(expressions: xs, ..) ->
-      list.fold(xs, a, fn(a, x) { ana_expr(a, x, tail) })
-    ast.ArrayExpression(elements: xs, ..) ->
-      list.fold(xs, a, fn(a, o) { ana_opt_expr(a, o, tail) })
+      ana_expr(ana_expr(ana_expr(a, c), t), f)
+    ast.SequenceExpression(expressions: xs, ..) -> list.fold(xs, a, ana_expr)
+    ast.ArrayExpression(elements: xs, ..) -> list.fold(xs, a, ana_opt_expr)
     ast.ObjectExpression(properties: ps, ..) ->
       list.fold(ps, a, fn(a, p) {
         case p {
-          ast.InitProperty(key: k, value: v, ..) ->
-            ana_expr(ana_key(a, k, tail), v, tail)
-          ast.MethodProperty(key: k, ..) | ast.AccessorProperty(key: k, ..) -> {
-            let a = ana_key(a, k, tail)
-            Ana(..a, cur: cursor_pop_child_fn(a.cur))
-          }
-          ast.SpreadProperty(argument: x) -> ana_expr(a, x, tail)
+          ast.InitProperty(key: k, value: v, ..) -> ana_expr(ana_key(a, k), v)
+          ast.MethodProperty(key: k, ..) | ast.AccessorProperty(key: k, ..) ->
+            ana_pop_child_fn(ana_key(a, k))
+          ast.SpreadProperty(argument: x) -> ana_expr(a, x)
         }
       })
     ast.TemplateLiteral(parts: parts, ..) ->
-      list.fold(ast.template_expressions(parts), a, fn(a, x) {
-        ana_expr(a, x, tail)
-      })
+      list.fold(ast.template_expressions(parts), a, ana_expr)
     ast.TaggedTemplateExpression(tag: t, parts: parts, ..) ->
-      list.fold(ast.template_expressions(parts), ana_expr(a, t, tail), fn(a, x) {
-        ana_expr(a, x, tail)
-      })
+      list.fold(ast.template_expressions(parts), ana_expr(a, t), ana_expr)
     ast.ImportExpression(source: s, options: o, ..) ->
-      ana_opt_expr(ana_expr(a, s, tail), o, tail)
+      ana_opt_expr(ana_expr(a, s), o)
     ast.ClassExpression(super_class: sc, body: elems, ..) ->
-      ana_class(a, sc, elems, tail)
+      ana_class(a, sc, elems)
   }
 }
 
-fn ana_key(a: Ana, k: ast.PropertyKey, tail) -> Ana {
+fn ana_key(a: Ana, k: ast.PropertyKey) -> Ana {
   case k {
-    ast.KeyComputed(expression: e) -> ana_expr(a, e, tail)
+    ast.KeyComputed(expression: e) -> ana_expr(a, e)
     ast.KeyIdentifier(..)
     | ast.KeyString(..)
     | ast.KeyNumber(..)
@@ -1086,7 +1027,6 @@ fn ana_class(
   a: Ana,
   sc: Option(ast.Expression),
   body: List(ast.ClassElement),
-  tail,
 ) -> Ana {
   let parts = ast_util.classify_class_body(body)
   let #(inner, resume) = cursor_enter_scope(a.tree, a.cur)
@@ -1096,10 +1036,10 @@ fn ana_class(
     False -> a
   }
   let a = ana_pop_child_fn(a)
-  let a = ana_opt_expr(a, sc, tail)
+  let a = ana_opt_expr(a, sc)
   let a =
     list.fold(ast_util.computed_element_keys(body), a, fn(a, key) {
-      ana_expr(a, key.1, tail)
+      ana_expr(a, key.1)
     })
   let a =
     list.fold(
@@ -1118,16 +1058,15 @@ fn ana_pop_child_fn(a: Ana) -> Ana {
   Ana(..a, cur: cursor_pop_child_fn(a.cur))
 }
 
-fn ana_pattern(a: Ana, p: ast.Pattern, tail) -> Ana {
+fn ana_pattern(a: Ana, p: ast.Pattern) -> Ana {
   case p {
     ast.IdentifierPattern(..) -> a
-    ast.AssignmentPattern(left: l, right: r) ->
-      ana_expr(ana_pattern(a, l, tail), r, tail)
-    ast.RestElement(argument: x) -> ana_pattern(a, x, tail)
+    ast.AssignmentPattern(left: l, right: r) -> ana_expr(ana_pattern(a, l), r)
+    ast.RestElement(argument: x) -> ana_pattern(a, x)
     ast.ArrayPattern(elements: xs) ->
       list.fold(xs, a, fn(a, o) {
         case o {
-          Some(x) -> ana_pattern(a, x, tail)
+          Some(x) -> ana_pattern(a, x)
           None -> a
         }
       })
@@ -1135,101 +1074,85 @@ fn ana_pattern(a: Ana, p: ast.Pattern, tail) -> Ana {
       list.fold(ps, a, fn(a, pp) {
         case pp {
           ast.PatternProperty(key: k, value: v, ..) ->
-            ana_pattern(ana_key(a, k, tail), v, tail)
+            ana_pattern(ana_key(a, k), v)
           ast.RestProperty(..) -> a
         }
       })
   }
 }
 
-fn ana_for_init(a: Ana, fi: ast.ForInit, tail) -> Ana {
+fn ana_declarators(a: Ana, ds: List(ast.VariableDeclarator)) -> Ana {
+  use a, d <- list.fold(ds, a)
+  ana_opt_expr(ana_pattern(a, d.id), d.init)
+}
+
+fn ana_for_init(a: Ana, fi: ast.ForInit) -> Ana {
   case fi {
-    ast.ForInitExpression(e) -> ana_expr(a, e, tail)
-    ast.ForInitDeclaration(declarations: ds, ..) ->
-      list.fold(ds, a, fn(a, d: ast.VariableDeclarator) {
-        ana_opt_expr(ana_pattern(a, d.id, tail), d.init, tail)
-      })
-    ast.ForInitPattern(p) -> ana_pattern(a, p, tail)
+    ast.ForInitExpression(e) -> ana_expr(a, e)
+    ast.ForInitDeclaration(declarations: ds, ..) -> ana_declarators(a, ds)
+    ast.ForInitPattern(p) -> ana_pattern(a, p)
   }
 }
 
 fn ana_stmts(a: Ana, ss: List(ast.StmtWithLine)) -> Ana {
-  case ss {
-    [] -> a
-    [sl, ..rest] -> ana_stmts(ana_stmt(a, sl, rest), rest)
-  }
+  list.fold(ss, a, ana_stmt)
 }
 
 fn one_stmt(line: Int, s: ast.Statement) -> List(ast.StmtWithLine) {
   [ast.StmtWithLine(line:, statement: s)]
 }
 
-fn ana_stmt(a: Ana, sl: ast.StmtWithLine, tail: List(ast.StmtWithLine)) -> Ana {
+fn ana_stmt(a: Ana, sl: ast.StmtWithLine) -> Ana {
   let ast.StmtWithLine(statement: s, ..) = sl
   case stmt_has_split(s) {
-    False -> frag_push(ana_stmt_cursor_only(a, s, tail), sl)
+    False -> frag_push(ana_stmt_cursor_only(a, s), sl)
     True ->
       case explode_stmt(a, sl) {
         Some(#(a, exploded)) -> ana_stmts(a, exploded)
-        None -> ana_split_stmt(a, sl, tail)
+        None -> ana_split_stmt(a, sl)
       }
   }
 }
 
-fn ana_split_stmt(
-  a: Ana,
-  sl: ast.StmtWithLine,
-  tail: List(ast.StmtWithLine),
-) -> Ana {
+fn ana_split_stmt(a: Ana, sl: ast.StmtWithLine) -> Ana {
   let ast.StmtWithLine(line:, statement: s) = sl
   case s {
     ast.IfStatement(condition: c, consequent: t, alternate: f) ->
-      plan_ctrl_if(a, line, c, t, f, tail)
-    ast.BlockStatement(body: b) ->
-      with_scope_if(a, ast_util.block_has_declarations(b), fn(a) {
-        ana_stmts(a, b)
-      })
+      plan_ctrl_if(a, line, c, t, f)
+    ast.BlockStatement(body: b) -> ana_block(a, b)
     ast.LabeledStatement(label:, body: b) ->
-      plan_ctrl_labeled(a, line, label, b, tail)
+      plan_ctrl_labeled(a, line, label, b)
     ast.WhileStatement(condition: c, body: b) ->
-      plan_ctrl_while(a, line, None, c, b, tail)
+      plan_ctrl_while(a, line, None, c, b)
     ast.DoWhileStatement(condition: c, body: b) ->
-      plan_ctrl_do_while(a, line, None, c, b, tail)
+      plan_ctrl_do_while(a, line, None, c, b)
     ast.ForStatement(init: i, condition: c, update: u, body: b) ->
-      plan_ctrl_for(a, line, None, i, c, u, b, tail)
-    ast.ForOfStatement(left: l, right: r, body: b, is_await: False) ->
-      plan_ctrl_for_of(a, line, None, l, r, b, False, tail)
-    ast.ForOfStatement(left: l, right: r, body: b, is_await: True) ->
-      plan_ctrl_for_of(a, line, None, l, r, b, True, tail)
+      plan_ctrl_for(a, line, None, i, c, u, b)
+    ast.ForOfStatement(left: l, right: r, body: b, is_await:) ->
+      plan_ctrl_for_of(a, line, None, l, r, b, is_await:)
     ast.ForInStatement(left: l, right: r, body: b) ->
-      plan_ctrl_for_of(a, line, None, l, r, b, False, tail)
+      plan_ctrl_for_of(a, line, None, l, r, b, is_await: False)
     ast.SwitchStatement(discriminant: d, cases: cs) ->
-      plan_ctrl_switch(a, line, None, d, cs, tail)
+      plan_ctrl_switch(a, None, d, cs)
     ast.ExpressionStatement(..)
     | ast.ThrowStatement(..)
     | ast.ReturnStatement(..)
-    | ast.VariableDeclaration(..) -> ana_hoisted(a, hoist_one(sl), tail)
+    | ast.VariableDeclaration(..) -> ana_hoisted(a, hoist_one(sl))
     ast.ClassDeclaration(super_class: sc, body: elems, ..) ->
-      frag_push(ana_class(a, sc, elems, tail), sl)
+      frag_push(ana_class(a, sc, elems), sl)
     ast.WithStatement(object: o, body: b) ->
       case split_of(o) {
         Some(#(kind, operand)) -> {
-          let a = ana_opt_expr(a, operand, tail)
+          let a = ana_opt_expr(a, operand)
           let rw = Some(ResumeWithScope(body: b, line:))
           case kind {
             SkYieldStar -> record_delegate(a, operand, rw)
-            _ -> {
-              let #(_, a) = record_split(a, kind, operand, rw)
-              a
-            }
+            _ -> record_plain_split(a, kind, operand, rw)
           }
         }
-        None -> {
-          let a = ana_expr(a, o, tail)
-          ana_stmts(a, one_stmt(line, b))
-        }
+        None -> ana_stmts(ana_expr(a, o), one_stmt(line, b))
       }
-    ast.TryStatement(block: blk, tail: tt) -> ana_try(a, blk, tt, tail)
+    ast.TryStatement(block: blk, tail: tt) -> ana_try(a, blk, tt)
     ast.EmptyStatement
     | ast.DebuggerStatement
     | ast.BreakStatement(..)
@@ -1238,151 +1161,87 @@ fn ana_split_stmt(
   }
 }
 
-fn ana_hoisted(
-  a: Ana,
-  items: List(HoistedItem),
-  tail: List(ast.StmtWithLine),
-) -> Ana {
-  list.fold(items, a, fn(a, item) {
-    case item {
-      HiStmt(s) -> frag_push(ana_stmt_cursor_only(a, s.statement, tail), s)
-      HiSplit(_, kind, operand, resume) -> {
-        let a = ana_opt_expr(a, operand, tail)
-        let rw = Some(resume)
-        case kind {
-          SkYieldStar -> record_delegate(a, operand, rw)
-          SkYield ->
-            case a.kind {
-              state.CorAsyncGen -> {
-                let #(_, a) = record_split(a, SkAwait, operand, None)
-                let #(ns2, a) = alloc_state(a)
-                let sp =
-                  SplitPoint(
-                    id: ns2,
-                    kind: SkYield,
-                    enclosing_try: ana_region(a),
-                  )
-                let a = Ana(..a, splits: [sp, ..a.splits])
-                let a =
-                  close_open(
-                    a,
-                    AsyncGenYieldSent(ns: ns2),
-                    ns2,
-                    AeResume(SkYield),
-                  )
-                Ana(..a, open_resume: rw)
-              }
-              state.CorAsync | state.CorGenerator -> {
-                let #(_, a) = record_split(a, SkYield, operand, rw)
-                a
-              }
-            }
-          SkAwait | SkForAwait -> {
-            let #(_, a) = record_split(a, kind, operand, rw)
-            a
-          }
-        }
-      }
-    }
-  })
+fn ana_hoisted(a: Ana, items: List(HoistedItem)) -> Ana {
+  use a, item <- list.fold(items, a)
+  case item {
+    HiStmt(s) -> frag_push(ana_stmt_cursor_only(a, s.statement), s)
+    HiSplit(kind:, operand:, resume:) ->
+      record_split(ana_opt_expr(a, operand), kind, operand, Some(resume))
+  }
 }
 
-fn ana_stmt_cursor_only(
-  a: Ana,
-  s: ast.Statement,
-  tail: List(ast.StmtWithLine),
-) -> Ana {
+fn ana_stmt_cursor_only(a: Ana, s: ast.Statement) -> Ana {
   let was = a.cursor_only
-  let a = cursor_only_walk(Ana(..a, cursor_only: True), s, tail)
+  let a = cursor_only_walk(Ana(..a, cursor_only: True), s)
   Ana(..a, cursor_only: was)
 }
 
-fn cursor_only_walk(
-  a: Ana,
-  s: ast.Statement,
-  tail: List(ast.StmtWithLine),
-) -> Ana {
+fn ana_stmts_cursor_only(a: Ana, ss: List(ast.StmtWithLine)) -> Ana {
+  use a, sl <- list.fold(ss, a)
+  ana_stmt_cursor_only(a, sl.statement)
+}
+
+fn ana_block_cursor_only(a: Ana, ss: List(ast.StmtWithLine)) -> Ana {
+  with_scope_if(a, ast_util.block_has_declarations(ss), fn(a) {
+    ana_stmts_cursor_only(a, ss)
+  })
+}
+
+fn cursor_only_walk(a: Ana, s: ast.Statement) -> Ana {
   case s {
-    ast.FunctionDeclaration(..) -> Ana(..a, cur: cursor_pop_child_fn(a.cur))
+    ast.FunctionDeclaration(..) -> ana_pop_child_fn(a)
     ast.ClassDeclaration(super_class: sc, body: elems, ..) ->
-      ana_class(a, sc, elems, tail)
+      ana_class(a, sc, elems)
     ast.ExpressionStatement(expression: e, ..)
-    | ast.ThrowStatement(argument: e) -> ana_expr(a, e, tail)
-    ast.ReturnStatement(argument: arg) -> ana_opt_expr(a, arg, tail)
-    ast.VariableDeclaration(declarations: ds, ..) ->
-      list.fold(ds, a, fn(a, d: ast.VariableDeclarator) {
-        ana_opt_expr(ana_pattern(a, d.id, tail), d.init, tail)
-      })
-    ast.BlockStatement(body: b) ->
-      with_scope_if(a, ast_util.block_has_declarations(b), fn(a) {
-        list.fold(b, a, fn(a, sl: ast.StmtWithLine) {
-          ana_stmt_cursor_only(a, sl.statement, tail)
-        })
-      })
+    | ast.ThrowStatement(argument: e) -> ana_expr(a, e)
+    ast.ReturnStatement(argument: arg) -> ana_opt_expr(a, arg)
+    ast.VariableDeclaration(declarations: ds, ..) -> ana_declarators(a, ds)
+    ast.BlockStatement(body: b) -> ana_block_cursor_only(a, b)
     ast.IfStatement(condition: c, consequent: t, alternate: f) -> {
-      let a = ana_expr(a, c, tail)
-      let a = ana_stmt_cursor_only(a, t, tail)
+      let a = ana_stmt_cursor_only(ana_expr(a, c), t)
       case f {
-        Some(alt) -> ana_stmt_cursor_only(a, alt, tail)
+        Some(alt) -> ana_stmt_cursor_only(a, alt)
         None -> a
       }
     }
     ast.WhileStatement(condition: c, body: b)
-    | ast.DoWhileStatement(condition: c, body: b) -> {
-      let a = ana_expr(a, c, tail)
-      ana_stmt_cursor_only(a, b, tail)
-    }
+    | ast.DoWhileStatement(condition: c, body: b) ->
+      ana_stmt_cursor_only(ana_expr(a, c), b)
     ast.ForStatement(init: i, condition: c, update: u, body: b) ->
       with_scope_if(a, ast_util.for_classic_init_is_lex(i), fn(a) {
         let a = case i {
-          Some(fi) -> ana_for_init(a, fi, tail)
+          Some(fi) -> ana_for_init(a, fi)
           None -> a
         }
-        let a = ana_opt_expr(a, c, tail)
-        let a = ana_opt_expr(a, u, tail)
-        ana_stmt_cursor_only(a, b, tail)
+        let a = ana_opt_expr(a, c)
+        let a = ana_opt_expr(a, u)
+        ana_stmt_cursor_only(a, b)
       })
     ast.ForInStatement(left: l, right: r, body: b)
     | ast.ForOfStatement(left: l, right: r, body: b, ..) ->
       with_scope_if(a, ast_util.for_classic_init_is_lex(Some(l)), fn(a) {
-        let a = ana_for_init(a, l, tail)
-        let a = ana_expr(a, r, tail)
-        ana_stmt_cursor_only(a, b, tail)
+        let a = ana_for_init(a, l)
+        let a = ana_expr(a, r)
+        ana_stmt_cursor_only(a, b)
       })
     ast.SwitchStatement(discriminant: d, cases: cs) -> {
-      let a = ana_expr(a, d, tail)
-      with_scope(a, fn(a) {
-        list.fold(cs, a, fn(a, c: ast.SwitchCase) {
-          let a = ana_opt_expr(a, c.condition, tail)
-          list.fold(c.consequent, a, fn(a, sl: ast.StmtWithLine) {
-            ana_stmt_cursor_only(a, sl.statement, tail)
-          })
-        })
-      })
+      use a <- with_scope(ana_expr(a, d))
+      use a, c <- list.fold(cs, a)
+      ana_stmts_cursor_only(ana_opt_expr(a, c.condition), c.consequent)
     }
-    ast.LabeledStatement(body: b, ..) -> ana_stmt_cursor_only(a, b, tail)
-    ast.WithStatement(object: o, body: b) -> {
-      let a = ana_expr(a, o, tail)
-      ana_stmt_cursor_only(a, b, tail)
-    }
+    ast.LabeledStatement(body: b, ..) -> ana_stmt_cursor_only(a, b)
+    ast.WithStatement(object: o, body: b) ->
+      ana_stmt_cursor_only(ana_expr(a, o), b)
     ast.TryStatement(block: blk, tail: tt) -> {
-      let body_fold = fn(a, ss: List(ast.StmtWithLine)) {
-        list.fold(ss, a, fn(a, sl: ast.StmtWithLine) {
-          ana_stmt_cursor_only(a, sl.statement, tail)
-        })
+      let a = ana_block_cursor_only(a, blk)
+      let catch_cur = fn(a, h: ast.CatchClause) {
+        walk_catch_cur(a, h, ana_stmts_cursor_only(_, h.body))
       }
-      let block_cur = fn(a, ss) {
-        with_scope_if(a, ast_util.block_has_declarations(ss), fn(a) {
-          body_fold(a, ss)
-        })
-      }
-      let a = block_cur(a, blk)
       case tt {
-        ast.TryCatch(handler: h) ->
-          walk_catch_cur(a, h, fn(a) { body_fold(a, h.body) })
-        ast.TryFinally(finalizer: f) -> block_cur(a, f)
+        ast.TryCatch(handler: h) -> catch_cur(a, h)
+        ast.TryFinally(finalizer: f) -> ana_block_cursor_only(a, f)
         ast.TryCatchFinally(handler: h, finalizer: f) ->
-          block_cur(walk_catch_cur(a, h, fn(a) { body_fold(a, h.body) }), f)
+          ana_block_cursor_only(catch_cur(a, h), f)
       }
     }
     ast.EmptyStatement
@@ -1392,31 +1251,20 @@ fn cursor_only_walk(
   }
 }
 
+// none means the arm reads the resumed value instead of an expression
 fn plan_head_expr(
   a: Ana,
   expr: ast.Expression,
-  tail: List(ast.StmtWithLine),
 ) -> #(Option(ast.Expression), Ana) {
-  case split_of(expr) {
-    Some(#(kind, operand)) ->
-      case kind {
-        SkYieldStar -> #(Some(expr), ana_expr(a, expr, tail))
-        SkYield ->
-          case a.kind {
-            state.CorAsyncGen -> #(Some(expr), ana_expr(a, expr, tail))
-            state.CorAsync | state.CorGenerator -> {
-              let a = ana_opt_expr(a, operand, tail)
-              let #(_, a) = record_split(a, SkYield, operand, None)
-              #(None, a)
-            }
-          }
-        SkAwait | SkForAwait -> {
-          let a = ana_opt_expr(a, operand, tail)
-          let #(_, a) = record_split(a, kind, operand, None)
-          #(None, a)
-        }
-      }
-    None -> #(Some(expr), ana_expr(a, expr, tail))
+  case split_of(expr), a.kind {
+    None, _
+    | Some(#(SkYieldStar, _)), _
+    | Some(#(SkYield, _)), state.CorAsyncGen
+    -> #(Some(expr), ana_expr(a, expr))
+    Some(#(kind, operand)), _ -> #(
+      None,
+      record_plain_split(ana_opt_expr(a, operand), kind, operand, None),
+    )
   }
 }
 
@@ -1426,9 +1274,8 @@ fn plan_ctrl_if(
   cond: ast.Expression,
   cons: ast.Statement,
   alt: Option(ast.Statement),
-  tail: List(ast.StmtWithLine),
 ) -> Ana {
-  let #(cond, a) = plan_head_expr(a, cond, tail)
+  let #(cond, a) = plan_head_expr(a, cond)
   let #(then_s, a) = alloc_state(a)
   let #(after, a) = alloc_state(a)
   let #(else_s, a) = case alt {
@@ -1453,7 +1300,6 @@ fn plan_ctrl_while(
   label: Option(String),
   cond: ast.Expression,
   body: ast.Statement,
-  tail: List(ast.StmtWithLine),
 ) -> Ana {
   let #(head, a) = alloc_state(a)
   let #(body_s, a) = alloc_state(a)
@@ -1461,7 +1307,7 @@ fn plan_ctrl_while(
   let #(brk, a) = alloc_sentinel(a)
   let #(cont, a) = alloc_sentinel(a)
   let a = close_open(a, FallTo(head), head, AeJump)
-  let #(cond, a) = plan_head_expr(a, cond, tail)
+  let #(cond, a) = plan_head_expr(a, cond)
   let a =
     close_open(
       a,
@@ -1490,7 +1336,6 @@ fn plan_ctrl_do_while(
   label: Option(String),
   cond: ast.Expression,
   body: ast.Statement,
-  tail: List(ast.StmtWithLine),
 ) -> Ana {
   let #(body_s, a) = alloc_state(a)
   let #(test_s, a) = alloc_state(a)
@@ -1511,7 +1356,7 @@ fn plan_ctrl_do_while(
   let a = ana_stmts(a, one_stmt(line, body))
   let a = pop_sm_label(a)
   let a = close_open(a, FallTo(test_s), test_s, AeJump)
-  let #(cond, a) = plan_head_expr(a, cond, tail)
+  let #(cond, a) = plan_head_expr(a, cond)
   close_open(a, CondBranch(cond:, then_s: body_s, else_s: after), after, AeJump)
 }
 
@@ -1523,13 +1368,12 @@ fn plan_ctrl_for(
   cond: Option(ast.Expression),
   update: Option(ast.Expression),
   body: ast.Statement,
-  tail: List(ast.StmtWithLine),
 ) -> Ana {
   with_scope_if(a, ast_util.for_classic_init_is_lex(init), fn(a) {
     let a = case init {
       None -> a
       Some(fi) -> {
-        let a = ana_for_init(a, fi, tail)
+        let a = ana_for_init(a, fi)
         case fi {
           ast.ForInitExpression(e) ->
             frag_push(
@@ -1561,7 +1405,7 @@ fn plan_ctrl_for(
     let a = close_open(a, FallTo(head), head, AeJump)
     let a = case cond {
       Some(c) -> {
-        let #(c, a) = plan_head_expr(a, c, tail)
+        let #(c, a) = plan_head_expr(a, c)
         close_open(
           a,
           CondBranch(cond: c, then_s: body_s, else_s: after),
@@ -1585,7 +1429,7 @@ fn plan_ctrl_for(
     let a = pop_sm_label(a)
     let a = close_open(a, FallTo(update_s), update_s, AeJump)
     let #(update, a) = case update {
-      Some(u) -> plan_head_expr(a, u, tail)
+      Some(u) -> plan_head_expr(a, u)
       None -> #(None, a)
     }
     close_open(a, ForUpdate(update:, head:), after, AeJump)
@@ -1599,44 +1443,39 @@ fn plan_ctrl_for_of(
   left: ast.ForInit,
   right: ast.Expression,
   body: ast.Statement,
-  is_await: Bool,
-  tail: List(ast.StmtWithLine),
+  is_await is_await: Bool,
 ) -> Ana {
-  with_scope_if(a, ast_util.for_classic_init_is_lex(Some(left)), fn(a) {
-    case is_await {
-      True -> plan_ctrl_for_await(a, line, label, left, right, body, tail)
-      False -> {
-        let #(head, a) = alloc_state(a)
-        let #(body_s, a) = alloc_state(a)
-        let #(after, a) = alloc_state(a)
-        let #(brk, a) = alloc_sentinel(a)
-        let #(cont, a) = alloc_sentinel(a)
-        let ikey = iter_key(head)
-        let a =
-          close_open(a, ForOfSetup(right:, iter_key: ikey, head:), head, AeJump)
-        let a =
-          close_open(
-            a,
-            ForOfStep(left:, iter_key: ikey, body_s:, after:, is_await: False),
-            body_s,
-            AeJump,
-          )
-        let sm_label =
-          SmLoop(
-            js_label: label,
-            brk_sentinel: brk,
-            cont_sentinel: cont,
-            break_state: after,
-            continue_state: head,
-            enclosing_try: ana_region(a),
-          )
-        let a = push_sm_label(a, sm_label)
-        let a = ana_stmts(a, one_stmt(line, body))
-        let a = pop_sm_label(a)
-        close_open(a, FallTo(head), after, AeJump)
-      }
-    }
+  use a <- with_scope_if(a, ast_util.for_classic_init_is_lex(Some(left)))
+  use <- bool.lazy_guard(is_await, fn() {
+    plan_ctrl_for_await(a, line, label, left, right, body)
   })
+  let #(head, a) = alloc_state(a)
+  let #(body_s, a) = alloc_state(a)
+  let #(after, a) = alloc_state(a)
+  let #(brk, a) = alloc_sentinel(a)
+  let #(cont, a) = alloc_sentinel(a)
+  let ikey = iter_key(head)
+  let a = close_open(a, ForOfSetup(right:, iter_key: ikey, head:), head, AeJump)
+  let a =
+    close_open(
+      a,
+      ForOfStep(left:, iter_key: ikey, body_s:, after:),
+      body_s,
+      AeJump,
+    )
+  let sm_label =
+    SmLoop(
+      js_label: label,
+      brk_sentinel: brk,
+      cont_sentinel: cont,
+      break_state: after,
+      continue_state: head,
+      enclosing_try: ana_region(a),
+    )
+  let a = push_sm_label(a, sm_label)
+  let a = ana_stmts(a, one_stmt(line, body))
+  let a = pop_sm_label(a)
+  close_open(a, FallTo(head), after, AeJump)
 }
 
 fn plan_ctrl_for_await(
@@ -1646,7 +1485,6 @@ fn plan_ctrl_for_await(
   left: ast.ForInit,
   right: ast.Expression,
   body: ast.Statement,
-  tail: List(ast.StmtWithLine),
 ) -> Ana {
   let #(head, a) = alloc_state(a)
   let #(check, a) = alloc_state(a)
@@ -1655,8 +1493,6 @@ fn plan_ctrl_for_await(
   let #(brk, a) = alloc_sentinel(a)
   let #(cont, a) = alloc_sentinel(a)
   let region = ana_region(a)
-  let sp = SplitPoint(id: check, kind: SkForAwait, enclosing_try: region)
-  let a = Ana(..a, splits: [sp, ..a.splits])
   let spec =
     ForAwaitSpec(
       head:,
@@ -1679,7 +1515,7 @@ fn plan_ctrl_for_await(
       enclosing_try: region,
     )
   let a = push_sm_label(a, sm_label)
-  let a = ana_for_init(a, left, tail)
+  let a = ana_for_init(a, left)
   let a = ana_stmts(a, one_stmt(line, body))
   let a = pop_sm_label(a)
   close_open(a, FallTo(head), after, AeJump)
@@ -1687,13 +1523,11 @@ fn plan_ctrl_for_await(
 
 fn plan_ctrl_switch(
   a: Ana,
-  _line: Int,
   label: Option(String),
   disc: ast.Expression,
   cases: List(ast.SwitchCase),
-  tail: List(ast.StmtWithLine),
 ) -> Ana {
-  let #(disc, a) = plan_head_expr(a, disc, tail)
+  let #(disc, a) = plan_head_expr(a, disc)
   let #(after, a) = alloc_state(a)
   let #(brk, a) = alloc_sentinel(a)
   with_scope(a, fn(a) {
@@ -1762,21 +1596,20 @@ fn plan_ctrl_labeled(
   line: Int,
   label: String,
   body: ast.Statement,
-  tail: List(ast.StmtWithLine),
 ) -> Ana {
   case body {
     ast.WhileStatement(condition: c, body: b) ->
-      plan_ctrl_while(a, line, Some(label), c, b, tail)
+      plan_ctrl_while(a, line, Some(label), c, b)
     ast.DoWhileStatement(condition: c, body: b) ->
-      plan_ctrl_do_while(a, line, Some(label), c, b, tail)
+      plan_ctrl_do_while(a, line, Some(label), c, b)
     ast.ForStatement(init: i, condition: c, update: u, body: b) ->
-      plan_ctrl_for(a, line, Some(label), i, c, u, b, tail)
+      plan_ctrl_for(a, line, Some(label), i, c, u, b)
     ast.ForOfStatement(left: l, right: r, body: b, is_await:) ->
-      plan_ctrl_for_of(a, line, Some(label), l, r, b, is_await, tail)
+      plan_ctrl_for_of(a, line, Some(label), l, r, b, is_await:)
     ast.ForInStatement(left: l, right: r, body: b) ->
-      plan_ctrl_for_of(a, line, Some(label), l, r, b, False, tail)
+      plan_ctrl_for_of(a, line, Some(label), l, r, b, is_await: False)
     ast.SwitchStatement(discriminant: d, cases: cs) ->
-      plan_ctrl_switch(a, line, Some(label), d, cs, tail)
+      plan_ctrl_switch(a, Some(label), d, cs)
     ast.LabeledStatement(label: inner, body: b) -> {
       let #(after, a) = alloc_state(a)
       let #(brk, a) = alloc_sentinel(a)
@@ -1788,7 +1621,7 @@ fn plan_ctrl_labeled(
           enclosing_try: ana_region(a),
         )
       let a = push_sm_label(a, alias)
-      let a = plan_ctrl_labeled(a, line, inner, b, tail)
+      let a = plan_ctrl_labeled(a, line, inner, b)
       let a = pop_sm_label(a)
       close_open(a, FallTo(after), after, AeJump)
     }
@@ -1810,43 +1643,31 @@ fn plan_ctrl_labeled(
   }
 }
 
-fn ana_try(
-  a: Ana,
-  block: List(ast.StmtWithLine),
-  tt: ast.TryTail,
-  tail: List(ast.StmtWithLine),
-) -> Ana {
+fn ana_block(a: Ana, ss: List(ast.StmtWithLine)) -> Ana {
+  with_scope_if(a, ast_util.block_has_declarations(ss), ana_stmts(_, ss))
+}
+
+fn ana_catch(a: Ana, h: ast.CatchClause) -> Ana {
+  walk_catch_cur(a, h, ana_stmts(_, h.body))
+}
+
+fn ana_try(a: Ana, block: List(ast.StmtWithLine), tt: ast.TryTail) -> Ana {
   let #(handler, finalizer) = case tt {
     ast.TryCatch(handler: h) -> #(Some(h), None)
     ast.TryFinally(finalizer: f) -> #(None, Some(f))
     ast.TryCatchFinally(handler: h, finalizer: f) -> #(Some(h), Some(f))
   }
-  let contains_split =
-    stmts_have_split(block)
-    || case handler {
-      Some(h) -> catch_has_split(h)
-      None -> False
-    }
-    || case finalizer {
-      Some(f) -> stmts_have_split(f)
-      None -> False
-    }
-  let block_has = ast_util.block_has_declarations(block)
-  case contains_split {
-    False -> {
-      let a = with_scope_if(a, block_has, fn(a) { ana_stmts(a, block) })
-      let a = case handler {
-        Some(h) -> walk_catch_cur(a, h, fn(a) { ana_stmts(a, h.body) })
-        None -> a
-      }
-      case finalizer {
-        Some(f) ->
-          with_scope_if(a, ast_util.block_has_declarations(f), fn(a) {
-            ana_stmts(a, f)
-          })
-        None -> a
-      }
-    }
+  let catch_split = option.map(handler, catch_has_split) |> option.unwrap(False)
+  let finally_split =
+    option.map(finalizer, stmts_have_split) |> option.unwrap(False)
+  let ana_handler = fn(a) {
+    option.map(handler, ana_catch(a, _)) |> option.unwrap(a)
+  }
+  let ana_finalizer = fn(a) {
+    option.map(finalizer, ana_block(a, _)) |> option.unwrap(a)
+  }
+  case stmts_have_split(block) || catch_split || finally_split {
+    False -> ana_block(a, block) |> ana_handler |> ana_finalizer
     True -> {
       let try_id = a.next_try
       let outer = ana_region(a)
@@ -1856,7 +1677,7 @@ fn ana_try(
       let a = close_open(a, FallTo(block_entry), block_entry, AeJump)
       let a =
         Ana(..a, try_stack: [try_id, ..a.try_stack], open_region: Some(try_id))
-      let a = with_scope_if(a, block_has, fn(a) { ana_stmts(a, block) })
+      let a = ana_block(a, block)
       let a =
         Ana(..a, try_stack: case a.try_stack {
           [_, ..rest] -> rest
@@ -1880,14 +1701,6 @@ fn ana_try(
       let normal_tail = case finally_state {
         Some(fs) -> FallToFinally(try_id, fs)
         None -> FallTo(after_state)
-      }
-      let catch_split = case handler {
-        Some(h) -> catch_has_split(h)
-        None -> False
-      }
-      let finally_split = case finalizer {
-        Some(f) -> stmts_have_split(f)
-        None -> False
       }
       let #(a, catch_close_tail) = case handler, catch_state, catch_split {
         Some(h), Some(cs), True -> {
@@ -1924,7 +1737,7 @@ fn ana_try(
             None -> #(a, None)
           }
           let a = Ana(..a, open_resume: Some(ResumeCatch(try_id, h.param)))
-          let a = walk_catch_cur(a, h, fn(a) { ana_stmts(a, h.body) })
+          let a = ana_catch(a, h)
           let a = case view {
             Some(v) ->
               Ana(..a, tries: [v, ..a.tries], try_stack: case a.try_stack {
@@ -1938,36 +1751,20 @@ fn ana_try(
         _, _, _ -> {
           let #(sink, a) = alloc_state(a)
           let a = close_open(a, normal_tail, sink, AeJump)
-          let a = case handler {
-            Some(h) -> walk_catch_cur(a, h, fn(a) { ana_stmts(a, h.body) })
-            None -> a
-          }
-          #(a, SegDone)
+          #(ana_handler(a), SegDone)
         }
       }
       let #(finally_cursor, a) = case finalizer, finally_state, finally_split {
         Some(f), Some(fs), True -> {
           let a = close_open(a, catch_close_tail, fs, AeJump)
-          let a =
-            with_scope_if(a, ast_util.block_has_declarations(f), fn(a) {
-              ana_stmts(a, f)
-            })
+          let a = ana_block(a, f)
           #(None, close_open(a, FinallyEnd(try_id), after_state, AeJump))
         }
         _, _, _ -> {
           let #(sink, a) = alloc_state(a)
           let a = close_open(a, catch_close_tail, sink, AeJump)
-          let finally_cursor = case finalizer {
-            Some(_) -> Some(a.cur)
-            None -> None
-          }
-          let a = case finalizer {
-            Some(f) ->
-              with_scope_if(a, ast_util.block_has_declarations(f), fn(a) {
-                ana_stmts(a, f)
-              })
-            None -> a
-          }
+          let finally_cursor = option.map(finalizer, fn(_) { a.cur })
+          let a = ana_finalizer(a)
           #(finally_cursor, close_open(a, SegDone, after_state, AeJump))
         }
       }
@@ -2016,7 +1813,6 @@ fn analyze_splits(
       try_stack: [],
       sm_labels: [],
       cur: cur0,
-      splits: [],
       tries: [],
       arms: [],
       delegates: [],
@@ -2035,7 +1831,6 @@ fn analyze_splits(
   }
   let a = close_open(a, BodyEnd, a.next_state, AeJump)
   SplitPlan(
-    n_states: a.next_state,
     n_temps: a.next_temp,
     arms: list.reverse(a.arms),
     try_entries: list.reverse(a.tries),
@@ -2044,30 +1839,30 @@ fn analyze_splits(
   )
 }
 
-pub fn pending_key(try_id: Int) -> String {
+fn pending_key(try_id: Int) -> String {
   "pending_" <> int.to_string(try_id)
 }
 
-pub fn caught_key(try_id: Int) -> String {
+fn caught_key(try_id: Int) -> String {
   "caught_" <> int.to_string(try_id)
 }
 
-pub fn iter_key(state_id: Int) -> String {
+fn iter_key(state_id: Int) -> String {
   "iter_" <> int.to_string(state_id)
 }
 
-pub fn inner_key(state_id: Int) -> String {
+fn inner_key(state_id: Int) -> String {
   "inner_" <> int.to_string(state_id)
 }
 
 // not a js value, marks the result slot until the first inner call
 const delegate_start = "yield_star_start"
 
-pub fn delegate_result_key(state_id: Int) -> String {
+fn delegate_result_key(state_id: Int) -> String {
   "delegate_result_" <> int.to_string(state_id)
 }
 
-pub fn for_await_iter_key(head: Int) -> String {
+fn for_await_iter_key(head: Int) -> String {
   "iter_fa_" <> int.to_string(head)
 }
 
@@ -2193,25 +1988,18 @@ fn initial_loc_loop(
   }
 }
 
-pub fn enrich_try_entries(
+fn enrich_try_entries(
   entries: List(TryEntry),
   layout: LocLayout,
 ) -> List(TryEntry) {
   use entry <- list.map(entries)
   let pending_loc_idx =
     dict.get(layout.extras, pending_key(entry.pending_id))
-    |> idx_or(entry.pending_loc_idx)
+    |> result.unwrap(entry.pending_loc_idx)
   let caught_loc_idx =
     dict.get(layout.extras, caught_key(entry.id))
-    |> idx_or(entry.caught_loc_idx)
+    |> result.unwrap(entry.caught_loc_idx)
   TryEntry(..entry, pending_loc_idx:, caught_loc_idx:)
-}
-
-fn idx_or(r: Result(Int, Nil), default: Int) -> Int {
-  case r {
-    Ok(v) -> v
-    Error(Nil) -> default
-  }
 }
 
 fn step_return(v: ir.Value) -> ir.Expr {
@@ -2261,33 +2049,11 @@ fn pack_loc_build(
     True ->
       case dict.get(overrides, i) {
         Ok(v) -> pack_loc_build(ctx, overrides, i + 1, [v, ..acc])
-        Error(_) ->
+        Error(Nil) ->
           anf.then(anf.bind(anf.tuple_get(ctx.loc_v, i)), fn(v) {
             pack_loc_build(ctx, overrides, i + 1, [v, ..acc])
           })
       }
-  }
-}
-
-fn restore_locals(ctx: SmCtx) -> anf.Build(Dict(Int, ir.Value)) {
-  let entries =
-    ctx.layout.slot_to_idx
-    |> dict.to_list
-    |> list.sort(fn(a, b) { int.compare(a.0, b.0) })
-  restore_locals_fold(ctx, entries, dict.new())
-}
-
-fn restore_locals_fold(
-  ctx: SmCtx,
-  entries: List(#(Int, Int)),
-  acc: Dict(Int, ir.Value),
-) -> anf.Build(Dict(Int, ir.Value)) {
-  case entries {
-    [] -> anf.pure(acc)
-    [#(slot, idx), ..rest] ->
-      anf.then(anf.bind(anf.tuple_get(ctx.loc_v, idx)), fn(v) {
-        restore_locals_fold(ctx, rest, dict.insert(acc, slot, v))
-      })
   }
 }
 
@@ -2296,14 +2062,10 @@ fn sm_default_arm(e: Emitter2) -> #(ir.Expr, Emitter2) {
   anf.run_to(anf.host("new_error", [msg]), e, fn(_e, err) { step_throw(err) })
 }
 
-fn cap_param_name(e: Emitter2, i: Int) -> String {
-  state.cap_param_name(e, i)
-}
-
 fn build_sm_params(e: Emitter2, i: Int, ncap: Int) -> List(ir.Local) {
   case i < ncap {
     True -> [
-      ir.Local(cap_param_name(e, i), ir.TTerm),
+      ir.Local(state.cap_param_name(e, i), ir.TTerm),
       ..build_sm_params(e, i + 1, ncap)
     ]
     False -> [
@@ -2364,7 +2126,7 @@ fn build_outer_params(e: Emitter2, i: Int, n: Int) -> List(ir.Local) {
   case i < n {
     False -> [ir.Local("_frame", ir.TTerm), ir.Local("_args", ir.TTerm)]
     True -> [
-      ir.Local(cap_param_name(e, i), ir.TTerm),
+      ir.Local(state.cap_param_name(e, i), ir.TTerm),
       ..build_outer_params(e, i + 1, n)
     ]
   }
@@ -2373,7 +2135,7 @@ fn build_outer_params(e: Emitter2, i: Int, n: Int) -> List(ir.Local) {
 fn cap_vars(e: Emitter2, i: Int, n: Int) -> List(ir.Value) {
   case i < n {
     False -> []
-    True -> [ir.Var(cap_param_name(e, i)), ..cap_vars(e, i + 1, n)]
+    True -> [ir.Var(state.cap_param_name(e, i)), ..cap_vars(e, i + 1, n)]
   }
 }
 
@@ -2500,7 +2262,7 @@ fn pack_loc_expr_go(
     True ->
       case dict.get(overrides, i) {
         Ok(v) -> pack_loc_expr_go(ctx, overrides, i + 1, [v, ..acc], k)
-        Error(_) -> {
+        Error(Nil) -> {
           // fixed names are safe, callers sit in a fresh let scope
           let name = "_pk" <> int.to_string(i)
           ir.Let(
@@ -2548,7 +2310,6 @@ fn route_return(ctx: SmCtx, region: Option(TryEntry), v: ir.Value) -> ir.Expr {
 
 fn wrap_arm_try(
   ctx: SmCtx,
-  _n: Int,
   region: Option(TryEntry),
   inner: ir.Expr,
 ) -> ir.Expr {
@@ -2782,7 +2543,6 @@ fn emit_delegate_await_arm(
   e: Emitter2,
   ctx: SmCtx,
   d: DelegateSpec,
-  _iter_idx: Int,
   result_idx: Int,
 ) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
   let b = {
@@ -2856,10 +2616,7 @@ fn find_try_entry(ctx: SmCtx, id: Int) -> Option(TryEntry) {
 }
 
 fn outer_entry(ctx: SmCtx, entry: TryEntry) -> Option(TryEntry) {
-  case entry.outer {
-    None -> None
-    Some(oid) -> find_try_entry(ctx, oid)
-  }
+  find_try(ctx.try_entries, entry.outer)
 }
 
 fn restore_and_seed(
@@ -2887,19 +2644,6 @@ fn restore_and_seed_go(
   }
 }
 
-fn jump_state_leaf(
-  e: Emitter2,
-  ctx: SmCtx,
-  ns: Int,
-  overrides: Dict(Int, ir.Value),
-) -> #(ir.Expr, Emitter2) {
-  cps_pair(e, fn(e, k) {
-    pack_loc_cps(e, ctx, overrides, fn(e, loc) {
-      k(e, sm_continue(ctx, ns, loc))
-    })
-  })
-}
-
 fn dispatch_throw(
   e: Emitter2,
   ctx: SmCtx,
@@ -2909,31 +2653,17 @@ fn dispatch_throw(
   case outer {
     None -> #(step_throw(carry), e)
     Some(o) ->
-      case o.catch_state {
-        Some(cs) ->
+      case o.catch_state, o.finally_state {
+        Some(cs), _ ->
           jump_state_leaf(
             e,
             ctx,
             cs,
             dict.from_list([#(o.caught_loc_idx, carry)]),
           )
-        None ->
-          case o.finally_state {
-            Some(fs) -> {
-              let #(pn, e) = state.fresh_var(e)
-              let #(jump, e) =
-                jump_state_leaf(
-                  e,
-                  ctx,
-                  fs,
-                  dict.from_list([#(o.pending_loc_idx, ir.Var(pn))]),
-                )
-              let pend =
-                ir.TermOp(ir.MakeTuple, [ir.ConstI32(pend_throw), carry])
-              #(ir.Let([pn], pend, jump), e)
-            }
-            None -> dispatch_throw(e, ctx, outer_entry(ctx, o), carry)
-          }
+        None, Some(fs) ->
+          jump_to_finally(e, ctx, o, fs, pending_tuple(PkThrow(carry)))
+        None, None -> dispatch_throw(e, ctx, outer_entry(ctx, o), carry)
       }
   }
 }
@@ -2948,18 +2678,8 @@ fn dispatch_return(
     None -> #(step_return(carry), e)
     Some(o) ->
       case o.finally_state {
-        Some(fs) -> {
-          let #(pn, e) = state.fresh_var(e)
-          let #(jump, e) =
-            jump_state_leaf(
-              e,
-              ctx,
-              fs,
-              dict.from_list([#(o.pending_loc_idx, ir.Var(pn))]),
-            )
-          let pend = ir.TermOp(ir.MakeTuple, [ir.ConstI32(pend_return), carry])
-          #(ir.Let([pn], pend, jump), e)
-        }
+        Some(fs) ->
+          jump_to_finally(e, ctx, o, fs, pending_tuple(PkReturn(carry)))
         None -> dispatch_return(e, ctx, outer_entry(ctx, o), carry)
       }
   }
@@ -2972,29 +2692,20 @@ fn dispatch_goto(
   carry: ir.Value,
 ) -> #(ir.Expr, Emitter2) {
   case outer {
-    None ->
-      cps_pair(e, fn(e, k) {
-        let #(ns, e) = state.fresh_var(e)
-        anf.wrap(
-          pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
-            k(e, ir.Continue(ctx.lresume, [ir.Var(ns), loc]))
-          }),
-          ir.Let([ns], ir.Convert(ir.UnboxInt(ir.W32), carry), _),
-        )
-      })
+    None -> {
+      // carry is the boxed target state, not a compile-time int
+      let #(ns, e) = state.fresh_var(e)
+      let jump = {
+        use e, loc <- pack_loc_cps(e, ctx, dict.new())
+        #(ir.Continue(ctx.lresume, [ir.Var(ns), loc]), e)
+      }
+      anf.wrap(jump, ir.Let([ns], ir.Convert(ir.UnboxInt(ir.W32), carry), _))
+    }
     Some(o) ->
       case o.finally_state {
         Some(fs) -> {
-          let #(pn, e) = state.fresh_var(e)
-          let #(jump, e) =
-            jump_state_leaf(
-              e,
-              ctx,
-              fs,
-              dict.from_list([#(o.pending_loc_idx, ir.Var(pn))]),
-            )
           let pend = ir.TermOp(ir.MakeTuple, [ir.ConstI32(pend_goto), carry])
-          #(ir.Let([pn], pend, jump), e)
+          jump_to_finally(e, ctx, o, fs, pend)
         }
         None -> dispatch_goto(e, ctx, outer_entry(ctx, o), carry)
       }
@@ -3178,7 +2889,7 @@ fn emit_arm_body(
             let entry = find_try_entry(ctx, try_id)
             let idx = case entry {
               Some(t) -> t.caught_loc_idx
-              None -> panic as "M18: ResumeCatch on unknown try region"
+              None -> panic as "aot/async: ResumeCatch on unknown try region"
             }
             let #(caught_n, e) = state.fresh_var(e)
             use #(dtree, e) <- result.map(e.dispatch.emit_destructure(
@@ -3229,14 +2940,7 @@ fn emit_seg_tail(
     BodyEnd -> Ok(#(step_return(e.consts.undef), e))
     // unreachable in practice, keeps the arm well-typed
     SegDone -> Ok(#(step_return(e.consts.undef), e))
-    FallTo(to) ->
-      Ok(
-        cps_pair(e, fn(e, k) {
-          pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
-            k(e, sm_continue(ctx, to, loc))
-          })
-        }),
-      )
+    FallTo(to) -> Ok(jump_state_leaf(e, ctx, to, dict.new()))
     FallToFinally(try_id, to) ->
       case find_try_entry(ctx, try_id) {
         Some(entry) ->
@@ -3246,7 +2950,7 @@ fn emit_seg_tail(
             to,
             dict.from_list([#(entry.pending_loc_idx, ir.ConstAtom("normal"))]),
           ))
-        None -> panic as "M18: FallToFinally on unknown try region"
+        None -> panic as "aot/async: FallToFinally on unknown try region"
       }
     FinallyEnd(try_id) ->
       case find_try_entry(ctx, try_id) {
@@ -3262,13 +2966,10 @@ fn emit_seg_tail(
             e,
           ))
         }
-        None -> panic as "M18: FinallyEnd on unknown try region"
+        None -> panic as "aot/async: FinallyEnd on unknown try region"
       }
     SplitAt(kind, arg, ns) -> {
-      use #(operand_tree, e) <- result.try(case arg {
-        Some(ex) -> e.dispatch.emit_expr(e, ex)
-        None -> Ok(#(ir.Values([e.consts.undef]), e))
-      })
+      use #(operand_tree, e) <- result.try(emit_opt_expr(e, arg, e.consts.undef))
       let #(v_n, e) = state.fresh_var(e)
       case kind {
         SkYieldStar -> {
@@ -3285,155 +2986,87 @@ fn emit_seg_tail(
               SkYield | SkYieldStar -> step_yield(v, ns, loc)
             }
           }
-          Ok(
-            cps_pair(e, fn(e, k) {
-              anf.wrap(
-                pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
-                  k(e, step(ir.Var(v_n), loc))
-                }),
-                ir.Let([v_n], operand_tree, _),
-              )
-            }),
-          )
+          let suspend = {
+            use e, loc <- pack_loc_cps(e, ctx, dict.new())
+            #(step(ir.Var(v_n), loc), e)
+          }
+          Ok(anf.wrap(suspend, ir.Let([v_n], operand_tree, _)))
         }
       }
     }
     CondBranch(cond, then_s, else_s) -> {
-      use #(cond_tree, e) <- result.try(case cond {
-        Some(ex) -> e.dispatch.emit_expr(e, ex)
-        None -> Ok(#(ir.Values([ctx.sent_v]), e))
-      })
+      use #(cond_tree, e) <- result.try(emit_opt_expr(e, cond, ctx.sent_v))
       let #(cv_n, e) = state.fresh_var(e)
       let #(ti_n, e) = state.fresh_var(e)
+      let branch = {
+        use e, loc <- pack_loc_cps(e, ctx, dict.new())
+        let then_jump = sm_continue(ctx, then_s, loc)
+        let else_jump = sm_continue(ctx, else_s, loc)
+        #(ir.If(ir.Var(ti_n), [ir.TTerm], then_jump, else_jump), e)
+      }
+      let cv = option.unwrap(state.let_tail_value(cond_tree), ir.Var(cv_n))
       Ok(
-        cps_pair(e, fn(e, k) {
-          anf.wrap(
-            pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
-              k(
-                e,
-                ir.If(
-                  ir.Var(ti_n),
-                  [ir.TTerm],
-                  sm_continue(ctx, then_s, loc),
-                  sm_continue(ctx, else_s, loc),
-                ),
-              )
-            }),
-            fn(t) {
-              let cv =
-                option.unwrap(state.let_tail_value(cond_tree), ir.Var(cv_n))
-              state.splice_let(
-                cond_tree,
-                cv_n,
-                ir.Let([ti_n], ir.CallHost("js", "truthy", [cv]), t),
-              )
-            },
+        anf.wrap(branch, fn(t) {
+          state.splice_let(
+            cond_tree,
+            cv_n,
+            ir.Let([ti_n], ir.CallHost("js", "truthy", [cv]), t),
           )
         }),
       )
     }
     ForUpdate(update, head) -> {
-      use #(upd_tree, e) <- result.try(case update {
-        Some(ex) -> e.dispatch.emit_expr(e, ex)
-        None -> Ok(#(ir.Values([e.consts.undef]), e))
-      })
+      use #(upd_tree, e) <- result.try(emit_opt_expr(e, update, e.consts.undef))
       let #(tmp, e) = state.fresh_var(e)
-      Ok(
-        cps_pair(e, fn(e, k) {
-          anf.wrap(
-            pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
-              k(e, sm_continue(ctx, head, loc))
-            }),
-            state.splice_let(upd_tree, tmp, _),
-          )
-        }),
-      )
+      let jump = jump_state_leaf(e, ctx, head, dict.new())
+      Ok(anf.wrap(jump, state.splice_let(upd_tree, tmp, _)))
     }
-    ForOfStep(left, iter_key, body_s, after, is_await) ->
-      emit_for_of_step(e, ctx, left, iter_key, body_s, after, is_await)
-    ForOfSetup(right, iter_key, head) -> {
-      use #(rhs_tree, e) <- result.try(e.dispatch.emit_expr(e, right))
-      let iter_idx = extra_idx(ctx.layout, iter_key)
-      let #(rhs_n, e) = state.fresh_var(e)
-      let #(iter_n, e) = state.fresh_var(e)
-      Ok(
-        cps_pair(e, fn(e, k) {
-          anf.wrap(
-            pack_loc_cps(
-              e,
-              ctx,
-              dict.from_list([#(iter_idx, ir.Var(iter_n))]),
-              fn(e, loc) { k(e, sm_continue(ctx, head, loc)) },
-            ),
-            fn(t) {
-              ir.Let(
-                [rhs_n],
-                rhs_tree,
-                ir.Let(
-                  [iter_n],
-                  ir.CallHost("js", "get_iterator", [
-                    ir.Var(rhs_n),
-                    ir.ConstAtom("sync"),
-                  ]),
-                  t,
-                ),
-              )
-            },
-          )
-        }),
-      )
-    }
+    ForOfStep(left, iter_key, body_s, after) ->
+      emit_for_of_step(e, ctx, left, iter_key, body_s, after)
+    ForOfSetup(right, iter_key, head) ->
+      emit_iterator_setup(e, ctx, right, iter_key, ir.ConstAtom("sync"), head)
     ForAwaitSetup(right, head) -> {
-      use #(rhs_tree, e) <- result.try(e.dispatch.emit_expr(e, right))
-      let iter_idx = extra_idx(ctx.layout, for_await_iter_key(head))
-      let #(rhs_n, e) = state.fresh_var(e)
-      let #(iter_n, e) = state.fresh_var(e)
-      Ok(
-        cps_pair(e, fn(e, k) {
-          anf.wrap(
-            pack_loc_cps(
-              e,
-              ctx,
-              dict.from_list([#(iter_idx, ir.Var(iter_n))]),
-              fn(e, loc) { k(e, sm_continue(ctx, head, loc)) },
-            ),
-            fn(t) {
-              ir.Let(
-                [rhs_n],
-                rhs_tree,
-                ir.Let(
-                  [iter_n],
-                  ir.CallHost("js", "get_iterator", [
-                    ir.Var(rhs_n),
-                    ir.ConstAtom("async"),
-                  ]),
-                  t,
-                ),
-              )
-            },
-          )
-        }),
-      )
+      let hint = ir.ConstAtom("async")
+      emit_iterator_setup(e, ctx, right, for_await_iter_key(head), hint, head)
     }
     AsyncGenYieldSent(ns) ->
-      Ok(
-        cps_pair(e, fn(e, k) {
-          pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
-            k(e, step_yield(ctx.sent_v, ns, loc))
-          })
-        }),
-      )
+      Ok({
+        use e, loc <- pack_loc_cps(e, ctx, dict.new())
+        #(step_yield(ctx.sent_v, ns, loc), e)
+      })
     SwitchDispatch(disc, tests, after) ->
       emit_switch_dispatch(e, ctx, disc, tests, after)
   }
 }
 
-fn cps_pair(
+fn emit_opt_expr(
   e: Emitter2,
-  f: fn(Emitter2, fn(Emitter2, ir.Expr) -> #(ir.Expr, Emitter2)) ->
-    #(ir.Expr, Emitter2),
-) -> #(ir.Expr, Emitter2) {
-  f(e, fn(ef, tail) { #(tail, ef) })
+  arg: Option(ast.Expression),
+  otherwise: ir.Value,
+) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
+  case arg {
+    Some(ex) -> e.dispatch.emit_expr(e, ex)
+    None -> Ok(#(ir.Values([otherwise]), e))
+  }
+}
+
+// gets the iterator for right, stores it in the iter slot, jumps to head
+fn emit_iterator_setup(
+  e: Emitter2,
+  ctx: SmCtx,
+  right: ast.Expression,
+  iter_key: String,
+  hint: ir.Value,
+  head: Int,
+) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
+  use #(rhs_tree, e) <- result.map(e.dispatch.emit_expr(e, right))
+  let iter_idx = extra_idx(ctx.layout, iter_key)
+  let #(rhs_n, e) = state.fresh_var(e)
+  let #(iter_n, e) = state.fresh_var(e)
+  let over = dict.from_list([#(iter_idx, ir.Var(iter_n))])
+  use t <- anf.wrap(jump_state_leaf(e, ctx, head, over))
+  let get_iter = ir.CallHost("js", "get_iterator", [ir.Var(rhs_n), hint])
+  ir.Let([rhs_n], rhs_tree, ir.Let([iter_n], get_iter, t))
 }
 
 fn emit_for_of_step(
@@ -3443,48 +3076,27 @@ fn emit_for_of_step(
   iter_key: String,
   body_s: Int,
   after: Int,
-  is_await: Bool,
 ) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
   let iter_idx = extra_idx(ctx.layout, iter_key)
   run_rk(e, fn(e, done) {
     let #(iter_n, e) = state.fresh_var(e)
     let #(res_n, e) = state.fresh_var(e)
-    let res_rhs = case is_await {
-      True -> ir.Values([ctx.sent_v])
-      False -> ir.CallHost("js", "iter_next", [ir.Var(iter_n)])
-    }
     let #(done_t, e) = state.fresh_var(e)
     let #(done_i, e) = state.fresh_var(e)
     let #(val_n, e) = state.fresh_var(e)
     let #(dk_n, e) = state.fresh_var(e)
     let #(vk_n, e) = state.fresh_var(e)
-    let done_rhs = case is_await {
-      True -> ir.CallHost("js", "get_prop", [ir.Var(res_n), ir.Var(dk_n)])
-      False -> ir.TermOp(ir.TupleGet(0), [ir.Var(res_n)])
-    }
-    let val_rhs = case is_await {
-      True -> ir.CallHost("js", "get_prop", [ir.Var(res_n), ir.Var(vk_n)])
-      False -> ir.TermOp(ir.TupleGet(1), [ir.Var(res_n)])
-    }
-    let #(done_branch, e) =
-      cps_pair(e, fn(e, k) {
-        pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
-          k(e, sm_continue(ctx, after, loc))
-        })
-      })
+    let #(done_branch, e) = jump_state_leaf(e, ctx, after, dict.new())
     use #(bind_tree, e) <- result.try(bind_for_lhs(e, left, ir.Var(val_n)))
     let #(tmp, e) = state.fresh_var(e)
-    let #(body_branch, e) =
-      cps_pair(e, fn(e, k) {
-        anf.wrap(
-          pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
-            k(e, sm_continue(ctx, body_s, loc))
-          }),
-          fn(t) {
-            ir.Let([val_n], val_rhs, state.splice_let(bind_tree, tmp, t))
-          },
-        )
-      })
+    let #(body_branch, e) = {
+      use t <- anf.wrap(jump_state_leaf(e, ctx, body_s, dict.new()))
+      ir.Let(
+        [val_n],
+        ir.TermOp(ir.TupleGet(1), [ir.Var(res_n)]),
+        state.splice_let(bind_tree, tmp, t),
+      )
+    }
     let branch = ir.If(ir.Var(done_i), [ir.TTerm], done_branch, body_branch)
     done(
       e,
@@ -3493,7 +3105,7 @@ fn emit_for_of_step(
         ir.TermOp(ir.TupleGet(iter_idx), [ctx.loc_v]),
         ir.Let(
           [res_n],
-          res_rhs,
+          ir.CallHost("js", "iter_next", [ir.Var(iter_n)]),
           ir.Let(
             [dk_n],
             named_key_tuple("done"),
@@ -3502,15 +3114,8 @@ fn emit_for_of_step(
               named_key_tuple("value"),
               ir.Let(
                 [done_t],
-                done_rhs,
-                ir.Let(
-                  [done_i],
-                  case is_await {
-                    True -> ir.CallHost("js", "truthy", [ir.Var(done_t)])
-                    False -> anf.is_true_expr(ir.Var(done_t))
-                  },
-                  branch,
-                ),
+                ir.TermOp(ir.TupleGet(0), [ir.Var(res_n)]),
+                ir.Let([done_i], anf.is_true_expr(ir.Var(done_t)), branch),
               ),
             ),
           ),
@@ -3566,10 +3171,7 @@ fn emit_switch_dispatch(
   tests: List(#(Option(ast.Expression), Int)),
   after: Int,
 ) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
-  use #(disc_tree, e) <- result.try(case disc {
-    Some(d) -> e.dispatch.emit_expr(e, d)
-    None -> Ok(#(ir.Values([ctx.sent_v]), e))
-  })
+  use #(disc_tree, e) <- result.try(emit_opt_expr(e, disc, ctx.sent_v))
   let #(dv_n, e) = state.fresh_var(e)
   let dv = ir.Var(dv_n)
   use #(chain, e) <- result.try(switch_chain(e, ctx, dv, tests, after))
@@ -3584,34 +3186,15 @@ fn switch_chain(
   after: Int,
 ) -> Result(#(ir.Expr, Emitter2), state.EmitError) {
   case tests {
-    [] ->
-      Ok(
-        cps_pair(e, fn(e, k) {
-          pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
-            k(e, sm_continue(ctx, after, loc))
-          })
-        }),
-      )
-    [#(None, target), ..] ->
-      Ok(
-        cps_pair(e, fn(e, k) {
-          pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
-            k(e, sm_continue(ctx, target, loc))
-          })
-        }),
-      )
+    [] -> Ok(jump_state_leaf(e, ctx, after, dict.new()))
+    [#(None, target), ..] -> Ok(jump_state_leaf(e, ctx, target, dict.new()))
     [#(Some(case_test), target), ..rest] -> {
       use #(test_tree, e) <- result.try(e.dispatch.emit_expr(e, case_test))
       let #(tv_n, e) = state.fresh_var(e)
       let #(eq_n, e) = state.fresh_var(e)
       let #(eqi_n, e) = state.fresh_var(e)
       use #(else_tree, e) <- result.try(switch_chain(e, ctx, dv, rest, after))
-      let #(hit, e) =
-        cps_pair(e, fn(e, k) {
-          pack_loc_cps(e, ctx, dict.new(), fn(e, loc) {
-            k(e, sm_continue(ctx, target, loc))
-          })
-        })
+      let #(hit, e) = jump_state_leaf(e, ctx, target, dict.new())
       Ok(#(
         ir.Let(
           [tv_n],
@@ -3632,75 +3215,48 @@ fn switch_chain(
   }
 }
 
-pub type HoistedItem {
+type HoistedItem {
   HiStmt(ast.StmtWithLine)
-  HiSplit(
-    line: Int,
-    kind: SplitKind,
-    operand: Option(ast.Expression),
-    resume: ResumeWith,
-  )
+  HiSplit(kind: SplitKind, operand: Option(ast.Expression), resume: ResumeWith)
 }
 
 // rewrite so every recognised await/yield sits at a statement boundary
-pub fn hoist_splits_to_stmts(
-  stmts: List(ast.StmtWithLine),
-) -> List(HoistedItem) {
-  list.flat_map(stmts, hoist_one)
-}
-
 fn hoist_one(located: ast.StmtWithLine) -> List(HoistedItem) {
   let ast.StmtWithLine(line, stmt) = located
   case stmt {
     ast.ExpressionStatement(expression: ex, ..) ->
-      case split_of(ex) {
-        Some(#(kind, operand)) -> [HiSplit(line, kind, operand, ResumeDiscard)]
-        None ->
-          case ex {
-            ast.SequenceExpression(_, parts) ->
-              list.flat_map(parts, fn(p) {
-                hoist_one(ast.StmtWithLine(
-                  line,
-                  ast.ExpressionStatement(p, None),
-                ))
-              })
-            ast.AssignmentExpression(_, ast.Assign, lhs, rhs) ->
-              case split_of(rhs), lhs_to_pattern(lhs) {
-                Some(#(kind, operand)), Some(pat) -> [
-                  HiSplit(
-                    line,
-                    kind,
-                    operand,
-                    ResumeBind(pat, state.BindAssign),
-                  ),
-                ]
-                _, _ -> [HiStmt(located)]
-              }
-            _ -> [HiStmt(located)]
+      case split_of(ex), ex {
+        Some(#(kind, operand)), _ -> [HiSplit(kind, operand, ResumeDiscard)]
+        None, ast.SequenceExpression(_, parts) ->
+          list.flat_map(parts, fn(p) { hoist_one(expr_stmt(line, p)) })
+        None, ast.AssignmentExpression(_, ast.Assign, lhs, rhs) ->
+          case lhs_to_pattern(lhs) {
+            Some(pat) ->
+              hoist_if_split(located, rhs, ResumeBind(pat, state.BindAssign))
+            None -> [HiStmt(located)]
           }
+        None, _ -> [HiStmt(located)]
       }
     ast.VariableDeclaration(kind, [ast.VariableDeclarator(pat, Some(init))]) ->
-      case split_of(init) {
-        Some(#(skind, operand)) -> [
-          HiSplit(line, skind, operand, ResumeBind(pat, bind_mode_of(kind))),
-        ]
-        None -> [HiStmt(located)]
-      }
+      hoist_if_split(located, init, ResumeBind(pat, bind_mode_of(kind)))
     ast.VariableDeclaration(kind, decls) ->
       list.flat_map(decls, fn(d) {
         hoist_one(ast.StmtWithLine(line, ast.VariableDeclaration(kind, [d])))
       })
-    ast.ReturnStatement(Some(ex)) ->
-      case split_of(ex) {
-        Some(#(kind, operand)) -> [HiSplit(line, kind, operand, ResumeReturn)]
-        None -> [HiStmt(located)]
-      }
-    ast.ThrowStatement(ex) ->
-      case split_of(ex) {
-        Some(#(kind, operand)) -> [HiSplit(line, kind, operand, ResumeThrow)]
-        None -> [HiStmt(located)]
-      }
+    ast.ReturnStatement(Some(ex)) -> hoist_if_split(located, ex, ResumeReturn)
+    ast.ThrowStatement(ex) -> hoist_if_split(located, ex, ResumeThrow)
     _ -> [HiStmt(located)]
+  }
+}
+
+fn hoist_if_split(
+  located: ast.StmtWithLine,
+  ex: ast.Expression,
+  resume: ResumeWith,
+) -> List(HoistedItem) {
+  case split_of(ex) {
+    Some(#(kind, operand)) -> [HiSplit(kind:, operand:, resume:)]
+    None -> [HiStmt(located)]
   }
 }
 
@@ -3734,7 +3290,7 @@ fn find_try(entries: List(TryEntry), region: Option(Int)) -> Option(TryEntry) {
 fn extra_idx(layout: LocLayout, key: String) -> Int {
   case dict.get(layout.extras, key) {
     Ok(i) -> i
-    Error(_) -> panic as { "M18: loc-layout extras missing key " <> key }
+    Error(Nil) -> panic as { "aot/async: loc layout has no extra " <> key }
   }
 }
 
@@ -3758,13 +3314,13 @@ fn build_switch_arms(
           use #(inner, e) <- result.map(emit_arm_body(e, arm_ctx, arm))
           let body =
             ir.Let([rv], ir.TermOp(ir.TupleGet(idx), [ctx.loc_v]), inner)
-          #(wrap_arm_try(ctx, arm.state_id, region, body), e)
+          #(wrap_arm_try(ctx, region, body), e)
         }
         _, _ -> {
           use #(inner, e) <- result.map(emit_arm_body(e, ctx, arm))
           let dispatched =
             emit_mode_dispatch(ctx, arm.entry_kind, region, inner)
-          #(wrap_arm_try(ctx, arm.state_id, region, dispatched), e)
+          #(wrap_arm_try(ctx, region, dispatched), e)
         }
       })
       #(push_arm(ctx, arm.state_id, wrapped), e)
@@ -3784,7 +3340,7 @@ fn build_switch_arms(
             None -> e
           }
           use #(inner, e) <- result.map(emit_catch_arm(e, ctx, entry, h))
-          let wrapped = wrap_arm_try(ctx, cs, catch_wrap_region, inner)
+          let wrapped = wrap_arm_try(ctx, catch_wrap_region, inner)
           #(push_arm(ctx, cs, wrapped), e)
         }
         _, _ -> Ok(#(ctx, e))
@@ -3798,7 +3354,7 @@ fn build_switch_arms(
             None -> e
           }
           use #(inner, e) <- result.map(emit_finally_arm(e, ctx, entry, fin))
-          let wrapped = wrap_arm_try(ctx, fs, outer_region, inner)
+          let wrapped = wrap_arm_try(ctx, outer_region, inner)
           #(push_arm(ctx, fs, wrapped), e)
         }
         _, _ -> Ok(#(ctx, e))
@@ -3810,10 +3366,9 @@ fn build_switch_arms(
       let #(ctx, e) = st
       let ctx = with_region(ctx, d.region)
       let region = current_try(ctx)
-      let sid = int.to_string(d.state_id)
-      let iter_idx = extra_idx(ctx.layout, "iter_" <> sid)
-      let inner_idx = extra_idx(ctx.layout, "inner_" <> sid)
-      let result_idx = extra_idx(ctx.layout, "delegate_result_" <> sid)
+      let iter_idx = extra_idx(ctx.layout, iter_key(d.state_id))
+      let inner_idx = extra_idx(ctx.layout, inner_key(d.state_id))
+      let result_idx = extra_idx(ctx.layout, delegate_result_key(d.state_id))
       use #(inner, e) <- result.try(emit_delegate_arm(
         e,
         ctx,
@@ -3822,8 +3377,7 @@ fn build_switch_arms(
         inner_idx,
         result_idx,
       ))
-      let wrapped = wrap_arm_try(ctx, d.state_id, region, inner)
-      let ctx = push_arm(ctx, d.state_id, wrapped)
+      let ctx = push_arm(ctx, d.state_id, wrap_arm_try(ctx, region, inner))
       case d.await_state {
         None -> Ok(#(ctx, e))
         Some(na) -> {
@@ -3831,17 +3385,11 @@ fn build_switch_arms(
             e,
             ctx,
             d,
-            iter_idx,
             result_idx,
           ))
-          let wrapped =
-            wrap_arm_try(
-              ctx,
-              na,
-              region,
-              emit_mode_dispatch(ctx, AeResume(SkAwait), region, body),
-            )
-          #(push_arm(ctx, na, wrapped), e)
+          let dispatched =
+            emit_mode_dispatch(ctx, AeResume(SkAwait), region, body)
+          #(push_arm(ctx, na, wrap_arm_try(ctx, region, dispatched)), e)
         }
       }
     }),
@@ -3852,17 +3400,11 @@ fn build_switch_arms(
       let ctx = with_region(ctx, fap.region)
       let region = current_try(ctx)
       let #(head_body, e) = emit_for_await_head(e, ctx, fap)
-      let ctx =
-        push_arm(ctx, fap.head, wrap_arm_try(ctx, fap.head, region, head_body))
+      let ctx = push_arm(ctx, fap.head, wrap_arm_try(ctx, region, head_body))
       use #(check_body, e) <- result.map(emit_for_await_check(e, ctx, fap))
-      let check_wrapped =
-        wrap_arm_try(
-          ctx,
-          fap.check,
-          region,
-          emit_mode_dispatch(ctx, AeResume(SkAwait), region, check_body),
-        )
-      #(push_arm(ctx, fap.check, check_wrapped), e)
+      let dispatched =
+        emit_mode_dispatch(ctx, AeResume(SkAwait), region, check_body)
+      #(push_arm(ctx, fap.check, wrap_arm_try(ctx, region, dispatched)), e)
     }),
   )
   #(finish_arms(ctx), e)
@@ -3891,7 +3433,6 @@ pub fn emit_coroutine_fn(
       fn_scope_id,
       strict: is_strict,
       is_async: kind_is_async(kind),
-      is_generator: kind_is_gen(kind),
       is_arrow: func.shape_is_arrow(shape),
     )
   }
@@ -4649,36 +4190,6 @@ fn lin_callee(
   }
 }
 
-fn compound_binop(op: ast.AssignmentOp) -> Option(ast.BinaryOp) {
-  case op {
-    ast.AddAssign -> Some(ast.Add)
-    ast.SubtractAssign -> Some(ast.Subtract)
-    ast.MultiplyAssign -> Some(ast.Multiply)
-    ast.DivideAssign -> Some(ast.Divide)
-    ast.ModuloAssign -> Some(ast.Modulo)
-    ast.ExponentiationAssign -> Some(ast.Exponentiation)
-    ast.LeftShiftAssign -> Some(ast.LeftShift)
-    ast.RightShiftAssign -> Some(ast.RightShift)
-    ast.UnsignedRightShiftAssign -> Some(ast.UnsignedRightShift)
-    ast.BitwiseAndAssign -> Some(ast.BitwiseAnd)
-    ast.BitwiseOrAssign -> Some(ast.BitwiseOr)
-    ast.BitwiseXorAssign -> Some(ast.BitwiseXor)
-    ast.Assign
-    | ast.LogicalAndAssign
-    | ast.LogicalOrAssign
-    | ast.NullishCoalesceAssign -> None
-  }
-}
-
-fn logical_assign_op(op: ast.AssignmentOp) -> Option(ast.LogicalOp) {
-  case op {
-    ast.LogicalAndAssign -> Some(ast.LogicalAnd)
-    ast.LogicalOrAssign -> Some(ast.LogicalOr)
-    ast.NullishCoalesceAssign -> Some(ast.NullishCoalescing)
-    _ -> None
-  }
-}
-
 fn lin_assign(
   a: Ana,
   line: Int,
@@ -4699,7 +4210,7 @@ fn lin_assign(
       }
     _ -> None
   }
-  case target, op, compound_binop(op), logical_assign_op(op) {
+  case target, op, expr.compound_binop(op), expr.logical_assign_op(op) {
     None, _, _, _ ->
       case expr_has_split(lhs) {
         True -> #(a, [], ast.AssignmentExpression(span, op, lhs, rhs))

@@ -8,7 +8,7 @@ import gleam/result
 
 pub type CompileError {
   ModuleGoalUnsupported
-  EmitFailed(emit.EmitError)
+  EmitFailed(state.EmitError)
   PipelineFailed(pipeline.PipelineError)
 }
 
@@ -21,13 +21,14 @@ pub fn describe(error: CompileError) -> String {
   }
 }
 
-pub fn describe_emit_error(error: emit.EmitError) -> String {
+pub fn describe_emit_error(error: state.EmitError) -> String {
+  let message = state.describe_error(error)
   case error {
-    state.BreakOutsideLoop -> "SyntaxError: break outside loop"
-    state.ContinueOutsideLoop -> "SyntaxError: continue outside loop"
-    state.EarlySyntaxError(message:) -> "SyntaxError: " <> message
-    state.UnsupportedFeature(feature:) -> "unsupported: " <> feature
-    state.ScopeCursorDesync(..) -> "internal: scope cursor desync"
+    state.BreakOutsideLoop
+    | state.ContinueOutsideLoop
+    | state.EarlySyntaxError(..) -> "SyntaxError: " <> message
+    state.UnsupportedFeature(..) -> message
+    state.ScopeCursorDesync(..) -> "internal: " <> message
   }
 }
 
@@ -36,7 +37,7 @@ pub fn to_ir(
   module_name: String,
 ) -> Result(ir.Module, CompileError) {
   case script_to_ir(source, module_name) {
-    Error(state.EarlySyntaxError(_) as err) ->
+    Error(state.EarlySyntaxError(..) as err) ->
       case parser.parse(source, parser.Module) {
         Ok(_) -> Error(ModuleGoalUnsupported)
         Error(_still_a_syntax_error) -> Error(EmitFailed(err))
@@ -49,15 +50,11 @@ pub fn to_ir(
 pub fn script_to_ir(
   source: String,
   module_name: String,
-) -> Result(ir.Module, emit.EmitError) {
-  let opts =
-    emit.CompileOpts(
-      module_name:,
-      source_kind: emit.AsScript,
-      entry_name: "js_main",
-    )
-  emit.compile_source(source, opts)
-  |> result.map(fn(unit) { unit.module })
+) -> Result(ir.Module, state.EmitError) {
+  emit.compile_source(
+    source,
+    emit.CompileOpts(module_name:, source_kind: emit.AsScript),
+  )
 }
 
 pub fn ir_to_beam(module: ir.Module) -> Result(BitArray, CompileError) {

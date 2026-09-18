@@ -63,15 +63,11 @@ fn seed() -> Agent {
 
 fn compile_load(source: String, name: String) -> Result(Atom, String) {
   let opts =
-    emit_2core.CompileOpts(
-      module_name: name,
-      source_kind: emit_2core.AsScript,
-      entry_name: "js_main",
-    )
+    emit_2core.CompileOpts(module_name: name, source_kind: emit_2core.AsScript)
   case emit_2core.compile_source(source, opts) {
     Error(e) -> Error("emit: " <> string.inspect(e))
-    Ok(unit) ->
-      case pipeline.compile_ir(unit.module, emit_2core.binding()) {
+    Ok(ir_module) ->
+      case pipeline.compile_ir(ir_module, emit_2core.binding()) {
         Error(e) -> Error("lower: " <> string.inspect(e))
         Ok(beam) ->
           case run.load(beam, name) {

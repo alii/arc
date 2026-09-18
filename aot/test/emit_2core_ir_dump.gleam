@@ -20,15 +20,14 @@ fn dump(name: String, source: String) -> Nil {
     emit_2core.CompileOpts(
       module_name: "irdump_" <> name,
       source_kind: emit_2core.AsScript,
-      entry_name: "js_main",
     )
   case emit_2core.compile_source(source, opts) {
     Error(e) -> io.println("!! compile_source FAILED: " <> string.inspect(e))
-    Ok(unit) -> {
+    Ok(ir_module) -> {
       io.println("─── twocore IR (printer.print_module) ───")
-      io.println(printer.print_module(unit.module))
+      io.println(printer.print_module(ir_module))
       io.println("─── Core Erlang (pipeline.ir_to_core, emit binding) ───")
-      case pipeline.ir_to_core(unit.module, emit_2core.binding()) {
+      case pipeline.ir_to_core(ir_module, emit_2core.binding()) {
         Error(e) -> io.println("!! ir_to_core FAILED: " <> string.inspect(e))
         Ok(core) -> io.println(core)
       }
@@ -69,13 +68,12 @@ fn dump_richards_node_counts() -> Nil {
     emit_2core.CompileOpts(
       module_name: "irdump_richards",
       source_kind: emit_2core.AsScript,
-      entry_name: "js_main",
     )
   case emit_2core.compile_source(src, opts) {
     Error(e) -> io.println("!! compile_source FAILED: " <> string.inspect(e))
-    Ok(unit) -> {
+    Ok(ir_module) -> {
       let rows =
-        unit.module.functions
+        ir_module.functions
         |> list.map(fn(f) { #(f.name, node_count(f.body)) })
         |> list.sort(fn(a, b) { int.compare(b.1, a.1) })
       let total = list.fold(rows, 0, fn(acc, r) { acc + r.1 })

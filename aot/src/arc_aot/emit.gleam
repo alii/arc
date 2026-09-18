@@ -6,9 +6,9 @@ import arc/parser/ast
 import arc_aot/emit/async
 import arc_aot/emit/class
 import arc_aot/emit/destructure
-import arc_aot/emit/exn
 import arc_aot/emit/expr
 import arc_aot/emit/func
+import arc_aot/emit/split
 import arc_aot/emit/state
 import arc_aot/emit/stmt
 import arc_aot/host_ops
@@ -29,17 +29,8 @@ pub type SourceKind {
 }
 
 pub type CompileOpts {
-  CompileOpts(module_name: String, source_kind: SourceKind, entry_name: String)
+  CompileOpts(module_name: String, source_kind: SourceKind)
 }
-
-pub type CompiledUnit {
-  CompiledUnit(module: ir.Module, tree: scope.ScopeTree, is_strict: Bool)
-}
-
-pub type EmitError =
-  state.EmitError
-
-pub const js_exn_tag = exn.js_exn_tag
 
 pub fn binding() -> instance.Binding {
   profiles.direct(host_ops.table())
@@ -47,7 +38,7 @@ pub fn binding() -> instance.Binding {
 
 fn init_emitter(
   tree: scope.ScopeTree,
-  is_module: Bool,
+  strict: Bool,
   module_name: String,
 ) -> state.Emitter2 {
   let dispatch =
@@ -55,14 +46,13 @@ fn init_emitter(
       emit_expr: expr.emit_expr,
       emit_expr_named: expr.emit_expr_named,
       emit_stmts: stmt.emit_stmts,
-      emit_pattern: destructure.emit_pattern,
       emit_destructure: destructure.emit_pattern,
       emit_function: func.emit_function,
       emit_function_site: func.emit_function_site,
       emit_class: class.emit_class,
       emit_async_body: async.emit_coroutine_fn,
     )
-  state.new_emitter(tree, scope.root_scope_id, is_module, module_name, dispatch)
+  state.new_emitter(tree, scope.root_scope_id, strict, module_name, dispatch)
 }
 
 fn root_binding_prologue(
@@ -173,12 +163,10 @@ fn root_lexical_prologue(
 }
 
 // §16.1.7 step 16, hoist top-level function declarations
-pub fn emit_hoists(
+fn emit_hoist(
   e: state.Emitter2,
-  prog_body: List(ast.StmtWithLine),
-) -> Result(#(fn(ir.Expr) -> ir.Expr, state.Emitter2), EmitError) {
-  let id = fn(t: ir.Expr) { t }
-  use #(wrap, e), located <- list.try_fold(prog_body, #(id, e))
+  located: ast.StmtWithLine,
+) -> Result(#(fn(ir.Expr) -> ir.Expr, state.Emitter2), state.EmitError) {
   case ast_util.peel_labels(located.statement) {
     ast.FunctionDeclaration(
       name: Some(ast.NamedBinding(name:, ..)),
@@ -188,7 +176,7 @@ pub fn emit_hoists(
       is_async:,
     ) -> {
       let #(child_id, e) = state.pop_child_fn(e)
-      use #(ctree, e) <- result.try(e.dispatch.emit_function(
+      use #(ctree, e) <- result.map(e.dispatch.emit_function(
         e,
         state.FnDecl(is_gen: is_generator, is_async:),
         Some(name),
@@ -197,75 +185,48 @@ pub fn emit_hoists(
         child_id,
       ))
       let #(fn_var, e) = state.fresh_var(e)
-      let #(wrap, e) = case state.resolve(e, name) {
+      let #(t, store, e) = case state.resolve(e, name) {
         scope.Plain(scope.Local(slot:, boxed: True, ..)) -> {
           let #(t, e) = state.fresh_var(e)
           let cell = ir.Var(state.get_slot_var(e, slot))
-          let w = fn(tail) {
-            wrap(ir.Let(
-              [fn_var],
-              ctree,
-              ir.Let(
-                [t],
-                ir.CallHost("js", "cell_set", [cell, ir.Var(fn_var)]),
-                tail,
-              ),
-            ))
-          }
-          #(w, e)
+          #(t, ir.CallHost("js", "cell_set", [cell, ir.Var(fn_var)]), e)
         }
         scope.Plain(scope.Local(slot:, boxed: False, ..)) -> {
           let #(t, e) = state.fresh_slot_var(e, slot)
-          let e = state.set_slot_var(e, slot, t)
-          let w = fn(tail) {
-            wrap(ir.Let(
-              [fn_var],
-              ctree,
-              ir.Let([t], ir.Values([ir.Var(fn_var)]), tail),
-            ))
-          }
-          #(w, e)
+          #(t, ir.Values([ir.Var(fn_var)]), state.set_slot_var(e, slot, t))
         }
         _ -> {
           let #(t, e) = state.fresh_var(e)
           let kb = ir.ConstBinary(bit_array.from_string(name))
-          let w = fn(tail) {
-            wrap(ir.Let(
-              [fn_var],
-              ctree,
-              ir.Let(
-                [t],
-                ir.CallHost("js", "global_set", [kb, ir.Var(fn_var)]),
-                tail,
-              ),
-            ))
-          }
-          #(w, e)
+          #(t, ir.CallHost("js", "global_set", [kb, ir.Var(fn_var)]), e)
         }
       }
-      Ok(#(wrap, e))
+      #(fn(tail) { ir.Let([fn_var], ctree, ir.Let([t], store, tail)) }, e)
     }
-    _ -> Ok(#(wrap, e))
+    _ -> Ok(#(fn(tail) { tail }, e))
   }
 }
 
 // erlc is superlinear in function size, so js_main is chunked
 const chunk_budget = 100
 
-// beam caps a function at 255 args
-const max_live = 250
-
 fn emit_top_level(
   e: state.Emitter2,
   hoists: List(ast.StmtWithLine),
   stmts: List(ast.StmtWithLine),
-  start: Int,
-  n: Int,
-) -> Result(#(ir.Expr, state.Emitter2), EmitError) {
+  chunk_first_var: Int,
+  chunk_index: Int,
+) -> Result(#(ir.Expr, state.Emitter2), state.EmitError) {
   case hoists, stmts {
     [h, ..rest], _ -> {
-      use #(w, e) <- result.try(emit_hoists(e, [h]))
-      use #(tail, e) <- result.map(cut_or_continue(e, rest, stmts, start, n))
+      use #(w, e) <- result.try(emit_hoist(e, h))
+      use #(tail, e) <- result.map(cut_or_continue(
+        e,
+        rest,
+        stmts,
+        chunk_first_var,
+        chunk_index,
+      ))
       #(w(tail), e)
     }
     [], [] -> Ok(#(ir.Return([e.consts.undef]), e))
@@ -284,7 +245,7 @@ fn emit_top_level(
     }
     [], [s, ..rest] ->
       e.dispatch.emit_stmts(e, [s], fn(ef) {
-        cut_or_continue(ef, [], rest, start, n)
+        cut_or_continue(ef, [], rest, chunk_first_var, chunk_index)
       })
   }
 }
@@ -293,24 +254,26 @@ fn cut_or_continue(
   e: state.Emitter2,
   hoists: List(ast.StmtWithLine),
   stmts: List(ast.StmtWithLine),
-  start: Int,
-  n: Int,
-) -> Result(#(ir.Expr, state.Emitter2), EmitError) {
+  chunk_first_var: Int,
+  chunk_index: Int,
+) -> Result(#(ir.Expr, state.Emitter2), state.EmitError) {
   let done = hoists == [] && stmts == []
   let live =
     dict.values(e.slot_vars) |> list.unique |> list.sort(string.compare)
-  let ready =
-    e.next_var - start >= chunk_budget && !done && list.length(live) <= max_live
-  case ready {
-    False -> emit_top_level(e, hoists, stmts, start, n)
+  let should_cut =
+    e.next_var - chunk_first_var >= chunk_budget
+    && !done
+    && list.length(live) <= split.max_live_params
+  case should_cut {
+    False -> emit_top_level(e, hoists, stmts, chunk_first_var, chunk_index)
     True -> {
-      let name = "js_main_" <> int.to_string(n + 1)
+      let name = "js_main_" <> int.to_string(chunk_index + 1)
       use #(body, e) <- result.map(emit_top_level(
         e,
         hoists,
         stmts,
         e.next_var,
-        n + 1,
+        chunk_index + 1,
       ))
       let chunk =
         ir.Function(
@@ -331,7 +294,7 @@ fn cut_or_continue(
 pub fn compile_source(
   source: String,
   opts: CompileOpts,
-) -> Result(CompiledUnit, EmitError) {
+) -> Result(ir.Module, state.EmitError) {
   let is_strict = opts.source_kind == AsModule
   use #(body, sb) <- result.try(
     parser.parse_script(source)
@@ -351,8 +314,7 @@ pub fn compile_source(
         box_try_writes: True,
       ),
     )
-  use module <- result.map(compile(ast.Script(body:), tree, opts))
-  CompiledUnit(module:, tree:, is_strict:)
+  compile(ast.Script(body:), tree, opts)
 }
 
 pub fn compile(
@@ -392,11 +354,11 @@ pub fn compile(
     globals: [],
     imports: [],
     functions: [js_main, ..state.take_functions(ef)],
-    exports: [ir.ExportFn(opts.entry_name, "js_main")],
+    exports: [ir.ExportFn("js_main", "js_main")],
     data_segments: [],
     tables: [],
     elements: [],
     start: None,
-    tags: [ir.TagDecl(js_exn_tag, [ir.TTerm])],
+    tags: [ir.TagDecl(ef.consts.js_tag, [ir.TTerm])],
   )
 }
