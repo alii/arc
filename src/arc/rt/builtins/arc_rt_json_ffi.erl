@@ -377,7 +377,7 @@ enc(null, _, _, _) -> <<"null">>;
 enc(A, _, _, _) when A =:= js_nan; A =:= js_inf; A =:= js_neg_inf -> <<"null">>;
 enc(undefined, _, _, _) -> skip;
 enc({js_sym, _}, _, _, _) -> skip;
-enc(S, _, _, _) when ?IS_STR(S) -> quote_tree(arc_rt_js_string_ffi:bin(S));
+enc(S, _, _, _) when ?IS_STR(S) -> quote_tree(arc_rt_js_string_ffi:text(S));
 enc({?HANDLE_TAG, Id}, {Cells, OP, AP, _} = Cx, Ind, Seen) ->
     case lists:member(Id, Seen) of
         true -> throw(json_miss);

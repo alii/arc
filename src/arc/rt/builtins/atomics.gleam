@@ -149,7 +149,7 @@ fn with_ta_and_index(
     rt_val.t_throw_type_error(st, "TypedArray is not attached")
   })
   use Nil <- helpers.guard(
-    !require_shared || types.buffer_is_shared(storage),
+    !require_shared || buffer.buffer_is_shared(storage),
     fn() {
       rt_val.t_throw_type_error(
         st,
@@ -238,15 +238,15 @@ fn live_buffer(storage: BufferStorage) -> Option(BufferInfo) {
     Shared(block: OwnerBlock(owner:, ..), ..) ->
       Some(BufferInfo(
         data: OwnerData(owner:),
-        byte_size: types.buffer_byte_size(storage),
+        byte_size: buffer.buffer_byte_size(storage),
         immutable: False,
       ))
     _ -> {
-      use bits <- option.map(types.buffer_bits(storage))
+      use bits <- option.map(buffer.buffer_bits(storage))
       BufferInfo(
         data: StoreData(storage:, bits:),
-        byte_size: types.buffer_byte_size(storage),
-        immutable: types.buffer_is_immutable(storage),
+        byte_size: buffer.buffer_byte_size(storage),
+        immutable: buffer.buffer_is_immutable(storage),
       )
     }
   }
@@ -323,7 +323,7 @@ fn write_element(
       buffer.set_storage(
         st,
         info.buffer,
-        types.buffer_store_region(
+        buffer.buffer_store_region(
           storage,
           set_int(bits, off, info.elem, v),
           off,

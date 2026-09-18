@@ -20,16 +20,16 @@ import arc/rt/types.{
   type IteratorNative, type IteratorRecord, type JsVal, type NativeToken,
   type ObjKind, type ObjectKey, type ZipMember, type ZipMode, ArgumentsObj,
   ArrayIterEntries, ArrayIterKeys, ArrayIterValues, ArrayIterator, ArrayObj,
-  AsyncFromSyncClose, AsyncFromSyncIterator, AsyncFromSyncNext,
-  AsyncFromSyncReturn, AsyncFromSyncThrow, AsyncFromSyncUnwrap, ClassicHelper,
-  ConcatHelper, ConcatItem, GenCompleted, GenExecuting, GenSuspendedStart,
-  GenSuspendedYield, HelperDrop, HelperFilter, HelperFlatMap, HelperMap,
-  HelperTake, IteratorConstructor, IteratorHelperObj, IteratorN, JNan, KHandle,
-  KNull, KStr, KUndef, MapIterator, NoElements, Ordinary, ReturnThis, SObject,
-  SetIterator, StringIterator, StringKey, SymbolKey, TypedArrayObj,
-  WrapForValidIteratorObj, ZipExhausted, ZipHelper, ZipLongest, ZipOpen,
-  ZipShortest, ZipStrict, classify, mk_bool, mk_int, mk_object, mk_string,
-  mk_undefined, symbol_async_iterator, symbol_iterator, symbol_to_string_tag,
+  AsyncFromSyncClose, AsyncFromSyncNext, AsyncFromSyncReturn, AsyncFromSyncThrow,
+  AsyncFromSyncUnwrap, ClassicHelper, ConcatHelper, ConcatItem, GenCompleted,
+  GenExecuting, GenSuspendedStart, GenSuspendedYield, HelperDrop, HelperFilter,
+  HelperFlatMap, HelperMap, HelperTake, IteratorConstructor, IteratorHelperObj,
+  IteratorN, JNan, KHandle, KNull, KStr, KUndef, MapIterator, NoElements,
+  Ordinary, ReturnThis, SObject, SetIterator, StringIterator, StringKey,
+  SymbolKey, TypedArrayObj, WrapForValidIteratorObj, ZipExhausted, ZipHelper,
+  ZipLongest, ZipOpen, ZipShortest, ZipStrict, classify, mk_bool, mk_int,
+  mk_object, mk_string, mk_undefined, symbol_async_iterator, symbol_iterator,
+  symbol_to_string_tag,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -254,12 +254,6 @@ fn alloc_iter_proto(
   #(h, st)
 }
 
-type AsyncFromSyncForward {
-  ForwardNext
-  ForwardReturn
-  ForwardThrow
-}
-
 pub fn dispatch(
   st: Agent,
   n: IteratorNative,
@@ -267,18 +261,11 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case n {
-    AsyncFromSyncNext -> async_from_sync(st, this, args, ForwardNext)
-    AsyncFromSyncReturn -> async_from_sync(st, this, args, ForwardReturn)
-    AsyncFromSyncThrow -> async_from_sync(st, this, args, ForwardThrow)
-    AsyncFromSyncUnwrap(done:) -> {
-      let v = first_arg_or_undefined(args)
-      let #(h, st) = rt_async.alloc_iter_result(st, v, done)
-      #(mk_object(h), st)
-    }
-    AsyncFromSyncClose(sync_iter:) -> {
-      let err = first_arg_or_undefined(args)
-      iter_protocol.close_throw(st, mk_object(sync_iter), err)
-    }
+    AsyncFromSyncNext
+    | AsyncFromSyncReturn
+    | AsyncFromSyncThrow
+    | AsyncFromSyncUnwrap(..)
+    | AsyncFromSyncClose(..) -> panic as "routed by builtins.dispatch_native"
     IteratorConstructor ->
       rt_val.t_throw_type_error(
         st,
@@ -500,145 +487,6 @@ fn iter_incompatible(st: Agent, tag: String) -> a {
 }
 
 // §27.1.4.2, any sync throw rejects the promise
-fn async_from_sync(
-  st: Agent,
-  this: JsVal,
-  args: List(JsVal),
-  kind: AsyncFromSyncForward,
-) -> #(JsVal, Agent) {
-  let #(#(promise_h, resolve_h, reject_h), st) =
-    rt_async.t_new_promise_capability(st)
-  let cap_resolve = mk_object(resolve_h)
-  let cap_reject = mk_object(reject_h)
-  let #(outcome, st) =
-    rt_call.try_run(st, fn(st) {
-      forward_to_sync_iterator(st, this, args, kind, cap_resolve, cap_reject)
-    })
-  let st = case outcome {
-    NormalCompletion(_) -> st
-    ThrowCompletion(e) -> rt_async.t_promise_reject(st, promise_h, e)
-  }
-  #(mk_object(promise_h), st)
-}
-
-fn forward_to_sync_iterator(
-  st: Agent,
-  this: JsVal,
-  args: List(JsVal),
-  kind: AsyncFromSyncForward,
-  cap_resolve: JsVal,
-  cap_reject: JsVal,
-) -> #(JsVal, Agent) {
-  let sync =
-    iter_protocol.sync_iterator_record(st, require_async_from_sync(st, this))
-  let sync_iter = sync.iterator
-  let sync_rec = case classify(sync_iter) {
-    KHandle(h) -> h
-    _ -> rt_val.t_throw_type_error(st, "not an Async-from-Sync Iterator")
-  }
-  let #(method, st) = case kind {
-    ForwardNext -> #(sync.next_method, st)
-    ForwardReturn ->
-      rt_obj.t_get_prop(st, sync_iter, StringKey(Named("return")))
-    ForwardThrow -> rt_obj.t_get_prop(st, sync_iter, StringKey(Named("throw")))
-  }
-  case kind, rt_val.is_callable(st, method) {
-    ForwardReturn, False -> {
-      let arg = first_arg_or_undefined(args)
-      let #(ir_h, st) = rt_async.alloc_iter_result(st, arg, done: True)
-      let #(_, st) =
-        rt_call.t_call(st, cap_resolve, mk_undefined(), [
-          mk_object(ir_h),
-        ])
-      #(mk_undefined(), st)
-    }
-    ForwardThrow, False -> {
-      let st = iter_protocol.iterator_close_normal(st, sync_iter)
-      rt_val.t_throw_type_error(
-        st,
-        "The iterator does not provide a 'throw' method.",
-      )
-    }
-    _, _ -> {
-      let #(result_val, st) = rt_call.t_call(st, method, sync_iter, args)
-      case classify(result_val) {
-        KHandle(result_h) -> {
-          let close_on_rejection = case kind {
-            ForwardReturn -> False
-            ForwardNext | ForwardThrow -> True
-          }
-          afs_continuation(
-            st,
-            result_h,
-            sync_rec,
-            close_on_rejection,
-            cap_resolve,
-            cap_reject,
-          )
-        }
-        _ -> rt_val.t_throw_type_error(st, "Iterator result is not an object")
-      }
-    }
-  }
-}
-
-// §27.1.4.4 asyncfromsynciteratorcontinuation
-fn afs_continuation(
-  st: Agent,
-  result_h: Handle,
-  sync_rec: Handle,
-  close_on_rejection close_on_rejection: Bool,
-  cap_resolve cap_resolve: JsVal,
-  cap_reject cap_reject: JsVal,
-) -> #(JsVal, Agent) {
-  let result = mk_object(result_h)
-  let #(done_v, st) = rt_obj.t_get_prop(st, result, StringKey(Named("done")))
-  let done = rt_val.to_boolean(done_v)
-  let #(inner, st) = rt_obj.t_get_prop(st, result, StringKey(Named("value")))
-  let #(on_fulfilled, st) =
-    alloc_closure(st, IteratorN(AsyncFromSyncUnwrap(done:)))
-  let #(on_rejected, st) = case done || !close_on_rejection {
-    True -> #(mk_undefined(), st)
-    False ->
-      alloc_closure(st, IteratorN(AsyncFromSyncClose(sync_iter: sync_rec)))
-  }
-  let #(inner_p, st) = rt_async.promise_resolve_static(st, inner)
-  let st =
-    rt_async.t_perform_then(
-      st,
-      inner_p,
-      on_fulfilled,
-      on_rejected,
-      cap_resolve,
-      cap_reject,
-    )
-  #(mk_undefined(), st)
-}
-
-fn alloc_closure(st: Agent, token: NativeToken) -> #(JsVal, Agent) {
-  let #(h, st) =
-    rt_call.t_native_new(
-      st,
-      Some(st.realm.function.prototype),
-      token,
-      "",
-      1,
-      constructible: False,
-    )
-  #(mk_object(h), st)
-}
-
-fn require_async_from_sync(st: Agent, this: JsVal) -> Handle {
-  case classify(this) {
-    KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
-        SObject(kind: AsyncFromSyncIterator(sync_rec:), ..) -> sync_rec
-        _ -> rt_val.t_throw_type_error(st, "not an Async-from-Sync Iterator")
-      }
-    _ -> rt_val.t_throw_type_error(st, "not an Async-from-Sync Iterator")
-  }
-}
-
 pub fn dispatch_construct(
   st: Agent,
   n: IteratorNative,

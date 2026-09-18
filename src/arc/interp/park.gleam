@@ -67,7 +67,7 @@ pub fn unpark_with(
     depth: agent.call_depth,
     try_stack:,
     this:,
-    new_target: kernel.val([kernel.Undefined]),
+    new_target: kernel.literal([kernel.Undefined]),
     home_object:,
     call_args:,
     eval_env: case eval_env {

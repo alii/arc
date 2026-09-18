@@ -8,7 +8,7 @@
 
 %% §10.1.8.1 ordinary get, miss when anything observable
 get_field(St, {?HANDLE_TAG, Id}, K) ->
-    cell_field(element(?AGENT_STORE, St), Id, K, undefined);
+    object_get(element(?AGENT_STORE, St), Id, K, undefined);
 get_field(_, Bin, ?LENGTH_KEY) when is_binary(Bin) ->
     byte_size(Bin);
 get_field(_, {?STR_TAG, _, Len, _}, ?LENGTH_KEY) ->
@@ -66,7 +66,7 @@ get_global(St, Lex, Name) ->
             end;
         _ ->
             {?HANDLE_TAG, G} = element(?REALM_GLOBAL, element(?AGENT_REALM, St)),
-            cell_field(element(?AGENT_STORE, St), G, {?KEY_NAMED, Name}, miss)
+            object_get(element(?AGENT_STORE, St), G, {?KEY_NAMED, Name}, miss)
     end.
 
 %% §9.1.1.4.5 setmutablebinding on the global object
@@ -80,34 +80,34 @@ put_global(Store, Lex, Global, Name, V, Strict) ->
 proto_field(St, Which, K) ->
     Pair = element(Which, element(?AGENT_REALM, St)),
     {?HANDLE_TAG, Id} = element(?BUILTINPAIR_PROTO, Pair),
-    cell_field(element(?AGENT_STORE, St), Id, K, undefined).
+    object_get(element(?AGENT_STORE, St), Id, K, undefined).
 
-cell_field(Store, Id, K, Absent) ->
+object_get(Store, Id, K, Absent) ->
     Cells = element(?STORE_CELLS, Store),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SSHAPEDOBJECT_TAG, _, Proto, Slots, Offs} ->
             KeyBin = element(2, K),
             case Offs of
                 #{KeyBin := Off} -> ?SLOT_AT(Slots, Off);
-                _ -> field_next(Cells, Proto, K, ?MAX_PROTO_HOPS, Absent)
+                _ -> proto_get(Cells, Proto, K, ?MAX_PROTO_HOPS, Absent)
             end;
         {?SOBJECT_TAG, ?ORDINARY, Proto, Props, _, _, _} ->
             case Props of
                 #{K := Prop} when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
                     element(?DATAPROPERTY_VALUE, Prop);
                 #{K := _} -> miss;
-                _ -> field_next(Cells, Proto, K, ?MAX_PROTO_HOPS, Absent)
+                _ -> proto_get(Cells, Proto, K, ?MAX_PROTO_HOPS, Absent)
             end;
-        Cell -> hop(Cells, Cell, K, ?MAX_PROTO_HOPS, Absent)
+        Cell -> chain_get(Cells, Cell, K, ?MAX_PROTO_HOPS, Absent)
     end.
 
-hop(Cells, Cell, K, Fuel, Absent) ->
+chain_get(Cells, Cell, K, Fuel, Absent) ->
     case Cell of
         {?SSHAPEDOBJECT_TAG, _, Proto, Slots, Offs} ->
             KeyBin = element(2, K),
             case Offs of
                 #{KeyBin := Off} -> ?SLOT_AT(Slots, Off);
-                _ -> field_next(Cells, Proto, K, Fuel, Absent)
+                _ -> proto_get(Cells, Proto, K, Fuel, Absent)
             end;
         _ when element(1, Cell) =:= ?SOBJECT_TAG ->
             Kind = element(?SOBJECT_KIND, Cell),
@@ -121,23 +121,23 @@ hop(Cells, Cell, K, Fuel, Absent) ->
                                 _ -> miss
                             end;
                         _ ->
-                            field_next(Cells, element(?SOBJECT_PROTO, Cell), K,
+                            proto_get(Cells, element(?SOBJECT_PROTO, Cell), K,
                                        Fuel, Absent)
                     end
             end;
         _ -> miss
     end.
 
-field_next(_, ?NONE, _, _, Absent) -> Absent;
-field_next(Cells, {?SOME, {?HANDLE_TAG, P}}, K, Fuel, Absent) when Fuel > 1 ->
-    hop(Cells, arc_rt_arena_ffi:get(P, Cells), K, Fuel - 1, Absent);
-field_next(_, _, _, _, _) -> miss.
+proto_get(_, ?NONE, _, _, Absent) -> Absent;
+proto_get(Cells, {?SOME, {?HANDLE_TAG, P}}, K, Fuel, Absent) when Fuel > 1 ->
+    chain_get(Cells, arc_rt_arena_ffi:get(P, Cells), K, Fuel - 1, Absent);
+proto_get(_, _, _, _, _) -> miss.
 
 named_virtual({?ARRAYOBJ_TAG, Length}, ?LENGTH_KEY) -> Length;
 named_virtual(_, _) -> miss.
 
--compile({inline, [named_plain/2, named_virtual/2, birth_plain/2, cell_field/4,
-                   hop/5, proto_field/3, put_prop/7, put_new/6, set_plain/5,
+-compile({inline, [named_plain/2, named_virtual/2, birth_plain/2, object_get/4,
+                   chain_get/5, proto_field/3, put_prop/7, put_new/6, set_plain/5,
                    shaped_grow/7, shaped_next/3, chain_takes_write/4,
                    literal_props/3]}).
 named_plain(Kind, K) -> ?NAMED_KEY_IS_PLAIN(Kind, K, ?LENGTH_KEY).
@@ -183,14 +183,14 @@ get_elem(Store, {?HANDLE_TAG, Id}, Idx) when is_integer(Idx), Idx >= 0 ->
         _ -> miss
     end;
 get_elem(_, S, Idx) when is_integer(Idx), ?IS_STR(S) ->
-    case arc_rt_js_string_ffi:char_at_val(S, Idx) of
+    case arc_rt_js_string_ffi:char_at(S, Idx) of
         {?SOME, Ch} -> Ch;
         ?NONE -> miss
     end;
 get_elem(Store, {?HANDLE_TAG, _} = Obj, Key) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:property_key_of(Key) of
         {?OKEY_STRING, {?KEY_NAMED, _} = K} ->
-            cell_field(Store, element(?HANDLE_ID, Obj), K, undefined);
+            object_get(Store, element(?HANDLE_ID, Obj), K, undefined);
         {?OKEY_STRING, {?KEY_INDEX, Idx}} -> get_elem(Store, Obj, Idx);
         _ -> miss
     end;

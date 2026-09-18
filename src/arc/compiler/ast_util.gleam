@@ -1,5 +1,5 @@
 import arc/compiler/scope.{type BindingKind}
-import arc/esm
+import arc/module/summary
 import arc/parser/ast
 import gleam/int
 import gleam/list
@@ -294,7 +294,10 @@ pub fn module_items_to_stmts(
           ast.ExpressionStatement(
             expression: ast.AssignmentExpression(
               operator: ast.Assign,
-              left: ast.Identifier(name: esm.default_export_local_name, span:),
+              left: ast.Identifier(
+                name: summary.default_export_local_name,
+                span:,
+              ),
               right: expr,
               span:,
             ),
@@ -574,4 +577,10 @@ pub fn class_body_bindings(
     private_fn_consts,
     computed,
   ])
+}
+
+// §10.2.11; must match emit's non_simple_fixed
+pub fn fixed_params_non_simple(params: List(ast.Pattern)) -> Bool {
+  let #(fixed, _rest) = split_trailing_rest(params)
+  !all_simple_params(fixed)
 }

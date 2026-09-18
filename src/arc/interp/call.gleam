@@ -4,6 +4,7 @@ import arc/bytecode/error_kind.{ReferenceError, TypeError}
 import arc/bytecode/lexical
 import arc/bytecode/opcode
 import arc/internal/tuple_array.{type TupleArray}
+import arc/interp/guard
 import arc/interp/kernel
 import arc/interp/safepoint
 import arc/interp/state.{
@@ -21,9 +22,9 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Cell, type FnFlags, type Handle, type JsVal, type NativeToken,
-  Agent, ArgumentsObj, ArrayObj, BoundFn, BytecodeFn, CompiledFn, FrameInfo,
-  FunctionApply, FunctionCall, FunctionN, KHandle, KNull, KTdz, KUndef, NativeFn,
-  ProxyObj, ReflectApply, ReflectN, SBox, SObject, classify, mk_object, mk_tdz,
+  Agent, ArgumentsObj, ArrayObj, BoundFn, BytecodeFn, CompiledFn, FunctionApply,
+  FunctionCall, FunctionN, KHandle, KNull, KTdz, KUndef, NativeFn, ProxyObj,
+  ReflectApply, ReflectN, SBox, SObject, classify, mk_object, mk_tdz,
   mk_undefined,
 }
 import arc/rt/val as rt_val
@@ -31,96 +32,6 @@ import gleam/bool
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
-
-pub fn guarded(
-  state: State,
-  body: fn(Agent) -> #(a, Agent),
-) -> Result(#(a, State), StepExit) {
-  kernel.guarded(kernel.guard1(body, state.agent), state)
-}
-
-pub fn guarded_unit(
-  state: State,
-  body: fn(Agent) -> Agent,
-) -> Result(State, StepExit) {
-  use #(_, state) <- result.map(kernel.guarded(
-    kernel.guard_unit1(body, state.agent),
-    state,
-  ))
-  state
-}
-
-pub const stack_source = "script"
-
-pub fn frame_info_at(template: FuncTemplate, line: Int) -> types.FrameInfo {
-  FrameInfo(name: option.unwrap(template.name, ""), script: stack_source, line:)
-}
-
-// no depth bump, caller already counted it
-pub fn push_frame_info(agent: Agent, template: FuncTemplate) -> Agent {
-  Agent(..agent, frames: [frame_info_at(template, 0), ..agent.frames])
-}
-
-pub fn pop_frame_info(agent: Agent) -> Agent {
-  case agent.frames {
-    [_, ..rest] -> Agent(..agent, frames: rest)
-    [] -> agent
-  }
-}
-
-// catch frames and call_depth up with the loop's fast calls
-pub fn sync(state: State, agent: Agent, pc: Int, bump: Int) -> Agent {
-  let depth = state.depth
-  let line = tuple_array.element(pc + 1, state.func.lines)
-  case depth - agent.call_depth, bump {
-    0, 0 ->
-      case agent.frames {
-        [FrameInfo(line: l, ..), ..] if l == line -> agent
-        frames -> Agent(..agent, frames: set_top_line(frames, line))
-      }
-    behind, _ if behind <= 0 ->
-      Agent(
-        ..agent,
-        call_depth: depth + bump,
-        frames: set_top_line(agent.frames, line),
-      )
-    behind, _ ->
-      Agent(
-        ..agent,
-        call_depth: depth + bump,
-        frames: pending_frames(agent.frames, state, line, behind),
-      )
-  }
-}
-
-fn set_top_line(frames: List(types.FrameInfo), line: Int) {
-  case frames {
-    [FrameInfo(line: l, ..), ..] if l == line -> frames
-    [top, ..rest] -> [FrameInfo(..top, line:), ..rest]
-    [] -> [FrameInfo("", stack_source, line)]
-  }
-}
-
-fn pending_frames(
-  frames: List(types.FrameInfo),
-  state: State,
-  line: Int,
-  behind: Int,
-) -> List(types.FrameInfo) {
-  case behind, state.call_stack {
-    0, _ -> set_top_line(frames, line)
-    _, [saved, ..] -> [
-      frame_info_at(state.func, line),
-      ..pending_frames(
-        frames,
-        saved.caller,
-        tuple_array.element(saved.pc, saved.caller.func.lines),
-        behind - 1,
-      )
-    ]
-    _, [] -> [frame_info_at(state.func, line), ..frames]
-  }
-}
 
 // frames above agent.call_depth were never pushed
 fn leave_frame(agent: Agent, depth: Int) -> Agent {
@@ -170,7 +81,7 @@ fn setup_frame(
     True -> #(this_arg, agent)
     False ->
       case kernel.is(this_arg, kernel.Undefined) {
-        True -> #(kernel.object([agent.realm.global_object]), agent)
+        True -> #(kernel.object_val([agent.realm.global_object]), agent)
         False -> {
           let bound = kernel.sloppy_this(this_arg, agent.realm.global_object)
           case kernel.is(bound, kernel.Miss) {
@@ -199,8 +110,8 @@ fn setup_frame(
 
 fn home_value(home_object: Option(Handle)) -> JsVal {
   case home_object {
-    Some(h) -> kernel.object([h])
-    None -> kernel.val([kernel.Undefined])
+    Some(h) -> kernel.object_val([h])
+    None -> kernel.literal([kernel.Undefined])
   }
 }
 
@@ -281,7 +192,7 @@ pub fn call_function_then(
         setup_frame(
           state.agent,
           env,
-          kernel.object([fn_h]),
+          kernel.object_val([fn_h]),
           home,
           template,
           flags,
@@ -404,7 +315,7 @@ pub fn call(
     False ->
       call_cell(
         state,
-        kernel.handle([callee]),
+        kernel.to_handle_unchecked([callee]),
         cell,
         this,
         args,
@@ -466,7 +377,7 @@ pub fn call_cell(
           rest_stack,
           this,
           None,
-          kernel.val([kernel.Undefined]),
+          kernel.literal([kernel.Undefined]),
           drive,
         )
       case state.func.is_strict && is_tail_call(state, state.pc, template) {
@@ -539,11 +450,11 @@ fn list_from_array_like(
   array_like: JsVal,
   rest_stack: List(JsVal),
 ) -> Result(#(List(JsVal), State), StepExit) {
-  let args = kernel.list_of(state.agent, array_like)
+  let args = kernel.list_from_array_like(state.agent, array_like)
   case kernel.is(args, kernel.Miss) {
     False -> Ok(#(args, state))
     True ->
-      guarded(State(..state, stack: rest_stack), fn(agent) {
+      guard.guarded(State(..state, stack: rest_stack), fn(agent) {
         rt_abstract_ops.create_list_from_array_like(agent, array_like)
       })
   }
@@ -562,10 +473,8 @@ fn call_native(
     True -> call_nested(state, callee, this, args, rest_stack)
     False -> {
       let agent = rt_store.t_enter_call(state.agent)
-      case
-        kernel.guard4(rt_builtins.dispatch_native, agent, token, this, args)
-      {
-        kernel.Ok(value: v, agent:) ->
+      case guard.guard4(rt_builtins.dispatch_native, agent, token, this, args) {
+        guard.Value(value: v, agent:) ->
           Ok(
             State(
               ..state,
@@ -574,7 +483,7 @@ fn call_native(
               pc: state.pc + 1,
             ),
           )
-        kernel.Threw(agent:, thrown:) ->
+        guard.Thrown(agent:, thrown:) ->
           Error(Threw(
             thrown,
             State(
@@ -722,8 +631,8 @@ fn construct_handle(
             drive,
           )
         False -> {
-          use #(new_obj, state) <- result.try(kernel.guarded(
-            kernel.guard2(new_base_this, state.agent, new_target),
+          use #(new_obj, state) <- result.try(guard.guard_state(
+            guard.guard2(new_base_this, state.agent, new_target),
             State(..state, stack: rest_stack),
           ))
           let this_val = mk_object(new_obj)
@@ -761,24 +670,24 @@ fn construct_handle(
     }
     _ ->
       case
-        kernel.guard4(
+        guard.guard4(
           rt_call.t_construct,
           state.agent,
-          kernel.object([ctor_h]),
+          kernel.object_val([ctor_h]),
           args,
           new_target,
         )
       {
-        kernel.Ok(value: h, agent:) ->
+        guard.Value(value: h, agent:) ->
           Ok(
             State(
               ..state,
               agent:,
-              stack: [kernel.object([h]), ..rest_stack],
+              stack: [kernel.object_val([h]), ..rest_stack],
               pc: state.pc + 1,
             ),
           )
-        kernel.Threw(agent:, thrown:) ->
+        guard.Thrown(agent:, thrown:) ->
           Error(Threw(thrown, State(..state, agent:, stack: rest_stack)))
       }
   }
@@ -893,7 +802,7 @@ pub fn restore_frame(
   let caller = saved.caller
   let locals = case saved, caller.func.regs {
     SavedRegFrame(locals:, r0:, r1:, ..), bytecode.Regs(a, b) ->
-      kernel.flush_regs(locals, a, b, r0, r1)
+      kernel.flush_registers(locals, a, b, r0, r1)
     _, _ -> saved.locals
   }
   State(..caller, agent:, stack:, locals:, pc: saved.pc)
@@ -962,10 +871,10 @@ pub fn root_this(
     template.is_derived_constructor,
     Ok(#(mk_tdz(), RootDerivedConstruct, agent)),
   )
-  case kernel.guard1(new_base_this(_, new_target), agent) {
-    kernel.Ok(value: h, agent:) ->
+  case guard.guard1(new_base_this(_, new_target), agent) {
+    guard.Value(value: h, agent:) ->
       Ok(#(mk_object(h), RootBaseConstruct(h), agent))
-    kernel.Threw(agent:, thrown:) -> Error(#(thrown, agent))
+    guard.Thrown(agent:, thrown:) -> Error(#(thrown, agent))
   }
 }
 

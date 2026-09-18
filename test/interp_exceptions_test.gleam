@@ -4,7 +4,7 @@ import arc/parser
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/inspect as rt_inspect
-import arc/rt/obj as rt_obj
+import arc/rt/lang as rt_lang
 import arc/rt/types.{type Agent, type JsVal, JInt, KNum, KStr, classify}
 import arc/rt/val as rt_val
 import gleam/int
@@ -302,7 +302,7 @@ pub fn host_native_throw_and_reentry_test() {
       }
       rt_val.t_throw_type_error(st, "host: " <> msg)
     })
-  let st = rt_obj.t_global_set(st, <<"thrower":utf8>>, thrower)
+  let st = rt_lang.t_global_set(st, <<"thrower":utf8>>, thrower)
   let #(reenter, st) =
     rt_helpers.func(st, fn(st, args) {
       case args {
@@ -310,7 +310,7 @@ pub fn host_native_throw_and_reentry_test() {
         _ -> #(types.mk_undefined(), st)
       }
     })
-  let st = rt_obj.t_global_set(st, <<"reenter":utf8>>, reenter)
+  let st = rt_lang.t_global_set(st, <<"reenter":utf8>>, reenter)
   let #(settle, st) =
     rt_helpers.func(st, fn(st, args) {
       case args {
@@ -328,7 +328,7 @@ pub fn host_native_throw_and_reentry_test() {
         _ -> #(types.mk_undefined(), st)
       }
     })
-  let st = rt_obj.t_global_set(st, <<"settle":utf8>>, settle)
+  let st = rt_lang.t_global_set(st, <<"settle":utf8>>, settle)
 
   assert eval_string_on(st, "try { thrower('a') } catch (e) { e.message }")
     == "host: a"

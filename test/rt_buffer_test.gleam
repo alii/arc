@@ -1,6 +1,7 @@
 import arc/bytecode/key
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
+import arc/rt/lang as rt_lang
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type JsVal, JFloat, JInt, KBig, KBool, KHandle, KNum, KStr, KUndef,
@@ -21,7 +22,7 @@ fn ints(xs: List(Int)) -> List(JsVal) {
 }
 
 fn global(st: Agent, name: String) -> JsVal {
-  let #(v, _) = rt_obj.t_global_get(st, <<name:utf8>>)
+  let #(v, _) = rt_lang.t_global_get(st, <<name:utf8>>)
   v
 }
 

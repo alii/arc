@@ -294,13 +294,13 @@ fn ab_get_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 fn ab_get_detached(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "detached")
   let buf = require_unshared(st, buf, "detached")
-  #(mk_bool(types.buffer_is_detached(buf.storage)), st)
+  #(mk_bool(buffer.buffer_is_detached(buf.storage)), st)
 }
 
 fn ab_get_immutable(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "immutable")
   let buf = require_unshared(st, buf, "immutable")
-  #(mk_bool(types.buffer_is_immutable(buf.storage)), st)
+  #(mk_bool(buffer.buffer_is_immutable(buf.storage)), st)
 }
 
 fn ab_get_max_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
@@ -309,9 +309,9 @@ fn ab_get_max_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let result = case buf.storage {
     Detached(..) -> 0
     live ->
-      case types.buffer_max_byte_length(live) {
+      case buffer.buffer_max_byte_length(live) {
         Some(max) -> max
-        None -> types.buffer_byte_size(live)
+        None -> buffer.buffer_byte_size(live)
       }
   }
   #(mk_int(result), st)
@@ -371,7 +371,7 @@ fn buffer_slice(
   let buf = require_buffer(st, this, "slice")
   let buf = require_family(st, buf, "slice", shared)
   let storage = require_live(st, buf, "slice")
-  let len = types.buffer_byte_size(storage)
+  let len = buffer.buffer_byte_size(storage)
   let #(first, st) =
     rt_abstract_ops.relative_index(
       st,
@@ -400,7 +400,7 @@ fn buffer_slice(
         "species constructor returned the same " <> ctor_name(shared),
       )
     False ->
-      case types.buffer_byte_size(new_storage) < new_len {
+      case buffer.buffer_byte_size(new_storage) < new_len {
         True ->
           rt_val.t_throw_type_error(
             st,
@@ -409,7 +409,7 @@ fn buffer_slice(
         False -> {
           let buf = require_buffer(st, mk_object(buf.h), "slice")
           let storage = require_live(st, buf, "slice")
-          let current_len = types.buffer_byte_size(storage)
+          let current_len = buffer.buffer_byte_size(storage)
           case first < current_len {
             False -> #(new_val, st)
             True -> {
@@ -607,11 +607,11 @@ fn ctor_name(shared: Bool) -> String {
 }
 
 fn live_byte_size(buf: LiveBuffer) -> Int {
-  types.buffer_byte_size(buf.storage)
+  buffer.buffer_byte_size(buf.storage)
 }
 
 fn max_byte_length(buf: LiveBuffer) -> Option(Int) {
-  types.buffer_max_byte_length(buf.storage)
+  buffer.buffer_max_byte_length(buf.storage)
 }
 
 fn detach(st: Agent, buf: LiveBuffer) -> Agent {
@@ -670,7 +670,7 @@ fn require_live(st: Agent, buf: LiveBuffer, method: String) -> BufferStorage {
 }
 
 fn require_live_bits(st: Agent, buf: LiveBuffer, method: String) -> BitArray {
-  case types.buffer_bits(buf.storage) {
+  case buffer.buffer_bits(buf.storage) {
     Some(bits) -> bits
     None -> detached_error(st, method)
   }

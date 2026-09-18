@@ -1,3 +1,7 @@
+import arc/bytecode/binop.{
+  type ClassifiedBinOp, AddOp, InOp, InstanceOfOp, PureOp,
+}
+import arc/bytecode/opcode
 import arc/parser/ast
 import arc/rt/types.{
   type JsNum, type JsVal, JFloat, JInt, JNegInf, JPosInf, mk_bigint, mk_bool,
@@ -68,5 +72,72 @@ pub fn fold_unary(op: ast.UnaryOp, arg: ast.Expression) -> Option(JsVal) {
       literal_truthy(arg) |> option.map(fn(t) { mk_bool(!t) })
     ast.Void, _ -> literal_truthy(arg) |> option.map(fn(_) { mk_undefined() })
     _, _ -> None
+  }
+}
+
+pub fn translate_binop(op: ast.BinaryOp) -> ClassifiedBinOp {
+  case op {
+    ast.Add -> AddOp
+    ast.Subtract -> PureOp(binop.Arith(binop.Sub))
+    ast.Multiply -> PureOp(binop.Arith(binop.Mul))
+    ast.Divide -> PureOp(binop.Arith(binop.Div))
+    ast.Modulo -> PureOp(binop.Arith(binop.Mod))
+    ast.Exponentiation -> PureOp(binop.Arith(binop.Exp))
+    ast.StrictEqual -> PureOp(binop.Equality(binop.StrictEq))
+    ast.StrictNotEqual -> PureOp(binop.Equality(binop.StrictNotEq))
+    ast.Equal -> PureOp(binop.Equality(binop.LooseEq))
+    ast.NotEqual -> PureOp(binop.Equality(binop.LooseNotEq))
+    ast.LessThan -> PureOp(binop.Compare(binop.Less))
+    ast.GreaterThan -> PureOp(binop.Compare(binop.Greater))
+    ast.LessThanEqual -> PureOp(binop.Compare(binop.LessEq))
+    ast.GreaterThanEqual -> PureOp(binop.Compare(binop.GreaterEq))
+    ast.LeftShift -> PureOp(binop.Bitwise(binop.ShiftLeft))
+    ast.RightShift -> PureOp(binop.Bitwise(binop.ShiftRight))
+    ast.UnsignedRightShift -> PureOp(binop.Bitwise(binop.ShiftRightUnsigned))
+    ast.BitwiseAnd -> PureOp(binop.Bitwise(binop.BitAnd))
+    ast.BitwiseOr -> PureOp(binop.Bitwise(binop.BitOr))
+    ast.BitwiseXor -> PureOp(binop.Bitwise(binop.BitXor))
+    ast.In -> InOp
+    ast.InstanceOf -> InstanceOfOp
+  }
+}
+
+pub fn update_binop(op: ast.UpdateOp) -> ClassifiedBinOp {
+  case op {
+    ast.Increment -> AddOp
+    ast.Decrement -> PureOp(binop.Arith(binop.Sub))
+  }
+}
+
+// typeof and delete map to None: they have dedicated arms
+pub fn translate_unaryop(op: ast.UnaryOp) -> Option(opcode.UnaryOpKind) {
+  case op {
+    ast.Negate -> Some(opcode.Neg)
+    ast.UnaryPlus -> Some(opcode.Pos)
+    ast.LogicalNot -> Some(opcode.LogicalNot)
+    ast.BitwiseNot -> Some(opcode.BitNot)
+    ast.Void -> Some(opcode.Void)
+    ast.TypeOf | ast.Delete -> None
+  }
+}
+
+pub fn compound_to_binop(op: ast.AssignmentOp) -> Result(ClassifiedBinOp, Nil) {
+  case op {
+    ast.AddAssign -> Ok(AddOp)
+    ast.SubtractAssign -> Ok(PureOp(binop.Arith(binop.Sub)))
+    ast.MultiplyAssign -> Ok(PureOp(binop.Arith(binop.Mul)))
+    ast.DivideAssign -> Ok(PureOp(binop.Arith(binop.Div)))
+    ast.ModuloAssign -> Ok(PureOp(binop.Arith(binop.Mod)))
+    ast.ExponentiationAssign -> Ok(PureOp(binop.Arith(binop.Exp)))
+    ast.LeftShiftAssign -> Ok(PureOp(binop.Bitwise(binop.ShiftLeft)))
+    ast.RightShiftAssign -> Ok(PureOp(binop.Bitwise(binop.ShiftRight)))
+    ast.UnsignedRightShiftAssign ->
+      Ok(PureOp(binop.Bitwise(binop.ShiftRightUnsigned)))
+    ast.BitwiseAndAssign -> Ok(PureOp(binop.Bitwise(binop.BitAnd)))
+    ast.BitwiseOrAssign -> Ok(PureOp(binop.Bitwise(binop.BitOr)))
+    ast.BitwiseXorAssign -> Ok(PureOp(binop.Bitwise(binop.BitXor)))
+    ast.Assign -> Error(Nil)
+    ast.LogicalAndAssign | ast.LogicalOrAssign | ast.NullishCoalesceAssign ->
+      Error(Nil)
   }
 }

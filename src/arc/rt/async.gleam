@@ -108,7 +108,16 @@ pub fn t_enqueue_job(st: Agent, job: Job) -> Agent {
   )
 }
 
-// gc safepoint between jobs only; called by name from arc_aot_exec_ffi
+// what runs when a turn ends: drain microtasks plus any embedder loop
+pub type Drain =
+  fn(Agent) -> Agent
+
+// for code already inside a job
+pub fn no_drain(st: Agent) -> Agent {
+  st
+}
+
+// gc safepoint between jobs only; called by name from arc_aot_run_ffi
 pub fn drain(st: Agent) -> Agent {
   let st = case st.waiters {
     [] -> st

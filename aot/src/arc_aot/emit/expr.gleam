@@ -612,8 +612,8 @@ pub fn analyze_const_globals(
   case dict.is_empty(cands) {
     True -> cands
     False -> {
-      let #(uses, _) =
-        list.fold(body, #(Uses(set.new(), False), set.new()), fn(st, s) {
+      let #(writes, _) =
+        list.fold(body, #(GlobalWrites(set.new(), False), set.new()), fn(st, s) {
           let #(acc, seen) = st
           case s.statement {
             ast.VariableDeclaration(declarations:, ..) ->
@@ -623,7 +623,7 @@ pub fn analyze_const_globals(
                 case d.id, d.init {
                   ast.IdentifierPattern(name:, ..), Some(_) ->
                     case set.contains(seen, name) {
-                      True -> #(uses_assign(acc, name), seen)
+                      True -> #(record_assigned(acc, name), seen)
                       False -> #(acc, set.insert(seen, name))
                     }
                   ast.IdentifierPattern(..), None -> #(acc, seen)
@@ -633,26 +633,28 @@ pub fn analyze_const_globals(
             _ -> #(stmt_assigned_globals(acc, s), seen)
           }
         })
-      case uses.names_eval {
+      case writes.names_eval {
         True -> dict.new()
         False ->
-          dict.filter(cands, fn(name, _) { !set.contains(uses.assigned, name) })
+          dict.filter(cands, fn(name, _) {
+            !set.contains(writes.assigned, name)
+          })
       }
     }
   }
 }
 
-type Uses {
-  Uses(assigned: set.Set(String), names_eval: Bool)
+type GlobalWrites {
+  GlobalWrites(assigned: set.Set(String), names_eval: Bool)
 }
 
-fn uses_assign(acc: Uses, name: String) -> Uses {
-  Uses(..acc, assigned: set.insert(acc.assigned, name))
+fn record_assigned(acc: GlobalWrites, name: String) -> GlobalWrites {
+  GlobalWrites(..acc, assigned: set.insert(acc.assigned, name))
 }
 
-fn uses_name(acc: Uses, name: String) -> Uses {
+fn record_reference(acc: GlobalWrites, name: String) -> GlobalWrites {
   case name {
-    "eval" | "Function" -> Uses(..acc, names_eval: True)
+    "eval" | "Function" -> GlobalWrites(..acc, names_eval: True)
     _ -> acc
   }
 }
@@ -743,7 +745,10 @@ fn small_int_value(f: Float) -> Option(ir.Value) {
   }
 }
 
-fn stmt_assigned_globals(acc: Uses, s: ast.StmtWithLine) -> Uses {
+fn stmt_assigned_globals(
+  acc: GlobalWrites,
+  s: ast.StmtWithLine,
+) -> GlobalWrites {
   case s.statement {
     ast.EmptyStatement | ast.DebuggerStatement -> acc
     ast.BreakStatement(..) | ast.ContinueStatement(..) -> acc
@@ -821,15 +826,15 @@ fn stmt_assigned_globals(acc: Uses, s: ast.StmtWithLine) -> Uses {
   }
 }
 
-fn st_assigned(acc: Uses, s: ast.Statement) -> Uses {
+fn st_assigned(acc: GlobalWrites, s: ast.Statement) -> GlobalWrites {
   stmt_assigned_globals(acc, ast.StmtWithLine(0, s))
 }
 
-fn decl_assigned(acc: Uses, d: ast.VariableDeclarator) -> Uses {
+fn decl_assigned(acc: GlobalWrites, d: ast.VariableDeclarator) -> GlobalWrites {
   pat_bound_assigned(opt_ex_assigned(acc, d.init), d.id)
 }
 
-fn for_init_assigned(acc: Uses, fi: ast.ForInit) -> Uses {
+fn for_init_assigned(acc: GlobalWrites, fi: ast.ForInit) -> GlobalWrites {
   case fi {
     ast.ForInitExpression(e) -> ex_assigned(acc, e)
     ast.ForInitDeclaration(declarations:, ..) ->
@@ -838,7 +843,7 @@ fn for_init_assigned(acc: Uses, fi: ast.ForInit) -> Uses {
   }
 }
 
-fn catch_assigned(acc: Uses, handler: ast.CatchClause) -> Uses {
+fn catch_assigned(acc: GlobalWrites, handler: ast.CatchClause) -> GlobalWrites {
   let acc = case handler.param {
     Some(p) -> pat_default_assigned(acc, p)
     None -> acc
@@ -846,14 +851,17 @@ fn catch_assigned(acc: Uses, handler: ast.CatchClause) -> Uses {
   list.fold(handler.body, acc, stmt_assigned_globals)
 }
 
-fn opt_ex_assigned(acc: Uses, e: Option(ast.Expression)) -> Uses {
+fn opt_ex_assigned(
+  acc: GlobalWrites,
+  e: Option(ast.Expression),
+) -> GlobalWrites {
   case e {
     Some(ex) -> ex_assigned(acc, ex)
     None -> acc
   }
 }
 
-fn pat_default_assigned(acc: Uses, p: ast.Pattern) -> Uses {
+fn pat_default_assigned(acc: GlobalWrites, p: ast.Pattern) -> GlobalWrites {
   case p {
     ast.IdentifierPattern(..) -> acc
     ast.AssignmentPattern(left:, right:) ->
@@ -877,12 +885,15 @@ fn pat_default_assigned(acc: Uses, p: ast.Pattern) -> Uses {
   }
 }
 
-fn pat_bound_assigned(acc: Uses, p: ast.Pattern) -> Uses {
+fn pat_bound_assigned(acc: GlobalWrites, p: ast.Pattern) -> GlobalWrites {
   let acc = pat_default_assigned(acc, p)
-  list.fold(ast.pattern_bound_names(p), acc, uses_assign)
+  list.fold(ast.pattern_bound_names(p), acc, record_assigned)
 }
 
-fn class_body_assigned(acc: Uses, body: List(ast.ClassElement)) -> Uses {
+fn class_body_assigned(
+  acc: GlobalWrites,
+  body: List(ast.ClassElement),
+) -> GlobalWrites {
   list.fold(body, acc, fn(acc, el) {
     case el {
       ast.ClassMethod(key:, value: ast.FunctionLiteral(body:, params:, ..), ..) ->
@@ -898,14 +909,14 @@ fn class_body_assigned(acc: Uses, body: List(ast.ClassElement)) -> Uses {
   })
 }
 
-fn key_assigned(acc: Uses, key: ast.PropertyKey) -> Uses {
+fn key_assigned(acc: GlobalWrites, key: ast.PropertyKey) -> GlobalWrites {
   case key {
     ast.KeyComputed(expression:) -> ex_assigned(acc, expression)
     _ -> acc
   }
 }
 
-fn ex_assigned(acc: Uses, ex: ast.Expression) -> Uses {
+fn ex_assigned(acc: GlobalWrites, ex: ast.Expression) -> GlobalWrites {
   case ex {
     ast.AssignmentExpression(left:, right:, ..) ->
       ex_assigned(ex_assigned(assign_target(acc, left), left), right)
@@ -929,7 +940,7 @@ fn ex_assigned(acc: Uses, ex: ast.Expression) -> Uses {
     }
     ast.ClassExpression(super_class:, body:, ..) ->
       class_body_assigned(opt_ex_assigned(acc, super_class), body)
-    ast.Identifier(name:, ..) -> uses_name(acc, name)
+    ast.Identifier(name:, ..) -> record_reference(acc, name)
     ast.NumberLiteral(..)
     | ast.BigIntLiteral(..)
     | ast.StringLiteral(..)
@@ -964,9 +975,9 @@ fn ex_assigned(acc: Uses, ex: ast.Expression) -> Uses {
       let acc = ex_assigned(acc, object)
       case property {
         ast.Bracket(expression: ast.StringLiteral(value:, ..)) ->
-          uses_name(acc, value)
+          record_reference(acc, value)
         ast.Bracket(expression:) -> ex_assigned(acc, expression)
-        ast.Dot(name:, ..) -> uses_name(acc, name)
+        ast.Dot(name:, ..) -> record_reference(acc, name)
       }
     }
     ast.SequenceExpression(expressions:, ..) ->
@@ -1004,9 +1015,9 @@ fn ex_assigned(acc: Uses, ex: ast.Expression) -> Uses {
   }
 }
 
-fn assign_target(acc: Uses, ex: ast.Expression) -> Uses {
+fn assign_target(acc: GlobalWrites, ex: ast.Expression) -> GlobalWrites {
   case ast_util.unwrap_parens(ex) {
-    ast.Identifier(name:, ..) -> uses_assign(acc, name)
+    ast.Identifier(name:, ..) -> record_assigned(acc, name)
     ast.ArrayExpression(_, elements) ->
       list.fold(elements, acc, fn(acc, el) {
         case el {

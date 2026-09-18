@@ -208,26 +208,17 @@ fn init_ctor(
           #("setFromBase64", TypedArrayN(Uint8ArrayPrototypeSetFromBase64), 1),
           #("setFromHex", TypedArrayN(Uint8ArrayPrototypeSetFromHex), 1),
         ])
-      let st = add_named_props(st, bt.prototype, u8_methods)
+      let st = common.add_named_properties(st, bt.prototype, u8_methods)
       let #(u8_statics, st) =
         common.alloc_methods(st, function_proto, [
           #("fromBase64", TypedArrayN(Uint8ArrayFromBase64), 1),
           #("fromHex", TypedArrayN(Uint8ArrayFromHex), 1),
         ])
-      add_named_props(st, bt.constructor, u8_statics)
+      common.add_named_properties(st, bt.constructor, u8_statics)
     }
     _ -> st
   }
   #(bt, st)
-}
-
-fn add_named_props(
-  st: Agent,
-  h: Handle,
-  props: List(#(String, types.Property)),
-) -> Agent {
-  use st, #(name, prop) <- list.fold(props, st)
-  common.add_named_property(st, h, name, prop)
 }
 
 pub fn dispatch(
@@ -635,7 +626,7 @@ fn from_buffer(
     }
   }
   // detached check after the observable conversions
-  case buffer.storage(st, buf_h) |> option.then(types.buffer_bits) {
+  case buffer.storage(st, buf_h) |> option.then(buffer.buffer_bits) {
     None ->
       rt_val.t_throw_type_error(
         st,
@@ -646,7 +637,7 @@ fn from_buffer(
       let range_err = fn(msg) { rt_val.t_throw_range_error(st, msg) }
       let resizable =
         buffer.storage(st, buf_h)
-        |> option.then(types.buffer_max_byte_length)
+        |> option.then(buffer.buffer_max_byte_length)
         |> option.is_some
       case new_len {
         None if resizable ->

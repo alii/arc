@@ -1,6 +1,6 @@
 %% frame locals and registers; sloppy_this may answer miss
 -module(arc_interp_locals_ffi).
--export([frame_locals/9, sloppy_this/2, flush_regs/5]).
+-export([frame_locals/9, sloppy_this/2, flush_registers/5]).
 
 -include("../rt/arc_rt_layout.hrl").
 
@@ -125,7 +125,7 @@ sloppy_this(null, Global) -> Global;
 sloppy_this(js_tdz, _Global) -> js_tdz;
 sloppy_this(_, _) -> miss.
 
-flush_regs(L, A, B, R0, R1) ->
+flush_registers(L, A, B, R0, R1) ->
     put_reg(put_reg(L, A, R0), B, R1).
 
 put_reg(L, S, _) when S < 0 -> L;

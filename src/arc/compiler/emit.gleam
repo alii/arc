@@ -1,3 +1,4 @@
+import arc/bytecode/binop.{AddOp, PureOp}
 import arc/bytecode/error_kind
 import arc/bytecode/key
 import arc/bytecode/lexical
@@ -16,7 +17,7 @@ import arc/compiler/scope.{
   LexGlobal, LexLocal, ParamBinding, ToEvalEnv, ToGlobal, VarBinding,
   root_scope_id,
 }
-import arc/esm
+import arc/module/summary
 import arc/parser/ast
 import arc/rt/types.{
   type JsVal, mk_bigint, mk_bool, mk_int, mk_null, mk_string, mk_tdz,
@@ -496,7 +497,7 @@ fn emit_jump_unless_strict_neq(
   e
   |> emit_scratch_get(slot)
   |> push_const(constant)
-  |> emit_ir(IrBinOp(opcode.StrictNotEq))
+  |> emit_ir(IrBinOp(PureOp(binop.Equality(binop.StrictNotEq))))
   |> emit_ir(IrJumpIfFalse(target))
 }
 
@@ -3131,7 +3132,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.BinaryExpression(_, op, left, right) -> {
       use e <- result.try(emit_expr(e, left))
       use e <- result.map(emit_expr(e, right))
-      emit_ir(e, IrBinOp(translate_binop(op)))
+      emit_ir(e, IrBinOp(const_fold.translate_binop(op)))
     }
 
     ast.LogicalExpression(_, op, left, right) -> {
@@ -3159,7 +3160,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     ast.UnaryExpression(_, op, arg) -> {
       use kind <- result.try(
-        translate_unaryop(op)
+        const_fold.translate_unaryop(op)
         |> option.to_result(NonGenericUnaryOperator),
       )
       case const_fold.fold_unary(op, arg) {
@@ -3398,7 +3399,7 @@ fn emit_update(
   argument argument: ast.Expression,
 ) -> Result(Emitter, EmitError) {
   let one = mk_int(1)
-  let bin_kind = update_binop(op)
+  let bin_kind = const_fold.update_binop(op)
   case argument {
     ast.CallExpression(..) ->
       emit_call_then_reference_error(
@@ -3485,7 +3486,7 @@ fn emit_assignment(
 
     // named evaluation for anonymous fn/class rhs
     ast.Assign, ast.Identifier(name:, ..) -> {
-      let inferred_name = case name == esm.default_export_local_name {
+      let inferred_name = case name == summary.default_export_local_name {
         True -> "default"
         False -> name
       }
@@ -3493,7 +3494,7 @@ fn emit_assignment(
     }
 
     _, ast.Identifier(name:, ..) ->
-      case compound_to_binop(op) {
+      case const_fold.compound_to_binop(op) {
         Ok(bin_kind) -> {
           use e <- with_identifier_read_write(e, name)
           use e <- result.map(emit_expr(e, right))
@@ -3525,7 +3526,7 @@ fn emit_assignment(
 
     // keep-read so base/key evaluate once
     _, ast.MemberExpression(..) ->
-      case compound_to_binop(op) {
+      case const_fold.compound_to_binop(op) {
         Ok(bin_kind) -> {
           use #(put, e) <- result.try(emit_member_get_keep(
             e,
@@ -3720,15 +3721,12 @@ fn emit_template_literal(
       use e <- result.map(emit_expr(e, expr))
       let e = emit_op(e, opcode.ToStringVal)
       let e = case started {
-        True -> emit_ir(e, IrBinOp(opcode.Add))
+        True -> emit_ir(e, IrBinOp(AddOp))
         False -> e
       }
       case quasi {
         "" -> #(True, e)
-        _ -> #(
-          True,
-          emit_ir(push_const(e, mk_string(quasi)), IrBinOp(opcode.Add)),
-        )
+        _ -> #(True, emit_ir(push_const(e, mk_string(quasi)), IrBinOp(AddOp)))
       }
     }),
   )
@@ -3775,7 +3773,7 @@ fn emit_switch(
         Some(SwitchTest(expr:, found:)) -> {
           let e = emit_op(e, opcode.Dup)
           use e <- result.map(emit_expr(e, expr))
-          let e = emit_ir(e, IrBinOp(opcode.StrictEq))
+          let e = emit_ir(e, IrBinOp(PureOp(binop.Equality(binop.StrictEq))))
           emit_ir(e, IrJumpIfTrue(found))
         }
         None -> Ok(e)
@@ -4529,7 +4527,7 @@ fn emit_default_if_undefined(
   let #(has_val, e) = fresh_label(e)
   let e = emit_op(e, opcode.Dup)
   let e = push_const(e, mk_undefined())
-  let e = emit_ir(e, IrBinOp(opcode.StrictEq))
+  let e = emit_ir(e, IrBinOp(PureOp(binop.Equality(binop.StrictEq))))
   let e = emit_ir(e, IrJumpIfFalse(has_val))
   let e = emit_op(e, opcode.Pop)
   use e <- result.map(case target_name {
@@ -5121,72 +5119,6 @@ fn emit_array_elements(
       use e <- result.map(emit_destructuring_bind(e, pattern, binding_kind))
       #(False, e)
     }
-  }
-}
-
-fn translate_binop(op: ast.BinaryOp) -> opcode.BinOpKind {
-  case op {
-    ast.Add -> opcode.Add
-    ast.Subtract -> opcode.Sub
-    ast.Multiply -> opcode.Mul
-    ast.Divide -> opcode.Div
-    ast.Modulo -> opcode.Mod
-    ast.Exponentiation -> opcode.Exp
-    ast.StrictEqual -> opcode.StrictEq
-    ast.StrictNotEqual -> opcode.StrictNotEq
-    ast.Equal -> opcode.LooseEq
-    ast.NotEqual -> opcode.LooseNotEq
-    ast.LessThan -> opcode.Less
-    ast.GreaterThan -> opcode.Greater
-    ast.LessThanEqual -> opcode.LessEq
-    ast.GreaterThanEqual -> opcode.GreaterEq
-    ast.LeftShift -> opcode.ShiftLeft
-    ast.RightShift -> opcode.ShiftRight
-    ast.UnsignedRightShift -> opcode.ShiftRightUnsigned
-    ast.BitwiseAnd -> opcode.BitAnd
-    ast.BitwiseOr -> opcode.BitOr
-    ast.BitwiseXor -> opcode.BitXor
-    ast.In -> opcode.In
-    ast.InstanceOf -> opcode.InstanceOf
-  }
-}
-
-fn update_binop(op: ast.UpdateOp) -> opcode.BinOpKind {
-  case op {
-    ast.Increment -> opcode.Add
-    ast.Decrement -> opcode.Sub
-  }
-}
-
-// typeof and delete map to None: they have dedicated arms
-fn translate_unaryop(op: ast.UnaryOp) -> Option(opcode.UnaryOpKind) {
-  case op {
-    ast.Negate -> Some(opcode.Neg)
-    ast.UnaryPlus -> Some(opcode.Pos)
-    ast.LogicalNot -> Some(opcode.LogicalNot)
-    ast.BitwiseNot -> Some(opcode.BitNot)
-    ast.Void -> Some(opcode.Void)
-    ast.TypeOf | ast.Delete -> None
-  }
-}
-
-fn compound_to_binop(op: ast.AssignmentOp) -> Result(opcode.BinOpKind, Nil) {
-  case op {
-    ast.AddAssign -> Ok(opcode.Add)
-    ast.SubtractAssign -> Ok(opcode.Sub)
-    ast.MultiplyAssign -> Ok(opcode.Mul)
-    ast.DivideAssign -> Ok(opcode.Div)
-    ast.ModuloAssign -> Ok(opcode.Mod)
-    ast.ExponentiationAssign -> Ok(opcode.Exp)
-    ast.LeftShiftAssign -> Ok(opcode.ShiftLeft)
-    ast.RightShiftAssign -> Ok(opcode.ShiftRight)
-    ast.UnsignedRightShiftAssign -> Ok(opcode.ShiftRightUnsigned)
-    ast.BitwiseAndAssign -> Ok(opcode.BitAnd)
-    ast.BitwiseOrAssign -> Ok(opcode.BitOr)
-    ast.BitwiseXorAssign -> Ok(opcode.BitXor)
-    ast.Assign -> Error(Nil)
-    ast.LogicalAndAssign | ast.LogicalOrAssign | ast.NullishCoalesceAssign ->
-      Error(Nil)
   }
 }
 

@@ -24,10 +24,10 @@ pub fn load(code: BitArray, name: String) -> Result(Atom, String) {
   build_beam.load_module(atom.create(name), name, code)
 }
 
-@external(erlang, "arc_aot_exec_ffi", "unload")
+@external(erlang, "arc_aot_run_ffi", "unload")
 pub fn unload(module: Atom) -> Nil
 
-@external(erlang, "arc_aot_exec_ffi", "apply_js_main")
+@external(erlang, "arc_aot_run_ffi", "apply_js_main")
 pub fn apply_js_main(st: Agent, module: Atom) -> #(JsExecOutcome, Agent)
 
 pub fn main(st: Agent, module: Atom) -> #(RunResult, Agent) {

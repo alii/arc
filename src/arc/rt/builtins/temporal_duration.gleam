@@ -1,21 +1,13 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError}
 import arc/internal/int_math.{floor_div, trunc_div}
 import arc/rt/builtins/helpers
+import arc/rt/builtins/options.{get_options_object, opt_get}
 import arc/rt/builtins/temporal_common.{
-  type FractionalDigits, type RoundingMode, type TimeUnit, type Unit, Compatible,
-  Day, DigitsAuto, DigitsFixed, HalfExpand, Hour, Microsecond, MicrosecondUnit,
-  Millisecond, MillisecondUnit, Month, Nanosecond, NanosecondUnit, Second,
-  SecondUnit, Trunc, UnitAbsent, UnitAuto, UnitValue, Week, Year,
-  apply_duration_fields, balance_time_ns, check_time_duration_range, date_part,
-  days_and_time_ns, duration_sign, duration_slot_of, epoch_ns_to_iso_in,
-  finish_duration, get_fractional_digits, get_options_object,
-  get_rounding_increment_option, get_rounding_mode_option, get_unit_option,
-  has_calendar_units, has_date_units, integral_int_arg_or, is_valid_duration,
-  largest_smaller_msg, largest_smaller_than_smallest, make_duration, max_unit,
-  negate_duration, opt_get, read_duration_fields, read_unit_option,
-  require_temporal, require_time_unit, round_to_increment, singular_unit,
-  static_name, time_part_ns, time_unit_ns, to_temporal_duration, unit_rank,
-  unit_to_string, valid_increment_for_unit,
+  apply_duration_fields, check_time_duration_range, date_part, days_and_time_ns,
+  duration_sign, duration_slot_of, finish_duration, has_calendar_units,
+  has_date_units, integral_int_arg_or, is_valid_duration, make_duration,
+  negate_duration, read_duration_fields, require_temporal, static_name,
+  time_part_ns, to_temporal_duration,
 }
 import arc/rt/builtins/temporal_diff.{
   add_calendar_units, adjust_date_for_time_sign, default_largest_unit,
@@ -33,10 +25,24 @@ import arc/rt/builtins/temporal_iso.{
   ns_per_ms, ns_per_second, ns_per_us, ns_to_time, pow10, time_to_ns,
   utc_epoch_ns,
 }
+import arc/rt/builtins/temporal_options.{Compatible}
+import arc/rt/builtins/temporal_rounding.{
+  type FractionalDigits, type RoundingMode, type TimeUnit, type Unit, Day,
+  DigitsAuto, DigitsFixed, HalfExpand, Hour, Microsecond, MicrosecondUnit,
+  Millisecond, MillisecondUnit, Month, Nanosecond, NanosecondUnit, Second,
+  SecondUnit, Trunc, UnitAbsent, UnitAuto, UnitValue, Week, Year,
+  balance_time_ns, get_fractional_digits, get_rounding_increment_option,
+  get_rounding_mode_option, get_unit_option, largest_smaller_msg,
+  largest_smaller_than_smallest, max_unit, read_unit_option, require_time_unit,
+  round_to_increment, singular_unit, time_unit_ns, unit_rank, unit_to_string,
+  valid_increment_for_unit,
+}
+import arc/rt/builtins/temporal_time_zone.{epoch_ns_to_iso_in}
 import arc/rt/builtins/temporal_zoned_ops.{
   type RelativeTo, NoRelativeTo, RelativeDate, RelativeZoned, add_zoned_ns,
   convert_relative_to, date_duration_days, get_epoch_ns_for,
 }
+import arc/rt/temporal_data
 import arc/rt/types.{
   type Agent, type DurationMethod, type JsVal, type NativeToken,
   type TemporalDurationGetter, type TemporalProtos, type TemporalStaticName,
@@ -651,7 +657,7 @@ fn duration_total_with(
 
 fn zoned_calendar_total(
   st: Agent,
-  tz: types.TemporalZone,
+  tz: temporal_data.TemporalZone,
   anchor_ns: Int,
   target_ns: Int,
   unit: Unit,

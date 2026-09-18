@@ -1,6 +1,7 @@
 import arc/bytecode/key
 import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
+import arc/rt/lang as rt_lang
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type JsVal, DataProperty, KBool, KStr, StringKey, classify,
@@ -18,7 +19,7 @@ fn key(name: String) {
 }
 
 fn json(st: Agent, method: String, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(ns, st) = rt_obj.t_global_get(st, <<"JSON">>)
+  let #(ns, st) = rt_lang.t_global_get(st, <<"JSON">>)
   rt_call.t_call_method(st, ns, key(method), args)
 }
 
@@ -39,7 +40,7 @@ pub fn raw_json_is_a_brand_not_a_shape_test() {
     ..,
   )) = d
   assert classify(value) == KStr("12")
-  let #(object, st) = rt_obj.t_global_get(st, <<"Object">>)
+  let #(object, st) = rt_lang.t_global_get(st, <<"Object">>)
   let #(frozen, st) = rt_call.t_call_method(st, object, key("isFrozen"), [raw])
   assert classify(frozen) == KBool(True)
   let #(fake_h, st) = rt_obj.t_new_object(st, None)

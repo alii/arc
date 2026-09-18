@@ -4,7 +4,7 @@ import arc/bytecode/error_kind.{SyntaxError, TypeError}
 import arc/bytecode/lexical
 import arc/compiler
 import arc/compiler/compile_task
-import arc/compiler/scope
+import arc/compiler/scope_builder
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/state.{type State, State}
 import arc/parser
@@ -34,10 +34,13 @@ pub type Run =
 
 type Parse =
   fn(String) ->
-    Result(#(List(ast.StmtWithLine), scope.ScopeBuilder), parser.ParseError)
+    Result(
+      #(List(ast.StmtWithLine), scope_builder.ScopeBuilder),
+      parser.ParseError,
+    )
 
 type Compile =
-  fn(List(ast.StmtWithLine), scope.ScopeBuilder) ->
+  fn(List(ast.StmtWithLine), scope_builder.ScopeBuilder) ->
     Result(FuncTemplate, compiler.CompileError)
 
 fn compile_source(
@@ -212,7 +215,7 @@ pub fn direct(
         ))
         run_bracketed(caller.agent, script_activation(_, template), run)
       }
-      adopt(caller, outcome, caller.eval_env)
+      return_to_caller(caller, outcome, caller.eval_env)
     }
     _, _ -> #(Ok(source), caller)
   }
@@ -283,12 +286,16 @@ fn run_direct_eval(
   }
   case outcome {
     Ok(#(res, agent, eval_env)) ->
-      adopt(caller, Ok(#(res, agent)), option.or(eval_env, caller.eval_env))
-    Error(err) -> adopt(caller, Error(err), caller.eval_env)
+      return_to_caller(
+        caller,
+        Ok(#(res, agent)),
+        option.or(eval_env, caller.eval_env),
+      )
+    Error(err) -> return_to_caller(caller, Error(err), caller.eval_env)
   }
 }
 
-fn adopt(
+fn return_to_caller(
   caller: State,
   outcome: Result(#(Result(JsVal, JsVal), Agent), #(JsVal, Agent)),
   eval_env: Option(Handle),

@@ -3706,7 +3706,7 @@ pub fn emit_coroutine_fn(
       e_outer,
       func.shape_self_name(shape),
       func.shape_is_arrow(shape),
-      own_args: False,
+      takes_args_list: False,
       params:,
       stmts:,
       info:,

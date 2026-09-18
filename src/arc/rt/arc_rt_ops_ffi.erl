@@ -183,25 +183,25 @@ step(_, _) -> miss.
 
 lt(A, B) when is_number(A), is_number(B) -> A < B;
 lt(A, B) when is_binary(A), is_binary(B) -> A < B;
-lt(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_js_string_ffi:bin(A) < arc_rt_js_string_ffi:bin(B);
+lt(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_js_string_ffi:text(A) < arc_rt_js_string_ffi:text(B);
 lt({js_bigint, A}, {js_bigint, B}) -> A < B;
 lt(A, B) -> cmp_nonfinite(A, B, lt).
 
 le(A, B) when is_number(A), is_number(B) -> A =< B;
 le(A, B) when is_binary(A), is_binary(B) -> A =< B;
-le(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_js_string_ffi:bin(A) =< arc_rt_js_string_ffi:bin(B);
+le(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_js_string_ffi:text(A) =< arc_rt_js_string_ffi:text(B);
 le({js_bigint, A}, {js_bigint, B}) -> A =< B;
 le(A, B) -> cmp_nonfinite(A, B, le).
 
 gt(A, B) when is_number(A), is_number(B) -> A > B;
 gt(A, B) when is_binary(A), is_binary(B) -> A > B;
-gt(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_js_string_ffi:bin(A) > arc_rt_js_string_ffi:bin(B);
+gt(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_js_string_ffi:text(A) > arc_rt_js_string_ffi:text(B);
 gt({js_bigint, A}, {js_bigint, B}) -> A > B;
 gt(A, B) -> cmp_nonfinite(A, B, gt).
 
 ge(A, B) when is_number(A), is_number(B) -> A >= B;
 ge(A, B) when is_binary(A), is_binary(B) -> A >= B;
-ge(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_js_string_ffi:bin(A) >= arc_rt_js_string_ffi:bin(B);
+ge(A, B) when ?IS_STR(A), ?IS_STR(B) -> arc_rt_js_string_ffi:text(A) >= arc_rt_js_string_ffi:text(B);
 ge({js_bigint, A}, {js_bigint, B}) -> A >= B;
 ge(A, B) -> cmp_nonfinite(A, B, ge).
 

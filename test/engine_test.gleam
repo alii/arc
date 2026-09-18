@@ -1,7 +1,7 @@
 import arc/engine.{ModuleReturned, Returned}
 import arc/host.{Context}
-import arc/module/load_error
-import arc/module_host
+import arc/module/import_hook
+import arc/module/loader
 import arc/rt/builtins/console as b_console
 import arc/rt/snapshot.{IncompatibleSnapshot, MalformedBinary}
 import arc/rt/types.{
@@ -242,7 +242,7 @@ fn with_import_hook(
   let #(Nil, eng) =
     engine.with_context(eng, fn(ctx) {
       let st =
-        module_host.install_import_hook(
+        import_hook.install_import_hook(
           ctx.agent,
           "/main.js",
           fn(raw, _referrer) { Ok(raw) },
@@ -418,11 +418,11 @@ pub fn host_fn_can_throw_test() {
 }
 
 fn reject_imports(_raw: String, _parent: String) {
-  Error(load_error.ResolveForbidden)
+  Error(loader.ResolveForbidden)
 }
 
 fn reject_loads(_resolved: String) {
-  Error(load_error.LoadForbidden)
+  Error(loader.LoadForbidden)
 }
 
 fn read_export(eng, ns, name: String) -> option.Option(JsValKind) {
@@ -477,7 +477,7 @@ pub fn destructured_declaration_exports_test() {
   let load = fn(resolved: String) {
     case resolved {
       "dep" -> Ok(dep)
-      _ -> Error(load_error.LoadNotFound)
+      _ -> Error(loader.LoadNotFound)
     }
   }
   let assert Ok(#(evaluated, eng)) =

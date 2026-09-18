@@ -15,11 +15,13 @@ import arc/rt/types.{
   mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
+import gleam/bit_array
 import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
 
 pub fn t_new_type_error(st: Agent, message: String) -> #(JsVal, Agent) {
   rt_val.t_new_error(st, TypeError, message)
@@ -467,3 +469,72 @@ pub fn array_iter_proto(st: Agent, rec: JsVal) -> Handle
 
 @external(erlang, "arc_rt_lang_ffi", "array_iter_record")
 pub fn array_iter_record(target: JsVal, index: Int, next_fn: JsVal) -> JsVal
+
+// absent name throws referenceerror; called by name from arc_rt_obj_ffi
+pub fn t_global_get(st: Agent, name: BitArray) -> #(JsVal, Agent) {
+  let g = types.mk_object(st.realm.global_object)
+  let key = StringKey(binary_key(name))
+  let #(has, st) = rt_obj.t_has_prop(st, g, key)
+  case has {
+    True -> rt_obj.t_get_prop(st, g, key)
+    False -> {
+      let text = bit_array.to_string(name) |> result.unwrap("")
+      rt_val.t_throw_reference_error(st, text <> " is not defined")
+    }
+  }
+}
+
+pub fn t_global_this(st: Agent) -> JsVal {
+  types.mk_object(st.realm.global_object)
+}
+
+// sloppy: failed set ignored
+pub fn t_global_set(st: Agent, name: BitArray, v: JsVal) -> Agent {
+  let g = st.realm.global_object
+  let #(_, st) =
+    rt_obj.t_set_prop(st, types.mk_object(g), StringKey(binary_key(name)), v)
+  st
+}
+
+// strict: unresolvable throws referenceerror, failed set typeerror
+pub fn t_global_set_strict(st: Agent, name: BitArray, v: JsVal) -> Agent {
+  let g = types.mk_object(st.realm.global_object)
+  let key = StringKey(binary_key(name))
+  let text = bit_array.to_string(name) |> result.unwrap("")
+  let #(has, st) = rt_obj.t_has_prop(st, g, key)
+  case has {
+    False -> rt_val.t_throw_reference_error(st, text <> " is not defined")
+    True -> {
+      let #(ok, st) = rt_obj.t_set_prop(st, g, key, v)
+      case ok {
+        True -> st
+        False ->
+          rt_val.t_throw_type_error(
+            st,
+            "Cannot assign to read only property '" <> text <> "'",
+          )
+      }
+    }
+  }
+}
+
+// unresolvable global yields "undefined" without throwing
+pub fn t_global_typeof(st: Agent, name: BitArray) -> #(String, Agent) {
+  let g = st.realm.global_object
+  let key = StringKey(binary_key(name))
+  let #(has, st) = rt_obj.t_has_prop(st, types.mk_object(g), key)
+  case has {
+    False -> #("undefined", st)
+    True -> {
+      let #(v, st) = rt_obj.t_get_prop(st, types.mk_object(g), key)
+      #(rt_val.type_of(st, v), st)
+    }
+  }
+}
+
+fn binary_key(name: BitArray) -> PropertyKey {
+  case bit_array.to_string(name) {
+    Ok(s) -> key.canonical(s)
+    Error(Nil) -> Named("")
+  }
+}

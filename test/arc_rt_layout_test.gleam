@@ -1,13 +1,14 @@
 // arc_rt_layout.hrl indices must match the gleam records
 
+import arc/bytecode/binop
 import arc/bytecode/key.{Index, Named, Private, max_array_index}
-import arc/bytecode/opcode
 import arc/internal/ordered_entries
 import arc/internal/tree_array
 import arc/interp/kernel
 import arc/rt/arena
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
+import arc/rt/lang as rt_lang
 import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -468,9 +469,9 @@ pub fn sshaped_object_test() {
   assert tuple_size(dyn(sl)) == 3
   assert element(1, dyn(sl)) == dyn(s0)
   assert element(2, dyn(sl)) == dyn(s1)
-  assert types.shape_slots_get(sl, 1) == s1
+  assert rt_obj.shape_slots_get(sl, 1) == s1
   assert slot_at(sl, 1) == s1
-  assert slot_set(sl, 0, s1) == types.shape_slots_set(sl, 0, s1)
+  assert slot_set(sl, 0, s1) == rt_obj.shape_slots_set(sl, 0, s1)
 }
 
 pub fn shape_desc_test() {
@@ -744,7 +745,7 @@ type Probe {
 
 pub fn typed_array_fast_paths_miss_test() {
   let st = seeded()
-  let #(ctor, st) = rt_obj.t_global_get(st, <<"Uint8Array">>)
+  let #(ctor, st) = rt_lang.t_global_get(st, <<"Uint8Array">>)
   let n = types.mk_int(4)
   let #(h, st) = rt_call.t_construct(st, ctor, [n], ctor)
   let ta = types.mk_object(h)
@@ -763,7 +764,7 @@ pub fn proxy_fast_paths_miss_test() {
   let n = types.mk_int(4)
   let #(arr, st) = rt_obj.t_new_array(st, [n, n])
   let #(handler, st) = rt_obj.t_new_object_literal(st)
-  let #(proxy_ctor, st) = rt_obj.t_global_get(st, <<"Proxy">>)
+  let #(proxy_ctor, st) = rt_lang.t_global_get(st, <<"Proxy">>)
   let #(ph, st) =
     rt_call.t_construct(st, proxy_ctor, [arr, handler], proxy_ctor)
   let p = types.mk_object(ph)
@@ -787,7 +788,7 @@ pub fn proxy_fast_paths_miss_test() {
 pub fn string_object_fast_paths_miss_test() {
   let st = seeded()
   let n = types.mk_int(1)
-  let #(string_ctor, st) = rt_obj.t_global_get(st, <<"String">>)
+  let #(string_ctor, st) = rt_lang.t_global_get(st, <<"String">>)
   let #(sh, st) =
     rt_call.t_construct(st, string_ctor, [types.mk_string("abc")], string_ctor)
   let s = types.mk_object(sh)
@@ -859,33 +860,32 @@ pub fn binop_kind_terms_test() {
   let six = mk_int(6)
   let three = mk_int(3)
   let answers = [
-    #(opcode.Add, dyn(mk_int(9))),
-    #(opcode.Sub, dyn(mk_int(3))),
-    #(opcode.Mul, dyn(mk_int(18))),
-    #(opcode.Div, dyn(mk_int(2))),
-    #(opcode.Mod, dyn(mk_int(0))),
-    #(opcode.BitAnd, dyn(mk_int(2))),
-    #(opcode.BitOr, dyn(mk_int(7))),
-    #(opcode.BitXor, dyn(mk_int(5))),
-    #(opcode.ShiftLeft, dyn(mk_int(48))),
-    #(opcode.ShiftRight, dyn(mk_int(0))),
-    #(opcode.ShiftRightUnsigned, dyn(mk_int(0))),
-    #(opcode.LooseEq, dyn(False)),
-    #(opcode.LooseNotEq, dyn(True)),
-    #(opcode.StrictEq, dyn(False)),
-    #(opcode.StrictNotEq, dyn(True)),
-    #(opcode.Less, dyn(False)),
-    #(opcode.LessEq, dyn(False)),
-    #(opcode.Greater, dyn(True)),
-    #(opcode.GreaterEq, dyn(True)),
-    #(opcode.Exp, dyn(kernel.Miss)),
-    #(opcode.In, dyn(kernel.Miss)),
-    #(opcode.InstanceOf, dyn(kernel.Miss)),
+    #(binop.AddOp, dyn(mk_int(9))),
+    #(binop.PureOp(binop.Arith(binop.Sub)), dyn(mk_int(3))),
+    #(binop.PureOp(binop.Arith(binop.Mul)), dyn(mk_int(18))),
+    #(binop.PureOp(binop.Arith(binop.Div)), dyn(mk_int(2))),
+    #(binop.PureOp(binop.Arith(binop.Mod)), dyn(mk_int(0))),
+    #(binop.PureOp(binop.Bitwise(binop.BitAnd)), dyn(mk_int(2))),
+    #(binop.PureOp(binop.Bitwise(binop.BitOr)), dyn(mk_int(7))),
+    #(binop.PureOp(binop.Bitwise(binop.BitXor)), dyn(mk_int(5))),
+    #(binop.PureOp(binop.Bitwise(binop.ShiftLeft)), dyn(mk_int(48))),
+    #(binop.PureOp(binop.Bitwise(binop.ShiftRight)), dyn(mk_int(0))),
+    #(binop.PureOp(binop.Bitwise(binop.ShiftRightUnsigned)), dyn(mk_int(0))),
+    #(binop.PureOp(binop.Equality(binop.LooseEq)), dyn(False)),
+    #(binop.PureOp(binop.Equality(binop.LooseNotEq)), dyn(True)),
+    #(binop.PureOp(binop.Equality(binop.StrictEq)), dyn(False)),
+    #(binop.PureOp(binop.Equality(binop.StrictNotEq)), dyn(True)),
+    #(binop.PureOp(binop.Compare(binop.Less)), dyn(False)),
+    #(binop.PureOp(binop.Compare(binop.LessEq)), dyn(False)),
+    #(binop.PureOp(binop.Compare(binop.Greater)), dyn(True)),
+    #(binop.PureOp(binop.Compare(binop.GreaterEq)), dyn(True)),
+    #(binop.PureOp(binop.Arith(binop.Exp)), dyn(kernel.Miss)),
+    #(binop.InOp, dyn(kernel.Miss)),
+    #(binop.InstanceOfOp, dyn(kernel.Miss)),
   ]
   list.each(answers, fn(row) {
     let #(kind, expected) = row
-    assert dyn(kernel.classified_binop(opcode.classify(kind), six, three))
-      == expected
+    assert dyn(kernel.classified_binop(kind, six, three)) == expected
   })
 }
 

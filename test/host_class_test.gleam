@@ -1,7 +1,7 @@
 import arc/bytecode/key.{Named}
 import arc/engine.{ModuleReturned, Returned}
 import arc/host.{type Context, Context}
-import arc/module/load_error
+import arc/module/loader
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type JsVal, JFloat, KNum, KStr, StringKey, mk_int, mk_object, mk_string,
@@ -125,7 +125,7 @@ fn dance_resolve(raw: String, _ref: String) {
 }
 
 fn no_source_loads(_resolved: String) {
-  Error(load_error.LoadForbidden)
+  Error(loader.LoadForbidden)
 }
 
 fn read_export(eng, ns, name: String) {

@@ -1,4 +1,5 @@
 import arc/bytecode/key.{Index, Named}
+import arc/interp/guard
 import arc/interp/kernel
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
@@ -237,11 +238,11 @@ pub fn put_elem_past_index_range_misses_test() {
 pub fn guard_catches_js_throw_test() {
   let st = rt_helpers.agent()
   let #(obj, st) = rt_obj.t_new_object_literal(st)
-  let assert kernel.Ok(value:, agent: _) =
-    kernel.guard3(rt_obj.t_get_prop, st, obj, StringKey(Named("nope")))
+  let assert guard.Value(value:, agent: _) =
+    guard.guard3(rt_obj.t_get_prop, st, obj, StringKey(Named("nope")))
   assert classify(value) == KUndef
-  let assert kernel.Threw(agent: st, thrown:) =
-    kernel.guard3(rt_obj.t_get_prop, st, mk_undefined(), StringKey(Named("x")))
+  let assert guard.Thrown(agent: st, thrown:) =
+    guard.guard3(rt_obj.t_get_prop, st, mk_undefined(), StringKey(Named("x")))
   let #(msg, _) = rt_val.t_to_string(st, thrown)
   assert msg == "TypeError: Cannot read properties of undefined (reading 'x')"
 }

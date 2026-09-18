@@ -1,9 +1,11 @@
+import arc/compiler
 import arc/dis
 import gleam/string
 
 fn dis_js(source: String) -> String {
-  let assert Ok(text) = dis.source(dis.Script, source)
-  text
+  let assert Ok(template) =
+    compiler.compile_source(compiler.ScriptSource, source)
+  dis.disassemble(template)
 }
 
 pub fn disassemble_shape_test() {

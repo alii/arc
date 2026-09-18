@@ -1,4 +1,4 @@
-import arc/bytecode/binop.{type PureBinOp}
+import arc/bytecode/binop.{type ClassifiedBinOp, type PureBinOp}
 import arc/bytecode/error_kind.{type ErrorKind}
 import arc/bytecode/key.{type PropertyKey}
 import gleam/option.{type Option, None, Some}
@@ -318,70 +318,6 @@ pub type AccessorKind {
   Setter
 }
 
-pub type BinOpKind {
-  Add
-  Sub
-  Mul
-  Div
-  Mod
-  Exp
-  BitAnd
-  BitOr
-  BitXor
-  ShiftLeft
-  ShiftRight
-  ShiftRightUnsigned
-  LooseEq
-  LooseNotEq
-  StrictEq
-  StrictNotEq
-  Less
-  LessEq
-  Greater
-  GreaterEq
-  In
-  InstanceOf
-}
-
-// classified once at assemble time, not per execution
-pub type ClassifiedBinOp {
-  PureOp(op: PureBinOp)
-  AddOp
-  InOp
-  InstanceOfOp
-}
-
-pub fn classify(kind: BinOpKind) -> ClassifiedBinOp {
-  case kind {
-    Add -> AddOp
-    In -> InOp
-    InstanceOf -> InstanceOfOp
-    Sub -> PureOp(binop.Arith(binop.Sub))
-    Mul -> PureOp(binop.Arith(binop.Mul))
-    Div -> PureOp(binop.Arith(binop.Div))
-    Mod -> PureOp(binop.Arith(binop.Mod))
-    Exp -> PureOp(binop.Arith(binop.Exp))
-    BitAnd -> PureOp(binop.Bitwise(binop.BitAnd))
-    BitOr -> PureOp(binop.Bitwise(binop.BitOr))
-    BitXor -> PureOp(binop.Bitwise(binop.BitXor))
-    ShiftLeft -> PureOp(binop.Bitwise(binop.ShiftLeft))
-    ShiftRight -> PureOp(binop.Bitwise(binop.ShiftRight))
-    ShiftRightUnsigned -> PureOp(binop.Bitwise(binop.ShiftRightUnsigned))
-    LooseEq -> PureOp(binop.Equality(binop.LooseEq))
-    LooseNotEq -> PureOp(binop.Equality(binop.LooseNotEq))
-    StrictEq -> PureOp(binop.Equality(binop.StrictEq))
-    StrictNotEq -> PureOp(binop.Equality(binop.StrictNotEq))
-    Less -> PureOp(binop.Compare(binop.Less))
-    LessEq -> PureOp(binop.Compare(binop.LessEq))
-    Greater -> PureOp(binop.Compare(binop.Greater))
-    GreaterEq -> PureOp(binop.Compare(binop.GreaterEq))
-  }
-}
-
-pub fn bin_op(kind: BinOpKind) -> Op {
-  BinOp(classify(kind))
-}
-
 pub type UnaryOpKind {
   Neg
   Pos
@@ -425,7 +361,7 @@ pub type IrOp {
   IrDefineMethod(name: String)
   IrDefineAccessor(name: String, kind: AccessorKind, enumerable: Bool)
 
-  IrBinOp(kind: BinOpKind)
+  IrBinOp(kind: ClassifiedBinOp)
 
   IrCmpLocalLocalJump(
     left: Int,

@@ -133,7 +133,7 @@ mk_int(N) when N > ?MAX_SAFE_INT; N < -?MAX_SAFE_INT ->
     mk_number('arc@rt@val':num_from_int(N));
 mk_int(N) -> N.
 
-mk_string(S) -> arc_rt_js_string_ffi:mk(S).
+mk_string(S) -> arc_rt_js_string_ffi:from_text(S).
 
 mk_bigint(N) -> {js_bigint, N}.
 

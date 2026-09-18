@@ -335,7 +335,7 @@ fn push_birth_refs(birth: types.FnBirth, acc: List(Int)) -> List(Int) {
   }
 }
 
-// turn boundary only, call_depth 0; called by name from arc_aot_exec_ffi
+// turn boundary only, call_depth 0; called by name from arc_aot_run_ffi
 pub fn t_maybe_collect(st: Agent) -> Agent {
   case st.call_depth == 0 && due(st.store) {
     True -> t_collect_some(st, [])

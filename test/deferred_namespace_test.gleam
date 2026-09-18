@@ -1,7 +1,7 @@
 import arc/host
 import arc/interp/entry
 import arc/module
-import arc/module/load_error
+import arc/module/loader
 import arc/rt/builtins as rt_builtins
 import arc/rt/types.{type Handle, mk_string}
 import gleam/dict
@@ -12,7 +12,7 @@ fn dance_resolve(raw: String, _ref: String) {
 }
 
 fn no_source_loads(_resolved: String) {
-  Error(load_error.LoadNotFound)
+  Error(loader.LoadNotFound)
 }
 
 fn deferred_namespace_of(

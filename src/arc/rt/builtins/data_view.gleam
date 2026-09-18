@@ -16,7 +16,6 @@ import arc/rt/types.{
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
-import gleam/float
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -302,8 +301,8 @@ fn live_buffer_info(st: Agent, buf: Handle) -> #(Int, Bool) {
         "Cannot perform operation on a detached ArrayBuffer",
       )
     Some(storage) -> #(
-      types.buffer_byte_size(storage),
-      option.is_some(types.buffer_max_byte_length(storage)),
+      buffer.buffer_byte_size(storage),
+      option.is_some(buffer.buffer_max_byte_length(storage)),
     )
     None ->
       rt_val.t_throw_type_error(st, "DataView buffer is not an ArrayBuffer")
@@ -395,7 +394,7 @@ fn decode_number(element: ViewNumElement, u: Int) -> JsVal {
     ViewInt8 -> mk_int(to_signed(u, 8))
     ViewInt16 -> mk_int(to_signed(u, 16))
     ViewInt32 -> mk_int(to_signed(u, 32))
-    ViewFloat16 -> mk_number(f16_from_bits(u))
+    ViewFloat16 -> mk_number(typed_array_bytes.decode_f16_bits(u))
     ViewFloat32 -> mk_number(typed_array_bytes.decode_f32_bits(u))
     ViewFloat64 -> mk_number(typed_array_bytes.decode_f64_bits(u))
   }
@@ -406,36 +405,6 @@ fn decode_bigint(element: ViewBigElement, u: Int) -> JsVal {
     ViewBigUint64 -> mk_bigint(u)
     ViewBigInt64 -> mk_bigint(to_signed(u, 64))
   }
-}
-
-// binary16: 1 sign, 5 exponent, 10 mantissa
-fn f16_from_bits(u: Int) -> JsNum {
-  let sign = int.bitwise_shift_right(u, 15)
-  let exp = int.bitwise_and(int.bitwise_shift_right(u, 10), 0x1F)
-  let mant = int.bitwise_and(u, 0x3FF)
-  case exp {
-    0x1F ->
-      case mant == 0, sign == 0 {
-        True, True -> JPosInf
-        True, False -> JNegInf
-        False, _ -> JNan
-      }
-    0 -> JFloat(apply_sign(int.to_float(mant) *. pow2(-24), sign))
-    _ -> JFloat(apply_sign(int.to_float(1024 + mant) *. pow2(exp - 25), sign))
-  }
-}
-
-fn apply_sign(f: Float, sign: Int) -> Float {
-  case sign {
-    0 -> f
-    _ -> f *. -1.0
-  }
-}
-
-fn pow2(e: Int) -> Float {
-  let assert Ok(f) = float.power(2.0, int.to_float(e))
-    as "data_view: 2^e is undefined"
-  f
 }
 
 fn encode_value(
@@ -468,7 +437,7 @@ fn encode_number(element: ViewNumElement, num: JsNum) -> BitArray {
     ViewInt32 | ViewUint32 -> <<to_int_wrap(num):size(32)>>
     ViewFloat64 -> <<typed_array_bytes.f64_bits(num):size(64)>>
     ViewFloat32 -> <<typed_array_bytes.f32_bits(num):size(32)>>
-    ViewFloat16 -> <<f16_to_bits(num):size(16)>>
+    ViewFloat16 -> <<typed_array_bytes.f16_bits(num):size(16)>>
   }
 }
 
@@ -477,64 +446,6 @@ fn to_int_wrap(num: JsNum) -> Int {
     JInt(i) -> i
     JFloat(f) -> rt_val.float_to_int(f)
     JNan | JPosInf | JNegInf -> 0
-  }
-}
-
-// round to nearest even from the binary64 bits
-fn f16_to_bits(num: JsNum) -> Int {
-  case num {
-    JNan -> 0x7E00
-    JPosInf -> 0x7C00
-    JNegInf -> 0xFC00
-    JInt(i) -> f16_to_bits(rt_val.num_from_int(i))
-    JFloat(f) -> {
-      let assert <<b:size(64)>> = <<f:float-size(64)>>
-        as "data_view: 64-bit float is not 64 bits wide"
-      let sign_bits = int.bitwise_shift_left(int.bitwise_shift_right(b, 63), 15)
-      let exp = int.bitwise_and(int.bitwise_shift_right(b, 52), 0x7FF)
-      let mant = int.bitwise_and(b, 0xFFFFFFFFFFFFF)
-      let e16 = exp - 1008
-      case e16 >= 0x1F, e16 >= 1 {
-        True, _ -> int.bitwise_or(sign_bits, 0x7C00)
-        False, True -> {
-          let kept = int.bitwise_shift_right(mant, 42)
-          let rest = int.bitwise_and(mant, 0x3FFFFFFFFFF)
-          let half = 0x20000000000
-          let rounded = case
-            rest > half || { rest == half && int.is_odd(kept) }
-          {
-            True -> kept + 1
-            False -> kept
-          }
-          let combined = int.bitwise_shift_left(e16, 10) + rounded
-          case combined >= 0x7C00 {
-            True -> int.bitwise_or(sign_bits, 0x7C00)
-            False -> int.bitwise_or(sign_bits, combined)
-          }
-        }
-        False, False -> {
-          let drop = 42 + 1 - e16
-          case exp == 0 && mant == 0, drop > 63 {
-            True, _ -> sign_bits
-            False, True -> sign_bits
-            False, False -> {
-              let full = int.bitwise_or(mant, 0x10000000000000)
-              let kept = int.bitwise_shift_right(full, drop)
-              let rest =
-                int.bitwise_and(full, int.bitwise_shift_left(1, drop) - 1)
-              let half = int.bitwise_shift_left(1, drop - 1)
-              let rounded = case
-                rest > half || { rest == half && int.is_odd(kept) }
-              {
-                True -> kept + 1
-                False -> kept
-              }
-              int.bitwise_or(sign_bits, rounded)
-            }
-          }
-        }
-      }
-    }
   }
 }
 

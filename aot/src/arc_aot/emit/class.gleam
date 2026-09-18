@@ -3,6 +3,7 @@ import arc/compiler/ast_util
 import arc/compiler/scope.{type Binding}
 import arc/parser/ast
 import arc_aot/emit/anf
+import arc_aot/emit/cps
 import arc_aot/emit/func
 import arc_aot/emit/state.{
   type EmitResult, type Emitter, type Next, type NextWith, ClassContext, Emitter,
@@ -14,41 +15,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
-
-fn let_(e: Emitter, rhs: ir.Expr, k: NextWith(ir.Value)) -> EmitResult {
-  state.let_(e, rhs, k)
-}
-
-fn host_(
-  e: Emitter,
-  op: String,
-  args: List(ir.Value),
-  k: NextWith(ir.Value),
-) -> EmitResult {
-  let_(e, ir.CallHost("js", op, args), k)
-}
-
-fn host_unit_(
-  e: Emitter,
-  op: String,
-  args: List(ir.Value),
-  k: Next,
-) -> EmitResult {
-  use _, e <- host_(e, op, args)
-  k(e)
-}
-
-fn each_(
-  e: Emitter,
-  items: List(a),
-  then k: Next,
-  with step: fn(Emitter, a, Next) -> EmitResult,
-) -> EmitResult {
-  case items {
-    [] -> k(e)
-    [x, ..rest] -> step(e, x, fn(e) { each_(e, rest, k, step) })
-  }
-}
 
 fn with_done(
   e: Emitter,
@@ -78,7 +44,7 @@ fn store_class_const(
     )
   case b.boxed {
     True ->
-      host_unit_(e, "box_set", [ir.Var(state.get_slot_var(e, b.slot)), v], k)
+      cps.host_unit(e, "box_set", [ir.Var(state.get_slot_var(e, b.slot)), v], k)
     False -> {
       let vn = state.slot_base_name(e, b.slot)
       use body <- state.map_tree(k(state.set_slot_var(e, b.slot, vn)))
@@ -95,7 +61,7 @@ fn read_class_const(
   let b = class_scope_binding(e, name)
   let v = ir.Var(state.get_slot_var(e, b.slot))
   case b.boxed {
-    True -> host_(e, "box_get", [v], k)
+    True -> cps.host(e, "box_get", [v], k)
     False -> k(v, e)
   }
 }
@@ -106,11 +72,15 @@ fn emit_computed_keys(
   body: List(ast.ClassElement),
   k: Next,
 ) -> EmitResult {
-  use e, pair, next <- each_(e, ast_util.computed_element_keys(body), then: k)
+  use e, pair, next <- cps.each(
+    e,
+    ast_util.computed_element_keys(body),
+    then: k,
+  )
   let #(idx, key_expr) = pair
   use #(tree, e) <- result.try(e.dispatch.emit_expr(e, key_expr))
-  use key_value, e <- let_(e, tree)
-  use pk, e <- host_(e, "to_property_key", [key_value])
+  use key_value, e <- cps.let_(e, tree)
+  use pk, e <- cps.host(e, "to_property_key", [key_value])
   store_class_const(e, ast_util.computed_field_const(idx), pk, next)
 }
 
@@ -160,7 +130,7 @@ fn resolve_method_key(
     | ast.KeyNumber(..)
     | ast.KeyBigInt(..) -> {
       let #(tree, e) = anf.run(anf.object_key_lit(key), e)
-      let_(e, tree, k)
+      cps.let_(e, tree, k)
     }
   }
 }
@@ -172,7 +142,7 @@ fn emit_methods(
   is_static is_static: Bool,
   k k: Next,
 ) -> EmitResult {
-  use e, method, next <- each_(e, methods, then: k)
+  use e, method, next <- cps.each(e, methods, then: k)
   let ast_util.ClassMethodElement(body_index:, key:, kind:, fun:) = method
   let ast.FunctionLiteral(params:, body:, is_generator: is_gen, is_async:, ..) =
     fun
@@ -185,10 +155,10 @@ fn emit_methods(
     state.StmtBody(body),
     child_id,
   ))
-  use method_fn, e <- let_(e, ctree)
+  use method_fn, e <- cps.let_(e, ctree)
   case key {
     ast.KeyPrivate(name:, ..) if !is_static -> {
-      use e <- host_unit_(e, "make_method", [method_fn, target])
+      use e <- cps.host_unit(e, "make_method", [method_fn, target])
       store_class_const(
         e,
         ast_util.private_fn_const(kind, name),
@@ -197,9 +167,9 @@ fn emit_methods(
       )
     }
     ast.KeyPrivate(name:, ..) -> {
-      use e <- host_unit_(e, "make_method", [method_fn, target])
+      use e <- cps.host_unit(e, "make_method", [method_fn, target])
       use pk, e <- read_class_const(e, name)
-      host_unit_(
+      cps.host_unit(
         e,
         "define_private",
         [target, pk, method_fn, method_install_atom(kind, is_static: False)],
@@ -208,7 +178,7 @@ fn emit_methods(
     }
     _ -> {
       use key_value, e <- resolve_method_key(e, key, body_index)
-      host_unit_(
+      cps.host_unit(
         e,
         "define_method",
         [
@@ -259,13 +229,13 @@ fn emit_ctor_and_create(
     state.StmtBody(ctor_body),
     ctor_child_id,
   ))
-  use ctor, e <- let_(e, ctor_tree)
-  use proto, e <- host_(e, "class_setup", [ctor, parent_class])
+  use ctor, e <- cps.let_(e, ctor_tree)
+  use proto, e <- cps.host(e, "class_setup", [ctor, parent_class])
   let assert [ctx, ..] = e.class_stack
     as "emit/class: emit_ctor_and_create with empty class_stack"
-  use e <- host_unit_(e, "box_set", [ctx.proto_home_box, proto])
-  use e <- host_unit_(e, "box_set", [ctx.static_home_box, ctor])
-  use e <- host_unit_(e, "box_set", [ctx.ctor_self_box, ctor])
+  use e <- cps.host_unit(e, "box_set", [ctx.proto_home_box, proto])
+  use e <- cps.host_unit(e, "box_set", [ctx.static_home_box, ctor])
+  use e <- cps.host_unit(e, "box_set", [ctx.ctor_self_box, ctor])
   k(#(ctor, proto), e)
 }
 
@@ -312,21 +282,21 @@ pub fn emit(
     )
   let #(save, e) = state.enter_scope(e, in_block: e.in_block)
   use e <- func.binding_prologue(e, e.cur_scope)
-  use e <- each_(e, private_names, with: fn(e, pname, next) {
-    use key, e <- host_(e, "new_private_name", [
+  use e <- cps.each(e, private_names, with: fn(e, pname, next) {
+    use key, e <- cps.host(e, "new_private_name", [
       ir.ConstBinary(bit_array.from_string(pname)),
     ])
     store_class_const(e, pname, key, next)
   })
   let is_derived = option.is_some(super_class)
-  use proto_home_box, e <- host_(e, "box_new", [e.consts.undef])
-  use static_home_box, e <- host_(e, "box_new", [e.consts.undef])
-  use ctor_self_box, e <- host_(e, "box_new", [e.consts.undef])
+  use proto_home_box, e <- cps.host(e, "box_new", [e.consts.undef])
+  use static_home_box, e <- cps.host(e, "box_new", [e.consts.undef])
+  use ctor_self_box, e <- cps.host(e, "box_new", [e.consts.undef])
   let with_inner_box = fn(e: Emitter, then: NextWith(Option(ir.Value))) {
     case binding_name {
       None -> then(None, e)
       Some(_) -> {
-        use box, e <- host_(e, "box_new", [e.consts.undef])
+        use box, e <- cps.host(e, "box_new", [e.consts.undef])
         then(Some(box), e)
       }
     }
@@ -365,7 +335,7 @@ pub fn emit(
     case super_class {
       Some(h) -> {
         use #(tree, e) <- result.try(e.dispatch.emit_expr(e, h))
-        let_(e, tree, k)
+        cps.let_(e, tree, k)
       }
       None -> k(e.consts.tdz, e)
     }
@@ -394,7 +364,7 @@ pub fn emit(
   use e <- with_inner_name(e)
   let with_fields_init = fn(e, then) {
     case init_fn {
-      Some(v) -> host_unit_(e, "set_fields_init", [ctor, v], then)
+      Some(v) -> cps.host_unit(e, "set_fields_init", [ctor, v], then)
       None -> then(e)
     }
   }
@@ -508,14 +478,14 @@ fn read_captured_const(
     scope.Plain(scope.Local(slot:, boxed:, ..)) -> {
       let v = ir.Var(state.get_slot_var(e, slot))
       case boxed {
-        True -> host_(e, "box_get", [v], k)
+        True -> cps.host(e, "box_get", [v], k)
         False -> k(v, e)
       }
     }
     scope.Plain(scope.Global(_))
     | scope.Plain(scope.EvalEnv(_))
     | scope.WithChain(..) ->
-      host_(
+      cps.host(
         e,
         "throw_reference_error",
         [
@@ -540,13 +510,13 @@ fn emit_one_init(
         e,
         static_block_iife(body),
       ))
-      use _, e <- let_(e, tree)
+      use _, e <- cps.let_(e, tree)
       next(e)
     }
     PrivateMethodInit(name:, closure_const:, kind:) -> {
       use pk, e <- read_captured_const(e, name)
       use closure, e <- read_captured_const(e, closure_const)
-      host_unit_(
+      cps.host_unit(
         e,
         "define_private",
         [this, pk, closure, method_install_atom(kind, is_static: False)],
@@ -560,8 +530,8 @@ fn emit_one_init(
         init,
         Some(name),
       ))
-      use v, e <- let_(e, tree)
-      host_unit_(e, "private_define", [this, pk, v], next)
+      use v, e <- cps.let_(e, tree)
+      cps.host_unit(e, "private_define", [this, pk, v], next)
     }
     NamedFieldInit(name:, init:) -> {
       let #(ktree, e) =
@@ -569,14 +539,14 @@ fn emit_one_init(
           anf.object_key_lit(ast.KeyIdentifier(name:, span: ast.Span(0, 0))),
           e,
         )
-      use key_value, e <- let_(e, ktree)
+      use key_value, e <- cps.let_(e, ktree)
       use #(tree, e) <- result.try(e.dispatch.emit_expr_named(
         e,
         init,
         Some(name),
       ))
-      use v, e <- let_(e, tree)
-      host_unit_(e, "create_data_prop", [this, key_value, v], next)
+      use v, e <- cps.let_(e, tree)
+      cps.host_unit(e, "create_data_prop", [this, key_value, v], next)
     }
     NumericFieldInit(value: n, init:) -> {
       let #(ktree, e) =
@@ -584,10 +554,10 @@ fn emit_one_init(
           anf.object_key_lit(ast.KeyNumber(value: n, span: ast.Span(0, 0))),
           e,
         )
-      use key_value, e <- let_(e, ktree)
+      use key_value, e <- cps.let_(e, ktree)
       use #(tree, e) <- result.try(e.dispatch.emit_expr(e, init))
-      use v, e <- let_(e, tree)
-      host_unit_(e, "create_data_prop", [this, key_value, v], next)
+      use v, e <- cps.let_(e, tree)
+      cps.host_unit(e, "create_data_prop", [this, key_value, v], next)
     }
     BigIntFieldInit(value: i, init:) -> {
       let #(ktree, e) =
@@ -595,16 +565,16 @@ fn emit_one_init(
           anf.object_key_lit(ast.KeyBigInt(value: i, span: ast.Span(0, 0))),
           e,
         )
-      use key_value, e <- let_(e, ktree)
+      use key_value, e <- cps.let_(e, ktree)
       use #(tree, e) <- result.try(e.dispatch.emit_expr(e, init))
-      use v, e <- let_(e, tree)
-      host_unit_(e, "create_data_prop", [this, key_value, v], next)
+      use v, e <- cps.let_(e, tree)
+      cps.host_unit(e, "create_data_prop", [this, key_value, v], next)
     }
     ComputedFieldInit(key_const:, init:) -> {
       use key_value, e <- read_captured_const(e, key_const)
       use #(tree, e) <- result.try(e.dispatch.emit_expr(e, init))
-      use v, e <- let_(e, tree)
-      host_unit_(e, "create_data_prop", [this, key_value, v], next)
+      use v, e <- cps.let_(e, tree)
+      cps.host_unit(e, "create_data_prop", [this, key_value, v], next)
     }
   }
 }
@@ -637,7 +607,7 @@ fn build_class_init_closure(
           Some(slot) -> {
             let v = ir.Var(state.get_slot_var(ec, slot))
             case state.lexical_is_boxed(ec, child_info, lexical.RefThis) {
-              True -> host_(ec, "box_get", [v], k)
+              True -> cps.host(ec, "box_get", [v], k)
               False -> k(v, ec)
             }
           }
@@ -645,7 +615,7 @@ fn build_class_init_closure(
         }
       }
       use this, ec <- with_this(ec)
-      each_(
+      cps.each(
         ec,
         inits,
         then: fn(ef) { done(ir.Return([ef.consts.undef]), ef) },
@@ -667,16 +637,19 @@ fn build_class_init_closure(
       ),
     )
   let e = state.leave_function(e_child, save)
-  use fun, e <- let_(e, ir.MakeClosure(fn_name, capture_vals, 2))
-  use flags_t, e <- let_(e, ir.TermOp(ir.MakeTuple, init_fn_flags(e.consts)))
-  use init_fn, e <- host_(e, "new_function", [
+  use fun, e <- cps.let_(e, ir.MakeClosure(fn_name, capture_vals, 2))
+  use flags_t, e <- cps.let_(
+    e,
+    ir.TermOp(ir.MakeTuple, init_fn_flags(e.consts)),
+  )
+  use init_fn, e <- cps.host(e, "new_function", [
     fun,
     flags_t,
     e.consts.empty_bin,
     ir.ConstI32(0),
     ir.ConstAtom("none"),
   ])
-  use e <- host_unit_(e, "make_method", [init_fn, home])
+  use e <- cps.host_unit(e, "make_method", [init_fn, home])
   k(init_fn, e)
 }
 
@@ -719,8 +692,8 @@ fn emit_static_init(
     _ -> {
       let #(child_id, e) = state.pop_child_fn(e)
       use static_init, e <- build_class_init_closure(e, child_id, inits, ctor)
-      use empty, e <- host_(e, "empty_list", [])
-      host_unit_(e, "call", [static_init, ctor, empty], k)
+      use empty, e <- cps.host(e, "empty_list", [])
+      cps.host_unit(e, "call", [static_init, ctor, empty], k)
     }
   }
 }

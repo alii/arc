@@ -1,7 +1,6 @@
 import arc/bytecode/key.{Named}
 import arc/internal/digits
 import arc/internal/gregorian.{civil_from_days, days_from_year}
-import arc/internal/host_time.{zone_offset_at_local_ms, zone_offset_at_utc_ms}
 import arc/internal/int_math.{floor_div, floor_mod}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -34,7 +33,9 @@ import arc/rt/types.{
   mk_null, mk_number, mk_object, mk_string,
 }
 import arc/rt/val as rt_val
-import arc/time_zone.{type TimeZone}
+import arc/time_zone.{
+  type TimeZone, zone_offset_at_local_ms, zone_offset_at_utc_ms,
+}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}

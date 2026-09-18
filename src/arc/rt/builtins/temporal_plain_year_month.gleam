@@ -5,14 +5,11 @@ import arc/internal/gregorian.{
 import arc/internal/int_math.{trunc_div, trunc_mod}
 import arc/internal/temporal_calendar
 import arc/rt/builtins/helpers
+import arc/rt/builtins/options.{get_options_object}
 import arc/rt/builtins/temporal_common.{
-  type CalendarNameMode, type RoundingMode, CalendarNameAuto, Month, Year,
-  apply_since_duration, apply_since_mode, format_with_reference,
-  get_calendar_name_option, get_difference_settings, get_options_object,
-  get_overflow_option_from_value, make_date_cal, make_duration, make_year_month,
-  make_year_month_cal, max_unit, read_pos_int_field, require_largest_ge_smallest,
-  require_temporal, round_to_increment, static_name, truncated_int_arg,
-  truncated_int_arg_or, unit_rank, year_month_slot_of,
+  make_date_cal, make_duration, make_year_month, make_year_month_cal,
+  read_pos_int_field, require_temporal, static_name, truncated_int_arg,
+  truncated_int_arg_or, year_month_slot_of,
 }
 import arc/rt/builtins/temporal_fields.{
   type DateFields, DateFields, add_sub_args, balance_year_month,
@@ -28,6 +25,15 @@ import arc/rt/builtins/temporal_iso.{
   IsoDateSlots, Reject, check_date_limits, epoch_days, format_iso_year,
   is_valid_iso_date, iso_date_from_epoch_days, iso_year_month_within_limits,
   pad2, regulate_iso_date, zero_duration,
+}
+import arc/rt/builtins/temporal_options.{
+  type CalendarNameMode, CalendarNameAuto, format_with_reference,
+  get_calendar_name_option, get_overflow_option_from_value,
+}
+import arc/rt/builtins/temporal_rounding.{
+  type RoundingMode, Month, Year, apply_since_duration, apply_since_mode,
+  get_difference_settings, max_unit, require_largest_ge_smallest,
+  round_to_increment, unit_rank,
 }
 import arc/rt/store as rt_store
 import arc/rt/types.{

@@ -1,6 +1,6 @@
 %% protected calls and frames; t_direct_callee may answer miss
 -module(arc_rt_call_ffi).
--export([t_call_protected/4, t_apply_protected/2, t_native_protected/4,
+-export([try_call_code/4, try_run/2, try_call_native/4,
          mk_frame/4, t_direct_callee/3, birth_props/2]).
 
 -include("arc_rt_layout.hrl").
@@ -38,12 +38,12 @@ t_direct_callee(_, _, _) -> miss.
             error:?JS_THROW(St2, E) -> {{?COMPLETION_THROW, E}, St2}
         end).
 
-t_call_protected(St, Code, Frame, Args) -> ?PROTECT(Code(St, Frame, Args)).
+try_call_code(St, Code, Frame, Args) -> ?PROTECT(Code(St, Frame, Args)).
 
-t_native_protected(St, Token, This, Args) ->
+try_call_native(St, Token, This, Args) ->
     ?PROTECT('arc@rt@builtins':dispatch_native(St, Token, This, Args)).
 
-t_apply_protected(St, Body) -> ?PROTECT(Body(St)).
+try_run(St, Body) -> ?PROTECT(Body(St)).
 
 mk_frame(This, ActiveFunc, HomeObj, NewTarget) ->
     ?FRAME(This, ActiveFunc, HomeObj, NewTarget).

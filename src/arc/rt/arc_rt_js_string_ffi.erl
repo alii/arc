@@ -2,8 +2,10 @@
 %% crumbs: byte offsets of codepoints 0, stride, 2 stride .., none when long
 %% TODO(Deviation): indexes by codepoint, js wants utf-16 code units
 -module(arc_rt_js_string_ffi).
--export([mk/1, mk_list/1, bin/1, len/1, is_str/1, cp_at/2, char_at_val/2,
-         sub/3, concat/2, concat_loose/2, index_of_val/3]).
+-export([from_text/1, from_texts/1, text/1, length/1, is_str/1,
+         codepoint_at/2, char_at/2, substring/3, concat/2, concat_loose/2,
+         index_of/3]).
+-compile({no_auto_import, [length/1]}).
 
 -include("arc_rt_layout.hrl").
 
@@ -11,13 +13,13 @@
 -define(MAX_CRUMBED_LEN, 8192).
 -define(ASCII_HI_MASK, 16#80808080808080).
 
-mk(Bin) when is_binary(Bin) ->
+from_text(Bin) when is_binary(Bin) ->
     case ascii(Bin) of
         true -> Bin;
         false -> tag(Bin)
     end.
 
-mk_list(L) -> [mk(B) || B <- L].
+from_texts(L) -> [from_text(B) || B <- L].
 
 tag(Bin) ->
     {Len, Crumbs} = build_crumbs(Bin, 0, 0, []),
@@ -61,11 +63,11 @@ advance(<<C, _, _, _, R/binary>>, N, Off, Got) when C >= 16#F0 ->
 advance(<<>>, _, Off, Got) -> {Got, Off, <<>>};
 advance(Bin, _, _, _) -> erlang:error({invalid_utf8, Bin}).
 
-bin(B) when is_binary(B) -> B;
-bin({?STR_TAG, B, _, _}) -> B.
+text(B) when is_binary(B) -> B;
+text({?STR_TAG, B, _, _}) -> B.
 
-len(B) when is_binary(B) -> byte_size(B);
-len({?STR_TAG, _, L, _}) -> L.
+length(B) when is_binary(B) -> byte_size(B);
+length({?STR_TAG, _, L, _}) -> L.
 
 is_str(B) when is_binary(B) -> true;
 is_str({?STR_TAG, _, _, _}) -> true;
@@ -105,28 +107,28 @@ count(Bin) ->
     {N, _, _} = advance(Bin, byte_size(Bin), 0),
     N.
 
-cp_at(S, I) when I >= 0 ->
-    case I < len(S) of
+codepoint_at(S, I) when I >= 0 ->
+    case I < length(S) of
         true ->
             Off = byte_offset(S, I),
-            <<_:Off/binary, C/utf8, _/binary>> = bin(S),
+            <<_:Off/binary, C/utf8, _/binary>> = text(S),
             {?SOME, C};
         false -> ?NONE
     end;
-cp_at(_, _) -> ?NONE.
+codepoint_at(_, _) -> ?NONE.
 
-char_at_val(S, I) ->
-    case cp_at(S, I) of
+char_at(S, I) ->
+    case codepoint_at(S, I) of
         {?SOME, C} when C < 16#80 -> {?SOME, <<C>>};
         {?SOME, C} -> {?SOME, {?STR_TAG, <<C/utf8>>, 1, {0}}};
         ?NONE -> ?NONE
     end.
 
 %% caller clamps: 0 =< Start, 0 =< N, Start + N =< len
-sub(_, _, N) when N =< 0 -> <<>>;
-sub(B, Start, N) when is_binary(B) -> binary:part(B, Start, N);
-sub(S, Start, N) ->
-    B = bin(S),
+substring(_, _, N) when N =< 0 -> <<>>;
+substring(B, Start, N) when is_binary(B) -> binary:part(B, Start, N);
+substring(S, Start, N) ->
+    B = text(S),
     O1 = byte_offset(S, Start),
     O2 = byte_offset(S, Start + N),
     Part = binary:part(B, O1, O2 - O1),
@@ -137,10 +139,10 @@ sub(S, Start, N) ->
 
 concat(A, B) when is_binary(A), is_binary(B) -> <<A/binary, B/binary>>;
 concat(A, B) ->
-    BA = bin(A),
-    LA = len(A),
-    Len = LA + len(B),
-    New = <<BA/binary, (bin(B))/binary>>,
+    BA = text(A),
+    LA = length(A),
+    Len = LA + length(B),
+    New = <<BA/binary, (text(B))/binary>>,
     Crumbs = case Len > ?MAX_CRUMBED_LEN of
         true -> none;
         false -> extend(A, LA, New)
@@ -161,9 +163,9 @@ extend(A, LA, New) ->
     list_to_tuple(Kept ++ tuple_to_list(More)).
 
 %% codepoint index of Needle at or after cp From, both js strings
-index_of_val(Hay, Needle, From) ->
-    HB = bin(Hay),
-    NB = bin(Needle),
+index_of(Hay, Needle, From) ->
+    HB = text(Hay),
+    NB = text(Needle),
     Start = byte_offset(Hay, From),
     case NB of
         <<>> -> {?SOME, From};
@@ -177,5 +179,5 @@ index_of_val(Hay, Needle, From) ->
 %% either side may be a plain utf8 binary that was never checked
 concat_loose(A, B) -> concat(loose(A), loose(B)).
 
-loose(B) when is_binary(B) -> mk(B);
+loose(B) when is_binary(B) -> from_text(B);
 loose(S) -> S.

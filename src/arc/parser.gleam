@@ -1,9 +1,11 @@
 import arc/bytecode/lexical
 import arc/compiler/ast_util
 import arc/compiler/scope
-import arc/esm
+import arc/compiler/scope_builder
 import arc/internal/bytes
+import arc/module/summary
 import arc/parser/ast
+import arc/parser/class_scopes
 import arc/parser/error.{
   ArgumentsInClassFieldInit, ArgumentsInStaticBlock, AwaitInAsyncFunction,
   AwaitInFormalParameter, AwaitInModule, AwaitInStaticBlock,
@@ -54,27 +56,25 @@ import arc/parser/error.{
   YieldInFormalParameter, YieldInGenerator, YieldReservedStrictMode, lex_error,
   regexp_syntax_error,
 }
-import arc/parser/lexer.{
-  type Token, type TokenKind, AmpersandAmpersandEqual, AmpersandEqual, Arrow, As,
-  Async, Await, Bang, Break, CaretEqual, Case, Catch, Class, Colon, Comma, Const,
-  Continue, Debugger, Default, Delete, Do, Dot, DotDotDot, Else, Eof, Equal,
-  Export, Extends, FalseLiteral, Finally, For, From, Function,
-  GreaterThanGreaterThanEqual, GreaterThanGreaterThanGreaterThanEqual,
-  Identifier, If, Illegal, Import, In, LeftBrace, LeftBracket, LeftParen,
-  LessThanLessThanEqual, Let, LexFailure, Minus, MinusEqual, MinusMinus, New,
-  Null, Number, Of, PercentEqual, PipeEqual, PipePipeEqual, Plus, PlusEqual,
-  PlusPlus, Question, QuestionDot, QuestionQuestionEqual, Return, RightBrace,
-  RightBracket, RightParen, Semicolon, Slash, SlashEqual, Star, StarEqual,
-  StarStar, StarStarEqual, Static, StringLiteral, Super, Switch, TemplateHead,
-  TemplateLiteral, This, Throw, Tilde, TrueLiteral, Try, Typeof, Undefined, Var,
-  Void, While, With, Yield,
-}
+import arc/parser/lexer
 import arc/parser/number
 import arc/parser/regex
 import arc/parser/token.{
-  Binary, BinaryOperator, Coalesce, ShortCircuit, assignment_op, binary_operator,
-  is_contextual_keyword, is_identifier_or_keyword, is_keyword_as_identifier,
-  is_reserved_word_kind,
+  type Token, type TokenKind, AmpersandAmpersandEqual, AmpersandEqual, Arrow, As,
+  Async, Await, Bang, Binary, BinaryOperator, Break, CaretEqual, Case, Catch,
+  Class, Coalesce, Colon, Comma, Const, Continue, Debugger, Default, Delete, Do,
+  Dot, DotDotDot, Else, Eof, Equal, Export, Extends, FalseLiteral, Finally, For,
+  From, Function, GreaterThanGreaterThanEqual,
+  GreaterThanGreaterThanGreaterThanEqual, Identifier, If, Illegal, Import, In,
+  LeftBrace, LeftBracket, LeftParen, LessThanLessThanEqual, Let, LexFailure,
+  Minus, MinusEqual, MinusMinus, New, Null, Number, Of, PercentEqual, PipeEqual,
+  PipePipeEqual, Plus, PlusEqual, PlusPlus, Question, QuestionDot,
+  QuestionQuestionEqual, Return, RightBrace, RightBracket, RightParen, Semicolon,
+  ShortCircuit, Slash, SlashEqual, Star, StarEqual, StarStar, StarStarEqual,
+  Static, StringLiteral, Super, Switch, TemplateHead, TemplateLiteral, This,
+  Throw, Tilde, TrueLiteral, Try, Typeof, Undefined, Var, Void, While, With,
+  Yield, assignment_op, binary_operator, is_contextual_keyword,
+  is_identifier_or_keyword, is_keyword_as_identifier, is_reserved_word_kind,
 }
 import gleam/bit_array
 import gleam/bool
@@ -214,7 +214,7 @@ type Parser {
     export_local_refs: List(#(String, Int)),
     import_bindings: Set(String),
     last_expr_name: Option(String),
-    scopes: scope.ScopeBuilder,
+    scopes: scope_builder.ScopeBuilder,
   )
 }
 
@@ -363,7 +363,7 @@ fn init_parser(
       export_local_refs: [],
       import_bindings: set.new(),
       last_expr_name: None,
-      scopes: scope.sb_init(code_kind, mode == Module),
+      scopes: scope_builder.init(code_kind, mode == Module),
     )),
   )
 }
@@ -371,7 +371,7 @@ fn init_parser(
 pub fn parse(
   source: String,
   mode: ParseMode,
-) -> Result(#(ast.Program, scope.ScopeBuilder), ParseError) {
+) -> Result(#(ast.Program, scope_builder.ScopeBuilder), ParseError) {
   case mode {
     Script -> {
       use #(body, scopes) <- result.map(parse_script(source))
@@ -386,14 +386,14 @@ pub fn parse(
 
 pub fn parse_script(
   source: String,
-) -> Result(#(List(ast.StmtWithLine), scope.ScopeBuilder), ParseError) {
+) -> Result(#(List(ast.StmtWithLine), scope_builder.ScopeBuilder), ParseError) {
   use p <- init_parser(source, Script)
   script_body(p)
 }
 
 pub fn parse_module(
   source: String,
-) -> Result(#(List(ast.ModuleItem), scope.ScopeBuilder), ParseError) {
+) -> Result(#(List(ast.ModuleItem), scope_builder.ScopeBuilder), ParseError) {
   use p <- init_parser(source, Module)
   module_body(p)
 }
@@ -406,7 +406,7 @@ pub fn parse_direct_eval(
   allow_super_call allow_super_call: Bool,
   allow_arguments allow_arguments: Bool,
   outer_private_names outer_private_names: List(String),
-) -> Result(#(List(ast.StmtWithLine), scope.ScopeBuilder), ParseError) {
+) -> Result(#(List(ast.StmtWithLine), scope_builder.ScopeBuilder), ParseError) {
   use p <- init_parser(source, Script)
   script_body(
     Parser(
@@ -426,25 +426,25 @@ pub fn parse_direct_eval(
 
 fn script_body(
   p: Parser,
-) -> Result(#(List(ast.StmtWithLine), scope.ScopeBuilder), ParseError) {
+) -> Result(#(List(ast.StmtWithLine), scope_builder.ScopeBuilder), ParseError) {
   use p <- result.try(apply_directive_prologue(p))
   use #(p_final, stmts) <- result.try(
     parse_statement_list(p, top_level: True, acc: []),
   )
   use Nil <- result.try(check_unresolved_private_refs(p_final))
   let scopes =
-    scope.sb_reorder_block_children(p_final.scopes, scope.root_scope_id)
+    scope_builder.reorder_block_children(p_final.scopes, scope.root_scope_id)
   Ok(#(stmts, scopes))
 }
 
 fn module_body(
   p: Parser,
-) -> Result(#(List(ast.ModuleItem), scope.ScopeBuilder), ParseError) {
+) -> Result(#(List(ast.ModuleItem), scope_builder.ScopeBuilder), ParseError) {
   use #(p_final, items) <- result.try(parse_module_body(p, []))
   use Nil <- result.try(validate_export_local_refs(p_final))
   use Nil <- result.try(check_unresolved_private_refs(p_final))
   let scopes =
-    scope.sb_reorder_block_children(p_final.scopes, scope.root_scope_id)
+    scope_builder.reorder_block_children(p_final.scopes, scope.root_scope_id)
   Ok(#(items, scopes))
 }
 
@@ -473,7 +473,8 @@ fn parse_module_body(
 fn validate_export_local_refs(p: Parser) -> Result(Nil, ParseError) {
   use #(name, pos) <- list.try_each(p.export_local_refs)
   let declared =
-    scope.sb_root_has(p.scopes, name) || set.contains(p.import_bindings, name)
+    scope_builder.root_has(p.scopes, name)
+    || set.contains(p.import_bindings, name)
   case declared {
     True -> Ok(Nil)
     False -> Error(UndeclaredExportBinding(pos, name))
@@ -710,7 +711,7 @@ fn parse_single_statement_in_position(
       case allow_annex_b_function && !p.ctx.strict && peek_at(p, 1) != Star {
         // annex b §B.3.3: parse as if wrapped in a block
         True -> {
-          let #(scopes, block_id) = scope.sb_push(p.scopes, scope.Block)
+          let #(scopes, block_id) = scope_builder.push(p.scopes, scope.Block)
           let p_inner =
             Parser(
               ..p,
@@ -723,8 +724,8 @@ fn parse_single_statement_in_position(
             )
           use #(p2, stmt) <- result.map(parse_statement(p_inner))
           let scopes =
-            scope.sb_close_block(p2.scopes, block_id)
-            |> scope.sb_enter(p.scopes.current)
+            scope_builder.close_block(p2.scopes, block_id)
+            |> scope_builder.enter(p.scopes.current)
           #(
             Parser(
               ..p2,
@@ -748,16 +749,16 @@ fn parse_single_statement_in_position(
 }
 
 fn enter_block_scope(p: Parser) -> Parser {
-  let #(scopes, _id) = scope.sb_push(p.scopes, scope.Block)
+  let #(scopes, _id) = scope_builder.push(p.scopes, scope.Block)
   Parser(..p, scopes:, ctx: GrammarContext(..p.ctx, in_block: True))
 }
 
 fn restore_block_scope(after p: Parser, before saved: Parser) -> Parser {
   // flip for-head children to source order for finalize
-  let scopes = scope.sb_reorder_block_children(p.scopes, p.scopes.current)
+  let scopes = scope_builder.reorder_block_children(p.scopes, p.scopes.current)
   Parser(
     ..p,
-    scopes: scope.sb_enter(scopes, saved.scopes.current),
+    scopes: scope_builder.enter(scopes, saved.scopes.current),
     ctx: GrammarContext(..p.ctx, in_block: saved.ctx.in_block),
   )
 }
@@ -798,7 +799,7 @@ fn parse_scoped_block_body(
   p: Parser,
 ) -> Result(#(Parser, List(ast.StmtWithLine)), ParseError) {
   use p2 <- result.try(expect(p, LeftBrace))
-  let #(scopes, block_id) = scope.sb_push(p2.scopes, scope.Block)
+  let #(scopes, block_id) = scope_builder.push(p2.scopes, scope.Block)
   let p_inner =
     Parser(
       ..p2,
@@ -817,8 +818,8 @@ fn parse_scoped_block_body(
   use p4 <- result.try(expect(p3, RightBrace))
   // prune or reorder in lockstep with emit_block
   let scopes =
-    scope.sb_close_block(p4.scopes, block_id)
-    |> scope.sb_enter(p2.scopes.current)
+    scope_builder.close_block(p4.scopes, block_id)
+    |> scope_builder.enter(p2.scopes.current)
   Ok(#(
     Parser(
       ..p4,
@@ -913,7 +914,11 @@ fn parse_variable_declarator(
         parse_assignment_expression(advance(p2)),
       )
       use Nil <- result.try(check_cover_grammar_errors(p3, init_start))
-      let p3 = Parser(..p3, scopes: mark_pattern_assigned(p3.scopes, pattern))
+      let p3 =
+        Parser(
+          ..p3,
+          scopes: class_scopes.mark_pattern_assigned(p3.scopes, pattern),
+        )
       Ok(#(p3, ast.VariableDeclarator(id: pattern, init: Some(init_expr))))
     }
     _ -> {
@@ -996,7 +1001,7 @@ fn check_not_escaped_reserved_word(
   p: Parser,
   name: String,
 ) -> Result(Nil, ParseError) {
-  case is_reserved_word_kind(lexer.keyword_or_identifier(name)) {
+  case is_reserved_word_kind(token.keyword_or_identifier(name)) {
     True -> Error(EscapedReservedWord(pos_of(p), name))
     False -> Ok(Nil)
   }
@@ -1121,14 +1126,14 @@ fn register_lexical_name(
   pos: Int,
 ) -> Result(Parser, ParseError) {
   use <- bool.guard(
-    scope.sb_lexical_conflict(p.scopes, name)
-      && !scope.sb_only_implicit_arguments(p.scopes, name),
+    scope_builder.lexical_conflict(p.scopes, name)
+      && !scope_builder.only_implicit_arguments(p.scopes, name),
     Error(IdentifierAlreadyDeclared(pos, name)),
   )
   Ok(
     Parser(
       ..p,
-      scopes: scope.sb_declare(p.scopes, name, kind, synthetic: False),
+      scopes: scope_builder.declare(p.scopes, name, kind, synthetic: False),
     ),
   )
 }
@@ -1144,7 +1149,7 @@ fn register_scope_binding(
       Ok(
         Parser(
           ..p,
-          scopes: scope.sb_declare(
+          scopes: scope_builder.declare(
             p.scopes,
             name,
             scope.ParamBinding,
@@ -1155,14 +1160,14 @@ fn register_scope_binding(
     DeclaringVar -> {
       // §14.3.2, and §16.2.1.1 at module root
       use <- bool.guard(
-        scope.sb_var_conflicts_lexical(p.scopes, name)
-          || scope.sb_var_conflicts_module_fn(p.scopes, name),
+        scope_builder.var_conflicts_lexical(p.scopes, name)
+          || scope_builder.var_conflicts_module_fn(p.scopes, name),
         Error(IdentifierAlreadyDeclared(pos_of(p), name)),
       )
       Ok(
         Parser(
           ..p,
-          scopes: scope.sb_declare_var(p.scopes, name, synthetic: False),
+          scopes: scope_builder.declare_var(p.scopes, name, synthetic: False),
         ),
       )
     }
@@ -1193,19 +1198,20 @@ fn register_function_name(
       ))
       case !p.ctx.strict && is_plain {
         False -> p2
-        True -> Parser(..p2, scopes: scope.sb_annexb_candidate(p2.scopes, name))
+        True ->
+          Parser(..p2, scopes: scope_builder.annexb_candidate(p2.scopes, name))
       }
     }
     False, False -> {
       use <- bool.guard(
-        scope.sb_current_has_kind(p.scopes, name, scope.LetBinding)
-          || scope.sb_current_has_kind(p.scopes, name, scope.ConstBinding),
+        scope_builder.current_has_kind(p.scopes, name, scope.LetBinding)
+          || scope_builder.current_has_kind(p.scopes, name, scope.ConstBinding),
         Error(IdentifierAlreadyDeclared(name_pos, name)),
       )
       Ok(
         Parser(
           ..p,
-          scopes: scope.sb_declare_var(p.scopes, name, synthetic: False),
+          scopes: scope_builder.declare_var(p.scopes, name, synthetic: False),
         ),
       )
     }
@@ -1233,7 +1239,7 @@ fn declare_import_binding(
   Ok(
     Parser(
       ..p,
-      scopes: scope.sb_declare(
+      scopes: scope_builder.declare(
         p.scopes,
         name,
         scope.ConstBinding,
@@ -1716,7 +1722,7 @@ fn parse_for_declaration(
   let #(p2, kind) = variable_declaration_head(p)
   let is_destr = peek(p2) == LeftBrace || peek(p2) == LeftBracket
   // B.3.4: for-of var names vs enclosing catch param
-  let catch_params = scope.sb_nearest_catch_params(p2.scopes)
+  let catch_params = scope_builder.nearest_catch_params(p2.scopes)
   use #(p3, pattern) <- result.try(parse_binding_pattern(p2))
   let decl =
     ast.ForInitDeclaration(kind:, declarations: [
@@ -1725,7 +1731,7 @@ fn parse_for_declaration(
   // §14.7.5.9: head binding written each iteration
   let p_in_of = fn() {
     let p = exit_declaration_context(p3, p)
-    Parser(..p, scopes: mark_pattern_assigned(p.scopes, pattern))
+    Parser(..p, scopes: class_scopes.mark_pattern_assigned(p.scopes, pattern))
   }
   case peek(p3) {
     In -> parse_for_in_of_rest(p_in_of(), decl, is_of: False, is_await: False)
@@ -1822,54 +1828,6 @@ fn pattern_element_has_eval_args_target(expr: ast.Expression) -> Bool {
   }
 }
 
-fn mark_assign_targets(
-  scopes: scope.ScopeBuilder,
-  lhs: ast.Expression,
-) -> scope.ScopeBuilder {
-  case lhs {
-    ast.Identifier(name:, ..) -> scope.sb_assign_ref(scopes, name)
-    ast.ParenthesizedExpression(expression:, ..) ->
-      mark_assign_targets(scopes, expression)
-    ast.ArrayExpression(elements:, ..) ->
-      list.fold(elements, scopes, fn(scopes, elem) {
-        case elem {
-          None -> scopes
-          Some(ast.SpreadElement(argument:, ..)) ->
-            mark_assign_targets(scopes, argument)
-          Some(e) -> mark_assign_element(scopes, e)
-        }
-      })
-    ast.ObjectExpression(properties:, ..) ->
-      list.fold(properties, scopes, fn(scopes, prop) {
-        case prop {
-          ast.InitProperty(value:, ..) -> mark_assign_element(scopes, value)
-          ast.SpreadProperty(argument:) -> mark_assign_targets(scopes, argument)
-          ast.MethodProperty(..) | ast.AccessorProperty(..) -> scopes
-        }
-      })
-    _ -> scopes
-  }
-}
-
-fn mark_assign_element(
-  scopes: scope.ScopeBuilder,
-  expr: ast.Expression,
-) -> scope.ScopeBuilder {
-  case expr {
-    ast.AssignmentExpression(operator: ast.Assign, left:, ..) ->
-      mark_assign_targets(scopes, left)
-    _ -> mark_assign_targets(scopes, expr)
-  }
-}
-
-// the only signal never_box_names sees for var/param collisions
-fn mark_pattern_assigned(
-  scopes: scope.ScopeBuilder,
-  pattern: ast.Pattern,
-) -> scope.ScopeBuilder {
-  list.fold(ast.pattern_bound_names(pattern), scopes, scope.sb_assign_ref)
-}
-
 // eval.x stays legal (§13.15.5)
 fn destructuring_target_is_eval_args(expr: ast.Expression) -> Bool {
   case expr {
@@ -1925,7 +1883,7 @@ fn parse_for_expression(
       let p2 =
         Parser(
           ..p2,
-          scopes: mark_assign_targets(p2.scopes, expr),
+          scopes: class_scopes.mark_assign_targets(p2.scopes, expr),
           literal_invalid_as_pattern: False,
           ctx: GrammarContext(
             ..p2.ctx,
@@ -2104,7 +2062,7 @@ fn parse_try_statement(
   p: Parser,
 ) -> Result(#(Parser, ast.Statement), ParseError) {
   let p2 = advance(p)
-  let p2 = Parser(..p2, scopes: scope.sb_enter_try(p2.scopes))
+  let p2 = Parser(..p2, scopes: scope_builder.enter_try(p2.scopes))
   use #(p3, block) <- result.try(parse_block_body(p2))
   use #(p4, handler) <- result.try(parse_catch_clause(p3))
   use #(p5, finalizer) <- result.try(case peek(p4) {
@@ -2114,7 +2072,7 @@ fn parse_try_statement(
     }
     _ -> Ok(#(p4, None))
   })
-  let p5 = Parser(..p5, scopes: scope.sb_leave_try(p5.scopes))
+  let p5 = Parser(..p5, scopes: scope_builder.leave_try(p5.scopes))
   use tail <- result.map(case handler, finalizer {
     None, None -> Error(MissingCatchOrFinally(pos_of(p5)))
     Some(handler), None -> Ok(ast.TryCatch(handler:))
@@ -2133,7 +2091,7 @@ fn parse_catch_clause(
   case peek(p2) {
     LeftParen -> {
       let p3 = advance(p2)
-      let #(scopes, catch_id) = scope.sb_push(p3.scopes, scope.Catch)
+      let #(scopes, catch_id) = scope_builder.push(p3.scopes, scope.Catch)
       use #(p4, param) <- result.try(parse_catch_parameter(
         Parser(..p3, scopes:),
       ))
@@ -2144,8 +2102,8 @@ fn parse_catch_clause(
         // flip catch children to source order for finalize
         Parser(
           ..p6,
-          scopes: scope.sb_reorder_block_children(p6.scopes, catch_id)
-            |> scope.sb_enter(p3.scopes.current),
+          scopes: scope_builder.reorder_block_children(p6.scopes, catch_id)
+            |> scope_builder.enter(p3.scopes.current),
           ctx: GrammarContext(
             ..p6.ctx,
             in_block: p3.ctx.in_block,
@@ -2186,8 +2144,8 @@ fn parse_catch_parameter(
     _ -> False
   }
   let scopes =
-    scope.sb_update_current(p2.scopes, fn(s) {
-      scope.RawScope(..s, catch_param_simple: simple)
+    scope_builder.update_current(p2.scopes, fn(s) {
+      scope_builder.RawScope(..s, catch_param_simple: simple)
     })
   let ctx =
     GrammarContext(
@@ -2210,7 +2168,7 @@ fn parse_switch_statement(
   use p5 <- result.try(expect(p4, RightParen))
   use p6 <- result.try(expect(p5, LeftBrace))
   // one block scope around all cases; may shadow params
-  let #(scopes, switch_id) = scope.sb_push(p6.scopes, scope.Block)
+  let #(scopes, switch_id) = scope_builder.push(p6.scopes, scope.Block)
   let p_inner =
     Parser(
       ..p6,
@@ -2226,8 +2184,8 @@ fn parse_switch_statement(
   )
   // never pruned: emit_switch always enters this scope
   let scopes =
-    scope.sb_reorder_switch_children(p7.scopes, switch_id)
-    |> scope.sb_enter(p6.scopes.current)
+    scope_builder.reorder_switch_children(p7.scopes, switch_id)
+    |> scope_builder.enter(p6.scopes.current)
   Ok(#(
     Parser(
       ..p7,
@@ -2254,16 +2212,16 @@ fn parse_switch_cases(
       let p2 = advance(p)
       // §14.12.4: case tests run before any case body
       let switch_id = p2.scopes.current
-      let mark = scope.sb_children_newest_first(p2.scopes, switch_id)
+      let mark = scope_builder.children_newest_first(p2.scopes, switch_id)
       use #(p3, condition) <- result.try(parse_expression(p2))
       let p3 =
         Parser(
           ..p3,
-          scopes: scope.sb_tag_children_since(
+          scopes: scope_builder.tag_children_since(
             p3.scopes,
             switch_id,
             mark,
-            scope.TagSwitchTest,
+            scope_builder.TagSwitchTest,
           ),
         )
       use p4 <- result.try(expect(p3, Colon))
@@ -2392,10 +2350,10 @@ fn parse_function_declaration(
     True ->
       Parser(
         ..p_fn,
-        scopes: scope.sb_set_source_tag(
+        scopes: scope_builder.set_source_tag(
           p_fn.scopes,
           p_fn.scopes.current,
-          scope.TagFnDecl,
+          scope_builder.TagFnDecl,
         ),
       )
     False -> p_fn
@@ -2460,10 +2418,15 @@ fn begin_function_body(
   let was_strict = p.ctx.strict
   use p <- result.try(apply_body_use_strict(p))
   // §10.2.11 step 28: shims take slots 0..arity-1
-  let scopes = declare_param_shims(p.scopes, params)
+  let scopes = class_scopes.declare_param_shims(p.scopes, params)
   // §10.2.11 step 18: implicit arguments, slot order matters
   let scopes =
-    scope.sb_declare(scopes, "arguments", scope.VarBinding, synthetic: True)
+    scope_builder.declare(
+      scopes,
+      "arguments",
+      scope.VarBinding,
+      synthetic: True,
+    )
   let p = Parser(..p, scopes:)
   use Nil <- result.try(case !was_strict && p.ctx.strict {
     True -> {
@@ -2475,31 +2438,13 @@ fn begin_function_body(
   parse_function_body(p, params)
 }
 
-// must agree with emit.compile_function_body
-fn declare_param_shims(
-  scopes: scope.ScopeBuilder,
-  params: List(ast.Pattern),
-) -> scope.ScopeBuilder {
-  let #(fixed, _rest) = ast_util.split_trailing_rest(params)
-  case ast_util.all_simple_params(fixed) {
-    True -> scopes
-    False -> scope.sb_insert_param_shims(scopes, list.length(fixed))
-  }
-}
-
-// §10.2.11; must match emit's non_simple_fixed
-fn fixed_params_non_simple(params: List(ast.Pattern)) -> Bool {
-  let #(fixed, _rest) = ast_util.split_trailing_rest(params)
-  !ast_util.all_simple_params(fixed)
-}
-
 fn parse_braced_body(
   p: Parser,
 ) -> Result(#(Parser, List(ast.StmtWithLine)), ParseError) {
   use p2 <- result.try(expect(p, LeftBrace))
   // snapshot so the reorder only moves body children
   let body_id = p2.scopes.current
-  let mark = scope.sb_children_newest_first(p2.scopes, body_id)
+  let mark = scope_builder.children_newest_first(p2.scopes, body_id)
   use #(p3, stmts) <- result.try(
     parse_statement_list(p2, top_level: False, acc: []),
   )
@@ -2510,7 +2455,7 @@ fn parse_braced_body(
   let p4 =
     Parser(
       ..p4,
-      scopes: scope.sb_reorder_body_children(p4.scopes, body_id, mark),
+      scopes: scope_builder.reorder_body_children(p4.scopes, body_id, mark),
     )
   Ok(#(p4, stmts))
 }
@@ -2520,16 +2465,19 @@ fn parse_function_body(
   p: Parser,
   params: List(ast.Pattern),
 ) -> Result(#(Parser, List(ast.StmtWithLine)), ParseError) {
-  case fixed_params_non_simple(params) {
+  case ast_util.fixed_params_non_simple(params) {
     False -> parse_braced_body(p)
     True -> {
       let fn_id = p.scopes.current
-      let #(scopes, _body_id) = scope.sb_push_var_boundary(p.scopes)
+      let #(scopes, _body_id) = scope_builder.push_var_boundary(p.scopes)
       use #(p2, body) <- result.map(parse_braced_body(Parser(..p, scopes:)))
       // flip fn root children to source order
-      let scopes = scope.sb_enter(p2.scopes, fn_id)
+      let scopes = scope_builder.enter(p2.scopes, fn_id)
       #(
-        Parser(..p2, scopes: scope.sb_reorder_block_children(scopes, fn_id)),
+        Parser(
+          ..p2,
+          scopes: scope_builder.reorder_block_children(scopes, fn_id),
+        ),
         body,
       )
     }
@@ -2886,25 +2834,6 @@ fn parse_class_head_and_tail(
   }
 }
 
-// matches scope.declare_class fold_class_body order
-type ClassScopeIds {
-  ClassScopeIds(
-    class_id: scope.ScopeId,
-    init_id: scope.ScopeId,
-    static_id: scope.ScopeId,
-  )
-}
-
-// key_scopes: scopes pushed while parsing a computed key
-type ClassElementScopes {
-  MethodScopes(key_scopes: List(scope.ScopeId), method_fn_id: scope.ScopeId)
-  NonMethodScopes(key_scopes: List(scope.ScopeId))
-}
-
-type ParsedClassElement {
-  ParsedClassElement(element: ast.ClassElement, scopes: ClassElementScopes)
-}
-
 // private names declared in one class body (§15.7.1)
 type DeclaredPrivateName {
   DeclaredPrivateName(is_static: Bool, kind: PrivateNameKind)
@@ -2917,16 +2846,6 @@ type PrivateNameKind {
   PrivateOther
 }
 
-// children_at is newest-first, so new ids are the prefix
-fn class_new_children(
-  scopes: scope.ScopeBuilder,
-  parent_id: scope.ScopeId,
-  before: List(scope.ScopeId),
-) -> List(scope.ScopeId) {
-  let now = scope.sb_children_newest_first(scopes, parent_id)
-  list.take(now, list.length(now) - list.length(before)) |> list.reverse
-}
-
 fn parse_class_tail(
   p: Parser,
   name: Option(String),
@@ -2937,7 +2856,7 @@ fn parse_class_tail(
   let saved_strict = p.ctx.strict
   let outer_current = p.scopes.current
   // §15.7.14: class scope is pushed before the heritage
-  let #(scopes, class_id) = scope.sb_push(p.scopes, scope.ClassBody)
+  let #(scopes, class_id) = scope_builder.push(p.scopes, scope.ClassBody)
   let p = Parser(..p, scopes:, ctx: GrammarContext(..p.ctx, strict: True))
   // once extends is consumed errors propagate, no backtrack
   let has_extends = peek(p) == Extends
@@ -2949,14 +2868,14 @@ fn parse_class_tail(
     False -> Ok(#(p, None))
   })
   let heritage_scopes =
-    scope.sb_children_newest_first(p2.scopes, class_id) |> list.reverse
+    scope_builder.children_newest_first(p2.scopes, class_id) |> list.reverse
   use p3 <- result.try(expect(p2, LeftBrace))
   // pre-create init shells; unneeded ones dropped at }
-  let #(scopes, init_id) = scope.sb_push(p3.scopes, scope.Function)
-  let scopes = scope.sb_enter(scopes, class_id)
-  let #(scopes, static_id) = scope.sb_push(scopes, scope.Function)
-  let scopes = scope.sb_enter(scopes, class_id)
-  let ids = ClassScopeIds(class_id:, init_id:, static_id:)
+  let #(scopes, init_id) = scope_builder.push(p3.scopes, scope.Function)
+  let scopes = scope_builder.enter(scopes, class_id)
+  let #(scopes, static_id) = scope_builder.push(scopes, scope.Function)
+  let scopes = scope_builder.enter(scopes, class_id)
+  let ids = class_scopes.ClassScopeIds(class_id:, init_id:, static_id:)
   // §15.7.14: heritage uses the outer private depth
   let outer_depth = p3.class_body_depth
   let p3 = Parser(..p3, scopes:, class_body_depth: outer_depth + 1)
@@ -2975,7 +2894,7 @@ fn parse_class_tail(
   let elements = list.map(parsed, fn(el) { el.element })
   // child order must match declare_class for emit's cursor
   let scopes =
-    class_scope_finalize(
+    class_scopes.class_scope_finalize(
       p4.scopes,
       ids,
       name,
@@ -2983,7 +2902,7 @@ fn parse_class_tail(
       heritage_scopes:,
       parsed:,
     )
-  let scopes = scope.sb_enter(scopes, outer_current)
+  let scopes = scope_builder.enter(scopes, outer_current)
   Ok(#(
     Parser(
       ..p4,
@@ -2996,272 +2915,19 @@ fn parse_class_tail(
   ))
 }
 
-// 7-step child order of scope.declare_class; emit reads it positionally
-fn class_scope_finalize(
-  scopes: scope.ScopeBuilder,
-  ids: ClassScopeIds,
-  name: Option(String),
-  has_super_class has_super_class: Bool,
-  heritage_scopes heritage_scopes: List(scope.ScopeId),
-  parsed parsed: List(ParsedClassElement),
-) -> scope.ScopeBuilder {
-  let elements = list.map(parsed, fn(el) { el.element })
-  // same slot order the emitter looks up
-  let scopes =
-    list.fold(
-      ast_util.class_body_bindings(name, elements),
-      scopes,
-      fn(scopes, n) {
-        scope.sb_declare_in(
-          scopes,
-          ids.class_id,
-          n,
-          scope.ConstBinding,
-          synthetic: True,
-        )
-      },
-    )
-  // (4) computed keys, source order
-  let key_scopes = list.flat_map(parsed, fn(el) { el.scopes.key_scopes })
-  let MethodScopeBuckets(constructor:, instance_methods:, static_methods:) =
-    method_scope_buckets(parsed)
-  // (1) instance init needed (§7.3.29)
-  let needs_instance_init =
-    list.any(elements, fn(el) {
-      case el {
-        ast.ClassMethod(key: ast.KeyPrivate(..), is_static: False, ..) -> True
-        _ -> ast_util.is_instance_field(el)
-      }
-    })
-  // (7) static init needed
-  let needs_static_init = list.any(elements, ast_util.is_static_element)
-  let scopes =
-    finalize_field_shell(
-      scopes,
-      ids.init_id,
-      elements,
-      is_static: False,
-      needed: needs_instance_init,
-    )
-  let scopes =
-    finalize_field_shell(
-      scopes,
-      ids.static_id,
-      elements,
-      is_static: True,
-      needed: needs_static_init,
-    )
-  // (2) constructor: always one function child
-  let #(scopes, ctor_id) = case constructor {
-    Some(id) -> #(scopes, id)
-    None -> scope.sb_push(scope.sb_enter(scopes, ids.class_id), scope.Function)
-  }
-  let scopes =
-    class_seed_ctor_shell(
-      scopes,
-      ctor_id,
-      needs_instance_init:,
-      is_synthetic: option.is_none(constructor),
-      has_super_class:,
-    )
-  let init_part = case needs_instance_init {
-    True -> [ids.init_id]
-    False -> []
-  }
-  let static_part = case needs_static_init {
-    True -> [ids.static_id]
-    False -> []
-  }
-  let ordered =
-    list.flatten([
-      init_part,
-      [ctor_id],
-      heritage_scopes,
-      key_scopes,
-      instance_methods,
-      static_methods,
-      static_part,
-    ])
-  scope.sb_set_children(scopes, ids.class_id, ordered)
-  |> scope.sb_enter(ids.class_id)
-}
-
-type MethodScopeBuckets {
-  MethodScopeBuckets(
-    constructor: Option(scope.ScopeId),
-    instance_methods: List(scope.ScopeId),
-    static_methods: List(scope.ScopeId),
-  )
-}
-
-// (2)(5)(6) buckets must match ast_util.classify_class_body
-fn method_scope_buckets(
-  parsed: List(ParsedClassElement),
-) -> MethodScopeBuckets {
-  let empty =
-    MethodScopeBuckets(
-      constructor: None,
-      instance_methods: [],
-      static_methods: [],
-    )
-  // parsed is in source order, so fold from the right to keep it
-  use buckets, ParsedClassElement(element:, scopes:) <- list.fold_right(
-    parsed,
-    empty,
-  )
-  case scopes {
-    NonMethodScopes(..) -> buckets
-    MethodScopes(method_fn_id: id, ..) ->
-      case ast_util.class_element_bucket(element) {
-        ast_util.ConstructorBucket ->
-          MethodScopeBuckets(..buckets, constructor: Some(id))
-        ast_util.InstanceMethodBucket ->
-          MethodScopeBuckets(..buckets, instance_methods: [
-            id,
-            ..buckets.instance_methods
-          ])
-        ast_util.StaticMethodBucket ->
-          MethodScopeBuckets(..buckets, static_methods: [
-            id,
-            ..buckets.static_methods
-          ])
-        // unreachable in practice
-        ast_util.InstanceFieldBucket | ast_util.StaticElementBucket -> buckets
-      }
-  }
-}
-
-// drop an unneeded shell, else flip its children and seed refs
-fn finalize_field_shell(
-  scopes: scope.ScopeBuilder,
-  shell_id: scope.ScopeId,
-  elements: List(ast.ClassElement),
-  is_static is_static: Bool,
-  needed needed: Bool,
-) -> scope.ScopeBuilder {
-  use <- bool.lazy_guard(!needed, fn() { scope.sb_discard(scopes, shell_id) })
-  let children =
-    scope.sb_children_newest_first(scopes, shell_id) |> list.reverse
-  class_seed_field_shell(scopes, shell_id, elements, is_static:)
-  |> scope.sb_set_children(shell_id, children)
-}
-
-// ref to the field-key stash const emit reads
-fn class_ref_field_key(
-  scopes: scope.ScopeBuilder,
-  key: ast.PropertyKey,
-  idx: Int,
-) -> scope.ScopeBuilder {
-  case key {
-    ast.KeyComputed(..) ->
-      scope.sb_ref(scopes, ast_util.computed_field_const(idx))
-    ast.KeyPrivate(name:, ..) -> scope.sb_ref(scopes, name)
-    ast.KeyIdentifier(..) | ast.KeyString(..) | ast.KeyNumber(..) -> scopes
-    ast.KeyBigInt(..) -> scopes
-  }
-}
-
-// seed synthetic refs emit's compile_class_init_fn reads
-fn class_seed_field_shell(
-  scopes: scope.ScopeBuilder,
-  shell_id: scope.ScopeId,
-  elements: List(ast.ClassElement),
-  is_static is_static: Bool,
-) -> scope.ScopeBuilder {
-  let scopes = scope.sb_enter(scopes, shell_id)
-  // §10.2.11 step 22
-  let scopes =
-    scope.sb_declare_in(
-      scopes,
-      shell_id,
-      "arguments",
-      scope.VarBinding,
-      synthetic: True,
-    )
-  let scopes = scope.sb_lexical_ref(scopes, lexical.RefThis)
-  // §7.3.29 private methods read #x and its stash
-  let scopes = case is_static {
-    True -> scopes
-    False ->
-      list.fold(elements, scopes, fn(scopes, element) {
-        case element {
-          ast.ClassMethod(
-            key: ast.KeyPrivate(name:, ..),
-            kind:,
-            is_static: False,
-            ..,
-          ) ->
-            scopes
-            |> scope.sb_ref(name)
-            |> scope.sb_ref(ast_util.private_fn_const(kind, name))
-          _ -> scopes
-        }
-      })
-  }
-  list.index_fold(elements, scopes, fn(scopes, element, idx) {
-    case element {
-      ast.ClassField(key:, is_static: s, ..) if s == is_static ->
-        class_ref_field_key(scopes, key, idx)
-      _ -> scopes
-    }
-  })
-}
-
-// what super(...) reads: the active function, new.target and this
-fn super_call_refs(scopes: scope.ScopeBuilder) -> scope.ScopeBuilder {
-  scopes
-  |> scope.sb_lexical_ref(lexical.RefActiveFunc)
-  |> scope.sb_lexical_ref(lexical.RefNewTarget)
-  |> scope.sb_lexical_ref(lexical.RefThis)
-}
-
-// synthetic refs the emitter adds to the constructor
-fn class_seed_ctor_shell(
-  scopes: scope.ScopeBuilder,
-  ctor_id: scope.ScopeId,
-  needs_instance_init needs_instance_init: Bool,
-  is_synthetic is_synthetic: Bool,
-  has_super_class has_super_class: Bool,
-) -> scope.ScopeBuilder {
-  let scopes =
-    scope.sb_enter(scopes, ctor_id)
-    |> scope.sb_update_current_fn(fn(fi) {
-      scope.RawFunctionInfo(..fi, is_derived_constructor: has_super_class)
-    })
-  // synthetic ctor never declared arguments
-  let scopes = case is_synthetic {
-    True ->
-      scope.sb_declare_in(
-        scopes,
-        ctor_id,
-        "arguments",
-        scope.VarBinding,
-        synthetic: True,
-      )
-    False -> scopes
-  }
-  let scopes = case needs_instance_init {
-    True ->
-      scopes
-      |> scope.sb_ref(ast_util.class_fields_init)
-      |> scope.sb_lexical_ref(lexical.RefThis)
-    False -> scopes
-  }
-  case is_synthetic && has_super_class {
-    True -> super_call_refs(scopes) |> scope.sb_ref("arguments")
-    False -> scopes
-  }
-}
-
 fn parse_class_body(
   p: Parser,
-  ids: ClassScopeIds,
+  ids: class_scopes.ClassScopeIds,
   has_extends has_extends: Bool,
   has_constructor has_constructor: Bool,
   private_names private_names: Dict(String, DeclaredPrivateName),
-  acc acc: List(ParsedClassElement),
+  acc acc: List(class_scopes.ParsedClassElement),
 ) -> Result(
-  #(Parser, List(ParsedClassElement), Dict(String, DeclaredPrivateName)),
+  #(
+    Parser,
+    List(class_scopes.ParsedClassElement),
+    Dict(String, DeclaredPrivateName),
+  ),
   ParseError,
 ) {
   case peek(p) {
@@ -3360,10 +3026,10 @@ fn ends_class_element_name(kind: TokenKind) -> Bool {
 
 fn parse_class_element(
   p: Parser,
-  ids: ClassScopeIds,
+  ids: class_scopes.ClassScopeIds,
   has_extends has_extends: Bool,
   has_constructor has_constructor: Bool,
-) -> Result(#(Parser, ParsedClassElement), ParseError) {
+) -> Result(#(Parser, class_scopes.ParsedClassElement), ParseError) {
   let is_static = peek(p) == Static && !ends_class_element_name(peek_at(p, 1))
   let p2 = case is_static {
     True -> advance(p)
@@ -3377,9 +3043,10 @@ fn parse_class_element(
   let #(p3, prefix) =
     parse_method_prefix(p2, ends_class_element_name, star_ends_accessor: True)
   // snapshot to diff out computed-key scopes
-  let key_before = scope.sb_children_newest_first(p3.scopes, ids.class_id)
+  let key_before = scope_builder.children_newest_first(p3.scopes, ids.class_id)
   use #(p4, key) <- result.try(parse_property_name(p3))
-  let key_scopes = class_new_children(p4.scopes, ids.class_id, key_before)
+  let key_scopes =
+    class_scopes.class_new_children(p4.scopes, ids.class_id, key_before)
   // §15.7.1 checks use the decoded key
   let static_name = ast.property_key_static_name(key)
   use <- bool.guard(
@@ -3415,7 +3082,10 @@ fn parse_class_element(
       let element = ast.ClassMethod(key:, value:, kind:, is_static:)
       #(
         p5,
-        ParsedClassElement(element, MethodScopes(key_scopes:, method_fn_id:)),
+        class_scopes.ParsedClassElement(
+          element,
+          class_scopes.MethodScopes(key_scopes:, method_fn_id:),
+        ),
       )
     }
     _ -> {
@@ -3431,7 +3101,13 @@ fn parse_class_element(
         is_static:,
       ))
       let element = ast.ClassField(key:, value:, is_static:)
-      #(p5, ParsedClassElement(element, NonMethodScopes(key_scopes:)))
+      #(
+        p5,
+        class_scopes.ParsedClassElement(
+          element,
+          class_scopes.NonMethodScopes(key_scopes:),
+        ),
+      )
     }
   }
 }
@@ -3439,16 +3115,17 @@ fn parse_class_element(
 // step (7): a static block is an arrow child of the static shell
 fn parse_static_block(
   p: Parser,
-  ids: ClassScopeIds,
-) -> Result(#(Parser, ParsedClassElement), ParseError) {
-  let p_static = Parser(..p, scopes: scope.sb_enter(p.scopes, ids.static_id))
+  ids: class_scopes.ClassScopeIds,
+) -> Result(#(Parser, class_scopes.ParsedClassElement), ParseError) {
+  let p_static =
+    Parser(..p, scopes: scope_builder.enter(p.scopes, ids.static_id))
   let p_body = enter_static_block_context(p_static)
   let scopes =
-    scope.sb_update_current(p_body.scopes, fn(s) {
-      scope.RawScope(..s, kind: scope.Function)
+    scope_builder.update_current(p_body.scopes, fn(s) {
+      scope_builder.RawScope(..s, kind: scope.Function)
     })
-    |> scope.sb_update_current_fn(fn(fi) {
-      scope.RawFunctionInfo(..fi, is_arrow: True)
+    |> scope_builder.update_current_fn(fn(fi) {
+      scope_builder.RawFunctionInfo(..fi, is_arrow: True)
     })
   // not parse_block_body: no block between arrow scope and body
   use #(p2, block) <- result.map(parse_braced_body(Parser(..p_body, scopes:)))
@@ -3456,9 +3133,15 @@ fn parse_static_block(
   let p2 =
     Parser(
       ..restore_outer_context(p2, p_static),
-      scopes: scope.sb_enter(p2.scopes, ids.class_id),
+      scopes: scope_builder.enter(p2.scopes, ids.class_id),
     )
-  #(p2, ParsedClassElement(ast.StaticBlock(body: block), NonMethodScopes([])))
+  #(
+    p2,
+    class_scopes.ParsedClassElement(
+      ast.StaticBlock(body: block),
+      class_scopes.NonMethodScopes([]),
+    ),
+  )
 }
 
 // §15.7.1: constructor must be a plain method, declared once
@@ -3495,13 +3178,13 @@ fn is_private_constructor_key(key: ast.PropertyKey) -> Bool {
 fn parse_class_method_value(
   p: Parser,
   outer: Parser,
-  ids: ClassScopeIds,
+  ids: class_scopes.ClassScopeIds,
   prefix: MethodPrefix,
   is_constructor is_constructor: Bool,
   has_extends has_extends: Bool,
 ) -> Result(#(Parser, ast.FunctionLiteral, scope.ScopeId), ParseError) {
   // method scope is a direct child of class_id; capture by diff
-  let body_before = scope.sb_children_newest_first(p.scopes, ids.class_id)
+  let body_before = scope_builder.children_newest_first(p.scopes, ids.class_id)
   use #(p2, params, body) <- result.map(parse_method_params_body(
     p,
     outer,
@@ -3511,7 +3194,7 @@ fn parse_class_method_value(
   ))
   // never empty: a method pushed exactly one function scope
   let assert [method_fn_id, ..] =
-    class_new_children(p2.scopes, ids.class_id, body_before)
+    class_scopes.class_new_children(p2.scopes, ids.class_id, body_before)
     as "parser: class method body pushed no Function scope"
   let value =
     ast.FunctionLiteral(
@@ -3528,7 +3211,7 @@ fn parse_class_method_value(
 fn parse_class_field_rest(
   p: Parser,
   outer: Parser,
-  ids: ClassScopeIds,
+  ids: class_scopes.ClassScopeIds,
   is_static is_static: Bool,
 ) -> Result(#(Parser, Option(ast.Expression)), ParseError) {
   use #(p2, value) <- result.try(case peek(p) {
@@ -3557,7 +3240,7 @@ fn enter_field_initializer_context(
 ) -> Parser {
   Parser(
     ..p,
-    scopes: scope.sb_enter(p.scopes, shell_id),
+    scopes: scope_builder.enter(p.scopes, shell_id),
     ctx: GrammarContext(
       ..p.ctx,
       allow_super_property: True,
@@ -3575,7 +3258,7 @@ fn exit_field_initializer_context(
 ) -> Parser {
   Parser(
     ..p,
-    scopes: scope.sb_enter(p.scopes, class_id),
+    scopes: scope_builder.enter(p.scopes, class_id),
     ctx: GrammarContext(
       ..p.ctx,
       allow_super_property: outer.ctx.allow_super_property,
@@ -3695,15 +3378,15 @@ fn parse_with_statement(
   use p3 <- result.try(expect(p2, LeftParen))
   use #(p4, object) <- result.try(parse_expression(p3))
   use p5 <- result.try(expect(p4, RightParen))
-  let #(scopes, with_id) = scope.sb_push_with(p5.scopes)
+  let #(scopes, with_id) = scope_builder.push_with(p5.scopes)
   use #(p6, body) <- result.try(parse_single_statement(
     Parser(..p5, scopes:),
     allow_annex_b_function: False,
   ))
   // flip children to source order for finalize
-  let scopes = scope.sb_reorder_block_children(p6.scopes, with_id)
+  let scopes = scope_builder.reorder_block_children(p6.scopes, with_id)
   Ok(#(
-    Parser(..p6, scopes: scope.sb_enter(scopes, p5.scopes.current)),
+    Parser(..p6, scopes: scope_builder.enter(scopes, p5.scopes.current)),
     ast.WithStatement(object:, body:),
   ))
 }
@@ -3905,7 +3588,7 @@ fn finish_assignment(
   let p =
     Parser(
       ..p,
-      scopes: mark_assign_targets(p.scopes, lhs),
+      scopes: class_scopes.mark_assign_targets(p.scopes, lhs),
       ctx: GrammarContext(..p.ctx, has_cover_initializer: False),
     )
   use #(p2, rhs) <- result.map(parse_assignment_expression(advance(p)))
@@ -4110,7 +3793,7 @@ fn try_paren_arrow(
   let p5 =
     Parser(
       ..advance(p4),
-      scopes: declare_param_shims(p4.scopes, params),
+      scopes: class_scopes.declare_param_shims(p4.scopes, params),
       ctx: GrammarContext(
         ..p4.ctx,
         in_generator: p_ctx.ctx.in_generator,
@@ -4166,7 +3849,8 @@ fn parse_arrow_body(
       // raise deferred cover errors before the context is dropped
       use Nil <- result.try(check_cover_grammar_errors(p2, start))
       // flip arrow children to source order for finalize
-      let scopes = scope.sb_reorder_block_children(p2.scopes, p.scopes.current)
+      let scopes =
+        scope_builder.reorder_block_children(p2.scopes, p.scopes.current)
       Ok(#(Parser(..p2, scopes:), ast.ArrowBodyExpression(expr)))
     }
   }
@@ -4564,7 +4248,7 @@ fn finish_update_expr(
             Parser(
               ..p,
               last_expr_assignable: False,
-              scopes: mark_assign_targets(p.scopes, arg),
+              scopes: class_scopes.mark_assign_targets(p.scopes, arg),
             ),
             ast.UpdateExpression(
               operator: op,
@@ -4632,7 +4316,7 @@ fn parse_new_target(
         Error(NewTargetOutsideFunction(start)),
       )
       let p2 = advance(p)
-      let scopes = scope.sb_lexical_ref(p2.scopes, lexical.RefNewTarget)
+      let scopes = scope_builder.lexical_ref(p2.scopes, lexical.RefNewTarget)
       let meta =
         ast.MetaProperty(kind: ast.NewTarget, span: span_from(start, p2))
       Ok(#(Parser(..p2, scopes:), meta))
@@ -4701,7 +4385,8 @@ fn parse_super_expression(
       use #(p3, args) <- result.map(parse_arguments(p2))
       // class_fields_init too, so arrows in derived ctors capture it
       let scopes =
-        super_call_refs(p3.scopes) |> scope.sb_ref(ast_util.class_fields_init)
+        class_scopes.super_call_refs(p3.scopes)
+        |> scope_builder.ref(ast_util.class_fields_init)
       let call =
         ast.CallExpression(
           callee: ast.SuperExpression(span: super_span),
@@ -4729,8 +4414,8 @@ fn super_property_reference(
   use <- bool.guard(!p.ctx.allow_super_property, Error(not_allowed))
   let scopes =
     p.scopes
-    |> scope.sb_lexical_ref(lexical.RefHomeObject)
-    |> scope.sb_lexical_ref(lexical.RefThis)
+    |> scope_builder.lexical_ref(lexical.RefHomeObject)
+    |> scope_builder.lexical_ref(lexical.RefThis)
   Ok(#(Parser(..p, scopes:), ast.SuperExpression(span:)))
 }
 
@@ -4861,7 +4546,7 @@ fn parse_call_chain(
       // §19.2.1 direct eval poisons the scope
       let p2 = case ast_util.unwrap_parens(callee) {
         ast.Identifier(name: "eval", ..) ->
-          Parser(..p2, scopes: scope.sb_mark_eval(p2.scopes))
+          Parser(..p2, scopes: scope_builder.mark_eval(p2.scopes))
         _ -> p2
       }
       let expr =
@@ -4976,7 +4661,7 @@ fn finish_dot_member(
   let p = note_private_ref(p, prop_name)
   // obj.#x is a ref to the class-scope #x const
   let p = case prop_name {
-    "#" <> _ -> Parser(..p, scopes: scope.sb_ref(p.scopes, prop_name))
+    "#" <> _ -> Parser(..p, scopes: scope_builder.ref(p.scopes, prop_name))
     _ -> p
   }
   let property = ast.Dot(name: prop_name, span: span_of(p))
@@ -5180,7 +4865,7 @@ fn identifier_reference(
     advance(
       Parser(
         ..p,
-        scopes: scope.sb_ref(p.scopes, name),
+        scopes: scope_builder.ref(p.scopes, name),
         last_expr_assignable: True,
         last_expr_name: Some(name),
       ),
@@ -5232,7 +4917,10 @@ fn parse_primary_non_identifier(
     }
     This ->
       accept_literal(
-        Parser(..p, scopes: scope.sb_lexical_ref(p.scopes, lexical.RefThis)),
+        Parser(
+          ..p,
+          scopes: scope_builder.lexical_ref(p.scopes, lexical.RefThis),
+        ),
         ast.ThisExpression(span: span_of(p)),
       )
     Super ->
@@ -5591,7 +5279,7 @@ fn parse_shorthand_property(
 ) -> Result(#(Parser, ast.Property), ParseError) {
   // shorthand is an identifier reference (§13.1.1)
   use Nil <- result.try(check_identifier_reference(p, name))
-  let p = Parser(..p, scopes: scope.sb_ref(p.scopes, name))
+  let p = Parser(..p, scopes: scope_builder.ref(p.scopes, name))
   let key_span = ast.property_key_span(key)
   let key_ident = ast.Identifier(name:, span: key_span)
   use #(p2, value) <- result.map(case has_default {
@@ -5635,7 +5323,7 @@ fn parse_function_expression(
     Some(name) ->
       Parser(
         ..p5,
-        scopes: scope.sb_declare_in(
+        scopes: scope_builder.declare_in(
           p5.scopes,
           fn_scope,
           name,
@@ -6040,9 +5728,9 @@ fn parse_default_class(
 // §16.2.3.7 *default* binding, VarBinding per emit
 fn declare_default_export(p: Parser) -> Parser {
   let scopes =
-    scope.sb_declare(
+    scope_builder.declare(
       p.scopes,
-      esm.default_export_local_name,
+      summary.default_export_local_name,
       scope.VarBinding,
       synthetic: True,
     )
@@ -6375,7 +6063,7 @@ fn enter_function_context(
   is_async is_async: Bool,
   strict_name strict_name: Option(String),
 ) -> Parser {
-  let #(scopes, _id) = scope.sb_push(p.scopes, scope.Function)
+  let #(scopes, _id) = scope_builder.push(p.scopes, scope.Function)
   Parser(
     ..p,
     ctx: GrammarContext(
@@ -6422,12 +6110,12 @@ fn enter_arrow_context(
     enter_function_context(p, is_generator: False, is_async:, strict_name: None)
   // arrow scopes own no lexical pseudo-slots
   let scopes =
-    scope.sb_update_current_fn(inner.scopes, fn(fi) {
-      scope.RawFunctionInfo(..fi, is_arrow: True)
+    scope_builder.update_current_fn(inner.scopes, fn(fi) {
+      scope_builder.RawFunctionInfo(..fi, is_arrow: True)
     })
   let scopes =
     list.fold(param_names, scopes, fn(acc, name) {
-      scope.sb_declare(acc, name, scope.ParamBinding, synthetic: False)
+      scope_builder.declare(acc, name, scope.ParamBinding, synthetic: False)
     })
   Parser(
     ..inner,
@@ -6475,8 +6163,8 @@ fn enter_static_block_context(p: Parser) -> Parser {
       strict_name: None,
     )
   let scopes =
-    scope.sb_update_current(inner.scopes, fn(s) {
-      scope.RawScope(..s, kind: scope.ClassStaticBlock, is_strict: True)
+    scope_builder.update_current(inner.scopes, fn(s) {
+      scope_builder.RawScope(..s, kind: scope.ClassStaticBlock, is_strict: True)
     })
   Parser(
     ..inner,
@@ -6503,13 +6191,13 @@ fn restore_outer_context(p: Parser, outer: Parser) -> Parser {
   Parser(
     ..p,
     ctx: outer.ctx,
-    scopes: scope.sb_enter(p.scopes, outer.scopes.current),
+    scopes: scope_builder.enter(p.scopes, outer.scopes.current),
   )
 }
 
 fn peek(p: Parser) -> TokenKind {
   case p.tokens {
-    [lexer.Token(kind: k, ..), ..] -> k
+    [token.Token(kind: k, ..), ..] -> k
     [] -> Eof
   }
 }
@@ -6522,9 +6210,9 @@ fn peek_token_at(p: Parser, n: Int) -> Token {
 fn peek_at(p: Parser, n: Int) -> TokenKind {
   case n, p.tokens {
     0, _ -> peek(p)
-    1, [_, lexer.Token(kind: k, ..), ..] -> k
+    1, [_, token.Token(kind: k, ..), ..] -> k
     _, _ -> {
-      let lexer.Token(kind: k, ..) = peek_token_at(p, n)
+      let token.Token(kind: k, ..) = peek_token_at(p, n)
       k
     }
   }
@@ -6532,7 +6220,7 @@ fn peek_at(p: Parser, n: Int) -> TokenKind {
 
 fn peek_value(p: Parser) -> String {
   case p.tokens {
-    [lexer.Token(value: v, ..), ..] -> v
+    [token.Token(value: v, ..), ..] -> v
     [] -> ""
   }
 }
@@ -6541,7 +6229,7 @@ fn peek_value_at(p: Parser, n: Int) -> String {
   case n {
     0 -> peek_value(p)
     _ -> {
-      let lexer.Token(kind:, value:, ..) = peek_token_at(p, n)
+      let token.Token(kind:, value:, ..) = peek_token_at(p, n)
       case kind {
         Eof -> ""
         _ -> value
@@ -6553,7 +6241,7 @@ fn peek_value_at(p: Parser, n: Int) -> String {
 // escaped contextual keywords are not keywords (§12.7.2)
 fn peek_had_escape(p: Parser) -> Bool {
   case p.tokens {
-    [lexer.Token(had_escape: e, ..), ..] -> e
+    [token.Token(had_escape: e, ..), ..] -> e
     [] -> False
   }
 }
@@ -6561,28 +6249,28 @@ fn peek_had_escape(p: Parser) -> Bool {
 // annex b legacy forms strict code forbids; decided by the lexer
 fn peek_annex_b_legacy(p: Parser) -> Bool {
   case p.tokens {
-    [lexer.Token(annex_b_legacy: legacy, ..), ..] -> legacy
+    [token.Token(annex_b_legacy: legacy, ..), ..] -> legacy
     [] -> False
   }
 }
 
 fn peek_raw_len(p: Parser) -> Int {
   case p.tokens {
-    [lexer.Token(raw_len: rl, ..), ..] -> rl
+    [token.Token(raw_len: rl, ..), ..] -> rl
     [] -> 0
   }
 }
 
 fn pos_of(p: Parser) -> Int {
   case p.tokens {
-    [lexer.Token(pos:, ..), ..] -> pos
+    [token.Token(pos:, ..), ..] -> pos
     [] -> 0
   }
 }
 
 fn span_of(p: Parser) -> ast.Span {
   case p.tokens {
-    [lexer.Token(pos:, raw_len:, ..), ..] ->
+    [token.Token(pos:, raw_len:, ..), ..] ->
       ast.Span(start: pos, end: pos + raw_len)
     [] -> ast.Span(start: 0, end: 0)
   }
@@ -6603,14 +6291,14 @@ fn span_from(start: Int, p_after: Parser) -> ast.Span {
 // falls back to the previous line at eof
 fn line_of(p: Parser) -> Int {
   case p.tokens {
-    [lexer.Token(line:, ..), ..] -> line
+    [token.Token(line:, ..), ..] -> line
     [] -> p.prev_line
   }
 }
 
 fn advance(p: Parser) -> Parser {
   case p.tokens {
-    [lexer.Token(line:, pos:, raw_len:, ..), ..rest] -> {
+    [token.Token(line:, pos:, raw_len:, ..), ..rest] -> {
       let prev_end = pos + raw_len
       case rest {
         [] -> {
@@ -6711,13 +6399,13 @@ fn eat_semicolon(p: Parser) -> Result(Parser, ParseError) {
 
 fn has_line_break_before(p: Parser) -> Bool {
   case p.tokens {
-    [lexer.Token(line: current_line, ..), ..] -> current_line > p.prev_line
+    [token.Token(line: current_line, ..), ..] -> current_line > p.prev_line
     [] -> True
   }
 }
 
 fn token_line_at(p: Parser, n: Int) -> Int {
-  let lexer.Token(kind:, line:, ..) = peek_token_at(p, n)
+  let token.Token(kind:, line:, ..) = peek_token_at(p, n)
   case kind {
     // -1 past eof so line comparisons never match
     Eof -> -1

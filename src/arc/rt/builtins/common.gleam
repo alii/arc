@@ -326,6 +326,15 @@ pub fn init_type_on(
   #(BuiltinPair(prototype: proto_h, constructor: ctor_h), st)
 }
 
+pub fn add_named_properties(
+  st: Agent,
+  h: Handle,
+  props: List(#(String, Property)),
+) -> Agent {
+  use st, #(name, prop) <- list.fold(props, st)
+  add_named_property(st, h, name, prop)
+}
+
 pub fn add_named_property(
   st: Agent,
   h: Handle,

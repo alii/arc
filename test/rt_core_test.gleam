@@ -5,6 +5,7 @@ import arc/rt/builtins as rt_builtins
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
+import arc/rt/lang as rt_lang
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/store as rt_store
@@ -208,7 +209,7 @@ pub fn minus_zero_survives_integer_arithmetic_test() {
 }
 
 fn global(st: Agent, name: String) -> JsVal {
-  rt_obj.t_global_get(st, <<name:utf8>>).0
+  rt_lang.t_global_get(st, <<name:utf8>>).0
 }
 
 fn get(st: Agent, obj: JsVal, name: String) -> JsVal {

@@ -5,12 +5,13 @@ import arc/compiler/scope.{
 }
 import arc/parser/ast
 import arc_aot/emit/anf
-import arc_aot/emit/exn
+import arc_aot/emit/cps
 import arc_aot/emit/expr
 import arc_aot/emit/state.{
   type BarrierCleanup, type EmitError, type EmitResult, type Emitter, type Next,
   type NextWith, FnDecl, StmtBody,
 }
+import arc_aot/emit/try_finally
 import carder/ir
 import gleam/bit_array
 import gleam/dict
@@ -19,41 +20,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
-
-fn let_(e: Emitter, rhs: ir.Expr, k: NextWith(ir.Value)) -> EmitResult {
-  state.let_(e, rhs, k)
-}
-
-fn host_(
-  e: Emitter,
-  op: String,
-  args: List(ir.Value),
-  k: NextWith(ir.Value),
-) -> EmitResult {
-  let_(e, ir.CallHost("js", op, args), k)
-}
-
-fn host_unit_(
-  e: Emitter,
-  op: String,
-  args: List(ir.Value),
-  k: Next,
-) -> EmitResult {
-  use _, e <- host_(e, op, args)
-  k(e)
-}
-
-fn each_(
-  e: Emitter,
-  items: List(a),
-  then k: Next,
-  with step: fn(Emitter, a, Next) -> EmitResult,
-) -> EmitResult {
-  case items {
-    [] -> k(e)
-    [x, ..rest] -> step(e, x, fn(e) { each_(e, rest, k, step) })
-  }
-}
 
 fn find_frame_carried(e: Emitter, ir_label: String) -> List(Int) {
   frame_carried_walk(e.frame_stack, ir_label)
@@ -100,12 +66,12 @@ fn inline_cleanup(e: Emitter, cleanup: BarrierCleanup, k: Next) -> EmitResult {
   let abrupt = e.consts.false_
   case cleanup {
     state.FinallyBlock(body:, saved_scope:, escape: None) ->
-      exn.inline_finally(e, body, saved_scope, k)
+      try_finally.inline_finally(e, body, saved_scope, k)
     state.FinallyBlock(body:, saved_scope:, escape: Some(esc)) -> {
       let carried = assigned_unboxed_slots_all(e, [ast.BlockStatement(body)])
       use #(f_tree, e) <- result.try(
         with_done(e, fn(done, e) {
-          use e <- exn.inline_finally(e, body, saved_scope)
+          use e <- try_finally.inline_finally(e, body, saved_scope)
           done(ir.Values(carried_values(e, carried)), e)
         }),
       )
@@ -113,7 +79,7 @@ fn inline_cleanup(e: Emitter, cleanup: BarrierCleanup, k: Next) -> EmitResult {
       rebind_after_block(e, carried, region, k)
     }
     state.IterClose(iter_var:, escape: None) ->
-      host_unit_(e, "iter_close", [ir.Var(iter_var), abrupt], k)
+      cps.host_unit(e, "iter_close", [ir.Var(iter_var), abrupt], k)
     state.IterClose(iter_var:, escape: Some(esc)) -> {
       let close =
         ir.Let(
@@ -189,7 +155,7 @@ fn derived_return(
     False -> k(v, e)
     True -> {
       let #(tree, e) = anf.run(expr.derived_return_value(v), e)
-      let_(e, tree, k)
+      cps.let_(e, tree, k)
     }
   }
 }
@@ -209,14 +175,14 @@ fn emit_return(e: Emitter, arg: Option(ast.Expression)) -> EmitResult {
     None -> with_value(e.consts.undef, e)
     Some(ex) -> {
       use #(rhs, e) <- result.try(e.dispatch.emit_expr(e, ex))
-      let_(e, rhs, with_value)
+      cps.let_(e, rhs, with_value)
     }
   }
 }
 
 fn expr_(e: Emitter, ex: ast.Expression, k: NextWith(ir.Value)) -> EmitResult {
   use #(tree, e) <- result.try(e.dispatch.emit_expr(e, ex))
-  let_(e, tree, k)
+  cps.let_(e, tree, k)
 }
 
 fn with_done(
@@ -234,7 +200,7 @@ pub fn emit_stmts(
   case expr.prop_write_run(e, ss) {
     Some(#(run, rest)) -> {
       let #(tree, e) = anf.run(expr.emit_prop_write_run(run), e)
-      use _, e <- let_(e, tree)
+      use _, e <- cps.let_(e, tree)
       emit_stmts(e, rest, k)
     }
     None ->
@@ -308,7 +274,12 @@ fn emit_stmt(e: Emitter, s: ast.Statement, k: Next) -> EmitResult {
 fn store_slot(e: Emitter, b: Binding, val: ir.Value, k: Next) -> EmitResult {
   case b.boxed {
     True ->
-      host_unit_(e, "box_set", [ir.Var(state.get_slot_var(e, b.slot)), val], k)
+      cps.host_unit(
+        e,
+        "box_set",
+        [ir.Var(state.get_slot_var(e, b.slot)), val],
+        k,
+      )
     False -> {
       let name = state.slot_base_name(e, b.slot)
       use body <- state.map_tree(k(state.set_slot_var(e, b.slot, name)))
@@ -321,7 +292,7 @@ fn binding_prologue(e: Emitter, scope_id: ScopeId, k: Next) -> EmitResult {
   let bindings =
     dict.to_list(scope.get(e.scope_tree, scope_id).bindings)
     |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
-  use e, entry, next <- each_(e, bindings, then: k)
+  use e, entry, next <- cps.each(e, bindings, then: k)
   let #(_, b): #(String, Binding) = entry
   let name = state.slot_base_name(e, b.slot)
   let seed = fn(e: Emitter, init) {
@@ -331,7 +302,7 @@ fn binding_prologue(e: Emitter, scope_id: ScopeId, k: Next) -> EmitResult {
         ir.Let([name], ir.Values([init]), body)
       }
       True -> {
-        use box, e <- host_(e, "box_new", [init])
+        use box, e <- cps.host(e, "box_new", [init])
         use body <- state.map_tree(next(state.set_slot_var(e, b.slot, name)))
         ir.Let([name], ir.Values([box]), body)
       }
@@ -349,7 +320,7 @@ fn hoist_fn_decls(
   stmts: List(ast.StmtWithLine),
   k: Next,
 ) -> EmitResult {
-  use e, located, next <- each_(e, stmts, then: k)
+  use e, located, next <- cps.each(e, stmts, then: k)
   case ast_util.peel_labels(located.statement) {
     ast.FunctionDeclaration(
       name: Some(ast.NamedBinding(name:, ..)),
@@ -367,7 +338,7 @@ fn hoist_fn_decls(
         StmtBody(body),
         child_id,
       ))
-      use closure, e <- let_(e, ctree)
+      use closure, e <- cps.let_(e, ctree)
       store_slot(e, cur_scope_binding(e, name), closure, next)
     }
     _ -> next(e)
@@ -386,7 +357,7 @@ fn fold_body(
   body: List(ast.StmtWithLine),
   next: Next,
 ) -> EmitResult {
-  each_(e, body, then: next, with: fn(e, located, k) {
+  cps.each(e, body, then: next, with: fn(e, located, k) {
     emit_stmt(e, located.statement, k)
   })
 }
@@ -453,7 +424,7 @@ fn annexb_promote(e: Emitter, name: String, k: Next) -> EmitResult {
             expr.emit_direct_put(d, name, v)
           }
           let #(tree, e) = anf.run(copy, e)
-          use _, e <- let_(e, tree)
+          use _, e <- cps.let_(e, tree)
           k(e)
         }
       }
@@ -535,7 +506,12 @@ fn store_declared(
       }
       case boxed {
         True ->
-          host_unit_(e, "box_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
+          cps.host_unit(
+            e,
+            "box_set",
+            [ir.Var(state.get_slot_var(e, slot)), v],
+            k,
+          )
         False -> {
           let #(n, e) = state.fresh_slot_var(e, slot)
           let e = case v {
@@ -554,9 +530,14 @@ fn store_declared(
     scope.Plain(scope.Global(_)) ->
       case state.lookup_slotted_global(e, name) {
         Some(slot) ->
-          host_unit_(e, "box_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
+          cps.host_unit(
+            e,
+            "box_set",
+            [ir.Var(state.get_slot_var(e, slot)), v],
+            k,
+          )
         None ->
-          host_unit_(
+          cps.host_unit(
             e,
             "global_set",
             [ir.ConstBinary(bit_array.from_string(name)), v],
@@ -581,7 +562,7 @@ fn emit_var_decl(
     ast.Const | ast.Using | ast.AwaitUsing -> state.BindConst
   }
   let lexical = ast_util.is_lexical(kind)
-  use e, decl, next <- each_(e, decls, then: next)
+  use e, decl, next <- cps.each(e, decls, then: next)
   let ast.VariableDeclarator(id: pat, init:) = decl
   case pat {
     ast.IdentifierPattern(name:, ..) ->
@@ -592,7 +573,7 @@ fn emit_var_decl(
             init_expr,
             Some(name),
           ))
-          use v, e <- let_(e, tree)
+          use v, e <- cps.let_(e, tree)
           store_declared(e, name, v, lexical, next)
         }
         None ->
@@ -609,7 +590,7 @@ fn emit_var_decl(
           v,
           mode,
         ))
-        use _, e <- let_(e, dtree)
+        use _, e <- cps.let_(e, dtree)
         next(e)
       }
       case init {
@@ -714,7 +695,7 @@ fn bind_invariant_callees(
     [callee, ..rest] -> {
       let sv = ir.Var(state.get_slot_var(e, callee.slot))
       let go = fn(f, e) {
-        use pair, e <- host_(e, "direct_callee", [f, e.consts.undef])
+        use pair, e <- cps.host(e, "direct_callee", [f, e.consts.undef])
         bind_invariant_callees(
           state.set_invariant_callee(e, callee, pair),
           rest,
@@ -723,7 +704,7 @@ fn bind_invariant_callees(
       }
       case callee {
         state.PlainSlot(_) -> go(sv, e)
-        state.BoxedSlot(_) -> host_(e, "box_get", [sv], go)
+        state.BoxedSlot(_) -> cps.host(e, "box_get", [sv], go)
       }
     }
   }
@@ -1324,7 +1305,7 @@ fn for_lhs_ident_assign(
   k: Next,
 ) -> EmitResult {
   let throw_const = fn(e) {
-    host_unit_(
+    cps.host_unit(
       e,
       "throw_type_error",
       [
@@ -1346,7 +1327,7 @@ fn for_lhs_ident_assign(
       let write = fn(e: Emitter) {
         case boxed {
           True ->
-            host_unit_(
+            cps.host_unit(
               e,
               "box_set",
               [ir.Var(state.get_slot_var(e, slot)), v],
@@ -1363,12 +1344,12 @@ fn for_lhs_ident_assign(
         let read = fn(e, kk) {
           case boxed {
             True ->
-              host_(e, "box_get", [ir.Var(state.get_slot_var(e, slot))], kk)
+              cps.host(e, "box_get", [ir.Var(state.get_slot_var(e, slot))], kk)
             False -> kk(ir.Var(state.get_slot_var(e, slot)), e)
           }
         }
         use cur, e <- read(e)
-        use e <- host_unit_(e, "tdz_check", [
+        use e <- cps.host_unit(e, "tdz_check", [
           cur,
           ir.ConstBinary(bit_array.from_string(name)),
         ])
@@ -1387,9 +1368,14 @@ fn for_lhs_ident_assign(
     scope.Plain(scope.Global(_)) ->
       case state.lookup_slotted_global(e, name) {
         Some(slot) ->
-          host_unit_(e, "box_set", [ir.Var(state.get_slot_var(e, slot)), v], k)
+          cps.host_unit(
+            e,
+            "box_set",
+            [ir.Var(state.get_slot_var(e, slot)), v],
+            k,
+          )
         None ->
-          host_unit_(
+          cps.host_unit(
             e,
             expr.global_set_op(e.strict),
             [ir.ConstBinary(bit_array.from_string(name)), v],
@@ -1410,7 +1396,7 @@ fn for_lhs_bind(
 ) -> EmitResult {
   let via_destructure = fn(e: Emitter, pat, mode) {
     use #(dtree, e) <- result.try(e.dispatch.emit_destructure(e, pat, v, mode))
-    use _, e <- let_(e, dtree)
+    use _, e <- cps.let_(e, dtree)
     k(e)
   }
   case left {
@@ -1439,7 +1425,7 @@ fn for_lhs_bind(
               anf.pure(v)
             })
           let #(dtree, e) = anf.run(assign, e)
-          use _, e <- let_(e, dtree)
+          use _, e <- cps.let_(e, dtree)
           k(e)
         }
         _ ->
@@ -1460,17 +1446,17 @@ fn for_lhs_member_put(
     ast.Dot(name: "#" <> _ as name, ..) ->
       case state.resolve(e, name) {
         scope.Plain(scope.Local(slot:, boxed: False, ..)) ->
-          host_unit_(
+          cps.host_unit(
             e,
             "private_set",
             [base, ir.Var(state.get_slot_var(e, slot)), v],
             k,
           )
         scope.Plain(scope.Local(slot:, boxed: True, ..)) -> {
-          use key, e <- host_(e, "box_get", [
+          use key, e <- cps.host(e, "box_get", [
             ir.Var(state.get_slot_var(e, slot)),
           ])
-          host_unit_(e, "private_set", [base, key, v], k)
+          cps.host_unit(e, "private_set", [base, key, v], k)
         }
         _ ->
           Error(state.EarlySyntaxError(
@@ -1478,23 +1464,23 @@ fn for_lhs_member_put(
           ))
       }
     ast.Dot(name:, ..) -> {
-      use inner, e <- let_(
+      use inner, e <- cps.let_(
         e,
         ir.TermOp(ir.MakeTuple, [
           ir.ConstAtom("named"),
           ir.ConstBinary(bit_array.from_string(name)),
         ]),
       )
-      use key, e <- let_(
+      use key, e <- cps.let_(
         e,
         ir.TermOp(ir.MakeTuple, [ir.ConstAtom("string_key"), inner]),
       )
-      host_unit_(e, expr.set_prop_op_name(e.strict), [base, key, v], k)
+      cps.host_unit(e, expr.set_prop_op_name(e.strict), [base, key, v], k)
     }
     ast.Bracket(expression:) -> {
       use kv, e <- expr_(e, expression)
-      use key, e <- host_(e, "to_property_key", [kv])
-      host_unit_(e, expr.set_prop_op_name(e.strict), [base, key, v], k)
+      use key, e <- cps.host(e, "to_property_key", [kv])
+      cps.host_unit(e, expr.set_prop_op_name(e.strict), [base, key, v], k)
     }
   }
 }
@@ -1517,7 +1503,7 @@ fn emit_for_in(
   use e <- seed_head(e)
   let head_scope = e.cur_scope
   use obj, e <- expr_(e, right)
-  use keys, e <- host_(e, "for_in_keys", [obj])
+  use keys, e <- cps.host(e, "for_in_keys", [obj])
   let carried = for_in_of_carried(e, left, body)
   let result_tys = carried_types(carried)
   let #(brk, e) = state.fresh_label(e)
@@ -1530,12 +1516,12 @@ fn emit_for_in(
   use #(loop_body, e) <- result.try(
     with_done(e, fn(done, e) {
       let e = enter_loop_body(e, carried, user_params)
-      use empty, e <- let_(e, ir.TermOp(ir.IsEmptyList, [ir.Var(tail_p)]))
+      use empty, e <- cps.let_(e, ir.TermOp(ir.IsEmptyList, [ir.Var(tail_p)]))
       let brk_payload = carried_values(e, carried)
       use #(not_empty, e) <- result.try(
         with_done(e, fn(done_ne, e) {
-          use key, e <- let_(e, ir.TermOp(ir.ListHead, [ir.Var(tail_p)]))
-          use rest, e <- let_(e, ir.TermOp(ir.ListTail, [ir.Var(tail_p)]))
+          use key, e <- cps.let_(e, ir.TermOp(ir.ListHead, [ir.Var(tail_p)]))
+          use rest, e <- cps.let_(e, ir.TermOp(ir.ListTail, [ir.Var(tail_p)]))
           use e <- per_iteration_env(e, left, head_scope)
           use e <- for_lhs_bind(e, left, key)
           use #(cont_body, e) <- result.try(
@@ -1594,13 +1580,13 @@ fn emit_for_of(
     use #(loop_body, e) <- result.try(
       with_done(e, fn(done, e) {
         let e = enter_loop_body(e, carried, user_params)
-        use step, e <- host_(e, "iter_next", [ir.Var(it)])
-        use done_value, e <- let_(e, ir.TermOp(ir.TupleGet(0), [step]))
-        use done_i, e <- let_(e, anf.is_true_expr(done_value))
+        use step, e <- cps.host(e, "iter_next", [ir.Var(it)])
+        use done_value, e <- cps.let_(e, ir.TermOp(ir.TupleGet(0), [step]))
+        use done_i, e <- cps.let_(e, anf.is_true_expr(done_value))
         let brk_payload = carried_values(e, carried)
         use #(not_done, e) <- result.try(
           with_done(e, fn(done_nd, e) {
-            use val, e <- let_(e, ir.TermOp(ir.TupleGet(1), [step]))
+            use val, e <- cps.let_(e, ir.TermOp(ir.TupleGet(1), [step]))
             use #(try_body, e) <- result.try(
               with_done(e, fn(done_tb, e) {
                 use e <- per_iteration_env(e, left, head_scope)
@@ -1621,7 +1607,7 @@ fn emit_for_of(
             )
             use #(handler, e) <- result.try(
               with_done(e, fn(done, e) {
-                use e <- host_unit_(e, "iter_close", [
+                use e <- cps.host_unit(e, "iter_close", [
                   ir.Var(it),
                   e.consts.true_,
                 ])
@@ -1652,7 +1638,7 @@ fn emit_for_of(
       ir.Block(brk, result_tys, ir.Loop(head, user_params, [], loop_body))
     let e = state.leave_for_scope(e, save)
     rebind_after_block(e, carried, outer, fn(e) {
-      host_unit_(e, "iter_close", [ir.Var(it), e.consts.false_], next)
+      cps.host_unit(e, "iter_close", [ir.Var(it), e.consts.false_], next)
     })
   }
   use body_tree <- state.map_tree(after_iter(e))
@@ -1712,7 +1698,7 @@ fn emit_try(
     ast.TryFinally(finalizer) -> {
       let slot_vars0 = e.slot_vars
       use #(tree, e) <- result.try(
-        exn.emit_try_finally(e, block, finalizer, fn(ef) {
+        try_finally.emit_try_finally(e, block, finalizer, fn(ef) {
           Ok(#(ir.Values([]), ef))
         }),
       )
@@ -1723,7 +1709,7 @@ fn emit_try(
     ast.TryCatchFinally(handler, finalizer) -> {
       let slot_vars0 = e.slot_vars
       use #(tree, e) <- result.try(
-        exn.emit_try_catch_finally(e, block, handler, finalizer, fn(ef) {
+        try_finally.emit_try_catch_finally(e, block, handler, finalizer, fn(ef) {
           Ok(#(ir.Values([]), ef))
         }),
       )
@@ -1745,14 +1731,14 @@ fn emit_catch_handler(
   case param {
     Some(p) -> {
       let #(save, e) = state.enter_scope(e, in_block: e.in_block)
-      use e <- exn.catch_binding_prologue(e, e.cur_scope)
+      use e <- try_finally.catch_binding_prologue(e, e.cur_scope)
       use #(dtree, e) <- result.try(e.dispatch.emit_destructure(
         e,
         p,
         ir.Var("_e"),
         state.BindLet,
       ))
-      use _, e <- let_(e, dtree)
+      use _, e <- cps.let_(e, dtree)
       use #(body, e) <- result.try(
         with_done(e, fn(done, e) {
           use e <- emit_block(e, catch_body)
@@ -1784,7 +1770,7 @@ fn emit_class_decl(
         super_class,
         body,
       ))
-      use ctor, e <- let_(e, tree)
+      use ctor, e <- cps.let_(e, tree)
       let b = cur_scope_binding(e, n)
       let e =
         state.Emitter(
@@ -1955,7 +1941,7 @@ fn switch_test_chain(
       switch_test_chain(e, d, rest, carried, miss)
     [CaseEntry(lbl:, cond: Some(test_expr), ..), ..rest] -> {
       let #(eq_tree, e) = anf.run(expr.emit_case_test_i32(d, test_expr), e)
-      use eqi, e <- let_(e, eq_tree)
+      use eqi, e <- cps.let_(e, eq_tree)
       use #(else_chain, e) <- result.map(switch_test_chain(
         e,
         d,
@@ -1987,7 +1973,7 @@ fn switch_nest_bodies(
           carried,
           ir.Block(lbl, carried_types(carried), inner),
           fn(e) {
-            use ef <- each_(e, body, with: fn(e, located, k) {
+            use ef <- cps.each(e, body, with: fn(e, located, k) {
               emit_stmt(e, located.statement, k)
             })
             case rest {
@@ -2016,13 +2002,13 @@ fn per_iter_rebox(
   per_iter: List(#(Int, Bool)),
   k: Next,
 ) -> EmitResult {
-  use e, #(slot, boxed), next <- each_(e, per_iter, then: k)
+  use e, #(slot, boxed), next <- cps.each(e, per_iter, then: k)
   case boxed {
     False -> next(e)
     True -> {
       let old = ir.Var(state.get_slot_var(e, slot))
-      use v, e <- host_(e, "box_get", [old])
-      use box, e <- host_(e, "box_new", [v])
+      use v, e <- cps.host(e, "box_get", [old])
+      use box, e <- cps.host(e, "box_new", [v])
       let #(n, e) = state.fresh_slot_var(e, slot)
       use body <- state.map_tree(next(state.set_slot_var(e, slot, n)))
       ir.Let([n], ir.Values([box]), body)
@@ -2190,7 +2176,7 @@ fn emit_cond_i32(
   k: NextWith(ir.Value),
 ) -> EmitResult {
   let #(tree, e) = anf.run(expr.emit_cond_i32(cond), e)
-  let_(e, tree, k)
+  cps.let_(e, tree, k)
 }
 
 fn emit_while(

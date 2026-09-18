@@ -1,11 +1,10 @@
 import arc/compiler
-import arc/interp/dynamic_import
 import arc/interp/entry
-import arc/interp/safepoint
 import arc/module
-import arc/module/load_error
+import arc/module/dynamic_import
+import arc/module/import_hook
+import arc/module/loader
 import arc/module/registry
-import arc/module_host
 import arc/parser
 import arc/rt/async as rt_async
 import arc/rt/builtins as rt_builtins
@@ -39,12 +38,10 @@ fn churning_module(tag: String) -> String {
   <> "' + churn() + churn();"
 }
 
-fn files(
-  table: List(#(String, String)),
-) -> #(module_host.ResolveFn, module_host.LoadFn) {
+fn files(table: List(#(String, String))) -> #(loader.ResolveFn, loader.LoadFn) {
   let sources = dict.from_list(table)
   #(fn(raw, _referrer) { Ok(raw) }, fn(resolved) {
-    dict.get(sources, resolved) |> result_or(load_error.LoadNotFound)
+    dict.get(sources, resolved) |> result_or(loader.LoadNotFound)
   })
 }
 
@@ -57,7 +54,7 @@ fn result_or(r: Result(a, Nil), e: e) -> Result(a, e) {
 
 fn evaluate(
   table: List(#(String, String)),
-  drain: safepoint.Drain,
+  drain: rt_async.Drain,
 ) -> #(Result(module.EvaluatedBundle, module.ModuleError), Agent) {
   let assert [#(entry_spec, entry_source), ..] = table
   let #(resolve, load) = files(table)
@@ -189,7 +186,7 @@ pub fn top_level_await_without_a_drain_is_pending_test() {
     )
   let assert #(Ok(linked), st) = module.link_for_evaluation(agent(), bundle)
   let assert #(_, Error(module.EvaluationPending(promise)), st) =
-    module.evaluate_linked_tracking(st, linked, safepoint.no_drain, set.new())
+    module.evaluate_linked_tracking(st, linked, rt_async.no_drain, set.new())
   let assert #(_, PromisePending(_), _) = rt_async.promise_data(st, promise)
   assert registry.read_module_status(st, "/main.js")
     == Some(registry.Evaluating)
@@ -231,7 +228,7 @@ pub fn dynamic_import_from_a_script_test() {
       ),
       #("/dep.js", "export const n = 2;"),
     ])
-  let st = module_host.install_import_hook(agent(), "/main.js", resolve, load)
+  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,
@@ -251,7 +248,7 @@ pub fn dynamic_import_from_a_script_test() {
 
 pub fn dynamic_import_of_a_throwing_module_rejects_every_time_test() {
   let #(resolve, load) = files([#("/bad.js", "throw new Error('boom')")])
-  let st = module_host.install_import_hook(agent(), "/main.js", resolve, load)
+  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,
@@ -266,7 +263,7 @@ pub fn dynamic_import_of_a_throwing_module_rejects_every_time_test() {
 pub fn dynamic_import_of_a_top_level_await_module_test() {
   let #(resolve, load) =
     files([#("/tla.js", "export const v = await Promise.resolve('waited');")])
-  let st = module_host.install_import_hook(agent(), "/main.js", resolve, load)
+  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,
@@ -282,7 +279,7 @@ pub fn nested_dynamic_import_resolves_against_the_importing_module_test() {
     case resolved {
       "/dir/outer.js" -> Ok("export const inner = import('./inner.js');")
       "/dir/inner.js" -> Ok("export const where = 'inner';")
-      _ -> Error(load_error.LoadNotFound)
+      _ -> Error(loader.LoadNotFound)
     }
   }
   let resolve = fn(raw: String, referrer: String) {
@@ -290,10 +287,10 @@ pub fn nested_dynamic_import_resolves_against_the_importing_module_test() {
     case raw, referrer {
       "./outer.js", "/main.js" -> Ok("/dir/outer.js")
       "./inner.js", "/dir/outer.js" -> Ok("/dir/inner.js")
-      _, _ -> Error(load_error.ResolveNotFound)
+      _, _ -> Error(loader.ResolveNotFound)
     }
   }
-  let st = module_host.install_import_hook(agent(), "/main.js", resolve, load)
+  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,
@@ -309,7 +306,7 @@ pub fn nested_dynamic_import_resolves_against_the_importing_module_test() {
 pub fn import_defer_links_without_evaluating_test() {
   let #(resolve, load) =
     files([#("/lazy.js", "globalThis.ran = 'yes'; export const v = 1;")])
-  let st = module_host.install_import_hook(agent(), "/main.js", resolve, load)
+  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,
@@ -326,7 +323,7 @@ pub fn dynamic_import_after_top_level_await_keeps_the_module_referrer_test() {
     case resolved {
       "/dir/dep.js" -> Ok("await null; export const p = import('./sib.js');")
       "/dir/sib.js" -> Ok("export const where = 'sib';")
-      _ -> Error(load_error.LoadNotFound)
+      _ -> Error(loader.LoadNotFound)
     }
   }
   let resolve = fn(raw: String, referrer: String) {
@@ -334,10 +331,10 @@ pub fn dynamic_import_after_top_level_await_keeps_the_module_referrer_test() {
     case raw, referrer {
       "./dir/dep.js", "/main.js" -> Ok("/dir/dep.js")
       "./sib.js", "/dir/dep.js" -> Ok("/dir/sib.js")
-      _, _ -> Error(load_error.ResolveNotFound)
+      _, _ -> Error(loader.ResolveNotFound)
     }
   }
-  let st = module_host.install_import_hook(agent(), "/main.js", resolve, load)
+  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
   let assert Ok(bundle) =
     module.compile_bundle(
       "/main.js",
@@ -348,7 +345,7 @@ pub fn dynamic_import_after_top_level_await_keeps_the_module_referrer_test() {
       load,
     )
   let assert #(Ok(evaluated), st) =
-    module_host.evaluate_bundle_with_registry(st, bundle, rt_async.drain)
+    import_hook.evaluate_bundle_with_registry(st, bundle, rt_async.drain)
   let st = rt_async.drain(st)
   assert classify(export(st, evaluated, "out")) == KStr("sib")
   let requests: List(#(String, String)) = rt_helpers.recorded()
@@ -357,7 +354,7 @@ pub fn dynamic_import_after_top_level_await_keeps_the_module_referrer_test() {
 
 pub fn dynamic_import_survives_a_non_extensible_global_test() {
   let #(resolve, load) = files([#("/lib.js", "export const v = 'lib';")])
-  let st = module_host.install_import_hook(agent(), "/main.js", resolve, load)
+  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,
@@ -382,7 +379,7 @@ pub fn static_module_survives_a_frozen_global_test() {
 pub fn dynamic_import_survives_collection_during_the_body_test() {
   let #(resolve, load) = files([#("/lib.js", churning_module("lib"))])
   let st =
-    module_host.install_import_hook(small_gc_agent(), "/main.js", resolve, load)
+    import_hook.install_import_hook(small_gc_agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,
@@ -396,7 +393,7 @@ pub fn dynamic_import_of_a_tla_module_survives_collection_test() {
   let #(resolve, load) =
     files([#("/tla.js", churning_module("tla") <> "\nawait null;")])
   let st =
-    module_host.install_import_hook(small_gc_agent(), "/main.js", resolve, load)
+    import_hook.install_import_hook(small_gc_agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,
@@ -416,7 +413,7 @@ pub fn import_defer_with_an_async_dep_survives_collection_test() {
       #("/dep.js", churning_module("dep") <> "\nawait null;"),
     ])
   let st =
-    module_host.install_import_hook(small_gc_agent(), "/main.js", resolve, load)
+    import_hook.install_import_hook(small_gc_agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,

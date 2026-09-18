@@ -118,7 +118,7 @@ read_proto(St, Cells, Shapes, Proto, Recv, KeyBin) ->
     end.
 
 read_prim(St, S, <<"length">>) when ?IS_STR(S) ->
-    {arc_rt_js_string_ffi:len(S), St};
+    {arc_rt_js_string_ffi:length(S), St};
 read_prim(St, S, KeyBin) when ?IS_STR(S) ->
     read_wrapper(St, ?REALM_STRING, S, KeyBin);
 read_prim(St, N, KeyBin) when is_number(N) ->
@@ -193,7 +193,7 @@ t_global_peek(St, KeyBin) ->
 
 t_global_get(St, KeyBin) ->
     case t_global_peek(St, KeyBin) of
-        miss -> 'arc@rt@obj':t_global_get(St, KeyBin);
+        miss -> 'arc@rt@lang':t_global_get(St, KeyBin);
         V -> {V, St}
     end.
 
@@ -840,7 +840,7 @@ for_in_add(Cells, Proto, Enum, Hidden, Seen, Acc, Fuel) ->
            end, Acc, Enum),
     Seen1 = lists:foldl(fun(K, S) -> S#{K => []} end, Seen, Enum ++ Hidden),
     case Proto of
-        ?NONE -> {plain_keys, [arc_rt_js_string_ffi:mk(K) || K <- lists:reverse(Acc1)]};
+        ?NONE -> {plain_keys, [arc_rt_js_string_ffi:from_text(K) || K <- lists:reverse(Acc1)]};
         {?SOME, {?HANDLE_TAG, P}} ->
             for_in_chain(Cells, arc_rt_arena_ffi:get(P, Cells), Seen1, Acc1, Fuel - 1)
     end.

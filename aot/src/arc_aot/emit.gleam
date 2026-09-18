@@ -1,6 +1,7 @@
 import arc/bytecode/lexical
 import arc/compiler/ast_util
 import arc/compiler/scope
+import arc/compiler/scope_analysis
 import arc/parser
 import arc/parser/ast
 import arc_aot/emit/async
@@ -303,7 +304,7 @@ pub fn compile_source(
     }),
   )
   let tree =
-    scope.finalize(
+    scope_analysis.finalize(
       sb,
       scope.AnalyzeOpts(
         ..scope.default_analyze_opts(),

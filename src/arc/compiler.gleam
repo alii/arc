@@ -3,9 +3,13 @@ import arc/bytecode/opcode
 import arc/compiler/assemble
 import arc/compiler/ast_util
 import arc/compiler/emit
+import arc/compiler/registers
 import arc/compiler/scope
-import arc/esm
+import arc/compiler/scope_analysis
+import arc/compiler/scope_builder
 import arc/internal/tuple_array
+import arc/module/summary
+import arc/parser
 import arc/parser/ast
 import arc/rt/bytecode.{
   type EnvCapture, type EvalNameTable, type FuncTemplate, type VarEnvKind,
@@ -68,7 +72,7 @@ pub type DirectEvalCaller {
 
 pub fn compile_script(
   body: List(ast.StmtWithLine),
-  sb: scope.ScopeBuilder,
+  sb: scope_builder.ScopeBuilder,
 ) -> Result(FuncTemplate, CompileError) {
   compile_top_level(body, sb, scope.LexLocal, deletable_global_vars: False)
 }
@@ -91,18 +95,18 @@ pub type ExportSeed {
 // imports are boxed captures 0..n-1; exports force-boxed for live bindings
 pub fn compile_module(
   items: List(ast.ModuleItem),
-  sb: scope.ScopeBuilder,
-  summary: esm.ModuleSummary,
+  sb: scope_builder.ScopeBuilder,
+  summary: summary.ModuleSummary,
 ) -> Result(CompiledModuleBody, CompileError) {
   let opts =
     scope.AnalyzeOpts(
       ..scope.default_analyze_opts(),
       top_lex: scope.LexLocal,
       strict: True,
-      parent_names: indexed_names(esm.import_local_names(summary)),
+      parent_names: indexed_names(summary.binding_local_names(summary.imports)),
       linker_seeded_exports: set.from_list(local_export_names(summary.exports)),
     )
-  let tree = scope.finalize(sb, opts)
+  let tree = scope_analysis.finalize(sb, opts)
   use out <- result.map(emit.module(items, tree))
   let template = finish_top_level(out, lexical.ScriptCode, eval_var_env: None)
   let has_tla =
@@ -117,10 +121,10 @@ pub fn compile_module(
   )
 }
 
-fn local_export_names(exports: List(esm.ExportEntry)) -> List(String) {
+fn local_export_names(exports: List(summary.ExportEntry)) -> List(String) {
   list.filter_map(exports, fn(entry) {
     case entry {
-      esm.LocalExport(local_name:, ..) -> Ok(local_name)
+      summary.LocalExport(local_name:, ..) -> Ok(local_name)
       _ -> Error(Nil)
     }
   })
@@ -129,7 +133,7 @@ fn local_export_names(exports: List(esm.ExportEntry)) -> List(String) {
 // todo: anonymous export default function should seed undefined too
 fn module_export_seeds(
   items: List(ast.ModuleItem),
-  exports: List(esm.ExportEntry),
+  exports: List(summary.ExportEntry),
 ) -> Dict(String, ExportSeed) {
   let undef =
     ast_util.module_items_to_stmts(items)
@@ -148,7 +152,7 @@ fn module_export_seeds(
 // top-level lexicals go to the global record to persist
 pub fn compile_repl(
   body: List(ast.StmtWithLine),
-  sb: scope.ScopeBuilder,
+  sb: scope_builder.ScopeBuilder,
 ) -> Result(FuncTemplate, CompileError) {
   compile_top_level(body, sb, scope.LexGlobal, deletable_global_vars: False)
 }
@@ -156,17 +160,17 @@ pub fn compile_repl(
 // indirect eval; introduced globals are deletable (§19.2.1.3)
 pub fn compile_eval(
   body: List(ast.StmtWithLine),
-  sb: scope.ScopeBuilder,
+  sb: scope_builder.ScopeBuilder,
 ) -> Result(FuncTemplate, CompileError) {
   compile_top_level(body, sb, scope.LexLocal, deletable_global_vars: True)
 }
 
 pub fn compile_eval_direct(
   body: List(ast.StmtWithLine),
-  sb: scope.ScopeBuilder,
+  sb: scope_builder.ScopeBuilder,
   caller: DirectEvalCaller,
 ) -> Result(FuncTemplate, CompileError) {
-  let tree = scope.finalize(sb, direct_eval_opts(caller, body))
+  let tree = scope_analysis.finalize(sb, direct_eval_opts(caller, body))
   // §14.11.1 with is illegal once the caller makes eval strict
   use <- bool.guard(
     caller.is_strict && contains_with(tree),
@@ -227,12 +231,12 @@ fn contains_with(tree: scope.ScopeTree) -> Bool {
 
 fn compile_top_level(
   stmts: List(ast.StmtWithLine),
-  sb: scope.ScopeBuilder,
+  sb: scope_builder.ScopeBuilder,
   top_lex: scope.TopLevelLex,
   deletable_global_vars deletable_global_vars: Bool,
 ) -> Result(FuncTemplate, CompileError) {
   let opts = scope.AnalyzeOpts(..scope.default_analyze_opts(), top_lex:)
-  let tree = scope.finalize(sb, opts)
+  let tree = scope_analysis.finalize(sb, opts)
   use out <- result.map(emit.program(stmts, tree, deletable_global_vars:))
   finish_top_level(out, lexical.ScriptCode, eval_var_env: Some(GlobalVarEnv))
 }
@@ -282,7 +286,7 @@ fn build_template(
   let assemble.Assembled(bytecode:, constants:, lines:) =
     assemble.assemble(code, constants)
   let #(bytecode, regs) = case use_registers {
-    True -> assemble.assign_regs(bytecode, captured_slots(functions))
+    True -> registers.assign_regs(bytecode, captured_slots(functions))
     False -> #(bytecode, bytecode.NoRegs)
   }
   FuncTemplate(
@@ -390,5 +394,54 @@ fn check_param_scope_var_conflict(
         <> "' declared by direct eval conflicts with a parameter-scope binding",
       ))
     Error(Nil) -> Ok(Nil)
+  }
+}
+
+pub type SourceKind {
+  ScriptSource
+  ModuleSource
+  ReplSource
+}
+
+pub type SourceError {
+  Syntax(parser.ParseError)
+  Compile(CompileError)
+}
+
+pub fn format_source_error(err: SourceError) -> String {
+  case err {
+    Syntax(parse_err) ->
+      "SyntaxError: " <> parser.parse_error_to_string(parse_err)
+    Compile(compile_err) -> "compile error: " <> error_message(compile_err)
+  }
+}
+
+pub fn compile_source(
+  kind: SourceKind,
+  source: String,
+) -> Result(FuncTemplate, SourceError) {
+  case kind {
+    ScriptSource -> {
+      use #(body, sb) <- result.try(
+        parser.parse_script(source) |> result.map_error(Syntax),
+      )
+      compile_script(body, sb) |> result.map_error(Compile)
+    }
+    ReplSource -> {
+      use #(body, sb) <- result.try(
+        parser.parse_script(source) |> result.map_error(Syntax),
+      )
+      compile_repl(body, sb) |> result.map_error(Compile)
+    }
+    ModuleSource -> {
+      use #(items, sb) <- result.try(
+        parser.parse_module(source) |> result.map_error(Syntax),
+      )
+      use compiled <- result.map(
+        compile_module(items, sb, summary.analyze(items))
+        |> result.map_error(Compile),
+      )
+      compiled.template
+    }
   }
 }
