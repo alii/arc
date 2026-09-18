@@ -103,24 +103,18 @@ fn fold_combining(s: String) -> String {
 
 fn compose_grapheme(g: String) -> String {
   case string.to_utf_codepoints(g) {
-    [base, mark] -> {
-      let b = string.utf_codepoint_to_int(base)
-      let m = string.utf_codepoint_to_int(mark)
-      case precomposed(b, m) {
-        Some(ch) -> ch
-        None -> g
-      }
-    }
+    [base, mark] ->
+      precomposed(
+        string.from_utf_codepoints([base]),
+        string.utf_codepoint_to_int(mark),
+      )
+      |> option.unwrap(g)
     _ -> g
   }
 }
 
-fn precomposed(base: Int, mark: Int) -> Option(String) {
-  let b = case string.utf_codepoint(base) {
-    Ok(cp) -> string.from_utf_codepoints([cp])
-    Error(Nil) -> ""
-  }
-  case b, mark {
+fn precomposed(base: String, mark: Int) -> Option(String) {
+  case base, mark {
     "a", 0x300 -> Some("à")
     "a", 0x301 -> Some("á")
     "a", 0x302 -> Some("â")
@@ -209,11 +203,7 @@ fn swap_case(s: String) -> String {
 }
 
 fn simple_compare(a: String, b: String) -> Int {
-  case string.compare(a, b) {
-    order.Lt -> -1
-    order.Eq -> 0
-    order.Gt -> 1
-  }
+  string.compare(a, b) |> order.to_int
 }
 
 fn numeric_compare(a: List(String), b: List(String)) -> Int {
@@ -232,15 +222,13 @@ fn numeric_compare(a: List(String), b: List(String)) -> Int {
           let ib = int.parse(nb) |> result.unwrap(0)
           case int.compare(ia, ib) {
             order.Eq -> numeric_compare(rest_a, rest_b)
-            order.Lt -> -1
-            order.Gt -> 1
+            unequal -> order.to_int(unequal)
           }
         }
         _, _ ->
           case string.compare(ca, cb) {
             order.Eq -> numeric_compare(ta, tb)
-            order.Lt -> -1
-            order.Gt -> 1
+            unequal -> order.to_int(unequal)
           }
       }
     }

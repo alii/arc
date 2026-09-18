@@ -5,9 +5,10 @@ import arc/rt/builtins/temporal_common.{
   epoch_ns_to_iso_in, get_difference_settings, get_options_object,
   get_overflow_option_from_value, make_duration, make_time, max_unit,
   negate_duration, read_int_field, require_largest_ge_smallest, require_temporal,
-  require_time_unit, round_options, round_to_increment, terr, time_part_ns,
-  time_slot_of, time_unit_ns, to_string_time_options, to_temporal_duration,
-  truncated_int_arg_or, unit_rank, valid_time_increment,
+  require_time_unit, round_options, round_to_increment, static_name, terr,
+  time_part_ns, time_slot_of, time_unit_ns, to_string_time_options,
+  to_temporal_duration, truncated_int_arg_or, unit_rank,
+  valid_rounding_increment,
 }
 import arc/rt/builtins/temporal_fields.{
   check_parsed_calendar, is_month_day_like, is_year_month_like,
@@ -86,13 +87,6 @@ pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
       )
     },
   )
-}
-
-fn static_name(s: TemporalStaticName) -> String {
-  case s {
-    TsFrom -> "from"
-    TsCompare -> "compare"
-  }
 }
 
 pub fn time_getter_name(g: TemporalTimeGetter) -> String {
@@ -253,7 +247,7 @@ pub fn method(
         round_options(st, helpers.arg_at(args, 0), allow_day: False)
       let unit_ns = time_unit_ns(smallest_time_unit)
       let max = ns_per_day / unit_ns
-      case valid_time_increment(inc, max) {
+      case valid_rounding_increment(inc, max, inclusive: False) {
         False -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
         True -> {
           let rounded = round_to_increment(time_to_ns(t), inc * unit_ns, mode)
@@ -403,7 +397,7 @@ pub fn to_temporal_time(
           ..,
         ) -> {
           let #(_o, st) = get_overflow_option_from_value(st, options)
-          let #(_, t) = terr(st, epoch_ns_to_iso_in(time_zone, epoch_ns))
+          let #(_, t) = epoch_ns_to_iso_in(time_zone, epoch_ns)
           #(t, st)
         }
         _ -> time_from_bag(st, h, options)
@@ -450,11 +444,11 @@ pub fn parse_time_string(s: String) -> Result(IsoTime, TErr) {
 
 fn parse_time_with_annotations(s: String) -> Option(IsoTime) {
   use #(t, rest) <- option.then(parse_time_part(s))
-  let rest = case parse_offset_part(rest) {
-    Some(#(Zulu, _)) -> "###invalid###"
-    Some(#(_, r)) -> r
-    None -> rest
-  }
+  use rest <- option.then(case parse_offset_part(rest) {
+    Some(#(Zulu, _)) -> None
+    Some(#(_, r)) -> Some(r)
+    None -> Some(rest)
+  })
   use #(_, _cal, rest2) <- option.then(parse_annotations(
     rest,
     None,

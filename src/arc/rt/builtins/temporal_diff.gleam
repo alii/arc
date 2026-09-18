@@ -9,13 +9,12 @@ import arc/rt/builtins/temporal_common.{
 }
 import arc/rt/builtins/temporal_fields.{
   balance_year_month, calendar_date_add, calendar_years_months_until,
-  compare_iso_date, compare_triple, round_between,
+  compare_iso_date, compare_triple, iso_date_add, round_between,
 }
 import arc/rt/builtins/temporal_iso.{
   type Duration, type IsoDate, type IsoTime, type TErr, Constrain, Duration,
-  IsoDate, RangeE, epoch_days, int_sign, iso_date_from_epoch_days,
-  iso_date_within_limits, midnight, ns_per_day, time_to_ns, utc_epoch_ns,
-  zero_duration,
+  IsoDate, add_days, epoch_days, int_sign, midnight, ns_per_day, time_to_ns,
+  utc_epoch_ns, zero_duration,
 }
 import arc/rt/builtins/temporal_zoned_ops.{
   check_iso_days_range, get_epoch_ns_for,
@@ -30,10 +29,6 @@ pub fn compare_iso_date_time(
   b: #(IsoDate, IsoTime),
 ) -> Int {
   int_sign(utc_epoch_ns(a.0, a.1) - utc_epoch_ns(b.0, b.1))
-}
-
-pub fn local_ns(d: IsoDate, t: IsoTime) -> Int {
-  epoch_days(d) * ns_per_day + time_to_ns(t)
 }
 
 pub fn calendar_date_until(
@@ -144,62 +139,52 @@ pub fn add_calendar_units(d: IsoDate, unit: Unit, n: Int) -> IsoDate {
   case unit {
     Year -> add_months_constrained(d, n * 12)
     Month -> add_months_constrained(d, n)
-    _ -> iso_date_from_epoch_days(epoch_days(d) + n * 7)
+    _ -> add_days(d, n * 7)
   }
 }
 
-fn cal_date_add_checked(d: IsoDate, dur: Duration) -> Result(IsoDate, TErr) {
-  let md = add_months_constrained(d, dur.years * 12 + dur.months)
-  let r = iso_date_from_epoch_days(epoch_days(md) + dur.weeks * 7 + dur.days)
-  case iso_date_within_limits(r) {
-    True -> Ok(r)
-    False -> Error(RangeE("date outside of supported range"))
-  }
-}
-
-fn nudge_window(
+// step the end date toward the start when the time remainder has the other sign
+pub fn adjust_date_for_time_sign(
   sign: Int,
-  ymwd: #(Int, Int, Int, Int),
-  origin: #(IsoDate, IsoTime),
-  unit: Unit,
-  inc: Int,
-  shift shift: Bool,
-  zoned zoned: Bool,
-) -> Result(#(Int, Int, Duration, Duration, Int, Int), TErr) {
-  let #(years, months, weeks, days) = ymwd
-  let #(whole, mk) = case unit {
-    Year -> #(years, fn(r) { Duration(..zero_duration, years: r) })
-    Month -> #(months, fn(r) { Duration(..zero_duration, years:, months: r) })
-    Week -> #(weeks + trunc_div(days, 7), fn(r) {
-      Duration(..zero_duration, years:, months:, weeks: r)
-    })
-    _ -> #(days, fn(r) {
-      Duration(..zero_duration, years:, months:, weeks:, days: r)
-    })
+  date: IsoDate,
+  time_ns: Int,
+) -> #(IsoDate, Int) {
+  case sign > 0 && time_ns < 0, sign < 0 && time_ns > 0 {
+    True, _ -> #(add_days(date, -1), time_ns + ns_per_day)
+    _, True -> #(add_days(date, 1), time_ns - ns_per_day)
+    _, _ -> #(date, time_ns)
   }
-  let base = trunc_div(whole, inc) * inc
-  let r1 = case shift {
-    True -> base + inc * sign
-    False -> base
+}
+
+fn within(sign: Int, start: Int, end: Int, x: Int) -> Bool {
+  case sign > 0 {
+    True -> start <= x && x <= end
+    False -> end <= x && x <= start
   }
-  let r2 = r1 + inc * sign
-  let start_dur = mk(r1)
-  let end_dur = mk(r2)
-  use start_date <- result.try(cal_date_add_checked(origin.0, start_dur))
-  use end_date <- result.try(cal_date_add_checked(origin.0, end_dur))
-  use Nil <- result.try(case zoned {
-    True -> {
-      use Nil <- result.try(check_iso_days_range(start_date))
-      check_iso_days_range(end_date)
+}
+
+pub type Window {
+  Window(count: Int, start_ns: Int, end_ns: Int, shifted: Bool)
+}
+
+// the count whose [count, count + step] bounds enclose dest, sliding once if not
+pub fn find_enclosing_window(
+  sign: Int,
+  count: Int,
+  step: Int,
+  dest_ns: Int,
+  bound_ns: fn(Int) -> Result(Int, TErr),
+) -> Result(Window, TErr) {
+  use start_ns <- result.try(bound_ns(count))
+  let next = count + step * sign
+  use end_ns <- result.try(bound_ns(next))
+  case within(sign, start_ns, end_ns, dest_ns) {
+    True -> Ok(Window(count:, start_ns:, end_ns:, shifted: False))
+    False -> {
+      use beyond_ns <- result.map(bound_ns(next + step * sign))
+      Window(count: next, start_ns: end_ns, end_ns: beyond_ns, shifted: True)
     }
-    False -> Ok(Nil)
-  })
-  let start_ns = case start_dur == zero_duration {
-    True -> local_ns(origin.0, origin.1)
-    False -> local_ns(start_date, origin.1)
   }
-  let end_ns = local_ns(end_date, origin.1)
-  Ok(#(r1, r2, start_dur, end_dur, start_ns, end_ns))
 }
 
 fn nudge_calendar_unit(
@@ -212,54 +197,39 @@ fn nudge_calendar_unit(
   mode: RoundingMode,
   zoned zoned: Bool,
 ) -> Result(#(Duration, Bool, Int), TErr) {
-  use w0 <- result.try(nudge_window(
-    sign,
-    ymwd,
-    origin,
-    unit,
-    inc,
-    shift: False,
-    zoned:,
-  ))
-  let in_bounds = fn(w: #(Int, Int, Duration, Duration, Int, Int)) {
-    case sign > 0 {
-      True -> w.4 <= dest_ns && dest_ns <= w.5
-      False -> w.5 <= dest_ns && dest_ns <= w.4
-    }
+  let #(years, months, weeks, days) = ymwd
+  let #(whole, with_count) = case unit {
+    Year -> #(years, fn(r) { Duration(..zero_duration, years: r) })
+    Month -> #(months, fn(r) { Duration(..zero_duration, years:, months: r) })
+    Week -> #(weeks + trunc_div(days, 7), fn(r) {
+      Duration(..zero_duration, years:, months:, weeks: r)
+    })
+    _ -> #(days, fn(r) {
+      Duration(..zero_duration, years:, months:, weeks:, days: r)
+    })
   }
-  use #(w, pre_expanded) <- result.try(case in_bounds(w0) {
-    True -> Ok(#(w0, False))
-    False -> {
-      use w1 <- result.map(nudge_window(
-        sign,
-        ymwd,
-        origin,
-        unit,
-        inc,
-        shift: True,
-        zoned:,
-      ))
-      #(w1, True)
-    }
-  })
-  let #(r1, r2, start_dur, end_dur, start_ns, end_ns) = w
-  let num = dest_ns - start_ns
-  let den = end_ns - start_ns
-  let abs_r1 = int.absolute_value(r1)
+  let bound_ns = fn(r) {
+    use date <- result.try(iso_date_add(origin.0, with_count(r), Constrain))
+    use Nil <- result.map(case zoned {
+      True -> check_iso_days_range(date)
+      False -> Ok(Nil)
+    })
+    utc_epoch_ns(date, origin.1)
+  }
+  let base = trunc_div(whole, inc) * inc
+  use w <- result.map(find_enclosing_window(sign, base, inc, dest_ns, bound_ns))
+  let r1 = w.count
+  let r2 = r1 + inc * sign
+  let num = dest_ns - w.start_ns
+  let den = w.end_ns - w.start_ns
   let abs_r2 = int.absolute_value(r2)
-  let rounded_abs = round_between(abs_r1, abs_r2, num, den, inc, mode, sign)
-  let expanded_here = rounded_abs == abs_r2
-  let did_expand = pre_expanded || expanded_here
-  let chosen = case expanded_here {
-    True -> end_dur
-    False -> start_dur
-  }
+  let rounded_abs =
+    round_between(int.absolute_value(r1), abs_r2, num, den, inc, mode, sign)
   // nudged must match chosen or bubbling overshoots
-  let nudged = case expanded_here {
-    True -> end_ns
-    False -> start_ns
+  case rounded_abs == abs_r2 {
+    True -> #(with_count(r2), True, w.end_ns)
+    False -> #(with_count(r1), w.shifted, w.start_ns)
   }
-  Ok(#(chosen, did_expand, nudged))
 }
 
 pub fn bubble_date_duration(
@@ -307,9 +277,8 @@ fn bubble_loop(
       }
       let end_date =
         add_months_constrained(origin.0, end_dur.years * 12 + end_dur.months)
-      let end_date =
-        iso_date_from_epoch_days(epoch_days(end_date) + end_dur.weeks * 7)
-      let end_ns = local_ns(end_date, origin.1)
+        |> add_days(end_dur.weeks * 7)
+      let end_ns = utc_epoch_ns(end_date, origin.1)
       case int_sign(nudged_ns - end_ns) != 0 - sign {
         True -> bubble_loop(sign, end_dur, nudged_ns, origin, rest)
         False -> dur
@@ -328,7 +297,7 @@ pub fn round_relative_date_duration(
   mode: RoundingMode,
   zoned zoned: Bool,
 ) -> Result(Duration, TErr) {
-  let sign = case int_sign(dest_ns - local_ns(origin.0, origin.1)) {
+  let sign = case int_sign(dest_ns - utc_epoch_ns(origin.0, origin.1)) {
     -1 -> -1
     _ -> 1
   }
@@ -367,21 +336,8 @@ pub fn diff_date_time_core(
   zoned zoned: Bool,
 ) -> Result(Duration, TErr) {
   let date_sign = compare_iso_date(b.0, a.0)
-  let time_diff = time_to_ns(b.1) - time_to_ns(a.1)
-  let #(b_date, time_diff) = case
-    date_sign > 0 && time_diff < 0,
-    date_sign < 0 && time_diff > 0
-  {
-    True, _ -> #(
-      iso_date_from_epoch_days(epoch_days(b.0) - 1),
-      time_diff + ns_per_day,
-    )
-    _, True -> #(
-      iso_date_from_epoch_days(epoch_days(b.0) + 1),
-      time_diff - ns_per_day,
-    )
-    _, _ -> #(b.0, time_diff)
-  }
+  let #(b_date, time_diff) =
+    adjust_date_for_time_sign(date_sign, b.0, time_to_ns(b.1) - time_to_ns(a.1))
   case unit_rank(largest) >= unit_rank(Day) {
     True -> {
       let #(years, months, weeks, days) =
@@ -393,7 +349,7 @@ pub fn diff_date_time_core(
           round_relative_date_duration(
             #(years, months, weeks, days),
             a,
-            local_ns(b.0, b.1),
+            utc_epoch_ns(b.0, b.1),
             largest,
             smallest,
             inc,
@@ -423,9 +379,9 @@ pub fn diff_date_time_core(
           case did_expand {
             False -> Ok(base)
             True -> {
-              let dest_ns = local_ns(b.0, b.1)
+              let dest_ns = utc_epoch_ns(b.0, b.1)
               let nudged = dest_ns + rounded - time_total
-              let dsign = case int_sign(dest_ns - local_ns(a.0, a.1)) {
+              let dsign = case int_sign(dest_ns - utc_epoch_ns(a.0, a.1)) {
                 -1 -> -1
                 _ -> 1
               }
@@ -437,10 +393,7 @@ pub fn diff_date_time_core(
     }
     False -> {
       use smallest_time_unit <- result.try(require_time_unit(smallest))
-      let total =
-        { epoch_days(b.0) - epoch_days(a.0) }
-        * ns_per_day
-        + { time_to_ns(b.1) - time_to_ns(a.1) }
+      let total = utc_epoch_ns(b.0, b.1) - utc_epoch_ns(a.0, a.1)
       let rounded =
         round_to_increment(total, inc * time_unit_ns(smallest_time_unit), mode)
       Ok(balance_time_ns(rounded, largest))
@@ -458,18 +411,14 @@ pub fn zoned_diff_round_time(
   inc: Int,
   mode: RoundingMode,
 ) -> Result(Duration, TErr) {
-  use #(a_d, a_t) <- result.try(epoch_ns_to_iso_in(tz, a_ns))
-  use #(b_d, b_t) <- result.try(epoch_ns_to_iso_in(tz, b_ns))
+  let #(a_d, a_t) = epoch_ns_to_iso_in(tz, a_ns)
+  let #(b_d, b_t) = epoch_ns_to_iso_in(tz, b_ns)
   let sign = case b_ns < a_ns {
     True -> -1
     False -> 1
   }
-  let tb = time_to_ns(b_t) - time_to_ns(a_t)
-  let b_date = case sign > 0 && tb < 0, sign < 0 && tb > 0 {
-    True, _ -> iso_date_from_epoch_days(epoch_days(b_d) - 1)
-    _, True -> iso_date_from_epoch_days(epoch_days(b_d) + 1)
-    _, _ -> b_d
-  }
+  let #(b_date, _) =
+    adjust_date_for_time_sign(sign, b_d, time_to_ns(b_t) - time_to_ns(a_t))
   let #(years, months, weeks, days) =
     calendar_date_until(cal, a_d, b_date, largest)
   let date_dur = Duration(..zero_duration, years:, months:, weeks:, days:)
@@ -515,7 +464,7 @@ fn zoned_nudge_time(
   let #(a_d, a_t) = a_dt
   let #(years, months, weeks, days) = ymwd
   use smallest_time_unit <- result.try(require_time_unit(smallest))
-  let end_date = iso_date_from_epoch_days(epoch_days(start_date) + sign)
+  let end_date = add_days(start_date, sign)
   use end_ns <- result.try(get_epoch_ns_for(tz, end_date, a_t, Compatible))
   let day_span = end_ns - start_ns
   let smallest_ns = inc * time_unit_ns(smallest_time_unit)
@@ -528,16 +477,9 @@ fn zoned_nudge_time(
       let time_part = balance_time_ns(rounded_t2, Hour)
       let base =
         Duration(..time_part, years:, months:, weeks:, days: days + sign)
-      let nudged_inst = end_ns + rounded_t2
-      use #(n_d, n_t) <- result.map(epoch_ns_to_iso_in(tz, nudged_inst))
-      bubble_date_duration(
-        sign,
-        base,
-        local_ns(n_d, n_t),
-        #(a_d, a_t),
-        largest,
-        Day,
-      )
+      let #(n_d, n_t) = epoch_ns_to_iso_in(tz, end_ns + rounded_t2)
+      let nudged_ns = utc_epoch_ns(n_d, n_t)
+      Ok(bubble_date_duration(sign, base, nudged_ns, #(a_d, a_t), largest, Day))
     }
     False -> {
       let time_part = balance_time_ns(rounded_t, Hour)

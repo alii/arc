@@ -6,17 +6,18 @@ import arc/rt/builtins/temporal_common.{
   apply_since_ns, as_if_positive_mode, balance_time_ns, check_diff_setup,
   epoch_ns_to_iso_in, format_offset_rounded, get_difference_settings,
   get_fractional_digits, get_options_object, get_rounding_mode_option,
-  get_unit_option, instant_slot_of, make_date, make_date_time, make_duration,
-  make_instant, make_time, make_zoned, max_unit, require_temporal,
-  require_time_unit, round_options, round_to_increment, seconds_string_precision,
-  system_time_zone, terr, time_part_ns, time_unit_ns, time_zone_id,
-  to_temporal_duration, to_temporal_instant, to_temporal_time_zone,
-  tz_offset_ns_at, unit_rank,
+  get_unit_option, has_date_units, instant_slot_of, is_valid_epoch_ns, make_date,
+  make_date_time, make_duration, make_instant, make_time, make_zoned, max_unit,
+  opt_get, require_temporal, require_time_unit, round_options,
+  round_to_increment, seconds_string_precision, system_time_zone, terr,
+  time_part_ns, time_unit_ns, time_zone_id, to_temporal_duration,
+  to_temporal_instant, to_temporal_time_zone, tz_offset_ns_at, unit_rank,
+  valid_rounding_increment, validate_epoch_ns,
 }
 import arc/rt/builtins/temporal_duration
 import arc/rt/builtins/temporal_iso.{
   type SecondsPrecision, AutoPrecision, epoch_ns_to_iso, format_iso_date,
-  format_iso_time, ns_max_instant, ns_per_day, ns_per_ms,
+  format_iso_time, ns_per_day, ns_per_ms,
 }
 import arc/rt/builtins/temporal_plain_date
 import arc/rt/builtins/temporal_plain_date_time
@@ -24,7 +25,6 @@ import arc/rt/builtins/temporal_plain_month_day
 import arc/rt/builtins/temporal_plain_time
 import arc/rt/builtins/temporal_plain_year_month
 import arc/rt/builtins/temporal_zoned_date_time
-import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type Handle, type InstantGetterName, type InstantMethodName,
   type InstantStaticName, type JsVal, type NativeToken, type TemporalNative,
@@ -34,23 +34,23 @@ import arc/rt/types.{
   InstantFromEpochNanoseconds, InstantRound, InstantSince, InstantSubtract,
   InstantToJson, InstantToLocaleString, InstantToString,
   InstantToZonedDateTimeIso, InstantUntil, InstantValueOf, JFloat, JInt, JNan,
-  JNegInf, JPosInf, KUndef, Named, NowInstant, NowPlainDateISO,
-  NowPlainDateTimeISO, NowPlainTimeISO, NowTimeZoneId, NowZonedDateTimeISO,
-  StringKey, TemporalDurationCtor, TemporalDurationGetter,
-  TemporalDurationMethod, TemporalDurationStatic, TemporalInstantCtor,
-  TemporalInstantGetter, TemporalInstantMethod, TemporalInstantStatic, TemporalN,
-  TemporalNowFn, TemporalPlainDateCtor, TemporalPlainDateGetter,
-  TemporalPlainDateMethod, TemporalPlainDateStatic, TemporalPlainDateTimeCtor,
-  TemporalPlainDateTimeGetter, TemporalPlainDateTimeMethod,
-  TemporalPlainDateTimeStatic, TemporalPlainMonthDayCtor,
-  TemporalPlainMonthDayGetter, TemporalPlainMonthDayMethod,
-  TemporalPlainMonthDayStatic, TemporalPlainTimeCtor, TemporalPlainTimeGetter,
-  TemporalPlainTimeMethod, TemporalPlainTimeStatic, TemporalPlainYearMonthCtor,
+  JNegInf, JPosInf, KUndef, NowInstant, NowPlainDateISO, NowPlainDateTimeISO,
+  NowPlainTimeISO, NowTimeZoneId, NowZonedDateTimeISO, TemporalDurationCtor,
+  TemporalDurationGetter, TemporalDurationMethod, TemporalDurationStatic,
+  TemporalInstantCtor, TemporalInstantGetter, TemporalInstantMethod,
+  TemporalInstantStatic, TemporalN, TemporalNowFn, TemporalPlainDateCtor,
+  TemporalPlainDateGetter, TemporalPlainDateMethod, TemporalPlainDateStatic,
+  TemporalPlainDateTimeCtor, TemporalPlainDateTimeGetter,
+  TemporalPlainDateTimeMethod, TemporalPlainDateTimeStatic,
+  TemporalPlainMonthDayCtor, TemporalPlainMonthDayGetter,
+  TemporalPlainMonthDayMethod, TemporalPlainMonthDayStatic,
+  TemporalPlainTimeCtor, TemporalPlainTimeGetter, TemporalPlainTimeMethod,
+  TemporalPlainTimeStatic, TemporalPlainYearMonthCtor,
   TemporalPlainYearMonthGetter, TemporalPlainYearMonthMethod,
   TemporalPlainYearMonthStatic, TemporalProtos, TemporalZonedDateTimeCtor,
   TemporalZonedDateTimeGetter, TemporalZonedDateTimeMethod,
   TemporalZonedDateTimeStatic, classify, mk_bigint, mk_bool, mk_number,
-  mk_object, mk_string, mk_undefined,
+  mk_object, mk_string,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -346,9 +346,14 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case native {
-    TemporalInstantCtor(..)
+    TemporalPlainDateCtor(..)
     | TemporalPlainTimeCtor(..)
-    | TemporalPlainDateCtor(..) ->
+    | TemporalPlainDateTimeCtor(..)
+    | TemporalPlainYearMonthCtor(..)
+    | TemporalPlainMonthDayCtor(..)
+    | TemporalDurationCtor(..)
+    | TemporalInstantCtor(..)
+    | TemporalZonedDateTimeCtor(..) ->
       rt_val.t_throw_type_error(st, "Temporal constructor requires new")
     TemporalPlainDateStatic(name:, protos:) ->
       temporal_plain_date.static(st, name, protos, args)
@@ -362,16 +367,12 @@ pub fn dispatch(
       temporal_plain_time.getter(st, getter, this)
     TemporalPlainTimeMethod(method:, protos:) ->
       temporal_plain_time.method(st, method, protos, this, args)
-    TemporalPlainDateTimeCtor(..) ->
-      rt_val.t_throw_type_error(st, "Temporal constructor requires new")
     TemporalPlainDateTimeStatic(name:, protos:) ->
       temporal_plain_date_time.static(st, name, protos, args)
     TemporalPlainDateTimeGetter(getter:) ->
       temporal_plain_date_time.getter(st, getter, this)
     TemporalPlainDateTimeMethod(method:, protos:) ->
       temporal_plain_date_time.method(st, method, protos, this, args)
-    TemporalPlainYearMonthCtor(..) | TemporalPlainMonthDayCtor(..) ->
-      rt_val.t_throw_type_error(st, "Temporal constructor requires new")
     TemporalPlainYearMonthStatic(name:, protos:) ->
       temporal_plain_year_month.static(st, name, protos, args)
     TemporalPlainYearMonthGetter(getter:) ->
@@ -384,8 +385,6 @@ pub fn dispatch(
       temporal_plain_month_day.getter(st, getter, this)
     TemporalPlainMonthDayMethod(method:, protos:) ->
       temporal_plain_month_day.method(st, method, protos, this, args)
-    TemporalDurationCtor(..) ->
-      rt_val.t_throw_type_error(st, "Temporal constructor requires new")
     TemporalDurationStatic(name:, protos:) ->
       temporal_duration.static(st, name, protos, args)
     TemporalDurationGetter(getter:) ->
@@ -397,15 +396,13 @@ pub fn dispatch(
     TemporalInstantGetter(getter:) -> instant_getter(st, getter, this)
     TemporalInstantMethod(method:, protos:) ->
       instant_method(st, method, protos, this, args)
-    TemporalNowFn(name:, protos:) -> now_dispatch(st, name, protos, args)
-    TemporalZonedDateTimeCtor(..) ->
-      rt_val.t_throw_type_error(st, "Temporal constructor requires new")
     TemporalZonedDateTimeStatic(name:, protos:) ->
       temporal_zoned_date_time.static(st, name, protos, args)
     TemporalZonedDateTimeGetter(getter:) ->
       temporal_zoned_date_time.getter(st, getter, this)
     TemporalZonedDateTimeMethod(method:, protos:) ->
       temporal_zoned_date_time.method(st, method, protos, this, args)
+    TemporalNowFn(name:, protos:) -> now_dispatch(st, name, protos, args)
   }
 }
 
@@ -417,7 +414,7 @@ pub fn dispatch_construct(
 ) -> #(Handle, Agent) {
   case native {
     TemporalInstantCtor(protos:) -> {
-      let #(v, st) = instant_ctor(st, protos, args)
+      let #(v, st) = instant_from_epoch_ns(st, protos, helpers.arg_at(args, 0))
       apply_new_target_proto(st, new_target, v)
     }
     TemporalPlainTimeCtor(protos:) -> {
@@ -456,13 +453,13 @@ fn require_instant(st: Agent, this: JsVal, name: String) -> Int {
   require_temporal(st, this, "Instant", name, instant_slot_of)
 }
 
-fn instant_ctor(
+fn instant_from_epoch_ns(
   st: Agent,
   protos: TemporalProtos,
-  args: List(JsVal),
+  arg: JsVal,
 ) -> #(JsVal, Agent) {
-  let #(ns, st) = rt_val.t_to_bigint(st, helpers.arg_at(args, 0))
-  case int.absolute_value(ns) <= ns_max_instant {
+  let #(ns, st) = rt_val.t_to_bigint(st, arg)
+  case is_valid_epoch_ns(ns) {
     False -> rt_val.t_throw_range_error(st, "epoch nanoseconds out of range")
     True -> make_instant(st, protos, ns)
   }
@@ -497,7 +494,7 @@ fn instant_static(
         None -> rt_val.t_throw_range_error(st, "not an integral number")
         Some(i) -> {
           let ns = i * ns_per_ms
-          case int.absolute_value(ns) <= ns_max_instant {
+          case is_valid_epoch_ns(ns) {
             False ->
               rt_val.t_throw_range_error(st, "epoch milliseconds out of range")
             True -> make_instant(st, protos, ns)
@@ -505,14 +502,8 @@ fn instant_static(
         }
       }
     }
-    InstantFromEpochNanoseconds -> {
-      let #(ns, st) = rt_val.t_to_bigint(st, helpers.arg_at(args, 0))
-      case int.absolute_value(ns) <= ns_max_instant {
-        False ->
-          rt_val.t_throw_range_error(st, "epoch nanoseconds out of range")
-        True -> make_instant(st, protos, ns)
-      }
-    }
+    InstantFromEpochNanoseconds ->
+      instant_from_epoch_ns(st, protos, helpers.arg_at(args, 0))
   }
 }
 
@@ -555,13 +546,9 @@ fn instant_method(
       let #(mode, st) = get_rounding_mode_option(st, opts, Trunc)
       let #(smallest, st) =
         get_unit_option(st, opts, "smallestUnit", allow_auto: False)
-      let #(tz_opt, st) = case opts {
-        None -> #(mk_undefined(), st)
-        Some(h) ->
-          rt_obj.t_get_prop(st, mk_object(h), StringKey(Named("timeZone")))
-      }
-      let #(precision, smallest_time_unit, inc, mode) =
-        terr(st, seconds_string_precision(digits, smallest, mode))
+      let #(tz_opt, st) = opt_get(st, opts, "timeZone")
+      let #(precision, smallest_time_unit, inc) =
+        terr(st, seconds_string_precision(digits, smallest))
       let rounded = case smallest_time_unit {
         None -> ns
         Some(u) ->
@@ -575,7 +562,7 @@ fn instant_method(
         KUndef -> #(mk_string(format_instant(rounded, precision)), st)
         _ -> {
           let #(tz, st) = to_temporal_time_zone(st, tz_opt)
-          let off = terr(st, tz_offset_ns_at(tz, rounded))
+          let off = tz_offset_ns_at(tz, rounded)
           let #(d, t) = epoch_ns_to_iso(rounded, off)
           let s =
             format_iso_date(d)
@@ -597,9 +584,7 @@ fn instant_method(
     }
     InstantAdd | InstantSubtract -> {
       let #(dur, st) = to_temporal_duration(st, helpers.arg_at(args, 0))
-      case
-        dur.years != 0 || dur.months != 0 || dur.weeks != 0 || dur.days != 0
-      {
+      case has_date_units(dur) {
         True ->
           rt_val.t_throw_range_error(
             st,
@@ -610,12 +595,7 @@ fn instant_method(
             InstantSubtract -> 0 - time_part_ns(dur)
             _ -> time_part_ns(dur)
           }
-          let ns2 = ns + delta
-          case int.absolute_value(ns2) <= ns_max_instant {
-            False ->
-              rt_val.t_throw_range_error(st, "instant outside valid range")
-            True -> make_instant(st, protos, ns2)
-          }
+          make_instant(st, protos, terr(st, validate_epoch_ns(ns + delta)))
         }
       }
     }
@@ -624,17 +604,13 @@ fn instant_method(
         round_options(st, helpers.arg_at(args, 0), allow_day: False)
       let unit_ns = time_unit_ns(smallest_time_unit)
       let max = ns_per_day / unit_ns
-      case inc >= 1 && inc <= max && max % inc == 0 {
+      case valid_rounding_increment(inc, max, inclusive: True) {
         False -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
         True -> {
           // rounds as if positive: down is toward the big bang
           let rounded =
             round_to_increment(ns, inc * unit_ns, as_if_positive_mode(mode))
-          case int.absolute_value(rounded) <= ns_max_instant {
-            False ->
-              rt_val.t_throw_range_error(st, "instant outside valid range")
-            True -> make_instant(st, protos, rounded)
-          }
+          make_instant(st, protos, terr(st, validate_epoch_ns(rounded)))
         }
       }
     }
@@ -703,17 +679,17 @@ fn now_dispatch(
     }
     NowPlainDateISO -> {
       let #(tz, st) = now_tz_arg(st, args)
-      let #(d, _) = terr(st, epoch_ns_to_iso_in(tz, now_epoch_ns(st)))
+      let #(d, _) = epoch_ns_to_iso_in(tz, now_epoch_ns(st))
       make_date(st, protos, d)
     }
     NowPlainDateTimeISO -> {
       let #(tz, st) = now_tz_arg(st, args)
-      let #(d, t) = terr(st, epoch_ns_to_iso_in(tz, now_epoch_ns(st)))
+      let #(d, t) = epoch_ns_to_iso_in(tz, now_epoch_ns(st))
       make_date_time(st, protos, d, t)
     }
     NowPlainTimeISO -> {
       let #(tz, st) = now_tz_arg(st, args)
-      let #(_, t) = terr(st, epoch_ns_to_iso_in(tz, now_epoch_ns(st)))
+      let #(_, t) = epoch_ns_to_iso_in(tz, now_epoch_ns(st))
       make_time(st, protos, t)
     }
     NowZonedDateTimeISO -> {

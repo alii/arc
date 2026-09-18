@@ -7,11 +7,12 @@ import arc/rt/builtins/temporal_iso.{
   type Duration, type IsoDate, type IsoTime, type Overflow,
   type SecondsPrecision, type TErr, AutoPrecision, Constrain, Duration, IsoDate,
   IsoTime, MinutePrecision, NoOffset, NumericOffset, RangeE, Reject,
-  SubsecondDigits, TypeE, Zulu, epoch_ns_to_iso, format_offset_minutes, int_sign,
-  is_tz_annotation, max_time_duration_ns, ns_max_instant, ns_per_day,
-  ns_per_hour, ns_per_minute, ns_per_ms, ns_per_second, ns_per_us, pad2,
-  parse_iso_datetime_string, parse_offset_part, pow10, round_to_float_precision,
-  take_some_digits, utc_epoch_ns,
+  SubsecondDigits, TypeE, Zulu, epoch_ns_to_iso, format_iso_date,
+  format_offset_minutes, int_sign, is_tz_annotation, max_time_duration_ns,
+  ns_max_instant, ns_per_day, ns_per_hour, ns_per_minute, ns_per_ms,
+  ns_per_second, ns_per_us, pad2, parse_iso_datetime_string, parse_offset_part,
+  pow10, pow2_32, round_to_float_precision, take_some_digits, utc_epoch_ns,
+  zero_duration,
 }
 import arc/rt/builtins/temporal_tz
 import arc/rt/call as rt_call
@@ -19,11 +20,12 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type ObjKind, type TemporalProtos,
-  type TimeZone, Agent, HintString, IanaZone, JFloat, JInt, JNan, JNegInf,
-  JPosInf, KHandle, KNum, KStr, KUndef, Named, OffsetZone, SObject, StringKey,
-  TemporalDate, TemporalDateTime, TemporalDuration, TemporalInstant,
-  TemporalMonthDay, TemporalObj, TemporalTime, TemporalYearMonth,
-  TemporalZonedDateTime, UtcZone, classify, mk_object, mk_undefined,
+  type TemporalStaticName, type TimeZone, Agent, HintString, IanaZone, JFloat,
+  JInt, JNan, JNegInf, JPosInf, KHandle, KNum, KStr, KUndef, Named, OffsetZone,
+  SObject, StringKey, TemporalDate, TemporalDateTime, TemporalDuration,
+  TemporalInstant, TemporalMonthDay, TemporalObj, TemporalTime,
+  TemporalYearMonth, TemporalZonedDateTime, TsCompare, TsFrom, UtcZone, classify,
+  mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/float
@@ -31,7 +33,6 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/order
-import gleam/result
 import gleam/string
 
 pub fn throw_terr(st: Agent, e: TErr) -> a {
@@ -66,6 +67,13 @@ pub fn require_temporal(
           <> name
           <> " called on incompatible receiver",
       )
+  }
+}
+
+pub fn static_name(s: TemporalStaticName) -> String {
+  case s {
+    TsFrom -> "from"
+    TsCompare -> "compare"
   }
 }
 
@@ -321,19 +329,20 @@ pub fn make_duration(
   protos: TemporalProtos,
   dur: Duration,
 ) -> #(JsVal, Agent) {
+  let d = map_duration_fields(dur, round_to_float_precision)
   alloc_value(
     st,
     TemporalDuration(
-      years: round_to_float_precision(dur.years),
-      months: round_to_float_precision(dur.months),
-      weeks: round_to_float_precision(dur.weeks),
-      days: round_to_float_precision(dur.days),
-      hours: round_to_float_precision(dur.hours),
-      minutes: round_to_float_precision(dur.minutes),
-      seconds: round_to_float_precision(dur.seconds),
-      milliseconds: round_to_float_precision(dur.milliseconds),
-      microseconds: round_to_float_precision(dur.microseconds),
-      nanoseconds: round_to_float_precision(dur.nanoseconds),
+      years: d.years,
+      months: d.months,
+      weeks: d.weeks,
+      days: d.days,
+      hours: d.hours,
+      minutes: d.minutes,
+      seconds: d.seconds,
+      milliseconds: d.milliseconds,
+      microseconds: d.microseconds,
+      nanoseconds: d.nanoseconds,
     ),
     protos.duration,
   )
@@ -612,23 +621,20 @@ pub type TimeZoneNameMode {
 
 pub fn get_calendar_name_option(
   st: Agent,
-  options_arg: JsVal,
-) -> #(#(CalendarNameMode, Option(Handle)), Agent) {
-  let #(opts, st) = get_options_object(st, options_arg)
-  let #(cal_name, st) =
-    get_enum_option(
-      st,
-      opts,
-      "calendarName",
-      [
-        #("auto", CalAuto),
-        #("always", CalAlways),
-        #("never", CalNever),
-        #("critical", CalCritical),
-      ],
-      CalAuto,
-    )
-  #(#(cal_name, opts), st)
+  opts: Option(Handle),
+) -> #(CalendarNameMode, Agent) {
+  get_enum_option(
+    st,
+    opts,
+    "calendarName",
+    [
+      #("auto", CalAuto),
+      #("always", CalAlways),
+      #("never", CalNever),
+      #("critical", CalCritical),
+    ],
+    CalAuto,
+  )
 }
 
 pub fn get_show_offset_option(
@@ -668,6 +674,19 @@ pub fn calendar_suffix(mode: CalendarNameMode, cal: tcal.Calendar) -> String {
       }
     CalAlways -> "[u-ca=" <> id <> "]"
     CalCritical -> "[!u-ca=" <> id <> "]"
+  }
+}
+
+// year-month and month-day print the full reference date unless iso can omit it
+pub fn format_with_reference(
+  iso: IsoDate,
+  cal: tcal.Calendar,
+  mode: CalendarNameMode,
+  short short: String,
+) -> String {
+  case cal, mode {
+    tcal.Iso8601, CalAuto | tcal.Iso8601, CalNever -> short
+    _, _ -> format_iso_date(iso) <> calendar_suffix(mode, cal)
   }
 }
 
@@ -798,6 +817,16 @@ pub fn time_unit_ns(u: TimeUnit) -> Int {
     MillisecondUnit -> ns_per_ms
     MicrosecondUnit -> ns_per_us
     NanosecondUnit -> 1
+  }
+}
+
+// spec maximumtemporaldurationroundingincrement
+pub fn max_rounding_increment(u: TimeUnit) -> Option(Int) {
+  case u {
+    DayUnit -> None
+    HourUnit -> Some(24)
+    MinuteUnit | SecondUnit -> Some(60)
+    MillisecondUnit | MicrosecondUnit | NanosecondUnit -> Some(1000)
   }
 }
 
@@ -1093,12 +1122,23 @@ pub fn round_unit(u: Unit, allow_day: Bool) -> Option(TimeUnit) {
   }
 }
 
-pub fn valid_time_increment(inc: Int, max: Int) -> Bool {
-  inc >= 1
-  && inc <= max
-  && { inc == max || max % inc == 0 }
-  && inc != max
-  || inc == 1
+// spec validatetemporalroundingincrement
+pub fn valid_rounding_increment(
+  inc: Int,
+  dividend: Int,
+  inclusive inclusive: Bool,
+) -> Bool {
+  case inclusive {
+    True -> inc >= 1 && inc <= dividend && dividend % inc == 0
+    False -> inc == 1 || { inc > 1 && inc < dividend && dividend % inc == 0 }
+  }
+}
+
+pub fn valid_increment_for_unit(inc: Int, smallest: Unit) -> Bool {
+  case option.then(as_time_unit(smallest), max_rounding_increment) {
+    Some(max) -> valid_rounding_increment(inc, max, inclusive: False)
+    None -> True
+  }
 }
 
 pub fn check_diff_setup(
@@ -1107,21 +1147,13 @@ pub fn check_diff_setup(
   smallest: Unit,
   inc: Int,
 ) -> Nil {
-  case largest_smaller_than_smallest(largest, smallest) {
-    True -> rt_val.t_throw_range_error(st, largest_smaller_msg)
-    False -> {
-      let ok = case smallest {
-        Hour -> valid_time_increment(inc, 24)
-        Minute | Second -> valid_time_increment(inc, 60)
-        Millisecond | Microsecond | Nanosecond ->
-          valid_time_increment(inc, 1000)
-        Year | Month | Week | Day -> True
-      }
-      case ok {
-        True -> Nil
-        False -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
-      }
-    }
+  case
+    largest_smaller_than_smallest(largest, smallest),
+    valid_increment_for_unit(inc, smallest)
+  {
+    True, _ -> rt_val.t_throw_range_error(st, largest_smaller_msg)
+    False, False -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
+    False, True -> Nil
   }
 }
 
@@ -1178,7 +1210,9 @@ pub fn to_string_time_options(
   let #(mode, st) = get_rounding_mode_option(st, opts, Trunc)
   let #(smallest, st) =
     get_unit_option(st, opts, "smallestUnit", allow_auto: False)
-  #(terr(st, seconds_string_precision(digits, smallest, mode)), st)
+  let #(precision, unit, inc) =
+    terr(st, seconds_string_precision(digits, smallest))
+  #(#(precision, unit, inc, mode), st)
 }
 
 pub type FractionalDigits {
@@ -1189,24 +1223,21 @@ pub type FractionalDigits {
 pub fn seconds_string_precision(
   digits: FractionalDigits,
   smallest: Option(Unit),
-  mode: RoundingMode,
-) -> Result(#(SecondsPrecision, Option(TimeUnit), Int, RoundingMode), TErr) {
+) -> Result(#(SecondsPrecision, Option(TimeUnit), Int), TErr) {
   case smallest {
     Some(Year) | Some(Month) | Some(Week) | Some(Day) | Some(Hour) ->
       Error(RangeE("smallestUnit must be a time unit"))
-    Some(Minute) -> Ok(#(MinutePrecision, Some(MinuteUnit), 1, mode))
-    Some(Second) -> Ok(#(SubsecondDigits(0), Some(SecondUnit), 1, mode))
-    Some(Millisecond) ->
-      Ok(#(SubsecondDigits(3), Some(MillisecondUnit), 1, mode))
-    Some(Microsecond) ->
-      Ok(#(SubsecondDigits(6), Some(MicrosecondUnit), 1, mode))
-    Some(Nanosecond) -> Ok(#(SubsecondDigits(9), Some(NanosecondUnit), 1, mode))
+    Some(Minute) -> Ok(#(MinutePrecision, Some(MinuteUnit), 1))
+    Some(Second) -> Ok(#(SubsecondDigits(0), Some(SecondUnit), 1))
+    Some(Millisecond) -> Ok(#(SubsecondDigits(3), Some(MillisecondUnit), 1))
+    Some(Microsecond) -> Ok(#(SubsecondDigits(6), Some(MicrosecondUnit), 1))
+    Some(Nanosecond) -> Ok(#(SubsecondDigits(9), Some(NanosecondUnit), 1))
     None ->
       case digits {
-        DigitsAuto -> Ok(#(AutoPrecision, None, 1, mode))
-        DigitsFixed(0) -> Ok(#(SubsecondDigits(0), Some(SecondUnit), 1, mode))
+        DigitsAuto -> Ok(#(AutoPrecision, None, 1))
+        DigitsFixed(0) -> Ok(#(SubsecondDigits(0), Some(SecondUnit), 1))
         DigitsFixed(n) ->
-          Ok(#(SubsecondDigits(n), Some(NanosecondUnit), pow10(9 - n), mode))
+          Ok(#(SubsecondDigits(n), Some(NanosecondUnit), pow10(9 - n)))
       }
   }
 }
@@ -1243,12 +1274,56 @@ pub fn get_fractional_digits(
   }
 }
 
-pub fn duration_sign(d: Duration) -> Int {
-  let fields = [
-    d.years, d.months, d.weeks, d.days, d.hours, d.minutes, d.seconds,
-    d.milliseconds, d.microseconds, d.nanoseconds,
+fn duration_field_list(d: Duration) -> List(Int) {
+  [
+    d.years,
+    d.months,
+    d.weeks,
+    d.days,
+    d.hours,
+    d.minutes,
+    d.seconds,
+    d.milliseconds,
+    d.microseconds,
+    d.nanoseconds,
   ]
-  list.fold(fields, 0, fn(acc, f) {
+}
+
+fn map_duration_fields(d: Duration, f: fn(Int) -> Int) -> Duration {
+  Duration(
+    years: f(d.years),
+    months: f(d.months),
+    weeks: f(d.weeks),
+    days: f(d.days),
+    hours: f(d.hours),
+    minutes: f(d.minutes),
+    seconds: f(d.seconds),
+    milliseconds: f(d.milliseconds),
+    microseconds: f(d.microseconds),
+    nanoseconds: f(d.nanoseconds),
+  )
+}
+
+pub fn has_calendar_units(d: Duration) -> Bool {
+  d.years != 0 || d.months != 0 || d.weeks != 0
+}
+
+pub fn has_date_units(d: Duration) -> Bool {
+  has_calendar_units(d) || d.days != 0
+}
+
+pub fn date_part(d: Duration) -> Duration {
+  Duration(
+    ..zero_duration,
+    years: d.years,
+    months: d.months,
+    weeks: d.weeks,
+    days: d.days,
+  )
+}
+
+pub fn duration_sign(d: Duration) -> Int {
+  list.fold(duration_field_list(d), 0, fn(acc, f) {
     case acc != 0 {
       True -> acc
       False -> int_sign(f)
@@ -1259,33 +1334,15 @@ pub fn duration_sign(d: Duration) -> Int {
 pub fn is_valid_duration(d: Duration) -> Bool {
   let sign = duration_sign(d)
   // validity is checked on float-rounded components per spec
-  let fr = round_to_float_precision
-  let d =
-    Duration(
-      years: fr(d.years),
-      months: fr(d.months),
-      weeks: fr(d.weeks),
-      days: fr(d.days),
-      hours: fr(d.hours),
-      minutes: fr(d.minutes),
-      seconds: fr(d.seconds),
-      milliseconds: fr(d.milliseconds),
-      microseconds: fr(d.microseconds),
-      nanoseconds: fr(d.nanoseconds),
-    )
-  let fields = [
-    d.years, d.months, d.weeks, d.days, d.hours, d.minutes, d.seconds,
-    d.milliseconds, d.microseconds, d.nanoseconds,
-  ]
+  let d = map_duration_fields(d, round_to_float_precision)
   let consistent =
-    list.all(fields, fn(f) {
+    list.all(duration_field_list(d), fn(f) {
       { f >= 0 || sign <= 0 } && { f <= 0 || sign >= 0 }
     })
-  let two32 = 4_294_967_296
   let cal_ok =
-    int.absolute_value(d.years) < two32
-    && int.absolute_value(d.months) < two32
-    && int.absolute_value(d.weeks) < two32
+    int.absolute_value(d.years) < pow2_32
+    && int.absolute_value(d.months) < pow2_32
+    && int.absolute_value(d.weeks) < pow2_32
   let total = days_and_time_ns(d)
   consistent && cal_ok && int.absolute_value(total) <= max_time_duration_ns
 }
@@ -1318,19 +1375,7 @@ pub fn check_time_duration_range(ns: Int) -> Result(Nil, TErr) {
 pub fn apply_duration_sign(d: Duration, sign: Int) -> Duration {
   case sign < 0 {
     False -> d
-    True ->
-      Duration(
-        years: 0 - d.years,
-        months: 0 - d.months,
-        weeks: 0 - d.weeks,
-        days: 0 - d.days,
-        hours: 0 - d.hours,
-        minutes: 0 - d.minutes,
-        seconds: 0 - d.seconds,
-        milliseconds: 0 - d.milliseconds,
-        microseconds: 0 - d.microseconds,
-        nanoseconds: 0 - d.nanoseconds,
-      )
+    True -> map_duration_fields(d, int.negate)
   }
 }
 
@@ -1475,7 +1520,7 @@ pub fn duration_from_bag(st: Agent, bag: Handle) -> #(Duration, Agent) {
         "invalid property bag for Temporal.Duration",
       )
     False -> {
-      let d = apply_duration_fields(temporal_iso.zero_duration, fields)
+      let d = apply_duration_fields(zero_duration, fields)
       case is_valid_duration(d) {
         True -> #(d, st)
         False -> rt_val.t_throw_range_error(st, "invalid duration")
@@ -1712,24 +1757,13 @@ fn tz_from_datetime_string(
     Some(p) ->
       case p.tz {
         Some(tz_str) ->
-          case string.uppercase(tz_str) == "UTC" {
-            True -> #(Ok(UtcZone), st)
-            False ->
-              case parse_offset_tz_id(tz_str) {
-                Some(ns) -> #(Ok(OffsetZone(ns:)), st)
-                None ->
-                  case resolve_zone(st, tz_str) {
-                    #(Ok(zone), st) -> #(Ok(IanaZone(zone:)), st)
-                    #(Error(temporal_tz.LoadFailed(id:, error:)), st) -> #(
-                      Error(unloadable_tz(id, error)),
-                      st,
-                    )
-                    #(Error(temporal_tz.UnknownZone), st) -> #(
-                      Error(unsupported_tz(tz_str)),
-                      st,
-                    )
-                  }
-              }
+          case parse_time_zone_identifier(st, tz_str) {
+            #(Ok(tz), st) -> #(Ok(tz), st)
+            #(Error(InvalidIdentifier(e)), st) -> #(Error(e), st)
+            #(Error(UnknownIdentifier), st) -> #(
+              Error(unsupported_tz(tz_str)),
+              st,
+            )
           }
         None ->
           case p.offset {
@@ -1790,24 +1824,24 @@ pub fn unloadable_tz(id: String, error: temporal_tz.TzError) -> TErr {
   )
 }
 
-pub fn tz_offset_ns_at(tz: TimeZone, epoch_ns: Int) -> Result(Int, TErr) {
+pub fn tz_offset_ns_at(tz: TimeZone, epoch_ns: Int) -> Int {
   case tz {
-    UtcZone -> Ok(0)
-    OffsetZone(ns:) -> Ok(ns)
-    IanaZone(zone:) -> Ok(temporal_tz.offset_ns_at(zone, epoch_ns))
+    UtcZone -> 0
+    OffsetZone(ns:) -> ns
+    IanaZone(zone:) -> temporal_tz.offset_ns_at(zone, epoch_ns)
   }
 }
 
-pub fn epoch_ns_to_iso_in(
-  tz: TimeZone,
-  epoch_ns: Int,
-) -> Result(#(IsoDate, IsoTime), TErr) {
-  use off <- result.map(tz_offset_ns_at(tz, epoch_ns))
-  epoch_ns_to_iso(epoch_ns, off)
+pub fn epoch_ns_to_iso_in(tz: TimeZone, epoch_ns: Int) -> #(IsoDate, IsoTime) {
+  epoch_ns_to_iso(epoch_ns, tz_offset_ns_at(tz, epoch_ns))
+}
+
+pub fn is_valid_epoch_ns(ns: Int) -> Bool {
+  int.absolute_value(ns) <= ns_max_instant
 }
 
 pub fn validate_epoch_ns(ns: Int) -> Result(Int, TErr) {
-  case int.absolute_value(ns) <= ns_max_instant {
+  case is_valid_epoch_ns(ns) {
     True -> Ok(ns)
     False -> Error(RangeE("instant outside valid range"))
   }
@@ -1860,8 +1894,8 @@ pub fn to_temporal_time_zone(st: Agent, v: JsVal) -> #(TimeZone, Agent) {
 }
 
 pub fn system_time_zone(st: Agent) -> #(TimeZone, Agent) {
-  case arc_host_time_zone_id(st) {
-    Some(id) ->
+  case host_time.time_zone_id(st.hooks.time_zone) {
+    Ok(id) ->
       case parse_time_zone_identifier(st, id) {
         #(Ok(tz), st) -> #(tz, st)
         #(Error(UnknownIdentifier), st) | #(Error(InvalidIdentifier(_)), st) -> #(
@@ -1869,12 +1903,8 @@ pub fn system_time_zone(st: Agent) -> #(TimeZone, Agent) {
           st,
         )
       }
-    None -> #(UtcZone, st)
+    Error(Nil) -> #(UtcZone, st)
   }
-}
-
-fn arc_host_time_zone_id(st: Agent) -> Option(String) {
-  host_time.time_zone_id(st.hooks.time_zone) |> option.from_result
 }
 
 pub fn to_temporal_instant(st: Agent, item: JsVal) -> #(Int, Agent) {
