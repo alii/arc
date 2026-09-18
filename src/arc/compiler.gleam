@@ -8,10 +8,11 @@ import arc/esm
 import arc/internal/tuple_array
 import arc/parser/ast
 import arc/rt/bytecode.{
-  type EvalNameTable, type FuncTemplate, type VarEnvKind, CaptureLocal,
-  EvalNameTable, FrameVarEnv, FuncTemplate, GlobalVarEnv,
+  type EnvCapture, type EvalNameTable, type FuncTemplate, type VarEnvKind,
+  CaptureLocal, EvalNameTable, FrameVarEnv, FuncTemplate, GlobalVarEnv,
 }
 import arc/rt/types.{type JsVal}
+import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -70,52 +71,6 @@ pub type DirectEvalCaller {
   )
 }
 
-fn resolve_top_level(
-  code: List(opcode.IrOp),
-  constants: List(JsVal),
-  info: scope.FunctionInfo,
-  child_templates: List(FuncTemplate),
-  is_strict: Bool,
-  code_kind: CodeKind,
-  local_names: Option(EvalNameTable),
-) -> FuncTemplate {
-  let resolve.Resolved(bytecode:, constants:, lines:) =
-    resolve.resolve(code, constants)
-  let #(bytecode, regs) = case local_names {
-    None -> resolve.assign_regs(bytecode, captured_slots(child_templates))
-    Some(_) -> #(bytecode, bytecode.NoRegs)
-  }
-  FuncTemplate(
-    name: None,
-    arity: 0,
-    length: 0,
-    local_count: info.local_count,
-    bytecode:,
-    constants:,
-    lines:,
-    functions: tuple_array.from_list(child_templates),
-    env_descriptors: [],
-    is_strict:,
-    is_arrow: False,
-    is_derived_constructor: False,
-    is_generator: False,
-    is_async: False,
-    is_constructor: False,
-    is_class_constructor: False,
-    local_names:,
-    lexical: info.lexical,
-    code_kind:,
-    regs:,
-  )
-}
-
-fn captured_slots(children: List(FuncTemplate)) -> Set(Int) {
-  list.flat_map(children, fn(t) {
-    list.map(t.env_descriptors, fn(c) { c.parent_index })
-  })
-  |> set.from_list
-}
-
 pub fn compile(
   body: List(ast.StmtWithLine),
   sb: scope.ScopeBuilder,
@@ -144,9 +99,27 @@ pub fn compile_module(
   sb: scope.ScopeBuilder,
   summary: esm.ModuleSummary,
 ) -> Result(CompiledModuleBody, CompileError) {
-  let import_locals = esm.import_local_names(summary)
-  let forced_box = local_export_names(summary.exports)
-  compile_module_with_scope(items, sb, import_locals, forced_box, summary)
+  let opts =
+    scope.AnalyzeOpts(
+      ..scope.default_analyze_opts(),
+      top_lex: scope.LexLocal,
+      strict: True,
+      parent_names: indexed_names(esm.import_local_names(summary)),
+      linker_seeded: set.from_list(local_export_names(summary.exports)),
+    )
+  let tree = scope.finalize(sb, opts)
+  use out <- result.map(emit.emit_module(items, tree))
+  let template = finish_top_level(out, lexical.ScriptCode, eval_var_env: None)
+  let has_tla =
+    tuple_array.to_list(template.bytecode)
+    |> list.any(fn(op) { op == opcode.Await })
+  CompiledModuleBody(
+    template:,
+    export_names: scope.function_info(out.tree, scope.root_scope_id).names,
+    hoisted_funcs: out.module_hoisted_funcs,
+    export_seeds: module_export_seeds(items, summary.exports),
+    has_tla:,
+  )
 }
 
 fn local_export_names(exports: List(esm.ExportEntry)) -> List(String) {
@@ -170,63 +143,13 @@ fn module_export_seeds(
       ast_util.direct_fn_names(stmts),
     ))
   local_export_names(exports)
-  |> list.fold(dict.new(), fn(acc, name) {
-    let seed = case set.contains(undef, name) {
-      True -> SeedUndefined
-      False -> SeedUninitialized
+  |> list.map(fn(name) {
+    case set.contains(undef, name) {
+      True -> #(name, SeedUndefined)
+      False -> #(name, SeedUninitialized)
     }
-    dict.insert(acc, name, seed)
   })
-}
-
-fn compile_module_with_scope(
-  items: List(ast.ModuleItem),
-  sb: scope.ScopeBuilder,
-  import_locals: List(String),
-  forced_box: List(String),
-  summary: esm.ModuleSummary,
-) -> Result(CompiledModuleBody, CompileError) {
-  let opts =
-    scope.AnalyzeOpts(
-      ..scope.default_analyze_opts(),
-      top_lex: scope.LexLocal,
-      strict: True,
-      parent_names: indexed_names(import_locals),
-      linker_seeded: set.from_list(forced_box),
-    )
-  let tree = scope.finalize(sb, opts)
-  use
-    emit.EmitOutput(
-      code:,
-      constants:,
-      children:,
-      is_strict:,
-      tree:,
-      hoisted_funcs:,
-    )
-  <- result.map(emit.emit_module(items, tree))
-  let info = scope.function_info(tree, scope.root_scope_id)
-  let child_templates = compile_children(children, tree, scope.root_scope_id)
-  let template =
-    resolve_top_level(
-      code,
-      constants,
-      info,
-      child_templates,
-      is_strict,
-      lexical.ScriptCode,
-      None,
-    )
-  let has_tla =
-    tuple_array.to_list(template.bytecode)
-    |> list.any(fn(op) { op == opcode.Await })
-  CompiledModuleBody(
-    template:,
-    export_names: info.names,
-    hoisted_funcs:,
-    export_seeds: module_export_seeds(items, summary.exports),
-    has_tla:,
-  )
+  |> dict.from_list
 }
 
 // top-level lexicals go to the global record to persist
@@ -251,11 +174,35 @@ pub fn compile_eval_direct(
   caller: DirectEvalCaller,
 ) -> Result(FuncTemplate, CompileError) {
   let caller_is_strict = caller.strictness == Strict
-  let caller_is_global = caller.var_env == GlobalVarEnv
+  let tree = scope.finalize(sb, direct_eval_opts(caller, body))
+  // §14.11.1 with is illegal once the caller makes eval strict
+  use <- bool.guard(
+    caller_is_strict && contains_with(tree),
+    Error(emit.EarlySyntaxError("'with' not allowed in strict mode")),
+  )
+  use out <- result.try(emit.emit_eval_direct(
+    body,
+    tree,
+    caller_is_strict,
+    caller.param_scope_names,
+    caller.private_names,
+  ))
+  // §19.2.1.1 evaldeclarationinstantiation step 3.d
+  use Nil <- result.try(case out.is_strict {
+    True -> Ok(Nil)
+    False -> check_param_scope_var_conflict(body, caller.param_scope_names)
+  })
+  Ok(finish_top_level(out, caller.code_kind, eval_var_env: Some(caller.var_env)))
+}
+
+fn direct_eval_opts(
+  caller: DirectEvalCaller,
+  body: List(ast.StmtWithLine),
+) -> scope.AnalyzeOpts {
   // finalize does not scan directives, so check the body too
-  let effective_strict =
-    caller_is_strict || ast_util.has_use_strict_directive(body)
-  let parent_dict = indexed_names(caller.names)
+  let strict =
+    caller.strictness == Strict || ast_util.has_use_strict_directive(body)
+  let parent_names = indexed_names(caller.names)
   // lexical box refs follow names, one slot per some entry
   let #(lexical_captures, _next) =
     list.fold(
@@ -272,74 +219,27 @@ pub fn compile_eval_direct(
   // every with holder must be one of caller.names
   let with_stack =
     list.map(caller.with_names, fn(n) {
-      let assert Ok(slot) = dict.get(parent_dict, n)
+      let assert Ok(slot) = dict.get(parent_names, n)
         as "direct-eval caller's with-holder is not one of its local names"
       slot
     })
-  let opts =
-    scope.AnalyzeOpts(
-      ..scope.default_analyze_opts(),
-      top_lex: scope.LexLocal,
-      fallthrough: case effective_strict || caller_is_global {
-        True -> scope.ToGlobal
-        False -> scope.ToEvalEnv
-      },
-      strict: effective_strict,
-      parent_names: parent_dict,
-      lexical_captures:,
-      with_stack:,
-    )
-  let tree = scope.finalize(sb, opts)
-  // §14.11.1 with is illegal once the caller makes eval strict
-  use Nil <- result.try(
-    case
-      caller_is_strict
-      && list.any(dict.values(tree.scopes), fn(s) { scope.is_with_kind(s.kind) })
-    {
-      True -> Error(emit.EarlySyntaxError("'with' not allowed in strict mode"))
-      False -> Ok(Nil)
-    },
-  )
-  use
-    emit.EmitOutput(
-      code:,
-      constants:,
-      children:,
-      is_strict: strict,
-      tree:,
-      hoisted_funcs: _,
-    )
-  <- result.try(emit.emit_eval_direct(
-    body,
-    tree,
-    caller_is_strict,
-    caller.param_scope_names,
-    caller.private_names,
-  ))
-  // §19.2.1.1 evaldeclarationinstantiation step 3.d
-  use Nil <- result.try(case strict {
-    True -> Ok(Nil)
-    False -> check_param_scope_var_conflict(body, caller.param_scope_names)
-  })
-  let info = scope.function_info(tree, scope.root_scope_id)
-  let child_templates = compile_children(children, tree, scope.root_scope_id)
-  let local_names = case info.contains_direct_eval {
-    True ->
-      Some(EvalNameTable(
-        var_env: caller.var_env,
-        names: dict.to_list(info.names),
-      ))
-    False -> None
+  let fallthrough = case strict || caller.var_env == GlobalVarEnv {
+    True -> scope.ToGlobal
+    False -> scope.ToEvalEnv
   }
-  Ok(resolve_top_level(
-    code,
-    constants,
-    info,
-    child_templates,
-    strict,
-    caller.code_kind,
-    local_names,
-  ))
+  scope.AnalyzeOpts(
+    ..scope.default_analyze_opts(),
+    top_lex: scope.LexLocal,
+    fallthrough:,
+    strict:,
+    parent_names:,
+    lexical_captures:,
+    with_stack:,
+  )
+}
+
+fn contains_with(tree: scope.ScopeTree) -> Bool {
+  list.any(dict.values(tree.scopes), fn(s) { scope.is_with_kind(s.kind) })
 }
 
 fn compile_script(
@@ -350,32 +250,87 @@ fn compile_script(
 ) -> Result(FuncTemplate, CompileError) {
   let opts = scope.AnalyzeOpts(..scope.default_analyze_opts(), top_lex:)
   let tree = scope.finalize(sb, opts)
-  use
-    emit.EmitOutput(
-      code:,
-      constants:,
-      children:,
-      is_strict:,
-      tree:,
-      hoisted_funcs: _,
-    )
-  <- result.map(emit.emit_program(stmts, tree, deletable_global_vars:))
-  let info = scope.function_info(tree, scope.root_scope_id)
-  let child_templates = compile_children(children, tree, scope.root_scope_id)
-  let local_names = case info.contains_direct_eval {
-    True ->
-      Some(EvalNameTable(var_env: GlobalVarEnv, names: dict.to_list(info.names)))
-    False -> None
+  use out <- result.map(emit.emit_program(stmts, tree, deletable_global_vars:))
+  finish_top_level(out, lexical.ScriptCode, eval_var_env: Some(GlobalVarEnv))
+}
+
+fn finish_top_level(
+  out: emit.EmitOutput,
+  code_kind: CodeKind,
+  eval_var_env eval_var_env: Option(VarEnvKind),
+) -> FuncTemplate {
+  let info = scope.function_info(out.tree, scope.root_scope_id)
+  let functions = compile_children(out.children, out.tree, scope.root_scope_id)
+  let local_names = case eval_var_env, info.contains_direct_eval {
+    Some(var_env), True -> Some(eval_name_table(var_env, info))
+    _, _ -> None
   }
-  resolve_top_level(
-    code,
-    constants,
+  build_template(
+    out.code,
+    out.constants,
     info,
-    child_templates,
-    is_strict,
-    lexical.ScriptCode,
+    functions,
+    [],
     local_names,
+    is_strict: out.is_strict,
+    code_kind:,
+    use_registers: option.is_none(local_names),
   )
+}
+
+fn eval_name_table(
+  var_env: VarEnvKind,
+  info: scope.FunctionInfo,
+) -> EvalNameTable {
+  EvalNameTable(var_env:, names: dict.to_list(info.names))
+}
+
+fn build_template(
+  code: List(opcode.IrOp),
+  constants: List(JsVal),
+  info: scope.FunctionInfo,
+  functions: List(FuncTemplate),
+  env_descriptors: List(EnvCapture),
+  local_names: Option(EvalNameTable),
+  is_strict is_strict: Bool,
+  code_kind code_kind: CodeKind,
+  use_registers use_registers: Bool,
+) -> FuncTemplate {
+  let resolve.Resolved(bytecode:, constants:, lines:) =
+    resolve.resolve(code, constants)
+  let #(bytecode, regs) = case use_registers {
+    True -> resolve.assign_regs(bytecode, captured_slots(functions))
+    False -> #(bytecode, bytecode.NoRegs)
+  }
+  FuncTemplate(
+    name: None,
+    arity: 0,
+    length: 0,
+    local_count: info.local_count,
+    bytecode:,
+    constants:,
+    lines:,
+    functions: tuple_array.from_list(functions),
+    env_descriptors:,
+    is_strict:,
+    is_arrow: False,
+    is_derived_constructor: False,
+    is_generator: False,
+    is_async: False,
+    is_constructor: False,
+    is_class_constructor: False,
+    local_names:,
+    lexical: info.lexical,
+    code_kind:,
+    regs:,
+  )
+}
+
+fn captured_slots(children: List(FuncTemplate)) -> Set(Int) {
+  list.flat_map(children, fn(t) {
+    list.map(t.env_descriptors, fn(c) { c.parent_index })
+  })
+  |> set.from_list
 }
 
 fn indexed_names(names: List(String)) -> Dict(String, Int) {
@@ -390,17 +345,14 @@ fn compile_child(
   let info = scope.function_info(tree, child.scope_id)
   let parent_info = scope.function_info(tree, parent_fn_scope)
 
-  // layout must match setup_frame
+  // layout must match call.setup_frame
   let lex_descriptors =
     list.filter_map(lexical.all_lexical_refs, fn(ref) {
-      case dict.has_key(info.lexical_captures, ref) {
-        False -> Error(Nil)
-        True ->
-          case lexical.lexical_slot(parent_info.lexical, ref) {
-            Some(parent_idx) -> Ok(CaptureLocal(parent_idx))
-            None ->
-              panic as "scope analyzer recorded a lexical capture the parent has no slot for"
-          }
+      use <- bool.guard(!dict.has_key(info.lexical_captures, ref), Error(Nil))
+      case lexical.lexical_slot(parent_info.lexical, ref) {
+        Some(parent_idx) -> Ok(CaptureLocal(parent_idx))
+        None ->
+          panic as "scope analyzer recorded a lexical capture the parent has no slot for"
       }
     })
   let env_descriptors =
@@ -408,46 +360,36 @@ fn compile_child(
     |> list.append(lex_descriptors)
 
   let local_names = case info.eval_in_subtree {
-    True ->
-      Some(EvalNameTable(var_env: FrameVarEnv, names: dict.to_list(info.names)))
+    True -> Some(eval_name_table(FrameVarEnv, info))
     False -> None
   }
-
-  let grandchild_templates =
-    compile_children(child.functions, tree, child.scope_id)
-
-  let resolve.Resolved(bytecode:, constants:, lines:) =
-    resolve.resolve(child.code, child.constants)
+  let functions = compile_children(child.functions, tree, child.scope_id)
   // coroutine frames park with raw locals, so they never get registers
-  let #(bytecode, regs) = case
-    local_names,
-    child.is_generator || child.is_async
-  {
-    None, False ->
-      resolve.assign_regs(bytecode, captured_slots(grandchild_templates))
-    _, _ -> #(bytecode, bytecode.NoRegs)
-  }
+  let use_registers =
+    option.is_none(local_names) && !child.is_generator && !child.is_async
+  let template =
+    build_template(
+      child.code,
+      child.constants,
+      info,
+      functions,
+      env_descriptors,
+      local_names,
+      is_strict: child.is_strict,
+      code_kind: child.code_kind,
+      use_registers:,
+    )
   FuncTemplate(
+    ..template,
     name: child.name,
     arity: child.arity,
     length: child.length,
-    local_count: info.local_count,
-    bytecode:,
-    constants:,
-    lines:,
-    functions: tuple_array.from_list(grandchild_templates),
-    env_descriptors:,
-    is_strict: child.is_strict,
     is_arrow: child.is_arrow,
     is_derived_constructor: child.is_derived_constructor,
     is_generator: child.is_generator,
     is_async: child.is_async,
     is_constructor: child.is_constructor,
     is_class_constructor: child.is_class_constructor,
-    local_names:,
-    lexical: info.lexical,
-    code_kind: child.code_kind,
-    regs:,
   )
 }
 
@@ -463,24 +405,20 @@ fn check_param_scope_var_conflict(
   body: List(ast.StmtWithLine),
   param_scope_names: List(String),
 ) -> Result(Nil, CompileError) {
-  case param_scope_names {
-    [] -> Ok(Nil)
-    _ -> {
-      let conflict =
-        list.append(
-          ast_util.collect_hoisted_vars(body),
-          ast_util.direct_fn_names(body),
-        )
-        |> list.find(list.contains(param_scope_names, _))
-      case conflict {
-        Ok(name) ->
-          Error(emit.EarlySyntaxError(
-            "variable '"
-            <> name
-            <> "' declared by direct eval conflicts with a parameter-scope binding",
-          ))
-        Error(Nil) -> Ok(Nil)
-      }
-    }
+  use <- bool.guard(param_scope_names == [], Ok(Nil))
+  let conflict =
+    list.append(
+      ast_util.collect_hoisted_vars(body),
+      ast_util.direct_fn_names(body),
+    )
+    |> list.find(list.contains(param_scope_names, _))
+  case conflict {
+    Ok(name) ->
+      Error(emit.EarlySyntaxError(
+        "variable '"
+        <> name
+        <> "' declared by direct eval conflicts with a parameter-scope binding",
+      ))
+    Error(Nil) -> Ok(Nil)
   }
 }

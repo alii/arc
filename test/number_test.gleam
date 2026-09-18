@@ -3,7 +3,7 @@ import arc/engine.{
   NegInfinity, Returned,
 }
 import arc/parser/ast.{FiniteNumber, InfiniteNumber}
-import arc/parser/number.{BigIntValue, NumberValue}
+import arc/parser/number.{ParsedBigInt, ParsedNumber}
 import gleam/string
 
 fn eval(source: String) -> JsValueKind {
@@ -12,7 +12,7 @@ fn eval(source: String) -> JsValueKind {
 }
 
 fn num(raw: String) -> Float {
-  let assert Ok(NumberValue(FiniteNumber(f))) =
+  let assert Ok(ParsedNumber(FiniteNumber(f))) =
     number.parse_numeric_literal(raw)
   f
 }
@@ -32,11 +32,11 @@ pub fn number_bare_dot_forms_test() {
 
 pub fn number_exponent_overflow_is_infinity_test() {
   assert number.parse_numeric_literal("1e400")
-    == Ok(NumberValue(InfiniteNumber))
+    == Ok(ParsedNumber(InfiniteNumber))
   assert number.parse_numeric_literal("1.5e400")
-    == Ok(NumberValue(InfiniteNumber))
+    == Ok(ParsedNumber(InfiniteNumber))
   assert number.parse_numeric_literal("1" <> string.repeat("0", 400))
-    == Ok(NumberValue(InfiniteNumber))
+    == Ok(ParsedNumber(InfiniteNumber))
 }
 
 pub fn number_exponent_underflow_is_zero_test() {
@@ -65,10 +65,10 @@ pub fn number_non_octal_decimal_is_base_ten_test() {
 }
 
 pub fn number_bigint_test() {
-  assert number.parse_numeric_literal("0xffn") == Ok(BigIntValue(255))
-  assert number.parse_numeric_literal("0B101n") == Ok(BigIntValue(5))
-  assert number.parse_numeric_literal("1_000n") == Ok(BigIntValue(1000))
-  assert number.parse_numeric_literal("0n") == Ok(BigIntValue(0))
+  assert number.parse_numeric_literal("0xffn") == Ok(ParsedBigInt(255))
+  assert number.parse_numeric_literal("0B101n") == Ok(ParsedBigInt(5))
+  assert number.parse_numeric_literal("1_000n") == Ok(ParsedBigInt(1000))
+  assert number.parse_numeric_literal("0n") == Ok(ParsedBigInt(0))
 }
 
 pub fn number_malformed_is_typed_error_test() {
