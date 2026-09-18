@@ -11,13 +11,13 @@ fn bundled_links() -> Dict(String, String)
 fn bundled_version() -> String
 
 fn canonical(id: String) -> String {
-  let assert Ok(zone) = temporal_tz.lookup(id)
-  temporal_tz.canonical(zone)
+  let assert Ok(proper) = temporal_tz.lookup_name(id)
+  temporal_tz.canonical_id(proper)
 }
 
 fn proper(id: String) -> String {
-  let assert Ok(zone) = temporal_tz.lookup(id)
-  temporal_tz.zone_id(zone)
+  let assert Ok(proper) = temporal_tz.lookup_name(id)
+  proper
 }
 
 fn js(source: String) -> engine.JsValueKind {
@@ -52,15 +52,15 @@ pub fn lookup_is_ascii_case_insensitive_test() {
   assert proper("america/argentina/buenos_aires")
     == "America/Argentina/Buenos_Aires"
   // U+212A kelvin sign folds to k under unicode rules but not ascii
-  assert temporal_tz.lookup("Asia/Kol\u{212A}ata") == Error(Nil)
+  assert temporal_tz.lookup_name("Asia/Kol\u{212A}ata") == Error(Nil)
 }
 
 pub fn unknown_id_rejected_test() {
-  assert temporal_tz.lookup("Asia/Nowhere") == Error(Nil)
-  assert temporal_tz.lookup("IST") == Error(Nil)
-  assert temporal_tz.lookup("Factory") == Error(Nil)
-  assert temporal_tz.lookup("posixrules") == Error(Nil)
-  assert temporal_tz.lookup("") == Error(Nil)
+  assert temporal_tz.lookup_name("Asia/Nowhere") == Error(Nil)
+  assert temporal_tz.lookup_name("IST") == Error(Nil)
+  assert temporal_tz.lookup_name("Factory") == Error(Nil)
+  assert temporal_tz.lookup_name("posixrules") == Error(Nil)
+  assert temporal_tz.lookup_name("") == Error(Nil)
 }
 
 pub fn bundled_table_drives_resolution_test() {

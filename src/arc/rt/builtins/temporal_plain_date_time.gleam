@@ -439,7 +439,8 @@ pub fn method(
       let arg = helpers.arg_at(args, 0)
       case classify(arg) {
         KStr(tz_str) -> {
-          let tz = terr(st, parse_time_zone_id(tz_str))
+          let #(tz, st) = parse_time_zone_id(st, tz_str)
+          let tz = terr(st, tz)
           let #(opts, st) = get_options_object(st, helpers.arg_at(args, 1))
           let #(dis, st) = get_disambiguation_option(st, opts)
           let ns = terr(st, get_epoch_ns_for(tz, d, t, dis))

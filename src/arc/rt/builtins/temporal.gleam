@@ -695,7 +695,10 @@ fn now_dispatch(
 ) -> #(JsVal, Agent) {
   case name {
     NowInstant -> make_instant(st, protos, now_epoch_ns(st))
-    NowTimeZoneId -> #(mk_string(time_zone_id(system_time_zone(st))), st)
+    NowTimeZoneId -> {
+      let #(tz, st) = system_time_zone(st)
+      #(mk_string(time_zone_id(tz)), st)
+    }
     NowPlainDateISO -> {
       let #(tz, st) = now_tz_arg(st, args)
       let #(d, _) = terr(st, epoch_ns_to_iso_in(tz, now_epoch_ns(st)))
@@ -721,7 +724,7 @@ fn now_dispatch(
 fn now_tz_arg(st: Agent, args: List(JsVal)) -> #(TimeZone, Agent) {
   let arg = helpers.arg_at(args, 0)
   case classify(arg) {
-    KUndef -> #(system_time_zone(st), st)
+    KUndef -> system_time_zone(st)
     _ -> to_temporal_time_zone(st, arg)
   }
 }
