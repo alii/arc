@@ -12,22 +12,27 @@ import arc/bytecode/opcode.{
   DeclareGlobalFn, DeclareGlobalLex, DeclareGlobalVar, DefineAccessor,
   DefineAccessorComputed, DefineField, DefineFieldComputed, DefineMethod,
   DefineMethodComputed, DefinePrivateAccessor, DefinePrivateField,
-  DefinePrivateMethod, DeleteElem, DeleteField, DeleteGlobalVar, Dup, ForInNext,
-  ForInStart, GetAsyncIterator, GetBoxed, GetElem, GetElem2, GetElemLocals,
+  DefinePrivateMethod, DeleteElem, DeleteField, DeleteGlobalVar, Dup,
+  DynamicImport, DynamicImportDefer, DynamicImportSource, ForInNext, ForInStart,
+  GetAsyncIterator, GetBoxed, GetDisposer, GetElem, GetElem2, GetElemLocals,
   GetElemPostInc, GetEvalVar, GetField, GetField2, GetFieldCall, GetFieldCall1,
   GetGlobal, GetIterator, GetLocal, GetLocalField, GetLocalField2,
   GetLocalFieldCall, GetPrivateFieldDyn, GetPrivateFieldDyn2, GetPrototypeOf,
-  GetSuperValue, GetSuperValue2, IncLocal, IncLocalCmpConstJump,
-  IncLocalCmpLocalJump, IncLocalJump, InitGlobalLex, InitialYield,
-  IteratorCheckObject, IteratorClose, IteratorCloseThrow, IteratorNext,
-  IteratorRecord, IteratorRest, Jump, JumpIfFalse, JumpIfLocal, JumpIfNotNullish,
-  JumpIfNullish, JumpIfTrue, MakeClosure, MakeMethod, NewObject, NewObjectWith,
-  NewPrivateName, NewRegExp, ObjectRestCopy, ObjectSpread, Pc, Pop, PostDecLocal,
-  PostIncLocal, PrivateInDyn, PushConst, PushTry, PutBoxed, PutBoxedCheckInit,
-  PutElem, PutElemPop, PutEvalVar, PutField, PutFieldPop, PutGlobal, PutLocal,
+  GetSuperValue, GetSuperValue2, GetTemplateObject, Gosub, IncLocal,
+  IncLocalCmpConstJump, IncLocalCmpLocalJump, IncLocalJump, InitGlobalLex,
+  InitialYield, IteratorCheckObject, IteratorClose, IteratorCloseThrow,
+  IteratorNext, IteratorRecord, IteratorRest, Jump, JumpIfFalse, JumpIfLocal,
+  JumpIfNotNullish, JumpIfNullish, JumpIfTrue, MakeClosure, MakeMethod,
+  MakeSuppressed, NewObject, NewObjectWith, NewPrivateName, NewRegExp,
+  ObjectRestCopy, ObjectSpread, Pc, Pop, PopTry, PostDecLocal, PostIncLocal,
+  PrivateInDyn, PushConst, PushTry, PutBoxed, PutBoxedCheckInit, PutElem,
+  PutElemPop, PutEvalVar, PutField, PutFieldPop, PutGlobal, PutLocal,
   PutLocalCheckInit, PutLocalConstField, PutLocalLocalField, PutPrivateFieldDyn,
-  PutSuperValue, Return, Rot3, Safepoint, SetProto, SetupDerivedClass, Swap,
-  TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, Unrot4, Yield, YieldStar,
+  PutSuperValue, Ret, Return, Rot3, Safepoint, SetProto, SetupDerivedClass, Swap,
+  Throw, ThrowConstAssign, ThrowError, ToObject, ToPropertyKey, ToStringVal,
+  TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, Unrot4, WithDeleteVar,
+  WithGetRefValue, WithGetVar, WithGetVarThis, WithMakeRef, WithPutRefValue,
+  WithPutVar, Yield, YieldStar,
 }
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/call.{type Drive}
@@ -46,7 +51,7 @@ import arc/rt/arena
 import arc/rt/async as rt_async
 import arc/rt/builtins as rt_builtins
 import arc/rt/builtins/disposable_stack
-import arc/rt/builtins/error as rt_error
+import arc/rt/builtins/error as b_error
 import arc/rt/builtins/global_fns
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/regexp as b_regexp
@@ -55,8 +60,8 @@ import arc/rt/bytecode.{
 }
 import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/class as rt_class
-import arc/rt/closure
-import arc/rt/elements as rt_elements
+import arc/rt/closure as rt_closure
+import arc/rt/elements
 import arc/rt/env as rt_env
 import arc/rt/inspect as rt_inspect
 import arc/rt/js_string
@@ -72,7 +77,7 @@ import arc/rt/types.{
   KSym, KUndef, Named, NoElements, Realm, ReflectApply, ReflectN, SBox, SObject,
   SShapedObject, StringKey, SymbolKey, classify, mk_bool, mk_int, mk_object,
   mk_string, mk_tdz, mk_undefined,
-} as rt_types
+}
 import arc/rt/val as rt_val
 import gleam/bit_array
 import gleam/bool
@@ -87,14 +92,40 @@ pub type Outcome {
   Suspended(state.SuspendKind, JsVal)
 }
 
+type FastIter {
+  ArrayStep(done: Bool, value: JsVal, store: types.JsStore(Agent))
+  GenStep(gen_h: Handle)
+  Protocol
+}
+
 @external(erlang, "arc_rt_store_ffi", "is_handle")
 fn is_handle(v: JsVal) -> Bool
+
+@external(erlang, "arc_interp_ffi", "is_tdz")
+fn is_tdz(v: JsVal) -> Bool
 
 @external(erlang, "arc_rt_ops_ffi", "binop")
 fn k_binop(kind: opcode.Classified, a: JsVal, b: JsVal) -> JsVal
 
 @external(erlang, "arc_rt_ops_ffi", "t_bitnot_fast")
 fn k_bitnot(a: JsVal) -> JsVal
+
+@external(erlang, "arc_rt_ops_ffi", "pure_binop")
+fn pure_binop_kernel(op: binop.PureBinOp, left: JsVal, right: JsVal) -> JsVal
+
+// §23.1.5.2.1 in the kernel only when the read observes nothing
+@external(erlang, "arc_interp_ffi", "iter_step")
+fn fast_iter_step(store: types.JsStore(Agent), rec: JsVal) -> FastIter
+
+const prototype_key = key.Named("prototype")
+
+const return_key = key.Named("return")
+
+const function_call = FunctionN(FunctionCall)
+
+const function_apply = FunctionN(FunctionApply)
+
+const reflect_apply = ReflectN(ReflectApply)
 
 fn rt2(
   state: State,
@@ -195,11 +226,11 @@ fn rt_unit6(
   |> drop_nil
 }
 
-fn okey(k: key.PropertyKey) -> ObjectKey {
+fn object_key(k: key.PropertyKey) -> ObjectKey {
   case k {
     key.Named(name) -> StringKey(Named(name))
     key.Index(i) -> StringKey(Index(i))
-    key.Private(text) -> StringKey(rt_types.private_key(text))
+    key.Private(text) -> StringKey(types.private_key(text))
   }
 }
 
@@ -253,7 +284,7 @@ fn direct_disposer(
     rt_store.t_cell_new(
       agent,
       SObject(
-        kind: rt_types.KBound(target: method, bound_this: val, bound_args: []),
+        kind: types.KBound(target: method, bound_this: val, bound_args: []),
         proto: Some(agent.realm.function.prototype),
         props: dict.new(),
         symbol_props: [],
@@ -271,7 +302,7 @@ fn sync_fallback_disposer(
   unit: Int,
 ) -> #(JsVal, Agent) {
   let #(h, agent) =
-    closure.t_new_bytecode_function(
+    rt_closure.t_new_bytecode_function(
       agent,
       sync_fallback_template(),
       bytecode.env_from_list([mk_object(method), val]),
@@ -312,11 +343,15 @@ fn sync_fallback_template() -> FuncTemplate {
   )
 }
 
-fn lex_lookup(agent: Agent, name: String) -> Option(LexicalGlobal) {
+fn lexical_global(agent: Agent, name: String) -> Option(LexicalGlobal) {
   dict.get(agent.realm.lexical_globals, name) |> option.from_result
 }
 
-fn lex_write(agent: Agent, name: String, binding: LexicalGlobal) -> Agent {
+fn put_lexical_global(
+  agent: Agent,
+  name: String,
+  binding: LexicalGlobal,
+) -> Agent {
   let realm = agent.realm
   Agent(
     ..agent,
@@ -327,11 +362,8 @@ fn lex_write(agent: Agent, name: String, binding: LexicalGlobal) -> Agent {
   )
 }
 
-@external(erlang, "arc_interp_ffi", "is_tdz")
-fn is_tdz(v: JsVal) -> Bool
-
-// every stream ends in a sentinel return, so fetch is unchecked
-pub fn execute_inner(
+// fast tier: registers live in loop arguments
+pub fn execute(
   state: State,
   drive: Drive,
 ) -> Result(#(Outcome, State), VmError) {
@@ -368,8 +400,8 @@ pub fn execute_inner(
         state.agent,
         code,
         constants,
-        ld(locals, a),
-        ld(locals, b),
+        load_register(locals, a),
+        load_register(locals, b),
       )
   }
 }
@@ -379,27 +411,17 @@ pub fn execute_to_completion(
   drive: Drive,
   site: String,
 ) -> #(Result(JsVal, JsVal), State) {
-  case execute_inner(state, drive) {
+  case execute(state, drive) {
     Ok(#(Completed(NormalCompletion(v)), s)) -> #(Ok(v), s)
     Ok(#(Completed(ThrowCompletion(e)), s)) -> #(Error(e), s)
     Ok(#(Suspended(kind, _), s)) ->
-      internal_fault(s, SuspensionLeak(site:, kind:))
-    Error(err) -> internal_fault(state, err)
+      state.internal_fault(s, SuspensionLeak(site:, kind:))
+    Error(err) -> state.internal_fault(state, err)
   }
 }
 
-fn internal_fault(s: State, err: VmError) -> #(Result(JsVal, JsVal), State) {
-  let #(e, s) =
-    state.new_error(
-      s,
-      rt_types.TypeErr,
-      "internal error: " <> state.vm_error_message(err),
-    )
-  #(Error(e), s)
-}
-
 // tuple_size tells the erlang compiler these are tuples so element inlines
-fn enter(
+fn enter_loop(
   state: State,
   drive: Drive,
   pc: Int,
@@ -427,21 +449,21 @@ fn enter(
         agent,
         code,
         constants,
-        ld(locals, a),
-        ld(locals, b),
+        load_register(locals, a),
+        load_register(locals, b),
       )
   }
 }
 
-fn ld(locals: TupleArray(JsVal), slot: Int) -> JsVal {
-  case slot < 0 {
+fn load_register(locals: TupleArray(JsVal), local: Int) -> JsVal {
+  case local < 0 {
     True -> ffi.val([ffi.Undefined])
-    False -> tuple_array.element(slot + 1, locals)
+    False -> tuple_array.element(local + 1, locals)
   }
 }
 
-// negative slots name a register
-fn wreg(
+// tail-calls fast_loop with r0 (-1) or r1 (-2) replaced
+fn continue_with_register(
   state: State,
   drive: Drive,
   pc: Int,
@@ -452,10 +474,10 @@ fn wreg(
   constants: TupleArray(JsVal),
   r0: JsVal,
   r1: JsVal,
-  slot: Int,
+  register: Int,
   v: JsVal,
 ) -> Result(#(Outcome, State), VmError) {
-  case slot {
+  case register {
     -1 ->
       fast_loop(state, drive, pc, stack, locals, agent, code, constants, v, r1)
     _ ->
@@ -464,7 +486,7 @@ fn wreg(
 }
 
 // registers written back so the tuple can leave the loop
-fn fl(
+fn flush_registers(
   state: State,
   locals: TupleArray(JsVal),
   r0: JsVal,
@@ -476,7 +498,7 @@ fn fl(
   }
 }
 
-fn slow(
+fn via_step(
   state: State,
   drive: Drive,
   pc: Int,
@@ -486,7 +508,14 @@ fn slow(
   r0: JsVal,
   r1: JsVal,
 ) -> Result(#(Outcome, State), VmError) {
-  dispatch_slow(state, drive, pc, stack, fl(state, locals, r0, r1), agent)
+  step_from_loop(
+    state,
+    drive,
+    pc,
+    stack,
+    flush_registers(state, locals, r0, r1),
+    agent,
+  )
 }
 
 // fast paths do nothing observable before a miss, so step re-runs the op.
@@ -503,6 +532,7 @@ fn fast_loop(
   r0: JsVal,
   r1: JsVal,
 ) -> Result(#(Outcome, State), VmError) {
+  // every stream ends in a sentinel return, so fetch is unchecked
   case tuple_array.element(pc + 1, code) {
     PushConst(index) -> {
       let v = tuple_array.element(index + 1, constants)
@@ -535,7 +565,7 @@ fn fast_loop(
             r0,
             r1,
           )
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     Dup ->
@@ -553,7 +583,7 @@ fn fast_loop(
             r0,
             r1,
           )
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     Swap ->
@@ -571,7 +601,7 @@ fn fast_loop(
             r0,
             r1,
           )
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     GetLocal(index) -> {
@@ -584,7 +614,7 @@ fn fast_loop(
         False -> tuple_array.element(index + 1, locals)
       }
       case ffi.is(v, ffi.JsTdz) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           fast_loop(
             state,
@@ -606,7 +636,7 @@ fn fast_loop(
         [v, ..rest] ->
           case index < 0 {
             True ->
-              wreg(
+              continue_with_register(
                 state,
                 drive,
                 pc + 1,
@@ -634,7 +664,7 @@ fn fast_loop(
                 r1,
               )
           }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     GetBoxed(index) -> {
@@ -648,7 +678,7 @@ fn fast_loop(
           False -> tuple_array.element(index + 1, locals)
         })
       case ffi.is(v, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           fast_loop(
             state,
@@ -677,7 +707,7 @@ fn fast_loop(
             False -> tuple_array.element(index + 1, locals)
           }
           case is_handle(slot) {
-            False -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            False -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             True ->
               fast_loop(
                 state,
@@ -693,7 +723,7 @@ fn fast_loop(
               )
           }
         }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     Safepoint ->
@@ -711,7 +741,7 @@ fn fast_loop(
             r0,
             r1,
           )
-        False -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        False -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     Jump(Pc(target)) ->
@@ -791,7 +821,7 @@ fn fast_loop(
                   }
               }
           }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     JumpIfTrue(Pc(target)) ->
@@ -857,7 +887,7 @@ fn fast_loop(
                   }
               }
           }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     JumpIfNullish(Pc(target)) ->
@@ -891,7 +921,7 @@ fn fast_loop(
                 r1,
               )
           }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     JumpIfNotNullish(Pc(target)) ->
@@ -925,7 +955,7 @@ fn fast_loop(
                 r1,
               )
           }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     BinOp(kind) ->
@@ -936,7 +966,7 @@ fn fast_loop(
             _ -> k_binop(kind, left, right)
           }
           case ffi.is(r, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -952,7 +982,7 @@ fn fast_loop(
               )
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     BinOpConst(kind, const_index) ->
@@ -964,7 +994,7 @@ fn fast_loop(
             _ -> k_binop(kind, left, right)
           }
           case ffi.is(r, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -980,7 +1010,7 @@ fn fast_loop(
               )
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     BinOpLocal(kind, index) ->
@@ -999,7 +1029,7 @@ fn fast_loop(
             _ -> k_binop(kind, left, right)
           }
           case ffi.is(r, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -1015,7 +1045,7 @@ fn fast_loop(
               )
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     BinOpLocalLocal(kind, left_idx, right_idx) -> {
@@ -1040,7 +1070,7 @@ fn fast_loop(
         _ -> k_binop(kind, left, right)
       }
       case ffi.is(r, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           fast_loop(
             state,
@@ -1072,7 +1102,7 @@ fn fast_loop(
         _ -> k_binop(kind, left, right)
       }
       case ffi.is(r, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           fast_loop(
             state,
@@ -1097,11 +1127,11 @@ fn fast_loop(
             _ -> k_binop(kind, left, right)
           }
           case ffi.is(r, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               case dst < 0 {
                 True ->
-                  wreg(
+                  continue_with_register(
                     state,
                     drive,
                     pc + 1,
@@ -1131,7 +1161,7 @@ fn fast_loop(
               }
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     BinOpConstPut(kind, const_index, dst) ->
@@ -1143,11 +1173,11 @@ fn fast_loop(
             _ -> k_binop(kind, left, right)
           }
           case ffi.is(r, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               case dst < 0 {
                 True ->
-                  wreg(
+                  continue_with_register(
                     state,
                     drive,
                     pc + 1,
@@ -1177,7 +1207,7 @@ fn fast_loop(
               }
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     BinOpLocalPut(kind, index, dst) ->
@@ -1196,11 +1226,11 @@ fn fast_loop(
             _ -> k_binop(kind, left, right)
           }
           case ffi.is(r, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               case dst < 0 {
                 True ->
-                  wreg(
+                  continue_with_register(
                     state,
                     drive,
                     pc + 1,
@@ -1230,7 +1260,7 @@ fn fast_loop(
               }
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     BinOpLocalField(kind, index, key.Named(_) as k) ->
@@ -1250,14 +1280,14 @@ fn fast_loop(
               k,
             )
           case ffi.is(right, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False -> {
               let r = case kind {
                 opcode.InstanceOfOp -> instance_of_kernel(agent, left, right)
                 _ -> k_binop(kind, left, right)
               }
               case ffi.is(r, ffi.Miss) {
-                True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+                True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
                 False ->
                   fast_loop(
                     state,
@@ -1275,7 +1305,7 @@ fn fast_loop(
             }
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     BinOpLocalLocalPut(kind, left_idx, right_idx, dst) -> {
@@ -1300,11 +1330,11 @@ fn fast_loop(
         _ -> k_binop(kind, left, right)
       }
       case ffi.is(r, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           case dst < 0 {
             True ->
-              wreg(
+              continue_with_register(
                 state,
                 drive,
                 pc + 1,
@@ -1346,7 +1376,7 @@ fn fast_loop(
             opcode.BitNot -> k_bitnot(operand)
           }
           case ffi.is(r, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -1362,7 +1392,7 @@ fn fast_loop(
               )
           }
         }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     IncLocal(index) -> {
@@ -1379,11 +1409,11 @@ fn fast_loop(
           1,
         )
       case ffi.is(r, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           case index < 0 {
             True ->
-              wreg(
+              continue_with_register(
                 state,
                 drive,
                 pc + 1,
@@ -1428,11 +1458,11 @@ fn fast_loop(
           -1,
         )
       case ffi.is(r, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           case index < 0 {
             True ->
-              wreg(
+              continue_with_register(
                 state,
                 drive,
                 pc + 1,
@@ -1473,7 +1503,7 @@ fn fast_loop(
         False -> tuple_array.element(index + 1, locals)
       }
       case ffi.is(v, ffi.JsTdz) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           case ffi.truthy(v) == when {
             True ->
@@ -1520,11 +1550,11 @@ fn fast_loop(
           1,
         )
       case ffi.is(r, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           case index < 0 {
             True ->
-              wreg(
+              continue_with_register(
                 state,
                 drive,
                 target,
@@ -1578,7 +1608,7 @@ fn fast_loop(
           )
       }
       case ffi.is(r, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False -> {
           let next = case ffi.is_bool(r, when) {
             True -> target
@@ -1586,7 +1616,7 @@ fn fast_loop(
           }
           case index < 0 {
             True ->
-              wreg(
+              continue_with_register(
                 state,
                 drive,
                 next,
@@ -1644,7 +1674,7 @@ fn fast_loop(
           })
       }
       case ffi.is(r, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False -> {
           let next = case ffi.is_bool(r, when) {
             True -> target
@@ -1652,7 +1682,7 @@ fn fast_loop(
           }
           case index < 0 {
             True ->
-              wreg(
+              continue_with_register(
                 state,
                 drive,
                 next,
@@ -1695,11 +1725,11 @@ fn fast_loop(
       }
       let r = ffi.step(old, 1)
       case ffi.is(r, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           case index < 0 {
             True ->
-              wreg(
+              continue_with_register(
                 state,
                 drive,
                 pc + 1,
@@ -1741,11 +1771,11 @@ fn fast_loop(
       }
       let r = ffi.step(old, -1)
       case ffi.is(r, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           case index < 0 {
             True ->
-              wreg(
+              continue_with_register(
                 state,
                 drive,
                 pc + 1,
@@ -1798,7 +1828,7 @@ fn fast_loop(
           },
         )
       case ffi.is(r, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           case ffi.is_bool(r, when) {
             True ->
@@ -1846,7 +1876,7 @@ fn fast_loop(
           tuple_array.element(const_index + 1, constants),
         )
       case ffi.is(r, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           case ffi.is_bool(r, when) {
             True ->
@@ -1884,7 +1914,7 @@ fn fast_loop(
         [right, left, ..rest] -> {
           let r = pure_binop_kernel(kind, left, right)
           case ffi.is(r, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               case ffi.is_bool(r, when) {
                 True ->
@@ -1916,7 +1946,7 @@ fn fast_loop(
               }
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     CmpConstJump(const_index, kind, Pc(target), when) ->
@@ -1929,7 +1959,7 @@ fn fast_loop(
               tuple_array.element(const_index + 1, constants),
             )
           case ffi.is(r, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               case ffi.is_bool(r, when) {
                 True ->
@@ -1961,7 +1991,7 @@ fn fast_loop(
               }
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     GetElem ->
@@ -1969,7 +1999,7 @@ fn fast_loop(
         [k, recv, ..rest] -> {
           let v = ffi.get_elem(agent.store, recv, k)
           case ffi.is(v, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -1985,7 +2015,7 @@ fn fast_loop(
               )
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     GetElem2 ->
@@ -1993,7 +2023,7 @@ fn fast_loop(
         [k, recv, ..] -> {
           let v = ffi.get_elem2(agent.store, recv, k)
           case ffi.is(v, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -2009,7 +2039,7 @@ fn fast_loop(
               )
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     PutElem ->
@@ -2017,7 +2047,7 @@ fn fast_loop(
         [val, k, recv, ..rest] -> {
           let store = ffi.put_elem(agent.store, recv, k, val)
           case ffi.is(store, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -2033,7 +2063,7 @@ fn fast_loop(
               )
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     GetElemLocals(obj, key_idx) -> {
@@ -2058,7 +2088,7 @@ fn fast_loop(
           },
         )
       case ffi.is(v, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           fast_loop(
             state,
@@ -2102,11 +2132,11 @@ fn fast_loop(
           )
       }
       case ffi.is(v, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           case key_idx < 0 {
             True ->
-              wreg(
+              continue_with_register(
                 state,
                 drive,
                 pc + 1,
@@ -2142,7 +2172,7 @@ fn fast_loop(
         [val, k, recv, ..rest] -> {
           let store = ffi.put_elem(agent.store, recv, k, val)
           case ffi.is(store, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -2158,7 +2188,7 @@ fn fast_loop(
               )
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     GetField(key.Named(_) as k) ->
@@ -2166,7 +2196,7 @@ fn fast_loop(
         [recv, ..rest] -> {
           let v = ffi.get_field(agent, recv, k)
           case ffi.is(v, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -2182,7 +2212,7 @@ fn fast_loop(
               )
           }
         }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     GetField2(key.Named(_) as k) ->
@@ -2190,7 +2220,7 @@ fn fast_loop(
         [recv, ..rest] -> {
           let v = ffi.get_field(agent, recv, k)
           case ffi.is(v, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -2206,7 +2236,7 @@ fn fast_loop(
               )
           }
         }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     PutField(key.Named(_) as k) ->
@@ -2214,7 +2244,7 @@ fn fast_loop(
         [val, recv, ..rest] -> {
           let store = ffi.put_field(agent.store, recv, k, val, True)
           case ffi.is(store, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -2230,7 +2260,7 @@ fn fast_loop(
               )
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     PutFieldPop(key.Named(_) as k) ->
@@ -2238,7 +2268,7 @@ fn fast_loop(
         [val, recv, ..rest] -> {
           let store = ffi.put_field(agent.store, recv, k, val, True)
           case ffi.is(store, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -2254,7 +2284,7 @@ fn fast_loop(
               )
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     PutLocalLocalField(obj, value, k) -> {
@@ -2267,7 +2297,7 @@ fn fast_loop(
         False -> tuple_array.element(value + 1, locals)
       }
       case ffi.is(val, ffi.JsTdz) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False -> {
           let store =
             ffi.put_field(
@@ -2285,7 +2315,7 @@ fn fast_loop(
               True,
             )
           case ffi.is(store, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -2321,7 +2351,7 @@ fn fast_loop(
           True,
         )
       case ffi.is(store, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           fast_loop(
             state,
@@ -2353,7 +2383,7 @@ fn fast_loop(
           k,
         )
       case ffi.is(v, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           fast_loop(
             state,
@@ -2381,7 +2411,7 @@ fn fast_loop(
       }
       let v = ffi.get_field(agent, recv, k)
       case ffi.is(v, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           fast_loop(
             state,
@@ -2401,7 +2431,7 @@ fn fast_loop(
     GetGlobal(name) -> {
       let v = ffi.get_global(agent, agent.realm.lexical_globals, name)
       case ffi.is(v, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           fast_loop(
             state,
@@ -2421,11 +2451,11 @@ fn fast_loop(
     TypeofGlobal(name) -> {
       let v = ffi.get_global(agent, agent.realm.lexical_globals, name)
       case ffi.is(v, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False -> {
           let t = ffi.type_of_in(agent.store, v)
           case ffi.is(t, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -2458,7 +2488,7 @@ fn fast_loop(
               state.func.is_strict,
             )
           case ffi.is(store, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -2474,7 +2504,7 @@ fn fast_loop(
               )
           }
         }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     NewObject -> {
@@ -2522,7 +2552,7 @@ fn fast_loop(
         [v, ..rest] -> {
           let t = ffi.type_of_in(agent.store, v)
           case ffi.is(t, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -2538,7 +2568,7 @@ fn fast_loop(
               )
           }
         }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     DefineField(key.Named(_) as k) ->
@@ -2546,7 +2576,7 @@ fn fast_loop(
         [val, obj, ..rest] -> {
           let store = ffi.define_field(agent.store, obj, k, val)
           case ffi.is(store, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -2562,13 +2592,13 @@ fn fast_loop(
               )
           }
         }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     MakeClosure(func_index) -> {
       let template = tuple_array.element(func_index + 1, state.func.functions)
       let #(fn_h, agent) =
-        closure.t_new_bytecode_function(
+        rt_closure.t_new_bytecode_function(
           agent,
           template,
           ffi.capture_env(template.env_descriptors, locals),
@@ -2593,7 +2623,7 @@ fn fast_loop(
         [iterable, ..rest] -> {
           let rec = ffi.array_iter_start(agent, iterable)
           case ffi.is(rec, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_loop(
                 state,
@@ -2609,7 +2639,7 @@ fn fast_loop(
               )
           }
         }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     IteratorClose ->
@@ -2642,9 +2672,9 @@ fn fast_loop(
                 r0,
                 r1,
               )
-            False -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            False -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
           }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     ForInNext ->
@@ -2678,7 +2708,7 @@ fn fast_loop(
                 r1,
               )
           }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     IteratorNext ->
@@ -2732,13 +2762,13 @@ fn fast_loop(
                       )
                     }
                     ffi.IterMiss ->
-                      slow(state, drive, pc, stack, locals, agent, r0, r1)
+                      via_step(state, drive, pc, stack, locals, agent, r0, r1)
                   }
                 False ->
                   case fast_iter_step(agent.store, rec) {
                     ArrayStep(done, val, store) -> {
                       let agent = Agent(..agent, store:)
-                      let slot = case done {
+                      let record = case done {
                         True -> mk_undefined()
                         False -> rec
                       }
@@ -2746,7 +2776,7 @@ fn fast_loop(
                         state,
                         drive,
                         pc + 1,
-                        [mk_bool(done), val, slot, ..rest],
+                        [mk_bool(done), val, record, ..rest],
                         locals,
                         agent,
                         code,
@@ -2756,7 +2786,7 @@ fn fast_loop(
                       )
                     }
                     // registers stay live across the step, flushed only on exits
-                    fast -> {
+                    plan -> {
                       let state =
                         State(
                           ..state,
@@ -2764,7 +2794,9 @@ fn fast_loop(
                           stack:,
                           agent: call.sync(state, agent, pc, 0),
                         )
-                      case iterator_next_slow(state, drive, rec, rest, fast) {
+                      case
+                        iterator_next_general(state, drive, rec, rest, plan)
+                      {
                         Ok(s) ->
                           fast_loop(
                             s,
@@ -2782,7 +2814,10 @@ fn fast_loop(
                           after_step(
                             Error(
                               state.map_exit_state(exit, fn(s) {
-                                State(..s, locals: fl(s, locals, r0, r1))
+                                State(
+                                  ..s,
+                                  locals: flush_registers(s, locals, r0, r1),
+                                )
                               }),
                             ),
                             drive,
@@ -2792,7 +2827,7 @@ fn fast_loop(
                   }
               }
           }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     // coroutine frames never get registers, see compile_child
@@ -2851,7 +2886,7 @@ fn fast_loop(
       )
     }
 
-    opcode.PopTry ->
+    PopTry ->
       case state.try_stack {
         [_, ..try_rest] ->
           fast_loop(
@@ -2866,13 +2901,19 @@ fn fast_loop(
             r0,
             r1,
           )
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     CreateArguments(simple_params:) -> {
       let s =
         call.create_arguments(
-          State(..state, pc:, stack:, locals: fl(state, locals, r0, r1), agent:),
+          State(
+            ..state,
+            pc:,
+            stack:,
+            locals: flush_registers(state, locals, r0, r1),
+            agent:,
+          ),
           simple_params,
         )
       fast_loop(
@@ -2889,6 +2930,7 @@ fn fast_loop(
       )
     }
 
+    // arity 0-2 unrolled to skip pop_n's tuple
     Call(arity) ->
       case arity, stack {
         0, [callee, ..rest] ->
@@ -2973,7 +3015,7 @@ fn fast_loop(
                 None,
                 ffi.val([ffi.Undefined]),
               )
-            _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
           }
       }
 
@@ -3061,7 +3103,7 @@ fn fast_loop(
                 None,
                 ffi.val([ffi.Undefined]),
               )
-            _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
           }
       }
 
@@ -3078,7 +3120,7 @@ fn fast_loop(
             False -> tuple_array.element(arg_idx + 1, locals)
           }
           case ffi.is(method, ffi.Miss) || ffi.is(arg, ffi.JsTdz) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_call(
                 state,
@@ -3101,7 +3143,7 @@ fn fast_loop(
               )
           }
         }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     GetFieldCall(key.Named(_) as k) ->
@@ -3109,7 +3151,7 @@ fn fast_loop(
         [recv, ..rest] -> {
           let method = ffi.get_field(agent, recv, k)
           case ffi.is(method, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
               fast_call(
                 state,
@@ -3132,7 +3174,7 @@ fn fast_loop(
               )
           }
         }
-        [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     GetLocalFieldCall(index, key.Named(_) as k) -> {
@@ -3146,7 +3188,7 @@ fn fast_loop(
       }
       let method = ffi.get_field(agent, recv, k)
       case ffi.is(method, ffi.Miss) {
-        True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
           fast_call(
             state,
@@ -3189,7 +3231,7 @@ fn fast_loop(
             args,
             rest,
           )
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     ApplyArguments(slot:, ..) ->
@@ -3226,9 +3268,9 @@ fn fast_loop(
                 None,
                 ffi.val([ffi.Undefined]),
               )
-            False -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            False -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
           }
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     CallConstructor(arity) ->
@@ -3250,7 +3292,7 @@ fn fast_loop(
             args,
             rest,
           )
-        _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+        _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     Return ->
@@ -3271,7 +3313,7 @@ fn fast_loop(
                     ..state,
                     pc:,
                     stack:,
-                    locals: fl(state, locals, r0, r1),
+                    locals: flush_registers(state, locals, r0, r1),
                     agent: call.sync(state, agent, pc, 0),
                   ),
                 ),
@@ -3293,6 +3335,7 @@ fn fast_loop(
               let caller_stack = saved.stack
               let caller_locals = saved.locals
               let depth = state.depth
+              // call.leave_frame inlined
               let agent = case agent.call_depth == depth {
                 False -> agent
                 True ->
@@ -3318,7 +3361,7 @@ fn fast_loop(
                       saved,
                       caller_stack,
                     ))
-                  enter(
+                  enter_loop(
                     caller,
                     drive,
                     caller_pc,
@@ -3329,6 +3372,7 @@ fn fast_loop(
                     caller.func.constants,
                   )
                 }
+                // enter_loop inlined
                 False ->
                   case saved {
                     SavedRegFrame(r0:, r1:, ..) -> {
@@ -3375,7 +3419,7 @@ fn fast_loop(
                           )
                         }
                         bytecode.Regs(..) ->
-                          enter(
+                          enter_loop(
                             caller,
                             drive,
                             caller_pc,
@@ -3404,7 +3448,7 @@ fn fast_loop(
         }
       }
 
-    _other -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+    _other -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
   }
 }
 
@@ -3420,7 +3464,7 @@ fn fast_call(
   constants: TupleArray(JsVal),
   r0: JsVal,
   r1: JsVal,
-  slot: rt_types.JsSlot,
+  callee_cell: types.JsSlot,
   callee: JsVal,
   this: JsVal,
   args: List(JsVal),
@@ -3429,9 +3473,9 @@ fn fast_call(
   new_target: JsVal,
 ) -> Result(#(Outcome, State), VmError) {
   let depth = state.depth
-  case ffi.is(slot, ffi.Miss) {
+  case ffi.is(callee_cell, ffi.Miss) {
     False ->
-      case slot {
+      case callee_cell {
         SObject(kind: KNative(tag:, ..), ..)
           if tag != function_call
           && tag != function_apply
@@ -3442,11 +3486,12 @@ fn fast_call(
             False -> call.sync(state, agent, pc, 1)
             True -> {
               let line = tuple_array.element(pc + 1, state.func.lines)
+              // call.set_top_line inlined
               let frames = case agent.frames {
-                [rt_types.FrameInfo(line: l, ..), ..] as frames if l == line ->
+                [types.FrameInfo(line: l, ..), ..] as frames if l == line ->
                   frames
-                [top, ..rest] -> [rt_types.FrameInfo(..top, line:), ..rest]
-                [] -> [rt_types.FrameInfo("", call.stack_source, line)]
+                [top, ..rest] -> [types.FrameInfo(..top, line:), ..rest]
+                [] -> [types.FrameInfo("", call.stack_source, line)]
               }
               Agent(..agent, frames:, call_depth: depth + 1)
             }
@@ -3473,7 +3518,7 @@ fn fast_call(
                     ..state,
                     pc:,
                     stack: rest,
-                    locals: fl(state, locals, r0, r1),
+                    locals: flush_registers(state, locals, r0, r1),
                     agent: Agent(..agent, call_depth: agent.call_depth - 1),
                   ),
                 )),
@@ -3492,7 +3537,7 @@ fn fast_call(
             ..,
           ),
           ..,
-        ) as slot ->
+        ) as callee_cell ->
           case
             realm == agent.realm.id
             && depth < limits.max_call_depth
@@ -3509,6 +3554,7 @@ fn fast_call(
                 Some(h) -> ffi.object([h])
                 None -> ffi.val([ffi.Undefined])
               }
+              // keep in step with call.setup_frame
               let #(this_val, agent) = case
                 template.is_arrow || flags.is_strict
               {
@@ -3585,6 +3631,7 @@ fn fast_call(
                 True -> call.elide_tail_frame(new_state)
                 False -> new_state
               }
+              // enter_loop inlined
               case template.regs {
                 bytecode.NoRegs -> {
                   let code = template.bytecode
@@ -3607,7 +3654,7 @@ fn fast_call(
                   )
                 }
                 bytecode.Regs(..) ->
-                  enter(
+                  enter_loop(
                     new_state,
                     drive,
                     0,
@@ -3628,11 +3675,11 @@ fn fast_call(
                         ..state,
                         pc:,
                         stack:,
-                        locals: fl(state, locals, r0, r1),
+                        locals: flush_registers(state, locals, r0, r1),
                         agent: call.sync(state, agent, pc, 0),
                       ),
                       ffi.handle([callee]),
-                      slot,
+                      callee_cell,
                       this,
                       args,
                       rest,
@@ -3640,21 +3687,22 @@ fn fast_call(
                     ),
                     drive,
                   )
-                False -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+                False ->
+                  via_step(state, drive, pc, stack, locals, agent, r0, r1)
               }
           }
-        slot ->
+        callee_cell ->
           after_step(
             call.call_cell(
               State(
                 ..state,
                 pc:,
                 stack:,
-                locals: fl(state, locals, r0, r1),
+                locals: flush_registers(state, locals, r0, r1),
                 agent: call.sync(state, agent, pc, 0),
               ),
               ffi.handle([callee]),
-              slot,
+              callee_cell,
               this,
               args,
               rest,
@@ -3670,7 +3718,7 @@ fn fast_call(
             ..state,
             pc:,
             stack:,
-            locals: fl(state, locals, r0, r1),
+            locals: flush_registers(state, locals, r0, r1),
             agent: call.sync(state, agent, pc, 0),
           ),
           callee,
@@ -3701,7 +3749,7 @@ fn fast_construct(
   rest: List(JsVal),
 ) -> Result(#(Outcome, State), VmError) {
   case ffi.cell_of(agent, ctor) {
-    SObject(kind: KBytecode(template:, flags:, realm:, ..), props:, ..) as slot
+    SObject(kind: KBytecode(template:, flags:, realm:, ..), props:, ..) as callee_cell
       if flags.is_constructor
       && realm == agent.realm.id
       && state.depth < limits.max_call_depth
@@ -3719,7 +3767,7 @@ fn fast_construct(
             constants,
             r0,
             r1,
-            slot,
+            callee_cell,
             ctor,
             ffi.val([ffi.JsTdz]),
             args,
@@ -3734,7 +3782,7 @@ fn fast_construct(
           }
           let made = ffi.new_receiver(agent, proto)
           case ffi.is(made, ffi.Miss) {
-            True -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+            True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False -> {
               let #(receiver, agent) = made
               fast_call(
@@ -3748,7 +3796,7 @@ fn fast_construct(
                 constants,
                 r0,
                 r1,
-                slot,
+                callee_cell,
                 ctor,
                 receiver,
                 args,
@@ -3760,15 +3808,9 @@ fn fast_construct(
           }
         }
       }
-    _ -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+    _ -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
   }
 }
-
-const prototype_key = key.Named("prototype")
-
-const return_key = key.Named("return")
-
-const function_call = FunctionN(FunctionCall)
 
 fn is_intrinsic_apply(agent: Agent, v: JsVal) -> Bool {
   case ffi.cell_of(agent, v) {
@@ -3777,16 +3819,12 @@ fn is_intrinsic_apply(agent: Agent, v: JsVal) -> Bool {
   }
 }
 
-const function_apply = FunctionN(FunctionApply)
-
-const reflect_apply = ReflectN(ReflectApply)
-
 fn instance_of_kernel(agent: Agent, left: JsVal, right: JsVal) -> JsVal {
-  ffi.instance_of(agent, left, right, rt_types.symbol_has_instance)
+  ffi.instance_of(agent, left, right, types.symbol_has_instance)
 }
 
 // the stack-only array record, spelled out with full get semantics
-fn array_iter_next_slow(
+fn array_iter_next_general(
   state: State,
   rec: JsVal,
   rest: List(JsVal),
@@ -3796,7 +3834,7 @@ fn array_iter_next_slow(
   let len = case classify(target) {
     KHandle(h) ->
       case rt_store.t_cell_get(state.agent, h) {
-        SObject(kind: rt_types.ArrayObj(length:), ..) -> length
+        SObject(kind: types.ArrayObj(length:), ..) -> length
         _ -> 0
       }
     _ -> 0
@@ -3866,26 +3904,18 @@ fn materialize_record(
       let kind = case classify(target) {
         KHandle(h) ->
           case rt_store.t_cell_get(state.agent, h) {
-            SObject(kind: rt_types.MapObj(_), ..) ->
-              rt_types.MapIterator(
-                target: h,
-                index:,
-                kind: rt_types.MapIterEntries,
-              )
-            SObject(kind: rt_types.SetObj(_), ..) ->
-              rt_types.SetIterator(
-                target: h,
-                index:,
-                kind: rt_types.SetIterValues,
-              )
+            SObject(kind: types.MapObj(_), ..) ->
+              types.MapIterator(target: h, index:, kind: types.MapIterEntries)
+            SObject(kind: types.SetObj(_), ..) ->
+              types.SetIterator(target: h, index:, kind: types.SetIterValues)
             _ ->
-              rt_types.ArrayIterator(
+              types.ArrayIterator(
                 target: h,
                 index:,
-                kind: rt_types.ArrayIterValues,
+                kind: types.ArrayIterValues,
               )
           }
-        _ -> rt_types.StringIterator(source: js_string.bin(target), index:)
+        _ -> types.StringIterator(source: js_string.bin(target), index:)
       }
       rt2(
         state,
@@ -3904,7 +3934,7 @@ fn materialize_record(
             )
           rt_lang.t_alloc_record(
             agent,
-            rt_types.IteratorRecord(
+            types.IteratorRecord(
               iterator: mk_object(iter),
               next_method: next_fn,
             ),
@@ -3938,9 +3968,6 @@ pub fn closable_record(
   }
 }
 
-@external(erlang, "arc_rt_ops_ffi", "pure_binop")
-fn pure_binop_kernel(op: binop.PureBinOp, left: JsVal, right: JsVal) -> JsVal
-
 fn top_or_undefined(stack: List(JsVal)) -> #(JsVal, List(JsVal)) {
   case stack {
     [v, ..rest] -> #(v, rest)
@@ -3948,7 +3975,7 @@ fn top_or_undefined(stack: List(JsVal)) -> #(JsVal, List(JsVal)) {
   }
 }
 
-fn dispatch_slow(
+fn step_from_loop(
   state: State,
   drive: Drive,
   pc: Int,
@@ -3973,7 +4000,7 @@ fn dispatch_slow(
   }
   case step(state, drive, op) {
     Ok(s) ->
-      enter(
+      enter_loop(
         s,
         drive,
         s.pc,
@@ -3993,7 +4020,7 @@ fn after_step(
 ) -> Result(#(Outcome, State), VmError) {
   case stepped {
     Ok(s) ->
-      enter(
+      enter_loop(
         s,
         drive,
         s.pc,
@@ -4047,17 +4074,9 @@ fn after_step(
     }
     Error(Threw(thrown, post)) ->
       case unwind_to_catch(post, thrown) {
-        Some(caught) -> execute_inner(caught, drive)
+        Some(caught) -> execute(caught, drive)
         None -> Ok(#(Completed(ThrowCompletion(thrown)), post))
       }
-  }
-}
-
-pub fn truncate_stack(stack: List(JsVal), depth: Int) -> List(JsVal) {
-  let excess = list.length(stack) - depth
-  case excess > 0 {
-    True -> list.drop(stack, excess)
-    False -> stack
   }
 }
 
@@ -4068,7 +4087,7 @@ pub fn unwind_to_catch(state: State, thrown: JsVal) -> Option(State) {
       Some(
         State(
           ..state,
-          stack: [thrown, ..truncate_stack(state.stack, stack_depth)],
+          stack: [thrown, ..state.truncate_stack(state.stack, stack_depth)],
           try_stack: rest_try,
           pc: catch_target,
         ),
@@ -4258,9 +4277,9 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
 
     // §9.1.1.4.4 getbindingvalue
     GetGlobal(name) ->
-      case lex_lookup(state.agent, name) {
+      case lexical_global(state.agent, name) {
         Some(binding) -> {
-          let value = rt_types.lexical_global_value(binding)
+          let value = types.lexical_global_value(binding)
           case is_tdz(value) {
             True ->
               state.throw_reference_error(
@@ -4283,11 +4302,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     PutGlobal(name) ->
       case state.stack {
         [value, ..rest] ->
-          case lex_lookup(state.agent, name) {
+          case lexical_global(state.agent, name) {
             // const rejects assignment even in tdz
-            Some(rt_types.Const(_)) ->
+            Some(types.Const(_)) ->
               state.throw_type_error(state, "Assignment to constant variable.")
-            Some(rt_types.Let(current)) ->
+            Some(types.Let(current)) ->
               case is_tdz(current) {
                 True ->
                   state.throw_reference_error(
@@ -4298,7 +4317,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                   Ok(
                     State(
                       ..state,
-                      agent: lex_write(state.agent, name, rt_types.Let(value)),
+                      agent: put_lexical_global(
+                        state.agent,
+                        name,
+                        types.Let(value),
+                      ),
                       stack: rest,
                       pc: state.pc + 1,
                     ),
@@ -4318,7 +4341,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
 
     // §9.1.1.4.7 deletebinding, lexical bindings never deletable
     DeleteGlobalVar(name) ->
-      case lex_lookup(state.agent, name) {
+      case lexical_global(state.agent, name) {
         Some(_) ->
           Ok(
             State(
@@ -4416,7 +4439,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           )
       }
 
-    opcode.ToStringVal ->
+    ToStringVal ->
       case state.stack {
         [val, ..rest] ->
           case classify(val) {
@@ -4430,7 +4453,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       }
 
     // §13.2.8.4 gettemplateobject, cached per site
-    opcode.GetTemplateObject(site, quasis) -> {
+    GetTemplateObject(site, quasis) -> {
       let cooked =
         list.map(quasis, fn(q) {
           option.map(q.cooked, mk_string) |> option.unwrap(mk_undefined())
@@ -4447,7 +4470,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     }
 
     // §7.1.19 topropertykey
-    opcode.ToPropertyKey ->
+    ToPropertyKey ->
       case state.stack {
         [val, ..rest] ->
           case classify(val) {
@@ -4480,7 +4503,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "ToPropertyKey")
       }
 
-    opcode.ToObject ->
+    ToObject ->
       case state.stack {
         [val, ..rest] -> {
           use #(h, state) <- result.map(rt2(state, rt_val.t_to_object, val))
@@ -4489,13 +4512,13 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "ToObject")
       }
 
-    opcode.WithGetVar(name, Pc(target)) ->
+    WithGetVar(name, Pc(target)) ->
       with_get_var(state, name, target, keep_this: False, op: "WithGetVar")
 
-    opcode.WithGetVarThis(name, Pc(target)) ->
+    WithGetVarThis(name, Pc(target)) ->
       with_get_var(state, name, target, keep_this: True, op: "WithGetVarThis")
 
-    opcode.WithPutVar(name, Pc(target)) ->
+    WithPutVar(name, Pc(target)) ->
       case state.stack {
         [obj, val, ..rest] ->
           case handle_of(obj) {
@@ -4527,7 +4550,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "WithPutVar")
       }
 
-    opcode.WithDeleteVar(name, Pc(target)) ->
+    WithDeleteVar(name, Pc(target)) ->
       case state.stack {
         [obj, ..rest] ->
           case handle_of(obj) {
@@ -4556,7 +4579,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "WithDeleteVar")
       }
 
-    opcode.WithMakeRef(name, Pc(target)) ->
+    WithMakeRef(name, Pc(target)) ->
       case state.stack {
         [obj, ..rest] ->
           case handle_of(obj) {
@@ -4577,7 +4600,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "WithMakeRef")
       }
 
-    opcode.WithGetRefValue(name, Pc(target)) ->
+    WithGetRefValue(name, Pc(target)) ->
       case state.stack {
         [obj, ..rest] ->
           case handle_of(obj) {
@@ -4596,7 +4619,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "WithGetRefValue")
       }
 
-    opcode.WithPutRefValue(name, Pc(target)) ->
+    WithPutRefValue(name, Pc(target)) ->
       case state.stack {
         [obj, val, ..rest] ->
           case handle_of(obj) {
@@ -4621,9 +4644,9 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       Ok(
         State(
           ..state,
-          agent: lex_write(state.agent, name, case is_const {
-            True -> rt_types.Const(mk_tdz())
-            False -> rt_types.Let(mk_tdz())
+          agent: put_lexical_global(state.agent, name, case is_const {
+            True -> types.Const(mk_tdz())
+            False -> types.Let(mk_tdz())
           }),
           pc: state.pc + 1,
         ),
@@ -4632,14 +4655,14 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     InitGlobalLex(name) ->
       case state.stack {
         [val, ..rest] -> {
-          let binding = case lex_lookup(state.agent, name) {
-            Some(existing) -> rt_types.lexical_global_with_value(existing, val)
-            None -> rt_types.Let(val)
+          let binding = case lexical_global(state.agent, name) {
+            Some(existing) -> types.lexical_global_with_value(existing, val)
+            None -> types.Let(val)
           }
           Ok(
             State(
               ..state,
-              agent: lex_write(state.agent, name, binding),
+              agent: put_lexical_global(state.agent, name, binding),
               stack: rest,
               pc: state.pc + 1,
             ),
@@ -4648,7 +4671,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "InitGlobalLex")
       }
 
-    opcode.GetDisposer(is_async:) ->
+    GetDisposer(is_async:) ->
       case state.stack {
         [val, ..rest] -> {
           let state = State(..state, stack: rest, pc: state.pc + 1)
@@ -4664,11 +4687,11 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "GetDisposer")
       }
 
-    opcode.MakeSuppressed ->
+    MakeSuppressed ->
       case state.stack {
         [suppressed, err, ..rest] -> {
           let #(suppressed_error, agent) =
-            rt_error.make_suppressed_error(state.agent, err, suppressed)
+            b_error.make_suppressed_error(state.agent, err, suppressed)
           Ok(
             State(
               ..state,
@@ -4692,9 +4715,9 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
 
     // tdz throws, undeclared is "undefined"
     TypeofGlobal(name) ->
-      case lex_lookup(state.agent, name) {
+      case lexical_global(state.agent, name) {
         Some(binding) -> {
-          let value = rt_types.lexical_global_value(binding)
+          let value = types.lexical_global_value(binding)
           case is_tdz(value) {
             True ->
               state.throw_reference_error(
@@ -4809,7 +4832,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             binop_step(state, kind, left, right, rest)
           }
           use <-
-            accessor_frame(state, receiver, k, rest, drive, Some(finish), _)
+            accessor_as_frame(state, receiver, k, rest, drive, Some(finish), _)
           use #(right, state) <- result.try(get_field(state, receiver, k))
           finish(state, right)
         }
@@ -4825,7 +4848,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     UnaryOp(kind) ->
       case state.stack {
         [operand, ..rest] -> {
-          use #(r, state) <- result.map(unaryop_slow(state, kind, operand))
+          use #(r, state) <- result.map(unaryop_general(state, kind, operand))
           State(..state, stack: [r, ..rest], pc: state.pc + 1)
         }
         [] -> underflow(state, "UnaryOp")
@@ -4951,22 +4974,22 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     }
 
     // quickjs op_gosub
-    opcode.Gosub(Pc(target)) ->
+    Gosub(Pc(target)) ->
       Ok(
         State(..state, stack: [mk_int(state.pc + 1), ..state.stack], pc: target),
       )
 
     // quickjs op_ret; negative retpc: slot below is the return value
-    opcode.Ret ->
+    Ret ->
       case state.stack {
         [ret_pc, ..rest] ->
           case classify(ret_pc), rest {
-            KNum(rt_types.JInt(n)), [slot, ..below] if n < 0 ->
+            KNum(types.JInt(n)), [slot, ..below] if n < 0 ->
               Error(Returned(slot, State(..state, stack: below)))
-            KNum(rt_types.JInt(n)), _ -> Ok(State(..state, stack: rest, pc: n))
-            KNum(rt_types.JFloat(f)), [slot, ..below] if f <. 0.0 ->
+            KNum(types.JInt(n)), _ -> Ok(State(..state, stack: rest, pc: n))
+            KNum(types.JFloat(f)), [slot, ..below] if f <. 0.0 ->
               Error(Returned(slot, State(..state, stack: below)))
-            KNum(rt_types.JFloat(f)), _ ->
+            KNum(types.JFloat(f)), _ ->
               Ok(State(..state, stack: rest, pc: rt_val.float_to_int(f)))
             _, _ -> underflow(state, "Ret")
           }
@@ -4981,22 +5004,22 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       )
     }
 
-    opcode.PopTry ->
+    PopTry ->
       case state.try_stack {
         [_, ..rest] -> Ok(State(..state, try_stack: rest, pc: state.pc + 1))
         [] -> underflow(state, "PopTry: empty try_stack")
       }
 
-    opcode.Throw ->
+    Throw ->
       case state.stack {
         [value, ..] -> Error(Threw(value, state))
         [] -> underflow(state, "Throw")
       }
 
-    opcode.ThrowConstAssign(_name) ->
+    ThrowConstAssign(_name) ->
       state.throw_type_error(state, "Assignment to constant variable.")
 
-    opcode.ThrowError(kind, msg) ->
+    ThrowError(kind, msg) ->
       case kind {
         opcode.ReferenceErrorKind -> state.throw_reference_error(state, msg)
         opcode.TypeErrorKind -> state.throw_type_error(state, msg)
@@ -5041,7 +5064,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     GetField(k) ->
       case state.stack {
         [receiver, ..rest] -> {
-          use <- getter_frame(state, receiver, k, rest, drive)
+          use <- getter_as_frame(state, receiver, k, rest, drive)
           use #(val, state) <- result.map(get_field(state, receiver, k))
           State(..state, stack: [val, ..rest], pc: state.pc + 1)
         }
@@ -5051,7 +5074,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     GetField2(k) ->
       case state.stack {
         [receiver, ..rest] -> {
-          use <- getter_frame(state, receiver, k, state.stack, drive)
+          use <- getter_as_frame(state, receiver, k, state.stack, drive)
           use #(val, state) <- result.map(get_field(state, receiver, k))
           State(..state, stack: [val, receiver, ..rest], pc: state.pc + 1)
         }
@@ -5063,7 +5086,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case is_tdz(receiver) {
         True -> tdz_reference_error(state)
         False -> {
-          use <- getter_frame(state, receiver, k, state.stack, drive)
+          use <- getter_as_frame(state, receiver, k, state.stack, drive)
           use #(val, state) <- result.map(get_field(state, receiver, k))
           State(..state, stack: [val, ..state.stack], pc: state.pc + 1)
         }
@@ -5146,7 +5169,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case state.stack {
         [value, receiver, ..rest] -> {
           let after = [value, ..rest]
-          use <- setter_frame(state, receiver, k, value, after, drive)
+          use <- setter_as_frame(state, receiver, k, value, after, drive)
           put_field_step(state, k, value, receiver, after)
         }
         _ -> underflow(state, "PutField")
@@ -5155,7 +5178,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     PutFieldPop(k) ->
       case state.stack {
         [value, receiver, ..rest] -> {
-          use <- setter_frame(state, receiver, k, value, rest, drive)
+          use <- setter_as_frame(state, receiver, k, value, rest, drive)
           put_field_step(state, k, value, receiver, rest)
         }
         _ -> underflow(state, "PutFieldPop")
@@ -5258,7 +5281,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 h,
                 k,
                 func,
-                rt_types.MIMethod,
+                types.MIMethod,
               ))
               State(..state, stack: [obj, ..rest], pc: state.pc + 1)
             }
@@ -5274,8 +5297,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           case handle_of(obj) {
             Some(h) -> {
               let install = case kind {
-                opcode.Getter -> rt_types.MIGetter
-                opcode.Setter -> rt_types.MISetter
+                opcode.Getter -> types.MIGetter
+                opcode.Setter -> types.MISetter
               }
               use state <- result.map(rt_unit5(
                 state,
@@ -5301,7 +5324,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               use state <- result.map(create_data_property_or_throw(
                 state,
                 h,
-                okey(k),
+                object_key(k),
                 value,
               ))
               State(..state, stack: [obj, ..rest], pc: state.pc + 1)
@@ -5320,9 +5343,9 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 state,
                 rt_class.t_define_method,
                 target,
-                okey(k),
+                object_key(k),
                 fn_h,
-                rt_types.MIMethod,
+                types.MIMethod,
                 False,
               ))
               State(..state, stack: [obj, ..rest], pc: state.pc + 1)
@@ -5348,7 +5371,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 target,
                 pk,
                 fn_h,
-                rt_types.MIMethod,
+                types.MIMethod,
                 False,
               ))
               State(..state, stack: [obj, ..rest], pc: state.pc + 1)
@@ -5367,7 +5390,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 state,
                 rt_class.t_define_method,
                 target,
-                okey(k),
+                object_key(k),
                 fn_h,
                 accessor_install_kind(kind),
                 enumerable,
@@ -5529,7 +5552,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 state,
                 rt_obj.t_delete_prop,
                 h,
-                okey(k),
+                object_key(k),
               ))
               // §13.5.1.2 step 5.b.i
               case deleted, state.func.is_strict {
@@ -5795,7 +5818,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                   param_scope_names,
                   with_names,
                   private_names,
-                  run_activation(_, drive),
+                  run_eval_body(_, drive),
                 )
               case res {
                 Ok(val) ->
@@ -5931,8 +5954,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(h) ->
               slot_prototype(state.agent, h)
               |> option.map(mk_object)
-              |> option.unwrap(rt_types.mk_null())
-            None -> rt_types.mk_null()
+              |> option.unwrap(types.mk_null())
+            None -> types.mk_null()
           }
           Ok(State(..state, stack: [proto, ..rest], pc: state.pc + 1))
         }
@@ -5984,7 +6007,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     MakeClosure(func_index) -> {
       let template = tuple_array.get_unchecked(func_index, state.func.functions)
       let #(fn_h, agent) =
-        closure.t_new_bytecode_function(
+        rt_closure.t_new_bytecode_function(
           state.agent,
           template,
           ffi.capture_env(template.env_descriptors, state.locals),
@@ -6101,7 +6124,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "IteratorRecord")
       }
 
-    // done or abrupt next: slot becomes undefined so later ops no-op
+    // done or abrupt next: the record becomes undefined so later ops no-op
     IteratorNext ->
       case state.stack {
         [rec, ..rest] ->
@@ -6116,12 +6139,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               )
             False -> {
               use <- bool.lazy_guard(ffi.is_array_iter(rec), fn() {
-                array_iter_next_slow(state, rec, rest)
+                array_iter_next_general(state, rec, rest)
               })
               case fast_iter_step(state.agent.store, rec) {
                 ArrayStep(done, val, store) -> {
                   let agent = Agent(..state.agent, store:)
-                  let slot = case done {
+                  let record = case done {
                     True -> mk_undefined()
                     False -> rec
                   }
@@ -6129,12 +6152,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                     State(
                       ..state,
                       agent:,
-                      stack: [mk_bool(done), val, slot, ..rest],
+                      stack: [mk_bool(done), val, record, ..rest],
                       pc: state.pc + 1,
                     ),
                   )
                 }
-                fast -> iterator_next_slow(state, drive, rec, rest, fast)
+                plan -> iterator_next_general(state, drive, rec, rest, plan)
               }
             }
           }
@@ -6234,12 +6257,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     // §27.5.3.8; pc kept here so the resume re-enters
     YieldStar ->
       case state.stack {
-        [arg, slot, ..rest] -> {
-          use #(slot, state) <- result.try(materialize_record(state, slot))
-          let state = State(..state, stack: [arg, slot, ..rest])
+        [arg, record, ..rest] -> {
+          use #(record, state) <- result.try(materialize_record(state, record))
+          let state = State(..state, stack: [arg, record, ..rest])
           use #(iterator, next_fn, state) <- result.try(delegate_target(
             state,
-            slot,
+            record,
           ))
           use #(#(done, val), state) <- result.try(delegate_step(
             state,
@@ -6258,15 +6281,15 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
 
     AsyncYieldStarNext(after_pc: _) ->
       case state.stack {
-        [arg, slot, ..rest] -> {
+        [arg, record, ..rest] -> {
           use #(iterator, next_fn, state) <- result.try(delegate_target(
             state,
-            slot,
+            record,
           ))
           use #(res, state) <- result.map(
             rt4(state, rt_call.t_call_checked, next_fn, iterator, [arg]),
           )
-          State(..state, stack: [res, slot, ..rest], pc: state.pc + 1)
+          State(..state, stack: [res, record, ..rest], pc: state.pc + 1)
         }
         _ -> underflow(state, "AsyncYieldStarNext")
       }
@@ -6318,7 +6341,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       }
 
     // §13.3.10 failures after arg evaluation reject the promise
-    opcode.DynamicImport ->
+    DynamicImport ->
       case state.stack {
         [options, specifier, ..rest] -> {
           use #(promise, state) <- result.map(rt3(
@@ -6332,7 +6355,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "DynamicImport")
       }
 
-    opcode.DynamicImportSource ->
+    DynamicImportSource ->
       case state.stack {
         [specifier, ..rest] -> {
           use #(promise, state) <- result.map(rt2(
@@ -6345,7 +6368,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "DynamicImportSource")
       }
 
-    opcode.DynamicImportDefer ->
+    DynamicImportDefer ->
       case state.stack {
         [specifier, ..rest] -> {
           use #(promise, state) <- result.map(rt2(
@@ -6360,12 +6383,10 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
   }
 }
 
-fn accessor_install_kind(
-  kind: opcode.AccessorKind,
-) -> rt_types.MethodInstallKind {
+fn accessor_install_kind(kind: opcode.AccessorKind) -> types.MethodInstallKind {
   case kind {
-    opcode.Getter -> rt_types.MIGetter
-    opcode.Setter -> rt_types.MISetter
+    opcode.Getter -> types.MIGetter
+    opcode.Setter -> types.MISetter
   }
 }
 
@@ -6402,7 +6423,7 @@ fn put_field_step(
         state,
         rt_obj.t_set_prop,
         receiver,
-        okey(k),
+        object_key(k),
         value,
       ))
       case ok, state.func.is_strict {
@@ -6454,7 +6475,7 @@ fn get_field(
           <> key.key_display_string(k)
           <> "')",
       )
-    _ -> rt3(state, rt_obj.t_get_prop, receiver, okey(k))
+    _ -> rt3(state, rt_obj.t_get_prop, receiver, object_key(k))
   }
 }
 
@@ -6574,7 +6595,7 @@ fn with_get_var(
   }
 }
 
-fn pure_binop_slow(
+fn pure_binop_general(
   state: State,
   op: binop.PureBinOp,
   left: JsVal,
@@ -6609,7 +6630,7 @@ fn pure_binop_slow(
   }
 }
 
-fn unaryop_slow(
+fn unaryop_general(
   state: State,
   kind: opcode.UnaryOpKind,
   operand: JsVal,
@@ -6799,7 +6820,7 @@ fn binop_value(
           )
       }
     opcode.AddOp -> rt3(state, rt_ops.t_add, left, right)
-    opcode.PureOp(op) -> pure_binop_slow(state, op, left, right)
+    opcode.PureOp(op) -> pure_binop_general(state, op, left, right)
   }
 }
 
@@ -6812,7 +6833,7 @@ fn fused_cmp_jump(
   when: Bool,
 ) -> Result(State, StepExit) {
   let next_pc = state.pc + 1
-  use #(r, state) <- result.map(pure_binop_slow(state, kind, left, right))
+  use #(r, state) <- result.map(pure_binop_general(state, kind, left, right))
   case ffi.truthy(r) == when {
     True -> State(..state, pc: target)
     False -> State(..state, pc: next_pc)
@@ -6848,8 +6869,8 @@ fn create_data_property_or_throw(
 
 fn object_key_display(k: ObjectKey) -> String {
   case k {
-    StringKey(pk) -> rt_types.key_display_string(pk)
-    SymbolKey(sym) -> rt_types.symbol_descriptive_string(sym)
+    StringKey(pk) -> types.key_display_string(pk)
+    SymbolKey(sym) -> types.symbol_descriptive_string(sym)
   }
 }
 
@@ -6937,12 +6958,12 @@ fn set_slot_prototype(agent: Agent, h: Handle, proto: Option(Handle)) -> Agent {
 fn array_push(agent: Agent, h: Handle, value: Option(JsVal)) -> Agent {
   rt_store.t_cell_update(agent, h, fn(slot) {
     case slot {
-      SObject(kind: rt_types.ArrayObj(length:), elements:, ..) ->
+      SObject(kind: types.ArrayObj(length:), elements:, ..) ->
         SObject(
           ..slot,
-          kind: rt_types.ArrayObj(length: length + 1),
+          kind: types.ArrayObj(length: length + 1),
           elements: case value {
-            Some(v) -> rt_elements.set(elements, length, v)
+            Some(v) -> elements.set(elements, length, v)
             None -> elements
           },
         )
@@ -6954,11 +6975,11 @@ fn array_push(agent: Agent, h: Handle, value: Option(JsVal)) -> Agent {
 fn array_append(agent: Agent, h: Handle, items: List(JsVal)) -> Agent {
   rt_store.t_cell_update(agent, h, fn(slot) {
     case slot {
-      SObject(kind: rt_types.ArrayObj(length:), elements:, ..) ->
+      SObject(kind: types.ArrayObj(length:), elements:, ..) ->
         SObject(
           ..slot,
-          kind: rt_types.ArrayObj(length: length + list.length(items)),
-          elements: rt_elements.write_list(elements, length, items),
+          kind: types.ArrayObj(length: length + list.length(items)),
+          elements: elements.write_list(elements, length, items),
         )
       _ -> slot
     }
@@ -6978,7 +6999,7 @@ fn fill_holes(
       case holes {
         [hole, ..rest_holes] if hole == index ->
           fill_holes(values, rest_holes, index + 1, count, [
-            rt_types.mk_hole(),
+            types.mk_hole(),
             ..acc
           ])
         _ ->
@@ -6986,32 +7007,29 @@ fn fill_holes(
             [v, ..rest_values] ->
               fill_holes(rest_values, holes, index + 1, count, [v, ..acc])
             [] ->
-              fill_holes([], holes, index + 1, count, [
-                rt_types.mk_hole(),
-                ..acc
-              ])
+              fill_holes([], holes, index + 1, count, [types.mk_hole(), ..acc])
           }
       }
   }
 }
 
-fn iterator_next_slow(
+fn iterator_next_general(
   state: State,
   drive: Drive,
   rec: JsVal,
   rest: List(JsVal),
-  fast: FastIter,
+  plan: FastIter,
 ) -> Result(State, StepExit) {
-  case iter_step(state, drive, rec, fast) {
+  case next_by_plan(state, drive, rec, plan) {
     Ok(#(#(done, val), state)) -> {
-      let slot = case done {
+      let record = case done {
         True -> mk_undefined()
         False -> rec
       }
       Ok(
         State(
           ..state,
-          stack: [mk_bool(done), val, slot, ..rest],
+          stack: [mk_bool(done), val, record, ..rest],
           pc: state.pc + 1,
         ),
       )
@@ -7025,14 +7043,14 @@ fn iterator_next_slow(
   }
 }
 
-fn iter_step(
+fn next_by_plan(
   state: State,
   drive: Drive,
   rec: JsVal,
-  fast: FastIter,
+  plan: FastIter,
 ) -> Result(#(#(Bool, JsVal), State), StepExit) {
-  case fast {
-    GenStep(data) -> gen_step(state, drive, data, mk_undefined())
+  case plan {
+    GenStep(gen_h) -> gen_step(state, drive, gen_h, mk_undefined())
     ArrayStep(..) | Protocol -> rt2(state, rt_lang.t_iter_next, rec)
   }
 }
@@ -7041,38 +7059,41 @@ fn iter_step(
 fn gen_step(
   state: State,
   drive: Drive,
-  data: Handle,
+  gen_h: Handle,
   sent: JsVal,
 ) -> Result(#(#(Bool, JsVal), State), StepExit) {
   let agent = state.agent
-  case rt_store.t_cell_get(agent, data) {
-    rt_types.SGenerator(
-      state: rt_types.GenSuspendedYield,
-      resume: rt_types.ResumeFrame(frame:) as resume,
+  case rt_store.t_cell_get(agent, gen_h) {
+    types.SGenerator(
+      state: types.GenSuspendedYield,
+      resume: types.ResumeFrame(frame:) as resume,
     )
-      | rt_types.SGenerator(
-        state: rt_types.GenSuspendedStart,
-        resume: rt_types.ResumeFrame(frame:) as resume,
+      | types.SGenerator(
+        state: types.GenSuspendedStart,
+        resume: types.ResumeFrame(frame:) as resume,
       )
       if frame.realm == agent.realm.id
       && agent.call_depth < limits.max_call_depth
     ->
       case frame.parked {
         ParkedOp ->
-          resume_here(state, drive, data, resume, frame, [sent, ..frame.stack])
+          resume_inline(state, drive, gen_h, resume, frame, [
+            sent,
+            ..frame.stack
+          ])
         ParkedStart ->
-          resume_here(state, drive, data, resume, frame, frame.stack)
-        _ -> rt3(state, rt_async.t_gen_step, data, sent)
+          resume_inline(state, drive, gen_h, resume, frame, frame.stack)
+        _ -> rt3(state, rt_async.t_gen_step, gen_h, sent)
       }
-    _ -> rt3(state, rt_async.t_gen_step, data, sent)
+    _ -> rt3(state, rt_async.t_gen_step, gen_h, sent)
   }
 }
 
-fn resume_here(
+fn resume_inline(
   state: State,
   drive: Drive,
-  data: Handle,
-  resume: rt_types.Resume,
+  gen_h: Handle,
+  resume: types.Resume,
   frame: SuspendedFrame,
   stack: List(JsVal),
 ) -> Result(#(#(Bool, JsVal), State), StepExit) {
@@ -7086,8 +7107,8 @@ fn resume_here(
       store: JsStore(
         ..store,
         data: arena.set(
-          data.id,
-          rt_types.SGenerator(state: rt_types.GenExecuting, resume:),
+          gen_h.id,
+          types.SGenerator(state: types.GenExecuting, resume:),
           store.data,
         ),
       ),
@@ -7101,15 +7122,17 @@ fn resume_here(
       ],
     )
   let body = park.unpark_with(running, frame, stack)
-  let completed = rt_types.SGenerator(state: rt_types.GenCompleted, resume:)
-  case ffi.guard_state2(resumed_turn, body, drive) {
+  let completed = types.SGenerator(state: types.GenCompleted, resume:)
+  case ffi.guard_state2(run_resumed, body, drive) {
     ffi.Ok(value: Ok(#(Suspended(state.Yield, v), post)), ..) -> {
-      let parked = rt_types.ResumeFrame(park.park(post, ParkedOp))
-      let gen =
-        rt_types.SGenerator(state: rt_types.GenSuspendedYield, resume: parked)
+      let parked = types.ResumeFrame(park.park(post, ParkedOp))
+      let gen = types.SGenerator(state: types.GenSuspendedYield, resume: parked)
       Ok(#(
         #(False, v),
-        State(..state, agent: settle_gen(post.agent, data, depth, frames, gen)),
+        State(
+          ..state,
+          agent: settle_generator(post.agent, gen_h, depth, frames, gen),
+        ),
       ))
     }
     ffi.Ok(value: Ok(#(Completed(NormalCompletion(v)), post)), ..) ->
@@ -7117,7 +7140,7 @@ fn resume_here(
         #(True, v),
         State(
           ..state,
-          agent: settle_gen(post.agent, data, depth, frames, completed),
+          agent: settle_generator(post.agent, gen_h, depth, frames, completed),
         ),
       ))
     ffi.Ok(value: Ok(#(Completed(ThrowCompletion(e)), post)), ..) ->
@@ -7125,7 +7148,7 @@ fn resume_here(
         e,
         State(
           ..state,
-          agent: settle_gen(post.agent, data, depth, frames, completed),
+          agent: settle_generator(post.agent, gen_h, depth, frames, completed),
         ),
       ))
     ffi.Ok(value: Ok(#(Suspended(state.Await, _), post)), ..) ->
@@ -7133,50 +7156,56 @@ fn resume_here(
         SuspensionLeak(site: "gen_step", kind: state.Await),
         State(
           ..state,
-          agent: settle_gen(post.agent, data, depth, frames, completed),
+          agent: settle_generator(post.agent, gen_h, depth, frames, completed),
         ),
       ))
     ffi.Ok(value: Error(err), agent:) -> {
       let #(e, s) =
         state.new_error(
           State(..state, agent:),
-          rt_types.TypeErr,
+          types.TypeErr,
           "internal error: " <> state.vm_error_message(err),
         )
       Error(Threw(
         e,
-        State(..s, agent: settle_gen(s.agent, data, depth, frames, completed)),
+        State(
+          ..s,
+          agent: settle_generator(s.agent, gen_h, depth, frames, completed),
+        ),
       ))
     }
     ffi.Threw(agent:, thrown:) ->
       Error(Threw(
         thrown,
-        State(..state, agent: settle_gen(agent, data, depth, frames, completed)),
+        State(
+          ..state,
+          agent: settle_generator(agent, gen_h, depth, frames, completed),
+        ),
       ))
   }
 }
 
-fn settle_gen(
+fn settle_generator(
   agent: Agent,
-  data: Handle,
+  gen_h: Handle,
   depth: Int,
-  frames: List(rt_types.FrameInfo),
-  gen: rt_types.JsSlot,
+  frames: List(types.FrameInfo),
+  cell: types.JsSlot,
 ) -> Agent {
   let store = agent.store
   Agent(
     ..agent,
-    store: JsStore(..store, data: arena.set(data.id, gen, store.data)),
+    store: JsStore(..store, data: arena.set(gen_h.id, cell, store.data)),
     call_depth: depth,
     frames:,
   )
 }
 
-fn resumed_turn(
+fn run_resumed(
   body: State,
   drive: Drive,
 ) -> #(Result(#(Outcome, State), VmError), Agent) {
-  case execute_inner(body, drive) {
+  case execute(body, drive) {
     Ok(#(_, post)) as res -> #(res, post.agent)
     Error(err) -> #(Error(err), body.agent)
   }
@@ -7190,7 +7219,7 @@ fn delegate_step(
   arg: JsVal,
 ) -> Result(#(#(Bool, JsVal), State), StepExit) {
   case native_generator(state.agent, iterator, next_fn) {
-    Some(data) -> gen_step(state, drive, data, arg)
+    Some(gen_h) -> gen_step(state, drive, gen_h, arg)
     None -> {
       use #(res, state) <- result.try(
         rt4(state, rt_call.t_call_checked, next_fn, iterator, [arg]),
@@ -7209,34 +7238,21 @@ fn native_generator(
   use iter_h <- option.then(handle_of(iterator))
   case rt_store.t_cell_get(agent, next_h), rt_store.t_cell_get(agent, iter_h) {
     SObject(
-      kind: rt_types.KNative(
-        tag: rt_types.GeneratorN(rt_types.GeneratorNext),
-        ..,
-      ),
+      kind: types.KNative(tag: types.GeneratorN(types.GeneratorNext), ..),
       ..,
     ),
-      SObject(kind: rt_types.GeneratorObj(data:), ..)
-    -> Some(data)
+      SObject(kind: types.GeneratorObj(data: gen_h), ..)
+    -> Some(gen_h)
     _, _ -> None
   }
 }
 
-type FastIter {
-  ArrayStep(done: Bool, value: JsVal, store: rt_types.JsStore(Agent))
-  GenStep(data: Handle)
-  Protocol
-}
-
-// §23.1.5.2.1 in the kernel only when the read observes nothing
-@external(erlang, "arc_interp_ffi", "iter_step")
-fn fast_iter_step(store: rt_types.JsStore(Agent), rec: JsVal) -> FastIter
-
 // §13.15.2 re-conversion must be side-effect free
 fn prop_key_value(pk: ObjectKey) -> JsVal {
   case pk {
-    SymbolKey(sym) -> rt_types.mk_symbol(sym)
+    SymbolKey(sym) -> types.mk_symbol(sym)
     StringKey(Index(n)) -> mk_int(n)
-    StringKey(other) -> mk_string(rt_types.key_to_text(other))
+    StringKey(other) -> mk_string(types.key_to_text(other))
   }
 }
 
@@ -7276,22 +7292,18 @@ fn get_super_value(
 
 fn async_iterator_object(agent: Agent, iterable: JsVal) -> #(JsVal, Agent) {
   let #(method, agent) =
-    rt_obj.t_get_prop(
-      agent,
-      iterable,
-      SymbolKey(rt_types.symbol_async_iterator),
-    )
+    rt_obj.t_get_prop(agent, iterable, SymbolKey(types.symbol_async_iterator))
   case classify(method) {
     KUndef | KNull -> {
       let #(sync_method, agent) =
-        rt_obj.t_get_prop(agent, iterable, SymbolKey(rt_types.symbol_iterator))
+        rt_obj.t_get_prop(agent, iterable, SymbolKey(types.symbol_iterator))
       case rt_call.is_callable(agent, sync_method) {
         False -> {
           let #(ty, agent) = rt_val.t_type_of(agent, iterable)
           let #(err, agent) =
             agent.store.ops.new_error(
               agent,
-              rt_types.TypeErr,
+              types.TypeErr,
               ty <> " is not async iterable",
             )
           rt_store.t_throw(agent, err)
@@ -7314,7 +7326,7 @@ fn async_iterator_object(agent: Agent, iterable: JsVal) -> #(JsVal, Agent) {
           let #(err, agent) =
             agent.store.ops.new_error(
               agent,
-              rt_types.TypeErr,
+              types.TypeErr,
               "Result of the Symbol.asyncIterator method is not an object",
             )
           rt_store.t_throw(agent, err)
@@ -7326,18 +7338,18 @@ fn async_iterator_object(agent: Agent, iterable: JsVal) -> #(JsVal, Agent) {
 
 fn delegate_target(
   state: State,
-  slot: JsVal,
+  record: JsVal,
 ) -> Result(#(JsVal, JsVal, State), StepExit) {
-  case rt_lang.record_parts(state.agent, slot) {
-    Some(record) -> Ok(#(record.iterator, record.next_method, state))
+  case rt_lang.record_parts(state.agent, record) {
+    Some(parts) -> Ok(#(parts.iterator, parts.next_method, state))
     None -> {
       use #(next_fn, state) <- result.map(rt3(
         state,
         rt_obj.t_get_prop,
-        slot,
+        record,
         StringKey(Named("next")),
       ))
-      #(slot, next_fn, state)
+      #(record, next_fn, state)
     }
   }
 }
@@ -7367,7 +7379,7 @@ fn pop_n_loop(
   }
 }
 
-fn run_activation(
+fn run_eval_body(
   activation: State,
   drive: Drive,
 ) -> #(Result(JsVal, JsVal), Agent) {
@@ -7378,7 +7390,7 @@ fn run_activation(
 }
 
 // a bytecode getter runs as an ordinary frame that returns onto rest
-fn getter_frame(
+fn getter_as_frame(
   state: State,
   receiver: JsVal,
   k: key.PropertyKey,
@@ -7386,11 +7398,11 @@ fn getter_frame(
   drive: Drive,
   otherwise: fn() -> Result(State, StepExit),
 ) -> Result(State, StepExit) {
-  accessor_frame(state, receiver, k, rest, drive, None, otherwise)
+  accessor_as_frame(state, receiver, k, rest, drive, None, otherwise)
 }
 
 // then, when given, finishes the op with the getter's result
-fn accessor_frame(
+fn accessor_as_frame(
   state: State,
   receiver: JsVal,
   k: key.PropertyKey,
@@ -7403,7 +7415,7 @@ fn accessor_frame(
     key.Named(_) ->
       case ffi.find_accessor(state.agent, receiver, k) {
         ffi.Accessor(get: Some(f), ..) ->
-          user_frame(state, f, receiver, [], rest, drive, then, otherwise)
+          call_as_frame(state, f, receiver, [], rest, drive, then, otherwise)
         _ -> otherwise()
       }
     _ -> otherwise()
@@ -7411,7 +7423,7 @@ fn accessor_frame(
 }
 
 // a bytecode setter runs as a frame whose result is dropped for stack_after
-fn setter_frame(
+fn setter_as_frame(
   state: State,
   receiver: JsVal,
   k: key.PropertyKey,
@@ -7427,7 +7439,7 @@ fn setter_frame(
           let finish = fn(state: State, _) {
             Ok(State(..state, stack: stack_after, pc: state.pc + 1))
           }
-          user_frame(
+          call_as_frame(
             state,
             f,
             receiver,
@@ -7445,7 +7457,7 @@ fn setter_frame(
 }
 
 // pushes f as a frame when it is same-realm bytecode, else otherwise
-fn user_frame(
+fn call_as_frame(
   state: State,
   f: JsVal,
   this: JsVal,
