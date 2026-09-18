@@ -3,13 +3,6 @@ pub fn now_ms() -> Int
 
 pub type TimeZone
 
-// tz env var, else /etc/localtime, else utc
-@external(erlang, "arc_tz_ffi", "host_zone")
-pub fn host_time_zone() -> TimeZone
-
-@external(erlang, "arc_tz_ffi", "zone_named")
-pub fn time_zone_named(name: String) -> Result(TimeZone, Nil)
-
 @external(erlang, "arc_tz_ffi", "utc_zone")
 pub fn utc_time_zone() -> TimeZone
 

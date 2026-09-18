@@ -29,6 +29,7 @@ import arc/rt/types.{
   StringKey, classify, mk_null, mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
+import arc/zoneinfo
 import gleam/float
 import gleam/int
 import gleam/io
@@ -1153,7 +1154,7 @@ fn ffi_take_report() -> Result(String, Nil) {
 }
 
 fn harness_host_hooks() -> host.HostHooks {
-  HostHooks(..host.default_host_hooks(), can_block: True)
+  HostHooks(..zoneinfo.hooks(host.default_host_hooks()), can_block: True)
 }
 
 fn settle_pending_wakes(st: Agent) -> Agent {

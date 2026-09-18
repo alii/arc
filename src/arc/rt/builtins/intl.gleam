@@ -1035,7 +1035,7 @@ fn supported_values_of(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
         "MXN", "RUB", "SEK", "USD",
       ])
     "numberingSystem" -> Some(fmt.numbering_systems())
-    "timeZone" -> Some(temporal_tz.available_ids())
+    "timeZone" -> Some(temporal_tz.available_ids(st.hooks.time_zone_ids()))
     "unit" -> Some(fmt.sanctioned_units())
     _ -> None
   }

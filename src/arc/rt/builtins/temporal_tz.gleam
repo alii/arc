@@ -33,14 +33,11 @@ pub fn canonical(zone: Zone) -> String {
   canonical_id(zone.id)
 }
 
-@external(erlang, "arc_tz_ffi", "available_zones")
-fn ffi_available_zones() -> List(String)
-
-// primary ids the host has data for, sorted
-pub fn available_ids() -> List(String) {
+// primary ids out of what the host has data for, sorted, utc always there
+pub fn available_ids(host_ids: List(String)) -> List(String) {
   let zones =
-    list.filter(ffi_available_zones(), fn(z) {
-      z != "Etc/UTC" && z != "Etc/GMT"
+    list.filter(host_ids, fn(z) {
+      z != "Etc/UTC" && z != "Etc/GMT" && z != "UTC"
     })
   list.sort(["UTC", ..zones], string.compare)
 }
@@ -63,10 +60,6 @@ pub type ResolveError {
   UnknownZone
   LoadFailed(id: String, error: TzError)
 }
-
-// zoneinfo on disk, keyed by canonical id
-@external(erlang, "arc_tz_ffi", "load")
-pub fn host_loader(canonical: String) -> Result(Rules, TzError)
 
 // a known name becomes a zone with its rules, loading each proper id once
 pub fn resolve(

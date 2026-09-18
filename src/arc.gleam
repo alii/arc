@@ -5,11 +5,13 @@ import arc/engine.{
   Threw,
 }
 import arc/esm
+import arc/host_hooks
 import arc/internal/path
 import arc/module/load_error
 import arc/module_host.{type LoadError, type ResolveError}
 import arc/parser
 import arc/repl/examples
+import arc/zoneinfo
 import gleam/int
 import gleam/io
 import gleam/option.{None, Some}
@@ -251,7 +253,7 @@ fn run_module_file(
   entry_path: String,
   source: String,
 ) -> Result(Nil, CliError(host)) {
-  let eng = engine.new()
+  let eng = new_engine()
   let entry = path.normalize(entry_path)
   case engine.eval_module(eng, entry, source, resolve_dep, load_dep) {
     Ok(#(ModuleReturned(..), _eng)) -> Ok(Nil)
@@ -282,7 +284,7 @@ fn load_dep(resolved: String) -> Result(String, LoadError) {
 }
 
 fn run_script_file(source: String) -> Result(Nil, CliError(host)) {
-  let eng = engine.new()
+  let eng = new_engine()
   case engine.eval(eng, source) {
     Ok(#(Threw(thrown), eng)) ->
       Error(ScriptThrew(format_uncaught(eng, thrown)))
@@ -320,7 +322,13 @@ fn run_print(source: String) -> Result(Nil, CliError(host)) {
 }
 
 fn new_repl() -> Repl(host) {
-  engine.repl(engine.new())
+  engine.repl(new_engine())
+}
+
+// the cli is a real host: local time and named zones come from the os
+fn new_engine() -> Engine(host) {
+  engine.new()
+  |> engine.with_host_hooks(zoneinfo.hooks(host_hooks.default_host_hooks()))
 }
 
 pub type UsageError {

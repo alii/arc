@@ -1,5 +1,7 @@
 import arc/engine.{JsBool, JsString, Returned}
+import arc/host_hooks
 import arc/rt/builtins/temporal_tz
+import arc/zoneinfo
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/string
@@ -21,7 +23,10 @@ fn proper(id: String) -> String {
 }
 
 fn js(source: String) -> engine.JsValueKind {
-  let assert Ok(#(Returned(value:), _)) = engine.eval(engine.new(), source)
+  let eng =
+    engine.new()
+    |> engine.with_host_hooks(zoneinfo.hooks(host_hooks.default_host_hooks()))
+  let assert Ok(#(Returned(value:), _)) = engine.eval(eng, source)
   engine.classify(value)
 }
 
@@ -80,7 +85,7 @@ pub fn bundled_table_drives_resolution_test() {
 }
 
 pub fn available_ids_are_canonical_and_sorted_test() {
-  let ids = temporal_tz.available_ids()
+  let ids = temporal_tz.available_ids(zoneinfo.available_ids())
   assert ids == list.sort(ids, string.compare)
   assert list.contains(ids, "UTC")
   assert list.contains(ids, "Asia/Kolkata")
