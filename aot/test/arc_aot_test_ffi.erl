@@ -98,9 +98,7 @@ main() ->
         _ -> erlang:halt(1)
     end.
 
-%% MaxWorkers tests run at once, each in a numbered slot. The vm never frees a
-%% module name (65536 of them, ever), so a test's compiled modules are named
-%% after the slot and reused, not after the test.
+%% modules are named after the worker slot since the vm never frees a module name
 feeder(Tests, Parent, Ref, MaxWorkers) ->
     process_flag(trap_exit, true),
     {Initial, Rest} = take(Tests, MaxWorkers),
@@ -110,8 +108,7 @@ feeder(Tests, Parent, Ref, MaxWorkers) ->
          || {T, Slot} <- lists:zip(Initial, Slots)]),
     feeder_loop(Rest, Parent, Ref, PidMap).
 
-%% a worker exit frees its slot for the next test; a worker that died before
-%% it could report is reported here
+%% a worker exit frees its slot; one that died unreported is reported here
 feeder_loop(_Remaining, _Parent, _Ref, PidMap) when map_size(PidMap) =:= 0 ->
     ok;
 feeder_loop(Remaining, Parent, Ref, PidMap) ->
@@ -193,9 +190,7 @@ in_flight() ->
     lists:reverse(lists:sort(
         [{Now - T0, Pid, Name} || {Pid, Name, T0} <- ets:tab2list(?IN_FLIGHT)])).
 
-%% max_heap_size only sees a test's heap: a runaway that keeps its garbage in
-%% off-heap binaries (strings) grows the vm until the machine kills it. When
-%% the whole vm outgrows the budget, kill the longest-running test instead.
+%% max_heap_size misses off-heap binaries, so past the budget kill the oldest test
 memory_guard(Budget) ->
     timer:sleep(250),
     case erlang:memory(total) of

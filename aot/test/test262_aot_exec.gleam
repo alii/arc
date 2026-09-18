@@ -13,7 +13,7 @@ import arc/rt/types.{
 }
 import arc/rt/val as rt_val
 import arc_aot/compile
-import arc_aot/emit/state as emit_state
+import arc_aot/emit/state
 import arc_aot/run
 import gleam/dict.{type Dict}
 import gleam/erlang/atom.{type Atom}
@@ -150,7 +150,7 @@ fn compile_harness_file(name: String) -> HarnessEntry {
     Error(err) -> Broken("read: " <> string.inspect(err))
     Ok(source) ->
       case compile.script_to_ir(globalize_lexicals(source), module_name) {
-        Error(emit_state.UnsupportedFeature(feature)) -> Unsupported(feature)
+        Error(state.UnsupportedFeature(feature)) -> Unsupported(feature)
         Error(err) -> Broken(compile.describe_emit_error(err))
         Ok(module) ->
           case compile.ir_to_beam(module) {
@@ -308,7 +308,7 @@ fn run_harness(
 
 fn compile_test(source: String, module_name: String) -> Result(Atom, Outcome) {
   case compile.script_to_ir(source, module_name) {
-    Error(emit_state.UnsupportedFeature(feature)) -> Error(Skip(feature))
+    Error(state.UnsupportedFeature(feature)) -> Error(Skip(feature))
     Error(err) -> Error(Fail(compile.describe_emit_error(err)))
     Ok(module) ->
       case compile.ir_to_beam(module) {

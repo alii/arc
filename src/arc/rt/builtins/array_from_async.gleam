@@ -1,5 +1,5 @@
-import arc/bytecode/key.{Named, index_key, max_array_length}
-import arc/rt/abstract_ops as rt_abstract
+import arc/bytecode/key.{Named, max_array_length}
+import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/async as rt_async
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
@@ -403,7 +403,7 @@ fn from_async_array_like(
   resolve: JsVal,
   reject: JsVal,
 ) -> Agent {
-  let #(len, st) = rt_abstract.length_of_array_like(st, items)
+  let #(len, st) = rt_abstract_ops.length_of_array_like(st, items)
   let #(target, st) = case rt_call.is_constructor(st, c) {
     True -> {
       let #(h, st) = rt_call.t_construct(st, c, [mk_int(len)], c)
@@ -434,7 +434,7 @@ fn from_async_like_step(st: Agent, ctx: FromAsyncLikeContext) -> Agent {
     }
     True -> {
       let #(k_val, st) =
-        rt_obj.t_get_prop(st, ctx.items, StringKey(index_key(ctx.k)))
+        rt_obj.t_get_prop(st, ctx.items, StringKey(key.index(ctx.k)))
       from_async_await(
         st,
         k_val,
@@ -512,7 +512,7 @@ fn from_async_define_own(st: Agent, target: JsVal, k: Int, v: JsVal) -> Agent {
     rt_obj.t_define_own_data(
       st,
       h,
-      StringKey(index_key(k)),
+      StringKey(key.index(k)),
       v,
       writable: True,
       enumerable: True,

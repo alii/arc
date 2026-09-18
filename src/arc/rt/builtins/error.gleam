@@ -238,7 +238,7 @@ fn alloc_suppressed(
   #(mk_object(h), st)
 }
 
-pub fn make_suppressed_error(
+pub fn make_suppressed(
   st: Agent,
   err: JsVal,
   suppressed: JsVal,

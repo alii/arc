@@ -2,7 +2,7 @@ import arc/bytecode/error_kind.{type JsError, JsError, RangeError}
 import arc/bytecode/key.{Named}
 import arc/internal/host_time
 import arc/internal/int_math.{floor_div, floor_mod}
-import arc/internal/temporal_calendar as tcal
+import arc/internal/temporal_calendar
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
 import arc/rt/builtins/temporal_iso.{
@@ -75,7 +75,9 @@ pub fn temporal_data_of(st: Agent, v: JsVal) -> Option(types.TemporalData) {
   }
 }
 
-pub fn date_slot_of(kind: ObjKind) -> Option(#(IsoDate, tcal.Calendar)) {
+pub fn date_slot_of(
+  kind: ObjKind,
+) -> Option(#(IsoDate, temporal_calendar.Calendar)) {
   case kind {
     TemporalObj(data: TemporalDate(year:, month:, day:, calendar:)) ->
       Some(#(IsoDate(year:, month:, day:), calendar))
@@ -100,7 +102,7 @@ pub fn time_slot_of(kind: ObjKind) -> Option(IsoTime) {
 
 pub fn date_time_slot_of(
   kind: ObjKind,
-) -> Option(#(IsoDate, IsoTime, tcal.Calendar)) {
+) -> Option(#(IsoDate, IsoTime, temporal_calendar.Calendar)) {
   case kind {
     TemporalObj(data: TemporalDateTime(
       year:,
@@ -176,7 +178,9 @@ pub fn instant_slot_of(kind: ObjKind) -> Option(Int) {
   }
 }
 
-pub fn zoned_slot_of(kind: ObjKind) -> Option(#(Int, TimeZone, tcal.Calendar)) {
+pub fn zoned_slot_of(
+  kind: ObjKind,
+) -> Option(#(Int, TimeZone, temporal_calendar.Calendar)) {
   case kind {
     TemporalObj(data: TemporalZonedDateTime(epoch_ns:, time_zone:, calendar:)) ->
       Some(#(epoch_ns, time_zone, calendar))
@@ -198,14 +202,14 @@ pub fn make_date(
   protos: TemporalProtos,
   d: IsoDate,
 ) -> #(JsVal, Agent) {
-  make_date_cal(st, protos, d, tcal.Iso8601)
+  make_date_cal(st, protos, d, temporal_calendar.Iso8601)
 }
 
 pub fn make_date_cal(
   st: Agent,
   protos: TemporalProtos,
   d: IsoDate,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
 ) -> #(JsVal, Agent) {
   alloc_value(
     st,
@@ -239,7 +243,7 @@ pub fn make_date_time(
   d: IsoDate,
   t: IsoTime,
 ) -> #(JsVal, Agent) {
-  make_date_time_cal(st, protos, d, t, tcal.Iso8601)
+  make_date_time_cal(st, protos, d, t, temporal_calendar.Iso8601)
 }
 
 pub fn make_date_time_cal(
@@ -247,7 +251,7 @@ pub fn make_date_time_cal(
   protos: TemporalProtos,
   d: IsoDate,
   t: IsoTime,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
 ) -> #(JsVal, Agent) {
   alloc_value(
     st,
@@ -274,7 +278,7 @@ pub fn make_year_month(
   m: Int,
   ref_day: Int,
 ) -> #(JsVal, Agent) {
-  make_year_month_cal(st, protos, y, m, ref_day, tcal.Iso8601)
+  make_year_month_cal(st, protos, y, m, ref_day, temporal_calendar.Iso8601)
 }
 
 pub fn make_year_month_cal(
@@ -283,7 +287,7 @@ pub fn make_year_month_cal(
   y: Int,
   m: Int,
   ref_day: Int,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
 ) -> #(JsVal, Agent) {
   alloc_value(
     st,
@@ -298,7 +302,7 @@ pub fn make_month_day_cal(
   m: Int,
   d: Int,
   ref_year: Int,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
 ) -> #(JsVal, Agent) {
   alloc_value(
     st,
@@ -356,7 +360,7 @@ pub fn make_zoned(
   ns: Int,
   tz: TimeZone,
 ) -> #(JsVal, Agent) {
-  make_zoned_cal(st, protos, ns, tz, tcal.Iso8601)
+  make_zoned_cal(st, protos, ns, tz, temporal_calendar.Iso8601)
 }
 
 pub fn make_zoned_cal(
@@ -364,7 +368,7 @@ pub fn make_zoned_cal(
   protos: TemporalProtos,
   ns: Int,
   tz: TimeZone,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
 ) -> #(JsVal, Agent) {
   alloc_value(
     st,
@@ -650,13 +654,16 @@ pub fn get_time_zone_name_option(
   )
 }
 
-pub fn calendar_suffix(mode: CalendarNameMode, cal: tcal.Calendar) -> String {
-  let id = tcal.identifier(cal)
+pub fn calendar_suffix(
+  mode: CalendarNameMode,
+  cal: temporal_calendar.Calendar,
+) -> String {
+  let id = temporal_calendar.identifier(cal)
   case mode {
     CalendarNameNever -> ""
     CalendarNameAuto ->
       case cal {
-        tcal.Iso8601 -> ""
+        temporal_calendar.Iso8601 -> ""
         _ -> "[u-ca=" <> id <> "]"
       }
     CalendarNameAlways -> "[u-ca=" <> id <> "]"
@@ -664,15 +671,17 @@ pub fn calendar_suffix(mode: CalendarNameMode, cal: tcal.Calendar) -> String {
   }
 }
 
-// year-month and month-day print the full reference date unless iso can omit it
+// year-month and month-day print the reference date unless iso omits it
 pub fn format_with_reference(
   iso: IsoDate,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   mode: CalendarNameMode,
   short short: String,
 ) -> String {
   case cal, mode {
-    tcal.Iso8601, CalendarNameAuto | tcal.Iso8601, CalendarNameNever -> short
+    temporal_calendar.Iso8601, CalendarNameAuto
+    | temporal_calendar.Iso8601, CalendarNameNever
+    -> short
     _, _ -> format_iso_date(iso) <> calendar_suffix(mode, cal)
   }
 }
@@ -1750,12 +1759,12 @@ fn tz_from_datetime_string(
     None -> #(Error(JsError(RangeError, "invalid time zone: " <> s)), st)
     Some(p) ->
       case p.tz {
-        Some(tz_str) ->
-          case parse_time_zone_identifier(st, tz_str) {
+        Some(tz_text) ->
+          case parse_time_zone_identifier(st, tz_text) {
             #(Ok(tz), st) -> #(Ok(tz), st)
             #(Error(InvalidIdentifier(e)), st) -> #(Error(e), st)
             #(Error(UnknownIdentifier), st) -> #(
-              Error(unsupported_tz(tz_str)),
+              Error(unsupported_tz(tz_text)),
               st,
             )
           }

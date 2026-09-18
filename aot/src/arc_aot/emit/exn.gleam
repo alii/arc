@@ -265,7 +265,7 @@ pub fn catch_binding_prologue(
   k: Next,
 ) -> EmitResult {
   let bindings =
-    dict.to_list(scope.get_scope(e.scope_tree, scope_id).bindings)
+    dict.to_list(scope.get(e.scope_tree, scope_id).bindings)
     |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
   use e, entry, next <- each_(e, bindings, then: k)
   let #(_, b): #(String, Binding) = entry

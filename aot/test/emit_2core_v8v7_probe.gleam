@@ -1,8 +1,8 @@
 import arc/rt/types.{type Agent}
-import arc_aot/emit as emit_2core
+import arc_aot/emit
 import arc_aot/run
 import carder/pipeline
-import emit_2core_harness as harness
+import emit_2core_harness
 import gleam/erlang/atom.{type Atom}
 import gleam/int
 import gleam/io
@@ -74,27 +74,22 @@ type Loaded {
 }
 
 fn seed_realm() -> Agent {
-  harness.seed()
+  emit_2core_harness.seed()
 }
 
-fn run_once(loaded: Loaded) -> harness.DiffRun {
-  harness.run_loaded(loaded.mod, loaded.seed).1
+fn run_once(loaded: Loaded) -> emit_2core_harness.DiffRun {
+  emit_2core_harness.run_loaded(loaded.mod, loaded.seed).1
 }
 
 fn bench_compiled(name: String, source: String) -> Outcome {
   let mod_name = "arc_v8v7_" <> name
-  let opts =
-    emit_2core.CompileOpts(
-      module_name: mod_name,
-      source_kind: emit_2core.AsScript,
-    )
-  let #(emit_us, emit_r) =
-    time_us(fn() { emit_2core.compile_source(source, opts) })
+  let opts = emit.CompileOpts(module_name: mod_name, source_kind: emit.AsScript)
+  let #(emit_us, emit_r) = time_us(fn() { emit.compile_source(source, opts) })
   case emit_r {
     Error(e) -> CompileFailed("emit_2core", string.inspect(e))
     Ok(ir_module) -> {
       let #(lower_us, lower_r) =
-        time_us(fn() { pipeline.compile_ir(ir_module, emit_2core.binding()) })
+        time_us(fn() { pipeline.compile_ir(ir_module, emit.binding()) })
       io.println(
         "  compile: emit_2core="
         <> int.to_string(emit_us)
@@ -119,9 +114,9 @@ fn bench_compiled(name: String, source: String) -> Outcome {
               let loaded = Loaded(mod:, seed:)
               let #(warm_us, first) = time_us(fn() { run_once(loaded) })
               case first {
-                harness.DiffRun(result: Error(e), stdout:) ->
+                emit_2core_harness.DiffRun(result: Error(e), stdout:) ->
                   RunFailed(e, string.inspect(stdout))
-                harness.DiffRun(result: Ok(_), stdout:) ->
+                emit_2core_harness.DiffRun(result: Ok(_), stdout:) ->
                   case stdout {
                     <<"ok\n":utf8>> -> {
                       let reps = reps_for(warm_us)
@@ -138,16 +133,17 @@ fn bench_compiled(name: String, source: String) -> Outcome {
 }
 
 fn bench_interp(source: String) -> Outcome {
-  let #(warm_us, first) = time_us(fn() { harness.run_interpreted(source) })
+  let #(warm_us, first) =
+    time_us(fn() { emit_2core_harness.run_interpreted(source) })
   case first {
-    harness.DiffRun(result: Error(e), stdout:) ->
+    emit_2core_harness.DiffRun(result: Error(e), stdout:) ->
       RunFailed(e, string.inspect(stdout))
-    harness.DiffRun(result: Ok(_), stdout:) ->
+    emit_2core_harness.DiffRun(result: Ok(_), stdout:) ->
       case stdout {
         <<"ok\n":utf8>> -> {
           let reps = reps_for(warm_us)
           Measured(
-            min_of_n(reps, fn() { harness.run_interpreted(source) }),
+            min_of_n(reps, fn() { emit_2core_harness.run_interpreted(source) }),
             reps,
           )
         }
@@ -194,7 +190,7 @@ fn one(name: String) {
       )
       let compiled = bench_compiled(name, source)
       io.println("  emit_2core : " <> show(compiled))
-      let interp = case harness.env_is_truthy("PROBE_SKIP_INTERP") {
+      let interp = case emit_2core_harness.env_is_truthy("PROBE_SKIP_INTERP") {
         True -> Measured(0, 0)
         False -> bench_interp(source)
       }

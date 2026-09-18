@@ -157,10 +157,7 @@ fn well_known_properties(
   }
 }
 
-pub fn new_symbol(
-  st: Agent,
-  description: Option(String),
-) -> #(SymbolId, Agent) {
+pub fn new(st: Agent, description: Option(String)) -> #(SymbolId, Agent) {
   let #(uid, st) = rt_store.t_next_symbol_id(st)
   #(UserSymbol(uid:, description:), st)
 }
@@ -186,13 +183,13 @@ pub fn dispatch(
 fn call_as_function(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   case classify(helpers.first_arg_or_undefined(args)) {
     KUndef -> {
-      let #(id, st) = new_symbol(st, None)
+      let #(id, st) = new(st, None)
       #(mk_symbol(id), st)
     }
     _ -> {
       let #(s, st) =
         rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
-      let #(id, st) = new_symbol(st, Some(s))
+      let #(id, st) = new(st, Some(s))
       #(mk_symbol(id), st)
     }
   }

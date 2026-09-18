@@ -86,7 +86,7 @@ pub fn init(
     )
 
   let #(pd_ctor, st) =
-    init_temporal_type(
+    init_type(
       st,
       function_proto,
       "PlainDate",
@@ -99,7 +99,7 @@ pub fn init(
     )
 
   let #(pt_ctor, st) =
-    init_temporal_type(
+    init_type(
       st,
       function_proto,
       "PlainTime",
@@ -112,7 +112,7 @@ pub fn init(
     )
 
   let #(pdt_ctor, st) =
-    init_temporal_type(
+    init_type(
       st,
       function_proto,
       "PlainDateTime",
@@ -125,7 +125,7 @@ pub fn init(
     )
 
   let #(pym_ctor, st) =
-    init_temporal_type(
+    init_type(
       st,
       function_proto,
       "PlainYearMonth",
@@ -138,7 +138,7 @@ pub fn init(
     )
 
   let #(pmd_ctor, st) =
-    init_temporal_type(
+    init_type(
       st,
       function_proto,
       "PlainMonthDay",
@@ -151,7 +151,7 @@ pub fn init(
     )
 
   let #(dur_ctor, st) =
-    init_temporal_type(
+    init_type(
       st,
       function_proto,
       "Duration",
@@ -164,7 +164,7 @@ pub fn init(
     )
 
   let #(ins_ctor, st) =
-    init_temporal_type(
+    init_type(
       st,
       function_proto,
       "Instant",
@@ -214,7 +214,7 @@ pub fn init(
     )
 
   let #(zdt_ctor, st) =
-    init_temporal_type(
+    init_type(
       st,
       function_proto,
       "ZonedDateTime",
@@ -267,7 +267,7 @@ pub fn init(
   ])
 }
 
-pub fn init_temporal_type(
+pub fn init_type(
   st: Agent,
   function_proto: Handle,
   name: String,

@@ -59,8 +59,8 @@ fn with_done(
 
 fn class_scope_binding(e: Emitter, name: String) -> Binding {
   let assert Ok(b) =
-    dict.get(scope.get_scope(e.scope_tree, e.cur_scope).bindings, name)
-    as "emit_2core/class: name missing from ClassBody-scope bindings"
+    dict.get(scope.get(e.scope_tree, e.cur_scope).bindings, name)
+    as "emit/class: name missing from ClassBody-scope bindings"
   b
 }
 
@@ -262,7 +262,7 @@ fn emit_ctor_and_create(
   use e, ctor <- let_(e, ctor_tree)
   use e, proto <- host_(e, "class_setup", [ctor, parent_class])
   let assert [ctx, ..] = e.class_stack
-    as "emit_2core/class: emit_ctor_and_create with empty class_stack"
+    as "emit/class: emit_ctor_and_create with empty class_stack"
   use e <- host_unit_(e, "box_set", [ctx.proto_home_box, proto])
   use e <- host_unit_(e, "box_set", [ctx.static_home_box, ctor])
   use e <- host_unit_(e, "box_set", [ctx.ctor_self_box, ctor])
@@ -293,7 +293,7 @@ fn default_ctor_body(is_derived: Bool) -> List(ast.StmtWithLine) {
 }
 
 // §15.7.14 class definition evaluation, step order matters
-pub fn emit_class(
+pub fn emit(
   e: Emitter,
   binding_name: Option(String),
   display_name: Option(String),
@@ -520,7 +520,7 @@ fn read_captured_const(
         "throw_reference_error",
         [
           ir.ConstBinary(bit_array.from_string(
-            "emit_2core/class: init-fn const resolve miss: " <> name,
+            "emit/class: init-fn const resolve miss: " <> name,
           )),
         ],
         k,
@@ -633,7 +633,7 @@ fn build_class_init_closure(
       use ec <- func.unpack_frame(ec, is_arrow: False, info: child_info)
       use ec <- func.binding_prologue(ec, ec.fn_scope)
       let with_this = fn(ec, k) {
-        case lexical.lexical_slot(child_info.lexical, lexical.RefThis) {
+        case lexical.slot_of(child_info.lexical, lexical.RefThis) {
           Some(slot) -> {
             let v = ir.Var(state.get_slot_var(ec, slot))
             case state.lexical_is_boxed(ec, child_info, lexical.RefThis) {
@@ -699,7 +699,7 @@ fn emit_field_init_fn(
     }
     _ -> {
       let assert Some(child_id) = init_child_id
-        as "emit_2core/class: has_instance_field_init/parser needs_instance_init desync"
+        as "emit/class: has_instance_field_init/parser needs_instance_init desync"
       use e, init_fn <- build_class_init_closure(e, child_id, inits, proto)
       use e <- store_class_const(e, ast_util.class_fields_init, init_fn)
       k(e, Some(init_fn))

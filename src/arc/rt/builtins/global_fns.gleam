@@ -1,7 +1,6 @@
 import arc/bytecode/error_kind.{JsError, UriError}
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
-import arc/rt/js_string
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -12,6 +11,7 @@ import arc/rt/types.{
   IndirectEval, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KStr, NativeFn,
   SObject, mk_bool, mk_number, mk_string,
 }
+import arc/rt/utf8
 import arc/rt/val as rt_val
 import gleam/bit_array
 import gleam/int
@@ -143,7 +143,7 @@ pub fn parse_int_value(
   let #(s, st) = rt_val.t_to_string(st, val)
   let #(radix_int, st) = rt_val.t_to_int32(st, radix_val)
   // strip sign before prefix check so "-0x10" works
-  let #(bytes, negative) = case <<js_string.trim_leading_js_ws(s):utf8>> {
+  let #(bytes, negative) = case <<utf8.trim_leading_js_ws(s):utf8>> {
     <<"-", rest:bits>> -> #(rest, True)
     <<"+", rest:bits>> -> #(rest, False)
     bytes -> #(bytes, False)
@@ -165,7 +165,7 @@ pub fn parse_int_value(
 
 pub fn parse_float_value(st: Agent, val: JsVal) -> #(JsNum, Agent) {
   let #(s, st) = rt_val.t_to_string(st, val)
-  #(parse_decimal_string(js_string.trim_leading_js_ws(s)), st)
+  #(parse_decimal_string(utf8.trim_leading_js_ws(s)), st)
 }
 
 fn parse_int_digits(
@@ -214,8 +214,8 @@ fn digit_value(c: Int, radix: Int) -> Option(Int) {
 }
 
 // §19.2.4 longest strdecimalliteral prefix
-fn parse_decimal_string(str: String) -> JsNum {
-  let bytes = <<str:utf8>>
+fn parse_decimal_string(text: String) -> JsNum {
+  let bytes = <<text:utf8>>
   case scan_decimal_literal(bytes) {
     0 -> JNan
     len -> rt_val.string_to_number(bytes_prefix(bytes, len))
@@ -334,8 +334,8 @@ fn uri_decode_dispatch(
   }
 }
 
-pub fn uri_encode(str: String, kind: UriKind) -> String {
-  string.to_utf_codepoints(str)
+pub fn uri_encode(text: String, kind: UriKind) -> String {
+  string.to_utf_codepoints(text)
   |> list.map(fn(cp) {
     let c = string.utf_codepoint_to_int(cp)
     case is_uri_unescaped(c, kind) {
@@ -392,8 +392,8 @@ fn percent_encode_bytes(bytes: BitArray, acc: String) -> String {
   }
 }
 
-pub fn uri_decode(str: String, kind: UriKind) -> Result(String, Int) {
-  uri_decode_loop(<<str:utf8>>, kind, 0, "")
+pub fn uri_decode(text: String, kind: UriKind) -> Result(String, Int) {
+  uri_decode_loop(<<text:utf8>>, kind, 0, "")
 }
 
 fn uri_decode_loop(

@@ -1,6 +1,6 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError, TypeError}
 import arc/internal/gregorian.{days_in_month}
-import arc/internal/temporal_calendar as tcal
+import arc/internal/temporal_calendar
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   type CalendarNameMode, CalendarNameAuto, format_with_reference,
@@ -9,7 +9,7 @@ import arc/rt/builtins/temporal_common.{
   require_temporal, truncated_int_arg, truncated_int_arg_or,
 }
 import arc/rt/builtins/temporal_fields.{
-  type DateFields, DateFields, max_reference_epoch_days, month_code_str,
+  type DateFields, DateFields, max_reference_epoch_days, month_code_text,
   month_day_reference_iso, no_date_fields, parse_month_day_string,
   read_bag_calendar, read_date_fields, read_era_fields, regulate_calendar_day,
   require_nonempty_fields, require_partial_bag, resolve_calendar_date,
@@ -176,11 +176,11 @@ fn month_day_from_bag(
 
 type MonthDayAnchor {
   AnchorFromYear
-  AnchorFromCode(tcal.MonthCode)
+  AnchorFromCode(temporal_calendar.MonthCode)
 }
 
 pub fn resolve_calendar_month_day(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   f: DateFields,
   overflow: Overflow,
 ) -> Result(IsoDateSlots, JsError) {
@@ -194,7 +194,7 @@ pub fn resolve_calendar_month_day(
   })
   let has_year = f.year != None || { f.era != None && f.era_year != None }
   case cal {
-    tcal.Iso8601 -> {
+    temporal_calendar.Iso8601 -> {
       use m <- result.try(resolve_iso_month(f))
       let ref_year = case f.month_code {
         Some(_) -> 1972
@@ -217,8 +217,9 @@ pub fn resolve_calendar_month_day(
       use #(mc, day) <- result.try(case anchor {
         AnchorFromYear -> {
           use y <- result.try(resolve_calendar_year(cal, f))
-          let year_first = tcal.date_to_epoch_days(cal, y, 1, 1)
-          let year_last = tcal.date_to_epoch_days(cal, y + 1, 1, 1) - 1
+          let year_first = temporal_calendar.date_to_epoch_days(cal, y, 1, 1)
+          let year_last =
+            temporal_calendar.date_to_epoch_days(cal, y + 1, 1, 1) - 1
           use Nil <- result.try(
             case year_first > max_epoch_days || year_last < min_epoch_days {
               True ->
@@ -228,21 +229,22 @@ pub fn resolve_calendar_month_day(
           )
           use m <- result.try(resolve_calendar_month(cal, y, f, overflow))
           use d <- result.try(regulate_calendar_day(cal, y, m, day, overflow))
-          Ok(#(tcal.month_code_of(cal, y, m), d))
+          Ok(#(temporal_calendar.month_code_of(cal, y, m), d))
         }
         AnchorFromCode(mc) -> {
           use Nil <- result.try(
             case
-              tcal.month_for_code(
+              temporal_calendar.month_for_code(
                 cal,
                 probe_year_for_month_code(cal, mc.leap),
                 mc,
               )
             {
-              Error(tcal.NeverValid) ->
+              Error(temporal_calendar.NeverValid) ->
                 Error(JsError(
                   RangeError,
-                  "monthCode is not valid for calendar " <> tcal.identifier(cal),
+                  "monthCode is not valid for calendar "
+                    <> temporal_calendar.identifier(cal),
                 ))
               _ -> Ok(Nil)
             },
@@ -257,7 +259,7 @@ pub fn resolve_calendar_month_day(
       // no iso reference year: reject throws, constrain uses non-leap month
       use mc <- result.try(
         case
-          { cal == tcal.Chinese || cal == tcal.Dangi }
+          { cal == temporal_calendar.Chinese || cal == temporal_calendar.Dangi }
           && mc.leap
           && chinese_ref_year_missing(mc.number, day)
         {
@@ -268,7 +270,8 @@ pub fn resolve_calendar_month_day(
                   RangeError,
                   "no reference year for monthCode and day",
                 ))
-              Constrain -> Ok(tcal.MonthCode(number: mc.number, leap: False))
+              Constrain ->
+                Ok(temporal_calendar.MonthCode(number: mc.number, leap: False))
             }
           False -> Ok(mc)
         },
@@ -288,11 +291,15 @@ fn chinese_ref_year_missing(num: Int, day: Int) -> Bool {
   }
 }
 
-fn probe_year_for_month_code(cal: tcal.Calendar, leap leap: Bool) -> Int {
-  case cal == tcal.Hebrew && leap {
+fn probe_year_for_month_code(
+  cal: temporal_calendar.Calendar,
+  leap leap: Bool,
+) -> Int {
+  case cal == temporal_calendar.Hebrew && leap {
     True -> 5779
     False -> {
-      let cd = tcal.date_from_epoch_days(cal, max_reference_epoch_days)
+      let cd =
+        temporal_calendar.date_from_epoch_days(cal, max_reference_epoch_days)
       cd.year
     }
   }
@@ -315,27 +322,35 @@ pub fn getter(
 }
 
 fn month_day_field_cal(
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   m: Int,
   d: Int,
   ry: Int,
   g: TemporalMonthDayGetter,
 ) -> JsVal {
   case g {
-    MonthDayCalendarId -> mk_string(tcal.identifier(cal))
+    MonthDayCalendarId -> mk_string(temporal_calendar.identifier(cal))
     MonthDayMonthCode ->
       case cal {
-        tcal.Iso8601 -> mk_string(month_code_str(m))
+        temporal_calendar.Iso8601 -> mk_string(month_code_text(m))
         _ -> {
-          let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(ry, m, d)))
-          mk_string(tcal.month_code(cal, cd.year, cd.month))
+          let cd =
+            temporal_calendar.date_from_epoch_days(
+              cal,
+              epoch_days(IsoDate(ry, m, d)),
+            )
+          mk_string(temporal_calendar.month_code(cal, cd.year, cd.month))
         }
       }
     MonthDayDay ->
       case cal {
-        tcal.Iso8601 -> mk_int(d)
+        temporal_calendar.Iso8601 -> mk_int(d)
         _ -> {
-          let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(ry, m, d)))
+          let cd =
+            temporal_calendar.date_from_epoch_days(
+              cal,
+              epoch_days(IsoDate(ry, m, d)),
+            )
           mk_int(cd.day)
         }
       }
@@ -388,7 +403,7 @@ fn with(
   m: Int,
   d: Int,
   ry: Int,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(bag, st) = require_partial_bag(st, helpers.arg_at(args, 0))
@@ -396,13 +411,14 @@ fn with(
   let Nil = require_nonempty_fields(st, fields == no_date_fields)
   let #(overflow, st) =
     get_overflow_option_from_value(st, helpers.arg_at(args, 1))
-  let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(ry, m, d)))
+  let cd =
+    temporal_calendar.date_from_epoch_days(cal, epoch_days(IsoDate(ry, m, d)))
   let f = case fields.month != None || fields.month_code != None {
     True -> fields
     False ->
       DateFields(
         ..fields,
-        month_code: Some(tcal.month_code_of(cal, cd.year, cd.month)),
+        month_code: Some(temporal_calendar.month_code_of(cal, cd.year, cd.month)),
       )
   }
   let f = case f.day {
@@ -420,7 +436,7 @@ fn to_plain_date(
   m: Int,
   d: Int,
   ry: Int,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case classify(helpers.arg_at(args, 0)) {
@@ -428,18 +444,22 @@ fn to_plain_date(
       let #(era, era_year, st) = read_era_fields(st, h, cal)
       let #(year, st) = read_int_field(st, h, "year")
       case cal, year {
-        tcal.Iso8601, Some(y) -> {
+        temporal_calendar.Iso8601, Some(y) -> {
           let date = rt_val.or_throw(st, regulate_iso_date(y, m, d, Constrain))
           let date = rt_val.or_throw(st, check_date_limits(date))
           make_date_cal(st, protos, date, cal)
         }
-        tcal.Iso8601, None -> rt_val.t_throw_type_error(st, "year is required")
+        temporal_calendar.Iso8601, None ->
+          rt_val.t_throw_type_error(st, "year is required")
         _, _ ->
           case year != None || { era != None && era_year != None } {
             True -> {
               let cd =
-                tcal.date_from_epoch_days(cal, epoch_days(IsoDate(ry, m, d)))
-              let mc = tcal.month_code_of(cal, cd.year, cd.month)
+                temporal_calendar.date_from_epoch_days(
+                  cal,
+                  epoch_days(IsoDate(ry, m, d)),
+                )
+              let mc = temporal_calendar.month_code_of(cal, cd.year, cd.month)
               let f =
                 DateFields(
                   day: Some(cd.day),
@@ -466,7 +486,7 @@ fn format_md_cal(
   m: Int,
   d: Int,
   ry: Int,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   mode: CalendarNameMode,
 ) -> String {
   format_with_reference(

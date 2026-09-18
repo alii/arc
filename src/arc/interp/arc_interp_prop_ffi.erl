@@ -7,16 +7,16 @@
 -include("../rt/arc_rt_layout.hrl").
 
 %% §10.1.8.1 ordinary get, miss when anything observable
-get_field(Agent, {?HANDLE_TAG, Id}, K) ->
-    cell_field(element(?AGENT_STORE, Agent), Id, K, undefined);
+get_field(St, {?HANDLE_TAG, Id}, K) ->
+    cell_field(element(?AGENT_STORE, St), Id, K, undefined);
 get_field(_, Bin, ?LENGTH_KEY) when is_binary(Bin) ->
     byte_size(Bin);
 get_field(_, {?STR_TAG, _, Len, _}, ?LENGTH_KEY) ->
     Len;
-get_field(Agent, S, K) when ?IS_STR(S) ->
-    proto_field(Agent, ?REALM_STRING, K);
-get_field(Agent, N, K) when is_number(N) ->
-    proto_field(Agent, ?REALM_NUMBER, K);
+get_field(St, S, K) when ?IS_STR(S) ->
+    proto_field(St, ?REALM_STRING, K);
+get_field(St, N, K) when is_number(N) ->
+    proto_field(St, ?REALM_NUMBER, K);
 get_field(_, _, _) -> miss.
 
 own_data(Props, K) ->
@@ -27,8 +27,8 @@ own_data(Props, K) ->
     end.
 
 %% the accessor K resolves to along a plain chain, else no_accessor
-find_accessor(Agent, {?HANDLE_TAG, Id}, K) ->
-    Cells = element(?STORE_CELLS, element(?AGENT_STORE, Agent)),
+find_accessor(St, {?HANDLE_TAG, Id}, K) ->
+    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     accessor_walk(Cells, arc_rt_arena_ffi:get(Id, Cells), K, ?MAX_PROTO_HOPS);
 find_accessor(_, _, _) -> no_accessor.
 
@@ -57,7 +57,7 @@ accessor_next(Cells, {?SOME, {?HANDLE_TAG, P}}, K, Fuel) ->
 accessor_next(_, _, _, _) -> no_accessor.
 
 %% §9.1.1.4.6 global getbindingvalue, plain case
-get_global(Agent, Lex, Name) ->
+get_global(St, Lex, Name) ->
     case Lex of
         #{Name := Binding} ->
             case element(?LEXICAL_GLOBAL_VALUE, Binding) of
@@ -65,8 +65,8 @@ get_global(Agent, Lex, Name) ->
                 V -> V
             end;
         _ ->
-            {?HANDLE_TAG, G} = element(?REALM_GLOBAL, element(?AGENT_REALM, Agent)),
-            cell_field(element(?AGENT_STORE, Agent), G, {?KEY_NAMED, Name}, miss)
+            {?HANDLE_TAG, G} = element(?REALM_GLOBAL, element(?AGENT_REALM, St)),
+            cell_field(element(?AGENT_STORE, St), G, {?KEY_NAMED, Name}, miss)
     end.
 
 %% §9.1.1.4.5 setmutablebinding on the global object
@@ -77,10 +77,10 @@ put_global(Store, Lex, Global, Name, V, Strict) ->
     end.
 
 %% getters miss so the general path passes the primitive as this
-proto_field(Agent, Which, K) ->
-    Pair = element(Which, element(?AGENT_REALM, Agent)),
+proto_field(St, Which, K) ->
+    Pair = element(Which, element(?AGENT_REALM, St)),
     {?HANDLE_TAG, Id} = element(?BUILTINPAIR_PROTO, Pair),
-    cell_field(element(?AGENT_STORE, Agent), Id, K, undefined).
+    cell_field(element(?AGENT_STORE, St), Id, K, undefined).
 
 cell_field(Store, Id, K, Absent) ->
     Cells = element(?STORE_CELLS, Store),
@@ -346,14 +346,14 @@ new_object(Store, Proto, Keys, N, Stack) when tuple_size(Store) =:= ?STORE_SIZE 
     {{?HANDLE_TAG, Id}, Stack2, setelement(?STORE_PROP_SEQ, Store2, Seq + N)}.
 
 %% §10.1.13 once prototype has been read
-new_receiver(Agent, {?HANDLE_TAG, _} = Proto)
-  when tuple_size(Agent) =:= ?AGENT_SIZE ->
-    case element(?AGENT_STORE, Agent) of
+new_receiver(St, {?HANDLE_TAG, _} = Proto)
+  when tuple_size(St) =:= ?AGENT_SIZE ->
+    case element(?AGENT_STORE, St) of
         Store when tuple_size(Store) =:= ?STORE_SIZE ->
             Cell = {?SSHAPEDOBJECT_TAG, 0, {?SOME, Proto}, {}, #{}},
             Id = element(?STORE_NEXT_ID, Store),
             Store2 = ?ALLOC_CELL(Store, element(?STORE_CELLS, Store), Id, Cell),
-            {{?HANDLE_TAG, Id}, setelement(?AGENT_STORE, Agent, Store2)};
+            {{?HANDLE_TAG, Id}, setelement(?AGENT_STORE, St, Store2)};
         _ -> miss
     end;
 new_receiver(_, _) -> miss.

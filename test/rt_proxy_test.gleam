@@ -1,4 +1,4 @@
-import arc/bytecode/key.{canonical_key}
+import arc/bytecode/key
 import arc/internal/unsafe
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{type Frame, NormalCompletion, ThrowCompletion} as rt_call
@@ -27,7 +27,7 @@ fn agent() -> Agent {
 }
 
 fn key(name: String) {
-  StringKey(canonical_key(name))
+  StringKey(key.canonical(name))
 }
 
 fn global(st: Agent, name: String) -> JsVal {

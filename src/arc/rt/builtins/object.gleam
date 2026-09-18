@@ -1,10 +1,9 @@
-import arc/bytecode/key.{Index, Named, key_to_text}
-import arc/rt/abstract_ops as rt_abstract
+import arc/bytecode/key.{Index, Named}
+import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
 import arc/rt/builtins/iter_protocol
 import arc/rt/call as rt_call
-import arc/rt/js_string
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -28,6 +27,7 @@ import arc/rt/types.{
   RegExpObj, SObject, StringKey, StringObj, SymbolKey, classify, mk_bool, mk_int,
   mk_null, mk_object, mk_string, mk_symbol, mk_undefined,
 }
+import arc/rt/utf8
 import arc/rt/val as rt_val
 import gleam/bool
 import gleam/dict
@@ -381,11 +381,11 @@ fn own_string_keys(
           #(names, st)
         }
       }
-      ok_array(st, list.map(names, fn(pk) { mk_string(key_to_text(pk)) }))
+      ok_array(st, list.map(names, fn(pk) { mk_string(key.to_text(pk)) }))
     }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
     KStr(s) -> {
-      let index_keys = string_index_keys(0, js_string.length(s))
+      let index_keys = string_index_keys(0, utf8.length(s))
       let ks = case enumerable_only {
         True -> index_keys
         False -> list.append(index_keys, [mk_string("length")])
@@ -449,7 +449,7 @@ fn own_enumerable_pairs(
       }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
     KStr(s) -> #(
-      list.index_map(js_string.explode(s), fn(ch, idx) {
+      list.index_map(utf8.explode(s), fn(ch, idx) {
         #(int.to_string(idx), mk_string(ch))
       }),
       st,
@@ -475,7 +475,7 @@ fn collect_enumerable(
         False -> collect_enumerable(st, h, rest, acc)
         True -> {
           let #(v, st) = rt_obj.t_get_prop(st, mk_object(h), k)
-          collect_enumerable(st, h, rest, [#(key_to_text(pk), v), ..acc])
+          collect_enumerable(st, h, rest, [#(key.to_text(pk), v), ..acc])
         }
       }
     }
@@ -511,7 +511,7 @@ fn get_own_prop_descriptors(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
     }
     KStr(s) -> {
       let keys =
-        list.append(string_index_object_keys(0, js_string.length(s)), [
+        list.append(string_index_object_keys(0, utf8.length(s)), [
           StringKey(Named("length")),
         ])
       let #(result_h, st) = rt_obj.t_new_object(st, Some(object_proto))
@@ -703,7 +703,7 @@ fn builtin_tag(st: Agent, this: JsVal) -> String {
     KSym(_) -> "Symbol"
     KBig(_) -> "Object"
     KHandle(h) -> {
-      use <- bool.guard(rt_abstract.is_array_handle(st, h), "Array")
+      use <- bool.guard(rt_abstract_ops.is_array_handle(st, h), "Array")
       case rt_store.t_cell_get(st, h) {
         SObject(kind:, ..) ->
           case kind {
@@ -1183,7 +1183,7 @@ fn ok_array(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
 
 fn key_text(key: ObjectKey) -> String {
   case key {
-    StringKey(pk) -> key_to_text(pk)
+    StringKey(pk) -> key.to_text(pk)
     SymbolKey(sym) -> types.symbol_descriptive_string(sym)
   }
 }

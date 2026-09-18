@@ -22,12 +22,12 @@ pub type Guarded(v) {
 
 pub fn guarded(
   outcome: Guarded(v),
-  st: State,
+  state: State,
 ) -> Result(#(v, State), StepExit) {
   case outcome {
-    Ok(value:, agent:) -> gleam.Ok(#(value, state.with_agent(st, agent)))
+    Ok(value:, agent:) -> gleam.Ok(#(value, state.with_agent(state, agent)))
     Threw(agent:, thrown:) ->
-      Error(state.Threw(thrown, state.with_agent(st, agent)))
+      Error(state.Threw(thrown, state.with_agent(state, agent)))
   }
 }
 

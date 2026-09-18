@@ -215,7 +215,7 @@ pub fn build_capture_values(
       case dict.has_key(child_info.lexical_captures, ref) {
         False -> Error(Nil)
         True ->
-          case lexical.lexical_slot(parent_info.lexical, ref) {
+          case lexical.slot_of(parent_info.lexical, ref) {
             Some(pslot) -> Ok(ir.Var(state.get_slot_var(e, pslot)))
             None ->
               panic as "aot/func: lexical capture parent slot missing (analyzer invariant)"
@@ -284,7 +284,7 @@ pub fn unpack_frame(
   case is_arrow, info.lexical {
     False, lexical.OwnedLexicalSlots(base:) -> {
       use e, ref, next <- each_(e, lexical.all_lexical_refs, then: k)
-      let idx = lexical.lexical_ref_offset(ref)
+      let idx = lexical.ref_offset(ref)
       let slot = base + idx
       use e, raw <- let_(e, ir.TermOp(ir.TupleGet(idx), [ir.Var(frame_param)]))
       case state.lexical_is_boxed(e, info, ref) {
@@ -307,7 +307,7 @@ pub fn unpack_frame(
 
 pub fn binding_prologue(e: Emitter, scope_id: ScopeId, k: Next) -> EmitResult {
   let bindings =
-    dict.to_list(scope.get_scope(e.scope_tree, scope_id).bindings)
+    dict.to_list(scope.get(e.scope_tree, scope_id).bindings)
     |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
   use e, entry, next <- each_(e, bindings, then: k)
   let #(_, b): #(String, Binding) = entry
@@ -350,7 +350,7 @@ fn body_param_copies(
       }
       let function_names = ast_util.top_level_function_names(stmts)
       let body_bindings =
-        dict.to_list(scope.get_scope(e.scope_tree, body_id).bindings)
+        dict.to_list(scope.get(e.scope_tree, body_id).bindings)
         |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
       use e, entry, next <- each_(e, body_bindings, then: k)
       let #(bname, b): #(String, Binding) = entry
@@ -391,10 +391,10 @@ fn init_self_name(
   case self_name {
     None -> k(e)
     Some(fname) ->
-      case dict.get(scope.get_scope(e.scope_tree, e.fn_scope).bindings, fname) {
+      case dict.get(scope.get(e.scope_tree, e.fn_scope).bindings, fname) {
         Ok(b) if b.kind == FnNameBinding -> {
           let assert Some(af_slot) =
-            lexical.lexical_slot(info.lexical, lexical.RefActiveFunc)
+            lexical.slot_of(info.lexical, lexical.RefActiveFunc)
           let af = ir.Var(state.get_slot_var(e, af_slot))
           let e =
             Emitter(
@@ -1246,12 +1246,7 @@ fn init_arguments(
   case is_arrow || !uses_args {
     True -> k(e)
     False ->
-      case
-        dict.get(
-          scope.get_scope(e.scope_tree, e.fn_scope).bindings,
-          "arguments",
-        )
-      {
+      case dict.get(scope.get(e.scope_tree, e.fn_scope).bindings, "arguments") {
         Error(Nil) -> k(e)
         Ok(b) -> {
           // mapped only for sloppy simple params, §10.2.11 step 18
@@ -1315,7 +1310,7 @@ fn hoist_fn_decls(
       ))
       use e, closure <- let_(e, ctree)
       let assert Ok(b) =
-        dict.get(scope.get_scope(e.scope_tree, e.cur_scope).bindings, name)
+        dict.get(scope.get(e.scope_tree, e.cur_scope).bindings, name)
         as "aot/func: hoisted function missing from var-scope bindings"
       store_slot(e, b, closure, next)
     }
@@ -1325,7 +1320,7 @@ fn hoist_fn_decls(
 
 fn fn_scope_binding(e: Emitter, name: String) -> Binding {
   let assert Ok(b) =
-    dict.get(scope.get_scope(e.scope_tree, e.fn_scope).bindings, name)
+    dict.get(scope.get(e.scope_tree, e.fn_scope).bindings, name)
     as "aot/func: name missing from fn-scope bindings"
   b
 }
@@ -1533,7 +1528,7 @@ fn seed_direct_this(
 ) -> EmitResult {
   case takes_this, info.lexical {
     True, lexical.OwnedLexicalSlots(base:) -> {
-      let slot = base + lexical.lexical_ref_offset(lexical.RefThis)
+      let slot = base + lexical.ref_offset(lexical.RefThis)
       k(state.set_slot_var(e, slot, direct_this_param))
     }
     _, _ -> k(e)

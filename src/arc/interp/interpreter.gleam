@@ -1,6 +1,6 @@
 import arc/bytecode/binop
 import arc/bytecode/error_kind.{TypeError}
-import arc/bytecode/key.{Index, Named, key_display_string, key_to_text}
+import arc/bytecode/key.{Index, Named}
 import arc/bytecode/lexical
 import arc/bytecode/opcode.{
   type Op, ApplyArguments, ArrayFrom, ArrayFromWithHoles, ArrayPush,
@@ -51,7 +51,7 @@ import arc/interp/state.{
 import arc/rt/arena
 import arc/rt/async as rt_async
 import arc/rt/builtins as rt_builtins
-import arc/rt/builtins/disposable_stack
+import arc/rt/builtins/disposable_stack as b_disposable_stack
 import arc/rt/builtins/error as b_error
 import arc/rt/builtins/global_fns
 import arc/rt/builtins/iter_protocol
@@ -238,10 +238,10 @@ fn using_disposer(
     KUndef | KNull -> #(mk_undefined(), agent)
     KHandle(_) -> {
       let #(method, agent) =
-        disposable_stack.get_dispose_method(agent, val, is_async:)
+        b_disposable_stack.get_dispose_method(agent, val, is_async:)
       case method {
-        disposable_stack.DirectDispose(m) -> direct_disposer(agent, m, val)
-        disposable_stack.SyncFallbackDispose(m) ->
+        b_disposable_stack.DirectDispose(m) -> direct_disposer(agent, m, val)
+        b_disposable_stack.SyncFallbackDispose(m) ->
           sync_fallback_disposer(agent, m, val, unit_id)
       }
     }
@@ -391,10 +391,10 @@ pub fn execute_to_completion(
   site: String,
 ) -> #(Result(JsVal, JsVal), State) {
   case execute(state, drive) {
-    Ok(#(Completed(NormalCompletion(v)), s)) -> #(Ok(v), s)
-    Ok(#(Completed(ThrowCompletion(e)), s)) -> #(Error(e), s)
-    Ok(#(Suspended(kind, _), s)) ->
-      state.internal_fault(s, SuspensionLeak(site:, kind:))
+    Ok(#(Completed(NormalCompletion(v)), state)) -> #(Ok(v), state)
+    Ok(#(Completed(ThrowCompletion(e)), state)) -> #(Error(e), state)
+    Ok(#(Suspended(kind, _), state)) ->
+      state.internal_fault(state, SuspensionLeak(site:, kind:))
     Error(err) -> state.internal_fault(state, err)
   }
 }
@@ -497,8 +497,7 @@ fn via_step(
   )
 }
 
-// fast paths do nothing observable before a miss, so step re-runs the op.
-// state.pc/stack/locals/agent are stale here, the loop args win
+// nothing ran before the miss, so step re-runs with the loop args
 fn fast_loop(
   state: State,
   drive: Drive,
@@ -2782,14 +2781,14 @@ fn fast_loop(
                       case
                         iterator_next_general(state, drive, rec, rest, plan)
                       {
-                        Ok(s) ->
+                        Ok(state) ->
                           fast_loop(
-                            s,
+                            state,
                             drive,
-                            s.pc,
-                            s.stack,
+                            state.pc,
+                            state.stack,
                             locals,
-                            s.agent,
+                            state.agent,
                             code,
                             constants,
                             r0,
@@ -2798,10 +2797,10 @@ fn fast_loop(
                         Error(exit) ->
                           after_step(
                             Error(
-                              state.map_exit_state(exit, fn(s) {
+                              state.map_exit(exit, fn(state) {
                                 State(
-                                  ..s,
-                                  locals: flush_registers(s, locals, r0, r1),
+                                  ..state,
+                                  locals: flush_registers(state, locals, r0, r1),
                                 )
                               }),
                             ),
@@ -2890,7 +2889,7 @@ fn fast_loop(
       }
 
     CreateArguments(simple_params:) -> {
-      let s =
+      let state =
         call.create_arguments(
           State(
             ..state,
@@ -2902,12 +2901,12 @@ fn fast_loop(
           simple_params,
         )
       fast_loop(
-        s,
+        state,
         drive,
-        s.pc,
-        s.stack,
+        state.pc,
+        state.stack,
         locals,
-        s.agent,
+        state.agent,
         code,
         constants,
         r0,
@@ -3905,7 +3904,7 @@ fn materialize_record(
                 kind: types.ArrayIterValues,
               )
           }
-        _ -> types.StringIterator(source: js_string.bin(target), index:)
+        _ -> types.StringIterator(source: js_string.text(target), index:)
       }
       rt2(
         state,
@@ -3989,16 +3988,16 @@ fn step_from_loop(
       })
   }
   case step(state, drive, op) {
-    Ok(s) ->
+    Ok(state) ->
       enter_loop(
-        s,
+        state,
         drive,
-        s.pc,
-        s.stack,
-        s.locals,
-        s.agent,
-        s.func.bytecode,
-        s.func.constants,
+        state.pc,
+        state.stack,
+        state.locals,
+        state.agent,
+        state.func.bytecode,
+        state.func.constants,
       )
     exit -> after_step(exit, drive)
   }
@@ -4009,16 +4008,16 @@ fn after_step(
   drive: Drive,
 ) -> Result(#(Outcome, State), VmError) {
   case stepped {
-    Ok(s) ->
+    Ok(state) ->
       enter_loop(
-        s,
+        state,
         drive,
-        s.pc,
-        s.stack,
-        s.locals,
-        s.agent,
-        s.func.bytecode,
-        s.func.constants,
+        state.pc,
+        state.stack,
+        state.locals,
+        state.agent,
+        state.func.bytecode,
+        state.func.constants,
       )
     Error(Returned(value, post)) ->
       Ok(#(Completed(NormalCompletion(value)), post))
@@ -4686,7 +4685,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case state.stack {
         [suppressed, err, ..rest] -> {
           let #(suppressed_error, agent) =
-            b_error.make_suppressed_error(state.agent, err, suppressed)
+            b_error.make_suppressed(state.agent, err, suppressed)
           Ok(
             State(
               ..state,
@@ -5551,9 +5550,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 False, True ->
                   state.throw_type_error(
                     state,
-                    "Cannot delete property '"
-                      <> key.key_display_string(k)
-                      <> "'",
+                    "Cannot delete property '" <> key.display_string(k) <> "'",
                   )
                 _, _ ->
                   Ok(
@@ -5808,7 +5805,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             False -> step(state, drive, Call(arity))
             True -> {
               let #(res, new_state) =
-                eval.direct_eval(
+                eval.direct(
                   State(..state, stack: rest_stack),
                   args,
                   param_scope_names,
@@ -6327,7 +6324,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             KStr(f), KStr(p) -> {
               use #(re, state) <- result.map(rt3(
                 state,
-                b_regexp.regexp_create_literal,
+                b_regexp.create_literal,
                 p,
                 f,
               ))
@@ -6429,7 +6426,7 @@ fn put_field_step(
           state.throw_type_error(
             state,
             "Cannot assign to read only property '"
-              <> key.key_display_string(k)
+              <> key.display_string(k)
               <> "' of object",
           )
         _, _ -> Ok(State(..state, stack:, pc: state.pc + 1))
@@ -6441,7 +6438,7 @@ fn put_field_step(
         "Cannot set properties of "
           <> rt_val.nullish_label(receiver)
           <> " (setting '"
-          <> key.key_display_string(k)
+          <> key.display_string(k)
           <> "')",
       )
     _ ->
@@ -6450,7 +6447,7 @@ fn put_field_step(
           state.throw_type_error(
             state,
             "Cannot create property '"
-              <> key.key_display_string(k)
+              <> key.display_string(k)
               <> "' on primitive value",
           )
         False -> Ok(State(..state, stack:, pc: state.pc + 1))
@@ -6470,7 +6467,7 @@ fn get_field(
         "Cannot read properties of "
           <> rt_val.nullish_label(receiver)
           <> " (reading '"
-          <> key.key_display_string(k)
+          <> key.display_string(k)
           <> "')",
       )
     _ -> rt3(state, rt_obj.t_get_prop, receiver, StringKey(k))
@@ -6868,7 +6865,7 @@ fn create_data_property_or_throw(
 
 fn object_key_display(k: ObjectKey) -> String {
   case k {
-    StringKey(pk) -> key_display_string(pk)
+    StringKey(pk) -> key.display_string(pk)
     SymbolKey(sym) -> types.symbol_descriptive_string(sym)
   }
 }
@@ -7035,8 +7032,8 @@ fn iterator_next_general(
     }
     Error(exit) ->
       Error(
-        state.map_exit_state(exit, fn(s) {
-          State(..s, stack: [mk_undefined(), ..rest])
+        state.map_exit(exit, fn(state) {
+          State(..state, stack: [mk_undefined(), ..rest])
         }),
       )
   }
@@ -7159,7 +7156,7 @@ fn resume_inline(
         ),
       ))
     kernel.Ok(value: Error(err), agent:) -> {
-      let #(e, s) =
+      let #(e, state) =
         state.new_error(
           State(..state, agent:),
           TypeError,
@@ -7168,8 +7165,8 @@ fn resume_inline(
       Error(Threw(
         e,
         State(
-          ..s,
-          agent: settle_generator(s.agent, gen_h, depth, frames, completed),
+          ..state,
+          agent: settle_generator(state.agent, gen_h, depth, frames, completed),
         ),
       ))
     }
@@ -7251,7 +7248,7 @@ fn prop_key_value(pk: ObjectKey) -> JsVal {
   case pk {
     SymbolKey(sym) -> types.mk_symbol(sym)
     StringKey(Index(n)) -> mk_int(n)
-    StringKey(other) -> mk_string(key_to_text(other))
+    StringKey(other) -> mk_string(key.to_text(other))
   }
 }
 
@@ -7378,9 +7375,9 @@ fn run_eval_body(
   drive: Drive,
 ) -> #(Result(JsVal, JsVal), Agent) {
   let agent = call.push_frame_info(activation.agent, activation.func)
-  let #(res, s) =
+  let #(res, state) =
     execute_to_completion(State(..activation, agent:), drive, "eval")
-  #(res, call.pop_frame_info(s.agent))
+  #(res, call.pop_frame_info(state.agent))
 }
 
 // a bytecode getter runs as an ordinary frame that returns onto rest

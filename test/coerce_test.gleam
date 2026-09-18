@@ -1,4 +1,4 @@
-//// §7.1.5 tointegerorinfinity keeps infinities for range checks
+// §7.1.5 tointegerorinfinity keeps infinities for range checks
 
 import arc/engine.{type JsValueKind, JsBool, JsString, Returned}
 

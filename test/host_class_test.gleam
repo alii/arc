@@ -13,8 +13,8 @@ fn get(
   recv: JsVal,
   name: String,
 ) -> #(JsVal, Context(host)) {
-  let #(v, agent) = rt_obj.t_get_prop(ctx.agent, recv, StringKey(Named(name)))
-  #(v, Context(..ctx, agent:))
+  let #(v, st) = rt_obj.t_get_prop(ctx.agent, recv, StringKey(Named(name)))
+  #(v, Context(..ctx, agent: st))
 }
 
 fn service_ctor(_args, _this, ctx: Context(host)) {

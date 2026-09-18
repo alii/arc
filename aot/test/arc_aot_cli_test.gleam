@@ -1,6 +1,6 @@
 import arc_aot.{Build, Help, Run, Usage}
 import arc_aot/compile
-import emit_2core_harness as harness
+import emit_2core_harness
 import gleam/option.{None, Some}
 import gleam/string
 import simplifile
@@ -25,16 +25,22 @@ pub fn module_name_for_test() {
 }
 
 pub fn run_prints_and_drains_test() {
-  harness.buf_reset()
+  emit_2core_harness.buf_reset()
   let result =
-    arc_aot.execute(Run("test/fixtures/hello.js"), harness.test_hooks())
+    arc_aot.execute(
+      Run("test/fixtures/hello.js"),
+      emit_2core_harness.test_hooks(),
+    )
   assert result == Ok(Nil)
-  assert harness.buf_read() == <<"hello aot\nlater\n":utf8>>
+  assert emit_2core_harness.buf_read() == <<"hello aot\nlater\n":utf8>>
 }
 
 pub fn run_uncaught_test() {
   let assert Error(err) =
-    arc_aot.execute(Run("test/fixtures/throws.js"), harness.test_hooks())
+    arc_aot.execute(
+      Run("test/fixtures/throws.js"),
+      emit_2core_harness.test_hooks(),
+    )
   let assert arc_aot.ScriptThrew(report) = err
   assert string.starts_with(report, "Uncaught RangeError: boom")
   assert arc_aot.exit_code(err) == 1
@@ -42,7 +48,10 @@ pub fn run_uncaught_test() {
 
 pub fn run_module_goal_test() {
   let assert Error(err) =
-    arc_aot.execute(Run("test/fixtures/esm.js"), harness.test_hooks())
+    arc_aot.execute(
+      Run("test/fixtures/esm.js"),
+      emit_2core_harness.test_hooks(),
+    )
   assert err
     == arc_aot.CompileFailed(
       "test/fixtures/esm.js",
@@ -54,13 +63,16 @@ pub fn run_module_goal_test() {
 
 pub fn run_missing_file_test() {
   let assert Error(arc_aot.ReadFailed(path: "nope.js", ..) as err) =
-    arc_aot.execute(Run("nope.js"), harness.test_hooks())
+    arc_aot.execute(Run("nope.js"), emit_2core_harness.test_hooks())
   assert arc_aot.exit_code(err) == 1
 }
 
 pub fn usage_error_test() {
   let assert Error(err) =
-    arc_aot.execute(arc_aot.parse_args(["build"]), harness.test_hooks())
+    arc_aot.execute(
+      arc_aot.parse_args(["build"]),
+      emit_2core_harness.test_hooks(),
+    )
   assert arc_aot.exit_code(err) == 2
   assert string.contains(arc_aot.format_cli_error(err), "Usage:")
 }
@@ -72,7 +84,7 @@ pub fn build_writes_beam_core_ir_test() {
   let result =
     arc_aot.execute(
       Build("test/fixtures/hello.js", Some(out), core: True, ir: True),
-      harness.test_hooks(),
+      emit_2core_harness.test_hooks(),
     )
   assert result == Ok(Nil)
   let assert Ok(beam) = simplifile.read_bits(out)

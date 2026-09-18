@@ -831,7 +831,7 @@ fn opt_get(st: Agent, opts: Option(Handle), name: String) -> #(JsVal, Agent) {
   }
 }
 
-fn get_str_opt(
+fn get_text_opt(
   st: Agent,
   opts: Option(Handle),
   name: String,
@@ -1002,7 +1002,7 @@ fn locale_list_from_object_loop(
         False -> locale_list_from_object_loop(st, o, k + 1, len, seen)
         True -> {
           let #(k_value, st) = rt_obj.t_get_prop(st, o, key)
-          let #(tag_str, st) = case classify(k_value) {
+          let #(tag_text, st) = case classify(k_value) {
             KStr(s) -> #(s, st)
             KHandle(o) ->
               case locale_of_handle(st, o) {
@@ -1015,7 +1015,7 @@ fn locale_list_from_object_loop(
                 "Locales item must be a string or object",
               )
           }
-          let #(tag, st) = canonical_tag_or_throw(st, tag_str)
+          let #(tag, st) = canonical_tag_or_throw(st, tag_text)
           let seen = case list.contains(seen, tag) {
             True -> seen
             False -> [tag, ..seen]
@@ -1082,7 +1082,7 @@ fn supported_locales_of(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(requested, st) = canonicalize_locale_list(st, locales)
   let #(opts, st) = coerce_options(st, options_v)
   let #(_matcher, st) =
-    get_str_opt(
+    get_text_opt(
       st,
       opts,
       "localeMatcher",
@@ -1144,7 +1144,7 @@ fn build_resolved_locale(
     [] -> data_locale
     _ -> {
       let sorted = list.sort(keywords, fn(a, b) { string.compare(a.0, b.0) })
-      let kw_str =
+      let kw_text =
         sorted
         |> list.map(fn(kv) {
           case kv {
@@ -1153,7 +1153,7 @@ fn build_resolved_locale(
           }
         })
         |> string.join("-")
-      data_locale <> "-u-" <> kw_str
+      data_locale <> "-u-" <> kw_text
     }
   }
 }
@@ -1243,7 +1243,7 @@ fn locale_state(
   tag_v: JsVal,
   options_v: JsVal,
 ) -> #(LocaleState, Agent) {
-  let #(tag_str, st) = case classify(tag_v) {
+  let #(tag_text, st) = case classify(tag_v) {
     KStr(s) -> #(s, st)
     KHandle(h) ->
       case locale_of_handle(st, h) {
@@ -1257,15 +1257,15 @@ fn locale_state(
       )
   }
   let #(opts, st) = coerce_options(st, options_v)
-  let lid = case intl_locale.parse(tag_str) {
+  let lid = case intl_locale.parse(tag_text) {
     Ok(lid) -> lid
     Error(Nil) ->
       rt_val.t_throw_range_error(
         st,
-        "Incorrect locale information provided: " <> tag_str,
+        "Incorrect locale information provided: " <> tag_text,
       )
   }
-  let #(language, st) = get_str_opt(st, opts, "language", [], None)
+  let #(language, st) = get_text_opt(st, opts, "language", [], None)
   let st = case language {
     Some(l) ->
       case intl_locale.is_language(l) {
@@ -1274,7 +1274,7 @@ fn locale_state(
       }
     None -> st
   }
-  let #(script, st) = get_str_opt(st, opts, "script", [], None)
+  let #(script, st) = get_text_opt(st, opts, "script", [], None)
   let st = case script {
     Some(s) ->
       case intl_locale.is_script(s) {
@@ -1283,7 +1283,7 @@ fn locale_state(
       }
     None -> st
   }
-  let #(region, st) = get_str_opt(st, opts, "region", [], None)
+  let #(region, st) = get_text_opt(st, opts, "region", [], None)
   let st = case region {
     Some(r) ->
       case intl_locale.is_region(r) {
@@ -1292,7 +1292,7 @@ fn locale_state(
       }
     None -> st
   }
-  let #(variants_opt, st) = get_str_opt(st, opts, "variants", [], None)
+  let #(variants_opt, st) = get_text_opt(st, opts, "variants", [], None)
   let variants_opt = case variants_opt {
     None -> None
     Some(v) -> {
@@ -1323,16 +1323,16 @@ fn locale_state(
       },
       variants: option.unwrap(variants_opt, lid.variants),
     )
-  let #(calendar, st) = get_str_opt(st, opts, "calendar", [], None)
+  let #(calendar, st) = get_text_opt(st, opts, "calendar", [], None)
   let st = require_type_seq(st, calendar, "calendar")
-  let #(collation, st) = get_str_opt(st, opts, "collation", [], None)
+  let #(collation, st) = get_text_opt(st, opts, "collation", [], None)
   let st = require_type_seq(st, collation, "collation")
   let #(hour_cycle, st) =
-    get_str_opt(st, opts, "hourCycle", ["h11", "h12", "h23", "h24"], None)
+    get_text_opt(st, opts, "hourCycle", ["h11", "h12", "h23", "h24"], None)
   let #(case_first, st) =
-    get_str_opt(st, opts, "caseFirst", ["upper", "lower", "false"], None)
+    get_text_opt(st, opts, "caseFirst", ["upper", "lower", "false"], None)
   let #(numeric, st) = get_bool_opt(st, opts, "numeric", None)
-  let #(first_day, st) = get_str_opt(st, opts, "firstDayOfWeek", [], None)
+  let #(first_day, st) = get_text_opt(st, opts, "firstDayOfWeek", [], None)
   let first_day = case first_day {
     None -> None
     Some(fd) ->
@@ -1341,7 +1341,7 @@ fn locale_state(
         None -> rt_val.t_throw_range_error(st, "Invalid firstDayOfWeek: " <> fd)
       }
   }
-  let #(numbering, st) = get_str_opt(st, opts, "numberingSystem", [], None)
+  let #(numbering, st) = get_text_opt(st, opts, "numberingSystem", [], None)
   let st = require_type_seq(st, numbering, "numberingSystem")
   let new_kws =
     list.filter_map(
@@ -1484,7 +1484,7 @@ fn resolve_keyword(
 // value unused but the read is observable
 fn read_locale_matcher(st: Agent, opts: Option(Handle)) -> Agent {
   let #(_matcher, st) =
-    get_str_opt(
+    get_text_opt(
       st,
       opts,
       "localeMatcher",
@@ -1514,7 +1514,7 @@ fn resolve_nu_locale(
   opts: Option(Handle),
   requested: List(String),
 ) -> #(String, String, Agent) {
-  let #(nu_opt, st) = get_str_opt(st, opts, "numberingSystem", [], None)
+  let #(nu_opt, st) = get_text_opt(st, opts, "numberingSystem", [], None)
   let st = require_type_seq(st, nu_opt, "numberingSystem")
   let #(data_locale, ext_kws) = resolve_locale(requested)
   let #(nu, nu_from_ext) =
@@ -1545,7 +1545,7 @@ fn collator_state(
       UsageSort,
     )
   let st = read_locale_matcher(st, opts)
-  let #(collation_opt, st) = get_str_opt(st, opts, "collation", [], None)
+  let #(collation_opt, st) = get_text_opt(st, opts, "collation", [], None)
   let st = require_type_seq(st, collation_opt, "collation")
   let #(numeric_opt, st) = get_bool_opt(st, opts, "numeric", None)
   let #(case_first_opt, st) =
@@ -1569,7 +1569,7 @@ fn collator_state(
       fn(v) { list.contains(supported_collations(), v) },
       "default",
     )
-  let #(numeric_str, kn_from_ext) =
+  let #(numeric_text, kn_from_ext) =
     resolve_keyword(
       ext_kws,
       "kn",
@@ -1582,7 +1582,7 @@ fn collator_state(
       fn(v) { v == "true" || v == "false" },
       "false",
     )
-  let numeric = numeric_str == "true"
+  let numeric = numeric_text == "true"
   let #(case_first, kf_from_ext) =
     resolve_typed_keyword(
       ext_kws,
@@ -1734,7 +1734,7 @@ fn read_unit_options(st: Agent, opts: Option(Handle)) -> #(NumberStyle, Agent) {
       ],
       RequestedDecimal,
     )
-  let #(currency, st) = get_str_opt(st, opts, "currency", [], None)
+  let #(currency, st) = get_text_opt(st, opts, "currency", [], None)
   let st = case currency {
     Some(c) ->
       case intl_locale.is_alpha(c) && string.length(c) == 3 {
@@ -1775,7 +1775,7 @@ fn read_unit_options(st: Agent, opts: Option(Handle)) -> #(NumberStyle, Agent) {
       [#("standard", StandardSign), #("accounting", AccountingSign)],
       StandardSign,
     )
-  let #(unit, st) = get_str_opt(st, opts, "unit", [], None)
+  let #(unit, st) = get_text_opt(st, opts, "unit", [], None)
   let st = case unit {
     Some(u) ->
       case intl_format.is_well_formed_unit(u) {
@@ -2107,9 +2107,9 @@ fn dtf_state_required(
 ) -> #(DateTimeFormatState, Agent) {
   let #(requested, opts, st) =
     constructor_prologue(st, locales_v, options_v, strict: False)
-  let #(calendar_opt, st) = get_str_opt(st, opts, "calendar", [], None)
+  let #(calendar_opt, st) = get_text_opt(st, opts, "calendar", [], None)
   let st = require_type_seq(st, calendar_opt, "calendar")
-  let #(nu_opt, st) = get_str_opt(st, opts, "numberingSystem", [], None)
+  let #(nu_opt, st) = get_text_opt(st, opts, "numberingSystem", [], None)
   let st = require_type_seq(st, nu_opt, "numberingSystem")
   let #(hour12, st) = get_bool_opt(st, opts, "hour12", None)
   let #(hour_cycle_opt, st) =
@@ -2256,7 +2256,7 @@ fn dtf_state_required(
       None,
     )
   let #(_format_matcher, st) =
-    get_str_opt(
+    get_text_opt(
       st,
       opts,
       "formatMatcher",
@@ -3808,11 +3808,11 @@ fn nf_format_parts(
   let opts = num_opts_from_nf(nf)
   let nu = nf.numbering_system
   case classify(x) {
-    KStr(str) ->
-      case is_plain_decimal(string.trim(str)) {
+    KStr(text) ->
+      case is_plain_decimal(string.trim(text)) {
         True -> #(
           intl_format.apply_numbering_system(
-            intl_format.format_decimal_string_parts(opts, string.trim(str)),
+            intl_format.format_decimal_string_parts(opts, string.trim(text)),
             nu,
             intl_format.is_number_digit,
           ),
@@ -4360,7 +4360,7 @@ fn build_dtf_parts(
     True -> 1 - fields.year
     False -> fields.year
   }
-  let year_str = fn(width) { numeric_width_str(width, display_year) }
+  let year_text = fn(width) { numeric_width_text(width, display_year) }
   let weekday_parts = case weekday {
     Some(w) -> [#(PartWeekday, intl_format.weekday_name(fields.week_day, w))]
     None -> []
@@ -4371,15 +4371,15 @@ fn build_dtf_parts(
       let d_part = case day {
         Some(dw) -> [
           #(PartLiteral, " "),
-          #(PartDay, numeric_width_str(dw, fields.day)),
+          #(PartDay, numeric_width_text(dw, fields.day)),
         ]
         None -> []
       }
       let y_part = case year {
         Some(yw) ->
           case day {
-            Some(_) -> [#(PartLiteral, ", "), #(PartYear, year_str(yw))]
-            None -> [#(PartLiteral, " "), #(PartYear, year_str(yw))]
+            Some(_) -> [#(PartLiteral, ", "), #(PartYear, year_text(yw))]
+            None -> [#(PartLiteral, " "), #(PartYear, year_text(yw))]
           }
         None -> []
       }
@@ -4387,7 +4387,7 @@ fn build_dtf_parts(
     }
     Some(MonthNum(_)) | None -> {
       let month_num = case month {
-        Some(MonthNum(mw)) -> Some(numeric_width_str(mw, fields.month))
+        Some(MonthNum(mw)) -> Some(numeric_width_text(mw, fields.month))
         Some(MonthName(_)) | None -> None
       }
       let lang = intl_locale.language_of(d.locale)
@@ -4399,9 +4399,9 @@ fn build_dtf_parts(
       let m_pair = #(PartMonth, month_num)
       let d_pair = #(
         PartDay,
-        option.map(day, fn(dw) { numeric_width_str(dw, fields.day) }),
+        option.map(day, fn(dw) { numeric_width_text(dw, fields.day) }),
       )
-      let y_pair = #(PartYear, option.map(year, year_str))
+      let y_pair = #(PartYear, option.map(year, year_text))
       let raw = case dotted {
         True -> [d_pair, m_pair, y_pair]
         False -> [m_pair, d_pair, y_pair]
@@ -4562,7 +4562,7 @@ fn am_pm(hour: Int) -> String {
 }
 
 // 2-digit keeps the low two digits
-fn numeric_width_str(width: NumericWidth, n: Int) -> String {
+fn numeric_width_text(width: NumericWidth, n: Int) -> String {
   case width {
     TwoDigit -> intl_format.pad2(n % 100)
     Numeric -> int.to_string(n)
@@ -4671,7 +4671,7 @@ fn dtf_collapsed_range(
         True -> 1 - xf.year
         False -> xf.year
       }
-      let year_str = case year_width {
+      let year_text = case year_width {
         TwoDigit -> intl_format.pad2(display_year % 100)
         Numeric -> int.to_string(display_year)
       }
@@ -4694,7 +4694,7 @@ fn dtf_collapsed_range(
                 ),
                 intl_format.RangePart(
                   PartDay,
-                  numeric_width_str(day_style, xf.day),
+                  numeric_width_text(day_style, xf.day),
                   intl_format.SourceStart,
                 ),
                 intl_format.RangePart(
@@ -4704,7 +4704,7 @@ fn dtf_collapsed_range(
                 ),
                 intl_format.RangePart(
                   PartDay,
-                  numeric_width_str(day_style, yf.day),
+                  numeric_width_text(day_style, yf.day),
                   intl_format.SourceEnd,
                 ),
                 intl_format.RangePart(
@@ -4714,7 +4714,7 @@ fn dtf_collapsed_range(
                 ),
                 intl_format.RangePart(
                   PartYear,
-                  year_str,
+                  year_text,
                   intl_format.SourceShared,
                 ),
               ]
@@ -4730,7 +4730,7 @@ fn dtf_collapsed_range(
                 intl_format.RangePart(PartLiteral, " ", intl_format.SourceStart),
                 intl_format.RangePart(
                   PartDay,
-                  numeric_width_str(day_style, xf.day),
+                  numeric_width_text(day_style, xf.day),
                   intl_format.SourceStart,
                 ),
                 intl_format.RangePart(
@@ -4746,7 +4746,7 @@ fn dtf_collapsed_range(
                 intl_format.RangePart(PartLiteral, " ", intl_format.SourceEnd),
                 intl_format.RangePart(
                   PartDay,
-                  numeric_width_str(day_style, yf.day),
+                  numeric_width_text(day_style, yf.day),
                   intl_format.SourceEnd,
                 ),
                 intl_format.RangePart(
@@ -4756,7 +4756,7 @@ fn dtf_collapsed_range(
                 ),
                 intl_format.RangePart(
                   PartYear,
-                  year_str,
+                  year_text,
                   intl_format.SourceShared,
                 ),
               ]
@@ -5073,7 +5073,7 @@ fn turkic_case(s: String, upper upper: Bool) -> String {
   }
 }
 
-fn codepoint_str(c: Int) -> String {
+fn codepoint_text(c: Int) -> String {
   case string.utf_codepoint(c) {
     Ok(cp) -> string.from_utf_codepoints([cp])
     Error(Nil) -> ""
@@ -5086,7 +5086,7 @@ fn lower_turkic_cps(cps: List(Int), acc: List(String)) -> String {
     [0x130, ..rest] -> lower_turkic_cps(rest, ["i", ..acc])
     [0x49, 0x307, ..rest] -> lower_turkic_cps(rest, ["i", ..acc])
     [0x49, ..rest] -> lower_turkic_cps(rest, ["ı", ..acc])
-    [c, ..rest] -> lower_turkic_cps(rest, [codepoint_str(c), ..acc])
+    [c, ..rest] -> lower_turkic_cps(rest, [codepoint_text(c), ..acc])
   }
 }
 
@@ -5105,7 +5105,7 @@ fn upper_lt_cps(cps: List(Int), acc: List(String)) -> String {
     [0x69, 0x307, ..rest] -> upper_lt_cps(rest, ["I", ..acc])
     [0x6a, 0x307, ..rest] -> upper_lt_cps(rest, ["J", ..acc])
     [0x12f, 0x307, ..rest] -> upper_lt_cps(rest, ["Į", ..acc])
-    [c, ..rest] -> upper_lt_cps(rest, [codepoint_str(c), ..acc])
+    [c, ..rest] -> upper_lt_cps(rest, [codepoint_text(c), ..acc])
   }
 }
 
@@ -5116,18 +5116,18 @@ fn lower_lt_cps(cps: List(Int), acc: List(String)) -> String {
     // I/J before a combining mark keep a dot above
     [0x49, m, ..rest] ->
       case is_mark(m) {
-        True -> lower_lt_cps(rest, [codepoint_str(m), "i\u{0307}", ..acc])
+        True -> lower_lt_cps(rest, [codepoint_text(m), "i\u{0307}", ..acc])
         False -> lower_lt_cps([m, ..rest], ["i", ..acc])
       }
     [0x4a, m, ..rest] ->
       case is_mark(m) {
-        True -> lower_lt_cps(rest, [codepoint_str(m), "j\u{0307}", ..acc])
+        True -> lower_lt_cps(rest, [codepoint_text(m), "j\u{0307}", ..acc])
         False -> lower_lt_cps([m, ..rest], ["j", ..acc])
       }
     [0xcc, ..rest] -> lower_lt_cps(rest, ["i\u{0307}\u{0300}", ..acc])
     [0xcd, ..rest] -> lower_lt_cps(rest, ["i\u{0307}\u{0301}", ..acc])
     [0x128, ..rest] -> lower_lt_cps(rest, ["i\u{0307}\u{0303}", ..acc])
-    [c, ..rest] -> lower_lt_cps(rest, [codepoint_str(c), ..acc])
+    [c, ..rest] -> lower_lt_cps(rest, [codepoint_text(c), ..acc])
   }
 }
 
@@ -5197,11 +5197,11 @@ fn rtf_method_parts(
     JNan | JPosInf | JNegInf ->
       rt_val.t_throw_range_error(st, "Value need to be finite number")
   }
-  let #(unit_str, st) = rt_val.t_to_string(st, unit_v)
-  let unit = case singular_unit(unit_str) {
+  let #(unit_text, st) = rt_val.t_to_string(st, unit_v)
+  let unit = case singular_unit(unit_text) {
     Some(u) -> u
     None ->
-      rt_val.t_throw_range_error(st, "Invalid unit argument: " <> unit_str)
+      rt_val.t_throw_range_error(st, "Invalid unit argument: " <> unit_text)
   }
   let abs_opts =
     intl_format.NumberFormatOptions(
@@ -5241,9 +5241,9 @@ fn string_list_from_iterable(
 ) -> #(List(String), Agent) {
   case classify(iterable) {
     KUndef -> #([], st)
-    KStr(str) -> {
+    KStr(text) -> {
       let items =
-        string.to_utf_codepoints(str)
+        string.to_utf_codepoints(text)
         |> list.map(fn(cp) { string.from_utf_codepoints([cp]) })
       #(items, st)
     }
@@ -5413,11 +5413,11 @@ fn to_duration_record(
   duration_v: JsVal,
 ) -> #(DurationRecord, Agent) {
   case classify(duration_v) {
-    KStr(str) ->
-      case parse_iso_duration(str) {
+    KStr(text) ->
+      case parse_iso_duration(text) {
         Ok(fields) -> #(fields, st)
         Error(Nil) ->
-          rt_val.t_throw_range_error(st, "Invalid duration string: " <> str)
+          rt_val.t_throw_range_error(st, "Invalid duration string: " <> text)
       }
     KHandle(_) -> {
       let #(fields, st, any_defined) =
@@ -5486,8 +5486,8 @@ fn is_valid_duration(d: DurationRecord) -> Bool {
 }
 
 // [+-]PnYnMnWnDTnHnMnS
-fn parse_iso_duration(str: String) -> Result(DurationRecord, Nil) {
-  let trimmed = string.trim(str)
+fn parse_iso_duration(text: String) -> Result(DurationRecord, Nil) {
+  let trimmed = string.trim(text)
   let #(sign, rest) = case string.pop_grapheme(trimmed) {
     Ok(#("-", r)) -> #(-1.0, r)
     Ok(#("\u{2212}", r)) -> #(-1.0, r)
@@ -5765,8 +5765,8 @@ fn build_duration_parts(
                 )
               let parts = case value_repr {
                 FloatValue(f) -> intl_format.format_number_parts(opts, f)
-                DecimalValue(str) ->
-                  intl_format.format_decimal_string_parts(opts, str)
+                DecimalValue(text) ->
+                  intl_format.format_decimal_string_parts(opts, text)
               }
               let unit_tag = duration_unit_singular(unit)
               let parts =
@@ -5877,10 +5877,10 @@ fn duration_fractional_value(
         True -> "-"
         False -> ""
       }
-      let r_str = string.pad_start(int.to_string(r), exponent, "0")
+      let r_text = string.pad_start(int.to_string(r), exponent, "0")
       #(
         DecimalValue(
-          sign <> int.to_string(int.absolute_value(q)) <> "." <> r_str,
+          sign <> int.to_string(int.absolute_value(q)) <> "." <> r_text,
         ),
         zero,
       )

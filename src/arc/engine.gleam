@@ -109,20 +109,16 @@ pub fn new_with_host_refs(host_refs: fn(host) -> List(Ref)) -> Engine(host) {
   new()
 }
 
-fn from_agent(agent: Agent) -> Engine(host) {
-  Engine(
-    agent: entry.link(agent),
-    key: host.new_key(),
-    host_modules: dict.new(),
-  )
+fn from_agent(st: Agent) -> Engine(host) {
+  Engine(agent: entry.link(st), key: host.new_key(), host_modules: dict.new())
 }
 
 pub fn with_host_hooks(
   engine: Engine(host),
   hooks: host_hooks.HostHooks,
 ) -> Engine(host) {
-  let agent = engine.agent
-  Engine(..engine, agent: Agent(..agent, hooks:))
+  let st = engine.agent
+  Engine(..engine, agent: Agent(..st, hooks:))
 }
 
 fn host_context(engine: Engine(host)) -> host.Context(host) {
@@ -200,8 +196,8 @@ pub fn with_context_with(
   let held =
     rt_gc.push_refs(result, [])
     |> list.map(fn(id) { mk_object(Handle(id)) })
-  let agent = safepoint.finish_turn(ctx.agent, held, finish)
-  #(Engine(..engine, agent:), result)
+  let st = safepoint.finish_turn(ctx.agent, held, finish)
+  #(Engine(..engine, agent: st), result)
 }
 
 pub fn register_host_module(
@@ -209,16 +205,16 @@ pub fn register_host_module(
   specifier: String,
   exports: List(#(String, JsValue)),
 ) -> Engine(host) {
-  let agent =
-    list.fold(exports, engine.agent, fn(agent, export) {
+  let st =
+    list.fold(exports, engine.agent, fn(st, export) {
       case types.classify(export.1) {
-        KHandle(h) -> rt_store.t_pin_root(agent, h)
-        _ -> agent
+        KHandle(h) -> rt_store.t_pin_root(st, h)
+        _ -> st
       }
     })
   Engine(
     ..engine,
-    agent:,
+    agent: st,
     host_modules: dict.insert(
       engine.host_modules,
       specifier,
@@ -230,15 +226,15 @@ pub fn register_host_module(
 fn settle(
   engine: Engine(host),
   completion: Completion(JsVal),
-  agent: Agent,
+  st: Agent,
   finish: fn(Agent) -> Agent,
 ) -> #(Outcome, Engine(host)) {
   let #(outcome, held) = case completion {
     NormalCompletion(v) -> #(Returned(v), v)
     ThrowCompletion(e) -> #(Threw(e), e)
   }
-  let agent = safepoint.finish_turn(agent, [held], finish)
-  #(outcome, Engine(..engine, agent:))
+  let st = safepoint.finish_turn(st, [held], finish)
+  #(outcome, Engine(..engine, agent: st))
 }
 
 /// §16.1.6 run a script then drain microtasks
@@ -256,15 +252,15 @@ pub fn eval_with(
   finish: fn(Agent) -> Agent,
 ) -> Result(#(Outcome, Engine(host)), EvalError(host)) {
   use template <- result.map(
-    compile_task.run_compile_task(string.byte_size(source), fn() {
+    compile_task.run(string.byte_size(source), fn() {
       use #(body, sb) <- result.try(
         parser.parse_script(source) |> result.map_error(ParseError),
       )
       compiler.compile_script(body, sb) |> result.map_error(CompileError)
     }),
   )
-  let #(completion, agent) = entry.run_script(engine.agent, template)
-  settle(engine, completion, agent, finish)
+  let #(completion, st) = entry.run_script(engine.agent, template)
+  settle(engine, completion, st, finish)
 }
 
 /// a top-level throw is Ok(ModuleThrew), not Error
@@ -296,8 +292,8 @@ pub fn eval_module_with(
     )
     |> result.map_error(ModuleCompileError),
   )
-  let #(agent, res) = module.evaluate_bundle(bundle, engine.agent, finish)
-  let engine = Engine(..engine, agent:)
+  let #(st, res) = module.evaluate_bundle(bundle, engine.agent, finish)
+  let engine = Engine(..engine, agent: st)
   case res {
     Ok(module.EvaluatedBundle(value:, namespace:)) ->
       Ok(#(ModuleReturned(value:, namespace: Namespace(namespace)), engine))
@@ -339,8 +335,8 @@ pub fn repl_eval(
     compiler.compile_repl(body, sb) |> result.map_error(CompileError),
   )
   let engine = repl.engine
-  let #(completion, agent) = entry.run_script(engine.agent, template)
-  let #(outcome, engine) = settle(engine, completion, agent, rt_async.drain)
+  let #(completion, st) = entry.run_script(engine.agent, template)
+  let #(outcome, engine) = settle(engine, completion, st, rt_async.drain)
   #(outcome, Repl(engine:))
 }
 
@@ -360,9 +356,8 @@ pub fn call_with(
   args: List(JsValue),
   finish: fn(Agent) -> Agent,
 ) -> #(Outcome, Engine(host)) {
-  let #(completion, agent) =
-    rt_call.t_try_call(engine.agent, callee, this, args)
-  settle(engine, completion, agent, finish)
+  let #(completion, st) = rt_call.t_try_call(engine.agent, callee, this, args)
+  settle(engine, completion, st, finish)
 }
 
 /// host fns, hooks and host modules are not written

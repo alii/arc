@@ -1,4 +1,4 @@
-import arc/bytecode/key.{canonical_key}
+import arc/bytecode/key
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
@@ -31,16 +31,16 @@ fn construct(st: Agent, name: String, args: List(JsVal)) -> #(JsVal, Agent) {
   #(mk_object(h), st)
 }
 
-fn get(st: Agent, obj: JsVal, key: String) -> #(JsVal, Agent) {
-  rt_obj.t_get_prop(st, obj, StringKey(canonical_key(key)))
+fn get(st: Agent, obj: JsVal, name: String) -> #(JsVal, Agent) {
+  rt_obj.t_get_prop(st, obj, StringKey(key.canonical(name)))
 }
 
-fn get_(st: Agent, obj: JsVal, key: String) -> JsVal {
-  get(st, obj, key).0
+fn get_(st: Agent, obj: JsVal, name: String) -> JsVal {
+  get(st, obj, name).0
 }
 
-fn set(st: Agent, obj: JsVal, key: String, v: JsVal) -> Agent {
-  let #(_, st) = rt_obj.t_set_prop(st, obj, StringKey(canonical_key(key)), v)
+fn set(st: Agent, obj: JsVal, name: String, v: JsVal) -> Agent {
+  let #(_, st) = rt_obj.t_set_prop(st, obj, StringKey(key.canonical(name)), v)
   st
 }
 
@@ -140,7 +140,7 @@ pub fn out_of_bounds_read_undefined_write_ignored_test() {
   assert classify(get_(st, ta, "length")) == KNum(JInt(2))
   let assert KHandle(h) = classify(ta)
   let #(keys, _) = rt_obj.t_own_keys(st, h)
-  assert keys == [StringKey(canonical_key("0")), StringKey(canonical_key("1"))]
+  assert keys == [StringKey(key.canonical("0")), StringKey(key.canonical("1"))]
 }
 
 pub fn resizable_buffer_length_tracking_view_test() {
@@ -222,8 +222,8 @@ pub fn keys_in_and_descriptor_test() {
   let #(ta, st) = construct(st, "Int8Array", [src])
   let #(keys, st) = static(st, "Object", "keys", [ta])
   assert joined(st, keys) == "0,1,2"
-  let #(has1, st) = rt_obj.t_has_prop(st, ta, StringKey(canonical_key("1")))
-  let #(has3, st) = rt_obj.t_has_prop(st, ta, StringKey(canonical_key("3")))
+  let #(has1, st) = rt_obj.t_has_prop(st, ta, StringKey(key.canonical("1")))
+  let #(has3, st) = rt_obj.t_has_prop(st, ta, StringKey(key.canonical("3")))
   assert has1
   assert !has3
   let #(desc, st) =
@@ -236,8 +236,8 @@ pub fn keys_in_and_descriptor_test() {
     static(st, "Object", "getOwnPropertyDescriptor", [ta, mk_string("7")])
   assert classify(none) == KUndef
   let assert KHandle(h) = classify(ta)
-  let #(d0, st) = rt_obj.t_delete_prop(st, h, StringKey(canonical_key("0")))
-  let #(d9, _) = rt_obj.t_delete_prop(st, h, StringKey(canonical_key("9")))
+  let #(d0, st) = rt_obj.t_delete_prop(st, h, StringKey(key.canonical("0")))
+  let #(d9, _) = rt_obj.t_delete_prop(st, h, StringKey(key.canonical("9")))
   assert !d0
   assert d9
 }
@@ -317,7 +317,7 @@ pub fn constructor_reads_new_target_prototype_in_spec_order_test() {
     rt_obj.t_define_own_accessor(
       st,
       nt_h,
-      StringKey(canonical_key("prototype")),
+      StringKey(key.canonical("prototype")),
       Some(mk_object(st.realm.throw_type_error)),
       option.None,
       enumerable: False,

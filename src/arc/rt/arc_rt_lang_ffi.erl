@@ -48,12 +48,10 @@ native(Cells, {?HANDLE_TAG, IId} = IterH, {?HANDLE_TAG, NId}) ->
     end;
 native(_, _, _) -> native_miss.
 
-%% for-of over a plain array or string keeps the iterator on the stack as
-%% {arc_iter, Target, Index, NextFn} while nothing can observe the objects;
-%% for strings the index is a byte offset
-array_iter_start(Agent, {?HANDLE_TAG, Id} = V) ->
-    Realm = element(?AGENT_REALM, Agent),
-    Cells = element(?STORE_CELLS, element(?AGENT_STORE, Agent)),
+%% unobserved for-of state {arc_iter, Target, Index, NextFn}; strings index by byte
+array_iter_start(St, {?HANDLE_TAG, Id} = V) ->
+    Realm = element(?AGENT_REALM, St),
+    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, _}, Proto, _, [], _, _} ->
             pristine(Realm, Cells, V, Proto, ?REALM_ARRAY, ?REALM_ARRAY_ITER_PROTO,
@@ -66,16 +64,15 @@ array_iter_start(Agent, {?HANDLE_TAG, Id} = V) ->
                      ?TOKEN_SET_VALUES, ?TOKEN_SET_ITER_NEXT);
         _ -> miss
     end;
-array_iter_start(Agent, S) when ?IS_STR(S) ->
-    Realm = element(?AGENT_REALM, Agent),
-    Cells = element(?STORE_CELLS, element(?AGENT_STORE, Agent)),
+array_iter_start(St, S) when ?IS_STR(S) ->
+    Realm = element(?AGENT_REALM, St),
+    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     Proto = {?SOME, element(?BUILTINPAIR_PROTO, element(?REALM_STRING, Realm))},
     pristine(Realm, Cells, S, Proto, ?REALM_STRING, ?REALM_STRING_ITER_PROTO,
              ?TOKEN_STRING_ITER, ?TOKEN_STRING_ITER_NEXT);
 array_iter_start(_, _) -> miss.
 
-%% V inherits @@iterator straight from the class prototype and both that and
-%% the iterator prototype's next are still the intrinsics
+%% V's @@iterator and the iterator prototype's next are still the intrinsics
 pristine(Realm, Cells, V, Proto, Class, IterProto, IterTok, NextTok) ->
     {?HANDLE_TAG, CP} = element(?BUILTINPAIR_PROTO, element(Class, Realm)),
     {?HANDLE_TAG, IP} = element(IterProto, Realm),
@@ -149,12 +146,12 @@ array_iter_next(_, {?ARC_ITER, S, Off, _} = R) when ?IS_STR(S) ->
 array_iter_next(_, _) -> iter_miss.
 
 %% the intrinsic prototype a materialized iterator for this record would get
-array_iter_proto(Agent, R) ->
-    element(iter_proto_ix(Agent, R), element(?AGENT_REALM, Agent)).
+array_iter_proto(St, R) ->
+    element(iter_proto_ix(St, R), element(?AGENT_REALM, St)).
 
 iter_proto_ix(_, {?ARC_ITER, S, _, _}) when ?IS_STR(S) -> ?REALM_STRING_ITER_PROTO;
-iter_proto_ix(Agent, {?ARC_ITER, {?HANDLE_TAG, T}, _, _}) ->
-    Cells = element(?STORE_CELLS, element(?AGENT_STORE, Agent)),
+iter_proto_ix(St, {?ARC_ITER, {?HANDLE_TAG, T}, _, _}) ->
+    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     case element(?SOBJECT_KIND, arc_rt_arena_ffi:get(T, Cells)) of
         {?MAPOBJ_TAG, _} -> ?REALM_MAP_ITER_PROTO;
         {?SETOBJ_TAG, _} -> ?REALM_SET_ITER_PROTO;
@@ -167,10 +164,10 @@ array_iter_parts({?ARC_ITER, T, I, N}) -> {T, I, N}.
 array_iter_record(T, I, N) -> {?ARC_ITER, T, I, N}.
 
 %% every element of a plain hole-free array, when iterating it observes nothing
-array_spread(Agent, V) ->
-    case array_iter_start(Agent, V) of
+array_spread(St, V) ->
+    case array_iter_start(St, V) of
         {?ARC_ITER, {?HANDLE_TAG, T}, _, _} ->
-            Cells = element(?STORE_CELLS, element(?AGENT_STORE, Agent)),
+            Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
             case arc_rt_arena_ffi:get(T, Cells) of
                 {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, Props, _, Els, _}
                   when map_size(Props) =:= 0 ->

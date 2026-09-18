@@ -7,7 +7,7 @@ import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined}
 import arc/rt/builtins/realm_ops
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
-import arc/rt/inspect
+import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/types.{
@@ -65,7 +65,7 @@ pub fn dispatch(
   }
 }
 
-/// create_realm passed in to avoid an import cycle
+// create_realm passed in to avoid an import cycle
 pub fn dispatch_construct(
   st: Agent,
   n: ShadowRealmNative,
@@ -273,7 +273,7 @@ fn perform_shadow_realm_eval(
       rt_val.t_throw_type_error(
         st,
         "ShadowRealm.prototype.evaluate threw: "
-          <> inspect.format_error(st, thrown),
+          <> rt_inspect.format_error(st, thrown),
       )
   }
 }
@@ -300,7 +300,7 @@ fn wrapped_function_call(
     ThrowCompletion(thrown) ->
       rt_val.t_throw_type_error(
         st,
-        "wrapped function threw: " <> inspect.format_error(st, thrown),
+        "wrapped function threw: " <> rt_inspect.format_error(st, thrown),
       )
   }
 }

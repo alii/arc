@@ -34,8 +34,8 @@ fn print(args, _this, ctx: host.Context(Nil)) {
 }
 
 fn uppercase(args, _this, ctx) {
-  use str, ctx <- host.validate_string(ctx, host.first_arg(args), "str")
-  #(ctx, Ok(mk_string(string.uppercase(str))))
+  use text, ctx <- host.validate_string(ctx, host.first_arg(args), "str")
+  #(ctx, Ok(mk_string(string.uppercase(text))))
 }
 
 fn map_range(args, _this, ctx) {
@@ -66,7 +66,7 @@ fn map_range_loop(ctx, cb, i, n, acc) {
 
 fn display(ctx: host.Context(Nil), v) {
   case engine.classify(v) {
-    JsString(str) -> str
+    JsString(text) -> text
     _ -> rt_inspect.inspect(ctx.agent, v)
   }
 }

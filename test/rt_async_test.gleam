@@ -145,7 +145,7 @@ pub fn promise_subclass_test() {
     )
   let #(p_ctor_h, st) =
     rt_call.t_fn_new(st, ctor_code, flags, "P", 1, None, None)
-  let #(p_proto_h, st) = rt_class.t_class_setup(st, p_ctor_h, promise)
+  let #(p_proto_h, st) = rt_class.t_setup(st, p_ctor_h, promise)
   let p_ctor = mk_object(p_ctor_h)
   let #(executor, st) =
     rt_helpers.func(st, fn(st, args) {

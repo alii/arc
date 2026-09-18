@@ -1,4 +1,4 @@
-import arc/internal/bytes as source_bytes
+import arc/internal/bytes
 import arc/internal/digits
 import arc/internal/utf16
 import arc/parser/lexer
@@ -34,7 +34,7 @@ pub type RegexFlags {
 }
 
 // returns the position just past the closing /
-pub fn skip_regex_body(bytes: BitArray, pos: Int) -> Result(Int, PatternError) {
+pub fn skip_body(bytes: BitArray, pos: Int) -> Result(Int, PatternError) {
   case bytes {
     <<_:bytes-size(pos), rest:bytes>> ->
       skip_regex_body_loop(rest, pos, in_class: False)
@@ -66,16 +66,13 @@ fn skip_regex_body_loop(
   }
 }
 
-pub fn skip_regex_flags(
-  bytes: BitArray,
+pub fn skip_flags(
+  src: BitArray,
   pos: Int,
 ) -> Result(#(Int, RegexFlags), PatternError) {
-  use #(end, seen) <- result.try(scan_regex_flags(bytes, pos, []))
+  use #(end, seen) <- result.try(scan_regex_flags(src, pos, []))
   use mode <- result.map(mode_of_flags(seen, pos))
-  #(
-    end,
-    RegexFlags(mode:, text: source_bytes.unsafe_slice(bytes, pos, end - pos)),
-  )
+  #(end, RegexFlags(mode:, text: bytes.unsafe_slice(src, pos, end - pos)))
 }
 
 pub fn validate_flags(flags: String) -> Result(RegexFlags, PatternError) {
@@ -90,11 +87,11 @@ pub fn validate_flags(flags: String) -> Result(RegexFlags, PatternError) {
 }
 
 fn scan_regex_flags(
-  bytes: BitArray,
+  src: BitArray,
   pos: Int,
   seen: List(String),
 ) -> Result(#(Int, List(String)), PatternError) {
-  case source_bytes.ascii_at(bytes, pos) {
+  case bytes.ascii_at(src, pos) {
     Some("g" as ch)
     | Some("i" as ch)
     | Some("m" as ch)
@@ -105,7 +102,7 @@ fn scan_regex_flags(
     | Some("d" as ch) ->
       case list.contains(seen, ch) {
         True -> Error(DuplicateFlag(pos, ch))
-        False -> scan_regex_flags(bytes, pos + 1, [ch, ..seen])
+        False -> scan_regex_flags(src, pos + 1, [ch, ..seen])
       }
     _ -> Ok(#(pos, seen))
   }
@@ -264,20 +261,20 @@ fn escaped_char_at(ctx: PatternContext, pos: Int) -> EscapedChar {
     Some(CodePoint(value:, width:)) if value >= 0x80 -> NonAscii(value:, width:)
     Some(CodePoint(value:, ..)) if value >= 0x30 && value <= 0x39 ->
       Digit(value - 0x30)
-    Some(_) -> Ascii(source_bytes.unsafe_slice(ctx.bytes, pos, 1))
+    Some(_) -> Ascii(bytes.unsafe_slice(ctx.bytes, pos, 1))
   }
 }
 
 fn ascii_at(ctx: PatternContext, pos: Int) -> Option(String) {
   case pos < ctx.end {
-    True -> source_bytes.ascii_at(ctx.bytes, pos)
+    True -> bytes.ascii_at(ctx.bytes, pos)
     False -> None
   }
 }
 
 fn byte_at(ctx: PatternContext, pos: Int) -> Int {
   case pos < ctx.end {
-    True -> source_bytes.byte_at(ctx.bytes, pos)
+    True -> bytes.byte_at(ctx.bytes, pos)
     False -> -1
   }
 }
@@ -1092,8 +1089,7 @@ fn property_escape_length(
   use <- bool.guard(ascii_at(ctx, pos + 2) != Some("{"), invalid)
   let name_start = pos + 3
   let name_end = skip_property_chars(ctx, name_start)
-  let name =
-    source_bytes.unsafe_slice(ctx.bytes, name_start, name_end - name_start)
+  let name = bytes.unsafe_slice(ctx.bytes, name_start, name_end - name_start)
   case ascii_at(ctx, name_end) {
     Some("}") ->
       case classify_lone(name), allow_strings {
@@ -1105,11 +1101,7 @@ fn property_escape_length(
       let value_start = name_end + 1
       let value_end = skip_property_chars(ctx, value_start)
       let value =
-        source_bytes.unsafe_slice(
-          ctx.bytes,
-          value_start,
-          value_end - value_start,
-        )
+        bytes.unsafe_slice(ctx.bytes, value_start, value_end - value_start)
       use <- bool.guard(ascii_at(ctx, value_end) != Some("}"), invalid)
       case classify_pair(name, value) {
         PropValid -> Ok(value_end + 1 - pos)

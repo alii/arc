@@ -169,8 +169,7 @@ cut(W, Shift, Node) ->
 cut_from(Ix, Node) when Ix =< ?FANOUT -> cut_from(Ix + 1, setelement(Ix, Node, ?FREE));
 cut_from(_, Node) -> Node.
 
-%% ids below W whose cell differs between Old and New; New descends from Old
-%% by set, so =:= settles shared subtrees by identity without walking them
+%% ids below W whose cell differs; =:= settles shared subtrees by identity
 diff_below(W, Old, New) ->
     {arena, OldShift, OldRoot, _, _} = settle(Old),
     {arena, NewShift, NewRoot, _, _} = settle(New),

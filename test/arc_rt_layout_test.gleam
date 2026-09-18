@@ -1,4 +1,4 @@
-//// arc_rt_layout.hrl indices must match the gleam records
+// arc_rt_layout.hrl indices must match the gleam records
 
 import arc/bytecode/key.{Index, Named, Private, max_array_index}
 import arc/bytecode/opcode

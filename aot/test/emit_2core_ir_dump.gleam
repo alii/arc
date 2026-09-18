@@ -1,6 +1,6 @@
 // throwaway perf dump, not a test
 
-import arc_aot/emit as emit_2core
+import arc_aot/emit
 import carder/ir
 import carder/ir/printer
 import carder/pipeline
@@ -17,17 +17,14 @@ fn dump(name: String, source: String) -> Nil {
   io.println("═══ src: " <> source)
   io.println("═══════════════════════════════════════════════════════════════")
   let opts =
-    emit_2core.CompileOpts(
-      module_name: "irdump_" <> name,
-      source_kind: emit_2core.AsScript,
-    )
-  case emit_2core.compile_source(source, opts) {
+    emit.CompileOpts(module_name: "irdump_" <> name, source_kind: emit.AsScript)
+  case emit.compile_source(source, opts) {
     Error(e) -> io.println("!! compile_source FAILED: " <> string.inspect(e))
     Ok(ir_module) -> {
       io.println("─── twocore IR (printer.print_module) ───")
       io.println(printer.print_module(ir_module))
       io.println("─── Core Erlang (pipeline.ir_to_core, emit binding) ───")
-      case pipeline.ir_to_core(ir_module, emit_2core.binding()) {
+      case pipeline.ir_to_core(ir_module, emit.binding()) {
         Error(e) -> io.println("!! ir_to_core FAILED: " <> string.inspect(e))
         Ok(core) -> io.println(core)
       }
@@ -65,11 +62,8 @@ fn dump_richards_node_counts() -> Nil {
   io.println("═══════════════════════════════════════════════════════════════")
   let assert Ok(src) = simplifile.read("../bench/v8-v7/richards_run.js")
   let opts =
-    emit_2core.CompileOpts(
-      module_name: "irdump_richards",
-      source_kind: emit_2core.AsScript,
-    )
-  case emit_2core.compile_source(src, opts) {
+    emit.CompileOpts(module_name: "irdump_richards", source_kind: emit.AsScript)
+  case emit.compile_source(src, opts) {
     Error(e) -> io.println("!! compile_source FAILED: " <> string.inspect(e))
     Ok(ir_module) -> {
       let rows =

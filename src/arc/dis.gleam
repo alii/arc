@@ -5,7 +5,7 @@ import arc/internal/tuple_array.{type TupleArray}
 import arc/parser
 import arc/rt/bytecode.{type FuncTemplate}
 import arc/rt/types.{type JsVal}
-import arc/rt/val
+import arc/rt/val as rt_val
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -195,7 +195,7 @@ fn resolve(
 fn constant_to_string(constant: JsVal) -> String {
   case types.classify(constant) {
     types.KStr(text) -> string.inspect(text)
-    types.KNum(number) -> val.jsnum_to_string(number)
+    types.KNum(number) -> rt_val.jsnum_to_string(number)
     types.KBig(n) -> int.to_string(n) <> "n"
     types.KBool(True) -> "true"
     types.KBool(False) -> "false"

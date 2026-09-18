@@ -1,5 +1,4 @@
-%% the os tz database; the only place arc reads the disk, and only when a
-%% host opts in through arc/zoneinfo
+%% the os tz database; arc's only disk read, opted into through arc/zoneinfo
 -module(arc_zoneinfo_ffi).
 
 -export([load/1, available_ids/0, system_time_zone/0, time_zone_named/1]).

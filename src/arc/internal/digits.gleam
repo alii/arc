@@ -154,7 +154,7 @@ pub fn is_binary_digit(ch: String) -> Bool {
 }
 
 // exactly n digits, none if fewer
-pub fn take_digits(s: String, n: Int) -> Option(#(Int, String)) {
+pub fn take(s: String, n: Int) -> Option(#(Int, String)) {
   take_digits_loop(s, n, 0)
 }
 

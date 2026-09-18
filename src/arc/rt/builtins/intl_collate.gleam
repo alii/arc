@@ -212,8 +212,8 @@ fn numeric_compare(a: List(String), b: List(String)) -> Int {
     [], _ -> -1
     _, [] -> 1
     [ca, ..ta], [cb, ..tb] -> {
-      let da = is_digit_str(ca)
-      let db = is_digit_str(cb)
+      let da = is_digit_text(ca)
+      let db = is_digit_text(cb)
       case da, db {
         True, True -> {
           let #(na, rest_a) = take_digits(a, "")
@@ -238,7 +238,7 @@ fn numeric_compare(a: List(String), b: List(String)) -> Int {
 fn take_digits(gs: List(String), acc: String) -> #(String, List(String)) {
   case gs {
     [g, ..rest] ->
-      case is_digit_str(g) {
+      case is_digit_text(g) {
         True -> take_digits(rest, acc <> g)
         False -> #(acc, gs)
       }
@@ -246,7 +246,7 @@ fn take_digits(gs: List(String), acc: String) -> #(String, List(String)) {
   }
 }
 
-fn is_digit_str(s: String) -> Bool {
+fn is_digit_text(s: String) -> Bool {
   s != ""
   && string.to_utf_codepoints(s)
   |> list.all(fn(cp) {

@@ -1,6 +1,6 @@
 import arc/bytecode/key.{Named}
 import arc/rt/builtins/console as b_console
-import arc/rt/inspect
+import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   JFloat, StringKey, mk_bigint, mk_hole, mk_int, mk_number, mk_string,
@@ -14,7 +14,7 @@ pub fn renders_structures_test() {
   let #(o, st) = rt_obj.t_new_object_literal(st)
   let #(_, st) = rt_obj.t_set_prop(st, o, StringKey(Named("a")), inner)
   let #(_, st) = rt_obj.t_set_prop(st, o, StringKey(Named("self")), o)
-  assert inspect.inspect(st, o) == "{ a: [ 1, <empty> ], self: [Circular] }"
+  assert rt_inspect.inspect(st, o) == "{ a: [ 1, <empty> ], self: [Circular] }"
   let #(is_nan, st) = rt_helpers.global(st, "isNaN")
   let #(line, _) =
     b_console.format(st, [

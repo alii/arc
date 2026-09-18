@@ -1,6 +1,6 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError}
 import arc/internal/int_math.{floor_div}
-import arc/internal/temporal_calendar as tcal
+import arc/internal/temporal_calendar
 import arc/rt/builtins/temporal_common.{
   type Disambiguation, type OffsetOption, Compatible, Earlier, HalfExpand,
   IgnoreOffset, Later, RejectDisambiguation, RejectOffset, UseOffset, date_part,
@@ -236,7 +236,7 @@ pub fn date_time_fields_all_none(f: DateTimeFields) -> Bool {
 pub fn read_date_time_fields(
   st: Agent,
   bag: Handle,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   read_offset read_offset: Bool,
   read_tz read_tz: Bool,
 ) -> #(DateTimeFields, Agent) {
@@ -299,7 +299,7 @@ pub fn to_temporal_zoned(
   st: Agent,
   item: JsVal,
   options: JsVal,
-) -> #(#(Int, TimeZone, tcal.Calendar), Agent) {
+) -> #(#(Int, TimeZone, temporal_calendar.Calendar), Agent) {
   case classify(item) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
@@ -317,9 +317,9 @@ pub fn to_temporal_zoned(
         _ -> zoned_from_bag(st, h, options)
       }
     KStr(s) -> {
-      let #(d, t_opt, offset, tz_str, cal) =
+      let #(d, t_opt, offset, tz_text, cal) =
         rt_val.or_throw(st, parse_zoned_string(s))
-      let #(tz, st) = time_zone_from_string(st, tz_str)
+      let #(tz, st) = time_zone_from_string(st, tz_text)
       let #(#(dis, offset_opt, _ov), st) = validated_zdt_options(st, options)
       let ns =
         rt_val.or_throw(
@@ -350,7 +350,7 @@ pub fn validated_zdt_options(
 pub fn parse_zoned_string(
   s: String,
 ) -> Result(
-  #(IsoDate, Option(IsoTime), ParsedOffset, String, tcal.Calendar),
+  #(IsoDate, Option(IsoTime), ParsedOffset, String, temporal_calendar.Calendar),
   JsError,
 ) {
   case parse_iso_datetime_string(s) {
@@ -363,9 +363,9 @@ pub fn parse_zoned_string(
             RangeError,
             "ZonedDateTime string requires a [TimeZone]",
           ))
-        Some(tz_str) -> {
+        Some(tz_text) -> {
           use cal <- result.map(parsed_calendar_id(p))
-          #(p.date, p.time, p.offset, tz_str, cal)
+          #(p.date, p.time, p.offset, tz_text, cal)
         }
       }
     }
@@ -415,7 +415,7 @@ pub fn zoned_from_bag(
   st: Agent,
   bag: Handle,
   options: JsVal,
-) -> #(#(Int, TimeZone, tcal.Calendar), Agent) {
+) -> #(#(Int, TimeZone, temporal_calendar.Calendar), Agent) {
   let #(cal, st) = read_bag_calendar(st, bag)
   let #(f, st) =
     read_date_time_fields(st, bag, cal, read_offset: True, read_tz: True)
@@ -451,8 +451,12 @@ pub fn zoned_from_bag(
 
 pub type RelativeTo {
   NoRelativeTo
-  RelativeDate(date: IsoDate, calendar: tcal.Calendar)
-  RelativeZoned(epoch_ns: Int, time_zone: TimeZone, calendar: tcal.Calendar)
+  RelativeDate(date: IsoDate, calendar: temporal_calendar.Calendar)
+  RelativeZoned(
+    epoch_ns: Int,
+    time_zone: TimeZone,
+    calendar: temporal_calendar.Calendar,
+  )
 }
 
 pub fn convert_relative_to(st: Agent, v: JsVal) -> #(RelativeTo, Agent) {
@@ -486,8 +490,8 @@ pub fn convert_relative_to(st: Agent, v: JsVal) -> #(RelativeTo, Agent) {
           let cal = rt_val.or_throw(st, parsed_calendar_id(p))
           let d = p.date
           case p.tz {
-            Some(tz_str) -> {
-              let #(tz, st) = time_zone_from_string(st, tz_str)
+            Some(tz_text) -> {
+              let #(tz, st) = time_zone_from_string(st, tz_text)
               let ens =
                 rt_val.or_throw(
                   st,
@@ -561,7 +565,7 @@ fn relative_from_bag(st: Agent, bag: Handle) -> #(RelativeTo, Agent) {
 pub fn add_zoned_ns(
   ns: Int,
   tz: TimeZone,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
   dur: Duration,
 ) -> Result(Int, JsError) {
   use base <- result.try(case has_date_units(dur) {
@@ -578,7 +582,7 @@ pub fn add_zoned_ns(
 pub fn date_duration_days(
   dur: Duration,
   relative_date: IsoDate,
-  cal: tcal.Calendar,
+  cal: temporal_calendar.Calendar,
 ) -> Result(Int, JsError) {
   case has_calendar_units(dur) {
     False -> Ok(dur.days)

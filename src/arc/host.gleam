@@ -1,7 +1,7 @@
 //// helpers for writing host functions; validators modeled on node's
 
 import arc/bytecode/error_kind.{type ErrorKind, RangeError, TypeError}
-import arc/bytecode/key.{canonical_key}
+import arc/bytecode/key
 import arc/host_hooks
 import arc/internal/unsafe
 import arc/rt/async as rt_async
@@ -49,8 +49,8 @@ pub type HostFn(host) =
   fn(List(JsVal), JsVal, Context(host)) ->
     #(Context(host), Result(JsVal, JsVal))
 
-pub fn from_agent(agent: Agent, key: Key(host)) -> Context(host) {
-  Context(agent:, new_target: mk_undefined(), key:)
+pub fn from_agent(st: Agent, key: Key(host)) -> Context(host) {
+  Context(agent: st, new_target: mk_undefined(), key:)
 }
 
 pub fn new_target(ctx: Context(host)) -> JsVal {
@@ -58,12 +58,12 @@ pub fn new_target(ctx: Context(host)) -> JsVal {
 }
 
 pub fn with_context(
-  agent: Agent,
+  st: Agent,
   key: Key(host),
   body: fn(Context(host)) -> #(Context(host), a),
 ) -> #(Agent, a) {
-  let #(Context(agent:, ..), result) = body(from_agent(agent, key))
-  #(rt_async.drain(agent), result)
+  let #(Context(agent: st, ..), result) = body(from_agent(st, key))
+  #(rt_async.drain(st), result)
 }
 
 /// missing args are undefined
@@ -102,7 +102,7 @@ pub fn validate_string(
   cont: fn(String, Context(host)) -> #(Context(host), Result(JsVal, JsVal)),
 ) -> #(Context(host), Result(JsVal, JsVal)) {
   case classify(val) {
-    KStr(str) -> cont(str, ctx)
+    KStr(text) -> cont(text, ctx)
     _ -> invalid_arg_type(ctx, name, "string", val)
   }
 }
@@ -429,7 +429,7 @@ pub fn define_global(
     rt_obj.t_define_own_data(
       st,
       st.realm.global_object,
-      StringKey(canonical_key(name)),
+      StringKey(key.canonical(name)),
       val,
       writable: True,
       enumerable: False,
@@ -487,10 +487,10 @@ fn register(
 ) -> #(Int, Agent) {
   let id = dict.size(st.host_fns)
   let entry =
-    HostFnEntry(name:, call: fn(agent, args, this, new_target) {
-      let #(Context(agent:, ..), result) =
-        impl(args, this, Context(agent:, new_target:, key:))
-      #(agent, result)
+    HostFnEntry(name:, call: fn(st, args, this, new_target) {
+      let #(Context(agent: st, ..), result) =
+        impl(args, this, Context(agent: st, new_target:, key:))
+      #(st, result)
     })
   #(id, Agent(..st, host_fns: dict.insert(st.host_fns, id, entry)))
 }

@@ -93,13 +93,13 @@ pub fn roundtrip_is_repeatable_test() {
 
 pub fn regexp_matcher_is_dropped_and_rebuilt_test() {
   let st = rt_helpers.agent()
-  let #(re, st) = b_regexp.regexp_create_literal(st, "a+b", "")
+  let #(re, st) = b_regexp.create_literal(st, "a+b", "")
   let assert KHandle(h) = classify(re)
   let st = rt_obj.t_global_set(st, <<"re">>, re)
   let matcher_cached = fn(st) {
     let assert SObject(kind: RegExpObj(compiled:, ..), ..) =
       rt_store.t_cell_get(st, h)
-    compiled != b_regexp.uncompiled_regexp()
+    compiled != b_regexp.uncompiled()
   }
   assert !matcher_cached(st)
   let #(hit, st) = rt_helpers.call_method(st, re, "test", [mk_string("caab")])

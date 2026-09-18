@@ -1,19 +1,19 @@
-import emit_2core_harness as harness
+import emit_2core_harness
 
 const sum_src = "function sum(n){let s=0;for(let i=1;i<=n;i++)s+=i;return s} console.log(sum(10))"
 
 const make_adder_src = "function makeAdder(x){return function(y){return x+y}} console.log(makeAdder(3)(4))"
 
 pub fn sum_n_diff_test() {
-  let i = harness.run_interpreted(sum_src)
-  let c = harness.run_compiled(sum_src)
+  let i = emit_2core_harness.run_interpreted(sum_src)
+  let c = emit_2core_harness.run_compiled(sum_src)
   assert i.stdout == <<"55\n":utf8>>
   assert c.stdout == i.stdout
 }
 
 pub fn make_adder_diff_test() {
-  let i = harness.run_interpreted(make_adder_src)
-  let c = harness.run_compiled(make_adder_src)
+  let i = emit_2core_harness.run_interpreted(make_adder_src)
+  let c = emit_2core_harness.run_compiled(make_adder_src)
   assert i.stdout == <<"7\n":utf8>>
   assert c.stdout == i.stdout
 }
@@ -23,15 +23,15 @@ const object_literal_src = "let o={x:5};console.log(o.x)"
 const obj_prop_src = "let o={x:0};for(let i=1;i<=4;i++)o.x=o.x+i;console.log(o.x)"
 
 pub fn object_literal_diff_test() {
-  let i = harness.run_interpreted(object_literal_src)
-  let c = harness.run_compiled(object_literal_src)
+  let i = emit_2core_harness.run_interpreted(object_literal_src)
+  let c = emit_2core_harness.run_compiled(object_literal_src)
   assert i.stdout == <<"5\n":utf8>>
   assert c.stdout == i.stdout
 }
 
 pub fn obj_prop_diff_test() {
-  let i = harness.run_interpreted(obj_prop_src)
-  let c = harness.run_compiled(obj_prop_src)
+  let i = emit_2core_harness.run_interpreted(obj_prop_src)
+  let c = emit_2core_harness.run_compiled(obj_prop_src)
   assert i.stdout == <<"10\n":utf8>>
   assert c.stdout == i.stdout
 }
@@ -39,8 +39,8 @@ pub fn obj_prop_diff_test() {
 const method_call_proto_own_src = "function A(){};A.prototype.mp=function(){return 'proto'};var a=new A();a.mo=function(){return 'own'};console.log(a.mp());console.log(a.mo())"
 
 pub fn method_call_proto_own_diff_test() {
-  let i = harness.run_interpreted(method_call_proto_own_src)
-  let c = harness.run_compiled(method_call_proto_own_src)
+  let i = emit_2core_harness.run_interpreted(method_call_proto_own_src)
+  let c = emit_2core_harness.run_compiled(method_call_proto_own_src)
   assert i.stdout == <<"proto\nown\n":utf8>>
   assert c.stdout == i.stdout
 }
@@ -48,8 +48,8 @@ pub fn method_call_proto_own_diff_test() {
 const method_call_proto_chain_src = "function A(){};A.prototype.m=function(){return 'A'};function B(){};B.prototype=new A();var b=new B();console.log(b.m());B.prototype.m=function(){return 'B'};console.log(b.m())"
 
 pub fn method_call_proto_chain_diff_test() {
-  let i = harness.run_interpreted(method_call_proto_chain_src)
-  let c = harness.run_compiled(method_call_proto_chain_src)
+  let i = emit_2core_harness.run_interpreted(method_call_proto_chain_src)
+  let c = emit_2core_harness.run_compiled(method_call_proto_chain_src)
   assert i.stdout == <<"A\nB\n":utf8>>
   assert c.stdout == i.stdout
 }
@@ -57,8 +57,8 @@ pub fn method_call_proto_chain_diff_test() {
 const method_call_shaped_chain_src = "function A(){this.a=1};A.prototype.m=function(){return 'A'+this.a+this.b+this.c};function B(){this.b=2};B.prototype=new A();function C(){this.c=3};C.prototype=new B();function D(){this.d=4};D.prototype=new C();var b=new B(),c=new C(),d=new D();var s='';for(var i=0;i<3;i++){s+=b.m()+'|'+c.m()+'|'+d.m()+'|'};console.log(s);C.prototype.m=function(){return 'C'};console.log(c.m()+b.m()+d.m());B.prototype.m=function(){return 'B'};console.log(c.m()+b.m());c.m=function(){return 'own'};console.log(c.m()+d.m())"
 
 pub fn method_call_shaped_chain_diff_test() {
-  let i = harness.run_interpreted(method_call_shaped_chain_src)
-  let c = harness.run_compiled(method_call_shaped_chain_src)
+  let i = emit_2core_harness.run_interpreted(method_call_shaped_chain_src)
+  let c = emit_2core_harness.run_compiled(method_call_shaped_chain_src)
   assert i.stdout
     == <<
       "A12undefined|A123|A123|A12undefined|A123|A123|A12undefined|A123|A123|\nCA12undefinedC\nCB\nownC\n":utf8,
@@ -69,8 +69,8 @@ pub fn method_call_shaped_chain_diff_test() {
 const method_call_miss_src = "var o={};try{o.nope()}catch(e){console.log('miss:'+e.name)};Object.defineProperty(o,'g',{get:function(){return function(){return 'getter'}}});console.log(o.g())"
 
 pub fn method_call_miss_diff_test() {
-  let i = harness.run_interpreted(method_call_miss_src)
-  let c = harness.run_compiled(method_call_miss_src)
+  let i = emit_2core_harness.run_interpreted(method_call_miss_src)
+  let c = emit_2core_harness.run_compiled(method_call_miss_src)
   assert i.stdout == <<"miss:TypeError\ngetter\n":utf8>>
   assert c.stdout == i.stdout
 }
@@ -78,8 +78,8 @@ pub fn method_call_miss_diff_test() {
 const this_multi_field_src = "function T(){this.a=1;this.b=2;this.c=3};T.prototype.p=9;Object.defineProperty(T.prototype,'g',{get:function(){return this.a+this.b}});T.prototype.rd=function(){var s='';s+=this.a;s+=this.b;s+=this.c;s+=this.g;s+=this.p;return s};console.log(new T().rd())"
 
 pub fn this_multi_field_diff_test() {
-  let i = harness.run_interpreted(this_multi_field_src)
-  let c = harness.run_compiled(this_multi_field_src)
+  let i = emit_2core_harness.run_interpreted(this_multi_field_src)
+  let c = emit_2core_harness.run_compiled(this_multi_field_src)
   assert i.stdout == <<"12339\n":utf8>>
   assert c.stdout == i.stdout
 }
@@ -87,8 +87,8 @@ pub fn this_multi_field_diff_test() {
 const ctor_add_setter_src = "function P(){this.x=1;this.y=2};new P();new P();Object.defineProperty(P.prototype,'y',{set:function(v){this.z=v*10}});var p=new P();console.log(''+p.x+p.y+p.z)"
 
 pub fn ctor_add_setter_diff_test() {
-  let i = harness.run_interpreted(ctor_add_setter_src)
-  let c = harness.run_compiled(ctor_add_setter_src)
+  let i = emit_2core_harness.run_interpreted(ctor_add_setter_src)
+  let c = emit_2core_harness.run_compiled(ctor_add_setter_src)
   assert i.stdout == <<"1undefined20\n":utf8>>
   assert c.stdout == i.stdout
 }
@@ -96,8 +96,8 @@ pub fn ctor_add_setter_diff_test() {
 const ctor_add_readonly_src = "function P(){this.x=1;this.y=2};new P();new P();Object.defineProperty(P.prototype,'x',{value:7,writable:false});var p=new P();console.log(''+p.x+p.y+Object.keys(p))"
 
 pub fn ctor_add_readonly_diff_test() {
-  let i = harness.run_interpreted(ctor_add_readonly_src)
-  let c = harness.run_compiled(ctor_add_readonly_src)
+  let i = emit_2core_harness.run_interpreted(ctor_add_readonly_src)
+  let c = emit_2core_harness.run_compiled(ctor_add_readonly_src)
   assert i.stdout == <<"72y\n":utf8>>
   assert c.stdout == i.stdout
 }
@@ -105,8 +105,8 @@ pub fn ctor_add_readonly_diff_test() {
 const ctor_add_proxy_src = "function P(){this.x=1};new P();new P();P.prototype=new Proxy({},{set:function(t,k,v,r){console.log('trap:'+k);return Reflect.set(t,k,v,r)}});var p=new P();console.log(''+p.x+Object.keys(p))"
 
 pub fn ctor_add_proxy_diff_test() {
-  let i = harness.run_interpreted(ctor_add_proxy_src)
-  let c = harness.run_compiled(ctor_add_proxy_src)
+  let i = emit_2core_harness.run_interpreted(ctor_add_proxy_src)
+  let c = emit_2core_harness.run_compiled(ctor_add_proxy_src)
   assert i.stdout == <<"trap:x\n1x\n":utf8>>
   assert c.stdout == i.stdout
 }
@@ -114,8 +114,8 @@ pub fn ctor_add_proxy_diff_test() {
 const ctor_add_shaped_proto_src = "function A(){this.m=1};var proto=new A();function B(){this.m=2};B.prototype=proto;new B();var b=new B();console.log(''+b.m+proto.m+Object.keys(b))"
 
 pub fn ctor_add_shaped_proto_diff_test() {
-  let i = harness.run_interpreted(ctor_add_shaped_proto_src)
-  let c = harness.run_compiled(ctor_add_shaped_proto_src)
+  let i = emit_2core_harness.run_interpreted(ctor_add_shaped_proto_src)
+  let c = emit_2core_harness.run_compiled(ctor_add_shaped_proto_src)
   assert i.stdout == <<"21m\n":utf8>>
   assert c.stdout == i.stdout
 }
@@ -123,8 +123,8 @@ pub fn ctor_add_shaped_proto_diff_test() {
 const set_read_coherence_src = "function C(){this.x=0;this.y=0};C.prototype.w=function(a,b){this.x=a;this.y=b};var c=new C();c.w(4,5);var k='x';console.log(''+c[k]+c['y']+c.x)"
 
 pub fn set_read_coherence_diff_test() {
-  let i = harness.run_interpreted(set_read_coherence_src)
-  let c = harness.run_compiled(set_read_coherence_src)
+  let i = emit_2core_harness.run_interpreted(set_read_coherence_src)
+  let c = emit_2core_harness.run_compiled(set_read_coherence_src)
   assert i.stdout == <<"454\n":utf8>>
   assert c.stdout == i.stdout
 }
@@ -132,8 +132,8 @@ pub fn set_read_coherence_diff_test() {
 const new_return_shape_src = "function Fo(){this.v=1;return {v:2}};function Fp(){this.v=1;return 5};console.log(''+new Fo().v);console.log(''+new Fp().v)"
 
 pub fn new_return_shape_diff_test() {
-  let i = harness.run_interpreted(new_return_shape_src)
-  let c = harness.run_compiled(new_return_shape_src)
+  let i = emit_2core_harness.run_interpreted(new_return_shape_src)
+  let c = emit_2core_harness.run_compiled(new_return_shape_src)
   assert i.stdout == <<"2\n1\n":utf8>>
   assert c.stdout == i.stdout
 }
@@ -141,8 +141,8 @@ pub fn new_return_shape_diff_test() {
 const new_nonctor_src = "var A=function(){return 1};A=()=>{};try{new A()}catch(e){console.log('arrow:'+e.name)};function F(x){this.v=x};var B=F.bind(null,7);console.log(''+new B().v)"
 
 pub fn new_nonctor_diff_test() {
-  let i = harness.run_interpreted(new_nonctor_src)
-  let c = harness.run_compiled(new_nonctor_src)
+  let i = emit_2core_harness.run_interpreted(new_nonctor_src)
+  let c = emit_2core_harness.run_compiled(new_nonctor_src)
   assert i.stdout == <<"arrow:TypeError\n7\n":utf8>>
   assert c.stdout == i.stdout
 }
@@ -150,8 +150,8 @@ pub fn new_nonctor_diff_test() {
 const truth_value_src = "function A(){};function B(){};var a=new A();var o={p:1};var s='';s+=(a instanceof A)+','+(a instanceof B)+',';s+=('p' in o)+','+('zz' in o)+',';s+=(1==1)+','+(1==2)+',';s+=('a'<'b')+','+('b'<'a')+',';s+=typeof (a instanceof A)+','+typeof ('p' in o)+','+typeof ('a'<'b');console.log(s)"
 
 pub fn truth_value_results_are_booleans_diff_test() {
-  let i = harness.run_interpreted(truth_value_src)
-  let c = harness.run_compiled(truth_value_src)
+  let i = emit_2core_harness.run_interpreted(truth_value_src)
+  let c = emit_2core_harness.run_compiled(truth_value_src)
   assert i.stdout
     == <<
       "true,false,true,false,true,false,true,false,boolean,boolean,boolean\n":utf8,
@@ -162,8 +162,8 @@ pub fn truth_value_results_are_booleans_diff_test() {
 const instanceof_chain_src = "function A(){};function B(){};B.prototype=new A();var b=new B();var s='';s+=(b instanceof B)?'y':'n';s+=(b instanceof A)?'y':'n';s+=({} instanceof A)?'y':'n';console.log(s)"
 
 pub fn instanceof_chain_diff_test() {
-  let i = harness.run_interpreted(instanceof_chain_src)
-  let c = harness.run_compiled(instanceof_chain_src)
+  let i = emit_2core_harness.run_interpreted(instanceof_chain_src)
+  let c = emit_2core_harness.run_compiled(instanceof_chain_src)
   assert i.stdout == <<"yyn\n":utf8>>
   assert c.stdout == i.stdout
 }
@@ -171,8 +171,8 @@ pub fn instanceof_chain_diff_test() {
 const instanceof_bound_src = "function A(){};var a=new A();var Ab=A.bind(null);var s='';s+=(a instanceof Ab)?'y':'n';s+=({} instanceof Ab)?'y':'n';console.log(s)"
 
 pub fn instanceof_bound_diff_test() {
-  let i = harness.run_interpreted(instanceof_bound_src)
-  let c = harness.run_compiled(instanceof_bound_src)
+  let i = emit_2core_harness.run_interpreted(instanceof_bound_src)
+  let c = emit_2core_harness.run_compiled(instanceof_bound_src)
   assert i.stdout == <<"yn\n":utf8>>
   assert c.stdout == i.stdout
 }
@@ -180,8 +180,8 @@ pub fn instanceof_bound_diff_test() {
 const instanceof_has_instance_src = "function H(){};Object.defineProperty(H,Symbol.hasInstance,{value:function(v){return v===42}});var s='';s+=(42 instanceof H)?'y':'n';s+=({} instanceof H)?'y':'n';console.log(s)"
 
 pub fn instanceof_has_instance_diff_test() {
-  let i = harness.run_interpreted(instanceof_has_instance_src)
-  let c = harness.run_compiled(instanceof_has_instance_src)
+  let i = emit_2core_harness.run_interpreted(instanceof_has_instance_src)
+  let c = emit_2core_harness.run_compiled(instanceof_has_instance_src)
   assert i.stdout == <<"yn\n":utf8>>
   assert c.stdout == i.stdout
 }
@@ -189,15 +189,15 @@ pub fn instanceof_has_instance_diff_test() {
 const cond_eq_src = "var a=1,b=1,c=2,o={};function f(x,y){if(x==y)return 'y';else return 'n'}console.log(f(a,b),f(a,c),f(null,undefined),f(o,o),f('1',1));if(a!=c)console.log('ne');if(a!=b)console.log('bad');var i=0;while(i!=3)i++;console.log(i);for(var j=5;j==5;j++)console.log('once')"
 
 pub fn cond_eq_diff_test() {
-  let i = harness.run_interpreted(cond_eq_src)
-  let c = harness.run_compiled(cond_eq_src)
+  let i = emit_2core_harness.run_interpreted(cond_eq_src)
+  let c = emit_2core_harness.run_compiled(cond_eq_src)
   assert i.stdout == <<"y n y y y\nne\n3\nonce\n":utf8>>
   assert c.stdout == i.stdout
 }
 
 fn diff(src: String, want: String) {
-  let i = harness.run_interpreted(src)
-  let c = harness.run_compiled(src)
+  let i = emit_2core_harness.run_interpreted(src)
+  let c = emit_2core_harness.run_compiled(src)
   assert i.stdout == <<want:utf8>>
   assert c.stdout == i.stdout
 }
@@ -301,7 +301,7 @@ pub fn microtasks_drain_after_main_diff_test() {
 }
 
 pub fn unsupported_import_call_is_compile_error_test() {
-  let c = harness.run_compiled("var p=import('x');console.log('no')")
+  let c = emit_2core_harness.run_compiled("var p=import('x');console.log('no')")
   assert c.stdout == <<>>
   let assert Error(msg) = c.result
   assert msg == "UnsupportedFeature(\"import()\")"
@@ -309,7 +309,9 @@ pub fn unsupported_import_call_is_compile_error_test() {
 
 pub fn unsupported_using_is_compile_error_test() {
   let c =
-    harness.run_compiled("{using r={[Symbol.dispose](){}};console.log('no')}")
+    emit_2core_harness.run_compiled(
+      "{using r={[Symbol.dispose](){}};console.log('no')}",
+    )
   assert c.stdout == <<>>
   let assert Error(msg) = c.result
   assert msg == "UnsupportedFeature(\"using declaration\")"
@@ -462,21 +464,21 @@ pub fn float_index_and_rounding_diff_test() {
 
 pub fn throwing_species_resolve_is_reported_test() {
   let c =
-    harness.run_compiled(
+    emit_2core_harness.run_compiled(
       "var p=Promise.resolve(1);function C(ex){ex(function(){throw new Error('boom')},function(){})}C[Symbol.species]=C;Promise.prototype.constructor=C;p.then(function(v){console.log('ran',v);return v})",
     )
   assert c.stdout == <<"ran 1\n":utf8>>
-  assert harness.err_read()
+  assert emit_2core_harness.err_read()
     == <<"Uncaught (in promise job) Error: boom\n":utf8>>
 }
 
 pub fn console_levels_split_test() {
   let c =
-    harness.run_compiled(
+    emit_2core_harness.run_compiled(
       "console.log('a');console.warn('b');console.error('c',1);console.info('d');console.debug('e')",
     )
   assert c.stdout == <<"a\nd\ne\n":utf8>>
-  assert harness.err_read() == <<"b\nc 1\n":utf8>>
+  assert emit_2core_harness.err_read() == <<"b\nc 1\n":utf8>>
 }
 
 pub fn console_renders_values_diff_test() {
@@ -506,19 +508,20 @@ pub fn console_renders_exotics_diff_test() {
 
 pub fn console_renders_errors_test() {
   let c =
-    harness.run_compiled(
+    emit_2core_harness.run_compiled(
       "var e=new Error('m');e.name='';console.log(new Error('e'), new TypeError, e, Object.assign(new Error('x'),{name:'N'}), new AggregateError([],'agg'), [new RangeError('r')]);Promise.reject({code:4})",
     )
   assert c.stdout
     == <<
       "Error: e TypeError Error: m Error: x AggregateError: agg [ RangeError: r ]\n":utf8,
     >>
-  assert harness.err_read() == <<"Uncaught (in promise) { code: 4 }\n":utf8>>
+  assert emit_2core_harness.err_read()
+    == <<"Uncaught (in promise) { code: 4 }\n":utf8>>
 }
 
 pub fn date_now_reads_wall_clock_hook_test() {
   let c =
-    harness.run_compiled(
+    emit_2core_harness.run_compiled(
       "console.log(Date.now(), new Date().getTime()===Date.now())",
     )
   assert c.stdout == <<"1700000000000 true\n":utf8>>
@@ -538,17 +541,18 @@ pub fn date_local_time_diff_test() {
 pub fn unhandled_rejection_report_diff_test() {
   let src =
     "Promise.reject('nobody');var p=Promise.reject('later');Promise.resolve().then(function(){p.catch(function(){})});console.log('main')"
-  harness.buf_reset()
-  let i = harness.run_interpreted(src)
-  let i_err = harness.err_read()
-  let c = harness.run_compiled(src)
+  emit_2core_harness.buf_reset()
+  let i = emit_2core_harness.run_interpreted(src)
+  let i_err = emit_2core_harness.err_read()
+  let c = emit_2core_harness.run_compiled(src)
   assert i.stdout == <<"main\n":utf8>>
   assert c.stdout == i.stdout
   assert i_err == <<"Uncaught (in promise) nobody\n":utf8>>
-  assert harness.err_read() == i_err
-  let c = harness.run_compiled("Promise.reject(new RangeError('e'))")
+  assert emit_2core_harness.err_read() == i_err
+  let c = emit_2core_harness.run_compiled("Promise.reject(new RangeError('e'))")
   let assert Ok(_) = c.result
-  assert harness.err_read() == <<"Uncaught (in promise) RangeError: e\n":utf8>>
+  assert emit_2core_harness.err_read()
+    == <<"Uncaught (in promise) RangeError: e\n":utf8>>
 }
 
 pub fn promise_and_generator_take_own_properties_diff_test() {

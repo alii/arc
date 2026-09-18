@@ -248,7 +248,7 @@ pub type LinkError {
   AmbiguousExport(requested_module: Raw, export_name: String)
 }
 
-pub fn link_error_message(e: LinkError) -> String {
+pub fn error_message(e: LinkError) -> String {
   case e {
     UnresolvedExport(requested_module:, export_name:) ->
       "The requested module '"

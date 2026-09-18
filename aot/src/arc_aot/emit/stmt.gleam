@@ -260,10 +260,7 @@ fn emit_stmt(e: Emitter, s: ast.Statement, k: Next) -> EmitResult {
       ..,
     ) -> {
       let blocked =
-        set.contains(
-          scope.get_scope(e.scope_tree, e.cur_scope).annexb_blocked,
-          name,
-        )
+        set.contains(scope.get(e.scope_tree, e.cur_scope).annexb_blocked, name)
       case e.in_block && !e.strict && !blocked {
         True -> annexb_promote(e, name, k)
         False -> k(e)
@@ -322,7 +319,7 @@ fn store_slot(e: Emitter, b: Binding, val: ir.Value, k: Next) -> EmitResult {
 
 fn binding_prologue(e: Emitter, scope_id: ScopeId, k: Next) -> EmitResult {
   let bindings =
-    dict.to_list(scope.get_scope(e.scope_tree, scope_id).bindings)
+    dict.to_list(scope.get(e.scope_tree, scope_id).bindings)
     |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
   use e, entry, next <- each_(e, bindings, then: k)
   let #(_, b): #(String, Binding) = entry
@@ -379,7 +376,7 @@ fn hoist_fn_decls(
 
 fn cur_scope_binding(e: Emitter, name: String) -> Binding {
   let assert Ok(b) =
-    dict.get(scope.get_scope(e.scope_tree, e.cur_scope).bindings, name)
+    dict.get(scope.get(e.scope_tree, e.cur_scope).bindings, name)
     as "aot/stmt: name missing from block-scope bindings"
   b
 }
@@ -477,7 +474,7 @@ fn read_binding(b: Binding) -> anf.Build(ir.Value) {
 fn scope_parent_in_fn(e: Emitter, id: ScopeId) -> Option(ScopeId) {
   case id == e.fn_scope {
     True -> None
-    False -> scope.get_scope(e.scope_tree, id).parent
+    False -> scope.get(e.scope_tree, id).parent
   }
 }
 
@@ -486,7 +483,7 @@ fn annexb_find_source(
   from: ScopeId,
   name: String,
 ) -> Option(#(Binding, Option(ScopeId))) {
-  let node = scope.get_scope(e.scope_tree, from)
+  let node = scope.get(e.scope_tree, from)
   case dict.get(node.bindings, name) {
     Ok(b) -> Some(#(b, scope_parent_in_fn(e, from)))
     Error(Nil) ->
@@ -505,7 +502,7 @@ fn annexb_find_target(
   case from {
     None -> None
     Some(id) -> {
-      let node = scope.get_scope(e.scope_tree, id)
+      let node = scope.get(e.scope_tree, id)
       case node.kind {
         scope.Catch -> annexb_find_target(e, scope_parent_in_fn(e, id), name)
         _ ->

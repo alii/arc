@@ -1,7 +1,7 @@
 // §13.3.10 import calls, failures reject the promise
 
 import arc/bytecode/error_kind.{SyntaxError, TypeError}
-import arc/bytecode/key.{Named, key_to_text}
+import arc/bytecode/key.{Named}
 import arc/module/registry
 import arc/rt/async as rt_async
 import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion} as rt_call
@@ -223,9 +223,8 @@ fn validate_options(st: Agent, options: JsVal) -> Agent {
 fn validate_attributes(st: Agent, attributes: Handle) -> Agent {
   let #(keys, st) = rt_obj.t_enumerable_own_keys(st, attributes)
   let st =
-    list.fold(keys, st, fn(st, key) {
-      let #(v, st) =
-        rt_obj.t_get_prop(st, mk_object(attributes), StringKey(key))
+    list.fold(keys, st, fn(st, pk) {
+      let #(v, st) = rt_obj.t_get_prop(st, mk_object(attributes), StringKey(pk))
       case classify(v) {
         KStr(_) -> st
         _ ->
@@ -237,10 +236,10 @@ fn validate_attributes(st: Agent, attributes: Handle) -> Agent {
     })
   case keys {
     [] -> st
-    [key, ..] ->
+    [pk, ..] ->
       rt_val.t_throw_type_error(
         st,
-        "Import attribute '" <> key_to_text(key) <> "' is not supported",
+        "Import attribute '" <> key.to_text(pk) <> "' is not supported",
       )
   }
 }

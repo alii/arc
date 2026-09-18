@@ -1,13 +1,10 @@
-//// §7.1 type conversion and §7.2 comparison
+// §7.1 type conversion and §7.2 comparison
 
 import arc/bytecode/error_kind.{
   type ErrorKind, type JsError, JsError, RangeError, ReferenceError, SyntaxError,
   TypeError,
 }
-import arc/bytecode/key.{
-  Index, Named, array_index_of_float, canonical_key, index_key,
-}
-import arc/rt/js_string
+import arc/bytecode/key.{Index, Named, array_index_of_float}
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsNum, type JsVal, type ObjectKey, type SymbolId,
@@ -17,6 +14,7 @@ import arc/rt/types.{
   SymbolKey, classify, mk_int, mk_number, mk_object, mk_string,
   symbol_to_primitive,
 }
+import arc/rt/utf8
 import gleam/bit_array
 import gleam/float
 import gleam/int
@@ -214,12 +212,13 @@ pub fn t_to_primitive(
         False -> {
           case is_callable(st, exotic) {
             True -> {
-              let hint_str = case hint {
+              let hint_text = case hint {
                 HintString -> "string"
                 HintNumber -> "number"
                 HintDefault -> "default"
               }
-              let #(result, st) = ops.call(st, exotic, v, [mk_string(hint_str)])
+              let #(result, st) =
+                ops.call(st, exotic, v, [mk_string(hint_text)])
               // §7.1.1 step 1.b.iv object result is a typeerror
               case is_object(result) {
                 False -> #(result, st)
@@ -509,7 +508,7 @@ pub fn t_to_property_key_of(
 fn primitive_to_prop_key(st: Agent, v: JsVal) -> #(ObjectKey, Agent) {
   case classify(v) {
     KSym(id) -> #(SymbolKey(id), st)
-    KNum(JInt(n)) -> #(StringKey(index_key(n)), st)
+    KNum(JInt(n)) -> #(StringKey(key.index(n)), st)
     KNum(JFloat(f)) ->
       case array_index_of_float(f) {
         Some(i) -> #(StringKey(Index(i)), st)
@@ -518,16 +517,15 @@ fn primitive_to_prop_key(st: Agent, v: JsVal) -> #(ObjectKey, Agent) {
     KNum(JNan) -> #(StringKey(Named("NaN")), st)
     KNum(JPosInf) -> #(StringKey(Named("Infinity")), st)
     KNum(JNegInf) -> #(StringKey(Named("-Infinity")), st)
-    KStr(s) -> #(StringKey(canonical_key(s)), st)
+    KStr(s) -> #(StringKey(key.canonical(s)), st)
     _ -> {
       let #(s, st) = t_to_string(st, v)
-      #(StringKey(canonical_key(s)), st)
+      #(StringKey(key.canonical(s)), st)
     }
   }
 }
 
-// §7.1.4.1.1 stringtonumber
-// called by name from arc_rt_json_ffi
+// §7.1.4.1.1 stringtonumber; called by name from arc_rt_json_ffi
 @external(erlang, "arc_rt_val_ffi", "string_to_number")
 pub fn string_to_number(s: String) -> JsNum
 
@@ -543,8 +541,7 @@ pub fn int_number(n: Int) -> JsNum {
   }
 }
 
-// erlang float/1 misrounds past 53 bits so round here
-// called by name from arc_rt_val_ffi
+// float/1 misrounds past 53 bits; called by name from arc_rt_val_ffi
 pub fn num_from_int(n: Int) -> JsNum {
   let a = int.absolute_value(n)
   case a < nf_two53 {
@@ -589,7 +586,7 @@ fn nf_bit_length(n: Int, acc: Int) -> Int {
 
 // §7.1.14 stringtobigint, none on failure
 pub fn string_to_bigint(s: String) -> Option(Int) {
-  case js_string.trim_js_ws(s) {
+  case utf8.trim_js_ws(s) {
     "" -> Some(0)
     "0x" <> rest | "0X" <> rest -> parse_bigint_radix_digits(rest, 16)
     "0o" <> rest | "0O" <> rest -> parse_bigint_radix_digits(rest, 8)

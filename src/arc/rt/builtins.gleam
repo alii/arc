@@ -15,8 +15,8 @@ import arc/rt/builtins/dom_exception as b_dom_exception
 import arc/rt/builtins/error as b_error
 import arc/rt/builtins/finalization_registry as b_finalization_registry
 import arc/rt/builtins/function as b_function
-import arc/rt/builtins/generator as b_generator
-import arc/rt/builtins/global_fns as b_global_fns
+import arc/rt/builtins/generator
+import arc/rt/builtins/global_fns
 import arc/rt/builtins/helpers.{first_arg_or_undefined}
 import arc/rt/builtins/intl as b_intl
 import arc/rt/builtins/iterator as b_iterator
@@ -35,8 +35,8 @@ import arc/rt/builtins/shadow_realm as b_shadow_realm
 import arc/rt/builtins/string as b_string
 import arc/rt/builtins/symbol as b_symbol
 import arc/rt/builtins/temporal as b_temporal
-import arc/rt/builtins/typed_array as b_typed_array
-import arc/rt/builtins/weak as b_weak
+import arc/rt/builtins/typed_array
+import arc/rt/builtins/weak
 import arc/rt/builtins/weak_ref as b_weak_ref
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
@@ -113,20 +113,13 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
   let #(promise, st) = b_promise.init(st, object_proto, fn_proto)
   let #(iters, st) = b_iterator.init(st, object_proto, fn_proto)
   let #(#(generator, generator_fn), st) =
-    b_generator.init(st, iters.iterator_proto, fn_proto, fn_ctor, id)
+    generator.init(st, iters.iterator_proto, fn_proto, fn_ctor, id)
   let #(#(async_gen, _async_gen_fn), st) =
-    b_generator.init_async(
-      st,
-      iters.async_iterator_proto,
-      fn_proto,
-      fn_ctor,
-      id,
-    )
-  let #(async_fn, st) =
-    b_generator.init_async_function(st, fn_proto, fn_ctor, id)
+    generator.init_async(st, iters.async_iterator_proto, fn_proto, fn_ctor, id)
+  let #(async_fn, st) = generator.init_async_function(st, fn_proto, fn_ctor, id)
   let #(map, st) = b_map.init(st, object_proto, fn_proto)
   let #(set, st) = b_set.init(st, object_proto, fn_proto)
-  let #(#(weak_map, weak_set), st) = b_weak.init(st, object_proto, fn_proto)
+  let #(#(weak_map, weak_set), st) = weak.init(st, object_proto, fn_proto)
   let #(finalization_registry, st) =
     b_finalization_registry.init(st, object_proto, fn_proto)
   let #(weak_ref, st) = b_weak_ref.init(st, object_proto, fn_proto)
@@ -140,9 +133,9 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
     b_array_buffer.init(st, object_proto, fn_proto)
   let #(data_view, st) = b_data_view.init(st, object_proto, fn_proto)
   let #(#(_ta_base, typed_arrays), st) =
-    b_typed_array.init(st, object_proto, fn_proto, array)
+    typed_array.init(st, object_proto, fn_proto, array)
   let #(gfns, st) =
-    b_global_fns.init(
+    global_fns.init(
       st,
       fn_proto,
       id,
@@ -420,7 +413,7 @@ type GlobalEntry {
 fn alloc_global_object(
   st: Agent,
   object_proto: Handle,
-  gfns: b_global_fns.GlobalFns,
+  gfns: global_fns.GlobalFns,
   r: GlobalRefs,
 ) -> #(Handle, Agent) {
   let ctor = fn(bt: BuiltinPair) { mk_object(bt.constructor) }
@@ -555,16 +548,16 @@ pub fn dispatch_native(
     JsonN(n) -> b_json.dispatch(st, n, this, args)
     ReflectN(n) -> b_reflect.dispatch(st, n, this, args)
     ConsoleN(n) -> b_console.dispatch(st, n, this, args)
-    GlobalN(n) -> b_global_fns.dispatch(st, n, this, args)
+    GlobalN(n) -> global_fns.dispatch(st, n, this, args)
     DateN(n) -> b_date.dispatch(st, n, this, args)
     RegExpN(n) -> b_regexp.dispatch(st, n, this, args)
     PromiseN(n) -> b_promise.dispatch(st, n, this, args)
     ProxyN(n) -> b_proxy.dispatch(st, n, this, args)
     IteratorN(n) -> b_iterator.dispatch(st, n, this, args)
-    GeneratorN(n) -> b_generator.dispatch(st, n, this, args)
+    GeneratorN(n) -> generator.dispatch(st, n, this, args)
     MapN(n) -> b_map.dispatch(st, n, this, args)
     SetN(n) -> b_set.dispatch(st, n, this, args)
-    WeakN(n) -> b_weak.dispatch(st, n, this, args)
+    WeakN(n) -> weak.dispatch(st, n, this, args)
     FinalizationRegistryN(n) ->
       b_finalization_registry.dispatch(st, n, this, args)
     WeakRefN(n) -> b_weak_ref.dispatch(st, n, this, args)
@@ -572,7 +565,7 @@ pub fn dispatch_native(
     types.ShadowRealmN(n) -> b_shadow_realm.dispatch(st, n, this, args)
     ArrayBufferN(n) -> b_array_buffer.dispatch(st, n, this, args)
     DataViewN(n) -> b_data_view.dispatch(st, n, this, args)
-    TypedArrayN(n) -> b_typed_array.dispatch(st, n, this, args)
+    TypedArrayN(n) -> typed_array.dispatch(st, n, this, args)
     AtomicsN(n) -> b_atomics.dispatch(st, n, this, args)
     Test262N(n) -> rt_realm.dispatch_262(st, n, this, args, create_realm)
     IntlN(n) -> b_intl.dispatch(st, n, this, args)
@@ -601,7 +594,7 @@ pub fn dispatch_native_construct(
     HostFn(id:) -> construct_host_fn(st, id, args, new_target)
     MapN(n) -> b_map.dispatch_construct(st, n, args, new_target)
     SetN(n) -> b_set.dispatch_construct(st, n, args, new_target)
-    WeakN(n) -> b_weak.dispatch_construct(st, n, args, new_target)
+    WeakN(n) -> weak.dispatch_construct(st, n, args, new_target)
     FinalizationRegistryN(n) ->
       b_finalization_registry.dispatch_construct(st, n, args, new_target)
     WeakRefN(n) -> b_weak_ref.dispatch_construct(st, n, args, new_target)
@@ -616,7 +609,7 @@ pub fn dispatch_native_construct(
     ArrayBufferN(n) ->
       b_array_buffer.dispatch_construct(st, n, args, new_target)
     DataViewN(n) -> b_data_view.dispatch_construct(st, n, args, new_target)
-    TypedArrayN(n) -> b_typed_array.dispatch_construct(st, n, args, new_target)
+    TypedArrayN(n) -> typed_array.dispatch_construct(st, n, args, new_target)
     IntlN(n) -> b_intl.dispatch_construct(st, n, args, new_target)
     TemporalN(n) -> b_temporal.dispatch_construct(st, n, args, new_target)
     ArrayN(n) -> {
@@ -672,7 +665,7 @@ pub fn dispatch_native_construct(
       require_handle(st, v)
     }
     GeneratorN(n) -> {
-      let #(v, st) = b_generator.dispatch_construct(st, n, args, new_target)
+      let #(v, st) = generator.dispatch_construct(st, n, args, new_target)
       require_handle(st, v)
     }
     StringN(_) | NumberN(_) | BooleanN(_) | SymbolN(_) ->

@@ -102,7 +102,7 @@ pub type ParseError =
   error.ParseError
 
 pub fn parse_error_to_string(err: ParseError) -> String {
-  error.parse_error_to_string(err)
+  error.to_string(err)
 }
 
 type DeclarationContext {
@@ -5678,11 +5678,11 @@ fn parse_regex_literal(
   let start_pos = pos_of(p)
   let body_start = start_pos + 1
   use end_pos <- result.try(
-    regex.skip_regex_body(p.bytes, body_start)
+    regex.skip_body(p.bytes, body_start)
     |> result.map_error(regexp_syntax_error),
   )
   use #(flags_end, flags) <- result.try(
-    regex.skip_regex_flags(p.bytes, end_pos)
+    regex.skip_flags(p.bytes, end_pos)
     |> result.map_error(regexp_syntax_error),
   )
   // pattern early errors; annex b grammar unless u/v

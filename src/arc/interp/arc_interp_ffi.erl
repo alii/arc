@@ -40,16 +40,16 @@ type_of(_Store, V) -> type_of(V).
 kind_tag(Kind) when is_atom(Kind) -> Kind;
 kind_tag(Kind) -> element(1, Kind).
 
-cell_of(Agent, {?HANDLE_TAG, Id}) ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, Agent))) of
+cell_of(St, {?HANDLE_TAG, Id}) ->
+    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, St))) of
         ?STORE_FREE_CELL -> miss;
         Cell -> Cell
     end;
 cell_of(_, _) -> miss.
 
 %% §10.1.13 step 2 when own data "prototype" is an object
-ctor_prototype(Agent, {?HANDLE_TAG, Id}) ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, Agent))) of
+ctor_prototype(St, {?HANDLE_TAG, Id}) ->
+    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, St))) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             Kind = kind_tag(element(?SOBJECT_KIND, Cell)),
             case
@@ -73,8 +73,8 @@ ctor_prototype(Agent, {?HANDLE_TAG, Id}) ->
 ctor_prototype(_, _) -> miss.
 
 %% §7.3.20 for plain arrays and unmapped arguments, holes miss
-list_of(Agent, {?HANDLE_TAG, Id}) ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, Agent))) of
+list_of(St, {?HANDLE_TAG, Id}) ->
+    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, St))) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, Props, _, {?ELEMS_DENSE, A}, _}
           when map_size(Props) =:= 0 ->
             dense_list(A, Len);
@@ -111,8 +111,8 @@ hole_free(L) ->
     end.
 
 %% tdz box misses
-box_get(Agent, {?HANDLE_TAG, Id}) ->
-    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, Agent))) of
+box_get(St, {?HANDLE_TAG, Id}) ->
+    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, St))) of
         {?SBOX_TAG, js_tdz} -> miss;
         {?SBOX_TAG, V} -> V;
         _ -> miss
@@ -126,14 +126,13 @@ capture_env([{capture_local, I}, {capture_local, J}], Locals) ->
 capture_env(Descriptors, Locals) ->
     list_to_tuple([element(I + 1, Locals) || {capture_local, I} <- Descriptors]).
 
-%% §13.10.2 + §7.3.22 inlined when @@hasInstance is provably the intrinsic
-%% proxies miss
+%% §13.10.2 + §7.3.22 when @@hasInstance is provably the intrinsic; proxies miss
 instance_of(_, js_tdz, _, _) -> miss;
-instance_of(Agent, V, {?HANDLE_TAG, CId}, Sym) ->
-    Cells = element(?STORE_CELLS, element(?AGENT_STORE, Agent)),
+instance_of(St, V, {?HANDLE_TAG, CId}, Sym) ->
+    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     {?HANDLE_TAG, FP} =
         element(?BUILTINPAIR_PROTO,
-                element(?REALM_FUNCTION, element(?AGENT_REALM, Agent))),
+                element(?REALM_FUNCTION, element(?AGENT_REALM, St))),
     case arc_rt_arena_ffi:get(CId, Cells) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             Kind = kind_tag(element(?SOBJECT_KIND, Cell)),
@@ -210,8 +209,7 @@ chain_reaches(Cells, VId, PId, Fuel) ->
         _ -> miss
     end.
 
-%% §23.1.5.2.1 array iterator or generator resume, else iter_miss
-%% index -1 marks exhausted
+%% §23.1.5.2.1 array iterator or generator resume, else iter_miss; -1 is done
 -define(ITERATOR_KEY, {?KEY_NAMED, <<"iterator">>}).
 -define(NEXT_KEY, {?KEY_NAMED, <<"next">>}).
 iter_step(Store, {?HANDLE_TAG, RecId}) ->

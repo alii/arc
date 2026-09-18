@@ -182,7 +182,7 @@ pub type EmitError {
   NonGenericUnaryOperator
 }
 
-pub fn emit_program(
+pub fn program(
   stmts: List(ast.StmtWithLine),
   tree: scope.ScopeTree,
   deletable_global_vars deletable_global_vars: Bool,
@@ -197,8 +197,8 @@ pub fn emit_program(
   emit_top_level_body(e, stmts, script_strict:, vars_to_global: True)
 }
 
-// §19.2.1.1 direct eval: caller strictness, param names and private env come in as config
-pub fn emit_eval_direct(
+// §19.2.1.1 direct eval: caller strictness, params and private env are config
+pub fn eval_direct(
   stmts: List(ast.StmtWithLine),
   tree: scope.ScopeTree,
   caller_is_strict caller_is_strict: Bool,
@@ -222,7 +222,7 @@ pub fn emit_eval_direct(
   emit_top_level_body(e, stmts, script_strict:, vars_to_global: !script_strict)
 }
 
-pub fn emit_module(
+pub fn module(
   items: List(ast.ModuleItem),
   tree: scope.ScopeTree,
 ) -> Result(EmitOutput, EmitError) {
@@ -384,8 +384,7 @@ fn emit_using_prelude(e: Emitter, slots: UsingSlots) -> Emitter {
   }
 }
 
-// register each disposer right after its binding inits, before the next initializer
-// threads the last line marker to avoid one IrLine per declarator
+// each disposer registers right after its init; one IrLine per statement
 fn emit_using_body(
   e: Emitter,
   items: List(UsingItem),
@@ -887,14 +886,14 @@ fn fn_fallthrough(e: Emitter) -> GlobalFallthrough {
 // block-kind children only; function children come from child_fn_cursor
 fn block_child_scopes(t: scope.ScopeTree, id: ScopeId) -> List(ScopeId) {
   use c <- list.filter(scope.child_scopes(t, id))
-  !scope.is_function_kind(scope.get_scope(t, c).kind)
+  !scope.is_function_kind(scope.get(t, c).kind)
 }
 
 // stops at the function root so walks never read the parent frame
 fn scope_parent_in_fn(e: Emitter, id: ScopeId) -> Option(ScopeId) {
   case id == e.fn_scope {
     True -> None
-    False -> scope.get_scope(e.scope_tree, id).parent
+    False -> scope.get(e.scope_tree, id).parent
   }
 }
 
@@ -993,9 +992,9 @@ fn owned_boxed_lexical_slot(
   ref: lexical.LexicalRef,
 ) -> Option(Int) {
   let owned = !dict.has_key(info.lexical_captures, ref)
-  let boxed = lexical.lexical_refs_get(info.lexical_boxed, ref)
+  let boxed = lexical.refs_get(info.lexical_boxed, ref)
   case owned && boxed {
-    True -> lexical.lexical_slot(info.lexical, ref)
+    True -> lexical.slot_of(info.lexical, ref)
     False -> None
   }
 }
@@ -1007,7 +1006,7 @@ fn bindings_in_slot_order(s: scope.Scope) -> List(#(String, scope.Binding)) {
 
 // var -> undef, let/const -> uninit, param/catch -> box only, capture -> nothing
 fn emit_binding_prologue(e: Emitter, scope_id: ScopeId) -> Emitter {
-  let bindings = bindings_in_slot_order(scope.get_scope(e.scope_tree, scope_id))
+  let bindings = bindings_in_slot_order(scope.get(e.scope_tree, scope_id))
   let at_module_root = scope_id == root_scope_id && e.fn_scope == root_scope_id
   // the frame already pads root-scope vars with undefined
   let is_function_root = scope_id == e.fn_scope
@@ -1043,10 +1042,7 @@ fn emit_scratch_put(e: Emitter, slot: Int) -> Emitter {
 }
 
 fn is_annexb_blocked(e: Emitter, name: String) -> Bool {
-  set.contains(
-    scope.get_scope(e.scope_tree, e.current_scope).annexb_blocked,
-    name,
-  )
+  set.contains(scope.get(e.scope_tree, e.current_scope).annexb_blocked, name)
 }
 
 type AnnexBTarget {
@@ -1083,7 +1079,7 @@ fn annexb_find_source(
   from: ScopeId,
   name: String,
 ) -> Option(#(scope.Binding, Option(ScopeId))) {
-  let node = scope.get_scope(e.scope_tree, from)
+  let node = scope.get(e.scope_tree, from)
   case dict.get(node.bindings, name) {
     Ok(b) -> Some(#(b, scope_parent_in_fn(e, from)))
     Error(Nil) ->
@@ -1103,7 +1099,7 @@ fn annexb_find_target(
   case from {
     None -> AnnexBFallthrough
     Some(id) -> {
-      let node = scope.get_scope(e.scope_tree, id)
+      let node = scope.get(e.scope_tree, id)
       case node.kind {
         // §B.3.4 simple catch params are var-transparent, step over
         scope.Catch -> annexb_find_target(e, scope_parent_in_fn(e, id), name)
@@ -1526,8 +1522,7 @@ fn push_const(e: Emitter, val: JsVal) -> Emitter {
   emit_op(e, opcode.PushConst(idx))
 }
 
-// "#x" names route through brand-checked private opcodes
-// [obj, ..] -> [val, ..]
+// #x names use brand-checked private opcodes; [obj, ..] -> [val, ..]
 fn emit_get_field(e: Emitter, name: String) -> Emitter {
   case name {
     "#" <> _ ->
@@ -1851,7 +1846,7 @@ fn add_child_function(e: Emitter, child: CompiledChild) -> #(Emitter, Int) {
     child.is_arrow
   {
     True -> #(
-      lexical.lexical_refs_or(e.lexical_refs, child.lexical_refs),
+      lexical.refs_or(e.lexical_refs, child.lexical_refs),
       e.references_arguments || child.references_arguments,
       e.arguments_escape || child.references_arguments,
     )
@@ -1876,7 +1871,7 @@ fn resolve_lexical(
   ref: lexical.LexicalRef,
 ) -> Option(scope.SlotRef) {
   let info = fn_info(e)
-  let boxed = lexical.lexical_refs_get(info.lexical_boxed, ref)
+  let boxed = lexical.refs_get(info.lexical_boxed, ref)
   scope.lexical_slot_in(info, ref)
   |> option.map(fn(slot) { scope.SlotRef(slot:, boxed:) })
 }
@@ -2296,8 +2291,7 @@ fn emit_hoisted_funcs(
   })
 }
 
-// §10.2.11 step 28.f.i.2: body var shadowing a param starts with its value
-// source set is params and arguments only, not captures or the nfe name
+// §10.2.11 28.f.i.2: a body var shadowing a param or arguments copies it
 fn emit_body_param_copies(
   e: Emitter,
   fn_scope_id: ScopeId,
@@ -2308,8 +2302,7 @@ fn emit_body_param_copies(
   // defensive: cursor fallback left us at the fn scope
   use <- bool.guard(body_id == fn_scope_id, e)
   let function_names = ast_util.top_level_function_names(stmts)
-  let body_bindings =
-    bindings_in_slot_order(scope.get_scope(e.scope_tree, body_id))
+  let body_bindings = bindings_in_slot_order(scope.get(e.scope_tree, body_id))
   use e, #(bname, b) <- list.fold(body_bindings, e)
   let copies =
     b.kind == VarBinding
@@ -2489,7 +2482,7 @@ fn compile_function_body(
 
   use e <- result.try(emit_parameter_bindings(e, layout))
 
-  // §10.2.11 step 28: non-simple params get a separate body var scope, parser lockstep
+  // §10.2.11 step 28: non-simple params get their own body var scope
   let #(e, body_save) = case layout.non_simple_fixed {
     False -> #(e, None)
     True -> {
@@ -2825,7 +2818,7 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
     }
 
     ast.FunctionDeclaration(name, _, _, is_generator, is_async) -> {
-      // closure already made at hoist time; only the annex b §B.3.2.6 copy happens here
+      // closure was made at hoist time; only the §B.3.2.6 copy happens here
       case name {
         Some(ast.NamedBinding(name: fname, ..)) -> {
           let promote =
@@ -2968,7 +2961,7 @@ fn emit_with(
   let e = emit_op(e, opcode.ToObject)
   let #(e, save) = enter_scope(e, in_block: e.in_block)
   // non-With kind here means cursor desync, crash
-  let with_scope = scope.get_scope(e.scope_tree, e.current_scope)
+  let with_scope = scope.get(e.scope_tree, e.current_scope)
   let assert scope.With(holder: synth) = with_scope.kind
     as "emit_with: emitter cursor is not on the analyzer's With scope"
   let assert Ok(holder) = dict.get(with_scope.bindings, synth)
@@ -3991,7 +3984,7 @@ fn literal_key(
   }
   use name <- option.then(name)
   use <- bool.guard(name == "__proto__" || set.contains(seen, name), None)
-  case key.canonical_key(name) {
+  case key.canonical(name) {
     key.Named(_) as pk -> Some(#(name, pk))
     _ -> None
   }
@@ -4358,8 +4351,7 @@ fn emit_for_of(
   emit_ir(e, IrJump(end))
 }
 
-// inner F_next guards next/await/unwrap so a next() failure does not close
-// throw path keeps [iter, thrown, ..base] so rethrow is always pop;pop;throw
+// F_next keeps a next() failure from closing; rethrow is pop;pop;throw
 fn emit_for_await_of(
   e: Emitter,
   left: ast.ForInit,
@@ -4547,8 +4539,7 @@ fn emit_default_if_undefined(
   emit_ir(e, IrLabel(has_val))
 }
 
-// invariant [src, key_n, .., key_1, ..]; keys stashed only when rest present
-// ToObject first: ({} = null) must throw even for an empty pattern
+// [src, key_n, .., key_1, ..], keys kept only for rest; ToObject first
 fn emit_object_pattern(
   e: Emitter,
   properties: List(prop),

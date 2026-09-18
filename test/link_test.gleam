@@ -228,7 +228,7 @@ pub fn validate_missing_export_message_test() {
   let expected =
     link.UnresolvedExport(requested_module: esm.raw("./m"), export_name: "z")
   assert link.validate(lg) == Error(expected)
-  assert link.link_error_message(expected)
+  assert link.error_message(expected)
     == "The requested module './m' does not provide an export named 'z'"
 }
 
@@ -246,7 +246,7 @@ pub fn validate_ambiguous_export_message_test() {
   let expected =
     link.AmbiguousExport(requested_module: esm.raw("./a"), export_name: "x")
   assert link.validate(lg) == Error(expected)
-  assert link.link_error_message(expected)
+  assert link.error_message(expected)
     == "The requested module './a' provides an ambiguous export named 'x'"
 }
 
@@ -260,7 +260,7 @@ pub fn validate_renaming_reexport_names_the_source_side_export_test() {
   let expected =
     link.UnresolvedExport(requested_module: esm.raw("./m"), export_name: "orig")
   assert link.validate(lg) == Error(expected)
-  assert link.link_error_message(expected)
+  assert link.error_message(expected)
     == "The requested module './m' does not provide an export named 'orig'"
 }
 

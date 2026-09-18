@@ -1,12 +1,9 @@
-import arc/bytecode/key.{
-  type PropertyKey, Index, Named, Private, canonical_key, index_key, key_to_text,
-}
+import arc/bytecode/key.{type PropertyKey, Index, Named, Private}
 import arc/internal/tree_array
 import arc/internal/unsafe
 import arc/rt/buffer
 import arc/rt/bytecode.{FuncTemplate}
 import arc/rt/elements
-import arc/rt/js_string
 import arc/rt/limits
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -19,6 +16,7 @@ import arc/rt/types.{
   SGenerator, SObject, SPromiseData, SShapedObject, ShapeDesc, Store, StringKey,
   StringObj, SymbolKey, TypedArrayObj, plain_object,
 }
+import arc/rt/utf8
 import arc/rt/val as rt_val
 import gleam/bit_array
 import gleam/bool
@@ -48,12 +46,12 @@ fn read_object(st: Agent, h: Handle) -> Cell {
 fn own_property_shaped(
   offsets: Dict(BitArray, Int),
   slots: types.ShapeSlots,
-  key: PropertyKey,
+  pk: PropertyKey,
 ) -> Option(Property) {
-  case key {
+  case pk {
     Private(_) -> None
     _ ->
-      case dict.get(offsets, bit_array.from_string(key_to_text(key))) {
+      case dict.get(offsets, bit_array.from_string(key.to_text(pk))) {
         Ok(off) ->
           Some(DataProperty(
             value: types.shape_slots_get(slots, off),
@@ -116,7 +114,7 @@ pub fn as_sobject(cell: Cell) -> Cell {
         dict.fold(offsets, dict.new(), fn(acc, key_bin, off) {
           let value = types.shape_slots_get(slots, off)
           let key = case bit_array.to_string(key_bin) {
-            Ok(s) -> canonical_key(s)
+            Ok(s) -> key.canonical(s)
             Error(Nil) -> Named("")
           }
           dict.insert(
@@ -172,7 +170,7 @@ fn own_property_of(
       )
       |> option.map(fn(v) {
         // seq 0: index keys enumerate numerically
-        case buffer.buffer_is_immutable(st, buf) {
+        case buffer.is_immutable(st, buf) {
           True ->
             DataProperty(
               value: v,
@@ -289,7 +287,7 @@ fn own_symbol_property_of(
 // §10.4.3.4 step 10
 fn string_length_property(s: String) -> Property {
   DataProperty(
-    value: types.mk_int(js_string.length(s)),
+    value: types.mk_int(utf8.length(s)),
     writable: False,
     enumerable: False,
     configurable: False,
@@ -299,7 +297,7 @@ fn string_length_property(s: String) -> Property {
 
 // §10.4.3.5 steps 5-10
 fn string_index_property(s: String, i: Int) -> Option(Property) {
-  use ch <- option.map(js_string.char_at(s, i))
+  use ch <- option.map(utf8.char_at(s, i))
   DataProperty(
     value: types.mk_string(ch),
     writable: False,
@@ -339,30 +337,30 @@ fn desc_is_data(d: ParsedDesc) -> Bool {
   option.is_some(d.value) || option.is_some(d.writable)
 }
 
-fn key_text(key: ObjectKey) -> String {
-  case key {
-    StringKey(pk) -> key_to_text(pk)
+fn key_text(k: ObjectKey) -> String {
+  case k {
+    StringKey(pk) -> key.to_text(pk)
     SymbolKey(sym) -> types.symbol_descriptive_string(sym)
   }
 }
 
-fn key_quoted(key: ObjectKey) -> String {
-  case key {
-    StringKey(pk) -> "'" <> key_to_text(pk) <> "'"
+fn key_quoted(k: ObjectKey) -> String {
+  case k {
+    StringKey(pk) -> "'" <> key.to_text(pk) <> "'"
     SymbolKey(_) -> "[symbol]"
   }
 }
 
 pub fn object_key_value(key: ObjectKey) -> JsVal {
   case key {
-    StringKey(pk) -> types.mk_string(key_to_text(pk))
+    StringKey(pk) -> types.mk_string(key.to_text(pk))
     SymbolKey(sym) -> types.mk_symbol(sym)
   }
 }
 
 fn object_key_of_value(v: JsVal) -> Option(ObjectKey) {
   case types.classify(v) {
-    types.KStr(s) -> Some(StringKey(canonical_key(s)))
+    types.KStr(s) -> Some(StringKey(key.canonical(s)))
     types.KSym(sym) -> Some(SymbolKey(sym))
     _ -> None
   }
@@ -802,7 +800,7 @@ pub fn t_set_prop(
       case key {
         StringKey(Named("length")) -> #(False, st)
         StringKey(Index(i)) ->
-          case js_string.char_at(s, i) {
+          case utf8.char_at(s, i) {
             Some(_) -> #(False, st)
             None -> set_from(st, st.realm.string.prototype, key, v, recv)
           }
@@ -1172,7 +1170,7 @@ fn set_own_string(
       }
     StringObj(_), Named("length") -> #(False, st)
     StringObj(value: s), Index(i) ->
-      case js_string.char_at(s, i) {
+      case utf8.char_at(s, i) {
         Some(_) -> #(False, st)
         None -> set_ordinary_string(st, h, props, extensible, key, v)
       }
@@ -1755,7 +1753,7 @@ fn has_from(st: Agent, h: Handle, key: ObjectKey) -> #(Bool, Agent) {
     -> #(True, st)
     SObject(kind: ModuleNamespace(exports:), symbol_props:, ..), _ -> #(
       case key {
-        StringKey(pk) -> dict.has_key(exports, key_to_text(pk))
+        StringKey(pk) -> dict.has_key(exports, key.to_text(pk))
         SymbolKey(sym) ->
           option.is_some(own_symbol_property_of(symbol_props, sym))
       },
@@ -1816,7 +1814,7 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
         ProxyObj(target:, handler:, revoked:), _ ->
           proxy_delete(st, Proxy(target:, handler:, revoked:), key)
         ModuleNamespace(exports:), _ -> #(
-          !dict.has_key(exports, key_to_text(pk)),
+          !dict.has_key(exports, key.to_text(pk)),
           st,
         )
         ArrayObj(_), Named("length") -> #(False, st)
@@ -1874,7 +1872,7 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
           }
         StringObj(_), Named("length") -> #(False, st)
         StringObj(value: s), Index(i) ->
-          case js_string.char_at(s, i) {
+          case utf8.char_at(s, i) {
             Some(_) -> #(False, st)
             None -> ordinary_delete()
           }
@@ -1917,7 +1915,7 @@ fn sobject_own_keys(st: Agent, cell: Cell) -> #(List(ObjectKey), Agent) {
   let elem_idx = case kind {
     ArrayObj(length:) | ArgumentsObj(length:, ..) ->
       elements.indices(elements) |> list.filter(fn(i) { i < length })
-    StringObj(value: s) -> ascending(js_string.length(s))
+    StringObj(value: s) -> ascending(utf8.length(s))
     TypedArrayObj(buffer: buf, elem_kind:, byte_offset:, length:) ->
       ascending(buffer.typed_array_live_count(
         st,
@@ -2035,7 +2033,7 @@ fn t_for_in_keys_loop(
           case key {
             SymbolKey(_) -> state
             StringKey(pk) -> {
-              let name = key_to_text(pk)
+              let name = key.to_text(pk)
               case set.contains(s, name) {
                 True -> state
                 False -> {
@@ -2203,9 +2201,9 @@ fn namespace_binding_value(st: Agent, name: String, box: Handle) -> JsVal {
 fn namespace_get(
   st: Agent,
   exports: Dict(String, Handle),
-  key: PropertyKey,
+  pk: PropertyKey,
 ) -> #(JsVal, Agent) {
-  let name = key_to_text(key)
+  let name = key.to_text(pk)
   case dict.get(exports, name) {
     Error(Nil) -> #(types.mk_undefined(), st)
     Ok(box) -> #(namespace_binding_value(st, name, box), st)
@@ -2216,9 +2214,9 @@ fn namespace_get(
 fn namespace_own_property(
   st: Agent,
   exports: Dict(String, Handle),
-  key: PropertyKey,
+  pk: PropertyKey,
 ) -> Option(Property) {
-  let name = key_to_text(key)
+  let name = key.to_text(pk)
   use box <- option.map(dict.get(exports, name) |> option.from_result)
   DataProperty(
     value: namespace_binding_value(st, name, box),
@@ -2233,10 +2231,10 @@ fn namespace_own_property(
 fn namespace_define(
   st: Agent,
   exports: Dict(String, Handle),
-  key: PropertyKey,
+  pk: PropertyKey,
   desc: ParsedDesc,
 ) -> #(Bool, Agent) {
-  let name = key_to_text(key)
+  let name = key.to_text(pk)
   case dict.get(exports, name) {
     Error(Nil) -> #(False, st)
     Ok(box) -> {
@@ -2957,7 +2955,7 @@ fn gather_keys_via_get(
   acc: List(ObjectKey),
 ) -> #(List(ObjectKey), Agent) {
   use <- bool.guard(idx >= len, #(list.reverse(acc), st))
-  let #(item, st) = t_get_prop(st, obj, StringKey(index_key(idx)))
+  let #(item, st) = t_get_prop(st, obj, StringKey(key.index(idx)))
   case object_key_of_value(item) {
     Some(k) -> gather_keys_via_get(st, obj, idx + 1, len, [k, ..acc])
     None ->
@@ -3223,8 +3221,7 @@ pub fn t_set_prop_untyped_key(
   t_set_prop(st, recv, rt_store.as_object_key(key), v)
 }
 
-// §13.15.2 strict putvalue throws on failed set
-// called by name from arc_rt_obj_ffi
+// §13.15.2 strict putvalue throws; called by name from arc_rt_obj_ffi
 pub fn t_set_prop_strict(
   st: Agent,
   recv: JsVal,
@@ -3313,8 +3310,7 @@ pub fn t_create_data_prop_general(
   }
 }
 
-// absent name throws referenceerror
-// called by name from arc_rt_obj_ffi
+// absent name throws referenceerror; called by name from arc_rt_obj_ffi
 pub fn t_global_get(st: Agent, name: BitArray) -> #(JsVal, Agent) {
   let g = types.mk_object(st.realm.global_object)
   let key = StringKey(binary_key(name))
@@ -3378,7 +3374,7 @@ pub fn t_global_typeof(st: Agent, name: BitArray) -> #(String, Agent) {
 
 fn binary_key(name: BitArray) -> PropertyKey {
   case bit_array.to_string(name) {
-    Ok(s) -> canonical_key(s)
+    Ok(s) -> key.canonical(s)
     Error(_) -> Named("")
   }
 }
@@ -3453,8 +3449,7 @@ pub fn t_new_arguments(
   #(types.mk_object(h), st)
 }
 
-// holes arrive as mk_hole() and stay holes
-// called by name from arc_rt_obj_ffi
+// holes arrive as mk_hole() and stay; called by name from arc_rt_obj_ffi
 pub fn t_new_array(st: Agent, elems: List(JsVal)) -> #(JsVal, Agent) {
   let len = list.length(elems)
   let elements = tree_array.from_list(elems)

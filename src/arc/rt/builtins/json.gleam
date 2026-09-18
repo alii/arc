@@ -1,7 +1,5 @@
-import arc/bytecode/key.{
-  type PropertyKey, Index, Named, Private, canonical_key, index_key, key_to_text,
-}
-import arc/rt/abstract_ops as rt_abstract
+import arc/bytecode/key.{type PropertyKey, Index, Named, Private}
+import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
@@ -77,9 +75,9 @@ fn call_in_caller_realm(
 
 // §25.5.1
 fn json_parse(args: List(JsVal), caller: Int, st: Agent) -> #(JsVal, Agent) {
-  let #(json_str, st) =
+  let #(json_text, st) =
     rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
-  let bytes = bit_array.from_string(json_str)
+  let bytes = bit_array.from_string(json_text)
   let reviver = helpers.arg_at(args, 1)
   // iscallable has no side effects, so it can run before the parse
   let revive = rt_val.is_callable(st, reviver)
@@ -113,18 +111,19 @@ fn internalize_json_property(
   node: Option(ParseRecord),
 ) -> #(JsVal, Agent) {
   let #(val, st) =
-    rt_obj.t_get_prop(st, mk_object(holder), StringKey(canonical_key(name)))
+    rt_obj.t_get_prop(st, mk_object(holder), StringKey(key.canonical(name)))
   let node = fresh_record(node, val)
   let st = case classify(val) {
     KHandle(h) ->
-      case rt_abstract.is_array_handle(st, h) {
+      case rt_abstract_ops.is_array_handle(st, h) {
         True -> {
-          let #(len, st) = rt_abstract.length_of_array_like(st, mk_object(h))
+          let #(len, st) =
+            rt_abstract_ops.length_of_array_like(st, mk_object(h))
           internalize_elements(st, ctx, h, 0, len, record_elements(node))
         }
         False -> {
           let #(keys, st) = enumerable_string_keys(st, h)
-          let keys = list.map(keys, key_to_text)
+          let keys = list.map(keys, key.to_text)
           internalize_keys(st, ctx, h, keys, record_members(node))
         }
       }
@@ -206,10 +205,10 @@ fn replace_or_delete(
   name: String,
   new_element: JsVal,
 ) -> Agent {
-  let key = StringKey(canonical_key(name))
+  let k = StringKey(key.canonical(name))
   case classify(new_element) {
     KUndef -> {
-      let #(_, st) = rt_obj.t_delete_prop(st, h, key)
+      let #(_, st) = rt_obj.t_delete_prop(st, h, k)
       st
     }
     _ -> {
@@ -217,7 +216,7 @@ fn replace_or_delete(
         rt_obj.t_define_own_prop(
           st,
           h,
-          key,
+          k,
           types.ParsedDesc(
             value: Some(new_element),
             get: None,
@@ -459,15 +458,15 @@ fn plain_props(
   case entries {
     [] -> acc
     [#(name, value), ..rest] -> {
-      let key = canonical_key(name)
-      case dict.get(acc, key) {
+      let pk = key.canonical(name)
+      case dict.get(acc, pk) {
         Ok(first) -> {
           let prop = types.plain_property(value, types.prop_seq(first))
-          plain_props(rest, dict.insert(acc, key, prop), seq)
+          plain_props(rest, dict.insert(acc, pk, prop), seq)
         }
         Error(Nil) -> {
           let prop = types.plain_property(value, seq)
-          plain_props(rest, dict.insert(acc, key, prop), seq + 1)
+          plain_props(rest, dict.insert(acc, pk, prop), seq + 1)
         }
       }
     }
@@ -511,9 +510,9 @@ fn props_from_entries(
   case entries {
     [] -> #(acc, st)
     [#(name, record), ..rest] -> {
-      let key = canonical_key(name)
+      let pk = key.canonical(name)
       let value = record_value(record)
-      case dict.get(acc, key) {
+      case dict.get(acc, pk) {
         Ok(first) -> {
           let prop =
             types.DataProperty(
@@ -523,11 +522,11 @@ fn props_from_entries(
               configurable: True,
               seq: types.prop_seq(first),
             )
-          props_from_entries(st, rest, dict.insert(acc, key, prop))
+          props_from_entries(st, rest, dict.insert(acc, pk, prop))
         }
         Error(Nil) -> {
           let #(prop, st) = rt_store.t_plain_property(st, value)
-          props_from_entries(st, rest, dict.insert(acc, key, prop))
+          props_from_entries(st, rest, dict.insert(acc, pk, prop))
         }
       }
     }
@@ -535,15 +534,15 @@ fn props_from_entries(
 }
 
 fn json_raw_json(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  let #(json_str, st) =
+  let #(json_text, st) =
     rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
-  case validate_raw_json_text(bit_array.from_string(json_str)) {
+  case validate_raw_json_text(bit_array.from_string(json_text)) {
     Error(e) -> rt_val.t_throw_syntax_error(st, json_error_message(e))
     Ok(Nil) -> {
       let #(seq, st) = rt_store.t_next_prop_seq(st)
       let prop =
         types.DataProperty(
-          value: mk_string(json_str),
+          value: mk_string(json_text),
           writable: False,
           enumerable: True,
           configurable: False,
@@ -553,7 +552,7 @@ fn json_raw_json(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
         rt_store.t_cell_new(
           st,
           SObject(
-            kind: RawJsonObj(raw: json_str),
+            kind: RawJsonObj(raw: json_text),
             proto: None,
             props: dict.from_list([#(Named("rawJSON"), prop)]),
             symbol_props: [],
@@ -678,11 +677,11 @@ fn build_replacer(st: Agent, replacer: JsVal) -> #(Replacer, Agent) {
       case rt_val.is_callable(st, replacer) {
         True -> #(ReplacerFn(replacer), st)
         False ->
-          case rt_abstract.is_array_handle(st, h) {
+          case rt_abstract_ops.is_array_handle(st, h) {
             False -> #(NoReplacer, st)
             True -> {
               let #(len, st) =
-                rt_abstract.length_of_array_like(st, mk_object(h))
+                rt_abstract_ops.length_of_array_like(st, mk_object(h))
               let #(items, st) =
                 collect_property_list(st, h, 0, len, set.new(), [])
               #(PropertyList(items), st)
@@ -705,7 +704,7 @@ fn collect_property_list(
     True -> #(list.reverse(acc), st)
     False -> {
       let #(v, st) =
-        rt_obj.t_get_prop(st, mk_object(h), StringKey(index_key(k)))
+        rt_obj.t_get_prop(st, mk_object(h), StringKey(key.index(k)))
       let #(item, st) = replacer_item(st, v)
       case item {
         Some(s) ->
@@ -782,13 +781,13 @@ fn serialize_property(
   ctx: StringifyContext,
   stack: List(Int),
   indent: String,
-  key: PropertyKey,
+  pk: PropertyKey,
   holder: Handle,
 ) -> #(Option(StringTree), Agent) {
   // canonical keys, so a named key never spells an index
-  let #(val, st) = case key {
+  let #(val, st) = case pk {
     Named(name) -> helpers.get_named(st, mk_object(holder), name)
-    Index(i) -> rt_abstract.get_index(st, mk_object(holder), i)
+    Index(i) -> rt_abstract_ops.get_index(st, mk_object(holder), i)
     Private(_) -> #(mk_undefined(), st)
   }
   let #(val, st) = case classify(val) {
@@ -797,7 +796,7 @@ fn serialize_property(
       case rt_val.is_callable(st, to_json) {
         True ->
           call_in_caller_realm(st, ctx.caller, to_json, val, [
-            mk_string(key_to_text(key)),
+            mk_string(key.to_text(pk)),
           ])
         False -> #(val, st)
       }
@@ -807,7 +806,7 @@ fn serialize_property(
   let #(val, st) = case ctx.replacer {
     ReplacerFn(rf) ->
       call_in_caller_realm(st, ctx.caller, rf, mk_object(holder), [
-        mk_string(key_to_text(key)),
+        mk_string(key.to_text(pk)),
         val,
       ])
     NoReplacer | PropertyList(_) -> #(val, st)
@@ -867,7 +866,7 @@ fn serialize_handle(
       case rt_val.is_callable(st, val) {
         True -> #(None, st)
         False -> {
-          let #(tree, st) = case rt_abstract.is_array_handle(st, h) {
+          let #(tree, st) = case rt_abstract_ops.is_array_handle(st, h) {
             True -> serialize_array(st, ctx, stack, indent, h)
             False -> serialize_object(st, ctx, stack, indent, h)
           }
@@ -890,7 +889,7 @@ fn serialize_object(
       let stack = [h.id, ..stack]
       let step_indent = indent <> ctx.gap
       let #(keys, st) = case ctx.replacer {
-        PropertyList(names) -> #(list.map(names, canonical_key), st)
+        PropertyList(names) -> #(list.map(names, key.canonical), st)
         NoReplacer | ReplacerFn(_) -> enumerable_string_keys(st, h)
       }
       let #(partial, st) =
@@ -920,7 +919,7 @@ fn serialize_members(
             _ -> ": "
           }
           let member =
-            quote_tree(key_to_text(k))
+            quote_tree(key.to_text(k))
             |> string_tree.append(sep)
             |> string_tree.append_tree(tree)
           serialize_members(st, ctx, stack, step_indent, h, rest, [
@@ -946,7 +945,7 @@ fn serialize_array(
     False -> {
       let stack = [h.id, ..stack]
       let step_indent = indent <> ctx.gap
-      let #(len, st) = rt_abstract.length_of_array_like(st, mk_object(h))
+      let #(len, st) = rt_abstract_ops.length_of_array_like(st, mk_object(h))
       let #(partial, st) =
         serialize_elements(st, ctx, stack, step_indent, h, 0, len, [])
       #(finalize_brackets(partial, ctx.gap, step_indent, indent, "[", "]"), st)
@@ -968,7 +967,7 @@ fn serialize_elements(
     True -> #(acc, st)
     False -> {
       let #(str_p, st) =
-        serialize_property(st, ctx, stack, step_indent, index_key(i), h)
+        serialize_property(st, ctx, stack, step_indent, key.index(i), h)
       let item =
         option.lazy_unwrap(str_p, fn() { string_tree.from_string("null") })
       serialize_elements(st, ctx, stack, step_indent, h, i + 1, len, [

@@ -1,4 +1,4 @@
-//// gc probe: gleam run -m arc_gc_oracle_probe
+// gc probe: gleam run -m arc_gc_oracle_probe
 
 import arc/engine
 import arc/rt/gc as rt_gc

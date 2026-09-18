@@ -1,17 +1,15 @@
 import arc/bytecode/key.{
-  type PropertyKey, Index, Named, index_key, key_display_string, max_array_index,
-  max_array_length,
+  type PropertyKey, Index, Named, max_array_index, max_array_length,
 }
-import arc/rt/abstract_ops as rt_abstract
+import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins/array_from_async
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
-import arc/rt/builtins/object as object_builtin
+import arc/rt/builtins/object as b_object
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/elements
-import arc/rt/js_string
 import arc/rt/lang as rt_lang
 import arc/rt/limits
 import arc/rt/obj as rt_obj
@@ -41,6 +39,7 @@ import arc/rt/types.{
   mk_string, mk_undefined, plain_object, symbol_is_concat_spreadable,
   symbol_iterator, symbol_species, symbol_unscopables,
 }
+import arc/rt/utf8
 import arc/rt/val as rt_val
 import gleam/bool
 import gleam/dict.{type Dict}
@@ -282,7 +281,10 @@ fn array_length_of_float(f: Float) -> Option(Int) {
 }
 
 fn is_array(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
-  #(mk_bool(rt_abstract.is_array(st, helpers.first_arg_or_undefined(args))), st)
+  #(
+    mk_bool(rt_abstract_ops.is_array(st, helpers.first_arg_or_undefined(args))),
+    st,
+  )
 }
 
 fn alloc_array(
@@ -348,7 +350,7 @@ fn require_array(
 fn object_length(st: Agent, h: Handle) -> #(Int, Agent) {
   case rt_store.t_cell_get(st, h) {
     SObject(kind: ArrayObj(length:), ..) -> #(length, st)
-    SObject(kind: StringObj(value: s), ..) -> #(js_string.length(s), st)
+    SObject(kind: StringObj(value: s), ..) -> #(utf8.length(s), st)
     SObject(props:, ..) -> length_of_properties(st, h, props)
     types.SShapedObject(..) as s ->
       case rt_obj.as_sobject(s) {
@@ -367,7 +369,7 @@ fn length_of_properties(
   case dict.get(props, Named("length")) {
     Ok(DataProperty(value: len_val, ..)) -> rt_val.t_to_length(st, len_val)
     _ -> {
-      rt_abstract.length_of_array_like(st, mk_object(h))
+      rt_abstract_ops.length_of_array_like(st, mk_object(h))
     }
   }
 }
@@ -426,50 +428,50 @@ fn guard_safe_length(
   }
 }
 
-fn generic_set(st: Agent, h: Handle, key: PropertyKey, val: JsVal) -> Agent {
-  let #(ok, st) = rt_obj.t_set_prop(st, mk_object(h), StringKey(key), val)
+fn generic_set(st: Agent, h: Handle, pk: PropertyKey, val: JsVal) -> Agent {
+  let #(ok, st) = rt_obj.t_set_prop(st, mk_object(h), StringKey(pk), val)
   case ok {
     True -> st
     False ->
       rt_val.t_throw_type_error(
         st,
         "Cannot assign to read only property '"
-          <> key_display_string(key)
+          <> key.display_string(pk)
           <> "' of object",
       )
   }
 }
 
 fn generic_set_index(st: Agent, h: Handle, idx: Int, val: JsVal) -> Agent {
-  generic_set(st, h, index_key(idx), val)
+  generic_set(st, h, key.index(idx), val)
 }
 
 fn generic_set_length(st: Agent, h: Handle, len: Int) -> Agent {
   generic_set(st, h, Named("length"), mk_int(len))
 }
 
-fn generic_delete(st: Agent, h: Handle, key: PropertyKey) -> Agent {
-  let #(ok, st) = rt_obj.t_delete_prop(st, h, StringKey(key))
+fn generic_delete(st: Agent, h: Handle, pk: PropertyKey) -> Agent {
+  let #(ok, st) = rt_obj.t_delete_prop(st, h, StringKey(pk))
   case ok {
     True -> st
     False ->
       rt_val.t_throw_type_error(
         st,
-        "Cannot delete property '" <> key_display_string(key) <> "' of object",
+        "Cannot delete property '" <> key.display_string(pk) <> "' of object",
       )
   }
 }
 
 fn generic_delete_index(st: Agent, h: Handle, idx: Int) -> Agent {
-  generic_delete(st, h, index_key(idx))
+  generic_delete(st, h, key.index(idx))
 }
 
 fn generic_has_op(st: Agent, h: Handle, idx: Int) -> #(Bool, Agent) {
-  rt_obj.t_has_prop(st, mk_object(h), StringKey(index_key(idx)))
+  rt_obj.t_has_prop(st, mk_object(h), StringKey(key.index(idx)))
 }
 
 fn generic_get(st: Agent, h: Handle, idx: Int) -> #(JsVal, Agent) {
-  rt_obj.t_get_prop(st, mk_object(h), StringKey(index_key(idx)))
+  rt_obj.t_get_prop(st, mk_object(h), StringKey(key.index(idx)))
 }
 
 fn get_index_if_present(
@@ -511,7 +513,7 @@ fn inherited_index(
   this: JsVal,
   idx: Int,
 ) -> #(Option(JsVal), Agent) {
-  let key = StringKey(index_key(idx))
+  let key = StringKey(key.index(idx))
   let #(has, st) = rt_obj.t_has_prop(st, mk_object(proto), key)
   case has {
     False -> #(None, st)
@@ -527,11 +529,11 @@ fn generic_index_if_present(
   this: JsVal,
   idx: Int,
 ) -> #(Option(JsVal), Agent) {
-  let #(has, st) = rt_obj.t_has_prop(st, this, StringKey(index_key(idx)))
+  let #(has, st) = rt_obj.t_has_prop(st, this, StringKey(key.index(idx)))
   case has {
     False -> #(None, st)
     True -> {
-      let #(v, st) = rt_abstract.get_index(st, this, idx)
+      let #(v, st) = rt_abstract_ops.get_index(st, this, idx)
       #(Some(v), st)
     }
   }
@@ -678,7 +680,7 @@ fn hole_is_inherited(
       case rt_store.t_cell_get(st, proto_h) {
         SObject(kind: ProxyObj(..), ..) -> #(True, st)
         _ ->
-          rt_obj.t_has_prop(st, mk_object(proto_h), StringKey(index_key(idx)))
+          rt_obj.t_has_prop(st, mk_object(proto_h), StringKey(key.index(idx)))
       }
   }
 }
@@ -801,7 +803,7 @@ fn join_elements_generic(
   case idx >= length {
     True -> finish_join(st, acc, separator)
     False -> {
-      let #(v, st) = rt_abstract.get_index(st, this, idx)
+      let #(v, st) = rt_abstract_ops.get_index(st, this, idx)
       case classify(v) {
         KUndef | KNull ->
           join_elements_generic(st, this, idx + 1, length, separator, [
@@ -1021,9 +1023,9 @@ fn array_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
   use this, _h, length, st <- require_array(st, this)
   let #(start, st) =
-    rt_abstract.relative_index(st, helpers.arg_at(args, 0), length, 0)
+    rt_abstract_ops.relative_index(st, helpers.arg_at(args, 0), length, 0)
   let #(end, st) =
-    rt_abstract.relative_index(st, helpers.arg_at(args, 1), length, length)
+    rt_abstract_ops.relative_index(st, helpers.arg_at(args, 1), length, length)
   let count = int.max(end - start, 0)
   let #(species, st) = array_species_create(st, this, count)
   let #(copied, st) = copy_range(st, this, start, 0, count, elements.new())
@@ -1048,7 +1050,7 @@ fn copy_range_dense(
   case remaining <= 0 {
     True -> #(dst, st)
     False -> {
-      let #(val, st) = rt_abstract.get_index(st, src, src_idx)
+      let #(val, st) = rt_abstract_ops.get_index(st, src, src_idx)
       copy_range_dense(
         st,
         src,
@@ -1327,7 +1329,7 @@ fn is_concat_spreadable(st: Agent, item: JsVal) -> #(Bool, Agent) {
       let #(flag, st) =
         rt_obj.t_get_prop(st, item, SymbolKey(symbol_is_concat_spreadable))
       case classify(flag) {
-        KUndef -> #(rt_abstract.is_array(st, item), st)
+        KUndef -> #(rt_abstract_ops.is_array(st, item), st)
         _ -> #(rt_val.to_boolean(flag), st)
       }
     }
@@ -1373,7 +1375,7 @@ fn species_protocol(
 ) -> #(Option(Handle), Agent) {
   case classify(original) {
     KHandle(_) -> {
-      case rt_abstract.is_array(st, original) {
+      case rt_abstract_ops.is_array(st, original) {
         False -> #(None, st)
         True -> {
           let #(ctor, st) =
@@ -1487,7 +1489,7 @@ fn write_species_element(
       configurable: Some(True),
     )
   let #(ok, st) =
-    rt_obj.t_define_own_prop(st, target, StringKey(index_key(idx)), desc)
+    rt_obj.t_define_own_prop(st, target, StringKey(key.index(idx)), desc)
   case ok {
     True -> st
     False ->
@@ -1577,9 +1579,9 @@ fn array_fill(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use this, h, length, st <- require_array(st, this)
   let fill_val = helpers.first_arg_or_undefined(args)
   let #(start, st) =
-    rt_abstract.relative_index(st, helpers.arg_at(args, 1), length, 0)
+    rt_abstract_ops.relative_index(st, helpers.arg_at(args, 1), length, 0)
   let #(end, st) =
-    rt_abstract.relative_index(st, helpers.arg_at(args, 2), length, length)
+    rt_abstract_ops.relative_index(st, helpers.arg_at(args, 2), length, length)
   use <- within_budget(st, end - start)
   let fast = {
     use els, len <- with_plain_elements(st, h, length, start, end)
@@ -1608,7 +1610,7 @@ fn array_at(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
   case idx < 0 || idx >= length {
     True -> #(mk_undefined(), st)
-    False -> rt_abstract.get_index(st, this, idx)
+    False -> rt_abstract_ops.get_index(st, this, idx)
   }
 }
 
@@ -1812,7 +1814,7 @@ fn search_forward_generic(
       let #(maybe_val, st) = case hole_mode {
         SkipHoles -> get_index_if_present(st, this, idx)
         VisitHoles -> {
-          let #(v, st) = rt_abstract.get_index(st, this, idx)
+          let #(v, st) = rt_abstract_ops.get_index(st, this, idx)
           #(Some(v), st)
         }
       }
@@ -2863,7 +2865,7 @@ fn array_splice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
   use this, h, length, st <- require_array(st, this)
   let #(actual_start, st) =
-    rt_abstract.relative_index(st, helpers.arg_at(args, 0), length, 0)
+    rt_abstract_ops.relative_index(st, helpers.arg_at(args, 0), length, 0)
   let #(#(actual_delete_count, items), st) =
     delete_count(st, args, length, actual_start)
   let item_count = list.length(items)
@@ -3029,7 +3031,7 @@ fn flatten_into_loop(
         Some(elem) ->
           case depth > 0 {
             True -> {
-              case classify(elem), rt_abstract.is_array(st, elem) {
+              case classify(elem), rt_abstract_ops.is_array(st, elem) {
                 KHandle(sub_h), True -> {
                   let #(sub_len, st) = object_length(st, sub_h)
                   let #(new_acc, st) =
@@ -3080,7 +3082,7 @@ fn array_flat_map_loop(
         None -> array_flat_map_loop(st, arr, idx + 1, length, cb, acc)
         Some(elem) -> {
           let #(mapped, st) = cb(st, [elem, mk_int(idx), arr])
-          case classify(mapped), rt_abstract.is_array(st, mapped) {
+          case classify(mapped), rt_abstract_ops.is_array(st, mapped) {
             KHandle(sub_h), True -> {
               let #(sub_len, st) = object_length(st, sub_h)
               let #(new_acc, st) = flatten_into(st, mapped, sub_len, 0, acc)
@@ -3102,11 +3104,11 @@ fn array_copy_within(
 ) -> #(JsVal, Agent) {
   use this, h, length, st <- require_array(st, this)
   let #(target, st) =
-    rt_abstract.relative_index(st, helpers.arg_at(args, 0), length, 0)
+    rt_abstract_ops.relative_index(st, helpers.arg_at(args, 0), length, 0)
   let #(from, st) =
-    rt_abstract.relative_index(st, helpers.arg_at(args, 1), length, 0)
+    rt_abstract_ops.relative_index(st, helpers.arg_at(args, 1), length, 0)
   let #(final, st) =
-    rt_abstract.relative_index(st, helpers.arg_at(args, 2), length, length)
+    rt_abstract_ops.relative_index(st, helpers.arg_at(args, 2), length, length)
   let count = int.min(final - from, length - target)
   use <- within_budget(st, count)
   case count <= 0 {
@@ -3255,7 +3257,7 @@ fn array_from_array_like(
         rt_obj.t_get_prop(st, items, SymbolKey(symbol_iterator))
       case classify(iter_method) {
         KUndef | KNull -> {
-          let #(length, st) = rt_abstract.length_of_array_like(st, items)
+          let #(length, st) = rt_abstract_ops.length_of_array_like(st, items)
           use <- within_budget(st, length)
           let #(target, st) = from_target(st, ctor, [mk_int(length)])
           array_from_loop(st, items, 0, length, map_fn, this_arg, target)
@@ -3332,7 +3334,7 @@ fn array_from_loop(
   case idx >= length {
     True -> from_finish(st, target, length)
     False -> {
-      let #(elem, st) = rt_abstract.get_index(st, items, idx)
+      let #(elem, st) = rt_abstract_ops.get_index(st, items, idx)
       let #(mapped, st) = case map_fn {
         None -> #(elem, st)
         Some(mf) -> rt_call.t_call(st, mf, this_arg, [elem, mk_int(idx)])
@@ -3362,7 +3364,7 @@ fn array_to_spliced(
   let array_proto = st.realm.array.prototype
   use this, _h, length, st <- require_array(st, this)
   let #(actual_start, st) =
-    rt_abstract.relative_index(st, helpers.arg_at(args, 0), length, 0)
+    rt_abstract_ops.relative_index(st, helpers.arg_at(args, 0), length, 0)
   let #(#(actual_skip_count, items), st) =
     delete_count(st, args, length, actual_start)
   let item_count = list.length(items)
@@ -3435,7 +3437,7 @@ fn collect_elements_descending(
   case idx < 0 {
     True -> #(list.reverse(acc), st)
     False -> {
-      let #(val, st) = rt_abstract.get_index(st, this, idx)
+      let #(val, st) = rt_abstract_ops.get_index(st, this, idx)
       collect_elements_descending(st, this, idx - 1, [val, ..acc])
     }
   }
@@ -3447,7 +3449,7 @@ fn array_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
     rt_obj.t_get_prop(st, mk_object(h), StringKey(Named("join")))
   case rt_val.is_callable(st, func) {
     True -> rt_call.t_call(st, func, array, [])
-    False -> object_builtin.dispatch(st, ObjectPrototypeToString, array, [])
+    False -> b_object.dispatch(st, ObjectPrototypeToString, array, [])
   }
 }
 
@@ -3485,7 +3487,7 @@ fn array_to_locale_string_loop(
         Error(Nil) -> rt_val.t_throw_range_error(st, "Invalid string length")
       }
     False -> {
-      let #(elem, st) = rt_abstract.get_index(st, this, idx)
+      let #(elem, st) = rt_abstract_ops.get_index(st, this, idx)
       case classify(elem) {
         KUndef | KNull ->
           array_to_locale_string_loop(

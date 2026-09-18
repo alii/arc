@@ -1,4 +1,4 @@
-import arc/bytecode/key.{Index, Named, canonical_key}
+import arc/bytecode/key.{Index, Named}
 import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
@@ -16,7 +16,7 @@ fn agent() -> Agent {
 }
 
 fn key(name: String) {
-  StringKey(canonical_key(name))
+  StringKey(key.canonical(name))
 }
 
 fn wrapper(st: Agent, s: String) -> #(JsVal, Agent) {

@@ -234,8 +234,7 @@ call_kind(St, ?COMPILEDFN(Code, Home, _, _, DirectEntry), Fn, Recv, N, A, B, C) 
 call_kind(St, {?NATIVEFN_TAG, Token, _, _, _}, _, Recv, N, A, B, C) ->
     'arc@rt@builtins':dispatch_native(St, Token, Recv, arg_list(N, A, B, C)).
 
-%% {hit, Fn, Kind} | miss | stale when a cached chain changed | spent when
-%% the own way no longer matches the receiver
+%% {hit, Fn, Kind} | miss | stale (chain changed) | spent (own way mismatch)
 ic_probe(Cells, RId, RCell, KeyBin, Ways) when element(1, RCell) =:= ?SOBJECT_TAG ->
     case Ways of
         #{{?ICOWN_TAG, RId} := {[{_, Cell}], Fn, Kind}} ->

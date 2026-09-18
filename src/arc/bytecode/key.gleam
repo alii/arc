@@ -16,7 +16,7 @@ pub type PropertyKey {
 }
 
 // §7.1.21 canonical numeric index string plus range check
-pub fn canonical_key(s: String) -> PropertyKey {
+pub fn canonical(s: String) -> PropertyKey {
   // digit guard: int.parse raises and catches on non-numeric keys
   case bit_array.from_string(s) {
     <<c, _:bytes>> if c >= 48 && c <= 57 ->
@@ -32,7 +32,7 @@ pub fn canonical_key(s: String) -> PropertyKey {
   }
 }
 
-pub fn index_key(n: Int) -> PropertyKey {
+pub fn index(n: Int) -> PropertyKey {
   case n >= 0 && n <= max_array_index {
     True -> Index(n)
     False -> Named(int.to_string(n))
@@ -49,8 +49,8 @@ pub fn array_index_of_float(f: Float) -> Option(Int) {
   }
 }
 
-// for humans; use key_to_text when the string is data
-pub fn key_display_string(key: PropertyKey) -> String {
+// for humans; use to_text when the string is data
+pub fn display_string(key: PropertyKey) -> String {
   case key {
     Index(n) -> int.to_string(n)
     Named(name) -> name
@@ -58,7 +58,7 @@ pub fn key_display_string(key: PropertyKey) -> String {
   }
 }
 
-pub fn key_to_text(key: PropertyKey) -> String {
+pub fn to_text(key: PropertyKey) -> String {
   case key {
     Index(n) -> int.to_string(n)
     Named(s) -> s
@@ -68,19 +68,19 @@ pub fn key_to_text(key: PropertyKey) -> String {
 
 const uid_separator = "\u{0}"
 
-pub fn private_key(name: String) -> PropertyKey {
+pub fn private(name: String) -> PropertyKey {
   Private(name)
 }
 
-pub fn private_key_from_text(text: String) -> PropertyKey {
+pub fn private_from_text(text: String) -> PropertyKey {
   Private(text)
 }
 
-pub fn private_key_text(name: String, uid: Int) -> String {
+pub fn private_text(name: String, uid: Int) -> String {
   name <> uid_separator <> int.to_string(uid)
 }
 
-pub fn is_private_key(key: PropertyKey) -> Bool {
+pub fn is_private(key: PropertyKey) -> Bool {
   case key {
     Private(_) -> True
     Index(_) | Named(_) -> False

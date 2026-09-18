@@ -1,5 +1,5 @@
-//// regenerator-style state machine transform for async and generator bodies.
-//// coroutine = the js function kind, machine = its lowered state machine
+//// regenerator-style state machine transform for async and generator bodies;
+//// coroutine is the js function kind, machine its lowered state machine
 
 import arc/compiler/ast_util
 import arc/compiler/scope.{type ScopeId, type ScopeTree}
@@ -308,8 +308,7 @@ const pend_return = 2
 
 const pend_goto = 3
 
-// fixed ir names bound by emit_machine_function and read through MachineContext
-// mirror rt_async sent modes, compared numerically in emitted code
+// bound by emit_machine_function; modes mirror rt_async sent modes
 const resume_next = rt_async.sent_next
 
 const resume_throw = rt_async.sent_throw
@@ -3814,7 +3813,7 @@ fn add_temp_slots(
   case n {
     0 -> #(tree, info)
     _ -> {
-      let sc = scope.get_scope(tree, fn_scope_id)
+      let sc = scope.get(tree, fn_scope_id)
       let bindings =
         list.repeat(Nil, n)
         |> list.index_map(fn(_, i) { i })

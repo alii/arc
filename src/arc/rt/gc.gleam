@@ -335,8 +335,7 @@ fn push_birth_refs(birth: types.FnBirth, acc: List(Int)) -> List(Int) {
   }
 }
 
-// turn boundary only (call_depth == 0), never at fn entry
-// called by name from arc_aot_exec_ffi
+// turn boundary only, call_depth 0; called by name from arc_aot_exec_ffi
 pub fn t_maybe_collect(st: Agent) -> Agent {
   case st.call_depth == 0 && due(st.store) {
     True -> t_collect_some(st, [])
@@ -439,8 +438,7 @@ fn collect_minor(st: Agent, extra_roots: List(Handle)) -> Agent {
         arena.set(id, arena.get(id, cells), acc)
       })
   }
-  // ids under next_id are never handed out again, so stale weak map keys only
-  // cost memory until the next major; refs and registries would dangle
+  // ids are never reused, so stale weak keys only cost memory until a major
   let #(kept, weak) =
     list.fold(weak, #(kept, []), fn(acc, id) {
       let #(kept, weak) = acc

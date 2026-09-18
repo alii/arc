@@ -1,11 +1,6 @@
-//// the only one-letter constructor families:
-////   K* JsValKind, the view classify gives of a JsVal
-////   J* JsNum, the number cases inside KNum
-////   S* Cell, what the store holds at a handle
-//// mk_* builds the JsVal a K* case reads back: mk_undefined <-> KUndef,
-//// mk_null <-> KNull, mk_bool <-> KBool, mk_number/mk_int <-> KNum,
-//// mk_string <-> KStr, mk_bigint <-> KBig, mk_symbol <-> KSym,
-//// mk_object(h) <-> KHandle(h), mk_tdz <-> KTdz
+//// one-letter constructor families: K* JsValKind (what classify gives),
+//// J* JsNum (the number cases inside KNum), S* Cell (what a handle holds);
+//// mk_* builds the JsVal each K* case reads back, mk_object(h) <-> KHandle(h)
 
 import arc/bytecode/error_kind.{type ErrorKind}
 import arc/bytecode/key.{type PropertyKey}
@@ -940,8 +935,7 @@ pub fn empty_legacy_statics() -> LegacyStatics {
 }
 
 pub type RegExpNative {
-  // per-realm regexp caches ride on the constructor: the last
-  // RegExp.prototype props seen pristine and compiled patterns
+  // per-realm regexp caches: pristine prototype props and compiled patterns
   RegExpConstructor(
     legacy: LegacyStatics,
     proto_props: Option(Dict(PropertyKey, Property)),

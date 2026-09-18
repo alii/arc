@@ -1,11 +1,11 @@
 // profiling harness, not a test
 
 import arc/rt/types.{type Agent}
-import arc_aot/emit as emit_2core
+import arc_aot/emit
 import arc_aot/run
 import carder/pipeline
 import emit_2core_bench.{adder_js, obj_js, sum_js}
-import emit_2core_harness as harness
+import emit_2core_harness
 import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
 import gleam/int
@@ -46,12 +46,11 @@ type TimeUnit {
 fn monotonic_time(unit: TimeUnit) -> Int
 
 fn compile_and_seed(source: String, name: String) -> #(Atom, Agent) {
-  let opts =
-    emit_2core.CompileOpts(module_name: name, source_kind: emit_2core.AsScript)
-  let assert Ok(ir_module) = emit_2core.compile_source(source, opts)
-  let assert Ok(beam) = pipeline.compile_ir(ir_module, emit_2core.binding())
+  let opts = emit.CompileOpts(module_name: name, source_kind: emit.AsScript)
+  let assert Ok(ir_module) = emit.compile_source(source, opts)
+  let assert Ok(beam) = pipeline.compile_ir(ir_module, emit.binding())
   let assert Ok(mod) = run.load(beam, name)
-  #(mod, harness.seed())
+  #(mod, emit_2core_harness.seed())
 }
 
 fn repeat(times: Int, f: fn() -> a) -> Nil {
@@ -461,12 +460,12 @@ const richards_baseline = [
 
 fn correctness_gate(label: String, path: String) -> Bool {
   let assert Ok(source) = simplifile.read(path)
-  case harness.run_compiled(source) {
-    harness.DiffRun(result: Ok(_), stdout: <<"ok\n":utf8>>) -> {
+  case emit_2core_harness.run_compiled(source) {
+    emit_2core_harness.DiffRun(result: Ok(_), stdout: <<"ok\n":utf8>>) -> {
       io.println("  ✓ " <> label <> " prints ok")
       True
     }
-    harness.DiffRun(result: Ok(_), stdout:) -> {
+    emit_2core_harness.DiffRun(result: Ok(_), stdout:) -> {
       io.println(
         "  ✗ "
         <> label
@@ -476,7 +475,7 @@ fn correctness_gate(label: String, path: String) -> Bool {
       )
       False
     }
-    harness.DiffRun(result: Error(e), stdout:) -> {
+    emit_2core_harness.DiffRun(result: Error(e), stdout:) -> {
       io.println(
         "  ✗ "
         <> label
@@ -862,15 +861,12 @@ pub fn crypto_am3_op_map() -> Nil {
 
 fn dump_am3_core() -> Nil {
   let opts =
-    emit_2core.CompileOpts(
-      module_name: "arc_prof_am3",
-      source_kind: emit_2core.AsScript,
-    )
-  case emit_2core.compile_source(am3_bench_js, opts) {
+    emit.CompileOpts(module_name: "arc_prof_am3", source_kind: emit.AsScript)
+  case emit.compile_source(am3_bench_js, opts) {
     Error(e) ->
       io.println("!! am3 compile_source FAILED: " <> string.inspect(e))
     Ok(ir_module) ->
-      case pipeline.ir_to_core(ir_module, emit_2core.binding()) {
+      case pipeline.ir_to_core(ir_module, emit.binding()) {
         Error(e) ->
           io.println("!! am3 ir_to_core FAILED: " <> string.inspect(e))
         Ok(core) -> io.println(core)

@@ -21,25 +21,25 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
-pub fn buffer_storage(st: Agent, buffer: Handle) -> Option(BufferStorage) {
+pub fn storage(st: Agent, buffer: Handle) -> Option(BufferStorage) {
   case rt_store.t_cell_get(st, buffer) {
     SObject(kind: ArrayBufferObj(storage:), ..) -> Some(storage)
     _ -> None
   }
 }
 
-pub fn buffer_bytes(st: Agent, buffer: Handle) -> Option(BitArray) {
-  buffer_storage(st, buffer) |> option.then(types.buffer_bits)
+pub fn bytes(st: Agent, buffer: Handle) -> Option(BitArray) {
+  storage(st, buffer) |> option.then(types.buffer_bits)
 }
 
-pub fn buffer_is_immutable(st: Agent, buffer: Handle) -> Bool {
-  buffer_storage(st, buffer)
+pub fn is_immutable(st: Agent, buffer: Handle) -> Bool {
+  storage(st, buffer)
   |> option.map(types.buffer_is_immutable)
   |> option.unwrap(False)
 }
 
 fn live_byte_size(st: Agent, buffer: Handle) -> Int {
-  buffer_storage(st, buffer)
+  storage(st, buffer)
   |> option.map(types.buffer_byte_size)
   |> option.unwrap(0)
 }
@@ -149,7 +149,7 @@ pub fn view_length(st: Agent, view: View) -> Int {
 
 pub fn live_view(st: Agent, view: View) -> Option(ResolvedView) {
   let View(buffer:, elem_kind:, byte_offset:, length:) = view
-  use data <- option.map(buffer_bytes(st, buffer))
+  use data <- option.map(bytes(st, buffer))
   resolve_view(bit_array.byte_size(data), elem_kind, byte_offset, length)
 }
 
@@ -176,7 +176,7 @@ pub fn typed_array_element(
   idx: Int,
 ) -> Option(JsVal) {
   use <- bool.guard(idx < 0 || idx >= length, None)
-  case buffer_bytes(st, buffer) {
+  case bytes(st, buffer) {
     None -> None
     Some(data) ->
       element_of_view(
@@ -197,7 +197,7 @@ pub fn typed_array_element_live(
   idx: Int,
 ) -> Option(JsVal) {
   use <- bool.guard(idx < 0, None)
-  case buffer_bytes(st, buffer) {
+  case bytes(st, buffer) {
     None -> None
     Some(data) ->
       element_of_view(
@@ -243,7 +243,7 @@ pub fn typed_array_iter_length(
   byte_offset: Int,
   length: Option(Int),
 ) -> Result(Int, ViewWitnessError) {
-  case buffer_bytes(st, buffer) {
+  case bytes(st, buffer) {
     None -> Error(BufferDetached)
     Some(data) -> {
       let view =
@@ -263,7 +263,7 @@ pub fn typed_array_live_length(
   byte_offset: Int,
   length: Int,
 ) -> Int {
-  case buffer_bytes(st, buffer) {
+  case bytes(st, buffer) {
     None -> 0
     Some(data) -> {
       let view =
@@ -341,7 +341,7 @@ pub fn typed_array_store(
   val: JsVal,
 ) -> #(Bool, Agent) {
   // immutable check must run before coercion so no user code runs
-  use <- bool.guard(buffer_is_immutable(st, view.buffer), #(False, st))
+  use <- bool.guard(is_immutable(st, view.buffer), #(False, st))
   case view.elem_kind {
     BigKind(big_kind) -> {
       let #(n, st) = rt_val.t_to_bigint(st, val)

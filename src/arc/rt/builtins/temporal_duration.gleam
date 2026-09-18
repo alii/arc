@@ -793,7 +793,7 @@ pub fn format_duration(d: Duration, precision: SecondsPrecision) -> String {
     False -> ""
   }
   let abs_part = fn(n: Int) { int.absolute_value(n) }
-  let date_str =
+  let date_text =
     join_unit(abs_part(d.years), "Y")
     <> join_unit(abs_part(d.months), "M")
     <> join_unit(abs_part(d.weeks), "W")
@@ -807,10 +807,10 @@ pub fn format_duration(d: Duration, precision: SecondsPrecision) -> String {
     + abs_part(d.nanoseconds)
   let extra_seconds = sub_total / ns_per_second
   let sub = sub_total % ns_per_second
-  let seconds_str = case
+  let seconds_text = case
     d.seconds != 0
     || sub_total != 0
-    || { date_str == "" && d.hours == 0 && d.minutes == 0 }
+    || { date_text == "" && d.hours == 0 && d.minutes == 0 }
     || show_fixed_seconds(precision)
   {
     True ->
@@ -819,15 +819,15 @@ pub fn format_duration(d: Duration, precision: SecondsPrecision) -> String {
       <> "S"
     False -> ""
   }
-  let time_str =
+  let time_text =
     join_unit(abs_part(d.hours), "H")
     <> join_unit(abs_part(d.minutes), "M")
-    <> seconds_str
-  let t = case time_str {
+    <> seconds_text
+  let t = case time_text {
     "" -> ""
-    _ -> "T" <> time_str
+    _ -> "T" <> time_text
   }
-  prefix <> "P" <> date_str <> t
+  prefix <> "P" <> date_text <> t
 }
 
 fn show_fixed_seconds(p: SecondsPrecision) -> Bool {

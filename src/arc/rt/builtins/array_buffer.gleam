@@ -1,5 +1,5 @@
 import arc/bytecode/key.{Named}
-import arc/rt/abstract_ops as rt_abstract
+import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/buffer
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -373,9 +373,14 @@ fn buffer_slice(
   let storage = require_live(st, buf, "slice")
   let len = types.buffer_byte_size(storage)
   let #(first, st) =
-    rt_abstract.relative_index(st, helpers.first_arg_or_undefined(args), len, 0)
+    rt_abstract_ops.relative_index(
+      st,
+      helpers.first_arg_or_undefined(args),
+      len,
+      0,
+    )
   let #(final, st) =
-    rt_abstract.relative_index(st, helpers.arg_at(args, 1), len, len)
+    rt_abstract_ops.relative_index(st, helpers.arg_at(args, 1), len, len)
   let new_len = int.max(final - first, 0)
   let default_ctor = case shared {
     True -> st.realm.shared_array_buffer.constructor
@@ -429,9 +434,14 @@ fn slice_to_immutable(
   let bytes = require_unshared_bytes(st, buf, "sliceToImmutable")
   let len = bit_array.byte_size(bytes)
   let #(first, st) =
-    rt_abstract.relative_index(st, helpers.first_arg_or_undefined(args), len, 0)
+    rt_abstract_ops.relative_index(
+      st,
+      helpers.first_arg_or_undefined(args),
+      len,
+      0,
+    )
   let #(final, st) =
-    rt_abstract.relative_index(st, helpers.arg_at(args, 1), len, len)
+    rt_abstract_ops.relative_index(st, helpers.arg_at(args, 1), len, len)
   let new_len = int.max(final - first, 0)
   let buf = require_buffer(st, mk_object(buf.h), "sliceToImmutable")
   let bytes = require_unshared_bytes(st, buf, "sliceToImmutable")
@@ -611,7 +621,7 @@ fn detach(st: Agent, buf: ResolvedBuffer) -> Agent {
 fn require_buffer(st: Agent, this: JsVal, method: String) -> ResolvedBuffer {
   case classify(this) {
     KHandle(h) ->
-      case buffer.buffer_storage(st, h) {
+      case buffer.storage(st, h) {
         Some(storage) -> ResolvedBuffer(h:, storage:)
         None -> incompatible(st, method)
       }
