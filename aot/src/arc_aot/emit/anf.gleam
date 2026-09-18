@@ -1,7 +1,7 @@
 import arc/bytecode/key
 import arc/parser/ast
 import arc/rt/val
-import arc_aot/emit/state.{type Emitter2, Emitter2}
+import arc_aot/emit/state.{type Emitter, Emitter}
 import carder/ir
 import gleam/bit_array
 import gleam/dict.{type Dict}
@@ -10,12 +10,12 @@ import gleam/list
 import gleam/option.{None, Some}
 
 pub type Build(a) =
-  fn(Emitter2, fn(Emitter2, a) -> #(ir.Expr, Emitter2)) -> #(ir.Expr, Emitter2)
+  fn(Emitter, fn(Emitter, a) -> #(ir.Expr, Emitter)) -> #(ir.Expr, Emitter)
 
 pub fn wrap(
-  p: #(ir.Expr, Emitter2),
+  p: #(ir.Expr, Emitter),
   f: fn(ir.Expr) -> ir.Expr,
-) -> #(ir.Expr, Emitter2) {
+) -> #(ir.Expr, Emitter) {
   #(f(p.0), p.1)
 }
 
@@ -54,7 +54,7 @@ pub fn mark_number(v: ir.Value) -> Build(ir.Value) {
   }
 }
 
-pub fn is_known_number(e: Emitter2, v: ir.Value) -> Bool {
+pub fn is_known_number(e: Emitter, v: ir.Value) -> Bool {
   case v {
     ir.Var(name) -> state.is_known_number(e, name)
     ir.ConstI32(_) | ir.ConstI64(_) -> True
@@ -99,7 +99,7 @@ pub fn mark_string(v: ir.Value) -> Build(ir.Value) {
   }
 }
 
-pub fn is_known_string(e: Emitter2, v: ir.Value) -> Bool {
+pub fn is_known_string(e: Emitter, v: ir.Value) -> Bool {
   case v {
     ir.Var(name) -> state.is_known_string(e, name)
     ir.ConstBinary(_) -> True
@@ -129,15 +129,15 @@ pub fn tuple_get(v: ir.Value, i: Int) -> ir.Expr {
   ir.TermOp(ir.TupleGet(i), [v])
 }
 
-pub fn run(b: Build(ir.Value), e: Emitter2) -> #(ir.Expr, Emitter2) {
+pub fn run(b: Build(ir.Value), e: Emitter) -> #(ir.Expr, Emitter) {
   b(e, fn(ef, v) { #(ir.Values([v]), ef) })
 }
 
 pub fn run_to(
   b: Build(a),
-  e: Emitter2,
-  tail: fn(Emitter2, a) -> ir.Expr,
-) -> #(ir.Expr, Emitter2) {
+  e: Emitter,
+  tail: fn(Emitter, a) -> ir.Expr,
+) -> #(ir.Expr, Emitter) {
   b(e, fn(ef, a) { #(tail(ef, a), ef) })
 }
 
@@ -182,7 +182,7 @@ fn widen_breaks(
   }
 }
 
-fn rebind_slots(e: Emitter2, slots: List(Int)) -> #(Emitter2, List(String)) {
+fn rebind_slots(e: Emitter, slots: List(Int)) -> #(Emitter, List(String)) {
   let #(e, rev) =
     list.fold(slots, #(e, []), fn(acc, slot) {
       let #(e, ns) = acc
@@ -192,7 +192,7 @@ fn rebind_slots(e: Emitter2, slots: List(Int)) -> #(Emitter2, List(String)) {
   #(e, list.reverse(rev))
 }
 
-fn arm_slot_vals(e_arm: Emitter2, slots: List(Int)) -> List(ir.Value) {
+fn arm_slot_vals(e_arm: Emitter, slots: List(Int)) -> List(ir.Value) {
   list.map(slots, fn(s) { ir.Var(state.get_slot_var(e_arm, s)) })
 }
 
@@ -241,17 +241,17 @@ fn bind_if_n(
   t: Build(List(ir.Value)),
   f: Build(List(ir.Value)),
 ) -> Build(List(ir.Value)) {
-  fn(e: Emitter2, k) {
+  fn(e: Emitter, k) {
     let sv0 = e.slot_vars
     let values = fn(_, vs) { ir.Values(vs) }
     let #(then_tree, e_t) = run_to(t, e, values)
-    let #(else_tree, e_f) = run_to(f, Emitter2(..e_t, slot_vars: sv0), values)
+    let #(else_tree, e_f) = run_to(f, Emitter(..e_t, slot_vars: sv0), values)
     let carried =
       merge_slots(
         slots_rebound(sv0, e_t.slot_vars),
         slots_rebound(sv0, e_f.slot_vars),
       )
-    let e = Emitter2(..e_f, slot_vars: sv0)
+    let e = Emitter(..e_f, slot_vars: sv0)
     let #(e, rs) = fresh_vars(e, list.length(head_tys))
     let heads = list.map(rs, ir.Var)
     case carried {
@@ -276,7 +276,7 @@ fn bind_if_n(
   }
 }
 
-fn fresh_vars(e: Emitter2, n: Int) -> #(Emitter2, List(String)) {
+fn fresh_vars(e: Emitter, n: Int) -> #(Emitter, List(String)) {
   case n {
     0 -> #(e, [])
     _ -> {
@@ -289,11 +289,11 @@ fn fresh_vars(e: Emitter2, n: Int) -> #(Emitter2, List(String)) {
 
 // §7.4.8 close on throw, the original error wins
 pub fn close_iter_on_throw(iter: ir.Value, body: Build(Nil)) -> Build(Nil) {
-  fn(e: Emitter2, k) {
+  fn(e: Emitter, k) {
     let sv0 = e.slot_vars
     let #(body_tree, e_b) = run(then(body, fn(_) { pure(e.consts.undef) }), e)
     let carried = slots_rebound(sv0, e_b.slot_vars)
-    let e = Emitter2(..e_b, slot_vars: sv0)
+    let e = Emitter(..e_b, slot_vars: sv0)
     let #(exn, e) = state.fresh_var(e)
     let #(closed, e) = state.fresh_var(e)
     let #(r, e) = state.fresh_var(e)
@@ -301,7 +301,7 @@ pub fn close_iter_on_throw(iter: ir.Value, body: Build(Nil)) -> Build(Nil) {
       ir.Let(
         [closed],
         ir.CallHost("js", "iter_close", [iter, e.consts.true_]),
-        ir.Throw(e.consts.js_tag, [ir.Var(exn)]),
+        ir.Throw(e.consts.exn_tag, [ir.Var(exn)]),
       )
     let body_tree = append_tail(body_tree, arm_slot_vals(e_b, carried))
     let #(e, out) = rebind_slots(e, carried)
@@ -310,7 +310,7 @@ pub fn close_iter_on_throw(iter: ir.Value, body: Build(Nil)) -> Build(Nil) {
       [r, ..out],
       ir.Try(result: tys, body: body_tree, handlers: [
         ir.CatchHandler(
-          on: ir.OnTag(e.consts.js_tag),
+          on: ir.OnTag(e.consts.exn_tag),
           payload: [exn],
           exnref: None,
           handler:,
@@ -355,12 +355,12 @@ pub fn nullish_if(
 }
 
 pub fn bind_block(body: fn(String) -> Build(ir.Value)) -> Build(ir.Value) {
-  fn(e: Emitter2, k) {
+  fn(e: Emitter, k) {
     let sv0 = e.slot_vars
     let #(label, e) = state.fresh_label(e)
     let #(body_tree, e_b) = run(body(label), e)
     let carried = slots_rebound(sv0, e_b.slot_vars)
-    let e = Emitter2(..e_b, slot_vars: sv0)
+    let e = Emitter(..e_b, slot_vars: sv0)
     let #(r, e) = state.fresh_var(e)
     case carried {
       [] ->
@@ -624,7 +624,7 @@ fn guarded_cmp_numeric(
   b: ir.Value,
 ) -> Build(ir.Value) {
   use #(both, elided) <- then(both_numbers(a, b))
-  let fast_arm = fn(e: Emitter2, k) {
+  let fast_arm = fn(e: Emitter, k) {
     let rc = e.consts
     then(bind(ir.NumTerm(fast, a, b)), bind_if(
       _,
@@ -641,7 +641,7 @@ fn guarded_cmp_numeric(
 
 // js comparison results are booleans, never leak a raw i32
 pub fn i32_to_js_bool(v: ir.Value) -> Build(ir.Value) {
-  fn(e: Emitter2, k) {
+  fn(e: Emitter, k) {
     let rc = e.consts
     bind_if(v, pure(rc.true_), pure(rc.false_))(e, k)
   }

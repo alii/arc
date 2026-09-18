@@ -16,7 +16,7 @@ pub type JsExecOutcome {
   JsCrashed(reason: String)
 }
 
-pub fn seed(hooks: HostHooks) -> Agent {
+pub fn new_linked_agent(hooks: HostHooks) -> Agent {
   entry.link(rt_builtins.new_agent(hooks))
 }
 
@@ -56,5 +56,5 @@ pub fn run_beam(
   name: String,
   hooks: HostHooks,
 ) -> #(Agent, RunResult) {
-  run_beam_in(seed(hooks), beam, name)
+  run_beam_in(new_linked_agent(hooks), beam, name)
 }

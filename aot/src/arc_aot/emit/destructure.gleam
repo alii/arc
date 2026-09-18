@@ -2,7 +2,7 @@ import arc/compiler/scope
 import arc/parser/ast
 import arc_aot/emit/anf.{type Build}
 import arc_aot/emit/expr
-import arc_aot/emit/state.{type BindMode, type EmitError, type Emitter2}
+import arc_aot/emit/state.{type BindMode, type EmitResult, type Emitter}
 import carder/ir
 import gleam/bit_array
 import gleam/list
@@ -10,11 +10,11 @@ import gleam/option.{type Option, None, Some}
 import gleam/set
 
 pub fn emit_pattern(
-  e: Emitter2,
+  e: Emitter,
   pat: ast.Pattern,
   source: ir.Value,
   mode: BindMode,
-) -> Result(#(ir.Expr, Emitter2), EmitError) {
+) -> EmitResult {
   Ok(
     anf.run_to(go(pat, source, mode), e, fn(ef, _) {
       ir.Values([ef.consts.undef])
@@ -37,7 +37,7 @@ fn go(pat: ast.Pattern, source: ir.Value, mode: BindMode) -> Build(Nil) {
       use is_undef <- anf.then(anf.bind(ir.NumTerm(ir.NEq, source, rc.undef)))
       use v <- anf.then(anf.bind_if(
         is_undef,
-        expr.bridge_expr(fn(e: Emitter2) {
+        expr.bridge_expr(fn(e: Emitter) {
           e.dispatch.emit_expr_named(e, default_expr, named)
         }),
         anf.pure(source),
@@ -64,9 +64,9 @@ fn bind_identifier(name: String, v: ir.Value, mode: BindMode) -> Build(Nil) {
           use _ <- anf.then(case lexical {
             True ->
               expr.modify(fn(e) {
-                state.Emitter2(
+                state.Emitter(
                   ..e,
-                  initialized: set.insert(e.initialized, slot),
+                  initialized_slots: set.insert(e.initialized_slots, slot),
                 )
               })
             False -> anf.pure(Nil)

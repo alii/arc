@@ -40,7 +40,7 @@ fn init_emitter(
   tree: scope.ScopeTree,
   strict: Bool,
   module_name: String,
-) -> state.Emitter2 {
+) -> state.Emitter {
   let dispatch =
     state.EmitDispatch(
       emit_expr: expr.emit_expr,
@@ -48,24 +48,24 @@ fn init_emitter(
       emit_stmts: stmt.emit_stmts,
       emit_destructure: destructure.emit_pattern,
       emit_function: func.emit_function,
-      emit_function_site: func.emit_function_site,
+      emit_function_callable: func.emit_function_callable,
       emit_class: class.emit_class,
-      emit_async_body: async.emit_coroutine_fn,
+      emit_coroutine_fn: async.emit_coroutine_fn,
     )
   state.new_emitter(tree, scope.root_scope_id, strict, module_name, dispatch)
 }
 
 fn root_binding_prologue(
-  e: state.Emitter2,
-) -> #(fn(ir.Expr) -> ir.Expr, state.Emitter2) {
+  e: state.Emitter,
+) -> #(fn(ir.Expr) -> ir.Expr, state.Emitter) {
   let bindings =
-    dict.to_list(scope.get_scope(e.tree, scope.root_scope_id).bindings)
+    dict.to_list(scope.get_scope(e.scope_tree, scope.root_scope_id).bindings)
     |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
   let #(wrap, e) = root_lexical_prologue(e)
   list.fold(bindings, #(wrap, e), fn(acc, entry) {
     let #(wrap, e) = acc
     let #(name, b) = entry
-    let sv = state.slot_var_name(e, b.slot)
+    let sv = state.slot_base_name(e, b.slot)
     let e = state.set_slot_var(e, b.slot, sv)
     let e = case b.kind {
       scope.VarBinding ->
@@ -91,11 +91,11 @@ fn root_binding_prologue(
 
 // §16.1.7 steps 17-18
 fn global_var_prologue(
-  e: state.Emitter2,
+  e: state.Emitter,
   body: List(ast.StmtWithLine),
   strict: Bool,
   wrap: fn(ir.Expr) -> ir.Expr,
-) -> #(fn(ir.Expr) -> ir.Expr, state.Emitter2) {
+) -> #(fn(ir.Expr) -> ir.Expr, state.Emitter) {
   let annexb = case strict {
     True -> []
     False -> state.fn_info(e).annexb_candidates
@@ -127,8 +127,8 @@ fn global_var_prologue(
 }
 
 fn root_lexical_prologue(
-  e: state.Emitter2,
-) -> #(fn(ir.Expr) -> ir.Expr, state.Emitter2) {
+  e: state.Emitter,
+) -> #(fn(ir.Expr) -> ir.Expr, state.Emitter) {
   let info = state.fn_info(e)
   let id = fn(t: ir.Expr) { t }
   case info.lexical {
@@ -136,7 +136,7 @@ fn root_lexical_prologue(
       list.fold(lexical.all_lexical_refs, #(id, e), fn(acc, ref) {
         let #(wrap, e) = acc
         let slot = base + lexical.lexical_ref_offset(ref)
-        let sv = state.slot_var_name(e, slot)
+        let sv = state.slot_base_name(e, slot)
         let e = state.set_slot_var(e, slot, sv)
         let init = case ref {
           lexical.RefThis -> ir.CallHost("js", "global_this", [])
@@ -164,9 +164,9 @@ fn root_lexical_prologue(
 
 // §16.1.7 step 16, hoist top-level function declarations
 fn emit_hoist(
-  e: state.Emitter2,
+  e: state.Emitter,
   located: ast.StmtWithLine,
-) -> Result(#(fn(ir.Expr) -> ir.Expr, state.Emitter2), state.EmitError) {
+) -> Result(#(fn(ir.Expr) -> ir.Expr, state.Emitter), state.EmitError) {
   case ast_util.peel_labels(located.statement) {
     ast.FunctionDeclaration(
       name: Some(ast.NamedBinding(name:, ..)),
@@ -188,8 +188,8 @@ fn emit_hoist(
       let #(t, store, e) = case state.resolve(e, name) {
         scope.Plain(scope.Local(slot:, boxed: True, ..)) -> {
           let #(t, e) = state.fresh_var(e)
-          let cell = ir.Var(state.get_slot_var(e, slot))
-          #(t, ir.CallHost("js", "cell_set", [cell, ir.Var(fn_var)]), e)
+          let box = ir.Var(state.get_slot_var(e, slot))
+          #(t, ir.CallHost("js", "cell_set", [box, ir.Var(fn_var)]), e)
         }
         scope.Plain(scope.Local(slot:, boxed: False, ..)) -> {
           let #(t, e) = state.fresh_slot_var(e, slot)
@@ -211,12 +211,12 @@ fn emit_hoist(
 const chunk_budget = 100
 
 fn emit_top_level(
-  e: state.Emitter2,
+  e: state.Emitter,
   hoists: List(ast.StmtWithLine),
   stmts: List(ast.StmtWithLine),
   chunk_first_var: Int,
   chunk_index: Int,
-) -> Result(#(ir.Expr, state.Emitter2), state.EmitError) {
+) -> state.EmitResult {
   case hoists, stmts {
     [h, ..rest], _ -> {
       use #(w, e) <- result.try(emit_hoist(e, h))
@@ -251,12 +251,12 @@ fn emit_top_level(
 }
 
 fn cut_or_continue(
-  e: state.Emitter2,
+  e: state.Emitter,
   hoists: List(ast.StmtWithLine),
   stmts: List(ast.StmtWithLine),
   chunk_first_var: Int,
   chunk_index: Int,
-) -> Result(#(ir.Expr, state.Emitter2), state.EmitError) {
+) -> state.EmitResult {
   let done = hoists == [] && stmts == []
   let live =
     dict.values(e.slot_vars) |> list.unique |> list.sort(string.compare)
@@ -342,7 +342,10 @@ pub fn compile(
   let js_main =
     ir.Function(
       name: "js_main",
-      params: [ir.Local("_frame", ir.TTerm), ir.Local("_args", ir.TTerm)],
+      params: [
+        ir.Local(func.frame_param, ir.TTerm),
+        ir.Local(func.args_param, ir.TTerm),
+      ],
       result: [ir.TTerm],
       locals: [],
       body: prologue(top_tree),
@@ -359,6 +362,6 @@ pub fn compile(
     tables: [],
     elements: [],
     start: None,
-    tags: [ir.TagDecl(ef.consts.js_tag, [ir.TTerm])],
+    tags: [ir.TagDecl(ef.consts.exn_tag, [ir.TTerm])],
   )
 }
