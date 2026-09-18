@@ -21254,7 +21254,10 @@ built-ins/TypedArray/prototype/copyWithin/bit-precision.js
 built-ins/TypedArray/prototype/copyWithin/byteoffset.js
 built-ins/TypedArray/prototype/copyWithin/coerced-target-start-end-shrink.js
 built-ins/TypedArray/prototype/copyWithin/coerced-target-start-grow.js
+built-ins/TypedArray/prototype/copyWithin/coerced-values-end-detached-prototype.js
+built-ins/TypedArray/prototype/copyWithin/coerced-values-end-detached.js
 built-ins/TypedArray/prototype/copyWithin/coerced-values-end.js
+built-ins/TypedArray/prototype/copyWithin/coerced-values-start-detached.js
 built-ins/TypedArray/prototype/copyWithin/coerced-values-start.js
 built-ins/TypedArray/prototype/copyWithin/coerced-values-target.js
 built-ins/TypedArray/prototype/copyWithin/detached-buffer.js
@@ -24673,6 +24676,8 @@ intl402/Locale/constructor-tag-tostring.js
 intl402/Locale/constructor-tag.js
 intl402/Locale/constructor-unicode-ext-invalid.js
 intl402/Locale/constructor-unicode-ext-valid.js
+intl402/Locale/constructor-unicode-extension-uvalue-true.js
+intl402/Locale/constructor-unicode-extension-uvalue-yes.js
 intl402/Locale/extensions-private.js
 intl402/Locale/function-prototype.js
 intl402/Locale/getters-grandfathered.js
@@ -24693,6 +24698,7 @@ intl402/Locale/prototype/baseName/branding.js
 intl402/Locale/prototype/baseName/name.js
 intl402/Locale/prototype/baseName/prop-desc.js
 intl402/Locale/prototype/calendar/branding.js
+intl402/Locale/prototype/calendar/canonicalize-case.js
 intl402/Locale/prototype/calendar/canonicalize.js
 intl402/Locale/prototype/calendar/name.js
 intl402/Locale/prototype/calendar/prop-desc.js
@@ -24700,6 +24706,7 @@ intl402/Locale/prototype/caseFirst/branding.js
 intl402/Locale/prototype/caseFirst/name.js
 intl402/Locale/prototype/caseFirst/prop-desc.js
 intl402/Locale/prototype/collation/branding.js
+intl402/Locale/prototype/collation/canonicalize-case.js
 intl402/Locale/prototype/collation/name.js
 intl402/Locale/prototype/collation/prop-desc.js
 intl402/Locale/prototype/constructor/prop-desc.js
@@ -24762,6 +24769,7 @@ intl402/Locale/prototype/minimize/length.js
 intl402/Locale/prototype/minimize/name.js
 intl402/Locale/prototype/minimize/prop-desc.js
 intl402/Locale/prototype/numberingSystem/branding.js
+intl402/Locale/prototype/numberingSystem/canonicalize-case.js
 intl402/Locale/prototype/numberingSystem/name.js
 intl402/Locale/prototype/numberingSystem/prop-desc.js
 intl402/Locale/prototype/numeric/branding.js
