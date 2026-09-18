@@ -16,6 +16,7 @@ import arc/rt/types.{
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bit_array
+import gleam/bool
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -664,6 +665,20 @@ fn json_stringify(
   let space = helpers.arg_at(args, 2)
   let #(replacer, st) = build_replacer(st, replacer_arg)
   let #(gap, st) = compute_gap(st, space)
+  let fast = case replacer {
+    NoReplacer -> stringify_fast(st, val, gap)
+    _ -> JsonMiss
+  }
+  use <- bool.lazy_guard(fast != JsonMiss, fn() {
+    case fast {
+      JsonDone(text) ->
+        case string.byte_size(text) > limits.max_string_bytes {
+          True -> rt_val.t_throw_range_error(st, "Invalid string length")
+          False -> #(mk_string(text), st)
+        }
+      JsonMiss -> #(mk_undefined(), st)
+    }
+  })
   let #(wrapper, st) = alloc_holder(st, val)
   let ctx = StringifyCtx(replacer:, gap:, caller:)
   case serialize_property(st, ctx, [], "", Named(""), wrapper) {
@@ -1003,6 +1018,15 @@ fn finalize_brackets(
       |> string_tree.append("\n" <> stepback <> close)
   }
 }
+
+type FastJson {
+  JsonDone(String)
+  JsonMiss
+}
+
+// whole value in one pass when nothing can run user code
+@external(erlang, "arc_rt_json_ffi", "stringify_fast")
+fn stringify_fast(st: Agent, value: JsVal, gap: String) -> FastJson
 
 @external(erlang, "arc_rt_json_ffi", "quote")
 fn quote_tree(s: String) -> StringTree

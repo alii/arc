@@ -1,6 +1,7 @@
 %% §25.5.1 json text to json.gleam's JsonValue, by offset into one binary
 -module(arc_rt_json_ffi).
--export([parse_value/2, plain_props/2, plain_keys/1, quote/1]).
+-export([parse_value/2, plain_props/2, plain_keys/1, quote/1,
+         stringify_fast/3]).
 
 -include("../arc_rt_layout.hrl").
 
@@ -343,4 +344,115 @@ object(Bin, P, Src, Acc) ->
             end,
             {V, P4} = value(Bin, P3, Src),
             object(Bin, ws(Bin, P4), Src, [{Key, V} | Acc])
+    end.
+
+%% §25.5.2 for plain data with no replacer: shaped and ordinary objects under
+%% Object.prototype, dense arrays under Array.prototype, primitives; anything
+%% that could run user code or needs the full algorithm answers json_miss,
+%% as does a top level that serializes to undefined
+stringify_fast(Agent, V, Gap) ->
+    Realm = element(?AGENT_REALM, Agent),
+    Data = element(?STORE_DATA, element(?AGENT_STORE, Agent)),
+    {?HANDLE_TAG, OP} = element(?PAIR_PROTO, element(?REALM_OBJECT, Realm)),
+    {?HANDLE_TAG, AP} = element(?PAIR_PROTO, element(?REALM_ARRAY, Realm)),
+    TJ = {?KEY_NAMED, <<"toJSON">>},
+    Clean = fun(Id) ->
+        case arc_rt_arena_ffi:get(Id, Data) of
+            {?SOBJECT_TAG, _, _, Props, _, _, _} -> not is_map_key(TJ, Props);
+            _ -> false
+        end
+    end,
+    case Clean(OP) andalso Clean(AP) of
+        false -> json_miss;
+        true ->
+            try enc(V, {Data, OP, AP, Gap}, <<>>, []) of
+                skip -> json_miss;
+                Io -> {json_done, iolist_to_binary(Io)}
+            catch throw:json_miss -> json_miss
+            end
+    end.
+
+enc(N, _, _, _) when is_integer(N) -> integer_to_binary(N);
+enc(F, _, _, _) when is_float(F) -> arc_rt_val_ffi:js_number_to_string(F);
+enc(true, _, _, _) -> <<"true">>;
+enc(false, _, _, _) -> <<"false">>;
+enc(null, _, _, _) -> <<"null">>;
+enc(A, _, _, _) when A =:= js_nan; A =:= js_inf; A =:= js_neg_inf -> <<"null">>;
+enc(undefined, _, _, _) -> skip;
+enc({js_sym, _}, _, _, _) -> skip;
+enc(S, _, _, _) when ?IS_STR(S) -> quote(arc_rt_str_ffi:bin(S));
+enc({?HANDLE_TAG, Id}, {Data, OP, AP, _} = Cx, Ind, Seen) ->
+    case lists:member(Id, Seen) of
+        true -> throw(json_miss);
+        false -> ok
+    end,
+    case arc_rt_arena_ffi:get(Id, Data) of
+        {?SSHAPED_TAG, _, Proto, Slots, Offs}
+          when (Proto =:= {?SOME, {?HANDLE_TAG, OP}} orelse Proto =:= ?NONE),
+               not is_map_key(<<"toJSON">>, Offs) ->
+            Pairs = [{KB, element(Off + 1, Slots)}
+                     || {KB, Off} <- lists:keysort(2, maps:to_list(Offs))],
+            enc_object(Pairs, Cx, Ind, [Id | Seen]);
+        {?SOBJECT_TAG, ?ORDINARY, Proto, Props, _, ?ELEMS_NONE, _}
+          when (Proto =:= {?SOME, {?HANDLE_TAG, OP}} orelse Proto =:= ?NONE),
+               not is_map_key({?KEY_NAMED, <<"toJSON">>}, Props) ->
+            enc_object(plain_pairs(Props), Cx, Ind, [Id | Seen]);
+        {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, {?SOME, {?HANDLE_TAG, AP}}, Props, _, Els, _}
+          when map_size(Props) =:= 0 ->
+            enc_array(elems(Els, Len), Cx, Ind, [Id | Seen]);
+        {?SOBJECT_TAG, Kind, _, _, _, _, _} when element(1, Kind) =:= ?KBYTECODE_TAG;
+                                                 element(1, Kind) =:= ?KNATIVE_TAG;
+                                                 element(1, Kind) =:= ?KFN_TAG;
+                                                 element(1, Kind) =:= k_bound ->
+            skip;
+        _ -> throw(json_miss)
+    end;
+enc(_, _, _, _) -> throw(json_miss).
+
+plain_pairs(Props) ->
+    L = maps:to_list(Props),
+    Idx = lists:sort([{N, P} || {{?KEY_INDEX, N}, P} <- L]),
+    Named = lists:sort(fun({_, A}, {_, B}) ->
+                element(?DATAPROP_SEQ, A) =< element(?DATAPROP_SEQ, B) end,
+                       [{B, P} || {{?KEY_NAMED, B}, P} <- L]),
+    [{key_text(K), value_of(P)} || {K, P} <- Idx ++ Named, enumerable(P)].
+
+key_text(N) when is_integer(N) -> integer_to_binary(N);
+key_text(B) -> B.
+
+value_of(P) when element(1, P) =:= ?DATAPROP_TAG -> element(?DATAPROP_VALUE, P);
+value_of(_) -> throw(json_miss).
+
+enumerable(P) when element(1, P) =:= ?DATAPROP_TAG ->
+    element(?DATAPROP_ENUMERABLE, P) =:= true;
+enumerable(_) -> throw(json_miss).
+
+elems(_, 0) -> [];
+elems({?ELEMS_DENSE, A}, Len) ->
+    case arc_tree_array_ffi:dense_list(A, Len) of
+        {some, L} -> L;
+        none -> throw(json_miss)
+    end;
+elems(_, _) -> throw(json_miss).
+
+enc_object(Pairs, {_, _, _, Gap} = Cx, Ind, Seen) ->
+    Ind1 = <<Ind/binary, Gap/binary>>,
+    Members = [member(quote(K), enc(V, Cx, Ind1, Seen), Gap) || {K, V} <- Pairs],
+    case [M || M <- Members, M =/= skip] of
+        [] -> <<"{}">>;
+        Ms when Gap =:= <<>> -> [${, lists:join($,, Ms), $}];
+        Ms -> [${, $\n, Ind1, lists:join([$,, $\n, Ind1], Ms), $\n, Ind, $}]
+    end.
+
+member(_, skip, _) -> skip;
+member(K, V, <<>>) -> [K, $:, V];
+member(K, V, _) -> [K, <<": ">>, V].
+
+enc_array(Items, {_, _, _, Gap} = Cx, Ind, Seen) ->
+    Ind1 = <<Ind/binary, Gap/binary>>,
+    Vs = [case enc(V, Cx, Ind1, Seen) of skip -> <<"null">>; E -> E end || V <- Items],
+    case Vs of
+        [] -> <<"[]">>;
+        _ when Gap =:= <<>> -> [$[, lists:join($,, Vs), $]];
+        _ -> [$[, $\n, Ind1, lists:join([$,, $\n, Ind1], Vs), $\n, Ind, $]]
     end.

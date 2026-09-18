@@ -1,7 +1,7 @@
 %% fast paths return miss and the caller takes the full path
 -module(arc_rt_obj_ffi).
--export([t_copy_data_fast/3, t_for_in_fast/2,
-         t_get_prop_own_data/3, t_set_prop_own_data/4, t_set_prop_named/5,
+-export([t_get_prop_own_data/3, t_set_prop_own_data/4, t_set_prop_named/5,
+         t_copy_data_fast/3, t_for_in_fast/2, t_own_enum_fast/2,
          t_create_data_prop/4, store_put_seq/3,
          t_get_prop_ic/4, t_get_prop_ic_miss/4, t_get_prop_slow/4,
          t_get_prop_site/4,
@@ -804,6 +804,7 @@ slot_of(St, Id) ->
         Slot -> Slot
     end.
 
+
 %% object spread onto a fresh literal when the source holds only plain data
 t_copy_data_fast(St, {?HANDLE_TAG, TId}, {?HANDLE_TAG, SId})
   when tuple_size(St) =:= ?AGENT_ARITY ->
@@ -897,3 +898,27 @@ for_in_named([{{?KEY_NAMED, K}, P} | Rest], Enum, Hidden) ->
         false -> for_in_named(Rest, Enum, [K | Hidden])
     end;
 for_in_named(_, _, _) -> none.
+
+
+
+%% §7.3.24 own enumerable named data pairs in order, none for anything else
+t_own_enum_fast(St, {?HANDLE_TAG, Id}) when tuple_size(St) =:= ?AGENT_ARITY ->
+    Data = element(?STORE_DATA, element(?AGENT_STORE, St)),
+    case arc_rt_arena_ffi:get(Id, Data) of
+        {?SSHAPED_TAG, _, _, Slots, Offs} ->
+            {some, [{KB, element(Off + 1, Slots)}
+                    || {KB, Off} <- lists:keysort(2, maps:to_list(Offs))]};
+        {?SOBJECT_TAG, ?ORDINARY, _, Props, _, ?ELEMS_NONE, _} ->
+            case lists:all(fun plain_named/1, maps:to_list(Props)) of
+                false -> none;
+                true ->
+                    L = lists:sort(fun({_, A}, {_, B}) ->
+                            element(?DATAPROP_SEQ, A) =< element(?DATAPROP_SEQ, B)
+                        end, maps:to_list(Props)),
+                    {some, [{KB, element(?DATAPROP_VALUE, P)}
+                            || {{?KEY_NAMED, KB}, P} <- L,
+                               element(?DATAPROP_ENUMERABLE, P) =:= true]}
+            end;
+        _ -> none
+    end;
+t_own_enum_fast(_, _) -> none.

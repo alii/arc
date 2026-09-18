@@ -233,10 +233,7 @@ fn call_bound(
           call.root_state(st, callee, this, args, new_target),
         )
       {
-        ffi.Ok(value: Ok(v), agent:) -> #(
-          v,
-          Agent(..agent, frames:, call_depth: depth),
-        )
+        ffi.Ok(value: Ok(v), agent:) -> #(v, resettle(agent, frames, depth))
         ffi.Ok(value: Error(e), agent:) ->
           rt_store.t_throw(Agent(..agent, frames:, call_depth: depth), e)
         ffi.Threw(agent:, thrown:) ->
@@ -244,6 +241,17 @@ fn call_bound(
       }
   }
 }
+
+// a callee that never synced left frames and depth untouched
+fn resettle(agent: Agent, frames: List(FrameInfo), depth: Int) -> Agent {
+  case agent.call_depth == depth && same_frames(agent.frames, frames) {
+    True -> agent
+    False -> Agent(..agent, frames:, call_depth: depth)
+  }
+}
+
+@external(erlang, "erlang", "=:=")
+fn same_frames(a: List(FrameInfo), b: List(FrameInfo)) -> Bool
 
 fn raised(outcome: #(Result(JsVal, JsVal), Agent)) -> #(JsVal, Agent) {
   case outcome {
@@ -305,10 +313,7 @@ fn run_plain_call(
     Error(#(thrown, st)) -> #(Error(thrown), st)
     Ok(state) ->
       case ffi.guard_state(complete_call, state) {
-        ffi.Ok(value:, agent:) -> #(
-          value,
-          Agent(..agent, frames:, call_depth: depth),
-        )
+        ffi.Ok(value:, agent:) -> #(value, resettle(agent, frames, depth))
         ffi.Threw(agent:, thrown:) -> #(
           Error(thrown),
           Agent(..agent, frames:, call_depth: depth),
