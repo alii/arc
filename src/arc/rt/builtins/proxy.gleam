@@ -32,8 +32,8 @@ pub fn init(
     rt_store.t_cell_new(
       st,
       SObject(
-        kind: rt_types.KNative(
-          tag: ProxyN(ProxyConstructor),
+        kind: rt_types.NativeFn(
+          token: ProxyN(ProxyConstructor),
           name: "Proxy",
           length: 2,
           constructible: True,
@@ -119,11 +119,11 @@ fn proxy_revocable(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 
 fn proxy_revoke(st: Agent, proxy: Handle) -> #(JsVal, Agent) {
   let st =
-    rt_store.t_cell_update(st, proxy, fn(slot) {
-      case slot {
+    rt_store.t_cell_update(st, proxy, fn(cell) {
+      case cell {
         SObject(kind: ProxyObj(target:, handler:, ..), ..) ->
-          SObject(..slot, kind: ProxyObj(target:, handler:, revoked: True))
-        _ -> slot
+          SObject(..cell, kind: ProxyObj(target:, handler:, revoked: True))
+        _ -> cell
       }
     })
   #(mk_undefined(), st)

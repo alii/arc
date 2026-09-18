@@ -7,22 +7,23 @@ import arc/rt/bytecode.{
   SuspendedFrame,
 }
 import arc/rt/types.{
-  type Agent, type AsyncGenRequest, type Handle, type IcEntry, type JsElements,
-  type JsSlot, type JsStore, type JsVal, type ObjKind, type PromiseReaction,
+  type Agent, type AsyncGenRequest, type Cell, type Handle, type IcEntry,
+  type JsElements, type JsStore, type JsVal, type ObjKind, type PromiseReaction,
   type PromiseState, type Property, type ReactionHandler, type Resume,
   type WeakKey, Agent, ArgumentsObj, ArrayBufferObj, ArrayIterator, ArrayObj,
   AsyncFromSyncIterator, AsyncGenRequest, AsyncGeneratorObj, BigIntObj,
-  BooleanObj, DataViewObj, DateObj, Dense, DisposableStackObj, ErrorObj,
-  FinRegCell, FinalizationRegistryObj, GeneratorObj, Handler, IcCall, IcGlobal,
-  IcInit, IcOff, IcRead, IdentityPassThrough, IntlObj, IteratorHelperObj, JsCell,
-  JsStore, KBound, KBytecode, KCompiled, KHandle, KHost, KNative, MapIterator,
-  MapObj, ModuleNamespace, NoElements, NumberObj, Ordinary, PromiseFulfilled,
+  BooleanObj, BoundFn, BytecodeFn, CompiledFn, DataViewObj, DateObj, Dense,
+  DisposableStackObj, ErrorObj, FinalizationRegistryObj, GeneratorObj, Handle,
+  Handler, HostObj, IcCall, IcGlobal, IcInit, IcOff, IcRead, IdentityPassThrough,
+  IntlObj, IteratorHelperObj, JsStore, KHandle, MapIterator, MapObj,
+  ModuleNamespace, NativeFn, NoElements, NumberObj, Ordinary, PromiseFulfilled,
   PromiseObj, PromisePending, PromiseReaction, PromiseRejected, ProxyObj,
-  RawJsonObj, RegExpObj, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
-  SBox, SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
-  SetIterator, SetObj, Sparse, StringIterator, StringObj, SymbolObj, TemporalObj,
-  ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakObjKey, WeakRefObj,
-  WeakSetObj, WeakSymKey, WrapForValidIteratorObj, classify, jq_to_list,
+  RawJsonObj, RegExpObj, Registration, ResumeCompiled, ResumeFrame,
+  SAsyncContext, SAsyncGen, SBox, SDisposeCapability, SGenerator, SObject,
+  SPromiseData, SShapedObject, SetIterator, SetObj, Sparse, StringIterator,
+  StringObj, SymbolObj, TemporalObj, ThrowerPassThrough, TypedArrayObj,
+  WeakMapObj, WeakObjKey, WeakRefObj, WeakSetObj, WeakSymKey,
+  WrapForValidIteratorObj, classify, jq_to_list,
 } as rt_types
 import gleam/dict.{type Dict}
 import gleam/dynamic.{type Dynamic}
@@ -100,8 +101,8 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
 }
 
 // exhaustive, no wildcard: a new variant must be traced
-fn refs_in_cell(slot: JsSlot, acc: List(Int)) -> List(Int) {
-  case slot {
+fn refs_in_cell(cell: Cell, acc: List(Int)) -> List(Int) {
+  case cell {
     SObject(kind:, proto:, props:, symbol_props:, elements:, extensible: _) ->
       push_objkind_refs(kind, push_opt_handle(proto, acc))
       |> push_props_refs(props, _)
@@ -203,7 +204,7 @@ fn push_request_refs(acc: List(Int), req: AsyncGenRequest) -> List(Int) {
   |> push_val_refs(reject, _)
 }
 
-// exhaustive; weak keys not traced, see prune_weak_slot
+// exhaustive; weak keys not traced, see prune_weak_cell
 fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
   case kind {
     Ordinary | rt_types.GlobalObj -> acc
@@ -218,12 +219,12 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     BooleanObj(value: _) -> acc
     BigIntObj(value: _) -> acc
     SymbolObj(value: _) -> acc
-    KCompiled(
+    CompiledFn(
       code:,
       home_object:,
       flags: _,
       fields_init:,
-      simple:,
+      direct_entry:,
       name: _,
       length: _,
       birth:,
@@ -232,9 +233,9 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       let acc = push_opt_handle(fields_init, acc)
       let acc = push_birth_refs(birth, acc)
       let acc = push_term_refs(to_dynamic(code), acc)
-      push_term_refs(to_dynamic(simple), acc)
+      push_term_refs(to_dynamic(direct_entry), acc)
     }
-    KBytecode(
+    BytecodeFn(
       template:,
       env:,
       home_object:,
@@ -250,13 +251,13 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       let acc = push_template_refs(template, acc)
       push_env_refs(env, acc)
     }
-    KNative(tag:, name: _, length: _, constructible: _) ->
-      push_term_refs(to_dynamic(tag), acc)
-    KBound(target:, bound_this:, bound_args:) -> {
+    NativeFn(token:, name: _, length: _, constructible: _) ->
+      push_term_refs(to_dynamic(token), acc)
+    BoundFn(target:, bound_this:, bound_args:) -> {
       let acc = push_val_refs(bound_this, [target.id, ..acc])
       list.fold(bound_args, acc, fn(a, v) { push_val_refs(v, a) })
     }
-    KHost(payload:) -> push_term_refs(to_dynamic(payload), acc)
+    HostObj(payload:) -> push_term_refs(to_dynamic(payload), acc)
     ErrorObj(stack: _) -> acc
     MapObj(entries:) ->
       ordered_entries.fold(entries, acc, fn(a, k, v) {
@@ -299,9 +300,9 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       ..acc
     ]
     DisposableStackObj(async: _, state: rt_types.Disposed) -> acc
-    FinalizationRegistryObj(callback:, cells:) ->
-      list.fold(cells, push_val_refs(callback, acc), fn(a, cell) {
-        push_val_refs(cell.held, a)
+    FinalizationRegistryObj(callback:, registrations:) ->
+      list.fold(registrations, push_val_refs(callback, acc), fn(a, r) {
+        push_val_refs(r.held, a)
       })
     WeakRefObj(target: _) -> acc
     rt_types.ShadowRealmObj(realm: _) -> acc
@@ -443,9 +444,9 @@ fn collect_minor(st: Agent, extra_roots: List(Handle)) -> Agent {
   let roots =
     list.fold(arena.diff_below(w, meta.old, data), roots, fn(acc, id) {
       case arena.get_option(id, data), arena.get_option(id, meta.old) {
-        Some(slot), Some(before) ->
-          diff_refs(to_dynamic(before), to_dynamic(slot), acc)
-        Some(slot), None -> refs_in_cell(slot, acc)
+        Some(cell), Some(before) ->
+          diff_refs(to_dynamic(before), to_dynamic(cell), acc)
+        Some(cell), None -> refs_in_cell(cell, acc)
         None, _ -> acc
       }
     })
@@ -465,9 +466,9 @@ fn collect_minor(st: Agent, extra_roots: List(Handle)) -> Agent {
     list.fold(weak, #(kept, []), fn(acc, id) {
       let #(kept, weak) = acc
       case arena.get_option(id, kept) {
-        Some(SObject(kind: WeakRefObj(..), ..) as slot)
-        | Some(SObject(kind: FinalizationRegistryObj(..), ..) as slot) -> #(
-          arena.set(id, prune_weak_slot(slot, is_live), kept),
+        Some(SObject(kind: WeakRefObj(..), ..) as cell)
+        | Some(SObject(kind: FinalizationRegistryObj(..), ..) as cell) -> #(
+          arena.set(id, prune_weak_cell(cell, is_live), kept),
           [id, ..weak],
         )
         Some(_) -> #(kept, [id, ..weak])
@@ -493,11 +494,11 @@ fn collect_minor(st: Agent, extra_roots: List(Handle)) -> Agent {
 }
 
 fn reset_dead(
-  data: Arena(JsSlot),
+  data: Arena(Cell),
   id: Int,
   next: Int,
   live: Dict(Int, Nil),
-) -> Arena(JsSlot) {
+) -> Arena(Cell) {
   case id >= next {
     True -> data
     False ->
@@ -510,7 +511,7 @@ fn reset_dead(
 
 // live young ids, plus any weak containers among them added to weak
 fn mark_young(
-  data: Arena(JsSlot),
+  data: Arena(Cell),
   frontier: List(Int),
   w: Int,
   visited: Dict(Int, Nil),
@@ -525,12 +526,12 @@ fn mark_young(
           let visited = mark(id, Nil, visited)
           case arena.get_option(id, data) {
             None -> mark_young(data, rest, w, visited, weak)
-            Some(slot) -> {
-              let weak = case is_weak_slot(slot) {
+            Some(cell) -> {
+              let weak = case is_weak_cell(cell) {
                 True -> [id, ..weak]
                 False -> weak
               }
-              mark_young(data, refs_in_cell(slot, rest), w, visited, weak)
+              mark_young(data, refs_in_cell(cell, rest), w, visited, weak)
             }
           }
         }
@@ -538,8 +539,8 @@ fn mark_young(
   }
 }
 
-fn is_weak_slot(slot: JsSlot) -> Bool {
-  case slot {
+fn is_weak_cell(cell: Cell) -> Bool {
+  case cell {
     SObject(kind: WeakMapObj(..), ..)
     | SObject(kind: WeakSetObj(..), ..)
     | SObject(kind: FinalizationRegistryObj(..), ..)
@@ -564,7 +565,7 @@ fn marked(id: Int, live: Dict(Int, Nil)) -> Bool
 fn mark(id: Int, nil: Nil, live: Dict(Int, Nil)) -> Dict(Int, Nil)
 
 fn mark_loop(
-  data: Arena(JsSlot),
+  data: Arena(Cell),
   frontier: List(Int),
   visited: Dict(Int, Nil),
 ) -> Dict(Int, Nil) {
@@ -577,7 +578,7 @@ fn mark_loop(
           let visited = mark(id, Nil, visited)
           case arena.get_option(id, data) {
             None -> mark_loop(data, rest, visited)
-            Some(slot) -> mark_loop(data, refs_in_cell(slot, rest), visited)
+            Some(cell) -> mark_loop(data, refs_in_cell(cell, rest), visited)
           }
         }
       }
@@ -585,22 +586,22 @@ fn mark_loop(
 }
 
 fn sweep(
-  data: Arena(JsSlot),
+  data: Arena(Cell),
   live: Dict(Int, Nil),
-) -> #(Arena(JsSlot), Int, List(Int)) {
+) -> #(Arena(Cell), Int, List(Int)) {
   let is_live = fn(id) { marked(id, live) }
   let #(kept, weak) =
     arena.fold(
-      fn(id, slot, acc) {
+      fn(id, cell, acc) {
         case marked(id, live) {
           True -> {
             let #(kept, weak) = acc
-            case is_weak_slot(slot) {
-              True -> #([#(id, prune_weak_slot(slot, is_live)), ..kept], [
+            case is_weak_cell(cell) {
+              True -> #([#(id, prune_weak_cell(cell, is_live)), ..kept], [
                 id,
                 ..weak
               ])
-              False -> #([#(id, slot), ..kept], weak)
+              False -> #([#(id, cell), ..kept], weak)
             }
           }
           False -> acc
@@ -616,39 +617,45 @@ fn sweep(
   #(arena.from_descending(kept), next, weak)
 }
 
-// drop weak entries and registry cells whose target died
-fn prune_weak_slot(slot: JsSlot, is_live: fn(Int) -> Bool) -> JsSlot {
-  case slot {
+// drop weak entries and registrations whose target died
+fn prune_weak_cell(cell: Cell, is_live: fn(Int) -> Bool) -> Cell {
+  case cell {
     SObject(kind: WeakMapObj(entries:), ..) ->
       SObject(
-        ..slot,
+        ..cell,
         kind: WeakMapObj(
           entries: dict.filter(entries, fn(k, _) { weak_key_live(k, is_live) }),
         ),
       )
     SObject(kind: WeakSetObj(entries:), ..) ->
       SObject(
-        ..slot,
+        ..cell,
         kind: WeakSetObj(
           entries: set.filter(entries, fn(k) { weak_key_live(k, is_live) }),
         ),
       )
-    SObject(kind: FinalizationRegistryObj(callback:, cells:), ..) -> {
-      let cells =
-        list.filter(cells, fn(c) {
-          option.is_some(weak_live(c.target, is_live))
+    SObject(kind: FinalizationRegistryObj(callback:, registrations:), ..) -> {
+      let registrations =
+        list.filter(registrations, fn(r) {
+          option.is_some(weak_live(r.target, is_live))
         })
-        |> list.map(fn(c) {
-          FinRegCell(..c, token: option.then(c.token, weak_live(_, is_live)))
+        |> list.map(fn(r) {
+          Registration(
+            ..r,
+            unregister_token: option.then(r.unregister_token, weak_live(
+              _,
+              is_live,
+            )),
+          )
         })
-      SObject(..slot, kind: FinalizationRegistryObj(callback:, cells:))
+      SObject(..cell, kind: FinalizationRegistryObj(callback:, registrations:))
     }
     SObject(kind: WeakRefObj(target:), ..) ->
       SObject(
-        ..slot,
+        ..cell,
         kind: WeakRefObj(target: option.then(target, weak_live(_, is_live))),
       )
-    _ -> slot
+    _ -> cell
   }
 }
 
@@ -661,7 +668,7 @@ fn weak_key_live(k: WeakKey, is_live: fn(Int) -> Bool) -> Bool {
 
 fn weak_live(v: JsVal, is_live: fn(Int) -> Bool) -> Option(JsVal) {
   case classify(v) {
-    KHandle(JsCell(id)) ->
+    KHandle(Handle(id)) ->
       case is_live(id) {
         True -> Some(v)
         False -> None
@@ -685,6 +692,6 @@ pub fn stats(st: Agent) -> GcStats {
 
 pub fn t_is_live(st: Agent, h: Handle) -> Bool {
   let js = st.store
-  let JsCell(id) = h
+  let Handle(id) = h
   option.is_some(arena.get_option(id, js.data))
 }

@@ -1,8 +1,8 @@
 import arc/rt/arena
 import arc/rt/limits
 import arc/rt/types.{
-  type Agent, type Handle, type JsOps, type JsSlot, type JsStore, type JsVal,
-  type StoreMeta, Agent, JsCell, JsOps, JsStore, RangeErr, SBox, StoreMeta,
+  type Agent, type Cell, type Handle, type JsOps, type JsStore, type JsVal,
+  type StoreMeta, Agent, Handle, JsOps, JsStore, RangeErr, SBox, StoreMeta,
 } as rt_types
 import gleam/dict
 import gleam/set
@@ -60,23 +60,23 @@ fn unseeded() -> a {
   panic as "JsOps unseeded — init_realm fills"
 }
 
-pub fn t_cell_new(st: Agent, slot: JsSlot) -> #(Handle, Agent) {
+pub fn t_cell_new(st: Agent, cell: Cell) -> #(Handle, Agent) {
   let js = st.store
   let id = js.next
   let js =
     JsStore(
       ..js,
-      data: arena.set(id, slot, js.data),
+      data: arena.set(id, cell, js.data),
       next: id + 1,
       alloc_since_gc: js.alloc_since_gc + 1,
     )
-  #(JsCell(id), Agent(..st, store: js))
+  #(Handle(id), Agent(..st, store: js))
 }
 
 pub fn t_cell_new_with(
   st: Agent,
   seqs: Int,
-  build: fn(Int) -> JsSlot,
+  build: fn(Int) -> Cell,
 ) -> #(Handle, Agent) {
   let js = st.store
   let id = js.next
@@ -88,22 +88,22 @@ pub fn t_cell_new_with(
       alloc_since_gc: js.alloc_since_gc + 1,
       prop_seq: js.prop_seq + seqs,
     )
-  #(JsCell(id), Agent(..st, store: js))
+  #(Handle(id), Agent(..st, store: js))
 }
 
 pub fn t_cell_new_pair(
   st: Agent,
-  build: fn(Handle, Handle) -> #(JsSlot, JsSlot),
+  build: fn(Handle, Handle) -> #(Cell, Cell),
 ) -> #(Handle, Handle, Agent) {
   let js = st.store
   let id = js.next
-  let a = JsCell(id)
-  let b = JsCell(id + 1)
-  let #(slot_a, slot_b) = build(a, b)
+  let a = Handle(id)
+  let b = Handle(id + 1)
+  let #(cell_a, cell_b) = build(a, b)
   let js =
     JsStore(
       ..js,
-      data: arena.set(id + 1, slot_b, arena.set(id, slot_a, js.data)),
+      data: arena.set(id + 1, cell_b, arena.set(id, cell_a, js.data)),
       next: id + 2,
       alloc_since_gc: js.alloc_since_gc + 2,
     )
@@ -111,13 +111,13 @@ pub fn t_cell_new_pair(
 }
 
 @external(erlang, "arc_rt_store_ffi", "t_cell_get")
-pub fn t_cell_get(st: Agent, h: Handle) -> JsSlot
+pub fn t_cell_get(st: Agent, h: Handle) -> Cell
 
-pub fn t_cell_set(st: Agent, h: Handle, slot: JsSlot) -> Agent {
+pub fn t_cell_set(st: Agent, h: Handle, cell: Cell) -> Agent {
   let js = st.store
-  let JsCell(id) = h
-  let data = arena.set(id, slot, js.data)
-  let global_epoch = case slot {
+  let Handle(id) = h
+  let data = arena.set(id, cell, js.data)
+  let global_epoch = case cell {
     rt_types.SObject(kind: rt_types.GlobalObj, ..) -> js.global_epoch + 1
     _ -> js.global_epoch
   }
@@ -129,30 +129,30 @@ pub fn t_cell_set(st: Agent, h: Handle, slot: JsSlot) -> Agent {
 }
 
 // boxes must be sbox so gc traces them
-pub fn t_var_new(st: Agent, value: JsVal) -> #(Handle, Agent) {
+pub fn t_box_new(st: Agent, value: JsVal) -> #(Handle, Agent) {
   t_cell_new(st, SBox(value))
 }
 
-@external(erlang, "arc_rt_store_ffi", "t_var_get")
-pub fn t_var_get(st: Agent, h: Handle) -> JsVal
+@external(erlang, "arc_rt_store_ffi", "t_box_get")
+pub fn t_box_get(st: Agent, h: Handle) -> JsVal
 
-pub fn t_var_set(st: Agent, h: Handle, value: JsVal) -> Agent {
+pub fn t_box_set(st: Agent, h: Handle, value: JsVal) -> Agent {
   t_cell_set(st, h, SBox(value))
 }
 
-pub fn t_cell_update(st: Agent, h: Handle, f: fn(JsSlot) -> JsSlot) -> Agent {
+pub fn t_cell_update(st: Agent, h: Handle, f: fn(Cell) -> Cell) -> Agent {
   t_cell_set(st, h, f(t_cell_get(st, h)))
 }
 
 pub fn t_cell_free(st: Agent, h: Handle) -> Agent {
   let js = st.store
-  let JsCell(id) = h
+  let Handle(id) = h
   Agent(..st, store: JsStore(..js, data: arena.free(id, js.data)))
 }
 
 pub fn t_pin_root(st: Agent, h: Handle) -> Agent {
   let js = st.store
-  let JsCell(id) = h
+  let Handle(id) = h
   Agent(
     ..st,
     store: JsStore(..js, pinned_roots: set.insert(js.pinned_roots, id)),

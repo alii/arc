@@ -2,7 +2,7 @@ import arc/internal/tuple_array
 import arc/interp/ffi
 import arc/interp/state.{type State, State}
 import arc/rt/bytecode.{type ParkedAt, type SuspendedFrame, SuspendedFrame}
-import arc/rt/types.{type Agent, type JsVal, Agent, FrameInfo, JsCell}
+import arc/rt/types.{type Agent, type JsVal, Agent, FrameInfo, Handle}
 import gleam/option.{None, Some}
 
 pub fn park(state: State, parked: ParkedAt) -> SuspendedFrame {
@@ -71,7 +71,7 @@ pub fn unpark_with(
     home_object:,
     call_args:,
     eval_env: case eval_env {
-      Some(id) -> Some(JsCell(id))
+      Some(id) -> Some(Handle(id))
       None -> None
     },
   )

@@ -29,18 +29,18 @@ dispatch_kind(St, F = {?HANDLE_TAG, Id}, This, N, A, B, C) ->
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, element(?AGENT_STORE, St))) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Cell) of
-                ?KFN(Code, Home, Flags, _, Simple) when ?IS_PLAIN_FN(Flags) ->
+                ?COMPILEDFN(Code, Home, Flags, _, DirectEntry) when ?IS_PLAIN_FN(Flags) ->
                     case element(?FNFLAGS_IS_ARROW, Flags)
                          orelse element(?FNFLAGS_IS_STRICT, Flags) of
                         true ->
-                            enter_compiled(St, F, Code, Home, Simple, This, N,
+                            enter_compiled(St, F, Code, Home, DirectEntry, This, N,
                                            A, B, C);
                         false when This =:= undefined; This =:= null ->
                             G = element(?REALM_GLOBAL, element(?AGENT_REALM, St)),
-                            enter_compiled(St, F, Code, Home, Simple, G, N, A,
+                            enter_compiled(St, F, Code, Home, DirectEntry, G, N, A,
                                            B, C);
                         false when element(1, This) =:= ?HANDLE_TAG ->
-                            enter_compiled(St, F, Code, Home, Simple, This, N,
+                            enter_compiled(St, F, Code, Home, DirectEntry, This, N,
                                            A, B, C);
                         false -> call_general(St, F, This, N, A, B, C)
                     end;
@@ -211,8 +211,8 @@ arg_list(3, A, B, C) -> [A, B, C].
 
 call_kind(St, Kind, Fn, Recv, Args, _, _, _) when is_list(Args) ->
     call_kind_list(St, Kind, Fn, Recv, Args);
-call_kind(St, ?KFN(Code, Home, _, _, Simple), Fn, Recv, N, A, B, C) ->
-    case Simple of
+call_kind(St, ?COMPILEDFN(Code, Home, _, _, DirectEntry), Fn, Recv, N, A, B, C) ->
+    case DirectEntry of
         {?SOME, ?DIRECT_ENTRY(CodeT, N, true)} ->
             case N of
                 0 -> CodeT(St, Recv);
@@ -231,7 +231,7 @@ call_kind(St, ?KFN(Code, Home, _, _, Simple), Fn, Recv, N, A, B, C) ->
             Code(St, ?FRAME(Recv, Fn, home_or_undefined(Home), undefined),
                  arg_list(N, A, B, C))
     end;
-call_kind(St, {?KNATIVE_TAG, Tag, _, _, _}, _, Recv, N, A, B, C) ->
+call_kind(St, {?NATIVEFN_TAG, Tag, _, _, _}, _, Recv, N, A, B, C) ->
     'arc@rt@builtins':dispatch_native(St, Tag, Recv, arg_list(N, A, B, C)).
 
 %% {hit, Fn, Kind} | miss | stale when a cached chain changed | spent when
@@ -346,7 +346,7 @@ walk_hop(St, Data, _, _, V, _, Recv, Args, _, _) ->
 call_found_fill(St, Data, Fn = {?HANDLE_TAG, _}, KeyBin, Recv, Args, Ic) ->
     case plain_callee_kind(Data, Fn) of
         miss -> {miss, St};
-        ?KFN(_, _, Flags, _, _)
+        ?COMPILEDFN(_, _, Flags, _, _)
           when not is_tuple(Recv),
                element(?FNFLAGS_IS_STRICT, Flags) =/= true ->
             {miss, St};
@@ -429,22 +429,22 @@ plain_callee_kind(Data, {?HANDLE_TAG, FnId}) ->
     case arc_rt_arena_ffi:get(FnId, Data) of
         FCell when element(1, FCell) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, FCell) of
-                Kind = ?KFN(_, _, Flags, _, _) when ?IS_PLAIN_FN(Flags) -> Kind;
-                Kind when element(1, Kind) =:= ?KNATIVE_TAG -> Kind;
+                Kind = ?COMPILEDFN(_, _, Flags, _, _) when ?IS_PLAIN_FN(Flags) -> Kind;
+                Kind when element(1, Kind) =:= ?NATIVEFN_TAG -> Kind;
                 _ -> miss
             end;
         _ -> miss
     end.
 
-call_kind_list(St, ?KFN(Code, Home, _, _, Simple), Fn, Recv, Args) ->
-    case Simple of
+call_kind_list(St, ?COMPILEDFN(Code, Home, _, _, DirectEntry), Fn, Recv, Args) ->
+    case DirectEntry of
         {?SOME, ?DIRECT_ENTRY(CodeT, Arity, true)} when length(Args) =:= Arity ->
             apply_this(CodeT, St, Recv, Args);
         {?SOME, ?DIRECT_ENTRY(CodeS, Arity, false)} when length(Args) =:= Arity ->
             erlang:apply(CodeS, [St | Args]);
         _ -> Code(St, ?FRAME(Recv, Fn, home_or_undefined(Home), undefined), Args)
     end;
-call_kind_list(St, {?KNATIVE_TAG, Tag, _, _, _}, _, Recv, Args) ->
+call_kind_list(St, {?NATIVEFN_TAG, Tag, _, _, _}, _, Recv, Args) ->
     'arc@rt@builtins':dispatch_native(St, Tag, Recv, Args).
 
 apply_this(CodeT, St, Recv, []) -> CodeT(St, Recv);
@@ -459,7 +459,7 @@ t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
     case arc_rt_arena_ffi:get(CId, Data) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Cell) of
-                Kind = ?KFN(_, _, Flags, ?NONE, _)
+                Kind = ?COMPILEDFN(_, _, Flags, ?NONE, _)
                   when element(?FNFLAGS_IS_CTOR, Flags) =:= true,
                        element(?FNFLAGS_IS_DERIVED, Flags) =:= false,
                        element(?FNFLAGS_IS_GEN, Flags) =:= false,
@@ -481,7 +481,7 @@ t_new_simple(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
     end;
 t_new_simple(St, _, _) -> {miss, St}.
 
-new_simple_apply(St, Store, Data, Ctor, ?KFN(Code, Home, _, _, Simple), Proto,
+new_simple_apply(St, Store, Data, Ctor, ?COMPILEDFN(Code, Home, _, _, DirectEntry), Proto,
                  Args)
   when tuple_size(St) =:= ?AGENT_SIZE, tuple_size(Store) =:= ?STORE_SIZE ->
     NewCell = {?SSHAPED_TAG, 0, {?SOME, Proto}, {}, #{}},
@@ -492,7 +492,7 @@ new_simple_apply(St, Store, Data, Ctor, ?KFN(Code, Home, _, _, Simple), Proto,
                         element(?STORE_ALLOC_SINCE_GC, Store) + 1),
     St2 = setelement(?AGENT_STORE, St, Store4),
     NewThis = {?HANDLE_TAG, NewId},
-    {V, St3} = case Simple of
+    {V, St3} = case DirectEntry of
         {?SOME, ?DIRECT_ENTRY(CodeT, Arity, true)} when length(Args) =:= Arity ->
             apply_this(CodeT, St2, NewThis, Args);
         {?SOME, ?DIRECT_ENTRY(CodeS, Arity, false)} when length(Args) =:= Arity ->
@@ -505,7 +505,7 @@ new_simple_apply(St, Store, Data, Ctor, ?KFN(Code, Home, _, _, Simple), Proto,
     end.
 
 %% bind once for natives that call back per element, none takes the frame path
-t_bind_compiled(St, F, ?KFN(Code, Home, Flags, _, Simple), This)
+t_bind_compiled(St, F, ?COMPILEDFN(Code, Home, Flags, _, DirectEntry), This)
   when ?IS_PLAIN_FN(Flags) ->
     ThisR = case element(?FNFLAGS_IS_ARROW, Flags)
                  orelse element(?FNFLAGS_IS_STRICT, Flags) of
@@ -520,7 +520,7 @@ t_bind_compiled(St, F, ?KFN(Code, Home, Flags, _, Simple), This)
         _ ->
             Frame = ?FRAME(ThisR, F, home_or_undefined(Home), undefined),
             General = fun(S, Args) -> Code(S, Frame, Args) end,
-            {?SOME, prepared_direct_entry(Simple, ThisR, General)}
+            {?SOME, prepared_direct_entry(DirectEntry, ThisR, General)}
     end;
 t_bind_compiled(_, _, _, _) -> ?NONE.
 

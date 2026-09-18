@@ -277,7 +277,7 @@ pub fn catch_binding_prologue(
         ir.Let([name], ir.Values([init]), body)
       }
       True -> {
-        use e, box <- host_(e, "cell_new", [init])
+        use e, box <- host_(e, "box_new", [init])
         use body <- state.map_tree(next(state.set_slot_var(e, b.slot, name)))
         ir.Let([name], ir.Values([box]), body)
       }

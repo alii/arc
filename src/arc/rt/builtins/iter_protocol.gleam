@@ -10,13 +10,13 @@ import arc/rt/js_string
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsElements, type JsSlot, type JsVal,
-  type Property, type PropertyKey, ArrayObj, AsyncFromSyncIterator, DataProperty,
-  Index, IteratorRecord, KHandle, KNull, KStr, KUndef, MapIterEntries,
-  MapIterKeys, MapIterValues, MapIterator, MapObj, Named, NoElements, SObject,
-  SetIterEntries, SetIterValues, SetIterator, SetObj, StringIterator, StringKey,
-  SymbolKey, TypeErr, classify, map_key_to_js, mk_int, mk_object, mk_string,
-  mk_undefined, symbol_async_iterator, symbol_iterator,
+  type Agent, type Cell, type Handle, type JsElements, type JsVal, type Property,
+  type PropertyKey, ArrayObj, AsyncFromSyncIterator, DataProperty, Index,
+  IteratorRecord, KHandle, KNull, KStr, KUndef, MapIterEntries, MapIterKeys,
+  MapIterValues, MapIterator, MapObj, Named, NoElements, SObject, SetIterEntries,
+  SetIterValues, SetIterator, SetObj, StringIterator, StringKey, SymbolKey,
+  TypeErr, classify, map_key_to_js, mk_int, mk_object, mk_string, mk_undefined,
+  symbol_async_iterator, symbol_iterator,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict.{type Dict}
@@ -298,8 +298,8 @@ fn array_values_iterator(st: Agent, rec: IteratorRecord) -> Option(Handle) {
     KHandle(next_h), KHandle(iter_h) ->
       case rt_store.t_cell_get(st, next_h), rt_store.t_cell_get(st, iter_h) {
         SObject(
-          kind: rt_types.KNative(
-            tag: rt_types.IteratorN(rt_types.ArrayIteratorNext),
+          kind: rt_types.NativeFn(
+            token: rt_types.IteratorN(rt_types.ArrayIteratorNext),
             ..,
           ),
           ..,
@@ -322,7 +322,7 @@ fn array_values_to_list(
   iter_h: Handle,
   acc: List(JsVal),
 ) -> #(List(JsVal), Agent) {
-  let assert SObject(kind: rt_types.ArrayIterator(target:, index:, kind:), ..) as iter_slot =
+  let assert SObject(kind: rt_types.ArrayIterator(target:, index:, kind:), ..) as iter_cell =
     rt_store.t_cell_get(st, iter_h)
   case index < 0 {
     True -> #(list.reverse(acc), st)
@@ -339,7 +339,7 @@ fn array_values_to_list(
             st,
             iter_h,
             SObject(
-              ..iter_slot,
+              ..iter_cell,
               kind: rt_types.ArrayIterator(target:, index: stop, kind:),
             ),
           )
@@ -378,8 +378,10 @@ pub fn intrinsic_next(
   case classify(rec.next_method), classify(rec.iterator) {
     KHandle(next_h), KHandle(iter_h) ->
       case rt_store.t_cell_get(st, next_h) {
-        SObject(kind: rt_types.KNative(tag: rt_types.IteratorN(next), ..), ..) ->
-          Some(#(next, iter_h))
+        SObject(
+          kind: rt_types.NativeFn(token: rt_types.IteratorN(next), ..),
+          ..,
+        ) -> Some(#(next, iter_h))
         _ -> None
       }
     _, _ -> None
@@ -392,16 +394,16 @@ pub fn native_step(
   next: rt_types.IteratorNative,
   iter_h: Handle,
 ) -> Option(#(Option(JsVal), Agent)) {
-  let slot = rt_store.t_cell_get(st, iter_h)
-  case next, slot {
+  let cell = rt_store.t_cell_get(st, iter_h)
+  case next, cell {
     rt_types.ArrayIteratorNext, SObject(kind: rt_types.ArrayIterator(..), ..) ->
-      array_iterator_step(st, iter_h, slot)
+      array_iterator_step(st, iter_h, cell)
     rt_types.MapIteratorNext, SObject(kind: MapIterator(..), ..) ->
-      Some(map_iterator_step(st, iter_h, slot))
+      Some(map_iterator_step(st, iter_h, cell))
     rt_types.SetIteratorNext, SObject(kind: SetIterator(..), ..) ->
-      Some(set_iterator_step(st, iter_h, slot))
+      Some(set_iterator_step(st, iter_h, cell))
     rt_types.StringIteratorNext, SObject(kind: StringIterator(..), ..) ->
-      Some(string_iterator_step(st, iter_h, slot))
+      Some(string_iterator_step(st, iter_h, cell))
     _, _ -> None
   }
 }
@@ -409,9 +411,9 @@ pub fn native_step(
 fn array_iterator_step(
   st: Agent,
   iter_h: Handle,
-  slot: JsSlot,
+  cell: Cell,
 ) -> Option(#(Option(JsVal), Agent)) {
-  case slot {
+  case cell {
     SObject(kind: rt_types.ArrayIterator(target:, index:, kind:), ..)
       if index >= 0
     ->
@@ -423,7 +425,7 @@ fn array_iterator_step(
               st,
               iter_h,
               SObject(
-                ..slot,
+                ..cell,
                 kind: rt_types.ArrayIterator(target:, index: -1, kind:),
               ),
             ),
@@ -449,7 +451,7 @@ fn array_iterator_step(
               st,
               iter_h,
               SObject(
-                ..slot,
+                ..cell,
                 kind: rt_types.ArrayIterator(target:, index: index + 1, kind:),
               ),
             )
@@ -464,9 +466,9 @@ fn array_iterator_step(
 pub fn map_iterator_step(
   st: Agent,
   iter_h: Handle,
-  slot: JsSlot,
+  cell: Cell,
 ) -> #(Option(JsVal), Agent) {
-  case slot {
+  case cell {
     SObject(kind: MapIterator(target:, index:, kind:), ..) if index >= 0 -> {
       let step = case rt_store.t_cell_get(st, target) {
         SObject(kind: MapObj(entries:), ..) ->
@@ -479,7 +481,7 @@ pub fn map_iterator_step(
           rt_store.t_cell_set(
             st,
             iter_h,
-            SObject(..slot, kind: MapIterator(target:, index: -1, kind:)),
+            SObject(..cell, kind: MapIterator(target:, index: -1, kind:)),
           ),
         )
         Some(#(next_cursor, mk, v)) -> {
@@ -493,7 +495,7 @@ pub fn map_iterator_step(
               st,
               iter_h,
               SObject(
-                ..slot,
+                ..cell,
                 kind: MapIterator(target:, index: next_cursor, kind:),
               ),
             )
@@ -508,9 +510,9 @@ pub fn map_iterator_step(
 pub fn set_iterator_step(
   st: Agent,
   iter_h: Handle,
-  slot: JsSlot,
+  cell: Cell,
 ) -> #(Option(JsVal), Agent) {
-  case slot {
+  case cell {
     SObject(kind: SetIterator(target:, index:, kind:), ..) if index >= 0 -> {
       let step = case rt_store.t_cell_get(st, target) {
         SObject(kind: SetObj(entries:), ..) ->
@@ -523,7 +525,7 @@ pub fn set_iterator_step(
           rt_store.t_cell_set(
             st,
             iter_h,
-            SObject(..slot, kind: SetIterator(target:, index: -1, kind:)),
+            SObject(..cell, kind: SetIterator(target:, index: -1, kind:)),
           ),
         )
         Some(#(next_cursor, _mk, v)) -> {
@@ -536,7 +538,7 @@ pub fn set_iterator_step(
               st,
               iter_h,
               SObject(
-                ..slot,
+                ..cell,
                 kind: SetIterator(target:, index: next_cursor, kind:),
               ),
             )
@@ -551,9 +553,9 @@ pub fn set_iterator_step(
 pub fn string_iterator_step(
   st: Agent,
   h: Handle,
-  slot: JsSlot,
+  cell: Cell,
 ) -> #(Option(JsVal), Agent) {
-  case slot {
+  case cell {
     SObject(kind: StringIterator(source:, index:), ..) if index >= 0 ->
       case js_string.char_at_offset(source, index) {
         None -> #(
@@ -561,7 +563,7 @@ pub fn string_iterator_step(
           rt_store.t_cell_set(
             st,
             h,
-            SObject(..slot, kind: StringIterator(source:, index: -1)),
+            SObject(..cell, kind: StringIterator(source:, index: -1)),
           ),
         )
         Some(#(ch, next)) -> #(
@@ -569,7 +571,7 @@ pub fn string_iterator_step(
           rt_store.t_cell_set(
             st,
             h,
-            SObject(..slot, kind: StringIterator(source:, index: next)),
+            SObject(..cell, kind: StringIterator(source:, index: next)),
           ),
         )
       }

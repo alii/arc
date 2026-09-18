@@ -67,7 +67,7 @@ fn construct(
       let #(msg_prop, st) = common.builtin_property(st, mk_string(message))
       let #(name_prop, st) = common.builtin_property(st, mk_string(name))
       let #(h, st) =
-        common.alloc_error_slot(st, proto, [
+        common.alloc_error_object(st, proto, [
           #("message", msg_prop),
           #("name", name_prop),
         ])

@@ -360,7 +360,7 @@ fn read_wm(st: Agent, ref: WMRef) -> Dict(WeakKey, JsVal) {
   let WMRef(h) = ref
   let assert SObject(kind: WeakMapObj(entries:), ..) =
     rt_store.t_cell_get(st, h)
-    as "weak: WMRef does not point at a WeakMap slot"
+    as "weak: WMRef does not point at a WeakMap cell"
   entries
 }
 
@@ -376,9 +376,9 @@ fn update_wm(
   f: fn(Dict(WeakKey, JsVal)) -> Dict(WeakKey, JsVal),
 ) -> Agent {
   let WMRef(h) = ref
-  rt_store.t_cell_update(st, h, fn(slot) {
-    let assert SObject(kind: WeakMapObj(entries:), ..) = slot
-    SObject(..slot, kind: WeakMapObj(entries: f(entries)))
+  rt_store.t_cell_update(st, h, fn(cell) {
+    let assert SObject(kind: WeakMapObj(entries:), ..) = cell
+    SObject(..cell, kind: WeakMapObj(entries: f(entries)))
   })
 }
 
@@ -386,7 +386,7 @@ fn read_ws(st: Agent, ref: WSRef) -> Set(WeakKey) {
   let WSRef(h) = ref
   let assert SObject(kind: WeakSetObj(entries:), ..) =
     rt_store.t_cell_get(st, h)
-    as "weak: WSRef does not point at a WeakSet slot"
+    as "weak: WSRef does not point at a WeakSet cell"
   entries
 }
 
@@ -396,8 +396,8 @@ fn update_ws(
   f: fn(Set(WeakKey)) -> Set(WeakKey),
 ) -> Agent {
   let WSRef(h) = ref
-  rt_store.t_cell_update(st, h, fn(slot) {
-    let assert SObject(kind: WeakSetObj(entries:), ..) = slot
-    SObject(..slot, kind: WeakSetObj(entries: f(entries)))
+  rt_store.t_cell_update(st, h, fn(cell) {
+    let assert SObject(kind: WeakSetObj(entries:), ..) = cell
+    SObject(..cell, kind: WeakSetObj(entries: f(entries)))
   })
 }

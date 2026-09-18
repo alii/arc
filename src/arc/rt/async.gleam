@@ -9,15 +9,15 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type AGResumeKind, type Agent, type AsyncGenRequest, type AsyncGenState,
-  type AsyncWaiter, type GeneratorCompletion, type Handle, type Job, type JsSlot,
+  type AsyncWaiter, type Cell, type GeneratorCompletion, type Handle, type Job,
   type JsStore, type JsVal, type Loc, type NativeToken, type PromiseReaction,
   type PromiseState, type ReactionHandler, type Resume, type SabOwner, type SmFn,
   type Step, type WaiterRef, AGAwaitingReturn, AGCompleted, AGExecuting,
   AGResumeAwaitingReturn, AGResumeReturnUnwind, AGSuspendedStart,
   AGSuspendedYield, Agent, AsyncGenRequest, AsyncGenResume, AsyncGeneratorObj,
   AsyncWaiter, DataProperty, GenCompleted, GenExecuting, GenNext, GenReturn,
-  GenSuspendedStart, GenSuspendedYield, GenThrow, GeneratorObj, Handler, HostJob,
-  IdentityPassThrough, JsCell, JsStore, KHandle, Named, NoElements, Ordinary,
+  GenSuspendedStart, GenSuspendedYield, GenThrow, GeneratorObj, Handle, Handler,
+  HostJob, IdentityPassThrough, JsStore, KHandle, Named, NoElements, Ordinary,
   PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction, PromiseRejectFn,
   PromiseRejected, PromiseResolveFn, RangeErr, ReactionJob, ResolveThenableJob,
   ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen, SBox, SGenerator,
@@ -260,7 +260,7 @@ fn earliest_deadline(st: Agent) -> Option(Int) {
 fn finish_drain(st: Agent) -> Agent {
   let js = require_js(st)
   list.each(js.meta.unhandled_rejections, fn(id) {
-    case rt_store.t_cell_get(st, JsCell(id)) {
+    case rt_store.t_cell_get(st, Handle(id)) {
       SPromiseData(state: PromiseRejected(reason), ..) ->
         st.hooks.report_uncaught(
           "Uncaught (in promise) " <> describe_thrown(st, reason),
@@ -423,7 +423,7 @@ pub fn generator_data(st: Agent, this: JsVal) -> Handle {
   }
 }
 
-fn read_generator(st: Agent, gen_h: Handle) -> JsSlot {
+fn read_generator(st: Agent, gen_h: Handle) -> Cell {
   case rt_store.t_cell_get(st, gen_h) {
     SGenerator(..) as gen -> gen
     _ -> panic as "rt_async: Handle is not an SGenerator cell (engine invariant)"
@@ -433,7 +433,7 @@ fn read_generator(st: Agent, gen_h: Handle) -> JsSlot {
 fn set_gen_state(
   st: Agent,
   gen_h: Handle,
-  gen: JsSlot,
+  gen: Cell,
   new_state: rt_types.GeneratorState,
 ) -> Agent {
   let assert SGenerator(resume:, ..) = gen
@@ -544,7 +544,7 @@ pub fn t_gen_throw(st: Agent, gen_h: Handle, e: JsVal) -> #(Handle, Agent) {
 fn gen_resume(
   st: Agent,
   gen_h: Handle,
-  gen: JsSlot,
+  gen: Cell,
   resume: Resume,
   sent: #(Int, JsVal),
 ) -> #(#(Bool, JsVal), Agent) {
@@ -1190,7 +1190,7 @@ fn read_asyncgen(st: Agent, gen_h: Handle) -> AGLive {
   }
 }
 
-fn encode_asyncgen(ag: AGLive) -> JsSlot {
+fn encode_asyncgen(ag: AGLive) -> Cell {
   SAsyncGen(state: ag.state, resume: ag.resume, queue: #(ag.front, ag.back))
 }
 

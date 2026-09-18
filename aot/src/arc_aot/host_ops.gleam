@@ -28,9 +28,9 @@ pub fn table() -> DirectHost {
   DirectHost(
     capability: "js",
     ops: dict.from_list([
-      #("cell_new", HostOp(store, "t_var_new", Mut)),
-      #("cell_get", HostOp(store, "t_var_get", Read)),
-      #("cell_set", HostOp(store, "t_var_set", MutUnit)),
+      #("box_new", HostOp(store, "t_box_new", Mut)),
+      #("box_get", HostOp(store, "t_box_get", Read)),
+      #("box_set", HostOp(store, "t_box_set", MutUnit)),
       #("pin_root", HostOp(store, "t_pin_root", MutUnit)),
       #("collect", HostOp(gc, "t_collect", MutUnit)),
       #("to_primitive", HostOp(val, "t_to_primitive", Mut)),
@@ -179,7 +179,7 @@ pub fn table() -> DirectHost {
       #("call_method_ic3", HostOp(call_fast_ffi, "t_call_method_ic3", Mut)),
       #("construct", HostOp(call, "t_construct", Mut)),
       #("new_simple", HostOp(call_fast_ffi, "t_new_simple", Mut)),
-      #("kfn_code", HostOp(call_ffi, "t_kfn_code", Read)),
+      #("compiled_fn_code", HostOp(call_ffi, "t_compiled_fn_code", Read)),
       #("new_private_name", HostOp(class, "t_new_private_name", Mut)),
       #("class_setup", HostOp(class, "t_class_setup", Mut)),
       #("define_method", HostOp(class, "t_define_method", MutUnit)),

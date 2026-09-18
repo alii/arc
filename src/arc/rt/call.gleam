@@ -3,12 +3,13 @@ import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type CompiledFn, type FnFlags, type Handle, type JsOps, type JsVal,
-  type NativeToken, type ObjKind, type Property, type PropertyKey, type Realm,
-  Agent, ArrayObj, BirthPending, BirthSettled, DataProperty, Dense, JInt,
-  JPosInf, KBound, KBytecode, KCompiled, KHandle, KNative, KNull, KNum, KStr,
-  KTdz, KUndef, Named, NoElements, ProxyObj, ReferenceErr, SObject, StringKey,
-  TypeErr, classify, mk_number, mk_object, mk_tdz, mk_undefined,
+  type Agent, type CompiledCode, type DirectEntry, type FnFlags, type Handle,
+  type JsOps, type JsVal, type NativeToken, type ObjKind, type Property,
+  type PropertyKey, type Realm, Agent, ArrayObj, BirthPending, BirthSettled,
+  BoundFn, BytecodeFn, CompiledFn, DataProperty, Dense, JInt, JPosInf, KHandle,
+  KNull, KNum, KStr, KTdz, KUndef, Named, NativeFn, NoElements, ProxyObj,
+  ReferenceErr, SObject, StringKey, TypeErr, classify, mk_number, mk_object,
+  mk_tdz, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bool
@@ -43,7 +44,7 @@ pub type Completion {
 @external(erlang, "arc_rt_call_ffi", "t_call_protected")
 fn t_call_protected(
   st: Agent,
-  code: CompiledFn,
+  code: CompiledCode,
   frame: Frame,
   args: List(JsVal),
 ) -> #(Completion, Agent)
@@ -57,7 +58,7 @@ fn t_apply_protected(
 @external(erlang, "arc_rt_call_ffi", "t_native_protected")
 fn t_native_protected(
   st: Agent,
-  tag: NativeToken,
+  token: NativeToken,
   this: JsVal,
   args: List(JsVal),
 ) -> #(Completion, Agent)
@@ -65,7 +66,7 @@ fn t_native_protected(
 @external(erlang, "arc_rt_builtins_ffi", "dispatch_native_construct")
 fn dispatch_native_construct(
   st: Agent,
-  tag: NativeToken,
+  token: NativeToken,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Handle, Agent)
@@ -102,10 +103,10 @@ pub fn is_constructor(st: Agent, v: JsVal) -> Bool {
 
 fn handle_is_constructor(st: Agent, h: Handle) -> Bool {
   case read_obj_kind(st, h) {
-    Some(KCompiled(flags:, ..)) | Some(KBytecode(flags:, ..)) ->
+    Some(CompiledFn(flags:, ..)) | Some(BytecodeFn(flags:, ..)) ->
       flags.is_constructor
-    Some(KNative(constructible:, ..)) -> constructible
-    Some(KBound(target:, ..)) -> handle_is_constructor(st, target)
+    Some(NativeFn(constructible:, ..)) -> constructible
+    Some(BoundFn(target:, ..)) -> handle_is_constructor(st, target)
     // §10.5.15 step 7: stays installed after revocation
     Some(ProxyObj(target:, ..)) -> handle_is_constructor(st, target)
     _ -> False
@@ -113,8 +114,8 @@ fn handle_is_constructor(st: Agent, h: Handle) -> Bool {
 }
 
 // fast path probe: ordinary compiled fn only, else undefined
-@external(erlang, "arc_rt_call_ffi", "t_kfn_code")
-pub fn t_kfn_code(st: Agent, callee: JsVal, this: JsVal) -> JsVal
+@external(erlang, "arc_rt_call_ffi", "t_compiled_fn_code")
+pub fn t_compiled_fn_code(st: Agent, callee: JsVal, this: JsVal) -> JsVal
 
 // §10.2.1 [[call]], catches a throw into a completion
 pub fn t_call(
@@ -126,37 +127,37 @@ pub fn t_call(
   case classify(callee) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: KBytecode(..) as kind, ..) -> {
+        SObject(kind: BytecodeFn(..) as kind, ..) -> {
           let #(res, st) = js_ops(st).call_bytecode(st, h, kind, this, args)
           case res {
             Ok(v) -> #(NormalCompletion(v), st)
             Error(e) -> #(ThrowCompletion(e), st)
           }
         }
-        slot -> call_slot(st, callee, h, slot, this, args)
+        cell -> call_cell(st, callee, h, cell, this, args)
       }
     _ -> bracketed(st, fn(st) { not_a_function(st, callee) })
   }
 }
 
-fn call_slot(
+fn call_cell(
   st: Agent,
   callee: JsVal,
   h: Handle,
-  slot: rt_types.JsSlot,
+  cell: rt_types.Cell,
   this: JsVal,
   args: List(JsVal),
 ) -> #(Completion, Agent) {
-  case slot {
-    SObject(kind: KCompiled(code:, home_object:, flags:, ..), ..) -> {
+  case cell {
+    SObject(kind: CompiledFn(code:, home_object:, flags:, ..), ..) -> {
       use st <- bracketed(st)
       call_kfunction(st, h, code, home_object, flags, this, args)
     }
-    SObject(kind: KNative(tag:, ..), ..) -> {
+    SObject(kind: NativeFn(token:, ..), ..) -> {
       use st <- bracketed(st)
-      t_native_protected(st, tag, this, args)
+      t_native_protected(st, token, this, args)
     }
-    SObject(kind: KBound(target:, bound_this:, bound_args:), ..) ->
+    SObject(kind: BoundFn(target:, bound_this:, bound_args:), ..) ->
       t_call(st, mk_object(target), bound_this, list.append(bound_args, args))
     SObject(kind: ProxyObj(target:, handler:, revoked:), ..) -> {
       use st <- bracketed(st)
@@ -183,7 +184,7 @@ fn bracketed(
 fn call_kfunction(
   st: Agent,
   callee_h: Handle,
-  code: CompiledFn,
+  code: CompiledCode,
   home_object: Option(Handle),
   flags: FnFlags,
   this: JsVal,
@@ -308,12 +309,12 @@ pub fn t_call_checked(
   case classify(callee) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: KBytecode(..) as kind, ..) ->
+        SObject(kind: BytecodeFn(..) as kind, ..) ->
           case js_ops(st).call_bytecode(st, h, kind, this, args) {
             #(Ok(v), st) -> #(v, st)
             #(Error(e), st) -> rt_store.t_throw(st, e)
           }
-        slot -> rethrown(call_slot(st, callee, h, slot, this, args))
+        cell -> rethrown(call_cell(st, callee, h, cell, this, args))
       }
     _ -> rethrown(bracketed(st, fn(st) { not_a_function(st, callee) }))
   }
@@ -328,12 +329,12 @@ pub fn t_bind_call(
   case classify(callee) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: KBytecode(..) as kind, ..) ->
+        SObject(kind: BytecodeFn(..) as kind, ..) ->
           js_ops(st).bind_call(st, h, kind, this)
-        SObject(kind: KNative(tag:, ..), ..) -> fn(st, args) {
-          call_native(st, tag, this, args)
+        SObject(kind: NativeFn(token:, ..), ..) -> fn(st, args) {
+          call_native(st, token, this, args)
         }
-        SObject(kind: KCompiled(code:, home_object:, flags:, ..), ..) -> fn(
+        SObject(kind: CompiledFn(code:, home_object:, flags:, ..), ..) -> fn(
           st,
           args,
         ) {
@@ -348,7 +349,7 @@ pub fn t_bind_call(
 fn call_compiled(
   st: Agent,
   h: Handle,
-  code: CompiledFn,
+  code: CompiledCode,
   home_object: Option(Handle),
   flags: FnFlags,
   this: JsVal,
@@ -360,12 +361,12 @@ fn call_compiled(
 
 fn call_native(
   st: Agent,
-  tag: NativeToken,
+  token: NativeToken,
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   use st <- rethrown_bracket(st)
-  t_native_protected(st, tag, this, args)
+  t_native_protected(st, token, this, args)
 }
 
 fn rethrown_bracket(
@@ -384,18 +385,18 @@ pub fn t_bind_callable(
   case classify(callee) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: KBytecode(..) as kind, ..) ->
+        SObject(kind: BytecodeFn(..) as kind, ..) ->
           Some(js_ops(st).bind_call(st, h, kind, this))
-        SObject(kind: KNative(tag:, ..), ..) ->
-          Some(fn(st, args) { call_native(st, tag, this, args) })
-        SObject(kind: KCompiled(code:, home_object:, flags:, ..) as kind, ..) ->
+        SObject(kind: NativeFn(token:, ..), ..) ->
+          Some(fn(st, args) { call_native(st, token, this, args) })
+        SObject(kind: CompiledFn(code:, home_object:, flags:, ..) as kind, ..) ->
           bind_compiled(st, callee, kind, this)
           |> option.or(
             Some(fn(st, args) {
               call_compiled(st, h, code, home_object, flags, this, args)
             }),
           )
-        SObject(kind: KBound(..), ..) -> Some(generic)
+        SObject(kind: BoundFn(..), ..) -> Some(generic)
         SObject(kind: ProxyObj(target:, ..), ..) ->
           case is_callable(st, mk_object(target)) {
             True -> Some(generic)
@@ -461,7 +462,7 @@ fn construct_by_kind(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case read_obj_kind(st, callee_h) {
-    Some(KCompiled(code:, home_object:, flags:, fields_init:, ..)) ->
+    Some(CompiledFn(code:, home_object:, flags:, fields_init:, ..)) ->
       construct_kfunction(
         st,
         callee_h,
@@ -472,11 +473,11 @@ fn construct_by_kind(
         args,
         new_target,
       )
-    Some(KBytecode(..)) ->
+    Some(BytecodeFn(..)) ->
       js_ops(st).construct_bytecode(st, callee_h, args, new_target)
-    Some(KNative(tag:, ..)) ->
-      dispatch_native_construct(st, tag, args, new_target)
-    Some(KBound(target:, bound_args:, ..)) -> {
+    Some(NativeFn(token:, ..)) ->
+      dispatch_native_construct(st, token, args, new_target)
+    Some(BoundFn(target:, bound_args:, ..)) -> {
       let nt = case classify(new_target) {
         KHandle(nt_h) if nt_h == callee_h -> mk_object(target)
         _ -> new_target
@@ -493,7 +494,7 @@ fn construct_by_kind(
 fn construct_kfunction(
   st: Agent,
   callee_h: Handle,
-  code: CompiledFn,
+  code: CompiledCode,
   home_object: Option(Handle),
   flags: FnFlags,
   fields_init: Option(Handle),
@@ -525,7 +526,7 @@ fn construct_kfunction(
 
 fn apply_ctor(
   st: Agent,
-  code: CompiledFn,
+  code: CompiledCode,
   frame: Frame,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
@@ -609,8 +610,8 @@ pub fn function_realm(st: Agent, obj: Handle) -> Realm {
 // §7.3.24 getfunctionrealm as a realm id
 pub fn get_function_realm(st: Agent, obj: Handle) -> Int {
   case rt_store.t_cell_get(st, obj) {
-    SObject(kind: KBytecode(realm:, ..), ..) -> realm
-    SObject(kind: KBound(target:, ..), ..) -> get_function_realm(st, target)
+    SObject(kind: BytecodeFn(realm:, ..), ..) -> realm
+    SObject(kind: BoundFn(target:, ..), ..) -> get_function_realm(st, target)
     SObject(kind: ProxyObj(revoked: True, ..), ..) ->
       throw_error(
         st,
@@ -618,8 +619,8 @@ pub fn get_function_realm(st: Agent, obj: Handle) -> Int {
         "Cannot perform 'getFunctionRealm' on a proxy that has been revoked",
       )
     SObject(kind: ProxyObj(target:, ..), ..) -> get_function_realm(st, target)
-    SObject(kind: KNative(tag:, ..), proto:, ..) ->
-      case native_realm(tag) {
+    SObject(kind: NativeFn(token:, ..), proto:, ..) ->
+      case native_realm(token) {
         Some(id) -> id
         None -> realm_of_function_proto(st, proto)
       }
@@ -628,8 +629,8 @@ pub fn get_function_realm(st: Agent, obj: Handle) -> Int {
   }
 }
 
-fn native_realm(tag: NativeToken) -> Option(Int) {
-  case tag {
+fn native_realm(token: NativeToken) -> Option(Int) {
+  case token {
     rt_types.GlobalN(rt_types.GlobalEval(realm:))
     | rt_types.FunctionN(rt_types.FunctionConstructor(realm:))
     | rt_types.GeneratorN(rt_types.GeneratorFunctionCtor(realm:))
@@ -803,22 +804,22 @@ fn alloc_fn_cell(
 // no .prototype here, makeconstructor is separate
 pub fn t_fn_new(
   st: Agent,
-  code: CompiledFn,
+  code: CompiledCode,
   flags: FnFlags,
   name: String,
   len: Int,
   home: Option(Handle),
-  simple: Option(#(CompiledFn, Int, Bool)),
+  direct_entry: Option(DirectEntry),
 ) -> #(Handle, Agent) {
   alloc_fn_cell(
     st,
     Some(st.realm.function.prototype),
-    KCompiled(
+    CompiledFn(
       code:,
       home_object: home,
       flags:,
       fields_init: None,
-      simple:,
+      direct_entry:,
       name:,
       length: len,
       birth: BirthSettled,
@@ -831,11 +832,11 @@ pub fn t_fn_new(
 // closure site of every compiled function
 pub fn t_new_function(
   st: Agent,
-  code: CompiledFn,
+  code: CompiledCode,
   flags: FnFlags,
   name: String,
   len: Int,
-  simple: Option(#(CompiledFn, Int, Bool)),
+  direct_entry: Option(DirectEntry),
 ) -> #(JsVal, Agent) {
   let realm = st.realm
   let proto = case flags.is_generator, flags.is_async {
@@ -854,12 +855,12 @@ pub fn t_new_function(
     rt_store.t_cell_new(
       st,
       SObject(
-        kind: KCompiled(
+        kind: CompiledFn(
           code:,
           home_object: None,
           flags:,
           fields_init: None,
-          simple:,
+          direct_entry:,
           name:,
           length: len,
           birth: BirthPending(prototype_parent),
@@ -899,7 +900,7 @@ pub fn t_new_function(
 pub fn t_native_new(
   st: Agent,
   proto: Option(Handle),
-  tag: NativeToken,
+  token: NativeToken,
   name: String,
   len: Int,
   constructible: Bool,
@@ -907,7 +908,7 @@ pub fn t_native_new(
   alloc_fn_cell(
     st,
     proto,
-    KNative(tag:, name:, length: len, constructible:),
+    NativeFn(token:, name:, length: len, constructible:),
     mk_number(JInt(len)),
     name,
   )
@@ -917,7 +918,7 @@ pub fn t_native_new(
 pub fn t_native_new_computed_length(
   st: Agent,
   proto: Option(Handle),
-  tag: NativeToken,
+  token: NativeToken,
   name: String,
   length_v: JsVal,
 ) -> #(Handle, Agent) {
@@ -928,7 +929,7 @@ pub fn t_native_new_computed_length(
   alloc_fn_cell(
     st,
     proto,
-    KNative(tag:, name:, length:, constructible: False),
+    NativeFn(token:, name:, length:, constructible: False),
     length_v,
     name,
   )
@@ -966,7 +967,7 @@ pub fn t_bound_new(
   alloc_fn_cell(
     st,
     Some(st.realm.function.prototype),
-    KBound(target:, bound_this:, bound_args:),
+    BoundFn(target:, bound_this:, bound_args:),
     length_v,
     bound_name,
   )

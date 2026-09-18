@@ -232,7 +232,7 @@ fn alloc_suppressed(
   let #(sup_prop, st) = common.builtin_property(st, suppressed)
   let props =
     list.append(msg_props, [#("error", err_prop), #("suppressed", sup_prop)])
-  let #(h, st) = common.alloc_error_slot(st, proto, props)
+  let #(h, st) = common.alloc_error_object(st, proto, props)
   let st = attach_stack(st, h, "SuppressedError", option.unwrap(message, ""))
   #(mk_object(h), st)
 }
@@ -304,7 +304,7 @@ fn alloc_error(
     }
     None -> #([], st)
   }
-  let #(h, st) = common.alloc_error_slot(st, proto, props)
+  let #(h, st) = common.alloc_error_object(st, proto, props)
   let name = error_name(st, Some(proto), 100)
   let st = attach_stack(st, h, name, option.unwrap(message, ""))
   install_error_cause(st, h, options)
@@ -402,8 +402,8 @@ pub fn attach_stack(st: Agent, h: Handle, name: String, msg: String) -> Agent {
   let trace = build_stack_trace(st, header)
   let #(stack_prop, st) = common.builtin_property(st, mk_string(trace))
   let st = rt_obj.devolve(st, h)
-  rt_store.t_cell_update(st, h, fn(slot) {
-    case slot {
+  rt_store.t_cell_update(st, h, fn(cell) {
+    case cell {
       SObject(kind: ErrorObj(..), ..) as s ->
         SObject(..s, kind: ErrorObj(stack: trace))
       SObject(props:, ..) as s ->

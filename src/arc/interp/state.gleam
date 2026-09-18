@@ -2,7 +2,7 @@ import arc/internal/tuple_array.{type TupleArray}
 import arc/rt/bytecode.{type FuncTemplate, type TryFrame}
 import arc/rt/gc as rt_gc
 import arc/rt/types.{
-  type Agent, type ErrorKind, type Handle, type JsVal, JsCell, RangeErr,
+  type Agent, type ErrorKind, type Handle, type JsVal, Handle, RangeErr,
   ReferenceErr, TypeErr,
 }
 import gleam/dynamic.{type Dynamic}
@@ -100,7 +100,7 @@ pub fn frame_roots(state: State) -> List(Handle) {
       eval_env,
     )
   list.fold(call_stack, acc, push_saved_frame)
-  |> list.map(JsCell)
+  |> list.map(Handle)
 }
 
 fn acc_frame(

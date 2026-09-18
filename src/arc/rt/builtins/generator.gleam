@@ -7,7 +7,7 @@ import arc/rt/types.{
   type Agent, type BuiltinPair, type GeneratorNative, type Handle, type JsVal,
   AsyncFunctionCtor, AsyncGeneratorFunctionCtor, AsyncGeneratorNext,
   AsyncGeneratorReturn, AsyncGeneratorThrow, BuiltinPair, GeneratorFunctionCtor,
-  GeneratorN, GeneratorNext, GeneratorReturn, GeneratorThrow, KNative,
+  GeneratorN, GeneratorNext, GeneratorReturn, GeneratorThrow, NativeFn,
   NoElements, SObject, mk_object, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
@@ -112,7 +112,7 @@ fn init_function_intrinsic(
     rt_store.t_cell_new(
       st,
       SObject(
-        kind: KNative(tag: ctor_tag, name:, length: 1, constructible: True),
+        kind: NativeFn(token: ctor_tag, name:, length: 1, constructible: True),
         proto: Some(fn_ctor),
         props: common.named_props([
           #("length", len_p),
@@ -142,9 +142,9 @@ fn init_function_intrinsic(
   }
   let #(tag_pair, st) = common.string_tag_property(st, name)
   let st =
-    rt_store.t_cell_update(st, gfn_proto, fn(slot) {
-      let assert SObject(..) = slot
-      SObject(..slot, props: common.named_props(proto_props), symbol_props: [
+    rt_store.t_cell_update(st, gfn_proto, fn(cell) {
+      let assert SObject(..) = cell
+      SObject(..cell, props: common.named_props(proto_props), symbol_props: [
         tag_pair,
       ])
     })

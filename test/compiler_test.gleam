@@ -77,11 +77,11 @@ fn promise_settlement(
   st: Agent,
   val: JsValueKind,
 ) -> option.Option(Result(JsValueKind, JsValueKind)) {
-  use ref <- option.then(case val {
-    JsObject(ref) -> Some(ref)
+  use h <- option.then(case val {
+    JsObject(h) -> Some(h)
     _ -> None
   })
-  use promise <- option.then(rt_async.as_promise(st, mk_object(ref)))
+  use promise <- option.then(rt_async.as_promise(st, mk_object(h)))
   case rt_async.promise_data(st, promise) {
     #(_, PromiseFulfilled(v), _) -> Some(Ok(engine.classify(v)))
     #(_, PromiseRejected(r), _) -> Some(Error(engine.classify(r)))
@@ -7241,9 +7241,9 @@ pub fn run_export_namespace_call_test() -> Nil {
       fn(_d, _p) { Error(load_error.ResolveForbidden) },
       fn(_resolved) { Error(load_error.LoadForbidden) },
     )
-  let assert #(st, Ok(module.EvaluatedBundle(namespace: ns_ref, ..))) =
+  let assert #(st, Ok(module.EvaluatedBundle(namespace: ns_h, ..))) =
     module.evaluate_bundle(bundle, agent(), rt_async.drain)
-  let namespace = mk_object(ns_ref)
+  let namespace = mk_object(ns_h)
 
   let assert Some(receive) = module.read_export(st, namespace, "receive")
 

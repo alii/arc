@@ -221,11 +221,11 @@ fn init_ctor(
 
 fn add_named_props(
   st: Agent,
-  ref: Handle,
+  h: Handle,
   props: List(#(String, types.Property)),
 ) -> Agent {
   use st, #(name, prop) <- list.fold(props, st)
-  common.add_named_property(st, ref, name, prop)
+  common.add_named_property(st, h, name, prop)
 }
 
 pub fn dispatch(
@@ -316,7 +316,7 @@ pub fn dispatch_construct(
 fn ta_create(st: Agent, ctor: JsVal, len: Int) -> #(JsVal, Handle, Agent) {
   let #(obj, obj_h, st) =
     ta_create_with_args(st, ctor, [mk_int(len)], Some(len))
-  let immutable = case ta_slot_of(st, obj_h) {
+  let immutable = case ta_view_of(st, obj_h) {
     Some(view) -> buffer.buffer_is_immutable(st, view.buffer)
     None -> False
   }
@@ -339,7 +339,7 @@ fn ta_create_with_args(
 ) -> #(JsVal, Handle, Agent) {
   let #(obj_h, st) = rt_call.t_construct(st, ctor, ctor_args, ctor)
   let obj = mk_object(obj_h)
-  case ta_slot_of(st, obj_h) {
+  case ta_view_of(st, obj_h) {
     Some(view) ->
       case view_witness_bytes(st, view) {
         Error(err) -> witness_type_error(st, err)
@@ -358,7 +358,7 @@ fn ta_create_with_args(
                 st,
                 "Derived TypedArray constructor created an array which was too small",
               )
-            _ -> #(obj, view.ref, st)
+            _ -> #(obj, view.ta, st)
           }
         }
       }
@@ -520,11 +520,11 @@ fn ta_construct(
     }
     [first, ..rest] ->
       case classify(first) {
-        KHandle(ref) -> {
+        KHandle(h) -> {
           let #(proto, st) = proto_from_new_target(st, new_target, kind)
-          case rt_store.t_cell_get(st, ref) {
+          case rt_store.t_cell_get(st, h) {
             SObject(kind: types.ArrayBufferObj(..), ..) ->
-              from_buffer(st, kind, proto, ref, rest)
+              from_buffer(st, kind, proto, h, rest)
             SObject(
               kind: TypedArrayObj(
                 buffer: src_buf,
@@ -549,7 +549,7 @@ fn ta_construct(
                   src_len,
                 ),
               )
-            _ -> from_object(st, kind, proto, first, ref)
+            _ -> from_object(st, kind, proto, first, h)
           }
         }
         _ -> {
@@ -562,12 +562,12 @@ fn ta_construct(
 }
 
 type FreshTa {
-  FreshTa(value: JsVal, ta_ref: Handle, buffer: Handle)
+  FreshTa(value: JsVal, ta: Handle, buffer: Handle)
 }
 
 fn fresh_handle(r: #(FreshTa, Agent)) -> #(Handle, Agent) {
   let #(fresh, st) = r
-  #(fresh.ta_ref, st)
+  #(fresh.ta, st)
 }
 
 // §23.2.5.1.1 allocatetypedarray
@@ -594,7 +594,7 @@ fn alloc_fresh_ta(
 ) -> #(FreshTa, Agent) {
   let #(buf, st) =
     array_buffer.alloc_buffer(st, st.realm.array_buffer.prototype, byte_len)
-  let #(ta_ref, st) =
+  let #(ta, st) =
     realm_ops.alloc_object(
       st,
       TypedArrayObj(
@@ -605,7 +605,7 @@ fn alloc_fresh_ta(
       ),
       proto,
     )
-  #(FreshTa(value: mk_object(ta_ref), ta_ref:, buffer: buf), st)
+  #(FreshTa(value: mk_object(ta), ta:, buffer: buf), st)
 }
 
 // §23.2.5.1.3 initializetypedarrayfromarraybuffer
@@ -613,7 +613,7 @@ fn from_buffer(
   st: Agent,
   kind: TypedArrayKind,
   proto: Handle,
-  buf_ref: Handle,
+  buf_h: Handle,
   rest: List(JsVal),
 ) -> #(Handle, Agent) {
   let size = typed_array_ffi.elem_size(kind)
@@ -636,7 +636,7 @@ fn from_buffer(
     }
   }
   // detached check after the observable conversions
-  case buffer.buffer_storage(st, buf_ref) |> option.then(types.buffer_bits) {
+  case buffer.buffer_storage(st, buf_h) |> option.then(types.buffer_bits) {
     None ->
       rt_val.t_throw_type_error(
         st,
@@ -646,14 +646,14 @@ fn from_buffer(
       let buf_len = bit_array.byte_size(data)
       let range_err = fn(msg) { rt_val.t_throw_range_error(st, msg) }
       let resizable =
-        buffer.buffer_storage(st, buf_ref)
+        buffer.buffer_storage(st, buf_h)
         |> option.then(types.buffer_max_byte_length)
         |> option.is_some
       case new_len {
         None if resizable ->
           case offset > buf_len {
             True -> range_err("Invalid typed array offset")
-            False -> alloc_ta_view(st, kind, proto, buf_ref, offset, None)
+            False -> alloc_ta_view(st, kind, proto, buf_h, offset, None)
           }
         None ->
           case buf_len % size != 0 {
@@ -672,7 +672,7 @@ fn from_buffer(
                     st,
                     kind,
                     proto,
-                    buf_ref,
+                    buf_h,
                     offset,
                     Some({ buf_len - offset } / size),
                   )
@@ -681,7 +681,7 @@ fn from_buffer(
         Some(l) ->
           case offset + l * size > buf_len {
             True -> range_err("Invalid typed array length")
-            False -> alloc_ta_view(st, kind, proto, buf_ref, offset, Some(l))
+            False -> alloc_ta_view(st, kind, proto, buf_h, offset, Some(l))
           }
       }
     }
@@ -692,13 +692,13 @@ fn alloc_ta_view(
   st: Agent,
   kind: TypedArrayKind,
   proto: Handle,
-  buf_ref: Handle,
+  buf_h: Handle,
   byte_offset: Int,
   len: Option(Int),
 ) -> #(Handle, Agent) {
   realm_ops.alloc_object(
     st,
-    TypedArrayObj(buffer: buf_ref, elem_kind: kind, byte_offset:, length: len),
+    TypedArrayObj(buffer: buf_h, elem_kind: kind, byte_offset:, length: len),
     proto,
   )
 }
@@ -755,7 +755,7 @@ fn from_typed_array(
       }
       let #(fresh, st) = alloc_fresh_ta(st, kind, proto, byte_len, src_len)
       let st = buffer.store_region(st, fresh.buffer, new_data, 0, byte_len)
-      #(fresh.ta_ref, st)
+      #(fresh.ta, st)
     }
   }
 }
@@ -824,7 +824,7 @@ fn from_object(
   kind: TypedArrayKind,
   proto: Handle,
   obj_val: JsVal,
-  obj_ref: Handle,
+  obj_h: Handle,
 ) -> #(Handle, Agent) {
   let #(iter_fn, st) =
     rt_obj.t_get_prop(st, obj_val, SymbolKey(symbol_iterator))
@@ -835,9 +835,9 @@ fn from_object(
       let #(values, st) = iter_protocol.iterator_to_list(st, rec)
       let #(fresh, st) =
         alloc_ta_with_length(st, kind, proto, list.length(values))
-      case try_bulk_store(st, fresh.ta_ref, 0, values) {
-        Some(st) -> #(fresh.ta_ref, st)
-        None -> #(fresh.ta_ref, store_list(st, fresh, values, 0))
+      case try_bulk_store(st, fresh.ta, 0, values) {
+        Some(st) -> #(fresh.ta, st)
+        None -> #(fresh.ta, store_list(st, fresh, values, 0))
       }
     }
     False -> {
@@ -846,11 +846,11 @@ fn from_object(
       let #(len, st) = rt_val.t_to_length(st, len_val)
       let #(fresh, st) = alloc_ta_with_length(st, kind, proto, len)
       let bulk =
-        buffer.plain_indexed_values(st, obj_ref, len)
-        |> option.then(try_bulk_store(st, fresh.ta_ref, 0, _))
+        buffer.plain_indexed_values(st, obj_h, len)
+        |> option.then(try_bulk_store(st, fresh.ta, 0, _))
       case bulk {
-        Some(st) -> #(fresh.ta_ref, st)
-        None -> #(fresh.ta_ref, store_array_like(st, fresh, obj_val, 0, len))
+        Some(st) -> #(fresh.ta, st)
+        None -> #(fresh.ta, store_array_like(st, fresh, obj_val, 0, len))
       }
     }
   }
@@ -865,7 +865,7 @@ fn store_list(
   case values {
     [] -> st
     [v, ..rest] -> {
-      let st = set_index(st, fresh.ta_ref, fresh.value, idx, v)
+      let st = set_index(st, fresh.ta, fresh.value, idx, v)
       store_list(st, fresh, rest, idx + 1)
     }
   }
@@ -882,7 +882,7 @@ fn store_array_like(
     True -> st
     False -> {
       let #(v, st) = rt_obj.t_get_prop(st, obj_val, StringKey(Index(k)))
-      let st = set_index(st, fresh.ta_ref, fresh.value, k, v)
+      let st = set_index(st, fresh.ta, fresh.value, k, v)
       store_array_like(st, fresh, obj_val, k + 1, len)
     }
   }
@@ -923,10 +923,10 @@ fn relative_index(i: IntOrInf, length: Int) -> Int {
   }
 }
 
-// declared slots; length None = length-tracking view
+// declared fields; length None = length-tracking view
 type TaView {
   TaView(
-    ref: Handle,
+    ta: Handle,
     buffer: Handle,
     kind: TypedArrayKind,
     byte_offset: Int,
@@ -934,10 +934,10 @@ type TaView {
   )
 }
 
-// length is a snapshot, ref is live; element reads go through ref
+// length is a snapshot, ta is live; element reads go through ta
 type TaWitness {
   TaWitness(
-    ref: Handle,
+    ta: Handle,
     buffer: Handle,
     kind: TypedArrayKind,
     byte_offset: Int,
@@ -945,17 +945,17 @@ type TaWitness {
   )
 }
 
-fn ta_slot(st: Agent, v: JsVal) -> Option(TaView) {
+fn ta_view(st: Agent, v: JsVal) -> Option(TaView) {
   case classify(v) {
-    KHandle(ref) -> ta_slot_of(st, ref)
+    KHandle(h) -> ta_view_of(st, h)
     _ -> None
   }
 }
 
-fn ta_slot_of(st: Agent, ref: Handle) -> Option(TaView) {
-  case rt_store.t_cell_get(st, ref) {
+fn ta_view_of(st: Agent, ta: Handle) -> Option(TaView) {
+  case rt_store.t_cell_get(st, ta) {
     SObject(kind: TypedArrayObj(buffer:, elem_kind:, byte_offset:, length:), ..) ->
-      Some(TaView(ref:, buffer:, kind: elem_kind, byte_offset:, length:))
+      Some(TaView(ta:, buffer:, kind: elem_kind, byte_offset:, length:))
     _ -> None
   }
 }
@@ -963,11 +963,11 @@ fn ta_slot_of(st: Agent, ref: Handle) -> Option(TaView) {
 // fast path when no value runs user code; None = use per-element path
 fn try_bulk_store(
   st: Agent,
-  ta_ref: Handle,
+  ta_h: Handle,
   start: Int,
   values: List(JsVal),
 ) -> Option(Agent) {
-  use view <- option.then(ta_slot_of(st, ta_ref))
+  use view <- option.then(ta_view_of(st, ta_h))
   let TaView(buffer: buf, kind:, byte_offset:, length:, ..) = view
   use region <- option.then(buffer.typed_array_encode_primitives(kind, values))
   case buffer.buffer_bytes(st, buf) {
@@ -997,10 +997,10 @@ fn try_bulk_store(
 }
 
 fn require_ta(st: Agent, this: JsVal) -> TaWitness {
-  case ta_slot(st, this) {
-    Some(TaView(ref:, buffer: buf, kind:, byte_offset:, length:)) ->
+  case ta_view(st, this) {
+    Some(TaView(ta:, buffer: buf, kind:, byte_offset:, length:)) ->
       TaWitness(
-        ref:,
+        ta:,
         buffer: buf,
         kind:,
         byte_offset:,
@@ -1056,7 +1056,7 @@ fn get_buffer(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 fn witness_in_bounds(st: Agent, witness: TaWitness) -> Bool {
   let TaWitness(buffer: buf, kind:, byte_offset:, length:, ..) = witness
   let view =
-    buffer.ViewSlot(
+    buffer.View(
       buffer: buf,
       elem_kind: kind,
       byte_offset:,
@@ -1096,7 +1096,7 @@ fn get_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 
 // §23.2.3.38 undefined for foreign receivers, no throw
 fn get_to_string_tag(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  case ta_slot(st, this) {
+  case ta_view(st, this) {
     Some(view) -> #(mk_string(typed_array_name(view.kind)), st)
     None -> #(mk_undefined(), st)
   }
@@ -1184,8 +1184,8 @@ fn proto_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let dst_data = witness_bytes(st, this)
   let len = ta_live_length(st, this)
   case classify(src) {
-    KHandle(src_ref) ->
-      case ta_slot_of(st, src_ref) {
+    KHandle(src_h) ->
+      case ta_view_of(st, src_h) {
         Some(src_view) -> {
           let TaView(
             buffer: src_buf,
@@ -1302,9 +1302,9 @@ fn set_from_array_like(
     rt_val.t_throw_range_error(st, "offset is out of bounds")
   })
   let bulk = case classify(src) {
-    KHandle(src_ref) ->
-      buffer.plain_indexed_values(st, src_ref, src_len)
-      |> option.then(try_bulk_store(st, view.ref, offset, _))
+    KHandle(src_h) ->
+      buffer.plain_indexed_values(st, src_h, src_len)
+      |> option.then(try_bulk_store(st, view.ta, offset, _))
     _ -> None
   }
   case bulk {
@@ -1328,7 +1328,7 @@ fn set_array_like_loop(
     True -> st
     False -> {
       let #(v, st) = rt_obj.t_get_prop(st, src, StringKey(Index(k)))
-      let st = set_index(st, view.ref, mk_object(view.ref), offset + k, v)
+      let st = set_index(st, view.ta, mk_object(view.ta), offset + k, v)
       set_array_like_loop(st, view, offset, src, k + 1, src_len)
     }
   }
@@ -1340,7 +1340,7 @@ fn proto_subarray(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  case ta_slot(st, this) {
+  case ta_view(st, this) {
     Some(view) -> do_subarray(st, this, args, view)
     None ->
       rt_val.t_throw_type_error(
@@ -1389,8 +1389,8 @@ fn do_subarray(
       #(mk_object(h), st)
     }
     Some(ctor) -> {
-      let #(obj, obj_ref, st) = ta_create_with_args(st, ctor, ctor_args, None)
-      let #(obj, _) = check_content_type(st, obj, obj_ref, kind)
+      let #(obj, obj_h, st) = ta_create_with_args(st, ctor, ctor_args, None)
+      let #(obj, _) = check_content_type(st, obj, obj_h, kind)
       #(obj, st)
     }
   }
@@ -1413,11 +1413,11 @@ fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let start = relative_index(s, len)
   let end = relative_index(e, len)
   let count = int.max(end - start, 0)
-  let #(#(target, target_ref), st) = ta_species_create(st, this, kind, count)
+  let #(#(target, target_h), st) = ta_species_create(st, this, kind, count)
   use <- bool.guard(count == 0, #(target, st))
   // revalidate source, species ctor may have detached or shrunk it
   let _source_bytes = witness_bytes(st, this)
-  case ta_slot(st, target) {
+  case ta_view(st, target) {
     Some(TaView(
       buffer: target_buf,
       kind: target_kind,
@@ -1464,7 +1464,7 @@ fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
             join_collect(st, view, start, [])
             |> list.reverse
             |> list.take(count)
-          #(target, write_values(st, target, target_ref, elements, 0))
+          #(target, write_values(st, target, target_h, elements, 0))
         }
       }
     None -> #(target, st)
@@ -1540,7 +1540,7 @@ fn join_parts(
     True -> acc
     False -> {
       // live read: separator tostring may have shrunk the buffer
-      let s = case option.map(ta_read(st, view.ref, i), classify) {
+      let s = case option.map(ta_read(st, view.ta, i), classify) {
         Some(KNum(n)) -> rt_val.jsnum_to_string(n)
         Some(KBig(b)) -> int.to_string(b)
         _ -> ""
@@ -1605,7 +1605,7 @@ fn search_loop(
   case i >= view.length {
     True -> -1
     False -> {
-      let matched = case ta_read(st, view.ref, i) {
+      let matched = case ta_read(st, view.ta, i) {
         Some(el) -> eq(el, search)
         None -> missing_undefined && eq(mk_undefined(), search)
       }
@@ -1624,13 +1624,13 @@ fn proto_iter(
   iter_kind: ArrayIterKind,
 ) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
-  let #(iter_ref, st) =
+  let #(iter_h, st) =
     realm_ops.alloc_object(
       st,
-      ArrayIterator(target: view.ref, index: 0, kind: iter_kind),
+      ArrayIterator(target: view.ta, index: 0, kind: iter_kind),
       st.realm.array_iter_proto,
     )
-  #(mk_object(iter_ref), st)
+  #(mk_object(iter_h), st)
 }
 
 // reversed, stops at first invalid index (user code shrunk buffer)
@@ -1643,7 +1643,7 @@ fn join_collect(
   case i >= view.length {
     True -> acc
     False ->
-      case ta_read(st, view.ref, i) {
+      case ta_read(st, view.ta, i) {
         Some(v) -> join_collect(st, view, i + 1, [v, ..acc])
         None -> acc
       }
@@ -1685,14 +1685,14 @@ fn set_index(
 }
 
 // §10.4.5.15 against the live view, None = invalid index
-fn ta_read(st: Agent, ta_ref: Handle, k: Int) -> Option(JsVal) {
-  use view <- option.then(ta_slot_of(st, ta_ref))
+fn ta_read(st: Agent, ta_h: Handle, k: Int) -> Option(JsVal) {
+  use view <- option.then(ta_view_of(st, ta_h))
   let TaView(buffer: buf, kind:, byte_offset:, length:, ..) = view
   buffer.typed_array_element_live(st, buf, kind, byte_offset, length, k)
 }
 
-fn ta_get(st: Agent, ta_ref: Handle, k: Int) -> JsVal {
-  ta_read(st, ta_ref, k) |> option.unwrap(mk_undefined())
+fn ta_get(st: Agent, ta_h: Handle, k: Int) -> JsVal {
+  ta_read(st, ta_h, k) |> option.unwrap(mk_undefined())
 }
 
 fn witness_type_error(st: Agent, err: buffer.ViewWitnessError) -> a {
@@ -1726,7 +1726,7 @@ fn ta_witness_bytes(
   st: Agent,
   this: JsVal,
 ) -> Result(BitArray, buffer.ViewWitnessError) {
-  case ta_slot(st, this) {
+  case ta_view(st, this) {
     Some(view) -> view_witness_bytes(st, view)
     None -> Error(buffer.NotAView)
   }
@@ -1734,7 +1734,7 @@ fn ta_witness_bytes(
 
 // §10.4.5.14 bound: current count of valid indices
 fn ta_live_length(st: Agent, this: JsVal) -> Int {
-  case ta_slot(st, this) {
+  case ta_view(st, this) {
     Some(TaView(buffer: buf, kind:, byte_offset:, length:, ..)) ->
       buffer.typed_array_live_count(st, buf, kind, byte_offset, length)
     None -> 0
@@ -1770,12 +1770,12 @@ fn iterate_calls(
   decide: fn(JsVal, JsVal, Int) -> Option(JsVal),
 ) -> #(Option(JsVal), Agent) {
   use <- bool.guard(k < 0 || k >= view.length, #(None, st))
-  let el = ta_get(st, view.ref, k)
+  let el = ta_get(st, view.ta, k)
   let #(res, st) =
     rt_call.t_call_checked(st, cb, this_arg, [
       el,
       mk_int(k),
-      mk_object(view.ref),
+      mk_object(view.ta),
     ])
   case decide(res, el, k) {
     Some(v) -> #(Some(v), st)
@@ -1860,9 +1860,9 @@ fn proto_find(
 fn proto_map(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
   let #(cb, this_arg) = require_cb(st, args)
-  let #(#(target, target_ref), st) =
+  let #(#(target, target_h), st) =
     ta_species_create(st, this, view.kind, view.length)
-  #(target, map_loop(st, view, 0, cb, this_arg, target, target_ref))
+  #(target, map_loop(st, view, 0, cb, this_arg, target, target_h))
 }
 
 fn map_loop(
@@ -1872,18 +1872,18 @@ fn map_loop(
   cb: JsVal,
   this_arg: JsVal,
   target: JsVal,
-  target_ref: Handle,
+  target_h: Handle,
 ) -> Agent {
   use <- bool.guard(k >= view.length, st)
-  let el = ta_get(st, view.ref, k)
+  let el = ta_get(st, view.ta, k)
   let #(mapped, st) =
     rt_call.t_call_checked(st, cb, this_arg, [
       el,
       mk_int(k),
-      mk_object(view.ref),
+      mk_object(view.ta),
     ])
-  let st = set_index(st, target_ref, target, k, mapped)
-  map_loop(st, view, k + 1, cb, this_arg, target, target_ref)
+  let st = set_index(st, target_h, target, k, mapped)
+  map_loop(st, view, k + 1, cb, this_arg, target, target_h)
 }
 
 fn proto_filter(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
@@ -1891,9 +1891,9 @@ fn proto_filter(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(cb, this_arg) = require_cb(st, args)
   let #(kept_rev, st) = filter_collect(st, view, 0, cb, this_arg, [])
   let kept = list.reverse(kept_rev)
-  let #(#(target, target_ref), st) =
+  let #(#(target, target_h), st) =
     ta_species_create(st, this, view.kind, list.length(kept))
-  #(target, write_values(st, target, target_ref, kept, 0))
+  #(target, write_values(st, target, target_h, kept, 0))
 }
 
 fn filter_collect(
@@ -1905,12 +1905,12 @@ fn filter_collect(
   acc: List(JsVal),
 ) -> #(List(JsVal), Agent) {
   use <- bool.guard(k >= view.length, #(acc, st))
-  let el = ta_get(st, view.ref, k)
+  let el = ta_get(st, view.ta, k)
   let #(res, st) =
     rt_call.t_call_checked(st, cb, this_arg, [
       el,
       mk_int(k),
-      mk_object(view.ref),
+      mk_object(view.ta),
     ])
   let acc = case rt_val.to_boolean(res) {
     True -> [el, ..acc]
@@ -1922,15 +1922,15 @@ fn filter_collect(
 fn write_values(
   st: Agent,
   target: JsVal,
-  target_ref: Handle,
+  target_h: Handle,
   values: List(JsVal),
   k: Int,
 ) -> Agent {
   case values {
     [] -> st
     [v, ..rest] -> {
-      let st = set_index(st, target_ref, target, k, v)
-      write_values(st, target, target_ref, rest, k + 1)
+      let st = set_index(st, target_h, target, k, v)
+      write_values(st, target, target_h, rest, k + 1)
     }
   }
 }
@@ -1958,7 +1958,7 @@ fn proto_reduce(
             "Reduce of empty array with no initial value",
           )
         False -> {
-          let acc = ta_get(st, view.ref, start)
+          let acc = ta_get(st, view.ta, start)
           reduce_loop(st, view, start + direction_step(dir), dir, cb, acc)
         }
       }
@@ -1974,13 +1974,13 @@ fn reduce_loop(
   acc: JsVal,
 ) -> #(JsVal, Agent) {
   use <- bool.guard(k < 0 || k >= view.length, #(acc, st))
-  let el = ta_get(st, view.ref, k)
+  let el = ta_get(st, view.ta, k)
   let #(res, st) =
     rt_call.t_call_checked(st, cb, mk_undefined(), [
       acc,
       el,
       mk_int(k),
-      mk_object(view.ref),
+      mk_object(view.ta),
     ])
   reduce_loop(st, view, k + direction_step(dir), dir, cb, res)
 }
@@ -2152,23 +2152,23 @@ fn proto_last_index_of(
           }
         INegInf -> -1
       }
-      #(mk_int(search_down(st, view.ref, k, search)), st)
+      #(mk_int(search_down(st, view.ta, k, search)), st)
     }
   }
 }
 
 // invalid indices skipped per hasproperty
-fn search_down(st: Agent, ta_ref: Handle, k: Int, search: JsVal) -> Int {
+fn search_down(st: Agent, ta_h: Handle, k: Int, search: JsVal) -> Int {
   case k < 0 {
     True -> -1
     False ->
-      case ta_read(st, ta_ref, k) {
+      case ta_read(st, ta_h, k) {
         Some(el) ->
           case rt_val.strict_equal(el, search) {
             True -> k
-            False -> search_down(st, ta_ref, k - 1, search)
+            False -> search_down(st, ta_h, k - 1, search)
           }
-        None -> search_down(st, ta_ref, k - 1, search)
+        None -> search_down(st, ta_h, k - 1, search)
       }
   }
 }
@@ -2402,7 +2402,7 @@ fn locale_loop(
     mk_string(string.join(list.reverse(acc), ",")),
     st,
   ))
-  let el = ta_get(st, view.ref, k)
+  let el = ta_get(st, view.ta, k)
   case rt_val.is_nullish(el) {
     True -> locale_loop(st, view, k + 1, locales_v, options_v, ["", ..acc])
     False -> {
@@ -2431,8 +2431,8 @@ fn resolve_species_ctor(
         rt_obj.t_get_prop(st, ctor, SymbolKey(symbol_species))
       case classify(species) {
         KNull | KUndef -> #(None, st)
-        KHandle(species_ref) ->
-          case species_ref == default_ctor {
+        KHandle(species_h) ->
+          case species_h == default_ctor {
             True -> #(None, st)
             False ->
               case rt_call.is_constructor(st, species) {
@@ -2458,13 +2458,13 @@ fn resolve_species_ctor(
 fn check_content_type(
   st: Agent,
   obj: JsVal,
-  obj_ref: Handle,
+  obj_h: Handle,
   kind: TypedArrayKind,
 ) -> #(JsVal, Handle) {
-  case ta_slot_of(st, obj_ref) {
+  case ta_view_of(st, obj_h) {
     Some(TaView(kind: result_kind, ..)) ->
       case same_content_type(result_kind, kind) {
-        True -> #(obj, obj_ref)
+        True -> #(obj, obj_h)
         False ->
           rt_val.t_throw_type_error(
             st,
@@ -2485,11 +2485,11 @@ fn ta_species_create(
   case maybe_ctor {
     None -> {
       let #(fresh, st) = ta_same_type_create(st, kind, len)
-      #(#(fresh.value, fresh.ta_ref), st)
+      #(#(fresh.value, fresh.ta), st)
     }
     Some(species) -> {
-      let #(obj, obj_ref, st) = ta_create(st, species, len)
-      #(check_content_type(st, obj, obj_ref, kind), st)
+      let #(obj, obj_h, st) = ta_create(st, species, len)
+      #(check_content_type(st, obj, obj_h, kind), st)
     }
   }
 }

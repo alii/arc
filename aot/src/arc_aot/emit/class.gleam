@@ -78,7 +78,7 @@ fn store_class_const(
     )
   case b.boxed {
     True ->
-      host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, b.slot)), v], k)
+      host_unit_(e, "box_set", [ir.Var(state.get_slot_var(e, b.slot)), v], k)
     False -> {
       let vn = state.slot_base_name(e, b.slot)
       use body <- state.map_tree(k(state.set_slot_var(e, b.slot, vn)))
@@ -95,7 +95,7 @@ fn read_class_const(
   let b = class_scope_binding(e, name)
   let v = ir.Var(state.get_slot_var(e, b.slot))
   case b.boxed {
-    True -> host_(e, "cell_get", [v], k)
+    True -> host_(e, "box_get", [v], k)
     False -> k(e, v)
   }
 }
@@ -260,9 +260,9 @@ fn emit_ctor_and_create(
   use e, proto <- host_(e, "class_setup", [ctor, parent_class])
   let assert [ctx, ..] = e.class_stack
     as "emit_2core/class: emit_ctor_and_create with empty class_stack"
-  use e <- host_unit_(e, "cell_set", [ctx.proto_home_box, proto])
-  use e <- host_unit_(e, "cell_set", [ctx.static_home_box, ctor])
-  use e <- host_unit_(e, "cell_set", [ctx.ctor_self_box, ctor])
+  use e <- host_unit_(e, "box_set", [ctx.proto_home_box, proto])
+  use e <- host_unit_(e, "box_set", [ctx.static_home_box, ctor])
+  use e <- host_unit_(e, "box_set", [ctx.ctor_self_box, ctor])
   k(e, #(ctor, proto))
 }
 
@@ -316,14 +316,14 @@ pub fn emit_class(
     store_class_const(e, pname, key, next)
   })
   let is_derived = option.is_some(super_class)
-  use e, proto_home_box <- host_(e, "cell_new", [e.consts.undef])
-  use e, static_home_box <- host_(e, "cell_new", [e.consts.undef])
-  use e, ctor_self_box <- host_(e, "cell_new", [e.consts.undef])
+  use e, proto_home_box <- host_(e, "box_new", [e.consts.undef])
+  use e, static_home_box <- host_(e, "box_new", [e.consts.undef])
+  use e, ctor_self_box <- host_(e, "box_new", [e.consts.undef])
   let with_inner_box = fn(e: Emitter, then: NextWith(Option(ir.Value))) {
     case binding_name {
       None -> then(e, None)
       Some(_) -> {
-        use e, box <- host_(e, "cell_new", [e.consts.undef])
+        use e, box <- host_(e, "box_new", [e.consts.undef])
         then(e, Some(box))
       }
     }
@@ -505,7 +505,7 @@ fn read_captured_const(
     scope.Plain(scope.Local(slot:, boxed:, ..)) -> {
       let v = ir.Var(state.get_slot_var(e, slot))
       case boxed {
-        True -> host_(e, "cell_get", [v], k)
+        True -> host_(e, "box_get", [v], k)
         False -> k(e, v)
       }
     }
@@ -634,7 +634,7 @@ fn build_class_init_closure(
           Some(slot) -> {
             let v = ir.Var(state.get_slot_var(ec, slot))
             case state.lexical_is_boxed(ec, child_info, lexical.RefThis) {
-              True -> host_(ec, "cell_get", [v], k)
+              True -> host_(ec, "box_get", [v], k)
               False -> k(ec, v)
             }
           }

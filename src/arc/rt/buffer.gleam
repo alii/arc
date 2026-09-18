@@ -45,10 +45,10 @@ fn live_byte_size(st: Agent, buffer: Handle) -> Int {
 }
 
 pub fn set_storage(st: Agent, buffer: Handle, storage: BufferStorage) -> Agent {
-  use slot <- rt_store.t_cell_update(st, buffer)
-  let assert SObject(kind: ArrayBufferObj(..), ..) = slot
+  use cell <- rt_store.t_cell_update(st, buffer)
+  let assert SObject(kind: ArrayBufferObj(..), ..) = cell
     as "buffer.set_storage: handle does not hold an ArrayBuffer"
-  SObject(..slot, kind: ArrayBufferObj(storage:))
+  SObject(..cell, kind: ArrayBufferObj(storage:))
 }
 
 pub fn store_region(
@@ -58,11 +58,11 @@ pub fn store_region(
   byte_offset: Int,
   count: Int,
 ) -> Agent {
-  use slot <- rt_store.t_cell_update(st, buffer)
-  let assert SObject(kind: ArrayBufferObj(storage:), ..) = slot
+  use cell <- rt_store.t_cell_update(st, buffer)
+  let assert SObject(kind: ArrayBufferObj(storage:), ..) = cell
     as "buffer.store_region: handle does not hold an ArrayBuffer"
   SObject(
-    ..slot,
+    ..cell,
     kind: ArrayBufferObj(storage: types.buffer_store_region(
       storage,
       new_bits,
@@ -72,8 +72,8 @@ pub fn store_region(
   )
 }
 
-pub type ViewSlot {
-  ViewSlot(
+pub type View {
+  View(
     buffer: Handle,
     elem_kind: TypedArrayKind,
     byte_offset: Int,
@@ -138,7 +138,7 @@ pub fn view_in_bounds(view: ResolvedView) -> Bool {
   view.byte_offset + view.len * view.elem_size <= view.byte_size
 }
 
-pub fn view_length(st: Agent, view: ViewSlot) -> Int {
+pub fn view_length(st: Agent, view: View) -> Int {
   resolve_len(
     live_byte_size(st, view.buffer),
     typed_array_ffi.elem_size(view.elem_kind),
@@ -147,8 +147,8 @@ pub fn view_length(st: Agent, view: ViewSlot) -> Int {
   )
 }
 
-pub fn live_view(st: Agent, view: ViewSlot) -> Option(ResolvedView) {
-  let ViewSlot(buffer:, elem_kind:, byte_offset:, length:) = view
+pub fn live_view(st: Agent, view: View) -> Option(ResolvedView) {
+  let View(buffer:, elem_kind:, byte_offset:, length:) = view
   use data <- option.map(buffer_bytes(st, buffer))
   resolve_view(bit_array.byte_size(data), elem_kind, byte_offset, length)
 }
@@ -164,7 +164,7 @@ pub fn typed_array_view_length(
   byte_offset: Int,
   length: Option(Int),
 ) -> Int {
-  view_length(st, ViewSlot(buffer:, elem_kind:, byte_offset:, length:))
+  view_length(st, View(buffer:, elem_kind:, byte_offset:, length:))
 }
 
 pub fn typed_array_element(
@@ -336,7 +336,7 @@ fn jsnum_to_store_int(n: JsNum) -> Int {
 
 pub fn typed_array_store(
   st: Agent,
-  view: ViewSlot,
+  view: View,
   idx: Option(Int),
   val: JsVal,
 ) -> #(Bool, Agent) {
@@ -360,14 +360,14 @@ pub fn typed_array_store(
 
 fn do_typed_store(
   st: Agent,
-  view: ViewSlot,
+  view: View,
   idx: Option(Int),
   write: fn(BitArray, Int) -> BitArray,
 ) -> #(Bool, Agent) {
   case idx {
     Some(i) ->
       case rt_store.t_cell_get(st, view.buffer) {
-        SObject(kind: ArrayBufferObj(storage:), ..) as slot -> {
+        SObject(kind: ArrayBufferObj(storage:), ..) as cell -> {
           let size = typed_array_ffi.elem_size(view.elem_kind)
           // bounds resolved here: coercion may have resized the buffer
           let resolved =
@@ -390,7 +390,7 @@ fn do_typed_store(
                 rt_store.t_cell_set(
                   st,
                   view.buffer,
-                  SObject(..slot, kind: ArrayBufferObj(storage: new_storage)),
+                  SObject(..cell, kind: ArrayBufferObj(storage: new_storage)),
                 )
               #(True, st)
             }

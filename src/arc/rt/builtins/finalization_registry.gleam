@@ -6,12 +6,11 @@ import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type BuiltinPair, type FinRegCell, type FinalizationRegistryNative,
-  type Handle, type JsVal, type Realm, FinRegCell,
-  FinalizationRegistryConstructor, FinalizationRegistryN,
-  FinalizationRegistryObj, FinalizationRegistryPrototypeRegister,
-  FinalizationRegistryPrototypeUnregister, KUndef, SObject, classify, mk_bool,
-  mk_undefined,
+  type Agent, type BuiltinPair, type FinalizationRegistryNative, type Handle,
+  type JsVal, type Realm, type Registration, FinalizationRegistryConstructor,
+  FinalizationRegistryN, FinalizationRegistryObj,
+  FinalizationRegistryPrototypeRegister, FinalizationRegistryPrototypeUnregister,
+  KUndef, Registration, SObject, classify, mk_bool, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/list
@@ -98,7 +97,7 @@ fn construct(
     })
   realm_ops.alloc_object(
     st,
-    FinalizationRegistryObj(callback:, cells: []),
+    FinalizationRegistryObj(callback:, registrations: []),
     proto_h,
   )
 }
@@ -125,11 +124,14 @@ fn do_register(
   registry: RegistryRef,
   target: JsVal,
   held: JsVal,
-  token: Option(JsVal),
+  unregister_token: Option(JsVal),
 ) -> #(JsVal, Agent) {
-  let cell = FinRegCell(target:, held:, token:)
+  let registration = Registration(target:, held:, unregister_token:)
   // order is unobservable, so prepend
-  #(mk_undefined(), update_cells(st, registry, fn(cells) { [cell, ..cells] }))
+  #(
+    mk_undefined(),
+    update_registrations(st, registry, fn(rs) { [registration, ..rs] }),
+  )
 }
 
 fn unregister(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
@@ -139,13 +141,13 @@ fn unregister(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     rt_val.t_throw_type_error(st, "Invalid value used as unregister token")
   })
   let #(removed, kept) =
-    list.partition(read_cells(st, registry), fn(cell) {
-      case cell.token {
+    list.partition(read_registrations(st, registry), fn(r) {
+      case r.unregister_token {
         Some(t) -> rt_val.same_value(t, token)
         None -> False
       }
     })
-  let st = update_cells(st, registry, fn(_cells) { kept })
+  let st = update_registrations(st, registry, fn(_rs) { kept })
   #(mk_bool(removed != []), st)
 }
 
@@ -178,23 +180,28 @@ fn require_registry(
   cont(RegistryRef(h))
 }
 
-fn read_cells(st: Agent, registry: RegistryRef) -> List(FinRegCell) {
+fn read_registrations(st: Agent, registry: RegistryRef) -> List(Registration) {
   let RegistryRef(h) = registry
-  let assert SObject(kind: FinalizationRegistryObj(cells:, ..), ..) =
+  let assert SObject(kind: FinalizationRegistryObj(registrations:, ..), ..) =
     rt_store.t_cell_get(st, h)
-    as "finalization_registry: RegistryRef does not point at a registry slot"
-  cells
+    as "finalization_registry: RegistryRef does not point at a registry cell"
+  registrations
 }
 
-fn update_cells(
+fn update_registrations(
   st: Agent,
   registry: RegistryRef,
-  f: fn(List(FinRegCell)) -> List(FinRegCell),
+  f: fn(List(Registration)) -> List(Registration),
 ) -> Agent {
   let RegistryRef(h) = registry
-  rt_store.t_cell_update(st, h, fn(slot) {
-    let assert SObject(kind: FinalizationRegistryObj(callback:, cells:), ..) =
-      slot
-    SObject(..slot, kind: FinalizationRegistryObj(callback:, cells: f(cells)))
+  rt_store.t_cell_update(st, h, fn(cell) {
+    let assert SObject(
+      kind: FinalizationRegistryObj(callback:, registrations:),
+      ..,
+    ) = cell
+    SObject(
+      ..cell,
+      kind: FinalizationRegistryObj(callback:, registrations: f(registrations)),
+    )
   })
 }

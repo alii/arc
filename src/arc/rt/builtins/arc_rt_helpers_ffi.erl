@@ -38,7 +38,7 @@ next(Data, {?SOME, {?HANDLE_TAG, Id}}, Sym, Recv, Fuel) ->
 
 returns_this(Data, {?HANDLE_TAG, G}, Recv) ->
     case arc_rt_arena_ffi:get(G, Data) of
-        {?SOBJECT_TAG, {?KNATIVE_TAG, return_this, _, _, _}, _, _, _, _, _} -> Recv;
+        {?SOBJECT_TAG, {?NATIVEFN_TAG, return_this, _, _, _}, _, _, _, _, _} -> Recv;
         _ -> miss
     end;
 returns_this(_, _, _) -> miss.

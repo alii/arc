@@ -137,14 +137,18 @@ fn profile(label: String, source: String, runs: Int, iters: Int) -> Nil {
   )
 
   let fast =
-    count_of(atom.create("arc_rt_call_ffi"), atom.create("t_kfn_code"), 3)
+    count_of(
+      atom.create("arc_rt_call_ffi"),
+      atom.create("t_compiled_fn_code"),
+      3,
+    )
   let slow =
     count_of(atom.create("arc@rt@call"), atom.create("t_call_checked"), 4)
   case fast + slow {
     0 -> Nil
     _ ->
       io.println(
-        "  fast-path: kfn_code="
+        "  fast-path: compiled_fn_code="
         <> int.to_string(fast)
         <> " ("
         <> int.to_string(fast / runs)
@@ -314,7 +318,7 @@ pub fn profile_file(label: String, path: String, runs: Int) -> Nil {
     #(rt("obj"), "t_get_prop_any", 3),
     #(rt("obj"), "t_set_prop_any", 4),
     #(rt("call"), "t_call_checked", 4),
-    #(rt("call"), "t_kfn_code", 3),
+    #(rt("call"), "t_compiled_fn_code", 3),
     #(rt("call"), "t_construct", 4),
     #(rt("ops"), "t_instance_of", 3),
     #(ffi("rt_obj_ffi"), "t_get_prop_own_data", 3),
@@ -385,17 +389,29 @@ fn microbench() {
   let #(_v, st_adder) = ffi_apply_js_main(mod, seed)
   let js = st_adder.store
   // inner fn is last cell, captured x is next-3
-  let add5_h = to_dynamic(#(atom.create("js_cell"), js.next - 1))
-  let x_h = to_dynamic(#(atom.create("js_cell"), js.next - 3))
-  micro("kfn_code (via Gleam wrapper)", "kfn_code", st_adder, add5_h, 1_000_000)
-  micro("kfn_code (FFI direct)", "kfn_code_ffi", st_adder, add5_h, 1_000_000)
+  let add5_h = to_dynamic(#(atom.create("handle"), js.next - 1))
+  let x_h = to_dynamic(#(atom.create("handle"), js.next - 3))
+  micro(
+    "compiled_fn_code (via Gleam wrapper)",
+    "compiled_fn_code",
+    st_adder,
+    add5_h,
+    1_000_000,
+  )
+  micro(
+    "compiled_fn_code (FFI direct)",
+    "compiled_fn_code_ffi",
+    st_adder,
+    add5_h,
+    1_000_000,
+  )
   micro("cell_get (via Gleam wrapper)", "cell_get", st_adder, x_h, 1_000_000)
   micro("cell_get (FFI direct)", "cell_get_ffi", st_adder, x_h, 1_000_000)
 
   let #(mod2, seed2) = compile_and_seed(obj_js, "arc_prof_micro_obj")
   let #(_v2, st_obj) = ffi_apply_js_main(mod2, seed2)
   let js2 = st_obj.store
-  let o_h = to_dynamic(#(atom.create("js_cell"), js2.next - 1))
+  let o_h = to_dynamic(#(atom.create("handle"), js2.next - 1))
   let key =
     to_dynamic(#(
       atom.create("string_key"),
@@ -446,7 +462,7 @@ const richards_baseline = [
   #("arc_rt_call_ffi", "t_new_simple", 3, 32),
   #("arc_rt_call_ffi", "t_call_method_ic", 5, 40_466),
   #("arc_rt_store_ffi", "t_cell_get", 2, 1320),
-  #("arc_rt_call_ffi", "t_kfn_code", 3, 1),
+  #("arc_rt_call_ffi", "t_compiled_fn_code", 3, 1),
 ]
 
 fn correctness_gate(label: String, path: String) -> Bool {

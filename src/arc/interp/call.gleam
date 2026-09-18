@@ -19,11 +19,11 @@ import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type FnFlags, type Handle, type JsSlot, type JsVal,
-  type NativeToken, Agent, ArgumentsObj, ArrayObj, FrameInfo, FunctionApply,
-  FunctionCall, FunctionN, KBound, KBytecode, KCompiled, KHandle, KNative, KNull,
-  KTdz, KUndef, ProxyObj, ReflectApply, ReflectN, SBox, SObject, classify,
-  mk_object, mk_tdz, mk_undefined,
+  type Agent, type Cell, type FnFlags, type Handle, type JsVal, type NativeToken,
+  Agent, ArgumentsObj, ArrayObj, BoundFn, BytecodeFn, CompiledFn, FrameInfo,
+  FunctionApply, FunctionCall, FunctionN, KHandle, KNull, KTdz, KUndef, NativeFn,
+  ProxyObj, ReflectApply, ReflectN, SBox, SObject, classify, mk_object, mk_tdz,
+  mk_undefined,
 }
 import gleam/bool
 import gleam/list
@@ -395,13 +395,13 @@ pub fn call(
   rest_stack: List(JsVal),
   drive: Drive,
 ) -> Result(State, StepExit) {
-  let slot = ffi.cell_of(state.agent, callee)
-  case ffi.is(slot, ffi.Miss) {
+  let cell = ffi.cell_of(state.agent, callee)
+  case ffi.is(cell, ffi.Miss) {
     False ->
       call_cell(
         state,
         ffi.handle([callee]),
-        slot,
+        cell,
         this,
         args,
         rest_stack,
@@ -428,15 +428,15 @@ pub fn call(
 pub fn call_cell(
   state: State,
   h: Handle,
-  slot: JsSlot,
+  cell: Cell,
   this: JsVal,
   args: List(JsVal),
   rest_stack: List(JsVal),
   drive: Drive,
 ) -> Result(State, StepExit) {
-  case slot {
+  case cell {
     SObject(
-      kind: KBytecode(template:, env:, home_object:, flags:, realm:, unit:, ..),
+      kind: BytecodeFn(template:, env:, home_object:, flags:, realm:, unit:, ..),
       ..,
     )
       if realm == state.agent.realm.id
@@ -463,7 +463,7 @@ pub fn call_cell(
       }
     }
     // §10.4.1.1 bound call
-    SObject(kind: KBound(target:, bound_this:, bound_args:), ..) ->
+    SObject(kind: BoundFn(target:, bound_this:, bound_args:), ..) ->
       call(
         state,
         mk_object(target),
@@ -473,7 +473,7 @@ pub fn call_cell(
         drive,
       )
     // §20.2.3.3 function.prototype.call
-    SObject(kind: KNative(tag: FunctionN(FunctionCall), ..), ..) -> {
+    SObject(kind: NativeFn(token: FunctionN(FunctionCall), ..), ..) -> {
       let #(this_arg, call_args) = case args {
         [t, ..rest] -> #(t, rest)
         [] -> #(mk_undefined(), [])
@@ -481,7 +481,7 @@ pub fn call_cell(
       call(state, this, this_arg, call_args, rest_stack, drive)
     }
     // §20.2.3.1 function.prototype.apply
-    SObject(kind: KNative(tag: FunctionN(FunctionApply), ..), ..) -> {
+    SObject(kind: NativeFn(token: FunctionN(FunctionApply), ..), ..) -> {
       let #(this_arg, arg_array) = case args {
         [t, a, ..] -> #(t, a)
         [t] -> #(t, mk_undefined())
@@ -495,7 +495,7 @@ pub fn call_cell(
       call(state, this, this_arg, call_args, rest_stack, drive)
     }
     // §28.1.1 reflect.apply
-    SObject(kind: KNative(tag: ReflectN(ReflectApply), ..), ..) -> {
+    SObject(kind: NativeFn(token: ReflectN(ReflectApply), ..), ..) -> {
       let #(target, this_arg, args_list) = case args {
         [t, a, l, ..] -> #(t, a, l)
         [t, a] -> #(t, a, mk_undefined())
@@ -510,11 +510,11 @@ pub fn call_cell(
       ))
       call(state, target, this_arg, call_args, rest_stack, drive)
     }
-    SObject(kind: KNative(tag:, ..), ..) ->
-      call_native(state, tag, mk_object(h), this, args, rest_stack)
+    SObject(kind: NativeFn(token:, ..), ..) ->
+      call_native(state, token, mk_object(h), this, args, rest_stack)
     // other-realm, compiled or proxy: nested activation
-    SObject(kind: KBytecode(..), ..)
-    | SObject(kind: KCompiled(..), ..)
+    SObject(kind: BytecodeFn(..), ..)
+    | SObject(kind: CompiledFn(..), ..)
     | SObject(kind: ProxyObj(..), ..) ->
       call_nested(state, mk_object(h), this, args, rest_stack)
     _ -> not_a_function(state, mk_object(h))
@@ -679,7 +679,7 @@ fn construct_handle(
 ) -> Result(State, StepExit) {
   case rt_store.t_cell_get(state.agent, ctor_h) {
     SObject(
-      kind: KBytecode(template:, env:, home_object:, flags:, realm:, unit:, ..),
+      kind: BytecodeFn(template:, env:, home_object:, flags:, realm:, unit:, ..),
       ..,
     )
       if realm == state.agent.realm.id
@@ -726,7 +726,7 @@ fn construct_handle(
         }
       }
     // §10.4.1.2 bound construct
-    SObject(kind: KBound(target:, bound_args:, ..), ..) -> {
+    SObject(kind: BoundFn(target:, bound_args:, ..), ..) -> {
       let nt = case classify(new_target) {
         KHandle(nt_h) if nt_h == ctor_h -> mk_object(target)
         _ -> new_target
@@ -911,8 +911,8 @@ pub fn arguments_object(state: State, simple_params: Bool) -> #(JsVal, Agent) {
         callee,
       )
     False -> {
-      let no_cells: List(Handle) = []
-      rt_obj.t_new_arguments(state.agent, state.call_args, no_cells, callee)
+      let no_boxes: List(Handle) = []
+      rt_obj.t_new_arguments(state.agent, state.call_args, no_boxes, callee)
     }
   }
 }

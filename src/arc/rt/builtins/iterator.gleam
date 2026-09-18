@@ -430,8 +430,8 @@ fn map_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: MapIterator(..), ..) as slot ->
-          yield_step(iter_protocol.map_iterator_step(st, h, slot))
+        SObject(kind: MapIterator(..), ..) as cell ->
+          yield_step(iter_protocol.map_iterator_step(st, h, cell))
         _ -> iter_incompatible(st, "Map")
       }
     _ -> iter_incompatible(st, "Map")
@@ -443,8 +443,8 @@ fn set_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: SetIterator(..), ..) as slot ->
-          yield_step(iter_protocol.set_iterator_step(st, h, slot))
+        SObject(kind: SetIterator(..), ..) as cell ->
+          yield_step(iter_protocol.set_iterator_step(st, h, cell))
         _ -> iter_incompatible(st, "Set")
       }
     _ -> iter_incompatible(st, "Set")
@@ -456,8 +456,8 @@ fn string_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: StringIterator(..), ..) as slot ->
-          yield_step(iter_protocol.string_iterator_step(st, h, slot))
+        SObject(kind: StringIterator(..), ..) as cell ->
+          yield_step(iter_protocol.string_iterator_step(st, h, cell))
         _ -> iter_incompatible(st, "String")
       }
     _ -> iter_incompatible(st, "String")
@@ -488,8 +488,8 @@ fn alloc_pair(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
 
 // re-reads the cell so getter mutations survive
 fn set_iter_kind(st: Agent, iter_h: Handle, kind: ObjKind) -> Agent {
-  rt_store.t_cell_update(st, iter_h, fn(slot) {
-    case slot {
+  rt_store.t_cell_update(st, iter_h, fn(cell) {
+    case cell {
       SObject(..) as obj -> SObject(..obj, kind:)
       other -> other
     }
@@ -801,13 +801,15 @@ const helper_running_err = "Iterator Helper is currently being iterated"
 
 // §27.1.4.1
 fn helper_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  use ref, gen_state, body <- require_helper(st, this)
-  use st <- resume(st, ref, gen_state)
+  use helper_h, gen_state, body <- require_helper(st, this)
+  use st <- resume(st, helper_h, gen_state)
   case body {
     ClassicHelper(kind:, underlying:, counter:) ->
-      classic_helper_next(st, ref, kind, underlying, counter)
-    ZipHelper(members:, mode:, keys:) -> zip_next(st, ref, members, mode, keys)
-    ConcatHelper(remaining:, inner:) -> concat_next(st, ref, remaining, inner)
+      classic_helper_next(st, helper_h, kind, underlying, counter)
+    ZipHelper(members:, mode:, keys:) ->
+      zip_next(st, helper_h, members, mode, keys)
+    ConcatHelper(remaining:, inner:) ->
+      concat_next(st, helper_h, remaining, inner)
   }
 }
 
@@ -830,7 +832,7 @@ fn require_helper(
 // §27.5.3.3 generatorresume
 fn resume(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   gen_state: GeneratorState,
   body: fn(Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
@@ -838,9 +840,9 @@ fn resume(
     GenExecuting -> rt_val.t_throw_type_error(st, helper_running_err)
     GenCompleted -> iter_done(st)
     GenSuspendedStart | GenSuspendedYield -> {
-      let st = set_gen_state(st, ref, GenExecuting)
+      let st = set_gen_state(st, helper_h, GenExecuting)
       let #(out, st) = protected_any(st, body)
-      let st = map_gen_state(st, ref, suspend_if_executing)
+      let st = map_gen_state(st, helper_h, suspend_if_executing)
       case out {
         NormalCompletion(v) -> #(v, st)
         ThrowCompletion(e) -> rt_store.t_throw(st, e)
@@ -852,15 +854,15 @@ fn resume(
 // §27.5.3.4 generatorresumeabrupt
 fn resume_abrupt(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   gen_state: GeneratorState,
   body: fn(Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   case gen_state {
     GenExecuting -> rt_val.t_throw_type_error(st, helper_running_err)
     GenCompleted -> iter_done(st)
-    GenSuspendedStart -> body(set_gen_state(st, ref, GenCompleted))
-    GenSuspendedYield -> body(set_gen_state(st, ref, GenExecuting))
+    GenSuspendedStart -> body(set_gen_state(st, helper_h, GenCompleted))
+    GenSuspendedYield -> body(set_gen_state(st, helper_h, GenExecuting))
   }
 }
 
@@ -871,20 +873,20 @@ fn suspend_if_executing(gs: GeneratorState) -> GeneratorState {
   }
 }
 
-fn set_gen_state(st: Agent, ref: Handle, gs: GeneratorState) -> Agent {
-  map_gen_state(st, ref, fn(_prev) { gs })
+fn set_gen_state(st: Agent, helper_h: Handle, gs: GeneratorState) -> Agent {
+  map_gen_state(st, helper_h, fn(_prev) { gs })
 }
 
 fn map_gen_state(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   update: fn(GeneratorState) -> GeneratorState,
 ) -> Agent {
-  rt_store.t_cell_update(st, ref, fn(slot) {
-    case slot {
+  rt_store.t_cell_update(st, helper_h, fn(cell) {
+    case cell {
       SObject(kind: IteratorHelperObj(gen_state:, ..) as k, ..) ->
         SObject(
-          ..slot,
+          ..cell,
           kind: IteratorHelperObj(..k, gen_state: update(gen_state)),
         )
       other -> other
@@ -894,36 +896,36 @@ fn map_gen_state(
 
 fn classic_helper_next(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   kind: IteratorHelperKind,
   underlying: IteratorRecord,
   counter: Int,
 ) -> #(JsVal, Agent) {
   case kind {
-    HelperMap(func:) -> step_map(st, ref, underlying, func, counter)
-    HelperFilter(func:) -> step_filter(st, ref, underlying, func, counter)
-    HelperTake(remaining:) -> step_take(st, ref, underlying, remaining)
-    HelperDrop(remaining:) -> step_drop(st, ref, underlying, remaining)
+    HelperMap(func:) -> step_map(st, helper_h, underlying, func, counter)
+    HelperFilter(func:) -> step_filter(st, helper_h, underlying, func, counter)
+    HelperTake(remaining:) -> step_take(st, helper_h, underlying, remaining)
+    HelperDrop(remaining:) -> step_drop(st, helper_h, underlying, remaining)
     HelperFlatMap(func:, inner:) ->
-      step_flat_map(st, ref, underlying, func, inner, counter)
+      step_flat_map(st, helper_h, underlying, func, inner, counter)
   }
 }
 
 // §27.1.4.2
 fn helper_return(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  use ref, gen_state, body <- require_helper(st, this)
-  use st <- resume_abrupt(st, ref, gen_state)
+  use helper_h, gen_state, body <- require_helper(st, this)
+  use st <- resume_abrupt(st, helper_h, gen_state)
   case body {
     ClassicHelper(kind:, underlying:, counter: _) ->
-      classic_helper_return(st, ref, kind, underlying)
-    ZipHelper(members:, mode: _, keys: _) -> zip_return(st, ref, members)
-    ConcatHelper(remaining: _, inner:) -> concat_return(st, ref, inner)
+      classic_helper_return(st, helper_h, kind, underlying)
+    ZipHelper(members:, mode: _, keys: _) -> zip_return(st, helper_h, members)
+    ConcatHelper(remaining: _, inner:) -> concat_return(st, helper_h, inner)
   }
 }
 
 fn classic_helper_return(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   kind: IteratorHelperKind,
   underlying: IteratorRecord,
 ) -> #(JsVal, Agent) {
@@ -937,7 +939,7 @@ fn classic_helper_return(
     | HelperDrop(remaining: _) -> #(Ok(Nil), st)
   }
   let #(outer_res, st) = close_normal_catch(st, underlying.iterator)
-  let st = mark_done(st, ref)
+  let st = mark_done(st, helper_h)
   case inner_res, outer_res {
     Error(e), _ -> rt_store.t_throw(st, e)
     _, Error(e) -> rt_store.t_throw(st, e)
@@ -947,21 +949,21 @@ fn classic_helper_return(
 
 fn step_map(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   underlying: IteratorRecord,
   func: JsVal,
   count: Int,
 ) -> #(JsVal, Agent) {
-  use step, st <- after_step(st, ref, underlying)
+  use step, st <- after_step(st, helper_h, underlying)
   case step {
-    None -> finish(st, ref)
+    None -> finish(st, helper_h)
     Some(v) -> {
-      let st = write_counter(st, ref, count + 1)
+      let st = write_counter(st, helper_h, count + 1)
       let idx = mk_int(count)
       case rt_call.t_call(st, func, mk_undefined(), [v, idx]) {
         #(rt_call.NormalCompletion(mapped), st) -> iter_yield(st, mapped)
         #(rt_call.ThrowCompletion(thrown), st) ->
-          close_throw_done(st, ref, underlying, thrown)
+          close_throw_done(st, helper_h, underlying, thrown)
       }
     }
   }
@@ -969,24 +971,24 @@ fn step_map(
 
 fn step_filter(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   underlying: IteratorRecord,
   func: JsVal,
   count: Int,
 ) -> #(JsVal, Agent) {
-  use step, st <- after_step(st, ref, underlying)
+  use step, st <- after_step(st, helper_h, underlying)
   case step {
-    None -> finish(st, ref)
+    None -> finish(st, helper_h)
     Some(v) -> {
-      let st = write_counter(st, ref, count + 1)
+      let st = write_counter(st, helper_h, count + 1)
       let idx = mk_int(count)
       case rt_call.t_call(st, func, mk_undefined(), [v, idx]) {
         #(rt_call.ThrowCompletion(thrown), st) ->
-          close_throw_done(st, ref, underlying, thrown)
+          close_throw_done(st, helper_h, underlying, thrown)
         #(rt_call.NormalCompletion(selected), st) ->
           case rt_val.to_boolean(selected) {
             True -> iter_yield(st, v)
-            False -> step_filter(st, ref, underlying, func, count + 1)
+            False -> step_filter(st, helper_h, underlying, func, count + 1)
           }
       }
     }
@@ -995,21 +997,21 @@ fn step_filter(
 
 fn step_take(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   underlying: IteratorRecord,
   remaining: Int,
 ) -> #(JsVal, Agent) {
   case remaining <= 0 {
     True -> {
       let #(close_res, st) = close_normal_catch(st, underlying.iterator)
-      finish_after_close(st, ref, close_res)
+      finish_after_close(st, helper_h, close_res)
     }
     False -> {
-      use step, st <- after_step(st, ref, underlying)
+      use step, st <- after_step(st, helper_h, underlying)
       case step {
-        None -> finish(st, ref)
+        None -> finish(st, helper_h)
         Some(v) -> {
-          let st = write_kind(st, ref, HelperTake(remaining - 1))
+          let st = write_kind(st, helper_h, HelperTake(remaining - 1))
           iter_yield(st, v)
         }
       }
@@ -1019,18 +1021,18 @@ fn step_take(
 
 fn step_drop(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   underlying: IteratorRecord,
   remaining: Int,
 ) -> #(JsVal, Agent) {
-  use step, st <- after_step(st, ref, underlying)
+  use step, st <- after_step(st, helper_h, underlying)
   case step {
-    None -> finish(st, ref)
+    None -> finish(st, helper_h)
     Some(v) ->
       case remaining > 0 {
         True -> {
-          let st = write_kind(st, ref, HelperDrop(remaining - 1))
-          step_drop(st, ref, underlying, remaining - 1)
+          let st = write_kind(st, helper_h, HelperDrop(remaining - 1))
+          step_drop(st, helper_h, underlying, remaining - 1)
         }
         False -> iter_yield(st, v)
       }
@@ -1039,7 +1041,7 @@ fn step_drop(
 
 fn step_flat_map(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   underlying: IteratorRecord,
   func: JsVal,
   inner: Option(IteratorRecord),
@@ -1052,24 +1054,25 @@ fn step_flat_map(
           iter_protocol.iterator_step_value(st, inner_rec)
         })
       case step {
-        ThrowCompletion(thrown) -> close_throw_done(st, ref, underlying, thrown)
+        ThrowCompletion(thrown) ->
+          close_throw_done(st, helper_h, underlying, thrown)
         NormalCompletion(Some(v)) -> iter_yield(st, v)
         NormalCompletion(None) -> {
-          let st = write_kind(st, ref, HelperFlatMap(func:, inner: None))
-          step_flat_map(st, ref, underlying, func, None, count)
+          let st = write_kind(st, helper_h, HelperFlatMap(func:, inner: None))
+          step_flat_map(st, helper_h, underlying, func, None, count)
         }
       }
     }
     None -> {
-      use step, st <- after_step(st, ref, underlying)
+      use step, st <- after_step(st, helper_h, underlying)
       case step {
-        None -> finish(st, ref)
+        None -> finish(st, helper_h)
         Some(v) -> {
           let idx = mk_int(count)
-          let st = write_counter(st, ref, count + 1)
+          let st = write_counter(st, helper_h, count + 1)
           case rt_call.t_call(st, func, mk_undefined(), [v, idx]) {
             #(rt_call.ThrowCompletion(thrown), st) ->
-              close_throw_done(st, ref, underlying, thrown)
+              close_throw_done(st, helper_h, underlying, thrown)
             #(rt_call.NormalCompletion(mapped), st) -> {
               let #(open, st) =
                 protected_any(st, fn(st) {
@@ -1082,17 +1085,17 @@ fn step_flat_map(
                 })
               case open {
                 ThrowCompletion(thrown) ->
-                  close_throw_done(st, ref, underlying, thrown)
+                  close_throw_done(st, helper_h, underlying, thrown)
                 NormalCompletion(new_inner) -> {
                   let st =
                     write_kind(
                       st,
-                      ref,
+                      helper_h,
                       HelperFlatMap(func:, inner: Some(new_inner)),
                     )
                   step_flat_map(
                     st,
-                    ref,
+                    helper_h,
                     underlying,
                     func,
                     Some(new_inner),
@@ -1364,7 +1367,7 @@ fn require_object_of(
 // next() threw: iterator already broken, no close
 fn after_step(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   rec: IteratorRecord,
   cont: fn(Option(JsVal), Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
@@ -1372,23 +1375,23 @@ fn after_step(
     protected_any(st, fn(st) { iter_protocol.iterator_step_value(st, rec) })
   case step {
     NormalCompletion(v) -> cont(v, st)
-    ThrowCompletion(thrown) -> rt_store.t_throw(mark_done(st, ref), thrown)
+    ThrowCompletion(thrown) -> rt_store.t_throw(mark_done(st, helper_h), thrown)
   }
 }
 
-fn finish(st: Agent, ref: Handle) -> #(JsVal, Agent) {
-  iter_done(mark_done(st, ref))
+fn finish(st: Agent, helper_h: Handle) -> #(JsVal, Agent) {
+  iter_done(mark_done(st, helper_h))
 }
 
 fn close_throw_done(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   underlying: IteratorRecord,
   thrown: JsVal,
 ) -> a {
   let #(original, st) =
     iter_protocol.close_and_throw(st, underlying.iterator, thrown)
-  rt_store.t_throw(mark_done(st, ref), original)
+  rt_store.t_throw(mark_done(st, helper_h), original)
 }
 
 fn close_normal_catch(st: Agent, iter: JsVal) -> #(Result(Nil, JsVal), Agent) {
@@ -1402,29 +1405,29 @@ fn close_normal_catch(st: Agent, iter: JsVal) -> #(Result(Nil, JsVal), Agent) {
   }
 }
 
-fn mark_done(st: Agent, ref: Handle) -> Agent {
-  set_gen_state(st, ref, GenCompleted)
+fn mark_done(st: Agent, helper_h: Handle) -> Agent {
+  set_gen_state(st, helper_h, GenCompleted)
 }
 
-fn write_counter(st: Agent, ref: Handle, counter: Int) -> Agent {
-  use kind, _counter <- update_helper(st, ref)
+fn write_counter(st: Agent, helper_h: Handle, counter: Int) -> Agent {
+  use kind, _counter <- update_helper(st, helper_h)
   #(kind, counter)
 }
 
-fn write_kind(st: Agent, ref: Handle, kind: IteratorHelperKind) -> Agent {
-  use _kind, counter <- update_helper(st, ref)
+fn write_kind(st: Agent, helper_h: Handle, kind: IteratorHelperKind) -> Agent {
+  use _kind, counter <- update_helper(st, helper_h)
   #(kind, counter)
 }
 
 fn map_helper_body(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   update: fn(HelperBody) -> HelperBody,
 ) -> Agent {
-  rt_store.t_cell_update(st, ref, fn(slot) {
-    case slot {
+  rt_store.t_cell_update(st, helper_h, fn(cell) {
+    case cell {
       SObject(kind: IteratorHelperObj(body:, ..) as helper, ..) ->
-        SObject(..slot, kind: IteratorHelperObj(..helper, body: update(body)))
+        SObject(..cell, kind: IteratorHelperObj(..helper, body: update(body)))
       other -> other
     }
   })
@@ -1432,10 +1435,10 @@ fn map_helper_body(
 
 fn update_helper(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   update: fn(IteratorHelperKind, Int) -> #(IteratorHelperKind, Int),
 ) -> Agent {
-  use body <- map_helper_body(st, ref)
+  use body <- map_helper_body(st, helper_h)
   case body {
     ClassicHelper(kind:, underlying:, counter:) -> {
       let #(kind, counter) = update(kind, counter)
@@ -1447,10 +1450,10 @@ fn update_helper(
 
 fn finish_after_close(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   close_res: Result(Nil, JsVal),
 ) -> #(JsVal, Agent) {
-  let st = mark_done(st, ref)
+  let st = mark_done(st, helper_h)
   case close_res {
     Error(e) -> rt_store.t_throw(st, e)
     Ok(Nil) -> iter_done(st)
@@ -1759,20 +1762,20 @@ fn alloc_zip(
 
 fn zip_next(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   members: List(ZipMember),
   mode: ZipMode,
   keys: Option(List(ObjectKey)),
 ) -> #(JsVal, Agent) {
   case members {
-    [] -> finish(st, ref)
-    _ -> zip_round(st, ref, mode, keys, [], members, [])
+    [] -> finish(st, helper_h)
+    _ -> zip_round(st, helper_h, mode, keys, [], members, [])
   }
 }
 
 fn zip_round(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   mode: ZipMode,
   keys: Option(List(ObjectKey)),
   prev: List(ZipMember),
@@ -1780,11 +1783,12 @@ fn zip_round(
   results: List(JsVal),
 ) -> #(JsVal, Agent) {
   case rest {
-    [] -> zip_emit(st, ref, keys, list.reverse(prev), list.reverse(results))
+    [] ->
+      zip_emit(st, helper_h, keys, list.reverse(prev), list.reverse(results))
     [member, ..tail] ->
       case member {
         ZipExhausted(padding:) ->
-          zip_round(st, ref, mode, keys, [member, ..prev], tail, [
+          zip_round(st, helper_h, mode, keys, [member, ..prev], tail, [
             padding,
             ..results
           ])
@@ -1795,9 +1799,14 @@ fn zip_round(
             })
           case step {
             ThrowCompletion(thrown) ->
-              close_all_throw_done(st, ref, open_others(prev, tail), thrown)
+              close_all_throw_done(
+                st,
+                helper_h,
+                open_others(prev, tail),
+                thrown,
+              )
             NormalCompletion(Some(v)) ->
-              zip_round(st, ref, mode, keys, [member, ..prev], tail, [
+              zip_round(st, helper_h, mode, keys, [member, ..prev], tail, [
                 v,
                 ..results
               ])
@@ -1806,20 +1815,20 @@ fn zip_round(
                 ZipShortest -> {
                   let #(close_res, st) =
                     close_all_normal(st, open_others(prev, tail))
-                  finish_after_close(st, ref, close_res)
+                  finish_after_close(st, helper_h, close_res)
                 }
                 ZipStrict ->
                   case prev {
-                    [] -> zip_strict_check(st, ref, tail)
-                    _ -> zip_strict_throw(st, ref, open_others(prev, tail))
+                    [] -> zip_strict_check(st, helper_h, tail)
+                    _ -> zip_strict_throw(st, helper_h, open_others(prev, tail))
                   }
                 ZipLongest ->
                   case open_others(prev, tail) {
-                    [] -> finish(st, ref)
+                    [] -> finish(st, helper_h)
                     _ ->
                       zip_round(
                         st,
-                        ref,
+                        helper_h,
                         mode,
                         keys,
                         [ZipExhausted(padding:), ..prev],
@@ -1836,12 +1845,12 @@ fn zip_round(
 
 fn zip_strict_check(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   rest: List(ZipMember),
 ) -> #(JsVal, Agent) {
   case rest {
-    [] -> finish(st, ref)
-    [ZipExhausted(padding: _), ..tail] -> zip_strict_check(st, ref, tail)
+    [] -> finish(st, helper_h)
+    [ZipExhausted(padding: _), ..tail] -> zip_strict_check(st, helper_h, tail)
     [ZipOpen(record:, padding: _), ..tail] -> {
       let #(step, st) =
         protected_any(st, fn(st) {
@@ -1849,10 +1858,10 @@ fn zip_strict_check(
         })
       case step {
         ThrowCompletion(thrown) ->
-          close_all_throw_done(st, ref, open_members(tail), thrown)
-        NormalCompletion(True) -> zip_strict_check(st, ref, tail)
+          close_all_throw_done(st, helper_h, open_members(tail), thrown)
+        NormalCompletion(True) -> zip_strict_check(st, helper_h, tail)
         NormalCompletion(False) ->
-          zip_strict_throw(st, ref, [record.iterator, ..open_members(tail)])
+          zip_strict_throw(st, helper_h, [record.iterator, ..open_members(tail)])
       }
     }
   }
@@ -1860,7 +1869,7 @@ fn zip_strict_check(
 
 fn zip_strict_throw(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   open: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(terr, st) =
@@ -1868,17 +1877,17 @@ fn zip_strict_throw(
       st,
       "Iterator.zip strict mode: iterators have different lengths",
     )
-  close_all_throw_done(st, ref, open, terr)
+  close_all_throw_done(st, helper_h, open, terr)
 }
 
 fn zip_emit(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   keys: Option(List(ObjectKey)),
   members: List(ZipMember),
   results: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let st = zip_write_members(st, ref, members)
+  let st = zip_write_members(st, helper_h, members)
   case keys {
     None -> {
       let #(arr, st) = realm_ops.alloc_array(st, results)
@@ -1909,11 +1918,11 @@ fn alloc_zip_keyed_result(
 
 fn zip_return(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   members: List(ZipMember),
 ) -> #(JsVal, Agent) {
   let #(close_res, st) = close_all_normal(st, open_members(members))
-  finish_after_close(st, ref, close_res)
+  finish_after_close(st, helper_h, close_res)
 }
 
 fn open_others(prev: List(ZipMember), tail: List(ZipMember)) -> List(JsVal) {
@@ -1952,7 +1961,7 @@ fn close_all_throw(st: Agent, iters: List(JsVal), original: JsVal) -> a {
 
 fn close_all_throw_done(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   open: List(JsVal),
   thrown: JsVal,
 ) -> a {
@@ -1961,7 +1970,7 @@ fn close_all_throw_done(
       let #(_superseded, st) = iter_protocol.call_return(st, it)
       st
     })
-  rt_store.t_throw(mark_done(st, ref), thrown)
+  rt_store.t_throw(mark_done(st, helper_h), thrown)
 }
 
 fn close_all_normal(
@@ -1982,10 +1991,10 @@ fn close_all_normal(
 
 fn zip_write_members(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   members: List(ZipMember),
 ) -> Agent {
-  use body <- map_helper_body(st, ref)
+  use body <- map_helper_body(st, helper_h)
   case body {
     ZipHelper(mode:, keys:, members: _) -> ZipHelper(members:, mode:, keys:)
     ClassicHelper(..) | ConcatHelper(..) -> body
@@ -2044,7 +2053,7 @@ fn concat_validate(
 
 fn concat_next(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   remaining: List(ConcatItem),
   inner: Option(IteratorRecord),
 ) -> #(JsVal, Agent) {
@@ -2056,29 +2065,29 @@ fn concat_next(
         })
       case step {
         ThrowCompletion(thrown) ->
-          rt_store.t_throw(concat_mark_done(st, ref), thrown)
+          rt_store.t_throw(concat_mark_done(st, helper_h), thrown)
         NormalCompletion(Some(v)) -> iter_yield(st, v)
         NormalCompletion(None) -> {
-          let st = concat_write(st, ref, remaining, None)
-          concat_open_next(st, ref, remaining)
+          let st = concat_write(st, helper_h, remaining, None)
+          concat_open_next(st, helper_h, remaining)
         }
       }
     }
-    None -> concat_open_next(st, ref, remaining)
+    None -> concat_open_next(st, helper_h, remaining)
   }
 }
 
 fn concat_open_next(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   remaining: List(ConcatItem),
 ) -> #(JsVal, Agent) {
   case remaining {
-    [] -> iter_done(concat_mark_done(st, ref))
+    [] -> iter_done(concat_mark_done(st, helper_h))
     [ConcatItem(open_method: method, iterable:), ..rest] ->
       case rt_call.t_call(st, method, iterable, []) {
         #(rt_call.ThrowCompletion(thrown), st) ->
-          rt_store.t_throw(concat_mark_done(st, ref), thrown)
+          rt_store.t_throw(concat_mark_done(st, helper_h), thrown)
         #(rt_call.NormalCompletion(iter), st) -> {
           let #(open, st) =
             protected_any(st, fn(st) {
@@ -2090,10 +2099,10 @@ fn concat_open_next(
             })
           case open {
             ThrowCompletion(thrown) ->
-              rt_store.t_throw(concat_mark_done(st, ref), thrown)
+              rt_store.t_throw(concat_mark_done(st, helper_h), thrown)
             NormalCompletion(inner) -> {
-              let st = concat_write(st, ref, rest, Some(inner))
-              concat_next(st, ref, rest, Some(inner))
+              let st = concat_write(st, helper_h, rest, Some(inner))
+              concat_next(st, helper_h, rest, Some(inner))
             }
           }
         }
@@ -2103,19 +2112,19 @@ fn concat_open_next(
 
 fn concat_return(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   inner: Option(IteratorRecord),
 ) -> #(JsVal, Agent) {
   let #(close_res, st) = case inner {
     Some(inner_rec) -> close_normal_catch(st, inner_rec.iterator)
     None -> #(Ok(Nil), st)
   }
-  finish_after_close(concat_mark_done(st, ref), ref, close_res)
+  finish_after_close(concat_mark_done(st, helper_h), helper_h, close_res)
 }
 
-fn concat_mark_done(st: Agent, ref: Handle) -> Agent {
-  let st = mark_done(st, ref)
-  use body <- map_helper_body(st, ref)
+fn concat_mark_done(st: Agent, helper_h: Handle) -> Agent {
+  let st = mark_done(st, helper_h)
+  use body <- map_helper_body(st, helper_h)
   case body {
     ConcatHelper(remaining:, inner: _) -> ConcatHelper(remaining:, inner: None)
     ClassicHelper(..) | ZipHelper(..) -> body
@@ -2124,11 +2133,11 @@ fn concat_mark_done(st: Agent, ref: Handle) -> Agent {
 
 fn concat_write(
   st: Agent,
-  ref: Handle,
+  helper_h: Handle,
   remaining: List(ConcatItem),
   inner: Option(IteratorRecord),
 ) -> Agent {
-  use body <- map_helper_body(st, ref)
+  use body <- map_helper_body(st, helper_h)
   case body {
     ConcatHelper(..) -> ConcatHelper(remaining:, inner:)
     ClassicHelper(..) | ZipHelper(..) -> body

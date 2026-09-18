@@ -3,12 +3,12 @@
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ErrorKind, type Handle, type JsNum, type JsOps, type JsVal,
-  type ObjectKey, type SymbolId, type ToPrimHint, HintDefault, HintNumber,
-  HintString, Index, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KBool, KBound,
-  KBytecode, KCompiled, KHandle, KNative, KNull, KNum, KStr, KSym, KTdz, KUndef,
-  Named, ProxyObj, RangeErr, ReferenceErr, SObject, StringKey, SymbolKey,
-  SyntaxErr, TypeErr, array_index_of_float, canonical_key, classify, index_key,
-  mk_number, mk_object, mk_string, symbol_to_primitive,
+  type ObjectKey, type SymbolId, type ToPrimHint, BoundFn, BytecodeFn,
+  CompiledFn, HintDefault, HintNumber, HintString, Index, JFloat, JInt, JNan,
+  JNegInf, JPosInf, KBig, KBool, KHandle, KNull, KNum, KStr, KSym, KTdz, KUndef,
+  Named, NativeFn, ProxyObj, RangeErr, ReferenceErr, SObject, StringKey,
+  SymbolKey, SyntaxErr, TypeErr, array_index_of_float, canonical_key, classify,
+  index_key, mk_number, mk_object, mk_string, symbol_to_primitive,
 }
 import gleam/bit_array
 import gleam/float
@@ -149,10 +149,10 @@ pub fn t_is_callable(st: Agent, v: JsVal) -> #(Bool, Agent) {
 
 fn handle_is_callable(st: Agent, h: Handle) -> Bool {
   case rt_store.t_cell_get(st, h) {
-    SObject(kind: KCompiled(..), ..)
-    | SObject(kind: KBytecode(..), ..)
-    | SObject(kind: KNative(..), ..)
-    | SObject(kind: KBound(..), ..) -> True
+    SObject(kind: CompiledFn(..), ..)
+    | SObject(kind: BytecodeFn(..), ..)
+    | SObject(kind: NativeFn(..), ..)
+    | SObject(kind: BoundFn(..), ..) -> True
     SObject(kind: ProxyObj(target:, ..), ..) -> handle_is_callable(st, target)
     _ -> False
   }

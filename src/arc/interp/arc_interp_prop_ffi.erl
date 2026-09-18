@@ -150,8 +150,8 @@ named_plain(Kind, K) ->
         ?TYPEDARRAYOBJ_TAG -> false;
         ?ARRAYOBJ_TAG -> K =/= ?LENGTH_KEY;
         ?STRINGOBJ_TAG -> K =/= ?LENGTH_KEY;
-        ?KBYTECODE_TAG -> birth_plain(element(?KBYTECODE_BIRTH, Kind), K);
-        ?KFN_TAG -> birth_plain(element(?KFN_BIRTH, Kind), K);
+        ?BYTECODEFN_TAG -> birth_plain(element(?BYTECODEFN_BIRTH, Kind), K);
+        ?COMPILEDFN_TAG -> birth_plain(element(?COMPILEDFN_BIRTH, Kind), K);
         _ -> true
     end.
 

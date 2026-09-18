@@ -10,7 +10,7 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type HostTerm, type JsVal, type Property, Agent,
-  HostFnEntry, HostJob, JFloat, JInt, KBool, KHandle, KHost, KNum, KStr,
+  HostFnEntry, HostJob, HostObj, JFloat, JInt, KBool, KHandle, KNum, KStr,
   NoElements, PromiseObj, RangeErr, SObject, StringKey, TypeErr, classify,
   mk_object, mk_undefined,
 } as rt_types
@@ -229,9 +229,9 @@ type TicketRoot {
 /// pending promise plus the ticket to resume it with later
 pub fn suspend(s: State(host)) -> #(State(host), JsVal, Ticket) {
   let #(promise, st) = rt_async.t_new_promise(s.agent)
-  let root_slot =
-    host_slot(tag(ticket_key(), TicketRoot(promise:)), None, False)
-  let #(root, st) = rt_store.t_cell_new(st, root_slot)
+  let root_cell =
+    host_cell(tag(ticket_key(), TicketRoot(promise:)), None, False)
+  let #(root, st) = rt_store.t_cell_new(st, root_cell)
   let st = rt_store.t_pin_root(st, root)
   #(State(..s, agent: st), mk_object(promise), Ticket(promise:, root:))
 }
@@ -280,7 +280,7 @@ fn ticket_state(st: Agent, ticket: Ticket) -> TicketState {
 fn is_ticket_root(st: Agent, root: Handle, promise: Handle) -> Bool {
   use <- bool.guard(!rt_gc.t_is_live(st, root), False)
   case rt_store.t_cell_get(st, root) {
-    SObject(kind: KHost(payload:), ..) ->
+    SObject(kind: HostObj(payload:), ..) ->
       payload == tag(ticket_key(), TicketRoot(promise:))
     _ -> False
   }
@@ -343,13 +343,13 @@ fn untag(key: Key(host), term: HostTerm) -> Option(host) {
   }
 }
 
-fn host_slot(
+fn host_cell(
   payload: HostTerm,
   proto: Option(Handle),
   extensible: Bool,
-) -> rt_types.JsSlot {
+) -> rt_types.Cell {
   SObject(
-    kind: KHost(payload:),
+    kind: HostObj(payload:),
     proto:,
     props: dict.new(),
     symbol_props: [],
@@ -365,7 +365,7 @@ pub fn alloc_host_object(
   prototype: Option(Handle),
 ) -> #(State(host), JsVal) {
   let #(h, st) =
-    rt_store.t_cell_new(s.agent, host_slot(tag(s.key, value), prototype, True))
+    rt_store.t_cell_new(s.agent, host_cell(tag(s.key, value), prototype, True))
   #(State(..s, agent: st), mk_object(h))
 }
 
@@ -373,7 +373,7 @@ pub fn alloc_host_object(
 pub fn read_host(s: State(host), val: JsVal) -> Option(host) {
   use h <- option.then(handle_of(val))
   case rt_store.t_cell_get(s.agent, h) {
-    SObject(kind: KHost(payload:), ..) -> untag(s.key, payload)
+    SObject(kind: HostObj(payload:), ..) -> untag(s.key, payload)
     _ -> None
   }
 }

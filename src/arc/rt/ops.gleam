@@ -2,9 +2,9 @@ import arc/rt/js_string
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsNum, type JsOps, type JsVal, HintDefault,
-  HintNumber, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KBool, KBound, KHandle,
-  KNull, KNum, KStr, KSym, KUndef, Named, SObject, StringKey, SymbolKey,
+  type Agent, type Handle, type JsNum, type JsOps, type JsVal, BoundFn,
+  HintDefault, HintNumber, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KBool,
+  KHandle, KNull, KNum, KStr, KSym, KUndef, Named, SObject, StringKey, SymbolKey,
   classify, mk_bigint, mk_number, mk_object, mk_string, symbol_has_instance,
 }
 import arc/rt/val as rt_val
@@ -68,7 +68,7 @@ pub fn t_ordinary_has_instance(
   v: JsVal,
 ) -> #(Int, Agent) {
   case rt_store.t_cell_get(st, ctor) {
-    SObject(kind: KBound(target:, ..), ..) ->
+    SObject(kind: BoundFn(target:, ..), ..) ->
       t_instance_of(st, v, mk_object(target))
     _ ->
       case classify(v) {

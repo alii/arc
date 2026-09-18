@@ -399,9 +399,9 @@ enc({?HANDLE_TAG, Id}, {Data, OP, AP, _} = Cx, Ind, Seen) ->
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, {?SOME, {?HANDLE_TAG, AP}}, Props, _, Els, _}
           when map_size(Props) =:= 0 ->
             enc_array(elems(Els, Len), Cx, Ind, [Id | Seen]);
-        {?SOBJECT_TAG, Kind, _, _, _, _, _} when element(1, Kind) =:= ?KBYTECODE_TAG;
-                                                 element(1, Kind) =:= ?KNATIVE_TAG;
-                                                 element(1, Kind) =:= ?KFN_TAG;
+        {?SOBJECT_TAG, Kind, _, _, _, _, _} when element(1, Kind) =:= ?BYTECODEFN_TAG;
+                                                 element(1, Kind) =:= ?NATIVEFN_TAG;
+                                                 element(1, Kind) =:= ?COMPILEDFN_TAG;
                                                  element(1, Kind) =:= ?BOUNDFN_TAG ->
             skip;
         _ -> throw(json_miss)

@@ -276,10 +276,10 @@ fn require_stack(
 }
 
 fn mark_disposed(st: Agent, h: Handle) -> Agent {
-  rt_store.t_cell_update(st, h, fn(slot) {
-    let assert SObject(kind: DisposableStackObj(async:, ..), ..) = slot
+  rt_store.t_cell_update(st, h, fn(cell) {
+    let assert SObject(kind: DisposableStackObj(async:, ..), ..) = cell
       as "disposable_stack: mark_disposed on a non-stack cell"
-    SObject(..slot, kind: DisposableStackObj(async:, state: Disposed))
+    SObject(..cell, kind: DisposableStackObj(async:, state: Disposed))
   })
 }
 

@@ -6,11 +6,11 @@ import arc/rt/js_string
 import arc/rt/limits
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsElements, type JsSlot, type JsVal,
-  type ObjKind, type ObjectKey, type ParsedDesc, type Property, type PropertyKey,
+  type Agent, type Cell, type Handle, type JsElements, type JsVal, type ObjKind,
+  type ObjectKey, type ParsedDesc, type Property, type PropertyKey,
   type SymbolId, type TypedArrayKind, AccessorProperty, Agent, ArgumentsObj,
-  ArrayObj, BirthPending, BirthSettled, DataProperty, Dense, Index, JsStore,
-  KBytecode, KCompiled, KHandle, KNull, KTdz, KUndef, ModuleNamespace, Named,
+  ArrayObj, BirthPending, BirthSettled, BytecodeFn, CompiledFn, DataProperty,
+  Dense, Index, JsStore, KHandle, KNull, KTdz, KUndef, ModuleNamespace, Named,
   NoElements, Ordinary, ParsedDesc, Private, ProxyObj, SAsyncContext, SAsyncGen,
   SBox, SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
   ShapeDesc, StringKey, StringObj, SymbolKey, TypedArrayObj,
@@ -27,7 +27,7 @@ import gleam/set
 import gleam/string
 
 // returns SObject or SShapedObject only
-fn read_object(st: Agent, h: Handle) -> JsSlot {
+fn read_object(st: Agent, h: Handle) -> Cell {
   case rt_store.t_cell_get(st, h) {
     SObject(..) as obj -> obj
     SShapedObject(..) as s -> s
@@ -68,15 +68,15 @@ fn read_own_and_proto(
   h: Handle,
   key: ObjectKey,
 ) -> #(Option(Property), Option(Handle)) {
-  own_and_proto_of_slot(st, read_object(st, h), key)
+  own_and_proto_of_cell(st, read_object(st, h), key)
 }
 
-fn own_and_proto_of_slot(
+fn own_and_proto_of_cell(
   st: Agent,
-  slot: JsSlot,
+  cell: Cell,
   key: ObjectKey,
 ) -> #(Option(Property), Option(Handle)) {
-  case slot {
+  case cell {
     SShapedObject(offsets:, proto:, slots:, ..) -> #(
       case key {
         StringKey(pk) -> own_property_shaped(offsets, slots, pk)
@@ -96,8 +96,8 @@ fn own_and_proto_of_slot(
 }
 
 // §10.4.5 numeric index keys never reach the proto chain
-fn typed_array_absorbs(slot: JsSlot, key: ObjectKey) -> Bool {
-  case slot, key {
+fn typed_array_absorbs(cell: Cell, key: ObjectKey) -> Bool {
+  case cell, key {
     SObject(kind: TypedArrayObj(..), ..), StringKey(Index(_)) -> True
     SObject(kind: TypedArrayObj(..), ..), StringKey(Named(s)) ->
       buffer.is_canonical_numeric_string(s)
@@ -105,8 +105,8 @@ fn typed_array_absorbs(slot: JsSlot, key: ObjectKey) -> Bool {
   }
 }
 
-pub fn as_sobject(slot: JsSlot) -> JsSlot {
-  case slot {
+pub fn as_sobject(cell: Cell) -> Cell {
+  case cell {
     SShapedObject(proto:, slots:, offsets:, ..) -> {
       let props =
         dict.fold(offsets, dict.new(), fn(acc, key_bin, off) {
@@ -136,7 +136,7 @@ pub fn as_sobject(slot: JsSlot) -> JsSlot {
         extensible: True,
       )
     }
-    _ -> slot
+    _ -> cell
   }
 }
 
@@ -247,13 +247,13 @@ fn own_property_of(
             )
           })
       }
-    KBytecode(template:, birth: BirthPending(_), ..), Named("length") ->
+    BytecodeFn(template:, birth: BirthPending(_), ..), Named("length") ->
       Some(birth_prop(rt_types.mk_int(template.length), 0))
-    KBytecode(template:, birth: BirthPending(_), ..), Named("name") ->
+    BytecodeFn(template:, birth: BirthPending(_), ..), Named("name") ->
       Some(birth_prop(rt_types.mk_string(option.unwrap(template.name, "")), 1))
-    KCompiled(length:, birth: BirthPending(_), ..), Named("length") ->
+    CompiledFn(length:, birth: BirthPending(_), ..), Named("length") ->
       Some(birth_prop(rt_types.mk_int(length), 0))
-    KCompiled(name:, birth: BirthPending(_), ..), Named("name") ->
+    CompiledFn(name:, birth: BirthPending(_), ..), Named("name") ->
       Some(birth_prop(rt_types.mk_string(name), 1))
     _, _ -> dict.get(props, key) |> option.from_result
   }
@@ -281,8 +281,8 @@ pub fn t_get_own_index(st: Agent, h: Handle, idx: Int) -> OwnIndex {
             None -> OwnIndexAbsent(proto)
           }
       }
-    slot ->
-      case own_and_proto_of_slot(st, slot, StringKey(Index(idx))) {
+    cell ->
+      case own_and_proto_of_cell(st, cell, StringKey(Index(idx))) {
         #(Some(prop), _) -> OwnIndexProperty(prop)
         #(None, proto) -> OwnIndexAbsent(proto)
       }
@@ -443,12 +443,12 @@ pub fn constructor_props(f: Handle) -> Dict(PropertyKey, Property) {
   ])
 }
 
-fn pending_birth(slot: JsSlot) -> Option(#(Int, String, Option(Handle))) {
-  case slot {
-    SObject(kind: KBytecode(template:, birth: BirthPending(parent), ..), ..) ->
+fn pending_birth(cell: Cell) -> Option(#(Int, String, Option(Handle))) {
+  case cell {
+    SObject(kind: BytecodeFn(template:, birth: BirthPending(parent), ..), ..) ->
       Some(#(template.length, option.unwrap(template.name, ""), parent))
     SObject(
-      kind: KCompiled(length:, name:, birth: BirthPending(parent), ..),
+      kind: CompiledFn(length:, name:, birth: BirthPending(parent), ..),
       ..,
     ) -> Some(#(length, name, parent))
     _ -> None
@@ -468,11 +468,11 @@ fn is_birth_key(key: ObjectKey) -> Bool {
 fn settle_birth(
   st: Agent,
   f: Handle,
-  slot: JsSlot,
+  cell: Cell,
   pending: #(Int, String, Option(Handle)),
 ) -> Agent {
   let #(length, name, parent) = pending
-  let assert SObject(kind:, props:, ..) = slot
+  let assert SObject(kind:, props:, ..) = cell
   let props =
     props
     |> dict.insert(Named("length"), birth_prop(rt_types.mk_int(length), 0))
@@ -504,67 +504,67 @@ fn settle_birth(
     }
   }
   let kind = case kind {
-    KBytecode(..) -> KBytecode(..kind, birth: BirthSettled)
-    KCompiled(..) -> KCompiled(..kind, birth: BirthSettled)
+    BytecodeFn(..) -> BytecodeFn(..kind, birth: BirthSettled)
+    CompiledFn(..) -> CompiledFn(..kind, birth: BirthSettled)
     _ -> kind
   }
-  rt_store.t_cell_set(st, f, SObject(..slot, kind:, props:))
+  rt_store.t_cell_set(st, f, SObject(..cell, kind:, props:))
 }
 
-fn settle(st: Agent, h: Handle, slot: JsSlot) -> #(JsSlot, Agent) {
-  case pending_birth(slot) {
+fn settle(st: Agent, h: Handle, cell: Cell) -> #(Cell, Agent) {
+  case pending_birth(cell) {
     Some(pending) -> {
-      let st = settle_birth(st, h, slot, pending)
+      let st = settle_birth(st, h, cell, pending)
       #(read_object(st, h), st)
     }
-    None -> #(slot, st)
+    None -> #(cell, st)
   }
 }
 
-fn read_settled(st: Agent, h: Handle, key: ObjectKey) -> #(JsSlot, Agent) {
-  let slot = read_object(st, h)
+fn read_settled(st: Agent, h: Handle, key: ObjectKey) -> #(Cell, Agent) {
+  let cell = read_object(st, h)
   case is_birth_key(key) {
-    True -> settle(st, h, slot)
-    False -> #(slot, st)
+    True -> settle(st, h, cell)
+    False -> #(cell, st)
   }
 }
 
 pub fn t_name_if_anonymous(st: Agent, f: Handle, name: String) -> Agent {
-  use slot <- rt_store.t_cell_update(st, f)
-  case slot {
-    SObject(kind: KBytecode(template:, birth: BirthPending(_), ..) as kind, ..) ->
+  use cell <- rt_store.t_cell_update(st, f)
+  case cell {
+    SObject(kind: BytecodeFn(template:, birth: BirthPending(_), ..) as kind, ..) ->
       case option.unwrap(template.name, "") {
         "" ->
           SObject(
-            ..slot,
-            kind: KBytecode(
+            ..cell,
+            kind: BytecodeFn(
               ..kind,
               template: FuncTemplate(..template, name: Some(name)),
             ),
           )
-        _ -> slot
+        _ -> cell
       }
-    SObject(kind: KCompiled(name: "", birth: BirthPending(_), ..) as kind, ..) ->
-      SObject(..slot, kind: KCompiled(..kind, name:))
-    SObject(kind: KBytecode(..), props:, ..)
-    | SObject(kind: KCompiled(..), props:, ..) ->
+    SObject(kind: CompiledFn(name: "", birth: BirthPending(_), ..) as kind, ..) ->
+      SObject(..cell, kind: CompiledFn(..kind, name:))
+    SObject(kind: BytecodeFn(..), props:, ..)
+    | SObject(kind: CompiledFn(..), props:, ..) ->
       case dict.get(props, Named("name")) {
         Ok(DataProperty(value: v, seq:, ..)) ->
           case rt_types.classify(v) {
             rt_types.KStr("") ->
               SObject(
-                ..slot,
+                ..cell,
                 props: dict.insert(
                   props,
                   Named("name"),
                   birth_prop(rt_types.mk_string(name), seq),
                 ),
               )
-            _ -> slot
+            _ -> cell
           }
-        _ -> slot
+        _ -> cell
       }
-    _ -> slot
+    _ -> cell
   }
 }
 
@@ -616,9 +616,9 @@ pub fn t_set_prototype_of(
   use <- bool.guard(!extensible, #(Error(NotExtensible), st))
   use <- bool.guard(would_create_cycle(st, obj, new_proto), #(Error(Cyclic), st))
   let st =
-    rt_store.t_cell_update(st, obj, fn(slot) {
-      let assert SObject(..) = slot
-      SObject(..slot, proto: new_proto)
+    rt_store.t_cell_update(st, obj, fn(cell) {
+      let assert SObject(..) = cell
+      SObject(..cell, proto: new_proto)
     })
   #(Ok(Nil), st)
 }
@@ -655,7 +655,7 @@ fn would_create_cycle(
   }
 }
 
-// §10.1.8.1 ordinaryget; primitives read without boxing
+// §10.1.8.1 ordinaryget; primitives read without wrapping
 pub fn t_get_prop(st: Agent, recv: JsVal, key: ObjectKey) -> #(JsVal, Agent) {
   case rt_types.classify(recv) {
     KHandle(h) -> get_from(st, h, key, recv)
@@ -700,8 +700,8 @@ fn get_from(
   receiver: JsVal,
 ) -> #(JsVal, Agent) {
   case read_object(st, h), key {
-    SObject(kind: ProxyObj(..), ..) as slot, StringKey(Private(_)) ->
-      ordinary_get(st, slot, key, receiver)
+    SObject(kind: ProxyObj(..), ..) as cell, StringKey(Private(_)) ->
+      ordinary_get(st, cell, key, receiver)
     SObject(kind: ProxyObj(target:, handler:, revoked:), ..), _ ->
       proxy_get(st, Proxy(target:, handler:, revoked:), key, receiver)
     // §10.4.6.8, tdz export throws referenceerror
@@ -724,30 +724,30 @@ fn get_from(
         |> option.unwrap(rt_types.mk_undefined()),
       st,
     )
-    SObject(kind: TypedArrayObj(..), ..) as slot, StringKey(Named(s)) ->
+    SObject(kind: TypedArrayObj(..), ..) as cell, StringKey(Named(s)) ->
       case buffer.is_canonical_numeric_string(s) {
         True -> #(rt_types.mk_undefined(), st)
-        False -> ordinary_get(st, slot, key, receiver)
+        False -> ordinary_get(st, cell, key, receiver)
       }
-    SObject(kind: KBytecode(birth: BirthPending(Some(_)), ..), ..) as slot,
+    SObject(kind: BytecodeFn(birth: BirthPending(Some(_)), ..), ..) as cell,
       StringKey(Named("prototype"))
-    | SObject(kind: KCompiled(birth: BirthPending(Some(_)), ..), ..) as slot,
+    | SObject(kind: CompiledFn(birth: BirthPending(Some(_)), ..), ..) as cell,
       StringKey(Named("prototype"))
     -> {
-      let #(_, st) = settle(st, h, slot)
+      let #(_, st) = settle(st, h, cell)
       get_from(st, h, key, receiver)
     }
-    slot, _ -> ordinary_get(st, slot, key, receiver)
+    cell, _ -> ordinary_get(st, cell, key, receiver)
   }
 }
 
 fn ordinary_get(
   st: Agent,
-  slot: JsSlot,
+  cell: Cell,
   key: ObjectKey,
   receiver: JsVal,
 ) -> #(JsVal, Agent) {
-  let #(own, proto) = own_and_proto_of_slot(st, slot, key)
+  let #(own, proto) = own_and_proto_of_cell(st, cell, key)
   case own {
     Some(prop) -> t_property_get_value(st, prop, receiver)
     None ->
@@ -821,8 +821,8 @@ fn set_from(
   receiver: JsVal,
 ) -> #(Bool, Agent) {
   case read_object(st, h), key {
-    SObject(kind: ProxyObj(..), ..) as slot, StringKey(Private(_)) ->
-      ordinary_set(st, slot, key, v, receiver)
+    SObject(kind: ProxyObj(..), ..) as cell, StringKey(Private(_)) ->
+      ordinary_set(st, cell, key, v, receiver)
     SObject(kind: ProxyObj(target:, handler:, revoked:), ..), _ ->
       proxy_set(st, Proxy(target:, handler:, revoked:), key, v, receiver)
     SObject(kind: ModuleNamespace(..), ..), _ -> #(False, st)
@@ -833,7 +833,7 @@ fn set_from(
     ),
       StringKey(Index(idx))
     -> {
-      let view = buffer.ViewSlot(buffer: buf, elem_kind:, byte_offset:, length:)
+      let view = buffer.View(buffer: buf, elem_kind:, byte_offset:, length:)
       case same_receiver(receiver, h) {
         True -> buffer.typed_array_store(st, view, Some(idx), v)
         False ->
@@ -855,7 +855,7 @@ fn set_from(
     SObject(
       kind: TypedArrayObj(buffer: buf, elem_kind:, byte_offset:, length:),
       ..,
-    ) as slot,
+    ) as cell,
       StringKey(Named(s))
     ->
       case buffer.is_canonical_numeric_string(s) {
@@ -864,23 +864,23 @@ fn set_from(
             True ->
               buffer.typed_array_store(
                 st,
-                buffer.ViewSlot(buffer: buf, elem_kind:, byte_offset:, length:),
+                buffer.View(buffer: buf, elem_kind:, byte_offset:, length:),
                 None,
                 v,
               )
             False -> #(True, st)
           }
-        False -> ordinary_set(st, slot, key, v, receiver)
+        False -> ordinary_set(st, cell, key, v, receiver)
       }
-    SObject(kind: KBytecode(birth: BirthPending(Some(_)), ..), ..) as slot,
+    SObject(kind: BytecodeFn(birth: BirthPending(Some(_)), ..), ..) as cell,
       StringKey(Named("prototype"))
-    | SObject(kind: KCompiled(birth: BirthPending(Some(_)), ..), ..) as slot,
+    | SObject(kind: CompiledFn(birth: BirthPending(Some(_)), ..), ..) as cell,
       StringKey(Named("prototype"))
     -> {
-      let #(_, st) = settle(st, h, slot)
+      let #(_, st) = settle(st, h, cell)
       set_from(st, h, key, v, receiver)
     }
-    slot, _ -> ordinary_set(st, slot, key, v, receiver)
+    cell, _ -> ordinary_set(st, cell, key, v, receiver)
   }
 }
 
@@ -894,12 +894,12 @@ fn same_receiver(receiver: JsVal, h: Handle) -> Bool {
 // §10.1.9.2 on an already-read cell
 fn ordinary_set(
   st: Agent,
-  slot: JsSlot,
+  cell: Cell,
   key: ObjectKey,
   v: JsVal,
   receiver: JsVal,
 ) -> #(Bool, Agent) {
-  let #(own, proto) = own_and_proto_of_slot(st, slot, key)
+  let #(own, proto) = own_and_proto_of_cell(st, cell, key)
   case own {
     None ->
       case proto {
@@ -940,7 +940,7 @@ fn set_on_receiver(
         }
         _, _ -> {
           let st = devolve(st, recv_h)
-          let #(slot, st) = read_settled(st, recv_h, key)
+          let #(cell, st) = read_settled(st, recv_h, key)
           let assert SObject(
             kind:,
             props:,
@@ -948,7 +948,7 @@ fn set_on_receiver(
             elements:,
             extensible:,
             ..,
-          ) = slot
+          ) = cell
           case key {
             StringKey(pk) ->
               set_own_string(
@@ -1095,10 +1095,10 @@ fn set_own_string(
             False -> {
               let new_len = int.max(length, i + 1)
               let st =
-                rt_store.t_cell_update(st, h, fn(slot) {
-                  let assert SObject(elements: e, ..) = slot
+                rt_store.t_cell_update(st, h, fn(cell) {
+                  let assert SObject(elements: e, ..) = cell
                   SObject(
-                    ..slot,
+                    ..cell,
                     kind: ArrayObj(new_len),
                     elements: elements.set(e, i, v),
                   )
@@ -1122,7 +1122,7 @@ fn set_own_string(
         Some(_) ->
           buffer.typed_array_store(
             st,
-            buffer.ViewSlot(buffer: buf, elem_kind:, byte_offset:, length:),
+            buffer.View(buffer: buf, elem_kind:, byte_offset:, length:),
             Some(idx),
             v,
           )
@@ -1157,9 +1157,9 @@ fn set_own_string(
             True -> #(False, st)
             False -> {
               let st =
-                rt_store.t_cell_update(st, h, fn(slot) {
-                  let assert SObject(elements: e, ..) = slot
-                  SObject(..slot, elements: elements.set(e, i, v))
+                rt_store.t_cell_update(st, h, fn(cell) {
+                  let assert SObject(elements: e, ..) = cell
+                  SObject(..cell, elements: elements.set(e, i, v))
                 })
               #(True, st)
             }
@@ -1255,9 +1255,9 @@ fn write_props(
   props: Dict(PropertyKey, Property),
 ) -> #(Bool, Agent) {
   let st =
-    rt_store.t_cell_update(st, h, fn(slot) {
-      let assert SObject(..) = slot
-      SObject(..slot, props:)
+    rt_store.t_cell_update(st, h, fn(cell) {
+      let assert SObject(..) = cell
+      SObject(..cell, props:)
     })
   #(True, st)
 }
@@ -1268,9 +1268,9 @@ fn write_symbol_props(
   symbol_props: List(#(SymbolId, Property)),
 ) -> #(Bool, Agent) {
   let st =
-    rt_store.t_cell_update(st, h, fn(slot) {
-      let assert SObject(..) = slot
-      SObject(..slot, symbol_props:)
+    rt_store.t_cell_update(st, h, fn(cell) {
+      let assert SObject(..) = cell
+      SObject(..cell, symbol_props:)
     })
   #(True, st)
 }
@@ -1319,9 +1319,9 @@ fn array_set_length(
   case new_len >= old_len {
     True -> {
       let st =
-        rt_store.t_cell_update(st, h, fn(slot) {
-          let assert SObject(..) = slot
-          SObject(..slot, kind: ArrayObj(new_len))
+        rt_store.t_cell_update(st, h, fn(cell) {
+          let assert SObject(..) = cell
+          SObject(..cell, kind: ArrayObj(new_len))
         })
       #(True, st)
     }
@@ -1348,10 +1348,10 @@ fn array_set_length(
         None -> new_len
       }
       let st =
-        rt_store.t_cell_update(st, h, fn(slot) {
-          let assert SObject(props: p, elements: e, ..) = slot
+        rt_store.t_cell_update(st, h, fn(cell) {
+          let assert SObject(props: p, elements: e, ..) = cell
           SObject(
-            ..slot,
+            ..cell,
             kind: ArrayObj(final_len),
             props: dict.filter(p, fn(k, _) {
               case k {
@@ -1384,9 +1384,9 @@ pub fn t_define_own_prop(
     }
     _, _, _ -> #(desc, None, st)
   }
-  let #(slot, st) = read_settled(st, obj, key)
+  let #(cell, st) = read_settled(st, obj, key)
   let assert SObject(kind:, props:, symbol_props:, elements:, extensible:, ..) =
-    slot
+    cell
   use <- exotic_define(st, kind, key, desc)
   let indexed_kind = case kind {
     ArrayObj(_) | ArgumentsObj(..) -> True
@@ -1429,17 +1429,17 @@ pub fn t_define_own_prop(
         None -> #(True, st)
       }
       let st =
-        rt_store.t_cell_update(st, obj, fn(slot) {
-          let assert SObject(props: p, ..) = slot
-          SObject(..slot, props: dict.insert(p, pk, new_prop))
+        rt_store.t_cell_update(st, obj, fn(cell) {
+          let assert SObject(props: p, ..) = cell
+          SObject(..cell, props: dict.insert(p, pk, new_prop))
         })
       #(len_ok, st)
     }
     _, _ -> {
       // exactly one store owns an index: elements or dict
       let st =
-        rt_store.t_cell_update(st, obj, fn(slot) {
-          let assert SObject(props: p, symbol_props: sp, elements: e, ..) = slot
+        rt_store.t_cell_update(st, obj, fn(cell) {
+          let assert SObject(props: p, symbol_props: sp, elements: e, ..) = cell
           case key {
             StringKey(Index(i) as pk) if indexed_kind ->
               case new_prop {
@@ -1451,28 +1451,28 @@ pub fn t_define_own_prop(
                   ..,
                 ) ->
                   SObject(
-                    ..slot,
+                    ..cell,
                     props: dict.delete(p, pk),
                     elements: elements.set(e, i, v),
                   )
                 _ ->
                   SObject(
-                    ..slot,
+                    ..cell,
                     props: dict.insert(p, pk, new_prop),
                     elements: elements.delete(e, i),
                   )
               }
             StringKey(pk) ->
-              SObject(..slot, props: dict.insert(p, pk, new_prop))
+              SObject(..cell, props: dict.insert(p, pk, new_prop))
             SymbolKey(sym) ->
-              SObject(..slot, symbol_props: list.key_set(sp, sym, new_prop))
+              SObject(..cell, symbol_props: list.key_set(sp, sym, new_prop))
           }
         })
       let st = case kind, key {
         ArrayObj(length:), StringKey(Index(i)) if i >= length ->
-          rt_store.t_cell_update(st, obj, fn(slot) {
-            let assert SObject(..) = slot
-            SObject(..slot, kind: ArrayObj(i + 1))
+          rt_store.t_cell_update(st, obj, fn(cell) {
+            let assert SObject(..) = cell
+            SObject(..cell, kind: ArrayObj(i + 1))
           })
         _, _ -> st
       }
@@ -1561,7 +1561,7 @@ fn typed_array_define_index(
       let #(stored, st) =
         buffer.typed_array_store(
           st,
-          buffer.ViewSlot(buffer: buf, elem_kind:, byte_offset:, length:),
+          buffer.View(buffer: buf, elem_kind:, byte_offset:, length:),
           Some(idx),
           v,
         )
@@ -1743,9 +1743,9 @@ fn has_from(st: Agent, h: Handle, key: ObjectKey) -> #(Bool, Agent) {
     _, StringKey(Private(_)) -> #(False, st)
     SObject(kind: ProxyObj(target:, handler:, revoked:), ..), _ ->
       proxy_has(st, Proxy(target:, handler:, revoked:), key)
-    SObject(kind: KBytecode(birth: BirthPending(Some(_)), ..), ..),
+    SObject(kind: BytecodeFn(birth: BirthPending(Some(_)), ..), ..),
       StringKey(Named("prototype"))
-    | SObject(kind: KCompiled(birth: BirthPending(Some(_)), ..), ..),
+    | SObject(kind: CompiledFn(birth: BirthPending(Some(_)), ..), ..),
       StringKey(Named("prototype"))
     -> #(True, st)
     SObject(kind: ModuleNamespace(exports:), symbol_props:, ..), _ -> #(
@@ -1756,13 +1756,13 @@ fn has_from(st: Agent, h: Handle, key: ObjectKey) -> #(Bool, Agent) {
       },
       st,
     )
-    slot, _ -> {
-      let #(own, proto) = own_and_proto_of_slot(st, slot, key)
+    cell, _ -> {
+      let #(own, proto) = own_and_proto_of_cell(st, cell, key)
       case own {
         Some(_) -> #(True, st)
         // §10.4.5.2 invalid index is false without the proto chain
         None ->
-          case typed_array_absorbs(slot, key) {
+          case typed_array_absorbs(cell, key) {
             True -> #(False, st)
             False ->
               case proto {
@@ -1778,8 +1778,8 @@ fn has_from(st: Agent, h: Handle, key: ObjectKey) -> #(Bool, Agent) {
 // §10.1.10.1, false when non-configurable
 pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
   let st = devolve(st, obj)
-  let #(slot, st) = read_settled(st, obj, key)
-  let assert SObject(kind:, props:, symbol_props:, elements:, ..) = slot
+  let #(cell, st) = read_settled(st, obj, key)
+  let assert SObject(kind:, props:, symbol_props:, elements:, ..) = cell
   case key {
     SymbolKey(sym) ->
       case kind {
@@ -1822,10 +1822,10 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
                 False -> #(False, st)
                 True -> {
                   let st =
-                    rt_store.t_cell_update(st, obj, fn(slot) {
-                      let assert SObject(props: p, elements: e, ..) = slot
+                    rt_store.t_cell_update(st, obj, fn(cell) {
+                      let assert SObject(props: p, elements: e, ..) = cell
                       SObject(
-                        ..slot,
+                        ..cell,
                         props: dict.delete(p, pk),
                         elements: elements.delete(e, i),
                       )
@@ -1838,9 +1838,9 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
                 False -> #(True, st)
                 True -> {
                   let st =
-                    rt_store.t_cell_update(st, obj, fn(slot) {
-                      let assert SObject(elements: e, ..) = slot
-                      SObject(..slot, elements: elements.delete(e, i))
+                    rt_store.t_cell_update(st, obj, fn(cell) {
+                      let assert SObject(elements: e, ..) = cell
+                      SObject(..cell, elements: elements.delete(e, i))
                     })
                   #(True, st)
                 }
@@ -1883,9 +1883,9 @@ pub fn t_delete_prop(st: Agent, obj: Handle, key: ObjectKey) -> #(Bool, Agent) {
 pub fn t_own_keys(st: Agent, obj: Handle) -> #(List(ObjectKey), Agent) {
   case read_object(st, obj) {
     SShapedObject(offsets:, ..) -> #(shaped_own_keys(offsets), st)
-    slot -> {
-      let #(slot, st) = settle(st, obj, slot)
-      sobject_own_keys(st, slot)
+    cell -> {
+      let #(cell, st) = settle(st, obj, cell)
+      sobject_own_keys(st, cell)
     }
   }
 }
@@ -1899,8 +1899,8 @@ fn shaped_own_keys(offsets: Dict(BitArray, Int)) -> List(ObjectKey) {
   })
 }
 
-fn sobject_own_keys(st: Agent, slot: JsSlot) -> #(List(ObjectKey), Agent) {
-  let assert SObject(kind:, props:, symbol_props:, elements:, ..) = slot
+fn sobject_own_keys(st: Agent, cell: Cell) -> #(List(ObjectKey), Agent) {
+  let assert SObject(kind:, props:, symbol_props:, elements:, ..) = cell
   use <- proxy_or(kind, proxy_own_keys(st, _))
   let has_virtual_length = case kind {
     ArrayObj(_) | StringObj(_) -> True
@@ -2076,22 +2076,22 @@ pub fn t_get_own_property(
   key: ObjectKey,
 ) -> #(Option(Property), Agent) {
   case read_object(st, h), key {
-    slot, StringKey(Private(_)) -> #(own_and_proto_of_slot(st, slot, key).0, st)
+    cell, StringKey(Private(_)) -> #(own_and_proto_of_cell(st, cell, key).0, st)
     SObject(kind: ProxyObj(target:, handler:, revoked:), ..), _ ->
       proxy_get_own_property(st, Proxy(target:, handler:, revoked:), key)
     SObject(kind: ModuleNamespace(exports:), ..), StringKey(pk) -> #(
       namespace_own_property(st, exports, pk),
       st,
     )
-    SObject(kind: KBytecode(birth: BirthPending(Some(_)), ..), ..) as slot,
+    SObject(kind: BytecodeFn(birth: BirthPending(Some(_)), ..), ..) as cell,
       StringKey(Named("prototype"))
-    | SObject(kind: KCompiled(birth: BirthPending(Some(_)), ..), ..) as slot,
+    | SObject(kind: CompiledFn(birth: BirthPending(Some(_)), ..), ..) as cell,
       StringKey(Named("prototype"))
     -> {
-      let #(slot, st) = settle(st, h, slot)
-      #(own_and_proto_of_slot(st, slot, key).0, st)
+      let #(cell, st) = settle(st, h, cell)
+      #(own_and_proto_of_cell(st, cell, key).0, st)
     }
-    slot, _ -> #(own_and_proto_of_slot(st, slot, key).0, st)
+    cell, _ -> #(own_and_proto_of_cell(st, cell, key).0, st)
   }
 }
 
@@ -2110,8 +2110,8 @@ pub fn t_own_property(
   h: Handle,
   key: ObjectKey,
 ) -> #(Option(Property), Agent) {
-  let #(slot, st) = read_settled(st, h, key)
-  #(own_and_proto_of_slot(st, slot, key).0, st)
+  let #(cell, st) = read_settled(st, h, key)
+  #(own_and_proto_of_cell(st, cell, key).0, st)
 }
 
 // §7.2.5 / §10.5.3
@@ -2119,16 +2119,16 @@ pub fn t_is_extensible(st: Agent, h: Handle) -> #(Bool, Agent) {
   case read_object(st, h) {
     SObject(kind: ProxyObj(target:, handler:, revoked:), ..) ->
       proxy_is_extensible(st, Proxy(target:, handler:, revoked:))
-    slot -> #(slot_extensible(slot), st)
+    cell -> #(cell_extensible(cell), st)
   }
 }
 
 pub fn t_ordinary_is_extensible(st: Agent, h: Handle) -> Bool {
-  slot_extensible(read_object(st, h))
+  cell_extensible(read_object(st, h))
 }
 
-fn slot_extensible(slot: JsSlot) -> Bool {
-  case slot {
+fn cell_extensible(cell: Cell) -> Bool {
+  case cell {
     SObject(extensible:, ..) -> extensible
     SShapedObject(..) -> True
     _ -> False
@@ -2156,9 +2156,9 @@ pub fn t_prevent_extensions(st: Agent, h: Handle) -> #(Bool, Agent) {
   use <- proxy_or(kind, proxy_prevent_extensions(st, _))
   use <- bool.guard(!extensible, #(True, st))
   let st =
-    rt_store.t_cell_update(st, h, fn(slot) {
-      let assert SObject(..) = slot
-      SObject(..slot, extensible: False)
+    rt_store.t_cell_update(st, h, fn(cell) {
+      let assert SObject(..) = cell
+      SObject(..cell, extensible: False)
     })
   #(True, st)
 }
@@ -2189,8 +2189,8 @@ pub fn t_new_module_namespace(
   )
 }
 
-fn namespace_binding_value(st: Agent, name: String, cell: Handle) -> JsVal {
-  let v = case rt_store.t_cell_get(st, cell) {
+fn namespace_binding_value(st: Agent, name: String, box: Handle) -> JsVal {
+  let v = case rt_store.t_cell_get(st, box) {
     SBox(value:) -> value
     _ -> rt_types.mk_undefined()
   }
@@ -2212,7 +2212,7 @@ fn namespace_get(
   let name = rt_types.key_to_text(key)
   case dict.get(exports, name) {
     Error(Nil) -> #(rt_types.mk_undefined(), st)
-    Ok(cell) -> #(namespace_binding_value(st, name, cell), st)
+    Ok(box) -> #(namespace_binding_value(st, name, box), st)
   }
 }
 
@@ -2223,9 +2223,9 @@ fn namespace_own_property(
   key: PropertyKey,
 ) -> Option(Property) {
   let name = rt_types.key_to_text(key)
-  use cell <- option.map(dict.get(exports, name) |> option.from_result)
+  use box <- option.map(dict.get(exports, name) |> option.from_result)
   DataProperty(
-    value: namespace_binding_value(st, name, cell),
+    value: namespace_binding_value(st, name, box),
     writable: True,
     enumerable: True,
     configurable: False,
@@ -2243,7 +2243,7 @@ fn namespace_define(
   let name = rt_types.key_to_text(key)
   case dict.get(exports, name) {
     Error(Nil) -> #(False, st)
-    Ok(cell) -> {
+    Ok(box) -> {
       let incompatible =
         desc.configurable == Some(True)
         || desc.enumerable == Some(False)
@@ -2254,7 +2254,7 @@ fn namespace_define(
         None -> #(True, st)
         // tdz here must throw, not return false
         Some(requested) -> #(
-          same_value(requested, namespace_binding_value(st, name, cell)),
+          same_value(requested, namespace_binding_value(st, name, box)),
           st,
         )
       }
@@ -3369,7 +3369,7 @@ pub fn t_new_arguments(
 ) -> #(JsVal, Agent) {
   let len = list.length(args)
   // wire-level check, a list is not a JsVal
-  let mapped_cells = case is_list(mapped) {
+  let mapped_boxes = case is_list(mapped) {
     True -> Some(unsafe_coerce(mapped))
     False -> None
   }
@@ -3395,7 +3395,7 @@ pub fn t_new_arguments(
         configurable: True,
         seq:,
       )
-    let callee_prop = case mapped_cells {
+    let callee_prop = case mapped_boxes {
       Some(_) ->
         DataProperty(
           value: callee,
@@ -3416,7 +3416,7 @@ pub fn t_new_arguments(
       }
     }
     SObject(
-      kind: ArgumentsObj(length: len, mapped: mapped_cells),
+      kind: ArgumentsObj(length: len, mapped: mapped_boxes),
       proto: Some(realm.object.prototype),
       props: dict.from_list([
         #(Named("length"), length_prop),

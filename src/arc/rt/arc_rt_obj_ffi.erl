@@ -186,8 +186,8 @@ named_plain(Kind, KeyBin) ->
         ?TYPEDARRAYOBJ_TAG -> false;
         ?ARRAYOBJ_TAG -> KeyBin =/= <<"length">>;
         ?STRINGOBJ_TAG -> KeyBin =/= <<"length">>;
-        ?KBYTECODE_TAG -> birth_plain(element(?KBYTECODE_BIRTH, Kind), KeyBin);
-        ?KFN_TAG -> birth_plain(element(?KFN_BIRTH, Kind), KeyBin);
+        ?BYTECODEFN_TAG -> birth_plain(element(?BYTECODEFN_BIRTH, Kind), KeyBin);
+        ?COMPILEDFN_TAG -> birth_plain(element(?COMPILEDFN_BIRTH, Kind), KeyBin);
         _ -> true
     end.
 
@@ -426,7 +426,7 @@ t_instanceof_fast(St, V, {?HANDLE_TAG, CId}) ->
         Cell when element(1, Cell) =:= ?SOBJECT_TAG,
                   element(?SOBJECT_SYMBOL_PROPS, Cell) =:= [] ->
             case element(?SOBJECT_KIND, Cell) of
-                Kind when element(1, Kind) =:= ?KFN_TAG ->
+                Kind when element(1, Kind) =:= ?COMPILEDFN_TAG ->
                     case element(?SOBJECT_PROPS, Cell) of
                         #{{?KEY_NAMED, <<"prototype">>} := Prop}
                           when element(1, Prop) =:= ?DATAPROP_TAG ->

@@ -239,7 +239,7 @@ pub fn build_ir_params(e: Emitter, i: Int, n: Int) -> List(ir.Local) {
 fn store_slot(e: Emitter, b: Binding, val: ir.Value, k: Next) -> EmitResult {
   case b.boxed {
     True ->
-      host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, b.slot)), val], k)
+      host_unit_(e, "box_set", [ir.Var(state.get_slot_var(e, b.slot)), val], k)
     False -> {
       let name = state.slot_base_name(e, b.slot)
       use body <- state.map_tree(k(state.set_slot_var(e, b.slot, name)))
@@ -267,7 +267,7 @@ pub fn unpack_frame(
           ir.Let([name], ir.Values([raw]), body)
         }
         True -> {
-          use e, box <- host_(e, "cell_new", [raw])
+          use e, box <- host_(e, "box_new", [raw])
           let name = state.slot_base_name(e, slot)
           use body <- state.map_tree(next(state.set_slot_var(e, slot, name)))
           ir.Let([name], ir.Values([box]), body)
@@ -292,7 +292,7 @@ pub fn binding_prologue(e: Emitter, scope_id: ScopeId, k: Next) -> EmitResult {
         ir.Let([name], ir.Values([init]), body)
       }
       True -> {
-        use e, box <- host_(e, "cell_new", [init])
+        use e, box <- host_(e, "box_new", [init])
         use body <- state.map_tree(next(state.set_slot_var(e, b.slot, name)))
         ir.Let([name], ir.Values([box]), body)
       }
@@ -340,7 +340,7 @@ fn body_param_copies(
               case src_boxed {
                 False -> store_slot(e, b, src_var, next)
                 True -> {
-                  use e, v <- host_(e, "cell_get", [src_var])
+                  use e, v <- host_(e, "box_get", [src_var])
                   store_slot(e, b, v, next)
                 }
               }
@@ -444,7 +444,7 @@ fn bind_one_param(
           ir.Let([vn], ir.Values([raw]), body)
         }
         True -> {
-          use e, box <- host_(e, "cell_new", [raw])
+          use e, box <- host_(e, "box_new", [raw])
           let vn = state.slot_base_name(e, b.slot)
           use body <- state.map_tree(k(state.set_slot_var(e, b.slot, vn)))
           ir.Let([vn], ir.Values([box]), body)
@@ -1458,7 +1458,7 @@ fn bind_simple_params(
           ir.Let([vn], ir.Values([raw]), body)
         }
         True -> {
-          use e, box <- host_(e, "cell_new", [raw])
+          use e, box <- host_(e, "box_new", [raw])
           use body <- state.map_tree(next(state.set_slot_var(e, b.slot, vn)))
           ir.Let([vn], ir.Values([box]), body)
         }
@@ -1593,7 +1593,7 @@ fn emit_closure_alloc(
   js_name: Option(String),
   expected_length: Int,
   capture_vals: List(ir.Value),
-  simple: Option(#(String, Int, Bool)),
+  direct_entry: Option(#(String, Int, Bool)),
 ) -> #(ir.Expr, Emitter) {
   let rc = e.consts
   // must match arc/rt/types.FnFlags field order
@@ -1616,7 +1616,7 @@ fn emit_closure_alloc(
     {
       use fun <- anf.then(anf.bind(ir.MakeClosure(fn_name, capture_vals, 2)))
       use flags_t <- anf.then(anf.make_tuple(flags))
-      use simple_v <- anf.then(case simple {
+      use direct_entry_v <- anf.then(case direct_entry {
         None -> anf.pure(ir.ConstAtom("none"))
         Some(#(sfn, arity, takes_this)) -> {
           let cls_arity = case takes_this {
@@ -1628,6 +1628,7 @@ fn emit_closure_alloc(
           )
           use inner <- anf.then(
             anf.make_tuple([
+              ir.ConstAtom("direct_entry"),
               scls,
               ir.ConstI32(arity),
               atom_bool(rc, takes_this),
@@ -1641,7 +1642,7 @@ fn emit_closure_alloc(
         flags_t,
         name_bin,
         ir.ConstI32(expected_length),
-        simple_v,
+        direct_entry_v,
       ])
     },
     e,
@@ -1727,7 +1728,7 @@ fn compile_function(
         None, True, Some(n) -> Some(n)
         _, _, _ -> None
       }
-      use #(e, simple) <- result.try(case simple_arity {
+      use #(e, direct_entry) <- result.try(case simple_arity {
         None -> {
           use #(body_expr, e_child) <- result.try(emit_body(
             e_child,
@@ -1812,10 +1813,10 @@ fn compile_function(
           js_name,
           exp_len,
           capture_vals,
-          simple,
+          direct_entry,
         )
       }
-      case simple {
+      case direct_entry {
         Some(#(name, arity, takes_this)) ->
           Ok(#(
             EmittedClosure(

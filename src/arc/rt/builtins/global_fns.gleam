@@ -7,7 +7,7 @@ import arc/rt/types.{
   GlobalDecodeUri, GlobalDecodeUriComponent, GlobalEncodeUri,
   GlobalEncodeUriComponent, GlobalEscape, GlobalEval, GlobalIsFinite,
   GlobalIsNaN, GlobalN, GlobalParseFloat, GlobalParseInt, GlobalUnescape,
-  IndirectEval, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KNative, KStr,
+  IndirectEval, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KStr, NativeFn,
   SObject, mk_bool, mk_number, mk_object, mk_string,
 } as rt_types
 import arc/rt/val as rt_val
@@ -125,7 +125,7 @@ pub fn is_intrinsic_eval(st: Agent, callee: JsVal) -> Bool {
   case rt_types.classify(callee) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: KNative(tag: GlobalN(GlobalEval(realm:)), ..), ..) ->
+        SObject(kind: NativeFn(token: GlobalN(GlobalEval(realm:)), ..), ..) ->
           realm == st.realm.id
         _ -> False
       }
@@ -322,7 +322,7 @@ fn uri_decode_dispatch(
 fn throw_uri_error(st: Agent, msg: String) -> a {
   let proto = st.realm.uri_error.prototype
   let #(msg_prop, st) = common.builtin_property(st, mk_string(msg))
-  let #(h, st) = common.alloc_error_slot(st, proto, [#("message", msg_prop)])
+  let #(h, st) = common.alloc_error_object(st, proto, [#("message", msg_prop)])
   rt_store.t_throw(st, mk_object(h))
 }
 

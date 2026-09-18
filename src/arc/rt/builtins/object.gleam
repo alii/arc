@@ -8,9 +8,9 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type ObjectKey,
   type ObjectNative, type ParsedDesc, type Property, AccessorProperty,
-  ArgumentsObj, BooleanObj, DataProperty, DateObj, ErrorObj, Index, KBig, KBool,
-  KBytecode, KCompiled, KHandle, KNative, KNull, KNum, KStr, KSym, KUndef, Named,
-  NumberObj, ObjectAssign, ObjectConstructor, ObjectCreate,
+  ArgumentsObj, BooleanObj, BytecodeFn, CompiledFn, DataProperty, DateObj,
+  ErrorObj, Index, KBig, KBool, KHandle, KNull, KNum, KStr, KSym, KUndef, Named,
+  NativeFn, NumberObj, ObjectAssign, ObjectConstructor, ObjectCreate,
   ObjectDefineProperties, ObjectDefineProperty, ObjectEntries, ObjectFreeze,
   ObjectFromEntries, ObjectGetOwnPropertyDescriptor,
   ObjectGetOwnPropertyDescriptors, ObjectGetOwnPropertyNames,
@@ -689,8 +689,8 @@ fn builtin_tag(st: Agent, this: JsVal) -> String {
         SObject(kind:, ..) ->
           case kind {
             ArgumentsObj(..) -> "Arguments"
-            KCompiled(..) | KBytecode(..) | KNative(..) -> "Function"
-            rt_types.KBound(..) -> "Function"
+            CompiledFn(..) | BytecodeFn(..) | NativeFn(..) -> "Function"
+            rt_types.BoundFn(..) -> "Function"
             ProxyObj(target:, ..) ->
               case rt_call.is_callable(st, mk_object(target)) {
                 True -> "Function"
@@ -1118,11 +1118,11 @@ fn lookup_accessor_chain(
   let #(desc, st) = rt_obj.t_get_own_property(st, h, key)
   case desc {
     Some(AccessorProperty(get:, set:, ..)) -> {
-      let slot = case kind {
+      let accessor = case kind {
         AsGetter -> get
         AsSetter -> set
       }
-      #(option.unwrap(slot, mk_undefined()), st)
+      #(option.unwrap(accessor, mk_undefined()), st)
     }
     Some(DataProperty(..)) -> #(mk_undefined(), st)
     None -> {

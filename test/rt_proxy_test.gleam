@@ -4,7 +4,7 @@ import arc/rt/lang as rt_lang
 import arc/rt/obj as rt_obj
 import arc/rt/ops as rt_ops
 import arc/rt/types.{
-  type Agent, type CompiledFn, type JsVal, FnFlags, JInt, KBool, KHandle, KNum,
+  type Agent, type CompiledCode, type JsVal, FnFlags, JInt, KBool, KHandle, KNum,
   KStr, KUndef, StringKey, canonical_key, classify, mk_bool, mk_null, mk_number,
   mk_object, mk_string, mk_undefined,
 }
@@ -21,7 +21,7 @@ fn t_apply_protected(
 ) -> #(rt_call.Completion, Agent)
 
 @external(erlang, "gleam_stdlib", "identity")
-fn as_code(f: fn(Agent, Frame, List(JsVal)) -> #(JsVal, Agent)) -> CompiledFn
+fn as_code(f: fn(Agent, Frame, List(JsVal)) -> #(JsVal, Agent)) -> CompiledCode
 
 fn agent() -> Agent {
   rt_builtins.new_agent(rt_helpers.quiet_hooks())

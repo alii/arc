@@ -24,7 +24,7 @@ import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type EvalKind, type FrameInfo, type Handle, type IteratorRecord,
-  type JsOps, type JsVal, type Step, Agent, JInt, JsOps, JsStore, KBytecode,
+  type JsOps, type JsVal, type Step, Agent, BytecodeFn, JInt, JsOps, JsStore,
   KHandle, KNull, KUndef, Named, ResumeFrame, SObject, StepAwait, StepReturn,
   StepThrow, StepYield, StringKey, TypeErr, classify, mk_number, mk_object,
   mk_undefined,
@@ -158,9 +158,16 @@ pub fn call_bytecode(
   this: JsVal,
   args: List(JsVal),
 ) -> #(Result(JsVal, JsVal), Agent) {
-  let assert KBytecode(template:, env:, home_object:, flags:, realm:, unit:, ..) =
-    kind
-    as "call_bytecode: not a KBytecode kind"
+  let assert BytecodeFn(
+    template:,
+    env:,
+    home_object:,
+    flags:,
+    realm:,
+    unit:,
+    ..,
+  ) = kind
+    as "call_bytecode: not a BytecodeFn kind"
   case st.call_depth >= limits.max_call_depth, realm == st.realm.id {
     True, _ -> depth_exceeded(st)
     False, True ->
@@ -178,9 +185,16 @@ pub fn bind_call(
   kind: types.ObjKind,
   this: JsVal,
 ) -> fn(Agent, List(JsVal)) -> #(JsVal, Agent) {
-  let assert KBytecode(template:, env:, home_object:, flags:, realm:, unit:, ..) =
-    kind
-    as "bind_call: not a KBytecode kind"
+  let assert BytecodeFn(
+    template:,
+    env:,
+    home_object:,
+    flags:,
+    realm:,
+    unit:,
+    ..,
+  ) = kind
+    as "bind_call: not a BytecodeFn kind"
   case
     realm == st.realm.id
     && !template.is_generator
@@ -320,15 +334,15 @@ pub fn construct_bytecode(
 
 fn run_construct(
   st: Agent,
-  cell: Handle,
+  callee_h: Handle,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Completion, Agent) {
   let assert SObject(
-    kind: KBytecode(template:, env:, home_object:, flags:, realm:, unit:, ..),
+    kind: BytecodeFn(template:, env:, home_object:, flags:, realm:, unit:, ..),
     ..,
-  ) = rt_store.t_cell_get(st, cell)
-    as "construct_bytecode: handle is not a KBytecode cell"
+  ) = rt_store.t_cell_get(st, callee_h)
+    as "construct_bytecode: handle is not a BytecodeFn cell"
   let m = mark(st)
   case call.root_this(st, template, new_target) {
     Error(#(thrown, st)) -> #(ThrowCompletion(thrown), settle(st, m))
@@ -336,7 +350,7 @@ fn run_construct(
       let #(outcome, st) = {
         use st <- rt_realm.with_realm(st, realm)
         let callee =
-          call.root_callee(cell, template, env, home_object, flags, unit)
+          call.root_callee(callee_h, template, env, home_object, flags, unit)
         case call.enter_root(st, callee, this, args, new_target) {
           Error(#(thrown, agent)) -> #(
             RootSettled(ThrowCompletion(thrown)),
@@ -760,12 +774,12 @@ fn return_into(s: State, value: JsVal) -> Outcome {
     None -> Finished(Ok(value), s)
     Some(IterCloseHandler(stack_depth, rest)) ->
       case state.truncate_stack(s.stack, stack_depth) {
-        [slot, ..base] -> {
+        [iter, ..base] -> {
           let s = State(..s, try_stack: rest, stack: base)
-          case interpreter.closable_record(s, slot) {
-            Ok(#(slot, s)) ->
-              case classify(slot) {
-                KHandle(_) -> close_for_return(s, slot, value)
+          case interpreter.closable_record(s, iter) {
+            Ok(#(iter, s)) ->
+              case classify(iter) {
+                KHandle(_) -> close_for_return(s, iter, value)
                 _ -> return_into(s, value)
               }
             Error(exit) -> exit_outcome(exit, "return_into")
@@ -779,7 +793,7 @@ fn return_into(s: State, value: JsVal) -> Outcome {
         State(
           ..s,
           try_stack: rest,
-          // retpc -1 tells Ret to complete with the slot
+          // retpc -1 tells Ret to complete with the value
           stack: [mk_number(JInt(-1)), value, ..base],
           pc: fin_pc,
         )

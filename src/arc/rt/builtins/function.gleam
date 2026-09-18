@@ -7,10 +7,10 @@ import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type FunctionNative, type Handle, type JsVal,
-  DataProperty, DynamicFunction, FunctionApply, FunctionBind, FunctionCall,
-  FunctionConstructor, FunctionHasInstance, FunctionN, FunctionPrototypeCall,
-  FunctionToString, JInt, KBound, KBytecode, KCompiled, KHandle, KNative, KNull,
-  KStr, KUndef, Named, NoElements, ProxyObj, SObject, StringKey,
+  BoundFn, BytecodeFn, CompiledFn, DataProperty, DynamicFunction, FunctionApply,
+  FunctionBind, FunctionCall, FunctionConstructor, FunctionHasInstance,
+  FunctionN, FunctionPrototypeCall, FunctionToString, JInt, KHandle, KNull, KStr,
+  KUndef, Named, NativeFn, NoElements, ProxyObj, SObject, StringKey,
   ThrowTypeErrorFn, classify, mk_bool, mk_number, mk_object, mk_string,
   mk_undefined,
 } as rt_types
@@ -40,8 +40,8 @@ pub fn init(
     rt_store.t_cell_new(
       st,
       SObject(
-        kind: KNative(
-          tag: FunctionN(ThrowTypeErrorFn),
+        kind: NativeFn(
+          token: FunctionN(ThrowTypeErrorFn),
           name: "",
           length: 0,
           constructible: False,
@@ -105,13 +105,13 @@ pub fn init(
     )
   // function.prototype is itself callable, returns undefined
   let st =
-    rt_store.t_cell_update(st, func_proto, fn(slot) {
-      case slot {
-        SObject(..) as slot ->
+    rt_store.t_cell_update(st, func_proto, fn(cell) {
+      case cell {
+        SObject(..) as cell ->
           SObject(
-            ..slot,
-            kind: KNative(
-              tag: FunctionN(FunctionPrototypeCall),
+            ..cell,
+            kind: NativeFn(
+              token: FunctionN(FunctionPrototypeCall),
               name: "",
               length: 0,
               constructible: False,
@@ -344,9 +344,9 @@ fn function_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: KCompiled(..), ..)
-        | SObject(kind: KBytecode(..), ..)
-        | SObject(kind: KNative(..), ..) -> {
+        SObject(kind: CompiledFn(..), ..)
+        | SObject(kind: BytecodeFn(..), ..)
+        | SObject(kind: NativeFn(..), ..) -> {
           let name = case
             rt_obj.t_ordinary_own_property(st, h, StringKey(Named("name")))
           {
@@ -359,7 +359,7 @@ fn function_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
           }
           #(mk_string("function " <> name <> "() { [native code] }"), st)
         }
-        SObject(kind: KBound(..), ..) -> #(
+        SObject(kind: BoundFn(..), ..) -> #(
           mk_string("function () { [native code] }"),
           st,
         )
@@ -386,8 +386,8 @@ fn restricted_function_property(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let is_legacy = case classify(this) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
-        SObject(kind: KCompiled(flags:, ..), ..)
-        | SObject(kind: KBytecode(flags:, ..), ..) ->
+        SObject(kind: CompiledFn(flags:, ..), ..)
+        | SObject(kind: BytecodeFn(flags:, ..), ..) ->
           flags.is_constructor && !flags.is_strict
         _ -> False
       }

@@ -3,10 +3,10 @@ import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type MethodInstallKind, type ObjectKey,
-  type Property, type PropertyKey, AccessorProperty, DataProperty, KBytecode,
-  KCompiled, KHandle, KNull, KStr, KTdz, MIGetter, MIMethod, MISetter, MIStatic,
-  MIStaticGetter, MIStaticSetter, Named, Private, SObject, StringKey, SymbolKey,
-  classify, mk_object, mk_string, mk_undefined,
+  type Property, type PropertyKey, AccessorProperty, BytecodeFn, CompiledFn,
+  DataProperty, KHandle, KNull, KStr, KTdz, MIGetter, MIMethod, MISetter,
+  MIStatic, MIStaticGetter, MIStaticSetter, Named, Private, SObject, StringKey,
+  SymbolKey, classify, mk_object, mk_string, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -39,25 +39,25 @@ pub fn t_new_private_name(st: Agent, source: String) -> #(JsVal, Agent) {
 
 // §15.4.4 makemethod, no-op on native/bound
 pub fn t_make_method(st: Agent, fn_h: Handle, home: Handle) -> Agent {
-  rt_store.t_cell_update(st, fn_h, fn(slot) {
-    case slot {
-      SObject(kind: KCompiled(..) as k, ..) ->
-        SObject(..slot, kind: KCompiled(..k, home_object: Some(home)))
-      SObject(kind: KBytecode(..) as k, ..) ->
-        SObject(..slot, kind: KBytecode(..k, home_object: Some(home)))
-      _ -> slot
+  rt_store.t_cell_update(st, fn_h, fn(cell) {
+    case cell {
+      SObject(kind: CompiledFn(..) as k, ..) ->
+        SObject(..cell, kind: CompiledFn(..k, home_object: Some(home)))
+      SObject(kind: BytecodeFn(..) as k, ..) ->
+        SObject(..cell, kind: BytecodeFn(..k, home_object: Some(home)))
+      _ -> cell
     }
   })
 }
 
 pub fn t_set_fields_init(st: Agent, ctor: Handle, init_h: Handle) -> Agent {
-  rt_store.t_cell_update(st, ctor, fn(slot) {
-    case slot {
-      SObject(kind: KCompiled(..) as k, ..) ->
-        SObject(..slot, kind: KCompiled(..k, fields_init: Some(init_h)))
-      SObject(kind: KBytecode(..) as k, ..) ->
-        SObject(..slot, kind: KBytecode(..k, fields_init: Some(init_h)))
-      _ -> slot
+  rt_store.t_cell_update(st, ctor, fn(cell) {
+    case cell {
+      SObject(kind: CompiledFn(..) as k, ..) ->
+        SObject(..cell, kind: CompiledFn(..k, fields_init: Some(init_h)))
+      SObject(kind: BytecodeFn(..) as k, ..) ->
+        SObject(..cell, kind: BytecodeFn(..k, fields_init: Some(init_h)))
+      _ -> cell
     }
   })
 }
@@ -106,21 +106,21 @@ pub fn t_class_setup(
   let #(proto_parent, ctor_parent, st) = class_heritage(st, super)
   let #(proto, st) = rt_obj.t_new_object(st, proto_parent)
   let st =
-    rt_store.t_cell_update(st, ctor, fn(slot) {
-      case slot {
-        SObject(kind: KCompiled(..) as k, ..) ->
+    rt_store.t_cell_update(st, ctor, fn(cell) {
+      case cell {
+        SObject(kind: CompiledFn(..) as k, ..) ->
           SObject(
-            ..slot,
-            kind: KCompiled(..k, home_object: Some(proto)),
+            ..cell,
+            kind: CompiledFn(..k, home_object: Some(proto)),
             proto: Some(ctor_parent),
           )
-        SObject(kind: KBytecode(..) as k, ..) ->
+        SObject(kind: BytecodeFn(..) as k, ..) ->
           SObject(
-            ..slot,
-            kind: KBytecode(..k, home_object: Some(proto)),
+            ..cell,
+            kind: BytecodeFn(..k, home_object: Some(proto)),
             proto: Some(ctor_parent),
           )
-        _ -> slot
+        _ -> cell
       }
     })
   let #(_, st) =
@@ -313,11 +313,11 @@ fn raw_define_private_data(
   writable: Bool,
 ) -> Agent {
   let #(seq, st) = rt_store.t_next_prop_seq(st)
-  rt_store.t_cell_update(st, obj, fn(slot) {
-    let assert SObject(props:, ..) as slot = rt_obj.as_sobject(slot)
+  rt_store.t_cell_update(st, obj, fn(cell) {
+    let assert SObject(props:, ..) as cell = rt_obj.as_sobject(cell)
       as "t_define_private target is not an SObject"
     SObject(
-      ..slot,
+      ..cell,
       props: dict.insert(
         props,
         key,
@@ -353,11 +353,11 @@ fn raw_merge_private_accessor(
     True -> #(Some(fn_v), set)
     False -> #(get, Some(fn_v))
   }
-  rt_store.t_cell_update(st, obj, fn(slot) {
-    let assert SObject(props:, ..) as slot = rt_obj.as_sobject(slot)
+  rt_store.t_cell_update(st, obj, fn(cell) {
+    let assert SObject(props:, ..) as cell = rt_obj.as_sobject(cell)
       as "t_define_private target is not an SObject"
     SObject(
-      ..slot,
+      ..cell,
       props: dict.insert(
         props,
         key,
@@ -423,12 +423,12 @@ pub fn t_private_set(
       case rt_obj.t_ordinary_own_property(st, h, StringKey(key)) {
         Some(DataProperty(writable: True, ..)) -> {
           let st =
-            rt_store.t_cell_update(st, h, fn(slot) {
-              let assert SObject(props:, ..) = slot
+            rt_store.t_cell_update(st, h, fn(cell) {
+              let assert SObject(props:, ..) = cell
               case dict.get(props, key) {
                 Ok(DataProperty(seq:, writable:, enumerable:, configurable:, ..)) ->
                   SObject(
-                    ..slot,
+                    ..cell,
                     props: dict.insert(
                       props,
                       key,
@@ -441,7 +441,7 @@ pub fn t_private_set(
                       ),
                     ),
                   )
-                _ -> slot
+                _ -> cell
               }
             })
           #(v, st)
@@ -563,8 +563,8 @@ pub fn t_super_call(
 
 pub fn t_fn_home_object(st: Agent, fn_h: Handle) -> JsVal {
   case rt_store.t_cell_get(st, fn_h) {
-    SObject(kind: KCompiled(home_object: Some(h), ..), ..)
-    | SObject(kind: KBytecode(home_object: Some(h), ..), ..) -> mk_object(h)
+    SObject(kind: CompiledFn(home_object: Some(h), ..), ..)
+    | SObject(kind: BytecodeFn(home_object: Some(h), ..), ..) -> mk_object(h)
     _ -> mk_undefined()
   }
 }

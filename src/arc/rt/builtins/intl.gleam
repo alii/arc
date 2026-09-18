@@ -624,10 +624,10 @@ fn branded_date_time_format(
 }
 
 fn write_intl_data(st: Agent, h: Handle, data: IntlData) -> Agent {
-  rt_store.t_cell_update(st, h, fn(slot) {
-    case slot {
+  rt_store.t_cell_update(st, h, fn(cell) {
+    case cell {
       SObject(kind: IntlObj(bound:, ..), ..) ->
-        SObject(..slot, kind: IntlObj(data:, bound:))
+        SObject(..cell, kind: IntlObj(data:, bound:))
       other -> other
     }
   })
@@ -3663,7 +3663,7 @@ fn bound_getter(
   case cached {
     Some(fn_h) -> #(mk_object(fn_h), st)
     None -> {
-      // not rooted: receiver's bound slot keeps it alive
+      // not rooted: receiver's bound field keeps it alive
       let #(fn_h, st) =
         rt_call.t_native_new(
           st,
@@ -3674,10 +3674,10 @@ fn bound_getter(
           False,
         )
       let st =
-        rt_store.t_cell_update(st, target, fn(slot) {
-          case slot {
+        rt_store.t_cell_update(st, target, fn(cell) {
+          case cell {
             SObject(kind: IntlObj(data:, ..), ..) ->
-              SObject(..slot, kind: IntlObj(data:, bound: Some(fn_h)))
+              SObject(..cell, kind: IntlObj(data:, bound: Some(fn_h)))
             other -> other
           }
         })

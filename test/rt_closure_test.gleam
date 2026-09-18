@@ -6,8 +6,8 @@ import arc/rt/closure as rt_closure
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, BirthPending, BirthSettled, DataProperty, JInt,
-  KBytecode, KHandle, KNum, KStr, Named, SObject, StringKey, classify,
+  type Agent, type Handle, BirthPending, BirthSettled, BytecodeFn, DataProperty,
+  JInt, KHandle, KNum, KStr, Named, SObject, StringKey, classify,
 }
 import gleam/list
 import gleam/option.{None, Some}
@@ -57,8 +57,10 @@ fn proto_of(st: Agent, h: Handle) -> Handle {
 pub fn plain_function_shape_test() {
   let #(f, st) = make("function Foo(a, b) {}", "Foo")
   assert proto_of(st, f) == st.realm.function.prototype
-  let assert SObject(kind: KBytecode(birth: BirthPending(Some(parent)), ..), ..) =
-    rt_store.t_cell_get(st, f)
+  let assert SObject(
+    kind: BytecodeFn(birth: BirthPending(Some(parent)), ..),
+    ..,
+  ) = rt_store.t_cell_get(st, f)
   assert parent == st.realm.object.prototype
   assert own_handle(st, f, "prototype") == Error(Nil)
   let #(keys, st) = rt_obj.t_own_keys(st, f)
@@ -80,7 +82,7 @@ pub fn plain_function_shape_test() {
   assert proto_of(st, proto) == st.realm.object.prototype
   assert own_handle(st, proto, "constructor") == Ok(f)
   let assert SObject(
-    kind: KBytecode(home_object: None, birth: BirthSettled, flags:, ..),
+    kind: BytecodeFn(home_object: None, birth: BirthSettled, flags:, ..),
     ..,
   ) = rt_store.t_cell_get(st, f)
   assert flags.is_constructor && !flags.is_class_constructor
@@ -168,7 +170,7 @@ pub fn class_constructor_prototype_not_writable_test() {
     rt_obj.t_ordinary_own_property(st, c, StringKey(Named("prototype")))
   let assert Ok(proto) = own_handle(st, c, "prototype")
   assert own_handle(st, proto, "constructor") == Ok(c)
-  let assert SObject(kind: KBytecode(home_object: Some(home), ..), ..) =
+  let assert SObject(kind: BytecodeFn(home_object: Some(home), ..), ..) =
     rt_store.t_cell_get(st, c)
   assert home == proto
 }
@@ -198,7 +200,7 @@ pub fn async_function_has_no_prototype_test() {
   assert proto_of(st, a) == st.realm.async_fn.prototype
   assert rt_obj.t_ordinary_own_property(st, a, StringKey(Named("prototype")))
     == None
-  let assert SObject(kind: KBytecode(home_object: None, ..), ..) =
+  let assert SObject(kind: BytecodeFn(home_object: None, ..), ..) =
     rt_store.t_cell_get(st, a)
 }
 
@@ -210,13 +212,13 @@ pub fn arrow_and_method_have_no_prototype_test() {
       StringKey(Named("prototype")),
     )
     == None
-  let assert SObject(kind: KBytecode(flags: af, ..), ..) =
+  let assert SObject(kind: BytecodeFn(flags: af, ..), ..) =
     rt_store.t_cell_get(st, arrow)
   assert af.is_arrow && !af.is_method
   let #(m, st) = make("var o = { m() {} };", "m")
   assert rt_obj.t_ordinary_own_property(st, m, StringKey(Named("prototype")))
     == None
-  let assert SObject(kind: KBytecode(flags: mf, ..), ..) =
+  let assert SObject(kind: BytecodeFn(flags: mf, ..), ..) =
     rt_store.t_cell_get(st, m)
   assert mf.is_method && !mf.is_constructor
 }

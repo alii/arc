@@ -107,12 +107,12 @@ bench_op(Which, St, Arg, N) ->
     erlang:monotonic_time(microsecond) - T0.
 
 bench_op_loop(_, _, _, 0) -> ok;
-bench_op_loop(kfn_code, St, F, N) ->
-    _ = 'arc@rt@call':t_kfn_code(St, F, undefined),
-    bench_op_loop(kfn_code, St, F, N-1);
-bench_op_loop(kfn_code_ffi, St, F, N) ->
-    _ = arc_rt_call_ffi:t_kfn_code(St, F, undefined),
-    bench_op_loop(kfn_code_ffi, St, F, N-1);
+bench_op_loop(compiled_fn_code, St, F, N) ->
+    _ = 'arc@rt@call':t_compiled_fn_code(St, F, undefined),
+    bench_op_loop(compiled_fn_code, St, F, N-1);
+bench_op_loop(compiled_fn_code_ffi, St, F, N) ->
+    _ = arc_rt_call_ffi:t_compiled_fn_code(St, F, undefined),
+    bench_op_loop(compiled_fn_code_ffi, St, F, N-1);
 bench_op_loop(cell_get, St, H, N) ->
     _ = 'arc@rt@store':t_cell_get(St, H),
     bench_op_loop(cell_get, St, H, N-1);

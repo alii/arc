@@ -81,7 +81,7 @@ fn root_binding_prologue(
     }
     let wrap = case b.boxed {
       True -> fn(tail) {
-        wrap(ir.Let([sv], ir.CallHost("js", "cell_new", [init]), tail))
+        wrap(ir.Let([sv], ir.CallHost("js", "box_new", [init]), tail))
       }
       False -> fn(tail) { wrap(ir.Let([sv], ir.Values([init]), tail)) }
     }
@@ -149,7 +149,7 @@ fn root_lexical_prologue(
               init,
               ir.Let(
                 [sv],
-                ir.CallHost("js", "cell_new", [ir.Var(sv <> "_raw")]),
+                ir.CallHost("js", "box_new", [ir.Var(sv <> "_raw")]),
                 tail,
               ),
             ))
@@ -189,7 +189,7 @@ fn emit_hoist(
         scope.Plain(scope.Local(slot:, boxed: True, ..)) -> {
           let #(t, e) = state.fresh_var(e)
           let box = ir.Var(state.get_slot_var(e, slot))
-          #(t, ir.CallHost("js", "cell_set", [box, ir.Var(fn_var)]), e)
+          #(t, ir.CallHost("js", "box_set", [box, ir.Var(fn_var)]), e)
         }
         scope.Plain(scope.Local(slot:, boxed: False, ..)) -> {
           let #(t, e) = state.fresh_slot_var(e, slot)
