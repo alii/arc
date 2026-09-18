@@ -2,21 +2,21 @@ import arc/internal/ordered_entries
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined}
 import arc/rt/builtins/iter_protocol.{type IteratorRecord}
+import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type MapKey,
-  type ObjKind, type SetIterKind, type SetNative, JFloat, JInt, JNan, KHandle,
-  KNull, KNum, KUndef, Named, NoElements, SObject, SetAdd, SetClear,
-  SetConstructor, SetDelete, SetDifference, SetEntries, SetForEach, SetGetSize,
-  SetHas, SetIntersection, SetIsDisjointFrom, SetIsSubsetOf, SetIsSupersetOf,
-  SetIterEntries, SetIterValues, SetIterator, SetN, SetObj,
-  SetSymmetricDifference, SetUnion, SetValues, StringKey, classify,
-  js_to_map_key, mk_bool, mk_number, mk_object, mk_undefined, symbol_iterator,
+  type ObjKind, type SetIterKind, type SetNative, JFloat, JNan, KNull, KNum,
+  KUndef, Named, SObject, SetAdd, SetClear, SetConstructor, SetDelete,
+  SetDifference, SetEntries, SetForEach, SetGetSize, SetHas, SetIntersection,
+  SetIsDisjointFrom, SetIsSubsetOf, SetIsSupersetOf, SetIterEntries,
+  SetIterValues, SetIterator, SetN, SetObj, SetSymmetricDifference, SetUnion,
+  SetValues, StringKey, classify, js_to_map_key, mk_bool, mk_int, mk_number,
+  mk_object, mk_undefined, symbol_iterator,
 } as rt_types
 import arc/rt/val as rt_val
-import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
@@ -65,7 +65,7 @@ pub fn init(
       0,
       [],
     )
-  let st = common.add_to_string_tag(st, bt.prototype, "Set")
+  let st = common.add_string_tag(st, bt.prototype, "Set")
   let #(iter_prop, st) = common.restamp(st, values_prop)
   let st =
     common.add_symbol_property(st, bt.prototype, symbol_iterator, iter_prop)
@@ -122,7 +122,7 @@ fn set_constructor(
       r.set.prototype
     })
   let #(set_h, st) =
-    alloc_kind_cell(st, SetObj(entries: ordered_entries.new()), proto)
+    realm_ops.alloc_object(st, SetObj(entries: ordered_entries.new()), proto)
   let set_v = mk_object(set_h)
   case classify(first_arg_or_undefined(args)) {
     KUndef | KNull -> #(set_h, st)
@@ -176,7 +176,7 @@ fn set_clear(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 
 fn set_size(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   use ref <- require_set(st, this, "size")
-  #(mk_number(JInt(ordered_entries.size(read_set_store(st, ref)))), st)
+  #(mk_int(ordered_entries.size(read_set_store(st, ref))), st)
 }
 
 fn set_for_each(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
@@ -224,7 +224,7 @@ fn alloc_set_iterator(
   kind: SetIterKind,
 ) -> #(JsVal, Agent) {
   let #(iter_h, st) =
-    alloc_kind_cell(
+    realm_ops.alloc_object(
       st,
       SetIterator(target: set_ref_handle(source), index: 0, kind:),
       st.realm.set_iter_proto,
@@ -490,55 +490,38 @@ fn get_set_record(
   other: JsVal,
   cont: fn(SetRecord, Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
-  case classify(other) {
-    KHandle(_) -> {
-      let #(raw_size, st) =
-        rt_obj.t_get_prop(st, other, StringKey(Named("size")))
-      let #(num, st) = rt_val.t_to_number(st, raw_size)
-      case num {
-        JNan -> rt_val.t_throw_type_error(st, "size is NaN")
-        num -> {
-          let int_size = rt_val.jsnum_to_integer_or_infinity(num)
-          case int_size < 0 {
-            True -> rt_val.t_throw_range_error(st, "size is negative")
-            False -> {
-              let #(has, st) =
-                rt_obj.t_get_prop(st, other, StringKey(Named("has")))
-              use has <- helpers.require_callable(st, has, fn() {
-                "has is not a function"
-              })
-              let #(keys, st) =
-                rt_obj.t_get_prop(st, other, StringKey(Named("keys")))
-              use keys <- helpers.require_callable(st, keys, fn() {
-                "keys is not a function"
-              })
-              cont(SetRecord(obj: other, size: int_size, has:, keys:), st)
-            }
-          }
-        }
-      }
-    }
-    _ -> rt_val.t_throw_type_error(st, "other is not an object")
-  }
+  use Nil <- helpers.guard(rt_val.is_object(other), fn() {
+    rt_val.t_throw_type_error(st, "other is not an object")
+  })
+  let #(raw_size, st) = rt_obj.t_get_prop(st, other, StringKey(Named("size")))
+  let #(num, st) = rt_val.t_to_number(st, raw_size)
+  use Nil <- helpers.guard(num != JNan, fn() {
+    rt_val.t_throw_type_error(st, "size is NaN")
+  })
+  let int_size = rt_val.jsnum_to_integer_or_infinity(num)
+  use Nil <- helpers.guard(int_size >= 0, fn() {
+    rt_val.t_throw_range_error(st, "size is negative")
+  })
+  let #(has, st) = rt_obj.t_get_prop(st, other, StringKey(Named("has")))
+  use has <- helpers.require_callable(st, has, fn() { "has is not a function" })
+  let #(keys, st) = rt_obj.t_get_prop(st, other, StringKey(Named("keys")))
+  use keys <- helpers.require_callable(st, keys, fn() {
+    "keys is not a function"
+  })
+  cont(SetRecord(obj: other, size: int_size, has:, keys:), st)
 }
 
 // §24.2.1.3 getkeysiterator
 fn get_keys_iterator(st: Agent, rec: SetRecord) -> #(IteratorRecord, Agent) {
   let #(iter, st) = rt_call.t_call_checked(st, rec.keys, rec.obj, [])
-  case classify(iter) {
-    KHandle(_) -> {
-      let #(next_fn, st) = rt_obj.t_get_prop(st, iter, StringKey(Named("next")))
-      case rt_call.is_callable(st, next_fn) {
-        False ->
-          rt_val.t_throw_type_error(st, "iterator.next is not a function")
-        True -> #(
-          rt_types.IteratorRecord(iterator: iter, next_method: next_fn),
-          st,
-        )
-      }
-    }
-    _ -> rt_val.t_throw_type_error(st, "keys() did not return an object")
-  }
+  use Nil <- helpers.guard(rt_val.is_object(iter), fn() {
+    rt_val.t_throw_type_error(st, "keys() did not return an object")
+  })
+  let #(next_fn, st) = rt_obj.t_get_prop(st, iter, StringKey(Named("next")))
+  use Nil <- helpers.guard(rt_call.is_callable(st, next_fn), fn() {
+    rt_val.t_throw_type_error(st, "iterator.next is not a function")
+  })
+  #(rt_types.IteratorRecord(iterator: iter, next_method: next_fn), st)
 }
 
 fn step_keys(st: Agent, keys: IteratorRecord) -> #(Option(JsVal), Agent) {
@@ -571,7 +554,8 @@ fn alloc_new_set(
   st: Agent,
   entries: ordered_entries.OrderedEntries(MapKey, JsVal),
 ) -> #(JsVal, Agent) {
-  let #(h, st) = alloc_kind_cell(st, SetObj(entries:), st.realm.set.prototype)
+  let #(h, st) =
+    realm_ops.alloc_object(st, SetObj(entries:), st.realm.set.prototype)
   #(mk_object(h), st)
 }
 
@@ -627,22 +611,4 @@ fn update_set(
     let assert SObject(..) = slot
     SObject(..slot, kind: SetObj(entries:))
   })
-}
-
-fn alloc_kind_cell(
-  st: Agent,
-  kind: ObjKind,
-  proto: Handle,
-) -> #(Handle, Agent) {
-  rt_store.t_cell_new(
-    st,
-    SObject(
-      kind:,
-      proto: Some(proto),
-      props: dict.new(),
-      symbol_props: [],
-      elements: NoElements,
-      extensible: True,
-    ),
-  )
 }

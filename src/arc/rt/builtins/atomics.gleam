@@ -2,6 +2,7 @@ import arc/rt/async as rt_async
 import arc/rt/buffer
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
+import arc/rt/limits
 import arc/rt/sab
 import arc/rt/store as rt_store
 import arc/rt/typed_array_ffi.{
@@ -17,7 +18,7 @@ import arc/rt/types.{
   BigUint64Kind, Detached, Int16Kind, Int32Kind, Int8Kind, JFloat, JInt, JNan,
   JNegInf, JPosInf, KHandle, KNum, KUndef, NumKind, OwnerBlock, SObject, Shared,
   TypedArrayObj, Uint16Kind, Uint32Kind, Uint8Kind, classify, mk_bigint, mk_bool,
-  mk_number, mk_object, mk_undefined,
+  mk_int, mk_number, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/float
@@ -369,7 +370,7 @@ fn modify_element(
 fn element_to_js(info: TaInfo, raw: Int) -> JsVal {
   case info.elem_kind {
     BigKind(_) -> mk_bigint(raw)
-    NumKind(_) -> mk_number(JInt(raw))
+    NumKind(_) -> mk_int(raw)
   }
 }
 
@@ -425,7 +426,7 @@ fn atomic_store(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
         JNegInf -> #(0, mk_number(JNegInf))
         _ -> {
           let n = rt_val.jsnum_to_integer_or_infinity(num)
-          #(n, mk_number(JInt(n)))
+          #(n, mk_int(n))
         }
       }
       let st = write_element(st, info, buf, idx, stored)
@@ -533,7 +534,7 @@ fn wait_result_object(
   value: JsVal,
 ) -> #(JsVal, Agent) {
   let #(h, st) =
-    common.alloc_pojo(st, st.realm.object.prototype, [
+    common.alloc_plain_object(st, st.realm.object.prototype, [
       #("async", mk_bool(is_async)),
       #("value", value),
     ])
@@ -547,15 +548,15 @@ fn notify(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   case buffer.buffer_storage(st, info.buffer) {
     Some(Shared(block: OwnerBlock(owner:, ..), ..)) -> {
       let n = sab.notify(owner, element_offset(info, idx), count)
-      #(mk_number(JInt(n)), st)
+      #(mk_int(n), st)
     }
-    Some(_) | None -> #(mk_number(JInt(0)), st)
+    Some(_) | None -> #(mk_int(0), st)
   }
 }
 
 fn notify_count(st: Agent, val: JsVal) -> #(Int, Agent) {
   case classify(val) {
-    KUndef -> #(rt_val.max_safe_integer, st)
+    KUndef -> #(limits.max_safe_integer, st)
     _ -> {
       let #(n, st) = rt_val.t_to_integer_or_infinity(st, val)
       #(int.max(n, 0), st)

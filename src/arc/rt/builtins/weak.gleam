@@ -3,13 +3,14 @@ import arc/rt/builtins/helpers.{
   arg_at, first_arg_or_undefined, two_args_or_undefined,
 }
 import arc/rt/builtins/iter_protocol
+import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type ObjKind,
   type Realm, type WeakKey, type WeakNative, KHandle, KNull, KSym, KUndef, Named,
-  NoElements, SObject, StringKey, WeakMapConstructor, WeakMapDelete, WeakMapGet,
+  SObject, StringKey, WeakMapConstructor, WeakMapDelete, WeakMapGet,
   WeakMapGetOrInsert, WeakMapGetOrInsertComputed, WeakMapHas, WeakMapObj,
   WeakMapSet, WeakN, WeakObjKey, WeakSetAdd, WeakSetConstructor, WeakSetDelete,
   WeakSetHas, WeakSetObj, WeakSymKey, classify, mk_bool, mk_object, mk_undefined,
@@ -44,7 +45,7 @@ pub fn init(
       0,
       [],
     )
-  let st = common.add_to_string_tag(st, weak_map.prototype, "WeakMap")
+  let st = common.add_string_tag(st, weak_map.prototype, "WeakMap")
   let #(ws_methods, st) =
     common.alloc_methods(st, fn_proto, [
       #("add", WeakN(WeakSetAdd), 1),
@@ -62,7 +63,7 @@ pub fn init(
       0,
       [],
     )
-  let st = common.add_to_string_tag(st, weak_set.prototype, "WeakSet")
+  let st = common.add_string_tag(st, weak_set.prototype, "WeakSet")
   #(#(weak_map, weak_set), st)
 }
 
@@ -135,7 +136,7 @@ fn weak_construct(
 ) -> #(Handle, Agent) {
   let #(proto, st) =
     rt_call.get_prototype_from_constructor(st, new_target, intrinsic)
-  let #(coll_h, st) = alloc_kind_cell(st, empty_kind, proto)
+  let #(coll_h, st) = realm_ops.alloc_object(st, empty_kind, proto)
   let coll = mk_object(coll_h)
   case classify(first_arg_or_undefined(args)) {
     KUndef | KNull -> #(coll_h, st)
@@ -399,22 +400,4 @@ fn update_ws(
     let assert SObject(kind: WeakSetObj(entries:), ..) = slot
     SObject(..slot, kind: WeakSetObj(entries: f(entries)))
   })
-}
-
-fn alloc_kind_cell(
-  st: Agent,
-  kind: ObjKind,
-  proto: Handle,
-) -> #(Handle, Agent) {
-  rt_store.t_cell_new(
-    st,
-    SObject(
-      kind:,
-      proto: Some(proto),
-      props: dict.new(),
-      symbol_props: [],
-      elements: NoElements,
-      extensible: True,
-    ),
-  )
 }

@@ -1,11 +1,13 @@
+//// small shared helpers for builtin natives
+
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsNum, type JsVal, type ObjKind, type SymbolId,
-  BigIntObj, BooleanObj, KBig, KBool, KHandle, KNum, KStr, KSym, NumberObj,
-  SObject, StringKey, StringObj, SymbolObj, classify, mk_undefined,
+  type Agent, type Handle, type JsVal, type ObjKind, type SymbolId, KHandle,
+  KSym, SObject, StringKey, classify, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
+import gleam/list
 import gleam/option.{type Option, None, Some}
 
 pub type OwnElement {
@@ -23,16 +25,8 @@ pub fn get_index(st: Agent, this: JsVal, idx: Int) -> #(JsVal, Agent) {
   }
 }
 
-@external(erlang, "arc_rt_obj_ffi", "t_get_prop_slow")
-fn ffi_get_named(
-  st: Agent,
-  recv: JsVal,
-  key: String,
-  site: Option(Nil),
-) -> #(JsVal, Agent)
-
 pub fn get_named(st: Agent, recv: JsVal, key: String) -> #(JsVal, Agent) {
-  ffi_get_named(st, recv, key, None)
+  rt_val.get_named(st, recv, key)
 }
 
 @external(erlang, "arc_rt_helpers_ffi", "get_symbol_data")
@@ -97,6 +91,20 @@ pub fn three_args_or_undefined(args: List(JsVal)) -> #(JsVal, JsVal, JsVal) {
     [a] -> #(a, mk_undefined(), mk_undefined())
     [] -> #(mk_undefined(), mk_undefined(), mk_undefined())
   }
+}
+
+// threaded list.map, results in input order
+pub fn map_threaded(
+  st: Agent,
+  items: List(a),
+  f: fn(Agent, a) -> #(b, Agent),
+) -> #(List(b), Agent) {
+  let #(rev, st) = {
+    use #(acc, st), item <- list.fold(items, #([], st))
+    let #(out, st) = f(st, item)
+    #([out, ..acc], st)
+  }
+  #(list.reverse(rev), st)
 }
 
 pub fn guard(cond: Bool, or_else: fn() -> r, cont: fn(Nil) -> r) -> r {
@@ -171,71 +179,4 @@ pub fn can_be_held_weakly(v: JsVal) -> Bool {
     KSym(id) -> !rt_types.is_registered_symbol(id)
     _ -> False
   }
-}
-
-pub fn this_string_value(st: Agent, this: JsVal) -> String {
-  case classify(this) {
-    KStr(s) -> s
-    KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
-        SObject(kind: StringObj(value:), ..) -> value
-        _ -> this_value_type_error(st, "String")
-      }
-    _ -> this_value_type_error(st, "String")
-  }
-}
-
-pub fn this_number_value(st: Agent, this: JsVal) -> JsNum {
-  case classify(this) {
-    KNum(n) -> n
-    KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
-        SObject(kind: NumberObj(value:), ..) -> value
-        _ -> this_value_type_error(st, "Number")
-      }
-    _ -> this_value_type_error(st, "Number")
-  }
-}
-
-pub fn this_boolean_value(st: Agent, this: JsVal) -> Bool {
-  case classify(this) {
-    KBool(b) -> b
-    KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
-        SObject(kind: BooleanObj(value:), ..) -> value
-        _ -> this_value_type_error(st, "Boolean")
-      }
-    _ -> this_value_type_error(st, "Boolean")
-  }
-}
-
-pub fn this_symbol_value(st: Agent, this: JsVal) -> SymbolId {
-  case classify(this) {
-    KSym(id) -> id
-    KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
-        SObject(kind: SymbolObj(value:), ..) -> value
-        _ -> this_value_type_error(st, "Symbol")
-      }
-    _ -> this_value_type_error(st, "Symbol")
-  }
-}
-
-pub fn this_bigint_value(st: Agent, this: JsVal) -> Int {
-  case classify(this) {
-    KBig(n) -> n
-    KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
-        SObject(kind: BigIntObj(value:), ..) -> value
-        _ -> this_value_type_error(st, "BigInt")
-      }
-    _ -> this_value_type_error(st, "BigInt")
-  }
-}
-
-fn this_value_type_error(st: Agent, name: String) -> a {
-  rt_val.t_throw_type_error(
-    st,
-    name <> ".prototype method called on incompatible receiver",
-  )
 }

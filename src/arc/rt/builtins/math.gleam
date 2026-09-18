@@ -36,7 +36,7 @@ pub fn init(
       fn(acc, entry) {
         let #(props, st) = acc
         let #(name, f) = entry
-        let #(prop, st) = common.data_prop(st, mk_number(JFloat(f)))
+        let #(prop, st) = common.frozen_property(st, mk_number(JFloat(f)))
         #([#(name, prop), ..props], st)
       },
     )

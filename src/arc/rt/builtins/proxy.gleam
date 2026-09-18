@@ -110,7 +110,7 @@ fn proxy_revocable(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
       False,
     )
   let #(result_h, st) =
-    common.alloc_pojo(st, realm.object.prototype, [
+    common.alloc_plain_object(st, realm.object.prototype, [
       #("proxy", mk_object(proxy_h)),
       #("revoke", mk_object(revoker_h)),
     ])

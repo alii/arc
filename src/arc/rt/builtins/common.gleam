@@ -1,3 +1,5 @@
+//// alloc and install kit for builtin objects
+
 import arc/internal/tree_array
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
@@ -5,14 +7,14 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type NativeToken,
   type ObjKind, type Property, type PropertyKey, type SymbolId, AccessorProperty,
-  ArrayObj, BuiltinPair, DataProperty, Dense, ErrorObj, JInt, KNative, Named,
-  NoElements, Ordinary, SObject, mk_number, mk_object, mk_string,
+  ArrayObj, BuiltinPair, DataProperty, Dense, ErrorObj, KNative, Named,
+  NoElements, Ordinary, SObject, mk_int, mk_object, mk_string,
 } as rt_types
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-pub fn data_prop(st: Agent, val: JsVal) -> #(Property, Agent) {
+pub fn frozen_property(st: Agent, val: JsVal) -> #(Property, Agent) {
   let #(seq, st) = rt_store.t_next_prop_seq(st)
   #(
     DataProperty(
@@ -26,17 +28,18 @@ pub fn data_prop(st: Agent, val: JsVal) -> #(Property, Agent) {
   )
 }
 
-pub fn data_property(st: Agent, val: JsVal) -> #(Property, Agent) {
+pub fn plain_property(st: Agent, val: JsVal) -> #(Property, Agent) {
   let #(seq, st) = rt_store.t_next_prop_seq(st)
-  #(
-    DataProperty(
-      value: val,
-      writable: True,
-      enumerable: True,
-      configurable: True,
-      seq:,
-    ),
-    st,
+  #(plain_property_at(val, seq), st)
+}
+
+pub fn plain_property_at(val: JsVal, seq: Int) -> Property {
+  DataProperty(
+    value: val,
+    writable: True,
+    enumerable: True,
+    configurable: True,
+    seq:,
   )
 }
 
@@ -65,22 +68,18 @@ pub fn accessor_prop(
   #(AccessorProperty(get:, set:, enumerable:, configurable:, seq:), st)
 }
 
-pub fn configurable(prop: Property) -> Property {
+pub fn make_configurable(prop: Property) -> Property {
   case prop {
-    DataProperty(value:, writable:, enumerable:, seq:, ..) ->
-      DataProperty(value:, writable:, enumerable:, configurable: True, seq:)
-    AccessorProperty(get:, set:, enumerable:, seq:, ..) ->
-      AccessorProperty(get:, set:, enumerable:, configurable: True, seq:)
+    DataProperty(..) -> DataProperty(..prop, configurable: True)
+    AccessorProperty(..) -> AccessorProperty(..prop, configurable: True)
   }
 }
 
 pub fn restamp(st: Agent, prop: Property) -> #(Property, Agent) {
   let #(seq, st) = rt_store.t_next_prop_seq(st)
   let prop = case prop {
-    DataProperty(value:, writable:, enumerable:, configurable:, ..) ->
-      DataProperty(value:, writable:, enumerable:, configurable:, seq:)
-    AccessorProperty(get:, set:, enumerable:, configurable:, ..) ->
-      AccessorProperty(get:, set:, enumerable:, configurable:, seq:)
+    DataProperty(..) -> DataProperty(..prop, seq:)
+    AccessorProperty(..) -> AccessorProperty(..prop, seq:)
   }
   #(prop, st)
 }
@@ -103,7 +102,7 @@ pub fn fn_length_property(st: Agent, arity: Int) -> #(Property, Agent) {
   let #(seq, st) = rt_store.t_next_prop_seq(st)
   #(
     DataProperty(
-      value: mk_number(JInt(arity)),
+      value: mk_int(arity),
       writable: False,
       enumerable: False,
       configurable: True,
@@ -114,17 +113,7 @@ pub fn fn_length_property(st: Agent, arity: Int) -> #(Property, Agent) {
 }
 
 pub fn fn_prototype_property(st: Agent, proto: Handle) -> #(Property, Agent) {
-  let #(seq, st) = rt_store.t_next_prop_seq(st)
-  #(
-    DataProperty(
-      value: mk_object(proto),
-      writable: False,
-      enumerable: False,
-      configurable: False,
-      seq:,
-    ),
-    st,
-  )
+  frozen_property(st, mk_object(proto))
 }
 
 pub fn named_props(
@@ -154,7 +143,7 @@ pub fn alloc_proto(
   #(h, rt_store.t_pin_root(st, h))
 }
 
-pub fn alloc_pojo(
+pub fn alloc_plain_object(
   st: Agent,
   object_proto: Handle,
   props: List(#(String, JsVal)),
@@ -162,7 +151,7 @@ pub fn alloc_pojo(
   use seq <- rt_store.t_cell_new_with(st, list.length(props))
   let entries =
     list.index_map(props, fn(kv, i) {
-      #(Named(kv.0), DataProperty(kv.1, True, True, True, seq + i))
+      #(Named(kv.0), plain_property_at(kv.1, seq + i))
     })
   SObject(
     kind: Ordinary,
@@ -172,16 +161,6 @@ pub fn alloc_pojo(
     elements: NoElements,
     extensible: True,
   )
-}
-
-pub fn alloc_native_fn(
-  st: Agent,
-  fn_proto: Handle,
-  tag: NativeToken,
-  name: String,
-  arity: Int,
-) -> #(Handle, Agent) {
-  alloc_rooted_native_fn(st, fn_proto, tag, name, arity)
 }
 
 pub fn alloc_rooted_native_fn(
@@ -201,13 +180,10 @@ pub fn alloc_methods(
   fn_proto: Handle,
   specs: List(#(String, NativeToken, Int)),
 ) -> #(List(#(String, Property)), Agent) {
-  list.fold(specs, #([], st), fn(acc, spec) {
-    let #(props, st) = acc
-    let #(name, tag, arity) = spec
-    let #(fn_h, st) = alloc_rooted_native_fn(st, fn_proto, tag, name, arity)
-    let #(prop, st) = builtin_property(st, mk_object(fn_h))
-    #([#(name, prop), ..props], st)
-  })
+  use #(props, st), #(name, tag, arity) <- list.fold(specs, #([], st))
+  let #(fn_h, st) = alloc_rooted_native_fn(st, fn_proto, tag, name, arity)
+  let #(prop, st) = builtin_property(st, mk_object(fn_h))
+  #([#(name, prop), ..props], st)
 }
 
 pub fn alloc_getters(
@@ -215,21 +191,17 @@ pub fn alloc_getters(
   fn_proto: Handle,
   specs: List(#(String, NativeToken)),
 ) -> #(List(#(String, Property)), Agent) {
-  list.fold(specs, #([], st), fn(acc, spec) {
-    let #(props, st) = acc
-    let #(name, tag) = spec
-    let #(fn_h, st) =
-      alloc_rooted_native_fn(st, fn_proto, tag, "get " <> name, 0)
-    let #(prop, st) =
-      accessor_prop(
-        st,
-        get: Some(mk_object(fn_h)),
-        set: None,
-        enumerable: False,
-        configurable: True,
-      )
-    #([#(name, prop), ..props], st)
-  })
+  use #(props, st), #(name, tag) <- list.fold(specs, #([], st))
+  let #(fn_h, st) = alloc_rooted_native_fn(st, fn_proto, tag, "get " <> name, 0)
+  let #(prop, st) =
+    accessor_prop(
+      st,
+      get: Some(mk_object(fn_h)),
+      set: None,
+      enumerable: False,
+      configurable: True,
+    )
+  #([#(name, prop), ..props], st)
 }
 
 pub fn alloc_get_set_accessor(
@@ -263,13 +235,11 @@ fn ctor_properties(
   let #(name_p, st) = fn_name_property(st, name)
   let #(proto_p, st) = fn_prototype_property(st, proto)
   // restamp extras so they sort after length/name/prototype
-  let #(extras, st) =
-    list.fold(extras, #([], st), fn(acc, kv) {
-      let #(es, st) = acc
-      let #(k, p) = kv
-      let #(p, st) = restamp(st, p)
-      #([#(k, p), ..es], st)
-    })
+  let #(extras, st) = {
+    use #(es, st), #(k, p) <- list.fold(extras, #([], st))
+    let #(p, st) = restamp(st, p)
+    #([#(k, p), ..es], st)
+  }
   #(
     [
       #("length", len_p),
@@ -301,33 +271,17 @@ pub fn init_type(
   ctor_props: List(#(String, Property)),
 ) -> #(BuiltinPair, Agent) {
   let #(proto_h, st) = alloc_proto(st, Some(parent_proto), dict.new())
-  let #(ctor_all_props, st) =
-    ctor_properties(st, proto_h, name, arity, ctor_props)
-  let #(ctor_h, st) =
-    rt_store.t_cell_new(
-      st,
-      SObject(
-        kind: KNative(
-          tag: ctor_tag(proto_h),
-          name:,
-          length: arity,
-          constructible: True,
-        ),
-        proto: Some(ctor_parent),
-        props: named_props(ctor_all_props),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
-      ),
-    )
-  let st = rt_store.t_pin_root(st, ctor_h)
-  let #(all_proto_props, st) = proto_properties(st, ctor_h, proto_props)
-  let st =
-    rt_store.t_cell_update(st, proto_h, fn(slot) {
-      let assert SObject(..) = slot
-      SObject(..slot, props: named_props(all_proto_props))
-    })
-  #(BuiltinPair(prototype: proto_h, constructor: ctor_h), st)
+  init_type_on(
+    st,
+    proto_h,
+    ctor_parent,
+    proto_props,
+    ctor_tag,
+    name,
+    arity,
+    ctor_props,
+    constructible: True,
+  )
 }
 
 pub fn init_wrapper_type(
@@ -366,7 +320,7 @@ pub fn init_namespace(
   tag: String,
   props: List(#(String, Property)),
 ) -> #(Handle, Agent) {
-  let #(tag_pair, st) = to_string_tag(st, tag)
+  let #(tag_pair, st) = string_tag_property(st, tag)
   let #(h, st) =
     rt_store.t_cell_new(
       st,
@@ -382,6 +336,7 @@ pub fn init_namespace(
   #(h, rt_store.t_pin_root(st, h))
 }
 
+// installs a constructor over an already allocated prototype
 pub fn init_type_on(
   st: Agent,
   proto_h: Handle,
@@ -391,7 +346,7 @@ pub fn init_type_on(
   name: String,
   arity: Int,
   ctor_props: List(#(String, Property)),
-  constructible: Bool,
+  constructible constructible: Bool,
 ) -> #(BuiltinPair, Agent) {
   let #(ctor_all_props, st) =
     ctor_properties(st, proto_h, name, arity, ctor_props)
@@ -417,11 +372,10 @@ pub fn init_type_on(
   let st =
     rt_store.t_cell_update(st, proto_h, fn(slot) {
       let assert SObject(props: existing, ..) = slot
-      let merged =
-        list.fold(all_proto_props, existing, fn(acc, kv) {
-          let #(k, v) = kv
-          dict.insert(acc, Named(k), v)
-        })
+      let merged = {
+        use acc, #(k, v) <- list.fold(all_proto_props, existing)
+        dict.insert(acc, Named(k), v)
+      }
       SObject(..slot, props: merged)
     })
   #(BuiltinPair(prototype: proto_h, constructor: ctor_h), st)
@@ -451,16 +405,16 @@ pub fn add_symbol_property(
   })
 }
 
-pub fn to_string_tag(
+pub fn string_tag_property(
   st: Agent,
   name: String,
 ) -> #(#(SymbolId, Property), Agent) {
-  let #(prop, st) = data_prop(st, mk_string(name))
-  #(#(rt_types.symbol_to_string_tag, configurable(prop)), st)
+  let #(prop, st) = frozen_property(st, mk_string(name))
+  #(#(rt_types.symbol_to_string_tag, make_configurable(prop)), st)
 }
 
-pub fn add_to_string_tag(st: Agent, h: Handle, name: String) -> Agent {
-  let #(#(sym, prop), st) = to_string_tag(st, name)
+pub fn add_string_tag(st: Agent, h: Handle, name: String) -> Agent {
+  let #(#(sym, prop), st) = string_tag_property(st, name)
   add_symbol_property(st, h, sym, prop)
 }
 

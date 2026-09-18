@@ -123,8 +123,8 @@ pub fn init(
       enumerable: False,
       configurable: True,
     )
-  let #(tag_pair, st) = common.to_string_tag(st, "Symbol")
-  let #(to_prim_p, st) = common.data_prop(st, mk_object(to_primitive_ref))
+  let #(tag_pair, st) = common.string_tag_property(st, "Symbol")
+  let #(to_prim_p, st) = common.frozen_property(st, mk_object(to_primitive_ref))
   let st =
     rt_store.t_cell_update(st, prototype, fn(slot) {
       let assert SObject(..) = slot
@@ -139,7 +139,7 @@ pub fn init(
         ]),
         symbol_props: [
           tag_pair,
-          #(rt_types.symbol_to_primitive, common.configurable(to_prim_p)),
+          #(rt_types.symbol_to_primitive, common.make_configurable(to_prim_p)),
         ],
       )
     })
@@ -153,7 +153,7 @@ fn well_known_properties(
   case specs {
     [] -> #([], st)
     [#(name, id), ..rest] -> {
-      let #(prop, st) = common.data_prop(st, mk_symbol(id))
+      let #(prop, st) = common.frozen_property(st, mk_symbol(id))
       let #(tail, st) = well_known_properties(st, rest)
       #([#(name, prop), ..tail], st)
     }

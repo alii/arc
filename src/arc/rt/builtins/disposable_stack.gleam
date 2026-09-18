@@ -2,6 +2,7 @@ import arc/rt/async as rt_async
 import arc/rt/builtins/common
 import arc/rt/builtins/error as b_error
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
+import arc/rt/builtins/realm_ops
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -16,9 +17,9 @@ import arc/rt/types.{
   DisposableStackObj, DisposableStackPrototypeAdopt,
   DisposableStackPrototypeDefer, DisposableStackPrototypeDispose,
   DisposableStackPrototypeMove, DisposableStackPrototypeUse, DisposeCallback,
-  Disposed, KHandle, KNull, KUndef, MethodDispose, NoElements, NullDispose,
-  Pending, SDisposeCapability, SObject, SymbolKey, TypeErr, classify, mk_bool,
-  mk_object, mk_undefined,
+  Disposed, KHandle, KNull, KUndef, MethodDispose, NullDispose, Pending,
+  SDisposeCapability, SObject, SymbolKey, TypeErr, classify, mk_bool, mk_object,
+  mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -120,9 +121,9 @@ fn init_stack_type(
       name,
       0,
       [],
-      True,
+      constructible: True,
     )
-  let st = common.add_to_string_tag(st, proto_h, name)
+  let st = common.add_string_tag(st, proto_h, name)
   let #(dispose_alias, st) = common.restamp(st, dispose_prop)
   let st =
     common.add_symbol_property(st, proto_h, dispose_symbol, dispose_alias)
@@ -225,17 +226,8 @@ fn alloc_stack(
   async async: Bool,
   disposable_state disposable_state: DisposableState,
 ) -> #(Handle, Agent) {
-  rt_store.t_cell_new(
-    st,
-    SObject(
-      kind: DisposableStackObj(async:, state: disposable_state),
-      proto: Some(proto),
-      props: dict.new(),
-      symbol_props: [],
-      elements: NoElements,
-      extensible: True,
-    ),
-  )
+  let kind = DisposableStackObj(async:, state: disposable_state)
+  realm_ops.alloc_object(st, kind, proto)
 }
 
 fn read_stack(

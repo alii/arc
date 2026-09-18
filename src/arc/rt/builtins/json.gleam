@@ -233,7 +233,7 @@ fn replace_or_delete(
 }
 
 fn alloc_holder(st: Agent, val: JsVal) -> #(Handle, Agent) {
-  common.alloc_pojo(st, st.realm.object.prototype, [#("", val)])
+  common.alloc_plain_object(st, st.realm.object.prototype, [#("", val)])
 }
 
 fn alloc_context(st: Agent, source: Option(BitArray)) -> #(Handle, Agent) {
@@ -245,7 +245,7 @@ fn alloc_context(st: Agent, source: Option(BitArray)) -> #(Handle, Agent) {
     }
     None -> []
   }
-  common.alloc_pojo(st, st.realm.object.prototype, props)
+  common.alloc_plain_object(st, st.realm.object.prototype, props)
 }
 
 // source stays raw bytes until a reviver asks
@@ -545,7 +545,7 @@ fn props_from_entries(
           props_from_entries(st, rest, dict.insert(acc, key, prop))
         }
         Error(Nil) -> {
-          let #(prop, st) = common.data_property(st, value)
+          let #(prop, st) = common.plain_property(st, value)
           props_from_entries(st, rest, dict.insert(acc, key, prop))
         }
       }

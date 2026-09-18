@@ -125,22 +125,22 @@ fn init_function_intrinsic(
       ),
     )
   let st = rt_store.t_pin_root(st, ctor_h)
-  let #(ctor_prop, st) = common.data_prop(st, mk_object(ctor_h))
-  let ctor_prop = common.configurable(ctor_prop)
+  let #(ctor_prop, st) = common.frozen_property(st, mk_object(ctor_h))
+  let ctor_prop = common.make_configurable(ctor_prop)
   let #(proto_props, st) = case generator_proto {
     Some(gp) -> {
-      let #(gp_prop, st) = common.data_prop(st, mk_object(gp))
+      let #(gp_prop, st) = common.frozen_property(st, mk_object(gp))
       #(
         [
           #("constructor", ctor_prop),
-          #("prototype", common.configurable(gp_prop)),
+          #("prototype", common.make_configurable(gp_prop)),
         ],
         st,
       )
     }
     None -> #([#("constructor", ctor_prop)], st)
   }
-  let #(tag_pair, st) = common.to_string_tag(st, name)
+  let #(tag_pair, st) = common.string_tag_property(st, name)
   let st =
     rt_store.t_cell_update(st, gfn_proto, fn(slot) {
       let assert SObject(..) = slot
@@ -150,8 +150,13 @@ fn init_function_intrinsic(
     })
   let st = case generator_proto {
     Some(gp) -> {
-      let #(bp, st) = common.data_prop(st, mk_object(gfn_proto))
-      common.add_named_property(st, gp, "constructor", common.configurable(bp))
+      let #(bp, st) = common.frozen_property(st, mk_object(gfn_proto))
+      common.add_named_property(
+        st,
+        gp,
+        "constructor",
+        common.make_configurable(bp),
+      )
     }
     None -> st
   }

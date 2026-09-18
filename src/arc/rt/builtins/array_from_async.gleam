@@ -1,21 +1,19 @@
 import arc/rt/async as rt_async
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
+import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
-import arc/rt/elements
 import arc/rt/obj as rt_obj
-import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type FromAsyncCtx, type FromAsyncLikeCtx, type JsVal,
   type NativeToken, ArrayFromAsyncCloseReject, ArrayFromAsyncLikeOnMapped,
   ArrayFromAsyncLikeOnValue, ArrayFromAsyncOnMapped, ArrayFromAsyncOnNext,
   ArrayFromAsyncRejectWith, ArrayN, ArrayObj, FromAsyncCtx, FromAsyncLikeCtx,
-  JInt, KHandle, KNull, KUndef, Named, SObject, StringKey, SymbolKey, classify,
-  index_key, max_array_length, mk_number, mk_object, mk_undefined,
-  symbol_async_iterator, symbol_iterator,
+  KHandle, KNull, KUndef, Named, StringKey, SymbolKey, classify, index_key,
+  max_array_length, mk_int, mk_object, mk_undefined, symbol_async_iterator,
+  symbol_iterator,
 } as rt_types
 import arc/rt/val as rt_val
-import gleam/dict
 import gleam/int
 import gleam/option.{type Option, None, Some}
 
@@ -46,10 +44,6 @@ fn attempt_value(
     #(NormalCompletion(v), st) -> Ok(#(v, st))
     #(ThrowCompletion(thrown), st) -> Error(#(thrown, st))
   }
-}
-
-fn from_int(n: Int) -> JsVal {
-  mk_number(JInt(n))
 }
 
 fn settle(st: Agent, target: JsVal, arg: JsVal) -> Agent {
@@ -84,10 +78,10 @@ fn from_async_handler(
   st: Agent,
   args: List(JsVal),
   reject: JsVal,
-  body: fn(Agent, JsVal) -> Agent,
+  body: fn(JsVal, Agent) -> Agent,
 ) -> #(JsVal, Agent) {
   let arg = helpers.first_arg_or_undefined(args)
-  let st = case attempt(st, fn(st) { body(st, arg) }) {
+  let st = case attempt(st, fn(st) { body(arg, st) }) {
     Ok(st) -> st
     Error(#(thrown, st)) -> settle(st, reject, thrown)
   }
@@ -269,7 +263,7 @@ pub fn on_next(
   ctx: FromAsyncCtx,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use st, next_result <- from_async_handler(st, args, ctx.reject)
+  use next_result, st <- from_async_handler(st, args, ctx.reject)
   from_async_next_steps(st, ctx, next_result)
 }
 
@@ -299,7 +293,7 @@ fn from_async_next_steps(
             attempt_value(st, fn(st) {
               rt_call.t_call_checked(st, map_fn, ctx.this_arg, [
                 next_value,
-                from_int(ctx.k),
+                mk_int(ctx.k),
               ])
             })
           {
@@ -332,7 +326,7 @@ pub fn on_mapped(
   ctx: FromAsyncCtx,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use st, mapped <- from_async_handler(st, args, ctx.reject)
+  use mapped, st <- from_async_handler(st, args, ctx.reject)
   from_async_define_and_continue(st, ctx, mapped)
 }
 
@@ -425,7 +419,7 @@ fn from_async_array_like(
   let #(len, st) = rt_val.t_to_length(st, len_val)
   let #(target, st) = case rt_call.is_constructor(st, c) {
     True -> {
-      let #(h, st) = rt_call.t_construct(st, c, [from_int(len)], c)
+      let #(h, st) = rt_call.t_construct(st, c, [mk_int(len)], c)
       #(mk_object(h), st)
     }
     False -> from_async_array_create(st, len)
@@ -469,7 +463,7 @@ pub fn like_on_value(
   ctx: FromAsyncLikeCtx,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use st, v <- from_async_handler(st, args, ctx.reject)
+  use v, st <- from_async_handler(st, args, ctx.reject)
   from_async_like_value_steps(st, ctx, v)
 }
 
@@ -482,7 +476,7 @@ fn from_async_like_value_steps(
     None -> from_async_like_define_and_continue(st, ctx, v)
     Some(map_fn) -> {
       let #(mapped, st) =
-        rt_call.t_call_checked(st, map_fn, ctx.this_arg, [v, from_int(ctx.k)])
+        rt_call.t_call_checked(st, map_fn, ctx.this_arg, [v, mk_int(ctx.k)])
       from_async_await(
         st,
         mapped,
@@ -498,7 +492,7 @@ pub fn like_on_mapped(
   ctx: FromAsyncLikeCtx,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use st, mapped <- from_async_handler(st, args, ctx.reject)
+  use mapped, st <- from_async_handler(st, args, ctx.reject)
   from_async_like_define_and_continue(st, ctx, mapped)
 }
 
@@ -516,17 +510,7 @@ fn from_async_array_create(st: Agent, len: Int) -> #(JsVal, Agent) {
     True -> rt_val.t_throw_range_error(st, "Invalid array length")
     False -> {
       let #(h, st) =
-        rt_store.t_cell_new(
-          st,
-          SObject(
-            kind: ArrayObj(len),
-            proto: Some(st.realm.array.prototype),
-            props: dict.new(),
-            symbol_props: [],
-            elements: elements.new(),
-            extensible: True,
-          ),
-        )
+        realm_ops.alloc_object(st, ArrayObj(len), st.realm.array.prototype)
       #(mk_object(h), st)
     }
   }
@@ -561,7 +545,7 @@ fn from_async_set_length(st: Agent, target: JsVal, n: Int) -> Agent {
   case classify(target) {
     KHandle(_) -> {
       let #(ok, st) =
-        rt_obj.t_set_prop(st, target, StringKey(Named("length")), from_int(n))
+        rt_obj.t_set_prop(st, target, StringKey(Named("length")), mk_int(n))
       case ok {
         True -> st
         False ->

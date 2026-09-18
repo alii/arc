@@ -32,7 +32,7 @@ import arc/rt/types.{
   DatePrototypeToString, DatePrototypeToTimeString, DatePrototypeToUTCString,
   DatePrototypeValueOf, DateUTC, HintDefault, HintNumber, HintString, JFloat,
   JInt, JNan, JNegInf, JPosInf, KHandle, KNum, KStr, Named, StringKey, classify,
-  mk_null, mk_number, mk_object, mk_string,
+  mk_int, mk_null, mk_number, mk_object, mk_string,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/int
@@ -127,13 +127,13 @@ pub fn init(
       "[Symbol.toPrimitive]",
       1,
     )
-  let #(prop, st) = common.data_prop(st, mk_object(to_prim_h))
+  let #(prop, st) = common.frozen_property(st, mk_object(to_prim_h))
   let st =
     common.add_symbol_property(
       st,
       bt.prototype,
       rt_types.symbol_to_primitive,
-      common.configurable(prop),
+      common.make_configurable(prop),
     )
 
   #(bt, st)
@@ -152,7 +152,7 @@ pub fn dispatch(
       let fields = get_date_fields(now_ms(st), local)
       #(mk_string(format_date(FmtLocal(DateAndTime), fields)), st)
     }
-    DateNow -> #(mk_number(JInt(now_ms(st))), st)
+    DateNow -> #(mk_int(now_ms(st)), st)
     DateParse -> date_parse(st, args, local)
     DateUTC -> date_utc(st, args)
     DatePrototypeValueOf | DatePrototypeGetTime -> date_get_time(st, this, name)
@@ -325,8 +325,8 @@ fn time_clip(t: JsNum) -> JsNum {
   }
 }
 
-fn finite_ms(tv: JsNum) -> Option(Int) {
-  case tv {
+fn finite_int(n: JsNum) -> Option(Int) {
+  case n {
     JInt(i) -> Some(i)
     JFloat(f) -> Some(rt_val.float_to_int(f))
     JNan | JPosInf | JNegInf -> None
@@ -490,26 +490,14 @@ type DateComponents {
 fn components_to_ints(
   c: DateComponents,
 ) -> Option(#(Int, Int, Int, Int, Int, Int, Int)) {
-  use y <- option.then(num_to_int(c.year))
-  use mon <- option.then(num_to_int(c.month))
-  use dt <- option.then(num_to_int(c.date))
-  use h <- option.then(num_to_int(c.hours))
-  use mi <- option.then(num_to_int(c.minutes))
-  use s <- option.then(num_to_int(c.seconds))
-  use ms <- option.map(num_to_int(c.ms))
+  use y <- option.then(finite_int(c.year))
+  use mon <- option.then(finite_int(c.month))
+  use dt <- option.then(finite_int(c.date))
+  use h <- option.then(finite_int(c.hours))
+  use mi <- option.then(finite_int(c.minutes))
+  use s <- option.then(finite_int(c.seconds))
+  use ms <- option.map(finite_int(c.ms))
   #(y, mon, dt, h, mi, s, ms)
-}
-
-fn num_to_int(n: JsNum) -> Option(Int) {
-  case n {
-    JInt(i) -> Some(i)
-    JFloat(f) -> Some(rt_val.float_to_int(f))
-    JNan | JPosInf | JNegInf -> None
-  }
-}
-
-fn int_num(i: Int) -> JsNum {
-  JInt(i)
 }
 
 fn make_date_checked(c: DateComponents, time_ref: TimeRef) -> JsNum {
@@ -575,7 +563,7 @@ fn date_constructor(
     rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
       r.date.prototype
     })
-  realm_ops.alloc_wrapper(st, DateObj(ms: tv), proto)
+  realm_ops.alloc_object(st, DateObj(ms: tv), proto)
 }
 
 fn single_arg_time_value(
@@ -650,12 +638,12 @@ fn date_get_tz_offset(
   local: TimeRef,
 ) -> #(JsVal, Agent) {
   use _, tv <- require_time_value(st, this, name)
-  case finite_ms(tv), local {
+  case finite_int(tv), local {
     Some(ms), LocalTime(zone) -> #(
-      mk_number(JInt(js_get_timezone_offset_minutes(zone, ms))),
+      mk_int(js_get_timezone_offset_minutes(zone, ms)),
       st,
     )
-    Some(_), UtcTime -> #(mk_number(JInt(0)), st)
+    Some(_), UtcTime -> #(mk_int(0), st)
     None, _ -> #(mk_number(JNan), st)
   }
 }
@@ -668,10 +656,10 @@ fn date_get_field(
   time_ref: TimeRef,
 ) -> #(JsVal, Agent) {
   use _, tv <- require_time_value(st, this, name)
-  case finite_ms(tv) {
+  case finite_int(tv) {
     Some(ms) -> {
       let fields = get_date_fields(ms, time_ref)
-      #(mk_number(JInt(field_at(fields, field))), st)
+      #(mk_int(field_at(fields, field)), st)
     }
     None -> #(mk_number(JNan), st)
   }
@@ -722,7 +710,7 @@ fn compute_set_field(
   new_nums: List(JsNum),
   time_ref: TimeRef,
 ) -> Option(JsNum) {
-  case finite_ms(tv) {
+  case finite_int(tv) {
     Some(ms) -> {
       let base = get_date_fields(ms, time_ref)
       let merged = overwrite_fields(fields_to_components(base), first, new_nums)
@@ -753,13 +741,13 @@ fn compute_set_field(
 
 fn fields_to_components(f: DateFields) -> DateComponents {
   DateComponents(
-    year: int_num(f.year),
-    month: int_num(f.month),
-    date: int_num(f.date),
-    hours: int_num(f.hours),
-    minutes: int_num(f.minutes),
-    seconds: int_num(f.seconds),
-    ms: int_num(f.ms),
+    year: JInt(f.year),
+    month: JInt(f.month),
+    date: JInt(f.date),
+    hours: JInt(f.hours),
+    minutes: JInt(f.minutes),
+    seconds: JInt(f.seconds),
+    ms: JInt(f.ms),
   )
 }
 
@@ -835,7 +823,7 @@ fn date_to_string(
   time_ref: TimeRef,
 ) -> #(JsVal, Agent) {
   use _, tv <- require_time_value(st, this, name)
-  case finite_ms(tv) {
+  case finite_int(tv) {
     Some(ms) -> {
       let fields = get_date_fields(ms, time_ref)
       #(mk_string(format_date(fmt, fields)), st)
@@ -1111,7 +1099,7 @@ fn parse_hhmm(s: String) -> Option(#(Int, String)) {
 }
 
 fn jsnum_add_minutes(n: JsNum, minutes: Int) -> JsNum {
-  case finite_ms(n) {
+  case finite_int(n) {
     Some(ms) -> time_clip(JInt(ms + minutes * 60_000))
     None -> n
   }
@@ -1134,10 +1122,10 @@ fn date_get_year(
   local: TimeRef,
 ) -> #(JsVal, Agent) {
   use _, tv <- require_time_value(st, this, name)
-  case finite_ms(tv) {
+  case finite_int(tv) {
     Some(ms) -> {
       let fields = get_date_fields(ms, local)
-      #(mk_number(JInt(fields.year - 1900)), st)
+      #(mk_int(fields.year - 1900), st)
     }
     None -> #(mk_number(JNan), st)
   }
@@ -1153,13 +1141,13 @@ fn date_set_year(
   use h, tv <- require_time_value(st, this, name)
   let arg = helpers.first_arg_or_undefined(args)
   let #(n, st) = rt_val.t_to_number(st, arg)
-  case num_to_int(n) {
+  case finite_int(n) {
     Some(yi) -> {
       let yi = case yi >= 0 && yi <= 99 {
         True -> yi + 1900
         False -> yi
       }
-      let new_tv = case finite_ms(tv) {
+      let new_tv = case finite_int(tv) {
         Some(ms) -> {
           let b = get_date_fields(ms, local)
           make_date(

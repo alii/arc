@@ -4,13 +4,14 @@ import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
 import arc/rt/js_string
+import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/typed_array_ffi.{splice_clamped}
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, ArrayBufferObj, Bytes, JInt, KHandle,
-  KStr, KUndef, Named, NumKind, SObject, StringKey, TypedArrayObj, Uint8Kind,
-  classify, mk_number, mk_object, mk_string, mk_undefined,
+  type Agent, type Handle, type JsVal, ArrayBufferObj, Bytes, KHandle, KStr,
+  KUndef, Named, NumKind, SObject, StringKey, TypedArrayObj, Uint8Kind, classify,
+  mk_int, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -22,9 +23,6 @@ import gleam/option.{type Option, None, Some}
 import gleam/string
 
 const max_byte_length = 2_147_483_647
-
-// 2^53 - 1
-const max_safe_integer = 9_007_199_254_740_991
 
 type B64Alphabet {
   Base64
@@ -300,21 +298,21 @@ pub fn u8_set_from_hex(
 pub fn u8_from_base64(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let s = require_string(st, helpers.first_arg_or_undefined(args))
   let #(alphabet, handling, st) = read_b64_options(st, helpers.arg_at(args, 1))
-  let res = from_base64(s, alphabet, handling, max_safe_integer)
+  let res = from_base64(s, alphabet, handling, limits.max_safe_integer)
   decode_to_new_u8(st, res, Base64Codec)
 }
 
 pub fn u8_from_hex(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let s = require_string(st, helpers.first_arg_or_undefined(args))
-  let res = from_hex(s, max_safe_integer)
+  let res = from_hex(s, limits.max_safe_integer)
   decode_to_new_u8(st, res, HexCodec)
 }
 
 fn read_written_result(st: Agent, read: Int, written: Int) -> #(JsVal, Agent) {
   let #(ref, st) =
-    common.alloc_pojo(st, st.realm.object.prototype, [
-      #("read", mk_number(JInt(read))),
-      #("written", mk_number(JInt(written))),
+    common.alloc_plain_object(st, st.realm.object.prototype, [
+      #("read", mk_int(read)),
+      #("written", mk_int(written)),
     ])
   #(mk_object(ref), st)
 }
@@ -376,13 +374,13 @@ fn u8_alloc_from_bytes(st: Agent, bytes: BitArray) -> #(JsVal, Agent) {
   })
   let kind = NumKind(Uint8Kind)
   let #(buf, st) =
-    realm_ops.alloc_wrapper(
+    realm_ops.alloc_object(
       st,
       ArrayBufferObj(storage: Bytes(bytes:, max_byte_length: None)),
       st.realm.array_buffer.prototype,
     )
   let #(ta_ref, st) =
-    realm_ops.alloc_wrapper(
+    realm_ops.alloc_object(
       st,
       TypedArrayObj(
         buffer: buf,

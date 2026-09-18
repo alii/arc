@@ -1,5 +1,6 @@
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
+import arc/rt/limits
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsNum, type JsVal,
@@ -10,7 +11,7 @@ import arc/rt/types.{
   NumberPrototypeToExponential, NumberPrototypeToFixed,
   NumberPrototypeToLocaleString, NumberPrototypeToPrecision,
   NumberPrototypeToString, NumberPrototypeValueOf, SObject, classify, mk_bool,
-  mk_number, mk_object, mk_string,
+  mk_int, mk_number, mk_object, mk_string,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/float
@@ -81,8 +82,8 @@ pub fn init(
       #("NaN", JNan),
       #("POSITIVE_INFINITY", JPosInf),
       #("NEGATIVE_INFINITY", JNegInf),
-      #("MAX_SAFE_INTEGER", JFloat(9_007_199_254_740_991.0)),
-      #("MIN_SAFE_INTEGER", JFloat(-9_007_199_254_740_991.0)),
+      #("MAX_SAFE_INTEGER", JFloat(int.to_float(limits.max_safe_integer))),
+      #("MIN_SAFE_INTEGER", JFloat(int.to_float(-limits.max_safe_integer))),
       #("EPSILON", JFloat(2.220446049250313e-16)),
       #("MAX_VALUE", JFloat(1.7976931348623157e308)),
       #("MIN_VALUE", JFloat(5.0e-324)),
@@ -129,7 +130,7 @@ fn data_constants(
   case specs {
     [] -> #([], st)
     [#(name, n), ..rest] -> {
-      let #(prop, st) = common.data_prop(st, mk_number(n))
+      let #(prop, st) = common.frozen_property(st, mk_number(n))
       let #(tail, st) = data_constants(st, rest)
       #([#(name, prop), ..tail], st)
     }
@@ -164,7 +165,7 @@ fn number_to_locale_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 
 fn call_as_function(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   case args {
-    [] -> #(mk_number(JInt(0)), st)
+    [] -> #(mk_int(0), st)
     [val, ..] -> {
       let #(prim, st) = rt_val.t_to_primitive(st, val, HintNumber)
       case classify(prim) {
@@ -175,22 +176,6 @@ fn call_as_function(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
         }
       }
     }
-  }
-}
-
-pub fn js_is_nan(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(num, st) = rt_val.t_to_number(st, helpers.first_arg_or_undefined(args))
-  case num {
-    JNan -> #(mk_bool(True), st)
-    _ -> #(mk_bool(False), st)
-  }
-}
-
-pub fn js_is_finite(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(num, st) = rt_val.t_to_number(st, helpers.first_arg_or_undefined(args))
-  case num {
-    JInt(_) | JFloat(_) -> #(mk_bool(True), st)
-    _ -> #(mk_bool(False), st)
   }
 }
 
@@ -218,7 +203,7 @@ fn number_is_integer(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 
 fn number_is_safe_integer(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let is_safe = fn(i: Int) {
-    i >= -9_007_199_254_740_991 && i <= 9_007_199_254_740_991
+    i >= -limits.max_safe_integer && i <= limits.max_safe_integer
   }
   case classify(helpers.first_arg_or_undefined(args)) {
     KNum(JInt(i)) -> #(mk_bool(is_safe(i)), st)

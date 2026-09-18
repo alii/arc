@@ -1,5 +1,5 @@
 import arc/internal/ordered_entries
-import arc/internal/tree_array
+import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/call.{
   type Completion, NormalCompletion, ThrowCompletion, is_callable, t_call,
@@ -10,14 +10,13 @@ import arc/rt/js_string
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsElements, type JsOps, type JsSlot, type JsVal,
+  type Agent, type Handle, type JsElements, type JsSlot, type JsVal,
   type Property, type PropertyKey, ArrayObj, AsyncFromSyncIterator, DataProperty,
-  Dense, Index, IteratorRecord, JInt, KHandle, KNull, KStr, KUndef,
-  MapIterEntries, MapIterKeys, MapIterValues, MapIterator, MapObj, Named,
-  NoElements, SObject, SetIterEntries, SetIterValues, SetIterator, SetObj,
-  StringIterator, StringKey, SymbolKey, TypeErr, classify, map_key_to_js,
-  mk_number, mk_object, mk_string, mk_undefined, symbol_async_iterator,
-  symbol_iterator,
+  Index, IteratorRecord, KHandle, KNull, KStr, KUndef, MapIterEntries,
+  MapIterKeys, MapIterValues, MapIterator, MapObj, Named, NoElements, SObject,
+  SetIterEntries, SetIterValues, SetIterator, SetObj, StringIterator, StringKey,
+  SymbolKey, TypeErr, classify, map_key_to_js, mk_int, mk_object, mk_string,
+  mk_undefined, symbol_async_iterator, symbol_iterator,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict.{type Dict}
@@ -27,6 +26,12 @@ import gleam/option.{type Option, None, Some}
 pub type IteratorRecord =
   rt_types.IteratorRecord
 
+// polarity for every/some style consumers
+pub type Quantifier {
+  Every
+  AtLeastOne
+}
+
 // catches js throws like t_call
 @external(erlang, "arc_rt_call_ffi", "t_apply_protected")
 fn protected(
@@ -34,41 +39,13 @@ fn protected(
   body: fn(Agent) -> #(JsVal, Agent),
 ) -> #(Completion, Agent)
 
-fn js_ops(st: Agent) -> JsOps(Agent) {
-  st.store.ops
-}
-
-fn throw_type_error(st: Agent, msg: String) -> a {
-  let #(e, st) = js_ops(st).new_error(st, TypeErr, msg)
-  rt_store.t_throw(st, e)
-}
-
 fn new_type_error(st: Agent, msg: String) -> #(JsVal, Agent) {
-  js_ops(st).new_error(st, TypeErr, msg)
+  st.store.ops.new_error(st, TypeErr, msg)
 }
 
 fn describe(st: Agent, v: JsVal) -> String {
   let #(ty, _) = rt_val.t_type_of(st, v)
   ty
-}
-
-fn alloc_array(st: Agent, elems: List(JsVal)) -> #(Handle, Agent) {
-  let len = list.length(elems)
-  let elements = case elems {
-    [] -> NoElements
-    _ -> Dense(tree_array.from_list(elems))
-  }
-  rt_store.t_cell_new(
-    st,
-    SObject(
-      kind: ArrayObj(length: len),
-      proto: Some(st.realm.array.prototype),
-      props: dict.new(),
-      symbol_props: [],
-      elements:,
-      extensible: True,
-    ),
-  )
 }
 
 // §7.4.9, next is read once and cached
@@ -82,7 +59,7 @@ pub fn get_iterator_direct(
       let #(next, st) = rt_obj.t_get_prop(st, obj, StringKey(Named("next")))
       #(IteratorRecord(iterator: obj, next_method: next), st)
     }
-    False -> throw_type_error(st, non_object_msg)
+    False -> rt_val.t_throw_type_error(st, non_object_msg)
   }
 }
 
@@ -90,7 +67,8 @@ pub fn get_iterator_direct(
 pub fn get_iterator_sync(st: Agent, obj: JsVal) -> #(IteratorRecord, Agent) {
   let #(method, st) = rt_obj.t_get_prop(st, obj, SymbolKey(symbol_iterator))
   case is_callable(st, method) {
-    False -> throw_type_error(st, describe(st, obj) <> " is not iterable")
+    False ->
+      rt_val.t_throw_type_error(st, describe(st, obj) <> " is not iterable")
     True -> get_iterator_from_method(st, obj, method)
   }
 }
@@ -119,7 +97,10 @@ pub fn get_iterator_async(st: Agent, obj: JsVal) -> #(IteratorRecord, Agent) {
         rt_obj.t_get_prop(st, obj, SymbolKey(symbol_iterator))
       case is_callable(st, sync_method) {
         False ->
-          throw_type_error(st, describe(st, obj) <> " is not async iterable")
+          rt_val.t_throw_type_error(
+            st,
+            describe(st, obj) <> " is not async iterable",
+          )
         True -> {
           let #(sync_rec, st) = get_iterator_from_method(st, obj, sync_method)
           create_async_from_sync(st, sync_rec)
@@ -129,7 +110,10 @@ pub fn get_iterator_async(st: Agent, obj: JsVal) -> #(IteratorRecord, Agent) {
     _ ->
       case is_callable(st, method) {
         False ->
-          throw_type_error(st, describe(st, obj) <> " is not async iterable")
+          rt_val.t_throw_type_error(
+            st,
+            describe(st, obj) <> " is not async iterable",
+          )
         True -> get_iterator_from_method(st, obj, method)
       }
   }
@@ -190,7 +174,7 @@ pub fn sync_iterator_record(st: Agent, sync_rec: Handle) -> IteratorRecord {
     Some(DataProperty(value: iterator, ..)),
       Some(DataProperty(value: next_method, ..))
     -> IteratorRecord(iterator:, next_method:)
-    _, _ -> throw_type_error(st, "not an Async-from-Sync Iterator")
+    _, _ -> rt_val.t_throw_type_error(st, "not an Async-from-Sync Iterator")
   }
 }
 
@@ -212,14 +196,14 @@ pub fn get_iterator_flattenable(
     _, _ -> False
   }
   case acceptable {
-    False -> throw_type_error(st, what <> " is not an object")
+    False -> rt_val.t_throw_type_error(st, what <> " is not an object")
     True -> {
       let #(method, st) = rt_obj.t_get_prop(st, obj, SymbolKey(symbol_iterator))
       let #(iter, st) = case classify(method) {
         KUndef | KNull -> #(obj, st)
         _ ->
           case is_callable(st, method) {
-            False -> throw_type_error(st, what <> " is not iterable")
+            False -> rt_val.t_throw_type_error(st, what <> " is not iterable")
             True -> t_call_checked(st, method, obj, [])
           }
       }
@@ -240,7 +224,7 @@ pub fn iterator_step_result(
       let #(done, st) = rt_obj.t_get_prop(st, result, StringKey(Named("done")))
       cont(result, rt_val.to_boolean(done), st)
     }
-    False -> throw_type_error(st, "Iterator result is not an object")
+    False -> rt_val.t_throw_type_error(st, "Iterator result is not an object")
   }
 }
 
@@ -446,7 +430,7 @@ fn array_iterator_step(
           ))
         SObject(kind: ArrayObj(_), ..) -> {
           let out = case kind {
-            rt_types.ArrayIterKeys -> Some(#(mk_number(JInt(index)), st))
+            rt_types.ArrayIterKeys -> Some(#(mk_int(index), st))
             rt_types.ArrayIterValues ->
               case helpers.own_element(st, mk_object(target), index) {
                 helpers.Hit(v) -> Some(#(v, st))
@@ -455,7 +439,7 @@ fn array_iterator_step(
             rt_types.ArrayIterEntries ->
               case helpers.own_element(st, mk_object(target), index) {
                 helpers.Hit(v) ->
-                  Some(rt_obj.t_new_array(st, [mk_number(JInt(index)), v]))
+                  Some(rt_obj.t_new_array(st, [mk_int(index), v]))
                 helpers.Slow -> None
               }
           }
@@ -656,7 +640,11 @@ pub fn iterator_close_normal(st: Agent, obj: JsVal) -> Agent {
     #(Ok(Returned(v)), st) ->
       case rt_val.is_object(v) {
         True -> st
-        False -> throw_type_error(st, "Iterator return result is not an object")
+        False ->
+          rt_val.t_throw_type_error(
+            st,
+            "Iterator return result is not an object",
+          )
       }
     #(Error(thrown), st) -> rt_store.t_throw(st, thrown)
   }
@@ -777,7 +765,7 @@ pub fn iterator_rest(st: Agent, iter: JsVal) -> #(JsVal, Agent) {
       "Iterator rest element target is not an object",
     )
   let #(values, st) = iterator_to_list(st, rec)
-  let #(h, st) = alloc_array(st, values)
+  let #(h, st) = common.alloc_array(st, values, st.realm.array.prototype)
   #(mk_object(h), st)
 }
 
@@ -789,11 +777,6 @@ pub fn read_iter_result(st: Agent, res: JsVal) -> #(#(Bool, JsVal), Agent) {
       let #(val, st) = rt_obj.t_get_prop(st, res, StringKey(Named("value")))
       #(#(rt_val.to_boolean(done), val), st)
     }
-    False -> throw_type_error(st, "Iterator result is not an object")
+    False -> rt_val.t_throw_type_error(st, "Iterator result is not an object")
   }
-}
-
-// identity, kept for existing call sites
-pub fn unwrap_record_value(_st: Agent, v: JsVal) -> JsVal {
-  v
 }

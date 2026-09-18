@@ -6,6 +6,7 @@ import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/realm_ops
 import arc/rt/builtins/uint8_codec
 import arc/rt/call as rt_call
+import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/typed_array_ffi.{fill_clamped, splice_clamped, ta_zeroed}
@@ -34,7 +35,7 @@ import arc/rt/types.{
   TypedArrayPrototypeWith, TypedArrays, Uint8ArrayFromBase64, Uint8ArrayFromHex,
   Uint8ArrayPrototypeSetFromBase64, Uint8ArrayPrototypeSetFromHex,
   Uint8ArrayPrototypeToBase64, Uint8ArrayPrototypeToHex, Uint8Kind,
-  all_typed_array_kinds, classify, mk_bool, mk_number, mk_object, mk_string,
+  all_typed_array_kinds, classify, mk_bool, mk_int, mk_object, mk_string,
   mk_undefined, symbol_iterator, symbol_species, symbol_to_string_tag,
   typed_array_name,
 }
@@ -50,18 +51,12 @@ import gleam/string
 // max backing byte length, rangeerror above
 const max_byte_length = 2_147_483_647
 
-const max_safe_integer = 9_007_199_254_740_991
-
 fn same_content_type(a: TypedArrayKind, b: TypedArrayKind) -> Bool {
   case a, b {
     NumKind(_), NumKind(_) -> True
     BigKind(_), BigKind(_) -> True
     NumKind(_), BigKind(_) | BigKind(_), NumKind(_) -> False
   }
-}
-
-pub fn kind_name(kind: TypedArrayKind) -> String {
-  typed_array_name(kind)
 }
 
 pub fn init(
@@ -188,7 +183,7 @@ fn init_ctor(
   kind: TypedArrayKind,
 ) -> #(BuiltinPair, Agent) {
   let size = typed_array_ffi.elem_size(kind)
-  let #(size_prop, st) = common.data_prop(st, mk_number(JInt(size)))
+  let #(size_prop, st) = common.frozen_property(st, mk_int(size))
   let #(size_prop2, st) = common.restamp(st, size_prop)
   let #(bt, st) =
     common.init_type(
@@ -320,7 +315,7 @@ pub fn dispatch_construct(
 // §23.2.4.2 typedarraycreate; immutable buffer throws (write mode)
 fn ta_create(st: Agent, ctor: JsVal, len: Int) -> #(JsVal, Handle, Agent) {
   let #(obj, obj_h, st) =
-    ta_create_with_args(st, ctor, [mk_number(JInt(len))], Some(len))
+    ta_create_with_args(st, ctor, [mk_int(len)], Some(len))
   let immutable = case ta_slot_of(st, obj_h) {
     Some(view) -> buffer.buffer_is_immutable(st, view.buffer)
     None -> False
@@ -493,7 +488,7 @@ fn map_and_store(
   this_arg: JsVal,
 ) -> Agent {
   let #(mapped, st) = case mapping {
-    Some(f) -> call(st, f, this_arg, [v, mk_number(JInt(k))])
+    Some(f) -> rt_call.t_call_checked(st, f, this_arg, [v, mk_int(k)])
     None -> #(v, st)
   }
   set_index(st, target_h, target, k, mapped)
@@ -600,7 +595,7 @@ fn alloc_fresh_ta(
   let #(buf, st) =
     array_buffer.alloc_buffer(st, st.realm.array_buffer.prototype, byte_len)
   let #(ta_ref, st) =
-    realm_ops.alloc_wrapper(
+    realm_ops.alloc_object(
       st,
       TypedArrayObj(
         buffer: buf,
@@ -701,7 +696,7 @@ fn alloc_ta_view(
   byte_offset: Int,
   len: Option(Int),
 ) -> #(Handle, Agent) {
-  realm_ops.alloc_wrapper(
+  realm_ops.alloc_object(
     st,
     TypedArrayObj(buffer: buf_ref, elem_kind: kind, byte_offset:, length: len),
     proto,
@@ -1078,7 +1073,7 @@ fn get_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
     True -> view.length * typed_array_ffi.elem_size(view.kind)
     False -> 0
   }
-  #(mk_number(JInt(n)), st)
+  #(mk_int(n), st)
 }
 
 fn get_byte_offset(st: Agent, this: JsVal) -> #(JsVal, Agent) {
@@ -1087,7 +1082,7 @@ fn get_byte_offset(st: Agent, this: JsVal) -> #(JsVal, Agent) {
     True -> view.byte_offset
     False -> 0
   }
-  #(mk_number(JInt(n)), st)
+  #(mk_int(n), st)
 }
 
 fn get_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
@@ -1096,7 +1091,7 @@ fn get_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
     True -> view.length
     False -> 0
   }
-  #(mk_number(JInt(n)), st)
+  #(mk_int(n), st)
 }
 
 // §23.2.3.38 undefined for foreign receivers, no throw
@@ -1180,7 +1175,7 @@ fn proto_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(off_i, st) = to_int_or_inf(st, helpers.arg_at(args, 1))
   let offset = case off_i {
     IInt(n) -> n
-    IPosInf -> max_safe_integer
+    IPosInf -> limits.max_safe_integer
     INegInf -> -1
   }
   use <- bool.lazy_guard(offset < 0, fn() {
@@ -1375,7 +1370,7 @@ fn do_subarray(
   let new_off = off + begin * size
   // tracking source with end undefined gives a tracking result
   let #(ctor_args, st) = case declared, classify(e_arg) {
-    None, KUndef -> #([mk_object(buf), mk_number(JInt(new_off))], st)
+    None, KUndef -> #([mk_object(buf), mk_int(new_off)], st)
     _, _ -> {
       let #(e, st) = case classify(e_arg) {
         KUndef -> #(IInt(src_length), st)
@@ -1383,10 +1378,7 @@ fn do_subarray(
       }
       let end = relative_index(e, src_length)
       let new_len = int.max(end - begin, 0)
-      #(
-        [mk_object(buf), mk_number(JInt(new_off)), mk_number(JInt(new_len))],
-        st,
-      )
+      #([mk_object(buf), mk_int(new_off), mk_int(new_len)], st)
     }
   }
   let #(maybe_ctor, st) = resolve_species_ctor(st, this, kind)
@@ -1563,9 +1555,7 @@ fn proto_index_of(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  proto_search(st, this, args, rt_val.strict_equal, False, fn(i) {
-    mk_number(JInt(i))
-  })
+  proto_search(st, this, args, rt_val.strict_equal, False, mk_int)
 }
 
 fn proto_includes(
@@ -1635,7 +1625,7 @@ fn proto_iter(
 ) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
   let #(iter_ref, st) =
-    realm_ops.alloc_wrapper(
+    realm_ops.alloc_object(
       st,
       ArrayIterator(target: view.ref, index: 0, kind: iter_kind),
       st.realm.array_iter_proto,
@@ -1673,16 +1663,6 @@ fn require_cb(st: Agent, args: List(JsVal)) -> #(JsVal, JsVal) {
 fn describe(st: Agent, v: JsVal) -> String {
   let #(ty, _) = rt_val.t_type_of(st, v)
   ty
-}
-
-fn call(
-  st: Agent,
-  f: JsVal,
-  this: JsVal,
-  args: List(JsVal),
-) -> #(JsVal, Agent) {
-  let js = st.store
-  js.ops.call(st, f, this, args)
 }
 
 // bool dropped: only false for immutable buffers, already rejected
@@ -1792,7 +1772,11 @@ fn iterate_calls(
   use <- bool.guard(k < 0 || k >= view.length, #(None, st))
   let el = ta_get(st, view.ref, k)
   let #(res, st) =
-    call(st, cb, this_arg, [el, mk_number(JInt(k)), mk_object(view.ref)])
+    rt_call.t_call_checked(st, cb, this_arg, [
+      el,
+      mk_int(k),
+      mk_object(view.ref),
+    ])
   case decide(res, el, k) {
     Some(v) -> #(Some(v), st)
     None ->
@@ -1860,7 +1844,7 @@ fn proto_find(
       True ->
         Some(case mode {
           FindValue -> el
-          FindIdx -> mk_number(JInt(k))
+          FindIdx -> mk_int(k)
         })
       False -> None
     }
@@ -1868,7 +1852,7 @@ fn proto_find(
   let #(early, st) = iterate_calls(st, view, start, dir, cb, this_arg, decide)
   let default = case mode {
     FindValue -> mk_undefined()
-    FindIdx -> mk_number(JInt(-1))
+    FindIdx -> mk_int(-1)
   }
   #(early |> option.unwrap(default), st)
 }
@@ -1893,7 +1877,11 @@ fn map_loop(
   use <- bool.guard(k >= view.length, st)
   let el = ta_get(st, view.ref, k)
   let #(mapped, st) =
-    call(st, cb, this_arg, [el, mk_number(JInt(k)), mk_object(view.ref)])
+    rt_call.t_call_checked(st, cb, this_arg, [
+      el,
+      mk_int(k),
+      mk_object(view.ref),
+    ])
   let st = set_index(st, target_ref, target, k, mapped)
   map_loop(st, view, k + 1, cb, this_arg, target, target_ref)
 }
@@ -1919,7 +1907,11 @@ fn filter_collect(
   use <- bool.guard(k >= view.length, #(acc, st))
   let el = ta_get(st, view.ref, k)
   let #(res, st) =
-    call(st, cb, this_arg, [el, mk_number(JInt(k)), mk_object(view.ref)])
+    rt_call.t_call_checked(st, cb, this_arg, [
+      el,
+      mk_int(k),
+      mk_object(view.ref),
+    ])
   let acc = case rt_val.to_boolean(res) {
     True -> [el, ..acc]
     False -> acc
@@ -1984,10 +1976,10 @@ fn reduce_loop(
   use <- bool.guard(k < 0 || k >= view.length, #(acc, st))
   let el = ta_get(st, view.ref, k)
   let #(res, st) =
-    call(st, cb, mk_undefined(), [
+    rt_call.t_call_checked(st, cb, mk_undefined(), [
       acc,
       el,
-      mk_number(JInt(k)),
+      mk_int(k),
       mk_object(view.ref),
     ])
   reduce_loop(st, view, k + direction_step(dir), dir, cb, res)
@@ -2113,7 +2105,7 @@ fn proto_with(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
         True -> i
         False -> len + i
       }
-    IPosInf -> max_safe_integer
+    IPosInf -> limits.max_safe_integer
     INegInf -> -1
   }
   // conversion before range check, valueof may resize
@@ -2141,7 +2133,7 @@ fn proto_last_index_of(
 ) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
   let len = view.length
-  use <- bool.guard(len == 0, #(mk_number(JInt(-1)), st))
+  use <- bool.guard(len == 0, #(mk_int(-1), st))
   let search = helpers.first_arg_or_undefined(args)
   // fromindex present (even undefined) differs from absent
   let #(n, st) = case helpers.list_at(args, 1) {
@@ -2149,7 +2141,7 @@ fn proto_last_index_of(
     Some(v) -> to_int_or_inf(st, v)
   }
   case n {
-    INegInf -> #(mk_number(JInt(-1)), st)
+    INegInf -> #(mk_int(-1), st)
     _ -> {
       let k = case n {
         IPosInf -> len - 1
@@ -2160,7 +2152,7 @@ fn proto_last_index_of(
           }
         INegInf -> -1
       }
-      #(mk_number(JInt(search_down(st, view.ref, k, search))), st)
+      #(mk_int(search_down(st, view.ref, k, search)), st)
     }
   }
 }
@@ -2238,7 +2230,7 @@ fn compare_with(st: Agent, cmp: JsVal, x: JsVal, y: JsVal) -> #(Int, Agent) {
   case classify(cmp) {
     KUndef -> #(default_ta_compare(x, y), st)
     _ -> {
-      let #(res, st) = call(st, cmp, mk_undefined(), [x, y])
+      let #(res, st) = rt_call.t_call_checked(st, cmp, mk_undefined(), [x, y])
       let #(n, st) = rt_val.t_to_number(st, res)
       let c = case n {
         JNan -> 0
@@ -2416,7 +2408,7 @@ fn locale_loop(
     False -> {
       let #(m, st) =
         rt_obj.t_get_prop(st, el, StringKey(Named("toLocaleString")))
-      let #(res, st) = call(st, m, el, [locales_v, options_v])
+      let #(res, st) = rt_call.t_call_checked(st, m, el, [locales_v, options_v])
       let #(s, st) = rt_val.t_to_string(st, res)
       locale_loop(st, view, k + 1, locales_v, options_v, [s, ..acc])
     }

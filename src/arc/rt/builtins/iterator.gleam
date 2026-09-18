@@ -2,7 +2,9 @@ import arc/rt/async as rt_async
 import arc/rt/buffer as rt_buffer
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{arg_at, first_arg_or_undefined}
-import arc/rt/builtins/iter_protocol.{IterateStrings, RejectPrimitives}
+import arc/rt/builtins/iter_protocol.{
+  type Quantifier, AtLeastOne, Every, IterateStrings, RejectPrimitives,
+}
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/limits
@@ -19,14 +21,13 @@ import arc/rt/types.{
   AsyncFromSyncReturn, AsyncFromSyncThrow, AsyncFromSyncUnwrap, ClassicHelper,
   ConcatHelper, ConcatItem, GenCompleted, GenExecuting, GenSuspendedStart,
   GenSuspendedYield, HelperDrop, HelperFilter, HelperFlatMap, HelperMap,
-  HelperTake, IteratorConstructor, IteratorHelperObj, IteratorN, JFloat, JInt,
-  JNan, JNegInf, JPosInf, KHandle, KNull, KStr, KUndef, MapIterator, Named,
-  NoElements, Ordinary, RangeErr, ReturnThis, SObject, SetIterator,
-  StringIterator, StringKey, SymbolKey, TypeErr, TypedArrayObj,
-  WrapForValidIteratorObj, ZipExhausted, ZipHelper, ZipLongest, ZipOpen,
-  ZipShortest, ZipStrict, classify, index_key, mk_bool, mk_number, mk_object,
-  mk_string, mk_undefined, symbol_async_iterator, symbol_iterator,
-  symbol_to_string_tag,
+  HelperTake, IteratorConstructor, IteratorHelperObj, IteratorN, JNan, KHandle,
+  KNull, KStr, KUndef, MapIterator, Named, NoElements, Ordinary, RangeErr,
+  ReturnThis, SObject, SetIterator, StringIterator, StringKey, SymbolKey,
+  TypeErr, TypedArrayObj, WrapForValidIteratorObj, ZipExhausted, ZipHelper,
+  ZipLongest, ZipOpen, ZipShortest, ZipStrict, classify, index_key, mk_bool,
+  mk_int, mk_object, mk_string, mk_undefined, symbol_async_iterator,
+  symbol_iterator, symbol_to_string_tag,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/dict
@@ -153,7 +154,7 @@ pub fn init(
       "Iterator",
       0,
       ctor_props,
-      True,
+      constructible: True,
     )
   let #(ctor_acc, st) =
     common.alloc_get_set_accessor(
@@ -247,7 +248,7 @@ fn alloc_iter_proto(
   let #(methods, st) = common.alloc_methods(st, fn_proto, [#("next", next, 0)])
   let #(h, st) =
     common.alloc_proto(st, Some(iterator_proto), common.named_props(methods))
-  let st = common.add_to_string_tag(st, h, tag)
+  let st = common.add_string_tag(st, h, tag)
   #(h, st)
 }
 
@@ -277,7 +278,10 @@ pub fn dispatch(
       iter_protocol.close_throw(st, mk_object(sync_iter), err)
     }
     IteratorConstructor ->
-      throw_type_error(st, "Abstract class Iterator not directly constructable")
+      rt_val.t_throw_type_error(
+        st,
+        "Abstract class Iterator not directly constructable",
+      )
     rt_types.IteratorFrom -> from(st, args)
     rt_types.IteratorZip -> zip(st, args)
     rt_types.IteratorZipKeyed -> zip_keyed(st, args)
@@ -302,9 +306,9 @@ pub fn dispatch(
     rt_types.IteratorPrototypeForEach -> for_each(st, this, args)
     rt_types.IteratorPrototypeReduce -> reduce(st, this, args)
     rt_types.IteratorPrototypeSome ->
-      bool_consumer(st, this, args, True, "some")
+      every_some(st, this, args, AtLeastOne, "some")
     rt_types.IteratorPrototypeEvery ->
-      bool_consumer(st, this, args, False, "every")
+      every_some(st, this, args, Every, "every")
     rt_types.IteratorPrototypeFind -> find(st, this, args)
     rt_types.IteratorHelperNext -> helper_next(st, this)
     rt_types.IteratorHelperReturn -> helper_return(st, this)
@@ -342,7 +346,7 @@ fn array_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
           ))
         False -> {
           let #(out, st) = case kind {
-            ArrayIterKeys -> #(mk_number(JInt(index)), st)
+            ArrayIterKeys -> #(mk_int(index), st)
             _ -> {
               let #(elem, st) =
                 rt_obj.t_get_prop(
@@ -352,7 +356,7 @@ fn array_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
                 )
               case kind {
                 ArrayIterValues -> #(elem, st)
-                ArrayIterEntries -> alloc_pair(st, mk_number(JInt(index)), elem)
+                ArrayIterEntries -> alloc_pair(st, mk_int(index), elem)
                 ArrayIterKeys -> #(elem, st)
               }
             }
@@ -402,17 +406,17 @@ fn array_source_length(st: Agent, target: Handle) -> #(Int, Agent) {
       {
         Ok(len) -> #(len, st)
         Error(err) ->
-          throw_type_error(st, rt_buffer.view_witness_error_message(err))
+          rt_val.t_throw_type_error(
+            st,
+            rt_buffer.view_witness_error_message(err),
+          )
       }
     _ -> {
       let #(len_v, st) =
         rt_obj.t_get_prop(st, mk_object(target), StringKey(Named("length")))
       let #(len, st) = rt_val.t_to_length(st, len_v)
       case len > limits.max_iteration {
-        True -> {
-          let #(e, st) = new_range_error(st, iteration_budget_msg)
-          rt_store.t_throw(st, e)
-        }
+        True -> rt_val.t_throw_range_error(st, iteration_budget_msg)
         False -> #(len, st)
       }
     }
@@ -493,7 +497,10 @@ fn set_iter_kind(st: Agent, iter_h: Handle, kind: ObjKind) -> Agent {
 }
 
 fn iter_incompatible(st: Agent, tag: String) -> a {
-  throw_type_error(st, tag <> " Iterator next called on incompatible receiver")
+  rt_val.t_throw_type_error(
+    st,
+    tag <> " Iterator next called on incompatible receiver",
+  )
 }
 
 // §27.1.4.2, any sync throw rejects the promise
@@ -508,12 +515,12 @@ fn async_from_sync(
   let cap_resolve = mk_object(resolve_h)
   let cap_reject = mk_object(reject_h)
   let #(outcome, st) =
-    protected(st, fn(st) {
+    protected_any(st, fn(st) {
       do_async_from_sync(st, this, args, kind, cap_resolve, cap_reject)
     })
   let st = case outcome {
-    rt_call.NormalCompletion(_) -> st
-    rt_call.ThrowCompletion(e) -> rt_async.t_promise_reject(st, promise_h, e)
+    NormalCompletion(_) -> st
+    ThrowCompletion(e) -> rt_async.t_promise_reject(st, promise_h, e)
   }
   #(mk_object(promise_h), st)
 }
@@ -531,7 +538,7 @@ fn do_async_from_sync(
   let sync_iter = sync.iterator
   let sync_rec = case classify(sync_iter) {
     KHandle(h) -> h
-    _ -> throw_type_error(st, "not an Async-from-Sync Iterator")
+    _ -> rt_val.t_throw_type_error(st, "not an Async-from-Sync Iterator")
   }
   let #(method, st) = case kind {
     AfsNext -> #(sync.next_method, st)
@@ -550,7 +557,10 @@ fn do_async_from_sync(
     }
     AfsThrow, False -> {
       let st = iter_protocol.iterator_close_normal(st, sync_iter)
-      throw_type_error(st, "The iterator does not provide a 'throw' method.")
+      rt_val.t_throw_type_error(
+        st,
+        "The iterator does not provide a 'throw' method.",
+      )
     }
     _, _ -> {
       let #(result_val, st) =
@@ -570,7 +580,7 @@ fn do_async_from_sync(
             cap_reject,
           )
         }
-        _ -> throw_type_error(st, "Iterator result is not an object")
+        _ -> rt_val.t_throw_type_error(st, "Iterator result is not an object")
       }
     }
   }
@@ -609,12 +619,6 @@ fn afs_continuation(
   #(mk_undefined(), st)
 }
 
-@external(erlang, "arc_rt_call_ffi", "t_apply_protected")
-fn protected(
-  st: Agent,
-  body: fn(Agent) -> #(JsVal, Agent),
-) -> #(rt_call.Completion, Agent)
-
 fn alloc_closure(st: Agent, tag: NativeToken) -> #(JsVal, Agent) {
   let #(h, st) =
     rt_call.t_native_new(
@@ -633,26 +637,18 @@ fn require_async_from_sync(st: Agent, this: JsVal) -> Handle {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
         SObject(kind: AsyncFromSyncIterator(sync_rec:), ..) -> sync_rec
-        _ -> throw_type_error(st, "not an Async-from-Sync Iterator")
+        _ -> rt_val.t_throw_type_error(st, "not an Async-from-Sync Iterator")
       }
-    _ -> throw_type_error(st, "not an Async-from-Sync Iterator")
+    _ -> rt_val.t_throw_type_error(st, "not an Async-from-Sync Iterator")
   }
 }
 
-fn throw_type_error(st: Agent, msg: String) -> a {
-  let js = st.store
-  let #(e, st) = js.ops.new_error(st, TypeErr, msg)
-  rt_store.t_throw(st, e)
-}
-
 fn new_type_error(st: Agent, msg: String) -> #(JsVal, Agent) {
-  let js = st.store
-  js.ops.new_error(st, TypeErr, msg)
+  st.store.ops.new_error(st, TypeErr, msg)
 }
 
 fn new_range_error(st: Agent, msg: String) -> #(JsVal, Agent) {
-  let js = st.store
-  js.ops.new_error(st, RangeErr, msg)
+  st.store.ops.new_error(st, RangeErr, msg)
 }
 
 // must match rt_call.Completion erlang tags
@@ -678,7 +674,7 @@ pub fn dispatch_construct(
       let self = mk_object(st.realm.iterator.constructor)
       case rt_val.is_undef(new_target) || same_handle(new_target, self) {
         True ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "Abstract class Iterator not directly constructable",
           )
@@ -687,17 +683,7 @@ pub fn dispatch_construct(
             rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
               r.iterator.prototype
             })
-          rt_store.t_cell_new(
-            st,
-            SObject(
-              kind: Ordinary,
-              proto: Some(proto),
-              props: dict.new(),
-              symbol_props: [],
-              elements: NoElements,
-              extensible: True,
-            ),
-          )
+          rt_obj.t_new_object(st, Some(proto))
         }
       }
     }
@@ -728,7 +714,7 @@ fn from(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
     True -> #(rec.iterator, st)
     False -> {
       let #(h, st) =
-        realm_ops.alloc_wrapper(
+        realm_ops.alloc_object(
           st,
           WrapForValidIteratorObj(record: rec),
           st.realm.wrap_for_valid_proto,
@@ -781,20 +767,12 @@ fn coerce_limit(
   }
   case nout {
     ThrowCompletion(thrown) -> iter_protocol.close_throw(st, this, thrown)
+    NormalCompletion(JNan) -> range_error(st, "NaN")
     NormalCompletion(n) ->
-      case n {
-        JNan -> range_error(st, "NaN")
-        JPosInf -> #(limits.max_safe_integer, st)
-        JNegInf -> range_error(st, "negative")
-        JInt(i) if i > limits.max_safe_integer -> range_error(st, "too large")
-        JInt(i) if i < 0 -> range_error(st, "negative")
-        JInt(i) -> #(i, st)
-        JFloat(f) if f >. 9_007_199_254_740_991.0 -> range_error(st, "too large")
-        JFloat(f) ->
-          case rt_val.float_to_int(f) {
-            i if i < 0 -> range_error(st, "negative")
-            i -> #(i, st)
-          }
+      case rt_val.jsnum_to_integer_or_infinity(n) {
+        i if i < 0 -> range_error(st, "negative")
+        i if i > limits.max_safe_integer -> range_error(st, "too large")
+        i -> #(i, st)
       }
   }
 }
@@ -809,7 +787,7 @@ fn alloc_helper(
 
 fn alloc_helper_body(st: Agent, body: HelperBody) -> #(JsVal, Agent) {
   let #(h, st) =
-    realm_ops.alloc_wrapper(
+    realm_ops.alloc_object(
       st,
       IteratorHelperObj(gen_state: GenSuspendedStart, body:),
       st.realm.iterator_helper_proto,
@@ -843,9 +821,9 @@ fn require_helper(
       case rt_store.t_cell_get(st, h) {
         SObject(kind: IteratorHelperObj(gen_state:, body:), ..) ->
           cont(h, gen_state, body)
-        _ -> throw_type_error(st, helper_receiver_err)
+        _ -> rt_val.t_throw_type_error(st, helper_receiver_err)
       }
-    _ -> throw_type_error(st, helper_receiver_err)
+    _ -> rt_val.t_throw_type_error(st, helper_receiver_err)
   }
 }
 
@@ -857,7 +835,7 @@ fn resume(
   body: fn(Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   case gen_state {
-    GenExecuting -> throw_type_error(st, helper_running_err)
+    GenExecuting -> rt_val.t_throw_type_error(st, helper_running_err)
     GenCompleted -> iter_done(st)
     GenSuspendedStart | GenSuspendedYield -> {
       let st = set_gen_state(st, ref, GenExecuting)
@@ -879,7 +857,7 @@ fn resume_abrupt(
   body: fn(Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   case gen_state {
-    GenExecuting -> throw_type_error(st, helper_running_err)
+    GenExecuting -> rt_val.t_throw_type_error(st, helper_running_err)
     GenCompleted -> iter_done(st)
     GenSuspendedStart -> body(set_gen_state(st, ref, GenCompleted))
     GenSuspendedYield -> body(set_gen_state(st, ref, GenExecuting))
@@ -979,7 +957,7 @@ fn step_map(
     None -> finish(st, ref)
     Some(v) -> {
       let st = write_counter(st, ref, count + 1)
-      let idx = mk_number(rt_val.num_from_int(count))
+      let idx = mk_int(count)
       case rt_call.t_call(st, func, mk_undefined(), [v, idx]) {
         #(rt_call.NormalCompletion(mapped), st) -> iter_yield(st, mapped)
         #(rt_call.ThrowCompletion(thrown), st) ->
@@ -1001,7 +979,7 @@ fn step_filter(
     None -> finish(st, ref)
     Some(v) -> {
       let st = write_counter(st, ref, count + 1)
-      let idx = mk_number(rt_val.num_from_int(count))
+      let idx = mk_int(count)
       case rt_call.t_call(st, func, mk_undefined(), [v, idx]) {
         #(rt_call.ThrowCompletion(thrown), st) ->
           close_throw_done(st, ref, underlying, thrown)
@@ -1087,7 +1065,7 @@ fn step_flat_map(
       case step {
         None -> finish(st, ref)
         Some(v) -> {
-          let idx = mk_number(rt_val.num_from_int(count))
+          let idx = mk_int(count)
           let st = write_counter(st, ref, count + 1)
           case rt_call.t_call(st, func, mk_undefined(), [v, idx]) {
             #(rt_call.ThrowCompletion(thrown), st) ->
@@ -1154,9 +1132,9 @@ fn require_wrap(
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
         SObject(kind: WrapForValidIteratorObj(record:), ..) -> cont(record)
-        _ -> throw_type_error(st, err)
+        _ -> rt_val.t_throw_type_error(st, err)
       }
-    _ -> throw_type_error(st, err)
+    _ -> rt_val.t_throw_type_error(st, err)
   }
 }
 
@@ -1181,7 +1159,7 @@ fn for_each_loop(
   case iter_protocol.iterator_step_value(st, rec) {
     #(None, st) -> #(mk_undefined(), st)
     #(Some(v), st) -> {
-      let idx = mk_number(rt_val.num_from_int(counter))
+      let idx = mk_int(counter)
       case rt_call.t_call(st, func, mk_undefined(), [v, idx]) {
         #(rt_call.ThrowCompletion(thrown), st) ->
           iter_protocol.close_throw(st, rec.iterator, thrown)
@@ -1199,7 +1177,10 @@ fn reduce(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     _ ->
       case iter_protocol.iterator_step_value(st, rec) {
         #(None, st) ->
-          throw_type_error(st, "Reduce of empty iterator with no initial value")
+          rt_val.t_throw_type_error(
+            st,
+            "Reduce of empty iterator with no initial value",
+          )
         #(Some(seed), st) -> reduce_loop(st, rec, func, seed, 1)
       }
   }
@@ -1215,7 +1196,7 @@ fn reduce_loop(
   case iter_protocol.iterator_step_value(st, rec) {
     #(None, st) -> #(acc, st)
     #(Some(v), st) -> {
-      let idx = mk_number(rt_val.num_from_int(counter))
+      let idx = mk_int(counter)
       case rt_call.t_call(st, func, mk_undefined(), [acc, v, idx]) {
         #(rt_call.ThrowCompletion(thrown), st) ->
           iter_protocol.close_throw(st, rec.iterator, thrown)
@@ -1226,40 +1207,48 @@ fn reduce_loop(
   }
 }
 
-// some: match_on true, every: false
-fn bool_consumer(
+fn every_some(
   st: Agent,
   this: JsVal,
   args: List(JsVal),
-  match_on: Bool,
+  quantifier: Quantifier,
   name: String,
 ) -> #(JsVal, Agent) {
   use rec, func, st <- consumer_with_callback(st, this, args, name)
-  let #(matched, st) = predicate_loop(st, rec, func, 0, match_on)
-  #(mk_bool(option.is_some(matched) == match_on), st)
+  let stop_on = case quantifier {
+    Every -> False
+    AtLeastOne -> True
+  }
+  let #(stopped_at, st) = predicate_loop(st, rec, func, 0, stop_on:)
+  let result = case quantifier {
+    Every -> option.is_none(stopped_at)
+    AtLeastOne -> option.is_some(stopped_at)
+  }
+  #(mk_bool(result), st)
 }
 
+// closes and returns the element once the predicate gives stop_on
 fn predicate_loop(
   st: Agent,
   rec: IteratorRecord,
   func: JsVal,
   counter: Int,
-  match_on: Bool,
+  stop_on stop_on: Bool,
 ) -> #(Option(JsVal), Agent) {
   case iter_protocol.iterator_step_value(st, rec) {
     #(None, st) -> #(None, st)
     #(Some(v), st) -> {
-      let idx = mk_number(rt_val.num_from_int(counter))
+      let idx = mk_int(counter)
       case rt_call.t_call(st, func, mk_undefined(), [v, idx]) {
         #(rt_call.ThrowCompletion(thrown), st) ->
           iter_protocol.close_throw(st, rec.iterator, thrown)
         #(rt_call.NormalCompletion(result), st) ->
-          case rt_val.to_boolean(result) == match_on {
+          case rt_val.to_boolean(result) == stop_on {
             True -> {
               let st = iter_protocol.iterator_close_normal(st, rec.iterator)
               #(Some(v), st)
             }
-            False -> predicate_loop(st, rec, func, counter + 1, match_on)
+            False -> predicate_loop(st, rec, func, counter + 1, stop_on:)
           }
       }
     }
@@ -1268,7 +1257,7 @@ fn predicate_loop(
 
 fn find(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use rec, func, st <- consumer_with_callback(st, this, args, "find")
-  let #(matched, st) = predicate_loop(st, rec, func, 0, True)
+  let #(matched, st) = predicate_loop(st, rec, func, 0, stop_on: True)
   #(option.unwrap(matched, mk_undefined()), st)
 }
 
@@ -1289,7 +1278,7 @@ fn ignore_proto_setter(
     KHandle(h) ->
       case h.id == proto.id {
         True ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "Cannot assign to read only property of Iterator.prototype",
           )
@@ -1304,12 +1293,15 @@ fn ignore_proto_setter(
           case ok {
             True -> #(mk_undefined(), st)
             False ->
-              throw_type_error(st, "Cannot define property on this receiver")
+              rt_val.t_throw_type_error(
+                st,
+                "Cannot define property on this receiver",
+              )
           }
         }
       }
     _ ->
-      throw_type_error(
+      rt_val.t_throw_type_error(
         st,
         "Cannot set property on non-object Iterator receiver",
       )
@@ -1365,7 +1357,7 @@ fn require_object_of(
 ) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) -> cont(h)
-    _ -> throw_type_error(st, msg)
+    _ -> rt_val.t_throw_type_error(st, msg)
   }
 }
 
@@ -1539,14 +1531,14 @@ fn zip_options(
           case classify(pad) {
             KUndef | KHandle(_) -> #(OptLongest(padding: pad), st)
             _ ->
-              throw_type_error(
+              rt_val.t_throw_type_error(
                 st,
                 "Iterator." <> name <> " padding is not an object",
               )
           }
         }
         _ ->
-          throw_type_error(
+          rt_val.t_throw_type_error(
             st,
             "Iterator."
               <> name
@@ -1555,7 +1547,10 @@ fn zip_options(
       }
     }
     _ ->
-      throw_type_error(st, "Iterator." <> name <> " options is not an object")
+      rt_val.t_throw_type_error(
+        st,
+        "Iterator." <> name <> " options is not an object",
+      )
   }
 }
 
@@ -1901,18 +1896,7 @@ fn alloc_zip_keyed_result(
   keys: List(ObjectKey),
   results: List(JsVal),
 ) -> #(Handle, Agent) {
-  let #(h, st) =
-    rt_store.t_cell_new(
-      st,
-      SObject(
-        kind: Ordinary,
-        proto: None,
-        props: dict.new(),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
-      ),
-    )
+  let #(h, st) = rt_obj.t_new_object(st, None)
   let st =
     list.zip(keys, results)
     |> list.fold(st, fn(st, pair) {
@@ -2030,7 +2014,10 @@ fn concat_validate(
             rt_obj.t_get_prop(st, item, SymbolKey(symbol_iterator))
           case classify(method) {
             KUndef | KNull ->
-              throw_type_error(st, "Iterator.concat argument is not iterable")
+              rt_val.t_throw_type_error(
+                st,
+                "Iterator.concat argument is not iterable",
+              )
             _ ->
               case rt_call.is_callable(st, method) {
                 True ->
@@ -2039,14 +2026,18 @@ fn concat_validate(
                     ..acc
                   ])
                 False ->
-                  throw_type_error(
+                  rt_val.t_throw_type_error(
                     st,
                     "Iterator.concat argument [Symbol.iterator] is not callable",
                   )
               }
           }
         }
-        _ -> throw_type_error(st, "Iterator.concat argument is not an object")
+        _ ->
+          rt_val.t_throw_type_error(
+            st,
+            "Iterator.concat argument is not an object",
+          )
       }
   }
 }

@@ -30,7 +30,7 @@ pub fn init(
       2,
       [],
     )
-  let st = common.add_to_string_tag(st, pair.prototype, "DOMException")
+  let st = common.add_string_tag(st, pair.prototype, "DOMException")
   #(pair, st)
 }
 

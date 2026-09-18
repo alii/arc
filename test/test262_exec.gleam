@@ -803,13 +803,13 @@ fn build_agent(s: HostState, parent: Option(AgentPid)) -> #(HostState, JsVal) {
   let #(children, st) = common.alloc_array(st, [], array_proto)
   let #(reports, st) = common.alloc_array(st, [], array_proto)
   let #(agents, st) = common.alloc_array(st, [], array_proto)
-  let #(children_prop, st) = common.data_prop(st, mk_object(children))
-  let #(reports_prop, st) = common.data_prop(st, mk_object(reports))
-  let #(agents_prop, st) = common.data_prop(st, mk_object(agents))
+  let #(children_prop, st) = common.frozen_property(st, mk_object(children))
+  let #(reports_prop, st) = common.frozen_property(st, mk_object(reports))
+  let #(agents_prop, st) = common.frozen_property(st, mk_object(agents))
   let hidden = [
-    #("__children__", common.configurable(children_prop)),
-    #("__reports__", common.configurable(reports_prop)),
-    #("__agents__", common.configurable(agents_prop)),
+    #("__children__", common.make_configurable(children_prop)),
+    #("__reports__", common.make_configurable(reports_prop)),
+    #("__agents__", common.make_configurable(agents_prop)),
   ]
   let #(h, st) =
     rt_store.t_cell_new(
@@ -939,8 +939,7 @@ fn payload_to_value(st: Agent, payload: AgentPayload) -> #(Agent, JsVal) {
         True -> st.realm.shared_array_buffer.prototype
         False -> st.realm.array_buffer.prototype
       }
-      let #(h, st) =
-        realm_ops.alloc_wrapper(st, ArrayBufferObj(storage:), proto)
+      let #(h, st) = realm_ops.alloc_object(st, ArrayBufferObj(storage:), proto)
       #(st, mk_object(h))
     }
   }

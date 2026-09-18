@@ -200,11 +200,7 @@ pub fn t_to_primitive(
     KTdz -> panic as "ToPrimitive on the TDZ sentinel"
     KHandle(h) -> {
       let ops = require_ops(st)
-      let fast = get_symbol_data(st, v, symbol_to_primitive)
-      let #(exotic, st) = case is_miss(fast) {
-        True -> ops.get_prop(st, v, SymbolKey(symbol_to_primitive))
-        False -> #(fast, st)
-      }
+      let #(exotic, st) = get_symbol(st, v, symbol_to_primitive)
       case is_nullish(exotic) {
         True -> t_ordinary_to_primitive(st, h, hint)
         False -> {
@@ -250,6 +246,18 @@ fn get_named_data(
   site: Option(Nil),
 ) -> #(JsVal, Agent)
 
+pub fn get_named(st: Agent, recv: JsVal, key: String) -> #(JsVal, Agent) {
+  get_named_data(st, recv, key, None)
+}
+
+fn get_symbol(st: Agent, recv: JsVal, sym: SymbolId) -> #(JsVal, Agent) {
+  let v = get_symbol_data(st, recv, sym)
+  case is_miss(v) {
+    True -> require_ops(st).get_prop(st, recv, SymbolKey(sym))
+    False -> #(v, st)
+  }
+}
+
 // §7.1.1.1 ordinarytoprimitive
 pub fn t_ordinary_to_primitive(
   st: Agent,
@@ -273,7 +281,7 @@ fn try_primitive_methods(
     [] -> t_throw_type_error(st, "Cannot convert object to primitive value")
     [name, ..rest] -> {
       let ops = require_ops(st)
-      let #(method, st) = get_named_data(st, receiver, name, None)
+      let #(method, st) = get_named(st, receiver, name)
       let #(callable, st) = t_is_callable(st, method)
       case callable {
         True -> {

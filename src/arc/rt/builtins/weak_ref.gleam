@@ -1,14 +1,13 @@
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{can_be_held_weakly}
+import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
-import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type Realm,
-  type WeakRefNative, NoElements, SObject, WeakRefConstructor, WeakRefN,
-  WeakRefObj, WeakRefPrototypeDeref, mk_undefined,
+  type WeakRefNative, WeakRefConstructor, WeakRefN, WeakRefObj,
+  WeakRefPrototypeDeref, mk_undefined,
 }
 import arc/rt/val as rt_val
-import gleam/dict
 import gleam/option.{None, Some}
 
 pub fn init(
@@ -31,7 +30,7 @@ pub fn init(
       1,
       [],
     )
-  let st = common.add_to_string_tag(st, bt.prototype, "WeakRef")
+  let st = common.add_string_tag(st, bt.prototype, "WeakRef")
   #(bt, st)
 }
 
@@ -74,17 +73,7 @@ fn construct(
     rt_call.get_prototype_from_constructor(st, new_target, fn(realm: Realm) {
       realm.weak_ref.prototype
     })
-  rt_store.t_cell_new(
-    st,
-    SObject(
-      kind: WeakRefObj(target: Some(target)),
-      proto: Some(proto_h),
-      props: dict.new(),
-      symbol_props: [],
-      elements: NoElements,
-      extensible: True,
-    ),
-  )
+  realm_ops.alloc_object(st, WeakRefObj(target: Some(target)), proto_h)
 }
 
 // §26.1.3.2 weakref.prototype.deref

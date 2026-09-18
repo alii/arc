@@ -15,16 +15,17 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type ObjectKey,
   type PromiseKeyedKind, type PromiseNative, ArrayObj, Dense, JInt, KHandle,
-  KeyedFulfilled, KeyedRejected, KeyedValue, Named, NoElements, Ordinary,
-  PromiseAllKeyedStatic, PromiseAllResolveElement, PromiseAllSettledElement,
+  KeyedFulfilled, KeyedRejected, KeyedValue, Named, PromiseAllKeyedStatic,
+  PromiseAllResolveElement, PromiseAllSettledElement,
   PromiseAllSettledKeyedStatic, PromiseAllSettledStatic, PromiseAllStatic,
   PromiseAnyRejectElement, PromiseAnyStatic, PromiseCapabilityExecutor,
   PromiseCatch, PromiseConstructor, PromiseFinally, PromiseFinallyFn,
   PromiseFinallyThrower, PromiseFinallyValueThunk, PromiseKeyedElement, PromiseN,
   PromiseRaceStatic, PromiseRejectStatic, PromiseResolveStatic, PromiseThen,
-  ReturnThis, SBox, SObject, StringKey, SymbolKey, TypeErr, classify, mk_bool,
-  mk_number, mk_object, mk_string, mk_undefined,
+  ReturnThis, SBox, SObject, StringKey, SymbolKey, classify, mk_bool, mk_int,
+  mk_object, mk_string, mk_undefined,
 } as rt_types
+import arc/rt/val as rt_val
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -63,7 +64,7 @@ pub fn init(
       1,
       static_methods,
     )
-  let st = common.add_to_string_tag(st, bt.prototype, "Promise")
+  let st = common.add_string_tag(st, bt.prototype, "Promise")
   let st = common.add_species_accessor(st, fn_proto, bt.constructor, ReturnThis)
   #(bt, st)
 }
@@ -76,7 +77,7 @@ pub fn dispatch(
 ) -> #(JsVal, Agent) {
   case n {
     PromiseConstructor ->
-      throw_type_error(st, "Promise constructor requires 'new'")
+      rt_val.t_throw_type_error(st, "Promise constructor requires 'new'")
     PromiseThen -> then(st, this, args)
     PromiseCatch -> {
       let on_rejected = first_arg_or_undefined(args)
@@ -173,7 +174,7 @@ pub fn dispatch_construct(
 ) -> #(Handle, Agent) {
   let executor = first_arg_or_undefined(args)
   case is_callable(st, executor) {
-    False -> throw_type_error(st, "Promise resolver is not a function")
+    False -> rt_val.t_throw_type_error(st, "Promise resolver is not a function")
     True -> {
       let #(proto, st) =
         rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
@@ -228,7 +229,11 @@ fn finally(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let on_finally = first_arg_or_undefined(args)
   case classify(this) {
     KHandle(_) -> Nil
-    _ -> throw_type_error(st, "Promise.prototype.finally called on non-object")
+    _ ->
+      rt_val.t_throw_type_error(
+        st,
+        "Promise.prototype.finally called on non-object",
+      )
   }
   let #(c, st) = species_constructor(st, this)
   let #(then_finally, catch_finally, st) = case is_callable(st, on_finally) {
@@ -287,7 +292,7 @@ fn resolve_static(
   let val = first_arg_or_undefined(args)
   case classify(this) {
     KHandle(_) -> promise_resolve(st, this, val)
-    _ -> throw_type_error(st, "Promise.resolve called on non-object")
+    _ -> rt_val.t_throw_type_error(st, "Promise.resolve called on non-object")
   }
 }
 
@@ -644,7 +649,7 @@ fn perform_all_keyed(
       keyed_loop(st, loop, all_keys, 0)
     }
     _ ->
-      throw_type_error(
+      rt_val.t_throw_type_error(
         st,
         "Promise keyed combinator argument must be an object",
       )
@@ -745,18 +750,7 @@ fn create_keyed_result(
 ) -> #(Handle, Agent) {
   let keys = read_array_values(st, keys_h)
   let values = read_array_values(st, values_h)
-  let #(h, st) =
-    rt_store.t_cell_new(
-      st,
-      SObject(
-        kind: Ordinary,
-        proto: None,
-        props: dict.new(),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
-      ),
-    )
+  let #(h, st) = rt_obj.t_new_object(st, None)
   let st =
     list.zip(keys, values)
     |> list.fold(st, fn(st, kv) {
@@ -817,7 +811,7 @@ fn settled_record(st: Agent, fulfilled: Bool, val: JsVal) -> #(JsVal, Agent) {
     False -> #("rejected", "reason")
   }
   let #(obj_h, st) =
-    common.alloc_pojo(st, st.realm.object.prototype, [
+    common.alloc_plain_object(st, st.realm.object.prototype, [
       #("status", mk_string(status)),
       #(field, val),
     ])
@@ -899,14 +893,18 @@ fn new_capability_from_constructor(
     False -> {
       case is_constructor(st, c) {
         False ->
-          throw_type_error(st, "Promise capability requires a constructor")
+          rt_val.t_throw_type_error(
+            st,
+            "Promise capability requires a constructor",
+          )
         True -> {
           let #(resolve_box, st) = alloc_box(st, mk_undefined())
           let #(reject_box, st) = alloc_box(st, mk_undefined())
           let #(executor, st) =
-            alloc_closure2(
+            alloc_closure_n(
               st,
               PromiseN(PromiseCapabilityExecutor(resolve_box:, reject_box:)),
+              2,
             )
           let #(promise_h, st) = t_construct(st, c, [executor], c)
           let resolve = read_box(st, resolve_box)
@@ -917,7 +915,7 @@ fn new_capability_from_constructor(
               st,
             )
             False ->
-              throw_type_error(
+              rt_val.t_throw_type_error(
                 st,
                 "Promise resolve or reject function is not callable",
               )
@@ -939,7 +937,7 @@ fn capability_executor(
     || read_box(st, reject_box) != mk_undefined()
   case already_set {
     True ->
-      throw_type_error(
+      rt_val.t_throw_type_error(
         st,
         "Promise executor has already been invoked with non-undefined arguments",
       )
@@ -956,7 +954,7 @@ fn get_promise_resolve(st: Agent, c: JsVal) -> #(JsVal, Agent) {
   let #(resolve_fn, st) = rt_obj.t_get_prop(st, c, StringKey(Named("resolve")))
   case is_callable(st, resolve_fn) {
     True -> #(resolve_fn, st)
-    False -> throw_type_error(st, "Promise resolve is not a function")
+    False -> rt_val.t_throw_type_error(st, "Promise resolve is not a function")
   }
 }
 
@@ -1002,14 +1000,14 @@ fn species_constructor_generic(
           case is_constructor(st, s) {
             True -> #(s, st)
             False ->
-              throw_type_error(
+              rt_val.t_throw_type_error(
                 st,
                 "Promise[Symbol.species] is not a constructor",
               )
           }
       }
     }
-    _ -> throw_type_error(st, ".constructor is not an object")
+    _ -> rt_val.t_throw_type_error(st, ".constructor is not an object")
   }
 }
 
@@ -1021,10 +1019,6 @@ fn protected(
 
 fn alloc_closure(st: Agent, tag: rt_types.NativeToken) -> #(JsVal, Agent) {
   alloc_closure_n(st, tag, 1)
-}
-
-fn alloc_closure2(st: Agent, tag: rt_types.NativeToken) -> #(JsVal, Agent) {
-  alloc_closure_n(st, tag, 2)
 }
 
 fn alloc_closure_n(
@@ -1056,7 +1050,7 @@ fn read_box(st: Agent, h: Handle) -> JsVal {
 }
 
 fn alloc_counter(st: Agent, n: Int) -> #(Handle, Agent) {
-  rt_store.t_cell_new(st, SBox(mk_number(JInt(n))))
+  rt_store.t_cell_new(st, SBox(mk_int(n)))
 }
 
 fn adjust_counter(st: Agent, h: Handle, delta: Int) -> #(Int, Agent) {
@@ -1065,7 +1059,7 @@ fn adjust_counter(st: Agent, h: Handle, delta: Int) -> #(Int, Agent) {
       case classify(v) {
         rt_types.KNum(JInt(n)) -> {
           let n2 = n + delta
-          #(n2, rt_store.t_cell_set(st, h, SBox(mk_number(JInt(n2)))))
+          #(n2, rt_store.t_cell_set(st, h, SBox(mk_int(n2))))
         }
         _ -> panic as "promise combinator counter not an int"
       }
@@ -1146,12 +1140,6 @@ fn make_aggregate_error(st: Agent, errors_h: Handle) -> #(JsVal, Agent) {
 fn require_promise(st: Agent, this: JsVal, name: String) -> Handle {
   case rt_async.as_promise(st, this) {
     Some(h) -> h
-    None -> throw_type_error(st, name <> " called on non-promise")
+    None -> rt_val.t_throw_type_error(st, name <> " called on non-promise")
   }
-}
-
-fn throw_type_error(st: Agent, msg: String) -> a {
-  let js = st.store
-  let #(e, st) = js.ops.new_error(st, TypeErr, msg)
-  rt_store.t_throw(st, e)
 }
