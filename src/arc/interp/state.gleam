@@ -3,13 +3,12 @@ import arc/rt/bytecode.{type FuncTemplate, type TryFrame}
 import arc/rt/gc as rt_gc
 import arc/rt/types.{
   type Agent, type ErrorKind, type Handle, type JsVal, JsCell, RangeErr,
-  ReferenceErr, SyntaxErr, TypeErr,
+  ReferenceErr, TypeErr,
 }
 import gleam/dynamic.{type Dynamic}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/result
 
 pub type State {
   State(
@@ -32,7 +31,7 @@ pub type State {
   )
 }
 
-// caller.pc/stack/locals/agent are stale, the frame fields win
+// restore pc/stack/locals from here, not from caller
 pub type SavedFrame {
   SavedFrame(
     caller: State,
@@ -41,7 +40,7 @@ pub type SavedFrame {
     locals: TupleArray(JsVal),
     constructor_this: Option(JsVal),
   )
-  // caller kept loop registers, locals is stale at caller.func.regs
+  // r0/r1 are the register-cached locals, written back on restore
   SavedRegFrame(
     caller: State,
     pc: Int,
@@ -244,6 +243,14 @@ pub fn map_exit_state(exit: StepExit, f: fn(State) -> State) -> StepExit {
   }
 }
 
+pub fn truncate_stack(stack: List(JsVal), depth: Int) -> List(JsVal) {
+  let excess = list.length(stack) - depth
+  case excess > 0 {
+    True -> list.drop(stack, excess)
+    False -> stack
+  }
+}
+
 pub fn new_error(
   state: State,
   kind: ErrorKind,
@@ -267,25 +274,25 @@ pub fn throw_type_error(state: State, msg: String) -> Result(a, StepExit) {
   throw_error(state, TypeErr, msg)
 }
 
-pub fn throw_range_error(state: State, msg: String) -> Result(a, StepExit) {
-  throw_error(state, RangeErr, msg)
-}
-
 pub fn throw_reference_error(state: State, msg: String) -> Result(a, StepExit) {
   throw_error(state, ReferenceErr, msg)
 }
 
-pub fn throw_syntax_error(state: State, msg: String) -> Result(a, StepExit) {
-  throw_error(state, SyntaxErr, msg)
+pub fn stack_overflow_error(agent: Agent) -> #(JsVal, Agent) {
+  agent.store.ops.new_error(agent, RangeErr, "Maximum call stack size exceeded")
 }
 
-pub fn throw_value(state: State, value: JsVal) -> Result(a, StepExit) {
-  Error(Threw(value, state))
+pub fn throw_stack_overflow(state: State) -> Result(a, StepExit) {
+  let #(err, agent) = stack_overflow_error(state.agent)
+  Error(Threw(err, State(..state, agent:)))
 }
 
-pub fn rethrow(res: Result(a, #(JsVal, State))) -> Result(a, StepExit) {
-  result.map_error(res, fn(err) {
-    let #(thrown, state) = err
-    Threw(thrown, state)
-  })
+// a vm error surfaces as a typeerror completion
+pub fn internal_fault(
+  state: State,
+  err: VmError,
+) -> #(Result(JsVal, JsVal), State) {
+  let #(e, state) =
+    new_error(state, TypeErr, "internal error: " <> vm_error_message(err))
+  #(Error(e), state)
 }

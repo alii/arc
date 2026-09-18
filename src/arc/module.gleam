@@ -2,7 +2,6 @@ import arc/compiler.{type ExportSeed}
 import arc/esm
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/entry
-import arc/interp/interpreter
 import arc/interp/safepoint
 import arc/interp/state.{type State, State}
 import arc/link
@@ -14,6 +13,7 @@ import arc/rt/async as rt_async
 import arc/rt/builtins/reflect as rt_reflect
 import arc/rt/bytecode.{type FuncTemplate}
 import arc/rt/call as rt_call
+import arc/rt/closure as rt_closure
 import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -992,7 +992,12 @@ fn instantiate_hoisted_functions(
               tuple_array.get_unchecked(desc.parent_index, locals)
             })
           let #(closure, st) =
-            interpreter.make_closure(st, child, captured, lm.unit)
+            rt_closure.t_new_bytecode_function(
+              st,
+              child,
+              bytecode.env_from_list(captured),
+              lm.unit,
+            )
           rt_store.t_cell_set(st, box, SBox(mk_object(closure)))
         }
       }

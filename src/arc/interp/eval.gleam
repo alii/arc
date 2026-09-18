@@ -17,8 +17,8 @@ import arc/rt/limits
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type EvalKind, type Handle, type JsVal, Agent, DynamicFunction,
-  IndirectEval, KBytecode, KHandle, KStr, RangeErr, SObject, ScriptEval,
-  SyntaxErr, TypeErr, classify, mk_object, mk_undefined,
+  IndirectEval, KBytecode, KHandle, KStr, SObject, ScriptEval, SyntaxErr,
+  TypeErr, classify, mk_object, mk_undefined,
 }
 import gleam/int
 import gleam/list
@@ -26,6 +26,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
+// entry.run, passed in to break the import cycle
 pub type Run =
   fn(State) -> #(Result(JsVal, JsVal), Agent)
 
@@ -65,7 +66,7 @@ fn top_level_locals(template: FuncTemplate, this: JsVal) -> TupleArray(JsVal) {
   }
 }
 
-fn activation(
+fn top_level_activation(
   agent: Agent,
   template: FuncTemplate,
   locals: TupleArray(JsVal),
@@ -92,19 +93,10 @@ fn activation(
   )
 }
 
-fn run_global_code(
-  agent: Agent,
-  template: FuncTemplate,
-  run: Run,
-) -> #(Result(JsVal, JsVal), Agent) {
+pub fn script_activation(agent: Agent, template: FuncTemplate) -> State {
   let global = mk_object(agent.realm.global_object)
-  run(activation(
-    agent,
-    template,
-    top_level_locals(template, global),
-    global,
-    None,
-  ))
+  let locals = top_level_locals(template, global)
+  top_level_activation(agent, template, locals, global, None)
 }
 
 // holds one call_depth unit, caller frame is not a gc root
@@ -116,12 +108,7 @@ fn run_bracketed(
   let depth = agent.call_depth
   case depth >= limits.max_call_depth {
     True -> {
-      let #(err, agent) =
-        agent.store.ops.new_error(
-          agent,
-          RangeErr,
-          "Maximum call stack size exceeded",
-        )
+      let #(err, agent) = state.stack_overflow_error(agent)
       #(Error(err), agent)
     }
     False -> {
@@ -150,7 +137,7 @@ pub fn eval_hook(
       parser.parse_script,
       compile,
     ))
-    let #(res, agent) = run_global_code(agent, template, run)
+    let #(res, agent) = run(script_activation(agent, template))
     let agent = case kind {
       ScriptEval -> rt_async.drain(agent)
       IndirectEval | DynamicFunction -> agent
@@ -215,24 +202,13 @@ pub fn direct_eval(
       )
     KStr(source), None -> {
       let outcome = {
-        use template <- result.try(compile_source(
+        use template <- result.map(compile_source(
           caller.agent,
           source,
           parser.parse_script,
           compiler.compile_eval,
         ))
-        let global = mk_object(caller.agent.realm.global_object)
-        let make = fn(agent) {
-          activation(
-            agent,
-            template,
-            top_level_locals(template, global),
-            global,
-            None,
-          )
-        }
-        let #(res, agent) = run_bracketed(caller.agent, make, run)
-        Ok(#(res, agent))
+        run_bracketed(caller.agent, script_activation(_, template), run)
       }
       adopt(caller, outcome, caller.eval_env)
     }
@@ -266,23 +242,25 @@ fn run_direct_eval(
       with_names:,
       private_names:,
     )
+  let parse = parser.parse_direct_eval(
+    _,
+    strict: func.is_strict,
+    allow_new_target: lexical.new_target_allowed(code_kind),
+    allow_super_property: lexical.super_prop_allowed(code_kind),
+    allow_super_call: lexical.super_call_allowed(code_kind),
+    allow_arguments: lexical.arguments_allowed(code_kind),
+    outer_private_names: private_names,
+  )
+  let compile = fn(body, sb) {
+    compiler.compile_eval_direct(body, sb, eval_caller)
+  }
   let outcome = {
-    use template <- result.try(
-      compile_source(
-        caller.agent,
-        source,
-        parser.parse_direct_eval(
-          _,
-          strict: func.is_strict,
-          allow_new_target: lexical.new_target_allowed(code_kind),
-          allow_super_property: lexical.super_prop_allowed(code_kind),
-          allow_super_call: lexical.super_call_allowed(code_kind),
-          allow_arguments: lexical.arguments_allowed(code_kind),
-          outer_private_names: private_names,
-        ),
-        fn(body, sb) { compiler.compile_eval_direct(body, sb, eval_caller) },
-      ),
-    )
+    use template <- result.try(compile_source(
+      caller.agent,
+      source,
+      parse,
+      compile,
+    ))
     use box_refs <- result.try(caller_box_refs(caller, name_table))
     let padding = template.local_count - list.length(box_refs)
     let locals =
@@ -299,7 +277,7 @@ fn run_direct_eval(
     let #(res, agent) =
       run_bracketed(
         agent,
-        activation(_, template, locals, caller.this, eval_env),
+        top_level_activation(_, template, locals, caller.this, eval_env),
         run,
       )
     Ok(#(res, agent, eval_env))

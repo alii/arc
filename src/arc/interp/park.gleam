@@ -49,6 +49,7 @@ pub fn unpark_with(
     unit:,
   ) = frame
   let line = tuple_array.element(pc + 1, template.lines)
+  // callers push this frame first
   let agent = case agent.frames {
     [FrameInfo(line: l, ..), ..] if l == line -> agent
     [top, ..rest] -> Agent(..agent, frames: [FrameInfo(..top, line:), ..rest])

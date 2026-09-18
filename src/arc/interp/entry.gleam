@@ -1,14 +1,15 @@
-import arc/bytecode/lexical
 import arc/bytecode/opcode.{
   AsyncYieldStarNext, CatchOnly, Finally, IterCloseGuard, Pc, YieldStar,
 }
-import arc/internal/tuple_array.{type TupleArray}
+import arc/internal/tuple_array
 import arc/interp/call
 import arc/interp/eval
 import arc/interp/ffi
 import arc/interp/interpreter.{Completed, Suspended}
 import arc/interp/park
-import arc/interp/state.{type State, type VmError, State, SuspensionLeak}
+import arc/interp/state.{
+  type State, type StepExit, InternalError, State, SuspensionLeak,
+}
 import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
 import arc/rt/bytecode.{
@@ -24,13 +25,12 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type EvalKind, type FrameInfo, type Handle, type IteratorRecord,
   type JsOps, type JsVal, type Step, Agent, JInt, JsOps, JsStore, KBytecode,
-  KHandle, KNull, KUndef, Named, RangeErr, ResumeFrame, SObject, StepAwait,
-  StepReturn, StepThrow, StepYield, StringKey, TypeErr, classify, mk_number,
-  mk_object, mk_undefined,
+  KHandle, KNull, KUndef, Named, ResumeFrame, SObject, StepAwait, StepReturn,
+  StepThrow, StepYield, StringKey, TypeErr, classify, mk_number, mk_object,
+  mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bool
-import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
@@ -55,14 +55,8 @@ type Outcome {
   Parked(state.SuspendKind, JsVal, State)
 }
 
-fn fault(s: State, err: VmError) -> #(Result(JsVal, JsVal), State) {
-  let #(e, s) =
-    state.new_error(
-      s,
-      TypeErr,
-      "internal error: " <> state.vm_error_message(err),
-    )
-  #(Error(e), s)
+fn to_outcome(outcome: #(Result(JsVal, JsVal), State)) -> Outcome {
+  Finished(outcome.0, outcome.1)
 }
 
 const drive = call.Drive(start_coroutine:)
@@ -72,17 +66,30 @@ fn execute(state: State) -> Outcome {
     Ok(#(Completed(NormalCompletion(v)), s)) -> Finished(Ok(v), s)
     Ok(#(Completed(ThrowCompletion(e)), s)) -> Finished(Error(e), s)
     Ok(#(Suspended(kind, v), s)) -> Parked(kind, v, s)
-    Error(err) -> {
-      let #(res, s) = fault(state, err)
-      Finished(res, s)
-    }
+    Error(err) -> to_outcome(state.internal_fault(state, err))
   }
 }
 
 fn complete(state: State, site: String) -> #(Result(JsVal, JsVal), State) {
   case execute(state) {
     Finished(res, s) -> #(res, s)
-    Parked(kind, _, s) -> fault(s, SuspensionLeak(site:, kind:))
+    Parked(kind, _, s) -> state.internal_fault(s, SuspensionLeak(site:, kind:))
+  }
+}
+
+fn complete_call(state: State) -> #(Result(JsVal, JsVal), Agent) {
+  case interpreter.execute_inner(state, drive) {
+    Ok(#(Completed(NormalCompletion(v)), s)) -> #(Ok(v), s.agent)
+    Ok(#(Completed(ThrowCompletion(e)), s)) -> #(Error(e), s.agent)
+    Ok(#(Suspended(kind, _), s)) -> {
+      let #(res, s) =
+        state.internal_fault(s, SuspensionLeak(site: "run_bytecode", kind:))
+      #(res, s.agent)
+    }
+    Error(err) -> {
+      let #(res, s) = state.internal_fault(state, err)
+      #(res, s.agent)
+    }
   }
 }
 
@@ -94,11 +101,16 @@ fn mark(agent: Agent) -> EntryMark {
   EntryMark(frames: agent.frames, call_depth: agent.call_depth)
 }
 
-// restore frames and depth after an abandoned activation
+// restore entry frames and depth
 fn settle(agent: Agent, m: EntryMark) -> Agent {
-  case agent.call_depth == m.call_depth && agent.frames == m.frames {
+  resettle(agent, m.frames, m.call_depth)
+}
+
+// a callee that never synced left frames and depth untouched
+fn resettle(agent: Agent, frames: List(FrameInfo), depth: Int) -> Agent {
+  case agent.call_depth == depth && agent.frames == frames {
     True -> agent
-    False -> Agent(..agent, frames: m.frames, call_depth: m.call_depth)
+    False -> Agent(..agent, frames:, call_depth: depth)
   }
 }
 
@@ -131,41 +143,11 @@ fn to_completion(res: Result(JsVal, JsVal)) -> Completion {
   }
 }
 
-fn top_level_locals(template: FuncTemplate, this: JsVal) -> TupleArray(JsVal) {
-  let locals = tuple_array.repeat(mk_undefined(), template.local_count)
-  case lexical.lexical_slot(template.lexical, lexical.RefThis) {
-    Some(idx) -> tuple_array.set_unchecked(idx, this, locals)
-    None -> locals
-  }
-}
-
-pub fn script_state(agent: Agent, template: FuncTemplate) -> State {
-  let this = mk_object(agent.realm.global_object)
-  let #(unit, agent) = rt_store.t_next_unit_uid(agent)
-  State(
-    agent:,
-    pc: 0,
-    stack: [],
-    locals: top_level_locals(template, this),
-    func: template,
-    unit:,
-    call_stack: [],
-    outer_depth: agent.call_depth,
-    depth: agent.call_depth,
-    try_stack: [],
-    this:,
-    new_target: mk_undefined(),
-    home_object: mk_undefined(),
-    call_args: [],
-    eval_env: None,
-  )
-}
-
 pub fn run_script(
   agent: Agent,
   template: FuncTemplate,
 ) -> #(Completion, Agent) {
-  let #(res, agent) = run(script_state(agent, template))
+  let #(res, agent) = run(eval.script_activation(agent, template))
   #(to_completion(res), agent)
 }
 
@@ -226,32 +208,18 @@ fn call_bound(
   let depth = st.call_depth
   case depth >= limits.max_call_depth {
     True -> raised(depth_exceeded(st))
-    False ->
-      case
-        ffi.guard_state(
-          complete_call,
-          call.root_state(st, callee, this, args, new_target),
-        )
-      {
+    False -> {
+      let state = call.root_state(st, callee, this, args, new_target)
+      case ffi.guard_state(complete_call, state) {
         ffi.Ok(value: Ok(v), agent:) -> #(v, resettle(agent, frames, depth))
         ffi.Ok(value: Error(e), agent:) ->
-          rt_store.t_throw(Agent(..agent, frames:, call_depth: depth), e)
+          rt_store.t_throw(resettle(agent, frames, depth), e)
         ffi.Threw(agent:, thrown:) ->
-          rt_store.t_throw(Agent(..agent, frames:, call_depth: depth), thrown)
+          rt_store.t_throw(resettle(agent, frames, depth), thrown)
       }
+    }
   }
 }
-
-// a callee that never synced left frames and depth untouched
-fn resettle(agent: Agent, frames: List(FrameInfo), depth: Int) -> Agent {
-  case agent.call_depth == depth && same_frames(agent.frames, frames) {
-    True -> agent
-    False -> Agent(..agent, frames:, call_depth: depth)
-  }
-}
-
-@external(erlang, "erlang", "=:=")
-fn same_frames(a: List(FrameInfo), b: List(FrameInfo)) -> Bool
 
 fn raised(outcome: #(Result(JsVal, JsVal), Agent)) -> #(JsVal, Agent) {
   case outcome {
@@ -261,8 +229,7 @@ fn raised(outcome: #(Result(JsVal, JsVal), Agent)) -> #(JsVal, Agent) {
 }
 
 fn depth_exceeded(st: Agent) -> #(Result(JsVal, JsVal), Agent) {
-  let #(e, st) =
-    st.store.ops.new_error(st, RangeErr, "Maximum call stack size exceeded")
+  let #(e, st) = state.stack_overflow_error(st)
   #(Error(e), st)
 }
 
@@ -316,24 +283,9 @@ fn run_plain_call(
         ffi.Ok(value:, agent:) -> #(value, resettle(agent, frames, depth))
         ffi.Threw(agent:, thrown:) -> #(
           Error(thrown),
-          Agent(..agent, frames:, call_depth: depth),
+          resettle(agent, frames, depth),
         )
       }
-  }
-}
-
-fn complete_call(state: State) -> #(Result(JsVal, JsVal), Agent) {
-  case interpreter.execute_inner(state, drive) {
-    Ok(#(Completed(NormalCompletion(v)), s)) -> #(Ok(v), s.agent)
-    Ok(#(Completed(ThrowCompletion(e)), s)) -> #(Error(e), s.agent)
-    Ok(#(Suspended(kind, _), s)) -> {
-      let #(res, s) = fault(s, SuspensionLeak(site: "run_bytecode", kind:))
-      #(res, s.agent)
-    }
-    Error(err) -> {
-      let #(res, s) = fault(state, err)
-      #(res, s.agent)
-    }
   }
 }
 
@@ -344,8 +296,7 @@ pub fn construct_bytecode(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   use <- bool.lazy_guard(st.call_depth >= limits.max_call_depth, fn() {
-    let #(e, st) =
-      st.store.ops.new_error(st, RangeErr, "Maximum call stack size exceeded")
+    let #(e, st) = state.stack_overflow_error(st)
     rt_store.t_throw(st, e)
   })
   let #(completion, st) = run_construct(st, fn_h, args, new_target)
@@ -436,18 +387,18 @@ fn start_coroutine_root(
       }
     Error(state.Threw(e, s)) -> #(Error(e), s)
     Error(state.Returned(v, s)) -> #(Ok(v), s)
-    Error(state.VmFailed(err, s)) -> fault(s, err)
+    Error(state.VmFailed(err, s)) -> state.internal_fault(s, err)
     Error(state.Yielded(_, _, s)) ->
-      fault(s, SuspensionLeak("run_bytecode", state.Yield))
+      state.internal_fault(s, SuspensionLeak("run_bytecode", state.Yield))
     Error(state.Awaited(_, s)) ->
-      fault(s, SuspensionLeak("run_bytecode", state.Await))
+      state.internal_fault(s, SuspensionLeak("run_bytecode", state.Await))
   }
 }
 
 fn start_coroutine(
   caller: State,
   c: call.CoroutineCall,
-) -> Result(State, state.StepExit) {
+) -> Result(State, StepExit) {
   let call.CoroutineCall(
     fn_h:,
     template:,
@@ -509,7 +460,7 @@ fn start_coroutine(
         Finished(Error(thrown), s) -> threw(s.agent, thrown)
         Finished(Ok(_), s) | Parked(state.Await, _, s) ->
           Error(state.VmFailed(
-            state.InternalError("start_coroutine", "body missed InitialYield"),
+            InternalError("start_coroutine", "body missed InitialYield"),
             State(..caller, agent: settle(s.agent, m)),
           ))
       }
@@ -519,15 +470,11 @@ fn start_coroutine(
 // caller frame is not a gc root while nested runs
 fn nested(
   caller: State,
-  k: fn(Agent) -> Result(State, state.StepExit),
-) -> Result(State, state.StepExit) {
+  k: fn(Agent) -> Result(State, StepExit),
+) -> Result(State, StepExit) {
   let agent = caller.agent
   case agent.call_depth >= limits.max_call_depth {
-    True -> {
-      let #(err, caller) =
-        state.new_error(caller, RangeErr, "Maximum call stack size exceeded")
-      Error(state.Threw(err, caller))
-    }
+    True -> state.throw_stack_overflow(caller)
     False -> k(Agent(..agent, call_depth: agent.call_depth + 1))
   }
 }
@@ -634,7 +581,7 @@ fn delegate_method(
   s: State,
   site: DelegateSite,
   name: String,
-) -> Result(#(Option(JsVal), State), state.StepExit) {
+) -> Result(#(Option(JsVal), State), StepExit) {
   let iterator = site_record(site).iterator
   use #(method, s) <- result.map(ffi.guarded(
     ffi.guard3(rt_obj.t_get_prop, s.agent, iterator, StringKey(Named(name))),
@@ -651,7 +598,7 @@ fn call_delegate(
   site: DelegateSite,
   method: JsVal,
   value: JsVal,
-) -> Result(#(JsVal, State), state.StepExit) {
+) -> Result(#(JsVal, State), StepExit) {
   let iterator = site_record(site).iterator
   ffi.guarded(
     ffi.guard4(rt_call.t_call_checked, s.agent, method, iterator, [value]),
@@ -673,22 +620,23 @@ fn inject_return(s: State, value: JsVal) -> #(Step, Agent) {
   }
 }
 
-fn delegate_exit(exit: state.StepExit) -> #(Step, Agent) {
+fn delegate_exit(exit: StepExit) -> #(Step, Agent) {
   case exit {
     state.Threw(thrown, s) -> step_of(throw_into(s, thrown))
     state.Returned(_, s)
     | state.Yielded(_, _, s)
     | state.Awaited(_, s)
-    | state.VmFailed(_, s) -> {
-      let #(res, s) =
-        fault(s, state.InternalError("yield* delegate", "unexpected step exit"))
-      step_of(Finished(res, s))
-    }
+    | state.VmFailed(_, s) ->
+      step_of(to_outcome(unexpected_exit(s, "yield* delegate")))
   }
 }
 
+fn unexpected_exit(s: State, site: String) -> #(Result(JsVal, JsVal), State) {
+  state.internal_fault(s, InternalError(site, "unexpected step exit"))
+}
+
 fn or_delegate_exit(
-  res: Result(a, state.StepExit),
+  res: Result(a, StepExit),
   k: fn(a) -> #(Step, Agent),
 ) -> #(Step, Agent) {
   case res {
@@ -806,20 +754,12 @@ fn find_return_handler(
   }
 }
 
-fn truncate_stack(stack: List(JsVal), depth: Int) -> List(JsVal) {
-  let excess = list.length(stack) - depth
-  case excess > 0 {
-    True -> list.drop(stack, excess)
-    False -> stack
-  }
-}
-
 // §27.5.3.4 return: run finallys, close iterators outwards
 fn return_into(s: State, value: JsVal) -> Outcome {
   case find_return_handler(s.try_stack) {
     None -> Finished(Ok(value), s)
     Some(IterCloseHandler(stack_depth, rest)) ->
-      case truncate_stack(s.stack, stack_depth) {
+      case state.truncate_stack(s.stack, stack_depth) {
         [slot, ..base] -> {
           let s = State(..s, try_stack: rest, stack: base)
           case interpreter.closable_record(s, slot) {
@@ -828,22 +768,13 @@ fn return_into(s: State, value: JsVal) -> Outcome {
                 KHandle(_) -> close_for_return(s, slot, value)
                 _ -> return_into(s, value)
               }
-            Error(state.Threw(thrown, s)) -> throw_into(s, thrown)
-            Error(state.Returned(v, s)) -> Finished(Ok(v), s)
-            Error(exit) -> {
-              let #(res, s) =
-                fault(
-                  exit_state(exit),
-                  state.InternalError("return_into", "unexpected step exit"),
-                )
-              Finished(res, s)
-            }
+            Error(exit) -> exit_outcome(exit, "return_into")
           }
         }
         [] -> return_into(State(..s, try_stack: rest, stack: []), value)
       }
     Some(FinallyHandler(fin_pc, stack_depth, rest)) -> {
-      let base = truncate_stack(s.stack, stack_depth)
+      let base = state.truncate_stack(s.stack, stack_depth)
       let fin =
         State(
           ..s,
@@ -863,27 +794,16 @@ fn return_into(s: State, value: JsVal) -> Outcome {
 fn close_for_return(s: State, record: JsVal, value: JsVal) -> Outcome {
   case call.guarded_unit(s, rt_lang.t_iter_close(_, record, False)) {
     Ok(s) -> return_into(s, value)
-    Error(state.Threw(thrown, s)) -> throw_into(s, thrown)
-    Error(state.Returned(v, s)) -> Finished(Ok(v), s)
-    Error(state.Yielded(..) as exit)
-    | Error(state.Awaited(..) as exit)
-    | Error(state.VmFailed(..) as exit) -> {
-      let #(res, s) =
-        fault(
-          exit_state(exit),
-          state.InternalError("close_for_return", "unexpected step exit"),
-        )
-      Finished(res, s)
-    }
+    Error(exit) -> exit_outcome(exit, "close_for_return")
   }
 }
 
-fn exit_state(exit: state.StepExit) -> State {
+// a step exit met while completing a return outside the loop
+fn exit_outcome(exit: StepExit, site: String) -> Outcome {
   case exit {
-    state.Threw(_, s) -> s
-    state.Returned(_, s) -> s
-    state.Yielded(_, _, s) -> s
-    state.Awaited(_, s) -> s
-    state.VmFailed(_, s) -> s
+    state.Threw(thrown, s) -> throw_into(s, thrown)
+    state.Returned(v, s) -> Finished(Ok(v), s)
+    state.Yielded(_, _, s) | state.Awaited(_, s) | state.VmFailed(_, s) ->
+      to_outcome(unexpected_exit(s, site))
   }
 }
