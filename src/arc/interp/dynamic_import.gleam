@@ -119,69 +119,72 @@ pub fn import_call(
   specifier: JsVal,
   options: JsVal,
 ) -> #(JsVal, Agent) {
+  use specifier, promise, st <- with_import_request(st, specifier, options)
+  let hook_args =
+    encode_hook_args(
+      string_of(specifier),
+      registry.read_active_referrer(st),
+      EagerPhase,
+    )
+  use st <- enqueue_import_job(st, promise)
+  call_host_hook(st, hook_args)
+}
+
+pub fn defer_import_call(st: Agent, specifier: JsVal) -> #(JsVal, Agent) {
+  use specifier, promise, st <- with_import_request(
+    st,
+    specifier,
+    mk_undefined(),
+  )
+  let #(#(resolve_h, reject_h), st) = rt_async.alloc_resolving_fns(st, promise)
+  let resolve_fn = mk_object(resolve_h)
+  let reject_fn = mk_object(reject_h)
+  let hook_args =
+    encode_hook_args(
+      string_of(specifier),
+      registry.read_active_referrer(st),
+      DeferPhase(resolve_fn:, reject_fn:),
+    )
+  use st <- enqueue_host_job(st, [resolve_fn, reject_fn])
+  case call_host_hook(st, hook_args) {
+    #(st, Ok(_)) -> st
+    #(st, Error(reason)) -> call_settle_fn(st, reject_fn, reason)
+  }
+}
+
+pub fn source_import_call(st: Agent, specifier: JsVal) -> #(JsVal, Agent) {
+  use _specifier, promise, st <- with_import_request(
+    st,
+    specifier,
+    mk_undefined(),
+  )
+  use st <- enqueue_import_job(st, promise)
+  let #(err, st) =
+    st.store.ops.new_error(
+      st,
+      SyntaxErr,
+      "Module has no source phase representation",
+    )
+  #(st, Error(err))
+}
+
+// a throwing request rejects the promise and skips k
+fn with_import_request(
+  st: Agent,
+  specifier: JsVal,
+  options: JsVal,
+  k: fn(JsVal, Handle, Agent) -> Agent,
+) -> #(JsVal, Agent) {
   let #(promise, st) = rt_async.t_new_promise(st)
   let st = case import_request(st, specifier, options) {
     #(ThrowCompletion(reason), st) ->
       rt_async.t_promise_reject(st, promise, reason)
-    #(NormalCompletion(specifier_string), st) -> {
-      let hook_args =
-        encode_hook_args(
-          string_of(specifier_string),
-          registry.read_active_referrer(st),
-          EagerPhase,
-        )
-      use st <- enqueue_import_job(st, promise)
-      call_host_hook(st, hook_args)
-    }
+    #(NormalCompletion(specifier), st) -> k(specifier, promise, st)
   }
   #(mk_object(promise), st)
 }
 
-pub fn defer_import_call(st: Agent, specifier: JsVal) -> #(JsVal, Agent) {
-  let #(promise, st) = rt_async.t_new_promise(st)
-  let st = case import_request(st, specifier, mk_undefined()) {
-    #(ThrowCompletion(reason), st) ->
-      rt_async.t_promise_reject(st, promise, reason)
-    #(NormalCompletion(specifier_string), st) -> {
-      let #(#(resolve_h, reject_h), st) =
-        rt_async.alloc_resolving_fns(st, promise)
-      let resolve_fn = mk_object(resolve_h)
-      let reject_fn = mk_object(reject_h)
-      let hook_args =
-        encode_hook_args(
-          string_of(specifier_string),
-          registry.read_active_referrer(st),
-          DeferPhase(resolve_fn:, reject_fn:),
-        )
-      use st <- enqueue_host_job(st, [resolve_fn, reject_fn])
-      case call_host_hook(st, hook_args) {
-        #(st, Ok(_)) -> st
-        #(st, Error(reason)) -> call_settle_fn(st, reject_fn, reason)
-      }
-    }
-  }
-  #(mk_object(promise), st)
-}
-
-pub fn source_import_call(st: Agent, specifier: JsVal) -> #(JsVal, Agent) {
-  let #(promise, st) = rt_async.t_new_promise(st)
-  let st = case import_request(st, specifier, mk_undefined()) {
-    #(ThrowCompletion(reason), st) ->
-      rt_async.t_promise_reject(st, promise, reason)
-    #(NormalCompletion(_), st) -> {
-      use st <- enqueue_import_job(st, promise)
-      let #(err, st) =
-        st.store.ops.new_error(
-          st,
-          SyntaxErr,
-          "Module has no source phase representation",
-        )
-      #(st, Error(err))
-    }
-  }
-  #(mk_object(promise), st)
-}
-
+// import_request only completes with a string
 fn string_of(v: JsVal) -> String {
   case classify(v) {
     KStr(s) -> s

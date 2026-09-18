@@ -66,21 +66,6 @@ pub fn pop_frame_info(agent: Agent) -> Agent {
   }
 }
 
-pub fn set_line(agent: Agent, line: Int) -> Agent {
-  case agent.frames {
-    [FrameInfo(line: l, ..), ..] if l == line -> agent
-    [top, ..rest] -> Agent(..agent, frames: [FrameInfo(..top, line:), ..rest])
-    [] -> Agent(..agent, frames: [FrameInfo("", stack_source, line)])
-  }
-}
-
-pub fn current_line(agent: Agent) -> Int {
-  case agent.frames {
-    [FrameInfo(line:, ..), ..] -> line
-    [] -> 0
-  }
-}
-
 /// catch frames and call_depth up with the loop's fast calls
 pub fn sync(state: State, agent: Agent, pc: Int, bump: Int) -> Agent {
   let depth = state.depth
@@ -210,8 +195,28 @@ fn setup_frame(
   )
 }
 
+fn home_value(home_object: Option(Handle)) -> JsVal {
+  case home_object {
+    Some(h) -> ffi.object([h])
+    None -> ffi.val([ffi.Undefined])
+  }
+}
+
+fn class_constructor_call_error(
+  agent: Agent,
+  template: FuncTemplate,
+) -> #(JsVal, Agent) {
+  agent.store.ops.new_error(
+    agent,
+    types.TypeErr,
+    "Class constructor "
+      <> option.unwrap(template.name, "")
+      <> " cannot be invoked without 'new'",
+  )
+}
+
 /// §10.2.1 flat entry: park caller, switch to callee
-pub fn call_function(
+fn call_function(
   state: State,
   fn_h: Handle,
   template: FuncTemplate,
@@ -262,18 +267,12 @@ pub fn call_function_then(
   cont: Option(fn(State, JsVal) -> Result(State, StepExit)),
 ) -> Result(State, StepExit) {
   case template.is_class_constructor && ffi.is(new_target, ffi.Undefined) {
-    True ->
-      state.throw_type_error(
-        State(..state, stack: rest_stack),
-        "Class constructor "
-          <> option.unwrap(template.name, "")
-          <> " cannot be invoked without 'new'",
-      )
+    True -> {
+      let #(err, agent) = class_constructor_call_error(state.agent, template)
+      Error(Threw(err, State(..state, agent:, stack: rest_stack)))
+    }
     False -> {
-      let home = case home_object {
-        Some(h) -> ffi.object([h])
-        None -> ffi.val([ffi.Undefined])
-      }
+      let home = home_value(home_object)
       let #(locals, this_val, agent) =
         setup_frame(
           state.agent,
@@ -305,9 +304,8 @@ pub fn call_function_then(
           let depth = state.depth
           case depth >= limits.max_call_depth {
             True ->
-              state.throw_range_error(
+              state.throw_stack_overflow(
                 State(..state, agent:, stack: rest_stack),
-                "Maximum call stack size exceeded",
               )
             False -> {
               let saved = case cont {
@@ -512,9 +510,9 @@ pub fn call_cell(
       ))
       call(state, target, this_arg, call_args, rest_stack, drive)
     }
-    // other-realm closure runs as a nested root activation
     SObject(kind: KNative(tag:, ..), ..) ->
       call_native(state, tag, mk_object(h), this, args, rest_stack)
+    // other-realm, compiled or proxy: nested activation
     SObject(kind: KBytecode(..), ..)
     | SObject(kind: KCompiled(..), ..)
     | SObject(kind: ProxyObj(..), ..) ->
@@ -865,6 +863,7 @@ pub fn cont_return(
 ) -> Result(State, StepExit) {
   let assert SavedCont(cont:, ..) = saved
   let caller = restore_frame(leave_frame(agent, depth), saved, saved.stack)
+  // cont re-runs the op itself and saved.pc points after it
   cont(State(..caller, pc: saved.pc - 1), value)
 }
 
@@ -969,10 +968,7 @@ pub fn root_callee(
     callee: mk_object(fn_h),
     template:,
     env:,
-    home: case home_object {
-      Some(h) -> ffi.object([h])
-      None -> ffi.val([ffi.Undefined])
-    },
+    home: home_value(home_object),
     flags:,
     unit:,
   )
@@ -988,17 +984,7 @@ pub fn enter_root(
 ) -> Result(State, #(JsVal, Agent)) {
   let template = callee.template
   case template.is_class_constructor && ffi.is(new_target, ffi.Undefined) {
-    True -> {
-      let #(err, agent) =
-        agent.store.ops.new_error(
-          agent,
-          types.TypeErr,
-          "Class constructor "
-            <> option.unwrap(template.name, "")
-            <> " cannot be invoked without 'new'",
-        )
-      Error(#(err, agent))
-    }
+    True -> Error(class_constructor_call_error(agent, template))
     False -> Ok(root_state(agent, callee, this_arg, args, new_target))
   }
 }

@@ -68,10 +68,10 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type LexicalGlobal, type ObjectKey,
   AccessorProperty, Agent, DataProperty, FunctionApply, FunctionCall, FunctionN,
-  HintString, Index, JsStore, KBytecode, KCompiled, KHandle, KNative, KNull,
-  KNum, KStr, KSym, KUndef, Named, NoElements, Realm, ReflectApply, ReflectN,
-  SBox, SObject, SShapedObject, StringKey, SymbolKey, classify, mk_bool,
-  mk_number, mk_object, mk_string, mk_tdz, mk_undefined,
+  HintString, Index, JsStore, KBytecode, KHandle, KNative, KNull, KNum, KStr,
+  KSym, KUndef, Named, NoElements, Realm, ReflectApply, ReflectN, SBox, SObject,
+  SShapedObject, StringKey, SymbolKey, classify, mk_bool, mk_int, mk_object,
+  mk_string, mk_tdz, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -89,10 +89,6 @@ pub type Outcome {
 
 @external(erlang, "arc_rt_store_ffi", "is_handle")
 fn is_handle(v: JsVal) -> Bool
-
-fn as_handle(v: JsVal) -> Handle {
-  ffi.handle([v])
-}
 
 @external(erlang, "arc_rt_ops_ffi", "binop")
 fn k_binop(kind: opcode.Classified, a: JsVal, b: JsVal) -> JsVal
@@ -207,19 +203,8 @@ fn okey(k: key.PropertyKey) -> ObjectKey {
   }
 }
 
-fn named(name: String) -> ObjectKey {
-  StringKey(Named(name))
-}
-
 fn is_undef(v: JsVal) -> Bool {
   ffi.is(v, ffi.Undefined)
-}
-
-fn is_object(v: JsVal) -> Bool {
-  case classify(v) {
-    KHandle(_) -> True
-    _ -> False
-  }
 }
 
 fn handle_of(v: JsVal) -> Option(Handle) {
@@ -229,45 +214,8 @@ fn handle_of(v: JsVal) -> Option(Handle) {
   }
 }
 
-fn int_val(n: Int) -> JsVal {
-  mk_number(rt_types.JInt(n))
-}
-
 fn inspect(state: State, v: JsVal) -> String {
   rt_inspect.inspect(state.agent, v)
-}
-
-pub fn make_closure(
-  agent: Agent,
-  template: FuncTemplate,
-  captured: List(JsVal),
-  unit: Int,
-) -> #(Handle, Agent) {
-  closure.t_new_bytecode_function(
-    agent,
-    template,
-    bytecode.env_from_list(captured),
-    unit,
-  )
-}
-
-fn set_home_object(agent: Agent, fn_h: Handle, home: Handle) -> Agent {
-  rt_store.t_cell_update(agent, fn_h, fn(slot) {
-    case slot {
-      SObject(kind: KBytecode(..) as k, ..) ->
-        SObject(..slot, kind: KBytecode(..k, home_object: Some(home)))
-      SObject(kind: KCompiled(..) as k, ..) ->
-        SObject(..slot, kind: KCompiled(..k, home_object: Some(home)))
-      _ -> slot
-    }
-  })
-}
-
-fn make_method(agent: Agent, func: JsVal, target: Handle) -> Agent {
-  case classify(func) {
-    KHandle(fn_h) -> set_home_object(agent, fn_h, target)
-    _ -> agent
-  }
 }
 
 fn using_disposer(
@@ -323,10 +271,10 @@ fn sync_fallback_disposer(
   unit: Int,
 ) -> #(JsVal, Agent) {
   let #(h, agent) =
-    make_closure(
+    closure.t_new_bytecode_function(
       agent,
       sync_fallback_template(),
-      [mk_object(method), val],
+      bytecode.env_from_list([mk_object(method), val]),
       unit,
     )
   #(mk_object(h), agent)
@@ -430,12 +378,24 @@ pub fn execute_to_completion(
   state: State,
   drive: Drive,
   site: String,
-) -> Result(#(Completion, State), VmError) {
+) -> #(Result(JsVal, JsVal), State) {
   case execute_inner(state, drive) {
-    Ok(#(Completed(comp), final_state)) -> Ok(#(comp, final_state))
-    Ok(#(Suspended(kind, _), _)) -> Error(SuspensionLeak(site:, kind:))
-    Error(vm_err) -> Error(vm_err)
+    Ok(#(Completed(NormalCompletion(v)), s)) -> #(Ok(v), s)
+    Ok(#(Completed(ThrowCompletion(e)), s)) -> #(Error(e), s)
+    Ok(#(Suspended(kind, _), s)) ->
+      internal_fault(s, SuspensionLeak(site:, kind:))
+    Error(err) -> internal_fault(state, err)
   }
+}
+
+fn internal_fault(s: State, err: VmError) -> #(Result(JsVal, JsVal), State) {
+  let #(e, s) =
+    state.new_error(
+      s,
+      rt_types.TypeErr,
+      "internal error: " <> state.vm_error_message(err),
+    )
+  #(Error(e), s)
 }
 
 // tuple_size tells the erlang compiler these are tuples so element inlines
@@ -725,7 +685,7 @@ fn fast_loop(
                 pc + 1,
                 rest,
                 locals,
-                rt_store.t_cell_set(agent, as_handle(slot), SBox(v)),
+                rt_store.t_cell_set(agent, ffi.handle([slot]), SBox(v)),
                 code,
                 constants,
                 r0,
@@ -3618,7 +3578,7 @@ fn fast_call(
               // §15.10 tail call elision
               let new_state = case
                 state.func.is_strict
-                && same_op(tuple_array.element(pc + 2, code), Return)
+                && tuple_array.element(pc + 2, code) == Return
                 && ffi.is(new_target, ffi.Undefined)
                 && call.is_tail_call(state, pc, template)
               {
@@ -3807,9 +3767,6 @@ fn fast_construct(
 const prototype_key = key.Named("prototype")
 
 const return_key = key.Named("return")
-
-@external(erlang, "erlang", "=:=")
-fn same_op(a: Op, b: Op) -> Bool
 
 const function_call = FunctionN(FunctionCall)
 
@@ -4996,11 +4953,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     // quickjs op_gosub
     opcode.Gosub(Pc(target)) ->
       Ok(
-        State(
-          ..state,
-          stack: [int_val(state.pc + 1), ..state.stack],
-          pc: target,
-        ),
+        State(..state, stack: [mk_int(state.pc + 1), ..state.stack], pc: target),
       )
 
     // quickjs op_ret; negative retpc: slot below is the return value
@@ -5210,7 +5163,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
 
     // §15.7.14 step 5/6 fresh privatename per class evaluation
     NewPrivateName(name) -> {
-      let #(k, agent) = rt_class_new_private_name(state.agent, name)
+      let #(k, agent) = rt_class.t_new_private_name(state.agent, name)
       Ok(State(..state, agent:, stack: [k, ..state.stack], pc: state.pc + 1))
     }
 
@@ -5218,7 +5171,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     GetPrivateFieldDyn ->
       case state.stack {
         [k, obj, ..rest] -> {
-          use #(val, state) <- result.map(private_get(state, obj, k))
+          use #(val, state) <- result.map(rt3(
+            state,
+            rt_class.t_private_get,
+            obj,
+            k,
+          ))
           State(..state, stack: [val, ..rest], pc: state.pc + 1)
         }
         _ -> underflow(state, "GetPrivateFieldDyn")
@@ -5227,7 +5185,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     GetPrivateFieldDyn2 ->
       case state.stack {
         [k, obj, ..rest] -> {
-          use #(val, state) <- result.map(private_get(state, obj, k))
+          use #(val, state) <- result.map(rt3(
+            state,
+            rt_class.t_private_get,
+            obj,
+            k,
+          ))
           State(..state, stack: [val, obj, ..rest], pc: state.pc + 1)
         }
         _ -> underflow(state, "GetPrivateFieldDyn2")
@@ -5237,7 +5200,13 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     PutPrivateFieldDyn ->
       case state.stack {
         [k, val, obj, ..rest] -> {
-          use #(v, state) <- result.map(private_set(state, obj, k, val))
+          use #(v, state) <- result.map(rt4(
+            state,
+            rt_class.t_private_set,
+            obj,
+            k,
+            val,
+          ))
           State(..state, stack: [v, ..rest], pc: state.pc + 1)
         }
         _ -> underflow(state, "PutPrivateFieldDyn")
@@ -5249,7 +5218,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [k, obj, ..rest] -> {
           use #(found, state) <- result.map(
             call.guarded(state, fn(agent) {
-              #(private_in(agent, obj, k), agent)
+              #(rt_class.t_private_in(agent, obj, k), agent)
             }),
           )
           State(..state, stack: [mk_bool(found), ..rest], pc: state.pc + 1)
@@ -5263,7 +5232,13 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [val, k, obj, ..rest] ->
           case handle_of(obj) {
             Some(h) -> {
-              use state <- result.map(private_define_field(state, h, k, val))
+              use state <- result.map(rt_unit4(
+                state,
+                rt_class.t_private_define,
+                h,
+                k,
+                val,
+              ))
               State(..state, stack: [obj, ..rest], pc: state.pc + 1)
             }
             None -> Ok(State(..state, stack: [obj, ..rest], pc: state.pc + 1))
@@ -5277,8 +5252,9 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [func, k, obj, ..rest] ->
           case handle_of(obj) {
             Some(h) -> {
-              use state <- result.map(private_define_method(
+              use state <- result.map(rt_unit5(
                 state,
+                rt_class.t_define_private,
                 h,
                 k,
                 func,
@@ -5301,8 +5277,9 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 opcode.Getter -> rt_types.MIGetter
                 opcode.Setter -> rt_types.MISetter
               }
-              use state <- result.map(private_define_method(
+              use state <- result.map(rt_unit5(
                 state,
+                rt_class.t_define_private,
                 h,
                 k,
                 func,
@@ -5341,7 +5318,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(target), Some(fn_h) -> {
               use state <- result.map(rt_unit6(
                 state,
-                rt_class_define_method,
+                rt_class.t_define_method,
                 target,
                 okey(k),
                 fn_h,
@@ -5367,7 +5344,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               ))
               use state <- result.map(rt_unit6(
                 state,
-                rt_class_define_method,
+                rt_class.t_define_method,
                 target,
                 pk,
                 fn_h,
@@ -5388,7 +5365,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(target), Some(fn_h) -> {
               use state <- result.map(rt_unit6(
                 state,
-                rt_class_define_method,
+                rt_class.t_define_method,
                 target,
                 okey(k),
                 fn_h,
@@ -5414,7 +5391,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               ))
               use state <- result.map(rt_unit6(
                 state,
-                rt_class_define_method,
+                rt_class.t_define_method,
                 target,
                 pk,
                 fn_h,
@@ -5431,16 +5408,16 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     MakeMethod ->
       case state.stack {
         [func, obj, ..] ->
-          case handle_of(obj) {
-            Some(target) ->
+          case handle_of(obj), handle_of(func) {
+            Some(target), Some(fn_h) ->
               Ok(
                 State(
                   ..state,
-                  agent: make_method(state.agent, func, target),
+                  agent: rt_class.t_make_method(state.agent, fn_h, target),
                   pc: state.pc + 1,
                 ),
               )
-            None -> Ok(State(..state, pc: state.pc + 1))
+            _, _ -> Ok(State(..state, pc: state.pc + 1))
           }
         _ -> underflow(state, "MakeMethod")
       }
@@ -5490,7 +5467,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     ObjectSpread ->
       case state.stack {
         [source, obj, ..rest] ->
-          case is_object(obj) {
+          case rt_val.is_object(obj) {
             True -> {
               use #(_, state) <- result.map(rt3(
                 state,
@@ -5636,7 +5613,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               let agent = state.agent
               let ctor_proto = own_prototype_handle(agent, ctor_h)
               let agent =
-                option.map(ctor_proto, set_home_object(agent, ctor_h, _))
+                option.map(ctor_proto, rt_class.t_make_method(agent, ctor_h, _))
                 |> option.unwrap(agent)
               let agent =
                 option.map(ctor_proto, set_slot_prototype(
@@ -5872,7 +5849,10 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case state.stack {
         [this_arg, apply_fn, target, ..rest] -> {
           let cached = tuple_array.get_unchecked(slot, state.locals)
-          case is_object(cached), is_intrinsic_apply(state.agent, apply_fn) {
+          case
+            rt_val.is_object(cached),
+            is_intrinsic_apply(state.agent, apply_fn)
+          {
             False, True ->
               call.call(state, target, this_arg, state.call_args, rest, drive)
             False, False -> {
@@ -6097,7 +6077,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     IteratorRecord ->
       case state.stack {
         [iterator, ..rest] ->
-          case is_object(iterator) {
+          case rt_val.is_object(iterator) {
             True -> {
               use #(rec, state) <- result.map(
                 call.guarded(state, fn(agent) {
@@ -6235,7 +6215,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     IteratorCheckObject ->
       case state.stack {
         [v, ..] ->
-          case is_object(v) {
+          case rt_val.is_object(v) {
             True -> Ok(State(..state, pc: state.pc + 1))
             False ->
               state.throw_type_error(state, "Iterator result is not an object")
@@ -6380,46 +6360,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
   }
 }
 
-fn rt_class_new_private_name(agent: Agent, name: String) -> #(JsVal, Agent) {
-  rt_class.t_new_private_name(agent, name)
-}
-
-fn rt_class_define_method(
-  agent: Agent,
-  target: Handle,
-  k: ObjectKey,
-  fn_h: Handle,
-  kind: rt_types.MethodInstallKind,
-  enumerable: Bool,
-) -> Agent {
-  let agent = set_home_object(agent, fn_h, target)
-  let agent = set_fn_name_if_empty(agent, fn_h, kind, k)
-  rt_class.t_define_method(agent, target, k, fn_h, kind, enumerable)
-}
-
-// §10.2.9 setfunctionname from the computed key
-fn set_fn_name_if_empty(
-  agent: Agent,
-  fn_h: Handle,
-  kind: rt_types.MethodInstallKind,
-  k: ObjectKey,
-) -> Agent {
-  let prefix = case kind {
-    rt_types.MIGetter | rt_types.MIStaticGetter -> "get "
-    rt_types.MISetter | rt_types.MIStaticSetter -> "set "
-    rt_types.MIMethod | rt_types.MIStatic -> ""
-  }
-  let name = case k {
-    StringKey(pk) -> rt_types.key_display_string(pk)
-    SymbolKey(sym) ->
-      case rt_types.symbol_description(sym) {
-        Some(d) -> "[" <> d <> "]"
-        None -> ""
-      }
-  }
-  rt_obj.t_name_if_anonymous(agent, fn_h, prefix <> name)
-}
-
 fn accessor_install_kind(
   kind: opcode.AccessorKind,
 ) -> rt_types.MethodInstallKind {
@@ -6525,7 +6465,7 @@ fn global_object_get(
 ) -> Result(#(JsVal, State), StepExit) {
   let agent = state.agent
   let global = agent.realm.global_object
-  let k = named(name)
+  let k = StringKey(Named(name))
   case rt_obj.t_ordinary_own_property(agent, global, k) {
     Some(DataProperty(value:, ..)) -> Ok(#(value, state))
     Some(AccessorProperty(..)) ->
@@ -6552,7 +6492,7 @@ fn global_object_put(
   value: JsVal,
 ) -> Result(State, StepExit) {
   let global = mk_object(state.agent.realm.global_object)
-  let k = named(name)
+  let k = StringKey(Named(name))
   case state.func.is_strict {
     True -> {
       use #(has, state) <- result.try(rt3(state, rt_obj.t_has_prop, global, k))
@@ -6695,7 +6635,7 @@ fn fused_update_local(
     True -> tdz_reference_error(state)
     False -> {
       use #(n, state) <- result.try(rt2(state, rt_ops.t_plus, v))
-      let one = int_val(1)
+      let one = mk_int(1)
       use #(r, state) <- result.map(case increment {
         True -> rt3(state, rt_ops.t_add, n, one)
         False -> rt3(state, rt_ops.t_sub, n, one)
@@ -6782,7 +6722,7 @@ fn fused_postfix_local(
   let next_pc = state.pc + 1
   use v <- local_or_tdz(state, index)
   use #(n, state) <- result.try(rt2(state, rt_ops.t_plus, v))
-  let one = int_val(1)
+  let one = mk_int(1)
   use #(r, state) <- result.map(case increment {
     True -> rt3(state, rt_ops.t_add, n, one)
     False -> rt3(state, rt_ops.t_sub, n, one)
@@ -6844,7 +6784,7 @@ fn binop_value(
       #(mk_bool(r == 1), state)
     }
     opcode.InOp ->
-      case is_object(right) {
+      case rt_val.is_object(right) {
         True -> {
           use #(r, state) <- result.map(rt3(state, rt_ops.t_in, left, right))
           #(mk_bool(r == 1), state)
@@ -6877,46 +6817,6 @@ fn fused_cmp_jump(
     True -> State(..state, pc: target)
     False -> State(..state, pc: next_pc)
   }
-}
-
-fn private_get(
-  state: State,
-  obj: JsVal,
-  k: JsVal,
-) -> Result(#(JsVal, State), StepExit) {
-  rt3(state, rt_class.t_private_get, obj, k)
-}
-
-fn private_set(
-  state: State,
-  obj: JsVal,
-  k: JsVal,
-  val: JsVal,
-) -> Result(#(JsVal, State), StepExit) {
-  rt4(state, rt_class.t_private_set, obj, k, val)
-}
-
-fn private_in(agent: Agent, obj: JsVal, k: JsVal) -> Bool {
-  rt_class.t_private_in(agent, obj, k)
-}
-
-fn private_define_field(
-  state: State,
-  h: Handle,
-  k: JsVal,
-  val: JsVal,
-) -> Result(State, StepExit) {
-  rt_unit4(state, rt_class.t_private_define, h, k, val)
-}
-
-fn private_define_method(
-  state: State,
-  h: Handle,
-  k: JsVal,
-  func: JsVal,
-  kind: rt_types.MethodInstallKind,
-) -> Result(State, StepExit) {
-  rt_unit5(state, rt_class.t_define_private, h, k, func, kind)
 }
 
 // §7.3.7 via the real [[defineownproperty]]; false throws
@@ -6986,7 +6886,7 @@ fn class_proto_parent(
             state,
             rt_obj.t_get_prop,
             parent,
-            named("prototype"),
+            StringKey(Named("prototype")),
           ))
           case classify(pp) {
             KHandle(p) -> Ok(#(Some(p), state))
@@ -7009,7 +6909,7 @@ fn class_proto_parent(
 }
 
 fn own_prototype_handle(agent: Agent, h: Handle) -> Option(Handle) {
-  case rt_obj.t_ordinary_own_property(agent, h, named("prototype")) {
+  case rt_obj.t_ordinary_own_property(agent, h, StringKey(Named("prototype"))) {
     Some(DataProperty(value:, ..)) -> handle_of(value)
     _ -> None
   }
@@ -7278,7 +7178,7 @@ fn resumed_turn(
 ) -> #(Result(#(Outcome, State), VmError), Agent) {
   case execute_inner(body, drive) {
     Ok(#(_, post)) as res -> #(res, post.agent)
-    Error(_) as res -> #(res, body.agent)
+    Error(err) -> #(Error(err), body.agent)
   }
 }
 
@@ -7335,7 +7235,7 @@ fn fast_iter_step(store: rt_types.JsStore(Agent), rec: JsVal) -> FastIter
 fn prop_key_value(pk: ObjectKey) -> JsVal {
   case pk {
     SymbolKey(sym) -> rt_types.mk_symbol(sym)
-    StringKey(Index(n)) -> int_val(n)
+    StringKey(Index(n)) -> mk_int(n)
     StringKey(other) -> mk_string(rt_types.key_to_text(other))
   }
 }
@@ -7408,7 +7308,7 @@ fn async_iterator_object(agent: Agent, iterable: JsVal) -> #(JsVal, Agent) {
     _ -> {
       let #(iterator, agent) =
         rt_call.t_call_checked(agent, method, iterable, [])
-      case is_object(iterator) {
+      case rt_val.is_object(iterator) {
         True -> #(iterator, agent)
         False -> {
           let #(err, agent) =
@@ -7435,7 +7335,7 @@ fn delegate_target(
         state,
         rt_obj.t_get_prop,
         slot,
-        named("next"),
+        StringKey(Named("next")),
       ))
       #(slot, next_fn, state)
     }
@@ -7472,24 +7372,9 @@ fn run_activation(
   drive: Drive,
 ) -> #(Result(JsVal, JsVal), Agent) {
   let agent = call.push_frame_info(activation.agent, activation.func)
-  let #(res, s) = case execute_inner(State(..activation, agent:), drive) {
-    Ok(#(Completed(NormalCompletion(v)), s)) -> #(Ok(v), s)
-    Ok(#(Completed(ThrowCompletion(e)), s)) -> #(Error(e), s)
-    Ok(#(Suspended(kind, _), s)) ->
-      fault(s, SuspensionLeak(site: "eval", kind:))
-    Error(err) -> fault(State(..activation, agent:), err)
-  }
+  let #(res, s) =
+    execute_to_completion(State(..activation, agent:), drive, "eval")
   #(res, call.pop_frame_info(s.agent))
-}
-
-fn fault(s: State, err: VmError) -> #(Result(JsVal, JsVal), State) {
-  let #(e, s) =
-    state.new_error(
-      s,
-      rt_types.TypeErr,
-      "internal error: " <> state.vm_error_message(err),
-    )
-  #(Error(e), s)
 }
 
 // a bytecode getter runs as an ordinary frame that returns onto rest
