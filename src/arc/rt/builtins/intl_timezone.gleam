@@ -12,7 +12,7 @@ import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
-pub fn resolve(st: Agent, s: String) -> #(Option(FormatTimeZone), Agent) {
+pub fn lookup(st: Agent, s: String) -> #(Option(FormatTimeZone), Agent) {
   case parse_utc_offset_minutes(s) {
     Some(minutes) -> #(Some(FixedZone(offset_zone_name(minutes), minutes)), st)
     None ->
@@ -38,7 +38,7 @@ fn named_zone(st: Agent, s: String) -> #(Option(FormatTimeZone), Agent) {
       case temporal_tz.primary_identifier(identifier) {
         "UTC" -> #(Some(FixedZone(identifier, 0)), st)
         _ ->
-          case temporal_common.resolve_zone(st, identifier) {
+          case temporal_common.lookup_zone(st, identifier) {
             #(Ok(zone), st) -> #(Some(NamedZone(zone:)), st)
             #(Error(_host_lacks_data), st) -> #(None, st)
           }

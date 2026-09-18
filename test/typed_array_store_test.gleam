@@ -1,19 +1,20 @@
 import arc/bytecode/key.{Named}
-import arc/engine.{type JsValueKind, Finite, JsNumber, JsString}
+import arc/engine
 import arc/rt/obj as rt_obj
-import arc/rt/types.{DataProperty, StringKey}
+import arc/rt/types.{type JsValKind, DataProperty, JFloat, KNum, KStr, StringKey}
 import gleam/option.{Some}
+import rt_helpers
 
-fn global_after(source: String, name: String) -> JsValueKind {
+fn global_after(source: String, name: String) -> JsValKind {
   let eng = engine.new()
   let assert Ok(#(_, eng)) = engine.eval(eng, source)
   let assert #(Some(DataProperty(value: v, ..)), _) =
     rt_obj.t_get_own_property(
-      engine.heap(eng),
+      engine.agent(eng),
       engine.global(eng),
       StringKey(Named(name)),
     )
-  engine.classify(v)
+  rt_helpers.classify(v)
 }
 
 pub fn bigint_store_accepts_radix_prefixed_strings_test() {
@@ -23,7 +24,7 @@ pub fn bigint_store_accepts_radix_prefixed_strings_test() {
        var out = String(a[0]) + ',' + String(a[1]) + ',' + String(a[2])",
       "out",
     )
-    == JsString("16,15,5")
+    == KStr("16,15,5")
 }
 
 pub fn bigint_store_rejects_malformed_string_with_syntax_error_test() {
@@ -33,7 +34,7 @@ pub fn bigint_store_rejects_malformed_string_with_syntax_error_test() {
        try { a[0] = '0xZZ'; out = 'no-throw' } catch (e) { out = e.constructor.name }",
       "out",
     )
-    == JsString("SyntaxError")
+    == KStr("SyntaxError")
 }
 
 pub fn store_runs_callable_proxy_value_of_test() {
@@ -43,7 +44,7 @@ pub fn store_runs_callable_proxy_value_of_test() {
        var out = t[0]",
       "out",
     )
-    == JsNumber(Finite(42.0))
+    == KNum(JFloat(42.0))
 }
 
 pub fn store_throws_on_non_callable_to_primitive_test() {
@@ -55,5 +56,5 @@ pub fn store_throws_on_non_callable_to_primitive_test() {
        try { t[0] = o; out = 'no-throw' } catch (e) { out = e.constructor.name }",
       "out",
     )
-    == JsString("TypeError")
+    == KStr("TypeError")
 }

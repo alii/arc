@@ -1,10 +1,12 @@
 // user formals spelled like the old $param_N shim names
 
-import arc/engine.{type JsValueKind, JsString, Returned}
+import arc/engine.{Returned}
+import arc/rt/types.{type JsValKind, KStr}
+import rt_helpers
 
-fn assert_eval(source: String) -> JsValueKind {
+fn assert_eval(source: String) -> JsValKind {
   let assert Ok(#(Returned(value:), _)) = engine.eval(engine.new(), source)
-  engine.classify(value)
+  rt_helpers.classify(value)
 }
 
 pub fn user_param_named_like_shim_test() {
@@ -14,7 +16,7 @@ pub fn user_param_named_like_shim_test() {
        }
        f(7)",
     )
-    == JsString("1,7")
+    == KStr("1,7")
 }
 
 pub fn user_param_named_param_0_test() {
@@ -24,5 +26,5 @@ pub fn user_param_named_param_0_test() {
        }
        f() + '|' + f('a', ['b'])",
     )
-    == JsString("d:y|a:b")
+    == KStr("d:y|a:b")
 }

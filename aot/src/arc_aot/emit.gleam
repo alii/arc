@@ -240,7 +240,7 @@ fn emit_top_level(
       ]
     -> {
       use #(tree, e) <- result.try(e.dispatch.emit_expr(e, expression))
-      use e, v <- state.let_(e, tree)
+      use v, e <- state.let_(e, tree)
       Ok(#(ir.Return([v]), e))
     }
     [], [s, ..rest] ->

@@ -3,7 +3,7 @@ import arc/compiler/compile_task
 import arc/host
 import arc/host_hooks
 import arc/interp/entry
-import arc/interp/safepoint
+import arc/interp/safepoint.{type Drain}
 import arc/module
 import arc/module_host
 import arc/parser
@@ -15,65 +15,19 @@ import arc/rt/inspect as rt_inspect
 import arc/rt/snapshot
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, type Realm, Agent, Handle, JFloat, JInt,
-  JNan, JNegInf, JPosInf, KBig, KBool, KHandle, KNull, KNum, KStr, KSym, KTdz,
-  KUndef, mk_object,
+  type Agent, type Handle, type JsVal, type Realm, Agent, Handle, KHandle,
+  mk_object,
 }
 import gleam/dict.{type Dict}
-import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-/// opaque; read with classify
-pub type JsValue =
-  JsVal
-
-pub type Ref =
-  Handle
-
-pub type Number {
-  Finite(Float)
-  NaN
-  Infinity
-  NegInfinity
-}
-
-pub type JsValueKind {
-  JsUndefined
-  JsNull
-  JsBool(Bool)
-  JsNumber(Number)
-  JsString(String)
-  JsObject(Ref)
-  JsSymbol
-  JsBigInt(Int)
-}
-
-pub fn classify(value: JsValue) -> JsValueKind {
-  case types.classify(value) {
-    KUndef -> JsUndefined
-    KNull -> JsNull
-    KBool(b) -> JsBool(b)
-    KNum(JInt(i)) -> JsNumber(Finite(int.to_float(i)))
-    KNum(JFloat(f)) -> JsNumber(Finite(f))
-    KNum(JNan) -> JsNumber(NaN)
-    KNum(JPosInf) -> JsNumber(Infinity)
-    KNum(JNegInf) -> JsNumber(NegInfinity)
-    KStr(s) -> JsString(s)
-    KBig(n) -> JsBigInt(n)
-    KSym(_) -> JsSymbol
-    KHandle(h) -> JsObject(h)
-    // tdz sentinel never leaves the runtime
-    KTdz -> panic as "arc/engine.classify: uninitialized binding sentinel"
-  }
-}
-
 pub opaque type Engine(host) {
   Engine(
     agent: Agent,
-    key: host.Key(host),
+    brand: host.Brand(host),
     host_modules: Dict(String, module.HostModule),
   )
 }
@@ -86,17 +40,17 @@ pub type EvalError(host) {
 }
 
 pub type Outcome {
-  Returned(value: JsValue)
-  Threw(error: JsValue)
+  Returned(value: JsVal)
+  Threw(error: JsVal)
 }
 
 pub opaque type Namespace {
-  Namespace(ref: Ref)
+  Namespace(handle: Handle)
 }
 
 pub type EvaluatedModule {
-  ModuleReturned(value: JsValue, namespace: Namespace)
-  ModuleThrew(error: JsValue)
+  ModuleReturned(value: JsVal, namespace: Namespace)
+  ModuleThrew(error: JsVal)
 }
 
 pub fn new() -> Engine(host) {
@@ -104,13 +58,17 @@ pub fn new() -> Engine(host) {
 }
 
 /// deprecated: host_refs is ignored, gc traces payloads itself
-pub fn new_with_host_refs(host_refs: fn(host) -> List(Ref)) -> Engine(host) {
+pub fn new_with_host_refs(host_refs: fn(host) -> List(Handle)) -> Engine(host) {
   let _unused = host_refs
   new()
 }
 
 fn from_agent(st: Agent) -> Engine(host) {
-  Engine(agent: entry.link(st), key: host.new_key(), host_modules: dict.new())
+  Engine(
+    agent: entry.link(st),
+    brand: host.new_brand(),
+    host_modules: dict.new(),
+  )
 }
 
 pub fn with_host_hooks(
@@ -122,7 +80,7 @@ pub fn with_host_hooks(
 }
 
 fn host_context(engine: Engine(host)) -> host.Context(host) {
-  host.from_agent(engine.agent, engine.key)
+  host.from_agent(engine.agent, engine.brand)
 }
 
 fn adopt(engine: Engine(host), ctx: host.Context(host)) -> Engine(host) {
@@ -149,7 +107,7 @@ pub fn define_namespace(
 pub fn define_global(
   engine: Engine(host),
   name: String,
-  val: JsValue,
+  val: JsVal,
 ) -> Engine(host) {
   adopt(engine, host.define_global(host_context(engine), name, val))
 }
@@ -160,9 +118,9 @@ pub fn host_fn(
   name: String,
   arity: Int,
   impl: host.HostFn(host),
-) -> #(Engine(host), JsValue) {
-  let #(ctx, f) = host.function(host_context(engine), name, arity, impl)
-  #(adopt(engine, ctx), f)
+) -> #(JsVal, Engine(host)) {
+  let #(f, ctx) = host.function(host_context(engine), name, arity, impl)
+  #(f, adopt(engine, ctx))
 }
 
 /// build a constructible class; nothing is installed
@@ -173,37 +131,37 @@ pub fn host_class(
   constructor: host.HostFn(host),
   methods: List(#(String, Int, host.HostFn(host))),
   statics: List(#(String, Int, host.HostFn(host))),
-) -> #(Engine(host), JsValue) {
-  let #(ctx, ctor) =
+) -> #(JsVal, Engine(host)) {
+  let #(ctor, ctx) =
     host.class(host_context(engine), name, arity, constructor, methods, statics)
-  #(adopt(engine, ctx), ctor)
+  #(ctor, adopt(engine, ctx))
 }
 
 /// run host code against the engine, then end the turn
 pub fn with_context(
   engine: Engine(host),
-  body: fn(host.Context(host)) -> #(host.Context(host), a),
-) -> #(Engine(host), a) {
+  body: fn(host.Context(host)) -> #(a, host.Context(host)),
+) -> #(a, Engine(host)) {
   with_context_with(engine, body, rt_async.drain)
 }
 
 pub fn with_context_with(
   engine: Engine(host),
-  body: fn(host.Context(host)) -> #(host.Context(host), a),
-  finish: fn(Agent) -> Agent,
-) -> #(Engine(host), a) {
-  let #(ctx, result) = body(host_context(engine))
+  body: fn(host.Context(host)) -> #(a, host.Context(host)),
+  drain: Drain,
+) -> #(a, Engine(host)) {
+  let #(result, ctx) = body(host_context(engine))
   let held =
     rt_gc.push_refs(result, [])
     |> list.map(fn(id) { mk_object(Handle(id)) })
-  let st = safepoint.finish_turn(ctx.agent, held, finish)
-  #(Engine(..engine, agent: st), result)
+  let st = safepoint.finish_turn(ctx.agent, held, drain)
+  #(result, Engine(..engine, agent: st))
 }
 
 pub fn register_host_module(
   engine: Engine(host),
   specifier: String,
-  exports: List(#(String, JsValue)),
+  exports: List(#(String, JsVal)),
 ) -> Engine(host) {
   let st =
     list.fold(exports, engine.agent, fn(st, export) {
@@ -227,13 +185,13 @@ fn settle(
   engine: Engine(host),
   completion: Completion(JsVal),
   st: Agent,
-  finish: fn(Agent) -> Agent,
+  drain: Drain,
 ) -> #(Outcome, Engine(host)) {
   let #(outcome, held) = case completion {
     NormalCompletion(v) -> #(Returned(v), v)
     ThrowCompletion(e) -> #(Threw(e), e)
   }
-  let st = safepoint.finish_turn(st, [held], finish)
+  let st = safepoint.finish_turn(st, [held], drain)
   #(outcome, Engine(..engine, agent: st))
 }
 
@@ -245,11 +203,11 @@ pub fn eval(
   eval_with(engine, source, rt_async.drain)
 }
 
-/// finish must drain microtasks plus any embedder loop
+/// drain must run microtasks plus any embedder loop
 pub fn eval_with(
   engine: Engine(host),
   source: String,
-  finish: fn(Agent) -> Agent,
+  drain: Drain,
 ) -> Result(#(Outcome, Engine(host)), EvalError(host)) {
   use template <- result.map(
     compile_task.run(string.byte_size(source), fn() {
@@ -260,7 +218,7 @@ pub fn eval_with(
     }),
   )
   let #(completion, st) = entry.run_script(engine.agent, template)
-  settle(engine, completion, st, finish)
+  settle(engine, completion, st, drain)
 }
 
 /// a top-level throw is Ok(ModuleThrew), not Error
@@ -280,7 +238,7 @@ pub fn eval_module_with(
   source: String,
   resolve: module_host.ResolveFn,
   load: module_host.LoadFn,
-  finish: fn(Agent) -> Agent,
+  drain: Drain,
 ) -> Result(#(EvaluatedModule, Engine(host)), EvalError(host)) {
   use bundle <- result.try(
     module.compile_bundle_with_hosts(
@@ -292,7 +250,7 @@ pub fn eval_module_with(
     )
     |> result.map_error(ModuleCompileError),
   )
-  let #(st, res) = module.evaluate_bundle(bundle, engine.agent, finish)
+  let #(res, st) = module.evaluate_bundle(engine.agent, bundle, drain)
   let engine = Engine(..engine, agent: st)
   case res {
     Ok(module.EvaluatedBundle(value:, namespace:)) ->
@@ -308,8 +266,8 @@ pub fn read_export(
   engine: Engine(host),
   namespace: Namespace,
   name: String,
-) -> Option(JsValue) {
-  module.read_export(engine.agent, mk_object(namespace.ref), name)
+) -> Option(JsVal) {
+  module.read_export(engine.agent, mk_object(namespace.handle), name)
 }
 
 pub opaque type Repl(host) {
@@ -342,22 +300,22 @@ pub fn repl_eval(
 
 pub fn call(
   engine: Engine(host),
-  callee: JsValue,
-  this: JsValue,
-  args: List(JsValue),
+  callee: JsVal,
+  this: JsVal,
+  args: List(JsVal),
 ) -> #(Outcome, Engine(host)) {
   call_with(engine, callee, this, args, rt_async.drain)
 }
 
 pub fn call_with(
   engine: Engine(host),
-  callee: JsValue,
-  this: JsValue,
-  args: List(JsValue),
-  finish: fn(Agent) -> Agent,
+  callee: JsVal,
+  this: JsVal,
+  args: List(JsVal),
+  drain: Drain,
 ) -> #(Outcome, Engine(host)) {
   let #(completion, st) = rt_call.t_try_call(engine.agent, callee, this, args)
-  settle(engine, completion, st, finish)
+  settle(engine, completion, st, drain)
 }
 
 /// host fns, hooks and host modules are not written
@@ -375,16 +333,16 @@ pub fn deserialize(
   |> result.map(from_agent)
 }
 
-pub fn inspect(engine: Engine(host), value: JsValue) -> String {
+pub fn inspect(engine: Engine(host), value: JsVal) -> String {
   rt_inspect.inspect(engine.agent, value)
 }
 
-pub fn format_error(engine: Engine(host), error: JsValue) -> String {
+pub fn format_error(engine: Engine(host), error: JsVal) -> String {
   rt_inspect.format_error(engine.agent, error)
 }
 
 /// debug view of the raw store cell
-pub fn dump_object(engine: Engine(host), val: JsValue) -> Option(String) {
+pub fn dump_object(engine: Engine(host), val: JsVal) -> Option(String) {
   case types.classify(val) {
     KHandle(h) ->
       case rt_gc.t_is_live(engine.agent, h) {
@@ -396,15 +354,15 @@ pub fn dump_object(engine: Engine(host), val: JsValue) -> Option(String) {
 }
 
 /// the agent every arc/rt operation takes
-pub fn heap(engine: Engine(host)) -> Agent {
+pub fn agent(engine: Engine(host)) -> Agent {
   engine.agent
 }
 
-pub fn builtins(engine: Engine(host)) -> Realm {
+pub fn realm(engine: Engine(host)) -> Realm {
   engine.agent.realm
 }
 
-pub fn global(engine: Engine(host)) -> Ref {
+pub fn global(engine: Engine(host)) -> Handle {
   engine.agent.realm.global_object
 }
 
@@ -419,6 +377,6 @@ pub fn eval_error_message(err: EvalError(host)) -> String {
     ModuleCompileError(e) -> module.format_compile_bundle_error(e)
     ModuleError(error:, engine:) ->
       module.module_error_phase(error)
-      <> module.error_message(error, engine.agent)
+      <> module.error_message(engine.agent, error)
   }
 }

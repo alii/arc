@@ -1,6 +1,5 @@
+import arc/time_zone.{type TimeZone}
 import gleam/option.{type Option}
-
-pub type TimeZone
 
 @external(erlang, "arc_tz_ffi", "utc_time_zone")
 pub fn utc_time_zone() -> TimeZone

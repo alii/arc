@@ -651,7 +651,7 @@ fn duration_total_with(
 
 fn zoned_calendar_total(
   st: Agent,
-  tz: types.TimeZone,
+  tz: types.TemporalZone,
   anchor_ns: Int,
   target_ns: Int,
   unit: Unit,

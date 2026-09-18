@@ -705,8 +705,8 @@ fn call_host_fn(
   case dict.get(st.host_fns, id) {
     Ok(HostFnEntry(call:, ..)) ->
       case call(st, args, this, new_target) {
-        #(st, Ok(v)) -> #(v, st)
-        #(st, Error(thrown)) -> rt_store.t_throw(st, thrown)
+        #(Ok(v), st) -> #(v, st)
+        #(Error(thrown), st) -> rt_store.t_throw(st, thrown)
       }
     Error(Nil) ->
       rt_val.t_throw_type_error(

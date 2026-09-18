@@ -195,16 +195,16 @@ fn try_call_compiled(
         Some(h) -> mk_object(h)
         None -> mk_undefined()
       }
-      let #(this_resolved, st) = resolve_this(st, flags, this)
+      let #(bound_this, st) = bind_this(st, flags, this)
       let frame =
-        mk_frame(this_resolved, mk_object(callee_h), home, mk_undefined())
+        mk_frame(bound_this, mk_object(callee_h), home, mk_undefined())
       try_call_code(st, code, frame, args)
     }
   }
 }
 
 // §10.2.1.2 ordinarycallbindthis, arrows keep lexical this
-pub fn resolve_this(st: Agent, flags: FnFlags, this: JsVal) -> #(JsVal, Agent) {
+pub fn bind_this(st: Agent, flags: FnFlags, this: JsVal) -> #(JsVal, Agent) {
   case flags.is_arrow || flags.is_strict {
     True -> #(this, st)
     False ->
@@ -212,7 +212,7 @@ pub fn resolve_this(st: Agent, flags: FnFlags, this: JsVal) -> #(JsVal, Agent) {
         KUndef | KNull -> #(mk_object(st.realm.global_object), st)
         KHandle(_) -> #(this, st)
         // tdz sentinel must not escape as this
-        KTdz -> panic as "TDZ sentinel escaped as `this` in resolve_this"
+        KTdz -> panic as "TDZ sentinel escaped as `this` in bind_this"
         _ -> {
           let #(h, st) = st.store.ops.to_object(st, this)
           #(mk_object(h), st)

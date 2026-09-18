@@ -1,7 +1,7 @@
 -module(arc_aot_exec_ffi).
 -export([apply_js_main/2, unload/1]).
 
-apply_js_main(Mod, St) ->
+apply_js_main(St, Mod) ->
     Frame = {undefined, undefined, undefined, undefined},
     try
         {Outcome, St2} =

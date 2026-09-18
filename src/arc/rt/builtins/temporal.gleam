@@ -29,7 +29,7 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type InstantGetterName, type InstantMethodName,
   type InstantStaticName, type JsVal, type NativeToken, type TemporalNative,
-  type TemporalNowName, type TemporalProtos, type TimeZone, InstantAdd,
+  type TemporalNowName, type TemporalProtos, type TemporalZone, InstantAdd,
   InstantCompare, InstantEpochMilliseconds, InstantEpochNanoseconds,
   InstantEquals, InstantFrom, InstantFromEpochMilliseconds,
   InstantFromEpochNanoseconds, InstantRound, InstantSince, InstantSubtract,
@@ -708,7 +708,7 @@ fn now_dispatch(
   }
 }
 
-fn now_tz_arg(st: Agent, args: List(JsVal)) -> #(TimeZone, Agent) {
+fn now_tz_arg(st: Agent, args: List(JsVal)) -> #(TemporalZone, Agent) {
   let arg = helpers.arg_at(args, 0)
   case classify(arg) {
     KUndef -> system_time_zone(st)

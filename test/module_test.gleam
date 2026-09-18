@@ -1,6 +1,7 @@
 import arc/bytecode/key.{Named}
 import arc/interp/dynamic_import
 import arc/interp/entry
+import arc/interp/safepoint
 import arc/module
 import arc/module/load_error
 import arc/module/registry
@@ -22,10 +23,6 @@ import rt_helpers
 
 fn agent() -> Agent {
   rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
-}
-
-fn no_drain(st: Agent) -> Agent {
-  st
 }
 
 fn dance_resolve(raw: String, _referrer: String) {
@@ -60,8 +57,8 @@ fn get(st: Agent, recv: JsVal, name: String) -> #(JsVal, Agent) {
 
 pub fn link_builds_namespaces_over_live_cells_test() {
   let b = bundle("import { greet } from 'dance'; export const r = greet;")
-  let assert #(st, Ok(linked)) = module.link_for_evaluation(b, agent())
-  let namespaces = module.linked_namespaces(linked, st) |> dict.from_list
+  let assert #(Ok(linked), st) = module.link_for_evaluation(agent(), b)
+  let namespaces = module.linked_namespaces(st, linked) |> dict.from_list
   let assert Ok(dance_ns) = dict.get(namespaces, "dance")
   let assert Ok(entry_ns) = dict.get(namespaces, "entry")
   let assert Some(greet) = module.read_export(st, mk_object(dance_ns), "greet")
@@ -80,15 +77,15 @@ pub fn link_builds_namespaces_over_live_cells_test() {
 
 pub fn missing_import_is_a_link_time_syntax_error_test() {
   let b = bundle("import { nope } from 'dance';")
-  let assert #(st, Error(module.EvaluationError(err))) =
-    module.link_for_evaluation(b, agent())
+  let assert #(Error(module.EvaluationError(err)), st) =
+    module.link_for_evaluation(agent(), b)
   assert string.starts_with(rt_inspect.format_error(st, err), "SyntaxError")
 }
 
 pub fn evaluation_marks_the_registry_test() {
   let b = bundle("import { greet } from 'dance'; export const r = greet;")
-  let assert #(st, Ok(module.EvaluatedBundle(value:, namespace: _))) =
-    module.evaluate_bundle(b, agent(), no_drain)
+  let assert #(Ok(module.EvaluatedBundle(value:, namespace: _)), st) =
+    module.evaluate_bundle(agent(), b, safepoint.no_drain)
   assert classify(value) == KUndef
   assert registry.read_module_status(st, "entry") == Some(registry.Evaluated)
   assert registry.read_module_error(st, "entry") == None
@@ -96,8 +93,8 @@ pub fn evaluation_marks_the_registry_test() {
 
 pub fn a_throwing_body_caches_its_error_test() {
   let b = bundle("throw 'boom'; export const r = 1;")
-  let assert #(st, Error(module.EvaluationError(thrown))) =
-    module.evaluate_bundle(b, agent(), no_drain)
+  let assert #(Error(module.EvaluationError(thrown)), st) =
+    module.evaluate_bundle(agent(), b, safepoint.no_drain)
   assert classify(thrown) == KStr("boom")
   assert registry.read_module_status(st, "entry") == None
   let assert Some(cached) = registry.read_module_error(st, "entry")
@@ -106,13 +103,13 @@ pub fn a_throwing_body_caches_its_error_test() {
 
 fn deferred_namespace_of(spec: String) {
   let b = bundle("import { greet } from 'dance'; export const r = greet;")
-  let assert #(st, Ok(linked)) = module.link_for_evaluation(b, agent())
-  let #(st, res) = module.get_or_create_deferred_namespace(st, linked, spec)
-  #(st, res)
+  let assert #(Ok(linked), st) = module.link_for_evaluation(agent(), b)
+  let #(res, st) = module.get_or_create_deferred_namespace(st, linked, spec)
+  #(res, st)
 }
 
 pub fn deferred_namespace_over_host_module_test() {
-  let assert #(st, Ok(proxy)) = deferred_namespace_of("dance")
+  let assert #(Ok(proxy), st) = deferred_namespace_of("dance")
   let ns = mk_object(proxy)
   let #(then_v, st) = get(st, ns, "then")
   assert classify(then_v) == KUndef
@@ -124,7 +121,7 @@ pub fn deferred_namespace_over_host_module_test() {
 }
 
 pub fn deferred_namespace_of_unknown_specifier_test() {
-  let assert #(_, Error(module.DeferredSpecifierNotInBundle("nope"))) =
+  let assert #(Error(module.DeferredSpecifierNotInBundle("nope")), _) =
     deferred_namespace_of("nope")
 }
 
@@ -218,9 +215,9 @@ pub fn hook_args_round_trip_test() {
     dynamic_import.parse_hook_args(args)
   assert specifier == "./a.js"
   assert referrer == Some("/m.js")
-  let assert dynamic_import.DeferPhase(resolve_fn:, reject_fn:) = phase
-  assert classify(resolve_fn) == KNum(JInt(1))
-  assert classify(reject_fn) == KNum(JInt(2))
+  let assert dynamic_import.DeferPhase(fulfill:, reject:) = phase
+  assert classify(fulfill) == KNum(JInt(1))
+  assert classify(reject) == KNum(JInt(2))
   let eager =
     dynamic_import.encode_hook_args("./a.js", None, dynamic_import.EagerPhase)
   assert list.length(eager) == 1

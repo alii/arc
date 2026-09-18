@@ -580,7 +580,7 @@ fn do_run_module(
   case module.compile_bundle(path, source, test262_resolve, test262_load) {
     Error(err) -> Error("module: " <> string.inspect(err))
     Ok(bundle) -> {
-      let #(st, res) =
+      let #(res, st) =
         module_host.evaluate_bundle_with_registry(
           st,
           bundle,
@@ -689,7 +689,7 @@ fn eval_harness(
 
 fn install_host_api(st: Agent, parent: Option(AgentPid)) -> Agent {
   let #(dollar_262, st) = rt_realm.install_262(st, st.realm)
-  let ctx = host.from_agent(st, host.new_key())
+  let ctx = host.from_agent(st, host.new_brand())
   let ctx = extend_262_with_agent(ctx, dollar_262, parent)
   let ctx = install_print(ctx)
   ctx.agent
@@ -701,10 +701,10 @@ fn install_print(ctx: HostContext) -> HostContext {
 }
 
 fn print_native(
+  ctx: HostContext,
   args: List(JsVal),
   _this: JsVal,
-  ctx: HostContext,
-) -> #(HostContext, Result(JsVal, JsVal)) {
+) -> #(Result(JsVal, JsVal), HostContext) {
   let #(str, st) = rt_val.t_to_string(ctx.agent, host.first_arg(args))
   let global = mk_object(st.realm.global_object)
   let #(_ok, st) =
@@ -767,7 +767,7 @@ fn extend_262_with_agent(
   dollar_262: Handle,
   parent: Option(AgentPid),
 ) -> HostContext {
-  let #(ctx, agent_obj) = build_agent(ctx, parent)
+  let #(agent_obj, ctx) = build_agent(ctx, parent)
   let #(prop, st) = rt_store.t_builtin_property(ctx.agent, agent_obj)
   let st = common.add_named_property(st, dollar_262, "agent", prop)
   host.Context(..ctx, agent: st)
@@ -776,9 +776,9 @@ fn extend_262_with_agent(
 fn build_agent(
   ctx: HostContext,
   parent: Option(AgentPid),
-) -> #(HostContext, JsVal) {
-  let report = fn(args, this, ctx) {
-    agent_report_native(args, this, ctx, parent)
+) -> #(JsVal, HostContext) {
+  let report = fn(ctx, args, this) {
+    agent_report_native(ctx, args, this, parent)
   }
   let methods = [
     #("start", agent_start_native, 1),
@@ -790,13 +790,13 @@ fn build_agent(
     #("leaving", agent_leaving_native, 0),
     #("receiveBroadcast", agent_receive_broadcast_native, 1),
   ]
-  let #(ctx, method_props) =
-    list.fold(methods, #(ctx, []), fn(acc, method) {
-      let #(ctx, props) = acc
+  let #(method_props, ctx) =
+    list.fold(methods, #([], ctx), fn(acc, method) {
+      let #(props, ctx) = acc
       let #(name, impl, arity) = method
-      let #(ctx, f) = host.function(ctx, name, arity, impl)
+      let #(f, ctx) = host.function(ctx, name, arity, impl)
       let #(prop, st) = rt_store.t_builtin_property(ctx.agent, f)
-      #(host.Context(..ctx, agent: st), [#(name, prop), ..props])
+      #([#(name, prop), ..props], host.Context(..ctx, agent: st))
     })
   let st = ctx.agent
   let array_proto = st.realm.array.prototype
@@ -820,7 +820,7 @@ fn build_agent(
         common.named_props(list.append(method_props, hidden)),
       ),
     )
-  #(host.Context(..ctx, agent: st), mk_object(h))
+  #(mk_object(h), host.Context(..ctx, agent: st))
 }
 
 type AgentPid
@@ -836,23 +836,23 @@ type AgentWake {
   AgentWakeParentDown
 }
 
-fn done(ctx: HostContext, st: Agent) -> #(HostContext, Result(JsVal, JsVal)) {
-  #(host.Context(..ctx, agent: st), Ok(mk_undefined()))
+fn done(ctx: HostContext, st: Agent) -> #(Result(JsVal, JsVal), HostContext) {
+  #(Ok(mk_undefined()), host.Context(..ctx, agent: st))
 }
 
 // script is not iife-wrapped, each child has its own realm
 fn agent_start_native(
+  ctx: HostContext,
   args: List(JsVal),
   this: JsVal,
-  ctx: HostContext,
-) -> #(HostContext, Result(JsVal, JsVal)) {
+) -> #(Result(JsVal, JsVal), HostContext) {
   let #(source, st) = rt_val.t_to_string(ctx.agent, host.first_arg(args))
   let ctx = host.Context(..ctx, agent: st)
   case agent_queue(ctx.agent, this, "__children__") {
     None -> host.type_error(ctx, "start: $262.agent state missing")
     Some(#(arr, children)) -> {
       let pid = ffi_spawn_agent(fn(parent) { run_agent_child(source, parent) })
-      let #(ctx, child) = host.alloc_host_object(ctx, pid, None)
+      let #(child, ctx) = host.alloc_host_object(ctx, pid, None)
       done(
         ctx,
         agent_queue_write(ctx.agent, arr, list.append(children, [child])),
@@ -909,7 +909,7 @@ fn run_agent_child_loop(st: Agent, agent_this: JsVal, parent: AgentPid) -> Nil {
         parent,
       )
     AgentWakeBroadcast(payload) -> {
-      let #(st, msg) = payload_to_value(st, payload)
+      let #(msg, st) = payload_to_value(st, payload)
       let st = case agent_queue(st, agent_this, "__agents__") {
         Some(#(_arr, callbacks)) ->
           list.fold(callbacks, st, fn(st, cb) {
@@ -931,25 +931,25 @@ fn run_agent_child_loop(st: Agent, agent_this: JsVal, parent: AgentPid) -> Nil {
   }
 }
 
-fn payload_to_value(st: Agent, payload: AgentPayload) -> #(Agent, JsVal) {
+fn payload_to_value(st: Agent, payload: AgentPayload) -> #(JsVal, Agent) {
   case payload {
-    AgentValuePayload(v) -> #(st, v)
+    AgentValuePayload(v) -> #(v, st)
     AgentSabPayload(storage:) -> {
       let proto = case types.buffer_is_shared(storage) {
         True -> st.realm.shared_array_buffer.prototype
         False -> st.realm.array_buffer.prototype
       }
       let #(h, st) = realm_ops.alloc_object(st, ArrayBufferObj(storage:), proto)
-      #(st, mk_object(h))
+      #(mk_object(h), st)
     }
   }
 }
 
 fn agent_receive_broadcast_native(
+  ctx: HostContext,
   args: List(JsVal),
   this: JsVal,
-  ctx: HostContext,
-) -> #(HostContext, Result(JsVal, JsVal)) {
+) -> #(Result(JsVal, JsVal), HostContext) {
   let cb = host.first_arg(args)
   case agent_queue(ctx.agent, this, "__agents__") {
     Some(#(arr, callbacks)) ->
@@ -959,10 +959,10 @@ fn agent_receive_broadcast_native(
 }
 
 fn agent_broadcast_native(
+  ctx: HostContext,
   args: List(JsVal),
   this: JsVal,
-  ctx: HostContext,
-) -> #(HostContext, Result(JsVal, JsVal)) {
+) -> #(Result(JsVal, JsVal), HostContext) {
   case agent_queue(ctx.agent, this, "__children__") {
     None -> host.type_error(ctx, "broadcast: $262.agent state missing")
     Some(#(_arr, children)) -> {
@@ -1004,11 +1004,11 @@ fn make_broadcast_payload(
 }
 
 fn agent_report_native(
+  ctx: HostContext,
   args: List(JsVal),
   this: JsVal,
-  ctx: HostContext,
   parent: Option(AgentPid),
-) -> #(HostContext, Result(JsVal, JsVal)) {
+) -> #(Result(JsVal, JsVal), HostContext) {
   let #(str, st) = rt_val.t_to_string(ctx.agent, host.first_arg(args))
   case parent {
     Some(parent) -> {
@@ -1032,21 +1032,21 @@ fn agent_report_native(
 }
 
 fn agent_get_report_native(
+  ctx: HostContext,
   _args: List(JsVal),
   this: JsVal,
-  ctx: HostContext,
-) -> #(HostContext, Result(JsVal, JsVal)) {
+) -> #(Result(JsVal, JsVal), HostContext) {
   case agent_queue(ctx.agent, this, "__reports__") {
     Some(#(arr, reports)) ->
       case reports {
         [] ->
           case ffi_take_report() {
-            Ok(report) -> #(ctx, Ok(mk_string(report)))
-            Error(Nil) -> #(ctx, Ok(mk_null()))
+            Ok(report) -> #(Ok(mk_string(report)), ctx)
+            Error(Nil) -> #(Ok(mk_null()), ctx)
           }
         [head, ..rest] -> #(
-          host.Context(..ctx, agent: agent_queue_write(ctx.agent, arr, rest)),
           Ok(head),
+          host.Context(..ctx, agent: agent_queue_write(ctx.agent, arr, rest)),
         )
       }
     None -> host.type_error(ctx, "getReport: $262.agent state missing")
@@ -1054,10 +1054,10 @@ fn agent_get_report_native(
 }
 
 fn agent_sleep_native(
+  ctx: HostContext,
   args: List(JsVal),
   _this: JsVal,
-  ctx: HostContext,
-) -> #(HostContext, Result(JsVal, JsVal)) {
+) -> #(Result(JsVal, JsVal), HostContext) {
   let #(num, st) = rt_val.t_to_number(ctx.agent, host.first_arg(args))
   let ms = case num {
     JInt(i) -> i
@@ -1069,19 +1069,19 @@ fn agent_sleep_native(
 }
 
 fn agent_monotonic_now_native(
+  ctx: HostContext,
   _args: List(JsVal),
   _this: JsVal,
-  ctx: HostContext,
-) -> #(HostContext, Result(JsVal, JsVal)) {
-  #(ctx, Ok(mk_int(ctx.agent.hooks.monotonic_now())))
+) -> #(Result(JsVal, JsVal), HostContext) {
+  #(Ok(mk_int(ctx.agent.hooks.monotonic_now())), ctx)
 }
 
 fn agent_leaving_native(
+  ctx: HostContext,
   _args: List(JsVal),
   _this: JsVal,
-  ctx: HostContext,
-) -> #(HostContext, Result(JsVal, JsVal)) {
-  #(ctx, Ok(mk_undefined()))
+) -> #(Result(JsVal, JsVal), HostContext) {
+  #(Ok(mk_undefined()), ctx)
 }
 
 fn agent_hidden_handle(st: Agent, this: JsVal, name: String) -> Option(Handle) {

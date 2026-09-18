@@ -34,17 +34,17 @@ fn throws(st: Agent, body: fn(Agent) -> #(a, Agent)) -> String {
   name
 }
 
-fn fixture() -> #(Agent, Handle, JsVal, Handle, Handle) {
+fn fixture() -> #(Handle, JsVal, Handle, Handle, Agent) {
   let st = agent()
   let #(box_a, st) = rt_store.t_cell_new(st, SBox(mk_int(1)))
   let #(box_b, st) = rt_store.t_cell_new(st, SBox(mk_tdz()))
   let #(ns_h, st) =
     rt_obj.t_new_module_namespace(st, [#("b", box_b), #("a", box_a)])
-  #(st, ns_h, mk_object(ns_h), box_a, box_b)
+  #(ns_h, mk_object(ns_h), box_a, box_b, st)
 }
 
 pub fn get_reads_the_live_binding_test() {
-  let #(st, _, ns, box_a, _) = fixture()
+  let #(_, ns, box_a, _, st) = fixture()
   let #(v, st) = rt_obj.t_get_prop(st, ns, key("a"))
   assert classify(v) == KNum(JInt(1))
   let st = rt_store.t_cell_set(st, box_a, SBox(mk_int(2)))
@@ -57,7 +57,7 @@ pub fn get_reads_the_live_binding_test() {
 }
 
 pub fn tdz_binding_is_a_reference_error_test() {
-  let #(st, ns_h, ns, _, box_b) = fixture()
+  let #(ns_h, ns, _, box_b, st) = fixture()
   assert throws(st, rt_obj.t_get_prop(_, ns, key("b"))) == "ReferenceError"
   assert throws(st, rt_obj.t_get_own_property(_, ns_h, key("b")))
     == "ReferenceError"
@@ -75,7 +75,7 @@ pub fn tdz_binding_is_a_reference_error_test() {
 }
 
 pub fn own_keys_are_sorted_exports_then_to_string_tag_test() {
-  let #(st, ns_h, ns, _, box_b) = fixture()
+  let #(ns_h, ns, _, box_b, st) = fixture()
   let #(keys, st) = rt_obj.t_own_keys(st, ns_h)
   assert keys
     == [
@@ -94,7 +94,7 @@ pub fn own_keys_are_sorted_exports_then_to_string_tag_test() {
 }
 
 pub fn descriptor_shape_test() {
-  let #(st, ns_h, _, _, _) = fixture()
+  let #(ns_h, _, _, _, st) = fixture()
   let #(d, st) = rt_obj.t_get_own_property(st, ns_h, key("a"))
   let assert Some(DataProperty(
     value:,
@@ -119,7 +119,7 @@ pub fn descriptor_shape_test() {
 }
 
 pub fn writes_and_deletes_fail_test() {
-  let #(st, ns_h, ns, box_a, _) = fixture()
+  let #(ns_h, ns, box_a, _, st) = fixture()
   let #(ok, st) = rt_obj.t_set_prop(st, ns, key("a"), mk_int(9))
   assert !ok
   let #(ok, st) = rt_obj.t_set_prop(st, ns, key("fresh"), mk_int(9))
@@ -149,7 +149,7 @@ pub fn writes_and_deletes_fail_test() {
 }
 
 pub fn prototype_and_extensibility_test() {
-  let #(st, ns_h, _, _, _) = fixture()
+  let #(ns_h, _, _, _, st) = fixture()
   let #(proto, st) = rt_obj.t_get_prototype_of(st, ns_h)
   assert proto == None
   let #(ext, st) = rt_obj.t_is_extensible(st, ns_h)
@@ -175,7 +175,7 @@ fn value_desc(v: JsVal) -> ParsedDesc {
 }
 
 pub fn define_own_property_only_accepts_no_ops_test() {
-  let #(st, ns_h, _, _, _) = fixture()
+  let #(ns_h, _, _, _, st) = fixture()
   let none = ParsedDesc(..value_desc(mk_int(0)), value: None)
   let #(ok, st) =
     rt_obj.t_define_own_prop(st, ns_h, key("a"), value_desc(mk_int(1)))
@@ -242,7 +242,7 @@ pub fn define_own_property_only_accepts_no_ops_test() {
 }
 
 pub fn binding_cells_survive_collection_test() {
-  let #(st, ns_h, ns, box_a, box_b) = fixture()
+  let #(ns_h, ns, box_a, box_b, st) = fixture()
   let st = rt_obj.t_global_set(st, <<"ns">>, ns)
   let st = rt_gc.t_collect(st, [])
   assert rt_gc.t_is_live(st, ns_h)

@@ -24,7 +24,7 @@ run(T, Opts) ->
     Pid = spawn_opt(fun() ->
         receive go -> ok end,
         E = arc@engine:new(),
-        A = arc@engine:heap(E),
+        A = arc@engine:agent(E),
         T0 = erlang:monotonic_time(microsecond),
         {C, A2} = arc@interp@entry:run_script(A, T),
         T1 = erlang:monotonic_time(microsecond),

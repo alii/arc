@@ -14,11 +14,11 @@ const threshold = 256
 
 fn small_engine() -> Engine(Nil) {
   let eng = engine.new() |> engine.with_host_hooks(rt_helpers.quiet_hooks())
-  let #(eng, Nil) =
+  let #(Nil, eng) =
     engine.with_context(eng, fn(ctx) {
       let st = rt_gc.t_collect(ctx.agent, [])
       let st = Agent(..st, store: Store(..st.store, gc_threshold: threshold))
-      #(Context(..ctx, agent: st), Nil)
+      #(Nil, Context(..ctx, agent: st))
     })
   eng
 }
@@ -28,16 +28,16 @@ fn show(eng: Engine(host), v: JsVal) -> String {
 }
 
 fn global(eng: Engine(host), name: String) -> JsVal {
-  let #(v, _) = rt_helpers.global(engine.heap(eng), name)
+  let #(v, _) = rt_helpers.global(engine.agent(eng), name)
   v
 }
 
 fn stats(eng: Engine(host)) -> rt_gc.GcStats {
-  rt_gc.stats(engine.heap(eng))
+  rt_gc.stats(engine.agent(eng))
 }
 
 fn is_live_and_unpinned(eng: Engine(host), v: JsVal) -> Bool {
-  let st: Agent = engine.heap(eng)
+  let st: Agent = engine.agent(eng)
   let assert KHandle(h) = classify(v)
   rt_gc.t_is_live(st, h) && !set.contains(st.store.pinned_roots, h.id)
 }
@@ -57,8 +57,8 @@ pub fn eval_is_bounded_drains_and_keeps_its_value_test() {
     "
   let assert Ok(#(Returned(v), eng)) = engine.eval(eng, source)
   assert is_live_and_unpinned(eng, v)
-  let #(tag, _) = rt_helpers.get(engine.heap(eng), v, "tag")
-  let #(seen, _) = rt_helpers.get(engine.heap(eng), v, "seen")
+  let #(tag, _) = rt_helpers.get(engine.agent(eng), v, "tag")
+  let #(seen, _) = rt_helpers.get(engine.agent(eng), v, "seen")
   assert show(eng, tag) == "'kept:7998000'"
   assert show(eng, seen) == "'undefined'"
   assert show(eng, global(eng, "done")) == "1000"
@@ -109,7 +109,7 @@ fn call_many(eng: Engine(host), work: JsVal, left: Int) -> Engine(host) {
       let #(outcome, eng) = engine.call(eng, work, mk_undefined(), [mk_int(n)])
       let assert Returned(v) = outcome
       assert is_live_and_unpinned(eng, v)
-      let #(last, _) = rt_helpers.get(engine.heap(eng), v, "last")
+      let #(last, _) = rt_helpers.get(engine.agent(eng), v, "last")
       assert show(eng, last) == "'v" <> string.inspect(n - 1) <> "'"
       call_many(eng, work, left - 1)
     }
@@ -156,10 +156,10 @@ pub fn eval_module_keeps_thrown_value_test() {
   assert string.contains(engine.format_error(eng, e), "SyntaxError: kept 1")
 }
 
-pub fn drivers_run_once_per_turn_test() {
+pub fn drain_runs_once_per_turn_test() {
   let eng = small_engine()
   let recording = fn(st) {
-    rt_helpers.record("finish")
+    rt_helpers.record("drain")
     rt_async.drain(st)
   }
   let assert Ok(#(Returned(_), eng)) =
@@ -168,11 +168,11 @@ pub fn drivers_run_once_per_turn_test() {
       "Promise.resolve(7).then(v => { globalThis.hit = v; })",
       recording,
     )
-  assert rt_helpers.recorded() == ["finish"]
+  assert rt_helpers.recorded() == ["drain"]
   assert show(eng, global(eng, "hit")) == "7"
   let #(_, eng) =
     engine.call_with(eng, global(eng, "Object"), mk_undefined(), [], recording)
-  assert rt_helpers.recorded() == ["finish"]
+  assert rt_helpers.recorded() == ["drain"]
   let assert Ok(#(_, eng)) =
     engine.eval_module_with(
       eng,
@@ -182,8 +182,8 @@ pub fn drivers_run_once_per_turn_test() {
       module_host.forbid_load,
       recording,
     )
-  assert rt_helpers.recorded() == ["finish"]
-  let #(_, Nil) =
-    engine.with_context_with(eng, fn(ctx) { #(ctx, Nil) }, recording)
-  assert rt_helpers.recorded() == ["finish"]
+  assert rt_helpers.recorded() == ["drain"]
+  let #(Nil, _) =
+    engine.with_context_with(eng, fn(ctx) { #(Nil, ctx) }, recording)
+  assert rt_helpers.recorded() == ["drain"]
 }

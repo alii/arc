@@ -167,21 +167,21 @@ fn format_op(pc: Int, width: Int, op: Op, template: FuncTemplate) -> String {
 fn annotate(op: Op, template: FuncTemplate) -> Option(String) {
   case op {
     opcode.PushConst(index) ->
-      Some(resolve(index, template.constants, constant_to_string))
+      Some(render_entry(index, template.constants, constant_to_string))
     opcode.CmpLocalConstJump(_, index, _, _, _)
     | opcode.IncLocalCmpConstJump(_, _, index, _, _, _)
     | opcode.CmpConstJump(index, _, _, _)
     | opcode.BinOpConst(_, index)
     | opcode.BinOpConstPut(_, index, _)
     | opcode.BinOpLocalConst(_, _, index) ->
-      Some(resolve(index, template.constants, constant_to_string))
+      Some(render_entry(index, template.constants, constant_to_string))
     opcode.MakeClosure(index) ->
-      Some(resolve(index, template.functions, child_label))
+      Some(render_entry(index, template.functions, child_label))
     _ -> None
   }
 }
 
-fn resolve(
+fn render_entry(
   index: Int,
   table: TupleArray(a),
   render: fn(a) -> String,

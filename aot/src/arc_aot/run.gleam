@@ -28,26 +28,26 @@ pub fn load(code: BitArray, name: String) -> Result(Atom, String) {
 pub fn unload(module: Atom) -> Nil
 
 @external(erlang, "arc_aot_exec_ffi", "apply_js_main")
-pub fn apply_js_main(module: Atom, st: Agent) -> #(JsExecOutcome, Agent)
+pub fn apply_js_main(st: Agent, module: Atom) -> #(JsExecOutcome, Agent)
 
-pub fn main(module: Atom, st: Agent) -> #(Agent, RunResult) {
-  let #(outcome, st) = apply_js_main(module, st)
+pub fn main(st: Agent, module: Atom) -> #(RunResult, Agent) {
+  let #(outcome, st) = apply_js_main(st, module)
   let result = case outcome {
     JsReturned(v) -> Ok(v)
     JsThrew(e) -> Error("uncaught: " <> string.inspect(e))
     JsCrashed(reason) -> Error(reason)
   }
-  #(st, result)
+  #(result, st)
 }
 
 pub fn from_beam_in(
   st: Agent,
   code: BitArray,
   name: String,
-) -> #(Agent, RunResult) {
+) -> #(RunResult, Agent) {
   case load(code, name) {
-    Error(reason) -> #(st, Error("load failed: " <> reason))
-    Ok(module) -> main(module, st)
+    Error(reason) -> #(Error("load failed: " <> reason), st)
+    Ok(module) -> main(st, module)
   }
 }
 
@@ -55,6 +55,6 @@ pub fn from_beam(
   code: BitArray,
   name: String,
   hooks: HostHooks,
-) -> #(Agent, RunResult) {
+) -> #(RunResult, Agent) {
   from_beam_in(new_linked_agent(hooks), code, name)
 }

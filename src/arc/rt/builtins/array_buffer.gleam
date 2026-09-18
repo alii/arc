@@ -595,8 +595,8 @@ fn sab_grow(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-type ResolvedBuffer {
-  ResolvedBuffer(h: Handle, storage: BufferStorage)
+type LiveBuffer {
+  LiveBuffer(h: Handle, storage: BufferStorage)
 }
 
 fn ctor_name(shared: Bool) -> String {
@@ -606,34 +606,30 @@ fn ctor_name(shared: Bool) -> String {
   }
 }
 
-fn live_byte_size(buf: ResolvedBuffer) -> Int {
+fn live_byte_size(buf: LiveBuffer) -> Int {
   types.buffer_byte_size(buf.storage)
 }
 
-fn max_byte_length(buf: ResolvedBuffer) -> Option(Int) {
+fn max_byte_length(buf: LiveBuffer) -> Option(Int) {
   types.buffer_max_byte_length(buf.storage)
 }
 
-fn detach(st: Agent, buf: ResolvedBuffer) -> Agent {
+fn detach(st: Agent, buf: LiveBuffer) -> Agent {
   buffer.set_storage(st, buf.h, Detached(max_byte_length: max_byte_length(buf)))
 }
 
-fn require_buffer(st: Agent, this: JsVal, method: String) -> ResolvedBuffer {
+fn require_buffer(st: Agent, this: JsVal, method: String) -> LiveBuffer {
   case classify(this) {
     KHandle(h) ->
       case buffer.storage(st, h) {
-        Some(storage) -> ResolvedBuffer(h:, storage:)
+        Some(storage) -> LiveBuffer(h:, storage:)
         None -> incompatible(st, method)
       }
     _ -> incompatible(st, method)
   }
 }
 
-fn require_unshared(
-  st: Agent,
-  buf: ResolvedBuffer,
-  method: String,
-) -> ResolvedBuffer {
+fn require_unshared(st: Agent, buf: LiveBuffer, method: String) -> LiveBuffer {
   case buf.storage {
     Shared(..) -> incompatible(st, method)
     Bytes(..) | Immutable(..) | Detached(..) -> buf
@@ -642,7 +638,7 @@ fn require_unshared(
 
 fn require_shared(
   st: Agent,
-  buf: ResolvedBuffer,
+  buf: LiveBuffer,
   method: String,
 ) -> types.SharedBlock {
   case buf.storage {
@@ -653,10 +649,10 @@ fn require_shared(
 
 fn require_family(
   st: Agent,
-  buf: ResolvedBuffer,
+  buf: LiveBuffer,
   method: String,
   shared shared: Bool,
-) -> ResolvedBuffer {
+) -> LiveBuffer {
   case shared {
     True -> {
       let _bytes = require_shared(st, buf, method)
@@ -666,22 +662,14 @@ fn require_family(
   }
 }
 
-fn require_live(
-  st: Agent,
-  buf: ResolvedBuffer,
-  method: String,
-) -> BufferStorage {
+fn require_live(st: Agent, buf: LiveBuffer, method: String) -> BufferStorage {
   case buf.storage {
     Detached(..) -> detached_error(st, method)
     live -> live
   }
 }
 
-fn require_live_bits(
-  st: Agent,
-  buf: ResolvedBuffer,
-  method: String,
-) -> BitArray {
+fn require_live_bits(st: Agent, buf: LiveBuffer, method: String) -> BitArray {
   case types.buffer_bits(buf.storage) {
     Some(bits) -> bits
     None -> detached_error(st, method)
@@ -690,7 +678,7 @@ fn require_live_bits(
 
 fn require_unshared_bytes(
   st: Agent,
-  buf: ResolvedBuffer,
+  buf: LiveBuffer,
   method: String,
 ) -> BitArray {
   case buf.storage {
@@ -702,7 +690,7 @@ fn require_unshared_bytes(
 
 fn require_resizable_bytes(
   st: Agent,
-  buf: ResolvedBuffer,
+  buf: LiveBuffer,
   method: String,
 ) -> #(BitArray, Int) {
   case buf.storage {
@@ -728,9 +716,9 @@ fn detached_error(st: Agent, method: String) -> a {
 
 fn require_not_immutable(
   st: Agent,
-  buf: ResolvedBuffer,
+  buf: LiveBuffer,
   method: String,
-) -> ResolvedBuffer {
+) -> LiveBuffer {
   case buf.storage {
     Immutable(..) ->
       rt_val.t_throw_type_error(

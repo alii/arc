@@ -84,7 +84,7 @@ pub fn init(
       [],
     )
   let st = install_legacy_accessors(st, fn_proto, bt.constructor)
-  let #(st, _) =
+  let st =
     list.fold(
       [
         #(types.symbol_match, RegExpSymbolMatch, "[Symbol.match]", 1),
@@ -93,14 +93,13 @@ pub fn init(
         #(types.symbol_search, RegExpSymbolSearch, "[Symbol.search]", 1),
         #(types.symbol_split, RegExpSymbolSplit, "[Symbol.split]", 2),
       ],
-      #(st, Nil),
-      fn(acc, spec) {
-        let #(st, _) = acc
+      st,
+      fn(st, spec) {
         let #(sym, tok, name, arity) = spec
         let #(fn_h, st) =
           common.alloc_rooted_native_fn(st, fn_proto, RegExpN(tok), name, arity)
         let #(prop, st) = rt_store.t_builtin_property(st, mk_object(fn_h))
-        #(common.add_symbol_property(st, bt.prototype, sym, prop), Nil)
+        common.add_symbol_property(st, bt.prototype, sym, prop)
       },
     )
   let st = common.add_species_accessor(st, fn_proto, bt.constructor, ReturnThis)
@@ -1626,16 +1625,16 @@ fn compute_replacement(
         KUndef ->
           finish_replacement(
             st,
-            list.reverse(substitution.resolve_plain_parts(without_named, ctx)),
+            list.reverse(substitution.expand_plain_parts(without_named, ctx)),
           )
         KNull -> rt_val.t_throw_type_error(st, "Cannot convert null to object")
-        _ -> resolve_segments(st, with_named, ctx, named_captures, [])
+        _ -> expand_segments(st, with_named, ctx, named_captures, [])
       }
     }
   }
 }
 
-fn resolve_segments(
+fn expand_segments(
   st: Agent,
   segments: List(substitution.NamedSegment),
   ctx: substitution.MatchContext,
@@ -1645,16 +1644,16 @@ fn resolve_segments(
   case segments {
     [] -> finish_replacement(st, acc)
     [seg, ..rest] ->
-      case substitution.resolve(seg, ctx) {
+      case substitution.expand(seg, ctx) {
         substitution.Text(text) ->
-          resolve_segments(st, rest, ctx, nc, [text, ..acc])
+          expand_segments(st, rest, ctx, nc, [text, ..acc])
         substitution.NamedRef(name) -> {
           let #(cap, st) = get_named(st, nc, name)
           case classify(cap) {
-            KUndef -> resolve_segments(st, rest, ctx, nc, ["", ..acc])
+            KUndef -> expand_segments(st, rest, ctx, nc, ["", ..acc])
             _ -> {
               let #(cap_text, st) = rt_val.t_to_string(st, cap)
-              resolve_segments(st, rest, ctx, nc, [cap_text, ..acc])
+              expand_segments(st, rest, ctx, nc, [cap_text, ..acc])
             }
           }
         }

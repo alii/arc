@@ -348,14 +348,14 @@ pub fn due(store: Store) -> Bool {
   store.alloc_since_gc >= store.gc_threshold
 }
 
-pub fn t_hold_roots(st: Agent, held: List(JsVal)) -> #(Agent, List(Int)) {
+pub fn t_hold_roots(st: Agent, held: List(JsVal)) -> #(List(Int), Agent) {
   let store = st.store
   let ids =
     list.fold(held, [], fn(acc, v) { push_refs(v, acc) })
     |> list.filter(fn(id) { !set.contains(store.pinned_roots, id) })
     |> list.unique
   let pinned = list.fold(ids, store.pinned_roots, set.insert)
-  #(Agent(..st, store: Store(..store, pinned_roots: pinned)), ids)
+  #(ids, Agent(..st, store: Store(..store, pinned_roots: pinned)))
 }
 
 pub fn t_release_roots(st: Agent, ids: List(Int)) -> Agent {

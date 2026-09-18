@@ -5,8 +5,10 @@ import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type CompiledCode, type JsVal, FnFlags, StringKey,
+  type Agent, type CompiledCode, type JsVal, type JsValKind, FnFlags, JFloat,
+  JInt, KNum, StringKey,
 }
+import gleam/int
 import gleam/option.{None}
 
 pub fn quiet_hooks() -> HostHooks {
@@ -19,6 +21,14 @@ pub fn quiet_hooks() -> HostHooks {
     print: fn(_, _) { Nil },
     report_uncaught: fn(_) { Nil },
   )
+}
+
+// ints widened to floats so a test writes one number spelling
+pub fn classify(v: JsVal) -> JsValKind {
+  case types.classify(v) {
+    KNum(JInt(i)) -> KNum(JFloat(int.to_float(i)))
+    kind -> kind
+  }
 }
 
 pub fn agent() -> Agent {

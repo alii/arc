@@ -11,8 +11,8 @@ import arc/rt/types.{
 }
 import rt_helpers.{agent, get, global}
 
-fn key() -> host.Key(Nil) {
-  host.new_key()
+fn brand() -> host.Brand(Nil) {
+  host.new_brand()
 }
 
 fn handle(v: JsVal) -> Handle {
@@ -24,8 +24,8 @@ fn promise_state(st: Agent, promise: JsVal) -> PromiseState {
   rt_async.promise_data(st, handle(promise)).1
 }
 
-fn recorder(ctx: host.Context(Nil)) -> #(host.Context(Nil), JsVal) {
-  host.function(ctx, "record", 1, fn(args, _, ctx) {
+fn recorder(ctx: host.Context(Nil)) -> #(JsVal, host.Context(Nil)) {
+  host.function(ctx, "record", 1, fn(ctx, args, _) {
     let st = ctx.agent
     let #(_, st) =
       rt_obj.t_set_prop(
@@ -34,7 +34,7 @@ fn recorder(ctx: host.Context(Nil)) -> #(host.Context(Nil), JsVal) {
         StringKey(Named("seen")),
         host.first_arg(args),
       )
-    #(Context(..ctx, agent: st), Ok(mk_undefined()))
+    #(Ok(mk_undefined()), Context(..ctx, agent: st))
   })
 }
 
@@ -42,11 +42,11 @@ fn seen(st: Agent) -> JsVal {
   get(st, global(st, "globalThis").0, "seen").0
 }
 
-fn suspended(rejecting rejecting: Bool) -> #(Agent, #(JsVal, host.Ticket)) {
-  use ctx <- host.with_context(agent(), key())
+fn suspended(rejecting rejecting: Bool) -> #(#(JsVal, host.Ticket), Agent) {
+  use ctx <- host.with_context(agent(), brand())
   let ctx = host.define_global(ctx, "seen", mk_string("nothing"))
-  let #(ctx, promise, ticket) = host.suspend(ctx)
-  let #(ctx, on_settle) = recorder(ctx)
+  let #(promise, ticket, ctx) = host.suspend(ctx)
+  let #(on_settle, ctx) = recorder(ctx)
   let #(on_fulfilled, on_rejected) = case rejecting {
     False -> #(on_settle, mk_undefined())
     True -> #(mk_undefined(), on_settle)
@@ -58,20 +58,20 @@ fn suspended(rejecting rejecting: Bool) -> #(Agent, #(JsVal, host.Ticket)) {
       on_fulfilled,
       on_rejected,
     )
-  #(Context(..ctx, agent: st), #(promise, ticket))
+  #(#(promise, ticket), Context(..ctx, agent: st))
 }
 
 pub fn resume_settles_on_the_next_drain_test() {
-  let #(st, #(promise, ticket)) = suspended(rejecting: False)
+  let #(#(promise, ticket), st) = suspended(rejecting: False)
   let assert PromisePending(_) = promise_state(st, promise)
   assert seen(st) == mk_string("nothing")
   let st = rt_gc.t_collect(st, [])
   assert rt_gc.t_is_live(st, handle(promise))
-  let #(st, outcome) =
-    host.with_context(st, key(), fn(ctx) {
-      let #(ctx, outcome) = host.resume(ctx, ticket, Ok(mk_int(42)))
+  let #(outcome, st) =
+    host.with_context(st, brand(), fn(ctx) {
+      let #(outcome, ctx) = host.resume(ctx, ticket, Ok(mk_int(42)))
       let assert PromisePending(_) = promise_state(ctx.agent, promise)
-      #(ctx, outcome)
+      #(outcome, ctx)
     })
   assert outcome == Resumed
   assert promise_state(st, promise) == PromiseFulfilled(mk_int(42))
@@ -79,9 +79,9 @@ pub fn resume_settles_on_the_next_drain_test() {
 }
 
 pub fn error_outcome_rejects_test() {
-  let #(st, #(promise, ticket)) = suspended(rejecting: True)
-  let #(st, outcome) =
-    host.with_context(st, key(), fn(ctx) {
+  let #(#(promise, ticket), st) = suspended(rejecting: True)
+  let #(outcome, st) =
+    host.with_context(st, brand(), fn(ctx) {
       host.resume(ctx, ticket, Error(mk_string("no")))
     })
   assert outcome == Resumed
@@ -90,9 +90,9 @@ pub fn error_outcome_rejects_test() {
 }
 
 pub fn thenable_outcome_is_assimilated_test() {
-  let #(st, #(promise, ticket)) = suspended(rejecting: False)
-  let #(st, outcome) =
-    host.with_context(st, key(), fn(ctx) {
+  let #(#(promise, ticket), st) = suspended(rejecting: False)
+  let #(outcome, st) =
+    host.with_context(st, brand(), fn(ctx) {
       let promise_ctor = global(ctx.agent, "Promise").0
       let #(inner, st) =
         rt_helpers.call_method(ctx.agent, promise_ctor, "resolve", [mk_int(7)])
@@ -104,54 +104,54 @@ pub fn thenable_outcome_is_assimilated_test() {
 }
 
 pub fn double_resume_is_a_no_op_test() {
-  let #(st, #(promise, ticket)) = suspended(rejecting: False)
-  let #(st, outcomes) =
-    host.with_context(st, key(), fn(ctx) {
-      let #(ctx, first) = host.resume(ctx, ticket, Ok(mk_int(1)))
-      let #(ctx, second) = host.resume(ctx, ticket, Ok(mk_int(2)))
-      #(ctx, #(first, second))
+  let #(#(promise, ticket), st) = suspended(rejecting: False)
+  let #(outcomes, st) =
+    host.with_context(st, brand(), fn(ctx) {
+      let #(first, ctx) = host.resume(ctx, ticket, Ok(mk_int(1)))
+      let #(second, ctx) = host.resume(ctx, ticket, Ok(mk_int(2)))
+      #(#(first, second), ctx)
     })
   assert outcomes == #(Resumed, AlreadySettled)
   assert promise_state(st, promise) == PromiseFulfilled(mk_int(1))
   assert seen(st) == mk_int(1)
-  let #(st, third) =
-    host.with_context(st, key(), fn(ctx) {
+  let #(third, st) =
+    host.with_context(st, brand(), fn(ctx) {
       host.resume(ctx, ticket, Ok(mk_int(3)))
     })
   assert third == AlreadySettled
   assert seen(st) == mk_int(1)
 }
 
-fn bare_suspend() -> #(Agent, #(JsVal, host.Ticket)) {
-  use ctx <- host.with_context(agent(), key())
-  let #(ctx, promise, ticket) = host.suspend(ctx)
-  #(ctx, #(promise, ticket))
+fn bare_suspend() -> #(#(JsVal, host.Ticket), Agent) {
+  use ctx <- host.with_context(agent(), brand())
+  let #(promise, ticket, ctx) = host.suspend(ctx)
+  #(#(promise, ticket), ctx)
 }
 
 pub fn resumed_promise_is_collectable_then_stale_test() {
-  let #(st, #(promise, ticket)) = bare_suspend()
+  let #(#(promise, ticket), st) = bare_suspend()
   let st = rt_gc.t_collect(st, [])
   assert rt_gc.t_is_live(st, handle(promise))
-  let #(st, outcome) =
-    host.with_context(st, key(), fn(ctx) {
+  let #(outcome, st) =
+    host.with_context(st, brand(), fn(ctx) {
       host.resume(ctx, ticket, Ok(mk_int(1)))
     })
   assert outcome == Resumed
   let st = rt_gc.t_collect(st, [])
   assert !rt_gc.t_is_live(st, handle(promise))
-  let #(_, outcome) =
-    host.with_context(st, key(), fn(ctx) {
+  let #(outcome, _) =
+    host.with_context(st, brand(), fn(ctx) {
       host.resume(ctx, ticket, Ok(mk_int(2)))
     })
   assert outcome == StaleTicket
 }
 
 pub fn held_promise_survives_resume_inside_a_turn_end_test() {
-  let #(st, #(promise, ticket)) = bare_suspend()
+  let #(#(promise, ticket), st) = bare_suspend()
   let st =
     safepoint.finish_turn(st, [promise], fn(st) {
-      let #(st, outcome) =
-        host.with_context(st, key(), fn(ctx) {
+      let #(outcome, st) =
+        host.with_context(st, brand(), fn(ctx) {
           host.resume(ctx, ticket, Ok(mk_int(5)))
         })
       assert outcome == Resumed
@@ -164,26 +164,26 @@ pub fn held_promise_survives_resume_inside_a_turn_end_test() {
 }
 
 pub fn holding_the_promise_does_not_revive_a_spent_ticket_test() {
-  let #(st, #(promise, ticket)) = bare_suspend()
-  let #(Context(agent: st, ..), first) =
-    host.resume(host.from_agent(st, key()), ticket, Ok(mk_int(1)))
-  let #(st, ids) = rt_gc.t_hold_roots(st, [promise])
-  let #(Context(agent: st, ..), second) =
-    host.resume(host.from_agent(st, key()), ticket, Ok(mk_int(2)))
+  let #(#(promise, ticket), st) = bare_suspend()
+  let #(first, Context(agent: st, ..)) =
+    host.resume(host.from_agent(st, brand()), ticket, Ok(mk_int(1)))
+  let #(ids, st) = rt_gc.t_hold_roots(st, [promise])
+  let #(second, Context(agent: st, ..)) =
+    host.resume(host.from_agent(st, brand()), ticket, Ok(mk_int(2)))
   assert #(first, second) == #(Resumed, AlreadySettled)
   let st = rt_gc.t_release_roots(rt_async.drain(st), ids)
   assert promise_state(st, promise) == PromiseFulfilled(mk_int(1))
 }
 
 pub fn foreign_ticket_is_stale_test() {
-  let #(_, ticket) =
-    host.with_context(agent(), key(), fn(ctx) {
-      let #(ctx, _) = host.object(ctx, [])
-      let #(ctx, _promise, ticket) = host.suspend(ctx)
-      #(ctx, ticket)
+  let #(ticket, _) =
+    host.with_context(agent(), brand(), fn(ctx) {
+      let #(_, ctx) = host.object(ctx, [])
+      let #(_promise, ticket, ctx) = host.suspend(ctx)
+      #(ticket, ctx)
     })
-  let #(_, outcome) =
-    host.with_context(agent(), key(), fn(ctx) {
+  let #(outcome, _) =
+    host.with_context(agent(), brand(), fn(ctx) {
       host.resume(ctx, ticket, Ok(mk_int(1)))
     })
   assert outcome == StaleTicket

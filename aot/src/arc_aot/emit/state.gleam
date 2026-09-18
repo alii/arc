@@ -154,7 +154,7 @@ pub type Next =
   fn(Emitter) -> EmitResult
 
 pub type NextWith(a) =
-  fn(Emitter, a) -> EmitResult
+  fn(a, Emitter) -> EmitResult
 
 pub fn map_tree(r: EmitResult, f: fn(ir.Expr) -> ir.Expr) -> EmitResult {
   case r {
@@ -348,7 +348,7 @@ pub fn let_(e: Emitter, rhs: ir.Expr, k: NextWith(ir.Value)) -> EmitResult {
       use tail <- map_tree(let_(e, inner_body, k))
       ir.Let(names, inner_rhs, tail)
     }
-    ir.Values([v]) -> k(e, v)
+    ir.Values([v]) -> k(v, e)
     _ -> {
       let #(n, e) = fresh_var(e)
       let e = case let_tail_value(rhs) {
@@ -359,7 +359,7 @@ pub fn let_(e: Emitter, rhs: ir.Expr, k: NextWith(ir.Value)) -> EmitResult {
           }
         _ -> e
       }
-      use body <- map_tree(k(e, ir.Var(n)))
+      use body <- map_tree(k(ir.Var(n), e))
       ir.Let([n], rhs, body)
     }
   }
@@ -674,10 +674,10 @@ pub fn fresh_escape(e: Emitter, arity: Int) -> #(Escape, Emitter) {
 }
 
 fn fresh_vars(e: Emitter, n: Int) -> #(List(String), Emitter) {
-  let #(e, names) = {
-    use #(e, acc), _ <- list.fold(list.repeat(Nil, n), #(e, []))
+  let #(names, e) = {
+    use #(acc, e), _ <- list.fold(list.repeat(Nil, n), #([], e))
     let #(v, e) = fresh_var(e)
-    #(e, [v, ..acc])
+    #([v, ..acc], e)
   }
   #(list.reverse(names), e)
 }
@@ -930,7 +930,7 @@ pub fn pop_child_fn(e: Emitter) -> #(ScopeId, Emitter) {
 pub fn enter_scope(
   e: Emitter,
   in_block in_block: Bool,
-) -> #(Emitter, ScopeSnapshot) {
+) -> #(ScopeSnapshot, Emitter) {
   case e.scope_cursor {
     [child_id, ..parent_rest] -> {
       let save =
@@ -947,7 +947,7 @@ pub fn enter_scope(
           scope_cursor: block_child_scopes(e.scope_tree, child_id),
           in_block:,
         )
-      #(e, save)
+      #(save, e)
     }
     [] -> {
       let save =
@@ -957,7 +957,7 @@ pub fn enter_scope(
           slot_vars: e.slot_vars,
           in_block: e.in_block,
         )
-      #(Emitter(..e, in_block:), save)
+      #(save, Emitter(..e, in_block:))
     }
   }
 }
@@ -1000,13 +1000,13 @@ fn scope_within(tree: ScopeTree, id: ScopeId, ancestor: ScopeId) -> Bool {
 pub fn enter_for_scope(
   e: Emitter,
   has_lex_head has_lex_head: Bool,
-) -> #(Emitter, Option(ScopeSnapshot)) {
+) -> #(Option(ScopeSnapshot), Emitter) {
   case has_lex_head {
     True -> {
-      let #(e, save) = enter_scope(e, in_block: e.in_block)
-      #(e, Some(save))
+      let #(save, e) = enter_scope(e, in_block: e.in_block)
+      #(Some(save), e)
     }
-    False -> #(e, None)
+    False -> #(None, e)
   }
 }
 
@@ -1024,7 +1024,7 @@ pub fn enter_function(
   strict strict: Bool,
   is_async is_async: Bool,
   is_arrow is_arrow: Bool,
-) -> #(Emitter, FnSave) {
+) -> #(FnSave, Emitter) {
   let save =
     FnSave(
       fn_scope: e.fn_scope,
@@ -1074,7 +1074,7 @@ pub fn enter_function(
       machine_abrupt: None,
       raw_args_var: None,
     )
-  #(child, save)
+  #(save, child)
 }
 
 pub fn leave_function(e: Emitter, save: FnSave) -> Emitter {

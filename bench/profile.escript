@@ -9,7 +9,7 @@ main([File | Rest]) ->
     {ok, {Body, Sb}} = arc@parser:parse_script(Src),
     {ok, T} = arc@compiler:compile_script(Body, Sb),
     E = arc@engine:new(),
-    Ag = arc@engine:heap(E),
+    Ag = arc@engine:agent(E),
     _ = arc@interp@entry:run_script(Ag, T),
     eprof:start(),
     eprof:profile(fun() -> arc@interp@entry:run_script(Ag, T) end),

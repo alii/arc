@@ -42,10 +42,10 @@ fn format_eval_error(err: engine.EvalError(host)) -> String {
 fn eval(
   repl: Repl(host),
   source: String,
-) -> #(Repl(host), Result(Outcome, engine.EvalError(host))) {
+) -> #(Result(Outcome, engine.EvalError(host)), Repl(host)) {
   case engine.repl_eval(repl, source) {
-    Ok(#(outcome, repl)) -> #(repl, Ok(outcome))
-    Error(err) -> #(repl, Error(err))
+    Ok(#(outcome, repl)) -> #(Ok(outcome), repl)
+    Error(err) -> #(Error(err), repl)
   }
 }
 
@@ -94,7 +94,7 @@ fn handle_repl_line(repl: Repl(host), line: String) -> ReplStep(host) {
     }
 
     "/heap " <> source -> {
-      let #(repl, result) = eval(repl, source)
+      let #(result, repl) = eval(repl, source)
       case result {
         Ok(Returned(val)) ->
           engine.dump_object(engine.repl_engine(repl), val)
@@ -160,7 +160,7 @@ fn handle_repl_line(repl: Repl(host), line: String) -> ReplStep(host) {
             }
             Some(ex) -> {
               examples.print_source(ex)
-              let #(repl, result) = eval(repl, ex.source)
+              let #(result, repl) = eval(repl, ex.source)
               case result {
                 Ok(Returned(_)) -> Nil
                 Ok(Threw(_)) | Error(_) -> print_result(repl, result)
@@ -174,7 +174,7 @@ fn handle_repl_line(repl: Repl(host), line: String) -> ReplStep(host) {
     "" -> Continue(repl)
 
     _ -> {
-      let #(repl, result) = eval(repl, source)
+      let #(result, repl) = eval(repl, source)
       print_result(repl, result)
       Continue(repl)
     }

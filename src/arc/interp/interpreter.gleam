@@ -3555,7 +3555,7 @@ fn fast_call(
                         kernel.sloppy_this(this, agent.realm.global_object)
                       case kernel.is(bound, kernel.Miss) {
                         False -> #(bound, agent)
-                        True -> rt_call.resolve_this(agent, flags, this)
+                        True -> rt_call.bind_this(agent, flags, this)
                       }
                     }
                   }

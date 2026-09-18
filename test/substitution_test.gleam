@@ -37,7 +37,7 @@ pub fn dollar_dollar_before_a_combining_mark_still_matches_test() {
 }
 
 pub fn resolving_a_matched_seg_before_a_combining_mark_test() {
-  assert substitution.resolve_without_named(
+  assert substitution.expand_without_named(
       tokenize("$&" <> combining_acute),
       ctx(),
     )

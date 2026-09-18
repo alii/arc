@@ -81,22 +81,22 @@ pub type View {
   )
 }
 
-pub opaque type ResolvedView {
-  ResolvedView(byte_size: Int, elem_size: Int, byte_offset: Int, len: Int)
+pub opaque type ViewBounds {
+  ViewBounds(byte_size: Int, elem_size: Int, byte_offset: Int, len: Int)
 }
 
-pub fn resolve_view(
+pub fn view_bounds(
   byte_size: Int,
   elem_kind: TypedArrayKind,
   byte_offset: Int,
   length: Option(Int),
-) -> ResolvedView {
+) -> ViewBounds {
   let elem_size = typed_array_bytes.elem_size(elem_kind)
-  ResolvedView(
+  ViewBounds(
     byte_size:,
     elem_size:,
     byte_offset:,
-    len: resolve_len(byte_size, elem_size, byte_offset, length),
+    len: bounds_len(byte_size, elem_size, byte_offset, length),
   )
 }
 
@@ -105,8 +105,8 @@ pub fn fixed_view(
   elem_kind: TypedArrayKind,
   byte_offset: Int,
   len: Int,
-) -> ResolvedView {
-  ResolvedView(
+) -> ViewBounds {
+  ViewBounds(
     byte_size:,
     elem_size: typed_array_bytes.elem_size(elem_kind),
     byte_offset:,
@@ -114,7 +114,7 @@ pub fn fixed_view(
   )
 }
 
-fn resolve_len(
+fn bounds_len(
   byte_size: Int,
   elem_size: Int,
   byte_offset: Int,
@@ -126,20 +126,20 @@ fn resolve_len(
   }
 }
 
-pub fn view_len(view: ResolvedView) -> Int {
+pub fn view_len(view: ViewBounds) -> Int {
   view.len
 }
 
-pub fn view_element_offset(view: ResolvedView, idx: Int) -> Int {
+pub fn view_element_offset(view: ViewBounds, idx: Int) -> Int {
   view.byte_offset + idx * view.elem_size
 }
 
-pub fn view_in_bounds(view: ResolvedView) -> Bool {
+pub fn view_in_bounds(view: ViewBounds) -> Bool {
   view.byte_offset + view.len * view.elem_size <= view.byte_size
 }
 
 pub fn view_length(st: Agent, view: View) -> Int {
-  resolve_len(
+  bounds_len(
     live_byte_size(st, view.buffer),
     typed_array_bytes.elem_size(view.elem_kind),
     view.byte_offset,
@@ -147,13 +147,13 @@ pub fn view_length(st: Agent, view: View) -> Int {
   )
 }
 
-pub fn live_view(st: Agent, view: View) -> Option(ResolvedView) {
+pub fn live_view(st: Agent, view: View) -> Option(ViewBounds) {
   let View(buffer:, elem_kind:, byte_offset:, length:) = view
   use data <- option.map(bytes(st, buffer))
-  resolve_view(bit_array.byte_size(data), elem_kind, byte_offset, length)
+  view_bounds(bit_array.byte_size(data), elem_kind, byte_offset, length)
 }
 
-pub fn valid_integer_index(view: ResolvedView, idx: Int) -> Bool {
+pub fn valid_integer_index(view: ViewBounds, idx: Int) -> Bool {
   idx >= 0 && idx < view.len && view_in_bounds(view)
 }
 
@@ -202,7 +202,7 @@ pub fn typed_array_element_live(
     Some(data) ->
       element_of_view(
         data,
-        resolve_view(bit_array.byte_size(data), elem_kind, byte_offset, length),
+        view_bounds(bit_array.byte_size(data), elem_kind, byte_offset, length),
         elem_kind,
         idx,
       )
@@ -211,7 +211,7 @@ pub fn typed_array_element_live(
 
 fn element_of_view(
   data: BitArray,
-  view: ResolvedView,
+  view: ViewBounds,
   elem_kind: TypedArrayKind,
   idx: Int,
 ) -> Option(JsVal) {
@@ -247,7 +247,7 @@ pub fn typed_array_iter_length(
     None -> Error(BufferDetached)
     Some(data) -> {
       let view =
-        resolve_view(bit_array.byte_size(data), elem_kind, byte_offset, length)
+        view_bounds(bit_array.byte_size(data), elem_kind, byte_offset, length)
       case view_in_bounds(view) {
         False -> Error(OutOfBoundsView)
         True -> Ok(view_len(view))
@@ -369,16 +369,16 @@ fn write_typed_element(
       case rt_store.t_cell_get(st, view.buffer) {
         SObject(kind: ArrayBufferObj(storage:), ..) as cell -> {
           let size = typed_array_bytes.elem_size(view.elem_kind)
-          // bounds resolved here: coercion may have resized the buffer
-          let resolved =
-            resolve_view(
+          // bounds taken here: coercion may have resized the buffer
+          let bounds =
+            view_bounds(
               types.buffer_byte_size(storage),
               view.elem_kind,
               view.byte_offset,
               view.length,
             )
-          let off = view_element_offset(resolved, i)
-          use <- bool.guard(!valid_integer_index(resolved, i), #(True, st))
+          let off = view_element_offset(bounds, i)
+          use <- bool.guard(!valid_integer_index(bounds, i), #(True, st))
           use <- bool.guard(types.buffer_is_immutable(storage), #(False, st))
           case types.buffer_bits(storage) {
             None -> #(True, st)

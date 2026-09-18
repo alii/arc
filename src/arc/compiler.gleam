@@ -1,8 +1,8 @@
 import arc/bytecode/lexical.{type CodeKind, type LexicalSlots}
 import arc/bytecode/opcode
+import arc/compiler/assemble
 import arc/compiler/ast_util
 import arc/compiler/emit
-import arc/compiler/resolve
 import arc/compiler/scope
 import arc/esm
 import arc/internal/tuple_array
@@ -279,10 +279,10 @@ fn build_template(
   code_kind code_kind: CodeKind,
   use_registers use_registers: Bool,
 ) -> FuncTemplate {
-  let resolve.Resolved(bytecode:, constants:, lines:) =
-    resolve.resolve(code, constants)
+  let assemble.Assembled(bytecode:, constants:, lines:) =
+    assemble.assemble(code, constants)
   let #(bytecode, regs) = case use_registers {
-    True -> resolve.assign_regs(bytecode, captured_slots(functions))
+    True -> assemble.assign_regs(bytecode, captured_slots(functions))
     False -> #(bytecode, bytecode.NoRegs)
   }
   FuncTemplate(

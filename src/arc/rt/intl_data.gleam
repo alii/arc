@@ -1,5 +1,5 @@
-import arc/internal/host_time
 import arc/rt/builtins/temporal_tz
+import arc/time_zone
 import gleam/option.{type Option, None}
 
 pub type NumberStyle {
@@ -375,7 +375,7 @@ pub const empty_dtf_components = DateTimeComponents(
 
 pub type FormatTimeZone {
   // host zone, reported as "UTC"
-  HostZone(zone: host_time.TimeZone)
+  HostZone(zone: time_zone.TimeZone)
   NamedZone(zone: temporal_tz.Zone)
   FixedZone(id: String, offset_minutes: Int)
 }

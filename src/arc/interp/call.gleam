@@ -175,7 +175,7 @@ fn setup_frame(
           let bound = kernel.sloppy_this(this_arg, agent.realm.global_object)
           case kernel.is(bound, kernel.Miss) {
             False -> #(bound, agent)
-            True -> rt_call.resolve_this(agent, flags, this_arg)
+            True -> rt_call.bind_this(agent, flags, this_arg)
           }
         }
       }
@@ -806,7 +806,7 @@ fn read_this_local(state: State) -> JsVal {
 }
 
 // §10.2.2 steps 10-12 constructor return override
-fn resolve_return(
+fn constructor_result(
   state: State,
   return_value: JsVal,
   constructor_this: Option(JsVal),
@@ -856,7 +856,7 @@ pub fn return_op(state: State) -> Result(State, StepExit) {
     [SavedCont(..) as saved, ..] ->
       cont_return(state.agent, state.depth, saved, return_value)
     [saved, ..] ->
-      case resolve_return(state, return_value, saved.constructor_this) {
+      case constructor_result(state, return_value, saved.constructor_this) {
         Error(#(thrown, state)) -> Error(Threw(thrown, state))
         Ok(pushed) -> Ok(return_to(state, saved, pushed))
       }
@@ -1080,7 +1080,7 @@ pub fn finish_root(
     RootBaseConstruct(h) -> Some(mk_object(h))
     RootDerivedConstruct -> None
   }
-  case resolve_return(final_state, value, constructor_this) {
+  case constructor_result(final_state, value, constructor_this) {
     Ok(v) -> Ok(#(v, final_state.agent))
     Error(#(thrown, state)) -> Error(#(thrown, state.agent))
   }

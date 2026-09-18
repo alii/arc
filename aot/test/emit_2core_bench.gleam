@@ -50,7 +50,7 @@ fn compile_load(source: String, name: String) -> #(Int, Int, Loaded) {
 }
 
 fn run_once(loaded: Loaded) -> Dynamic {
-  let #(outcome, _st) = run.apply_js_main(loaded.mod, loaded.seed)
+  let #(outcome, _st) = run.apply_js_main(loaded.seed, loaded.mod)
   to_dynamic(outcome)
 }
 

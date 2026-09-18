@@ -78,7 +78,7 @@ fn seed_realm() -> Agent {
 }
 
 fn run_once(loaded: Loaded) -> emit_2core_harness.DiffRun {
-  emit_2core_harness.run_loaded(loaded.mod, loaded.seed).1
+  emit_2core_harness.run_loaded(loaded.mod, loaded.seed).0
 }
 
 fn bench_compiled(name: String, source: String) -> Outcome {

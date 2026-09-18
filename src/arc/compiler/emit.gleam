@@ -231,7 +231,7 @@ pub fn module(
   let e = Emitter(..new_emitter(tree, root_scope_id), strict: True)
   let e = enter_root_scope(e)
 
-  use #(e, hoisted_funcs) <- result.try(collect_hoisted_funcs(e, stmts))
+  use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(e, stmts))
   let e = emit_hoisted_funcs(e, hoisted_funcs)
 
   use e <- result.try(case has_module_using {
@@ -286,10 +286,10 @@ type UsingItem {
 fn build_using_slots(
   e: Emitter,
   stmts: List(ast.StmtWithLine),
-) -> #(Emitter, UsingSlots, List(UsingItem)) {
-  let #(e, items_rev) =
-    list.fold(stmts, #(e, []), fn(acc, located) {
-      let #(e, items) = acc
+) -> #(UsingSlots, List(UsingItem), Emitter) {
+  let #(items_rev, e) =
+    list.fold(stmts, #([], e), fn(acc, located) {
+      let #(items, e) = acc
       case located.statement {
         ast.VariableDeclaration(kind: ast.Using, declarations:) ->
           lower_using_declarators(
@@ -307,7 +307,7 @@ fn build_using_slots(
             declarations,
             is_async: True,
           )
-        _ -> #(e, [PlainItem(located), ..items])
+        _ -> #([PlainItem(located), ..items], e)
       }
     })
   let items = list.reverse(items_rev)
@@ -318,8 +318,8 @@ fn build_using_slots(
         PlainItem(_) -> Error(Nil)
       }
     })
-  let #(e, slots) = make_using_slots(e, disposers)
-  #(e, slots, items)
+  let #(slots, e) = make_using_slots(e, disposers)
+  #(slots, items, e)
 }
 
 fn lower_using_declarators(
@@ -328,31 +328,30 @@ fn lower_using_declarators(
   line: Int,
   declarations: List(ast.VariableDeclarator),
   is_async is_async: Bool,
-) -> #(Emitter, List(UsingItem)) {
-  list.fold(declarations, #(e, items), fn(acc, decl) {
-    let #(e, items) = acc
+) -> #(List(UsingItem), Emitter) {
+  list.fold(declarations, #(items, e), fn(acc, decl) {
+    let #(items, e) = acc
     let assert ast.IdentifierPattern(name, ..) = decl.id
     let assert Some(init) = decl.init
-    let #(e, slot) = fresh_slot(e)
+    let #(slot, e) = fresh_slot(e)
     let resource =
       UsingResource(line:, name:, init:, disposer: Disposer(slot:, is_async:))
-    #(e, [ResourceItem(resource), ..items])
+    #([ResourceItem(resource), ..items], e)
   })
 }
 
 fn make_using_slots(
   e: Emitter,
   disposers: List(Disposer),
-) -> #(Emitter, UsingSlots) {
+) -> #(UsingSlots, Emitter) {
   let has_async = list.any(disposers, fn(d) { d.is_async })
-  let #(e, error_slot) = fresh_slot(e)
-  let #(e, has_error_slot) = fresh_slot(e)
-  let #(e, needs_await_slot) = fresh_slot(e)
-  let #(e, has_awaited_slot) = fresh_slot(e)
-  let #(e, call_result_slot) = fresh_slot(e)
-  let #(e, call_returned_slot) = fresh_slot(e)
+  let #(error_slot, e) = fresh_slot(e)
+  let #(has_error_slot, e) = fresh_slot(e)
+  let #(needs_await_slot, e) = fresh_slot(e)
+  let #(has_awaited_slot, e) = fresh_slot(e)
+  let #(call_result_slot, e) = fresh_slot(e)
+  let #(call_returned_slot, e) = fresh_slot(e)
   #(
-    e,
     UsingSlots(
       error_slot:,
       has_error_slot:,
@@ -363,6 +362,7 @@ fn make_using_slots(
       call_result_slot:,
       call_returned_slot:,
     ),
+    e,
   )
 }
 
@@ -389,9 +389,9 @@ fn emit_using_body(
   e: Emitter,
   items: List(UsingItem),
 ) -> Result(Emitter, EmitError) {
-  use #(e, _last_line) <- result.map(
-    list.try_fold(items, #(e, 0), fn(acc, item) {
-      let #(e, last_line) = acc
+  use #(_last_line, e) <- result.map(
+    list.try_fold(items, #(0, e), fn(acc, item) {
+      let #(last_line, e) = acc
       case item {
         ResourceItem(resource:) -> {
           let e = case resource.line == last_line {
@@ -399,14 +399,14 @@ fn emit_using_body(
             False -> set_line(e, resource.line)
           }
           use e <- result.map(emit_using_resource(e, resource))
-          #(e, resource.line)
+          #(resource.line, e)
         }
         PlainItem(located) -> {
           use e <- result.map(emit_stmt(
             set_line(e, located.line),
             located.statement,
           ))
-          #(e, 0)
+          #(0, e)
         }
       }
     }),
@@ -430,7 +430,7 @@ fn emit_using_resource(
 
 // [thrown, ..] -> [..]: err = has_err ? SuppressedError(thrown, err) : thrown
 fn emit_using_merge_error(e: Emitter, slots: UsingSlots) -> Emitter {
-  let #(e, skip) = fresh_label(e)
+  let #(skip, e) = fresh_label(e)
   e
   |> emit_scratch_get(slots.has_error_slot)
   |> emit_ir(IrJumpIfFalse(skip))
@@ -448,8 +448,8 @@ fn emit_using_try_merge(
   slots: UsingSlots,
   body: fn(Emitter) -> Emitter,
 ) -> Emitter {
-  let #(e, catch_label) = fresh_label(e)
-  let #(e, end_label) = fresh_label(e)
+  let #(catch_label, e) = fresh_label(e)
+  let #(end_label, e) = fresh_label(e)
   e
   |> emit_ir(IrPushTry(catch_label, CatchOnly))
   |> body
@@ -466,7 +466,7 @@ fn emit_using_flush_pending(
   slots: UsingSlots,
   reset reset: Bool,
 ) -> Emitter {
-  let #(e, skip) = fresh_label(e)
+  let #(skip, e) = fresh_label(e)
   let e =
     e
     |> emit_scratch_get(slots.needs_await_slot)
@@ -506,7 +506,7 @@ fn emit_using_dispose_sync(
   slots: UsingSlots,
   slot: Int,
 ) -> Emitter {
-  let #(e, skip) = fresh_label(e)
+  let #(skip, e) = fresh_label(e)
   let e = emit_jump_unless_strict_neq(e, slot, mk_null(), skip)
   let e = emit_jump_unless_strict_neq(e, slot, mk_undefined(), skip)
   let e = case slots.has_async {
@@ -529,9 +529,9 @@ fn emit_using_dispose_async(
   slots: UsingSlots,
   slot: Int,
 ) -> Emitter {
-  let #(e, skip) = fresh_label(e)
-  let #(e, no_method) = fresh_label(e)
-  let #(e, after_await) = fresh_label(e)
+  let #(skip, e) = fresh_label(e)
+  let #(no_method, e) = fresh_label(e)
+  let #(after_await, e) = fresh_label(e)
   let e = emit_jump_unless_strict_neq(e, slot, mk_null(), skip)
   let e = emit_jump_unless_strict_neq(e, slot, mk_undefined(), no_method)
   let e =
@@ -582,7 +582,7 @@ fn emit_using_dispose(e: Emitter, slots: UsingSlots) -> Emitter {
     False -> e
     True -> emit_using_flush_pending(e, slots, reset: False)
   }
-  let #(e, end) = fresh_label(e)
+  let #(end, e) = fresh_label(e)
   e
   |> emit_scratch_get(slots.has_error_slot)
   |> emit_ir(IrJumpIfFalse(end))
@@ -614,10 +614,10 @@ fn emit_using_record_error(e: Emitter, slots: UsingSlots) -> Emitter {
 fn single_using_slots(
   e: Emitter,
   is_async is_async: Bool,
-) -> #(Emitter, UsingSlots, Int) {
-  let #(e, slot) = fresh_slot(e)
-  let #(e, slots) = make_using_slots(e, [Disposer(slot:, is_async:)])
-  #(e, slots, slot)
+) -> #(UsingSlots, Int, Emitter) {
+  let #(slot, e) = fresh_slot(e)
+  let #(slots, e) = make_using_slots(e, [Disposer(slot:, is_async:)])
+  #(slots, slot, e)
 }
 
 type ForOfUsing {
@@ -646,7 +646,7 @@ fn emit_for_of_using_body(
   body: ast.Statement,
 ) -> Result(Emitter, EmitError) {
   let ForOfUsing(name:, is_async:) = binding
-  let #(e, slots, slot) = single_using_slots(e, is_async)
+  let #(slots, slot, e) = single_using_slots(e, is_async)
   let e = emit_using_prelude(e, slots)
   use e <- emit_using_try_wrap(e, slots)
   let e = emit_var_get(e, name)
@@ -669,7 +669,7 @@ fn emit_for_using_classic(
   let head = [
     ast.StmtWithLine(0, ast.VariableDeclaration(kind:, declarations:)),
   ]
-  let #(e, slots, items) = build_using_slots(e, head)
+  let #(slots, items, e) = build_using_slots(e, head)
   let e = emit_using_prelude(e, slots)
   use e <- emit_using_try_wrap(e, slots)
   use e <- result.try(emit_using_body(e, items))
@@ -683,10 +683,10 @@ fn emit_classic_loop(
   body: ast.Statement,
   per_iter: List(String),
 ) -> Result(Emitter, EmitError) {
-  let #(e, loop_start) = fresh_label(e)
-  let #(e, loop_test) = fresh_label(e)
-  let #(e, loop_continue) = fresh_label(e)
-  let #(e, loop_end) = fresh_label(e)
+  let #(loop_start, e) = fresh_label(e)
+  let #(loop_test, e) = fresh_label(e)
+  let #(loop_continue, e) = fresh_label(e)
+  let #(loop_end, e) = fresh_label(e)
   let e = push_loop(e, loop_end, loop_continue, NoIter)
   // bottom-tested loop; test duplicated as entry guard when cheap
   use e <- result.try(case condition {
@@ -755,11 +755,11 @@ fn emit_module_using_top(
   e: Emitter,
   stmts: List(ast.StmtWithLine),
 ) -> Result(Emitter, EmitError) {
-  let #(e, slots, items) = build_using_slots(e, stmts)
+  let #(slots, items, e) = build_using_slots(e, stmts)
   let e = emit_using_prelude(e, slots)
 
-  let #(e, catch_label) = fresh_label(e)
-  let #(e, dispose_label) = fresh_label(e)
+  let #(catch_label, e) = fresh_label(e)
+  let #(dispose_label, e) = fresh_label(e)
 
   let e = emit_ir(e, IrPushTry(catch_label, CatchOnly))
   let e = push_barrier(e, pop_try: 1, label_finally: None, drop: 0)
@@ -812,7 +812,7 @@ fn emit_top_level_body(
         emit_op(e, opcode.DeclareGlobalLex(name, is_const))
       })
   }
-  use #(e, hoisted_funcs) <- result.try(collect_hoisted_funcs(e, stmts))
+  use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(e, stmts))
   let e = emit_hoisted_funcs(e, hoisted_funcs)
   use e <- result.try(emit_stmts_tail(e, stmts))
   let #(code, constants, children) = finish(e)
@@ -902,7 +902,7 @@ type ScopeSave {
 }
 
 // no ir marker, only the cursor moves; emits the child's binding prologue
-fn enter_scope(e: Emitter, in_block in_block: Bool) -> #(Emitter, ScopeSave) {
+fn enter_scope(e: Emitter, in_block in_block: Bool) -> #(ScopeSave, Emitter) {
   case e.scope_cursor {
     [child_id, ..parent_rest] -> {
       let save =
@@ -918,13 +918,13 @@ fn enter_scope(e: Emitter, in_block in_block: Bool) -> #(Emitter, ScopeSave) {
           scope_cursor: block_child_scopes(e.scope_tree, child_id),
           in_block:,
         )
-      #(emit_binding_prologue(e, child_id), save)
+      #(save, emit_binding_prologue(e, child_id))
     }
     // scope omitted by the analyzer: stay in place, no prologue, no cursor change
     [] -> {
       let save =
         ScopeSave(scope: e.current_scope, cursor: [], in_block: e.in_block)
-      #(Emitter(..e, in_block:), save)
+      #(save, Emitter(..e, in_block:))
     }
   }
 }
@@ -943,7 +943,7 @@ fn in_child_scope(
   in_block in_block: Bool,
   body body: fn(Emitter) -> Result(Emitter, EmitError),
 ) -> Result(Emitter, EmitError) {
-  let #(e, save) = enter_scope(e, in_block:)
+  let #(save, e) = enter_scope(e, in_block:)
   use e <- result.map(body(e))
   leave_scope(e, save)
 }
@@ -952,13 +952,13 @@ fn in_child_scope(
 fn enter_for_scope(
   e: Emitter,
   has_lex_head has_lex_head: Bool,
-) -> #(Emitter, Option(ScopeSave)) {
+) -> #(Option(ScopeSave), Emitter) {
   case has_lex_head {
     True -> {
-      let #(e, save) = enter_scope(e, in_block: e.in_block)
-      #(e, Some(save))
+      let #(save, e) = enter_scope(e, in_block: e.in_block)
+      #(Some(save), e)
     }
-    False -> #(e, None)
+    False -> #(None, e)
   }
 }
 
@@ -1274,8 +1274,8 @@ fn emit_var_typeof(e: Emitter, name: String) -> Emitter {
   case crossed {
     [] -> direct(e)
     _ -> {
-      let #(e, hit) = fresh_label(e)
-      let #(e, end) = fresh_label(e)
+      let #(hit, e) = fresh_label(e)
+      let #(end, e) = fresh_label(e)
       let e =
         list.fold(crossed, e, fn(e, w) {
           e
@@ -1314,14 +1314,14 @@ type VarRef {
 }
 
 // §13.15.2 1.a: resolve before the rhs; stash the with base in a scratch slot
-fn emit_var_ref_make(e: Emitter, name: String) -> #(Emitter, VarRef) {
+fn emit_var_ref_make(e: Emitter, name: String) -> #(VarRef, Emitter) {
   let e = track_arguments_ref(e, name)
   let #(crossed, fallback) = split_with_chain(resolve(e, name))
   case crossed {
-    [] -> #(e, VarRef(name:, fallback:, base_slot: None, read: False))
+    [] -> #(VarRef(name:, fallback:, base_slot: None, read: False), e)
     _ -> {
-      let #(e, slot) = acquire_ref_slot(e)
-      let #(e, lref) = fresh_label(e)
+      let #(slot, e) = acquire_ref_slot(e)
+      let #(lref, e) = fresh_label(e)
       let e =
         list.fold(crossed, e, fn(e, w) {
           e
@@ -1332,8 +1332,8 @@ fn emit_var_ref_make(e: Emitter, name: String) -> #(Emitter, VarRef) {
       let e = push_const(e, mk_undefined())
       let e = emit_ir(e, IrLabel(lref))
       #(
-        emit_op(e, opcode.PutLocal(slot)),
         VarRef(name:, fallback:, base_slot: Some(slot), read: False),
+        emit_op(e, opcode.PutLocal(slot)),
       )
     }
   }
@@ -1343,7 +1343,7 @@ fn emit_var_ref_get(e: Emitter, ref: VarRef) -> Emitter {
   case ref.base_slot {
     None -> emit_direct_get(e, ref.fallback)
     Some(slot) -> {
-      let #(e, got) = fresh_label(e)
+      let #(got, e) = fresh_label(e)
       let e = emit_op(e, opcode.GetLocal(slot))
       let e = emit_ir(e, opcode.IrWithGetRefValue(ref.name, got))
       let e = emit_direct_get(e, ref.fallback)
@@ -1357,7 +1357,7 @@ fn emit_var_ref_put(e: Emitter, ref: VarRef) -> Emitter {
     None -> emit_direct_put(e, ref.fallback, ref.name, after_read: ref.read)
     Some(slot) -> {
       let e = Emitter(..e, free_ref_slots: [slot, ..e.free_ref_slots])
-      let #(e, done) = fresh_label(e)
+      let #(done, e) = fresh_label(e)
       let e = emit_op(e, opcode.GetLocal(slot))
       let e = emit_ir(e, opcode.IrWithPutRefValue(ref.name, done))
       let e = emit_direct_put(e, ref.fallback, ref.name, after_read: ref.read)
@@ -1372,7 +1372,7 @@ fn with_identifier_write(
   name: String,
   body: fn(Emitter) -> Result(Emitter, EmitError),
 ) -> Result(Emitter, EmitError) {
-  let #(e, ref) = emit_var_ref_make(e, name)
+  let #(ref, e) = emit_var_ref_make(e, name)
   use e <- result.map(body(e))
   e |> emit_op(opcode.Dup) |> emit_var_ref_put(ref)
 }
@@ -1383,7 +1383,7 @@ fn with_identifier_read_write(
   name: String,
   body: fn(Emitter) -> Result(Emitter, EmitError),
 ) -> Result(Emitter, EmitError) {
-  let #(e, ref) = emit_var_ref_make(e, name)
+  let #(ref, e) = emit_var_ref_make(e, name)
   let e = emit_var_ref_get(e, ref)
   use e <- result.map(body(e))
   e |> emit_op(opcode.Dup) |> emit_var_ref_put(VarRef(..ref, read: True))
@@ -1481,7 +1481,7 @@ fn emit_with_chain(
   case crossed {
     [] -> fallback(e)
     _ -> {
-      let #(e, done) = fresh_label(e)
+      let #(done, e) = fresh_label(e)
       let e =
         list.fold(crossed, e, fn(e, w) {
           e |> emit_slot_get(w) |> emit_ir(with_op(done))
@@ -1493,16 +1493,16 @@ fn emit_with_chain(
 }
 
 // reuse a freed scratch slot (lifo) or mint a new one
-fn acquire_ref_slot(e: Emitter) -> #(Emitter, Int) {
+fn acquire_ref_slot(e: Emitter) -> #(Int, Emitter) {
   case e.free_ref_slots {
-    [slot, ..rest] -> #(Emitter(..e, free_ref_slots: rest), slot)
+    [slot, ..rest] -> #(slot, Emitter(..e, free_ref_slots: rest))
     [] -> fresh_slot(e)
   }
 }
 
-fn add_constant(e: Emitter, val: JsVal) -> #(Emitter, Int) {
+fn add_constant(e: Emitter, val: JsVal) -> #(Int, Emitter) {
   case dict.get(e.constants_map, val) {
-    Ok(idx) -> #(e, idx)
+    Ok(idx) -> #(idx, e)
     Error(Nil) -> {
       let idx = e.next_const
       let e =
@@ -1512,13 +1512,13 @@ fn add_constant(e: Emitter, val: JsVal) -> #(Emitter, Int) {
           constants_list: [val, ..e.constants_list],
           next_const: idx + 1,
         )
-      #(e, idx)
+      #(idx, e)
     }
   }
 }
 
 fn push_const(e: Emitter, val: JsVal) -> Emitter {
-  let #(e, idx) = add_constant(e, val)
+  let #(idx, e) = add_constant(e, val)
   emit_op(e, opcode.PushConst(idx))
 }
 
@@ -1555,15 +1555,15 @@ fn emit_put_field(e: Emitter, name: String) -> Emitter {
   }
 }
 
-fn fresh_label(e: Emitter) -> #(Emitter, LabelId) {
+fn fresh_label(e: Emitter) -> #(LabelId, Emitter) {
   let label = e.next_label
-  #(Emitter(..e, next_label: label + 1), opcode.LabelId(label))
+  #(opcode.LabelId(label), Emitter(..e, next_label: label + 1))
 }
 
 // anonymous slot past all named bindings, never captured
-fn fresh_slot(e: Emitter) -> #(Emitter, Int) {
+fn fresh_slot(e: Emitter) -> #(Int, Emitter) {
   let #(tree, slot) = scope.alloc_scratch(e.scope_tree, e.fn_scope)
-  #(Emitter(..e, scope_tree: tree), slot)
+  #(slot, Emitter(..e, scope_tree: tree))
 }
 
 fn push_frame(e: Emitter, frame: Frame) -> Emitter {
@@ -1665,10 +1665,10 @@ fn emit_try_catch_finally(
   emit_finally: fn(Emitter) -> Result(Emitter, EmitError),
   emit_catch: fn(Emitter, LabelId, LabelId) -> Result(Emitter, EmitError),
 ) -> Result(Emitter, EmitError) {
-  let #(e, throw_label) = fresh_label(e)
-  let #(e, catch_label) = fresh_label(e)
-  let #(e, fin_label) = fresh_label(e)
-  let #(e, end_label) = fresh_label(e)
+  let #(throw_label, e) = fresh_label(e)
+  let #(catch_label, e) = fresh_label(e)
+  let #(fin_label, e) = fresh_label(e)
+  let #(end_label, e) = fresh_label(e)
 
   let e = emit_ir(e, IrPushTry(throw_label, Finally(fin_label)))
   let e = emit_ir(e, IrPushTry(catch_label, CatchOnly))
@@ -1772,8 +1772,8 @@ fn emit_cross_frame(
 
 // §7.4.13 async iterator close, normal completion: [iter, ..] -> [..]
 fn emit_async_iterator_close(e: Emitter) -> Emitter {
-  let #(e, no_ret) = fresh_label(e)
-  let #(e, closed) = fresh_label(e)
+  let #(no_ret, e) = fresh_label(e)
+  let #(closed, e) = fresh_label(e)
   e
   |> emit_ir(IrGetFieldKeep("return"))
   |> emit_op(opcode.Dup)
@@ -1839,7 +1839,7 @@ fn rewrite_apply_arguments(
   }
 }
 
-fn add_child_function(e: Emitter, child: CompiledChild) -> #(Emitter, Int) {
+fn add_child_function(e: Emitter, child: CompiledChild) -> #(Int, Emitter) {
   let idx = e.next_func
   // arrow refs propagate to the parent; non-arrows own their slots
   let #(lexical_refs, references_arguments, arguments_escape) = case
@@ -1853,6 +1853,7 @@ fn add_child_function(e: Emitter, child: CompiledChild) -> #(Emitter, Int) {
     False -> #(e.lexical_refs, e.references_arguments, e.arguments_escape)
   }
   #(
+    idx,
     Emitter(
       ..e,
       functions: [child, ..e.functions],
@@ -1861,7 +1862,6 @@ fn add_child_function(e: Emitter, child: CompiledChild) -> #(Emitter, Int) {
       references_arguments:,
       arguments_escape:,
     ),
-    idx,
   )
 }
 
@@ -1961,20 +1961,20 @@ fn emit_super_key(
 fn emit_member_get_keep(
   e: Emitter,
   target: AssignTarget,
-) -> Result(#(Emitter, fn(Emitter) -> Emitter), EmitError) {
+) -> Result(#(fn(Emitter) -> Emitter, Emitter), EmitError) {
   case target {
     SuperMember(property:) -> {
       use e <- result.map(emit_super_ref(e, property))
-      #(emit_op(e, opcode.GetSuperValueKeep), emit_op(_, opcode.PutSuperValue))
+      #(emit_op(_, opcode.PutSuperValue), emit_op(e, opcode.GetSuperValueKeep))
     }
     StaticMember(object:, prop:) -> {
       use e <- result.map(emit_expr(e, object))
-      #(emit_get_field_keep(e, prop), emit_put_field(_, prop))
+      #(emit_put_field(_, prop), emit_get_field_keep(e, prop))
     }
     ComputedMember(object:, key:) -> {
       use e <- result.try(emit_expr(e, object))
       use e <- result.map(emit_expr(e, key))
-      #(emit_op(e, opcode.GetElemKeep), emit_op(_, opcode.PutElem))
+      #(emit_op(_, opcode.PutElem), emit_op(e, opcode.GetElemKeep))
     }
     PlainTarget(_) -> Error(NonMemberLValue)
   }
@@ -1982,7 +1982,7 @@ fn emit_member_get_keep(
 
 // stack-neutral; skipped when the const is undefined (no fields)
 fn emit_field_init_call(e: Emitter) -> Emitter {
-  let #(e, skip) = fresh_label(e)
+  let #(skip, e) = fresh_label(e)
   e
   |> emit_var_get(class_fields_init)
   |> emit_op(opcode.Dup)
@@ -2043,7 +2043,7 @@ fn emit_stmt_tail_completion(
   e: Emitter,
   stmt: ast.Statement,
 ) -> Result(Emitter, EmitError) {
-  let #(e, slot) = fresh_slot(e)
+  let #(slot, e) = fresh_slot(e)
   let saved_var = e.completion_var
   let e = emit_store_const(e, slot, mk_undefined())
   let e = Emitter(..e, completion_var: Some(slot))
@@ -2099,15 +2099,15 @@ fn emit_block_using(
   body: List(ast.StmtWithLine),
   tail tail: Bool,
 ) -> Result(Emitter, EmitError) {
-  let #(e, slots, items) = build_using_slots(e, body)
+  let #(slots, items, e) = build_using_slots(e, body)
   let e = emit_using_prelude(e, slots)
   let saved_cv = e.completion_var
-  let #(e, cv) = case tail {
-    False -> #(e, None)
+  let #(cv, e) = case tail {
+    False -> #(None, e)
     True -> {
-      let #(e, slot) = fresh_slot(e)
+      let #(slot, e) = fresh_slot(e)
       let e = emit_store_const(e, slot, mk_undefined())
-      #(Emitter(..e, completion_var: Some(slot)), Some(slot))
+      #(Some(slot), Emitter(..e, completion_var: Some(slot)))
     }
   }
   use e <- result.map({
@@ -2126,7 +2126,7 @@ fn emit_block_declarations(
   e: Emitter,
   body: List(ast.StmtWithLine),
 ) -> Result(Emitter, EmitError) {
-  use #(e, funcs) <- result.map(collect_hoisted_funcs(e, body))
+  use #(funcs, e) <- result.map(collect_hoisted_funcs(e, body))
   list.fold(funcs, e, fn(e, hf) {
     let #(name, idx) = hf
     let e = emit_op(e, opcode.MakeClosure(idx))
@@ -2151,8 +2151,8 @@ fn emit_if(
   branch: fn(Emitter, ast.Statement) -> Result(Emitter, EmitError),
   none: fn(Emitter) -> Emitter,
 ) -> Result(Emitter, EmitError) {
-  let #(e, else_label) = fresh_label(e)
-  let #(e, end_label) = fresh_label(e)
+  let #(else_label, e) = fresh_label(e)
+  let #(end_label, e) = fresh_label(e)
   use e <- result.try(emit_test(e, condition, jump_when: False, to: else_label))
   use e <- result.try(branch(e, block_wrap_fn_decl(consequent)))
   let e = emit_ir(e, IrJump(end_label))
@@ -2171,8 +2171,8 @@ fn emit_try_catch(
   tail tail: Bool,
 ) -> Result(Emitter, EmitError) {
   let ast.CatchClause(param:, body:) = clause
-  let #(e, catch_label) = fresh_label(e)
-  let #(e, end_label) = fresh_label(e)
+  let #(catch_label, e) = fresh_label(e)
+  let #(end_label, e) = fresh_label(e)
 
   let e = emit_ir(e, IrPushTry(catch_label, CatchOnly))
   let e = push_barrier(e, pop_try: 1, label_finally: None, drop: 0)
@@ -2252,10 +2252,10 @@ fn emit_stmts_tail_value(
 fn collect_hoisted_funcs(
   e: Emitter,
   stmts: List(ast.StmtWithLine),
-) -> Result(#(Emitter, List(#(String, Int))), EmitError) {
-  use #(e, funcs_rev) <- result.map(
-    list.try_fold(stmts, #(e, []), fn(acc, located) {
-      let #(e, funcs) = acc
+) -> Result(#(List(#(String, Int)), Emitter), EmitError) {
+  use #(funcs_rev, e) <- result.map(
+    list.try_fold(stmts, #([], e), fn(acc, located) {
+      let #(funcs, e) = acc
       case ast_util.peel_labels(located.statement) {
         ast.FunctionDeclaration(
           Some(ast.NamedBinding(name, _)),
@@ -2264,21 +2264,21 @@ fn collect_hoisted_funcs(
           is_gen,
           is_async,
         ) -> {
-          use #(e, child) <- result.map(compile_function_body(
+          use #(child, e) <- result.map(compile_function_body(
             e,
             Some(name),
             params,
             StmtsBody(body),
             shape: FnDecl(is_gen:, is_async:),
           ))
-          let #(e, idx) = add_child_function(e, child)
-          #(e, [#(name, idx), ..funcs])
+          let #(idx, e) = add_child_function(e, child)
+          #([#(name, idx), ..funcs], e)
         }
-        _ -> Ok(#(e, funcs))
+        _ -> Ok(#(funcs, e))
       }
     }),
   )
-  #(e, list.reverse(funcs_rev))
+  #(list.reverse(funcs_rev), e)
 }
 
 fn emit_hoisted_funcs(
@@ -2422,7 +2422,7 @@ fn compile_function_body(
   params: List(ast.Pattern),
   body: FnBody,
   shape shape: FunctionShape,
-) -> Result(#(Emitter, CompiledChild), EmitError) {
+) -> Result(#(CompiledChild, Emitter), EmitError) {
   let FnTraits(is_arrow:, is_generator:, is_async:, is_constructor:, self_name:) =
     traits_of(shape)
   // exhausted cursor means analyzer walk-order desync, crash
@@ -2483,16 +2483,16 @@ fn compile_function_body(
   use e <- result.try(emit_parameter_bindings(e, layout))
 
   // §10.2.11 step 28: non-simple params get their own body var scope
-  let #(e, body_save) = case layout.non_simple_fixed {
-    False -> #(e, None)
+  let #(body_save, e) = case layout.non_simple_fixed {
+    False -> #(None, e)
     True -> {
-      let #(e, save) = enter_scope(e, in_block: e.in_block)
+      let #(save, e) = enter_scope(e, in_block: e.in_block)
       let e = emit_body_param_copies(e, save.scope, layout.bindings, stmts)
-      #(e, Some(save))
+      #(Some(save), e)
     }
   }
 
-  use #(e, hoisted_funcs) <- result.try(collect_hoisted_funcs(e, stmts))
+  use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(e, stmts))
   let e = emit_hoisted_funcs(e, hoisted_funcs)
 
   // generators suspend here before the body; async runs eagerly
@@ -2513,7 +2513,7 @@ fn compile_function_body(
       // directives stay outside the dispose try
       let #(directives, rest) = ast_util.split_directives(stmts)
       use e <- result.try(emit_stmts(e, directives))
-      let #(e, slots, items) = build_using_slots(e, rest)
+      let #(slots, items, e) = build_using_slots(e, rest)
       let e = emit_using_prelude(e, slots)
       use e <- emit_using_try_wrap(e, slots)
       emit_using_body(e, items)
@@ -2552,8 +2552,8 @@ fn compile_function_body(
     )
   // take the child's tree back: it holds scratch-slot local_count bumps
   Ok(#(
-    Emitter(..parent, scope_tree: e.scope_tree, next_site: e.next_site),
     child,
+    Emitter(..parent, scope_tree: e.scope_tree, next_site: e.next_site),
   ))
 }
 
@@ -2711,9 +2711,9 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
       emit_classic_loop(e, Some(condition), None, body, [])
 
     ast.DoWhileStatement(condition, body) -> {
-      let #(e, loop_start) = fresh_label(e)
-      let #(e, loop_cond) = fresh_label(e)
-      let #(e, loop_end) = fresh_label(e)
+      let #(loop_start, e) = fresh_label(e)
+      let #(loop_cond, e) = fresh_label(e)
+      let #(loop_end, e) = fresh_label(e)
       let e = push_loop(e, loop_end, loop_cond, NoIter)
       let e = emit_ir(e, IrLabel(loop_start))
       use e <- result.try(emit_stmt(e, body))
@@ -2745,21 +2745,21 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
       emit_for_using_classic(e, kind, declarations, condition, update, body)
 
     ast.ForStatement(init, condition, update, body) -> {
-      let #(e, save) =
+      let #(save, e) =
         enter_for_scope(e, ast_util.for_classic_init_is_lex(init))
-      use #(e, per_iter) <- result.try(case init {
+      use #(per_iter, e) <- result.try(case init {
         Some(ast.ForInitExpression(expr)) -> {
           use e <- result.map(emit_expr(e, expr))
-          #(emit_op(e, opcode.Pop), [])
+          #([], emit_op(e, opcode.Pop))
         }
         Some(ast.ForInitDeclaration(kind:, declarations:)) -> {
           use e <- result.map(emit_stmt(
             e,
             ast.VariableDeclaration(kind:, declarations:),
           ))
-          #(e, ast_util.for_let_names(kind, declarations))
+          #(ast_util.for_let_names(kind, declarations), e)
         }
-        Some(ast.ForInitPattern(_)) | None -> Ok(#(e, []))
+        Some(ast.ForInitPattern(_)) | None -> Ok(#([], e))
       })
       use e <- result.map(emit_classic_loop(
         e,
@@ -2808,7 +2808,7 @@ fn emit_stmt(e: Emitter, stmt: ast.Statement) -> Result(Emitter, EmitError) {
           emit_stmt(e, body)
         }
         _ -> {
-          let #(e, break_target) = fresh_label(e)
+          let #(break_target, e) = fresh_label(e)
           let e = push_frame(e, LabeledBlockFrame(break_target:, label:))
           use e <- result.map(emit_stmt(e, body))
           let e = pop_frame(e)
@@ -2911,9 +2911,9 @@ fn emit_try(
     ast.TryCatch(clause) -> emit_try_catch(e, block, clause, tail: False)
 
     ast.TryFinally(finally_body) -> {
-      let #(e, throw_label) = fresh_label(e)
-      let #(e, fin_label) = fresh_label(e)
-      let #(e, end_label) = fresh_label(e)
+      let #(throw_label, e) = fresh_label(e)
+      let #(fin_label, e) = fresh_label(e)
+      let #(end_label, e) = fresh_label(e)
 
       let e = emit_ir(e, IrPushTry(throw_label, Finally(fin_label)))
       let e =
@@ -2959,7 +2959,7 @@ fn emit_with(
 ) -> Result(Emitter, EmitError) {
   use e <- result.try(emit_expr(e, object))
   let e = emit_op(e, opcode.ToObject)
-  let #(e, save) = enter_scope(e, in_block: e.in_block)
+  let #(save, e) = enter_scope(e, in_block: e.in_block)
   // non-With kind here means cursor desync, crash
   let with_scope = scope.get(e.scope_tree, e.current_scope)
   let assert scope.With(holder: synth) = with_scope.kind
@@ -2987,9 +2987,9 @@ fn emit_chain_root(
   e: Emitter,
   expr: ast.Expression,
 ) -> Result(Emitter, EmitError) {
-  let #(e, nullish_with_base) = fresh_label(e)
-  let #(e, nullish_callee_pair) = fresh_label(e)
-  let #(e, end_label) = fresh_label(e)
+  let #(nullish_with_base, e) = fresh_label(e)
+  let #(nullish_callee_pair, e) = fresh_label(e)
+  let #(end_label, e) = fresh_label(e)
   let exits = ChainExits(nullish_with_base:, nullish_callee_pair:)
   use e <- result.map(emit_chain(e, expr, exits))
   let e = emit_ir(e, IrJump(end_label))
@@ -3028,12 +3028,12 @@ fn emit_chain(
     }
     // non-optional call after an optional link, e.g. a?.b.m(x)
     ast.CallExpression(_, callee, args) -> {
-      use #(e, form) <- result.try(emit_chain_callee(e, callee, exits))
+      use #(form, e) <- result.try(emit_chain_callee(e, callee, exits))
       emit_call_args(e, args, form)
     }
     // f?.(x): also check the function value
     ast.OptionalCallExpression(_, callee, args) -> {
-      use #(e, form) <- result.try(emit_chain_callee(e, callee, exits))
+      use #(form, e) <- result.try(emit_chain_callee(e, callee, exits))
       let e = emit_op(e, opcode.Dup)
       let exit = case form {
         MethodCall -> exits.nullish_callee_pair
@@ -3068,26 +3068,26 @@ fn emit_chain_callee(
   e: Emitter,
   callee: ast.Expression,
   exits: ChainExits,
-) -> Result(#(Emitter, CallForm), EmitError) {
+) -> Result(#(CallForm, Emitter), EmitError) {
   case callee {
     ast.MemberExpression(_, ast.SuperExpression(_), property) -> {
       use e <- result.map(emit_super_method_ref(e, property))
-      #(e, MethodCall)
+      #(MethodCall, e)
     }
     ast.MemberExpression(_, obj, ast.Dot(name:, ..))
     | ast.OptionalMemberExpression(_, obj, ast.Dot(name:, ..)) -> {
       use e <- result.map(emit_chain_object(e, callee, obj, exits))
-      #(emit_get_field_keep(e, name), MethodCall)
+      #(MethodCall, emit_get_field_keep(e, name))
     }
     ast.MemberExpression(_, obj, ast.Bracket(key))
     | ast.OptionalMemberExpression(_, obj, ast.Bracket(key)) -> {
       use e <- result.try(emit_chain_object(e, callee, obj, exits))
       use e <- result.map(emit_expr(e, key))
-      #(emit_get_elem_method(e), MethodCall)
+      #(MethodCall, emit_get_elem_method(e))
     }
     other -> {
       use e <- result.map(emit_chain(e, other, exits))
-      #(e, PlainCall)
+      #(PlainCall, e)
     }
   }
 }
@@ -3135,7 +3135,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     }
 
     ast.LogicalExpression(_, op, left, right) -> {
-      let #(e, end_label) = fresh_label(e)
+      let #(end_label, e) = fresh_label(e)
       use e <- result.try(emit_expr(e, left))
       let e = emit_short_circuit_test(e, op, end_label)
       let e = emit_op(e, opcode.Pop)
@@ -3180,8 +3180,8 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.CallExpression(_, callee, args) -> emit_call(e, expr, callee, args)
 
     ast.ConditionalExpression(_, condition, consequent, alternate) -> {
-      let #(e, else_label) = fresh_label(e)
-      let #(e, end_label) = fresh_label(e)
+      let #(else_label, e) = fresh_label(e)
+      let #(end_label, e) = fresh_label(e)
       use e <- result.try(emit_test(
         e,
         condition,
@@ -3413,7 +3413,7 @@ fn emit_update(
       Ok(emit_ir(e, IrBinOp(bin_kind)))
     }
     ast.Identifier(name:, ..) -> {
-      let #(e, ref) = emit_var_ref_make(e, name)
+      let #(ref, e) = emit_var_ref_make(e, name)
       let e = emit_var_ref_get(e, ref)
       let e = emit_op(e, opcode.UnaryOp(opcode.Pos))
       let e = emit_op(e, opcode.Dup)
@@ -3423,7 +3423,7 @@ fn emit_update(
     }
     // ToNumeric applies to the old value; postfix stashes it in a scratch slot
     ast.MemberExpression(..) -> {
-      use #(e, put) <- result.map(emit_member_get_keep(
+      use #(put, e) <- result.map(emit_member_get_keep(
         e,
         classify_assign_target(argument),
       ))
@@ -3436,7 +3436,7 @@ fn emit_update(
           |> put
         False -> {
           // save old aside, write new, recover old as the value
-          let #(e, old) = fresh_slot(e)
+          let #(old, e) = fresh_slot(e)
           e
           |> emit_op(opcode.Dup)
           |> emit_scratch_put(old)
@@ -3527,7 +3527,7 @@ fn emit_assignment(
     _, ast.MemberExpression(..) ->
       case compound_to_binop(op) {
         Ok(bin_kind) -> {
-          use #(e, put) <- result.try(emit_member_get_keep(
+          use #(put, e) <- result.try(emit_member_get_keep(
             e,
             classify_assign_target(target),
           ))
@@ -3690,9 +3690,9 @@ fn emit_yield(e: Emitter, is_delegate is_delegate: Bool) -> Emitter {
       let e = emit_op(e, opcode.GetAsyncIterator)
       let e = emit_op(e, opcode.IteratorRecord)
       let e = push_const(e, mk_undefined())
-      let #(e, next_label) = fresh_label(e)
+      let #(next_label, e) = fresh_label(e)
       // the async-gen driver resumes at after_label when a forwarded throw finishes
-      let #(e, after_label) = fresh_label(e)
+      let #(after_label, e) = fresh_label(e)
       e
       |> emit_ir(IrLabel(next_label))
       |> emit_ir(IrAsyncYieldStarNext(after_label))
@@ -3708,13 +3708,13 @@ fn emit_template_literal(
   parts: ast.TemplateParts(String),
 ) -> Result(Emitter, EmitError) {
   // "a" + x + "b" + y + "c", skipping empty quasis
-  let #(e, started) = case parts.head, parts.tail {
-    "", [_, ..] -> #(e, False)
-    head, _ -> #(push_const(e, mk_string(head)), True)
+  let #(started, e) = case parts.head, parts.tail {
+    "", [_, ..] -> #(False, e)
+    head, _ -> #(True, push_const(e, mk_string(head)))
   }
-  use #(e, _) <- result.map(
-    list.try_fold(parts.tail, #(e, started), fn(acc, part) {
-      let #(e, started) = acc
+  use #(_, e) <- result.map(
+    list.try_fold(parts.tail, #(started, e), fn(acc, part) {
+      let #(started, e) = acc
       let #(expr, quasi) = part
       // ToString with string hint, not the + operator's default hint
       use e <- result.map(emit_expr(e, expr))
@@ -3724,10 +3724,10 @@ fn emit_template_literal(
         False -> e
       }
       case quasi {
-        "" -> #(e, True)
+        "" -> #(True, e)
         _ -> #(
-          emit_ir(push_const(e, mk_string(quasi)), IrBinOp(opcode.Add)),
           True,
+          emit_ir(push_const(e, mk_string(quasi)), IrBinOp(opcode.Add)),
         )
       }
     }),
@@ -3740,7 +3740,7 @@ fn emit_switch(
   discriminant: ast.Expression,
   cases: List(ast.SwitchCase),
 ) -> Result(Emitter, EmitError) {
-  let #(e, end_label) = fresh_label(e)
+  let #(end_label, e) = fresh_label(e)
 
   let e = push_switch(e, end_label)
 
@@ -3749,23 +3749,23 @@ fn emit_switch(
 
   // case block is one scope; parser put children in the same hoist order
   let case_stmts = ast_util.switch_case_stmts(cases)
-  let #(e, save) = enter_scope(e, in_block: True)
+  let #(save, e) = enter_scope(e, in_block: True)
   use e <- result.try(emit_block_declarations(e, case_stmts))
 
   // found_N trampolines pop the discriminant before jumping to the body
-  let #(e, arms_rev) =
-    list.fold(cases, #(e, []), fn(acc, c) {
-      let #(e, out) = acc
+  let #(arms_rev, e) =
+    list.fold(cases, #([], e), fn(acc, c) {
+      let #(out, e) = acc
       let ast.SwitchCase(condition:, consequent:) = c
-      let #(e, body) = fresh_label(e)
-      let #(e, match) = case condition {
+      let #(body, e) = fresh_label(e)
+      let #(match, e) = case condition {
         Some(expr) -> {
-          let #(e, found) = fresh_label(e)
-          #(e, Some(SwitchTest(expr:, found:)))
+          let #(found, e) = fresh_label(e)
+          #(Some(SwitchTest(expr:, found:)), e)
         }
-        None -> #(e, None)
+        None -> #(None, e)
       }
-      #(e, [SwitchArm(match:, body:, consequent:), ..out])
+      #([SwitchArm(match:, body:, consequent:), ..out], e)
     })
   let arms = list.reverse(arms_rev)
 
@@ -3873,10 +3873,10 @@ fn emit_named_expr(
 }
 
 fn register_closure(
-  compiled: Result(#(Emitter, CompiledChild), EmitError),
+  compiled: Result(#(CompiledChild, Emitter), EmitError),
 ) -> Result(Emitter, EmitError) {
-  use #(e, child) <- result.map(compiled)
-  let #(e, idx) = add_child_function(e, child)
+  use #(child, e) <- result.map(compiled)
+  let #(idx, e) = add_child_function(e, child)
   emit_op(e, opcode.MakeClosure(idx))
 }
 
@@ -4101,15 +4101,15 @@ fn emit_array_no_spread(
   elements: List(Option(ast.Expression)),
 ) -> Result(Emitter, EmitError) {
   let count = list.length(elements)
-  use #(e, _idx, holes_rev) <- result.map(
-    list.try_fold(elements, #(e, 0, []), fn(acc, elem) {
-      let #(e, idx, holes_rev) = acc
+  use #(_idx, holes_rev, e) <- result.map(
+    list.try_fold(elements, #(0, [], e), fn(acc, elem) {
+      let #(idx, holes_rev, e) = acc
       case elem {
         Some(expr) -> {
           use e <- result.map(emit_expr(e, expr))
-          #(e, idx + 1, holes_rev)
+          #(idx + 1, holes_rev, e)
         }
-        None -> Ok(#(e, idx + 1, [idx, ..holes_rev]))
+        None -> Ok(#(idx + 1, [idx, ..holes_rev], e))
       }
     }),
   )
@@ -4208,14 +4208,14 @@ fn emit_for_in(
   right: ast.Expression,
   body: ast.Statement,
 ) -> Result(Emitter, EmitError) {
-  let #(e, loop_start) = fresh_label(e)
-  let #(e, loop_continue) = fresh_label(e)
-  let #(e, cleanup) = fresh_label(e)
-  let #(e, loop_end) = fresh_label(e)
+  let #(loop_start, e) = fresh_label(e)
+  let #(loop_continue, e) = fresh_label(e)
+  let #(cleanup, e) = fresh_label(e)
+  let #(loop_end, e) = fresh_label(e)
 
   // match on kind: for (let {} of ..) binds no names but has a scope
   let has_lex = ast_util.for_classic_init_is_lex(Some(left))
-  let #(e, save) = enter_for_scope(e, has_lex)
+  let #(save, e) = enter_for_scope(e, has_lex)
 
   // known gap: §14.7.5.6 step 5 restore oldEnv not modeled (scope-head-lex-*.js)
   use e <- result.try(emit_expr(e, right))
@@ -4283,13 +4283,13 @@ fn emit_for_of_common(
   iterator: LoopIter,
   emit_loop_body: fn(Emitter, ForOfLabels) -> Result(Emitter, EmitError),
 ) -> Result(Emitter, EmitError) {
-  let #(e, loop_start) = fresh_label(e)
-  let #(e, loop_continue) = fresh_label(e)
-  let #(e, break_target) = fresh_label(e)
-  let #(e, body_threw) = fresh_label(e)
-  let #(e, end) = fresh_label(e)
+  let #(loop_start, e) = fresh_label(e)
+  let #(loop_continue, e) = fresh_label(e)
+  let #(break_target, e) = fresh_label(e)
+  let #(body_threw, e) = fresh_label(e)
+  let #(end, e) = fresh_label(e)
   let has_lex = ast_util.for_classic_init_is_lex(Some(left))
-  let #(e, save) = enter_for_scope(e, has_lex)
+  let #(save, e) = enter_for_scope(e, has_lex)
   use e <- result.try(emit_expr(e, right))
   // for await uses CatchOnly: its close needs an await the unwinder cannot do
   let #(get_iter, body_kind) = case iterator {
@@ -4319,7 +4319,7 @@ fn emit_for_of(
   use e, labels <- emit_for_of_common(e, left, right, SyncIter)
   let ForOfLabels(loop_start:, loop_continue:, break_target:, body_threw:, end:) =
     labels
-  let #(e, exhausted) = fresh_label(e)
+  let #(exhausted, e) = fresh_label(e)
   let e = emit_op(e, opcode.IteratorNext)
   // [done, value, iter|undef, ..base]
   let e = emit_ir(e, IrJumpIfTrue(exhausted))
@@ -4361,10 +4361,10 @@ fn emit_for_await_of(
   use e, labels <- emit_for_of_common(e, left, right, AsyncIter)
   let ForOfLabels(loop_start:, loop_continue:, break_target:, body_threw:, end:) =
     labels
-  let #(e, exhausted) = fresh_label(e)
-  let #(e, catch_next) = fresh_label(e)
-  let #(e, no_ret_thr) = fresh_label(e)
-  let #(e, rethrow) = fresh_label(e)
+  let #(exhausted, e) = fresh_label(e)
+  let #(catch_next, e) = fresh_label(e)
+  let #(no_ret_thr, e) = fresh_label(e)
+  let #(rethrow, e) = fresh_label(e)
 
   // F_next: errors in next/await/unwrap must not close (§14.7.5.6)
   let e = emit_ir(e, IrPushTry(catch_next, CatchOnly))
@@ -4526,7 +4526,7 @@ fn emit_default_if_undefined(
   default_expr: ast.Expression,
   target_name: Option(String),
 ) -> Result(Emitter, EmitError) {
-  let #(e, has_val) = fresh_label(e)
+  let #(has_val, e) = fresh_label(e)
   let e = emit_op(e, opcode.Dup)
   let e = push_const(e, mk_undefined())
   let e = emit_ir(e, IrBinOp(opcode.StrictEq))
@@ -4545,12 +4545,12 @@ fn emit_object_pattern(
   properties: List(prop),
   has_rest has_rest: Bool,
   emit_prop emit_prop: fn(Emitter, prop, Int) ->
-    Result(#(Emitter, Int), EmitError),
+    Result(#(Int, Emitter), EmitError),
 ) -> Result(Emitter, EmitError) {
   let e = emit_op(e, opcode.ToObject)
-  use #(e, _excluded_key_count) <- result.map(
-    list.try_fold(properties, #(e, 0), fn(acc, prop) {
-      let #(e, excluded_key_count) = acc
+  use #(_excluded_key_count, e) <- result.map(
+    list.try_fold(properties, #(0, e), fn(acc, prop) {
+      let #(excluded_key_count, e) = acc
       emit_prop(e, prop, excluded_key_count)
     }),
   )
@@ -4567,12 +4567,12 @@ fn stash_excluded_key(
   name: String,
   has_rest has_rest: Bool,
   excluded_key_count excluded_key_count: Int,
-) -> #(Emitter, Int) {
+) -> #(Int, Emitter) {
   case has_rest {
-    False -> #(e, excluded_key_count)
+    False -> #(excluded_key_count, e)
     True -> {
       let e = push_const(e, mk_string(name)) |> emit_op(opcode.Swap)
-      #(e, excluded_key_count + 1)
+      #(excluded_key_count + 1, e)
     }
   }
 }
@@ -4584,7 +4584,7 @@ fn emit_single_object_prop(
   binding_kind: BindingKind,
   has_rest has_rest: Bool,
   excluded_key_count excluded_key_count: Int,
-) -> Result(#(Emitter, Int), EmitError) {
+) -> Result(#(Int, Emitter), EmitError) {
   case prop {
     ast.PatternProperty(key: ast.KeyIdentifier(name:, ..), value:, ..)
     | ast.PatternProperty(key: ast.KeyString(value: name, ..), value:, ..) -> {
@@ -4610,7 +4610,7 @@ fn emit_single_object_prop(
       let e = emit_op(e, opcode.ObjectRestCopy(excluded_key_count))
       let ident = ast.IdentifierPattern(name:, span:)
       use e <- result.map(emit_destructuring_bind(e, ident, binding_kind))
-      #(e, 0)
+      #(0, e)
     }
   }
 }
@@ -4623,19 +4623,19 @@ fn emit_computed_key_prop(
   binding_kind: BindingKind,
   has_rest has_rest: Bool,
   excluded_key_count excluded_key_count: Int,
-) -> Result(#(Emitter, Int), EmitError) {
+) -> Result(#(Int, Emitter), EmitError) {
   let e = emit_op(e, opcode.Dup)
   use e <- result.try(emit_key(e))
   case has_rest {
     False -> {
       let e = emit_op(e, opcode.GetElem)
       use e <- result.map(emit_destructuring_bind(e, inner, binding_kind))
-      #(e, excluded_key_count)
+      #(excluded_key_count, e)
     }
     True -> {
       let e = emit_op(e, opcode.GetElemKeep)
       use e <- result.map(emit_destructuring_bind(e, inner, binding_kind))
-      #(emit_keep_computed_key(e), excluded_key_count + 1)
+      #(excluded_key_count + 1, emit_keep_computed_key(e))
     }
   }
 }
@@ -4762,7 +4762,7 @@ fn emit_array_assign_elements(
   e: Emitter,
   elements: List(Option(ast.Expression)),
   close_throw: LabelId,
-) -> Result(#(Emitter, Bool), EmitError) {
+) -> Result(#(Bool, Emitter), EmitError) {
   use e, el <- emit_array_pattern_elements(e, elements)
   case el {
     ast.SpreadElement(argument:, ..) ->
@@ -4772,7 +4772,7 @@ fn emit_array_assign_elements(
         e,
         ast_util.unwrap_parens(target),
       ))
-      #(e, False)
+      #(False, e)
     }
   }
 }
@@ -4822,7 +4822,7 @@ fn emit_array_assign_rest(
   e: Emitter,
   target: ast.Expression,
   close_throw: LabelId,
-) -> Result(#(Emitter, Bool), EmitError) {
+) -> Result(#(Bool, Emitter), EmitError) {
   case classify_assign_target(target) {
     // [iter] -> [obj, iter] -> swap -> PopTry -> IteratorRest -> PutField
     StaticMember(object:, prop:) -> {
@@ -4831,7 +4831,7 @@ fn emit_array_assign_rest(
       let e = emit_op(e, opcode.PopTry)
       let e = emit_op(e, opcode.IteratorRest)
       let e = emit_put_field(e, prop)
-      #(emit_op(e, opcode.Pop), True)
+      #(True, emit_op(e, opcode.Pop))
     }
     // key may throw, so re-arm the close guard with iter back on top
     ComputedMember(object:, key:) -> {
@@ -4844,14 +4844,14 @@ fn emit_array_assign_rest(
       let e = emit_op(e, opcode.PopTry)
       let e = emit_op(e, opcode.IteratorRest)
       let e = emit_op(e, opcode.PutElem)
-      #(emit_op(e, opcode.Pop), True)
+      #(True, emit_op(e, opcode.Pop))
     }
     // identifiers and nested patterns: drain first
     SuperMember(..) | PlainTarget(_) -> {
       let e = emit_op(e, opcode.PopTry)
       let e = emit_op(e, opcode.IteratorRest)
       use e <- result.map(emit_destructuring_assign(e, target))
-      #(e, True)
+      #(True, e)
     }
   }
 }
@@ -4861,7 +4861,7 @@ fn emit_single_object_assign_prop(
   prop: ast.Property,
   has_rest has_rest: Bool,
   excluded_key_count excluded_key_count: Int,
-) -> Result(#(Emitter, Int), EmitError) {
+) -> Result(#(Int, Emitter), EmitError) {
   case prop {
     ast.InitProperty(key: ast.KeyComputed(expression:), value:, ..) -> {
       let e = emit_op(e, opcode.Dup)
@@ -4890,7 +4890,7 @@ fn emit_single_object_assign_prop(
     ast.SpreadProperty(argument) -> {
       let e = emit_op(e, opcode.ObjectRestCopy(excluded_key_count))
       use e <- result.map(emit_destructuring_assign(e, argument))
-      #(e, 0)
+      #(0, e)
     }
   }
 }
@@ -4939,19 +4939,19 @@ fn emit_elem_key_assign(
   value: ast.Expression,
   has_rest has_rest: Bool,
   excluded_key_count excluded_key_count: Int,
-) -> Result(#(Emitter, Int), EmitError) {
+) -> Result(#(Int, Emitter), EmitError) {
   case has_rest {
     False -> {
       use e <- result.map(emit_elem_keyed_target(
         e,
         ast_util.unwrap_parens(value),
       ))
-      #(e, excluded_key_count)
+      #(excluded_key_count, e)
     }
     True -> {
       let e = emit_op(e, opcode.GetElemKeep)
       use e <- result.map(emit_destructuring_assign(e, value))
-      #(emit_keep_computed_key(e), excluded_key_count + 1)
+      #(excluded_key_count + 1, emit_keep_computed_key(e))
     }
   }
 }
@@ -5013,18 +5013,18 @@ fn emit_elem_keyed_member_default(
   target: AssignTarget,
   default_expr: ast.Expression,
 ) -> Result(Emitter, EmitError) {
-  use #(e, put) <- result.try(case target {
+  use #(put, e) <- result.try(case target {
     StaticMember(object:, prop:) -> {
       use e <- result.map(emit_expr(e, object))
       let e = emit_unrot3(e)
-      #(emit_op(e, opcode.GetElem), emit_put_field(_, prop))
+      #(emit_put_field(_, prop), emit_op(e, opcode.GetElem))
     }
     ComputedMember(object:, key:) -> {
       use e <- result.try(emit_expr(e, object))
       let e = emit_unrot3(e)
       use e <- result.map(emit_expr(e, key))
       let e = emit_unrot3(e)
-      #(emit_op(e, opcode.GetElem), emit_op(_, opcode.PutElem))
+      #(emit_op(_, opcode.PutElem), emit_op(e, opcode.GetElem))
     }
     SuperMember(..) | PlainTarget(_) -> Error(NonMemberDefaultTarget)
   })
@@ -5054,14 +5054,14 @@ fn object_prop_key_name(key: ast.PropertyKey) -> Option(String) {
 // GetIterator, run elements under a close-on-throw guard, close unless rest drained
 fn with_iterator_scaffold(
   e: Emitter,
-  emit_elements: fn(Emitter, LabelId) -> Result(#(Emitter, Bool), EmitError),
+  emit_elements: fn(Emitter, LabelId) -> Result(#(Bool, Emitter), EmitError),
 ) -> Result(Emitter, EmitError) {
-  let #(e, close_throw) = fresh_label(e)
-  let #(e, done_label) = fresh_label(e)
+  let #(close_throw, e) = fresh_label(e)
+  let #(done_label, e) = fresh_label(e)
   // PushTry right after so unwind leaves [thrown, iter, ..]
   let e = emit_op(e, opcode.GetIterator)
   let e = emit_ir(e, IrPushTry(close_throw, IterCloseGuard))
-  use #(e, rested) <- result.map(emit_elements(e, close_throw))
+  use #(rested, e) <- result.map(emit_elements(e, close_throw))
   let e = case rested {
     True -> emit_ir(e, IrJump(done_label))
     False ->
@@ -5081,10 +5081,10 @@ fn with_iterator_scaffold(
 fn emit_array_pattern_elements(
   e: Emitter,
   elements: List(Option(el)),
-  emit_one: fn(Emitter, el) -> Result(#(Emitter, Bool), EmitError),
-) -> Result(#(Emitter, Bool), EmitError) {
+  emit_one: fn(Emitter, el) -> Result(#(Bool, Emitter), EmitError),
+) -> Result(#(Bool, Emitter), EmitError) {
   case elements {
-    [] -> Ok(#(e, False))
+    [] -> Ok(#(False, e))
     [None, ..rest] -> {
       let e =
         e
@@ -5094,9 +5094,9 @@ fn emit_array_pattern_elements(
       emit_array_pattern_elements(e, rest, emit_one)
     }
     [Some(el), ..rest] -> {
-      use #(e, rested) <- result.try(emit_one(e, el))
+      use #(rested, e) <- result.try(emit_one(e, el))
       case rested {
-        True -> Ok(#(e, True))
+        True -> Ok(#(True, e))
         False -> emit_array_pattern_elements(e, rest, emit_one)
       }
     }
@@ -5107,19 +5107,19 @@ fn emit_array_elements(
   e: Emitter,
   elements: List(Option(ast.Pattern)),
   binding_kind: BindingKind,
-) -> Result(#(Emitter, Bool), EmitError) {
+) -> Result(#(Bool, Emitter), EmitError) {
   use e, el <- emit_array_pattern_elements(e, elements)
   case el {
     // pop F_body before draining: no close on any later throw
     ast.RestElement(argument:) -> {
       let e = e |> emit_op(opcode.PopTry) |> emit_op(opcode.IteratorRest)
       use e <- result.map(emit_destructuring_bind(e, argument, binding_kind))
-      #(e, True)
+      #(True, e)
     }
     pattern -> {
       let e = e |> emit_op(opcode.IteratorNext) |> emit_op(opcode.Pop)
       use e <- result.map(emit_destructuring_bind(e, pattern, binding_kind))
-      #(e, False)
+      #(False, e)
     }
   }
 }
@@ -5200,15 +5200,15 @@ fn emit_logical_assign(
     SuperMember(..) ->
       Error(UnsupportedFeature("logical assignment to a super property"))
     StaticMember(..) as target -> {
-      use #(e, put) <- result.try(emit_member_get_keep(e, target))
+      use #(put, e) <- result.try(emit_member_get_keep(e, target))
       emit_logical_assign_member(e, op, right, put, put_arg_count: 1)
     }
     ComputedMember(..) as target -> {
-      use #(e, put) <- result.try(emit_member_get_keep(e, target))
+      use #(put, e) <- result.try(emit_member_get_keep(e, target))
       emit_logical_assign_member(e, op, right, put, put_arg_count: 2)
     }
     PlainTarget(ast.Identifier(name:, ..)) -> {
-      let #(e, end_label) = fresh_label(e)
+      let #(end_label, e) = fresh_label(e)
       with_identifier_read_write(e, name, fn(e) {
         let e = emit_short_circuit_test(e, op, end_label)
         let e = emit_op(e, opcode.Pop)
@@ -5228,8 +5228,8 @@ fn emit_logical_assign_member(
   put: fn(Emitter) -> Emitter,
   put_arg_count put_arg_count: Int,
 ) -> Result(Emitter, EmitError) {
-  let #(e, short_label) = fresh_label(e)
-  let #(e, end_label) = fresh_label(e)
+  let #(short_label, e) = fresh_label(e)
+  let #(end_label, e) = fresh_label(e)
   let e = emit_short_circuit_test(e, op, short_label)
   let e = emit_op(e, opcode.Pop)
   use e <- result.map(emit_expr(e, right))
@@ -5256,7 +5256,7 @@ fn emit_test(
     ast.LogicalExpression(_, ast.LogicalAnd as op, left, right)
     | ast.LogicalExpression(_, ast.LogicalOr as op, left, right) -> {
       let left_short_circuits_when = op == ast.LogicalOr
-      let #(e, skip) = fresh_label(e)
+      let #(skip, e) = fresh_label(e)
       let left_target = case left_short_circuits_when == jump_when {
         True -> target
         False -> skip
@@ -5334,7 +5334,7 @@ fn emit_short_circuit_test(
     ast.LogicalOr -> emit_ir(e, IrJumpIfTrue(short_label))
     // no jump-if-not-nullish op, so hop over a short jump
     ast.NullishCoalescing -> {
-      let #(e, go_label) = fresh_label(e)
+      let #(go_label, e) = fresh_label(e)
       e
       |> emit_ir(IrJumpIfNullish(go_label))
       |> emit_ir(IrJump(short_label))
@@ -5361,14 +5361,14 @@ fn compile_class(
       private_env: list.append(private_names, e.private_env),
     )
   // class scope slot layout must match ast_util.class_body_bindings
-  let #(e, save) = enter_scope(e, in_block: e.in_block)
+  let #(save, e) = enter_scope(e, in_block: e.in_block)
   // mint private names now; inner name bound after elements so [C] = 1 hits tdz
   let e =
     list.fold(private_names, e, fn(e, pname) {
       e |> emit_op(opcode.NewPrivateName(pname)) |> emit_var_init(pname)
     })
   let element_keys = ast_util.computed_element_keys(body)
-  use #(e, static_init_idx) <- result.map(compile_class_body(
+  use #(static_init_idx, e) <- result.map(compile_class_body(
     e,
     display_name,
     super_class,
@@ -5392,7 +5392,7 @@ fn compile_class_body(
   super_class: Option(ast.Expression),
   body: List(ast.ClassElement),
   computed_keys: List(#(Int, ast.Expression)),
-) -> Result(#(Emitter, Option(Int)), EmitError) {
+) -> Result(#(Option(Int), Emitter), EmitError) {
   let ast_util.ClassBodyParts(
     constructor: ctor_method,
     instance_methods:,
@@ -5410,7 +5410,7 @@ fn compile_class_body(
   }
 
   // instance fields compile into one init fn bound to <class_fields_init>
-  use #(e, init_idx) <- result.try(compile_class_init_fn(
+  use #(init_idx, e) <- result.try(compile_class_init_fn(
     e,
     list.append(
       private_method_inits(instance_methods),
@@ -5423,7 +5423,7 @@ fn compile_class_body(
     Some(_), True -> FieldInitAfterSuper
     Some(_), False -> FieldInitAtStart
   }
-  use #(e, child) <- result.try(compile_function_body(
+  use #(child, e) <- result.try(compile_function_body(
     Emitter(..e, in_implicit_derived_ctor: synth_super_forward),
     name,
     ctor_params,
@@ -5437,7 +5437,7 @@ fn compile_class_body(
       is_derived_constructor: derived,
       is_class_constructor: True,
     )
-  let #(e, ctor_idx) = add_child_function(e, child)
+  let #(ctor_idx, e) = add_child_function(e, child)
 
   use e <- result.try(case super_class {
     Some(parent_expr) -> {
@@ -5481,12 +5481,12 @@ fn compile_class_body(
 
   // after methods so the init fn's home object sees them
   let e = emit_attach_field_init(e, init_idx)
-  use #(e, static_init_idx) <- result.map(compile_class_init_fn(
+  use #(static_init_idx, e) <- result.map(compile_class_init_fn(
     e,
     static_inits(static_elements),
   ))
 
-  #(e, static_init_idx)
+  #(static_init_idx, e)
 }
 
 fn default_ctor_body(
@@ -5522,19 +5522,19 @@ fn default_ctor_body(
 fn compile_class_init_fn(
   e: Emitter,
   inits: List(FieldInit),
-) -> Result(#(Emitter, Option(Int)), EmitError) {
+) -> Result(#(Option(Int), Emitter), EmitError) {
   case inits {
-    [] -> Ok(#(e, None))
+    [] -> Ok(#(None, e))
     _ -> {
-      use #(e, child) <- result.map(compile_function_body(
+      use #(child, e) <- result.map(compile_function_body(
         e,
         None,
         [],
         FieldInitsBody(inits),
         shape: ClassInitFn,
       ))
-      let #(e, idx) = add_child_function(e, child)
-      #(e, Some(idx))
+      let #(idx, e) = add_child_function(e, child)
+      #(Some(idx), e)
     }
   }
 }

@@ -332,7 +332,7 @@ pub fn dispatch(
 
 // §23.1.5.2.1
 fn array_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  use st, iter_h, target, index, kind <- require_array_iter(st, this)
+  use iter_h, target, index, kind, st <- require_array_iter(st, this)
   case index < 0 {
     True -> iter_done(st)
     False -> {
@@ -377,13 +377,13 @@ fn array_iterator_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 fn require_array_iter(
   st: Agent,
   this: JsVal,
-  cont: fn(Agent, Handle, Handle, Int, ArrayIterKind) -> #(JsVal, Agent),
+  cont: fn(Handle, Handle, Int, ArrayIterKind, Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
         SObject(kind: ArrayIterator(target:, index:, kind:), ..) ->
-          cont(st, h, target, index, kind)
+          cont(h, target, index, kind, st)
         _ -> iter_incompatible(st, "Array")
       }
     _ -> iter_incompatible(st, "Array")

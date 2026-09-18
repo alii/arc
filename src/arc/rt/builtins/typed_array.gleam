@@ -1382,7 +1382,7 @@ fn subarray_of_view(
       #([mk_object(buf), mk_int(new_off), mk_int(new_len)], st)
     }
   }
-  let #(maybe_ctor, st) = resolve_species_ctor(st, this, kind)
+  let #(maybe_ctor, st) = species_ctor_for(st, this, kind)
   case maybe_ctor {
     None -> {
       let proto = default_proto_for(st, kind)
@@ -2446,7 +2446,7 @@ fn proto_to_locale_string_loop(
 }
 
 // §7.3.22 speciesconstructor, None = intrinsic default
-fn resolve_species_ctor(
+fn species_ctor_for(
   st: Agent,
   exemplar: JsVal,
   kind: TypedArrayKind,
@@ -2511,7 +2511,7 @@ fn ta_species_create(
   kind: TypedArrayKind,
   len: Int,
 ) -> #(#(JsVal, Handle), Agent) {
-  let #(maybe_ctor, st) = resolve_species_ctor(st, exemplar, kind)
+  let #(maybe_ctor, st) = species_ctor_for(st, exemplar, kind)
   case maybe_ctor {
     None -> {
       let #(fresh, st) = ta_same_type_create(st, kind, len)

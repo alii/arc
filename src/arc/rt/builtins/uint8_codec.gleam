@@ -115,7 +115,7 @@ type Uint8LiveView {
   Uint8LiveView(buffer: Handle, data: BitArray, byte_offset: Int, length: Int)
 }
 
-// resolve length from the same read as data, never re-read
+// length from the same read as data, never re-read
 fn u8_live_view(st: Agent, this: JsVal) -> Uint8LiveView {
   case uint8_view(st, this) {
     Some(Uint8View(buffer:, byte_offset:, length:)) ->
@@ -138,8 +138,8 @@ fn u8_live_view(st: Agent, this: JsVal) -> Uint8LiveView {
                 buffer.view_witness_error_message(buffer.OutOfBoundsView),
               )
             False -> {
-              let resolved =
-                buffer.resolve_view(
+              let bounds =
+                buffer.view_bounds(
                   byte_size,
                   NumKind(Uint8Kind),
                   byte_offset,
@@ -149,7 +149,7 @@ fn u8_live_view(st: Agent, this: JsVal) -> Uint8LiveView {
                 buffer:,
                 data:,
                 byte_offset:,
-                length: buffer.view_len(resolved),
+                length: buffer.view_len(bounds),
               )
             }
           }

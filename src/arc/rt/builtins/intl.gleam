@@ -2166,7 +2166,7 @@ fn dtf_state_required(
     KUndef -> #(HostZone(st.hooks.time_zone), st)
     _ -> {
       let #(s, st) = rt_val.t_to_string(st, tz_v)
-      case intl_timezone.resolve(st, s) {
+      case intl_timezone.lookup(st, s) {
         #(Some(tz), st) -> #(tz, st)
         #(None, st) ->
           rt_val.t_throw_range_error(st, "Invalid time zone specified: " <> s)

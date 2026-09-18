@@ -5,7 +5,7 @@ import arc/esm
 import arc/internal/tuple_array.{type TupleArray}
 import arc/internal/unsafe
 import arc/interp/entry
-import arc/interp/safepoint
+import arc/interp/safepoint.{type Drain}
 import arc/interp/state.{type State, State}
 import arc/link
 import arc/module/graph
@@ -138,7 +138,7 @@ pub fn module_error_phase(err: ModuleError) -> String {
   }
 }
 
-pub fn error_message(err: ModuleError, st: Agent) -> String {
+pub fn error_message(st: Agent, err: ModuleError) -> String {
   case err {
     NotInBundle(specifier:) ->
       "Module '" <> specifier <> "' not found in bundle"
@@ -300,13 +300,6 @@ type ModuleEvalStatus {
   Failed(value: JsVal)
 }
 
-pub type Finish =
-  fn(Agent) -> Agent
-
-fn no_drain(st: Agent) -> Agent {
-  st
-}
-
 type GraphEvaluation {
   GraphEvaluation(agent: Agent, modules: Dict(String, ModuleEvalStatus))
 }
@@ -356,12 +349,12 @@ fn try_fold_state(
   items: List(i),
   s: s,
   initial: a,
-  f: fn(s, a, i) -> #(s, Result(a, e)),
-) -> #(s, Result(a, e)) {
-  use acc, item <- list.fold(items, #(s, Ok(initial)))
+  f: fn(s, a, i) -> #(Result(a, e), s),
+) -> #(Result(a, e), s) {
+  use acc, item <- list.fold(items, #(Ok(initial), s))
   case acc {
-    #(_, Error(_)) -> acc
-    #(s, Ok(v)) -> f(s, v, item)
+    #(Error(_), _) -> acc
+    #(Ok(v), s) -> f(s, v, item)
   }
 }
 
@@ -369,29 +362,29 @@ pub type LinkedBundle {
   LinkedBundle(bundle: ModuleBundle, linked: Linked)
 }
 
-pub fn entry_namespace_of(linked_bundle: LinkedBundle, st: Agent) -> Handle {
-  entry_namespace(linked_bundle.linked, linked_bundle.bundle.entry, st)
+pub fn entry_namespace_of(st: Agent, linked_bundle: LinkedBundle) -> Handle {
+  entry_namespace(st, linked_bundle.linked, linked_bundle.bundle.entry)
 }
 
 pub fn link_for_evaluation(
-  bundle: ModuleBundle,
   st: Agent,
-) -> #(Agent, Result(LinkedBundle, ModuleError)) {
-  link_for_evaluation_reusing(bundle, st, dict.new(), dict.new())
+  bundle: ModuleBundle,
+) -> #(Result(LinkedBundle, ModuleError), Agent) {
+  link_for_evaluation_reusing(st, bundle, dict.new(), dict.new())
 }
 
 pub fn link_for_evaluation_reusing(
-  bundle: ModuleBundle,
   st: Agent,
+  bundle: ModuleBundle,
   preexisting: Dict(String, Handle),
   preexisting_deferred: Dict(String, Handle),
-) -> #(Agent, Result(LinkedBundle, ModuleError)) {
+) -> #(Result(LinkedBundle, ModuleError), Agent) {
   let lg = linkable_of_bundle(bundle)
   case link.validate(lg) {
     Error(link_error) -> {
       let #(err, st) =
         rt_val.t_new_error(st, SyntaxError, link.error_message(link_error))
-      #(st, Error(EvaluationError(err)))
+      #(Error(EvaluationError(err)), st)
     }
     Ok(Nil) -> {
       let pre =
@@ -411,11 +404,11 @@ pub fn link_for_evaluation_reusing(
               SyntaxError,
               stale_reused_export_message(spec, name),
             )
-          #(st, Error(EvaluationError(err)))
+          #(Error(EvaluationError(err)), st)
         }
         None -> {
-          let #(st, linked, deferred_to_fill) =
-            build_linked(bundle, st, pre, preexisting_deferred)
+          let #(linked, deferred_to_fill, st) =
+            build_linked(st, bundle, pre, preexisting_deferred)
           let st =
             list.fold(deferred_to_fill, st, fn(st, pair) {
               let #(spec, proxy) = pair
@@ -423,12 +416,12 @@ pub fn link_for_evaluation_reusing(
             })
           let st =
             instantiate_hoisted_functions(
+              st,
               bundle,
               linked,
-              st,
               set.from_list(dict.keys(pre)),
             )
-          #(st, Ok(LinkedBundle(bundle:, linked:)))
+          #(Ok(LinkedBundle(bundle:, linked:)), st)
         }
       }
     }
@@ -436,44 +429,44 @@ pub fn link_for_evaluation_reusing(
 }
 
 pub fn evaluate_linked(
-  linked_bundle: LinkedBundle,
   st: Agent,
-  finish: Finish,
-) -> #(Agent, Result(EvaluatedBundle, ModuleError)) {
-  let #(st, _evaluated, res) =
-    evaluate_linked_tracking(linked_bundle, st, finish, set.new())
+  linked_bundle: LinkedBundle,
+  drain: Drain,
+) -> #(Result(EvaluatedBundle, ModuleError), Agent) {
+  let #(_evaluated, res, st) =
+    evaluate_linked_tracking(st, linked_bundle, drain, set.new())
   case res {
     Error(EvaluationPending(promise: _)) -> {
       let #(err, st) =
         rt_val.t_new_error(st, TypeError, tla_never_settled_message)
-      #(st, Error(EvaluationError(value: err)))
+      #(Error(EvaluationError(value: err)), st)
     }
-    other -> #(st, other)
+    other -> #(other, st)
   }
 }
 
 pub fn evaluate_linked_tracking(
-  linked_bundle: LinkedBundle,
   st: Agent,
-  finish: Finish,
+  linked_bundle: LinkedBundle,
+  drain: Drain,
   already_evaluated: Set(String),
-) -> #(Agent, Set(String), Result(EvaluatedBundle, ModuleError)) {
+) -> #(Set(String), Result(EvaluatedBundle, ModuleError), Agent) {
   let LinkedBundle(bundle:, linked:) = linked_bundle
   let modules =
     set.fold(already_evaluated, dict.new(), fn(acc, spec) {
       dict.insert(acc, spec, Evaluated)
     })
   let evaluation = GraphEvaluation(agent: st, modules:)
-  let #(evaluation, res) =
-    eval_specifier(bundle, linked, evaluation, bundle.entry, finish)
+  let #(res, evaluation) =
+    eval_specifier(bundle, linked, evaluation, bundle.entry, drain)
   let res = {
     use value <- result.map(res)
     EvaluatedBundle(
       value:,
-      namespace: entry_namespace(linked, bundle.entry, evaluation.agent),
+      namespace: entry_namespace(evaluation.agent, linked, bundle.entry),
     )
   }
-  #(evaluation.agent, evaluated_specifiers(evaluation), res)
+  #(evaluated_specifiers(evaluation), res, evaluation.agent)
 }
 
 fn read_namespace_box(
@@ -492,8 +485,8 @@ fn read_namespace_box(
 }
 
 fn read_box_dict(
-  boxes: Dict(String, Handle),
   st: Agent,
+  boxes: Dict(String, Handle),
 ) -> List(#(String, Handle)) {
   use acc, spec, box <- dict.fold(boxes, [])
   let ns = read_namespace_box(st, spec, box) |> assert_link_invariant
@@ -501,8 +494,8 @@ fn read_box_dict(
 }
 
 pub fn linked_namespaces(
-  linked_bundle: LinkedBundle,
   st: Agent,
+  linked_bundle: LinkedBundle,
 ) -> List(#(String, Handle)) {
   use acc, spec, lm <- dict.fold(linked_bundle.linked.modules, [])
   let ns =
@@ -511,10 +504,10 @@ pub fn linked_namespaces(
 }
 
 pub fn linked_deferred_namespaces(
-  linked_bundle: LinkedBundle,
   st: Agent,
+  linked_bundle: LinkedBundle,
 ) -> List(#(String, Handle)) {
-  read_box_dict(linked_bundle.linked.deferred_boxes, st)
+  read_box_dict(st, linked_bundle.linked.deferred_boxes)
 }
 
 pub type DeferredNamespaceError {
@@ -525,36 +518,36 @@ pub fn get_or_create_deferred_namespace(
   st: Agent,
   linked_bundle: LinkedBundle,
   spec: String,
-) -> #(Agent, Result(Handle, DeferredNamespaceError)) {
+) -> #(Result(Handle, DeferredNamespaceError), Agent) {
   let LinkedBundle(bundle:, linked:) = linked_bundle
   use <- bool.lazy_guard(!dict.has_key(bundle.modules, spec), fn() {
-    #(st, Error(DeferredSpecifierNotInBundle(specifier: spec)))
+    #(Error(DeferredSpecifierNotInBundle(specifier: spec)), st)
   })
   case dict.get(linked.deferred_boxes, spec) {
     Ok(box) -> #(
-      st,
       Ok(read_namespace_box(st, spec, box) |> assert_link_invariant),
+      st,
     )
     Error(Nil) -> {
       let #(proxy, st) = reserve_cell(st)
       let st = fill_deferred_namespace(st, bundle, linked, spec, proxy)
-      #(st, Ok(proxy))
+      #(Ok(proxy), st)
     }
   }
 }
 
 pub fn evaluate_bundle(
-  bundle: ModuleBundle,
   st: Agent,
-  finish: Finish,
-) -> #(Agent, Result(EvaluatedBundle, ModuleError)) {
-  case link_for_evaluation(bundle, st) {
-    #(st, Error(err)) -> #(st, Error(err))
-    #(st, Ok(linked_bundle)) -> evaluate_linked(linked_bundle, st, finish)
+  bundle: ModuleBundle,
+  drain: Drain,
+) -> #(Result(EvaluatedBundle, ModuleError), Agent) {
+  case link_for_evaluation(st, bundle) {
+    #(Error(err), st) -> #(Error(err), st)
+    #(Ok(linked_bundle), st) -> evaluate_linked(st, linked_bundle, drain)
   }
 }
 
-fn entry_namespace(linked: Linked, entry: String, st: Agent) -> Handle {
+fn entry_namespace(st: Agent, linked: Linked, entry: String) -> Handle {
   let lm =
     dict.get(linked.modules, entry)
     |> result.replace_error(ModuleNotLinked(entry))
@@ -587,17 +580,17 @@ fn eval_specifier(
   linked: Linked,
   evaluation: GraphEvaluation,
   specifier: String,
-  finish: Finish,
-) -> #(GraphEvaluation, Result(JsVal, ModuleError)) {
+  drain: Drain,
+) -> #(Result(JsVal, ModuleError), GraphEvaluation) {
   case dict.get(bundle.modules, specifier) {
-    Error(Nil) -> #(evaluation, Error(NotInBundle(specifier:)))
-    Ok(SyntheticModule(_)) -> #(evaluation, Ok(mk_undefined()))
+    Error(Nil) -> #(Error(NotInBundle(specifier:)), evaluation)
+    Ok(SyntheticModule(_)) -> #(Ok(mk_undefined()), evaluation)
     Ok(SourceModule(compiled)) ->
       case module_eval_status(evaluation, specifier) {
-        Some(Evaluated) -> #(evaluation, Ok(mk_undefined()))
-        Some(Failed(err)) -> #(evaluation, Error(EvaluationError(err)))
+        Some(Evaluated) -> #(Ok(mk_undefined()), evaluation)
+        Some(Failed(err)) -> #(Error(EvaluationError(err)), evaluation)
         // circular dependency
-        Some(Evaluating) -> #(evaluation, Ok(mk_undefined()))
+        Some(Evaluating) -> #(Ok(mk_undefined()), evaluation)
         None ->
           eval_module_body(
             bundle,
@@ -605,7 +598,7 @@ fn eval_specifier(
             evaluation,
             specifier,
             compiled,
-            finish,
+            drain,
           )
       }
   }
@@ -617,11 +610,11 @@ fn eval_module_body(
   evaluation: GraphEvaluation,
   specifier: String,
   compiled: CompiledModule,
-  finish: Finish,
-) -> #(GraphEvaluation, Result(JsVal, ModuleError)) {
+  drain: Drain,
+) -> #(Result(JsVal, ModuleError), GraphEvaluation) {
   let evaluation = set_eval_status(evaluation, specifier, Evaluating)
 
-  let #(evaluation, dep_result) = {
+  let #(dep_result, evaluation) = {
     use evaluation, Nil, #(resolved_dep, phase) <- try_fold_state(
       compiled.requested_modules,
       evaluation,
@@ -639,14 +632,14 @@ fn eval_module_body(
         ).0
     }
     use evaluation, Nil, dep <- try_fold_state(to_evaluate, evaluation, Nil)
-    let #(evaluation, r) =
-      eval_specifier(bundle, linked, evaluation, dep, finish)
-    #(evaluation, result.replace(r, Nil))
+    let #(r, evaluation) =
+      eval_specifier(bundle, linked, evaluation, dep, drain)
+    #(result.replace(r, Nil), evaluation)
   }
 
   case dep_result {
     // pending tla is not a failure, don't cache
-    Error(EvaluationPending(promise: _) as err) -> #(evaluation, Error(err))
+    Error(EvaluationPending(promise: _) as err) -> #(Error(err), evaluation)
     Error(err) -> {
       let #(error_val, st) = case err {
         EvaluationError(value: v) -> #(v, evaluation.agent)
@@ -654,14 +647,14 @@ fn eval_module_body(
           rt_val.t_new_error(
             evaluation.agent,
             TypeError,
-            error_message(err, evaluation.agent),
+            error_message(evaluation.agent, err),
           )
       }
       let st = registry.write_module_error(st, specifier, error_val)
       let evaluation =
         with_agent(evaluation, st)
         |> set_eval_status(specifier, Failed(error_val))
-      #(evaluation, Error(err))
+      #(Error(err), evaluation)
     }
     Ok(Nil) -> {
       let lm = linked_module(linked, compiled)
@@ -676,7 +669,7 @@ fn eval_module_body(
           registry.Evaluating,
         )
       let #(outcome, st) =
-        run_module_body(st, specifier, compiled, lm.unit_id, seeds, finish)
+        run_module_body(st, specifier, compiled, lm.unit_id, seeds, drain)
       case outcome {
         BodyThrew(thrown) -> {
           let st =
@@ -686,18 +679,18 @@ fn eval_module_body(
           let evaluation =
             with_agent(evaluation, st)
             |> set_eval_status(specifier, Failed(thrown))
-          #(evaluation, Error(EvaluationError(thrown)))
+          #(Error(EvaluationError(thrown)), evaluation)
         }
         BodyReturned(v) -> {
           let st =
             registry.write_module_status(st, specifier, registry.Evaluated)
           let evaluation =
             with_agent(evaluation, st) |> set_eval_status(specifier, Evaluated)
-          #(evaluation, Ok(v))
+          #(Ok(v), evaluation)
         }
         BodyPending(promise) -> #(
-          with_agent(evaluation, st),
           Error(EvaluationPending(promise:)),
+          with_agent(evaluation, st),
         )
       }
     }
@@ -752,11 +745,11 @@ fn run_module_body(
   compiled: CompiledModule,
   unit_id: Int,
   seeds: List(#(Int, JsVal)),
-  finish: Finish,
+  drain: Drain,
 ) -> #(BodyOutcome, Agent) {
   let outer_referrer = registry.read_active_referrer(st)
   let st = registry.write_active_referrer(st, Some(specifier))
-  let #(outcome, st) = run_module_turns(st, compiled, unit_id, seeds, finish)
+  let #(outcome, st) = run_module_turns(st, compiled, unit_id, seeds, drain)
   #(outcome, registry.write_active_referrer(st, outer_referrer))
 }
 
@@ -765,19 +758,19 @@ fn run_module_turns(
   compiled: CompiledModule,
   unit_id: Int,
   seeds: List(#(Int, JsVal)),
-  finish: Finish,
+  drain: Drain,
 ) -> #(BodyOutcome, Agent) {
   let #(step, st) =
     entry.run_turn(module_activation(st, compiled.template, unit_id, seeds))
   case step {
-    StepReturn(v) -> #(BodyReturned(v), safepoint.finish_turn(st, [v], finish))
-    StepThrow(e) -> #(BodyThrew(e), safepoint.finish_turn(st, [e], finish))
+    StepReturn(v) -> #(BodyReturned(v), safepoint.finish_turn(st, [v], drain))
+    StepThrow(e) -> #(BodyThrew(e), safepoint.finish_turn(st, [e], drain))
     StepAwait(awaited, resume) ->
-      drive_top_level_await(st, awaited, resume, finish)
+      drive_top_level_await(st, awaited, resume, drain)
     StepYield(..) -> {
       let #(err, st) =
         rt_val.t_new_error(st, TypeError, "InternalError: module body yielded")
-      #(BodyThrew(err), safepoint.finish_turn(st, [err], finish))
+      #(BodyThrew(err), safepoint.finish_turn(st, [err], drain))
     }
   }
 }
@@ -787,7 +780,7 @@ fn drive_top_level_await(
   st: Agent,
   awaited: JsVal,
   resume: types.Resume,
-  finish: Finish,
+  drain: Drain,
 ) -> #(BodyOutcome, Agent) {
   let #(promise, st) = rt_async.t_new_promise(st)
   // held from gleam across drains
@@ -797,7 +790,7 @@ fn drive_top_level_await(
   let st = rt_store.t_cell_set(st, data, SPromiseData(pstate, is_handled: True))
   let #(ctx, st) = rt_store.t_cell_new(st, SAsyncContext(resume:, promise:))
   let st = rt_async.t_await(st, ctx, awaited)
-  let st = safepoint.finish_turn(st, [], finish)
+  let st = safepoint.finish_turn(st, [], drain)
   case rt_async.promise_data(st, promise) {
     #(_, PromiseFulfilled(v), _) -> #(BodyReturned(v), st)
     #(_, PromiseRejected(reason), _) -> #(BodyThrew(reason), st)
@@ -819,17 +812,17 @@ fn reserve_ns_boxes(
   st: Agent,
   specs: List(String),
   preexisting: fn(String) -> Result(Handle, Nil),
-) -> #(Agent, Dict(String, Handle), List(#(String, Handle))) {
-  use #(st, boxes, fresh), spec <- list.fold(specs, #(st, dict.new(), []))
+) -> #(Dict(String, Handle), List(#(String, Handle)), Agent) {
+  use #(boxes, fresh, st), spec <- list.fold(specs, #(dict.new(), [], st))
   case preexisting(spec) {
     Ok(existing) -> {
       let #(box, st) = alloc_box(st, mk_object(existing))
-      #(st, dict.insert(boxes, spec, box), fresh)
+      #(dict.insert(boxes, spec, box), fresh, st)
     }
     Error(Nil) -> {
       let #(obj, st) = reserve_cell(st)
       let #(box, st) = alloc_box(st, mk_object(obj))
-      #(st, dict.insert(boxes, spec, box), [#(spec, obj), ..fresh])
+      #(dict.insert(boxes, spec, box), [#(spec, obj), ..fresh], st)
     }
   }
 }
@@ -850,18 +843,18 @@ type DeferredTrap {
 }
 
 fn build_linked(
-  bundle: ModuleBundle,
   st: Agent,
+  bundle: ModuleBundle,
   preexisting: Dict(String, ReusedNamespace),
   preexisting_deferred: Dict(String, Handle),
-) -> #(Agent, Linked, List(#(String, Handle))) {
-  let #(st, local_boxes) = preallocate_local_boxes(bundle, st, preexisting)
+) -> #(Linked, List(#(String, Handle)), Agent) {
+  let #(local_boxes, st) = preallocate_local_boxes(st, bundle, preexisting)
   let specs = dict.keys(bundle.modules)
-  let #(st, namespace_boxes, ns_to_fill) =
+  let #(namespace_boxes, ns_to_fill, st) =
     reserve_ns_boxes(st, specs, fn(spec) {
       dict.get(preexisting, spec) |> result.map(fn(p) { p.namespace })
     })
-  let #(st, deferred_boxes, deferred_to_fill) =
+  let #(deferred_boxes, deferred_to_fill, st) =
     reserve_ns_boxes(st, needed_deferred_specs(bundle), dict.get(
       preexisting_deferred,
       _,
@@ -913,9 +906,9 @@ fn build_linked(
       let assert Ok(exp) = dict.get(exports, spec)
       rt_store.t_cell_set(st, obj, namespace_cell(exp, "Module"))
     })
-  let #(st, modules) =
-    list.fold(specs, #(st, dict.new()), fn(acc, spec) {
-      let #(st, modules) = acc
+  let #(modules, st) =
+    list.fold(specs, #(dict.new(), st), fn(acc, spec) {
+      let #(modules, st) = acc
       let assert Ok(lb) = dict.get(local_boxes, spec)
       let assert Ok(exp) = dict.get(exports, spec)
       let assert Ok(ns_box) = dict.get(namespace_boxes, spec)
@@ -927,9 +920,9 @@ fn build_linked(
           namespace_box: ns_box,
           unit_id:,
         )
-      #(st, dict.insert(modules, spec, lm))
+      #(dict.insert(modules, spec, lm), st)
     })
-  #(st, Linked(modules:, deferred_boxes:), deferred_to_fill)
+  #(Linked(modules:, deferred_boxes:), deferred_to_fill, st)
 }
 
 // GatherAsynchronousTransitiveDependencies
@@ -969,26 +962,26 @@ fn gather_async_transitive_deps(
 }
 
 pub fn evaluate_async_transitive_deps(
-  linked_bundle: LinkedBundle,
   st: Agent,
-  finish: Finish,
-) -> #(Agent, Result(List(#(String, Handle)), ModuleError)) {
+  linked_bundle: LinkedBundle,
+  drain: Drain,
+) -> #(Result(List(#(String, Handle)), ModuleError), Agent) {
   let LinkedBundle(bundle:, linked:) = linked_bundle
   let evaluation = GraphEvaluation(agent: st, modules: dict.new())
   let #(to_evaluate, _seen) =
     gather_async_transitive_deps(bundle, evaluation, bundle.entry, set.new())
-  let #(evaluation, res) = {
+  let #(res, evaluation) = {
     use evaluation, pendings, dep <- try_fold_state(to_evaluate, evaluation, [])
-    case eval_specifier(bundle, linked, evaluation, dep, finish) {
-      #(evaluation, Ok(_)) -> #(evaluation, Ok(pendings))
-      #(evaluation, Error(EvaluationPending(promise:))) -> #(
-        evaluation,
+    case eval_specifier(bundle, linked, evaluation, dep, drain) {
+      #(Ok(_), evaluation) -> #(Ok(pendings), evaluation)
+      #(Error(EvaluationPending(promise:)), evaluation) -> #(
         Ok([#(dep, promise), ..pendings]),
+        evaluation,
       )
-      #(evaluation, Error(err)) -> #(evaluation, Error(err))
+      #(Error(err), evaluation) -> #(Error(err), evaluation)
     }
   }
-  #(evaluation.agent, result.map(res, list.reverse))
+  #(result.map(res, list.reverse), evaluation.agent)
 }
 
 fn needed_deferred_specs(bundle: ModuleBundle) -> List(String) {
@@ -1016,9 +1009,9 @@ fn needed_deferred_specs(bundle: ModuleBundle) -> List(String) {
 
 // §16.2.1.6.4 step 9: exported functions callable before bodies run
 fn instantiate_hoisted_functions(
+  st: Agent,
   bundle: ModuleBundle,
   linked: Linked,
-  st: Agent,
   already_evaluated: Set(String),
 ) -> Agent {
   dict.fold(bundle.modules, st, fn(st, spec, bundle_module) {
@@ -1096,19 +1089,18 @@ fn stale_reused_export_message(specifier: String, name: String) -> String {
 }
 
 fn preallocate_local_boxes(
-  bundle: ModuleBundle,
   st: Agent,
+  bundle: ModuleBundle,
   preexisting: Dict(String, ReusedNamespace),
-) -> #(Agent, Dict(String, Dict(String, Handle))) {
-  dict.fold(bundle.modules, #(st, dict.new()), fn(acc, spec, bundle_module) {
-    let #(st, all) = acc
+) -> #(Dict(String, Dict(String, Handle)), Agent) {
+  dict.fold(bundle.modules, #(dict.new(), st), fn(acc, spec, bundle_module) {
+    let #(all, st) = acc
     let existing =
       dict.get(preexisting, spec)
       |> option.from_result
       |> option.map(fn(p) { p.exports })
-    let #(st, boxes) = case bundle_module, existing {
+    let #(boxes, st) = case bundle_module, existing {
       SourceModule(m), Some(existing_exports) -> #(
-        st,
         list.fold(m.export_entries, dict.new(), fn(boxes, e) {
           case e {
             esm.LocalExport(export_name:, local_name:) ->
@@ -1119,31 +1111,32 @@ fn preallocate_local_boxes(
             _ -> boxes
           }
         }),
+        st,
       )
       SourceModule(m), None ->
-        dict.fold(m.export_seeds, #(st, dict.new()), fn(a, local, seed) {
-          let #(st, boxes) = a
+        dict.fold(m.export_seeds, #(dict.new(), st), fn(a, local, seed) {
+          let #(boxes, st) = a
           let #(box, st) = alloc_box(st, seed_value(seed))
-          #(st, dict.insert(boxes, local, box))
+          #(dict.insert(boxes, local, box), st)
         })
       SyntheticModule(hm), existing_exports ->
-        list.fold(hm.exports, #(st, dict.new()), fn(a, export) {
-          let #(st, boxes) = a
+        list.fold(hm.exports, #(dict.new(), st), fn(a, export) {
+          let #(boxes, st) = a
           let #(name, val) = export
           let reused =
             option.then(existing_exports, fn(ex) {
               dict.get(ex, name) |> option.from_result
             })
           case reused {
-            Some(box) -> #(st, dict.insert(boxes, name, box))
+            Some(box) -> #(dict.insert(boxes, name, box), st)
             None -> {
               let #(box, st) = alloc_box(st, val)
-              #(st, dict.insert(boxes, name, box))
+              #(dict.insert(boxes, name, box), st)
             }
           }
         })
     }
-    #(st, dict.insert(all, spec, boxes))
+    #(dict.insert(all, spec, boxes), st)
   })
 }
 
@@ -1310,7 +1303,7 @@ fn ensure_deferred_evaluated(
   case registry.read_module_error(st, spec) {
     Some(err) -> rt_store.t_throw(st, err)
     None ->
-      case ready_for_sync_execution(bundle, st, spec, set.new()).0 {
+      case ready_for_sync_execution(st, bundle, spec, set.new()).0 {
         False ->
           rt_val.t_throw_type_error(
             st,
@@ -1325,8 +1318,8 @@ fn ensure_deferred_evaluated(
 
 // ReadyForSyncExecution: evaluation-phase requests only
 fn ready_for_sync_execution(
-  bundle: ModuleBundle,
   st: Agent,
+  bundle: ModuleBundle,
   spec: String,
   seen: Set(String),
 ) -> #(Bool, Set(String)) {
@@ -1348,8 +1341,8 @@ fn ready_for_sync_execution(
                   True, esm.Deferred -> acc
                   True, esm.Evaluation ->
                     ready_for_sync_execution(
-                      bundle,
                       st,
+                      bundle,
                       esm.resolved_text(request.0),
                       acc.1,
                     )
@@ -1368,18 +1361,18 @@ fn evaluate_deferred_subgraph(
   spec: String,
 ) -> Agent {
   let evaluation = GraphEvaluation(agent: st, modules: dict.new())
-  case eval_specifier(bundle, linked, evaluation, spec, no_drain) {
-    #(evaluation, Ok(_)) -> evaluation.agent
-    #(evaluation, Error(EvaluationError(value:))) ->
+  case eval_specifier(bundle, linked, evaluation, spec, safepoint.no_drain) {
+    #(Ok(_), evaluation) -> evaluation.agent
+    #(Error(EvaluationError(value:)), evaluation) ->
       rt_store.t_throw(evaluation.agent, value)
-    #(evaluation, Error(NotInBundle(..) as other))
-    | #(evaluation, Error(EvaluationPending(..) as other)) ->
+    #(Error(NotInBundle(..) as other), evaluation)
+    | #(Error(EvaluationPending(..) as other), evaluation) ->
       rt_val.t_throw_type_error(
         evaluation.agent,
         "Failed to evaluate deferred module '"
           <> spec
           <> "': "
-          <> error_message(other, evaluation.agent),
+          <> error_message(evaluation.agent, other),
       )
   }
 }

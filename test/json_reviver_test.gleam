@@ -1,16 +1,18 @@
-import arc/engine.{type JsValueKind, JsBool, JsString, Returned, Threw}
+import arc/engine.{Returned, Threw}
+import arc/rt/types.{type JsValKind, KBool, KStr}
+import rt_helpers
 
-fn eval(source: String) -> JsValueKind {
+fn eval(source: String) -> JsValKind {
   let assert Ok(#(Returned(value:), _)) = engine.eval(engine.new(), source)
-  engine.classify(value)
+  rt_helpers.classify(value)
 }
 
-fn eval_throw(source: String) -> JsValueKind {
+fn eval_throw(source: String) -> JsValKind {
   let assert Ok(#(Threw(error:), _)) = engine.eval(engine.new(), source)
-  engine.classify(error)
+  rt_helpers.classify(error)
 }
 
-fn eval_error_name(source: String) -> JsValueKind {
+fn eval_error_name(source: String) -> JsValKind {
   eval("try { " <> source <> "; 'no throw'; } catch (e) { e.constructor.name }")
 }
 
@@ -19,7 +21,7 @@ pub fn reviver_transforms_values_test() {
       "JSON.stringify(JSON.parse('{\"a\":1,\"b\":{\"c\":2}}',
          function (k, v) { return typeof v === 'number' ? v * 2 : v; }))",
     )
-    == JsString("{\"a\":2,\"b\":{\"c\":4}}")
+    == KStr("{\"a\":2,\"b\":{\"c\":4}}")
 }
 
 pub fn reviver_undefined_deletes_key_test() {
@@ -27,7 +29,7 @@ pub fn reviver_undefined_deletes_key_test() {
       "JSON.stringify(JSON.parse('{\"a\":1,\"b\":2}',
          function (k, v) { return k === 'a' ? undefined : v; }))",
     )
-    == JsString("{\"b\":2}")
+    == KStr("{\"b\":2}")
 }
 
 pub fn reviver_undefined_deletes_array_element_test() {
@@ -36,7 +38,7 @@ pub fn reviver_undefined_deletes_array_element_test() {
          function (k, v) { return v === 2 ? undefined : v; });
        a.length + '/' + (1 in a) + '/' + JSON.stringify(a)",
     )
-    == JsString("3/false/[1,null,3]")
+    == KStr("3/false/[1,null,3]")
 }
 
 pub fn reviver_receives_holder_as_this_test() {
@@ -48,26 +50,26 @@ pub fn reviver_receives_holder_as_this_test() {
        });
        seen.join('|')",
     )
-    == JsString("a:{\"a\":1}|:{\"\":{\"a\":1}}")
+    == KStr("a:{\"a\":1}|:{\"\":{\"a\":1}}")
 }
 
 pub fn reviver_root_key_is_empty_string_test() {
   assert eval(
       "JSON.parse('7', function (k, v) { return k === '' ? 'root' : 'nested'; })",
     )
-    == JsString("root")
+    == KStr("root")
 }
 
 pub fn reviver_throw_propagates_test() {
   assert eval_throw("JSON.parse('{\"a\":1}', function () { throw 'boom'; })")
-    == JsString("boom")
+    == KStr("boom")
 }
 
 pub fn non_callable_reviver_is_ignored_test() {
   assert eval("JSON.stringify(JSON.parse('{\"a\":1}', 42))")
-    == JsString("{\"a\":1}")
+    == KStr("{\"a\":1}")
   assert eval("JSON.stringify(JSON.parse('{\"a\":1}', {}))")
-    == JsString("{\"a\":1}")
+    == KStr("{\"a\":1}")
 }
 
 pub fn reviver_can_replace_with_object_test() {
@@ -75,7 +77,7 @@ pub fn reviver_can_replace_with_object_test() {
       "JSON.stringify(JSON.parse('[1]',
          function (k, v) { return k === '0' ? { n: v } : v; }))",
     )
-    == JsString("[{\"n\":1}]")
+    == KStr("[{\"n\":1}]")
 }
 
 pub fn reviver_replace_of_non_configurable_key_does_not_throw_test() {
@@ -86,7 +88,7 @@ pub fn reviver_replace_of_non_configurable_key_does_not_throw_test() {
          return v;
        }))",
     )
-    == JsString("{\"a\":1,\"b\":2}")
+    == KStr("{\"a\":1,\"b\":2}")
 }
 
 pub fn reviver_replace_of_non_configurable_index_does_not_throw_test() {
@@ -97,7 +99,7 @@ pub fn reviver_replace_of_non_configurable_index_does_not_throw_test() {
          return v;
        }))",
     )
-    == JsString("[1,2]")
+    == KStr("[1,2]")
 }
 
 pub fn reviver_context_source_at_nesting_depths_test() {
@@ -109,7 +111,7 @@ pub fn reviver_context_source_at_nesting_depths_test() {
        });
        out.join('|')",
     )
-    == JsString("a=1|0=true|1=\"x\"|c=undefined|b=undefined|=undefined")
+    == KStr("a=1|0=true|1=\"x\"|c=undefined|b=undefined|=undefined")
 }
 
 pub fn reviver_context_source_is_verbatim_literal_test() {
@@ -121,7 +123,7 @@ pub fn reviver_context_source_is_verbatim_literal_test() {
        });
        out.join('|')",
     )
-    == JsString("1.1e+1|-0|\"a\\nb\"|null|false")
+    == KStr("1.1e+1|-0|\"a\\nb\"|null|false")
 }
 
 pub fn reviver_context_is_empty_for_object_and_array_literals_test() {
@@ -136,7 +138,7 @@ pub fn reviver_context_is_empty_for_object_and_array_literals_test() {
        });
        out.join('|')",
     )
-    == JsString("0:1:0:true|a:0:0:true|:0:0:true")
+    == KStr("0:1:0:true|a:0:0:true|:0:0:true")
 }
 
 pub fn reviver_context_source_property_descriptor_test() {
@@ -148,7 +150,7 @@ pub fn reviver_context_source_property_descriptor_test() {
        });
        [d.value, d.writable, d.enumerable, d.configurable].join(',')",
     )
-    == JsString("1,true,true,true")
+    == KStr("1,true,true,true")
 }
 
 pub fn reviver_source_absent_after_forward_append_test() {
@@ -161,7 +163,7 @@ pub fn reviver_source_absent_after_forward_append_test() {
        });
        log.join('|')",
     )
-    == JsString("0:1|0:undefined|1:undefined|:undefined")
+    == KStr("0:1|0:undefined|1:undefined|:undefined")
 }
 
 pub fn reviver_source_absent_after_forward_replacement_test() {
@@ -174,7 +176,7 @@ pub fn reviver_source_absent_after_forward_replacement_test() {
        });
        log.join('|')",
     )
-    == JsString("p:1|q:undefined|:undefined")
+    == KStr("p:1|q:undefined|:undefined")
 }
 
 pub fn reviver_source_absent_after_forward_array_replacement_test() {
@@ -187,7 +189,7 @@ pub fn reviver_source_absent_after_forward_array_replacement_test() {
        });
        log.join('|')",
     )
-    == JsString("a:1|0:undefined|b:undefined|:undefined")
+    == KStr("a:1|0:undefined|b:undefined|:undefined")
 }
 
 pub fn reviver_source_absent_for_replaced_array_elements_test() {
@@ -200,7 +202,7 @@ pub fn reviver_source_absent_for_replaced_array_elements_test() {
        });
        log.join('|')",
     )
-    == JsString("0:1|0:undefined|1:undefined|:undefined")
+    == KStr("0:1|0:undefined|1:undefined|:undefined")
 }
 
 pub fn reviver_source_absent_for_replaced_object_members_test() {
@@ -213,7 +215,7 @@ pub fn reviver_source_absent_for_replaced_object_members_test() {
        });
        log.join('|')",
     )
-    == JsString("p:1|x:undefined|q:undefined|:undefined")
+    == KStr("p:1|x:undefined|q:undefined|:undefined")
 }
 
 pub fn reviver_source_absent_for_added_object_key_test() {
@@ -226,7 +228,7 @@ pub fn reviver_source_absent_for_added_object_key_test() {
        });
        log.join('|')",
     )
-    == JsString("p:1|added:undefined|q:undefined|:undefined")
+    == KStr("p:1|added:undefined|q:undefined|:undefined")
 }
 
 pub fn raw_json_returns_frozen_null_prototype_object_test() {
@@ -238,54 +240,53 @@ pub fn raw_json_returns_frozen_null_prototype_object_test() {
         Object.getOwnPropertyNames(r).join(','),
         String(Object.getOwnPropertySymbols(r).length)].join('|')",
     )
-    == JsString("null|true|1|rawJSON|0")
+    == KStr("null|true|1|rawJSON|0")
 }
 
 pub fn raw_json_stringify_round_trip_test() {
-  assert eval("JSON.stringify(JSON.rawJSON(1.1))") == JsString("1.1")
-  assert eval("JSON.stringify(JSON.rawJSON(null))") == JsString("null")
-  assert eval("JSON.stringify(JSON.rawJSON('\"foo\"'))") == JsString("\"foo\"")
+  assert eval("JSON.stringify(JSON.rawJSON(1.1))") == KStr("1.1")
+  assert eval("JSON.stringify(JSON.rawJSON(null))") == KStr("null")
+  assert eval("JSON.stringify(JSON.rawJSON('\"foo\"'))") == KStr("\"foo\"")
   assert eval("JSON.stringify({ x: JSON.rawJSON(1), y: JSON.rawJSON(2) })")
-    == JsString("{\"x\":1,\"y\":2}")
+    == KStr("{\"x\":1,\"y\":2}")
   assert eval("JSON.stringify([JSON.rawJSON('null'), JSON.rawJSON(true)])")
-    == JsString("[null,true]")
-  assert eval("JSON.stringify([{ x: JSON.rawJSON(1) }])")
-    == JsString("[{\"x\":1}]")
+    == KStr("[null,true]")
+  assert eval("JSON.stringify([{ x: JSON.rawJSON(1) }])") == KStr("[{\"x\":1}]")
 }
 
 pub fn raw_json_stringify_preserves_precision_test() {
   assert eval("JSON.stringify({ big: JSON.rawJSON('12345678901234567890') })")
-    == JsString("{\"big\":12345678901234567890}")
+    == KStr("{\"big\":12345678901234567890}")
 }
 
 pub fn raw_json_stringify_honours_gap_test() {
   assert eval("JSON.stringify({ x: JSON.rawJSON(1) }, null, 2)")
-    == JsString("{\n  \"x\": 1\n}")
+    == KStr("{\n  \"x\": 1\n}")
 }
 
 pub fn is_raw_json_true_only_for_boxes_test() {
-  assert eval("JSON.isRawJSON(JSON.rawJSON(1))") == JsBool(True)
-  assert eval("JSON.isRawJSON(JSON.rawJSON('\"s\"'))") == JsBool(True)
-  assert eval("JSON.isRawJSON(1)") == JsBool(False)
-  assert eval("JSON.isRawJSON({ rawJSON: '123' })") == JsBool(False)
+  assert eval("JSON.isRawJSON(JSON.rawJSON(1))") == KBool(True)
+  assert eval("JSON.isRawJSON(JSON.rawJSON('\"s\"'))") == KBool(True)
+  assert eval("JSON.isRawJSON(1)") == KBool(False)
+  assert eval("JSON.isRawJSON({ rawJSON: '123' })") == KBool(False)
   assert eval(
       "[JSON.isRawJSON(1.1), JSON.isRawJSON(null), JSON.isRawJSON(false),
         JSON.isRawJSON('123'), JSON.isRawJSON(undefined), JSON.isRawJSON([]),
         JSON.isRawJSON({}), JSON.isRawJSON(Symbol('123'))].join(',')",
     )
-    == JsString("false,false,false,false,false,false,false,false")
+    == KStr("false,false,false,false,false,false,false,false")
 }
 
 pub fn raw_json_rejects_illegal_text_test() {
-  assert eval_error_name("JSON.rawJSON('')") == JsString("SyntaxError")
-  assert eval_error_name("JSON.rawJSON(' 1')") == JsString("SyntaxError")
-  assert eval_error_name("JSON.rawJSON('1 ')") == JsString("SyntaxError")
-  assert eval_error_name("JSON.rawJSON('\\t1')") == JsString("SyntaxError")
-  assert eval_error_name("JSON.rawJSON('1\\n')") == JsString("SyntaxError")
-  assert eval_error_name("JSON.rawJSON('1\\r')") == JsString("SyntaxError")
-  assert eval_error_name("JSON.rawJSON('{}')") == JsString("SyntaxError")
-  assert eval_error_name("JSON.rawJSON('[]')") == JsString("SyntaxError")
-  assert eval_error_name("JSON.rawJSON('garbage')") == JsString("SyntaxError")
-  assert eval_error_name("JSON.rawJSON(undefined)") == JsString("SyntaxError")
-  assert eval_error_name("JSON.rawJSON(Symbol('123'))") == JsString("TypeError")
+  assert eval_error_name("JSON.rawJSON('')") == KStr("SyntaxError")
+  assert eval_error_name("JSON.rawJSON(' 1')") == KStr("SyntaxError")
+  assert eval_error_name("JSON.rawJSON('1 ')") == KStr("SyntaxError")
+  assert eval_error_name("JSON.rawJSON('\\t1')") == KStr("SyntaxError")
+  assert eval_error_name("JSON.rawJSON('1\\n')") == KStr("SyntaxError")
+  assert eval_error_name("JSON.rawJSON('1\\r')") == KStr("SyntaxError")
+  assert eval_error_name("JSON.rawJSON('{}')") == KStr("SyntaxError")
+  assert eval_error_name("JSON.rawJSON('[]')") == KStr("SyntaxError")
+  assert eval_error_name("JSON.rawJSON('garbage')") == KStr("SyntaxError")
+  assert eval_error_name("JSON.rawJSON(undefined)") == KStr("SyntaxError")
+  assert eval_error_name("JSON.rawJSON(Symbol('123'))") == KStr("TypeError")
 }

@@ -20,7 +20,7 @@ const defer_phase_marker = "defer"
 
 pub type HookPhase {
   EagerPhase
-  DeferPhase(resolve_fn: JsVal, reject_fn: JsVal)
+  DeferPhase(fulfill: JsVal, reject: JsVal)
 }
 
 pub type HookCall {
@@ -56,12 +56,12 @@ pub fn encode_hook_args(
         Some(referrer) -> [mk_string(specifier), mk_string(referrer)]
         None -> [mk_string(specifier)]
       }
-    DeferPhase(resolve_fn:, reject_fn:) -> [
+    DeferPhase(fulfill:, reject:) -> [
       mk_string(specifier),
       referrer |> option.map(mk_string) |> option.unwrap(mk_undefined()),
       mk_string(defer_phase_marker),
-      resolve_fn,
-      reject_fn,
+      fulfill,
+      reject,
     ]
   }
 }
@@ -95,11 +95,11 @@ fn parse_hook_tail(
       case classify(phase) {
         KStr(marker) if marker == defer_phase_marker ->
           case capability {
-            [resolve_fn, reject_fn] ->
+            [fulfill, reject] ->
               Ok(HookCall(
                 specifier:,
                 referrer:,
-                phase: DeferPhase(resolve_fn:, reject_fn:),
+                phase: DeferPhase(fulfill:, reject:),
               ))
             [] -> Error(MissingResolve)
             [_] -> Error(MissingReject)
@@ -132,19 +132,19 @@ pub fn defer_import_call(st: Agent, specifier: JsVal) -> #(JsVal, Agent) {
     specifier,
     mk_undefined(),
   )
-  let #(#(resolve_h, reject_h), st) = rt_async.alloc_resolving_fns(st, promise)
-  let resolve_fn = mk_object(resolve_h)
-  let reject_fn = mk_object(reject_h)
+  let #(#(fulfill_h, reject_h), st) = rt_async.alloc_resolving_fns(st, promise)
+  let fulfill = mk_object(fulfill_h)
+  let reject = mk_object(reject_h)
   let hook_args =
     encode_hook_args(
       string_of(specifier),
       registry.read_active_referrer(st),
-      DeferPhase(resolve_fn:, reject_fn:),
+      DeferPhase(fulfill:, reject:),
     )
-  use st <- enqueue_host_job(st, [resolve_fn, reject_fn])
+  use st <- enqueue_host_job(st, [fulfill, reject])
   case call_host_hook(st, hook_args) {
-    #(st, Ok(_)) -> st
-    #(st, Error(reason)) -> call_settle_fn(st, reject_fn, reason)
+    #(Ok(_), st) -> st
+    #(Error(reason), st) -> call_settle_fn(st, reject, reason)
   }
 }
 
@@ -161,7 +161,7 @@ pub fn source_import_call(st: Agent, specifier: JsVal) -> #(JsVal, Agent) {
       SyntaxError,
       "Module has no source phase representation",
     )
-  #(st, Error(err))
+  #(Error(err), st)
 }
 
 // a throwing request rejects the promise and skips k
@@ -247,15 +247,15 @@ fn validate_attributes(st: Agent, attributes: Handle) -> Agent {
 fn enqueue_import_job(
   st: Agent,
   promise: Handle,
-  settle: fn(Agent) -> #(Agent, Result(JsVal, JsVal)),
+  settle: fn(Agent) -> #(Result(JsVal, JsVal), Agent),
 ) -> Agent {
-  let #(#(resolve_h, reject_h), st) = rt_async.alloc_resolving_fns(st, promise)
-  let resolve_fn = mk_object(resolve_h)
-  let reject_fn = mk_object(reject_h)
-  use st <- enqueue_host_job(st, [resolve_fn, reject_fn])
+  let #(#(fulfill_h, reject_h), st) = rt_async.alloc_resolving_fns(st, promise)
+  let fulfill = mk_object(fulfill_h)
+  let reject = mk_object(reject_h)
+  use st <- enqueue_host_job(st, [fulfill, reject])
   case settle(st) {
-    #(st, Ok(v)) -> call_settle_fn(st, resolve_fn, v)
-    #(st, Error(reason)) -> call_settle_fn(st, reject_fn, reason)
+    #(Ok(v), st) -> call_settle_fn(st, fulfill, v)
+    #(Error(reason), st) -> call_settle_fn(st, reject, reason)
   }
 }
 
@@ -266,7 +266,7 @@ fn enqueue_host_job(
   run: fn(Agent) -> Agent,
 ) -> Agent {
   let job = fn(st) {
-    let #(st, held) = rt_gc.t_hold_roots(st, capability)
+    let #(held, st) = rt_gc.t_hold_roots(st, capability)
     let #(outcome, st) =
       rt_call.try_run(st, fn(st) { #(mk_undefined(), run(st)) })
     let st = rt_gc.t_release_roots(st, held)
@@ -286,7 +286,7 @@ fn call_settle_fn(st: Agent, settle_fn: JsVal, arg: JsVal) -> Agent {
 fn call_host_hook(
   st: Agent,
   hook_args: List(JsVal),
-) -> #(Agent, Result(JsVal, JsVal)) {
+) -> #(Result(JsVal, JsVal), Agent) {
   case st.import_hook {
     None -> {
       let #(err, st) =
@@ -295,19 +295,19 @@ fn call_host_hook(
           TypeError,
           "Dynamic import is not supported in this context",
         )
-      #(st, Error(err))
+      #(Error(err), st)
     }
     Some(types.HostFnEntry(call:, ..)) -> {
       let outcome =
         rt_call.try_run(st, fn(st) {
           case call(st, hook_args, mk_undefined(), mk_undefined()) {
-            #(st, Ok(v)) -> #(v, st)
-            #(st, Error(thrown)) -> rt_store.t_throw(st, thrown)
+            #(Ok(v), st) -> #(v, st)
+            #(Error(thrown), st) -> rt_store.t_throw(st, thrown)
           }
         })
       case outcome {
-        #(NormalCompletion(v), st) -> #(st, Ok(v))
-        #(ThrowCompletion(thrown), st) -> #(st, Error(thrown))
+        #(NormalCompletion(v), st) -> #(Ok(v), st)
+        #(ThrowCompletion(thrown), st) -> #(Error(thrown), st)
       }
     }
   }

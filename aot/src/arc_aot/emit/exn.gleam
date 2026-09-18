@@ -41,9 +41,9 @@ fn each_(
 
 fn with_done(
   e: Emitter,
-  f: fn(Emitter, NextWith(ir.Expr)) -> EmitResult,
+  f: fn(NextWith(ir.Expr), Emitter) -> EmitResult,
 ) -> EmitResult {
-  f(e, fn(ef, tree) { Ok(#(tree, ef)) })
+  f(fn(tree, ef) { Ok(#(tree, ef)) }, e)
 }
 
 // §14.15.3 finally overrides the pending completion
@@ -77,7 +77,7 @@ pub fn inline_finally(
       scope_cursor: here.scope_cursor,
       in_block: here.in_block,
     )
-  use e, _ <- let_(e, f_tree)
+  use _, e <- let_(e, f_tree)
   then(e)
 }
 
@@ -229,10 +229,10 @@ fn emit_catch_arm(
   catch_body: List(ast.StmtWithLine),
   ex_name: String,
 ) -> EmitResult {
-  use e, done <- with_done(e)
+  use done, e <- with_done(e)
   case param {
     Some(p) -> {
-      let #(e, save) = state.enter_scope(e, in_block: e.in_block)
+      let #(save, e) = state.enter_scope(e, in_block: e.in_block)
       use e <- catch_binding_prologue(e, e.cur_scope)
       use #(dtree, e) <- result.try(e.dispatch.emit_destructure(
         e,
@@ -240,13 +240,13 @@ fn emit_catch_arm(
         ir.Var(ex_name),
         state.BindLet,
       ))
-      use e, _ <- let_(e, dtree)
+      use _, e <- let_(e, dtree)
       use #(body_ir, e) <- result.try(
         e.dispatch.emit_stmts(e, as_block(catch_body), fn(ef) {
           Ok(#(ir.Values([]), ef))
         }),
       )
-      done(state.leave_scope(e, save), body_ir)
+      done(body_ir, state.leave_scope(e, save))
     }
     None -> {
       use #(body_ir, e) <- result.try(
@@ -254,7 +254,7 @@ fn emit_catch_arm(
           Ok(#(ir.Values([]), ef))
         }),
       )
-      done(e, body_ir)
+      done(body_ir, e)
     }
   }
 }
@@ -277,7 +277,7 @@ pub fn catch_binding_prologue(
         ir.Let([name], ir.Values([init]), body)
       }
       True -> {
-        use e, box <- host_(e, "box_new", [init])
+        use box, e <- host_(e, "box_new", [init])
         use body <- state.map_tree(next(state.set_slot_var(e, b.slot, name)))
         ir.Let([name], ir.Values([box]), body)
       }

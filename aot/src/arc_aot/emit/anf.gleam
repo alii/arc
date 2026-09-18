@@ -10,7 +10,7 @@ import gleam/list
 import gleam/option.{None, Some}
 
 pub type Build(a) =
-  fn(Emitter, fn(Emitter, a) -> #(ir.Expr, Emitter)) -> #(ir.Expr, Emitter)
+  fn(Emitter, fn(a, Emitter) -> #(ir.Expr, Emitter)) -> #(ir.Expr, Emitter)
 
 pub fn wrap(
   p: #(ir.Expr, Emitter),
@@ -20,24 +20,24 @@ pub fn wrap(
 }
 
 pub fn pure(v: a) -> Build(a) {
-  fn(e, k) { k(e, v) }
+  fn(e, k) { k(v, e) }
 }
 
 pub fn then(b: Build(a), f: fn(a) -> Build(c)) -> Build(c) {
-  fn(e, k) { b(e, fn(e, a) { f(a)(e, k) }) }
+  fn(e, k) { b(e, fn(a, e) { f(a)(e, k) }) }
 }
 
 pub fn bind(rhs: ir.Expr) -> Build(ir.Value) {
   fn(e, k) {
     let #(name, e) = state.fresh_var(e)
-    wrap(k(e, ir.Var(name)), ir.Let([name], rhs, _))
+    wrap(k(ir.Var(name), e), ir.Let([name], rhs, _))
   }
 }
 
 pub fn bind_number(rhs: ir.Expr) -> Build(ir.Value) {
   fn(e, k) {
     let #(name, e) = state.fresh_var(e)
-    wrap(k(state.mark_known_number(e, name), ir.Var(name)), ir.Let(
+    wrap(k(ir.Var(name), state.mark_known_number(e, name)), ir.Let(
       [name],
       rhs,
       _,
@@ -48,8 +48,8 @@ pub fn bind_number(rhs: ir.Expr) -> Build(ir.Value) {
 pub fn mark_number(v: ir.Value) -> Build(ir.Value) {
   fn(e, k) {
     case v {
-      ir.Var(name) -> k(state.mark_known_number(e, name), v)
-      _ -> k(e, v)
+      ir.Var(name) -> k(v, state.mark_known_number(e, name))
+      _ -> k(v, e)
     }
   }
 }
@@ -92,8 +92,8 @@ pub fn str_lit(s: String) -> Build(ir.Value) {
 pub fn mark_string(v: ir.Value) -> Build(ir.Value) {
   fn(e, k) {
     case v {
-      ir.Var(name) -> k(state.mark_known_string(e, name), v)
-      _ -> k(e, v)
+      ir.Var(name) -> k(v, state.mark_known_string(e, name))
+      _ -> k(v, e)
     }
   }
 }
@@ -129,15 +129,15 @@ pub fn tuple_get(v: ir.Value, i: Int) -> ir.Expr {
 }
 
 pub fn run(b: Build(ir.Value), e: Emitter) -> #(ir.Expr, Emitter) {
-  b(e, fn(ef, v) { #(ir.Values([v]), ef) })
+  b(e, fn(v, ef) { #(ir.Values([v]), ef) })
 }
 
 pub fn run_to(
   b: Build(a),
   e: Emitter,
-  tail: fn(Emitter, a) -> ir.Expr,
+  tail: fn(a, Emitter) -> ir.Expr,
 ) -> #(ir.Expr, Emitter) {
-  b(e, fn(ef, a) { #(tail(ef, a), ef) })
+  b(e, fn(a, ef) { #(tail(a, ef), ef) })
 }
 
 // arms that rebind a slot thread the new name out through the result
@@ -181,14 +181,14 @@ fn widen_breaks(
   }
 }
 
-fn rebind_slots(e: Emitter, slots: List(Int)) -> #(Emitter, List(String)) {
-  let #(e, rev) =
-    list.fold(slots, #(e, []), fn(acc, slot) {
-      let #(e, ns) = acc
+fn rebind_slots(e: Emitter, slots: List(Int)) -> #(List(String), Emitter) {
+  let #(rev, e) =
+    list.fold(slots, #([], e), fn(acc, slot) {
+      let #(ns, e) = acc
       let #(n, e) = state.fresh_slot_var(e, slot)
-      #(state.set_slot_var(e, slot, n), [n, ..ns])
+      #([n, ..ns], state.set_slot_var(e, slot, n))
     })
-  #(e, list.reverse(rev))
+  #(list.reverse(rev), e)
 }
 
 fn arm_slot_vals(e_arm: Emitter, slots: List(Int)) -> List(ir.Value) {
@@ -242,7 +242,7 @@ fn bind_if_n(
 ) -> Build(List(ir.Value)) {
   fn(e: Emitter, k) {
     let sv0 = e.slot_vars
-    let values = fn(_, vs) { ir.Values(vs) }
+    let values = fn(vs, _) { ir.Values(vs) }
     let #(then_tree, e_t) = run_to(t, e, values)
     let #(else_tree, e_f) = run_to(f, Emitter(..e_t, slot_vars: sv0), values)
     let carried =
@@ -251,11 +251,11 @@ fn bind_if_n(
         slots_rebound(sv0, e_f.slot_vars),
       )
     let e = Emitter(..e_f, slot_vars: sv0)
-    let #(e, rs) = fresh_vars(e, list.length(head_tys))
+    let #(rs, e) = fresh_vars(e, list.length(head_tys))
     let heads = list.map(rs, ir.Var)
     case carried {
       [] ->
-        wrap(k(e, heads), ir.Let(
+        wrap(k(heads, e), ir.Let(
           rs,
           ir.If(cond, head_tys, then_tree, else_tree),
           _,
@@ -263,9 +263,9 @@ fn bind_if_n(
       _ -> {
         let then_tree = append_tail(then_tree, arm_slot_vals(e_t, carried))
         let else_tree = append_tail(else_tree, arm_slot_vals(e_f, carried))
-        let #(e, out) = rebind_slots(e, carried)
+        let #(out, e) = rebind_slots(e, carried)
         let tys = list.append(head_tys, list.map(carried, fn(_) { ir.TTerm }))
-        wrap(k(e, heads), ir.Let(
+        wrap(k(heads, e), ir.Let(
           list.append(rs, out),
           ir.If(cond, tys, then_tree, else_tree),
           _,
@@ -275,13 +275,13 @@ fn bind_if_n(
   }
 }
 
-fn fresh_vars(e: Emitter, n: Int) -> #(Emitter, List(String)) {
+fn fresh_vars(e: Emitter, n: Int) -> #(List(String), Emitter) {
   case n {
-    0 -> #(e, [])
+    0 -> #([], e)
     _ -> {
       let #(r, e) = state.fresh_var(e)
-      let #(e, rest) = fresh_vars(e, n - 1)
-      #(e, [r, ..rest])
+      let #(rest, e) = fresh_vars(e, n - 1)
+      #([r, ..rest], e)
     }
   }
 }
@@ -303,9 +303,9 @@ pub fn close_iter_on_throw(iter: ir.Value, body: Build(Nil)) -> Build(Nil) {
         ir.Throw(e.consts.exn_tag, [ir.Var(exn)]),
       )
     let body_tree = append_tail(body_tree, arm_slot_vals(e_b, carried))
-    let #(e, out) = rebind_slots(e, carried)
+    let #(out, e) = rebind_slots(e, carried)
     let tys = [ir.TTerm, ..list.map(carried, fn(_) { ir.TTerm })]
-    wrap(k(e, Nil), ir.Let(
+    wrap(k(Nil, e), ir.Let(
       [r, ..out],
       ir.Try(result: tys, body: body_tree, handlers: [
         ir.CatchHandler(
@@ -363,7 +363,7 @@ pub fn bind_block(body: fn(String) -> Build(ir.Value)) -> Build(ir.Value) {
     let #(r, e) = state.fresh_var(e)
     case carried {
       [] ->
-        wrap(k(e, ir.Var(r)), ir.Let(
+        wrap(k(ir.Var(r), e), ir.Let(
           [r],
           ir.Block(label, [ir.TTerm], body_tree),
           _,
@@ -372,9 +372,9 @@ pub fn bind_block(body: fn(String) -> Build(ir.Value)) -> Build(ir.Value) {
         let body_tree =
           append_tail(body_tree, arm_slot_vals(e_b, carried))
           |> widen_breaks(label, arm_slot_vals(e, carried))
-        let #(e, out) = rebind_slots(e, carried)
+        let #(out, e) = rebind_slots(e, carried)
         let tys = [ir.TTerm, ..list.map(carried, fn(_) { ir.TTerm })]
-        wrap(k(e, ir.Var(r)), ir.Let(
+        wrap(k(ir.Var(r), e), ir.Let(
           [r, ..out],
           ir.Block(label, tys, body_tree),
           _,
@@ -385,7 +385,7 @@ pub fn bind_block(body: fn(String) -> Build(ir.Value)) -> Build(ir.Value) {
 }
 
 pub fn map(b: Build(a), f: fn(a) -> c) -> Build(c) {
-  fn(e, k) { b(e, fn(e, a) { k(e, f(a)) }) }
+  fn(e, k) { b(e, fn(a, e) { k(f(a), e) }) }
 }
 
 pub fn seq(bs: List(Build(a))) -> Build(List(a)) {
@@ -398,9 +398,9 @@ pub fn seq(bs: List(Build(a))) -> Build(List(a)) {
 fn number_guard(v: ir.Value) -> Build(#(ir.Value, Bool)) {
   fn(e, k) {
     case is_known_number(e, v) {
-      True -> k(e, #(ir.ConstI32(1), True))
+      True -> k(#(ir.ConstI32(1), True), e)
       False ->
-        bind(ir.TermTest(ir.IsNumber, v))(e, fn(e, g) { k(e, #(g, False)) })
+        bind(ir.TermTest(ir.IsNumber, v))(e, fn(g, e) { k(#(g, False), e) })
     }
   }
 }

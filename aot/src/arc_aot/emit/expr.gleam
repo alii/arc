@@ -25,11 +25,11 @@ pub fn ask(
 }
 
 pub fn modify(f: fn(Emitter) -> Emitter) -> Build(Nil) {
-  fn(e, k) { k(f(e), Nil) }
+  fn(e, k) { k(Nil, f(e)) }
 }
 
 pub fn consts() -> Build(state.IrConsts) {
-  fn(e: Emitter, k) { k(e, e.consts) }
+  fn(e: Emitter, k) { k(e.consts, e) }
 }
 
 // never panic: emit a runtime throw, yield undef so k still runs
@@ -49,7 +49,7 @@ pub fn bridge(call: Next) -> Build(ir.Value) {
     case call(e) {
       Ok(#(tree, e)) -> {
         let #(name, e) = state.fresh_var(e)
-        anf.wrap(k(e, ir.Var(name)), ir.Let([name], tree, _))
+        anf.wrap(k(ir.Var(name), e), ir.Let([name], tree, _))
       }
       Error(err) ->
         throw_at_rt("throw_type_error", state.describe_error(err))(e, k)
@@ -1150,7 +1150,7 @@ fn const_num(n: ast.LiteralNumber) -> types.JsNum {
 
 fn next_ic_site() -> Build(Int) {
   fn(e: Emitter, k) {
-    k(state.Emitter(..e, next_ic_site: e.next_ic_site + 1), e.next_ic_site)
+    k(e.next_ic_site, state.Emitter(..e, next_ic_site: e.next_ic_site + 1))
   }
 }
 
@@ -2300,7 +2300,7 @@ fn emit_iife(
     case
       e.dispatch.emit_function_callable(e, shape, None, params, body, fn_id)
     {
-      Ok(#(callee, e)) -> k(e, callee)
+      Ok(#(callee, e)) -> k(callee, e)
       Error(err) ->
         {
           use v <- anf.then(throw_at_rt(
@@ -2347,7 +2347,7 @@ fn write_slot(slot: Int, boxed boxed: Bool, v v: ir.Value) -> Build(ir.Value) {
           True -> state.mark_known_number(e, name)
           False -> e
         }
-        anf.wrap(k(state.set_slot_var(e, slot, name), v), ir.Let(
+        anf.wrap(k(v, state.set_slot_var(e, slot, name)), ir.Let(
           [name],
           ir.Values([v]),
           _,

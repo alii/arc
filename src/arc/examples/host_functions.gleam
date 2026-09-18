@@ -1,9 +1,9 @@
 // run with: gleam run -m arc/examples/host_functions
 
-import arc/engine.{JsString, Returned}
+import arc/engine.{Returned}
 import arc/host
 import arc/rt/inspect as rt_inspect
-import arc/rt/types.{mk_int, mk_string, mk_undefined}
+import arc/rt/types.{KStr, mk_int, mk_string, mk_undefined}
 import gleam/io
 import gleam/list
 import gleam/string
@@ -28,17 +28,17 @@ pub fn main() -> Nil {
   Nil
 }
 
-fn print(args, _this, ctx: host.Context(Nil)) {
+fn print(ctx: host.Context(Nil), args, _this) {
   io.println(list.map(args, display(ctx, _)) |> string.join(" "))
-  #(ctx, Ok(mk_undefined()))
+  #(Ok(mk_undefined()), ctx)
 }
 
-fn uppercase(args, _this, ctx) {
+fn uppercase(ctx, args, _this) {
   use text, ctx <- host.validate_string(ctx, host.first_arg(args), "str")
-  #(ctx, Ok(mk_string(string.uppercase(text))))
+  #(Ok(mk_string(string.uppercase(text))), ctx)
 }
 
-fn map_range(args, _this, ctx) {
+fn map_range(ctx, args, _this) {
   use n, ctx <- host.validate_integer(
     ctx,
     host.first_arg(args),
@@ -52,8 +52,8 @@ fn map_range(args, _this, ctx) {
 fn map_range_loop(ctx, cb, i, n, acc) {
   case i >= n {
     True -> {
-      let #(ctx, arr) = host.array(ctx, list.reverse(acc))
-      #(ctx, Ok(arr))
+      let #(arr, ctx) = host.array(ctx, list.reverse(acc))
+      #(Ok(arr), ctx)
     }
     False -> {
       use r, ctx <- host.try_call(ctx, cb, "callback", mk_undefined(), [
@@ -65,8 +65,8 @@ fn map_range_loop(ctx, cb, i, n, acc) {
 }
 
 fn display(ctx: host.Context(Nil), v) {
-  case engine.classify(v) {
-    JsString(text) -> text
+  case types.classify(v) {
+    KStr(text) -> text
     _ -> rt_inspect.inspect(ctx.agent, v)
   }
 }
