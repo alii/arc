@@ -14,11 +14,11 @@ import arc/rt/types.{
   ArrayBufferN, ArrayBufferObj, ArrayBufferResize, ArrayBufferSlice,
   ArrayBufferSliceToImmutable, ArrayBufferTransfer,
   ArrayBufferTransferToFixedLength, ArrayBufferTransferToImmutable, Bytes,
-  DataViewObj, Detached, Immutable, JInt, KHandle, KUndef, LocalBlock, Named,
+  DataViewObj, Detached, Immutable, KHandle, KUndef, LocalBlock, Named,
   OwnerBlock, ReturnThis, SObject, Shared, SharedArrayBufferConstructor,
   SharedArrayBufferGetByteLength, SharedArrayBufferGetGrowable,
   SharedArrayBufferGetMaxByteLength, SharedArrayBufferGrow,
-  SharedArrayBufferSlice, StringKey, TypedArrayObj, classify, mk_bool, mk_number,
+  SharedArrayBufferSlice, StringKey, TypedArrayObj, classify, mk_bool, mk_int,
   mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
@@ -74,7 +74,7 @@ pub fn init(
       1,
       ab_statics,
     )
-  let st = common.add_to_string_tag(st, ab_type.prototype, "ArrayBuffer")
+  let st = common.add_string_tag(st, ab_type.prototype, "ArrayBuffer")
   let st =
     common.add_species_accessor(
       st,
@@ -105,7 +105,7 @@ pub fn init(
       1,
       [],
     )
-  let st = common.add_to_string_tag(st, sab_type.prototype, "SharedArrayBuffer")
+  let st = common.add_string_tag(st, sab_type.prototype, "SharedArrayBuffer")
   let st =
     common.add_species_accessor(
       st,
@@ -230,7 +230,7 @@ fn allocate(
                 max_byte_length: max,
               )
           }
-          realm_ops.alloc_wrapper(st, ArrayBufferObj(storage:), proto)
+          realm_ops.alloc_object(st, ArrayBufferObj(storage:), proto)
         }
       }
     }
@@ -242,7 +242,7 @@ pub fn alloc_buffer(
   proto: Handle,
   byte_len: Int,
 ) -> #(Handle, Agent) {
-  realm_ops.alloc_wrapper(
+  realm_ops.alloc_object(
     st,
     ArrayBufferObj(storage: Bytes(
       bytes: zero_block(byte_len),
@@ -286,7 +286,7 @@ fn is_view(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 fn ab_get_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "byteLength")
   let buf = require_unshared(st, buf, "byteLength")
-  #(mk_number(JInt(live_byte_size(buf))), st)
+  #(mk_int(live_byte_size(buf)), st)
 }
 
 fn ab_get_detached(st: Agent, this: JsVal) -> #(JsVal, Agent) {
@@ -312,7 +312,7 @@ fn ab_get_max_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
         None -> types.buffer_byte_size(live)
       }
   }
-  #(mk_number(JInt(result)), st)
+  #(mk_int(result), st)
 }
 
 fn ab_get_resizable(st: Agent, this: JsVal) -> #(JsVal, Agent) {
@@ -379,8 +379,7 @@ fn buffer_slice(
     False -> st.realm.array_buffer.constructor
   }
   let #(ctor, st) = species_constructor(st, this, default_ctor)
-  let #(new_h, st) =
-    rt_call.t_construct(st, ctor, [mk_number(JInt(new_len))], ctor)
+  let #(new_h, st) = rt_call.t_construct(st, ctor, [mk_int(new_len)], ctor)
   let new_val = mk_object(new_h)
   let new_buf = require_buffer(st, new_val, "slice")
   let new_buf = require_family(st, new_buf, "slice", shared)
@@ -448,7 +447,7 @@ fn slice_to_immutable(
         }
       }
       let #(new_h, st) =
-        realm_ops.alloc_wrapper(
+        realm_ops.alloc_object(
           st,
           ArrayBufferObj(storage: Immutable(bytes: data)),
           st.realm.array_buffer.prototype,
@@ -502,7 +501,7 @@ fn ab_transfer(
           Bytes(bytes: data, max_byte_length: new_max)
       }
       let #(new_h, st) =
-        realm_ops.alloc_wrapper(
+        realm_ops.alloc_object(
           st,
           ArrayBufferObj(storage:),
           st.realm.array_buffer.prototype,
@@ -516,7 +515,7 @@ fn ab_transfer(
 fn sab_get_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "byteLength")
   let _block = require_shared(st, buf, "byteLength")
-  #(mk_number(JInt(live_byte_size(buf))), st)
+  #(mk_int(live_byte_size(buf)), st)
 }
 
 fn sab_get_growable(st: Agent, this: JsVal) -> #(JsVal, Agent) {
@@ -529,7 +528,7 @@ fn sab_get_max_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "maxByteLength")
   let _block = require_shared(st, buf, "maxByteLength")
   let max = option.unwrap(max_byte_length(buf), live_byte_size(buf))
-  #(mk_number(JInt(max)), st)
+  #(mk_int(max), st)
 }
 
 // §25.2.5.3

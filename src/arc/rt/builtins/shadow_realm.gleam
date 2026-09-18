@@ -10,10 +10,10 @@ import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type Realm,
-  type ShadowRealmNative, IndirectEval, JInt, JPosInf, KHandle, KNum, KStr,
-  Named, ShadowRealmConstructor, ShadowRealmEvaluate, ShadowRealmImportValue,
+  type ShadowRealmNative, IndirectEval, JPosInf, KHandle, KNum, KStr, Named,
+  ShadowRealmConstructor, ShadowRealmEvaluate, ShadowRealmImportValue,
   ShadowRealmN, ShadowRealmObj, StringKey, TypeErr, WrappedFunctionCall,
-  classify, mk_number, mk_object, mk_undefined,
+  classify, mk_int, mk_number, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/int
@@ -43,7 +43,7 @@ pub fn init(
       0,
       [],
     )
-  let st = common.add_to_string_tag(st, shadow_realm.prototype, "ShadowRealm")
+  let st = common.add_string_tag(st, shadow_realm.prototype, "ShadowRealm")
   #(shadow_realm, st)
 }
 
@@ -92,7 +92,7 @@ fn construct(
       fallback_proto
     })
   let #(realm, st) = create_realm(st)
-  realm_ops.alloc_wrapper(st, ShadowRealmObj(realm: realm.id), proto)
+  realm_ops.alloc_object(st, ShadowRealmObj(realm: realm.id), proto)
 }
 
 // §3.1.1 validateshadowrealmobject
@@ -218,9 +218,8 @@ fn copy_name_and_length(
   }
   let length = case classify(len_val) {
     KNum(JPosInf) -> mk_number(JPosInf)
-    KNum(n) ->
-      mk_number(JInt(int.max(rt_val.jsnum_to_integer_or_infinity(n), 0)))
-    _ -> mk_number(JInt(0))
+    KNum(n) -> mk_int(int.max(rt_val.jsnum_to_integer_or_infinity(n), 0))
+    _ -> mk_int(0)
   }
   let #(name_val, st) =
     rt_obj.t_get_prop(st, target_v, StringKey(Named("name")))

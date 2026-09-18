@@ -198,7 +198,7 @@ fn alloc_value(
   data: types.TemporalData,
   proto: Handle,
 ) -> #(JsVal, Agent) {
-  let #(h, st) = realm_ops.alloc_wrapper(st, TemporalObj(data), proto)
+  let #(h, st) = realm_ops.alloc_object(st, TemporalObj(data), proto)
   #(mk_object(h), st)
 }
 

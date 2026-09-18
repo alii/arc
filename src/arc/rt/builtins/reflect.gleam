@@ -1,16 +1,17 @@
 import arc/rt/builtins/common
+import arc/rt/builtins/function as b_function
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, type ReflectNative, KHandle, KNull, Named,
+  type Agent, type Handle, type JsVal, type ReflectNative, KHandle, KNull,
   ReflectApply, ReflectConstruct, ReflectDefineProperty, ReflectDeleteProperty,
   ReflectGet, ReflectGetOwnPropertyDescriptor, ReflectGetPrototypeOf, ReflectHas,
   ReflectIsExtensible, ReflectN, ReflectOwnKeys, ReflectPreventExtensions,
-  ReflectSet, ReflectSetPrototypeOf, StringKey, classify, mk_bool, mk_null,
-  mk_object, mk_undefined,
-} as rt_types
+  ReflectSet, ReflectSetPrototypeOf, classify, mk_bool, mk_null, mk_object,
+  mk_undefined,
+}
 import arc/rt/val as rt_val
 import gleam/list
 import gleam/option.{None, Some}
@@ -99,7 +100,8 @@ fn reflect_apply(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
     False ->
       rt_val.t_throw_type_error(st, "Reflect.apply: target is not a function")
     True -> {
-      let #(call_args, st) = create_list_from_array_like(st, args_list)
+      let #(call_args, st) =
+        b_function.create_list_from_array_like(st, args_list)
       rt_call.t_call_checked(st, target, this_arg, call_args)
     }
   }
@@ -126,7 +128,8 @@ fn reflect_construct(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
             "Reflect.construct: newTarget is not a constructor",
           )
         True -> {
-          let #(ctor_args, st) = create_list_from_array_like(st, args_list)
+          let #(ctor_args, st) =
+            b_function.create_list_from_array_like(st, args_list)
           let #(h, st) = rt_call.t_construct(st, target, ctor_args, new_target)
           #(mk_object(h), st)
         }
@@ -247,39 +250,6 @@ fn reflect_set_prototype_of(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
     Ok(new_proto) -> {
       let #(res, st) = rt_obj.t_set_prototype_of(st, h, new_proto)
       #(mk_bool(result.is_ok(res)), st)
-    }
-  }
-}
-
-// §7.3.19, throws on any non-object
-fn create_list_from_array_like(st: Agent, obj: JsVal) -> #(List(JsVal), Agent) {
-  case classify(obj) {
-    KHandle(_) -> {
-      let #(len_v, st) = rt_obj.t_get_prop(st, obj, StringKey(Named("length")))
-      let #(len, st) = rt_val.t_to_length(st, len_v)
-      collect_indexed(st, obj, 0, len, [])
-    }
-    _ ->
-      rt_val.t_throw_type_error(
-        st,
-        "CreateListFromArrayLike called on non-object",
-      )
-  }
-}
-
-fn collect_indexed(
-  st: Agent,
-  obj: JsVal,
-  i: Int,
-  len: Int,
-  acc: List(JsVal),
-) -> #(List(JsVal), Agent) {
-  case i >= len {
-    True -> #(list.reverse(acc), st)
-    False -> {
-      let #(v, st) =
-        rt_obj.t_get_prop(st, obj, StringKey(rt_types.index_key(i)))
-      collect_indexed(st, obj, i + 1, len, [v, ..acc])
     }
   }
 }

@@ -40,7 +40,7 @@ pub fn init(
     "BigInt",
     1,
     static_methods,
-    False,
+    constructible: False,
   )
 }
 

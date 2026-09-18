@@ -2,6 +2,7 @@
 
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{can_be_held_weakly}
+import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -9,11 +10,10 @@ import arc/rt/types.{
   type Handle, type JsVal, type Realm, FinRegCell,
   FinalizationRegistryConstructor, FinalizationRegistryN,
   FinalizationRegistryObj, FinalizationRegistryPrototypeRegister,
-  FinalizationRegistryPrototypeUnregister, KUndef, NoElements, SObject, classify,
-  mk_bool, mk_undefined,
+  FinalizationRegistryPrototypeUnregister, KUndef, SObject, classify, mk_bool,
+  mk_undefined,
 }
 import arc/rt/val as rt_val
-import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
@@ -48,7 +48,7 @@ pub fn init(
       1,
       [],
     )
-  let st = common.add_to_string_tag(st, bt.prototype, "FinalizationRegistry")
+  let st = common.add_string_tag(st, bt.prototype, "FinalizationRegistry")
   #(bt, st)
 }
 
@@ -89,27 +89,18 @@ fn construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   let callback = helpers.first_arg_or_undefined(args)
-  let #(callable, _) = rt_val.t_is_callable(st, callback)
-  case callable {
-    False -> rt_val.t_throw_type_error(st, "cleanup must be callable")
-    True -> {
-      let #(proto_h, st) =
-        rt_call.get_prototype_from_constructor(st, new_target, fn(realm: Realm) {
-          realm.finalization_registry.prototype
-        })
-      rt_store.t_cell_new(
-        st,
-        SObject(
-          kind: FinalizationRegistryObj(callback:, cells: []),
-          proto: Some(proto_h),
-          props: dict.new(),
-          symbol_props: [],
-          elements: NoElements,
-          extensible: True,
-        ),
-      )
-    }
-  }
+  use Nil <- helpers.guard(rt_call.is_callable(st, callback), fn() {
+    rt_val.t_throw_type_error(st, "cleanup must be callable")
+  })
+  let #(proto_h, st) =
+    rt_call.get_prototype_from_constructor(st, new_target, fn(realm: Realm) {
+      realm.finalization_registry.prototype
+    })
+  realm_ops.alloc_object(
+    st,
+    FinalizationRegistryObj(callback:, cells: []),
+    proto_h,
+  )
 }
 
 fn register(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
@@ -144,21 +135,18 @@ fn do_register(
 fn unregister(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use registry <- require_registry(st, this, "unregister")
   let token = helpers.first_arg_or_undefined(args)
-  case can_be_held_weakly(token) {
-    False ->
-      rt_val.t_throw_type_error(st, "Invalid value used as unregister token")
-    True -> {
-      let #(removed, kept) =
-        list.partition(read_cells(st, registry), fn(cell) {
-          case cell.token {
-            Some(t) -> rt_val.same_value(t, token)
-            None -> False
-          }
-        })
-      let st = update_cells(st, registry, fn(_) { kept })
-      #(mk_bool(removed != []), st)
-    }
-  }
+  use Nil <- helpers.guard(can_be_held_weakly(token), fn() {
+    rt_val.t_throw_type_error(st, "Invalid value used as unregister token")
+  })
+  let #(removed, kept) =
+    list.partition(read_cells(st, registry), fn(cell) {
+      case cell.token {
+        Some(t) -> rt_val.same_value(t, token)
+        None -> False
+      }
+    })
+  let st = update_cells(st, registry, fn(_cells) { kept })
+  #(mk_bool(removed != []), st)
 }
 
 // only built by require_registry

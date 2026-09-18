@@ -316,7 +316,7 @@ pub fn object(
   props: List(#(String, JsVal)),
 ) -> #(State(host), JsVal) {
   let st = s.agent
-  let #(h, st) = common.alloc_pojo(st, st.realm.object.prototype, props)
+  let #(h, st) = common.alloc_plain_object(st, st.realm.object.prototype, props)
   #(State(..s, agent: st), mk_object(h))
 }
 

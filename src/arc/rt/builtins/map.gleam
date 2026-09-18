@@ -2,17 +2,18 @@ import arc/internal/ordered_entries
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
 import arc/rt/builtins/iter_protocol
+import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type MapIterKind,
-  type MapKey, type MapNative, type ObjKind, JInt, KNull, KUndef, MapClear,
+  type MapKey, type MapNative, type ObjKind, KNull, KUndef, MapClear,
   MapConstructor, MapDelete, MapEntries, MapForEach, MapGet, MapGetOrInsert,
   MapGetOrInsertComputed, MapGetSize, MapGroupBy, MapHas, MapIterEntries,
   MapIterKeys, MapIterValues, MapIterator, MapKeys, MapN, MapObj, MapSet,
-  MapValues, Named, NoElements, SObject, StringKey, classify, js_to_map_key,
-  map_key_to_js, mk_bool, mk_number, mk_object, mk_undefined, symbol_iterator,
+  MapValues, Named, SObject, StringKey, classify, js_to_map_key, map_key_to_js,
+  mk_bool, mk_int, mk_object, mk_undefined, symbol_iterator,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -58,7 +59,7 @@ pub fn init(
       0,
       statics,
     )
-  let st = common.add_to_string_tag(st, bt.prototype, "Map")
+  let st = common.add_string_tag(st, bt.prototype, "Map")
   // @@iterator is the same function object as entries
   let #(iter_prop, st) = common.restamp(st, entries_prop)
   let st =
@@ -112,7 +113,8 @@ fn map_constructor(
     rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
       r.map.prototype
     })
-  let #(map_h, st) = alloc_map_cell(st, proto, ordered_entries.new())
+  let #(map_h, st) =
+    realm_ops.alloc_object(st, MapObj(entries: ordered_entries.new()), proto)
   let map = mk_object(map_h)
   case classify(first_arg_or_undefined(args)) {
     KUndef | KNull -> #(map_h, st)
@@ -159,7 +161,7 @@ fn group_by_loop(
       use kv, st <- iter_protocol.or_close(st, rec.iterator, fn(st) {
         rt_call.t_call_checked(st, callback, mk_undefined(), [
           item,
-          mk_number(JInt(index)),
+          mk_int(index),
         ])
       })
       let key = js_to_map_key(kv)
@@ -186,7 +188,8 @@ fn group_by_finish(
         common.alloc_array(st, list.reverse(members), array_proto)
       #(ordered_entries.insert(entries, key, mk_object(arr_h)), st)
     })
-  let #(map_h, st) = alloc_map_cell(st, st.realm.map.prototype, entries)
+  let #(map_h, st) =
+    realm_ops.alloc_object(st, MapObj(entries:), st.realm.map.prototype)
   #(mk_object(map_h), st)
 }
 
@@ -324,7 +327,7 @@ fn for_each_loop(
 
 fn map_get_size(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   use ref <- require_map(st, this, "size")
-  #(mk_number(JInt(ordered_entries.size(read_map_store(st, ref)))), st)
+  #(mk_int(ordered_entries.size(read_map_store(st, ref))), st)
 }
 
 fn map_iterator(
@@ -335,7 +338,7 @@ fn map_iterator(
 ) -> #(JsVal, Agent) {
   use ref <- require_map(st, this, method)
   let #(iter_h, st) =
-    alloc_kind_cell(
+    realm_ops.alloc_object(
       st,
       MapIterator(target: map_ref_handle(ref), index: 0, kind:),
       st.realm.map_iter_proto,
@@ -395,30 +398,4 @@ fn update_map_data(
     let assert SObject(..) = slot
     SObject(..slot, kind: MapObj(entries:))
   })
-}
-
-fn alloc_map_cell(
-  st: Agent,
-  proto: Handle,
-  entries: ordered_entries.OrderedEntries(MapKey, JsVal),
-) -> #(Handle, Agent) {
-  alloc_kind_cell(st, MapObj(entries:), proto)
-}
-
-fn alloc_kind_cell(
-  st: Agent,
-  kind: ObjKind,
-  proto: Handle,
-) -> #(Handle, Agent) {
-  rt_store.t_cell_new(
-    st,
-    SObject(
-      kind:,
-      proto: Some(proto),
-      props: dict.new(),
-      symbol_props: [],
-      elements: NoElements,
-      extensible: True,
-    ),
-  )
 }

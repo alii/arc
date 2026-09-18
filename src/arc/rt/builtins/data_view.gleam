@@ -69,7 +69,7 @@ pub fn init(
       1,
       [],
     )
-  let st = common.add_to_string_tag(st, bt.prototype, "DataView")
+  let st = common.add_string_tag(st, bt.prototype, "DataView")
   #(bt, st)
 }
 
@@ -156,7 +156,7 @@ fn construct(
     },
     fn() { rt_val.t_throw_range_error(st, "Invalid DataView length") },
   )
-  realm_ops.alloc_wrapper(
+  realm_ops.alloc_object(
     st,
     DataViewObj(buffer: buf_h, byte_offset: offset, byte_length: view_len),
     proto,

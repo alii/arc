@@ -3,6 +3,7 @@ import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as object_builtin
+import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/elements
 import arc/rt/js_string
@@ -32,7 +33,7 @@ import arc/rt/types.{
   JNan, JNegInf, JPosInf, KHandle, KNull, KNum, KStr, KUndef, Named, NoElements,
   ObjectPrototypeToString, Ordinary, ParsedDesc, ProxyObj, ReturnThis, SObject,
   StringKey, StringObj, SymbolKey, classify, index_key, key_display_string,
-  max_array_length, mk_bool, mk_object, mk_string, mk_undefined,
+  max_array_length, mk_bool, mk_int, mk_object, mk_string, mk_undefined,
   symbol_is_concat_spreadable, symbol_iterator, symbol_species,
   symbol_unscopables,
 } as rt_types
@@ -53,10 +54,14 @@ fn check_budget(st: Agent, exhausted: Bool) -> Nil {
   }
 }
 
-const cannot_convert = "Cannot convert undefined or null to object"
+fn within_budget(st: Agent, length: Int, k: fn() -> a) -> a {
+  case length > limits.max_iteration {
+    True -> rt_val.t_throw_range_error(st, iteration_budget_msg)
+    False -> k()
+  }
+}
 
-@external(erlang, "arc_rt_val_ffi", "mk_int")
-fn from_int(n: Int) -> JsVal
+const cannot_convert = "Cannot convert undefined or null to object"
 
 pub fn init(
   st: Agent,
@@ -338,21 +343,21 @@ fn alloc_array(
 }
 
 fn alloc_array_list(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
-  let array_proto = st.realm.array.prototype
-  alloc_array(st, list.length(values), elements.from_list(values), array_proto)
+  let #(h, st) = realm_ops.alloc_array(st, values)
+  #(mk_object(h), st)
 }
 
 // reads no properties, must not get length
 fn to_object_ref(
   st: Agent,
   this: JsVal,
-  cont: fn(Agent, JsVal, Handle) -> #(JsVal, Agent),
+  cont: fn(JsVal, Handle, Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   case classify(this) {
     KUndef | KNull -> rt_val.t_throw_type_error(st, cannot_convert)
     _ -> {
       let #(h, st) = rt_val.t_to_object(st, this)
-      cont(st, mk_object(h), h)
+      cont(mk_object(h), h, st)
     }
   }
 }
@@ -360,20 +365,20 @@ fn to_object_ref(
 fn require_length(
   st: Agent,
   ref: Handle,
-  cont: fn(Agent, Int) -> #(JsVal, Agent),
+  cont: fn(Int, Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   let #(length, st) = object_length(st, ref)
-  cont(st, length)
+  cont(length, st)
 }
 
 fn require_array(
   st: Agent,
   this: JsVal,
-  cont: fn(Agent, JsVal, Handle, Int) -> #(JsVal, Agent),
+  cont: fn(JsVal, Handle, Int, Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
-  use st, obj, ref <- to_object_ref(st, this)
-  use st, length <- require_length(st, ref)
-  cont(st, obj, ref, length)
+  use obj, ref, st <- to_object_ref(st, this)
+  use length, st <- require_length(st, ref)
+  cont(obj, ref, length, st)
 }
 
 fn object_length(st: Agent, ref: Handle) -> #(Int, Agent) {
@@ -408,11 +413,11 @@ fn length_of_properties(
 fn require_callback(
   st: Agent,
   args: List(JsVal),
-  cont: fn(Agent, ElementFn) -> #(JsVal, Agent),
+  cont: fn(ElementFn, Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   let #(cb, this_arg) = helpers.two_args_or_undefined(args)
   use call <- require_bound(st, cb, this_arg)
-  cont(st, call)
+  cont(call, st)
 }
 
 fn require_bound(
@@ -472,7 +477,7 @@ fn guard_safe_length(
   n: Int,
   cont: fn() -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
-  case n > rt_val.max_safe_integer {
+  case n > limits.max_safe_integer {
     True ->
       rt_val.t_throw_type_error(st, "Array length exceeds maximum safe integer")
     False -> cont()
@@ -498,7 +503,7 @@ fn generic_set_index(st: Agent, ref: Handle, idx: Int, val: JsVal) -> Agent {
 }
 
 fn generic_set_length(st: Agent, ref: Handle, len: Int) -> Agent {
-  generic_set(st, ref, Named("length"), from_int(len))
+  generic_set(st, ref, Named("length"), mk_int(len))
 }
 
 fn generic_delete(st: Agent, ref: Handle, key: PropertyKey) -> Agent {
@@ -737,7 +742,7 @@ fn hole_is_inherited(
 }
 
 fn array_join(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use st, this, _ref, length <- require_array(st, this)
+  use this, _ref, length, st <- require_array(st, this)
   let sep_val = case args {
     [v, ..] ->
       case classify(v) {
@@ -747,9 +752,7 @@ fn array_join(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     [] -> mk_string(",")
   }
   let #(separator, st) = rt_val.t_to_string(st, sep_val)
-  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  use <- within_budget(st, length)
   let #(joined, st) = join_elements(st, this, 0, length, separator, [])
   #(mk_string(joined), st)
 }
@@ -874,7 +877,7 @@ fn join_elements_generic(
 
 fn array_push(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   case push_fast(st, this, args) {
-    Pushed(new_length, st) -> #(from_int(new_length), st)
+    Pushed(new_length, st) -> #(mk_int(new_length), st)
     PushSlow -> array_push_slow(st, this, args)
   }
 }
@@ -898,12 +901,12 @@ fn array_push_slow(
     _, _ -> None
   }
   case fast {
-    Some(#(new_length, st)) -> #(from_int(new_length), st)
+    Some(#(new_length, st)) -> #(mk_int(new_length), st)
     None -> {
-      use st, _this, ref, length <- require_array(st, this)
+      use _this, ref, length, st <- require_array(st, this)
       use <- guard_safe_length(st, length + list.length(args))
       let #(new_length, st) = push_generic(st, ref, length, args)
-      #(from_int(new_length), st)
+      #(mk_int(new_length), st)
     }
   }
 }
@@ -949,7 +952,7 @@ type PopFast {
 fn pop_fast(st: Agent, this: JsVal) -> PopFast
 
 fn array_pop_slow(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  use st, _this, ref, length <- require_array(st, this)
+  use _this, ref, length, st <- require_array(st, this)
   case length == 0 {
     True -> #(mk_undefined(), generic_set_length(st, ref, 0))
     False -> {
@@ -971,7 +974,7 @@ fn array_pop_slow(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 }
 
 fn array_shift(st: Agent, this: JsVal, _args: List(JsVal)) -> #(JsVal, Agent) {
-  use st, _this, ref, length <- require_array(st, this)
+  use _this, ref, length, st <- require_array(st, this)
   case length == 0 {
     True -> #(mk_undefined(), generic_set_length(st, ref, 0))
     False -> {
@@ -1029,17 +1032,17 @@ fn move_range(
 }
 
 fn array_unshift(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use st, this, ref, length <- require_array(st, this)
+  use this, ref, length, st <- require_array(st, this)
   let arg_count = list.length(args)
   let new_len = length + arg_count
   // step 5 runs even with no args, observable
   use <- bool.lazy_guard(arg_count == 0, fn() {
     case classify(this) {
       KHandle(_) | KStr(_) -> #(
-        from_int(new_len),
+        mk_int(new_len),
         generic_set_length(st, ref, new_len),
       )
-      _ -> #(from_int(new_len), st)
+      _ -> #(mk_int(new_len), st)
     }
   })
   use <- guard_safe_length(st, new_len)
@@ -1051,7 +1054,7 @@ fn array_unshift(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     #(els, len + arg_count, Nil)
   }
   case fast {
-    Some(#(Nil, st)) -> #(from_int(new_len), st)
+    Some(#(Nil, st)) -> #(mk_int(new_len), st)
     None -> {
       let st =
         move_range(
@@ -1064,7 +1067,7 @@ fn array_unshift(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
           limits.max_iteration,
         )
       let st = write_list_at(st, ref, 0, args)
-      #(from_int(new_len), generic_set_length(st, ref, new_len))
+      #(mk_int(new_len), generic_set_length(st, ref, new_len))
     }
   }
 }
@@ -1079,7 +1082,7 @@ fn write_list_at(st: Agent, ref: Handle, idx: Int, vals: List(JsVal)) -> Agent {
 
 fn array_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
-  use st, this, _ref, length <- require_array(st, this)
+  use this, _ref, length, st <- require_array(st, this)
   let #(start, st) = relative_index(st, helpers.arg_at(args, 0), length, 0)
   let #(end, st) = relative_index(st, helpers.arg_at(args, 1), length, length)
   let count = int.max(end - start, 0)
@@ -1270,7 +1273,7 @@ fn copy_range_generic(
 
 fn array_concat(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
-  use st, this, _this_ref <- to_object_ref(st, this)
+  use this, _this_ref, st <- to_object_ref(st, this)
   let #(species, st) = array_species_create(st, this, 0)
   let all_items = [this, ..args]
   case species {
@@ -1312,7 +1315,7 @@ fn concat_item(
   case spreadable, classify(item) {
     True, KHandle(ref) -> {
       let #(length, st) = object_length(st, ref)
-      use <- bool.lazy_guard(pos + length > rt_val.max_safe_integer, fn() {
+      use <- bool.lazy_guard(pos + length > limits.max_safe_integer, fn() {
         rt_val.t_throw_type_error(
           st,
           "Array length exceeds maximum safe integer",
@@ -1322,7 +1325,7 @@ fn concat_item(
       #(#(copied, pos + length), st)
     }
     _, _ -> {
-      use <- bool.lazy_guard(pos >= rt_val.max_safe_integer, fn() {
+      use <- bool.lazy_guard(pos >= limits.max_safe_integer, fn() {
         rt_val.t_throw_type_error(
           st,
           "Array length exceeds maximum safe integer",
@@ -1346,7 +1349,7 @@ fn concat_items_species(
       case spreadable, classify(item) {
         True, KHandle(ref) -> {
           let #(length, st) = object_length(st, ref)
-          use <- bool.lazy_guard(pos + length > rt_val.max_safe_integer, fn() {
+          use <- bool.lazy_guard(pos + length > limits.max_safe_integer, fn() {
             rt_val.t_throw_type_error(
               st,
               "Array length exceeds maximum safe integer",
@@ -1365,7 +1368,7 @@ fn concat_items_species(
           concat_items_species(st, rest, target, pos + length)
         }
         _, _ -> {
-          use <- bool.lazy_guard(pos >= rt_val.max_safe_integer, fn() {
+          use <- bool.lazy_guard(pos >= limits.max_safe_integer, fn() {
             rt_val.t_throw_type_error(
               st,
               "Array length exceeds maximum safe integer",
@@ -1407,7 +1410,7 @@ fn array_species_create(
     _ -> #(None, st)
   }
   case species {
-    None if length > 4_294_967_295 ->
+    None if length > max_array_length ->
       rt_val.t_throw_range_error(st, "Invalid array length")
     _ -> #(species, st)
   }
@@ -1489,8 +1492,7 @@ fn species_construct(
     False ->
       rt_val.t_throw_type_error(st, "Species constructor is not a constructor")
     True -> {
-      let #(created, st) =
-        rt_call.t_construct(st, ctor, [from_int(length)], ctor)
+      let #(created, st) = rt_call.t_construct(st, ctor, [mk_int(length)], ctor)
       #(Some(created), st)
     }
   }
@@ -1503,9 +1505,7 @@ fn write_species_result(
   length: Int,
   set_length: Option(Int),
 ) -> Agent {
-  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  use <- within_budget(st, length)
   let st = write_species_elements(st, target, els, 0, length)
   case set_length {
     None -> st
@@ -1596,7 +1596,7 @@ fn array_reverse(
   this: JsVal,
   _args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use st, this, ref, length <- require_array(st, this)
+  use this, ref, length, st <- require_array(st, this)
   let fast = {
     use els, len <- try_elements_fast_path(st, ref, length, 0, length)
     #(elements.reverse_range(els, len), len, Nil)
@@ -1621,10 +1621,9 @@ fn reverse_generic(
     True -> st
     False -> {
       check_budget(st, fuel <= 0)
-      let #(has_lo, st) = generic_has_op(st, ref, lo)
-      let #(lo_val, st) = get_index_if(st, ref, lo, has_lo)
-      let #(has_hi, st) = generic_has_op(st, ref, hi)
-      let #(hi_val, st) = get_index_if(st, ref, hi, has_hi)
+      let obj = mk_object(ref)
+      let #(lo_val, st) = get_index_if_present(st, obj, lo)
+      let #(hi_val, st) = get_index_if_present(st, obj, hi)
       let st = case lo_val, hi_val {
         Some(lo_v), Some(hi_v) -> {
           let st = generic_set_index(st, ref, lo, hi_v)
@@ -1645,29 +1644,12 @@ fn reverse_generic(
   }
 }
 
-fn get_index_if(
-  st: Agent,
-  ref: Handle,
-  idx: Int,
-  present: Bool,
-) -> #(Option(JsVal), Agent) {
-  case present {
-    True -> {
-      let #(v, st) = generic_get(st, ref, idx)
-      #(Some(v), st)
-    }
-    False -> #(None, st)
-  }
-}
-
 fn array_fill(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use st, this, ref, length <- require_array(st, this)
+  use this, ref, length, st <- require_array(st, this)
   let fill_val = helpers.first_arg_or_undefined(args)
   let #(start, st) = relative_index(st, helpers.arg_at(args, 1), length, 0)
   let #(end, st) = relative_index(st, helpers.arg_at(args, 2), length, length)
-  use <- bool.lazy_guard(end - start > limits.max_iteration, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  use <- within_budget(st, end - start)
   let fast = {
     use els, len <- try_elements_fast_path(st, ref, length, start, end)
     #(elements.fill_range(els, start, end, fill_val), len, Nil)
@@ -1693,7 +1675,7 @@ fn fill_generic(
 }
 
 fn array_at(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use st, this, _ref, length <- require_array(st, this)
+  use this, _ref, length, st <- require_array(st, this)
   let #(raw, st) = rt_val.t_to_integer_or_infinity(st, helpers.arg_at(args, 0))
   let idx = case raw < 0 {
     True -> length + raw
@@ -1710,7 +1692,7 @@ fn array_index_of(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  forward_search_driver(st, this, args, Strict, SkipHoles, from_int)
+  forward_search_driver(st, this, args, Strict, SkipHoles, mk_int)
 }
 
 fn array_includes(
@@ -1731,7 +1713,7 @@ fn forward_search_driver(
   hole_mode: HoleMode,
   wrap: fn(Int) -> JsVal,
 ) -> #(JsVal, Agent) {
-  use st, this, _ref, length <- require_array(st, this)
+  use this, _ref, length, st <- require_array(st, this)
   use <- bool.guard(length == 0, #(wrap(-1), st))
   let search = helpers.first_arg_or_undefined(args)
   let #(from, st) = rt_val.t_to_integer_or_infinity(st, helpers.arg_at(args, 1))
@@ -1758,8 +1740,8 @@ fn array_last_index_of(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use st, this, _ref, length <- require_array(st, this)
-  use <- bool.guard(length == 0, #(from_int(-1), st))
+  use this, _ref, length, st <- require_array(st, this)
+  use <- bool.guard(length == 0, #(mk_int(-1), st))
   let search = helpers.first_arg_or_undefined(args)
   // checked by arg count, explicit undefined gives 0
   let #(from, st) = case args {
@@ -1772,7 +1754,7 @@ fn array_last_index_of(
   }
   let #(found, st) =
     search_backward(st, this, start, search, limits.max_iteration)
-  #(from_int(found), st)
+  #(mk_int(found), st)
 }
 
 type EqMode {
@@ -2041,7 +2023,7 @@ fn iterate_array(
   cb: ElementFn,
   hole_mode: HoleMode,
   stop_on: fn(JsVal) -> Bool,
-  cont: fn(Agent, FoundAt) -> #(JsVal, Agent),
+  cont: fn(FoundAt, Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   let #(start, end, step) = bounds(dir, length)
   iterate_loop(
@@ -2068,10 +2050,10 @@ fn iterate_loop(
   cb: ElementFn,
   hole_mode: HoleMode,
   stop_on: fn(JsVal) -> Bool,
-  cont: fn(Agent, FoundAt) -> #(JsVal, Agent),
+  cont: fn(FoundAt, Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   case idx == end, fuel {
-    True, _ -> cont(st, NotFound)
+    True, _ -> cont(NotFound, st)
     False, 0 -> rt_val.t_throw_range_error(st, iteration_budget_msg)
     False, _ -> {
       let #(maybe_elem, st) = case helpers.own_element(st, arr, idx) {
@@ -2099,9 +2081,9 @@ fn iterate_loop(
             cont,
           )
         Some(elem) -> {
-          let #(result, st) = cb(st, [elem, from_int(idx), arr])
+          let #(result, st) = cb(st, [elem, mk_int(idx), arr])
           case stop_on(result) {
-            True -> cont(st, Found(elem, idx))
+            True -> cont(Found(elem, idx), st)
             False ->
               iterate_loop(
                 st,
@@ -2124,13 +2106,6 @@ fn iterate_loop(
 
 type ElementFn =
   fn(Agent, List(JsVal)) -> #(JsVal, Agent)
-
-fn within_budget(st: Agent, length: Int, k: fn() -> a) -> a {
-  case length > limits.max_iteration {
-    True -> rt_val.t_throw_range_error(st, iteration_budget_msg)
-    False -> k()
-  }
-}
 
 fn map_dense(
   st: Agent,
@@ -2172,7 +2147,7 @@ fn map_dense_step(
   acc: List(JsVal),
   elem: JsVal,
 ) -> #(JsElements, Agent) {
-  let #(result, st) = cb(st, [elem, from_int(idx), arr])
+  let #(result, st) = cb(st, [elem, mk_int(idx), arr])
   map_dense(st, arr, idx + 1, length, cb, [result, ..acc])
 }
 
@@ -2190,7 +2165,7 @@ fn map_sparse(
       let #(maybe_elem, st) = get_index_if_present(st, arr, idx)
       case maybe_elem {
         Some(elem) -> {
-          let #(result, st) = cb(st, [elem, from_int(idx), arr])
+          let #(result, st) = cb(st, [elem, mk_int(idx), arr])
           map_sparse(
             st,
             arr,
@@ -2238,7 +2213,7 @@ fn filter_step(
   kept: List(JsVal),
   elem: JsVal,
 ) -> #(List(JsVal), Agent) {
-  let #(result, st) = cb(st, [elem, from_int(idx), arr])
+  let #(result, st) = cb(st, [elem, mk_int(idx), arr])
   case rt_val.to_boolean(result) {
     True -> filter_loop(st, arr, idx + 1, length, cb, [elem, ..kept])
     False -> filter_loop(st, arr, idx + 1, length, cb, kept)
@@ -2250,8 +2225,8 @@ fn array_for_each(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use st, this, _ref, length <- require_array(st, this)
-  use st, call <- require_callback(st, args)
+  use this, _ref, length, st <- require_array(st, this)
+  use call, st <- require_callback(st, args)
   #(mk_undefined(), for_each_loop(st, this, 0, length, call))
 }
 
@@ -2267,10 +2242,10 @@ fn for_each_loop(
     False, True -> rt_val.t_throw_range_error(st, iteration_budget_msg)
     False, False -> {
       let st = case helpers.own_element(st, arr, idx) {
-        helpers.Hit(elem) -> cb(st, [elem, from_int(idx), arr]).1
+        helpers.Hit(elem) -> cb(st, [elem, mk_int(idx), arr]).1
         helpers.Slow ->
           case probe_index_if_present(st, arr, idx) {
-            #(Some(elem), st) -> cb(st, [elem, from_int(idx), arr]).1
+            #(Some(elem), st) -> cb(st, [elem, mk_int(idx), arr]).1
             #(None, st) -> st
           }
       }
@@ -2280,8 +2255,8 @@ fn for_each_loop(
 }
 
 fn array_map(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use st, this, _ref, length <- require_array(st, this)
-  use st, call <- require_callback(st, args)
+  use this, _ref, length, st <- require_array(st, this)
+  use call, st <- require_callback(st, args)
   let #(species, st) = array_species_create(st, this, length)
   use <- within_budget(st, length)
   let #(els, st) = map_dense(st, this, 0, length, call, [])
@@ -2304,8 +2279,8 @@ fn finish_array(
 }
 
 fn array_filter(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use st, this, _ref, length <- require_array(st, this)
-  use st, call <- require_callback(st, args)
+  use this, _ref, length, st <- require_array(st, this)
+  use call, st <- require_callback(st, args)
   let #(species, st) = array_species_create(st, this, 0)
   use <- within_budget(st, length)
   let #(kept_rev, st) = filter_loop(st, this, 0, length, call, [])
@@ -2340,9 +2315,9 @@ fn every_some(
   args: List(JsVal),
   match_on match_on: Bool,
 ) -> #(JsVal, Agent) {
-  use st, this, _ref, length <- require_array(st, this)
-  use st, call <- require_callback(st, args)
-  use st, found <- iterate_array(
+  use this, _ref, length, st <- require_array(st, this)
+  use call, st <- require_callback(st, args)
+  use found, st <- iterate_array(
     st,
     this,
     length,
@@ -2363,11 +2338,11 @@ fn find_via_predicate(
   this: JsVal,
   args: List(JsVal),
   dir: Direction,
-  cont: fn(Agent, FoundAt) -> #(JsVal, Agent),
+  cont: fn(FoundAt, Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
-  use st, this, _ref, length <- require_array(st, this)
-  use st, call <- require_callback(st, args)
-  use st, found <- iterate_array(
+  use this, _ref, length, st <- require_array(st, this)
+  use call, st <- require_callback(st, args)
+  use found, st <- iterate_array(
     st,
     this,
     length,
@@ -2376,11 +2351,11 @@ fn find_via_predicate(
     VisitHoles,
     rt_val.to_boolean,
   )
-  cont(st, found)
+  cont(found, st)
 }
 
 fn array_find(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use st, found <- find_via_predicate(st, this, args, Ascending)
+  use found, st <- find_via_predicate(st, this, args, Ascending)
   case found {
     Found(elem, _) -> #(elem, st)
     NotFound -> #(mk_undefined(), st)
@@ -2392,10 +2367,10 @@ fn array_find_index(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use st, found <- find_via_predicate(st, this, args, Ascending)
+  use found, st <- find_via_predicate(st, this, args, Ascending)
   case found {
-    Found(_, idx) -> #(from_int(idx), st)
-    NotFound -> #(from_int(-1), st)
+    Found(_, idx) -> #(mk_int(idx), st)
+    NotFound -> #(mk_int(-1), st)
   }
 }
 
@@ -2404,7 +2379,7 @@ fn array_find_last(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use st, found <- find_via_predicate(st, this, args, Descending)
+  use found, st <- find_via_predicate(st, this, args, Descending)
   case found {
     Found(elem, _) -> #(elem, st)
     NotFound -> #(mk_undefined(), st)
@@ -2416,10 +2391,10 @@ fn array_find_last_index(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use st, found <- find_via_predicate(st, this, args, Descending)
+  use found, st <- find_via_predicate(st, this, args, Descending)
   case found {
-    Found(_, idx) -> #(from_int(idx), st)
-    NotFound -> #(from_int(-1), st)
+    Found(_, idx) -> #(mk_int(idx), st)
+    NotFound -> #(mk_int(-1), st)
   }
 }
 
@@ -2441,7 +2416,7 @@ fn reduce_impl(
   args: List(JsVal),
   dir: Direction,
 ) -> #(JsVal, Agent) {
-  use st, this, _ref, length <- require_array(st, this)
+  use this, _ref, length, st <- require_array(st, this)
   let cb = helpers.first_arg_or_undefined(args)
   use call <- require_bound(st, cb, mk_undefined())
   let #(start, end, step) = bounds(dir, length)
@@ -2515,13 +2490,13 @@ fn reduce_loop(
       let step = step_of(dir)
       case helpers.own_element(st, arr, idx) {
         helpers.Hit(elem) -> {
-          let #(result, st) = cb(st, [acc, elem, from_int(idx), arr])
+          let #(result, st) = cb(st, [acc, elem, mk_int(idx), arr])
           reduce_loop(st, arr, idx + step, end, cb, result, dir, fuel - 1)
         }
         helpers.Slow ->
           case probe_index_if_present(st, arr, idx) {
             #(Some(elem), st) -> {
-              let #(result, st) = cb(st, [acc, elem, from_int(idx), arr])
+              let #(result, st) = cb(st, [acc, elem, mk_int(idx), arr])
               reduce_loop(st, arr, idx + step, end, cb, result, dir, fuel - 1)
             }
             #(None, st) ->
@@ -2533,11 +2508,9 @@ fn reduce_loop(
 }
 
 fn array_sort(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use st, comparefn <- with_comparefn(st, args)
-  use st, this, ref, length <- require_array(st, this)
-  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  use comparefn, st <- with_comparefn(st, args)
+  use this, ref, length, st <- require_array(st, this)
+  use <- within_budget(st, length)
   case comparefn {
     None -> sort_default(st, ref, length, this)
     Some(cmp) -> sort_with_comparefn(st, ref, length, cmp, this)
@@ -2547,16 +2520,16 @@ fn array_sort(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
 fn with_comparefn(
   st: Agent,
   args: List(JsVal),
-  cont: fn(Agent, Option(JsVal)) -> #(JsVal, Agent),
+  cont: fn(Option(JsVal), Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   let comparefn = helpers.first_arg_or_undefined(args)
   case classify(comparefn) {
-    KUndef -> cont(st, None)
+    KUndef -> cont(None, st)
     _ -> {
       use comparefn <- helpers.require_callable(st, comparefn, fn() {
         not_a_function(st, comparefn)
       })
-      cont(st, Some(comparefn))
+      cont(Some(comparefn), st)
     }
   }
 }
@@ -2889,11 +2862,9 @@ fn array_to_sorted(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use st, comparefn <- with_comparefn(st, args)
-  use st, this, _ref, length <- require_array(st, this)
-  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  use comparefn, st <- with_comparefn(st, args)
+  use this, _ref, length, st <- require_array(st, this)
+  use <- within_budget(st, length)
   case comparefn {
     None -> to_sorted_impl(st, length, this, sort_values_default)
     Some(cmp) ->
@@ -2928,7 +2899,7 @@ fn sort_values_default(
 
 fn array_splice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
-  use st, this, ref, length <- require_array(st, this)
+  use this, ref, length, st <- require_array(st, this)
   let #(actual_start, st) =
     relative_index(st, helpers.arg_at(args, 0), length, 0)
   let #(#(actual_delete_count, items), st) =
@@ -3036,7 +3007,7 @@ fn splice_shift(
 }
 
 fn array_flat(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  use st, this, _ref, length <- require_array(st, this)
+  use this, _ref, length, st <- require_array(st, this)
   let #(depth, st) = case classify(helpers.first_arg_or_undefined(args)) {
     KUndef -> #(1, st)
     _ -> {
@@ -3075,9 +3046,7 @@ fn flatten_into(
   depth: Int,
   acc: List(JsVal),
 ) -> #(List(JsVal), Agent) {
-  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  use <- within_budget(st, length)
   flatten_into_loop(st, src, 0, length, depth, acc)
 }
 
@@ -3126,8 +3095,8 @@ fn array_flat_map(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use st, this, _ref, length <- require_array(st, this)
-  use st, call <- require_callback(st, args)
+  use this, _ref, length, st <- require_array(st, this)
+  use call, st <- require_callback(st, args)
   use <- within_budget(st, length)
   let #(species, st) = array_species_create(st, this, 0)
   let #(kept_rev, st) = flat_map_loop(st, this, 0, length, call, [])
@@ -3149,7 +3118,7 @@ fn flat_map_loop(
       case maybe_elem {
         None -> flat_map_loop(st, arr, idx + 1, length, cb, acc)
         Some(elem) -> {
-          let #(mapped, st) = cb(st, [elem, from_int(idx), arr])
+          let #(mapped, st) = cb(st, [elem, mk_int(idx), arr])
           let #(should_flatten, st) = try_is_array(st, mapped)
           case classify(mapped), should_flatten {
             KHandle(sub_ref), True -> {
@@ -3170,14 +3139,12 @@ fn array_copy_within(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use st, this, ref, length <- require_array(st, this)
+  use this, ref, length, st <- require_array(st, this)
   let #(target, st) = relative_index(st, helpers.arg_at(args, 0), length, 0)
   let #(from, st) = relative_index(st, helpers.arg_at(args, 1), length, 0)
   let #(final, st) = relative_index(st, helpers.arg_at(args, 2), length, length)
   let count = int.min(final - from, length - target)
-  use <- bool.lazy_guard(count > limits.max_iteration, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  use <- within_budget(st, count)
   case count <= 0 {
     True -> #(this, st)
     False -> {
@@ -3325,10 +3292,8 @@ fn array_from_array_like(
           let #(len_val, st) =
             rt_obj.t_get_prop(st, items, StringKey(Named("length")))
           let #(length, st) = rt_val.t_to_length(st, len_val)
-          use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-            rt_val.t_throw_range_error(st, iteration_budget_msg)
-          })
-          let #(target, st) = from_target(st, ctor, [from_int(length)])
+          use <- within_budget(st, length)
+          let #(target, st) = from_target(st, ctor, [mk_int(length)])
           array_from_loop(st, items, 0, length, map_fn, this_arg, target)
         }
         _ -> {
@@ -3371,7 +3336,7 @@ fn array_from_iterator_loop(
       let #(mapped, st) = case map_fn {
         Some(mf) -> {
           use mapped, st <- iter_protocol.or_close(st, rec.iterator, fn(st) {
-            rt_call.t_call_checked(st, mf, this_arg, [item, from_int(k)])
+            rt_call.t_call_checked(st, mf, this_arg, [item, mk_int(k)])
           })
           #(mapped, st)
         }
@@ -3407,7 +3372,7 @@ fn array_from_loop(
       let #(mapped, st) = case map_fn {
         None -> #(elem, st)
         Some(mf) ->
-          rt_call.t_call_checked(st, mf, this_arg, [elem, from_int(idx)])
+          rt_call.t_call_checked(st, mf, this_arg, [elem, mk_int(idx)])
       }
       let #(target, st) = from_put(st, target, idx, mapped)
       array_from_loop(st, items, idx + 1, length, map_fn, this_arg, target)
@@ -3417,7 +3382,7 @@ fn array_from_loop(
 
 fn array_of(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let len = list.length(args)
-  let #(target, st) = from_target(st, this, [from_int(len)])
+  let #(target, st) = from_target(st, this, [mk_int(len)])
   let #(target, st) =
     list.index_fold(args, #(target, st), fn(acc, item, k) {
       let #(target, st) = acc
@@ -3432,7 +3397,7 @@ fn array_to_spliced(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
-  use st, this, _ref, length <- require_array(st, this)
+  use this, _ref, length, st <- require_array(st, this)
   let #(actual_start, st) =
     relative_index(st, helpers.arg_at(args, 0), length, 0)
   let #(#(actual_skip_count, items), st) =
@@ -3453,7 +3418,7 @@ fn array_to_spliced(
 
 fn array_with(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
-  use st, this, _ref, length <- require_array(st, this)
+  use this, _ref, length, st <- require_array(st, this)
   let #(raw, st) = rt_val.t_to_integer_or_infinity(st, helpers.arg_at(args, 0))
   let actual_index = case raw < 0 {
     True -> length + raw
@@ -3492,10 +3457,8 @@ fn array_to_reversed(
   _args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
-  use st, this, _ref, length <- require_array(st, this)
-  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  use this, _ref, length, st <- require_array(st, this)
+  use <- within_budget(st, length)
   let #(reversed, st) = collect_elements_descending(st, this, length - 1, [])
   alloc_array(st, length, elements.from_list(reversed), array_proto)
 }
@@ -3516,7 +3479,7 @@ fn collect_elements_descending(
 }
 
 fn array_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  use st, array, ref <- to_object_ref(st, this)
+  use array, ref, st <- to_object_ref(st, this)
   let #(func, st) =
     rt_obj.t_get_prop(st, mk_object(ref), StringKey(Named("join")))
   let #(callable, st) = rt_val.t_is_callable(st, func)
@@ -3531,10 +3494,8 @@ fn array_to_locale_string(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  use st, this, _ref, length <- require_array(st, this)
-  use <- bool.lazy_guard(length > limits.max_iteration, fn() {
-    rt_val.t_throw_range_error(st, iteration_budget_msg)
-  })
+  use this, _ref, length, st <- require_array(st, this)
+  use <- within_budget(st, length)
   to_locale_string_loop(
     st,
     this,
@@ -3604,19 +3565,12 @@ fn create_array_iterator(
   this: JsVal,
   kind: rt_types.ArrayIterKind,
 ) -> #(JsVal, Agent) {
-  use st, _this, ref <- to_object_ref(st, this)
-  let iter_proto = st.realm.array_iter_proto
+  use _this, ref, st <- to_object_ref(st, this)
   let #(iter_ref, st) =
-    rt_store.t_cell_new(
+    realm_ops.alloc_object(
       st,
-      SObject(
-        kind: ArrayIterator(target: ref, index: 0, kind:),
-        proto: Some(iter_proto),
-        props: dict.new(),
-        symbol_props: [],
-        elements: NoElements,
-        extensible: True,
-      ),
+      ArrayIterator(target: ref, index: 0, kind:),
+      st.realm.array_iter_proto,
     )
   #(mk_object(iter_ref), st)
 }

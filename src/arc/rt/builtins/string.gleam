@@ -31,7 +31,8 @@ import arc/rt/types.{
   StringPrototypeToString, StringPrototypeToUpperCase,
   StringPrototypeToWellFormed, StringPrototypeTrim, StringPrototypeTrimEnd,
   StringPrototypeTrimStart, StringPrototypeValueOf, StringRaw, classify, mk_bool,
-  mk_number, mk_object, mk_string, mk_undefined, well_known_symbol_description,
+  mk_int, mk_number, mk_object, mk_string, mk_undefined,
+  well_known_symbol_description,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/int
@@ -258,7 +259,7 @@ fn string_char_code_at(
   let #(idx, st) =
     rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
   case js_string.cp_at(s, idx) {
-    Some(cp) -> #(mk_number(JInt(cp)), st)
+    Some(cp) -> #(mk_int(cp), st)
     None -> #(mk_number(JNan), st)
   }
 }
@@ -274,7 +275,7 @@ fn string_index_of(
   let #(pos, st) = rt_val.t_to_integer_or_infinity(st, helpers.arg_at(args, 1))
   let from = int.clamp(pos, 0, js_string.len(s))
   let result = js_string.index_of_val(s, mk_string(search), from)
-  #(mk_number(JInt(option.unwrap(result, -1))), st)
+  #(mk_int(option.unwrap(result, -1)), st)
 }
 
 fn string_last_index_of(
@@ -295,7 +296,7 @@ fn string_last_index_of(
       js_string.last_index_of(s, search, from)
     }
   }
-  #(mk_number(JInt(option.unwrap(result, -1))), st)
+  #(mk_int(option.unwrap(result, -1)), st)
 }
 
 fn string_includes(
@@ -520,7 +521,7 @@ fn string_code_point_at(
   let #(pos, st) =
     rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
   case js_string.cp_at(s, pos) {
-    Some(cp) -> #(mk_number(JInt(cp)), st)
+    Some(cp) -> #(mk_int(cp), st)
     None -> #(mk_undefined(), st)
   }
 }
@@ -580,7 +581,7 @@ fn string_locale_compare(
     order.Eq -> 0
     order.Gt -> 1
   }
-  #(mk_number(JInt(n)), st)
+  #(mk_int(n), st)
 }
 
 fn string_is_well_formed(st: Agent, this: JsVal) -> #(JsVal, Agent) {
@@ -869,7 +870,7 @@ fn replace_loop_functional(
       let #(result, st) =
         rt_call.t_call_checked(st, replace_fn, mk_undefined(), [
           mk_string(search_str),
-          mk_number(JInt(p)),
+          mk_int(p),
           mk_string(s),
         ])
       let #(replacement, st) = rt_val.t_to_string(st, result)

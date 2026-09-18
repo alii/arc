@@ -58,7 +58,8 @@ import arc/rt/val as rt_val
 import gleam/dict
 import gleam/int
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
+import gleam/result
 
 pub fn new_agent(hooks: HostHooks) -> Agent {
   let st =
@@ -260,12 +261,72 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
       lexical_globals: dict.new(),
       suppressed_error: errors.suppressed_error,
     )
-  let st =
-    list.fold(realm_ops.realm_handles(realm), st, fn(st, h) {
-      rt_store.t_pin_root(st, h)
-    })
+  let st = list.fold(realm_handles(realm), st, rt_store.t_pin_root)
   let st = Agent(..st, realm:, realms: dict.insert(st.realms, id, realm))
   #(realm, st)
+}
+
+// must stay exhaustive over the realm record fields
+fn realm_handles(r: Realm) -> List(Handle) {
+  let pair = fn(bt: BuiltinPair) { [bt.prototype, bt.constructor] }
+  let typed_arrays =
+    dict.fold(r.typed_arrays.by_kind, [], fn(acc, _kind, bt) {
+      [bt.prototype, bt.constructor, ..acc]
+    })
+  list.flatten([
+    pair(r.object),
+    pair(r.function),
+    pair(r.array),
+    pair(r.string),
+    pair(r.number),
+    pair(r.boolean),
+    pair(r.symbol),
+    pair(r.bigint),
+    pair(r.error),
+    pair(r.type_error),
+    pair(r.reference_error),
+    pair(r.range_error),
+    pair(r.syntax_error),
+    pair(r.eval_error),
+    pair(r.uri_error),
+    pair(r.aggregate_error),
+    pair(r.suppressed_error),
+    pair(r.map),
+    pair(r.set),
+    pair(r.weak_map),
+    pair(r.weak_set),
+    pair(r.date),
+    pair(r.regexp),
+    pair(r.promise),
+    pair(r.proxy),
+    pair(r.array_buffer),
+    pair(r.shared_array_buffer),
+    pair(r.data_view),
+    pair(r.iterator),
+    pair(r.generator),
+    pair(r.generator_fn),
+    pair(r.async_fn),
+    pair(r.async_gen),
+    typed_arrays,
+    [
+      r.math,
+      r.json,
+      r.reflect,
+      r.console,
+      r.atomics,
+      r.iterator_proto,
+      r.array_iter_proto,
+      r.string_iter_proto,
+      r.map_iter_proto,
+      r.set_iter_proto,
+      r.async_iterator_proto,
+      r.async_from_sync_proto,
+      r.iterator_helper_proto,
+      r.wrap_for_valid_proto,
+      r.throw_type_error,
+      r.global_object,
+    ],
+  ])
 }
 
 pub fn create_realm(st: Agent) -> #(Realm, Agent) {
@@ -275,11 +336,11 @@ pub fn create_realm(st: Agent) -> #(Realm, Agent) {
 }
 
 pub fn seed_ops(st: Agent) -> Agent {
-  let js = st.store
+  let store = st.store
   Agent(
     ..st,
     store: JsStore(
-      ..js,
+      ..store,
       ops: JsOps(
         get_prop: rt_obj.t_get_prop,
         call: rt_call.t_call_checked,
@@ -425,33 +486,25 @@ fn alloc_global_object(
     list.append(
       entries,
       list.filter_map(rt_types.all_typed_array_kinds, fn(kind) {
-        case dict.get(r.typed_arrays.by_kind, kind) {
-          Ok(bt) -> Ok(Builtin(b_typed_array.kind_name(kind), ctor(bt)))
-          Error(Nil) -> Error(Nil)
-        }
+        use bt <- result.map(dict.get(r.typed_arrays.by_kind, kind))
+        Builtin(rt_types.typed_array_name(kind), ctor(bt))
       }),
     )
-  let #(props, st) =
-    list.fold(entries, #([], st), fn(acc, e) {
-      let #(props, st) = acc
-      case e {
-        Immutable(name:, val:) -> {
-          let #(p, st) = common.data_prop(st, val)
-          #([#(name, p), ..props], st)
-        }
-        Builtin(name:, val:) -> {
-          let #(p, st) = common.builtin_property(st, val)
-          #([#(name, p), ..props], st)
-        }
-      }
-    })
+  let #(props, st) = {
+    use st, entry <- helpers.map_threaded(st, entries)
+    let #(prop, st) = case entry {
+      Immutable(val:, ..) -> common.frozen_property(st, val)
+      Builtin(val:, ..) -> common.builtin_property(st, val)
+    }
+    #(#(entry.name, prop), st)
+  }
   let #(global_h, st) =
     rt_store.t_cell_new(
       st,
       SObject(
         kind: rt_types.GlobalObj,
         proto: Some(object_proto),
-        props: common.named_props(list.reverse(props)),
+        props: common.named_props(props),
         symbol_props: [],
         elements: NoElements,
         extensible: True,
@@ -585,7 +638,7 @@ pub fn dispatch_native_construct(
         rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
           r.string.prototype
         })
-      realm_ops.alloc_wrapper(st, StringObj(s), proto)
+      realm_ops.alloc_object(st, StringObj(s), proto)
     }
     NumberN(NumberConstructor) -> {
       let #(v, st) =
@@ -598,7 +651,7 @@ pub fn dispatch_native_construct(
         rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
           r.number.prototype
         })
-      realm_ops.alloc_wrapper(st, NumberObj(n), proto)
+      realm_ops.alloc_object(st, NumberObj(n), proto)
     }
     BooleanN(BooleanConstructor) -> {
       let b = case args {
@@ -609,7 +662,7 @@ pub fn dispatch_native_construct(
         rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
           r.boolean.prototype
         })
-      realm_ops.alloc_wrapper(st, BooleanObj(b), proto)
+      realm_ops.alloc_object(st, BooleanObj(b), proto)
     }
     SymbolN(SymbolConstructor) ->
       rt_val.t_throw_type_error(st, "Symbol is not a constructor")
@@ -689,10 +742,7 @@ fn construct_host_fn(
   }
 }
 
-fn own_data_prototype(
-  st: Agent,
-  ctor: JsVal,
-) -> #(option.Option(Handle), Agent) {
+fn own_data_prototype(st: Agent, ctor: JsVal) -> #(Option(Handle), Agent) {
   case as_handle(ctor) {
     None -> #(None, st)
     Some(h) -> {
@@ -706,7 +756,7 @@ fn own_data_prototype(
   }
 }
 
-fn as_handle(v: JsVal) -> option.Option(Handle) {
+fn as_handle(v: JsVal) -> Option(Handle) {
   case classify(v) {
     KHandle(h) -> Some(h)
     _ -> None

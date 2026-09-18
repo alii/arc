@@ -34,8 +34,8 @@ pub fn init(
       #("toString", FunctionN(FunctionToString), 0),
     ])
   // §10.2.4.1 %ThrowTypeError%, frozen
-  let #(len_p, st) = common.data_prop(st, mk_number(JInt(0)))
-  let #(name_p, st) = common.data_prop(st, mk_string(""))
+  let #(len_p, st) = common.frozen_property(st, mk_number(JInt(0)))
+  let #(name_p, st) = common.frozen_property(st, mk_string(""))
   let #(thrower_h, st) =
     rt_store.t_cell_new(
       st,
@@ -76,7 +76,8 @@ pub fn init(
       "[Symbol.hasInstance]",
       1,
     )
-  let #(has_instance_prop, st) = common.data_prop(st, mk_object(has_instance_h))
+  let #(has_instance_prop, st) =
+    common.frozen_property(st, mk_object(has_instance_h))
   let st =
     common.add_symbol_property(
       st,
@@ -100,7 +101,7 @@ pub fn init(
       "Function",
       1,
       [],
-      True,
+      constructible: True,
     )
   // function.prototype is itself callable, returns undefined
   let st =

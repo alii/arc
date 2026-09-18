@@ -8,9 +8,9 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type ObjectKey,
   type ObjectNative, type ParsedDesc, type Property, AccessorProperty,
-  ArgumentsObj, BooleanObj, DataProperty, DateObj, ErrorObj, Index, JInt, KBig,
-  KBool, KBytecode, KCompiled, KHandle, KNative, KNull, KNum, KStr, KSym, KUndef,
-  Named, NumberObj, ObjectAssign, ObjectConstructor, ObjectCreate,
+  ArgumentsObj, BooleanObj, DataProperty, DateObj, ErrorObj, Index, KBig, KBool,
+  KBytecode, KCompiled, KHandle, KNative, KNull, KNum, KStr, KSym, KUndef, Named,
+  NumberObj, ObjectAssign, ObjectConstructor, ObjectCreate,
   ObjectDefineProperties, ObjectDefineProperty, ObjectEntries, ObjectFreeze,
   ObjectFromEntries, ObjectGetOwnPropertyDescriptor,
   ObjectGetOwnPropertyDescriptors, ObjectGetOwnPropertyNames,
@@ -23,8 +23,8 @@ import arc/rt/types.{
   ObjectPrototypeProtoGetter, ObjectPrototypeProtoSetter,
   ObjectPrototypeToLocaleString, ObjectPrototypeToString, ObjectPrototypeValueOf,
   ObjectSeal, ObjectSetPrototypeOf, ObjectValues, ParsedDesc, ProxyObj,
-  RegExpObj, SObject, SShapedObject, StringKey, StringObj, SymbolKey, classify,
-  mk_bool, mk_null, mk_number, mk_object, mk_string, mk_symbol, mk_undefined,
+  RegExpObj, SObject, StringKey, StringObj, SymbolKey, classify, mk_bool, mk_int,
+  mk_null, mk_object, mk_string, mk_symbol, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bool
@@ -101,7 +101,7 @@ pub fn init(
     "Object",
     1,
     static_methods,
-    True,
+    constructible: True,
   )
 }
 
@@ -204,27 +204,32 @@ fn object_ctor(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 
 fn get_own_prop_desc(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(target, key_val) = two_args_or_undefined(args)
-  case classify(target) {
+  let st = require_object_coercible(st, target)
+  let #(key, st) = rt_val.t_to_property_key(st, key_val)
+  case own_property_of(st, target, key) {
+    #(Some(prop), st) -> from_property_descriptor(st, prop)
+    #(None, st) -> #(mk_undefined(), st)
+  }
+}
+
+fn require_object_coercible(st: Agent, v: JsVal) -> Agent {
+  case classify(v) {
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
-    KHandle(h) -> {
-      let #(key, st) = rt_val.t_to_property_key(st, key_val)
-      let #(desc, st) = rt_obj.t_get_own_property(st, h, key)
-      case desc {
-        Some(prop) -> from_property_descriptor(st, prop)
-        None -> #(mk_undefined(), st)
-      }
-    }
-    KStr(s) -> {
-      let #(key, st) = rt_val.t_to_property_key(st, key_val)
-      case rt_obj.string_exotic_own_property(s, key) {
-        Some(prop) -> from_property_descriptor(st, prop)
-        None -> #(mk_undefined(), st)
-      }
-    }
-    _ -> {
-      let #(_key, st) = rt_val.t_to_property_key(st, key_val)
-      #(mk_undefined(), st)
-    }
+    _ -> st
+  }
+}
+
+// own property of toobject(target) without allocating the wrapper
+fn own_property_of(
+  st: Agent,
+  target: JsVal,
+  key: ObjectKey,
+) -> #(Option(Property), Agent) {
+  case classify(target) {
+    KHandle(h) -> rt_obj.t_get_own_property(st, h, key)
+    KStr(s) -> #(rt_obj.string_exotic_own_property(s, key), st)
+    KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
+    _ -> #(None, st)
   }
 }
 
@@ -625,22 +630,10 @@ fn object_is(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 
 fn has_own(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(target, key_val) = two_args_or_undefined(args)
-  case classify(target) {
-    KHandle(h) -> {
-      let #(key, st) = rt_val.t_to_property_key(st, key_val)
-      let #(desc, st) = rt_obj.t_get_own_property(st, h, key)
-      #(mk_bool(option.is_some(desc)), st)
-    }
-    KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
-    KStr(s) -> {
-      let #(key, st) = rt_val.t_to_property_key(st, key_val)
-      #(mk_bool(option.is_some(rt_obj.string_exotic_own_property(s, key))), st)
-    }
-    _ -> {
-      let #(_key, st) = rt_val.t_to_property_key(st, key_val)
-      #(mk_bool(False), st)
-    }
-  }
+  let st = require_object_coercible(st, target)
+  let #(key, st) = rt_val.t_to_property_key(st, key_val)
+  let #(desc, st) = own_property_of(st, target, key)
+  #(mk_bool(option.is_some(desc)), st)
 }
 
 fn has_own_property(
@@ -649,18 +642,8 @@ fn has_own_property(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(key, st) = rt_val.t_to_property_key(st, first_arg_or_undefined(args))
-  case classify(this) {
-    KHandle(h) -> {
-      let #(desc, st) = rt_obj.t_get_own_property(st, h, key)
-      #(mk_bool(option.is_some(desc)), st)
-    }
-    KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
-    KStr(s) -> #(
-      mk_bool(option.is_some(rt_obj.string_exotic_own_property(s, key))),
-      st,
-    )
-    _ -> #(mk_bool(False), st)
-  }
+  let #(desc, st) = own_property_of(st, this, key)
+  #(mk_bool(option.is_some(desc)), st)
 }
 
 fn property_is_enumerable(
@@ -669,27 +652,10 @@ fn property_is_enumerable(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(key, st) = rt_val.t_to_property_key(st, first_arg_or_undefined(args))
-  case classify(this) {
-    KHandle(h) -> {
-      let #(desc, st) = rt_obj.t_get_own_property(st, h, key)
-      #(
-        mk_bool(
-          option.map(desc, rt_types.prop_enumerable) |> option.unwrap(False),
-        ),
-        st,
-      )
-    }
-    KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
-    KStr(s) -> #(
-      mk_bool(
-        rt_obj.string_exotic_own_property(s, key)
-        |> option.map(rt_types.prop_enumerable)
-        |> option.unwrap(False),
-      ),
-      st,
-    )
-    _ -> #(mk_bool(False), st)
-  }
+  let #(desc, st) = own_property_of(st, this, key)
+  let enumerable =
+    option.map(desc, rt_types.prop_enumerable) |> option.unwrap(False)
+  #(mk_bool(enumerable), st)
 }
 
 fn object_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
@@ -738,8 +704,6 @@ fn builtin_tag(st: Agent, this: JsVal) -> String {
             RegExpObj(..) -> "RegExp"
             _ -> "Object"
           }
-        // h-shape-slowpath-compat
-        SShapedObject(..) -> "Object"
         _ -> "Object"
       }
     }
@@ -792,7 +756,7 @@ fn set_prototype_of(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
   case classify(target), proto {
     KNull, _ | KUndef, _ -> rt_val.t_throw_type_error(st, cannot_convert)
-    _, Error(_) ->
+    _, Error(Nil) ->
       rt_val.t_throw_type_error(
         st,
         "Object prototype may only be an Object or null",
@@ -1040,7 +1004,7 @@ fn group_by_loop(
         let #(kv, st) =
           rt_call.t_call_checked(st, callback, mk_undefined(), [
             item,
-            mk_number(JInt(index)),
+            mk_int(index),
           ])
         let #(key, st) = rt_val.t_to_property_key(st, kv)
         #(rt_obj.object_key_value(key), st)

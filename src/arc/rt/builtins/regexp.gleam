@@ -12,8 +12,8 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type LegacySlot,
   type LegacyStatics, type ObjectKey, type Property, type PropertyKey,
-  type RegExpFlag, type RegExpNative, ArrayObj, DataProperty, Index, JInt,
-  KHandle, KNative, KNull, KUndef, LegacyInput, LegacyLastMatch, LegacyLastParen,
+  type RegExpFlag, type RegExpNative, ArrayObj, DataProperty, Index, KHandle,
+  KNative, KNull, KUndef, LegacyInput, LegacyLastMatch, LegacyLastParen,
   LegacyLeftContext, LegacyParen1, LegacyParen2, LegacyParen3, LegacyParen4,
   LegacyParen5, LegacyParen6, LegacyParen7, LegacyParen8, LegacyParen9,
   LegacyRightContext, LegacyStatics, Named, NoElements, Ordinary, RFDotAll,
@@ -23,8 +23,8 @@ import arc/rt/types.{
   RegExpObj, RegExpPrototypeCompile, RegExpPrototypeExec, RegExpPrototypeTest,
   RegExpPrototypeToString, RegExpStringIteratorNext, RegExpSymbolMatch,
   RegExpSymbolMatchAll, RegExpSymbolReplace, RegExpSymbolSearch,
-  RegExpSymbolSplit, ReturnThis, SObject, StringKey, classify, mk_bool, mk_null,
-  mk_number, mk_object, mk_string, mk_undefined,
+  RegExpSymbolSplit, ReturnThis, SObject, StringKey, classify, mk_bool, mk_int,
+  mk_null, mk_object, mk_string, mk_undefined,
 } as rt_types
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -639,7 +639,7 @@ fn alloc_regexp_with_proto(
   let #(seq, st) = rt_store.t_next_prop_seq(st)
   let li_prop =
     rt_types.DataProperty(
-      value: mk_number(JInt(0)),
+      value: mk_int(0),
       writable: True,
       enumerable: False,
       configurable: False,
@@ -872,7 +872,7 @@ fn builtin_exec_raw(
   case ffi_regexp_exec_compiled(compiled, s, last_index, sticky) {
     Error(NoMatch) | Error(OffsetOutOfRange) | Error(PatternCompileFailed(_)) -> {
       let st = case global || sticky {
-        True -> set_throw(st, h, "lastIndex", mk_number(JInt(0)))
+        True -> set_throw(st, h, "lastIndex", mk_int(0))
         False -> st
       }
       #(RawMiss, flags, st)
@@ -880,13 +880,7 @@ fn builtin_exec_raw(
     Ok(#(whole, groups, _gc, names)) -> {
       let #(match_start, match_len) = whole
       let st = case global || sticky {
-        True ->
-          set_throw(
-            st,
-            h,
-            "lastIndex",
-            mk_number(JInt(match_start + match_len)),
-          )
+        True -> set_throw(st, h, "lastIndex", mk_int(match_start + match_len))
         False -> st
       }
       // unconditional like v8, gating would leave stale statics
@@ -985,7 +979,7 @@ fn build_exec_result(
   }
   let #(arr_h, st) =
     alloc_array_with_props(st, match_values, [
-      #("index", mk_number(JInt(match_start))),
+      #("index", mk_int(match_start)),
       #("input", mk_string(s)),
       #("groups", groups_val),
       ..extra
@@ -1032,7 +1026,7 @@ fn make_indices(
           let #(pair_h, st) =
             common.alloc_array(
               st,
-              [mk_number(JInt(start)), mk_number(JInt(start + len))],
+              [mk_int(start), mk_int(start + len)],
               realm.array.prototype,
             )
           #([mk_object(pair_h), ..vals], st)
@@ -1084,7 +1078,7 @@ fn alloc_null_proto_object(
     list.fold(entries, #([], st), fn(acc, kv) {
       let #(ps, st) = acc
       let #(k, v) = kv
-      let #(prop, st) = common.data_property(st, v)
+      let #(prop, st) = common.plain_property(st, v)
       #([#(k, prop), ..ps], st)
     })
   let #(h, st) =
@@ -1207,7 +1201,7 @@ fn regexp_compile(
         _ -> slot
       }
     })
-  let st = set_throw(st, h, "lastIndex", mk_number(JInt(0)))
+  let st = set_throw(st, h, "lastIndex", mk_int(0))
   #(this, st)
 }
 
@@ -1231,7 +1225,7 @@ fn regexp_symbol_match(
     False, True -> builtin_exec_mode(st, h, s, MatchArray)
     False, False -> regexp_exec_abstract(st, this, s)
     True, fast -> {
-      let st = set_throw(st, h, "lastIndex", mk_number(JInt(0)))
+      let st = set_throw(st, h, "lastIndex", mk_int(0))
       case fast {
         True -> match_global_fast(st, h, s)
         False -> match_global_loop(st, this, h, s, [], 0)
@@ -1266,7 +1260,7 @@ fn global_hits(
       update_legacy_statics(st, s, #(ms, ml), groups)
     [] -> st
   }
-  let st = set_throw(st, h, "lastIndex", mk_number(JInt(0)))
+  let st = set_throw(st, h, "lastIndex", mk_int(0))
   #(list.reverse(rev), st)
 }
 
@@ -1324,12 +1318,7 @@ fn advance_if_empty(
     "" -> {
       let #(li_v, st) = get_named(st, mk_object(h), "lastIndex")
       let #(this_index, st) = rt_val.t_to_length(st, li_v)
-      set_throw(
-        st,
-        h,
-        "lastIndex",
-        mk_number(JInt(next_char_boundary(s, this_index))),
-      )
+      set_throw(st, h, "lastIndex", mk_int(next_char_boundary(s, this_index)))
     }
     _ -> st
   }
@@ -1343,22 +1332,22 @@ fn regexp_symbol_search(
   let h = require_object(st, this, "[Symbol.search]")
   let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   let #(previous, st) = get_named(st, this, "lastIndex")
-  let st = set_unless_same_value(st, h, previous, mk_number(JInt(0)))
+  let st = set_unless_same_value(st, h, previous, mk_int(0))
   let #(fast, st) = pristine_exec(st, h)
   case fast {
     True -> {
       let #(raw, _flags, st) = builtin_exec_raw(st, h, s)
       let st = restore_last_index(st, h, previous)
       case raw {
-        RawMiss -> #(mk_number(JInt(-1)), st)
-        RawHit(whole: #(ms, _), ..) -> #(mk_number(JInt(ms)), st)
+        RawMiss -> #(mk_int(-1), st)
+        RawHit(whole: #(ms, _), ..) -> #(mk_int(ms), st)
       }
     }
     False -> {
       let #(result, st) = regexp_exec_abstract(st, this, s)
       let st = restore_last_index(st, h, previous)
       case classify(result) {
-        KNull -> #(mk_number(JInt(-1)), st)
+        KNull -> #(mk_int(-1), st)
         _ -> get_named(st, result, "index")
       }
     }
@@ -1416,7 +1405,7 @@ fn regexp_symbol_replace(
   let #(flags, st) = read_flags(st, this)
   let global = has_flag(flags, "g")
   let st = case global {
-    True -> set_throw(st, h, "lastIndex", mk_number(JInt(0)))
+    True -> set_throw(st, h, "lastIndex", mk_int(0))
     False -> st
   }
   let #(fast, st) = pristine_exec(st, h)
@@ -1621,7 +1610,7 @@ fn compute_replacement(
         list.flatten([
           [mk_string(matched)],
           captures,
-          [mk_number(JInt(position)), mk_string(s)],
+          [mk_int(position), mk_string(s)],
         ])
       let call_args = case classify(named_captures) {
         KUndef -> base
@@ -1929,7 +1918,7 @@ fn split_loop(
     True ->
       ok_array(st, list.reverse([mk_string(byte_drop_start(s, p)), ..acc]))
     False -> {
-      let st = set_throw(st, sp_h, "lastIndex", mk_number(JInt(q)))
+      let st = set_throw(st, sp_h, "lastIndex", mk_int(q))
       let #(z, st) = regexp_exec_abstract(st, splitter, s)
       case classify(z) {
         KNull ->
@@ -2036,7 +2025,7 @@ fn regexp_symbol_match_all(
   let #(m_h, st) = rt_call.t_construct(st, c, [this, mk_string(flags)], c)
   let #(li_v, st) = get_named(st, this, "lastIndex")
   let #(last_index, st) = rt_val.t_to_length(st, li_v)
-  let st = set_throw(st, m_h, "lastIndex", mk_number(JInt(last_index)))
+  let st = set_throw(st, m_h, "lastIndex", mk_int(last_index))
   let global = has_flag(flags, "g")
   create_regexp_string_iterator(st, m_h, s, global)
 }
@@ -2059,10 +2048,10 @@ fn create_regexp_string_iterator(
       False,
     )
   let #(next_prop, st) = common.builtin_property(st, mk_object(next_h))
-  let #(matcher_prop, st) = common.data_prop(st, mk_object(matcher))
-  let #(string_prop, st) = common.data_prop(st, mk_string(s))
-  let #(global_prop, st) = common.data_prop(st, mk_bool(global))
-  let #(done_prop, st) = common.data_property(st, mk_bool(False))
+  let #(matcher_prop, st) = common.frozen_property(st, mk_object(matcher))
+  let #(string_prop, st) = common.frozen_property(st, mk_string(s))
+  let #(global_prop, st) = common.frozen_property(st, mk_bool(global))
+  let #(done_prop, st) = common.plain_property(st, mk_bool(False))
   let #(iter_h, st) =
     rt_store.t_cell_new(
       st,

@@ -137,7 +137,7 @@ pub fn init(
       1,
       [],
     )
-  let st = common.add_to_string_tag(st, locale.prototype, "Intl.Locale")
+  let st = common.add_string_tag(st, locale.prototype, "Intl.Locale")
   let #(locale_methods, st) =
     common.alloc_methods(
       st,
@@ -404,7 +404,7 @@ fn init_service(
       arity,
       slo,
     )
-  let st = common.add_to_string_tag(st, bt.prototype, "Intl." <> name)
+  let st = common.add_string_tag(st, bt.prototype, "Intl." <> name)
   #(bt, st)
 }
 
@@ -730,7 +730,7 @@ fn alloc_array(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
 }
 
 fn alloc_pojo(st: Agent, props: List(#(String, JsVal))) -> #(JsVal, Agent) {
-  let #(h, st) = common.alloc_pojo(st, st.realm.object.prototype, props)
+  let #(h, st) = common.alloc_plain_object(st, st.realm.object.prototype, props)
   #(mk_object(h), st)
 }
 
@@ -1231,7 +1231,7 @@ fn construct_service(
         }
       }
       let #(h, st) =
-        realm_ops.alloc_wrapper(st, IntlObj(data:, bound: None), proto)
+        realm_ops.alloc_object(st, IntlObj(data:, bound: None), proto)
       #(mk_object(h), st)
     }
   }
@@ -5822,7 +5822,7 @@ fn segmenter_segment(
   let #(s, st) = rt_val.t_to_string(st, first_arg_or_undefined(args))
   let data = SegmentsData(SegmentsState(string: s, granularity: sg.granularity))
   let #(h, st) =
-    realm_ops.alloc_wrapper(st, IntlObj(data:, bound: None), segments_proto)
+    realm_ops.alloc_object(st, IntlObj(data:, bound: None), segments_proto)
   #(mk_object(h), st)
 }
 
@@ -5840,7 +5840,7 @@ fn segments_iterator(
       remaining: intl_segment.segment_string(sg.string, sg.granularity),
     ))
   let #(h, st) =
-    realm_ops.alloc_wrapper(st, IntlObj(data:, bound: None), iter_proto)
+    realm_ops.alloc_object(st, IntlObj(data:, bound: None), iter_proto)
   #(mk_object(h), st)
 }
 
@@ -6022,7 +6022,7 @@ fn locale_method(
       }
       let data = LocaleData(LocaleState(locale: new_tag))
       let #(h, st) =
-        realm_ops.alloc_wrapper(st, IntlObj(data:, bound: None), proto)
+        realm_ops.alloc_object(st, IntlObj(data:, bound: None), proto)
       #(mk_object(h), st)
     }
     LocaleGetCalendars ->

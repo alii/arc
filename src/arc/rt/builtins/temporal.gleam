@@ -290,9 +290,9 @@ pub fn init_temporal_type(
       name,
       arity,
       static_props,
-      True,
+      constructible: True,
     )
-  let st = common.add_to_string_tag(st, proto, "Temporal." <> name)
+  let st = common.add_string_tag(st, proto, "Temporal." <> name)
   #(bt.constructor, st)
 }
 
