@@ -4,13 +4,13 @@ import arc/internal/gregorian.{
 import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
-  CalAuto, Compatible, Day, apply_since_dur, apply_since_mode, calendar_suffix,
-  date_slot_of, epoch_ns_to_iso_in, get_calendar_name_option,
-  get_difference_settings, make_date_cal, make_date_time_cal, make_duration,
-  make_month_day_cal, make_year_month_cal, make_zoned_cal, max_unit,
-  parse_time_zone_id, require_largest_ge_smallest, require_temporal,
-  temporal_data_of, terr, unit_rank,
-} as tc
+  CalAuto, Compatible, Day, apply_since_duration, apply_since_mode,
+  calendar_suffix, date_slot_of, epoch_ns_to_iso_in, get_calendar_name_option,
+  get_difference_settings, get_overflow_option_from_value, make_date_cal,
+  make_date_time_cal, make_duration, make_month_day_cal, make_year_month_cal,
+  make_zoned_cal, max_unit, require_largest_ge_smallest, require_temporal,
+  temporal_data_of, terr, time_zone_from_string, truncated_int_arg, unit_rank,
+}
 import arc/rt/builtins/temporal_diff.{difference_calendar_date}
 import arc/rt/builtins/temporal_fields.{
   add_sub_args, calendar_date_add, calendar_with_fields, compare_iso_date,
@@ -18,11 +18,11 @@ import arc/rt/builtins/temporal_fields.{
   month_day_reference_iso, no_date_fields, parse_plain_datetime_string,
   parsed_calendar_id, read_bag_calendar, read_date_fields,
   require_nonempty_fields, require_partial_bag, resolve_calendar_date,
-  to_calendar_arg, to_temporal_calendar_identifier, validated_overflow,
+  to_calendar_arg, to_temporal_calendar_identifier,
 }
 import arc/rt/builtins/temporal_iso.{
-  type IsoDate, Constrain, IsoDate, day_of_week, day_of_year, epoch_days,
-  format_iso_date, is_valid_iso_date, iso_date_from_epoch_days,
+  type IsoDate, type IsoTime, Constrain, IsoDate, day_of_week, day_of_year,
+  epoch_days, format_iso_date, is_valid_iso_date, iso_date_from_epoch_days,
   iso_date_within_limits, midnight, week_of_year,
 }
 import arc/rt/builtins/temporal_plain_time.{to_temporal_time}
@@ -161,9 +161,9 @@ pub fn ctor(
   protos: TemporalProtos,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(y, st) = tc.arg_trunc_int(st, args, 0)
-  let #(m, st) = tc.arg_trunc_int(st, args, 1)
-  let #(d, st) = tc.arg_trunc_int(st, args, 2)
+  let #(y, st) = truncated_int_arg(st, args, 0)
+  let #(m, st) = truncated_int_arg(st, args, 1)
+  let #(d, st) = truncated_int_arg(st, args, 2)
   let cal = terr(st, to_calendar_arg(helpers.arg_at(args, 3)))
   case is_valid_iso_date(y, m, d) {
     False -> rt_val.t_throw_range_error(st, "invalid ISO date")
@@ -210,11 +210,11 @@ pub fn to_temporal_date(
       case temporal_data_of(st, item) {
         option.Some(TemporalDate(year:, month:, day:, calendar:))
         | option.Some(TemporalDateTime(year:, month:, day:, calendar:, ..)) -> {
-          let #(_opts, st) = validated_overflow(st, options)
+          let #(_opts, st) = get_overflow_option_from_value(st, options)
           #(#(IsoDate(year, month, day), calendar), st)
         }
         option.Some(TemporalZonedDateTime(epoch_ns:, time_zone:, calendar:)) -> {
-          let #(_opts, st) = validated_overflow(st, options)
+          let #(_opts, st) = get_overflow_option_from_value(st, options)
           let #(d, _) = terr(st, epoch_ns_to_iso_in(time_zone, epoch_ns))
           #(#(d, calendar), st)
         }
@@ -223,7 +223,7 @@ pub fn to_temporal_date(
     KStr(s) -> {
       let p = terr(st, parse_plain_datetime_string(s))
       let cal = terr(st, parsed_calendar_id(p))
-      let #(_opts, st) = validated_overflow(st, options)
+      let #(_opts, st) = get_overflow_option_from_value(st, options)
       case iso_date_within_limits(p.date) {
         True -> #(#(p.date, cal), st)
         False ->
@@ -241,7 +241,7 @@ pub fn date_from_bag(
 ) -> #(#(IsoDate, tcal.Calendar), Agent) {
   let #(cal, st) = read_bag_calendar(st, h)
   let #(fields, st) = read_date_fields(st, h, cal)
-  let #(overflow, st) = validated_overflow(st, options)
+  let #(overflow, st) = get_overflow_option_from_value(st, options)
   let date = terr(st, resolve_calendar_date(cal, fields, overflow))
   case iso_date_within_limits(date) {
     True -> #(#(date, cal), st)
@@ -355,7 +355,8 @@ pub fn method(
       let #(bag, st) = require_partial_bag(st, helpers.arg_at(args, 0))
       let #(fields, st) = read_date_fields(st, bag, cal)
       let Nil = require_nonempty_fields(st, fields == no_date_fields)
-      let #(overflow, st) = validated_overflow(st, helpers.arg_at(args, 1))
+      let #(overflow, st) =
+        get_overflow_option_from_value(st, helpers.arg_at(args, 1))
       let date = terr(st, calendar_with_fields(cal, d, fields, overflow))
       let date = terr(st, temporal_iso.check_date_limits(date))
       make_date_cal(st, protos, date, cal)
@@ -402,8 +403,7 @@ pub fn method(
       let arg = helpers.arg_at(args, 0)
       case classify(arg) {
         KStr(tz_str) -> {
-          let #(tz, st) = parse_time_zone_id(st, tz_str)
-          let tz = terr(st, tz)
+          let #(tz, st) = time_zone_from_string(st, tz_str)
           let ns = terr(st, start_of_day_ns(tz, d))
           make_zoned_cal(st, protos, ns, tz, cal)
         }
@@ -412,8 +412,7 @@ pub fn method(
           case classify(tz_val) {
             KUndef -> rt_val.t_throw_type_error(st, "time zone is required")
             KStr(tz_str) -> {
-              let #(tz, st) = parse_time_zone_id(st, tz_str)
-              let tz = terr(st, tz)
+              let #(tz, st) = time_zone_from_string(st, tz_str)
               let #(pt_val, st) = get_named(st, oh, "plainTime")
               case classify(pt_val) {
                 KUndef -> {
@@ -448,7 +447,7 @@ pub fn method(
   }
 }
 
-fn optional_time_arg(st: Agent, v: JsVal) -> #(temporal_iso.TimeRec, Agent) {
+fn optional_time_arg(st: Agent, v: JsVal) -> #(IsoTime, Agent) {
   case classify(v) {
     KUndef -> #(midnight, st)
     _ -> to_temporal_time(st, v, mk_undefined())
@@ -481,7 +480,7 @@ fn date_until_since(
           st,
           difference_calendar_date(cal, d1, d2, largest, smallest, inc, mode),
         )
-      let dur = apply_since_dur(dur, is_since)
+      let dur = apply_since_duration(dur, is_since)
       make_duration(st, protos, dur)
     }
   }

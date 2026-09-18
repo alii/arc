@@ -1775,9 +1775,9 @@ pub type PlainDateTimeMethod {
 }
 
 pub type TimeZone {
-  TzUtc
-  TzOffset(ns: Int)
-  TzNamed(zone: temporal_tz.Zone)
+  UtcZone
+  OffsetZone(ns: Int)
+  IanaZone(zone: temporal_tz.Zone)
 }
 
 pub type InstantStaticName {

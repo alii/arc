@@ -4,18 +4,19 @@ import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   Hour, Nanosecond, Second, Trunc, apply_new_target_proto, apply_since_mode,
   apply_since_ns, as_if_positive_mode, balance_time_ns, check_diff_setup,
-  epoch_ns_to_iso_in, get_difference_settings, get_fractional_digits,
-  get_options_object, get_rounding_mode_option, get_unit_option, instant_slot_of,
-  make_date, make_date_time, make_duration, make_instant, make_time, make_zoned,
-  max_unit, require_temporal, require_time_unit, round_options,
-  round_to_increment, seconds_string_precision, system_time_zone, terr,
-  time_only_ns, time_unit_ns, time_zone_id, to_temporal_duration,
-  to_temporal_instant, to_temporal_time_zone, tz_offset_ns_at, unit_rank,
+  epoch_ns_to_iso_in, format_offset_rounded, get_difference_settings,
+  get_fractional_digits, get_options_object, get_rounding_mode_option,
+  get_unit_option, instant_slot_of, make_date, make_date_time, make_duration,
+  make_instant, make_time, make_zoned, max_unit, require_temporal,
+  require_time_unit, round_options, round_to_increment, seconds_string_precision,
+  system_time_zone, terr, time_part_ns, time_unit_ns, time_zone_id,
+  to_temporal_duration, to_temporal_instant, to_temporal_time_zone,
+  tz_offset_ns_at, unit_rank,
 }
 import arc/rt/builtins/temporal_duration
 import arc/rt/builtins/temporal_iso.{
-  type Precision, AutoPrec, epoch_ns_to_iso, format_iso_date, format_iso_time,
-  ns_max_instant, ns_per_day, ns_per_ms,
+  type SecondsPrecision, AutoPrecision, epoch_ns_to_iso, format_iso_date,
+  format_iso_time, ns_max_instant, ns_per_day, ns_per_ms,
 }
 import arc/rt/builtins/temporal_plain_date
 import arc/rt/builtins/temporal_plain_date_time
@@ -545,33 +546,33 @@ fn instant_method(
   let ns = require_instant(st, this, instant_method_name(m))
   case m {
     InstantToJson | InstantToLocaleString -> #(
-      mk_string(format_instant(ns, AutoPrec)),
+      mk_string(format_instant(ns, AutoPrecision)),
       st,
     )
     InstantToString -> {
       let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
       let #(digits, st) = get_fractional_digits(st, opts)
       let #(mode, st) = get_rounding_mode_option(st, opts, Trunc)
-      let #(su_opt, st) =
+      let #(smallest, st) =
         get_unit_option(st, opts, "smallestUnit", allow_auto: False)
       let #(tz_opt, st) = case opts {
         None -> #(mk_undefined(), st)
         Some(h) ->
           rt_obj.t_get_prop(st, mk_object(h), StringKey(Named("timeZone")))
       }
-      let #(prec, su, sinc, mode) =
-        terr(st, seconds_string_precision(digits, su_opt, mode))
-      let rounded = case su {
+      let #(precision, smallest_time_unit, inc, mode) =
+        terr(st, seconds_string_precision(digits, smallest, mode))
+      let rounded = case smallest_time_unit {
         None -> ns
         Some(u) ->
           round_to_increment(
             ns,
-            sinc * time_unit_ns(u),
+            inc * time_unit_ns(u),
             as_if_positive_mode(mode),
           )
       }
       case classify(tz_opt) {
-        KUndef -> #(mk_string(format_instant(rounded, prec)), st)
+        KUndef -> #(mk_string(format_instant(rounded, precision)), st)
         _ -> {
           let #(tz, st) = to_temporal_time_zone(st, tz_opt)
           let off = terr(st, tz_offset_ns_at(tz, rounded))
@@ -579,8 +580,8 @@ fn instant_method(
           let s =
             format_iso_date(d)
             <> "T"
-            <> format_iso_time(t, prec)
-            <> temporal_common.format_offset_rounded(off)
+            <> format_iso_time(t, precision)
+            <> format_offset_rounded(off)
           #(mk_string(s), st)
         }
       }
@@ -606,8 +607,8 @@ fn instant_method(
           )
         False -> {
           let delta = case m {
-            InstantSubtract -> 0 - time_only_ns(dur)
-            _ -> time_only_ns(dur)
+            InstantSubtract -> 0 - time_part_ns(dur)
+            _ -> time_part_ns(dur)
           }
           let ns2 = ns + delta
           case int.absolute_value(ns2) <= ns_max_instant {
@@ -619,16 +620,16 @@ fn instant_method(
       }
     }
     InstantRound -> {
-      let #(#(su, inc, mode), st) =
+      let #(#(smallest_time_unit, inc, mode), st) =
         round_options(st, helpers.arg_at(args, 0), allow_day: False)
-      let u_ns = time_unit_ns(su)
-      let max = ns_per_day / u_ns
+      let unit_ns = time_unit_ns(smallest_time_unit)
+      let max = ns_per_day / unit_ns
       case inc >= 1 && inc <= max && max % inc == 0 {
         False -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
         True -> {
           // rounds as if positive: down is toward the big bang
           let rounded =
-            round_to_increment(ns, inc * u_ns, as_if_positive_mode(mode))
+            round_to_increment(ns, inc * unit_ns, as_if_positive_mode(mode))
           case int.absolute_value(rounded) <= ns_max_instant {
             False ->
               rt_val.t_throw_range_error(st, "instant outside valid range")
@@ -648,9 +649,9 @@ fn instant_method(
   }
 }
 
-fn format_instant(ns: Int, prec: Precision) -> String {
+fn format_instant(ns: Int, precision: SecondsPrecision) -> String {
   let #(d, t) = epoch_ns_to_iso(ns, 0)
-  format_iso_date(d) <> "T" <> format_iso_time(t, prec) <> "Z"
+  format_iso_date(d) <> "T" <> format_iso_time(t, precision) <> "Z"
 }
 
 fn instant_until_since(
@@ -672,10 +673,11 @@ fn instant_until_since(
       rt_val.t_throw_range_error(st, "units must be time units for Instant")
     False -> {
       let Nil = check_diff_setup(st, largest, smallest, inc)
-      let su = terr(st, require_time_unit(smallest))
-      let mode2 = apply_since_mode(mode, is_since)
+      let smallest_time_unit = terr(st, require_time_unit(smallest))
+      let mode = apply_since_mode(mode, is_since)
       let diff = b - a
-      let rounded = round_to_increment(diff, inc * time_unit_ns(su), mode2)
+      let rounded =
+        round_to_increment(diff, inc * time_unit_ns(smallest_time_unit), mode)
       let rounded = apply_since_ns(rounded, is_since)
       let dur = balance_time_ns(rounded, largest)
       make_duration(st, protos, dur)

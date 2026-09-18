@@ -17,20 +17,24 @@ pub fn zone_id(zone: Zone) -> String {
 }
 
 @external(erlang, "arc_tz_ffi", "lookup")
-pub fn lookup_name(id: String) -> Result(String, Nil)
+fn lookup(id: String) -> Result(String, Nil)
+
+pub fn known_identifier(id: String) -> Option(String) {
+  lookup(id) |> option.from_result
+}
 
 @external(erlang, "arc_tz_ffi", "canonical_id")
-fn ffi_canonical(id: String) -> String
+fn link_target(id: String) -> String
 
-pub fn canonical_id(proper: String) -> String {
-  case ffi_canonical(proper) {
+pub fn primary_identifier(identifier: String) -> String {
+  case link_target(identifier) {
     "Etc/UTC" | "Etc/GMT" | "GMT" -> "UTC"
     c -> c
   }
 }
 
-pub fn canonical(zone: Zone) -> String {
-  canonical_id(zone.id)
+pub fn primary_identifier_of(zone: Zone) -> String {
+  primary_identifier(zone.id)
 }
 
 // primary ids out of what the host has data for, sorted, utc always there
@@ -61,23 +65,24 @@ pub type ResolveError {
   LoadFailed(id: String, error: TzError)
 }
 
-// a known name becomes a zone with its rules, loading each proper id once
+// a known name becomes a zone with its rules, loading each identifier once
 pub fn resolve(
   name: String,
   zones: Dict(String, Zone),
   load: fn(String) -> Result(Rules, TzError),
 ) -> Result(#(Zone, Dict(String, Zone)), ResolveError) {
-  use proper <- result.try(
-    lookup_name(name) |> result.replace_error(UnknownZone),
+  use identifier <- result.try(
+    known_identifier(name) |> option.to_result(UnknownZone),
   )
-  case dict.get(zones, proper) {
+  case dict.get(zones, identifier) {
     Ok(zone) -> Ok(#(zone, zones))
     Error(Nil) -> {
       use rules <- result.map(
-        load(ffi_canonical(proper)) |> result.map_error(LoadFailed(proper, _)),
+        load(link_target(identifier))
+        |> result.map_error(LoadFailed(identifier, _)),
       )
-      let zone = Zone(id: proper, rules:)
-      #(zone, dict.insert(zones, proper, zone))
+      let zone = Zone(id: identifier, rules:)
+      #(zone, dict.insert(zones, identifier, zone))
     }
   }
 }

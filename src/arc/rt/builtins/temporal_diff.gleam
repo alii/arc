@@ -8,13 +8,14 @@ import arc/rt/builtins/temporal_common.{
   time_unit_ns, unit_rank,
 }
 import arc/rt/builtins/temporal_fields.{
-  balance_year_month, calendar_date_add, calendar_date_until, compare_iso_date,
-  compare_triple, round_between,
+  balance_year_month, calendar_date_add, calendar_years_months_until,
+  compare_iso_date, compare_triple, round_between,
 }
 import arc/rt/builtins/temporal_iso.{
-  type DurRec, type IsoDate, type TErr, type TimeRec, Constrain, DurRec, IsoDate,
-  RangeE, epoch_days, int_sign, iso_date_from_epoch_days, iso_date_within_limits,
-  midnight, ns_per_day, time_to_ns, utc_epoch_ns, zero_dur,
+  type Duration, type IsoDate, type IsoTime, type TErr, Constrain, Duration,
+  IsoDate, RangeE, epoch_days, int_sign, iso_date_from_epoch_days,
+  iso_date_within_limits, midnight, ns_per_day, time_to_ns, utc_epoch_ns,
+  zero_duration,
 }
 import arc/rt/builtins/temporal_zoned_ops.{
   check_iso_days_range, get_epoch_ns_for,
@@ -25,32 +26,37 @@ import gleam/list
 import gleam/result
 
 pub fn compare_iso_date_time(
-  a: #(IsoDate, TimeRec),
-  b: #(IsoDate, TimeRec),
+  a: #(IsoDate, IsoTime),
+  b: #(IsoDate, IsoTime),
 ) -> Int {
   int_sign(utc_epoch_ns(a.0, a.1) - utc_epoch_ns(b.0, b.1))
 }
 
-pub fn local_ns(d: IsoDate, t: TimeRec) -> Int {
+pub fn local_ns(d: IsoDate, t: IsoTime) -> Int {
   epoch_days(d) * ns_per_day + time_to_ns(t)
 }
 
-pub fn date_parts_in(
+pub fn calendar_date_until(
   cal: tcal.Calendar,
   d1: IsoDate,
   d2: IsoDate,
   largest: Unit,
 ) -> #(Int, Int, Int, Int) {
   case cal {
-    tcal.Iso8601 -> diff_date_parts(d1, d2, largest)
+    tcal.Iso8601 -> iso_date_until(d1, d2, largest)
     _ ->
       case largest {
         Year | Month -> {
           let #(y, m, rem_days) =
-            calendar_date_until(cal, d1, d2, whole_years: largest == Year)
+            calendar_years_months_until(
+              cal,
+              d1,
+              d2,
+              whole_years: largest == Year,
+            )
           #(y, m, 0, rem_days)
         }
-        _ -> diff_date_parts(d1, d2, largest)
+        _ -> iso_date_until(d1, d2, largest)
       }
   }
 }
@@ -63,14 +69,15 @@ pub fn difference_calendar_date(
   smallest: Unit,
   inc: Int,
   mode: RoundingMode,
-) -> Result(DurRec, TErr) {
+) -> Result(Duration, TErr) {
   let sign = compare_iso_date(d2, d1)
   case sign == 0 {
-    True -> Ok(zero_dur)
+    True -> Ok(zero_duration)
     False -> {
-      let #(years, months, weeks, days) = date_parts_in(cal, d1, d2, largest)
+      let #(years, months, weeks, days) =
+        calendar_date_until(cal, d1, d2, largest)
       case smallest == Day && inc == 1 {
-        True -> Ok(DurRec(..zero_dur, years:, months:, weeks:, days:))
+        True -> Ok(Duration(..zero_duration, years:, months:, weeks:, days:))
         False ->
           round_relative_date_duration(
             #(years, months, weeks, days),
@@ -80,14 +87,14 @@ pub fn difference_calendar_date(
             smallest,
             inc,
             mode,
-            False,
+            zoned: False,
           )
       }
     }
   }
 }
 
-pub fn diff_date_parts(
+pub fn iso_date_until(
   d1: IsoDate,
   d2: IsoDate,
   largest: Unit,
@@ -141,7 +148,7 @@ pub fn add_calendar_units(d: IsoDate, unit: Unit, n: Int) -> IsoDate {
   }
 }
 
-fn cal_date_add_checked(d: IsoDate, dur: DurRec) -> Result(IsoDate, TErr) {
+fn cal_date_add_checked(d: IsoDate, dur: Duration) -> Result(IsoDate, TErr) {
   let md = add_months_constrained(d, dur.years * 12 + dur.months)
   let r = iso_date_from_epoch_days(epoch_days(md) + dur.weeks * 7 + dur.days)
   case iso_date_within_limits(r) {
@@ -153,20 +160,22 @@ fn cal_date_add_checked(d: IsoDate, dur: DurRec) -> Result(IsoDate, TErr) {
 fn nudge_window(
   sign: Int,
   ymwd: #(Int, Int, Int, Int),
-  origin: #(IsoDate, TimeRec),
+  origin: #(IsoDate, IsoTime),
   unit: Unit,
   inc: Int,
-  shift: Bool,
-  zoned: Bool,
-) -> Result(#(Int, Int, DurRec, DurRec, Int, Int), TErr) {
+  shift shift: Bool,
+  zoned zoned: Bool,
+) -> Result(#(Int, Int, Duration, Duration, Int, Int), TErr) {
   let #(years, months, weeks, days) = ymwd
   let #(whole, mk) = case unit {
-    Year -> #(years, fn(r) { DurRec(..zero_dur, years: r) })
-    Month -> #(months, fn(r) { DurRec(..zero_dur, years:, months: r) })
+    Year -> #(years, fn(r) { Duration(..zero_duration, years: r) })
+    Month -> #(months, fn(r) { Duration(..zero_duration, years:, months: r) })
     Week -> #(weeks + trunc_div(days, 7), fn(r) {
-      DurRec(..zero_dur, years:, months:, weeks: r)
+      Duration(..zero_duration, years:, months:, weeks: r)
     })
-    _ -> #(days, fn(r) { DurRec(..zero_dur, years:, months:, weeks:, days: r) })
+    _ -> #(days, fn(r) {
+      Duration(..zero_duration, years:, months:, weeks:, days: r)
+    })
   }
   let base = trunc_div(whole, inc) * inc
   let r1 = case shift {
@@ -185,7 +194,7 @@ fn nudge_window(
     }
     False -> Ok(Nil)
   })
-  let start_ns = case start_dur == zero_dur {
+  let start_ns = case start_dur == zero_duration {
     True -> local_ns(origin.0, origin.1)
     False -> local_ns(start_date, origin.1)
   }
@@ -196,15 +205,23 @@ fn nudge_window(
 fn nudge_calendar_unit(
   sign: Int,
   ymwd: #(Int, Int, Int, Int),
-  origin: #(IsoDate, TimeRec),
+  origin: #(IsoDate, IsoTime),
   dest_ns: Int,
   unit: Unit,
   inc: Int,
   mode: RoundingMode,
-  zoned: Bool,
-) -> Result(#(DurRec, Bool, Int), TErr) {
-  use w0 <- result.try(nudge_window(sign, ymwd, origin, unit, inc, False, zoned))
-  let in_bounds = fn(w: #(Int, Int, DurRec, DurRec, Int, Int)) {
+  zoned zoned: Bool,
+) -> Result(#(Duration, Bool, Int), TErr) {
+  use w0 <- result.try(nudge_window(
+    sign,
+    ymwd,
+    origin,
+    unit,
+    inc,
+    shift: False,
+    zoned:,
+  ))
+  let in_bounds = fn(w: #(Int, Int, Duration, Duration, Int, Int)) {
     case sign > 0 {
       True -> w.4 <= dest_ns && dest_ns <= w.5
       False -> w.5 <= dest_ns && dest_ns <= w.4
@@ -219,8 +236,8 @@ fn nudge_calendar_unit(
         origin,
         unit,
         inc,
-        True,
-        zoned,
+        shift: True,
+        zoned:,
       ))
       #(w1, True)
     }
@@ -247,12 +264,12 @@ fn nudge_calendar_unit(
 
 pub fn bubble_date_duration(
   sign: Int,
-  dur: DurRec,
+  dur: Duration,
   nudged_ns: Int,
-  origin: #(IsoDate, TimeRec),
+  origin: #(IsoDate, IsoTime),
   largest: Unit,
   start_unit: Unit,
-) -> DurRec {
+) -> Duration {
   let candidates =
     case start_unit {
       Day -> [Week, Month, Year]
@@ -268,20 +285,21 @@ pub fn bubble_date_duration(
 
 fn bubble_loop(
   sign: Int,
-  dur: DurRec,
+  dur: Duration,
   nudged_ns: Int,
-  origin: #(IsoDate, TimeRec),
+  origin: #(IsoDate, IsoTime),
   candidates: List(Unit),
-) -> DurRec {
+) -> Duration {
   case candidates {
     [] -> dur
     [u, ..rest] -> {
       let end_dur = case u {
-        Year -> DurRec(..zero_dur, years: dur.years + sign)
-        Month -> DurRec(..zero_dur, years: dur.years, months: dur.months + sign)
+        Year -> Duration(..zero_duration, years: dur.years + sign)
+        Month ->
+          Duration(..zero_duration, years: dur.years, months: dur.months + sign)
         _ ->
-          DurRec(
-            ..zero_dur,
+          Duration(
+            ..zero_duration,
             years: dur.years,
             months: dur.months,
             weeks: dur.weeks + sign,
@@ -302,14 +320,14 @@ fn bubble_loop(
 
 pub fn round_relative_date_duration(
   ymwd: #(Int, Int, Int, Int),
-  origin: #(IsoDate, TimeRec),
+  origin: #(IsoDate, IsoTime),
   dest_ns: Int,
   largest: Unit,
   smallest: Unit,
   inc: Int,
   mode: RoundingMode,
-  zoned: Bool,
-) -> Result(DurRec, TErr) {
+  zoned zoned: Bool,
+) -> Result(Duration, TErr) {
   let sign = case int_sign(dest_ns - local_ns(origin.0, origin.1)) {
     -1 -> -1
     _ -> 1
@@ -322,7 +340,7 @@ pub fn round_relative_date_duration(
     smallest,
     inc,
     mode,
-    zoned,
+    zoned:,
   ))
   case did_expand && smallest != Week {
     True ->
@@ -340,14 +358,14 @@ pub fn round_relative_date_duration(
 
 pub fn diff_date_time_core(
   cal: tcal.Calendar,
-  a: #(IsoDate, TimeRec),
-  b: #(IsoDate, TimeRec),
+  a: #(IsoDate, IsoTime),
+  b: #(IsoDate, IsoTime),
   largest: Unit,
   smallest: Unit,
   inc: Int,
-  mode2: RoundingMode,
-  zoned: Bool,
-) -> Result(DurRec, TErr) {
+  mode: RoundingMode,
+  zoned zoned: Bool,
+) -> Result(Duration, TErr) {
   let date_sign = compare_iso_date(b.0, a.0)
   let time_diff = time_to_ns(b.1) - time_to_ns(a.1)
   let #(b_date, time_diff) = case
@@ -367,7 +385,7 @@ pub fn diff_date_time_core(
   case unit_rank(largest) >= unit_rank(Day) {
     True -> {
       let #(years, months, weeks, days) =
-        date_parts_in(cal, a.0, b_date, largest)
+        calendar_date_until(cal, a.0, b_date, largest)
       case
         unit_rank(smallest) > unit_rank(Day) || { zoned && smallest == Day }
       {
@@ -379,23 +397,27 @@ pub fn diff_date_time_core(
             largest,
             smallest,
             inc,
-            mode2,
-            zoned,
+            mode,
+            zoned:,
           )
         False -> {
-          use su <- result.try(require_time_unit(smallest))
+          use smallest_time_unit <- result.try(require_time_unit(smallest))
           let time_total = days * ns_per_day + time_diff
           let rounded = case smallest == Nanosecond && inc == 1 {
             True -> time_total
             False ->
-              round_to_increment(time_total, inc * time_unit_ns(su), mode2)
+              round_to_increment(
+                time_total,
+                inc * time_unit_ns(smallest_time_unit),
+                mode,
+              )
           }
           let whole_days = trunc_div(time_total, ns_per_day)
           let rounded_whole = trunc_div(rounded, ns_per_day)
           let rem_ns = rounded - rounded_whole * ns_per_day
           let time_part = balance_time_ns(rem_ns, Hour)
           let base =
-            DurRec(..time_part, years:, months:, weeks:, days: rounded_whole)
+            Duration(..time_part, years:, months:, weeks:, days: rounded_whole)
           let did_expand =
             int_sign(rounded_whole - whole_days) == int_sign(time_total)
           case did_expand {
@@ -414,12 +436,13 @@ pub fn diff_date_time_core(
       }
     }
     False -> {
-      use su <- result.try(require_time_unit(smallest))
+      use smallest_time_unit <- result.try(require_time_unit(smallest))
       let total =
         { epoch_days(b.0) - epoch_days(a.0) }
         * ns_per_day
         + { time_to_ns(b.1) - time_to_ns(a.1) }
-      let rounded = round_to_increment(total, inc * time_unit_ns(su), mode2)
+      let rounded =
+        round_to_increment(total, inc * time_unit_ns(smallest_time_unit), mode)
       Ok(balance_time_ns(rounded, largest))
     }
   }
@@ -434,7 +457,7 @@ pub fn zoned_diff_round_time(
   smallest: Unit,
   inc: Int,
   mode: RoundingMode,
-) -> Result(DurRec, TErr) {
+) -> Result(Duration, TErr) {
   use #(a_d, a_t) <- result.try(epoch_ns_to_iso_in(tz, a_ns))
   use #(b_d, b_t) <- result.try(epoch_ns_to_iso_in(tz, b_ns))
   let sign = case b_ns < a_ns {
@@ -447,8 +470,9 @@ pub fn zoned_diff_round_time(
     _, True -> iso_date_from_epoch_days(epoch_days(b_d) + 1)
     _, _ -> b_d
   }
-  let #(years, months, weeks, days) = date_parts_in(cal, a_d, b_date, largest)
-  let date_dur = DurRec(..zero_dur, years:, months:, weeks:, days:)
+  let #(years, months, weeks, days) =
+    calendar_date_until(cal, a_d, b_date, largest)
+  let date_dur = Duration(..zero_duration, years:, months:, weeks:, days:)
   use start_date <- result.try(calendar_date_add(cal, a_d, date_dur, Constrain))
   use start_ns <- result.try(get_epoch_ns_for(tz, start_date, a_t, Compatible))
   let time_rem = b_ns - start_ns
@@ -456,7 +480,7 @@ pub fn zoned_diff_round_time(
     // skip next-day bound, it can be out of range
     True -> {
       let time_part = balance_time_ns(time_rem, Hour)
-      Ok(DurRec(..time_part, years:, months:, weeks:, days:))
+      Ok(Duration(..time_part, years:, months:, weeks:, days:))
     }
     False ->
       zoned_nudge_time(
@@ -477,7 +501,7 @@ pub fn zoned_diff_round_time(
 
 fn zoned_nudge_time(
   tz: TimeZone,
-  a_dt: #(IsoDate, TimeRec),
+  a_dt: #(IsoDate, IsoTime),
   start_date: IsoDate,
   start_ns: Int,
   time_rem: Int,
@@ -487,14 +511,14 @@ fn zoned_nudge_time(
   smallest: Unit,
   inc: Int,
   mode: RoundingMode,
-) -> Result(DurRec, TErr) {
+) -> Result(Duration, TErr) {
   let #(a_d, a_t) = a_dt
   let #(years, months, weeks, days) = ymwd
-  use su <- result.try(require_time_unit(smallest))
+  use smallest_time_unit <- result.try(require_time_unit(smallest))
   let end_date = iso_date_from_epoch_days(epoch_days(start_date) + sign)
   use end_ns <- result.try(get_epoch_ns_for(tz, end_date, a_t, Compatible))
   let day_span = end_ns - start_ns
-  let smallest_ns = inc * time_unit_ns(su)
+  let smallest_ns = inc * time_unit_ns(smallest_time_unit)
   let rounded_t = round_to_increment(time_rem, smallest_ns, mode)
   let beyond = rounded_t - day_span
   case int_sign(beyond) != 0 - sign {
@@ -502,7 +526,8 @@ fn zoned_nudge_time(
       let rounded_t2 =
         round_to_increment(time_rem - day_span, smallest_ns, mode)
       let time_part = balance_time_ns(rounded_t2, Hour)
-      let base = DurRec(..time_part, years:, months:, weeks:, days: days + sign)
+      let base =
+        Duration(..time_part, years:, months:, weeks:, days: days + sign)
       let nudged_inst = end_ns + rounded_t2
       use #(n_d, n_t) <- result.map(epoch_ns_to_iso_in(tz, nudged_inst))
       bubble_date_duration(
@@ -516,23 +541,23 @@ fn zoned_nudge_time(
     }
     False -> {
       let time_part = balance_time_ns(rounded_t, Hour)
-      Ok(DurRec(..time_part, years:, months:, weeks:, days:))
+      Ok(Duration(..time_part, years:, months:, weeks:, days:))
     }
   }
 }
 
-pub fn larger_time_unit(a: DurRec, b: DurRec) -> Unit {
+pub fn larger_time_unit(a: Duration, b: Duration) -> Unit {
   max_unit(time_unit_of(a), time_unit_of(b))
 }
 
-fn time_unit_of(d: DurRec) -> Unit {
+fn time_unit_of(d: Duration) -> Unit {
   case d.days != 0, d.hours != 0, d.minutes != 0, d.seconds != 0 {
     True, _, _, _ -> Day
     _, True, _, _ -> Hour
     _, _, True, _ -> Minute
     _, _, _, True -> Second
     _, _, _, _ ->
-      case d.ms != 0, d.us != 0 {
+      case d.milliseconds != 0, d.microseconds != 0 {
         True, _ -> Millisecond
         _, True -> Microsecond
         _, _ -> Nanosecond
@@ -540,7 +565,7 @@ fn time_unit_of(d: DurRec) -> Unit {
   }
 }
 
-pub fn default_largest_unit(d: DurRec) -> Unit {
+pub fn default_largest_unit(d: Duration) -> Unit {
   case d.years != 0, d.months != 0, d.weeks != 0 {
     True, _, _ -> Year
     _, True, _ -> Month

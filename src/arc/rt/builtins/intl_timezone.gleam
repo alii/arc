@@ -1,5 +1,5 @@
 import arc/internal/host_time
-import arc/rt/builtins/intl_format as fmt
+import arc/rt/builtins/intl_format
 import arc/rt/builtins/temporal_common
 import arc/rt/builtins/temporal_tz
 import arc/rt/intl_data.{
@@ -26,21 +26,21 @@ pub fn canonical(st: Agent, s: String) -> #(Option(DtfTimeZone), Agent) {
 }
 
 fn is_utc(name: String) -> Bool {
-  case temporal_tz.lookup_name(name) {
-    Ok(proper) -> temporal_tz.canonical_id(proper) == "UTC"
-    Error(Nil) -> False
+  case temporal_tz.known_identifier(name) {
+    Some(identifier) -> temporal_tz.primary_identifier(identifier) == "UTC"
+    None -> False
   }
 }
 
 // a zone the host has no data for is not offered
 fn named_zone(st: Agent, s: String) -> #(Option(DtfTimeZone), Agent) {
-  case temporal_tz.lookup_name(s) {
-    Error(Nil) -> #(None, st)
-    Ok(proper) ->
-      case temporal_tz.canonical_id(proper) {
-        "UTC" -> #(Some(FixedZone(proper, 0)), st)
+  case temporal_tz.known_identifier(s) {
+    None -> #(None, st)
+    Some(identifier) ->
+      case temporal_tz.primary_identifier(identifier) {
+        "UTC" -> #(Some(FixedZone(identifier, 0)), st)
         _ ->
-          case temporal_common.resolve_zone(st, proper) {
+          case temporal_common.resolve_zone(st, identifier) {
             #(Ok(zone), st) -> #(Some(NamedZone(zone:)), st)
             #(Error(_host_lacks_data), st) -> #(None, st)
           }
@@ -133,7 +133,7 @@ fn format_offset_zone(minutes: Int) -> String {
     False -> "+"
   }
   let m = int.absolute_value(minutes)
-  sign <> fmt.pad2(m / 60) <> ":" <> fmt.pad2(m % 60)
+  sign <> intl_format.pad2(m / 60) <> ":" <> intl_format.pad2(m % 60)
 }
 
 pub fn display(name: String, width: TimeZoneNameWidth, offset: Int) -> String {
@@ -158,11 +158,13 @@ fn gmt_offset(offset: Int, long: Bool) -> String {
       let h = m / 60
       let mm = m % 60
       case long {
-        True -> "GMT" <> sign <> fmt.pad2(h) <> ":" <> fmt.pad2(mm)
+        True ->
+          "GMT" <> sign <> intl_format.pad2(h) <> ":" <> intl_format.pad2(mm)
         False ->
           case mm {
             0 -> "GMT" <> sign <> int.to_string(h)
-            _ -> "GMT" <> sign <> int.to_string(h) <> ":" <> fmt.pad2(mm)
+            _ ->
+              "GMT" <> sign <> int.to_string(h) <> ":" <> intl_format.pad2(mm)
           }
       }
     }

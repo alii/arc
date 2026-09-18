@@ -6,26 +6,27 @@ import arc/internal/temporal_calendar as tcal
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   type CalendarNameMode, type RoundingMode, CalAlways, CalAuto, CalCritical,
-  CalNever, Month, Year, apply_since_dur, apply_since_mode, arg_trunc_int,
-  arg_trunc_int_or, calendar_suffix, get_calendar_name_option,
-  get_difference_settings, make_date_cal, make_duration, make_year_month,
+  CalNever, Month, Year, apply_since_duration, apply_since_mode, calendar_suffix,
+  get_calendar_name_option, get_difference_settings,
+  get_overflow_option_from_value, make_date_cal, make_duration, make_year_month,
   make_year_month_cal, max_unit, read_pos_int_field, require_largest_ge_smallest,
-  require_temporal, round_to_increment, terr, unit_rank, year_month_slot_of,
+  require_temporal, round_to_increment, terr, truncated_int_arg,
+  truncated_int_arg_or, unit_rank, year_month_slot_of,
 }
 import arc/rt/builtins/temporal_fields.{
   type DateFields, DateFields, add_sub_args, balance_year_month,
-  calendar_date_add, calendar_date_until, check_ym_limits, compare_iso_date,
-  era_field, era_year_field, int_val, merge_year_month_code, month_code_str,
-  parse_year_month_string, read_bag_calendar, read_year_month_fields,
-  regulate_calendar_day, require_nonempty_fields, require_partial_bag,
-  resolve_calendar_month, resolve_calendar_year, resolve_iso_month,
-  round_between, to_calendar_arg, validated_overflow,
+  calendar_date_add, calendar_years_months_until, check_ym_limits,
+  compare_iso_date, era_field, era_year_field, int_val, merge_year_month_code,
+  month_code_str, parse_year_month_string, read_bag_calendar,
+  read_year_month_fields, regulate_calendar_day, require_nonempty_fields,
+  require_partial_bag, resolve_calendar_month, resolve_calendar_year,
+  resolve_iso_month, round_between, to_calendar_arg,
 }
 import arc/rt/builtins/temporal_iso.{
-  type IsoDate, type Overflow, type TErr, Constrain, DurRec, IsoDate, RangeE,
+  type IsoDate, type Overflow, type TErr, Constrain, Duration, IsoDate, RangeE,
   Reject, TypeE, check_date_limits, epoch_days, format_iso_date, format_iso_year,
   is_valid_iso_date, iso_date_from_epoch_days, iso_year_month_within_limits,
-  pad2, regulate_iso_date, zero_dur,
+  pad2, regulate_iso_date, zero_duration,
 }
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -145,10 +146,10 @@ pub fn ctor(
   protos: TemporalProtos,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(y, st) = arg_trunc_int(st, args, 0)
-  let #(m, st) = arg_trunc_int(st, args, 1)
+  let #(y, st) = truncated_int_arg(st, args, 0)
+  let #(m, st) = truncated_int_arg(st, args, 1)
   let cal = terr(st, to_calendar_arg(helpers.arg_at(args, 2)))
-  let #(d, st) = arg_trunc_int_or(st, args, 3, 1)
+  let #(d, st) = truncated_int_arg_or(st, args, 3, 1)
   case is_valid_iso_date(y, m, d) {
     False -> rt_val.t_throw_range_error(st, "invalid ISO year-month")
     True ->
@@ -201,7 +202,7 @@ pub fn to_temporal_year_month(
         SObject(kind:, ..) ->
           case year_month_slot_of(kind) {
             Some(ym) -> {
-              let #(_o, st) = validated_overflow(st, options)
+              let #(_o, st) = get_overflow_option_from_value(st, options)
               #(ym, st)
             }
             None -> year_month_from_bag(st, h, options)
@@ -210,7 +211,7 @@ pub fn to_temporal_year_month(
       }
     KStr(s) -> {
       let ym = terr(st, parse_year_month_string(s))
-      let #(_o, st) = validated_overflow(st, options)
+      let #(_o, st) = get_overflow_option_from_value(st, options)
       #(ym, st)
     }
     _ ->
@@ -228,7 +229,7 @@ fn year_month_from_bag(
 ) -> #(#(Int, Int, Int, tcal.Calendar), Agent) {
   let #(cal, st) = read_bag_calendar(st, h)
   let #(fields, st) = read_year_month_fields(st, h, cal)
-  let #(overflow, st) = validated_overflow(st, options)
+  let #(overflow, st) = get_overflow_option_from_value(st, options)
   #(terr(st, resolve_calendar_year_month(cal, fields, overflow)), st)
 }
 
@@ -405,9 +406,9 @@ fn add_subtract(
     || dur.hours != 0
     || dur.minutes != 0
     || dur.seconds != 0
-    || dur.ms != 0
-    || dur.us != 0
-    || dur.ns != 0
+    || dur.milliseconds != 0
+    || dur.microseconds != 0
+    || dur.nanoseconds != 0
   case has_lower_units {
     True ->
       rt_val.t_throw_range_error(
@@ -483,7 +484,8 @@ fn with(
       && era == None
       && era_year == None,
   )
-  let #(overflow, st) = validated_overflow(st, helpers.arg_at(args, 1))
+  let #(overflow, st) =
+    get_overflow_option_from_value(st, helpers.arg_at(args, 1))
   let cd = tcal.date_from_epoch_days(cal, epoch_days(IsoDate(y, m, rd)))
   let f = merge_year_month_code(cal, cd, fields)
   let #(y2, m2, rd2, _) =
@@ -573,37 +575,38 @@ fn year_month_until_since(
     False -> Nil
   }
   require_largest_ge_smallest(st, largest, smallest)
-  let mode2 = apply_since_mode(mode, is_since)
+  let mode = apply_since_mode(mode, is_since)
   let ia = IsoDate(a.0, a.1, a.2)
   let ib = IsoDate(b.0, b.1, b.2)
   let total_months = case cal {
     tcal.Iso8601 -> { b.0 - a.0 } * 12 + b.1 - a.1
     _ -> {
-      let #(_, months, _) = calendar_date_until(cal, ia, ib, whole_years: False)
+      let #(_, months, _) =
+        calendar_years_months_until(cal, ia, ib, whole_years: False)
       months
     }
   }
   let rounded = case smallest {
-    Year -> round_to_increment(total_months, inc * 12, mode2) / 12
-    _ -> round_to_increment(total_months, inc, mode2)
+    Year -> round_to_increment(total_months, inc * 12, mode) / 12
+    _ -> round_to_increment(total_months, inc, mode)
   }
   let dur = case cal {
     tcal.Iso8601 ->
       case smallest, largest {
-        Year, _ -> DurRec(..zero_dur, years: rounded)
+        Year, _ -> Duration(..zero_duration, years: rounded)
         _, Year ->
-          DurRec(
-            ..zero_dur,
+          Duration(
+            ..zero_duration,
             years: trunc_div(rounded, 12),
             months: trunc_mod(rounded, 12),
           )
-        _, _ -> DurRec(..zero_dur, months: rounded)
+        _, _ -> Duration(..zero_duration, months: rounded)
       }
     _ ->
       case smallest, largest {
         Year, _ -> {
-          let yrs = terr(st, round_calendar_year_total(cal, ia, ib, inc, mode2))
-          DurRec(..zero_dur, years: yrs)
+          let yrs = terr(st, round_calendar_year_total(cal, ia, ib, inc, mode))
+          Duration(..zero_duration, years: yrs)
         }
         _, Year -> {
           let mid =
@@ -612,18 +615,18 @@ fn year_month_until_since(
               calendar_date_add(
                 cal,
                 ia,
-                DurRec(..zero_dur, months: rounded),
+                Duration(..zero_duration, months: rounded),
                 Constrain,
               ),
             )
           let #(yrs, mos, _) =
-            calendar_date_until(cal, ia, mid, whole_years: True)
-          DurRec(..zero_dur, years: yrs, months: mos)
+            calendar_years_months_until(cal, ia, mid, whole_years: True)
+          Duration(..zero_duration, years: yrs, months: mos)
         }
-        _, _ -> DurRec(..zero_dur, months: rounded)
+        _, _ -> Duration(..zero_duration, months: rounded)
       }
   }
-  let dur = apply_since_dur(dur, is_since)
+  let dur = apply_since_duration(dur, is_since)
   make_duration(st, protos, dur)
 }
 
@@ -640,19 +643,19 @@ fn round_calendar_year_total(
     True -> -1
     False -> 1
   }
-  let #(yrs, _, _) = calendar_date_until(cal, ia, ib, whole_years: True)
+  let #(yrs, _, _) = calendar_years_months_until(cal, ia, ib, whole_years: True)
   let r1 = trunc_div(yrs, inc) * inc
   let r2 = r1 + inc * sign
   use start <- result.try(calendar_date_add(
     cal,
     ia,
-    DurRec(..zero_dur, years: r1),
+    Duration(..zero_duration, years: r1),
     Constrain,
   ))
   use end_date <- result.map(calendar_date_add(
     cal,
     ia,
-    DurRec(..zero_dur, years: r2),
+    Duration(..zero_duration, years: r2),
     Constrain,
   ))
   let num = dest - epoch_days(start)

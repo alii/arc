@@ -2,37 +2,37 @@ import arc/internal/int_math.{floor_div, trunc_div}
 import arc/rt/builtins/helpers
 import arc/rt/builtins/temporal_common.{
   type FractionalDigits, type RoundingMode, type TimeUnit, type Unit, Compatible,
-  Day, DigitsAuto, DigitsFixed, HalfExpand, Hour, Microsecond, Millisecond,
-  Minute, Month, Nanosecond, Second, Trunc, UMicrosecond, UMillisecond,
-  UNanosecond, USecond, UnitAbsent, UnitAuto, UnitValue, Week, Year,
+  Day, DigitsAuto, DigitsFixed, HalfExpand, Hour, Microsecond, MicrosecondUnit,
+  Millisecond, MillisecondUnit, Minute, Month, Nanosecond, NanosecondUnit,
+  Second, SecondUnit, Trunc, UnitAbsent, UnitAuto, UnitValue, Week, Year,
   apply_duration_fields, balance_time_ns, check_time_duration_range,
-  duration_sign, duration_slot_of, epoch_ns_to_iso_in, finish_duration,
-  get_fractional_digits, get_options_object, get_rounding_increment_option,
-  get_rounding_mode_option, get_unit_option, get_unit_option_keep,
-  is_valid_duration, largest_smaller_msg, largest_smaller_than_smallest,
-  make_duration, max_unit, negate_dur, opt_integral_arg, read_duration_fields,
-  require_temporal, require_time_unit, round_to_increment, singular_unit, terr,
-  time_duration_ns, time_only_ns, time_unit_ns, to_temporal_duration, unit_rank,
-  unit_to_string, valid_time_increment,
+  days_and_time_ns, duration_sign, duration_slot_of, epoch_ns_to_iso_in,
+  finish_duration, get_fractional_digits, get_options_object,
+  get_rounding_increment_option, get_rounding_mode_option, get_unit_option,
+  integral_int_arg_or, is_valid_duration, largest_smaller_msg,
+  largest_smaller_than_smallest, make_duration, max_unit, negate_duration,
+  read_duration_fields, read_unit_option, require_temporal, require_time_unit,
+  round_to_increment, singular_unit, terr, time_part_ns, time_unit_ns,
+  to_temporal_duration, unit_rank, unit_to_string, valid_time_increment,
 }
 import arc/rt/builtins/temporal_diff.{
-  add_calendar_units, default_largest_unit, diff_date_parts, diff_date_time_core,
+  add_calendar_units, default_largest_unit, diff_date_time_core, iso_date_until,
   larger_time_unit, zoned_diff_round_time,
 }
 import arc/rt/builtins/temporal_fields.{
-  add_duration_to_date, get_named, require_nonempty_fields,
+  get_named, iso_date_add, require_nonempty_fields,
 }
 import arc/rt/builtins/temporal_iso.{
-  type DurRec, type IsoDate, type Precision, type TErr, type TimeRec, AutoPrec,
-  Constrain, DurRec, FixedPrec, MinutePrec, RangeE, check_date_limits,
-  epoch_days, format_fraction, int_sign, iso_date_from_epoch_days,
-  iso_date_within_limits, iso_datetime_within_limits, midnight, ns_div_float,
-  ns_per_day, ns_per_ms, ns_per_second, ns_per_us, ns_to_time, pow10, time_to_ns,
-  zero_dur,
+  type Duration, type IsoDate, type IsoTime, type SecondsPrecision, type TErr,
+  AutoPrecision, Constrain, Duration, MinutePrecision, RangeE, SubsecondDigits,
+  check_date_limits, divide_as_float, epoch_days, format_fraction, int_sign,
+  iso_date_from_epoch_days, iso_date_within_limits, iso_datetime_within_limits,
+  midnight, ns_per_day, ns_per_ms, ns_per_second, ns_per_us, ns_to_time, pow10,
+  time_to_ns, zero_duration,
 }
 import arc/rt/builtins/temporal_zoned_ops.{
-  type RelTo, RelNone, RelPlain, RelZoned, add_zoned_ns, convert_relative_to,
-  date_duration_days, get_epoch_ns_for,
+  type RelativeTo, NoRelativeTo, RelativeDate, RelativeZoned, add_zoned_ns,
+  convert_relative_to, date_duration_days, get_epoch_ns_for,
 }
 import arc/rt/types.{
   type Agent, type DurationMethod, type JsVal, type NativeToken,
@@ -157,17 +157,29 @@ pub fn ctor(
   protos: TemporalProtos,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(y, st) = opt_integral_arg(st, args, 0)
-  let #(mo, st) = opt_integral_arg(st, args, 1)
-  let #(w, st) = opt_integral_arg(st, args, 2)
-  let #(d, st) = opt_integral_arg(st, args, 3)
-  let #(h, st) = opt_integral_arg(st, args, 4)
-  let #(mi, st) = opt_integral_arg(st, args, 5)
-  let #(s, st) = opt_integral_arg(st, args, 6)
-  let #(ms, st) = opt_integral_arg(st, args, 7)
-  let #(us, st) = opt_integral_arg(st, args, 8)
-  let #(ns, st) = opt_integral_arg(st, args, 9)
-  let dur = DurRec(y, mo, w, d, h, mi, s, ms, us, ns)
+  let #(years, st) = integral_int_arg_or(st, args, 0, 0)
+  let #(months, st) = integral_int_arg_or(st, args, 1, 0)
+  let #(weeks, st) = integral_int_arg_or(st, args, 2, 0)
+  let #(days, st) = integral_int_arg_or(st, args, 3, 0)
+  let #(hours, st) = integral_int_arg_or(st, args, 4, 0)
+  let #(minutes, st) = integral_int_arg_or(st, args, 5, 0)
+  let #(seconds, st) = integral_int_arg_or(st, args, 6, 0)
+  let #(milliseconds, st) = integral_int_arg_or(st, args, 7, 0)
+  let #(microseconds, st) = integral_int_arg_or(st, args, 8, 0)
+  let #(nanoseconds, st) = integral_int_arg_or(st, args, 9, 0)
+  let dur =
+    Duration(
+      years:,
+      months:,
+      weeks:,
+      days:,
+      hours:,
+      minutes:,
+      seconds:,
+      milliseconds:,
+      microseconds:,
+      nanoseconds:,
+    )
   finish_duration(st, protos, dur)
 }
 
@@ -190,11 +202,11 @@ fn duration_compare(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(a, st) = to_temporal_duration(st, helpers.arg_at(args, 0))
   let #(b, st) = to_temporal_duration(st, helpers.arg_at(args, 1))
   let #(opts, st) = get_options_object(st, helpers.arg_at(args, 2))
-  let #(relative_to, st) = case opts {
+  let #(relative_to_value, st) = case opts {
     None -> #(types.mk_undefined(), st)
     Some(oh) -> get_named(st, oh, "relativeTo")
   }
-  let #(rel, st) = convert_relative_to(st, relative_to)
+  let #(relative_to, st) = convert_relative_to(st, relative_to_value)
   let has_cal_units =
     a.years != 0
     || a.months != 0
@@ -203,13 +215,13 @@ fn duration_compare(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
     || b.months != 0
     || b.weeks != 0
   let time_compare = fn(st) {
-    #(from_int(int_sign(time_duration_ns(a) - time_duration_ns(b))), st)
+    #(from_int(int_sign(days_and_time_ns(a) - days_and_time_ns(b))), st)
   }
   case a == b {
     True -> #(from_int(0), st)
     False ->
-      case rel {
-        RelZoned(ns, tz, cal) ->
+      case relative_to {
+        RelativeZoned(ns, tz, cal) ->
           case has_cal_units || a.days != 0 || b.days != 0 {
             True -> {
               let na = terr(st, add_zoned_ns(ns, tz, cal, a))
@@ -218,20 +230,20 @@ fn duration_compare(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
             }
             False -> time_compare(st)
           }
-        RelPlain(rel_date, rel_cal) ->
+        RelativeDate(date, cal) ->
           case has_cal_units {
             True -> {
-              let da = terr(st, date_duration_days(a, rel_date, rel_cal))
-              let na = da * ns_per_day + time_only_ns(a)
+              let da = terr(st, date_duration_days(a, date, cal))
+              let na = da * ns_per_day + time_part_ns(a)
               let Nil = terr(st, check_time_duration_range(na))
-              let db = terr(st, date_duration_days(b, rel_date, rel_cal))
-              let nb = db * ns_per_day + time_only_ns(b)
+              let db = terr(st, date_duration_days(b, date, cal))
+              let nb = db * ns_per_day + time_part_ns(b)
               let Nil = terr(st, check_time_duration_range(nb))
               #(from_int(int_sign(na - nb)), st)
             }
             False -> time_compare(st)
           }
-        RelNone ->
+        NoRelativeTo ->
           case has_cal_units {
             True ->
               rt_val.t_throw_range_error(
@@ -244,7 +256,7 @@ fn duration_compare(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-fn require_duration(st: Agent, this: JsVal, name: String) -> DurRec {
+fn require_duration(st: Agent, this: JsVal, name: String) -> Duration {
   require_temporal(st, this, "Duration", name, duration_slot_of)
 }
 
@@ -257,7 +269,7 @@ pub fn getter(
   #(duration_field(d, g), st)
 }
 
-pub fn duration_field(d: DurRec, g: TemporalDurationGetter) -> JsVal {
+pub fn duration_field(d: Duration, g: TemporalDurationGetter) -> JsVal {
   case g {
     DrYears -> from_int(d.years)
     DrMonths -> from_int(d.months)
@@ -266,9 +278,9 @@ pub fn duration_field(d: DurRec, g: TemporalDurationGetter) -> JsVal {
     DrHours -> from_int(d.hours)
     DrMinutes -> from_int(d.minutes)
     DrSeconds -> from_int(d.seconds)
-    DrMilliseconds -> from_int(d.ms)
-    DrMicroseconds -> from_int(d.us)
-    DrNanoseconds -> from_int(d.ns)
+    DrMilliseconds -> from_int(d.milliseconds)
+    DrMicroseconds -> from_int(d.microseconds)
+    DrNanoseconds -> from_int(d.nanoseconds)
     DrSign -> from_int(duration_sign(d))
     DrBlank -> mk_bool(duration_sign(d) == 0)
   }
@@ -284,32 +296,33 @@ pub fn method(
   let d = require_duration(st, this, duration_method_name(m))
   case m {
     DmToJson | DmToLocaleString -> #(
-      mk_string(format_duration(d, AutoPrec)),
+      mk_string(format_duration(d, AutoPrecision)),
       st,
     )
     DmToString -> {
       let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
       let #(digits, st) = get_fractional_digits(st, opts)
       let #(mode, st) = get_rounding_mode_option(st, opts, Trunc)
-      let #(su, st) =
+      let #(smallest, st) =
         get_unit_option(st, opts, "smallestUnit", allow_auto: False)
-      let #(prec, runit, rinc) = terr(st, duration_string_precision(digits, su))
+      let #(precision, unit, inc) =
+        terr(st, duration_string_precision(digits, smallest))
       let d2 =
-        terr(st, case runit == UNanosecond && rinc == 1 {
+        terr(st, case unit == NanosecondUnit && inc == 1 {
           True -> Ok(d)
-          False -> round_duration_for_string(d, rinc, runit, mode)
+          False -> round_duration_for_string(d, inc, unit, mode)
         })
-      #(mk_string(format_duration(d2, prec)), st)
+      #(mk_string(format_duration(d2, precision)), st)
     }
     DmValueOf ->
       rt_val.t_throw_type_error(
         st,
         "Temporal.Duration cannot be converted with valueOf",
       )
-    DmNegated -> make_duration(st, protos, negate_dur(d))
+    DmNegated -> make_duration(st, protos, negate_duration(d))
     DmAbs -> {
       let abs_d = case duration_sign(d) < 0 {
-        True -> negate_dur(d)
+        True -> negate_duration(d)
         False -> d
       }
       make_duration(st, protos, abs_d)
@@ -327,7 +340,7 @@ pub fn method(
     DmAdd | DmSubtract -> {
       let #(other, st) = to_temporal_duration(st, helpers.arg_at(args, 0))
       let other = case m {
-        DmSubtract -> negate_dur(other)
+        DmSubtract -> negate_duration(other)
         _ -> other
       }
       let has_cal =
@@ -344,7 +357,7 @@ pub fn method(
             "duration add/subtract requires non-calendar durations",
           )
         False -> {
-          let total = time_duration_ns(d) + time_duration_ns(other)
+          let total = days_and_time_ns(d) + days_and_time_ns(other)
           let largest = larger_time_unit(d, other)
           let sum = balance_time_ns(total, largest)
           finish_duration(st, protos, sum)
@@ -359,23 +372,33 @@ pub fn method(
 fn duration_round(
   st: Agent,
   protos: TemporalProtos,
-  d: DurRec,
+  d: Duration,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let arg = helpers.arg_at(args, 0)
   case classify(arg) {
     KUndef -> rt_val.t_throw_type_error(st, "options parameter is required")
-    KStr(su_str) ->
-      case singular_unit(su_str) {
-        Some(su) ->
-          duration_round_with(st, protos, d, None, su, 1, HalfExpand, RelNone)
+    KStr(unit_name) ->
+      case singular_unit(unit_name) {
+        Some(smallest) ->
+          duration_round_with(
+            st,
+            protos,
+            d,
+            None,
+            smallest,
+            1,
+            HalfExpand,
+            NoRelativeTo,
+          )
         None -> rt_val.t_throw_range_error(st, "invalid smallestUnit")
       }
     KHandle(oh) -> {
       let opts = Some(oh)
-      let #(largest, st) = get_unit_option_keep(st, opts, "largestUnit")
-      let #(rel_v, st) = get_named(st, oh, "relativeTo")
-      let #(rel, st) = convert_relative_to(st, rel_v)
+      let #(largest, st) =
+        read_unit_option(st, opts, "largestUnit", allow_auto: True)
+      let #(relative_to_value, st) = get_named(st, oh, "relativeTo")
+      let #(relative_to, st) = convert_relative_to(st, relative_to_value)
       let #(inc, st) = get_rounding_increment_option(st, opts)
       let #(mode, st) = get_rounding_mode_option(st, opts, HalfExpand)
       let #(smallest, st) =
@@ -387,12 +410,21 @@ fn duration_round(
             "at least one of smallestUnit or largestUnit is required",
           )
         False -> {
-          let su = option.unwrap(smallest, Nanosecond)
-          let lu = case largest {
+          let smallest = option.unwrap(smallest, Nanosecond)
+          let largest = case largest {
             UnitValue(u) -> Some(u)
             UnitAuto | UnitAbsent -> None
           }
-          duration_round_with(st, protos, d, lu, su, inc, mode, rel)
+          duration_round_with(
+            st,
+            protos,
+            d,
+            largest,
+            smallest,
+            inc,
+            mode,
+            relative_to,
+          )
         }
       }
     }
@@ -404,12 +436,12 @@ fn duration_round(
 fn duration_round_with(
   st: Agent,
   protos: TemporalProtos,
-  d: DurRec,
+  d: Duration,
   largest: Option(Unit),
   smallest: Unit,
   inc: Int,
   mode: RoundingMode,
-  rel: RelTo,
+  relative_to: RelativeTo,
 ) -> #(JsVal, Agent) {
   let largest = case largest {
     None -> max_unit(default_largest_unit(d), smallest)
@@ -434,8 +466,8 @@ fn duration_round_with(
     True, _ -> rt_val.t_throw_range_error(st, largest_smaller_msg)
     _, True -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
     False, False ->
-      case rel {
-        RelNone -> {
+      case relative_to {
+        NoRelativeTo -> {
           let needs_rel =
             d.years != 0
             || d.months != 0
@@ -449,23 +481,31 @@ fn duration_round_with(
                 "relativeTo is required for calendar-unit rounding",
               )
             False -> {
-              let su = terr(st, require_time_unit(smallest))
-              let total = time_duration_ns(d)
+              let smallest_time_unit = terr(st, require_time_unit(smallest))
+              let total = days_and_time_ns(d)
               let rounded =
-                round_to_increment(total, inc * time_unit_ns(su), mode)
+                round_to_increment(
+                  total,
+                  inc * time_unit_ns(smallest_time_unit),
+                  mode,
+                )
               let result = balance_time_ns(rounded, largest)
               finish_duration(st, protos, result)
             }
           }
         }
-        RelZoned(rel_ns, tz, cal) -> {
-          let target_ns = terr(st, add_zoned_ns(rel_ns, tz, cal, d))
+        RelativeZoned(relative_ns, tz, cal) -> {
+          let target_ns = terr(st, add_zoned_ns(relative_ns, tz, cal, d))
           case unit_rank(largest) <= unit_rank(Hour) {
             True -> {
-              let su = terr(st, require_time_unit(smallest))
-              let diff = target_ns - rel_ns
+              let smallest_time_unit = terr(st, require_time_unit(smallest))
+              let diff = target_ns - relative_ns
               let rounded =
-                round_to_increment(diff, inc * time_unit_ns(su), mode)
+                round_to_increment(
+                  diff,
+                  inc * time_unit_ns(smallest_time_unit),
+                  mode,
+                )
               let result = balance_time_ns(rounded, largest)
               finish_duration(st, protos, result)
             }
@@ -473,7 +513,7 @@ fn duration_round_with(
               let result =
                 terr(st, case unit_rank(smallest) >= unit_rank(Day) {
                   True -> {
-                    use a_dt <- result.try(epoch_ns_to_iso_in(tz, rel_ns))
+                    use a_dt <- result.try(epoch_ns_to_iso_in(tz, relative_ns))
                     use b_dt <- result.try(epoch_ns_to_iso_in(tz, target_ns))
                     diff_date_time_core(
                       cal,
@@ -483,14 +523,14 @@ fn duration_round_with(
                       smallest,
                       inc,
                       mode,
-                      True,
+                      zoned: True,
                     )
                   }
                   False ->
                     zoned_diff_round_time(
                       cal,
                       tz,
-                      rel_ns,
+                      relative_ns,
                       target_ns,
                       largest,
                       smallest,
@@ -502,11 +542,11 @@ fn duration_round_with(
             }
           }
         }
-        RelPlain(rel_date, rel_cal) -> {
+        RelativeDate(relative_date, cal) -> {
           // zero returns before relativeTo is range-checked
           let out_of_range =
             duration_sign(d) != 0
-            && !iso_datetime_within_limits(rel_date, midnight)
+            && !iso_datetime_within_limits(relative_date, midnight)
           case out_of_range {
             True ->
               rt_val.t_throw_range_error(
@@ -514,19 +554,19 @@ fn duration_round_with(
                 "relativeTo is outside the representable range after conversion to DateTime",
               )
             False -> {
-              let target = terr(st, duration_target_datetime(rel_date, d))
+              let target = terr(st, duration_target_datetime(relative_date, d))
               let result =
                 terr(
                   st,
                   diff_date_time_core(
-                    rel_cal,
-                    #(rel_date, midnight),
+                    cal,
+                    #(relative_date, midnight),
                     target,
                     largest,
                     smallest,
                     inc,
                     mode,
-                    False,
+                    zoned: False,
                   ),
                 )
               finish_duration(st, protos, result)
@@ -539,18 +579,18 @@ fn duration_round_with(
 
 fn duration_target_datetime(
   rel: IsoDate,
-  d: DurRec,
-) -> Result(#(IsoDate, TimeRec), TErr) {
+  d: Duration,
+) -> Result(#(IsoDate, IsoTime), TErr) {
   let date_only =
-    DurRec(
-      ..zero_dur,
+    Duration(
+      ..zero_duration,
       years: d.years,
       months: d.months,
       weeks: d.weeks,
       days: d.days,
     )
-  use base <- result.try(add_duration_to_date(rel, date_only, Constrain))
-  let time_ns = time_only_ns(d)
+  use base <- result.try(iso_date_add(rel, date_only, Constrain))
+  let time_ns = time_part_ns(d)
   let extra_days = floor_div(time_ns, ns_per_day)
   let rem = time_ns - extra_days * ns_per_day
   let final = iso_date_from_epoch_days(epoch_days(base) + extra_days)
@@ -560,23 +600,26 @@ fn duration_target_datetime(
   }
 }
 
-fn duration_total(st: Agent, d: DurRec, args: List(JsVal)) -> #(JsVal, Agent) {
+fn duration_total(
+  st: Agent,
+  d: Duration,
+  args: List(JsVal),
+) -> #(JsVal, Agent) {
   let arg = helpers.arg_at(args, 0)
   case classify(arg) {
     KUndef -> rt_val.t_throw_type_error(st, "totalOf is required")
-    KStr(u_str) ->
-      case singular_unit(u_str) {
-        Some(u) -> duration_total_with(st, d, u, RelNone)
+    KStr(unit_name) ->
+      case singular_unit(unit_name) {
+        Some(u) -> duration_total_with(st, d, u, NoRelativeTo)
         None -> rt_val.t_throw_range_error(st, "invalid unit")
       }
     KHandle(oh) -> {
-      let #(rel_v, st) = get_named(st, oh, "relativeTo")
-      let #(rel, st) = convert_relative_to(st, rel_v)
-      let #(unit_o, st) =
-        get_unit_option(st, Some(oh), "unit", allow_auto: False)
-      case unit_o {
+      let #(relative_to_value, st) = get_named(st, oh, "relativeTo")
+      let #(relative_to, st) = convert_relative_to(st, relative_to_value)
+      let #(unit, st) = get_unit_option(st, Some(oh), "unit", allow_auto: False)
+      case unit {
         None -> rt_val.t_throw_range_error(st, "unit is required")
-        Some(u) -> duration_total_with(st, d, u, rel)
+        Some(u) -> duration_total_with(st, d, u, relative_to)
       }
     }
     _ -> rt_val.t_throw_type_error(st, "invalid totalOf")
@@ -589,12 +632,12 @@ fn total_number(f: Float) -> JsVal {
 
 fn duration_total_with(
   st: Agent,
-  d: DurRec,
+  d: Duration,
   unit: Unit,
-  rel: RelTo,
+  relative_to: RelativeTo,
 ) -> #(JsVal, Agent) {
-  case rel {
-    RelNone -> {
+  case relative_to {
+    NoRelativeTo -> {
       let needs_rel =
         d.years != 0
         || d.months != 0
@@ -607,31 +650,31 @@ fn duration_total_with(
             "relativeTo is required to total calendar units",
           )
         False -> {
-          let tu = terr(st, require_time_unit(unit))
-          let total = time_duration_ns(d)
-          #(total_number(ns_div_float(total, time_unit_ns(tu))), st)
+          let time_unit = terr(st, require_time_unit(unit))
+          let total = days_and_time_ns(d)
+          #(total_number(divide_as_float(total, time_unit_ns(time_unit))), st)
         }
       }
     }
-    RelZoned(anchor_ns, tz, cal) -> {
+    RelativeZoned(anchor_ns, tz, cal) -> {
       let target_ns = terr(st, add_zoned_ns(anchor_ns, tz, cal, d))
       case unit_rank(unit) <= unit_rank(Hour) {
         True -> {
-          let tu = terr(st, require_time_unit(unit))
+          let time_unit = terr(st, require_time_unit(unit))
           let diff = target_ns - anchor_ns
-          #(total_number(ns_div_float(diff, time_unit_ns(tu))), st)
+          #(total_number(divide_as_float(diff, time_unit_ns(time_unit))), st)
         }
         False -> zoned_calendar_total(st, tz, anchor_ns, target_ns, unit)
       }
     }
-    RelPlain(rel_date, _rel_cal) -> {
+    RelativeDate(relative_date, _cal) -> {
       // zero returns before relativeTo is range-checked
       let Nil =
         terr(
           st,
           case
             duration_sign(d) != 0
-            && !iso_datetime_within_limits(rel_date, midnight)
+            && !iso_datetime_within_limits(relative_date, midnight)
           {
             True ->
               Error(RangeE(
@@ -640,16 +683,17 @@ fn duration_total_with(
             False -> Ok(Nil)
           },
         )
-      let target = terr(st, duration_target_datetime(rel_date, d))
-      let rel_ns = epoch_days(rel_date) * ns_per_day
+      let target = terr(st, duration_target_datetime(relative_date, d))
+      let relative_ns = epoch_days(relative_date) * ns_per_day
       let target_ns = epoch_days(target.0) * ns_per_day + time_to_ns(target.1)
       case unit_rank(unit) <= unit_rank(Day) {
         True -> {
-          let tu = terr(st, require_time_unit(unit))
-          let diff = target_ns - rel_ns
-          #(total_number(ns_div_float(diff, time_unit_ns(tu))), st)
+          let time_unit = terr(st, require_time_unit(unit))
+          let diff = target_ns - relative_ns
+          #(total_number(divide_as_float(diff, time_unit_ns(time_unit))), st)
         }
-        False -> plain_calendar_total(st, rel_date, rel_ns, target_ns, unit)
+        False ->
+          plain_calendar_total(st, relative_date, relative_ns, target_ns, unit)
       }
     }
   }
@@ -675,8 +719,8 @@ fn zoned_calendar_total(
     _, _ -> b_d
   }
   let whole0 = case unit {
-    Year -> diff_date_parts(a_d, b_date, Year).0
-    Month -> diff_date_parts(a_d, b_date, Month).1
+    Year -> iso_date_until(a_d, b_date, Year).0
+    Month -> iso_date_until(a_d, b_date, Month).1
     Week -> trunc_div(epoch_days(b_date) - epoch_days(a_d), 7)
     _ -> epoch_days(b_date) - epoch_days(a_d)
   }
@@ -709,25 +753,25 @@ fn zoned_calendar_total(
 // window shifts one unit when month-end clamping undercounts
 fn plain_calendar_total(
   st: Agent,
-  rel_date: IsoDate,
-  rel_ns: Int,
+  relative_date: IsoDate,
+  relative_ns: Int,
   target_ns: Int,
   unit: Unit,
 ) -> #(JsVal, Agent) {
-  let sign = case target_ns < rel_ns {
+  let sign = case target_ns < relative_ns {
     True -> -1
     False -> 1
   }
   let target_floor_days = floor_div(target_ns, ns_per_day)
   let target_date = iso_date_from_epoch_days(target_floor_days)
   let whole0 = case unit {
-    Year -> diff_date_parts(rel_date, target_date, Year).0
-    Month -> diff_date_parts(rel_date, target_date, Month).1
-    _ -> trunc_div(epoch_days(target_date) - epoch_days(rel_date), 7)
+    Year -> iso_date_until(relative_date, target_date, Year).0
+    Month -> iso_date_until(relative_date, target_date, Month).1
+    _ -> trunc_div(epoch_days(target_date) - epoch_days(relative_date), 7)
   }
   let bound_ns = fn(w: Int) {
     use d2 <- result.map(
-      check_date_limits(add_calendar_units(rel_date, unit, w)),
+      check_date_limits(add_calendar_units(relative_date, unit, w)),
     )
     epoch_days(d2) * ns_per_day
   }
@@ -762,19 +806,19 @@ fn fractional_total(
   let den = end_ns - start_ns
   case den == 0 {
     True -> int.to_float(whole)
-    False -> ns_div_float(whole * den + sign * num, den)
+    False -> divide_as_float(whole * den + sign * num, den)
   }
 }
 
 fn duration_string_precision(
   digits: FractionalDigits,
-  su: Option(Unit),
-) -> Result(#(Precision, TimeUnit, Int), TErr) {
-  case su {
-    Some(Second) -> Ok(#(FixedPrec(0), USecond, 1))
-    Some(Millisecond) -> Ok(#(FixedPrec(3), UMillisecond, 1))
-    Some(Microsecond) -> Ok(#(FixedPrec(6), UMicrosecond, 1))
-    Some(Nanosecond) -> Ok(#(FixedPrec(9), UNanosecond, 1))
+  smallest: Option(Unit),
+) -> Result(#(SecondsPrecision, TimeUnit, Int), TErr) {
+  case smallest {
+    Some(Second) -> Ok(#(SubsecondDigits(0), SecondUnit, 1))
+    Some(Millisecond) -> Ok(#(SubsecondDigits(3), MillisecondUnit, 1))
+    Some(Microsecond) -> Ok(#(SubsecondDigits(6), MicrosecondUnit, 1))
+    Some(Nanosecond) -> Ok(#(SubsecondDigits(9), NanosecondUnit, 1))
     Some(u) ->
       Error(RangeE(
         unit_to_string(u)
@@ -782,20 +826,21 @@ fn duration_string_precision(
       ))
     None ->
       case digits {
-        DigitsAuto -> Ok(#(AutoPrec, UNanosecond, 1))
-        DigitsFixed(0) -> Ok(#(FixedPrec(0), USecond, 1))
-        DigitsFixed(n) -> Ok(#(FixedPrec(n), UNanosecond, pow10(9 - n)))
+        DigitsAuto -> Ok(#(AutoPrecision, NanosecondUnit, 1))
+        DigitsFixed(0) -> Ok(#(SubsecondDigits(0), SecondUnit, 1))
+        DigitsFixed(n) ->
+          Ok(#(SubsecondDigits(n), NanosecondUnit, pow10(9 - n)))
       }
   }
 }
 
 fn round_duration_for_string(
-  d: DurRec,
+  d: Duration,
   inc: Int,
   unit: TimeUnit,
   mode: RoundingMode,
-) -> Result(DurRec, TErr) {
-  let time_ns = time_only_ns(d)
+) -> Result(Duration, TErr) {
+  let time_ns = time_part_ns(d)
   let rounded = round_to_increment(time_ns, inc * time_unit_ns(unit), mode)
   let largest = max_unit(default_largest_unit(d), Second)
   let result = case unit_rank(largest) >= unit_rank(Day) {
@@ -803,7 +848,7 @@ fn round_duration_for_string(
       let extra_days = trunc_div(rounded, ns_per_day)
       let rem = rounded - extra_days * ns_per_day
       let t = balance_time_ns(rem, Hour)
-      DurRec(
+      Duration(
         ..t,
         years: d.years,
         months: d.months,
@@ -819,7 +864,7 @@ fn round_duration_for_string(
   }
 }
 
-pub fn format_duration(d: DurRec, prec: Precision) -> String {
+pub fn format_duration(d: Duration, precision: SecondsPrecision) -> String {
   let sign = duration_sign(d)
   let prefix = case sign < 0 {
     True -> "-"
@@ -833,24 +878,28 @@ pub fn format_duration(d: DurRec, prec: Precision) -> String {
     <> join_unit(abs_part(d.days), "D")
   // sub-second parts may exceed their unit; carry into seconds
   let sub_total =
-    abs_part(d.ms) * ns_per_ms + abs_part(d.us) * ns_per_us + abs_part(d.ns)
+    abs_part(d.milliseconds)
+    * ns_per_ms
+    + abs_part(d.microseconds)
+    * ns_per_us
+    + abs_part(d.nanoseconds)
   let extra_seconds = sub_total / ns_per_second
   let sub = sub_total % ns_per_second
   let seconds_str = case
     d.seconds != 0
     || sub_total != 0
     || { date_part == "" && d.hours == 0 && d.minutes == 0 }
-    || show_fixed_seconds(prec)
+    || show_fixed_seconds(precision)
   {
     True -> {
-      let frac = case prec {
-        AutoPrec -> format_fraction(sub, AutoPrec)
-        FixedPrec(0) -> ""
-        FixedPrec(n) -> {
+      let frac = case precision {
+        AutoPrecision -> format_fraction(sub, AutoPrecision)
+        SubsecondDigits(0) -> ""
+        SubsecondDigits(n) -> {
           let digits9 = int.to_string(sub) |> string.pad_start(9, "0")
           "." <> string.slice(digits9, 0, n)
         }
-        MinutePrec -> ""
+        MinutePrecision -> ""
       }
       int.to_string(abs_part(d.seconds) + extra_seconds) <> frac <> "S"
     }
@@ -867,10 +916,10 @@ pub fn format_duration(d: DurRec, prec: Precision) -> String {
   prefix <> "P" <> date_part <> t
 }
 
-fn show_fixed_seconds(p: Precision) -> Bool {
+fn show_fixed_seconds(p: SecondsPrecision) -> Bool {
   case p {
-    FixedPrec(_) -> True
-    AutoPrec | MinutePrec -> False
+    SubsecondDigits(_) -> True
+    AutoPrecision | MinutePrecision -> False
   }
 }
 
