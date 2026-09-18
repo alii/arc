@@ -8,21 +8,22 @@ import arc/bytecode/opcode.{
   IrLabel, IrPushTry, IrPutField, IterCloseGuard,
 }
 import arc/compiler/ast_util
+import arc/compiler/const_fold
 import arc/compiler/scope.{
   type BindingKind, type GlobalFallthrough, type ScopeId, type TopLevelLex,
   CaptureBinding, CatchBinding, ConstBinding, FnNameBinding, LetBinding,
   LexGlobal, LexLocal, ParamBinding, ToEvalEnv, ToGlobal, VarBinding,
   root_scope_id,
 }
+import arc/esm
 import arc/parser/ast
 import arc/rt/types.{
-  type JsNum, type JsVal, JFloat, JInt, JNegInf, JPosInf, mk_bigint, mk_bool,
-  mk_null, mk_number, mk_string, mk_tdz, mk_undefined,
+  type JsVal, JInt, mk_bigint, mk_bool, mk_null, mk_number, mk_string, mk_tdz,
+  mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bool
 import gleam/dict.{type Dict}
-import gleam/float
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -787,11 +788,15 @@ fn emit_top_level_body(
     True ->
       e
       |> list.fold(
-        ast_util.collect_hoisted_vars(stmts),
+        ast_util.var_declared_names(stmts),
         _,
         emit_declare_var_global,
       )
-      |> list.fold(ast_util.direct_fn_names(stmts), _, emit_declare_fn_global)
+      |> list.fold(
+        ast_util.top_level_function_names(stmts),
+        _,
+        emit_declare_fn_global,
+      )
   }
   // annex b §B.3.3: sloppy block function names get a var binding first
   let e = case script_strict {
@@ -802,7 +807,7 @@ fn emit_top_level_body(
   let e = case e.top_lex {
     LexLocal -> e
     LexGlobal ->
-      list.fold(ast_util.collect_top_lex_names(stmts), e, fn(e, lex) {
+      list.fold(ast_util.lexically_declared_names(stmts), e, fn(e, lex) {
         let #(name, is_const) = lex
         emit_op(e, opcode.DeclareGlobalLex(name, is_const))
       })
@@ -999,10 +1004,6 @@ fn bindings_in_slot_order(s: scope.Scope) -> List(#(String, scope.Binding)) {
   |> list.sort(fn(a, b) { int.compare({ a.1 }.slot, { b.1 }.slot) })
 }
 
-fn binding_slot(b: scope.Binding) -> scope.SlotRef {
-  scope.SlotRef(slot: b.slot, boxed: b.is_boxed)
-}
-
 // var -> undef, let/const -> uninit, param/catch -> box only, capture -> nothing
 fn emit_binding_prologue(e: Emitter, scope_id: ScopeId) -> Emitter {
   let bindings = bindings_in_slot_order(scope.get_scope(e.scope_tree, scope_id))
@@ -1010,7 +1011,8 @@ fn emit_binding_prologue(e: Emitter, scope_id: ScopeId) -> Emitter {
   // the frame already pads root-scope vars with undefined
   let is_function_root = scope_id == e.fn_scope
   use e, #(name, b) <- list.fold(bindings, e)
-  let seeded = at_module_root && set.contains(e.scope_tree.linker_seeded, name)
+  let seeded =
+    at_module_root && set.contains(e.scope_tree.linker_seeded_exports, name)
   use <- bool.guard(seeded, e)
   let e = case b.kind {
     VarBinding if is_function_root -> e
@@ -1019,7 +1021,7 @@ fn emit_binding_prologue(e: Emitter, scope_id: ScopeId) -> Emitter {
       emit_store_const(e, b.slot, mk_tdz())
     ParamBinding | CatchBinding | CaptureBinding -> e
   }
-  case b.kind, b.is_boxed {
+  case b.kind, b.boxed {
     CaptureBinding, _ -> e
     _, True -> emit_op(e, opcode.BoxLocal(b.slot))
     _, False -> e
@@ -1062,10 +1064,10 @@ fn emit_annexb_promote(e: Emitter, name: String) -> Emitter {
         AnnexBBlocked -> e
         AnnexBLocal(target) ->
           e
-          |> emit_slot_get(binding_slot(source))
+          |> emit_slot_get(scope.binding_ref(source))
           |> emit_slot_put(target)
         AnnexBFallthrough -> {
-          let e = emit_slot_get(e, binding_slot(source))
+          let e = emit_slot_get(e, scope.binding_ref(source))
           case fn_fallthrough(e) {
             ToGlobal -> emit_op(e, opcode.PutGlobal(name))
             ToEvalEnv -> emit_op(e, opcode.PutEvalVar(name))
@@ -1111,7 +1113,7 @@ fn annexb_find_target(
             | Ok(scope.Binding(kind: FnNameBinding, ..)) -> AnnexBBlocked
             Ok(scope.Binding(kind: CatchBinding, ..)) ->
               annexb_find_target(e, scope_parent_in_fn(e, id), name)
-            Ok(b) -> AnnexBLocal(binding_slot(b))
+            Ok(b) -> AnnexBLocal(scope.binding_ref(b))
             Error(Nil) -> annexb_find_target(e, scope_parent_in_fn(e, id), name)
           }
       }
@@ -1436,9 +1438,9 @@ fn emit_direct_put(
   case res {
     scope.Global(name:) -> emit_op(e, opcode.PutGlobal(name))
     scope.EvalEnv(name:) -> emit_op(e, opcode.PutEvalVar(name))
-    scope.Local(slot:, boxed:, kind:, origin_kind:) -> {
+    scope.Local(slot:, boxed:, kind:, declared_kind:) -> {
       let ref = scope.SlotRef(slot:, boxed:)
-      case origin_kind, kind {
+      case declared_kind, kind {
         // const always throws; nfe self-name throws only in strict, else drops
         ConstBinding, _ -> emit_op(e, opcode.ThrowConstAssign(name))
         FnNameBinding, _ ->
@@ -1874,10 +1876,7 @@ fn resolve_lexical(
 ) -> Option(scope.SlotRef) {
   let info = fn_info(e)
   let boxed = lexical.lexical_refs_get(info.lexical_boxed, ref)
-  lexical.lexical_slot(info.lexical, ref)
-  |> option.lazy_or(fn() {
-    dict.get(info.lexical_captures, ref) |> option.from_result
-  })
+  scope.lexical_slot_in(info, ref)
   |> option.map(fn(slot) { scope.SlotRef(slot:, boxed:) })
 }
 
@@ -2307,7 +2306,7 @@ fn emit_body_param_copies(
   let body_id = e.current_scope
   // defensive: cursor fallback left us at the fn scope
   use <- bool.guard(body_id == fn_scope_id, e)
-  let function_names = ast_util.direct_fn_names(stmts)
+  let function_names = ast_util.top_level_function_names(stmts)
   let body_bindings =
     bindings_in_slot_order(scope.get_scope(e.scope_tree, body_id))
   use e, #(bname, b) <- list.fold(body_bindings, e)
@@ -2319,7 +2318,7 @@ fn emit_body_param_copies(
   case scope.lookup(e.scope_tree, fn_scope_id, bname) {
     scope.Plain(scope.Local(..) as source) -> {
       let e = track_arguments_ref(e, bname)
-      emit_direct_get(e, source) |> emit_slot_put(binding_slot(b))
+      emit_direct_get(e, source) |> emit_slot_put(scope.binding_ref(b))
     }
     scope.Plain(scope.Global(_))
     | scope.Plain(scope.EvalEnv(_))
@@ -2574,9 +2573,8 @@ fn emit_self_name_binding(
   let shadowed =
     list.contains(layout.declared_names, fname)
     || fname == "arguments"
-    || list.contains(ast_util.collect_hoisted_vars(stmts), fname)
-    || list.contains(ast_util.direct_fn_names(stmts), fname)
-    || list.any(ast_util.collect_top_lex_names(stmts), fn(lex) {
+    || list.contains(ast_util.var_scoped_names(stmts), fname)
+    || list.any(ast_util.lexically_declared_names(stmts), fn(lex) {
       lex.0 == fname
     })
     || annexb_shadow
@@ -2902,7 +2900,7 @@ fn emit_variable_declarator(
         Some(init_expr) -> emit_expr(e, init_expr)
         None -> Ok(push_const(e, mk_undefined()))
       })
-      emit_destructuring_bind(e, pattern, binding_kind_of(kind))
+      emit_destructuring_bind(e, pattern, ast_util.binding_kind_of(kind))
     }
   }
 }
@@ -2972,7 +2970,7 @@ fn emit_with(
   let assert Ok(holder) = dict.get(with_scope.bindings, synth)
     as "emit_with: With scope is missing its holder binding"
   let e = Emitter(..e, initialized: set.insert(e.initialized, holder.slot))
-  let e = emit_slot_put(e, binding_slot(holder))
+  let e = emit_slot_put(e, scope.binding_ref(holder))
   let e = Emitter(..e, with_stack: [synth, ..e.with_stack])
   use e <- result.map(case tail {
     True -> emit_stmt_tail(e, body)
@@ -3105,72 +3103,10 @@ fn emit_get_elem_method(e: Emitter) -> Emitter {
   |> emit_op(opcode.Pop)
 }
 
-// same int/float rule as the aot emitter: ints in [0, 2^31) except -0
-fn number_const(n: ast.LiteralNumber) -> JsVal {
-  mk_number(literal_num(n))
-}
-
-fn literal_num(n: ast.LiteralNumber) -> JsNum {
-  case n {
-    ast.InfiniteNumber -> JPosInf
-    ast.FiniteNumber(f) -> {
-      // range-check first, truncating 1e308 needs bignums
-      let in_int_range = f >=. 0.0 && f <. 2_147_483_648.0
-      case in_int_range {
-        True -> {
-          let i = float.truncate(f)
-          case int.to_float(i) == f && !rt_val.is_neg_zero(f) {
-            True -> JInt(i)
-            False -> JFloat(f)
-          }
-        }
-        False -> JFloat(f)
-      }
-    }
-  }
-}
-
-fn literal_truthy(expr: ast.Expression) -> Option(Bool) {
-  case expr {
-    ast.BooleanLiteral(_, b) -> Some(b)
-    ast.NumberLiteral(_, ast.FiniteNumber(f)) -> Some(f != 0.0)
-    ast.NumberLiteral(_, ast.InfiniteNumber) -> Some(True)
-    ast.BigIntLiteral(_, n) -> Some(n != 0)
-    ast.StringExpression(_, s) -> Some(s != "")
-    ast.NullLiteral(_) | ast.UndefinedExpression(_) -> Some(False)
-    _ -> None
-  }
-}
-
-fn fold_unary(op: ast.UnaryOp, arg: ast.Expression) -> Option(JsVal) {
-  case op, arg {
-    ast.Negate, ast.NumberLiteral(_, n) ->
-      Some(
-        mk_number(case literal_num(n) {
-          JInt(0) -> JFloat(-0.0)
-          JInt(x) -> JInt(-x)
-          JFloat(x) -> JFloat(float.negate(x))
-          _ -> JNegInf
-        }),
-      )
-    ast.Negate, ast.BigIntLiteral(_, n) -> Some(mk_bigint(-n))
-    ast.UnaryPlus, ast.NumberLiteral(_, n) -> Some(number_const(n))
-    // already an int32
-    ast.BitwiseNot, ast.NumberLiteral(_, n) ->
-      case literal_num(n) {
-        JInt(x) -> Some(mk_number(JInt(-x - 1)))
-        _ -> None
-      }
-    ast.LogicalNot, _ ->
-      literal_truthy(arg) |> option.map(fn(t) { mk_bool(!t) })
-    ast.Void, _ -> literal_truthy(arg) |> option.map(fn(_) { mk_undefined() })
-    _, _ -> None
-  }
-}
-
 fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
   case expr {
-    ast.NumberLiteral(_, value) -> Ok(push_const(e, number_const(value)))
+    ast.NumberLiteral(_, value) ->
+      Ok(push_const(e, const_fold.number_const(value)))
     ast.BigIntLiteral(value: n, ..) -> Ok(push_const(e, mk_bigint(n)))
     ast.StringExpression(_, value) -> Ok(push_const(e, mk_string(value)))
     ast.BooleanLiteral(_, value) -> Ok(push_const(e, mk_bool(value)))
@@ -3229,7 +3165,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         translate_unaryop(op)
         |> option.to_result(NonGenericUnaryOperator),
       )
-      case fold_unary(op, arg) {
+      case const_fold.fold_unary(op, arg) {
         Some(value) -> Ok(push_const(e, value))
         None -> {
           use e <- result.map(emit_expr(e, arg))
@@ -3552,7 +3488,7 @@ fn emit_assignment(
 
     // named evaluation for anonymous fn/class rhs
     ast.Assign, ast.Identifier(name:, ..) -> {
-      let inferred_name = case name == scope.default_export {
+      let inferred_name = case name == esm.default_export_local_name {
         True -> "default"
         False -> name
       }
@@ -4128,7 +4064,7 @@ fn emit_property_key(
     ast.KeyIdentifier(name:, ..) | ast.KeyPrivate(name:, ..) ->
       Ok(push_const(e, mk_string(name)))
     ast.KeyString(value: s, ..) -> Ok(push_const(e, mk_string(s)))
-    ast.KeyNumber(value: n, ..) -> Ok(push_const(e, number_const(n)))
+    ast.KeyNumber(value: n, ..) -> Ok(push_const(e, const_fold.number_const(n)))
     ast.KeyBigInt(value: i, ..) -> Ok(push_const(e, mk_bigint(i)))
     ast.KeyComputed(expression:) -> emit_expr(e, expression)
   }
@@ -4511,7 +4447,7 @@ fn emit_for_lhs_bind(
 ) -> Result(Emitter, EmitError) {
   case left {
     ast.ForInitDeclaration(kind, [ast.VariableDeclarator(pattern, _)]) ->
-      emit_destructuring_bind(e, pattern, binding_kind_of(kind))
+      emit_destructuring_bind(e, pattern, ast_util.binding_kind_of(kind))
     ast.ForInitDeclaration(_, _) -> Error(MultiDeclaratorForHead)
     ast.ForInitPattern(pattern) ->
       emit_destructuring_bind(e, pattern, VarBinding)
@@ -5227,14 +5163,6 @@ fn update_binop(op: ast.UpdateOp) -> opcode.BinOpKind {
   }
 }
 
-fn binding_kind_of(kind: ast.VariableKind) -> BindingKind {
-  case kind {
-    ast.Var -> VarBinding
-    ast.Let -> LetBinding
-    ast.Const | ast.Using | ast.AwaitUsing -> ConstBinding
-  }
-}
-
 // typeof and delete map to None: they have dedicated arms
 fn translate_unaryop(op: ast.UnaryOp) -> Option(opcode.UnaryOpKind) {
   case op {
@@ -5358,7 +5286,7 @@ fn emit_test(
       }
     }
     _ ->
-      case literal_truthy(expr) {
+      case const_fold.literal_truthy(expr) {
         Some(truthy) if truthy == jump_when -> Ok(emit_ir(e, IrJump(target)))
         Some(_) -> Ok(e)
         None -> emit_value_test(e, expr, jump_when, target)
@@ -5479,7 +5407,7 @@ fn compile_class_body(
   ) = ast_util.classify_class_body(body)
 
   let #(ctor_params, ctor_body, synth_super_forward) = case ctor_method {
-    Some(ast_util.ClassMethodEl(
+    Some(ast_util.ClassMethodElement(
       fun: ast.FunctionLiteral(params:, body:, ..),
       ..,
     )) -> #(params, body, False)
@@ -5572,7 +5500,7 @@ fn default_ctor_body(
   case super_class {
     None -> []
     Some(heritage) -> {
-      let span = ast.expression_span(heritage)
+      let span = heritage.span
       [
         ast.StmtWithLine(
           0,
@@ -5668,11 +5596,11 @@ fn private_define_op(kind: ast.MethodKind) -> opcode.Op {
 // constructor already stripped by classify_class_body
 fn emit_class_methods(
   e: Emitter,
-  methods: List(ast_util.ClassMethodEl),
+  methods: List(ast_util.ClassMethodElement),
   on_prototype on_prototype: Bool,
 ) -> Result(Emitter, EmitError) {
   use e, method <- list.try_fold(methods, e)
-  let ast_util.ClassMethodEl(body_index:, key:, fun:, kind:) = method
+  let ast_util.ClassMethodElement(body_index:, key:, fun:, kind:) = method
   use e <- with_method_target(e, on_prototype)
   case key {
     // instance private methods: closure stashed now, installed per instance by field init
@@ -5748,7 +5676,7 @@ fn emit_call_static_init(e: Emitter, init_idx: Option(Int)) -> Emitter {
 
 // private methods install before field initializers run
 fn private_method_inits(
-  methods: List(ast_util.ClassMethodEl),
+  methods: List(ast_util.ClassMethodElement),
 ) -> List(FieldInit) {
   use m <- list.filter_map(methods)
   case m.key {
@@ -5766,13 +5694,13 @@ fn private_method_inits(
   }
 }
 
-fn field_inits(fields: List(ast_util.ClassFieldEl)) -> List(FieldInit) {
+fn field_inits(fields: List(ast_util.ClassFieldElement)) -> List(FieldInit) {
   use field <- list.map(fields)
   field_init_of(field)
 }
 
-fn field_init_of(field: ast_util.ClassFieldEl) -> FieldInit {
-  let ast_util.ClassFieldEl(body_index:, key:, value:) = field
+fn field_init_of(field: ast_util.ClassFieldElement) -> FieldInit {
+  let ast_util.ClassFieldElement(body_index:, key:, value:) = field
   let init =
     option.unwrap(value, ast.UndefinedExpression(ast.property_key_span(key)))
   case key {
@@ -5789,11 +5717,11 @@ fn field_init_of(field: ast_util.ClassFieldEl) -> FieldInit {
   }
 }
 
-fn static_inits(elements: List(ast_util.StaticEl)) -> List(FieldInit) {
+fn static_inits(elements: List(ast_util.StaticElement)) -> List(FieldInit) {
   use elem <- list.map(elements)
   case elem {
-    ast_util.StaticField(field) -> field_init_of(field)
-    ast_util.StaticBlockEl(body) -> StaticBlockInit(body)
+    ast_util.StaticFieldElement(field) -> field_init_of(field)
+    ast_util.StaticBlockElement(body) -> StaticBlockInit(body)
   }
 }
 
@@ -5825,7 +5753,11 @@ fn emit_field_init(e: Emitter, fi: FieldInit) -> Result(Emitter, EmitError) {
       emit_ir(e, IrDefineField(name))
     }
     NumericFieldInit(value: n, init:) ->
-      emit_computed_field_define(e, push_const(_, number_const(n)), init)
+      emit_computed_field_define(
+        e,
+        push_const(_, const_fold.number_const(n)),
+        init,
+      )
     ComputedFieldInit(key_const:, init:) ->
       emit_computed_field_define(e, emit_var_get(_, key_const), init)
     BigIntFieldInit(value: i, init:) ->

@@ -15,7 +15,7 @@ import rt_helpers
 
 fn compile(source: String) -> FuncTemplate {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
-  let assert Ok(template) = compiler.compile(body, sb)
+  let assert Ok(template) = compiler.compile_script(body, sb)
   template
 }
 

@@ -13,7 +13,7 @@ fn run(source: String) -> Result(JsValueKind, String) {
   case parser.parse_script(source) {
     Error(err) -> Error("parse: " <> parser.parse_error_to_string(err))
     Ok(#(body, sb)) ->
-      case compiler.compile(body, sb) {
+      case compiler.compile_script(body, sb) {
         Error(ce) -> Error("compile: " <> string.inspect(ce))
         Ok(template) -> {
           let st =

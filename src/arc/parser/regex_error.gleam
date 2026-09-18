@@ -97,7 +97,3 @@ pub fn pattern_error_message(e: PatternError) -> String {
       "Invalid regular expression: properties of strings require the v flag and a non-negated \\p"
   }
 }
-
-pub fn pattern_error_pos(e: PatternError) -> Int {
-  e.pos
-}

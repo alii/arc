@@ -62,13 +62,9 @@ pub type TopLevelLex {
   LexLocal
 }
 
+// declared_kind survives capture so a captured const stays const
 pub type Binding {
-  Binding(
-    slot: Int,
-    kind: BindingKind,
-    is_boxed: Bool,
-    origin_kind_for_capture: BindingKind,
-  )
+  Binding(slot: Int, kind: BindingKind, boxed: Bool, declared_kind: BindingKind)
 }
 
 pub type Scope {
@@ -86,15 +82,18 @@ pub type Scope {
   )
 }
 
-// captures pair each name with the parent's slot
+pub type NameCapture {
+  NameCapture(name: String, parent_slot: Int)
+}
+
 pub type FunctionInfo {
   FunctionInfo(
     local_count: Int,
     lexical: LexicalSlots,
     lexical_boxed: LexicalRefs,
-    captures: List(#(String, Int)),
+    captures: List(NameCapture),
     lexical_captures: Dict(LexicalRef, Int),
-    names: Dict(String, Int),
+    slot_by_name: Dict(String, Int),
     fallthrough: GlobalFallthrough,
     contains_direct_eval: Bool,
     eval_in_subtree: Bool,
@@ -110,14 +109,14 @@ pub type ScopeTree {
     functions: Dict(ScopeId, FunctionInfo),
     children_at: Dict(ScopeId, List(ScopeId)),
     top_lex: TopLevelLex,
-    linker_seeded: Set(String),
+    linker_seeded_exports: Set(String),
     // direct eval caller's with holders as root slots, innermost first
     inherited_with_stack: List(Int),
   )
 }
 
 pub type Direct {
-  Local(slot: Int, boxed: Bool, kind: BindingKind, origin_kind: BindingKind)
+  Local(slot: Int, boxed: Bool, kind: BindingKind, declared_kind: BindingKind)
   Global(name: String)
   EvalEnv(name: String)
 }
@@ -138,7 +137,7 @@ pub type AnalyzeOpts {
     strict: Bool,
     parent_names: Dict(String, Int),
     lexical_captures: Dict(LexicalRef, Int),
-    linker_seeded: Set(String),
+    linker_seeded_exports: Set(String),
     // sloppy script root vars get real slots; measured slower, off by default
     module_slot_globals: Bool,
     // box bindings declared outside a try and written inside it
@@ -155,7 +154,7 @@ pub fn default_analyze_opts() -> AnalyzeOpts {
     strict: False,
     parent_names: dict.new(),
     lexical_captures: dict.new(),
-    linker_seeded: set.new(),
+    linker_seeded_exports: set.new(),
     module_slot_globals: False,
     box_try_writes: False,
     with_stack: [],
@@ -502,7 +501,10 @@ pub fn sb_enter(sb: ScopeBuilder, id: ScopeId) -> ScopeBuilder {
   ScopeBuilder(..sb, current: id, current_fn: scope.function_scope)
 }
 
-pub fn sb_children_raw(sb: ScopeBuilder, id: ScopeId) -> List(ScopeId) {
+pub fn sb_children_newest_first(
+  sb: ScopeBuilder,
+  id: ScopeId,
+) -> List(ScopeId) {
   dict.get(sb.children_at, id) |> result.unwrap([])
 }
 
@@ -577,7 +579,7 @@ pub fn sb_discard(sb: ScopeBuilder, id: ScopeId) -> ScopeBuilder {
   let scope = sb_scope(sb, id)
   let children_at = case scope.parent {
     Some(pid) -> {
-      let siblings = sb_children_raw(sb, pid)
+      let siblings = sb_children_newest_first(sb, pid)
       dict.insert(sb.children_at, pid, list.filter(siblings, fn(c) { c != id }))
     }
     None -> sb.children_at
@@ -614,8 +616,8 @@ fn sb_prune_empty_block(sb: ScopeBuilder, id: ScopeId) -> ScopeBuilder {
           )
         }
       }
-      let own_children = sb_children_raw(sb, id)
-      let spliced = case sb_children_raw(sb, parent_id) {
+      let own_children = sb_children_newest_first(sb, id)
+      let spliced = case sb_children_newest_first(sb, parent_id) {
         [head, ..rest] if head == id -> list.append(own_children, rest)
         parent_children ->
           list.flat_map(parent_children, fn(c) {
@@ -661,7 +663,7 @@ pub fn sb_children_since(
   parent_id: ScopeId,
   before: List(ScopeId),
 ) -> List(ScopeId) {
-  let now = sb_children_raw(sb, parent_id)
+  let now = sb_children_newest_first(sb, parent_id)
   list.take(now, list.length(now) - list.length(before))
 }
 
@@ -692,7 +694,7 @@ pub fn sb_reorder_body_children(
   scope_id: ScopeId,
   before: List(ScopeId),
 ) -> ScopeBuilder {
-  use <- bool.guard(sb_children_raw(sb, scope_id) == [], sb)
+  use <- bool.guard(sb_children_newest_first(sb, scope_id) == [], sb)
   let body_src = sb_children_since(sb, scope_id, before) |> list.reverse
   let #(fn_decls, rest) =
     list.partition(body_src, fn(id) { sb_tag_of(sb, id) == TagFnDecl })
@@ -708,7 +710,7 @@ pub fn sb_reorder_switch_children(
   sb: ScopeBuilder,
   switch_id: ScopeId,
 ) -> ScopeBuilder {
-  let rev = sb_children_raw(sb, switch_id)
+  let rev = sb_children_newest_first(sb, switch_id)
   use <- bool.guard(rev == [], sb)
   let src_order = list.reverse(rev)
   let #(fn_decls, non_decl) =
@@ -893,7 +895,7 @@ fn blank_function_info(
     lexical_boxed: lexical.no_lexical_refs,
     captures: [],
     lexical_captures: dict.new(),
-    names: dict.new(),
+    slot_by_name: dict.new(),
     fallthrough:,
     contains_direct_eval: False,
     eval_in_subtree: False,
@@ -905,7 +907,7 @@ fn blank_function_info(
 
 pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
   let root_raw = sb_scope(sb, root_scope_id)
-  let parent_origin = case root_raw.kind {
+  let parent_declared_kind = case root_raw.kind {
     Module -> ConstBinding
     Script
     | Function
@@ -920,8 +922,8 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
       Binding(
         slot:,
         kind: CaptureBinding,
-        is_boxed: True,
-        origin_kind_for_capture: parent_origin,
+        boxed: True,
+        declared_kind: parent_declared_kind,
       )
     })
   // with_stack indexes parent_names so it adds no slots
@@ -942,7 +944,7 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
       local_count: root_local_count,
       lexical: root_lexical,
       lexical_captures: opts.lexical_captures,
-      names: opts.parent_names,
+      slot_by_name: opts.parent_names,
     )
   let st =
     FinalizeState(
@@ -958,7 +960,7 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
       functions: st.functions,
       children_at: sb.children_at,
       top_lex: opts.top_lex,
-      linker_seeded: opts.linker_seeded,
+      linker_seeded_exports: opts.linker_seeded_exports,
       inherited_with_stack: opts.with_stack,
     )
   analyze_captures(tree, sb, box_try_writes: opts.box_try_writes)
@@ -1028,7 +1030,7 @@ fn finalize_scope(
       scopes: dict.insert(st.scopes, scope_id, scope),
       functions: dict.insert(st.functions, fn_id, info),
     )
-  use st, child_id <- list.fold(sb_children_raw(sb, scope_id), st)
+  use st, child_id <- list.fold(sb_children_newest_first(sb, scope_id), st)
   finalize_scope(sb, opts, st, child_id, dict.new(), is_strict)
 }
 
@@ -1038,13 +1040,13 @@ fn push_named_slot(
   kind: BindingKind,
 ) -> #(Binding, FunctionInfo) {
   let slot = info.local_count
-  let names = case dict.has_key(info.names, name) {
-    True -> info.names
-    False -> dict.insert(info.names, name, slot)
+  let slot_by_name = case dict.has_key(info.slot_by_name, name) {
+    True -> info.slot_by_name
+    False -> dict.insert(info.slot_by_name, name, slot)
   }
   #(
-    Binding(slot:, kind:, is_boxed: False, origin_kind_for_capture: kind),
-    FunctionInfo(..info, local_count: slot + 1, names:),
+    Binding(slot:, kind:, boxed: False, declared_kind: kind),
+    FunctionInfo(..info, local_count: slot + 1, slot_by_name:),
   )
 }
 
@@ -1275,8 +1277,6 @@ fn nearest_finalized(
   }
 }
 
-pub const default_export = "*default*"
-
 fn with_object_name(depth: Int, with_id: ScopeId) -> String {
   "<with" <> int.to_string(depth) <> "_" <> int.to_string(with_id) <> ">"
 }
@@ -1297,7 +1297,7 @@ fn do_lookup(
 ) -> Resolution {
   let scope = get_scope(tree, scope_id)
   case dict.get(scope.bindings, name) {
-    Ok(Binding(slot:, kind:, is_boxed:, origin_kind_for_capture:)) -> {
+    Ok(Binding(slot:, kind:, boxed:, declared_kind:)) -> {
       // §9.1.2.1 inherited withs are probed before the closure env
       let crossed = case kind {
         CaptureBinding ->
@@ -1309,15 +1309,7 @@ fn do_lookup(
         | CatchBinding
         | FnNameBinding -> crossed
       }
-      wrap_with_chain(
-        crossed,
-        Local(
-          slot:,
-          boxed: is_boxed,
-          kind:,
-          origin_kind: origin_kind_for_capture,
-        ),
-      )
+      wrap_with_chain(crossed, Local(slot:, boxed:, kind:, declared_kind:))
     }
     Error(Nil) -> {
       let crossed = case scope.kind {
@@ -1344,7 +1336,33 @@ fn do_lookup(
 fn own_holder_ref(with_scope: Scope, holder: String) -> SlotRef {
   let assert Ok(b) = dict.get(with_scope.bindings, holder)
     as "scope: With(holder) whose holder binding is not in its own scope"
-  SlotRef(slot: b.slot, boxed: b.is_boxed)
+  binding_ref(b)
+}
+
+pub fn binding_ref(b: Binding) -> SlotRef {
+  SlotRef(slot: b.slot, boxed: b.boxed)
+}
+
+// owned slot first, else the capture slot; None at a script or module root
+pub fn lexical_slot_in(info: FunctionInfo, ref: LexicalRef) -> Option(Int) {
+  case lexical.lexical_slot(info.lexical, ref) {
+    Some(slot) -> Some(slot)
+    None -> dict.get(info.lexical_captures, ref) |> option.from_result
+  }
+}
+
+// parent slots for the child's lexical captures, in interp/call.setup_frame order
+pub fn lexical_capture_parent_slots(
+  child: FunctionInfo,
+  parent: FunctionInfo,
+) -> List(Int) {
+  use ref <- list.filter_map(lexical.all_lexical_refs)
+  use <- bool.guard(!dict.has_key(child.lexical_captures, ref), Error(Nil))
+  case lexical.lexical_slot(parent.lexical, ref) {
+    Some(parent_slot) -> Ok(parent_slot)
+    None ->
+      panic as "scope analyzer recorded a lexical capture the parent has no slot for"
+  }
 }
 
 fn wrap_with_chain(crossed: List(SlotRef), fallback: Direct) -> Resolution {
@@ -1461,7 +1479,7 @@ type SubtreeFacts {
 
 type ParentView {
   ParentView(
-    names: Dict(String, Int),
+    slot_by_name: Dict(String, Int),
     name_set: Set(String),
     consts: Set(String),
     fn_names: Set(String),
@@ -1488,7 +1506,7 @@ type CaptureAnalysis {
 // names captured from the parent; the index in ordered is the capture slot
 type NameCaptures {
   NameCaptures(
-    ordered: List(#(String, Int)),
+    ordered: List(NameCapture),
     consts: Set(String),
     fn_names: Set(String),
     lets: Set(String),
@@ -1555,7 +1573,7 @@ fn analyze_captures(
     )
   let root_parent =
     ParentView(
-      names: dict.new(),
+      slot_by_name: dict.new(),
       name_set: set.new(),
       consts: set.new(),
       fn_names: set.new(),
@@ -1804,9 +1822,9 @@ fn derive_name_captures(
     use name <- list.map(
       set.to_list(captured_names) |> list.sort(string.compare),
     )
-    let assert Ok(parent_slot) = dict.get(parent.names, name)
+    let assert Ok(parent_slot) = dict.get(parent.slot_by_name, name)
       as "scope.captures: captured name absent from parent view"
-    #(name, parent_slot)
+    NameCapture(name:, parent_slot:)
   }
   NameCaptures(
     ordered:,
@@ -1838,27 +1856,21 @@ fn derive_lexical_layout(
       let seeded_captures = seeded.lexical_captures
       let available = case script_root_owns {
         True -> lexical.every_lexical_ref
-        False -> lexical_refs_present(seeded_captures)
+        False -> lexical.lexical_refs_present(seeded_captures)
       }
       #(seeded_captures, available)
     }
     False, False -> #(dict.new(), lexical.every_lexical_ref)
     False, True -> {
       // one slot per lexical ref this arrow needs and the parent can serve
-      let #(slot_by_ref, _next) = {
-        use #(slot_by_ref, next) as acc, ref <- list.fold(
-          lexical.all_lexical_refs,
-          #(dict.new(), name_capture_count),
-        )
+      let slot_by_ref = {
+        use ref <- lexical.number_refs(from: name_capture_count)
         let needed =
           subtree.eval_in_subtree
           || lexical.lexical_refs_get(own.lexical_refs, ref)
-        case needed && lexical.lexical_refs_get(parent.lexical_available, ref) {
-          True -> #(dict.insert(slot_by_ref, ref, next), next + 1)
-          False -> acc
-        }
+        needed && lexical.lexical_refs_get(parent.lexical_available, ref)
       }
-      #(slot_by_ref, lexical_refs_present(slot_by_ref))
+      #(slot_by_ref, lexical.lexical_refs_present(slot_by_ref))
     }
   }
 
@@ -1904,8 +1916,8 @@ fn derive_lexical_layout(
       lexical.LexicalRefs(..lexical.no_lexical_refs, this: this_captured)
     }
     False, False ->
-      lexical_refs_and(
-        lexical_refs_present(lexical_captures),
+      lexical.lexical_refs_and(
+        lexical.lexical_refs_present(lexical_captures),
         parent.lexical_boxed,
       )
   }
@@ -1933,7 +1945,7 @@ fn derive_vars_to_box(
   let declared = declared_in(own_scopes)
   let forced_box =
     case fn_id == root_scope_id {
-      True -> tree.linker_seeded
+      True -> tree.linker_seeded_exports
       False -> set.new()
     }
     |> set.union(
@@ -2075,7 +2087,7 @@ fn insert_captures(
   let root = scopes_get_or_panic(scopes, fn_id)
   let scopes = {
     let bindings = {
-      use bs, #(name, _parent_slot), i <- list.index_fold(
+      use bs, NameCapture(name:, ..), i <- list.index_fold(
         name_captures.ordered,
         root.bindings,
       )
@@ -2086,18 +2098,20 @@ fn insert_captures(
         Binding(
           slot: i,
           kind: CaptureBinding,
-          is_boxed: set.contains(parent_boxed, name),
-          origin_kind_for_capture: captured_origin(name_captures, name),
+          boxed: set.contains(parent_boxed, name),
+          declared_kind: captured_declared_kind(name_captures, name),
         ),
       )
     }
     dict.insert(scopes, fn_id, Scope(..root, bindings:))
   }
   let info = function_info(tree, fn_id)
-  let names = {
+  let slot_by_name = {
     let shifted =
-      dict.map_values(info.names, fn(_n, slot) { slot + capture_slot_count })
-    use d, #(name, _parent_slot), i <- list.index_fold(
+      dict.map_values(info.slot_by_name, fn(_n, slot) {
+        slot + capture_slot_count
+      })
+    use d, NameCapture(name:, ..), i <- list.index_fold(
       name_captures.ordered,
       shifted,
     )
@@ -2111,13 +2125,16 @@ fn insert_captures(
       FunctionInfo(
         ..info,
         local_count: info.local_count + capture_slot_count,
-        names:,
+        slot_by_name:,
       ),
     )
   ScopeTree(..tree, scopes:, functions:)
 }
 
-fn captured_origin(name_captures: NameCaptures, name: String) -> BindingKind {
+fn captured_declared_kind(
+  name_captures: NameCaptures,
+  name: String,
+) -> BindingKind {
   use <- bool.guard(set.contains(name_captures.consts, name), ConstBinding)
   use <- bool.guard(set.contains(name_captures.fn_names, name), FnNameBinding)
   case set.contains(name_captures.lets, name) {
@@ -2134,18 +2151,18 @@ fn child_parent_view(
   lexical_boxed: LexicalRefs,
 ) -> ParentView {
   let capture_slots =
-    list.index_map(ours.ordered, fn(c, i) { #(c.0, i) }) |> dict.from_list
+    list.index_map(ours.ordered, fn(c, i) { #(c.name, i) }) |> dict.from_list
   let own_visible = visible_at_creation(tree, child_fn_id)
-  let names =
+  let slot_by_name =
     dict.fold(own_visible, capture_slots, fn(d, name, b) {
       dict.insert(d, name, b.slot)
     })
   let own_names = set.from_list(dict.keys(own_visible))
-  // origin kind, not kind, so a captured const stays const
-  let origin_names = fn(kind, inherited) {
+  // by declared kind, not kind, so a captured const stays const
+  let declared_as = fn(kind, inherited) {
     let own =
       dict.fold(own_visible, set.new(), fn(s, name, b) {
-        case b.origin_kind_for_capture == kind {
+        case b.declared_kind == kind {
           True -> set.insert(s, name)
           False -> s
         }
@@ -2154,17 +2171,17 @@ fn child_parent_view(
   }
   let boxed =
     dict.fold(own_visible, set.new(), fn(s, name, b) {
-      case b.is_boxed {
+      case b.boxed {
         True -> set.insert(s, name)
         False -> s
       }
     })
   ParentView(
-    names:,
-    name_set: set.from_list(dict.keys(names)),
-    consts: origin_names(ConstBinding, ours.consts),
-    fn_names: origin_names(FnNameBinding, ours.fn_names),
-    lets: origin_names(LetBinding, ours.lets),
+    slot_by_name:,
+    name_set: set.from_list(dict.keys(slot_by_name)),
+    consts: declared_as(ConstBinding, ours.consts),
+    fn_names: declared_as(FnNameBinding, ours.fn_names),
+    lets: declared_as(LetBinding, ours.lets),
     boxed:,
     lexical_available:,
     lexical_boxed:,
@@ -2183,7 +2200,7 @@ fn apply_boxing(
       let bindings =
         dict.map_values(scope.bindings, fn(name, b) {
           case set.contains(vars_to_box, name) {
-            True -> Binding(..b, is_boxed: True)
+            True -> Binding(..b, boxed: True)
             False -> b
           }
         })
@@ -2205,24 +2222,6 @@ fn update_function_info(
 ) -> ScopeTree {
   let info = function_info(tree, fn_id)
   ScopeTree(..tree, functions: dict.insert(tree.functions, fn_id, f(info)))
-}
-
-fn lexical_refs_and(a: LexicalRefs, b: LexicalRefs) -> LexicalRefs {
-  lexical.LexicalRefs(
-    this: a.this && b.this,
-    active_func: a.active_func && b.active_func,
-    home_object: a.home_object && b.home_object,
-    new_target: a.new_target && b.new_target,
-  )
-}
-
-fn lexical_refs_present(d: Dict(LexicalRef, a)) -> LexicalRefs {
-  lexical.LexicalRefs(
-    this: dict.has_key(d, RefThis),
-    active_func: dict.has_key(d, RefActiveFunc),
-    home_object: dict.has_key(d, RefHomeObject),
-    new_target: dict.has_key(d, RefNewTarget),
-  )
 }
 
 fn own_facts(own_by_fn: Dict(ScopeId, OwnFacts), fn_id: ScopeId) -> OwnFacts {

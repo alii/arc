@@ -1217,7 +1217,7 @@ fn const_global(e: Emitter, name: String) -> Option(ir.Value) {
 
 fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
   case d {
-    scope.Local(slot:, boxed:, origin_kind: scope.VarBinding, ..) -> {
+    scope.Local(slot:, boxed:, declared_kind: scope.VarBinding, ..) -> {
       use e <- anf.then(ask)
       case const_global(e, name) {
         Some(lit) -> anf.pure(lit)
@@ -1225,10 +1225,10 @@ fn emit_direct_get(d: scope.Direct, name: String) -> Build(ir.Value) {
       }
     }
     // §9.1.1.1.6 tdz check unless init already emitted here
-    scope.Local(slot:, boxed:, origin_kind:, ..) -> {
+    scope.Local(slot:, boxed:, declared_kind:, ..) -> {
       use v <- anf.then(read_slot(slot, boxed))
       use e <- anf.then(ask)
-      let checked = case origin_kind {
+      let checked = case declared_kind {
         scope.LetBinding | scope.ConstBinding | scope.FnNameBinding ->
           !set.contains(e.initialized_slots, slot)
         _ -> False
@@ -1558,8 +1558,8 @@ fn is_reorder_safe_receiver(e: Emitter, ex: ast.Expression) -> Bool {
 
 fn is_plain_unboxed_local(e: Emitter, name: String) -> Bool {
   case state.resolve(e, name) {
-    scope.Plain(scope.Local(slot:, boxed: False, origin_kind:, ..)) ->
-      case origin_kind {
+    scope.Plain(scope.Local(slot:, boxed: False, declared_kind:, ..)) ->
+      case declared_kind {
         scope.VarBinding | scope.ParamBinding -> True
         scope.LetBinding | scope.ConstBinding | scope.FnNameBinding ->
           set.contains(e.initialized_slots, slot)
@@ -2373,9 +2373,9 @@ pub fn emit_direct_put(
   v: ir.Value,
 ) -> Build(ir.Value) {
   case d {
-    scope.Local(origin_kind: scope.ConstBinding, ..) ->
+    scope.Local(declared_kind: scope.ConstBinding, ..) ->
       throw_at_rt("throw_type_error", "Assignment to constant '" <> name <> "'")
-    scope.Local(origin_kind: scope.FnNameBinding, ..) -> {
+    scope.Local(declared_kind: scope.FnNameBinding, ..) -> {
       use e <- anf.then(ask)
       case e.strict {
         True ->
@@ -2991,8 +2991,9 @@ fn emit_logical_assign(
   case lhs {
     // no in-arm write for unboxed locals, rebind once at the join
     // const/fnname puts throw so they must stay guarded
-    IdentTarget(_, scope.Local(boxed: False, origin_kind:, ..))
-      if origin_kind != scope.ConstBinding && origin_kind != scope.FnNameBinding
+    IdentTarget(_, scope.Local(boxed: False, declared_kind:, ..))
+      if declared_kind != scope.ConstBinding
+      && declared_kind != scope.FnNameBinding
     -> {
       use r <- anf.then(choose(emit(right, inferred)))
       target_put(lhs, r)

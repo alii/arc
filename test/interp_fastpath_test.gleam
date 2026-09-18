@@ -12,7 +12,7 @@ fn global_epoch_after(source: String) -> Int {
   let st = rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
   let assert Ok(#(body, sb)) = parser.parse_script(source)
     as { "parse failed: " <> source }
-  let assert Ok(template) = compiler.compile(body, sb)
+  let assert Ok(template) = compiler.compile_script(body, sb)
     as { "compile failed: " <> source }
   let #(_, st) = entry.run_script(st, template)
   st.store.global_epoch
@@ -35,7 +35,7 @@ fn run_string(source: String) -> String {
   let st = rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
   let assert Ok(#(body, sb)) = parser.parse_script(source)
     as { "parse failed: " <> source }
-  let assert Ok(template) = compiler.compile(body, sb)
+  let assert Ok(template) = compiler.compile_script(body, sb)
     as { "compile failed: " <> source }
   case entry.run_script(st, template) {
     #(NormalCompletion(v), st) ->

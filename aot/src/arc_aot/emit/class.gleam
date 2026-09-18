@@ -76,7 +76,7 @@ fn store_class_const(
       ..e,
       initialized_slots: set.insert(e.initialized_slots, b.slot),
     )
-  case b.is_boxed {
+  case b.boxed {
     True ->
       host_unit_(e, "cell_set", [ir.Var(state.get_slot_var(e, b.slot)), v], k)
     False -> {
@@ -94,7 +94,7 @@ fn read_class_const(
 ) -> EmitResult {
   let b = class_scope_binding(e, name)
   let v = ir.Var(state.get_slot_var(e, b.slot))
-  case b.is_boxed {
+  case b.boxed {
     True -> host_(e, "cell_get", [v], k)
     False -> k(e, v)
   }
@@ -164,13 +164,13 @@ fn resolve_method_key(
 
 fn emit_methods(
   e: Emitter,
-  methods: List(ast_util.ClassMethodEl),
+  methods: List(ast_util.ClassMethodElement),
   target: ir.Value,
   is_static: Bool,
   k: Next,
 ) -> EmitResult {
   use e, method, next <- each_(e, methods, then: k)
-  let ast_util.ClassMethodEl(body_index:, key:, kind:, fun:) = method
+  let ast_util.ClassMethodElement(body_index:, key:, kind:, fun:) = method
   let ast.FunctionLiteral(params:, body:, is_generator: is_gen, is_async:, ..) =
     fun
   let #(child_id, e) = state.pop_child_fn(e)
@@ -242,7 +242,7 @@ fn emit_ctor_and_create(
   k: NextWith(#(ir.Value, ir.Value)),
 ) -> EmitResult {
   let #(ctor_params, ctor_body, default) = case parts.constructor {
-    Some(ast_util.ClassMethodEl(
+    Some(ast_util.ClassMethodElement(
       fun: ast.FunctionLiteral(params:, body:, ..),
       ..,
     )) -> #(params, body, False)
@@ -420,7 +420,7 @@ type FieldInit {
 
 // §7.3.31 private methods install before fields
 fn private_method_inits(
-  methods: List(ast_util.ClassMethodEl),
+  methods: List(ast_util.ClassMethodElement),
 ) -> List(FieldInit) {
   use m <- list.filter_map(methods)
   case m.key {
@@ -438,8 +438,8 @@ fn private_method_inits(
   }
 }
 
-fn field_init_of(field: ast_util.ClassFieldEl) -> FieldInit {
-  let ast_util.ClassFieldEl(body_index:, key:, value:) = field
+fn field_init_of(field: ast_util.ClassFieldElement) -> FieldInit {
+  let ast_util.ClassFieldElement(body_index:, key:, value:) = field
   let init =
     option.unwrap(value, ast.UndefinedExpression(ast.property_key_span(key)))
   case key {
@@ -456,15 +456,15 @@ fn field_init_of(field: ast_util.ClassFieldEl) -> FieldInit {
   }
 }
 
-fn field_inits(fields: List(ast_util.ClassFieldEl)) -> List(FieldInit) {
+fn field_inits(fields: List(ast_util.ClassFieldElement)) -> List(FieldInit) {
   list.map(fields, field_init_of)
 }
 
-fn static_inits(elements: List(ast_util.StaticEl)) -> List(FieldInit) {
+fn static_inits(elements: List(ast_util.StaticElement)) -> List(FieldInit) {
   use elem <- list.map(elements)
   case elem {
-    ast_util.StaticField(field) -> field_init_of(field)
-    ast_util.StaticBlockEl(body) -> StaticBlockInit(body)
+    ast_util.StaticFieldElement(field) -> field_init_of(field)
+    ast_util.StaticBlockElement(body) -> StaticBlockInit(body)
   }
 }
 

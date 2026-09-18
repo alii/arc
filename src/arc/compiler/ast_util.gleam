@@ -1,3 +1,5 @@
+import arc/compiler/scope.{type BindingKind}
+import arc/esm
 import arc/parser/ast
 import gleam/int
 import gleam/list
@@ -32,8 +34,8 @@ fn declarator_names(declarators: List(ast.VariableDeclarator)) -> List(String) {
   })
 }
 
-// vardeclarednames, does not enter nested functions
-pub fn collect_hoisted_vars(stmts: List(ast.StmtWithLine)) -> List(String) {
+// §8.2.6 vardeclarednames, does not enter nested functions
+pub fn var_declared_names(stmts: List(ast.StmtWithLine)) -> List(String) {
   list.flat_map(stmts, collect_vars_located)
   |> list.unique()
 }
@@ -107,6 +109,14 @@ fn collect_vars_stmt(stmt: ast.Statement) -> List(String) {
   }
 }
 
+pub fn binding_kind_of(kind: ast.VariableKind) -> BindingKind {
+  case kind {
+    ast.Var -> scope.VarBinding
+    ast.Let -> scope.LetBinding
+    ast.Const | ast.Using | ast.AwaitUsing -> scope.ConstBinding
+  }
+}
+
 pub fn is_lexical(kind: ast.VariableKind) -> Bool {
   case kind {
     ast.Var -> False
@@ -121,13 +131,18 @@ pub fn peel_labels(stmt: ast.Statement) -> ast.Statement {
   }
 }
 
-pub fn direct_fn_names(stmts: List(ast.StmtWithLine)) -> List(String) {
+pub fn top_level_function_names(stmts: List(ast.StmtWithLine)) -> List(String) {
   list.filter_map(stmts, fn(located) {
     case peel_labels(located.statement) {
       ast.FunctionDeclaration(Some(ast.NamedBinding(name:, ..)), ..) -> Ok(name)
       _ -> Error(Nil)
     }
   })
+}
+
+// §8.2.7 varscopeddeclarations by name: vars plus top-level functions
+pub fn var_scoped_names(stmts: List(ast.StmtWithLine)) -> List(String) {
+  list.append(var_declared_names(stmts), top_level_function_names(stmts))
 }
 
 // §14.12.4: the whole caseblock is one block scope
@@ -137,7 +152,8 @@ pub fn switch_case_stmts(
   list.flat_map(cases, fn(c) { c.consequent })
 }
 
-pub fn collect_top_lex_names(
+// §8.2.4 lexicallydeclarednames paired with is_const
+pub fn lexically_declared_names(
   stmts: List(ast.StmtWithLine),
 ) -> List(#(String, Bool)) {
   list.flat_map(stmts, fn(located) {
@@ -278,7 +294,7 @@ pub fn module_items_to_stmts(
           ast.ExpressionStatement(
             expression: ast.AssignmentExpression(
               operator: ast.Assign,
-              left: ast.Identifier(name: "*default*", span:),
+              left: ast.Identifier(name: esm.default_export_local_name, span:),
               right: expr,
               span:,
             ),
@@ -306,6 +322,29 @@ pub fn unwrap_parens(expr: ast.Expression) -> ast.Expression {
   case expr {
     ast.ParenthesizedExpression(_, inner) -> unwrap_parens(inner)
     _ -> expr
+  }
+}
+
+pub fn is_bare_identifier(expr: ast.Expression) -> Bool {
+  case expr {
+    ast.Identifier(..) -> True
+    _ -> False
+  }
+}
+
+pub fn is_bare_private_name(expr: ast.Expression) -> Bool {
+  case expr {
+    ast.Identifier(name: "#" <> _, ..) -> True
+    _ -> False
+  }
+}
+
+pub fn is_private_name_access(expr: ast.Expression) -> Bool {
+  case expr {
+    ast.MemberExpression(property: ast.Dot(name: "#" <> _, ..), ..)
+    | ast.OptionalMemberExpression(property: ast.Dot(name: "#" <> _, ..), ..) ->
+      True
+    _ -> False
   }
 }
 
@@ -338,8 +377,8 @@ pub fn has_spread_element(elements: List(Option(ast.Expression))) -> Bool {
   })
 }
 
-pub type ClassMethodEl {
-  ClassMethodEl(
+pub type ClassMethodElement {
+  ClassMethodElement(
     body_index: Int,
     key: ast.PropertyKey,
     kind: ast.MethodKind,
@@ -347,78 +386,86 @@ pub type ClassMethodEl {
   )
 }
 
-pub type ClassFieldEl {
-  ClassFieldEl(
+pub type ClassFieldElement {
+  ClassFieldElement(
     body_index: Int,
     key: ast.PropertyKey,
     value: Option(ast.Expression),
   )
 }
 
-pub type StaticEl {
-  StaticField(ClassFieldEl)
-  StaticBlockEl(List(ast.StmtWithLine))
+pub type StaticElement {
+  StaticFieldElement(ClassFieldElement)
+  StaticBlockElement(List(ast.StmtWithLine))
 }
 
 pub type ClassBodyParts {
   ClassBodyParts(
-    constructor: Option(ClassMethodEl),
-    instance_methods: List(ClassMethodEl),
-    static_methods: List(ClassMethodEl),
-    instance_fields: List(ClassFieldEl),
-    static_elements: List(StaticEl),
+    constructor: Option(ClassMethodElement),
+    instance_methods: List(ClassMethodElement),
+    static_methods: List(ClassMethodElement),
+    instance_fields: List(ClassFieldElement),
+    static_elements: List(StaticElement),
   )
 }
 
 pub type ClassElementBucket {
-  CeCtor
-  CeInstanceMethod
-  CeStaticMethod
-  CeInstanceField
-  CeStaticElement
+  ConstructorBucket
+  InstanceMethodBucket
+  StaticMethodBucket
+  InstanceFieldBucket
+  StaticElementBucket
 }
 
 // the one partition, parser and emitter share it
 pub fn class_element_bucket(el: ast.ClassElement) -> ClassElementBucket {
   case el {
-    ast.ClassMethod(kind: ast.MethodConstructor, ..) -> CeCtor
-    ast.ClassMethod(is_static: False, ..) -> CeInstanceMethod
-    ast.ClassMethod(is_static: True, ..) -> CeStaticMethod
-    ast.ClassField(is_static: False, ..) -> CeInstanceField
-    ast.ClassField(is_static: True, ..) | ast.StaticBlock(..) -> CeStaticElement
+    ast.ClassMethod(kind: ast.MethodConstructor, ..) -> ConstructorBucket
+    ast.ClassMethod(is_static: False, ..) -> InstanceMethodBucket
+    ast.ClassMethod(is_static: True, ..) -> StaticMethodBucket
+    ast.ClassField(is_static: False, ..) -> InstanceFieldBucket
+    ast.ClassField(is_static: True, ..) | ast.StaticBlock(..) ->
+      StaticElementBucket
   }
 }
 
 pub fn is_instance_field(el: ast.ClassElement) -> Bool {
-  class_element_bucket(el) == CeInstanceField
+  class_element_bucket(el) == InstanceFieldBucket
 }
 
 pub fn is_static_element(el: ast.ClassElement) -> Bool {
-  class_element_bucket(el) == CeStaticElement
+  class_element_bucket(el) == StaticElementBucket
 }
 
-fn as_method_el(entry: #(Int, ast.ClassElement)) -> Result(ClassMethodEl, Nil) {
+fn as_method_element(
+  entry: #(Int, ast.ClassElement),
+) -> Result(ClassMethodElement, Nil) {
   let #(body_index, el) = entry
   case el {
     ast.ClassMethod(key:, value:, kind:, ..) ->
-      Ok(ClassMethodEl(body_index:, key:, kind:, fun: value))
+      Ok(ClassMethodElement(body_index:, key:, kind:, fun: value))
     ast.ClassField(..) | ast.StaticBlock(..) -> Error(Nil)
   }
 }
 
-fn as_field_el(entry: #(Int, ast.ClassElement)) -> Result(ClassFieldEl, Nil) {
+fn as_field_element(
+  entry: #(Int, ast.ClassElement),
+) -> Result(ClassFieldElement, Nil) {
   let #(body_index, el) = entry
   case el {
     ast.ClassField(key:, value:, ..) ->
-      Ok(ClassFieldEl(body_index:, key:, value:))
+      Ok(ClassFieldElement(body_index:, key:, value:))
     ast.ClassMethod(..) | ast.StaticBlock(..) -> Error(Nil)
   }
 }
 
-fn as_static_el(entry: #(Int, ast.ClassElement)) -> Result(StaticEl, Nil) {
+fn as_static_element(
+  entry: #(Int, ast.ClassElement),
+) -> Result(StaticElement, Nil) {
   case entry.1 {
-    ast.ClassField(..) -> as_field_el(entry) |> result.map(StaticField)
-    ast.StaticBlock(body:) -> Ok(StaticBlockEl(body))
+    ast.ClassField(..) ->
+      as_field_element(entry) |> result.map(StaticFieldElement)
+    ast.StaticBlock(body:) -> Ok(StaticBlockElement(body))
     ast.ClassMethod(..) -> Error(Nil)
   }
 }
@@ -429,15 +476,18 @@ pub fn classify_class_body(body: List(ast.ClassElement)) -> ClassBodyParts {
     list.filter(indexed, fn(entry) { class_element_bucket(entry.1) == bucket })
   }
   ClassBodyParts(
-    constructor: of_bucket(CeCtor)
+    constructor: of_bucket(ConstructorBucket)
       |> list.first
-      |> result.try(as_method_el)
+      |> result.try(as_method_element)
       |> option.from_result,
-    instance_methods: of_bucket(CeInstanceMethod)
-      |> list.filter_map(as_method_el),
-    static_methods: of_bucket(CeStaticMethod) |> list.filter_map(as_method_el),
-    instance_fields: of_bucket(CeInstanceField) |> list.filter_map(as_field_el),
-    static_elements: of_bucket(CeStaticElement) |> list.filter_map(as_static_el),
+    instance_methods: of_bucket(InstanceMethodBucket)
+      |> list.filter_map(as_method_element),
+    static_methods: of_bucket(StaticMethodBucket)
+      |> list.filter_map(as_method_element),
+    instance_fields: of_bucket(InstanceFieldBucket)
+      |> list.filter_map(as_field_element),
+    static_elements: of_bucket(StaticElementBucket)
+      |> list.filter_map(as_static_element),
   )
 }
 

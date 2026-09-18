@@ -15,7 +15,7 @@ main([File | Rest]) ->
     [code:add_pathz(D) || D <- filelib:wildcard(Root ++ "/*/ebin")],
     {ok, Src} = file:read_file(File),
     {ok, {Body, Sb}} = arc@parser:parse_script(Src),
-    {ok, T} = arc@compiler:compile(Body, Sb),
+    {ok, T} = arc@compiler:compile_script(Body, Sb),
     Results = [run_once(T) || _ <- lists:seq(1, Runs)],
     Reds = lists:min([R || {R, _, _} <- Results]),
     RedsMax = lists:max([R || {R, _, _} <- Results]),

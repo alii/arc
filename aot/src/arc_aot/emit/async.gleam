@@ -3801,8 +3801,8 @@ fn add_temp_slots(
             scope.Binding(
               slot: info.local_count + i,
               kind: scope.VarBinding,
-              is_boxed: False,
-              origin_kind_for_capture: scope.VarBinding,
+              boxed: False,
+              declared_kind: scope.VarBinding,
             ),
           )
         })
@@ -3965,7 +3965,7 @@ fn spill_to_temp(
   case is_trivial(ex) {
     True -> #(p, [], ex)
     False -> {
-      let span = ast.expression_span(ex)
+      let span = ex.span
       let #(t, p) = fresh_temp(p)
       case ex {
         ast.SpreadElement(sspan, arg) -> {
@@ -4007,7 +4007,7 @@ fn hoist_keeping_top_split(
         False -> #(p, [], ex)
         True -> {
           let #(p, pre, op2) = hoist_expr(p, line, op)
-          let span = ast.expression_span(ex)
+          let span = ex.span
           let rebuilt = case kind {
             AwaitSplit -> ast.AwaitExpression(span, op2)
             YieldSplit -> ast.YieldExpression(span, Some(op2), False)
@@ -4773,7 +4773,7 @@ fn loop_with_test(
   body: ast.Statement,
 ) -> ast.Statement {
   ast.WhileStatement(
-    ast.BooleanLiteral(ast.expression_span(cond), True),
+    ast.BooleanLiteral(cond.span, True),
     head_test_block(line, cond, pre, body),
   )
 }
@@ -4784,7 +4784,7 @@ fn head_test_block(
   pre: List(ast.StmtWithLine),
   body: ast.Statement,
 ) -> ast.Statement {
-  let span = ast.expression_span(cond)
+  let span = cond.span
   let check =
     ast.StmtWithLine(
       line:,

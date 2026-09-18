@@ -17,7 +17,7 @@ fn agent() -> Agent {
 fn run(source: String) -> #(rt_call.Completion, Agent) {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
     as { "parse failed: " <> source }
-  let assert Ok(template) = compiler.compile(body, sb)
+  let assert Ok(template) = compiler.compile_script(body, sb)
     as { "compile failed: " <> source }
   entry.run_script(agent(), template)
 }

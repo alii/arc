@@ -20,11 +20,9 @@ import arc/parser/number
 import arc/parser/regex_error
 import gleam/option.{type Option, None, Some}
 
-// every variant has pos first so error.pos works
+// pos first in every variant; the two wrappers copy the inner error's pos
 pub type ParseError {
-  // build via lex_error only, pos must match the lexer
   LexError(pos: Int, error: lexer.LexError)
-  // build via regexp_syntax_error only
   RegExpSyntaxError(pos: Int, error: regex_error.PatternError)
   ExpectedToken(pos: Int, expected: TokenKind, got: TokenKind)
   ExpectedIdentifier(pos: Int)
@@ -386,11 +384,11 @@ pub fn parse_error_pos(error: ParseError) -> Int {
 }
 
 pub fn lex_error(err: lexer.LexError) -> ParseError {
-  LexError(lexer.lex_error_pos(err), err)
+  LexError(err.pos, err)
 }
 
 pub fn regexp_syntax_error(err: regex_error.PatternError) -> ParseError {
-  RegExpSyntaxError(regex_error.pattern_error_pos(err), err)
+  RegExpSyntaxError(err.pos, err)
 }
 
 fn token_kind_to_string(kind: TokenKind) -> String {

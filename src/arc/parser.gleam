@@ -1,6 +1,8 @@
 import arc/bytecode/lexical
 import arc/compiler/ast_util
 import arc/compiler/scope
+import arc/esm
+import arc/internal/bytes
 import arc/parser/ast
 import arc/parser/error.{
   ArgumentsInClassFieldInit, ArgumentsInStaticBlock, AwaitInAsyncFunction,
@@ -68,7 +70,6 @@ import arc/parser/lexer.{
 }
 import arc/parser/number
 import arc/parser/regex
-import arc/parser/source_bytes
 import arc/parser/token.{
   Binary, BinaryOperator, Coalesce, ShortCircuit, assignment_op, binary_operator,
   is_contextual_keyword, is_identifier_or_keyword, is_keyword_as_identifier,
@@ -2252,7 +2253,7 @@ fn parse_switch_cases(
       let p2 = advance(p)
       // §14.12.4: case tests run before any case body
       let switch_id = p2.scopes.current
-      let mark = scope.sb_children_raw(p2.scopes, switch_id)
+      let mark = scope.sb_children_newest_first(p2.scopes, switch_id)
       use #(p3, condition) <- result.try(parse_expression(p2))
       let p3 =
         Parser(
@@ -2478,12 +2479,10 @@ fn declare_param_shims(
   scopes: scope.ScopeBuilder,
   params: List(ast.Pattern),
 ) -> scope.ScopeBuilder {
-  case fixed_params_non_simple(params) {
-    False -> scopes
-    True -> {
-      let #(fixed, _rest) = ast_util.split_trailing_rest(params)
-      scope.sb_insert_param_shims(scopes, list.length(fixed))
-    }
+  let #(fixed, _rest) = ast_util.split_trailing_rest(params)
+  case ast_util.all_simple_params(fixed) {
+    True -> scopes
+    False -> scope.sb_insert_param_shims(scopes, list.length(fixed))
   }
 }
 
@@ -2499,7 +2498,7 @@ fn parse_braced_body(
   use p2 <- result.try(expect(p, LeftBrace))
   // snapshot so the reorder only moves body children
   let body_id = p2.scopes.current
-  let mark = scope.sb_children_raw(p2.scopes, body_id)
+  let mark = scope.sb_children_newest_first(p2.scopes, body_id)
   use #(p3, stmts) <- result.try(
     parse_statement_list(p2, top_level: False, acc: []),
   )
@@ -2923,7 +2922,7 @@ fn class_new_children(
   parent_id: scope.ScopeId,
   before: List(scope.ScopeId),
 ) -> List(scope.ScopeId) {
-  let now = scope.sb_children_raw(scopes, parent_id)
+  let now = scope.sb_children_newest_first(scopes, parent_id)
   list.take(now, list.length(now) - list.length(before)) |> list.reverse
 }
 
@@ -2949,7 +2948,7 @@ fn parse_class_tail(
     False -> Ok(#(p, None))
   })
   let heritage_scopes =
-    scope.sb_children_raw(p2.scopes, class_id) |> list.reverse
+    scope.sb_children_newest_first(p2.scopes, class_id) |> list.reverse
   use p3 <- result.try(expect(p2, LeftBrace))
   // pre-create init shells; unneeded ones dropped at }
   let #(scopes, init_id) = scope.sb_push(p3.scopes, scope.Function)
@@ -3113,19 +3112,20 @@ fn method_scope_buckets(
     NonMethodScopes(..) -> buckets
     MethodScopes(method_fn_id: id, ..) ->
       case ast_util.class_element_bucket(element) {
-        ast_util.CeCtor -> MethodScopeBuckets(..buckets, constructor: Some(id))
-        ast_util.CeInstanceMethod ->
+        ast_util.ConstructorBucket ->
+          MethodScopeBuckets(..buckets, constructor: Some(id))
+        ast_util.InstanceMethodBucket ->
           MethodScopeBuckets(..buckets, instance_methods: [
             id,
             ..buckets.instance_methods
           ])
-        ast_util.CeStaticMethod ->
+        ast_util.StaticMethodBucket ->
           MethodScopeBuckets(..buckets, static_methods: [
             id,
             ..buckets.static_methods
           ])
         // unreachable in practice
-        ast_util.CeInstanceField | ast_util.CeStaticElement -> buckets
+        ast_util.InstanceFieldBucket | ast_util.StaticElementBucket -> buckets
       }
   }
 }
@@ -3139,7 +3139,8 @@ fn finalize_field_shell(
   needed needed: Bool,
 ) -> scope.ScopeBuilder {
   use <- bool.lazy_guard(!needed, fn() { scope.sb_discard(scopes, shell_id) })
-  let children = scope.sb_children_raw(scopes, shell_id) |> list.reverse
+  let children =
+    scope.sb_children_newest_first(scopes, shell_id) |> list.reverse
   class_seed_field_shell(scopes, shell_id, elements, is_static:)
   |> scope.sb_set_children(shell_id, children)
 }
@@ -3375,7 +3376,7 @@ fn parse_class_element(
   let #(p3, prefix) =
     parse_method_prefix(p2, ends_class_element_name, star_ends_accessor: True)
   // snapshot to diff out computed-key scopes
-  let key_before = scope.sb_children_raw(p3.scopes, ids.class_id)
+  let key_before = scope.sb_children_newest_first(p3.scopes, ids.class_id)
   use #(p4, key) <- result.try(parse_property_name(p3))
   let key_scopes = class_new_children(p4.scopes, ids.class_id, key_before)
   // §15.7.1 checks use the decoded key
@@ -3499,7 +3500,7 @@ fn parse_class_method_value(
   has_extends has_extends: Bool,
 ) -> Result(#(Parser, ast.FunctionLiteral, scope.ScopeId), ParseError) {
   // method scope is a direct child of class_id; capture by diff
-  let body_before = scope.sb_children_raw(p.scopes, ids.class_id)
+  let body_before = scope.sb_children_newest_first(p.scopes, ids.class_id)
   use #(p2, params, body) <- result.map(parse_method_params_body(
     p,
     outer,
@@ -3749,7 +3750,7 @@ fn parse_expression(
             Parser(..p4, last_expr_assignable: False),
             ast.SequenceExpression(
               expressions: [first_expr, rest_expr],
-              span: ast.Span(ast.expression_span(first_expr).start, p4.prev_end),
+              span: ast.Span(first_expr.span.start, p4.prev_end),
             ),
           ))
         }
@@ -3920,7 +3921,7 @@ fn finish_assignment(
       operator: op,
       left: lhs,
       right: rhs,
-      span: ast.Span(ast.expression_span(lhs).start, p2.prev_end),
+      span: ast.Span(lhs.span.start, p2.prev_end),
     ),
   )
 }
@@ -4242,7 +4243,7 @@ fn parse_conditional_expression(
           condition: test_expr,
           consequent:,
           alternate:,
-          span: ast.Span(ast.expression_span(test_expr).start, p6.prev_end),
+          span: ast.Span(test_expr.span.start, p6.prev_end),
         ),
       ))
     }
@@ -4265,7 +4266,7 @@ fn parse_binary_rhs(
 ) -> Result(#(Parser, ast.Expression), ParseError) {
   let tok = peek(p)
   // §13.10: bare #x is only valid left of in
-  let bare_private = is_bare_private_name(left)
+  let bare_private = ast_util.is_bare_private_name(left)
   case binary_operator(tok, p.ctx.allow_in) {
     Some(BinaryOperator(precedence:, op:)) if precedence > min_prec -> {
       let op_pos = pos_of(p)
@@ -4285,7 +4286,7 @@ fn parse_binary_rhs(
         _ -> precedence
       }
       use #(p3, right) <- result.try(parse_binary_expression(p2, next_min))
-      let span = ast.Span(ast.expression_span(left).start, p3.prev_end)
+      let span = ast.Span(left.span.start, p3.prev_end)
       use expr <- result.try(binary_node(op, left, right, span, op_pos))
       parse_binary_rhs(
         Parser(..p3, last_expr_assignable: False),
@@ -4338,13 +4339,6 @@ fn binary_node(
   }
 }
 
-fn is_bare_private_name(expr: ast.Expression) -> Bool {
-  case expr {
-    ast.Identifier(name: "#" <> _, ..) -> True
-    _ -> False
-  }
-}
-
 fn is_unary_operand(expr: ast.Expression) -> Bool {
   case expr {
     ast.UnaryExpression(..) | ast.AwaitExpression(..) -> True
@@ -4359,7 +4353,7 @@ fn parse_unary_expression(
   let unary = fn(p2, op) {
     use #(p3, arg) <- result.try(parse_unary_expression(p2))
     use <- bool.guard(
-      is_bare_private_name(arg),
+      ast_util.is_bare_private_name(arg),
       Error(PrivateNameNotInBrandCheck(pos_of(p2))),
     )
     Ok(#(
@@ -4378,11 +4372,11 @@ fn parse_unary_expression(
       let operand = delete_operand(expr)
       // §13.5.1.1 delete early errors, through parens
       use <- bool.guard(
-        p.ctx.strict && is_bare_identifier(operand),
+        p.ctx.strict && ast_util.is_bare_identifier(operand),
         Error(DeleteUnqualifiedStrictMode(start)),
       )
       use <- bool.guard(
-        is_private_name_access(operand),
+        ast_util.is_private_name_access(operand),
         Error(DeletePrivateName(start)),
       )
       Ok(#(p3, expr))
@@ -4442,22 +4436,6 @@ fn delete_operand(expr: ast.Expression) -> ast.Expression {
     ast.UnaryExpression(operator: ast.Delete, argument:, ..) ->
       ast_util.unwrap_parens(argument)
     _ -> expr
-  }
-}
-
-fn is_bare_identifier(expr: ast.Expression) -> Bool {
-  case expr {
-    ast.Identifier(..) -> True
-    _ -> False
-  }
-}
-
-fn is_private_name_access(expr: ast.Expression) -> Bool {
-  case expr {
-    ast.MemberExpression(property: ast.Dot(name:, ..), ..)
-    | ast.OptionalMemberExpression(property: ast.Dot(name:, ..), ..) ->
-      string.starts_with(name, "#")
-    _ -> False
   }
 }
 
@@ -5109,7 +5087,7 @@ fn template_continuation(p: Parser) -> Parser {
 
 // raw quasi text, line terminators normalized (§12.9.6 trv)
 fn template_span_raw(p: Parser, trailing: Int) -> String {
-  source_bytes.slice(p.bytes, pos_of(p) + 1, peek_raw_len(p) - 1 - trailing)
+  bytes.unsafe_slice(p.bytes, pos_of(p) + 1, peek_raw_len(p) - 1 - trailing)
   |> string.replace("\r\n", "\n")
   |> string.replace("\r", "\n")
 }
@@ -5712,7 +5690,7 @@ fn parse_regex_literal(
     |> result.map_error(regexp_syntax_error),
   )
   let pattern =
-    source_bytes.slice(p.bytes, body_start, end_pos - 1 - body_start)
+    bytes.unsafe_slice(p.bytes, body_start, end_pos - 1 - body_start)
   // window past / is garbage; relex after the flags
   let p2 = rescan_from(p, flags_end)
   let span = ast.Span(start: start_pos, end: flags_end)
@@ -6063,7 +6041,7 @@ fn declare_default_export(p: Parser) -> Parser {
   let scopes =
     scope.sb_declare(
       p.scopes,
-      scope.default_export,
+      esm.default_export_local_name,
       scope.VarBinding,
       synthetic: True,
     )

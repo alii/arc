@@ -271,7 +271,7 @@ pub fn catch_binding_prologue(
   let #(_, b): #(String, Binding) = entry
   let name = state.slot_base_name(e, b.slot)
   let seed = fn(e: Emitter, init) {
-    case b.is_boxed {
+    case b.boxed {
       False -> {
         use body <- state.map_tree(next(state.set_slot_var(e, b.slot, name)))
         ir.Let([name], ir.Values([init]), body)

@@ -7,7 +7,7 @@ main([File | Rest]) ->
     [code:add_pathz(D) || D <- filelib:wildcard(Root ++ "/*/ebin")],
     {ok, Src} = file:read_file(File),
     {ok, {Body, Sb}} = arc@parser:parse_script(Src),
-    {ok, T} = arc@compiler:compile(Body, Sb),
+    {ok, T} = arc@compiler:compile_script(Body, Sb),
     E = arc@engine:new(),
     Ag = arc@engine:heap(E),
     _ = arc@interp@entry:run_script(Ag, T),

@@ -18,7 +18,7 @@ fn agent() -> Agent {
 fn run_on(st: Agent, source: String) -> #(rt_call.Completion, Agent) {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
     as { "parse failed: " <> source }
-  let assert Ok(template) = compiler.compile(body, sb)
+  let assert Ok(template) = compiler.compile_script(body, sb)
     as { "compile failed: " <> source }
   entry.run_script(st, template)
 }
@@ -285,7 +285,7 @@ pub fn template_objects_do_not_collide_across_scripts_test() {
   assert check("f() === first")
   let source = "id`z`"
   let assert Ok(#(body, sb)) = parser.parse_script(source)
-  let assert Ok(template) = compiler.compile(body, sb)
+  let assert Ok(template) = compiler.compile_script(body, sb)
   let assert #(NormalCompletion(z1), st) = entry.run_script(st, template)
   let assert #(NormalCompletion(z2), _) = entry.run_script(st, template)
   assert z1 != z2
