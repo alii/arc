@@ -3,58 +3,50 @@
 
 -export([parse/1, offset_at/2, transitions/3, year_of/1]).
 
--export_type([footer/0, rule/0]).
+-export_type([posix_tz/0]).
 
--define(EPOCH_GS, 62167219200).
--define(EPOCH_DAYS, 719528).
+-define(UNIX_EPOCH_GREGORIAN_SECONDS, 62167219200).
+-define(UNIX_EPOCH_GREGORIAN_DAYS, 719528).
 
+%% posix Mm.w.d, Jn and n date rules
 -type rule() :: {m, 1..12, 1..5, 0..6, integer()}
               | {j, 1..365, integer()}
               | {d0, 0..365, integer()}.
 
--type footer() :: {fixed, integer()} | {dst, integer(), integer(), rule(), rule()}.
+-type posix_tz() :: {fixed, integer()}
+                  | {dst, integer(), integer(), rule(), rule()}.
 
-bind(none, _F) -> none;
-bind({ok, Rest}, F) -> F(Rest).
-
-bind3(none, _F) -> none;
-bind3({ok, V, Rest}, F) -> F(V, Rest).
-
--spec parse(string()) -> footer() | none.
+-spec parse(string()) -> posix_tz() | none.
 parse(S) ->
-    bind(parse_name(S),
-         fun(R1) ->
-             bind3(parse_posix_offset(R1),
-                   fun(StdPosix, R2) -> parse_posix_dst(-StdPosix, R2) end)
-         end).
+    maybe
+        {ok, R1} ?= parse_name(S),
+        {ok, StdPosix, R2} ?= parse_signed_hms(R1),
+        parse_dst(-StdPosix, R2)
+    else
+        none -> none
+    end.
 
-parse_posix_dst(StdOff, S) ->
+parse_dst(StdOff, S) ->
     case parse_name(S) of
         none -> {fixed, StdOff};
         {ok, R3} ->
             {DstOff, R4} =
-                case parse_posix_offset(R3) of
-                    {ok, DP, RR} -> {-DP, RR};
+                case parse_signed_hms(R3) of
+                    {ok, DstPosix, RR} -> {-DstPosix, RR};
                     none -> {StdOff + 3600, R3}
                 end,
-            parse_posix_rules(StdOff, DstOff, R4)
+            parse_dst_rules(StdOff, DstOff, R4)
     end.
 
-parse_posix_rules(StdOff, DstOff, "," ++ R5) ->
-    Footer =
-        bind3(parse_rule(R5),
-              fun(Rule1, "," ++ R6) ->
-                      bind3(parse_rule(R6),
-                            fun(Rule2, _) ->
-                                    {dst, StdOff, DstOff, Rule1, Rule2}
-                            end);
-                 (_, _) -> none
-              end),
-    case Footer of
-        none -> {fixed, StdOff};
-        _ -> Footer
+parse_dst_rules(StdOff, DstOff, "," ++ R5) ->
+    maybe
+        {ok, DstStart, "," ++ R6} ?= parse_rule(R5),
+        {ok, DstEnd, _} ?= parse_rule(R6),
+        {dst, StdOff, DstOff, DstStart, DstEnd}
+    else
+        _ -> {fixed, StdOff}
     end;
-parse_posix_rules(StdOff, DstOff, _) ->
+parse_dst_rules(StdOff, DstOff, _) ->
     %% no rule given: posix default us rule
     {dst, StdOff, DstOff, {m, 3, 2, 0, 7200}, {m, 11, 1, 0, 7200}}.
 
@@ -72,7 +64,8 @@ parse_name(S) ->
 
 is_alpha(C) -> (C >= $a andalso C =< $z) orelse (C >= $A andalso C =< $Z).
 
-parse_posix_offset(S) ->
+%% [+-]h[:m[:s]] in seconds
+parse_signed_hms(S) ->
     {Sign, R0} = case S of
         "-" ++ R -> {-1, R};
         "+" ++ R -> {1, R};
@@ -81,8 +74,8 @@ parse_posix_offset(S) ->
     case parse_int(R0) of
         {ok, H, R1} ->
             {M, R2} = parse_opt_colon_int(R1),
-            {Sc, R3} = parse_opt_colon_int(R2),
-            {ok, Sign * (H * 3600 + M * 60 + Sc), R3};
+            {Sec, R3} = parse_opt_colon_int(R2),
+            {ok, Sign * (H * 3600 + M * 60 + Sec), R3};
         none -> none
     end.
 
@@ -101,70 +94,59 @@ parse_int(S) ->
     end.
 
 %% ranges checked at parse; eval has no handler
-in_range(N, Lo, Hi) -> is_integer(N) andalso N >= Lo andalso N =< Hi.
+in_range(N, Lo, Hi) -> N >= Lo andalso N =< Hi.
 
 parse_rule("M" ++ R0) ->
-    bind3(parse_int(R0),
-          fun(M, "." ++ R1) ->
-                  bind3(parse_int(R1),
-                        fun(W, "." ++ R2) ->
-                                bind3(parse_int(R2),
-                                      fun(D, R3) ->
-                                              {T, R4} = parse_rule_time(R3),
-                                              rule_m(M, W, D, T, R4)
-                                      end);
-                           (_, _) -> none
-                        end);
-             (_, _) -> none
-          end);
+    maybe
+        {ok, M, "." ++ R1} ?= parse_int(R0),
+        {ok, W, "." ++ R2} ?= parse_int(R1),
+        {ok, D, R3} ?= parse_int(R2),
+        {T, R4} = parse_rule_time(R3),
+        nth_weekday_rule(M, W, D, T, R4)
+    else
+        _ -> none
+    end;
 parse_rule("J" ++ R0) ->
-    bind3(parse_int(R0),
-          fun(N, R1) ->
-                  {T, R2} = parse_rule_time(R1),
-                  case in_range(N, 1, 365) of
-                      true -> {ok, {j, N, T}, R2};
-                      false -> none
-                  end
-          end);
+    maybe
+        {ok, N, R1} ?= parse_int(R0),
+        {T, R2} = parse_rule_time(R1),
+        true ?= in_range(N, 1, 365),
+        {ok, {j, N, T}, R2}
+    else
+        _ -> none
+    end;
 parse_rule(S) ->
-    bind3(parse_int(S),
-          fun(N, R1) ->
-                  {T, R2} = parse_rule_time(R1),
-                  case in_range(N, 0, 365) of
-                      true -> {ok, {d0, N, T}, R2};
-                      false -> none
-                  end
-          end).
+    maybe
+        {ok, N, R1} ?= parse_int(S),
+        {T, R2} = parse_rule_time(R1),
+        true ?= in_range(N, 0, 365),
+        {ok, {d0, N, T}, R2}
+    else
+        _ -> none
+    end.
 
 %% week 5 = last, weekday 0 = sunday
-rule_m(M, W, D, T, Rest) ->
+nth_weekday_rule(M, W, D, T, Rest) ->
     case in_range(M, 1, 12) andalso in_range(W, 1, 5) andalso in_range(D, 0, 6) of
         true -> {ok, {m, M, W, D, T}, Rest};
         false -> none
     end.
 
 parse_rule_time("/" ++ R0) ->
-    {Sign, R1} = case R0 of
-        "-" ++ R -> {-1, R};
-        "+" ++ R -> {1, R};
-        _ -> {1, R0}
-    end,
-    case parse_int(R1) of
-        {ok, H, R2} ->
-            {M, R3} = parse_opt_colon_int(R2),
-            {S, R4} = parse_opt_colon_int(R3),
-            {Sign * (H * 3600 + M * 60 + S), R4};
+    case parse_signed_hms(R0) of
+        {ok, T, R} -> {T, R};
         none -> {7200, R0}
     end;
 parse_rule_time(R) -> {7200, R}.
 
--spec offset_at(footer(), integer()) -> integer().
+-spec offset_at(posix_tz(), integer()) -> integer().
 offset_at({fixed, Off}, _Sec) -> Off;
-offset_at({dst, Std, Dst, _R1, _R2} = F, Sec) ->
+offset_at({dst, Std, Dst, _DstStart, _DstEnd} = Tz, Sec) ->
     Y = year_of(Sec + Std),
-    Trans = transitions(F, Y - 1, Y + 1),
+    Trans = transitions(Tz, Y - 1, Y + 1),
+    %% offset in force before the first listed transition
     Initial = case Trans of
-        [{_, First} | _] when First =:= Dst -> Std;
+        [{_, FirstTarget} | _] when FirstTarget =:= Dst -> Std;
         [{_, _} | _] -> Dst;
         [] -> Std
     end,
@@ -176,13 +158,13 @@ offset_at({dst, Std, Dst, _R1, _R2} = F, Sec) ->
           end
       end, Initial, Trans).
 
--spec transitions(footer(), integer(), integer()) -> [{integer(), integer()}].
+-spec transitions(posix_tz(), integer(), integer()) -> [{integer(), integer()}].
 transitions({fixed, _Off}, _FromY, _ToY) -> [];
-transitions({dst, Std, Dst, R1, R2}, FromY, ToY) ->
+transitions({dst, Std, Dst, DstStart, DstEnd}, FromY, ToY) ->
     L = lists:flatmap(
           fun(Y) ->
-              [{rule_to_utc(Y, R1, Std), Dst},
-               {rule_to_utc(Y, R2, Dst), Std}]
+              [{rule_to_utc(Y, DstStart, Std), Dst},
+               {rule_to_utc(Y, DstEnd, Dst), Std}]
           end, lists:seq(FromY, ToY)),
     lists:keysort(1, L).
 
@@ -212,9 +194,10 @@ month_week_day(Y, M, W, D) ->
 is_leap(Y) -> calendar:is_leap_year(Y).
 
 days_from_epoch(Y, M, D) ->
-    calendar:date_to_gregorian_days(Y, M, D) - ?EPOCH_DAYS.
+    calendar:date_to_gregorian_days(Y, M, D) - ?UNIX_EPOCH_GREGORIAN_DAYS.
 
 -spec year_of(integer()) -> integer().
 year_of(Sec) ->
-    {{Y, _, _}, _} = calendar:gregorian_seconds_to_datetime(Sec + ?EPOCH_GS),
+    {{Y, _, _}, _} = calendar:gregorian_seconds_to_datetime(
+                       Sec + ?UNIX_EPOCH_GREGORIAN_SECONDS),
     Y.

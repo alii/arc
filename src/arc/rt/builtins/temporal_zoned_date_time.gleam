@@ -539,7 +539,7 @@ pub fn method(
         IanaZone(zone:) -> {
           let found = case dir {
             Next -> temporal_tz.next_transition_ns(zone, ns)
-            Previous -> temporal_tz.prev_transition_ns(zone, ns)
+            Previous -> temporal_tz.previous_transition_ns(zone, ns)
           }
           case found {
             None -> #(mk_null(), st)

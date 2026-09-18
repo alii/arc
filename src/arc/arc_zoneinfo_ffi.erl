@@ -2,7 +2,9 @@
 %% host opts in through arc/zoneinfo
 -module(arc_zoneinfo_ffi).
 
--export([load/1, available_zones/0, system_zone/0, zone_named/1]).
+-export([load/1, available_ids/0, system_time_zone/0, time_zone_named/1]).
+
+-include_lib("kernel/include/file.hrl").
 
 -type tz_error() :: no_zoneinfo | {unreadable, binary()} | {unparseable, binary()}.
 
@@ -26,16 +28,22 @@ load(Id) when is_binary(Id) ->
     end.
 
 %% bundled zone names that have a file here
--spec available_zones() -> [binary()].
-available_zones() ->
+-spec available_ids() -> [binary()].
+available_ids() ->
     case root() of
         none -> [];
-        Root -> [Z || Z <- arc_tz_links_ffi:zones(), is_file(Root, Z)]
+        Root -> [Z || Z <- arc_tz_links_ffi:primary_zones(), is_file(Root, Z)]
     end.
 
 %% tz env var, else /etc/localtime, else /etc/timezone, else utc
--spec system_zone() -> arc_tz_ffi:local_zone().
-system_zone() ->
+-spec system_time_zone() -> arc_tz_ffi:local_zone().
+system_time_zone() ->
+    case detected_zone() of
+        none -> arc_tz_ffi:utc_time_zone();
+        Zone -> Zone
+    end.
+
+detected_zone() ->
     try
         case os:getenv("TZ") of
             false ->
@@ -48,18 +56,18 @@ system_zone() ->
     catch error:undef -> none
     end.
 
--spec zone_named(binary()) -> {ok, arc_tz_ffi:local_zone()} | {error, nil}.
-zone_named(Name) when is_binary(Name) ->
+-spec time_zone_named(binary()) -> {ok, arc_tz_ffi:local_zone()} | {error, nil}.
+time_zone_named(Name) when is_binary(Name) ->
     case arc_tz_ffi:lookup(Name) of
         {error, nil} -> {error, nil};
         {ok, Id} ->
-            case loaded(Id) of
+            case zone_for_id(Id) of
                 none -> {error, nil};
                 Zone -> {ok, Zone}
             end
     end.
 
-loaded(Id) ->
+zone_for_id(Id) ->
     case load(arc_tz_ffi:canonical_id(Id)) of
         {ok, Tz} -> arc_tz_ffi:tzif_zone(Id, Tz);
         {error, _NoData} -> none
@@ -93,14 +101,14 @@ zone_from_localtime_contents() ->
 zone_with_contents(Bin) ->
     case root() of
         none -> none;
-        Root -> match_zone_contents(Root, Bin, arc_tz_links_ffi:zones())
+        Root -> match_zone_contents(Root, Bin, arc_tz_links_ffi:primary_zones())
     end.
 
 match_zone_contents(_Root, _Bin, []) -> none;
 match_zone_contents(Root, Bin, [Id | Rest]) ->
     Path = filename:join(Root, binary_to_list(Id)),
     case prim_file:read_file(Path) of
-        {ok, Bin} -> loaded(Id);
+        {ok, Contents} when Contents =:= Bin -> zone_for_id(Id);
         _Miss -> match_zone_contents(Root, Bin, Rest)
     end.
 
@@ -131,7 +139,7 @@ zone_from_path_or_posix(Tz) ->
 known_zone("") -> none;
 known_zone(Name) ->
     case arc_tz_ffi:lookup(unicode:characters_to_binary(Name)) of
-        {ok, Id} -> loaded(Id);
+        {ok, Id} -> zone_for_id(Id);
         {error, nil} -> host_only_zone(Name)
     end.
 
@@ -142,12 +150,7 @@ host_only_zone(Name) ->
         Root ->
             case safe_zone_name(Name) andalso
                  is_tzif(filename:join(Root, Name)) of
-                true ->
-                    Id = unicode:characters_to_binary(Name),
-                    case load(Id) of
-                        {ok, Tz} -> arc_tz_ffi:tzif_zone(Id, Tz);
-                        {error, _NoData} -> none
-                    end;
+                true -> zone_for_id(unicode:characters_to_binary(Name));
                 false -> none
             end
     end.
@@ -178,8 +181,8 @@ is_tzif(Path) ->
 
 is_file(Root, Id) ->
     case prim_file:read_file_info(filename:join(Root, binary_to_list(Id))) of
-        {ok, Info} -> element(3, Info) =:= regular;
-        {error, _Missing} -> false
+        {ok, #file_info{type = regular}} -> true;
+        _NotAFile -> false
     end.
 
 root() ->
@@ -189,7 +192,7 @@ root() ->
 find_root([]) -> none;
 find_root([D | Rest]) ->
     case prim_file:read_file_info(D) of
-        {ok, Info} when element(3, Info) =:= directory -> D;
+        {ok, #file_info{type = directory}} -> D;
         _NotADir -> find_root(Rest)
     end.
 

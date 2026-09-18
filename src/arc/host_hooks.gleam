@@ -47,7 +47,7 @@ pub fn default_host_hooks() -> HostHooks {
     monotonic_now: clock.monotonic_now,
     sleep_ms: clock.sleep_ms,
     report_uncaught: io.println_error,
-    wall_clock_ms: host_time.now_ms,
+    wall_clock_ms: clock.now_ms,
     time_zone: zoneinfo.system_time_zone(),
     load_time_zone: zoneinfo.load,
     time_zone_ids: zoneinfo.available_ids,

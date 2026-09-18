@@ -1,5 +1,7 @@
 -module(arc_clock_ffi).
--export([monotonic_now/0, sleep/1]).
+-export([now_ms/0, monotonic_now/0, sleep_ms/1]).
+
+now_ms() -> erlang:system_time(millisecond).
 
 %% offset so readings are non-negative
 monotonic_now() ->
@@ -7,5 +9,5 @@ monotonic_now() ->
         erlang:monotonic_time() - erlang:system_info(start_time),
         native, millisecond).
 
-sleep(Ms) when Ms =< 0 -> nil;
-sleep(Ms) -> timer:sleep(Ms), nil.
+sleep_ms(Ms) when Ms =< 0 -> nil;
+sleep_ms(Ms) -> timer:sleep(Ms), nil.

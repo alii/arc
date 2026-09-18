@@ -35,17 +35,20 @@ main(Args) ->
     Body =
         [header(In),
          "-module(arc_tz_links_ffi).\n"
-         "-export([version/0, zones/0, links/0, names/0]).\n\n",
+         "-export([version/0, primary_zones/0, links/0,"
+         " names_by_lowercase/0]).\n\n",
          "version() -> ", bin_lit(Version), ".\n\n",
-         "zones() ->\n    [", join([bin_lit(Z) || Z <- Zones], ",\n     "),
+         "primary_zones() ->\n    [",
+         join([bin_lit(Z) || Z <- Zones], ",\n     "),
          "].\n\n",
-         "links() ->\n    #{", join([[bin_lit(L), " => ", bin_lit(T)]
-                                  || {L, T} <- lists:sort(maps:to_list(Links))],
-                                 ",\n      "),
+         "links() ->\n    #{",
+         join([[bin_lit(L), " => ", bin_lit(T)]
+               || {L, T} <- lists:sort(maps:to_list(Links))],
+              ",\n      "),
          "}.\n\n",
-         "names() ->\n    #{", join([[bin_lit(K), " => ", bin_lit(N)]
-                                  || {K, N} <- lists:sort(Lower)],
-                                 ",\n      "),
+         "names_by_lowercase() ->\n    #{",
+         join([[bin_lit(K), " => ", bin_lit(N)] || {K, N} <- lists:sort(Lower)],
+              ",\n      "),
          "}.\n"],
     ok = file:write_file(Out, Body),
     io:format("wrote ~ts: tzdata ~ts, ~b zones, ~b links~n",
