@@ -15,7 +15,7 @@ fn agent() -> Agent {
   rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
 }
 
-fn run_on(st: Agent, source: String) -> #(rt_call.Completion, Agent) {
+fn run_on(st: Agent, source: String) -> #(rt_call.Completion(JsVal), Agent) {
   let assert Ok(#(body, sb)) = parser.parse_script(source)
     as { "parse failed: " <> source }
   let assert Ok(template) = compiler.compile_script(body, sb)
@@ -23,7 +23,7 @@ fn run_on(st: Agent, source: String) -> #(rt_call.Completion, Agent) {
   entry.run_script(st, template)
 }
 
-fn run(source: String) -> #(rt_call.Completion, Agent) {
+fn run(source: String) -> #(rt_call.Completion(JsVal), Agent) {
   run_on(agent(), source)
 }
 

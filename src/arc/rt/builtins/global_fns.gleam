@@ -1,5 +1,6 @@
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
+import arc/rt/js_string
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -141,7 +142,7 @@ pub fn parse_int_value(
   let #(s, st) = rt_val.t_to_string(st, val)
   let #(radix_int, st) = rt_val.t_to_int32(st, radix_val)
   // strip sign before prefix check so "-0x10" works
-  let #(bytes, negative) = case <<trim_leading_js_whitespace(s):utf8>> {
+  let #(bytes, negative) = case <<js_string.trim_leading_js_ws(s):utf8>> {
     <<"-", rest:bits>> -> #(rest, True)
     <<"+", rest:bits>> -> #(rest, False)
     bytes -> #(bytes, False)
@@ -163,7 +164,7 @@ pub fn parse_int_value(
 
 pub fn parse_float_value(st: Agent, val: JsVal) -> #(JsNum, Agent) {
   let #(s, st) = rt_val.t_to_string(st, val)
-  #(parse_decimal_string(trim_leading_js_whitespace(s)), st)
+  #(parse_decimal_string(js_string.trim_leading_js_ws(s)), st)
 }
 
 fn parse_int_digits(bytes: BitArray, radix: Int, negative: Bool) -> JsNum {
@@ -681,7 +682,3 @@ fn hex4(a: Int, b: Int, c: Int, d: Int) -> Option(Int) {
   use low <- option.map(hex2(c, d))
   high * 256 + low
 }
-
-// es strwhitespace set, not erlang unicode whitespace
-@external(erlang, "arc_string_ffi", "trim_leading_js_ws")
-fn trim_leading_js_whitespace(s: String) -> String

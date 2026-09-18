@@ -1,3 +1,5 @@
+import arc/internal/bytes
+import arc/internal/unsafe
 import arc/parser/regex
 import arc/parser/regex_error
 import arc/rt/async as rt_async
@@ -185,7 +187,7 @@ pub fn dispatch(
     RegExpPrototypeToString -> to_string(st, this)
     RegExpPrototypeExec -> regexp_exec(st, this, args)
     RegExpPrototypeTest -> regexp_test(st, this, args)
-    RegExpPrototypeCompile -> regexp_compile(st, this, args)
+    RegExpPrototypeCompile -> prototype_compile(st, this, args)
     RegExpSymbolMatch -> regexp_symbol_match(st, this, args)
     RegExpSymbolMatchAll -> regexp_symbol_match_all(st, this, args)
     RegExpSymbolReplace -> regexp_symbol_replace(st, this, args)
@@ -486,13 +488,13 @@ fn legacy_static_value(statics: LegacyStatics, which: LegacyStatic) -> String {
   }
   case which {
     rt_types.LegacyInput -> input
-    rt_types.LegacyLastMatch -> byte_slice(s, start, len)
+    rt_types.LegacyLastMatch -> bytes.unsafe_slice(s, start, len)
     rt_types.LegacyLastParen ->
       list.last(groups)
       |> result.map(capture_to_legacy_string(s, _))
       |> result.unwrap("")
-    rt_types.LegacyLeftContext -> byte_slice(s, 0, start)
-    rt_types.LegacyRightContext -> byte_drop_start(s, start + len)
+    rt_types.LegacyLeftContext -> bytes.unsafe_slice(s, 0, start)
+    rt_types.LegacyRightContext -> bytes.drop_start(s, start + len)
     rt_types.LegacyParen1 -> paren(1)
     rt_types.LegacyParen2 -> paren(2)
     rt_types.LegacyParen3 -> paren(3)
@@ -507,7 +509,7 @@ fn legacy_static_value(statics: LegacyStatics, which: LegacyStatic) -> String {
 
 fn capture_to_legacy_string(s: String, cap: #(Int, Int)) -> String {
   case cap {
-    #(start, len) if start >= 0 -> byte_slice(s, start, len)
+    #(start, len) if start >= 0 -> bytes.unsafe_slice(s, start, len)
     _ -> ""
   }
 }
@@ -735,13 +737,13 @@ type ExecFailure {
 pub fn has_flag(flags: String, flag: String) -> Bool
 
 @external(erlang, "arc_regexp_ffi", "regexp_compile")
-fn ffi_regexp_compile(pattern: String, flags: String) -> rt_types.CompiledRegExp
+fn regexp_compile(pattern: String, flags: String) -> rt_types.CompiledRegExp
 
 @external(erlang, "arc_regexp_ffi", "is_compiled")
-fn ffi_is_compiled(compiled: rt_types.CompiledRegExp) -> Bool
+fn is_compiled(compiled: rt_types.CompiledRegExp) -> Bool
 
 @external(erlang, "arc_regexp_ffi", "regexp_exec_compiled")
-fn ffi_regexp_exec_compiled(
+fn regexp_exec_compiled(
   compiled: rt_types.CompiledRegExp,
   s: String,
   offset: Int,
@@ -750,17 +752,6 @@ fn ffi_regexp_exec_compiled(
   #(#(Int, Int), List(#(Int, Int)), Int, List(#(String, Int))),
   ExecFailure,
 )
-
-// byte offsets, clamped, never raises
-@external(erlang, "arc_bytes_ffi", "unsafe_slice")
-fn byte_slice(s: String, start: Int, len: Int) -> String
-
-@external(erlang, "arc_bytes_ffi", "drop_start")
-fn byte_drop_start(s: String, start: Int) -> String
-
-// may return past the end, loops rely on it
-@external(erlang, "arc_bytes_ffi", "next_char_boundary")
-fn next_char_boundary(s: String, pos: Int) -> Int
 
 fn try_get(st: Agent, o: JsVal, key: ObjectKey) -> #(JsVal, Agent) {
   rt_obj.t_get_prop(st, o, key)
@@ -771,7 +762,7 @@ fn get_named(st: Agent, o: JsVal, name: String) -> #(JsVal, Agent) {
 }
 
 fn set_throw(st: Agent, h: Handle, name: String, v: JsVal) -> Agent {
-  helpers.set_named(st, mk_object(h), name, v, True)
+  helpers.t_set_named(st, mk_object(h), name, v, True)
 }
 
 fn require_object(st: Agent, v: JsVal, op: String) -> Handle {
@@ -853,7 +844,7 @@ type RawExec {
     groups: List(#(Int, Int)),
     names: List(#(String, Int)),
   )
-  RawMiss
+  RawNoMatch
 }
 
 // §22.2.7.2 regexpbuiltinexec up to the result array
@@ -872,13 +863,13 @@ fn builtin_exec_raw(
     True -> last_index
     False -> 0
   }
-  case ffi_regexp_exec_compiled(compiled, s, last_index, sticky) {
+  case regexp_exec_compiled(compiled, s, last_index, sticky) {
     Error(NoMatch) | Error(OffsetOutOfRange) | Error(PatternCompileFailed(_)) -> {
       let st = case global || sticky {
         True -> set_throw(st, h, "lastIndex", mk_int(0))
         False -> st
       }
-      #(RawMiss, flags, st)
+      #(RawNoMatch, flags, st)
     }
     Ok(#(whole, groups, _gc, names)) -> {
       let #(match_start, match_len) = whole
@@ -901,7 +892,7 @@ fn builtin_exec_mode(
 ) -> #(JsVal, Agent) {
   let #(raw, flags, st) = builtin_exec_raw(st, h, s)
   case raw, mode {
-    RawMiss, _ -> #(mk_null(), st)
+    RawNoMatch, _ -> #(mk_null(), st)
     RawHit(..), MatchOnly -> #(mk_bool(True), st)
     RawHit(whole:, groups:, names:), MatchArray ->
       build_exec_result(st, s, whole, groups, names, has_flag(flags, "d"))
@@ -914,7 +905,7 @@ fn regexp_matcher(
 ) -> #(String, rt_types.CompiledRegExp, Agent) {
   case rt_store.t_cell_get(st, h) {
     SObject(kind: RegExpObj(source:, flags:, last_index:, compiled:), ..) as cell ->
-      case ffi_is_compiled(compiled) {
+      case is_compiled(compiled) {
         True -> #(flags, compiled, st)
         False -> {
           let #(compiled, st) = compile_cached(st, source, flags)
@@ -944,7 +935,7 @@ fn compile_cached(
   case cached {
     Ok(compiled) -> #(compiled, st)
     Error(Nil) -> {
-      let fresh = ffi_regexp_compile(source, flags)
+      let fresh = regexp_compile(source, flags)
       let st = {
         use tag <- update_constructor(st, st.realm.regexp.constructor)
         let cache = case dict.size(tag.compiled) < 256 {
@@ -968,7 +959,7 @@ fn build_exec_result(
 ) -> #(JsVal, Agent) {
   let #(match_start, match_len) = whole
   let match_values = [
-    mk_string(byte_slice(s, match_start, match_len)),
+    mk_string(bytes.unsafe_slice(s, match_start, match_len)),
     ..list.map(groups, capture_to_value(s, _))
   ]
   let #(groups_val, st) = groups_object(st, s, groups, names)
@@ -1102,7 +1093,7 @@ fn alloc_null_proto_object(
 fn capture_to_value(s: String, cap: #(Int, Int)) -> JsVal {
   let #(start, len) = cap
   case start >= 0 {
-    True -> mk_string(byte_slice(s, start, len))
+    True -> mk_string(bytes.unsafe_slice(s, start, len))
     False -> mk_undefined()
   }
 }
@@ -1150,7 +1141,7 @@ fn regexp_test(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   #(mk_bool(classify(m) != KNull), st)
 }
 
-fn regexp_compile(
+fn prototype_compile(
   st: Agent,
   this: JsVal,
   args: List(JsVal),
@@ -1223,14 +1214,14 @@ fn regexp_symbol_match(
   let h = require_object(st, this, "[Symbol.match]")
   let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   let #(flags, st) = read_flags(st, this)
-  let #(fast, st) = pristine_exec(st, h)
-  case has_flag(flags, "g"), fast {
+  let #(pristine, st) = pristine_exec(st, h)
+  case has_flag(flags, "g"), pristine {
     False, True -> builtin_exec_mode(st, h, s, MatchArray)
     False, False -> regexp_exec_abstract(st, this, s)
-    True, fast -> {
+    True, pristine -> {
       let st = set_throw(st, h, "lastIndex", mk_int(0))
-      case fast {
-        True -> match_global_fast(st, h, s)
+      case pristine {
+        True -> match_global_pristine(st, h, s)
         False -> match_global_loop(st, this, h, s, [], 0)
       }
     }
@@ -1238,14 +1229,16 @@ fn regexp_symbol_match(
 }
 
 // no user code can run mid-loop, so lastIndex and statics land once
-fn match_global_fast(st: Agent, h: Handle, s: String) -> #(JsVal, Agent) {
+fn match_global_pristine(st: Agent, h: Handle, s: String) -> #(JsVal, Agent) {
   let #(hits, st) = global_hits(st, h, s)
   case hits {
     [] -> #(mk_null(), st)
     _ ->
       ok_array(
         st,
-        list.map(hits, fn(hit) { mk_string(byte_slice(s, hit.0, hit.1)) }),
+        list.map(hits, fn(hit) {
+          mk_string(bytes.unsafe_slice(s, hit.0, hit.1))
+        }),
       )
   }
 }
@@ -1274,12 +1267,12 @@ fn scan_hits(
   q: Int,
   acc: List(#(Int, Int, List(#(Int, Int)), List(#(String, Int)))),
 ) -> List(#(Int, Int, List(#(Int, Int)), List(#(String, Int)))) {
-  case ffi_regexp_exec_compiled(compiled, s, q, sticky) {
+  case regexp_exec_compiled(compiled, s, q, sticky) {
     Error(NoMatch) | Error(OffsetOutOfRange) | Error(PatternCompileFailed(_)) ->
       acc
     Ok(#(#(ms, ml), groups, _gc, names)) -> {
       let next = case ml {
-        0 -> next_char_boundary(s, ms)
+        0 -> bytes.next_char_boundary(s, ms)
         _ -> ms + ml
       }
       scan_hits(compiled, s, sticky, next, [#(ms, ml, groups, names), ..acc])
@@ -1321,7 +1314,12 @@ fn advance_if_empty(
     "" -> {
       let #(li_v, st) = get_named(st, mk_object(h), "lastIndex")
       let #(this_index, st) = rt_val.t_to_length(st, li_v)
-      set_throw(st, h, "lastIndex", mk_int(next_char_boundary(s, this_index)))
+      set_throw(
+        st,
+        h,
+        "lastIndex",
+        mk_int(bytes.next_char_boundary(s, this_index)),
+      )
     }
     _ -> st
   }
@@ -1336,13 +1334,13 @@ fn regexp_symbol_search(
   let #(s, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   let #(previous, st) = get_named(st, this, "lastIndex")
   let st = set_unless_same_value(st, h, previous, mk_int(0))
-  let #(fast, st) = pristine_exec(st, h)
-  case fast {
+  let #(pristine, st) = pristine_exec(st, h)
+  case pristine {
     True -> {
       let #(raw, _flags, st) = builtin_exec_raw(st, h, s)
       let st = restore_last_index(st, h, previous)
       case raw {
-        RawMiss -> #(mk_int(-1), st)
+        RawNoMatch -> #(mk_int(-1), st)
         RawHit(whole: #(ms, _), ..) -> #(mk_int(ms), st)
       }
     }
@@ -1411,8 +1409,8 @@ fn regexp_symbol_replace(
     True -> set_throw(st, h, "lastIndex", mk_int(0))
     False -> st
   }
-  let #(fast, st) = pristine_exec(st, h)
-  case fast {
+  let #(pristine, st) = pristine_exec(st, h)
+  case pristine {
     True -> {
       let #(hits, st) = collect_raw_results(st, h, s, global)
       process_raw_results(st, hits, s, replacer, 0, "")
@@ -1452,7 +1450,7 @@ fn collect_raw_results(
     False -> {
       let #(raw, _flags, st) = builtin_exec_raw(st, h, s)
       case raw {
-        RawMiss -> #([], st)
+        RawNoMatch -> #([], st)
         RawHit(..) -> #([raw], st)
       }
     }
@@ -1468,9 +1466,12 @@ fn process_raw_results(
   acc: String,
 ) -> #(JsVal, Agent) {
   case hits {
-    [] | [RawMiss, ..] -> #(mk_string(acc <> byte_drop_start(s, next_pos)), st)
+    [] | [RawNoMatch, ..] -> #(
+      mk_string(acc <> bytes.drop_start(s, next_pos)),
+      st,
+    )
     [RawHit(whole: #(ms, ml), groups:, names:), ..rest] -> {
-      let matched = byte_slice(s, ms, ml)
+      let matched = bytes.unsafe_slice(s, ms, ml)
       let captures = list.map(groups, capture_to_value(s, _))
       let #(named_captures, st) = groups_object(st, s, groups, names)
       let #(replacement, st) =
@@ -1501,7 +1502,7 @@ fn splice_replacement(
 ) -> #(String, Int) {
   case position >= next_pos {
     True -> #(
-      acc <> byte_slice(s, next_pos, position - next_pos) <> replacement,
+      acc <> bytes.unsafe_slice(s, next_pos, position - next_pos) <> replacement,
       position + string.byte_size(matched),
     )
     False -> #(acc, next_pos)
@@ -1537,7 +1538,7 @@ fn process_replace_results(
   acc: String,
 ) -> #(JsVal, Agent) {
   case results {
-    [] -> #(mk_string(acc <> byte_drop_start(s, next_pos)), st)
+    [] -> #(mk_string(acc <> bytes.drop_start(s, next_pos)), st)
     [result, ..rest] -> {
       let #(len_v, st) = get_named(st, result, "length")
       let #(result_length, st) = rt_val.t_to_length(st, len_v)
@@ -1627,9 +1628,9 @@ fn compute_replacement(
       let ctx =
         substitution.Ctx(
           matched:,
-          before: fn() { byte_slice(s, 0, position) },
+          before: fn() { bytes.unsafe_slice(s, 0, position) },
           after: fn() {
-            byte_drop_start(s, position + string.byte_size(matched))
+            bytes.drop_start(s, position + string.byte_size(matched))
           },
           capture: fn(idx) { capture_or_empty(captures, idx) },
           m: n_captures,
@@ -1730,14 +1731,14 @@ fn regexp_symbol_split(
       }
     }
     _, _ -> {
-      let #(fast, st) = case is_handle(c, realm.regexp.constructor) {
+      let #(pristine, st) = case is_handle(c, realm.regexp.constructor) {
         True -> pristine_exec(st, sp_h)
         False -> #(False, st)
       }
-      case fast {
+      case pristine {
         True -> {
           let #(_flags, compiled, st) = regexp_matcher(st, sp_h)
-          split_fast(st, compiled, s, size, lim, 0, 0, [], 0)
+          split_pristine(st, compiled, s, size, lim, 0, 0, [], 0)
         }
         False -> split_loop(st, splitter, sp_h, s, size, lim, 0, 0, [], 0)
       }
@@ -1804,11 +1805,11 @@ fn intrinsic_getter(
 
 // get(rx, "flags") short of the accessor call when nothing is observable
 fn read_flags(st: Agent, rx: JsVal) -> #(String, Agent) {
-  let #(fast, st) = case classify(rx) {
+  let #(pristine, st) = case classify(rx) {
     KHandle(h) -> own_flags(st, h)
     _ -> #(None, st)
   }
-  case fast {
+  case pristine {
     Some(flags) -> #(flags, st)
     None -> {
       let #(flags_v, st) = get_named(st, rx, "flags")
@@ -1831,7 +1832,7 @@ fn pristine_exec(st: Agent, h: Handle) -> #(Bool, Agent) {
 }
 
 // unanchored search replaces the per-index sticky probe, same matches
-fn split_fast(
+fn split_pristine(
   st: Agent,
   compiled: rt_types.CompiledRegExp,
   s: String,
@@ -1843,10 +1844,10 @@ fn split_fast(
   count: Int,
 ) -> #(JsVal, Agent) {
   let rest = fn(st) {
-    ok_array(st, list.reverse([mk_string(byte_drop_start(s, p)), ..acc]))
+    ok_array(st, list.reverse([mk_string(bytes.drop_start(s, p)), ..acc]))
   }
   use <- bool.lazy_guard(q >= size, fn() { rest(st) })
-  case ffi_regexp_exec_compiled(compiled, s, q, False) {
+  case regexp_exec_compiled(compiled, s, q, False) {
     Error(NoMatch) | Error(OffsetOutOfRange) | Error(PatternCompileFailed(_)) ->
       rest(st)
     // the spec never probes at size itself, so a match there is a miss
@@ -1857,28 +1858,29 @@ fn split_fast(
       let st = update_legacy_statics(st, s, whole, groups)
       case e == p {
         True ->
-          split_fast(
+          split_pristine(
             st,
             compiled,
             s,
             size,
             lim,
             p,
-            next_char_boundary(s, ms),
+            bytes.next_char_boundary(s, ms),
             acc,
             count,
           )
         False -> {
-          let acc = [mk_string(byte_slice(s, p, ms - p)), ..acc]
+          let acc = [mk_string(bytes.unsafe_slice(s, p, ms - p)), ..acc]
           let count = count + 1
           use <- bool.lazy_guard(count == lim, fn() {
             ok_array(st, list.reverse(acc))
           })
           let #(acc, count, hit) =
-            split_fast_captures(s, groups, acc, count, lim)
+            split_pristine_captures(s, groups, acc, count, lim)
           case hit {
             True -> ok_array(st, list.reverse(acc))
-            False -> split_fast(st, compiled, s, size, lim, e, e, acc, count)
+            False ->
+              split_pristine(st, compiled, s, size, lim, e, e, acc, count)
           }
         }
       }
@@ -1886,7 +1888,7 @@ fn split_fast(
   }
 }
 
-fn split_fast_captures(
+fn split_pristine_captures(
   s: String,
   groups: List(#(Int, Int)),
   acc: List(JsVal),
@@ -1900,7 +1902,7 @@ fn split_fast_captures(
       let count = count + 1
       case count == lim {
         True -> #(acc, count, True)
-        False -> split_fast_captures(s, groups, acc, count, lim)
+        False -> split_pristine_captures(s, groups, acc, count, lim)
       }
     }
   }
@@ -1920,7 +1922,7 @@ fn split_loop(
 ) -> #(JsVal, Agent) {
   case q >= size {
     True ->
-      ok_array(st, list.reverse([mk_string(byte_drop_start(s, p)), ..acc]))
+      ok_array(st, list.reverse([mk_string(bytes.drop_start(s, p)), ..acc]))
     False -> {
       let st = set_throw(st, sp_h, "lastIndex", mk_int(q))
       let #(z, st) = regexp_exec_abstract(st, splitter, s)
@@ -1934,7 +1936,7 @@ fn split_loop(
             size,
             lim,
             p,
-            next_char_boundary(s, q),
+            bytes.next_char_boundary(s, q),
             acc,
             count,
           )
@@ -1952,12 +1954,12 @@ fn split_loop(
                 size,
                 lim,
                 p,
-                next_char_boundary(s, q),
+                bytes.next_char_boundary(s, q),
                 acc,
                 count,
               )
             False -> {
-              let acc = [mk_string(byte_slice(s, p, q - p)), ..acc]
+              let acc = [mk_string(bytes.unsafe_slice(s, p, q - p)), ..acc]
               let count = count + 1
               case count == lim {
                 True -> ok_array(st, list.reverse(acc))
@@ -2264,5 +2266,6 @@ fn flag_char(f: RegExpFlag) -> String {
 }
 
 // sentinel until first exec compiles the real matcher
-@external(erlang, "arc_rt_val_ffi", "mk_undefined")
-pub fn uncompiled_regexp() -> rt_types.CompiledRegExp
+pub fn uncompiled_regexp() -> rt_types.CompiledRegExp {
+  unsafe.coerce(rt_types.mk_undefined())
+}

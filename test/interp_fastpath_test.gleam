@@ -1,4 +1,4 @@
-// fused kernels must agree with the slow path
+// fused kernels must agree with the general path
 import arc/compiler
 import arc/interp/entry
 import arc/parser

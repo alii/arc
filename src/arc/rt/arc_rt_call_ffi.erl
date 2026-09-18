@@ -1,10 +1,11 @@
+%% protected calls and frames; t_direct_callee may answer miss
 -module(arc_rt_call_ffi).
 -export([t_call_protected/4, t_apply_protected/2, t_native_protected/4,
-         mk_frame/4, t_compiled_fn_code/3, birth_props/2]).
+         mk_frame/4, t_direct_callee/3, birth_props/2]).
 
 -include("arc_rt_layout.hrl").
 
-t_compiled_fn_code(St, {?HANDLE_TAG, Id}, This) ->
+t_direct_callee(St, {?HANDLE_TAG, Id}, This) ->
     Store = element(?AGENT_STORE, St),
     case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
@@ -21,13 +22,13 @@ t_compiled_fn_code(St, {?HANDLE_TAG, Id}, This) ->
                              DirectEntry};
                         false when element(1, This) =:= ?HANDLE_TAG ->
                             {Code, This, DirectEntry};
-                        false -> undefined
+                        false -> miss
                     end;
-                _ -> undefined
+                _ -> miss
             end;
-        _ -> undefined
+        _ -> miss
     end;
-t_compiled_fn_code(_, _, _) -> undefined.
+t_direct_callee(_, _, _) -> miss.
 
 %% runs body under the js guard, answering a Completion
 -define(PROTECT(Body),
@@ -40,7 +41,7 @@ t_compiled_fn_code(_, _, _) -> undefined.
 t_call_protected(St, Code, Frame, Args) -> ?PROTECT(Code(St, Frame, Args)).
 
 t_native_protected(St, Tag, This, Args) ->
-    ?PROTECT(arc_rt_builtins_ffi:dispatch_native(St, Tag, This, Args)).
+    ?PROTECT('arc@rt@builtins':dispatch_native(St, Tag, This, Args)).
 
 t_apply_protected(St, Body) -> ?PROTECT(Body(St)).
 

@@ -1065,10 +1065,10 @@ type PropertyEscapeKind {
 }
 
 @external(erlang, "arc_regex_props_ffi", "classify_lone")
-fn classify_lone_property(name: String) -> PropertyEscapeKind
+fn classify_lone(name: String) -> PropertyEscapeKind
 
 @external(erlang, "arc_regex_props_ffi", "classify_pair")
-fn classify_pair_property(name: String, value: String) -> PropertyEscapeKind
+fn classify_pair(name: String, value: String) -> PropertyEscapeKind
 
 fn skip_property_chars(ctx: PatternContext, pos: Int) -> Int {
   let continues = case ascii_at(ctx, pos) {
@@ -1095,7 +1095,7 @@ fn property_escape_length(
     source_bytes.unsafe_slice(ctx.bytes, name_start, name_end - name_start)
   case ascii_at(ctx, name_end) {
     Some("}") ->
-      case classify_lone_property(name), allow_strings {
+      case classify_lone(name), allow_strings {
         PropValid, _ | PropString, True -> Ok(name_end + 1 - pos)
         PropString, False -> Error(PropertyOfStringsRequiresVFlag(pos))
         PropInvalid, _ -> invalid
@@ -1110,7 +1110,7 @@ fn property_escape_length(
           value_end - value_start,
         )
       use <- bool.guard(ascii_at(ctx, value_end) != Some("}"), invalid)
-      case classify_pair_property(name, value) {
+      case classify_pair(name, value) {
         PropValid -> Ok(value_end + 1 - pos)
         PropString | PropInvalid -> invalid
       }

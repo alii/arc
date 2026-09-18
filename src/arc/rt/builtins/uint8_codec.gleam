@@ -7,7 +7,7 @@ import arc/rt/js_string
 import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
-import arc/rt/typed_array_ffi.{splice_clamped}
+import arc/rt/typed_array_bytes.{splice_clamped}
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, ArrayBufferObj, Bytes, KHandle, KStr,
   KUndef, Named, NumKind, SObject, StringKey, TypedArrayObj, Uint8Kind, classify,

@@ -9,7 +9,7 @@ import arc/rt/call as rt_call
 import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
-import arc/rt/typed_array_ffi.{fill_clamped, splice_clamped, ta_zeroed}
+import arc/rt/typed_array_bytes.{fill_clamped, splice_clamped, zeroed}
 import arc/rt/types.{
   type Agent, type ArrayIterKind, type BuiltinPair, type Handle, type JsNum,
   type JsVal, type Realm, type TypedArrayKind, type TypedArrayNative,
@@ -182,7 +182,7 @@ fn init_ctor(
   function_proto: Handle,
   kind: TypedArrayKind,
 ) -> #(BuiltinPair, Agent) {
-  let size = typed_array_ffi.elem_size(kind)
+  let size = typed_array_bytes.elem_size(kind)
   let #(size_prop, st) = common.frozen_property(st, mk_int(size))
   let #(size_prop2, st) = common.restamp(st, size_prop)
   let #(bt, st) =
@@ -577,7 +577,7 @@ fn alloc_ta_with_length(
   proto: Handle,
   len: Int,
 ) -> #(FreshTa, Agent) {
-  let size = typed_array_ffi.elem_size(kind)
+  let size = typed_array_bytes.elem_size(kind)
   let byte_len = len * size
   use <- bool.lazy_guard(byte_len > max_byte_length, fn() {
     rt_val.t_throw_range_error(st, "Invalid typed array length")
@@ -616,7 +616,7 @@ fn from_buffer(
   buf_h: Handle,
   rest: List(JsVal),
 ) -> #(Handle, Agent) {
-  let size = typed_array_ffi.elem_size(kind)
+  let size = typed_array_bytes.elem_size(kind)
   let #(offset_arg, len_arg) = helpers.two_args_or_undefined(rest)
   let #(offset, st) = to_index(st, offset_arg)
   use <- bool.lazy_guard(offset % size != 0, fn() {
@@ -729,12 +729,12 @@ fn from_typed_array(
         "Cannot perform Construct on a detached ArrayBuffer",
       )
     Some(src_data) -> {
-      let size = typed_array_ffi.elem_size(kind)
+      let size = typed_array_bytes.elem_size(kind)
       let byte_len = src_len * size
       use <- bool.lazy_guard(byte_len > max_byte_length, fn() {
         rt_val.t_throw_range_error(st, "Invalid typed array length")
       })
-      let src_size = typed_array_ffi.elem_size(src_kind)
+      let src_size = typed_array_bytes.elem_size(src_kind)
       use <- bool.lazy_guard(
         src_off + src_len * src_size > bit_array.byte_size(src_data),
         fn() {
@@ -800,8 +800,8 @@ fn convert_elements_loop(
         buffer.typed_array_element(st, src_buf, src_kind, src_off, src_len, i)
         |> option.then(buffer.decoded_element(dst_kind, _))
       {
-        Some(el) -> buffer.typed_array_encode_value(ta_zeroed(dst_size), 0, el)
-        None -> ta_zeroed(dst_size)
+        Some(el) -> buffer.typed_array_encode_value(zeroed(dst_size), 0, el)
+        None -> zeroed(dst_size)
       }
       convert_elements_loop(
         st,
@@ -973,7 +973,7 @@ fn try_bulk_store(
   case buffer.buffer_bytes(st, buf) {
     None -> Some(st)
     Some(data) -> {
-      let size = typed_array_ffi.elem_size(kind)
+      let size = typed_array_bytes.elem_size(kind)
       let byte_size = bit_array.byte_size(data)
       let len = case length {
         Some(n) -> n
@@ -1027,7 +1027,7 @@ fn validate_ta(st: Agent, this: JsVal) -> TaWitness {
   case buffer.buffer_bytes(st, buf) {
     None -> witness_type_error(st, buffer.BufferDetached)
     Some(data) -> {
-      let size = typed_array_ffi.elem_size(kind)
+      let size = typed_array_bytes.elem_size(kind)
       case off + len * size > bit_array.byte_size(data) {
         True -> witness_type_error(st, buffer.OutOfBoundsView)
         False -> view
@@ -1070,7 +1070,7 @@ fn witness_in_bounds(st: Agent, witness: TaWitness) -> Bool {
 fn get_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let view = require_ta(st, this)
   let n = case witness_in_bounds(st, view) {
-    True -> view.length * typed_array_ffi.elem_size(view.kind)
+    True -> view.length * typed_array_bytes.elem_size(view.kind)
     False -> 0
   }
   #(mk_int(n), st)
@@ -1140,11 +1140,11 @@ fn proto_fill(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let end = relative_index(e, len)
   // revalidate after the observable coercions
   let data = witness_bytes(st, this)
-  let size = typed_array_ffi.elem_size(kind)
+  let size = typed_array_bytes.elem_size(kind)
   let avail = int.max(0, { bit_array.byte_size(data) - off } / size)
   let start = int.min(start, avail)
   let end = int.min(end, avail)
-  let elem = buffer.typed_array_encode_value(ta_zeroed(size), 0, converted)
+  let elem = buffer.typed_array_encode_value(zeroed(size), 0, converted)
   let region_off = off + start * size
   let #(new_data, written) = fill_clamped(data, region_off, end - start, elem)
   #(this, buffer.store_region(st, buf, new_data, region_off, written))
@@ -1262,7 +1262,7 @@ fn set_from_typed_array(
   use <- bool.lazy_guard(src_len + offset > len, fn() {
     rt_val.t_throw_range_error(st, "offset is out of bounds")
   })
-  let size = typed_array_ffi.elem_size(kind)
+  let size = typed_array_bytes.elem_size(kind)
   let region = case kind == src_kind {
     True -> copy_region(st, src_buf, src_off, src_len * size)
     False ->
@@ -1366,7 +1366,7 @@ fn do_subarray(
     _ -> to_int_or_inf(st, b_arg)
   }
   let begin = relative_index(b, src_length)
-  let size = typed_array_ffi.elem_size(kind)
+  let size = typed_array_bytes.elem_size(kind)
   let new_off = off + begin * size
   // tracking source with end undefined gives a tracking result
   let #(ctor_args, st) = case declared, classify(e_arg) {
@@ -1426,7 +1426,7 @@ fn proto_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     )) ->
       case target_kind == kind {
         True -> {
-          let size = typed_array_ffi.elem_size(kind)
+          let size = typed_array_bytes.elem_size(kind)
           // copy only whole live source elements
           let copy_elems = int.clamp(ta_live_length(st, this) - start, 0, count)
           let src_byte = off + start * size
@@ -1507,13 +1507,13 @@ fn copy_region(
   byte_len: Int,
 ) -> BitArray {
   case buffer.buffer_bytes(st, buf) {
-    None -> ta_zeroed(byte_len)
+    None -> zeroed(byte_len)
     Some(data) -> {
       let bytes = slice_clamped(data, byte_off, byte_len)
       let got = bit_array.byte_size(bytes)
       case got == byte_len {
         True -> bytes
-        False -> bit_array.concat([bytes, ta_zeroed(byte_len - got)])
+        False -> bit_array.concat([bytes, zeroed(byte_len - got)])
       }
     }
   }
@@ -1555,7 +1555,7 @@ fn proto_index_of(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  proto_search(st, this, args, rt_val.strict_equal, False, mk_int)
+  proto_search(st, this, args, rt_val.strict_eq, False, mk_int)
 }
 
 fn proto_includes(
@@ -1709,7 +1709,7 @@ fn view_witness_bytes(
     None -> Error(buffer.BufferDetached)
     Some(data) -> {
       let byte_size = bit_array.byte_size(data)
-      let size = typed_array_ffi.elem_size(kind)
+      let size = typed_array_bytes.elem_size(kind)
       let oob = case declared {
         Some(n) -> off + n * size > byte_size
         None -> off > byte_size
@@ -2010,7 +2010,7 @@ fn proto_copy_within(
   use <- bool.guard(count <= 0, #(this, st))
   // revalidate, coercions may detach or shrink a fixed view
   let data = witness_bytes(st, this)
-  let size = typed_array_ffi.elem_size(kind)
+  let size = typed_array_bytes.elem_size(kind)
   // tracking view follows a shrink, never a grow
   let live_len = int.min(len, ta_live_length(st, this))
   let to = int.min(to, live_len)
@@ -2052,7 +2052,7 @@ fn proto_reverse(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case buffer.buffer_bytes(st, buf) {
     None -> #(this, st)
     Some(data) -> {
-      let size = typed_array_ffi.elem_size(kind)
+      let size = typed_array_bytes.elem_size(kind)
       let region = reversed_bytes(data, off, len, size)
       let #(new_data, written) = splice_clamped(data, off, region)
       #(this, buffer.store_region(st, buf, new_data, off, written))
@@ -2084,7 +2084,7 @@ fn write_fresh_buffer(
 fn proto_to_reversed(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let view = validate_ta(st, this)
   let TaWitness(buffer: buf, kind:, byte_offset: off, length: len, ..) = view
-  let size = typed_array_ffi.elem_size(kind)
+  let size = typed_array_bytes.elem_size(kind)
   let #(fresh, st) = ta_same_type_create(st, kind, len)
   let FreshTa(value: ta_val, buffer: new_buf, ..) = fresh
   let src = copy_region(st, buf, off, len * size)
@@ -2110,7 +2110,7 @@ fn proto_with(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
   // conversion before range check, valueof may resize
   let #(converted, st) = convert_for_kind(st, kind, value_arg)
-  let size = typed_array_ffi.elem_size(kind)
+  let size = typed_array_bytes.elem_size(kind)
   let valid = actual >= 0 && actual < ta_live_length(st, this)
   use <- bool.lazy_guard(!valid, fn() {
     rt_val.t_throw_range_error(st, "Invalid typed array index")
@@ -2164,7 +2164,7 @@ fn search_down(st: Agent, ta_h: Handle, k: Int, search: JsVal) -> Int {
     False ->
       case ta_read(st, ta_h, k) {
         Some(el) ->
-          case rt_val.strict_equal(el, search) {
+          case rt_val.strict_eq(el, search) {
             True -> k
             False -> search_down(st, ta_h, k - 1, search)
           }
@@ -2298,8 +2298,8 @@ fn encode_region(
 ) -> BitArray {
   list.map(values, fn(v) {
     case buffer.decoded_element(kind, v) {
-      Some(el) -> buffer.typed_array_encode_value(ta_zeroed(size), 0, el)
-      None -> ta_zeroed(size)
+      Some(el) -> buffer.typed_array_encode_value(zeroed(size), 0, el)
+      None -> zeroed(size)
     }
   })
   |> bit_array.concat
@@ -2336,7 +2336,7 @@ fn proto_sort(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   case buffer.buffer_bytes(st, buf) {
     None -> #(this, st)
     Some(data) -> {
-      let size = typed_array_ffi.elem_size(kind)
+      let size = typed_array_bytes.elem_size(kind)
       // clamp to currently valid indices, comparefn may have shrunk buffer
       let region = encode_region(kind, size, sorted)
       let avail = int.min(len, ta_live_length(st, this)) * size
@@ -2365,10 +2365,10 @@ fn proto_to_sorted(
   let TaWitness(kind:, length: len, ..) = view
   let #(fresh, st) = ta_same_type_create(st, kind, len)
   let FreshTa(value: ta_val, buffer: new_buf, ..) = fresh
-  let size = typed_array_ffi.elem_size(kind)
+  let size = typed_array_bytes.elem_size(kind)
   let new_data = case buffer.buffer_bytes(st, new_buf) {
     Some(_fresh) -> encode_region(kind, size, sorted)
-    None -> ta_zeroed(len * size)
+    None -> zeroed(len * size)
   }
   write_fresh_buffer(st, new_buf, new_data, ta_val)
 }

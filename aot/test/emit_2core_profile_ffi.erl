@@ -17,7 +17,7 @@ mods() ->
      'arc@rt@types',
      'arc@vm@internal@ordered_entries',
      arc_rt_call_ffi,
-     arc_rt_call_fast_ffi,
+     arc_rt_call_ic_ffi,
      arc_rt_store_ffi,
      arc_rt_ops_ffi,
      arc_rt_val_ffi,
@@ -107,12 +107,12 @@ bench_op(Which, St, Arg, N) ->
     erlang:monotonic_time(microsecond) - T0.
 
 bench_op_loop(_, _, _, 0) -> ok;
-bench_op_loop(compiled_fn_code, St, F, N) ->
-    _ = 'arc@rt@call':t_compiled_fn_code(St, F, undefined),
-    bench_op_loop(compiled_fn_code, St, F, N-1);
-bench_op_loop(compiled_fn_code_ffi, St, F, N) ->
-    _ = arc_rt_call_ffi:t_compiled_fn_code(St, F, undefined),
-    bench_op_loop(compiled_fn_code_ffi, St, F, N-1);
+bench_op_loop(direct_callee, St, F, N) ->
+    _ = 'arc@rt@call':t_direct_callee(St, F, undefined),
+    bench_op_loop(direct_callee, St, F, N-1);
+bench_op_loop(direct_callee_ffi, St, F, N) ->
+    _ = arc_rt_call_ffi:t_direct_callee(St, F, undefined),
+    bench_op_loop(direct_callee_ffi, St, F, N-1);
 bench_op_loop(cell_get, St, H, N) ->
     _ = 'arc@rt@store':t_cell_get(St, H),
     bench_op_loop(cell_get, St, H, N-1);
@@ -120,7 +120,7 @@ bench_op_loop(cell_get_ffi, St, H, N) ->
     _ = arc_rt_store_ffi:t_cell_get(St, H),
     bench_op_loop(cell_get_ffi, St, H, N-1);
 bench_op_loop(get_prop, St, {O, K}, N) ->
-    {_, _} = 'arc@rt@obj':t_get_prop_any(St, O, K),
+    {_, _} = 'arc@rt@obj':t_get_prop_untyped_key(St, O, K),
     bench_op_loop(get_prop, St, {O, K}, N-1);
 bench_op_loop(get_prop_own_data, St, {O, Kb}, N) ->
     _ = arc_rt_obj_ffi:t_get_prop_own_data(St, O, Kb),
@@ -133,7 +133,7 @@ bench_op_loop(set_prop_own_data, St, {O, Kb}, N) ->
     _ = arc_rt_obj_ffi:t_set_prop_own_data(St, O, Kb, 42),
     bench_op_loop(set_prop_own_data, St, {O, Kb}, N-1);
 bench_op_loop(set_prop, St, {O, K}, N) ->
-    {_, St2} = 'arc@rt@obj':t_set_prop_any(St, O, K, 42),
+    {_, St2} = 'arc@rt@obj':t_set_prop_untyped_key(St, O, K, 42),
     bench_op_loop(set_prop, St2, {O, K}, N-1);
 bench_op_loop(nop, St, A, N) ->
     bench_op_loop(nop, St, A, N-1).

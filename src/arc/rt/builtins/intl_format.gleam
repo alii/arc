@@ -17,6 +17,7 @@ import arc/rt/intl_data.{
   StylePercent, StyleUnit, TzdAuto, TzdStripIfInteger, UnitList, UnitLong,
   UnitNarrow, UnitShort, WLong, WNarrow, WShort,
 }
+import arc/rt/val as rt_val
 import gleam/bool
 import gleam/float
 import gleam/int
@@ -942,7 +943,7 @@ pub type Decimal {
 const zero_decimal = Decimal(digits: "", exponent: 0)
 
 fn decimal_of_float(x: Float) -> Decimal {
-  parse_decimal(js_format_number(x))
+  parse_decimal(rt_val.js_format_float(x))
 }
 
 fn parse_decimal(s: String) -> Decimal {
@@ -1501,7 +1502,7 @@ pub fn rtf_parts_en(
   let with_unit = fn(p: Part) { UnitPart(p.0, p.1, Some(unit)) }
   let literal = fn(text) { UnitPart(PLiteral, text, None) }
   // normalize -0.0 so the 0.0 patterns match
-  let v = case is_neg_zero(value) {
+  let v = case rt_val.is_neg_zero(value) {
     True -> 0.0
     False -> value
   }
@@ -1929,12 +1930,6 @@ fn numbering_base(nu: String) -> Option(Int) {
   }
 }
 
-@external(erlang, "arc_rt_val_ffi", "is_neg_zero")
-fn is_neg_zero(x: Float) -> Bool
-
 fn is_negative_float(x: Float) -> Bool {
-  x <. 0.0 || is_neg_zero(x)
+  x <. 0.0 || rt_val.is_neg_zero(x)
 }
-
-@external(erlang, "arc_rt_val_ffi", "js_number_to_string")
-fn js_format_number(n: Float) -> String

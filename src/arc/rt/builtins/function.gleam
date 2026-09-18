@@ -167,7 +167,7 @@ pub fn dispatch(
           case rt_call.is_callable(st, this) {
             True -> {
               let #(b, st) = rt_ops.t_ordinary_has_instance(st, h, v)
-              #(mk_bool(b != 0), st)
+              #(mk_bool(b), st)
             }
             False -> #(mk_bool(False), st)
           }
@@ -292,8 +292,8 @@ pub fn create_list_from_array_like(
   arr: JsVal,
 ) -> #(List(JsVal), Agent) {
   case arg_list(st, arr), classify(arr) {
-    ArgsHit(args), _ -> #(args, st)
-    ArgsSlow, KHandle(h) -> {
+    DenseArgs(args), _ -> #(args, st)
+    Miss, KHandle(h) -> {
       let #(len, st) = case rt_store.t_cell_get(st, h) {
         SObject(kind: rt_types.ArrayObj(length:), ..) -> #(length, st)
         _ -> {
@@ -304,7 +304,7 @@ pub fn create_list_from_array_like(
       }
       collect_array_like(st, arr, 0, len, [])
     }
-    ArgsSlow, _ ->
+    Miss, _ ->
       rt_val.t_throw_type_error(
         st,
         "CreateListFromArrayLike called on non-object",
@@ -313,8 +313,8 @@ pub fn create_list_from_array_like(
 }
 
 type ArgList {
-  ArgsHit(List(JsVal))
-  ArgsSlow
+  DenseArgs(List(JsVal))
+  Miss
 }
 
 @external(erlang, "arc_rt_array_ffi", "arg_list")
@@ -332,7 +332,7 @@ fn collect_array_like(
     False -> {
       let #(v, st) = case helpers.own_element(st, arr, i) {
         helpers.Hit(v) -> #(v, st)
-        helpers.Slow ->
+        helpers.Miss ->
           rt_obj.t_get_prop(st, arr, StringKey(rt_types.index_key(i)))
       }
       collect_array_like(st, arr, i + 1, len, [v, ..acc])

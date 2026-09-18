@@ -359,13 +359,13 @@ fn combinator(
   let #(cap, st) = new_capability_from_constructor(st, this)
   let iterable = first_arg_or_undefined(args)
   let #(outcome, st) =
-    protected(st, fn(st) {
+    rt_call.t_apply_protected(st, fn(st) {
       let #(promise_resolve, st) = get_promise_resolve(st, this)
       let #(rec, st) = get_iterator_sync(st, iterable)
       // tracks whether the iterator still needs closing
       let #(open_h, st) = alloc_box(st, mk_bool(True))
       let #(loop_outcome, st) =
-        protected(st, fn(st) {
+        rt_call.t_apply_protected(st, fn(st) {
           perform_combinator(st, rec, this, cap, promise_resolve, kind, open_h)
         })
       case loop_outcome {
@@ -608,7 +608,9 @@ fn keyed_combinator(
   let #(cap, st) = new_capability_from_constructor(st, this)
   let promises = first_arg_or_undefined(args)
   let #(outcome, st) =
-    protected(st, fn(st) { perform_all_keyed(st, this, promises, cap, settled) })
+    rt_call.t_apply_protected(st, fn(st) {
+      perform_all_keyed(st, this, promises, cap, settled)
+    })
   let st = case outcome {
     NormalCompletion(_) -> st
     ThrowCompletion(e) -> {
@@ -1010,12 +1012,6 @@ fn species_constructor_generic(
     _ -> rt_val.t_throw_type_error(st, ".constructor is not an object")
   }
 }
-
-@external(erlang, "arc_rt_call_ffi", "t_apply_protected")
-fn protected(
-  st: Agent,
-  body: fn(Agent) -> #(JsVal, Agent),
-) -> #(rt_call.Completion, Agent)
 
 fn alloc_closure(st: Agent, tag: rt_types.NativeToken) -> #(JsVal, Agent) {
   alloc_closure_n(st, tag, 1)

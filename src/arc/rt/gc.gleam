@@ -1,10 +1,8 @@
 import arc/internal/ordered_entries
 import arc/internal/tree_array
-import arc/internal/tuple_array.{type TupleArray}
 import arc/rt/arena.{type Arena}
 import arc/rt/bytecode.{
-  type EnvTuple, type FuncTemplate, type SuspendedFrame, FuncTemplate,
-  SuspendedFrame,
+  type FuncTemplate, type SuspendedFrame, FuncTemplate, SuspendedFrame,
 }
 import arc/rt/types.{
   type Agent, type AsyncGenRequest, type Cell, type Handle, type IcEntry,
@@ -23,37 +21,30 @@ import arc/rt/types.{
   SPromiseData, SShapedObject, SetIterator, SetObj, Sparse, StringIterator,
   StringObj, SymbolObj, TemporalObj, ThrowerPassThrough, TypedArrayObj,
   WeakMapObj, WeakObjKey, WeakRefObj, WeakSetObj, WeakSymKey,
-  WrapForValidIteratorObj, classify, jq_to_list,
+  WrapForValidIteratorObj, classify, job_queue_to_list,
 } as rt_types
 import gleam/dict.{type Dict}
-import gleam/dynamic.{type Dynamic}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set
 
-@external(erlang, "arc_rt_gc_ffi", "refs_in_term")
-pub fn push_term_refs(v: Dynamic, acc: List(Int)) -> List(Int)
+// every handle id inside any term, fun envs included
+@external(erlang, "arc_rt_gc_ffi", "push_refs")
+pub fn push_refs(term: a, acc: List(Int)) -> List(Int)
 
 // refs only in what changed since the old copy; unchanged parts are old news
 @external(erlang, "arc_rt_gc_ffi", "diff_refs")
-fn diff_refs(before: Dynamic, now: Dynamic, acc: List(Int)) -> List(Int)
+fn diff_refs(before: a, now: a, acc: List(Int)) -> List(Int)
 
-@external(erlang, "arc_rt_gc_ffi", "refs_in_props")
+@external(erlang, "arc_rt_gc_ffi", "push_props_refs")
 fn push_props_refs(props: Dict(k, Property), acc: List(Int)) -> List(Int)
 
-@external(erlang, "arc_rt_gc_ffi", "refs_in_symbol_props")
+@external(erlang, "arc_rt_gc_ffi", "push_symbol_props_refs")
 fn push_symbol_props_refs(
   props: List(#(k, Property)),
   acc: List(Int),
 ) -> List(Int)
-
-@external(erlang, "gleam_stdlib", "identity")
-fn to_dynamic(a: anything) -> Dynamic
-
-pub fn push_val_refs(v: JsVal, acc: List(Int)) -> List(Int) {
-  push_term_refs(to_dynamic(v), acc)
-}
 
 // exhaustive destructure: a new store field must be rooted here
 pub fn roots_of_state(st: Agent) -> List(Int) {
@@ -87,30 +78,30 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
   ) = st.store
   let acc = set.to_list(pinned_roots)
   let acc = list.append(unhandled_rejections, acc)
-  let acc = push_term_refs(to_dynamic(jq_to_list(microtasks)), acc)
-  let acc = push_term_refs(to_dynamic(dict.values(st.host_fns)), acc)
-  let acc = push_term_refs(to_dynamic(st.import_hook), acc)
-  let acc = push_term_refs(to_dynamic(st.waiters), acc)
+  let acc = push_refs(job_queue_to_list(microtasks), acc)
+  let acc = push_refs(dict.values(st.host_fns), acc)
+  let acc = push_refs(st.import_hook, acc)
+  let acc = push_refs(st.waiters, acc)
   // registry copy of the current realm may be stale
   let realms = dict.insert(st.realms, st.realm.id, st.realm)
   dict.fold(realms, acc, fn(acc, _id, realm) {
     dict.fold(realm.lexical_globals, acc, fn(acc, _name, binding) {
-      push_val_refs(rt_types.lexical_global_value(binding), acc)
+      push_refs(rt_types.lexical_global_value(binding), acc)
     })
   })
 }
 
 // exhaustive, no wildcard: a new variant must be traced
-fn refs_in_cell(cell: Cell, acc: List(Int)) -> List(Int) {
+fn push_cell_refs(cell: Cell, acc: List(Int)) -> List(Int) {
   case cell {
     SObject(kind:, proto:, props:, symbol_props:, elements:, extensible: _) ->
-      push_objkind_refs(kind, push_opt_handle(proto, acc))
+      push_objkind_refs(kind, push_optional_handle(proto, acc))
       |> push_props_refs(props, _)
       |> push_symbol_props_refs(symbol_props, _)
       |> push_elements_refs(elements, _)
     SShapedObject(shape_id: _, proto:, slots:, offsets: _) ->
-      push_term_refs(to_dynamic(slots), push_opt_handle(proto, acc))
-    SBox(value:) -> push_val_refs(value, acc)
+      push_refs(slots, push_optional_handle(proto, acc))
+    SBox(value:) -> push_refs(value, acc)
     SPromiseData(state:, is_handled: _) -> push_promise_state_refs(state, acc)
     SGenerator(state: _, resume:) -> push_resume_refs(resume, acc)
     SAsyncGen(state: _, resume:, queue: #(front, back)) -> {
@@ -120,14 +111,13 @@ fn refs_in_cell(cell: Cell, acc: List(Int)) -> List(Int) {
     }
     SAsyncContext(resume:, promise:) ->
       push_resume_refs(resume, [promise.id, ..acc])
-    SDisposeCapability(resources:) -> push_term_refs(to_dynamic(resources), acc)
+    SDisposeCapability(resources:) -> push_refs(resources, acc)
   }
 }
 
 fn push_resume_refs(resume: Resume, acc: List(Int)) -> List(Int) {
   case resume {
-    ResumeCompiled(sm:, rs: _, loc:) ->
-      push_term_refs(to_dynamic(loc), push_term_refs(to_dynamic(sm), acc))
+    ResumeCompiled(sm:, rs: _, loc:) -> push_refs(loc, push_refs(sm, acc))
     ResumeFrame(frame:) -> push_suspended_frame_refs(frame, acc)
   }
 }
@@ -151,11 +141,11 @@ fn push_suspended_frame_refs(
     unit: _,
   ) = frame
   let acc = push_template_refs(template, acc)
-  let acc = push_vals_tuple_refs(locals, acc)
-  let acc = list.fold(stack, acc, fn(a, v) { push_val_refs(v, a) })
-  let acc = push_val_refs(this, acc)
-  let acc = push_val_refs(home_object, acc)
-  let acc = list.fold(call_args, acc, fn(a, v) { push_val_refs(v, a) })
+  let acc = push_refs(locals, acc)
+  let acc = list.fold(stack, acc, fn(a, v) { push_refs(v, a) })
+  let acc = push_refs(this, acc)
+  let acc = push_refs(home_object, acc)
+  let acc = list.fold(call_args, acc, fn(a, v) { push_refs(v, a) })
   case eval_env {
     Some(id) -> [id, ..acc]
     None -> acc
@@ -185,23 +175,15 @@ fn push_template_refs(template: FuncTemplate, acc: List(Int)) -> List(Int) {
     code_kind: _,
     regs: _,
   ) = template
-  push_vals_tuple_refs(constants, acc)
-}
-
-fn push_env_refs(env: EnvTuple, acc: List(Int)) -> List(Int) {
-  push_term_refs(to_dynamic(env), acc)
-}
-
-fn push_vals_tuple_refs(vals: TupleArray(JsVal), acc: List(Int)) -> List(Int) {
-  push_term_refs(to_dynamic(vals), acc)
+  push_refs(constants, acc)
 }
 
 fn push_request_refs(acc: List(Int), req: AsyncGenRequest) -> List(Int) {
   let AsyncGenRequest(completion: _, value:, resolve:, reject:) = req
   acc
-  |> push_val_refs(value, _)
-  |> push_val_refs(resolve, _)
-  |> push_val_refs(reject, _)
+  |> push_refs(value, _)
+  |> push_refs(resolve, _)
+  |> push_refs(reject, _)
 }
 
 // exhaustive; weak keys not traced, see prune_weak_cell
@@ -229,11 +211,11 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       length: _,
       birth:,
     ) -> {
-      let acc = push_opt_handle(home_object, acc)
-      let acc = push_opt_handle(fields_init, acc)
+      let acc = push_optional_handle(home_object, acc)
+      let acc = push_optional_handle(fields_init, acc)
       let acc = push_birth_refs(birth, acc)
-      let acc = push_term_refs(to_dynamic(code), acc)
-      push_term_refs(to_dynamic(direct_entry), acc)
+      let acc = push_refs(code, acc)
+      push_refs(direct_entry, acc)
     }
     BytecodeFn(
       template:,
@@ -245,30 +227,28 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       unit: _,
       birth:,
     ) -> {
-      let acc = push_opt_handle(home_object, acc)
-      let acc = push_opt_handle(fields_init, acc)
+      let acc = push_optional_handle(home_object, acc)
+      let acc = push_optional_handle(fields_init, acc)
       let acc = push_birth_refs(birth, acc)
       let acc = push_template_refs(template, acc)
-      push_env_refs(env, acc)
+      push_refs(env, acc)
     }
     NativeFn(token:, name: _, length: _, constructible: _) ->
-      push_term_refs(to_dynamic(token), acc)
+      push_refs(token, acc)
     BoundFn(target:, bound_this:, bound_args:) -> {
-      let acc = push_val_refs(bound_this, [target.id, ..acc])
-      list.fold(bound_args, acc, fn(a, v) { push_val_refs(v, a) })
+      let acc = push_refs(bound_this, [target.id, ..acc])
+      list.fold(bound_args, acc, fn(a, v) { push_refs(v, a) })
     }
-    HostObj(payload:) -> push_term_refs(to_dynamic(payload), acc)
+    HostObj(payload:) -> push_refs(payload, acc)
     ErrorObj(stack: _) -> acc
     MapObj(entries:) ->
       ordered_entries.fold(entries, acc, fn(a, k, v) {
-        push_val_refs(v, push_term_refs(to_dynamic(k), a))
+        push_refs(v, push_refs(k, a))
       })
     SetObj(entries:) ->
-      ordered_entries.fold(entries, acc, fn(a, k, _) {
-        push_term_refs(to_dynamic(k), a)
-      })
+      ordered_entries.fold(entries, acc, fn(a, k, _) { push_refs(k, a) })
     WeakMapObj(entries:) ->
-      dict.fold(entries, acc, fn(a, _, v) { push_val_refs(v, a) })
+      dict.fold(entries, acc, fn(a, _, v) { push_refs(v, a) })
     WeakSetObj(entries: _) -> acc
     DateObj(ms: _) -> acc
     RegExpObj(source: _, flags: _, last_index: _, compiled: _) -> acc
@@ -290,10 +270,9 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     GeneratorObj(data:) -> [data.id, ..acc]
     AsyncGeneratorObj(data:) -> [data.id, ..acc]
     AsyncFromSyncIterator(sync_rec:) -> [sync_rec.id, ..acc]
-    IteratorHelperObj(gen_state: _, body:) ->
-      push_term_refs(to_dynamic(body), acc)
-    WrapForValidIteratorObj(record:) -> push_term_refs(to_dynamic(record), acc)
-    IntlObj(data: _, bound:) -> push_opt_handle(bound, acc)
+    IteratorHelperObj(gen_state: _, body:) -> push_refs(body, acc)
+    WrapForValidIteratorObj(record:) -> push_refs(record, acc)
+    IntlObj(data: _, bound:) -> push_optional_handle(bound, acc)
     TemporalObj(data: _) -> acc
     DisposableStackObj(async: _, state: rt_types.Pending(capability:)) -> [
       capability.id,
@@ -301,8 +280,8 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
     ]
     DisposableStackObj(async: _, state: rt_types.Disposed) -> acc
     FinalizationRegistryObj(callback:, registrations:) ->
-      list.fold(registrations, push_val_refs(callback, acc), fn(a, r) {
-        push_val_refs(r.held, a)
+      list.fold(registrations, push_refs(callback, acc), fn(a, r) {
+        push_refs(r.held, a)
       })
     WeakRefObj(target: _) -> acc
     rt_types.ShadowRealmObj(realm: _) -> acc
@@ -313,16 +292,16 @@ fn push_elements_refs(elems: JsElements, acc: List(Int)) -> List(Int) {
   case elems {
     NoElements -> acc
     Dense(arr) ->
-      tree_array.sparse_fold(fn(_, v, a) { push_val_refs(v, a) }, acc, arr)
-    Sparse(d) -> push_term_refs(to_dynamic(d), acc)
+      tree_array.sparse_fold(fn(_, v, a) { push_refs(v, a) }, acc, arr)
+    Sparse(d) -> push_refs(d, acc)
   }
 }
 
 fn push_promise_state_refs(state: PromiseState, acc: List(Int)) -> List(Int) {
   case state {
     PromisePending(reactions:) -> list.fold(reactions, acc, push_reaction_refs)
-    PromiseFulfilled(v) -> push_val_refs(v, acc)
-    PromiseRejected(v) -> push_val_refs(v, acc)
+    PromiseFulfilled(v) -> push_refs(v, acc)
+    PromiseRejected(v) -> push_refs(v, acc)
   }
 }
 
@@ -331,17 +310,17 @@ fn push_reaction_refs(acc: List(Int), r: PromiseReaction) -> List(Int) {
     r
   let acc = push_reaction_handler_refs(on_fulfill, acc)
   let acc = push_reaction_handler_refs(on_reject, acc)
-  push_val_refs(child_reject, push_val_refs(child_resolve, acc))
+  push_refs(child_reject, push_refs(child_resolve, acc))
 }
 
 fn push_reaction_handler_refs(h: ReactionHandler, acc: List(Int)) -> List(Int) {
   case h {
-    Handler(fun:) -> push_val_refs(fun, acc)
+    Handler(fun:) -> push_refs(fun, acc)
     IdentityPassThrough | ThrowerPassThrough -> acc
   }
 }
 
-fn push_opt_handle(oh: Option(Handle), acc: List(Int)) -> List(Int) {
+fn push_optional_handle(oh: Option(Handle), acc: List(Int)) -> List(Int) {
   case oh {
     Some(h) -> [h.id, ..acc]
     None -> acc
@@ -351,12 +330,13 @@ fn push_opt_handle(oh: Option(Handle), acc: List(Int)) -> List(Int) {
 fn push_birth_refs(birth: rt_types.FnBirth, acc: List(Int)) -> List(Int) {
   case birth {
     rt_types.BirthPending(prototype_parent:) ->
-      push_opt_handle(prototype_parent, acc)
+      push_optional_handle(prototype_parent, acc)
     rt_types.BirthSettled -> acc
   }
 }
 
 // turn boundary only (call_depth == 0), never at fn entry
+// called by name from arc_aot_exec_ffi
 pub fn t_maybe_collect(st: Agent) -> Agent {
   case st.call_depth == 0 && due(st.store) {
     True -> t_collect_some(st, [])
@@ -372,7 +352,7 @@ pub fn due(js: JsStore(st)) -> Bool {
 pub fn t_hold_roots(st: Agent, held: List(JsVal)) -> #(Agent, List(Int)) {
   let js = st.store
   let ids =
-    list.fold(held, [], fn(acc, v) { push_val_refs(v, acc) })
+    list.fold(held, [], fn(acc, v) { push_refs(v, acc) })
     |> list.filter(fn(id) { !set.contains(js.pinned_roots, id) })
     |> list.unique
   let pinned = list.fold(ids, js.pinned_roots, set.insert)
@@ -444,9 +424,8 @@ fn collect_minor(st: Agent, extra_roots: List(Handle)) -> Agent {
   let roots =
     list.fold(arena.diff_below(w, meta.old, data), roots, fn(acc, id) {
       case arena.get_option(id, data), arena.get_option(id, meta.old) {
-        Some(cell), Some(before) ->
-          diff_refs(to_dynamic(before), to_dynamic(cell), acc)
-        Some(cell), None -> refs_in_cell(cell, acc)
+        Some(cell), Some(before) -> diff_refs(before, cell, acc)
+        Some(cell), None -> push_cell_refs(cell, acc)
         None, _ -> acc
       }
     })
@@ -531,7 +510,7 @@ fn mark_young(
                 True -> [id, ..weak]
                 False -> weak
               }
-              mark_young(data, refs_in_cell(cell, rest), w, visited, weak)
+              mark_young(data, push_cell_refs(cell, rest), w, visited, weak)
             }
           }
         }
@@ -578,7 +557,7 @@ fn mark_loop(
           let visited = mark(id, Nil, visited)
           case arena.get_option(id, data) {
             None -> mark_loop(data, rest, visited)
-            Some(cell) -> mark_loop(data, refs_in_cell(cell, rest), visited)
+            Some(cell) -> mark_loop(data, push_cell_refs(cell, rest), visited)
           }
         }
       }

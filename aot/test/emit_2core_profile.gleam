@@ -36,7 +36,7 @@ fn module_total(m: Atom) -> Int
 fn all_mods() -> List(Atom)
 
 @external(erlang, "arc_aot_exec_ffi", "apply_js_main")
-fn ffi_apply_js_main(mod: Atom, st: Agent) -> #(Dynamic, Agent)
+fn apply_js_main(mod: Atom, st: Agent) -> #(Dynamic, Agent)
 
 type TimeUnit {
   Microsecond
@@ -69,20 +69,20 @@ fn profile(label: String, source: String, runs: Int, iters: Int) -> Nil {
   trace_reset()
   let #(mod, seed) = compile_and_seed(source, name)
 
-  ffi_apply_js_main(mod, seed)
+  apply_js_main(mod, seed)
 
   let js_before = seed.store
-  let #(_v, st_after) = ffi_apply_js_main(mod, seed)
+  let #(_v, st_after) = apply_js_main(mod, seed)
   let js_after = st_after.store
   let cells = js_after.alloc_since_gc - js_before.alloc_since_gc
 
   let t0 = monotonic_time(Microsecond)
-  repeat(runs, fn() { ffi_apply_js_main(mod, seed) })
+  repeat(runs, fn() { apply_js_main(mod, seed) })
   let untraced_us = monotonic_time(Microsecond) - t0
 
   trace_on(mod)
   let t1 = monotonic_time(Microsecond)
-  repeat(runs, fn() { ffi_apply_js_main(mod, seed) })
+  repeat(runs, fn() { apply_js_main(mod, seed) })
   let traced_us = monotonic_time(Microsecond) - t1
   trace_off()
 
@@ -136,28 +136,24 @@ fn profile(label: String, source: String, runs: Int, iters: Int) -> Nil {
     },
   )
 
-  let fast =
-    count_of(
-      atom.create("arc_rt_call_ffi"),
-      atom.create("t_compiled_fn_code"),
-      3,
-    )
-  let slow =
+  let direct =
+    count_of(atom.create("arc_rt_call_ffi"), atom.create("t_direct_callee"), 3)
+  let general =
     count_of(atom.create("arc@rt@call"), atom.create("t_call_checked"), 4)
-  case fast + slow {
+  case direct + general {
     0 -> Nil
     _ ->
       io.println(
-        "  fast-path: compiled_fn_code="
-        <> int.to_string(fast)
+        "  direct callee: direct_callee="
+        <> int.to_string(direct)
         <> " ("
-        <> int.to_string(fast / runs)
-        <> "/run)  t_call_checked(slow)="
-        <> int.to_string(slow)
-        <> " → fast-path "
-        <> case slow {
+        <> int.to_string(direct / runs)
+        <> "/run)  t_call_checked(general)="
+        <> int.to_string(general)
+        <> " → direct callee "
+        <> case general {
           0 -> "TAKEN"
-          _ -> "MISSED " <> int.to_string(slow) <> "×"
+          _ -> "MISSED " <> int.to_string(general) <> "×"
         },
       )
   }
@@ -208,20 +204,20 @@ pub fn profile_file(label: String, path: String, runs: Int) -> Nil {
   trace_reset()
   let #(mod, seed) = compile_and_seed(source, name)
 
-  ffi_apply_js_main(mod, seed)
+  apply_js_main(mod, seed)
 
   let js_before = seed.store
-  let #(_v, st_after) = ffi_apply_js_main(mod, seed)
+  let #(_v, st_after) = apply_js_main(mod, seed)
   let js_after = st_after.store
   let cells = js_after.alloc_since_gc - js_before.alloc_since_gc
 
   let t0 = monotonic_time(Microsecond)
-  repeat(runs, fn() { ffi_apply_js_main(mod, seed) })
+  repeat(runs, fn() { apply_js_main(mod, seed) })
   let untraced_us = monotonic_time(Microsecond) - t0
 
   trace_on(mod)
   let t1 = monotonic_time(Microsecond)
-  repeat(runs, fn() { ffi_apply_js_main(mod, seed) })
+  repeat(runs, fn() { apply_js_main(mod, seed) })
   let traced_us = monotonic_time(Microsecond) - t1
   trace_off()
 
@@ -315,30 +311,29 @@ pub fn profile_file(label: String, path: String, runs: Int) -> Nil {
   let rt = fn(m: String) { atom.create("arc@rt@" <> m) }
   let ffi = fn(m: String) { atom.create("arc_" <> m) }
   let targets = [
-    #(rt("obj"), "t_get_prop_any", 3),
-    #(rt("obj"), "t_set_prop_any", 4),
+    #(rt("obj"), "t_get_prop_untyped_key", 3),
+    #(rt("obj"), "t_set_prop_untyped_key", 4),
     #(rt("call"), "t_call_checked", 4),
-    #(rt("call"), "t_compiled_fn_code", 3),
+    #(rt("call"), "t_direct_callee", 3),
     #(rt("call"), "t_construct", 4),
     #(rt("ops"), "t_instance_of", 3),
     #(ffi("rt_obj_ffi"), "t_get_prop_own_data", 3),
     #(rt("obj"), "t_global_get", 2),
-    #(ffi("rt_obj_ffi"), "t_global_get_fast", 2),
-    #(ffi("rt_obj_ffi"), "t_get_elem_fast", 3),
-    #(ffi("rt_obj_ffi"), "elem_read", 2),
-    #(ffi("rt_obj_ffi"), "t_set_elem_fast", 4),
+    #(ffi("rt_obj_ffi"), "t_global_peek", 2),
+    #(ffi("rt_obj_ffi"), "t_get_elem", 3),
+    #(ffi("rt_obj_ffi"), "elem_at", 2),
+    #(ffi("rt_obj_ffi"), "t_set_elem", 4),
     #(ffi("rt_obj_ffi"), "elem_write", 3),
     #(rt("val"), "t_to_property_key", 2),
     #(ffi("rt_obj_ffi"), "t_set_prop_own_data", 4),
     #(rt("store"), "t_cell_get", 2),
     #(ffi("rt_store_ffi"), "t_cell_get", 2),
-    #(ffi("rt_call_ffi"), "t_call_method_ic", 5),
-    #(ffi("rt_call_ffi"), "t_new_simple", 3),
-    #(ffi("rt_obj_ffi"), "t_ic_get", 4),
-    #(ffi("rt_obj_ffi"), "t_ic_set", 5),
+    #(ffi("rt_call_ic_ffi"), "t_call_method_ic", 6),
+    #(ffi("rt_call_ic_ffi"), "t_new_direct", 3),
+    #(ffi("rt_obj_ic_ffi"), "t_get_named_ic", 4),
+    #(ffi("rt_obj_ic_ffi"), "t_set_named_ic", 6),
     #(rt("obj"), "t_new_arguments", 4),
-    #(ffi("rt_call_ffi"), "new_simple_apply", 7),
-    #(ffi("rt_call_ffi"), "t_method_ic_warm", 2),
+    #(ffi("rt_call_ic_ffi"), "new_direct_apply", 7),
   ]
   list.each(targets, fn(t) {
     let #(m, f, a) = t
@@ -386,21 +381,21 @@ fn microbench() {
   io.println("══════ isolated untraced microbench (1M calls each) ══════")
   trace_reset()
   let #(mod, seed) = compile_and_seed(adder_js, "arc_prof_micro_adder")
-  let #(_v, st_adder) = ffi_apply_js_main(mod, seed)
+  let #(_v, st_adder) = apply_js_main(mod, seed)
   let js = st_adder.store
   // inner fn is last cell, captured x is next-3
   let add5_h = to_dynamic(#(atom.create("handle"), js.next - 1))
   let x_h = to_dynamic(#(atom.create("handle"), js.next - 3))
   micro(
-    "compiled_fn_code (via Gleam wrapper)",
-    "compiled_fn_code",
+    "direct_callee (via Gleam wrapper)",
+    "direct_callee",
     st_adder,
     add5_h,
     1_000_000,
   )
   micro(
-    "compiled_fn_code (FFI direct)",
-    "compiled_fn_code_ffi",
+    "direct_callee (FFI direct)",
+    "direct_callee_ffi",
     st_adder,
     add5_h,
     1_000_000,
@@ -409,7 +404,7 @@ fn microbench() {
   micro("cell_get (FFI direct)", "cell_get_ffi", st_adder, x_h, 1_000_000)
 
   let #(mod2, seed2) = compile_and_seed(obj_js, "arc_prof_micro_obj")
-  let #(_v2, st_obj) = ffi_apply_js_main(mod2, seed2)
+  let #(_v2, st_obj) = apply_js_main(mod2, seed2)
   let js2 = st_obj.store
   let o_h = to_dynamic(#(atom.create("handle"), js2.next - 1))
   let key =
@@ -418,14 +413,14 @@ fn microbench() {
       #(atom.create("named"), <<"x":utf8>>),
     ))
   micro(
-    "t_get_prop_any (o.x)",
+    "t_get_prop_untyped_key (o.x)",
     "get_prop",
     st_obj,
     to_dynamic(#(o_h, key)),
     1_000_000,
   )
   micro(
-    "t_set_prop_any (o.x = v)",
+    "t_set_prop_untyped_key (o.x = v)",
     "set_prop",
     st_obj,
     to_dynamic(#(o_h, key)),
@@ -453,16 +448,16 @@ const richards_us_target = 2200
 const obj_prop_us_target = 11_800
 
 const richards_baseline = [
-  #("arc_rt_obj_ffi", "t_global_get_fast", 2, 65),
+  #("arc_rt_obj_ffi", "t_global_peek", 2, 65),
   #("arc@rt@obj", "t_global_get", 2, 0),
   #("arc_rt_obj_ffi", "t_get_prop_own_data", 3, 106),
   #("arc_rt_obj_ffi", "t_set_prop_own_data", 4, 143),
-  #("arc_rt_obj_ffi", "t_ic_get", 4, 0),
-  #("arc_rt_obj_ffi", "t_ic_set", 5, 0),
-  #("arc_rt_call_ffi", "t_new_simple", 3, 32),
-  #("arc_rt_call_ffi", "t_call_method_ic", 5, 40_466),
+  #("arc_rt_obj_ic_ffi", "t_get_named_ic", 4, 0),
+  #("arc_rt_obj_ic_ffi", "t_set_named_ic", 6, 0),
+  #("arc_rt_call_ic_ffi", "t_new_direct", 3, 32),
+  #("arc_rt_call_ic_ffi", "t_call_method_ic", 6, 40_466),
   #("arc_rt_store_ffi", "t_cell_get", 2, 1320),
-  #("arc_rt_call_ffi", "t_compiled_fn_code", 3, 1),
+  #("arc_rt_call_ffi", "t_direct_callee", 3, 1),
 ]
 
 fn correctness_gate(label: String, path: String) -> Bool {
@@ -508,12 +503,12 @@ pub fn bench_verify() -> Bool {
   trace_reset()
   let assert Ok(src) = simplifile.read("../bench/v8-v7/richards_run.js")
   let #(mod, seed) = compile_and_seed(src, "arc_prof_gate_richards")
-  ffi_apply_js_main(mod, seed)
+  apply_js_main(mod, seed)
   let runs = 5
   let best =
     list.fold(list.repeat(Nil, runs), 1_000_000_000, fn(acc, _) {
       let t0 = monotonic_time(Microsecond)
-      ffi_apply_js_main(mod, seed)
+      apply_js_main(mod, seed)
       let dt = monotonic_time(Microsecond) - t0
       int.min(acc, dt)
     })
@@ -535,11 +530,11 @@ pub fn bench_verify() -> Bool {
 
   trace_reset()
   let #(obj_mod, obj_seed) = compile_and_seed(obj_js, "arc_prof_gate_obj")
-  ffi_apply_js_main(obj_mod, obj_seed)
+  apply_js_main(obj_mod, obj_seed)
   let obj_best =
     list.fold(list.repeat(Nil, runs), 1_000_000_000, fn(acc, _) {
       let t0 = monotonic_time(Microsecond)
-      ffi_apply_js_main(obj_mod, obj_seed)
+      apply_js_main(obj_mod, obj_seed)
       let dt = monotonic_time(Microsecond) - t0
       int.min(acc, dt)
     })
@@ -560,7 +555,7 @@ pub fn bench_verify() -> Bool {
   )
 
   trace_on(mod)
-  ffi_apply_js_main(mod, seed)
+  apply_js_main(mod, seed)
   trace_off()
   io.println("  ── targeted counts: before (a2881bb) → after ──")
   io.println(
@@ -599,11 +594,11 @@ pub fn bench_verify() -> Bool {
     False -> {
       io.println("  ── attribution (target missed) ──")
       let n = fn(m, f, a) { count_of(atom.create(m), atom.create(f), a) }
-      let g_after = n("arc_rt_obj_ffi", "t_global_get_fast", 2)
-      let i_after = n("arc_rt_obj_ffi", "t_ic_get", 4)
+      let g_after = n("arc_rt_obj_ffi", "t_global_peek", 2)
+      let i_after = n("arc_rt_obj_ic_ffi", "t_get_named_ic", 4)
       let h_own = n("arc_rt_obj_ffi", "t_get_prop_own_data", 3)
       io.println(
-        "    G slotted-globals: t_global_get_fast "
+        "    G slotted-globals: t_global_peek "
         <> int.to_string(g_after)
         <> "/run — "
         <> case g_after < 10 {
@@ -612,7 +607,7 @@ pub fn bench_verify() -> Bool {
         },
       )
       io.println(
-        "    I prop-IC:         t_ic_get "
+        "    I prop-IC:         t_get_named_ic "
         <> int.to_string(i_after)
         <> "/run — "
         <> case i_after > 0 {
@@ -647,10 +642,10 @@ pub fn raytrace_apply_verify() -> Bool {
   let assert Ok(src) = simplifile.read("../bench/v8-v7/raytrace_run.js")
   trace_reset()
   let #(mod, seed) = compile_and_seed(src, "arc_prof_rt_cc")
-  ffi_apply_js_main(mod, seed)
+  apply_js_main(mod, seed)
   trace_on(mod)
   let t0 = monotonic_time(Microsecond)
-  ffi_apply_js_main(mod, seed)
+  apply_js_main(mod, seed)
   let traced_us = monotonic_time(Microsecond) - t0
   trace_off()
 
@@ -686,12 +681,12 @@ pub fn raytrace_apply_verify() -> Bool {
   let ffi = fn(m: String) { atom.create("arc_" <> m) }
   let n_new_args = count_of(rt("obj"), atom.create("t_new_arguments"), 4)
   let n_call_chk = count_of(rt("call"), atom.create("t_call_checked"), 4)
-  let n_new_simple =
-    count_of(ffi("rt_call_ffi"), atom.create("t_new_simple"), 3)
+  let n_new_direct =
+    count_of(ffi("rt_call_ic_ffi"), atom.create("t_new_direct"), 3)
   let n_ns_apply =
-    count_of(ffi("rt_call_ffi"), atom.create("new_simple_apply"), 7)
+    count_of(ffi("rt_call_ic_ffi"), atom.create("new_direct_apply"), 7)
   let n_method_ic =
-    count_of(ffi("rt_call_ffi"), atom.create("t_call_method_ic"), 5)
+    count_of(ffi("rt_call_ic_ffi"), atom.create("t_call_method_ic"), 6)
   let n_construct = count_of(rt("call"), atom.create("t_construct"), 4)
   io.println("  ── targeted counts (per run) ──")
   let row = fn(name: String, n: Int) {
@@ -703,10 +698,10 @@ pub fn raytrace_apply_verify() -> Bool {
   }
   row("t_new_arguments/4", n_new_args)
   row("t_call_checked/4", n_call_chk)
-  row("t_new_simple/3", n_new_simple)
-  row("new_simple_apply/7", n_ns_apply)
-  row("t_call_method_ic/5", n_method_ic)
-  row("t_construct/4 (new_simple miss)", n_construct)
+  row("t_new_direct/3", n_new_direct)
+  row("new_direct_apply/7", n_ns_apply)
+  row("t_call_method_ic/6", n_method_ic)
+  row("t_construct/4 (new_direct miss)", n_construct)
 
   let args_ok = n_new_args < 100
   let chk_ok = n_call_chk < 100
@@ -739,20 +734,20 @@ pub fn raytrace_apply_verify() -> Bool {
     },
   )
   io.println(
-    "    (3) new_simple → emit_apply_arguments: "
+    "    (3) new_direct → emit_apply_arguments: "
     <> case reaches {
       True ->
         "✓ REACHED (via compiled ctor body — "
         <> int.to_string(n_ns_apply)
-        <> " new_simple_apply, "
+        <> " new_direct_apply, "
         <> int.to_string(n_method_ic)
         <> " method_ic incl. initialize)"
       False ->
         "✗ NOT REACHED (method_ic "
         <> int.to_string(n_method_ic)
-        <> " < new_simple_apply "
+        <> " < new_direct_apply "
         <> int.to_string(n_ns_apply)
-        <> " — ctor bodies falling to slow path)"
+        <> " — ctor bodies falling to general path)"
     },
   )
   args_ok && chk_ok && reaches
@@ -786,9 +781,9 @@ pub fn crypto_am3_op_map() -> Nil {
   io.println("══════ perf8 BB: crypto am3 op-map (isolated am3 harness) ══════")
   trace_reset()
   let #(mod, seed) = compile_and_seed(am3_bench_js, "arc_prof_am3")
-  ffi_apply_js_main(mod, seed)
+  apply_js_main(mod, seed)
   trace_on(mod)
-  ffi_apply_js_main(mod, seed)
+  apply_js_main(mod, seed)
   trace_off()
 
   io.println(
@@ -826,17 +821,21 @@ pub fn crypto_am3_op_map() -> Nil {
   let ffi = fn(m: String) { atom.create("arc_" <> m) }
   let rt = fn(m: String) { atom.create("arc@rt@" <> m) }
   let per_op = [
-    #(ffi("rt_ops_ffi"), "t_shr_fast", 2, ">>14/>>28 fallback", 0),
-    #(ffi("rt_ops_ffi"), "t_shl_fast", 2, "<<14 fallback", 0),
-    #(ffi("rt_ops_ffi"), "t_bitand_fast", 2, "& 0x3fff/0xfffffff fallback", 0),
-    #(ffi("rt_ops_ffi"), "t_ushr_fast", 2, ">>> (am3 has none)", 0),
+    #(ffi("rt_ops_ffi"), "shr", 2, ">>14/>>28 fallback", 0),
+    #(ffi("rt_ops_ffi"), "shl", 2, "<<14 fallback", 0),
+    #(ffi("rt_ops_ffi"), "bitand", 2, "& 0x3fff/0xfffffff fallback", 0),
+    #(ffi("rt_ops_ffi"), "ushr", 2, ">>> (am3 has none)", 0),
     #(rt("ops"), "t_mul", 3, "* fallback (JMut)", 0),
     #(rt("ops"), "t_add", 3, "+ fallback (JMut)", 0),
-    #(ffi("rt_obj_ffi"), "t_get_elem_fast_c", 4, "this_array[i] hoisted", 8000),
-    #(ffi("rt_obj_ffi"), "t_get_elem_fast_p", 3, "w_array[j] read", 4000),
-    #(ffi("rt_obj_ffi"), "t_set_elem_fast_p", 4, "w_array[j++]= write", 4000),
-    #(ffi("rt_obj_ffi"), "t_arr_c_load", 1, "arr_c hoist (1/am3 call)", 100),
-    #(rt("obj"), "t_get_prop_any", 3, "elem-miss slow path", 0),
+    #(
+      ffi("rt_obj_ffi"),
+      "t_get_elem",
+      3,
+      "this_array[i] / w_array[j] read",
+      12_000,
+    ),
+    #(ffi("rt_obj_ffi"), "t_set_elem", 4, "w_array[j++]= write", 4000),
+    #(rt("obj"), "t_get_prop_untyped_key", 3, "elem-miss general path", 0),
     #(rt("val"), "t_to_property_key", 2, "elem-miss key coerce", 0),
   ]
   io.println(

@@ -1,3 +1,4 @@
+import arc/internal/unsafe
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{type Frame, NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/lang as rt_lang
@@ -14,14 +15,11 @@ import gleam/option.{None, Some}
 import gleam/string
 import rt_helpers
 
-@external(erlang, "arc_rt_call_ffi", "t_apply_protected")
-fn t_apply_protected(
-  st: Agent,
-  body: fn(Agent) -> #(JsVal, Agent),
-) -> #(rt_call.Completion, Agent)
-
-@external(erlang, "gleam_stdlib", "identity")
-fn as_code(f: fn(Agent, Frame, List(JsVal)) -> #(JsVal, Agent)) -> CompiledCode
+fn as_code(
+  f: fn(Agent, Frame, List(JsVal)) -> #(JsVal, Agent),
+) -> CompiledCode {
+  unsafe.coerce(f)
+}
 
 fn agent() -> Agent {
   rt_builtins.new_agent(rt_helpers.quiet_hooks())
@@ -136,7 +134,7 @@ fn drain(st: Agent, log: JsVal) -> #(String, Agent) {
 
 fn throws(st: Agent, body: fn(Agent) -> #(a, Agent)) -> String {
   let #(c, st) =
-    t_apply_protected(st, fn(st) {
+    rt_call.t_apply_protected(st, fn(st) {
       let #(_, st) = body(st)
       #(mk_undefined(), st)
     })
@@ -249,7 +247,7 @@ pub fn call_and_construct_traps_test() {
     == "TypeError"
 }
 
-fn ok(r: #(rt_call.Completion, Agent)) -> #(JsVal, Agent) {
+fn ok(r: #(rt_call.Completion(JsVal), Agent)) -> #(JsVal, Agent) {
   case r {
     #(NormalCompletion(v), st) -> #(v, st)
     #(ThrowCompletion(e), st) -> rt_call.t_call_checked(st, e, e, [])
@@ -389,14 +387,14 @@ pub fn instanceof_uses_get_prototype_of_trap_test() {
   let #(target, st) = object(st)
   let #(p, st) = proxy(st, target, handler)
   let #(r, st) = rt_ops.t_instance_of(st, p, global(st, "Object"))
-  assert r == 1
+  assert r
   let #(seen, st) = drain(st, log)
   assert seen == "getPrototypeOf"
   let array_proto = mk_object(st.realm.array.prototype)
   let #(liar, st) = handler_of(st, "getPrototypeOf", array_proto)
   let #(p2, st) = proxy(st, target, liar)
   let #(r, st) = rt_ops.t_instance_of(st, p2, global(st, "Array"))
-  assert r == 1
+  assert r
   let #(is_proto, _) =
     rt_call.t_call_method(st, array_proto, key("isPrototypeOf"), [p2])
   assert classify(is_proto) == KBool(True)

@@ -5,9 +5,9 @@ import arc/rt/builtins/helpers
 import arc/rt/limits
 import arc/rt/sab
 import arc/rt/store as rt_store
-import arc/rt/typed_array_ffi.{
-  type IntElem, I16, I32, I64, I8, U16, U32, U64, U8, int_elem_bits,
-  int_elem_signed, int_elem_size, ta_get_int, ta_set_int, ta_zeroed,
+import arc/rt/typed_array_bytes.{
+  type IntElem, I16, I32, I64, I8, U16, U32, U64, U8, get_int, int_elem_bits,
+  int_elem_signed, int_elem_size, set_int, zeroed,
 }
 import arc/rt/types.{
   type Agent, type AtomicsNative, type BufferStorage, type Handle, type JsVal,
@@ -294,15 +294,15 @@ fn element_offset(info: TaInfo, idx: Int) -> Int {
 }
 
 fn element_bytes(info: TaInfo, v: Int) -> BitArray {
-  ta_set_int(ta_zeroed(elem_size(info)), 0, info.elem, v)
+  set_int(zeroed(elem_size(info)), 0, info.elem, v)
 }
 
 fn read_element(buf: BufferInfo, info: TaInfo, idx: Int) -> Int {
   let off = element_offset(info, idx)
   case buf.data {
-    StoreData(bits:, ..) -> ta_get_int(bits, off, info.elem)
+    StoreData(bits:, ..) -> get_int(bits, off, info.elem)
     OwnerData(owner:) ->
-      ta_get_int(sab.read_part(owner, off, elem_size(info)), 0, info.elem)
+      get_int(sab.read_part(owner, off, elem_size(info)), 0, info.elem)
   }
 }
 
@@ -322,7 +322,7 @@ fn write_element(
         info.buffer,
         types.buffer_store_region(
           storage,
-          ta_set_int(bits, off, info.elem, v),
+          set_int(bits, off, info.elem, v),
           off,
           size,
         ),
@@ -356,9 +356,9 @@ fn modify_element(
           element_offset(info, idx),
           elem_size(info),
         )
-        let old = ta_get_int(old_bits, 0, info.elem)
+        let old = get_int(old_bits, 0, info.elem)
         case op(old) {
-          Some(new) -> #(old, ta_set_int(old_bits, 0, info.elem, new))
+          Some(new) -> #(old, set_int(old_bits, 0, info.elem, new))
           None -> #(old, old_bits)
         }
       }

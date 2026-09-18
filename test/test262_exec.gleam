@@ -1,4 +1,5 @@
 import arc/compiler
+import arc/compiler/compile_task
 import arc/esm
 import arc/host
 import arc/host_hooks.{HostHooks}
@@ -871,7 +872,7 @@ fn run_agent_child(source: String, parent: AgentPid) -> Nil {
     }
     |> option.unwrap(mk_undefined())
   let compiled =
-    ffi_run_compile_task(string.byte_size(source), fn() {
+    compile_task.run_compile_task(string.byte_size(source), fn() {
       case parser.parse_script(source) {
         Error(err) -> Error(parser.parse_error_to_string(err))
         Ok(#(body, sb)) ->
@@ -1157,11 +1158,6 @@ fn harness_host_hooks() -> host.HostHooks {
 
 fn settle_pending_wakes(st: Agent) -> Agent {
   rt_async.drain(st)
-}
-
-@external(erlang, "arc_compile_task_ffi", "run_compile_task")
-fn ffi_run_compile_task(_source_bytes: Int, _task: fn() -> a) -> a {
-  panic as beam_only_test
 }
 
 const beam_only_test = "test262 suite is BEAM-only"

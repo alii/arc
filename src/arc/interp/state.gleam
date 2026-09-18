@@ -5,7 +5,6 @@ import arc/rt/types.{
   type Agent, type ErrorKind, type Handle, type JsVal, Handle, RangeErr,
   ReferenceErr, TypeErr,
 }
-import gleam/dynamic.{type Dynamic}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -66,9 +65,6 @@ pub fn with_agent(state: State, agent: Agent) -> State {
   State(..state, agent:)
 }
 
-@external(erlang, "gleam_stdlib", "identity")
-fn to_dynamic(a: anything) -> Dynamic
-
 // exhaustive destructures on purpose: classify new fields as roots or not
 pub fn frame_roots(state: State) -> List(Handle) {
   let State(
@@ -89,7 +85,7 @@ pub fn frame_roots(state: State) -> List(Handle) {
     eval_env:,
   ) = state
   let acc =
-    acc_frame(
+    push_frame_roots(
       [],
       stack,
       locals,
@@ -99,11 +95,11 @@ pub fn frame_roots(state: State) -> List(Handle) {
       call_args,
       eval_env,
     )
-  list.fold(call_stack, acc, push_saved_frame)
+  list.fold(call_stack, acc, push_saved_frame_roots)
   |> list.map(Handle)
 }
 
-fn acc_frame(
+fn push_frame_roots(
   acc: List(Int),
   stack: List(JsVal),
   locals: TupleArray(JsVal),
@@ -114,38 +110,38 @@ fn acc_frame(
   eval_env: Option(Handle),
 ) -> List(Int) {
   acc
-  |> push_vals(stack)
-  |> push_term(locals)
-  |> push_val(this)
-  |> push_val(new_target)
-  |> push_val(home_object)
-  |> push_vals(call_args)
-  |> push_opt_handle(eval_env)
+  |> rt_gc.push_refs(stack, _)
+  |> rt_gc.push_refs(locals, _)
+  |> rt_gc.push_refs(this, _)
+  |> rt_gc.push_refs(new_target, _)
+  |> rt_gc.push_refs(home_object, _)
+  |> rt_gc.push_refs(call_args, _)
+  |> push_optional_handle(eval_env)
 }
 
 // caller.call_stack is the fold's own tail, not walked again
-fn push_saved_frame(acc: List(Int), frame: SavedFrame) -> List(Int) {
+fn push_saved_frame_roots(acc: List(Int), frame: SavedFrame) -> List(Int) {
   case frame {
     SavedFrame(caller:, pc: _, stack:, locals:, constructor_this:) ->
-      push_caller(acc, caller, stack, locals, constructor_this)
+      push_caller_roots(acc, caller, stack, locals, constructor_this)
     SavedRegFrame(caller:, pc: _, stack:, locals:, constructor_this:, r0:, r1:) ->
-      push_caller(acc, caller, stack, locals, constructor_this)
-      |> push_val(r0)
-      |> push_val(r1)
+      push_caller_roots(acc, caller, stack, locals, constructor_this)
+      |> rt_gc.push_refs(r0, _)
+      |> rt_gc.push_refs(r1, _)
     SavedCont(caller:, pc: _, stack:, locals:, constructor_this:, cont:) ->
-      push_caller(acc, caller, stack, locals, constructor_this)
-      |> rt_gc.push_term_refs(to_dynamic(cont), _)
+      push_caller_roots(acc, caller, stack, locals, constructor_this)
+      |> rt_gc.push_refs(cont, _)
   }
 }
 
-fn push_caller(
+fn push_caller_roots(
   acc: List(Int),
   caller: State,
   stack: List(JsVal),
   locals: TupleArray(JsVal),
   constructor_this: Option(JsVal),
 ) -> List(Int) {
-  acc_frame(
+  push_frame_roots(
     acc,
     stack,
     locals,
@@ -155,29 +151,17 @@ fn push_caller(
     caller.call_args,
     caller.eval_env,
   )
-  |> push_opt_val(constructor_this)
+  |> push_optional_val(constructor_this)
 }
 
-fn push_val(acc: List(Int), v: JsVal) -> List(Int) {
-  rt_gc.push_val_refs(v, acc)
-}
-
-fn push_vals(acc: List(Int), vs: List(JsVal)) -> List(Int) {
-  list.fold(vs, acc, push_val)
-}
-
-fn push_term(acc: List(Int), t: TupleArray(JsVal)) -> List(Int) {
-  rt_gc.push_term_refs(to_dynamic(t), acc)
-}
-
-fn push_opt_val(acc: List(Int), ov: Option(JsVal)) -> List(Int) {
+fn push_optional_val(acc: List(Int), ov: Option(JsVal)) -> List(Int) {
   case ov {
-    Some(v) -> push_val(acc, v)
+    Some(v) -> rt_gc.push_refs(v, acc)
     None -> acc
   }
 }
 
-fn push_opt_handle(acc: List(Int), oh: Option(Handle)) -> List(Int) {
+fn push_optional_handle(acc: List(Int), oh: Option(Handle)) -> List(Int) {
   case oh {
     Some(h) -> [h.id, ..acc]
     None -> acc

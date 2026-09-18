@@ -1,5 +1,6 @@
 //// §7.1 type conversion and §7.2 comparison
 
+import arc/rt/js_string
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type ErrorKind, type Handle, type JsNum, type JsOps, type JsVal,
@@ -82,12 +83,8 @@ pub fn is_null(v: JsVal) -> Bool {
   }
 }
 
-pub fn is_nullish(v: JsVal) -> Bool {
-  case classify(v) {
-    KUndef | KNull -> True
-    _ -> False
-  }
-}
+@external(erlang, "arc_rt_val_ffi", "is_nullish")
+pub fn is_nullish(v: JsVal) -> Bool
 
 pub fn is_object(v: JsVal) -> Bool {
   case classify(v) {
@@ -97,27 +94,12 @@ pub fn is_object(v: JsVal) -> Bool {
 }
 
 // §7.1.2 toboolean
-pub fn to_boolean(v: JsVal) -> Bool {
-  case classify(v) {
-    KUndef | KNull | KTdz -> False
-    KBool(b) -> b
-    KNum(JNan) -> False
-    KNum(JInt(n)) -> n != 0
-    KNum(JFloat(f)) -> f != 0.0
-    KNum(JPosInf) | KNum(JNegInf) -> True
-    KStr(s) -> s != ""
-    KBig(n) -> n != 0
-    KHandle(_) -> True
-    KSym(_) -> True
-  }
-}
+@external(erlang, "arc_rt_val_ffi", "to_boolean")
+pub fn to_boolean(v: JsVal) -> Bool
 
-pub fn to_boolean_i32(v: JsVal) -> Int {
-  case to_boolean(v) {
-    True -> 1
-    False -> 0
-  }
-}
+// !v as a js boolean
+@external(erlang, "arc_rt_val_ffi", "logical_not")
+pub fn logical_not(v: JsVal) -> JsVal
 
 pub fn empty_list() -> List(JsVal) {
   []
@@ -231,15 +213,16 @@ pub fn t_to_primitive(
   }
 }
 
-// data property fast paths ahead of the full get
-@external(erlang, "arc_rt_helpers_ffi", "get_symbol_data")
-fn get_symbol_data(st: Agent, recv: JsVal, sym: SymbolId) -> JsVal
+// the one test for a kernel's miss answer
+@external(erlang, "arc_rt_val_ffi", "is_miss")
+pub fn is_miss(v: a) -> Bool
 
-@external(erlang, "arc_rt_helpers_ffi", "is_miss")
-fn is_miss(v: JsVal) -> Bool
+// bound here, not in obj, because obj imports val
+@external(erlang, "arc_rt_obj_ffi", "get_symbol_data")
+pub fn get_symbol_data(st: Agent, recv: JsVal, sym: SymbolId) -> JsVal
 
-@external(erlang, "arc_rt_obj_ffi", "t_get_prop_slow")
-fn get_named_data(
+@external(erlang, "arc_rt_obj_ffi", "t_get_named")
+fn t_get_named(
   st: Agent,
   recv: JsVal,
   key: String,
@@ -247,10 +230,10 @@ fn get_named_data(
 ) -> #(JsVal, Agent)
 
 pub fn get_named(st: Agent, recv: JsVal, key: String) -> #(JsVal, Agent) {
-  get_named_data(st, recv, key, None)
+  t_get_named(st, recv, key, None)
 }
 
-fn get_symbol(st: Agent, recv: JsVal, sym: SymbolId) -> #(JsVal, Agent) {
+pub fn get_symbol(st: Agent, recv: JsVal, sym: SymbolId) -> #(JsVal, Agent) {
   let v = get_symbol_data(st, recv, sym)
   case is_miss(v) {
     True -> require_ops(st).get_prop(st, recv, SymbolKey(sym))
@@ -299,7 +282,7 @@ fn try_primitive_methods(
 
 // §7.2.14 isstrictlyequal
 @external(erlang, "arc_rt_val_ffi", "strict_eq")
-pub fn strict_equal(left: JsVal, right: JsVal) -> Bool
+pub fn strict_eq(left: JsVal, right: JsVal) -> Bool
 
 // §7.2.11 samevalue
 pub fn same_value(left: JsVal, right: JsVal) -> Bool {
@@ -310,7 +293,7 @@ pub fn same_value(left: JsVal, right: JsVal) -> Bool {
     KNum(JInt(a)), KNum(JInt(b)) -> a == b
     KNum(JInt(a)), KNum(JFloat(b)) -> float_same_term(int.to_float(a), b)
     KNum(JFloat(a)), KNum(JInt(b)) -> float_same_term(a, int.to_float(b))
-    _, _ -> strict_equal(left, right)
+    _, _ -> strict_eq(left, right)
   }
 }
 
@@ -400,7 +383,7 @@ pub fn jsnum_to_string(n: JsNum) -> String {
   }
 }
 
-@external(erlang, "arc_rt_val_ffi", "js_number_to_string")
+@external(erlang, "arc_rt_val_ffi", "js_format_float")
 pub fn js_format_float(f: Float) -> String
 
 pub fn format_jsnum(n: JsNum) -> String {
@@ -450,7 +433,8 @@ pub fn prim_to_string(v: JsVal) -> Result(String, CoerceError) {
 @external(erlang, "arc_rt_val_ffi", "t_to_string")
 pub fn t_to_string(st: Agent, v: JsVal) -> #(String, Agent)
 
-pub fn t_to_string_slow(st: Agent, v: JsVal) -> #(String, Agent) {
+// called by name from arc_rt_val_ffi
+pub fn t_to_string_general(st: Agent, v: JsVal) -> #(String, Agent) {
   case classify(v) {
     KStr(s) -> #(s, st)
     KNum(n) -> #(jsnum_to_string(n), st)
@@ -519,17 +503,15 @@ fn primitive_to_prop_key(st: Agent, v: JsVal) -> #(ObjectKey, Agent) {
 }
 
 // §7.1.4.1.1 stringtonumber
+// called by name from arc_rt_json_ffi
 @external(erlang, "arc_rt_val_ffi", "string_to_number")
 pub fn string_to_number(s: String) -> JsNum
-
-// §7.1.4.1 strwhitespacechar, not unicode white_space
-@external(erlang, "arc_string_ffi", "trim_js_ws")
-fn trim_string_ws(s: String) -> String
 
 const nf_two52 = 4_503_599_627_370_496
 
 const nf_two53 = 9_007_199_254_740_992
 
+// called by name from arc_rt_val_ffi
 pub fn int_number(n: Int) -> JsNum {
   case n <= max_safe_integer && n >= -max_safe_integer {
     True -> JInt(n)
@@ -538,6 +520,7 @@ pub fn int_number(n: Int) -> JsNum {
 }
 
 // erlang float/1 misrounds past 53 bits so round here
+// called by name from arc_rt_val_ffi
 pub fn num_from_int(n: Int) -> JsNum {
   let a = int.absolute_value(n)
   case a < nf_two53 {
@@ -582,7 +565,7 @@ fn nf_bit_length(n: Int, acc: Int) -> Int {
 
 // §7.1.14 stringtobigint, none on failure
 pub fn string_to_bigint(s: String) -> Option(Int) {
-  case trim_string_ws(s) {
+  case js_string.trim_js_ws(s) {
     "" -> Some(0)
     "0x" <> rest | "0X" <> rest -> parse_bigint_radix_digits(rest, 16)
     "0o" <> rest | "0O" <> rest -> parse_bigint_radix_digits(rest, 8)
@@ -602,7 +585,8 @@ fn parse_bigint_radix_digits(digits: String, base: Int) -> Option(Int) {
 @external(erlang, "arc_rt_val_ffi", "t_to_number")
 pub fn t_to_number(st: Agent, v: JsVal) -> #(JsNum, Agent)
 
-pub fn t_to_number_slow(st: Agent, v: JsVal) -> #(JsNum, Agent) {
+// called by name from arc_rt_val_ffi
+pub fn t_to_number_general(st: Agent, v: JsVal) -> #(JsNum, Agent) {
   case classify(v) {
     KNum(n) -> #(n, st)
     KStr(s) -> #(string_to_number(s), st)
@@ -688,7 +672,8 @@ pub fn t_to_uint32(st: Agent, v: JsVal) -> #(Int, Agent) {
 @external(erlang, "arc_rt_val_ffi", "t_to_integer_or_infinity")
 pub fn t_to_integer_or_infinity(st: Agent, v: JsVal) -> #(Int, Agent)
 
-pub fn t_to_integer_or_infinity_slow(st: Agent, v: JsVal) -> #(Int, Agent) {
+// called by name from arc_rt_val_ffi
+pub fn t_to_integer_or_infinity_general(st: Agent, v: JsVal) -> #(Int, Agent) {
   let #(n, st) = t_to_number(st, v)
   #(jsnum_to_integer_or_infinity(n), st)
 }
@@ -696,7 +681,8 @@ pub fn t_to_integer_or_infinity_slow(st: Agent, v: JsVal) -> #(Int, Agent) {
 @external(erlang, "arc_rt_val_ffi", "t_to_length")
 pub fn t_to_length(st: Agent, v: JsVal) -> #(Int, Agent)
 
-pub fn t_to_length_slow(st: Agent, v: JsVal) -> #(Int, Agent) {
+// called by name from arc_rt_val_ffi
+pub fn t_to_length_general(st: Agent, v: JsVal) -> #(Int, Agent) {
   let #(n, st) = t_to_number(st, v)
   #(jsnum_to_length(n), st)
 }

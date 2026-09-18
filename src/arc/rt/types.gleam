@@ -365,13 +365,13 @@ pub type SabOwner
 pub type WaiterRef
 
 @external(erlang, "arc_rt_sab_ffi", "byte_length")
-fn sab_byte_length(owner: SabOwner) -> Int
+fn byte_length(owner: SabOwner) -> Int
 
 @external(erlang, "arc_rt_sab_ffi", "read")
-fn sab_read(owner: SabOwner) -> BitArray
+fn read(owner: SabOwner) -> BitArray
 
 @external(erlang, "arc_rt_sab_ffi", "write")
-fn sab_write(owner: SabOwner, byte_offset: Int, chunk: BitArray) -> Nil
+fn write(owner: SabOwner, byte_offset: Int, chunk: BitArray) -> Nil
 
 pub fn buffer_is_shared(storage: BufferStorage) -> Bool {
   case storage {
@@ -412,7 +412,7 @@ pub fn buffer_byte_size(storage: BufferStorage) -> Int {
     Shared(block: OwnerBlock(byte_length:, ..), max_byte_length: None) ->
       byte_length
     Shared(block: OwnerBlock(owner:, ..), max_byte_length: Some(_)) ->
-      sab_byte_length(owner)
+      byte_length(owner)
   }
 }
 
@@ -422,7 +422,7 @@ pub fn buffer_bits(storage: BufferStorage) -> Option(BitArray) {
     Bytes(bytes:, ..)
     | Immutable(bytes:)
     | Shared(block: LocalBlock(bytes:), ..) -> Some(bytes)
-    Shared(block: OwnerBlock(owner:, ..), ..) -> Some(sab_read(owner))
+    Shared(block: OwnerBlock(owner:, ..), ..) -> Some(read(owner))
   }
 }
 
@@ -447,7 +447,7 @@ pub fn buffer_store_region(
         OwnerBlock(owner:, ..) -> {
           let assert Ok(chunk) = bit_array.slice(new_bits, byte_offset, count)
             as "buffer_store_region: region checked above"
-          let Nil = sab_write(owner, byte_offset, chunk)
+          let Nil = write(owner, byte_offset, chunk)
           storage
         }
       }
@@ -568,6 +568,7 @@ pub fn js_to_map_key(v: JsVal) -> MapKey {
   }
 }
 
+// called by name from arc_rt_lang_ffi
 pub fn map_key_to_js(key: MapKey) -> JsVal {
   case key {
     MKString(s) -> mk_string(s)
@@ -2033,7 +2034,7 @@ pub type ShapeDesc {
   )
 }
 
-// droppable cache, not a gc root; see arc_rt_call_fast_ffi
+// droppable cache, not a gc root; see arc_rt_call_ic_ffi
 pub type IcEntry {
   IcRead(key: BitArray, offsets: Dict(Int, Int))
   IcCall(
@@ -2142,17 +2143,17 @@ pub type Step {
 
 pub type JobQueue
 
-@external(erlang, "arc_job_queue_ffi", "job_queue_new")
-pub fn jq_new() -> JobQueue
+@external(erlang, "arc_rt_job_queue_ffi", "job_queue_new")
+pub fn job_queue_new() -> JobQueue
 
-@external(erlang, "arc_job_queue_ffi", "job_queue_push")
-pub fn jq_push(queue: JobQueue, item: Job) -> JobQueue
+@external(erlang, "arc_rt_job_queue_ffi", "job_queue_push")
+pub fn job_queue_push(queue: JobQueue, item: Job) -> JobQueue
 
-@external(erlang, "arc_job_queue_ffi", "job_queue_pop")
-pub fn jq_pop(queue: JobQueue) -> Option(#(Job, JobQueue))
+@external(erlang, "arc_rt_job_queue_ffi", "job_queue_pop")
+pub fn job_queue_pop(queue: JobQueue) -> Option(#(Job, JobQueue))
 
-@external(erlang, "arc_job_queue_ffi", "job_queue_to_list")
-pub fn jq_to_list(queue: JobQueue) -> List(Job)
+@external(erlang, "arc_rt_job_queue_ffi", "job_queue_to_list")
+pub fn job_queue_to_list(queue: JobQueue) -> List(Job)
 
 pub type BuiltinPair {
   BuiltinPair(prototype: Handle, constructor: Handle)

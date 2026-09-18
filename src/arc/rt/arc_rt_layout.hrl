@@ -64,6 +64,7 @@
                     (is_tuple(V) andalso tuple_size(V) =:= 4
                      andalso element(1, V) =:= ?STR_TAG))).
 -define(IS_INF(V), (V =:= js_inf orelse V =:= js_neg_inf)).
+-define(IS_NULLISH(V), (V =:= undefined orelse V =:= null)).
 -define(IS_JS_NUMBER(V),
         (is_number(V) orelse V =:= js_nan orelse ?IS_INF(V))).
 
@@ -251,6 +252,87 @@
 %% dense promotion policy, mirrors rt/elements
 -define(MAX_GAP, 1024).
 -define(MAX_DENSE_INDEX, 10000000).
+
+%% shared kernels; each module instantiates them as one-line locals
+
+%% which builtin a native fn cell dispatches to, else none
+-define(NATIVE_TOKEN(Cell),
+        (case Cell of
+             _ when element(1, Cell) =:= ?SOBJECT_TAG,
+                    element(1, element(?SOBJECT_KIND, Cell)) =:= ?NATIVEFN_TAG ->
+                 element(?NATIVEFN_TOKEN, element(?SOBJECT_KIND, Cell));
+             _ -> none
+         end)).
+
+%% element at idx or the hole
+-define(ELEM_AT(Els, Idx),
+        (case Els of
+             {?ELEMS_DENSE, ElemAtVec} -> arc_tree_array_ffi:get(Idx, ElemAtVec);
+             {?ELEMS_SPARSE, ElemAtMap} ->
+                 case ElemAtMap of
+                     #{Idx := ElemAtV} -> ElemAtV;
+                     _ -> ?ELEMS_HOLE
+                 end;
+             _ -> ?ELEMS_HOLE
+         end)).
+
+%% append at idx while the dense gap policy allows it, else miss
+-define(ELEM_WRITE_GROW(Els, Idx, V),
+        (case Els of
+             {?ELEMS_DENSE, GrowVec} ->
+                 case Idx - arc_tree_array_ffi:size(GrowVec) =< ?MAX_GAP
+                      andalso Idx < ?MAX_DENSE_INDEX of
+                     true -> {?ELEMS_DENSE, arc_tree_array_ffi:set(Idx, V, GrowVec)};
+                     false -> miss
+                 end;
+             {?ELEMS_SPARSE, GrowMap} -> {?ELEMS_SPARSE, GrowMap#{Idx => V}};
+             ?ELEMS_NONE when Idx =< ?MAX_GAP ->
+                 {?ELEMS_DENSE, arc_tree_array_ffi:set(Idx, V, {})};
+             _ -> miss
+         end)).
+
+%% known successor shape for adding keybin, as {To, ToOffsets}, else miss
+-define(SHAPED_NEXT(Shapes, Sid, KeyBin),
+        (case Shapes of
+             #{Sid := NextFromDesc} ->
+                 case element(?SHAPE_TRANSITIONS, NextFromDesc) of
+                     #{KeyBin := NextTo} ->
+                         {NextTo, element(?SHAPE_OFFSETS, map_get(NextTo, Shapes))};
+                     _ -> miss
+                 end;
+             _ -> miss
+         end)).
+
+%% false for exotic or virtual named keys; needs a local birth_plain/2
+-define(NAMED_KEY_IS_PLAIN(Kind, K, LengthK),
+        (case Kind of
+             ?ORDINARY -> true;
+             _ when is_atom(Kind) -> true;
+             _ ->
+                 case element(1, Kind) of
+                     ?PROXYOBJ_TAG -> false;
+                     ?MODULENS_TAG -> false;
+                     ?TYPEDARRAYOBJ_TAG -> false;
+                     ?ARRAYOBJ_TAG -> K =/= LengthK;
+                     ?STRINGOBJ_TAG -> K =/= LengthK;
+                     ?BYTECODEFN_TAG ->
+                         birth_plain(element(?BYTECODEFN_BIRTH, Kind), K);
+                     ?COMPILEDFN_TAG ->
+                         birth_plain(element(?COMPILEDFN_BIRTH, Kind), K);
+                     _ -> true
+                 end
+         end)).
+
+%% length, name, prototype are not in props until birth settles
+-define(LAZY_KEY_IS_PLAIN(Birth, K, LengthK, NameK, PrototypeK),
+        (case Birth of
+             ?BIRTH_SETTLED -> true;
+             _ when K =:= LengthK -> false;
+             _ when K =:= NameK -> false;
+             _ when K =:= PrototypeK ->
+                 element(?BIRTH_PROTOTYPE_PARENT, Birth) =:= ?NONE;
+             _ -> true
+         end)).
 
 %% inline cache entry tags in store ics
 -define(IC_READ, ic_read).

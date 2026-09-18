@@ -19,7 +19,8 @@ fn js_ops(st: Agent) -> JsOps(Agent) {
 }
 
 // §13.10.2 instanceof operator
-pub fn t_instance_of(st: Agent, v: JsVal, target: JsVal) -> #(Int, Agent) {
+// called by name from arc_rt_obj_ffi
+pub fn t_instance_of(st: Agent, v: JsVal, target: JsVal) -> #(Bool, Agent) {
   case classify(target) {
     KHandle(ctor_h) -> {
       let ops = js_ops(st)
@@ -42,7 +43,7 @@ pub fn t_instance_of(st: Agent, v: JsVal, target: JsVal) -> #(Int, Agent) {
           case callable {
             True -> {
               let #(res, st) = ops.call(st, handler, target, [v])
-              #(bool_int(rt_val.to_boolean(res)), st)
+              #(rt_val.to_boolean(res), st)
             }
             False ->
               rt_val.t_throw_type_error(
@@ -66,7 +67,7 @@ pub fn t_ordinary_has_instance(
   st: Agent,
   ctor: Handle,
   v: JsVal,
-) -> #(Int, Agent) {
+) -> #(Bool, Agent) {
   case rt_store.t_cell_get(st, ctor) {
     SObject(kind: BoundFn(target:, ..), ..) ->
       t_instance_of(st, v, mk_object(target))
@@ -88,7 +89,7 @@ pub fn t_ordinary_has_instance(
               )
           }
         }
-        _ -> #(0, st)
+        _ -> #(False, st)
       }
   }
 }
@@ -99,16 +100,16 @@ fn proto_walk(
   obj: Handle,
   target_proto: Handle,
   fuel: Int,
-) -> #(Int, Agent) {
+) -> #(Bool, Agent) {
   case fuel <= 0 {
     True -> rt_val.t_throw_range_error(st, "Maximum call stack size exceeded")
     False -> {
       let #(next, st) = rt_obj.t_get_prototype_of(st, obj)
       case next {
-        None -> #(0, st)
+        None -> #(False, st)
         Some(proto_h) ->
           case proto_h.id == target_proto.id {
-            True -> #(1, st)
+            True -> #(True, st)
             False -> proto_walk(st, proto_h, target_proto, fuel - 1)
           }
       }
@@ -339,11 +340,11 @@ pub fn t_bitnot(st: Agent, a: JsVal) -> #(JsVal, Agent) {
 }
 
 pub fn strict_eq(a: JsVal, b: JsVal) -> Bool {
-  rt_val.strict_equal(a, b)
+  rt_val.strict_eq(a, b)
 }
 
 pub fn strict_ne(a: JsVal, b: JsVal) -> Bool {
-  case rt_val.strict_equal(a, b) {
+  case rt_val.strict_eq(a, b) {
     True -> False
     False -> True
   }
@@ -359,7 +360,7 @@ pub fn t_eq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
     | KBig(_), KBig(_)
     | KSym(_), KSym(_)
     | KHandle(_), KHandle(_)
-    -> #(bool_int(rt_val.strict_equal(a, b)), st)
+    -> #(bool_int(rt_val.strict_eq(a, b)), st)
     // bool arms must precede the object arms
     KBool(x), _ -> t_eq(st, mk_number(bool_to_jsnum(x)), b)
     _, KBool(y) -> t_eq(st, a, mk_number(bool_to_jsnum(y)))
@@ -389,11 +390,11 @@ pub fn t_eq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
       st,
     )
     KNum(_), KStr(s) -> #(
-      bool_int(rt_val.strict_equal(a, mk_number(rt_val.string_to_number(s)))),
+      bool_int(rt_val.strict_eq(a, mk_number(rt_val.string_to_number(s)))),
       st,
     )
     KStr(s), KNum(_) -> #(
-      bool_int(rt_val.strict_equal(mk_number(rt_val.string_to_number(s)), b)),
+      bool_int(rt_val.strict_eq(mk_number(rt_val.string_to_number(s)), b)),
       st,
     )
     _, _ -> #(0, st)
@@ -424,6 +425,7 @@ fn bool_to_jsnum(b: Bool) -> JsNum {
   }
 }
 
+// called by name from arc_rt_ops_ffi
 pub fn t_neg(st: Agent, a: JsVal) -> #(JsVal, Agent) {
   let #(n, st) = rt_val.t_to_numeric(st, a)
   case classify(n) {
@@ -438,12 +440,11 @@ pub fn t_plus(st: Agent, a: JsVal) -> #(JsVal, Agent) {
   #(mk_number(n), st)
 }
 
-pub fn t_in(st: Agent, key: JsVal, obj: JsVal) -> #(Int, Agent) {
+pub fn t_in(st: Agent, key: JsVal, obj: JsVal) -> #(Bool, Agent) {
   case classify(obj) {
     KHandle(_) -> {
       let #(pk, st) = rt_val.t_to_property_key(st, key)
-      let #(found, st) = rt_obj.t_has_prop(st, obj, pk)
-      #(bool_int(found), st)
+      rt_obj.t_has_prop(st, obj, pk)
     }
     _ -> {
       let #(tag, st) = rt_val.t_type_of(st, obj)
@@ -757,6 +758,7 @@ fn string_val(st: Agent, v: JsVal) -> #(JsVal, Agent) {
   }
 }
 
+// called by name from arc_rt_ops_ffi
 pub fn t_add(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(pa, st) = rt_val.t_to_primitive(st, a, HintDefault)
   let #(pb, st) = rt_val.t_to_primitive(st, b, HintDefault)
@@ -780,6 +782,7 @@ pub fn t_add(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   }
 }
 
+// called by name from arc_rt_ops_ffi
 pub fn t_sub(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(na, nb, st) = to_numeric_operands(st, a, b)
   case classify(na), classify(nb) {
@@ -790,6 +793,7 @@ pub fn t_sub(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   }
 }
 
+// called by name from arc_rt_ops_ffi
 pub fn t_mul(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(na, nb, st) = to_numeric_operands(st, a, b)
   case classify(na), classify(nb) {
@@ -800,6 +804,7 @@ pub fn t_mul(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   }
 }
 
+// called by name from arc_rt_ops_ffi
 pub fn t_div(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(na, nb, st) = to_numeric_operands(st, a, b)
   case classify(na), classify(nb) {
@@ -811,6 +816,7 @@ pub fn t_div(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   }
 }
 
+// called by name from arc_rt_ops_ffi
 pub fn t_mod(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(na, nb, st) = to_numeric_operands(st, a, b)
   case classify(na), classify(nb) {

@@ -54,7 +54,7 @@ fn attempt(
   obj: JsVal,
   name: String,
   args: List(JsVal),
-) -> #(rt_call.Completion, Agent) {
+) -> #(rt_call.Completion(JsVal), Agent) {
   let #(f, st) = rt_helpers.get(st, obj, name)
   rt_call.t_call(st, f, obj, args)
 }

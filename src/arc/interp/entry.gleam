@@ -4,8 +4,8 @@ import arc/bytecode/opcode.{
 import arc/internal/tuple_array
 import arc/interp/call
 import arc/interp/eval
-import arc/interp/ffi
 import arc/interp/interpreter.{Completed, Suspended}
+import arc/interp/kernel
 import arc/interp/park
 import arc/interp/state.{
   type State, type StepExit, InternalError, State, SuspensionLeak,
@@ -120,9 +120,9 @@ fn backstopped(
   body: fn(Agent) -> #(a, Agent),
   on_escape: fn(JsVal) -> a,
 ) -> #(a, Agent) {
-  case ffi.guard1(body, agent) {
-    ffi.Ok(value:, agent:) -> #(value, settle(agent, m))
-    ffi.Threw(agent:, thrown:) -> #(on_escape(thrown), settle(agent, m))
+  case kernel.guard1(body, agent) {
+    kernel.Ok(value:, agent:) -> #(value, settle(agent, m))
+    kernel.Threw(agent:, thrown:) -> #(on_escape(thrown), settle(agent, m))
   }
 }
 
@@ -136,7 +136,7 @@ pub fn run(state: State) -> #(Result(JsVal, JsVal), Agent) {
   backstopped(agent, m, body, Error)
 }
 
-fn to_completion(res: Result(JsVal, JsVal)) -> Completion {
+fn to_completion(res: Result(JsVal, JsVal)) -> Completion(JsVal) {
   case res {
     Ok(v) -> NormalCompletion(v)
     Error(e) -> ThrowCompletion(e)
@@ -146,7 +146,7 @@ fn to_completion(res: Result(JsVal, JsVal)) -> Completion {
 pub fn run_script(
   agent: Agent,
   template: FuncTemplate,
-) -> #(Completion, Agent) {
+) -> #(Completion(JsVal), Agent) {
   let #(res, agent) = run(eval.script_activation(agent, template))
   #(to_completion(res), agent)
 }
@@ -224,11 +224,11 @@ fn call_bound(
     True -> raised(depth_exceeded(st))
     False -> {
       let state = call.root_state(st, callee, this, args, new_target)
-      case ffi.guard_state(complete_call, state) {
-        ffi.Ok(value: Ok(v), agent:) -> #(v, resettle(agent, frames, depth))
-        ffi.Ok(value: Error(e), agent:) ->
+      case kernel.guard1(complete_call, state) {
+        kernel.Ok(value: Ok(v), agent:) -> #(v, resettle(agent, frames, depth))
+        kernel.Ok(value: Error(e), agent:) ->
           rt_store.t_throw(resettle(agent, frames, depth), e)
-        ffi.Threw(agent:, thrown:) ->
+        kernel.Threw(agent:, thrown:) ->
           rt_store.t_throw(resettle(agent, frames, depth), thrown)
       }
     }
@@ -293,9 +293,9 @@ fn run_plain_call(
   case call.enter_root(st, callee, this, args, mk_undefined()) {
     Error(#(thrown, st)) -> #(Error(thrown), st)
     Ok(state) ->
-      case ffi.guard_state(complete_call, state) {
-        ffi.Ok(value:, agent:) -> #(value, resettle(agent, frames, depth))
-        ffi.Threw(agent:, thrown:) -> #(
+      case kernel.guard1(complete_call, state) {
+        kernel.Ok(value:, agent:) -> #(value, resettle(agent, frames, depth))
+        kernel.Threw(agent:, thrown:) -> #(
           Error(thrown),
           resettle(agent, frames, depth),
         )
@@ -337,7 +337,7 @@ fn run_construct(
   callee_h: Handle,
   args: List(JsVal),
   new_target: JsVal,
-) -> #(Completion, Agent) {
+) -> #(Completion(JsVal), Agent) {
   let assert SObject(
     kind: BytecodeFn(template:, env:, home_object:, flags:, realm:, unit:, ..),
     ..,
@@ -381,7 +381,7 @@ fn run_construct(
 }
 
 type RootOutcome {
-  RootSettled(Completion)
+  RootSettled(Completion(JsVal))
   RootReturned(JsVal, State)
 }
 
@@ -455,9 +455,9 @@ fn start_coroutine(
   case template.is_generator {
     False -> {
       let frame = park.park(body, ParkedStart)
-      case ffi.guard2(rt_async.t_async_run, agent, ResumeFrame(frame)) {
-        ffi.Ok(value: promise, agent:) -> resume(agent, mk_object(promise))
-        ffi.Threw(agent:, thrown:) -> threw(agent, thrown)
+      case kernel.guard2(rt_async.t_async_run, agent, ResumeFrame(frame)) {
+        kernel.Ok(value: promise, agent:) -> resume(agent, mk_object(promise))
+        kernel.Threw(agent:, thrown:) -> threw(agent, thrown)
       }
     }
     True ->
@@ -597,8 +597,8 @@ fn delegate_method(
   name: String,
 ) -> Result(#(Option(JsVal), State), StepExit) {
   let iterator = site_record(site).iterator
-  use #(method, s) <- result.map(ffi.guarded(
-    ffi.guard3(rt_obj.t_get_prop, s.agent, iterator, StringKey(Named(name))),
+  use #(method, s) <- result.map(kernel.guarded(
+    kernel.guard3(rt_obj.t_get_prop, s.agent, iterator, StringKey(Named(name))),
     s,
   ))
   case classify(method) {
@@ -614,8 +614,8 @@ fn call_delegate(
   value: JsVal,
 ) -> Result(#(JsVal, State), StepExit) {
   let iterator = site_record(site).iterator
-  ffi.guarded(
-    ffi.guard4(rt_call.t_call_checked, s.agent, method, iterator, [value]),
+  kernel.guarded(
+    kernel.guard4(rt_call.t_call_checked, s.agent, method, iterator, [value]),
     s,
   )
 }
@@ -725,8 +725,8 @@ fn delegate_result(
   rest: List(JsVal),
   on_done: fn(State, JsVal) -> #(Step, Agent),
 ) -> #(Step, Agent) {
-  use #(#(done, val), s) <- or_delegate_exit(ffi.guarded(
-    ffi.guard2(iter_protocol.read_iter_result, s.agent, res),
+  use #(#(done, val), s) <- or_delegate_exit(kernel.guarded(
+    kernel.guard2(iter_protocol.read_iter_result, s.agent, res),
     s,
   ))
   case done {

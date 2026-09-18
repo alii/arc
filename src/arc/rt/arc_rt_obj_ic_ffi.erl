@@ -1,8 +1,8 @@
-%% site-cached kernels called only by aot emitted code; reads may answer miss
--module(arc_rt_obj_fast_ffi).
--export([t_set_props_named/5, t_set_props_init/6, t_new_object_props/3,
-         t_set_prop/5, t_set_prop/6, t_get_prop/4, t_global_get/3,
-         t_global_get_miss/3]).
+%% site ic kernels called only by aot emitted code; exports may answer miss
+-module(arc_rt_obj_ic_ffi).
+-export([t_set_named_many/5, t_set_named_init_ic/6, t_new_object_props/3,
+         t_set_named_ic/6, t_get_named_ic/4, t_get_named_ic_shaped/4,
+         t_global_get_ic/3, t_global_get_ic_fill/3]).
 
 -include("arc_rt_layout.hrl").
 
@@ -12,17 +12,17 @@
 
 %% site cache of a global object data property, valid while the epoch holds;
 %% keyed like the read and call ics so a site can never answer for another name
-t_global_get(St, KeyBin, Site) ->
+t_global_get_ic(St, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
     case element(?STORE_ICS, Store) of
         #{Site := {?IC_GLOBAL, KeyBin, Epoch, V, _}}
           when Epoch =:= element(?STORE_GLOBAL_EPOCH, Store) ->
             V;
-        #{Site := ?IC_OFF} -> arc_rt_obj_ffi:t_global_get_fast(St, KeyBin);
+        #{Site := ?IC_OFF} -> arc_rt_obj_ffi:t_global_peek(St, KeyBin);
         _ -> miss
     end.
 
-t_global_get_miss(St, KeyBin, Site) when tuple_size(St) =:= ?AGENT_SIZE ->
+t_global_get_ic_fill(St, KeyBin, Site) when tuple_size(St) =:= ?AGENT_SIZE ->
     {V, St1} = arc_rt_obj_ffi:t_global_get(St, KeyBin),
     case element(?AGENT_STORE, St1) of
         Store when tuple_size(Store) =:= ?STORE_SIZE ->
@@ -56,8 +56,25 @@ global_plain(Cell, KeyBin, V)
     end;
 global_plain(_, _, _) -> false.
 
-%% bare value or miss; on miss arc_rt_obj_ffi:t_get_prop_slow fills the ic
-t_get_prop(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
+%% shaped receivers only, this reads
+t_get_named_ic_shaped(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
+    Store = element(?AGENT_STORE, St),
+    case element(?STORE_ICS, Store) of
+        #{Site := {?IC_READ, KeyBin, Offs}} ->
+            case arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)) of
+                {?SSHAPED_TAG, Sid, _, Slots, _} ->
+                    case Offs of
+                        #{Sid := Off} -> ?SLOT_AT(Slots, Off);
+                        _ -> miss
+                    end;
+                _ -> miss
+            end;
+        _ -> miss
+    end;
+t_get_named_ic_shaped(_, _, _, _) -> miss.
+
+%% bare value or miss; on miss arc_rt_obj_ffi:t_get_named fills the ic
+t_get_named_ic(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
     Cell = arc_rt_arena_ffi:get(Id, element(?STORE_DATA, Store)),
     case element(1, Cell) of
@@ -89,12 +106,12 @@ t_get_prop(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
             end;
         _ -> miss
     end;
-t_get_prop(_, S, <<"length">>, _) when ?IS_STR(S) ->
-    arc_rt_str_ffi:len(S);
-t_get_prop(_, _, _, _) -> miss.
+t_get_named_ic(_, S, <<"length">>, _) when ?IS_STR(S) ->
+    arc_rt_js_string_ffi:len(S);
+t_get_named_ic(_, _, _, _) -> miss.
 
 %% own overwrite only, size guards keep setelement inline
-t_set_prop(St, Obj = {?HANDLE_TAG, Id}, KeyBin, V, Strict)
+set_named(St, Obj = {?HANDLE_TAG, Id}, KeyBin, V, Strict)
   when tuple_size(St) =:= ?AGENT_SIZE ->
     case element(?AGENT_STORE, St) of
         Store when tuple_size(Store) =:= ?STORE_SIZE ->
@@ -104,7 +121,7 @@ t_set_prop(St, Obj = {?HANDLE_TAG, Id}, KeyBin, V, Strict)
                           tuple_size(Cell) =:= ?SSHAPED_SIZE ->
                     case slot_offset(Store, Cell, KeyBin) of
                         miss ->
-                            arc_rt_obj_ffi:t_set_prop_named(St, Obj, KeyBin, V,
+                            arc_rt_obj_ffi:t_set_named(St, Obj, KeyBin, V,
                                                             Strict);
                         Off ->
                             Slots = ?SLOT_SET(element(?SSHAPED_SLOTS, Cell), Off, V),
@@ -129,17 +146,17 @@ t_set_prop(St, Obj = {?HANDLE_TAG, Id}, KeyBin, V, Strict)
                                        setelement(?STORE_DATA, Store,
                                                   arc_rt_arena_ffi:set(Id, NewCell, Data)));
                         _ ->
-                            arc_rt_obj_ffi:t_set_prop_named(St, Obj, KeyBin, V,
+                            arc_rt_obj_ffi:t_set_named(St, Obj, KeyBin, V,
                                                             Strict)
                     end;
-                _ -> arc_rt_obj_ffi:t_set_prop_named(St, Obj, KeyBin, V, Strict)
+                _ -> arc_rt_obj_ffi:t_set_named(St, Obj, KeyBin, V, Strict)
             end
     end;
-t_set_prop(St, Obj, KeyBin, V, Strict) ->
-    arc_rt_obj_ffi:t_set_prop_named(St, Obj, KeyBin, V, Strict).
+set_named(St, Obj, KeyBin, V, Strict) ->
+    arc_rt_obj_ffi:t_set_named(St, Obj, KeyBin, V, Strict).
 
 %% own overwrite first, then the site's cached transition for a new key
-t_set_prop(St, Obj = {?HANDLE_TAG, Id}, KeyBin, V, Strict, Site)
+t_set_named_ic(St, Obj = {?HANDLE_TAG, Id}, KeyBin, V, Strict, Site)
   when tuple_size(St) =:= ?AGENT_SIZE ->
     case element(?AGENT_STORE, St) of
         Store when tuple_size(Store) =:= ?STORE_SIZE ->
@@ -158,11 +175,11 @@ t_set_prop(St, Obj = {?HANDLE_TAG, Id}, KeyBin, V, Strict, Site)
                                        setelement(?STORE_DATA, Store,
                                                   arc_rt_arena_ffi:set(Id, NewCell, Data)))
                     end;
-                _ -> t_set_prop(St, Obj, KeyBin, V, Strict)
+                _ -> set_named(St, Obj, KeyBin, V, Strict)
             end
     end;
-t_set_prop(St, Obj, KeyBin, V, Strict, _) ->
-    arc_rt_obj_ffi:t_set_prop_named(St, Obj, KeyBin, V, Strict).
+t_set_named_ic(St, Obj, KeyBin, V, Strict, _) ->
+    arc_rt_obj_ffi:t_set_named(St, Obj, KeyBin, V, Strict).
 
 slot_offset(_, Cell, KeyBin) ->
     case element(?SSHAPED_OFFSETS, Cell) of
@@ -173,7 +190,7 @@ slot_offset(_, Cell, KeyBin) ->
 -define(IC_INIT_HOPS, 8).
 
 %% caches a pure append run from one shape, proto chain checked by identity
-t_set_props_init(St, Obj = {?HANDLE_TAG, Id}, Keys, Vals, Strict, Site)
+t_set_named_init_ic(St, Obj = {?HANDLE_TAG, Id}, Keys, Vals, Strict, Site)
   when tuple_size(St) =:= ?AGENT_SIZE ->
     case element(?AGENT_STORE, St) of
         Store when tuple_size(Store) =:= ?STORE_SIZE ->
@@ -183,11 +200,11 @@ t_set_props_init(St, Obj = {?HANDLE_TAG, Id}, Keys, Vals, Strict, Site)
                           tuple_size(Cell) =:= ?SSHAPED_SIZE ->
                     shaped_init(St, Store, Data, Id, Cell, Obj, Keys, Vals,
                                 Strict, Site);
-                _ -> t_set_props_named(St, Obj, Keys, Vals, Strict)
+                _ -> t_set_named_many(St, Obj, Keys, Vals, Strict)
             end
     end;
-t_set_props_init(St, Obj, Keys, Vals, Strict, _) ->
-    t_set_props_named(St, Obj, Keys, Vals, Strict).
+t_set_named_init_ic(St, Obj, Keys, Vals, Strict, _) ->
+    t_set_named_many(St, Obj, Keys, Vals, Strict).
 
 shaped_init(St, Store, Data, Id, Cell, Obj, Keys, Vals, Strict, Site)
   when tuple_size(St) =:= ?AGENT_SIZE, tuple_size(Store) =:= ?STORE_SIZE ->
@@ -204,12 +221,12 @@ shaped_init(St, Store, Data, Id, Cell, Obj, Keys, Vals, Strict, Site)
                                setelement(?STORE_DATA, Store,
                                           arc_rt_arena_ffi:set(Id, NewCell, Data)));
                 false ->
-                    init_fill(t_set_props_named(St, Obj, Keys, Vals, Strict),
+                    init_fill(t_set_named_many(St, Obj, Keys, Vals, Strict),
                               Id, Sid, Proto, Keys, Site)
             end;
-        #{Site := _} -> t_set_props_named(St, Obj, Keys, Vals, Strict);
+        #{Site := _} -> t_set_named_many(St, Obj, Keys, Vals, Strict);
         _ ->
-            init_fill(t_set_props_named(St, Obj, Keys, Vals, Strict), Id, Sid,
+            init_fill(t_set_named_many(St, Obj, Keys, Vals, Strict), Id, Sid,
                       Proto, Keys, Site)
     end.
 
@@ -279,7 +296,7 @@ chain_of(Data, {?SOME, {?HANDLE_TAG, PId}}, Fuel, Acc) ->
     end;
 chain_of(_, _, _, _) -> none.
 
-t_set_props_named(St, Obj = {?HANDLE_TAG, Id}, Keys, Vals, Strict) ->
+t_set_named_many(St, Obj = {?HANDLE_TAG, Id}, Keys, Vals, Strict) ->
     Store = element(?AGENT_STORE, St),
     Data = element(?STORE_DATA, Store),
     case arc_rt_arena_ffi:get(Id, Data) of
@@ -288,7 +305,7 @@ t_set_props_named(St, Obj = {?HANDLE_TAG, Id}, Keys, Vals, Strict) ->
                        Strict, element(?STORE_SHAPES, Store), false);
         _ -> each_named(St, Obj, Keys, Vals, Strict)
     end;
-t_set_props_named(St, Obj, Keys, Vals, Strict) ->
+t_set_named_many(St, Obj, Keys, Vals, Strict) ->
     each_named(St, Obj, Keys, Vals, Strict).
 
 shaped_run(St, Store, Data, Id, Obj, Sid, P, Slots, [K | Ks], [V | Vs],
@@ -340,7 +357,7 @@ commit(St, Store, Data, Id, Sid, P, Slots, Shapes, true)
                setelement(?STORE_DATA, Store, arc_rt_arena_ffi:set(Id, Cell, Data))).
 
 each_named(St, Obj, [K | Ks], [V | Vs], Strict) ->
-    each_named(arc_rt_obj_ffi:t_set_prop_named(St, Obj, K, V, Strict), Obj,
+    each_named(arc_rt_obj_ffi:t_set_named(St, Obj, K, V, Strict), Obj,
                Ks, Vs, Strict);
 each_named(St, _, _, _, _) -> St.
 

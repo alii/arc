@@ -1,9 +1,9 @@
 %% ascii strings are bare binaries, others {js_str, Utf8, CpLen, Crumbs}
 %% crumbs: byte offsets of codepoints 0, stride, 2 stride .., none when long
 %% TODO(Deviation): indexes by codepoint, js wants utf-16 code units
--module(arc_rt_str_ffi).
--export([mk/1, mk_list/1, bin/1, len/1, is_str/1, cp_at/2, char_at/2,
-         sub/3, concat/2, concat_loose/2, index_of/3]).
+-module(arc_rt_js_string_ffi).
+-export([mk/1, mk_list/1, bin/1, len/1, is_str/1, cp_at/2, char_at_val/2,
+         sub/3, concat/2, concat_loose/2, index_of_val/3]).
 
 -include("arc_rt_layout.hrl").
 
@@ -115,7 +115,7 @@ cp_at(S, I) when I >= 0 ->
     end;
 cp_at(_, _) -> none.
 
-char_at(S, I) ->
+char_at_val(S, I) ->
     case cp_at(S, I) of
         {some, C} when C < 16#80 -> {some, <<C>>};
         {some, C} -> {some, {?STR_TAG, <<C/utf8>>, 1, {0}}};
@@ -161,7 +161,7 @@ extend(A, LA, New) ->
     list_to_tuple(Kept ++ tuple_to_list(More)).
 
 %% codepoint index of Needle at or after cp From, both js strings
-index_of(Hay, Needle, From) ->
+index_of_val(Hay, Needle, From) ->
     HB = bin(Hay),
     NB = bin(Needle),
     Start = byte_offset(Hay, From),

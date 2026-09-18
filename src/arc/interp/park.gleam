@@ -1,5 +1,5 @@
 import arc/internal/tuple_array
-import arc/interp/ffi
+import arc/interp/kernel
 import arc/interp/state.{type State, State}
 import arc/rt/bytecode.{type ParkedAt, type SuspendedFrame, SuspendedFrame}
 import arc/rt/types.{type Agent, type JsVal, Agent, FrameInfo, Handle}
@@ -67,7 +67,7 @@ pub fn unpark_with(
     depth: agent.call_depth,
     try_stack:,
     this:,
-    new_target: ffi.val([ffi.Undefined]),
+    new_target: kernel.val([kernel.Undefined]),
     home_object:,
     call_args:,
     eval_env: case eval_env {

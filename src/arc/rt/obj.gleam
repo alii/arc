@@ -1,4 +1,5 @@
 import arc/internal/tree_array
+import arc/internal/unsafe
 import arc/rt/buffer
 import arc/rt/bytecode.{FuncTemplate}
 import arc/rt/elements
@@ -1986,9 +1987,9 @@ pub fn t_for_in_keys(st: Agent, obj: JsVal) -> #(List(JsVal), Agent) {
   case rt_types.classify(obj) {
     KUndef | KNull -> #([], st)
     KHandle(h) ->
-      case for_in_fast(st, obj) {
-        Some(keys) -> #(keys, st)
-        None ->
+      case plain_for_in_keys(st, obj) {
+        PlainKeys(keys) -> #(keys, st)
+        Miss ->
           for_in_keys_loop(
             st,
             Some(h),
@@ -2005,8 +2006,13 @@ pub fn t_for_in_keys(st: Agent, obj: JsVal) -> #(List(JsVal), Agent) {
 }
 
 // plain chains only, see arc_rt_obj_ffi
-@external(erlang, "arc_rt_obj_ffi", "t_for_in_fast")
-fn for_in_fast(st: Agent, obj: JsVal) -> Option(List(JsVal))
+type PlainKeys {
+  PlainKeys(List(JsVal))
+  Miss
+}
+
+@external(erlang, "arc_rt_obj_ffi", "plain_for_in_keys")
+fn plain_for_in_keys(st: Agent, obj: JsVal) -> PlainKeys
 
 // non-enumerable own key still shadows proto keys; fuel bounds trap loops
 fn for_in_keys_loop(
@@ -3189,37 +3195,37 @@ pub fn t_define_own_accessor(
   )
 }
 
-// accepts wire PropertyKey or ObjectKey
-@external(erlang, "arc_rt_store_ffi", "as_object_key")
-fn as_object_key(key: k) -> ObjectKey
-
-@external(erlang, "gleam_stdlib", "identity")
-fn unsafe_coerce(a: a) -> b
-
 @external(erlang, "erlang", "is_list")
 fn is_list(a: a) -> Bool
 
-pub fn t_get_prop_any(st: Agent, recv: JsVal, key: k) -> #(JsVal, Agent) {
-  t_get_prop(st, recv, as_object_key(key))
+// called by name from arc_rt_obj_ffi
+pub fn t_get_prop_untyped_key(
+  st: Agent,
+  recv: JsVal,
+  key: k,
+) -> #(JsVal, Agent) {
+  t_get_prop(st, recv, rt_store.as_object_key(key))
 }
 
-pub fn t_set_prop_any(
+// called by name from arc_rt_obj_ffi
+pub fn t_set_prop_untyped_key(
   st: Agent,
   recv: JsVal,
   key: k,
   v: JsVal,
 ) -> #(Bool, Agent) {
-  t_set_prop(st, recv, as_object_key(key), v)
+  t_set_prop(st, recv, rt_store.as_object_key(key), v)
 }
 
 // §13.15.2 strict putvalue throws on failed set
+// called by name from arc_rt_obj_ffi
 pub fn t_set_prop_strict(
   st: Agent,
   recv: JsVal,
   key: k,
   v: JsVal,
 ) -> #(Bool, Agent) {
-  let okey = as_object_key(key)
+  let okey = rt_store.as_object_key(key)
   let #(ok, st) = t_set_prop(st, recv, okey, v)
   case ok {
     True -> #(True, st)
@@ -3257,7 +3263,8 @@ pub fn t_create_data_prop(
   v: JsVal,
 ) -> #(Bool, Agent)
 
-pub fn t_create_data_prop_slow(
+// called by name from arc_rt_obj_ffi
+pub fn t_create_data_prop_general(
   st: Agent,
   recv: JsVal,
   key: k,
@@ -3265,7 +3272,7 @@ pub fn t_create_data_prop_slow(
 ) -> #(Bool, Agent) {
   case rt_types.classify(recv) {
     KHandle(h) -> {
-      let okey = as_object_key(key)
+      let okey = rt_store.as_object_key(key)
       let #(ok, st) = t_define_own_data(st, h, okey, v, True, True, True)
       case ok {
         True -> #(True, st)
@@ -3280,7 +3287,7 @@ pub fn t_create_data_prop_slow(
       rt_val.t_throw_type_error(
         st,
         "Cannot define property '"
-          <> key_text(as_object_key(key))
+          <> key_text(rt_store.as_object_key(key))
           <> "' on "
           <> case rt_types.classify(recv) {
           KNull -> "null"
@@ -3292,6 +3299,7 @@ pub fn t_create_data_prop_slow(
 }
 
 // absent name throws referenceerror
+// called by name from arc_rt_obj_ffi
 pub fn t_global_get(st: Agent, name: BitArray) -> #(JsVal, Agent) {
   let g = rt_types.mk_object(st.realm.global_object)
   let key = StringKey(binary_key(name))
@@ -3370,7 +3378,7 @@ pub fn t_new_arguments(
   let len = list.length(args)
   // wire-level check, a list is not a JsVal
   let mapped_boxes = case is_list(mapped) {
-    True -> Some(unsafe_coerce(mapped))
+    True -> Some(unsafe.coerce(mapped))
     False -> None
   }
   let elements = tree_array.from_list(args)
@@ -3431,6 +3439,7 @@ pub fn t_new_arguments(
 }
 
 // holes arrive as mk_hole() and stay holes
+// called by name from arc_rt_obj_ffi
 pub fn t_new_array(st: Agent, elems: List(JsVal)) -> #(JsVal, Agent) {
   let len = list.length(elems)
   let elements = tree_array.from_list(elems)

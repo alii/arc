@@ -28,10 +28,10 @@ pub fn load(beam: BitArray, name: String) -> Result(Atom, String) {
 pub fn unload(module: Atom) -> Nil
 
 @external(erlang, "arc_aot_exec_ffi", "apply_js_main")
-pub fn apply_main(module: Atom, st: Agent) -> #(JsExecOutcome, Agent)
+pub fn apply_js_main(module: Atom, st: Agent) -> #(JsExecOutcome, Agent)
 
 pub fn run_loaded(module: Atom, st: Agent) -> #(Agent, RunResult) {
-  let #(outcome, st) = apply_main(module, st)
+  let #(outcome, st) = apply_js_main(module, st)
   let result = case outcome {
     JsReturned(v) -> Ok(v)
     JsThrew(e) -> Error("uncaught: " <> string.inspect(e))

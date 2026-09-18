@@ -14,6 +14,7 @@ import arc/rt/types.{
 import arc/rt/val as rt_val
 import gleam/bool
 import gleam/dict.{type Dict}
+import gleam/dynamic.{type Dynamic}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -22,7 +23,7 @@ import gleam/option.{type Option, None, Some}
 pub type Frame
 
 @external(erlang, "arc_rt_call_ffi", "mk_frame")
-fn mk_frame(
+pub fn mk_frame(
   this: JsVal,
   active_func: JsVal,
   home_object: JsVal,
@@ -36,8 +37,8 @@ pub fn frame_active_func(frame: Frame) -> JsVal {
   frame_element(2, frame)
 }
 
-pub type Completion {
-  NormalCompletion(JsVal)
+pub type Completion(a) {
+  NormalCompletion(a)
   ThrowCompletion(JsVal)
 }
 
@@ -47,13 +48,13 @@ fn t_call_protected(
   code: CompiledCode,
   frame: Frame,
   args: List(JsVal),
-) -> #(Completion, Agent)
+) -> #(Completion(JsVal), Agent)
 
 @external(erlang, "arc_rt_call_ffi", "t_apply_protected")
-fn t_apply_protected(
+pub fn t_apply_protected(
   st: Agent,
-  body: fn(Agent) -> #(JsVal, Agent),
-) -> #(Completion, Agent)
+  body: fn(Agent) -> #(a, Agent),
+) -> #(Completion(a), Agent)
 
 @external(erlang, "arc_rt_call_ffi", "t_native_protected")
 fn t_native_protected(
@@ -61,9 +62,9 @@ fn t_native_protected(
   token: NativeToken,
   this: JsVal,
   args: List(JsVal),
-) -> #(Completion, Agent)
+) -> #(Completion(JsVal), Agent)
 
-@external(erlang, "arc_rt_builtins_ffi", "dispatch_native_construct")
+@external(erlang, "arc@rt@builtins", "dispatch_native_construct")
 fn dispatch_native_construct(
   st: Agent,
   token: NativeToken,
@@ -113,9 +114,9 @@ fn handle_is_constructor(st: Agent, h: Handle) -> Bool {
   }
 }
 
-// fast path probe: ordinary compiled fn only, else undefined
-@external(erlang, "arc_rt_call_ffi", "t_compiled_fn_code")
-pub fn t_compiled_fn_code(st: Agent, callee: JsVal, this: JsVal) -> JsVal
+// {code, this, direct_entry} for a plain compiled fn, else miss
+@external(erlang, "arc_rt_call_ffi", "t_direct_callee")
+pub fn t_direct_callee(st: Agent, callee: JsVal, this: JsVal) -> Dynamic
 
 // §10.2.1 [[call]], catches a throw into a completion
 pub fn t_call(
@@ -123,7 +124,7 @@ pub fn t_call(
   callee: JsVal,
   this: JsVal,
   args: List(JsVal),
-) -> #(Completion, Agent) {
+) -> #(Completion(JsVal), Agent) {
   case classify(callee) {
     KHandle(h) ->
       case rt_store.t_cell_get(st, h) {
@@ -147,7 +148,7 @@ fn call_cell(
   cell: rt_types.Cell,
   this: JsVal,
   args: List(JsVal),
-) -> #(Completion, Agent) {
+) -> #(Completion(JsVal), Agent) {
   case cell {
     SObject(kind: CompiledFn(code:, home_object:, flags:, ..), ..) -> {
       use st <- bracketed(st)
@@ -169,8 +170,8 @@ fn call_cell(
 
 fn bracketed(
   st: Agent,
-  body: fn(Agent) -> #(Completion, Agent),
-) -> #(Completion, Agent) {
+  body: fn(Agent) -> #(Completion(JsVal), Agent),
+) -> #(Completion(JsVal), Agent) {
   let depth = st.call_depth
   case depth >= limits.max_call_depth {
     True -> t_apply_protected(st, rt_store.stack_overflow)
@@ -189,7 +190,7 @@ fn call_kfunction(
   flags: FnFlags,
   this: JsVal,
   args: List(JsVal),
-) -> #(Completion, Agent) {
+) -> #(Completion(JsVal), Agent) {
   case flags.is_class_constructor {
     True ->
       t_apply_protected(st, fn(st) {
@@ -239,7 +240,7 @@ fn call_proxy(
   revoked: Bool,
   this: JsVal,
   args: List(JsVal),
-) -> #(Completion, Agent) {
+) -> #(Completion(JsVal), Agent) {
   t_apply_protected(st, fn(st) {
     use <- bool.lazy_guard(!is_callable(st, mk_object(target)), fn() {
       not_a_function_raise(st, callee)
@@ -290,7 +291,7 @@ fn proxy_trap(
   }
 }
 
-fn not_a_function(st: Agent, callee: JsVal) -> #(Completion, Agent) {
+fn not_a_function(st: Agent, callee: JsVal) -> #(Completion(JsVal), Agent) {
   t_apply_protected(st, fn(st) { not_a_function_raise(st, callee) })
 }
 
@@ -300,6 +301,7 @@ fn not_a_function_raise(st: Agent, callee: JsVal) -> a {
 }
 
 // rethrows; the fn seeded into jsops.call
+// called by name from arc_rt_call_ic_ffi
 pub fn t_call_checked(
   st: Agent,
   callee: JsVal,
@@ -371,7 +373,7 @@ fn call_native(
 
 fn rethrown_bracket(
   st: Agent,
-  body: fn(Agent) -> #(Completion, Agent),
+  body: fn(Agent) -> #(Completion(JsVal), Agent),
 ) -> #(JsVal, Agent) {
   rethrown(bracketed(st, body))
 }
@@ -390,7 +392,7 @@ pub fn t_bind_callable(
         SObject(kind: NativeFn(token:, ..), ..) ->
           Some(fn(st, args) { call_native(st, token, this, args) })
         SObject(kind: CompiledFn(code:, home_object:, flags:, ..) as kind, ..) ->
-          bind_compiled(st, callee, kind, this)
+          t_bind_compiled(st, callee, kind, this)
           |> option.or(
             Some(fn(st, args) {
               call_compiled(st, h, code, home_object, flags, this, args)
@@ -408,15 +410,15 @@ pub fn t_bind_callable(
   }
 }
 
-@external(erlang, "arc_rt_call_fast_ffi", "t_bind_compiled")
-fn bind_compiled(
+@external(erlang, "arc_rt_call_ic_ffi", "t_bind_compiled")
+fn t_bind_compiled(
   st: Agent,
   callee: JsVal,
   kind: ObjKind,
   this: JsVal,
 ) -> Option(fn(Agent, List(JsVal)) -> #(JsVal, Agent))
 
-fn rethrown(outcome: #(Completion, Agent)) -> #(JsVal, Agent) {
+fn rethrown(outcome: #(Completion(JsVal), Agent)) -> #(JsVal, Agent) {
   case outcome {
     #(NormalCompletion(v), st) -> #(v, st)
     #(ThrowCompletion(e), st) -> rt_store.t_throw(st, e)

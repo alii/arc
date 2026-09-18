@@ -315,8 +315,8 @@ fn dispose(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 fn dispose_resources(
   st: Agent,
   resources: List(DisposeResource),
-  completion: rt_call.Completion,
-) -> #(rt_call.Completion, Agent) {
+  completion: rt_call.Completion(JsVal),
+) -> #(rt_call.Completion(JsVal), Agent) {
   case resources {
     [] -> #(completion, st)
     [resource, ..rest] -> {

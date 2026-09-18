@@ -2,7 +2,7 @@ import arc/rt/async as rt_async
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/realm_ops
-import arc/rt/call as rt_call
+import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/types.{
   type Agent, type FromAsyncCtx, type FromAsyncLikeCtx, type JsVal,
@@ -17,20 +17,11 @@ import arc/rt/val as rt_val
 import gleam/int
 import gleam/option.{type Option, None, Some}
 
-// wire-compatible with rt_call.Completion
-type ProtOut(a) {
-  NormalCompletion(a)
-  ThrowCompletion(JsVal)
-}
-
-@external(erlang, "arc_rt_call_ffi", "t_apply_protected")
-fn protected(st: Agent, body: fn(Agent) -> #(a, Agent)) -> #(ProtOut(a), Agent)
-
 fn attempt(
   st: Agent,
   body: fn(Agent) -> Agent,
 ) -> Result(Agent, #(JsVal, Agent)) {
-  case protected(st, fn(st) { #(Nil, body(st)) }) {
+  case rt_call.t_apply_protected(st, fn(st) { #(Nil, body(st)) }) {
     #(NormalCompletion(Nil), st) -> Ok(st)
     #(ThrowCompletion(thrown), st) -> Error(#(thrown, st))
   }
@@ -40,7 +31,7 @@ fn attempt_value(
   st: Agent,
   body: fn(Agent) -> #(a, Agent),
 ) -> Result(#(a, Agent), #(JsVal, Agent)) {
-  case protected(st, body) {
+  case rt_call.t_apply_protected(st, body) {
     #(NormalCompletion(v), st) -> Ok(#(v, st))
     #(ThrowCompletion(thrown), st) -> Error(#(thrown, st))
   }

@@ -1327,7 +1327,7 @@ fn skip_identifier_unicode(rest: BitArray, consumed: Int) -> IdentRun {
   case rest {
     <<c:utf8_codepoint, tail:bytes>> -> {
       let code = string.utf_codepoint_to_int(c)
-      case is_unicode_id_continue(code) {
+      case is_id_continue(code) {
         True -> skip_identifier_bytes(tail, consumed + codepoint_width(code))
         False -> RunEnd(consumed)
       }
@@ -1357,7 +1357,7 @@ fn is_identifier_start_code(code: Int) -> Bool {
   digits.is_ascii_alpha_code(code)
   || code == 0x5F
   || code == 0x24
-  || { code > 127 && is_unicode_id_start(code) }
+  || { code > 127 && is_id_start(code) }
 }
 
 fn is_identifier_part_code(code: Int) -> Bool {
@@ -1366,14 +1366,14 @@ fn is_identifier_part_code(code: Int) -> Bool {
   || code == 0x24
   || code == 0x200C
   || code == 0x200D
-  || { code > 127 && is_unicode_id_continue(code) }
+  || { code > 127 && is_id_continue(code) }
 }
 
 @external(erlang, "arc_unicode_ffi", "is_id_start")
-fn is_unicode_id_start(cp: Int) -> Bool
+fn is_id_start(cp: Int) -> Bool
 
 @external(erlang, "arc_unicode_ffi", "is_id_continue")
-fn is_unicode_id_continue(cp: Int) -> Bool
+fn is_id_continue(cp: Int) -> Bool
 
 pub fn keyword_or_identifier(word: String) -> TokenKind {
   case word {

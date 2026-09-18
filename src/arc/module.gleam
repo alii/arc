@@ -1,6 +1,7 @@
 import arc/compiler.{type ExportSeed}
 import arc/esm
 import arc/internal/tuple_array.{type TupleArray}
+import arc/internal/unsafe
 import arc/interp/entry
 import arc/interp/safepoint
 import arc/interp/state.{type State, State}
@@ -1120,10 +1121,11 @@ fn namespace_cell(exports: Dict(String, Handle), tag: String) -> types.Cell {
   )
 }
 
-@external(erlang, "gleam_stdlib", "identity")
 fn as_code(
   f: fn(Agent, rt_call.Frame, List(JsVal)) -> #(JsVal, Agent),
-) -> CompiledCode
+) -> CompiledCode {
+  unsafe.coerce(f)
+}
 
 fn trap_flags() -> types.FnFlags {
   FnFlags(

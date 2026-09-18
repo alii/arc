@@ -102,10 +102,10 @@ fn global_var_prologue(
   }
   let vars =
     list.append(ast_util.var_declared_names(body), annexb)
-    |> list.map(fn(name) { #(name, "declare_global_var") })
+    |> list.map(fn(name) { #(name, "create_global_var_binding") })
   let fns =
     ast_util.top_level_function_names(body)
-    |> list.map(fn(name) { #(name, "declare_global_fn") })
+    |> list.map(fn(name) { #(name, "create_global_fn_binding") })
   list.append(vars, fns)
   |> list.unique
   |> list.filter(fn(entry) {

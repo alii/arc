@@ -4,7 +4,7 @@
 %% invariant: every promise is settled exactly once
 start() ->
     register(main, self()),
-    Eng = arc@wasm@playground:new_engine(),
+    Eng = 'arc@wasm@playground':new_engine(),
     announce_ready(),
     loop(Eng).
 
@@ -35,7 +35,7 @@ handle_call(Promise, Src0, Eng) ->
     try
         case normalise_source(Src0) of
             {ok, Src} ->
-                case in_worker(fun() -> arc@wasm@playground:eval(Eng, Src) end) of
+                case in_worker(fun() -> 'arc@wasm@playground':eval(Eng, Src) end) of
                     {ok, Out} -> emscripten:promise_resolve(Promise, Out);
                     {error, Msg} -> emscripten:promise_reject(Promise, Msg);
                     {crash, WC, WR, WSt} ->

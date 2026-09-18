@@ -20,7 +20,6 @@ import arc/rt/types.{
   KUndef, mk_object,
 }
 import gleam/dict.{type Dict}
-import gleam/dynamic.{type Dynamic}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -199,14 +198,11 @@ pub fn with_state_with(
 ) -> #(Engine(host), a) {
   let #(s, result) = body(host_state(engine))
   let held =
-    rt_gc.push_term_refs(to_dynamic(result), [])
+    rt_gc.push_refs(result, [])
     |> list.map(fn(id) { mk_object(Handle(id)) })
   let agent = safepoint.finish_turn(s.agent, held, finish)
   #(Engine(..engine, agent:), result)
 }
-
-@external(erlang, "gleam_stdlib", "identity")
-fn to_dynamic(a: anything) -> Dynamic
 
 pub fn register_host_module(
   engine: Engine(host),
@@ -233,7 +229,7 @@ pub fn register_host_module(
 
 fn settle(
   engine: Engine(host),
-  completion: Completion,
+  completion: Completion(JsVal),
   agent: Agent,
   finish: fn(Agent) -> Agent,
 ) -> #(Outcome, Engine(host)) {
@@ -260,7 +256,7 @@ pub fn eval_with(
   finish: fn(Agent) -> Agent,
 ) -> Result(#(Outcome, Engine(host)), EvalError(host)) {
   use template <- result.map(
-    compile_task.run(string.byte_size(source), fn() {
+    compile_task.run_compile_task(string.byte_size(source), fn() {
       use #(body, sb) <- result.try(
         parser.parse_script(source) |> result.map_error(ParseError),
       )

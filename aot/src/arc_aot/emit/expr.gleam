@@ -169,7 +169,7 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
           use ov <- anf.then(expr(object))
           case object, static_dot_key(property) {
             ast.ThisExpression(_), Some(key_bytes) ->
-              get_prop_this(ov, key_bytes)
+              get_named("get_named_ic_shaped", ov, key_bytes)
             _, _ -> emit_member_get(ov, property)
           }
         }
@@ -189,7 +189,7 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
       case ast_util.has_spread_arg(args) {
         True -> anf.host("construct", [c, args_l, c])
         False -> {
-          use r <- anf.then(anf.host("new_simple", [c, args_l]))
+          use r <- anf.then(anf.host("new_direct", [c, args_l]))
           use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, r)))
           anf.bind_if(
             is_miss,
@@ -328,9 +328,9 @@ fn emit_identifier(name: String) -> Build(ir.Value) {
 
 fn binop(op: ast.BinaryOp, l: ir.Value, r: ir.Value) -> Build(ir.Value) {
   case op {
-    ast.Add -> anf.guarded_binop("num_add", "add", l, r)
-    ast.Subtract -> anf.guarded_binop("num_sub", "sub", l, r)
-    ast.Multiply -> anf.guarded_binop("num_mul", "mul", l, r)
+    ast.Add -> anf.guarded_binop("add", "add_general", l, r)
+    ast.Subtract -> anf.guarded_binop("sub", "sub_general", l, r)
+    ast.Multiply -> anf.guarded_binop("mul", "mul_general", l, r)
     ast.LessThan -> anf.guarded_cmp(ir.NLt, "lt", l, r)
     ast.LessThanEqual -> anf.guarded_cmp(ir.NLe, "le", l, r)
     ast.GreaterThan -> anf.guarded_cmp(ir.NGt, "gt", l, r)
@@ -360,35 +360,39 @@ fn binop(op: ast.BinaryOp, l: ir.Value, r: ir.Value) -> Build(ir.Value) {
       mark_int_result(
         l,
         r,
-        shift_small_const("erl_bsl", "shl_fast", "shl", l, r),
+        shift_small_const("bsl", "shl", "shl_general", l, r),
       )
     ast.RightShift ->
       mark_int_result(
         l,
         r,
-        shift_small_const("erl_bsr", "shr_fast", "shr", l, r),
+        shift_small_const("bsr", "shr", "shr_general", l, r),
       )
     ast.UnsignedRightShift ->
-      mark_int_result(l, r, int_fast("ushr_fast", "ushr", l, r))
+      mark_int_result(l, r, with_kernel("ushr", "ushr_general", l, r))
     ast.BitwiseAnd ->
       mark_int_result(
         l,
         r,
-        bitop_small_const("erl_band", "bitand_fast", "bitand", l, r),
+        bitop_small_const("band", "bitand", "bitand_general", l, r),
       )
     ast.BitwiseOr ->
-      mark_int_result(l, r, int_fast("bitor_fast", "bitor", l, r))
+      mark_int_result(l, r, with_kernel("bitor", "bitor_general", l, r))
     ast.BitwiseXor ->
-      mark_int_result(l, r, int_fast("bitxor_fast", "bitxor", l, r))
-    ast.In -> anf.then(anf.host("op_in", [l, r]), anf.i32_to_js_bool)
+      mark_int_result(l, r, with_kernel("bitxor", "bitxor_general", l, r))
+    ast.In -> anf.host("in", [l, r])
     ast.InstanceOf -> anf.then(instance_of_i32(l, r), anf.i32_to_js_bool)
   }
 }
 
 fn instance_of_i32(l: ir.Value, r: ir.Value) -> Build(ir.Value) {
-  use v <- anf.then(anf.host("instanceof_fast", [l, r]))
+  use v <- anf.then(anf.host("instanceof_i32", [l, r]))
   use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, v)))
-  anf.bind_if_i32(is_miss, anf.host("instance_of", [l, r]), anf.pure(v))
+  anf.bind_if_i32(
+    is_miss,
+    anf.host("instanceof_i32_general", [l, r]),
+    anf.pure(v),
+  )
 }
 
 pub fn emit_cond_i32(cond: ast.Expression) -> Build(ir.Value) {
@@ -438,14 +442,14 @@ fn not_i32(v: ir.Value) -> Build(ir.Value) {
 }
 
 fn cond_rel(
-  fast: ir.NumTermOp,
-  slow_op: String,
+  term_op: ir.NumTermOp,
+  general_op: String,
   left: ast.Expression,
   right: ast.Expression,
 ) -> Build(ir.Value) {
   use l <- anf.then(expr_operand(left))
   use r <- anf.then(expr_operand(right))
-  anf.cond_cmp(fast, slow_op, l, r)
+  anf.cond_cmp(term_op, general_op, l, r)
 }
 
 fn is_boolean_expr(ex: ast.Expression) -> Bool {
@@ -489,24 +493,24 @@ fn loose_eq(l: ir.Value, r: ir.Value) -> Build(ir.Value) {
     True, _ -> inline_is_nullish_i32(r)
     _, True -> inline_is_nullish_i32(l)
     False, False ->
-      // consti32 with bit 31 set is a wrapped negative, stays on eq_fast
+      // consti32 with bit 31 set is a wrapped negative, stays on eq_i32
       case l, r {
         ir.ConstI32(c), _ if c >= 0 && c < 0x80000000 -> loose_eq_int_const(r, l)
         _, ir.ConstI32(c) if c >= 0 && c < 0x80000000 -> loose_eq_int_const(l, r)
         ir.ConstI64(_), _ -> loose_eq_int_const(r, l)
         _, ir.ConstI64(_) -> loose_eq_int_const(l, r)
-        _, _ -> loose_eq_slow(l, r)
+        _, _ -> loose_eq_general(l, r)
       }
   }
 }
 
 fn loose_eq_int_const(v: ir.Value, c: ir.Value) -> Build(ir.Value) {
   use is_i <- anf.then(anf.bind(ir.TermTest(ir.IsInt, v)))
-  anf.bind_if(is_i, anf.bind(ir.NumTerm(ir.NEq, v, c)), loose_eq_slow(v, c))
+  anf.bind_if(is_i, anf.bind(ir.NumTerm(ir.NEq, v, c)), loose_eq_general(v, c))
 }
 
-fn loose_eq_slow(l: ir.Value, r: ir.Value) -> Build(ir.Value) {
-  use v <- anf.then(anf.host("eq_fast", [l, r]))
+fn loose_eq_general(l: ir.Value, r: ir.Value) -> Build(ir.Value) {
+  use v <- anf.then(anf.host("eq_i32", [l, r]))
   use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, v)))
   anf.bind_if(is_miss, anf.host("eq", [l, r]), anf.pure(v))
 }
@@ -1042,71 +1046,71 @@ fn is_nullish_const(v: ir.Value) -> Bool {
   }
 }
 
-fn int_fast(
-  fast: String,
-  slow: String,
+fn with_kernel(
+  term_op: String,
+  general: String,
   l: ir.Value,
   r: ir.Value,
 ) -> Build(ir.Value) {
-  use v <- anf.then(anf.host(fast, [l, r]))
+  use v <- anf.then(anf.host(term_op, [l, r]))
   use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, v)))
-  anf.bind_if(is_miss, anf.host(slow, [l, r]), anf.pure(v))
+  anf.bind_if(is_miss, anf.host(general, [l, r]), anf.pure(v))
 }
 
 // skipping toint32 is only safe for band with 0 <= c < 2^31
 fn bitop_small_const(
   bif: String,
-  fast: String,
-  slow: String,
+  kernel: String,
+  general: String,
   l: ir.Value,
   r: ir.Value,
 ) -> Build(ir.Value) {
   case l, r {
     ir.ConstI32(c), _ if c >= 0 && c < 0x80000000 ->
-      bitop_with_const(bif, fast, slow, r, l)
+      bitop_with_const(bif, kernel, general, r, l)
     _, ir.ConstI32(c) if c >= 0 && c < 0x80000000 ->
-      bitop_with_const(bif, fast, slow, l, r)
-    _, _ -> int_fast(fast, slow, l, r)
+      bitop_with_const(bif, kernel, general, l, r)
+    _, _ -> with_kernel(kernel, general, l, r)
   }
 }
 
 fn bitop_with_const(
   bif: String,
-  fast: String,
-  slow: String,
+  kernel: String,
+  general: String,
   v: ir.Value,
   c: ir.Value,
 ) -> Build(ir.Value) {
   use is_i <- anf.then(anf.bind(ir.TermTest(ir.IsInt, v)))
-  anf.bind_if(is_i, anf.host(bif, [v, c]), int_fast(fast, slow, v, c))
+  anf.bind_if(is_i, anf.host(bif, [v, c]), with_kernel(kernel, general, v, c))
 }
 
 // bare bsr/bsl only valid for l in [0, mask]
 fn shift_small_const(
   bif: String,
-  fast: String,
-  slow: String,
+  kernel: String,
+  general: String,
   l: ir.Value,
   r: ir.Value,
 ) -> Build(ir.Value) {
   case r {
     ir.ConstI32(c) if c >= 0 && c < 32 -> {
       let mask = case bif {
-        "erl_bsl" -> int.bitwise_shift_left(1, 31 - c) - 1
+        "bsl" -> int.bitwise_shift_left(1, 31 - c) - 1
         _ -> 0x7FFFFFFF
       }
       use is_i <- anf.then(anf.bind(ir.TermTest(ir.IsInt, l)))
       anf.bind_if(
         is_i,
         {
-          use m <- anf.then(anf.host("erl_band", [l, ir.ConstI32(mask)]))
+          use m <- anf.then(anf.host("band", [l, ir.ConstI32(mask)]))
           use ok <- anf.then(anf.bind(ir.NumTerm(ir.NEq, m, l)))
-          anf.bind_if(ok, anf.host(bif, [l, r]), anf.host(fast, [l, r]))
+          anf.bind_if(ok, anf.host(bif, [l, r]), anf.host(kernel, [l, r]))
         },
-        int_fast(fast, slow, l, r),
+        with_kernel(kernel, general, l, r),
       )
     }
-    _ -> int_fast(fast, slow, l, r)
+    _ -> with_kernel(kernel, general, l, r)
   }
 }
 
@@ -1119,7 +1123,7 @@ fn number_literal(n: ast.LiteralNumber) -> Build(ir.Value) {
       anf.bind_number(ir.Convert(ir.BoxInt(ir.W64), ir.ConstI64(i)))
     rt_types.JFloat(f) ->
       anf.then(
-        anf.host("float_lit", [
+        anf.host("binary_to_float", [
           ir.ConstBinary(bit_array.from_string(float.to_string(f))),
         ]),
         anf.mark_number,
@@ -1157,16 +1161,16 @@ fn emit_template_literal(parts: ast.TemplateParts(String)) -> Build(ir.Value) {
     use acc <- anf.then(acc_b)
     use v <- anf.then(expr(sub))
     use a1 <- anf.then(
-      anf.miss_or(anf.host("add_prim", [acc, v]), {
+      anf.miss_or(anf.host("add", [acc, v]), {
         use s <- anf.then(anf.host("to_string", [v]))
-        anf.host("string_concat", [acc, s])
+        anf.host("concat_loose", [acc, s])
       }),
     )
     case quasi {
       "" -> anf.pure(a1)
       _ -> {
         use q <- anf.then(anf.str_lit(quasi))
-        anf.host("string_concat", [a1, q])
+        anf.host("concat_loose", [a1, q])
       }
     }
   })
@@ -1272,11 +1276,15 @@ fn global_read(e: Emitter, g: String) -> Build(ir.Value) {
     False -> {
       use site <- anf.then(next_ic_site())
       let site = ir.ConstI32(site)
-      use v <- anf.then(anf.host("global_get_fast", [key, site]))
+      use v <- anf.then(anf.host("global_get_ic", [key, site]))
       use miss <- anf.then(
         anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))),
       )
-      anf.bind_if(miss, anf.host("global_get_miss", [key, site]), anf.pure(v))
+      anf.bind_if(
+        miss,
+        anf.host("global_get_ic_fill", [key, site]),
+        anf.pure(v),
+      )
     }
   }
 }
@@ -1351,14 +1359,14 @@ fn this_check_init(slot: Int, boxed: Bool) -> Build(Nil) {
 }
 
 fn to_property_key(v: ir.Value) -> Build(ir.Value) {
-  use k <- anf.then(anf.host("to_property_key_fast", [v]))
+  use k <- anf.then(anf.host("property_key_of", [v]))
   use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, k)))
   anf.bind_if(is_miss, anf.host("to_property_key", [v]), anf.pure(k))
 }
 
 // §6.2.5.5 toobject(base) happens before key coercion
 fn to_property_key_of(base: ir.Value, v: ir.Value) -> Build(ir.Value) {
-  use k <- anf.then(anf.host("to_property_key_fast", [v]))
+  use k <- anf.then(anf.host("property_key_of", [v]))
   use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, k)))
   anf.bind_if(is_miss, anf.host("to_property_key_of", [base, v]), anf.pure(k))
 }
@@ -1423,26 +1431,22 @@ fn static_dot_key(prop: ast.MemberProperty) -> Option(BitArray) {
   }
 }
 
-fn get_prop_fast(obj: ir.Value, key_bytes: BitArray) -> Build(ir.Value) {
+// probe is get_named_ic, or get_named_ic_shaped when obj is `this`;
+// compare against the miss atom since undefined and null are valid hits
+fn get_named(
+  probe: String,
+  obj: ir.Value,
+  key_bytes: BitArray,
+) -> Build(ir.Value) {
   use site <- anf.then(next_ic_site())
   let key = ir.ConstBinary(key_bytes)
   let site = ir.ConstI32(site)
-  use v <- anf.then(anf.host("get_prop_fast", [obj, key, site]))
+  use v <- anf.then(anf.host(probe, [obj, key, site]))
   use ic_miss <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))))
-  anf.bind_if(ic_miss, anf.host("get_prop_slow", [obj, key, site]), anf.pure(v))
+  anf.bind_if(ic_miss, anf.host("get_named", [obj, key, site]), anf.pure(v))
 }
 
-// compare against miss atom, undefined/null are valid hits
-fn get_prop_this(obj: ir.Value, key_bytes: BitArray) -> Build(ir.Value) {
-  use site <- anf.then(next_ic_site())
-  let key = ir.ConstBinary(key_bytes)
-  let site = ir.ConstI32(site)
-  use v <- anf.then(anf.host("get_prop_ic", [obj, key, site]))
-  use ic_miss <- anf.then(anf.bind(ir.NumTerm(ir.NEq, v, ir.ConstAtom("miss"))))
-  anf.bind_if(ic_miss, anf.host("get_prop_slow", [obj, key, site]), anf.pure(v))
-}
-
-fn set_prop_fast(
+fn set_named_ic(
   obj: ir.Value,
   key_bytes: BitArray,
   v: ir.Value,
@@ -1454,7 +1458,7 @@ fn set_prop_fast(
   }
   use site <- anf.then(next_ic_site())
   use _ <- anf.then(
-    anf.host("set_prop_site", [
+    anf.host("set_named_ic", [
       obj,
       ir.ConstBinary(key_bytes),
       v,
@@ -1614,14 +1618,14 @@ pub fn emit_prop_write_run(run: PropWriteRun) -> Build(ir.Value) {
     False -> ir.ConstAtom("false")
   }
   use site <- anf.then(next_ic_site())
-  anf.host("set_props_init", [obj, keys, vals, strict, ir.ConstI32(site)])
+  anf.host("set_named_init_ic", [obj, keys, vals, strict, ir.ConstI32(site)])
 }
 
 // §13.15.2 step 6.b.iv strict failed set throws
 pub fn set_prop_op_name(strict: Bool) -> String {
   case strict {
     True -> "set_prop_strict"
-    False -> "set_prop"
+    False -> "set_prop_untyped_key"
   }
 }
 
@@ -1640,45 +1644,45 @@ fn delete_prop_op() -> Build(String) {
 }
 
 // callers own topropertykey so read-modify-write coerces once
-fn get_elem_fast(
+fn get_elem(
   obj: ir.Value,
   idx: ir.Value,
-  slow: Build(ir.Value),
+  general: Build(ir.Value),
 ) -> Build(ir.Value) {
-  use v <- anf.then(anf.host("get_elem_fast", [obj, idx]))
+  use v <- anf.then(anf.host("get_elem", [obj, idx]))
   use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, v)))
-  anf.bind_if(is_miss, slow, anf.pure(v))
+  anf.bind_if(is_miss, general, anf.pure(v))
 }
 
-fn set_elem_fast(
+fn set_elem(
   obj: ir.Value,
   idx: ir.Value,
   v: ir.Value,
-  slow: Build(ir.Value),
+  general: Build(ir.Value),
 ) -> Build(ir.Value) {
-  use r <- anf.then(anf.host("set_elem_fast", [obj, idx, v]))
+  use r <- anf.then(anf.host("set_elem", [obj, idx, v]))
   use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, r)))
-  use _ <- anf.then(anf.bind_if(is_miss, slow, anf.pure(v)))
+  use _ <- anf.then(anf.bind_if(is_miss, general, anf.pure(v)))
   anf.pure(v)
 }
 
 fn emit_member_get(obj: ir.Value, prop: ast.MemberProperty) -> Build(ir.Value) {
   case static_dot_key(prop) {
-    Some(key_bytes) -> get_prop_fast(obj, key_bytes)
+    Some(key_bytes) -> get_named("get_named_ic", obj, key_bytes)
     None ->
       case prop {
         ast.Bracket(expression:) -> {
           use idx <- anf.then(expr(expression))
-          get_elem_fast(obj, idx, {
+          get_elem(obj, idx, {
             use k <- anf.then(to_property_key_of(obj, idx))
-            anf.host("get_prop", [obj, k])
+            anf.host("get_prop_untyped_key", [obj, k])
           })
         }
         _ -> {
           use k <- anf.then(emit_key_from_prop(prop))
           case is_private_prop(prop) {
             True -> anf.host("private_get", [obj, k])
-            False -> anf.host("get_prop", [obj, k])
+            False -> anf.host("get_prop_untyped_key", [obj, k])
           }
         }
       }
@@ -1722,7 +1726,7 @@ fn fold_args_spread(
 }
 
 fn emit_call(f: ir.Value, this: ir.Value, args_l: ir.Value) -> Build(ir.Value) {
-  anf.host("call_fast", [f, this, args_l])
+  anf.host("call_by_kind", [f, this, args_l])
 }
 
 fn emit_call_pos(
@@ -1732,7 +1736,11 @@ fn emit_call_pos(
 ) -> Build(ir.Value) {
   case pos {
     [] | [_] | [_, _] | [_, _, _] ->
-      anf.host("call_fast" <> int.to_string(list.length(pos)), [f, this, ..pos])
+      anf.host("call_by_kind" <> int.to_string(list.length(pos)), [
+        f,
+        this,
+        ..pos
+      ])
     _ -> {
       use args_l <- anf.then(anf.cons_list(pos))
       emit_call(f, this, args_l)
@@ -1758,7 +1766,7 @@ fn emit_call_with_direct_callee(
     Positional(pos) -> anf.cons_list(pos)
   }
   use is_direct <- anf.then(anf.bind(ir.TermTest(ir.IsTuple, direct_callee)))
-  let fast = {
+  let direct_call = {
     use rc <- anf.then(consts())
     use code <- anf.then(anf.bind(anf.tuple_get(direct_callee, 0)))
     use this_r <- anf.then(anf.bind(anf.tuple_get(direct_callee, 1)))
@@ -1803,9 +1811,9 @@ fn emit_call_with_direct_callee(
       }
     }
   }
-  anf.bind_if(is_direct, fast, {
+  anf.bind_if(is_direct, direct_call, {
     use args_l <- anf.then(cons_args)
-    anf.host("call", [f, this, args_l])
+    anf.host("call_checked", [f, this, args_l])
   })
 }
 
@@ -2098,9 +2106,9 @@ fn emit_unary(op: ast.UnaryOp, arg: ast.Expression) -> Build(ir.Value) {
     ast.UnaryPlus -> anf.then(expr(arg), fn(v) { anf.host("plus", [v]) })
     ast.BitwiseNot ->
       anf.then(expr(arg), fn(v) {
-        use r <- anf.then(anf.host("bitnot_fast", [v]))
+        use r <- anf.then(anf.host("bitnot", [v]))
         use is_miss <- anf.then(anf.bind(ir.TermTest(ir.IsAtom, r)))
-        anf.bind_if(is_miss, anf.host("bitnot", [v]), anf.pure(r))
+        anf.bind_if(is_miss, anf.host("bitnot_general", [v]), anf.pure(r))
       })
   }
 }
@@ -2514,11 +2522,11 @@ fn target_get(lhs: AssignTarget) -> Build(ir.Value) {
   case lhs {
     IdentTarget(name:, direct:) -> emit_direct_get(direct, name)
     PrivateTarget(obj:, key:) -> anf.host("private_get", [obj, key])
-    NamedTarget(obj:, key_bytes:) -> get_prop_fast(obj, key_bytes)
+    NamedTarget(obj:, key_bytes:) -> get_named("get_named_ic", obj, key_bytes)
     IndexedTarget(obj:, idx:, key:) ->
-      get_elem_fast(obj, idx, {
+      get_elem(obj, idx, {
         use k <- anf.then(elem_key(obj, idx, key))
-        anf.host("get_prop", [obj, k])
+        anf.host("get_prop_untyped_key", [obj, k])
       })
     SuperTarget(home:, this:, key:) -> anf.host("super_get", [home, this, key])
   }
@@ -2531,9 +2539,9 @@ fn target_put(lhs: AssignTarget, v: ir.Value) -> Build(ir.Value) {
       use _ <- anf.then(anf.host("private_set", [obj, key, v]))
       anf.pure(v)
     }
-    NamedTarget(obj:, key_bytes:) -> set_prop_fast(obj, key_bytes, v)
+    NamedTarget(obj:, key_bytes:) -> set_named_ic(obj, key_bytes, v)
     IndexedTarget(obj:, idx:, key:) ->
-      set_elem_fast(obj, idx, v, {
+      set_elem(obj, idx, v, {
         use k <- anf.then(elem_key(obj, idx, key))
         use op <- anf.then(set_prop_op())
         anf.host(op, [obj, k, v])
@@ -2569,7 +2577,9 @@ fn emit_array_no_spread(
   anf.host("new_array", [l])
 }
 
-fn emit_array_slow(elements: List(Option(ast.Expression))) -> Build(ir.Value) {
+fn emit_array_general(
+  elements: List(Option(ast.Expression)),
+) -> Build(ir.Value) {
   use acc0 <- anf.then(anf.host("empty_list", []))
   use l <- anf.then(
     fold_build(elements, acc0, fn(acc, el) {
@@ -2610,7 +2620,7 @@ fn emit_object_property(obj: ir.Value, p: ast.Property) -> Build(ir.Value) {
     ast.InitProperty(key:, value:, shorthand: _) -> {
       use k <- anf.then(emit_key(key))
       use v <- anf.then(emit(value, ast.property_key_static_name(key)))
-      use _ <- anf.then(anf.host("define_prop", [obj, k, v]))
+      use _ <- anf.then(anf.host("create_data_prop", [obj, k, v]))
       anf.pure(obj)
     }
 
@@ -2703,7 +2713,7 @@ fn emit_function_expr(
 fn emit_object(properties: List(ast.Property)) -> Build(ir.Value) {
   let #(lead, rest) = plain_members(properties, [], set.new())
   use obj <- anf.then(case lead {
-    [] -> anf.host("new_object", [])
+    [] -> anf.host("new_object_literal", [])
     _ -> {
       use vs <- anf.then(
         anf.seq(
@@ -2765,7 +2775,7 @@ fn plain_member_name(key: ast.PropertyKey) -> Option(String) {
 
 fn emit_array(elements: List(Option(ast.Expression))) -> Build(ir.Value) {
   case ast_util.has_spread_element(elements) {
-    True -> emit_array_slow(elements)
+    True -> emit_array_general(elements)
     False ->
       case const_elements(elements) {
         Some(cs) -> emit_const_array(cs)
@@ -2939,14 +2949,14 @@ fn emit_update(
       use lhs <- anf.then(settle_assign_target(lhs))
       use old <- anf.then(target_get(lhs))
       use one <- anf.then(number_literal(ast.FiniteNumber(1.0)))
-      let #(fast_op, bop) = case op {
-        ast.Increment -> #("num_add", ast.Add)
-        ast.Decrement -> #("num_sub", ast.Subtract)
+      let #(kernel_op, bop) = case op {
+        ast.Increment -> #("add", ast.Add)
+        ast.Decrement -> #("sub", ast.Subtract)
       }
       use e <- anf.then(ask)
       case anf.is_known_number(e, old) {
         True -> {
-          use new <- anf.then(anf.num_binop(fast_op, old, one))
+          use new <- anf.then(anf.num_binop(kernel_op, old, one))
           use _ <- anf.then(target_put(lhs, new))
           case prefix {
             True -> anf.pure(new)
@@ -2957,7 +2967,7 @@ fn emit_update(
           use is_num <- anf.then(anf.bind(ir.TermTest(ir.IsNumber, old)))
           use #(old_n, new) <- anf.then(anf.bind_if2(
             is_num,
-            anf.map(anf.num_binop(fast_op, old, one), fn(new) { #(old, new) }),
+            anf.map(anf.num_binop(kernel_op, old, one), fn(new) { #(old, new) }),
             anf.then(anf.host("to_numeric", [old]), fn(old_n) {
               anf.map(binop(bop, old_n, one), fn(new) { #(old_n, new) })
             }),
@@ -3209,12 +3219,12 @@ fn emit_object_assign_props(
         // §13.15.5.6 step 1a lref before getv
         True -> {
           use lhs <- anf.then(emit_assign_target(value))
-          use v <- anf.then(anf.host("get_prop", [src, k]))
+          use v <- anf.then(anf.host("get_prop_untyped_key", [src, k]))
           use _ <- anf.then(target_put(lhs, v))
           emit_object_assign_props(tail, src, [k, ..seen])
         }
         False -> {
-          use v <- anf.then(anf.host("get_prop", [src, k]))
+          use v <- anf.then(anf.host("get_prop_untyped_key", [src, k]))
           use _ <- anf.then(emit_destructuring_assign(value, v))
           emit_object_assign_props(tail, src, [k, ..seen])
         }

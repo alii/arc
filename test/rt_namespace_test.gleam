@@ -12,12 +12,6 @@ import gleam/list
 import gleam/option.{None, Some}
 import rt_helpers
 
-@external(erlang, "arc_rt_call_ffi", "t_apply_protected")
-fn t_apply_protected(
-  st: Agent,
-  body: fn(Agent) -> #(JsVal, Agent),
-) -> #(rt_call.Completion, Agent)
-
 fn agent() -> Agent {
   rt_builtins.new_agent(rt_helpers.quiet_hooks())
 }
@@ -32,7 +26,7 @@ fn int(i: Int) -> JsVal {
 
 fn throws(st: Agent, body: fn(Agent) -> #(a, Agent)) -> String {
   let #(c, st) =
-    t_apply_protected(st, fn(st) {
+    rt_call.t_apply_protected(st, fn(st) {
       let #(_, st) = body(st)
       #(mk_undefined(), st)
     })

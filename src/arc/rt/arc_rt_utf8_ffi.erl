@@ -1,19 +1,20 @@
 %% indexes by codepoint; invalid utf-8 crashes on purpose, no fallback clauses
 %% TODO(Deviation): js indexes by utf-16 code unit
--module(arc_string_ffi).
--export([string_char_at/2, string_codepoint_length/1,
-         string_char_at_offset/2, replacement_codepoint/0]).
--export([string_index_of/3, string_last_index_of/3, string_contains/2,
-         has_byte/2, string_last_index_of_all/2]).
--export([string_cp_slice/3, string_cp_drop/2, string_cp_explode/1]).
--export([string_split/3, string_repeat/2, string_replace_literal/4]).
--export([string_ascii_upper/1, string_ascii_lower/1]).
+-module(arc_rt_utf8_ffi).
+-compile({no_auto_import, [length/1]}).
+-export([char_at/2, length/1,
+         char_at_offset/2, replacement_codepoint/0]).
+-export([index_of/3, last_index_of/3, contains/2,
+         has_byte/2, last_index_of_all/2]).
+-export([slice/3, drop_start/2, explode/1]).
+-export([split/3, repeat/2, replace_literal/4]).
+-export([ascii_upper/1, ascii_lower/1]).
 -export([trim_js_ws/1, trim_leading_js_ws/1, trim_trailing_js_ws/1]).
 
 %% match window bytes per backward step
 -define(LAST_INDEX_CHUNK, 65536).
 
-string_char_at(Bin, Idx) ->
+char_at(Bin, Idx) ->
     case string_codepoint_at(Bin, Idx) of
         {some, C} -> {some, <<C/utf8>>};
         none -> none
@@ -27,15 +28,15 @@ string_codepoint_at(Bin, Idx) when Idx >= 0 ->
     end;
 string_codepoint_at(_, _) -> none.
 
-string_char_at_offset(Bin, Off) when Off >= 0, Off < byte_size(Bin) ->
+char_at_offset(Bin, Off) when Off >= 0, Off < byte_size(Bin) ->
     <<_:Off/binary, C/utf8, _/binary>> = Bin,
     Ch = <<C/utf8>>,
     {some, {Ch, Off + byte_size(Ch)}};
-string_char_at_offset(_, _) -> none.
+char_at_offset(_, _) -> none.
 
 replacement_codepoint() -> 16#FFFD.
 
-string_codepoint_length(Bin) -> cp_length(Bin, 0).
+length(Bin) -> cp_length(Bin, 0).
 %% 56 bits = 7 ascii bytes, still a small int
 cp_length(<<W1:56, W2:56, W3:56, W4:56, W5:56, W6:56, W7:56, W8:56,
             Rest/binary>>, N)
@@ -64,31 +65,32 @@ has_byte(<<C, _/binary>>, C) -> true;
 has_byte(<<_, R/binary>>, C) -> has_byte(R, C);
 has_byte(<<>>, _) -> false.
 
-string_contains(_Hay, <<>>) -> true;
-string_contains(Hay, Needle) -> binary:match(Hay, Needle) =/= nomatch.
+contains(_Hay, <<>>) -> true;
+contains(Hay, Needle) -> binary:match(Hay, Needle) =/= nomatch.
 
-string_index_of(Hay, <<>>, From) ->
+index_of(Hay, <<>>, From) ->
     {some, clamp_cp(Hay, From)};
-string_index_of(Hay, Needle, From) ->
+index_of(Hay, Needle, From) ->
     Start = cp_off(Hay, max(From, 0)),
     case binary:match(Hay, Needle, [{scope, {Start, byte_size(Hay) - Start}}]) of
         nomatch -> none;
         {BytePos, _} -> {some, cp_length(binary:part(Hay, 0, BytePos), 0)}
     end.
 
-string_last_index_of_all(Hay, <<>>) ->
-    {some, string_codepoint_length(Hay)};
-string_last_index_of_all(Hay, Needle) ->
-    last_index_of(Hay, Needle, byte_size(Hay)).
+last_index_of_all(Hay, <<>>) ->
+    {some, length(Hay)};
+last_index_of_all(Hay, Needle) ->
+    last_index_before(Hay, Needle, byte_size(Hay)).
 
-string_last_index_of(Hay, <<>>, From) ->
+last_index_of(Hay, <<>>, From) ->
     {some, clamp_cp(Hay, From)};
-string_last_index_of(Hay, Needle, From) ->
+last_index_of(Hay, Needle, From) ->
     Limit = cp_off(Hay, max(From, 0)),
-    last_index_of(Hay, Needle, min(Limit + byte_size(Needle), byte_size(Hay))).
+    last_index_before(Hay, Needle, min(Limit + byte_size(Needle), byte_size(Hay))).
 
-last_index_of(_Hay, Needle, End) when End < byte_size(Needle) -> none;
-last_index_of(Hay, Needle, End) ->
+%% end is a byte offset
+last_index_before(_Hay, Needle, End) when End < byte_size(Needle) -> none;
+last_index_before(Hay, Needle, End) ->
     HighestStart = End - byte_size(Needle),
     Chunk = max(?LAST_INDEX_CHUNK, 2 * byte_size(Needle)),
     case scan_back(Hay, Needle, max(0, HighestStart - Chunk + 1), HighestStart, Chunk) of
@@ -113,43 +115,43 @@ latest_overlap(Hay, Needle, L, Pos) ->
         _Other -> latest_overlap(Hay, Needle, L, Pos - 1)
     end.
 
-clamp_cp(Hay, From) -> min(max(From, 0), string_codepoint_length(Hay)).
+clamp_cp(Hay, From) -> min(max(From, 0), length(Hay)).
 
-string_cp_slice(Bin, Start, Len) when Start >= 0, Len > 0 ->
+slice(Bin, Start, Len) when Start >= 0, Len > 0 ->
     Off = cp_off(Bin, Start),
     <<_:Off/binary, Rest/binary>> = Bin,
     binary:part(Bin, Off, cp_off(Rest, Len));
-string_cp_slice(_, _, _) -> <<>>.
+slice(_, _, _) -> <<>>.
 
-string_cp_drop(Bin, N) when N > 0 ->
+drop_start(Bin, N) when N > 0 ->
     Off = cp_off(Bin, N),
     binary:part(Bin, Off, byte_size(Bin) - Off);
-string_cp_drop(Bin, _) -> Bin.
+drop_start(Bin, _) -> Bin.
 
-string_cp_explode(Bin) -> cp_explode(Bin, []).
+explode(Bin) -> cp_explode(Bin, []).
 cp_explode(<<>>, Acc) -> lists:reverse(Acc);
 cp_explode(<<C/utf8, Rest/binary>>, Acc) -> cp_explode(Rest, [<<C/utf8>> | Acc]).
 
-string_split(Hay, Sep, Lim) ->
+split(Hay, Sep, Lim) ->
     Parts = binary:split(Hay, Sep, [global]),
-    case length(Parts) > Lim of
+    case erlang:length(Parts) > Lim of
         true -> lists:sublist(Parts, Lim);
         false -> Parts
     end.
 
 %% search is non-empty
-string_replace_literal(Hay, Search, Repl, true) ->
+replace_literal(Hay, Search, Repl, true) ->
     binary:replace(Hay, Search, Repl, [global]);
-string_replace_literal(Hay, Search, Repl, false) ->
+replace_literal(Hay, Search, Repl, false) ->
     binary:replace(Hay, Search, Repl, []).
 
-string_repeat(Bin, N) when N > 1024, byte_size(Bin) < 1024 ->
+repeat(Bin, N) when N > 1024, byte_size(Bin) < 1024 ->
     Block = binary:copy(Bin, 1024),
     Whole = binary:copy(Block, N div 1024),
     Tail = binary:copy(Bin, N rem 1024),
     <<Whole/binary, Tail/binary>>;
-string_repeat(Bin, N) when N > 0 -> binary:copy(Bin, N);
-string_repeat(_, _) -> <<>>.
+repeat(Bin, N) when N > 0 -> binary:copy(Bin, N);
+repeat(_, _) -> <<>>.
 
 cp_off(Bin, N) -> cp_off(Bin, N, 0).
 
@@ -170,9 +172,9 @@ cp_off(<<C, _, _, _, R/binary>>, N, Off) when N >= 1, C >= 16#F0 ->
 cp_off(<<>>, _N, Off) -> Off;
 cp_off(_Bin, 0, Off) -> Off.
 
-string_ascii_upper(Bin) ->
+ascii_upper(Bin) ->
     ascii_map(Bin, 16#1F1F1F1F1F1F1F, 16#05050505050505, <<>>).
-string_ascii_lower(Bin) ->
+ascii_lower(Bin) ->
     ascii_map(Bin, 16#3F3F3F3F3F3F3F, 16#25252525252525, <<>>).
 
 ascii_map(<<W:56, Rest/binary>>, Lo, Hi, Acc) when W band 16#80808080808080 =:= 0 ->
