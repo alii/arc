@@ -11,10 +11,10 @@ JavaScript on the BEAM
 </picture>
 <br><br>
 
-Arc is a JavaScript engine written in [Gleam](https://gleam.run). It implements the full language: closures, generators, async/await, classes, proxies, typed arrays, Intl and Temporal. It runs on Erlang/OTP, and in the browser through [AtomVM](https://www.atomvm.net) compiled to WebAssembly.
+Arc is a JavaScript engine written in [Gleam](https://gleam.run). It implements ECMAScript, including closures, generators, async/await, classes, proxies, typed arrays, Intl and Temporal. You can run it on Erlang/OTP, or in the browser through [AtomVM](https://www.atomvm.net) compiled to WebAssembly.
 <br><br>
 
-The engine knows nothing outside ECMAScript. There are no built-in timers, I/O or concurrency model. You embed it in a BEAM program and give it the globals and host functions you want.
+Arc only provides what the ECMAScript spec defines, so it has no timers, I/O or concurrency built in. The BEAM program that embeds it chooses which globals and host functions the JavaScript can use.
 <br><br>
 
 Tested against [test262](https://github.com/tc39/test262) on every commit:

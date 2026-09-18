@@ -427,7 +427,7 @@ export function Playground() {
 								onClick={() => compile(codeRef.current)}
 								className="underline underline-offset-2 decoration-dotted hover:text-rpd-text dark:hover:text-rp-text cursor-pointer"
 							>
-								source changed — recompile
+								source changed, recompile
 							</button>
 						)}
 					</span>

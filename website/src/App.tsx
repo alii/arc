@@ -52,23 +52,22 @@ export default function App() {
 				</motion.div>
 
 				<motion.p variants={item}>
-					Arc is a JavaScript engine written in <ExternalLink href="https://gleam.run">Gleam</ExternalLink>. It runs
-					wherever the BEAM runs: on Erlang/OTP, and in the browser through{' '}
-					<ExternalLink href="https://www.atomvm.net">AtomVM</ExternalLink> compiled to WebAssembly.
-					{wide ? ' The playground beside this is Arc running as WebAssembly.' : ''}
+					Arc is a JavaScript engine written in <ExternalLink href="https://gleam.run">Gleam</ExternalLink>. It runs on
+					Erlang/OTP, and in the browser through <ExternalLink href="https://www.atomvm.net">AtomVM</ExternalLink>{' '}
+					compiled to WebAssembly.
+					{wide ? ' The playground next to this text runs Arc in your browser that way.' : ''}
 				</motion.p>
 
 				<motion.p variants={item}>
-					It implements all* of JavaScript. Closures, generators, async/await, classes, proxies, typed arrays, plus Intl
-					and Temporal. The engine is small and very host-agnostic. It does not know anything about the world, outside
-					ECMAScript. You embed it in a BEAM program and give it the globals and host functions you want - timers, I/O,
-					a concurrency model - instead of inheriting a fixed runtime.
+					It implements ECMAScript, including closures, generators, async/await, classes, proxies, typed arrays, Intl
+					and Temporal. Arc only provides what the ECMAScript spec defines, so it has no timers, I/O or concurrency
+					built in. The BEAM program that embeds it chooses which globals and host functions the JavaScript can use.
 				</motion.p>
 
 				<motion.p variants={item}>
-					Arc also compiles ahead of time. The same JavaScript is lowered to Erlang and compiled to BEAM bytecode, so it
-					runs as native BEAM code instead of being interpreted.
-					{wide ? ' The Erlang tab in the playground shows exactly what it emits.' : ''}
+					Arc can also compile JavaScript ahead of time. It translates the program to Erlang and compiles that to BEAM
+					bytecode, so it runs as ordinary BEAM code and skips the interpreter.
+					{wide ? ' The Erlang tab in the playground shows what it produces.' : ''}
 					{wide && (
 						<>
 							{' '}
@@ -97,7 +96,7 @@ export default function App() {
 				</motion.div>
 
 				<motion.p variants={item} className="text-rpd-muted dark:text-rp-muted text-sm">
-					Arc is an extremely early research project, tread carefully.
+					Arc is an early research project and is rough in places.
 				</motion.p>
 			</motion.div>
 

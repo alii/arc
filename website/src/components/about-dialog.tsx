@@ -5,13 +5,11 @@ import { ExternalLink } from './external-link';
 
 const ease = [0.23, 1, 0.32, 1] as const;
 
-const section = { hidden: { opacity: 0, y: 6 }, show: { opacity: 1, y: 0 } };
-
 /**
- * "How this page works" — the modal behind the `?` in the playground toolbar
- * and the link in the prose. Radix for a11y (focus trap, escape, labelling);
- * motion for the enter/exit animation, which is why the content is force-
- * mounted and gated by AnimatePresence instead of Radix's own mount logic.
+ * The "How this page works" modal, opened from the `?` in the playground toolbar
+ * and from the link in the page text. Radix handles focus and escape. Motion
+ * fades the modal in and out, so the content is force-mounted and shown by
+ * AnimatePresence instead of Radix's own mount logic.
  */
 export function AboutDialog({ trigger }: { trigger: ReactNode }) {
 	const [open, setOpen] = useState(false);
@@ -39,13 +37,8 @@ export function AboutDialog({ trigger }: { trigger: ReactNode }) {
 								transition={{ duration: 0.28, ease }}
 								className="fixed z-50 left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-[min(92vw,640px)] max-h-[85dvh] overflow-auto rounded-xl border border-rpd-text/15 dark:border-rp-overlay bg-rpd-surface dark:bg-rp-surface text-rpd-subtle dark:text-rp-subtle shadow-2xl shadow-black/20 dark:shadow-black/50 font-mono text-sm leading-relaxed outline-none"
 							>
-								<motion.div
-									initial="hidden"
-									animate="show"
-									transition={{ staggerChildren: 0.05, delayChildren: 0.08 }}
-									className="p-6 sm:p-8 flex flex-col gap-5"
-								>
-									<motion.div variants={section} className="flex items-start justify-between gap-4">
+								<div className="p-6 sm:p-8 flex flex-col gap-5">
+									<div className="flex items-start justify-between gap-4">
 										<Dialog.Title className="text-base font-semibold text-rpd-text dark:text-rp-text">
 											How this page works
 										</Dialog.Title>
@@ -65,54 +58,54 @@ export function AboutDialog({ trigger }: { trigger: ReactNode }) {
 												<path d="M4 4l8 8M12 4l-8 8" />
 											</svg>
 										</Dialog.Close>
-									</motion.div>
+									</div>
 
 									<Section title="Everything runs in your tab">
-										Arc is a JavaScript engine written in Gleam. This page runs it compiled to WebAssembly through{' '}
-										<ExternalLink href="https://www.atomvm.net">AtomVM</ExternalLink>, a small BEAM implementation. The
-										page loads it once (about 7 MB); after that nothing you type leaves the browser and there is no
-										server involved.
+										Arc is a JavaScript engine written in Gleam. This page runs it on{' '}
+										<ExternalLink href="https://www.atomvm.net">AtomVM</ExternalLink>, a small BEAM implementation
+										compiled to WebAssembly. The download is about 7 MB and happens once. Nothing you type leaves your
+										browser, and there is no server.
 									</Section>
 
 									<Section title="Output">
-										<Kbd>run</Kbd> hands your program to Arc's interpreter inside AtomVM. Whatever it prints shows up
-										here, and its completion value too when it isn't <code>undefined</code>. Errors are shown as the
-										engine reports them.
+										<Kbd>run</Kbd> sends your program to Arc's interpreter inside AtomVM. The Output tab shows what the
+										program prints, plus its final value unless that value is <code>undefined</code>. Errors appear as
+										the engine reports them.
 									</Section>
 
 									<Section title="Erlang · Core Erlang · IR">
-										Arc also compiles ahead of time: the same JavaScript is lowered to a small IR, then to an internal
-										Core-Erlang-shaped module, then straight to Erlang abstract forms that the Erlang compiler turns
-										into BEAM bytecode. These tabs show each stage for the program in the editor: the Erlang tab is
-										exactly what would be compiled; the Core Erlang tab is a rendering of the intermediate for reading
-										(the compile path never goes through the Core Erlang compiler). The final compile-to-BEAM step needs
-										OTP's compiler, which doesn't exist in the browser, so here it's for reading rather than running.
+										Arc can also compile JavaScript ahead of time. It converts the program to a small intermediate
+										representation (IR), then to a module shaped like Core Erlang, then to Erlang abstract forms, which
+										the Erlang compiler turns into BEAM bytecode. The three tabs show these steps for the program in
+										the editor. The Erlang tab is exactly what gets compiled. The Core Erlang tab is a readable copy of
+										the middle step, because the real compile path skips the Core Erlang compiler. The last step needs
+										OTP's compiler, which the browser does not have, so you can read the output here but not run it.
 									</Section>
 
 									<Section title="Warming up">
-										AtomVM loads code on first use and Arc builds JavaScript's global environment (hundreds of
-										built-ins) when it starts. So right after the page loads, a little program runs behind the scenes to
-										pull all of that in, so your first click does not pay for it. The status says{' '}
-										<em>warming up caches</em> while that happens; you can run anyway, it just queues.
+										AtomVM loads code the first time it is used, and Arc creates JavaScript's global environment
+										(hundreds of built-ins) at startup. So after the page loads, a small program runs in the background
+										to load all of that before your first click. The status reads <em>warming up caches</em> until it
+										finishes. You can still press run, and it will wait its turn.
 									</Section>
 
 									<Section title="Speed">
-										AtomVM in WebAssembly is an interpreter running an interpreter. Programs run roughly tens of times
-										slower here than on the real BEAM.
+										AtomVM in WebAssembly is an interpreter running an interpreter. Programs here run roughly tens of
+										times slower than on the real BEAM.
 									</Section>
 
 									<Section title="Regular expressions">
-										AtomVM has no regex engine, so <code>RegExp</code> here is answered by the browser's own JavaScript
-										engine: Arc asks the page to run the match and hands the result back to the BEAM side, offsets
-										converted between UTF-8 and UTF-16 on the way. Each match costs about a millisecond. There are no
-										timers, filesystem or network: Arc does not provide them and this page does not either.
+										AtomVM has no regex engine, so <code>RegExp</code> uses your browser's own JavaScript engine. Arc
+										asks the page to run the match and sends the result back to the BEAM side, converting offsets
+										between UTF-8 and UTF-16. Each match takes about a millisecond. There are no timers, filesystem or
+										network. Arc does not provide them and this page does not either.
 									</Section>
 
-									<motion.p variants={section} className="text-xs text-rpd-muted dark:text-rp-muted">
+									<p className="text-xs text-rpd-muted dark:text-rp-muted">
 										Arc is an early research project.{' '}
 										<ExternalLink href="https://github.com/alii/arc">Source on GitHub</ExternalLink>.
-									</motion.p>
-								</motion.div>
+									</p>
+								</div>
 							</motion.div>
 						</Dialog.Content>
 					</Dialog.Portal>
@@ -122,12 +115,12 @@ export function AboutDialog({ trigger }: { trigger: ReactNode }) {
 	);
 }
 
-/** `title` names the paragraph in source and for screen readers; it isn't rendered. */
+/** `title` names the paragraph in source and for screen readers. It is not shown. */
 function Section({ title, children }: { title: string; children: ReactNode }) {
 	return (
-		<motion.section variants={section} aria-label={title}>
+		<section aria-label={title}>
 			<p>{children}</p>
-		</motion.section>
+		</section>
 	);
 }
 
