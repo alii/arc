@@ -38,8 +38,9 @@ import arc/interp/park
 import arc/interp/safepoint
 import arc/interp/state.{
   type State, type StepExit, type VmError, AsyncDelegateResume, Awaited,
-  DelegateYield, InitialSuspend, InternalError, PlainYield, Returned, SavedFrame,
-  SavedRegFrame, StackUnderflow, State, SuspensionLeak, Threw, VmFailed, Yielded,
+  DelegateYield, InitialSuspend, InternalError, PlainYield, Returned, SavedCont,
+  SavedFrame, SavedRegFrame, StackUnderflow, State, SuspensionLeak, Threw,
+  VmFailed, Yielded,
 }
 import arc/rt/arena
 import arc/rt/async as rt_async
@@ -3294,6 +3295,13 @@ fn fast_loop(
 
     Return ->
       case state.call_stack {
+        [SavedCont(..) as saved, ..] -> {
+          let value = case stack {
+            [v, ..] -> v
+            [] -> ffi.val([ffi.Undefined])
+          }
+          after_step(call.cont_return(agent, state.depth, saved, value), drive)
+        }
         [saved, ..] ->
           case saved.constructor_this, state.func.is_derived_constructor {
             None, True ->
@@ -3383,7 +3391,7 @@ fn fast_loop(
                         r1,
                       )
                     }
-                    SavedFrame(..) -> {
+                    SavedFrame(..) | SavedCont(..) -> {
                       let caller_func = caller.func
                       case caller_func.regs {
                         bytecode.NoRegs -> {
@@ -4840,8 +4848,13 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case state.stack {
         [left, ..rest] -> {
           use receiver <- local_or_tdz(state, index)
+          let finish = fn(state, right) {
+            binop_step(state, kind, left, right, rest)
+          }
+          use <-
+            accessor_frame(state, receiver, k, rest, drive, Some(finish), _)
           use #(right, state) <- result.try(get_field(state, receiver, k))
-          binop_step(state, kind, left, right, rest)
+          finish(state, right)
         }
         _ -> underflow(state, "BinOpLocalField")
       }
@@ -5075,6 +5088,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     GetField(k) ->
       case state.stack {
         [receiver, ..rest] -> {
+          use <- getter_frame(state, receiver, k, rest, drive)
           use #(val, state) <- result.map(get_field(state, receiver, k))
           State(..state, stack: [val, ..rest], pc: state.pc + 1)
         }
@@ -5084,6 +5098,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     GetField2(k) ->
       case state.stack {
         [receiver, ..rest] -> {
+          use <- getter_frame(state, receiver, k, state.stack, drive)
           use #(val, state) <- result.map(get_field(state, receiver, k))
           State(..state, stack: [val, receiver, ..rest], pc: state.pc + 1)
         }
@@ -5095,6 +5110,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case is_tdz(receiver) {
         True -> tdz_reference_error(state)
         False -> {
+          use <- getter_frame(state, receiver, k, state.stack, drive)
           use #(val, state) <- result.map(get_field(state, receiver, k))
           State(..state, stack: [val, ..state.stack], pc: state.pc + 1)
         }
@@ -5175,15 +5191,20 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
 
     PutField(k) ->
       case state.stack {
-        [value, receiver, ..rest] ->
-          put_field_step(state, k, value, receiver, [value, ..rest])
+        [value, receiver, ..rest] -> {
+          let after = [value, ..rest]
+          use <- setter_frame(state, receiver, k, value, after, drive)
+          put_field_step(state, k, value, receiver, after)
+        }
         _ -> underflow(state, "PutField")
       }
 
     PutFieldPop(k) ->
       case state.stack {
-        [value, receiver, ..rest] ->
+        [value, receiver, ..rest] -> {
+          use <- setter_frame(state, receiver, k, value, rest, drive)
           put_field_step(state, k, value, receiver, rest)
+        }
         _ -> underflow(state, "PutFieldPop")
       }
 
@@ -7469,4 +7490,113 @@ fn fault(s: State, err: VmError) -> #(Result(JsVal, JsVal), State) {
       "internal error: " <> state.vm_error_message(err),
     )
   #(Error(e), s)
+}
+
+// a bytecode getter runs as an ordinary frame that returns onto rest
+fn getter_frame(
+  state: State,
+  receiver: JsVal,
+  k: key.PropertyKey,
+  rest: List(JsVal),
+  drive: Drive,
+  otherwise: fn() -> Result(State, StepExit),
+) -> Result(State, StepExit) {
+  accessor_frame(state, receiver, k, rest, drive, None, otherwise)
+}
+
+// then, when given, finishes the op with the getter's result
+fn accessor_frame(
+  state: State,
+  receiver: JsVal,
+  k: key.PropertyKey,
+  rest: List(JsVal),
+  drive: Drive,
+  then: Option(fn(State, JsVal) -> Result(State, StepExit)),
+  otherwise: fn() -> Result(State, StepExit),
+) -> Result(State, StepExit) {
+  case k {
+    key.Named(_) ->
+      case ffi.find_accessor(state.agent, receiver, k) {
+        ffi.Accessor(get: Some(f), ..) ->
+          user_frame(state, f, receiver, [], rest, drive, then, otherwise)
+        _ -> otherwise()
+      }
+    _ -> otherwise()
+  }
+}
+
+// a bytecode setter runs as a frame whose result is dropped for stack_after
+fn setter_frame(
+  state: State,
+  receiver: JsVal,
+  k: key.PropertyKey,
+  value: JsVal,
+  stack_after: List(JsVal),
+  drive: Drive,
+  otherwise: fn() -> Result(State, StepExit),
+) -> Result(State, StepExit) {
+  case k {
+    key.Named(_) ->
+      case ffi.find_accessor(state.agent, receiver, k) {
+        ffi.Accessor(set: Some(f), ..) -> {
+          let finish = fn(state: State, _) {
+            Ok(State(..state, stack: stack_after, pc: state.pc + 1))
+          }
+          user_frame(
+            state,
+            f,
+            receiver,
+            [value],
+            stack_after,
+            drive,
+            Some(finish),
+            otherwise,
+          )
+        }
+        _ -> otherwise()
+      }
+    _ -> otherwise()
+  }
+}
+
+// pushes f as a frame when it is same-realm bytecode, else otherwise
+fn user_frame(
+  state: State,
+  f: JsVal,
+  this: JsVal,
+  args: List(JsVal),
+  rest: List(JsVal),
+  drive: Drive,
+  then: Option(fn(State, JsVal) -> Result(State, StepExit)),
+  otherwise: fn() -> Result(State, StepExit),
+) -> Result(State, StepExit) {
+  case ffi.cell_of(state.agent, f) {
+    SObject(
+      kind: KBytecode(template:, env:, home_object:, flags:, realm:, unit:, ..),
+      ..,
+    )
+      if realm == state.agent.realm.id
+      && !template.is_generator
+      && !template.is_async
+    -> {
+      let assert KHandle(fn_h) = classify(f)
+      call.call_function_then(
+        state,
+        fn_h,
+        template,
+        unit,
+        env,
+        home_object,
+        flags,
+        args,
+        rest,
+        this,
+        None,
+        mk_undefined(),
+        drive,
+        then,
+      )
+    }
+    _ -> otherwise()
+  }
 }

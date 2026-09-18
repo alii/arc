@@ -12,6 +12,8 @@ import arc/rt/types.{
 }
 import gleam
 import gleam/dict.{type Dict}
+import gleam/dynamic.{type Dynamic}
+import gleam/option.{type Option}
 
 pub type Guarded(v) {
   Ok(value: v, agent: Agent)
@@ -375,6 +377,29 @@ pub fn array_iter_proto(agent: Agent, rec: JsVal) -> Handle
 
 @external(erlang, "arc_rt_lang_ffi", "array_iter_record")
 pub fn array_iter_record(target: JsVal, index: Int, next_fn: JsVal) -> JsVal
+
+pub type Accessor {
+  Accessor(get: Option(JsVal), set: Option(JsVal))
+  NoAccessor
+}
+
+@external(erlang, "arc_interp_prop_ffi", "get_getter")
+fn find_accessor_raw(agent: Agent, obj: JsVal, key: PropertyKey) -> Dynamic
+
+// the accessor a plain chain resolves key to, if that is what it holds
+pub fn find_accessor(agent: Agent, obj: JsVal, key: PropertyKey) -> Accessor {
+  let r = find_accessor_raw(agent, obj, key)
+  case is_miss_term(r) {
+    True -> NoAccessor
+    False -> decode_accessor(r)
+  }
+}
+
+@external(erlang, "arc_interp_ffi", "is_miss")
+fn is_miss_term(v: Dynamic) -> Bool
+
+@external(erlang, "gleam_stdlib", "identity")
+fn decode_accessor(v: Dynamic) -> Accessor
 
 // for-in keeps its pending keys on the operand stack, never in the heap
 pub type ForInStep {

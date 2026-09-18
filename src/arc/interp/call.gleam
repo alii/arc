@@ -6,7 +6,7 @@ import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/ffi
 import arc/interp/safepoint
 import arc/interp/state.{
-  type SavedFrame, type State, type StepExit, Returned, SavedFrame,
+  type SavedFrame, type State, type StepExit, Returned, SavedCont, SavedFrame,
   SavedRegFrame, State, Threw,
 }
 import arc/rt/builtins as rt_builtins
@@ -226,6 +226,41 @@ pub fn call_function(
   new_target: JsVal,
   drive: Drive,
 ) -> Result(State, StepExit) {
+  call_function_then(
+    state,
+    fn_h,
+    template,
+    unit,
+    env,
+    home_object,
+    flags,
+    args,
+    rest_stack,
+    this_arg,
+    constructor_this,
+    new_target,
+    drive,
+    None,
+  )
+}
+
+// cont, when given, finishes the calling op with the callee's result
+pub fn call_function_then(
+  state: State,
+  fn_h: Handle,
+  template: FuncTemplate,
+  unit: Int,
+  env: EnvTuple,
+  home_object: Option(Handle),
+  flags: FnFlags,
+  args: List(JsVal),
+  rest_stack: List(JsVal),
+  this_arg: JsVal,
+  constructor_this: Option(JsVal),
+  new_target: JsVal,
+  drive: Drive,
+  cont: Option(fn(State, JsVal) -> Result(State, StepExit)),
+) -> Result(State, StepExit) {
   case template.is_class_constructor && ffi.is(new_target, ffi.Undefined) {
     True ->
       state.throw_type_error(
@@ -275,14 +310,25 @@ pub fn call_function(
                 "Maximum call stack size exceeded",
               )
             False -> {
-              let saved =
-                SavedFrame(
-                  caller: state,
-                  pc: state.pc + 1,
-                  stack: rest_stack,
-                  locals: state.locals,
-                  constructor_this:,
-                )
+              let saved = case cont {
+                None ->
+                  SavedFrame(
+                    caller: state,
+                    pc: state.pc + 1,
+                    stack: rest_stack,
+                    locals: state.locals,
+                    constructor_this:,
+                  )
+                Some(cont) ->
+                  SavedCont(
+                    caller: state,
+                    pc: state.pc + 1,
+                    stack: rest_stack,
+                    locals: state.locals,
+                    constructor_this: None,
+                    cont:,
+                  )
+              }
               Ok(State(
                 agent:,
                 stack: [],
@@ -311,6 +357,7 @@ pub fn call_function(
 /// §15.10 isintailposition
 pub fn is_tail_call(state: State, pc: Int, callee: FuncTemplate) -> Bool {
   let frame_eligible = case state.try_stack, state.call_stack {
+    [], [SavedCont(..), ..] -> False
     [], [_, ..] ->
       state.func.is_strict
       && !callee.is_generator
@@ -789,6 +836,8 @@ pub fn return_op(state: State) -> Result(State, StepExit) {
   }
   case state.call_stack {
     [] -> Error(Returned(return_value, state))
+    [SavedCont(..) as saved, ..] ->
+      cont_return(state.agent, state.depth, saved, return_value)
     [saved, ..] ->
       case resolve_return(state, return_value, saved.constructor_this) {
         Error(#(thrown, state)) -> Error(Threw(thrown, state))
@@ -804,6 +853,19 @@ fn return_to(state: State, saved: SavedFrame, value: JsVal) -> State {
       ..saved.stack
     ]),
   )
+}
+
+// the callee ran for an op that was midway; its cont finishes the op
+// no safepoint first: what cont captured lives only in the popped frame
+pub fn cont_return(
+  agent: Agent,
+  depth: Int,
+  saved: SavedFrame,
+  value: JsVal,
+) -> Result(State, StepExit) {
+  let assert SavedCont(cont:, ..) = saved
+  let caller = restore_frame(leave_frame(agent, depth), saved, saved.stack)
+  cont(State(..caller, pc: saved.pc - 1), value)
 }
 
 pub fn restore_frame(

@@ -1,6 +1,6 @@
 %% property fast paths: answer or miss, never raise
 -module(arc_interp_prop_ffi).
--export([get_field/3, own_data/2, get_elem/3, get_elem2/3, put_field/5, put_elem/4,
+-export([get_field/3, get_getter/3, own_data/2, get_elem/3, get_elem2/3, put_field/5, put_elem/4,
          define_field/4, new_object/5, new_receiver/2, get_global/3,
          put_global/6]).
 
@@ -27,6 +27,36 @@ own_data(Props, K) ->
             element(?DATAPROP_VALUE, Prop);
         _ -> miss
     end.
+
+%% the accessor K resolves to along a plain chain
+get_getter(Agent, {?HANDLE_TAG, Id}, K) ->
+    Data = element(?STORE_DATA, element(?AGENT_STORE, Agent)),
+    getter_walk(Data, arc_rt_arena_ffi:get(Id, Data), K, 64);
+get_getter(_, _, _) -> miss.
+
+getter_walk(_, _, _, 0) -> miss;
+getter_walk(Data, {?SSHAPED_TAG, _, Proto, _, Offs}, K, Fuel) ->
+    case is_map_key(element(2, K), Offs) of
+        true -> miss;
+        false -> getter_next(Data, Proto, K, Fuel)
+    end;
+getter_walk(Data, Slot, K, Fuel) when element(1, Slot) =:= ?SOBJECT_TAG ->
+    case named_plain(element(?SOBJECT_KIND, Slot), K) of
+        false -> miss;
+        true ->
+            case element(?SOBJECT_PROPS, Slot) of
+                #{K := Prop} when element(1, Prop) =:= ?ACCESSORPROP_TAG ->
+                    {accessor, element(?ACCESSORPROP_GET, Prop),
+                     element(?ACCESSORPROP_SET, Prop)};
+                #{K := _} -> miss;
+                _ -> getter_next(Data, element(?SOBJECT_PROTO, Slot), K, Fuel)
+            end
+    end;
+getter_walk(_, _, _, _) -> miss.
+
+getter_next(Data, {?SOME, {?HANDLE_TAG, P}}, K, Fuel) ->
+    getter_walk(Data, arc_rt_arena_ffi:get(P, Data), K, Fuel - 1);
+getter_next(_, _, _, _) -> miss.
 
 %% §9.1.1.4.6 global getbindingvalue, plain case
 get_global(Agent, Lex, Name) ->
