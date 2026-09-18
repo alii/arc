@@ -26,8 +26,8 @@ import arc/bytecode/opcode.{
   PostIncLocal, PrivateInDyn, PushConst, PushTry, PutBoxed, PutBoxedCheckInit,
   PutElem, PutElemPop, PutEvalVar, PutField, PutFieldPop, PutGlobal, PutLocal,
   PutLocalCheckInit, PutLocalConstField, PutLocalLocalField, PutPrivateFieldDyn,
-  PutSuperValue, Return, Rot3, SetProto, SetupDerivedClass, Swap, TypeOf,
-  TypeofEvalVar, TypeofGlobal, UnaryOp, Unrot4, Yield, YieldStar,
+  PutSuperValue, Return, Rot3, Safepoint, SetProto, SetupDerivedClass, Swap,
+  TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp, Unrot4, Yield, YieldStar,
 }
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/call.{type Drive}
@@ -734,6 +734,24 @@ fn fast_loop(
           }
         }
         [] -> slow(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    Safepoint ->
+      case agent.store.alloc_since_gc < agent.store.gc_threshold {
+        True ->
+          fast_loop(
+            state,
+            drive,
+            pc + 1,
+            stack,
+            locals,
+            agent,
+            code,
+            constants,
+            r0,
+            r1,
+          )
+        False -> slow(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
     Jump(Pc(target)) ->
@@ -4647,6 +4665,9 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       }
 
     Return -> call.return_op(state)
+
+    Safepoint ->
+      Ok(safepoint.maybe_collect_at_return(State(..state, pc: state.pc + 1)))
 
     Jump(Pc(target)) -> Ok(State(..state, pc: target))
 

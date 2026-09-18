@@ -28,12 +28,17 @@ import arc/rt/types.{
 } as rt_types
 import gleam/dict.{type Dict}
 import gleam/dynamic.{type Dynamic}
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/set
 
 @external(erlang, "arc_rt_gc_ffi", "refs_in_term")
 pub fn push_term_refs(v: Dynamic, acc: List(Int)) -> List(Int)
+
+// refs only in what changed since the old copy; unchanged parts are old news
+@external(erlang, "arc_rt_gc_ffi", "diff_refs")
+fn diff_refs(before: Dynamic, now: Dynamic, acc: List(Int)) -> List(Int)
 
 @external(erlang, "arc_rt_gc_ffi", "refs_in_props")
 fn push_props_refs(props: Dict(k, Property), acc: List(Int)) -> List(Int)
@@ -60,23 +65,30 @@ pub fn roots_of_state(st: Agent) -> List(Int) {
   let JsStore(
     data: _,
     next: _,
-    pinned_roots:,
     alloc_since_gc: _,
     gc_threshold: _,
-    gc_live: _,
     prop_seq: _,
-    private_uid: _,
-    symbol_uid: _,
-    ops: _,
-    microtasks:,
-    unhandled_rejections:,
     shapes: _,
     next_shape: _,
-    unit_uid: _,
     // ics are validated on use, so weak
     ics: _,
     free_protos: _,
     global_epoch: _,
+    ops: _,
+    microtasks:,
+    pinned_roots:,
+    meta: rt_types.StoreMeta(
+      gc_live: _,
+      private_uid: _,
+      symbol_uid: _,
+      unit_uid: _,
+      unhandled_rejections:,
+      old: _,
+      old_next: _,
+      weak_old: _,
+      major_live: _,
+      minors_since_major: _,
+    ),
   ) = require_js(st)
   let acc = set.to_list(pinned_roots)
   let acc = list.append(unhandled_rejections, acc)
@@ -370,8 +382,6 @@ fn push_birth_refs(birth: rt_types.FnBirth, acc: List(Int)) -> List(Int) {
   }
 }
 
-pub const default_gc_threshold: Int = 65_536
-
 // turn boundary only (call_depth == 0), never at fn entry
 pub fn t_maybe_collect(st: Agent) -> Agent {
   t_maybe_collect_with(st, [])
@@ -379,16 +389,14 @@ pub fn t_maybe_collect(st: Agent) -> Agent {
 
 pub fn t_maybe_collect_with(st: Agent, extra_roots: List(Handle)) -> Agent {
   case st.call_depth == 0 && due(require_js(st)) {
-    True -> t_collect(st, extra_roots)
+    True -> t_collect_some(st, extra_roots)
     False -> st
   }
 }
 
-// threshold scales with live size so marking tracks allocation
+// minor gcs are cheap, so a fixed young generation size
 pub fn due(js: JsStore(st)) -> Bool {
   js.alloc_since_gc >= js.gc_threshold
-  && js.alloc_since_gc * 2 * default_gc_threshold
-  >= js.gc_threshold * js.gc_live
 }
 
 pub fn t_hold_roots(st: Agent, held: List(JsVal)) -> #(Agent, List(Int)) {
@@ -407,13 +415,32 @@ pub fn t_release_roots(st: Agent, ids: List(Int)) -> Agent {
   Agent(..st, store: JsStore(..js, pinned_roots: pinned))
 }
 
-// no renumbering; dead ids dropped, next falls past highest survivor
+// majors keep the old full-gc schedule, minors run in between
+pub const minors_per_major: Int = 16
+
+pub fn t_collect_some(st: Agent, extra_roots: List(Handle)) -> Agent {
+  let js = require_js(st)
+  let meta = js.meta
+  let floor = meta.major_live / 2
+  case
+    meta.old_next > 0
+    && meta.gc_live - meta.major_live < int.max(js.gc_threshold, floor)
+    && meta.minors_since_major * js.gc_threshold
+    < int.max(minors_per_major * js.gc_threshold, floor)
+  {
+    True -> collect_minor(st, extra_roots)
+    False -> t_collect(st, extra_roots)
+  }
+}
+
+// full; no renumbering, dead ids dropped, next falls past highest survivor
 pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {
   let js = require_js(st)
   let roots =
     list.fold(extra_roots, roots_of_state(st), fn(a, h) { [h.id, ..a] })
   let live = mark_loop(js.data, roots, dict.new())
-  let #(data, next) = sweep(js.data, live)
+  let #(data, next, weak) = sweep(js.data, live)
+  let live_count = dict.size(live)
   Agent(
     ..st,
     store: JsStore(
@@ -421,11 +448,135 @@ pub fn t_collect(st: Agent, extra_roots: List(Handle)) -> Agent {
       data:,
       next:,
       alloc_since_gc: 0,
-      gc_live: dict.size(live),
       ics: dict.filter(js.ics, fn(_, entry) { is_read_ic(entry) }),
       free_protos: dict.new(),
+      meta: rt_types.StoreMeta(
+        ..js.meta,
+        gc_live: live_count,
+        old: data,
+        old_next: next,
+        weak_old: weak,
+        major_live: live_count,
+        minors_since_major: 0,
+      ),
     ),
   )
+}
+
+// young ids are old_next and up; old cells reach them only if written since
+fn collect_minor(st: Agent, extra_roots: List(Handle)) -> Agent {
+  let js = require_js(st)
+  let meta = js.meta
+  let w = meta.old_next
+  let data = js.data
+  let roots =
+    list.fold(extra_roots, roots_of_state(st), fn(a, h) { [h.id, ..a] })
+  let roots =
+    list.fold(arena.diff_below(w, meta.old, data), roots, fn(acc, id) {
+      case arena.get_option(id, data), arena.get_option(id, meta.old) {
+        Some(slot), Some(before) ->
+          diff_refs(to_dynamic(before), to_dynamic(slot), acc)
+        Some(slot), None -> refs_in_cell(slot, acc)
+        None, _ -> acc
+      }
+    })
+  let #(live, weak) = mark_young(data, roots, w, dict.new(), meta.weak_old)
+  let is_live = fn(id) { id < w || marked(id, live) }
+  let kept = case dict.size(live) * 2 > js.next - w {
+    True -> reset_dead(data, w, js.next, live)
+    False ->
+      list.sort(dict.keys(live), int.compare)
+      |> list.fold(arena.truncate(w, data), fn(acc, id) {
+        arena.set(id, arena.get(id, data), acc)
+      })
+  }
+  // ids under next are never handed out again, so stale weak map keys only
+  // cost memory until the next major; refs and registries would dangle
+  let #(kept, weak) =
+    list.fold(weak, #(kept, []), fn(acc, id) {
+      let #(kept, weak) = acc
+      case arena.get_option(id, kept) {
+        Some(SObject(kind: WeakRefObj(..), ..) as slot)
+        | Some(SObject(kind: FinalizationRegistryObj(..), ..) as slot) -> #(
+          arena.set(id, prune_weak_slot(slot, is_live), kept),
+          [id, ..weak],
+        )
+        Some(_) -> #(kept, [id, ..weak])
+        None -> acc
+      }
+    })
+  Agent(
+    ..st,
+    store: JsStore(
+      ..js,
+      data: kept,
+      alloc_since_gc: 0,
+      meta: rt_types.StoreMeta(
+        ..meta,
+        gc_live: meta.gc_live + dict.size(live),
+        old: kept,
+        old_next: js.next,
+        weak_old: weak,
+        minors_since_major: meta.minors_since_major + 1,
+      ),
+    ),
+  )
+}
+
+fn reset_dead(
+  data: Arena(JsSlot),
+  id: Int,
+  next: Int,
+  live: Dict(Int, Nil),
+) -> Arena(JsSlot) {
+  case id >= next {
+    True -> data
+    False ->
+      case marked(id, live) {
+        True -> reset_dead(data, id + 1, next, live)
+        False -> reset_dead(arena.reset(id, data), id + 1, next, live)
+      }
+  }
+}
+
+// live young ids, plus any weak containers among them added to weak
+fn mark_young(
+  data: Arena(JsSlot),
+  frontier: List(Int),
+  w: Int,
+  visited: Dict(Int, Nil),
+  weak: List(Int),
+) -> #(Dict(Int, Nil), List(Int)) {
+  case frontier {
+    [] -> #(visited, weak)
+    [id, ..rest] ->
+      case id < w || marked(id, visited) {
+        True -> mark_young(data, rest, w, visited, weak)
+        False -> {
+          let visited = mark(id, Nil, visited)
+          case arena.get_option(id, data) {
+            None -> mark_young(data, rest, w, visited, weak)
+            Some(slot) -> {
+              let weak = case is_weak_slot(slot) {
+                True -> [id, ..weak]
+                False -> weak
+              }
+              mark_young(data, refs_in_cell(slot, rest), w, visited, weak)
+            }
+          }
+        }
+      }
+  }
+}
+
+fn is_weak_slot(slot: JsSlot) -> Bool {
+  case slot {
+    SObject(kind: WeakMapObj(..), ..)
+    | SObject(kind: WeakSetObj(..), ..)
+    | SObject(kind: FinalizationRegistryObj(..), ..)
+    | SObject(kind: WeakRefObj(..), ..) -> True
+    _ -> False
+  }
 }
 
 // call ics name cell ids that sweep hands out again
@@ -464,70 +615,85 @@ fn mark_loop(
   }
 }
 
-fn sweep(data: Arena(JsSlot), live: Dict(Int, Nil)) -> #(Arena(JsSlot), Int) {
-  let kept =
+fn sweep(
+  data: Arena(JsSlot),
+  live: Dict(Int, Nil),
+) -> #(Arena(JsSlot), Int, List(Int)) {
+  let is_live = fn(id) { marked(id, live) }
+  let #(kept, weak) =
     arena.fold(
       fn(id, slot, acc) {
         case marked(id, live) {
-          True -> [#(id, prune_weak_slot(slot, live)), ..acc]
+          True -> {
+            let #(kept, weak) = acc
+            case is_weak_slot(slot) {
+              True -> #([#(id, prune_weak_slot(slot, is_live)), ..kept], [
+                id,
+                ..weak
+              ])
+              False -> #([#(id, slot), ..kept], weak)
+            }
+          }
           False -> acc
         }
       },
-      [],
+      #([], []),
       data,
     )
   let next = case kept {
     [] -> 0
     [#(id, _), ..] -> id + 1
   }
-  #(arena.from_descending(kept), next)
+  #(arena.from_descending(kept), next, weak)
 }
 
 // drop weak entries and registry cells whose target died
-fn prune_weak_slot(slot: JsSlot, live: Dict(Int, Nil)) -> JsSlot {
+fn prune_weak_slot(slot: JsSlot, is_live: fn(Int) -> Bool) -> JsSlot {
   case slot {
     SObject(kind: WeakMapObj(entries:), ..) ->
       SObject(
         ..slot,
         kind: WeakMapObj(
-          entries: dict.filter(entries, fn(k, _) { weak_key_live(k, live) }),
+          entries: dict.filter(entries, fn(k, _) { weak_key_live(k, is_live) }),
         ),
       )
     SObject(kind: WeakSetObj(entries:), ..) ->
       SObject(
         ..slot,
         kind: WeakSetObj(
-          entries: set.filter(entries, fn(k) { weak_key_live(k, live) }),
+          entries: set.filter(entries, fn(k) { weak_key_live(k, is_live) }),
         ),
       )
     SObject(kind: FinalizationRegistryObj(callback:, cells:), ..) -> {
       let cells =
-        list.filter(cells, fn(c) { option.is_some(weak_live(c.target, live)) })
+        list.filter(cells, fn(c) {
+          option.is_some(weak_live(c.target, is_live))
+        })
         |> list.map(fn(c) {
-          FinRegCell(..c, token: option.then(c.token, weak_live(_, live)))
+          FinRegCell(..c, token: option.then(c.token, weak_live(_, is_live)))
         })
       SObject(..slot, kind: FinalizationRegistryObj(callback:, cells:))
     }
     SObject(kind: WeakRefObj(target:), ..) ->
       SObject(
         ..slot,
-        kind: WeakRefObj(target: option.then(target, weak_live(_, live))),
+        kind: WeakRefObj(target: option.then(target, weak_live(_, is_live))),
       )
     _ -> slot
   }
 }
 
-fn weak_key_live(k: WeakKey, live: Dict(Int, Nil)) -> Bool {
+fn weak_key_live(k: WeakKey, is_live: fn(Int) -> Bool) -> Bool {
   case k {
-    WeakObjKey(id:) -> marked(id, live)
+    WeakObjKey(id:) -> is_live(id)
     WeakSymKey(_) -> True
   }
 }
 
-fn weak_live(v: JsVal, live: Dict(Int, Nil)) -> Option(JsVal) {
+fn weak_live(v: JsVal, is_live: fn(Int) -> Bool) -> Option(JsVal) {
   case classify(v) {
     KHandle(JsCell(id)) ->
-      case marked(id, live) {
+      case is_live(id) {
         True -> Some(v)
         False -> None
       }

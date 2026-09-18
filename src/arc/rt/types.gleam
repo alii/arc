@@ -2698,28 +2698,44 @@ pub type JsOps(st) {
   )
 }
 
+// field order is abi (arc_rt_layout.hrl); hot fields only, rest in meta
 pub type JsStore(st) {
   JsStore(
     data: Arena(JsSlot),
     next: Int,
-    pinned_roots: Set(Int),
     alloc_since_gc: Int,
     gc_threshold: Int,
-    gc_live: Int,
     prop_seq: Int,
-    private_uid: Int,
-    symbol_uid: Int,
-    ops: JsOps(st),
-    microtasks: JobQueue,
-    unhandled_rejections: List(Int),
     shapes: Dict(Int, ShapeDesc),
     next_shape: Int,
-    unit_uid: Int,
     ics: Dict(Int, IcEntry),
     // proto id to whether its chain takes plain named writes
     free_protos: Dict(Int, Nil),
     // bumped on any write to a global object cell, for global read caches
     global_epoch: Int,
+    ops: JsOps(st),
+    microtasks: JobQueue,
+    pinned_roots: Set(Int),
+    meta: StoreMeta,
+  )
+}
+
+// rarely written, kept out of the record every heap write copies
+pub type StoreMeta {
+  StoreMeta(
+    gc_live: Int,
+    private_uid: Int,
+    symbol_uid: Int,
+    unit_uid: Int,
+    unhandled_rejections: List(Int),
+    // data as of the last gc, ids below old_next are the old generation
+    old: Arena(JsSlot),
+    old_next: Int,
+    // old cells holding weak refs, pruned each minor gc
+    weak_old: List(Int),
+    // gc_live right after the last major gc
+    major_live: Int,
+    minors_since_major: Int,
   )
 }
 

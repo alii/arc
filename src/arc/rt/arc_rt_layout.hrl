@@ -22,19 +22,26 @@
 -define(STORE_TAG, js_store).
 -define(STORE_DATA, 2).
 -define(STORE_NEXT, 3).
--define(STORE_PINNED_ROOTS, 4).
--define(STORE_ALLOC, 5).
--define(STORE_SHAPES, 14).
--define(STORE_NEXT_SHAPE, 15).
--define(STORE_ARITY, 19).
--define(STORE_ICS, 17).
--define(STORE_FREE_PROTOS, 18).
--define(STORE_GLOBAL_EPOCH, 19).
+-define(STORE_ALLOC, 4).
+-define(STORE_PROP_SEQ, 6).
+-define(STORE_SHAPES, 7).
+-define(STORE_NEXT_SHAPE, 8).
+-define(STORE_ICS, 9).
+-define(STORE_FREE_PROTOS, 10).
+-define(STORE_GLOBAL_EPOCH, 11).
+-define(STORE_PINNED_ROOTS, 14).
+-define(STORE_ARITY, 15).
 
 -define(REALM_TAG, realm).
 -define(REALM_OBJECT, 2).
 -define(REALM_FUNCTION, 3).
 -define(REALM_ARRAY, 4).
+-define(REALM_ARRAY_ITER_PROTO, 37).
+-define(REALM_STRING_ITER_PROTO, 38).
+-define(REALM_MAP, 18).
+-define(REALM_SET, 19).
+-define(REALM_MAP_ITER_PROTO, 39).
+-define(REALM_SET_ITER_PROTO, 40).
 -define(REALM_GLOBAL, 51).
 -define(REALM_ID, 53).
 -define(REALM_ARITY, 55).
@@ -163,8 +170,6 @@
 
 -define(REALM_STRING, 5).
 -define(REALM_NUMBER, 6).
-
--define(STORE_PROP_SEQ, 8).
 
 -define(STORE_FREE_SLOT, js_free).
 

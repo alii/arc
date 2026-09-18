@@ -14,7 +14,10 @@ pub fn maybe_collect_at_return(state: State) -> State {
     True ->
       State(
         ..state,
-        agent: rt_gc.t_collect(state.agent, interp_state.frame_roots(state)),
+        agent: rt_gc.t_collect_some(
+          state.agent,
+          interp_state.frame_roots(state),
+        ),
       )
     False -> state
   }
