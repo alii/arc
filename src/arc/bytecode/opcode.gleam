@@ -152,6 +152,8 @@ pub type Op {
   CallConstructorApply
   Return
 
+  // gc check at the head of loops that can allocate
+  Safepoint
   Jump(target: Pc)
   JumpIfFalse(target: Pc)
   JumpIfTrue(target: Pc)

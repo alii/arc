@@ -240,16 +240,12 @@ fn string_char_at(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
+  let #(s, st) = with_this_str(st, this)
   let #(idx, st) =
     rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
-  case idx >= 0 {
-    True ->
-      case js_string.char_at(s, idx) {
-        Some(ch) -> #(mk_string(ch), st)
-        None -> #(mk_string(""), st)
-      }
-    False -> #(mk_string(""), st)
+  case js_string.char_at_val(s, idx) {
+    Some(ch) -> #(ch, st)
+    None -> #(mk_string(""), st)
   }
 }
 
@@ -258,10 +254,10 @@ fn string_char_code_at(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
+  let #(s, st) = with_this_str(st, this)
   let #(idx, st) =
     rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
-  case js_string.codepoint_at(s, idx) {
+  case js_string.cp_at(s, idx) {
     Some(cp) -> #(mk_number(JInt(cp)), st)
     None -> #(mk_number(JNan), st)
   }
@@ -272,17 +268,12 @@ fn string_index_of(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
+  let #(s, st) = with_this_str(st, this)
   let #(search, st) =
     rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   let #(pos, st) = rt_val.t_to_integer_or_infinity(st, helpers.arg_at(args, 1))
-  let result = case pos <= 0 {
-    True -> js_string.index_of(s, search, 0)
-    False -> {
-      let len = js_string.length(s)
-      js_string.index_of_known(s, len, search, int.min(pos, len))
-    }
-  }
+  let from = int.clamp(pos, 0, js_string.len(s))
+  let result = js_string.index_of_val(s, mk_string(search), from)
   #(mk_number(JInt(option.unwrap(result, -1))), st)
 }
 
@@ -291,14 +282,15 @@ fn string_last_index_of(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
+  let #(v, st) = with_this_str(st, this)
+  let s = js_string.bin(v)
   let #(search, st) =
     rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
   let #(num, st) = rt_val.t_to_number(st, helpers.arg_at(args, 1))
   let result = case num {
     JNan | rt_types.JPosInf -> js_string.last_index_of_all(s, search)
     _ -> {
-      let len = js_string.length(s)
+      let len = js_string.len(v)
       let from = int.clamp(rt_val.jsnum_to_integer_or_infinity(num), 0, len)
       js_string.last_index_of(s, search, from)
     }
@@ -329,7 +321,8 @@ fn string_search_bool(
   name: String,
   predicate: fn(String, String) -> Bool,
 ) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
+  let #(v, st) = with_this_str(st, this)
+  let s = js_string.bin(v)
   let search_val = helpers.first_arg_or_undefined(args)
   let #(is_re, st) = regexp.is_regexp(st, search_val)
   case is_re {
@@ -346,7 +339,11 @@ fn string_search_bool(
         rt_val.t_to_integer_or_infinity(st, helpers.arg_at(args, 1))
       let sub = case pos <= 0 {
         True -> s
-        False -> js_string.drop_known(s, js_string.length(s), pos)
+        False -> {
+          let len = js_string.len(v)
+          let pos = int.min(pos, len)
+          js_string.bin(js_string.sub(v, pos, len - pos))
+        }
       }
       #(mk_bool(predicate(sub, search)), st)
     }
@@ -358,7 +355,8 @@ fn string_ends_with(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
+  let #(v, st) = with_this_str(st, this)
+  let s = js_string.bin(v)
   let search_val = helpers.first_arg_or_undefined(args)
   let #(is_re, st) = regexp.is_regexp(st, search_val)
   case is_re {
@@ -369,9 +367,12 @@ fn string_ends_with(
       )
     False -> {
       let #(search, st) = rt_val.t_to_string(st, search_val)
-      let len = js_string.length(s)
+      let len = js_string.len(v)
       let #(end_pos, st) = second_arg_index_or_len(st, args, len, int.clamp)
-      let sub = js_string.slice_known(s, len, 0, end_pos)
+      let sub = case end_pos == len {
+        True -> s
+        False -> js_string.bin(js_string.sub(v, 0, end_pos))
+      }
       #(mk_bool(string.ends_with(sub, search)), st)
     }
   }
@@ -397,13 +398,13 @@ fn second_arg_index_or_len(
 }
 
 fn string_slice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
-  let len = js_string.length(s)
+  let #(s, st) = with_this_str(st, this)
+  let len = js_string.len(s)
   let #(start, st) =
     relative_index(st, helpers.first_arg_or_undefined(args), len, 0)
   let #(end, st) = relative_index(st, helpers.arg_at(args, 1), len, len)
   case end > start {
-    True -> #(mk_string(js_string.slice_known(s, len, start, end - start)), st)
+    True -> #(js_string.sub(s, start, end - start), st)
     False -> #(mk_string(""), st)
   }
 }
@@ -413,8 +414,8 @@ fn string_substring(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
-  let len = js_string.length(s)
+  let #(s, st) = with_this_str(st, this)
+  let len = js_string.len(s)
   let #(raw_start, st) =
     rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
   let #(raw_end, st) = second_arg_index_or_len(st, args, len, fn(n, _, _) { n })
@@ -424,7 +425,7 @@ fn string_substring(
     True -> #(end, start)
     False -> #(start, end)
   }
-  #(mk_string(js_string.slice_known(s, len, start, end - start)), st)
+  #(js_string.sub(s, start, end - start), st)
 }
 
 fn string_concat(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
@@ -497,17 +498,16 @@ fn string_pad(
 }
 
 fn string_at(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
+  let #(s, st) = with_this_str(st, this)
   let #(idx, st) =
     rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
-  let len = js_string.length(s)
   let actual = case idx < 0 {
-    True -> len + idx
+    True -> js_string.len(s) + idx
     False -> idx
   }
-  case actual >= 0 && actual < len {
-    True -> #(mk_string(js_string.slice_known(s, len, actual, 1)), st)
-    False -> #(mk_undefined(), st)
+  case js_string.char_at_val(s, actual) {
+    Some(ch) -> #(ch, st)
+    None -> #(mk_undefined(), st)
   }
 }
 
@@ -516,14 +516,10 @@ fn string_code_point_at(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
+  let #(s, st) = with_this_str(st, this)
   let #(pos, st) =
     rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
-  let cp = case pos >= 0 {
-    True -> js_string.codepoint_at(s, pos)
-    False -> None
-  }
-  case cp {
+  case js_string.cp_at(s, pos) {
     Some(cp) -> #(mk_number(JInt(cp)), st)
     None -> #(mk_undefined(), st)
   }
@@ -557,8 +553,8 @@ fn string_normalize(
 
 // annex b §b.2.2.1
 fn string_substr(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(s, st) = with_this_string(st, this)
-  let size = js_string.length(s)
+  let #(s, st) = with_this_str(st, this)
+  let size = js_string.len(s)
   let #(start, st) =
     relative_index(st, helpers.first_arg_or_undefined(args), size, 0)
   let #(raw_len, st) =
@@ -567,10 +563,7 @@ fn string_substr(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let end = int.min(start + len, size)
   case start >= end {
     True -> #(mk_string(""), st)
-    False -> #(
-      mk_string(js_string.slice_known(s, size, start, end - start)),
-      st,
-    )
+    False -> #(js_string.sub(s, start, end - start), st)
   }
 }
 
@@ -785,7 +778,7 @@ fn string_split_parts(
             "" -> js_string.explode(s) |> list.take(lim)
             _ -> js_string.split(s, sep, lim)
           }
-          ok_array(st, mk_strings(parts))
+          ok_array(st, js_string.mk_list(parts))
         }
       }
     }
@@ -1195,16 +1188,21 @@ fn require_object_coercible(st: Agent, this: JsVal, name: String) -> Agent {
   }
 }
 
-@external(erlang, "erlang", "is_binary")
-fn is_str(v: JsVal) -> Bool
-
-@external(erlang, "arc_rt_store_ffi", "identity")
-fn unchecked_str(v: JsVal) -> String
-
 fn with_this_string(st: Agent, this: JsVal) -> #(String, Agent) {
-  case is_str(this) {
-    True -> #(unchecked_str(this), st)
+  case js_string.is_str(this) {
+    True -> #(js_string.bin(this), st)
     False -> coerce_this_string(st, this)
+  }
+}
+
+// the js value itself, so length and indexing stay o(1)
+fn with_this_str(st: Agent, this: JsVal) -> #(JsVal, Agent) {
+  case js_string.is_str(this) {
+    True -> #(this, st)
+    False -> {
+      let #(s, st) = coerce_this_string(st, this)
+      #(mk_string(s), st)
+    }
   }
 }
 
@@ -1273,10 +1271,6 @@ fn concat_within_limit(st: Agent, parts_rev: List(String)) -> #(JsVal, Agent) {
     False -> #(mk_string(string.concat(parts)), st)
   }
 }
-
-// mk_string over a list, which is the identity
-@external(erlang, "arc_rt_store_ffi", "identity")
-fn mk_strings(parts: List(String)) -> List(JsVal)
 
 fn ok_array(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
   let #(h, st) = realm_ops.alloc_array(st, values)

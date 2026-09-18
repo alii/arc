@@ -92,8 +92,8 @@ t_get_prop(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
             end;
         _ -> miss
     end;
-t_get_prop(_, Bin, <<"length">>, _) when is_binary(Bin) ->
-    arc_string_ffi:string_codepoint_length(Bin);
+t_get_prop(_, S, <<"length">>, _) when ?IS_STR(S) ->
+    arc_rt_str_ffi:len(S);
 t_get_prop(_, _, _, _) -> miss.
 
 %% own slot overwrite only, guards keep setelement inline

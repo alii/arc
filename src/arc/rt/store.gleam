@@ -2,7 +2,7 @@ import arc/rt/arena
 import arc/rt/limits
 import arc/rt/types.{
   type Agent, type Handle, type JobQueue, type JsOps, type JsSlot, type JsStore,
-  type JsVal, Agent, JsCell, JsOps, JsStore, RangeErr, SBox,
+  type JsVal, Agent, JsCell, JsOps, JsStore, RangeErr, SBox, StoreMeta,
 } as rt_types
 import gleam/dict
 import gleam/set
@@ -14,25 +14,33 @@ pub fn t_store_new() -> JsStore(Agent) {
   JsStore(
     data: arena.new(),
     next: 0,
-    pinned_roots: set.new(),
     alloc_since_gc: 0,
-    gc_threshold: 65_536,
-    gc_live: 0,
+    // young generation size in cells between minor gcs
+    gc_threshold: 4096,
     // past the constant birth seqs
     prop_seq: 3,
-    private_uid: 0,
-    symbol_uid: 0,
-    ops: unseeded_ops(),
-    microtasks: jq_new(),
-    unhandled_rejections: [],
     shapes: dict.from_list([
       #(0, rt_types.ShapeDesc(0, dict.new(), dict.new())),
     ]),
     next_shape: 1,
-    unit_uid: 0,
     ics: dict.new(),
     free_protos: dict.new(),
     global_epoch: 0,
+    ops: unseeded_ops(),
+    microtasks: jq_new(),
+    pinned_roots: set.new(),
+    meta: StoreMeta(
+      gc_live: 0,
+      private_uid: 0,
+      symbol_uid: 0,
+      unit_uid: 0,
+      unhandled_rejections: [],
+      old: arena.new(),
+      old_next: 0,
+      weak_old: [],
+      major_live: 0,
+      minors_since_major: 0,
+    ),
   )
 }
 
@@ -169,17 +177,41 @@ pub fn t_next_prop_seq(st: Agent) -> #(Int, Agent) {
 
 pub fn t_next_private_uid(st: Agent) -> #(Int, Agent) {
   let js = require_js(st)
-  #(js.private_uid, with_js(st, JsStore(..js, private_uid: js.private_uid + 1)))
+  #(
+    js.meta.private_uid,
+    with_js(
+      st,
+      JsStore(
+        ..js,
+        meta: StoreMeta(..js.meta, private_uid: js.meta.private_uid + 1),
+      ),
+    ),
+  )
 }
 
 pub fn t_next_symbol_uid(st: Agent) -> #(Int, Agent) {
   let js = require_js(st)
-  #(js.symbol_uid, with_js(st, JsStore(..js, symbol_uid: js.symbol_uid + 1)))
+  #(
+    js.meta.symbol_uid,
+    with_js(
+      st,
+      JsStore(
+        ..js,
+        meta: StoreMeta(..js.meta, symbol_uid: js.meta.symbol_uid + 1),
+      ),
+    ),
+  )
 }
 
 pub fn t_next_unit_uid(st: Agent) -> #(Int, Agent) {
   let js = require_js(st)
-  #(js.unit_uid, with_js(st, JsStore(..js, unit_uid: js.unit_uid + 1)))
+  #(
+    js.meta.unit_uid,
+    with_js(
+      st,
+      JsStore(..js, meta: StoreMeta(..js.meta, unit_uid: js.meta.unit_uid + 1)),
+    ),
+  )
 }
 
 pub fn t_enter_call(st: Agent) -> Agent {

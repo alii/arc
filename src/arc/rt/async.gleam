@@ -21,9 +21,9 @@ import arc/rt/types.{
   PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction, PromiseRejectFn,
   PromiseRejected, PromiseResolveFn, RangeErr, ReactionJob, ResolveThenableJob,
   ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen, SBox, SGenerator,
-  SObject, SPromiseData, StepAwait, StepReturn, StepThrow, StepYield, StringKey,
-  ThrowerPassThrough, TypeErr, classify, jq_pop, jq_push, mk_bool, mk_object,
-  mk_string, mk_undefined,
+  SObject, SPromiseData, StepAwait, StepReturn, StepThrow, StepYield, StoreMeta,
+  StringKey, ThrowerPassThrough, TypeErr, classify, jq_pop, jq_push, mk_bool,
+  mk_object, mk_string, mk_undefined,
 } as rt_types
 import gleam/dict
 import gleam/int
@@ -259,7 +259,7 @@ fn earliest_deadline(st: Agent) -> Option(Int) {
 
 fn finish_drain(st: Agent) -> Agent {
   let js = require_js(st)
-  list.each(js.unhandled_rejections, fn(id) {
+  list.each(js.meta.unhandled_rejections, fn(id) {
     case rt_store.t_cell_get(st, JsCell(id)) {
       SPromiseData(state: PromiseRejected(reason), ..) ->
         st.hooks.report_uncaught(
@@ -268,7 +268,10 @@ fn finish_drain(st: Agent) -> Agent {
       _ -> Nil
     }
   })
-  with_js(st, JsStore(..js, unhandled_rejections: []))
+  with_js(
+    st,
+    JsStore(..js, meta: StoreMeta(..js.meta, unhandled_rejections: [])),
+  )
 }
 
 type Side {
@@ -655,10 +658,13 @@ pub fn t_promise_reject(st: Agent, promise_h: Handle, reason: JsVal) -> Agent {
           let js = require_js(st)
           with_js(
             st,
-            JsStore(..js, unhandled_rejections: [
-              data.id,
-              ..js.unhandled_rejections
-            ]),
+            JsStore(
+              ..js,
+              meta: StoreMeta(..js.meta, unhandled_rejections: [
+                data.id,
+                ..js.meta.unhandled_rejections
+              ]),
+            ),
           )
         }
         True -> st
@@ -872,9 +878,12 @@ fn untrack_rejection(st: Agent, data: Handle) -> Agent {
     st,
     JsStore(
       ..js,
-      unhandled_rejections: list.filter(js.unhandled_rejections, fn(r) {
-        r != data.id
-      }),
+      meta: StoreMeta(
+        ..js.meta,
+        unhandled_rejections: list.filter(js.meta.unhandled_rejections, fn(r) {
+          r != data.id
+        }),
+      ),
     ),
   )
 }

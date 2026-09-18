@@ -157,7 +157,7 @@ ic(St, Recv, KeyBin, Site, RSite, N, A, B, C) ->
         W -> prim(St, Recv, W, KeyBin, Site, RSite, N, A, B, C)
     end.
 
-prim_wrapper(Recv, KeyBin) when is_binary(Recv), KeyBin =/= <<"length">> ->
+prim_wrapper(Recv, KeyBin) when ?IS_STR(Recv), KeyBin =/= <<"length">> ->
     ?REALM_STRING;
 prim_wrapper(Recv, _) when is_number(Recv) -> ?REALM_NUMBER;
 prim_wrapper(_, _) -> none.

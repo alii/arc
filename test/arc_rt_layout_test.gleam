@@ -147,6 +147,12 @@ pub fn realm_test() {
   assert at(realm, "REALM_ARRAY") == dyn(realm.array)
   assert at(realm, "REALM_STRING") == dyn(realm.string)
   assert at(realm, "REALM_NUMBER") == dyn(realm.number)
+  assert at(realm, "REALM_ARRAY_ITER_PROTO") == dyn(realm.array_iter_proto)
+  assert at(realm, "REALM_STRING_ITER_PROTO") == dyn(realm.string_iter_proto)
+  assert at(realm, "REALM_MAP") == dyn(realm.map)
+  assert at(realm, "REALM_SET") == dyn(realm.set)
+  assert at(realm, "REALM_MAP_ITER_PROTO") == dyn(realm.map_iter_proto)
+  assert at(realm, "REALM_SET_ITER_PROTO") == dyn(realm.set_iter_proto)
   assert at(realm, "REALM_GLOBAL") == dyn(realm.global_object)
   assert at(realm, "REALM_ID") == dyn(realm.id)
   assert realm.id == 0

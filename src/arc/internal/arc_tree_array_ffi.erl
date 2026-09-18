@@ -4,7 +4,8 @@
 -module(arc_tree_array_ffi).
 -compile({no_auto_import, [size/1]}).
 -export([new/0, from_list/1, get/2, get_option/2, set/3, size/1, resize/2,
-         reset/2, sparse_fold/3, to_list/1]).
+         reset/2, sparse_fold/3, to_list/1, dense_list/2, append_list/2,
+         range_list/3]).
 
 -include("../rt/arc_rt_layout.hrl").
 
@@ -191,6 +192,43 @@ fold_node(F, Acc, N, S, Base, Ix, Size) when Ix =< ?W ->
 fold_node(_, Acc, _, _, _, _, _) -> Acc.
 
 %% every slot below size, holes included
+%% the first Len values when all are set, else none
+dense_list(A, Len) ->
+    case size(A) of
+        Len ->
+            L = to_list(A),
+            case lists:member(?H, L) of
+                true -> none;
+                false -> {some, L}
+            end;
+        _ when Len =:= 0 -> {some, []};
+        _ -> none
+    end.
+
+%% Count values from index From when all are set, else none
+range_list(_, _, 0) -> {some, []};
+range_list(A, From, Count) when From >= 0 ->
+    case From + Count =< size(A) of
+        false -> none;
+        true -> range_acc(A, From, From + Count - 1, [])
+    end;
+range_list(_, _, _) -> none.
+
+range_acc(_, From, I, Acc) when I < From -> {some, Acc};
+range_acc(A, From, I, Acc) ->
+    case get(I, A) of
+        ?H -> none;
+        V -> range_acc(A, From, I - 1, [V | Acc])
+    end.
+
+%% values written at size, size + 1, ..
+append_list({?VEC_TAG, Size, _, _, _, _} = V, L) ->
+    {V1, _} = lists:foldl(fun(X, {A, I}) -> {set(I, X, A), I + 1} end,
+                          {V, Size}, L),
+    V1;
+append_list(T, L) ->
+    from_list(tuple_to_list(T) ++ L).
+
 to_list({?VEC_TAG, Size, _, _, _, _} = V) ->
     {?VEC_TAG, _, S, N, _, _} = settle(V),
     lists:sublist(leaves(N, S, []), Size);

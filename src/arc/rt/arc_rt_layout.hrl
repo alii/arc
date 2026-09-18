@@ -22,19 +22,26 @@
 -define(STORE_TAG, js_store).
 -define(STORE_DATA, 2).
 -define(STORE_NEXT, 3).
--define(STORE_PINNED_ROOTS, 4).
--define(STORE_ALLOC, 5).
--define(STORE_SHAPES, 14).
--define(STORE_NEXT_SHAPE, 15).
--define(STORE_ARITY, 19).
--define(STORE_ICS, 17).
--define(STORE_FREE_PROTOS, 18).
--define(STORE_GLOBAL_EPOCH, 19).
+-define(STORE_ALLOC, 4).
+-define(STORE_PROP_SEQ, 6).
+-define(STORE_SHAPES, 7).
+-define(STORE_NEXT_SHAPE, 8).
+-define(STORE_ICS, 9).
+-define(STORE_FREE_PROTOS, 10).
+-define(STORE_GLOBAL_EPOCH, 11).
+-define(STORE_PINNED_ROOTS, 14).
+-define(STORE_ARITY, 15).
 
 -define(REALM_TAG, realm).
 -define(REALM_OBJECT, 2).
 -define(REALM_FUNCTION, 3).
 -define(REALM_ARRAY, 4).
+-define(REALM_ARRAY_ITER_PROTO, 37).
+-define(REALM_STRING_ITER_PROTO, 38).
+-define(REALM_MAP, 18).
+-define(REALM_SET, 19).
+-define(REALM_MAP_ITER_PROTO, 39).
+-define(REALM_SET_ITER_PROTO, 40).
 -define(REALM_GLOBAL, 51).
 -define(REALM_ID, 53).
 -define(REALM_ARITY, 55).
@@ -44,6 +51,11 @@
 
 -define(HANDLE_TAG, js_cell).
 -define(HANDLE_ID, 2).
+
+-define(STR_TAG, js_str).
+-define(IS_STR(V), (is_binary(V) orelse
+                    (is_tuple(V) andalso tuple_size(V) =:= 4
+                     andalso element(1, V) =:= ?STR_TAG))).
 
 -define(SBOX_TAG, s_box).
 -define(SBOX_VALUE, 2).
@@ -114,6 +126,16 @@
 -define(GENERATOROBJ_ARITY, 2).
 -define(TOKEN_ARRAY_ITER_NEXT, {iterator_n, array_iterator_next}).
 -define(TOKEN_GENERATOR_NEXT, {generator_n, generator_next}).
+-define(TOKEN_ARRAY_VALUES, {array_n, array_prototype_values}).
+-define(TOKEN_STRING_ITER, {string_n, string_prototype_symbol_iterator}).
+-define(TOKEN_STRING_ITER_NEXT, {iterator_n, string_iterator_next}).
+-define(TOKEN_MAP_ENTRIES, {map_n, map_entries}).
+-define(TOKEN_MAP_ITER_NEXT, {iterator_n, map_iterator_next}).
+-define(TOKEN_SET_VALUES, {set_n, set_values}).
+-define(TOKEN_SET_ITER_NEXT, {iterator_n, set_iterator_next}).
+-define(MAPOBJ_TAG, map_obj).
+-define(SETOBJ_TAG, set_obj).
+-define(ARC_ITER, arc_iter).
 -define(PROXYOBJ_TAG, proxy_obj).
 -define(STRINGOBJ_TAG, string_obj).
 -define(STRINGOBJ_VALUE, 2).
@@ -158,8 +180,6 @@
 
 -define(REALM_STRING, 5).
 -define(REALM_NUMBER, 6).
-
--define(STORE_PROP_SEQ, 8).
 
 -define(STORE_FREE_SLOT, js_free).
 

@@ -26,6 +26,7 @@ pub fn resolve(code: List(IrOp), constants: List(JsVal)) -> Resolved {
   let code = thread_jumps(code, label_suffixes(code, dict.new()), [])
   let code = drop_dead_labels(code, referenced_labels(code, set.new()), [])
   let code = peephole(code, const_arr, [])
+  let code = add_safepoints(code)
   let label_map = build_label_map(code, 0, dict.new())
   let #(ops, lines) = resolve_ops(code, label_map, 0, [], [])
   Resolved(
@@ -560,6 +561,233 @@ fn skip_markers(code: List(IrOp)) -> List(IrOp) {
   case code {
     [IrLabel(_), ..rest] | [IrLine(_), ..rest] -> skip_markers(rest)
     _ -> code
+  }
+}
+
+// a label jumped to from below heads a loop; it gets a safepoint unless
+// nothing between it and the jump can allocate a cell
+fn add_safepoints(code: List(IrOp)) -> List(IrOp) {
+  let heads = loop_heads(code, 0, dict.new(), dict.new())
+  case dict.is_empty(heads) {
+    True -> code
+    False -> {
+      let heavy = heavy_prefix(code, 0, 0, dict.new())
+      insert_safepoints(code, 0, heads, heavy, [])
+    }
+  }
+}
+
+// label -> #(label position, furthest backward jump position)
+fn loop_heads(
+  code: List(IrOp),
+  i: Int,
+  seen: Dict(LabelId, Int),
+  heads: Dict(LabelId, #(Int, Int)),
+) -> Dict(LabelId, #(Int, Int)) {
+  case code {
+    [] -> heads
+    [IrLabel(l), ..rest] ->
+      loop_heads(rest, i + 1, dict.insert(seen, l, i), heads)
+    [op, ..rest] -> {
+      let heads =
+        list.fold(loop_refs(op), heads, fn(heads, l) {
+          case dict.get(seen, l) {
+            Ok(at) -> dict.insert(heads, l, #(at, i))
+            Error(Nil) -> heads
+          }
+        })
+      loop_heads(rest, i + 1, seen, heads)
+    }
+  }
+}
+
+// plain control flow only, not try or generator plumbing
+fn loop_refs(op: IrOp) -> List(LabelId) {
+  case op {
+    IrJump(l)
+    | IrJumpIfFalse(l)
+    | IrJumpIfTrue(l)
+    | IrJumpIfNullish(l)
+    | IrJumpIfNotNullish(l)
+    | IrCmpLocalLocalJump(label: l, ..)
+    | IrCmpLocalConstJump(label: l, ..)
+    | IrCmpJump(label: l, ..)
+    | IrCmpConstJump(label: l, ..)
+    | IrIncLocalJump(label: l, ..)
+    | IrIncLocalCmpConstJump(label: l, ..)
+    | IrIncLocalCmpLocalJump(label: l, ..)
+    | IrJumpIfLocal(label: l, ..) -> [l]
+    _ -> []
+  }
+}
+
+// heavy ops seen before each position
+fn heavy_prefix(
+  code: List(IrOp),
+  i: Int,
+  n: Int,
+  acc: Dict(Int, Int),
+) -> Dict(Int, Int) {
+  case code {
+    [] -> dict.insert(acc, i, n)
+    [op, ..rest] -> {
+      let acc = dict.insert(acc, i, n)
+      let n = case may_allocate(op) {
+        True -> n + 1
+        False -> n
+      }
+      heavy_prefix(rest, i + 1, n, acc)
+    }
+  }
+}
+
+fn insert_safepoints(
+  code: List(IrOp),
+  i: Int,
+  heads: Dict(LabelId, #(Int, Int)),
+  heavy: Dict(Int, Int),
+  acc: List(IrOp),
+) -> List(IrOp) {
+  case code {
+    [] -> list.reverse(acc)
+    [IrLabel(l) as op, ..rest] -> {
+      let acc = case dict.get(heads, l) {
+        Ok(#(from, to)) ->
+          case heavy_between(heavy, from, to) {
+            True -> [IrFinal(opcode.Safepoint), op, ..acc]
+            False -> [op, ..acc]
+          }
+        Error(Nil) -> [op, ..acc]
+      }
+      insert_safepoints(rest, i + 1, heads, heavy, acc)
+    }
+    [op, ..rest] -> insert_safepoints(rest, i + 1, heads, heavy, [op, ..acc])
+  }
+}
+
+fn heavy_between(heavy: Dict(Int, Int), from: Int, to: Int) -> Bool {
+  let at = fn(i) { dict.get(heavy, i) |> result.unwrap(0) }
+  at(to + 1) > at(from)
+}
+
+// false for ops that never mint a cell, and for plain calls
+fn may_allocate(op: IrOp) -> Bool {
+  case op {
+    IrFinal(op) ->
+      case op {
+        opcode.PushConst(_)
+        | opcode.Pop
+        | opcode.Dup
+        | opcode.Swap
+        | opcode.Rot3
+        | opcode.Unrot4
+        | opcode.GetLocal(_)
+        | opcode.PutLocal(_)
+        | opcode.PutLocalCheckInit(_)
+        | opcode.GetGlobal(_)
+        | opcode.PutGlobal(_)
+        | opcode.GetField(_)
+        | opcode.GetField2(_)
+        | opcode.PutField(_)
+        | opcode.GetElem
+        | opcode.GetElem2
+        | opcode.PutElem
+        | opcode.DeleteField(_)
+        | opcode.DeleteElem
+        | opcode.Return
+        | opcode.Safepoint
+        | opcode.Jump(_)
+        | opcode.JumpIfFalse(_)
+        | opcode.JumpIfTrue(_)
+        | opcode.JumpIfNullish(_)
+        | opcode.JumpIfNotNullish(_)
+        | opcode.Gosub(_)
+        | opcode.Ret
+        | opcode.Throw
+        | opcode.ThrowConstAssign(_)
+        | opcode.PushTry(..)
+        | opcode.PopTry
+        | opcode.GetBoxed(_)
+        | opcode.PutBoxed(_)
+        | opcode.PutBoxedCheckInit(_)
+        | opcode.BinOp(_)
+        | opcode.UnaryOp(_)
+        | opcode.TypeOf
+        | opcode.TypeofGlobal(_)
+        | opcode.IncLocal(_)
+        | opcode.DecLocal(_)
+        | opcode.JumpIfLocal(..)
+        | opcode.IncLocalJump(..)
+        | opcode.IncLocalCmpConstJump(..)
+        | opcode.IncLocalCmpLocalJump(..)
+        | opcode.CmpLocalLocalJump(..)
+        | opcode.CmpLocalConstJump(..)
+        | opcode.CmpJump(..)
+        | opcode.CmpConstJump(..)
+        | opcode.GetLocalField(..)
+        | opcode.GetLocalField2(..)
+        | opcode.PutFieldPop(_)
+        | opcode.PutLocalLocalField(..)
+        | opcode.PutLocalConstField(..)
+        | opcode.BinOpConst(..)
+        | opcode.BinOpLocal(..)
+        | opcode.BinOpLocalLocal(..)
+        | opcode.BinOpLocalConst(..)
+        | opcode.PostIncLocal(_)
+        | opcode.PostDecLocal(_)
+        | opcode.PutElemPop
+        | opcode.GetElemLocals(..)
+        | opcode.GetElemPostInc(..)
+        | opcode.BinOpLocalField(..)
+        | opcode.BinOpPut(..)
+        | opcode.BinOpConstPut(..)
+        | opcode.BinOpLocalPut(..)
+        | opcode.BinOpLocalLocalPut(..)
+        | // a bytecode callee reaches the return safepoint itself
+          opcode.Call(_)
+        | opcode.CallMethod(_)
+        | opcode.GetFieldCall(_)
+        | opcode.GetFieldCall1(..)
+        | opcode.GetLocalFieldCall(..)
+        | opcode.IteratorNext
+        | opcode.ForInNext
+        | opcode.Yield -> False
+        _ -> True
+      }
+    IrLine(_)
+    | IrLabel(_)
+    | IrJump(_)
+    | IrJumpIfFalse(_)
+    | IrJumpIfTrue(_)
+    | IrJumpIfNullish(_)
+    | IrJumpIfNotNullish(_)
+    | IrPushTry(..)
+    | IrGosub(_)
+    | IrGetField(_)
+    | IrGetField2(_)
+    | IrPutField(_)
+    | IrDeleteField(_)
+    | IrBinOp(_)
+    | IrCmpLocalLocalJump(..)
+    | IrCmpLocalConstJump(..)
+    | IrCmpJump(..)
+    | IrCmpConstJump(..)
+    | IrIncLocalJump(..)
+    | IrJumpIfLocal(..)
+    | IrIncLocalCmpConstJump(..)
+    | IrIncLocalCmpLocalJump(..) -> False
+    IrAsyncYieldStarNext(_)
+    | IrAsyncYieldStarResume(_)
+    | IrWithGetVar(..)
+    | IrWithGetVarThis(..)
+    | IrWithPutVar(..)
+    | IrWithDeleteVar(..)
+    | IrWithMakeRef(..)
+    | IrWithGetRefValue(..)
+    | IrWithPutRefValue(..)
+    | IrDefineField(_)
+    | IrDefineMethod(_)
+    | IrDefineAccessor(..) -> True
   }
 }
 

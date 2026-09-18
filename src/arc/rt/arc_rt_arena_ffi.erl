@@ -3,7 +3,7 @@
 %% get/2 crashes on ids never minted, probe/2 is total
 -module(arc_rt_arena_ffi).
 -export([new/0, get/2, get_option/2, probe/2, set/3, reset/2, fold/3,
-         from_descending/1, count/1]).
+         from_descending/1, count/1, truncate/2, diff_below/3]).
 
 -include("arc_rt_layout.hrl").
 
@@ -137,6 +137,57 @@ reset(I, A) ->
         ?F -> A;
         _ -> set(I, ?F, A)
     end.
+
+%% frees every id >= W, keeps depth
+truncate(W, A) ->
+    {arena, S, N, _, _} = settle(A),
+    N1 = case W bsr S < ?W of
+        true -> cut(W, S, N);
+        false -> N
+    end,
+    Top = max(W - 1, 0),
+    {arena, S, N1, Top bsr ?B, leaf(Top, S, N1)}.
+
+cut(_, _, ?F) -> ?F;
+cut(W, 0, N) -> cut_from((W band ?M) + 1, N);
+cut(W, S, N) ->
+    Ix = ((W bsr S) band ?M) + 1,
+    setelement(Ix, cut_from(Ix + 1, N), cut(W, S - ?B, element(Ix, N))).
+
+cut_from(Ix, N) when Ix =< ?W -> cut_from(Ix + 1, setelement(Ix, N, ?F));
+cut_from(_, N) -> N.
+
+%% ids below W whose slot differs between Old and New; New descends from Old
+%% by set, so =:= settles shared subtrees by identity without walking them
+diff_below(W, Old, New) ->
+    {arena, So, No, _, _} = settle(Old),
+    {arena, Sn, Nn, _, _} = settle(New),
+    diff_node(No, descend(Nn, Sn, So), So, 0, W, []).
+
+descend(N, S, S) -> N;
+descend(?F, _, _) -> ?F;
+descend(N, Sn, So) -> descend(element(1, N), Sn - ?B, So).
+
+diff_node(_, _, _, Base, W, Acc) when Base >= W -> Acc;
+diff_node(A, B, S, Base, W, Acc) ->
+    case A =:= B of
+        true -> Acc;
+        false when S =:= 0 -> diff_leaf(full(A), full(B), Base, 1, W, Acc);
+        false -> diff_kids(full(A), full(B), S, Base, W, 1, Acc)
+    end.
+
+diff_kids(A, B, S, Base, W, Ix, Acc) when Ix =< ?W ->
+    Acc1 = diff_node(element(Ix, A), element(Ix, B), S - ?B,
+                     Base + ((Ix - 1) bsl S), W, Acc),
+    diff_kids(A, B, S, Base, W, Ix + 1, Acc1);
+diff_kids(_, _, _, _, _, _, Acc) -> Acc.
+
+diff_leaf(A, B, Base, Ix, W, Acc) when Ix =< ?W, Base + Ix - 1 < W ->
+    case element(Ix, A) =:= element(Ix, B) of
+        true -> diff_leaf(A, B, Base, Ix + 1, W, Acc);
+        false -> diff_leaf(A, B, Base, Ix + 1, W, [Base + Ix - 1 | Acc])
+    end;
+diff_leaf(_, _, _, _, _, Acc) -> Acc.
 
 settle({arena, S, N, HotIx, Hot}) ->
     {S1, N1} = put_leaf(HotIx bsl ?B, Hot, S, N),

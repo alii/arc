@@ -1,7 +1,37 @@
 // use these, never gleam/string graphemes, on js strings
 // TODO(Deviation): indexes by codepoint, js wants utf-16 code units
 
+import arc/rt/types.{type JsVal}
 import gleam/option.{type Option}
+
+// these take the js value so tagged strings keep their index
+
+@external(erlang, "arc_rt_str_ffi", "concat")
+pub fn concat(a: JsVal, b: JsVal) -> JsVal
+
+@external(erlang, "arc_rt_str_ffi", "len")
+pub fn len(s: JsVal) -> Int
+
+@external(erlang, "arc_rt_str_ffi", "bin")
+pub fn bin(s: JsVal) -> String
+
+@external(erlang, "arc_rt_str_ffi", "is_str")
+pub fn is_str(v: JsVal) -> Bool
+
+@external(erlang, "arc_rt_str_ffi", "cp_at")
+pub fn cp_at(s: JsVal, idx: Int) -> Option(Int)
+
+@external(erlang, "arc_rt_str_ffi", "char_at")
+pub fn char_at_val(s: JsVal, idx: Int) -> Option(JsVal)
+
+@external(erlang, "arc_rt_str_ffi", "sub")
+pub fn sub(s: JsVal, start: Int, len: Int) -> JsVal
+
+@external(erlang, "arc_rt_str_ffi", "index_of")
+pub fn index_of_val(hay: JsVal, needle: JsVal, from: Int) -> Option(Int)
+
+@external(erlang, "arc_rt_str_ffi", "mk_list")
+pub fn mk_list(parts: List(String)) -> List(JsVal)
 
 @external(erlang, "arc_string_ffi", "string_char_at")
 pub fn char_at(s: String, idx: Int) -> Option(String)

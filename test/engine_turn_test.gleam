@@ -63,7 +63,8 @@ pub fn eval_is_bounded_drains_and_keeps_its_value_test() {
   assert show(eng, tag) == "'kept:7998000'"
   assert show(eng, seen) == "'undefined'"
   assert show(eng, global(eng, "done")) == "1000"
-  assert stats(eng).live <= base + 4 * threshold
+  // cells that die old wait for the next major
+  assert stats(eng).live <= base + rt_gc.minors_per_major * threshold
 }
 
 pub fn eval_keeps_thrown_value_test() {

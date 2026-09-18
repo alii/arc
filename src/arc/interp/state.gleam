@@ -51,6 +51,16 @@ pub type SavedFrame {
     r0: JsVal,
     r1: JsVal,
   )
+  // an op that had to call user code midway; cont finishes it with the
+  // result; locals already hold the registers like SavedFrame
+  SavedCont(
+    caller: State,
+    pc: Int,
+    stack: List(JsVal),
+    locals: TupleArray(JsVal),
+    constructor_this: Option(JsVal),
+    cont: fn(State, JsVal) -> Result(State, StepExit),
+  )
 }
 
 pub fn with_agent(state: State, agent: Agent) -> State {
@@ -123,6 +133,9 @@ fn push_saved_frame(acc: List(Int), frame: SavedFrame) -> List(Int) {
       push_caller(acc, caller, stack, locals, constructor_this)
       |> push_val(r0)
       |> push_val(r1)
+    SavedCont(caller:, pc: _, stack:, locals:, constructor_this:, cont:) ->
+      push_caller(acc, caller, stack, locals, constructor_this)
+      |> rt_gc.push_term_refs(to_dynamic(cont), _)
   }
 }
 

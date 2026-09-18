@@ -1,4 +1,5 @@
 -module(arc_rt_val_ffi).
+-include("arc_rt_layout.hrl").
 
 -export([
     classify/1,
@@ -24,6 +25,7 @@ classify(js_nan) -> {k_num, j_nan};
 classify(js_inf) -> {k_num, j_pos_inf};
 classify(js_neg_inf) -> {k_num, j_neg_inf};
 classify(B) when is_binary(B) -> {k_str, B};
+classify({?STR_TAG, B, _, _}) -> {k_str, B};
 classify({js_bigint, N}) -> {k_big, N};
 classify({js_sym, S}) -> {k_sym, S};
 classify({js_cell, N}) -> {k_handle, {js_cell, N}};
@@ -42,6 +44,7 @@ to_boolean_i32(js_inf) -> 1;
 to_boolean_i32(js_neg_inf) -> 1;
 to_boolean_i32(<<>>) -> 0;
 to_boolean_i32(B) when is_binary(B) -> 1;
+to_boolean_i32({?STR_TAG, _, _, _}) -> 1;
 to_boolean_i32({js_bigint, 0}) -> 0;
 to_boolean_i32({js_bigint, _}) -> 1;
 to_boolean_i32({js_sym, _}) -> 1;
@@ -61,6 +64,7 @@ to_boolean(js_inf) -> true;
 to_boolean(js_neg_inf) -> true;
 to_boolean(<<>>) -> false;
 to_boolean(B) when is_binary(B) -> true;
+to_boolean({?STR_TAG, _, _, _}) -> true;
 to_boolean({js_bigint, 0}) -> false;
 to_boolean({js_bigint, _}) -> true;
 to_boolean({js_sym, _}) -> true;
@@ -81,6 +85,8 @@ t_to_property_key_fast(N)
     {string_key, {index, N}};
 t_to_property_key_fast(B) when is_binary(B) ->
     {string_key, canonical_key_bin(B)};
+t_to_property_key_fast({?STR_TAG, B, _, _}) ->
+    {string_key, {named, B}};
 t_to_property_key_fast({js_sym, S}) ->
     {symbol_key, S};
 t_to_property_key_fast(_) -> miss.
@@ -119,7 +125,7 @@ mk_int(N) when N > ?MAX_SAFE_INT; N < -?MAX_SAFE_INT ->
     mk_number('arc@rt@val':num_from_int(N));
 mk_int(N) -> N.
 
-mk_string(S) -> S.
+mk_string(S) -> arc_rt_str_ffi:mk(S).
 
 mk_bigint(N) -> {js_bigint, N}.
 
@@ -131,6 +137,7 @@ mk_tdz() -> js_tdz.
 
 %% hot heads of the val.gleam coercions, everything else goes back there
 t_to_string(St, V) when is_binary(V) -> {V, St};
+t_to_string(St, {?STR_TAG, B, _, _}) -> {B, St};
 t_to_string(St, V) when is_integer(V) -> {integer_to_binary(V), St};
 t_to_string(St, V) when is_float(V) -> {js_number_to_string(V), St};
 t_to_string(St, V) -> 'arc@rt@val':t_to_string_slow(St, V).

@@ -1,6 +1,8 @@
 %% fast-path kernels: total, answer `miss` when anything observable is needed
 -module(arc_interp_ffi).
--export([is_miss/1, is_tdz/1, is_undefined/1,
+-export([for_in_list/1, for_in_next/1,
+         native_token/1, iter_elem/2,
+         is_miss/1, is_tdz/1, is_undefined/1,
          truthy/1, lnot/1, nullish/1, typeof/1, typeof/2,
          box_get/2, cell_of/2, ctor_prototype/2, list_of/2, instance_of/4,
          capture_env/2, iter_step/2]).
@@ -29,6 +31,7 @@ truthy(js_inf) -> true;
 truthy(js_neg_inf) -> true;
 truthy(<<>>) -> false;
 truthy(B) when is_binary(B) -> true;
+truthy({?STR_TAG, _, _, _}) -> true;
 truthy({js_bigint, 0}) -> false;
 truthy({js_bigint, _}) -> true;
 truthy({js_sym, _}) -> true;
@@ -48,6 +51,7 @@ typeof(B) when is_boolean(B) -> <<"boolean">>;
 typeof(N) when is_number(N) -> <<"number">>;
 typeof(A) when A =:= js_nan; A =:= js_inf; A =:= js_neg_inf -> <<"number">>;
 typeof(B) when is_binary(B) -> <<"string">>;
+typeof({?STR_TAG, _, _, _}) -> <<"string">>;
 typeof({js_bigint, _}) -> <<"bigint">>;
 typeof({js_sym, _}) -> <<"symbol">>;
 typeof(js_tdz) -> <<"undefined">>;
@@ -264,6 +268,7 @@ iter_step(Store, {?HANDLE_TAG, RecId}) ->
     end;
 iter_step(_, _) -> protocol.
 
+
 native_token(Slot)
   when element(1, Slot) =:= ?SOBJECT_TAG,
        element(1, element(?SOBJECT_KIND, Slot)) =:= ?KNATIVE_TAG ->
@@ -317,3 +322,8 @@ iter_elem({?ELEMS_SPARSE, M}, Idx) ->
         _ -> ?ELEMS_HOLE
     end;
 iter_elem(_, _) -> ?ELEMS_HOLE.
+
+for_in_list(Keys) -> {for_in, Keys}.
+
+for_in_next({for_in, [K | Rest]}) -> {for_in_key, K, {for_in, Rest}};
+for_in_next({for_in, []}) -> for_in_end.

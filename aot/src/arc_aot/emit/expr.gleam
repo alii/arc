@@ -93,8 +93,7 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
       )
       anf.make_tuple([ir.ConstAtom("js_bigint"), boxed])
     }
-    ast.StringExpression(_, s) ->
-      anf.pure(ir.ConstBinary(bit_array.from_string(s)))
+    ast.StringExpression(_, s) -> anf.str_lit(s)
     ast.BooleanLiteral(_, b) -> {
       use rc <- anf.then(consts())
       anf.pure(case b {
@@ -1173,8 +1172,7 @@ fn next_site() -> Build(Int) {
 
 // §13.2.8.5 holes concat via tostring, not toprimitive
 fn emit_template_literal(parts: ast.TemplateParts(String)) -> Build(ir.Value) {
-  let head = ir.ConstBinary(bit_array.from_string(parts.head))
-  list.fold(parts.tail, anf.pure(head), fn(acc_b, part) {
+  list.fold(parts.tail, anf.str_lit(parts.head), fn(acc_b, part) {
     let #(sub, quasi) = part
     use acc <- anf.then(acc_b)
     use v <- anf.then(expr(sub))
@@ -1186,11 +1184,10 @@ fn emit_template_literal(parts: ast.TemplateParts(String)) -> Build(ir.Value) {
     )
     case quasi {
       "" -> anf.pure(a1)
-      _ ->
-        anf.host("string_concat", [
-          a1,
-          ir.ConstBinary(bit_array.from_string(quasi)),
-        ])
+      _ -> {
+        use q <- anf.then(anf.str_lit(quasi))
+        anf.host("string_concat", [a1, q])
+      }
     }
   })
 }
@@ -1205,8 +1202,8 @@ fn emit_template_object(
   let cooked =
     list.map(quasis, fn(q) {
       case q.cooked {
-        Some(s) -> ir.ConstBinary(bit_array.from_string(s))
-        None -> rc.undef
+        Some(s) -> anf.str_lit(s)
+        None -> anf.pure(rc.undef)
       }
     })
   let raw =
@@ -1215,6 +1212,7 @@ fn emit_template_object(
     ir.ConstBinary(bit_array.from_string(
       e.module_name <> "#" <> int.to_string(site),
     ))
+  use cooked <- anf.then(anf.seq(cooked))
   use cooked_l <- anf.then(anf.cons_list(cooked))
   use raw_l <- anf.then(anf.cons_list(raw))
   anf.host("get_template_object", [site_v, cooked_l, raw_l])

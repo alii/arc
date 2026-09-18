@@ -31,3 +31,14 @@ pub fn reset(index: Int, arr: TreeArray(a)) -> TreeArray(a)
 /// set entries only, ascending
 @external(erlang, "arc_tree_array_ffi", "sparse_fold")
 pub fn sparse_fold(f: fn(Int, a, b) -> b, initial: b, arr: TreeArray(a)) -> b
+
+// first len values when none is unset
+@external(erlang, "arc_tree_array_ffi", "dense_list")
+pub fn dense_list(arr: TreeArray(a), len: Int) -> Option(List(a))
+
+@external(erlang, "arc_tree_array_ffi", "append_list")
+pub fn append_list(arr: TreeArray(a), items: List(a)) -> TreeArray(a)
+
+// count values from index from when none is unset
+@external(erlang, "arc_tree_array_ffi", "range_list")
+pub fn range_list(arr: TreeArray(a), from: Int, count: Int) -> Option(List(a))

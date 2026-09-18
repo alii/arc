@@ -132,10 +132,6 @@ pub fn float_from_bits(bits: Int) -> JsVal {
   mk_number(JFloat(f))
 }
 
-pub fn string_concat(a: BitArray, b: BitArray) -> BitArray {
-  <<a:bits, b:bits>>
-}
-
 pub fn nullish_label(v: JsVal) -> String {
   case classify(v) {
     KNull -> "null"

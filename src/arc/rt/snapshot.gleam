@@ -17,7 +17,7 @@ import gleam/result
 import gleam/set.{type Set}
 
 // bump on any change to the image or runtime records
-pub const abi_version = 8
+pub const abi_version = 9
 
 pub type SnapshotError {
   SnapshotContainsCompiledCode(cell: Handle)
@@ -86,22 +86,29 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
   let JsStore(
     data:,
     next:,
-    pinned_roots:,
     alloc_since_gc:,
     gc_threshold:,
-    gc_live: _,
     prop_seq:,
-    private_uid:,
-    symbol_uid:,
-    ops: _,
-    microtasks:,
-    unhandled_rejections:,
     shapes:,
     next_shape:,
-    unit_uid:,
     ics: _,
     free_protos: _,
     global_epoch: _,
+    ops: _,
+    microtasks:,
+    pinned_roots:,
+    meta: types.StoreMeta(
+      gc_live: _,
+      private_uid:,
+      symbol_uid:,
+      unit_uid:,
+      unhandled_rejections:,
+      old: _,
+      old_next: _,
+      weak_old: _,
+      major_live: _,
+      minors_since_major: _,
+    ),
   ) = store
   let microtasks = types.jq_to_list(microtasks)
   let data =
@@ -176,22 +183,29 @@ fn restore(image: StoreImage) -> JsStore(Agent) {
       arena.set(id, slot, acc)
     }),
     next:,
-    pinned_roots:,
     alloc_since_gc:,
     gc_threshold:,
-    gc_live: 0,
     prop_seq:,
-    private_uid:,
-    symbol_uid:,
-    ops: rt_store.t_store_new().ops,
-    microtasks: list.fold(microtasks, types.jq_new(), types.jq_push),
-    unhandled_rejections:,
     shapes:,
     next_shape:,
-    unit_uid:,
     ics: dict.new(),
     free_protos: dict.new(),
     global_epoch: 0,
+    ops: rt_store.t_store_new().ops,
+    microtasks: list.fold(microtasks, types.jq_new(), types.jq_push),
+    pinned_roots:,
+    meta: types.StoreMeta(
+      gc_live: 0,
+      private_uid:,
+      symbol_uid:,
+      unit_uid:,
+      unhandled_rejections:,
+      old: arena.new(),
+      old_next: 0,
+      weak_old: [],
+      major_live: 0,
+      minors_since_major: 0,
+    ),
   )
 }
 

@@ -352,6 +352,15 @@ fn own_keys_impl(
 ) -> #(JsVal, Agent) {
   case classify(first_arg_or_undefined(args)) {
     KHandle(h) -> {
+      let fast = case enumerable_only {
+        True -> own_enum_fast(st, mk_object(h))
+        False -> None
+      }
+      use <- bool.lazy_guard(option.is_some(fast), fn() {
+        let names =
+          option.unwrap(fast, []) |> list.map(fn(kv) { mk_string(kv.0) })
+        ok_array(st, names)
+      })
       let #(names, st) = case enumerable_only {
         True -> rt_obj.t_enumerable_own_keys(st, h)
         False -> {
@@ -384,6 +393,10 @@ fn own_keys_impl(
   }
 }
 
+// plain named data only, see arc_rt_obj_ffi
+@external(erlang, "arc_rt_obj_ffi", "t_own_enum_fast")
+fn own_enum_fast(st: Agent, obj: JsVal) -> Option(List(#(String, JsVal)))
+
 fn values(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(pairs, st) = own_enumerable_pairs(st, args)
   ok_array(st, list.map(pairs, fn(kv) { kv.1 }))
@@ -407,10 +420,14 @@ fn own_enumerable_pairs(
   args: List(JsVal),
 ) -> #(List(#(String, JsVal)), Agent) {
   case classify(first_arg_or_undefined(args)) {
-    KHandle(h) -> {
-      let #(keys, st) = rt_obj.t_own_keys(st, h)
-      collect_enumerable(st, h, keys, [])
-    }
+    KHandle(h) ->
+      case own_enum_fast(st, mk_object(h)) {
+        Some(pairs) -> #(pairs, st)
+        None -> {
+          let #(keys, st) = rt_obj.t_own_keys(st, h)
+          collect_enumerable(st, h, keys, [])
+        }
+      }
     KNull | KUndef -> rt_val.t_throw_type_error(st, cannot_convert)
     KStr(s) -> #(
       list.index_map(js_string.explode(s), fn(ch, idx) {
