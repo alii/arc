@@ -726,10 +726,12 @@ fn unit_affixes(
           Part(PartLiteral, " "),
           Part(PartUnit, unit_name_long(unit, one)),
         ])
-        UnitNarrow -> #([], [Part(PartUnit, unit_name(unit, narrow: True))])
+        UnitNarrow -> #([], [
+          Part(PartUnit, unit_name(unit, narrow: True, one:)),
+        ])
         UnitShort -> #([], [
           Part(PartLiteral, " "),
-          Part(PartUnit, unit_name(unit, narrow: False)),
+          Part(PartUnit, unit_name(unit, narrow: False, one:)),
         ])
       }
   }
@@ -870,7 +872,7 @@ fn unit_name_long(unit: String, one one: Bool) -> String {
   }
 }
 
-fn unit_name(unit: String, narrow narrow: Bool) -> String {
+fn unit_name(unit: String, narrow narrow: Bool, one one: Bool) -> String {
   let simple = fn(u: String) -> String {
     case u, narrow {
       "acre", _ -> "ac"
@@ -932,6 +934,15 @@ fn unit_name(unit: String, narrow narrow: Bool) -> String {
       _, _ -> u
     }
   }
+  let counted = fn(u: String) -> String {
+    case u, narrow || one {
+      "day", False -> "days"
+      "month", False -> "mths"
+      "week", False -> "wks"
+      "year", False -> "yrs"
+      _, _ -> simple(u)
+    }
+  }
   case string.split_once(unit, "-per-") {
     Ok(#(num, den)) -> {
       let den_text = case den {
@@ -939,9 +950,9 @@ fn unit_name(unit: String, narrow narrow: Bool) -> String {
         "second" -> "s"
         _ -> simple(den)
       }
-      simple(num) <> "/" <> den_text
+      counted(num) <> "/" <> den_text
     }
-    Error(Nil) -> simple(unit)
+    Error(Nil) -> counted(unit)
   }
 }
 
