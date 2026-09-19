@@ -256,7 +256,8 @@ fn emit_stmt(e: Emitter, s: ast.Statement, k: Next) -> EmitResult {
       emit_for_in(e, left, right, body, k)
     ast.ForOfStatement(left:, right:, body:, is_await:) ->
       case is_await {
-        True -> todo as "for await outside a coroutine"
+        True ->
+          Error(state.EarlySyntaxError("for await is only valid in async code"))
         False -> emit_for_of(e, left, right, body, k)
       }
     ast.SwitchStatement(discriminant:, cases:) ->
