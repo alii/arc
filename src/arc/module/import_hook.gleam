@@ -2,8 +2,9 @@ import arc/bytecode/error_kind.{SyntaxError, TypeError}
 import arc/module
 import arc/module/dynamic_import
 import arc/module/graph
-import arc/module/loader.{type LoadFn, type ResolveFn}
+import arc/module/loader.{type LoadFn, type ModuleSource, type ResolveFn}
 import arc/module/registry
+import arc/module/specifier.{type Resolved}
 import arc/rt/async as rt_async
 import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
@@ -52,21 +53,28 @@ fn import_module(
 ) -> #(Result(JsVal, JsVal), Agent) {
   case dynamic_import.parse_hook_args(args) {
     Error(err) -> type_error(st, dynamic_import.hook_arg_error_message(err))
-    Ok(dynamic_import.HookCall(specifier:, referrer:, phase:)) -> {
+    Ok(dynamic_import.HookCall(
+      specifier: raw_specifier,
+      referrer:,
+      attributes:,
+      phase:,
+    )) -> {
       let referrer = option.unwrap(referrer, entry_referrer)
-      case resolve(specifier, referrer) {
+      case resolve(raw_specifier, referrer) {
         Error(err) ->
           type_error(
             st,
-            loader.resolve_failure_message(specifier, referrer, err),
+            loader.resolve_failure_message(raw_specifier, referrer, err),
           )
-        Ok(resolved) ->
+        Ok(path) -> {
+          let target = specifier.resolved_with(path, attributes)
           case phase {
             dynamic_import.DeferPhase(fulfill:, reject:) ->
-              defer_import_module(st, resolved, resolve, load, fulfill, reject)
+              defer_import_module(st, target, resolve, load, fulfill, reject)
             dynamic_import.EagerPhase ->
-              eager_import_module(st, resolved, resolve, load)
+              eager_import_module(st, target, resolve, load)
           }
+        }
       }
     }
   }
@@ -74,11 +82,11 @@ fn import_module(
 
 fn eager_import_module(
   st: Agent,
-  resolved: String,
+  target: Resolved,
   resolve: ResolveFn,
   load: LoadFn,
 ) -> #(Result(JsVal, JsVal), Agent) {
-  case registry.lookup(st, resolved) {
+  case registry.lookup(st, specifier.registry_key(target)) {
     // error cache wins: a namespace entry may be stale after a throw
     registry.Failed(error:) -> #(Error(error), st)
     // parked on tla: same in-flight promise (Evaluate step 4)
@@ -89,18 +97,19 @@ fn eager_import_module(
     )
     // linked-only (import.defer) namespaces still need evaluating
     registry.LinkedOnly(_) | registry.Absent(_) ->
-      evaluate_module(st, resolved, resolve, load)
+      evaluate_module(st, target, resolve, load)
   }
 }
 
 fn evaluate_module(
   st: Agent,
-  resolved: String,
+  target: Resolved,
   resolve: ResolveFn,
   load: LoadFn,
 ) -> #(Result(JsVal, JsVal), Agent) {
-  use source <- with_loaded_source(st, resolved, load)
-  case module.compile_bundle(resolved, source, resolve, load) {
+  let resolved = specifier.registry_key(target)
+  use source <- with_loaded_source(st, target, load)
+  case module.compile_loaded_bundle(target, source, resolve, load) {
     Error(err) -> compile_bundle_rejection(st, err)
     Ok(bundle) -> {
       // evaluate without draining: we are inside a promise job
@@ -120,9 +129,9 @@ fn evaluate_module(
         Error(module.NotInBundle(..) as other) ->
           type_error(
             st,
-            "Failed to evaluate module '"
-              <> resolved
-              <> "': "
+            "Failed to evaluate module "
+              <> specifier.describe(target)
+              <> ": "
               <> module.error_message(st, other),
           )
       }
@@ -133,12 +142,13 @@ fn evaluate_module(
 // import.defer: link, pre-evaluate async deps, settle via fulfill
 fn defer_import_module(
   st: Agent,
-  resolved: String,
+  target: Resolved,
   resolve: ResolveFn,
   load: LoadFn,
   fulfill: JsVal,
   reject: JsVal,
 ) -> #(Result(JsVal, JsVal), Agent) {
+  let resolved = specifier.registry_key(target)
   case registry.lookup(st, resolved) {
     registry.Failed(error:) -> #(Error(error), st)
     registry.Pending(deferred: option.Some(deferred_ns), ..)
@@ -150,8 +160,8 @@ fn defer_import_module(
     | registry.EvaluationStarted(deferred: option.None, ..)
     | registry.LinkedOnly(deferred: option.None)
     | registry.Absent(deferred: option.None) -> {
-      use source <- with_loaded_source(st, resolved, load)
-      case module.compile_bundle(resolved, source, resolve, load) {
+      use source <- with_loaded_source(st, target, load)
+      case module.compile_loaded_bundle(target, source, resolve, load) {
         Error(err) -> compile_bundle_rejection(st, err)
         Ok(bundle) ->
           case link_bundle_with_registry(st, bundle) {
@@ -168,7 +178,7 @@ fn defer_import_module(
                   let st = registry.write_deferred_namespace(st, resolved, ns)
                   evaluate_deferred_async_deps(
                     st,
-                    resolved,
+                    target,
                     mk_object(ns),
                     linked_bundle,
                     fulfill,
@@ -194,19 +204,21 @@ fn settle_defer_import(
 
 fn with_loaded_source(
   st: Agent,
-  resolved: String,
+  target: Resolved,
   load: LoadFn,
-  then: fn(String) -> #(Result(JsVal, JsVal), Agent),
+  then: fn(ModuleSource) -> #(Result(JsVal, JsVal), Agent),
 ) -> #(Result(JsVal, JsVal), Agent) {
-  case load(resolved) {
-    Error(err) -> type_error(st, loader.load_failure_message(resolved, err))
+  case
+    load(specifier.resolved_path(target), specifier.resolved_attributes(target))
+  {
+    Error(err) -> type_error(st, loader.load_failure_message(target, err))
     Ok(source) -> then(source)
   }
 }
 
 fn evaluate_deferred_async_deps(
   st: Agent,
-  resolved: String,
+  target: Resolved,
   ns: JsVal,
   linked_bundle: module.LinkedBundle,
   fulfill: JsVal,
@@ -221,16 +233,17 @@ fn evaluate_deferred_async_deps(
       chain_deferred_settlement(st, ns, pendings, fulfill, reject),
     )
     #(Error(module.EvaluationError(value: thrown)), st) -> {
-      let st = registry.write_module_error(st, resolved, thrown)
+      let st =
+        registry.write_module_error(st, specifier.registry_key(target), thrown)
       #(Error(thrown), st)
     }
     #(Error(module.NotInBundle(..) as other), st)
     | #(Error(module.EvaluationPending(..) as other), st) ->
       type_error(
         st,
-        "Failed to evaluate async dependencies of module '"
-          <> resolved
-          <> "': "
+        "Failed to evaluate async dependencies of module "
+          <> specifier.describe(target)
+          <> ": "
           <> module.error_message(st, other),
       )
   }
@@ -460,7 +473,10 @@ fn compile_bundle_rejection(
   err: module.CompileBundleError,
 ) -> #(Result(JsVal, JsVal), Agent) {
   case err {
+    // innermoduleloading: unsupported attributes are a syntaxerror
     module.GraphError(error: graph.ParseFailed(..))
+    | module.GraphError(error: graph.JsonParseFailed(..))
+    | module.GraphError(error: graph.UnsupportedImportAttribute(..))
     | module.GraphError(error: graph.SourcePhaseUnsupported(..))
     | module.CompileError(..) ->
       syntax_error(st, module.compile_bundle_error_message(err))

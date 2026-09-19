@@ -11,7 +11,7 @@ fn dance_resolve(raw: String, _ref: String) {
   Ok(raw)
 }
 
-fn no_source_loads(_resolved: String) {
+fn no_source_loads(_resolved: String, _attributes) {
   Error(loader.LoadNotFound)
 }
 

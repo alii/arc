@@ -7000,7 +7000,7 @@ fn run_module(
       specifier,
       source,
       fn(_dep, _parent) { Error(loader.ResolveForbidden) },
-      fn(_resolved) { Error(loader.LoadForbidden) },
+      fn(_resolved, _attributes) { Error(loader.LoadForbidden) },
     )
   {
     Error(err) -> Error("module error: " <> string.inspect(err))
@@ -7089,13 +7089,13 @@ pub fn module_diamond_deps_compiled_once_test() -> Nil {
       _ -> Error(loader.ResolveNotFound)
     }
   }
-  let load = fn(resolved: String) {
+  let load = fn(resolved: String, _attributes) {
     bump_load()
     case resolved {
-      "/b.js" -> Ok("import './d.js';")
-      "/c.js" -> Ok("import './d.js';")
-      "/d.js" -> Ok("import './e.js';")
-      "/e.js" -> Ok("export const e = 1;")
+      "/b.js" -> Ok(loader.SourceText("import './d.js';"))
+      "/c.js" -> Ok(loader.SourceText("import './d.js';"))
+      "/d.js" -> Ok(loader.SourceText("import './e.js';"))
+      "/e.js" -> Ok(loader.SourceText("export const e = 1;"))
       _ -> Error(loader.LoadNotFound)
     }
   }
@@ -7132,7 +7132,7 @@ pub fn module_repl_harness_globals_test() -> Nil {
       specifier,
       module_source,
       fn(_dep, _parent) { Error(loader.ResolveForbidden) },
-      fn(_resolved) { Error(loader.LoadForbidden) },
+      fn(_resolved, _attributes) { Error(loader.LoadForbidden) },
     )
 
   case module.evaluate_bundle(st, bundle, rt_async.drain) {
@@ -7170,7 +7170,7 @@ pub fn run_export_namespace_call_test() -> Nil {
       "<run_export-test>",
       source,
       fn(_d, _p) { Error(loader.ResolveForbidden) },
-      fn(_resolved) { Error(loader.LoadForbidden) },
+      fn(_resolved, _attributes) { Error(loader.LoadForbidden) },
     )
   let assert #(Ok(module.EvaluatedBundle(namespace: ns_h, ..)), st) =
     module.evaluate_bundle(agent(), bundle, rt_async.drain)
@@ -7499,7 +7499,7 @@ pub fn direct_eval_at_top_level_vars_go_global_test() -> Nil {
 pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
   let spec = "/shared.js"
   let no_resolve = fn(_dep, _parent) { Error(loader.ResolveForbidden) }
-  let no_load = fn(_resolved) { Error(loader.LoadForbidden) }
+  let no_load = fn(_resolved, _attributes) { Error(loader.LoadForbidden) }
 
   let assert Ok(first) =
     module.compile_bundle(spec, "export const x = 1;", no_resolve, no_load)
@@ -7530,7 +7530,7 @@ pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
 pub fn reused_module_gaining_reexport_is_a_link_error_test() -> Nil {
   let spec = "/shared.js"
   let no_resolve = fn(_dep, _parent) { Error(loader.ResolveForbidden) }
-  let no_load = fn(_resolved) { Error(loader.LoadForbidden) }
+  let no_load = fn(_resolved, _attributes) { Error(loader.LoadForbidden) }
 
   let assert Ok(first) =
     module.compile_bundle(spec, "export const x = 1;", no_resolve, no_load)
@@ -7543,9 +7543,9 @@ pub fn reused_module_gaining_reexport_is_a_link_error_test() -> Nil {
       _ -> Error(loader.ResolveForbidden)
     }
   }
-  let dep_load = fn(resolved) {
+  let dep_load = fn(resolved, _attributes) {
     case resolved {
-      "/dep.js" -> Ok("export const y = 2;")
+      "/dep.js" -> Ok(loader.SourceText("export const y = 2;"))
       _ -> Error(loader.LoadForbidden)
     }
   }

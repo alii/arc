@@ -85,24 +85,39 @@ fn json_parse(
   let reviver = helpers.arg_at(args, 1)
   // iscallable has no side effects, so it can run before the parse
   let revive = rt_val.is_callable(st, reviver)
-  case parse_value(bytes, revive) {
-    Error(e) -> rt_val.throw_syntax_error(st, json_error_message(e))
-    Ok(#(val, rest)) ->
-      case skip_whitespace(rest) {
-        <<>> -> {
-          case revive {
-            False -> materialize_plain(st, val)
-            True -> {
-              let #(record, st) = materialize(st, val)
-              let #(root, st) = alloc_holder(st, record_value(record))
-              let ctx = ReviveContext(reviver:, caller: caller_realm)
-              internalize_json_property(st, ctx, root, "", Some(record))
-            }
-          }
-        }
-        _ -> rt_val.throw_syntax_error(st, json_error_message(TrailingContent))
-      }
+  case parse_text(bytes, revive), revive {
+    Error(e), _ -> rt_val.throw_syntax_error(st, json_error_message(e))
+    Ok(val), False -> materialize_plain(st, val)
+    Ok(val), True -> {
+      let #(record, st) = materialize(st, val)
+      let #(root, st) = alloc_holder(st, record_value(record))
+      let ctx = ReviveContext(reviver:, caller: caller_realm)
+      internalize_json_property(st, ctx, root, "", Some(record))
+    }
   }
+}
+
+// a whole json text, trailing whitespace only
+fn parse_text(
+  bytes: BitArray,
+  with_source with_source: Bool,
+) -> Result(JsonValue, JsonParseError) {
+  use #(val, rest) <- result.try(parse_value(bytes, with_source))
+  case skip_whitespace(rest) {
+    <<>> -> Ok(val)
+    _ -> Error(TrailingContent)
+  }
+}
+
+// parsejsonmodule step 1, ahead of any realm
+pub fn parse_module_source(source: String) -> Result(JsonValue, String) {
+  parse_text(bit_array.from_string(source), False)
+  |> result.map_error(json_error_message)
+}
+
+// the default export of a json module, plain objects in st's realm
+pub fn module_value(st: Agent, json: JsonValue) -> #(JsVal, Agent) {
+  materialize_plain(st, json)
 }
 
 // §25.5.1.1 internalizejsonproperty
@@ -251,7 +266,7 @@ fn alloc_context(st: Agent, source: Option(BitArray)) -> #(Handle, Agent) {
 }
 
 // source stays raw bytes until a reviver asks
-type JsonValue {
+pub opaque type JsonValue {
   JsonNull(source: BitArray)
   JsonBool(value: Bool, source: BitArray)
   JsonNumber(value: JsNum, source: BitArray)

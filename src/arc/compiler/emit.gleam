@@ -3268,16 +3268,17 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     ast.ImportExpression(_, source, options, phase) -> {
       use e <- result.try(emit_expr(e, source))
+      let with_options = fn(e, op) {
+        use e <- result.map(case options {
+          Some(opts) -> emit_expr(e, opts)
+          None -> Ok(push_const(e, mk_undefined()))
+        })
+        emit_op(e, op)
+      }
       case phase {
-        ast.PhaseEvaluation -> {
-          use e <- result.map(case options {
-            Some(opts) -> emit_expr(e, opts)
-            None -> Ok(push_const(e, mk_undefined()))
-          })
-          emit_op(e, opcode.DynamicImport)
-        }
+        ast.PhaseEvaluation -> with_options(e, opcode.DynamicImport)
+        ast.PhaseDefer -> with_options(e, opcode.DynamicImportDefer)
         ast.PhaseSource -> Ok(emit_op(e, opcode.DynamicImportSource))
-        ast.PhaseDefer -> Ok(emit_op(e, opcode.DynamicImportDefer))
       }
     }
 

@@ -2010,6 +2010,34 @@ pub fn enumerable_own_keys(
   #(list.reverse(found), st)
 }
 
+// §7.3.23 key+value: descriptor read then get, per key, in order
+pub fn enumerable_own_entries(
+  st: Agent,
+  obj: Handle,
+) -> #(List(#(String, JsVal)), Agent) {
+  let #(keys, st) = own_keys(st, obj)
+  let #(found, st) =
+    list.fold(keys, #([], st), fn(acc, k) {
+      let #(found, st) = acc
+      case k {
+        SymbolKey(_) -> acc
+        StringKey(pk) -> {
+          let #(prop, st) = get_own_property(st, obj, k)
+          let enumerable =
+            option.map(prop, types.prop_enumerable) |> option.unwrap(False)
+          case enumerable {
+            False -> #(found, st)
+            True -> {
+              let #(v, st) = get_prop(st, types.mk_object(obj), k)
+              #([#(key.to_text(pk), v), ..found], st)
+            }
+          }
+        }
+      }
+    })
+  #(list.reverse(found), st)
+}
+
 // §14.7.5.9 enumerateobjectproperties
 pub fn for_in_keys(st: Agent, obj: JsVal) -> #(List(JsVal), Agent) {
   case types.classify(obj) {

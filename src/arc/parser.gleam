@@ -14,20 +14,21 @@ import arc/parser/error.{
   ClassDuplicateConstructor, CoalesceMixedWithLogical, ContinueOutsideLoop,
   ContinueToNonIterationLabel, DeletePrivateName, DeleteUnqualifiedStrictMode,
   DestructuringMissingInitializer, DuplicateBindingLexical, DuplicateDefaultCase,
-  DuplicateExport, DuplicateImportBinding, DuplicateLabel,
-  DuplicateParamNameStrictMode, DuplicateParameterName, DuplicatePrivateName,
-  DuplicateProtoProperty, EnumReservedWord, EscapedReservedWord,
-  EvalArgsAssignStrictMode, ExpectedAfterOptionalChain,
+  DuplicateExport, DuplicateImportAttribute, DuplicateImportBinding,
+  DuplicateLabel, DuplicateParamNameStrictMode, DuplicateParameterName,
+  DuplicatePrivateName, DuplicateProtoProperty, EnumReservedWord,
+  EscapedReservedWord, EvalArgsAssignStrictMode, ExpectedAfterOptionalChain,
   ExpectedAsOrFromAfterExportStar, ExpectedBindingPattern,
   ExpectedBraceOrStarAfterComma, ExpectedCallOrDotAfterImport,
   ExpectedCaseDefaultOrBrace, ExpectedCloseAfterSetter,
   ExpectedCommaOrBraceInExport, ExpectedCommaOrBraceInImport,
-  ExpectedCommaOrBraceInObject, ExpectedCommaOrBracket,
-  ExpectedCommaOrBracketInExpr, ExpectedCommaOrCloseParen,
-  ExpectedCommaOrObjectClose, ExpectedExportAlias, ExpectedExportSpecifierName,
-  ExpectedForDeclSeparator, ExpectedForHeadSeparator, ExpectedForSeparator,
-  ExpectedFromOrComma, ExpectedFunctionAfterAsync, ExpectedIdentifier,
-  ExpectedIdentifierAfterDot, ExpectedImportMeta, ExpectedImportSpecifier,
+  ExpectedCommaOrBraceInObject, ExpectedCommaOrBraceInWithClause,
+  ExpectedCommaOrBracket, ExpectedCommaOrBracketInExpr,
+  ExpectedCommaOrCloseParen, ExpectedCommaOrObjectClose, ExpectedExportAlias,
+  ExpectedExportSpecifierName, ExpectedForDeclSeparator,
+  ExpectedForHeadSeparator, ExpectedForSeparator, ExpectedFromOrComma,
+  ExpectedFunctionAfterAsync, ExpectedIdentifier, ExpectedIdentifierAfterDot,
+  ExpectedImportAttributeKey, ExpectedImportMeta, ExpectedImportSpecifier,
   ExpectedImportSpecifierName, ExpectedModuleSpecifier, ExpectedNewTarget,
   ExpectedPropertyName, ExpectedSemicolon, ExpectedToken, ExportNotTopLevel,
   FieldNamedConstructor, ForInInitializer, ForOfInitializer,
@@ -4414,7 +4415,7 @@ fn parse_import_call_or_meta(
   let import_start = pos_of(p)
   let p2 = advance(p)
   case peek(p2) {
-    LeftParen -> parse_import_call(p2, import_start)
+    LeftParen -> parse_import_call(p2, import_start, ast.PhaseEvaluation)
     Dot -> {
       let p3 = advance(p2)
       // meta/source/defer must be unescaped (§5.1.5)
@@ -4435,14 +4436,14 @@ fn parse_import_call_or_meta(
         // bare import.source is a syntax error
         Identifier, "source", False ->
           case peek_at(p3, 1) {
-            LeftParen ->
-              parse_phase_import_call(p3, import_start, ast.PhaseSource)
+            LeftParen -> parse_source_import_call(p3, import_start)
             _ -> Error(ExpectedImportMeta(pos_of(p3), Some("source")))
           }
+        // import.defer takes the same importcallarguments as import()
         Identifier, "defer", False ->
           case peek_at(p3, 1) {
             LeftParen ->
-              parse_phase_import_call(p3, import_start, ast.PhaseDefer)
+              parse_import_call(advance(p3), import_start, ast.PhaseDefer)
             _ -> Error(ExpectedImportMeta(pos_of(p3), Some("defer")))
           }
         Identifier, other, _ ->
@@ -4454,10 +4455,11 @@ fn parse_import_call_or_meta(
   }
 }
 
-// §13.3.10 import(x) / import(x, options); p is at (
+// §13.3.10 importcallarguments: (x) or (x, options); p is at (
 fn parse_import_call(
   p: Parser,
   import_start: Int,
+  phase: ast.ImportPhase,
 ) -> Result(#(Parser, ast.Expression), ParseError) {
   // import() arguments are [+In]
   use p2 <- allowing_in(advance(p))
@@ -4477,7 +4479,7 @@ fn parse_import_call(
     ast.ImportExpression(
       source: source_expr,
       options:,
-      phase: ast.PhaseEvaluation,
+      phase:,
       span: span_from(import_start, p5),
     ),
   )
@@ -4503,11 +4505,10 @@ fn at_suffix_start(p: Parser) -> Bool {
   }
 }
 
-// §13.3.10 import.source(x) / import.defer(x)
-fn parse_phase_import_call(
+// import.source(x) takes a single argument
+fn parse_source_import_call(
   p: Parser,
   import_start: Int,
-  phase: ast.ImportPhase,
 ) -> Result(#(Parser, ast.Expression), ParseError) {
   use p2 <- allowing_in(advance(advance(p)))
   use #(p3, source_expr) <- result.try(parse_assignment_expression(p2))
@@ -4518,7 +4519,7 @@ fn parse_phase_import_call(
     ast.ImportExpression(
       source: source_expr,
       options: None,
-      phase:,
+      phase: ast.PhaseSource,
       span: span_from(import_start, p5),
     ),
   )
@@ -5410,23 +5411,68 @@ fn parse_module_specifier(
 
 fn expect_from_module_specifier(
   p: Parser,
-) -> Result(#(Parser, ModuleSpecifier), ParseError) {
+) -> Result(#(Parser, ModuleSpecifier, List(ast.ImportAttribute)), ParseError) {
   use p2 <- result.try(expect(p, From))
-  use #(p3, specifier) <- result.try(parse_module_specifier(p2))
-  use p4 <- result.try(skip_import_attributes(p3))
-  use p5 <- result.map(eat_semicolon(p4))
-  #(p5, specifier)
+  parse_module_specifier_with_clause(p2)
 }
 
-// no import attributes supported: only an empty with {} parses
-fn skip_import_attributes(p: Parser) -> Result(Parser, ParseError) {
-  case peek(p) {
-    With -> {
-      use p2 <- result.try(expect(advance(p), LeftBrace))
-      expect(p2, RightBrace)
-    }
-    _ -> Ok(p)
-  }
+// ModuleSpecifier WithClause(opt) ;
+fn parse_module_specifier_with_clause(
+  p: Parser,
+) -> Result(#(Parser, ModuleSpecifier, List(ast.ImportAttribute)), ParseError) {
+  use #(p2, specifier) <- result.try(parse_module_specifier(p))
+  use #(p3, attributes) <- result.try(parse_with_clause(p2))
+  use p4 <- result.map(eat_semicolon(p3))
+  #(p4, specifier, attributes)
+}
+
+// withclause; duplicate keys are an early error
+fn parse_with_clause(
+  p: Parser,
+) -> Result(#(Parser, List(ast.ImportAttribute)), ParseError) {
+  use <- bool.guard(peek(p) != With, Ok(#(p, [])))
+  use p2 <- result.try(expect(advance(p), LeftBrace))
+  use #(p3, entries) <- result.try(parse_comma_list(
+    p2,
+    [],
+    RightBrace,
+    parse_with_entry,
+    ExpectedCommaOrBraceInWithClause,
+  ))
+  use attributes <- result.map(
+    list.try_fold(entries, [], fn(seen, entry) {
+      let #(pos, attribute) = entry
+      case
+        list.any(seen, fn(a: ast.ImportAttribute) { a.key == attribute.key })
+      {
+        True -> Error(DuplicateImportAttribute(pos, attribute.key))
+        False -> Ok([attribute, ..seen])
+      }
+    }),
+  )
+  // withclausetoattributes step 2: sorted by key
+  #(p3, list.sort(attributes, fn(a, b) { string.compare(a.key, b.key) }))
+}
+
+// AttributeKey : StringLiteral, with the key position for errors
+fn parse_with_entry(
+  p: Parser,
+) -> Result(#(Parser, #(Int, ast.ImportAttribute)), ParseError) {
+  use <- bool.guard(
+    !is_specifier_name(peek(p)),
+    Error(ExpectedImportAttributeKey(pos_of(p))),
+  )
+  use key <- result.try(specifier_name_value(p))
+  use p2 <- result.try(expect(advance(p), Colon))
+  use value <- result.map(case peek(p2) {
+    StringLiteral -> module_specifier_value(p2)
+    found ->
+      Error(error_at_current(
+        p2,
+        ExpectedToken(pos_of(p2), StringLiteral, found),
+      ))
+  })
+  #(advance(p2), #(pos_of(p), ast.ImportAttribute(key:, value:)))
 }
 
 fn finish_import_from(
@@ -5435,7 +5481,7 @@ fn finish_import_from(
   phase: ast.ImportPhase,
   specifiers: List(ast.ImportSpecifier),
 ) -> Result(#(Parser, ast.ModuleItem), ParseError) {
-  use #(p2, ModuleSpecifier(source, span_end)) <- result.map(
+  use #(p2, ModuleSpecifier(source, span_end), attributes) <- result.map(
     expect_from_module_specifier(p),
   )
   #(
@@ -5443,6 +5489,7 @@ fn finish_import_from(
     ast.ImportDeclaration(
       specifiers:,
       source:,
+      attributes:,
       phase:,
       span: ast.Span(start: span_start, end: span_end),
     ),
@@ -5495,15 +5542,15 @@ fn parse_import_declaration(
   })
   case peek(p2) {
     StringLiteral -> {
-      use #(p3, ModuleSpecifier(value, span_end)) <- result.try(
-        parse_module_specifier(p2),
+      use #(p3, ModuleSpecifier(value, span_end), attributes) <- result.map(
+        parse_module_specifier_with_clause(p2),
       )
-      use p4 <- result.map(eat_semicolon(p3))
       #(
-        p4,
+        p3,
         ast.ImportDeclaration(
           specifiers: [],
           source: value,
+          attributes:,
           phase: ast.PhaseEvaluation,
           span: ast.Span(start: span_start, end: span_end),
         ),
@@ -5780,15 +5827,15 @@ fn finish_export_all(
   span_start: Int,
   exported: Option(String),
 ) -> Result(#(Parser, ast.ModuleItem), ParseError) {
-  use #(p2, ModuleSpecifier(value, span_end)) <- result.try(
-    parse_module_specifier(p),
+  use #(p2, ModuleSpecifier(value, span_end), attributes) <- result.map(
+    parse_module_specifier_with_clause(p),
   )
-  use p3 <- result.map(eat_semicolon(p2))
   #(
-    p3,
+    p2,
     ast.ExportAllDeclaration(
       exported:,
       source: value,
+      attributes:,
       span: ast.Span(start: span_start, end: span_end),
     ),
   )
@@ -5879,12 +5926,11 @@ fn parse_export_list(
   }
   case peek(p2) {
     From -> {
-      use #(p3, ModuleSpecifier(value:, ..)) <- result.try(
-        parse_module_specifier(advance(p2)),
+      use #(p3, ModuleSpecifier(value:, ..), attributes) <- result.map(
+        parse_module_specifier_with_clause(advance(p2)),
       )
-      use p4 <- result.map(eat_semicolon(p3))
       let source = Some(value)
-      #(p4, ast.ExportNamed(specifiers:, source:, span: span(p4)))
+      #(p3, ast.ExportNamed(specifiers:, source:, attributes:, span: span(p3)))
     }
     _ -> {
       use p3 <- result.map(eat_semicolon(p2))
@@ -5894,7 +5940,14 @@ fn parse_export_list(
           [#(specifier.local, specifier.local_span.start), ..refs]
         })
       let p3 = Parser(..p3, export_local_refs:)
-      #(p3, ast.ExportNamed(specifiers:, source: None, span: span(p3)))
+      let item =
+        ast.ExportNamed(
+          specifiers:,
+          source: None,
+          attributes: [],
+          span: span(p3),
+        )
+      #(p3, item)
     }
   }
 }

@@ -246,7 +246,7 @@ fn with_import_hook(
           ctx.agent,
           "/main.js",
           fn(raw, _referrer) { Ok(raw) },
-          fn(_resolved) { Ok(source) },
+          fn(_resolved, _attributes) { Ok(loader.SourceText(source)) },
         )
       #(Nil, Context(..ctx, agent: st))
     })
@@ -423,7 +423,7 @@ fn reject_imports(_raw: String, _parent: String) {
   Error(loader.ResolveForbidden)
 }
 
-fn reject_loads(_resolved: String) {
+fn reject_loads(_resolved: String, _attributes) {
   Error(loader.LoadForbidden)
 }
 
@@ -476,9 +476,9 @@ pub fn destructured_declaration_exports_test() {
      export const { a, b: c, ...r } = o;
      export let [x, , y = 1] = arr;"
   let resolve = fn(raw: String, _referrer: String) { Ok(raw) }
-  let load = fn(resolved: String) {
+  let load = fn(resolved: String, _attributes) {
     case resolved {
-      "dep" -> Ok(dep)
+      "dep" -> Ok(loader.SourceText(dep))
       _ -> Error(loader.LoadNotFound)
     }
   }

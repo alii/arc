@@ -1,6 +1,6 @@
 // §16.2.1.6.3 resolveexport over a runtime-free module view
 
-import arc/module/specifier.{type Raw, type Resolved}
+import arc/module/specifier.{type Raw, type Request, type Resolved}
 import arc/module/summary
 import gleam/dict.{type Dict}
 import gleam/list
@@ -38,20 +38,20 @@ pub type LinkableExport {
 pub type LinkableGraph =
   Dict(Resolved, LinkableModule)
 
-// error(raw) means a broken specifier map, never guest code
+// error(request) means a broken specifier map, never guest code
 pub fn module_of(
-  import_bindings: List(#(Raw, List(summary.ImportBinding))),
+  import_bindings: List(#(Request, List(summary.ImportBinding))),
   export_entries: List(summary.ExportEntry),
   specifier_map: specifier.SpecifierMap,
-) -> Result(LinkableModule, Raw) {
-  let resolve = fn(raw: Raw) {
-    specifier.lookup(specifier_map, raw) |> option.to_result(raw)
+) -> Result(LinkableModule, Request) {
+  let resolve = fn(request: Request) {
+    specifier.lookup(specifier_map, request) |> option.to_result(request)
   }
   use imports <- result.try(
     list.try_map(import_bindings, fn(entry) {
-      let #(raw_dep, bindings) = entry
-      use dep <- result.map(resolve(raw_dep))
-      ImportEdge(raw: raw_dep, resolved: dep, bindings:)
+      let #(request, bindings) = entry
+      use dep <- result.map(resolve(request))
+      ImportEdge(raw: request.specifier, resolved: dep, bindings:)
     }),
   )
   use #(exports, stars) <- result.map(
@@ -60,23 +60,23 @@ pub fn module_of(
       case e {
         summary.LocalExport(export_name:, local_name:) ->
           Ok(#([LocalExport(export_name:, local_name:), ..exports], stars))
-        summary.ReExport(export_name:, imported_name:, source_specifier:) -> {
-          use dep <- result.map(resolve(source_specifier))
+        summary.ReExport(export_name:, imported_name:, request:) -> {
+          use dep <- result.map(resolve(request))
           let entry =
             ReExport(
               export_name:,
               imported_name:,
-              raw_dep: source_specifier,
+              raw_dep: request.specifier,
               dep:,
             )
           #([entry, ..exports], stars)
         }
-        summary.ReExportNamespace(export_name:, source_specifier:) -> {
-          use dep <- result.map(resolve(source_specifier))
+        summary.ReExportNamespace(export_name:, request:) -> {
+          use dep <- result.map(resolve(request))
           #([ReExportNamespace(export_name:, dep:), ..exports], stars)
         }
-        summary.ReExportAll(source_specifier:) -> {
-          use dep <- result.map(resolve(source_specifier))
+        summary.ReExportAll(request:) -> {
+          use dep <- result.map(resolve(request))
           #(exports, [dep, ..stars])
         }
       }

@@ -6056,11 +6056,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
 
     DynamicImportDefer ->
       case state.stack {
-        [specifier, ..rest] -> {
-          use #(promise, state) <- result.map(guarded2(
+        [options, specifier, ..rest] -> {
+          use #(promise, state) <- result.map(guarded3(
             state,
             dynamic_import.defer_import_call,
             specifier,
+            options,
           ))
           State(..state, stack: [promise, ..rest], pc: state.pc + 1)
         }
