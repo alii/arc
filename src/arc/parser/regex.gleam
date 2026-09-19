@@ -983,7 +983,7 @@ fn skip_to_close_brace(
 }
 
 // §22.2.1 SyntaxCharacter
-fn is_syntax_char(ch: String) -> Bool {
+pub fn is_syntax_char(ch: String) -> Bool {
   case ch {
     "^" | "$" | "\\" | "." | "*" | "+" | "?" -> True
     "(" | ")" | "[" | "]" | "{" | "}" | "|" -> True

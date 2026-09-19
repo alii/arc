@@ -1,6 +1,8 @@
 import arc/bytecode/key.{type PropertyKey, Named}
 import arc/internal/bytes
+import arc/internal/digits
 import arc/internal/unsafe
+import arc/internal/utf16
 import arc/parser/regex
 import arc/parser/regex_error
 import arc/rt/builtins/common
@@ -13,13 +15,13 @@ import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type LegacyStatic,
   type LegacyStatics, type Property, type RegExpFlag, type RegExpNative,
   ArrayObj, DataProperty, DotAllFlag, GlobalFlag, HasIndicesFlag, IgnoreCaseFlag,
-  KHandle, KNull, KUndef, LegacyInput, LegacyLastMatch, LegacyLastParen,
+  KHandle, KNull, KStr, KUndef, LegacyInput, LegacyLastMatch, LegacyLastParen,
   LegacyLeftContext, LegacyParen1, LegacyParen2, LegacyParen3, LegacyParen4,
   LegacyParen5, LegacyParen6, LegacyParen7, LegacyParen8, LegacyParen9,
   LegacyRightContext, LegacyStatics, MultilineFlag, NativeFn, Ordinary,
-  RegExpConstructor, RegExpGetFlag, RegExpGetFlags, RegExpGetSource,
-  RegExpLegacyGetter, RegExpLegacyInputSetter, RegExpN, RegExpObj,
-  RegExpPrototypeCompile, RegExpPrototypeExec, RegExpPrototypeTest,
+  RegExpConstructor, RegExpEscape, RegExpGetFlag, RegExpGetFlags,
+  RegExpGetSource, RegExpLegacyGetter, RegExpLegacyInputSetter, RegExpN,
+  RegExpObj, RegExpPrototypeCompile, RegExpPrototypeExec, RegExpPrototypeTest,
   RegExpPrototypeToString, RegExpStringIteratorNext, RegExpSymbolMatch,
   RegExpSymbolMatchAll, RegExpSymbolReplace, RegExpSymbolSearch,
   RegExpSymbolSplit, SObject, StickyFlag, UnicodeFlag, UnicodeSetsFlag, classify,
@@ -27,7 +29,9 @@ import arc/rt/types.{
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
+import gleam/bool
 import gleam/dict.{type Dict}
+import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -60,6 +64,8 @@ pub fn init(
       ),
     )
   let proto_props = list.append(proto_methods, getters)
+  let #(static_methods, st) =
+    common.alloc_methods(st, fn_proto, [#("escape", RegExpN(RegExpEscape), 1)])
   let #(bt, st) =
     common.init_type(
       st,
@@ -75,7 +81,7 @@ pub fn init(
       },
       "RegExp",
       2,
-      [],
+      static_methods,
     )
   let st = install_legacy_accessors(st, fn_proto, bt.constructor)
   let st =
@@ -170,6 +176,7 @@ pub fn dispatch(
       legacy_static_get(st, this, ctor, which)
     RegExpLegacyInputSetter(ctor:) ->
       legacy_static_set_input(st, this, args, ctor)
+    RegExpEscape -> regexp_escape(st, args)
     RegExpGetSource -> get_source(st, this)
     RegExpGetFlags -> get_flags(st, this)
     RegExpGetFlag(f) -> get_flag(st, this, f)
@@ -500,21 +507,26 @@ fn get_source(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 fn source_string(pattern: String) -> String {
   case pattern {
     "" -> "(?:)"
-    p -> escape_pattern(bit_array.from_string(p), "")
+    p -> escape_pattern(bit_array.from_string(p), False, "")
   }
 }
 
-fn escape_pattern(chars: BitArray, acc: String) -> String {
+fn escape_pattern(chars: BitArray, in_class: Bool, acc: String) -> String {
   case chars {
     <<"\\":utf8, next:utf8_codepoint, rest:bits>> ->
-      escape_pattern(rest, acc <> "\\" <> escape_terminator(next))
-    <<"/":utf8, rest:bits>> -> escape_pattern(rest, acc <> "\\/")
-    <<"\n":utf8, rest:bits>> -> escape_pattern(rest, acc <> "\\n")
-    <<"\r":utf8, rest:bits>> -> escape_pattern(rest, acc <> "\\r")
-    <<"\u{2028}":utf8, rest:bits>> -> escape_pattern(rest, acc <> "\\u2028")
-    <<"\u{2029}":utf8, rest:bits>> -> escape_pattern(rest, acc <> "\\u2029")
+      escape_pattern(rest, in_class, acc <> "\\" <> escape_terminator(next))
+    <<"/":utf8, rest:bits>> if !in_class ->
+      escape_pattern(rest, in_class, acc <> "\\/")
+    <<"[":utf8, rest:bits>> -> escape_pattern(rest, True, acc <> "[")
+    <<"]":utf8, rest:bits>> -> escape_pattern(rest, False, acc <> "]")
+    <<"\n":utf8, rest:bits>> -> escape_pattern(rest, in_class, acc <> "\\n")
+    <<"\r":utf8, rest:bits>> -> escape_pattern(rest, in_class, acc <> "\\r")
+    <<"\u{2028}":utf8, rest:bits>> ->
+      escape_pattern(rest, in_class, acc <> "\\u2028")
+    <<"\u{2029}":utf8, rest:bits>> ->
+      escape_pattern(rest, in_class, acc <> "\\u2029")
     <<ch:utf8_codepoint, rest:bits>> ->
-      escape_pattern(rest, acc <> string.from_utf_codepoints([ch]))
+      escape_pattern(rest, in_class, acc <> string.from_utf_codepoints([ch]))
     _ -> acc
   }
 }
@@ -527,6 +539,87 @@ fn escape_terminator(cp: UtfCodepoint) -> String {
     0x2029 -> "u2029"
     _ -> string.from_utf_codepoints([cp])
   }
+}
+
+// §22.2.5.1
+fn regexp_escape(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  case classify(helpers.first_arg_or_undefined(args)) {
+    KStr(s) -> #(mk_string(escape_string(bit_array.from_string(s))), st)
+    _ -> rt_val.throw_type_error(st, "RegExp.escape requires a string")
+  }
+}
+
+fn escape_string(chars: BitArray) -> String {
+  case chars {
+    <<c:utf8_codepoint, rest:bits>> -> {
+      let n = string.utf_codepoint_to_int(c)
+      case digits.is_ascii_alnum_code(n) {
+        True -> escape_chars(rest, "\\x" <> lower_hex(n, 2))
+        False -> escape_chars(chars, "")
+      }
+    }
+    _ -> ""
+  }
+}
+
+// §22.2.5.1.1
+fn escape_chars(chars: BitArray, acc: String) -> String {
+  case chars {
+    <<"/":utf8, rest:bits>> -> escape_chars(rest, acc <> "\\/")
+    <<"\t":utf8, rest:bits>> -> escape_chars(rest, acc <> "\\t")
+    <<"\n":utf8, rest:bits>> -> escape_chars(rest, acc <> "\\n")
+    <<"\u{000B}":utf8, rest:bits>> -> escape_chars(rest, acc <> "\\v")
+    <<"\f":utf8, rest:bits>> -> escape_chars(rest, acc <> "\\f")
+    <<"\r":utf8, rest:bits>> -> escape_chars(rest, acc <> "\\r")
+    <<c:utf8_codepoint, rest:bits>> -> escape_chars(rest, acc <> escape_char(c))
+    _ -> acc
+  }
+}
+
+fn escape_char(c: UtfCodepoint) -> String {
+  let n = string.utf_codepoint_to_int(c)
+  let text = string.from_utf_codepoints([c])
+  use <- bool.lazy_guard(regex.is_syntax_char(text), fn() { "\\" <> text })
+  let hex =
+    is_other_punctuator(text)
+    || is_white_space(n)
+    || is_line_terminator(n)
+    || utf16.is_high(n)
+    || utf16.is_low(n)
+  case hex, n <= 0xFF {
+    False, _ -> text
+    True, True -> "\\x" <> lower_hex(n, 2)
+    True, False -> "\\u" <> lower_hex(n, 4)
+  }
+}
+
+fn is_other_punctuator(ch: String) -> Bool {
+  case ch {
+    "," | "-" | "=" | "<" | ">" | "#" | "&" | "!" | "%" -> True
+    ":" | ";" | "@" | "~" | "'" | "`" | "\"" -> True
+    _ -> False
+  }
+}
+
+// §12.2
+fn is_white_space(c: Int) -> Bool {
+  case c {
+    0x09 | 0x0B | 0x0C | 0xFEFF -> True
+    0x20 | 0xA0 | 0x1680 | 0x202F | 0x205F | 0x3000 -> True
+    _ -> c >= 0x2000 && c <= 0x200A
+  }
+}
+
+// §12.3
+fn is_line_terminator(c: Int) -> Bool {
+  case c {
+    0x0A | 0x0D | 0x2028 | 0x2029 -> True
+    _ -> False
+  }
+}
+
+fn lower_hex(n: Int, width: Int) -> String {
+  int.to_base16(n) |> string.lowercase |> string.pad_start(width, "0")
 }
 
 fn get_flags(st: Agent, this: JsVal) -> #(JsVal, Agent) {

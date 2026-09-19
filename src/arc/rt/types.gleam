@@ -847,6 +847,7 @@ pub type RegExpNative {
   )
   RegExpLegacyGetter(ctor: Handle, which: LegacyStatic)
   RegExpLegacyInputSetter(ctor: Handle)
+  RegExpEscape
   RegExpPrototypeExec
   RegExpPrototypeTest
   RegExpPrototypeToString
