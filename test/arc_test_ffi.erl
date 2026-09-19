@@ -8,7 +8,7 @@ main() ->
     ErlModules = [erl_to_module(F) || F <- ErlFiles],
     AllModules = lists:usort(GleamModules ++ ErlModules),
 
-    Excluded = [arc_test_ffi, test262_exec_ffi, test_runner_ffi, test262_exec],
+    Excluded = [arc_test_ffi, test262_exec_ffi, test262_exec],
     TestModules = [M || M <- AllModules,
                         not lists:member(M, Excluded),
                         has_test_functions(M)],
@@ -245,13 +245,6 @@ format_test_name(Module, Function) ->
 
 print_failure(error, test_timeout, _Stack) ->
     io:format("    timed out (>10s)~n");
-print_failure(error, {gleam_error, assert, Message, _Module, _Function, _Line, _Extra}, _Stack) ->
-    io:format("    ~ts~n", [Message]);
-print_failure(error, {gleam_error, let_assert, Message, _Module, _Function, _Line, _Extra}, _Stack) ->
-    io:format("    ~ts~n", [Message]);
-print_failure(error, {assertion_failed, Props}, _Stack) ->
-    Reason = proplists:get_value(reason, Props, <<"unknown">>),
-    io:format("    ~ts~n", [Reason]);
 print_failure(_Class, Reason, Stack) ->
     io:format("    ~p~n", [Reason]),
     case Stack of

@@ -17,13 +17,19 @@ import gleam/option.{type Option, None, Some}
 
 pub fn accessor_property(
   st: Agent,
-  get get: Option(JsVal),
+  get get: JsVal,
   set set: Option(JsVal),
-  enumerable enumerable: Bool,
-  configurable configurable: Bool,
 ) -> #(Property, Agent) {
   let #(seq, st) = rt_store.next_prop_seq(st)
-  #(AccessorProperty(get:, set:, enumerable:, configurable:, seq:), st)
+  let prop =
+    AccessorProperty(
+      get: Some(get),
+      set:,
+      enumerable: False,
+      configurable: True,
+      seq:,
+    )
+  #(prop, st)
 }
 
 pub fn make_configurable(prop: Property) -> Property {
@@ -160,14 +166,7 @@ pub fn alloc_getters(
   use #(props, st), #(name, token) <- list.fold(specs, #([], st))
   let #(fn_h, st) =
     alloc_rooted_native_fn(st, fn_proto, token, "get " <> name, 0)
-  let #(prop, st) =
-    accessor_property(
-      st,
-      get: Some(mk_object(fn_h)),
-      set: None,
-      enumerable: False,
-      configurable: True,
-    )
+  let #(prop, st) = accessor_property(st, get: mk_object(fn_h), set: None)
   #([#(name, prop), ..props], st)
 }
 
@@ -182,13 +181,7 @@ pub fn alloc_get_set_accessor(
     alloc_rooted_native_fn(st, fn_proto, get, "get " <> name, 0)
   let #(set_h, st) =
     alloc_rooted_native_fn(st, fn_proto, set, "set " <> name, 1)
-  accessor_property(
-    st,
-    get: Some(mk_object(get_h)),
-    set: Some(mk_object(set_h)),
-    enumerable: False,
-    configurable: True,
-  )
+  accessor_property(st, get: mk_object(get_h), set: Some(mk_object(set_h)))
 }
 
 fn ctor_properties(
@@ -395,18 +388,16 @@ pub fn add_species_accessor(
   st: Agent,
   fn_proto: Handle,
   ctor_h: Handle,
-  return_this: NativeToken,
 ) -> Agent {
   let #(getter, st) =
-    alloc_rooted_native_fn(st, fn_proto, return_this, "get [Symbol.species]", 0)
-  let #(prop, st) =
-    accessor_property(
+    alloc_rooted_native_fn(
       st,
-      get: Some(mk_object(getter)),
-      set: None,
-      enumerable: False,
-      configurable: True,
+      fn_proto,
+      types.ReturnThis,
+      "get [Symbol.species]",
+      0,
     )
+  let #(prop, st) = accessor_property(st, get: mk_object(getter), set: None)
   add_symbol_property(st, ctor_h, types.symbol_species, prop)
 }
 

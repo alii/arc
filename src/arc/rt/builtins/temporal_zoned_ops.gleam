@@ -54,7 +54,7 @@ pub fn check_iso_days_range(d: IsoDate) -> Result(Nil, JsError) {
   }
 }
 
-pub fn get_possible_epoch_ns(
+fn get_possible_epoch_ns(
   tz: TemporalZone,
   d: IsoDate,
   t: IsoTime,
@@ -95,7 +95,7 @@ pub fn get_possible_epoch_ns(
   }
 }
 
-pub fn disambiguate_epoch_ns(
+fn disambiguate_epoch_ns(
   possible: List(Int),
   tz: TemporalZone,
   d: IsoDate,
@@ -286,7 +286,7 @@ pub fn read_date_time_fields(
   )
 }
 
-pub fn read_bag_offset(st: Agent, bag: Handle) -> #(Option(Int), Agent) {
+fn read_bag_offset(st: Agent, bag: Handle) -> #(Option(Int), Agent) {
   let #(v, st) = rt_val.get_named(st, types.mk_object(bag), "offset", None)
   case classify(v) {
     KUndef -> #(None, st)
@@ -343,7 +343,7 @@ pub fn to_temporal_zoned(
   }
 }
 
-pub type ZonedOptions {
+type ZonedOptions {
   ZonedOptions(
     disambiguation: Disambiguation,
     offset: OffsetOption,
@@ -351,7 +351,7 @@ pub type ZonedOptions {
   )
 }
 
-pub fn validated_zoned_options(
+fn validated_zoned_options(
   st: Agent,
   options: JsVal,
 ) -> #(ZonedOptions, Agent) {
@@ -362,7 +362,7 @@ pub fn validated_zoned_options(
   #(ZonedOptions(disambiguation:, offset:, overflow:), st)
 }
 
-pub type ParsedZoned {
+type ParsedZoned {
   ParsedZoned(
     date: IsoDate,
     time: Option(IsoTime),
@@ -372,7 +372,7 @@ pub type ParsedZoned {
   )
 }
 
-pub fn parse_zoned_string(s: String) -> Result(ParsedZoned, JsError) {
+fn parse_zoned_string(s: String) -> Result(ParsedZoned, JsError) {
   case parse_iso_datetime_string(s) {
     None -> Error(JsError(RangeError, "invalid ZonedDateTime string: " <> s))
     Some(p) -> {
@@ -392,7 +392,7 @@ pub fn parse_zoned_string(s: String) -> Result(ParsedZoned, JsError) {
   }
 }
 
-pub fn zoned_string_epoch_ns(
+fn zoned_string_epoch_ns(
   d: IsoDate,
   t_opt: Option(IsoTime),
   offset: ParsedOffset,
@@ -431,7 +431,7 @@ pub fn zoned_string_epoch_ns(
   }
 }
 
-pub fn zoned_from_bag(
+fn zoned_from_bag(
   st: Agent,
   bag: Handle,
   options: JsVal,

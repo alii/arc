@@ -1,6 +1,5 @@
 import arc/compiler
 import arc/interp/entry
-import arc/interp/safepoint
 import arc/parser
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion} as rt_call
@@ -38,7 +37,7 @@ pub fn allocating_loop_is_bounded_and_keeps_frame_values_test() {
   let assert NormalCompletion(v) = completion
   assert rt_inspect.describe(st, v) == "'42:7998000'"
   assert rt_gc.stats(st).live_count <= base + 4 * threshold
-  let st = safepoint.end_turn(st, [v])
+  let st = rt_helpers.end_turn(st, [v])
   assert rt_gc.stats(st).live_count <= base + 4 * threshold
 }
 

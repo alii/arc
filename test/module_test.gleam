@@ -34,7 +34,7 @@ fn no_source_loads(_resolved: String) {
 
 fn hosts() {
   dict.from_list([
-    #("dance", module.HostModule("dance", [#("greet", mk_int(7))])),
+    #("dance", module.HostModule([#("greet", mk_int(7))])),
   ])
 }
 
@@ -76,8 +76,7 @@ pub fn link_builds_namespaces_over_live_cells_test() {
 
 pub fn missing_import_is_a_link_time_syntax_error_test() {
   let b = bundle("import { nope } from 'dance';")
-  let assert #(Error(module.EvaluationError(err)), st) =
-    module.link_for_evaluation(agent(), b)
+  let assert #(Error(err), st) = module.link_for_evaluation(agent(), b)
   assert string.starts_with(rt_inspect.format_error(st, err), "SyntaxError")
 }
 

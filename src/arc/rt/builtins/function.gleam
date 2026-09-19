@@ -59,10 +59,8 @@ pub fn init(
   let #(restricted, st) =
     common.accessor_property(
       st,
-      get: Some(mk_object(thrower_h)),
+      get: mk_object(thrower_h),
       set: Some(mk_object(thrower_h)),
-      enumerable: False,
-      configurable: True,
     )
   let #(restricted2, st) = common.restamp(st, restricted)
   let restricted_props = [

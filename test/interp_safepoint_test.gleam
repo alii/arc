@@ -193,7 +193,7 @@ pub fn end_turn_keeps_completion_value_across_drain_test() {
     |> rt_async.enqueue_job(alloc_job)
     |> rt_async.enqueue_job(alloc_job)
     |> rt_async.enqueue_job(alloc_job)
-  let st = safepoint.end_turn(st, [kept])
+  let st = rt_helpers.end_turn(st, [kept])
   assert rt_gc.is_live(st, kept_h)
   assert !rt_gc.is_live(st, dead_h)
   assert rt_gc.stats(st).live_count <= base + 2 * threshold
@@ -204,7 +204,7 @@ pub fn end_turn_leaves_permanent_pins_alone_test() {
   let st = small_agent()
   let #(pinned_h, pinned, st) = new_object(st)
   let st = rt_store.pin_root(st, pinned_h)
-  let st = safepoint.end_turn(st, [pinned])
+  let st = rt_helpers.end_turn(st, [pinned])
   assert set.contains(st.store.pinned_roots, pinned_h.id)
 }
 
@@ -259,7 +259,6 @@ pub fn closure_environment_and_constants_are_traced_test() {
       is_class_constructor: False,
       is_derived_constructor: False,
       is_arrow: True,
-      is_method: False,
       is_generator: False,
       is_async: False,
       is_strict: True,

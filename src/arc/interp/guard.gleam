@@ -7,7 +7,7 @@ pub type Guarded(v) {
   Thrown(thrown: JsVal, agent: Agent)
 }
 
-pub fn guard_state(
+fn guard_state(
   outcome: Guarded(v),
   state: State,
 ) -> Result(#(v, State), StepExit) {
@@ -43,7 +43,7 @@ pub fn guard4(
 ) -> Guarded(v)
 
 @external(erlang, "arc_interp_guard_ffi", "guard5")
-pub fn guard5(
+fn guard5(
   f: fn(Agent, a, b, c, d) -> #(v, Agent),
   agent: Agent,
   a: a,
@@ -53,7 +53,7 @@ pub fn guard5(
 ) -> Guarded(v)
 
 @external(erlang, "arc_interp_guard_ffi", "guard7")
-pub fn guard7(
+fn guard7(
   f: fn(Agent, a, b, c, d, e, g) -> #(v, Agent),
   agent: Agent,
   a: a,
@@ -65,10 +65,10 @@ pub fn guard7(
 ) -> Guarded(v)
 
 @external(erlang, "arc_interp_guard_ffi", "guard_unit1")
-pub fn guard_unit1(f: fn(Agent) -> Agent, agent: Agent) -> Guarded(Nil)
+fn guard_unit1(f: fn(Agent) -> Agent, agent: Agent) -> Guarded(Nil)
 
 @external(erlang, "arc_interp_guard_ffi", "guard_unit3")
-pub fn guard_unit3(
+fn guard_unit3(
   f: fn(Agent, a, b) -> Agent,
   agent: Agent,
   a: a,
@@ -76,7 +76,7 @@ pub fn guard_unit3(
 ) -> Guarded(Nil)
 
 @external(erlang, "arc_interp_guard_ffi", "guard_unit4")
-pub fn guard_unit4(
+fn guard_unit4(
   f: fn(Agent, a, b, c) -> Agent,
   agent: Agent,
   a: a,
@@ -85,7 +85,7 @@ pub fn guard_unit4(
 ) -> Guarded(Nil)
 
 @external(erlang, "arc_interp_guard_ffi", "guard_unit5")
-pub fn guard_unit5(
+fn guard_unit5(
   f: fn(Agent, a, b, c, d) -> Agent,
   agent: Agent,
   a: a,
@@ -95,7 +95,7 @@ pub fn guard_unit5(
 ) -> Guarded(Nil)
 
 @external(erlang, "arc_interp_guard_ffi", "guard_unit6")
-pub fn guard_unit6(
+fn guard_unit6(
   f: fn(Agent, a, b, c, d, e) -> Agent,
   agent: Agent,
   a: a,

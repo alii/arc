@@ -1,5 +1,4 @@
 import arc/bytecode/binop.{type ClassifiedBinOp, type PureBinOp}
-import arc/bytecode/error_kind.{type ErrorKind}
 import arc/bytecode/key.{type PropertyKey}
 import gleam/option.{type Option, None, Some}
 
@@ -14,11 +13,6 @@ pub type LabelId {
 
 pub type Pc {
   Pc(pc: Int)
-}
-
-pub fn pc_int(pc: Pc) -> Int {
-  let Pc(n) = pc
-  n
 }
 
 pub type TryKind(target) {
@@ -162,7 +156,7 @@ pub type Op {
   Throw
   // assignment to const, always typeerror
   ThrowConstAssign(name: String)
-  ThrowError(kind: ErrorKind, msg: String)
+  ThrowReferenceError(msg: String)
   PushTry(catch_target: Pc, kind: TryKind(Pc))
   PopTry
 
@@ -281,8 +275,7 @@ pub type Op {
   Yield
   // [arg, iter]; loops on itself until inner is done
   YieldStar
-  // after_pc is the op after the whole yield* sequence
-  AsyncYieldStarNext(after_pc: Pc)
+  AsyncYieldStarNext
   // next_pc points back at the asyncyieldstarnext op
   AsyncYieldStarResume(next_pc: Pc)
 
@@ -342,7 +335,6 @@ pub type IrOp {
   IrJumpIfNotNullish(label: LabelId)
   IrPushTry(catch_label: LabelId, kind: TryKind(LabelId))
   IrGosub(label: LabelId)
-  IrAsyncYieldStarNext(after_label: LabelId)
   IrAsyncYieldStarResume(next_label: LabelId)
 
   IrWithGetVar(name: String, label: LabelId)

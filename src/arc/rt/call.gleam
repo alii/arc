@@ -15,7 +15,6 @@ import arc/rt/types.{
 import arc/rt/val as rt_val
 import gleam/bool
 import gleam/dict.{type Dict}
-import gleam/dynamic.{type Dynamic}
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -100,10 +99,6 @@ fn handle_is_constructor(st: Agent, h: Handle) -> Bool {
     _ -> False
   }
 }
-
-// {code, this, direct_entry} for a plain compiled fn, else miss
-@external(erlang, "arc_rt_call_ffi", "direct_callee")
-pub fn direct_callee(st: Agent, callee: JsVal, this: JsVal) -> Dynamic
 
 // §10.2.1 [[call]], catches a throw into a completion
 pub fn try_call(
@@ -594,7 +589,7 @@ pub fn function_realm(st: Agent, obj: Handle) -> Realm {
 }
 
 // §7.3.24 getfunctionrealm as a realm id
-pub fn get_function_realm(st: Agent, obj: Handle) -> Int {
+fn get_function_realm(st: Agent, obj: Handle) -> Int {
   case rt_store.cell_get(st, obj) {
     SObject(kind: BytecodeFn(realm:, ..), ..) -> realm
     SObject(kind: BoundFn(target:, ..), ..) -> get_function_realm(st, target)
@@ -745,18 +740,8 @@ fn alloc_args_array(st: Agent, items: List(JsVal)) -> #(Handle, Agent) {
 }
 
 // birth props take seq 0,1,2; length is a jsval so bind can pass +infinity
-pub fn fn_own_prop(value: JsVal, seq: Int) -> Property {
-  DataProperty(
-    value:,
-    writable: False,
-    enumerable: False,
-    configurable: True,
-    seq:,
-  )
-}
-
 @external(erlang, "arc_rt_call_ffi", "birth_props")
-pub fn birth_props(length_v: JsVal, name: String) -> Dict(PropertyKey, Property)
+fn birth_props(length_v: JsVal, name: String) -> Dict(PropertyKey, Property)
 
 fn alloc_fn_cell(
   st: Agent,
@@ -778,13 +763,12 @@ fn alloc_fn_cell(
   )
 }
 
-pub fn builtin_function_flags() -> FnFlags {
+fn builtin_function_flags() -> FnFlags {
   FnFlags(
     is_constructor: False,
     is_class_constructor: False,
     is_derived_constructor: False,
     is_arrow: True,
-    is_method: False,
     is_generator: False,
     is_async: False,
     is_strict: True,
@@ -802,7 +786,7 @@ pub fn new_builtin_function(
     unsafe.coerce(fn(st: Agent, _frame: Frame, args: List(JsVal)) {
       body(st, args)
     })
-  alloc_compiled_fn(st, code, builtin_function_flags(), name, arity, None, None)
+  alloc_compiled_fn(st, code, builtin_function_flags(), name, arity)
 }
 
 // no .prototype here, makeconstructor is separate
@@ -812,18 +796,16 @@ pub fn alloc_compiled_fn(
   flags: FnFlags,
   name: String,
   len: Int,
-  home: Option(Handle),
-  direct_entry: Option(DirectEntry),
 ) -> #(Handle, Agent) {
   alloc_fn_cell(
     st,
     Some(st.realm.function.prototype),
     CompiledFn(
       code:,
-      home_object: home,
+      home_object: None,
       flags:,
       fields_init: None,
-      direct_entry:,
+      direct_entry: None,
       name:,
       length: len,
       birth: BirthSettled,
@@ -921,7 +903,7 @@ pub fn native_new(
 // length may be +infinity (wrappedfunctioncreate)
 pub fn native_new_computed_length(
   st: Agent,
-  proto: Option(Handle),
+  proto: Handle,
   token: NativeToken,
   name: String,
   length_v: JsVal,
@@ -932,7 +914,7 @@ pub fn native_new_computed_length(
   }
   alloc_fn_cell(
     st,
-    proto,
+    Some(proto),
     NativeFn(token:, name:, length:, constructible: False),
     length_v,
     name,

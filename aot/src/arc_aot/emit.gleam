@@ -53,7 +53,7 @@ fn init_emitter(
       emit_class: class.emit,
       emit_coroutine_fn: async.emit_coroutine_fn,
     )
-  state.new_emitter(tree, scope.root_scope_id, strict, module_name, dispatch)
+  state.new_emitter(tree, strict, module_name, dispatch)
 }
 
 fn root_binding_prologue(
@@ -315,20 +315,14 @@ pub fn compile_source(
         box_try_writes: True,
       ),
     )
-  compile(ast.Script(body:), tree, opts)
+  compile(body, tree, opts)
 }
 
-pub fn compile(
-  program: ast.Program,
+fn compile(
+  body: List(ast.StmtWithLine),
   tree: scope.ScopeTree,
   opts: CompileOpts,
 ) -> Result(ir.Module, state.EmitError) {
-  let body = case program {
-    ast.Script(body:) -> Ok(body)
-    ast.Module(..) ->
-      Error(state.UnsupportedFeature("ESM module graph (SPEC Q7 v1)"))
-  }
-  use body <- result.try(body)
   let strict =
     opts.source_kind == AsModule || ast_util.has_use_strict_directive(body)
   let e = init_emitter(tree, strict, opts.module_name)

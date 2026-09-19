@@ -48,7 +48,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-pub const all_time_getters = [
+const all_time_getters = [
   TimeHour,
   TimeMinute,
   TimeSecond,
@@ -109,7 +109,7 @@ pub fn time_getter_name(g: TemporalTimeGetter) -> String {
   }
 }
 
-pub fn plain_time_method_name(m: PlainTimeMethod) -> String {
+fn plain_time_method_name(m: PlainTimeMethod) -> String {
   case m {
     PlainTimeAdd -> "add"
     PlainTimeSubtract -> "subtract"
@@ -328,7 +328,7 @@ pub fn time_fields_apply(f: TimeFields, base: IsoTime) -> IsoTime {
   )
 }
 
-pub fn read_time_fields(st: Agent, bag: Handle) -> #(TimeFields, Agent) {
+fn read_time_fields(st: Agent, bag: Handle) -> #(TimeFields, Agent) {
   let #(hour, st) = read_int_field(st, bag, "hour")
   let #(microsecond, st) = read_int_field(st, bag, "microsecond")
   let #(millisecond, st) = read_int_field(st, bag, "millisecond")
@@ -423,7 +423,7 @@ pub fn to_temporal_time(
   }
 }
 
-pub fn parse_time_string(s: String) -> Result(IsoTime, JsError) {
+fn parse_time_string(s: String) -> Result(IsoTime, JsError) {
   case parse_iso_datetime_string(s) {
     Some(p) ->
       case p.offset {
@@ -483,11 +483,7 @@ fn time_string_is_ambiguous(s: String) -> Bool {
   is_year_month_like(base) || is_month_day_like(base)
 }
 
-pub fn time_from_bag(
-  st: Agent,
-  bag: Handle,
-  options: JsVal,
-) -> #(IsoTime, Agent) {
+fn time_from_bag(st: Agent, bag: Handle, options: JsVal) -> #(IsoTime, Agent) {
   let #(f, st) = read_time_fields(st, bag)
   case f == no_time_fields {
     True ->

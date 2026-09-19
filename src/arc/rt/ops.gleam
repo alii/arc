@@ -334,10 +334,6 @@ pub fn bitnot_general(st: Agent, a: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-pub fn strict_eq(a: JsVal, b: JsVal) -> Bool {
-  rt_val.strict_eq(a, b)
-}
-
 // §7.2.14 is loosely equal
 pub fn eq_i32_general(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   case classify(a), classify(b) {

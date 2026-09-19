@@ -5,7 +5,7 @@ import arc/rt/builtins/options.{get_option, get_options_object}
 import arc/rt/builtins/temporal_common.{
   apply_duration_fields, check_time_duration_range, date_part, days_and_time_ns,
   duration_sign, duration_slot_of, finish_duration, has_calendar_units,
-  has_date_units, integral_int_arg_or, is_valid_duration, make_duration,
+  has_date_units, integral_int_arg, is_valid_duration, make_duration,
   negate_duration, read_duration_fields, require_temporal, static_name,
   time_part_ns, to_temporal_duration,
 }
@@ -59,7 +59,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
-pub const all_duration_getters = [
+const all_duration_getters = [
   DurationYears,
   DurationMonths,
   DurationWeeks,
@@ -115,7 +115,7 @@ pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
   )
 }
 
-pub fn duration_getter_name(g: TemporalDurationGetter) -> String {
+fn duration_getter_name(g: TemporalDurationGetter) -> String {
   case g {
     DurationYears -> "years"
     DurationMonths -> "months"
@@ -132,7 +132,7 @@ pub fn duration_getter_name(g: TemporalDurationGetter) -> String {
   }
 }
 
-pub fn duration_method_name(m: DurationMethod) -> String {
+fn duration_method_name(m: DurationMethod) -> String {
   case m {
     DurationWith -> "with"
     DurationNegated -> "negated"
@@ -153,16 +153,16 @@ pub fn ctor(
   protos: TemporalProtos,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(years, st) = integral_int_arg_or(st, args, 0, 0)
-  let #(months, st) = integral_int_arg_or(st, args, 1, 0)
-  let #(weeks, st) = integral_int_arg_or(st, args, 2, 0)
-  let #(days, st) = integral_int_arg_or(st, args, 3, 0)
-  let #(hours, st) = integral_int_arg_or(st, args, 4, 0)
-  let #(minutes, st) = integral_int_arg_or(st, args, 5, 0)
-  let #(seconds, st) = integral_int_arg_or(st, args, 6, 0)
-  let #(milliseconds, st) = integral_int_arg_or(st, args, 7, 0)
-  let #(microseconds, st) = integral_int_arg_or(st, args, 8, 0)
-  let #(nanoseconds, st) = integral_int_arg_or(st, args, 9, 0)
+  let #(years, st) = integral_int_arg(st, args, 0)
+  let #(months, st) = integral_int_arg(st, args, 1)
+  let #(weeks, st) = integral_int_arg(st, args, 2)
+  let #(days, st) = integral_int_arg(st, args, 3)
+  let #(hours, st) = integral_int_arg(st, args, 4)
+  let #(minutes, st) = integral_int_arg(st, args, 5)
+  let #(seconds, st) = integral_int_arg(st, args, 6)
+  let #(milliseconds, st) = integral_int_arg(st, args, 7)
+  let #(microseconds, st) = integral_int_arg(st, args, 8)
+  let #(nanoseconds, st) = integral_int_arg(st, args, 9)
   let dur =
     Duration(
       years:,
@@ -256,7 +256,7 @@ pub fn getter(
   #(duration_field(d, g), st)
 }
 
-pub fn duration_field(d: Duration, g: TemporalDurationGetter) -> JsVal {
+fn duration_field(d: Duration, g: TemporalDurationGetter) -> JsVal {
   case g {
     DurationYears -> mk_int(d.years)
     DurationMonths -> mk_int(d.months)
@@ -794,7 +794,7 @@ fn round_duration_for_string(
   }
 }
 
-pub fn format_duration(d: Duration, precision: SecondsPrecision) -> String {
+fn format_duration(d: Duration, precision: SecondsPrecision) -> String {
   let sign = duration_sign(d)
   let prefix = case sign < 0 {
     True -> "-"

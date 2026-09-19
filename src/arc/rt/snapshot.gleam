@@ -17,7 +17,7 @@ import gleam/result
 import gleam/set.{type Set}
 
 // bump on any change to the image or runtime records
-pub const abi_version = 15
+pub const abi_version = 16
 
 pub type SnapshotError {
   SnapshotContainsCompiledCode(handle: Handle)
@@ -33,7 +33,6 @@ pub type DeserializeError {
 type StoreImage {
   StoreImage(
     cells: Dict(Int, Cell),
-    free: List(Int),
     next_id: Int,
     pinned_roots: Set(Int),
     alloc_since_gc: Int,
@@ -123,7 +122,6 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
   let store =
     StoreImage(
       cells:,
-      free: [],
       next_id:,
       pinned_roots:,
       alloc_since_gc:,
@@ -166,7 +164,6 @@ pub fn deserialize(
 fn restore(image: StoreImage) -> Store {
   let StoreImage(
     cells:,
-    free: _,
     next_id:,
     pinned_roots:,
     alloc_since_gc:,

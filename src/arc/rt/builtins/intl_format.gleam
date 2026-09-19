@@ -95,7 +95,7 @@ pub fn part_type_text(t: PartType) -> String {
   }
 }
 
-pub type PartClass {
+type PartClass {
   NumberDigit
   NumberExponentDigit
   NumberCore
@@ -105,7 +105,7 @@ pub type PartClass {
   OtherPart
 }
 
-pub fn part_class(t: PartType) -> PartClass {
+fn part_class(t: PartType) -> PartClass {
   case t {
     PartInteger | PartFraction -> NumberDigit
     PartExponentInteger -> NumberExponentDigit
@@ -971,7 +971,7 @@ pub fn is_well_formed_unit(unit: String) -> Bool {
 }
 
 // value = 0.digits * 10^exponent, digits "" is zero
-pub type Decimal {
+type Decimal {
   Decimal(digits: String, exponent: Int)
 }
 
@@ -1403,21 +1403,17 @@ fn split_pairs_loop(s: String, acc: List(String)) -> List(String) {
 }
 
 pub type PluralCategory {
-  PluralZero
   PluralOne
   PluralTwo
   PluralFew
-  PluralMany
   PluralOther
 }
 
 pub fn plural_category_text(c: PluralCategory) -> String {
   case c {
-    PluralZero -> "zero"
     PluralOne -> "one"
     PluralTwo -> "two"
     PluralFew -> "few"
-    PluralMany -> "many"
     PluralOther -> "other"
   }
 }
@@ -1593,7 +1589,7 @@ fn relative_time_unit_en(
 ) -> String {
   let single = case plural {
     PluralOne -> True
-    PluralZero | PluralTwo | PluralFew | PluralMany | PluralOther -> False
+    PluralTwo | PluralFew | PluralOther -> False
   }
   case style {
     RelativeLong ->

@@ -40,11 +40,7 @@ pub fn dispatch(
   print(st, level, args)
 }
 
-pub fn print(
-  st: Agent,
-  level: ConsoleLevel,
-  args: List(JsVal),
-) -> #(JsVal, Agent) {
+fn print(st: Agent, level: ConsoleLevel, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(line, st) = format(st, args)
   st.hooks.print(level, line)
   #(mk_undefined(), st)

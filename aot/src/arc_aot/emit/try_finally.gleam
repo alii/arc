@@ -1,26 +1,17 @@
 import arc/compiler/ast_util
 import arc/compiler/scope.{
-  type Binding, CaptureBinding, CatchBinding, ConstBinding, FnNameBinding,
-  LetBinding, ParamBinding, VarBinding,
+  type Binding, CaptureBinding, ConstBinding, FnNameBinding, LetBinding,
+  ParamBinding, VarBinding,
 }
 import arc/parser/ast
 import arc_aot/emit/cps
-import arc_aot/emit/state.{
-  type EmitResult, type Emitter, type Next, type NextWith,
-}
+import arc_aot/emit/state.{type EmitResult, type Emitter, type Next}
 import carder/ir
 import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
-
-fn with_done(
-  e: Emitter,
-  f: fn(NextWith(ir.Expr), Emitter) -> EmitResult,
-) -> EmitResult {
-  f(fn(tree, ef) { Ok(#(tree, ef)) }, e)
-}
 
 // §14.15.3 finally overrides the pending completion
 pub fn inline_finally(
@@ -39,13 +30,11 @@ pub fn inline_finally(
       in_block: saved.in_block,
       frame_stack: drop_through_finally_barrier(e.frame_stack),
     )
-  let e = state.push_barrier(e, None, None, None)
   use #(f_tree, e) <- result.try(
     e.dispatch.emit_stmts(e, body, fn(ef) {
       Ok(#(ir.Values([ef.consts.undef]), ef))
     }),
   )
-  let e = state.pop_frame(e)
   let e =
     state.Emitter(
       ..e,
@@ -62,7 +51,7 @@ fn drop_through_finally_barrier(
 ) -> List(state.Frame) {
   case frames {
     [] -> []
-    [state.BarrierFrame(finally_body: Some(_), ..), ..rest] -> rest
+    [state.BarrierFrame(..), ..rest] -> rest
     [_, ..rest] -> drop_through_finally_barrier(rest)
   }
 }
@@ -81,13 +70,9 @@ fn as_block(body: List(ast.StmtWithLine)) -> List(ast.StmtWithLine) {
 }
 
 fn emit_finalizer(e: Emitter, finalizer: List(ast.StmtWithLine)) -> EmitResult {
-  let e = state.push_barrier(e, None, None, None)
-  use #(tree, e) <- result.map(
-    e.dispatch.emit_stmts(e, as_block(finalizer), fn(ef) {
-      Ok(#(ir.Values([]), ef))
-    }),
-  )
-  #(tree, state.pop_frame(e))
+  e.dispatch.emit_stmts(e, as_block(finalizer), fn(ef) {
+    Ok(#(ir.Values([]), ef))
+  })
 }
 
 pub fn emit_try_finally(
@@ -111,14 +96,11 @@ pub fn emit_try_catch_finally(
   let scopes_before_fin =
     block_scope_count(block) + catch_scope_count(param, catch_body)
   use e <- wrap_with_finally(e, finalizer, scopes_before_fin, k)
-  let #(esc, e) = state.fresh_escape(e, 0)
-  let e = state.push_barrier(e, None, None, Some(esc))
   use #(body_ir, e) <- result.try(
     e.dispatch.emit_stmts(e, as_block(block), fn(ef) {
       Ok(#(ir.Values([]), ef))
     }),
   )
-  let e = state.pop_frame(e)
   let #(ex, e) = state.fresh_var(e)
   use #(h_ir, e) <- result.map(emit_catch_arm(e, param, catch_body, ex))
   let inner =
@@ -130,7 +112,7 @@ pub fn emit_try_catch_finally(
         handler: h_ir,
       ),
     ])
-  state.land_escapes(e, esc, inner)
+  #(inner, e)
 }
 
 fn block_scope_count(body: List(ast.StmtWithLine)) -> Int {
@@ -164,13 +146,7 @@ fn wrap_with_finally(
       scope_cursor: list.drop(e.scope_cursor, scopes_before_fin),
     )
   let #(esc, e) = state.fresh_escape(e, 0)
-  let e =
-    state.push_barrier(
-      e,
-      Some(#(as_block(finalizer), fin_save)),
-      None,
-      Some(esc),
-    )
+  let e = state.push_barrier(e, as_block(finalizer), fin_save, esc)
   use #(body_ir, e) <- result.try(build(e))
   let e = state.pop_frame(e)
   let fin_pos = snapshot_scope(e)
@@ -205,7 +181,7 @@ fn emit_catch_arm(
   catch_body: List(ast.StmtWithLine),
   ex_name: String,
 ) -> EmitResult {
-  use done, e <- with_done(e)
+  use done, e <- cps.with_done(e)
   case param {
     Some(p) -> {
       let #(save, e) = state.enter_scope(e, in_block: e.in_block)
@@ -262,7 +238,7 @@ pub fn catch_binding_prologue(
   case b.kind {
     VarBinding -> seed(e, e.consts.undef)
     LetBinding | ConstBinding | FnNameBinding -> seed(e, e.consts.tdz)
-    CatchBinding | ParamBinding -> seed(e, e.consts.undef)
+    ParamBinding -> seed(e, e.consts.undef)
     CaptureBinding -> next(e)
   }
 }

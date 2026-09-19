@@ -39,12 +39,12 @@ pub const sent_throw = 1
 
 pub const sent_return = 2
 
-pub fn sent_start() -> #(Int, JsVal) {
+fn sent_start() -> #(Int, JsVal) {
   #(sent_next, mk_undefined())
 }
 
 @external(erlang, "arc_rt_async_ffi", "apply_state_machine")
-pub fn apply_state_machine(
+fn apply_state_machine(
   st: Agent,
   machine: StateMachine,
   resume_point: Int,
@@ -52,7 +52,7 @@ pub fn apply_state_machine(
   locals: Locals,
 ) -> #(Step, Agent)
 
-pub fn apply_resume(
+fn apply_resume(
   st: Agent,
   resume: Resume,
   sent: #(Int, JsVal),
@@ -182,16 +182,7 @@ pub fn add_waiter(
   deadline: Option(Int),
 ) -> #(Handle, Agent) {
   let #(promise, st) = new_promise(st)
-  let target = mk_object(promise)
-  let waiter =
-    AsyncWaiter(
-      owner:,
-      ref:,
-      promise:,
-      resolve: target,
-      reject: target,
-      deadline:,
-    )
+  let waiter = AsyncWaiter(owner:, ref:, promise:, deadline:)
   #(promise, Agent(..st, waiters: list.append(st.waiters, [waiter])))
 }
 
@@ -233,8 +224,8 @@ fn enqueue_resolve_ok(st: Agent, w: AsyncWaiter) -> Agent {
     ReactionJob(
       handler: IdentityPassThrough,
       arg: wait_result_js(Woken),
-      resolve: w.resolve,
-      reject: w.reject,
+      resolve: mk_object(w.promise),
+      reject: mk_object(w.promise),
     ),
   )
 }
@@ -249,7 +240,8 @@ fn fire_due_waiters(st: Agent, cutoff: Int) -> Agent {
     })
   list.fold(due, Agent(..st, waiters: pending), fn(st, w) {
     case cancel(w.owner, w.ref) {
-      Cancelled -> settle(st, w.resolve, Fulfil, wait_result_js(TimedOut))
+      Cancelled ->
+        settle(st, mk_object(w.promise), Fulfil, wait_result_js(TimedOut))
       AlreadyWoken -> {
         let Nil = await_wake(w.ref)
         enqueue_resolve_ok(st, w)

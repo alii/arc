@@ -11,7 +11,7 @@ import arc/rt/types.{
   type Agent, type JsVal, FnFlags, HostJob, JInt, KBool, KHandle, KNum, KStr,
   StringKey, classify, mk_int, mk_object, mk_string, mk_undefined,
 }
-import gleam/option.{None, Some}
+import gleam/option.{Some}
 import rt_helpers
 
 fn recording_agent() -> Agent {
@@ -137,13 +137,11 @@ pub fn promise_subclass_test() {
       is_class_constructor: True,
       is_derived_constructor: True,
       is_arrow: False,
-      is_method: False,
       is_generator: False,
       is_async: False,
       is_strict: True,
     )
-  let #(p_ctor_h, st) =
-    rt_call.alloc_compiled_fn(st, ctor_code, flags, "P", 1, None, None)
+  let #(p_ctor_h, st) = rt_call.alloc_compiled_fn(st, ctor_code, flags, "P", 1)
   let #(p_proto_h, st) = rt_class.setup(st, p_ctor_h, promise)
   let p_ctor = mk_object(p_ctor_h)
   let #(executor, st) =

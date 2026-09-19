@@ -40,9 +40,7 @@ pub fn init(
       object_proto,
       fn_proto,
       proto_methods,
-      fn(proto) {
-        FinalizationRegistryN(FinalizationRegistryConstructor(proto:))
-      },
+      fn(_) { FinalizationRegistryN(FinalizationRegistryConstructor) },
       "FinalizationRegistry",
       1,
       [],
@@ -58,7 +56,7 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case native {
-    FinalizationRegistryConstructor(..) ->
+    FinalizationRegistryConstructor ->
       rt_val.throw_type_error(
         st,
         "Constructor FinalizationRegistry requires 'new'",
@@ -75,7 +73,7 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case native {
-    FinalizationRegistryConstructor(..) -> construct(st, args, new_target)
+    FinalizationRegistryConstructor -> construct(st, args, new_target)
     FinalizationRegistryPrototypeRegister
     | FinalizationRegistryPrototypeUnregister ->
       rt_val.throw_type_error(st, "not a constructor")

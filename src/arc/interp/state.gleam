@@ -6,7 +6,6 @@ import arc/rt/bytecode.{type FuncTemplate, type TryFrame}
 import arc/rt/gc as rt_gc
 import arc/rt/types.{type Agent, type Handle, type JsVal, Handle}
 import arc/rt/val as rt_val
-import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
@@ -174,7 +173,6 @@ pub type SuspendKind {
 }
 
 pub type VmError {
-  PcOutOfBounds(pc: Int)
   StackUnderflow(op: String)
   SuspensionLeak(site: String, kind: SuspendKind)
   InternalError(site: String, detail: String)
@@ -182,7 +180,6 @@ pub type VmError {
 
 pub fn vm_error_message(err: VmError) -> String {
   case err {
-    PcOutOfBounds(pc) -> "pc out of bounds: " <> int.to_string(pc)
     StackUnderflow(op) -> "stack underflow in " <> op
     SuspensionLeak(site:, kind:) ->
       "internal error at "
@@ -206,13 +203,10 @@ pub type StepExit {
   Threw(JsVal, State)
   Returned(JsVal, State)
   Yielded(YieldKind, JsVal, State)
-  Awaited(JsVal, State)
   VmFailed(VmError, State)
 }
 
 pub type YieldKind {
-  InitialSuspend
-  PlainYield
   DelegateYield
   AsyncDelegateResume(next_pc: Int)
 }
@@ -222,7 +216,6 @@ pub fn map_exit(exit: StepExit, f: fn(State) -> State) -> StepExit {
     Threw(v, state) -> Threw(v, f(state))
     Returned(v, state) -> Returned(v, f(state))
     Yielded(k, v, state) -> Yielded(k, v, f(state))
-    Awaited(v, state) -> Awaited(v, f(state))
     VmFailed(e, state) -> VmFailed(e, f(state))
   }
 }
@@ -245,7 +238,7 @@ pub fn new_error(
   #(err, State(..state, agent:))
 }
 
-pub fn throw_error(
+fn throw_error(
   state: State,
   kind: ErrorKind,
   msg: String,

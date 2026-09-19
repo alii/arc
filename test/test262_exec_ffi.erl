@@ -1,6 +1,6 @@
 -module(test262_exec_ffi).
 
--export([init_stats/0, record_pass/0, record_fail/0, record_skip/0,
+-export([init_stats/0, record_pass/0, record_fail/0,
          get_stats/0, record_pass_path/1, get_pass_paths/0,
          init_config/3, get_update_mode/0, get_has_snapshot/0, get_fail_log/0,
          init_snapshot_set/1, snapshot_contains/1,
@@ -12,19 +12,17 @@ init_stats() ->
     catch ets:delete(test262_stats),
     catch ets:delete(test262_passes),
     ets:new(test262_stats, [named_table, public, set]),
-    ets:insert(test262_stats, [{pass, 0}, {fail, 0}, {skip, 0}]),
+    ets:insert(test262_stats, [{pass, 0}, {fail, 0}]),
     ets:new(test262_passes, [named_table, public, bag]),
     nil.
 
 record_pass() -> ets:update_counter(test262_stats, pass, 1), nil.
 record_fail() -> ets:update_counter(test262_stats, fail, 1), nil.
-record_skip() -> ets:update_counter(test262_stats, skip, 1), nil.
 
 get_stats() ->
     [{_, Pass}] = ets:lookup(test262_stats, pass),
     [{_, Fail}] = ets:lookup(test262_stats, fail),
-    [{_, Skip}] = ets:lookup(test262_stats, skip),
-    {Pass, Fail, Skip}.
+    {Pass, Fail}.
 
 record_pass_path(Path) ->
     ets:insert(test262_passes, {Path}),

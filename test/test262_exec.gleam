@@ -173,10 +173,6 @@ pub fn run_file(relative: String) -> Result(Nil, String) {
               Error("NEW PASS — run with UPDATE_SNAPSHOT=1 to update snapshot")
           }
         }
-        Skip(_) -> {
-          record_skip()
-          Ok(Nil)
-        }
         Fail(reason) -> {
           record_fail()
           case fail_log {
@@ -209,15 +205,10 @@ pub fn finish(errors: List(#(String, String))) -> Result(Nil, String) {
   let update_mode = get_update_mode()
   let fail_log = get_fail_log()
 
-  let #(pass_count, fail_count, skip_count) = get_stats()
+  let #(pass_count, fail_count) = get_stats()
   io.println(
     "\n"
-    <> test262_suite.summary_line(
-      "test262 exec",
-      pass_count,
-      fail_count,
-      skip_count,
-    ),
+    <> test262_suite.summary_line("test262 exec", pass_count, fail_count, 0),
   )
 
   case fail_log {
@@ -260,7 +251,7 @@ pub fn finish(errors: List(#(String, String))) -> Result(Nil, String) {
 
   case test_runner.get_env("RESULTS_FILE") {
     Ok(path) -> {
-      let json = test262_suite.results_json(pass_count, fail_count, skip_count)
+      let json = test262_suite.results_json(pass_count, fail_count, 0)
       case simplifile.write(to: path, contents: json) {
         Ok(Nil) -> io.println("Results written to " <> path)
         Error(err) ->
@@ -287,7 +278,6 @@ pub fn finish(errors: List(#(String, String))) -> Result(Nil, String) {
 type TestOutcome {
   Pass
   Fail(reason: String)
-  Skip(reason: String)
 }
 
 fn run_test_by_phase(
@@ -325,7 +315,6 @@ fn run_test_by_phase(
     }
     case outcome {
       Pass -> list.Continue(Pass)
-      Skip(reason) -> list.Stop(Skip(reason))
       Fail(reason) ->
         list.Stop(Fail(reason <> test262_suite.variant_label(variant)))
     }
@@ -1217,13 +1206,8 @@ fn record_fail() -> Nil {
   panic as beam_only_test
 }
 
-@external(erlang, "test262_exec_ffi", "record_skip")
-fn record_skip() -> Nil {
-  panic as beam_only_test
-}
-
 @external(erlang, "test262_exec_ffi", "get_stats")
-fn get_stats() -> #(Int, Int, Int) {
+fn get_stats() -> #(Int, Int) {
   panic as beam_only_test
 }
 

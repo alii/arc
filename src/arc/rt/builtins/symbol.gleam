@@ -112,13 +112,7 @@ pub fn init(
   let #(ts_p, st) = rt_store.builtin_property(st, mk_object(to_string_h))
   let #(vo_p, st) = rt_store.builtin_property(st, mk_object(value_of_h))
   let #(desc_p, st) =
-    common.accessor_property(
-      st,
-      get: Some(mk_object(description_get_h)),
-      set: None,
-      enumerable: False,
-      configurable: True,
-    )
+    common.accessor_property(st, get: mk_object(description_get_h), set: None)
   let #(tag_pair, st) = common.string_tag_property(st, "Symbol")
   let #(to_prim_p, st) = rt_store.frozen_property(st, mk_object(to_primitive_h))
   let st =
@@ -156,7 +150,7 @@ fn well_known_properties(
   }
 }
 
-pub fn new(st: Agent, description: Option(String)) -> #(SymbolId, Agent) {
+fn new(st: Agent, description: Option(String)) -> #(SymbolId, Agent) {
   let #(uid, st) = rt_store.next_symbol_id(st)
   #(UserSymbol(uid:, description:), st)
 }

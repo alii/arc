@@ -117,7 +117,7 @@ pub fn store_elem_of_kind(kind: TypedArrayKind) -> StoreElem {
   }
 }
 
-pub fn float_elem_size(elem: FloatElem) -> Int {
+fn float_elem_size(elem: FloatElem) -> Int {
   case elem {
     F32 -> 4
     F64 -> 8

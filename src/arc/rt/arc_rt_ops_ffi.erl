@@ -2,7 +2,7 @@
 %% float ops raise badarith past 1.8e308, caught as infinity
 -module(arc_rt_ops_ffi).
 -export([add/2, sub/2, mul/2, 'div'/2, mod/2, neg/1, plus/1, step/2,
-         lt/2, le/2, gt/2, ge/2, eq/2, neq/2, classified_binop/3, pure_binop/3,
+         lt/2, eq/2, neq/2, classified_binop/3, pure_binop/3,
          add_general/3, sub_general/3, mul_general/3, div_general/3,
          mod_general/3, neg_general/2,
          pow_total/2, fmod_total/2, fadd/2, fsub/2, fmul/2, fdiv/2,

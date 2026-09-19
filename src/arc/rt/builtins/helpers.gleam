@@ -109,13 +109,6 @@ pub fn require_brand(
   }
 }
 
-pub fn require_object(st: Agent, this: JsVal, name: String) -> Handle {
-  case classify(this) {
-    KHandle(h) -> h
-    _ -> rt_val.throw_type_error(st, name <> " called on non-object")
-  }
-}
-
 pub fn require_callable(
   st: Agent,
   val: JsVal,

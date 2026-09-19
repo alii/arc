@@ -170,7 +170,7 @@ pub fn register_host_module(
     host_modules: dict.insert(
       engine.host_modules,
       specifier,
-      module.HostModule(specifier:, exports:),
+      module.HostModule(exports:),
     ),
   )
 }

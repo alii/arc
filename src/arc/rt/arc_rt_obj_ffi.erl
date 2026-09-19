@@ -1,9 +1,9 @@
 %% object model kernels; exports may answer miss for the general path
 -module(arc_rt_obj_ffi).
--export([get_prop_own_data/3, set_prop_own_data/4, set_named/5,
+-export([set_prop_own_data/4, set_named/5,
          plain_copy_data_props/3, plain_for_in_keys/2, plain_own_enum_pairs/2,
          create_data_prop/4,
-         get_named_ic_fill/4, get_named/4,
+         get_named/4,
          get_named_site/4,
          instanceof_i32/3, instanceof_i32_general/3,
          get_elem/3, set_elem/4, array_lit/2,
@@ -11,12 +11,11 @@
          global_peek/2, global_get/2,
          named_write_walk/5, chain_takes_named_write/4, named_plain/2,
          shape_slots_new/0, shape_slots_get/2, shape_slots_set/3,
-         shape_slots_append/2, get_symbol_data/3, native_token/1, elem_at/2,
-         elem_write_grow/3, shaped_next/3]).
+         shape_slots_append/2, get_symbol_data/3]).
 
 -include("arc_rt_layout.hrl").
 
--compile({inline, [peek_named_at/3, peek_named/3, live_cell/2, general_get/3,
+-compile({inline, [peek_named/3, live_cell/2, general_get/3,
                    named_plain/2, birth_plain/2, store_put_seq/3, index_read/2,
                    index_write/4, elem_write/3, named_write_walk_next/5,
                    set_prop_new/7, chain_takes_named_write/4, with_store/2,
@@ -25,10 +24,6 @@
 
 -define(PROTO_KEY, {?KEY_NAMED, <<"__proto__">>}).
 -define(IC_READ_WAYS, 8).
-
-get_prop_own_data(St, {?HANDLE_TAG, Id}, KeyBin) ->
-    peek_named_at(St, Id, KeyBin);
-get_prop_own_data(_, _, _) -> miss.
 
 %% nested constant array literals arrive as {js_alit, Elems}
 array_lit(St, Elems) ->
@@ -43,20 +38,6 @@ array_lit_elems([], St, Acc) -> {lists:reverse(Acc), St}.
 
 array_lit_packed(St, Bin) -> array_lit(St, binary_to_term(Bin)).
 
-
-get_named_ic_fill(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
-    Store = element(?AGENT_STORE, St),
-    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, Store)) of
-        {?SSHAPEDOBJECT_TAG, Sid, _, Slots, Offs} ->
-            case Offs of
-                #{KeyBin := Off} ->
-                    {?SLOT_AT(Slots, Off),
-                     ic_fill(St, Store, Site, Sid, Off, KeyBin)};
-                _ -> {miss, St}
-            end;
-        Cell -> {peek_named(St, Cell, KeyBin), St}
-    end;
-get_named_ic_fill(St, _, _, _) -> {miss, St}.
 
 get_named(St, Recv = {?HANDLE_TAG, Id}, KeyBin, Site) ->
     Store = element(?AGENT_STORE, St),
@@ -196,9 +177,6 @@ global_get(St, KeyBin) ->
         miss -> 'arc@rt@lang':global_get(St, KeyBin);
         V -> {V, St}
     end.
-
-peek_named_at(St, Id, KeyBin) ->
-    peek_named(St, live_cell(St, Id), KeyBin).
 
 peek_named(_, {?SSHAPEDOBJECT_TAG, _, _, Slots, Offs}, KeyBin) ->
     case Offs of
@@ -659,12 +637,6 @@ elem_append({?ELEMS_DENSE, A}, Idx, V) ->
 elem_append({?ELEMS_SPARSE, M}, Idx, V) ->
     {?ELEMS_SPARSE, M#{Idx => V}};
 elem_append(_, _, _) -> miss.
-
-elem_write_grow(Els, Idx, V) -> ?ELEM_WRITE_GROW(Els, Idx, V).
-
-native_token(Cell) -> ?NATIVE_TOKEN(Cell).
-
-elem_at(Els, Idx) -> ?ELEM_AT(Els, Idx).
 
 shape_slots_get(Slots, Off) -> ?SLOT_AT(Slots, Off).
 

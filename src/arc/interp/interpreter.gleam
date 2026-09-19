@@ -29,9 +29,9 @@ import arc/bytecode/opcode.{
   PutBoxedCheckInit, PutElem, PutElemPop, PutEvalVar, PutField, PutFieldPop,
   PutGlobal, PutLocal, PutLocalCheckInit, PutLocalConstField, PutLocalLocalField,
   PutPrivateFieldDyn, PutSuperValue, Ret, Return, Rot3, Safepoint, SetProto,
-  SetupDerivedClass, Swap, Throw, ThrowConstAssign, ThrowError, ToObject,
-  ToPropertyKey, ToStringVal, TypeOf, TypeofEvalVar, TypeofGlobal, UnaryOp,
-  Unrot4, WithDeleteVar, WithGetRefValue, WithGetVar, WithGetVarThis,
+  SetupDerivedClass, Swap, Throw, ThrowConstAssign, ThrowReferenceError,
+  ToObject, ToPropertyKey, ToStringVal, TypeOf, TypeofEvalVar, TypeofGlobal,
+  UnaryOp, Unrot4, WithDeleteVar, WithGetRefValue, WithGetVar, WithGetVarThis,
   WithMakeRef, WithPutRefValue, WithPutVar, Yield, YieldStar,
 }
 import arc/internal/tuple_array.{type TupleArray}
@@ -46,10 +46,9 @@ import arc/interp/kernel
 import arc/interp/park
 import arc/interp/safepoint
 import arc/interp/state.{
-  type State, type StepExit, type VmError, AsyncDelegateResume, Awaited,
-  DelegateYield, InitialSuspend, InternalError, PlainYield, Returned, SavedCont,
-  SavedFrame, SavedRegFrame, StackUnderflow, State, SuspensionLeak, Threw,
-  VmFailed, Yielded,
+  type State, type StepExit, type VmError, AsyncDelegateResume, DelegateYield,
+  InternalError, Returned, SavedCont, SavedFrame, SavedRegFrame, StackUnderflow,
+  State, SuspensionLeak, Threw, VmFailed, Yielded,
 }
 import arc/interp/using
 import arc/module/dynamic_import
@@ -183,16 +182,15 @@ pub fn execute(
   }
 }
 
-pub fn execute_to_completion(
+fn execute_to_completion(
   state: State,
   drive: Drive,
-  site: String,
 ) -> #(Result(JsVal, JsVal), State) {
   case execute(state, drive) {
     Ok(#(Completed(NormalCompletion(v)), state)) -> #(Ok(v), state)
     Ok(#(Completed(ThrowCompletion(e)), state)) -> #(Error(e), state)
     Ok(#(Suspended(kind, _), state)) ->
-      state.internal_fault(state, SuspensionLeak(site:, kind:))
+      state.internal_fault(state, SuspensionLeak(site: "eval", kind:))
     Error(err) -> state.internal_fault(state, err)
   }
 }
@@ -3817,16 +3815,6 @@ fn after_step(
     Error(Yielded(kind, yielded_value, post)) -> {
       // must spread from post: the step may have run user code
       let parked = case kind {
-        InitialSuspend -> State(..post, pc: post.pc + 1)
-        PlainYield ->
-          State(
-            ..post,
-            stack: case post.stack {
-              [_, ..rest] -> rest
-              [] -> []
-            },
-            pc: post.pc + 1,
-          )
         // keep pc so the resume re-executes yieldstar
         DelegateYield ->
           State(..post, stack: case post.stack {
@@ -3840,18 +3828,6 @@ fn after_step(
           })
       }
       Ok(#(Suspended(state.Yield, yielded_value), parked))
-    }
-    Error(Awaited(awaited_value, post)) -> {
-      let parked =
-        State(
-          ..post,
-          stack: case post.stack {
-            [_, ..rest] -> rest
-            [] -> []
-          },
-          pc: post.pc + 1,
-        )
-      Ok(#(Suspended(state.Await, awaited_value), parked))
     }
     Error(Threw(thrown, post)) ->
       case unwind_to_catch(post, thrown) {
@@ -3898,10 +3874,18 @@ fn conditional_jump(
 
 fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
   case op {
-    PushConst(index) -> {
-      let value = tuple_array.get_unchecked(index, state.func.constants)
-      Ok(State(..state, stack: [value, ..state.stack], pc: state.pc + 1))
-    }
+    // the loop runs these without ever falling back here
+    PushConst(_)
+    | Jump(_)
+    | PushTry(..)
+    | NewObject
+    | NewObjectWith(..)
+    | MakeClosure(_)
+    | InitialYield
+    | Yield
+    | Await
+    | CreateArguments(..)
+    | Return -> Error(VmFailed(InternalError("step", "loop-only op"), state))
 
     Pop ->
       case state.stack {
@@ -4731,12 +4715,8 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "CmpConstJump")
       }
 
-    Return -> call.return_op(state)
-
     Safepoint ->
       Ok(safepoint.maybe_collect_at_return(State(..state, pc: state.pc + 1)))
-
-    Jump(Pc(target)) -> Ok(State(..state, pc: target))
 
     JumpIfFalse(Pc(target)) -> {
       use v <- conditional_jump(state, target)
@@ -4778,22 +4758,10 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             KNum(types.JInt(n)), [v, ..below] if n < 0 ->
               Error(Returned(v, State(..state, stack: below)))
             KNum(types.JInt(n)), _ -> Ok(State(..state, stack: rest, pc: n))
-            KNum(types.JFloat(f)), [v, ..below] if f <. 0.0 ->
-              Error(Returned(v, State(..state, stack: below)))
-            KNum(types.JFloat(f)), _ ->
-              Ok(State(..state, stack: rest, pc: rt_val.float_to_int(f)))
             _, _ -> underflow(state, "Ret")
           }
         [] -> underflow(state, "Ret")
       }
-
-    PushTry(catch_target: Pc(catch_target), kind:) -> {
-      let frame =
-        TryFrame(catch_target:, stack_depth: list.length(state.stack), kind:)
-      Ok(
-        State(..state, try_stack: [frame, ..state.try_stack], pc: state.pc + 1),
-      )
-    }
 
     PopTry ->
       case state.try_stack {
@@ -4810,40 +4778,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     ThrowConstAssign(_name) ->
       state.throw_type_error(state, "Assignment to constant variable.")
 
-    ThrowError(kind, msg) -> state.throw_error(state, kind, msg)
-
-    NewObject -> {
-      let #(h, agent) =
-        rt_obj.new_object(state.agent, Some(state.agent.realm.object.prototype))
-      Ok(
-        State(
-          ..state,
-          agent:,
-          stack: [mk_object(h), ..state.stack],
-          pc: state.pc + 1,
-        ),
-      )
-    }
-
-    NewObjectWith(keys, count) -> {
-      let agent = state.agent
-      let #(obj, stack, store) =
-        kernel.new_object(
-          agent.store,
-          agent.realm.object.prototype,
-          keys,
-          count,
-          state.stack,
-        )
-      Ok(
-        State(
-          ..state,
-          agent: Agent(..agent, store:),
-          stack: [obj, ..stack],
-          pc: state.pc + 1,
-        ),
-      )
-    }
+    ThrowReferenceError(msg) -> state.throw_reference_error(state, msg)
 
     GetField(k) ->
       case state.stack {
@@ -5080,10 +5015,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [func, k, obj, ..rest] ->
           case handle_of(obj) {
             Some(h) -> {
-              let install = case kind {
-                opcode.Getter -> types.InstallGetter
-                opcode.Setter -> types.InstallSetter
-              }
+              let install = accessor_install_kind(kind)
               use state <- result.map(guarded_unit5(
                 state,
                 rt_class.private_method_add,
@@ -5792,25 +5724,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "PutSuperValue")
       }
 
-    MakeClosure(func_index) -> {
-      let template = tuple_array.get_unchecked(func_index, state.func.functions)
-      let #(fn_h, agent) =
-        rt_closure.new_bytecode_function(
-          state.agent,
-          template,
-          kernel.capture_env(template.env_descriptors, state.locals),
-          state.unit_id,
-        )
-      Ok(
-        State(
-          ..state,
-          agent:,
-          stack: [mk_object(fn_h), ..state.stack],
-          pc: state.pc + 1,
-        ),
-      )
-    }
-
     // §14.7.5.6 key list computed up front
     ForInStart ->
       case state.stack {
@@ -6038,14 +5951,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [] -> underflow(state, "IteratorCheckObject")
       }
 
-    InitialYield -> Error(Yielded(InitialSuspend, mk_undefined(), state))
-
-    Yield ->
-      case state.stack {
-        [yielded, ..] -> Error(Yielded(PlainYield, yielded, state))
-        [] -> Error(Yielded(PlainYield, mk_undefined(), state))
-      }
-
     // §27.5.3.8; pc kept here so the resume re-enters
     YieldStar ->
       case state.stack {
@@ -6070,7 +5975,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         _ -> underflow(state, "YieldStar")
       }
 
-    AsyncYieldStarNext(after_pc: _) ->
+    AsyncYieldStarNext ->
       case state.stack {
         [arg, record, ..rest] -> {
           use #(types.IteratorRecord(iterator, next_fn), state) <- result.try(
@@ -6099,15 +6004,6 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         }
         _ -> underflow(state, "AsyncYieldStarResume")
       }
-
-    Await ->
-      case state.stack {
-        [awaited, ..] -> Error(Awaited(awaited, state))
-        [] -> Error(Awaited(mk_undefined(), state))
-      }
-
-    CreateArguments(simple_params:) ->
-      Ok(call.create_arguments(state, simple_params))
 
     CreateRestArray(from_index) -> Ok(call.create_rest_array(state, from_index))
 
@@ -6425,9 +6321,9 @@ fn pure_binop_general(
     binop.Equality(binop.LooseEq) -> cmp(rt_ops.eq_i32_general)
     binop.Equality(binop.LooseNotEq) -> cmp(rt_ops.neq_i32)
     binop.Equality(binop.StrictEq) ->
-      Ok(#(mk_bool(rt_ops.strict_eq(left, right)), state))
+      Ok(#(mk_bool(rt_val.strict_eq(left, right)), state))
     binop.Equality(binop.StrictNotEq) ->
-      Ok(#(mk_bool(!rt_ops.strict_eq(left, right)), state))
+      Ok(#(mk_bool(!rt_val.strict_eq(left, right)), state))
   }
 }
 
@@ -7186,8 +7082,7 @@ fn run_eval_body(
   drive: Drive,
 ) -> #(Result(JsVal, JsVal), Agent) {
   let agent = frames.push_frame_info(activation.agent, activation.func)
-  let #(res, state) =
-    execute_to_completion(State(..activation, agent:), drive, "eval")
+  let #(res, state) = execute_to_completion(State(..activation, agent:), drive)
   #(res, frames.pop_frame_info(state.agent))
 }
 

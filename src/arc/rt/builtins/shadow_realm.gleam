@@ -186,13 +186,7 @@ fn wrapped_function_create(
           target_realm: from,
         ))
       let #(h, st) =
-        rt_call.native_new_computed_length(
-          st,
-          Some(fn_proto),
-          tag,
-          name,
-          length,
-        )
+        rt_call.native_new_computed_length(st, fn_proto, tag, name, length)
       #(mk_object(h), st)
     }
   }

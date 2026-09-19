@@ -6,7 +6,7 @@
     classify/1,
     mk_undefined/0, mk_hole/0, mk_array_lit/1, mk_null/0, mk_bool/1, mk_number/1, mk_int/1,
     mk_string/1, mk_bigint/1, mk_symbol/1, mk_object/1, mk_tdz/0,
-    to_boolean_i32/1, to_boolean/1, logical_not/1, is_nullish/1, is_nullish_i32/1,
+    to_boolean_i32/1, to_boolean/1, logical_not/1, is_nullish/1,
     strict_eq/2, same_value_zero/2,
     property_key_of/1,
     js_format_float/1,
@@ -77,9 +77,6 @@ to_boolean(js_tdz) -> false.
 logical_not(V) -> not to_boolean(V).
 
 is_nullish(V) -> ?IS_NULLISH(V).
-
-is_nullish_i32(V) ->
-    case ?IS_NULLISH(V) of true -> 1; false -> 0 end.
 
 strict_eq(js_nan, _) -> false;
 strict_eq(_, js_nan) -> false;

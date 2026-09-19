@@ -10,6 +10,7 @@ import arc/rt/types.{
   KStr, KUndef, ParsedDesc, SBox, StringKey, SymbolKey, classify, mk_int,
   mk_object, mk_string, mk_tdz, mk_undefined,
 }
+import gleam/dict
 import gleam/list
 import gleam/option.{None, Some}
 import rt_helpers
@@ -39,8 +40,9 @@ fn fixture() -> #(Handle, JsVal, Handle, Handle, Agent) {
   let st = agent()
   let #(box_a, st) = rt_store.cell_new(st, SBox(mk_int(1)))
   let #(box_b, st) = rt_store.cell_new(st, SBox(mk_tdz()))
+  let exports = dict.from_list([#("b", box_b), #("a", box_a)])
   let #(ns_h, st) =
-    rt_obj.new_module_namespace(st, [#("b", box_b), #("a", box_a)])
+    rt_store.cell_new(st, rt_obj.module_namespace_cell(exports, "Module"))
   #(ns_h, mk_object(ns_h), box_a, box_b, st)
 }
 

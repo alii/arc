@@ -314,13 +314,13 @@ fn new_repl() -> Repl(host) {
   engine.repl(engine.new())
 }
 
-pub type UsageError {
+type UsageError {
   MissingDisPath
   MissingPrintExpr
   UnknownFlag(String)
 }
 
-pub type Command {
+type Command {
   Repl
   RunFile(String)
   Print(String)

@@ -1,7 +1,6 @@
 import arc/compiler
 import arc/host_hooks
 import arc/interp/entry
-import arc/interp/safepoint
 import arc/parser
 import arc/rt/builtins as rt_builtins
 import arc/rt/call.{NormalCompletion, ThrowCompletion}
@@ -22,7 +21,7 @@ fn run(source: String) -> Result(JsValKind, String) {
             |> entry.link
           case entry.run_script(st, template) {
             #(NormalCompletion(v), st) -> {
-              let _st = safepoint.end_turn(st, [v])
+              let _st = rt_helpers.end_turn(st, [v])
               Ok(rt_helpers.classify(v))
             }
             #(ThrowCompletion(v), st) ->

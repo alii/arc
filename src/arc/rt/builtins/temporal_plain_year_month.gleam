@@ -114,7 +114,7 @@ pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
   })
 }
 
-pub fn getter_name(g: TemporalYearMonthGetter) -> String {
+fn getter_name(g: TemporalYearMonthGetter) -> String {
   case g {
     YearMonthCalendarId -> "calendarId"
     YearMonthEra -> "era"
@@ -129,7 +129,7 @@ pub fn getter_name(g: TemporalYearMonthGetter) -> String {
   }
 }
 
-pub fn method_name(m: PlainYearMonthMethod) -> String {
+fn method_name(m: PlainYearMonthMethod) -> String {
   case m {
     PlainYearMonthWith -> "with"
     PlainYearMonthAdd -> "add"
@@ -192,7 +192,7 @@ pub fn static(
   }
 }
 
-pub fn to_temporal_year_month(
+fn to_temporal_year_month(
   st: Agent,
   item: JsVal,
   options: JsVal,
@@ -231,7 +231,7 @@ fn year_month_from_bag(
   #(rt_val.or_throw(st, resolve_calendar_year_month(cal, fields, overflow)), st)
 }
 
-pub fn resolve_calendar_year_month(
+fn resolve_calendar_year_month(
   cal: temporal_calendar.Calendar,
   f: DateFields,
   overflow: Overflow,

@@ -58,12 +58,6 @@ pub fn sub(a: JsVal, b: JsVal) -> JsVal
 @external(erlang, "arc_rt_ops_ffi", "mul")
 pub fn mul(a: JsVal, b: JsVal) -> JsVal
 
-@external(erlang, "arc_rt_ops_ffi", "div")
-pub fn div(a: JsVal, b: JsVal) -> JsVal
-
-@external(erlang, "arc_rt_ops_ffi", "mod")
-pub fn mod(a: JsVal, b: JsVal) -> JsVal
-
 @external(erlang, "arc_rt_ops_ffi", "neg")
 pub fn neg(a: JsVal) -> JsVal
 
@@ -75,15 +69,6 @@ pub fn step(a: JsVal, delta: Int) -> JsVal
 
 @external(erlang, "arc_rt_ops_ffi", "lt")
 pub fn lt(a: JsVal, b: JsVal) -> JsVal
-
-@external(erlang, "arc_rt_ops_ffi", "le")
-pub fn le(a: JsVal, b: JsVal) -> JsVal
-
-@external(erlang, "arc_rt_ops_ffi", "gt")
-pub fn gt(a: JsVal, b: JsVal) -> JsVal
-
-@external(erlang, "arc_rt_ops_ffi", "ge")
-pub fn ge(a: JsVal, b: JsVal) -> JsVal
 
 @external(erlang, "arc_rt_ops_ffi", "strict_eq")
 pub fn strict_eq(a: JsVal, b: JsVal) -> JsVal

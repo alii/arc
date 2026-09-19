@@ -16,10 +16,6 @@ fn template_flags(template: FuncTemplate) -> FnFlags {
     is_class_constructor: template.is_class_constructor,
     is_derived_constructor: template.is_derived_constructor,
     is_arrow: template.is_arrow,
-    is_method: !template.is_arrow
-      && !template.is_constructor
-      && !template.is_generator
-      && !template.is_async,
     is_generator: template.is_generator,
     is_async: template.is_async,
     is_strict: template.is_strict,

@@ -257,7 +257,7 @@ pub fn init(
   ])
 }
 
-pub fn init_type(
+fn init_type(
   st: Agent,
   function_proto: Handle,
   name: String,
@@ -338,8 +338,8 @@ pub fn dispatch(
       temporal_plain_year_month.getter(st, getter, this)
     TemporalPlainYearMonthMethod(method:, protos:) ->
       temporal_plain_year_month.method(st, method, protos, this, args)
-    TemporalPlainMonthDayStatic(name:, protos:) ->
-      temporal_plain_month_day.static(st, name, protos, args)
+    TemporalPlainMonthDayStatic(protos:) ->
+      temporal_plain_month_day.static(st, protos, args)
     TemporalPlainMonthDayGetter(getter:) ->
       temporal_plain_month_day.getter(st, getter, this)
     TemporalPlainMonthDayMethod(method:, protos:) ->

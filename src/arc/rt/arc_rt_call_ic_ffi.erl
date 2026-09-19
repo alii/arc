@@ -2,7 +2,7 @@
 -module(arc_rt_call_ic_ffi).
 -export([call_by_kind/4, call_by_kind0/3, call_by_kind1/4, call_by_kind2/5,
          call_by_kind3/6,
-         call_method_mono/4, call_method_ic/6, call_method_ic0/5,
+         call_method_ic/6, call_method_ic0/5,
          call_method_ic1/6, call_method_ic2/7, call_method_ic3/8,
          new_direct/3, prepare_compiled_call/4]).
 
@@ -274,12 +274,6 @@ ic_chain_ok(Cells, {?SOME, {?HANDLE_TAG, PId}}, [{PId, PCell} | Rest]) ->
         _ -> false
     end;
 ic_chain_ok(_, _, _) -> false.
-
-%% st unchanged on miss; emitter guards V =:= miss, not is_atom
-call_method_mono(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Args) ->
-    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
-    call_via_walk(St, Recv, arc_rt_arena_ffi:get(RId, Cells), KeyBin, Args, none);
-call_method_mono(St, _, _, _) -> {miss, St}.
 
 %% resolves keybin along a plain chain, filling site when one is given
 call_via_walk(St, Recv = {?HANDLE_TAG, RId}, RCell, KeyBin, Args, Site)

@@ -380,7 +380,7 @@ pub fn call_cell(
           kernel.literal([kernel.Undefined]),
           drive,
         )
-      case state.func.is_strict && is_tail_call(state, state.pc, template) {
+      case is_tail_call(state, state.pc, template) {
         True -> result.map(res, elide_tail_frame)
         False -> res
       }
@@ -627,9 +627,10 @@ fn construct_handle(
             drive,
           )
         False -> {
-          use #(new_obj, state) <- result.try(guard.guard_state(
-            guard.guard2(new_base_this, state.agent, new_target),
+          use #(new_obj, state) <- result.try(guard.guarded2(
             State(..state, stack: rest_stack),
+            new_base_this,
+            new_target,
           ))
           let this_val = mk_object(new_obj)
           call_function(

@@ -407,7 +407,7 @@ pub fn apply_new_target_proto(
   #(obj, st)
 }
 
-pub fn to_integer_with_truncation(st: Agent, v: JsVal) -> #(Int, Agent) {
+fn to_integer_with_truncation(st: Agent, v: JsVal) -> #(Int, Agent) {
   let #(n, st) = rt_val.to_number(st, v)
   case n {
     JInt(i) -> #(i, st)
@@ -417,10 +417,7 @@ pub fn to_integer_with_truncation(st: Agent, v: JsVal) -> #(Int, Agent) {
   }
 }
 
-pub fn to_positive_integer_with_truncation(
-  st: Agent,
-  v: JsVal,
-) -> #(Int, Agent) {
+fn to_positive_integer_with_truncation(st: Agent, v: JsVal) -> #(Int, Agent) {
   let #(n, st) = to_integer_with_truncation(st, v)
   case n > 0 {
     True -> #(n, st)
@@ -428,7 +425,7 @@ pub fn to_positive_integer_with_truncation(
   }
 }
 
-pub fn to_integer_if_integral(st: Agent, v: JsVal) -> #(Int, Agent) {
+fn to_integer_if_integral(st: Agent, v: JsVal) -> #(Int, Agent) {
   let #(n, st) = rt_val.to_number(st, v)
   case n {
     JInt(i) -> #(i, st)
@@ -446,15 +443,14 @@ pub fn to_integer_if_integral(st: Agent, v: JsVal) -> #(Int, Agent) {
   }
 }
 
-pub fn integral_int_arg_or(
+pub fn integral_int_arg(
   st: Agent,
   args: List(JsVal),
   idx: Int,
-  default: Int,
 ) -> #(Int, Agent) {
   let v = helpers.arg_at(args, idx)
   case classify(v) {
-    KUndef -> #(default, st)
+    KUndef -> #(0, st)
     _ -> to_integer_if_integral(st, v)
   }
 }
@@ -589,7 +585,7 @@ pub fn negate_duration(d: Duration) -> Duration {
   apply_duration_sign(d, -1)
 }
 
-pub fn read_bag_int_field(
+fn read_bag_int_field(
   st: Agent,
   bag: Handle,
   key: String,
@@ -621,7 +617,7 @@ pub fn read_pos_int_field(
   read_bag_int_field(st, bag, key, to_positive_integer_with_truncation)
 }
 
-pub fn read_integral_int_field(
+fn read_integral_int_field(
   st: Agent,
   bag: Handle,
   key: String,
@@ -717,7 +713,7 @@ pub fn apply_duration_fields(
   }
 }
 
-pub fn duration_from_bag(st: Agent, bag: Handle) -> #(Duration, Agent) {
+fn duration_from_bag(st: Agent, bag: Handle) -> #(Duration, Agent) {
   let #(fields, st) = read_duration_fields(st, bag)
   case list.all(fields, option.is_none) {
     True ->
@@ -732,7 +728,7 @@ pub fn duration_from_bag(st: Agent, bag: Handle) -> #(Duration, Agent) {
   }
 }
 
-pub fn parse_duration_string(s: String) -> Option(Duration) {
+fn parse_duration_string(s: String) -> Option(Duration) {
   let #(sign, rest) = case s {
     "+" <> r -> #(1, r)
     "-" <> r -> #(-1, r)

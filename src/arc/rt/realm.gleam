@@ -78,7 +78,6 @@ pub fn install_test262(st: Agent, realm: Realm) -> #(Handle, Agent) {
 pub fn dispatch_test262(
   st: Agent,
   native: Test262Native,
-  _this: JsVal,
   args: List(JsVal),
   create_realm: fn(Agent) -> #(Realm, Agent),
 ) -> #(JsVal, Agent) {

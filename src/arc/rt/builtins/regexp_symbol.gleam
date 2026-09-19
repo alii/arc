@@ -10,7 +10,7 @@ import arc/rt/builtins/regexp.{
   type MatchRanges, MatchArray, NoMatch, OffsetOutOfRange, PatternCompileFailed,
   RangesHit, RangesMiss, builtin_exec_mode, builtin_exec_ranges,
   capture_to_value, groups_object, has_flag, is_handle, pristine_exec,
-  read_flags, regexp_exec_compiled, require_object, set_throw,
+  read_flags, regexp_exec_compiled, require_object, set_last_index,
   species_constructor, update_legacy_statics,
 }
 import arc/rt/builtins/substitution
@@ -44,7 +44,7 @@ pub fn symbol_match(
     False, True -> builtin_exec_mode(st, h, s, MatchArray)
     False, False -> regexp.exec_abstract(st, this, s)
     True, pristine -> {
-      let st = set_throw(st, h, "lastIndex", mk_int(0))
+      let st = set_last_index(st, h, mk_int(0))
       case pristine {
         True -> match_global_pristine(st, h, s)
         False -> collect_global_matches(st, this, h, s, [], 0)
@@ -87,7 +87,7 @@ fn global_hits(st: Agent, h: Handle, s: String) -> #(List(GlobalHit), Agent) {
       update_legacy_statics(st, s, #(start, length), groups)
     [] -> st
   }
-  let st = set_throw(st, h, "lastIndex", mk_int(0))
+  let st = set_last_index(st, h, mk_int(0))
   #(list.reverse(rev), st)
 }
 
@@ -153,12 +153,7 @@ fn advance_if_empty(
     "" -> {
       let #(li_v, st) = rt_val.get_named(st, mk_object(h), "lastIndex", None)
       let #(this_index, st) = rt_val.to_length(st, li_v)
-      set_throw(
-        st,
-        h,
-        "lastIndex",
-        mk_int(bytes.next_char_boundary(s, this_index)),
-      )
+      set_last_index(st, h, mk_int(bytes.next_char_boundary(s, this_index)))
     }
     _ -> st
   }
@@ -207,7 +202,7 @@ fn set_unless_same_value(
 ) -> Agent {
   case rt_val.same_value(current, target) {
     True -> st
-    False -> set_throw(st, h, "lastIndex", target)
+    False -> set_last_index(st, h, target)
   }
 }
 
@@ -244,7 +239,7 @@ pub fn symbol_replace(
   let #(flags, st) = read_flags(st, this)
   let global = has_flag(flags, "g")
   let st = case global {
-    True -> set_throw(st, h, "lastIndex", mk_int(0))
+    True -> set_last_index(st, h, mk_int(0))
     False -> st
   }
   let #(pristine, st) = pristine_exec(st, h)
@@ -689,7 +684,7 @@ fn symbol_split_loop(
         list.reverse([mk_string(bytes.drop_start(s, p)), ..acc]),
       )
     False -> {
-      let st = set_throw(st, sp_h, "lastIndex", mk_int(q))
+      let st = set_last_index(st, sp_h, mk_int(q))
       let #(z, st) = regexp.exec_abstract(st, splitter, s)
       case classify(z) {
         KNull ->
@@ -796,7 +791,7 @@ pub fn symbol_match_all(
   let #(m_h, st) = rt_call.construct(st, c, [this, mk_string(flags)], c)
   let #(li_v, st) = rt_val.get_named(st, this, "lastIndex", None)
   let #(last_index, st) = rt_val.to_length(st, li_v)
-  let st = set_throw(st, m_h, "lastIndex", mk_int(last_index))
+  let st = set_last_index(st, m_h, mk_int(last_index))
   let global = has_flag(flags, "g")
   create_regexp_string_iterator(st, m_h, s, global)
 }

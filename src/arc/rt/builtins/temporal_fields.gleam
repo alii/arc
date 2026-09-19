@@ -36,9 +36,7 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
-pub fn calendar_slot_of(
-  data: TemporalData,
-) -> Option(temporal_calendar.Calendar) {
+fn calendar_slot_of(data: TemporalData) -> Option(temporal_calendar.Calendar) {
   case data {
     TemporalDate(calendar:, ..)
     | TemporalDateTime(calendar:, ..)
@@ -64,7 +62,7 @@ pub fn add_sub_args(
   #(dur, overflow, st)
 }
 
-pub fn canonicalize_calendar(
+fn canonicalize_calendar(
   id: String,
 ) -> Result(temporal_calendar.Calendar, JsError) {
   case temporal_calendar.canonicalize(id) {
@@ -74,7 +72,7 @@ pub fn canonicalize_calendar(
   }
 }
 
-pub fn calendar_from_string(
+fn calendar_from_string(
   s: String,
 ) -> Result(temporal_calendar.Calendar, JsError) {
   case canonicalize_calendar(s) {
@@ -233,7 +231,7 @@ fn is_ascii_digit(g: String) -> Bool {
   }
 }
 
-pub fn read_bag_era(st: Agent, h: Handle) -> #(Option(String), Agent) {
+fn read_bag_era(st: Agent, h: Handle) -> #(Option(String), Agent) {
   let #(v, st) = rt_val.get_named(st, mk_object(h), "era", None)
   case classify(v) {
     KUndef -> #(None, st)
@@ -635,7 +633,7 @@ pub fn calendar_date_add(
   }
 }
 
-pub fn balance_calendar_month(
+fn balance_calendar_month(
   cal: temporal_calendar.Calendar,
   year: Int,
   month: Int,
@@ -676,7 +674,7 @@ pub fn calendar_years_months_until(
     False -> 0
   }
   let after_years = add_calendar_years_constrain(cal, cd1, years)
-  let months = count_calendar_months(cal, after_years, cd1.day, cd2, sign, 0)
+  let months = count_calendar_months(cal, after_years, cd1.day, cd2, sign)
   let #(ym, mm) =
     balance_calendar_month(cal, after_years.year, after_years.month + months)
   let dmax = temporal_calendar.days_in_month(cal, ym, mm)
@@ -778,10 +776,9 @@ fn count_calendar_months(
   day_cmp: Int,
   cd2: temporal_calendar.CalendarDate,
   sign: Int,
-  acc: Int,
 ) -> Int {
-  let #(y, m) = balance_calendar_month(cal, cd.year, cd.month + acc)
-  count_calendar_months_loop(cal, y, m, day_cmp, cd2, sign, acc)
+  let #(y, m) = balance_calendar_month(cal, cd.year, cd.month)
+  count_calendar_months_loop(cal, y, m, day_cmp, cd2, sign, 0)
 }
 
 fn count_calendar_months_loop(

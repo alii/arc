@@ -42,7 +42,7 @@ fn to_executed(outcome: #(Result(JsVal, JsVal), State)) -> Executed {
   Finished(res, state)
 }
 
-pub const drive = call.Drive(start_coroutine:)
+const drive = call.Drive(start_coroutine:)
 
 pub fn executed(state: State) -> Executed {
   case interpreter.execute(state, drive) {
@@ -107,8 +107,6 @@ pub fn start_coroutine_root(
     Error(state.VmFailed(err, state)) -> state.internal_fault(state, err)
     Error(state.Yielded(_, _, state)) ->
       state.internal_fault(state, SuspensionLeak("run_bytecode", state.Yield))
-    Error(state.Awaited(_, state)) ->
-      state.internal_fault(state, SuspensionLeak("run_bytecode", state.Await))
   }
 }
 
@@ -260,7 +258,7 @@ const missing_throw = "The iterator does not provide a 'throw' method."
 
 type DelegateSite {
   SyncSite(record: IteratorRecord, rest: List(JsVal))
-  AsyncSite(record: IteratorRecord, rest: List(JsVal), await_pc: Int)
+  AsyncSite(record: IteratorRecord, await_pc: Int)
 }
 
 fn delegate_site(state: State) -> Option(DelegateSite) {
@@ -268,9 +266,9 @@ fn delegate_site(state: State) -> Option(DelegateSite) {
     YieldStar, [rec, ..rest] ->
       rt_lang.record_parts(state.agent, rec)
       |> option.map(SyncSite(_, rest))
-    AsyncYieldStarNext(..), [rec, ..rest] ->
+    AsyncYieldStarNext, [rec, ..] ->
       rt_lang.record_parts(state.agent, rec)
-      |> option.map(AsyncSite(_, rest, state.pc + 1))
+      |> option.map(AsyncSite(_, state.pc + 1))
     _, _ -> None
   }
 }
@@ -288,9 +286,11 @@ fn delegate_method(
   name: String,
 ) -> Result(#(Option(JsVal), State), StepExit) {
   let iterator = site_record(site).iterator
-  use #(method, state) <- result.map(guard.guard_state(
-    guard.guard3(rt_obj.get_prop, state.agent, iterator, StringKey(Named(name))),
+  use #(method, state) <- result.map(guard.guarded3(
     state,
+    rt_obj.get_prop,
+    iterator,
+    StringKey(Named(name)),
   ))
   case classify(method) {
     KUndef | KNull -> #(None, state)
@@ -305,10 +305,7 @@ fn call_delegate(
   value: JsVal,
 ) -> Result(#(JsVal, State), StepExit) {
   let iterator = site_record(site).iterator
-  guard.guard_state(
-    guard.guard4(rt_call.call, state.agent, method, iterator, [value]),
-    state,
-  )
+  guard.guarded4(state, rt_call.call, method, iterator, [value])
 }
 
 fn inject_throw(state: State, thrown: JsVal) -> #(Step, Agent) {
@@ -330,7 +327,6 @@ fn delegate_exit(exit: StepExit) -> #(Step, Agent) {
     state.Threw(thrown, state) -> step_of(throw_into(state, thrown))
     state.Returned(_, state)
     | state.Yielded(_, _, state)
-    | state.Awaited(_, state)
     | state.VmFailed(_, state) ->
       step_of(to_executed(unexpected_exit(state, "yield* delegate")))
   }
@@ -448,9 +444,10 @@ fn delegate_result(
   rest: List(JsVal),
   on_done: fn(JsVal, State) -> #(Step, Agent),
 ) -> #(Step, Agent) {
-  use #(#(done, val), state) <- or_delegate_exit(guard.guard_state(
-    guard.guard2(iter_protocol.read_iter_result, state.agent, res),
+  use #(#(done, val), state) <- or_delegate_exit(guard.guarded2(
     state,
+    iter_protocol.read_iter_result,
+    res,
   ))
   case done {
     False -> step_of(Parked(state.Yield, val, state))
@@ -541,8 +538,7 @@ fn exit_executed(exit: StepExit, site: String) -> Executed {
   case exit {
     state.Threw(thrown, state) -> throw_into(state, thrown)
     state.Returned(v, state) -> Finished(Ok(v), state)
-    state.Yielded(_, _, state)
-    | state.Awaited(_, state)
-    | state.VmFailed(_, state) -> to_executed(unexpected_exit(state, site))
+    state.Yielded(_, _, state) | state.VmFailed(_, state) ->
+      to_executed(unexpected_exit(state, site))
   }
 }

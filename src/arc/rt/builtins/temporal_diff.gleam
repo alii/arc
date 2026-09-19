@@ -33,7 +33,7 @@ pub fn compare_iso_date_time(
   int_sign(utc_epoch_ns(a.0, a.1) - utc_epoch_ns(b.0, b.1))
 }
 
-pub fn calendar_date_until(
+fn calendar_date_until(
   cal: temporal_calendar.Calendar,
   from: IsoDate,
   to: IsoDate,
@@ -139,7 +139,7 @@ fn adjust_months(d1: IsoDate, d2: IsoDate, candidate: Int, sign: Int) -> Int {
   }
 }
 
-pub fn add_months_constrained(d: IsoDate, months: Int) -> IsoDate {
+fn add_months_constrained(d: IsoDate, months: Int) -> IsoDate {
   let #(y, m) = balance_year_month(d.year, d.month + months)
   let day = int.min(d.day, days_in_month(y, m))
   IsoDate(y, m, day)
@@ -242,7 +242,7 @@ fn nudge_calendar_unit(
   }
 }
 
-pub fn bubble_date_duration(
+fn bubble_date_duration(
   sign: Int,
   dur: Duration,
   nudged_ns: Int,
@@ -298,7 +298,7 @@ fn bubble_date_duration_loop(
   }
 }
 
-pub fn round_relative_date_duration(
+fn round_relative_date_duration(
   ymwd: DateDuration,
   origin: #(IsoDate, IsoTime),
   dest_ns: Int,

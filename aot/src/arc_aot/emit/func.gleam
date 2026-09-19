@@ -1,8 +1,8 @@
 import arc/bytecode/lexical
 import arc/compiler/ast_util
 import arc/compiler/scope.{
-  type Binding, type FunctionInfo, type ScopeId, CaptureBinding, CatchBinding,
-  ConstBinding, FnNameBinding, LetBinding, ParamBinding, VarBinding,
+  type Binding, type FunctionInfo, type ScopeId, CaptureBinding, ConstBinding,
+  FnNameBinding, LetBinding, ParamBinding, VarBinding,
 }
 import arc/parser/ast
 import arc_aot/emit/anf
@@ -29,13 +29,6 @@ pub const args_param = "_args"
 
 const direct_this_param = "_this"
 
-fn with_done(
-  e: Emitter,
-  f: fn(NextWith(ir.Expr), Emitter) -> EmitResult,
-) -> EmitResult {
-  f(fn(tree, ef) { Ok(#(tree, ef)) }, e)
-}
-
 type ShapeFlags {
   ShapeFlags(
     is_arrow: Bool,
@@ -44,7 +37,6 @@ type ShapeFlags {
     is_constructor: Bool,
     is_class_constructor: Bool,
     is_derived_constructor: Bool,
-    is_method: Bool,
     self_name: Option(String),
   )
 }
@@ -59,7 +51,6 @@ fn derive_flags(shape: FnShape) -> ShapeFlags {
         is_constructor: !is_generator && !is_async,
         is_class_constructor: False,
         is_derived_constructor: False,
-        is_method: False,
         self_name: None,
       )
     FnExpr(self_name:, is_generator:, is_async:) ->
@@ -70,7 +61,6 @@ fn derive_flags(shape: FnShape) -> ShapeFlags {
         is_constructor: !is_generator && !is_async,
         is_class_constructor: False,
         is_derived_constructor: False,
-        is_method: False,
         self_name:,
       )
     Arrow(is_async:) ->
@@ -81,7 +71,6 @@ fn derive_flags(shape: FnShape) -> ShapeFlags {
         is_constructor: False,
         is_class_constructor: False,
         is_derived_constructor: False,
-        is_method: False,
         self_name: None,
       )
     Method(is_generator:, is_async:) ->
@@ -92,7 +81,6 @@ fn derive_flags(shape: FnShape) -> ShapeFlags {
         is_constructor: False,
         is_class_constructor: False,
         is_derived_constructor: False,
-        is_method: True,
         self_name: None,
       )
     ClassCtor(is_derived:, ..) ->
@@ -103,7 +91,6 @@ fn derive_flags(shape: FnShape) -> ShapeFlags {
         is_constructor: True,
         is_class_constructor: True,
         is_derived_constructor: is_derived,
-        is_method: False,
         self_name: None,
       )
   }
@@ -126,10 +113,6 @@ pub fn shape_is_arrow(shape: FnShape) -> Bool {
   derive_flags(shape).is_arrow
 }
 
-pub fn shape_is_method(shape: FnShape) -> Bool {
-  derive_flags(shape).is_method
-}
-
 pub fn shape_self_name(shape: FnShape) -> Option(String) {
   derive_flags(shape).self_name
 }
@@ -139,11 +122,7 @@ fn derive_field_init(
   parent: state.FieldInitMode,
 ) -> state.FieldInitMode {
   case shape {
-    Arrow(..) ->
-      case parent {
-        FieldInitAfterSuper -> FieldInitAfterSuper
-        _ -> NoFieldInit
-      }
+    Arrow(..) -> parent
     ClassCtor(is_derived: True, has_field_init: True, ..) -> FieldInitAfterSuper
     _ -> NoFieldInit
   }
@@ -215,7 +194,12 @@ pub fn build_ir_params(e: Emitter, i: Int, n: Int) -> List(ir.Local) {
   }
 }
 
-fn store_slot(e: Emitter, b: Binding, val: ir.Value, k: Next) -> EmitResult {
+pub fn store_slot(
+  e: Emitter,
+  b: Binding,
+  val: ir.Value,
+  k: Next,
+) -> EmitResult {
   case b.boxed {
     True ->
       cps.host_unit(
@@ -288,7 +272,7 @@ pub fn binding_prologue(e: Emitter, scope_id: ScopeId, k: Next) -> EmitResult {
   case b.kind {
     VarBinding -> seed(e, e.consts.undef)
     LetBinding | ConstBinding | FnNameBinding -> seed(e, e.consts.tdz)
-    ParamBinding | CatchBinding | CaptureBinding -> next(e)
+    ParamBinding | CaptureBinding -> next(e)
   }
 }
 
@@ -1247,7 +1231,7 @@ fn build_mapped_boxes(
   }
 }
 
-fn hoist_fn_decls(
+pub fn hoist_fn_decls(
   e: Emitter,
   stmts: List(ast.StmtWithLine),
   k: Next,
@@ -1393,20 +1377,12 @@ fn direct_param_ir_name(
   fixed: List(ast.Pattern),
   i: Int,
 ) -> String {
-  case list_at(fixed, i) {
+  case state.list_at(fixed, i) {
     Some(ast.IdentifierPattern(name:, ..)) -> {
       let b = fn_scope_binding(e, name)
       state.slot_base_name(e, b.slot)
     }
     _ -> direct_param_name(i)
-  }
-}
-
-fn list_at(xs: List(a), i: Int) -> Option(a) {
-  case xs, i {
-    [], _ -> None
-    [x, ..], 0 -> Some(x)
-    [_, ..rest], n -> list_at(rest, n - 1)
   }
 }
 
@@ -1505,7 +1481,7 @@ fn emit_direct_body(
 ) -> EmitResult {
   let stmts = body_stmts(body)
   let ret_undef = fn(ef: Emitter) { Ok(#(ir.Return([ef.consts.undef]), ef)) }
-  with_done(e, fn(done, e) {
+  cps.with_done(e, fn(done, e) {
     use e <- seed_direct_this(e, takes_this, info)
     use e <- binding_prologue(e, e.fn_scope)
     use e <- bind_direct_params(e, fixed, fixed, 0)
@@ -1592,7 +1568,7 @@ fn shim_walk(
   }
 }
 
-fn atom_bool(consts: state.IrConsts, value b: Bool) -> ir.Value {
+pub fn atom_bool(consts: state.IrConsts, value b: Bool) -> ir.Value {
   case b {
     True -> consts.true_
     False -> consts.false_
@@ -1617,7 +1593,6 @@ fn emit_closure_alloc(
     atom_bool(consts, sf.is_class_constructor),
     atom_bool(consts, sf.is_derived_constructor),
     atom_bool(consts, sf.is_arrow),
-    atom_bool(consts, sf.is_method),
     atom_bool(consts, sf.is_generator),
     atom_bool(consts, sf.is_async),
     atom_bool(consts, is_strict),
@@ -1664,7 +1639,7 @@ fn emit_closure_alloc(
 }
 
 // §15.1.5 expected argument count
-fn expected_length(fixed: List(ast.Pattern)) -> Int {
+pub fn expected_length(fixed: List(ast.Pattern)) -> Int {
   fixed
   |> list.take_while(fn(p) {
     case p {

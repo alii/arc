@@ -310,7 +310,6 @@ type JsonParseError {
   ControlCharInString
   InvalidEscape(escape: String)
   InvalidUnicodeEscape
-  InvalidCodepoint
   InvalidNumber(raw: String)
   Expected(what: String, in_: String)
   InvalidUtf8
@@ -332,7 +331,6 @@ fn json_error_message(e: JsonParseError) -> String {
     InvalidEscape(escape:) ->
       "Invalid escape character '\\" <> escape <> "' in JSON"
     InvalidUnicodeEscape -> "Invalid Unicode escape in JSON"
-    InvalidCodepoint -> "Invalid Unicode codepoint in JSON string"
     InvalidNumber(raw:) -> "Invalid number '" <> raw <> "' in JSON"
     Expected(what:, in_:) -> "Expected " <> what <> " in " <> in_
     InvalidUtf8 -> "Invalid UTF-8 in JSON input"

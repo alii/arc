@@ -192,7 +192,7 @@ pub fn view_bounds(
   )
 }
 
-pub fn fixed_view(
+fn fixed_view(
   byte_size: Int,
   elem_kind: TypedArrayKind,
   byte_offset: Int,
@@ -222,7 +222,7 @@ pub fn view_len(view: ViewBounds) -> Int {
   view.len
 }
 
-pub fn view_element_offset(view: ViewBounds, idx: Int) -> Int {
+fn view_element_offset(view: ViewBounds, idx: Int) -> Int {
   view.byte_offset + idx * view.elem_size
 }
 
@@ -245,7 +245,7 @@ pub fn live_view(st: Agent, view: View) -> Option(ViewBounds) {
   view_bounds(bit_array.byte_size(data), elem_kind, byte_offset, length)
 }
 
-pub fn valid_integer_index(view: ViewBounds, idx: Int) -> Bool {
+fn valid_integer_index(view: ViewBounds, idx: Int) -> Bool {
   idx >= 0 && idx < view.len && view_in_bounds(view)
 }
 
@@ -343,26 +343,6 @@ pub fn typed_array_iter_length(
       case view_in_bounds(view) {
         False -> Error(OutOfBoundsView)
         True -> Ok(view_len(view))
-      }
-    }
-  }
-}
-
-pub fn typed_array_live_length(
-  st: Agent,
-  buffer: Handle,
-  elem_kind: TypedArrayKind,
-  byte_offset: Int,
-  length: Int,
-) -> Int {
-  case bytes(st, buffer) {
-    None -> 0
-    Some(data) -> {
-      let view =
-        fixed_view(bit_array.byte_size(data), elem_kind, byte_offset, length)
-      case view_in_bounds(view) {
-        True -> length
-        False -> 0
       }
     }
   }

@@ -92,8 +92,7 @@ pub fn class_new_children(
   parent_id: scope.ScopeId,
   before: List(scope.ScopeId),
 ) -> List(scope.ScopeId) {
-  let now = scope_builder.children_newest_first(scopes, parent_id)
-  list.take(now, list.length(now) - list.length(before)) |> list.reverse
+  scope_builder.children_since(scopes, parent_id, before) |> list.reverse
 }
 
 // 7-step child order of class_scope_finalize; emit reads it positionally

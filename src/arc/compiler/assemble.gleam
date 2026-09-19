@@ -1,14 +1,13 @@
 import arc/bytecode/key
 import arc/bytecode/opcode.{
-  type IrOp, type LabelId, type Op, type Pc, IrAsyncYieldStarNext,
-  IrAsyncYieldStarResume, IrBinOp, IrCmpConstJump, IrCmpJump,
-  IrCmpLocalConstJump, IrCmpLocalLocalJump, IrDefineAccessor, IrDefineField,
-  IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetFieldKeep, IrGosub,
-  IrIncLocalCmpConstJump, IrIncLocalCmpLocalJump, IrIncLocalJump, IrJump,
-  IrJumpIfFalse, IrJumpIfLocal, IrJumpIfNotNullish, IrJumpIfNullish,
-  IrJumpIfTrue, IrLabel, IrLine, IrPushTry, IrPutField, IrWithDeleteVar,
-  IrWithGetRefValue, IrWithGetVar, IrWithGetVarThis, IrWithMakeRef,
-  IrWithPutRefValue, IrWithPutVar, Pc,
+  type IrOp, type LabelId, type Op, type Pc, IrAsyncYieldStarResume, IrBinOp,
+  IrCmpConstJump, IrCmpJump, IrCmpLocalConstJump, IrCmpLocalLocalJump,
+  IrDefineAccessor, IrDefineField, IrDefineMethod, IrDeleteField, IrFinal,
+  IrGetField, IrGetFieldKeep, IrGosub, IrIncLocalCmpConstJump,
+  IrIncLocalCmpLocalJump, IrIncLocalJump, IrJump, IrJumpIfFalse, IrJumpIfLocal,
+  IrJumpIfNotNullish, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrLine, IrPushTry,
+  IrPutField, IrWithDeleteVar, IrWithGetRefValue, IrWithGetVar, IrWithGetVarThis,
+  IrWithMakeRef, IrWithPutRefValue, IrWithPutVar, Pc,
 }
 import arc/compiler/peephole
 import arc/internal/tuple_array
@@ -310,8 +309,7 @@ fn may_allocate(op: IrOp) -> Bool {
     | IrJumpIfLocal(..)
     | IrIncLocalCmpConstJump(..)
     | IrIncLocalCmpLocalJump(..) -> False
-    IrAsyncYieldStarNext(_)
-    | IrAsyncYieldStarResume(_)
+    IrAsyncYieldStarResume(_)
     | IrWithGetVar(..)
     | IrWithGetVarThis(..)
     | IrWithPutVar(..)
@@ -341,7 +339,6 @@ fn label_refs(op: IrOp) -> List(LabelId) {
     | IrJumpIfNullish(l)
     | IrJumpIfNotNullish(l)
     | IrGosub(l)
-    | IrAsyncYieldStarNext(l)
     | IrAsyncYieldStarResume(l)
     | IrWithGetVar(_, l)
     | IrWithGetVarThis(_, l)
@@ -453,7 +450,6 @@ fn assemble_op(op: IrOp, labels: Dict(LabelId, Pc)) -> Op {
     IrPushTry(l, kind) ->
       opcode.PushTry(label_pc(labels, l), assemble_try_kind(labels, kind))
     IrGosub(l) -> opcode.Gosub(label_pc(labels, l))
-    IrAsyncYieldStarNext(l) -> opcode.AsyncYieldStarNext(label_pc(labels, l))
     IrAsyncYieldStarResume(l) ->
       opcode.AsyncYieldStarResume(label_pc(labels, l))
 

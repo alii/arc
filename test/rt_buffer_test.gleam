@@ -322,7 +322,6 @@ pub fn constructor_reads_new_target_prototype_in_spec_order_test() {
       Some(mk_object(st.realm.throw_type_error)),
       option.None,
       enumerable: False,
-      configurable: True,
     )
   let nt = mk_object(nt_h)
   let ctor = global(st, "Int8Array")

@@ -1,5 +1,4 @@
 -module(arc_regexp_ffi).
--export([regexp_exec_info/5]).
 -export([regexp_compile/2, is_compiled/1, regexp_exec_compiled/4]).
 -export([pair_trail/1, has_flag/2, take_hex/1]).
 
@@ -475,14 +474,6 @@ pair_trail(<<$\\, $u, E, F, G, H, Rest/binary>>) ->
         false -> none
     end;
 pair_trail(_) -> none.
-
-regexp_exec_info(Pattern, Flags, String, Offset, Sticky) ->
-    case check_offset(String, Offset) of
-        {ok, Offset1} ->
-            run_compiled(get_compiled(Pattern, Flags), String, Offset1, Sticky);
-        {error, _} = Err ->
-            Err
-    end.
 
 regexp_compile(Pattern, Flags) ->
     get_compiled(Pattern, Flags).

@@ -61,7 +61,7 @@ pub fn init(
       object_proto,
       fn_proto,
       proto_props,
-      fn(proto) { SetN(SetConstructor(proto:)) },
+      fn(_) { SetN(SetConstructor) },
       "Set",
       0,
       [],
@@ -80,7 +80,7 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case n {
-    SetConstructor(..) ->
+    SetConstructor ->
       rt_val.throw_type_error(st, "Constructor Set requires 'new'")
     SetAdd -> set_add(st, this, args)
     SetHas -> set_has(st, this, args)
@@ -107,7 +107,7 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case n {
-    SetConstructor(..) -> set_constructor(st, args, new_target)
+    SetConstructor -> set_constructor(st, args, new_target)
     _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }

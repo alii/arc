@@ -4,9 +4,9 @@ import arc/bytecode/lexical.{
 }
 import arc/compiler/scope.{
   type BindingKind, type ScopeId, type ScopeKind, Block, CaptureBinding, Catch,
-  CatchBinding, ClassBody, ClassStaticBlock, ConstBinding, FnNameBinding,
-  Function, LetBinding, Module, ParamBinding, Script, VarBinding, With,
-  is_function_kind, param_shim, root_scope_id, with_object_name,
+  ClassBody, ClassStaticBlock, ConstBinding, FnNameBinding, Function, LetBinding,
+  Module, ParamBinding, Script, VarBinding, With, is_function_kind, param_shim,
+  root_scope_id, with_object_name,
 }
 import gleam/bool
 import gleam/dict.{type Dict}
@@ -34,7 +34,6 @@ pub type RawScope {
     bindings: Dict(String, RawBinding),
     next_decl_order: Int,
     contains_direct_eval: Bool,
-    annexb_blocked: Set(String),
     is_strict: Bool,
     catch_param_simple: Bool,
     source_tag: SourceTag,
@@ -76,7 +75,6 @@ fn new_raw_scope(
     bindings: dict.new(),
     next_decl_order: 0,
     contains_direct_eval: False,
-    annexb_blocked: set.new(),
     is_strict:,
     catch_param_simple: True,
     source_tag: OtherSource,
@@ -116,14 +114,14 @@ pub type ScopeBuilder {
   )
 }
 
-pub fn init(root_kind: ScopeKind, strict strict: Bool) -> ScopeBuilder {
+pub fn init(root_kind: ScopeKind) -> ScopeBuilder {
   let root =
     new_raw_scope(
       root_scope_id,
       None,
       root_scope_id,
       root_kind,
-      strict || root_kind == Module,
+      root_kind == Module,
     )
   ScopeBuilder(
     scopes: dict.from_list([#(root_scope_id, root)]),
@@ -222,12 +220,8 @@ pub fn declare(
 ) -> ScopeBuilder {
   let target_id = case kind {
     VarBinding -> var_target(sb)
-    LetBinding
-    | ConstBinding
-    | ParamBinding
-    | CatchBinding
-    | CaptureBinding
-    | FnNameBinding -> sb.current
+    LetBinding | ConstBinding | ParamBinding | CaptureBinding | FnNameBinding ->
+      sb.current
   }
   declare_in(sb, target_id, name, kind, synthetic:)
 }
@@ -245,13 +239,9 @@ fn var_target(sb: ScopeBuilder) -> ScopeId {
   }
 }
 
-pub fn declare_var(
-  sb: ScopeBuilder,
-  name: String,
-  synthetic synthetic: Bool,
-) -> ScopeBuilder {
+pub fn declare_var(sb: ScopeBuilder, name: String) -> ScopeBuilder {
   let sb = mark_hoisted_var(sb, sb.current, name)
-  declare(sb, name, VarBinding, synthetic:)
+  declare(sb, name, VarBinding, synthetic: False)
 }
 
 fn fold_up(
@@ -613,8 +603,7 @@ pub fn annexb_candidate(sb: ScopeBuilder, name: String) -> ScopeBuilder {
 fn is_lexical_kind(kind: BindingKind) -> Bool {
   case kind {
     LetBinding | ConstBinding -> True
-    VarBinding | ParamBinding | CatchBinding | CaptureBinding | FnNameBinding ->
-      False
+    VarBinding | ParamBinding | CaptureBinding | FnNameBinding -> False
   }
 }
 
@@ -644,7 +633,7 @@ fn boundary_param_conflict(
       let parent = scope_at(sb, parent_id)
       use <- bool.guard(!scope.is_var_boundary && parent.kind != Catch, False)
       case raw_binding_kind(parent, name) {
-        Some(ParamBinding) | Some(CatchBinding) -> True
+        Some(ParamBinding) -> True
         Some(_) | None -> False
       }
     }
@@ -708,7 +697,7 @@ pub fn nearest_catch_params(sb: ScopeBuilder) -> List(String) {
       list.Stop({
         use #(name, rb) <- list.filter_map(dict.to_list(scope.bindings))
         case rb.kind {
-          ParamBinding | CatchBinding -> Ok(name)
+          ParamBinding -> Ok(name)
           _ -> Error(Nil)
         }
       })

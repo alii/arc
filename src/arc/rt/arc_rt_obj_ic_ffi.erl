@@ -1,6 +1,6 @@
 %% site ic kernels called only by aot emitted code; exports may answer miss
 -module(arc_rt_obj_ic_ffi).
--export([set_named_many/5, set_named_init_ic/6, new_object_props/3,
+-export([set_named_init_ic/6, new_object_props/3,
          set_named_ic/6, get_named_ic/4, get_named_ic_shaped/4,
          global_get_ic/3, global_get_ic_fill/3]).
 

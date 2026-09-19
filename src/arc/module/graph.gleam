@@ -12,10 +12,10 @@ import gleam/list
 import gleam/result
 import gleam/set.{type Set}
 
-pub type Resolve =
+type Resolve =
   fn(summary.ModuleRequest, Resolved) -> Result(Resolved, ResolveError)
 
-pub type Load =
+type Load =
   fn(Resolved) -> Result(String, LoadError)
 
 pub type ParsedModule {

@@ -210,11 +210,11 @@ pub fn arrow_and_method_have_no_prototype_test() {
     == None
   let assert SObject(kind: BytecodeFn(flags: af, ..), ..) =
     rt_store.cell_get(st, arrow)
-  assert af.is_arrow && !af.is_method
+  assert af.is_arrow
   let #(m, st) = make("var o = { m() {} };", "m")
   assert rt_obj.ordinary_own_property(st, m, StringKey(Named("prototype")))
     == None
   let assert SObject(kind: BytecodeFn(flags: mf, ..), ..) =
     rt_store.cell_get(st, m)
-  assert mf.is_method && !mf.is_constructor
+  assert !mf.is_arrow && !mf.is_constructor
 }

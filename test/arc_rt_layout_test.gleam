@@ -151,7 +151,6 @@ fn no_flags() -> FnFlags {
     is_class_constructor: False,
     is_derived_constructor: False,
     is_arrow: False,
-    is_method: False,
     is_generator: False,
     is_async: False,
     is_strict: False,
@@ -496,8 +495,8 @@ pub fn fn_flags_test() {
   let base = no_flags()
   let names = [
     "FNFLAGS_IS_CONSTRUCTOR", "FNFLAGS_IS_CLASS_CONSTRUCTOR",
-    "FNFLAGS_IS_DERIVED_CONSTRUCTOR", "FNFLAGS_IS_ARROW", "FNFLAGS_IS_METHOD",
-    "FNFLAGS_IS_GENERATOR", "FNFLAGS_IS_ASYNC", "FNFLAGS_IS_STRICT",
+    "FNFLAGS_IS_DERIVED_CONSTRUCTOR", "FNFLAGS_IS_ARROW", "FNFLAGS_IS_GENERATOR",
+    "FNFLAGS_IS_ASYNC", "FNFLAGS_IS_STRICT",
   ]
   let one_hot = [
     #("FNFLAGS_IS_CONSTRUCTOR", FnFlags(..base, is_constructor: True)),
@@ -510,7 +509,6 @@ pub fn fn_flags_test() {
       FnFlags(..base, is_derived_constructor: True),
     ),
     #("FNFLAGS_IS_ARROW", FnFlags(..base, is_arrow: True)),
-    #("FNFLAGS_IS_METHOD", FnFlags(..base, is_method: True)),
     #("FNFLAGS_IS_GENERATOR", FnFlags(..base, is_generator: True)),
     #("FNFLAGS_IS_ASYNC", FnFlags(..base, is_async: True)),
     #("FNFLAGS_IS_STRICT", FnFlags(..base, is_strict: True)),
@@ -527,7 +525,7 @@ pub fn is_plain_fn_test() {
   let base = no_flags()
   assert is_plain_fn(base)
   assert is_plain_fn(FnFlags(..base, is_constructor: True, is_strict: True))
-  assert is_plain_fn(FnFlags(..base, is_arrow: True, is_method: True))
+  assert is_plain_fn(FnFlags(..base, is_arrow: True))
   assert !is_plain_fn(FnFlags(..base, is_class_constructor: True))
   assert !is_plain_fn(FnFlags(..base, is_generator: True))
   assert !is_plain_fn(FnFlags(..base, is_async: True))
@@ -729,22 +727,14 @@ fn get_elem(st: Agent, recv: JsVal, idx: Int) -> Dynamic
 @external(erlang, "arc_rt_obj_ffi", "set_elem")
 fn set_elem(st: Agent, recv: JsVal, idx: Int, v: JsVal) -> Dynamic
 
-@external(erlang, "arc_rt_obj_ffi", "get_prop_own_data")
-fn get_prop_own_data(st: Agent, recv: JsVal, key: BitArray) -> Dynamic
-
 @external(erlang, "arc_rt_obj_ffi", "set_prop_own_data")
 fn set_prop_own_data(st: Agent, recv: JsVal, key: BitArray, v: JsVal) -> Dynamic
 
 @external(erlang, "arc_rt_obj_ffi", "instanceof_i32")
 fn instanceof_i32(st: Agent, v: JsVal, ctor: JsVal) -> Dynamic
 
-@external(erlang, "arc_rt_call_ic_ffi", "call_method_mono")
-fn call_method_mono(
-  st: Agent,
-  recv: JsVal,
-  key: BitArray,
-  args: List(JsVal),
-) -> #(Dynamic, Agent)
+@external(erlang, "arc_rt_call_ffi", "direct_callee")
+fn direct_callee(st: Agent, callee: JsVal, this: JsVal) -> Dynamic
 
 @external(erlang, "arc_rt_call_ic_ffi", "new_direct")
 fn new_direct(st: Agent, ctor: JsVal, args: List(JsVal)) -> #(Dynamic, Agent)
@@ -764,8 +754,6 @@ pub fn typed_array_kernels_miss_test() {
   assert get_elem(st, ta, 0) == dyn(Miss)
   assert set_elem(st, ta, 0, n) == dyn(Miss)
   assert set_elem(st, ta, 4, n) == dyn(Miss)
-  assert get_prop_own_data(st, ta, <<"length">>) == dyn(Miss)
-  assert get_prop_own_data(st, ta, <<"extra">>) == dyn(Miss)
   assert set_prop_own_data(st, ta, <<"extra">>, n) == dyn(Miss)
 }
 
@@ -779,9 +767,7 @@ pub fn proxy_kernels_miss_test() {
   let p = types.mk_object(ph)
   assert get_elem(st, p, 0) == dyn(Miss)
   assert set_elem(st, p, 0, n) == dyn(Miss)
-  assert get_prop_own_data(st, p, <<"length">>) == dyn(Miss)
   assert set_prop_own_data(st, p, <<"length">>, n) == dyn(Miss)
-  assert call_method_mono(st, p, <<"push">>, [n]).0 == dyn(Miss)
   // instanceof over a proxy must reach the getprototypeof trap
   let ctor_flags = FnFlags(..no_flags(), is_constructor: True)
   let #(f, st) =
@@ -806,9 +792,7 @@ pub fn string_object_kernels_miss_test() {
   assert get_elem(st, s, 0) == dyn(Miss)
   assert set_elem(st, s, 0, n) == dyn(Miss)
   assert set_elem(st, s, 3, n) == dyn(Miss)
-  assert get_prop_own_data(st, s, <<"length">>) == dyn(Miss)
   assert set_prop_own_data(st, s, <<"length">>, n) == dyn(Miss)
-  assert get_prop_own_data(st, s, <<"extra">>) == dyn(types.mk_string("x"))
   assert set_prop_own_data(st, s, <<"extra">>, n) != dyn(Miss)
 }
 
@@ -838,10 +822,9 @@ pub fn bytecode_function_kernels_miss_test() {
   assert rt_val.is_callable(st, f)
   assert rt_call.is_constructor(st, f)
   let undef = types.mk_undefined()
-  assert rt_call.direct_callee(st, f, undef) == dyn(Miss)
+  assert direct_callee(st, f, undef) == dyn(Miss)
   let #(o, st) = rt_obj.new_object_literal(st)
   let #(_, st) = rt_obj.set_prop(st, o, StringKey(Named("m")), f)
-  assert call_method_mono(st, o, <<"m">>, []).0 == dyn(Miss)
   assert new_direct(st, f, []).0 == dyn(Miss)
   assert instanceof_i32(st, o, f) == dyn(Miss)
 }
@@ -858,7 +841,7 @@ pub fn compiled_function_kernels_hit_test() {
   let code = compiled_code(fn(st, _frame, _args) { #(undef, st) })
   let flags = FnFlags(..no_flags(), is_constructor: True, is_strict: True)
   let #(f, st) = rt_call.new_closure(st, code, flags, "F", 0, None)
-  assert rt_call.direct_callee(st, f, undef) != dyn(Miss)
+  assert direct_callee(st, f, undef) != dyn(Miss)
   assert new_direct(st, f, []).0 == dyn(Miss)
   let #(proto, st) = rt_obj.get_prop(st, f, StringKey(Named("prototype")))
   let #(this, _) = new_direct(st, f, [])

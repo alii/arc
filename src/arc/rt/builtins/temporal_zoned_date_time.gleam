@@ -14,9 +14,9 @@ import arc/rt/builtins/temporal_fields.{
   require_partial_bag, to_calendar_arg, to_temporal_calendar_identifier,
 }
 import arc/rt/builtins/temporal_iso.{
-  type SecondsPrecision, AutoPrecision, add_days, divide_as_float,
-  epoch_ns_to_iso, format_iso_date, format_iso_time, int_sign,
-  iso_date_from_epoch_days, ns_per_day, ns_per_hour, ns_per_ms,
+  AutoPrecision, add_days, divide_as_float, epoch_ns_to_iso, format_iso_date,
+  format_iso_time, int_sign, iso_date_from_epoch_days, ns_per_day, ns_per_hour,
+  ns_per_ms,
 }
 import arc/rt/builtins/temporal_options.{
   Compatible, OffsetShowAuto, OffsetShowNever, PreferOffset, ZoneNameAuto,
@@ -161,7 +161,7 @@ pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
   )
 }
 
-pub fn zoned_getter_name(g: TemporalZonedGetter) -> String {
+fn zoned_getter_name(g: TemporalZonedGetter) -> String {
   case g {
     ZonedTimeZoneId -> "timeZoneId"
     ZonedEpochMilliseconds -> "epochMilliseconds"
@@ -174,7 +174,7 @@ pub fn zoned_getter_name(g: TemporalZonedGetter) -> String {
   }
 }
 
-pub fn method_name(m: ZonedDateTimeMethod) -> String {
+fn method_name(m: ZonedDateTimeMethod) -> String {
   case m {
     ZonedDateTimeWithTimeZone -> "withTimeZone"
     ZonedDateTimeWithCalendar -> "withCalendar"
@@ -302,7 +302,7 @@ pub fn method(
   let #(d, t) = epoch_ns_to_iso(ns, off)
   case m {
     ZonedDateTimeToJson | ZonedDateTimeToLocaleString -> #(
-      mk_string(format_zoned(ns, tz, AutoPrecision)),
+      mk_string(format_zoned(ns, tz)),
       st,
     )
     ZonedDateTimeToString -> {
@@ -597,16 +597,12 @@ fn zoned_until_since(
   }
 }
 
-fn format_zoned(
-  ns: Int,
-  tz: TemporalZone,
-  precision: SecondsPrecision,
-) -> String {
+fn format_zoned(ns: Int, tz: TemporalZone) -> String {
   let off = tz_offset_ns_at(tz, ns)
   let #(d, t) = epoch_ns_to_iso(ns, off)
   format_iso_date(d)
   <> "T"
-  <> format_iso_time(t, precision)
+  <> format_iso_time(t, AutoPrecision)
   <> format_offset_rounded(off)
   <> "["
   <> time_zone_id(tz)

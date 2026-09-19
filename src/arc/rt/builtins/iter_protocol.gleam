@@ -1,7 +1,6 @@
 import arc/bytecode/error_kind.{TypeError}
 import arc/bytecode/key.{type PropertyKey, Index, Named}
 import arc/internal/ordered_entries
-import arc/rt/builtins/common
 import arc/rt/call.{NormalCompletion, ThrowCompletion, call, try_call} as rt_call
 import arc/rt/elements
 import arc/rt/obj as rt_obj
@@ -345,7 +344,7 @@ fn walk_elements(
 }
 
 // builtin next steps run no user code, so step in place
-pub fn intrinsic_next(
+fn intrinsic_next(
   st: Agent,
   rec: IteratorRecord,
 ) -> Option(#(types.IteratorNative, Handle)) {
@@ -638,7 +637,7 @@ pub fn or_close(
   }
 }
 
-pub type EntrySink =
+type EntrySink =
   fn(Agent, JsVal, JsVal) -> Agent
 
 // §24.1.1.2
@@ -729,19 +728,6 @@ fn add_values_from_iterable_loop(
       add_values_from_iterable_loop(st, target, rec, adder)
     }
   }
-}
-
-// no getiterator, so bare {next} objects work
-pub fn iterator_rest(st: Agent, iter: JsVal) -> #(JsVal, Agent) {
-  let #(rec, st) =
-    get_iterator_direct(
-      st,
-      iter,
-      "Iterator rest element target is not an object",
-    )
-  let #(values, st) = iterator_to_list(st, rec)
-  let #(h, st) = common.alloc_array(st, values, st.realm.array.prototype)
-  #(mk_object(h), st)
 }
 
 // §7.4.5 + §7.4.6, always reads value

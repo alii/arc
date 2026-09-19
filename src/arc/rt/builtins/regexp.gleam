@@ -22,9 +22,8 @@ import arc/rt/types.{
   RegExpPrototypeCompile, RegExpPrototypeExec, RegExpPrototypeTest,
   RegExpPrototypeToString, RegExpStringIteratorNext, RegExpSymbolMatch,
   RegExpSymbolMatchAll, RegExpSymbolReplace, RegExpSymbolSearch,
-  RegExpSymbolSplit, ReturnThis, SObject, StickyFlag, UnicodeFlag,
-  UnicodeSetsFlag, classify, mk_bool, mk_int, mk_null, mk_object, mk_string,
-  mk_undefined, plain_object,
+  RegExpSymbolSplit, SObject, StickyFlag, UnicodeFlag, UnicodeSetsFlag, classify,
+  mk_bool, mk_int, mk_null, mk_object, mk_string, mk_undefined, plain_object,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -97,7 +96,7 @@ pub fn init(
         common.add_symbol_property(st, bt.prototype, sym, prop)
       },
     )
-  let st = common.add_species_accessor(st, fn_proto, bt.constructor, ReturnThis)
+  let st = common.add_species_accessor(st, fn_proto, bt.constructor)
   #(bt, st)
 }
 
@@ -148,13 +147,7 @@ fn install_legacy_accessors(
         0,
       )
     let #(prop, st) =
-      common.accessor_property(
-        st,
-        get: Some(mk_object(get_h)),
-        set: None,
-        enumerable: False,
-        configurable: True,
-      )
+      common.accessor_property(st, get: mk_object(get_h), set: None)
     common.add_named_property(st, ctor, name, prop)
   })
 }
@@ -499,7 +492,7 @@ fn capture_to_legacy_string(s: String, cap: #(Int, Int)) -> String {
 
 fn get_source(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case require_regexp_or_proto(st, this, "source") {
-    ReadRegExp(s, _, _) -> #(mk_string(source_string(s)), st)
+    ReadRegExp(s, _) -> #(mk_string(source_string(s)), st)
     ReadRegExpProto -> #(mk_string("(?:)"), st)
   }
 }
@@ -572,7 +565,7 @@ fn build_flags(
 
 fn get_flag(st: Agent, this: JsVal, flag: RegExpFlag) -> #(JsVal, Agent) {
   case require_regexp_or_proto(st, this, flag_property(flag)) {
-    ReadRegExp(_, flags, _) -> #(mk_bool(has_flag(flags, flag_char(flag))), st)
+    ReadRegExp(_, flags) -> #(mk_bool(has_flag(flags, flag_char(flag))), st)
     ReadRegExpProto -> #(mk_undefined(), st)
   }
 }
@@ -642,7 +635,6 @@ fn alloc_regexp_with_proto(
           _ -> source
         },
         flags: canonical_flags(flags),
-        last_index: 0,
         compiled: uncompiled(),
       ),
       option.Some(proto),
@@ -669,7 +661,7 @@ fn validate_pattern_and_flags(
 }
 
 type RegExpRead {
-  ReadRegExp(source: String, flags: String, last_index: Int)
+  ReadRegExp(source: String, flags: String)
   ReadRegExpProto
 }
 
@@ -677,8 +669,8 @@ fn require_regexp_or_proto(st: Agent, v: JsVal, op: String) -> RegExpRead {
   case classify(v) {
     KHandle(h) ->
       case rt_store.cell_get(st, h) {
-        SObject(kind: RegExpObj(source:, flags:, last_index:, ..), ..) ->
-          ReadRegExp(source, flags, last_index)
+        SObject(kind: RegExpObj(source:, flags:, ..), ..) ->
+          ReadRegExp(source, flags)
         _ ->
           case h == st.realm.regexp.prototype {
             True -> ReadRegExpProto
@@ -733,8 +725,8 @@ pub fn regexp_exec_compiled(
   ExecFailure,
 )
 
-pub fn set_throw(st: Agent, h: Handle, name: String, v: JsVal) -> Agent {
-  rt_obj.set_named(st, mk_object(h), name, v, strict: True)
+pub fn set_last_index(st: Agent, h: Handle, v: JsVal) -> Agent {
+  rt_obj.set_named(st, mk_object(h), "lastIndex", v, strict: True)
 }
 
 pub fn require_object(st: Agent, v: JsVal, op: String) -> Handle {
@@ -837,7 +829,7 @@ pub fn builtin_exec_ranges(
   case regexp_exec_compiled(compiled, s, last_index, sticky) {
     Error(NoMatch) | Error(OffsetOutOfRange) | Error(PatternCompileFailed(_)) -> {
       let st = case global || sticky {
-        True -> set_throw(st, h, "lastIndex", mk_int(0))
+        True -> set_last_index(st, h, mk_int(0))
         False -> st
       }
       #(RangesMiss, flags, st)
@@ -845,7 +837,7 @@ pub fn builtin_exec_ranges(
     Ok(#(whole, groups, _gc, names)) -> {
       let #(match_start, match_len) = whole
       let st = case global || sticky {
-        True -> set_throw(st, h, "lastIndex", mk_int(match_start + match_len))
+        True -> set_last_index(st, h, mk_int(match_start + match_len))
         False -> st
       }
       // unconditional like v8, gating would leave stale statics
@@ -872,12 +864,12 @@ pub fn builtin_exec_mode(
 
 pub fn matcher(st: Agent, h: Handle) -> #(String, types.CompiledRegExp, Agent) {
   case rt_store.cell_get(st, h) {
-    SObject(kind: RegExpObj(source:, flags:, last_index:, compiled:), ..) as cell ->
+    SObject(kind: RegExpObj(source:, flags:, compiled:), ..) as cell ->
       case is_compiled(compiled) {
         True -> #(flags, compiled, st)
         False -> {
           let #(compiled, st) = compile_cached(st, source, flags)
-          let kind = RegExpObj(source:, flags:, last_index:, compiled:)
+          let kind = RegExpObj(source:, flags:, compiled:)
           let st = rt_store.cell_set(st, h, SObject(..cell, kind:))
           #(flags, compiled, st)
         }
@@ -1150,18 +1142,17 @@ fn prototype_compile(
             kind: RegExpObj(
               source:,
               flags: canonical_flags(flags),
-              last_index: 0,
               compiled: uncompiled(),
             ),
           )
         _ -> cell
       }
     })
-  let st = set_throw(st, h, "lastIndex", mk_int(0))
+  let st = set_last_index(st, h, mk_int(0))
   #(this, st)
 }
 
-pub fn not_regexp(st: Agent, method: String) -> a {
+fn not_regexp(st: Agent, method: String) -> a {
   rt_val.throw_type_error(
     st,
     "RegExp.prototype." <> method <> " requires that 'this' be a RegExp",

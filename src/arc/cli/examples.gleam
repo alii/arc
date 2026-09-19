@@ -9,7 +9,7 @@ pub type Example {
   Example(title: String, blurb: String, source: String)
 }
 
-pub fn all() -> List(Example) {
+fn all() -> List(Example) {
   [closures(), promises(), generators(), classes(), array_methods()]
 }
 

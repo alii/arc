@@ -397,7 +397,7 @@ pub fn function(
   arity: Int,
   impl: HostFn(host),
 ) -> #(JsVal, Context(host)) {
-  let #(id, st) = register(ctx.agent, ctx.brand, name, impl)
+  let #(id, st) = register(ctx.agent, ctx.brand, impl)
   let #(h, st) =
     common.alloc_rooted_native_fn(
       st,
@@ -464,7 +464,7 @@ pub fn class(
   let realm = st.realm
   let #(proto_props, st) = alloc_host_methods(st, ctx.brand, methods)
   let #(static_props, st) = alloc_host_methods(st, ctx.brand, statics)
-  let #(id, st) = register(st, ctx.brand, name, constructor)
+  let #(id, st) = register(st, ctx.brand, constructor)
   let #(pair, st) =
     common.init_type(
       st,
@@ -483,12 +483,11 @@ pub fn class(
 fn register(
   st: Agent,
   brand: Brand(host),
-  name: String,
   impl: HostFn(host),
 ) -> #(Int, Agent) {
   let id = dict.size(st.host_fns)
   let entry =
-    HostFnEntry(name:, call: fn(st, args, this, new_target) {
+    HostFnEntry(call: fn(st, args, this, new_target) {
       let #(result, Context(agent: st, ..)) =
         impl(Context(agent: st, new_target:, brand:), args, this)
       #(result, st)
@@ -505,7 +504,7 @@ fn alloc_host_methods(
     list.fold(specs, #([], st), fn(acc, spec) {
       let #(props, st) = acc
       let HostMethod(name:, arity:, call: impl) = spec
-      let #(id, st) = register(st, brand, name, impl)
+      let #(id, st) = register(st, brand, impl)
       let #(h, st) =
         common.alloc_rooted_native_fn(
           st,

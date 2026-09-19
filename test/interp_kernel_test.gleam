@@ -144,7 +144,6 @@ pub fn put_elem_inherited_setter_on_append_misses_test() {
       None,
       Some(setter),
       enumerable: True,
-      configurable: True,
     )
   assert is_miss(kernel.put_elem(st.store, arr, mk_int(2), mk_int(30)))
   assert !is_miss(kernel.put_elem(st.store, arr, mk_int(1), mk_int(21)))
@@ -203,7 +202,6 @@ pub fn put_elem_sparse_hole_walks_chain_test() {
       None,
       Some(setter),
       enumerable: True,
-      configurable: True,
     )
   assert is_miss(kernel.put_elem(st.store, arr, mk_int(5), mk_int(7)))
 }

@@ -18,11 +18,10 @@ import arc/rt/types.{
   ArrayBufferSliceToImmutable, ArrayBufferTransfer,
   ArrayBufferTransferToFixedLength, ArrayBufferTransferToImmutable, Bytes,
   DataViewObj, Detached, Immutable, KHandle, KUndef, LocalBlock, OwnerBlock,
-  ReturnThis, SObject, Shared, SharedArrayBufferConstructor,
-  SharedArrayBufferGetByteLength, SharedArrayBufferGetGrowable,
-  SharedArrayBufferGetMaxByteLength, SharedArrayBufferGrow,
-  SharedArrayBufferSlice, StringKey, TypedArrayObj, classify, mk_bool, mk_int,
-  mk_object, mk_undefined,
+  SObject, Shared, SharedArrayBufferConstructor, SharedArrayBufferGetByteLength,
+  SharedArrayBufferGetGrowable, SharedArrayBufferGetMaxByteLength,
+  SharedArrayBufferGrow, SharedArrayBufferSlice, StringKey, TypedArrayObj,
+  classify, mk_bool, mk_int, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -69,19 +68,14 @@ pub fn init(
       object_proto,
       function_proto,
       list.append(getters, methods),
-      fn(proto) { ArrayBufferN(ArrayBufferConstructor(proto:)) },
+      fn(_) { ArrayBufferN(ArrayBufferConstructor) },
       "ArrayBuffer",
       1,
       statics,
     )
   let st = common.add_string_tag(st, array_buffer.prototype, "ArrayBuffer")
   let st =
-    common.add_species_accessor(
-      st,
-      function_proto,
-      array_buffer.constructor,
-      ReturnThis,
-    )
+    common.add_species_accessor(st, function_proto, array_buffer.constructor)
 
   let #(shared_methods, st) =
     common.alloc_methods(st, function_proto, [
@@ -100,7 +94,7 @@ pub fn init(
       object_proto,
       function_proto,
       list.append(shared_getters, shared_methods),
-      fn(proto) { ArrayBufferN(SharedArrayBufferConstructor(proto:)) },
+      fn(_) { ArrayBufferN(SharedArrayBufferConstructor) },
       "SharedArrayBuffer",
       1,
       [],
@@ -116,7 +110,6 @@ pub fn init(
       st,
       function_proto,
       shared_array_buffer.constructor,
-      ReturnThis,
     )
 
   #(#(array_buffer, shared_array_buffer), st)
@@ -129,9 +122,9 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case native {
-    ArrayBufferConstructor(..) ->
+    ArrayBufferConstructor ->
       rt_val.throw_type_error(st, "Constructor ArrayBuffer requires 'new'")
-    SharedArrayBufferConstructor(..) ->
+    SharedArrayBufferConstructor ->
       rt_val.throw_type_error(
         st,
         "Constructor SharedArrayBuffer requires 'new'",
@@ -172,9 +165,8 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case native {
-    ArrayBufferConstructor(..) ->
-      constructor(st, args, new_target, shared: False)
-    SharedArrayBufferConstructor(..) ->
+    ArrayBufferConstructor -> constructor(st, args, new_target, shared: False)
+    SharedArrayBufferConstructor ->
       constructor(st, args, new_target, shared: True)
     _ -> rt_val.throw_type_error(st, "not a constructor")
   }

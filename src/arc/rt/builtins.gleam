@@ -56,8 +56,8 @@ import arc/rt/types.{
   NumberObj, ObjectN, PromiseN, PromiseRejectFn, PromiseResolveFn, ProxyN, Realm,
   ReflectN, RegExpN, ReturnThis, SetN, Store, StringConstructor, StringKey,
   StringN, StringObj, SymbolConstructor, SymbolN, TemporalN, Test262N,
-  ThrowTypeErrorPoison, TypedArrayN, WeakN, WeakRefN, classify, mk_number,
-  mk_object, mk_undefined, plain_object,
+  TypedArrayN, WeakN, WeakRefN, classify, mk_number, mk_object, mk_undefined,
+  plain_object,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -86,7 +86,7 @@ pub fn new_agent(hooks: HostHooks) -> Agent {
 }
 
 // allocation order matters for prototype wiring
-pub fn init_realm(st: Agent) -> #(Realm, Agent) {
+fn init_realm(st: Agent) -> #(Realm, Agent) {
   let id =
     dict.fold(st.realms, st.realm.id + 1, fn(next, known, _realm) {
       int.max(next, known + 1)
@@ -534,8 +534,6 @@ pub fn dispatch_native(
       ),
     )
     ReturnThis -> #(this, st)
-    ThrowTypeErrorPoison ->
-      b_function.dispatch(st, types.ThrowTypeErrorFn, this, args)
     HostFn(id:) -> call_host_fn(st, id, this, args, mk_undefined())
     ObjectN(n) -> b_object.dispatch(st, n, this, args)
     FunctionN(n) -> b_function.dispatch(st, n, this, args)
@@ -600,7 +598,7 @@ pub fn dispatch_native(
     DataViewN(n) -> b_data_view.dispatch(st, n, this, args)
     TypedArrayN(n) -> typed_array.dispatch(st, n, this, args)
     AtomicsN(n) -> b_atomics.dispatch(st, n, this, args)
-    Test262N(n) -> rt_realm.dispatch_test262(st, n, this, args, create_realm)
+    Test262N(n) -> rt_realm.dispatch_test262(st, n, args, create_realm)
     IntlN(n) -> b_intl.dispatch(st, n, this, args)
     TemporalN(n) -> b_temporal.dispatch(st, n, this, args)
   }
@@ -708,7 +706,6 @@ pub fn dispatch_native_construct(
     | PromiseRejectFn(..)
     | AsyncGenResume(..)
     | ReturnThis
-    | ThrowTypeErrorPoison
     | MathN(_)
     | JsonN(_)
     | ReflectN(_)
@@ -736,7 +733,7 @@ fn call_host_fn(
   new_target: JsVal,
 ) -> #(JsVal, Agent) {
   case dict.get(st.host_fns, id) {
-    Ok(HostFnEntry(call:, ..)) ->
+    Ok(HostFnEntry(call:)) ->
       case call(st, args, this, new_target) {
         #(Ok(v), st) -> #(v, st)
         #(Error(thrown), st) -> rt_store.throw(st, thrown)
