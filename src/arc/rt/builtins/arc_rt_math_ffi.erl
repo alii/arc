@@ -1,18 +1,18 @@
 %% math:* badariths on overflow, so these return jsnum shapes; math_kernel may answer miss
 -module(arc_rt_math_ffi).
 -export([exp_total/1, pow_total/2, cosh_total/1, sinh_total/1, hypot_total/1, to_float32/1,
-         t_math_sqrt/1, t_math_floor/1, t_math_abs/1,
-         t_math_pow/2, t_math_min/2, t_math_max/2, math_kernel/2]).
+         math_sqrt/1, math_floor/1, math_abs/1,
+         math_pow/2, math_min/2, math_max/2, math_kernel/2]).
 
 -include("../arc_rt_layout.hrl").
 
 %% plain number args straight to the kernels, else miss
-math_kernel(math_floor, [X | _]) -> t_math_floor(X);
-math_kernel(math_abs, [X | _]) -> t_math_abs(X);
-math_kernel(math_sqrt, [X | _]) -> t_math_sqrt(X);
-math_kernel(math_pow, [B, E | _]) -> t_math_pow(B, E);
-math_kernel(math_max, [A, B]) -> t_math_max(A, B);
-math_kernel(math_min, [A, B]) -> t_math_min(A, B);
+math_kernel(math_floor, [X | _]) -> math_floor(X);
+math_kernel(math_abs, [X | _]) -> math_abs(X);
+math_kernel(math_sqrt, [X | _]) -> math_sqrt(X);
+math_kernel(math_pow, [B, E | _]) -> math_pow(B, E);
+math_kernel(math_max, [A, B]) -> math_max(A, B);
+math_kernel(math_min, [A, B]) -> math_min(A, B);
 math_kernel(math_ceil, [X | _]) when is_integer(X) -> X;
 math_kernel(math_round, [X | _]) when is_integer(X) -> X;
 math_kernel(math_trunc, [X | _]) when is_integer(X) -> X;
@@ -97,33 +97,33 @@ signed_infinity(X) ->
     end.
 
 %% never wildcard-match a non-number arg, spec throws there
-t_math_sqrt(X) when is_number(X), X >= 0 -> math:sqrt(X);
-t_math_sqrt(X) when is_number(X) -> js_nan;
-t_math_sqrt(js_nan) -> js_nan;
-t_math_sqrt(js_inf) -> js_inf;
-t_math_sqrt(js_neg_inf) -> js_nan;
-t_math_sqrt(_) -> miss.
+math_sqrt(X) when is_number(X), X >= 0 -> math:sqrt(X);
+math_sqrt(X) when is_number(X) -> js_nan;
+math_sqrt(js_nan) -> js_nan;
+math_sqrt(js_inf) -> js_inf;
+math_sqrt(js_neg_inf) -> js_nan;
+math_sqrt(_) -> miss.
 
-t_math_floor(X) when is_integer(X) -> X;
-t_math_floor(X) when is_float(X) ->
+math_floor(X) when is_integer(X) -> X;
+math_floor(X) when is_float(X) ->
     case floor(X) of
         0 -> case neg_sign(X) of true -> X; false -> 0 end;
         R when R > ?MAX_SAFE_INT; R < -?MAX_SAFE_INT -> X;
         R -> R
     end;
-t_math_floor(js_nan) -> js_nan;
-t_math_floor(js_inf) -> js_inf;
-t_math_floor(js_neg_inf) -> js_neg_inf;
-t_math_floor(_) -> miss.
+math_floor(js_nan) -> js_nan;
+math_floor(js_inf) -> js_inf;
+math_floor(js_neg_inf) -> js_neg_inf;
+math_floor(_) -> miss.
 
-t_math_abs(X) when is_integer(X) -> abs(X);
-t_math_abs(X) when is_float(X) -> abs(X);
-t_math_abs(js_nan) -> js_nan;
-t_math_abs(js_inf) -> js_inf;
-t_math_abs(js_neg_inf) -> js_inf;
-t_math_abs(_) -> miss.
+math_abs(X) when is_integer(X) -> abs(X);
+math_abs(X) when is_float(X) -> abs(X);
+math_abs(js_nan) -> js_nan;
+math_abs(js_inf) -> js_inf;
+math_abs(js_neg_inf) -> js_inf;
+math_abs(_) -> miss.
 
-t_math_pow(B, E) when is_number(B), is_number(E) ->
+math_pow(B, E) when is_number(B), is_number(E) ->
     Bf = as_float(B), Ef = as_float(E),
     case pow_total(Bf, Ef) of
         {j_float, F} -> F;
@@ -131,51 +131,51 @@ t_math_pow(B, E) when is_number(B), is_number(E) ->
         j_neg_inf -> js_neg_inf;
         j_nan -> js_nan
     end;
-t_math_pow(B, E) when E == 0, ?IS_JS_NUMBER(B) -> 1;
-t_math_pow(js_nan, E) when ?IS_JS_NUMBER(E) -> js_nan;
-t_math_pow(B, js_nan) when ?IS_JS_NUMBER(B) -> js_nan;
-t_math_pow(js_inf, E) when is_number(E) ->
+math_pow(B, E) when E == 0, ?IS_JS_NUMBER(B) -> 1;
+math_pow(js_nan, E) when ?IS_JS_NUMBER(E) -> js_nan;
+math_pow(B, js_nan) when ?IS_JS_NUMBER(B) -> js_nan;
+math_pow(js_inf, E) when is_number(E) ->
     if E > 0 -> js_inf; E < 0 -> 0; true -> 1 end;
-t_math_pow(js_neg_inf, E) when is_number(E) ->
+math_pow(js_neg_inf, E) when is_number(E) ->
     T = trunc(as_float(E)),
     Odd = T == E andalso T rem 2 =/= 0,
     if E > 0, Odd -> js_neg_inf; E > 0 -> js_inf;
        E < 0, Odd -> -0.0; E < 0 -> 0; true -> 1 end;
-t_math_pow(B, js_inf) when is_number(B) ->
+math_pow(B, js_inf) when is_number(B) ->
     A = abs(as_float(B)),
     if A > 1.0 -> js_inf; A < 1.0 -> 0; true -> js_nan end;
-t_math_pow(B, js_neg_inf) when is_number(B) ->
+math_pow(B, js_neg_inf) when is_number(B) ->
     A = abs(as_float(B)),
     if A > 1.0 -> 0; A < 1.0 -> js_inf; true -> js_nan end;
-t_math_pow(js_inf, js_inf) -> js_inf;
-t_math_pow(js_inf, js_neg_inf) -> 0;
-t_math_pow(js_neg_inf, js_inf) -> js_inf;
-t_math_pow(js_neg_inf, js_neg_inf) -> 0;
-t_math_pow(_, _) -> miss.
+math_pow(js_inf, js_inf) -> js_inf;
+math_pow(js_inf, js_neg_inf) -> 0;
+math_pow(js_neg_inf, js_inf) -> js_inf;
+math_pow(js_neg_inf, js_neg_inf) -> 0;
+math_pow(_, _) -> miss.
 
-t_math_min(js_nan, B) when ?IS_JS_NUMBER(B) -> js_nan;
-t_math_min(A, js_nan) when ?IS_JS_NUMBER(A) -> js_nan;
-t_math_min(js_neg_inf, B) when ?IS_JS_NUMBER(B) -> js_neg_inf;
-t_math_min(A, js_neg_inf) when ?IS_JS_NUMBER(A) -> js_neg_inf;
-t_math_min(js_inf, B) -> num_or_miss(B);
-t_math_min(A, js_inf) -> num_or_miss(A);
-t_math_min(A, B) when is_number(A), is_number(B) ->
+math_min(js_nan, B) when ?IS_JS_NUMBER(B) -> js_nan;
+math_min(A, js_nan) when ?IS_JS_NUMBER(A) -> js_nan;
+math_min(js_neg_inf, B) when ?IS_JS_NUMBER(B) -> js_neg_inf;
+math_min(A, js_neg_inf) when ?IS_JS_NUMBER(A) -> js_neg_inf;
+math_min(js_inf, B) -> num_or_miss(B);
+math_min(A, js_inf) -> num_or_miss(A);
+math_min(A, B) when is_number(A), is_number(B) ->
     if A < B -> A; A > B -> B;
        true -> case is_neg_zero_v(A) of true -> A; false -> B end
     end;
-t_math_min(_, _) -> miss.
+math_min(_, _) -> miss.
 
-t_math_max(js_nan, B) when ?IS_JS_NUMBER(B) -> js_nan;
-t_math_max(A, js_nan) when ?IS_JS_NUMBER(A) -> js_nan;
-t_math_max(js_inf, B) when ?IS_JS_NUMBER(B) -> js_inf;
-t_math_max(A, js_inf) when ?IS_JS_NUMBER(A) -> js_inf;
-t_math_max(js_neg_inf, B) -> num_or_miss(B);
-t_math_max(A, js_neg_inf) -> num_or_miss(A);
-t_math_max(A, B) when is_number(A), is_number(B) ->
+math_max(js_nan, B) when ?IS_JS_NUMBER(B) -> js_nan;
+math_max(A, js_nan) when ?IS_JS_NUMBER(A) -> js_nan;
+math_max(js_inf, B) when ?IS_JS_NUMBER(B) -> js_inf;
+math_max(A, js_inf) when ?IS_JS_NUMBER(A) -> js_inf;
+math_max(js_neg_inf, B) -> num_or_miss(B);
+math_max(A, js_neg_inf) -> num_or_miss(A);
+math_max(A, B) when is_number(A), is_number(B) ->
     if A > B -> A; A < B -> B;
        true -> case is_neg_zero_v(A) of true -> B; false -> A end
     end;
-t_math_max(_, _) -> miss.
+math_max(_, _) -> miss.
 
 as_float(X) when is_float(X) -> X;
 as_float(X) when is_integer(X) -> float(X).

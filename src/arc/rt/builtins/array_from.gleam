@@ -31,7 +31,7 @@ fn from_target(
     KHandle(h) if h != st.realm.array.constructor ->
       case rt_call.is_constructor(st, ctor) {
         True -> {
-          let #(a, st) = rt_call.t_construct(st, ctor, ctor_args, ctor)
+          let #(a, st) = rt_call.construct(st, ctor, ctor_args, ctor)
           #(Constructed(a), st)
         }
         False -> #(FreshArray([]), st)
@@ -87,7 +87,7 @@ fn array_from_array_like(
 ) -> #(JsVal, Agent) {
   case classify(items) {
     KNull | KUndef -> {
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot create array from " <> rt_val.type_of(st, items),
       )
@@ -103,7 +103,7 @@ fn array_from_array_like(
         alloc_array_list(st, values)
       })
       let #(iter_method, st) =
-        rt_obj.t_get_prop(st, items, SymbolKey(symbol_iterator))
+        rt_obj.get_prop(st, items, SymbolKey(symbol_iterator))
       case classify(iter_method) {
         KUndef | KNull -> {
           let #(length, st) = rt_abstract_ops.length_of_array_like(st, items)
@@ -151,7 +151,7 @@ fn array_from_iterator_loop(
       let #(mapped, st) = case map_fn {
         Some(mf) -> {
           use mapped, st <- iter_protocol.or_close(st, rec.iterator, fn(st) {
-            rt_call.t_call(st, mf, this_arg, [item, mk_int(k)])
+            rt_call.call(st, mf, this_arg, [item, mk_int(k)])
           })
           #(mapped, st)
         }
@@ -186,7 +186,7 @@ fn array_from_loop(
       let #(elem, st) = rt_abstract_ops.get_index(st, items, idx)
       let #(mapped, st) = case map_fn {
         None -> #(elem, st)
-        Some(mf) -> rt_call.t_call(st, mf, this_arg, [elem, mk_int(idx)])
+        Some(mf) -> rt_call.call(st, mf, this_arg, [elem, mk_int(idx)])
       }
       let #(target, st) = from_put(st, target, idx, mapped)
       array_from_loop(st, items, idx + 1, length, map_fn, this_arg, target)

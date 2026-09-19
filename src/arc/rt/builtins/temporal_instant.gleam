@@ -43,7 +43,7 @@ import gleam/order
 pub fn to_temporal_instant(st: Agent, item: JsVal) -> #(Int, Agent) {
   case classify(item) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: TemporalObj(data: TemporalInstant(epoch_ns:)), ..) -> #(
           epoch_ns,
           st,
@@ -53,11 +53,11 @@ pub fn to_temporal_instant(st: Agent, item: JsVal) -> #(Int, Agent) {
           ..,
         ) -> #(epoch_ns, st)
         _ -> {
-          let #(prim, st) = rt_val.t_to_primitive(st, item, HintString)
+          let #(prim, st) = rt_val.to_primitive(st, item, HintString)
           case classify(prim) {
             KStr(s) -> parse_instant_to_ns(st, s)
             _ ->
-              rt_val.t_throw_type_error(
+              rt_val.throw_type_error(
                 st,
                 "cannot convert to a Temporal.Instant",
               )
@@ -65,25 +65,25 @@ pub fn to_temporal_instant(st: Agent, item: JsVal) -> #(Int, Agent) {
         }
       }
     KStr(s) -> parse_instant_to_ns(st, s)
-    _ -> rt_val.t_throw_type_error(st, "cannot convert to a Temporal.Instant")
+    _ -> rt_val.throw_type_error(st, "cannot convert to a Temporal.Instant")
   }
 }
 
 fn parse_instant_to_ns(st: Agent, s: String) -> #(Int, Agent) {
   // calendar annotation value is ignored for instant
   case parse_iso_datetime_string(s) {
-    None -> rt_val.t_throw_range_error(st, "invalid instant string: " <> s)
+    None -> rt_val.throw_range_error(st, "invalid instant string: " <> s)
     Some(p) ->
       case p.time, valid_tz_annotation(p.tz) {
         _, False ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "invalid time zone annotation in instant string: " <> s,
           )
         Some(t), True ->
           case p.offset {
             NoOffset ->
-              rt_val.t_throw_range_error(
+              rt_val.throw_range_error(
                 st,
                 "instant string requires a UTC offset",
               )
@@ -97,7 +97,7 @@ fn parse_instant_to_ns(st: Agent, s: String) -> #(Int, Agent) {
             }
           }
         None, True ->
-          rt_val.t_throw_range_error(st, "instant string requires a time")
+          rt_val.throw_range_error(st, "instant string requires a time")
       }
   }
 }
@@ -151,9 +151,9 @@ pub fn instant_from_epoch_ns(
   protos: TemporalProtos,
   arg: JsVal,
 ) -> #(JsVal, Agent) {
-  let #(ns, st) = rt_val.t_to_bigint(st, arg)
+  let #(ns, st) = rt_val.to_bigint(st, arg)
   case is_valid_epoch_ns(ns) {
-    False -> rt_val.t_throw_range_error(st, "epoch nanoseconds out of range")
+    False -> rt_val.throw_range_error(st, "epoch nanoseconds out of range")
     True -> make_instant(st, protos, ns)
   }
 }
@@ -175,21 +175,21 @@ pub fn instant_static(
       #(mk_int(int.compare(a, b) |> order_to_int), st)
     }
     InstantFromEpochMilliseconds -> {
-      let #(n, st) = rt_val.t_to_number(st, helpers.arg_at(args, 0))
+      let #(n, st) = rt_val.to_number(st, helpers.arg_at(args, 0))
       // -0 is integral, so use the ±0-safe check
       let i = case n {
         JInt(i) -> Some(i)
         JFloat(f) -> rt_val.integral_int(f)
         JNan | JPosInf | JNegInf ->
-          rt_val.t_throw_range_error(st, "not a finite number")
+          rt_val.throw_range_error(st, "not a finite number")
       }
       case i {
-        None -> rt_val.t_throw_range_error(st, "not an integral number")
+        None -> rt_val.throw_range_error(st, "not an integral number")
         Some(i) -> {
           let ns = i * ns_per_ms
           case is_valid_epoch_ns(ns) {
             False ->
-              rt_val.t_throw_range_error(st, "epoch milliseconds out of range")
+              rt_val.throw_range_error(st, "epoch milliseconds out of range")
             True -> make_instant(st, protos, ns)
           }
         }
@@ -267,7 +267,7 @@ pub fn instant_method(
       }
     }
     InstantValueOf ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Temporal.Instant cannot be converted with valueOf",
       )
@@ -279,7 +279,7 @@ pub fn instant_method(
       let #(dur, st) = to_temporal_duration(st, helpers.arg_at(args, 0))
       case has_date_units(dur) {
         True ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "Instant arithmetic does not support date units",
           )
@@ -302,7 +302,7 @@ pub fn instant_method(
       let unit_ns = time_unit_ns(smallest_time_unit)
       let max = ns_per_day / unit_ns
       case valid_rounding_increment(inc, max, inclusive: True) {
-        False -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
+        False -> rt_val.throw_range_error(st, "invalid roundingIncrement")
         True -> {
           // rounds as if positive: down is toward the big bang
           let rounded =
@@ -346,8 +346,7 @@ fn instant_until_since(
     unit_rank(smallest) > unit_rank(Hour)
     || unit_rank(largest) > unit_rank(Hour)
   {
-    True ->
-      rt_val.t_throw_range_error(st, "units must be time units for Instant")
+    True -> rt_val.throw_range_error(st, "units must be time units for Instant")
     False -> {
       let Nil = check_diff_setup(st, largest, smallest, inc)
       let smallest_time_unit = rt_val.or_throw(st, require_time_unit(smallest))

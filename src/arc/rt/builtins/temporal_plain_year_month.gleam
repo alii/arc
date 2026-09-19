@@ -154,14 +154,11 @@ pub fn ctor(
   let cal = rt_val.or_throw(st, to_calendar_arg(helpers.arg_at(args, 2)))
   let #(d, st) = truncated_int_arg_or(st, args, 3, 1)
   case is_valid_iso_date(y, m, d) {
-    False -> rt_val.t_throw_range_error(st, "invalid ISO year-month")
+    False -> rt_val.throw_range_error(st, "invalid ISO year-month")
     True ->
       case iso_year_month_within_limits(y, m) {
         False ->
-          rt_val.t_throw_range_error(
-            st,
-            "year-month outside of supported range",
-          )
+          rt_val.throw_range_error(st, "year-month outside of supported range")
         True -> make_year_month_cal(st, protos, y, m, d, cal)
       }
   }
@@ -201,7 +198,7 @@ pub fn to_temporal_year_month(
 ) -> #(IsoDateSlots, Agent) {
   case classify(item) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind:, ..) ->
           case year_month_slot_of(kind) {
             Some(ym) -> {
@@ -218,10 +215,7 @@ pub fn to_temporal_year_month(
       #(ym, st)
     }
     _ ->
-      rt_val.t_throw_type_error(
-        st,
-        "cannot convert to a Temporal.PlainYearMonth",
-      )
+      rt_val.throw_type_error(st, "cannot convert to a Temporal.PlainYearMonth")
   }
 }
 
@@ -370,7 +364,7 @@ pub fn method(
       #(mk_string(format_ym_cal(y, m, rd, cal, cal_name)), st)
     }
     PlainYearMonthValueOf ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Temporal.PlainYearMonth cannot be converted with valueOf",
       )
@@ -388,7 +382,7 @@ pub fn method(
         to_temporal_year_month(st, helpers.arg_at(args, 0), mk_undefined())
       case other.calendar == cal {
         False ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "cannot compute difference between dates of different calendars",
           )
@@ -430,7 +424,7 @@ fn add_subtract(
     || dur.nanoseconds != 0
   let Nil = case has_lower_units {
     True ->
-      rt_val.t_throw_range_error(
+      rt_val.throw_range_error(
         st,
         "only years and months can be added to Temporal.PlainYearMonth",
       )
@@ -443,7 +437,7 @@ fn add_subtract(
       let #(y2, m2) = balance_year_month(y + dur.years, m + dur.months)
       case iso_year_month_within_limits(y2, m2) {
         False ->
-          rt_val.t_throw_range_error(st, "year-month outside supported range")
+          rt_val.throw_range_error(st, "year-month outside supported range")
         True -> make_year_month(st, protos, y2, m2, 1)
       }
     }
@@ -472,7 +466,7 @@ fn add_subtract(
         ))
       case iso_year_month_within_limits(first.year, first.month) {
         False ->
-          rt_val.t_throw_range_error(st, "year-month outside supported range")
+          rt_val.throw_range_error(st, "year-month outside supported range")
         True ->
           make_year_month_cal(
             st,
@@ -557,10 +551,10 @@ fn to_plain_date(
           let date = rt_val.or_throw(st, check_date_limits(date))
           make_date_cal(st, protos, date, cal)
         }
-        None -> rt_val.t_throw_type_error(st, "day is required")
+        None -> rt_val.throw_type_error(st, "day is required")
       }
     }
-    _ -> rt_val.t_throw_type_error(st, "argument must be an object")
+    _ -> rt_val.throw_type_error(st, "argument must be an object")
   }
 }
 
@@ -592,7 +586,7 @@ fn year_month_until_since(
   let smallest = option.unwrap(smallest, Month)
   let largest = option.unwrap(largest, max_unit(smallest, Year))
   let Nil = case unit_rank(smallest) < unit_rank(Month) {
-    True -> rt_val.t_throw_range_error(st, "smallestUnit must be year or month")
+    True -> rt_val.throw_range_error(st, "smallestUnit must be year or month")
     False -> Nil
   }
   let Nil = require_largest_ge_smallest(st, largest, smallest)

@@ -19,7 +19,7 @@ pub fn date_now_uses_wall_clock_test() {
   let #(date, st) = rt_helpers.global(st, "Date")
   let #(now, st) = rt_helpers.call_method(st, date, "now", [])
   assert classify(now) == KNum(JInt(1_234_567))
-  let #(d, st) = rt_call.t_construct(st, date, [], date)
+  let #(d, st) = rt_call.construct(st, date, [], date)
   let #(t, _) = rt_helpers.call_method(st, mk_object(d), "getTime", [])
   assert classify(t) == KNum(JInt(1_234_567))
 }

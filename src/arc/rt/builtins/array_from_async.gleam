@@ -39,13 +39,13 @@ fn attempt_value(
 }
 
 fn settle(st: Agent, target: JsVal, arg: JsVal) -> Agent {
-  let #(_, st) = rt_call.t_call(st, target, mk_undefined(), [arg])
+  let #(_, st) = rt_call.call(st, target, mk_undefined(), [arg])
   st
 }
 
 fn alloc_closure(st: Agent, token: NativeToken) -> #(JsVal, Agent) {
   let #(h, st) =
-    rt_call.t_native_new(
+    rt_call.native_new(
       st,
       Some(st.realm.function.prototype),
       token,
@@ -84,14 +84,14 @@ pub fn from_async(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(#(promise_h, resolve_h, reject_h), st) =
-    rt_async.t_new_promise_capability(st)
+    rt_async.new_promise_capability(st)
   let resolve = mk_object(resolve_h)
   let reject = mk_object(reject_h)
   let st = case
     attempt(st, fn(st) { from_async_closure(st, this, args, resolve, reject) })
   {
     Ok(st) -> st
-    Error(#(thrown, st)) -> rt_async.t_promise_reject(st, promise_h, thrown)
+    Error(#(thrown, st)) -> rt_async.promise_reject(st, promise_h, thrown)
   }
   #(mk_object(promise_h), st)
 }
@@ -110,7 +110,7 @@ fn from_async_closure(
       case rt_val.is_callable(st, map_fn) {
         True -> Some(map_fn)
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             type_name(st, map_fn) <> " is not a function",
           )
@@ -118,7 +118,7 @@ fn from_async_closure(
   }
   let st = case classify(items) {
     KUndef | KNull ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot convert " <> type_name(st, items) <> " to object",
       )
@@ -151,13 +151,13 @@ fn from_async_closure(
       }
     }
     _ -> {
-      let #(iter_val, st) = rt_call.t_call(st, async_method, items, [])
+      let #(iter_val, st) = rt_call.call(st, async_method, items, [])
       let st = case classify(iter_val) {
         KHandle(_) -> st
-        _ -> rt_val.t_throw_type_error(st, "The iterator is not an object")
+        _ -> rt_val.throw_type_error(st, "The iterator is not an object")
       }
       let #(next_method, st) =
-        rt_obj.t_get_prop(st, iter_val, StringKey(Named("next")))
+        rt_obj.get_prop(st, iter_val, StringKey(Named("next")))
       from_async_iterate(
         st,
         c,
@@ -177,14 +177,14 @@ fn from_async_get_method(
   v: JsVal,
   key: types.ObjectKey,
 ) -> #(JsVal, Agent) {
-  let #(method, st) = rt_obj.t_get_prop(st, v, key)
+  let #(method, st) = rt_obj.get_prop(st, v, key)
   case classify(method) {
     KUndef | KNull -> #(mk_undefined(), st)
     _ ->
       case rt_val.is_callable(st, method) {
         True -> #(method, st)
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             type_name(st, method) <> " is not a function",
           )
@@ -204,7 +204,7 @@ fn from_async_iterate(
 ) -> Agent {
   let #(target, st) = case rt_call.is_constructor(st, c) {
     True -> {
-      let #(h, st) = rt_call.t_construct(st, c, [], c)
+      let #(h, st) = rt_call.construct(st, c, [], c)
       #(mk_object(h), st)
     }
     False -> from_async_array_create(st, 0)
@@ -225,7 +225,7 @@ fn from_async_iterate(
 }
 
 fn from_async_request_next(st: Agent, ctx: FromAsyncContext) -> Agent {
-  let #(next_result, st) = rt_call.t_call(st, ctx.next_method, ctx.iter, [])
+  let #(next_result, st) = rt_call.call(st, ctx.next_method, ctx.iter, [])
   from_async_await(
     st,
     next_result,
@@ -242,7 +242,7 @@ fn from_async_await(
 ) -> Agent {
   let #(on_f, st) = alloc_closure(st, on_fulfilled)
   let #(awaited_h, st) = rt_async.promise_resolve_static(st, v)
-  let #(_child, st) = rt_async.t_promise_then(st, awaited_h, on_f, on_rejected)
+  let #(_child, st) = rt_async.promise_then(st, awaited_h, on_f, on_rejected)
   st
 }
 
@@ -262,10 +262,10 @@ fn from_async_next_steps(
 ) -> Agent {
   let st = case classify(next_result) {
     KHandle(_) -> st
-    _ -> rt_val.t_throw_type_error(st, "Iterator result is not an object")
+    _ -> rt_val.throw_type_error(st, "Iterator result is not an object")
   }
   let #(done_val, st) =
-    rt_obj.t_get_prop(st, next_result, StringKey(Named("done")))
+    rt_obj.get_prop(st, next_result, StringKey(Named("done")))
   case rt_val.to_boolean(done_val) {
     True -> {
       let st = from_async_set_length(st, ctx.target, ctx.k)
@@ -273,13 +273,13 @@ fn from_async_next_steps(
     }
     False -> {
       let #(next_value, st) =
-        rt_obj.t_get_prop(st, next_result, StringKey(Named("value")))
+        rt_obj.get_prop(st, next_result, StringKey(Named("value")))
       case ctx.map_fn {
         None -> from_async_define_and_continue(st, ctx, next_value)
         Some(map_fn) ->
           case
             attempt_value(st, fn(st) {
-              rt_call.t_call(st, map_fn, ctx.this_arg, [
+              rt_call.call(st, map_fn, ctx.this_arg, [
                 next_value,
                 mk_int(ctx.k),
               ])
@@ -357,7 +357,7 @@ fn from_async_close_then_reject(
       let #(rw, st) =
         alloc_closure(st, ArrayN(ArrayFromAsyncRejectWith(error: err, reject:)))
       let #(inner_h, st) = rt_async.promise_resolve_static(st, inner)
-      let #(_child, st) = rt_async.t_promise_then(st, inner_h, rw, rw)
+      let #(_child, st) = rt_async.promise_then(st, inner_h, rw, rw)
       st
     }
   }
@@ -368,7 +368,7 @@ fn call_return_method(st: Agent, iter: JsVal) -> #(Option(JsVal), Agent) {
     KHandle(_) -> {
       let got =
         attempt_value(st, fn(st) {
-          rt_obj.t_get_prop(st, iter, StringKey(Named("return")))
+          rt_obj.get_prop(st, iter, StringKey(Named("return")))
         })
       case got {
         Error(#(_inner_thrown, st)) -> #(None, st)
@@ -387,7 +387,7 @@ fn call_if_callable(
   case rt_val.is_callable(st, ret_fn) {
     False -> #(None, st)
     True ->
-      case rt_call.t_try_call(st, ret_fn, iter, []) {
+      case rt_call.try_call(st, ret_fn, iter, []) {
         #(rt_call.ThrowCompletion(_inner_thrown), st) -> #(None, st)
         #(rt_call.NormalCompletion(inner), st) -> #(Some(inner), st)
       }
@@ -406,7 +406,7 @@ fn from_async_array_like(
   let #(len, st) = rt_abstract_ops.length_of_array_like(st, items)
   let #(target, st) = case rt_call.is_constructor(st, c) {
     True -> {
-      let #(h, st) = rt_call.t_construct(st, c, [mk_int(len)], c)
+      let #(h, st) = rt_call.construct(st, c, [mk_int(len)], c)
       #(mk_object(h), st)
     }
     False -> from_async_array_create(st, len)
@@ -434,7 +434,7 @@ fn from_async_like_step(st: Agent, ctx: FromAsyncLikeContext) -> Agent {
     }
     True -> {
       let #(k_val, st) =
-        rt_obj.t_get_prop(st, ctx.items, StringKey(key.index(ctx.k)))
+        rt_obj.get_prop(st, ctx.items, StringKey(key.index(ctx.k)))
       from_async_await(
         st,
         k_val,
@@ -463,7 +463,7 @@ fn from_async_like_value_steps(
     None -> from_async_like_define_and_continue(st, ctx, v)
     Some(map_fn) -> {
       let #(mapped, st) =
-        rt_call.t_call(st, map_fn, ctx.this_arg, [v, mk_int(ctx.k)])
+        rt_call.call(st, map_fn, ctx.this_arg, [v, mk_int(ctx.k)])
       from_async_await(
         st,
         mapped,
@@ -494,7 +494,7 @@ fn from_async_like_define_and_continue(
 
 fn from_async_array_create(st: Agent, len: Int) -> #(JsVal, Agent) {
   case len > max_array_length {
-    True -> rt_val.t_throw_range_error(st, "Invalid array length")
+    True -> rt_val.throw_range_error(st, "Invalid array length")
     False -> {
       let #(h, st) =
         realm_ops.alloc_object(st, ArrayObj(len), st.realm.array.prototype)
@@ -506,10 +506,10 @@ fn from_async_array_create(st: Agent, len: Int) -> #(JsVal, Agent) {
 fn from_async_define_own(st: Agent, target: JsVal, k: Int, v: JsVal) -> Agent {
   let h = case classify(target) {
     KHandle(target_h) -> target_h
-    _ -> rt_val.t_throw_type_error(st, "Cannot define property on a primitive")
+    _ -> rt_val.throw_type_error(st, "Cannot define property on a primitive")
   }
   let #(ok, st) =
-    rt_obj.t_define_own_data(
+    rt_obj.define_own_data(
       st,
       h,
       StringKey(key.index(k)),
@@ -521,7 +521,7 @@ fn from_async_define_own(st: Agent, target: JsVal, k: Int, v: JsVal) -> Agent {
   case ok {
     True -> st
     False ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot define property " <> int.to_string(k) <> " on object",
       )
@@ -532,11 +532,11 @@ fn from_async_set_length(st: Agent, target: JsVal, n: Int) -> Agent {
   case classify(target) {
     KHandle(_) -> {
       let #(ok, st) =
-        rt_obj.t_set_prop(st, target, StringKey(Named("length")), mk_int(n))
+        rt_obj.set_prop(st, target, StringKey(Named("length")), mk_int(n))
       case ok {
         True -> st
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Cannot set property length, it is read-only",
           )

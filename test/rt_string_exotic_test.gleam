@@ -21,8 +21,8 @@ fn key(name: String) {
 }
 
 fn wrapper(st: Agent, s: String) -> #(JsVal, Agent) {
-  let #(ctor, st) = rt_lang.t_global_get(st, <<"String">>)
-  let #(h, st) = rt_call.t_construct(st, ctor, [mk_string(s)], ctor)
+  let #(ctor, st) = rt_lang.global_get(st, <<"String">>)
+  let #(h, st) = rt_call.construct(st, ctor, [mk_string(s)], ctor)
   #(mk_object(h), st)
 }
 
@@ -46,7 +46,7 @@ pub fn index_and_length_descriptors_test() {
   let st = agent()
   let #(s, st) = wrapper(st, "abc")
   let sh = handle(s)
-  let #(d, st) = rt_obj.t_get_own_property(st, sh, key("1"))
+  let #(d, st) = rt_obj.get_own_property(st, sh, key("1"))
   let assert Some(DataProperty(
     value:,
     writable: False,
@@ -55,9 +55,9 @@ pub fn index_and_length_descriptors_test() {
     ..,
   )) = d
   assert classify(value) == KStr("b")
-  let #(d, st) = rt_obj.t_get_own_property(st, sh, key("3"))
+  let #(d, st) = rt_obj.get_own_property(st, sh, key("3"))
   assert d == None
-  let #(d, st) = rt_obj.t_get_own_property(st, sh, key("length"))
+  let #(d, st) = rt_obj.get_own_property(st, sh, key("length"))
   let assert Some(DataProperty(
     value:,
     writable: False,
@@ -66,13 +66,13 @@ pub fn index_and_length_descriptors_test() {
     ..,
   )) = d
   assert classify(value) == KNum(JInt(3))
-  let #(v, st) = rt_obj.t_get_prop(st, s, key("2"))
+  let #(v, st) = rt_obj.get_prop(st, s, key("2"))
   assert classify(v) == KStr("c")
-  let #(v, st) = rt_obj.t_get_prop(st, s, key("3"))
+  let #(v, st) = rt_obj.get_prop(st, s, key("3"))
   assert classify(v) == KUndef
-  let #(has, st) = rt_obj.t_has_prop(st, s, key("0"))
+  let #(has, st) = rt_obj.has_prop(st, s, key("0"))
   assert has
-  let #(has, _) = rt_obj.t_has_prop(st, s, key("3"))
+  let #(has, _) = rt_obj.has_prop(st, s, key("3"))
   assert !has
 }
 
@@ -80,25 +80,25 @@ pub fn synthesized_properties_are_read_only_test() {
   let st = agent()
   let #(s, st) = wrapper(st, "abc")
   let sh = handle(s)
-  let #(ok, st) = rt_obj.t_set_prop(st, s, key("0"), mk_string("z"))
+  let #(ok, st) = rt_obj.set_prop(st, s, key("0"), mk_string("z"))
   assert !ok
-  let #(ok, st) = rt_obj.t_set_prop(st, s, key("length"), mk_int(9))
+  let #(ok, st) = rt_obj.set_prop(st, s, key("length"), mk_int(9))
   assert !ok
-  let #(v, st) = rt_obj.t_get_prop(st, s, key("0"))
+  let #(v, st) = rt_obj.get_prop(st, s, key("0"))
   assert classify(v) == KStr("a")
-  let #(other, st) = rt_obj.t_new_object_literal(st)
+  let #(other, st) = rt_obj.new_object_literal(st)
   let #(ok, st) =
-    rt_obj.t_set_prop_with_receiver(st, handle(other), key("1"), mk_int(1), s)
+    rt_obj.set_prop_with_receiver(st, handle(other), key("1"), mk_int(1), s)
   assert !ok
-  let #(ok, st) = rt_obj.t_set_prop(st, s, key("5"), mk_string("x"))
+  let #(ok, st) = rt_obj.set_prop(st, s, key("5"), mk_string("x"))
   assert ok
-  let #(ok, st) = rt_obj.t_delete_prop(st, sh, key("0"))
+  let #(ok, st) = rt_obj.delete_prop(st, sh, key("0"))
   assert !ok
-  let #(ok, st) = rt_obj.t_delete_prop(st, sh, key("length"))
+  let #(ok, st) = rt_obj.delete_prop(st, sh, key("length"))
   assert !ok
-  let #(ok, st) = rt_obj.t_delete_prop(st, sh, key("5"))
+  let #(ok, st) = rt_obj.delete_prop(st, sh, key("5"))
   assert ok
-  let #(has, _) = rt_obj.t_has_prop(st, s, key("5"))
+  let #(has, _) = rt_obj.has_prop(st, s, key("5"))
   assert !has
 }
 
@@ -107,26 +107,26 @@ pub fn define_own_property_validates_against_fixed_descriptors_test() {
   let #(s, st) = wrapper(st, "abc")
   let sh = handle(s)
   let #(ok, st) =
-    rt_obj.t_define_own_prop(st, sh, key("0"), value_desc(mk_string("a")))
+    rt_obj.define_own_prop(st, sh, key("0"), value_desc(mk_string("a")))
   assert ok
   let #(ok, st) =
-    rt_obj.t_define_own_prop(st, sh, key("0"), value_desc(mk_string("z")))
+    rt_obj.define_own_prop(st, sh, key("0"), value_desc(mk_string("z")))
   assert !ok
   let #(ok, st) =
-    rt_obj.t_define_own_prop(st, sh, key("length"), value_desc(mk_int(3)))
+    rt_obj.define_own_prop(st, sh, key("length"), value_desc(mk_int(3)))
   assert ok
   let #(ok, st) =
-    rt_obj.t_define_own_prop(st, sh, key("length"), value_desc(mk_int(4)))
+    rt_obj.define_own_prop(st, sh, key("length"), value_desc(mk_int(4)))
   assert !ok
   let widen =
     ParsedDesc(..value_desc(mk_string("a")), value: None, writable: Some(True))
-  let #(ok, st) = rt_obj.t_define_own_prop(st, sh, key("0"), widen)
+  let #(ok, st) = rt_obj.define_own_prop(st, sh, key("0"), widen)
   assert !ok
   let accessor =
     ParsedDesc(..widen, writable: None, get: Some(types.mk_undefined()))
-  let #(ok, st) = rt_obj.t_define_own_prop(st, sh, key("1"), accessor)
+  let #(ok, st) = rt_obj.define_own_prop(st, sh, key("1"), accessor)
   assert !ok
-  let #(keys, _) = rt_obj.t_own_keys(st, sh)
+  let #(keys, _) = rt_obj.own_keys(st, sh)
   assert keys == [key("0"), key("1"), key("2"), key("length")]
 }
 
@@ -134,12 +134,12 @@ pub fn own_property_keys_order_test() {
   let st = agent()
   let #(s, st) = wrapper(st, "abc")
   let sh = handle(s)
-  let #(_, st) = rt_obj.t_set_prop(st, s, key("foo"), mk_int(1))
-  let #(_, st) = rt_obj.t_set_prop(st, s, key("7"), mk_int(2))
-  let #(_, st) = rt_obj.t_set_prop(st, s, key("bar"), mk_int(3))
+  let #(_, st) = rt_obj.set_prop(st, s, key("foo"), mk_int(1))
+  let #(_, st) = rt_obj.set_prop(st, s, key("7"), mk_int(2))
+  let #(_, st) = rt_obj.set_prop(st, s, key("bar"), mk_int(3))
   let sym = types.symbol_iterator
-  let #(_, st) = rt_obj.t_set_prop(st, s, SymbolKey(sym), mk_int(4))
-  let #(keys, st) = rt_obj.t_own_keys(st, sh)
+  let #(_, st) = rt_obj.set_prop(st, s, SymbolKey(sym), mk_int(4))
+  let #(keys, st) = rt_obj.own_keys(st, sh)
   assert keys
     == [
       StringKey(Index(0)),
@@ -151,30 +151,28 @@ pub fn own_property_keys_order_test() {
       StringKey(Named("bar")),
       SymbolKey(sym),
     ]
-  let #(names, st) = rt_obj.t_for_in_keys(st, s)
+  let #(names, st) = rt_obj.for_in_keys(st, s)
   assert list.map(names, classify)
     == list.map(["0", "1", "2", "7", "foo", "bar"], KStr)
-  let #(object, st) = rt_lang.t_global_get(st, <<"Object">>)
-  let #(ks, st) = rt_call.t_call_method(st, object, key("keys"), [s])
-  let #(joined, st) =
-    rt_call.t_call_method(st, ks, key("join"), [mk_string(",")])
+  let #(object, st) = rt_lang.global_get(st, <<"Object">>)
+  let #(ks, st) = rt_call.call_method(st, object, key("keys"), [s])
+  let #(joined, st) = rt_call.call_method(st, ks, key("join"), [mk_string(",")])
   assert classify(joined) == KStr("0,1,2,7,foo,bar")
   let #(ns, st) =
-    rt_call.t_call_method(st, object, key("getOwnPropertyNames"), [s])
-  let #(joined, _) =
-    rt_call.t_call_method(st, ns, key("join"), [mk_string(",")])
+    rt_call.call_method(st, object, key("getOwnPropertyNames"), [s])
+  let #(joined, _) = rt_call.call_method(st, ns, key("join"), [mk_string(",")])
   assert classify(joined) == KStr("0,1,2,7,length,foo,bar")
 }
 
 pub fn frozen_string_wrapper_test() {
   let st = agent()
   let #(s, st) = wrapper(st, "ab")
-  let #(object, st) = rt_lang.t_global_get(st, <<"Object">>)
-  let #(frozen, st) = rt_call.t_call_method(st, object, key("isFrozen"), [s])
+  let #(object, st) = rt_lang.global_get(st, <<"Object">>)
+  let #(frozen, st) = rt_call.call_method(st, object, key("isFrozen"), [s])
   assert classify(frozen) == types.KBool(False)
-  let #(_, st) = rt_call.t_call_method(st, object, key("freeze"), [s])
-  let #(frozen, st) = rt_call.t_call_method(st, object, key("isFrozen"), [s])
+  let #(_, st) = rt_call.call_method(st, object, key("freeze"), [s])
+  let #(frozen, st) = rt_call.call_method(st, object, key("isFrozen"), [s])
   assert classify(frozen) == types.KBool(True)
-  let #(v, _) = rt_obj.t_get_prop(st, s, key("1"))
+  let #(v, _) = rt_obj.get_prop(st, s, key("1"))
   assert classify(v) == KStr("b")
 }

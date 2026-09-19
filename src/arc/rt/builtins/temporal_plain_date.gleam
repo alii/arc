@@ -173,7 +173,7 @@ pub fn ctor(
   let #(d, st) = truncated_int_arg(st, args, 2)
   let cal = rt_val.or_throw(st, to_calendar_arg(helpers.arg_at(args, 3)))
   case is_valid_iso_date(y, m, d) {
-    False -> rt_val.t_throw_range_error(st, "invalid ISO date")
+    False -> rt_val.throw_range_error(st, "invalid ISO date")
     True -> {
       let date = rt_val.or_throw(st, check_date_limits(IsoDate(y, m, d)))
       make_date_cal(st, protos, date, cal)
@@ -229,7 +229,7 @@ pub fn to_temporal_date(
       let #(_opts, st) = get_overflow_option_from_value(st, options)
       #(#(rt_val.or_throw(st, check_date_limits(p.date)), cal), st)
     }
-    _ -> rt_val.t_throw_type_error(st, "cannot convert to a Temporal.PlainDate")
+    _ -> rt_val.throw_type_error(st, "cannot convert to a Temporal.PlainDate")
   }
 }
 
@@ -337,7 +337,7 @@ pub fn method(
       #(mk_string(format_iso_date(d) <> calendar_suffix(cal_name, cal)), st)
     }
     PlainDateValueOf ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Temporal.PlainDate cannot be converted with valueOf; use compare() or equals()",
       )
@@ -411,14 +411,14 @@ pub fn method(
         KHandle(oh) -> {
           let #(tz_val, st) = get_named(st, oh, "timeZone")
           let #(tz, st) = case classify(tz_val) {
-            KUndef -> rt_val.t_throw_type_error(st, "time zone is required")
+            KUndef -> rt_val.throw_type_error(st, "time zone is required")
             KStr(tz_text) -> time_zone_from_string(st, tz_text)
-            _ -> rt_val.t_throw_type_error(st, "time zone must be a string")
+            _ -> rt_val.throw_type_error(st, "time zone must be a string")
           }
           let #(plain_time, st) = get_named(st, oh, "plainTime")
           #(tz, plain_time, st)
         }
-        _ -> rt_val.t_throw_type_error(st, "time zone must be a string")
+        _ -> rt_val.throw_type_error(st, "time zone must be a string")
       }
       let #(ns, st) = case classify(plain_time) {
         KUndef -> #(rt_val.or_throw(st, start_of_day_ns(tz, d)), st)
@@ -434,7 +434,7 @@ pub fn method(
         to_temporal_date(st, helpers.arg_at(args, 0), mk_undefined())
       case other_cal == cal {
         False ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "cannot compute difference between dates of different calendars",
           )
@@ -466,7 +466,7 @@ fn date_until_since(
   let largest = option.unwrap(largest, max_unit(smallest, Day))
   case unit_rank(smallest) < unit_rank(Day) {
     True ->
-      rt_val.t_throw_range_error(
+      rt_val.throw_range_error(
         st,
         "smallestUnit must be a date unit for PlainDate",
       )

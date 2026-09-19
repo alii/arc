@@ -27,7 +27,7 @@ fn agent() -> Agent {
 }
 
 fn small_gc_agent() -> Agent {
-  let st = agent() |> rt_gc.t_collect([])
+  let st = agent() |> rt_gc.collect([])
   Agent(..st, store: Store(..st.store, gc_threshold: 64))
 }
 

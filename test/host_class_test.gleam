@@ -15,7 +15,7 @@ fn get(
   recv: JsVal,
   name: String,
 ) -> #(JsVal, Context(host)) {
-  let #(v, st) = rt_obj.t_get_prop(ctx.agent, recv, StringKey(Named(name)))
+  let #(v, st) = rt_obj.get_prop(ctx.agent, recv, StringKey(Named(name)))
   #(v, Context(..ctx, agent: st))
 }
 

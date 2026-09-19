@@ -59,7 +59,7 @@ fn compile_source(
       }
     })
   result.map_error(compiled, fn(msg) {
-    rt_val.t_new_error(agent, SyntaxError, msg)
+    rt_val.new_error(agent, SyntaxError, msg)
   })
 }
 
@@ -78,7 +78,7 @@ fn top_level_activation(
   this: JsVal,
   eval_env: Option(Handle),
 ) -> State {
-  let #(unit_id, agent) = rt_store.t_next_unit_id(agent)
+  let #(unit_id, agent) = rt_store.next_unit_id(agent)
   State(
     agent:,
     pc: 0,
@@ -155,14 +155,14 @@ pub fn hook(
   case outcome, kind {
     Ok(#(f, agent)), DynamicFunction -> #(f, name_anonymous(agent, f))
     Ok(#(v, agent)), _ -> #(v, agent)
-    Error(#(thrown, agent)), _ -> rt_store.t_throw(agent, thrown)
+    Error(#(thrown, agent)), _ -> rt_store.throw(agent, thrown)
   }
 }
 
 fn name_anonymous(agent: Agent, f: JsVal) -> Agent {
   case classify(f) {
     KHandle(h) ->
-      rt_store.t_cell_update(agent, h, fn(cell) {
+      rt_store.cell_update(agent, h, fn(cell) {
         case cell {
           SObject(kind: BytecodeFn(template:, ..) as kind, ..) ->
             SObject(
@@ -272,7 +272,7 @@ fn run_direct_eval(
       True, _, _ | _, GlobalVarEnv, _ -> #(None, caller.agent)
       False, FrameVarEnv, Some(h) -> #(Some(h), caller.agent)
       False, FrameVarEnv, None -> {
-        let #(h, agent) = rt_env.t_new_eval_env(caller.agent)
+        let #(h, agent) = rt_env.new_eval_env(caller.agent)
         #(Some(h), agent)
       }
     }
@@ -328,7 +328,7 @@ fn caller_boxes(
     list.append(named, lex)
   }
   result.map_error(boxes, fn(idx) {
-    rt_val.t_new_error(
+    rt_val.new_error(
       caller.agent,
       TypeError,
       "direct eval: local slot " <> int.to_string(idx) <> " missing",

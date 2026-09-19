@@ -235,15 +235,15 @@ pub fn init(
   let #(now_h, st) =
     common.init_namespace(st, object_proto, "Temporal.Now", now_props)
 
-  let #(pd_prop, st) = rt_store.t_builtin_property(st, mk_object(pd_ctor))
-  let #(pt_prop, st) = rt_store.t_builtin_property(st, mk_object(pt_ctor))
-  let #(pdt_prop, st) = rt_store.t_builtin_property(st, mk_object(pdt_ctor))
-  let #(pym_prop, st) = rt_store.t_builtin_property(st, mk_object(pym_ctor))
-  let #(pmd_prop, st) = rt_store.t_builtin_property(st, mk_object(pmd_ctor))
-  let #(dur_prop, st) = rt_store.t_builtin_property(st, mk_object(dur_ctor))
-  let #(ins_prop, st) = rt_store.t_builtin_property(st, mk_object(ins_ctor))
-  let #(zdt_prop, st) = rt_store.t_builtin_property(st, mk_object(zdt_ctor))
-  let #(now_prop, st) = rt_store.t_builtin_property(st, mk_object(now_h))
+  let #(pd_prop, st) = rt_store.builtin_property(st, mk_object(pd_ctor))
+  let #(pt_prop, st) = rt_store.builtin_property(st, mk_object(pt_ctor))
+  let #(pdt_prop, st) = rt_store.builtin_property(st, mk_object(pdt_ctor))
+  let #(pym_prop, st) = rt_store.builtin_property(st, mk_object(pym_ctor))
+  let #(pmd_prop, st) = rt_store.builtin_property(st, mk_object(pmd_ctor))
+  let #(dur_prop, st) = rt_store.builtin_property(st, mk_object(dur_ctor))
+  let #(ins_prop, st) = rt_store.builtin_property(st, mk_object(ins_ctor))
+  let #(zdt_prop, st) = rt_store.builtin_property(st, mk_object(zdt_ctor))
+  let #(now_prop, st) = rt_store.builtin_property(st, mk_object(now_h))
   common.init_namespace(st, object_proto, "Temporal", [
     #("PlainDate", pd_prop),
     #("PlainTime", pt_prop),
@@ -313,7 +313,7 @@ pub fn dispatch(
     | TemporalDurationCtor(..)
     | TemporalInstantCtor(..)
     | TemporalZonedDateTimeCtor(..) ->
-      rt_val.t_throw_type_error(st, "Temporal constructor requires new")
+      rt_val.throw_type_error(st, "Temporal constructor requires new")
     TemporalPlainDateStatic(name:, protos:) ->
       temporal_plain_date.static(st, name, protos, args)
     TemporalPlainDateGetter(getter:) ->
@@ -410,7 +410,7 @@ pub fn dispatch_construct(
       let #(v, st) = temporal_zoned_date_time.ctor(st, protos, args)
       apply_new_target_proto(st, new_target, v)
     }
-    _ -> rt_val.t_throw_type_error(st, "not a constructor")
+    _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }
 

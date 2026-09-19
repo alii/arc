@@ -32,7 +32,7 @@ fn promise_static(st: Agent, method: String, arg: JsVal) -> #(JsVal, Agent) {
 
 fn new_error(st: Agent, msg: String) -> #(JsVal, Agent) {
   let #(error, st) = rt_helpers.global(st, "Error")
-  let #(h, st) = rt_call.t_construct(st, error, [mk_string(msg)], error)
+  let #(h, st) = rt_call.construct(st, error, [mk_string(msg)], error)
   #(mk_object(h), st)
 }
 
@@ -59,7 +59,7 @@ pub fn rejection_handled_later_in_same_drain_not_reported_test() {
   let #(p, st) = promise_static(st, "reject", mk_string("late"))
   let #(noop, st) = rt_helpers.func(st, fn(st, _) { #(mk_undefined(), st) })
   let st =
-    rt_async.t_enqueue_job(
+    rt_async.enqueue_job(
       st,
       HostJob(fn(st) { rt_helpers.call_method(st, p, "catch", [noop]).1 }),
     )
@@ -81,7 +81,7 @@ pub fn host_job_runs_fifo_with_reaction_jobs_test() {
   let #(second, st) = recorder(st, "then2")
   let #(_, st) = rt_helpers.call_method(st, p, "then", [first])
   let st =
-    rt_async.t_enqueue_job(
+    rt_async.enqueue_job(
       st,
       HostJob(fn(st) {
         rt_helpers.record("host")
@@ -97,7 +97,7 @@ pub fn host_job_runs_fifo_with_reaction_jobs_test() {
 pub fn throwing_host_job_is_reported_test() {
   let st = recording_agent()
   let #(e, st) = new_error(st, "hj")
-  let st = rt_async.t_enqueue_job(st, HostJob(rt_store.t_throw(_, e)))
+  let st = rt_async.enqueue_job(st, HostJob(rt_store.throw(_, e)))
   let _ = rt_async.drain(st)
   assert reports() == ["Uncaught (in promise job) Error: hj"]
 }
@@ -111,13 +111,12 @@ fn is_extensible(st: Agent, v: JsVal) -> Bool {
 pub fn promise_takes_own_properties_test() {
   let st = rt_helpers.agent()
   let #(p, st) = promise_static(st, "resolve", mk_int(1))
-  let #(_, st) =
-    rt_obj.t_set_prop(st, p, StringKey(Named("tag")), mk_string("t"))
+  let #(_, st) = rt_obj.set_prop(st, p, StringKey(Named("tag")), mk_string("t"))
   let #(tag, st) = rt_helpers.get(st, p, "tag")
   assert classify(tag) == KStr("t")
   assert is_extensible(st, p)
   let assert KHandle(ph) = classify(p)
-  let #(keys, _) = rt_obj.t_own_keys(st, ph)
+  let #(keys, _) = rt_obj.own_keys(st, ph)
   assert keys == [StringKey(Named("tag"))]
 }
 
@@ -129,7 +128,7 @@ pub fn promise_subclass_test() {
     rt_helpers.as_code(fn(st, frame, args) {
       let assert KHandle(active) = classify(rt_helpers.frame_at(2, frame))
       let new_target = rt_helpers.frame_at(4, frame)
-      let #(h, st) = rt_class.t_super_call(st, active, args, new_target)
+      let #(h, st) = rt_class.super_call(st, active, args, new_target)
       #(mk_object(h), st)
     })
   let flags =
@@ -143,24 +142,23 @@ pub fn promise_subclass_test() {
       is_async: False,
       is_strict: True,
     )
-  let #(p_ctor_h, st) =
-    rt_call.t_fn_new(st, ctor_code, flags, "P", 1, None, None)
-  let #(p_proto_h, st) = rt_class.t_setup(st, p_ctor_h, promise)
+  let #(p_ctor_h, st) = rt_call.fn_new(st, ctor_code, flags, "P", 1, None, None)
+  let #(p_proto_h, st) = rt_class.setup(st, p_ctor_h, promise)
   let p_ctor = mk_object(p_ctor_h)
   let #(executor, st) =
     rt_helpers.func(st, fn(st, args) {
       let assert [resolve, ..] = args
-      rt_call.t_call(st, resolve, mk_undefined(), [mk_int(1)])
+      rt_call.call(st, resolve, mk_undefined(), [mk_int(1)])
     })
-  let #(inst_h, st) = rt_call.t_construct(st, p_ctor, [executor], p_ctor)
+  let #(inst_h, st) = rt_call.construct(st, p_ctor, [executor], p_ctor)
   let inst = mk_object(inst_h)
-  assert rt_obj.t_get_prototype_of(st, inst_h).0 == Some(p_proto_h)
-  let #(is_p, st) = rt_ops.t_instance_of(st, inst, p_ctor)
+  assert rt_obj.get_prototype_of(st, inst_h).0 == Some(p_proto_h)
+  let #(is_p, st) = rt_ops.instance_of(st, inst, p_ctor)
   assert is_p
   let #(noop, st) = rt_helpers.func(st, fn(st, _) { #(mk_undefined(), st) })
   let #(child, st) = rt_helpers.call_method(st, inst, "then", [noop])
   let assert KHandle(child_h) = classify(child)
-  assert rt_obj.t_get_prototype_of(st, child_h).0 == Some(p_proto_h)
+  assert rt_obj.get_prototype_of(st, child_h).0 == Some(p_proto_h)
   let #(seen, st) = recorder(st, "settled")
   let #(_, st) = rt_helpers.call_method(st, inst, "then", [seen])
   let _ = rt_async.drain(st)
@@ -171,7 +169,7 @@ pub fn generator_object_is_extensible_with_own_props_test() {
   let st = rt_helpers.agent()
   let loc = rt_helpers.as_loc(#(mk_string("a"), mk_string("b"), mk_string("d")))
   let #(gen_h, st) =
-    rt_async.t_gen_start(
+    rt_async.gen_start(
       st,
       rt_helpers.counter_sm(),
       rt_helpers.as_frame(#(
@@ -184,10 +182,10 @@ pub fn generator_object_is_extensible_with_own_props_test() {
       loc,
     )
   let gen = mk_object(gen_h)
-  assert rt_obj.t_get_prototype_of(st, gen_h).0
+  assert rt_obj.get_prototype_of(st, gen_h).0
     == Some(st.realm.generator.prototype)
   assert is_extensible(st, gen)
-  let #(_, st) = rt_obj.t_set_prop(st, gen, StringKey(Named("x")), mk_int(5))
+  let #(_, st) = rt_obj.set_prop(st, gen, StringKey(Named("x")), mk_int(5))
   let #(x, st) = rt_helpers.get(st, gen, "x")
   assert classify(x) == KNum(JInt(5))
   let next_value = fn(st) {

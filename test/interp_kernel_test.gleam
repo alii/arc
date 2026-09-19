@@ -20,7 +20,7 @@ pub fn add_numbers_and_strings_test() {
 
 pub fn add_object_misses_test() {
   let st = rt_helpers.agent()
-  let #(obj, _st) = rt_obj.t_new_object_literal(st)
+  let #(obj, _st) = rt_obj.new_object_literal(st)
   assert is_miss(kernel.add(obj, mk_int(1)))
   assert is_miss(kernel.sub(mk_string("3"), mk_int(1)))
 }
@@ -45,8 +45,8 @@ pub fn compare_and_equality_test() {
 
 pub fn get_and_put_field_test() {
   let st = rt_helpers.agent()
-  let #(obj, st) = rt_obj.t_new_object_literal(st)
-  let #(_, st) = rt_obj.t_set_prop(st, obj, StringKey(Named("x")), mk_int(42))
+  let #(obj, st) = rt_obj.new_object_literal(st)
+  let #(_, st) = rt_obj.set_prop(st, obj, StringKey(Named("x")), mk_int(42))
   assert classify(kernel.get_field(st, obj, key.Named("x"))) == KNum(JInt(42))
   assert classify(kernel.get_field(st, obj, key.Named("missing"))) == KUndef
   let assert KHandle(_) =
@@ -68,16 +68,16 @@ pub fn get_and_put_field_test() {
     kernel.put_field(st.store, obj, key.Named("x"), mk_int(43), create: True)
   assert !is_miss(store)
   let st = types.Agent(..st, store:)
-  let #(v, st) = rt_obj.t_get_prop(st, obj, StringKey(Named("x")))
+  let #(v, st) = rt_obj.get_prop(st, obj, StringKey(Named("x")))
   assert classify(v) == KNum(JInt(43))
   let store =
     kernel.put_field(st.store, obj, key.Named("y"), mk_int(1), create: True)
   assert !is_miss(store)
   let st = types.Agent(..st, store:)
-  let #(keys, st) = rt_obj.t_own_keys(st, handle_of(obj))
+  let #(keys, st) = rt_obj.own_keys(st, handle_of(obj))
   assert keys == [StringKey(Named("x")), StringKey(Named("y"))]
   let #(desc, st) =
-    rt_obj.t_get_own_property(st, handle_of(obj), StringKey(Named("y")))
+    rt_obj.get_own_property(st, handle_of(obj), StringKey(Named("y")))
   let assert Some(types.DataProperty(
     writable: True,
     enumerable: True,
@@ -91,7 +91,7 @@ pub fn get_and_put_field_test() {
     mk_int(1),
     create: True,
   ))
-  let #(_, st) = rt_obj.t_prevent_extensions(st, handle_of(obj))
+  let #(_, st) = rt_obj.prevent_extensions(st, handle_of(obj))
   assert is_miss(kernel.put_field(
     st.store,
     obj,
@@ -103,7 +103,7 @@ pub fn get_and_put_field_test() {
 
 pub fn get_and_put_elem_test() {
   let st = rt_helpers.agent()
-  let #(arr, st) = rt_obj.t_new_array(st, [mk_int(10), mk_int(20)])
+  let #(arr, st) = rt_obj.new_array(st, [mk_int(10), mk_int(20)])
   assert classify(kernel.get_elem(st.store, arr, mk_int(1))) == KNum(JInt(20))
   assert is_miss(kernel.get_elem(st.store, arr, mk_int(2)))
   assert classify(kernel.get_elem(st.store, arr, mk_string("0")))
@@ -111,7 +111,7 @@ pub fn get_and_put_elem_test() {
   let store = kernel.put_elem(st.store, arr, mk_int(2), mk_int(30))
   assert !is_miss(store)
   let st = types.Agent(..st, store:)
-  let #(len, st) = rt_obj.t_get_prop(st, arr, StringKey(Named("length")))
+  let #(len, st) = rt_obj.get_prop(st, arr, StringKey(Named("length")))
   assert classify(len) == KNum(JInt(3))
   assert is_miss(kernel.put_elem(st.store, arr, mk_int(5), mk_int(1)))
 }
@@ -125,19 +125,19 @@ fn array_prototype(
   st: types.Agent,
   arr: JsVal,
 ) -> #(types.Handle, types.Agent) {
-  let #(proto, st) = rt_obj.t_get_prototype_of(st, handle_of(arr))
+  let #(proto, st) = rt_obj.get_prototype_of(st, handle_of(arr))
   let assert Some(p) = proto
   #(p, st)
 }
 
 pub fn put_elem_inherited_setter_on_append_misses_test() {
   let st = rt_helpers.agent()
-  let #(arr, st) = rt_obj.t_new_array(st, [mk_int(10), mk_int(20)])
+  let #(arr, st) = rt_obj.new_array(st, [mk_int(10), mk_int(20)])
   let #(proto, st) = array_prototype(st, arr)
   let #(setter, st) =
     rt_helpers.func(st, fn(st, _args) { #(mk_undefined(), st) })
   let #(_, st) =
-    rt_obj.t_define_own_accessor(
+    rt_obj.define_own_accessor(
       st,
       proto,
       StringKey(Index(2)),
@@ -152,12 +152,12 @@ pub fn put_elem_inherited_setter_on_append_misses_test() {
 
 pub fn put_elem_inherited_readonly_on_hole_fill_misses_test() {
   let st = rt_helpers.agent()
-  let #(arr, st) = rt_obj.t_new_array(st, [mk_int(0), mk_int(1), mk_int(2)])
-  let #(_, st) = rt_obj.t_delete_prop(st, handle_of(arr), StringKey(Index(1)))
+  let #(arr, st) = rt_obj.new_array(st, [mk_int(0), mk_int(1), mk_int(2)])
+  let #(_, st) = rt_obj.delete_prop(st, handle_of(arr), StringKey(Index(1)))
   assert !is_miss(kernel.put_elem(st.store, arr, mk_int(1), mk_int(9)))
   let #(proto, st) = array_prototype(st, arr)
   let #(_, st) =
-    rt_obj.t_define_own_data(
+    rt_obj.define_own_data(
       st,
       proto,
       StringKey(Index(1)),
@@ -171,9 +171,9 @@ pub fn put_elem_inherited_readonly_on_hole_fill_misses_test() {
 
 pub fn put_elem_frozen_length_on_append_misses_test() {
   let st = rt_helpers.agent()
-  let #(arr, st) = rt_obj.t_new_array(st, [mk_int(1), mk_int(2)])
+  let #(arr, st) = rt_obj.new_array(st, [mk_int(1), mk_int(2)])
   let #(_, st) =
-    rt_obj.t_define_own_data(
+    rt_obj.define_own_data(
       st,
       handle_of(arr),
       StringKey(Named("length")),
@@ -188,16 +188,15 @@ pub fn put_elem_frozen_length_on_append_misses_test() {
 
 pub fn put_elem_sparse_hole_walks_chain_test() {
   let st = rt_helpers.agent()
-  let #(arr, st) = rt_obj.t_new_array(st, [])
-  let #(_, st) =
-    rt_obj.t_set_prop(st, arr, StringKey(Index(100_000)), mk_int(1))
+  let #(arr, st) = rt_obj.new_array(st, [])
+  let #(_, st) = rt_obj.set_prop(st, arr, StringKey(Index(100_000)), mk_int(1))
   assert !is_miss(kernel.put_elem(st.store, arr, mk_int(5), mk_int(7)))
   let #(object_ctor, st) = rt_helpers.global(st, "Object")
   let #(object_proto, st) = rt_helpers.get(st, object_ctor, "prototype")
   let #(setter, st) =
     rt_helpers.func(st, fn(st, _args) { #(mk_undefined(), st) })
   let #(_, st) =
-    rt_obj.t_define_own_accessor(
+    rt_obj.define_own_accessor(
       st,
       handle_of(object_proto),
       StringKey(Index(5)),
@@ -211,16 +210,10 @@ pub fn put_elem_sparse_hole_walks_chain_test() {
 
 pub fn put_elem_past_index_range_misses_test() {
   let st = rt_helpers.agent()
-  let #(arr, st) = rt_obj.t_new_array(st, [])
+  let #(arr, st) = rt_obj.new_array(st, [])
+  let #(_, st) = rt_obj.set_prop(st, arr, StringKey(Index(100_000)), mk_int(1))
   let #(_, st) =
-    rt_obj.t_set_prop(st, arr, StringKey(Index(100_000)), mk_int(1))
-  let #(_, st) =
-    rt_obj.t_set_prop(
-      st,
-      arr,
-      StringKey(Named("length")),
-      mk_int(4_294_967_295),
-    )
+    rt_obj.set_prop(st, arr, StringKey(Named("length")), mk_int(4_294_967_295))
   assert is_miss(kernel.put_elem(
     st.store,
     arr,
@@ -237,12 +230,12 @@ pub fn put_elem_past_index_range_misses_test() {
 
 pub fn guard_catches_js_throw_test() {
   let st = rt_helpers.agent()
-  let #(obj, st) = rt_obj.t_new_object_literal(st)
+  let #(obj, st) = rt_obj.new_object_literal(st)
   let assert guard.Value(value:, agent: _) =
-    guard.guard3(rt_obj.t_get_prop, st, obj, StringKey(Named("nope")))
+    guard.guard3(rt_obj.get_prop, st, obj, StringKey(Named("nope")))
   assert classify(value) == KUndef
   let assert guard.Thrown(agent: st, thrown:) =
-    guard.guard3(rt_obj.t_get_prop, st, mk_undefined(), StringKey(Named("x")))
-  let #(msg, _) = rt_val.t_to_string(st, thrown)
+    guard.guard3(rt_obj.get_prop, st, mk_undefined(), StringKey(Named("x")))
+  let #(msg, _) = rt_val.to_string(st, thrown)
   assert msg == "TypeError: Cannot read properties of undefined (reading 'x')"
 }

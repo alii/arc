@@ -78,17 +78,13 @@ fn inspect_object(
   depth: Int,
   visited: Set(Handle),
 ) -> String {
-  case rt_obj.as_sobject(rt_store.t_cell_get(st, h)) {
+  case rt_obj.as_sobject(rt_store.cell_get(st, h)) {
     SObject(kind:, props:, elements:, symbol_props:, ..) ->
       case kind {
         ArrayObj(length:) -> inspect_array(st, elements, length, depth, visited)
         CompiledFn(..) | BytecodeFn(..) | NativeFn(..) | BoundFn(..) -> {
           let name = case
-            rt_obj.t_ordinary_own_property(
-              st,
-              h,
-              types.StringKey(Named("name")),
-            )
+            rt_obj.ordinary_own_property(st, h, types.StringKey(Named("name")))
           {
             Some(DataProperty(value:, ..)) ->
               case classify(value) {
@@ -327,7 +323,7 @@ fn temporal_label(data: TemporalData) -> String {
 }
 
 fn error_display(st: Agent, h: Handle) -> Option(String) {
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     SObject(kind: ErrorObj(stack:), ..) -> {
       let own_stack = case stack {
         "" -> None
@@ -359,7 +355,7 @@ fn error_property(
   fuel: Int,
 ) -> Option(String) {
   use <- bool.guard(fuel <= 0, None)
-  case rt_obj.as_sobject(rt_store.t_cell_get(st, h)) {
+  case rt_obj.as_sobject(rt_store.cell_get(st, h)) {
     SObject(props:, proto:, ..) ->
       case dict.get(props, Named(key)) {
         Ok(DataProperty(value:, ..)) ->

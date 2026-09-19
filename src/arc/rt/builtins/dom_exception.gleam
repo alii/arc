@@ -57,7 +57,7 @@ fn construct(
 ) -> #(JsVal, Agent) {
   case classify(new_target) {
     KUndef ->
-      rt_val.t_throw_type_error(st, "Constructor DOMException requires 'new'")
+      rt_val.throw_type_error(st, "Constructor DOMException requires 'new'")
     _ -> {
       let #(proto, st) =
         rt_call.get_prototype_from_constructor(st, new_target, fn(_realm) {
@@ -66,8 +66,8 @@ fn construct(
       let #(msg_arg, name_arg) = helpers.two_args_or_undefined(args)
       let #(message, st) = arg_string(st, msg_arg, "")
       let #(name, st) = arg_string(st, name_arg, "Error")
-      let #(msg_prop, st) = rt_store.t_builtin_property(st, mk_string(message))
-      let #(name_prop, st) = rt_store.t_builtin_property(st, mk_string(name))
+      let #(msg_prop, st) = rt_store.builtin_property(st, mk_string(message))
+      let #(name_prop, st) = rt_store.builtin_property(st, mk_string(name))
       let #(h, st) =
         common.alloc_error_object(st, proto, [
           #("message", msg_prop),
@@ -82,16 +82,15 @@ fn construct(
 fn arg_string(st: Agent, arg: JsVal, default: String) -> #(String, Agent) {
   case classify(arg) {
     KUndef -> #(default, st)
-    _ -> rt_val.t_to_string(st, arg)
+    _ -> rt_val.to_string(st, arg)
   }
 }
 
 fn get_code(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(_) -> {
-      let #(name_val, st) =
-        rt_obj.t_get_prop(st, this, StringKey(Named("name")))
-      let #(name, st) = rt_val.t_to_string(st, name_val)
+      let #(name_val, st) = rt_obj.get_prop(st, this, StringKey(Named("name")))
+      let #(name, st) = rt_val.to_string(st, name_val)
       #(mk_int(legacy_code(name)), st)
     }
     _ -> #(mk_int(0), st)

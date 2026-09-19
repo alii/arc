@@ -39,7 +39,7 @@ import gleam/result
 import gleam/string
 
 pub fn get_named(st: Agent, h: Handle, key: String) -> #(JsVal, Agent) {
-  rt_obj.t_get_prop(st, mk_object(h), StringKey(Named(key)))
+  rt_obj.get_prop(st, mk_object(h), StringKey(Named(key)))
 }
 
 pub fn calendar_slot_of(
@@ -187,15 +187,15 @@ pub fn read_month_code(
   case classify(v) {
     KUndef -> #(None, st)
     _ -> {
-      let #(prim, st) = rt_val.t_to_primitive(st, v, HintString)
+      let #(prim, st) = rt_val.to_primitive(st, v, HintString)
       case classify(prim) {
         KStr(s) ->
           case parse_month_code_grammar(s) {
             Ok(mc) -> #(Some(mc), st)
             Error(Nil) ->
-              rt_val.t_throw_range_error(st, "invalid monthCode: " <> s)
+              rt_val.throw_range_error(st, "invalid monthCode: " <> s)
           }
-        _ -> rt_val.t_throw_type_error(st, "monthCode must be a string")
+        _ -> rt_val.throw_type_error(st, "monthCode must be a string")
       }
     }
   }
@@ -244,10 +244,10 @@ pub fn read_bag_era(st: Agent, h: Handle) -> #(Option(String), Agent) {
   case classify(v) {
     KUndef -> #(None, st)
     _ -> {
-      let #(prim, st) = rt_val.t_to_primitive(st, v, HintString)
+      let #(prim, st) = rt_val.to_primitive(st, v, HintString)
       case classify(prim) {
         KStr(s) -> #(Some(s), st)
-        _ -> rt_val.t_throw_type_error(st, "era must be a string")
+        _ -> rt_val.throw_type_error(st, "era must be a string")
       }
     }
   }
@@ -279,9 +279,9 @@ pub fn read_bag_calendar(
     KHandle(_) ->
       case temporal_data_of(st, v) |> option.then(calendar_slot_of) {
         Some(calendar) -> #(calendar, st)
-        None -> rt_val.t_throw_type_error(st, "invalid calendar")
+        None -> rt_val.throw_type_error(st, "invalid calendar")
       }
-    _ -> rt_val.t_throw_type_error(st, "invalid calendar")
+    _ -> rt_val.throw_type_error(st, "invalid calendar")
   }
 }
 
@@ -294,9 +294,9 @@ pub fn to_temporal_calendar_identifier(
     KHandle(_) ->
       case temporal_data_of(st, v) |> option.then(calendar_slot_of) {
         Some(calendar) -> #(calendar, st)
-        None -> rt_val.t_throw_type_error(st, "not a valid calendar")
+        None -> rt_val.throw_type_error(st, "not a valid calendar")
       }
-    _ -> rt_val.t_throw_type_error(st, "not a valid calendar")
+    _ -> rt_val.throw_type_error(st, "not a valid calendar")
   }
 }
 
@@ -343,7 +343,7 @@ pub fn require_partial_bag(st: Agent, v: JsVal) -> #(Handle, Agent) {
     KHandle(h) ->
       case temporal_data_of(st, v) {
         Some(_) ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "with() argument must be a plain object, not a Temporal instance",
           )
@@ -355,27 +355,27 @@ pub fn require_partial_bag(st: Agent, v: JsVal) -> #(Handle, Agent) {
               case classify(tz) {
                 KUndef -> #(h, st)
                 _ ->
-                  rt_val.t_throw_type_error(
+                  rt_val.throw_type_error(
                     st,
                     "with() argument must not have a timeZone property",
                   )
               }
             }
             _ ->
-              rt_val.t_throw_type_error(
+              rt_val.throw_type_error(
                 st,
                 "with() argument must not have a calendar property",
               )
           }
         }
       }
-    _ -> rt_val.t_throw_type_error(st, "with() argument must be an object")
+    _ -> rt_val.throw_type_error(st, "with() argument must be an object")
   }
 }
 
 pub fn require_nonempty_fields(st: Agent, is_empty is_empty: Bool) -> Nil {
   case is_empty {
-    True -> rt_val.t_throw_type_error(st, "with() requires at least one field")
+    True -> rt_val.throw_type_error(st, "with() requires at least one field")
     False -> Nil
   }
 }

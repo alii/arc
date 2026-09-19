@@ -7125,7 +7125,7 @@ pub fn module_repl_harness_globals_test() -> Nil {
 
   let global_object = mk_object(st.realm.global_object)
   let assert #(True, st) =
-    rt_obj.t_has_prop(st, global_object, StringKey(Named("greetFromHarness")))
+    rt_obj.has_prop(st, global_object, StringKey(Named("greetFromHarness")))
 
   let module_source = "greetFromHarness()"
   let specifier = "<test-module>"
@@ -7152,7 +7152,7 @@ fn run_export(
   callee: JsVal,
   args: List(JsVal),
 ) -> #(Result(JsValKind, JsValKind), Agent) {
-  let #(completion, st) = rt_call.t_try_call(st, callee, mk_undefined(), args)
+  let #(completion, st) = rt_call.try_call(st, callee, mk_undefined(), args)
   let st = safepoint.end_turn(st, [completion_value(completion)])
   #(classify_outcome(completion), st)
 }

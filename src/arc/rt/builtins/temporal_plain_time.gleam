@@ -138,7 +138,7 @@ pub fn ctor(
   let t =
     IsoTime(hour:, minute:, second:, millisecond:, microsecond:, nanosecond:)
   case is_valid_time(t) {
-    False -> rt_val.t_throw_range_error(st, "invalid time")
+    False -> rt_val.throw_range_error(st, "invalid time")
     True -> make_time(st, protos, t)
   }
 }
@@ -222,7 +222,7 @@ pub fn method(
       #(mk_string(format_iso_time(t2, precision)), st)
     }
     PlainTimeValueOf ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Temporal.PlainTime cannot be converted with valueOf",
       )
@@ -256,7 +256,7 @@ pub fn method(
       let unit_ns = time_unit_ns(smallest_time_unit)
       let max = ns_per_day / unit_ns
       case valid_rounding_increment(inc, max, inclusive: False) {
-        False -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
+        False -> rt_val.throw_range_error(st, "invalid roundingIncrement")
         True -> {
           let rounded = round_to_increment(time_to_ns(t), inc * unit_ns, mode)
           let t2 = ns_to_time(floor_mod(rounded, ns_per_day))
@@ -288,7 +288,7 @@ fn time_until_since(
     || unit_rank(largest) > unit_rank(Hour)
   {
     True ->
-      rt_val.t_throw_range_error(st, "units must be time units for PlainTime")
+      rt_val.throw_range_error(st, "units must be time units for PlainTime")
     False -> {
       let Nil = require_largest_ge_smallest(st, largest, smallest)
       let smallest_time_unit = rt_val.or_throw(st, require_time_unit(smallest))
@@ -369,7 +369,7 @@ pub fn to_temporal_time(
 ) -> #(IsoTime, Agent) {
   case classify(item) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(
           kind: TemporalObj(data: TemporalTime(
             hour:,
@@ -418,7 +418,7 @@ pub fn to_temporal_time(
       let #(_o, st) = get_overflow_option_from_value(st, options)
       #(t, st)
     }
-    _ -> rt_val.t_throw_type_error(st, "cannot convert to a Temporal.PlainTime")
+    _ -> rt_val.throw_type_error(st, "cannot convert to a Temporal.PlainTime")
   }
 }
 
@@ -490,10 +490,7 @@ pub fn time_from_bag(
   let #(f, st) = read_time_fields(st, bag)
   case f == no_time_fields {
     True ->
-      rt_val.t_throw_type_error(
-        st,
-        "invalid property bag for Temporal.PlainTime",
-      )
+      rt_val.throw_type_error(st, "invalid property bag for Temporal.PlainTime")
     False -> {
       let #(overflow, st) = get_overflow_option_from_value(st, options)
       let t0 = time_fields_apply(f, midnight)

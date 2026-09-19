@@ -62,7 +62,7 @@ fn unseeded() -> a {
   panic as "JsOps unseeded — init_realm fills"
 }
 
-pub fn t_cell_new(st: Agent, cell: Cell) -> #(Handle, Agent) {
+pub fn cell_new(st: Agent, cell: Cell) -> #(Handle, Agent) {
   let store = st.store
   let id = store.next_id
   let store =
@@ -75,7 +75,7 @@ pub fn t_cell_new(st: Agent, cell: Cell) -> #(Handle, Agent) {
   #(Handle(id), Agent(..st, store: store))
 }
 
-pub fn t_cell_new_with(
+pub fn cell_new_with(
   st: Agent,
   seqs: Int,
   build: fn(Int) -> Cell,
@@ -93,7 +93,7 @@ pub fn t_cell_new_with(
   #(Handle(id), Agent(..st, store: store))
 }
 
-pub fn t_cell_new_pair(
+pub fn cell_new_pair(
   st: Agent,
   build: fn(Handle, Handle) -> #(Cell, Cell),
 ) -> #(Handle, Handle, Agent) {
@@ -112,10 +112,10 @@ pub fn t_cell_new_pair(
   #(a, b, Agent(..st, store: store))
 }
 
-@external(erlang, "arc_rt_store_ffi", "t_cell_get")
-pub fn t_cell_get(st: Agent, h: Handle) -> Cell
+@external(erlang, "arc_rt_store_ffi", "cell_get")
+pub fn cell_get(st: Agent, h: Handle) -> Cell
 
-pub fn t_cell_set(st: Agent, h: Handle, cell: Cell) -> Agent {
+pub fn cell_set(st: Agent, h: Handle, cell: Cell) -> Agent {
   let store = st.store
   let Handle(id) = h
   let cells = arena.set(id, cell, store.cells)
@@ -131,28 +131,28 @@ pub fn t_cell_set(st: Agent, h: Handle, cell: Cell) -> Agent {
 }
 
 // boxes must be sbox so gc traces them
-pub fn t_box_new(st: Agent, value: JsVal) -> #(Handle, Agent) {
-  t_cell_new(st, SBox(value))
+pub fn box_new(st: Agent, value: JsVal) -> #(Handle, Agent) {
+  cell_new(st, SBox(value))
 }
 
-@external(erlang, "arc_rt_store_ffi", "t_box_get")
-pub fn t_box_get(st: Agent, h: Handle) -> JsVal
+@external(erlang, "arc_rt_store_ffi", "box_get")
+pub fn box_get(st: Agent, h: Handle) -> JsVal
 
-pub fn t_box_set(st: Agent, h: Handle, value: JsVal) -> Agent {
-  t_cell_set(st, h, SBox(value))
+pub fn box_set(st: Agent, h: Handle, value: JsVal) -> Agent {
+  cell_set(st, h, SBox(value))
 }
 
-pub fn t_cell_update(st: Agent, h: Handle, f: fn(Cell) -> Cell) -> Agent {
-  t_cell_set(st, h, f(t_cell_get(st, h)))
+pub fn cell_update(st: Agent, h: Handle, f: fn(Cell) -> Cell) -> Agent {
+  cell_set(st, h, f(cell_get(st, h)))
 }
 
-pub fn t_cell_free(st: Agent, h: Handle) -> Agent {
+pub fn cell_free(st: Agent, h: Handle) -> Agent {
   let store = st.store
   let Handle(id) = h
   Agent(..st, store: Store(..store, cells: arena.free(id, store.cells)))
 }
 
-pub fn t_pin_root(st: Agent, h: Handle) -> Agent {
+pub fn pin_root(st: Agent, h: Handle) -> Agent {
   let store = st.store
   let Handle(id) = h
   Agent(
@@ -161,7 +161,7 @@ pub fn t_pin_root(st: Agent, h: Handle) -> Agent {
   )
 }
 
-pub fn t_next_prop_seq(st: Agent) -> #(Int, Agent) {
+pub fn next_prop_seq(st: Agent) -> #(Int, Agent) {
   let store = st.store
   #(
     store.prop_seq,
@@ -170,8 +170,8 @@ pub fn t_next_prop_seq(st: Agent) -> #(Int, Agent) {
 }
 
 // spelled out rather than via types.*_property: one call per property made
-pub fn t_frozen_property(st: Agent, value: JsVal) -> #(Property, Agent) {
-  let #(seq, st) = t_next_prop_seq(st)
+pub fn frozen_property(st: Agent, value: JsVal) -> #(Property, Agent) {
+  let #(seq, st) = next_prop_seq(st)
   let prop =
     DataProperty(
       value:,
@@ -183,8 +183,8 @@ pub fn t_frozen_property(st: Agent, value: JsVal) -> #(Property, Agent) {
   #(prop, st)
 }
 
-pub fn t_plain_property(st: Agent, value: JsVal) -> #(Property, Agent) {
-  let #(seq, st) = t_next_prop_seq(st)
+pub fn plain_property(st: Agent, value: JsVal) -> #(Property, Agent) {
+  let #(seq, st) = next_prop_seq(st)
   let prop =
     DataProperty(
       value:,
@@ -196,8 +196,8 @@ pub fn t_plain_property(st: Agent, value: JsVal) -> #(Property, Agent) {
   #(prop, st)
 }
 
-pub fn t_builtin_property(st: Agent, value: JsVal) -> #(Property, Agent) {
-  let #(seq, st) = t_next_prop_seq(st)
+pub fn builtin_property(st: Agent, value: JsVal) -> #(Property, Agent) {
+  let #(seq, st) = next_prop_seq(st)
   let prop =
     DataProperty(
       value:,
@@ -209,7 +209,7 @@ pub fn t_builtin_property(st: Agent, value: JsVal) -> #(Property, Agent) {
   #(prop, st)
 }
 
-pub fn t_next_private_id(st: Agent) -> #(Int, Agent) {
+pub fn next_private_id(st: Agent) -> #(Int, Agent) {
   let meta = st.store.meta
   #(
     meta.next_private_id,
@@ -217,7 +217,7 @@ pub fn t_next_private_id(st: Agent) -> #(Int, Agent) {
   )
 }
 
-pub fn t_next_symbol_id(st: Agent) -> #(Int, Agent) {
+pub fn next_symbol_id(st: Agent) -> #(Int, Agent) {
   let meta = st.store.meta
   #(
     meta.next_symbol_id,
@@ -225,7 +225,7 @@ pub fn t_next_symbol_id(st: Agent) -> #(Int, Agent) {
   )
 }
 
-pub fn t_next_unit_id(st: Agent) -> #(Int, Agent) {
+pub fn next_unit_id(st: Agent) -> #(Int, Agent) {
   let meta = st.store.meta
   #(
     meta.next_unit_id,
@@ -237,7 +237,7 @@ fn with_meta(st: Agent, meta: StoreMeta) -> Agent {
   Agent(..st, store: Store(..st.store, meta:))
 }
 
-pub fn t_enter_call(st: Agent) -> Agent {
+pub fn enter_call(st: Agent) -> Agent {
   case st.call_depth >= limits.max_call_depth {
     True -> {
       let #(_, st) = stack_overflow(st)
@@ -250,15 +250,15 @@ pub fn t_enter_call(st: Agent) -> Agent {
 pub fn stack_overflow(st: Agent) -> #(JsVal, Agent) {
   let #(e, st) =
     st.store.ops.new_error(st, RangeError, "Maximum call stack size exceeded")
-  t_throw(st, e)
+  throw(st, e)
 }
 
-pub fn t_leave_call(st: Agent) -> Agent {
+pub fn leave_call(st: Agent) -> Agent {
   Agent(..st, call_depth: st.call_depth - 1)
 }
 
-@external(erlang, "arc_rt_store_ffi", "t_throw")
-pub fn t_throw(st: Agent, err_val: JsVal) -> a
+@external(erlang, "arc_rt_store_ffi", "throw")
+pub fn throw(st: Agent, err_val: JsVal) -> a
 
 // wire key tuple as an object key, no copy
 @external(erlang, "arc_rt_store_ffi", "as_object_key")

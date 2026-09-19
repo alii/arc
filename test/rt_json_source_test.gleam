@@ -16,7 +16,7 @@ fn key(name: String) {
 
 fn json(st: Agent, method: String, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(ns, st) = rt_helpers.global(st, "JSON")
-  rt_call.t_call_method(st, ns, key(method), args)
+  rt_call.call_method(st, ns, key(method), args)
 }
 
 fn reviver(
@@ -38,7 +38,7 @@ fn reviver(
     rt_helpers.as_code(fn(st, frame, args) {
       body(st, rt_helpers.frame_at(1, frame), args)
     })
-  let #(h, st) = rt_call.t_fn_new(st, code, flags, "reviver", 3, None, None)
+  let #(h, st) = rt_call.fn_new(st, code, flags, "reviver", 3, None, None)
   #(types.mk_object(h), st)
 }
 
@@ -46,14 +46,14 @@ fn record_call(st: Agent, args: List(JsVal)) -> Agent {
   let assert [k, _v, context] = args
   let assert KStr(name) = classify(k)
   let assert KHandle(ctx) = classify(context)
-  let #(proto, st) = rt_obj.t_get_prototype_of(st, ctx)
+  let #(proto, st) = rt_obj.get_prototype_of(st, ctx)
   assert proto == Some(st.realm.object.prototype)
-  let #(keys, st) = rt_obj.t_own_keys(st, ctx)
+  let #(keys, st) = rt_obj.own_keys(st, ctx)
   let #(source, st) = case keys {
     [] -> #(None, st)
     [k] -> {
       assert k == key("source")
-      let #(desc, st) = rt_obj.t_get_own_property(st, ctx, k)
+      let #(desc, st) = rt_obj.get_own_property(st, ctx, k)
       let assert Some(DataProperty(
         value:,
         writable: True,
@@ -164,7 +164,7 @@ pub fn object_literal_source_test() {
   assert calls() == [#("", None)]
   let #(single, st) = parse_logged(st, "{\"42\":37}")
   assert calls() == [#("42", Some("37")), #("", None)]
-  let #(v, st) = rt_obj.t_get_prop(st, single, key("42"))
+  let #(v, st) = rt_obj.get_prop(st, single, key("42"))
   assert num(v) == 37.0
   let #(_, st) = parse_logged(st, "{\"x\": 1, \"y\": 2}")
   assert calls() == [#("x", Some("1")), #("y", Some("2")), #("", None)]
@@ -188,7 +188,7 @@ pub fn string_source_is_verbatim_test() {
   let st = rt_helpers.agent()
   let #(v, st) = parse_logged(st, "{\"s\": \"a\\u0041\\n\"}")
   assert calls() == [#("s", Some("\"a\\u0041\\n\"")), #("", None)]
-  let #(s, _) = rt_obj.t_get_prop(st, v, key("s"))
+  let #(s, _) = rt_obj.get_prop(st, v, key("s"))
   assert classify(s) == KStr("aA\n")
 }
 
@@ -218,10 +218,10 @@ fn forward_modifier(
   let assert KStr(name) = classify(k)
   let st = record_call(st, args)
   let st = case name == first {
-    True -> rt_obj.t_set_prop(st, this, key(later), replacement).1
+    True -> rt_obj.set_prop(st, this, key(later), replacement).1
     False -> st
   }
-  rt_obj.t_get_prop(st, this, key(name))
+  rt_obj.get_prop(st, this, key(name))
 }
 
 // test262: reviver-forward-modifies-object.js
@@ -230,10 +230,10 @@ pub fn array_forward_modification_drops_source_test() {
   let #(f, st) = forward_modifier(st, "0", "1", mk_int(42))
   let #(o, st) = json(st, "parse", [mk_string("[1, 2]"), f])
   assert calls() == [#("0", Some("1")), #("1", None), #("", None)]
-  let #(second, st) = rt_obj.t_get_prop(st, o, key("1"))
+  let #(second, st) = rt_obj.get_prop(st, o, key("1"))
   assert num(second) == 42.0
-  let #(repl, st) = rt_obj.t_new_object_literal(st)
-  let #(_, st) = rt_obj.t_set_prop(st, repl, key("foo"), mk_string("bar"))
+  let #(repl, st) = rt_obj.new_object_literal(st)
+  let #(_, st) = rt_obj.set_prop(st, repl, key("foo"), mk_string("bar"))
   let #(f, st) = forward_modifier(st, "0", "1", repl)
   let #(_, _) = json(st, "parse", [mk_string("[1, 2]"), f])
   assert calls()
@@ -245,9 +245,9 @@ pub fn object_forward_modification_drops_source_test() {
   let #(f, st) = forward_modifier(st, "p", "q", mk_string("foo"))
   let #(o, st) = json(st, "parse", [mk_string("{\"p\":1, \"q\":2}"), f])
   assert calls() == [#("p", Some("1")), #("q", None), #("", None)]
-  let #(q, st) = rt_obj.t_get_prop(st, o, key("q"))
+  let #(q, st) = rt_obj.get_prop(st, o, key("q"))
   assert classify(q) == KStr("foo")
-  let #(repl, st) = rt_obj.t_new_array(st, [mk_string("foo")])
+  let #(repl, st) = rt_obj.new_array(st, [mk_string("foo")])
   let #(f, st) = forward_modifier(st, "p", "q", repl)
   let #(_, _) = json(st, "parse", [mk_string("{\"p\":1, \"q\":2}"), f])
   assert calls() == [#("p", Some("1")), #("0", None), #("q", None), #("", None)]
@@ -261,10 +261,10 @@ pub fn chained_forward_modifications_test() {
       let assert KStr(name) = classify(k)
       let st = record_call(st, args)
       let st = case name {
-        "a" -> rt_obj.t_set_prop(st, this, key("b"), mk_int(2)).1
+        "a" -> rt_obj.set_prop(st, this, key("b"), mk_int(2)).1
         "b" -> {
           assert num(v) == 2.0
-          rt_obj.t_set_prop(st, this, key("c"), mk_int(3)).1
+          rt_obj.set_prop(st, this, key("c"), mk_int(3)).1
         }
         "c" -> {
           assert num(v) == 3.0
@@ -289,12 +289,12 @@ pub fn appended_element_has_no_source_test() {
       let st = record_call(st, args)
       let st = case is_one(v) {
         True -> {
-          let #(inner, st) = rt_obj.t_get_prop(st, this, key("1"))
+          let #(inner, st) = rt_obj.get_prop(st, this, key("1"))
           rt_helpers.call_method(st, inner, "push", [mk_string("barf")]).1
         }
         False -> st
       }
-      rt_obj.t_get_prop(st, this, key(name))
+      rt_obj.get_prop(st, this, key(name))
     })
   let #(o, st) = json(st, "parse", [mk_string("[1,[]]"), f])
   assert calls() == [#("0", Some("1")), #("0", None), #("1", None), #("", None)]
@@ -311,12 +311,12 @@ pub fn added_property_has_no_source_test() {
       let st = record_call(st, args)
       let st = case is_one(v) {
         True -> {
-          let #(q, st) = rt_obj.t_get_prop(st, this, key("q"))
-          rt_obj.t_set_prop(st, q, key("added"), mk_string("barf")).1
+          let #(q, st) = rt_obj.get_prop(st, this, key("q"))
+          rt_obj.set_prop(st, q, key("added"), mk_string("barf")).1
         }
         False -> st
       }
-      rt_obj.t_get_prop(st, this, key(name))
+      rt_obj.get_prop(st, this, key(name))
     })
   let #(o, st) = json(st, "parse", [mk_string("{\"p\":1,\"q\":{}}"), f])
   assert calls()
@@ -328,8 +328,8 @@ pub fn added_property_has_no_source_test() {
 pub fn raw_json_stringifies_verbatim_test() {
   let st = rt_helpers.agent()
   let #(raw, st) = json(st, "rawJSON", [mk_string("1e3")])
-  let #(holder, st) = rt_obj.t_new_object_literal(st)
-  let #(_, st) = rt_obj.t_set_prop(st, holder, key("n"), raw)
+  let #(holder, st) = rt_obj.new_object_literal(st)
+  let #(_, st) = rt_obj.set_prop(st, holder, key("n"), raw)
   let #(out, st) = json(st, "stringify", [holder])
   assert classify(out) == KStr("{\"n\":1e3}")
   let #(yes, st) = json(st, "isRawJSON", [raw])

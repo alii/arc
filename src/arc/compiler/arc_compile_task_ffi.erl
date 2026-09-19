@@ -1,14 +1,14 @@
 %% worker catches and ships its crash so caller re-raises same class
 -module(arc_compile_task_ffi).
--export([run_compile_task/2]).
+-export([run/2]).
 
 -define(COMPILE_TASK_THRESHOLD, 262144).         %% bytes
 -define(COMPILE_HEAP_WORDS_PER_BYTE, 16).
 -define(COMPILE_HEAP_MAX_WORDS, 134217728).      %% ~1GB
 
-run_compile_task(SourceBytes, Task) when SourceBytes < ?COMPILE_TASK_THRESHOLD ->
+run(SourceBytes, Task) when SourceBytes < ?COMPILE_TASK_THRESHOLD ->
     Task();
-run_compile_task(SourceBytes, Task) ->
+run(SourceBytes, Task) ->
     Heap = min(SourceBytes * ?COMPILE_HEAP_WORDS_PER_BYTE,
                ?COMPILE_HEAP_MAX_WORDS),
     Self = self(),

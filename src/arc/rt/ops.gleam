@@ -16,7 +16,7 @@ import gleam/order
 import gleam/string
 
 // §13.10.2 instanceof; called by name from arc_rt_obj_ffi
-pub fn t_instance_of(st: Agent, v: JsVal, target: JsVal) -> #(Bool, Agent) {
+pub fn instance_of(st: Agent, v: JsVal, target: JsVal) -> #(Bool, Agent) {
   case classify(target) {
     KHandle(ctor_h) -> {
       let ops = st.store.ops
@@ -25,9 +25,9 @@ pub fn t_instance_of(st: Agent, v: JsVal, target: JsVal) -> #(Bool, Agent) {
       case rt_val.is_nullish(handler) {
         True -> {
           case rt_val.is_callable(st, target) {
-            True -> t_ordinary_has_instance(st, ctor_h, v)
+            True -> ordinary_has_instance(st, ctor_h, v)
             False ->
-              rt_val.t_throw_type_error(
+              rt_val.throw_type_error(
                 st,
                 "Right-hand side of instanceof is not callable",
               )
@@ -40,7 +40,7 @@ pub fn t_instance_of(st: Agent, v: JsVal, target: JsVal) -> #(Bool, Agent) {
               #(rt_val.to_boolean(res), st)
             }
             False ->
-              rt_val.t_throw_type_error(
+              rt_val.throw_type_error(
                 st,
                 "Symbol.hasInstance handler is not callable",
               )
@@ -49,7 +49,7 @@ pub fn t_instance_of(st: Agent, v: JsVal, target: JsVal) -> #(Bool, Agent) {
       }
     }
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Right-hand side of instanceof is not callable",
       )
@@ -57,14 +57,14 @@ pub fn t_instance_of(st: Agent, v: JsVal, target: JsVal) -> #(Bool, Agent) {
 }
 
 // §7.3.22 steps 2-7, caller checked callable
-pub fn t_ordinary_has_instance(
+pub fn ordinary_has_instance(
   st: Agent,
   ctor: Handle,
   v: JsVal,
 ) -> #(Bool, Agent) {
-  case rt_store.t_cell_get(st, ctor) {
+  case rt_store.cell_get(st, ctor) {
     SObject(kind: BoundFn(target:, ..), ..) ->
-      t_instance_of(st, v, mk_object(target))
+      instance_of(st, v, mk_object(target))
     _ ->
       case classify(v) {
         KHandle(obj_h) -> {
@@ -77,7 +77,7 @@ pub fn t_ordinary_has_instance(
           case classify(proto_val) {
             KHandle(proto_h) -> proto_walk(st, obj_h, proto_h, 10_000)
             _ ->
-              rt_val.t_throw_type_error(
+              rt_val.throw_type_error(
                 st,
                 "Function has non-object prototype in instanceof check",
               )
@@ -96,9 +96,9 @@ fn proto_walk(
   fuel: Int,
 ) -> #(Bool, Agent) {
   case fuel <= 0 {
-    True -> rt_val.t_throw_range_error(st, "Maximum call stack size exceeded")
+    True -> rt_val.throw_range_error(st, "Maximum call stack size exceeded")
     False -> {
-      let #(next, st) = rt_obj.t_get_prototype_of(st, obj)
+      let #(next, st) = rt_obj.get_prototype_of(st, obj)
       case next {
         None -> #(False, st)
         Some(proto_h) ->
@@ -188,22 +188,22 @@ fn compare_bigint_num(b: Int, n: JsNum) -> Cmp {
 }
 
 // §7.2.13 islessthan, strings compare by utf-8 bytes
-fn t_relational_cmp(st: Agent, a: JsVal, b: JsVal) -> #(Cmp, Agent) {
-  let #(pa, st) = rt_val.t_to_primitive(st, a, HintNumber)
-  let #(pb, st) = rt_val.t_to_primitive(st, b, HintNumber)
+fn relational_cmp(st: Agent, a: JsVal, b: JsVal) -> #(Cmp, Agent) {
+  let #(pa, st) = rt_val.to_primitive(st, a, HintNumber)
+  let #(pb, st) = rt_val.to_primitive(st, b, HintNumber)
   case classify(pa), classify(pb) {
     KStr(sa), KStr(sb) -> #(order_to_cmp(string.compare(sa, sb)), st)
     KBig(x), KStr(sb) -> #(cmp_bigint_text(x, sb), st)
     KStr(sa), KBig(y) -> #(cmp_negate(cmp_bigint_text(y, sa)), st)
     _, _ -> {
-      let #(na, st) = rt_val.t_to_numeric(st, pa)
-      let #(nb, st) = rt_val.t_to_numeric(st, pb)
+      let #(na, st) = rt_val.to_numeric(st, pa)
+      let #(nb, st) = rt_val.to_numeric(st, pb)
       case classify(na), classify(nb) {
         KBig(x), KBig(y) -> #(order_to_cmp(int.compare(x, y)), st)
         KBig(x), KNum(n) -> #(compare_bigint_num(x, n), st)
         KNum(n), KBig(y) -> #(cmp_negate(compare_bigint_num(y, n)), st)
         KNum(x), KNum(y) -> #(ncmp(x, y), st)
-        _, _ -> panic as "t_to_numeric returned non-numeric"
+        _, _ -> panic as "to_numeric returned non-numeric"
       }
     }
   }
@@ -216,32 +216,32 @@ fn cmp_bigint_text(x: Int, s: String) -> Cmp {
   }
 }
 
-pub fn t_lt(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
-  let #(c, st) = t_relational_cmp(st, a, b)
+pub fn lt(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
+  let #(c, st) = relational_cmp(st, a, b)
   case c {
     Lt -> #(1, st)
     Eq | Gt | Undef -> #(0, st)
   }
 }
 
-pub fn t_le(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
-  let #(c, st) = t_relational_cmp(st, a, b)
+pub fn le(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
+  let #(c, st) = relational_cmp(st, a, b)
   case c {
     Lt | Eq -> #(1, st)
     Gt | Undef -> #(0, st)
   }
 }
 
-pub fn t_gt(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
-  let #(c, st) = t_relational_cmp(st, a, b)
+pub fn gt(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
+  let #(c, st) = relational_cmp(st, a, b)
   case c {
     Gt -> #(1, st)
     Lt | Eq | Undef -> #(0, st)
   }
 }
 
-pub fn t_ge(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
-  let #(c, st) = t_relational_cmp(st, a, b)
+pub fn ge(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
+  let #(c, st) = relational_cmp(st, a, b)
   case c {
     Gt | Eq -> #(1, st)
     Lt | Undef -> #(0, st)
@@ -255,8 +255,8 @@ fn to_numeric_operands(
   a: JsVal,
   b: JsVal,
 ) -> #(JsVal, JsVal, Agent) {
-  let #(an, st) = rt_val.t_to_numeric(st, a)
-  let #(bn, st) = rt_val.t_to_numeric(st, b)
+  let #(an, st) = rt_val.to_numeric(st, a)
+  let #(bn, st) = rt_val.to_numeric(st, b)
   #(an, bn, st)
 }
 
@@ -270,7 +270,7 @@ fn int32_binop(
   let #(an, bn, st) = to_numeric_operands(st, a, b)
   case classify(an), classify(bn) {
     KBig(x), KBig(y) -> #(mk_bigint(big(x, y)), st)
-    KBig(_), _ | _, KBig(_) -> rt_val.t_throw_type_error(st, bigint_mix_error)
+    KBig(_), _ | _, KBig(_) -> rt_val.throw_type_error(st, bigint_mix_error)
     KNum(x), KNum(y) -> {
       let r = op(rt_val.num_to_int32(x), rt_val.num_to_int32(y))
       #(mk_int(rt_val.wrap_int32(r)), st)
@@ -279,39 +279,39 @@ fn int32_binop(
   }
 }
 
-pub fn t_bitand(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+pub fn bitand(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   int32_binop(st, a, b, int.bitwise_and, int.bitwise_and)
 }
 
-pub fn t_bitor(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+pub fn bitor(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   int32_binop(st, a, b, int.bitwise_or, int.bitwise_or)
 }
 
-pub fn t_bitxor(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+pub fn bitxor(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   int32_binop(st, a, b, int.bitwise_exclusive_or, int.bitwise_exclusive_or)
 }
 
-pub fn t_shl(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+pub fn shl(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   int32_binop(st, a, b, int.bitwise_shift_left, fn(x, y) {
     int.bitwise_shift_left(x, int.bitwise_and(y, 31))
   })
 }
 
-pub fn t_shr(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+pub fn shr(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   int32_binop(st, a, b, int.bitwise_shift_right, fn(x, y) {
     int.bitwise_shift_right(x, int.bitwise_and(y, 31))
   })
 }
 
-pub fn t_ushr(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+pub fn ushr(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(an, bn, st) = to_numeric_operands(st, a, b)
   case classify(an), classify(bn) {
     KBig(_), KBig(_) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "BigInts have no unsigned right shift, use >> instead",
       )
-    KBig(_), _ | _, KBig(_) -> rt_val.t_throw_type_error(st, bigint_mix_error)
+    KBig(_), _ | _, KBig(_) -> rt_val.throw_type_error(st, bigint_mix_error)
     KNum(x), KNum(y) -> {
       let r =
         int.bitwise_shift_right(
@@ -324,8 +324,8 @@ pub fn t_ushr(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-pub fn t_bitnot(st: Agent, a: JsVal) -> #(JsVal, Agent) {
-  let #(an, st) = rt_val.t_to_numeric(st, a)
+pub fn bitnot(st: Agent, a: JsVal) -> #(JsVal, Agent) {
+  let #(an, st) = rt_val.to_numeric(st, a)
   case classify(an) {
     KBig(x) -> #(mk_bigint(-1 - x), st)
     KNum(n) -> #(mk_int(int.bitwise_not(rt_val.num_to_int32(n))), st)
@@ -345,7 +345,7 @@ pub fn strict_ne(a: JsVal, b: JsVal) -> Bool {
 }
 
 // §7.2.14 is loosely equal
-pub fn t_eq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
+pub fn eq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   case classify(a), classify(b) {
     KUndef, KUndef | KNull, KNull | KNull, KUndef | KUndef, KNull -> #(1, st)
     KBool(_), KBool(_)
@@ -356,23 +356,23 @@ pub fn t_eq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
     | KHandle(_), KHandle(_)
     -> #(bool_int(rt_val.strict_eq(a, b)), st)
     // bool arms must precede the object arms
-    KBool(x), _ -> t_eq(st, mk_number(bool_to_jsnum(x)), b)
-    _, KBool(y) -> t_eq(st, a, mk_number(bool_to_jsnum(y)))
+    KBool(x), _ -> eq(st, mk_number(bool_to_jsnum(x)), b)
+    _, KBool(y) -> eq(st, a, mk_number(bool_to_jsnum(y)))
     KHandle(_), KNum(_)
     | KHandle(_), KStr(_)
     | KHandle(_), KBig(_)
     | KHandle(_), KSym(_)
     -> {
-      let #(ap, st) = rt_val.t_to_primitive(st, a, HintDefault)
-      t_eq(st, ap, b)
+      let #(ap, st) = rt_val.to_primitive(st, a, HintDefault)
+      eq(st, ap, b)
     }
     KNum(_), KHandle(_)
     | KStr(_), KHandle(_)
     | KBig(_), KHandle(_)
     | KSym(_), KHandle(_)
     -> {
-      let #(bp, st) = rt_val.t_to_primitive(st, b, HintDefault)
-      t_eq(st, a, bp)
+      let #(bp, st) = rt_val.to_primitive(st, b, HintDefault)
+      eq(st, a, bp)
     }
     KBig(x), KStr(s) | KStr(s), KBig(x) ->
       case rt_val.string_to_bigint(s) {
@@ -395,8 +395,8 @@ pub fn t_eq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   }
 }
 
-pub fn t_neq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
-  let #(r, st) = t_eq(st, a, b)
+pub fn neq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
+  let #(r, st) = eq(st, a, b)
   #(1 - r, st)
 }
 
@@ -420,8 +420,8 @@ fn bool_to_jsnum(b: Bool) -> JsNum {
 }
 
 // called by name from arc_rt_ops_ffi
-pub fn t_neg(st: Agent, a: JsVal) -> #(JsVal, Agent) {
-  let #(n, st) = rt_val.t_to_numeric(st, a)
+pub fn neg(st: Agent, a: JsVal) -> #(JsVal, Agent) {
+  let #(n, st) = rt_val.to_numeric(st, a)
   case classify(n) {
     KBig(x) -> #(mk_bigint(0 - x), st)
     KNum(x) -> #(mk_number(num_negate(x)), st)
@@ -429,20 +429,20 @@ pub fn t_neg(st: Agent, a: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-pub fn t_plus(st: Agent, a: JsVal) -> #(JsVal, Agent) {
-  let #(n, st) = rt_val.t_to_number(st, a)
+pub fn plus(st: Agent, a: JsVal) -> #(JsVal, Agent) {
+  let #(n, st) = rt_val.to_number(st, a)
   #(mk_number(n), st)
 }
 
-pub fn t_in(st: Agent, key: JsVal, obj: JsVal) -> #(Bool, Agent) {
+pub fn in(st: Agent, key: JsVal, obj: JsVal) -> #(Bool, Agent) {
   case classify(obj) {
     KHandle(_) -> {
-      let #(pk, st) = rt_val.t_to_property_key(st, key)
-      rt_obj.t_has_prop(st, obj, pk)
+      let #(pk, st) = rt_val.to_property_key(st, key)
+      rt_obj.has_prop(st, obj, pk)
     }
     _ -> {
       let tag = rt_val.type_of(st, obj)
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot use 'in' operator to search for property in " <> tag,
       )
@@ -746,16 +746,16 @@ fn string_val(st: Agent, v: JsVal) -> #(JsVal, Agent) {
   case classify(v) {
     KStr(_) -> #(v, st)
     _ -> {
-      let #(s, st) = rt_val.t_to_string(st, v)
+      let #(s, st) = rt_val.to_string(st, v)
       #(mk_string(s), st)
     }
   }
 }
 
 // called by name from arc_rt_ops_ffi
-pub fn t_add(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
-  let #(pa, st) = rt_val.t_to_primitive(st, a, HintDefault)
-  let #(pb, st) = rt_val.t_to_primitive(st, b, HintDefault)
+pub fn add(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+  let #(pa, st) = rt_val.to_primitive(st, a, HintDefault)
+  let #(pb, st) = rt_val.to_primitive(st, b, HintDefault)
   case classify(pa), classify(pb) {
     KStr(_), _ | _, KStr(_) -> {
       let #(sa, st) = string_val(st, pa)
@@ -763,12 +763,11 @@ pub fn t_add(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
       #(js_string.concat(sa, sb), st)
     }
     _, _ -> {
-      let #(na, st) = rt_val.t_to_numeric(st, pa)
-      let #(nb, st) = rt_val.t_to_numeric(st, pb)
+      let #(na, st) = rt_val.to_numeric(st, pa)
+      let #(nb, st) = rt_val.to_numeric(st, pb)
       case classify(na), classify(nb) {
         KBig(x), KBig(y) -> #(mk_bigint(x + y), st)
-        KBig(_), _ | _, KBig(_) ->
-          rt_val.t_throw_type_error(st, bigint_mix_error)
+        KBig(_), _ | _, KBig(_) -> rt_val.throw_type_error(st, bigint_mix_error)
         KNum(x), KNum(y) -> #(mk_number(num_add(x, y)), st)
         _, _ -> panic as "ToNumeric returned non-numeric"
       }
@@ -777,58 +776,58 @@ pub fn t_add(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
 }
 
 // called by name from arc_rt_ops_ffi
-pub fn t_sub(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+pub fn sub(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(na, nb, st) = to_numeric_operands(st, a, b)
   case classify(na), classify(nb) {
     KBig(x), KBig(y) -> #(mk_bigint(x - y), st)
-    KBig(_), _ | _, KBig(_) -> rt_val.t_throw_type_error(st, bigint_mix_error)
+    KBig(_), _ | _, KBig(_) -> rt_val.throw_type_error(st, bigint_mix_error)
     KNum(x), KNum(y) -> #(mk_number(num_sub(x, y)), st)
     _, _ -> panic as "ToNumeric returned non-numeric"
   }
 }
 
 // called by name from arc_rt_ops_ffi
-pub fn t_mul(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+pub fn mul(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(na, nb, st) = to_numeric_operands(st, a, b)
   case classify(na), classify(nb) {
     KBig(x), KBig(y) -> #(mk_bigint(x * y), st)
-    KBig(_), _ | _, KBig(_) -> rt_val.t_throw_type_error(st, bigint_mix_error)
+    KBig(_), _ | _, KBig(_) -> rt_val.throw_type_error(st, bigint_mix_error)
     KNum(x), KNum(y) -> #(mk_number(num_mul(x, y)), st)
     _, _ -> panic as "ToNumeric returned non-numeric"
   }
 }
 
 // called by name from arc_rt_ops_ffi
-pub fn t_div(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+pub fn div(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(na, nb, st) = to_numeric_operands(st, a, b)
   case classify(na), classify(nb) {
-    KBig(_), KBig(0) -> rt_val.t_throw_range_error(st, "Division by zero")
+    KBig(_), KBig(0) -> rt_val.throw_range_error(st, "Division by zero")
     KBig(x), KBig(y) -> #(mk_bigint(x / y), st)
-    KBig(_), _ | _, KBig(_) -> rt_val.t_throw_type_error(st, bigint_mix_error)
+    KBig(_), _ | _, KBig(_) -> rt_val.throw_type_error(st, bigint_mix_error)
     KNum(x), KNum(y) -> #(mk_number(num_div(x, y)), st)
     _, _ -> panic as "ToNumeric returned non-numeric"
   }
 }
 
 // called by name from arc_rt_ops_ffi
-pub fn t_mod(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+pub fn mod(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(na, nb, st) = to_numeric_operands(st, a, b)
   case classify(na), classify(nb) {
-    KBig(_), KBig(0) -> rt_val.t_throw_range_error(st, "Division by zero")
+    KBig(_), KBig(0) -> rt_val.throw_range_error(st, "Division by zero")
     KBig(x), KBig(y) -> #(mk_bigint(x % y), st)
-    KBig(_), _ | _, KBig(_) -> rt_val.t_throw_type_error(st, bigint_mix_error)
+    KBig(_), _ | _, KBig(_) -> rt_val.throw_type_error(st, bigint_mix_error)
     KNum(x), KNum(y) -> #(mk_number(num_mod(x, y)), st)
     _, _ -> panic as "ToNumeric returned non-numeric"
   }
 }
 
-pub fn t_pow(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+pub fn pow(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(na, nb, st) = to_numeric_operands(st, a, b)
   case classify(na), classify(nb) {
     KBig(_), KBig(y) if y < 0 ->
-      rt_val.t_throw_range_error(st, "Exponent must be non-negative")
+      rt_val.throw_range_error(st, "Exponent must be non-negative")
     KBig(x), KBig(y) -> #(mk_bigint(bigint_pow(x, y)), st)
-    KBig(_), _ | _, KBig(_) -> rt_val.t_throw_type_error(st, bigint_mix_error)
+    KBig(_), _ | _, KBig(_) -> rt_val.throw_type_error(st, bigint_mix_error)
     KNum(x), KNum(y) -> #(mk_number(num_exp(x, y)), st)
     _, _ -> panic as "ToNumeric returned non-numeric"
   }

@@ -236,7 +236,7 @@ fn duration_compare(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
         NoRelativeTo ->
           case has_cal_units {
             True ->
-              rt_val.t_throw_range_error(
+              rt_val.throw_range_error(
                 st,
                 "relativeTo is required for duration comparison with calendar units",
               )
@@ -305,7 +305,7 @@ pub fn method(
       #(mk_string(format_duration(d2, precision)), st)
     }
     DurationValueOf ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Temporal.Duration cannot be converted with valueOf",
       )
@@ -325,7 +325,7 @@ pub fn method(
             require_nonempty_fields(st, list.all(fields, option.is_none))
           finish_duration(st, protos, apply_duration_fields(d, fields))
         }
-        _ -> rt_val.t_throw_type_error(st, "argument must be an object")
+        _ -> rt_val.throw_type_error(st, "argument must be an object")
       }
     DurationAdd | DurationSubtract -> {
       let #(other, st) = to_temporal_duration(st, helpers.arg_at(args, 0))
@@ -335,7 +335,7 @@ pub fn method(
       }
       case has_calendar_units(d) || has_calendar_units(other) {
         True ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "duration add/subtract requires non-calendar durations",
           )
@@ -360,7 +360,7 @@ fn duration_round(
 ) -> #(JsVal, Agent) {
   let arg = helpers.arg_at(args, 0)
   case classify(arg) {
-    KUndef -> rt_val.t_throw_type_error(st, "options parameter is required")
+    KUndef -> rt_val.throw_type_error(st, "options parameter is required")
     KStr(unit_name) ->
       case singular_unit(unit_name) {
         Some(smallest) ->
@@ -374,7 +374,7 @@ fn duration_round(
             HalfExpand,
             NoRelativeTo,
           )
-        None -> rt_val.t_throw_range_error(st, "invalid smallestUnit")
+        None -> rt_val.throw_range_error(st, "invalid smallestUnit")
       }
     KHandle(oh) -> {
       let opts = Some(oh)
@@ -388,7 +388,7 @@ fn duration_round(
         get_unit_option(st, opts, "smallestUnit", allow_auto: False)
       case smallest == None && largest == UnitAbsent {
         True ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "at least one of smallestUnit or largestUnit is required",
           )
@@ -411,7 +411,7 @@ fn duration_round(
         }
       }
     }
-    _ -> rt_val.t_throw_type_error(st, "invalid options")
+    _ -> rt_val.throw_type_error(st, "invalid options")
   }
 }
 
@@ -436,8 +436,8 @@ fn duration_round_with(
     largest_smaller_than_smallest(largest, smallest),
     !valid_increment_for_unit(inc, smallest) || date_inc_invalid
   {
-    True, _ -> rt_val.t_throw_range_error(st, largest_smaller_msg)
-    _, True -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
+    True, _ -> rt_val.throw_range_error(st, largest_smaller_msg)
+    _, True -> rt_val.throw_range_error(st, "invalid roundingIncrement")
     False, False ->
       case relative_to {
         NoRelativeTo -> {
@@ -447,7 +447,7 @@ fn duration_round_with(
             || unit_rank(smallest) > unit_rank(Day)
           case needs_rel {
             True ->
-              rt_val.t_throw_range_error(
+              rt_val.throw_range_error(
                 st,
                 "relativeTo is required for calendar-unit rounding",
               )
@@ -575,22 +575,22 @@ fn duration_total(
 ) -> #(JsVal, Agent) {
   let arg = helpers.arg_at(args, 0)
   case classify(arg) {
-    KUndef -> rt_val.t_throw_type_error(st, "totalOf is required")
+    KUndef -> rt_val.throw_type_error(st, "totalOf is required")
     KStr(unit_name) ->
       case singular_unit(unit_name) {
         Some(u) -> duration_total_with(st, d, u, NoRelativeTo)
-        None -> rt_val.t_throw_range_error(st, "invalid unit")
+        None -> rt_val.throw_range_error(st, "invalid unit")
       }
     KHandle(oh) -> {
       let #(relative_to_value, st) = get_named(st, oh, "relativeTo")
       let #(relative_to, st) = convert_relative_to(st, relative_to_value)
       let #(unit, st) = get_unit_option(st, Some(oh), "unit", allow_auto: False)
       case unit {
-        None -> rt_val.t_throw_range_error(st, "unit is required")
+        None -> rt_val.throw_range_error(st, "unit is required")
         Some(u) -> duration_total_with(st, d, u, relative_to)
       }
     }
-    _ -> rt_val.t_throw_type_error(st, "invalid totalOf")
+    _ -> rt_val.throw_type_error(st, "invalid totalOf")
   }
 }
 
@@ -604,7 +604,7 @@ fn duration_total_with(
     NoRelativeTo -> {
       case has_calendar_units(d) || unit_rank(unit) > unit_rank(Day) {
         True ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "relativeTo is required to total calendar units",
           )

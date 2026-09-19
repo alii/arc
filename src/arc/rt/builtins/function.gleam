@@ -35,10 +35,10 @@ pub fn init(
       #("toString", FunctionN(FunctionToString), 0),
     ])
   // §10.2.4.1 %ThrowTypeError%, frozen
-  let #(len_p, st) = rt_store.t_frozen_property(st, mk_int(0))
-  let #(name_p, st) = rt_store.t_frozen_property(st, mk_string(""))
+  let #(len_p, st) = rt_store.frozen_property(st, mk_int(0))
+  let #(name_p, st) = rt_store.frozen_property(st, mk_string(""))
   let #(thrower_h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       SObject(
         kind: NativeFn(
@@ -54,7 +54,7 @@ pub fn init(
         extensible: False,
       ),
     )
-  let st = rt_store.t_pin_root(st, thrower_h)
+  let st = rt_store.pin_root(st, thrower_h)
   // §10.2.4 caller and arguments share the one thrower
   let #(restricted, st) =
     common.accessor_property(
@@ -78,7 +78,7 @@ pub fn init(
       1,
     )
   let #(has_instance_prop, st) =
-    rt_store.t_frozen_property(st, mk_object(has_instance_h))
+    rt_store.frozen_property(st, mk_object(has_instance_h))
   let st =
     common.add_symbol_property(
       st,
@@ -106,7 +106,7 @@ pub fn init(
     )
   // function.prototype is itself callable, returns undefined
   let st =
-    rt_store.t_cell_update(st, func_proto, fn(cell) {
+    rt_store.cell_update(st, func_proto, fn(cell) {
       case cell {
         SObject(..) as cell ->
           SObject(
@@ -136,7 +136,7 @@ pub fn dispatch(
         [t, ..rest] -> #(t, rest)
         [] -> #(mk_undefined(), [])
       }
-      rt_call.t_call(st, this, this_arg, call_args)
+      rt_call.call(st, this, this_arg, call_args)
     }
     FunctionApply -> {
       let #(this_arg, arg_array) = helpers.two_args_or_undefined(args)
@@ -144,7 +144,7 @@ pub fn dispatch(
         KUndef | KNull -> #([], st)
         _ -> rt_abstract_ops.create_list_from_array_like(st, arg_array)
       }
-      rt_call.t_call(st, this, this_arg, call_args)
+      rt_call.call(st, this, this_arg, call_args)
     }
     FunctionBind -> {
       let #(this_arg, bound_args) = case args {
@@ -153,11 +153,10 @@ pub fn dispatch(
       }
       case rt_val.is_callable(st, this), classify(this) {
         True, KHandle(target_h) -> {
-          let #(h, st) = rt_call.t_bound_new(st, target_h, this_arg, bound_args)
+          let #(h, st) = rt_call.bound_new(st, target_h, this_arg, bound_args)
           #(mk_object(h), st)
         }
-        _, _ ->
-          rt_val.t_throw_type_error(st, "Bind must be called on a function")
+        _, _ -> rt_val.throw_type_error(st, "Bind must be called on a function")
       }
     }
     FunctionToString -> function_to_string(st, this)
@@ -167,7 +166,7 @@ pub fn dispatch(
         KHandle(h) ->
           case rt_val.is_callable(st, this) {
             True -> {
-              let #(b, st) = rt_ops.t_ordinary_has_instance(st, h, v)
+              let #(b, st) = rt_ops.ordinary_has_instance(st, h, v)
               #(mk_bool(b), st)
             }
             False -> #(mk_bool(False), st)
@@ -197,8 +196,7 @@ pub fn dispatch_construct(
     | FunctionToString
     | FunctionHasInstance
     | ThrowTypeErrorFn
-    | FunctionPrototypeCall ->
-      rt_val.t_throw_type_error(st, "not a constructor")
+    | FunctionPrototypeCall -> rt_val.throw_type_error(st, "not a constructor")
   }
 }
 
@@ -221,7 +219,7 @@ pub fn create_dynamic_function(
   let #(strs, st) =
     list.fold(args, #([], st), fn(acc, arg) {
       let #(done, st) = acc
-      let #(s, st) = rt_val.t_to_string(st, arg)
+      let #(s, st) = rt_val.to_string(st, arg)
       #([s, ..done], st)
     })
   let #(params, body) = case strs {
@@ -246,7 +244,7 @@ pub fn create_dynamic_function(
   case classify(f) {
     KHandle(h) -> {
       let #(_, st) =
-        rt_obj.t_define_own_data(
+        rt_obj.define_own_data(
           st,
           h,
           StringKey(Named("name")),
@@ -279,7 +277,7 @@ fn apply_new_target_prototype(
               rt_call.async_generator_fn_prototype(st, realm)
           }
         })
-      let #(_res, st) = rt_obj.t_set_prototype_of(st, h, Some(proto))
+      let #(_res, st) = rt_obj.set_prototype_of(st, h, Some(proto))
       st
     }
     _ -> st
@@ -289,12 +287,12 @@ fn apply_new_target_prototype(
 fn function_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: CompiledFn(..), ..)
         | SObject(kind: BytecodeFn(..), ..)
         | SObject(kind: NativeFn(..), ..) -> {
           let name = case
-            rt_obj.t_ordinary_own_property(st, h, StringKey(Named("name")))
+            rt_obj.ordinary_own_property(st, h, StringKey(Named("name")))
           {
             Some(DataProperty(value: v, ..)) ->
               case classify(v) {
@@ -321,7 +319,7 @@ fn function_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 }
 
 fn to_string_type_error(st: Agent) -> a {
-  rt_val.t_throw_type_error(
+  rt_val.throw_type_error(
     st,
     "Function.prototype.toString requires that 'this' be a Function",
   )
@@ -331,7 +329,7 @@ fn to_string_type_error(st: Agent) -> a {
 fn restricted_function_property(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let is_legacy = case classify(this) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: CompiledFn(flags:, ..), ..)
         | SObject(kind: BytecodeFn(flags:, ..), ..) ->
           flags.is_constructor && !flags.is_strict
@@ -342,7 +340,7 @@ fn restricted_function_property(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case is_legacy {
     True -> #(mk_undefined(), st)
     False ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "'caller', 'callee', and 'arguments' properties may not be "
           <> "accessed on strict mode functions or the arguments objects "

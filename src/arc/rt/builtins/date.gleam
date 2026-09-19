@@ -128,7 +128,7 @@ pub fn init(
       "[Symbol.toPrimitive]",
       1,
     )
-  let #(prop, st) = rt_store.t_frozen_property(st, mk_object(to_prim_h))
+  let #(prop, st) = rt_store.frozen_property(st, mk_object(to_prim_h))
   let st =
     common.add_symbol_property(
       st,
@@ -244,7 +244,7 @@ pub fn dispatch_construct(
 ) -> #(Handle, Agent) {
   case native {
     DateConstructor(..) -> date_constructor(st, args, new_target)
-    _ -> rt_val.t_throw_type_error(st, "not a constructor")
+    _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }
 
@@ -519,7 +519,7 @@ fn make_date_checked(c: DateComponents, time_ref: TimeRef) -> JsNum {
 fn this_time_value(st: Agent, this: JsVal) -> Option(#(Handle, JsNum)) {
   case classify(this) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         types.SObject(kind: DateObj(ms:), ..) -> Some(#(h, ms))
         _ -> None
       }
@@ -536,7 +536,7 @@ fn require_time_value(
   case this_time_value(st, this) {
     Some(#(h, tv)) -> k(h, tv)
     None ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Date.prototype." <> name <> " called on incompatible receiver",
       )
@@ -544,7 +544,7 @@ fn require_time_value(
 }
 
 fn set_this_time_value(st: Agent, h: Handle, tv: JsNum) -> Agent {
-  rt_store.t_cell_update(st, h, fn(cell) {
+  rt_store.cell_update(st, h, fn(cell) {
     let assert types.SObject(kind: DateObj(_), ..) as obj = cell
       as "date: cell is not a Date object"
     types.SObject(..obj, kind: DateObj(ms: tv))
@@ -577,11 +577,11 @@ fn single_arg_time_value(
   case this_time_value(st, arg) {
     Some(#(_, tv)) -> #(time_clip(tv), st)
     None -> {
-      let #(prim, st) = rt_val.t_to_primitive(st, arg, HintDefault)
+      let #(prim, st) = rt_val.to_primitive(st, arg, HintDefault)
       case classify(prim) {
         KStr(s) -> #(parse_date_string(s, local), st)
         _ -> {
-          let #(n, st) = rt_val.t_to_number(st, prim)
+          let #(n, st) = rt_val.to_number(st, prim)
           #(time_clip(n), st)
         }
       }
@@ -615,7 +615,7 @@ fn pad_fields(nums: List(JsNum)) -> DateComponents {
 
 fn date_parse(st: Agent, args: List(JsVal), local: TimeRef) -> #(JsVal, Agent) {
   let arg = helpers.first_arg_or_undefined(args)
-  let #(s, st) = rt_val.t_to_string(st, arg)
+  let #(s, st) = rt_val.to_string(st, arg)
   #(mk_number(parse_date_string(s, local)), st)
 }
 
@@ -676,7 +676,7 @@ fn date_set_time(
 ) -> #(JsVal, Agent) {
   use h, _ <- require_time_value(st, this, name)
   let arg = helpers.first_arg_or_undefined(args)
-  let #(n, st) = rt_val.t_to_number(st, arg)
+  let #(n, st) = rt_val.to_number(st, arg)
   let tv = time_clip(n)
   let st = set_this_time_value(st, h, tv)
   #(mk_number(tv), st)
@@ -833,7 +833,7 @@ fn date_to_string(
     }
     None ->
       case fmt {
-        IsoFormat -> rt_val.t_throw_range_error(st, "Invalid time value")
+        IsoFormat -> rt_val.throw_range_error(st, "Invalid time value")
         _ -> #(mk_string("Invalid Date"), st)
       }
   }
@@ -1112,7 +1112,7 @@ fn args_to_nums(st: Agent, args: List(JsVal)) -> #(List(JsNum), Agent) {
   let #(rev, st) =
     list.fold(args, #([], st), fn(acc, arg) {
       let #(nums, st) = acc
-      let #(n, st) = rt_val.t_to_number(st, arg)
+      let #(n, st) = rt_val.to_number(st, arg)
       #([n, ..nums], st)
     })
   #(list.reverse(rev), st)
@@ -1143,7 +1143,7 @@ fn date_set_year(
 ) -> #(JsVal, Agent) {
   use h, tv <- require_time_value(st, this, name)
   let arg = helpers.first_arg_or_undefined(args)
-  let #(n, st) = rt_val.t_to_number(st, arg)
+  let #(n, st) = rt_val.to_number(st, arg)
   case finite_int(n) {
     Some(yi) -> {
       let yi = case yi >= 0 && yi <= 99 {
@@ -1186,13 +1186,13 @@ fn date_to_primitive(
       let hint_arg = helpers.first_arg_or_undefined(args)
       case classify(hint_arg) {
         KStr("string") | KStr("default") ->
-          rt_val.t_ordinary_to_primitive(st, h, HintString)
-        KStr("number") -> rt_val.t_ordinary_to_primitive(st, h, HintNumber)
-        _ -> rt_val.t_throw_type_error(st, "Invalid hint")
+          rt_val.ordinary_to_primitive(st, h, HintString)
+        KStr("number") -> rt_val.ordinary_to_primitive(st, h, HintNumber)
+        _ -> rt_val.throw_type_error(st, "Invalid hint")
       }
     }
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Date.prototype[Symbol.toPrimitive] called on non-object",
       )
@@ -1202,14 +1202,14 @@ fn date_to_primitive(
 fn date_to_json(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case rt_val.is_nullish(this) {
     True ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Date.prototype.toJSON called on null or undefined",
       )
     False -> {
-      let #(o_h, st) = rt_val.t_to_object(st, this)
+      let #(o_h, st) = rt_val.to_object(st, this)
       let obj = mk_object(o_h)
-      let #(prim, st) = rt_val.t_to_primitive(st, obj, HintNumber)
+      let #(prim, st) = rt_val.to_primitive(st, obj, HintNumber)
       case classify(prim) {
         KNum(JNan) | KNum(JPosInf) | KNum(JNegInf) -> #(mk_null(), st)
         _ -> invoke_to_iso_string(st, obj)
@@ -1219,11 +1219,10 @@ fn date_to_json(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 }
 
 fn invoke_to_iso_string(st: Agent, obj: JsVal) -> #(JsVal, Agent) {
-  let #(method, st) =
-    rt_obj.t_get_prop(st, obj, StringKey(Named("toISOString")))
+  let #(method, st) = rt_obj.get_prop(st, obj, StringKey(Named("toISOString")))
   case rt_val.is_callable(st, method) {
-    True -> rt_call.t_call(st, method, obj, [])
-    False -> rt_val.t_throw_type_error(st, "toISOString is not a function")
+    True -> rt_call.call(st, method, obj, [])
+    False -> rt_val.throw_type_error(st, "toISOString is not a function")
   }
 }
 

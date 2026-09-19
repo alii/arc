@@ -259,7 +259,7 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
       lexical_globals: dict.new(),
       suppressed_error: errors.suppressed_error,
     )
-  let st = list.fold(realm_handles(realm), st, rt_store.t_pin_root)
+  let st = list.fold(realm_handles(realm), st, rt_store.pin_root)
   let st = Agent(..st, realm:, realms: dict.insert(st.realms, id, realm))
   #(realm, st)
 }
@@ -340,10 +340,10 @@ pub fn seed_ops(st: Agent) -> Agent {
     store: Store(
       ..store,
       ops: JsOps(
-        get_prop: rt_obj.t_get_prop,
-        call: rt_call.t_call,
-        to_object: realm_ops.t_wrap_primitive,
-        new_error: realm_ops.t_new_error,
+        get_prop: rt_obj.get_prop,
+        call: rt_call.call,
+        to_object: realm_ops.wrap_primitive,
+        new_error: realm_ops.new_error,
         eval_hook: no_eval,
         call_bytecode: fn(_, _, _, _, _) {
           interpreter_not_linked("call_bytecode")
@@ -359,7 +359,7 @@ pub fn seed_ops(st: Agent) -> Agent {
 }
 
 fn no_eval(st: Agent, _source: String, _kind: types.EvalKind) -> a {
-  rt_val.t_throw_type_error(
+  rt_val.throw_type_error(
     st,
     "eval is not supported in this environment: no interpreter linked",
   )
@@ -491,13 +491,13 @@ fn alloc_global_object(
   let #(props, st) = {
     use st, entry <- helpers.map_threaded(st, entries)
     let #(prop, st) = case entry {
-      Immutable(val:, ..) -> rt_store.t_frozen_property(st, val)
-      Builtin(val:, ..) -> rt_store.t_builtin_property(st, val)
+      Immutable(val:, ..) -> rt_store.frozen_property(st, val)
+      Builtin(val:, ..) -> rt_store.builtin_property(st, val)
     }
     #(#(entry.name, prop), st)
   }
   let #(global_h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       plain_object(
         types.GlobalObj,
@@ -505,8 +505,8 @@ fn alloc_global_object(
         common.named_props(props),
       ),
     )
-  let st = rt_store.t_pin_root(st, global_h)
-  let #(self_prop, st) = rt_store.t_builtin_property(st, mk_object(global_h))
+  let st = rt_store.pin_root(st, global_h)
+  let #(self_prop, st) = rt_store.builtin_property(st, mk_object(global_h))
   let st = common.add_named_property(st, global_h, "globalThis", self_prop)
   #(global_h, st)
 }
@@ -525,7 +525,7 @@ pub fn dispatch_native(
       rt_async.promise_reject_fn(st, promise, already_resolved, args)
     AsyncGenResume(gen:, is_throw:, kind:) -> #(
       mk_undefined(),
-      rt_async.t_asyncgen_resume(
+      rt_async.asyncgen_resume(
         st,
         gen,
         is_throw,
@@ -652,13 +652,13 @@ pub fn dispatch_native_construct(
         })
       let #(v, st) = b_array.dispatch(st, n, mk_undefined(), args)
       let #(h, st) = require_handle(st, v)
-      let #(_res, st) = rt_obj.t_set_prototype_of(st, h, Some(proto))
+      let #(_res, st) = rt_obj.set_prototype_of(st, h, Some(proto))
       #(h, st)
     }
     StringN(StringConstructor) -> {
       let #(s, st) = case args {
         [] -> #("", st)
-        [v, ..] -> rt_val.t_to_string(st, v)
+        [v, ..] -> rt_val.to_string(st, v)
       }
       let #(proto, st) =
         rt_call.get_prototype_from_constructor(st, new_target, fn(r) {
@@ -691,8 +691,8 @@ pub fn dispatch_native_construct(
       realm_ops.alloc_object(st, BooleanObj(b), proto)
     }
     SymbolN(SymbolConstructor) ->
-      rt_val.t_throw_type_error(st, "Symbol is not a constructor")
-    BigIntN(_) -> rt_val.t_throw_type_error(st, "BigInt is not a constructor")
+      rt_val.throw_type_error(st, "Symbol is not a constructor")
+    BigIntN(_) -> rt_val.throw_type_error(st, "BigInt is not a constructor")
     FunctionN(n) -> {
       let #(v, st) = b_function.dispatch_construct(st, n, args, new_target)
       require_handle(st, v)
@@ -702,7 +702,7 @@ pub fn dispatch_native_construct(
       require_handle(st, v)
     }
     StringN(_) | NumberN(_) | BooleanN(_) | SymbolN(_) ->
-      rt_val.t_throw_type_error(st, "not a constructor")
+      rt_val.throw_type_error(st, "not a constructor")
     IteratorN(n) -> b_iterator.dispatch_construct(st, n, args, new_target)
     PromiseResolveFn(..)
     | PromiseRejectFn(..)
@@ -739,10 +739,10 @@ fn call_host_fn(
     Ok(HostFnEntry(call:, ..)) ->
       case call(st, args, this, new_target) {
         #(Ok(v), st) -> #(v, st)
-        #(Error(thrown), st) -> rt_store.t_throw(st, thrown)
+        #(Error(thrown), st) -> rt_store.throw(st, thrown)
       }
     Error(Nil) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "host function #" <> int.to_string(id) <> " is not registered",
       )
@@ -759,12 +759,12 @@ fn construct_host_fn(
   let #(proto, st) = own_data_prototype(st, new_target)
   case classify(v), proto {
     KHandle(h), Some(proto) -> {
-      let #(_res, st) = rt_obj.t_set_prototype_of(st, h, Some(proto))
+      let #(_res, st) = rt_obj.set_prototype_of(st, h, Some(proto))
       #(h, st)
     }
     KHandle(h), None -> #(h, st)
     _, _ ->
-      rt_val.t_throw_type_error(st, "host constructor must return an object")
+      rt_val.throw_type_error(st, "host constructor must return an object")
   }
 }
 
@@ -773,7 +773,7 @@ fn own_data_prototype(st: Agent, ctor: JsVal) -> #(Option(Handle), Agent) {
     None -> #(None, st)
     Some(h) -> {
       let #(prop, st) =
-        rt_obj.t_own_property(st, h, StringKey(Named("prototype")))
+        rt_obj.own_property(st, h, StringKey(Named("prototype")))
       case prop {
         Some(DataProperty(value:, ..)) -> #(rt_val.handle_of(value), st)
         _ -> #(None, st)

@@ -1,7 +1,7 @@
 import arc/bytecode/error_kind.{RangeError, TypeError}
 import arc/bytecode/key.{Named}
 import arc/rt/call.{
-  type Completion, type Frame, NormalCompletion, ThrowCompletion, t_try_call,
+  type Completion, type Frame, NormalCompletion, ThrowCompletion, try_call,
 } as rt_call
 import arc/rt/gc as rt_gc
 import arc/rt/inspect as rt_inspect
@@ -69,7 +69,7 @@ fn alloc_native_fn(
   name: String,
   length: Int,
 ) -> #(Handle, Agent) {
-  rt_call.t_native_new(
+  rt_call.native_new(
     st,
     Some(st.realm.function.prototype),
     token,
@@ -83,7 +83,7 @@ pub fn alloc_resolving_fns(
   st: Agent,
   promise_h: Handle,
 ) -> #(#(Handle, Handle), Agent) {
-  let #(already_resolved, st) = rt_store.t_cell_new(st, SBox(mk_bool(False)))
+  let #(already_resolved, st) = rt_store.cell_new(st, SBox(mk_bool(False)))
   let #(resolve_h, st) =
     alloc_native_fn(st, PromiseResolveFn(promise_h, already_resolved), "", 1)
   let #(reject_h, st) =
@@ -100,7 +100,7 @@ fn alloc_asyncgen_resume(
   alloc_native_fn(st, AsyncGenResume(gen: gen_h, is_throw:, kind:), "", 1)
 }
 
-pub fn t_enqueue_job(st: Agent, job: Job) -> Agent {
+pub fn enqueue_job(st: Agent, job: Job) -> Agent {
   let store = st.store
   Agent(
     ..st,
@@ -133,7 +133,7 @@ pub fn drain(st: Agent) -> Agent {
     Some(#(job, rest)) -> {
       let st = Agent(..st, store: Store(..store, microtasks: rest))
       let st = execute_job(st, job)
-      let st = rt_gc.t_maybe_collect(st)
+      let st = rt_gc.maybe_collect(st)
       drain(st)
     }
   }
@@ -170,13 +170,13 @@ fn take_wake(refs: List(WaiterRef), timeout_ms: Int) -> Option(WaiterRef)
 @external(erlang, "arc_rt_sab_ffi", "await_wake")
 fn await_wake(ref: WaiterRef) -> Nil
 
-pub fn t_add_waiter(
+pub fn add_waiter(
   st: Agent,
   owner: SabOwner,
   ref: WaiterRef,
   deadline: Option(Int),
 ) -> #(Handle, Agent) {
-  let #(promise, st) = t_new_promise(st)
+  let #(promise, st) = new_promise(st)
   let target = mk_object(promise)
   let waiter =
     AsyncWaiter(
@@ -201,7 +201,7 @@ fn pending_refs(st: Agent) -> List(WaiterRef) {
 fn apply_pending_wakes(st: Agent) -> Agent {
   case take_wake(pending_refs(st), -1) {
     None -> st
-    Some(ref) -> apply_pending_wakes(t_wake_waiter(st, ref))
+    Some(ref) -> apply_pending_wakes(wake_waiter(st, ref))
   }
 }
 
@@ -209,13 +209,13 @@ fn apply_pending_wakes(st: Agent) -> Agent {
 fn idle_until(st: Agent, deadline: Int) -> Agent {
   let wait_ms = int.max(deadline - st.hooks.monotonic_now(), 0) + 1
   case take_wake(pending_refs(st), wait_ms) {
-    Some(ref) -> t_wake_waiter(st, ref)
+    Some(ref) -> wake_waiter(st, ref)
     None if wait_ms <= max_receive_ms -> fire_due_waiters(st, deadline)
     None -> st
   }
 }
 
-pub fn t_wake_waiter(st: Agent, ref: WaiterRef) -> Agent {
+pub fn wake_waiter(st: Agent, ref: WaiterRef) -> Agent {
   case list.partition(st.waiters, fn(w) { w.ref == ref }) {
     #([], _) -> st
     #([w, ..], kept) -> enqueue_resolve_ok(Agent(..st, waiters: kept), w)
@@ -223,7 +223,7 @@ pub fn t_wake_waiter(st: Agent, ref: WaiterRef) -> Agent {
 }
 
 fn enqueue_resolve_ok(st: Agent, w: AsyncWaiter) -> Agent {
-  t_enqueue_job(
+  enqueue_job(
     st,
     ReactionJob(
       handler: IdentityPassThrough,
@@ -266,7 +266,7 @@ fn earliest_deadline(st: Agent) -> Option(Int) {
 fn finish_drain(st: Agent) -> Agent {
   let store = st.store
   list.each(store.meta.unhandled_rejections, fn(id) {
-    case rt_store.t_cell_get(st, Handle(id)) {
+    case rt_store.cell_get(st, Handle(id)) {
       SPromiseData(state: PromiseRejected(reason), ..) ->
         st.hooks.report_uncaught(
           "Uncaught (in promise) " <> describe_thrown(st, reason),
@@ -293,11 +293,11 @@ fn settle(st: Agent, target: JsVal, side: Side, value: JsVal) -> Agent {
   case classify(target) {
     types.KUndef -> st
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h), side {
+      case rt_store.cell_get(st, h), side {
         SObject(kind: PromiseObj(..), ..), Fulfil ->
-          t_promise_resolve(st, h, value)
+          promise_resolve(st, h, value)
         SObject(kind: PromiseObj(..), ..), Reject ->
-          t_promise_reject(st, h, value)
+          promise_reject(st, h, value)
         SAsyncContext(resume:, promise:), _ -> {
           use st <- resume_from_job(st)
           let #(step, st) = apply_resume(st, resume, sent_of(side, value))
@@ -321,14 +321,14 @@ fn sent_of(side: Side, value: JsVal) -> #(Int, JsVal) {
 }
 
 fn resume_from_job(st: Agent, turn: fn(Agent) -> Agent) -> Agent {
-  let st = rt_store.t_enter_call(st)
+  let st = rt_store.enter_call(st)
   let #(outcome, st) =
     rt_call.try_run(st, fn(st) { #(mk_undefined(), turn(st)) })
-  report_job_throw(#(outcome, rt_store.t_leave_call(st)))
+  report_job_throw(#(outcome, rt_store.leave_call(st)))
 }
 
 fn call_settle(st: Agent, target: JsVal, args: List(JsVal)) -> Agent {
-  report_job_throw(t_try_call(st, target, mk_undefined(), args))
+  report_job_throw(try_call(st, target, mk_undefined(), args))
 }
 
 fn report_job_throw(outcome: #(Completion(JsVal), Agent)) -> Agent {
@@ -354,13 +354,13 @@ fn execute_job(st: Agent, job: Job) -> Agent {
         IdentityPassThrough -> settle(st, resolve, Fulfil, arg)
         ThrowerPassThrough -> settle(st, reject, Reject, arg)
         Handler(fun) ->
-          case t_try_call(st, fun, mk_undefined(), [arg]) {
+          case try_call(st, fun, mk_undefined(), [arg]) {
             #(NormalCompletion(v), st) -> settle(st, resolve, Fulfil, v)
             #(ThrowCompletion(e), st) -> settle(st, reject, Reject, e)
           }
       }
     ResolveThenableJob(thenable:, then_fn:, resolve:, reject:) ->
-      case t_try_call(st, then_fn, thenable, [resolve, reject]) {
+      case try_call(st, then_fn, thenable, [resolve, reject]) {
         #(NormalCompletion(_), st) -> st
         #(ThrowCompletion(e), st) -> call_settle(st, reject, [e])
       }
@@ -378,7 +378,7 @@ pub fn alloc_iter_result(
   done done: Bool,
 ) -> #(Handle, Agent) {
   let object_proto = st.realm.object.prototype
-  use seq <- rt_store.t_cell_new_with(st, 2)
+  use seq <- rt_store.cell_new_with(st, 2)
   SObject(
     kind: Ordinary,
     proto: Some(object_proto),
@@ -415,7 +415,7 @@ fn alloc_shell(
   kind: types.ObjKind,
   proto: Option(Handle),
 ) -> #(Handle, Agent) {
-  rt_store.t_cell_new(
+  rt_store.cell_new(
     st,
     SObject(
       kind:,
@@ -432,7 +432,7 @@ fn alloc_shell(
 pub fn generator_data(st: Agent, this: JsVal) -> Handle {
   let data = case classify(this) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: GeneratorObj(data:), ..) -> Some(data)
         _ -> None
       }
@@ -441,7 +441,7 @@ pub fn generator_data(st: Agent, this: JsVal) -> Handle {
   case data {
     Some(data) -> data
     None ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Generator.prototype method called on incompatible receiver",
       )
@@ -449,7 +449,7 @@ pub fn generator_data(st: Agent, this: JsVal) -> Handle {
 }
 
 fn read_generator(st: Agent, gen_h: Handle) -> Cell {
-  case rt_store.t_cell_get(st, gen_h) {
+  case rt_store.cell_get(st, gen_h) {
     SGenerator(..) as gen -> gen
     _ -> panic as "rt_async: Handle is not an SGenerator cell (engine invariant)"
   }
@@ -462,27 +462,27 @@ fn set_gen_state(
   new_state: types.GeneratorState,
 ) -> Agent {
   let assert SGenerator(resume:, ..) = gen
-  rt_store.t_cell_set(st, gen_h, SGenerator(state: new_state, resume:))
+  rt_store.cell_set(st, gen_h, SGenerator(state: new_state, resume:))
 }
 
 // §27.5.1.2 generatorstart
-pub fn t_gen_start(
+pub fn gen_start(
   st: Agent,
   sm: SmFn,
   frame: Frame,
   _args: List(JsVal),
   loc0: Loc,
 ) -> #(Handle, Agent) {
-  t_gen_new(
+  gen_new(
     st,
     rt_call.frame_active_func(frame),
     ResumeCompiled(sm:, rs: 0, loc: loc0),
   )
 }
 
-pub fn t_gen_new(st: Agent, callee: JsVal, resume: Resume) -> #(Handle, Agent) {
+pub fn gen_new(st: Agent, callee: JsVal, resume: Resume) -> #(Handle, Agent) {
   let #(data, st) =
-    rt_store.t_cell_new(st, SGenerator(state: GenSuspendedStart, resume:))
+    rt_store.cell_new(st, SGenerator(state: GenSuspendedStart, resume:))
   let proto = generator_prototype(st, callee, fn(r) { r.generator.prototype })
   alloc_shell(st, GeneratorObj(data:), Some(proto))
 }
@@ -496,7 +496,7 @@ fn generator_prototype(
   case classify(callee) {
     KHandle(fn_h) ->
       case
-        rt_obj.t_ordinary_own_property(st, fn_h, StringKey(Named("prototype")))
+        rt_obj.ordinary_own_property(st, fn_h, StringKey(Named("prototype")))
       {
         Some(DataProperty(value:, ..)) ->
           case classify(value) {
@@ -510,12 +510,12 @@ fn generator_prototype(
 }
 
 // §27.5.3.3 generatorresume
-pub fn t_gen_next(st: Agent, gen_h: Handle, sent: JsVal) -> #(Handle, Agent) {
-  let #(#(done, v), st) = t_gen_step(st, gen_h, sent)
+pub fn gen_next(st: Agent, gen_h: Handle, sent: JsVal) -> #(Handle, Agent) {
+  let #(#(done, v), st) = gen_step(st, gen_h, sent)
   alloc_iter_result(st, v, done)
 }
 
-pub fn t_gen_step(
+pub fn gen_step(
   st: Agent,
   gen_h: Handle,
   sent: JsVal,
@@ -524,20 +524,18 @@ pub fn t_gen_step(
   let assert SGenerator(state:, resume:) = gen
   case state {
     GenCompleted -> #(#(True, mk_undefined()), st)
-    GenExecuting ->
-      rt_val.t_throw_type_error(st, "Generator is already running")
+    GenExecuting -> rt_val.throw_type_error(st, "Generator is already running")
     GenSuspendedStart | GenSuspendedYield ->
       gen_resume(st, gen_h, gen, resume, #(sent_next, sent))
   }
 }
 
 // §27.5.3.4 generatorresumeabrupt, return
-pub fn t_gen_return(st: Agent, gen_h: Handle, v: JsVal) -> #(Handle, Agent) {
+pub fn gen_return(st: Agent, gen_h: Handle, v: JsVal) -> #(Handle, Agent) {
   let gen = read_generator(st, gen_h)
   let assert SGenerator(state:, resume:) = gen
   case state {
-    GenExecuting ->
-      rt_val.t_throw_type_error(st, "Generator is already running")
+    GenExecuting -> rt_val.throw_type_error(st, "Generator is already running")
     GenCompleted | GenSuspendedStart -> {
       let st = set_gen_state(st, gen_h, gen, GenCompleted)
       alloc_iter_result(st, v, done: True)
@@ -551,15 +549,14 @@ pub fn t_gen_return(st: Agent, gen_h: Handle, v: JsVal) -> #(Handle, Agent) {
 }
 
 // §27.5.3.4 generatorresumeabrupt, throw
-pub fn t_gen_throw(st: Agent, gen_h: Handle, e: JsVal) -> #(Handle, Agent) {
+pub fn gen_throw(st: Agent, gen_h: Handle, e: JsVal) -> #(Handle, Agent) {
   let gen = read_generator(st, gen_h)
   let assert SGenerator(state:, resume:) = gen
   case state {
-    GenExecuting ->
-      rt_val.t_throw_type_error(st, "Generator is already running")
+    GenExecuting -> rt_val.throw_type_error(st, "Generator is already running")
     GenCompleted | GenSuspendedStart -> {
       let st = set_gen_state(st, gen_h, gen, GenCompleted)
-      rt_store.t_throw(st, e)
+      rt_store.throw(st, e)
     }
     GenSuspendedYield -> {
       let #(#(done, v), st) =
@@ -577,18 +574,18 @@ fn gen_resume(
   sent: #(Int, JsVal),
 ) -> #(#(Bool, JsVal), Agent) {
   let st = set_gen_state(st, gen_h, gen, GenExecuting)
-  let st = rt_store.t_enter_call(st)
+  let st = rt_store.enter_call(st)
   let #(step, st) = apply_resume(st, resume, sent)
-  let st = rt_store.t_leave_call(st)
+  let st = rt_store.leave_call(st)
   case step {
     StepReturn(v) -> #(#(True, v), set_gen_state(st, gen_h, gen, GenCompleted))
     StepThrow(e) -> {
       let st = set_gen_state(st, gen_h, gen, GenCompleted)
-      rt_store.t_throw(st, e)
+      rt_store.throw(st, e)
     }
     StepYield(value:, resume:) -> {
       let st =
-        rt_store.t_cell_set(
+        rt_store.cell_set(
           st,
           gen_h,
           SGenerator(state: GenSuspendedYield, resume:),
@@ -604,7 +601,7 @@ fn gen_resume(
 pub fn as_promise(st: Agent, v: JsVal) -> Option(Handle) {
   case classify(v) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: PromiseObj(..), ..) -> Some(h)
         _ -> None
       }
@@ -616,9 +613,9 @@ pub fn promise_data(
   st: Agent,
   promise_h: Handle,
 ) -> #(Handle, PromiseState, Bool) {
-  case rt_store.t_cell_get(st, promise_h) {
+  case rt_store.cell_get(st, promise_h) {
     SObject(kind: PromiseObj(data:), ..) ->
-      case rt_store.t_cell_get(st, data) {
+      case rt_store.cell_get(st, data) {
         SPromiseData(state:, is_handled:) -> #(data, state, is_handled)
         _ ->
           panic as "rt_async: PromiseObj data is not SPromiseData (engine invariant)"
@@ -627,24 +624,24 @@ pub fn promise_data(
   }
 }
 
-pub fn t_new_promise_with_proto(
+pub fn new_promise_with_proto(
   st: Agent,
   proto: Option(Handle),
 ) -> #(Handle, Agent) {
   let #(data, st) =
-    rt_store.t_cell_new(st, SPromiseData(PromisePending([]), is_handled: False))
+    rt_store.cell_new(st, SPromiseData(PromisePending([]), is_handled: False))
   alloc_shell(st, PromiseObj(data:), proto)
 }
 
-pub fn t_new_promise(st: Agent) -> #(Handle, Agent) {
-  t_new_promise_with_proto(st, Some(st.realm.promise.prototype))
+pub fn new_promise(st: Agent) -> #(Handle, Agent) {
+  new_promise_with_proto(st, Some(st.realm.promise.prototype))
 }
 
 // §27.2.1.5 newpromisecapability
-pub fn t_new_promise_capability(
+pub fn new_promise_capability(
   st: Agent,
 ) -> #(#(Handle, Handle, Handle), Agent) {
-  let #(promise_h, st) = t_new_promise(st)
+  let #(promise_h, st) = new_promise(st)
   let #(#(resolve_h, reject_h), st) = alloc_resolving_fns(st, promise_h)
   #(#(promise_h, resolve_h, reject_h), st)
 }
@@ -654,7 +651,7 @@ fn fulfill_promise(st: Agent, promise_h: Handle, value: JsVal) -> Agent {
   case promise_data(st, promise_h) {
     #(data, PromisePending(reactions), is_handled) -> {
       let st =
-        rt_store.t_cell_set(
+        rt_store.cell_set(
           st,
           data,
           SPromiseData(PromiseFulfilled(value), is_handled:),
@@ -666,11 +663,11 @@ fn fulfill_promise(st: Agent, promise_h: Handle, value: JsVal) -> Agent {
 }
 
 // §27.2.1.7 rejectpromise
-pub fn t_promise_reject(st: Agent, promise_h: Handle, reason: JsVal) -> Agent {
+pub fn promise_reject(st: Agent, promise_h: Handle, reason: JsVal) -> Agent {
   case promise_data(st, promise_h) {
     #(data, PromisePending(reactions), is_handled) -> {
       let st =
-        rt_store.t_cell_set(
+        rt_store.cell_set(
           st,
           data,
           SPromiseData(PromiseRejected(reason), is_handled:),
@@ -705,7 +702,7 @@ fn enqueue_reactions(
   pick: fn(PromiseReaction) -> ReactionHandler,
 ) -> Agent {
   list.fold(list.reverse(reactions), st, fn(st, r) {
-    t_enqueue_job(
+    enqueue_job(
       st,
       ReactionJob(
         handler: pick(r),
@@ -726,7 +723,7 @@ fn on_reject_handler(r: PromiseReaction) -> ReactionHandler {
 }
 
 // §27.2.1.3.2 promise resolve functions steps 7-16
-pub fn t_promise_resolve(
+pub fn promise_resolve(
   st: Agent,
   promise_h: Handle,
   resolution: JsVal,
@@ -734,8 +731,8 @@ pub fn t_promise_resolve(
   case classify(resolution) {
     KHandle(h) if h == promise_h -> {
       let #(e, st) =
-        rt_val.t_new_error(st, TypeError, "Chaining cycle detected for promise")
-      t_promise_reject(st, promise_h, e)
+        rt_val.new_error(st, TypeError, "Chaining cycle detected for promise")
+      promise_reject(st, promise_h, e)
     }
     KHandle(h) -> resolve_with_handle(st, promise_h, resolution, h)
     _ -> fulfill_promise(st, promise_h, resolution)
@@ -748,21 +745,21 @@ fn resolve_with_handle(
   resolution: JsVal,
   h: Handle,
 ) -> Agent {
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     SObject(..) | types.SShapedObject(..) -> {
       let #(outcome, st) =
         rt_call.try_run(st, fn(st) {
-          rt_obj.t_get_prop(st, resolution, StringKey(Named("then")))
+          rt_obj.get_prop(st, resolution, StringKey(Named("then")))
         })
       case outcome {
-        ThrowCompletion(e) -> t_promise_reject(st, promise_h, e)
+        ThrowCompletion(e) -> promise_reject(st, promise_h, e)
         NormalCompletion(then_val) ->
           case is_callable(st, then_val) {
             False -> fulfill_promise(st, promise_h, resolution)
             True -> {
               let #(#(resolve_h, reject_h), st) =
                 alloc_resolving_fns(st, promise_h)
-              t_enqueue_job(
+              enqueue_job(
                 st,
                 ResolveThenableJob(
                   thenable: resolution,
@@ -784,28 +781,28 @@ pub fn promise_resolve_static(st: Agent, v: JsVal) -> #(Handle, Agent) {
   case as_promise(st, v) {
     Some(h) -> #(h, st)
     None -> {
-      let #(h, st) = t_new_promise(st)
-      #(h, t_promise_resolve(st, h, v))
+      let #(h, st) = new_promise(st)
+      #(h, promise_resolve(st, h, v))
     }
   }
 }
 
 // §27.2.5.4.1 performpromisethen
-pub fn t_promise_then(
+pub fn promise_then(
   st: Agent,
   promise_h: Handle,
   on_fulfilled: JsVal,
   on_rejected: JsVal,
 ) -> #(Handle, Agent) {
-  let #(child_h, st) = t_new_promise(st)
+  let #(child_h, st) = new_promise(st)
   let child = mk_object(child_h)
   #(
     child_h,
-    t_perform_then(st, promise_h, on_fulfilled, on_rejected, child, child),
+    perform_then(st, promise_h, on_fulfilled, on_rejected, child, child),
   )
 }
 
-pub fn t_perform_then(
+pub fn perform_then(
   st: Agent,
   promise_h: Handle,
   on_fulfilled: JsVal,
@@ -815,14 +812,21 @@ pub fn t_perform_then(
 ) -> Agent {
   let fulfill_handler = to_handler(st, on_fulfilled, IdentityPassThrough)
   let reject_handler = to_handler(st, on_rejected, ThrowerPassThrough)
-  perform_then(st, promise_h, fulfill_handler, reject_handler, resolve, reject)
+  perform_then_handlers(
+    st,
+    promise_h,
+    fulfill_handler,
+    reject_handler,
+    resolve,
+    reject,
+  )
 }
 
 // §27.7.5.3 await; always enqueues
-pub fn t_await(st: Agent, data_h: Handle, awaited: JsVal) -> Agent {
+pub fn await(st: Agent, data_h: Handle, awaited: JsVal) -> Agent {
   let #(awaited_h, st) = promise_resolve_static(st, awaited)
   let target = mk_object(data_h)
-  perform_then(
+  perform_then_handlers(
     st,
     awaited_h,
     IdentityPassThrough,
@@ -832,7 +836,7 @@ pub fn t_await(st: Agent, data_h: Handle, awaited: JsVal) -> Agent {
   )
 }
 
-fn perform_then(
+fn perform_then_handlers(
   st: Agent,
   promise_h: Handle,
   fulfill_handler: ReactionHandler,
@@ -842,7 +846,7 @@ fn perform_then(
 ) -> Agent {
   case promise_data(st, promise_h) {
     #(data, PromisePending(reactions), _) ->
-      rt_store.t_cell_set(
+      rt_store.cell_set(
         st,
         data,
         SPromiseData(
@@ -860,20 +864,20 @@ fn perform_then(
       )
     #(data, PromiseFulfilled(value) as state, _) -> {
       let st =
-        rt_store.t_cell_set(st, data, SPromiseData(state, is_handled: True))
-      t_enqueue_job(
+        rt_store.cell_set(st, data, SPromiseData(state, is_handled: True))
+      enqueue_job(
         st,
         ReactionJob(handler: fulfill_handler, arg: value, resolve:, reject:),
       )
     }
     #(data, PromiseRejected(reason) as state, is_handled) -> {
       let st =
-        rt_store.t_cell_set(st, data, SPromiseData(state, is_handled: True))
+        rt_store.cell_set(st, data, SPromiseData(state, is_handled: True))
       let st = case is_handled {
         False -> untrack_rejection(st, data)
         True -> st
       }
-      t_enqueue_job(
+      enqueue_job(
         st,
         ReactionJob(handler: reject_handler, arg: reason, resolve:, reject:),
       )
@@ -910,27 +914,27 @@ fn untrack_rejection(st: Agent, data: Handle) -> Agent {
 }
 
 // §27.6.3.1 asyncgeneratorstart
-pub fn t_asyncgen_start(
+pub fn asyncgen_start(
   st: Agent,
   sm: SmFn,
   frame: Frame,
   _args: List(JsVal),
   loc0: Loc,
 ) -> #(Handle, Agent) {
-  t_asyncgen_new(
+  asyncgen_new(
     st,
     rt_call.frame_active_func(frame),
     ResumeCompiled(sm:, rs: 0, loc: loc0),
   )
 }
 
-pub fn t_asyncgen_new(
+pub fn asyncgen_new(
   st: Agent,
   callee: JsVal,
   resume: Resume,
 ) -> #(Handle, Agent) {
   let #(data, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       SAsyncGen(state: AsyncGenSuspendedStart, resume:, queue: #([], [])),
     )
@@ -938,15 +942,11 @@ pub fn t_asyncgen_new(
   alloc_shell(st, AsyncGeneratorObj(data:), Some(proto))
 }
 
-pub fn t_asyncgen_next(
-  st: Agent,
-  this: JsVal,
-  value: JsVal,
-) -> #(Handle, Agent) {
+pub fn asyncgen_next(st: Agent, this: JsVal, value: JsVal) -> #(Handle, Agent) {
   asyncgen_method(st, this, GenNext, value)
 }
 
-pub fn t_asyncgen_return(
+pub fn asyncgen_return(
   st: Agent,
   this: JsVal,
   value: JsVal,
@@ -954,7 +954,7 @@ pub fn t_asyncgen_return(
   asyncgen_method(st, this, GenReturn, value)
 }
 
-pub fn t_asyncgen_throw(
+pub fn asyncgen_throw(
   st: Agent,
   this: JsVal,
   exception: JsVal,
@@ -969,16 +969,16 @@ fn asyncgen_method(
   completion: GeneratorCompletion,
   value: JsVal,
 ) -> #(Handle, Agent) {
-  let #(promise_h, st) = t_new_promise(st)
+  let #(promise_h, st) = new_promise(st)
   case asyncgen_data_of(st, this) {
     Error(Nil) -> {
       let #(e, st) =
-        rt_val.t_new_error(
+        rt_val.new_error(
           st,
           TypeError,
           "AsyncGenerator method called on incompatible receiver",
         )
-      #(promise_h, t_promise_reject(st, promise_h, e))
+      #(promise_h, promise_reject(st, promise_h, e))
     }
     Ok(#(gen_h, ag)) -> {
       let promise = mk_object(promise_h)
@@ -1000,7 +1000,7 @@ fn asyncgen_data_of(
 ) -> Result(#(Handle, AsyncGenLive), Nil) {
   case classify(this) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: AsyncGeneratorObj(data:), ..) ->
           Ok(#(data, read_asyncgen(st, data)))
         _ -> Error(Nil)
@@ -1085,13 +1085,13 @@ fn asyncgen_turn(
   case st.call_depth >= limits.max_call_depth {
     True -> {
       let #(e, st) =
-        rt_val.t_new_error(st, RangeError, "Maximum call stack size exceeded")
+        rt_val.new_error(st, RangeError, "Maximum call stack size exceeded")
       #(StepThrow(e), st)
     }
     False -> {
-      let st = rt_store.t_enter_call(st)
+      let st = rt_store.enter_call(st)
       let #(step, st) = apply_resume(st, resume, sent)
-      #(step, rt_store.t_leave_call(st))
+      #(step, rt_store.leave_call(st))
     }
   }
 }
@@ -1124,7 +1124,7 @@ fn drive_asyncgen_step(
     }
     StepAwait(value:, resume:) -> {
       let st = write_asyncgen(st, gen_h, fn(ag) { AsyncGenLive(..ag, resume:) })
-      t_await(st, gen_h, value)
+      await(st, gen_h, value)
     }
   }
 }
@@ -1148,7 +1148,7 @@ fn redrive_asyncgen(
   drive_asyncgen_step(st, gen_h, req, step)
 }
 
-pub fn t_asyncgen_resume(
+pub fn asyncgen_resume(
   st: Agent,
   gen_h: Handle,
   is_throw is_throw: Bool,
@@ -1186,7 +1186,7 @@ fn setup_return_await(
   let #(on_fulfill, st) =
     alloc_asyncgen_resume(st, gen_h, is_throw: False, kind:)
   let #(on_reject, st) = alloc_asyncgen_resume(st, gen_h, is_throw: True, kind:)
-  perform_then(
+  perform_then_handlers(
     st,
     promise_h,
     Handler(mk_object(on_fulfill)),
@@ -1216,7 +1216,7 @@ type AsyncGenLive {
 }
 
 fn read_asyncgen(st: Agent, gen_h: Handle) -> AsyncGenLive {
-  case rt_store.t_cell_get(st, gen_h) {
+  case rt_store.cell_get(st, gen_h) {
     SAsyncGen(state:, resume:, queue: #(front, back)) ->
       AsyncGenLive(state:, resume:, front:, back:)
     _ -> panic as "rt_async: Handle is not an SAsyncGen cell (engine invariant)"
@@ -1237,7 +1237,7 @@ fn write_asyncgen(
 }
 
 fn put_asyncgen(st: Agent, gen_h: Handle, ag: AsyncGenLive) -> Agent {
-  rt_store.t_cell_set(st, gen_h, encode_asyncgen(ag))
+  rt_store.cell_set(st, gen_h, encode_asyncgen(ag))
 }
 
 fn ag_normalize(ag: AsyncGenLive) -> AsyncGenLive {
@@ -1275,24 +1275,24 @@ fn first_arg(args: List(JsVal)) -> JsVal {
 }
 
 // §27.7.5.1 asyncfunctionstart
-pub fn t_start(
+pub fn start(
   st: Agent,
   sm: SmFn,
   _frame: Frame,
   _args: List(JsVal),
   loc0: Loc,
 ) -> #(Handle, Agent) {
-  t_run(st, ResumeCompiled(sm:, rs: 0, loc: loc0))
+  run(st, ResumeCompiled(sm:, rs: 0, loc: loc0))
 }
 
-pub fn t_reject(st: Agent, reason: JsVal) -> #(Handle, Agent) {
-  let #(promise_h, st) = t_new_promise(st)
-  let st = t_promise_reject(st, promise_h, reason)
+pub fn reject(st: Agent, reason: JsVal) -> #(Handle, Agent) {
+  let #(promise_h, st) = new_promise(st)
+  let st = promise_reject(st, promise_h, reason)
   #(promise_h, st)
 }
 
-pub fn t_run(st: Agent, resume: Resume) -> #(Handle, Agent) {
-  let #(promise_h, st) = t_new_promise(st)
+pub fn run(st: Agent, resume: Resume) -> #(Handle, Agent) {
+  let #(promise_h, st) = new_promise(st)
   let #(step, st) = apply_resume(st, resume, sent_start())
   #(promise_h, drive_async_step(st, None, promise_h, step))
 }
@@ -1304,15 +1304,15 @@ fn drive_async_step(
   step: Step,
 ) -> Agent {
   case step {
-    StepReturn(v) -> t_promise_resolve(st, promise_h, v)
-    StepThrow(e) -> t_promise_reject(st, promise_h, e)
+    StepReturn(v) -> promise_resolve(st, promise_h, v)
+    StepThrow(e) -> promise_reject(st, promise_h, e)
     StepAwait(value:, resume:) -> {
       let context = SAsyncContext(resume:, promise: promise_h)
       let #(ctx_h, st) = case ctx {
-        Some(h) -> #(h, rt_store.t_cell_set(st, h, context))
-        None -> rt_store.t_cell_new(st, context)
+        Some(h) -> #(h, rt_store.cell_set(st, h, context))
+        None -> rt_store.cell_new(st, context)
       }
-      t_await(st, ctx_h, value)
+      await(st, ctx_h, value)
     }
     StepYield(..) ->
       panic as "rt_async: plain async function body produced a yield step"
@@ -1330,7 +1330,7 @@ pub fn promise_resolve_fn(
     #(True, st) -> #(mk_undefined(), st)
     #(False, st) -> #(
       mk_undefined(),
-      t_promise_resolve(st, promise_h, first_arg(args)),
+      promise_resolve(st, promise_h, first_arg(args)),
     )
   }
 }
@@ -1346,19 +1346,19 @@ pub fn promise_reject_fn(
     #(True, st) -> #(mk_undefined(), st)
     #(False, st) -> #(
       mk_undefined(),
-      t_promise_reject(st, promise_h, first_arg(args)),
+      promise_reject(st, promise_h, first_arg(args)),
     )
   }
 }
 
 fn check_already_resolved(st: Agent, already_h: Handle) -> #(Bool, Agent) {
-  case rt_store.t_cell_get(st, already_h) {
+  case rt_store.cell_get(st, already_h) {
     SBox(value: v) ->
       case classify(v) {
         types.KBool(True) -> #(True, st)
         _ -> #(
           False,
-          rt_store.t_cell_set(st, already_h, SBox(value: mk_bool(True))),
+          rt_store.cell_set(st, already_h, SBox(value: mk_bool(True))),
         )
       }
     _ ->

@@ -81,13 +81,13 @@ fn require_object_target(
       case classify(first) {
         KHandle(h) -> cont(h, rest, st)
         _ ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Reflect." <> method <> " called on non-object",
           )
       }
     [] ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Reflect." <> method <> " called on non-object",
       )
@@ -98,11 +98,11 @@ fn reflect_apply(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   let #(target, this_arg, args_list) = helpers.three_args_or_undefined(args)
   case rt_val.is_callable(st, target) {
     False ->
-      rt_val.t_throw_type_error(st, "Reflect.apply: target is not a function")
+      rt_val.throw_type_error(st, "Reflect.apply: target is not a function")
     True -> {
       let #(call_args, st) =
         rt_abstract_ops.create_list_from_array_like(st, args_list)
-      rt_call.t_call(st, target, this_arg, call_args)
+      rt_call.call(st, target, this_arg, call_args)
     }
   }
 }
@@ -116,21 +116,21 @@ fn reflect_construct(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
   case rt_call.is_constructor(st, target) {
     False ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Reflect.construct: target is not a constructor",
       )
     True ->
       case rt_call.is_constructor(st, new_target) {
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Reflect.construct: newTarget is not a constructor",
           )
         True -> {
           let #(ctor_args, st) =
             rt_abstract_ops.create_list_from_array_like(st, args_list)
-          let #(h, st) = rt_call.t_construct(st, target, ctor_args, new_target)
+          let #(h, st) = rt_call.construct(st, target, ctor_args, new_target)
           #(mk_object(h), st)
         }
       }
@@ -140,17 +140,17 @@ fn reflect_construct(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
 fn reflect_define_property(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use h, rest, st <- require_object_target(args, st, "defineProperty")
   let #(key_val, desc_val) = helpers.two_args_or_undefined(rest)
-  let #(pk, st) = rt_val.t_to_property_key(st, key_val)
-  let #(desc, st) = rt_obj.t_to_property_descriptor(st, desc_val)
-  let #(ok, st) = rt_obj.t_define_own_prop(st, h, pk, desc)
+  let #(pk, st) = rt_val.to_property_key(st, key_val)
+  let #(desc, st) = rt_obj.to_property_descriptor(st, desc_val)
+  let #(ok, st) = rt_obj.define_own_prop(st, h, pk, desc)
   #(mk_bool(ok), st)
 }
 
 fn reflect_delete_property(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use h, rest, st <- require_object_target(args, st, "deleteProperty")
   let key_val = helpers.first_arg_or_undefined(rest)
-  let #(pk, st) = rt_val.t_to_property_key(st, key_val)
-  let #(ok, st) = rt_obj.t_delete_prop(st, h, pk)
+  let #(pk, st) = rt_val.to_property_key(st, key_val)
+  let #(ok, st) = rt_obj.delete_prop(st, h, pk)
   #(mk_bool(ok), st)
 }
 
@@ -161,8 +161,8 @@ fn reflect_get(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
     [k] -> #(k, mk_object(h))
     [] -> #(mk_undefined(), mk_object(h))
   }
-  let #(pk, st) = rt_val.t_to_property_key(st, key_val)
-  rt_obj.t_get_prop_with_receiver(st, h, pk, receiver)
+  let #(pk, st) = rt_val.to_property_key(st, key_val)
+  rt_obj.get_prop_with_receiver(st, h, pk, receiver)
 }
 
 fn reflect_get_own_property_descriptor(
@@ -171,12 +171,12 @@ fn reflect_get_own_property_descriptor(
 ) -> #(JsVal, Agent) {
   use h, rest, st <- require_object_target(args, st, "getOwnPropertyDescriptor")
   let key_val = helpers.first_arg_or_undefined(rest)
-  let #(pk, st) = rt_val.t_to_property_key(st, key_val)
-  let #(desc, st) = rt_obj.t_get_own_property(st, h, pk)
+  let #(pk, st) = rt_val.to_property_key(st, key_val)
+  let #(desc, st) = rt_obj.get_own_property(st, h, pk)
   case desc {
     Some(prop) -> {
       let #(dh, st) =
-        rt_obj.t_from_property_descriptor(st, rt_obj.parsed_of_property(prop))
+        rt_obj.from_property_descriptor(st, rt_obj.parsed_of_property(prop))
       #(mk_object(dh), st)
     }
     None -> #(mk_undefined(), st)
@@ -185,7 +185,7 @@ fn reflect_get_own_property_descriptor(
 
 fn reflect_get_prototype_of(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use h, _rest, st <- require_object_target(args, st, "getPrototypeOf")
-  let #(proto, st) = rt_obj.t_get_prototype_of(st, h)
+  let #(proto, st) = rt_obj.get_prototype_of(st, h)
   case proto {
     Some(p) -> #(mk_object(p), st)
     None -> #(mk_null(), st)
@@ -195,20 +195,20 @@ fn reflect_get_prototype_of(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
 fn reflect_has(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use h, rest, st <- require_object_target(args, st, "has")
   let key_val = helpers.first_arg_or_undefined(rest)
-  let #(pk, st) = rt_val.t_to_property_key(st, key_val)
-  let #(found, st) = rt_obj.t_has_prop(st, mk_object(h), pk)
+  let #(pk, st) = rt_val.to_property_key(st, key_val)
+  let #(found, st) = rt_obj.has_prop(st, mk_object(h), pk)
   #(mk_bool(found), st)
 }
 
 fn reflect_is_extensible(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use h, _rest, st <- require_object_target(args, st, "isExtensible")
-  let #(extensible, st) = rt_obj.t_is_extensible(st, h)
+  let #(extensible, st) = rt_obj.is_extensible(st, h)
   #(mk_bool(extensible), st)
 }
 
 fn reflect_own_keys(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use h, _rest, st <- require_object_target(args, st, "ownKeys")
-  let #(keys, st) = rt_obj.t_own_keys(st, h)
+  let #(keys, st) = rt_obj.own_keys(st, h)
   let #(arr, st) =
     realm_ops.alloc_array(st, list.map(keys, rt_obj.object_key_value))
   #(mk_object(arr), st)
@@ -216,7 +216,7 @@ fn reflect_own_keys(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
 
 fn reflect_prevent_extensions(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   use h, _rest, st <- require_object_target(args, st, "preventExtensions")
-  let #(ok, st) = rt_obj.t_prevent_extensions(st, h)
+  let #(ok, st) = rt_obj.prevent_extensions(st, h)
   #(mk_bool(ok), st)
 }
 
@@ -228,8 +228,8 @@ fn reflect_set(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
     [k] -> #(k, mk_undefined(), mk_object(h))
     [] -> #(mk_undefined(), mk_undefined(), mk_object(h))
   }
-  let #(pk, st) = rt_val.t_to_property_key(st, key_val)
-  let #(ok, st) = rt_obj.t_set_prop_with_receiver(st, h, pk, val, receiver)
+  let #(pk, st) = rt_val.to_property_key(st, key_val)
+  let #(ok, st) = rt_obj.set_prop_with_receiver(st, h, pk, val, receiver)
   #(mk_bool(ok), st)
 }
 
@@ -243,12 +243,12 @@ fn reflect_set_prototype_of(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
   case new_proto {
     Error(Nil) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Object prototype may only be an Object or null",
       )
     Ok(new_proto) -> {
-      let #(res, st) = rt_obj.t_set_prototype_of(st, h, new_proto)
+      let #(res, st) = rt_obj.set_prototype_of(st, h, new_proto)
       #(mk_bool(result.is_ok(res)), st)
     }
   }

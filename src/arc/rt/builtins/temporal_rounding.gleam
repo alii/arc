@@ -184,15 +184,12 @@ pub fn read_unit_option(
   case classify(v) {
     KUndef -> #(UnitAbsent, st)
     _ -> {
-      let #(s, st) = rt_val.t_to_string(st, v)
+      let #(s, st) = rt_val.to_string(st, v)
       case allow_auto && s == "auto", singular_unit(s) {
         True, _ -> #(UnitAuto, st)
         False, Some(u) -> #(UnitValue(u), st)
         False, None ->
-          rt_val.t_throw_range_error(
-            st,
-            s <> " is not a valid value for " <> key,
-          )
+          rt_val.throw_range_error(st, s <> " is not a valid value for " <> key)
       }
     }
   }
@@ -230,7 +227,7 @@ pub fn get_rounding_increment_option(
   case classify(v) {
     KUndef -> #(1, st)
     _ -> {
-      let #(n, st) = rt_val.t_to_number(st, v)
+      let #(n, st) = rt_val.to_number(st, v)
       let i = case n {
         JInt(i) -> Some(i)
         JFloat(f) -> Some(rt_val.float_to_int(f))
@@ -238,7 +235,7 @@ pub fn get_rounding_increment_option(
       }
       case i {
         Some(i) if i >= 1 && i <= 1_000_000_000 -> #(i, st)
-        _ -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
+        _ -> rt_val.throw_range_error(st, "invalid roundingIncrement")
       }
     }
   }
@@ -372,7 +369,7 @@ pub fn require_largest_ge_smallest(
   smallest: Unit,
 ) -> Nil {
   case largest_smaller_than_smallest(largest, smallest) {
-    True -> rt_val.t_throw_range_error(st, largest_smaller_msg)
+    True -> rt_val.throw_range_error(st, largest_smaller_msg)
     False -> Nil
   }
 }
@@ -427,11 +424,11 @@ pub fn round_options(
   allow_day allow_day: Bool,
 ) -> #(#(TimeUnit, Int, RoundingMode), Agent) {
   case classify(arg) {
-    KUndef -> rt_val.t_throw_type_error(st, "options parameter is required")
+    KUndef -> rt_val.throw_type_error(st, "options parameter is required")
     KStr(s) ->
       case singular_unit(s) |> option.then(round_unit(_, allow_day)) {
         Some(u) -> #(#(u, 1, HalfExpand), st)
-        None -> rt_val.t_throw_range_error(st, "invalid smallestUnit")
+        None -> rt_val.throw_range_error(st, "invalid smallestUnit")
       }
     KHandle(h) -> {
       let opts = Some(h)
@@ -440,15 +437,15 @@ pub fn round_options(
       let #(smallest, st) =
         get_unit_option(st, opts, "smallestUnit", allow_auto: False)
       case smallest {
-        None -> rt_val.t_throw_range_error(st, "smallestUnit is required")
+        None -> rt_val.throw_range_error(st, "smallestUnit is required")
         Some(u) ->
           case round_unit(u, allow_day) {
             Some(unit) -> #(#(unit, inc, mode), st)
-            None -> rt_val.t_throw_range_error(st, "invalid smallestUnit")
+            None -> rt_val.throw_range_error(st, "invalid smallestUnit")
           }
       }
     }
-    _ -> rt_val.t_throw_type_error(st, "invalid options")
+    _ -> rt_val.throw_type_error(st, "invalid options")
   }
 }
 
@@ -488,8 +485,8 @@ pub fn check_diff_setup(
     largest_smaller_than_smallest(largest, smallest),
     valid_increment_for_unit(inc, smallest)
   {
-    True, _ -> rt_val.t_throw_range_error(st, largest_smaller_msg)
-    False, False -> rt_val.t_throw_range_error(st, "invalid roundingIncrement")
+    True, _ -> rt_val.throw_range_error(st, largest_smaller_msg)
+    False, False -> rt_val.throw_range_error(st, "invalid roundingIncrement")
     False, True -> Nil
   }
 }
@@ -589,23 +586,21 @@ pub fn get_fractional_digits(
     KNum(JInt(i)) ->
       case i >= 0 && i <= 9 {
         True -> #(DigitsFixed(i), st)
-        False ->
-          rt_val.t_throw_range_error(st, "invalid fractionalSecondDigits")
+        False -> rt_val.throw_range_error(st, "invalid fractionalSecondDigits")
       }
     KNum(JFloat(f)) -> {
       let i = rt_val.float_to_int(float.floor(f))
       case i >= 0 && i <= 9 {
         True -> #(DigitsFixed(i), st)
-        False ->
-          rt_val.t_throw_range_error(st, "invalid fractionalSecondDigits")
+        False -> rt_val.throw_range_error(st, "invalid fractionalSecondDigits")
       }
     }
-    KNum(_) -> rt_val.t_throw_range_error(st, "invalid fractionalSecondDigits")
+    KNum(_) -> rt_val.throw_range_error(st, "invalid fractionalSecondDigits")
     _ -> {
-      let #(s, st) = rt_val.t_to_string(st, v)
+      let #(s, st) = rt_val.to_string(st, v)
       case s {
         "auto" -> #(DigitsAuto, st)
-        _ -> rt_val.t_throw_range_error(st, "invalid fractionalSecondDigits")
+        _ -> rt_val.throw_range_error(st, "invalid fractionalSecondDigits")
       }
     }
   }

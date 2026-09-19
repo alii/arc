@@ -59,7 +59,7 @@ pub fn dispatch(
 ) -> #(JsVal, Agent) {
   case native {
     FinalizationRegistryConstructor(..) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Constructor FinalizationRegistry requires 'new'",
       )
@@ -78,7 +78,7 @@ pub fn dispatch_construct(
     FinalizationRegistryConstructor(..) -> construct(st, args, new_target)
     FinalizationRegistryPrototypeRegister
     | FinalizationRegistryPrototypeUnregister ->
-      rt_val.t_throw_type_error(st, "not a constructor")
+      rt_val.throw_type_error(st, "not a constructor")
   }
 }
 
@@ -89,7 +89,7 @@ fn construct(
 ) -> #(Handle, Agent) {
   let callback = helpers.first_arg_or_undefined(args)
   use Nil <- helpers.guard(rt_val.is_callable(st, callback), fn() {
-    rt_val.t_throw_type_error(st, "cleanup must be callable")
+    rt_val.throw_type_error(st, "cleanup must be callable")
   })
   let #(proto_h, st) =
     rt_call.get_prototype_from_constructor(st, new_target, fn(realm: Realm) {
@@ -106,15 +106,15 @@ fn register(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use registry <- require_registry(st, this, "register")
   let #(target, held, token_arg) = helpers.three_args_or_undefined(args)
   use Nil <- helpers.guard(can_be_held_weakly(target), fn() {
-    rt_val.t_throw_type_error(st, "Invalid value used as weak ref target")
+    rt_val.throw_type_error(st, "Invalid value used as weak ref target")
   })
   use Nil <- helpers.guard(!rt_val.same_value(target, held), fn() {
-    rt_val.t_throw_type_error(st, "target and holdings must not be same")
+    rt_val.throw_type_error(st, "target and holdings must not be same")
   })
   case can_be_held_weakly(token_arg), classify(token_arg) {
     False, KUndef -> add_registration(st, registry, target, held, None)
     False, _ ->
-      rt_val.t_throw_type_error(st, "Invalid value used as unregister token")
+      rt_val.throw_type_error(st, "Invalid value used as unregister token")
     True, _ -> add_registration(st, registry, target, held, Some(token_arg))
   }
 }
@@ -138,7 +138,7 @@ fn unregister(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use registry <- require_registry(st, this, "unregister")
   let token = helpers.first_arg_or_undefined(args)
   use Nil <- helpers.guard(can_be_held_weakly(token), fn() {
-    rt_val.t_throw_type_error(st, "Invalid value used as unregister token")
+    rt_val.throw_type_error(st, "Invalid value used as unregister token")
   })
   let #(removed, kept) =
     list.partition(read_registrations(st, registry), fn(r) {
@@ -186,7 +186,7 @@ fn read_registrations(
 ) -> List(Registration) {
   let RegistryHandle(h) = registry
   let assert SObject(kind: FinalizationRegistryObj(registrations:, ..), ..) =
-    rt_store.t_cell_get(st, h)
+    rt_store.cell_get(st, h)
     as "finalization_registry: RegistryHandle does not point at a registry cell"
   registrations
 }
@@ -197,7 +197,7 @@ fn update_registrations(
   f: fn(List(Registration)) -> List(Registration),
 ) -> Agent {
   let RegistryHandle(h) = registry
-  rt_store.t_cell_update(st, h, fn(cell) {
+  rt_store.cell_update(st, h, fn(cell) {
     let assert SObject(
       kind: FinalizationRegistryObj(callback:, registrations:),
       ..,

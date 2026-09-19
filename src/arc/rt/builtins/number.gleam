@@ -74,8 +74,8 @@ pub fn init(
       #("isSafeInteger", NumberN(NumberIsSafeInteger), 1),
     ])
   // number.parseint must be === the global parseint
-  let #(pi_p, st) = rt_store.t_builtin_property(st, mk_object(parse_int_h))
-  let #(pf_p, st) = rt_store.t_builtin_property(st, mk_object(parse_float_h))
+  let #(pi_p, st) = rt_store.builtin_property(st, mk_object(parse_int_h))
+  let #(pf_p, st) = rt_store.builtin_property(st, mk_object(parse_float_h))
   let shared_globals = [#("parseInt", pi_p), #("parseFloat", pf_p)]
   let #(constants, st) =
     data_constants(st, [
@@ -130,7 +130,7 @@ fn data_constants(
   case specs {
     [] -> #([], st)
     [#(name, n), ..rest] -> {
-      let #(prop, st) = rt_store.t_frozen_property(st, mk_number(n))
+      let #(prop, st) = rt_store.frozen_property(st, mk_number(n))
       let #(tail, st) = data_constants(st, rest)
       #([#(name, prop), ..tail], st)
     }
@@ -167,11 +167,11 @@ fn call_as_function(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   case args {
     [] -> #(mk_int(0), st)
     [val, ..] -> {
-      let #(prim, st) = rt_val.t_to_primitive(st, val, HintNumber)
+      let #(prim, st) = rt_val.to_primitive(st, val, HintNumber)
       case classify(prim) {
         KBig(n) -> #(mk_number(rt_val.num_from_int(n)), st)
         _ -> {
-          let #(n, st) = rt_val.t_to_number(st, prim)
+          let #(n, st) = rt_val.to_number(st, prim)
           #(mk_number(n), st)
         }
       }
@@ -231,15 +231,12 @@ fn number_to_string(
     [r, ..] ->
       case classify(r) {
         KUndef -> #(10, st)
-        _ -> rt_val.t_to_integer_or_infinity(st, r)
+        _ -> rt_val.to_integer_or_infinity(st, r)
       }
   }
   case radix >= 2 && radix <= 36 {
     False ->
-      rt_val.t_throw_range_error(
-        st,
-        "toString() radix must be between 2 and 36",
-      )
+      rt_val.throw_range_error(st, "toString() radix must be between 2 and 36")
     True -> #(mk_string(format_number_radix(n, radix)), st)
   }
 }
@@ -251,10 +248,10 @@ fn number_to_fixed(
 ) -> #(JsVal, Agent) {
   let n = this_number_value(st, this, "toFixed")
   let #(f, st) =
-    rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
+    rt_val.to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
   case f < 0 || f > 100 {
     True ->
-      rt_val.t_throw_range_error(
+      rt_val.throw_range_error(
         st,
         "toFixed() digits argument must be between 0 and 100",
       )
@@ -280,13 +277,13 @@ fn number_to_exponential(
   case classify(arg) {
     KUndef -> #(mk_string(format_non_finite(n, format_to_exponential_auto)), st)
     _ -> {
-      let #(f, st) = rt_val.t_to_integer_or_infinity(st, arg)
+      let #(f, st) = rt_val.to_integer_or_infinity(st, arg)
       // non-finite check runs before the range check
       case n {
         JInt(_) | JFloat(_) ->
           case f < 0 || f > 100 {
             True ->
-              rt_val.t_throw_range_error(
+              rt_val.throw_range_error(
                 st,
                 "toExponential() argument must be between 0 and 100",
               )
@@ -311,13 +308,13 @@ fn number_to_precision(
   case classify(arg) {
     KUndef -> #(mk_string(rt_val.format_jsnum(n)), st)
     _ -> {
-      let #(p, st) = rt_val.t_to_integer_or_infinity(st, arg)
+      let #(p, st) = rt_val.to_integer_or_infinity(st, arg)
       // non-finite check runs before the range check
       case n {
         JInt(_) | JFloat(_) ->
           case p < 1 || p > 100 {
             True ->
-              rt_val.t_throw_range_error(
+              rt_val.throw_range_error(
                 st,
                 "toPrecision() argument must be between 1 and 100",
               )
@@ -336,7 +333,7 @@ fn this_number_value(st: Agent, this: JsVal, method: String) -> JsNum {
   case classify(this) {
     KNum(n) -> n
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: NumberObj(value: n), ..) -> n
         _ -> not_a_number(st, method)
       }
@@ -345,7 +342,7 @@ fn this_number_value(st: Agent, this: JsVal, method: String) -> JsNum {
 }
 
 fn not_a_number(st: Agent, method: String) -> a {
-  rt_val.t_throw_type_error(
+  rt_val.throw_type_error(
     st,
     "Number.prototype." <> method <> " requires that 'this' be a Number",
   )

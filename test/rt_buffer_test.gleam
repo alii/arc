@@ -22,18 +22,18 @@ fn ints(xs: List(Int)) -> List(JsVal) {
 }
 
 fn global(st: Agent, name: String) -> JsVal {
-  let #(v, _) = rt_lang.t_global_get(st, <<name:utf8>>)
+  let #(v, _) = rt_lang.global_get(st, <<name:utf8>>)
   v
 }
 
 fn construct(st: Agent, name: String, args: List(JsVal)) -> #(JsVal, Agent) {
   let ctor = global(st, name)
-  let #(h, st) = rt_call.t_construct(st, ctor, args, ctor)
+  let #(h, st) = rt_call.construct(st, ctor, args, ctor)
   #(mk_object(h), st)
 }
 
 fn get(st: Agent, obj: JsVal, name: String) -> #(JsVal, Agent) {
-  rt_obj.t_get_prop(st, obj, StringKey(key.canonical(name)))
+  rt_obj.get_prop(st, obj, StringKey(key.canonical(name)))
 }
 
 fn get_(st: Agent, obj: JsVal, name: String) -> JsVal {
@@ -41,7 +41,7 @@ fn get_(st: Agent, obj: JsVal, name: String) -> JsVal {
 }
 
 fn set(st: Agent, obj: JsVal, name: String, v: JsVal) -> Agent {
-  let #(_, st) = rt_obj.t_set_prop(st, obj, StringKey(key.canonical(name)), v)
+  let #(_, st) = rt_obj.set_prop(st, obj, StringKey(key.canonical(name)), v)
   st
 }
 
@@ -52,7 +52,7 @@ fn attempt(
   args: List(JsVal),
 ) -> #(rt_call.Completion(JsVal), Agent) {
   let #(f, st) = get(st, obj, name)
-  rt_call.t_try_call(st, f, obj, args)
+  rt_call.try_call(st, f, obj, args)
 }
 
 fn invoke(
@@ -82,7 +82,7 @@ fn static(
 }
 
 fn array(st: Agent, xs: List(JsVal)) -> #(JsVal, Agent) {
-  rt_obj.t_new_array(st, xs)
+  rt_obj.new_array(st, xs)
 }
 
 fn error_name(st: Agent, err: JsVal) -> String {
@@ -98,7 +98,7 @@ fn joined(st: Agent, ta: JsVal) -> String {
 }
 
 fn options(st: Agent, key: String, v: JsVal) -> #(JsVal, Agent) {
-  let #(h, st) = rt_obj.t_new_object(st, Some(st.realm.object.prototype))
+  let #(h, st) = rt_obj.new_object(st, Some(st.realm.object.prototype))
   let o = mk_object(h)
   #(o, set(st, o, key, v))
 }
@@ -140,7 +140,7 @@ pub fn out_of_bounds_read_undefined_write_ignored_test() {
   assert classify(get_(st, ta, "5")) == KUndef
   assert classify(get_(st, ta, "length")) == KNum(JInt(2))
   let assert KHandle(h) = classify(ta)
-  let #(keys, _) = rt_obj.t_own_keys(st, h)
+  let #(keys, _) = rt_obj.own_keys(st, h)
   assert keys == [StringKey(key.canonical("0")), StringKey(key.canonical("1"))]
 }
 
@@ -223,8 +223,8 @@ pub fn keys_in_and_descriptor_test() {
   let #(ta, st) = construct(st, "Int8Array", [src])
   let #(keys, st) = static(st, "Object", "keys", [ta])
   assert joined(st, keys) == "0,1,2"
-  let #(has1, st) = rt_obj.t_has_prop(st, ta, StringKey(key.canonical("1")))
-  let #(has3, st) = rt_obj.t_has_prop(st, ta, StringKey(key.canonical("3")))
+  let #(has1, st) = rt_obj.has_prop(st, ta, StringKey(key.canonical("1")))
+  let #(has3, st) = rt_obj.has_prop(st, ta, StringKey(key.canonical("3")))
   assert has1
   assert !has3
   let #(desc, st) =
@@ -237,8 +237,8 @@ pub fn keys_in_and_descriptor_test() {
     static(st, "Object", "getOwnPropertyDescriptor", [ta, mk_string("7")])
   assert classify(none) == KUndef
   let assert KHandle(h) = classify(ta)
-  let #(d0, st) = rt_obj.t_delete_prop(st, h, StringKey(key.canonical("0")))
-  let #(d9, _) = rt_obj.t_delete_prop(st, h, StringKey(key.canonical("9")))
+  let #(d0, st) = rt_obj.delete_prop(st, h, StringKey(key.canonical("0")))
+  let #(d9, _) = rt_obj.delete_prop(st, h, StringKey(key.canonical("9")))
   assert !d0
   assert d9
 }
@@ -313,9 +313,9 @@ pub fn wide_integer_float_store_rounds_like_arithmetic_test() {
 
 pub fn constructor_reads_new_target_prototype_in_spec_order_test() {
   let st = agent()
-  let #(nt_h, st) = rt_obj.t_new_object(st, Some(st.realm.object.prototype))
+  let #(nt_h, st) = rt_obj.new_object(st, Some(st.realm.object.prototype))
   let #(_, st) =
-    rt_obj.t_define_own_accessor(
+    rt_obj.define_own_accessor(
       st,
       nt_h,
       StringKey(key.canonical("prototype")),
@@ -328,7 +328,7 @@ pub fn constructor_reads_new_target_prototype_in_spec_order_test() {
   let ctor = global(st, "Int8Array")
   let #(c, st) =
     rt_call.try_run(st, fn(st) {
-      let #(h, st) = rt_call.t_construct(st, ctor, [mk_int(-1)], nt)
+      let #(h, st) = rt_call.construct(st, ctor, [mk_int(-1)], nt)
       #(mk_object(h), st)
     })
   let assert ThrowCompletion(err) = c
@@ -336,7 +336,7 @@ pub fn constructor_reads_new_target_prototype_in_spec_order_test() {
   let #(src, st) = array(st, ints([1]))
   let #(c, st) =
     rt_call.try_run(st, fn(st) {
-      let #(h, st) = rt_call.t_construct(st, ctor, [src], nt)
+      let #(h, st) = rt_call.construct(st, ctor, [src], nt)
       #(mk_object(h), st)
     })
   let assert ThrowCompletion(err) = c

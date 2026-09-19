@@ -291,14 +291,14 @@ pub fn read_bag_offset(st: Agent, bag: Handle) -> #(Option(Int), Agent) {
   case classify(v) {
     KUndef -> #(None, st)
     _ -> {
-      let #(prim, st) = rt_val.t_to_primitive(st, v, HintString)
+      let #(prim, st) = rt_val.to_primitive(st, v, HintString)
       case classify(prim) {
         KStr(s) ->
           case parse_offset_part(s) {
             Some(#(NumericOffset(off, _), "")) -> #(Some(off), st)
-            _ -> rt_val.t_throw_range_error(st, "invalid offset string: " <> s)
+            _ -> rt_val.throw_range_error(st, "invalid offset string: " <> s)
           }
-        _ -> rt_val.t_throw_type_error(st, "offset must be a string")
+        _ -> rt_val.throw_type_error(st, "offset must be a string")
       }
     }
   }
@@ -311,7 +311,7 @@ pub fn to_temporal_zoned(
 ) -> #(#(Int, TemporalZone, temporal_calendar.Calendar), Agent) {
   case classify(item) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(
           kind: TemporalObj(TemporalZonedDateTime(
             epoch_ns:,
@@ -338,10 +338,7 @@ pub fn to_temporal_zoned(
       #(#(ns, tz, cal), st)
     }
     _ ->
-      rt_val.t_throw_type_error(
-        st,
-        "cannot convert to a Temporal.ZonedDateTime",
-      )
+      rt_val.throw_type_error(st, "cannot convert to a Temporal.ZonedDateTime")
   }
 }
 
@@ -429,7 +426,7 @@ pub fn zoned_from_bag(
   let #(f, st) =
     read_date_time_fields(st, bag, cal, read_offset: True, read_tz: True)
   case classify(f.time_zone_value) {
-    KUndef -> rt_val.t_throw_type_error(st, "timeZone is required")
+    KUndef -> rt_val.throw_type_error(st, "timeZone is required")
     _ -> {
       let #(tz, st) = to_temporal_time_zone(st, f.time_zone_value)
       let #(#(dis, offset_opt, ov), st) = validated_zdt_options(st, options)
@@ -472,7 +469,7 @@ pub fn convert_relative_to(st: Agent, v: JsVal) -> #(RelativeTo, Agent) {
   case classify(v) {
     KUndef -> #(NoRelativeTo, st)
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(
           kind: TemporalObj(TemporalZonedDateTime(
             epoch_ns:,
@@ -493,7 +490,7 @@ pub fn convert_relative_to(st: Agent, v: JsVal) -> #(RelativeTo, Agent) {
       }
     KStr(s) ->
       case parse_iso_datetime_string(s) {
-        None -> rt_val.t_throw_range_error(st, "invalid ISO 8601 string: " <> s)
+        None -> rt_val.throw_range_error(st, "invalid ISO 8601 string: " <> s)
         Some(p) -> {
           let Nil = rt_val.or_throw(st, check_parsed_calendar(p))
           let cal = rt_val.or_throw(st, parsed_calendar_id(p))
@@ -518,7 +515,7 @@ pub fn convert_relative_to(st: Agent, v: JsVal) -> #(RelativeTo, Agent) {
             None ->
               case p.offset {
                 Zulu ->
-                  rt_val.t_throw_range_error(
+                  rt_val.throw_range_error(
                     st,
                     "Z designator requires a bracketed time zone in relativeTo",
                   )
@@ -530,8 +527,7 @@ pub fn convert_relative_to(st: Agent, v: JsVal) -> #(RelativeTo, Agent) {
           }
         }
       }
-    _ ->
-      rt_val.t_throw_type_error(st, "relativeTo must be a string or an object")
+    _ -> rt_val.throw_type_error(st, "relativeTo must be a string or an object")
   }
 }
 

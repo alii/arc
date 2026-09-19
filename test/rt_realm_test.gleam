@@ -25,7 +25,7 @@ fn handle(v: JsVal) -> Handle {
 }
 
 fn proto_of(st: Agent, v: JsVal) -> Handle {
-  let assert #(Some(p), _) = rt_obj.t_get_prototype_of(st, handle(v))
+  let assert #(Some(p), _) = rt_obj.get_prototype_of(st, handle(v))
   p
 }
 
@@ -46,8 +46,7 @@ pub fn create_realm_registers_a_distinct_realm_test() {
   let other_global = mk_object(other.global_object)
   let other_object_ctor = get(st, other_global, "Object")
   assert other_object_ctor == mk_object(other.object.constructor)
-  let #(o, st) =
-    rt_call.t_construct(st, other_object_ctor, [], other_object_ctor)
+  let #(o, st) = rt_call.construct(st, other_object_ctor, [], other_object_ctor)
   assert proto_of(st, mk_object(o)) == other.object.prototype
   assert proto_of(st, other_object_ctor) == other.function.prototype
 }
@@ -61,9 +60,9 @@ pub fn with_realm_swaps_and_restores_test() {
   let #(thrower, st) =
     rt_helpers.func(st, fn(st, _args) {
       use st <- rt_realm.with_realm(st, other.id)
-      rt_val.t_throw_type_error(st, "inside")
+      rt_val.throw_type_error(st, "inside")
     })
-  let #(outcome, st) = rt_call.t_try_call(st, thrower, mk_undefined(), [])
+  let #(outcome, st) = rt_call.try_call(st, thrower, mk_undefined(), [])
   let assert ThrowCompletion(e) = outcome
   assert st.realm.id == 0
   assert proto_of(st, e) == other.type_error.prototype
@@ -96,9 +95,9 @@ pub fn install_262_and_create_realm_test() {
   let #(g, st) = rt_helpers.global(st, "$262")
   assert g == dollar
   assert get(st, dollar, "global") == mk_object(st.realm.global_object)
-  let #(agent_obj, st) = rt_obj.t_new_object_literal(st)
+  let #(agent_obj, st) = rt_obj.new_object_literal(st)
   let #(_, st) =
-    rt_obj.t_set_prop(st, dollar, StringKey(Named("agent")), agent_obj)
+    rt_obj.set_prop(st, dollar, StringKey(Named("agent")), agent_obj)
   let #(child, st) = rt_helpers.call_method(st, dollar, "createRealm", [])
   assert st.realm.id == 0
   assert dict.size(st.realms) == 2
@@ -111,7 +110,7 @@ pub fn install_262_and_create_realm_test() {
   let #(r, st) = rt_helpers.call_method(st, child, "gc", [])
   assert r == mk_undefined()
   let #(ab_ctor, st) = rt_helpers.global(st, "ArrayBuffer")
-  let #(buf, st) = rt_call.t_construct(st, ab_ctor, [mk_int(8)], ab_ctor)
+  let #(buf, st) = rt_call.construct(st, ab_ctor, [mk_int(8)], ab_ctor)
   let #(_, st) =
     rt_helpers.call_method(st, dollar, "detachArrayBuffer", [mk_object(buf)])
   assert get(st, mk_object(buf), "detached") == types.mk_bool(True)
@@ -147,13 +146,12 @@ pub fn json_is_attributed_to_its_own_realm_test() {
   let #(other, st) = two_realms()
   let other_json = get(st, mk_object(other.global_object), "JSON")
   let parse = get(st, other_json, "parse")
-  let #(outcome, st) =
-    rt_call.t_try_call(st, parse, other_json, [mk_string("{")])
+  let #(outcome, st) = rt_call.try_call(st, parse, other_json, [mk_string("{")])
   let assert ThrowCompletion(e) = outcome
   assert proto_of(st, e) == other.syntax_error.prototype
   assert st.realm.id == 0
   let #(outcome, st) =
-    rt_call.t_try_call(st, parse, mk_undefined(), [mk_string("{\"a\":[1]}")])
+    rt_call.try_call(st, parse, mk_undefined(), [mk_string("{\"a\":[1]}")])
   let assert NormalCompletion(obj) = outcome
   assert proto_of(st, obj) == other.object.prototype
   assert proto_of(st, get(st, obj, "a")) == other.array.prototype
@@ -164,12 +162,12 @@ pub fn json_is_attributed_to_its_own_realm_test() {
       #(v, st)
     })
   let #(outcome, st) =
-    rt_call.t_try_call(st, parse, mk_undefined(), [mk_string("[7]"), reviver])
+    rt_call.try_call(st, parse, mk_undefined(), [mk_string("[7]"), reviver])
   let assert NormalCompletion(_) = outcome
   assert rt_helpers.recorded() == [0, 0]
   let #(json, st) = rt_helpers.global(st, "JSON")
   let #(outcome, st) =
-    rt_call.t_try_call(st, get(st, json, "parse"), json, [mk_string("{")])
+    rt_call.try_call(st, get(st, json, "parse"), json, [mk_string("{")])
   let assert ThrowCompletion(e) = outcome
   assert proto_of(st, e) == st.realm.syntax_error.prototype
 }
@@ -178,7 +176,7 @@ pub fn stack_setter_uses_its_own_realm_test() {
   let #(other, st) = two_realms()
   let setter = fn(r: Realm) {
     let assert Some(AccessorProperty(set: Some(s), ..)) =
-      rt_obj.t_ordinary_own_property(
+      rt_obj.ordinary_own_property(
         st,
         r.error.prototype,
         StringKey(Named("stack")),
@@ -190,20 +188,20 @@ pub fn stack_setter_uses_its_own_realm_test() {
   assert set_a != set_b
   let b_error_ctor = mk_object(other.error.constructor)
   let #(err_b, st) =
-    rt_call.t_construct(st, b_error_ctor, [mk_string("m")], b_error_ctor)
+    rt_call.construct(st, b_error_ctor, [mk_string("m")], b_error_ctor)
   let #(outcome, st) =
-    rt_call.t_try_call(st, set_a, mk_object(err_b), [mk_string("sentinel")])
+    rt_call.try_call(st, set_a, mk_object(err_b), [mk_string("sentinel")])
   let assert NormalCompletion(_) = outcome
   assert get(st, mk_object(err_b), "stack") == mk_string("sentinel")
   let #(outcome, st) =
-    rt_call.t_try_call(st, set_a, mk_object(other.error.prototype), [
+    rt_call.try_call(st, set_a, mk_object(other.error.prototype), [
       mk_string("x"),
     ])
   let assert ThrowCompletion(e) = outcome
   assert proto_of(st, e) == other.type_error.prototype
   assert st.realm.id == 0
   let #(outcome, st) =
-    rt_call.t_try_call(st, set_a, mk_object(st.realm.error.prototype), [
+    rt_call.try_call(st, set_a, mk_object(st.realm.error.prototype), [
       mk_string("x"),
     ])
   let assert ThrowCompletion(e) = outcome
@@ -213,7 +211,7 @@ pub fn stack_setter_uses_its_own_realm_test() {
 pub fn template_objects_are_cached_per_realm_test() {
   let #(other, st) = two_realms()
   let tpl = fn(st) {
-    rt_lang.t_get_template_object(st, "site-1", [mk_string("a")], ["a"])
+    rt_lang.get_template_object(st, "site-1", [mk_string("a")], ["a"])
   }
   let #(t0, st) = tpl(st)
   let #(t0_again, st) = tpl(st)
@@ -227,10 +225,10 @@ pub fn template_objects_are_cached_per_realm_test() {
 
 pub fn species_create_ignores_a_foreign_array_constructor_test() {
   let #(other, st) = two_realms()
-  let #(arr, st) = rt_obj.t_new_array(st, [mk_int(1)])
+  let #(arr, st) = rt_obj.new_array(st, [mk_int(1)])
   let other_array = mk_object(other.array.constructor)
   let #(_, st) =
-    rt_obj.t_set_prop(st, arr, StringKey(Named("constructor")), other_array)
+    rt_obj.set_prop(st, arr, StringKey(Named("constructor")), other_array)
   let #(identity, st) =
     rt_helpers.func(st, fn(st, args) {
       let assert [v, ..] = args
@@ -250,7 +248,7 @@ pub fn construct_defaults_to_the_new_target_realm_intrinsic_test() {
     ])
   let construct = fn(st: Agent, pair: types.BuiltinPair, args) {
     let #(h, st) =
-      rt_call.t_construct(st, mk_object(pair.constructor), args, new_target)
+      rt_call.construct(st, mk_object(pair.constructor), args, new_target)
     #(mk_object(h), st)
   }
   let here = st.realm
@@ -267,7 +265,7 @@ pub fn construct_defaults_to_the_new_target_realm_intrinsic_test() {
   let #(b, st) = construct(st, here.array_buffer, [mk_int(0)])
   assert proto_of(st, b) == other.array_buffer.prototype
   let #(p, st) =
-    rt_call.t_construct(
+    rt_call.construct(
       st,
       mk_object(here.map.constructor),
       [],

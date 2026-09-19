@@ -29,74 +29,74 @@ fn throws(st: Agent, body: fn(Agent) -> #(a, Agent)) -> String {
       #(mk_undefined(), st)
     })
   let assert ThrowCompletion(err) = c
-  let #(ctor, st) = rt_obj.t_get_prop(st, err, key("constructor"))
-  let #(name, _) = rt_obj.t_get_prop(st, ctor, key("name"))
+  let #(ctor, st) = rt_obj.get_prop(st, err, key("constructor"))
+  let #(name, _) = rt_obj.get_prop(st, ctor, key("name"))
   let assert KStr(name) = classify(name)
   name
 }
 
 fn fixture() -> #(Handle, JsVal, Handle, Handle, Agent) {
   let st = agent()
-  let #(box_a, st) = rt_store.t_cell_new(st, SBox(mk_int(1)))
-  let #(box_b, st) = rt_store.t_cell_new(st, SBox(mk_tdz()))
+  let #(box_a, st) = rt_store.cell_new(st, SBox(mk_int(1)))
+  let #(box_b, st) = rt_store.cell_new(st, SBox(mk_tdz()))
   let #(ns_h, st) =
-    rt_obj.t_new_module_namespace(st, [#("b", box_b), #("a", box_a)])
+    rt_obj.new_module_namespace(st, [#("b", box_b), #("a", box_a)])
   #(ns_h, mk_object(ns_h), box_a, box_b, st)
 }
 
 pub fn get_reads_the_live_binding_test() {
   let #(_, ns, box_a, _, st) = fixture()
-  let #(v, st) = rt_obj.t_get_prop(st, ns, key("a"))
+  let #(v, st) = rt_obj.get_prop(st, ns, key("a"))
   assert classify(v) == KNum(JInt(1))
-  let st = rt_store.t_cell_set(st, box_a, SBox(mk_int(2)))
-  let #(v, st) = rt_obj.t_get_prop(st, ns, key("a"))
+  let st = rt_store.cell_set(st, box_a, SBox(mk_int(2)))
+  let #(v, st) = rt_obj.get_prop(st, ns, key("a"))
   assert classify(v) == KNum(JInt(2))
-  let #(v, st) = rt_obj.t_get_prop(st, ns, key("toString"))
+  let #(v, st) = rt_obj.get_prop(st, ns, key("toString"))
   assert classify(v) == KUndef
-  let #(v, _) = rt_obj.t_get_prop(st, ns, key("nope"))
+  let #(v, _) = rt_obj.get_prop(st, ns, key("nope"))
   assert classify(v) == KUndef
 }
 
 pub fn tdz_binding_is_a_reference_error_test() {
   let #(ns_h, ns, _, box_b, st) = fixture()
-  assert throws(st, rt_obj.t_get_prop(_, ns, key("b"))) == "ReferenceError"
-  assert throws(st, rt_obj.t_get_own_property(_, ns_h, key("b")))
+  assert throws(st, rt_obj.get_prop(_, ns, key("b"))) == "ReferenceError"
+  assert throws(st, rt_obj.get_own_property(_, ns_h, key("b")))
     == "ReferenceError"
-  assert throws(st, rt_obj.t_for_in_keys(_, ns)) == "ReferenceError"
-  let #(object, st) = rt_lang.t_global_get(st, <<"Object">>)
-  assert throws(st, rt_call.t_call_method(_, object, key("keys"), [ns]))
+  assert throws(st, rt_obj.for_in_keys(_, ns)) == "ReferenceError"
+  let #(object, st) = rt_lang.global_get(st, <<"Object">>)
+  assert throws(st, rt_call.call_method(_, object, key("keys"), [ns]))
     == "ReferenceError"
-  let #(has, st) = rt_obj.t_has_prop(st, ns, key("b"))
+  let #(has, st) = rt_obj.has_prop(st, ns, key("b"))
   assert has
-  let #(keys, st) = rt_obj.t_own_keys(st, ns_h)
+  let #(keys, st) = rt_obj.own_keys(st, ns_h)
   assert list.length(keys) == 3
-  let st = rt_store.t_cell_set(st, box_b, SBox(mk_int(3)))
-  let #(v, _) = rt_obj.t_get_prop(st, ns, key("b"))
+  let st = rt_store.cell_set(st, box_b, SBox(mk_int(3)))
+  let #(v, _) = rt_obj.get_prop(st, ns, key("b"))
   assert classify(v) == KNum(JInt(3))
 }
 
 pub fn own_keys_are_sorted_exports_then_to_string_tag_test() {
   let #(ns_h, ns, _, box_b, st) = fixture()
-  let #(keys, st) = rt_obj.t_own_keys(st, ns_h)
+  let #(keys, st) = rt_obj.own_keys(st, ns_h)
   assert keys
     == [
       StringKey(Named("a")),
       StringKey(Named("b")),
       SymbolKey(types.symbol_to_string_tag),
     ]
-  let st = rt_store.t_cell_set(st, box_b, SBox(mk_int(3)))
-  let #(names, st) = rt_obj.t_for_in_keys(st, ns)
+  let st = rt_store.cell_set(st, box_b, SBox(mk_int(3)))
+  let #(names, st) = rt_obj.for_in_keys(st, ns)
   assert list.map(names, classify) == [KStr("a"), KStr("b")]
-  let #(object, st) = rt_lang.t_global_get(st, <<"Object">>)
-  let #(object_proto, st) = rt_obj.t_get_prop(st, object, key("prototype"))
-  let #(to_string, st) = rt_obj.t_get_prop(st, object_proto, key("toString"))
-  let #(tag, _) = rt_call.t_call(st, to_string, ns, [])
+  let #(object, st) = rt_lang.global_get(st, <<"Object">>)
+  let #(object_proto, st) = rt_obj.get_prop(st, object, key("prototype"))
+  let #(to_string, st) = rt_obj.get_prop(st, object_proto, key("toString"))
+  let #(tag, _) = rt_call.call(st, to_string, ns, [])
   assert classify(tag) == KStr("[object Module]")
 }
 
 pub fn descriptor_shape_test() {
   let #(ns_h, _, _, _, st) = fixture()
-  let #(d, st) = rt_obj.t_get_own_property(st, ns_h, key("a"))
+  let #(d, st) = rt_obj.get_own_property(st, ns_h, key("a"))
   let assert Some(DataProperty(
     value:,
     writable: True,
@@ -105,10 +105,10 @@ pub fn descriptor_shape_test() {
     ..,
   )) = d
   assert classify(value) == KNum(JInt(1))
-  let #(d, st) = rt_obj.t_get_own_property(st, ns_h, key("nope"))
+  let #(d, st) = rt_obj.get_own_property(st, ns_h, key("nope"))
   assert d == None
   let #(d, _) =
-    rt_obj.t_get_own_property(st, ns_h, SymbolKey(types.symbol_to_string_tag))
+    rt_obj.get_own_property(st, ns_h, SymbolKey(types.symbol_to_string_tag))
   let assert Some(DataProperty(
     value:,
     writable: False,
@@ -121,15 +121,15 @@ pub fn descriptor_shape_test() {
 
 pub fn writes_and_deletes_fail_test() {
   let #(ns_h, ns, box_a, _, st) = fixture()
-  let #(ok, st) = rt_obj.t_set_prop(st, ns, key("a"), mk_int(9))
+  let #(ok, st) = rt_obj.set_prop(st, ns, key("a"), mk_int(9))
   assert !ok
-  let #(ok, st) = rt_obj.t_set_prop(st, ns, key("fresh"), mk_int(9))
+  let #(ok, st) = rt_obj.set_prop(st, ns, key("fresh"), mk_int(9))
   assert !ok
-  let assert SBox(value:) = rt_store.t_cell_get(st, box_a)
+  let assert SBox(value:) = rt_store.cell_get(st, box_a)
   assert classify(value) == KNum(JInt(1))
-  let #(other, st) = rt_obj.t_new_object_literal(st)
+  let #(other, st) = rt_obj.new_object_literal(st)
   let assert types.KHandle(other_h) = classify(other)
-  assert throws(st, rt_obj.t_set_prop_with_receiver(
+  assert throws(st, rt_obj.set_prop_with_receiver(
       _,
       other_h,
       key("b"),
@@ -138,29 +138,29 @@ pub fn writes_and_deletes_fail_test() {
     ))
     == "ReferenceError"
   let #(ok, st) =
-    rt_obj.t_set_prop_with_receiver(st, other_h, key("a"), mk_int(1), ns)
+    rt_obj.set_prop_with_receiver(st, other_h, key("a"), mk_int(1), ns)
   assert !ok
-  let #(ok, st) = rt_obj.t_delete_prop(st, ns_h, key("a"))
+  let #(ok, st) = rt_obj.delete_prop(st, ns_h, key("a"))
   assert !ok
-  let #(ok, st) = rt_obj.t_delete_prop(st, ns_h, key("nope"))
+  let #(ok, st) = rt_obj.delete_prop(st, ns_h, key("nope"))
   assert ok
   let #(ok, _) =
-    rt_obj.t_delete_prop(st, ns_h, SymbolKey(types.symbol_to_string_tag))
+    rt_obj.delete_prop(st, ns_h, SymbolKey(types.symbol_to_string_tag))
   assert !ok
 }
 
 pub fn prototype_and_extensibility_test() {
   let #(ns_h, _, _, _, st) = fixture()
-  let #(proto, st) = rt_obj.t_get_prototype_of(st, ns_h)
+  let #(proto, st) = rt_obj.get_prototype_of(st, ns_h)
   assert proto == None
-  let #(ext, st) = rt_obj.t_is_extensible(st, ns_h)
+  let #(ext, st) = rt_obj.is_extensible(st, ns_h)
   assert !ext
-  let #(ok, st) = rt_obj.t_prevent_extensions(st, ns_h)
+  let #(ok, st) = rt_obj.prevent_extensions(st, ns_h)
   assert ok
-  let #(res, st) = rt_obj.t_set_prototype_of(st, ns_h, None)
+  let #(res, st) = rt_obj.set_prototype_of(st, ns_h, None)
   assert res == Ok(Nil)
   let #(res, _) =
-    rt_obj.t_set_prototype_of(st, ns_h, Some(st.realm.object.prototype))
+    rt_obj.set_prototype_of(st, ns_h, Some(st.realm.object.prototype))
   assert res != Ok(Nil)
 }
 
@@ -179,15 +179,15 @@ pub fn define_own_property_only_accepts_no_ops_test() {
   let #(ns_h, _, _, _, st) = fixture()
   let none = ParsedDesc(..value_desc(mk_int(0)), value: None)
   let #(ok, st) =
-    rt_obj.t_define_own_prop(st, ns_h, key("a"), value_desc(mk_int(1)))
+    rt_obj.define_own_prop(st, ns_h, key("a"), value_desc(mk_int(1)))
   assert ok
   let #(ok, st) =
-    rt_obj.t_define_own_prop(st, ns_h, key("a"), value_desc(mk_int(9)))
+    rt_obj.define_own_prop(st, ns_h, key("a"), value_desc(mk_int(9)))
   assert !ok
-  let #(ok, st) = rt_obj.t_define_own_prop(st, ns_h, key("a"), none)
+  let #(ok, st) = rt_obj.define_own_prop(st, ns_h, key("a"), none)
   assert ok
   let #(ok, st) =
-    rt_obj.t_define_own_prop(
+    rt_obj.define_own_prop(
       st,
       ns_h,
       key("a"),
@@ -195,7 +195,7 @@ pub fn define_own_property_only_accepts_no_ops_test() {
     )
   assert !ok
   let #(ok, st) =
-    rt_obj.t_define_own_prop(
+    rt_obj.define_own_prop(
       st,
       ns_h,
       key("a"),
@@ -203,7 +203,7 @@ pub fn define_own_property_only_accepts_no_ops_test() {
     )
   assert !ok
   let #(ok, st) =
-    rt_obj.t_define_own_prop(
+    rt_obj.define_own_prop(
       st,
       ns_h,
       key("a"),
@@ -211,7 +211,7 @@ pub fn define_own_property_only_accepts_no_ops_test() {
     )
   assert !ok
   let #(ok, st) =
-    rt_obj.t_define_own_prop(
+    rt_obj.define_own_prop(
       st,
       ns_h,
       key("a"),
@@ -219,21 +219,21 @@ pub fn define_own_property_only_accepts_no_ops_test() {
     )
   assert !ok
   let #(ok, st) =
-    rt_obj.t_define_own_prop(st, ns_h, key("nope"), value_desc(mk_int(1)))
+    rt_obj.define_own_prop(st, ns_h, key("nope"), value_desc(mk_int(1)))
   assert !ok
-  assert throws(st, rt_obj.t_define_own_prop(
+  assert throws(st, rt_obj.define_own_prop(
       _,
       ns_h,
       key("b"),
       value_desc(mk_int(1)),
     ))
     == "ReferenceError"
-  let #(object, st) = rt_lang.t_global_get(st, <<"Object">>)
-  let #(desc, st) = rt_obj.t_new_object_literal(st)
-  let #(_, st) = rt_obj.t_set_prop(st, desc, key("value"), mk_int(9))
+  let #(object, st) = rt_lang.global_get(st, <<"Object">>)
+  let #(desc, st) = rt_obj.new_object_literal(st)
+  let #(_, st) = rt_obj.set_prop(st, desc, key("value"), mk_int(9))
   assert throws(
       st,
-      rt_call.t_call_method(_, object, key("defineProperty"), [
+      rt_call.call_method(_, object, key("defineProperty"), [
         mk_object(ns_h),
         mk_string("a"),
         desc,
@@ -244,11 +244,11 @@ pub fn define_own_property_only_accepts_no_ops_test() {
 
 pub fn binding_cells_survive_collection_test() {
   let #(ns_h, ns, box_a, box_b, st) = fixture()
-  let st = rt_lang.t_global_set(st, <<"ns">>, ns)
-  let st = rt_gc.t_collect(st, [])
-  assert rt_gc.t_is_live(st, ns_h)
-  assert rt_gc.t_is_live(st, box_a)
-  assert rt_gc.t_is_live(st, box_b)
-  let #(v, _) = rt_obj.t_get_prop(st, ns, key("a"))
+  let st = rt_lang.global_set(st, <<"ns">>, ns)
+  let st = rt_gc.collect(st, [])
+  assert rt_gc.is_live(st, ns_h)
+  assert rt_gc.is_live(st, box_a)
+  assert rt_gc.is_live(st, box_b)
+  let #(v, _) = rt_obj.get_prop(st, ns, key("a"))
   assert classify(v) == KNum(JInt(1))
 }

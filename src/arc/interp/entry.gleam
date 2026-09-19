@@ -161,9 +161,9 @@ fn call_prepared(
           frames.resettle(agent, frames, depth),
         )
         guard.Value(value: Error(e), agent:) ->
-          rt_store.t_throw(frames.resettle(agent, frames, depth), e)
+          rt_store.throw(frames.resettle(agent, frames, depth), e)
         guard.Thrown(agent:, thrown:) ->
-          rt_store.t_throw(frames.resettle(agent, frames, depth), thrown)
+          rt_store.throw(frames.resettle(agent, frames, depth), thrown)
       }
     }
   }
@@ -172,7 +172,7 @@ fn call_prepared(
 fn raised(outcome: #(Result(JsVal, JsVal), Agent)) -> #(JsVal, Agent) {
   case outcome {
     #(Ok(v), agent) -> #(v, agent)
-    #(Error(e), agent) -> rt_store.t_throw(agent, e)
+    #(Error(e), agent) -> rt_store.throw(agent, e)
   }
 }
 
@@ -249,23 +249,23 @@ pub fn construct_bytecode(
 ) -> #(Handle, Agent) {
   use <- bool.lazy_guard(agent.call_depth >= limits.max_call_depth, fn() {
     let #(e, agent) = state.stack_overflow_error(agent)
-    rt_store.t_throw(agent, e)
+    rt_store.throw(agent, e)
   })
   let #(completion, agent) = run_construct(agent, fn_h, args, new_target)
   let #(v, agent) = case completion {
     NormalCompletion(v) -> #(v, agent)
-    ThrowCompletion(e) -> rt_store.t_throw(agent, e)
+    ThrowCompletion(e) -> rt_store.throw(agent, e)
   }
   case classify(v) {
     KHandle(h) -> #(h, agent)
     _ -> {
       let #(e, agent) =
-        rt_val.t_new_error(
+        rt_val.new_error(
           agent,
           TypeError,
           "internal error: constructor completed with a non-object",
         )
-      rt_store.t_throw(agent, e)
+      rt_store.throw(agent, e)
     }
   }
 }
@@ -287,7 +287,7 @@ fn run_construct(
       ..,
     ),
     ..,
-  ) = rt_store.t_cell_get(agent, callee_h)
+  ) = rt_store.cell_get(agent, callee_h)
     as "construct_bytecode: handle is not a BytecodeFn cell"
   let m = frames.mark(agent)
   case call.root_this(agent, template, new_target) {

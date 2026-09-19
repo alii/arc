@@ -19,7 +19,7 @@ pub fn coerce_options_to_object(
   case classify(v) {
     KUndef -> #(None, st)
     _ -> {
-      let #(h, st) = rt_val.t_to_object(st, v)
+      let #(h, st) = rt_val.to_object(st, v)
       #(Some(h), st)
     }
   }
@@ -29,7 +29,7 @@ pub fn get_options_object(st: Agent, v: JsVal) -> #(Option(Handle), Agent) {
   case classify(v) {
     KUndef -> #(None, st)
     KHandle(h) -> #(Some(h), st)
-    _ -> rt_val.t_throw_type_error(st, "options must be an object or undefined")
+    _ -> rt_val.throw_type_error(st, "options must be an object or undefined")
   }
 }
 
@@ -40,7 +40,7 @@ pub fn opt_get(
 ) -> #(JsVal, Agent) {
   case opts {
     None -> #(mk_undefined(), st)
-    Some(h) -> rt_obj.t_get_prop(st, mk_object(h), StringKey(Named(name)))
+    Some(h) -> rt_obj.get_prop(st, mk_object(h), StringKey(Named(name)))
   }
 }
 
@@ -55,11 +55,11 @@ pub fn get_text_opt(
   case classify(v) {
     KUndef -> #(default, st)
     _ -> {
-      let #(s, st) = rt_val.t_to_string(st, v)
+      let #(s, st) = rt_val.to_string(st, v)
       case allowed == [] || list.contains(allowed, s) {
         True -> #(Some(s), st)
         False ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "Value " <> s <> " out of range for options property " <> name,
           )
@@ -79,11 +79,11 @@ pub fn get_enum_opt(
   case classify(v) {
     KUndef -> #(default, st)
     _ -> {
-      let #(s, st) = rt_val.t_to_string(st, v)
+      let #(s, st) = rt_val.to_string(st, v)
       case list.key_find(variants, s) {
         Ok(variant) -> #(variant, st)
         Error(Nil) ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "Value " <> s <> " out of range for options property " <> name,
           )
@@ -128,7 +128,7 @@ pub fn default_number_option(
   case classify(v) {
     KUndef -> #(default, st)
     _ -> {
-      let #(n, st) = rt_val.t_to_number(st, v)
+      let #(n, st) = rt_val.to_number(st, v)
       let f = case n {
         JInt(i) -> Some(int.to_float(i))
         JFloat(f) -> Some(f)
@@ -140,12 +140,12 @@ pub fn default_number_option(
           case f >=. int.to_float(min) && f <=. int.to_float(max) {
             True -> #(Some(float.truncate(float.floor(f))), st)
             False ->
-              rt_val.t_throw_range_error(
+              rt_val.throw_range_error(
                 st,
                 name <> " value is out of range: " <> float.to_string(f),
               )
           }
-        None -> rt_val.t_throw_range_error(st, name <> " value is out of range")
+        None -> rt_val.throw_range_error(st, name <> " value is out of range")
       }
     }
   }

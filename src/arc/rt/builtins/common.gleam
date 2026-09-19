@@ -22,7 +22,7 @@ pub fn accessor_property(
   enumerable enumerable: Bool,
   configurable configurable: Bool,
 ) -> #(Property, Agent) {
-  let #(seq, st) = rt_store.t_next_prop_seq(st)
+  let #(seq, st) = rt_store.next_prop_seq(st)
   #(AccessorProperty(get:, set:, enumerable:, configurable:, seq:), st)
 }
 
@@ -34,7 +34,7 @@ pub fn make_configurable(prop: Property) -> Property {
 }
 
 pub fn restamp(st: Agent, prop: Property) -> #(Property, Agent) {
-  let #(seq, st) = rt_store.t_next_prop_seq(st)
+  let #(seq, st) = rt_store.next_prop_seq(st)
   let prop = case prop {
     DataProperty(..) -> DataProperty(..prop, seq:)
     AccessorProperty(..) -> AccessorProperty(..prop, seq:)
@@ -43,7 +43,7 @@ pub fn restamp(st: Agent, prop: Property) -> #(Property, Agent) {
 }
 
 pub fn fn_name_property(st: Agent, name: String) -> #(Property, Agent) {
-  let #(seq, st) = rt_store.t_next_prop_seq(st)
+  let #(seq, st) = rt_store.next_prop_seq(st)
   #(
     DataProperty(
       value: mk_string(name),
@@ -57,7 +57,7 @@ pub fn fn_name_property(st: Agent, name: String) -> #(Property, Agent) {
 }
 
 pub fn fn_length_property(st: Agent, arity: Int) -> #(Property, Agent) {
-  let #(seq, st) = rt_store.t_next_prop_seq(st)
+  let #(seq, st) = rt_store.next_prop_seq(st)
   #(
     DataProperty(
       value: mk_int(arity),
@@ -71,7 +71,7 @@ pub fn fn_length_property(st: Agent, arity: Int) -> #(Property, Agent) {
 }
 
 pub fn fn_prototype_property(st: Agent, proto: Handle) -> #(Property, Agent) {
-  rt_store.t_frozen_property(st, mk_object(proto))
+  rt_store.frozen_property(st, mk_object(proto))
 }
 
 pub fn named_props(
@@ -86,8 +86,8 @@ pub fn alloc_proto(
   proto: Option(Handle),
   props: Dict(PropertyKey, Property),
 ) -> #(Handle, Agent) {
-  let #(h, st) = rt_store.t_cell_new(st, plain_object(Ordinary, proto, props))
-  #(h, rt_store.t_pin_root(st, h))
+  let #(h, st) = rt_store.cell_new(st, plain_object(Ordinary, proto, props))
+  #(h, rt_store.pin_root(st, h))
 }
 
 pub fn alloc_plain_object(
@@ -95,7 +95,7 @@ pub fn alloc_plain_object(
   object_proto: Handle,
   props: List(#(String, JsVal)),
 ) -> #(Handle, Agent) {
-  use seq <- rt_store.t_cell_new_with(st, list.length(props))
+  use seq <- rt_store.cell_new_with(st, list.length(props))
   let entries =
     list.index_map(props, fn(kv, i) {
       #(Named(kv.0), types.plain_property(kv.1, seq + i))
@@ -111,7 +111,7 @@ pub fn alloc_rooted_native_fn(
   arity: Int,
 ) -> #(Handle, Agent) {
   let #(h, st) =
-    rt_call.t_native_new(
+    rt_call.native_new(
       st,
       Some(fn_proto),
       token,
@@ -119,7 +119,7 @@ pub fn alloc_rooted_native_fn(
       arity,
       constructible: False,
     )
-  #(h, rt_store.t_pin_root(st, h))
+  #(h, rt_store.pin_root(st, h))
 }
 
 pub fn alloc_methods(
@@ -129,7 +129,7 @@ pub fn alloc_methods(
 ) -> #(List(#(String, Property)), Agent) {
   use #(props, st), #(name, token, arity) <- list.fold(specs, #([], st))
   let #(fn_h, st) = alloc_rooted_native_fn(st, fn_proto, token, name, arity)
-  let #(prop, st) = rt_store.t_builtin_property(st, mk_object(fn_h))
+  let #(prop, st) = rt_store.builtin_property(st, mk_object(fn_h))
   #([#(name, prop), ..props], st)
 }
 
@@ -204,7 +204,7 @@ fn proto_properties(
   ctor: Handle,
   extras: List(#(String, Property)),
 ) -> #(List(#(String, Property)), Agent) {
-  let #(ctor_p, st) = rt_store.t_builtin_property(st, mk_object(ctor))
+  let #(ctor_p, st) = rt_store.builtin_property(st, mk_object(ctor))
   #([#("constructor", ctor_p), ..extras], st)
 }
 
@@ -255,7 +255,7 @@ pub fn init_wrapper_type(
       ctor_props,
     )
   let st =
-    rt_store.t_cell_update(st, bt.prototype, fn(cell) {
+    rt_store.cell_update(st, bt.prototype, fn(cell) {
       let assert SObject(..) = cell
       SObject(..cell, kind: proto_kind)
     })
@@ -270,7 +270,7 @@ pub fn init_namespace(
 ) -> #(Handle, Agent) {
   let #(tag_pair, st) = string_tag_property(st, tag)
   let #(h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       SObject(
         kind: Ordinary,
@@ -281,7 +281,7 @@ pub fn init_namespace(
         extensible: True,
       ),
     )
-  #(h, rt_store.t_pin_root(st, h))
+  #(h, rt_store.pin_root(st, h))
 }
 
 // installs a constructor over an already allocated prototype
@@ -299,7 +299,7 @@ pub fn init_type_on(
   let #(ctor_all_props, st) =
     ctor_properties(st, proto_h, name, arity, ctor_props)
   let #(ctor_h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       plain_object(
         NativeFn(
@@ -312,10 +312,10 @@ pub fn init_type_on(
         named_props(ctor_all_props),
       ),
     )
-  let st = rt_store.t_pin_root(st, ctor_h)
+  let st = rt_store.pin_root(st, ctor_h)
   let #(all_proto_props, st) = proto_properties(st, ctor_h, proto_props)
   let st =
-    rt_store.t_cell_update(st, proto_h, fn(cell) {
+    rt_store.cell_update(st, proto_h, fn(cell) {
       let assert SObject(props: existing, ..) = cell
       let merged = {
         use acc, #(k, v) <- list.fold(all_proto_props, existing)
@@ -341,7 +341,7 @@ pub fn add_named_property(
   name: String,
   prop: Property,
 ) -> Agent {
-  rt_store.t_cell_update(st, h, fn(cell) {
+  rt_store.cell_update(st, h, fn(cell) {
     let assert SObject(props:, ..) = cell
     SObject(..cell, props: dict.insert(props, Named(name), prop))
   })
@@ -353,7 +353,7 @@ pub fn add_symbol_property(
   sym: SymbolId,
   prop: Property,
 ) -> Agent {
-  rt_store.t_cell_update(st, h, fn(cell) {
+  rt_store.cell_update(st, h, fn(cell) {
     let assert SObject(symbol_props:, ..) = cell
     SObject(..cell, symbol_props: list.key_set(symbol_props, sym, prop))
   })
@@ -363,7 +363,7 @@ pub fn string_tag_property(
   st: Agent,
   name: String,
 ) -> #(#(SymbolId, Property), Agent) {
-  let #(prop, st) = rt_store.t_frozen_property(st, mk_string(name))
+  let #(prop, st) = rt_store.frozen_property(st, mk_string(name))
   #(#(types.symbol_to_string_tag, make_configurable(prop)), st)
 }
 
@@ -395,12 +395,12 @@ pub fn add_species_accessor(
 pub fn species_intact(st: Agent, pair: BuiltinPair) -> Bool {
   let BuiltinPair(prototype:, constructor:) = pair
   case
-    rt_obj.t_ordinary_own_property(
+    rt_obj.ordinary_own_property(
       st,
       prototype,
       types.StringKey(Named("constructor")),
     ),
-    rt_obj.t_ordinary_own_property(
+    rt_obj.ordinary_own_property(
       st,
       constructor,
       types.SymbolKey(types.symbol_species),
@@ -416,7 +416,7 @@ pub fn species_intact(st: Agent, pair: BuiltinPair) -> Bool {
 fn is_return_this(st: Agent, f: JsVal) -> Bool {
   case types.classify(f) {
     types.KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: NativeFn(token: types.ReturnThis, ..), ..) -> True
         _ -> False
       }
@@ -429,7 +429,7 @@ pub fn alloc_error_object(
   proto: Handle,
   props: List(#(String, Property)),
 ) -> #(Handle, Agent) {
-  rt_store.t_cell_new(
+  rt_store.cell_new(
     st,
     plain_object(ErrorObj(stack: ""), Some(proto), named_props(props)),
   )
@@ -445,7 +445,7 @@ pub fn alloc_array(
     [] -> NoElements
     _ -> Dense(tree_array.from_list(values))
   }
-  rt_store.t_cell_new(
+  rt_store.cell_new(
     st,
     SObject(
       kind: ArrayObj(length: len),

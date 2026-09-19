@@ -53,10 +53,10 @@ pub fn init(
       #("captureStackTrace", ErrorN(ErrorCaptureStackTrace), 2),
       #("isError", ErrorN(ErrorIsError), 1),
     ])
-  let #(stl_prop, st) = rt_store.t_builtin_property(st, mk_number(JFloat(10.0)))
+  let #(stl_prop, st) = rt_store.builtin_property(st, mk_number(JFloat(10.0)))
   let error_static = [#("stackTraceLimit", stl_prop), ..capture_methods]
-  let #(name_prop, st) = rt_store.t_builtin_property(st, mk_string("Error"))
-  let #(msg_prop, st) = rt_store.t_builtin_property(st, mk_string(""))
+  let #(name_prop, st) = rt_store.builtin_property(st, mk_string("Error"))
+  let #(msg_prop, st) = rt_store.builtin_property(st, mk_string(""))
   let #(error, st) =
     common.init_type(
       st,
@@ -114,7 +114,7 @@ fn subclass(
   arity: Int,
   native: fn(Handle) -> ErrorNative,
 ) -> #(BuiltinPair, Agent) {
-  let #(name_prop, st) = rt_store.t_builtin_property(st, mk_string(name))
+  let #(name_prop, st) = rt_store.builtin_property(st, mk_string(name))
   common.init_type(
     st,
     base.prototype,
@@ -167,7 +167,7 @@ fn call_error_ctor(
     }
     _ -> {
       // tostring(message) runs before reading cause
-      let #(msg, st) = rt_val.t_to_string(st, message)
+      let #(msg, st) = rt_val.to_string(st, message)
       let #(h, st) = alloc_error(st, proto, Some(msg), options)
       #(mk_object(h), st)
     }
@@ -185,14 +185,14 @@ fn aggregate_error_ctor(
   let #(h, st) = case classify(message) {
     KUndef -> alloc_error(st, proto, None, options)
     _ -> {
-      let #(msg, st) = rt_val.t_to_string(st, message)
+      let #(msg, st) = rt_val.to_string(st, message)
       alloc_error(st, proto, Some(msg), options)
     }
   }
   let #(rec, st) = iter_protocol.get_iterator_sync(st, errors)
   let #(collected, st) = iter_protocol.iterator_to_list(st, rec)
   let #(arr_h, st) = common.alloc_array(st, collected, st.realm.array.prototype)
-  let #(errors_prop, st) = rt_store.t_builtin_property(st, mk_object(arr_h))
+  let #(errors_prop, st) = rt_store.builtin_property(st, mk_object(arr_h))
   let st = common.add_named_property(st, h, "errors", errors_prop)
   #(mk_object(h), st)
 }
@@ -208,7 +208,7 @@ fn suppressed_error_ctor(
   let #(msg_opt, st) = case classify(message) {
     KUndef -> #(None, st)
     _ -> {
-      let #(s, st) = rt_val.t_to_string(st, message)
+      let #(s, st) = rt_val.to_string(st, message)
       #(Some(s), st)
     }
   }
@@ -224,13 +224,13 @@ fn alloc_suppressed(
 ) -> #(JsVal, Agent) {
   let #(msg_props, st) = case message {
     Some(msg) -> {
-      let #(mp, st) = rt_store.t_builtin_property(st, mk_string(msg))
+      let #(mp, st) = rt_store.builtin_property(st, mk_string(msg))
       #([#("message", mp)], st)
     }
     None -> #([], st)
   }
-  let #(err_prop, st) = rt_store.t_builtin_property(st, err)
-  let #(sup_prop, st) = rt_store.t_builtin_property(st, suppressed)
+  let #(err_prop, st) = rt_store.builtin_property(st, err)
+  let #(sup_prop, st) = rt_store.builtin_property(st, suppressed)
   let props =
     list.append(msg_props, [#("error", err_prop), #("suppressed", sup_prop)])
   let #(h, st) = common.alloc_error_object(st, proto, props)
@@ -300,7 +300,7 @@ fn alloc_error(
 ) -> #(Handle, Agent) {
   let #(props, st) = case message {
     Some(msg) -> {
-      let #(mp, st) = rt_store.t_builtin_property(st, mk_string(msg))
+      let #(mp, st) = rt_store.builtin_property(st, mk_string(msg))
       #([#("message", mp)], st)
     }
     None -> #([], st)
@@ -318,13 +318,13 @@ fn install_error_cause(
 ) -> #(Handle, Agent) {
   case classify(options) {
     KHandle(_) -> {
-      let #(has, st) = rt_obj.t_has_prop(st, options, StringKey(Named("cause")))
+      let #(has, st) = rt_obj.has_prop(st, options, StringKey(Named("cause")))
       case has {
         False -> #(h, st)
         True -> {
           let #(cause, st) =
-            rt_obj.t_get_prop(st, options, StringKey(Named("cause")))
-          let #(cp, st) = rt_store.t_builtin_property(st, cause)
+            rt_obj.get_prop(st, options, StringKey(Named("cause")))
+          let #(cp, st) = rt_store.builtin_property(st, cause)
           let st = common.add_named_property(st, h, "cause", cp)
           #(h, st)
         }
@@ -337,9 +337,9 @@ fn install_error_cause(
 fn error_name(st: Agent, proto: Option(Handle), fuel: Int) -> String {
   case proto {
     Some(h) if fuel > 0 ->
-      case rt_obj.as_sobject(rt_store.t_cell_get(st, h)) {
+      case rt_obj.as_sobject(rt_store.cell_get(st, h)) {
         SObject(proto: parent, ..) ->
-          case rt_obj.t_ordinary_own_property(st, h, StringKey(Named("name"))) {
+          case rt_obj.ordinary_own_property(st, h, StringKey(Named("name"))) {
             Some(DataProperty(value: v, ..)) ->
               case classify(v) {
                 KStr(n) -> n
@@ -376,7 +376,7 @@ fn format_frame(frame: FrameInfo) -> String {
 }
 
 fn stack_trace_limit(st: Agent) -> Int {
-  let ctor = rt_store.t_cell_get(st, st.realm.error.constructor)
+  let ctor = rt_store.cell_get(st, st.realm.error.constructor)
   case rt_obj.as_sobject(ctor) {
     SObject(props:, ..) ->
       case dict.get(props, Named("stackTraceLimit")) {
@@ -401,9 +401,9 @@ pub fn attach_stack(st: Agent, h: Handle, name: String, msg: String) -> Agent {
     _ -> name <> ": " <> msg
   }
   let trace = build_stack_trace(st, header)
-  let #(stack_prop, st) = rt_store.t_builtin_property(st, mk_string(trace))
+  let #(stack_prop, st) = rt_store.builtin_property(st, mk_string(trace))
   let st = rt_obj.devolve(st, h)
-  rt_store.t_cell_update(st, h, fn(cell) {
+  rt_store.cell_update(st, h, fn(cell) {
     case cell {
       SObject(kind: ErrorObj(..), ..) as s ->
         SObject(..s, kind: ErrorObj(stack: trace))
@@ -422,7 +422,7 @@ fn capture_stack_trace(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
       #(mk_undefined(), st)
     }
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Error.captureStackTrace requires that the first argument be an object",
       )
@@ -431,7 +431,7 @@ fn capture_stack_trace(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 
 fn target_header_parts(st: Agent, h: Handle) -> #(String, String) {
   let read = fn(key) {
-    case rt_obj.as_sobject(rt_store.t_cell_get(st, h)) {
+    case rt_obj.as_sobject(rt_store.cell_get(st, h)) {
       SObject(props:, ..) ->
         case dict.get(props, Named(key)) {
           Ok(DataProperty(value: v, ..)) ->
@@ -450,7 +450,7 @@ fn target_header_parts(st: Agent, h: Handle) -> #(String, String) {
 fn is_error(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let result = case classify(helpers.first_arg_or_undefined(args)) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: ErrorObj(..), ..) -> True
         _ -> False
       }
@@ -462,12 +462,12 @@ fn is_error(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 fn stack_getter(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: ErrorObj(stack:), ..) -> #(mk_string(stack), st)
         _ -> #(mk_undefined(), st)
       }
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "get Error.prototype.stack called on non-object",
       )
@@ -507,7 +507,7 @@ fn stack_setter(
 
 fn throw_type_error_in(st: Agent, realm: Int, message: String) -> #(a, Agent) {
   use st <- rt_realm.with_realm(st, realm)
-  rt_val.t_throw_type_error(st, message)
+  rt_val.throw_type_error(st, message)
 }
 
 fn set_stack_ignoring_prototype(
@@ -525,18 +525,17 @@ fn set_stack_ignoring_prototype(
         "Cannot assign to read only property 'stack' of Error.prototype",
       )
     False -> {
-      let #(own, st) =
-        rt_obj.t_get_own_property(st, h, StringKey(Named("stack")))
+      let #(own, st) = rt_obj.get_own_property(st, h, StringKey(Named("stack")))
       let #(ok, st) = case option.is_some(own) {
         True ->
-          rt_obj.t_set_prop(
+          rt_obj.set_prop(
             st,
             mk_object(h),
             StringKey(Named("stack")),
             mk_string(s),
           )
         False ->
-          rt_obj.t_define_own_prop(
+          rt_obj.define_own_prop(
             st,
             h,
             StringKey(Named("stack")),
@@ -567,22 +566,21 @@ fn set_stack_ignoring_prototype(
 fn error_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   case classify(this) {
     KNull | KUndef ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Error.prototype.toString called on non-object",
       )
     KHandle(_) -> {
-      let #(name_val, st) =
-        rt_obj.t_get_prop(st, this, StringKey(Named("name")))
+      let #(name_val, st) = rt_obj.get_prop(st, this, StringKey(Named("name")))
       let #(name, st) = case classify(name_val) {
         KUndef -> #("Error", st)
-        _ -> rt_val.t_to_string(st, name_val)
+        _ -> rt_val.to_string(st, name_val)
       }
       let #(msg_val, st) =
-        rt_obj.t_get_prop(st, this, StringKey(Named("message")))
+        rt_obj.get_prop(st, this, StringKey(Named("message")))
       let #(msg, st) = case classify(msg_val) {
         KUndef -> #("", st)
-        _ -> rt_val.t_to_string(st, msg_val)
+        _ -> rt_val.to_string(st, msg_val)
       }
       let result = case name, msg {
         "", _ -> msg
@@ -592,7 +590,7 @@ fn error_to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
       #(mk_string(result), st)
     }
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Error.prototype.toString called on non-object",
       )

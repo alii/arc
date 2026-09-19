@@ -98,7 +98,7 @@ fn spec(
       case classify(head) {
         KSym(id) -> Some(#(types.symbol_descriptive_string(id), rest, st))
         _ -> {
-          let #(s, st) = rt_val.t_to_string(st, head)
+          let #(s, st) = rt_val.to_string(st, head)
           Some(#(s, rest, st))
         }
       }
@@ -109,7 +109,7 @@ fn spec(
         _ -> {
           let #(n, st) = case sp {
             "i" -> global_fns.parse_int_value(st, head, mk_int(10))
-            _ -> rt_val.t_to_number(st, head)
+            _ -> rt_val.to_number(st, head)
           }
           Some(#(number_substitution(n), rest, st))
         }

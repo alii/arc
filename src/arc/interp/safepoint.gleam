@@ -10,7 +10,7 @@ pub fn maybe_collect_at_return(state: State) -> State {
     True ->
       State(
         ..state,
-        agent: rt_gc.t_collect_some(state.agent, state.frame_roots(state)),
+        agent: rt_gc.collect_some(state.agent, state.frame_roots(state)),
       )
     False -> state
   }
@@ -22,10 +22,10 @@ pub fn finish_turn(
   held: List(JsVal),
   drain: rt_async.Drain,
 ) -> Agent {
-  let #(ids, agent) = rt_gc.t_hold_roots(agent, held)
-  let agent = rt_gc.t_maybe_collect(agent)
+  let #(ids, agent) = rt_gc.hold_roots(agent, held)
+  let agent = rt_gc.maybe_collect(agent)
   let agent = drain(agent)
-  rt_gc.t_release_roots(agent, ids)
+  rt_gc.release_roots(agent, ids)
 }
 
 pub fn end_turn(agent: Agent, held: List(JsVal)) -> Agent {

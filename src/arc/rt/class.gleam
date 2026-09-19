@@ -28,14 +28,14 @@ fn object_key_display(k: ObjectKey) -> String {
 }
 
 // §15.7.14 mint a fresh private name
-pub fn t_new_private_name(st: Agent, source: String) -> #(JsVal, Agent) {
-  let #(uid, st) = rt_store.t_next_private_id(st)
+pub fn new_private_name(st: Agent, source: String) -> #(JsVal, Agent) {
+  let #(uid, st) = rt_store.next_private_id(st)
   #(mk_string(key.private_text(source, uid)), st)
 }
 
 // §15.4.4 makemethod, no-op on native/bound
-pub fn t_make_method(st: Agent, fn_h: Handle, home: Handle) -> Agent {
-  rt_store.t_cell_update(st, fn_h, fn(cell) {
+pub fn make_method(st: Agent, fn_h: Handle, home: Handle) -> Agent {
+  rt_store.cell_update(st, fn_h, fn(cell) {
     case cell {
       SObject(kind: CompiledFn(..) as k, ..) ->
         SObject(..cell, kind: CompiledFn(..k, home_object: Some(home)))
@@ -46,8 +46,8 @@ pub fn t_make_method(st: Agent, fn_h: Handle, home: Handle) -> Agent {
   })
 }
 
-pub fn t_set_fields_init(st: Agent, ctor: Handle, init_h: Handle) -> Agent {
-  rt_store.t_cell_update(st, ctor, fn(cell) {
+pub fn set_fields_init(st: Agent, ctor: Handle, init_h: Handle) -> Agent {
+  rt_store.cell_update(st, ctor, fn(cell) {
     case cell {
       SObject(kind: CompiledFn(..) as k, ..) ->
         SObject(..cell, kind: CompiledFn(..k, fields_init: Some(init_h)))
@@ -67,18 +67,18 @@ fn class_heritage(st: Agent, super: JsVal) -> #(Option(Handle), Handle, Agent) {
     KHandle(parent_h) ->
       case rt_call.is_constructor(st, super) {
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Class extends value is not a constructor or null",
           )
         True -> {
           let #(pp, st) =
-            rt_obj.t_get_prop(st, super, StringKey(Named("prototype")))
+            rt_obj.get_prop(st, super, StringKey(Named("prototype")))
           case classify(pp) {
             KHandle(pph) -> #(Some(pph), parent_h, st)
             KNull -> #(None, parent_h, st)
             _ ->
-              rt_val.t_throw_type_error(
+              rt_val.throw_type_error(
                 st,
                 "Class extends value does not have valid prototype property",
               )
@@ -86,7 +86,7 @@ fn class_heritage(st: Agent, super: JsVal) -> #(Option(Handle), Handle, Agent) {
         }
       }
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Class extends value is not a constructor or null",
       )
@@ -94,11 +94,11 @@ fn class_heritage(st: Agent, super: JsVal) -> #(Option(Handle), Handle, Agent) {
 }
 
 // §15.7.14 steps 8-18
-pub fn t_setup(st: Agent, ctor: Handle, super: JsVal) -> #(Handle, Agent) {
+pub fn setup(st: Agent, ctor: Handle, super: JsVal) -> #(Handle, Agent) {
   let #(proto_parent, ctor_parent, st) = class_heritage(st, super)
-  let #(proto, st) = rt_obj.t_new_object(st, proto_parent)
+  let #(proto, st) = rt_obj.new_object(st, proto_parent)
   let st =
-    rt_store.t_cell_update(st, ctor, fn(cell) {
+    rt_store.cell_update(st, ctor, fn(cell) {
       case cell {
         SObject(kind: CompiledFn(..) as k, ..) ->
           SObject(
@@ -116,7 +116,7 @@ pub fn t_setup(st: Agent, ctor: Handle, super: JsVal) -> #(Handle, Agent) {
       }
     })
   let #(_, st) =
-    rt_obj.t_define_own_data(
+    rt_obj.define_own_data(
       st,
       ctor,
       StringKey(Named("prototype")),
@@ -126,7 +126,7 @@ pub fn t_setup(st: Agent, ctor: Handle, super: JsVal) -> #(Handle, Agent) {
       configurable: False,
     )
   let #(_, st) =
-    rt_obj.t_define_own_data(
+    rt_obj.define_own_data(
       st,
       proto,
       StringKey(Named("constructor")),
@@ -139,7 +139,7 @@ pub fn t_setup(st: Agent, ctor: Handle, super: JsVal) -> #(Handle, Agent) {
 }
 
 // §14.3.9; enumerable for object literals, not classes
-pub fn t_define_method(
+pub fn define_method(
   st: Agent,
   target: Handle,
   key: ObjectKey,
@@ -147,11 +147,11 @@ pub fn t_define_method(
   kind: MethodInstallKind,
   enumerable enumerable: Bool,
 ) -> Agent {
-  let _ = case rt_obj.t_ordinary_own_property(st, target, key) {
+  let _ = case rt_obj.ordinary_own_property(st, target, key) {
     Some(prop) ->
       case types.prop_configurable(prop) {
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Cannot redefine property: " <> object_key_display(key),
           )
@@ -159,19 +159,19 @@ pub fn t_define_method(
       }
     None -> Nil
   }
-  let st = t_make_method(st, fn_h, target)
+  let st = make_method(st, fn_h, target)
   // only rename when compiled anonymous (computed key)
   let prefix = case kind {
     InstallGetter | InstallStaticGetter -> "get "
     InstallSetter | InstallStaticSetter -> "set "
     InstallMethod | InstallStatic -> ""
   }
-  let st = rt_obj.t_name_if_anonymous(st, fn_h, prefix <> key_fn_name(key))
+  let st = rt_obj.name_if_anonymous(st, fn_h, prefix <> key_fn_name(key))
   let fn_v = mk_object(fn_h)
   case kind {
     InstallMethod | InstallStatic -> {
       let #(_, st) =
-        rt_obj.t_define_own_data(
+        rt_obj.define_own_data(
           st,
           target,
           key,
@@ -184,7 +184,7 @@ pub fn t_define_method(
     }
     InstallGetter | InstallStaticGetter -> {
       let #(_, st) =
-        rt_obj.t_define_own_accessor(
+        rt_obj.define_own_accessor(
           st,
           target,
           key,
@@ -197,7 +197,7 @@ pub fn t_define_method(
     }
     InstallSetter | InstallStaticSetter -> {
       let #(_, st) =
-        rt_obj.t_define_own_accessor(
+        rt_obj.define_own_accessor(
           st,
           target,
           key,
@@ -224,7 +224,7 @@ fn key_fn_name(key: ObjectKey) -> String {
 }
 
 // §7.3.28 privatefieldadd, bypasses defineownproperty
-pub fn t_private_define(
+pub fn private_define(
   st: Agent,
   obj: Handle,
   priv_key: JsVal,
@@ -236,7 +236,7 @@ pub fn t_private_define(
 }
 
 // §7.3.29; home_object already set at class definition
-pub fn t_define_private(
+pub fn define_private(
   st: Agent,
   obj: Handle,
   priv_key: JsVal,
@@ -257,7 +257,7 @@ pub fn t_define_private(
         InstallGetter | InstallStaticGetter -> True
         _ -> False
       }
-      let existing = rt_obj.t_ordinary_own_property(st, obj, StringKey(key))
+      let existing = rt_obj.ordinary_own_property(st, obj, StringKey(key))
       let st = case existing {
         None -> check_private_add(st, obj, text)
         Some(AccessorProperty(get:, set:, ..)) ->
@@ -279,12 +279,12 @@ pub fn t_define_private(
 }
 
 fn check_private_add(st: Agent, obj: Handle, text: String) -> Agent {
-  case rt_obj.t_ordinary_own_property(st, obj, StringKey(Private(text))) {
+  case rt_obj.ordinary_own_property(st, obj, StringKey(Private(text))) {
     Some(_) -> throw_private_double_init(st, text, "")
     None ->
-      case rt_obj.t_ordinary_is_extensible(st, obj) {
+      case rt_obj.ordinary_is_extensible(st, obj) {
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Cannot define private member "
               <> private_display_name(text)
@@ -296,7 +296,7 @@ fn check_private_add(st: Agent, obj: Handle, text: String) -> Agent {
 }
 
 fn throw_private_double_init(st: Agent, text: String, kind: String) -> a {
-  rt_val.t_throw_type_error(
+  rt_val.throw_type_error(
     st,
     "Cannot initialize "
       <> kind
@@ -312,10 +312,10 @@ fn raw_define_private_data(
   v: JsVal,
   writable writable: Bool,
 ) -> Agent {
-  let #(seq, st) = rt_store.t_next_prop_seq(st)
-  rt_store.t_cell_update(st, obj, fn(cell) {
+  let #(seq, st) = rt_store.next_prop_seq(st)
+  rt_store.cell_update(st, obj, fn(cell) {
     let assert SObject(props:, ..) as cell = rt_obj.as_sobject(cell)
-      as "t_define_private target is not an SObject"
+      as "define_private target is not an SObject"
     SObject(
       ..cell,
       props: dict.insert(
@@ -343,7 +343,7 @@ fn raw_merge_private_accessor(
 ) -> Agent {
   let #(seq, st) = case existing {
     Some(old) -> #(types.prop_seq(old), st)
-    None -> rt_store.t_next_prop_seq(st)
+    None -> rt_store.next_prop_seq(st)
   }
   let #(get, set) = case existing {
     Some(AccessorProperty(get:, set:, ..)) -> #(get, set)
@@ -353,9 +353,9 @@ fn raw_merge_private_accessor(
     True -> #(Some(fn_v), set)
     False -> #(get, Some(fn_v))
   }
-  rt_store.t_cell_update(st, obj, fn(cell) {
+  rt_store.cell_update(st, obj, fn(cell) {
     let assert SObject(props:, ..) as cell = rt_obj.as_sobject(cell)
-      as "t_define_private target is not an SObject"
+      as "define_private target is not an SObject"
     SObject(
       ..cell,
       props: dict.insert(
@@ -374,26 +374,22 @@ fn raw_merge_private_accessor(
 }
 
 // §7.3.30 privateget, getter may re-enter js
-pub fn t_private_get(
-  st: Agent,
-  obj: JsVal,
-  priv_key: JsVal,
-) -> #(JsVal, Agent) {
+pub fn private_get(st: Agent, obj: JsVal, priv_key: JsVal) -> #(JsVal, Agent) {
   let text = priv_key_text(priv_key)
   let name = private_display_name(text)
   case classify(obj) {
     KHandle(h) ->
-      case rt_obj.t_ordinary_own_property(st, h, StringKey(Private(text))) {
+      case rt_obj.ordinary_own_property(st, h, StringKey(Private(text))) {
         Some(DataProperty(value:, ..)) -> #(value, st)
         Some(AccessorProperty(get: Some(getter), ..)) ->
           st.store.ops.call(st, getter, obj, [])
         Some(AccessorProperty(get: None, ..)) ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "'" <> name <> "' was defined without a getter",
           )
         None ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Cannot read private member "
               <> name
@@ -401,7 +397,7 @@ pub fn t_private_get(
           )
       }
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot read private member " <> name <> " on non-object",
       )
@@ -409,7 +405,7 @@ pub fn t_private_get(
 }
 
 // §7.3.31 privateset
-pub fn t_private_set(
+pub fn private_set(
   st: Agent,
   obj: JsVal,
   priv_key: JsVal,
@@ -420,10 +416,10 @@ pub fn t_private_set(
   let key = Private(text)
   case classify(obj) {
     KHandle(h) ->
-      case rt_obj.t_ordinary_own_property(st, h, StringKey(key)) {
+      case rt_obj.ordinary_own_property(st, h, StringKey(key)) {
         Some(DataProperty(writable: True, ..)) -> {
           let st =
-            rt_store.t_cell_update(st, h, fn(cell) {
+            rt_store.cell_update(st, h, fn(cell) {
               let assert SObject(props:, ..) = cell
               case dict.get(props, key) {
                 Ok(DataProperty(seq:, writable:, enumerable:, configurable:, ..)) ->
@@ -452,14 +448,14 @@ pub fn t_private_set(
         }
         Some(DataProperty(writable: False, ..))
         | Some(AccessorProperty(set: None, ..)) ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Cannot write private member "
               <> name
               <> ": it is a method or has no setter",
           )
         None ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Cannot write private member "
               <> name
@@ -467,7 +463,7 @@ pub fn t_private_set(
           )
       }
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot write private member " <> name <> " on non-object",
       )
@@ -475,17 +471,17 @@ pub fn t_private_set(
 }
 
 // §13.10.1 #x in obj
-pub fn t_private_in(st: Agent, obj: JsVal, priv_key: JsVal) -> Bool {
+pub fn private_in(st: Agent, obj: JsVal, priv_key: JsVal) -> Bool {
   let text = priv_key_text(priv_key)
   case classify(obj) {
     KHandle(h) ->
-      option.is_some(rt_obj.t_ordinary_own_property(
+      option.is_some(rt_obj.ordinary_own_property(
         st,
         h,
         StringKey(Private(text)),
       ))
     _ ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot use 'in' operator to search for private name "
           <> private_display_name(text)
@@ -495,17 +491,16 @@ pub fn t_private_in(st: Agent, obj: JsVal, priv_key: JsVal) -> Bool {
 }
 
 // super.key read on home.[[prototype]] with receiver as this
-pub fn t_super_get(
+pub fn super_get(
   st: Agent,
   home: Handle,
   receiver: JsVal,
   key: ObjectKey,
 ) -> #(JsVal, Agent) {
-  case rt_obj.t_get_prototype_of(st, home) {
-    #(Some(base), st) ->
-      rt_obj.t_get_prop_with_receiver(st, base, key, receiver)
+  case rt_obj.get_prototype_of(st, home) {
+    #(Some(base), st) -> rt_obj.get_prop_with_receiver(st, base, key, receiver)
     #(None, st) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot read super property when prototype is null",
       )
@@ -513,7 +508,7 @@ pub fn t_super_get(
 }
 
 // failure throws only when strict
-pub fn t_super_set(
+pub fn super_set(
   st: Agent,
   home: Handle,
   receiver: JsVal,
@@ -521,21 +516,20 @@ pub fn t_super_set(
   v: JsVal,
   strict strict: Bool,
 ) -> #(JsVal, Agent) {
-  case rt_obj.t_get_prototype_of(st, home) {
+  case rt_obj.get_prototype_of(st, home) {
     #(Some(base), st) -> {
-      let #(ok, st) =
-        rt_obj.t_set_prop_with_receiver(st, base, key, v, receiver)
+      let #(ok, st) = rt_obj.set_prop_with_receiver(st, base, key, v, receiver)
       case ok || !strict {
         True -> #(v, st)
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Cannot assign to read-only super property",
           )
       }
     }
     #(None, st) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot write super property when prototype is null",
       )
@@ -543,26 +537,26 @@ pub fn t_super_set(
 }
 
 // §13.3.7.1 supercall
-pub fn t_super_call(
+pub fn super_call(
   st: Agent,
   active_func: Handle,
   args: List(JsVal),
   new_target: JsVal,
 ) -> #(Handle, Agent) {
-  case rt_obj.t_get_prototype_of(st, active_func) {
+  case rt_obj.get_prototype_of(st, active_func) {
     #(Some(parent), st) ->
-      rt_call.t_construct(st, mk_object(parent), args, new_target)
+      rt_call.construct(st, mk_object(parent), args, new_target)
     // null proto means setprototypeof(ctor, null): typeerror
     #(None, st) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Super constructor null of derived class is not a constructor",
       )
   }
 }
 
-pub fn t_fn_home_object(st: Agent, fn_h: Handle) -> JsVal {
-  case rt_store.t_cell_get(st, fn_h) {
+pub fn fn_home_object(st: Agent, fn_h: Handle) -> JsVal {
+  case rt_store.cell_get(st, fn_h) {
     SObject(kind: CompiledFn(home_object: Some(h), ..), ..)
     | SObject(kind: BytecodeFn(home_object: Some(h), ..), ..) -> mk_object(h)
     _ -> mk_undefined()

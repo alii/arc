@@ -76,9 +76,9 @@ pub fn dispatch(
 ) -> #(JsVal, Agent) {
   case n {
     WeakMapConstructor(..) ->
-      rt_val.t_throw_type_error(st, "Constructor WeakMap requires 'new'")
+      rt_val.throw_type_error(st, "Constructor WeakMap requires 'new'")
     WeakSetConstructor(..) ->
-      rt_val.t_throw_type_error(st, "Constructor WeakSet requires 'new'")
+      rt_val.throw_type_error(st, "Constructor WeakSet requires 'new'")
     WeakMapGet -> weak_map_get(st, this, args)
     WeakMapSet -> weak_map_set(st, this, args)
     WeakMapHas -> weak_map_has(st, this, args)
@@ -121,7 +121,7 @@ pub fn dispatch_construct(
         "add",
         iter_protocol.add_values_from_iterable,
       )
-    _ -> rt_val.t_throw_type_error(st, "not a constructor")
+    _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }
 
@@ -143,11 +143,10 @@ fn weak_construct(
     KUndef | KNull -> #(coll_h, st)
     _ -> {
       let iterable = first_arg_or_undefined(args)
-      let #(adder, st) =
-        rt_obj.t_get_prop(st, coll, StringKey(Named(adder_name)))
+      let #(adder, st) = rt_obj.get_prop(st, coll, StringKey(Named(adder_name)))
       case rt_val.is_callable(st, adder) {
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "'"
               <> adder_name
@@ -236,7 +235,7 @@ fn weak_map_get_or_insert_computed(
   case dict.get(read_wm(st, weak_map), wk) {
     Ok(existing) -> #(existing, st)
     Error(Nil) -> {
-      let #(computed, st) = rt_call.t_call(st, callback, mk_undefined(), [key])
+      let #(computed, st) = rt_call.call(st, callback, mk_undefined(), [key])
       #(computed, update_wm(st, weak_map, dict.insert(_, wk, computed)))
     }
   }
@@ -351,14 +350,13 @@ fn require_weak_key(
 ) -> #(JsVal, Agent) {
   case to_weak_key(key) {
     Some(wk) -> cont(wk)
-    None -> rt_val.t_throw_type_error(st, msg)
+    None -> rt_val.throw_type_error(st, msg)
   }
 }
 
 fn read_wm(st: Agent, weak_map: WeakMapHandle) -> Dict(WeakKey, JsVal) {
   let WeakMapHandle(h) = weak_map
-  let assert SObject(kind: WeakMapObj(entries:), ..) =
-    rt_store.t_cell_get(st, h)
+  let assert SObject(kind: WeakMapObj(entries:), ..) = rt_store.cell_get(st, h)
     as "weak: WeakMapHandle does not point at a WeakMap cell"
   entries
 }
@@ -375,7 +373,7 @@ fn update_wm(
   f: fn(Dict(WeakKey, JsVal)) -> Dict(WeakKey, JsVal),
 ) -> Agent {
   let WeakMapHandle(h) = weak_map
-  rt_store.t_cell_update(st, h, fn(cell) {
+  rt_store.cell_update(st, h, fn(cell) {
     let assert SObject(kind: WeakMapObj(entries:), ..) = cell
     SObject(..cell, kind: WeakMapObj(entries: f(entries)))
   })
@@ -383,8 +381,7 @@ fn update_wm(
 
 fn read_ws(st: Agent, weak_set: WeakSetHandle) -> Set(WeakKey) {
   let WeakSetHandle(h) = weak_set
-  let assert SObject(kind: WeakSetObj(entries:), ..) =
-    rt_store.t_cell_get(st, h)
+  let assert SObject(kind: WeakSetObj(entries:), ..) = rt_store.cell_get(st, h)
     as "weak: WeakSetHandle does not point at a WeakSet cell"
   entries
 }
@@ -395,7 +392,7 @@ fn update_ws(
   f: fn(Set(WeakKey)) -> Set(WeakKey),
 ) -> Agent {
   let WeakSetHandle(h) = weak_set
-  rt_store.t_cell_update(st, h, fn(cell) {
+  rt_store.cell_update(st, h, fn(cell) {
     let assert SObject(kind: WeakSetObj(entries:), ..) = cell
     SObject(..cell, kind: WeakSetObj(entries: f(entries)))
   })

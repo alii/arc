@@ -10,7 +10,7 @@
     strict_eq/2, same_value_zero/2,
     property_key_of/1,
     js_format_float/1,
-    t_to_string/2, t_to_number/2, t_to_integer_or_infinity/2, t_to_length/2,
+    to_string/2, to_number/2, to_integer_or_infinity/2, to_length/2,
     string_to_number/1,
     is_neg_zero/1, float_same_term/2, is_miss/1
 ]).
@@ -144,24 +144,24 @@ mk_object(H) -> H.
 mk_tdz() -> js_tdz.
 
 %% hot heads of the val.gleam coercions, the rest calls back into it by name
-t_to_string(St, V) when is_binary(V) -> {V, St};
-t_to_string(St, {?STR_TAG, B, _, _}) -> {B, St};
-t_to_string(St, V) when is_integer(V) -> {integer_to_binary(V), St};
-t_to_string(St, V) when is_float(V) -> {js_format_float(V), St};
-t_to_string(St, V) -> 'arc@rt@val':t_to_string_general(St, V).
+to_string(St, V) when is_binary(V) -> {V, St};
+to_string(St, {?STR_TAG, B, _, _}) -> {B, St};
+to_string(St, V) when is_integer(V) -> {integer_to_binary(V), St};
+to_string(St, V) when is_float(V) -> {js_format_float(V), St};
+to_string(St, V) -> 'arc@rt@val':to_string_general(St, V).
 
-t_to_number(St, V) when is_integer(V) -> {{j_int, V}, St};
-t_to_number(St, V) when is_float(V) -> {{j_float, V}, St};
-t_to_number(St, V) -> 'arc@rt@val':t_to_number_general(St, V).
+to_number(St, V) when is_integer(V) -> {{j_int, V}, St};
+to_number(St, V) when is_float(V) -> {{j_float, V}, St};
+to_number(St, V) -> 'arc@rt@val':to_number_general(St, V).
 
-t_to_integer_or_infinity(St, V) when is_integer(V) -> {V, St};
-t_to_integer_or_infinity(St, V) when is_float(V) -> {trunc(V), St};
-t_to_integer_or_infinity(St, undefined) -> {0, St};
-t_to_integer_or_infinity(St, V) -> 'arc@rt@val':t_to_integer_or_infinity_general(St, V).
+to_integer_or_infinity(St, V) when is_integer(V) -> {V, St};
+to_integer_or_infinity(St, V) when is_float(V) -> {trunc(V), St};
+to_integer_or_infinity(St, undefined) -> {0, St};
+to_integer_or_infinity(St, V) -> 'arc@rt@val':to_integer_or_infinity_general(St, V).
 
-t_to_length(St, V) when is_integer(V), V >= 0 -> {V, St};
-t_to_length(St, V) when is_integer(V) -> {0, St};
-t_to_length(St, V) -> 'arc@rt@val':t_to_length_general(St, V).
+to_length(St, V) when is_integer(V), V >= 0 -> {V, St};
+to_length(St, V) when is_integer(V) -> {0, St};
+to_length(St, V) -> 'arc@rt@val':to_length_general(St, V).
 
 %% §6.1.6.1.20 number tostring
 js_format_float(N) when is_float(N) ->

@@ -45,7 +45,7 @@ pub fn init(
   // keys and @@iterator must alias the same values function
   let #(values_h, st) =
     common.alloc_rooted_native_fn(st, fn_proto, SetN(SetValues), "values", 0)
-  let #(values_prop, st) = rt_store.t_builtin_property(st, mk_object(values_h))
+  let #(values_prop, st) = rt_store.builtin_property(st, mk_object(values_h))
   let #(keys_prop, st) = common.restamp(st, values_prop)
   let #(size_props, st) =
     common.alloc_getters(st, fn_proto, [#("size", SetN(SetGetSize))])
@@ -81,7 +81,7 @@ pub fn dispatch(
 ) -> #(JsVal, Agent) {
   case n {
     SetConstructor(..) ->
-      rt_val.t_throw_type_error(st, "Constructor Set requires 'new'")
+      rt_val.throw_type_error(st, "Constructor Set requires 'new'")
     SetAdd -> set_add(st, this, args)
     SetHas -> set_has(st, this, args)
     SetDelete -> set_delete(st, this, args)
@@ -108,7 +108,7 @@ pub fn dispatch_construct(
 ) -> #(Handle, Agent) {
   case n {
     SetConstructor(..) -> set_constructor(st, args, new_target)
-    _ -> rt_val.t_throw_type_error(st, "not a constructor")
+    _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }
 
@@ -129,13 +129,10 @@ fn set_constructor(
     KUndef | KNull -> #(set_h, st)
     _ -> {
       let iterable = first_arg_or_undefined(args)
-      let #(adder, st) = rt_obj.t_get_prop(st, set_v, StringKey(Named("add")))
+      let #(adder, st) = rt_obj.get_prop(st, set_v, StringKey(Named("add")))
       case rt_val.is_callable(st, adder) {
         False ->
-          rt_val.t_throw_type_error(
-            st,
-            "'add' property of Set is not a function",
-          )
+          rt_val.throw_type_error(st, "'add' property of Set is not a function")
         True -> {
           let #(_set, st) =
             iter_protocol.add_values_from_iterable(st, set_v, iterable, adder)
@@ -202,7 +199,7 @@ fn set_for_each_loop(
   case ordered_entries.next_from(store, cursor) {
     None -> #(mk_undefined(), st)
     Some(#(next_cursor, _key, val)) -> {
-      let #(_r, st) = rt_call.t_call(st, cb, this_arg, [val, val, set_this])
+      let #(_r, st) = rt_call.call(st, cb, this_arg, [val, val, set_this])
       set_for_each_loop(st, set, next_cursor, cb, this_arg, set_this)
     }
   }
@@ -496,20 +493,20 @@ fn get_set_record(
   cont: fn(SetRecord, Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   use Nil <- helpers.guard(rt_val.is_object(other), fn() {
-    rt_val.t_throw_type_error(st, "other is not an object")
+    rt_val.throw_type_error(st, "other is not an object")
   })
-  let #(raw_size, st) = rt_obj.t_get_prop(st, other, StringKey(Named("size")))
-  let #(num, st) = rt_val.t_to_number(st, raw_size)
+  let #(raw_size, st) = rt_obj.get_prop(st, other, StringKey(Named("size")))
+  let #(num, st) = rt_val.to_number(st, raw_size)
   use Nil <- helpers.guard(num != JNan, fn() {
-    rt_val.t_throw_type_error(st, "size is NaN")
+    rt_val.throw_type_error(st, "size is NaN")
   })
   let int_size = rt_val.jsnum_to_integer_or_infinity(num)
   use Nil <- helpers.guard(int_size >= 0, fn() {
-    rt_val.t_throw_range_error(st, "size is negative")
+    rt_val.throw_range_error(st, "size is negative")
   })
-  let #(has, st) = rt_obj.t_get_prop(st, other, StringKey(Named("has")))
+  let #(has, st) = rt_obj.get_prop(st, other, StringKey(Named("has")))
   use has <- helpers.require_callable(st, has, fn() { "has is not a function" })
-  let #(keys, st) = rt_obj.t_get_prop(st, other, StringKey(Named("keys")))
+  let #(keys, st) = rt_obj.get_prop(st, other, StringKey(Named("keys")))
   use keys <- helpers.require_callable(st, keys, fn() {
     "keys is not a function"
   })
@@ -518,13 +515,13 @@ fn get_set_record(
 
 // §24.2.1.3 getkeysiterator
 fn get_keys_iterator(st: Agent, rec: SetRecord) -> #(IteratorRecord, Agent) {
-  let #(iter, st) = rt_call.t_call(st, rec.keys, rec.obj, [])
+  let #(iter, st) = rt_call.call(st, rec.keys, rec.obj, [])
   use Nil <- helpers.guard(rt_val.is_object(iter), fn() {
-    rt_val.t_throw_type_error(st, "keys() did not return an object")
+    rt_val.throw_type_error(st, "keys() did not return an object")
   })
-  let #(next_fn, st) = rt_obj.t_get_prop(st, iter, StringKey(Named("next")))
+  let #(next_fn, st) = rt_obj.get_prop(st, iter, StringKey(Named("next")))
   use Nil <- helpers.guard(rt_val.is_callable(st, next_fn), fn() {
-    rt_val.t_throw_type_error(st, "iterator.next is not a function")
+    rt_val.throw_type_error(st, "iterator.next is not a function")
   })
   #(types.IteratorRecord(iterator: iter, next_method: next_fn), st)
 }
@@ -535,7 +532,7 @@ fn step_keys(st: Agent, keys: IteratorRecord) -> #(Option(JsVal), Agent) {
 }
 
 fn set_record_has(st: Agent, rec: SetRecord, v: JsVal) -> #(Bool, Agent) {
-  let #(r, st) = rt_call.t_call(st, rec.has, rec.obj, [v])
+  let #(r, st) = rt_call.call(st, rec.has, rec.obj, [v])
   #(rt_val.to_boolean(r), st)
 }
 
@@ -597,7 +594,7 @@ fn read_set_store(
   set: SetHandle,
 ) -> ordered_entries.OrderedEntries(MapKey, JsVal) {
   let assert SObject(kind: SetObj(entries:), ..) =
-    rt_store.t_cell_get(st, set.handle)
+    rt_store.cell_get(st, set.handle)
     as "set: SetHandle does not point at a Set cell"
   entries
 }
@@ -607,7 +604,7 @@ fn update_set(
   set: SetHandle,
   entries: ordered_entries.OrderedEntries(MapKey, JsVal),
 ) -> Agent {
-  rt_store.t_cell_update(st, set.handle, fn(cell) {
+  rt_store.cell_update(st, set.handle, fn(cell) {
     let assert SObject(..) = cell
     SObject(..cell, kind: SetObj(entries:))
   })

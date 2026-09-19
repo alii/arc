@@ -83,15 +83,15 @@ pub fn init(
       "values",
       0,
     )
-  let #(values_prop, st) = rt_store.t_builtin_property(st, mk_object(values_h))
+  let #(values_prop, st) = rt_store.builtin_property(st, mk_object(values_h))
   // tostring is the same object as array.prototype.tostring
   let #(array_to_string, st) =
-    rt_obj.t_get_prop(
+    rt_obj.get_prop(
       st,
       mk_object(array.prototype),
       StringKey(Named("toString")),
     )
-  let #(to_string_prop, st) = rt_store.t_builtin_property(st, array_to_string)
+  let #(to_string_prop, st) = rt_store.builtin_property(st, array_to_string)
   let #(methods, st) =
     common.alloc_methods(st, function_proto, [
       #("at", TypedArrayN(TypedArrayPrototypeAt), 1),
@@ -185,7 +185,7 @@ fn init_ctor(
   kind: TypedArrayKind,
 ) -> #(BuiltinPair, Agent) {
   let size = typed_array_bytes.elem_size(kind)
-  let #(size_prop, st) = rt_store.t_frozen_property(st, mk_int(size))
+  let #(size_prop, st) = rt_store.frozen_property(st, mk_int(size))
   let #(size_prop2, st) = common.restamp(st, size_prop)
   let #(bt, st) =
     common.init_type(
@@ -229,12 +229,12 @@ pub fn dispatch(
 ) -> #(JsVal, Agent) {
   case native {
     TypedArrayIntrinsicConstructor ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Abstract class TypedArray not directly constructable",
       )
     TypedArrayConstructor(kind:, ..) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Constructor " <> typed_array_name(kind) <> " requires 'new'",
       )
@@ -296,12 +296,12 @@ pub fn dispatch_construct(
 ) -> #(Handle, Agent) {
   case native {
     TypedArrayIntrinsicConstructor ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Abstract class TypedArray not directly constructable",
       )
     TypedArrayConstructor(kind:, ..) -> ta_construct(st, kind, new_target, args)
-    _ -> rt_val.t_throw_type_error(st, "not a constructor")
+    _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }
 
@@ -315,7 +315,7 @@ fn ta_create(st: Agent, ctor: JsVal, len: Int) -> #(JsVal, Handle, Agent) {
   }
   case immutable {
     True ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Constructor returned a TypedArray backed by an immutable ArrayBuffer",
       )
@@ -330,7 +330,7 @@ fn ta_create_with_args(
   ctor_args: List(JsVal),
   min_len: Option(Int),
 ) -> #(JsVal, Handle, Agent) {
-  let #(obj_h, st) = rt_call.t_construct(st, ctor, ctor_args, ctor)
+  let #(obj_h, st) = rt_call.construct(st, ctor, ctor_args, ctor)
   let obj = mk_object(obj_h)
   case ta_view_of(st, obj_h) {
     Some(view) ->
@@ -347,7 +347,7 @@ fn ta_create_with_args(
             )
           case min_len {
             Some(len) if l < len ->
-              rt_val.t_throw_type_error(
+              rt_val.throw_type_error(
                 st,
                 "Derived TypedArray constructor created an array which was too small",
               )
@@ -362,7 +362,7 @@ fn ta_create_with_args(
 // §23.2.2.1 from
 fn ta_from(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use <- bool.lazy_guard(!rt_call.is_constructor(st, this), fn() {
-    rt_val.t_throw_type_error(st, "%TypedArray%.from called on non-constructor")
+    rt_val.throw_type_error(st, "%TypedArray%.from called on non-constructor")
   })
   let source = helpers.first_arg_or_undefined(args)
   let mapfn = helpers.arg_at(args, 1)
@@ -372,13 +372,13 @@ fn ta_from(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     _ ->
       case rt_val.is_callable(st, mapfn) {
         True -> Some(mapfn)
-        False -> rt_val.t_throw_type_error(st, "mapfn is not a function")
+        False -> rt_val.throw_type_error(st, "mapfn is not a function")
       }
   }
   use <- bool.lazy_guard(rt_val.is_nullish(source), fn() {
-    rt_val.t_throw_type_error(st, "Cannot convert undefined or null to object")
+    rt_val.throw_type_error(st, "Cannot convert undefined or null to object")
   })
-  let #(iter_fn, st) = rt_obj.t_get_prop(st, source, SymbolKey(symbol_iterator))
+  let #(iter_fn, st) = rt_obj.get_prop(st, source, SymbolKey(symbol_iterator))
   case rt_val.is_callable(st, iter_fn) {
     True -> {
       let #(rec, st) =
@@ -452,7 +452,7 @@ fn fill_target_from_array_like(
   case k >= len {
     True -> #(target, st)
     False -> {
-      let #(v, st) = rt_obj.t_get_prop(st, source, StringKey(Index(k)))
+      let #(v, st) = rt_obj.get_prop(st, source, StringKey(Index(k)))
       let st = map_and_store(st, target, target_h, v, k, mapping, this_arg)
       fill_target_from_array_like(
         st,
@@ -478,7 +478,7 @@ fn map_and_store(
   this_arg: JsVal,
 ) -> Agent {
   let #(mapped, st) = case mapping {
-    Some(f) -> rt_call.t_call(st, f, this_arg, [v, mk_int(k)])
+    Some(f) -> rt_call.call(st, f, this_arg, [v, mk_int(k)])
     None -> #(v, st)
   }
   set_index(st, target_h, target, k, mapped)
@@ -487,7 +487,7 @@ fn map_and_store(
 // §23.2.2.2 of
 fn ta_of(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use <- bool.lazy_guard(!rt_call.is_constructor(st, this), fn() {
-    rt_val.t_throw_type_error(st, "%TypedArray%.of called on non-constructor")
+    rt_val.throw_type_error(st, "%TypedArray%.of called on non-constructor")
   })
   let #(target, target_h, st) = ta_create(st, this, list.length(args))
   case try_bulk_store(st, target_h, 0, args) {
@@ -512,7 +512,7 @@ fn ta_construct(
       case classify(first) {
         KHandle(h) -> {
           let #(proto, st) = proto_from_new_target(st, new_target, kind)
-          case rt_store.t_cell_get(st, h) {
+          case rt_store.cell_get(st, h) {
             SObject(kind: types.ArrayBufferObj(..), ..) ->
               from_buffer(st, kind, proto, h, rest)
             SObject(
@@ -570,7 +570,7 @@ fn alloc_ta_with_length(
   let size = typed_array_bytes.elem_size(kind)
   let byte_len = len * size
   use <- bool.lazy_guard(byte_len > max_byte_length, fn() {
-    rt_val.t_throw_range_error(st, "Invalid typed array length")
+    rt_val.throw_range_error(st, "Invalid typed array length")
   })
   alloc_fresh_typed_array(st, kind, proto, byte_len, len)
 }
@@ -610,7 +610,7 @@ fn from_buffer(
   let #(offset_arg, len_arg) = helpers.two_args_or_undefined(rest)
   let #(offset, st) = to_index(st, offset_arg)
   use <- bool.lazy_guard(offset % size != 0, fn() {
-    rt_val.t_throw_range_error(
+    rt_val.throw_range_error(
       st,
       "start offset of "
         <> typed_array_name(kind)
@@ -628,13 +628,13 @@ fn from_buffer(
   // detached check after the observable conversions
   case buffer.storage(st, buf_h) |> option.then(buffer.buffer_bits) {
     None ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot perform Construct on a detached ArrayBuffer",
       )
     Some(data) -> {
       let buf_len = bit_array.byte_size(data)
-      let range_err = fn(msg) { rt_val.t_throw_range_error(st, msg) }
+      let range_err = fn(msg) { rt_val.throw_range_error(st, msg) }
       let resizable =
         buffer.storage(st, buf_h)
         |> option.then(buffer.buffer_max_byte_length)
@@ -704,7 +704,7 @@ fn from_typed_array(
   src_len: Int,
 ) -> #(Handle, Agent) {
   use <- bool.lazy_guard(!same_content_type(kind, src_kind), fn() {
-    rt_val.t_throw_type_error(
+    rt_val.throw_type_error(
       st,
       "Cannot initialize "
         <> typed_array_name(kind)
@@ -714,7 +714,7 @@ fn from_typed_array(
   })
   case buffer.bytes(st, src_buf) {
     None ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot perform Construct on a detached ArrayBuffer",
       )
@@ -722,13 +722,13 @@ fn from_typed_array(
       let size = typed_array_bytes.elem_size(kind)
       let byte_len = src_len * size
       use <- bool.lazy_guard(byte_len > max_byte_length, fn() {
-        rt_val.t_throw_range_error(st, "Invalid typed array length")
+        rt_val.throw_range_error(st, "Invalid typed array length")
       })
       let src_size = typed_array_bytes.elem_size(src_kind)
       use <- bool.lazy_guard(
         src_off + src_len * src_size > bit_array.byte_size(src_data),
         fn() {
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Cannot perform Construct on an out-of-bounds TypedArray",
           )
@@ -817,8 +817,7 @@ fn from_object(
   obj_val: JsVal,
   obj_h: Handle,
 ) -> #(Handle, Agent) {
-  let #(iter_fn, st) =
-    rt_obj.t_get_prop(st, obj_val, SymbolKey(symbol_iterator))
+  let #(iter_fn, st) = rt_obj.get_prop(st, obj_val, SymbolKey(symbol_iterator))
   case rt_val.is_callable(st, iter_fn) {
     True -> {
       let #(rec, st) =
@@ -870,7 +869,7 @@ fn store_array_like(
   case k >= len {
     True -> st
     False -> {
-      let #(v, st) = rt_obj.t_get_prop(st, obj_val, StringKey(Index(k)))
+      let #(v, st) = rt_obj.get_prop(st, obj_val, StringKey(Index(k)))
       let st = set_index(st, fresh.ta, fresh.value, k, v)
       store_array_like(st, fresh, obj_val, k + 1, len)
     }
@@ -879,7 +878,7 @@ fn store_array_like(
 
 // §7.1.22 toindex
 fn to_index(st: Agent, val: JsVal) -> #(Int, Agent) {
-  rt_val.t_to_index(st, val, "Invalid typed array length")
+  rt_val.to_index(st, val, "Invalid typed array length")
 }
 
 type IntOrInf {
@@ -889,7 +888,7 @@ type IntOrInf {
 }
 
 fn to_int_or_inf(st: Agent, val: JsVal) -> #(IntOrInf, Agent) {
-  let #(n, st) = rt_val.t_to_number(st, val)
+  let #(n, st) = rt_val.to_number(st, val)
   let i = case n {
     JNan -> FiniteInteger(0)
     JInt(i) -> FiniteInteger(i)
@@ -942,7 +941,7 @@ fn ta_view(st: Agent, v: JsVal) -> Option(TypedArrayView) {
 }
 
 fn ta_view_of(st: Agent, ta: Handle) -> Option(TypedArrayView) {
-  case rt_store.t_cell_get(st, ta) {
+  case rt_store.cell_get(st, ta) {
     SObject(kind: TypedArrayObj(buffer:, elem_kind:, byte_offset:, length:), ..) ->
       Some(TypedArrayView(ta:, buffer:, kind: elem_kind, byte_offset:, length:))
     _ -> None
@@ -1002,7 +1001,7 @@ fn require_ta(st: Agent, this: JsVal) -> TypedArrayWitness {
         ),
       )
     None ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Method %TypedArray%.prototype called on incompatible receiver",
       )
@@ -1030,7 +1029,7 @@ fn validate_ta(st: Agent, this: JsVal) -> TypedArrayWitness {
 fn require_mutable(st: Agent, buf: Handle) -> Nil {
   case buffer.is_immutable(st, buf) {
     True ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot modify a TypedArray backed by an immutable ArrayBuffer",
       )
@@ -1149,11 +1148,11 @@ fn convert_for_kind(
 ) -> #(buffer.TypedElement, Agent) {
   case kind {
     NumKind(k) -> {
-      let #(n, st) = rt_val.t_to_number(st, val)
+      let #(n, st) = rt_val.to_number(st, val)
       #(buffer.NumberElement(k, n), st)
     }
     BigKind(k) -> {
-      let #(n, st) = rt_val.t_to_bigint(st, val)
+      let #(n, st) = rt_val.to_bigint(st, val)
       #(buffer.BigIntElement(k, n), st)
     }
   }
@@ -1171,7 +1170,7 @@ fn proto_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     NegativeInfinity -> -1
   }
   use <- bool.lazy_guard(offset < 0, fn() {
-    rt_val.t_throw_range_error(st, "offset is out of bounds")
+    rt_val.throw_range_error(st, "offset is out of bounds")
   })
   let dst_data = witness_bytes(st, this)
   let len = ta_live_length(st, this)
@@ -1211,12 +1210,12 @@ fn proto_set(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
         None -> set_from_array_like(st, view, offset, len, src)
       }
     KUndef | KNull ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot convert " <> rt_val.nullish_label(src) <> " to object",
       )
     _ -> {
-      let #(src_h, st) = rt_val.t_to_object(st, src)
+      let #(src_h, st) = rt_val.to_object(st, src)
       set_from_array_like(st, view, offset, len, mk_object(src_h))
     }
   }
@@ -1243,16 +1242,16 @@ fn set_from_typed_array(
   let TypedArrayWitness(buffer: dst_buf, kind:, byte_offset: dst_off, ..) = view
   let src_live = option.is_some(buffer.bytes(st, src_buf))
   use <- bool.lazy_guard(!src_live, fn() {
-    rt_val.t_throw_type_error(
+    rt_val.throw_type_error(
       st,
       "Cannot perform set from a detached ArrayBuffer",
     )
   })
   use <- bool.lazy_guard(!same_content_type(kind, src_kind), fn() {
-    rt_val.t_throw_type_error(st, "Cannot mix BigInt and other types")
+    rt_val.throw_type_error(st, "Cannot mix BigInt and other types")
   })
   use <- bool.lazy_guard(src_len + offset > len, fn() {
-    rt_val.t_throw_range_error(st, "offset is out of bounds")
+    rt_val.throw_range_error(st, "offset is out of bounds")
   })
   let size = typed_array_bytes.elem_size(kind)
   let region = case kind == src_kind {
@@ -1290,7 +1289,7 @@ fn set_from_array_like(
 ) -> #(JsVal, Agent) {
   let #(src_len, st) = rt_abstract_ops.length_of_array_like(st, src)
   use <- bool.lazy_guard(src_len + offset > len, fn() {
-    rt_val.t_throw_range_error(st, "offset is out of bounds")
+    rt_val.throw_range_error(st, "offset is out of bounds")
   })
   let bulk = case classify(src) {
     KHandle(src_h) ->
@@ -1318,7 +1317,7 @@ fn set_from_array_like_loop(
   case k >= src_len {
     True -> st
     False -> {
-      let #(v, st) = rt_obj.t_get_prop(st, src, StringKey(Index(k)))
+      let #(v, st) = rt_obj.get_prop(st, src, StringKey(Index(k)))
       let st = set_index(st, view.ta, mk_object(view.ta), offset + k, v)
       set_from_array_like_loop(st, view, offset, src, k + 1, src_len)
     }
@@ -1334,7 +1333,7 @@ fn proto_subarray(
   case ta_view(st, this) {
     Some(view) -> subarray_of_view(st, this, args, view)
     None ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Method %TypedArray%.prototype called on incompatible receiver",
       )
@@ -1517,7 +1516,7 @@ fn proto_join(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let sep_arg = helpers.first_arg_or_undefined(args)
   let #(sep, st) = case classify(sep_arg) {
     KUndef -> #(",", st)
-    _ -> rt_val.t_to_string(st, sep_arg)
+    _ -> rt_val.to_string(st, sep_arg)
   }
   let parts = join_parts(st, view, 0, []) |> list.reverse
   #(mk_string(string.join(parts, sep)), st)
@@ -1663,7 +1662,7 @@ fn require_cb(st: Agent, args: List(JsVal)) -> #(JsVal, JsVal) {
   case rt_val.is_callable(st, cb) {
     True -> #(cb, this_arg)
     False ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         rt_val.type_of(st, cb) <> " is not a function",
       )
@@ -1679,13 +1678,7 @@ fn set_index(
   v: JsVal,
 ) -> Agent {
   let #(_, st) =
-    rt_obj.t_set_prop_with_receiver(
-      st,
-      target_h,
-      StringKey(Index(k)),
-      v,
-      target,
-    )
+    rt_obj.set_prop_with_receiver(st, target_h, StringKey(Index(k)), v, target)
   st
 }
 
@@ -1701,7 +1694,7 @@ fn ta_get(st: Agent, ta_h: Handle, k: Int) -> JsVal {
 }
 
 fn witness_type_error(st: Agent, err: buffer.ViewWitnessError) -> a {
-  rt_val.t_throw_type_error(st, buffer.view_witness_error_message(err))
+  rt_val.throw_type_error(st, buffer.view_witness_error_message(err))
 }
 
 // §23.2.4.4 witness checks; ok carries the live bytes as proof
@@ -1778,7 +1771,7 @@ fn iterate_calls(
   use <- bool.guard(k < 0 || k >= view.length, #(None, st))
   let el = ta_get(st, view.ta, k)
   let #(res, st) =
-    rt_call.t_call(st, cb, this_arg, [
+    rt_call.call(st, cb, this_arg, [
       el,
       mk_int(k),
       mk_object(view.ta),
@@ -1883,7 +1876,7 @@ fn proto_map_loop(
   use <- bool.guard(k >= view.length, st)
   let el = ta_get(st, view.ta, k)
   let #(mapped, st) =
-    rt_call.t_call(st, cb, this_arg, [
+    rt_call.call(st, cb, this_arg, [
       el,
       mk_int(k),
       mk_object(view.ta),
@@ -1913,7 +1906,7 @@ fn filter_collect(
   use <- bool.guard(k >= view.length, #(acc, st))
   let el = ta_get(st, view.ta, k)
   let #(res, st) =
-    rt_call.t_call(st, cb, this_arg, [
+    rt_call.call(st, cb, this_arg, [
       el,
       mk_int(k),
       mk_object(view.ta),
@@ -1951,10 +1944,7 @@ fn proto_reduce(
   let len = view.length
   let cb = helpers.first_arg_or_undefined(args)
   use <- bool.lazy_guard(!rt_val.is_callable(st, cb), fn() {
-    rt_val.t_throw_type_error(
-      st,
-      rt_val.type_of(st, cb) <> " is not a function",
-    )
+    rt_val.throw_type_error(st, rt_val.type_of(st, cb) <> " is not a function")
   })
   let start = direction_start(dir, len)
   case helpers.list_at(args, 1) {
@@ -1962,7 +1952,7 @@ fn proto_reduce(
     None ->
       case len == 0 {
         True ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Reduce of empty array with no initial value",
           )
@@ -1985,7 +1975,7 @@ fn proto_reduce_loop(
   use <- bool.guard(k < 0 || k >= view.length, #(acc, st))
   let el = ta_get(st, view.ta, k)
   let #(res, st) =
-    rt_call.t_call(st, cb, mk_undefined(), [
+    rt_call.call(st, cb, mk_undefined(), [
       acc,
       el,
       mk_int(k),
@@ -2126,7 +2116,7 @@ fn proto_with(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let size = typed_array_bytes.elem_size(kind)
   let valid = actual >= 0 && actual < ta_live_length(st, this)
   use <- bool.lazy_guard(!valid, fn() {
-    rt_val.t_throw_range_error(st, "Invalid typed array index")
+    rt_val.throw_range_error(st, "Invalid typed array index")
   })
   // snapshot length; value lands only if index inside it
   let #(fresh, st) = ta_same_type_create(st, kind, len)
@@ -2243,8 +2233,8 @@ fn compare_with(st: Agent, cmp: JsVal, x: JsVal, y: JsVal) -> #(Int, Agent) {
   case classify(cmp) {
     KUndef -> #(default_ta_compare(x, y), st)
     _ -> {
-      let #(res, st) = rt_call.t_call(st, cmp, mk_undefined(), [x, y])
-      let #(n, st) = rt_val.t_to_number(st, res)
+      let #(res, st) = rt_call.call(st, cmp, mk_undefined(), [x, y])
+      let #(n, st) = rt_val.to_number(st, res)
       let c = case n {
         JNan -> 0
         JInt(i) ->
@@ -2328,7 +2318,7 @@ fn sorted_snapshot(
   use <- bool.lazy_guard(
     classify(cmp) != KUndef && !rt_val.is_callable(st, cmp),
     fn() {
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "The comparison function must be either a function or undefined",
       )
@@ -2424,10 +2414,9 @@ fn proto_to_locale_string_loop(
         ..acc
       ])
     False -> {
-      let #(m, st) =
-        rt_obj.t_get_prop(st, el, StringKey(Named("toLocaleString")))
-      let #(res, st) = rt_call.t_call(st, m, el, [locales_v, options_v])
-      let #(s, st) = rt_val.t_to_string(st, res)
+      let #(m, st) = rt_obj.get_prop(st, el, StringKey(Named("toLocaleString")))
+      let #(res, st) = rt_call.call(st, m, el, [locales_v, options_v])
+      let #(s, st) = rt_val.to_string(st, res)
       proto_to_locale_string_loop(st, view, k + 1, locales_v, options_v, [
         s,
         ..acc
@@ -2444,12 +2433,11 @@ fn species_ctor_for(
 ) -> #(Option(JsVal), Agent) {
   let default_ctor = typed_array_pair(st, kind).constructor
   let #(ctor, st) =
-    rt_obj.t_get_prop(st, exemplar, StringKey(Named("constructor")))
+    rt_obj.get_prop(st, exemplar, StringKey(Named("constructor")))
   case classify(ctor) {
     KUndef -> #(None, st)
     KHandle(_) -> {
-      let #(species, st) =
-        rt_obj.t_get_prop(st, ctor, SymbolKey(symbol_species))
+      let #(species, st) = rt_obj.get_prop(st, ctor, SymbolKey(symbol_species))
       case classify(species) {
         KNull | KUndef -> #(None, st)
         KHandle(species_h) ->
@@ -2459,20 +2447,20 @@ fn species_ctor_for(
               case rt_call.is_constructor(st, species) {
                 True -> #(Some(species), st)
                 False ->
-                  rt_val.t_throw_type_error(
+                  rt_val.throw_type_error(
                     st,
                     "Species constructor is not a constructor",
                   )
               }
           }
         _ ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Species constructor is not a constructor",
           )
       }
     }
-    _ -> rt_val.t_throw_type_error(st, "Constructor property is not an object")
+    _ -> rt_val.throw_type_error(st, "Constructor property is not an object")
   }
 }
 
@@ -2487,7 +2475,7 @@ fn check_content_type(
       case same_content_type(result_kind, kind) {
         True -> #(obj, obj_h)
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "Content types of source and created typed arrays differ",
           )

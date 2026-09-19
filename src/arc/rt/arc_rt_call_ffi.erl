@@ -1,11 +1,11 @@
-%% protected calls and frames; t_direct_callee may answer miss
+%% protected calls and frames; direct_callee may answer miss
 -module(arc_rt_call_ffi).
 -export([try_call_code/4, try_run/2, try_call_native/4,
-         mk_frame/4, t_direct_callee/3, birth_props/2]).
+         mk_frame/4, direct_callee/3, birth_props/2]).
 
 -include("arc_rt_layout.hrl").
 
-t_direct_callee(St, {?HANDLE_TAG, Id}, This) ->
+direct_callee(St, {?HANDLE_TAG, Id}, This) ->
     Store = element(?AGENT_STORE, St),
     case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, Store)) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
@@ -28,7 +28,7 @@ t_direct_callee(St, {?HANDLE_TAG, Id}, This) ->
             end;
         _ -> miss
     end;
-t_direct_callee(_, _, _) -> miss.
+direct_callee(_, _, _) -> miss.
 
 %% runs body under the js guard, answering a Completion
 -define(PROTECT(Body),

@@ -80,7 +80,7 @@ pub fn dispatch(
 ) -> #(JsVal, Agent) {
   case native {
     DataViewConstructor(..) ->
-      rt_val.t_throw_type_error(st, "Constructor DataView requires 'new'")
+      rt_val.throw_type_error(st, "Constructor DataView requires 'new'")
     DataViewGetBuffer -> get_buffer(st, this)
     DataViewGetByteLength -> get_byte_length(st, this)
     DataViewGetByteOffset -> get_byte_offset(st, this)
@@ -97,7 +97,7 @@ pub fn dispatch_construct(
 ) -> #(Handle, Agent) {
   case native {
     DataViewConstructor(..) -> construct(st, args, new_target)
-    _ -> rt_val.t_throw_type_error(st, "not a constructor")
+    _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }
 
@@ -110,17 +110,17 @@ fn construct(
   use buf_h <- helpers.some_or(
     as_array_buffer(st, first_arg_or_undefined(args)),
     fn() {
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "First argument to DataView constructor must be an ArrayBuffer",
       )
     },
   )
   let #(offset, st) =
-    rt_val.t_to_index(st, arg_at(args, 1), "Invalid DataView offset")
+    rt_val.to_index(st, arg_at(args, 1), "Invalid DataView offset")
   let #(buf_len, resizable) = live_buffer_info(st, buf_h)
   use Nil <- helpers.guard(offset <= buf_len, fn() {
-    rt_val.t_throw_range_error(
+    rt_val.throw_range_error(
       st,
       "Start offset "
         <> int.to_string(offset)
@@ -136,9 +136,9 @@ fn construct(
       }
     _ -> {
       let #(view_len, st) =
-        rt_val.t_to_index(st, len_arg, "Invalid DataView length")
+        rt_val.to_index(st, len_arg, "Invalid DataView length")
       use Nil <- helpers.guard(offset + view_len <= buf_len, fn() {
-        rt_val.t_throw_range_error(st, "Invalid DataView length")
+        rt_val.throw_range_error(st, "Invalid DataView length")
       })
       #(Some(view_len), st)
     }
@@ -153,7 +153,7 @@ fn construct(
       Some(l) -> offset + l <= buf_len
       None -> offset <= buf_len
     },
-    fn() { rt_val.t_throw_range_error(st, "Invalid DataView length") },
+    fn() { rt_val.throw_range_error(st, "Invalid DataView length") },
   )
   realm_ops.alloc_object(
     st,
@@ -224,7 +224,7 @@ fn require_data_view(st: Agent, this: JsVal) -> ViewRecord {
   case helpers.brand_of(st, this, view_record_of) {
     Some(#(view, _h)) -> view
     None ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Method called on incompatible receiver: expected a DataView",
       )
@@ -242,7 +242,7 @@ fn view_record_of(kind: ObjKind) -> Option(ViewRecord) {
 fn require_mutable_buffer(st: Agent, buf: Handle) -> Nil {
   case buffer.is_immutable(st, buf) {
     True ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot modify a DataView backed by an immutable ArrayBuffer",
       )
@@ -257,11 +257,7 @@ fn view_and_index(
 ) -> #(ViewRecord, Int, Agent) {
   let view = require_data_view(st, this)
   let #(get_index, st) =
-    rt_val.t_to_index(
-      st,
-      first_arg_or_undefined(args),
-      "Invalid DataView offset",
-    )
+    rt_val.to_index(st, first_arg_or_undefined(args), "Invalid DataView offset")
   #(view, get_index, st)
 }
 
@@ -273,10 +269,7 @@ fn checked_view_bytes(
 ) -> #(BitArray, Int) {
   let size = view_size(st, view)
   use Nil <- helpers.guard(get_index + elem_size <= size, fn() {
-    rt_val.t_throw_range_error(
-      st,
-      "Offset is outside the bounds of the DataView",
-    )
+    rt_val.throw_range_error(st, "Offset is outside the bounds of the DataView")
   })
   let data = buffer_data(st, view.buffer)
   #(data, view.byte_offset + get_index)
@@ -296,7 +289,7 @@ fn as_array_buffer(st: Agent, val: JsVal) -> Option(Handle) {
 fn live_buffer_info(st: Agent, buf: Handle) -> #(Int, Bool) {
   case buffer.storage(st, buf) {
     Some(Detached(..)) ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot perform operation on a detached ArrayBuffer",
       )
@@ -304,8 +297,7 @@ fn live_buffer_info(st: Agent, buf: Handle) -> #(Int, Bool) {
       buffer.buffer_byte_size(storage),
       option.is_some(buffer.buffer_max_byte_length(storage)),
     )
-    None ->
-      rt_val.t_throw_type_error(st, "DataView buffer is not an ArrayBuffer")
+    None -> rt_val.throw_type_error(st, "DataView buffer is not an ArrayBuffer")
   }
 }
 
@@ -313,7 +305,7 @@ fn buffer_data(st: Agent, buf: Handle) -> BitArray {
   case buffer.bytes(st, buf) {
     Some(bits) -> bits
     None ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "Cannot perform operation on a detached ArrayBuffer",
       )
@@ -327,7 +319,7 @@ fn view_size(st: Agent, view: ViewRecord) -> Int {
       case view.byte_offset + len <= buf_len {
         True -> len
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "DataView is outside the bounds of its buffer",
           )
@@ -336,7 +328,7 @@ fn view_size(st: Agent, view: ViewRecord) -> Int {
       case view.byte_offset <= buf_len {
         True -> buf_len - view.byte_offset
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "DataView is outside the bounds of its buffer",
           )
@@ -414,11 +406,11 @@ fn encode_value(
 ) -> #(BitArray, Agent) {
   case element {
     ViewBig(e) -> {
-      let #(n, st) = rt_val.t_to_bigint(st, val)
+      let #(n, st) = rt_val.to_bigint(st, val)
       #(encode_bigint(e, n), st)
     }
     ViewNum(e) -> {
-      let #(num, st) = rt_val.t_to_number(st, val)
+      let #(num, st) = rt_val.to_number(st, val)
       #(encode_number(e, num), st)
     }
   }

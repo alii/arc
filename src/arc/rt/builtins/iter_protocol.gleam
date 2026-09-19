@@ -2,7 +2,7 @@ import arc/bytecode/error_kind.{TypeError}
 import arc/bytecode/key.{type PropertyKey, Index, Named}
 import arc/internal/ordered_entries
 import arc/rt/builtins/common
-import arc/rt/call.{NormalCompletion, ThrowCompletion, t_call, t_try_call} as rt_call
+import arc/rt/call.{NormalCompletion, ThrowCompletion, call, try_call} as rt_call
 import arc/rt/elements
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -37,22 +37,19 @@ pub fn get_iterator_direct(
 ) -> #(IteratorRecord, Agent) {
   case rt_val.is_object(obj) {
     True -> {
-      let #(next, st) = rt_obj.t_get_prop(st, obj, StringKey(Named("next")))
+      let #(next, st) = rt_obj.get_prop(st, obj, StringKey(Named("next")))
       #(IteratorRecord(iterator: obj, next_method: next), st)
     }
-    False -> rt_val.t_throw_type_error(st, non_object_msg)
+    False -> rt_val.throw_type_error(st, non_object_msg)
   }
 }
 
 // §7.4.3 sync
 pub fn get_iterator_sync(st: Agent, obj: JsVal) -> #(IteratorRecord, Agent) {
-  let #(method, st) = rt_obj.t_get_prop(st, obj, SymbolKey(symbol_iterator))
+  let #(method, st) = rt_obj.get_prop(st, obj, SymbolKey(symbol_iterator))
   case is_callable(st, method) {
     False ->
-      rt_val.t_throw_type_error(
-        st,
-        rt_val.type_of(st, obj) <> " is not iterable",
-      )
+      rt_val.throw_type_error(st, rt_val.type_of(st, obj) <> " is not iterable")
     True -> get_iterator_from_method(st, obj, method)
   }
 }
@@ -63,7 +60,7 @@ pub fn get_iterator_from_method(
   obj: JsVal,
   method: JsVal,
 ) -> #(IteratorRecord, Agent) {
-  let #(iter, st) = t_call(st, method, obj, [])
+  let #(iter, st) = call(st, method, obj, [])
   get_iterator_direct(
     st,
     iter,
@@ -73,15 +70,14 @@ pub fn get_iterator_from_method(
 
 // §7.4.3 async, falls back to wrapped sync iterator
 pub fn get_iterator_async(st: Agent, obj: JsVal) -> #(IteratorRecord, Agent) {
-  let #(method, st) =
-    rt_obj.t_get_prop(st, obj, SymbolKey(symbol_async_iterator))
+  let #(method, st) = rt_obj.get_prop(st, obj, SymbolKey(symbol_async_iterator))
   case classify(method) {
     KUndef | KNull -> {
       let #(sync_method, st) =
-        rt_obj.t_get_prop(st, obj, SymbolKey(symbol_iterator))
+        rt_obj.get_prop(st, obj, SymbolKey(symbol_iterator))
       case is_callable(st, sync_method) {
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             rt_val.type_of(st, obj) <> " is not async iterable",
           )
@@ -94,7 +90,7 @@ pub fn get_iterator_async(st: Agent, obj: JsVal) -> #(IteratorRecord, Agent) {
     _ ->
       case is_callable(st, method) {
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             rt_val.type_of(st, obj) <> " is not async iterable",
           )
@@ -112,9 +108,9 @@ pub fn create_async_from_sync(
   st: Agent,
   sync: IteratorRecord,
 ) -> #(IteratorRecord, Agent) {
-  let #(sync_rec, st) = rt_obj.t_new_object(st, None)
+  let #(sync_rec, st) = rt_obj.new_object(st, None)
   let #(_, st) =
-    rt_obj.t_define_own_data(
+    rt_obj.define_own_data(
       st,
       sync_rec,
       k_iterator,
@@ -124,7 +120,7 @@ pub fn create_async_from_sync(
       configurable: True,
     )
   let #(_, st) =
-    rt_obj.t_define_own_data(
+    rt_obj.define_own_data(
       st,
       sync_rec,
       k_next,
@@ -134,7 +130,7 @@ pub fn create_async_from_sync(
       configurable: True,
     )
   let #(wrapper_h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       plain_object(
         AsyncFromSyncIterator(sync_rec:),
@@ -143,19 +139,19 @@ pub fn create_async_from_sync(
       ),
     )
   let wrapper = mk_object(wrapper_h)
-  let #(next, st) = rt_obj.t_get_prop(st, wrapper, StringKey(Named("next")))
+  let #(next, st) = rt_obj.get_prop(st, wrapper, StringKey(Named("next")))
   #(IteratorRecord(iterator: wrapper, next_method: next), st)
 }
 
 pub fn sync_iterator_record(st: Agent, sync_rec: Handle) -> IteratorRecord {
   case
-    rt_obj.t_ordinary_own_property(st, sync_rec, k_iterator),
-    rt_obj.t_ordinary_own_property(st, sync_rec, k_next)
+    rt_obj.ordinary_own_property(st, sync_rec, k_iterator),
+    rt_obj.ordinary_own_property(st, sync_rec, k_next)
   {
     Some(DataProperty(value: iterator, ..)),
       Some(DataProperty(value: next_method, ..))
     -> IteratorRecord(iterator:, next_method:)
-    _, _ -> rt_val.t_throw_type_error(st, "not an Async-from-Sync Iterator")
+    _, _ -> rt_val.throw_type_error(st, "not an Async-from-Sync Iterator")
   }
 }
 
@@ -177,15 +173,15 @@ pub fn get_iterator_flattenable(
     _, _ -> False
   }
   case acceptable {
-    False -> rt_val.t_throw_type_error(st, what <> " is not an object")
+    False -> rt_val.throw_type_error(st, what <> " is not an object")
     True -> {
-      let #(method, st) = rt_obj.t_get_prop(st, obj, SymbolKey(symbol_iterator))
+      let #(method, st) = rt_obj.get_prop(st, obj, SymbolKey(symbol_iterator))
       let #(iter, st) = case classify(method) {
         KUndef | KNull -> #(obj, st)
         _ ->
           case is_callable(st, method) {
-            False -> rt_val.t_throw_type_error(st, what <> " is not iterable")
-            True -> t_call(st, method, obj, [])
+            False -> rt_val.throw_type_error(st, what <> " is not iterable")
+            True -> call(st, method, obj, [])
           }
       }
       get_iterator_direct(st, iter, what <> " is not iterable")
@@ -199,13 +195,13 @@ pub fn iterator_step_result(
   rec: IteratorRecord,
   cont: fn(JsVal, Bool, Agent) -> #(a, Agent),
 ) -> #(a, Agent) {
-  let #(result, st) = t_call(st, rec.next_method, rec.iterator, [])
+  let #(result, st) = call(st, rec.next_method, rec.iterator, [])
   case rt_val.is_object(result) {
     True -> {
-      let #(done, st) = rt_obj.t_get_prop(st, result, StringKey(Named("done")))
+      let #(done, st) = rt_obj.get_prop(st, result, StringKey(Named("done")))
       cont(result, rt_val.to_boolean(done), st)
     }
-    False -> rt_val.t_throw_type_error(st, "Iterator result is not an object")
+    False -> rt_val.throw_type_error(st, "Iterator result is not an object")
   }
 }
 
@@ -218,7 +214,7 @@ pub fn iterator_step_value(
   case done {
     True -> #(None, st)
     False -> {
-      let #(v, st) = rt_obj.t_get_prop(st, result, StringKey(Named("value")))
+      let #(v, st) = rt_obj.get_prop(st, result, StringKey(Named("value")))
       #(Some(v), st)
     }
   }
@@ -277,7 +273,7 @@ fn iterator_to_list_loop(
 fn array_values_iterator(st: Agent, rec: IteratorRecord) -> Option(Handle) {
   case classify(rec.next_method), classify(rec.iterator) {
     KHandle(next_h), KHandle(iter_h) ->
-      case rt_store.t_cell_get(st, next_h), rt_store.t_cell_get(st, iter_h) {
+      case rt_store.cell_get(st, next_h), rt_store.cell_get(st, iter_h) {
         SObject(
           kind: types.NativeFn(
             token: types.IteratorN(types.ArrayIteratorNext),
@@ -304,11 +300,11 @@ fn array_values_to_list(
   acc: List(JsVal),
 ) -> #(List(JsVal), Agent) {
   let assert SObject(kind: types.ArrayIterator(target:, index:, kind:), ..) as iter_cell =
-    rt_store.t_cell_get(st, iter_h)
+    rt_store.cell_get(st, iter_h)
   case index < 0 {
     True -> #(list.reverse(acc), st)
     False -> {
-      let #(acc, stop) = case rt_store.t_cell_get(st, target) {
+      let #(acc, stop) = case rt_store.cell_get(st, target) {
         SObject(kind: ArrayObj(length:), elements:, props:, ..) ->
           walk_elements(elements, props, index, length, acc)
         _ -> #(acc, index)
@@ -316,7 +312,7 @@ fn array_values_to_list(
       let st = case stop == index {
         True -> st
         False ->
-          rt_store.t_cell_set(
+          rt_store.cell_set(
             st,
             iter_h,
             SObject(
@@ -357,7 +353,7 @@ pub fn intrinsic_next(
 ) -> Option(#(types.IteratorNative, Handle)) {
   case classify(rec.next_method), classify(rec.iterator) {
     KHandle(next_h), KHandle(iter_h) ->
-      case rt_store.t_cell_get(st, next_h) {
+      case rt_store.cell_get(st, next_h) {
         SObject(kind: types.NativeFn(token: types.IteratorN(next), ..), ..) ->
           Some(#(next, iter_h))
         _ -> None
@@ -372,7 +368,7 @@ pub fn native_step(
   next: types.IteratorNative,
   iter_h: Handle,
 ) -> Option(#(Option(JsVal), Agent)) {
-  let cell = rt_store.t_cell_get(st, iter_h)
+  let cell = rt_store.cell_get(st, iter_h)
   case next, cell {
     types.ArrayIteratorNext, SObject(kind: types.ArrayIterator(..), ..) ->
       array_iterator_step(st, iter_h, cell)
@@ -395,11 +391,11 @@ fn array_iterator_step(
     SObject(kind: types.ArrayIterator(target:, index:, kind:), ..)
       if index >= 0
     ->
-      case rt_store.t_cell_get(st, target) {
+      case rt_store.cell_get(st, target) {
         SObject(kind: ArrayObj(length:), ..) if index >= length ->
           Some(#(
             None,
-            rt_store.t_cell_set(
+            rt_store.cell_set(
               st,
               iter_h,
               SObject(
@@ -419,13 +415,13 @@ fn array_iterator_step(
             types.ArrayIterEntries ->
               case elements.own_element(st, mk_object(target), index) {
                 elements.Hit(v) ->
-                  Some(rt_obj.t_new_array(st, [mk_int(index), v]))
+                  Some(rt_obj.new_array(st, [mk_int(index), v]))
                 elements.Miss -> None
               }
           }
           use #(v, st) <- option.map(out)
           let st =
-            rt_store.t_cell_set(
+            rt_store.cell_set(
               st,
               iter_h,
               SObject(
@@ -448,7 +444,7 @@ pub fn map_iterator_step(
 ) -> #(Option(JsVal), Agent) {
   case cell {
     SObject(kind: MapIterator(target:, index:, kind:), ..) if index >= 0 -> {
-      let step = case rt_store.t_cell_get(st, target) {
+      let step = case rt_store.cell_get(st, target) {
         SObject(kind: MapObj(entries:), ..) ->
           ordered_entries.next_from(entries, index)
         _ -> None
@@ -456,7 +452,7 @@ pub fn map_iterator_step(
       case step {
         None -> #(
           None,
-          rt_store.t_cell_set(
+          rt_store.cell_set(
             st,
             iter_h,
             SObject(..cell, kind: MapIterator(target:, index: -1, kind:)),
@@ -466,10 +462,10 @@ pub fn map_iterator_step(
           let #(out, st) = case kind {
             MapIterKeys -> #(map_key_to_js(mk), st)
             MapIterValues -> #(v, st)
-            MapIterEntries -> rt_obj.t_new_array(st, [map_key_to_js(mk), v])
+            MapIterEntries -> rt_obj.new_array(st, [map_key_to_js(mk), v])
           }
           let st =
-            rt_store.t_cell_set(
+            rt_store.cell_set(
               st,
               iter_h,
               SObject(
@@ -492,7 +488,7 @@ pub fn set_iterator_step(
 ) -> #(Option(JsVal), Agent) {
   case cell {
     SObject(kind: SetIterator(target:, index:, kind:), ..) if index >= 0 -> {
-      let step = case rt_store.t_cell_get(st, target) {
+      let step = case rt_store.cell_get(st, target) {
         SObject(kind: SetObj(entries:), ..) ->
           ordered_entries.next_from(entries, index)
         _ -> None
@@ -500,7 +496,7 @@ pub fn set_iterator_step(
       case step {
         None -> #(
           None,
-          rt_store.t_cell_set(
+          rt_store.cell_set(
             st,
             iter_h,
             SObject(..cell, kind: SetIterator(target:, index: -1, kind:)),
@@ -509,10 +505,10 @@ pub fn set_iterator_step(
         Some(#(next_cursor, _mk, v)) -> {
           let #(out, st) = case kind {
             SetIterValues -> #(v, st)
-            SetIterEntries -> rt_obj.t_new_array(st, [v, v])
+            SetIterEntries -> rt_obj.new_array(st, [v, v])
           }
           let st =
-            rt_store.t_cell_set(
+            rt_store.cell_set(
               st,
               iter_h,
               SObject(
@@ -538,7 +534,7 @@ pub fn string_iterator_step(
       case utf8.char_at_offset(source, index) {
         None -> #(
           None,
-          rt_store.t_cell_set(
+          rt_store.cell_set(
             st,
             h,
             SObject(..cell, kind: StringIterator(source:, index: -1)),
@@ -546,7 +542,7 @@ pub fn string_iterator_step(
         )
         Some(#(ch, next)) -> #(
           Some(mk_string(ch)),
-          rt_store.t_cell_set(
+          rt_store.cell_set(
             st,
             h,
             SObject(..cell, kind: StringIterator(source:, index: next)),
@@ -569,7 +565,7 @@ pub fn call_return(
 ) -> #(Result(ReturnCall, JsVal), Agent) {
   let #(get_c, st) =
     rt_call.try_run(st, fn(st) {
-      rt_obj.t_get_prop(st, obj, StringKey(Named("return")))
+      rt_obj.get_prop(st, obj, StringKey(Named("return")))
     })
   case get_c {
     ThrowCompletion(e) -> #(Error(e), st)
@@ -580,7 +576,7 @@ pub fn call_return(
           case is_callable(st, ret_fn) {
             False -> {
               let #(e, st) =
-                rt_val.t_new_error(
+                rt_val.new_error(
                   st,
                   TypeError,
                   "iterator.return is not a function",
@@ -588,7 +584,7 @@ pub fn call_return(
               #(Error(e), st)
             }
             True ->
-              case t_try_call(st, ret_fn, obj, []) {
+              case try_call(st, ret_fn, obj, []) {
                 #(NormalCompletion(v), st) -> #(Ok(Returned(v)), st)
                 #(ThrowCompletion(e), st) -> #(Error(e), st)
               }
@@ -609,11 +605,11 @@ pub fn close_and_throw(
 
 pub fn close_throw(st: Agent, obj: JsVal, original: JsVal) -> a {
   let #(thrown, st) = close_and_throw(st, obj, original)
-  rt_store.t_throw(st, thrown)
+  rt_store.throw(st, thrown)
 }
 
 pub fn close_throw_type(st: Agent, obj: JsVal, msg: String) -> a {
-  let #(err, st) = rt_val.t_new_error(st, TypeError, msg)
+  let #(err, st) = rt_val.new_error(st, TypeError, msg)
   close_throw(st, obj, err)
 }
 
@@ -625,12 +621,9 @@ pub fn iterator_close_normal(st: Agent, obj: JsVal) -> Agent {
       case rt_val.is_object(v) {
         True -> st
         False ->
-          rt_val.t_throw_type_error(
-            st,
-            "Iterator return result is not an object",
-          )
+          rt_val.throw_type_error(st, "Iterator return result is not an object")
       }
-    #(Error(thrown), st) -> rt_store.t_throw(st, thrown)
+    #(Error(thrown), st) -> rt_store.throw(st, thrown)
   }
 }
 
@@ -672,14 +665,14 @@ fn add_entries_with_sink_loop(
   case done {
     True -> #(target, st)
     False -> {
-      let #(entry, st) = rt_obj.t_get_prop(st, step, StringKey(Named("value")))
+      let #(entry, st) = rt_obj.get_prop(st, step, StringKey(Named("value")))
       case rt_val.is_object(entry) {
         True -> {
           use k, st <- or_close(st, rec.iterator, fn(st) {
-            rt_obj.t_get_prop(st, entry, StringKey(Index(0)))
+            rt_obj.get_prop(st, entry, StringKey(Index(0)))
           })
           use v, st <- or_close(st, rec.iterator, fn(st) {
-            rt_obj.t_get_prop(st, entry, StringKey(Index(1)))
+            rt_obj.get_prop(st, entry, StringKey(Index(1)))
           })
           use _, st <- or_close(st, rec.iterator, fn(st) {
             #(mk_undefined(), add_entry(st, k, v))
@@ -706,7 +699,7 @@ pub fn add_entries_from_iterable(
   adder: JsVal,
 ) -> #(JsVal, Agent) {
   use st, k, v <- add_entries_with_sink(st, target, iterable)
-  let #(_, st) = t_call(st, adder, target, [k, v])
+  let #(_, st) = call(st, adder, target, [k, v])
   st
 }
 
@@ -731,9 +724,9 @@ fn add_values_from_iterable_loop(
   case done {
     True -> #(target, st)
     False -> {
-      let #(v, st) = rt_obj.t_get_prop(st, step, StringKey(Named("value")))
+      let #(v, st) = rt_obj.get_prop(st, step, StringKey(Named("value")))
       use _add_result, st <- or_close(st, rec.iterator, fn(st) {
-        t_call(st, adder, target, [v])
+        call(st, adder, target, [v])
       })
       add_values_from_iterable_loop(st, target, rec, adder)
     }
@@ -757,10 +750,10 @@ pub fn iterator_rest(st: Agent, iter: JsVal) -> #(JsVal, Agent) {
 pub fn read_iter_result(st: Agent, res: JsVal) -> #(#(Bool, JsVal), Agent) {
   case rt_val.is_object(res) {
     True -> {
-      let #(done, st) = rt_obj.t_get_prop(st, res, StringKey(Named("done")))
-      let #(val, st) = rt_obj.t_get_prop(st, res, StringKey(Named("value")))
+      let #(done, st) = rt_obj.get_prop(st, res, StringKey(Named("done")))
+      let #(val, st) = rt_obj.get_prop(st, res, StringKey(Named("value")))
       #(#(rt_val.to_boolean(done), val), st)
     }
-    False -> rt_val.t_throw_type_error(st, "Iterator result is not an object")
+    False -> rt_val.throw_type_error(st, "Iterator result is not an object")
   }
 }

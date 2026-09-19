@@ -16,7 +16,7 @@ fn small_engine() -> Engine(Nil) {
   let eng = engine.new() |> engine.with_host_hooks(rt_helpers.quiet_hooks())
   let #(Nil, eng) =
     engine.with_context(eng, fn(ctx) {
-      let st = rt_gc.t_collect(ctx.agent, [])
+      let st = rt_gc.collect(ctx.agent, [])
       let st = Agent(..st, store: Store(..st.store, gc_threshold: threshold))
       #(Nil, Context(..ctx, agent: st))
     })
@@ -39,7 +39,7 @@ fn stats(eng: Engine(host)) -> rt_gc.GcStats {
 fn is_live_and_unpinned(eng: Engine(host), v: JsVal) -> Bool {
   let st: Agent = engine.agent(eng)
   let assert KHandle(h) = classify(v)
-  rt_gc.t_is_live(st, h) && !set.contains(st.store.pinned_roots, h.id)
+  rt_gc.is_live(st, h) && !set.contains(st.store.pinned_roots, h.id)
 }
 
 pub fn eval_is_bounded_drains_and_keeps_its_value_test() {

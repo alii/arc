@@ -28,7 +28,7 @@ fn recorder(ctx: host.Context(Nil)) -> #(JsVal, host.Context(Nil)) {
   host.function(ctx, "record", 1, fn(ctx, args, _) {
     let st = ctx.agent
     let #(_, st) =
-      rt_obj.t_set_prop(
+      rt_obj.set_prop(
         st,
         global(st, "globalThis").0,
         StringKey(Named("seen")),
@@ -52,12 +52,7 @@ fn suspended(rejecting rejecting: Bool) -> #(#(JsVal, host.Ticket), Agent) {
     True -> #(mk_undefined(), on_settle)
   }
   let #(_, st) =
-    rt_async.t_promise_then(
-      ctx.agent,
-      handle(promise),
-      on_fulfilled,
-      on_rejected,
-    )
+    rt_async.promise_then(ctx.agent, handle(promise), on_fulfilled, on_rejected)
   #(#(promise, ticket), Context(..ctx, agent: st))
 }
 
@@ -65,8 +60,8 @@ pub fn resume_settles_on_the_next_drain_test() {
   let #(#(promise, ticket), st) = suspended(rejecting: False)
   let assert PromisePending(_) = promise_state(st, promise)
   assert seen(st) == mk_string("nothing")
-  let st = rt_gc.t_collect(st, [])
-  assert rt_gc.t_is_live(st, handle(promise))
+  let st = rt_gc.collect(st, [])
+  assert rt_gc.is_live(st, handle(promise))
   let #(outcome, st) =
     host.with_context(st, brand(), fn(ctx) {
       let #(outcome, ctx) = host.resume(ctx, ticket, Ok(mk_int(42)))
@@ -130,15 +125,15 @@ fn bare_suspend() -> #(#(JsVal, host.Ticket), Agent) {
 
 pub fn resumed_promise_is_collectable_then_stale_test() {
   let #(#(promise, ticket), st) = bare_suspend()
-  let st = rt_gc.t_collect(st, [])
-  assert rt_gc.t_is_live(st, handle(promise))
+  let st = rt_gc.collect(st, [])
+  assert rt_gc.is_live(st, handle(promise))
   let #(outcome, st) =
     host.with_context(st, brand(), fn(ctx) {
       host.resume(ctx, ticket, Ok(mk_int(1)))
     })
   assert outcome == Resumed
-  let st = rt_gc.t_collect(st, [])
-  assert !rt_gc.t_is_live(st, handle(promise))
+  let st = rt_gc.collect(st, [])
+  assert !rt_gc.is_live(st, handle(promise))
   let #(outcome, _) =
     host.with_context(st, brand(), fn(ctx) {
       host.resume(ctx, ticket, Ok(mk_int(2)))
@@ -155,23 +150,23 @@ pub fn held_promise_survives_resume_inside_a_turn_end_test() {
           host.resume(ctx, ticket, Ok(mk_int(5)))
         })
       assert outcome == Resumed
-      rt_gc.t_collect(st, [])
+      rt_gc.collect(st, [])
     })
-  assert rt_gc.t_is_live(st, handle(promise))
+  assert rt_gc.is_live(st, handle(promise))
   assert promise_state(st, promise) == PromiseFulfilled(mk_int(5))
-  let st = rt_gc.t_collect(st, [])
-  assert !rt_gc.t_is_live(st, handle(promise))
+  let st = rt_gc.collect(st, [])
+  assert !rt_gc.is_live(st, handle(promise))
 }
 
 pub fn holding_the_promise_does_not_revive_a_spent_ticket_test() {
   let #(#(promise, ticket), st) = bare_suspend()
   let #(first, Context(agent: st, ..)) =
     host.resume(host.from_agent(st, brand()), ticket, Ok(mk_int(1)))
-  let #(ids, st) = rt_gc.t_hold_roots(st, [promise])
+  let #(ids, st) = rt_gc.hold_roots(st, [promise])
   let #(second, Context(agent: st, ..)) =
     host.resume(host.from_agent(st, brand()), ticket, Ok(mk_int(2)))
   assert #(first, second) == #(Resumed, AlreadySettled)
-  let st = rt_gc.t_release_roots(rt_async.drain(st), ids)
+  let st = rt_gc.release_roots(rt_async.drain(st), ids)
   assert promise_state(st, promise) == PromiseFulfilled(mk_int(1))
 }
 

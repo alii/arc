@@ -23,11 +23,11 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 
 // allocates the realm's error object without throwing it
-pub fn t_new_error(st: Agent, kind: ErrorKind, msg: String) -> #(JsVal, Agent) {
+pub fn new_error(st: Agent, kind: ErrorKind, msg: String) -> #(JsVal, Agent) {
   st.store.ops.new_error(st, kind, msg)
 }
 
-pub fn t_throw(st: Agent, error: JsError) -> a {
+pub fn throw(st: Agent, error: JsError) -> a {
   let JsError(kind:, message:) = error
   throw_kind(st, kind, message)
 }
@@ -35,37 +35,37 @@ pub fn t_throw(st: Agent, error: JsError) -> a {
 pub fn or_throw(st: Agent, r: Result(a, JsError)) -> a {
   case r {
     Ok(v) -> v
-    Error(e) -> t_throw(st, e)
+    Error(e) -> throw(st, e)
   }
 }
 
 fn throw_kind(st: Agent, kind: ErrorKind, msg: String) -> a {
   let #(err, st) = st.store.ops.new_error(st, kind, msg)
-  rt_store.t_throw(st, err)
+  rt_store.throw(st, err)
 }
 
-pub fn t_throw_type_error(st: Agent, msg: String) -> a {
+pub fn throw_type_error(st: Agent, msg: String) -> a {
   throw_kind(st, TypeError, msg)
 }
 
-pub fn t_throw_range_error(st: Agent, msg: String) -> a {
+pub fn throw_range_error(st: Agent, msg: String) -> a {
   throw_kind(st, RangeError, msg)
 }
 
-pub fn t_throw_reference_error(st: Agent, msg: String) -> a {
+pub fn throw_reference_error(st: Agent, msg: String) -> a {
   throw_kind(st, ReferenceError, msg)
 }
 
-pub fn t_throw_syntax_error(st: Agent, msg: String) -> a {
+pub fn throw_syntax_error(st: Agent, msg: String) -> a {
   throw_kind(st, SyntaxError, msg)
 }
 
 // §9.1.1.1.5/6 tdz read throws referenceerror
-pub fn t_tdz_check(st: Agent, v: JsVal, name: BitArray) -> Agent {
+pub fn tdz_check(st: Agent, v: JsVal, name: BitArray) -> Agent {
   case classify(v) {
     KTdz -> {
       let n = bit_array.to_string(name) |> result.unwrap("<name>")
-      t_throw_reference_error(
+      throw_reference_error(
         st,
         "Cannot access '" <> n <> "' before initialization",
       )
@@ -75,10 +75,10 @@ pub fn t_tdz_check(st: Agent, v: JsVal, name: BitArray) -> Agent {
 }
 
 // §9.1.1.3.4 this is tdz until super() returns
-pub fn t_check_this(st: Agent, v: JsVal) -> Agent {
+pub fn check_this(st: Agent, v: JsVal) -> Agent {
   case classify(v) {
     KTdz ->
-      t_throw_reference_error(
+      throw_reference_error(
         st,
         "Must call super constructor in derived class before accessing 'this' or returning from derived constructor",
       )
@@ -154,7 +154,7 @@ pub fn is_callable(st: Agent, v: JsVal) -> Bool {
 }
 
 fn handle_is_callable(st: Agent, h: Handle) -> Bool {
-  case rt_store.t_cell_get(st, h) {
+  case rt_store.cell_get(st, h) {
     SObject(kind: CompiledFn(..), ..)
     | SObject(kind: BytecodeFn(..), ..)
     | SObject(kind: NativeFn(..), ..)
@@ -184,20 +184,16 @@ pub fn type_of(st: Agent, v: JsVal) -> String {
 }
 
 // §7.2.1 requireobjectcoercible
-pub fn t_require_object_coercible(st: Agent, v: JsVal) -> #(JsVal, Agent) {
+pub fn require_object_coercible(st: Agent, v: JsVal) -> #(JsVal, Agent) {
   case classify(v) {
-    KNull -> t_throw_type_error(st, "Cannot convert null to object")
-    KUndef -> t_throw_type_error(st, "Cannot convert undefined to object")
+    KNull -> throw_type_error(st, "Cannot convert null to object")
+    KUndef -> throw_type_error(st, "Cannot convert undefined to object")
     _ -> #(v, st)
   }
 }
 
 // §7.1.1 toprimitive
-pub fn t_to_primitive(
-  st: Agent,
-  v: JsVal,
-  hint: ToPrimHint,
-) -> #(JsVal, Agent) {
+pub fn to_primitive(st: Agent, v: JsVal, hint: ToPrimHint) -> #(JsVal, Agent) {
   case classify(v) {
     KUndef | KNull | KBool(_) | KNum(_) | KStr(_) | KSym(_) | KBig(_) -> #(
       v,
@@ -208,7 +204,7 @@ pub fn t_to_primitive(
       let ops = st.store.ops
       let #(exotic, st) = get_symbol(st, v, symbol_to_primitive)
       case is_nullish(exotic) {
-        True -> t_ordinary_to_primitive(st, h, hint)
+        True -> ordinary_to_primitive(st, h, hint)
         False -> {
           case is_callable(st, exotic) {
             True -> {
@@ -223,13 +219,13 @@ pub fn t_to_primitive(
               case is_object(result) {
                 False -> #(result, st)
                 True ->
-                  t_throw_type_error(
+                  throw_type_error(
                     st,
                     "Cannot convert object to primitive value",
                   )
               }
             }
-            False -> t_throw_type_error(st, "@@toPrimitive is not callable")
+            False -> throw_type_error(st, "@@toPrimitive is not callable")
           }
         }
       }
@@ -245,8 +241,8 @@ pub fn is_miss(v: a) -> Bool
 @external(erlang, "arc_rt_obj_ffi", "get_symbol_data")
 pub fn get_symbol_data(st: Agent, recv: JsVal, sym: SymbolId) -> JsVal
 
-@external(erlang, "arc_rt_obj_ffi", "t_get_named")
-fn t_get_named(
+@external(erlang, "arc_rt_obj_ffi", "get_named")
+fn get_named_with_site(
   st: Agent,
   recv: JsVal,
   key: String,
@@ -254,7 +250,7 @@ fn t_get_named(
 ) -> #(JsVal, Agent)
 
 pub fn get_named(st: Agent, recv: JsVal, key: String) -> #(JsVal, Agent) {
-  t_get_named(st, recv, key, None)
+  get_named_with_site(st, recv, key, None)
 }
 
 pub fn get_symbol(st: Agent, recv: JsVal, sym: SymbolId) -> #(JsVal, Agent) {
@@ -266,7 +262,7 @@ pub fn get_symbol(st: Agent, recv: JsVal, sym: SymbolId) -> #(JsVal, Agent) {
 }
 
 // §7.1.1.1 ordinarytoprimitive
-pub fn t_ordinary_to_primitive(
+pub fn ordinary_to_primitive(
   st: Agent,
   h: Handle,
   hint: ToPrimHint,
@@ -285,7 +281,7 @@ fn call_primitive_methods(
 ) -> #(JsVal, Agent) {
   let receiver = mk_object(h)
   case method_names {
-    [] -> t_throw_type_error(st, "Cannot convert object to primitive value")
+    [] -> throw_type_error(st, "Cannot convert object to primitive value")
     [name, ..rest] -> {
       let ops = st.store.ops
       let #(method, st) = get_named(st, receiver, name)
@@ -453,11 +449,11 @@ pub fn prim_to_string(v: JsVal) -> Result(String, CoerceError) {
 }
 
 // §7.1.17 tostring
-@external(erlang, "arc_rt_val_ffi", "t_to_string")
-pub fn t_to_string(st: Agent, v: JsVal) -> #(String, Agent)
+@external(erlang, "arc_rt_val_ffi", "to_string")
+pub fn to_string(st: Agent, v: JsVal) -> #(String, Agent)
 
 // called by name from arc_rt_val_ffi
-pub fn t_to_string_general(st: Agent, v: JsVal) -> #(String, Agent) {
+pub fn to_string_general(st: Agent, v: JsVal) -> #(String, Agent) {
   case classify(v) {
     KStr(s) -> #(s, st)
     KNum(n) -> #(jsnum_to_string(n), st)
@@ -466,22 +462,21 @@ pub fn t_to_string_general(st: Agent, v: JsVal) -> #(String, Agent) {
     KNull -> #("null", st)
     KUndef -> #("undefined", st)
     KBig(n) -> #(int.to_string(n), st)
-    KSym(_) ->
-      t_throw_type_error(st, "Cannot convert a Symbol value to a string")
+    KSym(_) -> throw_type_error(st, "Cannot convert a Symbol value to a string")
     // toprimitive never returns an object so this recurs once
     KHandle(_) -> {
-      let #(prim, st) = t_to_primitive(st, v, HintString)
-      t_to_string(st, prim)
+      let #(prim, st) = to_primitive(st, v, HintString)
+      to_string(st, prim)
     }
     KTdz -> panic as "ToString on TDZ sentinel"
   }
 }
 
 // §7.1.19 topropertykey, symbol check runs after toprimitive
-pub fn t_to_property_key(st: Agent, v: JsVal) -> #(ObjectKey, Agent) {
+pub fn to_property_key(st: Agent, v: JsVal) -> #(ObjectKey, Agent) {
   case classify(v) {
     KHandle(_) -> {
-      let #(prim, st) = t_to_primitive(st, v, HintString)
+      let #(prim, st) = to_primitive(st, v, HintString)
       primitive_to_prop_key(st, prim)
     }
     _ -> primitive_to_prop_key(st, v)
@@ -489,18 +484,15 @@ pub fn t_to_property_key(st: Agent, v: JsVal) -> #(ObjectKey, Agent) {
 }
 
 // nullish base throws before the key's tostring runs
-pub fn t_to_property_key_of(
+pub fn to_property_key_of(
   st: Agent,
   base: JsVal,
   v: JsVal,
 ) -> #(ObjectKey, Agent) {
   case classify(base) {
     KNull | KUndef ->
-      t_throw_type_error(
-        st,
-        "Cannot read properties of " <> nullish_label(base),
-      )
-    _ -> t_to_property_key(st, v)
+      throw_type_error(st, "Cannot read properties of " <> nullish_label(base))
+    _ -> to_property_key(st, v)
   }
 }
 
@@ -519,7 +511,7 @@ fn primitive_to_prop_key(st: Agent, v: JsVal) -> #(ObjectKey, Agent) {
     KNum(JNegInf) -> #(StringKey(Named("-Infinity")), st)
     KStr(s) -> #(StringKey(key.canonical(s)), st)
     _ -> {
-      let #(s, st) = t_to_string(st, v)
+      let #(s, st) = to_string(st, v)
       #(StringKey(key.canonical(s)), st)
     }
   }
@@ -603,11 +595,11 @@ fn parse_bigint_radix_digits(digits: String, base: Int) -> Option(Int) {
 }
 
 // §7.1.4 tonumber
-@external(erlang, "arc_rt_val_ffi", "t_to_number")
-pub fn t_to_number(st: Agent, v: JsVal) -> #(JsNum, Agent)
+@external(erlang, "arc_rt_val_ffi", "to_number")
+pub fn to_number(st: Agent, v: JsVal) -> #(JsNum, Agent)
 
 // called by name from arc_rt_val_ffi
-pub fn t_to_number_general(st: Agent, v: JsVal) -> #(JsNum, Agent) {
+pub fn to_number_general(st: Agent, v: JsVal) -> #(JsNum, Agent) {
   case classify(v) {
     KNum(n) -> #(n, st)
     KStr(s) -> #(string_to_number(s), st)
@@ -615,18 +607,18 @@ pub fn t_to_number_general(st: Agent, v: JsVal) -> #(JsNum, Agent) {
     KBool(False) -> #(JInt(0), st)
     KNull -> #(JInt(0), st)
     KUndef -> #(JNan, st)
-    KBig(_) -> t_throw_type_error(st, "Cannot convert BigInt to number")
-    KSym(_) -> t_throw_type_error(st, "Cannot convert Symbol to number")
+    KBig(_) -> throw_type_error(st, "Cannot convert BigInt to number")
+    KSym(_) -> throw_type_error(st, "Cannot convert Symbol to number")
     KHandle(_) -> {
-      let #(prim, st) = t_to_primitive(st, v, HintNumber)
-      t_to_number(st, prim)
+      let #(prim, st) = to_primitive(st, v, HintNumber)
+      to_number(st, prim)
     }
     KTdz -> panic as "ToNumber on TDZ sentinel"
   }
 }
 
 // §7.1.3 tonumeric
-pub fn t_to_numeric(st: Agent, v: JsVal) -> #(JsVal, Agent) {
+pub fn to_numeric(st: Agent, v: JsVal) -> #(JsVal, Agent) {
   case classify(v) {
     KBig(_) -> #(v, st)
     KNum(_) -> #(v, st)
@@ -635,18 +627,18 @@ pub fn t_to_numeric(st: Agent, v: JsVal) -> #(JsVal, Agent) {
     KBool(False) -> #(mk_int(0), st)
     KNull -> #(mk_int(0), st)
     KUndef -> #(mk_number(JNan), st)
-    KSym(_) -> t_throw_type_error(st, "Cannot convert Symbol to number")
+    KSym(_) -> throw_type_error(st, "Cannot convert Symbol to number")
     KHandle(_) -> {
-      let #(prim, st) = t_to_primitive(st, v, HintNumber)
-      t_to_numeric(st, prim)
+      let #(prim, st) = to_primitive(st, v, HintNumber)
+      to_numeric(st, prim)
     }
     KTdz -> panic as "ToNumeric on TDZ sentinel"
   }
 }
 
 // §7.1.13 tobigint
-pub fn t_to_bigint(st: Agent, v: JsVal) -> #(Int, Agent) {
-  let #(prim, st) = t_to_primitive(st, v, HintNumber)
+pub fn to_bigint(st: Agent, v: JsVal) -> #(Int, Agent) {
+  let #(prim, st) = to_primitive(st, v, HintNumber)
   case classify(prim) {
     KBig(n) -> #(n, st)
     KBool(True) -> #(1, st)
@@ -655,77 +647,76 @@ pub fn t_to_bigint(st: Agent, v: JsVal) -> #(Int, Agent) {
       case string_to_bigint(s) {
         Some(n) -> #(n, st)
         // bad string is syntaxerror not typeerror
-        None ->
-          t_throw_syntax_error(st, "Cannot convert " <> s <> " to a BigInt")
+        None -> throw_syntax_error(st, "Cannot convert " <> s <> " to a BigInt")
       }
-    KNum(_) -> t_throw_type_error(st, "Cannot convert a Number to a BigInt")
-    KSym(_) -> t_throw_type_error(st, "Cannot convert a Symbol to a BigInt")
-    KNull -> t_throw_type_error(st, "Cannot convert null to a BigInt")
-    KUndef -> t_throw_type_error(st, "Cannot convert undefined to a BigInt")
+    KNum(_) -> throw_type_error(st, "Cannot convert a Number to a BigInt")
+    KSym(_) -> throw_type_error(st, "Cannot convert a Symbol to a BigInt")
+    KNull -> throw_type_error(st, "Cannot convert null to a BigInt")
+    KUndef -> throw_type_error(st, "Cannot convert undefined to a BigInt")
     KHandle(_) | KTdz -> panic as "ToBigInt: ToPrimitive returned non-primitive"
   }
 }
 
 // §7.1.18 toobject
-pub fn t_to_object(st: Agent, v: JsVal) -> #(Handle, Agent) {
+pub fn to_object(st: Agent, v: JsVal) -> #(Handle, Agent) {
   case classify(v) {
     KHandle(h) -> #(h, st)
-    KNull -> t_throw_type_error(st, "Cannot convert null to object")
-    KUndef -> t_throw_type_error(st, "Cannot convert undefined to object")
+    KNull -> throw_type_error(st, "Cannot convert null to object")
+    KUndef -> throw_type_error(st, "Cannot convert undefined to object")
     KTdz -> panic as "ToObject on the TDZ sentinel"
     _ -> st.store.ops.to_object(st, v)
   }
 }
 
 // §7.1.6 toint32
-pub fn t_to_int32(st: Agent, v: JsVal) -> #(Int, Agent) {
-  let #(n, st) = t_to_number(st, v)
+pub fn to_int32(st: Agent, v: JsVal) -> #(Int, Agent) {
+  let #(n, st) = to_number(st, v)
   #(num_to_int32(n), st)
 }
 
 // §7.1.7 touint32
-pub fn t_to_uint32(st: Agent, v: JsVal) -> #(Int, Agent) {
-  let #(n, st) = t_to_number(st, v)
+pub fn to_uint32(st: Agent, v: JsVal) -> #(Int, Agent) {
+  let #(n, st) = to_number(st, v)
   #(num_to_uint32(n), st)
 }
 
 // §7.1.5 tointegerorinfinity
-@external(erlang, "arc_rt_val_ffi", "t_to_integer_or_infinity")
-pub fn t_to_integer_or_infinity(st: Agent, v: JsVal) -> #(Int, Agent)
+@external(erlang, "arc_rt_val_ffi", "to_integer_or_infinity")
+pub fn to_integer_or_infinity(st: Agent, v: JsVal) -> #(Int, Agent)
 
 // called by name from arc_rt_val_ffi
-pub fn t_to_integer_or_infinity_general(st: Agent, v: JsVal) -> #(Int, Agent) {
-  let #(n, st) = t_to_number(st, v)
+pub fn to_integer_or_infinity_general(st: Agent, v: JsVal) -> #(Int, Agent) {
+  let #(n, st) = to_number(st, v)
   #(jsnum_to_integer_or_infinity(n), st)
 }
 
-@external(erlang, "arc_rt_val_ffi", "t_to_length")
-pub fn t_to_length(st: Agent, v: JsVal) -> #(Int, Agent)
+@external(erlang, "arc_rt_val_ffi", "to_length")
+pub fn to_length(st: Agent, v: JsVal) -> #(Int, Agent)
 
 // called by name from arc_rt_val_ffi
-pub fn t_to_length_general(st: Agent, v: JsVal) -> #(Int, Agent) {
-  let #(n, st) = t_to_number(st, v)
+pub fn to_length_general(st: Agent, v: JsVal) -> #(Int, Agent) {
+  let #(n, st) = to_number(st, v)
   #(jsnum_to_length(n), st)
 }
 
 // §7.1.22 toindex, rangeerror outside [0, 2^53-1]
-pub fn t_to_index(st: Agent, v: JsVal, err_msg: String) -> #(Int, Agent) {
+pub fn to_index(st: Agent, v: JsVal, err_msg: String) -> #(Int, Agent) {
   case classify(v) {
     KUndef -> #(0, st)
     _ -> {
-      let #(num, st) = t_to_number(st, v)
+      let #(num, st) = to_number(st, v)
       case num {
         JNan -> #(0, st)
-        JPosInf | JNegInf -> t_throw_range_error(st, err_msg)
+        JPosInf | JNegInf -> throw_range_error(st, err_msg)
         JInt(i) ->
           case i < 0 || i > max_safe_integer {
-            True -> t_throw_range_error(st, err_msg)
+            True -> throw_range_error(st, err_msg)
             False -> #(i, st)
           }
         JFloat(f) -> {
           let i = float_to_int(f)
           case i < 0 || i > max_safe_integer {
-            True -> t_throw_range_error(st, err_msg)
+            True -> throw_range_error(st, err_msg)
             False -> #(i, st)
           }
         }

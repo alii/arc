@@ -17,7 +17,7 @@ fn run(st: Agent, source: String) -> #(rt_call.Completion(JsVal), Agent) {
 
 pub fn parked_generator_eval_env_survives_collect_test() {
   let st = rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
-  let st = rt_gc.t_collect(st, [])
+  let st = rt_gc.collect(st, [])
   let #(first, st) =
     run(
       st,
@@ -33,11 +33,11 @@ pub fn parked_generator_eval_env_survives_collect_test() {
     )
   let assert NormalCompletion(v) = first
   assert rt_inspect.inspect(st, v) == "1"
-  let st = rt_gc.t_collect(st, [])
+  let st = rt_gc.collect(st, [])
   let st = safepoint.end_turn(st, [])
   let #(_, st) =
     run(st, "for (var k = 0; k < 3000; k++) { var o = { k: k, a: [k] }; } 0")
-  let st = rt_gc.t_collect(st, [])
+  let st = rt_gc.collect(st, [])
   let #(second, st) = run(st, "it.next().value")
   let assert NormalCompletion(v) = second
   assert rt_inspect.inspect(st, v) == "10"

@@ -129,7 +129,7 @@ pub fn init(
       "[Symbol.iterator]",
       0,
     )
-  let #(iter_prop, st) = rt_store.t_builtin_property(st, mk_object(iter_fn))
+  let #(iter_prop, st) = rt_store.builtin_property(st, mk_object(iter_fn))
   let st =
     common.add_symbol_property(
       st,
@@ -213,7 +213,7 @@ fn call_as_function(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
       case classify(v) {
         types.KSym(id) -> #(mk_string(types.symbol_descriptive_string(id)), st)
         _ -> {
-          let #(s, st) = rt_val.t_to_string(st, v)
+          let #(s, st) = rt_val.to_string(st, v)
           #(mk_string(s), st)
         }
       }
@@ -224,7 +224,7 @@ fn string_symbol_iterator(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let #(s, st) = with_this_text(st, this)
   let realm = st.realm
   let #(iter_h, st) =
-    rt_store.t_cell_new(
+    rt_store.cell_new(
       st,
       plain_object(
         StringIterator(source: s, index: 0),
@@ -242,7 +242,7 @@ fn string_char_at(
 ) -> #(JsVal, Agent) {
   let #(s, st) = with_this_str(st, this)
   let #(idx, st) =
-    rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
+    rt_val.to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
   case js_string.char_at(s, idx) {
     Some(ch) -> #(ch, st)
     None -> #(mk_string(""), st)
@@ -256,7 +256,7 @@ fn string_char_code_at(
 ) -> #(JsVal, Agent) {
   let #(s, st) = with_this_str(st, this)
   let #(idx, st) =
-    rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
+    rt_val.to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
   case js_string.codepoint_at(s, idx) {
     Some(cp) -> #(mk_int(cp), st)
     None -> #(mk_number(JNan), st)
@@ -269,9 +269,8 @@ fn string_index_of(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(s, st) = with_this_str(st, this)
-  let #(search, st) =
-    rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
-  let #(pos, st) = rt_val.t_to_integer_or_infinity(st, helpers.arg_at(args, 1))
+  let #(search, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
+  let #(pos, st) = rt_val.to_integer_or_infinity(st, helpers.arg_at(args, 1))
   let from = int.clamp(pos, 0, js_string.length(s))
   let result = js_string.index_of(s, mk_string(search), from)
   #(mk_int(option.unwrap(result, -1)), st)
@@ -284,9 +283,8 @@ fn string_last_index_of(
 ) -> #(JsVal, Agent) {
   let #(v, st) = with_this_str(st, this)
   let s = js_string.text(v)
-  let #(search, st) =
-    rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
-  let #(num, st) = rt_val.t_to_number(st, helpers.arg_at(args, 1))
+  let #(search, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
+  let #(num, st) = rt_val.to_number(st, helpers.arg_at(args, 1))
   let result = case num {
     JNan | types.JPosInf -> utf8.last_index_of_all(s, search)
     _ -> {
@@ -327,16 +325,16 @@ fn string_search_bool(
   let #(is_re, st) = b_regexp.is_regexp(st, search_val)
   case is_re {
     True ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "First argument to String.prototype."
           <> name
           <> " must not be a regular expression",
       )
     False -> {
-      let #(search, st) = rt_val.t_to_string(st, search_val)
+      let #(search, st) = rt_val.to_string(st, search_val)
       let #(pos, st) =
-        rt_val.t_to_integer_or_infinity(st, helpers.arg_at(args, 1))
+        rt_val.to_integer_or_infinity(st, helpers.arg_at(args, 1))
       let sub = case pos <= 0 {
         True -> s
         False -> {
@@ -361,12 +359,12 @@ fn string_ends_with(
   let #(is_re, st) = b_regexp.is_regexp(st, search_val)
   case is_re {
     True ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "First argument to String.prototype.endsWith must not be a regular expression",
       )
     False -> {
-      let #(search, st) = rt_val.t_to_string(st, search_val)
+      let #(search, st) = rt_val.to_string(st, search_val)
       let len = js_string.length(v)
       let #(end_pos, st) = second_arg_index_or_len(st, args, len, int.clamp)
       let sub = case end_pos == len {
@@ -389,7 +387,7 @@ fn second_arg_index_or_len(
       case classify(v) {
         KUndef -> #(len, st)
         _ -> {
-          let #(n, st) = rt_val.t_to_integer_or_infinity(st, v)
+          let #(n, st) = rt_val.to_integer_or_infinity(st, v)
           #(map(n, 0, len), st)
         }
       }
@@ -423,7 +421,7 @@ fn string_substring(
   let #(s, st) = with_this_str(st, this)
   let len = js_string.length(s)
   let #(raw_start, st) =
-    rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
+    rt_val.to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
   let #(raw_end, st) = second_arg_index_or_len(st, args, len, fn(n, _, _) { n })
   let start = int.clamp(raw_start, 0, len)
   let end = int.clamp(raw_end, 0, len)
@@ -447,7 +445,7 @@ fn string_concat_loop(
   case args {
     [] -> concat_within_limit(st, acc_rev)
     [arg, ..rest] -> {
-      let #(s, st) = rt_val.t_to_string(st, arg)
+      let #(s, st) = rt_val.to_string(st, arg)
       string_concat_loop(st, rest, [s, ..acc_rev])
     }
   }
@@ -455,23 +453,22 @@ fn string_concat_loop(
 
 fn string_repeat(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(s, st) = with_this_text(st, this)
-  let #(num, st) = rt_val.t_to_number(st, helpers.first_arg_or_undefined(args))
+  let #(num, st) = rt_val.to_number(st, helpers.first_arg_or_undefined(args))
   case num {
     types.JPosInf | types.JNegInf ->
-      rt_val.t_throw_range_error(st, "Invalid count value: Infinity")
+      rt_val.throw_range_error(st, "Invalid count value: Infinity")
     _ -> {
       let count = rt_val.jsnum_to_integer_or_infinity(num)
       case count < 0 {
         True ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "Invalid count value: " <> int.to_string(count),
           )
         False ->
           case limits.repeat(s, count) {
             Ok(r) -> #(mk_string(r), st)
-            Error(Nil) ->
-              rt_val.t_throw_range_error(st, "Invalid string length")
+            Error(Nil) -> rt_val.throw_range_error(st, "Invalid string length")
           }
       }
     }
@@ -487,26 +484,26 @@ fn string_pad(
 ) -> #(JsVal, Agent) {
   let #(s, st) = with_this_text(st, this)
   let #(max_len, st) =
-    rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
+    rt_val.to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
   let target_len = int.max(max_len, 0)
   let #(filler, st) = case args {
     [_, v, ..] ->
       case classify(v) {
         KUndef -> #(" ", st)
-        _ -> rt_val.t_to_string(st, v)
+        _ -> rt_val.to_string(st, v)
       }
     _ -> #(" ", st)
   }
   case pad_fn(s, target_len, filler) {
     Ok(r) -> #(mk_string(r), st)
-    Error(Nil) -> rt_val.t_throw_range_error(st, "Invalid string length")
+    Error(Nil) -> rt_val.throw_range_error(st, "Invalid string length")
   }
 }
 
 fn string_at(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(s, st) = with_this_str(st, this)
   let #(idx, st) =
-    rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
+    rt_val.to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
   let actual = case idx < 0 {
     True -> js_string.length(s) + idx
     False -> idx
@@ -524,7 +521,7 @@ fn string_code_point_at(
 ) -> #(JsVal, Agent) {
   let #(s, st) = with_this_str(st, this)
   let #(pos, st) =
-    rt_val.t_to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
+    rt_val.to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
   case js_string.codepoint_at(s, pos) {
     Some(cp) -> #(mk_int(cp), st)
     None -> #(mk_undefined(), st)
@@ -541,14 +538,14 @@ fn string_normalize(
     KUndef -> #(mk_string(ffi_nfc(s)), st)
     _ -> {
       let #(form, st) =
-        rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+        rt_val.to_string(st, helpers.first_arg_or_undefined(args))
       case form {
         "NFC" -> #(mk_string(ffi_nfc(s)), st)
         "NFD" -> #(mk_string(ffi_nfd(s)), st)
         "NFKC" -> #(mk_string(ffi_nfkc(s)), st)
         "NFKD" -> #(mk_string(ffi_nfkd(s)), st)
         _ ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "The normalization form should be one of NFC, NFD, NFKC, NFKD",
           )
@@ -585,7 +582,7 @@ fn string_locale_compare(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let #(s, st) = with_this_text(st, this)
-  let #(that, st) = rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+  let #(that, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   let n = case string.compare(ffi_nfc(s), ffi_nfc(that)) {
     order.Lt -> -1
     order.Eq -> 0
@@ -621,7 +618,7 @@ fn get_method(
         False -> {
           case rt_val.is_callable(st, func) {
             True -> #(Some(func), st)
-            False -> rt_val.t_throw_type_error(st, not_a_function(symbol))
+            False -> rt_val.throw_type_error(st, not_a_function(symbol))
           }
         }
       }
@@ -644,14 +641,14 @@ fn delegate_or_regexp(
 ) -> #(JsVal, Agent) {
   let #(method_opt, st) = get_method(st, val, symbol)
   case method_opt {
-    Some(method) -> rt_call.t_call(st, method, val, [this])
+    Some(method) -> rt_call.call(st, method, val, [this])
     None -> {
-      let #(s, st) = rt_val.t_to_string(st, this)
+      let #(s, st) = rt_val.to_string(st, this)
       let #(rx, st) = b_regexp.create(st, val, mk_undefined())
       let #(method_opt, st) = get_method(st, rx, symbol)
       case method_opt {
-        Some(method) -> rt_call.t_call(st, method, rx, [mk_string(s)])
-        None -> rt_val.t_throw_type_error(st, not_a_function(symbol))
+        Some(method) -> rt_call.call(st, method, rx, [mk_string(s)])
+        None -> rt_val.throw_type_error(st, not_a_function(symbol))
       }
     }
   }
@@ -687,10 +684,10 @@ fn string_replace(
   let replace_val = helpers.arg_at(args, 1)
   let #(method_opt, st) = get_method(st, search_val, types.symbol_replace)
   case method_opt {
-    Some(method) -> rt_call.t_call(st, method, search_val, [this, replace_val])
+    Some(method) -> rt_call.call(st, method, search_val, [this, replace_val])
     None -> {
-      let #(s, st) = rt_val.t_to_string(st, this)
-      let #(search_text, st) = rt_val.t_to_string(st, search_val)
+      let #(s, st) = rt_val.to_string(st, this)
+      let #(search_text, st) = rt_val.to_string(st, search_val)
       replace_string_search(st, s, search_text, replace_val, all: False)
     }
   }
@@ -708,10 +705,10 @@ fn string_replace_all(
   let st = require_global_when_regexp(st, search_val, is_re, "replaceAll")
   let #(method_opt, st) = get_method(st, search_val, types.symbol_replace)
   case method_opt {
-    Some(method) -> rt_call.t_call(st, method, search_val, [this, replace_val])
+    Some(method) -> rt_call.call(st, method, search_val, [this, replace_val])
     None -> {
-      let #(s, st) = rt_val.t_to_string(st, this)
-      let #(search_text, st) = rt_val.t_to_string(st, search_val)
+      let #(s, st) = rt_val.to_string(st, this)
+      let #(search_text, st) = rt_val.to_string(st, search_val)
       replace_string_search(st, s, search_text, replace_val, all: True)
     }
   }
@@ -728,15 +725,15 @@ fn string_match_all(
   let st = require_global_when_regexp(st, regexp_arg, is_re, "matchAll")
   let #(method_opt, st) = get_method(st, regexp_arg, types.symbol_match_all)
   case method_opt {
-    Some(method) -> rt_call.t_call(st, method, regexp_arg, [this])
+    Some(method) -> rt_call.call(st, method, regexp_arg, [this])
     None -> {
-      let #(s, st) = rt_val.t_to_string(st, this)
+      let #(s, st) = rt_val.to_string(st, this)
       let #(rx, st) = b_regexp.create(st, regexp_arg, mk_string("g"))
       let #(method_opt, st) = get_method(st, rx, types.symbol_match_all)
       case method_opt {
-        Some(method) -> rt_call.t_call(st, method, rx, [mk_string(s)])
+        Some(method) -> rt_call.call(st, method, rx, [mk_string(s)])
         None ->
-          rt_val.t_throw_type_error(st, not_a_function(types.symbol_match_all))
+          rt_val.throw_type_error(st, not_a_function(types.symbol_match_all))
       }
     }
   }
@@ -748,12 +745,12 @@ fn string_split(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let limit_val = helpers.arg_at(args, 1)
   let #(method_opt, st) = get_method(st, sep_val, types.symbol_split)
   case method_opt {
-    Some(method) -> rt_call.t_call(st, method, sep_val, [this, limit_val])
+    Some(method) -> rt_call.call(st, method, sep_val, [this, limit_val])
     None -> {
       let #(s, st) = with_this_text(st, this)
       let #(lim, st) = case classify(limit_val) {
         KUndef -> #(4_294_967_295, st)
-        _ -> rt_val.t_to_uint32(st, limit_val)
+        _ -> rt_val.to_uint32(st, limit_val)
       }
       string_split_parts(st, s, sep_val, lim)
     }
@@ -774,7 +771,7 @@ fn string_split_parts(
       }
     _ -> {
       // tostring(separator) runs before the lim=0 check
-      let #(sep, st) = rt_val.t_to_string(st, sep_val)
+      let #(sep, st) = rt_val.to_string(st, sep_val)
       case lim {
         0 -> ok_array(st, [])
         _ -> {
@@ -812,7 +809,7 @@ fn replace_string_search(
         all,
       )
     False -> {
-      let #(template, st) = rt_val.t_to_string(st, replace_val)
+      let #(template, st) = rt_val.to_string(st, replace_val)
       let segments = substitution.tokenize_plain(template)
       let literal = case segments {
         [] -> Some("")
@@ -847,7 +844,7 @@ fn replace_string_search(
 
 fn string_within_limit(st: Agent, s: String) -> #(JsVal, Agent) {
   case string.byte_size(s) > limits.max_string_bytes {
-    True -> rt_val.t_throw_range_error(st, "Invalid string length")
+    True -> rt_val.throw_range_error(st, "Invalid string length")
     False -> #(mk_string(s), st)
   }
 }
@@ -870,12 +867,12 @@ fn replace_loop_functional(
       let after = utf8.drop_start(tail, rel + search_len)
       let p = abs_pos + rel
       let #(result, st) =
-        rt_call.t_call(st, replace_fn, mk_undefined(), [
+        rt_call.call(st, replace_fn, mk_undefined(), [
           mk_string(search_text),
           mk_int(p),
           mk_string(s),
         ])
-      let #(replacement, st) = rt_val.t_to_string(st, result)
+      let #(replacement, st) = rt_val.to_string(st, result)
       let acc = [replacement, preserved, ..acc]
       case all, search_len {
         False, _ -> concat_within_limit(st, [after, ..acc])
@@ -992,7 +989,7 @@ fn string_raw(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
     [_, ..rest] -> rest
     [] -> []
   }
-  let #(raw_val, st) = rt_obj.t_get_prop(st, template, StringKey(Named("raw")))
+  let #(raw_val, st) = rt_obj.get_prop(st, template, StringKey(Named("raw")))
   let #(literal_count, st) = rt_abstract_ops.length_of_array_like(st, raw_val)
   case literal_count {
     0 -> #(mk_string(""), st)
@@ -1009,19 +1006,15 @@ fn string_raw_loop(
   acc_rev: List(String),
 ) -> #(JsVal, Agent) {
   let #(lit_val, st) =
-    rt_obj.t_get_prop(
-      st,
-      raw_val,
-      StringKey(key.canonical(int.to_string(index))),
-    )
-  let #(lit, st) = rt_val.t_to_string(st, lit_val)
+    rt_obj.get_prop(st, raw_val, StringKey(key.canonical(int.to_string(index))))
+  let #(lit, st) = rt_val.to_string(st, lit_val)
   let acc_rev = [lit, ..acc_rev]
   case index + 1 == literal_count {
     True -> concat_within_limit(st, acc_rev)
     False ->
       case subs {
         [sub_val, ..rest] -> {
-          let #(sub, st) = rt_val.t_to_string(st, sub_val)
+          let #(sub, st) = rt_val.to_string(st, sub_val)
           string_raw_loop(st, raw_val, rest, literal_count, index + 1, [
             sub,
             ..acc_rev
@@ -1046,7 +1039,7 @@ fn from_char_code_coerce(
   case args {
     [] -> #(acc, st)
     [arg, ..rest] -> {
-      let #(num, st) = rt_val.t_to_number(st, arg)
+      let #(num, st) = rt_val.to_number(st, arg)
       // §7.1.8 touint16
       let n = case num {
         JInt(i) -> i
@@ -1087,7 +1080,7 @@ fn string_from_code_point_loop(
   case args {
     [] -> #(mk_string(string.from_utf_codepoints(list.reverse(acc))), st)
     [arg, ..rest] -> {
-      let #(num, st) = rt_val.t_to_number(st, arg)
+      let #(num, st) = rt_val.to_number(st, arg)
       case num {
         JInt(i) if i >= 0 && i <= 0x10FFFF ->
           string_from_code_point_loop(st, rest, [
@@ -1102,18 +1095,18 @@ fn string_from_code_point_loop(
                 ..acc
               ])
             _ ->
-              rt_val.t_throw_range_error(
+              rt_val.throw_range_error(
                 st,
                 "Invalid code point " <> rt_val.js_format_float(f),
               )
           }
-        JNan -> rt_val.t_throw_range_error(st, "Invalid code point NaN")
+        JNan -> rt_val.throw_range_error(st, "Invalid code point NaN")
         JInt(i) ->
-          rt_val.t_throw_range_error(
+          rt_val.throw_range_error(
             st,
             "Invalid code point " <> int.to_string(i),
           )
-        _ -> rt_val.t_throw_range_error(st, "Invalid code point Infinity")
+        _ -> rt_val.throw_range_error(st, "Invalid code point Infinity")
       }
     }
   }
@@ -1134,7 +1127,7 @@ fn html_wrap_attr(
 ) -> #(JsVal, Agent) {
   let #(s, st) = with_this_text(st, this)
   let #(attr_val, st) =
-    rt_val.t_to_string(st, helpers.first_arg_or_undefined(args))
+    rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   let escaped = string.replace(attr_val, "\"", "&quot;")
   #(
     mk_string(
@@ -1164,13 +1157,13 @@ fn require_global_when_regexp(
   case is_re {
     False -> st
     True -> {
-      let #(flags, st) = rt_obj.t_get_prop(st, val, StringKey(Named("flags")))
-      let #(flags, st) = rt_val.t_require_object_coercible(st, flags)
-      let #(s, st) = rt_val.t_to_string(st, flags)
+      let #(flags, st) = rt_obj.get_prop(st, val, StringKey(Named("flags")))
+      let #(flags, st) = rt_val.require_object_coercible(st, flags)
+      let #(s, st) = rt_val.to_string(st, flags)
       case b_regexp.has_flag(s, "g") {
         True -> st
         False ->
-          rt_val.t_throw_type_error(
+          rt_val.throw_type_error(
             st,
             "String.prototype."
               <> method
@@ -1184,7 +1177,7 @@ fn require_global_when_regexp(
 fn require_object_coercible(st: Agent, this: JsVal, name: String) -> Agent {
   case classify(this) {
     KNull | KUndef ->
-      rt_val.t_throw_type_error(
+      rt_val.throw_type_error(
         st,
         "String.prototype." <> name <> " called on null or undefined",
       )
@@ -1212,10 +1205,9 @@ fn with_this_str(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 
 fn coerce_this_text(st: Agent, this: JsVal) -> #(String, Agent) {
   case classify(this) {
-    KNull -> rt_val.t_throw_type_error(st, "Cannot read properties of null")
-    KUndef ->
-      rt_val.t_throw_type_error(st, "Cannot read properties of undefined")
-    _ -> rt_val.t_to_string(st, this)
+    KNull -> rt_val.throw_type_error(st, "Cannot read properties of null")
+    KUndef -> rt_val.throw_type_error(st, "Cannot read properties of undefined")
+    _ -> rt_val.to_string(st, this)
   }
 }
 
@@ -1233,7 +1225,7 @@ fn this_string_value(st: Agent, this: JsVal, method: String) -> String {
   case classify(this) {
     KStr(s) -> s
     KHandle(h) ->
-      case rt_store.t_cell_get(st, h) {
+      case rt_store.cell_get(st, h) {
         SObject(kind: StringObj(value: s), ..) -> s
         _ -> not_a_string(st, method)
       }
@@ -1242,7 +1234,7 @@ fn this_string_value(st: Agent, this: JsVal, method: String) -> String {
 }
 
 fn not_a_string(st: Agent, method: String) -> a {
-  rt_val.t_throw_type_error(
+  rt_val.throw_type_error(
     st,
     "String.prototype." <> method <> " requires that 'this' be a String",
   )
@@ -1253,7 +1245,7 @@ fn concat_within_limit(st: Agent, parts_rev: List(String)) -> #(JsVal, Agent) {
   let total =
     list.fold(parts, 0, fn(sum, part) { sum + string.byte_size(part) })
   case total > limits.max_string_bytes {
-    True -> rt_val.t_throw_range_error(st, "Invalid string length")
+    True -> rt_val.throw_range_error(st, "Invalid string length")
     False -> #(mk_string(string.concat(parts)), st)
   }
 }

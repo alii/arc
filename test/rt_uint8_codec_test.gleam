@@ -20,27 +20,27 @@ fn global(st: Agent, name: String) -> JsVal {
 
 fn u8(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let ctor = global(st, "Uint8Array")
-  let #(h, st) = rt_call.t_construct(st, ctor, args, ctor)
+  let #(h, st) = rt_call.construct(st, ctor, args, ctor)
   #(mk_object(h), st)
 }
 
 fn u8_of(st: Agent, bytes: List(Int)) -> #(JsVal, Agent) {
-  let #(src, st) = rt_obj.t_new_array(st, ints(bytes))
+  let #(src, st) = rt_obj.new_array(st, ints(bytes))
   u8(st, [src])
 }
 
 fn get_(st: Agent, obj: JsVal, name: String) -> JsVal {
-  let #(v, _) = rt_obj.t_get_prop(st, obj, StringKey(key.canonical(name)))
+  let #(v, _) = rt_obj.get_prop(st, obj, StringKey(key.canonical(name)))
   v
 }
 
 fn set(st: Agent, obj: JsVal, name: String, v: JsVal) -> Agent {
-  let #(_, st) = rt_obj.t_set_prop(st, obj, StringKey(key.canonical(name)), v)
+  let #(_, st) = rt_obj.set_prop(st, obj, StringKey(key.canonical(name)), v)
   st
 }
 
 fn options(st: Agent, kvs: List(#(String, JsVal))) -> #(JsVal, Agent) {
-  let #(h, st) = rt_obj.t_new_object(st, Some(st.realm.object.prototype))
+  let #(h, st) = rt_obj.new_object(st, Some(st.realm.object.prototype))
   let o = mk_object(h)
   let st = list.fold(kvs, st, fn(st, kv) { set(st, o, kv.0, kv.1) })
   #(o, st)
@@ -53,7 +53,7 @@ fn attempt(
   args: List(JsVal),
 ) -> #(rt_call.Completion(JsVal), Agent) {
   let #(f, st) = rt_helpers.get(st, obj, name)
-  rt_call.t_try_call(st, f, obj, args)
+  rt_call.try_call(st, f, obj, args)
 }
 
 fn invoke(
@@ -170,12 +170,12 @@ pub fn set_from_hex_written_count_test() {
   assert classify(get_(st, res, "read")) == KNum(JInt(6))
   assert classify(get_(st, res, "written")) == KNum(JInt(3))
   assert joined(st, target) == "160,177,194"
-  let #(src, st) = rt_obj.t_new_array(st, ints([1]))
+  let #(src, st) = rt_obj.new_array(st, ints([1]))
   let i8_ctor = global(st, "Int8Array")
-  let #(i8_h, st) = rt_call.t_construct(st, i8_ctor, [src], i8_ctor)
+  let #(i8_h, st) = rt_call.construct(st, i8_ctor, [src], i8_ctor)
   let set_from_hex = get_(st, target, "setFromHex")
   let #(c, _) =
-    rt_call.t_try_call(st, set_from_hex, mk_object(i8_h), [mk_string("00")])
+    rt_call.try_call(st, set_from_hex, mk_object(i8_h), [mk_string("00")])
   let assert ThrowCompletion(_) = c
 }
 
