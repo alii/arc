@@ -1,4 +1,5 @@
 import arc/internal/tree_array
+import arc/rt/limits
 import arc/rt/types.{
   type Agent, type JsElements, type JsVal, Dense, NoElements, Sparse,
 }
@@ -7,19 +8,13 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option}
 
-// max hole run before dense promotes to sparse
-const max_gap = 1024
-
-// ffi :array backing tops out here
-const max_dense_index = 10_000_000
-
 pub type OwnElement {
   Hit(JsVal)
   Miss
 }
 
 // own read of a plain array or arguments object, miss defers to [[get]]
-@external(erlang, "arc_rt_array_ffi", "own_element")
+@external(erlang, "arc_rt_elements_ffi", "own_element")
 pub fn own_element(st: Agent, this: JsVal, idx: Int) -> OwnElement
 
 pub fn new() -> JsElements {
@@ -40,7 +35,7 @@ pub fn get(elements: JsElements, i: Int) -> JsVal {
 pub fn get_option(elements: JsElements, i: Int) -> Option(JsVal) {
   case elements {
     NoElements -> option.None
-    Dense(data) -> tree_array.get_option(i, data)
+    Dense(data) -> tree_array.get(i, data)
     Sparse(data) -> dict.get(data, i) |> option.from_result
   }
 }
@@ -54,7 +49,7 @@ pub fn set(elements: JsElements, i: Int, v: JsVal) -> JsElements {
     NoElements -> set(Dense(tree_array.new()), i, v)
     Dense(data) -> {
       let size = tree_array.size(data)
-      case i - size > max_gap || i >= max_dense_index {
+      case i - size > limits.max_gap || i >= limits.max_dense_index {
         True -> Sparse(dense_to_sparse(data) |> dict.insert(i, v))
         False -> Dense(tree_array.set(i, v, data))
       }
@@ -174,7 +169,8 @@ pub fn write_list(
     _, NoElements if i == 0 -> from_list(vals)
     [v, ..rest], Dense(data) ->
       case
-        tree_array.size(data) == i && i + list.length(vals) < max_dense_index
+        tree_array.size(data) == i
+        && i + list.length(vals) < limits.max_dense_index
       {
         True -> Dense(tree_array.append_list(data, vals))
         False -> write_list(set(elements, i, v), i + 1, rest)

@@ -12,13 +12,13 @@ import rt_helpers
 
 fn run(source: String) -> Result(JsValKind, String) {
   case parser.parse_script(source) {
-    Error(err) -> Error("parse: " <> parser.parse_error_to_string(err))
-    Ok(#(body, sb)) ->
-      case compiler.compile_script(body, sb) {
+    Error(err) -> Error("parse: " <> parser.error_to_string(err))
+    Ok(#(body, scopes)) ->
+      case compiler.compile_script(body, scopes) {
         Error(ce) -> Error("compile: " <> string.inspect(ce))
         Ok(template) -> {
           let st =
-            rt_builtins.new_agent(host_hooks.default_host_hooks())
+            rt_builtins.new_agent(host_hooks.default())
             |> entry.link
           case entry.run_script(st, template) {
             #(NormalCompletion(v), st) -> {
@@ -26,7 +26,7 @@ fn run(source: String) -> Result(JsValKind, String) {
               Ok(rt_helpers.classify(v))
             }
             #(ThrowCompletion(v), st) ->
-              Error("threw: " <> rt_inspect.inspect(st, v))
+              Error("threw: " <> rt_inspect.describe(st, v))
           }
         }
       }

@@ -1,9 +1,9 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError}
+import arc/internal/digits
 import arc/rt/builtins/temporal_iso.{
   type IsoDate, type IsoTime, NoOffset, NumericOffset, Zulu, epoch_ns_to_iso,
   format_offset_minutes, is_tz_annotation, ns_max_instant, ns_per_day,
-  ns_per_minute, ns_per_second, pad2, parse_iso_datetime_string,
-  parse_offset_part,
+  ns_per_minute, ns_per_second, parse_iso_datetime_string, parse_offset_part,
 }
 import arc/rt/store as rt_store
 import arc/rt/temporal_data.{
@@ -186,10 +186,13 @@ pub fn format_offset_full(offset_ns: Int) -> String {
   }
   let total_sec = int.absolute_value(offset_ns) / ns_per_second
   let base =
-    sign <> pad2(total_sec / 3600) <> ":" <> pad2({ total_sec / 60 } % 60)
+    sign
+    <> digits.pad2(total_sec / 3600)
+    <> ":"
+    <> digits.pad2({ total_sec / 60 } % 60)
   case total_sec % 60 {
     0 -> base
-    s -> base <> ":" <> pad2(s)
+    s -> base <> ":" <> digits.pad2(s)
   }
 }
 

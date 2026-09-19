@@ -10,15 +10,15 @@ import rt_helpers
 
 fn run_js(source: String) -> Result(Result(JsVal, String), String) {
   case parser.parse_script(source) {
-    Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
-    Ok(#(body, sb)) ->
-      case compiler.compile_script(body, sb) {
+    Error(err) -> Error("parse error: " <> parser.error_to_string(err))
+    Ok(#(body, scopes)) ->
+      case compiler.compile_script(body, scopes) {
         Error(e) -> Error("compile error: " <> string.inspect(e))
         Ok(template) -> {
           let st = rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
           case entry.run_script(st, template) {
             #(NormalCompletion(v), _st) -> Ok(Ok(v))
-            #(ThrowCompletion(e), st) -> Ok(Error(rt_inspect.inspect(st, e)))
+            #(ThrowCompletion(e), st) -> Ok(Error(rt_inspect.describe(st, e)))
           }
         }
       }

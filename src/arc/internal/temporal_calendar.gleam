@@ -1,7 +1,5 @@
-import arc/internal/gregorian.{
-  civil_from_days, days_from_civil, days_in_month as gregorian_days_in_month,
-  is_leap_year as is_gregorian_leap,
-}
+import arc/internal/digits
+import arc/internal/gregorian.{civil_from_days, days_from_civil}
 import arc/internal/int_math.{floor_div, floor_mod}
 import arc/internal/temporal_calendar_data.{
   chinese_data, dangi_data, umalqura_month_length, umalqura_year_start_fix,
@@ -277,7 +275,7 @@ fn persian_from_days(days: Int) -> CalendarDate {
 
 fn indian_year_start(year: Int) -> Int {
   let gregorian_year = year + 78
-  case is_gregorian_leap(gregorian_year) {
+  case gregorian.is_leap_year(gregorian_year) {
     True -> days_from_civil(gregorian_year, 3, 21)
     False -> days_from_civil(gregorian_year, 3, 22)
   }
@@ -286,7 +284,7 @@ fn indian_year_start(year: Int) -> Int {
 fn indian_days_in_month(year: Int, month: Int) -> Int {
   case month {
     1 ->
-      case is_gregorian_leap(year + 78) {
+      case gregorian.is_leap_year(year + 78) {
         True -> 31
         False -> 30
       }
@@ -312,7 +310,7 @@ fn indian_to_days(year: Int, month: Int, day: Int) -> Int {
 }
 
 fn indian_from_days(days: Int) -> CalendarDate {
-  let #(gregorian_year, _, _) = civil_from_days(days)
+  let gregorian_year = civil_from_days(days).year
   let y0 = gregorian_year - 78
   let y = case days < indian_year_start(y0) {
     True -> y0 - 1
@@ -586,7 +584,7 @@ fn lunisolar_to_days(
 }
 
 fn lunisolar_from_days(year_table: YearTable, days: Int) -> CalendarDate {
-  let #(y0, _, _) = civil_from_days(days)
+  let y0 = civil_from_days(days).year
   let y = adjust_year(days, y0, fn(yy) { lunisolar_year_start(year_table, yy) })
   let #(m, d) =
     scan_months(days, y, 1, lunisolar_months_in_year(year_table, y), fn(yy, mm) {
@@ -630,7 +628,7 @@ fn scan_months(
 pub fn date_from_epoch_days(cal: Calendar, days: Int) -> CalendarDate {
   case arithmetic(cal) {
     IsoArith(offset) -> {
-      let #(y, m, d) = civil_from_days(days)
+      let gregorian.CivilDate(y, m, d) = civil_from_days(days)
       CalendarDate(y + offset, m, d)
     }
     CopticArith(epoch:, year_shift:) ->
@@ -679,7 +677,7 @@ pub fn months_in_year(cal: Calendar, year: Int) -> Int {
 
 pub fn days_in_month(cal: Calendar, year: Int, month: Int) -> Int {
   case arithmetic(cal) {
-    IsoArith(offset) -> gregorian_days_in_month(year - offset, month)
+    IsoArith(offset) -> gregorian.days_in_month(year - offset, month)
     CopticArith(epoch: _, year_shift:) ->
       coptic_days_in_month(year_shift, year, month)
     TabularIslamicArith(_) -> islamic_days_in_month(year, month)
@@ -709,12 +707,12 @@ pub fn days_in_year(cal: Calendar, year: Int) -> Int {
 
 pub fn in_leap_year(cal: Calendar, year: Int) -> Bool {
   case arithmetic(cal) {
-    IsoArith(offset) -> is_gregorian_leap(year - offset)
+    IsoArith(offset) -> gregorian.is_leap_year(year - offset)
     CopticArith(epoch: _, year_shift:) -> coptic_is_leap(year_shift, year)
     TabularIslamicArith(_) -> islamic_is_leap(year)
     UmalquraArith -> days_in_year(cal, year) > 354
     PersianArith -> persian_is_leap(year)
-    IndianArith -> is_gregorian_leap(year + 78)
+    IndianArith -> gregorian.is_leap_year(year + 78)
     HebrewArith -> hebrew_is_leap(year)
     LunisolarArith(year_table) -> lunisolar_leap_month(year_table, year) != 0
   }
@@ -730,17 +728,10 @@ pub type MonthCode {
   MonthCode(number: Int, leap: Bool)
 }
 
-fn pad2(n: Int) -> String {
-  case n < 10 {
-    True -> "0" <> int.to_string(n)
-    False -> int.to_string(n)
-  }
-}
-
 fn month_code_string(mc: MonthCode) -> String {
   case mc.leap {
-    True -> "M" <> pad2(mc.number) <> "L"
-    False -> "M" <> pad2(mc.number)
+    True -> "M" <> digits.pad2(mc.number) <> "L"
+    False -> "M" <> digits.pad2(mc.number)
   }
 }
 
@@ -836,16 +827,16 @@ pub fn has_eras(cal: Calendar) -> Bool {
 }
 
 pub type EraCode {
-  Ce
-  Bce
-  Be
+  CommonEra
+  BeforeCommonEra
+  BuddhistEra
   Minguo
   BeforeMinguo
-  Am
-  Aa
-  Ah
-  Bh
-  Ap
+  AnnoMartyrum
+  AmeteAlem
+  AnnoHegirae
+  BeforeHijrah
+  AnnoPersico
   Shaka
   Reiwa
   Heisei
@@ -856,16 +847,16 @@ pub type EraCode {
 
 pub fn parse_era_code(s: String) -> Result(EraCode, Nil) {
   case s {
-    "ce" | "ad" -> Ok(Ce)
-    "bce" | "bc" -> Ok(Bce)
-    "be" -> Ok(Be)
+    "ce" | "ad" -> Ok(CommonEra)
+    "bce" | "bc" -> Ok(BeforeCommonEra)
+    "be" -> Ok(BuddhistEra)
     "roc" -> Ok(Minguo)
     "broc" -> Ok(BeforeMinguo)
-    "am" -> Ok(Am)
-    "aa" -> Ok(Aa)
-    "ah" -> Ok(Ah)
-    "bh" -> Ok(Bh)
-    "ap" -> Ok(Ap)
+    "am" -> Ok(AnnoMartyrum)
+    "aa" -> Ok(AmeteAlem)
+    "ah" -> Ok(AnnoHegirae)
+    "bh" -> Ok(BeforeHijrah)
+    "ap" -> Ok(AnnoPersico)
     "shaka" -> Ok(Shaka)
     "reiwa" -> Ok(Reiwa)
     "heisei" -> Ok(Heisei)
@@ -878,16 +869,16 @@ pub fn parse_era_code(s: String) -> Result(EraCode, Nil) {
 
 pub fn era_code_string(code: EraCode) -> String {
   case code {
-    Ce -> "ce"
-    Bce -> "bce"
-    Be -> "be"
+    CommonEra -> "ce"
+    BeforeCommonEra -> "bce"
+    BuddhistEra -> "be"
     Minguo -> "roc"
     BeforeMinguo -> "broc"
-    Am -> "am"
-    Aa -> "aa"
-    Ah -> "ah"
-    Bh -> "bh"
-    Ap -> "ap"
+    AnnoMartyrum -> "am"
+    AmeteAlem -> "aa"
+    AnnoHegirae -> "ah"
+    BeforeHijrah -> "bh"
+    AnnoPersico -> "ap"
     Shaka -> "shaka"
     Reiwa -> "reiwa"
     Heisei -> "heisei"
@@ -923,17 +914,17 @@ fn era_code_for(
 ) -> Option(EraCode) {
   case cal {
     Iso8601 | Chinese | Dangi -> None
-    Gregory -> Some(era_by_sign(year, Ce, Bce))
-    Buddhist -> Some(Be)
+    Gregory -> Some(era_by_sign(year, CommonEra, BeforeCommonEra))
+    Buddhist -> Some(BuddhistEra)
     Japanese -> Some(japanese_era_code(year, month, day))
     Roc -> Some(era_by_sign(year, Minguo, BeforeMinguo))
-    Coptic -> Some(Am)
-    Ethiopic -> Some(era_by_sign(year, Am, Aa))
-    Ethioaa -> Some(Aa)
-    Hebrew -> Some(Am)
+    Coptic -> Some(AnnoMartyrum)
+    Ethiopic -> Some(era_by_sign(year, AnnoMartyrum, AmeteAlem))
+    Ethioaa -> Some(AmeteAlem)
+    Hebrew -> Some(AnnoMartyrum)
     IslamicCivil | IslamicTbla | IslamicUmalqura ->
-      Some(era_by_sign(year, Ah, Bh))
-    Persian -> Some(Ap)
+      Some(era_by_sign(year, AnnoHegirae, BeforeHijrah))
+    Persian -> Some(AnnoPersico)
     Indian -> Some(Shaka)
   }
 }
@@ -958,7 +949,7 @@ fn japanese_era_code(year: Int, month: Int, day: Int) -> EraCode {
   }
   case list.find(japanese_eras, started) {
     Ok(era) -> era.code
-    Error(Nil) -> era_by_sign(year, Ce, Bce)
+    Error(Nil) -> era_by_sign(year, CommonEra, BeforeCommonEra)
   }
 }
 
@@ -970,21 +961,21 @@ type EraShift {
 fn eras_of(cal: Calendar) -> List(#(EraCode, EraShift)) {
   case cal {
     Iso8601 | Chinese | Dangi -> []
-    Gregory -> [#(Ce, Forward(0)), #(Bce, Backward(1))]
-    Buddhist -> [#(Be, Forward(0))]
+    Gregory -> [#(CommonEra, Forward(0)), #(BeforeCommonEra, Backward(1))]
+    Buddhist -> [#(BuddhistEra, Forward(0))]
     Japanese ->
       list.map(japanese_eras, fn(era) { #(era.code, Forward(era.year_offset)) })
       |> list.append(eras_of(Gregory))
     Roc -> [#(Minguo, Forward(0)), #(BeforeMinguo, Backward(1))]
-    Coptic -> [#(Am, Forward(0))]
-    Ethiopic -> [#(Am, Forward(0)), #(Aa, Forward(-5500))]
-    Ethioaa -> [#(Aa, Forward(0))]
-    Hebrew -> [#(Am, Forward(0))]
+    Coptic -> [#(AnnoMartyrum, Forward(0))]
+    Ethiopic -> [#(AnnoMartyrum, Forward(0)), #(AmeteAlem, Forward(-5500))]
+    Ethioaa -> [#(AmeteAlem, Forward(0))]
+    Hebrew -> [#(AnnoMartyrum, Forward(0))]
     IslamicCivil | IslamicTbla | IslamicUmalqura -> [
-      #(Ah, Forward(0)),
-      #(Bh, Backward(1)),
+      #(AnnoHegirae, Forward(0)),
+      #(BeforeHijrah, Backward(1)),
     ]
-    Persian -> [#(Ap, Forward(0))]
+    Persian -> [#(AnnoPersico, Forward(0))]
     Indian -> [#(Shaka, Forward(0))]
   }
 }

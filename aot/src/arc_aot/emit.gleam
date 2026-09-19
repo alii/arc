@@ -140,7 +140,7 @@ fn root_lexical_prologue(
         let sv = state.slot_base_name(e, slot)
         let e = state.set_slot_var(e, slot, sv)
         let init = case ref {
-          lexical.RefThis -> ir.CallHost("js", "global_this", [])
+          lexical.ThisRef -> ir.CallHost("js", "global_this", [])
           _ -> ir.Values([e.consts.undef])
         }
         let wrap = case state.lexical_is_boxed(e, info, ref) {
@@ -179,14 +179,14 @@ fn emit_hoist(
       let #(child_id, e) = state.pop_child_fn(e)
       use #(ctree, e) <- result.map(e.dispatch.emit_function(
         e,
-        state.FnDecl(is_gen: is_generator, is_async:),
+        state.FnDecl(is_generator:, is_async:),
         Some(name),
         params,
         state.StmtBody(body),
         child_id,
       ))
       let #(fn_var, e) = state.fresh_var(e)
-      let #(t, store, e) = case state.resolve(e, name) {
+      let #(t, write, e) = case state.resolve(e, name) {
         scope.Plain(scope.Local(slot:, boxed: True, ..)) -> {
           let #(t, e) = state.fresh_var(e)
           let box = ir.Var(state.get_slot_var(e, slot))
@@ -202,7 +202,7 @@ fn emit_hoist(
           #(t, ir.CallHost("js", "global_set", [kb, ir.Var(fn_var)]), e)
         }
       }
-      #(fn(tail) { ir.Let([fn_var], ctree, ir.Let([t], store, tail)) }, e)
+      #(fn(tail) { ir.Let([fn_var], ctree, ir.Let([t], write, tail)) }, e)
     }
     _ -> Ok(#(fn(tail) { tail }, e))
   }
@@ -297,19 +297,19 @@ pub fn compile_source(
   opts: CompileOpts,
 ) -> Result(ir.Module, state.EmitError) {
   let is_strict = opts.source_kind == AsModule
-  use #(body, sb) <- result.try(
+  use #(body, scopes) <- result.try(
     parser.parse_script(source)
     |> result.map_error(fn(e) {
-      state.EarlySyntaxError(parser.parse_error_to_string(e))
+      state.EarlySyntaxError(parser.error_to_string(e))
     }),
   )
   let tree =
     scope_analysis.finalize(
-      sb,
+      scopes,
       scope.AnalyzeOpts(
         ..scope.default_analyze_opts(),
         strict: is_strict,
-        top_lex: scope.LexLocal,
+        top_lex: scope.LocalLexical,
         // slot globals measured slower on richards, keep off
         module_slot_globals: False,
         box_try_writes: True,

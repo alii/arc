@@ -242,7 +242,7 @@ pub fn define_own_property_only_accepts_no_ops_test() {
     == "TypeError"
 }
 
-pub fn binding_cells_survive_collection_test() {
+pub fn binding_boxes_survive_collection_test() {
   let #(ns_h, ns, box_a, box_b, st) = fixture()
   let st = rt_lang.global_set(st, <<"ns">>, ns)
   let st = rt_gc.collect(st, [])

@@ -30,28 +30,28 @@ fn read(owner: SabOwner) -> BitArray
 @external(erlang, "arc_rt_sab_ffi", "write")
 fn write(owner: SabOwner, byte_offset: Int, chunk: BitArray) -> Nil
 
-pub fn buffer_is_shared(storage: BufferStorage) -> Bool {
+pub fn storage_is_shared(storage: BufferStorage) -> Bool {
   case storage {
     Shared(..) -> True
     Bytes(..) | Immutable(..) | Detached(..) -> False
   }
 }
 
-pub fn buffer_is_detached(storage: BufferStorage) -> Bool {
+pub fn storage_is_detached(storage: BufferStorage) -> Bool {
   case storage {
     Detached(..) -> True
     Bytes(..) | Immutable(..) | Shared(..) -> False
   }
 }
 
-pub fn buffer_is_immutable(storage: BufferStorage) -> Bool {
+pub fn storage_is_immutable(storage: BufferStorage) -> Bool {
   case storage {
     Immutable(..) -> True
     Bytes(..) | Shared(..) | Detached(..) -> False
   }
 }
 
-pub fn buffer_max_byte_length(storage: BufferStorage) -> Option(Int) {
+pub fn storage_max_byte_length(storage: BufferStorage) -> Option(Int) {
   case storage {
     Detached(max_byte_length:)
     | Bytes(max_byte_length:, ..)
@@ -60,7 +60,7 @@ pub fn buffer_max_byte_length(storage: BufferStorage) -> Option(Int) {
   }
 }
 
-pub fn buffer_byte_size(storage: BufferStorage) -> Int {
+pub fn storage_byte_size(storage: BufferStorage) -> Int {
   case storage {
     Detached(..) -> 0
     Bytes(bytes:, ..)
@@ -73,7 +73,7 @@ pub fn buffer_byte_size(storage: BufferStorage) -> Int {
   }
 }
 
-pub fn buffer_bits(storage: BufferStorage) -> Option(BitArray) {
+pub fn storage_bits(storage: BufferStorage) -> Option(BitArray) {
   case storage {
     Detached(..) -> None
     Bytes(bytes:, ..)
@@ -83,7 +83,7 @@ pub fn buffer_bits(storage: BufferStorage) -> Option(BitArray) {
   }
 }
 
-pub fn buffer_store_region(
+pub fn storage_store_region(
   storage: BufferStorage,
   new_bits: BitArray,
   byte_offset: Int,
@@ -97,13 +97,13 @@ pub fn buffer_store_region(
         byte_offset >= 0
         && count >= 0
         && byte_offset + count <= bit_array.byte_size(new_bits)
-        as "buffer_store_region: write range outside the new buffer image"
+        as "storage_store_region: write range outside the new buffer image"
       case block {
         LocalBlock(_) ->
           Shared(block: LocalBlock(bytes: new_bits), max_byte_length:)
         OwnerBlock(owner:, ..) -> {
           let assert Ok(chunk) = bit_array.slice(new_bits, byte_offset, count)
-            as "buffer_store_region: region checked above"
+            as "storage_store_region: region checked above"
           let Nil = write(owner, byte_offset, chunk)
           storage
         }
@@ -121,18 +121,18 @@ pub fn storage(st: Agent, buffer: Handle) -> Option(BufferStorage) {
 }
 
 pub fn bytes(st: Agent, buffer: Handle) -> Option(BitArray) {
-  storage(st, buffer) |> option.then(buffer_bits)
+  storage(st, buffer) |> option.then(storage_bits)
 }
 
 pub fn is_immutable(st: Agent, buffer: Handle) -> Bool {
   storage(st, buffer)
-  |> option.map(buffer_is_immutable)
+  |> option.map(storage_is_immutable)
   |> option.unwrap(False)
 }
 
 fn live_byte_size(st: Agent, buffer: Handle) -> Int {
   storage(st, buffer)
-  |> option.map(buffer_byte_size)
+  |> option.map(storage_byte_size)
   |> option.unwrap(0)
 }
 
@@ -155,7 +155,7 @@ pub fn store_region(
     as "buffer.store_region: handle does not hold an ArrayBuffer"
   SObject(
     ..cell,
-    kind: ArrayBufferObj(storage: buffer_store_region(
+    kind: ArrayBufferObj(storage: storage_store_region(
       storage,
       new_bits,
       byte_offset,
@@ -464,20 +464,20 @@ fn write_typed_element(
           // bounds taken here: coercion may have resized the buffer
           let bounds =
             view_bounds(
-              buffer_byte_size(storage),
+              storage_byte_size(storage),
               view.elem_kind,
               view.byte_offset,
               view.length,
             )
           let off = view_element_offset(bounds, i)
           use <- bool.guard(!valid_integer_index(bounds, i), #(True, st))
-          use <- bool.guard(buffer_is_immutable(storage), #(False, st))
-          case buffer_bits(storage) {
+          use <- bool.guard(storage_is_immutable(storage), #(False, st))
+          case storage_bits(storage) {
             None -> #(True, st)
             Some(data) -> {
               let new_bits = write(data, off)
               let new_storage =
-                buffer_store_region(storage, new_bits, off, size)
+                storage_store_region(storage, new_bits, off, size)
               let st =
                 rt_store.cell_set(
                   st,
@@ -571,7 +571,7 @@ fn typed_array_encode_primitives_loop(
           case rt_val.prim_to_number(v) {
             Ok(num) -> Some(encode_typed_number(zeroed(size), 0, k, num))
             Error(rt_val.BigIntToNumber)
-            | Error(rt_val.SymbolToNumber)
+            | Error(rt_val.SymbolNotCoercible)
             | Error(rt_val.NeedsToPrimitive) -> None
           }
       }

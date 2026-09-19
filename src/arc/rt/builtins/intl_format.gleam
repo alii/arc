@@ -61,7 +61,7 @@ pub type PartType {
   PartLiteral
 }
 
-pub fn part_type_to_js_string(t: PartType) -> String {
+pub fn part_type_text(t: PartType) -> String {
   case t {
     PartInteger -> "integer"
     PartGroup -> "group"
@@ -153,8 +153,9 @@ pub fn is_date_numeric(t: PartType) -> Bool {
   }
 }
 
-pub type Part =
-  #(PartType, String)
+pub type Part {
+  Part(type_: PartType, value: String)
+}
 
 pub type PartSource {
   SourceStart
@@ -162,7 +163,7 @@ pub type PartSource {
   SourceShared
 }
 
-pub fn part_source_to_js_string(s: PartSource) -> String {
+pub fn part_source_text(s: PartSource) -> String {
   case s {
     SourceStart -> "startRange"
     SourceEnd -> "endRange"
@@ -179,7 +180,7 @@ pub type UnitPart {
 }
 
 pub fn parts_to_string(parts: List(Part)) -> String {
-  parts |> list.map(fn(p) { p.1 }) |> string.join("")
+  parts |> list.map(fn(p) { p.value }) |> string.join("")
 }
 
 pub fn unit_parts_to_string(parts: List(UnitPart)) -> String {
@@ -192,9 +193,9 @@ pub fn format_range_combine(
   x_parts: List(Part),
   y_parts: List(Part),
 ) -> List(RangePart) {
-  let as_start = fn(p: Part) { RangePart(p.0, p.1, SourceStart) }
-  let as_end = fn(p: Part) { RangePart(p.0, p.1, SourceEnd) }
-  let shared = fn(p: Part) { RangePart(p.0, p.1, SourceShared) }
+  let as_start = fn(p: Part) { RangePart(p.type_, p.value, SourceStart) }
+  let as_end = fn(p: Part) { RangePart(p.type_, p.value, SourceEnd) }
+  let shared = fn(p: Part) { RangePart(p.type_, p.value, SourceShared) }
   let separator = fn(spaced) {
     RangePart(PartLiteral, range_sep(key, spaced), SourceShared)
   }
@@ -208,7 +209,7 @@ pub fn format_range_combine(
       let #(y_pre, y_core, y_suf) = split_range_affixes(y_parts)
       let affix_cp =
         list.fold(list.append(x_pre, x_suf), 0, fn(acc, p: Part) {
-          acc + string.length(p.1)
+          acc + string.length(p.value)
         })
       case x_pre == y_pre && x_suf == y_suf && affix_cp != 1 {
         True ->
@@ -236,7 +237,7 @@ fn split_range_affixes(
   parts: List(Part),
 ) -> #(List(Part), List(Part), List(Part)) {
   let is_core = fn(p: Part) {
-    case part_class(p.0) {
+    case part_class(p.type_) {
       NumberDigit | NumberExponentDigit | NumberCore -> True
       NumberAffix | DateNumeric | DateText | OtherPart -> False
     }
@@ -415,13 +416,13 @@ fn format_decimal_parts(
     NotationScientific | NotationEngineering -> {
       let exp_parts = case exponent < 0 {
         True -> [
-          #(PartExponentSeparator, "E"),
-          #(PartExponentMinusSign, "-"),
-          #(PartExponentInteger, int.to_string(-exponent)),
+          Part(PartExponentSeparator, "E"),
+          Part(PartExponentMinusSign, "-"),
+          Part(PartExponentInteger, int.to_string(-exponent)),
         ]
         False -> [
-          #(PartExponentSeparator, "E"),
-          #(PartExponentInteger, int.to_string(exponent)),
+          Part(PartExponentSeparator, "E"),
+          Part(PartExponentInteger, int.to_string(exponent)),
         ]
       }
       list.append(digit_parts, exp_parts)
@@ -497,14 +498,14 @@ fn en_compact(e: Int, display: CompactDisplay) -> CompactSuffix {
   use <- bool.guard(e < 3, no_compact_suffix)
   let k = int.min(4, e / 3)
   let suffix = case k, display {
-    1, CompactShort -> [#(PartCompact, "K")]
-    2, CompactShort -> [#(PartCompact, "M")]
-    3, CompactShort -> [#(PartCompact, "B")]
-    _, CompactShort -> [#(PartCompact, "T")]
-    1, CompactLong -> [#(PartLiteral, " "), #(PartCompact, "thousand")]
-    2, CompactLong -> [#(PartLiteral, " "), #(PartCompact, "million")]
-    3, CompactLong -> [#(PartLiteral, " "), #(PartCompact, "billion")]
-    _, CompactLong -> [#(PartLiteral, " "), #(PartCompact, "trillion")]
+    1, CompactShort -> [Part(PartCompact, "K")]
+    2, CompactShort -> [Part(PartCompact, "M")]
+    3, CompactShort -> [Part(PartCompact, "B")]
+    _, CompactShort -> [Part(PartCompact, "T")]
+    1, CompactLong -> [Part(PartLiteral, " "), Part(PartCompact, "thousand")]
+    2, CompactLong -> [Part(PartLiteral, " "), Part(PartCompact, "million")]
+    3, CompactLong -> [Part(PartLiteral, " "), Part(PartCompact, "billion")]
+    _, CompactLong -> [Part(PartLiteral, " "), Part(PartCompact, "trillion")]
   }
   same_suffix(3 * k, suffix)
 }
@@ -512,9 +513,9 @@ fn en_compact(e: Int, display: CompactDisplay) -> CompactSuffix {
 fn indian_compact(e: Int, display: CompactDisplay) -> CompactSuffix {
   let entry = fn(shift: Int, short: String, long: String) {
     case display {
-      CompactShort -> same_suffix(shift, [#(PartCompact, short)])
+      CompactShort -> same_suffix(shift, [Part(PartCompact, short)])
       CompactLong ->
-        same_suffix(shift, [#(PartLiteral, " "), #(PartCompact, long)])
+        same_suffix(shift, [Part(PartLiteral, " "), Part(PartCompact, long)])
     }
   }
   case e {
@@ -533,7 +534,7 @@ fn cjk_compact(
   thousand thousand: Option(String),
 ) -> CompactSuffix {
   let unit = fn(shift: Int, name: String) {
-    same_suffix(shift, [#(PartCompact, name)])
+    same_suffix(shift, [Part(PartCompact, name)])
   }
   case e {
     3 -> option.map(thousand, unit(3, _)) |> option.unwrap(no_compact_suffix)
@@ -545,8 +546,10 @@ fn cjk_compact(
 }
 
 fn de_compact(e: Int, display: CompactDisplay) -> CompactSuffix {
-  let short = fn(s: String) { [#(PartLiteral, "\u{00A0}"), #(PartCompact, s)] }
-  let long = fn(s: String) { [#(PartLiteral, " "), #(PartCompact, s)] }
+  let short = fn(s: String) {
+    [Part(PartLiteral, "\u{00A0}"), Part(PartCompact, s)]
+  }
+  let long = fn(s: String) { [Part(PartLiteral, " "), Part(PartCompact, s)] }
   case display {
     CompactShort ->
       case e {
@@ -571,7 +574,7 @@ fn de_compact(e: Int, display: CompactDisplay) -> CompactSuffix {
 pub fn format_nan_parts(opts: NumberFormatOptions) -> List(Part) {
   wrap_affixes(
     opts,
-    [#(PartNan, nan_text(opts.locale))],
+    [Part(PartNan, nan_text(opts.locale))],
     negative: False,
     is_nan: True,
   )
@@ -581,7 +584,7 @@ pub fn format_infinity_parts(
   opts: NumberFormatOptions,
   negative negative: Bool,
 ) -> List(Part) {
-  wrap_affixes(opts, [#(PartInfinity, "∞")], negative, is_nan: False)
+  wrap_affixes(opts, [Part(PartInfinity, "∞")], negative, is_nan: False)
 }
 
 fn wrap_affixes(
@@ -618,39 +621,44 @@ fn wrap_affixes(
     True -> []
     False ->
       case show_minus, show_plus {
-        True, _ -> [#(PartMinusSign, "-")]
-        _, True -> [#(PartPlusSign, "+")]
+        True, _ -> [Part(PartMinusSign, "-")]
+        _, True -> [Part(PartPlusSign, "+")]
         False, False -> []
       }
   }
   case opts.style {
-    StylePercent -> list.flatten([sign_parts, core, [#(PartPercentSign, "%")]])
+    StylePercent ->
+      list.flatten([sign_parts, core, [Part(PartPercentSign, "%")]])
     StyleCurrency(currency: code, display: cur_display, ..) -> {
       let #(text, spaced) = currency_text(key, code, cur_display)
       let with_cur = case cur_display {
         CurrencyName ->
-          list.append(core, [#(PartLiteral, " "), #(PartCurrency, text)])
+          list.append(core, [Part(PartLiteral, " "), Part(PartCurrency, text)])
         CurrencyCode | CurrencySymbol | CurrencyNarrowSymbol ->
           case currency_suffixed(key) {
             True ->
               list.append(core, [
-                #(PartLiteral, "\u{00A0}"),
-                #(PartCurrency, text),
+                Part(PartLiteral, "\u{00A0}"),
+                Part(PartCurrency, text),
               ])
             False ->
               case spaced {
                 True ->
                   list.flatten([
-                    [#(PartCurrency, text), #(PartLiteral, " ")],
+                    [Part(PartCurrency, text), Part(PartLiteral, " ")],
                     core,
                   ])
-                False -> [#(PartCurrency, text), ..core]
+                False -> [Part(PartCurrency, text), ..core]
               }
           }
       }
       case accounting {
         True ->
-          list.flatten([[#(PartLiteral, "(")], with_cur, [#(PartLiteral, ")")]])
+          list.flatten([
+            [Part(PartLiteral, "(")],
+            with_cur,
+            [Part(PartLiteral, ")")],
+          ])
         False -> list.append(sign_parts, with_cur)
       }
     }
@@ -674,54 +682,54 @@ fn unit_affixes(
     "kilometer-per-hour", "de" ->
       case display {
         UnitLong -> #([], [
-          #(PartLiteral, " "),
-          #(PartUnit, "Kilometer pro Stunde"),
+          Part(PartLiteral, " "),
+          Part(PartUnit, "Kilometer pro Stunde"),
         ])
         UnitShort | UnitNarrow -> #([], [
-          #(PartLiteral, " "),
-          #(PartUnit, "km/h"),
+          Part(PartLiteral, " "),
+          Part(PartUnit, "km/h"),
         ])
       }
     "kilometer-per-hour", "ja" ->
       case display {
-        UnitLong -> #([#(PartUnit, "時速"), #(PartLiteral, " ")], [
-          #(PartLiteral, " "),
-          #(PartUnit, "キロメートル"),
+        UnitLong -> #([Part(PartUnit, "時速"), Part(PartLiteral, " ")], [
+          Part(PartLiteral, " "),
+          Part(PartUnit, "キロメートル"),
         ])
-        UnitNarrow -> #([], [#(PartUnit, "km/h")])
-        UnitShort -> #([], [#(PartLiteral, " "), #(PartUnit, "km/h")])
+        UnitNarrow -> #([], [Part(PartUnit, "km/h")])
+        UnitShort -> #([], [Part(PartLiteral, " "), Part(PartUnit, "km/h")])
       }
     "kilometer-per-hour", "ko" ->
       case display {
-        UnitLong -> #([#(PartUnit, "시속"), #(PartLiteral, " ")], [
-          #(PartUnit, "킬로미터"),
+        UnitLong -> #([Part(PartUnit, "시속"), Part(PartLiteral, " ")], [
+          Part(PartUnit, "킬로미터"),
         ])
-        UnitShort | UnitNarrow -> #([], [#(PartUnit, "km/h")])
+        UnitShort | UnitNarrow -> #([], [Part(PartUnit, "km/h")])
       }
     "kilometer-per-hour", "zh" if hant ->
       case display {
-        UnitLong -> #([#(PartUnit, "每小時"), #(PartLiteral, " ")], [
-          #(PartLiteral, " "),
-          #(PartUnit, "公里"),
+        UnitLong -> #([Part(PartUnit, "每小時"), Part(PartLiteral, " ")], [
+          Part(PartLiteral, " "),
+          Part(PartUnit, "公里"),
         ])
-        UnitNarrow -> #([], [#(PartUnit, "公里/小時")])
-        UnitShort -> #([], [#(PartLiteral, " "), #(PartUnit, "公里/小時")])
+        UnitNarrow -> #([], [Part(PartUnit, "公里/小時")])
+        UnitShort -> #([], [Part(PartLiteral, " "), Part(PartUnit, "公里/小時")])
       }
     "percent", _ ->
       case display {
-        UnitLong -> #([], [#(PartLiteral, " "), #(PartUnit, "percent")])
-        UnitShort | UnitNarrow -> #([], [#(PartUnit, "%")])
+        UnitLong -> #([], [Part(PartLiteral, " "), Part(PartUnit, "percent")])
+        UnitShort | UnitNarrow -> #([], [Part(PartUnit, "%")])
       }
     _, _ ->
       case display {
         UnitLong -> #([], [
-          #(PartLiteral, " "),
-          #(PartUnit, unit_name_long(unit, one)),
+          Part(PartLiteral, " "),
+          Part(PartUnit, unit_name_long(unit, one)),
         ])
-        UnitNarrow -> #([], [#(PartUnit, unit_name(unit, narrow: True))])
+        UnitNarrow -> #([], [Part(PartUnit, unit_name(unit, narrow: True))])
         UnitShort -> #([], [
-          #(PartLiteral, " "),
-          #(PartUnit, unit_name(unit, narrow: False)),
+          Part(PartLiteral, " "),
+          Part(PartUnit, unit_name(unit, narrow: False)),
         ])
       }
   }
@@ -731,8 +739,8 @@ pub fn plural_operands(parts: List(Part)) -> #(String, String) {
   let digits_of = fn(want: PartType) {
     parts
     |> list.filter_map(fn(p: Part) {
-      case p.0 == want {
-        True -> Ok(p.1)
+      case p.type_ == want {
+        True -> Ok(p.value)
         False -> Error(Nil)
       }
     })
@@ -1120,7 +1128,7 @@ fn round_fraction(
   let dropped = dropped_digits(dec, keep)
   let #(n, remainder_nonzero) = case keep >= n_digits, keep <= 0 {
     True, _ -> #(
-      parse_int_or_zero(dec.digits) * pow10_int(keep - n_digits),
+      parse_int_or_zero(dec.digits) * int_math.pow10(keep - n_digits),
       False,
     )
     False, True -> #(0, dec.digits != "")
@@ -1184,13 +1192,6 @@ fn parse_int_or_zero(s: String) -> Int {
   int.parse(s) |> result.unwrap(0)
 }
 
-fn pow10_int(e: Int) -> Int {
-  case e <= 0 {
-    True -> 1
-    False -> 10 * pow10_int(e - 1)
-  }
-}
-
 fn split_integer_fraction(dec: Decimal, frac_len: Int) -> #(String, String) {
   let n = string.length(dec.digits)
   let exponent = dec.exponent
@@ -1246,8 +1247,8 @@ fn format_digits(
     "" -> int_parts
     _ ->
       list.append(int_parts, [
-        #(PartDecimal, decimal_sep(key)),
-        #(PartFraction, frac_text),
+        Part(PartDecimal, decimal_sep(key)),
+        Part(PartFraction, frac_text),
       ])
   }
 }
@@ -1333,7 +1334,7 @@ fn group_integer(opts: NumberFormatOptions, int_text: String) -> List(Part) {
     GroupingAuto -> n > 3
   }
   case grouped {
-    False -> [#(PartInteger, int_text)]
+    False -> [Part(PartInteger, int_text)]
     True -> {
       let groups = case indian_grouping(key) {
         True -> split_groups_indian(int_text)
@@ -1341,7 +1342,7 @@ fn group_integer(opts: NumberFormatOptions, int_text: String) -> List(Part) {
       }
       let sep = group_sep(key)
       groups
-      |> list.map(fn(g) { [#(PartGroup, sep), #(PartInteger, g)] })
+      |> list.map(fn(g) { [Part(PartGroup, sep), Part(PartInteger, g)] })
       |> list.flatten
       |> list.drop(1)
     }
@@ -1410,7 +1411,7 @@ pub type PluralCategory {
   PluralOther
 }
 
-pub fn plural_category_to_js_string(c: PluralCategory) -> String {
+pub fn plural_category_text(c: PluralCategory) -> String {
   case c {
     PluralZero -> "zero"
     PluralOne -> "one"
@@ -1461,10 +1462,10 @@ pub fn list_format_parts(
 ) -> List(Part) {
   case items {
     [] -> []
-    [only] -> [#(PartElement, only)]
+    [only] -> [Part(PartElement, only)]
     [a, b] -> {
       let sep = two_separator(type_, style)
-      [#(PartElement, a), #(PartLiteral, sep), #(PartElement, b)]
+      [Part(PartElement, a), Part(PartLiteral, sep), Part(PartElement, b)]
     }
     [first, ..rest] -> {
       let mid = case type_, style {
@@ -1473,7 +1474,7 @@ pub fn list_format_parts(
         Conjunction, _ | Disjunction, _ -> ", "
       }
       let last_sep = end_separator(type_, style)
-      build_list_parts(rest, [#(PartElement, first)], mid, last_sep)
+      build_list_parts(rest, [Part(PartElement, first)], mid, last_sep)
     }
   }
 }
@@ -1509,18 +1510,18 @@ fn build_list_parts(
   case remaining {
     [] -> list.reverse(acc)
     [last] ->
-      list.reverse([#(PartElement, last), #(PartLiteral, last_sep), ..acc])
+      list.reverse([Part(PartElement, last), Part(PartLiteral, last_sep), ..acc])
     [next, ..rest] ->
       build_list_parts(
         rest,
-        [#(PartElement, next), #(PartLiteral, mid), ..acc],
+        [Part(PartElement, next), Part(PartLiteral, mid), ..acc],
         mid,
         last_sep,
       )
   }
 }
 
-pub fn rtf_parts_en(
+pub fn relative_time_parts_en(
   style: RelativeTimeStyle,
   numeric: RelativeTimeNumeric,
   value: Float,
@@ -1531,26 +1532,26 @@ pub fn rtf_parts_en(
     NumericAuto -> True
     NumericAlways -> False
   }
-  let with_unit = fn(p: Part) { UnitPart(p.0, p.1, Some(unit)) }
+  let with_unit = fn(p: Part) { UnitPart(p.type_, p.value, Some(unit)) }
   let literal = fn(text) { UnitPart(PartLiteral, text, None) }
   // normalize -0.0 so the 0.0 patterns match
   let v = case rt_val.is_neg_zero(value) {
     True -> 0.0
     False -> value
   }
-  case is_auto, rtf_auto_name(unit, v) {
+  case is_auto, relative_time_auto_name(unit, v) {
     True, Some(name) -> [literal(name)]
     _, _ -> {
       let plural = case float.absolute_value(value) {
         1.0 -> PluralOne
         _ -> PluralOther
       }
-      let unit_text = rtf_unit_en(style, unit, plural)
+      let unit_text = relative_time_unit_en(style, unit, plural)
       let past = is_negative_float(value)
       let tagged =
         list.map(value_parts, fn(p: Part) {
-          case p.0 {
-            PartLiteral -> literal(p.1)
+          case p.type_ {
+            PartLiteral -> literal(p.value)
             _ -> with_unit(p)
           }
         })
@@ -1563,7 +1564,7 @@ pub fn rtf_parts_en(
   }
 }
 
-fn rtf_auto_name(unit: String, value: Float) -> Option(String) {
+fn relative_time_auto_name(unit: String, value: Float) -> Option(String) {
   case unit, value {
     "second", 0.0 -> Some("now")
     "day", -1.0 -> Some("yesterday")
@@ -1585,7 +1586,7 @@ fn rtf_auto_name(unit: String, value: Float) -> Option(String) {
   }
 }
 
-fn rtf_unit_en(
+fn relative_time_unit_en(
   style: RelativeTimeStyle,
   unit: String,
   plural: PluralCategory,
@@ -1640,7 +1641,7 @@ pub fn fields_from_epoch_ms(ms: Float, offset_minutes: Int) -> DateFields {
   let minute = { total_seconds / 60 } % 60
   let hour = total_seconds / 3600
   let week_day = gregorian.weekday_from_days(days)
-  let #(year, month, day) = civil_from_days(days)
+  let gregorian.CivilDate(year, month, day) = civil_from_days(days)
   DateFields(
     year:,
     month:,
@@ -1719,10 +1720,6 @@ pub fn day_period_name(hour: Int, minute: Int, width: NameWidth) -> String {
         _ -> "at night"
       }
   }
-}
-
-pub fn pad2(n: Int) -> String {
-  string.pad_start(int.to_string(n), 2, "0")
 }
 
 pub fn language_display_name(code: String) -> Option(String) {
@@ -1832,8 +1829,8 @@ pub fn apply_numbering_system(
     "latn" -> parts
     _ ->
       list.map(parts, fn(part: Part) {
-        case translits(part.0) {
-          True -> #(part.0, translit_digits(part.1, nu))
+        case translits(part.type_) {
+          True -> Part(part.type_, translit_digits(part.value, nu))
           False -> part
         }
       })

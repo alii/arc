@@ -29,7 +29,7 @@ fn read_line(prompt: String) -> ReadLine
 fn format_eval_error(err: engine.EvalError(host)) -> String {
   case err {
     engine.ParseError(parse_err) ->
-      "SyntaxError: " <> parser.parse_error_to_string(parse_err)
+      "SyntaxError: " <> parser.error_to_string(parse_err)
     engine.CompileError(compile_err) ->
       "compile error: " <> compiler.error_message(compile_err)
     engine.ModuleCompileError(_) | engine.ModuleError(..) ->

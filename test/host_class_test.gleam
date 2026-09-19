@@ -45,8 +45,11 @@ fn engine_with_service() {
       "Service",
       0,
       service_ctor,
-      [#("who", 0, service_who)],
-      [#("kind", 0, service_kind), #("named", 0, service_named)],
+      [host.HostMethod("who", 0, service_who)],
+      [
+        host.HostMethod("kind", 0, service_kind),
+        host.HostMethod("named", 0, service_named),
+      ],
     )
   engine.define_global(eng, "Service", service)
 }
@@ -175,7 +178,7 @@ pub fn host_module_class_extends_test() {
       "Service",
       0,
       service_ctor,
-      [#("who", 0, service_who)],
+      [host.HostMethod("who", 0, service_who)],
       [],
     )
   let eng = engine.register_host_module(eng, "dance", [#("Service", service)])

@@ -383,7 +383,7 @@ pub fn has_spread_element(elements: List(Option(ast.Expression))) -> Bool {
 pub type ClassMethodElement {
   ClassMethodElement(
     body_index: Int,
-    key: ast.PropertyKey,
+    key: ast.PropertyName,
     kind: ast.MethodKind,
     fun: ast.FunctionLiteral,
   )
@@ -392,7 +392,7 @@ pub type ClassMethodElement {
 pub type ClassFieldElement {
   ClassFieldElement(
     body_index: Int,
-    key: ast.PropertyKey,
+    key: ast.PropertyName,
     value: Option(ast.Expression),
   )
 }
@@ -500,8 +500,8 @@ pub const class_fields_init = "<class_fields_init>"
 pub fn class_private_names(body: List(ast.ClassElement)) -> List(String) {
   list.fold(body, [], fn(acc, elem) {
     let name = case elem {
-      ast.ClassMethod(key: ast.KeyPrivate(name:, ..), ..)
-      | ast.ClassField(key: ast.KeyPrivate(name:, ..), ..) -> Some(name)
+      ast.ClassMethod(key: ast.PrivateName(name:, ..), ..)
+      | ast.ClassField(key: ast.PrivateName(name:, ..), ..) -> Some(name)
       _ -> None
     }
     case name {
@@ -537,8 +537,8 @@ pub fn computed_element_keys(
   |> list.filter_map(fn(pair) {
     let #(idx, elem) = pair
     case elem {
-      ast.ClassField(key: ast.KeyComputed(expression:), ..)
-      | ast.ClassMethod(key: ast.KeyComputed(expression:), ..) ->
+      ast.ClassField(key: ast.ComputedName(expression:), ..)
+      | ast.ClassMethod(key: ast.ComputedName(expression:), ..) ->
         Ok(#(idx, expression))
       _ -> Error(Nil)
     }
@@ -558,7 +558,7 @@ pub fn class_body_bindings(
     list.filter_map(body, fn(elem) {
       case elem {
         ast.ClassMethod(
-          key: ast.KeyPrivate(name:, ..),
+          key: ast.PrivateName(name:, ..),
           kind:,
           is_static: False,
           ..,

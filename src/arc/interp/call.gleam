@@ -83,10 +83,10 @@ fn setup_frame(
       case kernel.is(this_arg, kernel.Undefined) {
         True -> #(kernel.object_val([agent.realm.global_object]), agent)
         False -> {
-          let bound = kernel.sloppy_this(this_arg, agent.realm.global_object)
-          case kernel.is(bound, kernel.Miss) {
-            False -> #(bound, agent)
-            True -> rt_call.bind_this(agent, flags, this_arg)
+          let coerced = kernel.sloppy_this(this_arg, agent.realm.global_object)
+          case kernel.is(coerced, kernel.Miss) {
+            False -> #(coerced, agent)
+            True -> rt_call.callee_this(agent, flags, this_arg)
           }
         }
       }
@@ -177,7 +177,7 @@ pub fn call_function_then(
   constructor_this: Option(JsVal),
   new_target: JsVal,
   drive: Drive,
-  cont: Option(fn(State, JsVal) -> Result(State, StepExit)),
+  cont: Option(fn(JsVal, State) -> Result(State, StepExit)),
 ) -> Result(State, StepExit) {
   case
     template.is_class_constructor && kernel.is(new_target, kernel.Undefined)
@@ -508,7 +508,7 @@ fn require_callable(
 fn not_a_function(state: State, callee: JsVal) -> Result(State, StepExit) {
   state.throw_type_error(
     state,
-    rt_inspect.inspect(state.agent, callee) <> " is not a function",
+    rt_inspect.describe(state.agent, callee) <> " is not a function",
   )
 }
 
@@ -580,7 +580,7 @@ pub fn construct(
     _, _ ->
       state.throw_type_error(
         State(..state, stack: rest_stack),
-        rt_inspect.inspect(state.agent, ctor) <> " is not a constructor",
+        rt_inspect.describe(state.agent, ctor) <> " is not a constructor",
       )
   }
 }
@@ -707,7 +707,7 @@ fn read_lexical_local(state: State, ref: lexical.LexicalRef) -> JsVal {
 }
 
 fn read_this_local(state: State) -> JsVal {
-  read_lexical_local(state, lexical.RefThis)
+  read_lexical_local(state, lexical.ThisRef)
 }
 
 // §10.2.2 steps 10-12 constructor return override
@@ -787,7 +787,7 @@ pub fn cont_return(
   let assert SavedCont(cont:, ..) = saved
   let caller = restore_frame(leave_frame(agent, depth), saved, saved.stack)
   // cont re-runs the op itself and saved.pc points after it
-  cont(State(..caller, pc: saved.pc - 1), value)
+  cont(value, State(..caller, pc: saved.pc - 1))
 }
 
 pub fn restore_frame(
@@ -830,7 +830,7 @@ pub fn arguments_object(
   state: State,
   simple_params simple_params: Bool,
 ) -> #(JsVal, Agent) {
-  let callee = read_lexical_local(state, lexical.RefActiveFunc)
+  let callee = read_lexical_local(state, lexical.ActiveFuncRef)
   case state.func.is_strict || !simple_params {
     True ->
       rt_obj.new_arguments(state.agent, state.call_args, mk_undefined(), callee)

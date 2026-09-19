@@ -2,14 +2,12 @@
 -module(arc_regex_vclass).
 -export([parse/2]).
 
--define(CS, arc_regex_charset).
-
 parse(Bin, CI) -> vclass(Bin, CI).
 
 vclass(<<$^, Rest/binary>>, CI) ->
     case vexpr(Rest, CI) of
         {ok, Ranges, [], Rest2} ->
-            {ok, ?CS:character_complement(Ranges, CI), [], Rest2};
+            {ok, arc_regex_charset:character_complement(Ranges, CI), [], Rest2};
         {ok, _Ranges, [_ | _], _Rest2} -> error;
         error -> error
     end;
@@ -51,10 +49,10 @@ vchain(L, Op, R, S, CI) ->
 
 vapply(inter, R, S, R2, S2) ->
     S2u = lists:usort(S2),
-    {?CS:vinter(R, R2), [X || X <- lists:usort(S), lists:member(X, S2u)]};
+    {arc_regex_charset:vinter(R, R2), [X || X <- lists:usort(S), lists:member(X, S2u)]};
 vapply(subtract, R, S, R2, S2) ->
     S2u = lists:usort(S2),
-    {?CS:vsubtract(R, R2), [X || X <- lists:usort(S), not lists:member(X, S2u)]}.
+    {arc_regex_charset:vsubtract(R, R2), [X || X <- lists:usort(S), not lists:member(X, S2u)]}.
 
 vrange_or_item(L, CI) ->
     case vitem(L, CI) of
@@ -63,7 +61,8 @@ vrange_or_item(L, CI) ->
             error;
         {char, Lo, <<$-, R2/binary>>} ->
             case vitem(R2, CI) of
-                {char, Hi, R3} when Lo =< Hi -> {ok, ?CS:vfold([{Lo, Hi}], CI), [], R3};
+                {char, Hi, R3} when Lo =< Hi ->
+                    {ok, arc_regex_charset:vfold([{Lo, Hi}], CI), [], R3};
                 {char, _Hi, _R3} -> error;
                 {set, _R, _S, _Rest} -> error;
                 error -> error
@@ -73,7 +72,7 @@ vrange_or_item(L, CI) ->
         error -> error
     end.
 
-vsingle({char, CP, Rest}, CI) -> {ok, ?CS:vfold([{CP, CP}], CI), [], Rest}.
+vsingle({char, CP, Rest}, CI) -> {ok, arc_regex_charset:vfold([{CP, CP}], CI), [], Rest}.
 
 vitem(<<$[, Rest/binary>>, CI) ->
     case vclass(Rest, CI) of
@@ -93,12 +92,18 @@ vitem(<<C, Rest/binary>>, _CI) ->
 vitem(<<>>, _CI) ->
     error.
 
-vescape(<<$d, R/binary>>, CI) -> {set, ?CS:vfold(?CS:vdigit(), CI), [], R};
-vescape(<<$D, R/binary>>, CI) -> {set, ?CS:character_complement(?CS:vdigit(), CI), [], R};
-vescape(<<$w, R/binary>>, CI) -> {set, ?CS:vfold(?CS:vword(), CI), [], R};
-vescape(<<$W, R/binary>>, CI) -> {set, ?CS:character_complement(?CS:vword(), CI), [], R};
-vescape(<<$s, R/binary>>, CI) -> {set, ?CS:vfold(?CS:vspace(), CI), [], R};
-vescape(<<$S, R/binary>>, CI) -> {set, ?CS:character_complement(?CS:vspace(), CI), [], R};
+vescape(<<$d, R/binary>>, CI) ->
+    {set, arc_regex_charset:vfold(arc_regex_charset:vdigit(), CI), [], R};
+vescape(<<$D, R/binary>>, CI) ->
+    {set, arc_regex_charset:character_complement(arc_regex_charset:vdigit(), CI), [], R};
+vescape(<<$w, R/binary>>, CI) ->
+    {set, arc_regex_charset:vfold(arc_regex_charset:vword(), CI), [], R};
+vescape(<<$W, R/binary>>, CI) ->
+    {set, arc_regex_charset:character_complement(arc_regex_charset:vword(), CI), [], R};
+vescape(<<$s, R/binary>>, CI) ->
+    {set, arc_regex_charset:vfold(arc_regex_charset:vspace(), CI), [], R};
+vescape(<<$S, R/binary>>, CI) ->
+    {set, arc_regex_charset:character_complement(arc_regex_charset:vspace(), CI), [], R};
 vescape(<<$b, R/binary>>, _CI) -> {char, 16#08, R};
 vescape(<<$t, R/binary>>, _CI) -> {char, $\t, R};
 vescape(<<$n, R/binary>>, _CI) -> {char, $\n, R};
@@ -166,8 +171,8 @@ vstrings(L, CurRev, Rs, Ss, CI) ->
             end
     end.
 
-vstring_close([CP], Rs, Ss, CI) -> {?CS:vfold([{CP, CP}], CI) ++ Rs, Ss};
-vstring_close(Str, Rs, Ss, CI) -> {Rs, [?CS:vfold_str(Str, CI) | Ss]}.
+vstring_close([CP], Rs, Ss, CI) -> {arc_regex_charset:vfold([{CP, CP}], CI) ++ Rs, Ss};
+vstring_close(Str, Rs, Ss, CI) -> {Rs, [arc_regex_charset:vfold_str(Str, CI) | Ss]}.
 
 vstring_char(<<$\\, R/binary>>, CI) ->
     case vescape(R, CI) of
@@ -191,9 +196,9 @@ vprop(Negated, L, CI) ->
         {PayloadBin, Rest} ->
             case arc_regex_props_ffi:char_set(PayloadBin) of
                 {ok, Ranges} when Negated ->
-                    {set, ?CS:character_complement(Ranges, CI), [], Rest};
+                    {set, arc_regex_charset:character_complement(Ranges, CI), [], Rest};
                 {ok, Ranges} ->
-                    {set, ?CS:vfold(Ranges, CI), [], Rest};
+                    {set, arc_regex_charset:vfold(Ranges, CI), [], Rest};
                 {error, property_of_strings} when not Negated ->
                     vstring_prop(PayloadBin, Rest, CI);
                 {error, property_of_strings} -> error;
@@ -206,7 +211,7 @@ vprop(Negated, L, CI) ->
 vstring_prop(PayloadBin, Rest, CI) ->
     case arc_regex_props_ffi:string_list(PayloadBin) of
         {ok, Strs} ->
-            {R, S} = ?CS:vsplit_singles(Strs, CI),
+            {R, S} = arc_regex_charset:vsplit_singles(Strs, CI),
             {set, R, S, Rest};
         {error, no_exact_data} -> error
     end.

@@ -1,5 +1,6 @@
 import arc/bytecode/key
 import arc/parser/ast
+import arc/rt/limits
 import arc/rt/val as rt_val
 import arc_aot/emit/state.{type Emitter, Emitter}
 import carder/ir
@@ -27,14 +28,14 @@ pub fn then(b: Build(a), f: fn(a) -> Build(c)) -> Build(c) {
   fn(e, k) { b(e, fn(a, e) { f(a)(e, k) }) }
 }
 
-pub fn bind(rhs: ir.Expr) -> Build(ir.Value) {
+pub fn let_(rhs: ir.Expr) -> Build(ir.Value) {
   fn(e, k) {
     let #(name, e) = state.fresh_var(e)
     wrap(k(ir.Var(name), e), ir.Let([name], rhs, _))
   }
 }
 
-pub fn bind_number(rhs: ir.Expr) -> Build(ir.Value) {
+pub fn let_number(rhs: ir.Expr) -> Build(ir.Value) {
   fn(e, k) {
     let #(name, e) = state.fresh_var(e)
     wrap(k(ir.Var(name), state.mark_known_number(e, name)), ir.Let(
@@ -107,7 +108,7 @@ pub fn is_known_string(e: Emitter, v: ir.Value) -> Bool {
 }
 
 pub fn host(op: String, args: List(ir.Value)) -> Build(ir.Value) {
-  bind(ir.CallHost("js", op, args))
+  let_(ir.CallHost("js", op, args))
 }
 
 pub fn host_unit(op: String, args: List(ir.Value)) -> Build(Nil) {
@@ -115,13 +116,13 @@ pub fn host_unit(op: String, args: List(ir.Value)) -> Build(Nil) {
 }
 
 pub fn cons_list(vs: List(ir.Value)) -> Build(ir.Value) {
-  list.fold_right(vs, bind(ir.TermOp(ir.MakeNil, [])), fn(tail_b, head) {
-    then(tail_b, fn(tail) { bind(ir.TermOp(ir.MakeCons, [head, tail])) })
+  list.fold_right(vs, let_(ir.TermOp(ir.MakeNil, [])), fn(tail_b, head) {
+    then(tail_b, fn(tail) { let_(ir.TermOp(ir.MakeCons, [head, tail])) })
   })
 }
 
 pub fn make_tuple(vs: List(ir.Value)) -> Build(ir.Value) {
-  bind(ir.TermOp(ir.MakeTuple, vs))
+  let_(ir.TermOp(ir.MakeTuple, vs))
 }
 
 pub fn tuple_get(v: ir.Value, i: Int) -> ir.Expr {
@@ -143,9 +144,9 @@ pub fn run_to(
 // arms that rebind a slot thread the new name out through the result
 fn slots_rebound(
   before: Dict(Int, String),
-  after_: Dict(Int, String),
+  after: Dict(Int, String),
 ) -> List(Int) {
-  dict.fold(after_, [], fn(acc, slot, name) {
+  dict.fold(after, [], fn(acc, slot, name) {
     case dict.get(before, slot) == Ok(name) {
       True -> acc
       False -> [slot, ..acc]
@@ -195,46 +196,46 @@ fn arm_slot_vals(e_arm: Emitter, slots: List(Int)) -> List(ir.Value) {
   list.map(slots, fn(s) { ir.Var(state.get_slot_var(e_arm, s)) })
 }
 
-pub fn bind_if(
+pub fn let_if(
   cond: ir.Value,
   t: Build(ir.Value),
   f: Build(ir.Value),
 ) -> Build(ir.Value) {
-  bind_if_typed(cond, ir.TTerm, t, f)
+  let_if_typed(cond, ir.TTerm, t, f)
 }
 
-pub fn bind_if_i32(
+pub fn let_if_i32(
   cond: ir.Value,
   t: Build(ir.Value),
   f: Build(ir.Value),
 ) -> Build(ir.Value) {
-  bind_if_typed(cond, ir.TI32, t, f)
+  let_if_typed(cond, ir.TI32, t, f)
 }
 
-fn bind_if_typed(
+fn let_if_typed(
   cond: ir.Value,
   head_ty: ir.ValType,
   t: Build(ir.Value),
   f: Build(ir.Value),
 ) -> Build(ir.Value) {
   let one = fn(b) { map(b, fn(v) { [v] }) }
-  use vs <- map(bind_if_n(cond, [head_ty], one(t), one(f)))
+  use vs <- map(let_if_n(cond, [head_ty], one(t), one(f)))
   let assert [v] = vs
   v
 }
 
-pub fn bind_if_pair(
+pub fn let_if_pair(
   cond: ir.Value,
   t: Build(#(ir.Value, ir.Value)),
   f: Build(#(ir.Value, ir.Value)),
 ) -> Build(#(ir.Value, ir.Value)) {
   let two = fn(b) { map(b, fn(p: #(ir.Value, ir.Value)) { [p.0, p.1] }) }
-  use vs <- map(bind_if_n(cond, [ir.TTerm, ir.TTerm], two(t), two(f)))
+  use vs <- map(let_if_n(cond, [ir.TTerm, ir.TTerm], two(t), two(f)))
   let assert [a, b] = vs
   #(a, b)
 }
 
-fn bind_if_n(
+fn let_if_n(
   cond: ir.Value,
   head_tys: List(ir.ValType),
   t: Build(List(ir.Value)),
@@ -329,7 +330,7 @@ pub fn truthy_if(
   t: Build(ir.Value),
   f: Build(ir.Value),
 ) -> Build(ir.Value) {
-  then(truthy_i32(v), bind_if(_, t, f))
+  then(truthy_i32(v), let_if(_, t, f))
 }
 
 // ir.If tests against 0 and a bare false atom is not 0
@@ -338,7 +339,7 @@ pub fn is_true_expr(v: ir.Value) -> ir.Expr {
 }
 
 pub fn is_true(v: ir.Value) -> Build(ir.Value) {
-  bind(is_true_expr(v))
+  let_(is_true_expr(v))
 }
 
 pub fn host_bool(op: String, args: List(ir.Value)) -> Build(ir.Value) {
@@ -350,10 +351,10 @@ pub fn nullish_if(
   t: Build(ir.Value),
   f: Build(ir.Value),
 ) -> Build(ir.Value) {
-  then(host_bool("is_nullish", [v]), bind_if(_, t, f))
+  then(host_bool("is_nullish", [v]), let_if(_, t, f))
 }
 
-pub fn bind_block(body: fn(String) -> Build(ir.Value)) -> Build(ir.Value) {
+pub fn let_block(body: fn(String) -> Build(ir.Value)) -> Build(ir.Value) {
   fn(e: Emitter, k) {
     let sv0 = e.slot_vars
     let #(label, e) = state.fresh_label(e)
@@ -400,7 +401,7 @@ fn number_guard(v: ir.Value) -> Build(#(ir.Value, Bool)) {
     case is_known_number(e, v) {
       True -> k(#(ir.ConstI32(1), True), e)
       False ->
-        bind(ir.TermTest(ir.IsNumber, v))(e, fn(g, e) { k(#(g, False), e) })
+        let_(ir.TermTest(ir.IsNumber, v))(e, fn(g, e) { k(#(g, False), e) })
     }
   }
 }
@@ -415,7 +416,7 @@ fn both_numbers(a: ir.Value, b: ir.Value) -> Build(#(ir.Value, Bool)) {
     False, True -> pure(#(ga, False))
     False, False ->
       map(
-        bind(ir.If(ga, [ir.TI32], ir.Values([gb]), ir.Values([ir.ConstI32(0)]))),
+        let_(ir.If(ga, [ir.TI32], ir.Values([gb]), ir.Values([ir.ConstI32(0)]))),
         fn(g) { #(g, False) },
       )
   }
@@ -442,23 +443,21 @@ fn with_small_int_kernel(
   case arm {
     Some(arm) -> {
       use ii <- then(both_ints(a, b))
-      bind_if(ii, arm, otherwise)
+      let_if(ii, arm, otherwise)
     }
     None -> otherwise
   }
 }
 
-const max_safe_int = 9_007_199_254_740_991
-
 fn both_ints(a: ir.Value, b: ir.Value) -> Build(ir.Value) {
   case is_const_int(a), is_const_int(b) {
     True, True -> pure(ir.ConstI32(1))
-    True, False -> bind(ir.TermTest(ir.IsInt, b))
-    False, True -> bind(ir.TermTest(ir.IsInt, a))
+    True, False -> let_(ir.TermTest(ir.IsInt, b))
+    False, True -> let_(ir.TermTest(ir.IsInt, a))
     False, False -> {
-      use ga <- then(bind(ir.TermTest(ir.IsInt, a)))
-      use gb <- then(bind(ir.TermTest(ir.IsInt, b)))
-      bind(ir.If(ga, [ir.TI32], ir.Values([gb]), ir.Values([ir.ConstI32(0)])))
+      use ga <- then(let_(ir.TermTest(ir.IsInt, a)))
+      use gb <- then(let_(ir.TermTest(ir.IsInt, b)))
+      let_(ir.If(ga, [ir.TI32], ir.Values([gb]), ir.Values([ir.ConstI32(0)])))
     }
   }
 }
@@ -477,22 +476,24 @@ fn small_int_arm(
   zero_sign zero_sign: Bool,
   on_overflow on_overflow: Build(ir.Value),
 ) -> Build(ir.Value) {
-  use r <- then(bind(ir.NumTerm(op, a, b)))
-  use hi <- then(bind(ir.NumTerm(ir.NLe, r, ir.ConstI64(max_safe_int))))
-  use fits <- then(bind_if_i32(
+  use r <- then(let_(ir.NumTerm(op, a, b)))
+  use hi <- then(
+    let_(ir.NumTerm(ir.NLe, r, ir.ConstI64(limits.max_safe_integer))),
+  )
+  use fits <- then(let_if_i32(
     hi,
-    bind(ir.NumTerm(ir.NGe, r, ir.ConstI64(-max_safe_int))),
+    let_(ir.NumTerm(ir.NGe, r, ir.ConstI64(-limits.max_safe_integer))),
     pure(ir.ConstI32(0)),
   ))
   case zero_sign {
-    False -> bind_if(fits, pure(r), on_overflow)
+    False -> let_if(fits, pure(r), on_overflow)
     True -> {
-      use nz <- then(bind_if_i32(
+      use nz <- then(let_if_i32(
         fits,
-        bind(ir.NumTerm(ir.NEq, r, ir.ConstI32(0))),
+        let_(ir.NumTerm(ir.NEq, r, ir.ConstI32(0))),
         pure(ir.ConstI32(1)),
       ))
-      bind_if(nz, on_overflow, pure(r))
+      let_if(nz, on_overflow, pure(r))
     }
   }
 }
@@ -508,11 +509,14 @@ pub fn guarded_binop(
     case is_known_number(e, a) && is_known_number(e, b) {
       True -> num_binop(kernel_op, a, b)(e, k)
       False -> {
-        let str = is_known_string(e, a) || is_known_string(e, b)
-        case str || non_number_const(a) || non_number_const(b), kernel_op {
+        let either_string = is_known_string(e, a) || is_known_string(e, b)
+        case
+          either_string || non_number_const(a) || non_number_const(b),
+          kernel_op
+        {
           True, "add" -> {
             let add = miss_or(host("add", [a, b]), general)
-            case str {
+            case either_string {
               True -> then(add, mark_string)(e, k)
               False -> add(e, k)
             }
@@ -549,8 +553,8 @@ pub fn miss_or(
   general: Build(ir.Value),
 ) -> Build(ir.Value) {
   use r <- then(probe)
-  use m <- then(bind(ir.NumTerm(ir.NEq, r, ir.ConstAtom("miss"))))
-  bind_if(m, general, pure(r))
+  use m <- then(let_(ir.NumTerm(ir.NEq, r, ir.ConstAtom("miss"))))
+  let_if(m, general, pure(r))
 }
 
 fn if_both_numbers(
@@ -562,7 +566,7 @@ fn if_both_numbers(
   use #(both, elided) <- then(both_numbers(a, b))
   case elided {
     True -> host(kernel_op, [a, b])
-    False -> bind_if(both, host(kernel_op, [a, b]), general)
+    False -> let_if(both, host(kernel_op, [a, b]), general)
   }
 }
 
@@ -575,18 +579,18 @@ pub fn guarded_mod(a: ir.Value, b: ir.Value) -> Build(ir.Value) {
   let kernel = miss_or(host("mod", [a, b]), host("mod_general", [a, b]))
   case b {
     ir.ConstI32(c) if c > 0 -> {
-      use is_i <- then(bind(ir.TermTest(ir.IsInt, a)))
-      bind_if(
+      use is_i <- then(let_(ir.TermTest(ir.IsInt, a)))
+      let_if(
         is_i,
         {
           use r <- then(host("rem", [a, b]))
-          use zero <- then(bind(ir.NumTerm(ir.NEq, r, ir.ConstI32(0))))
-          use neg_zero <- then(bind_if_i32(
+          use zero <- then(let_(ir.NumTerm(ir.NEq, r, ir.ConstI32(0))))
+          use neg_zero <- then(let_if_i32(
             zero,
-            bind(ir.NumTerm(ir.NLt, a, ir.ConstI32(0))),
+            let_(ir.NumTerm(ir.NLt, a, ir.ConstI32(0))),
             pure(ir.ConstI32(0)),
           ))
-          bind_if(neg_zero, kernel, then(pure(r), mark_number))
+          let_if(neg_zero, kernel, then(pure(r), mark_number))
         },
         kernel,
       )
@@ -601,8 +605,8 @@ pub fn guarded_neg(v: ir.Value) -> Build(ir.Value) {
       True -> then(host("neg", [v]), mark_number)(e, k)
       False ->
         {
-          use is_n <- then(bind(ir.TermTest(ir.IsNumber, v)))
-          bind_if(is_n, host("neg", [v]), host("neg_general", [v]))
+          use is_n <- then(let_(ir.TermTest(ir.IsNumber, v)))
+          let_if(is_n, host("neg", [v]), host("neg_general", [v]))
         }(e, k)
     }
   }
@@ -630,25 +634,25 @@ fn guarded_cmp_numeric(
 ) -> Build(ir.Value) {
   use #(both, elided) <- then(both_numbers(a, b))
   let inline_arm = fn(e: Emitter, k) {
-    let rc = e.consts
-    then(bind(ir.NumTerm(term_op, a, b)), bind_if(
+    let consts = e.consts
+    then(let_(ir.NumTerm(term_op, a, b)), let_if(
       _,
-      pure(rc.true_),
-      pure(rc.false_),
+      pure(consts.true_),
+      pure(consts.false_),
     ))(e, k)
   }
   case elided {
     True -> inline_arm
     False ->
-      bind_if(both, inline_arm, then(host(general_op, [a, b]), i32_to_js_bool))
+      let_if(both, inline_arm, then(host(general_op, [a, b]), i32_to_js_bool))
   }
 }
 
 // js comparison results are booleans, never leak a raw i32
 pub fn i32_to_js_bool(v: ir.Value) -> Build(ir.Value) {
   fn(e: Emitter, k) {
-    let rc = e.consts
-    bind_if(v, pure(rc.true_), pure(rc.false_))(e, k)
+    let consts = e.consts
+    let_if(v, pure(consts.true_), pure(consts.false_))(e, k)
   }
 }
 
@@ -678,37 +682,37 @@ fn cond_cmp_numeric(
 ) -> Build(ir.Value) {
   use #(both, elided) <- then(both_numbers(a, b))
   case elided {
-    True -> bind(ir.NumTerm(term_op, a, b))
+    True -> let_(ir.NumTerm(term_op, a, b))
     False ->
-      bind_if_i32(
+      let_if_i32(
         both,
-        bind(ir.NumTerm(term_op, a, b)),
+        let_(ir.NumTerm(term_op, a, b)),
         then(host(general_op, [a, b]), fn(v) { host("to_boolean_i32", [v]) }),
       )
   }
 }
 
 // the one static key canonicalizer, output must be canonical
-pub fn object_key_lit(pk: ast.PropertyKey) -> Build(ir.Value) {
+pub fn object_key_lit(pk: ast.PropertyName) -> Build(ir.Value) {
   let inner = case pk {
-    ast.KeyIdentifier(name:, ..) -> wire_named(name)
-    ast.KeyString(value: s, ..) -> wire_prop_key(key.canonical(s))
-    ast.KeyNumber(value: ast.FiniteNumber(f), ..) ->
+    ast.IdentifierName(name:, ..) -> wire_named(name)
+    ast.StringName(value: s, ..) -> wire_prop_key(key.canonical(s))
+    ast.NumberName(value: ast.FiniteNumber(f), ..) ->
       case key.array_index_of_float(f) {
         Some(i) -> wire_index(i)
         None -> wire_named(rt_val.js_format_float(f))
       }
-    ast.KeyNumber(value: ast.InfiniteNumber, ..) -> wire_named("Infinity")
-    ast.KeyBigInt(value: n, ..) -> wire_prop_key(key.index(n))
-    ast.KeyPrivate(name:, ..) ->
+    ast.NumberName(value: ast.InfiniteNumber, ..) -> wire_named("Infinity")
+    ast.BigIntName(value: n, ..) -> wire_prop_key(key.index(n))
+    ast.PrivateName(name:, ..) ->
       ir.TermOp(ir.MakeTuple, [
         ir.ConstAtom("private"),
         ir.ConstBinary(bit_array.from_string(name)),
       ])
-    ast.KeyComputed(..) ->
-      panic as "object_key_lit: KeyComputed routes through host(to_property_key)"
+    ast.ComputedName(..) ->
+      panic as "object_key_lit: ComputedName routes through host(to_property_key)"
   }
-  use iv <- then(bind(inner))
+  use iv <- then(let_(inner))
   make_tuple([ir.ConstAtom("string_key"), iv])
 }
 

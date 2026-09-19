@@ -333,7 +333,7 @@ fn hoist_fn_decls(
       let #(child_id, e) = state.pop_child_fn(e)
       use #(ctree, e) <- result.try(e.dispatch.emit_function(
         e,
-        FnDecl(is_gen: is_generator, is_async:),
+        FnDecl(is_generator:, is_async:),
         Some(name),
         params,
         StmtBody(body),
@@ -422,7 +422,7 @@ fn annexb_promote(e: Emitter, name: String, k: Next) -> EmitResult {
         Some(d) -> {
           let copy = {
             use v <- anf.then(read_binding(source))
-            expr.emit_direct_put(d, name, v)
+            expr.emit_target_put(d, name, v)
           }
           let #(tree, e) = anf.run(copy, e)
           use _, e <- cps.let_(e, tree)
@@ -686,7 +686,7 @@ fn assigned_unboxed_slots_all(
   |> list.sort(int.compare)
 }
 
-fn bind_invariant_callees(
+fn load_invariant_callees(
   e: Emitter,
   callees: List(state.InvariantCallee),
   k: Next,
@@ -697,7 +697,7 @@ fn bind_invariant_callees(
       let sv = ir.Var(state.get_slot_var(e, callee.slot))
       let go = fn(f, e) {
         use pair, e <- cps.host(e, "direct_callee", [f, e.consts.undef])
-        bind_invariant_callees(
+        load_invariant_callees(
           state.set_invariant_callee(e, callee, pair),
           rest,
           k,
@@ -931,11 +931,11 @@ fn expr_callee_names(ex: ast.Expression, acc: List(String)) -> List(String) {
 }
 
 fn prop_key_callee_names(
-  key: ast.PropertyKey,
+  key: ast.PropertyName,
   acc: List(String),
 ) -> List(String) {
   case key {
-    ast.KeyComputed(expression:) -> expr_callee_names(expression, acc)
+    ast.ComputedName(expression:) -> expr_callee_names(expression, acc)
     _ -> acc
   }
 }
@@ -1218,11 +1218,11 @@ fn expr_assigned_names(ex: ast.Expression, acc: List(String)) -> List(String) {
 }
 
 fn prop_key_assigned_names(
-  key: ast.PropertyKey,
+  key: ast.PropertyName,
   acc: List(String),
 ) -> List(String) {
   case key {
-    ast.KeyComputed(expression:) -> expr_assigned_names(expression, acc)
+    ast.ComputedName(expression:) -> expr_assigned_names(expression, acc)
     _ -> acc
   }
 }
@@ -1900,8 +1900,8 @@ fn emit_switch(
     })
     |> option.from_result
   let branch_slots = e.slot_vars
-  // no i32 fast path: a non-int discriminant must fall to default
-  let miss_leaf = fn(e: Emitter) {
+  // no i32 compare kernel: a non-int discriminant falls to default
+  let no_match_leaf = fn(e: Emitter) {
     case default_lbl {
       Some(dl) -> ir.Break(dl, carried_values(e, carried))
       None -> ir.Break(break_lbl, carried_values(e, carried))
@@ -1912,7 +1912,7 @@ fn emit_switch(
     d,
     labelled,
     carried,
-    miss_leaf,
+    no_match_leaf,
   ))
   let e = state.Emitter(..e, slot_vars: branch_slots)
   use #(nested, e) <- result.try(switch_nest_bodies(
@@ -1934,12 +1934,12 @@ fn switch_test_chain(
   d: ir.Value,
   labelled: List(CaseEntry),
   carried: List(Int),
-  miss: fn(Emitter) -> ir.Expr,
+  no_match: fn(Emitter) -> ir.Expr,
 ) -> EmitResult {
   case labelled {
-    [] -> Ok(#(miss(e), e))
+    [] -> Ok(#(no_match(e), e))
     [CaseEntry(cond: None, ..), ..rest] ->
-      switch_test_chain(e, d, rest, carried, miss)
+      switch_test_chain(e, d, rest, carried, no_match)
     [CaseEntry(lbl:, cond: Some(test_expr), ..), ..rest] -> {
       let #(eq_tree, e) = anf.run(expr.emit_case_test_i32(d, test_expr), e)
       use eqi, e <- cps.let_(e, eq_tree)
@@ -1948,7 +1948,7 @@ fn switch_test_chain(
         d,
         rest,
         carried,
-        miss,
+        no_match,
       ))
       let hit = ir.Break(lbl, carried_values(e, carried))
       #(ir.If(eqi, [], hit, else_chain), e)
@@ -2062,7 +2062,7 @@ fn emit_for_classic(
     }
     let callees = loop_invariant_callees(e, body, cond, upd, carried)
     let prev_callees = e.invariant_callees
-    use e <- bind_invariant_callees(e, callees)
+    use e <- load_invariant_callees(e, callees)
     let e = state.push_loop(e, brk, cont, carried, None)
     let emit_upd = fn(e: Emitter, k) {
       case upd {
@@ -2195,7 +2195,7 @@ fn emit_while(
   let #(params, e) = carried_params(e, carried)
   let callees = loop_invariant_callees(e, body, Some(cond), None, carried)
   let prev_callees = e.invariant_callees
-  use e <- bind_invariant_callees(e, callees)
+  use e <- load_invariant_callees(e, callees)
   let e = state.push_loop(e, brk, cont, carried, None)
   use #(loop_body, e) <- result.try(
     with_done(e, fn(done, e) {

@@ -10,12 +10,12 @@ import gleam/int
 import gleam/io
 import simplifile
 
-type Unit {
+type TimeUnit {
   Millisecond
 }
 
 @external(erlang, "erlang", "monotonic_time")
-fn now(unit: Unit) -> Int
+fn now(unit: TimeUnit) -> Int
 
 @external(erlang, "erts_debug", "flat_size")
 fn flat_size(term: a) -> Int

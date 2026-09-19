@@ -77,8 +77,8 @@ import arc/rt/types.{
   type Agent, type Handle, type JsVal, type LexicalGlobal, type ObjectKey,
   AccessorProperty, Agent, BytecodeFn, DataProperty, FunctionApply, FunctionCall,
   FunctionN, HintString, KHandle, KNull, KNum, KStr, KSym, KUndef, NativeFn,
-  NoElements, Realm, ReflectApply, ReflectN, SBox, SObject, SShapedObject, Store,
-  StringKey, SymbolKey, classify, mk_bool, mk_int, mk_object, mk_string, mk_tdz,
+  Realm, ReflectApply, ReflectN, SBox, SObject, SShapedObject, Store, StringKey,
+  SymbolKey, classify, mk_bool, mk_int, mk_object, mk_string, mk_tdz,
   mk_undefined,
 }
 import arc/rt/val as rt_val
@@ -117,7 +117,7 @@ fn handle_of(v: JsVal) -> Option(Handle) {
 }
 
 fn inspect(state: State, v: JsVal) -> String {
-  rt_inspect.inspect(state.agent, v)
+  rt_inspect.describe(state.agent, v)
 }
 
 fn lexical_global(agent: Agent, name: String) -> Option(LexicalGlobal) {
@@ -139,7 +139,7 @@ fn put_lexical_global(
   )
 }
 
-// fast tier: registers live in loop arguments
+// loop tier: registers live in loop arguments
 pub fn execute(
   state: State,
   drive: Drive,
@@ -154,7 +154,7 @@ pub fn execute(
   case func.regs {
     bytecode.NoRegs -> {
       let u = kernel.literal([kernel.Undefined])
-      fast_loop(
+      loop(
         state,
         drive,
         state.pc,
@@ -168,7 +168,7 @@ pub fn execute(
       )
     }
     bytecode.Regs(a, b) ->
-      fast_loop(
+      loop(
         state,
         drive,
         state.pc,
@@ -214,10 +214,10 @@ fn enter_loop(
   case state.func.regs {
     bytecode.NoRegs -> {
       let u = kernel.literal([kernel.Undefined])
-      fast_loop(state, drive, pc, stack, locals, agent, code, constants, u, u)
+      loop(state, drive, pc, stack, locals, agent, code, constants, u, u)
     }
     bytecode.Regs(a, b) ->
-      fast_loop(
+      loop(
         state,
         drive,
         pc,
@@ -255,10 +255,8 @@ fn continue_with_register(
   v: JsVal,
 ) -> Result(#(Outcome, State), VmError) {
   case register {
-    -1 ->
-      fast_loop(state, drive, pc, stack, locals, agent, code, constants, v, r1)
-    _ ->
-      fast_loop(state, drive, pc, stack, locals, agent, code, constants, r0, v)
+    -1 -> loop(state, drive, pc, stack, locals, agent, code, constants, v, r1)
+    _ -> loop(state, drive, pc, stack, locals, agent, code, constants, r0, v)
   }
 }
 
@@ -296,7 +294,7 @@ fn via_step(
 }
 
 // nothing ran before the miss, so step re-runs with the loop args
-fn fast_loop(
+fn loop(
   state: State,
   drive: Drive,
   pc: Int,
@@ -312,7 +310,7 @@ fn fast_loop(
   case tuple_array.element(pc + 1, code) {
     PushConst(index) -> {
       let v = tuple_array.element(index + 1, constants)
-      fast_loop(
+      loop(
         state,
         drive,
         pc + 1,
@@ -329,7 +327,7 @@ fn fast_loop(
     Pop ->
       case stack {
         [_, ..rest] ->
-          fast_loop(
+          loop(
             state,
             drive,
             pc + 1,
@@ -347,7 +345,7 @@ fn fast_loop(
     Dup ->
       case stack {
         [top, ..] ->
-          fast_loop(
+          loop(
             state,
             drive,
             pc + 1,
@@ -365,7 +363,7 @@ fn fast_loop(
     Swap ->
       case stack {
         [a, b, ..rest] ->
-          fast_loop(
+          loop(
             state,
             drive,
             pc + 1,
@@ -392,7 +390,7 @@ fn fast_loop(
       case kernel.is(v, kernel.JsTdz) {
         True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
-          fast_loop(
+          loop(
             state,
             drive,
             pc + 1,
@@ -427,7 +425,7 @@ fn fast_loop(
                 v,
               )
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -456,7 +454,7 @@ fn fast_loop(
       case kernel.is(v, kernel.Miss) {
         True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
-          fast_loop(
+          loop(
             state,
             drive,
             pc + 1,
@@ -485,7 +483,7 @@ fn fast_loop(
           case rt_store.is_handle(local) {
             False -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             True ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -509,7 +507,7 @@ fn fast_loop(
     Safepoint ->
       case agent.store.alloc_since_gc < agent.store.gc_threshold {
         True ->
-          fast_loop(
+          loop(
             state,
             drive,
             pc + 1,
@@ -525,25 +523,14 @@ fn fast_loop(
       }
 
     Jump(Pc(target)) ->
-      fast_loop(
-        state,
-        drive,
-        target,
-        stack,
-        locals,
-        agent,
-        code,
-        constants,
-        r0,
-        r1,
-      )
+      loop(state, drive, target, stack, locals, agent, code, constants, r0, r1)
 
     JumpIfFalse(Pc(target)) ->
       case stack {
         [top, ..rest] ->
           case kernel.is_bool(top, expected: True) {
             True ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -558,7 +545,7 @@ fn fast_loop(
             False ->
               case kernel.is_bool(top, expected: False) {
                 True ->
-                  fast_loop(
+                  loop(
                     state,
                     drive,
                     target,
@@ -573,7 +560,7 @@ fn fast_loop(
                 False ->
                   case rt_val.to_boolean(top) {
                     True ->
-                      fast_loop(
+                      loop(
                         state,
                         drive,
                         pc + 1,
@@ -586,7 +573,7 @@ fn fast_loop(
                         r1,
                       )
                     False ->
-                      fast_loop(
+                      loop(
                         state,
                         drive,
                         target,
@@ -609,7 +596,7 @@ fn fast_loop(
         [top, ..rest] ->
           case kernel.is_bool(top, expected: True) {
             True ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 target,
@@ -624,7 +611,7 @@ fn fast_loop(
             False ->
               case kernel.is_bool(top, expected: False) {
                 True ->
-                  fast_loop(
+                  loop(
                     state,
                     drive,
                     pc + 1,
@@ -639,7 +626,7 @@ fn fast_loop(
                 False ->
                   case rt_val.to_boolean(top) {
                     True ->
-                      fast_loop(
+                      loop(
                         state,
                         drive,
                         target,
@@ -652,7 +639,7 @@ fn fast_loop(
                         r1,
                       )
                     False ->
-                      fast_loop(
+                      loop(
                         state,
                         drive,
                         pc + 1,
@@ -675,7 +662,7 @@ fn fast_loop(
         [top, ..rest] ->
           case kernel.is(top, kernel.Undefined) || kernel.is(top, kernel.Null) {
             True ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 target,
@@ -688,7 +675,7 @@ fn fast_loop(
                 r1,
               )
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -709,7 +696,7 @@ fn fast_loop(
         [top, ..rest] ->
           case kernel.is(top, kernel.Undefined) || kernel.is(top, kernel.Null) {
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 target,
@@ -722,7 +709,7 @@ fn fast_loop(
                 r1,
               )
             True ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -748,7 +735,7 @@ fn fast_loop(
           case kernel.is(r, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -776,7 +763,7 @@ fn fast_loop(
           case kernel.is(r, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -811,7 +798,7 @@ fn fast_loop(
           case kernel.is(r, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -852,7 +839,7 @@ fn fast_loop(
       case kernel.is(r, kernel.Miss) {
         True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
-          fast_loop(
+          loop(
             state,
             drive,
             pc + 1,
@@ -884,7 +871,7 @@ fn fast_loop(
       case kernel.is(r, kernel.Miss) {
         True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
-          fast_loop(
+          loop(
             state,
             drive,
             pc + 1,
@@ -926,7 +913,7 @@ fn fast_loop(
                     r,
                   )
                 False ->
-                  fast_loop(
+                  loop(
                     state,
                     drive,
                     pc + 1,
@@ -972,7 +959,7 @@ fn fast_loop(
                     r,
                   )
                 False ->
-                  fast_loop(
+                  loop(
                     state,
                     drive,
                     pc + 1,
@@ -1025,7 +1012,7 @@ fn fast_loop(
                     r,
                   )
                 False ->
-                  fast_loop(
+                  loop(
                     state,
                     drive,
                     pc + 1,
@@ -1069,7 +1056,7 @@ fn fast_loop(
               case kernel.is(r, kernel.Miss) {
                 True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
                 False ->
-                  fast_loop(
+                  loop(
                     state,
                     drive,
                     pc + 1,
@@ -1129,7 +1116,7 @@ fn fast_loop(
                 r,
               )
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -1158,7 +1145,7 @@ fn fast_loop(
           case kernel.is(r, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -1208,7 +1195,7 @@ fn fast_loop(
                 r,
               )
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -1257,7 +1244,7 @@ fn fast_loop(
                 r,
               )
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -1287,7 +1274,7 @@ fn fast_loop(
         False ->
           case rt_val.to_boolean(v) == when {
             True ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 target,
@@ -1300,7 +1287,7 @@ fn fast_loop(
                 r1,
               )
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -1349,7 +1336,7 @@ fn fast_loop(
                 r,
               )
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 target,
@@ -1411,7 +1398,7 @@ fn fast_loop(
                 n,
               )
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 next,
@@ -1477,7 +1464,7 @@ fn fast_loop(
                 n,
               )
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 next,
@@ -1524,7 +1511,7 @@ fn fast_loop(
                 r,
               )
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -1570,7 +1557,7 @@ fn fast_loop(
                 r,
               )
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -1612,7 +1599,7 @@ fn fast_loop(
         False ->
           case kernel.is_bool(r, when) {
             True ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 target,
@@ -1625,7 +1612,7 @@ fn fast_loop(
                 r1,
               )
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -1660,7 +1647,7 @@ fn fast_loop(
         False ->
           case kernel.is_bool(r, when) {
             True ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 target,
@@ -1673,7 +1660,7 @@ fn fast_loop(
                 r1,
               )
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -1698,7 +1685,7 @@ fn fast_loop(
             False ->
               case kernel.is_bool(r, when) {
                 True ->
-                  fast_loop(
+                  loop(
                     state,
                     drive,
                     target,
@@ -1711,7 +1698,7 @@ fn fast_loop(
                     r1,
                   )
                 False ->
-                  fast_loop(
+                  loop(
                     state,
                     drive,
                     pc + 1,
@@ -1743,7 +1730,7 @@ fn fast_loop(
             False ->
               case kernel.is_bool(r, when) {
                 True ->
-                  fast_loop(
+                  loop(
                     state,
                     drive,
                     target,
@@ -1756,7 +1743,7 @@ fn fast_loop(
                     r1,
                   )
                 False ->
-                  fast_loop(
+                  loop(
                     state,
                     drive,
                     pc + 1,
@@ -1781,7 +1768,7 @@ fn fast_loop(
           case kernel.is(v, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -1805,7 +1792,7 @@ fn fast_loop(
           case kernel.is(v, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -1829,7 +1816,7 @@ fn fast_loop(
           case kernel.is(store, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -1870,7 +1857,7 @@ fn fast_loop(
       case kernel.is(v, kernel.Miss) {
         True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
-          fast_loop(
+          loop(
             state,
             drive,
             pc + 1,
@@ -1931,7 +1918,7 @@ fn fast_loop(
                 r,
               )
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -1954,7 +1941,7 @@ fn fast_loop(
           case kernel.is(store, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -1978,7 +1965,7 @@ fn fast_loop(
           case kernel.is(v, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -2002,7 +1989,7 @@ fn fast_loop(
           case kernel.is(v, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -2026,7 +2013,7 @@ fn fast_loop(
           case kernel.is(store, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -2050,7 +2037,7 @@ fn fast_loop(
           case kernel.is(store, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -2097,7 +2084,7 @@ fn fast_loop(
           case kernel.is(store, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -2133,7 +2120,7 @@ fn fast_loop(
       case kernel.is(store, kernel.Miss) {
         True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
-          fast_loop(
+          loop(
             state,
             drive,
             pc + 1,
@@ -2165,7 +2152,7 @@ fn fast_loop(
       case kernel.is(v, kernel.Miss) {
         True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
-          fast_loop(
+          loop(
             state,
             drive,
             pc + 1,
@@ -2193,7 +2180,7 @@ fn fast_loop(
       case kernel.is(v, kernel.Miss) {
         True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
-          fast_loop(
+          loop(
             state,
             drive,
             pc + 1,
@@ -2213,7 +2200,7 @@ fn fast_loop(
       case kernel.is(v, kernel.Miss) {
         True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
-          fast_loop(
+          loop(
             state,
             drive,
             pc + 1,
@@ -2237,7 +2224,7 @@ fn fast_loop(
           case kernel.is(t, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -2270,7 +2257,7 @@ fn fast_loop(
           case kernel.is(store, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -2296,7 +2283,7 @@ fn fast_loop(
           0,
           stack,
         )
-      fast_loop(
+      loop(
         state,
         drive,
         pc + 1,
@@ -2319,7 +2306,7 @@ fn fast_loop(
           count,
           stack,
         )
-      fast_loop(
+      loop(
         state,
         drive,
         pc + 1,
@@ -2340,7 +2327,7 @@ fn fast_loop(
           case kernel.is(t, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -2364,7 +2351,7 @@ fn fast_loop(
           case kernel.is(store, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -2390,7 +2377,7 @@ fn fast_loop(
           kernel.capture_env(template.env_descriptors, locals),
           state.unit_id,
         )
-      fast_loop(
+      loop(
         state,
         drive,
         pc + 1,
@@ -2411,7 +2398,7 @@ fn fast_loop(
           case kernel.is(rec, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -2446,7 +2433,7 @@ fn fast_loop(
             }
           {
             True ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -2468,7 +2455,7 @@ fn fast_loop(
         [iter, ..rest] ->
           case kernel.for_in_next(iter) {
             kernel.ForInKey(key:, rest: iter) ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -2481,7 +2468,7 @@ fn fast_loop(
                 r1,
               )
             kernel.ForInEnd ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -2502,7 +2489,7 @@ fn fast_loop(
         [rec, ..rest] ->
           case kernel.is(rec, kernel.Undefined) {
             True ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -2519,7 +2506,7 @@ fn fast_loop(
                 True ->
                   case rt_lang.array_iter_next(agent.store, rec) {
                     rt_lang.IterStep(done:, value:, rec:) ->
-                      fast_loop(
+                      loop(
                         state,
                         drive,
                         pc + 1,
@@ -2533,7 +2520,7 @@ fn fast_loop(
                       )
                     rt_lang.IterPair(key:, value:, rec:) -> {
                       let #(pair, agent) = rt_obj.new_array(agent, [key, value])
-                      fast_loop(
+                      loop(
                         state,
                         drive,
                         pc + 1,
@@ -2557,7 +2544,7 @@ fn fast_loop(
                         True -> mk_undefined()
                         False -> rec
                       }
-                      fast_loop(
+                      loop(
                         state,
                         drive,
                         pc + 1,
@@ -2583,7 +2570,7 @@ fn fast_loop(
                         iterator_next_general(state, drive, rec, rest, plan)
                       {
                         Ok(state) ->
-                          fast_loop(
+                          loop(
                             state,
                             drive,
                             state.pc,
@@ -2657,7 +2644,7 @@ fn fast_loop(
     PushTry(catch_target: Pc(catch_target), kind:) -> {
       let frame =
         TryFrame(catch_target:, stack_depth: list.length(stack), kind:)
-      fast_loop(
+      loop(
         State(..state, try_stack: [frame, ..state.try_stack]),
         drive,
         pc + 1,
@@ -2674,7 +2661,7 @@ fn fast_loop(
     PopTry ->
       case state.try_stack {
         [_, ..try_rest] ->
-          fast_loop(
+          loop(
             State(..state, try_stack: try_rest),
             drive,
             pc + 1,
@@ -2701,7 +2688,7 @@ fn fast_loop(
           ),
           simple_params,
         )
-      fast_loop(
+      loop(
         state,
         drive,
         state.pc,
@@ -2719,7 +2706,7 @@ fn fast_loop(
     Call(arity) ->
       case arity, stack {
         0, [callee, ..rest] ->
-          fast_call(
+          loop_call(
             state,
             drive,
             pc,
@@ -2739,7 +2726,7 @@ fn fast_loop(
             kernel.literal([kernel.Undefined]),
           )
         1, [a, callee, ..rest] ->
-          fast_call(
+          loop_call(
             state,
             drive,
             pc,
@@ -2759,7 +2746,7 @@ fn fast_loop(
             kernel.literal([kernel.Undefined]),
           )
         2, [b, a, callee, ..rest] ->
-          fast_call(
+          loop_call(
             state,
             drive,
             pc,
@@ -2781,7 +2768,7 @@ fn fast_loop(
         _, _ ->
           case pop_n(stack, arity) {
             Some(#(args, [callee, ..rest])) ->
-              fast_call(
+              loop_call(
                 state,
                 drive,
                 pc,
@@ -2807,7 +2794,7 @@ fn fast_loop(
     CallMethod(arity) ->
       case arity, stack {
         0, [method, receiver, ..rest] ->
-          fast_call(
+          loop_call(
             state,
             drive,
             pc,
@@ -2827,7 +2814,7 @@ fn fast_loop(
             kernel.literal([kernel.Undefined]),
           )
         1, [a, method, receiver, ..rest] ->
-          fast_call(
+          loop_call(
             state,
             drive,
             pc,
@@ -2847,7 +2834,7 @@ fn fast_loop(
             kernel.literal([kernel.Undefined]),
           )
         2, [b, a, method, receiver, ..rest] ->
-          fast_call(
+          loop_call(
             state,
             drive,
             pc,
@@ -2869,7 +2856,7 @@ fn fast_loop(
         _, _ ->
           case pop_n(stack, arity) {
             Some(#(args, [method, receiver, ..rest])) ->
-              fast_call(
+              loop_call(
                 state,
                 drive,
                 pc,
@@ -2907,7 +2894,7 @@ fn fast_loop(
           case kernel.is(method, kernel.Miss) || kernel.is(arg, kernel.JsTdz) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_call(
+              loop_call(
                 state,
                 drive,
                 pc,
@@ -2938,7 +2925,7 @@ fn fast_loop(
           case kernel.is(method, kernel.Miss) {
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False ->
-              fast_call(
+              loop_call(
                 state,
                 drive,
                 pc,
@@ -2975,7 +2962,7 @@ fn fast_loop(
       case kernel.is(method, kernel.Miss) {
         True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
         False ->
-          fast_call(
+          loop_call(
             state,
             drive,
             pc,
@@ -3000,7 +2987,7 @@ fn fast_loop(
     CallNew(arity) ->
       case pop_n(stack, arity) {
         Some(#(args, [ctor, ..rest])) ->
-          fast_construct(
+          loop_construct(
             state,
             drive,
             pc,
@@ -3034,7 +3021,7 @@ fn fast_loop(
             && is_intrinsic_apply(agent, apply_fn)
           {
             True ->
-              fast_call(
+              loop_call(
                 state,
                 drive,
                 pc,
@@ -3061,7 +3048,7 @@ fn fast_loop(
     CallConstructor(arity) ->
       case pop_n(stack, arity) {
         Some(#(args, [new_target, ctor, ..rest])) ->
-          fast_construct(
+          loop_construct(
             state,
             drive,
             pc,
@@ -3169,7 +3156,7 @@ fn fast_loop(
                       let _ = tuple_array.size(caller_locals)
                       let _ = tuple_array.size(code)
                       let _ = tuple_array.size(constants)
-                      fast_loop(
+                      loop(
                         caller,
                         drive,
                         caller_pc,
@@ -3192,7 +3179,7 @@ fn fast_loop(
                           let _ = tuple_array.size(code)
                           let _ = tuple_array.size(constants)
                           let u = kernel.literal([kernel.Undefined])
-                          fast_loop(
+                          loop(
                             caller,
                             drive,
                             caller_pc,
@@ -3239,8 +3226,8 @@ fn fast_loop(
   }
 }
 
-// new_target undefined = plain call; otherwise entered from fast_construct
-fn fast_call(
+// new_target undefined = plain call; otherwise entered from loop_construct
+fn loop_call(
   state: State,
   drive: Drive,
   pc: Int,
@@ -3273,7 +3260,7 @@ fn fast_call(
             False -> frames.sync_entering(state, agent, pc)
             True -> {
               let line = tuple_array.element(pc + 1, state.func.lines)
-              // call.set_top_line inlined
+              // frames.set_top_line inlined
               let frames = case agent.frames {
                 [types.FrameInfo(line: l, ..), ..] as frames if l == line ->
                   frames
@@ -3287,7 +3274,7 @@ fn fast_call(
             guard.guard4(rt_builtins.dispatch_native, agent, token, this, args)
           {
             Value(value: v, agent:) ->
-              fast_loop(
+              loop(
                 state,
                 drive,
                 pc + 1,
@@ -3355,11 +3342,11 @@ fn fast_call(
                       agent,
                     )
                     False -> {
-                      let bound =
+                      let coerced =
                         kernel.sloppy_this(this, agent.realm.global_object)
-                      case kernel.is(bound, kernel.Miss) {
-                        False -> #(bound, agent)
-                        True -> rt_call.bind_this(agent, flags, this)
+                      case kernel.is(coerced, kernel.Miss) {
+                        False -> #(coerced, agent)
+                        True -> rt_call.callee_this(agent, flags, this)
                       }
                     }
                   }
@@ -3433,7 +3420,7 @@ fn fast_call(
                   let _ = tuple_array.size(code)
                   let _ = tuple_array.size(constants)
                   let u = kernel.literal([kernel.Undefined])
-                  fast_loop(
+                  loop(
                     new_state,
                     drive,
                     0,
@@ -3525,7 +3512,7 @@ fn fast_call(
   }
 }
 
-fn fast_construct(
+fn loop_construct(
   state: State,
   drive: Drive,
   pc: Int,
@@ -3549,7 +3536,7 @@ fn fast_construct(
     ->
       case template.is_derived_constructor {
         True ->
-          fast_call(
+          loop_call(
             state,
             drive,
             pc,
@@ -3578,7 +3565,7 @@ fn fast_construct(
             True -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
             False -> {
               let #(receiver, agent) = made
-              fast_call(
+              loop_call(
                 state,
                 drive,
                 pc,
@@ -3654,7 +3641,7 @@ fn array_iter_next_general(
   }
 }
 
-// what the fast loop would have done, before the array hole path
+// what the loop does, before the array hole path
 fn iter_next_kernel(
   state: State,
   rec: JsVal,
@@ -3713,15 +3700,16 @@ fn materialize_record(
       guarded2(
         state,
         fn(agent, _) {
+          let proto = Some(rt_lang.array_iter_proto(agent, rec))
           let #(iter, agent) =
             rt_store.cell_new(
               agent,
-              SObject(
-                kind:,
-                proto: Some(rt_lang.array_iter_proto(agent, rec)),
+              types.SObject(
+                kind: kind,
+                proto: proto,
                 props: dict.new(),
                 symbol_props: [],
-                elements: NoElements,
+                elements: types.NoElements,
                 extensible: True,
               ),
             )
@@ -4162,7 +4150,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         }
       }
 
-    // §9.1.1.4.17 createglobalvarbinding, d = true only for eval
+    // §9.1.1.4.17 createglobalvarbinding, deletable only for eval
     DeclareGlobalVar(name, deletable) -> {
       use state <- result.map(guarded_unit3(
         state,
@@ -4630,13 +4618,13 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
       case state.stack {
         [left, ..rest] -> {
           use receiver <- local_or_tdz(state, index)
-          let finish = fn(state, right) {
+          let finish = fn(right, state) {
             binop_step(state, kind, left, right, rest)
           }
           use <-
             accessor_as_frame(state, receiver, k, rest, drive, Some(finish), _)
           use #(right, state) <- result.try(get_field(state, receiver, k))
-          finish(state, right)
+          finish(right, state)
         }
         _ -> underflow(state, "BinOpLocalField")
       }
@@ -5053,7 +5041,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(h) -> {
               use state <- result.map(guarded_unit4(
                 state,
-                rt_class.private_define,
+                rt_class.private_field_add,
                 h,
                 k,
                 val,
@@ -5073,7 +5061,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
             Some(h) -> {
               use state <- result.map(guarded_unit5(
                 state,
-                rt_class.define_private,
+                rt_class.private_method_add,
                 h,
                 k,
                 func,
@@ -5098,7 +5086,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
               }
               use state <- result.map(guarded_unit5(
                 state,
-                rt_class.define_private,
+                rt_class.private_method_add,
                 h,
                 k,
                 func,
@@ -5355,7 +5343,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 False, True ->
                   state.throw_type_error(
                     state,
-                    "Cannot delete property '" <> key.display_string(k) <> "'",
+                    "Cannot delete property '" <> key.display_text(k) <> "'",
                   )
                 _, _ ->
                   Ok(
@@ -6064,10 +6052,9 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
         [arg, record, ..rest] -> {
           use #(record, state) <- result.try(materialize_record(state, record))
           let state = State(..state, stack: [arg, record, ..rest])
-          use #(iterator, next_fn, state) <- result.try(delegate_target(
-            state,
-            record,
-          ))
+          use #(types.IteratorRecord(iterator, next_fn), state) <- result.try(
+            delegate_target(state, record),
+          )
           use #(#(done, val), state) <- result.try(delegate_step(
             state,
             drive,
@@ -6086,10 +6073,9 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     AsyncYieldStarNext(after_pc: _) ->
       case state.stack {
         [arg, record, ..rest] -> {
-          use #(iterator, next_fn, state) <- result.try(delegate_target(
-            state,
-            record,
-          ))
+          use #(types.IteratorRecord(iterator, next_fn), state) <- result.try(
+            delegate_target(state, record),
+          )
           use #(res, state) <- result.map(
             guarded4(state, rt_call.call, next_fn, iterator, [arg]),
           )
@@ -6235,7 +6221,7 @@ fn put_field_step(
           state.throw_type_error(
             state,
             "Cannot assign to read only property '"
-              <> key.display_string(k)
+              <> key.display_text(k)
               <> "' of object",
           )
         _, _ -> Ok(State(..state, stack:, pc: state.pc + 1))
@@ -6247,7 +6233,7 @@ fn put_field_step(
         "Cannot set properties of "
           <> rt_val.nullish_label(receiver)
           <> " (setting '"
-          <> key.display_string(k)
+          <> key.display_text(k)
           <> "')",
       )
     _ ->
@@ -6256,7 +6242,7 @@ fn put_field_step(
           state.throw_type_error(
             state,
             "Cannot create property '"
-              <> key.display_string(k)
+              <> key.display_text(k)
               <> "' on primitive value",
           )
         False -> Ok(State(..state, stack:, pc: state.pc + 1))
@@ -6276,7 +6262,7 @@ fn get_field(
         "Cannot read properties of "
           <> rt_val.nullish_label(receiver)
           <> " (reading '"
-          <> key.display_string(k)
+          <> key.display_text(k)
           <> "')",
       )
     _ -> guarded3(state, rt_obj.get_prop, receiver, StringKey(k))
@@ -6420,19 +6406,24 @@ fn pure_binop_general(
     binop.Arith(binop.Div) -> guarded3(state, rt_ops.div, left, right)
     binop.Arith(binop.Mod) -> guarded3(state, rt_ops.mod, left, right)
     binop.Arith(binop.Exp) -> guarded3(state, rt_ops.pow, left, right)
-    binop.Bitwise(binop.BitAnd) -> guarded3(state, rt_ops.bitand, left, right)
-    binop.Bitwise(binop.BitOr) -> guarded3(state, rt_ops.bitor, left, right)
-    binop.Bitwise(binop.BitXor) -> guarded3(state, rt_ops.bitxor, left, right)
-    binop.Bitwise(binop.ShiftLeft) -> guarded3(state, rt_ops.shl, left, right)
-    binop.Bitwise(binop.ShiftRight) -> guarded3(state, rt_ops.shr, left, right)
+    binop.Bitwise(binop.BitAnd) ->
+      guarded3(state, rt_ops.bitand_general, left, right)
+    binop.Bitwise(binop.BitOr) ->
+      guarded3(state, rt_ops.bitor_general, left, right)
+    binop.Bitwise(binop.BitXor) ->
+      guarded3(state, rt_ops.bitxor_general, left, right)
+    binop.Bitwise(binop.ShiftLeft) ->
+      guarded3(state, rt_ops.shl_general, left, right)
+    binop.Bitwise(binop.ShiftRight) ->
+      guarded3(state, rt_ops.shr_general, left, right)
     binop.Bitwise(binop.ShiftRightUnsigned) ->
-      guarded3(state, rt_ops.ushr, left, right)
-    binop.Compare(binop.Less) -> cmp(rt_ops.lt)
-    binop.Compare(binop.LessEq) -> cmp(rt_ops.le)
-    binop.Compare(binop.Greater) -> cmp(rt_ops.gt)
-    binop.Compare(binop.GreaterEq) -> cmp(rt_ops.ge)
-    binop.Equality(binop.LooseEq) -> cmp(rt_ops.eq)
-    binop.Equality(binop.LooseNotEq) -> cmp(rt_ops.neq)
+      guarded3(state, rt_ops.ushr_general, left, right)
+    binop.Compare(binop.Less) -> cmp(rt_ops.lt_i32)
+    binop.Compare(binop.LessEq) -> cmp(rt_ops.le_i32)
+    binop.Compare(binop.Greater) -> cmp(rt_ops.gt_i32)
+    binop.Compare(binop.GreaterEq) -> cmp(rt_ops.ge_i32)
+    binop.Equality(binop.LooseEq) -> cmp(rt_ops.eq_i32_general)
+    binop.Equality(binop.LooseNotEq) -> cmp(rt_ops.neq_i32)
     binop.Equality(binop.StrictEq) ->
       Ok(#(mk_bool(rt_ops.strict_eq(left, right)), state))
     binop.Equality(binop.StrictNotEq) ->
@@ -6448,7 +6439,7 @@ fn unaryop_general(
   case kind {
     opcode.Neg -> guarded2(state, rt_ops.neg, operand)
     opcode.Pos -> guarded2(state, rt_ops.plus, operand)
-    opcode.BitNot -> guarded2(state, rt_ops.bitnot, operand)
+    opcode.BitNot -> guarded2(state, rt_ops.bitnot_general, operand)
     opcode.LogicalNot -> Ok(#(mk_bool(!rt_val.to_boolean(operand)), state))
     opcode.Void -> Ok(#(mk_undefined(), state))
   }
@@ -6679,7 +6670,7 @@ fn create_data_property_or_throw(
 
 fn object_key_display(k: ObjectKey) -> String {
   case k {
-    StringKey(pk) -> key.display_string(pk)
+    StringKey(pk) -> key.display_text(pk)
     SymbolKey(sym) -> types.symbol_descriptive_string(sym)
   }
 }
@@ -7150,17 +7141,17 @@ fn async_iterator_object(agent: Agent, iterable: JsVal) -> #(JsVal, Agent) {
 fn delegate_target(
   state: State,
   record: JsVal,
-) -> Result(#(JsVal, JsVal, State), StepExit) {
+) -> Result(#(types.IteratorRecord, State), StepExit) {
   case rt_lang.record_parts(state.agent, record) {
-    Some(parts) -> Ok(#(parts.iterator, parts.next_method, state))
+    Some(parts) -> Ok(#(parts, state))
     None -> {
-      use #(next_fn, state) <- result.map(guarded3(
+      use #(next_method, state) <- result.map(guarded3(
         state,
         rt_obj.get_prop,
         record,
         StringKey(Named("next")),
       ))
-      #(record, next_fn, state)
+      #(types.IteratorRecord(iterator: record, next_method:), state)
     }
   }
 }
@@ -7219,7 +7210,7 @@ fn accessor_as_frame(
   k: key.PropertyKey,
   rest: List(JsVal),
   drive: Drive,
-  then: Option(fn(State, JsVal) -> Result(State, StepExit)),
+  then: Option(fn(JsVal, State) -> Result(State, StepExit)),
   otherwise: fn() -> Result(State, StepExit),
 ) -> Result(State, StepExit) {
   case k {
@@ -7247,7 +7238,7 @@ fn setter_as_frame(
     key.Named(_) ->
       case kernel.find_accessor(state.agent, receiver, k) {
         kernel.Accessor(set: Some(f), ..) -> {
-          let finish = fn(state: State, _) {
+          let finish = fn(_, state: State) {
             Ok(State(..state, stack: stack_after, pc: state.pc + 1))
           }
           call_as_frame(
@@ -7275,7 +7266,7 @@ fn call_as_frame(
   args: List(JsVal),
   rest: List(JsVal),
   drive: Drive,
-  then: Option(fn(State, JsVal) -> Result(State, StepExit)),
+  then: Option(fn(JsVal, State) -> Result(State, StepExit)),
   otherwise: fn() -> Result(State, StepExit),
 ) -> Result(State, StepExit) {
   case kernel.cell_of(state.agent, f) {

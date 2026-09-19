@@ -1,6 +1,6 @@
 %% AtomVM shim: there is no filesystem in the browser.
 %%
-%% arc_tz_ffi probes /etc/localtime, /etc/timezone and the zoneinfo tree
+%% arc_time_zone_ffi probes /etc/localtime, /etc/timezone and the zoneinfo tree
 %% through prim_file to find the host time zone, and already treats "no
 %% zoneinfo" as UTC. Without this module AtomVM's loader prints three lines
 %% ("prim_file.beam is not a valid BEAM file" …) to stdout — straight into the

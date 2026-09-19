@@ -1,4 +1,4 @@
-//// language-sensitive case mappings SpecialCasing.txt tailors
+// language-sensitive case mappings specialcasing.txt tailors
 
 import gleam/list
 import gleam/string

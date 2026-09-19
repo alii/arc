@@ -1,8 +1,7 @@
-//// helpers for writing host functions; validators modeled on node's
+// helpers for writing host functions; validators modeled on node's
 
 import arc/bytecode/error_kind.{type ErrorKind, RangeError, TypeError}
 import arc/bytecode/key
-import arc/host_hooks
 import arc/internal/unsafe
 import arc/rt/async as rt_async
 import arc/rt/builtins/common
@@ -48,6 +47,11 @@ pub type Context(host) {
 pub type HostFn(host) =
   fn(Context(host), List(JsVal), JsVal) ->
     #(Result(JsVal, JsVal), Context(host))
+
+/// a named host function of a namespace or class
+pub type HostMethod(host) {
+  HostMethod(name: String, arity: Int, call: HostFn(host))
+}
 
 pub fn from_agent(st: Agent, brand: Brand(host)) -> Context(host) {
   Context(agent: st, new_target: mk_undefined(), brand:)
@@ -305,13 +309,6 @@ fn is_promise(st: Agent, h: Handle) -> Bool {
   }
 }
 
-pub type HostHooks =
-  host_hooks.HostHooks
-
-pub fn default_host_hooks() -> HostHooks {
-  host_hooks.default_host_hooks()
-}
-
 pub fn array(
   ctx: Context(host),
   values: List(JsVal),
@@ -445,7 +442,7 @@ pub fn define_global(
 pub fn define_namespace(
   ctx: Context(host),
   name: String,
-  methods: List(#(String, Int, HostFn(host))),
+  methods: List(HostMethod(host)),
 ) -> Context(host) {
   let st = ctx.agent
   let #(props, st) = alloc_host_methods(st, ctx.brand, methods)
@@ -460,8 +457,8 @@ pub fn class(
   name: String,
   arity: Int,
   constructor: HostFn(host),
-  methods: List(#(String, Int, HostFn(host))),
-  statics: List(#(String, Int, HostFn(host))),
+  methods: List(HostMethod(host)),
+  statics: List(HostMethod(host)),
 ) -> #(JsVal, Context(host)) {
   let st = ctx.agent
   let realm = st.realm
@@ -502,12 +499,12 @@ fn register(
 fn alloc_host_methods(
   st: Agent,
   brand: Brand(host),
-  specs: List(#(String, Int, HostFn(host))),
+  specs: List(HostMethod(host)),
 ) -> #(List(#(String, Property)), Agent) {
   let #(props, st) =
     list.fold(specs, #([], st), fn(acc, spec) {
       let #(props, st) = acc
-      let #(name, arity, impl) = spec
+      let HostMethod(name:, arity:, call: impl) = spec
       let #(id, st) = register(st, brand, name, impl)
       let #(h, st) =
         common.alloc_rooted_native_fn(

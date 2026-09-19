@@ -23,9 +23,9 @@ fn new_state() -> host.Context(host) {
 }
 
 fn run(ctx: host.Context(host), source: String) -> #(Completion(JsVal), Agent) {
-  let assert Ok(#(body, sb)) = parser.parse_script(source)
+  let assert Ok(#(body, scopes)) = parser.parse_script(source)
     as { "parse failed: " <> source }
-  let assert Ok(template) = compiler.compile_script(body, sb)
+  let assert Ok(template) = compiler.compile_script(body, scopes)
     as { "compile failed: " <> source }
   let #(completion, st) = entry.run_script(ctx.agent, template)
   #(completion, rt_async.drain(st))
@@ -35,7 +35,7 @@ fn eval_value(ctx: host.Context(host), source: String) -> JsVal {
   case run(ctx, source) {
     #(NormalCompletion(v), _) -> v
     #(ThrowCompletion(e), st) ->
-      panic as { source <> " threw " <> rt_inspect.inspect(st, e) }
+      panic as { source <> " threw " <> rt_inspect.describe(st, e) }
   }
 }
 

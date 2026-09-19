@@ -6,7 +6,7 @@ import arc/interp/guard
 import arc/interp/resume
 import arc/interp/state.{type State, State}
 import arc/rt/bytecode.{type FuncTemplate}
-import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion} as _
+import arc/rt/call.{type Completion} as rt_call
 import arc/rt/limits
 import arc/rt/realm as rt_realm
 import arc/rt/store as rt_store
@@ -47,8 +47,8 @@ pub fn run(state: State) -> #(Result(JsVal, JsVal), Agent) {
 
 fn to_completion(res: Result(JsVal, JsVal)) -> Completion(JsVal) {
   case res {
-    Ok(v) -> NormalCompletion(v)
-    Error(e) -> ThrowCompletion(e)
+    Ok(v) -> rt_call.NormalCompletion(v)
+    Error(e) -> rt_call.ThrowCompletion(e)
   }
 }
 
@@ -253,8 +253,8 @@ pub fn construct_bytecode(
   })
   let #(completion, agent) = run_construct(agent, fn_h, args, new_target)
   let #(v, agent) = case completion {
-    NormalCompletion(v) -> #(v, agent)
-    ThrowCompletion(e) -> rt_store.throw(agent, e)
+    rt_call.NormalCompletion(v) -> #(v, agent)
+    rt_call.ThrowCompletion(e) -> rt_store.throw(agent, e)
   }
   case classify(v) {
     KHandle(h) -> #(h, agent)
@@ -292,7 +292,7 @@ fn run_construct(
   let m = frames.mark(agent)
   case call.root_this(agent, template, new_target) {
     Error(#(thrown, agent)) -> #(
-      ThrowCompletion(thrown),
+      rt_call.ThrowCompletion(thrown),
       frames.settle(agent, m),
     )
     Ok(#(this, kind, agent)) -> {
@@ -302,7 +302,7 @@ fn run_construct(
           call.root_callee(callee_h, template, env, home_object, flags, unit_id)
         case call.enter_root(agent, callee, this, args, new_target) {
           Error(#(thrown, agent)) -> #(
-            ActivationSettled(ThrowCompletion(thrown)),
+            ActivationSettled(rt_call.ThrowCompletion(thrown)),
             agent,
           )
           Ok(state) -> {
@@ -312,7 +312,7 @@ fn run_construct(
               case res {
                 Ok(v) -> #(ActivationReturned(v, state), state.agent)
                 Error(e) -> #(
-                  ActivationSettled(ThrowCompletion(e)),
+                  ActivationSettled(rt_call.ThrowCompletion(e)),
                   state.agent,
                 )
               }
@@ -325,8 +325,8 @@ fn run_construct(
         ActivationSettled(c) -> #(c, agent)
         ActivationReturned(v, final) ->
           case call.finish_root(kind, v, State(..final, agent:)) {
-            Ok(#(v, agent)) -> #(NormalCompletion(v), agent)
-            Error(#(e, agent)) -> #(ThrowCompletion(e), agent)
+            Ok(#(v, agent)) -> #(rt_call.NormalCompletion(v), agent)
+            Error(#(e, agent)) -> #(rt_call.ThrowCompletion(e), agent)
           }
       }
     }
@@ -339,7 +339,7 @@ type ActivationOutcome {
 }
 
 fn escaped(thrown: JsVal) -> ActivationOutcome {
-  ActivationSettled(ThrowCompletion(thrown))
+  ActivationSettled(rt_call.ThrowCompletion(thrown))
 }
 
 pub fn eval_source(

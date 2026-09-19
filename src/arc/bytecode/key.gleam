@@ -50,7 +50,7 @@ pub fn array_index_of_float(f: Float) -> Option(Int) {
 }
 
 // for humans; use to_text when the string is data
-pub fn display_string(key: PropertyKey) -> String {
+pub fn display_text(key: PropertyKey) -> String {
   case key {
     Index(n) -> int.to_string(n)
     Named(name) -> name
@@ -70,10 +70,6 @@ const uid_separator = "\u{0}"
 
 pub fn private(name: String) -> PropertyKey {
   Private(name)
-}
-
-pub fn private_from_text(text: String) -> PropertyKey {
-  Private(text)
 }
 
 pub fn private_text(name: String, uid: Int) -> String {

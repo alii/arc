@@ -1,7 +1,7 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError}
-import arc/internal/int_math.{floor_div, trunc_div}
+import arc/internal/int_math.{floor_div, pow10, trunc_div}
 import arc/rt/builtins/helpers
-import arc/rt/builtins/options.{get_options_object, opt_get}
+import arc/rt/builtins/options.{get_option, get_options_object}
 import arc/rt/builtins/temporal_common.{
   apply_duration_fields, check_time_duration_range, date_part, days_and_time_ns,
   duration_sign, duration_slot_of, finish_duration, has_calendar_units,
@@ -14,28 +14,25 @@ import arc/rt/builtins/temporal_diff.{
   diff_date_time_core, find_enclosing_window, iso_date_until, larger_time_unit,
   zoned_diff_round_time,
 }
-import arc/rt/builtins/temporal_fields.{
-  get_named, iso_date_add, require_nonempty_fields,
-}
+import arc/rt/builtins/temporal_fields.{iso_date_add, require_nonempty_fields}
 import arc/rt/builtins/temporal_iso.{
   type Duration, type IsoDate, type IsoTime, type SecondsPrecision,
   AutoPrecision, Constrain, Duration, MinutePrecision, SubsecondDigits, add_days,
   check_date_limits, divide_as_float, epoch_days, format_fraction, int_sign,
   iso_date_from_epoch_days, iso_datetime_within_limits, midnight, ns_per_day,
-  ns_per_ms, ns_per_second, ns_per_us, ns_to_time, pow10, time_to_ns,
-  utc_epoch_ns,
+  ns_per_ms, ns_per_second, ns_per_us, ns_to_time, time_to_ns, utc_epoch_ns,
 }
 import arc/rt/builtins/temporal_options.{Compatible}
 import arc/rt/builtins/temporal_rounding.{
-  type FractionalDigits, type RoundingMode, type TimeUnit, type Unit, Day,
-  DigitsAuto, DigitsFixed, HalfExpand, Hour, Microsecond, MicrosecondUnit,
-  Millisecond, MillisecondUnit, Month, Nanosecond, NanosecondUnit, Second,
-  SecondUnit, Trunc, UnitAbsent, UnitAuto, UnitValue, Week, Year,
-  balance_time_ns, get_fractional_digits, get_rounding_increment_option,
-  get_rounding_mode_option, get_unit_option, largest_smaller_msg,
-  largest_smaller_than_smallest, max_unit, read_unit_option, require_time_unit,
-  round_to_increment, singular_unit, time_unit_ns, unit_rank, unit_to_string,
-  valid_increment_for_unit,
+  type FractionalDigits, type RoundingMode, type StringPrecision, type TimeUnit,
+  type Unit, Day, DigitsAuto, DigitsFixed, HalfExpand, Hour, Microsecond,
+  MicrosecondUnit, Millisecond, MillisecondUnit, Month, Nanosecond,
+  NanosecondUnit, Second, SecondUnit, StringPrecision, Trunc, UnitAbsent,
+  UnitAuto, UnitValue, Week, Year, balance_time_ns, get_fractional_digits,
+  get_rounding_increment_option, get_rounding_mode_option, get_unit_option,
+  largest_smaller_msg, largest_smaller_than_smallest, max_unit, read_unit_option,
+  require_time_unit, round_to_increment, singular_unit, time_unit_ns, unit_rank,
+  unit_to_string, valid_increment_for_unit,
 }
 import arc/rt/builtins/temporal_time_zone.{epoch_ns_to_iso_in}
 import arc/rt/builtins/temporal_zoned_ops.{
@@ -200,8 +197,8 @@ pub fn static(
 fn duration_compare(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(a, st) = to_temporal_duration(st, helpers.arg_at(args, 0))
   let #(b, st) = to_temporal_duration(st, helpers.arg_at(args, 1))
-  let #(opts, st) = get_options_object(st, helpers.arg_at(args, 2))
-  let #(relative_to_value, st) = opt_get(st, opts, "relativeTo")
+  let opts = get_options_object(st, helpers.arg_at(args, 2))
+  let #(relative_to_value, st) = get_option(st, opts, "relativeTo")
   let #(relative_to, st) = convert_relative_to(st, relative_to_value)
   let has_cal_units = has_calendar_units(a) || has_calendar_units(b)
   let time_compare = fn(st) {
@@ -290,12 +287,12 @@ pub fn method(
       st,
     )
     DurationToString -> {
-      let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
+      let opts = get_options_object(st, helpers.arg_at(args, 0))
       let #(digits, st) = get_fractional_digits(st, opts)
       let #(mode, st) = get_rounding_mode_option(st, opts, Trunc)
       let #(smallest, st) =
         get_unit_option(st, opts, "smallestUnit", allow_auto: False)
-      let #(precision, unit, inc) =
+      let StringPrecision(precision, unit, inc) =
         rt_val.or_throw(st, duration_string_precision(digits, smallest))
       let d2 =
         rt_val.or_throw(st, case unit == NanosecondUnit && inc == 1 {
@@ -380,7 +377,8 @@ fn duration_round(
       let opts = Some(oh)
       let #(largest, st) =
         read_unit_option(st, opts, "largestUnit", allow_auto: True)
-      let #(relative_to_value, st) = get_named(st, oh, "relativeTo")
+      let #(relative_to_value, st) =
+        rt_val.get_named(st, types.mk_object(oh), "relativeTo", None)
       let #(relative_to, st) = convert_relative_to(st, relative_to_value)
       let #(inc, st) = get_rounding_increment_option(st, opts)
       let #(mode, st) = get_rounding_mode_option(st, opts, HalfExpand)
@@ -582,7 +580,8 @@ fn duration_total(
         None -> rt_val.throw_range_error(st, "invalid unit")
       }
     KHandle(oh) -> {
-      let #(relative_to_value, st) = get_named(st, oh, "relativeTo")
+      let #(relative_to_value, st) =
+        rt_val.get_named(st, types.mk_object(oh), "relativeTo", None)
       let #(relative_to, st) = convert_relative_to(st, relative_to_value)
       let #(unit, st) = get_unit_option(st, Some(oh), "unit", allow_auto: False)
       case unit {
@@ -671,8 +670,8 @@ fn zoned_calendar_total(
   let #(b_date, _) =
     adjust_date_for_time_sign(sign, b_d, time_to_ns(b_t) - time_to_ns(a_t))
   let whole = case unit {
-    Year -> iso_date_until(a_d, b_date, Year).0
-    Month -> iso_date_until(a_d, b_date, Month).1
+    Year -> iso_date_until(a_d, b_date, Year).years
+    Month -> iso_date_until(a_d, b_date, Month).months
     Week -> trunc_div(epoch_days(b_date) - epoch_days(a_d), 7)
     _ -> epoch_days(b_date) - epoch_days(a_d)
   }
@@ -706,8 +705,8 @@ fn plain_calendar_total(
   let target_floor_days = floor_div(target_ns, ns_per_day)
   let target_date = iso_date_from_epoch_days(target_floor_days)
   let whole = case unit {
-    Year -> iso_date_until(relative_date, target_date, Year).0
-    Month -> iso_date_until(relative_date, target_date, Month).1
+    Year -> iso_date_until(relative_date, target_date, Year).years
+    Month -> iso_date_until(relative_date, target_date, Month).months
     _ -> trunc_div(epoch_days(target_date) - epoch_days(relative_date), 7)
   }
   let bound_ns = fn(w: Int) {
@@ -740,12 +739,15 @@ fn fractional_total(
 fn duration_string_precision(
   digits: FractionalDigits,
   smallest: Option(Unit),
-) -> Result(#(SecondsPrecision, TimeUnit, Int), JsError) {
+) -> Result(StringPrecision(TimeUnit), JsError) {
   case smallest {
-    Some(Second) -> Ok(#(SubsecondDigits(0), SecondUnit, 1))
-    Some(Millisecond) -> Ok(#(SubsecondDigits(3), MillisecondUnit, 1))
-    Some(Microsecond) -> Ok(#(SubsecondDigits(6), MicrosecondUnit, 1))
-    Some(Nanosecond) -> Ok(#(SubsecondDigits(9), NanosecondUnit, 1))
+    Some(Second) -> Ok(StringPrecision(SubsecondDigits(0), SecondUnit, 1))
+    Some(Millisecond) ->
+      Ok(StringPrecision(SubsecondDigits(3), MillisecondUnit, 1))
+    Some(Microsecond) ->
+      Ok(StringPrecision(SubsecondDigits(6), MicrosecondUnit, 1))
+    Some(Nanosecond) ->
+      Ok(StringPrecision(SubsecondDigits(9), NanosecondUnit, 1))
     Some(u) ->
       Error(JsError(
         RangeError,
@@ -754,10 +756,10 @@ fn duration_string_precision(
       ))
     None ->
       case digits {
-        DigitsAuto -> Ok(#(AutoPrecision, NanosecondUnit, 1))
-        DigitsFixed(0) -> Ok(#(SubsecondDigits(0), SecondUnit, 1))
+        DigitsAuto -> Ok(StringPrecision(AutoPrecision, NanosecondUnit, 1))
+        DigitsFixed(0) -> Ok(StringPrecision(SubsecondDigits(0), SecondUnit, 1))
         DigitsFixed(n) ->
-          Ok(#(SubsecondDigits(n), NanosecondUnit, pow10(9 - n)))
+          Ok(StringPrecision(SubsecondDigits(n), NanosecondUnit, pow10(9 - n)))
       }
   }
 }

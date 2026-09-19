@@ -40,7 +40,7 @@ pub fn default_print(level: ConsoleLevel, line: String) -> Nil {
   }
 }
 
-pub fn default_host_hooks() -> HostHooks {
+pub fn default() -> HostHooks {
   HostHooks(
     can_block: False,
     monotonic_now: clock.monotonic_now,

@@ -29,7 +29,7 @@ pub fn is_bool(v: JsVal, expected expected: Bool) -> Bool
 pub fn same(a: JsVal, b: JsVal) -> Bool
 
 @external(erlang, "arc_interp_ffi", "cell_of")
-pub fn cell_of(agent: Agent, v: JsVal) -> Cell
+pub fn cell_of(st: Agent, v: JsVal) -> Cell
 
 @external(erlang, "arc_interp_ffi", "capture_env")
 pub fn capture_env(
@@ -38,7 +38,7 @@ pub fn capture_env(
 ) -> EnvTuple
 
 @external(erlang, "arc_interp_ffi", "list_from_array_like")
-pub fn list_from_array_like(agent: Agent, array_like: JsVal) -> List(JsVal)
+pub fn list_from_array_like(st: Agent, array_like: JsVal) -> List(JsVal)
 
 @external(erlang, "arc_rt_ops_ffi", "classified_binop")
 pub fn classified_binop(kind: ClassifiedBinOp, a: JsVal, b: JsVal) -> JsVal
@@ -99,7 +99,7 @@ pub fn neq(a: JsVal, b: JsVal) -> JsVal
 
 @external(erlang, "arc_interp_ffi", "instance_of")
 pub fn instance_of(
-  agent: Agent,
+  st: Agent,
   v: JsVal,
   ctor: JsVal,
   has_instance: SymbolId,
@@ -109,17 +109,17 @@ pub fn instance_of(
 pub fn type_of(store: Store, v: JsVal) -> String
 
 @external(erlang, "arc_interp_ffi", "box_get")
-pub fn box_get(agent: Agent, box: JsVal) -> JsVal
+pub fn box_get(st: Agent, box: JsVal) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "get_field")
-pub fn get_field(agent: Agent, obj: JsVal, key: PropertyKey) -> JsVal
+pub fn get_field(st: Agent, obj: JsVal, key: PropertyKey) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "own_data")
 pub fn own_data(props: Dict(PropertyKey, Property), key: PropertyKey) -> JsVal
 
 @external(erlang, "arc_interp_prop_ffi", "get_global")
 pub fn get_global(
-  agent: Agent,
+  st: Agent,
   lex: Dict(String, LexicalGlobal),
   name: String,
 ) -> JsVal
@@ -159,7 +159,7 @@ pub fn new_object(
 ) -> #(JsVal, List(JsVal), Store)
 
 @external(erlang, "arc_interp_prop_ffi", "new_receiver")
-pub fn new_receiver(agent: Agent, proto: JsVal) -> #(JsVal, Agent)
+pub fn new_receiver(st: Agent, proto: JsVal) -> #(JsVal, Agent)
 
 @external(erlang, "arc_interp_prop_ffi", "define_field")
 pub fn define_field(
@@ -212,9 +212,9 @@ pub type Accessor {
   NoAccessor
 }
 
-// the accessor a plain chain resolves key to, if that is what it holds
+// accessor found by a plain chain lookup of key, if any
 @external(erlang, "arc_interp_prop_ffi", "find_accessor")
-pub fn find_accessor(agent: Agent, obj: JsVal, key: PropertyKey) -> Accessor
+pub fn find_accessor(st: Agent, obj: JsVal, key: PropertyKey) -> Accessor
 
 // for-in keeps its pending keys on the operand stack, never in the heap
 pub type ForInStep {

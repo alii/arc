@@ -219,7 +219,7 @@ pub fn keyword_or_identifier(word: String) -> TokenKind {
   }
 }
 
-pub fn token_kind_to_string(kind: TokenKind) -> String {
+pub fn kind_to_string(kind: TokenKind) -> String {
   case kind {
     Number -> "number"
     StringLiteral -> "string"

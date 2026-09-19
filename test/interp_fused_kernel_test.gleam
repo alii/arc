@@ -10,9 +10,9 @@ import rt_helpers
 
 fn global_epoch_after(source: String) -> Int {
   let st = rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
-  let assert Ok(#(body, sb)) = parser.parse_script(source)
+  let assert Ok(#(body, scopes)) = parser.parse_script(source)
     as { "parse failed: " <> source }
-  let assert Ok(template) = compiler.compile_script(body, sb)
+  let assert Ok(template) = compiler.compile_script(body, scopes)
     as { "compile failed: " <> source }
   let #(_, st) = entry.run_script(st, template)
   st.store.global_epoch
@@ -33,18 +33,18 @@ pub fn global_epoch_test() {
 
 fn run_string(source: String) -> String {
   let st = rt_builtins.new_agent(rt_helpers.quiet_hooks()) |> entry.link
-  let assert Ok(#(body, sb)) = parser.parse_script(source)
+  let assert Ok(#(body, scopes)) = parser.parse_script(source)
     as { "parse failed: " <> source }
-  let assert Ok(template) = compiler.compile_script(body, sb)
+  let assert Ok(template) = compiler.compile_script(body, scopes)
     as { "compile failed: " <> source }
   case entry.run_script(st, template) {
     #(NormalCompletion(v), st) ->
       case classify(v) {
         KStr(s) -> s
-        _ -> panic as { source <> " gave " <> rt_inspect.inspect(st, v) }
+        _ -> panic as { source <> " gave " <> rt_inspect.describe(st, v) }
       }
     #(ThrowCompletion(e), st) ->
-      panic as { source <> " threw " <> rt_inspect.inspect(st, e) }
+      panic as { source <> " threw " <> rt_inspect.describe(st, e) }
   }
 }
 
@@ -453,7 +453,7 @@ pub fn put_global_kernel_test() {
     == "10,20,30,true,ReferenceError,1,false"
 }
 
-pub fn construct_fast_path_test() {
+pub fn construct_kernel_test() {
   assert run_string(
       "function K(a) { this.a = a } K.prototype = { z: 1 };
        var k = new K(5);

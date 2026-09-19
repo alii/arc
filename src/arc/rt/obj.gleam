@@ -14,7 +14,7 @@ import arc/rt/types.{
   KHandle, KNull, KTdz, KUndef, ModuleNamespace, NoElements, Ordinary,
   ParsedDesc, ProxyObj, SAsyncContext, SAsyncGen, SBox, SDisposeCapability,
   SGenerator, SObject, SPromiseData, SShapedObject, ShapeDesc, Store, StringKey,
-  StringObj, SymbolKey, TypedArrayObj, plain_object,
+  StringObj, SymbolKey, TypedArrayObj,
 }
 import arc/rt/utf8
 import arc/rt/val as rt_val
@@ -132,8 +132,8 @@ pub fn as_sobject(cell: Cell) -> Cell {
           dict.insert(
             acc,
             key,
-            DataProperty(
-              value:,
+            types.DataProperty(
+              value: value,
               writable: True,
               enumerable: True,
               configurable: True,
@@ -141,12 +141,12 @@ pub fn as_sobject(cell: Cell) -> Cell {
             ),
           )
         })
-      SObject(
+      types.SObject(
         kind: Ordinary,
-        proto:,
-        props:,
+        proto: proto,
+        props: props,
         symbol_props: [],
-        elements: NoElements,
+        elements: types.NoElements,
         extensible: True,
       )
     }
@@ -192,7 +192,7 @@ fn own_property_of(
               seq: 0,
             )
           False ->
-            DataProperty(
+            types.DataProperty(
               value: v,
               writable: True,
               enumerable: True,
@@ -237,15 +237,13 @@ fn own_property_of(
         Ok(prop) -> Some(prop)
         Error(Nil) ->
           elements.get_option(elements, i)
-          |> option.map(fn(v) {
-            DataProperty(
-              value: v,
-              writable: True,
-              enumerable: True,
-              configurable: True,
-              seq: 0,
-            )
-          })
+          |> option.map(types.DataProperty(
+            value: _,
+            writable: True,
+            enumerable: True,
+            configurable: True,
+            seq: 0,
+          ))
       }
     BytecodeFn(template:, birth: BirthPending(_), ..), Named("length") ->
       Some(birth_prop(types.mk_int(template.length), 0))
@@ -298,7 +296,7 @@ fn own_symbol_property_of(
 
 // §10.4.3.4 step 10
 fn string_length_property(s: String) -> Property {
-  DataProperty(
+  types.DataProperty(
     value: types.mk_int(utf8.length(s)),
     writable: False,
     enumerable: False,
@@ -383,10 +381,11 @@ fn alloc_plain(st: Agent, entries: List(#(String, JsVal))) -> #(Handle, Agent) {
   use seq <- rt_store.cell_new_with(st, list.length(entries))
   let props =
     list.index_map(entries, fn(entry, i) {
+      let #(name, value) = entry
       #(
-        Named(entry.0),
-        DataProperty(
-          value: entry.1,
+        Named(name),
+        types.DataProperty(
+          value: value,
           writable: True,
           enumerable: True,
           configurable: True,
@@ -394,12 +393,12 @@ fn alloc_plain(st: Agent, entries: List(#(String, JsVal))) -> #(Handle, Agent) {
         ),
       )
     })
-  SObject(
+  types.SObject(
     kind: Ordinary,
     proto: Some(object_proto),
     props: dict.from_list(props),
     symbol_props: [],
-    elements: NoElements,
+    elements: types.NoElements,
     extensible: True,
   )
 }
@@ -407,12 +406,12 @@ fn alloc_plain(st: Agent, entries: List(#(String, JsVal))) -> #(Handle, Agent) {
 pub fn new_object(st: Agent, proto: Option(Handle)) -> #(Handle, Agent) {
   rt_store.cell_new(
     st,
-    SObject(
+    types.SObject(
       kind: Ordinary,
-      proto:,
+      proto: proto,
       props: dict.new(),
       symbol_props: [],
-      elements: NoElements,
+      elements: types.NoElements,
       extensible: True,
     ),
   )
@@ -453,7 +452,7 @@ pub fn constructor_props(f: Handle) -> Dict(PropertyKey, Property) {
   dict.from_list([
     #(
       Named("constructor"),
-      DataProperty(
+      types.DataProperty(
         value: types.mk_object(f),
         writable: True,
         enumerable: False,
@@ -464,14 +463,22 @@ pub fn constructor_props(f: Handle) -> Dict(PropertyKey, Property) {
   ])
 }
 
-fn pending_birth(cell: Cell) -> Option(#(Int, String, Option(Handle))) {
+type PendingBirth {
+  PendingBirth(length: Int, name: String, prototype_parent: Option(Handle))
+}
+
+fn pending_birth(cell: Cell) -> Option(PendingBirth) {
   case cell {
     SObject(kind: BytecodeFn(template:, birth: BirthPending(parent), ..), ..) ->
-      Some(#(template.length, option.unwrap(template.name, ""), parent))
+      Some(PendingBirth(
+        template.length,
+        option.unwrap(template.name, ""),
+        parent,
+      ))
     SObject(
       kind: CompiledFn(length:, name:, birth: BirthPending(parent), ..),
       ..,
-    ) -> Some(#(length, name, parent))
+    ) -> Some(PendingBirth(length, name, parent))
     _ -> None
   }
 }
@@ -490,9 +497,9 @@ fn settle_birth(
   st: Agent,
   f: Handle,
   cell: Cell,
-  pending: #(Int, String, Option(Handle)),
+  pending: PendingBirth,
 ) -> Agent {
-  let #(length, name, parent) = pending
+  let PendingBirth(length:, name:, prototype_parent: parent) = pending
   let assert SObject(kind:, props:, ..) = cell
   let props =
     props
@@ -504,7 +511,14 @@ fn settle_birth(
       let #(proto, st) =
         rt_store.cell_new(
           st,
-          plain_object(Ordinary, Some(parent), constructor_props(f)),
+          types.SObject(
+            kind: Ordinary,
+            proto: Some(parent),
+            props: constructor_props(f),
+            symbol_props: [],
+            elements: types.NoElements,
+            extensible: True,
+          ),
         )
       let prototype =
         DataProperty(
@@ -2019,6 +2033,28 @@ pub fn for_in_keys(st: Agent, obj: JsVal) -> #(List(JsVal), Agent) {
   }
 }
 
+// spread of plain data onto a fresh literal in one write
+pub type PlainCopy {
+  Copied(Agent)
+  CopyMiss
+}
+
+@external(erlang, "arc_rt_obj_ffi", "plain_copy_data_props")
+pub fn plain_copy_data_props(
+  st: Agent,
+  target: JsVal,
+  source: JsVal,
+) -> PlainCopy
+
+@external(erlang, "arc_rt_obj_ffi", "set_named")
+pub fn set_named(
+  st: Agent,
+  obj: JsVal,
+  key: String,
+  v: JsVal,
+  strict strict: Bool,
+) -> Agent
+
 // plain chains only, see arc_rt_obj_ffi
 type PlainKeys {
   PlainKeys(List(JsVal))
@@ -2169,13 +2205,13 @@ pub fn prevent_extensions(st: Agent, h: Handle) -> #(Bool, Agent) {
   #(True, st)
 }
 
-// §10.4.6.12 exports map to live binding cells
+// §10.4.6.12 exports map to live binding boxes
 pub fn new_module_namespace(
   st: Agent,
   exports: List(#(String, Handle)),
 ) -> #(Handle, Agent) {
   let to_string_tag =
-    DataProperty(
+    types.DataProperty(
       value: types.mk_string("Module"),
       writable: False,
       enumerable: False,
@@ -3229,20 +3265,20 @@ pub fn set_prop_untyped_key(
 }
 
 // §13.15.2 strict putvalue throws; called by name from arc_rt_obj_ffi
-pub fn set_prop_strict(
+pub fn set_prop_strict_untyped_key(
   st: Agent,
   recv: JsVal,
   key: k,
   v: JsVal,
 ) -> #(Bool, Agent) {
-  let okey = rt_store.as_object_key(key)
-  let #(ok, st) = set_prop(st, recv, okey, v)
+  let object_key = rt_store.as_object_key(key)
+  let #(ok, st) = set_prop(st, recv, object_key, v)
   case ok {
     True -> #(True, st)
     False ->
       rt_val.throw_type_error(
         st,
-        "Cannot assign to read only property '" <> key_text(okey) <> "'",
+        "Cannot assign to read only property '" <> key_text(object_key) <> "'",
       )
   }
 }
@@ -3282,12 +3318,12 @@ pub fn create_data_prop_general(
 ) -> #(Bool, Agent) {
   case types.classify(recv) {
     KHandle(h) -> {
-      let okey = rt_store.as_object_key(key)
+      let object_key = rt_store.as_object_key(key)
       let #(ok, st) =
         define_own_data(
           st,
           h,
-          okey,
+          object_key,
           v,
           writable: True,
           enumerable: True,
@@ -3298,7 +3334,7 @@ pub fn create_data_prop_general(
         False ->
           rt_val.throw_type_error(
             st,
-            "Cannot define property '" <> key_text(okey) <> "'",
+            "Cannot define property '" <> key_text(object_key) <> "'",
           )
       }
     }
@@ -3317,7 +3353,7 @@ pub fn create_data_prop_general(
   }
 }
 
-// mapped is undefined or a cons-list of param cells
+// mapped is undefined or a cons-list of param boxes
 pub fn new_arguments(
   st: Agent,
   args: List(JsVal),
@@ -3345,16 +3381,16 @@ pub fn new_arguments(
   let #(h, st) = {
     use seq <- rt_store.cell_new_with(st, 2)
     let length_prop =
-      DataProperty(
+      types.DataProperty(
         value: types.mk_int(len),
         writable: True,
         enumerable: False,
         configurable: True,
-        seq:,
+        seq: seq,
       )
     let callee_prop = case mapped_boxes {
       Some(_) ->
-        DataProperty(
+        types.DataProperty(
           value: callee,
           writable: True,
           enumerable: False,

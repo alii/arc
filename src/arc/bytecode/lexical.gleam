@@ -4,18 +4,18 @@ import gleam/option.{type Option, None, Some}
 
 // §9.1.1.3 function env slots, like quickjs pseudo vars
 pub type LexicalRef {
-  RefThis
-  RefActiveFunc
-  RefHomeObject
-  RefNewTarget
+  ThisRef
+  ActiveFuncRef
+  HomeObjectRef
+  NewTargetRef
 }
 
 // order must match interp/call.setup_frame
 pub const all_lexical_refs = [
-  RefThis,
-  RefActiveFunc,
-  RefHomeObject,
-  RefNewTarget,
+  ThisRef,
+  ActiveFuncRef,
+  HomeObjectRef,
+  NewTargetRef,
 ]
 
 pub type LexicalSlots {
@@ -50,20 +50,20 @@ pub fn slot_of(slots: LexicalSlots, ref: LexicalRef) -> Option(Int) {
     OwnedLexicalSlots(base) -> Some(base + ref_offset(ref))
     CapturedLexicalSlots(this:, active_func:, home_object:, new_target:) ->
       case ref {
-        RefThis -> this
-        RefActiveFunc -> active_func
-        RefHomeObject -> home_object
-        RefNewTarget -> new_target
+        ThisRef -> this
+        ActiveFuncRef -> active_func
+        HomeObjectRef -> home_object
+        NewTargetRef -> new_target
       }
   }
 }
 
 pub fn ref_offset(ref: LexicalRef) -> Int {
   case ref {
-    RefThis -> 0
-    RefActiveFunc -> 1
-    RefHomeObject -> 2
-    RefNewTarget -> 3
+    ThisRef -> 0
+    ActiveFuncRef -> 1
+    HomeObjectRef -> 2
+    NewTargetRef -> 3
   }
 }
 
@@ -110,19 +110,19 @@ pub fn refs_and(a: LexicalRefs, b: LexicalRefs) -> LexicalRefs {
 
 pub fn refs_present(d: Dict(LexicalRef, a)) -> LexicalRefs {
   LexicalRefs(
-    this: dict.has_key(d, RefThis),
-    active_func: dict.has_key(d, RefActiveFunc),
-    home_object: dict.has_key(d, RefHomeObject),
-    new_target: dict.has_key(d, RefNewTarget),
+    this: dict.has_key(d, ThisRef),
+    active_func: dict.has_key(d, ActiveFuncRef),
+    home_object: dict.has_key(d, HomeObjectRef),
+    new_target: dict.has_key(d, NewTargetRef),
   )
 }
 
 pub fn refs_get(refs: LexicalRefs, ref: LexicalRef) -> Bool {
   case ref {
-    RefThis -> refs.this
-    RefActiveFunc -> refs.active_func
-    RefHomeObject -> refs.home_object
-    RefNewTarget -> refs.new_target
+    ThisRef -> refs.this
+    ActiveFuncRef -> refs.active_func
+    HomeObjectRef -> refs.home_object
+    NewTargetRef -> refs.new_target
   }
 }
 

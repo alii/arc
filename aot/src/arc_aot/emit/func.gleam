@@ -51,23 +51,23 @@ type ShapeFlags {
 
 fn derive_flags(shape: FnShape) -> ShapeFlags {
   case shape {
-    FnDecl(is_gen:, is_async:) ->
+    FnDecl(is_generator:, is_async:) ->
       ShapeFlags(
         is_arrow: False,
-        is_generator: is_gen,
+        is_generator:,
         is_async:,
-        is_constructor: !is_gen && !is_async,
+        is_constructor: !is_generator && !is_async,
         is_class_constructor: False,
         is_derived_constructor: False,
         is_method: False,
         self_name: None,
       )
-    FnExpr(self_name:, is_gen:, is_async:) ->
+    FnExpr(self_name:, is_generator:, is_async:) ->
       ShapeFlags(
         is_arrow: False,
-        is_generator: is_gen,
+        is_generator:,
         is_async:,
-        is_constructor: !is_gen && !is_async,
+        is_constructor: !is_generator && !is_async,
         is_class_constructor: False,
         is_derived_constructor: False,
         is_method: False,
@@ -84,10 +84,10 @@ fn derive_flags(shape: FnShape) -> ShapeFlags {
         is_method: False,
         self_name: None,
       )
-    Method(is_gen:, is_async:) ->
+    Method(is_generator:, is_async:) ->
       ShapeFlags(
         is_arrow: False,
-        is_generator: is_gen,
+        is_generator:,
         is_async:,
         is_constructor: False,
         is_class_constructor: False,
@@ -95,14 +95,14 @@ fn derive_flags(shape: FnShape) -> ShapeFlags {
         is_method: True,
         self_name: None,
       )
-    ClassCtor(derived:, ..) ->
+    ClassCtor(is_derived:, ..) ->
       ShapeFlags(
         is_arrow: False,
         is_generator: False,
         is_async: False,
         is_constructor: True,
         is_class_constructor: True,
-        is_derived_constructor: derived,
+        is_derived_constructor: is_derived,
         is_method: False,
         self_name: None,
       )
@@ -144,7 +144,7 @@ fn derive_field_init(
         FieldInitAfterSuper -> FieldInitAfterSuper
         _ -> NoFieldInit
       }
-    ClassCtor(derived: True, has_field_init: True, ..) -> FieldInitAfterSuper
+    ClassCtor(is_derived: True, has_field_init: True, ..) -> FieldInitAfterSuper
     _ -> NoFieldInit
   }
 }
@@ -198,10 +198,10 @@ pub fn seed_capture_slots(e: Emitter, info: FunctionInfo) -> Emitter {
 
 fn lexical_capture_name(ref: lexical.LexicalRef) -> String {
   case ref {
-    lexical.RefThis -> "this_cap"
-    lexical.RefActiveFunc -> "func_cap"
-    lexical.RefHomeObject -> "home_cap"
-    lexical.RefNewTarget -> "new_target_cap"
+    lexical.ThisRef -> "this_cap"
+    lexical.ActiveFuncRef -> "func_cap"
+    lexical.HomeObjectRef -> "home_cap"
+    lexical.NewTargetRef -> "new_target_cap"
   }
 }
 
@@ -354,7 +354,7 @@ fn init_self_name(
       case dict.get(scope.get(e.scope_tree, e.fn_scope).bindings, fname) {
         Ok(b) if b.kind == FnNameBinding -> {
           let assert Some(af_slot) =
-            lexical.slot_of(info.lexical, lexical.RefActiveFunc)
+            lexical.slot_of(info.lexical, lexical.ActiveFuncRef)
           let af = ir.Var(state.get_slot_var(e, af_slot))
           let e =
             Emitter(
@@ -487,14 +487,14 @@ fn refs_args_opt(oe: Option(ast.Expression)) -> Bool {
   }
 }
 
-fn refs_args_key(k: ast.PropertyKey) -> Bool {
+fn refs_args_key(k: ast.PropertyName) -> Bool {
   case k {
-    ast.KeyComputed(expression:) -> refs_args_expr(expression)
-    ast.KeyIdentifier(..)
-    | ast.KeyString(..)
-    | ast.KeyNumber(..)
-    | ast.KeyBigInt(..)
-    | ast.KeyPrivate(..) -> False
+    ast.ComputedName(expression:) -> refs_args_expr(expression)
+    ast.IdentifierName(..)
+    | ast.StringName(..)
+    | ast.NumberName(..)
+    | ast.BigIntName(..)
+    | ast.PrivateName(..) -> False
   }
 }
 
@@ -702,14 +702,14 @@ fn needs_args_object_opt(oe: Option(ast.Expression)) -> Bool {
   }
 }
 
-fn needs_args_object_key(k: ast.PropertyKey) -> Bool {
+fn needs_args_object_key(k: ast.PropertyName) -> Bool {
   case k {
-    ast.KeyComputed(expression:) -> needs_args_object_expr(expression)
-    ast.KeyIdentifier(..)
-    | ast.KeyString(..)
-    | ast.KeyNumber(..)
-    | ast.KeyBigInt(..)
-    | ast.KeyPrivate(..) -> False
+    ast.ComputedName(expression:) -> needs_args_object_expr(expression)
+    ast.IdentifierName(..)
+    | ast.StringName(..)
+    | ast.NumberName(..)
+    | ast.BigIntName(..)
+    | ast.PrivateName(..) -> False
   }
 }
 
@@ -906,14 +906,14 @@ fn refs_frame_opt(
   }
 }
 
-fn refs_frame_key(k: ast.PropertyKey, count_this count_this: Bool) -> Bool {
+fn refs_frame_key(k: ast.PropertyName, count_this count_this: Bool) -> Bool {
   case k {
-    ast.KeyComputed(expression:) -> refs_frame_expr(expression, count_this)
-    ast.KeyIdentifier(..)
-    | ast.KeyString(..)
-    | ast.KeyNumber(..)
-    | ast.KeyBigInt(..)
-    | ast.KeyPrivate(..) -> False
+    ast.ComputedName(expression:) -> refs_frame_expr(expression, count_this)
+    ast.IdentifierName(..)
+    | ast.StringName(..)
+    | ast.NumberName(..)
+    | ast.BigIntName(..)
+    | ast.PrivateName(..) -> False
   }
 }
 
@@ -1164,11 +1164,14 @@ fn direct_abi_shape(
   body: FnBody,
 ) -> Option(DirectAbi) {
   let #(shape_ok, is_arrow) = case shape {
-    FnDecl(is_gen: False, is_async: False) -> #(True, False)
-    FnExpr(is_gen: False, is_async: False, self_name: None) -> #(True, False)
+    FnDecl(is_generator: False, is_async: False) -> #(True, False)
+    FnExpr(is_generator: False, is_async: False, self_name: None) -> #(
+      True,
+      False,
+    )
     Arrow(is_async: False) -> #(True, True)
-    Method(is_gen: False, is_async: False) -> #(True, False)
-    ClassCtor(derived: False, has_field_init: False, ..) -> #(True, False)
+    Method(is_generator: False, is_async: False) -> #(True, False)
+    ClassCtor(is_derived: False, has_field_init: False, ..) -> #(True, False)
     _ -> #(False, False)
   }
   case shape_ok {
@@ -1199,8 +1202,7 @@ fn init_arguments(
   is_arrow is_arrow: Bool,
   uses_args uses_args: Bool,
   fixed fixed: List(ast.Pattern),
-  non_simple non_simple: Bool,
-  has_rest has_rest: Bool,
+  unmapped unmapped: Bool,
   k k: Next,
 ) -> EmitResult {
   case is_arrow || !uses_args {
@@ -1210,7 +1212,7 @@ fn init_arguments(
         Error(Nil) -> k(e)
         Ok(b) -> {
           // mapped only for sloppy simple params, §10.2.11 step 18
-          use mapped, e <- build_mapped_boxes(e, fixed, non_simple || has_rest)
+          use mapped, e <- build_mapped_boxes(e, fixed, unmapped:)
           use callee, e <- cps.let_(
             e,
             ir.TermOp(ir.TupleGet(1), [ir.Var(frame_param)]),
@@ -1262,7 +1264,7 @@ fn hoist_fn_decls(
       let #(child_id, e) = state.pop_child_fn(e)
       use #(ctree, e) <- result.try(emit_function(
         e,
-        FnDecl(is_gen: is_generator, is_async:),
+        FnDecl(is_generator:, is_async:),
         Some(name),
         params,
         StmtBody(body),
@@ -1325,8 +1327,7 @@ pub fn emit_prologue(
   let unmapped = non_simple || rest_param != None
   let init_arguments_if = fn(e, when: Bool, k) {
     case when {
-      True ->
-        init_arguments(e, is_arrow, uses_args, fixed, non_simple, unmapped, k)
+      True -> init_arguments(e, is_arrow:, uses_args:, fixed:, unmapped:, k:)
       False -> k(e)
     }
   }
@@ -1488,7 +1489,7 @@ fn seed_direct_this(
 ) -> EmitResult {
   case takes_this, info.lexical {
     True, lexical.OwnedLexicalSlots(base:) -> {
-      let slot = base + lexical.ref_offset(lexical.RefThis)
+      let slot = base + lexical.ref_offset(lexical.ThisRef)
       k(state.set_slot_var(e, slot, direct_this_param))
     }
     _, _ -> k(e)
@@ -1591,10 +1592,10 @@ fn shim_walk(
   }
 }
 
-fn atom_bool(rc: state.IrConsts, value b: Bool) -> ir.Value {
+fn atom_bool(consts: state.IrConsts, value b: Bool) -> ir.Value {
   case b {
-    True -> rc.true_
-    False -> rc.false_
+    True -> consts.true_
+    False -> consts.false_
   }
 }
 
@@ -1608,49 +1609,49 @@ fn emit_closure_alloc(
   capture_vals capture_vals: List(ir.Value),
   direct_entry direct_entry: Option(DirectEntryFn),
 ) -> #(ir.Expr, Emitter) {
-  let rc = e.consts
+  let consts = e.consts
   // must match arc/rt/types.FnFlags field order
   let flags = [
     ir.ConstAtom("fn_flags"),
-    atom_bool(rc, sf.is_constructor),
-    atom_bool(rc, sf.is_class_constructor),
-    atom_bool(rc, sf.is_derived_constructor),
-    atom_bool(rc, sf.is_arrow),
-    atom_bool(rc, sf.is_method),
-    atom_bool(rc, sf.is_generator),
-    atom_bool(rc, sf.is_async),
-    atom_bool(rc, is_strict),
+    atom_bool(consts, sf.is_constructor),
+    atom_bool(consts, sf.is_class_constructor),
+    atom_bool(consts, sf.is_derived_constructor),
+    atom_bool(consts, sf.is_arrow),
+    atom_bool(consts, sf.is_method),
+    atom_bool(consts, sf.is_generator),
+    atom_bool(consts, sf.is_async),
+    atom_bool(consts, is_strict),
   ]
   let name_bin = case js_name {
     Some(n) -> ir.ConstBinary(bit_array.from_string(n))
-    None -> rc.empty_bin
+    None -> consts.empty_bin
   }
   anf.run(
     {
-      use fun <- anf.then(anf.bind(ir.MakeClosure(fn_name, capture_vals, 2)))
+      use fun <- anf.then(anf.let_(ir.MakeClosure(fn_name, capture_vals, 2)))
       use flags_t <- anf.then(anf.make_tuple(flags))
       use direct_entry_v <- anf.then(case direct_entry {
         None -> anf.pure(ir.ConstAtom("none"))
-        Some(DirectEntryFn(name: sfn, arity:, takes_this:)) -> {
+        Some(DirectEntryFn(name: entry_name, arity:, takes_this:)) -> {
           let cls_arity = case takes_this {
             True -> arity + 1
             False -> arity
           }
-          use scls <- anf.then(
-            anf.bind(ir.MakeClosure(sfn, capture_vals, cls_arity)),
+          use entry_closure <- anf.then(
+            anf.let_(ir.MakeClosure(entry_name, capture_vals, cls_arity)),
           )
           use inner <- anf.then(
             anf.make_tuple([
               ir.ConstAtom("direct_entry"),
-              scls,
+              entry_closure,
               ir.ConstI32(arity),
-              atom_bool(rc, takes_this),
+              atom_bool(consts, takes_this),
             ]),
           )
           anf.make_tuple([ir.ConstAtom("some"), inner])
         }
       })
-      anf.host("new_function", [
+      anf.host("new_closure", [
         fun,
         flags_t,
         name_bin,
@@ -1764,10 +1765,10 @@ fn compile_function(
         }
         Some(DirectAbi(arity:, takes_this:)) -> {
           let direct_fn_name = case takes_this {
-            True -> fn_name <> "_t"
-            False -> fn_name <> "_s"
+            True -> fn_name <> "_direct_this"
+            False -> fn_name <> "_direct"
           }
-          use #(sbody, e_child) <- result.try(emit_direct_body(
+          use #(direct_body, e_child) <- result.try(emit_direct_body(
             e_child,
             fixed,
             body,
@@ -1789,7 +1790,7 @@ fn compile_function(
                 ),
                 result: [ir.TTerm],
                 locals: [],
-                body: sbody,
+                body: direct_body,
               ),
             )
           let e_child =

@@ -1,7 +1,7 @@
 -module(aot_profile_ffi).
--export([trace_on/1, trace_off/0, reset/0, top_n/1, alloc_bytes/0,
+-export([trace_on/1, trace_off/0, trace_reset/0, top_n/1, alloc_bytes/0,
          all_mods/0, module_total/1, count_of/3, bench_op/4,
-         count_pdict_gets/2, probe_jsf/2, eprof_run/2]).
+         count_pdict_gets/2, probe_fns/2, eprof_run/2]).
 
 mods() ->
     [
@@ -15,13 +15,14 @@ mods() ->
      'arc@rt@class',
      'arc@rt@async',
      'arc@rt@types',
-     'arc@vm@internal@ordered_entries',
+     'arc@internal@ordered_entries',
      arc_rt_call_ffi,
      arc_rt_call_ic_ffi,
      arc_rt_store_ffi,
      arc_rt_ops_ffi,
      arc_rt_val_ffi,
      arc_rt_obj_ffi,
+     arc_rt_obj_ic_ffi,
      'gleam@dict', 'gleam@list', 'gleam@option',
      gleam_stdlib
     ].
@@ -43,7 +44,7 @@ trace_off() ->
     erlang:trace(self(), false, [call]),
     nil.
 
-reset() ->
+trace_reset() ->
     erlang:trace_pattern({'_','_','_'}, false, [call_time, local]),
     erlang:trace_pattern({'_','_','_'}, false, [call_time]),
     nil.
@@ -149,12 +150,15 @@ mod_funs(Mod) ->
 
 eprof_run(Mod, St) ->
     _ = code:ensure_loaded(Mod),
-    Jsf = [{list_to_atom("jsf_" ++ integer_to_list(N) ++ S), A}
+    Jsf = [{list_to_atom("fn_" ++ integer_to_list(N) ++ S), A}
            || N <- lists:seq(0, 80),
-              {S, A} <- [{"", 3}, {"_s", 1}, {"_s", 2}, {"_s", 3}, {"_s", 4},
-                         {"_s", 5}, {"_s", 6}, {"_s", 7}, {"_s", 8},
-                         {"_t", 2}, {"_t", 3}, {"_t", 4}, {"_t", 5},
-                         {"_t", 6}, {"_t", 7}, {"_t", 8}]],
+              {S, A} <- [{"", 3}, {"_direct", 1}, {"_direct", 2},
+                         {"_direct", 3}, {"_direct", 4}, {"_direct", 5},
+                         {"_direct", 6}, {"_direct", 7}, {"_direct", 8},
+                         {"_direct_this", 2}, {"_direct_this", 3},
+                         {"_direct_this", 4}, {"_direct_this", 5},
+                         {"_direct_this", 6}, {"_direct_this", 7},
+                         {"_direct_this", 8}]],
     Bifs = [{erlang, get, 1}, {erlang, put, 2}, {erlang, element, 2},
             {erlang, setelement, 3}, {erlang, is_tuple, 1},
             {erlang, is_atom, 1}, {erlang, is_map, 1}, {erlang, '=:=', 2},
@@ -163,7 +167,7 @@ eprof_run(Mod, St) ->
     AllFuns = mod_funs(Mod),
     Jn = [{F, A} || {F, A} <- AllFuns,
                     case atom_to_list(F) of
-                        "jsf_" ++ _ -> false;
+                        "fn_" ++ _ -> false;
                         "js_main" ++ _ -> false;
                         "module_info" ++ _ -> false;
                         _ -> true
@@ -202,7 +206,7 @@ eprof_run(Mod, St) ->
           io:format("      ~-30s ~10B~n",
                     [io_lib:format("~p/~p", [F,A]), C])
       end, lists:sublist(JnRows, 25)),
-    io:format("  jsf_N by us (call_time; own excl. children):~n", []),
+    io:format("  fn_N by us (call_time; own excl. children):~n", []),
     Rows = lists:filtermap(
              fun({F,A}) ->
                  case erlang:trace_info({Mod,F,A}, call_time) of
@@ -212,7 +216,7 @@ eprof_run(Mod, St) ->
                  end
              end, Jsf),
     Total = lists:sum([U || {U,_,_,_} <- Rows]),
-    io:format("    TOTAL jsf us: ~B~n", [Total]),
+    io:format("    TOTAL fn us: ~B~n", [Total]),
     lists:foreach(
       fun({U,C,F,A}) ->
           io:format("    ~-22s ~10B  ~8B us  ~6B ns/call~n",
@@ -223,11 +227,11 @@ eprof_run(Mod, St) ->
     erlang:trace_pattern({'_','_','_'}, false, [call_time]),
     nil.
 
-probe_jsf(Mod, St) ->
+probe_fns(Mod, St) ->
     _ = code:ensure_loaded(Mod),
     Exports = try Mod:module_info(exports) catch _:_ -> [] end,
     Jsf = [{F,A} || {F,A} <- Exports,
-                    case atom_to_list(F) of "jsf_" ++ _ -> true; _ -> false end],
+                    case atom_to_list(F) of "fn_" ++ _ -> true; _ -> false end],
     erlang:trace_pattern({'_','_','_'}, false, [call_time, local]),
     erlang:trace_pattern({'_','_','_'}, false, [call_count]),
     _ = [erlang:trace_pattern({Mod,F,A}, true, [call_time]) || {F,A} <- Jsf],

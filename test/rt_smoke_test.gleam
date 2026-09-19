@@ -99,10 +99,12 @@ pub fn shaped_set_transitions_test() {
   assert ok
   let #(ok, st) = rt_obj.set_prop(st, mk_object(a), x, mk_int(4))
   assert ok
-  let assert types.SShapedObject(shape_id: sa, ..) = rt_store.cell_get(st, a)
-  let assert types.SShapedObject(shape_id: sb, ..) = rt_store.cell_get(st, b)
-  assert sa == 2
-  assert sb == 1
+  let assert types.SShapedObject(shape_id: shape_a, ..) =
+    rt_store.cell_get(st, a)
+  let assert types.SShapedObject(shape_id: shape_b, ..) =
+    rt_store.cell_get(st, b)
+  assert shape_a == 2
+  assert shape_b == 1
   let #(ax, st) = rt_obj.get_prop(st, mk_object(a), x)
   let #(ay, st) = rt_obj.get_prop(st, mk_object(a), y)
   let #(bx, st) = rt_obj.get_prop(st, mk_object(b), x)

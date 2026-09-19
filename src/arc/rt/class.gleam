@@ -22,7 +22,7 @@ fn priv_key_text(v: JsVal) -> String {
 
 fn object_key_display(k: ObjectKey) -> String {
   case k {
-    StringKey(pk) -> key.display_string(pk)
+    StringKey(pk) -> key.display_text(pk)
     SymbolKey(sym) -> types.symbol_descriptive_string(sym)
   }
 }
@@ -214,7 +214,7 @@ pub fn define_method(
 // symbol key names the fn "[description]"
 fn key_fn_name(key: ObjectKey) -> String {
   case key {
-    StringKey(pk) -> key.display_string(pk)
+    StringKey(pk) -> key.display_text(pk)
     SymbolKey(sym) ->
       case types.symbol_description(sym) {
         Some(d) -> "[" <> d <> "]"
@@ -224,7 +224,7 @@ fn key_fn_name(key: ObjectKey) -> String {
 }
 
 // §7.3.28 privatefieldadd, bypasses defineownproperty
-pub fn private_define(
+pub fn private_field_add(
   st: Agent,
   obj: Handle,
   priv_key: JsVal,
@@ -232,11 +232,11 @@ pub fn private_define(
 ) -> Agent {
   let text = priv_key_text(priv_key)
   let st = check_private_add(st, obj, text)
-  raw_define_private_data(st, obj, Private(text), v, writable: True)
+  write_private_data(st, obj, Private(text), v, writable: True)
 }
 
 // §7.3.29; home_object already set at class definition
-pub fn define_private(
+pub fn private_method_add(
   st: Agent,
   obj: Handle,
   priv_key: JsVal,
@@ -249,7 +249,7 @@ pub fn define_private(
     // non-writable so private set rejects methods
     InstallMethod | InstallStatic -> {
       let st = check_private_add(st, obj, text)
-      raw_define_private_data(st, obj, key, fn_v, writable: False)
+      write_private_data(st, obj, key, fn_v, writable: False)
     }
     // same accessor half twice is a typeerror
     InstallGetter | InstallStaticGetter | InstallSetter | InstallStaticSetter -> {
@@ -273,7 +273,7 @@ pub fn define_private(
         Some(DataProperty(..)) ->
           throw_private_double_init(st, text, "private accessor ")
       }
-      raw_merge_private_accessor(st, obj, key, existing, fn_v, is_getter)
+      merge_private_accessor(st, obj, key, existing, fn_v, is_getter)
     }
   }
 }
@@ -305,7 +305,7 @@ fn throw_private_double_init(st: Agent, text: String, kind: String) -> a {
   )
 }
 
-fn raw_define_private_data(
+fn write_private_data(
   st: Agent,
   obj: Handle,
   key: PropertyKey,
@@ -315,7 +315,7 @@ fn raw_define_private_data(
   let #(seq, st) = rt_store.next_prop_seq(st)
   rt_store.cell_update(st, obj, fn(cell) {
     let assert SObject(props:, ..) as cell = rt_obj.as_sobject(cell)
-      as "define_private target is not an SObject"
+      as "private_method_add target is not an SObject"
     SObject(
       ..cell,
       props: dict.insert(
@@ -333,7 +333,7 @@ fn raw_define_private_data(
   })
 }
 
-fn raw_merge_private_accessor(
+fn merge_private_accessor(
   st: Agent,
   obj: Handle,
   key: PropertyKey,
@@ -355,7 +355,7 @@ fn raw_merge_private_accessor(
   }
   rt_store.cell_update(st, obj, fn(cell) {
     let assert SObject(props:, ..) as cell = rt_obj.as_sobject(cell)
-      as "define_private target is not an SObject"
+      as "private_method_add target is not an SObject"
     SObject(
       ..cell,
       props: dict.insert(

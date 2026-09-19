@@ -5,8 +5,8 @@ import arc/rt/elements
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, ArrayObj, KHandle, KUndef, ProxyObj,
-  SObject, StringKey, classify,
+  type Agent, type Handle, type JsVal, ArrayObj, KHandle, KNull, KUndef,
+  ProxyObj, SObject, StringKey, classify,
 }
 import arc/rt/val as rt_val
 import gleam/int
@@ -73,7 +73,7 @@ type ArgList {
   Miss
 }
 
-@external(erlang, "arc_rt_array_ffi", "arg_list")
+@external(erlang, "arc_rt_elements_ffi", "arg_list")
 fn arg_list(st: Agent, arr: JsVal) -> ArgList
 
 // §7.3.20 createlistfromarraylike
@@ -111,5 +111,13 @@ fn collect_array_like(
       let #(v, st) = get_index(st, arr, i)
       collect_array_like(st, arr, i + 1, len, [v, ..acc])
     }
+  }
+}
+
+// typeof, except null reads as null in messages
+pub fn type_name(st: Agent, v: JsVal) -> String {
+  case classify(v) {
+    KNull -> "null"
+    _ -> rt_val.type_of(st, v)
   }
 }

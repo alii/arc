@@ -1,10 +1,11 @@
 import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins/array.{
-  alloc_array, alloc_array_list, generic_set_length, lazy_guard_spread,
-  not_a_function, within_budget, write_species_element,
+  alloc_array, generic_set_length, lazy_guard_spread, not_a_function,
+  within_budget, write_species_element,
 }
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
+import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/elements
 import arc/rt/lang as rt_lang
@@ -100,7 +101,7 @@ fn array_from_array_like(
         _, _ -> rt_lang.SpreadMiss
       }
       use <- lazy_guard_spread(plain, fn(values) {
-        alloc_array_list(st, values)
+        realm_ops.new_array(st, values)
       })
       let #(iter_method, st) =
         rt_obj.get_prop(st, items, SymbolKey(symbol_iterator))
@@ -109,7 +110,15 @@ fn array_from_array_like(
           let #(length, st) = rt_abstract_ops.length_of_array_like(st, items)
           use <- within_budget(st, length)
           let #(target, st) = from_target(st, ctor, [mk_int(length)])
-          array_from_loop(st, items, 0, length, map_fn, this_arg, target)
+          array_from_array_like_loop(
+            st,
+            items,
+            0,
+            length,
+            map_fn,
+            this_arg,
+            target,
+          )
         }
         _ -> {
           use m <- helpers.require_callable(st, iter_method, fn() {
@@ -138,7 +147,7 @@ fn array_from_iterator(
 
 fn array_from_iterator_loop(
   st: Agent,
-  rec: iter_protocol.IteratorRecord,
+  rec: types.IteratorRecord,
   map_fn: Option(JsVal),
   this_arg: JsVal,
   k: Int,
@@ -171,7 +180,7 @@ fn array_from_iterator_loop(
   }
 }
 
-fn array_from_loop(
+fn array_from_array_like_loop(
   st: Agent,
   items: JsVal,
   idx: Int,
@@ -189,7 +198,15 @@ fn array_from_loop(
         Some(mf) -> rt_call.call(st, mf, this_arg, [elem, mk_int(idx)])
       }
       let #(target, st) = from_put(st, target, idx, mapped)
-      array_from_loop(st, items, idx + 1, length, map_fn, this_arg, target)
+      array_from_array_like_loop(
+        st,
+        items,
+        idx + 1,
+        length,
+        map_fn,
+        this_arg,
+        target,
+      )
     }
   }
 }

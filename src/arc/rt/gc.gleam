@@ -47,7 +47,7 @@ fn push_symbol_props_refs(
 ) -> List(Int)
 
 // exhaustive destructure: a new store field must be rooted here
-pub fn roots_of_state(st: Agent) -> List(Int) {
+pub fn agent_roots(st: Agent) -> List(Int) {
   let Store(
     cells: _,
     next_id: _,
@@ -104,7 +104,7 @@ fn push_cell_refs(cell: Cell, acc: List(Int)) -> List(Int) {
     SBox(value:) -> push_refs(value, acc)
     SPromiseData(state:, is_handled: _) -> push_promise_state_refs(state, acc)
     SGenerator(state: _, resume:) -> push_resume_refs(resume, acc)
-    SAsyncGen(state: _, resume:, queue: #(front, back)) -> {
+    SAsyncGen(state: _, resume:, front:, back:) -> {
       let acc = push_resume_refs(resume, acc)
       let acc = list.fold(front, acc, push_request_refs)
       list.fold(back, acc, push_request_refs)
@@ -117,7 +117,8 @@ fn push_cell_refs(cell: Cell, acc: List(Int)) -> List(Int) {
 
 fn push_resume_refs(resume: Resume, acc: List(Int)) -> List(Int) {
   case resume {
-    ResumeCompiled(sm:, rs: _, loc:) -> push_refs(loc, push_refs(sm, acc))
+    ResumeCompiled(machine:, locals:, ..) ->
+      push_refs(locals, push_refs(machine, acc))
     ResumeFrame(frame:) -> push_suspended_frame_refs(frame, acc)
   }
 }
@@ -385,10 +386,9 @@ pub fn collect_some(st: Agent, extra_roots: List(Handle)) -> Agent {
 // full; no renumbering, dead ids dropped, next_id falls past highest survivor
 pub fn collect(st: Agent, extra_roots: List(Handle)) -> Agent {
   let store = st.store
-  let roots =
-    list.fold(extra_roots, roots_of_state(st), fn(a, h) { [h.id, ..a] })
+  let roots = list.fold(extra_roots, agent_roots(st), fn(a, h) { [h.id, ..a] })
   let live = mark_reachable(store.cells, roots, dict.new())
-  let #(cells, next_id, weak) = sweep(store.cells, live)
+  let Swept(cells:, next_id:, weak_ids: weak) = sweep(store.cells, live)
   let live_count = dict.size(live)
   Agent(
     ..st,
@@ -418,8 +418,7 @@ fn collect_minor(st: Agent, extra_roots: List(Handle)) -> Agent {
   let meta = store.meta
   let w = meta.young_start
   let cells = store.cells
-  let roots =
-    list.fold(extra_roots, roots_of_state(st), fn(a, h) { [h.id, ..a] })
+  let roots = list.fold(extra_roots, agent_roots(st), fn(a, h) { [h.id, ..a] })
   let roots =
     list.fold(arena.diff_below(w, meta.old_gen, cells), roots, fn(acc, id) {
       case arena.get_option(id, cells), arena.get_option(id, meta.old_gen) {
@@ -563,10 +562,11 @@ fn mark_reachable(
   }
 }
 
-fn sweep(
-  cells: Arena(Cell),
-  live: Dict(Int, Nil),
-) -> #(Arena(Cell), Int, List(Int)) {
+type Swept {
+  Swept(cells: Arena(Cell), next_id: Int, weak_ids: List(Int))
+}
+
+fn sweep(cells: Arena(Cell), live: Dict(Int, Nil)) -> Swept {
   let is_live = fn(id) { marked(id, live) }
   let #(kept, weak) =
     arena.fold(
@@ -592,7 +592,7 @@ fn sweep(
     [] -> 0
     [#(id, _), ..] -> id + 1
   }
-  #(arena.from_descending(kept), next, weak)
+  Swept(cells: arena.from_descending(kept), next_id: next, weak_ids: weak)
 }
 
 // drop weak entries and registrations whose target died

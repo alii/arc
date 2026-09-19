@@ -1,11 +1,11 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError}
-import arc/internal/int_math.{floor_div, floor_mod}
+import arc/internal/int_math.{floor_div, floor_mod, pow10}
 import arc/rt/builtins/helpers
-import arc/rt/builtins/options.{get_options_object, opt_get}
+import arc/rt/builtins/options.{get_option, get_options_object}
 import arc/rt/builtins/temporal_iso.{
   type Duration, type SecondsPrecision, AutoPrecision, Duration, MinutePrecision,
   SubsecondDigits, int_sign, ns_per_day, ns_per_hour, ns_per_minute, ns_per_ms,
-  ns_per_second, ns_per_us, pow10,
+  ns_per_second, ns_per_us,
 }
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, JFloat, JInt, JNan, JNegInf, JPosInf,
@@ -180,7 +180,7 @@ pub fn read_unit_option(
   key: String,
   allow_auto allow_auto: Bool,
 ) -> #(UnitOption, Agent) {
-  let #(v, st) = opt_get(st, opts, key)
+  let #(v, st) = get_option(st, opts, key)
   case classify(v) {
     KUndef -> #(UnitAbsent, st)
     _ -> {
@@ -223,7 +223,7 @@ pub fn get_rounding_increment_option(
   st: Agent,
   opts: Option(Handle),
 ) -> #(Int, Agent) {
-  let #(v, st) = opt_get(st, opts, "roundingIncrement")
+  let #(v, st) = get_option(st, opts, "roundingIncrement")
   case classify(v) {
     KUndef -> #(1, st)
     _ -> {
@@ -347,7 +347,7 @@ pub fn get_difference_settings(
   st: Agent,
   args: List(JsVal),
 ) -> #(#(Option(Unit), Option(Unit), Int, RoundingMode), Agent) {
-  let #(opts, st) = get_options_object(st, helpers.arg_at(args, 1))
+  let opts = get_options_object(st, helpers.arg_at(args, 1))
   let #(largest, st) =
     get_unit_option(st, opts, "largestUnit", allow_auto: True)
   let #(inc, st) = get_rounding_increment_option(st, opts)
@@ -539,14 +539,14 @@ pub fn balance_time_ns(total: Int, largest: Unit) -> Duration {
 pub fn to_string_time_options(
   st: Agent,
   opts: Option(Handle),
-) -> #(#(SecondsPrecision, Option(TimeUnit), Int, RoundingMode), Agent) {
+) -> #(StringPrecision(Option(TimeUnit)), RoundingMode, Agent) {
   let #(digits, st) = get_fractional_digits(st, opts)
   let #(mode, st) = get_rounding_mode_option(st, opts, Trunc)
   let #(smallest, st) =
     get_unit_option(st, opts, "smallestUnit", allow_auto: False)
-  let #(precision, unit, inc) =
+  let precision =
     rt_val.or_throw(st, seconds_string_precision(digits, smallest))
-  #(#(precision, unit, inc, mode), st)
+  #(precision, mode, st)
 }
 
 pub type FractionalDigits {
@@ -554,24 +554,37 @@ pub type FractionalDigits {
   DigitsFixed(Int)
 }
 
+// §13.15 tosecondsstringprecisionrecord
+pub type StringPrecision(unit) {
+  StringPrecision(precision: SecondsPrecision, unit: unit, increment: Int)
+}
+
 pub fn seconds_string_precision(
   digits: FractionalDigits,
   smallest: Option(Unit),
-) -> Result(#(SecondsPrecision, Option(TimeUnit), Int), JsError) {
+) -> Result(StringPrecision(Option(TimeUnit)), JsError) {
   case smallest {
     Some(Year) | Some(Month) | Some(Week) | Some(Day) | Some(Hour) ->
       Error(JsError(RangeError, "smallestUnit must be a time unit"))
-    Some(Minute) -> Ok(#(MinutePrecision, Some(MinuteUnit), 1))
-    Some(Second) -> Ok(#(SubsecondDigits(0), Some(SecondUnit), 1))
-    Some(Millisecond) -> Ok(#(SubsecondDigits(3), Some(MillisecondUnit), 1))
-    Some(Microsecond) -> Ok(#(SubsecondDigits(6), Some(MicrosecondUnit), 1))
-    Some(Nanosecond) -> Ok(#(SubsecondDigits(9), Some(NanosecondUnit), 1))
+    Some(Minute) -> Ok(StringPrecision(MinutePrecision, Some(MinuteUnit), 1))
+    Some(Second) -> Ok(StringPrecision(SubsecondDigits(0), Some(SecondUnit), 1))
+    Some(Millisecond) ->
+      Ok(StringPrecision(SubsecondDigits(3), Some(MillisecondUnit), 1))
+    Some(Microsecond) ->
+      Ok(StringPrecision(SubsecondDigits(6), Some(MicrosecondUnit), 1))
+    Some(Nanosecond) ->
+      Ok(StringPrecision(SubsecondDigits(9), Some(NanosecondUnit), 1))
     None ->
       case digits {
-        DigitsAuto -> Ok(#(AutoPrecision, None, 1))
-        DigitsFixed(0) -> Ok(#(SubsecondDigits(0), Some(SecondUnit), 1))
+        DigitsAuto -> Ok(StringPrecision(AutoPrecision, None, 1))
+        DigitsFixed(0) ->
+          Ok(StringPrecision(SubsecondDigits(0), Some(SecondUnit), 1))
         DigitsFixed(n) ->
-          Ok(#(SubsecondDigits(n), Some(NanosecondUnit), pow10(9 - n)))
+          Ok(StringPrecision(
+            SubsecondDigits(n),
+            Some(NanosecondUnit),
+            pow10(9 - n),
+          ))
       }
   }
 }
@@ -580,7 +593,7 @@ pub fn get_fractional_digits(
   st: Agent,
   opts: Option(Handle),
 ) -> #(FractionalDigits, Agent) {
-  let #(v, st) = opt_get(st, opts, "fractionalSecondDigits")
+  let #(v, st) = get_option(st, opts, "fractionalSecondDigits")
   case classify(v) {
     KUndef -> #(DigitsAuto, st)
     KNum(JInt(i)) ->

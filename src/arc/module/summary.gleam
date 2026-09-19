@@ -1,4 +1,4 @@
-//// §16.2.1.2 static import/export entries from the ast alone
+// §16.2.1.2 static import/export entries from the ast alone
 
 import arc/module/specifier.{type Raw}
 import arc/parser/ast
@@ -236,12 +236,12 @@ fn export_entries(item: ast.ModuleItem) -> List(ExportEntry) {
 
 fn declaration_exports(declaration: ast.Declaration) -> List(ExportEntry) {
   case declaration {
-    ast.DeclVariable(declarations:, ..) ->
+    ast.DeclareVariable(declarations:, ..) ->
       list.flat_map(declarations, fn(decl) {
         ast.pattern_bound_names(decl.id) |> list.map(self_export)
       })
-    ast.DeclFunction(function:) -> binding_exports(function.name)
-    ast.DeclClass(name:, ..) -> binding_exports(name)
+    ast.DeclareFunction(function:) -> binding_exports(function.name)
+    ast.DeclareClass(name:, ..) -> binding_exports(name)
   }
 }
 

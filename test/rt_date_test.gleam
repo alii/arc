@@ -8,6 +8,7 @@ import arc/rt/types.{
 import arc/time_zone
 import arc/zoneinfo
 import gleam/list
+import gleam/option.{Some}
 import rt_helpers
 
 fn agent_in(zone: time_zone.TimeZone) -> Agent {
@@ -15,7 +16,7 @@ fn agent_in(zone: time_zone.TimeZone) -> Agent {
 }
 
 fn new_york() -> Agent {
-  let assert Ok(zone) = zoneinfo.time_zone_named("America/New_York")
+  let assert Some(zone) = zoneinfo.time_zone_named("America/New_York")
   agent_in(zone)
 }
 

@@ -92,12 +92,12 @@ pub fn dispatch(
       let #(n, st) = parse_float_value(st, val)
       #(mk_number(n), st)
     }
-    GlobalIsNaN -> global_is_nan(args, st)
-    GlobalIsFinite -> global_is_finite(args, st)
-    GlobalEncodeUri -> uri_encode_dispatch(args, st, WholeUri)
-    GlobalEncodeUriComponent -> uri_encode_dispatch(args, st, UriComponent)
-    GlobalDecodeUri -> uri_decode_dispatch(args, st, WholeUri)
-    GlobalDecodeUriComponent -> uri_decode_dispatch(args, st, UriComponent)
+    GlobalIsNaN -> global_is_nan(st, args)
+    GlobalIsFinite -> global_is_finite(st, args)
+    GlobalEncodeUri -> uri_encode_dispatch(st, args, WholeUri)
+    GlobalEncodeUriComponent -> uri_encode_dispatch(st, args, UriComponent)
+    GlobalDecodeUri -> uri_decode_dispatch(st, args, WholeUri)
+    GlobalDecodeUriComponent -> uri_decode_dispatch(st, args, UriComponent)
     GlobalEscape -> {
       let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
       #(mk_string(js_escape(s)), st)
@@ -283,7 +283,7 @@ fn scan_exponent_length(bytes: BitArray) -> Int {
   }
 }
 
-fn global_is_nan(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
+fn global_is_nan(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(num, st) = rt_val.to_number(st, helpers.first_arg_or_undefined(args))
   let result = case num {
     JNan -> True
@@ -292,7 +292,7 @@ fn global_is_nan(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   #(mk_bool(result), st)
 }
 
-fn global_is_finite(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
+fn global_is_finite(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(num, st) = rt_val.to_number(st, helpers.first_arg_or_undefined(args))
   let result = case num {
     JInt(_) | JFloat(_) -> True
@@ -308,8 +308,8 @@ pub type UriKind {
 }
 
 fn uri_encode_dispatch(
-  args: List(JsVal),
   st: Agent,
+  args: List(JsVal),
   kind: UriKind,
 ) -> #(JsVal, Agent) {
   let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
@@ -317,8 +317,8 @@ fn uri_encode_dispatch(
 }
 
 fn uri_decode_dispatch(
-  args: List(JsVal),
   st: Agent,
+  args: List(JsVal),
   kind: UriKind,
 ) -> #(JsVal, Agent) {
   let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))

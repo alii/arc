@@ -23,7 +23,7 @@ pub type ParsedModule {
     specifier: Resolved,
     source: String,
     items: List(ast.ModuleItem),
-    sb: scope_builder.ScopeBuilder,
+    scopes: scope_builder.ScopeBuilder,
     summary: summary.ModuleSummary,
   )
 }
@@ -36,11 +36,8 @@ pub type SourceModule {
 }
 
 pub fn specifier_map(m: SourceModule) -> specifier.SpecifierMap {
-  use acc, #(request, resolved) <- list.fold(
-    m.edges,
-    specifier.new_specifier_map(),
-  )
-  specifier.insert_specifier(acc, request.specifier, resolved)
+  use acc, #(request, resolved) <- list.fold(m.edges, specifier.new_map())
+  specifier.insert(acc, request.specifier, resolved)
 }
 
 pub type SourceGraph {
@@ -63,7 +60,7 @@ fn parse_and_analyze(
   specifier: Resolved,
   source: String,
 ) -> Result(ParsedModule, GraphError) {
-  use #(items, sb) <- result.map(
+  use #(items, scopes) <- result.map(
     parser.parse_module(source)
     |> result.map_error(ParseFailed(specifier, _)),
   )
@@ -71,7 +68,7 @@ fn parse_and_analyze(
     specifier:,
     source:,
     items:,
-    sb:,
+    scopes:,
     summary: summary.analyze(items),
   )
 }
@@ -118,26 +115,26 @@ fn visit(
   let specifier = node.specifier
   // mark before walking deps so cycles terminate
   let walk = Walk(..walk, started: set.insert(walk.started, specifier))
-  use #(walk, edges) <- result.try(
-    list.try_fold(node.summary.requested, #(walk, []), fn(acc, request) {
-      let #(walk, edges) = acc
+  use #(edges, walk) <- result.try(
+    list.try_fold(node.summary.requested, #([], walk), fn(acc, request) {
+      let #(edges, walk) = acc
       let raw = request.specifier
       use resolved <- result.try(
         resolve(request, specifier)
         |> result.map_error(ResolveFailed(raw, specifier, _)),
       )
       let edges = [#(request, resolved), ..edges]
-      use <- bool.guard(is_host(resolved), Ok(#(walk, edges)))
+      use <- bool.guard(is_host(resolved), Ok(#(edges, walk)))
       use <- bool.guard(
         set.contains(walk.started, resolved),
-        Ok(#(walk, edges)),
+        Ok(#(edges, walk)),
       )
       use source <- result.try(
         load_source(resolved) |> result.map_error(LoadFailed(resolved, _)),
       )
       use dep <- result.try(parse_and_analyze(resolved, source))
       use walk <- result.map(visit(dep, resolve, load_source, is_host, walk))
-      #(walk, edges)
+      #(edges, walk)
     }),
   )
   // §16.2.1.7.2 checked after resolve so resolve errors win

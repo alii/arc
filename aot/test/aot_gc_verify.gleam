@@ -57,8 +57,8 @@ Promise.resolve().then(function(){
 console.log('sync');
 "
 
-fn seed() -> Agent {
-  aot_harness.seed()
+fn new_agent() -> Agent {
+  aot_harness.new_agent()
 }
 
 fn compile_load(source: String, name: String) -> Result(Atom, String) {
@@ -153,9 +153,9 @@ fn run_a() {
         Error(e) -> io.println("  ABORT (read): " <> e)
         Ok(m_read) -> {
           aot_harness.buf_reset()
-          let st0 = seed()
+          let st0 = new_agent()
           let s0 = rt_gc.stats(st0)
-          io.println(stats_line("seed:     ", s0))
+          io.println(stats_line("fresh:    ", s0))
           let #(out1, st1) = run.apply_js_main(st0, m_alloc)
           let s1 = rt_gc.stats(st1)
           io.println(stats_line("post-run: ", s1))
@@ -200,11 +200,11 @@ fn run_b() {
     Error(e) -> io.println("  ABORT: " <> e)
     Ok(m) -> {
       aot_harness.buf_reset()
-      let st0 = seed()
+      let st0 = new_agent()
       let s0 = rt_gc.stats(st0)
       let #(out, st1) = run.apply_js_main(st0, m)
       let s1 = rt_gc.stats(st1)
-      io.println(stats_line("seed:     ", s0))
+      io.println(stats_line("fresh:    ", s0))
       io.println(stats_line("post-run: ", s1))
       io.println("  outcome  : " <> string.slice(string.inspect(out), 0, 200))
       let out_text = stdout_text(st1)
@@ -233,7 +233,7 @@ fn run_c() {
     Error(e) -> io.println("  ABORT: " <> e)
     Ok(m) -> {
       aot_harness.buf_reset()
-      let st0 = seed()
+      let st0 = new_agent()
       let s0 = rt_gc.stats(st0)
       let #(out, st1) = run.apply_js_main(st0, m)
       let s1 = rt_gc.stats(st1)
@@ -249,10 +249,10 @@ fn run_c() {
 
 fn inspect_roots() {
   io.println("")
-  io.println("═══ roots_of_state includes global object? ═══")
-  let st = seed()
+  io.println("═══ agent_roots includes global object? ═══")
+  let st = new_agent()
   let types.Handle(global_id) = st.realm.global_object
-  let roots = rt_gc.roots_of_state(st)
+  let roots = rt_gc.agent_roots(st)
   let n = list.length(roots)
   let has_global = list.contains(roots, global_id)
   io.println(

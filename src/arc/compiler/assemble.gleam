@@ -107,13 +107,17 @@ fn add_safepoints(code: List(IrOp)) -> List(IrOp) {
   }
 }
 
-// label -> #(label position, furthest backward jump position)
+type LoopSpan {
+  LoopSpan(head_at: Int, back_edge_at: Int)
+}
+
+// label -> its position and the furthest backward jump to it
 fn loop_heads(
   code: List(IrOp),
   i: Int,
   seen: Dict(LabelId, Int),
-  heads: Dict(LabelId, #(Int, Int)),
-) -> Dict(LabelId, #(Int, Int)) {
+  heads: Dict(LabelId, LoopSpan),
+) -> Dict(LabelId, LoopSpan) {
   case code {
     [] -> heads
     [IrLabel(l), ..rest] ->
@@ -122,7 +126,7 @@ fn loop_heads(
       let heads =
         list.fold(loop_refs(op), heads, fn(heads, l) {
           case dict.get(seen, l) {
-            Ok(at) -> dict.insert(heads, l, #(at, i))
+            Ok(at) -> dict.insert(heads, l, LoopSpan(at, i))
             Error(Nil) -> heads
           }
         })
@@ -174,7 +178,7 @@ fn heavy_prefix(
 fn insert_safepoints(
   code: List(IrOp),
   i: Int,
-  heads: Dict(LabelId, #(Int, Int)),
+  heads: Dict(LabelId, LoopSpan),
   heavy: Dict(Int, Int),
   acc: List(IrOp),
 ) -> List(IrOp) {
@@ -182,7 +186,7 @@ fn insert_safepoints(
     [] -> list.reverse(acc)
     [IrLabel(l) as op, ..rest] -> {
       let acc = case dict.get(heads, l) {
-        Ok(#(from, to)) ->
+        Ok(LoopSpan(from, to)) ->
           case heavy_between(heavy, from, to) {
             True -> [IrFinal(opcode.Safepoint), op, ..acc]
             False -> [op, ..acc]

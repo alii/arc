@@ -137,7 +137,7 @@ fn map_constructor(
 
 fn map_group_by(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(items, callback) = two_args_or_undefined(args)
-  let #(_, st) = rt_val.require_object_coercible(st, items)
+  let items = rt_val.require_object_coercible(st, items)
   use callback <- helpers.require_callable(st, callback, fn() {
     "Map.groupBy callback is not callable"
   })
@@ -147,7 +147,7 @@ fn map_group_by(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 
 fn map_group_by_loop(
   st: Agent,
-  rec: iter_protocol.IteratorRecord,
+  rec: types.IteratorRecord,
   callback: JsVal,
   index: Int,
   groups: dict.Dict(MapKey, List(JsVal)),
@@ -272,8 +272,8 @@ fn map_delete(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let store = read_map_store(st, map)
   let map_key = js_to_map_key(key_arg)
   case ordered_entries.delete(store, map_key) {
-    #(_store, False) -> #(mk_bool(False), st)
-    #(store, True) -> {
+    #(False, _store) -> #(mk_bool(False), st)
+    #(True, store) -> {
       let st = update_map_data(st, map, store)
       #(mk_bool(True), st)
     }

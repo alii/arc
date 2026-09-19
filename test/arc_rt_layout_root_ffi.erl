@@ -1,5 +1,5 @@
 -module(arc_rt_layout_root_ffi).
--export([idx/1, tag/1, element_of/2, size_of/1, dyn/1, slots/1,
+-export([idx/1, tag/1, element_of/2, size_of/1, slots/1,
          compiled_fn_parts/1, direct_entry/3, is_plain_fn/1, plain_property/2,
          slot_at/2, slot_set/3, frame/4, is_js_number/1, is_inf/1, is_str/1,
          is_nullish/1, elem_at/2, elem_write_grow/3, native_token/1,
@@ -36,11 +36,11 @@ idx(<<"REALM_MAP">>) -> ?REALM_MAP;
 idx(<<"REALM_SET">>) -> ?REALM_SET;
 idx(<<"REALM_MAP_ITER_PROTO">>) -> ?REALM_MAP_ITER_PROTO;
 idx(<<"REALM_SET_ITER_PROTO">>) -> ?REALM_SET_ITER_PROTO;
-idx(<<"REALM_GLOBAL">>) -> ?REALM_GLOBAL;
+idx(<<"REALM_GLOBAL_OBJECT">>) -> ?REALM_GLOBAL_OBJECT;
 idx(<<"REALM_ID">>) -> ?REALM_ID;
 idx(<<"REALM_SIZE">>) -> ?REALM_SIZE;
-idx(<<"BUILTINPAIR_PROTO">>) -> ?BUILTINPAIR_PROTO;
-idx(<<"BUILTINPAIR_CTOR">>) -> ?BUILTINPAIR_CTOR;
+idx(<<"BUILTINPAIR_PROTOTYPE">>) -> ?BUILTINPAIR_PROTOTYPE;
+idx(<<"BUILTINPAIR_CONSTRUCTOR">>) -> ?BUILTINPAIR_CONSTRUCTOR;
 idx(<<"HANDLE_ID">>) -> ?HANDLE_ID;
 idx(<<"SOBJECT_KIND">>) -> ?SOBJECT_KIND;
 idx(<<"SOBJECT_PROTO">>) -> ?SOBJECT_PROTO;
@@ -49,7 +49,7 @@ idx(<<"SOBJECT_SYMBOL_PROPS">>) -> ?SOBJECT_SYMBOL_PROPS;
 idx(<<"SOBJECT_ELEMENTS">>) -> ?SOBJECT_ELEMENTS;
 idx(<<"SOBJECT_EXTENSIBLE">>) -> ?SOBJECT_EXTENSIBLE;
 idx(<<"SOBJECT_SIZE">>) -> ?SOBJECT_SIZE;
-idx(<<"SSHAPEDOBJECT_SID">>) -> ?SSHAPEDOBJECT_SID;
+idx(<<"SSHAPEDOBJECT_SHAPE_ID">>) -> ?SSHAPEDOBJECT_SHAPE_ID;
 idx(<<"SSHAPEDOBJECT_PROTO">>) -> ?SSHAPEDOBJECT_PROTO;
 idx(<<"SSHAPEDOBJECT_SLOTS">>) -> ?SSHAPEDOBJECT_SLOTS;
 idx(<<"SSHAPEDOBJECT_OFFSETS">>) -> ?SSHAPEDOBJECT_OFFSETS;
@@ -59,7 +59,7 @@ idx(<<"SHAPE_OFFSETS">>) -> ?SHAPE_OFFSETS;
 idx(<<"SHAPE_TRANSITIONS">>) -> ?SHAPE_TRANSITIONS;
 idx(<<"SHAPE_SIZE">>) -> ?SHAPE_SIZE;
 idx(<<"COMPILEDFN_CODE">>) -> ?COMPILEDFN_CODE;
-idx(<<"COMPILEDFN_HOME">>) -> ?COMPILEDFN_HOME;
+idx(<<"COMPILEDFN_HOME_OBJECT">>) -> ?COMPILEDFN_HOME_OBJECT;
 idx(<<"COMPILEDFN_FLAGS">>) -> ?COMPILEDFN_FLAGS;
 idx(<<"COMPILEDFN_FIELDS_INIT">>) -> ?COMPILEDFN_FIELDS_INIT;
 idx(<<"COMPILEDFN_DIRECT_ENTRY">>) -> ?COMPILEDFN_DIRECT_ENTRY;
@@ -88,12 +88,12 @@ idx(<<"ARRAYITERATOR_SIZE">>) -> ?ARRAYITERATOR_SIZE;
 idx(<<"GENERATOROBJ_DATA">>) -> ?GENERATOROBJ_DATA;
 idx(<<"GENERATOROBJ_SIZE">>) -> ?GENERATOROBJ_SIZE;
 idx(<<"SBOX_VALUE">>) -> ?SBOX_VALUE;
-idx(<<"FNFLAGS_IS_CTOR">>) -> ?FNFLAGS_IS_CTOR;
-idx(<<"FNFLAGS_IS_CLASS_CTOR">>) -> ?FNFLAGS_IS_CLASS_CTOR;
-idx(<<"FNFLAGS_IS_DERIVED">>) -> ?FNFLAGS_IS_DERIVED;
+idx(<<"FNFLAGS_IS_CONSTRUCTOR">>) -> ?FNFLAGS_IS_CONSTRUCTOR;
+idx(<<"FNFLAGS_IS_CLASS_CONSTRUCTOR">>) -> ?FNFLAGS_IS_CLASS_CONSTRUCTOR;
+idx(<<"FNFLAGS_IS_DERIVED_CONSTRUCTOR">>) -> ?FNFLAGS_IS_DERIVED_CONSTRUCTOR;
 idx(<<"FNFLAGS_IS_ARROW">>) -> ?FNFLAGS_IS_ARROW;
 idx(<<"FNFLAGS_IS_METHOD">>) -> ?FNFLAGS_IS_METHOD;
-idx(<<"FNFLAGS_IS_GEN">>) -> ?FNFLAGS_IS_GEN;
+idx(<<"FNFLAGS_IS_GENERATOR">>) -> ?FNFLAGS_IS_GENERATOR;
 idx(<<"FNFLAGS_IS_ASYNC">>) -> ?FNFLAGS_IS_ASYNC;
 idx(<<"FNFLAGS_IS_STRICT">>) -> ?FNFLAGS_IS_STRICT;
 idx(<<"FNFLAGS_SIZE">>) -> ?FNFLAGS_SIZE;
@@ -163,8 +163,8 @@ tag(<<"ACCESSORPROPERTY_TAG">>) -> ?ACCESSORPROPERTY_TAG;
 tag(<<"KEY_NAMED">>) -> ?KEY_NAMED;
 tag(<<"KEY_INDEX">>) -> ?KEY_INDEX;
 tag(<<"KEY_PRIVATE">>) -> ?KEY_PRIVATE;
-tag(<<"OKEY_STRING">>) -> ?OKEY_STRING;
-tag(<<"OKEY_SYMBOL">>) -> ?OKEY_SYMBOL;
+tag(<<"STRINGKEY_TAG">>) -> ?STRINGKEY_TAG;
+tag(<<"SYMBOLKEY_TAG">>) -> ?SYMBOLKEY_TAG;
 tag(<<"ELEMS_NONE">>) -> ?ELEMS_NONE;
 tag(<<"ELEMS_DENSE">>) -> ?ELEMS_DENSE;
 tag(<<"ELEMS_SPARSE">>) -> ?ELEMS_SPARSE;
@@ -194,8 +194,6 @@ element_of(N, T) -> element(N, T).
 
 size_of(T) when is_tuple(T) -> tuple_size(T);
 size_of(_) -> 0.
-
-dyn(X) -> X.
 
 slots(L) -> list_to_tuple(L).
 

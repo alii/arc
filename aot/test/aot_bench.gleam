@@ -19,9 +19,6 @@ type TimeUnit {
 @external(erlang, "erlang", "monotonic_time")
 fn monotonic_time(unit: TimeUnit) -> Int
 
-@external(erlang, "aot_harness_ffi", "to_dynamic")
-fn to_dynamic(a: a) -> Dynamic
-
 const n = 1_000_000
 
 const budget_us = 3_000_000
@@ -33,7 +30,7 @@ pub const adder_js = "function makeAdder(x){return function(y){return x+y}}let a
 pub const obj_js = "let o={x:0};for(let i=0;i<1000000;i++)o.x=o.x+i;let s=o.x;s"
 
 type Loaded {
-  Loaded(mod: Atom, seed: Agent)
+  Loaded(mod: Atom, st: Agent)
 }
 
 fn compile_load(source: String, name: String) -> #(Int, Int, Loaded) {
@@ -45,19 +42,19 @@ fn compile_load(source: String, name: String) -> #(Int, Int, Loaded) {
       beam
     })
   let assert Ok(mod) = run.load(beam, name)
-  let #(realm_us, seed) = time_us(fn() { aot_harness.seed() })
-  #(compile_us, realm_us, Loaded(mod:, seed:))
+  let #(realm_us, st) = time_us(fn() { aot_harness.new_agent() })
+  #(compile_us, realm_us, Loaded(mod:, st:))
 }
 
 fn run_once(loaded: Loaded) -> Dynamic {
-  let #(outcome, _st) = run.apply_js_main(loaded.seed, loaded.mod)
-  to_dynamic(outcome)
+  let #(outcome, _st) = run.apply_js_main(loaded.st, loaded.mod)
+  aot_harness.to_dynamic(outcome)
 }
 
 fn interp_once(source: String) -> Dynamic {
   let eng: engine.Engine(Nil) = engine.new()
   let assert Ok(#(engine.Returned(value:), _)) = engine.eval(eng, source)
-  to_dynamic(value)
+  aot_harness.to_dynamic(value)
 }
 
 fn native_sum(i: Int, s: Int, lim: Int) -> Int {
@@ -119,7 +116,7 @@ fn bench(
   native: fn() -> Int,
   expected: Int,
 ) -> Row {
-  let mod = "arc_emit2c_bench_" <> name
+  let mod = "arc_aot_bench_" <> name
   let #(compile_us, realm_us, loaded) = compile_load(source, mod)
 
   let logged = source <> ";console.log(s)"
@@ -220,7 +217,7 @@ fn ratio(a: Int, b: Int) -> String {
 pub fn main() {
   io.println("aot benchmark — compiled path vs arc interpreter vs native")
   io.println(
-    "compiled = compile ONCE, seed realm ONCE, apply js_main × adaptive",
+    "compiled = compile ONCE, new agent ONCE, apply js_main × adaptive",
   )
 
   let sum = bench("sum", sum_js, fn() { native_sum(0, 0, n) }, 499_999_500_000)

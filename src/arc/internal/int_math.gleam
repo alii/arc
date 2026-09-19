@@ -19,3 +19,10 @@ pub fn trunc_div(a: Int, b: Int) -> Int {
 pub fn trunc_mod(a: Int, b: Int) -> Int {
   a - trunc_div(a, b) * b
 }
+
+pub fn pow10(n: Int) -> Int {
+  case n <= 0 {
+    True -> 1
+    False -> 10 * pow10(n - 1)
+  }
+}

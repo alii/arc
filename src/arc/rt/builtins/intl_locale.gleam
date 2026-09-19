@@ -749,7 +749,7 @@ pub fn canonical_keyword_value(key: String, value: String) -> String {
   }
 }
 
-fn t_value_alias(key: String, v: String) -> String {
+fn transform_value_alias(key: String, v: String) -> String {
   case key, v {
     "m0", "names" -> "prprname"
     _, _ -> v
@@ -813,7 +813,7 @@ fn canonicalize_extension(ext: Extension) -> Extension {
         fields
         |> list.map(fn(kv) {
           let #(k, v) = kv
-          #(k, t_value_alias(k, v))
+          #(k, transform_value_alias(k, v))
         })
         |> list.sort(fn(a, b) { string.compare(a.0, b.0) })
       TransformExtension(tlang:, fields:)

@@ -12,16 +12,16 @@ import arc/rt/builtins/temporal_common.{
 import arc/rt/builtins/temporal_diff.{difference_calendar_date}
 import arc/rt/builtins/temporal_fields.{
   add_sub_args, calendar_date_add, calendar_with_fields, compare_iso_date,
-  era_field, era_year_field, get_named, month_code_text, month_day_reference_iso,
+  era_field, era_year_field, month_code_text, month_day_reference_iso,
   no_date_fields, parse_plain_datetime_string, parsed_calendar_id,
   read_bag_calendar, read_date_fields, require_nonempty_fields,
   require_partial_bag, resolve_calendar_date, to_calendar_arg,
   to_temporal_calendar_identifier,
 }
 import arc/rt/builtins/temporal_iso.{
-  type IsoDate, type IsoTime, Constrain, IsoDate, check_date_limits, day_of_week,
-  day_of_year, epoch_days, format_iso_date, is_valid_iso_date,
-  iso_date_from_epoch_days, midnight, week_of_year,
+  type IsoDate, type IsoTime, Constrain, IsoDate, IsoDateSlots,
+  check_date_limits, day_of_week, day_of_year, epoch_days, format_iso_date,
+  is_valid_iso_date, iso_date_from_epoch_days, midnight, week_of_year,
 }
 import arc/rt/builtins/temporal_options.{
   CalendarNameAuto, Compatible, calendar_suffix, get_calendar_name_option,
@@ -250,7 +250,7 @@ pub fn getter(
   g: TemporalDateGetter,
   this: JsVal,
 ) -> #(JsVal, Agent) {
-  let #(d, cal) =
+  let IsoDateSlots(d, cal) =
     require_temporal(st, this, "PlainDate", date_getter_name(g), date_slot_of)
   #(date_field_cal(cal, d, g), st)
 }
@@ -318,7 +318,7 @@ pub fn method(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(d, cal) =
+  let IsoDateSlots(d, cal) =
     require_temporal(
       st,
       this,
@@ -332,7 +332,7 @@ pub fn method(
       st,
     )
     PlainDateToString -> {
-      let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
+      let opts = get_options_object(st, helpers.arg_at(args, 0))
       let #(cal_name, st) = get_calendar_name_option(st, opts)
       #(mk_string(format_iso_date(d) <> calendar_suffix(cal_name, cal)), st)
     }
@@ -409,13 +409,15 @@ pub fn method(
           #(tz, mk_undefined(), st)
         }
         KHandle(oh) -> {
-          let #(tz_val, st) = get_named(st, oh, "timeZone")
+          let #(tz_val, st) =
+            rt_val.get_named(st, types.mk_object(oh), "timeZone", option.None)
           let #(tz, st) = case classify(tz_val) {
             KUndef -> rt_val.throw_type_error(st, "time zone is required")
             KStr(tz_text) -> time_zone_from_string(st, tz_text)
             _ -> rt_val.throw_type_error(st, "time zone must be a string")
           }
-          let #(plain_time, st) = get_named(st, oh, "plainTime")
+          let #(plain_time, st) =
+            rt_val.get_named(st, types.mk_object(oh), "plainTime", option.None)
           #(tz, plain_time, st)
         }
         _ -> rt_val.throw_type_error(st, "time zone must be a string")

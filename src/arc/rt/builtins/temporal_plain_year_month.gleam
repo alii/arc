@@ -1,4 +1,5 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError, TypeError}
+import arc/internal/digits
 import arc/internal/gregorian.{
   days_in_month, days_in_year as days_in_iso_year, is_leap_year,
 }
@@ -21,10 +22,10 @@ import arc/rt/builtins/temporal_fields.{
   resolve_iso_month, round_between, to_calendar_arg,
 }
 import arc/rt/builtins/temporal_iso.{
-  type IsoDate, type IsoDateSlots, type Overflow, Constrain, Duration, IsoDate,
-  IsoDateSlots, Reject, check_date_limits, epoch_days, format_iso_year,
-  is_valid_iso_date, iso_date_from_epoch_days, iso_year_month_within_limits,
-  pad2, regulate_iso_date, zero_duration,
+  type IsoDate, type IsoDateSlots, type Overflow, Constrain, DateDuration,
+  Duration, IsoDate, IsoDateSlots, Reject, check_date_limits, epoch_days,
+  format_iso_year, is_valid_iso_date, iso_date_from_epoch_days,
+  iso_year_month_within_limits, regulate_iso_date, zero_duration,
 }
 import arc/rt/builtins/temporal_options.{
   type CalendarNameMode, CalendarNameAuto, format_with_reference,
@@ -359,7 +360,7 @@ pub fn method(
       st,
     )
     PlainYearMonthToString -> {
-      let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
+      let opts = get_options_object(st, helpers.arg_at(args, 0))
       let #(cal_name, st) = get_calendar_name_option(st, opts)
       #(mk_string(format_ym_cal(y, m, rd, cal, cal_name)), st)
     }
@@ -569,7 +570,7 @@ fn format_ym_cal(
     IsoDate(y, m, rd),
     cal,
     mode,
-    short: format_iso_year(y) <> "-" <> pad2(m),
+    short: format_iso_year(y) <> "-" <> digits.pad2(m),
   )
 }
 
@@ -595,9 +596,7 @@ fn year_month_until_since(
     temporal_calendar.Iso8601 ->
       { ib.year - ia.year } * 12 + ib.month - ia.month
     _ -> {
-      let #(_, months, _) =
-        calendar_years_months_until(cal, ia, ib, whole_years: False)
-      months
+      calendar_years_months_until(cal, ia, ib, whole_years: False).months
     }
   }
   let rounded = case smallest {
@@ -637,9 +636,9 @@ fn year_month_until_since(
                 Constrain,
               ),
             )
-          let #(yrs, mos, _) =
+          let DateDuration(years:, months:, ..) =
             calendar_years_months_until(cal, ia, mid, whole_years: True)
-          Duration(..zero_duration, years: yrs, months: mos)
+          Duration(..zero_duration, years:, months:)
         }
         _, _ -> Duration(..zero_duration, months: rounded)
       }
@@ -661,7 +660,7 @@ fn round_calendar_year_total(
     True -> -1
     False -> 1
   }
-  let #(yrs, _, _) = calendar_years_months_until(cal, ia, ib, whole_years: True)
+  let yrs = calendar_years_months_until(cal, ia, ib, whole_years: True).years
   let r1 = trunc_div(yrs, inc) * inc
   let r2 = r1 + inc * sign
   use start <- result.try(calendar_date_add(

@@ -1,5 +1,6 @@
 import arc/bytecode/key.{Named}
 import arc/rt/js_string
+import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -216,7 +217,7 @@ fn cmp_bigint_text(x: Int, s: String) -> Cmp {
   }
 }
 
-pub fn lt(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
+pub fn lt_i32(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   let #(c, st) = relational_cmp(st, a, b)
   case c {
     Lt -> #(1, st)
@@ -224,7 +225,7 @@ pub fn lt(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   }
 }
 
-pub fn le(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
+pub fn le_i32(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   let #(c, st) = relational_cmp(st, a, b)
   case c {
     Lt | Eq -> #(1, st)
@@ -232,7 +233,7 @@ pub fn le(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   }
 }
 
-pub fn gt(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
+pub fn gt_i32(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   let #(c, st) = relational_cmp(st, a, b)
   case c {
     Gt -> #(1, st)
@@ -240,7 +241,7 @@ pub fn gt(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   }
 }
 
-pub fn ge(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
+pub fn ge_i32(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   let #(c, st) = relational_cmp(st, a, b)
   case c {
     Gt | Eq -> #(1, st)
@@ -279,31 +280,31 @@ fn int32_binop(
   }
 }
 
-pub fn bitand(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+pub fn bitand_general(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   int32_binop(st, a, b, int.bitwise_and, int.bitwise_and)
 }
 
-pub fn bitor(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+pub fn bitor_general(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   int32_binop(st, a, b, int.bitwise_or, int.bitwise_or)
 }
 
-pub fn bitxor(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+pub fn bitxor_general(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   int32_binop(st, a, b, int.bitwise_exclusive_or, int.bitwise_exclusive_or)
 }
 
-pub fn shl(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+pub fn shl_general(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   int32_binop(st, a, b, int.bitwise_shift_left, fn(x, y) {
     int.bitwise_shift_left(x, int.bitwise_and(y, 31))
   })
 }
 
-pub fn shr(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+pub fn shr_general(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   int32_binop(st, a, b, int.bitwise_shift_right, fn(x, y) {
     int.bitwise_shift_right(x, int.bitwise_and(y, 31))
   })
 }
 
-pub fn ushr(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
+pub fn ushr_general(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   let #(an, bn, st) = to_numeric_operands(st, a, b)
   case classify(an), classify(bn) {
     KBig(_), KBig(_) ->
@@ -324,7 +325,7 @@ pub fn ushr(st: Agent, a: JsVal, b: JsVal) -> #(JsVal, Agent) {
   }
 }
 
-pub fn bitnot(st: Agent, a: JsVal) -> #(JsVal, Agent) {
+pub fn bitnot_general(st: Agent, a: JsVal) -> #(JsVal, Agent) {
   let #(an, st) = rt_val.to_numeric(st, a)
   case classify(an) {
     KBig(x) -> #(mk_bigint(-1 - x), st)
@@ -337,15 +338,8 @@ pub fn strict_eq(a: JsVal, b: JsVal) -> Bool {
   rt_val.strict_eq(a, b)
 }
 
-pub fn strict_ne(a: JsVal, b: JsVal) -> Bool {
-  case rt_val.strict_eq(a, b) {
-    True -> False
-    False -> True
-  }
-}
-
 // §7.2.14 is loosely equal
-pub fn eq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
+pub fn eq_i32_general(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   case classify(a), classify(b) {
     KUndef, KUndef | KNull, KNull | KNull, KUndef | KUndef, KNull -> #(1, st)
     KBool(_), KBool(_)
@@ -356,15 +350,15 @@ pub fn eq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
     | KHandle(_), KHandle(_)
     -> #(bool_int(rt_val.strict_eq(a, b)), st)
     // bool arms must precede the object arms
-    KBool(x), _ -> eq(st, mk_number(bool_to_jsnum(x)), b)
-    _, KBool(y) -> eq(st, a, mk_number(bool_to_jsnum(y)))
+    KBool(x), _ -> eq_i32_general(st, mk_number(bool_to_jsnum(x)), b)
+    _, KBool(y) -> eq_i32_general(st, a, mk_number(bool_to_jsnum(y)))
     KHandle(_), KNum(_)
     | KHandle(_), KStr(_)
     | KHandle(_), KBig(_)
     | KHandle(_), KSym(_)
     -> {
       let #(ap, st) = rt_val.to_primitive(st, a, HintDefault)
-      eq(st, ap, b)
+      eq_i32_general(st, ap, b)
     }
     KNum(_), KHandle(_)
     | KStr(_), KHandle(_)
@@ -372,7 +366,7 @@ pub fn eq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
     | KSym(_), KHandle(_)
     -> {
       let #(bp, st) = rt_val.to_primitive(st, b, HintDefault)
-      eq(st, a, bp)
+      eq_i32_general(st, a, bp)
     }
     KBig(x), KStr(s) | KStr(s), KBig(x) ->
       case rt_val.string_to_bigint(s) {
@@ -395,8 +389,8 @@ pub fn eq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
   }
 }
 
-pub fn neq(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
-  let #(r, st) = eq(st, a, b)
+pub fn neq_i32(st: Agent, a: JsVal, b: JsVal) -> #(Int, Agent) {
+  let #(r, st) = eq_i32_general(st, a, b)
   #(1 - r, st)
 }
 
@@ -500,7 +494,7 @@ fn finite_to_float(n: JsNum) -> Float {
 
 // past 2^53 round to nearest double
 fn int_result(i: Int) -> JsNum {
-  case i > rt_val.max_safe_integer || i < -rt_val.max_safe_integer {
+  case i > limits.max_safe_integer || i < -limits.max_safe_integer {
     True -> rt_val.num_from_int(i)
     False -> JInt(i)
   }

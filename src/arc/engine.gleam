@@ -54,13 +54,7 @@ pub type EvaluatedModule {
 }
 
 pub fn new() -> Engine(host) {
-  from_agent(rt_builtins.new_agent(host_hooks.default_host_hooks()))
-}
-
-/// deprecated: host_refs is ignored, gc traces payloads itself
-pub fn new_with_host_refs(host_refs: fn(host) -> List(Handle)) -> Engine(host) {
-  let _unused = host_refs
-  new()
+  from_agent(rt_builtins.new_agent(host_hooks.default()))
 }
 
 fn from_agent(st: Agent) -> Engine(host) {
@@ -99,7 +93,7 @@ pub fn define_fn(
 pub fn define_namespace(
   engine: Engine(host),
   name: String,
-  methods: List(#(String, Int, host.HostFn(host))),
+  methods: List(host.HostMethod(host)),
 ) -> Engine(host) {
   adopt(engine, host.define_namespace(host_context(engine), name, methods))
 }
@@ -129,8 +123,8 @@ pub fn host_class(
   name: String,
   arity: Int,
   constructor: host.HostFn(host),
-  methods: List(#(String, Int, host.HostFn(host))),
-  statics: List(#(String, Int, host.HostFn(host))),
+  methods: List(host.HostMethod(host)),
+  statics: List(host.HostMethod(host)),
 ) -> #(JsVal, Engine(host)) {
   let #(ctor, ctx) =
     host.class(host_context(engine), name, arity, constructor, methods, statics)
@@ -211,10 +205,10 @@ pub fn eval_with(
 ) -> Result(#(Outcome, Engine(host)), EvalError(host)) {
   use template <- result.map(
     compile_task.run(string.byte_size(source), fn() {
-      use #(body, sb) <- result.try(
+      use #(body, scopes) <- result.try(
         parser.parse_script(source) |> result.map_error(ParseError),
       )
-      compiler.compile_script(body, sb) |> result.map_error(CompileError)
+      compiler.compile_script(body, scopes) |> result.map_error(CompileError)
     }),
   )
   let #(completion, st) = entry.run_script(engine.agent, template)
@@ -286,11 +280,11 @@ pub fn repl_eval(
   repl: Repl(host),
   source: String,
 ) -> Result(#(Outcome, Repl(host)), EvalError(host)) {
-  use #(body, sb) <- result.try(
+  use #(body, scopes) <- result.try(
     parser.parse_script(source) |> result.map_error(ParseError),
   )
   use template <- result.map(
-    compiler.compile_repl(body, sb) |> result.map_error(CompileError),
+    compiler.compile_repl(body, scopes) |> result.map_error(CompileError),
   )
   let engine = repl.engine
   let #(completion, st) = entry.run_script(engine.agent, template)
@@ -329,12 +323,12 @@ pub fn serialize(
 pub fn deserialize(
   data: BitArray,
 ) -> Result(Engine(host), snapshot.DeserializeError) {
-  snapshot.deserialize(data, host_hooks.default_host_hooks())
+  snapshot.deserialize(data, host_hooks.default())
   |> result.map(from_agent)
 }
 
 pub fn inspect(engine: Engine(host), value: JsVal) -> String {
-  rt_inspect.inspect(engine.agent, value)
+  rt_inspect.describe(engine.agent, value)
 }
 
 pub fn format_error(engine: Engine(host), error: JsVal) -> String {
@@ -372,11 +366,10 @@ pub fn host_hooks(engine: Engine(host)) -> host_hooks.HostHooks {
 
 pub fn eval_error_message(err: EvalError(host)) -> String {
   case err {
-    ParseError(e) -> parser.parse_error_to_string(e)
+    ParseError(e) -> parser.error_to_string(e)
     CompileError(e) -> compiler.error_message(e)
     ModuleCompileError(e) -> module.format_compile_bundle_error(e)
     ModuleError(error:, engine:) ->
-      module.module_error_phase(error)
-      <> module.error_message(engine.agent, error)
+      module.error_phase(error) <> module.error_message(engine.agent, error)
   }
 }

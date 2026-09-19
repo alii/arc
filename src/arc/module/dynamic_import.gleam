@@ -132,7 +132,8 @@ pub fn defer_import_call(st: Agent, specifier: JsVal) -> #(JsVal, Agent) {
     specifier,
     mk_undefined(),
   )
-  let #(#(fulfill_h, reject_h), st) = rt_async.alloc_resolving_fns(st, promise)
+  let #(rt_async.ResolvingFunctions(fulfill_h, reject_h), st) =
+    rt_async.alloc_resolving_fns(st, promise)
   let fulfill = mk_object(fulfill_h)
   let reject = mk_object(reject_h)
   let hook_args =
@@ -245,7 +246,8 @@ fn enqueue_import_job(
   promise: Handle,
   settle: fn(Agent) -> #(Result(JsVal, JsVal), Agent),
 ) -> Agent {
-  let #(#(fulfill_h, reject_h), st) = rt_async.alloc_resolving_fns(st, promise)
+  let #(rt_async.ResolvingFunctions(fulfill_h, reject_h), st) =
+    rt_async.alloc_resolving_fns(st, promise)
   let fulfill = mk_object(fulfill_h)
   let reject = mk_object(reject_h)
   use st <- enqueue_host_job(st, [fulfill, reject])

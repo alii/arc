@@ -4,7 +4,7 @@ import arc/rt/async as rt_async
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
 import arc/rt/builtins/iter_protocol.{
-  type IteratorRecord, close_and_throw, get_iterator_sync, iterator_step_value,
+  close_and_throw, get_iterator_sync, iterator_step_value,
 }
 import arc/rt/call.{
   NormalCompletion, ThrowCompletion, call, call_method, construct,
@@ -14,16 +14,16 @@ import arc/rt/elements
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type BuiltinPair, type Handle, type JsVal, type ObjectKey,
-  type PromiseKeyedKind, type PromiseNative, ArrayObj, Dense, JInt, KHandle,
-  KeyedFulfilled, KeyedRejected, KeyedValue, PromiseAllKeyedStatic,
-  PromiseAllResolveElement, PromiseAllSettledElement,
+  type Agent, type BuiltinPair, type Handle, type IteratorRecord, type JsVal,
+  type ObjectKey, type PromiseKeyedKind, type PromiseNative, ArrayObj, Dense,
+  JInt, KHandle, KeyedFulfilled, KeyedRejected, KeyedValue,
+  PromiseAllKeyedStatic, PromiseAllResolveElement, PromiseAllSettledElement,
   PromiseAllSettledKeyedStatic, PromiseAllSettledStatic, PromiseAllStatic,
   PromiseAnyRejectElement, PromiseAnyStatic, PromiseCapabilityExecutor,
   PromiseCatch, PromiseConstructor, PromiseFinally, PromiseFinallyFn,
   PromiseFinallyThrower, PromiseFinallyValueThunk, PromiseKeyedElement, PromiseN,
   PromiseRaceStatic, PromiseRejectStatic, PromiseResolveStatic, PromiseThen,
-  ReturnThis, SBox, SObject, StringKey, SymbolKey, classify, mk_bool, mk_int,
+  ReturnThis, SObject, StringKey, SymbolKey, classify, mk_bool, mk_int,
   mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val.{is_callable} as rt_val
@@ -182,7 +182,7 @@ pub fn dispatch_construct(
           r.promise.prototype
         })
       let #(promise_h, st) = rt_async.new_promise_with_proto(st, Some(proto))
-      let #(#(resolve_h, reject_h), st) =
+      let #(rt_async.ResolvingFunctions(resolve_h, reject_h), st) =
         rt_async.alloc_resolving_fns(st, promise_h)
       let resolve = mk_object(resolve_h)
       let reject = mk_object(reject_h)
@@ -241,22 +241,24 @@ fn finally(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     False -> #(on_finally, on_finally, st)
     True -> {
       let #(tf, st) =
-        alloc_closure(
+        common.alloc_native_closure(
           st,
           PromiseN(PromiseFinallyFn(
             rejecting: False,
             on_finally:,
             constructor: c,
           )),
+          1,
         )
       let #(cf, st) =
-        alloc_closure(
+        common.alloc_native_closure(
           st,
           PromiseN(PromiseFinallyFn(
             rejecting: True,
             on_finally:,
             constructor: c,
           )),
+          1,
         )
       #(tf, cf, st)
     }
@@ -279,8 +281,17 @@ fn finally_wrapper(
   let #(p, st) = promise_resolve(st, constructor, result)
   let #(handler, st) = case rejecting {
     False ->
-      alloc_closure_n(st, PromiseN(PromiseFinallyValueThunk(original)), 0)
-    True -> alloc_closure_n(st, PromiseN(PromiseFinallyThrower(original)), 0)
+      common.alloc_native_closure(
+        st,
+        PromiseN(PromiseFinallyValueThunk(original)),
+        0,
+      )
+    True ->
+      common.alloc_native_closure(
+        st,
+        PromiseN(PromiseFinallyThrower(original)),
+        0,
+      )
   }
   call_method(st, p, StringKey(Named("then")), [handler])
 }
@@ -363,7 +374,7 @@ fn combinator(
       let #(promise_resolve, st) = get_promise_resolve(st, this)
       let #(rec, st) = get_iterator_sync(st, iterable)
       // tracks whether the iterator still needs closing
-      let #(open_h, st) = alloc_box(st, mk_bool(True))
+      let #(open_h, st) = rt_store.box_new(st, mk_bool(True))
       let #(loop_outcome, st) =
         rt_call.try_run(st, fn(st) {
           perform_combinator(st, rec, this, cap, promise_resolve, kind, open_h)
@@ -371,7 +382,7 @@ fn combinator(
       case loop_outcome {
         NormalCompletion(v) -> #(v, st)
         ThrowCompletion(e) ->
-          case read_box(st, open_h) == mk_bool(True) {
+          case rt_store.box_get(st, open_h) == mk_bool(True) {
             True -> {
               let #(e, st) = close_and_throw(st, rec.iterator, e)
               rt_store.throw(st, e)
@@ -424,9 +435,9 @@ fn perform_combinator(
         0,
         fn(st, i) {
           let st = set_array_element(st, values_h, i, mk_undefined())
-          let #(already_called, st) = alloc_box(st, mk_bool(False))
+          let #(already_called, st) = rt_store.box_new(st, mk_bool(False))
           let #(resolve_fn, st) =
-            alloc_closure(
+            common.alloc_native_closure(
               st,
               PromiseN(PromiseAllResolveElement(
                 index: i,
@@ -435,6 +446,7 @@ fn perform_combinator(
                 already_called:,
                 resolve: cap.resolve,
               )),
+              1,
             )
           let st = increment_counter(st, remaining_h)
           #(resolve_fn, cap.reject, st)
@@ -454,9 +466,9 @@ fn perform_combinator(
         0,
         fn(st, i) {
           let st = set_array_element(st, values_h, i, mk_undefined())
-          let #(already_called, st) = alloc_box(st, mk_bool(False))
+          let #(already_called, st) = rt_store.box_new(st, mk_bool(False))
           let #(resolve_fn, st) =
-            alloc_closure(
+            common.alloc_native_closure(
               st,
               PromiseN(PromiseAllSettledElement(
                 fulfilled: True,
@@ -466,9 +478,10 @@ fn perform_combinator(
                 already_called:,
                 resolve: cap.resolve,
               )),
+              1,
             )
           let #(reject_fn, st) =
-            alloc_closure(
+            common.alloc_native_closure(
               st,
               PromiseN(PromiseAllSettledElement(
                 fulfilled: False,
@@ -478,6 +491,7 @@ fn perform_combinator(
                 already_called:,
                 resolve: cap.resolve,
               )),
+              1,
             )
           let st = increment_counter(st, remaining_h)
           #(resolve_fn, reject_fn, st)
@@ -497,9 +511,9 @@ fn perform_combinator(
         0,
         fn(st, i) {
           let st = set_array_element(st, errors_h, i, mk_undefined())
-          let #(already_called, st) = alloc_box(st, mk_bool(False))
+          let #(already_called, st) = rt_store.box_new(st, mk_bool(False))
           let #(reject_fn, st) =
-            alloc_closure(
+            common.alloc_native_closure(
               st,
               PromiseN(PromiseAnyRejectElement(
                 index: i,
@@ -508,6 +522,7 @@ fn perform_combinator(
                 already_called:,
                 reject: cap.reject,
               )),
+              1,
             )
           let st = increment_counter(st, remaining_h)
           #(cap.resolve, reject_fn, st)
@@ -529,12 +544,12 @@ fn combinator_loop(
   on_done: fn(Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   // §7.4.8 abrupt during step means no close
-  let st = rt_store.cell_set(st, open_h, SBox(mk_bool(False)))
+  let st = rt_store.box_set(st, open_h, mk_bool(False))
   let #(step, st) = iterator_step_value(st, rec)
   case step {
     None -> on_done(st)
     Some(v) -> {
-      let st = rt_store.cell_set(st, open_h, SBox(mk_bool(True)))
+      let st = rt_store.box_set(st, open_h, mk_bool(True))
       let #(next_promise, st) = call(st, promise_resolve, c, [v])
       let #(on_fulfilled, on_rejected, st) = make_handlers(st, index)
       let #(_, st) =
@@ -691,9 +706,9 @@ fn perform_all_keyed_loop(
           let st = set_array_element(st, loop.values_h, index, mk_undefined())
           let #(next_promise, st) =
             call(st, loop.promise_resolve, loop.c, [prop_value])
-          let #(already_called, st) = alloc_box(st, mk_bool(False))
+          let #(already_called, st) = rt_store.box_new(st, mk_bool(False))
           let element = fn(st, kind) {
-            alloc_closure(
+            common.alloc_native_closure(
               st,
               PromiseN(PromiseKeyedElement(
                 kind:,
@@ -704,6 +719,7 @@ fn perform_all_keyed_loop(
                 already_called:,
                 resolve: loop.cap.resolve,
               )),
+              1,
             )
           }
           let fulfilled_kind = case loop.settled {
@@ -874,10 +890,10 @@ fn with_element_once(
   body: fn(JsVal, Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   let js_true = mk_bool(True)
-  case rt_store.cell_get(st, already_called) {
-    SBox(v) if v == js_true -> #(mk_undefined(), st)
-    _ -> {
-      let st = rt_store.cell_set(st, already_called, SBox(js_true))
+  case rt_store.box_get(st, already_called) == js_true {
+    True -> #(mk_undefined(), st)
+    False -> {
+      let st = rt_store.box_set(st, already_called, js_true)
       body(first_arg_or_undefined(args), st)
     }
   }
@@ -894,7 +910,8 @@ fn new_capability_from_constructor(
   let realm = st.realm
   case c == mk_object(realm.promise.constructor) {
     True -> {
-      let #(#(p, r, j), st) = rt_async.new_promise_capability(st)
+      let #(rt_async.PromiseCapability(p, r, j), st) =
+        rt_async.new_promise_capability(st)
       #(
         Capability(
           promise: mk_object(p),
@@ -912,17 +929,17 @@ fn new_capability_from_constructor(
             "Promise capability requires a constructor",
           )
         True -> {
-          let #(resolve_box, st) = alloc_box(st, mk_undefined())
-          let #(reject_box, st) = alloc_box(st, mk_undefined())
+          let #(resolve_box, st) = rt_store.box_new(st, mk_undefined())
+          let #(reject_box, st) = rt_store.box_new(st, mk_undefined())
           let #(executor, st) =
-            alloc_closure_n(
+            common.alloc_native_closure(
               st,
               PromiseN(PromiseCapabilityExecutor(resolve_box:, reject_box:)),
               2,
             )
           let #(promise_h, st) = construct(st, c, [executor], c)
-          let resolve = read_box(st, resolve_box)
-          let reject = read_box(st, reject_box)
+          let resolve = rt_store.box_get(st, resolve_box)
+          let reject = rt_store.box_get(st, reject_box)
           case is_callable(st, resolve) && is_callable(st, reject) {
             True -> #(
               Capability(promise: mk_object(promise_h), resolve:, reject:),
@@ -947,8 +964,8 @@ fn capability_executor(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   let already_set =
-    read_box(st, resolve_box) != mk_undefined()
-    || read_box(st, reject_box) != mk_undefined()
+    rt_store.box_get(st, resolve_box) != mk_undefined()
+    || rt_store.box_get(st, reject_box) != mk_undefined()
   case already_set {
     True ->
       rt_val.throw_type_error(
@@ -957,8 +974,8 @@ fn capability_executor(
       )
     False -> {
       let #(resolve, reject) = two_args_or_undefined(args)
-      let st = rt_store.cell_set(st, resolve_box, SBox(resolve))
-      let st = rt_store.cell_set(st, reject_box, SBox(reject))
+      let st = rt_store.box_set(st, resolve_box, resolve)
+      let st = rt_store.box_set(st, reject_box, reject)
       #(mk_undefined(), st)
     }
   }
@@ -1025,53 +1042,17 @@ fn species_constructor_generic(
   }
 }
 
-fn alloc_closure(st: Agent, token: types.NativeToken) -> #(JsVal, Agent) {
-  alloc_closure_n(st, token, 1)
-}
-
-fn alloc_closure_n(
-  st: Agent,
-  token: types.NativeToken,
-  len: Int,
-) -> #(JsVal, Agent) {
-  let #(h, st) =
-    rt_call.native_new(
-      st,
-      Some(st.realm.function.prototype),
-      token,
-      "",
-      len,
-      constructible: False,
-    )
-  #(mk_object(h), st)
-}
-
-fn alloc_box(st: Agent, v: JsVal) -> #(Handle, Agent) {
-  rt_store.cell_new(st, SBox(v))
-}
-
-fn read_box(st: Agent, h: Handle) -> JsVal {
-  case rt_store.cell_get(st, h) {
-    SBox(v) -> v
-    _ -> mk_undefined()
-  }
-}
-
 fn alloc_counter(st: Agent, n: Int) -> #(Handle, Agent) {
-  rt_store.cell_new(st, SBox(mk_int(n)))
+  rt_store.box_new(st, mk_int(n))
 }
 
 fn adjust_counter(st: Agent, h: Handle, delta: Int) -> #(Int, Agent) {
-  case rt_store.cell_get(st, h) {
-    SBox(v) ->
-      case classify(v) {
-        types.KNum(JInt(n)) -> {
-          let n2 = n + delta
-          #(n2, rt_store.cell_set(st, h, SBox(mk_int(n2))))
-        }
-        _ -> panic as "promise combinator counter not an int"
-      }
-    _ -> panic as "promise combinator counter not an SBox"
+  case classify(rt_store.box_get(st, h)) {
+    types.KNum(JInt(n)) -> {
+      let n2 = n + delta
+      #(n2, rt_store.box_set(st, h, mk_int(n2)))
+    }
+    _ -> panic as "promise combinator counter not an int"
   }
 }
 

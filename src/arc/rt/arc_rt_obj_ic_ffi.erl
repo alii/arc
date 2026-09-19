@@ -31,7 +31,7 @@ global_get_ic_fill(St, KeyBin, Site) when tuple_size(St) =:= ?AGENT_SIZE ->
                 #{Site := _} -> ?IC_GLOBAL_REFILLS + 1;
                 _ -> 0
             end,
-            {?HANDLE_TAG, GId} = element(?REALM_GLOBAL, element(?AGENT_REALM, St1)),
+            {?HANDLE_TAG, GId} = element(?REALM_GLOBAL_OBJECT, element(?AGENT_REALM, St1)),
             Cell = arc_rt_arena_ffi:get(GId, element(?STORE_CELLS, Store)),
             Entry = case N < ?IC_GLOBAL_REFILLS andalso global_plain(Cell, KeyBin, V) of
                 true -> {?IC_GLOBAL, KeyBin, element(?STORE_GLOBAL_EPOCH, Store), V, N};
@@ -81,7 +81,7 @@ get_named_ic(St, {?HANDLE_TAG, Id}, KeyBin, Site) ->
             case element(?STORE_ICS, Store) of
                 #{Site := {?IC_READ, KeyBin, Offs}} ->
                     case Offs of
-                        #{element(?SSHAPEDOBJECT_SID, Cell) := Off} ->
+                        #{element(?SSHAPEDOBJECT_SHAPE_ID, Cell) := Off} ->
                             ?SLOT_AT(element(?SSHAPEDOBJECT_SLOTS, Cell), Off);
                         _ -> miss
                     end;
@@ -207,7 +207,7 @@ set_named_init_ic(St, Obj, Keys, Vals, Strict, _) ->
 
 shaped_init(St, Store, Cells, Id, Cell, Obj, Keys, Vals, Strict, Site)
   when tuple_size(St) =:= ?AGENT_SIZE, tuple_size(Store) =:= ?STORE_SIZE ->
-    Sid = element(?SSHAPEDOBJECT_SID, Cell),
+    Sid = element(?SSHAPEDOBJECT_SHAPE_ID, Cell),
     Proto = element(?SSHAPEDOBJECT_PROTO, Cell),
     case element(?STORE_ICS, Store) of
         #{Site := {?IC_INIT, Sid, _, Blank, Chain}}
@@ -252,7 +252,7 @@ init_fill(St, Id, Sid, Proto, Keys, Site)
             Entry = case element(1, Cell) =:= ?SSHAPEDOBJECT_TAG
                          andalso element(?SSHAPEDOBJECT_PROTO, Cell) =:= Proto
                          andalso appended(Shapes, Sid, Keys) of
-                To when is_integer(To), To =:= element(?SSHAPEDOBJECT_SID, Cell) ->
+                To when is_integer(To), To =:= element(?SSHAPEDOBJECT_SHAPE_ID, Cell) ->
                     case chain_of(Cells, Proto, ?IC_INIT_HOPS, []) of
                         none -> ?IC_OFF;
                         Chain ->
@@ -368,7 +368,7 @@ alloc_object_props(St, Store, Keys, Vals)
   when tuple_size(St) =:= ?AGENT_SIZE, tuple_size(Store) =:= ?STORE_SIZE ->
     Seq = element(?STORE_PROP_SEQ, Store),
     {Props, Seq1} = props_of(Keys, Vals, Seq, []),
-    Proto = element(?BUILTINPAIR_PROTO,
+    Proto = element(?BUILTINPAIR_PROTOTYPE,
                     element(?REALM_OBJECT, element(?AGENT_REALM, St))),
     Cell = {?SOBJECT_TAG, ?ORDINARY, {?SOME, Proto}, Props, [], ?ELEMS_NONE,
             true},

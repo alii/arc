@@ -1,6 +1,6 @@
 import arc/internal/int_math.{floor_div}
 import arc/rt/builtins/helpers
-import arc/rt/builtins/options.{get_options_object, opt_get}
+import arc/rt/builtins/options.{get_option, get_options_object}
 import arc/rt/builtins/temporal_common.{
   has_date_units, instant_slot_of, make_duration, make_instant, make_zoned,
   require_temporal, time_part_ns, to_temporal_duration,
@@ -11,8 +11,8 @@ import arc/rt/builtins/temporal_iso.{
   parse_iso_datetime_string, utc_epoch_ns,
 }
 import arc/rt/builtins/temporal_rounding.{
-  Hour, Nanosecond, Second, Trunc, apply_since_mode, apply_since_ns,
-  as_if_positive_mode, balance_time_ns, check_diff_setup,
+  Hour, Nanosecond, Second, StringPrecision, Trunc, apply_since_mode,
+  apply_since_ns, as_if_positive_mode, balance_time_ns, check_diff_setup,
   get_difference_settings, get_fractional_digits, get_rounding_mode_option,
   get_unit_option, max_unit, require_time_unit, round_options,
   round_to_increment, seconds_string_precision, time_unit_ns, unit_rank,
@@ -234,13 +234,13 @@ pub fn instant_method(
       st,
     )
     InstantToString -> {
-      let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
+      let opts = get_options_object(st, helpers.arg_at(args, 0))
       let #(digits, st) = get_fractional_digits(st, opts)
       let #(mode, st) = get_rounding_mode_option(st, opts, Trunc)
       let #(smallest, st) =
         get_unit_option(st, opts, "smallestUnit", allow_auto: False)
-      let #(tz_opt, st) = opt_get(st, opts, "timeZone")
-      let #(precision, smallest_time_unit, inc) =
+      let #(tz_opt, st) = get_option(st, opts, "timeZone")
+      let StringPrecision(precision, smallest_time_unit, inc) =
         rt_val.or_throw(st, seconds_string_precision(digits, smallest))
       let rounded = case smallest_time_unit {
         None -> ns

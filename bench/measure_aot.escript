@@ -12,7 +12,7 @@ main([File | Rest]) ->
     Name = <<"arc_aot_bench_mod">>,
     {ok, Beam} = arc_aot@compile:to_beam(Src, Name),
     {ok, Mod} = arc_aot@run:load(Beam, Name),
-    Hooks = arc@host_hooks:default_host_hooks(),
+    Hooks = arc@host_hooks:default(),
     Results = [run_once(Mod, Hooks) || _ <- lists:seq(1, Runs)],
     Reds = lists:min([R || {R, _, _} <- Results]),
     RedsMax = lists:max([R || {R, _, _} <- Results]),

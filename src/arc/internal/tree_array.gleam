@@ -10,8 +10,8 @@ pub fn new() -> TreeArray(a)
 pub fn from_list(items: List(a)) -> TreeArray(a)
 
 // none for hole, negative or out of bounds
-@external(erlang, "arc_tree_array_ffi", "get_option")
-pub fn get_option(index: Int, arr: TreeArray(a)) -> Option(a)
+@external(erlang, "arc_tree_array_ffi", "get")
+pub fn get(index: Int, arr: TreeArray(a)) -> Option(a)
 
 // negative index crashes, never a silent no-op
 @external(erlang, "arc_tree_array_ffi", "set")

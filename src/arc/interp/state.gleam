@@ -57,7 +57,7 @@ pub type SavedFrame {
     stack: List(JsVal),
     locals: TupleArray(JsVal),
     constructor_this: Option(JsVal),
-    cont: fn(State, JsVal) -> Result(State, StepExit),
+    cont: fn(JsVal, State) -> Result(State, StepExit),
   )
 }
 

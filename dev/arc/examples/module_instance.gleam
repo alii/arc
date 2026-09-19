@@ -11,7 +11,7 @@ import gleam/option.{Some}
 pub fn main() -> Nil {
   let eng =
     engine.new()
-    |> engine.define_namespace("Host", [#("emit", 1, emit)])
+    |> engine.define_namespace("Host", [host.HostMethod("emit", 1, emit)])
 
   let source =
     "let count = 0;

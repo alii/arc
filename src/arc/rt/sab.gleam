@@ -15,7 +15,7 @@ pub fn share(st: Agent, buffer_h: Handle) -> #(Option(SabOwner), Agent) {
         Shared(
           block: OwnerBlock(
             owner:,
-            byte_length: buffer.buffer_byte_size(Shared(
+            byte_length: buffer.storage_byte_size(Shared(
               block: LocalBlock(bytes:),
               max_byte_length:,
             )),

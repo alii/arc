@@ -1,13 +1,14 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError}
 import arc/bytecode/key.{Named}
+import arc/internal/int_math.{pow10}
 import arc/internal/temporal_calendar
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
 import arc/rt/builtins/temporal_iso.{
   type Duration, type IsoDate, type IsoDateSlots, type IsoTime, Duration,
   IsoDate, IsoDateSlots, IsoTime, int_sign, max_time_duration_ns, ns_per_day,
-  ns_per_hour, ns_per_minute, ns_per_ms, ns_per_second, ns_per_us, pow10,
-  pow2_32, round_to_float_precision, take_some_digits, zero_duration,
+  ns_per_hour, ns_per_minute, ns_per_ms, ns_per_second, ns_per_us, pow2_32,
+  round_to_float_precision, take_some_digits, zero_duration,
 }
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
@@ -71,12 +72,10 @@ pub fn temporal_data_of(
   }
 }
 
-pub fn date_slot_of(
-  kind: ObjKind,
-) -> Option(#(IsoDate, temporal_calendar.Calendar)) {
+pub fn date_slot_of(kind: ObjKind) -> Option(IsoDateSlots) {
   case kind {
     TemporalObj(data: TemporalDate(year:, month:, day:, calendar:)) ->
-      Some(#(IsoDate(year:, month:, day:), calendar))
+      Some(IsoDateSlots(IsoDate(year:, month:, day:), calendar))
     _ -> None
   }
 }
@@ -96,9 +95,15 @@ pub fn time_slot_of(kind: ObjKind) -> Option(IsoTime) {
   }
 }
 
-pub fn date_time_slot_of(
-  kind: ObjKind,
-) -> Option(#(IsoDate, IsoTime, temporal_calendar.Calendar)) {
+pub type IsoDateTimeSlots {
+  IsoDateTimeSlots(
+    iso_date: IsoDate,
+    time: IsoTime,
+    calendar: temporal_calendar.Calendar,
+  )
+}
+
+pub fn date_time_slot_of(kind: ObjKind) -> Option(IsoDateTimeSlots) {
   case kind {
     TemporalObj(data: TemporalDateTime(
       year:,
@@ -112,7 +117,7 @@ pub fn date_time_slot_of(
       nanosecond:,
       calendar:,
     )) ->
-      Some(#(
+      Some(IsoDateTimeSlots(
         IsoDate(year, month, day),
         IsoTime(hour, minute, second, millisecond, microsecond, nanosecond),
         calendar,
@@ -174,12 +179,18 @@ pub fn instant_slot_of(kind: ObjKind) -> Option(Int) {
   }
 }
 
-pub fn zoned_slot_of(
-  kind: ObjKind,
-) -> Option(#(Int, TemporalZone, temporal_calendar.Calendar)) {
+pub type ZonedSlots {
+  ZonedSlots(
+    epoch_ns: Int,
+    time_zone: TemporalZone,
+    calendar: temporal_calendar.Calendar,
+  )
+}
+
+pub fn zoned_slot_of(kind: ObjKind) -> Option(ZonedSlots) {
   case kind {
     TemporalObj(data: TemporalZonedDateTime(epoch_ns:, time_zone:, calendar:)) ->
-      Some(#(epoch_ns, time_zone, calendar))
+      Some(ZonedSlots(epoch_ns:, time_zone:, calendar:))
     _ -> None
   }
 }
@@ -760,16 +771,18 @@ fn parse_duration_date_units(s: String, sign: Int) -> Option(Duration) {
           ))
       }
     "T" <> r | "t" <> r -> {
-      use #(h, mi, sec, sub_ns) <- option.then(parse_duration_time_units(r))
+      use time <- option.then(parse_duration_time_units(r))
+      let DurationTimeUnits(hours:, minutes:, seconds:, subsecond_ns: sub_ns) =
+        time
       Some(apply_duration_sign(
         Duration(
           years: option.unwrap(years, 0),
           months: option.unwrap(months, 0),
           weeks: option.unwrap(weeks, 0),
           days: option.unwrap(days, 0),
-          hours: h,
-          minutes: mi,
-          seconds: sec,
+          hours:,
+          minutes:,
+          seconds:,
           milliseconds: sub_ns / ns_per_ms,
           microseconds: { sub_ns % ns_per_ms } / ns_per_us,
           nanoseconds: sub_ns % ns_per_us,
@@ -795,7 +808,11 @@ fn parse_duration_unit(
   }
 }
 
-fn parse_duration_time_units(s: String) -> Option(#(Int, Int, Int, Int)) {
+type DurationTimeUnits {
+  DurationTimeUnits(hours: Int, minutes: Int, seconds: Int, subsecond_ns: Int)
+}
+
+fn parse_duration_time_units(s: String) -> Option(DurationTimeUnits) {
   use #(h, h_frac, s1) <- option.then(parse_duration_time_unit(s, ["H", "h"]))
   case h_frac {
     Some(f) ->
@@ -805,7 +822,12 @@ fn parse_duration_time_units(s: String) -> Option(#(Int, Int, Int, Int)) {
           let mi = total_ns / ns_per_minute
           let rem = total_ns - mi * ns_per_minute
           let sec = rem / ns_per_second
-          Some(#(option.unwrap(h, 0), mi, sec, rem - sec * ns_per_second))
+          Some(DurationTimeUnits(
+            hours: option.unwrap(h, 0),
+            minutes: mi,
+            seconds: sec,
+            subsecond_ns: rem - sec * ns_per_second,
+          ))
         }
         _ -> None
       }
@@ -819,11 +841,11 @@ fn parse_duration_time_units(s: String) -> Option(#(Int, Int, Int, Int)) {
             "" -> {
               let total_ns = f * 60
               let sec = total_ns / ns_per_second
-              Some(#(
-                option.unwrap(h, 0),
-                option.unwrap(mi, 0),
-                sec,
-                total_ns - sec * ns_per_second,
+              Some(DurationTimeUnits(
+                hours: option.unwrap(h, 0),
+                minutes: option.unwrap(mi, 0),
+                seconds: sec,
+                subsecond_ns: total_ns - sec * ns_per_second,
               ))
             }
             _ -> None
@@ -837,11 +859,11 @@ fn parse_duration_time_units(s: String) -> Option(#(Int, Int, Int, Int)) {
               case h == None && mi == None && sec == None {
                 True -> None
                 False ->
-                  Some(#(
-                    option.unwrap(h, 0),
-                    option.unwrap(mi, 0),
-                    option.unwrap(sec, 0),
-                    option.unwrap(s_frac, 0),
+                  Some(DurationTimeUnits(
+                    hours: option.unwrap(h, 0),
+                    minutes: option.unwrap(mi, 0),
+                    seconds: option.unwrap(sec, 0),
+                    subsecond_ns: option.unwrap(s_frac, 0),
                   ))
               }
             _ -> None

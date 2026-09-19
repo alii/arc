@@ -116,7 +116,7 @@ fn require_shadow_realm(st: Agent, this: JsVal, method: String) -> Int {
   }
 }
 
-fn protected_in_realm(
+fn try_run_in_realm(
   st: Agent,
   id: Int,
   body: fn(Agent) -> #(a, Agent),
@@ -170,7 +170,7 @@ fn wrapped_function_create(
 ) -> #(JsVal, Agent) {
   // run the observable gets in the target's realm
   let #(copied, st) =
-    protected_in_realm(st, from, copy_name_and_length(_, target))
+    try_run_in_realm(st, from, copy_name_and_length(_, target))
   case copied {
     ThrowCompletion(_thrown) ->
       rt_val.throw_type_error(
@@ -251,18 +251,19 @@ fn perform_shadow_realm_eval(
   eval_realm: Int,
 ) -> #(JsVal, Agent) {
   let early = {
-    use #(body, sb) <- result.try(
+    use #(body, scopes) <- result.try(
       parser.parse_script(source)
-      |> result.map_error(parser.parse_error_to_string),
+      |> result.map_error(parser.error_to_string),
     )
-    compiler.compile_eval(body, sb) |> result.map_error(compiler.error_message)
+    compiler.compile_eval(body, scopes)
+    |> result.map_error(compiler.error_message)
   }
   let st = case early {
     Ok(_template) -> st
     Error(message) -> rt_val.throw_syntax_error(st, message)
   }
   let #(outcome, st) =
-    protected_in_realm(st, eval_realm, fn(st) {
+    try_run_in_realm(st, eval_realm, fn(st) {
       st.store.ops.eval_hook(st, source, IndirectEval)
     })
   case outcome {
@@ -291,7 +292,7 @@ fn wrapped_function_call(
   let #(wrapped_this, st) =
     get_wrapped_value(st, caller_realm, target_realm, this)
   let #(outcome, st) =
-    protected_in_realm(st, target_realm, fn(st) {
+    try_run_in_realm(st, target_realm, fn(st) {
       rt_call.call(st, mk_object(target), wrapped_this, wrapped_args)
     })
   case outcome {

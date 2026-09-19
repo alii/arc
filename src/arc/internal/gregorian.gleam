@@ -59,8 +59,12 @@ pub fn days_from_civil(y: Int, m: Int, d: Int) -> Int {
   era * 146_097 + doe - 719_468
 }
 
+pub type CivilDate {
+  CivilDate(year: Int, month: Int, day: Int)
+}
+
 // hinnant civil_from_days
-pub fn civil_from_days(z: Int) -> #(Int, Int, Int) {
+pub fn civil_from_days(z: Int) -> CivilDate {
   let z = z + 719_468
   let era = floor_div(z, 146_097)
   let doe = z - era * 146_097
@@ -74,7 +78,7 @@ pub fn civil_from_days(z: Int) -> #(Int, Int, Int) {
     False -> mp - 9
   }
   case m <= 2 {
-    True -> #(y + 1, m, d)
-    False -> #(y, m, d)
+    True -> CivilDate(y + 1, m, d)
+    False -> CivilDate(y, m, d)
   }
 }

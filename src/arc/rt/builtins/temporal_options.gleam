@@ -1,5 +1,5 @@
 import arc/internal/temporal_calendar
-import arc/rt/builtins/options.{get_options_object, opt_get}
+import arc/rt/builtins/options.{get_option, get_options_object}
 import arc/rt/builtins/temporal_iso.{
   type IsoDate, type Overflow, Constrain, Reject, format_iso_date,
 }
@@ -15,7 +15,7 @@ pub fn get_enum_option(
   allowed: List(#(String, a)),
   default: a,
 ) -> #(a, Agent) {
-  let #(v, st) = opt_get(st, opts, key)
+  let #(v, st) = get_option(st, opts, key)
   case classify(v) {
     KUndef -> #(default, st)
     _ -> {
@@ -63,7 +63,7 @@ pub fn get_overflow_option_from_value(
   st: Agent,
   options: JsVal,
 ) -> #(Overflow, Agent) {
-  let #(opts, st) = get_options_object(st, options)
+  let opts = get_options_object(st, options)
   get_overflow_option(st, opts)
 }
 

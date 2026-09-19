@@ -8,8 +8,8 @@ import arc/rt/builtins/temporal_common.{
 }
 import arc/rt/builtins/temporal_fields.{
   type DateFields, DateFields, calendar_date_add, check_parsed_calendar,
-  get_named, no_date_fields, parsed_calendar_id, read_bag_calendar,
-  read_era_fields, read_month_code, resolve_calendar_date,
+  no_date_fields, parsed_calendar_id, read_bag_calendar, read_era_fields,
+  read_month_code, resolve_calendar_date,
 }
 import arc/rt/builtins/temporal_iso.{
   type Duration, type IsoDate, type IsoTime, type Overflow, type ParsedOffset,
@@ -264,7 +264,7 @@ pub fn read_date_time_fields(
   }
   let #(second, st) = read_int_field(st, bag, "second")
   let #(time_zone_value, st) = case read_tz {
-    True -> get_named(st, bag, "timeZone")
+    True -> rt_val.get_named(st, types.mk_object(bag), "timeZone", None)
     False -> #(mk_undefined(), st)
   }
   let #(year, st) = read_int_field(st, bag, "year")
@@ -287,7 +287,7 @@ pub fn read_date_time_fields(
 }
 
 pub fn read_bag_offset(st: Agent, bag: Handle) -> #(Option(Int), Agent) {
-  let #(v, st) = get_named(st, bag, "offset")
+  let #(v, st) = rt_val.get_named(st, types.mk_object(bag), "offset", None)
   case classify(v) {
     KUndef -> #(None, st)
     _ -> {
@@ -320,16 +320,17 @@ pub fn to_temporal_zoned(
           )),
           ..,
         ) -> {
-          let #(_o, st) = validated_zdt_options(st, options)
+          let #(_o, st) = validated_zoned_options(st, options)
           #(#(epoch_ns, time_zone, calendar), st)
         }
         _ -> zoned_from_bag(st, h, options)
       }
     KStr(s) -> {
-      let #(d, t_opt, offset, tz_text, cal) =
+      let ParsedZoned(d, t_opt, offset, tz_text, cal) =
         rt_val.or_throw(st, parse_zoned_string(s))
       let #(tz, st) = time_zone_from_string(st, tz_text)
-      let #(#(dis, offset_opt, _ov), st) = validated_zdt_options(st, options)
+      let #(ZonedOptions(dis, offset_opt, _ov), st) =
+        validated_zoned_options(st, options)
       let ns =
         rt_val.or_throw(
           st,
@@ -342,23 +343,36 @@ pub fn to_temporal_zoned(
   }
 }
 
-pub fn validated_zdt_options(
-  st: Agent,
-  options: JsVal,
-) -> #(#(Disambiguation, OffsetOption, Overflow), Agent) {
-  let #(opts, st) = get_options_object(st, options)
-  let #(d, st) = get_disambiguation_option(st, opts)
-  let #(of, st) = get_offset_option(st, opts, RejectOffset)
-  let #(ov, st) = get_overflow_option(st, opts)
-  #(#(d, of, ov), st)
+pub type ZonedOptions {
+  ZonedOptions(
+    disambiguation: Disambiguation,
+    offset: OffsetOption,
+    overflow: Overflow,
+  )
 }
 
-pub fn parse_zoned_string(
-  s: String,
-) -> Result(
-  #(IsoDate, Option(IsoTime), ParsedOffset, String, temporal_calendar.Calendar),
-  JsError,
-) {
+pub fn validated_zoned_options(
+  st: Agent,
+  options: JsVal,
+) -> #(ZonedOptions, Agent) {
+  let opts = get_options_object(st, options)
+  let #(disambiguation, st) = get_disambiguation_option(st, opts)
+  let #(offset, st) = get_offset_option(st, opts, RejectOffset)
+  let #(overflow, st) = get_overflow_option(st, opts)
+  #(ZonedOptions(disambiguation:, offset:, overflow:), st)
+}
+
+pub type ParsedZoned {
+  ParsedZoned(
+    date: IsoDate,
+    time: Option(IsoTime),
+    offset: ParsedOffset,
+    time_zone_text: String,
+    calendar: temporal_calendar.Calendar,
+  )
+}
+
+pub fn parse_zoned_string(s: String) -> Result(ParsedZoned, JsError) {
   case parse_iso_datetime_string(s) {
     None -> Error(JsError(RangeError, "invalid ZonedDateTime string: " <> s))
     Some(p) -> {
@@ -371,7 +385,7 @@ pub fn parse_zoned_string(
           ))
         Some(tz_text) -> {
           use cal <- result.map(parsed_calendar_id(p))
-          #(p.date, p.time, p.offset, tz_text, cal)
+          ParsedZoned(p.date, p.time, p.offset, tz_text, cal)
         }
       }
     }
@@ -429,7 +443,8 @@ pub fn zoned_from_bag(
     KUndef -> rt_val.throw_type_error(st, "timeZone is required")
     _ -> {
       let #(tz, st) = to_temporal_time_zone(st, f.time_zone_value)
-      let #(#(dis, offset_opt, ov), st) = validated_zdt_options(st, options)
+      let #(ZonedOptions(dis, offset_opt, ov), st) =
+        validated_zoned_options(st, options)
       let date = rt_val.or_throw(st, resolve_calendar_date(cal, f.date, ov))
       let t0 = time_fields_apply(f.time, midnight)
       let t = rt_val.or_throw(st, regulate_time(t0, ov))

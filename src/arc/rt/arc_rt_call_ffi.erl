@@ -1,7 +1,7 @@
-%% protected calls and frames; direct_callee may answer miss
+%% try_run calls and frames; direct_callee may answer miss
 -module(arc_rt_call_ffi).
 -export([try_call_code/4, try_run/2, try_call_native/4,
-         mk_frame/4, direct_callee/3, birth_props/2]).
+         new_frame/4, direct_callee/3, birth_props/2]).
 
 -include("arc_rt_layout.hrl").
 
@@ -17,7 +17,7 @@ direct_callee(St, {?HANDLE_TAG, Id}, This) ->
                         true -> {Code, This, DirectEntry};
                         false when This =:= undefined; This =:= null ->
                             {Code,
-                             element(?REALM_GLOBAL,
+                             element(?REALM_GLOBAL_OBJECT,
                                      element(?AGENT_REALM, St)),
                              DirectEntry};
                         false when element(1, This) =:= ?HANDLE_TAG ->
@@ -45,7 +45,7 @@ try_call_native(St, Token, This, Args) ->
 
 try_run(St, Body) -> ?PROTECT(Body(St)).
 
-mk_frame(This, ActiveFunc, HomeObj, NewTarget) ->
+new_frame(This, ActiveFunc, HomeObj, NewTarget) ->
     ?FRAME(This, ActiveFunc, HomeObj, NewTarget).
 
 birth_props(LengthV, Name) ->

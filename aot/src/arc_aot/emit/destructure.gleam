@@ -37,9 +37,11 @@ fn build_pattern(
         ast.IdentifierPattern(name:, ..) -> Some(name)
         _ -> None
       }
-      use rc <- anf.then(expr.consts())
-      use is_undef <- anf.then(anf.bind(ir.NumTerm(ir.NEq, source, rc.undef)))
-      use v <- anf.then(anf.bind_if(
+      use consts <- anf.then(expr.consts())
+      use is_undef <- anf.then(
+        anf.let_(ir.NumTerm(ir.NEq, source, consts.undef)),
+      )
+      use v <- anf.then(anf.let_if(
         is_undef,
         expr.bridge(fn(e: Emitter) {
           e.dispatch.emit_expr_named(e, default_expr, named)
@@ -117,7 +119,7 @@ fn emit_array_pattern(
   source: ir.Value,
   mode: BindMode,
 ) -> Build(Nil) {
-  use rc <- anf.then(expr.consts())
+  use consts <- anf.then(expr.consts())
   use iter <- anf.then(anf.host("get_iterator", [source, ir.ConstAtom("sync")]))
   let drained =
     list.any(elements, fn(el) {
@@ -134,7 +136,7 @@ fn emit_array_pattern(
   )
   case drained {
     True -> anf.pure(Nil)
-    False -> anf.host_unit("iter_close", [iter, rc.false_])
+    False -> anf.host_unit("iter_close", [iter, consts.false_])
   }
 }
 
@@ -157,7 +159,7 @@ fn emit_array_elements(
     }
     [Some(p), ..rest] -> {
       use pair <- anf.then(anf.host("iter_next", [iter]))
-      use v <- anf.then(anf.bind(anf.tuple_get(pair, 1)))
+      use v <- anf.then(anf.let_(anf.tuple_get(pair, 1)))
       use _ <- anf.then(build_pattern(p, v, mode))
       emit_array_elements(rest, iter, mode)
     }

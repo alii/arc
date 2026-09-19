@@ -129,10 +129,10 @@ read_wrapper(St, Which, Recv, KeyBin) ->
     Pair = element(Which, element(?AGENT_REALM, St)),
     Store = element(?AGENT_STORE, St),
     read_proto(St, element(?STORE_CELLS, Store), element(?STORE_SHAPES, Store),
-               {?SOME, element(?BUILTINPAIR_PROTO, Pair)}, Recv, KeyBin).
+               {?SOME, element(?BUILTINPAIR_PROTOTYPE, Pair)}, Recv, KeyBin).
 
 general_get(St, Recv, KeyBin) ->
-    'arc@rt@obj':get_prop_untyped_key(St, Recv, {?OKEY_STRING, {?KEY_NAMED, KeyBin}}).
+    'arc@rt@obj':get_prop_untyped_key(St, Recv, {?STRINGKEY_TAG, {?KEY_NAMED, KeyBin}}).
 
 %% §10.1.8.1 ordinary get while every hop is plain data
 proto_read(_, _, ?NONE, _, _) -> undefined;
@@ -187,7 +187,7 @@ ic_fill(St, Store, Site, Sid, Off, KeyBin) ->
     end.
 
 global_peek(St, KeyBin) ->
-    {?HANDLE_TAG, GId} = element(?REALM_GLOBAL, element(?AGENT_REALM, St)),
+    {?HANDLE_TAG, GId} = element(?REALM_GLOBAL_OBJECT, element(?AGENT_REALM, St)),
     Store = element(?AGENT_STORE, St),
     peek_named(St, arc_rt_arena_ffi:get(GId, element(?STORE_CELLS, Store)), KeyBin).
 
@@ -310,7 +310,7 @@ set_named(St, Obj, KeyBin, V, Strict) ->
         miss ->
             Key = {?KEY_NAMED, KeyBin},
             {_, St1} = case Strict of
-                true -> 'arc@rt@obj':set_prop_strict(St, Obj, Key, V);
+                true -> 'arc@rt@obj':set_prop_strict_untyped_key(St, Obj, Key, V);
                 false -> 'arc@rt@obj':set_prop_untyped_key(St, Obj, Key, V)
             end,
             St1;
@@ -320,7 +320,7 @@ set_named(St, Obj, KeyBin, V, Strict) ->
 %% §7.3.5 create data property, new plain key only
 create_data_prop(St, Recv = {?HANDLE_TAG, Id}, Key, V) ->
     PK = case Key of
-        {?OKEY_STRING, K} -> K;
+        {?STRINGKEY_TAG, K} -> K;
         K -> K
     end,
     Store = element(?AGENT_STORE, St),
@@ -436,7 +436,7 @@ get_elem(St, Recv, Idx)
     get_elem(St, Recv, trunc(Idx));
 get_elem(St, {?HANDLE_TAG, Id}, Key) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:property_key_of(Key) of
-        {?OKEY_STRING, {?KEY_NAMED, KeyBin}} ->
+        {?STRINGKEY_TAG, {?KEY_NAMED, KeyBin}} ->
             Store = element(?AGENT_STORE, St),
             Cells = element(?STORE_CELLS, Store),
             case named_read(Cells, element(?STORE_SHAPES, Store),
@@ -444,7 +444,7 @@ get_elem(St, {?HANDLE_TAG, Id}, Key) when ?IS_STR(Key) ->
                 undefined -> miss;
                 V -> V
             end;
-        {?OKEY_STRING, {?KEY_INDEX, Idx}} ->
+        {?STRINGKEY_TAG, {?KEY_INDEX, Idx}} ->
             Store = element(?AGENT_STORE, St),
             index_read(arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, Store)), Idx);
         _ -> miss
@@ -459,7 +459,7 @@ index_read(Cell, Idx) when element(1, Cell) =:= ?SOBJECT_TAG ->
                 _ ->
                     case element(?SOBJECT_ELEMENTS, Cell) of
                         {?ELEMS_DENSE, A} ->
-                            case arc_tree_array_ffi:get(Idx, A) of
+                            case arc_tree_array_ffi:get_or_hole(Idx, A) of
                                 ?ELEMS_HOLE -> miss;
                                 V -> V
                             end;
@@ -525,9 +525,9 @@ set_elem(St, Recv, Idx, V)
     set_elem(St, Recv, trunc(Idx), V);
 set_elem(St, Recv = {?HANDLE_TAG, Id}, Key, V) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:property_key_of(Key) of
-        {?OKEY_STRING, {?KEY_NAMED, KeyBin}} ->
+        {?STRINGKEY_TAG, {?KEY_NAMED, KeyBin}} ->
             set_prop_own_data(St, Recv, KeyBin, V);
-        {?OKEY_STRING, {?KEY_INDEX, Idx}} -> index_write(St, Id, Idx, V);
+        {?STRINGKEY_TAG, {?KEY_INDEX, Idx}} -> index_write(St, Id, Idx, V);
         _ -> miss
     end;
 set_elem(_, _, _, _) -> miss.
@@ -888,7 +888,7 @@ get_symbol_data(_, _, _) -> miss.
 symbol_walk(_, _, _, _, 0) -> miss;
 symbol_walk(Cells, Id, Sym, Recv, Fuel) ->
     case arc_rt_arena_ffi:get(Id, Cells) of
-        {?SSHAPEDOBJECT_TAG, _, Proto, _} -> symbol_next(Cells, Proto, Sym, Recv, Fuel);
+        {?SSHAPEDOBJECT_TAG, _, Proto, _, _} -> symbol_next(Cells, Proto, Sym, Recv, Fuel);
         {?SOBJECT_TAG, Kind, Proto, _, SymProps, _, _} ->
             case is_tuple(Kind) andalso element(1, Kind) =:= ?PROXYOBJ_TAG of
                 true -> miss;

@@ -160,7 +160,7 @@ pub fn dispatch(
 
 fn number_to_locale_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let n = this_number_value(st, this, "toLocaleString")
-  #(mk_string(rt_val.format_jsnum(n)), st)
+  #(mk_string(rt_val.jsnum_to_string(n)), st)
 }
 
 fn call_as_function(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
@@ -292,7 +292,7 @@ fn number_to_exponential(
               st,
             )
           }
-        JNan | JPosInf | JNegInf -> #(mk_string(rt_val.format_jsnum(n)), st)
+        JNan | JPosInf | JNegInf -> #(mk_string(rt_val.jsnum_to_string(n)), st)
       }
     }
   }
@@ -306,7 +306,7 @@ fn number_to_precision(
   let n = this_number_value(st, this, "toPrecision")
   let arg = helpers.first_arg_or_undefined(args)
   case classify(arg) {
-    KUndef -> #(mk_string(rt_val.format_jsnum(n)), st)
+    KUndef -> #(mk_string(rt_val.jsnum_to_string(n)), st)
     _ -> {
       let #(p, st) = rt_val.to_integer_or_infinity(st, arg)
       // non-finite check runs before the range check
@@ -323,7 +323,7 @@ fn number_to_precision(
               st,
             )
           }
-        JNan | JPosInf | JNegInf -> #(mk_string(rt_val.format_jsnum(n)), st)
+        JNan | JPosInf | JNegInf -> #(mk_string(rt_val.jsnum_to_string(n)), st)
       }
     }
   }
@@ -350,7 +350,7 @@ fn not_a_number(st: Agent, method: String) -> a {
 
 fn format_number_radix(n: JsNum, base: Int) -> String {
   case n, base {
-    _, 10 -> rt_val.format_jsnum(n)
+    _, 10 -> rt_val.jsnum_to_string(n)
     JNan, _ -> "NaN"
     JPosInf, _ -> "Infinity"
     JNegInf, _ -> "-Infinity"

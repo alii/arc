@@ -69,11 +69,15 @@ pub type TrailingZeroDisplay {
   TrailingZeroStripIfInteger
 }
 
+pub type DigitRange {
+  DigitRange(min: Int, max: Int)
+}
+
 pub type IntlDigitOptions {
   IntlDigitOptions(
     minimum_integer_digits: Int,
-    fraction_digits: Option(#(Int, Int)),
-    significant_digits: Option(#(Int, Int)),
+    fraction_digits: Option(DigitRange),
+    significant_digits: Option(DigitRange),
     rounding_increment: Int,
     rounding_mode: RoundingMode,
     rounding_priority: RoundingPriority,
@@ -358,7 +362,7 @@ pub type DateTimeComponents {
   )
 }
 
-pub const empty_dtf_components = DateTimeComponents(
+pub const empty_date_time_components = DateTimeComponents(
   weekday: None,
   era: None,
   year: None,
@@ -379,7 +383,7 @@ pub type FormatTimeZone {
   FixedZone(id: String, offset_minutes: Int)
 }
 
-pub fn dtf_time_zone_id(tz: FormatTimeZone) -> String {
+pub fn format_time_zone_id(tz: FormatTimeZone) -> String {
   case tz {
     HostZone(_) -> "UTC"
     NamedZone(zone:) -> time_zone.zone_id(zone)
@@ -524,14 +528,14 @@ pub type DurationFormatState {
   )
 }
 
-pub fn collator_usage_to_js_string(v: CollatorUsage) -> String {
+pub fn collator_usage_text(v: CollatorUsage) -> String {
   case v {
     UsageSort -> "sort"
     UsageSearch -> "search"
   }
 }
 
-pub fn collator_sensitivity_to_js_string(v: CollatorSensitivity) -> String {
+pub fn collator_sensitivity_text(v: CollatorSensitivity) -> String {
   case v {
     SensBase -> "base"
     SensAccent -> "accent"
@@ -540,7 +544,7 @@ pub fn collator_sensitivity_to_js_string(v: CollatorSensitivity) -> String {
   }
 }
 
-pub fn case_first_to_js_string(v: CaseFirst) -> String {
+pub fn case_first_text(v: CaseFirst) -> String {
   case v {
     CaseFirstUpper -> "upper"
     CaseFirstLower -> "lower"
@@ -548,7 +552,7 @@ pub fn case_first_to_js_string(v: CaseFirst) -> String {
   }
 }
 
-pub fn case_first_from_js_string(s: String) -> Option(CaseFirst) {
+pub fn case_first_from_text(s: String) -> Option(CaseFirst) {
   case s {
     "upper" -> Some(CaseFirstUpper)
     "lower" -> Some(CaseFirstLower)
@@ -557,7 +561,7 @@ pub fn case_first_from_js_string(s: String) -> Option(CaseFirst) {
   }
 }
 
-pub fn num_style_to_js_string(v: NumberStyle) -> String {
+pub fn num_style_text(v: NumberStyle) -> String {
   case v {
     StyleDecimal -> "decimal"
     StylePercent -> "percent"
@@ -566,7 +570,7 @@ pub fn num_style_to_js_string(v: NumberStyle) -> String {
   }
 }
 
-pub fn notation_to_js_string(v: Notation) -> String {
+pub fn notation_text(v: Notation) -> String {
   case v {
     NotationStandard -> "standard"
     NotationScientific -> "scientific"
@@ -575,14 +579,14 @@ pub fn notation_to_js_string(v: Notation) -> String {
   }
 }
 
-pub fn compact_display_to_js_string(v: CompactDisplay) -> String {
+pub fn compact_display_text(v: CompactDisplay) -> String {
   case v {
     CompactShort -> "short"
     CompactLong -> "long"
   }
 }
 
-pub fn sign_display_to_js_string(v: SignDisplay) -> String {
+pub fn sign_display_text(v: SignDisplay) -> String {
   case v {
     SignAuto -> "auto"
     SignNever -> "never"
@@ -592,7 +596,7 @@ pub fn sign_display_to_js_string(v: SignDisplay) -> String {
   }
 }
 
-pub fn currency_display_to_js_string(v: CurrencyDisplay) -> String {
+pub fn currency_display_text(v: CurrencyDisplay) -> String {
   case v {
     CurrencyCode -> "code"
     CurrencySymbol -> "symbol"
@@ -601,14 +605,14 @@ pub fn currency_display_to_js_string(v: CurrencyDisplay) -> String {
   }
 }
 
-pub fn currency_sign_to_js_string(v: CurrencySign) -> String {
+pub fn currency_sign_text(v: CurrencySign) -> String {
   case v {
     StandardSign -> "standard"
     AccountingSign -> "accounting"
   }
 }
 
-pub fn unit_display_to_js_string(v: UnitDisplay) -> String {
+pub fn unit_display_text(v: UnitDisplay) -> String {
   case v {
     UnitShort -> "short"
     UnitNarrow -> "narrow"
@@ -616,7 +620,7 @@ pub fn unit_display_to_js_string(v: UnitDisplay) -> String {
   }
 }
 
-pub fn rounding_mode_to_js_string(v: RoundingMode) -> String {
+pub fn rounding_mode_text(v: RoundingMode) -> String {
   case v {
     RoundCeil -> "ceil"
     RoundFloor -> "floor"
@@ -630,7 +634,7 @@ pub fn rounding_mode_to_js_string(v: RoundingMode) -> String {
   }
 }
 
-pub fn rounding_priority_to_js_string(v: RoundingPriority) -> String {
+pub fn rounding_priority_text(v: RoundingPriority) -> String {
   case v {
     PriorityAuto -> "auto"
     PriorityMorePrecision -> "morePrecision"
@@ -638,21 +642,21 @@ pub fn rounding_priority_to_js_string(v: RoundingPriority) -> String {
   }
 }
 
-pub fn trailing_zero_display_to_js_string(v: TrailingZeroDisplay) -> String {
+pub fn trailing_zero_display_text(v: TrailingZeroDisplay) -> String {
   case v {
     TrailingZeroAuto -> "auto"
     TrailingZeroStripIfInteger -> "stripIfInteger"
   }
 }
 
-pub fn numeric_width_to_js_string(v: NumericWidth) -> String {
+pub fn numeric_width_text(v: NumericWidth) -> String {
   case v {
     Numeric -> "numeric"
     TwoDigit -> "2-digit"
   }
 }
 
-pub fn name_width_to_js_string(v: NameWidth) -> String {
+pub fn name_width_text(v: NameWidth) -> String {
   case v {
     WidthLong -> "long"
     WidthShort -> "short"
@@ -660,14 +664,14 @@ pub fn name_width_to_js_string(v: NameWidth) -> String {
   }
 }
 
-pub fn month_width_to_js_string(v: MonthWidth) -> String {
+pub fn month_width_text(v: MonthWidth) -> String {
   case v {
-    MonthNum(w) -> numeric_width_to_js_string(w)
-    MonthName(w) -> name_width_to_js_string(w)
+    MonthNum(w) -> numeric_width_text(w)
+    MonthName(w) -> name_width_text(w)
   }
 }
 
-pub fn time_zone_name_width_to_js_string(v: TimeZoneNameWidth) -> String {
+pub fn time_zone_name_width_text(v: TimeZoneNameWidth) -> String {
   case v {
     ZoneShort -> "short"
     ZoneLong -> "long"
@@ -678,7 +682,7 @@ pub fn time_zone_name_width_to_js_string(v: TimeZoneNameWidth) -> String {
   }
 }
 
-pub fn hour_cycle_to_js_string(v: HourCycle) -> String {
+pub fn hour_cycle_text(v: HourCycle) -> String {
   case v {
     H11 -> "h11"
     H12 -> "h12"
@@ -687,7 +691,7 @@ pub fn hour_cycle_to_js_string(v: HourCycle) -> String {
   }
 }
 
-pub fn date_style_to_js_string(v: DateStyle) -> String {
+pub fn date_style_text(v: DateStyle) -> String {
   case v {
     DateFull -> "full"
     DateLong -> "long"
@@ -696,7 +700,7 @@ pub fn date_style_to_js_string(v: DateStyle) -> String {
   }
 }
 
-pub fn time_style_to_js_string(v: TimeStyle) -> String {
+pub fn time_style_text(v: TimeStyle) -> String {
   case v {
     TimeFull -> "full"
     TimeLong -> "long"
@@ -705,14 +709,14 @@ pub fn time_style_to_js_string(v: TimeStyle) -> String {
   }
 }
 
-pub fn plural_type_to_js_string(v: PluralType) -> String {
+pub fn plural_type_text(v: PluralType) -> String {
   case v {
     Cardinal -> "cardinal"
     Ordinal -> "ordinal"
   }
 }
 
-pub fn list_format_type_to_js_string(v: ListFormatType) -> String {
+pub fn list_format_type_text(v: ListFormatType) -> String {
   case v {
     Conjunction -> "conjunction"
     Disjunction -> "disjunction"
@@ -720,7 +724,7 @@ pub fn list_format_type_to_js_string(v: ListFormatType) -> String {
   }
 }
 
-pub fn list_format_style_to_js_string(v: ListFormatStyle) -> String {
+pub fn list_format_style_text(v: ListFormatStyle) -> String {
   case v {
     ListLong -> "long"
     ListShort -> "short"
@@ -728,7 +732,7 @@ pub fn list_format_style_to_js_string(v: ListFormatStyle) -> String {
   }
 }
 
-pub fn rtf_style_to_js_string(v: RelativeTimeStyle) -> String {
+pub fn relative_time_style_text(v: RelativeTimeStyle) -> String {
   case v {
     RelativeLong -> "long"
     RelativeShort -> "short"
@@ -736,14 +740,14 @@ pub fn rtf_style_to_js_string(v: RelativeTimeStyle) -> String {
   }
 }
 
-pub fn rtf_numeric_to_js_string(v: RelativeTimeNumeric) -> String {
+pub fn relative_time_numeric_text(v: RelativeTimeNumeric) -> String {
   case v {
     NumericAlways -> "always"
     NumericAuto -> "auto"
   }
 }
 
-pub fn granularity_to_js_string(v: Granularity) -> String {
+pub fn granularity_text(v: Granularity) -> String {
   case v {
     GraphemeGranularity -> "grapheme"
     WordGranularity -> "word"
@@ -751,7 +755,7 @@ pub fn granularity_to_js_string(v: Granularity) -> String {
   }
 }
 
-pub fn display_names_type_to_js_string(v: DisplayNamesType) -> String {
+pub fn display_names_type_text(v: DisplayNamesType) -> String {
   case v {
     LanguageNames -> "language"
     RegionNames -> "region"
@@ -762,21 +766,21 @@ pub fn display_names_type_to_js_string(v: DisplayNamesType) -> String {
   }
 }
 
-pub fn display_names_fallback_to_js_string(v: DisplayNamesFallback) -> String {
+pub fn display_names_fallback_text(v: DisplayNamesFallback) -> String {
   case v {
     CodeFallback -> "code"
     NoFallback -> "none"
   }
 }
 
-pub fn language_display_to_js_string(v: LanguageDisplay) -> String {
+pub fn language_display_text(v: LanguageDisplay) -> String {
   case v {
     DialectNames -> "dialect"
     StandardNames -> "standard"
   }
 }
 
-pub fn duration_unit_style_to_js_string(v: DurationUnitStyle) -> String {
+pub fn duration_unit_style_text(v: DurationUnitStyle) -> String {
   case v {
     UnitStyleLong -> "long"
     UnitStyleShort -> "short"
@@ -787,14 +791,14 @@ pub fn duration_unit_style_to_js_string(v: DurationUnitStyle) -> String {
   }
 }
 
-pub fn duration_display_to_js_string(v: DurationDisplay) -> String {
+pub fn duration_display_text(v: DurationDisplay) -> String {
   case v {
     DisplayAuto -> "auto"
     DisplayAlways -> "always"
   }
 }
 
-pub fn duration_base_style_to_js_string(v: DurationBaseStyle) -> String {
+pub fn duration_base_style_text(v: DurationBaseStyle) -> String {
   case v {
     BaseLong -> "long"
     BaseShort -> "short"

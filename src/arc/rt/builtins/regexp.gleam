@@ -7,6 +7,7 @@ import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
 import arc/rt/elements
+import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type BuiltinPair, type Handle, type JsVal, type LegacyStatic,
@@ -213,7 +214,7 @@ fn regexp_call(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
   case pattern_is_regexp, classify(flags) {
     True, KUndef -> {
-      let #(ctor, st) = get_named(st, pattern, "constructor")
+      let #(ctor, st) = rt_val.get_named(st, pattern, "constructor", None)
       case rt_val.same_value(ctor, new_target) {
         True -> #(pattern, st)
         False -> construct(st)
@@ -239,10 +240,10 @@ fn construct_regexp(
     None ->
       case pattern_is_regexp {
         True -> {
-          let #(p, st) = get_named(st, pattern, "source")
+          let #(p, st) = rt_val.get_named(st, pattern, "source", None)
           case classify(flags) {
             KUndef -> {
-              let #(f, st) = get_named(st, pattern, "flags")
+              let #(f, st) = rt_val.get_named(st, pattern, "flags", None)
               #(p, f, st)
             }
             _ -> #(p, flags, st)
@@ -271,7 +272,7 @@ pub fn create(st: Agent, p: JsVal, f: JsVal) -> #(JsVal, Agent) {
 pub fn is_regexp(st: Agent, val: JsVal) -> #(Bool, Agent) {
   case classify(val) {
     KHandle(_) -> {
-      let #(matcher, st) = helpers.get_symbol(st, val, types.symbol_match)
+      let #(matcher, st) = rt_val.get_symbol(st, val, types.symbol_match)
       case classify(matcher) {
         KUndef -> #(is_regexp_object(st, val), st)
         _ -> #(rt_val.to_boolean(matcher), st)
@@ -409,19 +410,13 @@ fn update_constructor(
   }
 }
 
-@external(erlang, "erlang", "=:=")
-fn same_props(
-  a: Dict(PropertyKey, Property),
-  b: Dict(PropertyKey, Property),
-) -> Bool
-
 // usually one compare against the last props map seen pristine
 fn proto_pristine(st: Agent) -> #(Bool, Agent) {
   case rt_store.cell_get(st, st.realm.regexp.prototype), ctor_state(st) {
     SObject(props:, ..), Some(CtorState(proto_props:, ..)) ->
       case proto_props {
         Some(seen) ->
-          case same_props(seen, props) {
+          case seen == props {
             True -> #(True, st)
             False -> verify_pristine(st, props)
           }
@@ -565,7 +560,7 @@ fn build_flags(
   case remaining {
     [] -> #(mk_string(acc), st)
     [flag, ..rest] -> {
-      let #(v, st) = get_named(st, this, flag_property(flag))
+      let #(v, st) = rt_val.get_named(st, this, flag_property(flag), None)
       let acc = case rt_val.to_boolean(v) {
         True -> acc <> flag_char(flag)
         False -> acc
@@ -591,7 +586,7 @@ fn to_string(st: Agent, this: JsVal) -> #(JsVal, Agent) {
         "RegExp.prototype.toString called on non-object",
       )
   }
-  let #(src_v, st) = get_named(st, this, "source")
+  let #(src_v, st) = rt_val.get_named(st, this, "source", None)
   let #(src, st) = rt_val.to_string(st, src_v)
   let #(flags, st) = read_flags(st, this)
   #(mk_string("/" <> src <> "/" <> flags), st)
@@ -738,12 +733,8 @@ pub fn regexp_exec_compiled(
   ExecFailure,
 )
 
-pub fn get_named(st: Agent, o: JsVal, name: String) -> #(JsVal, Agent) {
-  helpers.get_named(st, o, name)
-}
-
 pub fn set_throw(st: Agent, h: Handle, name: String, v: JsVal) -> Agent {
-  helpers.set_named(st, mk_object(h), name, v, strict: True)
+  rt_obj.set_named(st, mk_object(h), name, v, strict: True)
 }
 
 pub fn require_object(st: Agent, v: JsVal, op: String) -> Handle {
@@ -757,11 +748,7 @@ pub fn require_object(st: Agent, v: JsVal, op: String) -> Handle {
   }
 }
 
-pub fn regexp_exec_abstract(
-  st: Agent,
-  rx: JsVal,
-  s: String,
-) -> #(JsVal, Agent) {
+pub fn exec_abstract(st: Agent, rx: JsVal, s: String) -> #(JsVal, Agent) {
   regexp_exec_mode(st, rx, s, MatchArray)
 }
 
@@ -772,7 +759,7 @@ fn regexp_exec_mode(
   mode: ExecMode,
 ) -> #(JsVal, Agent) {
   let h = require_object(st, rx, ".exec")
-  let #(exec_fn, st) = get_named(st, rx, "exec")
+  let #(exec_fn, st) = rt_val.get_named(st, rx, "exec", None)
   let receiver = rt_store.cell_get(st, h)
   case receiver, is_intrinsic_exec(st, exec_fn) {
     SObject(kind: RegExpObj(..), ..), True -> builtin_exec_mode(st, h, s, mode)
@@ -837,10 +824,10 @@ pub fn builtin_exec_ranges(
   h: Handle,
   s: String,
 ) -> #(MatchRanges, String, Agent) {
-  let #(li_v, st) = get_named(st, mk_object(h), "lastIndex")
+  let #(li_v, st) = rt_val.get_named(st, mk_object(h), "lastIndex", None)
   let #(last_index, st) = rt_val.to_length(st, li_v)
   // re-read after the get, a getter may have recompiled
-  let #(flags, compiled, st) = regexp_matcher(st, h)
+  let #(flags, compiled, st) = matcher(st, h)
   let global = has_flag(flags, "g")
   let sticky = has_flag(flags, "y")
   let last_index = case global || sticky {
@@ -883,10 +870,7 @@ pub fn builtin_exec_mode(
   }
 }
 
-pub fn regexp_matcher(
-  st: Agent,
-  h: Handle,
-) -> #(String, types.CompiledRegExp, Agent) {
+pub fn matcher(st: Agent, h: Handle) -> #(String, types.CompiledRegExp, Agent) {
   case rt_store.cell_get(st, h) {
     SObject(kind: RegExpObj(source:, flags:, last_index:, compiled:), ..) as cell ->
       case is_compiled(compiled) {
@@ -1083,8 +1067,9 @@ fn alloc_array_with_props(
   let array_proto = st.realm.array.prototype
   use seq <- rt_store.cell_new_with(st, list.length(entries))
   let props =
-    list.index_map(entries, fn(kv, i) {
-      #(Named(kv.0), types.plain_property(kv.1, seq + i))
+    list.index_map(entries, fn(entry, i) {
+      let #(name, value) = entry
+      #(Named(name), types.plain_property(value, seq + i))
     })
   SObject(
     kind: ArrayObj(list.length(values)),
@@ -1248,7 +1233,7 @@ pub fn read_flags(st: Agent, rx: JsVal) -> #(String, Agent) {
   case pristine {
     Some(flags) -> #(flags, st)
     None -> {
-      let #(flags_v, st) = get_named(st, rx, "flags")
+      let #(flags_v, st) = rt_val.get_named(st, rx, "flags", None)
       rt_val.to_string(st, flags_v)
     }
   }
@@ -1273,11 +1258,11 @@ pub fn species_constructor(
   o: JsVal,
   default_ctor: Handle,
 ) -> #(JsVal, Agent) {
-  let #(c, st) = get_named(st, o, "constructor")
+  let #(c, st) = rt_val.get_named(st, o, "constructor", None)
   case classify(c) {
     KUndef -> #(mk_object(default_ctor), st)
     KHandle(_) -> {
-      let #(s, st) = helpers.get_symbol(st, c, types.symbol_species)
+      let #(s, st) = rt_val.get_symbol(st, c, types.symbol_species)
       case classify(s) {
         KUndef | KNull -> #(mk_object(default_ctor), st)
         KHandle(_) -> #(s, st)

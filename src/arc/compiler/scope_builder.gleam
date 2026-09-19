@@ -1,6 +1,6 @@
 import arc/bytecode/lexical.{
-  type LexicalRef, type LexicalRefs, RefActiveFunc, RefHomeObject, RefNewTarget,
-  RefThis,
+  type LexicalRef, type LexicalRefs, ActiveFuncRef, HomeObjectRef, NewTargetRef,
+  ThisRef,
 }
 import arc/compiler/scope.{
   type BindingKind, type ScopeId, type ScopeKind, Block, CaptureBinding, Catch,
@@ -20,9 +20,9 @@ pub type RawBinding {
 }
 
 pub type SourceTag {
-  TagFnDecl
-  TagSwitchTest
-  TagOther
+  FnDeclSource
+  SwitchTestSource
+  OtherSource
 }
 
 pub type RawScope {
@@ -79,7 +79,7 @@ fn new_raw_scope(
     annexb_blocked: set.new(),
     is_strict:,
     catch_param_simple: True,
-    source_tag: TagOther,
+    source_tag: OtherSource,
     hoisted_vars: set.new(),
     non_simple_shim_count: 0,
     is_var_boundary: False,
@@ -326,10 +326,10 @@ pub fn lexical_ref(sb: ScopeBuilder, ref: LexicalRef) -> ScopeBuilder {
     dict.upsert(sb.own_lexical_refs, sb.current_fn, fn(prev) {
       let prev = option.unwrap(prev, lexical.no_lexical_refs)
       case ref {
-        RefThis -> lexical.LexicalRefs(..prev, this: True)
-        RefActiveFunc -> lexical.LexicalRefs(..prev, active_func: True)
-        RefHomeObject -> lexical.LexicalRefs(..prev, home_object: True)
-        RefNewTarget -> lexical.LexicalRefs(..prev, new_target: True)
+        ThisRef -> lexical.LexicalRefs(..prev, this: True)
+        ActiveFuncRef -> lexical.LexicalRefs(..prev, active_func: True)
+        HomeObjectRef -> lexical.LexicalRefs(..prev, home_object: True)
+        NewTargetRef -> lexical.LexicalRefs(..prev, new_target: True)
       }
     })
   ScopeBuilder(..sb, own_lexical_refs:)
@@ -548,7 +548,7 @@ pub fn reorder_body_children(
   use <- bool.guard(children_newest_first(sb, scope_id) == [], sb)
   let body_src = children_since(sb, scope_id, before) |> list.reverse
   let #(fn_decls, rest) =
-    list.partition(body_src, fn(id) { tag_of(sb, id) == TagFnDecl })
+    list.partition(body_src, fn(id) { tag_of(sb, id) == FnDeclSource })
   set_children(
     sb,
     scope_id,
@@ -565,9 +565,9 @@ pub fn reorder_switch_children(
   use <- bool.guard(rev == [], sb)
   let src_order = list.reverse(rev)
   let #(fn_decls, non_decl) =
-    list.partition(src_order, fn(id) { tag_of(sb, id) == TagFnDecl })
+    list.partition(src_order, fn(id) { tag_of(sb, id) == FnDeclSource })
   let #(tests, rest) =
-    list.partition(non_decl, fn(id) { tag_of(sb, id) == TagSwitchTest })
+    list.partition(non_decl, fn(id) { tag_of(sb, id) == SwitchTestSource })
   set_children(sb, switch_id, list.flatten([fn_decls, tests, rest]))
 }
 

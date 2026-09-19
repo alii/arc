@@ -17,14 +17,14 @@ start() ->
 loop() ->
     receive
         {emscripten, {call, Promise, Src0}} ->
-            handle(Promise, Src0),
+            serve(Promise, Src0),
             loop();
         Other ->
             io:format("arc_aot_wasm_ffi: unexpected message ~p~n", [Other]),
             loop()
     end.
 
-handle(Promise, Src0) ->
+serve(Promise, Src0) ->
     try
         Src = unicode:characters_to_binary(Src0),
         case in_worker(fun() -> arc_aot@playground:emit(Src, <<"playground">>) end) of
@@ -33,12 +33,12 @@ handle(Promise, Src0) ->
                                            <<Ir/binary, 30, Core/binary, 30, Erl/binary>>);
             {error, Msg} when is_binary(Msg) ->
                 emscripten:promise_reject(Promise, Msg);
-            {crash, C, R, St} ->
-                reject_quietly(Promise, fun() -> format_crash(C, R, St) end)
+            {crash, C, R, Stk} ->
+                reject_quietly(Promise, fun() -> format_crash(C, R, Stk) end)
         end
     catch
-        C0:R0:St0 ->
-            reject_quietly(Promise, fun() -> format_crash(C0, R0, St0) end)
+        C0:R0:Stk0 ->
+            reject_quietly(Promise, fun() -> format_crash(C0, R0, Stk0) end)
     end.
 
 %% fresh process per request keeps atomvm heap small
@@ -47,7 +47,7 @@ in_worker(Work) ->
     Ref = make_ref(),
     _Pid = spawn_opt(fun() ->
                          Self ! {Ref, try Work()
-                                      catch C:R:St -> {crash, C, R, St}
+                                      catch C:R:Stk -> {crash, C, R, Stk}
                                       end}
                      end, [{atomvm_heap_growth, fibonacci}]),
     receive

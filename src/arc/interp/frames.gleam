@@ -22,7 +22,7 @@ pub fn pop_frame_info(agent: Agent) -> Agent {
   }
 }
 
-// catch frames and call_depth up with the loop's fast calls
+// catch frames and call_depth up with the in-loop calls
 pub fn sync(state: State, agent: Agent, pc: Int) -> Agent {
   let depth = state.depth
   let line = tuple_array.element(pc + 1, state.func.lines)

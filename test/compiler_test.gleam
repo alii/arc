@@ -24,7 +24,7 @@ import gleam/string
 import rt_helpers
 
 fn agent() -> Agent {
-  rt_builtins.new_agent(host_hooks.default_host_hooks()) |> entry.link
+  rt_builtins.new_agent(host_hooks.default()) |> entry.link
 }
 
 fn classify_outcome(
@@ -63,9 +63,9 @@ fn run_js(
   source: String,
 ) -> Result(#(Result(JsValKind, JsValKind), Agent), String) {
   case parser.parse_script(source) {
-    Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
-    Ok(#(body, sb)) ->
-      case compiler.compile_script(body, sb) {
+    Error(err) -> Error("parse error: " <> parser.error_to_string(err))
+    Ok(#(body, scopes)) ->
+      case compiler.compile_script(body, scopes) {
         Error(err) -> Error("compile error: " <> compiler.error_message(err))
         Ok(template) -> Ok(run_template(agent(), template))
       }
@@ -81,10 +81,10 @@ fn promise_settlement(
     _ -> None
   })
   use promise <- option.then(rt_async.as_promise(st, mk_object(h)))
-  case rt_async.promise_data(st, promise) {
-    #(_, PromiseFulfilled(v), _) -> Some(Ok(rt_helpers.classify(v)))
-    #(_, PromiseRejected(r), _) -> Some(Error(rt_helpers.classify(r)))
-    #(_, PromisePending(_), _) -> None
+  case rt_async.promise_data(st, promise).state {
+    PromiseFulfilled(v) -> Some(Ok(rt_helpers.classify(v)))
+    PromiseRejected(r) -> Some(Error(rt_helpers.classify(r)))
+    PromisePending(_) -> None
   }
 }
 
@@ -6541,9 +6541,9 @@ fn run_repl_input(
   st: Agent,
 ) -> Result(#(Result(JsValKind, JsValKind), Agent), String) {
   case parser.parse_script(source) {
-    Error(err) -> Error("parse error: " <> parser.parse_error_to_string(err))
-    Ok(#(body, sb)) ->
-      case compiler.compile_repl(body, sb) {
+    Error(err) -> Error("parse error: " <> parser.error_to_string(err))
+    Ok(#(body, scopes)) ->
+      case compiler.compile_repl(body, scopes) {
         Error(err) -> Error("compile error: " <> compiler.error_message(err))
         Ok(template) -> Ok(run_template(st, template))
       }
@@ -7059,23 +7059,23 @@ pub fn module_export_function_test() -> Nil {
 }
 
 @external(erlang, "test_runner_ffi", "counter_reset")
-fn do_counter_reset(_key: String) -> Nil {
+fn counter_reset(_key: String) -> Nil {
   panic as "counter FFI is Erlang-only (process dictionary)"
 }
 
 @external(erlang, "test_runner_ffi", "counter_bump")
-fn do_counter_bump(_key: String) -> Nil {
+fn counter_bump(_key: String) -> Nil {
   panic as "counter FFI is Erlang-only (process dictionary)"
 }
 
 @external(erlang, "test_runner_ffi", "counter_read")
-fn do_counter_read(_key: String) -> Int {
+fn counter_read(_key: String) -> Int {
   panic as "counter FFI is Erlang-only (process dictionary)"
 }
 
 fn counter(key: String, next: fn(fn() -> Int, fn() -> Nil) -> Nil) {
-  do_counter_reset(key)
-  next(fn() { do_counter_read(key) }, fn() { do_counter_bump(key) })
+  counter_reset(key)
+  next(fn() { counter_read(key) }, fn() { counter_bump(key) })
 }
 
 pub fn module_diamond_deps_compiled_once_test() -> Nil {

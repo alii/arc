@@ -1,6 +1,7 @@
 import arc/bytecode/key.{Named, max_array_length}
 import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/async as rt_async
+import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/realm_ops
@@ -43,26 +44,6 @@ fn settle(st: Agent, target: JsVal, arg: JsVal) -> Agent {
   st
 }
 
-fn alloc_closure(st: Agent, token: NativeToken) -> #(JsVal, Agent) {
-  let #(h, st) =
-    rt_call.native_new(
-      st,
-      Some(st.realm.function.prototype),
-      token,
-      "",
-      1,
-      constructible: False,
-    )
-  #(mk_object(h), st)
-}
-
-fn type_name(st: Agent, v: JsVal) -> String {
-  case classify(v) {
-    KNull -> "null"
-    _ -> rt_val.type_of(st, v)
-  }
-}
-
 fn from_async_handler(
   st: Agent,
   args: List(JsVal),
@@ -83,7 +64,7 @@ pub fn from_async(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(#(promise_h, resolve_h, reject_h), st) =
+  let #(rt_async.PromiseCapability(promise_h, resolve_h, reject_h), st) =
     rt_async.new_promise_capability(st)
   let resolve = mk_object(resolve_h)
   let reject = mk_object(reject_h)
@@ -112,7 +93,7 @@ fn from_async_closure(
         False ->
           rt_val.throw_type_error(
             st,
-            type_name(st, map_fn) <> " is not a function",
+            rt_abstract_ops.type_name(st, map_fn) <> " is not a function",
           )
       }
   }
@@ -120,7 +101,9 @@ fn from_async_closure(
     KUndef | KNull ->
       rt_val.throw_type_error(
         st,
-        "Cannot convert " <> type_name(st, items) <> " to object",
+        "Cannot convert "
+          <> rt_abstract_ops.type_name(st, items)
+          <> " to object",
       )
     _ -> st
   }
@@ -186,7 +169,7 @@ fn from_async_get_method(
         False ->
           rt_val.throw_type_error(
             st,
-            type_name(st, method) <> " is not a function",
+            rt_abstract_ops.type_name(st, method) <> " is not a function",
           )
       }
   }
@@ -240,7 +223,7 @@ fn from_async_await(
   on_fulfilled: NativeToken,
   on_rejected: JsVal,
 ) -> Agent {
-  let #(on_f, st) = alloc_closure(st, on_fulfilled)
+  let #(on_f, st) = common.alloc_native_closure(st, on_fulfilled, 1)
   let #(awaited_h, st) = rt_async.promise_resolve_static(st, v)
   let #(_child, st) = rt_async.promise_then(st, awaited_h, on_f, on_rejected)
   st
@@ -287,12 +270,13 @@ fn from_async_next_steps(
           {
             Ok(#(mapped, st)) -> {
               let #(on_r, st) =
-                alloc_closure(
+                common.alloc_native_closure(
                   st,
                   ArrayN(ArrayFromAsyncCloseReject(
                     iter: ctx.iter,
                     reject: ctx.reject,
                   )),
+                  1,
                 )
               from_async_await(
                 st,
@@ -355,7 +339,11 @@ fn from_async_close_then_reject(
     #(None, st) -> settle(st, reject, err)
     #(Some(inner), st) -> {
       let #(rw, st) =
-        alloc_closure(st, ArrayN(ArrayFromAsyncRejectWith(error: err, reject:)))
+        common.alloc_native_closure(
+          st,
+          ArrayN(ArrayFromAsyncRejectWith(error: err, reject:)),
+          1,
+        )
       let #(inner_h, st) = rt_async.promise_resolve_static(st, inner)
       let #(_child, st) = rt_async.promise_then(st, inner_h, rw, rw)
       st

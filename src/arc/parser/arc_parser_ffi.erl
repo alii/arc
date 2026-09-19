@@ -1,4 +1,4 @@
--module(arc_escape_ffi).
+-module(arc_parser_ffi).
 -export([decode_string_escapes/1, cook_template_string/1]).
 
 -define(IS_HEX1(C),

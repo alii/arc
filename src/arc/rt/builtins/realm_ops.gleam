@@ -78,3 +78,8 @@ pub fn alloc_iter_result(
 pub fn alloc_array(st: Agent, values: List(JsVal)) -> #(Handle, Agent) {
   common.alloc_array(st, values, st.realm.array.prototype)
 }
+
+pub fn new_array(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
+  let #(h, st) = alloc_array(st, values)
+  #(mk_object(h), st)
+}

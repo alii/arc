@@ -244,17 +244,7 @@ fn put_hidden_property(
     SObject(props:, ..) ->
       SObject(
         ..cell,
-        props: dict.insert(
-          props,
-          key,
-          DataProperty(
-            value: val,
-            writable: True,
-            enumerable: False,
-            configurable: True,
-            seq:,
-          ),
-        ),
+        props: dict.insert(props, key, types.builtin_property(val, seq)),
       )
     _ -> panic as "arc/module/registry: hidden property target is not an object"
   }

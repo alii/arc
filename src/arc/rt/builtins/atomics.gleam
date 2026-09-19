@@ -57,12 +57,12 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case native {
-    AtomicsAdd -> rmw(st, args, fn(old, v) { old + v })
-    AtomicsAnd -> rmw(st, args, int.bitwise_and)
-    AtomicsOr -> rmw(st, args, int.bitwise_or)
-    AtomicsXor -> rmw(st, args, int.bitwise_exclusive_or)
-    AtomicsSub -> rmw(st, args, fn(old, v) { old - v })
-    AtomicsExchange -> rmw(st, args, fn(_old, v) { v })
+    AtomicsAdd -> read_modify_write(st, args, fn(old, v) { old + v })
+    AtomicsAnd -> read_modify_write(st, args, int.bitwise_and)
+    AtomicsOr -> read_modify_write(st, args, int.bitwise_or)
+    AtomicsXor -> read_modify_write(st, args, int.bitwise_exclusive_or)
+    AtomicsSub -> read_modify_write(st, args, fn(old, v) { old - v })
+    AtomicsExchange -> read_modify_write(st, args, fn(_old, v) { v })
     AtomicsCompareExchange -> compare_exchange(st, args)
     AtomicsLoad -> atomic_load(st, args)
     AtomicsStore -> atomic_store(st, args)
@@ -75,7 +75,7 @@ pub fn dispatch(
 }
 
 type AtomicAccess {
-  RmwAccess
+  ReadModifyWriteAccess
   LoadAccess
   WaitAccess
   NotifyAccess
@@ -84,7 +84,7 @@ type AtomicAccess {
 type AtomicsTarget {
   AtomicsTarget(
     buffer: Handle,
-    elem_kind: TypedArrayKind,
+    kind: TypedArrayKind,
     byte_offset: Int,
     elem: IntElem,
   )
@@ -115,28 +115,28 @@ fn elem_size(info: AtomicsTarget) -> Int {
 }
 
 // §25.4.3.1 + §25.4.3.3 validate typed array and index
-fn with_ta_and_index(
+fn with_typed_array_and_index(
   st: Agent,
   args: List(JsVal),
   mode mode: AtomicAccess,
 ) -> #(AtomicsTarget, Int, Agent) {
   let waitable = case mode {
     WaitAccess | NotifyAccess -> True
-    RmwAccess | LoadAccess -> False
+    ReadModifyWriteAccess | LoadAccess -> False
   }
   let require_shared = case mode {
     WaitAccess -> True
-    RmwAccess | LoadAccess | NotifyAccess -> False
+    ReadModifyWriteAccess | LoadAccess | NotifyAccess -> False
   }
   let write = case mode {
-    RmwAccess -> True
+    ReadModifyWriteAccess -> True
     LoadAccess | WaitAccess | NotifyAccess -> False
   }
-  let ta_val = helpers.first_arg_or_undefined(args)
-  use view <- helpers.some_or(read_typed_array(st, ta_val), fn() {
+  let typed_array_val = helpers.first_arg_or_undefined(args)
+  use view <- helpers.some_or(read_typed_array(st, typed_array_val), fn() {
     rt_val.throw_type_error(st, "Atomics operation needs an integer TypedArray")
   })
-  use elem <- helpers.some_or(atomics_elem(view.elem_kind, waitable), fn() {
+  use elem <- helpers.some_or(atomics_elem(view.kind, waitable), fn() {
     rt_val.throw_type_error(
       st,
       "Invalid TypedArray element type for Atomics operation",
@@ -146,7 +146,7 @@ fn with_ta_and_index(
     rt_val.throw_type_error(st, "TypedArray is not attached")
   })
   use Nil <- helpers.guard(
-    !require_shared || buffer.buffer_is_shared(storage),
+    !require_shared || buffer.storage_is_shared(storage),
     fn() {
       rt_val.throw_type_error(
         st,
@@ -169,7 +169,7 @@ fn with_ta_and_index(
   let info =
     AtomicsTarget(
       buffer: view.buffer,
-      elem_kind: view.elem_kind,
+      kind: view.kind,
       byte_offset: view.byte_offset,
       elem:,
     )
@@ -181,31 +181,31 @@ fn with_ta_and_index(
   #(info, idx, st)
 }
 
-type TypedArrayView {
-  TypedArrayView(
+type IntegerTypedArrayView {
+  IntegerTypedArrayView(
     buffer: Handle,
-    elem_kind: TypedArrayKind,
+    kind: TypedArrayKind,
     byte_offset: Int,
     length: Int,
   )
 }
 
-fn read_typed_array(st: Agent, val: JsVal) -> Option(TypedArrayView) {
+fn read_typed_array(st: Agent, val: JsVal) -> Option(IntegerTypedArrayView) {
   case classify(val) {
     KHandle(h) ->
       case rt_store.cell_get(st, h) {
         SObject(
-          kind: TypedArrayObj(buffer:, elem_kind:, byte_offset:, length:),
+          kind: TypedArrayObj(buffer:, elem_kind: kind, byte_offset:, length:),
           ..,
         ) ->
-          Some(TypedArrayView(
+          Some(IntegerTypedArrayView(
             buffer:,
-            elem_kind:,
+            kind:,
             byte_offset:,
             length: buffer.typed_array_view_length(
               st,
               buffer,
-              elem_kind,
+              kind,
               byte_offset,
               length,
             ),
@@ -231,15 +231,15 @@ fn live_buffer(storage: BufferStorage) -> Option(BufferInfo) {
     Shared(block: OwnerBlock(owner:, ..), ..) ->
       Some(BufferInfo(
         data: OwnerData(owner:),
-        byte_size: buffer.buffer_byte_size(storage),
+        byte_size: buffer.storage_byte_size(storage),
         immutable: False,
       ))
     _ -> {
-      use bits <- option.map(buffer.buffer_bits(storage))
+      use bits <- option.map(buffer.storage_bits(storage))
       BufferInfo(
         data: StoreData(storage:, bits:),
-        byte_size: buffer.buffer_byte_size(storage),
-        immutable: buffer.buffer_is_immutable(storage),
+        byte_size: buffer.storage_byte_size(storage),
+        immutable: buffer.storage_is_immutable(storage),
       )
     }
   }
@@ -263,7 +263,7 @@ fn revalidate(st: Agent, info: AtomicsTarget, idx: Int) -> BufferInfo {
 
 // non-finite maps to +0, match before saturating
 fn to_operand(st: Agent, info: AtomicsTarget, val: JsVal) -> #(Int, Agent) {
-  case info.elem_kind {
+  case info.kind {
     BigKind(_) -> rt_val.to_bigint(st, val)
     NumKind(_) -> {
       let #(num, st) = rt_val.to_number(st, val)
@@ -316,7 +316,7 @@ fn write_element(
       buffer.set_storage(
         st,
         info.buffer,
-        buffer.buffer_store_region(
+        buffer.storage_store_region(
           storage,
           set_int(bits, off, info.elem, v),
           off,
@@ -364,18 +364,19 @@ fn modify_element(
 }
 
 fn element_to_js(info: AtomicsTarget, raw: Int) -> JsVal {
-  case info.elem_kind {
+  case info.kind {
     BigKind(_) -> mk_bigint(raw)
     NumKind(_) -> mk_int(raw)
   }
 }
 
-fn rmw(
+fn read_modify_write(
   st: Agent,
   args: List(JsVal),
   op: fn(Int, Int) -> Int,
 ) -> #(JsVal, Agent) {
-  let #(info, idx, st) = with_ta_and_index(st, args, mode: RmwAccess)
+  let #(info, idx, st) =
+    with_typed_array_and_index(st, args, mode: ReadModifyWriteAccess)
   let #(operand, st) = to_operand(st, info, helpers.arg_at(args, 2))
   let buf = revalidate(st, info, idx)
   let #(old, st) =
@@ -384,7 +385,8 @@ fn rmw(
 }
 
 fn compare_exchange(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(info, idx, st) = with_ta_and_index(st, args, mode: RmwAccess)
+  let #(info, idx, st) =
+    with_typed_array_and_index(st, args, mode: ReadModifyWriteAccess)
   let #(expected, st) = to_operand(st, info, helpers.arg_at(args, 2))
   let #(replacement, st) = to_operand(st, info, helpers.arg_at(args, 3))
   let buf = revalidate(st, info, idx)
@@ -400,14 +402,15 @@ fn compare_exchange(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 }
 
 fn atomic_load(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(info, idx, st) = with_ta_and_index(st, args, mode: LoadAccess)
+  let #(info, idx, st) = with_typed_array_and_index(st, args, mode: LoadAccess)
   let buf = revalidate(st, info, idx)
   #(element_to_js(info, read_element(buf, info, idx)), st)
 }
 
 fn atomic_store(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(info, idx, st) = with_ta_and_index(st, args, mode: RmwAccess)
-  case info.elem_kind {
+  let #(info, idx, st) =
+    with_typed_array_and_index(st, args, mode: ReadModifyWriteAccess)
+  case info.kind {
     BigKind(_) -> {
       let #(v, st) = rt_val.to_bigint(st, helpers.arg_at(args, 2))
       let buf = revalidate(st, info, idx)
@@ -457,7 +460,7 @@ fn pause(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 
 // §25.4.3.14 dowait
 fn do_wait(st: Agent, args: List(JsVal), sync sync: Bool) -> #(JsVal, Agent) {
-  let #(info, idx, st) = with_ta_and_index(st, args, mode: WaitAccess)
+  let #(info, idx, st) = with_typed_array_and_index(st, args, mode: WaitAccess)
   let #(v, st) = wait_value(st, info, helpers.arg_at(args, 2))
   let #(timeout_ms, st) = wait_timeout(st, helpers.arg_at(args, 3))
   use Nil <- helpers.guard(!sync || st.hooks.can_block, fn() {
@@ -505,7 +508,7 @@ fn do_wait(st: Agent, args: List(JsVal), sync sync: Bool) -> #(JsVal, Agent) {
 }
 
 fn wait_value(st: Agent, info: AtomicsTarget, val: JsVal) -> #(Int, Agent) {
-  case info.elem_kind {
+  case info.kind {
     BigKind(_) -> {
       let #(n, st) = rt_val.to_bigint(st, val)
       #(wrap_to_kind(n, I64), st)
@@ -544,7 +547,8 @@ fn wait_result_object(
 
 // §25.4.11
 fn notify(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
-  let #(info, idx, st) = with_ta_and_index(st, args, mode: NotifyAccess)
+  let #(info, idx, st) =
+    with_typed_array_and_index(st, args, mode: NotifyAccess)
   let #(count, st) = notify_count(st, helpers.arg_at(args, 2))
   case buffer.storage(st, info.buffer) {
     Some(Shared(block: OwnerBlock(owner:, ..), ..)) -> {

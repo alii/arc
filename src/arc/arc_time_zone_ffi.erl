@@ -1,5 +1,5 @@
 %% every offset here is local minus utc, in seconds; no io, see arc_zoneinfo_ffi
--module(arc_tz_ffi).
+-module(arc_time_zone_ffi).
 
 -export([known_identifier/1, canonical_id/1, rules_offset_at/2, rules_next_transition/2,
          rules_previous_transition/2, utc_time_zone/0, tzif_zone/2,

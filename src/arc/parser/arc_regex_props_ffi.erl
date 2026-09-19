@@ -43,15 +43,15 @@ resolve_pair(_, _) ->
 
 classify_lone(Name) ->
     case resolve_lone(Name) of
-        invalid -> prop_invalid;
-        strings -> prop_string;
-        _ -> prop_valid
+        invalid -> invalid_property;
+        strings -> strings_property;
+        _ -> valid_property
     end.
 
 classify_pair(Name, Value) ->
     case resolve_pair(Name, Value) of
-        invalid -> prop_invalid;
-        _ -> prop_valid
+        invalid -> invalid_property;
+        _ -> valid_property
     end.
 
 translate_lone(Name, Negated, InClass, VFlag) ->

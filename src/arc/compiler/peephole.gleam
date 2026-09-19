@@ -264,7 +264,7 @@ fn peephole(
       case fusable_cmp(kind) {
         Some(pure) ->
           peephole(rest, consts, [
-            IrCmpJump(pure, l, jump == IrJumpIfTrue(l)),
+            IrCmpJump(pure, l, when: jump == IrJumpIfTrue(l)),
             ..acc
           ])
         None -> peephole(rest, consts, [jump, op, ..acc])
@@ -282,7 +282,7 @@ fn peephole(
       case kind {
         PureOp(binop.Compare(_) as pure) | PureOp(binop.Equality(_) as pure) ->
           peephole(rest, consts, [
-            IrCmpConstJump(c, pure, l, jump == IrJumpIfTrue(l)),
+            IrCmpConstJump(c, pure, l, when: jump == IrJumpIfTrue(l)),
             ..acc
           ])
         _ -> peephole(rest, consts, [jump, op, ..acc])

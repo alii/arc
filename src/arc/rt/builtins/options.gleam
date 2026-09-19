@@ -1,4 +1,4 @@
-//// §9.2.12 CoerceOptionsToObject, GetOptionsObject and the GetOption family
+// §9.2.12 getoption family
 
 import arc/bytecode/key.{Named}
 import arc/rt/obj as rt_obj
@@ -25,15 +25,15 @@ pub fn coerce_options_to_object(
   }
 }
 
-pub fn get_options_object(st: Agent, v: JsVal) -> #(Option(Handle), Agent) {
+pub fn get_options_object(st: Agent, v: JsVal) -> Option(Handle) {
   case classify(v) {
-    KUndef -> #(None, st)
-    KHandle(h) -> #(Some(h), st)
+    KUndef -> None
+    KHandle(h) -> Some(h)
     _ -> rt_val.throw_type_error(st, "options must be an object or undefined")
   }
 }
 
-pub fn opt_get(
+pub fn get_option(
   st: Agent,
   opts: Option(Handle),
   name: String,
@@ -51,7 +51,7 @@ pub fn get_text_opt(
   allowed: List(String),
   default: Option(String),
 ) -> #(Option(String), Agent) {
-  let #(v, st) = opt_get(st, opts, name)
+  let #(v, st) = get_option(st, opts, name)
   case classify(v) {
     KUndef -> #(default, st)
     _ -> {
@@ -75,7 +75,7 @@ pub fn get_enum_opt(
   variants: List(#(String, a)),
   default: a,
 ) -> #(a, Agent) {
-  let #(v, st) = opt_get(st, opts, name)
+  let #(v, st) = get_option(st, opts, name)
   case classify(v) {
     KUndef -> #(default, st)
     _ -> {
@@ -98,7 +98,7 @@ pub fn get_bool_opt(
   name: String,
   default: Option(Bool),
 ) -> #(Option(Bool), Agent) {
-  let #(v, st) = opt_get(st, opts, name)
+  let #(v, st) = get_option(st, opts, name)
   case classify(v) {
     KUndef -> #(default, st)
     _ -> #(Some(rt_val.to_boolean(v)), st)
@@ -113,7 +113,7 @@ pub fn get_num_opt(
   max: Int,
   default: Option(Int),
 ) -> #(Option(Int), Agent) {
-  let #(v, st) = opt_get(st, opts, name)
+  let #(v, st) = get_option(st, opts, name)
   default_number_option(st, v, min, max, default, name)
 }
 

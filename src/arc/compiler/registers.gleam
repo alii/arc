@@ -17,9 +17,19 @@ pub fn assign_regs(
   let #(scores, pinned) = score_slots(ops, loop_depths(ops), dict.new(), pinned)
   let picked =
     dict.to_list(scores)
-    |> list.filter(fn(e) { e.1.1 && !set.contains(pinned, e.0) })
-    |> list.sort(fn(a, b) { int.compare(b.1.0, a.1.0) })
-    |> list.map(fn(e) { e.0 })
+    |> list.filter(fn(e) {
+      let #(slot, SlotScore(written_in_loop:, ..)) = e
+      written_in_loop && !set.contains(pinned, slot)
+    })
+    |> list.sort(fn(a, b) {
+      let #(_, SlotScore(score: score_a, ..)) = a
+      let #(_, SlotScore(score: score_b, ..)) = b
+      int.compare(score_b, score_a)
+    })
+    |> list.map(fn(e) {
+      let #(slot, _) = e
+      slot
+    })
   case picked {
     [] -> #(code, bytecode.NoRegs)
     [a, ..rest] -> {
@@ -60,13 +70,16 @@ fn loop_depths(ops: List(Op)) -> List(Int) {
   list.reverse(rev)
 }
 
-// score and whether the slot is written inside a loop
+type SlotScore {
+  SlotScore(score: Int, written_in_loop: Bool)
+}
+
 fn score_slots(
   ops: List(Op),
   depths: List(Int),
-  scores: Dict(Int, #(Int, Bool)),
+  scores: Dict(Int, SlotScore),
   pinned: Set(Int),
-) -> #(Dict(Int, #(Int, Bool)), Set(Int)) {
+) -> #(Dict(Int, SlotScore), Set(Int)) {
   case ops, depths {
     [op, ..ops], [d, ..depths] -> {
       let w = case d {
@@ -78,13 +91,18 @@ fn score_slots(
       let scores =
         list.fold(opcode.slot_uses(op), scores, fn(scores, used) {
           let #(slot, is_write) = used
-          let #(score, hot) =
-            dict.get(scores, slot) |> result.unwrap(#(0, False))
+          let SlotScore(score:, written_in_loop: hot) =
+            dict.get(scores, slot)
+            |> result.unwrap(SlotScore(score: 0, written_in_loop: False))
           let add = case is_write {
             True -> w * 3
             False -> w
           }
-          dict.insert(scores, slot, #(score + add, hot || { is_write && d > 0 }))
+          dict.insert(
+            scores,
+            slot,
+            SlotScore(score + add, hot || { is_write && d > 0 }),
+          )
         })
       let pinned = list.fold(opcode.pinned_slots(op), pinned, set.insert)
       score_slots(ops, depths, scores, pinned)

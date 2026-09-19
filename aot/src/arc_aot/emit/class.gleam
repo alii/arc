@@ -100,13 +100,14 @@ fn method_install_atom(
 }
 
 fn method_fn_name(
-  key: ast.PropertyKey,
+  key: ast.PropertyName,
   kind: ast.MethodKind,
 ) -> Option(String) {
   let base = case key {
-    ast.KeyIdentifier(name:, ..) | ast.KeyString(value: name, ..) -> Some(name)
-    ast.KeyPrivate(name:, ..) -> Some(name)
-    ast.KeyNumber(..) | ast.KeyBigInt(..) | ast.KeyComputed(..) -> None
+    ast.IdentifierName(name:, ..) | ast.StringName(value: name, ..) ->
+      Some(name)
+    ast.PrivateName(name:, ..) -> Some(name)
+    ast.NumberName(..) | ast.BigIntName(..) | ast.ComputedName(..) -> None
   }
   case kind, base {
     ast.GetterMethod, Some(n) -> Some("get " <> n)
@@ -115,20 +116,20 @@ fn method_fn_name(
   }
 }
 
-fn resolve_method_key(
+fn method_key_value(
   e: Emitter,
-  key: ast.PropertyKey,
+  key: ast.PropertyName,
   body_index: Int,
   k: NextWith(ir.Value),
 ) -> EmitResult {
   case key {
-    ast.KeyComputed(..) ->
+    ast.ComputedName(..) ->
       read_class_const(e, ast_util.computed_field_const(body_index), k)
-    ast.KeyPrivate(name:, ..) -> read_class_const(e, name, k)
-    ast.KeyIdentifier(..)
-    | ast.KeyString(..)
-    | ast.KeyNumber(..)
-    | ast.KeyBigInt(..) -> {
+    ast.PrivateName(name:, ..) -> read_class_const(e, name, k)
+    ast.IdentifierName(..)
+    | ast.StringName(..)
+    | ast.NumberName(..)
+    | ast.BigIntName(..) -> {
       let #(tree, e) = anf.run(anf.object_key_lit(key), e)
       cps.let_(e, tree, k)
     }
@@ -144,12 +145,11 @@ fn emit_methods(
 ) -> EmitResult {
   use e, method, next <- cps.each(e, methods, then: k)
   let ast_util.ClassMethodElement(body_index:, key:, kind:, fun:) = method
-  let ast.FunctionLiteral(params:, body:, is_generator: is_gen, is_async:, ..) =
-    fun
+  let ast.FunctionLiteral(params:, body:, is_generator:, is_async:, ..) = fun
   let #(child_id, e) = state.pop_child_fn(e)
   use #(ctree, e) <- result.try(e.dispatch.emit_function(
     e,
-    state.Method(is_gen:, is_async:),
+    state.Method(is_generator:, is_async:),
     method_fn_name(key, kind),
     params,
     state.StmtBody(body),
@@ -157,7 +157,7 @@ fn emit_methods(
   ))
   use method_fn, e <- cps.let_(e, ctree)
   case key {
-    ast.KeyPrivate(name:, ..) if !is_static -> {
+    ast.PrivateName(name:, ..) if !is_static -> {
       use e <- cps.host_unit(e, "make_method", [method_fn, target])
       store_class_const(
         e,
@@ -166,18 +166,18 @@ fn emit_methods(
         next,
       )
     }
-    ast.KeyPrivate(name:, ..) -> {
+    ast.PrivateName(name:, ..) -> {
       use e <- cps.host_unit(e, "make_method", [method_fn, target])
       use pk, e <- read_class_const(e, name)
       cps.host_unit(
         e,
-        "define_private",
+        "private_method_add",
         [target, pk, method_fn, method_install_atom(kind, is_static: False)],
         next,
       )
     }
     _ -> {
-      use key_value, e <- resolve_method_key(e, key, body_index)
+      use key_value, e <- method_key_value(e, key, body_index)
       cps.host_unit(
         e,
         "define_method",
@@ -198,7 +198,7 @@ pub fn has_instance_field_init(parts: ast_util.ClassBodyParts) -> Bool {
   parts.instance_fields != []
   || list.any(parts.instance_methods, fn(m) {
     case m.key {
-      ast.KeyPrivate(..) -> True
+      ast.PrivateName(..) -> True
       _ -> False
     }
   })
@@ -212,7 +212,7 @@ fn emit_ctor_and_create(
   is_derived is_derived: Bool,
   has_field_init has_field_init: Bool,
   ctor_child_id ctor_child_id: scope.ScopeId,
-  k k: NextWith(#(ir.Value, ir.Value)),
+  k k: NextWith(CtorProto),
 ) -> EmitResult {
   let #(ctor_params, ctor_body, default) = case parts.constructor {
     Some(ast_util.ClassMethodElement(
@@ -223,20 +223,24 @@ fn emit_ctor_and_create(
   }
   use #(ctor_tree, e) <- result.try(e.dispatch.emit_function(
     e,
-    state.ClassCtor(derived: is_derived, has_field_init:, default:),
+    state.ClassCtor(is_derived:, has_field_init:, default:),
     display_name,
     ctor_params,
     state.StmtBody(ctor_body),
     ctor_child_id,
   ))
   use ctor, e <- cps.let_(e, ctor_tree)
-  use proto, e <- cps.host(e, "class_setup", [ctor, parent_class])
+  use proto, e <- cps.host(e, "setup", [ctor, parent_class])
   let assert [ctx, ..] = e.class_stack
     as "emit/class: emit_ctor_and_create with empty class_stack"
   use e <- cps.host_unit(e, "box_set", [ctx.proto_home_box, proto])
   use e <- cps.host_unit(e, "box_set", [ctx.static_home_box, ctor])
   use e <- cps.host_unit(e, "box_set", [ctx.ctor_self_box, ctor])
-  k(#(ctor, proto), e)
+  k(CtorProto(ctor:, proto:), e)
+}
+
+type CtorProto {
+  CtorProto(ctor: ir.Value, proto: ir.Value)
 }
 
 // §15.7.14 step 14.a default constructor
@@ -341,7 +345,7 @@ pub fn emit(
     }
   }
   use parent_class, e <- with_super(e)
-  use #(ctor, proto), e <- emit_ctor_and_create(
+  use CtorProto(ctor:, proto:), e <- emit_ctor_and_create(
     e,
     parts,
     display_name,
@@ -397,31 +401,31 @@ fn private_method_inits(
 ) -> List(FieldInit) {
   use m <- list.filter_map(methods)
   case m.key {
-    ast.KeyPrivate(name:, ..) ->
+    ast.PrivateName(name:, ..) ->
       Ok(PrivateMethodInit(
         name:,
         closure_const: ast_util.private_fn_const(m.kind, name),
         kind: m.kind,
       ))
-    ast.KeyIdentifier(..)
-    | ast.KeyString(..)
-    | ast.KeyNumber(..)
-    | ast.KeyBigInt(..)
-    | ast.KeyComputed(..) -> Error(Nil)
+    ast.IdentifierName(..)
+    | ast.StringName(..)
+    | ast.NumberName(..)
+    | ast.BigIntName(..)
+    | ast.ComputedName(..) -> Error(Nil)
   }
 }
 
 fn field_init_of(field: ast_util.ClassFieldElement) -> FieldInit {
   let ast_util.ClassFieldElement(body_index:, key:, value:) = field
   let init =
-    option.unwrap(value, ast.UndefinedExpression(ast.property_key_span(key)))
+    option.unwrap(value, ast.UndefinedExpression(ast.property_name_span(key)))
   case key {
-    ast.KeyPrivate(name:, ..) -> PrivateFieldInit(name:, init:)
-    ast.KeyIdentifier(name:, ..) | ast.KeyString(value: name, ..) ->
+    ast.PrivateName(name:, ..) -> PrivateFieldInit(name:, init:)
+    ast.IdentifierName(name:, ..) | ast.StringName(value: name, ..) ->
       NamedFieldInit(name:, init:)
-    ast.KeyNumber(value: n, ..) -> NumericFieldInit(value: n, init:)
-    ast.KeyBigInt(value: i, ..) -> BigIntFieldInit(value: i, init:)
-    ast.KeyComputed(..) ->
+    ast.NumberName(value: n, ..) -> NumericFieldInit(value: n, init:)
+    ast.BigIntName(value: i, ..) -> BigIntFieldInit(value: i, init:)
+    ast.ComputedName(..) ->
       ComputedFieldInit(
         key_const: ast_util.computed_field_const(body_index),
         init:,
@@ -455,17 +459,17 @@ fn static_block_iife(body: List(ast.StmtWithLine)) -> ast.Expression {
 }
 
 // must match arc/rt/types FnFlags field order exactly
-fn init_fn_flags(rc: state.IrConsts) -> List(ir.Value) {
+fn init_fn_flags(consts: state.IrConsts) -> List(ir.Value) {
   [
     ir.ConstAtom("fn_flags"),
-    rc.false_,
-    rc.false_,
-    rc.false_,
-    rc.false_,
-    rc.false_,
-    rc.false_,
-    rc.false_,
-    rc.true_,
+    consts.false_,
+    consts.false_,
+    consts.false_,
+    consts.false_,
+    consts.false_,
+    consts.false_,
+    consts.false_,
+    consts.true_,
   ]
 }
 
@@ -518,7 +522,7 @@ fn emit_one_init(
       use closure, e <- read_captured_const(e, closure_const)
       cps.host_unit(
         e,
-        "define_private",
+        "private_method_add",
         [this, pk, closure, method_install_atom(kind, is_static: False)],
         next,
       )
@@ -531,12 +535,12 @@ fn emit_one_init(
         Some(name),
       ))
       use v, e <- cps.let_(e, tree)
-      cps.host_unit(e, "private_define", [this, pk, v], next)
+      cps.host_unit(e, "private_field_add", [this, pk, v], next)
     }
     NamedFieldInit(name:, init:) -> {
       let #(ktree, e) =
         anf.run(
-          anf.object_key_lit(ast.KeyIdentifier(name:, span: ast.Span(0, 0))),
+          anf.object_key_lit(ast.IdentifierName(name:, span: ast.Span(0, 0))),
           e,
         )
       use key_value, e <- cps.let_(e, ktree)
@@ -551,7 +555,7 @@ fn emit_one_init(
     NumericFieldInit(value: n, init:) -> {
       let #(ktree, e) =
         anf.run(
-          anf.object_key_lit(ast.KeyNumber(value: n, span: ast.Span(0, 0))),
+          anf.object_key_lit(ast.NumberName(value: n, span: ast.Span(0, 0))),
           e,
         )
       use key_value, e <- cps.let_(e, ktree)
@@ -562,7 +566,7 @@ fn emit_one_init(
     BigIntFieldInit(value: i, init:) -> {
       let #(ktree, e) =
         anf.run(
-          anf.object_key_lit(ast.KeyBigInt(value: i, span: ast.Span(0, 0))),
+          anf.object_key_lit(ast.BigIntName(value: i, span: ast.Span(0, 0))),
           e,
         )
       use key_value, e <- cps.let_(e, ktree)
@@ -603,10 +607,10 @@ fn build_class_init_closure(
       use ec <- func.unpack_frame(ec, is_arrow: False, info: child_info)
       use ec <- func.binding_prologue(ec, ec.fn_scope)
       let with_this = fn(ec, k) {
-        case lexical.slot_of(child_info.lexical, lexical.RefThis) {
+        case lexical.slot_of(child_info.lexical, lexical.ThisRef) {
           Some(slot) -> {
             let v = ir.Var(state.get_slot_var(ec, slot))
-            case state.lexical_is_boxed(ec, child_info, lexical.RefThis) {
+            case state.lexical_is_boxed(ec, child_info, lexical.ThisRef) {
               True -> cps.host(ec, "box_get", [v], k)
               False -> k(v, ec)
             }
@@ -642,7 +646,7 @@ fn build_class_init_closure(
     e,
     ir.TermOp(ir.MakeTuple, init_fn_flags(e.consts)),
   )
-  use init_fn, e <- cps.host(e, "new_function", [
+  use init_fn, e <- cps.host(e, "new_closure", [
     fun,
     flags_t,
     e.consts.empty_bin,

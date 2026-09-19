@@ -5,6 +5,7 @@ import arc/module/graph
 import arc/module/loader.{type LoadFn, type ResolveFn}
 import arc/module/registry
 import arc/rt/async as rt_async
+import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -18,7 +19,7 @@ import gleam/option
 import gleam/set
 
 /// installs the §16.2.1.8 dynamic import hook; reinstall after deserialize
-pub fn install_import_hook(
+pub fn install(
   st: Agent,
   referrer: String,
   resolve: ResolveFn,
@@ -276,7 +277,7 @@ fn chain_deferred_settlement(
           "%ContinueDeferredImportRejected%",
           1,
         )
-        let reason = first_or_undefined(args)
+        let reason = helpers.first_arg_or_undefined(args)
         // entry stays uncached; a later import.defer relinks
         let st = registry.write_module_error(st, dep_spec, reason)
         #(mk_undefined(), call_import_settle_fn(st, reject, reason))
@@ -290,13 +291,6 @@ fn chain_deferred_settlement(
         )
       st
     }
-  }
-}
-
-fn first_or_undefined(args: List(JsVal)) -> JsVal {
-  case args {
-    [v, ..] -> v
-    [] -> mk_undefined()
   }
 }
 
@@ -381,7 +375,7 @@ fn pending_module_promise(
       type_error(st, "Module '" <> resolved <> "' produced no namespace")
     option.Some(namespace_h) -> {
       let namespace = mk_object(namespace_h)
-      let #(#(ns_promise, ns_resolve, ns_reject), st) =
+      let #(rt_async.PromiseCapability(ns_promise, ns_resolve, ns_reject), st) =
         rt_async.new_promise_capability(st)
       let #(on_fulfilled, st) = {
         use st, _args <- rt_call.new_builtin_function(
@@ -401,7 +395,7 @@ fn pending_module_promise(
           "%FinishDynamicImportRejected%",
           1,
         )
-        let reason = first_or_undefined(args)
+        let reason = helpers.first_arg_or_undefined(args)
         let st =
           st
           |> registry.clear_pending_promise(resolved)
@@ -452,7 +446,7 @@ pub fn evaluate_bundle_with_registry(
       case res {
         Ok(module.EvaluatedBundle(..)) -> #(res, st)
         Error(module.EvaluationError(value:)) -> {
-          // host modules are not rolled back; their cells stay initialized
+          // host modules are not rolled back; their boxes stay initialized
           let st =
             list.fold(module.source_specifiers(bundle), st, fn(st, spec) {
               case

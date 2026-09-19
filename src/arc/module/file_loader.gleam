@@ -1,4 +1,4 @@
-//// opt-in resolve/load pair that reads modules from the filesystem
+// opt-in resolve/load pair that reads modules from the filesystem
 
 import arc/module/loader.{type LoadError, type ResolveError}
 import arc/module/specifier

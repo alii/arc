@@ -535,15 +535,15 @@ fn string_normalize(
 ) -> #(JsVal, Agent) {
   let #(s, st) = with_this_text(st, this)
   case classify(helpers.first_arg_or_undefined(args)) {
-    KUndef -> #(mk_string(ffi_nfc(s)), st)
+    KUndef -> #(mk_string(nfc(s)), st)
     _ -> {
       let #(form, st) =
         rt_val.to_string(st, helpers.first_arg_or_undefined(args))
       case form {
-        "NFC" -> #(mk_string(ffi_nfc(s)), st)
-        "NFD" -> #(mk_string(ffi_nfd(s)), st)
-        "NFKC" -> #(mk_string(ffi_nfkc(s)), st)
-        "NFKD" -> #(mk_string(ffi_nfkd(s)), st)
+        "NFC" -> #(mk_string(nfc(s)), st)
+        "NFD" -> #(mk_string(nfd(s)), st)
+        "NFKC" -> #(mk_string(nfkc(s)), st)
+        "NFKD" -> #(mk_string(nfkd(s)), st)
         _ ->
           rt_val.throw_range_error(
             st,
@@ -583,7 +583,7 @@ fn string_locale_compare(
 ) -> #(JsVal, Agent) {
   let #(s, st) = with_this_text(st, this)
   let #(that, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
-  let n = case string.compare(ffi_nfc(s), ffi_nfc(that)) {
+  let n = case string.compare(nfc(s), nfc(that)) {
     order.Lt -> -1
     order.Eq -> 0
     order.Gt -> 1
@@ -612,7 +612,7 @@ fn get_method(
 ) -> #(Option(JsVal), Agent) {
   case classify(val) {
     KHandle(_) -> {
-      let #(func, st) = helpers.get_symbol(st, val, symbol)
+      let #(func, st) = rt_val.get_symbol(st, val, symbol)
       case rt_val.is_nullish(func) {
         True -> #(None, st)
         False -> {
@@ -766,20 +766,20 @@ fn string_split_parts(
   case classify(sep_val) {
     KUndef ->
       case lim {
-        0 -> ok_array(st, [])
-        _ -> ok_array(st, [mk_string(s)])
+        0 -> realm_ops.new_array(st, [])
+        _ -> realm_ops.new_array(st, [mk_string(s)])
       }
     _ -> {
       // tostring(separator) runs before the lim=0 check
       let #(sep, st) = rt_val.to_string(st, sep_val)
       case lim {
-        0 -> ok_array(st, [])
+        0 -> realm_ops.new_array(st, [])
         _ -> {
           let parts = case sep {
             "" -> utf8.explode(s) |> list.take(lim)
             _ -> utf8.split(s, sep, lim)
           }
-          ok_array(st, js_string.from_texts(parts))
+          realm_ops.new_array(st, js_string.from_texts(parts))
         }
       }
     }
@@ -797,7 +797,7 @@ fn replace_string_search(
   let search_len = utf8.length(search_text)
   case rt_val.is_callable(st, replace_val) {
     True ->
-      replace_loop_functional(
+      replace_each_with_fn(
         st,
         s,
         s,
@@ -813,7 +813,7 @@ fn replace_string_search(
       let segments = substitution.tokenize_plain(template)
       let literal = case segments {
         [] -> Some("")
-        [substitution.LiteralSeg(text)] -> Some(text)
+        [substitution.LiteralSegment(text)] -> Some(text)
         _ -> None
       }
       case literal, search_text {
@@ -823,9 +823,9 @@ fn replace_string_search(
             utf8.replace_literal(s, search_text, text, all),
           )
         _, _ -> {
-          let needs_before = list.contains(segments, substitution.BeforeSeg)
+          let needs_before = list.contains(segments, substitution.BeforeSegment)
           let parts =
-            replace_loop_template(
+            replace_each_with_template(
               s,
               search_text,
               search_len,
@@ -849,7 +849,7 @@ fn string_within_limit(st: Agent, s: String) -> #(JsVal, Agent) {
   }
 }
 
-fn replace_loop_functional(
+fn replace_each_with_fn(
   st: Agent,
   tail: String,
   s: String,
@@ -880,7 +880,7 @@ fn replace_loop_functional(
           case after {
             "" -> concat_within_limit(st, acc)
             _ ->
-              replace_loop_functional(
+              replace_each_with_fn(
                 st,
                 utf8.drop_start(after, 1),
                 s,
@@ -893,7 +893,7 @@ fn replace_loop_functional(
               )
           }
         True, _ ->
-          replace_loop_functional(
+          replace_each_with_fn(
             st,
             after,
             s,
@@ -909,7 +909,7 @@ fn replace_loop_functional(
   }
 }
 
-fn replace_loop_template(
+fn replace_each_with_template(
   tail: String,
   search_text: String,
   search_len: Int,
@@ -925,7 +925,7 @@ fn replace_loop_template(
       let preserved = utf8.slice(tail, 0, rel)
       let after = utf8.drop_start(tail, rel + search_len)
       let replacement = case segments {
-        [substitution.LiteralSeg(text)] -> text
+        [substitution.LiteralSegment(text)] -> text
         _ ->
           substitution.expand_without_named(
             segments,
@@ -934,7 +934,7 @@ fn replace_loop_template(
               before: fn() { before <> preserved },
               after: fn() { after },
               capture: fn(_) { "" },
-              m: 0,
+              capture_count: 0,
             ),
           )
       }
@@ -950,7 +950,7 @@ fn replace_loop_template(
                 True -> before <> cp
                 False -> ""
               }
-              replace_loop_template(
+              replace_each_with_template(
                 utf8.drop_start(after, 1),
                 search_text,
                 search_len,
@@ -967,7 +967,7 @@ fn replace_loop_template(
             True -> before <> preserved <> search_text
             False -> ""
           }
-          replace_loop_template(
+          replace_each_with_template(
             after,
             search_text,
             search_len,
@@ -1158,7 +1158,7 @@ fn require_global_when_regexp(
     False -> st
     True -> {
       let #(flags, st) = rt_obj.get_prop(st, val, StringKey(Named("flags")))
-      let #(flags, st) = rt_val.require_object_coercible(st, flags)
+      let flags = rt_val.require_object_coercible(st, flags)
       let #(s, st) = rt_val.to_string(st, flags)
       case b_regexp.has_flag(s, "g") {
         True -> st
@@ -1250,11 +1250,6 @@ fn concat_within_limit(st: Agent, parts_rev: List(String)) -> #(JsVal, Agent) {
   }
 }
 
-fn ok_array(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
-  let #(h, st) = realm_ops.alloc_array(st, values)
-  #(mk_object(h), st)
-}
-
 fn is_high_surrogate(cu: Int) -> Bool {
   cu >= 0xD800 && cu <= 0xDBFF
 }
@@ -1283,13 +1278,13 @@ fn codepoint_or_replacement(i: Int) -> UtfCodepoint {
 }
 
 @external(erlang, "unicode", "characters_to_nfc_binary")
-fn ffi_nfc(s: String) -> String
+fn nfc(s: String) -> String
 
 @external(erlang, "unicode", "characters_to_nfd_binary")
-fn ffi_nfd(s: String) -> String
+fn nfd(s: String) -> String
 
 @external(erlang, "unicode", "characters_to_nfkc_binary")
-fn ffi_nfkc(s: String) -> String
+fn nfkc(s: String) -> String
 
 @external(erlang, "unicode", "characters_to_nfkd_binary")
-fn ffi_nfkd(s: String) -> String
+fn nfkd(s: String) -> String

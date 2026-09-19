@@ -1,4 +1,4 @@
-//// public time zone types the host hands the engine
+// public time zone types the host hands the engine
 
 import arc/internal/int_math.{floor_div}
 import gleam/dict.{type Dict}
@@ -27,18 +27,18 @@ pub fn describe(error: TzError) -> String {
   }
 }
 
-@external(erlang, "arc_tz_ffi", "utc_time_zone")
+@external(erlang, "arc_time_zone_ffi", "utc_time_zone")
 pub fn utc_time_zone() -> TimeZone
 
-@external(erlang, "arc_tz_ffi", "time_zone_id")
+@external(erlang, "arc_time_zone_ffi", "time_zone_id")
 pub fn time_zone_id(zone: TimeZone) -> Option(String)
 
 // minutes, local minus utc, at a utc instant
-@external(erlang, "arc_tz_ffi", "zone_offset_at_utc_ms")
+@external(erlang, "arc_time_zone_ffi", "zone_offset_at_utc_ms")
 pub fn zone_offset_at_utc_ms(zone: TimeZone, epoch_ms: Int) -> Int
 
 // §21.4.1.25 localtza isutc=false, takes a wall clock not an instant
-@external(erlang, "arc_tz_ffi", "zone_offset_at_local_ms")
+@external(erlang, "arc_time_zone_ffi", "zone_offset_at_local_ms")
 pub fn zone_offset_at_local_ms(zone: TimeZone, local_ms: Int) -> Int
 
 pub opaque type Zone {
@@ -49,10 +49,10 @@ pub fn zone_id(zone: Zone) -> String {
   zone.id
 }
 
-@external(erlang, "arc_tz_ffi", "known_identifier")
+@external(erlang, "arc_time_zone_ffi", "known_identifier")
 pub fn known_identifier(id: String) -> Option(String)
 
-@external(erlang, "arc_tz_ffi", "canonical_id")
+@external(erlang, "arc_time_zone_ffi", "canonical_id")
 fn canonical_id(id: String) -> String
 
 pub fn primary_identifier(identifier: String) -> String {
@@ -102,13 +102,13 @@ pub fn lookup(
   }
 }
 
-@external(erlang, "arc_tz_ffi", "rules_offset_at")
+@external(erlang, "arc_time_zone_ffi", "rules_offset_at")
 fn rules_offset_at(rules: Rules, epoch_seconds: Int) -> Int
 
-@external(erlang, "arc_tz_ffi", "rules_next_transition")
+@external(erlang, "arc_time_zone_ffi", "rules_next_transition")
 fn rules_next_transition(rules: Rules, epoch_seconds: Int) -> Option(Int)
 
-@external(erlang, "arc_tz_ffi", "rules_previous_transition")
+@external(erlang, "arc_time_zone_ffi", "rules_previous_transition")
 fn rules_previous_transition(rules: Rules, epoch_seconds: Int) -> Option(Int)
 
 const ns_per_second = 1_000_000_000

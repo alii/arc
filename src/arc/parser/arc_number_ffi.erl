@@ -1,4 +1,4 @@
--module(arc_float_ffi).
+-module(arc_number_ffi).
 -export([parse_float/1]).
 
 parse_float(S) ->

@@ -38,7 +38,8 @@ fn reviver(
     rt_helpers.as_code(fn(st, frame, args) {
       body(st, rt_helpers.frame_at(1, frame), args)
     })
-  let #(h, st) = rt_call.fn_new(st, code, flags, "reviver", 3, None, None)
+  let #(h, st) =
+    rt_call.alloc_compiled_fn(st, code, flags, "reviver", 3, None, None)
   #(types.mk_object(h), st)
 }
 

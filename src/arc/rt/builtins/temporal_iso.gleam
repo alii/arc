@@ -4,7 +4,7 @@ import arc/internal/gregorian.{
   civil_from_days, days_from_year, days_in_month,
   days_in_year as days_in_iso_year,
 }
-import arc/internal/int_math.{floor_div}
+import arc/internal/int_math.{floor_div, pow10}
 import arc/internal/temporal_calendar
 import gleam/int
 import gleam/list
@@ -40,6 +40,11 @@ pub type IsoDate {
 }
 
 // [[isodate]] and [[calendar]] slots of plaindate, plainyearmonth, plainmonthday
+// calendar part of a duration before balancing into Duration
+pub type DateDuration {
+  DateDuration(years: Int, months: Int, weeks: Int, days: Int)
+}
+
 pub type IsoDateSlots {
   IsoDateSlots(iso_date: IsoDate, calendar: temporal_calendar.Calendar)
 }
@@ -95,7 +100,7 @@ pub fn epoch_days(d: IsoDate) -> Int {
 }
 
 pub fn iso_date_from_epoch_days(days: Int) -> IsoDate {
-  let #(year, month, day) = civil_from_days(days)
+  let gregorian.CivilDate(year, month, day) = civil_from_days(days)
   IsoDate(year:, month:, day:)
 }
 
@@ -240,10 +245,6 @@ pub fn epoch_ns_to_iso(epoch_ns: Int, offset_ns: Int) -> #(IsoDate, IsoTime) {
   #(iso_date_from_epoch_days(days), ns_to_time(rem))
 }
 
-pub fn pad2(n: Int) -> String {
-  int.to_string(int.absolute_value(n)) |> string.pad_start(2, "0")
-}
-
 pub fn format_iso_year(y: Int) -> String {
   case y >= 0 && y <= 9999 {
     True -> int.to_string(y) |> string.pad_start(4, "0")
@@ -259,7 +260,11 @@ pub fn format_iso_year(y: Int) -> String {
 }
 
 pub fn format_iso_date(d: IsoDate) -> String {
-  format_iso_year(d.year) <> "-" <> pad2(d.month) <> "-" <> pad2(d.day)
+  format_iso_year(d.year)
+  <> "-"
+  <> digits.pad2(d.month)
+  <> "-"
+  <> digits.pad2(d.day)
 }
 
 pub type SecondsPrecision {
@@ -291,10 +296,10 @@ pub fn trim_trailing_zeros(s: String) -> String {
 
 pub fn format_iso_time(t: IsoTime, precision: SecondsPrecision) -> String {
   let sub = t.millisecond * ns_per_ms + t.microsecond * ns_per_us + t.nanosecond
-  let base = pad2(t.hour) <> ":" <> pad2(t.minute)
+  let base = digits.pad2(t.hour) <> ":" <> digits.pad2(t.minute)
   case precision {
     MinutePrecision -> base
-    _ -> base <> ":" <> pad2(t.second) <> format_fraction(sub, precision)
+    _ -> base <> ":" <> digits.pad2(t.second) <> format_fraction(sub, precision)
   }
 }
 
@@ -305,7 +310,10 @@ pub fn format_offset_minutes(offset_ns: Int) -> String {
   }
   let a = int.absolute_value(offset_ns)
   let total_minutes = a / ns_per_minute
-  sign <> pad2(total_minutes / 60) <> ":" <> pad2(total_minutes % 60)
+  sign
+  <> digits.pad2(total_minutes / 60)
+  <> ":"
+  <> digits.pad2(total_minutes % 60)
 }
 
 pub type ParsedOffset {
@@ -357,7 +365,7 @@ fn take_some_digits_loop(
   }
 }
 
-pub fn parse_date_part(s: String) -> Option(#(Int, Int, Int, String)) {
+pub fn parse_date_part(s: String) -> Option(#(IsoDate, String)) {
   use #(year, rest) <- option.then(parse_year_part(s))
   case rest {
     "-" <> r1 -> {
@@ -365,7 +373,7 @@ pub fn parse_date_part(s: String) -> Option(#(Int, Int, Int, String)) {
       case r2 {
         "-" <> r3 -> {
           use #(d, r4) <- option.then(digits.take(r3, 2))
-          Some(#(year, m, d, r4))
+          Some(#(IsoDate(year, m, d), r4))
         }
         _ -> None
       }
@@ -373,7 +381,7 @@ pub fn parse_date_part(s: String) -> Option(#(Int, Int, Int, String)) {
     _ -> {
       use #(m, r2) <- option.then(digits.take(rest, 2))
       use #(d, r3) <- option.then(digits.take(r2, 2))
-      Some(#(year, m, d, r3))
+      Some(#(IsoDate(year, m, d), r3))
     }
   }
 }
@@ -393,7 +401,8 @@ pub fn parse_year_part(s: String) -> Option(#(Int, String)) {
 
 pub fn parse_time_part(s: String) -> Option(#(IsoTime, String)) {
   use #(h, rest) <- option.then(digits.take(s, 2))
-  let #(mi, sec, frac_ns, _has_seconds, rest) = parse_minutes_seconds(rest)
+  let #(MinutesSeconds(mi, sec, frac_ns, ..), rest) =
+    parse_minutes_seconds(rest)
   let t =
     IsoTime(
       hour: h,
@@ -410,14 +419,18 @@ pub fn parse_time_part(s: String) -> Option(#(IsoTime, String)) {
   }
 }
 
+type MinutesSeconds {
+  MinutesSeconds(minute: Int, second: Int, subsecond_ns: Int, has_seconds: Bool)
+}
+
 // minutes then seconds after an hour, extended or basic format
-fn parse_minutes_seconds(s: String) -> #(Int, Int, Int, Bool, String) {
+fn parse_minutes_seconds(s: String) -> #(MinutesSeconds, String) {
   let #(extended, after_sep) = case s {
     ":" <> r -> #(True, r)
     _ -> #(False, s)
   }
   case digits.take(after_sep, 2) {
-    None -> #(0, 0, 0, False, s)
+    None -> #(MinutesSeconds(0, 0, 0, has_seconds: False), s)
     Some(#(mi, rest)) -> {
       let seconds_start = case extended, rest {
         True, ":" <> r -> Some(r)
@@ -427,9 +440,9 @@ fn parse_minutes_seconds(s: String) -> #(Int, Int, Int, Bool, String) {
       case option.then(seconds_start, digits.take(_, 2)) {
         Some(#(sec, rest)) -> {
           let #(frac, rest) = parse_fraction(rest)
-          #(mi, sec, frac, True, rest)
+          #(MinutesSeconds(mi, sec, frac, has_seconds: True), rest)
         }
-        None -> #(mi, 0, 0, False, rest)
+        None -> #(MinutesSeconds(mi, 0, 0, has_seconds: False), rest)
       }
     }
   }
@@ -446,13 +459,6 @@ pub fn parse_fraction(s: String) -> #(Int, String) {
   }
 }
 
-pub fn pow10(n: Int) -> Int {
-  case n {
-    0 -> 1
-    _ -> 10 * pow10(n - 1)
-  }
-}
-
 pub fn parse_offset_part(s: String) -> Option(#(ParsedOffset, String)) {
   case s {
     "Z" <> rest | "z" <> rest -> Some(#(Zulu, rest))
@@ -464,7 +470,8 @@ pub fn parse_offset_part(s: String) -> Option(#(ParsedOffset, String)) {
 
 fn parse_offset_value(s: String, sign: Int) -> Option(#(ParsedOffset, String)) {
   use #(h, rest) <- option.then(digits.take(s, 2))
-  let #(mi, sec, frac, sub_minute, rest) = parse_minutes_seconds(rest)
+  let #(MinutesSeconds(mi, sec, frac, sub_minute), rest) =
+    parse_minutes_seconds(rest)
   case h <= 23 && mi <= 59 && sec <= 59 {
     True -> {
       let ns =
@@ -574,11 +581,10 @@ fn is_tz_char(c: String) -> Bool {
 }
 
 pub fn parse_iso_datetime_string(s: String) -> Option(ParsedIso) {
-  use #(y, m, d, rest) <- option.then(parse_date_part(s))
-  case is_valid_iso_date(y, m, d) {
+  use #(date, rest) <- option.then(parse_date_part(s))
+  case is_valid_iso_date(date.year, date.month, date.day) {
     False -> None
     True -> {
-      let date = IsoDate(y, m, d)
       let #(time, offset, rest) = case rest {
         "T" <> tr | "t" <> tr | " " <> tr ->
           case parse_time_part(tr) {

@@ -26,11 +26,11 @@ pub fn function(f: ir.Function) -> List(ir.Function) {
         })
       let env =
         list.fold(spine, params, fn(env, node) {
-          bind_types(env, node.0, rhs_types(node.1, env))
+          bind_types(env, node.names, rhs_types(node.rhs, env))
         })
       let bound =
         list.fold(spine, dict.keys(params) |> set.from_list, fn(acc, node) {
-          list.fold(node.0, acc, set.insert)
+          list.fold(node.names, acc, set.insert)
         })
       let init =
         Cut(
@@ -64,9 +64,9 @@ fn cut_step(
   env: Dict(String, ir.ValType),
   bound: Set(String),
   cut: Cut,
-  node: #(List(String), ir.Expr),
+  node: LetNode,
 ) -> Cut {
-  let #(names, rhs) = node
+  let LetNode(names:, rhs:) = node
   let index = cut.index - 1
   let candidate = case cut.since_cut >= chunk && index > 0 {
     False -> None
@@ -121,12 +121,13 @@ fn cut_step(
   }
 }
 
-fn unzip_spine(
-  e: ir.Expr,
-  acc: List(#(List(String), ir.Expr)),
-) -> #(List(#(List(String), ir.Expr)), ir.Expr) {
+type LetNode {
+  LetNode(names: List(String), rhs: ir.Expr)
+}
+
+fn unzip_spine(e: ir.Expr, acc: List(LetNode)) -> #(List(LetNode), ir.Expr) {
   case e {
-    ir.Let(names, rhs, body) -> unzip_spine(body, [#(names, rhs), ..acc])
+    ir.Let(names, rhs, body) -> unzip_spine(body, [LetNode(names, rhs), ..acc])
     _ -> #(list.reverse(acc), e)
   }
 }

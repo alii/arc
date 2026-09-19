@@ -27,13 +27,13 @@ pub fn run_interpreted(source: String) -> DiffRun {
 }
 
 @external(erlang, "aot_harness_ffi", "to_dynamic")
-fn to_dynamic(a: a) -> Dynamic
+pub fn to_dynamic(a: a) -> Dynamic
 
 pub const fixed_now_ms = 1_700_000_000_000
 
 pub fn test_hooks() -> host_hooks.HostHooks {
   host_hooks.HostHooks(
-    ..host_hooks.default_host_hooks(),
+    ..host_hooks.default(),
     monotonic_now: fn() { fixed_now_ms },
     wall_clock_ms: fn() { fixed_now_ms },
     time_zone: time_zone.utc_time_zone(),
@@ -51,27 +51,11 @@ fn buf_print(level: ConsoleLevel, line: String) -> Nil {
   }
 }
 
-pub fn seed_random(seed: Int) -> Nil {
-  do_seed_random(seed)
-}
-
-pub fn buf_reset() -> Nil {
-  do_buf_reset()
-}
-
-pub fn buf_read() -> BitArray {
-  do_buf_read()
-}
-
-pub fn err_read() -> BitArray {
-  do_err_read()
-}
-
 @external(erlang, "aot_harness_ffi", "next_random")
 fn next_random() -> Float
 
 @external(erlang, "aot_harness_ffi", "seed_random")
-fn do_seed_random(seed: Int) -> Nil
+pub fn seed_random(seed: Int) -> Nil
 
 @external(erlang, "aot_harness_ffi", "buf_push")
 fn buf_push(line: String) -> Nil
@@ -80,18 +64,18 @@ fn buf_push(line: String) -> Nil
 fn err_push(line: String) -> Nil
 
 @external(erlang, "aot_harness_ffi", "buf_reset")
-fn do_buf_reset() -> Nil
+pub fn buf_reset() -> Nil
 
 @external(erlang, "aot_harness_ffi", "buf_read")
-fn do_buf_read() -> BitArray
+pub fn buf_read() -> BitArray
 
 @external(erlang, "aot_harness_ffi", "err_read")
-fn do_err_read() -> BitArray
+pub fn err_read() -> BitArray
 
 @external(erlang, "aot_harness_ffi", "env_is_truthy")
 pub fn env_is_truthy(name: String) -> Bool
 
-pub fn seed() -> Agent {
+pub fn new_agent() -> Agent {
   run.new_linked_agent(test_hooks())
 }
 
@@ -102,7 +86,7 @@ pub fn run_loaded(module: Atom, st: Agent) -> #(DiffRun, Agent) {
 }
 
 pub fn run_compiled(source: String) -> DiffRun {
-  let mod_name = "arc_emit2c_test_" <> int.to_string(unique_integer([Positive]))
+  let mod_name = "arc_aot_test_" <> int.to_string(unique_integer([Positive]))
   let opts = emit.CompileOpts(module_name: mod_name, source_kind: emit.AsScript)
   case emit.compile_source(source, opts) {
     Error(e) -> DiffRun(stdout: <<>>, result: Error(string.inspect(e)))
@@ -113,7 +97,7 @@ pub fn run_compiled(source: String) -> DiffRun {
           case run.load(beam, mod_name) {
             Error(reason) ->
               DiffRun(stdout: <<>>, result: Error("load failed: " <> reason))
-            Ok(module) -> run_loaded(module, seed()).0
+            Ok(module) -> run_loaded(module, new_agent()).0
           }
       }
   }

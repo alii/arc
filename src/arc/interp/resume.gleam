@@ -38,7 +38,8 @@ pub type Executed {
 }
 
 fn to_executed(outcome: #(Result(JsVal, JsVal), State)) -> Executed {
-  Finished(outcome.0, outcome.1)
+  let #(res, state) = outcome
+  Finished(res, state)
 }
 
 pub const drive = call.Drive(start_coroutine:)
@@ -195,35 +196,34 @@ fn with_call_depth(
   }
 }
 
-// mode 0 next, 1 throw, 2 return
 pub fn resume_frame(
   agent: Agent,
   frame: SuspendedFrame,
   sent: #(Int, JsVal),
 ) -> #(Step, Agent) {
   use agent <- rt_realm.with_realm(agent, frame.realm)
-  let m = frames.mark(agent)
+  let mark = frames.mark(agent)
   let agent = frames.push_frame_info(agent, frame.template)
   let #(mode, value) = sent
   let turn = fn(agent) {
     let state = park.unpark(agent, frame)
     case frame.parked, mode {
-      ParkedStart, m if m == rt_async.sent_next -> step_of(executed(state))
-      ParkedOp, m if m == rt_async.sent_next ->
+      ParkedStart, _ if mode == rt_async.sent_next -> step_of(executed(state))
+      ParkedOp, _ if mode == rt_async.sent_next ->
         step_of(executed(State(..state, stack: [value, ..state.stack])))
-      ParkedOp, m if m == rt_async.sent_throw -> inject_throw(state, value)
+      ParkedOp, _ if mode == rt_async.sent_throw -> inject_throw(state, value)
       ParkedOp, _ -> inject_return(state, value)
-      ParkedDelegateReturn, m if m == rt_async.sent_next ->
+      ParkedDelegateReturn, _ if mode == rt_async.sent_next ->
         delegate_returned(state, value)
-      ParkedReturnValue, m if m == rt_async.sent_next ->
+      ParkedReturnValue, _ if mode == rt_async.sent_next ->
         step_of(return_into(state, value))
-      ParkedDelegateClose, m if m == rt_async.sent_next ->
+      ParkedDelegateClose, _ if mode == rt_async.sent_next ->
         delegate_closed(state, value)
-      _, m if m == rt_async.sent_throw -> step_of(throw_into(state, value))
+      _, _ if mode == rt_async.sent_throw -> step_of(throw_into(state, value))
       _, _ -> step_of(return_into(state, value))
     }
   }
-  backstopped(agent, m, turn, StepThrow)
+  backstopped(agent, mark, turn, StepThrow)
 }
 
 pub fn step_of(outcome: Executed) -> #(Step, Agent) {
@@ -367,7 +367,7 @@ fn forward_throw(
         method,
         thrown,
       ))
-      delegate_result(state, res, rest, fn(state, val) {
+      delegate_result(state, res, rest, fn(val, state) {
         step_of(executed(State(..state, stack: [val, ..rest], pc: state.pc + 1)))
       })
     }
@@ -426,7 +426,7 @@ fn forward_return(
         method,
         value,
       ))
-      delegate_result(state, res, rest, fn(state, val) {
+      delegate_result(state, res, rest, fn(val, state) {
         step_of(return_into(state, val))
       })
     }
@@ -446,7 +446,7 @@ fn delegate_result(
   state: State,
   res: JsVal,
   rest: List(JsVal),
-  on_done: fn(State, JsVal) -> #(Step, Agent),
+  on_done: fn(JsVal, State) -> #(Step, Agent),
 ) -> #(Step, Agent) {
   use #(#(done, val), state) <- or_delegate_exit(guard.guard_state(
     guard.guard2(iter_protocol.read_iter_result, state.agent, res),
@@ -454,7 +454,7 @@ fn delegate_result(
   ))
   case done {
     False -> step_of(Parked(state.Yield, val, state))
-    True -> on_done(State(..state, stack: rest), val)
+    True -> on_done(val, State(..state, stack: rest))
   }
 }
 
@@ -463,7 +463,7 @@ fn delegate_returned(state: State, settled: JsVal) -> #(Step, Agent) {
     [_rec, ..rest] -> rest
     [] -> []
   }
-  delegate_result(state, settled, rest, fn(state, val) {
+  delegate_result(state, settled, rest, fn(val, state) {
     step_of(return_into(state, val))
   })
 }
