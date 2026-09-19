@@ -63,7 +63,7 @@ pub fn init(
       object_proto,
       function_proto,
       proto_props,
-      fn(proto) { DataViewN(DataViewConstructor(proto:)) },
+      fn(_) { DataViewN(DataViewConstructor) },
       "DataView",
       1,
       [],
@@ -79,7 +79,7 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case native {
-    DataViewConstructor(..) ->
+    DataViewConstructor ->
       rt_val.throw_type_error(st, "Constructor DataView requires 'new'")
     DataViewGetBuffer -> get_buffer(st, this)
     DataViewGetByteLength -> get_byte_length(st, this)
@@ -96,7 +96,7 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case native {
-    DataViewConstructor(..) -> construct(st, args, new_target)
+    DataViewConstructor -> construct(st, args, new_target)
     _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }

@@ -27,7 +27,3 @@ pub fn finish_turn(
   let agent = drain(agent)
   rt_gc.release_roots(agent, ids)
 }
-
-pub fn end_turn(agent: Agent, held: List(JsVal)) -> Agent {
-  finish_turn(agent, held, rt_async.drain)
-}

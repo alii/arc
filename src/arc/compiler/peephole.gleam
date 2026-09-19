@@ -279,13 +279,13 @@ fn peephole(
         IrJumpIfTrue(l) as jump,
         ..rest
       ] ->
-      case kind {
-        PureOp(binop.Compare(_) as pure) | PureOp(binop.Equality(_) as pure) ->
+      case fusable_cmp(kind) {
+        Some(pure) ->
           peephole(rest, consts, [
             IrCmpConstJump(c, pure, l, when: jump == IrJumpIfTrue(l)),
             ..acc
           ])
-        _ -> peephole(rest, consts, [jump, op, ..acc])
+        None -> peephole(rest, consts, [jump, op, ..acc])
       }
     [
       IrFinal(opcode.GetLocal(obj)),
@@ -445,7 +445,7 @@ fn put_local(acc: List(IrOp), dst: Int) -> List(IrOp) {
   }
 }
 
-pub fn fusable_cmp(kind: ClassifiedBinOp) -> Option(binop.PureBinOp) {
+fn fusable_cmp(kind: ClassifiedBinOp) -> Option(binop.PureBinOp) {
   case kind {
     PureOp(binop.Compare(_) as pure) | PureOp(binop.Equality(_) as pure) ->
       Some(pure)

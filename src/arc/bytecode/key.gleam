@@ -68,19 +68,8 @@ pub fn to_text(key: PropertyKey) -> String {
 
 const uid_separator = "\u{0}"
 
-pub fn private(name: String) -> PropertyKey {
-  Private(name)
-}
-
 pub fn private_text(name: String, uid: Int) -> String {
   name <> uid_separator <> int.to_string(uid)
-}
-
-pub fn is_private(key: PropertyKey) -> Bool {
-  case key {
-    Private(_) -> True
-    Index(_) | Named(_) -> False
-  }
 }
 
 pub fn private_display_name(key_text: String) -> String {

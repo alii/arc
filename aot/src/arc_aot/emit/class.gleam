@@ -6,7 +6,7 @@ import arc_aot/emit/anf
 import arc_aot/emit/cps
 import arc_aot/emit/func
 import arc_aot/emit/state.{
-  type EmitResult, type Emitter, type Next, type NextWith, ClassContext, Emitter,
+  type EmitResult, type Emitter, type Next, type NextWith, Emitter,
 }
 import carder/ir
 import gleam/bit_array
@@ -15,13 +15,6 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/set
-
-fn with_done(
-  e: Emitter,
-  f: fn(NextWith(ir.Expr), Emitter) -> EmitResult,
-) -> EmitResult {
-  f(fn(tree, ef) { Ok(#(tree, ef)) }, e)
-}
 
 fn class_scope_binding(e: Emitter, name: String) -> Binding {
   let assert Ok(b) =
@@ -85,17 +78,11 @@ fn emit_computed_keys(
 }
 
 // atoms must match gleam's erlang spelling of InstallMethod etc
-fn method_install_atom(
-  kind: ast.MethodKind,
-  is_static is_static: Bool,
-) -> ir.Value {
-  ir.ConstAtom(case kind, is_static {
-    ast.GetterMethod, False -> "install_getter"
-    ast.SetterMethod, False -> "install_setter"
-    ast.PlainMethod, False | ast.ConstructorMethod, False -> "install_method"
-    ast.GetterMethod, True -> "install_static_getter"
-    ast.SetterMethod, True -> "install_static_setter"
-    ast.PlainMethod, True | ast.ConstructorMethod, True -> "install_static"
+fn method_install_atom(kind: ast.MethodKind) -> ir.Value {
+  ir.ConstAtom(case kind {
+    ast.GetterMethod -> "install_getter"
+    ast.SetterMethod -> "install_setter"
+    ast.PlainMethod | ast.ConstructorMethod -> "install_method"
   })
 }
 
@@ -172,7 +159,7 @@ fn emit_methods(
       cps.host_unit(
         e,
         "private_method_add",
-        [target, pk, method_fn, method_install_atom(kind, is_static: False)],
+        [target, pk, method_fn, method_install_atom(kind)],
         next,
       )
     }
@@ -185,7 +172,7 @@ fn emit_methods(
           target,
           key_value,
           method_fn,
-          method_install_atom(kind, is_static),
+          method_install_atom(kind),
           e.consts.false_,
         ],
         next,
@@ -231,11 +218,6 @@ fn emit_ctor_and_create(
   ))
   use ctor, e <- cps.let_(e, ctor_tree)
   use proto, e <- cps.host(e, "setup", [ctor, parent_class])
-  let assert [ctx, ..] = e.class_stack
-    as "emit/class: emit_ctor_and_create with empty class_stack"
-  use e <- cps.host_unit(e, "box_set", [ctx.proto_home_box, proto])
-  use e <- cps.host_unit(e, "box_set", [ctx.static_home_box, ctor])
-  use e <- cps.host_unit(e, "box_set", [ctx.ctor_self_box, ctor])
   k(CtorProto(ctor:, proto:), e)
 }
 
@@ -274,16 +256,10 @@ pub fn emit(
   super_class: Option(ast.Expression),
   body: List(ast.ClassElement),
 ) -> EmitResult {
-  use done, e <- with_done(e)
+  use done, e <- cps.with_done(e)
   let saved_strict = e.strict
-  let saved_private_env = e.private_env
   let private_names = ast_util.class_private_names(body)
-  let e =
-    Emitter(
-      ..e,
-      strict: True,
-      private_env: list.append(private_names, e.private_env),
-    )
+  let e = Emitter(..e, strict: True)
   let #(save, e) = state.enter_scope(e, in_block: e.in_block)
   use e <- func.binding_prologue(e, e.cur_scope)
   use e <- cps.each(e, private_names, with: fn(e, pname, next) {
@@ -293,37 +269,6 @@ pub fn emit(
     store_class_const(e, pname, key, next)
   })
   let is_derived = option.is_some(super_class)
-  use proto_home_box, e <- cps.host(e, "box_new", [e.consts.undef])
-  use static_home_box, e <- cps.host(e, "box_new", [e.consts.undef])
-  use ctor_self_box, e <- cps.host(e, "box_new", [e.consts.undef])
-  let with_inner_box = fn(e: Emitter, then: NextWith(Option(ir.Value))) {
-    case binding_name {
-      None -> then(None, e)
-      Some(_) -> {
-        use box, e <- cps.host(e, "box_new", [e.consts.undef])
-        then(Some(box), e)
-      }
-    }
-  }
-  use inner_name_box, e <- with_inner_box(e)
-  let brand_vars =
-    list.fold(private_names, dict.new(), fn(acc, pname) {
-      dict.insert(
-        acc,
-        pname,
-        ir.Var(state.get_slot_var(e, class_scope_binding(e, pname).slot)),
-      )
-    })
-  let ctx =
-    ClassContext(
-      brand_vars:,
-      proto_home_box:,
-      static_home_box:,
-      ctor_self_box:,
-      inner_name_box:,
-      is_derived:,
-    )
-  let e = Emitter(..e, class_stack: [ctx, ..e.class_stack])
   // analyzer registers init then ctor shells first, so pop them first
   let parts = ast_util.classify_class_body(body)
   let has_field_init = has_instance_field_init(parts)
@@ -374,14 +319,7 @@ pub fn emit(
   }
   use e <- with_fields_init(e)
   use e <- emit_static_init(e, parts, ctor)
-  let assert [_, ..outer_class_stack] = e.class_stack
-  let e =
-    Emitter(
-      ..state.leave_scope(e, save),
-      class_stack: outer_class_stack,
-      strict: saved_strict,
-      private_env: saved_private_env,
-    )
+  let e = Emitter(..state.leave_scope(e, save), strict: saved_strict)
   done(ir.Values([ctor]), e)
 }
 
@@ -468,7 +406,6 @@ fn init_fn_flags(consts: state.IrConsts) -> List(ir.Value) {
     consts.false_,
     consts.false_,
     consts.false_,
-    consts.false_,
     consts.true_,
   ]
 }
@@ -523,7 +460,7 @@ fn emit_one_init(
       cps.host_unit(
         e,
         "private_method_add",
-        [this, pk, closure, method_install_atom(kind, is_static: False)],
+        [this, pk, closure, method_install_atom(kind)],
         next,
       )
     }
@@ -603,7 +540,7 @@ fn build_class_init_closure(
     )
   let e_child = func.seed_capture_slots(e_child, child_info)
   use #(body_expr, e_child) <- result.try(
-    with_done(e_child, fn(done, ec) {
+    cps.with_done(e_child, fn(done, ec) {
       use ec <- func.unpack_frame(ec, is_arrow: False, info: child_info)
       use ec <- func.binding_prologue(ec, ec.fn_scope)
       let with_this = fn(ec, k) {

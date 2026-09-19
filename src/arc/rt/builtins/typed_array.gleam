@@ -17,7 +17,7 @@ import arc/rt/types.{
   type JsVal, type Realm, type TypedArrayKind, type TypedArrayNative,
   type TypedArrays, ArrayIterEntries, ArrayIterKeys, ArrayIterValues,
   ArrayIterator, BigKind, JFloat, JInt, JNan, JNegInf, JPosInf, KBig, KHandle,
-  KNull, KNum, KUndef, NumKind, ReturnThis, SObject, StringKey, SymbolKey,
+  KNull, KNum, KUndef, NumKind, SObject, StringKey, SymbolKey,
   TypedArrayConstructor, TypedArrayFrom, TypedArrayGetBuffer,
   TypedArrayGetByteLength, TypedArrayGetByteOffset, TypedArrayGetLength,
   TypedArrayGetToStringTag, TypedArrayIntrinsicConstructor, TypedArrayN,
@@ -155,17 +155,10 @@ pub fn init(
       0,
     )
   let #(tag_prop, st) =
-    common.accessor_property(
-      st,
-      get: Some(mk_object(tag_get)),
-      set: None,
-      enumerable: False,
-      configurable: True,
-    )
+    common.accessor_property(st, get: mk_object(tag_get), set: None)
   let st =
     common.add_symbol_property(st, ta.prototype, symbol_to_string_tag, tag_prop)
-  let st =
-    common.add_species_accessor(st, function_proto, ta.constructor, ReturnThis)
+  let st = common.add_species_accessor(st, function_proto, ta.constructor)
   let #(by_kind, st) =
     list.fold(all_typed_array_kinds, #(dict.new(), st), fn(acc, kind) {
       let #(d, st) = acc
@@ -190,7 +183,7 @@ fn init_ctor(
       ta.prototype,
       ta.constructor,
       [#("BYTES_PER_ELEMENT", size_prop)],
-      fn(proto) { TypedArrayN(TypedArrayConstructor(kind:, proto:)) },
+      fn(_) { TypedArrayN(TypedArrayConstructor(kind:)) },
       typed_array_name(kind),
       3,
       [#("BYTES_PER_ELEMENT", size_prop2)],
@@ -230,7 +223,7 @@ pub fn dispatch(
         st,
         "Abstract class TypedArray not directly constructable",
       )
-    TypedArrayConstructor(kind:, ..) ->
+    TypedArrayConstructor(kind:) ->
       rt_val.throw_type_error(
         st,
         "Constructor " <> typed_array_name(kind) <> " requires 'new'",
@@ -297,7 +290,7 @@ pub fn dispatch_construct(
         st,
         "Abstract class TypedArray not directly constructable",
       )
-    TypedArrayConstructor(kind:, ..) -> construct(st, kind, new_target, args)
+    TypedArrayConstructor(kind:) -> construct(st, kind, new_target, args)
     _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }

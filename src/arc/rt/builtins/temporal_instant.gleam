@@ -40,7 +40,7 @@ import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/order
 
-pub fn to_temporal_instant(st: Agent, item: JsVal) -> #(Int, Agent) {
+fn to_temporal_instant(st: Agent, item: JsVal) -> #(Int, Agent) {
   case classify(item) {
     KHandle(h) ->
       case rt_store.cell_get(st, h) {

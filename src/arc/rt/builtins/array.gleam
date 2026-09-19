@@ -33,10 +33,10 @@ import arc/rt/types.{
   ArrayPrototypeToSorted, ArrayPrototypeToSpliced, ArrayPrototypeToString,
   ArrayPrototypeUnshift, ArrayPrototypeValues, ArrayPrototypeWith, DataProperty,
   JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KNull, KNum, KStr, KUndef,
-  ObjectPrototypeToString, Ordinary, ParsedDesc, ProxyObj, ReturnThis, SObject,
-  StringKey, StringObj, SymbolKey, classify, mk_bool, mk_int, mk_object,
-  mk_string, mk_undefined, plain_object, symbol_is_concat_spreadable,
-  symbol_iterator, symbol_species, symbol_unscopables,
+  ObjectPrototypeToString, Ordinary, ParsedDesc, ProxyObj, SObject, StringKey,
+  StringObj, SymbolKey, classify, mk_bool, mk_int, mk_object, mk_string,
+  mk_undefined, plain_object, symbol_is_concat_spreadable, symbol_iterator,
+  symbol_species, symbol_unscopables,
 }
 import arc/rt/utf8
 import arc/rt/val as rt_val
@@ -174,7 +174,7 @@ pub fn init(
         seq:,
       ),
     )
-  let st = common.add_species_accessor(st, fn_proto, bt.constructor, ReturnThis)
+  let st = common.add_species_accessor(st, fn_proto, bt.constructor)
   #(bt, st)
 }
 
@@ -453,7 +453,7 @@ fn generic_delete(st: Agent, h: Handle, pk: PropertyKey) -> Agent {
   }
 }
 
-pub fn generic_delete_index(st: Agent, h: Handle, idx: Int) -> Agent {
+fn generic_delete_index(st: Agent, h: Handle, idx: Int) -> Agent {
   generic_delete(st, h, key.index(idx))
 }
 
@@ -687,7 +687,7 @@ fn array_join(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   }
   let #(separator, st) = rt_val.to_string(st, sep_val)
   use <- within_budget(st, length)
-  let #(joined, st) = join_elements(st, this, 0, length, separator, [])
+  let #(joined, st) = join_elements(st, this, length, separator)
   #(mk_string(joined), st)
 }
 
@@ -705,15 +705,13 @@ fn finish_join(
 fn join_elements(
   st: Agent,
   this: JsVal,
-  idx: Int,
   length: Int,
   separator: String,
-  acc: List(String),
 ) -> #(String, Agent) {
   case dense_snapshot(st, this) {
     Some(#(els, proto)) ->
-      join_elements_snapshot(st, this, els, proto, idx, length, separator, acc)
-    None -> join_elements_generic(st, this, idx, length, separator, acc)
+      join_elements_snapshot(st, this, els, proto, 0, length, separator, [])
+    None -> join_elements_generic(st, this, 0, length, separator, [])
   }
 }
 

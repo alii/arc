@@ -35,7 +35,7 @@ fn linked_ops(ops: JsOps) -> JsOps {
   )
 }
 
-pub fn run(state: State) -> #(Result(JsVal, JsVal), Agent) {
+fn run(state: State) -> #(Result(JsVal, JsVal), Agent) {
   let m = frames.mark(state.agent)
   let agent = frames.push_frame_info(state.agent, state.func)
   let body = fn(agent) {
@@ -60,7 +60,7 @@ pub fn run_script(
   #(to_completion(res), agent)
 }
 
-pub fn call_bytecode(
+fn call_bytecode(
   agent: Agent,
   fn_h: Handle,
   kind: types.ObjKind,
@@ -108,7 +108,7 @@ pub fn call_bytecode(
   }
 }
 
-pub fn prepare_call(
+fn prepare_call(
   agent: Agent,
   fn_h: Handle,
   kind: types.ObjKind,
@@ -133,8 +133,7 @@ pub fn prepare_call(
     True -> {
       let callee =
         call.root_callee(fn_h, template, env, home_object, flags, unit_id)
-      let new_target = mk_undefined()
-      fn(agent, args) { call_prepared(agent, callee, this, args, new_target) }
+      fn(agent, args) { call_prepared(agent, callee, this, args) }
     }
     False -> fn(agent, args) {
       raised(call_bytecode(agent, fn_h, kind, this, args))
@@ -147,14 +146,13 @@ fn call_prepared(
   callee: call.RootCallee,
   this: JsVal,
   args: List(JsVal),
-  new_target: JsVal,
 ) -> #(JsVal, Agent) {
   let frames = agent.frames
   let depth = agent.call_depth
   case depth >= limits.max_call_depth {
     True -> raised(depth_exceeded(agent))
     False -> {
-      let state = call.root_state(agent, callee, this, args, new_target)
+      let state = call.root_state(agent, callee, this, args, mk_undefined())
       case guard.guard1(resume.complete_call, state) {
         guard.Value(value: Ok(v), agent:) -> #(
           v,
@@ -241,7 +239,7 @@ fn run_plain_call(
   }
 }
 
-pub fn construct_bytecode(
+fn construct_bytecode(
   agent: Agent,
   fn_h: Handle,
   args: List(JsVal),
@@ -342,7 +340,7 @@ fn escaped(thrown: JsVal) -> ActivationOutcome {
   ActivationSettled(rt_call.ThrowCompletion(thrown))
 }
 
-pub fn eval_source(
+fn eval_source(
   agent: Agent,
   source: String,
   kind: EvalKind,

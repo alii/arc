@@ -66,7 +66,7 @@ fn parse_build_flags(flags: List(String), command: Command) -> Command {
   }
 }
 
-pub const usage_text = "Usage:
+const usage_text = "Usage:
   arc_aot run <file>              compile <file> to BEAM in memory and run it
   arc_aot build <file> [-o out]   compile <file> and write the .beam (default <file>.beam)
             [--core] [--ir]       also write the Core Erlang / carder IR text next to it

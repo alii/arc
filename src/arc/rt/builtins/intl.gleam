@@ -404,7 +404,7 @@ fn init_service(
     common.alloc_getters(st, function_proto, accessors)
   let #(slo, st) =
     common.alloc_methods(st, function_proto, [
-      #("supportedLocalesOf", IntlN(IntlSupportedLocalesOf(brand)), 1),
+      #("supportedLocalesOf", IntlN(IntlSupportedLocalesOf), 1),
     ])
   let #(bt, st) =
     common.init_type(
@@ -486,7 +486,7 @@ pub fn dispatch(
     IntlSupportedValuesOf -> supported_values_of(st, args)
     IntlConstructor(service:, proto:) ->
       construct_service(st, service, proto, args, mk_undefined())
-    IntlSupportedLocalesOf(_service) -> supported_locales_of(st, args)
+    IntlSupportedLocalesOf -> supported_locales_of(st, args)
     IntlResolvedOptions(service:) -> resolved_options(st, service, this)
     IntlBoundGetter(service:) -> bound_getter(st, service, this)
     IntlBoundMethod(service:, target:) ->

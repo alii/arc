@@ -90,7 +90,7 @@ pub fn str_lit(s: String) -> Build(ir.Value) {
   }
 }
 
-pub fn mark_string(v: ir.Value) -> Build(ir.Value) {
+fn mark_string(v: ir.Value) -> Build(ir.Value) {
   fn(e, k) {
     case v {
       ir.Var(name) -> k(v, state.mark_known_string(e, name))
@@ -99,7 +99,7 @@ pub fn mark_string(v: ir.Value) -> Build(ir.Value) {
   }
 }
 
-pub fn is_known_string(e: Emitter, v: ir.Value) -> Bool {
+fn is_known_string(e: Emitter, v: ir.Value) -> Bool {
   case v {
     ir.Var(name) -> state.is_known_string(e, name)
     ir.ConstBinary(_) -> True
@@ -252,7 +252,7 @@ fn let_if_n(
         slots_rebound(sv0, e_f.slot_vars),
       )
     let e = Emitter(..e_f, slot_vars: sv0)
-    let #(rs, e) = fresh_vars(e, list.length(head_tys))
+    let #(rs, e) = state.fresh_vars(e, list.length(head_tys))
     let heads = list.map(rs, ir.Var)
     case carried {
       [] ->
@@ -272,17 +272,6 @@ fn let_if_n(
           _,
         ))
       }
-    }
-  }
-}
-
-fn fresh_vars(e: Emitter, n: Int) -> #(List(String), Emitter) {
-  case n {
-    0 -> #([], e)
-    _ -> {
-      let #(r, e) = state.fresh_var(e)
-      let #(rest, e) = fresh_vars(e, n - 1)
-      #([r, ..rest], e)
     }
   }
 }
@@ -338,7 +327,7 @@ pub fn is_true_expr(v: ir.Value) -> ir.Expr {
   ir.NumTerm(ir.NEq, v, ir.ConstAtom("true"))
 }
 
-pub fn is_true(v: ir.Value) -> Build(ir.Value) {
+fn is_true(v: ir.Value) -> Build(ir.Value) {
   let_(is_true_expr(v))
 }
 

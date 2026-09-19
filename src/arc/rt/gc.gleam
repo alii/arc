@@ -252,7 +252,7 @@ fn push_objkind_refs(kind: ObjKind, acc: List(Int)) -> List(Int) {
       dict.fold(entries, acc, fn(a, _, v) { push_refs(v, a) })
     WeakSetObj(entries: _) -> acc
     DateObj(ms: _) -> acc
-    RegExpObj(source: _, flags: _, last_index: _, compiled: _) -> acc
+    RegExpObj(source: _, flags: _, compiled: _) -> acc
     ArrayBufferObj(storage: _) -> acc
     TypedArrayObj(buffer:, elem_kind: _, byte_offset: _, length: _) -> [
       buffer.id,
@@ -345,7 +345,7 @@ pub fn maybe_collect(st: Agent) -> Agent {
 }
 
 // minor gcs are cheap, so a fixed young generation size
-pub fn due(store: Store) -> Bool {
+fn due(store: Store) -> Bool {
   store.alloc_since_gc >= store.gc_threshold
 }
 

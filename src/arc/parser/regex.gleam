@@ -405,9 +405,9 @@ fn check_no_duplicate(
   seen: List(String),
   pos: Int,
 ) -> Result(Nil, PatternError) {
-  case list.find(new_names, list.contains(seen, _)) {
-    Ok(name) -> Error(DuplicateGroupName(pos, name))
-    Error(Nil) -> Ok(Nil)
+  case list.any(new_names, list.contains(seen, _)) {
+    True -> Error(DuplicateGroupName(pos))
+    False -> Ok(Nil)
   }
 }
 
@@ -598,7 +598,7 @@ fn parse_atom_escape(
       let #(after, n) = decimal_run(ctx, pos + 1)
       case strict, n {
         True, Some(n) if n > ctx.capture_count ->
-          Error(BackReferenceOutOfRange(pos, n, ctx.capture_count))
+          Error(BackReferenceOutOfRange(pos))
         _, _ -> Ok(after)
       }
     }

@@ -2205,29 +2205,23 @@ pub fn prevent_extensions(st: Agent, h: Handle) -> #(Bool, Agent) {
   #(True, st)
 }
 
-// §10.4.6.12 exports map to live binding boxes
-pub fn new_module_namespace(
-  st: Agent,
-  exports: List(#(String, Handle)),
-) -> #(Handle, Agent) {
-  let to_string_tag =
-    types.DataProperty(
-      value: types.mk_string("Module"),
-      writable: False,
-      enumerable: False,
-      configurable: False,
-      seq: 0,
-    )
-  rt_store.cell_new(
-    st,
-    SObject(
-      kind: ModuleNamespace(exports: dict.from_list(exports)),
-      proto: None,
-      props: dict.new(),
-      symbol_props: [#(types.symbol_to_string_tag, to_string_tag)],
-      elements: NoElements,
-      extensible: False,
-    ),
+// §10.4.6 exports map to live binding boxes
+pub fn module_namespace_cell(
+  exports: Dict(String, Handle),
+  tag: String,
+) -> types.Cell {
+  SObject(
+    kind: ModuleNamespace(exports:),
+    proto: None,
+    props: dict.new(),
+    symbol_props: [
+      #(
+        types.symbol_to_string_tag,
+        types.frozen_property(types.mk_string(tag), 0),
+      ),
+    ],
+    elements: NoElements,
+    extensible: False,
   )
 }
 
@@ -3229,7 +3223,6 @@ pub fn define_own_accessor(
   get: Option(JsVal),
   set: Option(JsVal),
   enumerable enumerable: Bool,
-  configurable configurable: Bool,
 ) -> #(Bool, Agent) {
   define_own_prop(
     st,
@@ -3241,7 +3234,7 @@ pub fn define_own_accessor(
       set:,
       writable: None,
       enumerable: Some(enumerable),
-      configurable: Some(configurable),
+      configurable: Some(True),
     ),
   )
 }

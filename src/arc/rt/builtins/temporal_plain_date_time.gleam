@@ -136,14 +136,14 @@ pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
   )
 }
 
-pub fn date_time_getter_name(g: TemporalDateTimeGetter) -> String {
+fn date_time_getter_name(g: TemporalDateTimeGetter) -> String {
   case g {
     DateTimeDate(g) -> date_getter_name(g)
     DateTimeTime(g) -> time_getter_name(g)
   }
 }
 
-pub fn plain_date_time_method_name(m: PlainDateTimeMethod) -> String {
+fn plain_date_time_method_name(m: PlainDateTimeMethod) -> String {
   case m {
     PlainDateTimeWith -> "with"
     PlainDateTimeWithPlainTime -> "withPlainTime"
@@ -220,7 +220,7 @@ pub fn static(
   }
 }
 
-pub fn to_temporal_date_time(
+fn to_temporal_date_time(
   st: Agent,
   item: JsVal,
   options: JsVal,
@@ -269,7 +269,7 @@ pub fn to_temporal_date_time(
   }
 }
 
-pub fn date_time_from_bag(
+fn date_time_from_bag(
   st: Agent,
   h: Handle,
   options: JsVal,

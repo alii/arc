@@ -27,8 +27,7 @@ push_prop_list_refs([P | T], Acc) -> push_prop_list_refs(T, push_prop_refs(P, Ac
 push_prop_list_refs([], Acc) -> Acc.
 
 push_prop_refs({?DATAPROPERTY_TAG, V, _, _, _, _}, Acc) -> push_refs(V, Acc);
-push_prop_refs({?ACCESSORPROPERTY_TAG, G, S, _, _, _}, Acc) -> push_refs(G, push_refs(S, Acc));
-push_prop_refs(P, Acc) -> push_refs(P, Acc).
+push_prop_refs({?ACCESSORPROPERTY_TAG, G, S, _, _, _}, Acc) -> push_refs(G, push_refs(S, Acc)).
 
 %% refs in the parts of New that differ from Old; =:= is cheap on shared parts
 diff_refs(Old, New, Acc) ->

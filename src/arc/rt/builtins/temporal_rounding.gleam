@@ -15,7 +15,6 @@ import arc/rt/val as rt_val
 import gleam/float
 import gleam/int
 import gleam/option.{type Option, None, Some}
-import gleam/order
 
 import arc/rt/builtins/temporal_common.{apply_duration_sign, negate_duration}
 import arc/rt/builtins/temporal_options.{get_enum_option}
@@ -115,7 +114,7 @@ pub type TimeUnit {
   NanosecondUnit
 }
 
-pub fn as_time_unit(u: Unit) -> Option(TimeUnit) {
+fn as_time_unit(u: Unit) -> Option(TimeUnit) {
   case u {
     Year | Month | Week -> None
     Day -> Some(DayUnit)
@@ -312,36 +311,6 @@ pub fn unsigned_rounding_mode(
   }
 }
 
-// num/den in [0,1] is x between r1 and r2; true picks r2
-pub fn apply_unsigned_rounding(
-  num: Int,
-  den: Int,
-  r1_even r1_even: Bool,
-  mode mode: UnsignedRoundingMode,
-) -> Bool {
-  case num == 0 {
-    True -> False
-    False ->
-      case mode {
-        UnsignedZero -> False
-        UnsignedInfinity -> True
-        UnsignedHalfZero | UnsignedHalfInfinity | UnsignedHalfEven -> {
-          let twice = 2 * num
-          case int.compare(twice, den) {
-            order.Lt -> False
-            order.Gt -> True
-            order.Eq ->
-              case mode {
-                UnsignedHalfZero -> False
-                UnsignedHalfInfinity -> True
-                UnsignedHalfEven | UnsignedZero | UnsignedInfinity -> !r1_even
-              }
-          }
-        }
-      }
-  }
-}
-
 // options read alphabetically, order is observable
 pub fn get_difference_settings(
   st: Agent,
@@ -408,7 +377,7 @@ pub fn max_unit(a: Unit, b: Unit) -> Unit {
   }
 }
 
-pub fn negate_rounding_mode(mode: RoundingMode) -> RoundingMode {
+fn negate_rounding_mode(mode: RoundingMode) -> RoundingMode {
   case mode {
     Ceil -> Floor
     Floor -> Ceil
@@ -449,7 +418,7 @@ pub fn round_options(
   }
 }
 
-pub fn round_unit(u: Unit, allow_day allow_day: Bool) -> Option(TimeUnit) {
+fn round_unit(u: Unit, allow_day allow_day: Bool) -> Option(TimeUnit) {
   case as_time_unit(u) {
     Some(DayUnit) if !allow_day -> None
     other -> other

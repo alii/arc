@@ -29,19 +29,19 @@ pub type HookCall {
 
 pub type HookArgError {
   MissingSpecifier
-  NonStringSpecifier(found: JsVal)
+  NonStringSpecifier
   MissingResolve
   MissingReject
-  BadPhase(found: JsVal)
+  BadPhase
 }
 
 pub fn hook_arg_error_message(err: HookArgError) -> String {
   case err {
     MissingSpecifier -> "import hook called without a specifier"
-    NonStringSpecifier(_) -> "import hook called with a non-string specifier"
+    NonStringSpecifier -> "import hook called with a non-string specifier"
     MissingResolve | MissingReject ->
       "import hook called with the defer phase but no promise capability"
-    BadPhase(_) -> "import hook called with unexpected arguments"
+    BadPhase -> "import hook called with unexpected arguments"
   }
 }
 
@@ -72,7 +72,7 @@ pub fn parse_hook_args(args: List(JsVal)) -> Result(HookCall, HookArgError) {
     [first, ..rest] ->
       case classify(first) {
         KStr(specifier) -> parse_hook_tail(specifier, rest)
-        _ -> Error(NonStringSpecifier(first))
+        _ -> Error(NonStringSpecifier)
       }
   }
 }
@@ -103,9 +103,9 @@ fn parse_hook_tail(
               ))
             [] -> Error(MissingResolve)
             [_] -> Error(MissingReject)
-            [_, _, ..] -> Error(BadPhase(phase))
+            [_, _, ..] -> Error(BadPhase)
           }
-        _ -> Error(BadPhase(phase))
+        _ -> Error(BadPhase)
       }
   }
 }
@@ -295,7 +295,7 @@ fn call_host_hook(
         )
       #(Error(err), st)
     }
-    Some(types.HostFnEntry(call:, ..)) -> {
+    Some(types.HostFnEntry(call:)) -> {
       let outcome =
         rt_call.try_run(st, fn(st) {
           case call(st, hook_args, mk_undefined(), mk_undefined()) {

@@ -2,28 +2,6 @@ import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
-pub fn hex_value(ch: String) -> Option(Int) {
-  case ch {
-    "0" -> Some(0)
-    "1" -> Some(1)
-    "2" -> Some(2)
-    "3" -> Some(3)
-    "4" -> Some(4)
-    "5" -> Some(5)
-    "6" -> Some(6)
-    "7" -> Some(7)
-    "8" -> Some(8)
-    "9" -> Some(9)
-    "a" | "A" -> Some(10)
-    "b" | "B" -> Some(11)
-    "c" | "C" -> Some(12)
-    "d" | "D" -> Some(13)
-    "e" | "E" -> Some(14)
-    "f" | "F" -> Some(15)
-    _ -> None
-  }
-}
-
 // not int.base_parse, that accepts a leading sign
 pub fn hex_value_code(code: Int) -> Option(Int) {
   case code {
@@ -59,98 +37,6 @@ pub fn digit_value(ch: String) -> Option(Int) {
     "8" -> Some(8)
     "9" -> Some(9)
     _ -> None
-  }
-}
-
-// radix 36, callers reject values >= radix
-pub fn alnum_value(ch: String) -> Option(Int) {
-  case ch {
-    "0" -> Some(0)
-    "1" -> Some(1)
-    "2" -> Some(2)
-    "3" -> Some(3)
-    "4" -> Some(4)
-    "5" -> Some(5)
-    "6" -> Some(6)
-    "7" -> Some(7)
-    "8" -> Some(8)
-    "9" -> Some(9)
-    "a" | "A" -> Some(10)
-    "b" | "B" -> Some(11)
-    "c" | "C" -> Some(12)
-    "d" | "D" -> Some(13)
-    "e" | "E" -> Some(14)
-    "f" | "F" -> Some(15)
-    "g" | "G" -> Some(16)
-    "h" | "H" -> Some(17)
-    "i" | "I" -> Some(18)
-    "j" | "J" -> Some(19)
-    "k" | "K" -> Some(20)
-    "l" | "L" -> Some(21)
-    "m" | "M" -> Some(22)
-    "n" | "N" -> Some(23)
-    "o" | "O" -> Some(24)
-    "p" | "P" -> Some(25)
-    "q" | "Q" -> Some(26)
-    "r" | "R" -> Some(27)
-    "s" | "S" -> Some(28)
-    "t" | "T" -> Some(29)
-    "u" | "U" -> Some(30)
-    "v" | "V" -> Some(31)
-    "w" | "W" -> Some(32)
-    "x" | "X" -> Some(33)
-    "y" | "Y" -> Some(34)
-    "z" | "Z" -> Some(35)
-    _ -> None
-  }
-}
-
-pub fn is_hex_digit(ch: String) -> Bool {
-  case ch {
-    "0"
-    | "1"
-    | "2"
-    | "3"
-    | "4"
-    | "5"
-    | "6"
-    | "7"
-    | "8"
-    | "9"
-    | "a"
-    | "b"
-    | "c"
-    | "d"
-    | "e"
-    | "f"
-    | "A"
-    | "B"
-    | "C"
-    | "D"
-    | "E"
-    | "F" -> True
-    _ -> False
-  }
-}
-
-pub fn is_decimal_digit(ch: String) -> Bool {
-  case ch {
-    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" -> True
-    _ -> False
-  }
-}
-
-pub fn is_octal_digit(ch: String) -> Bool {
-  case ch {
-    "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" -> True
-    _ -> False
-  }
-}
-
-pub fn is_binary_digit(ch: String) -> Bool {
-  case ch {
-    "0" | "1" -> True
-    _ -> False
   }
 }
 

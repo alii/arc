@@ -11,27 +11,27 @@ import gleam/dict
 import gleam/option.{type Option, None, Some}
 
 fn status_property() -> PropertyKey {
-  key.private("arc_module_status")
+  key.Private("arc_module_status")
 }
 
 fn errors_property() -> PropertyKey {
-  key.private("arc_module_errors")
+  key.Private("arc_module_errors")
 }
 
 fn namespaces_property() -> PropertyKey {
-  key.private("arc_module_namespaces")
+  key.Private("arc_module_namespaces")
 }
 
 fn deferred_property() -> PropertyKey {
-  key.private("arc_module_deferred")
+  key.Private("arc_module_deferred")
 }
 
 fn pending_property() -> PropertyKey {
-  key.private("arc_module_pending")
+  key.Private("arc_module_pending")
 }
 
 fn referrer_property() -> PropertyKey {
-  key.private("arc_module_referrer")
+  key.Private("arc_module_referrer")
 }
 
 const referrer_key = "active"
@@ -139,7 +139,7 @@ pub type Entry {
   Failed(error: JsVal)
   Pending(promise: Handle, deferred: Option(Handle))
   EvaluationStarted(namespace: Handle, deferred: Option(Handle))
-  LinkedOnly(namespace: Handle, deferred: Option(Handle))
+  LinkedOnly(deferred: Option(Handle))
   Absent(deferred: Option(Handle))
 }
 
@@ -156,7 +156,7 @@ pub fn lookup(st: Agent, spec: String) -> Entry {
           case read_module_status(st, spec) {
             Some(Evaluating) | Some(Evaluated) ->
               EvaluationStarted(namespace:, deferred:)
-            None -> LinkedOnly(namespace:, deferred:)
+            None -> LinkedOnly(deferred:)
           }
       }
     }

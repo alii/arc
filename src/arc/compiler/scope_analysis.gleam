@@ -6,9 +6,9 @@ import arc/compiler/scope.{
   type AnalyzeOpts, type Binding, type BindingKind, type FunctionInfo,
   type GlobalFallthrough, type NameCapture, type Scope, type ScopeId,
   type ScopeKind, type ScopeTree, Binding, Block, CaptureBinding, Catch,
-  CatchBinding, ClassBody, ClassStaticBlock, ConstBinding, FnNameBinding,
-  Function, FunctionInfo, LetBinding, LocalLexical, Module, NameCapture,
-  ParamBinding, Scope, ScopeTree, Script, ToEvalEnv, ToGlobal, VarBinding, With,
+  ClassBody, ClassStaticBlock, ConstBinding, FnNameBinding, Function,
+  FunctionInfo, LetBinding, LocalLexical, Module, NameCapture, ParamBinding,
+  Scope, ScopeTree, Script, ToEvalEnv, ToGlobal, VarBinding, With,
   child_function_scopes, function_info, get, is_function_kind, root_scope_id,
 }
 import arc/compiler/scope_builder.{
@@ -180,7 +180,7 @@ fn finalize_scope(
       kind: raw.kind,
       bindings:,
       contains_direct_eval: raw.contains_direct_eval,
-      annexb_blocked: raw.annexb_blocked,
+      annexb_blocked: set.new(),
       is_strict:,
       is_var_boundary: raw.is_var_boundary,
     )
@@ -232,7 +232,7 @@ fn root_binding_is_local(
       case kind {
         VarBinding -> opts.strict || opts.module_slot_globals
         LetBinding | ConstBinding -> opts.top_lex == LocalLexical
-        ParamBinding | CatchBinding | CaptureBinding | FnNameBinding -> True
+        ParamBinding | CaptureBinding | FnNameBinding -> True
       }
     Module
     | Function
@@ -342,8 +342,6 @@ fn annexb_blocked_by(raw: RawScope, name: String) -> Bool {
     Some(LetBinding), _ | Some(ConstBinding), _ | Some(FnNameBinding), _ -> True
     // §B.3.2.1 a same-named formal suppresses the twin
     Some(ParamBinding), _ -> True
-    // unreachable, catch params are recorded as param kind
-    Some(CatchBinding), _ -> False
     Some(VarBinding), _ | Some(CaptureBinding), _ -> False
   }
 }
@@ -1009,7 +1007,7 @@ fn never_box_names(
           False -> NeverWritten
           True -> Rewritten
         }
-      CatchBinding | FnNameBinding ->
+      FnNameBinding ->
         case assigned {
           False -> NeverWritten
           True -> Rewritten

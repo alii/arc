@@ -46,7 +46,6 @@ pub type EmitError {
   ContinueOutsideLoop
   EarlySyntaxError(message: String)
   UnsupportedFeature(feature: String)
-  ScopeCursorDesync(at: ScopeId)
 }
 
 pub fn describe_error(err: EmitError) -> String {
@@ -55,24 +54,12 @@ pub fn describe_error(err: EmitError) -> String {
     ContinueOutsideLoop -> "continue outside loop"
     EarlySyntaxError(message:) -> message
     UnsupportedFeature(feature:) -> "unsupported: " <> feature
-    ScopeCursorDesync(..) -> "scope cursor desync"
   }
 }
 
 pub type FieldInitMode {
   NoFieldInit
   FieldInitAfterSuper
-}
-
-pub type ClassContext {
-  ClassContext(
-    brand_vars: Dict(String, ir.Value),
-    proto_home_box: ir.Value,
-    static_home_box: ir.Value,
-    ctor_self_box: ir.Value,
-    inner_name_box: Option(ir.Value),
-    is_derived: Bool,
-  )
 }
 
 // a loop-invariant callee whose direct entry is loaded before the loop
@@ -101,12 +88,10 @@ pub type FnSave {
     pending_label: Option(String),
     strict: Bool,
     is_async: Bool,
-    private_env: List(String),
     field_init: FieldInitMode,
     derived_ctor: Bool,
     default_ctor: Bool,
     this_tdz: Bool,
-    class_stack: List(ClassContext),
     slot_vars: Dict(Int, String),
     cap_names: List(String),
     initialized_slots: Set(Int),
@@ -127,9 +112,9 @@ pub type Frame {
   SwitchFrame(ir_break: String, js_label: Option(String), carried: List(Int))
   LabeledBlockFrame(ir_break: String, js_label: String, carried: List(Int))
   BarrierFrame(
-    finally_body: Option(#(List(ast.StmtWithLine), ScopeSnapshot)),
-    iter_close: Option(String),
-    escape: Option(Escape),
+    body: List(ast.StmtWithLine),
+    saved: ScopeSnapshot,
+    escape: Escape,
   )
 }
 
@@ -141,10 +126,9 @@ pub type BarrierCleanup {
   FinallyBlock(
     body: List(ast.StmtWithLine),
     saved_scope: ScopeSnapshot,
-    escape: Option(Escape),
+    escape: Escape,
   )
-  IterClose(iter_var: String, escape: Option(Escape))
-  CatchOnly
+  IterClose(iter_var: String, escape: Escape)
 }
 
 pub type EmitResult =
@@ -270,7 +254,6 @@ pub type Emitter {
     unsupported: List(String),
     strict: Bool,
     is_async: Bool,
-    private_env: List(String),
     field_init: FieldInitMode,
     derived_ctor: Bool,
     default_ctor: Bool,
@@ -283,7 +266,6 @@ pub type Emitter {
     invariant_callees: Dict(InvariantCallee, ir.Value),
     const_globals: Dict(String, ir.Value),
     slotted_globals: Dict(String, Int),
-    class_stack: List(ClassContext),
     machine_abrupt: Option(MachineAbrupt),
     raw_args_var: Option(String),
     dispatch: EmitDispatch,
@@ -351,14 +333,6 @@ pub fn let_(e: Emitter, rhs: ir.Expr, k: NextWith(ir.Value)) -> EmitResult {
     ir.Values([v]) -> k(v, e)
     _ -> {
       let #(n, e) = fresh_var(e)
-      let e = case let_tail_value(rhs) {
-        Some(ir.Var(vn)) ->
-          case is_known_number(e, vn) {
-            True -> mark_known_number(e, n)
-            False -> e
-          }
-        _ -> e
-      }
       use body <- map_tree(k(ir.Var(n), e))
       ir.Let([n], rhs, body)
     }
@@ -577,7 +551,7 @@ pub fn cap_param_name(e: Emitter, i: Int) -> String {
   list_at(e.cap_names, i) |> option.unwrap("cap_" <> int.to_string(i))
 }
 
-fn list_at(xs: List(a), i: Int) -> Option(a) {
+pub fn list_at(xs: List(a), i: Int) -> Option(a) {
   case xs, i {
     [], _ -> None
     [x, ..], 0 -> Some(x)
@@ -658,12 +632,12 @@ pub fn push_labeled(
 // not via push_frame: pending_label must survive a barrier
 pub fn push_barrier(
   e: Emitter,
-  finally_body: Option(#(List(ast.StmtWithLine), ScopeSnapshot)),
-  iter_close: Option(String),
-  escape: Option(Escape),
+  body: List(ast.StmtWithLine),
+  saved: ScopeSnapshot,
+  escape: Escape,
 ) -> Emitter {
   Emitter(..e, frame_stack: [
-    BarrierFrame(finally_body:, iter_close:, escape:),
+    BarrierFrame(body:, saved:, escape:),
     ..e.frame_stack
   ])
 }
@@ -673,7 +647,7 @@ pub fn fresh_escape(e: Emitter, arity: Int) -> #(Escape, Emitter) {
   #(Escape(label:, arity:), e)
 }
 
-fn fresh_vars(e: Emitter, n: Int) -> #(List(String), Emitter) {
+pub fn fresh_vars(e: Emitter, n: Int) -> #(List(String), Emitter) {
   let #(names, e) = {
     use #(acc, e), _ <- list.fold(list.repeat(Nil, n), #([], e))
     let #(v, e) = fresh_var(e)
@@ -782,24 +756,9 @@ fn continue_target_of(frame: Frame, name: Option(String)) -> Option(String) {
 
 pub fn cross_cleanups(frame: Frame) -> List(BarrierCleanup) {
   case frame {
-    LoopFrame(iter_close: Some(#(iv, esc)), ..) -> [
-      IterClose(iv, Some(esc)),
-    ]
+    LoopFrame(iter_close: Some(#(iv, esc)), ..) -> [IterClose(iv, esc)]
     LoopFrame(..) | SwitchFrame(..) | LabeledBlockFrame(..) -> []
-    BarrierFrame(finally_body:, iter_close:, escape:) -> {
-      let acc = case finally_body {
-        Some(#(body, save)) -> [FinallyBlock(body, save, escape)]
-        None -> []
-      }
-      case iter_close {
-        Some(iv) -> [IterClose(iv, escape), ..acc]
-        None ->
-          case acc {
-            [] -> [CatchOnly]
-            _ -> acc
-          }
-      }
-    }
+    BarrierFrame(body:, saved:, escape:) -> [FinallyBlock(body, saved, escape)]
   }
 }
 
@@ -845,11 +804,11 @@ pub fn block_child_scopes(tree: ScopeTree, id: ScopeId) -> List(ScopeId) {
 
 pub fn new_emitter(
   tree: ScopeTree,
-  root: ScopeId,
   strict strict: Bool,
   module_name module_name: String,
   dispatch dispatch: EmitDispatch,
 ) -> Emitter {
+  let root = scope.root_scope_id
   Emitter(
     scope_tree: tree,
     fn_scope: root,
@@ -871,7 +830,6 @@ pub fn new_emitter(
     unsupported: [],
     strict:,
     is_async: False,
-    private_env: [],
     field_init: NoFieldInit,
     derived_ctor: False,
     default_ctor: False,
@@ -883,7 +841,6 @@ pub fn new_emitter(
     invariant_callees: dict.new(),
     const_globals: dict.new(),
     slotted_globals: dict.new(),
-    class_stack: [],
     machine_abrupt: None,
     raw_args_var: None,
     dispatch:,
@@ -1036,12 +993,10 @@ pub fn enter_function(
       pending_label: e.pending_label,
       strict: e.strict,
       is_async: e.is_async,
-      private_env: e.private_env,
       field_init: e.field_init,
       derived_ctor: e.derived_ctor,
       default_ctor: e.default_ctor,
       this_tdz: e.this_tdz,
-      class_stack: e.class_stack,
       slot_vars: e.slot_vars,
       cap_names: e.cap_names,
       initialized_slots: e.initialized_slots,
@@ -1061,12 +1016,10 @@ pub fn enter_function(
       pending_label: None,
       strict:,
       is_async:,
-      private_env: e.private_env,
       field_init: NoFieldInit,
       derived_ctor: False,
       default_ctor: False,
       this_tdz: is_arrow && e.this_tdz,
-      class_stack: e.class_stack,
       slot_vars: dict.new(),
       cap_names: [],
       initialized_slots: set.new(),
@@ -1089,12 +1042,10 @@ pub fn leave_function(e: Emitter, save: FnSave) -> Emitter {
     pending_label: save.pending_label,
     strict: save.strict,
     is_async: save.is_async,
-    private_env: save.private_env,
     field_init: save.field_init,
     derived_ctor: save.derived_ctor,
     default_ctor: save.default_ctor,
     this_tdz: save.this_tdz,
-    class_stack: save.class_stack,
     slot_vars: save.slot_vars,
     cap_names: save.cap_names,
     initialized_slots: save.initialized_slots,

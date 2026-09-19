@@ -2,7 +2,6 @@ import arc/bytecode/key.{Named}
 import arc/compiler
 import arc/host_hooks
 import arc/interp/entry
-import arc/interp/safepoint
 import arc/module
 import arc/module/loader
 import arc/parser
@@ -55,7 +54,7 @@ fn run_template(
   template: FuncTemplate,
 ) -> #(Result(JsValKind, JsValKind), Agent) {
   let #(completion, st) = entry.run_script(st, template)
-  let st = safepoint.end_turn(st, [completion_value(completion)])
+  let st = rt_helpers.end_turn(st, [completion_value(completion)])
   #(classify_outcome(completion), st)
 }
 
@@ -5763,8 +5762,7 @@ pub fn direct_eval_this_lexical_test() -> Nil {
   )
 }
 
-// todo: parser rejects direct-eval new.target at top level
-pub fn direct_eval_new_target_pending() -> Nil {
+pub fn direct_eval_new_target_test() -> Nil {
   assert_normal_number(
     "function f() { return eval('new.target') }
      new f() === f ? 1 : 0",
@@ -7153,7 +7151,7 @@ fn run_export(
   args: List(JsVal),
 ) -> #(Result(JsValKind, JsValKind), Agent) {
   let #(completion, st) = rt_call.try_call(st, callee, mk_undefined(), args)
-  let st = safepoint.end_turn(st, [completion_value(completion)])
+  let st = rt_helpers.end_turn(st, [completion_value(completion)])
   #(classify_outcome(completion), st)
 }
 
@@ -7522,14 +7520,10 @@ pub fn reused_module_gaining_export_is_a_link_error_test() -> Nil {
       dict.from_list([#(spec, ns)]),
       dict.new(),
     )
-  let assert True = case err {
-    module.EvaluationError(..) ->
-      string.contains(
-        module.error_message(st, err),
-        "was re-loaded with an export",
-      )
-    _ -> False
-  }
+  assert string.contains(
+    rt_inspect.format_error(st, err),
+    "was re-loaded with an export",
+  )
   Nil
 }
 
@@ -7569,13 +7563,9 @@ pub fn reused_module_gaining_reexport_is_a_link_error_test() -> Nil {
       dict.from_list([#(spec, ns)]),
       dict.new(),
     )
-  let assert True = case err {
-    module.EvaluationError(..) ->
-      string.contains(
-        module.error_message(st, err),
-        "was re-loaded with an export",
-      )
-    _ -> False
-  }
+  assert string.contains(
+    rt_inspect.format_error(st, err),
+    "was re-loaded with an export",
+  )
   Nil
 }

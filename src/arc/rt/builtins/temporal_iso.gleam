@@ -136,7 +136,7 @@ pub fn is_valid_iso_date(y: Int, m: Int, d: Int) -> Bool {
   m >= 1 && m <= 12 && d >= 1 && d <= days_in_month(y, m)
 }
 
-pub fn iso_date_within_limits(d: IsoDate) -> Bool {
+fn iso_date_within_limits(d: IsoDate) -> Bool {
   let ed = epoch_days(d)
   ed >= min_epoch_days && ed <= max_epoch_days
 }
@@ -287,7 +287,7 @@ pub fn format_fraction(sub_ns: Int, precision: SecondsPrecision) -> String {
   }
 }
 
-pub fn trim_trailing_zeros(s: String) -> String {
+fn trim_trailing_zeros(s: String) -> String {
   case string.ends_with(s, "0") {
     True -> trim_trailing_zeros(string.drop_end(s, 1))
     False -> s
@@ -365,7 +365,7 @@ fn take_some_digits_loop(
   }
 }
 
-pub fn parse_date_part(s: String) -> Option(#(IsoDate, String)) {
+fn parse_date_part(s: String) -> Option(#(IsoDate, String)) {
   use #(year, rest) <- option.then(parse_year_part(s))
   case rest {
     "-" <> r1 -> {
@@ -448,7 +448,7 @@ fn parse_minutes_seconds(s: String) -> #(MinutesSeconds, String) {
   }
 }
 
-pub fn parse_fraction(s: String) -> #(Int, String) {
+fn parse_fraction(s: String) -> #(Int, String) {
   case s {
     "." <> r | "," <> r ->
       case take_some_digits(r, 9) {
@@ -625,9 +625,9 @@ fn is_time_prefix(s: String) -> Bool {
 
 pub const pow2_32 = 4_294_967_296
 
-pub const pow2_52 = 4_503_599_627_370_496
+const pow2_52 = 4_503_599_627_370_496
 
-pub const pow2_53 = 9_007_199_254_740_992
+const pow2_53 = 9_007_199_254_740_992
 
 pub fn int_sign(n: Int) -> Int {
   case n > 0 {

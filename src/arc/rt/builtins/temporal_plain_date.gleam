@@ -58,7 +58,7 @@ import arc/rt/val as rt_val
 import gleam/list
 import gleam/option
 
-pub const all_date_getters = [
+const all_date_getters = [
   DateCalendarId,
   DateEra,
   DateEraYear,
@@ -143,7 +143,7 @@ pub fn date_getter_name(g: TemporalDateGetter) -> String {
   }
 }
 
-pub fn plain_date_method_name(m: PlainDateMethod) -> String {
+fn plain_date_method_name(m: PlainDateMethod) -> String {
   case m {
     PlainDateToPlainYearMonth -> "toPlainYearMonth"
     PlainDateToPlainMonthDay -> "toPlainMonthDay"
@@ -203,7 +203,7 @@ pub fn static(
   }
 }
 
-pub fn to_temporal_date(
+fn to_temporal_date(
   st: Agent,
   item: JsVal,
   options: JsVal,
@@ -233,7 +233,7 @@ pub fn to_temporal_date(
   }
 }
 
-pub fn date_from_bag(
+fn date_from_bag(
   st: Agent,
   h: Handle,
   options: JsVal,
@@ -255,7 +255,7 @@ pub fn getter(
   #(date_field_cal(cal, d, g), st)
 }
 
-pub fn date_field(d: IsoDate, g: TemporalDateGetter) -> JsVal {
+fn date_field(d: IsoDate, g: TemporalDateGetter) -> JsVal {
   case g {
     DateCalendarId -> mk_string("iso8601")
     DateEra -> mk_undefined()

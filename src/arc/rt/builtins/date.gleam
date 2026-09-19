@@ -114,7 +114,7 @@ pub fn init(
       object_proto,
       fn_proto,
       proto_methods,
-      fn(proto) { DateN(DateConstructor(proto:)) },
+      fn(_) { DateN(DateConstructor) },
       "Date",
       7,
       statics,
@@ -149,7 +149,7 @@ pub fn dispatch(
   let name = method_name(native)
   let local = LocalTime(st.hooks.time_zone)
   case native {
-    DateConstructor(..) -> {
+    DateConstructor -> {
       let fields = get_date_fields(now_ms(st), local)
       #(mk_string(format_date(LocalFormat(DateAndTime), fields)), st)
     }
@@ -243,14 +243,14 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case native {
-    DateConstructor(..) -> date_constructor(st, args, new_target)
+    DateConstructor -> date_constructor(st, args, new_target)
     _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }
 
 fn method_name(native: DateNative) -> String {
   case native {
-    DateConstructor(..) -> "constructor"
+    DateConstructor -> "constructor"
     DateNow -> "now"
     DateParse -> "parse"
     DateUTC -> "UTC"
@@ -970,8 +970,8 @@ type IsoTime {
 
 fn parse_iso(s: String, basis: TimeBasis) -> Option(JsNum) {
   use #(year, rest) <- option.then(parse_year(s))
-  let #(mon, rest) = parse_dash_int(rest, 2) |> option.unwrap(#(1, rest))
-  let #(day, rest) = parse_dash_int(rest, 2) |> option.unwrap(#(1, rest))
+  let #(mon, rest) = parse_dash_int(rest) |> option.unwrap(#(1, rest))
+  let #(day, rest) = parse_dash_int(rest) |> option.unwrap(#(1, rest))
   use #(time, rest) <- option.then(case rest {
     "T" <> t -> parse_time(t) |> option.map(fn(p) { #(Some(p.0), p.1) })
     _ -> Some(#(None, rest))
@@ -1035,9 +1035,9 @@ fn parse_year(s: String) -> Option(#(Int, String)) {
   }
 }
 
-fn parse_dash_int(s: String, n: Int) -> Option(#(Int, String)) {
+fn parse_dash_int(s: String) -> Option(#(Int, String)) {
   case s {
-    "-" <> rest -> digits.take(rest, n)
+    "-" <> rest -> digits.take(rest, 2)
     _ -> None
   }
 }

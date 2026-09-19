@@ -19,7 +19,6 @@ pub type BindingKind {
   LetBinding
   ConstBinding
   ParamBinding
-  CatchBinding
   CaptureBinding
   // §13.2.5.5 nfe self name; sloppy writes are silently dropped
   FnNameBinding
@@ -184,12 +183,8 @@ fn lookup_crossing(
       let crossed = case kind {
         CaptureBinding ->
           list.append(inherited_with_slots(tree, scope), crossed)
-        VarBinding
-        | LetBinding
-        | ConstBinding
-        | ParamBinding
-        | CatchBinding
-        | FnNameBinding -> crossed
+        VarBinding | LetBinding | ConstBinding | ParamBinding | FnNameBinding ->
+          crossed
       }
       wrap_with_chain(crossed, Local(slot:, boxed:, kind:, declared_kind:))
     }

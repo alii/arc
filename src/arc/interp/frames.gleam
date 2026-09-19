@@ -67,7 +67,7 @@ pub fn sync_entering(state: State, agent: Agent, pc: Int) -> Agent {
   }
 }
 
-pub fn set_top_line(frames: List(FrameInfo), line: Int) -> List(FrameInfo) {
+fn set_top_line(frames: List(FrameInfo), line: Int) -> List(FrameInfo) {
   case frames {
     [FrameInfo(line: l, ..), ..] if l == line -> frames
     [top, ..rest] -> [FrameInfo(..top, line:), ..rest]

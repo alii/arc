@@ -38,7 +38,6 @@ fn flags(strict strict: Bool) {
     is_class_constructor: False,
     is_derived_constructor: False,
     is_arrow: False,
-    is_method: False,
     is_generator: False,
     is_async: False,
     is_strict: strict,
@@ -47,8 +46,7 @@ fn flags(strict strict: Bool) {
 
 fn this_fn(st: Agent, strict strict: Bool) -> #(JsVal, Agent) {
   let code = as_code(fn(st, frame, _args) { #(frame_at(1, frame), st) })
-  let #(h, st) =
-    rt_call.alloc_compiled_fn(st, code, flags(strict), "f", 0, None, None)
+  let #(h, st) = rt_call.alloc_compiled_fn(st, code, flags(strict), "f", 0)
   #(mk_object(h), st)
 }
 
@@ -94,7 +92,7 @@ pub fn call_depth_range_error_test() {
       rt_call.call_method(st, arr, StringKey(key.canonical("map")), [self])
     })
   let #(h, st) =
-    rt_call.alloc_compiled_fn(st, code, flags(strict: True), "f", 0, None, None)
+    rt_call.alloc_compiled_fn(st, code, flags(strict: True), "f", 0)
   let assert #(ThrowCompletion(e), st) =
     rt_call.try_call(st, mk_object(h), mk_undefined(), [])
   let assert KHandle(_) = classify(e)
@@ -353,15 +351,7 @@ pub fn map_get_or_insert_computed_test() {
       #(mk_string(rt_val.to_string(st, q).0), st)
     })
   let #(fh, st) =
-    rt_call.alloc_compiled_fn(
-      st,
-      seen_key,
-      flags(strict: True),
-      "f",
-      1,
-      None,
-      None,
-    )
+    rt_call.alloc_compiled_fn(st, seen_key, flags(strict: True), "f", 1)
   let f = mk_object(fh)
   let #(mz, st) = rt_ops.neg(st, mk_int(0))
   let #(r, st) = call_method(st, m, "getOrInsertComputed", [mz, f])
@@ -369,7 +359,7 @@ pub fn map_get_or_insert_computed_test() {
   let boom =
     as_code(fn(st, _frame, _args) { rt_val.throw_type_error(st, "called") })
   let #(bh, st) =
-    rt_call.alloc_compiled_fn(st, boom, flags(strict: True), "b", 1, None, None)
+    rt_call.alloc_compiled_fn(st, boom, flags(strict: True), "b", 1)
   let #(r, st) =
     call_method(st, m, "getOrInsertComputed", [mk_int(0), mk_object(bh)])
   assert classify(r) == KStr("Infinity")
@@ -380,15 +370,7 @@ pub fn map_get_or_insert_computed_test() {
       #(mk_string("outer"), st)
     })
   let #(sh, st) =
-    rt_call.alloc_compiled_fn(
-      st,
-      sneaky,
-      flags(strict: True),
-      "s",
-      1,
-      None,
-      None,
-    )
+    rt_call.alloc_compiled_fn(st, sneaky, flags(strict: True), "s", 1)
   let #(r, st) =
     call_method(st, m, "getOrInsertComputed", [mk_string("k"), mk_object(sh)])
   assert classify(r) == KStr("outer")
@@ -425,15 +407,7 @@ pub fn map_group_by_test() {
       }
     })
   let #(ph, st) =
-    rt_call.alloc_compiled_fn(
-      st,
-      parity,
-      flags(strict: True),
-      "p",
-      1,
-      None,
-      None,
-    )
+    rt_call.alloc_compiled_fn(st, parity, flags(strict: True), "p", 1)
   let #(g, st) = call_method(st, map_ctor, "groupBy", [items, mk_object(ph)])
   assert type_of(st, g) == "object"
   let #(size, st) = rt_obj.get_prop(st, g, StringKey(key.canonical("size")))

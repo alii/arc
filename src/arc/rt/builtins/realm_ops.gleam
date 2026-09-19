@@ -15,7 +15,7 @@ import arc/rt/val as rt_val
 import gleam/dict
 import gleam/option.{Some}
 
-pub fn error_kind_prototype(r: Realm, kind: ErrorKind) -> Handle {
+fn error_kind_prototype(r: Realm, kind: ErrorKind) -> Handle {
   case kind {
     TypeError -> r.type_error.prototype
     RangeError -> r.range_error.prototype

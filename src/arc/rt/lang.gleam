@@ -2,7 +2,6 @@ import arc/bytecode/key.{type PropertyKey, Named}
 import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as b_object
-import arc/rt/builtins/regexp as b_regexp
 import arc/rt/call.{NormalCompletion, ThrowCompletion, call} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -363,14 +362,6 @@ fn copy_data_properties(
       }
     }
   }
-}
-
-pub fn regexp_new(
-  st: Agent,
-  pattern: String,
-  flags: String,
-) -> #(JsVal, Agent) {
-  b_regexp.create_literal(st, pattern, flags)
 }
 
 // §13.2.8.4 gettemplateobject, cached per realm and site

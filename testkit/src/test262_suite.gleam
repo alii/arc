@@ -125,7 +125,7 @@ pub fn write_pass_list(
   simplifile.write(to: path, contents: string.join(paths, "\n") <> "\n")
 }
 
-pub fn format_percent(pass: Int, tested: Int) -> String {
+fn format_percent(pass: Int, tested: Int) -> String {
   case tested > 0 {
     True -> {
       let pct_x100 = { pass * 10_000 } / tested

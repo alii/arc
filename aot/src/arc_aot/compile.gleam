@@ -28,7 +28,6 @@ pub fn describe_emit_error(error: state.EmitError) -> String {
     | state.ContinueOutsideLoop
     | state.EarlySyntaxError(..) -> "SyntaxError: " <> message
     state.UnsupportedFeature(..) -> message
-    state.ScopeCursorDesync(..) -> "internal: " <> message
   }
 }
 

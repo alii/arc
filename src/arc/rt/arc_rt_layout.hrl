@@ -172,11 +172,10 @@
 -define(FNFLAGS_IS_CLASS_CONSTRUCTOR, 3).
 -define(FNFLAGS_IS_DERIVED_CONSTRUCTOR, 4).
 -define(FNFLAGS_IS_ARROW, 5).
--define(FNFLAGS_IS_METHOD, 6).
--define(FNFLAGS_IS_GENERATOR, 7).
--define(FNFLAGS_IS_ASYNC, 8).
--define(FNFLAGS_IS_STRICT, 9).
--define(FNFLAGS_SIZE, 9).
+-define(FNFLAGS_IS_GENERATOR, 6).
+-define(FNFLAGS_IS_ASYNC, 7).
+-define(FNFLAGS_IS_STRICT, 8).
+-define(FNFLAGS_SIZE, 8).
 %% neither class constructor nor generator nor async
 -define(IS_PLAIN_FN(Flags),
         (element(?FNFLAGS_IS_CLASS_CONSTRUCTOR, Flags) =:= false andalso

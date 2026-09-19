@@ -142,11 +142,11 @@ pub fn time_zone_id(tz: TemporalZone) -> String {
   }
 }
 
-pub fn unsupported_tz(tz: String) -> JsError {
+fn unsupported_tz(tz: String) -> JsError {
   JsError(RangeError, "time zone " <> tz <> " is not supported")
 }
 
-pub fn unloadable_tz(id: String, error: time_zone.TzError) -> JsError {
+fn unloadable_tz(id: String, error: time_zone.TzError) -> JsError {
   JsError(
     RangeError,
     "time zone " <> id <> " cannot be loaded: " <> time_zone.describe(error),

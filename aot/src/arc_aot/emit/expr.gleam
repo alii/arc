@@ -255,30 +255,8 @@ fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
       })
     }
 
-    ast.AwaitExpression(_, argument) -> {
-      use v <- anf.then(expr(argument))
-      anf.host("await", [v])
-    }
-    ast.YieldExpression(_, argument, is_delegate) -> {
-      use consts <- anf.then(consts())
-      use v <- anf.then(case argument {
-        Some(a) -> expr(a)
-        None -> anf.pure(consts.undef)
-      })
-      case is_delegate {
-        True -> anf.host("yield_star", [v])
-        False -> {
-          use e <- anf.then(ask)
-          case e.is_async {
-            True -> {
-              use awaited <- anf.then(anf.host("await", [v]))
-              anf.host("yield", [awaited])
-            }
-            False -> anf.host("yield", [v])
-          }
-        }
-      }
-    }
+    ast.AwaitExpression(..) -> unreachable("unsplit await")
+    ast.YieldExpression(..) -> unreachable("unsplit yield")
 
     ast.ImportExpression(..) -> {
       use _ <- anf.then(modify(state.mark_unsupported(_, "import()")))

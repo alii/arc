@@ -55,7 +55,7 @@ pub fn init(
       object_proto,
       fn_proto,
       proto_props,
-      fn(proto) { MapN(MapConstructor(proto:)) },
+      fn(_) { MapN(MapConstructor) },
       "Map",
       0,
       statics,
@@ -75,7 +75,7 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case n {
-    MapConstructor(..) ->
+    MapConstructor ->
       rt_val.throw_type_error(st, "Constructor Map requires 'new'")
     MapGroupBy -> map_group_by(st, args)
     MapGet -> map_get(st, this, args)
@@ -100,7 +100,7 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case n {
-    MapConstructor(..) -> map_constructor(st, args, new_target)
+    MapConstructor -> map_constructor(st, args, new_target)
     _ -> rt_val.throw_type_error(st, "not a constructor")
   }
 }

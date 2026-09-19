@@ -29,7 +29,7 @@ import gleam/result
 import gleam/string
 
 // entry.run, passed in to break the import cycle
-pub type Run =
+type Run =
   fn(State) -> #(Result(JsVal, JsVal), Agent)
 
 type Parse =

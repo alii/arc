@@ -94,13 +94,6 @@ pub fn is_undef(v: JsVal) -> Bool {
   }
 }
 
-pub fn is_null(v: JsVal) -> Bool {
-  case classify(v) {
-    KNull -> True
-    _ -> False
-  }
-}
-
 @external(erlang, "arc_rt_val_ffi", "is_nullish")
 pub fn is_nullish(v: JsVal) -> Bool
 
@@ -132,11 +125,6 @@ pub fn empty_list() -> List(JsVal) {
 
 pub fn list_append_one(xs: List(JsVal), x: JsVal) -> List(JsVal) {
   list.append(xs, [x])
-}
-
-pub fn float_from_bits(bits: Int) -> JsVal {
-  let assert <<f:float-size(64)>> = <<bits:size(64)>>
-  mk_number(JFloat(f))
 }
 
 pub fn nullish_label(v: JsVal) -> String {
@@ -240,7 +228,7 @@ pub fn is_miss(v: a) -> Bool
 
 // bound here, not in obj, because obj imports val
 @external(erlang, "arc_rt_obj_ffi", "get_symbol_data")
-pub fn get_symbol_data(st: Agent, recv: JsVal, sym: SymbolId) -> JsVal
+fn get_symbol_data(st: Agent, recv: JsVal, sym: SymbolId) -> JsVal
 
 // site is an aot ic slot, none from gleam
 @external(erlang, "arc_rt_obj_ffi", "get_named")
@@ -425,22 +413,6 @@ pub fn prim_to_number(v: JsVal) -> Result(JsNum, CoerceError) {
     KSym(_) -> Error(SymbolNotCoercible)
     KHandle(_) -> Error(NeedsToPrimitive)
     KTdz -> panic as "ToNumber on TDZ sentinel"
-  }
-}
-
-// §7.1.17 tostring, primitives only
-pub fn prim_to_string(v: JsVal) -> Result(String, CoerceError) {
-  case classify(v) {
-    KStr(s) -> Ok(s)
-    KNum(n) -> Ok(jsnum_to_string(n))
-    KBool(True) -> Ok("true")
-    KBool(False) -> Ok("false")
-    KNull -> Ok("null")
-    KUndef -> Ok("undefined")
-    KBig(n) -> Ok(int.to_string(n))
-    KSym(_) -> Error(SymbolNotCoercible)
-    KHandle(_) -> Error(NeedsToPrimitive)
-    KTdz -> panic as "ToString on TDZ sentinel"
   }
 }
 

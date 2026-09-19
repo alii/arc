@@ -29,7 +29,6 @@ fn reviver(
       is_class_constructor: False,
       is_derived_constructor: False,
       is_arrow: False,
-      is_method: False,
       is_generator: False,
       is_async: False,
       is_strict: True,
@@ -38,8 +37,7 @@ fn reviver(
     rt_helpers.as_code(fn(st, frame, args) {
       body(st, rt_helpers.frame_at(1, frame), args)
     })
-  let #(h, st) =
-    rt_call.alloc_compiled_fn(st, code, flags, "reviver", 3, None, None)
+  let #(h, st) = rt_call.alloc_compiled_fn(st, code, flags, "reviver", 3)
   #(types.mk_object(h), st)
 }
 

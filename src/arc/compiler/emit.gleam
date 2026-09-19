@@ -1,21 +1,18 @@
 import arc/bytecode/binop.{AddOp, PureOp}
-import arc/bytecode/error_kind
 import arc/bytecode/key
 import arc/bytecode/lexical
 import arc/bytecode/opcode.{
-  type IrOp, type LabelId, CatchOnly, Finally, IrAsyncYieldStarNext,
-  IrAsyncYieldStarResume, IrBinOp, IrDefineAccessor, IrDefineField,
-  IrDefineMethod, IrDeleteField, IrFinal, IrGetField, IrGetFieldKeep, IrGosub,
-  IrJump, IrJumpIfFalse, IrJumpIfNotNullish, IrJumpIfNullish, IrJumpIfTrue,
-  IrLabel, IrPushTry, IrPutField, IterCloseGuard,
+  type IrOp, type LabelId, CatchOnly, Finally, IrAsyncYieldStarResume, IrBinOp,
+  IrDefineAccessor, IrDefineField, IrDefineMethod, IrDeleteField, IrFinal,
+  IrGetField, IrGetFieldKeep, IrGosub, IrJump, IrJumpIfFalse, IrJumpIfNotNullish,
+  IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrPushTry, IrPutField, IterCloseGuard,
 }
 import arc/compiler/ast_util
 import arc/compiler/const_fold
 import arc/compiler/scope.{
-  type BindingKind, type GlobalFallthrough, type ScopeId, type TopLevelLex,
-  CaptureBinding, CatchBinding, ConstBinding, FnNameBinding, GlobalLexical,
-  LetBinding, LocalLexical, ParamBinding, ToEvalEnv, ToGlobal, VarBinding,
-  root_scope_id,
+  type BindingKind, type GlobalFallthrough, type ScopeId, CaptureBinding,
+  ConstBinding, FnNameBinding, GlobalLexical, LetBinding, LocalLexical,
+  ParamBinding, ToEvalEnv, ToGlobal, VarBinding, root_scope_id,
 }
 import arc/module/summary
 import arc/parser/ast
@@ -48,7 +45,6 @@ pub type CompiledChild {
     is_async: Bool,
     is_constructor: Bool,
     is_class_constructor: Bool,
-    lexical_refs: lexical.LexicalRefs,
     references_arguments: Bool,
     code_kind: lexical.CodeKind,
   )
@@ -100,13 +96,11 @@ type Emitter {
     strict: Bool,
     is_async: Bool,
     is_arrow: Bool,
-    lexical_refs: lexical.LexicalRefs,
     references_arguments: Bool,
     // false while arguments only appears as f.apply(t, arguments)
     arguments_escape: Bool,
     code_kind: lexical.CodeKind,
     // GlobalLexical only for the repl program emitter
-    top_lex: TopLevelLex,
     scope_tree: scope.ScopeTree,
     // scope-chain walks stop here, never reading the parent frame
     fn_scope: ScopeId,
@@ -805,7 +799,7 @@ fn emit_top_level_body(
     False -> list.fold(fn_info(e).annexb_candidates, e, emit_declare_var_global)
   }
   // §16.1.7 top-level let/const/class go to the global lexical record
-  let e = case e.top_lex {
+  let e = case e.scope_tree.top_lex {
     LocalLexical -> e
     GlobalLexical ->
       list.fold(ast_util.lexically_declared_names(stmts), e, fn(e, lex) {
@@ -843,11 +837,9 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
     strict: False,
     is_async: False,
     is_arrow: False,
-    lexical_refs: lexical.no_lexical_refs,
     references_arguments: False,
     arguments_escape: False,
     code_kind: lexical.ScriptCode,
-    top_lex: tree.top_lex,
     scope_tree: tree,
     fn_scope: fn_id,
     current_scope: fn_id,
@@ -870,7 +862,7 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
 
 // fn_scope check required: child emitters inherit top_lex
 fn at_global_lex(e: Emitter) -> Bool {
-  e.top_lex == GlobalLexical
+  e.scope_tree.top_lex == GlobalLexical
   && e.fn_scope == root_scope_id
   && !e.in_block
   && e.current_scope == e.fn_scope
@@ -1020,7 +1012,7 @@ fn emit_binding_prologue(e: Emitter, scope_id: ScopeId) -> Emitter {
     VarBinding -> emit_store_const(e, b.slot, mk_undefined())
     LetBinding | ConstBinding | FnNameBinding ->
       emit_store_const(e, b.slot, mk_tdz())
-    ParamBinding | CatchBinding | CaptureBinding -> e
+    ParamBinding | CaptureBinding -> e
   }
   case b.kind, b.boxed {
     CaptureBinding, _ -> e
@@ -1109,8 +1101,6 @@ fn annexb_find_target(
             Ok(scope.Binding(kind: LetBinding, ..))
             | Ok(scope.Binding(kind: ConstBinding, ..))
             | Ok(scope.Binding(kind: FnNameBinding, ..)) -> AnnexBBlocked
-            Ok(scope.Binding(kind: CatchBinding, ..)) ->
-              annexb_find_target(e, scope_parent_in_fn(e, id), name)
             Ok(b) -> AnnexBLocal(scope.binding_ref(b))
             Error(Nil) -> annexb_find_target(e, scope_parent_in_fn(e, id), name)
           }
@@ -1843,15 +1833,12 @@ fn rewrite_apply_arguments(
 fn add_child_function(e: Emitter, child: CompiledChild) -> #(Int, Emitter) {
   let idx = e.next_func
   // arrow refs propagate to the parent; non-arrows own their slots
-  let #(lexical_refs, references_arguments, arguments_escape) = case
-    child.is_arrow
-  {
+  let #(references_arguments, arguments_escape) = case child.is_arrow {
     True -> #(
-      lexical.refs_or(e.lexical_refs, child.lexical_refs),
       e.references_arguments || child.references_arguments,
       e.arguments_escape || child.references_arguments,
     )
-    False -> #(e.lexical_refs, e.references_arguments, e.arguments_escape)
+    False -> #(e.references_arguments, e.arguments_escape)
   }
   #(
     idx,
@@ -1859,7 +1846,6 @@ fn add_child_function(e: Emitter, child: CompiledChild) -> #(Int, Emitter) {
       ..e,
       functions: [child, ..e.functions],
       next_func: idx + 1,
-      lexical_refs:,
       references_arguments:,
       arguments_escape:,
     ),
@@ -1877,24 +1863,7 @@ fn resolve_lexical(
   |> option.map(fn(slot) { scope.SlotRef(slot:, boxed:) })
 }
 
-fn lexical_refs_with(
-  refs: lexical.LexicalRefs,
-  ref: lexical.LexicalRef,
-) -> lexical.LexicalRefs {
-  case ref {
-    lexical.ThisRef -> lexical.LexicalRefs(..refs, this: True)
-    lexical.ActiveFuncRef -> lexical.LexicalRefs(..refs, active_func: True)
-    lexical.HomeObjectRef -> lexical.LexicalRefs(..refs, home_object: True)
-    lexical.NewTargetRef -> lexical.LexicalRefs(..refs, new_target: True)
-  }
-}
-
-fn mark_lexical_ref(e: Emitter, ref: lexical.LexicalRef) -> Emitter {
-  Emitter(..e, lexical_refs: lexical_refs_with(e.lexical_refs, ref))
-}
-
 fn emit_lexical_get(e: Emitter, ref: lexical.LexicalRef) -> Emitter {
-  let e = mark_lexical_ref(e, ref)
   case resolve_lexical(e, ref) {
     Some(slot) -> emit_slot_get(e, slot)
     None -> push_const(e, mk_undefined())
@@ -1907,7 +1876,6 @@ fn emit_this_get(e: Emitter) -> Emitter {
 
 // §10.2.4 writing an initialized this is a ReferenceError
 fn emit_this_bind(e: Emitter) -> Emitter {
-  let e = mark_lexical_ref(e, lexical.ThisRef)
   case resolve_lexical(e, lexical.ThisRef) {
     Some(scope.SlotRef(slot:, boxed: True)) ->
       emit_op(e, opcode.PutBoxedCheckInit(slot))
@@ -2207,7 +2175,7 @@ fn emit_catch_clause(
   case param {
     Some(pattern) -> {
       use e <- in_child_scope(e, in_block: e.in_block)
-      use e <- result.try(emit_destructuring_bind(e, pattern, CatchBinding))
+      use e <- result.try(emit_destructuring_bind(e, pattern, ParamBinding))
       emit_body(e)
     }
     None -> emit_body(emit_op(e, opcode.Pop))
@@ -2555,7 +2523,6 @@ fn compile_function_body(
       is_async:,
       is_constructor:,
       is_class_constructor: False,
-      lexical_refs: e.lexical_refs,
       references_arguments: e.references_arguments,
       code_kind:,
     )
@@ -3362,13 +3329,7 @@ fn emit_delete(e: Emitter, arg: ast.Expression) -> Result(Emitter, EmitError) {
           result.map(emit_expr(e, key), emit_op(_, opcode.Pop))
         ast.Dot(..) -> Ok(e)
       })
-      emit_op(
-        e,
-        opcode.ThrowError(
-          error_kind.ReferenceError,
-          "Unsupported reference to 'super'",
-        ),
-      )
+      emit_op(e, opcode.ThrowReferenceError("Unsupported reference to 'super'"))
     }
     ast.MemberExpression(_, obj, ast.Dot(name: prop, ..)) -> {
       use e <- result.map(emit_expr(e, obj))
@@ -3397,7 +3358,7 @@ fn emit_call_then_reference_error(
   use e <- result.map(emit_expr(e, call))
   e
   |> emit_op(opcode.Pop)
-  |> emit_op(opcode.ThrowError(error_kind.ReferenceError, message))
+  |> emit_op(opcode.ThrowReferenceError(message))
 }
 
 // argument arrives with parens already unwrapped
@@ -3701,14 +3662,11 @@ fn emit_yield(e: Emitter, is_delegate is_delegate: Bool) -> Emitter {
       let e = emit_op(e, opcode.IteratorRecord)
       let e = push_const(e, mk_undefined())
       let #(next_label, e) = fresh_label(e)
-      // the async-gen driver resumes at after_label when a forwarded throw finishes
-      let #(after_label, e) = fresh_label(e)
       e
       |> emit_ir(IrLabel(next_label))
-      |> emit_ir(IrAsyncYieldStarNext(after_label))
+      |> emit_op(opcode.AsyncYieldStarNext)
       |> emit_op(opcode.Await)
       |> emit_ir(IrAsyncYieldStarResume(next_label))
-      |> emit_ir(IrLabel(after_label))
     }
   }
 }
@@ -4477,19 +4435,12 @@ fn emit_destructuring_bind(
       let e = case binding_kind {
         LetBinding -> declare_lex(e, name, is_const: False)
         ConstBinding -> declare_lex(e, name, is_const: True)
-        ParamBinding
-        | CatchBinding
-        | VarBinding
-        | CaptureBinding
-        | FnNameBinding -> e
+        ParamBinding | VarBinding | CaptureBinding | FnNameBinding -> e
       }
       case binding_kind {
         LetBinding | ConstBinding -> Ok(init_lex(e, name))
-        VarBinding
-        | ParamBinding
-        | CatchBinding
-        | CaptureBinding
-        | FnNameBinding -> Ok(emit_var_put(e, name))
+        VarBinding | ParamBinding | CaptureBinding | FnNameBinding ->
+          Ok(emit_var_put(e, name))
       }
     }
 

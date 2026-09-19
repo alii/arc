@@ -302,7 +302,7 @@ fn global_is_finite(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 }
 
 // whole uris keep the reserved set ;/?:@&=+$,# as is
-pub type UriKind {
+type UriKind {
   WholeUri
   UriComponent
 }
@@ -332,7 +332,7 @@ fn uri_decode_dispatch(
   }
 }
 
-pub fn uri_encode(text: String, kind: UriKind) -> String {
+fn uri_encode(text: String, kind: UriKind) -> String {
   string.to_utf_codepoints(text)
   |> list.map(fn(cp) {
     let c = string.utf_codepoint_to_int(cp)
@@ -390,7 +390,7 @@ fn percent_encode_bytes(bytes: BitArray, acc: String) -> String {
   }
 }
 
-pub fn uri_decode(text: String, kind: UriKind) -> Result(String, Int) {
+fn uri_decode(text: String, kind: UriKind) -> Result(String, Int) {
   uri_decode_loop(<<text:utf8>>, kind, 0, "")
 }
 
@@ -531,7 +531,7 @@ fn is_uri_reserved_byte(c: Int) -> Bool {
   || c == 35
 }
 
-pub fn js_escape(input: String) -> String {
+fn js_escape(input: String) -> String {
   string.to_utf_codepoints(input)
   |> list.map(fn(cp) {
     let code = string.utf_codepoint_to_int(cp)
@@ -569,7 +569,7 @@ fn escape_code_point(code: Int) -> String {
   }
 }
 
-pub fn js_unescape(input: String) -> String {
+fn js_unescape(input: String) -> String {
   string.to_utf_codepoints(input)
   |> list.map(string.utf_codepoint_to_int)
   |> js_unescape_loop([])

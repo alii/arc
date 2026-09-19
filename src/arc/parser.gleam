@@ -363,7 +363,7 @@ fn init_parser(
       export_local_refs: [],
       import_bindings: set.new(),
       last_expr_name: None,
-      scopes: scope_builder.init(code_kind, strict: mode == Module),
+      scopes: scope_builder.init(code_kind),
     )),
   )
 }
@@ -413,7 +413,7 @@ pub fn parse_direct_eval(
       ..p,
       ctx: GrammarContext(
         ..p.ctx,
-        strict: p.ctx.strict || strict,
+        strict:,
         allow_new_target:,
         allow_super_property:,
         allow_super_call:,
@@ -1164,12 +1164,7 @@ fn register_scope_binding(
           || scope_builder.var_conflicts_module_fn(p.scopes, name),
         Error(IdentifierAlreadyDeclared(pos_of(p), name)),
       )
-      Ok(
-        Parser(
-          ..p,
-          scopes: scope_builder.declare_var(p.scopes, name, synthetic: False),
-        ),
-      )
+      Ok(Parser(..p, scopes: scope_builder.declare_var(p.scopes, name)))
     }
     NotDeclaring -> Ok(p)
   }
@@ -1208,12 +1203,7 @@ fn register_function_name(
           || scope_builder.current_has_kind(p.scopes, name, scope.ConstBinding),
         Error(IdentifierAlreadyDeclared(name_pos, name)),
       )
-      Ok(
-        Parser(
-          ..p,
-          scopes: scope_builder.declare_var(p.scopes, name, synthetic: False),
-        ),
-      )
+      Ok(Parser(..p, scopes: scope_builder.declare_var(p.scopes, name)))
     }
   }
 }

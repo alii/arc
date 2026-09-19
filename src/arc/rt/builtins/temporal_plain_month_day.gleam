@@ -28,12 +28,11 @@ import arc/rt/builtins/temporal_options.{
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type JsVal, type NativeToken, type PlainMonthDayMethod,
-  type TemporalMonthDayGetter, type TemporalProtos, type TemporalStaticName,
-  CompareStatic, FromStatic, KHandle, KStr, MonthDayCalendarId, MonthDayDay,
-  MonthDayMonthCode, PlainMonthDayEquals, PlainMonthDayToJson,
-  PlainMonthDayToLocaleString, PlainMonthDayToPlainDate, PlainMonthDayToString,
-  PlainMonthDayValueOf, PlainMonthDayWith, SObject, TemporalN,
-  TemporalPlainMonthDayCtor, TemporalPlainMonthDayGetter,
+  type TemporalMonthDayGetter, type TemporalProtos, KHandle, KStr,
+  MonthDayCalendarId, MonthDayDay, MonthDayMonthCode, PlainMonthDayEquals,
+  PlainMonthDayToJson, PlainMonthDayToLocaleString, PlainMonthDayToPlainDate,
+  PlainMonthDayToString, PlainMonthDayValueOf, PlainMonthDayWith, SObject,
+  TemporalN, TemporalPlainMonthDayCtor, TemporalPlainMonthDayGetter,
   TemporalPlainMonthDayMethod, TemporalPlainMonthDayStatic, classify, mk_bool,
   mk_int, mk_string, mk_undefined,
 }
@@ -60,7 +59,7 @@ pub fn ctor_token(protos: TemporalProtos) -> NativeToken {
 }
 
 pub fn statics(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
-  [#("from", TemporalN(TemporalPlainMonthDayStatic(FromStatic, protos)), 1)]
+  [#("from", TemporalN(TemporalPlainMonthDayStatic(protos)), 1)]
 }
 
 pub fn getters() -> List(#(String, NativeToken)) {
@@ -79,7 +78,7 @@ pub fn methods(protos: TemporalProtos) -> List(#(String, NativeToken, Int)) {
   })
 }
 
-pub fn getter_name(g: TemporalMonthDayGetter) -> String {
+fn getter_name(g: TemporalMonthDayGetter) -> String {
   case g {
     MonthDayCalendarId -> "calendarId"
     MonthDayMonthCode -> "monthCode"
@@ -87,7 +86,7 @@ pub fn getter_name(g: TemporalMonthDayGetter) -> String {
   }
 }
 
-pub fn method_name(m: PlainMonthDayMethod) -> String {
+fn method_name(m: PlainMonthDayMethod) -> String {
   case m {
     PlainMonthDayWith -> "with"
     PlainMonthDayEquals -> "equals"
@@ -116,27 +115,15 @@ pub fn ctor(
 
 pub fn static(
   st: Agent,
-  name: TemporalStaticName,
   protos: TemporalProtos,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  case name {
-    FromStatic -> {
-      let #(IsoDateSlots(IsoDate(ry, m, d), cal), st) =
-        to_temporal_month_day(
-          st,
-          helpers.arg_at(args, 0),
-          helpers.arg_at(args, 1),
-        )
-      make_month_day_cal(st, protos, m, d, ry, cal)
-    }
-    // unreachable, plainmonthday has no compare
-    CompareStatic ->
-      rt_val.throw_type_error(st, "Temporal.PlainMonthDay has no compare")
-  }
+  let #(IsoDateSlots(IsoDate(ry, m, d), cal), st) =
+    to_temporal_month_day(st, helpers.arg_at(args, 0), helpers.arg_at(args, 1))
+  make_month_day_cal(st, protos, m, d, ry, cal)
 }
 
-pub fn to_temporal_month_day(
+fn to_temporal_month_day(
   st: Agent,
   item: JsVal,
   options: JsVal,
@@ -180,7 +167,7 @@ type MonthDayAnchor {
   AnchorFromCode(temporal_calendar.MonthCode)
 }
 
-pub fn resolve_calendar_month_day(
+fn resolve_calendar_month_day(
   cal: temporal_calendar.Calendar,
   f: DateFields,
   overflow: Overflow,

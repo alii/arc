@@ -362,10 +362,6 @@ pub fn to_string(error: ParseError) -> String {
   }
 }
 
-pub fn pos(error: ParseError) -> Int {
-  error.pos
-}
-
 pub fn lex_error(err: token.LexError) -> ParseError {
   LexError(err.pos, err)
 }

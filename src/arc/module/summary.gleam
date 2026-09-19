@@ -58,35 +58,31 @@ pub fn binding_local_names(
   })
 }
 
-type Analysis {
-  Analysis(
-    imports: List(#(Raw, List(ImportBinding))),
-    exports: List(ExportEntry),
-    requested: List(ModuleRequest),
-    has_source_phase: Bool,
-  )
-}
-
 pub fn analyze(items: List(ast.ModuleItem)) -> ModuleSummary {
   let empty =
-    Analysis(imports: [], exports: [], requested: [], has_source_phase: False)
-  let analysis = list.fold(items, empty, analyze_item)
+    ModuleSummary(
+      imports: [],
+      exports: [],
+      requested: [],
+      has_source_phase: False,
+    )
+  let acc = list.fold(items, empty, analyze_item)
   ModuleSummary(
-    imports: list.reverse(analysis.imports),
-    exports: list.reverse(analysis.exports),
-    requested: merge_requests(list.reverse(analysis.requested)),
-    has_source_phase: analysis.has_source_phase,
+    imports: list.reverse(acc.imports),
+    exports: list.reverse(acc.exports),
+    requested: merge_requests(list.reverse(acc.requested)),
+    has_source_phase: acc.has_source_phase,
   )
 }
 
-fn analyze_item(acc: Analysis, item: ast.ModuleItem) -> Analysis {
+fn analyze_item(acc: ModuleSummary, item: ast.ModuleItem) -> ModuleSummary {
   case item {
     ast.ImportDeclaration(specifiers:, source:, phase:, ..) -> {
       let request_phase = case phase {
         ast.PhaseDefer -> Deferred
         ast.PhaseEvaluation | ast.PhaseSource -> Evaluation
       }
-      Analysis(
+      ModuleSummary(
         imports: [
           #(specifier.raw(source), declaration_bindings(specifiers, phase)),
           ..acc.imports
@@ -129,7 +125,7 @@ fn analyze_item(acc: Analysis, item: ast.ModuleItem) -> Analysis {
             Error(Nil) -> requested
           }
         })
-      Analysis(..acc, exports:, requested:)
+      ModuleSummary(..acc, exports:, requested:)
     }
   }
 }

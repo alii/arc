@@ -34,7 +34,7 @@ fn is_digits(s: String) -> Bool {
   s != "" && all_codepoints(s, digits.is_decimal_code)
 }
 
-pub fn is_alnum(s: String) -> Bool {
+fn is_alnum(s: String) -> Bool {
   s != "" && all_codepoints(s, digits.is_ascii_alnum_code)
 }
 
@@ -127,8 +127,8 @@ fn parse_language(parts: List(String)) -> Result(LocaleId, Nil) {
       case is_language(lang) {
         False -> Error(Nil)
         True -> {
-          use #(script, rest) <- result.try(parse_script(rest))
-          use #(region, rest) <- result.try(parse_region(rest))
+          let #(script, rest) = parse_script(rest)
+          let #(region, rest) = parse_region(rest)
           use #(variants, rest) <- result.try(parse_variants(rest, []))
           use #(extensions, private_use) <- result.try(
             parse_extensions(rest, [], []),
@@ -147,29 +147,25 @@ fn parse_language(parts: List(String)) -> Result(LocaleId, Nil) {
   }
 }
 
-fn parse_script(
-  parts: List(String),
-) -> Result(#(Option(String), List(String)), Nil) {
+fn parse_script(parts: List(String)) -> #(Option(String), List(String)) {
   case parts {
     [p, ..rest] ->
       case is_script(p) {
-        True -> Ok(#(Some(p), rest))
-        False -> Ok(#(None, parts))
+        True -> #(Some(p), rest)
+        False -> #(None, parts)
       }
-    [] -> Ok(#(None, []))
+    [] -> #(None, [])
   }
 }
 
-fn parse_region(
-  parts: List(String),
-) -> Result(#(Option(String), List(String)), Nil) {
+fn parse_region(parts: List(String)) -> #(Option(String), List(String)) {
   case parts {
     [p, ..rest] ->
       case is_region(p) {
-        True -> Ok(#(Some(p), rest))
-        False -> Ok(#(None, parts))
+        True -> #(Some(p), rest)
+        False -> #(None, parts)
       }
-    [] -> Ok(#(None, []))
+    [] -> #(None, [])
   }
 }
 
@@ -1021,7 +1017,7 @@ pub fn canonicalize_tag(tag: String) -> Result(String, Nil) {
   to_string(canonicalize(lid))
 }
 
-pub fn available_locales() -> List(String) {
+fn available_locales() -> List(String) {
   [
     "ar", "bg", "cs", "da", "de", "de-AT", "de-CH", "el", "en", "en-AU", "en-CA",
     "en-GB", "en-IN", "en-NZ", "en-US", "es", "es-419", "es-ES", "es-MX", "fa",

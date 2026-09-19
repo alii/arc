@@ -17,7 +17,7 @@ pub fn number_const(n: ast.LiteralNumber) -> JsVal {
   mk_number(literal_num(n))
 }
 
-pub fn literal_num(n: ast.LiteralNumber) -> JsNum {
+fn literal_num(n: ast.LiteralNumber) -> JsNum {
   case n {
     ast.InfiniteNumber -> JPosInf
     ast.FiniteNumber(f) -> {

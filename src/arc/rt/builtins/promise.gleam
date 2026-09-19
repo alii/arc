@@ -23,8 +23,8 @@ import arc/rt/types.{
   PromiseCatch, PromiseConstructor, PromiseFinally, PromiseFinallyFn,
   PromiseFinallyThrower, PromiseFinallyValueThunk, PromiseKeyedElement, PromiseN,
   PromiseRaceStatic, PromiseRejectStatic, PromiseResolveStatic, PromiseThen,
-  ReturnThis, SObject, StringKey, SymbolKey, classify, mk_bool, mk_int,
-  mk_object, mk_string, mk_undefined,
+  SObject, StringKey, SymbolKey, classify, mk_bool, mk_int, mk_object, mk_string,
+  mk_undefined,
 }
 import arc/rt/val.{is_callable} as rt_val
 import gleam/dict
@@ -66,7 +66,7 @@ pub fn init(
       static_methods,
     )
   let st = common.add_string_tag(st, bt.prototype, "Promise")
-  let st = common.add_species_accessor(st, fn_proto, bt.constructor, ReturnThis)
+  let st = common.add_species_accessor(st, fn_proto, bt.constructor)
   #(bt, st)
 }
 
@@ -202,7 +202,7 @@ pub fn dispatch_construct(
 
 fn then(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(on_fulfilled, on_rejected) = two_args_or_undefined(args)
-  let promise_h = require_promise(st, this, "Promise.prototype.then")
+  let promise_h = require_promise(st, this)
   let #(c, st) = species_constructor(st, this)
   case c == mk_object(st.realm.promise.constructor) {
     True -> {
@@ -425,7 +425,7 @@ fn perform_combinator(
       )
     AllCombinator -> {
       let #(values_h, st) = alloc_empty_array(st, realm.array.prototype)
-      let #(remaining_h, st) = alloc_counter(st, 1)
+      let #(remaining_h, st) = alloc_counter(st)
       combinator_loop(
         st,
         rec,
@@ -456,7 +456,7 @@ fn perform_combinator(
     }
     AllSettledCombinator -> {
       let #(values_h, st) = alloc_empty_array(st, realm.array.prototype)
-      let #(remaining_h, st) = alloc_counter(st, 1)
+      let #(remaining_h, st) = alloc_counter(st)
       combinator_loop(
         st,
         rec,
@@ -501,7 +501,7 @@ fn perform_combinator(
     }
     AnyCombinator -> {
       let #(errors_h, st) = alloc_empty_array(st, realm.array.prototype)
-      let #(remaining_h, st) = alloc_counter(st, 1)
+      let #(remaining_h, st) = alloc_counter(st)
       combinator_loop(
         st,
         rec,
@@ -650,7 +650,7 @@ fn perform_all_keyed(
       let realm = st.realm
       let #(keys_h, st) = alloc_empty_array(st, realm.array.prototype)
       let #(values_h, st) = alloc_empty_array(st, realm.array.prototype)
-      let #(remaining_h, st) = alloc_counter(st, 1)
+      let #(remaining_h, st) = alloc_counter(st)
       let loop =
         KeyedLoop(
           c:,
@@ -1042,8 +1042,8 @@ fn species_constructor_generic(
   }
 }
 
-fn alloc_counter(st: Agent, n: Int) -> #(Handle, Agent) {
-  rt_store.box_new(st, mk_int(n))
+fn alloc_counter(st: Agent) -> #(Handle, Agent) {
+  rt_store.box_new(st, mk_int(1))
 }
 
 fn adjust_counter(st: Agent, h: Handle, delta: Int) -> #(Int, Agent) {
@@ -1126,9 +1126,13 @@ fn make_aggregate_error(st: Agent, errors_h: Handle) -> #(JsVal, Agent) {
   #(mk_object(h), st)
 }
 
-fn require_promise(st: Agent, this: JsVal, name: String) -> Handle {
+fn require_promise(st: Agent, this: JsVal) -> Handle {
   case rt_async.as_promise(st, this) {
     Some(h) -> h
-    None -> rt_val.throw_type_error(st, name <> " called on non-promise")
+    None ->
+      rt_val.throw_type_error(
+        st,
+        "Promise.prototype.then called on non-promise",
+      )
   }
 }

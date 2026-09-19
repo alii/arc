@@ -36,7 +36,7 @@ pub type Expanded {
   NamedGroup(name: String)
 }
 
-pub fn expand_plain(segment: PlainSegment, ctx: MatchContext) -> String {
+fn expand_plain(segment: PlainSegment, ctx: MatchContext) -> String {
   case segment {
     LiteralSegment(text) -> text
     MatchedSegment -> ctx.matched

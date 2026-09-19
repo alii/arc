@@ -19,6 +19,13 @@ pub fn host(
   let_(e, ir.CallHost("js", op, args), k)
 }
 
+pub fn with_done(
+  e: Emitter,
+  f: fn(NextWith(ir.Expr), Emitter) -> EmitResult,
+) -> EmitResult {
+  f(fn(tree, ef) { Ok(#(tree, ef)) }, e)
+}
+
 pub fn host_unit(
   e: Emitter,
   op: String,

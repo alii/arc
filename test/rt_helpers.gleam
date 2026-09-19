@@ -1,6 +1,8 @@
 import arc/bytecode/key.{Named}
 import arc/host_hooks.{type HostHooks, HostHooks}
 import arc/internal/unsafe
+import arc/interp/safepoint
+import arc/rt/async as rt_async
 import arc/rt/builtins as rt_builtins
 import arc/rt/call as rt_call
 import arc/rt/lang as rt_lang
@@ -85,4 +87,8 @@ pub fn func(
 ) -> #(JsVal, Agent) {
   let #(h, st) = rt_call.new_builtin_function(st, "f", 0, body)
   #(types.mk_object(h), st)
+}
+
+pub fn end_turn(agent: Agent, held: List(JsVal)) -> Agent {
+  safepoint.finish_turn(agent, held, rt_async.drain)
 }

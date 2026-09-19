@@ -195,7 +195,7 @@ fn construct(
   let #(proto_h, st) =
     rt_call.get_prototype_from_constructor(st, new_target, fn(_realm) { proto })
   let #(capability, st) = new_capability(st)
-  alloc_stack(st, proto_h, async:, disposable_state: Pending(capability:))
+  alloc_stack(st, proto_h, async:, capability:)
 }
 
 fn new_capability(st: Agent) -> #(Handle, Agent) {
@@ -222,9 +222,9 @@ fn alloc_stack(
   st: Agent,
   proto: Handle,
   async async: Bool,
-  disposable_state disposable_state: DisposableState,
+  capability capability: Handle,
 ) -> #(Handle, Agent) {
-  let kind = DisposableStackObj(async:, state: disposable_state)
+  let kind = DisposableStackObj(async:, state: Pending(capability:))
   realm_ops.alloc_object(st, kind, proto)
 }
 
@@ -523,8 +523,7 @@ fn move(
 ) -> #(JsVal, Agent) {
   use h, disposable_state <- require_stack(st, this, async, "move")
   use capability <- require_pending(st, disposable_state, async:)
-  let #(new_h, st) =
-    alloc_stack(st, proto, async:, disposable_state: Pending(capability:))
+  let #(new_h, st) = alloc_stack(st, proto, async:, capability:)
   let st = mark_disposed(st, h)
   #(mk_object(new_h), st)
 }

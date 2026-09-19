@@ -1,6 +1,6 @@
 // profiling harness, not a test
 
-import aot_bench.{adder_js, obj_js, sum_js}
+import aot_bench.{adder_js, obj_js}
 import aot_harness
 import arc/rt/types.{type Agent}
 import arc_aot/emit
@@ -59,7 +59,7 @@ fn repeat(times: Int, f: fn() -> a) -> Nil {
   }
 }
 
-fn profile(label: String, source: String, runs: Int, iters: Int) -> Nil {
+pub fn profile(label: String, source: String, runs: Int, iters: Int) -> Nil {
   let name = "arc_prof_" <> label
   trace_reset()
   let #(mod, st) = compile_and_load(source, name)
@@ -308,14 +308,11 @@ pub fn profile_file(label: String, path: String, runs: Int) -> Nil {
     #(rt("obj"), "get_prop_untyped_key", 3),
     #(rt("obj"), "set_prop_untyped_key", 4),
     #(rt("call"), "call", 4),
-    #(rt("call"), "direct_callee", 3),
     #(rt("call"), "construct", 4),
     #(rt("ops"), "instance_of", 3),
-    #(ffi("rt_obj_ffi"), "get_prop_own_data", 3),
     #(rt("lang"), "global_get", 2),
     #(ffi("rt_obj_ffi"), "global_peek", 2),
     #(ffi("rt_obj_ffi"), "get_elem", 3),
-    #(ffi("rt_obj_ffi"), "elem_at", 2),
     #(ffi("rt_obj_ffi"), "set_elem", 4),
     #(ffi("rt_obj_ffi"), "elem_write", 3),
     #(rt("val"), "to_property_key", 2),
@@ -367,7 +364,7 @@ fn micro(label: String, which: String, st: Agent, arg: arg, n: Int) {
   )
 }
 
-fn microbench() {
+pub fn microbench() {
   io.println("")
   io.println("══════ isolated untraced microbench (1M calls each) ══════")
   trace_reset()
@@ -379,13 +376,6 @@ fn microbench() {
     aot_harness.to_dynamic(#(atom.create("handle"), adder_store.next_id - 1))
   let x_h =
     aot_harness.to_dynamic(#(atom.create("handle"), adder_store.next_id - 3))
-  micro(
-    "direct_callee (via Gleam wrapper)",
-    "direct_callee",
-    st_adder,
-    add5_h,
-    1_000_000,
-  )
   micro(
     "direct_callee (FFI direct)",
     "direct_callee_ffi",
@@ -422,13 +412,6 @@ fn microbench() {
   )
   let kb = aot_harness.to_dynamic(<<"x":utf8>>)
   micro(
-    "get_prop_own_data (FFI)",
-    "get_prop_own_data",
-    st_obj,
-    aot_harness.to_dynamic(#(o_h, kb)),
-    1_000_000,
-  )
-  micro(
     "set_prop_own_data (FFI)",
     "set_prop_own_data",
     st_obj,
@@ -444,7 +427,6 @@ const obj_prop_us_target = 11_800
 const richards_baseline = [
   #("arc_rt_obj_ffi", "global_peek", 2, 65),
   #("arc@rt@lang", "global_get", 2, 0),
-  #("arc_rt_obj_ffi", "get_prop_own_data", 3, 106),
   #("arc_rt_obj_ffi", "set_prop_own_data", 4, 143),
   #("arc_rt_obj_ic_ffi", "get_named_ic", 4, 0),
   #("arc_rt_obj_ic_ffi", "set_named_ic", 6, 0),
@@ -590,7 +572,6 @@ pub fn bench_verify() -> Bool {
       let n = fn(m, f, a) { count_of(atom.create(m), atom.create(f), a) }
       let g_after = n("arc_rt_obj_ffi", "global_peek", 2)
       let i_after = n("arc_rt_obj_ic_ffi", "get_named_ic", 4)
-      let h_own = n("arc_rt_obj_ffi", "get_prop_own_data", 3)
       io.println(
         "    G slotted-globals: global_peek "
         <> int.to_string(g_after)
@@ -607,15 +588,6 @@ pub fn bench_verify() -> Bool {
         <> case i_after > 0 {
           True -> "FIRED"
           False -> "NOT FIRED (expect >0; reads still via own_data)"
-        },
-      )
-      io.println(
-        "    H shaped-objects:  get_prop_own_data "
-        <> int.to_string(h_own)
-        <> "/run — "
-        <> case h_own < 50 {
-          True -> "reads shifted (H/I)"
-          False -> "still map-backed (baseline 106; H not firing)"
         },
       )
     }

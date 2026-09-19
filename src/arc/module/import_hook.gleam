@@ -26,7 +26,7 @@ pub fn install(
   load: LoadFn,
 ) -> Agent {
   let hook =
-    HostFnEntry(name: "%DynamicImportHook%", call: fn(st, args, _this, _nt) {
+    HostFnEntry(call: fn(st, args, _this, _nt) {
       import_module(st, args, referrer, resolve, load)
     })
   Agent(..st, import_hook: option.Some(hook))
@@ -88,7 +88,7 @@ fn eager_import_module(
       st,
     )
     // linked-only (import.defer) namespaces still need evaluating
-    registry.LinkedOnly(..) | registry.Absent(..) ->
+    registry.LinkedOnly(_) | registry.Absent(_) ->
       evaluate_module(st, resolved, resolve, load)
   }
 }
@@ -143,30 +143,19 @@ fn defer_import_module(
     registry.Failed(error:) -> #(Error(error), st)
     registry.Pending(deferred: option.Some(deferred_ns), ..)
     | registry.EvaluationStarted(deferred: option.Some(deferred_ns), ..)
-    | registry.LinkedOnly(deferred: option.Some(deferred_ns), ..)
+    | registry.LinkedOnly(deferred: option.Some(deferred_ns))
     | registry.Absent(deferred: option.Some(deferred_ns)) ->
       settle_defer_import(st, fulfill, mk_object(deferred_ns))
     registry.Pending(deferred: option.None, ..)
     | registry.EvaluationStarted(deferred: option.None, ..)
-    | registry.LinkedOnly(deferred: option.None, ..)
+    | registry.LinkedOnly(deferred: option.None)
     | registry.Absent(deferred: option.None) -> {
       use source <- with_loaded_source(st, resolved, load)
       case module.compile_bundle(resolved, source, resolve, load) {
         Error(err) -> compile_bundle_rejection(st, err)
         Ok(bundle) ->
           case link_bundle_with_registry(st, bundle) {
-            #(Error(module.EvaluationError(value: thrown)), st) -> #(
-              Error(thrown),
-              st,
-            )
-            #(Error(other), st) ->
-              type_error(
-                st,
-                "Failed to link module '"
-                  <> resolved
-                  <> "': "
-                  <> module.error_message(st, other),
-              )
+            #(Error(thrown), st) -> #(Error(thrown), st)
             #(Ok(linked_bundle), st) ->
               case
                 module.get_or_create_deferred_namespace(
@@ -311,7 +300,7 @@ fn call_import_settle_fn(st: Agent, settle_fn: JsVal, arg: JsVal) -> Agent {
 fn link_bundle_with_registry(
   st: Agent,
   bundle: module.ModuleBundle,
-) -> #(Result(module.LinkedBundle, module.ModuleError), Agent) {
+) -> #(Result(module.LinkedBundle, JsVal), Agent) {
   let specs = dict.keys(bundle.modules)
   let preexisting = read_registered(st, specs, registry.read_namespace)
   let preexisting_deferred =
@@ -426,7 +415,7 @@ pub fn evaluate_bundle_with_registry(
   let specs = dict.keys(bundle.modules)
   let preexisting = read_registered(st, specs, registry.read_namespace)
   case link_bundle_with_registry(st, bundle) {
-    #(Error(err), st) -> #(Error(err), st)
+    #(Error(err), st) -> #(Error(module.EvaluationError(err)), st)
     #(Ok(linked_bundle), st) -> {
       // linked-only modules still need their body run
       let already_instantiated =

@@ -55,12 +55,6 @@ pub type EnvTuple
 @external(erlang, "erlang", "list_to_tuple")
 pub fn env_from_list(values: List(JsVal)) -> EnvTuple
 
-@external(erlang, "erlang", "tuple_to_list")
-pub fn env_to_list(env: EnvTuple) -> List(JsVal)
-
-@external(erlang, "erlang", "tuple_size")
-pub fn env_size(env: EnvTuple) -> Int
-
 pub type TryFrame {
   TryFrame(catch_target: Int, stack_depth: Int, kind: TryKind(Pc))
 }

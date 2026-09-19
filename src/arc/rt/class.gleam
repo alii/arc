@@ -5,9 +5,8 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, type MethodInstallKind, type ObjectKey,
   type Property, AccessorProperty, BytecodeFn, CompiledFn, DataProperty,
-  InstallGetter, InstallMethod, InstallSetter, InstallStatic,
-  InstallStaticGetter, InstallStaticSetter, KHandle, KNull, KStr, KTdz, SObject,
-  StringKey, SymbolKey, classify, mk_object, mk_string, mk_undefined,
+  InstallGetter, InstallMethod, InstallSetter, KHandle, KNull, KStr, KTdz,
+  SObject, StringKey, SymbolKey, classify, mk_object, mk_string,
 }
 import arc/rt/val as rt_val
 import gleam/dict
@@ -162,14 +161,14 @@ pub fn define_method(
   let st = make_method(st, fn_h, target)
   // only rename when compiled anonymous (computed key)
   let prefix = case kind {
-    InstallGetter | InstallStaticGetter -> "get "
-    InstallSetter | InstallStaticSetter -> "set "
-    InstallMethod | InstallStatic -> ""
+    InstallGetter -> "get "
+    InstallSetter -> "set "
+    InstallMethod -> ""
   }
   let st = rt_obj.name_if_anonymous(st, fn_h, prefix <> key_fn_name(key))
   let fn_v = mk_object(fn_h)
   case kind {
-    InstallMethod | InstallStatic -> {
+    InstallMethod -> {
       let #(_, st) =
         rt_obj.define_own_data(
           st,
@@ -182,7 +181,7 @@ pub fn define_method(
         )
       st
     }
-    InstallGetter | InstallStaticGetter -> {
+    InstallGetter -> {
       let #(_, st) =
         rt_obj.define_own_accessor(
           st,
@@ -191,11 +190,10 @@ pub fn define_method(
           Some(fn_v),
           None,
           enumerable,
-          configurable: True,
         )
       st
     }
-    InstallSetter | InstallStaticSetter -> {
+    InstallSetter -> {
       let #(_, st) =
         rt_obj.define_own_accessor(
           st,
@@ -204,7 +202,6 @@ pub fn define_method(
           None,
           Some(fn_v),
           enumerable,
-          configurable: True,
         )
       st
     }
@@ -247,16 +244,13 @@ pub fn private_method_add(
   let key = Private(text)
   case kind {
     // non-writable so private set rejects methods
-    InstallMethod | InstallStatic -> {
+    InstallMethod -> {
       let st = check_private_add(st, obj, text)
       write_private_data(st, obj, key, fn_v, writable: False)
     }
     // same accessor half twice is a typeerror
-    InstallGetter | InstallStaticGetter | InstallSetter | InstallStaticSetter -> {
-      let is_getter = case kind {
-        InstallGetter | InstallStaticGetter -> True
-        _ -> False
-      }
+    InstallGetter | InstallSetter -> {
+      let is_getter = kind == InstallGetter
       let existing = rt_obj.ordinary_own_property(st, obj, StringKey(key))
       let st = case existing {
         None -> check_private_add(st, obj, text)
@@ -552,13 +546,5 @@ pub fn super_call(
         st,
         "Super constructor null of derived class is not a constructor",
       )
-  }
-}
-
-pub fn fn_home_object(st: Agent, fn_h: Handle) -> JsVal {
-  case rt_store.cell_get(st, fn_h) {
-    SObject(kind: CompiledFn(home_object: Some(h), ..), ..)
-    | SObject(kind: BytecodeFn(home_object: Some(h), ..), ..) -> mk_object(h)
-    _ -> mk_undefined()
   }
 }

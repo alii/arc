@@ -20,7 +20,7 @@ import arc/time_zone
 import gleam/dict.{type Dict}
 import gleam/float
 import gleam/int
-import gleam/option.{type Option, None, Some}
+import gleam/option.{type Option, Some}
 import gleam/set.{type Set}
 
 pub type JsVal =
@@ -156,7 +156,7 @@ pub const symbol_dispose = WellKnownSymbol(SymDispose)
 
 pub const symbol_async_dispose = WellKnownSymbol(SymAsyncDispose)
 
-pub fn well_known_description(which: WellKnown) -> String {
+fn well_known_description(which: WellKnown) -> String {
   case which {
     SymToStringTag -> "Symbol.toStringTag"
     SymIterator -> "Symbol.iterator"
@@ -173,13 +173,6 @@ pub fn well_known_description(which: WellKnown) -> String {
     SymUnscopables -> "Symbol.unscopables"
     SymDispose -> "Symbol.dispose"
     SymAsyncDispose -> "Symbol.asyncDispose"
-  }
-}
-
-pub fn well_known_symbol_description(id: SymbolId) -> Option(String) {
-  case id {
-    WellKnownSymbol(which) -> Some(well_known_description(which))
-    UserSymbol(..) | RegisteredSymbol(..) -> None
   }
 }
 
@@ -373,7 +366,6 @@ pub type FnFlags {
     is_class_constructor: Bool,
     is_derived_constructor: Bool,
     is_arrow: Bool,
-    is_method: Bool,
     is_generator: Bool,
     is_async: Bool,
     is_strict: Bool,
@@ -463,9 +455,6 @@ pub type MethodInstallKind {
   InstallMethod
   InstallGetter
   InstallSetter
-  InstallStatic
-  InstallStaticGetter
-  InstallStaticSetter
 }
 
 // new tokens: prototype methods are <Type><Method>, statics end in Static
@@ -501,7 +490,6 @@ pub type NativeToken {
   ReflectN(ReflectNative)
   ConsoleN(ConsoleNative)
   GlobalN(GlobalNative)
-  ThrowTypeErrorPoison
   HostFn(id: Int)
   Test262N(Test262Native)
   DomExceptionN(DomExceptionNative)
@@ -519,7 +507,7 @@ pub type WeakRefNative {
 }
 
 pub type FinalizationRegistryNative {
-  FinalizationRegistryConstructor(proto: Handle)
+  FinalizationRegistryConstructor
   FinalizationRegistryPrototypeRegister
   FinalizationRegistryPrototypeUnregister
 }
@@ -749,7 +737,7 @@ pub type ErrorNative {
 }
 
 pub type DateNative {
-  DateConstructor(proto: Handle)
+  DateConstructor
   DateNow
   DateParse
   DateUTC
@@ -867,7 +855,7 @@ pub type RegExpNative {
 }
 
 pub type ArrayBufferNative {
-  ArrayBufferConstructor(proto: Handle)
+  ArrayBufferConstructor
   ArrayBufferIsView
   ArrayBufferGetByteLength
   ArrayBufferGetDetached
@@ -881,7 +869,7 @@ pub type ArrayBufferNative {
   ArrayBufferSliceToImmutable
   ArrayBufferTransferToImmutable
   ArrayBufferDetach262
-  SharedArrayBufferConstructor(proto: Handle)
+  SharedArrayBufferConstructor
   SharedArrayBufferGetByteLength
   SharedArrayBufferGrow
   SharedArrayBufferGetGrowable
@@ -891,7 +879,7 @@ pub type ArrayBufferNative {
 
 pub type TypedArrayNative {
   TypedArrayIntrinsicConstructor
-  TypedArrayConstructor(kind: TypedArrayKind, proto: Handle)
+  TypedArrayConstructor(kind: TypedArrayKind)
   TypedArrayFrom
   TypedArrayOf
   TypedArrayGetBuffer
@@ -938,7 +926,7 @@ pub type TypedArrayNative {
 }
 
 pub type DataViewNative {
-  DataViewConstructor(proto: Handle)
+  DataViewConstructor
   DataViewGetBuffer
   DataViewGetByteLength
   DataViewGetByteOffset
@@ -1079,7 +1067,7 @@ pub const all_typed_array_kinds = [
 ]
 
 pub type MapNative {
-  MapConstructor(proto: Handle)
+  MapConstructor
   MapGroupBy
   MapGet
   MapSet
@@ -1096,7 +1084,7 @@ pub type MapNative {
 }
 
 pub type SetNative {
-  SetConstructor(proto: Handle)
+  SetConstructor
   SetAdd
   SetHas
   SetDelete
@@ -1115,14 +1103,14 @@ pub type SetNative {
 }
 
 pub type WeakNative {
-  WeakMapConstructor(proto: Handle)
+  WeakMapConstructor
   WeakMapGet
   WeakMapSet
   WeakMapHas
   WeakMapDelete
   WeakMapGetOrInsert
   WeakMapGetOrInsertComputed
-  WeakSetConstructor(proto: Handle)
+  WeakSetConstructor
   WeakSetAdd
   WeakSetHas
   WeakSetDelete
@@ -1305,7 +1293,7 @@ pub type IntlNative {
   IntlGetCanonicalLocales
   IntlSupportedValuesOf
   IntlConstructor(service: ConstructibleService, proto: Handle)
-  IntlSupportedLocalesOf(service: IntlService)
+  IntlSupportedLocalesOf
   IntlResolvedOptions(service: IntlService)
   IntlBoundGetter(service: BoundGetterService)
   IntlBoundMethod(service: BoundGetterService, target: Handle)
@@ -1401,7 +1389,7 @@ pub type TemporalNative {
     protos: TemporalProtos,
   )
   TemporalPlainMonthDayCtor(protos: TemporalProtos)
-  TemporalPlainMonthDayStatic(name: TemporalStaticName, protos: TemporalProtos)
+  TemporalPlainMonthDayStatic(protos: TemporalProtos)
   TemporalPlainMonthDayGetter(getter: TemporalMonthDayGetter)
   TemporalPlainMonthDayMethod(
     method: PlainMonthDayMethod,
@@ -1745,12 +1733,7 @@ pub type ObjKind {
   WeakMapObj(entries: Dict(WeakKey, JsVal))
   WeakSetObj(entries: Set(WeakKey))
   DateObj(ms: JsNum)
-  RegExpObj(
-    source: String,
-    flags: String,
-    last_index: Int,
-    compiled: CompiledRegExp,
-  )
+  RegExpObj(source: String, flags: String, compiled: CompiledRegExp)
   ArrayBufferObj(storage: BufferStorage)
   TypedArrayObj(
     buffer: Handle,
@@ -1852,7 +1835,7 @@ pub type IcEntry {
 }
 
 // bare {chain, callee, kind} tuple as arc_rt_call_ic_ffi ic_fill builds it
-pub type IcCallWay =
+type IcCallWay =
   #(List(#(Int, Cell)), Handle, ObjKind)
 
 // shaped receivers key by shape id then proto id in IcCall.shaped
@@ -2198,8 +2181,6 @@ pub type AsyncWaiter {
     owner: SabOwner,
     ref: WaiterRef,
     promise: Handle,
-    resolve: JsVal,
-    reject: JsVal,
     deadline: Option(Int),
   )
 }
@@ -2212,7 +2193,6 @@ pub type HostTerm
 
 pub type HostFnEntry {
   HostFnEntry(
-    name: String,
     call: fn(Agent, List(JsVal), JsVal, JsVal) -> #(Result(JsVal, JsVal), Agent),
   )
 }

@@ -41,7 +41,7 @@ pub fn init(
       object_proto,
       fn_proto,
       wm_methods,
-      fn(proto) { WeakN(WeakMapConstructor(proto:)) },
+      fn(_) { WeakN(WeakMapConstructor) },
       "WeakMap",
       0,
       [],
@@ -59,7 +59,7 @@ pub fn init(
       object_proto,
       fn_proto,
       ws_methods,
-      fn(proto) { WeakN(WeakSetConstructor(proto:)) },
+      fn(_) { WeakN(WeakSetConstructor) },
       "WeakSet",
       0,
       [],
@@ -75,9 +75,9 @@ pub fn dispatch(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case n {
-    WeakMapConstructor(..) ->
+    WeakMapConstructor ->
       rt_val.throw_type_error(st, "Constructor WeakMap requires 'new'")
-    WeakSetConstructor(..) ->
+    WeakSetConstructor ->
       rt_val.throw_type_error(st, "Constructor WeakSet requires 'new'")
     WeakMapGet -> weak_map_get(st, this, args)
     WeakMapSet -> weak_map_set(st, this, args)
@@ -99,7 +99,7 @@ pub fn dispatch_construct(
   new_target: JsVal,
 ) -> #(Handle, Agent) {
   case n {
-    WeakMapConstructor(..) ->
+    WeakMapConstructor ->
       weak_construct(
         st,
         fn(r: Realm) { r.weak_map.prototype },
@@ -110,7 +110,7 @@ pub fn dispatch_construct(
         "set",
         iter_protocol.add_entries_from_iterable,
       )
-    WeakSetConstructor(..) ->
+    WeakSetConstructor ->
       weak_construct(
         st,
         fn(r: Realm) { r.weak_set.prototype },

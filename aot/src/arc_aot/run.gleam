@@ -39,22 +39,3 @@ pub fn main(st: Agent, module: Atom) -> #(RunResult, Agent) {
   }
   #(result, st)
 }
-
-pub fn from_beam_in(
-  st: Agent,
-  code: BitArray,
-  name: String,
-) -> #(RunResult, Agent) {
-  case load(code, name) {
-    Error(reason) -> #(Error("load failed: " <> reason), st)
-    Ok(module) -> main(st, module)
-  }
-}
-
-pub fn from_beam(
-  code: BitArray,
-  name: String,
-  hooks: HostHooks,
-) -> #(RunResult, Agent) {
-  from_beam_in(new_linked_agent(hooks), code, name)
-}

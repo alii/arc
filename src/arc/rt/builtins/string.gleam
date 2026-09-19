@@ -1,4 +1,5 @@
 import arc/bytecode/key.{Named}
+import arc/internal/utf16
 import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
@@ -33,7 +34,7 @@ import arc/rt/types.{
   StringPrototypeToWellFormed, StringPrototypeTrim, StringPrototypeTrimEnd,
   StringPrototypeTrimStart, StringPrototypeValueOf, StringRaw, classify, mk_bool,
   mk_int, mk_number, mk_object, mk_string, mk_undefined, plain_object,
-  well_known_symbol_description,
+  symbol_description,
 }
 import arc/rt/unicode_case
 import arc/rt/utf8
@@ -628,7 +629,7 @@ fn get_method(
 }
 
 fn not_a_function(symbol: SymbolId) -> String {
-  well_known_symbol_description(symbol)
+  symbol_description(symbol)
   |> option.unwrap("Symbol method")
   |> string.append(" is not a function")
 }
@@ -1055,10 +1056,10 @@ fn char_codes_to_string(codes: List(Int), acc: List(UtfCodepoint)) -> String {
   case codes {
     [] -> string.from_utf_codepoints(list.reverse(acc))
     [code, ..rest] -> {
-      let #(cp, remaining) = case is_high_surrogate(code), rest {
+      let #(cp, remaining) = case utf16.is_high(code), rest {
         True, [low, ..after] ->
-          case is_low_surrogate(low) {
-            True -> #(combine_surrogates(code, low), after)
+          case utf16.is_low(low) {
+            True -> #(utf16.combine(code, low), after)
             False -> #(code, rest)
           }
         _, _ -> #(code, rest)
@@ -1248,18 +1249,6 @@ fn concat_within_limit(st: Agent, parts_rev: List(String)) -> #(JsVal, Agent) {
     True -> rt_val.throw_range_error(st, "Invalid string length")
     False -> #(mk_string(string.concat(parts)), st)
   }
-}
-
-fn is_high_surrogate(cu: Int) -> Bool {
-  cu >= 0xD800 && cu <= 0xDBFF
-}
-
-fn is_low_surrogate(cu: Int) -> Bool {
-  cu >= 0xDC00 && cu <= 0xDFFF
-}
-
-fn combine_surrogates(high: Int, low: Int) -> Int {
-  0x10000 + { high - 0xD800 } * 0x400 + { low - 0xDC00 }
 }
 
 fn modulo_uint16(n: Int) -> Int {

@@ -7,6 +7,7 @@ import arc/parser/ast
 import arc/rt/async as rt_async
 import arc_aot/emit/anf
 import arc_aot/emit/class
+import arc_aot/emit/cps
 import arc_aot/emit/expr
 import arc_aot/emit/func
 import arc_aot/emit/state.{
@@ -81,7 +82,6 @@ type SplitKind {
   AwaitSplit
   YieldSplit
   YieldStarSplit
-  ForAwaitSplit
 }
 
 type TryEntry {
@@ -144,7 +144,6 @@ type ResumeWith {
   ResumeBind(pat: ast.Pattern, mode: state.BindMode)
   ResumeReturn
   ResumeThrow
-  ResumeWithScope(body: ast.Statement, line: Int)
   ResumeCatch(try_id: Int, param: Option(ast.Pattern))
 }
 
@@ -1230,18 +1229,8 @@ fn plan_split_stmt(p: SplitPlanner, sl: ast.StmtWithLine) -> SplitPlanner {
     | ast.VariableDeclaration(..) -> plan_hoisted(p, hoist_one(sl))
     ast.ClassDeclaration(super_class: sc, body: elems, ..) ->
       push_pending_stmt(plan_class(p, sc, elems), sl)
-    ast.WithStatement(object: o, body: b) ->
-      case split_of(o) {
-        Some(#(kind, operand)) -> {
-          let p = plan_opt_expr(p, operand)
-          let rw = Some(ResumeWithScope(body: b, line:))
-          case kind {
-            YieldStarSplit -> plan_delegate(p, operand, rw)
-            _ -> plan_plain_split(p, kind, operand, rw)
-          }
-        }
-        None -> plan_stmts(plan_expr(p, o), one_stmt(line, b))
-      }
+    // stmt emission rejects with, so leave it whole for that error
+    ast.WithStatement(..) -> push_pending_stmt(plan_stmt_cursor_only(p, s), sl)
     ast.TryStatement(block: blk, tail: tt) -> plan_try(p, blk, tt)
     ast.EmptyStatement
     | ast.DebuggerStatement
@@ -2298,24 +2287,6 @@ fn cap_vars(e: Emitter, i: Int, n: Int) -> List(ir.Value) {
   }
 }
 
-fn atom_bool(consts: state.IrConsts, value b: Bool) -> ir.Value {
-  case b {
-    True -> consts.true_
-    False -> consts.false_
-  }
-}
-
-fn expected_length(fixed: List(ast.Pattern)) -> Int {
-  fixed
-  |> list.take_while(fn(p) {
-    case p {
-      ast.AssignmentPattern(..) -> False
-      _ -> True
-    }
-  })
-  |> list.length
-}
-
 fn start_op(kind: state.CoroutineKind) -> String {
   case kind {
     state.AsyncFunction -> "start"
@@ -2368,18 +2339,17 @@ fn emit_closure_alloc(
     consts.false_,
     consts.false_,
     consts.false_,
-    atom_bool(consts, func.shape_is_arrow(shape)),
-    atom_bool(consts, func.shape_is_method(shape)),
-    atom_bool(consts, kind_is_generator(kind)),
-    atom_bool(consts, kind_is_async(kind)),
-    atom_bool(consts, is_strict),
+    func.atom_bool(consts, func.shape_is_arrow(shape)),
+    func.atom_bool(consts, kind_is_generator(kind)),
+    func.atom_bool(consts, kind_is_async(kind)),
+    func.atom_bool(consts, is_strict),
   ]
   let name_bin = case js_name {
     Some(n) -> ir.ConstBinary(bit_array.from_string(n))
     None -> consts.empty_bin
   }
   let #(fixed, _) = ast_util.split_trailing_rest(params)
-  let exp_len = expected_length(fixed)
+  let exp_len = func.expected_length(fixed)
   anf.run(
     {
       use fun <- anf.then(anf.let_(ir.MakeClosure(outer_name, captures, 2)))
@@ -2989,20 +2959,13 @@ fn build_pending_dispatch(
   )
 }
 
-fn with_done(
-  e: Emitter,
-  body: fn(NextWith(ir.Expr), Emitter) -> EmitResult,
-) -> EmitResult {
-  body(fn(tree, ef) { Ok(#(tree, ef)) }, e)
-}
-
 fn emit_finally_arm(
   e: Emitter,
   ctx: MachineContext,
   entry: TryEntry,
   finalizer: List(ast.StmtWithLine),
 ) -> EmitResult {
-  with_done(e, fn(done, e) {
+  cps.with_done(e, fn(done, e) {
     use e <- restore_and_seed(e, ctx)
     let #(pend_n, e) = state.fresh_var(e)
     let pend = ir.Var(pend_n)
@@ -3037,7 +3000,7 @@ fn emit_catch_arm(
   handler: ast.CatchClause,
 ) -> EmitResult {
   let ast.CatchClause(param:, body: catch_body) = handler
-  with_done(e, fn(done, e) {
+  cps.with_done(e, fn(done, e) {
     use e <- restore_and_seed(e, ctx)
     let #(caught_n, e) = state.fresh_var(e)
     let caught = ir.Var(caught_n)
@@ -3212,10 +3175,10 @@ fn emit_seg_tail(
             )
           Ok(#(ir.Let([v_n], operand_tree, setup), e))
         }
-        AwaitSplit | ForAwaitSplit | YieldSplit -> {
+        AwaitSplit | YieldSplit -> {
           let step = fn(v, loc) {
             case kind {
-              AwaitSplit | ForAwaitSplit -> step_await(v, resume_state, loc)
+              AwaitSplit -> step_await(v, resume_state, loc)
               YieldSplit | YieldStarSplit -> step_yield(v, resume_state, loc)
             }
           }
@@ -3322,7 +3285,7 @@ fn emit_for_of_step(
   after: Int,
 ) -> EmitResult {
   let iter_idx = extra_idx(ctx.layout, iter_key)
-  with_done(e, fn(done, e) {
+  cps.with_done(e, fn(done, e) {
     let #(iter_n, e) = state.fresh_var(e)
     let #(res_n, e) = state.fresh_var(e)
     let #(done_t, e) = state.fresh_var(e)
@@ -3869,7 +3832,7 @@ fn emit_for_await_check(
   ctx: MachineContext,
   spec: ForAwaitSpec,
 ) -> EmitResult {
-  with_done(e, fn(done, e) {
+  cps.with_done(e, fn(done, e) {
     use e <- restore_and_seed(e, ctx)
     let e = install_cursor(e, spec.body_cursor)
     let #(done_branch, e) =
@@ -4092,7 +4055,6 @@ fn hoist_keeping_top_split(
               ast.YieldExpression(span, Some(op2), is_delegate: False)
             YieldStarSplit ->
               ast.YieldExpression(span, Some(op2), is_delegate: True)
-            ForAwaitSplit -> ex
           }
           HoistedExpr(pre, rebuilt, p)
         }

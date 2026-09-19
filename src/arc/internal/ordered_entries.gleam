@@ -80,34 +80,13 @@ pub fn size(table: OrderedEntries(k, v)) -> Int {
   dict.size(table.entries)
 }
 
-pub fn next_seq(table: OrderedEntries(k, v)) -> Int {
-  table.next_seq
-}
-
 pub fn fold(table: OrderedEntries(k, v), acc: a, f: fn(a, k, v) -> a) -> a {
   use acc, k, entry <- dict.fold(table.entries, acc)
   f(acc, k, entry.1)
 }
 
-pub fn live_entries(table: OrderedEntries(k, v)) -> List(#(k, v)) {
-  live_entries_from(table, 0)
-}
-
 pub fn live_values(table: OrderedEntries(k, v)) -> List(v) {
-  live_entries(table) |> list.map(fn(e) { e.1 })
-}
-
-pub fn live_entries_from(
-  table: OrderedEntries(k, v),
-  cursor: Int,
-) -> List(#(k, v)) {
-  dict.fold(table.entries, [], fn(acc, k, entry) {
-    let #(seq, v) = entry
-    case seq >= cursor {
-      True -> [#(seq, #(k, v)), ..acc]
-      False -> acc
-    }
-  })
+  dict.values(table.entries)
   |> list.sort(fn(a, b) { int.compare(a.0, b.0) })
   |> list.map(fn(p) { p.1 })
 }

@@ -51,7 +51,7 @@ fn sort_default(
   this: JsVal,
 ) -> #(JsVal, Agent) {
   let #(#(defined, undefs), st) =
-    collect_sort_elements(st, this, length, 0, [], 0, SkipHoles)
+    collect_sort_elements(st, this, length, SkipHoles)
   let #(pairs, st) = stringify_elements(st, defined, [])
   let sorted = list.sort(pairs, fn(a, b) { string.compare(a.0, b.0) })
   let sorted_values = list.map(sorted, fn(pair) { pair.1 })
@@ -68,7 +68,7 @@ fn sort_with_comparefn(
   this: JsVal,
 ) -> #(JsVal, Agent) {
   let #(#(defined, undefs), st) =
-    collect_sort_elements(st, this, length, 0, [], 0, SkipHoles)
+    collect_sort_elements(st, this, length, SkipHoles)
   let #(sorted, st) = merge_sort(st, defined, comparefn)
   let all_values = list.append(sorted, list.repeat(mk_undefined(), undefs))
   #(this, write_sort_result(st, h, all_values, length, 0))
@@ -78,9 +78,6 @@ fn collect_sort_elements(
   st: Agent,
   this: JsVal,
   length: Int,
-  idx: Int,
-  acc: List(JsVal),
-  undefs: Int,
   hole_mode: HoleMode,
 ) -> #(#(List(JsVal), Int), Agent) {
   case dense_snapshot(st, this) {
@@ -91,21 +88,12 @@ fn collect_sort_elements(
         els,
         proto,
         length,
-        idx,
-        acc,
-        undefs,
+        0,
+        [],
+        0,
         hole_mode,
       )
-    None ->
-      collect_sort_elements_generic(
-        st,
-        this,
-        length,
-        idx,
-        acc,
-        undefs,
-        hole_mode,
-      )
+    None -> collect_sort_elements_generic(st, this, length, 0, [], 0, hole_mode)
   }
 }
 
@@ -380,7 +368,7 @@ fn to_sorted_with(
 ) -> #(JsVal, Agent) {
   let array_proto = st.realm.array.prototype
   let #(#(defined, undefs), st) =
-    collect_sort_elements(st, this, length, 0, [], 0, VisitHoles)
+    collect_sort_elements(st, this, length, VisitHoles)
   let #(sorted, st) = sort(st, defined)
   let all_values = list.append(sorted, list.repeat(mk_undefined(), undefs))
   alloc_array(st, length, elements.from_list(all_values), array_proto)

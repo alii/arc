@@ -33,7 +33,7 @@ pub type HostHooks {
   )
 }
 
-pub fn default_print(level: ConsoleLevel, line: String) -> Nil {
+fn default_print(level: ConsoleLevel, line: String) -> Nil {
   case level {
     LogLevel | InfoLevel | DebugLevel -> io.println(line)
     WarnLevel | ErrorLevel -> io.println_error(line)

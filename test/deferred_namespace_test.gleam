@@ -28,7 +28,7 @@ fn deferred_namespace_of(
     })
   let hosts =
     dict.from_list([
-      #("dance", module.HostModule("dance", [#("greet", greet)])),
+      #("dance", module.HostModule([#("greet", greet)])),
     ])
   let assert Ok(bundle) =
     module.compile_bundle_with_hosts(

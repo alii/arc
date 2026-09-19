@@ -26,7 +26,7 @@ import arc/rt/types.{
   ProxyObj, ReflectDefineProperty, ReflectDeleteProperty, ReflectGet,
   ReflectGetOwnPropertyDescriptor, ReflectHas, ReflectOwnKeys, SAsyncContext,
   SBox, SObject, SPromiseData, StepAwait, StepReturn, StepThrow, StepYield,
-  StringKey, classify, mk_object, mk_string, mk_tdz, mk_undefined,
+  StringKey, classify, mk_object, mk_tdz, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bool
@@ -57,7 +57,7 @@ pub type RequestedModule {
 }
 
 pub type HostModule {
-  HostModule(specifier: String, exports: List(#(String, JsVal)))
+  HostModule(exports: List(#(String, JsVal)))
 }
 
 pub type BundleModule {
@@ -150,7 +150,7 @@ pub fn error_message(st: Agent, err: ModuleError) -> String {
   }
 }
 
-pub type LinkInvariantBroken {
+type LinkInvariantBroken {
   UnresolvedDependency(specifier: specifier.Raw)
   ModuleNotLinked(specifier: String)
   MissingExportBox(dep: String, name: String)
@@ -159,7 +159,7 @@ pub type LinkInvariantBroken {
   NamespaceBoxCorrupt(specifier: String)
 }
 
-pub fn link_invariant_message(broken: LinkInvariantBroken) -> String {
+fn link_invariant_message(broken: LinkInvariantBroken) -> String {
   "arc/module: linker invariant broken: " <> string.inspect(broken)
 }
 
@@ -382,10 +382,11 @@ pub fn entry_namespace_of(st: Agent, linked_bundle: LinkedBundle) -> Handle {
   entry_namespace(st, linked_bundle.linked, linked_bundle.bundle.entry)
 }
 
+// error is the thrown syntaxerror
 pub fn link_for_evaluation(
   st: Agent,
   bundle: ModuleBundle,
-) -> #(Result(LinkedBundle, ModuleError), Agent) {
+) -> #(Result(LinkedBundle, JsVal), Agent) {
   link_for_evaluation_reusing(st, bundle, dict.new(), dict.new())
 }
 
@@ -394,13 +395,13 @@ pub fn link_for_evaluation_reusing(
   bundle: ModuleBundle,
   preexisting: Dict(String, Handle),
   preexisting_deferred: Dict(String, Handle),
-) -> #(Result(LinkedBundle, ModuleError), Agent) {
+) -> #(Result(LinkedBundle, JsVal), Agent) {
   let lg = linkable_of_bundle(bundle)
   case linkable.validate(lg) {
     Error(link_error) -> {
       let #(err, st) =
         rt_val.new_error(st, SyntaxError, linkable.error_message(link_error))
-      #(Error(EvaluationError(err)), st)
+      #(Error(err), st)
     }
     Ok(Nil) -> {
       let pre =
@@ -420,7 +421,7 @@ pub fn link_for_evaluation_reusing(
               SyntaxError,
               stale_reused_export_message(spec, name),
             )
-          #(Error(EvaluationError(err)), st)
+          #(Error(err), st)
         }
         None -> {
           let #(linked, deferred_to_fill, st) =
@@ -444,7 +445,7 @@ pub fn link_for_evaluation_reusing(
   }
 }
 
-pub fn evaluate_linked(
+fn evaluate_linked(
   st: Agent,
   linked_bundle: LinkedBundle,
   drain: Drain,
@@ -558,7 +559,7 @@ pub fn evaluate_bundle(
   drain: Drain,
 ) -> #(Result(EvaluatedBundle, ModuleError), Agent) {
   case link_for_evaluation(st, bundle) {
-    #(Error(err), st) -> #(Error(err), st)
+    #(Error(err), st) -> #(Error(EvaluationError(err)), st)
     #(Ok(linked_bundle), st) -> evaluate_linked(st, linked_bundle, drain)
   }
 }
@@ -932,7 +933,7 @@ fn build_linked(
     list.fold(ns_to_fill, st, fn(st, pair) {
       let #(spec, obj) = pair
       let assert Ok(exp) = dict.get(exports, spec)
-      rt_store.cell_set(st, obj, namespace_cell(exp, "Module"))
+      rt_store.cell_set(st, obj, rt_obj.module_namespace_cell(exp, "Module"))
     })
   let #(modules, st) =
     list.fold(specs, #(dict.new(), st), fn(acc, spec) {
@@ -1168,20 +1169,6 @@ fn preallocate_local_boxes(
   })
 }
 
-// §10.4.6 module namespace exotic object
-fn namespace_cell(exports: Dict(String, Handle), tag: String) -> types.Cell {
-  SObject(
-    kind: ModuleNamespace(exports:),
-    proto: None,
-    props: dict.new(),
-    symbol_props: [
-      #(types.symbol_to_string_tag, types.frozen_property(mk_string(tag), 0)),
-    ],
-    elements: NoElements,
-    extensible: False,
-  )
-}
-
 // proxy whose traps evaluate the module then forward
 fn fill_deferred_namespace(
   st: Agent,
@@ -1195,7 +1182,10 @@ fn fill_deferred_namespace(
     |> result.replace_error(ModuleNotLinked(spec))
     |> assert_link_invariant
   let #(target, st) =
-    rt_store.cell_new(st, namespace_cell(lm.exports, "Deferred Module"))
+    rt_store.cell_new(
+      st,
+      rt_obj.module_namespace_cell(lm.exports, "Deferred Module"),
+    )
   let #(handler, st) = rt_obj.new_object(st, Some(st.realm.object.prototype))
   let st =
     [
