@@ -582,6 +582,8 @@ pub type PromiseNative {
   PromiseRaceStatic
   PromiseAllSettledStatic
   PromiseAnyStatic
+  PromiseTryStatic
+  PromiseWithResolversStatic
   PromiseAllKeyedStatic
   PromiseAllSettledKeyedStatic
   PromiseCapabilityExecutor(resolve_box: Handle, reject_box: Handle)
@@ -990,6 +992,7 @@ pub type MathNative {
   MathSin
   MathSinh
   MathSqrt
+  MathSumPrecise
   MathTan
   MathTanh
   MathTrunc
