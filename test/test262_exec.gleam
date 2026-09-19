@@ -433,6 +433,7 @@ fn resolution_error_outcome(
   let is_match = case expected {
     "SyntaxError" ->
       string.contains(reason, "ParseFailed(")
+      || string.contains(reason, "UnsupportedImportAttribute(")
       || string.contains(reason, "LinkError(")
     "TypeError" ->
       string.contains(reason, "ResolveFailed(")

@@ -290,7 +290,6 @@ pub type Op {
 
   DynamicImport
   DynamicImportSource
-  // todo: deferral not implemented, behaves as import()
   DynamicImportDefer
 
   // §9.1.1.4.17, deletable becomes configurable

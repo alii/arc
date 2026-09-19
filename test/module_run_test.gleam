@@ -2,6 +2,7 @@ import arc/compiler
 import arc/interp/entry
 import arc/module
 import arc/module/dynamic_import
+import arc/module/graph
 import arc/module/import_hook
 import arc/module/loader
 import arc/module/registry
@@ -17,7 +18,8 @@ import arc/rt/types.{
 }
 import gleam/dict
 import gleam/list
-import gleam/option.{Some}
+import gleam/option.{None, Some}
+import gleam/result
 import gleam/set
 import gleam/string
 import rt_helpers
@@ -40,8 +42,16 @@ fn churning_module(tag: String) -> String {
 
 fn files(table: List(#(String, String))) -> #(loader.ResolveFn, loader.LoadFn) {
   let sources = dict.from_list(table)
-  #(fn(raw, _referrer) { Ok(raw) }, fn(resolved) {
-    dict.get(sources, resolved) |> result_or(loader.LoadNotFound)
+  #(fn(raw, _referrer) { Ok(raw) }, fn(resolved, attributes) {
+    use text <- result.try(
+      dict.get(sources, resolved) |> result_or(loader.LoadNotFound),
+    )
+    case loader.module_type(attributes) {
+      None -> Ok(loader.SourceText(text))
+      Some("json") -> Ok(loader.JsonSource(text))
+      Some("text") -> Ok(loader.TextSource(text))
+      Some(other) -> Error(loader.UnsupportedModuleType(other))
+    }
   })
 }
 
@@ -139,6 +149,63 @@ pub fn namespace_import_sees_the_module_object_test() {
     )
   assert classify(export(st, evaluated, "keys")) == KStr("a,b")
   assert classify(export(st, evaluated, "tag")) == KStr("[object Module]")
+}
+
+pub fn json_module_default_export_test() {
+  let assert #(Ok(evaluated), st) =
+    evaluate(
+      [
+        #(
+          "/main.js",
+          "import data from '/data.json' with { type: 'json' };
+           import * as ns from '/data.json' with { type: 'json' };
+           export const r = data.x + ':' + Object.keys(ns) + ':' + (ns.default === data);",
+        ),
+        #("/data.json", "{ \"x\": 7 }"),
+      ],
+      rt_async.drain,
+    )
+  assert classify(export(st, evaluated, "r")) == KStr("7:default:true")
+}
+
+pub fn the_type_attribute_makes_a_distinct_module_test() {
+  let assert #(Ok(evaluated), st) =
+    evaluate(
+      [
+        #(
+          "/main.js",
+          "import js from '/m.js';
+           import text from '/m.js' with { type: 'text' };
+           export const r = js + ':' + typeof text + ':' + text.length;",
+        ),
+        #("/m.js", "export default 'js'"),
+      ],
+      rt_async.drain,
+    )
+  assert classify(export(st, evaluated, "r")) == KStr("js:string:19")
+}
+
+pub fn invalid_json_module_fails_to_load_test() {
+  let #(resolve, load) = files([#("/bad.json", "{ nope }")])
+  let assert Error(module.GraphError(graph.JsonParseFailed(..))) =
+    module.compile_bundle(
+      "/main.js",
+      "import d from '/bad.json' with { type: 'json' };",
+      resolve,
+      load,
+    )
+}
+
+pub fn unsupported_import_attribute_is_a_graph_error_test() {
+  let #(resolve, load) = files([#("/m.js", "")])
+  let assert Error(module.GraphError(graph.UnsupportedImportAttribute(key:, ..))) =
+    module.compile_bundle(
+      "/main.js",
+      "import x from '/m.js' with { flavor: 'x' };",
+      resolve,
+      load,
+    )
+  assert key == "flavor"
 }
 
 pub fn a_thrown_body_is_an_evaluation_error_test() {
@@ -246,6 +313,25 @@ pub fn dynamic_import_from_a_script_test() {
   assert global_string(st, "same") == "true"
 }
 
+pub fn dynamic_import_with_a_type_attribute_test() {
+  let #(resolve, load) = files([#("/data.json", "{ \"x\": [1, 2] }")])
+  let st = import_hook.install(agent(), "/main.js", resolve, load)
+  let st =
+    run_script(
+      st,
+      "var out = 'unset', same = 'unset', untyped = 'unset';
+       var json = { with: { type: 'json' } };
+       import('/data.json', json).then(ns => { out = String(ns.default.x) });
+       Promise.all([import('/data.json', json), import('/data.json', json)])
+         .then(([a, b]) => { same = String(a === b) });
+       import('/data.json').catch(e => { untyped = e.constructor.name });
+       ",
+    )
+  assert global_string(st, "out") == "1,2"
+  assert global_string(st, "same") == "true"
+  assert global_string(st, "untyped") == "SyntaxError"
+}
+
 pub fn dynamic_import_of_a_throwing_module_rejects_every_time_test() {
   let #(resolve, load) = files([#("/bad.js", "throw new Error('boom')")])
   let st = import_hook.install(agent(), "/main.js", resolve, load)
@@ -275,10 +361,11 @@ pub fn dynamic_import_of_a_top_level_await_module_test() {
 }
 
 pub fn nested_dynamic_import_resolves_against_the_importing_module_test() {
-  let load = fn(resolved) {
+  let load = fn(resolved, _attributes) {
     case resolved {
-      "/dir/outer.js" -> Ok("export const inner = import('./inner.js');")
-      "/dir/inner.js" -> Ok("export const where = 'inner';")
+      "/dir/outer.js" ->
+        Ok(loader.SourceText("export const inner = import('./inner.js');"))
+      "/dir/inner.js" -> Ok(loader.SourceText("export const where = 'inner';"))
       _ -> Error(loader.LoadNotFound)
     }
   }
@@ -318,11 +405,62 @@ pub fn import_defer_links_without_evaluating_test() {
   assert global_string(st, "after") == "yes"
 }
 
+pub fn import_defer_with_a_type_attribute_test() {
+  let #(resolve, load) = files([#("/data.json", "{ \"x\": 3 }")])
+  let st = import_hook.install(agent(), "/main.js", resolve, load)
+  let st =
+    run_script(
+      st,
+      "var out = 'unset', untyped = 'unset', bad = 'unset', sync = 'unset';
+       import.defer('/data.json', { with: { type: 'json' } },)
+         .then(ns => { out = ns[Symbol.toStringTag] + ':' + ns.default.x });
+       import.defer('/data.json').catch(e => { untyped = e.constructor.name });
+       import.defer('/data.json', { with: { as: 'json' } }).catch(e => { bad = e.constructor.name });
+       try { import.defer('/data.json', (() => { throw 'thrown' })()) } catch (e) { sync = e }
+       ",
+    )
+  assert global_string(st, "out") == "Deferred Module:3"
+  assert global_string(st, "untyped") == "SyntaxError"
+  assert global_string(st, "bad") == "TypeError"
+  assert global_string(st, "sync") == "thrown"
+}
+
+// a host may serve source text for a typed request; its imports resolve by path
+pub fn typed_source_module_resolves_imports_against_its_path_test() {
+  let load = fn(resolved, attributes) {
+    case resolved, loader.module_type(attributes) {
+      "/dir/gen.js", Some("macro") ->
+        Ok(loader.SourceText("export { where } from './sib.js';"))
+      "/dir/sib.js", None ->
+        Ok(loader.SourceText("export const where = 'sib';"))
+      _, _ -> Error(loader.LoadNotFound)
+    }
+  }
+  let resolve = fn(raw: String, referrer: String) {
+    case raw, referrer {
+      "./dir/gen.js", "/main.js" -> Ok("/dir/gen.js")
+      "./sib.js", "/dir/gen.js" -> Ok("/dir/sib.js")
+      _, _ -> Error(loader.ResolveNotFound)
+    }
+  }
+  let assert Ok(bundle) =
+    module.compile_bundle(
+      "/main.js",
+      "export { where } from './dir/gen.js' with { type: 'macro' };",
+      resolve,
+      load,
+    )
+  let assert #(Ok(evaluated), st) =
+    module.evaluate_bundle(agent(), bundle, rt_async.drain)
+  assert classify(export(st, evaluated, "where")) == KStr("sib")
+}
+
 pub fn dynamic_import_after_top_level_await_keeps_the_module_referrer_test() {
-  let load = fn(resolved) {
+  let load = fn(resolved, _attributes) {
     case resolved {
-      "/dir/dep.js" -> Ok("await null; export const p = import('./sib.js');")
-      "/dir/sib.js" -> Ok("export const where = 'sib';")
+      "/dir/dep.js" ->
+        Ok(loader.SourceText("await null; export const p = import('./sib.js');"))
+      "/dir/sib.js" -> Ok(loader.SourceText("export const where = 'sib';"))
       _ -> Error(loader.LoadNotFound)
     }
   }

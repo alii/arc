@@ -2,7 +2,9 @@
 
 import arc/bytecode/error_kind.{SyntaxError, TypeError}
 import arc/bytecode/key.{Named}
+import arc/module/loader
 import arc/module/registry
+import arc/parser/ast.{type ImportAttribute, ImportAttribute}
 import arc/rt/async as rt_async
 import arc/rt/call.{type Completion, NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/gc as rt_gc
@@ -15,6 +17,10 @@ import arc/rt/types.{
 import arc/rt/val as rt_val
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/result
+import gleam/string
+
+const evaluation_phase_marker = "evaluation"
 
 const defer_phase_marker = "defer"
 
@@ -23,90 +29,107 @@ pub type HookPhase {
   DeferPhase(fulfill: JsVal, reject: JsVal)
 }
 
+// modulerequest record plus referrer and phase
 pub type HookCall {
-  HookCall(specifier: String, referrer: Option(String), phase: HookPhase)
+  HookCall(
+    specifier: String,
+    referrer: Option(String),
+    attributes: List(ImportAttribute),
+    phase: HookPhase,
+  )
 }
 
 pub type HookArgError {
   MissingSpecifier
+  TooFewArguments
   NonStringSpecifier
   MissingResolve
   MissingReject
   BadPhase
+  BadAttributes
 }
 
 pub fn hook_arg_error_message(err: HookArgError) -> String {
   case err {
     MissingSpecifier -> "import hook called without a specifier"
+    TooFewArguments -> "import hook called with too few arguments"
     NonStringSpecifier -> "import hook called with a non-string specifier"
     MissingResolve | MissingReject ->
       "import hook called with the defer phase but no promise capability"
-    BadPhase -> "import hook called with unexpected arguments"
+    BadPhase -> "import hook called with an unknown phase"
+    BadAttributes -> "import hook called with malformed import attributes"
   }
 }
 
-pub fn encode_hook_args(
-  specifier: String,
-  referrer: Option(String),
-  phase: HookPhase,
-) -> List(JsVal) {
-  case phase {
-    EagerPhase ->
-      case referrer {
-        Some(referrer) -> [mk_string(specifier), mk_string(referrer)]
-        None -> [mk_string(specifier)]
-      }
-    DeferPhase(fulfill:, reject:) -> [
-      mk_string(specifier),
-      referrer |> option.map(mk_string) |> option.unwrap(mk_undefined()),
-      mk_string(defer_phase_marker),
-      fulfill,
-      reject,
-    ]
+// [specifier, referrer, phase, fulfill, reject, key, value, ...]
+pub fn encode_hook_args(call: HookCall) -> List(JsVal) {
+  let HookCall(specifier:, referrer:, attributes:, phase:) = call
+  let #(marker, fulfill, reject) = case phase {
+    EagerPhase -> #(evaluation_phase_marker, mk_undefined(), mk_undefined())
+    DeferPhase(fulfill:, reject:) -> #(defer_phase_marker, fulfill, reject)
   }
+  let head = [
+    mk_string(specifier),
+    referrer |> option.map(mk_string) |> option.unwrap(mk_undefined()),
+    mk_string(marker),
+    fulfill,
+    reject,
+  ]
+  list.append(
+    head,
+    list.flat_map(attributes, fn(a) { [mk_string(a.key), mk_string(a.value)] }),
+  )
 }
 
 pub fn parse_hook_args(args: List(JsVal)) -> Result(HookCall, HookArgError) {
   case args {
     [] -> Error(MissingSpecifier)
-    [first, ..rest] ->
-      case classify(first) {
-        KStr(specifier) -> parse_hook_tail(specifier, rest)
-        _ -> Error(NonStringSpecifier)
-      }
+    [specifier, referrer, marker, fulfill, reject, ..attributes] -> {
+      use specifier <- result.try(
+        string_arg(specifier) |> option.to_result(NonStringSpecifier),
+      )
+      use attributes <- result.try(parse_attribute_args(attributes, []))
+      use phase <- result.map(parse_phase(marker, fulfill, reject))
+      HookCall(specifier:, referrer: string_arg(referrer), attributes:, phase:)
+    }
+    [_, ..] -> Error(TooFewArguments)
   }
 }
 
-fn parse_hook_tail(
-  specifier: String,
-  rest: List(JsVal),
-) -> Result(HookCall, HookArgError) {
-  let referrer = case list.first(rest) |> option.from_result {
-    Some(v) ->
-      case classify(v) {
-        KStr(referrer) -> Some(referrer)
-        _ -> None
-      }
-    None -> None
+fn string_arg(v: JsVal) -> Option(String) {
+  case classify(v) {
+    KStr(s) -> Some(s)
+    _ -> None
   }
-  case rest {
-    [] | [_] -> Ok(HookCall(specifier:, referrer:, phase: EagerPhase))
-    [_, phase, ..capability] ->
-      case classify(phase) {
-        KStr(marker) if marker == defer_phase_marker ->
-          case capability {
-            [fulfill, reject] ->
-              Ok(HookCall(
-                specifier:,
-                referrer:,
-                phase: DeferPhase(fulfill:, reject:),
-              ))
-            [] -> Error(MissingResolve)
-            [_] -> Error(MissingReject)
-            [_, _, ..] -> Error(BadPhase)
-          }
-        _ -> Error(BadPhase)
+}
+
+fn parse_phase(
+  marker: JsVal,
+  fulfill: JsVal,
+  reject: JsVal,
+) -> Result(HookPhase, HookArgError) {
+  case string_arg(marker), classify(fulfill), classify(reject) {
+    Some(m), _, _ if m == evaluation_phase_marker -> Ok(EagerPhase)
+    Some(m), KUndef, _ if m == defer_phase_marker -> Error(MissingResolve)
+    Some(m), _, KUndef if m == defer_phase_marker -> Error(MissingReject)
+    Some(m), _, _ if m == defer_phase_marker -> Ok(DeferPhase(fulfill:, reject:))
+    _, _, _ -> Error(BadPhase)
+  }
+}
+
+fn parse_attribute_args(
+  args: List(JsVal),
+  acc: List(ImportAttribute),
+) -> Result(List(ImportAttribute), HookArgError) {
+  case args {
+    [] -> Ok(list.reverse(acc))
+    [k, v, ..rest] ->
+      case string_arg(k), string_arg(v) {
+        Some(key), Some(value) ->
+          parse_attribute_args(rest, [ImportAttribute(key:, value:), ..acc])
+        _, _ -> Error(BadAttributes)
       }
+    [_] -> Error(BadAttributes)
   }
 }
 
@@ -115,33 +138,35 @@ pub fn import_call(
   specifier: JsVal,
   options: JsVal,
 ) -> #(JsVal, Agent) {
-  use specifier, promise, st <- with_import_request(st, specifier, options)
+  use request, promise, st <- with_import_request(st, specifier, options)
   let hook_args =
-    encode_hook_args(
-      string_of(specifier),
-      registry.read_active_referrer(st),
-      EagerPhase,
-    )
+    encode_hook_args(HookCall(
+      specifier: request.specifier,
+      referrer: registry.read_active_referrer(st),
+      attributes: request.attributes,
+      phase: EagerPhase,
+    ))
   use st <- enqueue_import_job(st, promise)
   call_host_hook(st, hook_args)
 }
 
-pub fn defer_import_call(st: Agent, specifier: JsVal) -> #(JsVal, Agent) {
-  use specifier, promise, st <- with_import_request(
-    st,
-    specifier,
-    mk_undefined(),
-  )
+pub fn defer_import_call(
+  st: Agent,
+  specifier: JsVal,
+  options: JsVal,
+) -> #(JsVal, Agent) {
+  use request, promise, st <- with_import_request(st, specifier, options)
   let #(rt_async.ResolvingFunctions(fulfill_h, reject_h), st) =
     rt_async.alloc_resolving_fns(st, promise)
   let fulfill = mk_object(fulfill_h)
   let reject = mk_object(reject_h)
   let hook_args =
-    encode_hook_args(
-      string_of(specifier),
-      registry.read_active_referrer(st),
-      DeferPhase(fulfill:, reject:),
-    )
+    encode_hook_args(HookCall(
+      specifier: request.specifier,
+      referrer: registry.read_active_referrer(st),
+      attributes: request.attributes,
+      phase: DeferPhase(fulfill:, reject:),
+    ))
   use st <- enqueue_host_job(st, [fulfill, reject])
   case call_host_hook(st, hook_args) {
     #(Ok(_), st) -> st
@@ -150,7 +175,7 @@ pub fn defer_import_call(st: Agent, specifier: JsVal) -> #(JsVal, Agent) {
 }
 
 pub fn source_import_call(st: Agent, specifier: JsVal) -> #(JsVal, Agent) {
-  use _specifier, promise, st <- with_import_request(
+  use _request, promise, st <- with_import_request(
     st,
     specifier,
     mk_undefined(),
@@ -165,50 +190,55 @@ pub fn source_import_call(st: Agent, specifier: JsVal) -> #(JsVal, Agent) {
   #(Error(err), st)
 }
 
+// modulerequest record
+type ImportRequest {
+  ImportRequest(specifier: String, attributes: List(ImportAttribute))
+}
+
 // a throwing request rejects the promise and skips k
 fn with_import_request(
   st: Agent,
   specifier: JsVal,
   options: JsVal,
-  k: fn(JsVal, Handle, Agent) -> Agent,
+  k: fn(ImportRequest, Handle, Agent) -> Agent,
 ) -> #(JsVal, Agent) {
   let #(promise, st) = rt_async.new_promise(st)
   let st = case import_request(st, specifier, options) {
     #(ThrowCompletion(reason), st) ->
       rt_async.promise_reject(st, promise, reason)
-    #(NormalCompletion(specifier), st) -> k(specifier, promise, st)
+    #(NormalCompletion(request), st) -> k(request, promise, st)
   }
   #(mk_object(promise), st)
 }
 
-// import_request only completes with a string
-fn string_of(v: JsVal) -> String {
-  case classify(v) {
-    KStr(s) -> s
-    _ -> ""
-  }
-}
-
+// evaluateimportcall steps 7-11
 fn import_request(
   st: Agent,
   specifier: JsVal,
   options: JsVal,
-) -> #(Completion(JsVal), Agent) {
+) -> #(Completion(ImportRequest), Agent) {
   use st <- rt_call.try_run(st)
-  let #(specifier_string, st) = rt_val.to_string(st, specifier)
-  let st = validate_options(st, options)
-  #(mk_string(specifier_string), st)
+  let #(specifier, st) = rt_val.to_string(st, specifier)
+  let #(attributes, st) = import_attributes(st, options)
+  #(ImportRequest(specifier:, attributes:), st)
 }
 
-fn validate_options(st: Agent, options: JsVal) -> Agent {
+// evaluateimportcall step 10
+fn import_attributes(
+  st: Agent,
+  options: JsVal,
+) -> #(List(ImportAttribute), Agent) {
   case classify(options) {
-    KUndef -> st
+    KUndef -> #([], st)
     KHandle(_) -> {
-      let #(attributes, st) =
+      let #(attributes_obj, st) =
         rt_obj.get_prop(st, options, StringKey(Named("with")))
-      case classify(attributes) {
-        KUndef -> st
-        KHandle(attributes_h) -> validate_attributes(st, attributes_h)
+      case classify(attributes_obj) {
+        KUndef -> #([], st)
+        KHandle(h) -> {
+          let #(entries, st) = rt_obj.enumerable_own_entries(st, h)
+          #(validate_attributes(st, entries), st)
+        }
         _ -> rt_val.throw_type_error(st, "The 'with' option must be an object")
       }
     }
@@ -220,24 +250,26 @@ fn validate_options(st: Agent, options: JsVal) -> Agent {
   }
 }
 
-fn validate_attributes(st: Agent, attributes: Handle) -> Agent {
-  let #(keys, st) = rt_obj.enumerable_own_keys(st, attributes)
-  let st =
-    list.fold(keys, st, fn(st, pk) {
-      let #(v, st) = rt_obj.get_prop(st, mk_object(attributes), StringKey(pk))
-      case classify(v) {
-        KStr(_) -> st
+// evaluateimportcall steps 10.d.iv-10.f
+fn validate_attributes(
+  st: Agent,
+  entries: List(#(String, JsVal)),
+) -> List(ImportAttribute) {
+  let attributes =
+    list.map(entries, fn(entry) {
+      case classify(entry.1) {
+        KStr(value) -> ImportAttribute(key: entry.0, value:)
         _ ->
           rt_val.throw_type_error(st, "Import attribute values must be strings")
       }
     })
-  case keys {
-    [] -> st
-    [pk, ..] ->
+  case loader.unsupported_attribute(attributes) {
+    Some(unsupported) ->
       rt_val.throw_type_error(
         st,
-        "Import attribute '" <> key.to_text(pk) <> "' is not supported",
+        "Import attribute '" <> unsupported <> "' is not supported",
       )
+    None -> list.sort(attributes, fn(a, b) { string.compare(a.key, b.key) })
   }
 }
 

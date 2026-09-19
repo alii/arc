@@ -343,11 +343,18 @@ fn alloc_from_bytes(st: Agent, bytes: BitArray) -> #(JsVal, Agent) {
   use <- bool.lazy_guard(len > limits.max_buffer_byte_length, fn() {
     rt_val.throw_range_error(st, "Invalid typed array length")
   })
-  let kind = NumKind(Uint8Kind)
+  alloc_uint8_array(st, Bytes(bytes:, max_byte_length: None))
+}
+
+// a fixed-length uint8array over a fresh buffer holding storage
+pub fn alloc_uint8_array(
+  st: Agent,
+  storage: types.BufferStorage,
+) -> #(JsVal, Agent) {
   let #(buf, st) =
     realm_ops.alloc_object(
       st,
-      ArrayBufferObj(storage: Bytes(bytes:, max_byte_length: None)),
+      ArrayBufferObj(storage:),
       st.realm.array_buffer.prototype,
     )
   let #(typed_array_h, st) =
@@ -355,9 +362,9 @@ fn alloc_from_bytes(st: Agent, bytes: BitArray) -> #(JsVal, Agent) {
       st,
       TypedArrayObj(
         buffer: buf,
-        elem_kind: kind,
+        elem_kind: NumKind(Uint8Kind),
         byte_offset: 0,
-        length: Some(len),
+        length: Some(buffer.storage_byte_size(storage)),
       ),
       uint8_array_prototype(st),
     )

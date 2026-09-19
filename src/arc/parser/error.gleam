@@ -52,6 +52,7 @@ pub type ParseError {
   DuplicateBindingLexical(pos: Int, name: String)
   DuplicateExport(pos: Int, name: String)
   DuplicateImportBinding(pos: Int, name: String)
+  DuplicateImportAttribute(pos: Int, key: String)
   DuplicateLabel(pos: Int, label: String)
   DuplicateProtoProperty(pos: Int)
   IdentifierAlreadyDeclared(pos: Int, name: String)
@@ -110,6 +111,8 @@ pub type ParseError {
   UnexpectedAfterExport(pos: Int)
   ExpectedCommaOrBraceInExport(pos: Int)
   ExpectedExportAlias(pos: Int)
+  ExpectedCommaOrBraceInWithClause(pos: Int)
+  ExpectedImportAttributeKey(pos: Int)
   FunctionDeclInSingleStatement(pos: Int)
   StrictModeBindingName(pos: Int, name: String)
   LetBindingInLexicalDecl(pos: Int)
@@ -216,6 +219,8 @@ pub fn to_string(error: ParseError) -> String {
     DuplicateExport(name:, ..) -> "Duplicate export of '" <> name <> "'"
     DuplicateImportBinding(name:, ..) ->
       "Duplicate import binding '" <> name <> "'"
+    DuplicateImportAttribute(key:, ..) ->
+      "Duplicate import attribute '" <> key <> "'"
     DuplicateLabel(label:, ..) -> "Duplicate label '" <> label <> "'"
     DuplicateProtoProperty(_) ->
       "Duplicate '__proto__' property in object literal"
@@ -298,6 +303,9 @@ pub fn to_string(error: ParseError) -> String {
     ExpectedCommaOrBraceInExport(_) ->
       "Expected ',' or '}' in export specifiers"
     ExpectedExportAlias(_) -> "Expected export alias"
+    ExpectedCommaOrBraceInWithClause(_) ->
+      "Expected ',' or '}' in import attributes"
+    ExpectedImportAttributeKey(_) -> "Expected import attribute key"
     FunctionDeclInSingleStatement(_) ->
       "Function declarations are not allowed in single-statement context"
     StrictModeBindingName(name:, ..) ->

@@ -20,19 +20,25 @@ fn graph_of(
     request: summary.ModuleRequest,
     _referrer: specifier.Resolved,
   ) {
-    case specifier.raw_text(request.specifier) {
-      "./" <> rest -> Ok(key(rest))
-      other -> Ok(key(other))
+    case specifier.raw_text(request.request.specifier) {
+      "./" <> rest -> Ok(rest)
+      other -> Ok(other)
     }
   }
   let load = fn(resolved: specifier.Resolved) {
-    case dict.get(sources, specifier.resolved_text(resolved)) {
-      Ok(src) -> Ok(src)
+    case dict.get(sources, specifier.resolved_path(resolved)) {
+      Ok(src) -> Ok(loader.SourceText(src))
       Error(Nil) -> Error(loader.LoadNotFound)
     }
   }
   let assert Ok(g) =
-    graph.load(key(entry), entry_source, resolve, load, fn(_) { False })
+    graph.load(
+      key(entry),
+      loader.SourceText(entry_source),
+      resolve,
+      load,
+      fn(_) { False },
+    )
   g
 }
 
@@ -41,7 +47,8 @@ fn linkable_of(
   files: List(#(String, String)),
 ) -> linkable.LinkableGraph {
   let g = graph_of(entry, files)
-  dict.map_values(g.modules, fn(_specifier, m) {
+  dict.map_values(g.modules, fn(_specifier, loaded) {
+    let assert graph.SourceTextModule(m) = loaded
     let assert Ok(linkable_module) =
       linkable.module_of(
         m.parsed.summary.imports,

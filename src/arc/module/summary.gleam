@@ -1,6 +1,6 @@
 // §16.2.1.2 static import/export entries from the ast alone
 
-import arc/module/specifier.{type Raw}
+import arc/module/specifier.{type Request, Request}
 import arc/parser/ast
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -21,14 +21,14 @@ pub const default_export_local_name = "*default*"
 
 pub type ExportEntry {
   LocalExport(export_name: String, local_name: String)
-  ReExport(export_name: String, imported_name: String, source_specifier: Raw)
-  ReExportAll(source_specifier: Raw)
-  ReExportNamespace(export_name: String, source_specifier: Raw)
+  ReExport(export_name: String, imported_name: String, request: Request)
+  ReExportAll(request: Request)
+  ReExportNamespace(export_name: String, request: Request)
 }
 
 pub type ModuleRequest {
   ModuleRequest(
-    specifier: Raw,
+    request: Request,
     // deferred only if every reference is import defer
     phase: Phase,
   )
@@ -36,7 +36,7 @@ pub type ModuleRequest {
 
 pub type ModuleSummary {
   ModuleSummary(
-    imports: List(#(Raw, List(ImportBinding))),
+    imports: List(#(Request, List(ImportBinding))),
     exports: List(ExportEntry),
     requested: List(ModuleRequest),
     has_source_phase: Bool,
@@ -77,19 +77,20 @@ pub fn analyze(items: List(ast.ModuleItem)) -> ModuleSummary {
 
 fn analyze_item(acc: ModuleSummary, item: ast.ModuleItem) -> ModuleSummary {
   case item {
-    ast.ImportDeclaration(specifiers:, source:, phase:, ..) -> {
+    ast.ImportDeclaration(specifiers:, source:, attributes:, phase:, ..) -> {
       let request_phase = case phase {
         ast.PhaseDefer -> Deferred
         ast.PhaseEvaluation | ast.PhaseSource -> Evaluation
       }
+      let request = Request(specifier: specifier.raw(source), attributes:)
       ModuleSummary(
         imports: [
-          #(specifier.raw(source), declaration_bindings(specifiers, phase)),
+          #(request, declaration_bindings(specifiers, phase)),
           ..acc.imports
         ],
         exports: acc.exports,
         requested: [
-          ModuleRequest(specifier: specifier.raw(source), phase: request_phase),
+          ModuleRequest(request:, phase: request_phase),
           ..acc.requested
         ],
         has_source_phase: acc.has_source_phase || phase == ast.PhaseSource,
@@ -107,8 +108,11 @@ fn analyze_item(acc: ModuleSummary, item: ast.ModuleItem) -> ModuleSummary {
         })
       // §16.2.1.3: `export {} from "m"` still requested m
       let requested = case item {
-        ast.ExportNamed(source: Some(source), ..) -> [
-          ModuleRequest(specifier: specifier.raw(source), phase: Evaluation),
+        ast.ExportNamed(source: Some(source), attributes:, ..) -> [
+          ModuleRequest(
+            request: Request(specifier: specifier.raw(source), attributes:),
+            phase: Evaluation,
+          ),
           ..acc.requested
         ]
         ast.ExportNamed(source: None, ..)
@@ -132,27 +136,27 @@ fn analyze_item(acc: ModuleSummary, item: ast.ModuleItem) -> ModuleSummary {
 
 fn request_of_entry(entry: ExportEntry) -> Result(ModuleRequest, Nil) {
   case entry {
-    ReExport(source_specifier:, ..)
-    | ReExportAll(source_specifier:)
-    | ReExportNamespace(source_specifier:, ..) ->
-      Ok(ModuleRequest(specifier: source_specifier, phase: Evaluation))
+    ReExport(request:, ..)
+    | ReExportAll(request:)
+    | ReExportNamespace(request:, ..) ->
+      Ok(ModuleRequest(request:, phase: Evaluation))
     LocalExport(..) -> Error(Nil)
   }
 }
 
-// dedup by specifier; first eager request wins phase and position
+// dedup by modulerequestsequal; first eager request wins phase and position
 fn merge_requests(requested: List(ModuleRequest)) -> List(ModuleRequest) {
   let merged: List(ModuleRequest) = []
   list.fold(requested, merged, fn(merged, request) {
     let seen =
-      list.find(merged, fn(existing) { existing.specifier == request.specifier })
+      list.find(merged, fn(existing) { existing.request == request.request })
     case seen, request.phase {
       Error(Nil), _ -> list.append(merged, [request])
       Ok(ModuleRequest(phase: Evaluation, ..)), _ -> merged
       Ok(ModuleRequest(phase: Deferred, ..)), Deferred -> merged
       Ok(ModuleRequest(phase: Deferred, ..)), Evaluation ->
         list.append(
-          list.filter(merged, fn(e) { e.specifier != request.specifier }),
+          list.filter(merged, fn(e) { e.request != request.request }),
           [request],
         )
     }
@@ -206,25 +210,26 @@ fn export_entries(item: ast.ModuleItem) -> List(ExportEntry) {
     ast.ExportDefaultDeclaration(..) -> [
       LocalExport(export_name: "default", local_name: default_export_local_name),
     ]
-    ast.ExportNamed(specifiers:, source: Some(source), ..) ->
+    ast.ExportNamed(specifiers:, source: Some(source), attributes:, ..) -> {
+      let request = Request(specifier: specifier.raw(source), attributes:)
       list.map(specifiers, fn(spec) {
         case spec {
           ast.ExportSpecifier(local:, exported:, ..) ->
-            ReExport(
-              export_name: exported,
-              imported_name: local,
-              source_specifier: specifier.raw(source),
-            )
+            ReExport(export_name: exported, imported_name: local, request:)
         }
       })
-    ast.ExportAllDeclaration(exported: Some(name), source:, ..) -> [
+    }
+    ast.ExportAllDeclaration(exported: Some(name), source:, attributes:, ..) -> [
       ReExportNamespace(
         export_name: name,
-        source_specifier: specifier.raw(source),
+        request: Request(specifier: specifier.raw(source), attributes:),
       ),
     ]
-    ast.ExportAllDeclaration(exported: None, source:, ..) -> [
-      ReExportAll(source_specifier: specifier.raw(source)),
+    ast.ExportAllDeclaration(exported: None, source:, attributes:, ..) -> [
+      ReExportAll(request: Request(
+        specifier: specifier.raw(source),
+        attributes:,
+      )),
     ]
     ast.StatementItem(_) | ast.ImportDeclaration(..) -> []
   }

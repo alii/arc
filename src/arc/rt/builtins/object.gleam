@@ -444,10 +444,7 @@ fn own_enumerable_pairs(
     KHandle(h) ->
       case plain_own_enum_pairs(st, mk_object(h)) {
         PlainPairs(pairs) -> #(pairs, st)
-        Miss -> {
-          let #(keys, st) = rt_obj.own_keys(st, h)
-          collect_enumerable(st, h, keys, [])
-        }
+        Miss -> rt_obj.enumerable_own_entries(st, h)
       }
     KNull | KUndef -> rt_val.throw_type_error(st, cannot_convert)
     KStr(s) -> #(
@@ -457,30 +454,6 @@ fn own_enumerable_pairs(
       st,
     )
     _ -> #([], st)
-  }
-}
-
-fn collect_enumerable(
-  st: Agent,
-  h: Handle,
-  keys: List(ObjectKey),
-  acc: List(#(String, JsVal)),
-) -> #(List(#(String, JsVal)), Agent) {
-  case keys {
-    [] -> #(list.reverse(acc), st)
-    [SymbolKey(_), ..rest] -> collect_enumerable(st, h, rest, acc)
-    [StringKey(pk) as k, ..rest] -> {
-      let #(prop, st) = rt_obj.get_own_property(st, h, k)
-      let enumerable =
-        option.map(prop, types.prop_enumerable) |> option.unwrap(False)
-      case enumerable {
-        False -> collect_enumerable(st, h, rest, acc)
-        True -> {
-          let #(v, st) = rt_obj.get_prop(st, mk_object(h), k)
-          collect_enumerable(st, h, rest, [#(key.to_text(pk), v), ..acc])
-        }
-      }
-    }
   }
 }
 

@@ -7,13 +7,15 @@ import arc/interp/safepoint
 import arc/interp/state.{type State, State}
 import arc/module/graph
 import arc/module/linkable
-import arc/module/loader.{type LoadError, type ResolveError}
+import arc/module/loader.{type ModuleSource}
 import arc/module/registry
 import arc/module/specifier
 import arc/module/summary
 import arc/parser
 import arc/rt/async.{type Drain} as rt_async
+import arc/rt/builtins/json
 import arc/rt/builtins/reflect as b_reflect
+import arc/rt/builtins/uint8_codec
 import arc/rt/bytecode.{type FuncTemplate}
 import arc/rt/call as rt_call
 import arc/rt/closure as rt_closure
@@ -21,12 +23,12 @@ import arc/rt/inspect as rt_inspect
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, type ReflectNative, KHandle, KStr, KTdz,
-  ModuleNamespace, NoElements, PromiseFulfilled, PromisePending, PromiseRejected,
-  ProxyObj, ReflectDefineProperty, ReflectDeleteProperty, ReflectGet,
-  ReflectGetOwnPropertyDescriptor, ReflectHas, ReflectOwnKeys, SAsyncContext,
-  SBox, SObject, SPromiseData, StepAwait, StepReturn, StepThrow, StepYield,
-  StringKey, classify, mk_object, mk_tdz, mk_undefined,
+  type Agent, type Handle, type JsVal, type ReflectNative, Immutable, KHandle,
+  KStr, KTdz, ModuleNamespace, NoElements, PromiseFulfilled, PromisePending,
+  PromiseRejected, ProxyObj, ReflectDefineProperty, ReflectDeleteProperty,
+  ReflectGet, ReflectGetOwnPropertyDescriptor, ReflectHas, ReflectOwnKeys,
+  SAsyncContext, SBox, SObject, StepAwait, StepReturn, StepThrow, StepYield,
+  StringKey, classify, mk_object, mk_string, mk_tdz, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bool
@@ -41,7 +43,7 @@ pub type CompiledModule {
   CompiledModule(
     specifier: specifier.Resolved,
     template: FuncTemplate,
-    import_bindings: List(#(specifier.Raw, List(summary.ImportBinding))),
+    import_bindings: List(#(specifier.Request, List(summary.ImportBinding))),
     export_entries: List(summary.ExportEntry),
     export_names: Dict(String, Int),
     specifier_map: specifier.SpecifierMap,
@@ -63,6 +65,11 @@ pub type HostModule {
 pub type BundleModule {
   SourceModule(compiled: CompiledModule)
   SyntheticModule(host: HostModule)
+  // createdefaultexportsyntheticmodule: the only export is default
+  DefaultExportModule(
+    specifier: specifier.Resolved,
+    default_export: graph.DefaultExport,
+  )
 }
 
 pub type ModuleBundle {
@@ -76,7 +83,7 @@ fn with_source_module(
 ) -> a {
   case bundle_module {
     SourceModule(compiled) -> k(compiled)
-    SyntheticModule(_) -> default
+    SyntheticModule(_) | DefaultExportModule(..) -> default
   }
 }
 
@@ -102,22 +109,30 @@ const tla_never_settled_message = "module evaluation never completed: top-level 
 pub fn compile_bundle_error_message(err: CompileBundleError) -> String {
   case err {
     GraphError(error: graph.ParseFailed(resolved, parse_error)) ->
-      "SyntaxError in '"
-      <> specifier.resolved_text(resolved)
-      <> "': "
+      "SyntaxError in "
+      <> specifier.describe(resolved)
+      <> ": "
       <> parser.error_to_string(parse_error)
+    GraphError(error: graph.JsonParseFailed(resolved, message)) ->
+      "SyntaxError in " <> specifier.describe(resolved) <> ": " <> message
+    GraphError(error: graph.UnsupportedImportAttribute(raw, referrer, key)) ->
+      "Import attribute '"
+      <> key
+      <> "' is not supported, importing '"
+      <> specifier.raw_text(raw)
+      <> "' from "
+      <> specifier.describe(referrer)
     GraphError(error: graph.ResolveFailed(raw, referrer, error)) ->
       loader.resolve_failure_message(
         specifier.raw_text(raw),
-        specifier.resolved_text(referrer),
+        specifier.resolved_path(referrer),
         error,
       )
     GraphError(error: graph.LoadFailed(resolved, error)) ->
-      loader.load_failure_message(specifier.resolved_text(resolved), error)
+      loader.load_failure_message(resolved, error)
     GraphError(error: graph.SourcePhaseUnsupported(resolved)) ->
-      "'"
-      <> specifier.resolved_text(resolved)
-      <> "': source phase imports ('import source') are not supported"
+      specifier.describe(resolved)
+      <> ": source phase imports ('import source') are not supported"
     CompileError(specifier:, error:) ->
       compiler.error_message(error) <> " in '" <> specifier <> "'"
   }
@@ -125,9 +140,12 @@ pub fn compile_bundle_error_message(err: CompileBundleError) -> String {
 
 pub fn format_compile_bundle_error(err: CompileBundleError) -> String {
   let phase = case err {
-    GraphError(error: graph.ParseFailed(..)) -> ""
+    GraphError(error: graph.ParseFailed(..))
+    | GraphError(error: graph.JsonParseFailed(..)) -> ""
     GraphError(error: graph.ResolveFailed(..))
-    | GraphError(error: graph.LoadFailed(..)) -> "ResolutionError: "
+    | GraphError(error: graph.LoadFailed(..))
+    | GraphError(error: graph.UnsupportedImportAttribute(..)) ->
+      "ResolutionError: "
     GraphError(error: graph.SourcePhaseUnsupported(..)) -> "LinkError: "
     CompileError(..) -> "CompileError: "
   }
@@ -151,7 +169,7 @@ pub fn error_message(st: Agent, err: ModuleError) -> String {
 }
 
 type LinkInvariantBroken {
-  UnresolvedDependency(specifier: specifier.Raw)
+  UnresolvedDependency(request: specifier.Request)
   ModuleNotLinked(specifier: String)
   MissingExportBox(dep: String, name: String)
   MissingDeferredBox(dep: String)
@@ -177,8 +195,8 @@ pub type EvaluatedBundle {
 pub fn compile_bundle(
   entry_specifier: String,
   entry_source: String,
-  resolve: fn(String, String) -> Result(String, ResolveError),
-  load: fn(String) -> Result(String, LoadError),
+  resolve: loader.ResolveFn,
+  load: loader.LoadFn,
 ) -> Result(ModuleBundle, CompileBundleError) {
   compile_bundle_with_hosts(
     entry_specifier,
@@ -192,26 +210,55 @@ pub fn compile_bundle(
 pub fn compile_bundle_with_hosts(
   entry_specifier: String,
   entry_source: String,
-  resolve: fn(String, String) -> Result(String, ResolveError),
-  load: fn(String) -> Result(String, LoadError),
+  resolve: loader.ResolveFn,
+  load: loader.LoadFn,
+  host_modules: Dict(String, HostModule),
+) -> Result(ModuleBundle, CompileBundleError) {
+  compile_graph(
+    specifier.resolved(entry_specifier),
+    loader.SourceText(entry_source),
+    resolve,
+    load,
+    host_modules,
+  )
+}
+
+// entry carries the attributes entry_source was loaded with
+pub fn compile_loaded_bundle(
+  entry: specifier.Resolved,
+  entry_source: ModuleSource,
+  resolve: loader.ResolveFn,
+  load: loader.LoadFn,
+) -> Result(ModuleBundle, CompileBundleError) {
+  compile_graph(entry, entry_source, resolve, load, dict.new())
+}
+
+fn compile_graph(
+  entry: specifier.Resolved,
+  entry_source: ModuleSource,
+  resolve: loader.ResolveFn,
+  load: loader.LoadFn,
   host_modules: Dict(String, HostModule),
 ) -> Result(ModuleBundle, CompileBundleError) {
   let resolve_request = fn(request: summary.ModuleRequest, referrer) {
     resolve(
-      specifier.raw_text(request.specifier),
-      specifier.resolved_text(referrer),
+      specifier.raw_text(request.request.specifier),
+      specifier.resolved_path(referrer),
     )
-    |> result.map(specifier.resolved)
   }
-  let load_source = fn(spec) { load(specifier.resolved_text(spec)) }
-  use source_graph <- result.try(
-    graph.load(
-      specifier.resolved(entry_specifier),
-      entry_source,
-      resolve_request,
-      load_source,
-      fn(spec) { dict.has_key(host_modules, specifier.resolved_text(spec)) },
+  let load_source = fn(resolved) {
+    load(
+      specifier.resolved_path(resolved),
+      specifier.resolved_attributes(resolved),
     )
+  }
+  // host modules are registered without attributes
+  let is_host = fn(resolved) {
+    specifier.resolved_attributes(resolved) == []
+    && dict.has_key(host_modules, specifier.resolved_path(resolved))
+  }
+  use source_graph <- result.try(
+    graph.load(entry, entry_source, resolve_request, load_source, is_host)
     |> result.map_error(GraphError),
   )
   let with_hosts =
@@ -219,15 +266,16 @@ pub fn compile_bundle_with_hosts(
   use modules <- result.map(
     dict.fold(source_graph.modules, Ok(with_hosts), fn(acc, resolved, node) {
       use modules <- result.try(acc)
-      use compiled <- result.map(compile_source_module(node))
-      dict.insert(
-        modules,
-        specifier.resolved_text(resolved),
-        SourceModule(compiled),
-      )
+      use bundle_module <- result.map(case node {
+        graph.SourceTextModule(module) ->
+          compile_source_module(module) |> result.map(SourceModule)
+        graph.DefaultExportModule(default_export) ->
+          Ok(DefaultExportModule(specifier: resolved, default_export:))
+      })
+      dict.insert(modules, specifier.registry_key(resolved), bundle_module)
     }),
   )
-  ModuleBundle(entry: entry_specifier, modules:)
+  ModuleBundle(entry: specifier.registry_key(entry), modules:)
 }
 
 fn compile_source_module(
@@ -246,7 +294,7 @@ fn compile_source_module(
   use body <- result.map(
     compiler.compile_module(items, scopes, module_summary)
     |> result.map_error(fn(error) {
-      CompileError(specifier: specifier.resolved_text(resolved), error:)
+      CompileError(specifier: specifier.resolved_path(resolved), error:)
     }),
   )
   let requested_modules =
@@ -275,23 +323,39 @@ fn seed_value(seed: ExportSeed) -> JsVal {
   }
 }
 
+// host modules are registered without attributes
+fn identity_of(
+  spec: String,
+  bundle_module: BundleModule,
+) -> specifier.Resolved {
+  case bundle_module {
+    SourceModule(compiled) -> compiled.specifier
+    DefaultExportModule(specifier:, ..) -> specifier
+    SyntheticModule(_) -> specifier.resolved(spec)
+  }
+}
+
 fn linkable_of_bundle(bundle: ModuleBundle) -> linkable.LinkableGraph {
-  use acc, specifier, bundle_module <- dict.fold(bundle.modules, dict.new())
+  use acc, spec, bundle_module <- dict.fold(bundle.modules, dict.new())
   let linkable = case bundle_module {
     SourceModule(m) ->
       linkable.module_of(m.import_bindings, m.export_entries, m.specifier_map)
       |> result.map_error(UnresolvedDependency)
       |> assert_link_invariant
-    SyntheticModule(hm) ->
-      linkable.LinkableModule(
-        import_bindings: [],
-        export_entries: list.map(hm.exports, fn(e) {
-          linkable.LocalExport(export_name: e.0, local_name: e.0)
-        }),
-        star_exports: [],
-      )
+    SyntheticModule(hm) -> leaf_linkable(list.map(hm.exports, fn(e) { e.0 }))
+    DefaultExportModule(..) -> leaf_linkable(["default"])
   }
-  dict.insert(acc, specifier.resolved(specifier), linkable)
+  dict.insert(acc, identity_of(spec, bundle_module), linkable)
+}
+
+fn leaf_linkable(export_names: List(String)) -> linkable.LinkableModule {
+  linkable.LinkableModule(
+    import_bindings: [],
+    export_entries: list.map(export_names, fn(name) {
+      linkable.LocalExport(export_name: name, local_name: name)
+    }),
+    star_exports: [],
+  )
 }
 
 pub type LinkedModule {
@@ -601,7 +665,18 @@ fn evaluate_if_needed(
 ) -> #(Result(JsVal, ModuleError), GraphEvaluation) {
   case dict.get(bundle.modules, specifier) {
     Error(Nil) -> #(Error(NotInBundle(specifier:)), evaluation)
-    Ok(SyntheticModule(_)) -> #(Ok(mk_undefined()), evaluation)
+    // synthetic evaluate only publishes already-seeded bindings
+    Ok(SyntheticModule(_)) | Ok(DefaultExportModule(..)) -> {
+      let st =
+        registry.write_module_status(
+          evaluation.agent,
+          specifier,
+          registry.Evaluated,
+        )
+      let evaluation =
+        with_agent(evaluation, st) |> set_run_status(specifier, Evaluated)
+      #(Ok(mk_undefined()), evaluation)
+    }
     Ok(SourceModule(compiled)) ->
       case run_status_of(evaluation, specifier) {
         Some(Evaluated) -> #(Ok(mk_undefined()), evaluation)
@@ -637,7 +712,7 @@ fn evaluate_with_deps(
       evaluation,
       Nil,
     )
-    let dep_specifier = specifier.resolved_text(resolved_dep)
+    let dep_specifier = specifier.registry_key(resolved_dep)
     let to_evaluate = case phase {
       summary.Evaluation -> [dep_specifier]
       summary.Deferred -> {
@@ -689,7 +764,7 @@ fn evaluate_with_deps(
           registry.Evaluating,
         )
       let #(outcome, st) =
-        run_module_body(st, spec, compiled, lm.unit_id, seeds, drain)
+        run_module_body(st, compiled, lm.unit_id, seeds, drain)
       case outcome {
         BodyThrew(thrown) -> {
           let st =
@@ -760,14 +835,14 @@ fn module_activation(
 
 fn run_module_body(
   st: Agent,
-  specifier: String,
   compiled: CompiledModule,
   unit_id: Int,
   seeds: List(#(Int, JsVal)),
   drain: Drain,
 ) -> #(BodyOutcome, Agent) {
+  let referrer = specifier.resolved_path(compiled.specifier)
   let outer_referrer = registry.read_active_referrer(st)
-  let st = registry.write_active_referrer(st, Some(specifier))
+  let st = registry.write_active_referrer(st, Some(referrer))
   let #(outcome, st) = run_module_turns(st, compiled, unit_id, seeds, drain)
   #(outcome, registry.write_active_referrer(st, outer_referrer))
 }
@@ -784,8 +859,10 @@ fn run_module_turns(
   case step {
     StepReturn(v) -> #(BodyReturned(v), safepoint.finish_turn(st, [v], drain))
     StepThrow(e) -> #(BodyThrew(e), safepoint.finish_turn(st, [e], drain))
-    StepAwait(awaited, resume) ->
-      drive_top_level_await(st, awaited, resume, drain)
+    StepAwait(awaited, resume) -> {
+      let spec = specifier.registry_key(compiled.specifier)
+      drive_top_level_await(st, spec, awaited, resume, drain)
+    }
     StepYield(..) -> {
       let #(err, st) =
         rt_val.new_error(st, TypeError, "InternalError: module body yielded")
@@ -797,6 +874,7 @@ fn run_module_turns(
 // §16.2.1.5.3.4 execute async module
 fn drive_top_level_await(
   st: Agent,
+  spec: String,
   awaited: JsVal,
   resume: types.Resume,
   drain: Drain,
@@ -804,10 +882,8 @@ fn drive_top_level_await(
   let #(promise, st) = rt_async.new_promise(st)
   // held from gleam across drains
   let st = rt_store.pin_root(st, promise)
-  let rt_async.PromiseRecord(data:, state: pstate, ..) =
-    rt_async.promise_data(st, promise)
-  // mark handled, the host inspects it below
-  let st = rt_store.cell_set(st, data, SPromiseData(pstate, is_handled: True))
+  // also marks it handled, the host inspects it below
+  let st = settle_status_in_reaction(st, spec, promise)
   let #(ctx, st) = rt_store.cell_new(st, SAsyncContext(resume:, promise:))
   let st = rt_async.await(st, ctx, awaited)
   let st = safepoint.finish_turn(st, [], drain)
@@ -825,6 +901,46 @@ fn drive_top_level_await(
       st,
     )
   }
+}
+
+// asyncmoduleexecutionfulfilled/rejected: status settles in that job
+fn settle_status_in_reaction(
+  st: Agent,
+  spec: String,
+  promise: Handle,
+) -> Agent {
+  let #(on_fulfilled, st) = {
+    use st, _args <- rt_call.new_builtin_function(
+      st,
+      "%AsyncModuleExecutionFulfilled%",
+      0,
+    )
+    #(
+      mk_undefined(),
+      registry.write_module_status(st, spec, registry.Evaluated),
+    )
+  }
+  let #(on_rejected, st) = {
+    use st, args <- rt_call.new_builtin_function(
+      st,
+      "%AsyncModuleExecutionRejected%",
+      1,
+    )
+    let reason = list.first(args) |> result.unwrap(mk_undefined())
+    let st =
+      st
+      |> registry.clear_module_status(spec)
+      |> registry.write_module_error(spec, reason)
+    #(mk_undefined(), st)
+  }
+  rt_async.perform_then(
+    st,
+    promise,
+    mk_object(on_fulfilled),
+    mk_object(on_rejected),
+    mk_undefined(),
+    mk_undefined(),
+  )
 }
 
 // pinned: binding boxes are held from gleam
@@ -890,12 +1006,12 @@ fn build_linked(
     ))
   let lg = linkable_of_bundle(bundle)
   let exports =
-    list.fold(specs, dict.new(), fn(all, spec) {
+    dict.fold(bundle.modules, dict.new(), fn(all, spec, bundle_module) {
       case dict.get(preexisting, spec) {
         Ok(ReusedNamespace(exports: existing_exports, ..)) ->
           dict.insert(all, spec, existing_exports)
         Error(Nil) -> {
-          let key = specifier.resolved(spec)
+          let key = identity_of(spec, bundle_module)
           let map =
             linkable.exported_names(lg, key)
             |> list.fold(dict.new(), fn(map, name) {
@@ -903,23 +1019,23 @@ fn build_linked(
                 // §16.2.1.6.3 ambiguous star names are not exported
                 linkable.Unresolvable | linkable.Ambiguous -> map
                 linkable.ResolvedTo(owner, binding) ->
-                  dict.get(local_boxes, specifier.resolved_text(owner))
+                  dict.get(local_boxes, specifier.registry_key(owner))
                   |> result.try(dict.get(_, binding))
                   |> result.replace_error(MissingExportBox(
-                    specifier.resolved_text(owner),
+                    specifier.registry_key(owner),
                     binding,
                   ))
                   |> assert_link_invariant
                   |> dict.insert(map, name, _)
                 linkable.ResolvedNamespace(target) -> {
                   let assert Ok(box) =
-                    dict.get(namespace_boxes, specifier.resolved_text(target))
+                    dict.get(namespace_boxes, specifier.registry_key(target))
                   dict.insert(map, name, box)
                 }
                 linkable.ResolvedDeferredNamespace(target) ->
-                  dict.get(deferred_boxes, specifier.resolved_text(target))
+                  dict.get(deferred_boxes, specifier.registry_key(target))
                   |> result.replace_error(
-                    MissingDeferredBox(specifier.resolved_text(target)),
+                    MissingDeferredBox(specifier.registry_key(target)),
                   )
                   |> assert_link_invariant
                   |> dict.insert(map, name, _)
@@ -970,7 +1086,10 @@ fn gather_async_transitive_deps(
   }
   use <- bool.guard(already_started, #([], seen))
   case dict.get(bundle.modules, spec) {
-    Error(Nil) | Ok(SyntheticModule(_)) -> #([], seen)
+    Error(Nil) | Ok(SyntheticModule(_)) | Ok(DefaultExportModule(..)) -> #(
+      [],
+      seen,
+    )
     Ok(SourceModule(m)) ->
       case m.has_tla {
         True -> #([spec], seen)
@@ -981,7 +1100,7 @@ fn gather_async_transitive_deps(
               gather_async_transitive_deps(
                 bundle,
                 evaluation,
-                specifier.resolved_text(request.specifier),
+                specifier.registry_key(request.specifier),
                 seen,
               )
             #(list.append(found, more), seen)
@@ -1017,7 +1136,7 @@ fn needed_deferred_specs(bundle: ModuleBundle) -> List(String) {
   dict.fold(bundle.modules, [], fn(acc, _spec, bundle_module) {
     use m <- with_source_module(bundle_module, acc)
     list.fold(m.import_bindings, acc, fn(acc, entry) {
-      let #(raw_dep, bindings) = entry
+      let #(request, bindings) = entry
       let is_deferred =
         list.any(bindings, fn(binding) {
           case binding {
@@ -1027,10 +1146,10 @@ fn needed_deferred_specs(bundle: ModuleBundle) -> List(String) {
         })
       use <- bool.guard(!is_deferred, acc)
       let dep =
-        specifier.lookup(m.specifier_map, raw_dep)
-        |> option.to_result(UnresolvedDependency(raw_dep))
+        specifier.lookup(m.specifier_map, request)
+        |> option.to_result(UnresolvedDependency(request))
         |> assert_link_invariant
-      [specifier.resolved_text(dep), ..acc]
+      [specifier.registry_key(dep), ..acc]
     })
   })
   |> list.unique
@@ -1087,7 +1206,7 @@ fn stale_reused_export(
     let #(spec, bundle_module) = entry
     case bundle_module, dict.get(preexisting, spec) {
       SourceModule(_), Ok(ReusedNamespace(exports: existing_exports, ..)) -> {
-        let key = specifier.resolved(spec)
+        let key = identity_of(spec, bundle_module)
         linkable.exported_names(lg, key)
         |> list.find_map(fn(name) {
           case linkable.resolve_export(lg, key, name) {
@@ -1152,21 +1271,51 @@ fn preallocate_local_boxes(
         list.fold(hm.exports, #(dict.new(), st), fn(a, export) {
           let #(boxes, st) = a
           let #(name, val) = export
-          let reused =
-            option.then(existing_exports, fn(ex) {
-              dict.get(ex, name) |> option.from_result
-            })
-          case reused {
-            Some(box) -> #(dict.insert(boxes, name, box), st)
-            None -> {
-              let #(box, st) = alloc_box(st, val)
-              #(dict.insert(boxes, name, box), st)
-            }
-          }
+          reuse_or_alloc_box(st, boxes, existing_exports, name, fn(st) {
+            #(val, st)
+          })
+        })
+      DefaultExportModule(default_export:, ..), existing_exports ->
+        reuse_or_alloc_box(st, dict.new(), existing_exports, "default", fn(st) {
+          default_export_value(st, default_export)
         })
     }
     #(dict.insert(all, spec, boxes), st)
   })
+}
+
+fn reuse_or_alloc_box(
+  st: Agent,
+  boxes: Dict(String, Handle),
+  existing_exports: Option(Dict(String, Handle)),
+  name: String,
+  make: fn(Agent) -> #(JsVal, Agent),
+) -> #(Dict(String, Handle), Agent) {
+  let reused =
+    option.then(existing_exports, fn(ex) {
+      dict.get(ex, name) |> option.from_result
+    })
+  case reused {
+    Some(box) -> #(dict.insert(boxes, name, box), st)
+    None -> {
+      let #(val, st) = make(st)
+      let #(box, st) = alloc_box(st, val)
+      #(dict.insert(boxes, name, box), st)
+    }
+  }
+}
+
+// the value setsyntheticexport("default") publishes
+fn default_export_value(
+  st: Agent,
+  default_export: graph.DefaultExport,
+) -> #(JsVal, Agent) {
+  case default_export {
+    graph.JsonExport(value:) -> json.module_value(st, value)
+    graph.TextExport(text:) -> #(mk_string(text), st)
+    graph.BytesExport(bytes:) ->
+      uint8_codec.alloc_uint8_array(st, Immutable(bytes:))
+  }
 }
 
 // proxy whose traps evaluate the module then forward
@@ -1308,7 +1457,7 @@ fn ensure_deferred_evaluated(
   }
 }
 
-// ReadyForSyncExecution: evaluation-phase requests only
+// ReadyForSyncExecution, deferred requests included
 fn ready_for_sync_execution(
   st: Agent,
   bundle: ModuleBundle,
@@ -1322,24 +1471,23 @@ fn ready_for_sync_execution(
     Some(registry.Evaluating) -> #(False, seen)
     None ->
       case dict.get(bundle.modules, spec) {
-        Error(Nil) | Ok(SyntheticModule(_)) -> #(True, seen)
+        Error(Nil) | Ok(SyntheticModule(_)) | Ok(DefaultExportModule(..)) -> #(
+          True,
+          seen,
+        )
         Ok(SourceModule(m)) ->
           case m.has_tla {
             True -> #(False, seen)
             False ->
               list.fold(m.requested_modules, #(True, seen), fn(acc, request) {
                 let #(ready, seen) = acc
-                case ready, request.phase {
-                  False, _ -> acc
-                  True, summary.Deferred -> acc
-                  True, summary.Evaluation ->
-                    ready_for_sync_execution(
-                      st,
-                      bundle,
-                      specifier.resolved_text(request.specifier),
-                      seen,
-                    )
-                }
+                use <- bool.guard(!ready, acc)
+                ready_for_sync_execution(
+                  st,
+                  bundle,
+                  specifier.registry_key(request.specifier),
+                  seen,
+                )
               })
           }
       }
@@ -1373,16 +1521,16 @@ fn evaluate_deferred_subgraph(
 fn import_seeds(
   linked: Linked,
   specifier_map: specifier.SpecifierMap,
-  import_bindings: List(#(specifier.Raw, List(summary.ImportBinding))),
+  import_bindings: List(#(specifier.Request, List(summary.ImportBinding))),
 ) -> Result(List(#(Int, JsVal)), LinkInvariantBroken) {
   use per_dep <- result.map(
     list.try_map(import_bindings, fn(entry) {
-      let #(raw_dep, bindings) = entry
+      let #(request, bindings) = entry
       use dep <- result.try(
-        specifier.lookup(specifier_map, raw_dep)
-        |> option.to_result(UnresolvedDependency(raw_dep)),
+        specifier.lookup(specifier_map, request)
+        |> option.to_result(UnresolvedDependency(request)),
       )
-      let dep = specifier.resolved_text(dep)
+      let dep = specifier.registry_key(dep)
       use lm <- result.try(
         dict.get(linked.modules, dep)
         |> result.replace_error(ModuleNotLinked(dep)),
@@ -1418,7 +1566,7 @@ fn forward_box(
 }
 
 fn linked_module(linked: Linked, compiled: CompiledModule) -> LinkedModule {
-  let spec = specifier.resolved_text(compiled.specifier)
+  let spec = specifier.registry_key(compiled.specifier)
   dict.get(linked.modules, spec)
   |> result.replace_error(ModuleNotLinked(spec))
   |> assert_link_invariant

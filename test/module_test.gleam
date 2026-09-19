@@ -5,6 +5,7 @@ import arc/module/dynamic_import
 import arc/module/import_hook
 import arc/module/loader
 import arc/module/registry
+import arc/parser/ast
 import arc/rt/async as rt_async
 import arc/rt/builtins as rt_builtins
 import arc/rt/inspect as rt_inspect
@@ -15,7 +16,6 @@ import arc/rt/types.{
   mk_undefined,
 }
 import gleam/dict
-import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
 import rt_helpers
@@ -28,7 +28,7 @@ fn dance_resolve(raw: String, _referrer: String) {
   Ok(raw)
 }
 
-fn no_source_loads(_resolved: String) {
+fn no_source_loads(_resolved: String, _attributes) {
   Error(loader.LoadNotFound)
 }
 
@@ -155,9 +155,9 @@ pub fn import_source_rejects_with_syntax_error_test() {
 }
 
 pub fn import_through_the_hook_yields_the_registered_namespace_test() {
-  let load = fn(resolved) {
+  let load = fn(resolved, _attributes) {
     case resolved {
-      "/lib.js" -> Ok("export var v; export function f() {}")
+      "/lib.js" -> Ok(loader.SourceText("export var v; export function f() {}"))
       _ -> Error(loader.LoadNotFound)
     }
   }
@@ -180,7 +180,7 @@ pub fn import_through_the_hook_yields_the_registered_namespace_test() {
   let assert Some(f) = module.read_export(st, ns, "f")
   let assert types.KHandle(_) = classify(f)
   let st =
-    import_hook.install(st, "/main.js", resolve, fn(_) {
+    import_hook.install(st, "/main.js", resolve, fn(_, _) {
       Error(loader.LoadNotFound)
     })
   let #(p2, st) =
@@ -203,20 +203,33 @@ pub fn import_of_an_unresolvable_specifier_rejects_test() {
 }
 
 pub fn hook_args_round_trip_test() {
+  let json = [ast.ImportAttribute(key: "type", value: "json")]
   let args =
-    dynamic_import.encode_hook_args(
-      "./a.js",
-      Some("/m.js"),
-      dynamic_import.DeferPhase(mk_int(1), mk_int(2)),
-    )
-  let assert Ok(dynamic_import.HookCall(specifier:, referrer:, phase:)) =
-    dynamic_import.parse_hook_args(args)
+    dynamic_import.encode_hook_args(dynamic_import.HookCall(
+      specifier: "./a.js",
+      referrer: Some("/m.js"),
+      attributes: json,
+      phase: dynamic_import.DeferPhase(mk_int(1), mk_int(2)),
+    ))
+  let assert Ok(dynamic_import.HookCall(
+    specifier:,
+    referrer:,
+    attributes:,
+    phase:,
+  )) = dynamic_import.parse_hook_args(args)
   assert specifier == "./a.js"
   assert referrer == Some("/m.js")
+  assert attributes == json
   let assert dynamic_import.DeferPhase(fulfill:, reject:) = phase
   assert classify(fulfill) == KNum(JInt(1))
   assert classify(reject) == KNum(JInt(2))
   let eager =
-    dynamic_import.encode_hook_args("./a.js", None, dynamic_import.EagerPhase)
-  assert list.length(eager) == 1
+    dynamic_import.encode_hook_args(dynamic_import.HookCall(
+      specifier: "./a.js",
+      referrer: None,
+      attributes: [],
+      phase: dynamic_import.EagerPhase,
+    ))
+  let assert Ok(dynamic_import.HookCall(referrer: None, attributes: [], ..)) =
+    dynamic_import.parse_hook_args(eager)
 }

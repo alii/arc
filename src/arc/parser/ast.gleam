@@ -82,6 +82,7 @@ pub type ModuleItem {
   ImportDeclaration(
     specifiers: List(ImportSpecifier),
     source: String,
+    attributes: List(ImportAttribute),
     phase: ImportPhase,
     span: Span,
   )
@@ -89,10 +90,21 @@ pub type ModuleItem {
   ExportNamed(
     specifiers: List(ExportSpecifier),
     source: Option(String),
+    attributes: List(ImportAttribute),
     span: Span,
   )
   ExportDefaultDeclaration(declaration: Expression, line: Int, span: Span)
-  ExportAllDeclaration(exported: Option(String), source: String, span: Span)
+  ExportAllDeclaration(
+    exported: Option(String),
+    source: String,
+    attributes: List(ImportAttribute),
+    span: Span,
+  )
+}
+
+// withclausetoattributes entry; lists come sorted by key
+pub type ImportAttribute {
+  ImportAttribute(key: String, value: String)
 }
 
 pub type Declaration {

@@ -1,3 +1,4 @@
+import arc/parser/ast
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option}
@@ -8,9 +9,14 @@ pub opaque type Raw {
   Raw(String)
 }
 
-// canonical module identity from the host resolver
+// modulerequest record minus phase; attributes sorted by key
+pub type Request {
+  Request(specifier: Raw, attributes: List(ast.ImportAttribute))
+}
+
+// canonical module identity: host-resolved path plus import attributes
 pub opaque type Resolved {
-  Resolved(String)
+  Resolved(path: String, attributes: List(ast.ImportAttribute))
 }
 
 pub fn raw(text: String) -> Raw {
@@ -22,30 +28,63 @@ pub fn raw_text(r: Raw) -> String {
   text
 }
 
-pub fn resolved(text: String) -> Resolved {
-  Resolved(text)
+pub fn resolved(path: String) -> Resolved {
+  Resolved(path:, attributes: [])
 }
 
-pub fn resolved_text(r: Resolved) -> String {
-  let Resolved(text) = r
-  text
+// modulerequestsequal: same path and attributes give the same module
+pub fn resolved_with(
+  path: String,
+  attributes: List(ast.ImportAttribute),
+) -> Resolved {
+  Resolved(path:, attributes:)
+}
+
+pub fn resolved_path(r: Resolved) -> String {
+  r.path
+}
+
+pub fn resolved_attributes(r: Resolved) -> List(ast.ImportAttribute) {
+  r.attributes
+}
+
+// string key for the registry and bundle tables
+pub fn registry_key(r: Resolved) -> String {
+  case r.attributes {
+    [] -> r.path
+    attributes -> r.path <> " " <> with_clause(attributes)
+  }
+}
+
+// 'path' plus its with clause, for messages
+pub fn describe(r: Resolved) -> String {
+  case r.attributes {
+    [] -> "'" <> r.path <> "'"
+    attributes -> "'" <> r.path <> "' " <> with_clause(attributes)
+  }
+}
+
+fn with_clause(attributes: List(ast.ImportAttribute)) -> String {
+  let entries =
+    list.map(attributes, fn(a) { a.key <> ": " <> string.inspect(a.value) })
+  "with { " <> string.join(entries, ", ") <> " }"
 }
 
 pub opaque type SpecifierMap {
-  SpecifierMap(entries: Dict(Raw, Resolved))
+  SpecifierMap(entries: Dict(Request, Resolved))
 }
 
 pub fn new_map() -> SpecifierMap {
   SpecifierMap(dict.new())
 }
 
-pub fn insert(map: SpecifierMap, from: Raw, to: Resolved) -> SpecifierMap {
+pub fn insert(map: SpecifierMap, from: Request, to: Resolved) -> SpecifierMap {
   let SpecifierMap(entries) = map
   SpecifierMap(dict.insert(entries, from, to))
 }
 
-// the only bridge from raw to resolved
-pub fn lookup(map: SpecifierMap, r: Raw) -> Option(Resolved) {
+// the only bridge from request to resolved
+pub fn lookup(map: SpecifierMap, r: Request) -> Option(Resolved) {
   let SpecifierMap(entries) = map
   dict.get(entries, r) |> option.from_result
 }
@@ -63,7 +102,7 @@ pub fn resolve_path(raw: Raw, parent: Resolved) -> Specifier {
     string.starts_with(text, "/")
   {
     True, _, _ | _, True, _ -> {
-      let parent_dir = dirname(resolved_text(parent))
+      let parent_dir = dirname(parent.path)
       PathSpecifier(resolved(normalize(parent_dir <> "/" <> text)))
     }
     _, _, True -> PathSpecifier(resolved(normalize(text)))
