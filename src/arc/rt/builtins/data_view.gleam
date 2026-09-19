@@ -294,8 +294,8 @@ fn live_buffer_info(st: Agent, buf: Handle) -> #(Int, Bool) {
         "Cannot perform operation on a detached ArrayBuffer",
       )
     Some(storage) -> #(
-      buffer.buffer_byte_size(storage),
-      option.is_some(buffer.buffer_max_byte_length(storage)),
+      buffer.storage_byte_size(storage),
+      option.is_some(buffer.storage_max_byte_length(storage)),
     )
     None -> rt_val.throw_type_error(st, "DataView buffer is not an ArrayBuffer")
   }

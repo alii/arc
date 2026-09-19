@@ -1,4 +1,5 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError, TypeError}
+import arc/internal/digits
 import arc/internal/gregorian.{days_in_month}
 import arc/internal/temporal_calendar
 import arc/rt/builtins/helpers
@@ -18,7 +19,7 @@ import arc/rt/builtins/temporal_fields.{
 import arc/rt/builtins/temporal_iso.{
   type IsoDateSlots, type Overflow, Constrain, IsoDate, IsoDateSlots, Reject,
   check_date_limits, epoch_days, is_valid_iso_date, max_epoch_days,
-  min_epoch_days, pad2, regulate_iso_date,
+  min_epoch_days, regulate_iso_date,
 }
 import arc/rt/builtins/temporal_options.{
   type CalendarNameMode, CalendarNameAuto, format_with_reference,
@@ -378,7 +379,7 @@ pub fn method(
       st,
     )
     PlainMonthDayToString -> {
-      let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
+      let opts = get_options_object(st, helpers.arg_at(args, 0))
       let #(cal_name, st) = get_calendar_name_option(st, opts)
       #(mk_string(format_md_cal(m, d, ry, cal, cal_name)), st)
     }
@@ -493,6 +494,6 @@ fn format_md_cal(
     IsoDate(ry, m, d),
     cal,
     mode,
-    short: pad2(m) <> "-" <> pad2(d),
+    short: digits.pad2(m) <> "-" <> digits.pad2(d),
   )
 }

@@ -2,30 +2,12 @@
 
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, type ObjKind, type SymbolId, KHandle,
-  KSym, SObject, classify, mk_undefined,
+  type Agent, type Handle, type JsVal, type ObjKind, KHandle, KSym, SObject,
+  classify, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/list
 import gleam/option.{type Option, None, Some}
-
-pub fn get_named(st: Agent, recv: JsVal, key: String) -> #(JsVal, Agent) {
-  rt_val.get_named(st, recv, key)
-}
-
-pub fn get_symbol(st: Agent, recv: JsVal, sym: SymbolId) -> #(JsVal, Agent) {
-  rt_val.get_symbol(st, recv, sym)
-}
-
-// strict set, throws on failure
-@external(erlang, "arc_rt_obj_ffi", "set_named")
-pub fn set_named(
-  st: Agent,
-  obj: JsVal,
-  key: String,
-  v: JsVal,
-  strict strict: Bool,
-) -> Agent
 
 pub fn list_at(lst: List(a), idx: Int) -> Option(a) {
   case idx, lst {

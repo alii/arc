@@ -29,9 +29,9 @@ import arc/rt/builtins/temporal_plain_time.{
   to_temporal_time,
 }
 import arc/rt/builtins/temporal_rounding.{
-  Day, DayUnit, Nanosecond, apply_since_duration, apply_since_mode,
-  check_diff_setup, get_difference_settings, max_unit, round_options,
-  round_to_increment, time_unit_ns, to_string_time_options,
+  Day, DayUnit, Nanosecond, StringPrecision, apply_since_duration,
+  apply_since_mode, check_diff_setup, get_difference_settings, max_unit,
+  round_options, round_to_increment, time_unit_ns, to_string_time_options,
   valid_rounding_increment,
 }
 import arc/rt/builtins/temporal_time_zone.{
@@ -290,7 +290,7 @@ pub fn getter(
   g: TemporalDateTimeGetter,
   this: JsVal,
 ) -> #(JsVal, Agent) {
-  let #(d, t, cal) =
+  let temporal_common.IsoDateTimeSlots(d, t, cal) =
     require_temporal(
       st,
       this,
@@ -311,7 +311,7 @@ pub fn method(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(d, t, cal) =
+  let temporal_common.IsoDateTimeSlots(d, t, cal) =
     require_temporal(
       st,
       this,
@@ -334,9 +334,9 @@ pub fn method(
       st,
     )
     PlainDateTimeToString -> {
-      let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
+      let opts = get_options_object(st, helpers.arg_at(args, 0))
       let #(cal_name, st) = get_calendar_name_option(st, opts)
-      let #(#(precision, smallest_time_unit, inc, mode), st) =
+      let #(StringPrecision(precision, smallest_time_unit, inc), mode, st) =
         to_string_time_options(st, opts)
       let #(d2, t2) = case smallest_time_unit {
         None -> #(d, t)
@@ -426,7 +426,7 @@ pub fn method(
       case classify(arg) {
         KStr(tz_text) -> {
           let #(tz, st) = time_zone_from_string(st, tz_text)
-          let #(opts, st) = get_options_object(st, helpers.arg_at(args, 1))
+          let opts = get_options_object(st, helpers.arg_at(args, 1))
           let #(dis, st) = get_disambiguation_option(st, opts)
           let ns = rt_val.or_throw(st, get_epoch_ns_for(tz, d, t, dis))
           let ns = rt_val.or_throw(st, validate_epoch_ns(ns))

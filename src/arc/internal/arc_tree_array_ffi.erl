@@ -3,7 +3,7 @@
 %% trie invariant: every leaf below size except the hot one is in the trie
 -module(arc_tree_array_ffi).
 -compile({no_auto_import, [size/1]}).
--export([new/0, from_list/1, get/2, get_option/2, set/3, size/1, resize/2,
+-export([new/0, from_list/1, get_or_hole/2, get/2, set/3, size/1, resize/2,
          reset/2, sparse_fold/3, to_list/1, dense_list/2, append_list/2,
          range_list/3]).
 
@@ -29,21 +29,21 @@ from_list(L) ->
 size({?VEC_TAG, Size, _, _, _, _}) -> Size;
 size(T) -> tuple_size(T).
 
-get(I, {?VEC_TAG, _, _, _, HotIx, Hot}) when I bsr ?LEVEL_BITS =:= HotIx ->
+get_or_hole(I, {?VEC_TAG, _, _, _, HotIx, Hot}) when I bsr ?LEVEL_BITS =:= HotIx ->
     element((I band ?MASK) + 1, Hot);
-get(I, {?VEC_TAG, Size, 4, N, _, _}) when I < Size, I >= 0 ->
+get_or_hole(I, {?VEC_TAG, Size, 4, N, _, _}) when I < Size, I >= 0 ->
     element((I band ?MASK) + 1, element((I bsr 4) + 1, N));
-get(I, {?VEC_TAG, Size, 8, N, _, _}) when I < Size, I >= 0 ->
+get_or_hole(I, {?VEC_TAG, Size, 8, N, _, _}) when I < Size, I >= 0 ->
     element((I band ?MASK) + 1,
     element(((I bsr 4) band ?MASK) + 1,
     element((I bsr 8) + 1, N)));
-get(I, {?VEC_TAG, Size, S, N, _, _}) when I < Size, I >= 0 -> vget(I, S, N);
-get(_, {?VEC_TAG, _, _, _, _, _}) -> ?HOLE;
-get(I, T) when I < tuple_size(T), I >= 0 -> element(I + 1, T);
-get(_, _) -> ?HOLE.
+get_or_hole(I, {?VEC_TAG, Size, S, N, _, _}) when I < Size, I >= 0 -> vget(I, S, N);
+get_or_hole(_, {?VEC_TAG, _, _, _, _, _}) -> ?HOLE;
+get_or_hole(I, T) when I < tuple_size(T), I >= 0 -> element(I + 1, T);
+get_or_hole(_, _) -> ?HOLE.
 
-get_option(I, V) ->
-    case get(I, V) of
+get(I, V) ->
+    case get_or_hole(I, V) of
         ?HOLE -> ?NONE;
         X -> {?SOME, X}
     end.
@@ -219,7 +219,7 @@ range_list(_, _, _) -> ?NONE.
 
 range_acc(_, From, I, Acc) when I < From -> {?SOME, Acc};
 range_acc(A, From, I, Acc) ->
-    case get(I, A) of
+    case get_or_hole(I, A) of
         ?HOLE -> ?NONE;
         V -> range_acc(A, From, I - 1, [V | Acc])
     end.

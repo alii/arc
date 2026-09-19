@@ -45,9 +45,9 @@ fn run_with(
   source: String,
   compile,
 ) -> #(rt_call.Completion(JsVal), Agent) {
-  let assert Ok(#(body, sb)) = parser.parse_script(source)
+  let assert Ok(#(body, scopes)) = parser.parse_script(source)
     as { "parse failed: " <> source }
-  let assert Ok(template) = compile(body, sb)
+  let assert Ok(template) = compile(body, scopes)
     as { "compile failed: " <> source }
   entry.run_script(st, template)
 }
@@ -56,7 +56,7 @@ fn eval(source: String) -> #(JsVal, Agent) {
   case run(source) {
     #(NormalCompletion(v), st) -> #(v, st)
     #(ThrowCompletion(e), st) ->
-      panic as { source <> " threw " <> rt_inspect.inspect(st, e) }
+      panic as { source <> " threw " <> rt_inspect.describe(st, e) }
   }
 }
 
@@ -64,7 +64,7 @@ fn eval_int(source: String) -> Int {
   let #(v, st) = eval(source)
   case classify(v) {
     KNum(JInt(n)) -> n
-    _ -> panic as { source <> " gave " <> rt_inspect.inspect(st, v) }
+    _ -> panic as { source <> " gave " <> rt_inspect.describe(st, v) }
   }
 }
 
@@ -73,7 +73,7 @@ fn eval_float(source: String) -> Float {
   case classify(v) {
     KNum(JInt(n)) -> int.to_float(n)
     KNum(JFloat(f)) -> f
-    _ -> panic as { source <> " gave " <> rt_inspect.inspect(st, v) }
+    _ -> panic as { source <> " gave " <> rt_inspect.describe(st, v) }
   }
 }
 
@@ -81,7 +81,7 @@ fn eval_string(source: String) -> String {
   let #(v, st) = eval(source)
   case classify(v) {
     KStr(s) -> s
-    _ -> panic as { source <> " gave " <> rt_inspect.inspect(st, v) }
+    _ -> panic as { source <> " gave " <> rt_inspect.describe(st, v) }
   }
 }
 
@@ -127,7 +127,7 @@ pub fn globals_test() {
   assert eval_string("const c = 'C'; c + c") == "CC"
   let #(comp, st) = run("nope + 1")
   let assert ThrowCompletion(e) = comp
-  assert string.contains(rt_inspect.inspect(st, e), "ReferenceError")
+  assert string.contains(rt_inspect.describe(st, e), "ReferenceError")
 }
 
 pub fn globals_persist_across_scripts_test() {
@@ -205,7 +205,7 @@ pub fn indirect_eval_and_function_constructor_test() {
   assert eval_string("Function('return 1').name") == "anonymous"
   let #(comp, st) = run("(0, eval)('let (')")
   let assert ThrowCompletion(e) = comp
-  assert string.contains(rt_inspect.inspect(st, e), "SyntaxError")
+  assert string.contains(rt_inspect.describe(st, e), "SyntaxError")
 }
 
 pub fn run_bytecode_from_gleam_test() {
@@ -230,10 +230,10 @@ fn drained(source: String, expr: String) -> String {
     NormalCompletion(v) ->
       case classify(v) {
         KStr(s) -> s
-        _ -> panic as { expr <> " gave " <> rt_inspect.inspect(st, v) }
+        _ -> panic as { expr <> " gave " <> rt_inspect.describe(st, v) }
       }
     ThrowCompletion(e) ->
-      panic as { expr <> " threw " <> rt_inspect.inspect(st, e) }
+      panic as { expr <> " threw " <> rt_inspect.describe(st, e) }
   }
 }
 
@@ -302,10 +302,10 @@ fn eval_small_heap(source: String) -> String {
     #(NormalCompletion(v), st) ->
       case classify(v) {
         KStr(s) -> s
-        _ -> panic as { source <> " gave " <> rt_inspect.inspect(st, v) }
+        _ -> panic as { source <> " gave " <> rt_inspect.describe(st, v) }
       }
     #(ThrowCompletion(e), st) ->
-      panic as { source <> " threw " <> rt_inspect.inspect(st, e) }
+      panic as { source <> " threw " <> rt_inspect.describe(st, e) }
   }
 }
 

@@ -1,11 +1,11 @@
 import arc/bytecode/key.{Named}
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
-import arc/rt/obj.{constructor_props, prototype_seq} as rt_obj
+import arc/rt/call as rt_call
+import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type FnFlags, type Handle, BirthPending, BytecodeFn, DataProperty,
-  FnFlags, KHandle, NoElements, Ordinary, SObject, StringKey, classify,
-  mk_object,
+  FnFlags, Ordinary, mk_object,
 }
 import gleam/dict
 import gleam/option.{None, Some}
@@ -45,23 +45,25 @@ pub fn new_bytecode_function(
         False, True -> #(realm.async_fn.prototype, None)
         False, False -> #(realm.function.prototype, None)
       }
+      let kind =
+        BytecodeFn(
+          template:,
+          env:,
+          home_object: None,
+          flags:,
+          fields_init: None,
+          realm: realm.id,
+          unit_id:,
+          birth: BirthPending(prototype_parent),
+        )
       rt_store.cell_new(
         st,
-        SObject(
-          kind: BytecodeFn(
-            template:,
-            env:,
-            home_object: None,
-            flags:,
-            fields_init: None,
-            realm: realm.id,
-            unit_id:,
-            birth: BirthPending(prototype_parent),
-          ),
+        types.SObject(
+          kind: kind,
           proto: Some(fn_proto),
           props: dict.new(),
           symbol_props: [],
-          elements: NoElements,
+          elements: types.NoElements,
           extensible: True,
         ),
       )
@@ -83,7 +85,7 @@ fn new_with_eager_prototype(
     flags.is_async
   {
     True, True -> #(
-      async_generator_fn_prototype(st),
+      rt_call.async_generator_fn_prototype(st, st.realm),
       realm.async_gen.prototype,
       fn(_) { dict.new() },
     )
@@ -95,7 +97,7 @@ fn new_with_eager_prototype(
     False, _ -> #(
       realm.function.prototype,
       realm.object.prototype,
-      constructor_props,
+      rt_obj.constructor_props,
     )
   }
   let #(h, _, st) = {
@@ -106,53 +108,38 @@ fn new_with_eager_prototype(
         writable: !flags.is_class_constructor,
         enumerable: False,
         configurable: False,
-        seq: prototype_seq,
+        seq: rt_obj.prototype_seq,
       )
+    let kind =
+      BytecodeFn(
+        template:,
+        env:,
+        home_object: Some(proto),
+        flags:,
+        fields_init: None,
+        realm: realm.id,
+        unit_id:,
+        birth: BirthPending(None),
+      )
+    let props = dict.from_list([#(Named("prototype"), prototype_prop)])
     #(
-      SObject(
-        kind: BytecodeFn(
-          template:,
-          env:,
-          home_object: Some(proto),
-          flags:,
-          fields_init: None,
-          realm: realm.id,
-          unit_id:,
-          birth: BirthPending(None),
-        ),
+      types.SObject(
+        kind: kind,
         proto: Some(fn_proto),
-        props: dict.from_list([#(Named("prototype"), prototype_prop)]),
+        props: props,
         symbol_props: [],
-        elements: NoElements,
+        elements: types.NoElements,
         extensible: True,
       ),
-      SObject(
+      types.SObject(
         kind: Ordinary,
         proto: Some(proto_parent),
         props: proto_props(h),
         symbol_props: [],
-        elements: NoElements,
+        elements: types.NoElements,
         extensible: True,
       ),
     )
   }
   #(h, st)
-}
-
-fn async_generator_fn_prototype(st: Agent) -> Handle {
-  let realm = st.realm
-  case
-    rt_obj.ordinary_own_property(
-      st,
-      realm.async_gen.constructor,
-      StringKey(Named("prototype")),
-    )
-  {
-    Some(DataProperty(value:, ..)) ->
-      case classify(value) {
-        KHandle(p) -> p
-        _ -> realm.function.prototype
-      }
-    _ -> realm.function.prototype
-  }
 }

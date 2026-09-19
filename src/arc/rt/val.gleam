@@ -5,6 +5,7 @@ import arc/bytecode/error_kind.{
   TypeError,
 }
 import arc/bytecode/key.{Index, Named, array_index_of_float}
+import arc/rt/limits
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsNum, type JsVal, type ObjectKey, type SymbolId,
@@ -184,11 +185,11 @@ pub fn type_of(st: Agent, v: JsVal) -> String {
 }
 
 // §7.2.1 requireobjectcoercible
-pub fn require_object_coercible(st: Agent, v: JsVal) -> #(JsVal, Agent) {
+pub fn require_object_coercible(st: Agent, v: JsVal) -> JsVal {
   case classify(v) {
     KNull -> throw_type_error(st, "Cannot convert null to object")
     KUndef -> throw_type_error(st, "Cannot convert undefined to object")
-    _ -> #(v, st)
+    _ -> v
   }
 }
 
@@ -241,17 +242,14 @@ pub fn is_miss(v: a) -> Bool
 @external(erlang, "arc_rt_obj_ffi", "get_symbol_data")
 pub fn get_symbol_data(st: Agent, recv: JsVal, sym: SymbolId) -> JsVal
 
+// site is an aot ic slot, none from gleam
 @external(erlang, "arc_rt_obj_ffi", "get_named")
-fn get_named_with_site(
+pub fn get_named(
   st: Agent,
   recv: JsVal,
   key: String,
-  site: Option(Nil),
+  site: Option(Int),
 ) -> #(JsVal, Agent)
-
-pub fn get_named(st: Agent, recv: JsVal, key: String) -> #(JsVal, Agent) {
-  get_named_with_site(st, recv, key, None)
-}
 
 pub fn get_symbol(st: Agent, recv: JsVal, sym: SymbolId) -> #(JsVal, Agent) {
   let v = get_symbol_data(st, recv, sym)
@@ -284,7 +282,7 @@ fn call_primitive_methods(
     [] -> throw_type_error(st, "Cannot convert object to primitive value")
     [name, ..rest] -> {
       let ops = st.store.ops
-      let #(method, st) = get_named(st, receiver, name)
+      let #(method, st) = get_named(st, receiver, name, None)
       case is_callable(st, method) {
         True -> {
           let #(result, st) = ops.call(st, method, receiver, [])
@@ -325,8 +323,6 @@ fn float_same_term(a: Float, b: Float) -> Bool
 
 @external(erlang, "arc_rt_val_ffi", "is_neg_zero")
 pub fn is_neg_zero(x: Float) -> Bool
-
-pub const max_safe_integer: Int = 9_007_199_254_740_991
 
 pub fn float_to_int(f: Float) -> Int {
   case f <. 0.0 {
@@ -381,14 +377,18 @@ pub fn jsnum_to_integer_or_infinity(n: JsNum) -> Int {
     JNan -> 0
     JInt(i) -> i
     JFloat(f) -> float_to_int(f)
-    JPosInf -> max_safe_integer
-    JNegInf -> 0 - max_safe_integer
+    JPosInf -> limits.max_safe_integer
+    JNegInf -> 0 - limits.max_safe_integer
   }
 }
 
 // §7.1.20 tolength
 pub fn jsnum_to_length(n: JsNum) -> Int {
-  int.clamp(jsnum_to_integer_or_infinity(n), min: 0, max: max_safe_integer)
+  int.clamp(
+    jsnum_to_integer_or_infinity(n),
+    min: 0,
+    max: limits.max_safe_integer,
+  )
 }
 
 // §6.1.6.1.20 number::tostring
@@ -405,14 +405,10 @@ pub fn jsnum_to_string(n: JsNum) -> String {
 @external(erlang, "arc_rt_val_ffi", "js_format_float")
 pub fn js_format_float(f: Float) -> String
 
-pub fn format_jsnum(n: JsNum) -> String {
-  jsnum_to_string(n)
-}
-
 pub type CoerceError {
   // object input, caller runs toprimitive then retries
   NeedsToPrimitive
-  SymbolToNumber
+  SymbolNotCoercible
   BigIntToNumber
 }
 
@@ -426,7 +422,7 @@ pub fn prim_to_number(v: JsVal) -> Result(JsNum, CoerceError) {
     KBool(False) -> Ok(JInt(0))
     KStr(s) -> Ok(string_to_number(s))
     KBig(_) -> Error(BigIntToNumber)
-    KSym(_) -> Error(SymbolToNumber)
+    KSym(_) -> Error(SymbolNotCoercible)
     KHandle(_) -> Error(NeedsToPrimitive)
     KTdz -> panic as "ToNumber on TDZ sentinel"
   }
@@ -442,7 +438,7 @@ pub fn prim_to_string(v: JsVal) -> Result(String, CoerceError) {
     KNull -> Ok("null")
     KUndef -> Ok("undefined")
     KBig(n) -> Ok(int.to_string(n))
-    KSym(_) -> Error(SymbolToNumber)
+    KSym(_) -> Error(SymbolNotCoercible)
     KHandle(_) -> Error(NeedsToPrimitive)
     KTdz -> panic as "ToString on TDZ sentinel"
   }
@@ -521,13 +517,13 @@ fn primitive_to_prop_key(st: Agent, v: JsVal) -> #(ObjectKey, Agent) {
 @external(erlang, "arc_rt_val_ffi", "string_to_number")
 pub fn string_to_number(s: String) -> JsNum
 
-const nf_two52 = 4_503_599_627_370_496
+const two_pow_52 = 4_503_599_627_370_496
 
-const nf_two53 = 9_007_199_254_740_992
+const two_pow_53 = 9_007_199_254_740_992
 
 // called by name from arc_rt_val_ffi
 pub fn int_number(n: Int) -> JsNum {
-  case n <= max_safe_integer && n >= -max_safe_integer {
+  case n <= limits.max_safe_integer && n >= -limits.max_safe_integer {
     True -> JInt(n)
     False -> num_from_int(n)
   }
@@ -536,10 +532,10 @@ pub fn int_number(n: Int) -> JsNum {
 // float/1 misrounds past 53 bits; called by name from arc_rt_val_ffi
 pub fn num_from_int(n: Int) -> JsNum {
   let a = int.absolute_value(n)
-  case a < nf_two53 {
+  case a < two_pow_53 {
     True -> JFloat(int.to_float(n))
     False -> {
-      let s = nf_bit_length(a, 0) - 53
+      let s = bit_length(a, 0) - 53
       let q0 = int.bitwise_shift_right(a, s)
       let r = a - int.bitwise_shift_left(q0, s)
       let half = int.bitwise_shift_left(1, s - 1)
@@ -547,8 +543,8 @@ pub fn num_from_int(n: Int) -> JsNum {
         True -> q0 + 1
         False -> q0
       }
-      let #(q, s) = case q == nf_two53 {
-        True -> #(nf_two52, s + 1)
+      let #(q, s) = case q == two_pow_53 {
+        True -> #(two_pow_52, s + 1)
         False -> #(q, s)
       }
       case 53 + s > 1024 {
@@ -569,10 +565,10 @@ pub fn num_from_int(n: Int) -> JsNum {
   }
 }
 
-fn nf_bit_length(n: Int, acc: Int) -> Int {
+fn bit_length(n: Int, acc: Int) -> Int {
   case n == 0 {
     True -> acc
-    False -> nf_bit_length(int.bitwise_shift_right(n, 1), acc + 1)
+    False -> bit_length(int.bitwise_shift_right(n, 1), acc + 1)
   }
 }
 
@@ -709,13 +705,13 @@ pub fn to_index(st: Agent, v: JsVal, err_msg: String) -> #(Int, Agent) {
         JNan -> #(0, st)
         JPosInf | JNegInf -> throw_range_error(st, err_msg)
         JInt(i) ->
-          case i < 0 || i > max_safe_integer {
+          case i < 0 || i > limits.max_safe_integer {
             True -> throw_range_error(st, err_msg)
             False -> #(i, st)
           }
         JFloat(f) -> {
           let i = float_to_int(f)
-          case i < 0 || i > max_safe_integer {
+          case i < 0 || i > limits.max_safe_integer {
             True -> throw_range_error(st, err_msg)
             False -> #(i, st)
           }

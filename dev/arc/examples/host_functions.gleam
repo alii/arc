@@ -12,7 +12,9 @@ pub fn main() -> Nil {
   let eng =
     engine.new()
     |> engine.define_fn("print", 1, print)
-    |> engine.define_namespace("host", [#("uppercase", 1, uppercase)])
+    |> engine.define_namespace("host", [
+      host.HostMethod("uppercase", 1, uppercase),
+    ])
     |> engine.define_fn("mapRange", 2, map_range)
 
   let source =
@@ -67,6 +69,6 @@ fn map_range_loop(ctx, cb, i, n, acc) {
 fn display(ctx: host.Context(Nil), v) {
   case types.classify(v) {
     KStr(text) -> text
-    _ -> rt_inspect.inspect(ctx.agent, v)
+    _ -> rt_inspect.describe(ctx.agent, v)
   }
 }

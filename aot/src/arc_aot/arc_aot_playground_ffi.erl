@@ -15,13 +15,13 @@ pmap(Items, F) when is_function(F, 1), is_list(Items) ->
                 Ref = make_ref(),
                 spawn_opt(fun() ->
                               Self ! {Ref, try {ok, F(Item)}
-                                           catch C:R:St -> {error, {C, R, St}}
+                                           catch C:R:Stk -> {error, {C, R, Stk}}
                                            end}
                           end, []),
                 Ref
             end || Item <- Items],
     [receive
          {Ref, {ok, V}} -> V;
-         {Ref, {error, {C, R, St}}} -> erlang:raise(C, R, St)
+         {Ref, {error, {C, R, Stk}}} -> erlang:raise(C, R, Stk)
      end || Ref <- Refs].
 

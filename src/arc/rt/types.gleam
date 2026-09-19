@@ -13,6 +13,7 @@ import arc/rt/intl_data.{
   type BoundGetterService, type ConstructibleService, type IntlData,
   type IntlService,
 }
+import arc/rt/limits
 import arc/rt/temporal_data.{type TemporalData}
 import arc/rt/wire
 import arc/time_zone
@@ -433,8 +434,8 @@ fn integral_key_number(f: Float) -> JsNum {
   let n = float.truncate(f)
   let exact =
     int.to_float(n) == f
-    && n <= 9_007_199_254_740_991
-    && n >= -9_007_199_254_740_991
+    && n <= limits.max_safe_integer
+    && n >= -limits.max_safe_integer
   case exact {
     True -> JInt(n)
     False -> JFloat(f)
@@ -1797,7 +1798,8 @@ pub type Cell {
   SAsyncGen(
     state: AsyncGenState,
     resume: Resume,
-    queue: #(List(AsyncGenRequest), List(AsyncGenRequest)),
+    front: List(AsyncGenRequest),
+    back: List(AsyncGenRequest),
   )
   SAsyncContext(resume: Resume, promise: Handle)
   SDisposeCapability(resources: List(DisposeResource))
@@ -1927,12 +1929,14 @@ pub type AsyncGenRequest {
   )
 }
 
-pub type SmFn
+// aot coroutine body compiled to a resumable state machine
+pub type StateMachine
 
-pub type Loc
+// the state machine's saved locals tuple
+pub type Locals
 
 pub type Resume {
-  ResumeCompiled(sm: SmFn, rs: Int, loc: Loc)
+  ResumeCompiled(machine: StateMachine, resume_point: Int, locals: Locals)
   ResumeFrame(frame: SuspendedFrame)
 }
 

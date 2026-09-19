@@ -26,7 +26,7 @@ own_data(Props, K) ->
         _ -> miss
     end.
 
-%% the accessor K resolves to along a plain chain, else no_accessor
+%% accessor a plain chain lookup of K finds, else no_accessor
 find_accessor(St, {?HANDLE_TAG, Id}, K) ->
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     accessor_walk(Cells, arc_rt_arena_ffi:get(Id, Cells), K, ?MAX_PROTO_HOPS);
@@ -65,7 +65,7 @@ get_global(St, Lex, Name) ->
                 V -> V
             end;
         _ ->
-            {?HANDLE_TAG, G} = element(?REALM_GLOBAL, element(?AGENT_REALM, St)),
+            {?HANDLE_TAG, G} = element(?REALM_GLOBAL_OBJECT, element(?AGENT_REALM, St)),
             object_get(element(?AGENT_STORE, St), G, {?KEY_NAMED, Name}, miss)
     end.
 
@@ -79,7 +79,7 @@ put_global(Store, Lex, Global, Name, V, Strict) ->
 %% getters miss so the general path passes the primitive as this
 proto_field(St, Which, K) ->
     Pair = element(Which, element(?AGENT_REALM, St)),
-    {?HANDLE_TAG, Id} = element(?BUILTINPAIR_PROTO, Pair),
+    {?HANDLE_TAG, Id} = element(?BUILTINPAIR_PROTOTYPE, Pair),
     object_get(element(?AGENT_STORE, St), Id, K, undefined).
 
 object_get(Store, Id, K, Absent) ->
@@ -189,9 +189,9 @@ get_elem(_, S, Idx) when is_integer(Idx), ?IS_STR(S) ->
     end;
 get_elem(Store, {?HANDLE_TAG, _} = Obj, Key) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:property_key_of(Key) of
-        {?OKEY_STRING, {?KEY_NAMED, _} = K} ->
+        {?STRINGKEY_TAG, {?KEY_NAMED, _} = K} ->
             object_get(Store, element(?HANDLE_ID, Obj), K, undefined);
-        {?OKEY_STRING, {?KEY_INDEX, Idx}} -> get_elem(Store, Obj, Idx);
+        {?STRINGKEY_TAG, {?KEY_INDEX, Idx}} -> get_elem(Store, Obj, Idx);
         _ -> miss
     end;
 get_elem(_, _, _) -> miss.
@@ -202,7 +202,7 @@ get_elem_keep(_, _, _) -> miss.
 
 -compile({inline, [elem_read/2, elem_overwrite/3]}).
 elem_read({?ELEMS_DENSE, {?VEC_TAG, _, _, _, _, _} = A}, Idx) ->
-    case arc_tree_array_ffi:get(Idx, A) of
+    case arc_tree_array_ffi:get_or_hole(Idx, A) of
         ?ELEMS_HOLE -> miss;
         V -> V
     end;
@@ -429,8 +429,8 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
     end;
 put_elem(Store, {?HANDLE_TAG, _} = Obj, Key, V) when ?IS_STR(Key) ->
     case arc_rt_val_ffi:property_key_of(Key) of
-        {?OKEY_STRING, {?KEY_NAMED, _} = K} -> put_field(Store, Obj, K, V, true);
-        {?OKEY_STRING, {?KEY_INDEX, Idx}} -> put_elem(Store, Obj, Idx, V);
+        {?STRINGKEY_TAG, {?KEY_NAMED, _} = K} -> put_field(Store, Obj, K, V, true);
+        {?STRINGKEY_TAG, {?KEY_INDEX, Idx}} -> put_elem(Store, Obj, Idx, V);
         _ -> miss
     end;
 put_elem(_, _, _, _) -> miss.
@@ -471,12 +471,12 @@ index_kind_is_plain(Kind) ->
         _ -> true
     end.
 
-elem_has({?ELEMS_DENSE, A}, Idx) -> arc_tree_array_ffi:get(Idx, A) =/= ?ELEMS_HOLE;
+elem_has({?ELEMS_DENSE, A}, Idx) -> arc_tree_array_ffi:get_or_hole(Idx, A) =/= ?ELEMS_HOLE;
 elem_has({?ELEMS_SPARSE, M}, Idx) -> is_map_key(Idx, M);
 elem_has(_, _) -> false.
 
 elem_overwrite({?ELEMS_DENSE, {?VEC_TAG, _, _, _, _, _} = A}, Idx, V) ->
-    case arc_tree_array_ffi:get(Idx, A) of
+    case arc_tree_array_ffi:get_or_hole(Idx, A) of
         ?ELEMS_HOLE -> hole;
         _ -> {?ELEMS_DENSE, arc_tree_array_ffi:set(Idx, V, A)}
     end;

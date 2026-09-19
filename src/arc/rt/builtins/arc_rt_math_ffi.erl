@@ -161,7 +161,7 @@ math_min(js_inf, B) -> num_or_miss(B);
 math_min(A, js_inf) -> num_or_miss(A);
 math_min(A, B) when is_number(A), is_number(B) ->
     if A < B -> A; A > B -> B;
-       true -> case is_neg_zero_v(A) of true -> A; false -> B end
+       true -> case is_neg_zero(A) of true -> A; false -> B end
     end;
 math_min(_, _) -> miss.
 
@@ -173,7 +173,7 @@ math_max(js_neg_inf, B) -> num_or_miss(B);
 math_max(A, js_neg_inf) -> num_or_miss(A);
 math_max(A, B) when is_number(A), is_number(B) ->
     if A > B -> A; A < B -> B;
-       true -> case is_neg_zero_v(A) of true -> B; false -> A end
+       true -> case is_neg_zero(A) of true -> B; false -> A end
     end;
 math_max(_, _) -> miss.
 
@@ -186,5 +186,5 @@ num_or_miss(js_inf) -> js_inf;
 num_or_miss(js_neg_inf) -> js_neg_inf;
 num_or_miss(_) -> miss.
 
-is_neg_zero_v(X) when is_float(X) -> X == 0.0 andalso neg_sign(X);
-is_neg_zero_v(_) -> false.
+is_neg_zero(X) when is_float(X) -> X == 0.0 andalso neg_sign(X);
+is_neg_zero(_) -> false.

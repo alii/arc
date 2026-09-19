@@ -90,7 +90,7 @@ pub fn lexical_globals_persist_across_switches_test() {
 
 pub fn install_262_and_create_realm_test() {
   let st = rt_helpers.agent()
-  let #(dollar_h, st) = rt_realm.install_262(st, st.realm)
+  let #(dollar_h, st) = rt_realm.install_test262(st, st.realm)
   let dollar = mk_object(dollar_h)
   let #(g, st) = rt_helpers.global(st, "$262")
   assert g == dollar
@@ -109,8 +109,9 @@ pub fn install_262_and_create_realm_test() {
   assert proto_of(st, child) == rt_call.realm_by_id(st, 1).object.prototype
   let #(r, st) = rt_helpers.call_method(st, child, "gc", [])
   assert r == mk_undefined()
-  let #(ab_ctor, st) = rt_helpers.global(st, "ArrayBuffer")
-  let #(buf, st) = rt_call.construct(st, ab_ctor, [mk_int(8)], ab_ctor)
+  let #(array_buffer_ctor, st) = rt_helpers.global(st, "ArrayBuffer")
+  let #(buf, st) =
+    rt_call.construct(st, array_buffer_ctor, [mk_int(8)], array_buffer_ctor)
   let #(_, st) =
     rt_helpers.call_method(st, dollar, "detachArrayBuffer", [mk_object(buf)])
   assert get(st, mk_object(buf), "detached") == types.mk_bool(True)
@@ -127,7 +128,7 @@ pub fn eval_script_runs_in_its_realm_test() {
       ..st,
       store: Store(..st.store, ops: JsOps(..st.store.ops, eval_hook: hook)),
     )
-  let #(dollar_h, st) = rt_realm.install_262(st, st.realm)
+  let #(dollar_h, st) = rt_realm.install_test262(st, st.realm)
   let #(child, st) =
     rt_helpers.call_method(st, mk_object(dollar_h), "createRealm", [])
   let #(r, st) =

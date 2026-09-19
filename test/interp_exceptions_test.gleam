@@ -16,9 +16,9 @@ fn agent() -> Agent {
 }
 
 fn run_on(st: Agent, source: String) -> #(rt_call.Completion(JsVal), Agent) {
-  let assert Ok(#(body, sb)) = parser.parse_script(source)
+  let assert Ok(#(body, scopes)) = parser.parse_script(source)
     as { "parse failed: " <> source }
-  let assert Ok(template) = compiler.compile_script(body, sb)
+  let assert Ok(template) = compiler.compile_script(body, scopes)
     as { "compile failed: " <> source }
   entry.run_script(st, template)
 }
@@ -31,7 +31,7 @@ fn eval_on(st: Agent, source: String) -> #(JsVal, Agent) {
   case run_on(st, source) {
     #(NormalCompletion(v), st) -> #(v, st)
     #(ThrowCompletion(e), st) ->
-      panic as { source <> " threw " <> rt_inspect.inspect(st, e) }
+      panic as { source <> " threw " <> rt_inspect.describe(st, e) }
   }
 }
 
@@ -42,7 +42,7 @@ fn eval(source: String) -> #(JsVal, Agent) {
 fn as_string(st: Agent, v: JsVal, source: String) -> String {
   case classify(v) {
     KStr(s) -> s
-    _ -> panic as { source <> " gave " <> rt_inspect.inspect(st, v) }
+    _ -> panic as { source <> " gave " <> rt_inspect.describe(st, v) }
   }
 }
 
@@ -60,15 +60,17 @@ fn eval_int(source: String) -> Int {
   let #(v, st) = eval(source)
   case classify(v) {
     KNum(JInt(n)) -> n
-    _ -> panic as { source <> " gave " <> rt_inspect.inspect(st, v) }
+    _ -> panic as { source <> " gave " <> rt_inspect.describe(st, v) }
   }
 }
 
 fn thrown(source: String) -> String {
   case run(source) {
-    #(ThrowCompletion(e), st) -> rt_inspect.inspect(st, e)
+    #(ThrowCompletion(e), st) -> rt_inspect.describe(st, e)
     #(NormalCompletion(v), st) ->
-      panic as { source <> " did not throw, gave " <> rt_inspect.inspect(st, v) }
+      panic as {
+        source <> " did not throw, gave " <> rt_inspect.describe(st, v)
+      }
   }
 }
 

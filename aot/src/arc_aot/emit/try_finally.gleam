@@ -155,7 +155,7 @@ fn wrap_with_finally(
   finalizer: List(ast.StmtWithLine),
   scopes_before_fin: Int,
   k: Next,
-  protected build: Next,
+  body build: Next,
 ) -> EmitResult {
   let entry_save = snapshot_scope(e)
   let fin_save =
@@ -171,7 +171,7 @@ fn wrap_with_finally(
       None,
       Some(esc),
     )
-  use #(protected_ir, e) <- result.try(build(e))
+  use #(body_ir, e) <- result.try(build(e))
   let e = state.pop_frame(e)
   let fin_pos = snapshot_scope(e)
   let #(ex, e) = state.fresh_var(e)
@@ -184,7 +184,7 @@ fn wrap_with_finally(
     state.land_escapes(
       e,
       esc,
-      ir.Try(result: [], body: protected_ir, handlers: [
+      ir.Try(result: [], body: body_ir, handlers: [
         ir.CatchHandler(
           on: ir.OnTag(e.consts.exn_tag),
           payload: [ex],
@@ -193,7 +193,7 @@ fn wrap_with_finally(
         ),
       ]),
     )
-  // TODO: rebinds inside try are not threaded out yet
+  // todo: rebinds inside try are not threaded out yet
   let e = state.Emitter(..e, slot_vars: entry_save.slot_vars)
   use tail <- state.map_tree(k(e))
   ir.Let([], region, ir.Let([], f_normal, tail))

@@ -171,11 +171,11 @@ pub type BindMode {
 }
 
 pub type FnShape {
-  FnDecl(is_gen: Bool, is_async: Bool)
-  FnExpr(self_name: Option(String), is_gen: Bool, is_async: Bool)
+  FnDecl(is_generator: Bool, is_async: Bool)
+  FnExpr(self_name: Option(String), is_generator: Bool, is_async: Bool)
   Arrow(is_async: Bool)
-  Method(is_gen: Bool, is_async: Bool)
-  ClassCtor(derived: Bool, has_field_init: Bool, default: Bool)
+  Method(is_generator: Bool, is_async: Bool)
+  ClassCtor(is_derived: Bool, has_field_init: Bool, default: Bool)
 }
 
 pub type FnBody {
@@ -450,10 +450,10 @@ fn unique_fn_name(base: String, taken: Set(String), n: Int) -> String {
 
 fn fn_name_free(cand: String, taken: Set(String)) -> Bool {
   !set.contains(taken, cand)
-  && !set.contains(taken, cand <> "_s")
-  && !set.contains(taken, cand <> "_t")
+  && !set.contains(taken, cand <> "_direct")
+  && !set.contains(taken, cand <> "_direct_this")
   && !set.contains(taken, cand <> "__sm")
-  && list.all(["_s", "_t", "__sm"], fn(suffix) {
+  && list.all(["_direct", "_direct_this", "__sm"], fn(suffix) {
     case strip_suffix(cand, suffix) {
       Some(stem) -> !set.contains(taken, stem)
       None -> True
@@ -528,8 +528,8 @@ fn slot_base_names(tree: ScopeTree) -> Dict(#(ScopeId, Int), String) {
         }
       })
     let #(acc, _taken) =
-      list.fold(sorted, #(acc, set.new()), fn(st, entry) {
-        let #(acc, taken) = st
+      list.fold(sorted, #(acc, set.new()), fn(names, entry) {
+        let #(acc, taken) = names
         let #(slot, js_name) = entry
         let key = #(frame, slot)
         case dict.has_key(acc, key) {
@@ -807,18 +807,18 @@ fn find_target(
   frames: List(Frame),
   name: Option(String),
   target_of: fn(Frame, Option(String)) -> Option(String),
-  miss: EmitError,
+  not_found: EmitError,
   crossed: List(BarrierCleanup),
 ) -> Result(#(String, List(BarrierCleanup)), EmitError) {
   case frames {
-    [] -> Error(miss)
+    [] -> Error(not_found)
     [frame, ..rest] ->
       case target_of(frame, name) {
         Some(label) -> Ok(#(label, list.reverse(crossed)))
         None -> {
           let crossed =
             list.fold(cross_cleanups(frame), crossed, fn(acc, c) { [c, ..acc] })
-          find_target(rest, name, target_of, miss, crossed)
+          find_target(rest, name, target_of, not_found, crossed)
         }
       }
   }
@@ -901,7 +901,7 @@ pub fn lexical_is_boxed(
   ref: lexical.LexicalRef,
 ) -> Bool {
   lexical.refs_get(info.lexical_boxed, ref)
-  || { ref == lexical.RefThis && e.derived_ctor }
+  || { ref == lexical.ThisRef && e.derived_ctor }
 }
 
 pub fn resolve(e: Emitter, name: String) -> scope.Resolution {

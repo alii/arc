@@ -13,7 +13,7 @@ import gleam/int
 
 pub fn quiet_hooks() -> HostHooks {
   HostHooks(
-    ..host_hooks.default_host_hooks(),
+    ..host_hooks.default(),
     monotonic_now: fn() { 0 },
     wall_clock_ms: fn() { 0 },
     random: fn() { 0.5 },
@@ -72,12 +72,12 @@ pub fn as_frame(t: a) -> rt_call.Frame {
   unsafe.coerce(t)
 }
 
-pub fn as_loc(t: a) -> types.Loc {
+pub fn as_locals(t: a) -> types.Locals {
   unsafe.coerce(t)
 }
 
-@external(erlang, "rt_helpers_ffi", "counter_sm")
-pub fn counter_sm() -> types.SmFn
+@external(erlang, "rt_helpers_ffi", "counter_state_machine")
+pub fn counter_state_machine() -> types.StateMachine
 
 pub fn func(
   st: Agent,

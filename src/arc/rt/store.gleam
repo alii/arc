@@ -239,15 +239,12 @@ fn with_meta(st: Agent, meta: StoreMeta) -> Agent {
 
 pub fn enter_call(st: Agent) -> Agent {
   case st.call_depth >= limits.max_call_depth {
-    True -> {
-      let #(_, st) = stack_overflow(st)
-      st
-    }
+    True -> stack_overflow(st)
     False -> Agent(..st, call_depth: st.call_depth + 1)
   }
 }
 
-pub fn stack_overflow(st: Agent) -> #(JsVal, Agent) {
+pub fn stack_overflow(st: Agent) -> a {
   let #(e, st) =
     st.store.ops.new_error(st, RangeError, "Maximum call stack size exceeded")
   throw(st, e)

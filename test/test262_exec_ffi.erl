@@ -124,7 +124,7 @@ send_report(Parent, Report) ->
 
 take_report() ->
     receive
-        {arc_agent_report, Report} -> {ok, Report}
+        {arc_agent_report, Report} -> {some, Report}
     after 0 ->
-        {error, nil}
+        none
     end.

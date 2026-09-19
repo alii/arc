@@ -67,7 +67,7 @@ pub fn declare_param_shims(
   }
 }
 
-// matches scope.declare_class fold_class_body order
+// matches emit.compile_class_body order
 pub type ClassScopeIds {
   ClassScopeIds(
     class_id: scope.ScopeId,
@@ -96,7 +96,7 @@ pub fn class_new_children(
   list.take(now, list.length(now) - list.length(before)) |> list.reverse
 }
 
-// 7-step child order of scope.declare_class; emit reads it positionally
+// 7-step child order of class_scope_finalize; emit reads it positionally
 pub fn class_scope_finalize(
   scopes: scope_builder.ScopeBuilder,
   ids: ClassScopeIds,
@@ -129,7 +129,7 @@ pub fn class_scope_finalize(
   let needs_instance_init =
     list.any(elements, fn(el) {
       case el {
-        ast.ClassMethod(key: ast.KeyPrivate(..), is_static: False, ..) -> True
+        ast.ClassMethod(key: ast.PrivateName(..), is_static: False, ..) -> True
         _ -> ast_util.is_instance_field(el)
       }
     })
@@ -255,15 +255,15 @@ fn finalize_field_shell(
 // ref to the field-key stash const emit reads
 fn class_ref_field_key(
   scopes: scope_builder.ScopeBuilder,
-  key: ast.PropertyKey,
+  key: ast.PropertyName,
   idx: Int,
 ) -> scope_builder.ScopeBuilder {
   case key {
-    ast.KeyComputed(..) ->
+    ast.ComputedName(..) ->
       scope_builder.ref(scopes, ast_util.computed_field_const(idx))
-    ast.KeyPrivate(name:, ..) -> scope_builder.ref(scopes, name)
-    ast.KeyIdentifier(..) | ast.KeyString(..) | ast.KeyNumber(..) -> scopes
-    ast.KeyBigInt(..) -> scopes
+    ast.PrivateName(name:, ..) -> scope_builder.ref(scopes, name)
+    ast.IdentifierName(..) | ast.StringName(..) | ast.NumberName(..) -> scopes
+    ast.BigIntName(..) -> scopes
   }
 }
 
@@ -284,7 +284,7 @@ fn class_seed_field_shell(
       scope.VarBinding,
       synthetic: True,
     )
-  let scopes = scope_builder.lexical_ref(scopes, lexical.RefThis)
+  let scopes = scope_builder.lexical_ref(scopes, lexical.ThisRef)
   // §7.3.29 private methods read #x and its stash
   let scopes = case is_static {
     True -> scopes
@@ -292,7 +292,7 @@ fn class_seed_field_shell(
       list.fold(elements, scopes, fn(scopes, element) {
         case element {
           ast.ClassMethod(
-            key: ast.KeyPrivate(name:, ..),
+            key: ast.PrivateName(name:, ..),
             kind:,
             is_static: False,
             ..,
@@ -318,9 +318,9 @@ pub fn super_call_refs(
   scopes: scope_builder.ScopeBuilder,
 ) -> scope_builder.ScopeBuilder {
   scopes
-  |> scope_builder.lexical_ref(lexical.RefActiveFunc)
-  |> scope_builder.lexical_ref(lexical.RefNewTarget)
-  |> scope_builder.lexical_ref(lexical.RefThis)
+  |> scope_builder.lexical_ref(lexical.ActiveFuncRef)
+  |> scope_builder.lexical_ref(lexical.NewTargetRef)
+  |> scope_builder.lexical_ref(lexical.ThisRef)
 }
 
 // synthetic refs the emitter adds to the constructor
@@ -355,7 +355,7 @@ fn class_seed_ctor_shell(
     True ->
       scopes
       |> scope_builder.ref(ast_util.class_fields_init)
-      |> scope_builder.lexical_ref(lexical.RefThis)
+      |> scope_builder.lexical_ref(lexical.ThisRef)
     False -> scopes
   }
   case is_synthetic && has_super_class {

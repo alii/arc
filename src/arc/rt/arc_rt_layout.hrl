@@ -46,12 +46,12 @@
 -define(REALM_STRING_ITER_PROTO, 38).
 -define(REALM_MAP_ITER_PROTO, 39).
 -define(REALM_SET_ITER_PROTO, 40).
--define(REALM_GLOBAL, 51).
+-define(REALM_GLOBAL_OBJECT, 51).
 -define(REALM_ID, 53).
 -define(REALM_SIZE, 55).
 -define(BUILTINPAIR_TAG, builtin_pair).
--define(BUILTINPAIR_PROTO, 2).
--define(BUILTINPAIR_CTOR, 3).
+-define(BUILTINPAIR_PROTOTYPE, 2).
+-define(BUILTINPAIR_CONSTRUCTOR, 3).
 
 %% LexicalGlobal, Let and Const alike
 -define(LEXICAL_GLOBAL_VALUE, 2).
@@ -82,7 +82,7 @@
 -define(SOBJECT_SIZE, 7).
 
 -define(SSHAPEDOBJECT_TAG, s_shaped_object).
--define(SSHAPEDOBJECT_SID, 2).
+-define(SSHAPEDOBJECT_SHAPE_ID, 2).
 -define(SSHAPEDOBJECT_PROTO, 3).
 -define(SSHAPEDOBJECT_SLOTS, 4).
 -define(SSHAPEDOBJECT_OFFSETS, 5).
@@ -106,7 +106,7 @@
 
 -define(COMPILEDFN_TAG, compiled_fn).
 -define(COMPILEDFN_CODE, 2).
--define(COMPILEDFN_HOME, 3).
+-define(COMPILEDFN_HOME_OBJECT, 3).
 -define(COMPILEDFN_FLAGS, 4).
 -define(COMPILEDFN_FIELDS_INIT, 5).
 -define(COMPILEDFN_DIRECT_ENTRY, 6).
@@ -168,19 +168,19 @@
 -define(MODULENS_TAG, module_namespace).
 
 -define(FNFLAGS_TAG, fn_flags).
--define(FNFLAGS_IS_CTOR, 2).
--define(FNFLAGS_IS_CLASS_CTOR, 3).
--define(FNFLAGS_IS_DERIVED, 4).
+-define(FNFLAGS_IS_CONSTRUCTOR, 2).
+-define(FNFLAGS_IS_CLASS_CONSTRUCTOR, 3).
+-define(FNFLAGS_IS_DERIVED_CONSTRUCTOR, 4).
 -define(FNFLAGS_IS_ARROW, 5).
 -define(FNFLAGS_IS_METHOD, 6).
--define(FNFLAGS_IS_GEN, 7).
+-define(FNFLAGS_IS_GENERATOR, 7).
 -define(FNFLAGS_IS_ASYNC, 8).
 -define(FNFLAGS_IS_STRICT, 9).
 -define(FNFLAGS_SIZE, 9).
 %% neither class constructor nor generator nor async
 -define(IS_PLAIN_FN(Flags),
-        (element(?FNFLAGS_IS_CLASS_CTOR, Flags) =:= false andalso
-         element(?FNFLAGS_IS_GEN, Flags) =:= false andalso
+        (element(?FNFLAGS_IS_CLASS_CONSTRUCTOR, Flags) =:= false andalso
+         element(?FNFLAGS_IS_GENERATOR, Flags) =:= false andalso
          element(?FNFLAGS_IS_ASYNC, Flags) =:= false)).
 
 %% NativeToken values the kernels recognise
@@ -215,8 +215,8 @@
 -define(KEY_NAMED, named).
 -define(KEY_INDEX, index).
 -define(KEY_PRIVATE, private).
--define(OKEY_STRING, string_key).
--define(OKEY_SYMBOL, symbol_key).
+-define(STRINGKEY_TAG, string_key).
+-define(SYMBOLKEY_TAG, symbol_key).
 -define(LENGTH_KEY, {?KEY_NAMED, <<"length">>}).
 %% SymbolId for Symbol.iterator
 -define(SYMBOL_ITERATOR, {well_known_symbol, sym_iterator}).
@@ -280,7 +280,7 @@
 %% element at idx or the hole
 -define(ELEM_AT(Els, Idx),
         (case Els of
-             {?ELEMS_DENSE, ElemAtVec} -> arc_tree_array_ffi:get(Idx, ElemAtVec);
+             {?ELEMS_DENSE, ElemAtVec} -> arc_tree_array_ffi:get_or_hole(Idx, ElemAtVec);
              {?ELEMS_SPARSE, ElemAtMap} ->
                  case ElemAtMap of
                      #{Idx := ElemAtV} -> ElemAtV;

@@ -1,5 +1,4 @@
 import arc/bytecode/error_kind.{type JsError, JsError, RangeError, TypeError}
-import arc/bytecode/key.{Named}
 import arc/internal/digits
 import arc/internal/gregorian.{days_in_month}
 import arc/internal/int_math.{floor_div, floor_mod, trunc_div}
@@ -10,10 +9,10 @@ import arc/rt/builtins/temporal_common.{
   time_part_ns, to_temporal_duration,
 }
 import arc/rt/builtins/temporal_iso.{
-  type Duration, type IsoDate, type IsoDateSlots, type Overflow, type ParsedIso,
-  Constrain, IsoDate, IsoDateSlots, NoOffset, NumericOffset, Reject, Zulu,
-  check_date_limits, epoch_days, int_sign, is_valid_iso_date,
-  iso_date_from_epoch_days, iso_year_month_within_limits, pad2,
+  type DateDuration, type Duration, type IsoDate, type IsoDateSlots,
+  type Overflow, type ParsedIso, Constrain, DateDuration, IsoDate, IsoDateSlots,
+  NoOffset, NumericOffset, Reject, Zulu, check_date_limits, epoch_days, int_sign,
+  is_valid_iso_date, iso_date_from_epoch_days, iso_year_month_within_limits,
   parse_annotations, parse_iso_datetime_string, parse_offset_part,
   parse_time_part, parse_year_part, regulate_iso_date,
 }
@@ -22,7 +21,6 @@ import arc/rt/builtins/temporal_rounding.{
   type RoundingMode, UnsignedHalfEven, UnsignedHalfInfinity, UnsignedHalfZero,
   UnsignedInfinity, UnsignedZero, unsigned_rounding_mode,
 }
-import arc/rt/obj as rt_obj
 import arc/rt/temporal_data.{
   type TemporalData, TemporalDate, TemporalDateTime, TemporalDuration,
   TemporalInstant, TemporalMonthDay, TemporalTime, TemporalYearMonth,
@@ -30,17 +28,13 @@ import arc/rt/temporal_data.{
 }
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, HintString, KHandle, KStr, KUndef,
-  StringKey, classify, mk_int, mk_object, mk_string, mk_undefined,
+  classify, mk_int, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
-
-pub fn get_named(st: Agent, h: Handle, key: String) -> #(JsVal, Agent) {
-  rt_obj.get_prop(st, mk_object(h), StringKey(Named(key)))
-}
 
 pub fn calendar_slot_of(
   data: TemporalData,
@@ -176,14 +170,14 @@ pub fn parsed_calendar_id(
 }
 
 pub fn month_code_text(m: Int) -> String {
-  "M" <> pad2(m)
+  "M" <> digits.pad2(m)
 }
 
 pub fn read_month_code(
   st: Agent,
   h: Handle,
 ) -> #(Option(temporal_calendar.MonthCode), Agent) {
-  let #(v, st) = get_named(st, h, "monthCode")
+  let #(v, st) = rt_val.get_named(st, mk_object(h), "monthCode", None)
   case classify(v) {
     KUndef -> #(None, st)
     _ -> {
@@ -240,7 +234,7 @@ fn is_ascii_digit(g: String) -> Bool {
 }
 
 pub fn read_bag_era(st: Agent, h: Handle) -> #(Option(String), Agent) {
-  let #(v, st) = get_named(st, h, "era")
+  let #(v, st) = rt_val.get_named(st, mk_object(h), "era", None)
   case classify(v) {
     KUndef -> #(None, st)
     _ -> {
@@ -272,7 +266,7 @@ pub fn read_bag_calendar(
   st: Agent,
   h: Handle,
 ) -> #(temporal_calendar.Calendar, Agent) {
-  let #(v, st) = get_named(st, h, "calendar")
+  let #(v, st) = rt_val.get_named(st, mk_object(h), "calendar", None)
   case classify(v) {
     KUndef -> #(temporal_calendar.Iso8601, st)
     KStr(s) -> #(rt_val.or_throw(st, calendar_from_string(s)), st)
@@ -348,10 +342,11 @@ pub fn require_partial_bag(st: Agent, v: JsVal) -> #(Handle, Agent) {
             "with() argument must be a plain object, not a Temporal instance",
           )
         None -> {
-          let #(cal, st) = get_named(st, h, "calendar")
+          let #(cal, st) = rt_val.get_named(st, mk_object(h), "calendar", None)
           case classify(cal) {
             KUndef -> {
-              let #(tz, st) = get_named(st, h, "timeZone")
+              let #(tz, st) =
+                rt_val.get_named(st, mk_object(h), "timeZone", None)
               case classify(tz) {
                 KUndef -> #(h, st)
                 _ ->
@@ -667,7 +662,7 @@ pub fn calendar_years_months_until(
   from: IsoDate,
   to: IsoDate,
   whole_years whole_years: Bool,
-) -> #(Int, Int, Int) {
+) -> DateDuration {
   let from_days = epoch_days(from)
   let to_days = epoch_days(to)
   let sign = case to_days >= from_days {
@@ -688,7 +683,7 @@ pub fn calendar_years_months_until(
   // constrain the original day once, not per step
   let dd = int.min(cd1.day, dmax)
   let intermediate = temporal_calendar.date_to_epoch_days(cal, ym, mm, dd)
-  #(years, months, to_days - intermediate)
+  DateDuration(years:, months:, weeks: 0, days: to_days - intermediate)
 }
 
 pub fn compare_triple(a: #(Int, Int, Int), b: #(Int, Int, Int)) -> Int {

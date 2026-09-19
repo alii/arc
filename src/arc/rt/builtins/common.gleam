@@ -97,8 +97,9 @@ pub fn alloc_plain_object(
 ) -> #(Handle, Agent) {
   use seq <- rt_store.cell_new_with(st, list.length(props))
   let entries =
-    list.index_map(props, fn(kv, i) {
-      #(Named(kv.0), types.plain_property(kv.1, seq + i))
+    list.index_map(props, fn(entry, i) {
+      let #(name, value) = entry
+      #(Named(name), types.plain_property(value, seq + i))
     })
   plain_object(Ordinary, Some(object_proto), dict.from_list(entries))
 }
@@ -120,6 +121,24 @@ pub fn alloc_rooted_native_fn(
       constructible: False,
     )
   #(h, rt_store.pin_root(st, h))
+}
+
+// anonymous closure over a token, e.g. promise resolving functions
+pub fn alloc_native_closure(
+  st: Agent,
+  token: NativeToken,
+  arity: Int,
+) -> #(JsVal, Agent) {
+  let #(h, st) =
+    rt_call.native_new(
+      st,
+      Some(st.realm.function.prototype),
+      token,
+      "",
+      arity,
+      constructible: False,
+    )
+  #(mk_object(h), st)
 }
 
 pub fn alloc_methods(

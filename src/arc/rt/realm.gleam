@@ -41,7 +41,7 @@ fn enter(st: Agent, id: Int) -> Agent {
   }
 }
 
-pub fn install_262(st: Agent, realm: Realm) -> #(Handle, Agent) {
+pub fn install_test262(st: Agent, realm: Realm) -> #(Handle, Agent) {
   let fn_proto = realm.function.prototype
   let #(methods, st) =
     common.alloc_methods(st, fn_proto, [
@@ -75,7 +75,7 @@ pub fn install_262(st: Agent, realm: Realm) -> #(Handle, Agent) {
   #(h, st)
 }
 
-pub fn dispatch_262(
+pub fn dispatch_test262(
   st: Agent,
   native: Test262Native,
   _this: JsVal,
@@ -84,7 +84,7 @@ pub fn dispatch_262(
 ) -> #(JsVal, Agent) {
   case native {
     Test262EvalScript(realm:) -> eval_script(st, realm, args)
-    Test262CreateRealm(realm:) -> create_realm_262(st, realm, create_realm)
+    Test262CreateRealm(realm:) -> create_test262_realm(st, realm, create_realm)
     // gc only runs at safepoints, nothing to do here
     Test262Gc -> #(mk_undefined(), st)
   }
@@ -96,13 +96,13 @@ fn eval_script(st: Agent, realm: Int, args: List(JsVal)) -> #(JsVal, Agent) {
   st.store.ops.eval_hook(st, source, ScriptEval)
 }
 
-fn create_realm_262(
+fn create_test262_realm(
   st: Agent,
   parent: Int,
   create_realm: fn(Agent) -> #(Realm, Agent),
 ) -> #(JsVal, Agent) {
   let #(realm, st) = create_realm(st)
-  let #(dollar, st) = install_262(st, realm)
+  let #(dollar, st) = install_test262(st, realm)
   let parent_global = rt_call.realm_by_id(st, parent).global_object
   let agent_obj =
     own_data(st, parent_global, "$262")

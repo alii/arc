@@ -35,10 +35,10 @@ available_ids() ->
     end.
 
 %% tz env var, else /etc/localtime, else /etc/timezone, else utc
--spec system_time_zone() -> arc_tz_ffi:local_zone().
+-spec system_time_zone() -> arc_time_zone_ffi:local_zone().
 system_time_zone() ->
     case detected_zone() of
-        none -> arc_tz_ffi:utc_time_zone();
+        none -> arc_time_zone_ffi:utc_time_zone();
         Zone -> Zone
     end.
 
@@ -55,20 +55,20 @@ detected_zone() ->
     catch error:undef -> none
     end.
 
--spec time_zone_named(binary()) -> {ok, arc_tz_ffi:local_zone()} | {error, nil}.
+-spec time_zone_named(binary()) -> {some, arc_time_zone_ffi:local_zone()} | none.
 time_zone_named(Name) when is_binary(Name) ->
-    case arc_tz_ffi:known_identifier(Name) of
-        none -> {error, nil};
+    case arc_time_zone_ffi:known_identifier(Name) of
+        none -> none;
         {some, Id} ->
             case zone_for_id(Id) of
-                none -> {error, nil};
-                Zone -> {ok, Zone}
+                none -> none;
+                Zone -> {some, Zone}
             end
     end.
 
 zone_for_id(Id) ->
-    case load(arc_tz_ffi:canonical_id(Id)) of
-        {ok, Tz} -> arc_tz_ffi:tzif_zone(Id, Tz);
+    case load(arc_time_zone_ffi:canonical_id(Id)) of
+        {ok, Tz} -> arc_time_zone_ffi:tzif_zone(Id, Tz);
         {error, _NoData} -> none
     end.
 
@@ -128,7 +128,7 @@ zone_from_path_or_posix("") -> none;
 zone_from_path_or_posix(Tz) ->
     case zone_from_path(Tz) of
         none ->
-            case arc_tz_ffi:posix_zone(unicode:characters_to_binary(Tz)) of
+            case arc_time_zone_ffi:posix_zone(unicode:characters_to_binary(Tz)) of
                 {some, Zone} -> Zone;
                 none -> none
             end;
@@ -137,7 +137,7 @@ zone_from_path_or_posix(Tz) ->
 
 known_zone("") -> none;
 known_zone(Name) ->
-    case arc_tz_ffi:known_identifier(unicode:characters_to_binary(Name)) of
+    case arc_time_zone_ffi:known_identifier(unicode:characters_to_binary(Name)) of
         {some, Id} -> zone_for_id(Id);
         none -> host_only_zone(Name)
     end.

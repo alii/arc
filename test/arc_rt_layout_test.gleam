@@ -4,6 +4,7 @@ import arc/bytecode/binop
 import arc/bytecode/key.{Index, Named, Private, max_array_index}
 import arc/internal/ordered_entries
 import arc/internal/tree_array
+import arc/internal/unsafe
 import arc/interp/kernel
 import arc/rt/arena
 import arc/rt/bytecode.{type EnvTuple, type FuncTemplate}
@@ -37,16 +38,18 @@ fn idx(name: String) -> Int
 fn tag(name: String) -> Dynamic
 
 @external(erlang, "arc_rt_layout_root_ffi", "element_of")
-fn element(n: Int, of: Dynamic) -> Dynamic
+fn element_of(n: Int, of: Dynamic) -> Dynamic
 
 @external(erlang, "arc_rt_layout_root_ffi", "size_of")
-fn tuple_size(of: Dynamic) -> Int
+fn size_of(record: a) -> Int
 
-@external(erlang, "arc_rt_layout_root_ffi", "dyn")
-fn dyn(x: a) -> Dynamic
+fn dyn(x: a) -> Dynamic {
+  unsafe.coerce(x)
+}
 
-@external(erlang, "arc_rt_layout_root_ffi", "dyn")
-fn dummy_code(label: String) -> CompiledCode
+fn dummy_code(label: String) -> CompiledCode {
+  unsafe.coerce(label)
+}
 
 @external(erlang, "arc_rt_layout_root_ffi", "slots")
 fn slots(vals: List(JsVal)) -> ShapeSlots
@@ -74,7 +77,7 @@ fn slot_at(slots: ShapeSlots, off: Int) -> JsVal
 fn slot_set(slots: ShapeSlots, off: Int, v: JsVal) -> ShapeSlots
 
 @external(erlang, "arc_rt_layout_root_ffi", "frame")
-fn frame_macro(this: JsVal, f: JsVal, home: JsVal, nt: JsVal) -> Dynamic
+fn frame(this: JsVal, f: JsVal, home: JsVal, nt: JsVal) -> Dynamic
 
 @external(erlang, "arc_rt_layout_root_ffi", "is_js_number")
 fn is_js_number(v: JsVal) -> Bool
@@ -110,31 +113,32 @@ fn shaped_next(
   key: BitArray,
 ) -> Dynamic
 
-@external(erlang, "arc_rt_layout_root_ffi", "dyn")
-fn template(label: String) -> FuncTemplate
+fn template(label: String) -> FuncTemplate {
+  unsafe.coerce(label)
+}
 
-@external(erlang, "arc_rt_layout_root_ffi", "dyn")
-fn env(vals: List(JsVal)) -> EnvTuple
+fn env(vals: List(JsVal)) -> EnvTuple {
+  unsafe.coerce(vals)
+}
 
-@external(erlang, "arc_rt_layout_root_ffi", "dyn")
-fn sm_fn(label: String) -> types.SmFn
+fn state_machine(label: String) -> types.StateMachine {
+  unsafe.coerce(label)
+}
 
-@external(erlang, "arc_rt_layout_root_ffi", "dyn")
-fn loc(label: String) -> types.Loc
+fn locals(label: String) -> types.Locals {
+  unsafe.coerce(label)
+}
 
-@external(erlang, "arc_rt_layout_root_ffi", "dyn")
-fn frame(label: String) -> bytecode.SuspendedFrame
+fn suspended_frame(label: String) -> bytecode.SuspendedFrame {
+  unsafe.coerce(label)
+}
 
 fn at(record: a, name: String) -> Dynamic {
-  element(idx(name), dyn(record))
+  element_of(idx(name), dyn(record))
 }
 
 fn tag_of(record: a) -> Dynamic {
-  element(1, dyn(record))
-}
-
-fn size_of(record: a) -> Int {
-  tuple_size(dyn(record))
+  element_of(1, dyn(record))
 }
 
 fn seeded() -> Agent {
@@ -219,7 +223,7 @@ pub fn realm_test() {
   assert at(realm, "REALM_SET") == dyn(realm.set)
   assert at(realm, "REALM_MAP_ITER_PROTO") == dyn(realm.map_iter_proto)
   assert at(realm, "REALM_SET_ITER_PROTO") == dyn(realm.set_iter_proto)
-  assert at(realm, "REALM_GLOBAL") == dyn(realm.global_object)
+  assert at(realm, "REALM_GLOBAL_OBJECT") == dyn(realm.global_object)
   assert at(realm, "REALM_ID") == dyn(realm.id)
   assert realm.id == 0
   assert realm.object != realm.function
@@ -227,8 +231,8 @@ pub fn realm_test() {
   let pair = realm.object
   assert tag_of(pair) == tag("BUILTINPAIR_TAG")
   assert size_of(pair) == 3
-  assert at(pair, "BUILTINPAIR_PROTO") == dyn(pair.prototype)
-  assert at(pair, "BUILTINPAIR_CTOR") == dyn(pair.constructor)
+  assert at(pair, "BUILTINPAIR_PROTOTYPE") == dyn(pair.prototype)
+  assert at(pair, "BUILTINPAIR_CONSTRUCTOR") == dyn(pair.constructor)
   assert pair.prototype != pair.constructor
   let v = types.mk_string("g")
   assert at(types.Let(v), "LEXICAL_GLOBAL_VALUE") == dyn(v)
@@ -324,7 +328,7 @@ pub fn sobject_test() {
   assert size_of(obj) == idx("SOBJECT_SIZE")
   assert at(obj, "SOBJECT_KIND") == dyn(ArrayObj(9))
   assert at(obj, "SOBJECT_PROTO") == dyn(Some(proto))
-  assert element(2, at(obj, "SOBJECT_PROTO")) == dyn(proto)
+  assert element_of(2, at(obj, "SOBJECT_PROTO")) == dyn(proto)
   assert at(obj, "SOBJECT_PROPS") == dyn(props)
   assert at(obj, "SOBJECT_SYMBOL_PROPS") == dyn(symbol_props)
   assert at(obj, "SOBJECT_ELEMENTS") == dyn(elements)
@@ -365,23 +369,23 @@ pub fn sobject_test() {
 pub fn keys_and_elements_test() {
   assert tag_of(Named("x")) == tag("KEY_NAMED")
   assert dyn(Named("length")) == tag("LENGTH_KEY")
-  assert element(2, dyn(Named("x"))) == dyn("x")
+  assert element_of(2, dyn(Named("x"))) == dyn("x")
   assert tag_of(Index(5)) == tag("KEY_INDEX")
-  assert element(2, dyn(Index(5))) == dyn(5)
+  assert element_of(2, dyn(Index(5))) == dyn(5)
   assert tag_of(Private("#p")) == tag("KEY_PRIVATE")
-  assert tag_of(StringKey(Named("x"))) == tag("OKEY_STRING")
-  assert element(2, dyn(StringKey(Named("x")))) == dyn(Named("x"))
-  assert tag_of(SymbolKey(types.symbol_iterator)) == tag("OKEY_SYMBOL")
+  assert tag_of(StringKey(Named("x"))) == tag("STRINGKEY_TAG")
+  assert element_of(2, dyn(StringKey(Named("x")))) == dyn(Named("x"))
+  assert tag_of(SymbolKey(types.symbol_iterator)) == tag("SYMBOLKEY_TAG")
   assert dyn(types.symbol_iterator) == tag("SYMBOL_ITERATOR")
   assert dyn(NoElements) == tag("ELEMS_NONE")
   let arr = tree_array.from_list([types.mk_string("a")])
   assert tag_of(Dense(arr)) == tag("ELEMS_DENSE")
   let deep = tree_array.from_list(list.repeat(types.mk_int(0), 65))
   assert tag_of(deep) == tag("VEC_TAG")
-  assert element(2, dyn(Dense(arr))) == dyn(arr)
+  assert element_of(2, dyn(Dense(arr))) == dyn(arr)
   let sparse = dict.from_list([#(0, types.mk_string("s"))])
   assert tag_of(Sparse(sparse)) == tag("ELEMS_SPARSE")
-  assert element(2, dyn(Sparse(sparse))) == dyn(sparse)
+  assert element_of(2, dyn(Sparse(sparse))) == dyn(sparse)
   assert dyn(types.mk_hole()) == tag("ELEMS_HOLE")
 }
 
@@ -460,15 +464,15 @@ pub fn sshaped_object_test() {
     )
   assert tag_of(obj) == tag("SSHAPEDOBJECT_TAG")
   assert size_of(obj) == idx("SSHAPEDOBJECT_SIZE")
-  assert at(obj, "SSHAPEDOBJECT_SID") == dyn(21)
+  assert at(obj, "SSHAPEDOBJECT_SHAPE_ID") == dyn(21)
   assert at(obj, "SSHAPEDOBJECT_PROTO") == dyn(Some(Handle(2)))
   assert at(obj, "SSHAPEDOBJECT_SLOTS") == dyn(sl)
   assert at(obj, "SSHAPEDOBJECT_OFFSETS") == dyn(offs)
   assert idx("CELL_PROTO") == idx("SSHAPEDOBJECT_PROTO")
   assert idx("CELL_PROTO") == idx("SOBJECT_PROTO")
-  assert tuple_size(dyn(sl)) == 3
-  assert element(1, dyn(sl)) == dyn(s0)
-  assert element(2, dyn(sl)) == dyn(s1)
+  assert size_of(sl) == 3
+  assert element_of(1, dyn(sl)) == dyn(s0)
+  assert element_of(2, dyn(sl)) == dyn(s1)
   assert rt_obj.shape_slots_get(sl, 1) == s1
   assert slot_at(sl, 1) == s1
   assert slot_set(sl, 0, s1) == rt_obj.shape_slots_set(sl, 0, s1)
@@ -491,17 +495,23 @@ pub fn shape_desc_test() {
 pub fn fn_flags_test() {
   let base = no_flags()
   let names = [
-    "FNFLAGS_IS_CTOR", "FNFLAGS_IS_CLASS_CTOR", "FNFLAGS_IS_DERIVED",
-    "FNFLAGS_IS_ARROW", "FNFLAGS_IS_METHOD", "FNFLAGS_IS_GEN",
-    "FNFLAGS_IS_ASYNC", "FNFLAGS_IS_STRICT",
+    "FNFLAGS_IS_CONSTRUCTOR", "FNFLAGS_IS_CLASS_CONSTRUCTOR",
+    "FNFLAGS_IS_DERIVED_CONSTRUCTOR", "FNFLAGS_IS_ARROW", "FNFLAGS_IS_METHOD",
+    "FNFLAGS_IS_GENERATOR", "FNFLAGS_IS_ASYNC", "FNFLAGS_IS_STRICT",
   ]
   let one_hot = [
-    #("FNFLAGS_IS_CTOR", FnFlags(..base, is_constructor: True)),
-    #("FNFLAGS_IS_CLASS_CTOR", FnFlags(..base, is_class_constructor: True)),
-    #("FNFLAGS_IS_DERIVED", FnFlags(..base, is_derived_constructor: True)),
+    #("FNFLAGS_IS_CONSTRUCTOR", FnFlags(..base, is_constructor: True)),
+    #(
+      "FNFLAGS_IS_CLASS_CONSTRUCTOR",
+      FnFlags(..base, is_class_constructor: True),
+    ),
+    #(
+      "FNFLAGS_IS_DERIVED_CONSTRUCTOR",
+      FnFlags(..base, is_derived_constructor: True),
+    ),
     #("FNFLAGS_IS_ARROW", FnFlags(..base, is_arrow: True)),
     #("FNFLAGS_IS_METHOD", FnFlags(..base, is_method: True)),
-    #("FNFLAGS_IS_GEN", FnFlags(..base, is_generator: True)),
+    #("FNFLAGS_IS_GENERATOR", FnFlags(..base, is_generator: True)),
     #("FNFLAGS_IS_ASYNC", FnFlags(..base, is_async: True)),
     #("FNFLAGS_IS_STRICT", FnFlags(..base, is_strict: True)),
   ]
@@ -541,7 +551,7 @@ pub fn compiled_fn_test() {
   assert tag_of(compiled) == tag("COMPILEDFN_TAG")
   assert size_of(compiled) == idx("COMPILEDFN_SIZE")
   assert at(compiled, "COMPILEDFN_CODE") == dyn(code)
-  assert at(compiled, "COMPILEDFN_HOME") == dyn(Some(Handle(30)))
+  assert at(compiled, "COMPILEDFN_HOME_OBJECT") == dyn(Some(Handle(30)))
   assert at(compiled, "COMPILEDFN_FLAGS") == dyn(flags)
   assert at(compiled, "COMPILEDFN_FIELDS_INIT") == dyn(Some(Handle(31)))
   assert at(compiled, "COMPILEDFN_NAME") == dyn("nm")
@@ -552,12 +562,12 @@ pub fn compiled_fn_test() {
   assert at(birth, "BIRTHPENDING_PROTOTYPE_PARENT") == dyn(Some(Handle(32)))
   let entry = at(compiled, "COMPILEDFN_DIRECT_ENTRY")
   assert tag_of(entry) == tag("SOME")
-  let inner = element(2, entry)
+  let inner = element_of(2, entry)
   assert tag_of(inner) == tag("DIRECT_ENTRY_TAG")
-  assert tuple_size(inner) == idx("DIRECT_ENTRY_SIZE")
-  assert element(2, inner) == dyn(code_s)
-  assert element(3, inner) == dyn(2)
-  assert element(4, inner) == dyn(True)
+  assert size_of(inner) == idx("DIRECT_ENTRY_SIZE")
+  assert element_of(2, inner) == dyn(code_s)
+  assert element_of(3, inner) == dyn(2)
+  assert element_of(4, inner) == dyn(True)
   assert inner == direct_entry(code_s, 2, takes_this: True)
   assert inner == dyn(DirectEntry(code_s, 2, True))
   assert compiled_fn_parts(compiled)
@@ -579,7 +589,7 @@ pub fn compiled_fn_test() {
       length: 0,
       birth: BirthSettled,
     )
-  assert at(bare, "COMPILEDFN_HOME") == tag("NONE")
+  assert at(bare, "COMPILEDFN_HOME_OBJECT") == tag("NONE")
   assert at(bare, "COMPILEDFN_FIELDS_INIT") == tag("NONE")
   assert at(bare, "COMPILEDFN_DIRECT_ENTRY") == tag("NONE")
   assert at(bare, "COMPILEDFN_BIRTH") == tag("BIRTH_SETTLED")
@@ -670,31 +680,36 @@ pub fn data_property_test() {
 
 pub fn step_and_resume_test() {
   let v = types.mk_string("v")
-  let compiled = ResumeCompiled(sm: sm_fn("sm"), rs: 3, loc: loc("L"))
+  let compiled =
+    ResumeCompiled(
+      machine: state_machine("sm"),
+      resume_point: 3,
+      locals: locals("L"),
+    )
   assert tag_of(compiled) == tag("RESUMECOMPILED_TAG")
   assert size_of(compiled) == 4
-  assert element(2, dyn(compiled)) == dyn("sm")
-  assert element(3, dyn(compiled)) == dyn(3)
-  assert element(4, dyn(compiled)) == dyn("L")
-  let parked = ResumeFrame(frame: frame("F"))
+  assert element_of(2, dyn(compiled)) == dyn("sm")
+  assert element_of(3, dyn(compiled)) == dyn(3)
+  assert element_of(4, dyn(compiled)) == dyn("L")
+  let parked = ResumeFrame(frame: suspended_frame("F"))
   assert tag_of(parked) == tag("RESUMEFRAME_TAG")
-  assert element(2, dyn(parked)) == dyn("F")
+  assert element_of(2, dyn(parked)) == dyn("F")
   assert tag_of(StepReturn(v)) == tag("STEP_RETURN")
-  assert element(2, dyn(StepReturn(v))) == dyn(v)
+  assert element_of(2, dyn(StepReturn(v))) == dyn(v)
   assert tag_of(StepThrow(v)) == tag("STEP_THROW")
   assert tag_of(StepYield(v, compiled)) == tag("STEP_YIELD")
-  assert element(2, dyn(StepYield(v, compiled))) == dyn(v)
-  assert element(3, dyn(StepYield(v, compiled))) == dyn(compiled)
+  assert element_of(2, dyn(StepYield(v, compiled))) == dyn(v)
+  assert element_of(3, dyn(StepYield(v, compiled))) == dyn(compiled)
   assert tag_of(StepAwait(v, parked)) == tag("STEP_AWAIT")
-  assert element(3, dyn(StepAwait(v, parked))) == dyn(parked)
+  assert element_of(3, dyn(StepAwait(v, parked))) == dyn(parked)
 }
 
 pub fn completion_test() {
   let v = types.mk_string("c")
   assert tag_of(NormalCompletion(v)) == tag("COMPLETION_NORMAL")
-  assert element(2, dyn(NormalCompletion(v))) == dyn(v)
+  assert element_of(2, dyn(NormalCompletion(v))) == dyn(v)
   assert tag_of(ThrowCompletion(v)) == tag("COMPLETION_THROW")
-  assert element(2, dyn(ThrowCompletion(v))) == dyn(v)
+  assert element_of(2, dyn(ThrowCompletion(v))) == dyn(v)
 }
 
 pub fn frame_test() {
@@ -702,10 +717,10 @@ pub fn frame_test() {
   let f = types.mk_string("fn")
   let home = types.mk_string("home")
   let nt = types.mk_undefined()
-  let frame = rt_call.mk_frame(this, f, home, nt)
-  assert frame_macro(this, f, home, nt) == dyn(frame)
-  assert dyn(frame) == dyn(#(this, f, home, nt))
-  assert rt_call.frame_active_func(frame) == f
+  let built = rt_call.new_frame(this, f, home, nt)
+  assert frame(this, f, home, nt) == dyn(built)
+  assert dyn(built) == dyn(#(this, f, home, nt))
+  assert rt_call.frame_active_func(built) == f
 }
 
 @external(erlang, "arc_rt_obj_ffi", "get_elem")
@@ -738,7 +753,7 @@ type Probe {
   Miss
 }
 
-pub fn typed_array_fast_paths_miss_test() {
+pub fn typed_array_kernels_miss_test() {
   let st = seeded()
   let #(ctor, st) = rt_lang.global_get(st, <<"Uint8Array">>)
   let n = types.mk_int(4)
@@ -754,7 +769,7 @@ pub fn typed_array_fast_paths_miss_test() {
   assert set_prop_own_data(st, ta, <<"extra">>, n) == dyn(Miss)
 }
 
-pub fn proxy_fast_paths_miss_test() {
+pub fn proxy_kernels_miss_test() {
   let st = seeded()
   let n = types.mk_int(4)
   let #(arr, st) = rt_obj.new_array(st, [n, n])
@@ -770,7 +785,7 @@ pub fn proxy_fast_paths_miss_test() {
   // instanceof over a proxy must reach the getprototypeof trap
   let ctor_flags = FnFlags(..no_flags(), is_constructor: True)
   let #(f, st) =
-    rt_call.new_function(st, dummy_code("F"), ctor_flags, "F", 0, None)
+    rt_call.new_closure(st, dummy_code("F"), ctor_flags, "F", 0, None)
   let #(_, st) = rt_obj.get_prop(st, f, StringKey(Named("prototype")))
   let #(plain, st) = rt_obj.new_object_literal(st)
   assert instanceof_i32(st, plain, f) == dyn(0)
@@ -779,7 +794,7 @@ pub fn proxy_fast_paths_miss_test() {
   assert instanceof_i32(st, types.mk_object(child), f) == dyn(Miss)
 }
 
-pub fn string_object_fast_paths_miss_test() {
+pub fn string_object_kernels_miss_test() {
   let st = seeded()
   let n = types.mk_int(1)
   let #(string_ctor, st) = rt_lang.global_get(st, <<"String">>)
@@ -797,7 +812,7 @@ pub fn string_object_fast_paths_miss_test() {
   assert set_prop_own_data(st, s, <<"extra">>, n) != dyn(Miss)
 }
 
-pub fn bytecode_function_fast_paths_miss_test() {
+pub fn bytecode_function_kernels_miss_test() {
   let st = seeded()
   let flags = FnFlags(..no_flags(), is_constructor: True, is_strict: True)
   let kind =
@@ -831,17 +846,18 @@ pub fn bytecode_function_fast_paths_miss_test() {
   assert instanceof_i32(st, o, f) == dyn(Miss)
 }
 
-@external(erlang, "arc_rt_layout_root_ffi", "dyn")
 fn compiled_code(
   code: fn(Agent, Dynamic, List(JsVal)) -> #(JsVal, Agent),
-) -> CompiledCode
+) -> CompiledCode {
+  unsafe.coerce(code)
+}
 
-pub fn compiled_function_fast_paths_hit_test() {
+pub fn compiled_function_kernels_hit_test() {
   let st = seeded()
   let undef = types.mk_undefined()
   let code = compiled_code(fn(st, _frame, _args) { #(undef, st) })
   let flags = FnFlags(..no_flags(), is_constructor: True, is_strict: True)
-  let #(f, st) = rt_call.new_function(st, code, flags, "F", 0, None)
+  let #(f, st) = rt_call.new_closure(st, code, flags, "F", 0, None)
   assert rt_call.direct_callee(st, f, undef) != dyn(Miss)
   assert new_direct(st, f, []).0 == dyn(Miss)
   let #(proto, st) = rt_obj.get_prop(st, f, StringKey(Named("prototype")))

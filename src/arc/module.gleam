@@ -45,11 +45,15 @@ pub type CompiledModule {
     export_entries: List(summary.ExportEntry),
     export_names: Dict(String, Int),
     specifier_map: specifier.SpecifierMap,
-    requested_modules: List(#(specifier.Resolved, summary.Phase)),
+    requested_modules: List(RequestedModule),
     export_seeds: Dict(String, ExportSeed),
     hoisted_funcs: List(#(String, Int)),
     has_tla: Bool,
   )
+}
+
+pub type RequestedModule {
+  RequestedModule(specifier: specifier.Resolved, phase: summary.Phase)
 }
 
 pub type HostModule {
@@ -101,7 +105,7 @@ pub fn compile_bundle_error_message(err: CompileBundleError) -> String {
       "SyntaxError in '"
       <> specifier.resolved_text(resolved)
       <> "': "
-      <> parser.parse_error_to_string(parse_error)
+      <> parser.error_to_string(parse_error)
     GraphError(error: graph.ResolveFailed(raw, referrer, error)) ->
       loader.resolve_failure_message(
         specifier.raw_text(raw),
@@ -130,7 +134,7 @@ pub fn format_compile_bundle_error(err: CompileBundleError) -> String {
   phase <> compile_bundle_error_message(err)
 }
 
-pub fn module_error_phase(err: ModuleError) -> String {
+pub fn error_phase(err: ModuleError) -> String {
   case err {
     NotInBundle(..) -> "ResolutionError: "
     EvaluationError(..) | EvaluationPending(..) -> ""
@@ -149,7 +153,7 @@ pub fn error_message(st: Agent, err: ModuleError) -> String {
 pub type LinkInvariantBroken {
   UnresolvedDependency(specifier: specifier.Raw)
   ModuleNotLinked(specifier: String)
-  MissingExportCell(dep: String, name: String)
+  MissingExportBox(dep: String, name: String)
   MissingDeferredBox(dep: String)
   PreexistingNotANamespace(specifier: String, namespace: Handle)
   NamespaceBoxCorrupt(specifier: String)
@@ -234,13 +238,13 @@ fn compile_source_module(
       specifier: resolved,
       source: _,
       items:,
-      sb:,
+      scopes:,
       summary: module_summary,
     ),
     edges:,
   ) = node
   use body <- result.map(
-    compiler.compile_module(items, sb, module_summary)
+    compiler.compile_module(items, scopes, module_summary)
     |> result.map_error(fn(error) {
       CompileError(specifier: specifier.resolved_text(resolved), error:)
     }),
@@ -248,7 +252,7 @@ fn compile_source_module(
   let requested_modules =
     list.map(edges, fn(edge) {
       let #(request, resolved_specifier) = edge
-      #(resolved_specifier, request.phase)
+      RequestedModule(specifier: resolved_specifier, phase: request.phase)
     })
   CompiledModule(
     specifier: resolved,
@@ -627,7 +631,7 @@ fn evaluate_with_deps(
   let evaluation = set_run_status(evaluation, spec, Evaluating)
 
   let #(dep_result, evaluation) = {
-    use evaluation, Nil, #(resolved_dep, phase) <- try_fold_state(
+    use evaluation, Nil, RequestedModule(resolved_dep, phase) <- try_fold_state(
       compiled.requested_modules,
       evaluation,
       Nil,
@@ -635,13 +639,16 @@ fn evaluate_with_deps(
     let dep_specifier = specifier.resolved_text(resolved_dep)
     let to_evaluate = case phase {
       summary.Evaluation -> [dep_specifier]
-      summary.Deferred ->
-        gather_async_transitive_deps(
-          bundle,
-          evaluation,
-          dep_specifier,
-          set.new(),
-        ).0
+      summary.Deferred -> {
+        let #(deps, _seen) =
+          gather_async_transitive_deps(
+            bundle,
+            evaluation,
+            dep_specifier,
+            set.new(),
+          )
+        deps
+      }
     }
     use evaluation, Nil, dep <- try_fold_state(to_evaluate, evaluation, Nil)
     let #(r, evaluation) =
@@ -796,22 +803,32 @@ fn drive_top_level_await(
   let #(promise, st) = rt_async.new_promise(st)
   // held from gleam across drains
   let st = rt_store.pin_root(st, promise)
-  let #(data, pstate, _) = rt_async.promise_data(st, promise)
+  let rt_async.PromiseRecord(data:, state: pstate, ..) =
+    rt_async.promise_data(st, promise)
   // mark handled, the host inspects it below
   let st = rt_store.cell_set(st, data, SPromiseData(pstate, is_handled: True))
   let #(ctx, st) = rt_store.cell_new(st, SAsyncContext(resume:, promise:))
   let st = rt_async.await(st, ctx, awaited)
   let st = safepoint.finish_turn(st, [], drain)
   case rt_async.promise_data(st, promise) {
-    #(_, PromiseFulfilled(v), _) -> #(BodyReturned(v), st)
-    #(_, PromiseRejected(reason), _) -> #(BodyThrew(reason), st)
-    #(_, PromisePending(_), _) -> #(BodyPending(promise), st)
+    rt_async.PromiseRecord(state: PromiseFulfilled(v), ..) -> #(
+      BodyReturned(v),
+      st,
+    )
+    rt_async.PromiseRecord(state: PromiseRejected(reason), ..) -> #(
+      BodyThrew(reason),
+      st,
+    )
+    rt_async.PromiseRecord(state: PromisePending(_), ..) -> #(
+      BodyPending(promise),
+      st,
+    )
   }
 }
 
-// pinned: binding cells are held from gleam
+// pinned: binding boxes are held from gleam
 fn alloc_box(st: Agent, val: JsVal) -> #(Handle, Agent) {
-  let #(box, st) = rt_store.cell_new(st, SBox(val))
+  let #(box, st) = rt_store.box_new(st, val)
   #(box, rt_store.pin_root(st, box))
 }
 
@@ -887,7 +904,7 @@ fn build_linked(
                 linkable.ResolvedTo(owner, binding) ->
                   dict.get(local_boxes, specifier.resolved_text(owner))
                   |> result.try(dict.get(_, binding))
-                  |> result.replace_error(MissingExportCell(
+                  |> result.replace_error(MissingExportBox(
                     specifier.resolved_text(owner),
                     binding,
                   ))
@@ -963,7 +980,7 @@ fn gather_async_transitive_deps(
               gather_async_transitive_deps(
                 bundle,
                 evaluation,
-                specifier.resolved_text(request.0),
+                specifier.resolved_text(request.specifier),
                 seen,
               )
             #(list.append(found, more), seen)
@@ -1052,7 +1069,7 @@ fn instantiate_hoisted_functions(
               bytecode.env_from_list(captured),
               lm.unit_id,
             )
-          rt_store.cell_set(st, box, SBox(mk_object(closure)))
+          rt_store.box_set(st, box, mk_object(closure))
         }
       }
     })
@@ -1116,7 +1133,7 @@ fn preallocate_local_boxes(
           case e {
             summary.LocalExport(export_name:, local_name:) ->
               dict.get(existing_exports, export_name)
-              |> result.replace_error(MissingExportCell(spec, export_name))
+              |> result.replace_error(MissingExportBox(spec, export_name))
               |> assert_link_invariant
               |> dict.insert(boxes, local_name, _)
             _ -> boxes
@@ -1284,8 +1301,10 @@ fn ensure_deferred_evaluated(
   )
   case registry.read_module_error(st, spec) {
     Some(err) -> rt_store.throw(st, err)
-    None ->
-      case ready_for_sync_execution(st, bundle, spec, set.new()).0 {
+    None -> {
+      let #(ready, _seen) =
+        ready_for_sync_execution(st, bundle, spec, set.new())
+      case ready {
         False ->
           rt_val.throw_type_error(
             st,
@@ -1295,6 +1314,7 @@ fn ensure_deferred_evaluated(
           )
         True -> evaluate_deferred_subgraph(st, bundle, linked, spec)
       }
+    }
   }
 }
 
@@ -1318,15 +1338,16 @@ fn ready_for_sync_execution(
             True -> #(False, seen)
             False ->
               list.fold(m.requested_modules, #(True, seen), fn(acc, request) {
-                case acc.0, request.1 {
+                let #(ready, seen) = acc
+                case ready, request.phase {
                   False, _ -> acc
                   True, summary.Deferred -> acc
                   True, summary.Evaluation ->
                     ready_for_sync_execution(
                       st,
                       bundle,
-                      specifier.resolved_text(request.0),
-                      acc.1,
+                      specifier.resolved_text(request.specifier),
+                      seen,
                     )
                 }
               })
@@ -1402,7 +1423,7 @@ fn forward_box(
   name: String,
 ) -> Result(JsVal, LinkInvariantBroken) {
   dict.get(dep_exports, name)
-  |> result.replace_error(MissingExportCell(dep, name))
+  |> result.replace_error(MissingExportBox(dep, name))
   |> result.map(mk_object)
 }
 

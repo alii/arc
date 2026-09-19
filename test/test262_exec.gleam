@@ -127,13 +127,13 @@ fn harness_template(
 }
 
 fn compile_harness_source(source: String) -> Result(FuncTemplate, String) {
-  use #(body, sb) <- result.try(
+  use #(body, scopes) <- result.try(
     parser.parse_script(source)
     |> result.map_error(fn(err) {
-      "harness parse: " <> parser.parse_error_to_string(err)
+      "harness parse: " <> parser.error_to_string(err)
     }),
   )
-  compiler.compile_repl(body, sb)
+  compiler.compile_repl(body, scopes)
   |> result.map_error(fn(err) { "harness compile: " <> string.inspect(err) })
 }
 
@@ -520,7 +520,7 @@ fn check_async_completion(settled: Settled) -> Result(Nil, String) {
             _ ->
               Error(
                 "unexpected __print_output__: "
-                <> rt_inspect.inspect(st, output),
+                <> rt_inspect.describe(st, output),
               )
           }
       }
@@ -624,9 +624,9 @@ fn do_run_script_with_harness(
   let test_source = test262_suite.variant_source(source, variant)
 
   case parser.parse_script(test_source) {
-    Error(err) -> Error("parse: " <> parser.parse_error_to_string(err))
-    Ok(#(body, sb)) ->
-      case compiler.compile_repl(body, sb) {
+    Error(err) -> Error("parse: " <> parser.error_to_string(err))
+    Ok(#(body, scopes)) ->
+      case compiler.compile_repl(body, scopes) {
         Error(err) -> Error("compile: " <> string.inspect(err))
         Ok(template) -> Ok(run_settled(st, template))
       }
@@ -658,7 +658,7 @@ fn eval_harness(
     True -> Ok(st)
     False -> {
       let st =
-        import_hook.install_import_hook(
+        import_hook.install(
           st,
           path,
           file_loader.file_resolve,
@@ -678,7 +678,7 @@ fn eval_harness(
 }
 
 fn install_host_api(st: Agent, parent: Option(AgentPid)) -> Agent {
-  let #(dollar_262, st) = rt_realm.install_262(st, st.realm)
+  let #(dollar_262, st) = rt_realm.install_test262(st, st.realm)
   let ctx = host.from_agent(st, host.new_brand())
   let ctx = extend_262_with_agent(ctx, dollar_262, parent)
   let ctx = install_print(ctx)
@@ -744,7 +744,7 @@ fn inspect_thrown(val: JsVal, st: Agent) -> String {
       _ -> None
     }
   }
-  option.lazy_unwrap(described, fn() { rt_inspect.inspect(st, val) })
+  option.lazy_unwrap(described, fn() { rt_inspect.describe(st, val) })
 }
 
 fn extend_262_with_agent(
@@ -836,7 +836,7 @@ fn agent_start_native(
   case agent_queue(ctx.agent, this, "__children__") {
     None -> host.type_error(ctx, "start: $262.agent state missing")
     Some(#(arr, children)) -> {
-      let pid = ffi_spawn_agent(fn(parent) { run_agent_child(source, parent) })
+      let pid = spawn_agent(fn(parent) { run_agent_child(source, parent) })
       let #(child, ctx) = host.alloc_host_object(ctx, pid, None)
       done(
         ctx,
@@ -858,9 +858,10 @@ fn run_agent_child(source: String, parent: AgentPid) -> Nil {
   let compiled =
     compile_task.run(string.byte_size(source), fn() {
       case parser.parse_script(source) {
-        Error(err) -> Error(parser.parse_error_to_string(err))
-        Ok(#(body, sb)) ->
-          compiler.compile_eval(body, sb) |> result.map_error(string.inspect)
+        Error(err) -> Error(parser.error_to_string(err))
+        Ok(#(body, scopes)) ->
+          compiler.compile_eval(body, scopes)
+          |> result.map_error(string.inspect)
       }
     })
   case compiled {
@@ -885,7 +886,7 @@ fn run_agent_child(source: String, parent: AgentPid) -> Nil {
 }
 
 fn run_agent_child_loop(st: Agent, agent_this: JsVal, parent: AgentPid) -> Nil {
-  case ffi_await_broadcast_or_wake(parent) {
+  case await_broadcast_or_wake(parent) {
     AgentWakeParentDown -> Nil
     AgentWakeSab(ref) ->
       run_agent_child_loop(
@@ -920,7 +921,7 @@ fn payload_to_value(st: Agent, payload: AgentPayload) -> #(JsVal, Agent) {
   case payload {
     AgentValuePayload(v) -> #(v, st)
     AgentSabPayload(storage:) -> {
-      let proto = case buffer.buffer_is_shared(storage) {
+      let proto = case buffer.storage_is_shared(storage) {
         True -> st.realm.shared_array_buffer.prototype
         False -> st.realm.array_buffer.prototype
       }
@@ -962,7 +963,7 @@ fn agent_broadcast_native(
             "$262.agent.broadcast: argument must be a (Shared)ArrayBuffer or a primitive",
           )
         #(Some(payload), st) -> {
-          let Nil = ffi_broadcast(pids, payload)
+          let Nil = broadcast(pids, payload)
           done(ctx, st)
         }
       }
@@ -997,7 +998,7 @@ fn agent_report_native(
   let #(str, st) = rt_val.to_string(ctx.agent, host.first_arg(args))
   case parent {
     Some(parent) -> {
-      let Nil = ffi_send_report(parent, str)
+      let Nil = send_report(parent, str)
       done(ctx, st)
     }
     None ->
@@ -1025,9 +1026,9 @@ fn agent_get_report_native(
     Some(#(arr, reports)) ->
       case reports {
         [] ->
-          case ffi_take_report() {
-            Ok(report) -> #(Ok(mk_string(report)), ctx)
-            Error(Nil) -> #(Ok(mk_null()), ctx)
+          case take_report() {
+            Some(report) -> #(Ok(mk_string(report)), ctx)
+            None -> #(Ok(mk_null()), ctx)
           }
         [head, ..rest] -> #(
           Ok(head),
@@ -1112,32 +1113,32 @@ fn agent_queue_write(st: Agent, arr: Handle, values: List(JsVal)) -> Agent {
 }
 
 @external(erlang, "test262_exec_ffi", "spawn_agent")
-fn ffi_spawn_agent(_body: fn(AgentPid) -> Nil) -> AgentPid {
+fn spawn_agent(_body: fn(AgentPid) -> Nil) -> AgentPid {
   panic as beam_only_test
 }
 
 @external(erlang, "test262_exec_ffi", "broadcast")
-fn ffi_broadcast(_pids: List(AgentPid), _payload: AgentPayload) -> Nil {
+fn broadcast(_pids: List(AgentPid), _payload: AgentPayload) -> Nil {
   panic as beam_only_test
 }
 
 @external(erlang, "test262_exec_ffi", "await_broadcast_or_wake")
-fn ffi_await_broadcast_or_wake(_parent: AgentPid) -> AgentWake {
+fn await_broadcast_or_wake(_parent: AgentPid) -> AgentWake {
   panic as beam_only_test
 }
 
 @external(erlang, "test262_exec_ffi", "send_report")
-fn ffi_send_report(_parent: AgentPid, _report: String) -> Nil {
+fn send_report(_parent: AgentPid, _report: String) -> Nil {
   panic as beam_only_test
 }
 
 @external(erlang, "test262_exec_ffi", "take_report")
-fn ffi_take_report() -> Result(String, Nil) {
+fn take_report() -> Option(String) {
   panic as beam_only_test
 }
 
-fn harness_host_hooks() -> host.HostHooks {
-  HostHooks(..host.default_host_hooks(), can_block: True)
+fn harness_host_hooks() -> host_hooks.HostHooks {
+  HostHooks(..host_hooks.default(), can_block: True)
 }
 
 fn settle_pending_wakes(st: Agent) -> Agent {

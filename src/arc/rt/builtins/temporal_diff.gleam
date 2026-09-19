@@ -7,9 +7,9 @@ import arc/rt/builtins/temporal_fields.{
   compare_iso_date, compare_triple, iso_date_add, round_between,
 }
 import arc/rt/builtins/temporal_iso.{
-  type Duration, type IsoDate, type IsoTime, Constrain, Duration, IsoDate,
-  add_days, epoch_days, int_sign, midnight, ns_per_day, time_to_ns, utc_epoch_ns,
-  zero_duration,
+  type DateDuration, type Duration, type IsoDate, type IsoTime, Constrain,
+  DateDuration, Duration, IsoDate, add_days, epoch_days, int_sign, midnight,
+  ns_per_day, time_to_ns, utc_epoch_ns, zero_duration,
 }
 import arc/rt/builtins/temporal_options.{Compatible}
 import arc/rt/builtins/temporal_rounding.{
@@ -35,25 +35,22 @@ pub fn compare_iso_date_time(
 
 pub fn calendar_date_until(
   cal: temporal_calendar.Calendar,
-  d1: IsoDate,
-  d2: IsoDate,
+  from: IsoDate,
+  to: IsoDate,
   largest: Unit,
-) -> #(Int, Int, Int, Int) {
+) -> DateDuration {
   case cal {
-    temporal_calendar.Iso8601 -> iso_date_until(d1, d2, largest)
+    temporal_calendar.Iso8601 -> iso_date_until(from, to, largest)
     _ ->
       case largest {
-        Year | Month -> {
-          let #(y, m, rem_days) =
-            calendar_years_months_until(
-              cal,
-              d1,
-              d2,
-              whole_years: largest == Year,
-            )
-          #(y, m, 0, rem_days)
-        }
-        _ -> iso_date_until(d1, d2, largest)
+        Year | Month ->
+          calendar_years_months_until(
+            cal,
+            from,
+            to,
+            whole_years: largest == Year,
+          )
+        _ -> iso_date_until(from, to, largest)
       }
   }
 }
@@ -71,13 +68,13 @@ pub fn difference_calendar_date(
   case sign == 0 {
     True -> Ok(zero_duration)
     False -> {
-      let #(years, months, weeks, days) =
+      let DateDuration(years:, months:, weeks:, days:) as date_duration =
         calendar_date_until(cal, d1, d2, largest)
       case smallest == Day && inc == 1 {
         True -> Ok(Duration(..zero_duration, years:, months:, weeks:, days:))
         False ->
           round_relative_date_duration(
-            #(years, months, weeks, days),
+            date_duration,
             #(d1, midnight),
             epoch_days(d2) * ns_per_day,
             largest,
@@ -92,27 +89,38 @@ pub fn difference_calendar_date(
 }
 
 pub fn iso_date_until(
-  d1: IsoDate,
-  d2: IsoDate,
+  from: IsoDate,
+  to: IsoDate,
   largest: Unit,
-) -> #(Int, Int, Int, Int) {
+) -> DateDuration {
   case largest {
     Year | Month -> {
-      let sign = compare_iso_date(d2, d1)
-      let total_months = count_months_between(d1, d2, sign)
+      let sign = compare_iso_date(to, from)
+      let total_months = count_months_between(from, to, sign)
       let #(years, months) = case largest {
         Year -> #(trunc_div(total_months, 12), trunc_mod(total_months, 12))
         _ -> #(0, total_months)
       }
-      let intermediate = add_months_constrained(d1, years * 12 + months)
-      let days = epoch_days(d2) - epoch_days(intermediate)
-      #(years, months, 0, days)
+      let intermediate = add_months_constrained(from, years * 12 + months)
+      let days = epoch_days(to) - epoch_days(intermediate)
+      DateDuration(years:, months:, weeks: 0, days:)
     }
     Week -> {
-      let days = epoch_days(d2) - epoch_days(d1)
-      #(0, 0, trunc_div(days, 7), trunc_mod(days, 7))
+      let days = epoch_days(to) - epoch_days(from)
+      DateDuration(
+        years: 0,
+        months: 0,
+        weeks: trunc_div(days, 7),
+        days: trunc_mod(days, 7),
+      )
     }
-    _ -> #(0, 0, 0, epoch_days(d2) - epoch_days(d1))
+    _ ->
+      DateDuration(
+        years: 0,
+        months: 0,
+        weeks: 0,
+        days: epoch_days(to) - epoch_days(from),
+      )
   }
 }
 
@@ -191,7 +199,7 @@ pub fn find_enclosing_window(
 
 fn nudge_calendar_unit(
   sign: Int,
-  ymwd: #(Int, Int, Int, Int),
+  ymwd: DateDuration,
   origin: #(IsoDate, IsoTime),
   dest_ns: Int,
   unit: Unit,
@@ -199,7 +207,7 @@ fn nudge_calendar_unit(
   mode: RoundingMode,
   zoned zoned: Bool,
 ) -> Result(#(Duration, Bool, Int), JsError) {
-  let #(years, months, weeks, days) = ymwd
+  let DateDuration(years:, months:, weeks:, days:) = ymwd
   let #(whole, with_count) = case unit {
     Year -> #(years, fn(r) { Duration(..zero_duration, years: r) })
     Month -> #(months, fn(r) { Duration(..zero_duration, years:, months: r) })
@@ -291,7 +299,7 @@ fn bubble_date_duration_loop(
 }
 
 pub fn round_relative_date_duration(
-  ymwd: #(Int, Int, Int, Int),
+  ymwd: DateDuration,
   origin: #(IsoDate, IsoTime),
   dest_ns: Int,
   largest: Unit,
@@ -343,14 +351,14 @@ pub fn diff_date_time_core(
     adjust_date_for_time_sign(date_sign, b.0, time_to_ns(b.1) - time_to_ns(a.1))
   case unit_rank(largest) >= unit_rank(Day) {
     True -> {
-      let #(years, months, weeks, days) =
+      let DateDuration(years:, months:, weeks:, days:) as date_duration =
         calendar_date_until(cal, a.0, b_date, largest)
       case
         unit_rank(smallest) > unit_rank(Day) || { zoned && smallest == Day }
       {
         True ->
           round_relative_date_duration(
-            #(years, months, weeks, days),
+            date_duration,
             a,
             utc_epoch_ns(b.0, b.1),
             largest,
@@ -422,7 +430,7 @@ pub fn zoned_diff_round_time(
   }
   let #(b_date, _) =
     adjust_date_for_time_sign(sign, b_d, time_to_ns(b_t) - time_to_ns(a_t))
-  let #(years, months, weeks, days) =
+  let DateDuration(years:, months:, weeks:, days:) as date_duration =
     calendar_date_until(cal, a_d, b_date, largest)
   let date_dur = Duration(..zero_duration, years:, months:, weeks:, days:)
   use start_date <- result.try(calendar_date_add(cal, a_d, date_dur, Constrain))
@@ -441,7 +449,7 @@ pub fn zoned_diff_round_time(
         start_date,
         start_ns,
         time_rem,
-        #(years, months, weeks, days),
+        date_duration,
         sign,
         largest,
         smallest,
@@ -457,7 +465,7 @@ fn zoned_nudge_time(
   start_date: IsoDate,
   start_ns: Int,
   time_rem: Int,
-  ymwd: #(Int, Int, Int, Int),
+  ymwd: DateDuration,
   sign: Int,
   largest: Unit,
   smallest: Unit,
@@ -465,7 +473,7 @@ fn zoned_nudge_time(
   mode: RoundingMode,
 ) -> Result(Duration, JsError) {
   let #(a_d, a_t) = a_dt
-  let #(years, months, weeks, days) = ymwd
+  let DateDuration(years:, months:, weeks:, days:) = ymwd
   use smallest_time_unit <- result.try(require_time_unit(smallest))
   let end_date = add_days(start_date, sign)
   use end_ns <- result.try(get_epoch_ns_for(tz, end_date, a_t, Compatible))

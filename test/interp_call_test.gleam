@@ -16,9 +16,9 @@ fn agent() -> Agent {
 }
 
 fn run_on(st: Agent, source: String) -> #(rt_call.Completion(JsVal), Agent) {
-  let assert Ok(#(body, sb)) = parser.parse_script(source)
+  let assert Ok(#(body, scopes)) = parser.parse_script(source)
     as { "parse failed: " <> source }
-  let assert Ok(template) = compiler.compile_script(body, sb)
+  let assert Ok(template) = compiler.compile_script(body, scopes)
     as { "compile failed: " <> source }
   entry.run_script(st, template)
 }
@@ -31,7 +31,7 @@ fn eval(source: String) -> #(JsVal, Agent) {
   case run(source) {
     #(NormalCompletion(v), st) -> #(v, st)
     #(ThrowCompletion(e), st) ->
-      panic as { source <> " threw " <> rt_inspect.inspect(st, e) }
+      panic as { source <> " threw " <> rt_inspect.describe(st, e) }
   }
 }
 
@@ -39,7 +39,7 @@ fn eval_int(source: String) -> Int {
   let #(v, st) = eval(source)
   case classify(v) {
     KNum(JInt(n)) -> n
-    _ -> panic as { source <> " gave " <> rt_inspect.inspect(st, v) }
+    _ -> panic as { source <> " gave " <> rt_inspect.describe(st, v) }
   }
 }
 
@@ -47,7 +47,7 @@ fn eval_string(source: String) -> String {
   let #(v, st) = eval(source)
   case classify(v) {
     KStr(s) -> s
-    _ -> panic as { source <> " gave " <> rt_inspect.inspect(st, v) }
+    _ -> panic as { source <> " gave " <> rt_inspect.describe(st, v) }
   }
 }
 
@@ -55,15 +55,15 @@ fn eval_bool(source: String) -> Bool {
   let #(v, st) = eval(source)
   case classify(v) {
     KBool(b) -> b
-    _ -> panic as { source <> " gave " <> rt_inspect.inspect(st, v) }
+    _ -> panic as { source <> " gave " <> rt_inspect.describe(st, v) }
   }
 }
 
 fn thrown(source: String) -> String {
   case run(source) {
-    #(ThrowCompletion(e), st) -> rt_inspect.inspect(st, e)
+    #(ThrowCompletion(e), st) -> rt_inspect.describe(st, e)
     #(NormalCompletion(v), st) ->
-      panic as { source <> " returned " <> rt_inspect.inspect(st, v) }
+      panic as { source <> " returned " <> rt_inspect.describe(st, v) }
   }
 }
 
@@ -277,15 +277,15 @@ pub fn template_objects_do_not_collide_across_scripts_test() {
     case c {
       NormalCompletion(v) -> classify(v) == KBool(True)
       ThrowCompletion(e) ->
-        panic as { source <> " threw " <> rt_inspect.inspect(st2, e) }
+        panic as { source <> " threw " <> rt_inspect.describe(st2, e) }
     }
   }
   assert check("id`y`.raw[0] === 'y'")
   assert check("id`x` !== first")
   assert check("f() === first")
   let source = "id`z`"
-  let assert Ok(#(body, sb)) = parser.parse_script(source)
-  let assert Ok(template) = compiler.compile_script(body, sb)
+  let assert Ok(#(body, scopes)) = parser.parse_script(source)
+  let assert Ok(template) = compiler.compile_script(body, scopes)
   let assert #(NormalCompletion(z1), st) = entry.run_script(st, template)
   let assert #(NormalCompletion(z2), _) = entry.run_script(st, template)
   assert z1 != z2

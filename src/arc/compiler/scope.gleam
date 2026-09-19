@@ -56,8 +56,8 @@ pub fn is_function_kind(kind: ScopeKind) -> Bool {
 }
 
 pub type TopLevelLex {
-  LexGlobal
-  LexLocal
+  GlobalLexical
+  LocalLexical
 }
 
 // declared_kind survives capture so a captured const stays const
@@ -113,7 +113,7 @@ pub type ScopeTree {
   )
 }
 
-pub type Direct {
+pub type BindingTarget {
   Local(slot: Int, boxed: Bool, kind: BindingKind, declared_kind: BindingKind)
   Global(name: String)
   EvalEnv(name: String)
@@ -124,8 +124,8 @@ pub type SlotRef {
 }
 
 pub type Resolution {
-  Plain(direct: Direct)
-  WithChain(crossed_slots: List(SlotRef), fallback: Direct)
+  Plain(target: BindingTarget)
+  WithChain(crossed_slots: List(SlotRef), fallback: BindingTarget)
 }
 
 pub type AnalyzeOpts {
@@ -147,7 +147,7 @@ pub type AnalyzeOpts {
 
 pub fn default_analyze_opts() -> AnalyzeOpts {
   AnalyzeOpts(
-    top_lex: LexLocal,
+    top_lex: LocalLexical,
     fallthrough: ToGlobal,
     strict: False,
     parent_names: dict.new(),
@@ -248,7 +248,10 @@ pub fn lexical_capture_parent_slots(
   }
 }
 
-fn wrap_with_chain(crossed: List(SlotRef), fallback: Direct) -> Resolution {
+fn wrap_with_chain(
+  crossed: List(SlotRef),
+  fallback: BindingTarget,
+) -> Resolution {
   case crossed {
     [] -> Plain(fallback)
     _ -> WithChain(crossed_slots: list.reverse(crossed), fallback:)
@@ -293,7 +296,7 @@ pub fn fold_enclosing_withs(
 pub fn alloc_scratch(
   tree: ScopeTree,
   function_scope_id: ScopeId,
-) -> #(ScopeTree, Int) {
+) -> #(Int, ScopeTree) {
   let info = function_info(tree, function_scope_id)
   let slot = info.local_count
   let info = FunctionInfo(..info, local_count: slot + 1)
@@ -302,7 +305,7 @@ pub fn alloc_scratch(
       ..tree,
       functions: dict.insert(tree.functions, function_scope_id, info),
     )
-  #(tree, slot)
+  #(slot, tree)
 }
 
 pub fn function_info(tree: ScopeTree, scope_id: ScopeId) -> FunctionInfo {

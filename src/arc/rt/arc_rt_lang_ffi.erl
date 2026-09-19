@@ -6,13 +6,13 @@
 
 -include("arc_rt_layout.hrl").
 
--define(K(Name), {?KEY_NAMED, <<Name>>}).
+-define(NAMED_KEY(Name), {?KEY_NAMED, <<Name>>}).
 
 plain_iter_record(St, {?HANDLE_TAG, Id}) ->
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, ?ORDINARY, _,
-         #{?K("done") := DoneP, ?K("iterator") := IterP, ?K("next") := NextP},
+         #{?NAMED_KEY("done") := DoneP, ?NAMED_KEY("iterator") := IterP, ?NAMED_KEY("next") := NextP},
          _, _, _}
           when element(1, DoneP) =:= ?DATAPROPERTY_TAG,
                element(1, IterP) =:= ?DATAPROPERTY_TAG,
@@ -67,21 +67,21 @@ array_iter_start(St, {?HANDLE_TAG, Id} = V) ->
 array_iter_start(St, S) when ?IS_STR(S) ->
     Realm = element(?AGENT_REALM, St),
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
-    Proto = {?SOME, element(?BUILTINPAIR_PROTO, element(?REALM_STRING, Realm))},
+    Proto = {?SOME, element(?BUILTINPAIR_PROTOTYPE, element(?REALM_STRING, Realm))},
     pristine(Realm, Cells, S, Proto, ?REALM_STRING, ?REALM_STRING_ITER_PROTO,
              ?TOKEN_STRING_ITER, ?TOKEN_STRING_ITER_NEXT);
 array_iter_start(_, _) -> miss.
 
 %% V's @@iterator and the iterator prototype's next are still the intrinsics
 pristine(Realm, Cells, V, Proto, Class, IterProto, IterTok, NextTok) ->
-    {?HANDLE_TAG, CP} = element(?BUILTINPAIR_PROTO, element(Class, Realm)),
+    {?HANDLE_TAG, CP} = element(?BUILTINPAIR_PROTOTYPE, element(Class, Realm)),
     {?HANDLE_TAG, IP} = element(IterProto, Realm),
     case Proto =:= {?SOME, {?HANDLE_TAG, CP}} of
         false -> miss;
         true ->
             case {arc_rt_arena_ffi:get(CP, Cells), arc_rt_arena_ffi:get(IP, Cells)} of
                 {{?SOBJECT_TAG, _, _, _, Syms, _, _},
-                 {?SOBJECT_TAG, _, _, #{?K("next") := NP}, _, _, _}}
+                 {?SOBJECT_TAG, _, _, #{?NAMED_KEY("next") := NP}, _, _, _}}
                   when element(1, NP) =:= ?DATAPROPERTY_TAG ->
                     N = element(?DATAPROPERTY_VALUE, NP),
                     case lists:keyfind(?SYMBOL_ITERATOR, 1, Syms) of

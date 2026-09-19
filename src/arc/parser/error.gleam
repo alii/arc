@@ -150,9 +150,9 @@ pub fn to_string(error: ParseError) -> String {
     RegExpSyntaxError(error:, ..) -> regex_error.pattern_error_message(error)
     ExpectedToken(expected:, got:, ..) ->
       "Expected "
-      <> token.token_kind_to_string(expected)
+      <> token.kind_to_string(expected)
       <> " but got "
-      <> token.token_kind_to_string(got)
+      <> token.kind_to_string(got)
     ExpectedIdentifier(_) -> "Expected identifier"
     ExpectedSemicolon(_) -> "Expected ';'"
     ExpectedBindingPattern(_) -> "Expected binding pattern"
@@ -165,7 +165,7 @@ pub fn to_string(error: ParseError) -> String {
     UnexpectedSuper(_) -> "Unexpected 'super'"
     UnexpectedCloseParen(_) -> "Unexpected token ')'"
     UnexpectedToken(kind:, ..) ->
-      "Unexpected token: " <> token.token_kind_to_string(kind)
+      "Unexpected token: " <> token.kind_to_string(kind)
     MalformedNumericLiteral(error:, ..) -> number.parse_error_message(error)
     ReturnOutsideFunction(_) -> "'return' outside of function"
     BreakOutsideLoopOrSwitch(_) -> "'break' outside of loop or switch"

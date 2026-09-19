@@ -6,7 +6,6 @@ import arc/rt/types.{type Agent}
 import arc_aot/emit
 import arc_aot/run
 import carder/pipeline
-import gleam/dynamic.{type Dynamic}
 import gleam/erlang/atom.{type Atom}
 import gleam/int
 import gleam/io
@@ -20,7 +19,7 @@ fn trace_on(bench_mod: Atom) -> Nil
 @external(erlang, "aot_profile_ffi", "trace_off")
 fn trace_off() -> Nil
 
-@external(erlang, "aot_profile_ffi", "reset")
+@external(erlang, "aot_profile_ffi", "trace_reset")
 fn trace_reset() -> Nil
 
 @external(erlang, "aot_profile_ffi", "count_of")
@@ -35,9 +34,6 @@ fn module_total(m: Atom) -> Int
 @external(erlang, "aot_profile_ffi", "all_mods")
 fn all_mods() -> List(Atom)
 
-@external(erlang, "arc_aot_run_ffi", "apply_js_main")
-fn apply_js_main(st: Agent, mod: Atom) -> #(Dynamic, Agent)
-
 type TimeUnit {
   Microsecond
 }
@@ -45,12 +41,12 @@ type TimeUnit {
 @external(erlang, "erlang", "monotonic_time")
 fn monotonic_time(unit: TimeUnit) -> Int
 
-fn compile_and_seed(source: String, name: String) -> #(Atom, Agent) {
+fn compile_and_load(source: String, name: String) -> #(Atom, Agent) {
   let opts = emit.CompileOpts(module_name: name, source_kind: emit.AsScript)
   let assert Ok(ir_module) = emit.compile_source(source, opts)
   let assert Ok(beam) = pipeline.compile_ir(ir_module, emit.binding())
   let assert Ok(mod) = run.load(beam, name)
-  #(mod, aot_harness.seed())
+  #(mod, aot_harness.new_agent())
 }
 
 fn repeat(times: Int, f: fn() -> a) -> Nil {
@@ -66,22 +62,22 @@ fn repeat(times: Int, f: fn() -> a) -> Nil {
 fn profile(label: String, source: String, runs: Int, iters: Int) -> Nil {
   let name = "arc_prof_" <> label
   trace_reset()
-  let #(mod, seed) = compile_and_seed(source, name)
+  let #(mod, st) = compile_and_load(source, name)
 
-  apply_js_main(seed, mod)
+  run.apply_js_main(st, mod)
 
-  let store_before = seed.store
-  let #(_v, st_after) = apply_js_main(seed, mod)
+  let store_before = st.store
+  let #(_v, st_after) = run.apply_js_main(st, mod)
   let store_after = st_after.store
   let cells = store_after.alloc_since_gc - store_before.alloc_since_gc
 
   let t0 = monotonic_time(Microsecond)
-  repeat(runs, fn() { apply_js_main(seed, mod) })
+  repeat(runs, fn() { run.apply_js_main(st, mod) })
   let untraced_us = monotonic_time(Microsecond) - t0
 
   trace_on(mod)
   let t1 = monotonic_time(Microsecond)
-  repeat(runs, fn() { apply_js_main(seed, mod) })
+  repeat(runs, fn() { run.apply_js_main(st, mod) })
   let traced_us = monotonic_time(Microsecond) - t1
   trace_off()
 
@@ -200,22 +196,22 @@ pub fn profile_file(label: String, path: String, runs: Int) -> Nil {
   let assert Ok(source) = simplifile.read(path)
   let name = "arc_prof_" <> label
   trace_reset()
-  let #(mod, seed) = compile_and_seed(source, name)
+  let #(mod, st) = compile_and_load(source, name)
 
-  apply_js_main(seed, mod)
+  run.apply_js_main(st, mod)
 
-  let store_before = seed.store
-  let #(_v, st_after) = apply_js_main(seed, mod)
+  let store_before = st.store
+  let #(_v, st_after) = run.apply_js_main(st, mod)
   let store_after = st_after.store
   let cells = store_after.alloc_since_gc - store_before.alloc_since_gc
 
   let t0 = monotonic_time(Microsecond)
-  repeat(runs, fn() { apply_js_main(seed, mod) })
+  repeat(runs, fn() { run.apply_js_main(st, mod) })
   let untraced_us = monotonic_time(Microsecond) - t0
 
   trace_on(mod)
   let t1 = monotonic_time(Microsecond)
-  repeat(runs, fn() { apply_js_main(seed, mod) })
+  repeat(runs, fn() { run.apply_js_main(st, mod) })
   let traced_us = monotonic_time(Microsecond) - t1
   trace_off()
 
@@ -352,12 +348,9 @@ pub fn profile_file(label: String, path: String, runs: Int) -> Nil {
 }
 
 @external(erlang, "aot_profile_ffi", "bench_op")
-fn bench_op(which: Atom, st: Agent, arg: Dynamic, n: Int) -> Int
+fn bench_op(which: Atom, st: Agent, arg: arg, n: Int) -> Int
 
-@external(erlang, "aot_harness_ffi", "to_dynamic")
-fn to_dynamic(a: a) -> Dynamic
-
-fn micro(label: String, which: String, st: Agent, arg: Dynamic, n: Int) {
+fn micro(label: String, which: String, st: Agent, arg: arg, n: Int) {
   let a = atom.create(which)
   bench_op(a, st, arg, n)
   let us = bench_op(a, st, arg, n)
@@ -378,12 +371,14 @@ fn microbench() {
   io.println("")
   io.println("══════ isolated untraced microbench (1M calls each) ══════")
   trace_reset()
-  let #(mod, seed) = compile_and_seed(adder_js, "arc_prof_micro_adder")
-  let #(_v, st_adder) = apply_js_main(seed, mod)
+  let #(mod, st) = compile_and_load(adder_js, "arc_prof_micro_adder")
+  let #(_v, st_adder) = run.apply_js_main(st, mod)
   let adder_store = st_adder.store
   // inner fn is last cell, captured x is next-3
-  let add5_h = to_dynamic(#(atom.create("handle"), adder_store.next_id - 1))
-  let x_h = to_dynamic(#(atom.create("handle"), adder_store.next_id - 3))
+  let add5_h =
+    aot_harness.to_dynamic(#(atom.create("handle"), adder_store.next_id - 1))
+  let x_h =
+    aot_harness.to_dynamic(#(atom.create("handle"), adder_store.next_id - 3))
   micro(
     "direct_callee (via Gleam wrapper)",
     "direct_callee",
@@ -401,12 +396,13 @@ fn microbench() {
   micro("cell_get (via Gleam wrapper)", "cell_get", st_adder, x_h, 1_000_000)
   micro("cell_get (FFI direct)", "cell_get_ffi", st_adder, x_h, 1_000_000)
 
-  let #(mod2, seed2) = compile_and_seed(obj_js, "arc_prof_micro_obj")
-  let #(_v2, st_obj) = apply_js_main(seed2, mod2)
+  let #(mod2, st2) = compile_and_load(obj_js, "arc_prof_micro_obj")
+  let #(_v2, st_obj) = run.apply_js_main(st2, mod2)
   let obj_store = st_obj.store
-  let o_h = to_dynamic(#(atom.create("handle"), obj_store.next_id - 1))
+  let o_h =
+    aot_harness.to_dynamic(#(atom.create("handle"), obj_store.next_id - 1))
   let key =
-    to_dynamic(#(
+    aot_harness.to_dynamic(#(
       atom.create("string_key"),
       #(atom.create("named"), <<"x":utf8>>),
     ))
@@ -414,29 +410,29 @@ fn microbench() {
     "get_prop_untyped_key (o.x)",
     "get_prop",
     st_obj,
-    to_dynamic(#(o_h, key)),
+    aot_harness.to_dynamic(#(o_h, key)),
     1_000_000,
   )
   micro(
     "set_prop_untyped_key (o.x = v)",
     "set_prop",
     st_obj,
-    to_dynamic(#(o_h, key)),
+    aot_harness.to_dynamic(#(o_h, key)),
     1_000_000,
   )
-  let kb = to_dynamic(<<"x":utf8>>)
+  let kb = aot_harness.to_dynamic(<<"x":utf8>>)
   micro(
     "get_prop_own_data (FFI)",
     "get_prop_own_data",
     st_obj,
-    to_dynamic(#(o_h, kb)),
+    aot_harness.to_dynamic(#(o_h, kb)),
     1_000_000,
   )
   micro(
     "set_prop_own_data (FFI)",
     "set_prop_own_data",
     st_obj,
-    to_dynamic(#(o_h, kb)),
+    aot_harness.to_dynamic(#(o_h, kb)),
     1_000_000,
   )
 }
@@ -500,13 +496,13 @@ pub fn bench_verify() -> Bool {
 
   trace_reset()
   let assert Ok(src) = simplifile.read("../bench/v8-v7/richards_run.js")
-  let #(mod, seed) = compile_and_seed(src, "arc_prof_gate_richards")
-  apply_js_main(seed, mod)
+  let #(mod, st) = compile_and_load(src, "arc_prof_gate_richards")
+  run.apply_js_main(st, mod)
   let runs = 5
   let best =
     list.fold(list.repeat(Nil, runs), 1_000_000_000, fn(acc, _) {
       let t0 = monotonic_time(Microsecond)
-      apply_js_main(seed, mod)
+      run.apply_js_main(st, mod)
       let dt = monotonic_time(Microsecond) - t0
       int.min(acc, dt)
     })
@@ -527,12 +523,12 @@ pub fn bench_verify() -> Bool {
   )
 
   trace_reset()
-  let #(obj_mod, obj_seed) = compile_and_seed(obj_js, "arc_prof_gate_obj")
-  apply_js_main(obj_seed, obj_mod)
+  let #(obj_mod, obj_st) = compile_and_load(obj_js, "arc_prof_gate_obj")
+  run.apply_js_main(obj_st, obj_mod)
   let obj_best =
     list.fold(list.repeat(Nil, runs), 1_000_000_000, fn(acc, _) {
       let t0 = monotonic_time(Microsecond)
-      apply_js_main(obj_seed, obj_mod)
+      run.apply_js_main(obj_st, obj_mod)
       let dt = monotonic_time(Microsecond) - t0
       int.min(acc, dt)
     })
@@ -553,7 +549,7 @@ pub fn bench_verify() -> Bool {
   )
 
   trace_on(mod)
-  apply_js_main(seed, mod)
+  run.apply_js_main(st, mod)
   trace_off()
   io.println("  ── targeted counts: before (a2881bb) → after ──")
   io.println(
@@ -639,11 +635,11 @@ pub fn raytrace_apply_verify() -> Bool {
   io.println("══════ perf8 CC: raytrace-apply-verify ══════")
   let assert Ok(src) = simplifile.read("../bench/v8-v7/raytrace_run.js")
   trace_reset()
-  let #(mod, seed) = compile_and_seed(src, "arc_prof_rt_cc")
-  apply_js_main(seed, mod)
+  let #(mod, st) = compile_and_load(src, "arc_prof_rt_cc")
+  run.apply_js_main(st, mod)
   trace_on(mod)
   let t0 = monotonic_time(Microsecond)
-  apply_js_main(seed, mod)
+  run.apply_js_main(st, mod)
   let traced_us = monotonic_time(Microsecond) - t0
   trace_off()
 
@@ -776,10 +772,10 @@ pub fn crypto_am3_op_map() -> Nil {
   io.println("")
   io.println("══════ perf8 BB: crypto am3 op-map (isolated am3 harness) ══════")
   trace_reset()
-  let #(mod, seed) = compile_and_seed(am3_bench_js, "arc_prof_am3")
-  apply_js_main(seed, mod)
+  let #(mod, st) = compile_and_load(am3_bench_js, "arc_prof_am3")
+  run.apply_js_main(st, mod)
   trace_on(mod)
-  apply_js_main(seed, mod)
+  run.apply_js_main(st, mod)
   trace_off()
 
   io.println(
@@ -813,7 +809,7 @@ pub fn crypto_am3_op_map() -> Nil {
     )
   })
 
-  io.println("  ── per-op runtime counts (JPure verdict) ──")
+  io.println("  ── per-op runtime counts (Pure verdict) ──")
   let ffi = fn(m: String) { atom.create("arc_" <> m) }
   let rt = fn(m: String) { atom.create("arc@rt@" <> m) }
   let per_op = [
@@ -821,8 +817,8 @@ pub fn crypto_am3_op_map() -> Nil {
     #(ffi("rt_ops_ffi"), "shl", 2, "<<14 fallback", 0),
     #(ffi("rt_ops_ffi"), "bitand", 2, "& 0x3fff/0xfffffff fallback", 0),
     #(ffi("rt_ops_ffi"), "ushr", 2, ">>> (am3 has none)", 0),
-    #(rt("ops"), "mul", 3, "* fallback (JMut)", 0),
-    #(rt("ops"), "add", 3, "+ fallback (JMut)", 0),
+    #(rt("ops"), "mul", 3, "* fallback (Mut)", 0),
+    #(rt("ops"), "add", 3, "+ fallback (Mut)", 0),
     #(
       ffi("rt_obj_ffi"),
       "get_elem",

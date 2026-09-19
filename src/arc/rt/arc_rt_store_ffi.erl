@@ -27,6 +27,6 @@ throw(St, V) -> erlang:error(?JS_THROW(St, V)).
 is_handle({?HANDLE_TAG, N}) when is_integer(N) -> true;
 is_handle(_) -> false.
 
-as_object_key({?OKEY_STRING, _} = K) -> K;
-as_object_key({?OKEY_SYMBOL, _} = K) -> K;
-as_object_key(K) -> {?OKEY_STRING, K}.
+as_object_key({?STRINGKEY_TAG, _} = K) -> K;
+as_object_key({?SYMBOLKEY_TAG, _} = K) -> K;
+as_object_key(K) -> {?STRINGKEY_TAG, K}.

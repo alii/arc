@@ -187,11 +187,11 @@ pub fn top_level_await_without_a_drain_is_pending_test() {
   let assert #(Ok(linked), st) = module.link_for_evaluation(agent(), bundle)
   let assert #(_, Error(module.EvaluationPending(promise)), st) =
     module.evaluate_linked_tracking(st, linked, rt_async.no_drain, set.new())
-  let assert #(_, PromisePending(_), _) = rt_async.promise_data(st, promise)
+  let assert PromisePending(_) = rt_async.promise_data(st, promise).state
   assert registry.read_module_status(st, "/main.js")
     == Some(registry.Evaluating)
   let st = rt_async.drain(st)
-  let assert #(_, PromiseFulfilled(_), _) = rt_async.promise_data(st, promise)
+  let assert PromiseFulfilled(_) = rt_async.promise_data(st, promise).state
   let ns = mk_object(module.entry_namespace_of(st, linked))
   let assert Some(v) = module.read_export(st, ns, "v")
   assert classify(v) == KNum(JInt(7))
@@ -205,8 +205,8 @@ pub fn a_never_settling_await_is_reported_test() {
 }
 
 fn run_script(st: Agent, source: String) -> Agent {
-  let assert Ok(#(body, sb)) = parser.parse_script(source)
-  let assert Ok(template) = compiler.compile_script(body, sb)
+  let assert Ok(#(body, scopes)) = parser.parse_script(source)
+  let assert Ok(template) = compiler.compile_script(body, scopes)
   let assert #(NormalCompletion(_), st) = entry.run_script(st, template)
   rt_async.drain(st)
 }
@@ -215,7 +215,7 @@ fn global_string(st: Agent, name: String) -> String {
   let #(v, st) = rt_helpers.global(st, name)
   case classify(v) {
     KStr(s) -> s
-    _ -> panic as { name <> " = " <> rt_inspect.inspect(st, v) }
+    _ -> panic as { name <> " = " <> rt_inspect.describe(st, v) }
   }
 }
 
@@ -228,7 +228,7 @@ pub fn dynamic_import_from_a_script_test() {
       ),
       #("/dep.js", "export const n = 2;"),
     ])
-  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
+  let st = import_hook.install(agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,
@@ -248,7 +248,7 @@ pub fn dynamic_import_from_a_script_test() {
 
 pub fn dynamic_import_of_a_throwing_module_rejects_every_time_test() {
   let #(resolve, load) = files([#("/bad.js", "throw new Error('boom')")])
-  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
+  let st = import_hook.install(agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,
@@ -263,7 +263,7 @@ pub fn dynamic_import_of_a_throwing_module_rejects_every_time_test() {
 pub fn dynamic_import_of_a_top_level_await_module_test() {
   let #(resolve, load) =
     files([#("/tla.js", "export const v = await Promise.resolve('waited');")])
-  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
+  let st = import_hook.install(agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,
@@ -290,7 +290,7 @@ pub fn nested_dynamic_import_resolves_against_the_importing_module_test() {
       _, _ -> Error(loader.ResolveNotFound)
     }
   }
-  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
+  let st = import_hook.install(agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,
@@ -306,7 +306,7 @@ pub fn nested_dynamic_import_resolves_against_the_importing_module_test() {
 pub fn import_defer_links_without_evaluating_test() {
   let #(resolve, load) =
     files([#("/lazy.js", "globalThis.ran = 'yes'; export const v = 1;")])
-  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
+  let st = import_hook.install(agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,
@@ -334,7 +334,7 @@ pub fn dynamic_import_after_top_level_await_keeps_the_module_referrer_test() {
       _, _ -> Error(loader.ResolveNotFound)
     }
   }
-  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
+  let st = import_hook.install(agent(), "/main.js", resolve, load)
   let assert Ok(bundle) =
     module.compile_bundle(
       "/main.js",
@@ -354,7 +354,7 @@ pub fn dynamic_import_after_top_level_await_keeps_the_module_referrer_test() {
 
 pub fn dynamic_import_survives_a_non_extensible_global_test() {
   let #(resolve, load) = files([#("/lib.js", "export const v = 'lib';")])
-  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
+  let st = import_hook.install(agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,
@@ -378,8 +378,7 @@ pub fn static_module_survives_a_frozen_global_test() {
 // the import job must keep its capability alive across gc
 pub fn dynamic_import_survives_collection_during_the_body_test() {
   let #(resolve, load) = files([#("/lib.js", churning_module("lib"))])
-  let st =
-    import_hook.install_import_hook(small_gc_agent(), "/main.js", resolve, load)
+  let st = import_hook.install(small_gc_agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,
@@ -392,8 +391,7 @@ pub fn dynamic_import_survives_collection_during_the_body_test() {
 pub fn dynamic_import_of_a_tla_module_survives_collection_test() {
   let #(resolve, load) =
     files([#("/tla.js", churning_module("tla") <> "\nawait null;")])
-  let st =
-    import_hook.install_import_hook(small_gc_agent(), "/main.js", resolve, load)
+  let st = import_hook.install(small_gc_agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,
@@ -412,8 +410,7 @@ pub fn import_defer_with_an_async_dep_survives_collection_test() {
       ),
       #("/dep.js", churning_module("dep") <> "\nawait null;"),
     ])
-  let st =
-    import_hook.install_import_hook(small_gc_agent(), "/main.js", resolve, load)
+  let st = import_hook.install(small_gc_agent(), "/main.js", resolve, load)
   let st =
     run_script(
       st,
@@ -433,5 +430,5 @@ pub fn rejected_import_promise_reports_nothing_uncaught_test() {
     )
   let st = rt_async.drain(st)
   let assert Some(h) = rt_async.as_promise(st, p)
-  let assert #(_, PromiseRejected(_), _) = rt_async.promise_data(st, h)
+  let assert PromiseRejected(_) = rt_async.promise_data(st, h).state
 }

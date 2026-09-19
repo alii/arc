@@ -70,15 +70,15 @@ fn repeat(n: Int, f: fn() -> a) -> Nil {
 }
 
 type Loaded {
-  Loaded(mod: Atom, seed: Agent)
+  Loaded(mod: Atom, st: Agent)
 }
 
-fn seed_realm() -> Agent {
-  aot_harness.seed()
+fn new_agent() -> Agent {
+  aot_harness.new_agent()
 }
 
 fn run_once(loaded: Loaded) -> aot_harness.DiffRun {
-  aot_harness.run_loaded(loaded.mod, loaded.seed).0
+  aot_harness.run_loaded(loaded.mod, loaded.st).0
 }
 
 fn bench_compiled(name: String, source: String) -> Outcome {
@@ -107,11 +107,11 @@ fn bench_compiled(name: String, source: String) -> Outcome {
           case run.load(beam, mod_name) {
             Error(e) -> CompileFailed("beam_load", e)
             Ok(mod) -> {
-              let #(realm_us, seed) = time_us(seed_realm)
+              let #(realm_us, st) = time_us(new_agent)
               io.println(
                 "  realm-init: " <> int.to_string(realm_us) <> "µs (once)",
               )
-              let loaded = Loaded(mod:, seed:)
+              let loaded = Loaded(mod:, st:)
               let #(warm_us, first) = time_us(fn() { run_once(loaded) })
               case first {
                 aot_harness.DiffRun(result: Error(e), stdout:) ->

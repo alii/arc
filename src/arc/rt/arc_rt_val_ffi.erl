@@ -91,13 +91,13 @@ same_value_zero(A, B) -> strict_eq(A, B).
 
 property_key_of(N)
   when is_integer(N), N >= 0, N =< ?MAX_ARRAY_INDEX ->
-    {?OKEY_STRING, {?KEY_INDEX, N}};
+    {?STRINGKEY_TAG, {?KEY_INDEX, N}};
 property_key_of(B) when is_binary(B) ->
-    {?OKEY_STRING, canonical_key_bin(B)};
+    {?STRINGKEY_TAG, canonical_key_bin(B)};
 property_key_of({?STR_TAG, B, _, _}) ->
-    {?OKEY_STRING, {?KEY_NAMED, B}};
+    {?STRINGKEY_TAG, {?KEY_NAMED, B}};
 property_key_of({js_sym, S}) ->
-    {?OKEY_SYMBOL, S};
+    {?SYMBOLKEY_TAG, S};
 property_key_of(_) -> miss.
 
 canonical_key_bin(<<C, _/binary>> = B) when C >= $0, C =< $9 ->

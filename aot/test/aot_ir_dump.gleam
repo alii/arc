@@ -21,7 +21,7 @@ fn dump(name: String, source: String) -> Nil {
   case emit.compile_source(source, opts) {
     Error(e) -> io.println("!! compile_source FAILED: " <> string.inspect(e))
     Ok(ir_module) -> {
-      io.println("─── twocore IR (printer.print_module) ───")
+      io.println("─── carder IR (printer.print_module) ───")
       io.println(printer.print_module(ir_module))
       io.println("─── Core Erlang (pipeline.ir_to_core, emit binding) ───")
       case pipeline.ir_to_core(ir_module, emit.binding()) {

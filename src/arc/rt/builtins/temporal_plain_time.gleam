@@ -19,10 +19,11 @@ import arc/rt/builtins/temporal_iso.{
 }
 import arc/rt/builtins/temporal_options.{get_overflow_option_from_value}
 import arc/rt/builtins/temporal_rounding.{
-  Hour, Nanosecond, apply_since_mode, apply_since_ns, balance_time_ns,
-  get_difference_settings, max_unit, require_largest_ge_smallest,
-  require_time_unit, round_options, round_to_increment, time_unit_ns,
-  to_string_time_options, unit_rank, valid_rounding_increment,
+  Hour, Nanosecond, StringPrecision, apply_since_mode, apply_since_ns,
+  balance_time_ns, get_difference_settings, max_unit,
+  require_largest_ge_smallest, require_time_unit, round_options,
+  round_to_increment, time_unit_ns, to_string_time_options, unit_rank,
+  valid_rounding_increment,
 }
 import arc/rt/builtins/temporal_time_zone.{epoch_ns_to_iso_in}
 import arc/rt/store as rt_store
@@ -208,8 +209,8 @@ pub fn method(
       st,
     )
     PlainTimeToString -> {
-      let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
-      let #(#(precision, smallest_time_unit, inc, mode), st) =
+      let opts = get_options_object(st, helpers.arg_at(args, 0))
+      let #(StringPrecision(precision, smallest_time_unit, inc), mode, st) =
         to_string_time_options(st, opts)
       let t2 = case smallest_time_unit {
         None -> t

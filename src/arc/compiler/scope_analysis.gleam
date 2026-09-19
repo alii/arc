@@ -1,19 +1,19 @@
 import arc/bytecode/lexical.{
-  type LexicalRef, type LexicalRefs, type LexicalSlots, RefActiveFunc,
-  RefHomeObject, RefNewTarget, RefThis,
+  type LexicalRef, type LexicalRefs, type LexicalSlots, ActiveFuncRef,
+  HomeObjectRef, NewTargetRef, ThisRef,
 }
 import arc/compiler/scope.{
   type AnalyzeOpts, type Binding, type BindingKind, type FunctionInfo,
   type GlobalFallthrough, type NameCapture, type Scope, type ScopeId,
   type ScopeKind, type ScopeTree, Binding, Block, CaptureBinding, Catch,
   CatchBinding, ClassBody, ClassStaticBlock, ConstBinding, FnNameBinding,
-  Function, FunctionInfo, LetBinding, LexLocal, Module, NameCapture,
+  Function, FunctionInfo, LetBinding, LocalLexical, Module, NameCapture,
   ParamBinding, Scope, ScopeTree, Script, ToEvalEnv, ToGlobal, VarBinding, With,
   child_function_scopes, function_info, get, is_function_kind, root_scope_id,
 }
 import arc/compiler/scope_builder.{
-  type RawFunctionInfo, type RawScope, type ScopeBuilder, RawScope, TagFnDecl,
-  TagOther, TagSwitchTest,
+  type RawFunctionInfo, type RawScope, type ScopeBuilder, FnDeclSource,
+  OtherSource, RawScope, SwitchTestSource,
 }
 import gleam/bool
 import gleam/dict.{type Dict}
@@ -51,8 +51,8 @@ fn blank_function_info(
   )
 }
 
-pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
-  let root_raw = scope_builder.scope_at(sb, root_scope_id)
+pub fn finalize(builder: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
+  let root_raw = scope_builder.scope_at(builder, root_scope_id)
   let parent_declared_kind = case root_raw.kind {
     Module -> ConstBinding
     Script
@@ -87,7 +87,7 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
   let root_fn =
     FunctionInfo(
       ..blank_function_info(
-        scope_builder.fn_info_at(sb, root_scope_id),
+        scope_builder.fn_info_at(builder, root_scope_id),
         opts.fallthrough,
       ),
       local_count: root_local_count,
@@ -95,42 +95,49 @@ pub fn finalize(sb: ScopeBuilder, opts: AnalyzeOpts) -> ScopeTree {
       lexical_captures: opts.lexical_captures,
       slot_by_name: opts.parent_names,
     )
-  let st =
+  let acc =
     FinalizeState(
       scopes: dict.new(),
       functions: dict.from_list([#(root_scope_id, root_fn)]),
     )
-  let st =
-    finalize_scope(sb, opts, st, root_scope_id, parent_bindings, opts.strict)
-  let st = hoist_annexb_block_functions(sb, st, opts)
+  let acc =
+    finalize_scope(
+      builder,
+      opts,
+      acc,
+      root_scope_id,
+      parent_bindings,
+      inherited_strict: opts.strict,
+    )
+  let acc = hoist_annexb_block_functions(builder, acc, opts)
   let tree =
     ScopeTree(
-      scopes: st.scopes,
-      functions: st.functions,
-      children_at: sb.children_at,
+      scopes: acc.scopes,
+      functions: acc.functions,
+      children_at: builder.children_at,
       top_lex: opts.top_lex,
       linker_seeded_exports: opts.linker_seeded_exports,
       inherited_with_stack: opts.with_stack,
     )
-  analyze_captures(tree, sb, box_try_writes: opts.box_try_writes)
+  analyze_captures(tree, builder, box_try_writes: opts.box_try_writes)
 }
 
 fn finalize_scope(
-  sb: ScopeBuilder,
+  builder: ScopeBuilder,
   opts: AnalyzeOpts,
-  st: FinalizeState,
+  acc: FinalizeState,
   scope_id: ScopeId,
   seed_bindings: Dict(String, Binding),
   inherited_strict inherited_strict: Bool,
 ) -> FinalizeState {
-  let raw = scope_builder.scope_at(sb, scope_id)
+  let raw = scope_builder.scope_at(builder, scope_id)
   let is_strict = raw.is_strict || inherited_strict
   let fn_id = raw.function_scope
-  let info = case dict.get(st.functions, fn_id), is_function_kind(raw.kind) {
+  let info = case dict.get(acc.functions, fn_id), is_function_kind(raw.kind) {
     Ok(info), _ -> info
     Error(Nil), True ->
       blank_function_info(
-        scope_builder.fn_info_at(sb, scope_id),
+        scope_builder.fn_info_at(builder, scope_id),
         opts.fallthrough,
       )
     Error(Nil), False ->
@@ -146,14 +153,14 @@ fn finalize_scope(
   // seeds win, except names a strict direct eval declares itself
   let strict_eval_root = opts.strict && raw.kind == Script
   let #(bindings, info) = {
-    use #(bindings, info) as acc, #(name, rb) <- list.fold(in_decl_order, #(
+    use #(bindings, info) as folded, #(name, rb) <- list.fold(in_decl_order, #(
       seed_bindings,
       info,
     ))
     let keep_seeded =
       dict.has_key(bindings, name)
       && !{ strict_eval_root && dict.has_key(seed_bindings, name) }
-    use <- bool.guard(keep_seeded, acc)
+    use <- bool.guard(keep_seeded, folded)
     // §10.2.11 step 28: user formals past the shims become let (tdz)
     let past_shims =
       raw.non_simple_shim_count > 0
@@ -177,16 +184,23 @@ fn finalize_scope(
       is_strict:,
       is_var_boundary: raw.is_var_boundary,
     )
-  let st =
+  let acc =
     FinalizeState(
-      scopes: dict.insert(st.scopes, scope_id, scope),
-      functions: dict.insert(st.functions, fn_id, info),
+      scopes: dict.insert(acc.scopes, scope_id, scope),
+      functions: dict.insert(acc.functions, fn_id, info),
     )
-  use st, child_id <- list.fold(
-    scope_builder.children_newest_first(sb, scope_id),
-    st,
+  use acc, child_id <- list.fold(
+    scope_builder.children_newest_first(builder, scope_id),
+    acc,
   )
-  finalize_scope(sb, opts, st, child_id, dict.new(), is_strict)
+  finalize_scope(
+    builder,
+    opts,
+    acc,
+    child_id,
+    dict.new(),
+    inherited_strict: is_strict,
+  )
 }
 
 fn push_named_slot(
@@ -217,7 +231,7 @@ fn root_binding_is_local(
     Script ->
       case kind {
         VarBinding -> opts.strict || opts.module_slot_globals
-        LetBinding | ConstBinding -> opts.top_lex == LexLocal
+        LetBinding | ConstBinding -> opts.top_lex == LocalLexical
         ParamBinding | CatchBinding | CaptureBinding | FnNameBinding -> True
       }
     Module
@@ -232,47 +246,47 @@ fn root_binding_is_local(
 
 // §B.3.2-6 annex b var twins, decided once the whole body is known
 fn hoist_annexb_block_functions(
-  sb: ScopeBuilder,
-  st: FinalizeState,
+  builder: ScopeBuilder,
+  acc: FinalizeState,
   opts: AnalyzeOpts,
 ) -> FinalizeState {
-  use st, fn_id, raw_fi <- dict.fold(sb.functions, st)
-  use <- bool.guard(raw_fi.annexb_candidates == [], st)
+  use acc, fn_id, raw_fi <- dict.fold(builder.functions, acc)
+  use <- bool.guard(raw_fi.annexb_candidates == [], acc)
   let var_is_local =
     root_binding_is_local(
-      scope_builder.scope_at(sb, fn_id).kind,
+      scope_builder.scope_at(builder, fn_id).kind,
       fn_id,
       opts,
       VarBinding,
     )
-  use st, #(block_id, name) <- list.fold(raw_fi.annexb_candidates, st)
-  case annexb_walk_blocked(sb, block_id, fn_id, name) {
-    True -> mark_annexb_blocked(st, block_id, name)
-    False -> hoist_annexb_twin(st, fn_id, name, declare: var_is_local)
+  use acc, #(block_id, name) <- list.fold(raw_fi.annexb_candidates, acc)
+  case annexb_walk_blocked(builder, block_id, fn_id, name) {
+    True -> mark_annexb_blocked(acc, block_id, name)
+    False -> hoist_annexb_twin(acc, fn_id, name, declare: var_is_local)
   }
 }
 
 fn mark_annexb_blocked(
-  st: FinalizeState,
+  acc: FinalizeState,
   block_id: ScopeId,
   name: String,
 ) -> FinalizeState {
-  let assert Ok(block) = dict.get(st.scopes, block_id)
+  let assert Ok(block) = dict.get(acc.scopes, block_id)
     as "scope_analysis: Annex-B block absent from finalized scopes"
   let block =
     Scope(..block, annexb_blocked: set.insert(block.annexb_blocked, name))
-  FinalizeState(..st, scopes: dict.insert(st.scopes, block_id, block))
+  FinalizeState(..acc, scopes: dict.insert(acc.scopes, block_id, block))
 }
 
 fn hoist_annexb_twin(
-  st: FinalizeState,
+  acc: FinalizeState,
   fn_id: ScopeId,
   name: String,
   declare declare: Bool,
 ) -> FinalizeState {
-  let assert Ok(info) = dict.get(st.functions, fn_id)
+  let assert Ok(info) = dict.get(acc.functions, fn_id)
     as "scope_analysis.hoist_annexb_block_functions: FunctionInfo missing"
-  let assert Ok(fn_scope) = dict.get(st.scopes, fn_id)
+  let assert Ok(fn_scope) = dict.get(acc.scopes, fn_id)
     as "scope_analysis.hoist_annexb_block_functions: fn-root Scope missing"
   let #(fn_scope, info) = case
     declare && !dict.has_key(fn_scope.bindings, name)
@@ -287,36 +301,36 @@ fn hoist_annexb_twin(
   let info =
     FunctionInfo(..info, annexb_candidates: [name, ..info.annexb_candidates])
   FinalizeState(
-    scopes: dict.insert(st.scopes, fn_id, fn_scope),
-    functions: dict.insert(st.functions, fn_id, info),
+    scopes: dict.insert(acc.scopes, fn_id, fn_scope),
+    functions: dict.insert(acc.functions, fn_id, info),
   )
 }
 
 // would var name be an early error between the block and fn_id
 fn annexb_walk_blocked(
-  sb: ScopeBuilder,
+  builder: ScopeBuilder,
   from_block: ScopeId,
   fn_id: ScopeId,
   name: String,
 ) -> Bool {
-  case scope_builder.scope_at(sb, from_block).parent {
+  case scope_builder.scope_at(builder, from_block).parent {
     None -> False
-    Some(parent_id) -> annexb_check_chain(sb, parent_id, fn_id, name)
+    Some(parent_id) -> annexb_check_chain(builder, parent_id, fn_id, name)
   }
 }
 
 fn annexb_check_chain(
-  sb: ScopeBuilder,
+  builder: ScopeBuilder,
   scope_id: ScopeId,
   fn_id: ScopeId,
   name: String,
 ) -> Bool {
-  let raw = scope_builder.scope_at(sb, scope_id)
+  let raw = scope_builder.scope_at(builder, scope_id)
   use <- bool.guard(annexb_blocked_by(raw, name), True)
   use <- bool.guard(scope_id == fn_id, False)
   case raw.parent {
     None -> False
-    Some(parent_id) -> annexb_check_chain(sb, parent_id, fn_id, name)
+    Some(parent_id) -> annexb_check_chain(builder, parent_id, fn_id, name)
   }
 }
 
@@ -336,20 +350,20 @@ fn annexb_blocked_by(raw: RawScope, name: String) -> Bool {
 
 fn resolve_raw_refs(
   tree: ScopeTree,
-  sb: ScopeBuilder,
+  builder: ScopeBuilder,
 ) -> Set(#(ScopeId, String)) {
   let #(_seen, captured) = {
-    use #(seen, captured) as acc, ref <- list.fold(sb.raw_refs, #(
+    use #(seen, captured) as acc, ref <- list.fold(builder.raw_refs, #(
       set.new(),
       set.new(),
     ))
     // ref.scope may be a pruned tombstone; start from a live ancestor
-    let assert Ok(raw) = dict.get(sb.scopes, ref.scope)
+    let assert Ok(raw) = dict.get(builder.scopes, ref.scope)
       as "scope_analysis.resolve_raw_refs: dangling raw_ref"
     use <- bool.guard(set.contains(seen, ref), acc)
     let seen = set.insert(seen, ref)
     let ref_fn = raw.function_scope
-    case declaring_scope(tree, sb, ref.scope, ref.name) {
+    case declaring_scope(tree, builder, ref.scope, ref.name) {
       Some(decl) if decl.function_scope == ref_fn -> #(seen, captured)
       Some(_) | None -> #(seen, set.insert(captured, #(ref_fn, ref.name)))
     }
@@ -359,10 +373,10 @@ fn resolve_raw_refs(
 
 fn resolve_assign_refs(
   tree: ScopeTree,
-  sb: ScopeBuilder,
+  builder: ScopeBuilder,
 ) -> Dict(ScopeId, Dict(String, ScopeId)) {
-  use acc, ref <- list.fold(sb.assign_refs, dict.new())
-  case declaring_scope(tree, sb, ref.scope, ref.name) {
+  use acc, ref <- list.fold(builder.assign_refs, dict.new())
+  case declaring_scope(tree, builder, ref.scope, ref.name) {
     None -> acc
     Some(decl) ->
       dict.upsert(acc, decl.function_scope, fn(prev) {
@@ -376,12 +390,12 @@ fn resolve_assign_refs(
 
 fn resolve_try_assign_refs(
   tree: ScopeTree,
-  sb: ScopeBuilder,
+  builder: ScopeBuilder,
 ) -> Dict(ScopeId, Set(String)) {
-  use acc, ref <- list.fold(sb.try_assign_refs, dict.new())
+  use acc, ref <- list.fold(builder.try_assign_refs, dict.new())
   case
-    declaring_scope(tree, sb, ref.scope, ref.name),
-    declaring_scope(tree, sb, ref.try_scope, ref.name)
+    declaring_scope(tree, builder, ref.scope, ref.name),
+    declaring_scope(tree, builder, ref.try_scope, ref.name)
   {
     Some(decl), Some(outer) if decl.id == outer.id ->
       dict.upsert(acc, decl.function_scope, fn(prev) {
@@ -391,10 +405,13 @@ fn resolve_try_assign_refs(
   }
 }
 
-fn resolve_arguments_refs(tree: ScopeTree, sb: ScopeBuilder) -> Set(ScopeId) {
-  use acc, ref <- list.fold(sb.raw_refs, set.new())
+fn resolve_arguments_refs(
+  tree: ScopeTree,
+  builder: ScopeBuilder,
+) -> Set(ScopeId) {
+  use acc, ref <- list.fold(builder.raw_refs, set.new())
   use <- bool.guard(ref.name != "arguments", acc)
-  case declaring_scope(tree, sb, ref.scope, ref.name) {
+  case declaring_scope(tree, builder, ref.scope, ref.name) {
     Some(decl) -> set.insert(acc, decl.function_scope)
     None -> acc
   }
@@ -403,11 +420,11 @@ fn resolve_arguments_refs(tree: ScopeTree, sb: ScopeBuilder) -> Set(ScopeId) {
 // from may be a raw scope pruned before finalize
 fn declaring_scope(
   tree: ScopeTree,
-  sb: ScopeBuilder,
+  builder: ScopeBuilder,
   from: ScopeId,
   name: String,
 ) -> Option(Scope) {
-  nearest_finalized(tree, sb, from)
+  nearest_finalized(tree, builder, from)
   |> option.then(find_declaring_scope(tree, _, name))
 }
 
@@ -426,13 +443,13 @@ fn find_declaring_scope(
 
 fn nearest_finalized(
   tree: ScopeTree,
-  sb: ScopeBuilder,
+  builder: ScopeBuilder,
   scope_id: ScopeId,
 ) -> Option(ScopeId) {
   use <- bool.guard(dict.has_key(tree.scopes, scope_id), Some(scope_id))
-  case dict.get(sb.scopes, scope_id) {
+  case dict.get(builder.scopes, scope_id) {
     Ok(RawScope(parent: Some(parent_id), ..)) ->
-      nearest_finalized(tree, sb, parent_id)
+      nearest_finalized(tree, builder, parent_id)
     Ok(RawScope(parent: None, ..)) | Error(Nil) -> None
   }
 }
@@ -514,15 +531,15 @@ type CapturePlan {
 
 fn analyze_captures(
   tree: ScopeTree,
-  sb: ScopeBuilder,
+  builder: ScopeBuilder,
   box_try_writes box_try_writes: Bool,
 ) -> ScopeTree {
-  let captured = resolve_raw_refs(tree, sb)
+  let captured = resolve_raw_refs(tree, builder)
   let own_by_fn =
     collect_own_facts(
       tree,
       free_names_by_fn(captured),
-      sb.own_lexical_refs,
+      builder.own_lexical_refs,
       root_scope_id,
       dict.new(),
     )
@@ -536,7 +553,7 @@ fn analyze_captures(
       dict.new(),
     )
   let try_assigned = case box_try_writes {
-    True -> resolve_try_assign_refs(tree, sb)
+    True -> resolve_try_assign_refs(tree, builder)
     False -> dict.new()
   }
   let analysis =
@@ -544,10 +561,10 @@ fn analyze_captures(
       own_by_fn:,
       subtree_by_fn:,
       scopes_by_fn:,
-      assigned: resolve_assign_refs(tree, sb),
+      assigned: resolve_assign_refs(tree, builder),
       try_assigned:,
-      refs_arguments: resolve_arguments_refs(tree, sb),
-      fn_decls: fn_decl_scopes(sb),
+      refs_arguments: resolve_arguments_refs(tree, builder),
+      fn_decls: fn_decl_scopes(builder),
     )
   let root_parent =
     ParentView(
@@ -563,11 +580,11 @@ fn analyze_captures(
   assign_captures(tree, analysis, root_scope_id, root_parent)
 }
 
-fn fn_decl_scopes(sb: ScopeBuilder) -> Set(ScopeId) {
-  use acc, id, raw <- dict.fold(sb.scopes, set.new())
+fn fn_decl_scopes(builder: ScopeBuilder) -> Set(ScopeId) {
+  use acc, id, raw <- dict.fold(builder.scopes, set.new())
   case raw.source_tag {
-    TagFnDecl -> set.insert(acc, id)
-    TagSwitchTest | TagOther -> acc
+    FnDeclSource -> set.insert(acc, id)
+    SwitchTestSource | OtherSource -> acc
   }
 }
 
@@ -866,10 +883,10 @@ fn derive_lexical_layout(
       }
       #(
         lexical.captured_slots(
-          this: captured(RefThis),
-          active_func: captured(RefActiveFunc),
-          home_object: captured(RefHomeObject),
-          new_target: captured(RefNewTarget),
+          this: captured(ThisRef),
+          active_func: captured(ActiveFuncRef),
+          home_object: captured(HomeObjectRef),
+          new_target: captured(NewTargetRef),
         ),
         0,
       )

@@ -18,8 +18,8 @@ fn small_agent() -> Agent {
 }
 
 fn run(st: Agent, source: String) -> #(rt_call.Completion(JsVal), Agent) {
-  let assert Ok(#(body, sb)) = parser.parse_script(source)
-  let assert Ok(template) = compiler.compile_script(body, sb)
+  let assert Ok(#(body, scopes)) = parser.parse_script(source)
+  let assert Ok(template) = compiler.compile_script(body, scopes)
   entry.run_script(st, template)
 }
 
@@ -36,7 +36,7 @@ pub fn allocating_loop_is_bounded_and_keeps_frame_values_test() {
     "
   let #(completion, st) = run(st, source)
   let assert NormalCompletion(v) = completion
-  assert rt_inspect.inspect(st, v) == "'42:7998000'"
+  assert rt_inspect.describe(st, v) == "'42:7998000'"
   assert rt_gc.stats(st).live_count <= base + 4 * threshold
   let st = safepoint.end_turn(st, [v])
   assert rt_gc.stats(st).live_count <= base + 4 * threshold
@@ -55,5 +55,5 @@ pub fn closures_made_in_the_loop_keep_their_captures_test() {
     "
   let #(completion, st) = run(st, source)
   let assert NormalCompletion(v) = completion
-  assert rt_inspect.inspect(st, v) == "3000"
+  assert rt_inspect.describe(st, v) == "3000"
 }

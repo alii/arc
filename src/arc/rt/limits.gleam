@@ -9,6 +9,12 @@ pub const max_iteration = 10_000_000
 // past this index arrays go sparse
 pub const max_dense_index = 10_000_000
 
+// max hole run before dense promotes to sparse
+pub const max_gap = 1024
+
+// arraybuffer byte length cap, 2^31 - 1
+pub const max_buffer_byte_length = 2_147_483_647
+
 pub const max_safe_integer = 9_007_199_254_740_991
 
 // 256mb

@@ -31,7 +31,7 @@ fn pass_test_fn(filename: String, source: String) -> Result(Nil, String) {
   let mode = parse_mode(filename)
   case parser.parse(source, mode) {
     Ok(_) -> Ok(Nil)
-    Error(err) -> Error(parser.parse_error_to_string(err))
+    Error(err) -> Error(parser.error_to_string(err))
   }
 }
 
@@ -109,7 +109,7 @@ pub fn import_declaration_span_round_trip_test() {
 fn import_decl_span_text(src: String) -> Result(String, String) {
   use #(program, _sb) <- result.try(
     parser.parse(src, parser.Module)
-    |> result.map_error(parser.parse_error_to_string),
+    |> result.map_error(parser.error_to_string),
   )
   let span = case program {
     ast.Module(body) ->
@@ -167,7 +167,7 @@ pub fn export_default_span_round_trip_test() {
 fn export_default_span_text(src: String) -> Result(String, String) {
   use #(program, _sb) <- result.try(
     parser.parse(src, parser.Module)
-    |> result.map_error(parser.parse_error_to_string),
+    |> result.map_error(parser.error_to_string),
   )
   let span = case program {
     ast.Module(body) ->
@@ -228,7 +228,7 @@ fn binding_span_texts(
 ) -> Result(List(#(String, String)), String) {
   use #(program, _sb) <- result.try(
     parser.parse(src, parser.Module)
-    |> result.map_error(parser.parse_error_to_string),
+    |> result.map_error(parser.error_to_string),
   )
   let spans = case program, kind {
     ast.Module(body), "import" ->
@@ -460,7 +460,7 @@ pub fn lazy_lexer_error_reporting_test() {
 fn expect_parses(src: String, mode: parser.ParseMode) -> Result(Nil, String) {
   case parser.parse(src, mode) {
     Ok(_) -> Ok(Nil)
-    Error(err) -> Error(src <> " -> " <> parser.parse_error_to_string(err))
+    Error(err) -> Error(src <> " -> " <> parser.error_to_string(err))
   }
 }
 
@@ -489,7 +489,7 @@ fn expect_parse_error_containing(
   case parser.parse(src, mode) {
     Ok(_) -> Error(src <> " -> parsed; expected: " <> needle)
     Error(err) -> {
-      let msg = parser.parse_error_to_string(err)
+      let msg = parser.error_to_string(err)
       case string.contains(msg, needle) {
         True -> Ok(Nil)
         False -> Error(src <> " -> wrong error: " <> msg)

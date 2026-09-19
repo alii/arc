@@ -350,8 +350,8 @@ object(Bin, P, Src, Acc) ->
 plain_stringify(St, V, Gap) ->
     Realm = element(?AGENT_REALM, St),
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
-    {?HANDLE_TAG, OP} = element(?BUILTINPAIR_PROTO, element(?REALM_OBJECT, Realm)),
-    {?HANDLE_TAG, AP} = element(?BUILTINPAIR_PROTO, element(?REALM_ARRAY, Realm)),
+    {?HANDLE_TAG, OP} = element(?BUILTINPAIR_PROTOTYPE, element(?REALM_OBJECT, Realm)),
+    {?HANDLE_TAG, AP} = element(?BUILTINPAIR_PROTOTYPE, element(?REALM_ARRAY, Realm)),
     TJ = {?KEY_NAMED, <<"toJSON">>},
     Clean = fun(Id) ->
         case arc_rt_arena_ffi:get(Id, Cells) of
@@ -374,7 +374,7 @@ enc(F, _, _, _) when is_float(F) -> arc_rt_val_ffi:js_format_float(F);
 enc(true, _, _, _) -> <<"true">>;
 enc(false, _, _, _) -> <<"false">>;
 enc(null, _, _, _) -> <<"null">>;
-enc(A, _, _, _) when A =:= js_nan; A =:= js_inf; A =:= js_neg_inf -> <<"null">>;
+enc(A, _, _, _) when A =:= js_nan; ?IS_INF(A) -> <<"null">>;
 enc(undefined, _, _, _) -> skip;
 enc({js_sym, _}, _, _, _) -> skip;
 enc(S, _, _, _) when ?IS_STR(S) -> quote_tree(arc_rt_js_string_ffi:text(S));

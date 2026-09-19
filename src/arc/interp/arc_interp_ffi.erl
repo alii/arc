@@ -12,7 +12,7 @@ type_of(undefined) -> <<"undefined">>;
 type_of(null) -> <<"object">>;
 type_of(B) when is_boolean(B) -> <<"boolean">>;
 type_of(N) when is_number(N) -> <<"number">>;
-type_of(A) when A =:= js_nan; A =:= js_inf; A =:= js_neg_inf -> <<"number">>;
+type_of(A) when A =:= js_nan; ?IS_INF(A) -> <<"number">>;
 type_of(B) when is_binary(B) -> <<"string">>;
 type_of({?STR_TAG, _, _, _}) -> <<"string">>;
 type_of({js_bigint, _}) -> <<"bigint">>;
@@ -106,7 +106,7 @@ instance_of(_, js_tdz, _, _) -> miss;
 instance_of(St, V, {?HANDLE_TAG, CId}, Sym) ->
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     {?HANDLE_TAG, FP} =
-        element(?BUILTINPAIR_PROTO,
+        element(?BUILTINPAIR_PROTOTYPE,
                 element(?REALM_FUNCTION, element(?AGENT_REALM, St))),
     case arc_rt_arena_ffi:get(CId, Cells) of
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->

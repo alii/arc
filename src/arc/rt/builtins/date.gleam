@@ -336,7 +336,7 @@ fn finite_int(n: JsNum) -> Option(Int) {
   }
 }
 
-type TimeRef {
+type TimeBasis {
   LocalTime(TimeZone)
   UtcTime
 }
@@ -413,8 +413,8 @@ fn settable_index(f: SettableField) -> Int {
   }
 }
 
-fn get_date_fields(tv: Int, time_ref: TimeRef) -> DateFields {
-  let tz = case time_ref {
+fn get_date_fields(tv: Int, basis: TimeBasis) -> DateFields {
+  let tz = case basis {
     LocalTime(zone) -> zone_offset_at_utc_ms(zone, tv)
     UtcTime -> 0
   }
@@ -428,7 +428,7 @@ fn get_date_fields(tv: Int, time_ref: TimeRef) -> DateFields {
   let minutes = floor_mod(h, 60)
   let hours = { h - minutes } / 60
   let weekday = gregorian.weekday_from_days(days)
-  let #(year, month1, date) = civil_from_days(days)
+  let gregorian.CivilDate(year, month1, date) = civil_from_days(days)
   DateFields(
     year:,
     month: month1 - 1,
@@ -451,7 +451,7 @@ fn make_date(
   minutes: Int,
   seconds: Int,
   ms: Int,
-  time_ref: TimeRef,
+  basis: TimeBasis,
 ) -> JsNum {
   let ym = y + floor_div(mon, 12)
   let mn = floor_mod(mon, 12)
@@ -462,7 +462,7 @@ fn make_date(
       let day = days_from_year(ym) + sum_month_days(ym, mn, 0, 0) + date - 1
       let time = hours * 3_600_000 + minutes * 60_000 + seconds * 1000 + ms
       let tv = day * ms_per_day + time
-      let tv = case time_ref {
+      let tv = case basis {
         LocalTime(zone) -> tv - zone_offset_at_local_ms(zone, tv) * 60_000
         UtcTime -> tv
       }
@@ -503,7 +503,7 @@ fn components_to_ints(
   #(y, mon, dt, h, mi, s, ms)
 }
 
-fn make_date_checked(c: DateComponents, time_ref: TimeRef) -> JsNum {
+fn make_date_checked(c: DateComponents, basis: TimeBasis) -> JsNum {
   case components_to_ints(c) {
     None -> JNan
     Some(#(y, mon, dt, h, mi, s, ms)) -> {
@@ -511,7 +511,7 @@ fn make_date_checked(c: DateComponents, time_ref: TimeRef) -> JsNum {
         True -> y + 1900
         False -> y
       }
-      make_date(y, mon, dt, h, mi, s, ms, time_ref)
+      make_date(y, mon, dt, h, mi, s, ms, basis)
     }
   }
 }
@@ -572,14 +572,14 @@ fn date_constructor(
 fn single_arg_time_value(
   st: Agent,
   arg: JsVal,
-  local: TimeRef,
+  basis: TimeBasis,
 ) -> #(JsNum, Agent) {
   case this_time_value(st, arg) {
     Some(#(_, tv)) -> #(time_clip(tv), st)
     None -> {
       let #(prim, st) = rt_val.to_primitive(st, arg, HintDefault)
       case classify(prim) {
-        KStr(s) -> #(parse_date_string(s, local), st)
+        KStr(s) -> #(parse_date_string(s, basis), st)
         _ -> {
           let #(n, st) = rt_val.to_number(st, prim)
           #(time_clip(n), st)
@@ -592,10 +592,10 @@ fn single_arg_time_value(
 fn args_to_time_value(
   st: Agent,
   args: List(JsVal),
-  time_ref: TimeRef,
+  basis: TimeBasis,
 ) -> #(JsNum, Agent) {
   let #(nums, st) = args_to_nums(st, list.take(args, 7))
-  #(make_date_checked(pad_fields(nums), time_ref), st)
+  #(make_date_checked(pad_fields(nums), basis), st)
 }
 
 fn pad_fields(nums: List(JsNum)) -> DateComponents {
@@ -613,10 +613,14 @@ fn pad_fields(nums: List(JsNum)) -> DateComponents {
   }
 }
 
-fn date_parse(st: Agent, args: List(JsVal), local: TimeRef) -> #(JsVal, Agent) {
+fn date_parse(
+  st: Agent,
+  args: List(JsVal),
+  basis: TimeBasis,
+) -> #(JsVal, Agent) {
   let arg = helpers.first_arg_or_undefined(args)
   let #(s, st) = rt_val.to_string(st, arg)
-  #(mk_number(parse_date_string(s, local)), st)
+  #(mk_number(parse_date_string(s, basis)), st)
 }
 
 fn date_utc(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
@@ -638,10 +642,10 @@ fn date_get_tz_offset(
   st: Agent,
   this: JsVal,
   name: String,
-  local: TimeRef,
+  basis: TimeBasis,
 ) -> #(JsVal, Agent) {
   use _, tv <- require_time_value(st, this, name)
-  case finite_int(tv), local {
+  case finite_int(tv), basis {
     Some(ms), LocalTime(zone) -> #(
       mk_int(js_get_timezone_offset_minutes(zone, ms)),
       st,
@@ -656,12 +660,12 @@ fn date_get_field(
   this: JsVal,
   name: String,
   field: DateField,
-  time_ref: TimeRef,
+  basis: TimeBasis,
 ) -> #(JsVal, Agent) {
   use _, tv <- require_time_value(st, this, name)
   case finite_int(tv) {
     Some(ms) -> {
-      let fields = get_date_fields(ms, time_ref)
+      let fields = get_date_fields(ms, basis)
       #(mk_int(field_at(fields, field)), st)
     }
     None -> #(mk_number(JNan), st)
@@ -688,13 +692,13 @@ fn date_set_field(
   args: List(JsVal),
   name: String,
   first: SettableField,
-  time_ref: TimeRef,
+  basis: TimeBasis,
 ) -> #(JsVal, Agent) {
   use h, tv <- require_time_value(st, this, name)
   let supplied = list.take(args, settable_max_args(first))
   let #(new_nums, st) = args_to_nums(st, supplied)
   // none is a nan base: return nan without writing back
-  case compute_set_field(tv, first, new_nums, time_ref) {
+  case compute_set_field(tv, first, new_nums, basis) {
     None -> #(mk_number(JNan), st)
     Some(result) -> {
       let result = case args {
@@ -711,13 +715,13 @@ fn compute_set_field(
   tv: JsNum,
   first: SettableField,
   new_nums: List(JsNum),
-  time_ref: TimeRef,
+  basis: TimeBasis,
 ) -> Option(JsNum) {
   case finite_int(tv) {
     Some(ms) -> {
-      let base = get_date_fields(ms, time_ref)
+      let base = get_date_fields(ms, basis)
       let merged = overwrite_fields(fields_to_components(base), first, new_nums)
-      Some(make_date_from_components(merged, time_ref))
+      Some(make_date_from_components(merged, basis))
     }
     None ->
       case first {
@@ -735,7 +739,7 @@ fn compute_set_field(
               ms: zero,
             )
           let merged = overwrite_fields(epoch, first, new_nums)
-          Some(make_date_from_components(merged, time_ref))
+          Some(make_date_from_components(merged, basis))
         }
         _ -> None
       }
@@ -778,15 +782,15 @@ fn merge_field(base: JsNum, i: Int, lo: Int, new_nums: List(JsNum)) -> JsNum {
   }
 }
 
-fn make_date_from_components(c: DateComponents, time_ref: TimeRef) -> JsNum {
+fn make_date_from_components(c: DateComponents, basis: TimeBasis) -> JsNum {
   case components_to_ints(c) {
     None -> JNan
     Some(#(y, mon, dt, h, mi, s, ms)) ->
-      make_date(y, mon, dt, h, mi, s, ms, time_ref)
+      make_date(y, mon, dt, h, mi, s, ms, basis)
   }
 }
 
-type DateFmt {
+type DateFormat {
   LocalFormat(DatePart)
   UtcFormat
   IsoFormat
@@ -810,37 +814,29 @@ fn name_at(names: List(String), i: Int) -> String {
   helpers.list_at(names, i) |> option.unwrap("")
 }
 
-fn pad2(n: Int) -> String {
-  int.to_string(int.absolute_value(n)) |> string.pad_start(2, "0")
-}
-
-fn pad3(n: Int) -> String {
-  int.to_string(int.absolute_value(n)) |> string.pad_start(3, "0")
-}
-
 fn date_to_string(
   st: Agent,
   this: JsVal,
   name: String,
-  fmt: DateFmt,
-  time_ref: TimeRef,
+  format: DateFormat,
+  basis: TimeBasis,
 ) -> #(JsVal, Agent) {
   use _, tv <- require_time_value(st, this, name)
   case finite_int(tv) {
     Some(ms) -> {
-      let fields = get_date_fields(ms, time_ref)
-      #(mk_string(format_date(fmt, fields)), st)
+      let fields = get_date_fields(ms, basis)
+      #(mk_string(format_date(format, fields)), st)
     }
     None ->
-      case fmt {
+      case format {
         IsoFormat -> rt_val.throw_range_error(st, "Invalid time value")
         _ -> #(mk_string("Invalid Date"), st)
       }
   }
 }
 
-fn format_date(fmt: DateFmt, f: DateFields) -> String {
-  case fmt {
+fn format_date(format: DateFormat, f: DateFields) -> String {
+  case format {
     IsoFormat -> format_iso(f)
     UtcFormat -> format_utc(f)
     LocalFormat(part) -> format_local(part, f)
@@ -862,34 +858,34 @@ fn format_iso(f: DateFields) -> String {
   }
   year
   <> "-"
-  <> pad2(f.month + 1)
+  <> digits.pad2(f.month + 1)
   <> "-"
-  <> pad2(f.date)
+  <> digits.pad2(f.date)
   <> "T"
-  <> pad2(f.hours)
+  <> digits.pad2(f.hours)
   <> ":"
-  <> pad2(f.minutes)
+  <> digits.pad2(f.minutes)
   <> ":"
-  <> pad2(f.seconds)
+  <> digits.pad2(f.seconds)
   <> "."
-  <> pad3(f.ms)
+  <> digits.pad3(f.ms)
   <> "Z"
 }
 
 fn format_utc(f: DateFields) -> String {
   name_at(day_names, f.weekday)
   <> ", "
-  <> pad2(f.date)
+  <> digits.pad2(f.date)
   <> " "
   <> name_at(month_names, f.month)
   <> " "
   <> format_year_signed(f.year)
   <> " "
-  <> pad2(f.hours)
+  <> digits.pad2(f.hours)
   <> ":"
-  <> pad2(f.minutes)
+  <> digits.pad2(f.minutes)
   <> ":"
-  <> pad2(f.seconds)
+  <> digits.pad2(f.seconds)
   <> " GMT"
 }
 
@@ -899,15 +895,15 @@ fn format_local(part: DatePart, f: DateFields) -> String {
     <> " "
     <> name_at(month_names, f.month)
     <> " "
-    <> pad2(f.date)
+    <> digits.pad2(f.date)
     <> " "
     <> format_year_signed(f.year)
   let time_part =
-    pad2(f.hours)
+    digits.pad2(f.hours)
     <> ":"
-    <> pad2(f.minutes)
+    <> digits.pad2(f.minutes)
     <> ":"
-    <> pad2(f.seconds)
+    <> digits.pad2(f.seconds)
     <> " GMT"
     <> format_tz(f.tz)
   case part {
@@ -935,9 +931,9 @@ fn format_locale(part: DatePart, f: DateFields) -> String {
   let time_part =
     int.to_string(h12)
     <> ":"
-    <> pad2(f.minutes)
+    <> digits.pad2(f.minutes)
     <> ":"
-    <> pad2(f.seconds)
+    <> digits.pad2(f.seconds)
     <> " "
     <> ampm
   case part {
@@ -960,19 +956,19 @@ fn format_tz(tz: Int) -> String {
     False -> "+"
   }
   let a = int.absolute_value(tz)
-  sign <> pad2(a / 60) <> pad2(a % 60)
+  sign <> digits.pad2(a / 60) <> digits.pad2(a % 60)
 }
 
-fn parse_date_string(s: String, local: TimeRef) -> JsNum {
+fn parse_date_string(s: String, basis: TimeBasis) -> JsNum {
   let s = string.trim(s)
-  parse_iso(s, local) |> option.unwrap(JNan)
+  parse_iso(s, basis) |> option.unwrap(JNan)
 }
 
 type IsoTime {
   IsoTime(hours: Int, minutes: Int, seconds: Int, ms: Int)
 }
 
-fn parse_iso(s: String, local: TimeRef) -> Option(JsNum) {
+fn parse_iso(s: String, basis: TimeBasis) -> Option(JsNum) {
   use #(year, rest) <- option.then(parse_year(s))
   let #(mon, rest) = parse_dash_int(rest, 2) |> option.unwrap(#(1, rest))
   let #(day, rest) = parse_dash_int(rest, 2) |> option.unwrap(#(1, rest))
@@ -986,7 +982,7 @@ fn parse_iso(s: String, local: TimeRef) -> Option(JsNum) {
   case rest {
     "" ->
       Some(case zone {
-        LocalZone -> make_date(year, mon - 1, day, h, mi, sec, ms, local)
+        LocalZone -> make_date(year, mon - 1, day, h, mi, sec, ms, basis)
         FixedOffset(minutes) ->
           make_date(year, mon - 1, day, h, mi, sec, ms, UtcTime)
           |> jsnum_add_minutes(minutes)
@@ -1122,12 +1118,12 @@ fn date_get_year(
   st: Agent,
   this: JsVal,
   name: String,
-  local: TimeRef,
+  basis: TimeBasis,
 ) -> #(JsVal, Agent) {
   use _, tv <- require_time_value(st, this, name)
   case finite_int(tv) {
     Some(ms) -> {
-      let fields = get_date_fields(ms, local)
+      let fields = get_date_fields(ms, basis)
       #(mk_int(fields.year - 1900), st)
     }
     None -> #(mk_number(JNan), st)
@@ -1139,7 +1135,7 @@ fn date_set_year(
   this: JsVal,
   args: List(JsVal),
   name: String,
-  local: TimeRef,
+  basis: TimeBasis,
 ) -> #(JsVal, Agent) {
   use h, tv <- require_time_value(st, this, name)
   let arg = helpers.first_arg_or_undefined(args)
@@ -1152,7 +1148,7 @@ fn date_set_year(
       }
       let new_tv = case finite_int(tv) {
         Some(ms) -> {
-          let b = get_date_fields(ms, local)
+          let b = get_date_fields(ms, basis)
           make_date(
             yi,
             b.month,
@@ -1161,10 +1157,10 @@ fn date_set_year(
             b.minutes,
             b.seconds,
             b.ms,
-            local,
+            basis,
           )
         }
-        None -> make_date(yi, 0, 1, 0, 0, 0, 0, local)
+        None -> make_date(yi, 0, 1, 0, 0, 0, 0, basis)
       }
       let st = set_this_time_value(st, h, new_tv)
       #(mk_number(new_tv), st)

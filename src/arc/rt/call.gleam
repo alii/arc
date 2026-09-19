@@ -23,8 +23,8 @@ import gleam/option.{type Option, None, Some}
 // plain erlang 4-tuple {this, func, home, new_target}, not a record
 pub type Frame
 
-@external(erlang, "arc_rt_call_ffi", "mk_frame")
-pub fn mk_frame(
+@external(erlang, "arc_rt_call_ffi", "new_frame")
+pub fn new_frame(
   this: JsVal,
   active_func: JsVal,
   home_object: JsVal,
@@ -191,16 +191,16 @@ fn try_call_compiled(
         Some(h) -> mk_object(h)
         None -> mk_undefined()
       }
-      let #(bound_this, st) = bind_this(st, flags, this)
+      let #(coerced_this, st) = callee_this(st, flags, this)
       let frame =
-        mk_frame(bound_this, mk_object(callee_h), home, mk_undefined())
+        new_frame(coerced_this, mk_object(callee_h), home, mk_undefined())
       try_call_code(st, code, frame, args)
     }
   }
 }
 
 // §10.2.1.2 ordinarycallbindthis, arrows keep lexical this
-pub fn bind_this(st: Agent, flags: FnFlags, this: JsVal) -> #(JsVal, Agent) {
+pub fn callee_this(st: Agent, flags: FnFlags, this: JsVal) -> #(JsVal, Agent) {
   case flags.is_arrow || flags.is_strict {
     True -> #(this, st)
     False ->
@@ -208,7 +208,7 @@ pub fn bind_this(st: Agent, flags: FnFlags, this: JsVal) -> #(JsVal, Agent) {
         KUndef | KNull -> #(mk_object(st.realm.global_object), st)
         KHandle(_) -> #(this, st)
         // tdz sentinel must not escape as this
-        KTdz -> panic as "TDZ sentinel escaped as `this` in bind_this"
+        KTdz -> panic as "TDZ sentinel escaped as `this` in callee_this"
         _ -> {
           let #(h, st) = st.store.ops.to_object(st, this)
           #(mk_object(h), st)
@@ -496,7 +496,7 @@ fn construct_compiled(
   }
   case flags.is_derived_constructor {
     True -> {
-      let frame = mk_frame(mk_tdz(), callee_v, home, new_target)
+      let frame = new_frame(mk_tdz(), callee_v, home, new_target)
       let #(c, st) = apply_ctor(st, code, frame, args)
       derived_return_override(st, c)
     }
@@ -505,7 +505,7 @@ fn construct_compiled(
         get_prototype_from_constructor(st, new_target, object_prototype)
       let #(new_this, st) = rt_obj.new_receiver(st, proto)
       let st = run_fields_init(st, fields_init, new_this)
-      let frame = mk_frame(mk_object(new_this), callee_v, home, new_target)
+      let frame = new_frame(mk_object(new_this), callee_v, home, new_target)
       let #(c, st) = apply_ctor(st, code, frame, args)
       base_return_override(st, c, new_this)
     }
@@ -767,12 +767,12 @@ fn alloc_fn_cell(
 ) -> #(Handle, Agent) {
   rt_store.cell_new(
     st,
-    SObject(
-      kind:,
-      proto:,
+    types.SObject(
+      kind: kind,
+      proto: proto,
       props: birth_props(length_v, name),
       symbol_props: [],
-      elements: NoElements,
+      elements: types.NoElements,
       extensible: True,
     ),
   )
@@ -802,11 +802,11 @@ pub fn new_builtin_function(
     unsafe.coerce(fn(st: Agent, _frame: Frame, args: List(JsVal)) {
       body(st, args)
     })
-  fn_new(st, code, builtin_function_flags(), name, arity, None, None)
+  alloc_compiled_fn(st, code, builtin_function_flags(), name, arity, None, None)
 }
 
 // no .prototype here, makeconstructor is separate
-pub fn fn_new(
+pub fn alloc_compiled_fn(
   st: Agent,
   code: CompiledCode,
   flags: FnFlags,
@@ -834,7 +834,7 @@ pub fn fn_new(
 }
 
 // closure site of every compiled function
-pub fn new_function(
+pub fn new_closure(
   st: Agent,
   code: CompiledCode,
   flags: FnFlags,
@@ -858,7 +858,7 @@ pub fn new_function(
   let #(h, st) =
     rt_store.cell_new(
       st,
-      SObject(
+      types.SObject(
         kind: CompiledFn(
           code:,
           home_object: None,
@@ -872,7 +872,7 @@ pub fn new_function(
         proto: Some(proto),
         props: dict.new(),
         symbol_props: [],
-        elements: NoElements,
+        elements: types.NoElements,
         extensible: True,
       ),
     )

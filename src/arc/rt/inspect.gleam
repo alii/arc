@@ -34,7 +34,7 @@ import gleam/string
 const max_items = 100
 
 // read only: never invokes js, safe on error paths
-pub fn inspect(st: Agent, val: JsVal) -> String {
+pub fn describe(st: Agent, val: JsVal) -> String {
   inspect_at_depth(st, val, 0, set.new())
 }
 
@@ -144,11 +144,11 @@ fn inspect_object(
         DataViewObj(..) -> "DataView {}"
         ArrayBufferObj(storage: Shared(..) as storage) ->
           "SharedArrayBuffer { byteLength: "
-          <> int.to_string(buffer.buffer_byte_size(storage))
+          <> int.to_string(buffer.storage_byte_size(storage))
           <> " }"
         ArrayBufferObj(storage:) ->
           "ArrayBuffer { byteLength: "
-          <> int.to_string(buffer.buffer_byte_size(storage))
+          <> int.to_string(buffer.storage_byte_size(storage))
           <> " }"
         TypedArrayObj(buffer: buf, elem_kind:, byte_offset:, length:) ->
           types.typed_array_name(elem_kind)
@@ -261,7 +261,7 @@ fn inspect_plain_object(
         list.take(visible, max_items)
         |> list.map(fn(pair) {
           let #(pk, val) = pair
-          key.display_string(pk)
+          key.display_text(pk)
           <> ": "
           <> inspect_at_depth(st, val, depth + 1, visited)
         })
@@ -304,8 +304,8 @@ fn ordered_property_pairs(
 pub fn format_error(st: Agent, val: JsVal) -> String {
   case classify(val) {
     KStr(s) -> s
-    KHandle(h) -> error_display(st, h) |> option.unwrap(inspect(st, val))
-    _ -> inspect(st, val)
+    KHandle(h) -> error_display(st, h) |> option.unwrap(describe(st, val))
+    _ -> describe(st, val)
   }
 }
 

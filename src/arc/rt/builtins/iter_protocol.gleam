@@ -7,21 +7,19 @@ import arc/rt/elements
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Cell, type Handle, type JsElements, type JsVal, type Property,
-  ArrayObj, AsyncFromSyncIterator, DataProperty, IteratorRecord, KHandle, KNull,
-  KStr, KUndef, MapIterEntries, MapIterKeys, MapIterValues, MapIterator, MapObj,
-  SObject, SetIterEntries, SetIterValues, SetIterator, SetObj, StringIterator,
-  StringKey, SymbolKey, classify, map_key_to_js, mk_int, mk_object, mk_string,
-  mk_undefined, plain_object, symbol_async_iterator, symbol_iterator,
+  type Agent, type Cell, type Handle, type IteratorRecord, type JsElements,
+  type JsVal, type Property, ArrayObj, AsyncFromSyncIterator, DataProperty,
+  IteratorRecord, KHandle, KNull, KStr, KUndef, MapIterEntries, MapIterKeys,
+  MapIterValues, MapIterator, MapObj, SObject, SetIterEntries, SetIterValues,
+  SetIterator, SetObj, StringIterator, StringKey, SymbolKey, classify,
+  map_key_to_js, mk_int, mk_object, mk_string, mk_undefined, plain_object,
+  symbol_async_iterator, symbol_iterator,
 }
 import arc/rt/utf8
 import arc/rt/val.{is_callable} as rt_val
 import gleam/dict.{type Dict}
 import gleam/list
 import gleam/option.{type Option, None, Some}
-
-pub type IteratorRecord =
-  types.IteratorRecord
 
 // polarity for every/some style consumers
 pub type Quantifier {
@@ -99,9 +97,9 @@ pub fn get_iterator_async(st: Agent, obj: JsVal) -> #(IteratorRecord, Agent) {
   }
 }
 
-const k_iterator = StringKey(Named("iterator"))
+const iterator_key = StringKey(Named("iterator"))
 
-const k_next = StringKey(Named("next"))
+const next_key = StringKey(Named("next"))
 
 // §27.1.6.1, proto must be %AsyncFromSyncIteratorPrototype%
 pub fn create_async_from_sync(
@@ -113,7 +111,7 @@ pub fn create_async_from_sync(
     rt_obj.define_own_data(
       st,
       sync_rec,
-      k_iterator,
+      iterator_key,
       sync.iterator,
       writable: True,
       enumerable: True,
@@ -123,7 +121,7 @@ pub fn create_async_from_sync(
     rt_obj.define_own_data(
       st,
       sync_rec,
-      k_next,
+      next_key,
       sync.next_method,
       writable: True,
       enumerable: True,
@@ -145,8 +143,8 @@ pub fn create_async_from_sync(
 
 pub fn sync_iterator_record(st: Agent, sync_rec: Handle) -> IteratorRecord {
   case
-    rt_obj.ordinary_own_property(st, sync_rec, k_iterator),
-    rt_obj.ordinary_own_property(st, sync_rec, k_next)
+    rt_obj.ordinary_own_property(st, sync_rec, iterator_key),
+    rt_obj.ordinary_own_property(st, sync_rec, next_key)
   {
     Some(DataProperty(value: iterator, ..)),
       Some(DataProperty(value: next_method, ..))
@@ -292,7 +290,7 @@ fn array_values_iterator(st: Agent, rec: IteratorRecord) -> Option(Handle) {
   }
 }
 
-// fast path over plain array elements until a hole or own prop
+// plain array elements until a hole or own prop
 fn array_values_to_list(
   st: Agent,
   rec: IteratorRecord,

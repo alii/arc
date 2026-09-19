@@ -52,9 +52,9 @@ fn compile_source(
   let compiled =
     compile_task.run(string.byte_size(source), fn() {
       case parse(source) {
-        Error(err) -> Error(parser.parse_error_to_string(err))
-        Ok(#(body, sb)) ->
-          compile(body, sb)
+        Error(err) -> Error(parser.error_to_string(err))
+        Ok(#(body, scopes)) ->
+          compile(body, scopes)
           |> result.map_error(compiler.error_message)
       }
     })
@@ -65,7 +65,7 @@ fn compile_source(
 
 fn top_level_locals(template: FuncTemplate, this: JsVal) -> TupleArray(JsVal) {
   let locals = tuple_array.repeat(mk_undefined(), template.local_count)
-  case lexical.slot_of(template.lexical, lexical.RefThis) {
+  case lexical.slot_of(template.lexical, lexical.ThisRef) {
     Some(idx) -> tuple_array.set_unchecked(idx, this, locals)
     None -> locals
   }
@@ -235,7 +235,10 @@ fn run_direct_eval(
   let code_kind = func.code_kind
   let eval_caller =
     compiler.DirectEvalCaller(
-      slot_names: list.map(name_table, fn(pair) { pair.0 }),
+      slot_names: list.map(name_table, fn(entry) {
+        let #(name, _slot) = entry
+        name
+      }),
       lexical: func.lexical,
       code_kind:,
       is_strict: func.is_strict,
@@ -253,8 +256,8 @@ fn run_direct_eval(
     allow_arguments: lexical.arguments_allowed(code_kind),
     outer_private_names: private_names,
   )
-  let compile = fn(body, sb) {
-    compiler.compile_eval_direct(body, sb, eval_caller)
+  let compile = fn(body, scopes) {
+    compiler.compile_eval_direct(body, scopes, eval_caller)
   }
   let outcome = {
     use template <- result.try(compile_source(
@@ -282,10 +285,10 @@ fn run_direct_eval(
         top_level_activation(_, template, locals, caller.this, eval_env),
         run,
       )
-    Ok(#(res, agent, eval_env))
+    Ok(#(res, eval_env, agent))
   }
   case outcome {
-    Ok(#(res, agent, eval_env)) ->
+    Ok(#(res, eval_env, agent)) ->
       return_to_caller(
         caller,
         Ok(#(res, agent)),
@@ -317,7 +320,12 @@ fn caller_boxes(
     tuple_array.get(idx, caller.locals) |> option.to_result(idx)
   }
   let boxes = {
-    use named <- result.try(list.try_map(name_table, fn(pair) { read(pair.1) }))
+    use named <- result.try(
+      list.try_map(name_table, fn(entry) {
+        let #(_name, slot) = entry
+        read(slot)
+      }),
+    )
     use lex <- result.map(
       lexical.all_lexical_refs
       |> list.filter_map(fn(ref) {

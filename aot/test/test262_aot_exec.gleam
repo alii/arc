@@ -403,7 +403,7 @@ fn check_async_completion(st: Agent) -> Result(Nil, String) {
         KUndef -> Error("async test did not call $DONE")
         _ ->
           Error(
-            "unexpected __print_output__: " <> rt_inspect.inspect(st, output),
+            "unexpected __print_output__: " <> rt_inspect.describe(st, output),
           )
       }
   }
@@ -452,7 +452,7 @@ fn verify_negative_type(
 
 fn hooks_for(metadata: TestMetadata) -> HostHooks {
   HostHooks(
-    ..host_hooks.default_host_hooks(),
+    ..host_hooks.default(),
     can_block: !list.contains(metadata.flags, "CanBlockIsFalse"),
     report_uncaught: fn(_report) { Nil },
     print: fn(_level, _line) { Nil },
@@ -460,7 +460,7 @@ fn hooks_for(metadata: TestMetadata) -> HostHooks {
 }
 
 fn install_host_api(st: Agent) -> Agent {
-  let #(_dollar_262, st) = rt_realm.install_262(st, st.realm)
+  let #(_dollar_262, st) = rt_realm.install_test262(st, st.realm)
   let ctx: host.Context(Nil) = host.from_agent(st, host.new_brand())
   let ctx = host.define_global(ctx, print_output, mk_undefined())
   let ctx = host.define_fn(ctx, "print", 1, print_native)
@@ -514,7 +514,7 @@ fn inspect_thrown(val: JsVal, st: Agent) -> String {
       _ -> None
     }
   }
-  option.lazy_unwrap(described, fn() { rt_inspect.inspect(st, val) })
+  option.lazy_unwrap(described, fn() { rt_inspect.describe(st, val) })
 }
 
 pub fn finish(ctx: RunnerContext, results: List(TestResult)) -> Int {

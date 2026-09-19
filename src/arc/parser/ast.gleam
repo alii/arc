@@ -21,16 +21,20 @@ pub type TemplateQuasi {
   TemplateQuasi(cooked: Option(String), raw: String)
 }
 
+pub type TemplateSpan(quasi) {
+  TemplateSpan(expression: Expression, quasi: quasi)
+}
+
 pub type TemplateParts(quasi) {
-  TemplateParts(head: quasi, tail: List(#(Expression, quasi)))
+  TemplateParts(head: quasi, tail: List(TemplateSpan(quasi)))
 }
 
 pub fn template_quasis(parts: TemplateParts(a)) -> List(a) {
-  [parts.head, ..list.map(parts.tail, fn(part) { part.1 })]
+  [parts.head, ..list.map(parts.tail, fn(part) { part.quasi })]
 }
 
 pub fn template_expressions(parts: TemplateParts(a)) -> List(Expression) {
-  list.map(parts.tail, fn(part) { part.0 })
+  list.map(parts.tail, fn(part) { part.expression })
 }
 
 pub fn map_template_quasis(
@@ -39,7 +43,9 @@ pub fn map_template_quasis(
 ) -> TemplateParts(b) {
   TemplateParts(
     head: f(parts.head),
-    tail: list.map(parts.tail, fn(part) { #(part.0, f(part.1)) }),
+    tail: list.map(parts.tail, fn(part) {
+      TemplateSpan(part.expression, f(part.quasi))
+    }),
   )
 }
 
@@ -50,8 +56,8 @@ pub fn try_map_template_quasis(
   use head <- result.try(f(parts.head))
   use tail <- result.map(
     list.try_map(parts.tail, fn(part) {
-      use quasi <- result.map(f(part.1))
-      #(part.0, quasi)
+      use quasi <- result.map(f(part.quasi))
+      TemplateSpan(part.expression, quasi)
     }),
   )
   TemplateParts(head:, tail:)
@@ -90,9 +96,9 @@ pub type ModuleItem {
 }
 
 pub type Declaration {
-  DeclVariable(kind: VariableKind, declarations: List(VariableDeclarator))
-  DeclFunction(function: FunctionLiteral)
-  DeclClass(
+  DeclareVariable(kind: VariableKind, declarations: List(VariableDeclarator))
+  DeclareFunction(function: FunctionLiteral)
+  DeclareClass(
     name: Option(NamedBinding),
     super_class: Option(Expression),
     body: List(ClassElement),
@@ -101,16 +107,16 @@ pub type Declaration {
 
 pub fn declaration_to_statement(decl: Declaration) -> Statement {
   case decl {
-    DeclVariable(kind:, declarations:) ->
+    DeclareVariable(kind:, declarations:) ->
       VariableDeclaration(kind:, declarations:)
-    DeclFunction(function: FunctionLiteral(
+    DeclareFunction(function: FunctionLiteral(
       name:,
       params:,
       body:,
       is_generator:,
       is_async:,
     )) -> FunctionDeclaration(name:, params:, body:, is_generator:, is_async:)
-    DeclClass(name:, super_class:, body:) ->
+    DeclareClass(name:, super_class:, body:) ->
       ClassDeclaration(name:, super_class:, body:)
   }
 }
@@ -209,12 +215,12 @@ pub type FunctionLiteral {
 
 pub type ClassElement {
   ClassMethod(
-    key: PropertyKey,
+    key: PropertyName,
     value: FunctionLiteral,
     kind: MethodKind,
     is_static: Bool,
   )
-  ClassField(key: PropertyKey, value: Option(Expression), is_static: Bool)
+  ClassField(key: PropertyName, value: Option(Expression), is_static: Bool)
   StaticBlock(body: List(StmtWithLine))
 }
 
@@ -357,38 +363,42 @@ pub type ArrowBody {
   ArrowBodyBlock(List(StmtWithLine))
 }
 
-pub type PropertyKey {
-  KeyIdentifier(name: String, span: Span)
-  KeyString(value: String, span: Span)
-  KeyNumber(value: LiteralNumber, span: Span)
-  KeyBigInt(value: Int, span: Span)
-  KeyPrivate(name: String, span: Span)
-  KeyComputed(expression: Expression)
+pub type PropertyName {
+  IdentifierName(name: String, span: Span)
+  StringName(value: String, span: Span)
+  NumberName(value: LiteralNumber, span: Span)
+  BigIntName(value: Int, span: Span)
+  PrivateName(name: String, span: Span)
+  ComputedName(expression: Expression)
 }
 
-pub fn property_key_span(key: PropertyKey) -> Span {
+pub fn property_name_span(key: PropertyName) -> Span {
   case key {
-    KeyIdentifier(span:, ..)
-    | KeyString(span:, ..)
-    | KeyNumber(span:, ..)
-    | KeyBigInt(span:, ..)
-    | KeyPrivate(span:, ..) -> span
-    KeyComputed(expression:) -> expression.span
+    IdentifierName(span:, ..)
+    | StringName(span:, ..)
+    | NumberName(span:, ..)
+    | BigIntName(span:, ..)
+    | PrivateName(span:, ..) -> span
+    ComputedName(expression:) -> expression.span
   }
 }
 
-pub fn property_key_static_name(key: PropertyKey) -> Option(String) {
+pub fn static_name(key: PropertyName) -> Option(String) {
   case key {
-    KeyIdentifier(name:, ..) -> Some(name)
-    KeyString(value:, ..) -> Some(value)
-    KeyNumber(..) | KeyBigInt(..) | KeyPrivate(..) | KeyComputed(..) -> None
+    IdentifierName(name:, ..) -> Some(name)
+    StringName(value:, ..) -> Some(value)
+    NumberName(..) | BigIntName(..) | PrivateName(..) | ComputedName(..) -> None
   }
 }
 
 pub type Property {
-  InitProperty(key: PropertyKey, value: Expression, shorthand: Bool)
-  MethodProperty(key: PropertyKey, value: FunctionLiteral)
-  AccessorProperty(key: PropertyKey, value: FunctionLiteral, kind: AccessorKind)
+  InitProperty(key: PropertyName, value: Expression, shorthand: Bool)
+  MethodProperty(key: PropertyName, value: FunctionLiteral)
+  AccessorProperty(
+    key: PropertyName,
+    value: FunctionLiteral,
+    kind: AccessorKind,
+  )
   SpreadProperty(argument: Expression)
 }
 
@@ -411,7 +421,7 @@ pub type Pattern {
 }
 
 pub type PatternProperty {
-  PatternProperty(key: PropertyKey, value: Pattern, shorthand: Bool)
+  PatternProperty(key: PropertyName, value: Pattern, shorthand: Bool)
   RestProperty(name: String, span: Span)
 }
 

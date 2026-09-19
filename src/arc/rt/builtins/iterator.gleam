@@ -113,7 +113,7 @@ pub fn init(
       symbol_async_iterator,
       async_sym_fn,
     )
-  let #(afs_methods, st) =
+  let #(async_from_sync_methods, st) =
     common.alloc_methods(st, fn_proto, [
       #("next", IteratorN(AsyncFromSyncNext), 1),
       #("return", IteratorN(AsyncFromSyncReturn), 1),
@@ -123,7 +123,7 @@ pub fn init(
     common.alloc_proto(
       st,
       Some(async_iterator_proto),
-      common.named_props(afs_methods),
+      common.named_props(async_from_sync_methods),
     )
   let #(proto_methods, st) =
     common.alloc_methods(st, fn_proto, [

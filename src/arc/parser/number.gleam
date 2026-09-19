@@ -189,7 +189,7 @@ fn bit_length(n: Int, acc: Int) -> Int {
   }
 }
 
-@external(erlang, "arc_float_ffi", "parse_float")
+@external(erlang, "arc_number_ffi", "parse_float")
 fn parse_float(s: String) -> Result(Float, FloatParseError)
 
 fn parse_digits(s: String, radix: Int) -> Result(Int, NumberParseError) {

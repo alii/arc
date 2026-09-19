@@ -339,14 +339,14 @@ fn write_sort_result(
   length: Int,
   idx: Int,
 ) -> Agent {
-  let fast = case idx == 0 {
+  let dense = case idx == 0 {
     True -> {
       use _els, len <- with_plain_elements(st, h, length, 0, length)
       #(elements.from_list(values), len, Nil)
     }
     False -> None
   }
-  case fast {
+  case dense {
     Some(#(Nil, st)) -> st
     None ->
       case values {

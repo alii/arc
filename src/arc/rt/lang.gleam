@@ -1,4 +1,3 @@
-import arc/bytecode/error_kind.{TypeError}
 import arc/bytecode/key.{type PropertyKey, Named}
 import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
@@ -11,8 +10,8 @@ import arc/rt/types.{
   type Agent, type Handle, type IteratorNative, type IteratorRecord, type JsVal,
   type ObjectKey, type Store, Agent, DataProperty, GeneratorN, GeneratorNext,
   GeneratorObj, IteratorN, IteratorRecord, KHandle, KNull, KUndef, NativeFn,
-  NoElements, Ordinary, SObject, Store, StringKey, classify, mk_bool, mk_object,
-  mk_string, mk_undefined,
+  Ordinary, SObject, Store, StringKey, classify, mk_bool, mk_object, mk_string,
+  mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/bit_array
@@ -23,21 +22,17 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
-pub fn new_type_error(st: Agent, message: String) -> #(JsVal, Agent) {
-  rt_val.new_error(st, TypeError, message)
-}
-
 // iterator record is a null-proto object: iterator, next, done
 pub type IterHint {
   Sync
   Async
 }
 
-const k_iterator = StringKey(Named("iterator"))
+const iterator_key = StringKey(Named("iterator"))
 
-const k_next = StringKey(Named("next"))
+const next_key = StringKey(Named("next"))
 
-const k_done = StringKey(Named("done"))
+const done_key = StringKey(Named("done"))
 
 pub fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
   let store = st.store
@@ -46,17 +41,17 @@ pub fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
     dict.from_list([
       #(
         Named("iterator"),
-        DataProperty(
+        types.DataProperty(
           value: rec.iterator,
           writable: True,
           enumerable: True,
           configurable: True,
-          seq:,
+          seq: seq,
         ),
       ),
       #(
         Named("next"),
-        DataProperty(
+        types.DataProperty(
           value: rec.next_method,
           writable: True,
           enumerable: True,
@@ -66,7 +61,7 @@ pub fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
       ),
       #(
         Named("done"),
-        DataProperty(
+        types.DataProperty(
           value: mk_bool(False),
           writable: True,
           enumerable: True,
@@ -79,12 +74,12 @@ pub fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
   let #(h, st) =
     rt_store.cell_new(
       st,
-      SObject(
+      types.SObject(
         kind: Ordinary,
         proto: None,
-        props:,
+        props: props,
         symbol_props: [],
-        elements: NoElements,
+        elements: types.NoElements,
         extensible: True,
       ),
     )
@@ -132,9 +127,9 @@ fn read_record(st: Agent, rec: JsVal) -> #(Bool, IteratorRecord, Agent) {
   case record_fields(st, rec) {
     Some(#(done, record)) -> #(done, record, st)
     None -> {
-      let #(done, st) = rt_obj.get_prop(st, rec, k_done)
-      let #(iterator, st) = rt_obj.get_prop(st, rec, k_iterator)
-      let #(next_method, st) = rt_obj.get_prop(st, rec, k_next)
+      let #(done, st) = rt_obj.get_prop(st, rec, done_key)
+      let #(iterator, st) = rt_obj.get_prop(st, rec, iterator_key)
+      let #(next_method, st) = rt_obj.get_prop(st, rec, next_key)
       #(rt_val.to_boolean(done), IteratorRecord(iterator:, next_method:), st)
     }
   }
@@ -153,7 +148,7 @@ fn record_fields(st: Agent, rec: JsVal) -> Option(#(Bool, IteratorRecord)) {
 }
 
 fn mark_done(st: Agent, rec: JsVal) -> Agent {
-  let #(_, st) = rt_obj.set_prop(st, rec, k_done, mk_bool(True))
+  let #(_, st) = rt_obj.set_prop(st, rec, done_key, mk_bool(True))
   st
 }
 
@@ -313,23 +308,14 @@ pub fn copy_data_props(
   target: JsVal,
   source: JsVal,
 ) -> #(JsVal, Agent) {
-  case plain_copy_data_props(st, target, source) {
-    Copied(st) -> #(target, st)
-    CopyMiss -> {
+  case rt_obj.plain_copy_data_props(st, target, source) {
+    rt_obj.Copied(st) -> #(target, st)
+    rt_obj.CopyMiss -> {
       let assert KHandle(target_h) = classify(target)
       #(target, copy_data_properties(st, target_h, source, []))
     }
   }
 }
-
-// spread of plain data onto a fresh literal in one write
-type PlainCopy {
-  Copied(Agent)
-  CopyMiss
-}
-
-@external(erlang, "arc_rt_obj_ffi", "plain_copy_data_props")
-fn plain_copy_data_props(st: Agent, target: JsVal, source: JsVal) -> PlainCopy
 
 // object rest pattern, excluded keys skipped
 pub fn object_rest(

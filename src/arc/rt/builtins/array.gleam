@@ -304,11 +304,6 @@ pub fn alloc_array(
   #(mk_object(h), st)
 }
 
-pub fn alloc_array_list(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
-  let #(h, st) = realm_ops.alloc_array(st, values)
-  #(mk_object(h), st)
-}
-
 // reads no properties, must not get length
 fn require_object(
   st: Agent,
@@ -376,11 +371,11 @@ fn require_callback(
   cont: fn(ElementFn, Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
   let #(cb, this_arg) = helpers.two_args_or_undefined(args)
-  use call <- require_bound(st, cb, this_arg)
+  use call <- require_prepared_call(st, cb, this_arg)
   cont(call, st)
 }
 
-fn require_bound(
+fn require_prepared_call(
   st: Agent,
   cb: JsVal,
   this: JsVal,
@@ -432,7 +427,7 @@ fn generic_set(st: Agent, h: Handle, pk: PropertyKey, val: JsVal) -> Agent {
       rt_val.throw_type_error(
         st,
         "Cannot assign to read only property '"
-          <> key.display_string(pk)
+          <> key.display_text(pk)
           <> "' of object",
       )
   }
@@ -453,7 +448,7 @@ fn generic_delete(st: Agent, h: Handle, pk: PropertyKey) -> Agent {
     False ->
       rt_val.throw_type_error(
         st,
-        "Cannot delete property '" <> key.display_string(pk) <> "' of object",
+        "Cannot delete property '" <> key.display_text(pk) <> "' of object",
       )
   }
 }
@@ -830,11 +825,11 @@ type Push {
 fn push(st: Agent, this: JsVal, args: List(JsVal)) -> Push
 
 fn push_general(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  let fast = case classify(this), args {
+  let dense = case classify(this), args {
     KHandle(h), [_, ..] -> push_dense(st, h, rt_store.cell_get(st, h), args)
     _, _ -> None
   }
-  case fast {
+  case dense {
     Some(#(new_length, st)) -> #(mk_int(new_length), st)
     None -> {
       use _this, h, length, st <- require_array(st, this)
@@ -891,11 +886,11 @@ fn pop_general(st: Agent, this: JsVal) -> #(JsVal, Agent) {
     True -> #(mk_undefined(), generic_set_length(st, h, 0))
     False -> {
       let new_len = length - 1
-      let fast = {
+      let dense = {
         use els, len <- with_plain_elements(st, h, length, new_len, length)
         #(elements.truncate(els, len - 1), len - 1, elements.get(els, len - 1))
       }
-      case fast {
+      case dense {
         Some(#(val, st)) -> #(val, st)
         None -> {
           let #(val, st) = generic_get(st, h, new_len)
@@ -912,14 +907,14 @@ fn array_shift(st: Agent, this: JsVal, _args: List(JsVal)) -> #(JsVal, Agent) {
   case length == 0 {
     True -> #(mk_undefined(), generic_set_length(st, h, 0))
     False -> {
-      let fast = {
+      let dense = {
         use els, len <- with_plain_elements(st, h, length, 0, length)
         let first = elements.get(els, 0)
         let els =
           elements.move_range(els, 1, len, -1) |> elements.truncate(len - 1)
         #(els, len - 1, first)
       }
-      case fast {
+      case dense {
         Some(#(first, st)) -> #(first, st)
         None -> {
           let #(val, st) = generic_get(st, h, 0)
@@ -980,14 +975,14 @@ fn array_unshift(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     }
   })
   use <- guard_safe_length(st, new_len)
-  let fast = {
+  let dense = {
     use els, len <- with_plain_elements(st, h, length, 0, new_len)
     let els =
       elements.move_range(els, 0, len, arg_count)
       |> elements.write_list(0, args)
     #(els, len + arg_count, Nil)
   }
-  case fast {
+  case dense {
     Some(#(Nil, st)) -> #(mk_int(new_len), st)
     None -> {
       let st =
@@ -1335,7 +1330,7 @@ fn array_species_create(
     KHandle(h) ->
       case intrinsic_species(st, rt_store.cell_get(st, h)) {
         True -> #(None, st)
-        False -> species_protocol(st, original, length)
+        False -> species_general(st, original, length)
       }
     _ -> #(None, st)
   }
@@ -1357,7 +1352,7 @@ fn intrinsic_species(st: Agent, cell: Cell) -> Bool {
   }
 }
 
-fn species_protocol(
+fn species_general(
   st: Agent,
   original: JsVal,
   length: Int,
@@ -1526,11 +1521,11 @@ fn array_reverse(
   _args: List(JsVal),
 ) -> #(JsVal, Agent) {
   use this, h, length, st <- require_array(st, this)
-  let fast = {
+  let dense = {
     use els, len <- with_plain_elements(st, h, length, 0, length)
     #(elements.reverse_range(els, len), len, Nil)
   }
-  case fast {
+  case dense {
     Some(#(Nil, st)) -> #(this, st)
     None -> #(this, reverse_generic(st, h, 0, length - 1, limits.max_iteration))
   }
@@ -1572,11 +1567,11 @@ fn array_fill(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(end, st) =
     rt_abstract_ops.relative_index(st, helpers.arg_at(args, 2), length, length)
   use <- within_budget(st, end - start)
-  let fast = {
+  let dense = {
     use els, len <- with_plain_elements(st, h, length, start, end)
     #(elements.fill_range(els, start, end, fill_val), len, Nil)
   }
-  case fast {
+  case dense {
     Some(#(Nil, st)) -> #(this, st)
     None -> #(this, fill_generic(st, h, start, end, fill_val))
   }
@@ -1912,10 +1907,14 @@ type Direction {
   Descending
 }
 
-fn bounds(dir: Direction, length: Int) -> #(Int, Int, Int) {
+type IndexRange {
+  IndexRange(start: Int, stop: Int, step: Int)
+}
+
+fn bounds(dir: Direction, length: Int) -> IndexRange {
   case dir {
-    Ascending -> #(0, length, 1)
-    Descending -> #(length - 1, -1, -1)
+    Ascending -> IndexRange(start: 0, stop: length, step: 1)
+    Descending -> IndexRange(start: length - 1, stop: -1, step: -1)
   }
 }
 
@@ -1941,7 +1940,7 @@ fn iterate_array(
   stop_on: fn(JsVal) -> Bool,
   cont: fn(FoundAt, Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
-  let #(start, end, step) = bounds(dir, length)
+  let IndexRange(start:, stop: end, step:) = bounds(dir, length)
   iterate_array_loop(
     st,
     arr,
@@ -2202,7 +2201,7 @@ fn array_filter(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   use <- within_budget(st, length)
   let #(kept_rev, st) = array_filter_loop(st, this, 0, length, call, [])
   case species {
-    None -> alloc_array_list(st, list.reverse(kept_rev))
+    None -> realm_ops.new_array(st, list.reverse(kept_rev))
     Some(target) -> {
       let vals = list.reverse(kept_rev)
       let st =
@@ -2335,8 +2334,8 @@ fn reduce_directed(
 ) -> #(JsVal, Agent) {
   use this, _h, length, st <- require_array(st, this)
   let cb = helpers.first_arg_or_undefined(args)
-  use call <- require_bound(st, cb, mk_undefined())
-  let #(start, end, step) = bounds(dir, length)
+  use call <- require_prepared_call(st, cb, mk_undefined())
+  let IndexRange(start:, stop: end, step:) = bounds(dir, length)
   let #(has_init, init) = case args {
     [_, v, ..] -> #(True, v)
     _ -> #(False, mk_undefined())
@@ -2508,7 +2507,7 @@ fn array_splice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
     }
   }
   let shift = item_count - actual_delete_count
-  let fast = {
+  let dense = {
     use els, len <- with_plain_elements(
       st,
       h,
@@ -2526,7 +2525,7 @@ fn array_splice(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
       |> elements.truncate(new_length)
     #(els, new_length, Nil)
   }
-  case fast {
+  case dense {
     Some(#(Nil, st)) -> #(removed_arr, st)
     None -> {
       let st =
@@ -2599,7 +2598,7 @@ fn finish_species_list(
 ) -> #(JsVal, Agent) {
   let kept = list.reverse(kept_rev)
   case species {
-    None -> alloc_array_list(st, kept)
+    None -> realm_ops.new_array(st, kept)
     Some(target) -> {
       let count = list.length(kept)
       let st =
@@ -2721,11 +2720,11 @@ fn array_copy_within(
   case count <= 0 {
     True -> #(this, st)
     False -> {
-      let fast = {
+      let dense = {
         use els, len <- with_plain_elements(st, h, length, 0, length)
         #(elements.copy_within(els, from, target, count), len, Nil)
       }
-      case fast {
+      case dense {
         Some(#(Nil, st)) -> #(this, st)
         None ->
           case from < target && target < from + count {

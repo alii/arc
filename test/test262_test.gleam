@@ -183,7 +183,6 @@ fn run_parse_test(
       Error(
         "Expected parse error (negative.phase: parse) but parsed successfully",
       )
-    Error(err), False ->
-      Error("Parse error: " <> parser.parse_error_to_string(err))
+    Error(err), False -> Error("Parse error: " <> parser.error_to_string(err))
   }
 }

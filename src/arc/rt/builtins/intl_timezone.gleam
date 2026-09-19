@@ -1,4 +1,4 @@
-import arc/rt/builtins/intl_format
+import arc/internal/digits
 import arc/rt/builtins/temporal_time_zone
 import arc/rt/intl_data.{
   type FormatTimeZone, type TimeZoneNameWidth, FixedZone, HostZone, NamedZone,
@@ -118,10 +118,7 @@ fn offset_sign(minutes: Int) -> String {
 
 fn offset_zone_name(minutes: Int) -> String {
   let m = int.absolute_value(minutes)
-  offset_sign(minutes)
-  <> intl_format.pad2(m / 60)
-  <> ":"
-  <> intl_format.pad2(m % 60)
+  offset_sign(minutes) <> digits.pad2(m / 60) <> ":" <> digits.pad2(m % 60)
 }
 
 pub fn display_name(
@@ -147,13 +144,9 @@ fn gmt_offset_label(offset_minutes: Int, long long: Bool) -> String {
   case offset_minutes, long, minutes {
     0, _, _ -> "GMT"
     _, True, _ ->
-      "GMT"
-      <> sign
-      <> intl_format.pad2(hours)
-      <> ":"
-      <> intl_format.pad2(minutes)
+      "GMT" <> sign <> digits.pad2(hours) <> ":" <> digits.pad2(minutes)
     _, False, 0 -> "GMT" <> sign <> int.to_string(hours)
     _, False, _ ->
-      "GMT" <> sign <> int.to_string(hours) <> ":" <> intl_format.pad2(minutes)
+      "GMT" <> sign <> int.to_string(hours) <> ":" <> digits.pad2(minutes)
   }
 }

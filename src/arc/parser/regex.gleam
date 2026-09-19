@@ -37,13 +37,13 @@ pub type RegexFlags {
 pub fn skip_body(bytes: BitArray, pos: Int) -> Result(Int, PatternError) {
   case bytes {
     <<_:bytes-size(pos), rest:bytes>> ->
-      skip_regex_body_loop(rest, pos, in_class: False)
+      skip_body_loop(rest, pos, in_class: False)
     _ -> Error(UnterminatedRegex(pos))
   }
 }
 
 // line terminators end it, even escaped; trail bytes fall through
-fn skip_regex_body_loop(
+fn skip_body_loop(
   rest: BitArray,
   pos: Int,
   in_class in_class: Bool,
@@ -53,15 +53,15 @@ fn skip_regex_body_loop(
       Error(UnterminatedRegex(pos + 1))
     <<0x5c, 0xe2, 0x80, 0xa8, _:bytes>> | <<0x5c, 0xe2, 0x80, 0xa9, _:bytes>> ->
       Error(UnterminatedRegex(pos + 1))
-    <<0x5c, _, rest:bytes>> -> skip_regex_body_loop(rest, pos + 2, in_class)
+    <<0x5c, _, rest:bytes>> -> skip_body_loop(rest, pos + 2, in_class)
     <<0x5c, _:bytes>> -> Error(UnterminatedRegex(pos + 1))
-    <<0x5b, rest:bytes>> -> skip_regex_body_loop(rest, pos + 1, in_class: True)
-    <<0x5d, rest:bytes>> -> skip_regex_body_loop(rest, pos + 1, in_class: False)
+    <<0x5b, rest:bytes>> -> skip_body_loop(rest, pos + 1, in_class: True)
+    <<0x5d, rest:bytes>> -> skip_body_loop(rest, pos + 1, in_class: False)
     <<0x2f, _:bytes>> if !in_class -> Ok(pos + 1)
     <<0x0a, _:bytes>> | <<0x0d, _:bytes>> -> Error(UnterminatedRegex(pos))
     <<0xe2, 0x80, 0xa8, _:bytes>> | <<0xe2, 0x80, 0xa9, _:bytes>> ->
       Error(UnterminatedRegex(pos))
-    <<_, rest:bytes>> -> skip_regex_body_loop(rest, pos + 1, in_class)
+    <<_, rest:bytes>> -> skip_body_loop(rest, pos + 1, in_class)
     _ -> Error(UnterminatedRegex(pos))
   }
 }
@@ -386,7 +386,7 @@ fn parse_alternative(
   case ascii_at(ctx, pos) {
     Some("|") | Some(")") -> Ok(#(pos, acc))
     _ -> {
-      use #(pos2, term_names, kind) <- result.try(parse_term(ctx, pos))
+      use ParsedTerm(pos2, term_names, kind) <- result.try(parse_term(ctx, pos))
       use Nil <- result.try(check_no_duplicate(term_names, acc, pos))
       use #(pos3, quantified) <- result.try(parse_quantifier(ctx, pos2))
       use Nil <- result.try(case quantified, kind, ctx.mode {
@@ -411,43 +411,47 @@ fn check_no_duplicate(
   }
 }
 
+type ParsedTerm {
+  ParsedTerm(after: Int, group_names: List(String), kind: TermKind)
+}
+
 fn parse_term(
   ctx: PatternContext,
   pos: Int,
-) -> Result(#(Int, List(String), TermKind), PatternError) {
+) -> Result(ParsedTerm, PatternError) {
   let strict = ctx.mode != Legacy
   case ascii_at(ctx, pos) {
-    Some("^") | Some("$") -> Ok(#(pos + 1, [], AssertionTerm))
+    Some("^") | Some("$") -> Ok(ParsedTerm(pos + 1, [], AssertionTerm))
     Some("\\") ->
       case ascii_at(ctx, pos + 1) {
-        Some("b") | Some("B") -> Ok(#(pos + 2, [], AssertionTerm))
+        Some("b") | Some("B") -> Ok(ParsedTerm(pos + 2, [], AssertionTerm))
         _ -> {
           use pos2 <- result.map(parse_atom_escape(ctx, pos))
-          #(pos2, [], AtomTerm)
+          ParsedTerm(pos2, [], AtomTerm)
         }
       }
     Some("(") -> parse_group(ctx, pos)
     Some("[") -> {
       use pos2 <- result.map(parse_class(ctx, pos + 1))
-      #(pos2, [], AtomTerm)
+      ParsedTerm(pos2, [], AtomTerm)
     }
     Some("*") | Some("+") | Some("?") -> Error(NothingToRepeat(pos))
     Some("{") if strict -> Error(LoneQuantifierBrackets(pos))
     Some("{") ->
       case braced_quantifier(ctx, pos) {
         Some(_) -> Error(NothingToRepeat(pos))
-        None -> Ok(#(pos + 1, [], AtomTerm))
+        None -> Ok(ParsedTerm(pos + 1, [], AtomTerm))
       }
     Some("}") if strict -> Error(LoneQuantifierBrackets(pos))
     Some("]") if strict -> Error(LoneClassBracket(pos))
-    _ -> Ok(#(pos + char_width_at(ctx, pos), [], AtomTerm))
+    _ -> Ok(ParsedTerm(pos + char_width_at(ctx, pos), [], AtomTerm))
   }
 }
 
 fn parse_group(
   ctx: PatternContext,
   pos: Int,
-) -> Result(#(Int, List(String), TermKind), PatternError) {
+) -> Result(ParsedTerm, PatternError) {
   case ascii_at(ctx, pos + 1), ascii_at(ctx, pos + 2), ascii_at(ctx, pos + 3) {
     Some("?"), Some("="), _ | Some("?"), Some("!"), _ ->
       group_rest(ctx, pos + 3, LookaheadTerm)
@@ -458,7 +462,7 @@ fn parse_group(
       use #(name, after_name) <- result.try(parse_group_name(ctx, pos + 3))
       use #(pos2, inner) <- result.try(parse_group_body(ctx, after_name))
       use Nil <- result.try(check_no_duplicate([name], inner, pos))
-      Ok(#(pos2, [name, ..inner], AtomTerm))
+      Ok(ParsedTerm(pos2, [name, ..inner], AtomTerm))
     }
     Some("?"), _, _ -> {
       use after_colon <- result.try(parse_modifiers(ctx, pos + 2))
@@ -472,9 +476,9 @@ fn group_rest(
   ctx: PatternContext,
   pos: Int,
   kind: TermKind,
-) -> Result(#(Int, List(String), TermKind), PatternError) {
+) -> Result(ParsedTerm, PatternError) {
   use #(pos2, names) <- result.map(parse_group_body(ctx, pos))
-  #(pos2, names, kind)
+  ParsedTerm(pos2, names, kind)
 }
 
 fn parse_group_body(
@@ -675,7 +679,7 @@ fn parse_character_escape(
         _, _, False -> char(pos + 2, 0x78)
       }
     Ascii("u") -> {
-      use #(after, value) <- result.map(parse_unicode_escape(ctx, pos))
+      use Escaped(after:, value:) <- result.map(parse_unicode_escape(ctx, pos))
       ClassCharacter(after:, value:)
     }
     // u/v allow only \0, annex b reads legacy octal
@@ -726,7 +730,8 @@ fn legacy_octal_escape(
         True -> 2
         False -> 1
       }
-      let #(after, value) = octal_run(ctx, pos + 2, max_more, first_digit)
+      let Escaped(after:, value:) =
+        octal_run(ctx, pos + 2, max_more, first_digit)
       ClassCharacter(after:, value:)
     }
   }
@@ -737,23 +742,33 @@ fn octal_run(
   pos: Int,
   remaining: Int,
   acc: Int,
-) -> #(Int, Int) {
+) -> Escaped {
   case remaining > 0, octal_at(ctx, pos) {
     True, Some(d) -> octal_run(ctx, pos + 1, remaining - 1, acc * 8 + d)
-    _, _ -> #(pos, acc)
+    _, _ -> Escaped(after: pos, value: acc)
   }
+}
+
+// an escape's code point and the position after it
+type Escaped {
+  Escaped(after: Int, value: Int)
 }
 
 // pattern \u, surrogate pairs only join under u or v
 fn parse_unicode_escape(
   ctx: PatternContext,
   pos: Int,
-) -> Result(#(Int, Int), PatternError) {
+) -> Result(Escaped, PatternError) {
   case hex4_at(ctx, pos + 2), ctx.mode {
-    Some(code), Legacy -> Ok(#(pos + 6, code))
+    Some(code), Legacy -> Ok(Escaped(pos + 6, code))
     Some(code), Unicode | Some(code), UnicodeSets ->
-      Ok(join_trailing_surrogate(#(pos + 6, code), hex4_unicode_escape(ctx, _)))
-    None, Legacy -> Ok(#(pos + 2, 0x75))
+      Ok(
+        join_trailing_surrogate(Escaped(pos + 6, code), hex4_unicode_escape(
+          ctx,
+          _,
+        )),
+      )
+    None, Legacy -> Ok(Escaped(pos + 2, 0x75))
     None, Unicode | None, UnicodeSets ->
       case braced_unicode_escape(ctx, pos) {
         Ok(escape) -> Ok(escape)
@@ -772,7 +787,7 @@ type UnicodeEscapeError {
 fn braced_unicode_escape(
   ctx: PatternContext,
   pos: Int,
-) -> Result(#(Int, Int), UnicodeEscapeError) {
+) -> Result(Escaped, UnicodeEscapeError) {
   use <- bool.guard(
     ascii_at(ctx, pos + 2) != Some("{"),
     Error(MalformedUnicodeEscape),
@@ -780,29 +795,29 @@ fn braced_unicode_escape(
   let #(digits_end, value) = hex_run(ctx, pos + 3)
   case value, ascii_at(ctx, digits_end) {
     Some(v), Some("}") if v > 0x10FFFF -> Error(CodePointOutOfRange)
-    Some(v), Some("}") -> Ok(#(digits_end + 1, v))
+    Some(v), Some("}") -> Ok(Escaped(digits_end + 1, v))
     _, _ -> Error(MalformedUnicodeEscape)
   }
 }
 
 // \uXXXX with pos at the backslash
-fn hex4_unicode_escape(ctx: PatternContext, pos: Int) -> Option(#(Int, Int)) {
+fn hex4_unicode_escape(ctx: PatternContext, pos: Int) -> Option(Escaped) {
   case ascii_at(ctx, pos), ascii_at(ctx, pos + 1), hex4_at(ctx, pos + 2) {
-    Some("\\"), Some("u"), Some(code) -> Some(#(pos + 6, code))
+    Some("\\"), Some("u"), Some(code) -> Some(Escaped(pos + 6, code))
     _, _, _ -> None
   }
 }
 
 fn join_trailing_surrogate(
-  lead_escape: #(Int, Int),
-  parse_trail: fn(Int) -> Option(#(Int, Int)),
-) -> #(Int, Int) {
-  let #(after_lead, lead) = lead_escape
+  lead_escape: Escaped,
+  parse_trail: fn(Int) -> Option(Escaped),
+) -> Escaped {
+  let Escaped(after_lead, lead) = lead_escape
   use <- bool.guard(!utf16.is_high(lead), lead_escape)
   case parse_trail(after_lead) {
-    Some(#(after_trail, trail)) ->
+    Some(Escaped(after_trail, trail)) ->
       case utf16.is_low(trail) {
-        True -> #(after_trail, utf16.combine(lead, trail))
+        True -> Escaped(after_trail, utf16.combine(lead, trail))
         False -> lead_escape
       }
     None -> lead_escape
@@ -1016,7 +1031,7 @@ fn parse_group_name_loop(
       let parse_trail = fn(at) {
         option.from_result(group_name_escape(ctx, at))
       }
-      let #(next, code) = join_trailing_surrogate(lead, parse_trail)
+      let Escaped(next, code) = join_trailing_surrogate(lead, parse_trail)
       group_name_char(ctx, pos, code, next, is_first, acc)
     }
     Some(CodePoint(value:, width:)), _ ->
@@ -1047,19 +1062,19 @@ fn group_name_char(
 fn group_name_escape(
   ctx: PatternContext,
   pos: Int,
-) -> Result(#(Int, Int), PatternError) {
+) -> Result(Escaped, PatternError) {
   let invalid = InvalidGroupName(pos)
   use <- bool.guard(ascii_at(ctx, pos + 1) != Some("u"), Error(invalid))
   case hex4_at(ctx, pos + 2) {
-    Some(code) -> Ok(#(pos + 6, code))
+    Some(code) -> Ok(Escaped(pos + 6, code))
     None -> braced_unicode_escape(ctx, pos) |> result.replace_error(invalid)
   }
 }
 
 type PropertyEscapeKind {
-  PropValid
-  PropString
-  PropInvalid
+  ValidProperty
+  StringsProperty
+  InvalidProperty
 }
 
 @external(erlang, "arc_regex_props_ffi", "classify_lone")
@@ -1093,9 +1108,9 @@ fn property_escape_length(
   case ascii_at(ctx, name_end) {
     Some("}") ->
       case classify_lone(name), allow_strings {
-        PropValid, _ | PropString, True -> Ok(name_end + 1 - pos)
-        PropString, False -> Error(PropertyOfStringsRequiresVFlag(pos))
-        PropInvalid, _ -> invalid
+        ValidProperty, _ | StringsProperty, True -> Ok(name_end + 1 - pos)
+        StringsProperty, False -> Error(PropertyOfStringsRequiresVFlag(pos))
+        InvalidProperty, _ -> invalid
       }
     Some("=") -> {
       let value_start = name_end + 1
@@ -1104,8 +1119,8 @@ fn property_escape_length(
         bytes.unsafe_slice(ctx.bytes, value_start, value_end - value_start)
       use <- bool.guard(ascii_at(ctx, value_end) != Some("}"), invalid)
       case classify_pair(name, value) {
-        PropValid -> Ok(value_end + 1 - pos)
-        PropString | PropInvalid -> invalid
+        ValidProperty -> Ok(value_end + 1 - pos)
+        StringsProperty | InvalidProperty -> invalid
       }
     }
     _ -> invalid

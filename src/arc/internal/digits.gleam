@@ -1,3 +1,4 @@
+import gleam/int
 import gleam/option.{type Option, None, Some}
 import gleam/string
 
@@ -155,20 +156,28 @@ pub fn is_binary_digit(ch: String) -> Bool {
 
 // exactly n digits, none if fewer
 pub fn take(s: String, n: Int) -> Option(#(Int, String)) {
-  take_digits_loop(s, n, 0)
+  take_loop(s, n, 0)
 }
 
-fn take_digits_loop(s: String, n: Int, acc: Int) -> Option(#(Int, String)) {
+fn take_loop(s: String, n: Int, acc: Int) -> Option(#(Int, String)) {
   case n {
     0 -> Some(#(acc, s))
     _ ->
       case string.pop_grapheme(s) {
         Ok(#(c, rest)) ->
           case digit_value(c) {
-            Some(d) -> take_digits_loop(rest, n - 1, acc * 10 + d)
+            Some(d) -> take_loop(rest, n - 1, acc * 10 + d)
             None -> None
           }
         Error(Nil) -> None
       }
   }
+}
+
+pub fn pad2(n: Int) -> String {
+  int.to_string(int.absolute_value(n)) |> string.pad_start(2, "0")
+}
+
+pub fn pad3(n: Int) -> String {
+  int.to_string(int.absolute_value(n)) |> string.pad_start(3, "0")
 }

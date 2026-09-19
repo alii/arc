@@ -242,7 +242,7 @@ fn with_import_hook(
   let #(Nil, eng) =
     engine.with_context(eng, fn(ctx) {
       let st =
-        import_hook.install_import_hook(
+        import_hook.install(
           ctx.agent,
           "/main.js",
           fn(raw, _referrer) { Ok(raw) },
@@ -350,13 +350,13 @@ pub fn define_namespace_creates_object_with_methods_test() {
   let eng =
     engine.new()
     |> engine.define_namespace("math2", [
-      #("square", 1, fn(ctx, args, _this) {
+      host.HostMethod("square", 1, fn(ctx, args, _this) {
         case kinds(args) {
           [KNum(JFloat(n)), ..] -> #(Ok(num(n *. n)), ctx)
           _ -> #(Ok(mk_undefined()), ctx)
         }
       }),
-      #("cube", 1, fn(ctx, args, _this) {
+      host.HostMethod("cube", 1, fn(ctx, args, _this) {
         case kinds(args) {
           [KNum(JFloat(n)), ..] -> #(Ok(num(n *. n *. n)), ctx)
           _ -> #(Ok(mk_undefined()), ctx)
@@ -373,7 +373,9 @@ pub fn define_namespace_has_tostringtag_test() {
   let eng =
     engine.new()
     |> engine.define_namespace("widgets", [
-      #("noop", 0, fn(ctx, _args, _this) { #(Ok(mk_undefined()), ctx) }),
+      host.HostMethod("noop", 0, fn(ctx, _args, _this) {
+        #(Ok(mk_undefined()), ctx)
+      }),
     ])
 
   let assert Ok(#(Returned(value:), _)) =

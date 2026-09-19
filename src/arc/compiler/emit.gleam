@@ -13,8 +13,8 @@ import arc/compiler/ast_util
 import arc/compiler/const_fold
 import arc/compiler/scope.{
   type BindingKind, type GlobalFallthrough, type ScopeId, type TopLevelLex,
-  CaptureBinding, CatchBinding, ConstBinding, FnNameBinding, LetBinding,
-  LexGlobal, LexLocal, ParamBinding, ToEvalEnv, ToGlobal, VarBinding,
+  CaptureBinding, CatchBinding, ConstBinding, FnNameBinding, GlobalLexical,
+  LetBinding, LocalLexical, ParamBinding, ToEvalEnv, ToGlobal, VarBinding,
   root_scope_id,
 }
 import arc/module/summary
@@ -105,7 +105,7 @@ type Emitter {
     // false while arguments only appears as f.apply(t, arguments)
     arguments_escape: Bool,
     code_kind: lexical.CodeKind,
-    // LexGlobal only for the repl program emitter
+    // GlobalLexical only for the repl program emitter
     top_lex: TopLevelLex,
     scope_tree: scope.ScopeTree,
     // scope-chain walks stop here, never reading the parent frame
@@ -240,7 +240,7 @@ pub fn module(
     True -> emit_module_using_top(e, stmts)
   })
 
-  let #(code, constants, children) = finish(e)
+  let Finished(code:, constants:, children:) = finish(e)
   Ok(EmitOutput(
     code:,
     constants:,
@@ -806,8 +806,8 @@ fn emit_top_level_body(
   }
   // §16.1.7 top-level let/const/class go to the global lexical record
   let e = case e.top_lex {
-    LexLocal -> e
-    LexGlobal ->
+    LocalLexical -> e
+    GlobalLexical ->
       list.fold(ast_util.lexically_declared_names(stmts), e, fn(e, lex) {
         let #(name, is_const) = lex
         emit_op(e, opcode.DeclareGlobalLex(name, is_const))
@@ -816,7 +816,7 @@ fn emit_top_level_body(
   use #(hoisted_funcs, e) <- result.try(collect_hoisted_funcs(e, stmts))
   let e = emit_hoisted_funcs(e, hoisted_funcs)
   use e <- result.try(emit_stmts_tail(e, stmts))
-  let #(code, constants, children) = finish(e)
+  let Finished(code:, constants:, children:) = finish(e)
   Ok(
     EmitOutput(
       code:,
@@ -870,7 +870,7 @@ fn new_emitter(tree: scope.ScopeTree, fn_id: ScopeId) -> Emitter {
 
 // fn_scope check required: child emitters inherit top_lex
 fn at_global_lex(e: Emitter) -> Bool {
-  e.top_lex == LexGlobal
+  e.top_lex == GlobalLexical
   && e.fn_scope == root_scope_id
   && !e.in_block
   && e.current_scope == e.fn_scope
@@ -1226,7 +1226,7 @@ fn emit_var_get(e: Emitter, name: String) -> Emitter {
   let e = track_arguments_ref(e, name)
   let #(crossed, fallback) = split_with_chain(resolve(e, name))
   use e <- emit_with_chain(e, crossed, opcode.IrWithGetVar(name, _))
-  emit_direct_get(e, fallback)
+  emit_target_get(e, fallback)
 }
 
 // §13.3.6.2 leaves [f, this]: this is the with object if resolved through one
@@ -1235,21 +1235,21 @@ fn emit_var_get_as_callee(e: Emitter, name: String) -> Emitter {
   let #(crossed, fallback) = split_with_chain(resolve(e, name))
   use e <- emit_with_chain(e, crossed, opcode.IrWithGetVarThis(name, _))
   let e = push_const(e, mk_undefined())
-  emit_direct_get(e, fallback)
+  emit_target_get(e, fallback)
 }
 
 fn emit_var_put(e: Emitter, name: String) -> Emitter {
   let e = track_arguments_ref(e, name)
   let #(crossed, fallback) = split_with_chain(resolve(e, name))
   use e <- emit_with_chain(e, crossed, opcode.IrWithPutVar(name, _))
-  emit_direct_put(e, fallback, name, after_read: False)
+  emit_target_put(e, fallback, name, after_read: False)
 }
 
 // init store, bypasses const/tdz checks, not an arguments reference
 fn emit_var_init(e: Emitter, name: String) -> Emitter {
-  let assert scope.Plain(direct) = resolve(e, name)
+  let assert scope.Plain(target) = resolve(e, name)
     as "emit: var init crossed a with-scope"
-  case direct {
+  case target {
     scope.Local(slot:, boxed: True, ..) ->
       Emitter(..e, initialized: set.insert(e.initialized, slot))
       |> emit_op(opcode.PutBoxed(slot))
@@ -1265,15 +1265,15 @@ fn emit_var_init(e: Emitter, name: String) -> Emitter {
 fn emit_var_typeof(e: Emitter, name: String) -> Emitter {
   let e = track_arguments_ref(e, name)
   let #(crossed, fallback) = split_with_chain(resolve(e, name))
-  let direct = fn(e: Emitter) {
+  let typeof_fallback = fn(e: Emitter) {
     case fallback {
-      scope.Local(..) -> emit_direct_get(e, fallback) |> emit_op(opcode.TypeOf)
+      scope.Local(..) -> emit_target_get(e, fallback) |> emit_op(opcode.TypeOf)
       scope.Global(name:) -> emit_op(e, opcode.TypeofGlobal(name))
       scope.EvalEnv(name:) -> emit_op(e, opcode.TypeofEvalVar(name))
     }
   }
   case crossed {
-    [] -> direct(e)
+    [] -> typeof_fallback(e)
     _ -> {
       let #(hit, e) = fresh_label(e)
       let #(end, e) = fresh_label(e)
@@ -1283,7 +1283,7 @@ fn emit_var_typeof(e: Emitter, name: String) -> Emitter {
           |> emit_slot_get(w)
           |> emit_ir(opcode.IrWithGetVar(name, hit))
         })
-      let e = direct(e)
+      let e = typeof_fallback(e)
       let e = emit_ir(e, IrJump(end))
       let e = emit_ir(e, IrLabel(hit))
       let e = emit_op(e, opcode.TypeOf)
@@ -1308,7 +1308,7 @@ fn emit_var_delete(e: Emitter, name: String) -> Emitter {
 type VarRef {
   VarRef(
     name: String,
-    fallback: scope.Direct,
+    fallback: scope.BindingTarget,
     base_slot: Option(Int),
     read: Bool,
   )
@@ -1342,12 +1342,12 @@ fn emit_var_ref_make(e: Emitter, name: String) -> #(VarRef, Emitter) {
 
 fn emit_var_ref_get(e: Emitter, ref: VarRef) -> Emitter {
   case ref.base_slot {
-    None -> emit_direct_get(e, ref.fallback)
+    None -> emit_target_get(e, ref.fallback)
     Some(slot) -> {
       let #(got, e) = fresh_label(e)
       let e = emit_op(e, opcode.GetLocal(slot))
       let e = emit_ir(e, opcode.IrWithGetRefValue(ref.name, got))
-      let e = emit_direct_get(e, ref.fallback)
+      let e = emit_target_get(e, ref.fallback)
       emit_ir(e, IrLabel(got))
     }
   }
@@ -1355,13 +1355,13 @@ fn emit_var_ref_get(e: Emitter, ref: VarRef) -> Emitter {
 
 fn emit_var_ref_put(e: Emitter, ref: VarRef) -> Emitter {
   case ref.base_slot {
-    None -> emit_direct_put(e, ref.fallback, ref.name, after_read: ref.read)
+    None -> emit_target_put(e, ref.fallback, ref.name, after_read: ref.read)
     Some(slot) -> {
       let e = Emitter(..e, free_ref_slots: [slot, ..e.free_ref_slots])
       let #(done, e) = fresh_label(e)
       let e = emit_op(e, opcode.GetLocal(slot))
       let e = emit_ir(e, opcode.IrWithPutRefValue(ref.name, done))
-      let e = emit_direct_put(e, ref.fallback, ref.name, after_read: ref.read)
+      let e = emit_target_put(e, ref.fallback, ref.name, after_read: ref.read)
       emit_ir(e, IrLabel(done))
     }
   }
@@ -1392,9 +1392,9 @@ fn with_identifier_read_write(
 
 // §14.7.4.2 per-iteration copy into a fresh box, no-op when unboxed
 fn emit_var_rebox(e: Emitter, name: String) -> Emitter {
-  let assert scope.Plain(direct) = resolve(e, name)
+  let assert scope.Plain(target) = resolve(e, name)
     as "emit: var rebox crossed a with-scope"
-  case direct {
+  case target {
     scope.Local(slot:, boxed: True, ..) ->
       e
       |> emit_op(opcode.GetBoxed(slot))
@@ -1410,14 +1410,14 @@ fn resolve(e: Emitter, name: String) -> scope.Resolution {
 
 fn split_with_chain(
   res: scope.Resolution,
-) -> #(List(scope.SlotRef), scope.Direct) {
+) -> #(List(scope.SlotRef), scope.BindingTarget) {
   case res {
     scope.WithChain(crossed_slots:, fallback:) -> #(crossed_slots, fallback)
-    scope.Plain(direct) -> #([], direct)
+    scope.Plain(target) -> #([], target)
   }
 }
 
-fn emit_direct_get(e: Emitter, res: scope.Direct) -> Emitter {
+fn emit_target_get(e: Emitter, res: scope.BindingTarget) -> Emitter {
   case res {
     scope.Local(slot:, boxed:, ..) ->
       emit_slot_get(e, scope.SlotRef(slot:, boxed:))
@@ -1427,9 +1427,9 @@ fn emit_direct_get(e: Emitter, res: scope.Direct) -> Emitter {
 }
 
 // after_read: a get already ran, skip the tdz check
-fn emit_direct_put(
+fn emit_target_put(
   e: Emitter,
-  res: scope.Direct,
+  res: scope.BindingTarget,
   name: String,
   after_read after_read: Bool,
 ) -> Emitter {
@@ -1563,7 +1563,7 @@ fn fresh_label(e: Emitter) -> #(LabelId, Emitter) {
 
 // anonymous slot past all named bindings, never captured
 fn fresh_slot(e: Emitter) -> #(Int, Emitter) {
-  let #(tree, slot) = scope.alloc_scratch(e.scope_tree, e.fn_scope)
+  let #(slot, tree) = scope.alloc_scratch(e.scope_tree, e.fn_scope)
   #(slot, Emitter(..e, scope_tree: tree))
 }
 
@@ -1882,10 +1882,10 @@ fn lexical_refs_with(
   ref: lexical.LexicalRef,
 ) -> lexical.LexicalRefs {
   case ref {
-    lexical.RefThis -> lexical.LexicalRefs(..refs, this: True)
-    lexical.RefActiveFunc -> lexical.LexicalRefs(..refs, active_func: True)
-    lexical.RefHomeObject -> lexical.LexicalRefs(..refs, home_object: True)
-    lexical.RefNewTarget -> lexical.LexicalRefs(..refs, new_target: True)
+    lexical.ThisRef -> lexical.LexicalRefs(..refs, this: True)
+    lexical.ActiveFuncRef -> lexical.LexicalRefs(..refs, active_func: True)
+    lexical.HomeObjectRef -> lexical.LexicalRefs(..refs, home_object: True)
+    lexical.NewTargetRef -> lexical.LexicalRefs(..refs, new_target: True)
   }
 }
 
@@ -1902,13 +1902,13 @@ fn emit_lexical_get(e: Emitter, ref: lexical.LexicalRef) -> Emitter {
 }
 
 fn emit_this_get(e: Emitter) -> Emitter {
-  emit_lexical_get(e, lexical.RefThis)
+  emit_lexical_get(e, lexical.ThisRef)
 }
 
 // §10.2.4 writing an initialized this is a ReferenceError
 fn emit_this_bind(e: Emitter) -> Emitter {
-  let e = mark_lexical_ref(e, lexical.RefThis)
-  case resolve_lexical(e, lexical.RefThis) {
+  let e = mark_lexical_ref(e, lexical.ThisRef)
+  case resolve_lexical(e, lexical.ThisRef) {
     Some(scope.SlotRef(slot:, boxed: True)) ->
       emit_op(e, opcode.PutBoxedCheckInit(slot))
     Some(scope.SlotRef(slot:, boxed: False)) ->
@@ -1921,7 +1921,7 @@ fn emit_this_bind(e: Emitter) -> Emitter {
 fn emit_super_base(e: Emitter) -> Emitter {
   e
   |> emit_this_get
-  |> emit_lexical_get(lexical.RefHomeObject)
+  |> emit_lexical_get(lexical.HomeObjectRef)
   |> emit_op(opcode.GetPrototypeOf)
 }
 
@@ -1942,7 +1942,7 @@ fn emit_super_method_ref(
     e
     |> emit_this_get
     |> emit_op(opcode.Dup)
-    |> emit_lexical_get(lexical.RefHomeObject)
+    |> emit_lexical_get(lexical.HomeObjectRef)
     |> emit_op(opcode.GetPrototypeOf)
   use e <- result.map(emit_super_key(e, property))
   emit_op(e, opcode.GetSuperValue)
@@ -1995,11 +1995,19 @@ fn emit_field_init_call(e: Emitter) -> Emitter {
   |> emit_op(opcode.Pop)
 }
 
-fn finish(e: Emitter) -> #(List(IrOp), List(JsVal), List(CompiledChild)) {
-  #(
-    list.reverse(e.code),
-    list.reverse(e.constants_list),
-    list.reverse(e.functions),
+type Finished {
+  Finished(
+    code: List(IrOp),
+    constants: List(JsVal),
+    children: List(CompiledChild),
+  )
+}
+
+fn finish(e: Emitter) -> Finished {
+  Finished(
+    code: list.reverse(e.code),
+    constants: list.reverse(e.constants_list),
+    children: list.reverse(e.functions),
   )
 }
 
@@ -2262,7 +2270,7 @@ fn collect_hoisted_funcs(
           Some(ast.NamedBinding(name, _)),
           params,
           body,
-          is_gen,
+          is_generator,
           is_async,
         ) -> {
           use #(child, e) <- result.map(compile_function_body(
@@ -2270,7 +2278,7 @@ fn collect_hoisted_funcs(
             Some(name),
             params,
             StmtsBody(body),
-            shape: FnDecl(is_gen:, is_async:),
+            shape: FnDecl(is_generator:, is_async:),
           ))
           let #(idx, e) = add_child_function(e, child)
           #([#(name, idx), ..funcs], e)
@@ -2313,7 +2321,7 @@ fn emit_body_param_copies(
   case scope.lookup(e.scope_tree, fn_scope_id, bname) {
     scope.Plain(scope.Local(..) as source) -> {
       let e = track_arguments_ref(e, bname)
-      emit_direct_get(e, source) |> emit_slot_put(scope.binding_ref(b))
+      emit_target_get(e, source) |> emit_slot_put(scope.binding_ref(b))
     }
     scope.Plain(scope.Global(_))
     | scope.Plain(scope.EvalEnv(_))
@@ -2322,12 +2330,12 @@ fn emit_body_param_copies(
 }
 
 type FunctionShape {
-  FnDecl(is_gen: Bool, is_async: Bool)
+  FnDecl(is_generator: Bool, is_async: Bool)
   // self name only when syntactically named
-  FnExpr(self_name: Option(String), is_gen: Bool, is_async: Bool)
+  FnExpr(self_name: Option(String), is_generator: Bool, is_async: Bool)
   Arrow(is_async: Bool)
-  Method(is_gen: Bool, is_async: Bool)
-  ClassCtor(derived: Bool, field_init: FieldInitMode)
+  Method(is_generator: Bool, is_async: Bool)
+  ClassCtor(is_derived: Bool, field_init: FieldInitMode)
   ClassInitFn
 }
 
@@ -2351,24 +2359,24 @@ fn traits_of(shape: FunctionShape) -> FnTraits {
       self_name: None,
     )
   case shape {
-    FnDecl(is_gen:, is_async:) ->
+    FnDecl(is_generator:, is_async:) ->
       FnTraits(
         ..plain,
-        is_generator: is_gen,
+        is_generator:,
         is_async:,
-        is_constructor: !is_gen && !is_async,
+        is_constructor: !is_generator && !is_async,
       )
-    FnExpr(self_name:, is_gen:, is_async:) ->
+    FnExpr(self_name:, is_generator:, is_async:) ->
       FnTraits(
         ..plain,
-        is_generator: is_gen,
+        is_generator:,
         is_async:,
-        is_constructor: !is_gen && !is_async,
+        is_constructor: !is_generator && !is_async,
         self_name:,
       )
     Arrow(is_async:) -> FnTraits(..plain, is_arrow: True, is_async:)
-    Method(is_gen:, is_async:) ->
-      FnTraits(..plain, is_generator: is_gen, is_async:)
+    Method(is_generator:, is_async:) ->
+      FnTraits(..plain, is_generator:, is_async:)
     ClassCtor(..) -> FnTraits(..plain, is_constructor: True)
     ClassInitFn -> plain
   }
@@ -2441,8 +2449,8 @@ fn compile_function_body(
     Arrow(..) -> parent.code_kind
     FnDecl(..) | FnExpr(..) -> lexical.FunctionCode
     Method(..) -> lexical.MethodCode
-    ClassCtor(derived: True, ..) -> lexical.DerivedCtorCode
-    ClassCtor(derived: False, ..) -> lexical.MethodCode
+    ClassCtor(is_derived: True, ..) -> lexical.DerivedCtorCode
+    ClassCtor(is_derived: False, ..) -> lexical.MethodCode
     ClassInitFn -> lexical.FieldInitCode
   }
   // only FieldInitAfterSuper is inherited by arrows; AtStart would re-run per call
@@ -2529,7 +2537,7 @@ fn compile_function_body(
   let e = push_const(e, mk_undefined())
   let e = emit_op(e, opcode.Return)
   let e = splice_arguments_setup(e, layout, pre_args_code)
-  let #(code, constants, children) = finish(e)
+  let Finished(code:, constants:, children:) = finish(e)
 
   let child =
     CompiledChild(
@@ -2578,7 +2586,7 @@ fn emit_self_name_binding(
     || annexb_shadow
   case shadowed {
     True -> e
-    False -> emit_lexical_get(e, lexical.RefActiveFunc) |> emit_var_init(fname)
+    False -> emit_lexical_get(e, lexical.ActiveFuncRef) |> emit_var_init(fname)
   }
 }
 
@@ -3200,16 +3208,17 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
 
     // leading static-key data props go into one NewObjectWith
     ast.ObjectExpression(_, properties) -> {
-      let #(keys, head, rest) = literal_head(properties, [], [], set.new())
-      case head {
+      let LiteralHead(keys:, members:, rest:) =
+        literal_head(properties, [], [], set.new())
+      case members {
         [] -> {
           let e = emit_op(e, opcode.NewObject)
           list.try_fold(properties, e, emit_object_property)
         }
         _ -> {
           use e <- result.try(
-            list.try_fold(head, e, fn(e, member) {
-              emit_named_expr(e, member.1, member.0)
+            list.try_fold(members, e, fn(e, member) {
+              emit_named_expr(e, member.value, member.name)
             }),
           )
           let e = emit_op(e, opcode.NewObjectWith(keys, list.length(keys)))
@@ -3231,13 +3240,13 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
         True -> emit_array_with_spread(e, elements)
       }
 
-    ast.FunctionExpression(_, name, params, body, is_gen, is_async) ->
+    ast.FunctionExpression(_, name, params, body, is_generator, is_async) ->
       emit_function_closure(
         e,
         ast.binding_name(name),
         params,
         body,
-        is_gen,
+        is_generator,
         is_async,
         bind_self: True,
       )
@@ -3248,7 +3257,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.ThisExpression(_) -> Ok(emit_this_get(e))
 
     ast.MetaProperty(_, ast.NewTarget) ->
-      Ok(emit_lexical_get(e, lexical.RefNewTarget))
+      Ok(emit_lexical_get(e, lexical.NewTargetRef))
 
     ast.MetaProperty(_, ast.ImportMeta) ->
       Error(UnsupportedFeature("import.meta"))
@@ -3495,12 +3504,12 @@ fn emit_assignment(
 
     _, ast.Identifier(name:, ..) ->
       case const_fold.compound_to_binop(op) {
-        Ok(bin_kind) -> {
+        Some(bin_kind) -> {
           use e <- with_identifier_read_write(e, name)
           use e <- result.map(emit_expr(e, right))
           emit_ir(e, IrBinOp(bin_kind))
         }
-        Error(Nil) -> Error(NonCompoundAssignOperator)
+        None -> Error(NonCompoundAssignOperator)
       }
 
     ast.Assign, ast.MemberExpression(_, ast.SuperExpression(_), property) -> {
@@ -3527,7 +3536,7 @@ fn emit_assignment(
     // keep-read so base/key evaluate once
     _, ast.MemberExpression(..) ->
       case const_fold.compound_to_binop(op) {
-        Ok(bin_kind) -> {
+        Some(bin_kind) -> {
           use #(put, e) <- result.try(emit_member_get_keep(
             e,
             classify_assign_target(target),
@@ -3535,7 +3544,7 @@ fn emit_assignment(
           use e <- result.map(emit_expr(e, right))
           emit_ir(e, IrBinOp(bin_kind)) |> put
         }
-        Error(Nil) -> Error(NonCompoundAssignOperator)
+        None -> Error(NonCompoundAssignOperator)
       }
 
     // result is rhs (§13.15.2 step 6), so dup before destructuring
@@ -3563,9 +3572,9 @@ fn emit_call(
     ast.SuperExpression(_) -> {
       let e =
         e
-        |> emit_lexical_get(lexical.RefActiveFunc)
+        |> emit_lexical_get(lexical.ActiveFuncRef)
         |> emit_op(opcode.GetPrototypeOf)
-        |> emit_lexical_get(lexical.RefNewTarget)
+        |> emit_lexical_get(lexical.NewTargetRef)
       use e <- result.map(case e.in_implicit_derived_ctor {
         // default derived ctor forwards args without observable iteration
         True ->
@@ -3716,7 +3725,7 @@ fn emit_template_literal(
   use #(_, e) <- result.map(
     list.try_fold(parts.tail, #(started, e), fn(acc, part) {
       let #(started, e) = acc
-      let #(expr, quasi) = part
+      let ast.TemplateSpan(expr, quasi) = part
       // ToString with string hint, not the + operator's default hint
       use e <- result.map(emit_expr(e, expr))
       let e = emit_op(e, opcode.ToStringVal)
@@ -3852,13 +3861,13 @@ fn emit_named_expr(
   case expr {
     // looks through parens: (function(){}) is still anonymous
     ast.ParenthesizedExpression(_, inner) -> emit_named_expr(e, inner, name)
-    ast.FunctionExpression(_, None, params, body, is_gen, is_async) ->
+    ast.FunctionExpression(_, None, params, body, is_generator, is_async) ->
       emit_function_closure(
         e,
         Some(name),
         params,
         body,
-        is_gen,
+        is_generator,
         is_async,
         bind_self: False,
       )
@@ -3884,14 +3893,13 @@ fn emit_method_value(
   value: ast.FunctionLiteral,
   name: Option(String),
 ) -> Result(Emitter, EmitError) {
-  let ast.FunctionLiteral(params:, body:, is_generator: is_gen, is_async:, ..) =
-    value
+  let ast.FunctionLiteral(params:, body:, is_generator:, is_async:, ..) = value
   compile_function_body(
     e,
     name,
     params,
     StmtsBody(body),
-    shape: Method(is_gen:, is_async:),
+    shape: Method(is_generator:, is_async:),
   )
   |> register_closure
 }
@@ -3901,7 +3909,7 @@ fn emit_function_closure(
   name: Option(String),
   params: List(ast.Pattern),
   body: List(ast.StmtWithLine),
-  is_gen is_gen: Bool,
+  is_generator is_generator: Bool,
   is_async is_async: Bool,
   // only syntactically named expressions get the self-name binding
   bind_self bind_self: Bool,
@@ -3915,7 +3923,7 @@ fn emit_function_closure(
     name,
     params,
     StmtsBody(body),
-    shape: FnExpr(self_name:, is_gen:, is_async:),
+    shape: FnExpr(self_name:, is_generator:, is_async:),
   )
   |> register_closure
 }
@@ -3943,18 +3951,26 @@ fn emit_arrow_closure(
   |> register_closure
 }
 
+type NamedMember {
+  NamedMember(name: String, value: ast.Expression)
+}
+
+type LiteralHead {
+  LiteralHead(
+    keys: List(key.PropertyKey),
+    members: List(NamedMember),
+    rest: List(ast.Property),
+  )
+}
+
 // leading distinct static-key data members, for NewObjectWith
 fn literal_head(
   properties: List(ast.Property),
   keys: List(key.PropertyKey),
-  head: List(#(String, ast.Expression)),
+  head: List(NamedMember),
   seen: Set(String),
-) -> #(
-  List(key.PropertyKey),
-  List(#(String, ast.Expression)),
-  List(ast.Property),
-) {
-  let done = #(keys, list.reverse(head), properties)
+) -> LiteralHead {
+  let done = LiteralHead(keys:, members: list.reverse(head), rest: properties)
   case properties {
     [ast.InitProperty(key: k, value:, ..), ..rest] ->
       case literal_key(k, seen) {
@@ -3962,7 +3978,7 @@ fn literal_head(
           literal_head(
             rest,
             [pk, ..keys],
-            [#(name, value), ..head],
+            [NamedMember(name:, value:), ..head],
             set.insert(seen, name),
           )
         None -> done
@@ -3972,12 +3988,12 @@ fn literal_head(
 }
 
 fn literal_key(
-  k: ast.PropertyKey,
+  k: ast.PropertyName,
   seen: Set(String),
 ) -> Option(#(String, key.PropertyKey)) {
   let name = case k {
-    ast.KeyIdentifier(name:, ..) -> Some(name)
-    ast.KeyString(value: name, ..) -> Some(name)
+    ast.IdentifierName(name:, ..) -> Some(name)
+    ast.StringName(value: name, ..) -> Some(name)
     _ -> None
   }
   use name <- option.then(name)
@@ -3996,12 +4012,12 @@ fn emit_object_property(
   case prop {
     // annex b: non-computed, non-shorthand __proto__: v sets the prototype
     ast.InitProperty(
-      key: ast.KeyIdentifier(name: "__proto__", ..),
+      key: ast.IdentifierName(name: "__proto__", ..),
       value:,
       shorthand: False,
     )
     | ast.InitProperty(
-        key: ast.KeyString(value: "__proto__", ..),
+        key: ast.StringName(value: "__proto__", ..),
         value:,
         shorthand: False,
       ) -> {
@@ -4009,8 +4025,8 @@ fn emit_object_property(
       emit_op(e, opcode.SetProto)
     }
 
-    ast.InitProperty(key: ast.KeyIdentifier(name:, ..), value:, ..)
-    | ast.InitProperty(key: ast.KeyString(value: name, ..), value:, ..) -> {
+    ast.InitProperty(key: ast.IdentifierName(name:, ..), value:, ..)
+    | ast.InitProperty(key: ast.StringName(value: name, ..), value:, ..) -> {
       use e <- result.map(emit_named_expr(e, value, name))
       emit_ir(e, IrDefineField(name))
     }
@@ -4019,8 +4035,8 @@ fn emit_object_property(
     ast.InitProperty(key:, value:, ..) ->
       emit_computed_init_property(e, emit_property_key(_, key), value)
 
-    ast.MethodProperty(key: ast.KeyIdentifier(name:, ..), value:)
-    | ast.MethodProperty(key: ast.KeyString(value: name, ..), value:) -> {
+    ast.MethodProperty(key: ast.IdentifierName(name:, ..), value:)
+    | ast.MethodProperty(key: ast.StringName(value: name, ..), value:) -> {
       use e <- result.map(emit_method_value(e, value, Some(name)))
       let e = emit_op(e, opcode.MakeMethod)
       emit_ir(e, IrDefineField(name))
@@ -4029,8 +4045,8 @@ fn emit_object_property(
     ast.MethodProperty(key:, value:) ->
       emit_computed_method_property(e, emit_property_key(_, key), value)
 
-    ast.AccessorProperty(key: ast.KeyIdentifier(name:, ..), value:, kind:)
-    | ast.AccessorProperty(key: ast.KeyString(value: name, ..), value:, kind:) -> {
+    ast.AccessorProperty(key: ast.IdentifierName(name:, ..), value:, kind:)
+    | ast.AccessorProperty(key: ast.StringName(value: name, ..), value:, kind:) -> {
       let #(prefix, accessor) = property_accessor(kind)
       use e <- result.map(emit_method_value(e, value, Some(prefix <> name)))
       emit_ir(e, IrDefineAccessor(name, accessor, enumerable: True))
@@ -4053,15 +4069,16 @@ fn emit_object_property(
 // no ToPropertyKey here, the vm does it; KeyPrivate unreachable
 fn emit_property_key(
   e: Emitter,
-  key: ast.PropertyKey,
+  key: ast.PropertyName,
 ) -> Result(Emitter, EmitError) {
   case key {
-    ast.KeyIdentifier(name:, ..) | ast.KeyPrivate(name:, ..) ->
+    ast.IdentifierName(name:, ..) | ast.PrivateName(name:, ..) ->
       Ok(push_const(e, mk_string(name)))
-    ast.KeyString(value: s, ..) -> Ok(push_const(e, mk_string(s)))
-    ast.KeyNumber(value: n, ..) -> Ok(push_const(e, const_fold.number_const(n)))
-    ast.KeyBigInt(value: i, ..) -> Ok(push_const(e, mk_bigint(i)))
-    ast.KeyComputed(expression:) -> emit_expr(e, expression)
+    ast.StringName(value: s, ..) -> Ok(push_const(e, mk_string(s)))
+    ast.NumberName(value: n, ..) ->
+      Ok(push_const(e, const_fold.number_const(n)))
+    ast.BigIntName(value: i, ..) -> Ok(push_const(e, mk_bigint(i)))
+    ast.ComputedName(expression:) -> emit_expr(e, expression)
   }
 }
 
@@ -4584,8 +4601,8 @@ fn emit_single_object_prop(
   excluded_key_count excluded_key_count: Int,
 ) -> Result(#(Int, Emitter), EmitError) {
   case prop {
-    ast.PatternProperty(key: ast.KeyIdentifier(name:, ..), value:, ..)
-    | ast.PatternProperty(key: ast.KeyString(value: name, ..), value:, ..) -> {
+    ast.PatternProperty(key: ast.IdentifierName(name:, ..), value:, ..)
+    | ast.PatternProperty(key: ast.StringName(value: name, ..), value:, ..) -> {
       // [src] -> dup -> GetField -> [val, src] -> bind -> [src]
       let e = emit_op(e, opcode.Dup)
       let e = emit_ir(e, IrGetField(name))
@@ -4676,7 +4693,7 @@ fn emit_destructuring_assign(
         e
         |> emit_this_get
         |> emit_op(opcode.Swap)
-        |> emit_lexical_get(lexical.RefHomeObject)
+        |> emit_lexical_get(lexical.HomeObjectRef)
         |> emit_op(opcode.GetPrototypeOf)
         |> emit_op(opcode.Swap)
       use e <- result.map(emit_super_key(e, property))
@@ -4861,7 +4878,7 @@ fn emit_single_object_assign_prop(
   excluded_key_count excluded_key_count: Int,
 ) -> Result(#(Int, Emitter), EmitError) {
   case prop {
-    ast.InitProperty(key: ast.KeyComputed(expression:), value:, ..) -> {
+    ast.InitProperty(key: ast.ComputedName(expression:), value:, ..) -> {
       let e = emit_op(e, opcode.Dup)
       use e <- result.try(emit_expr(e, expression))
       // ToPropertyKey fires before the target reference is evaluated
@@ -5037,15 +5054,15 @@ fn emit_unrot3(e: Emitter) -> Emitter {
   |> emit_op(opcode.Rot3)
 }
 
-// None for computed or bigint keys; numbers use js_format_number
-fn object_prop_key_name(key: ast.PropertyKey) -> Option(String) {
+// None for computed or bigint keys; numbers use js_format_float
+fn object_prop_key_name(key: ast.PropertyName) -> Option(String) {
   case key {
-    ast.KeyIdentifier(name:, ..) | ast.KeyPrivate(name:, ..) -> Some(name)
-    ast.KeyString(value: s, ..) -> Some(s)
-    ast.KeyNumber(value: ast.FiniteNumber(f), ..) ->
+    ast.IdentifierName(name:, ..) | ast.PrivateName(name:, ..) -> Some(name)
+    ast.StringName(value: s, ..) -> Some(s)
+    ast.NumberName(value: ast.FiniteNumber(f), ..) ->
       Some(rt_val.js_format_float(f))
-    ast.KeyNumber(value: ast.InfiniteNumber, ..) -> Some("Infinity")
-    ast.KeyBigInt(..) | ast.KeyComputed(..) -> None
+    ast.NumberName(value: ast.InfiniteNumber, ..) -> Some("Infinity")
+    ast.BigIntName(..) | ast.ComputedName(..) -> None
   }
 }
 
@@ -5349,8 +5366,8 @@ fn compile_class_body(
       field_inits(instance_fields),
     ),
   ))
-  let derived = option.is_some(super_class)
-  let field_init = case init_idx, derived {
+  let is_derived = option.is_some(super_class)
+  let field_init = case init_idx, is_derived {
     None, _ -> NoFieldInit
     Some(_), True -> FieldInitAfterSuper
     Some(_), False -> FieldInitAtStart
@@ -5360,13 +5377,13 @@ fn compile_class_body(
     name,
     ctor_params,
     StmtsBody(ctor_body),
-    shape: ClassCtor(derived:, field_init:),
+    shape: ClassCtor(is_derived:, field_init:),
   ))
   let e = Emitter(..e, in_implicit_derived_ctor: False)
   let child =
     CompiledChild(
       ..child,
-      is_derived_constructor: derived,
+      is_derived_constructor: is_derived,
       is_class_constructor: True,
     )
   let #(ctor_idx, e) = add_child_function(e, child)
@@ -5531,7 +5548,7 @@ fn emit_class_methods(
   use e <- with_method_target(e, on_prototype)
   case key {
     // instance private methods: closure stashed now, installed per instance by field init
-    ast.KeyPrivate(name:, ..) -> {
+    ast.PrivateName(name:, ..) -> {
       let display_name = method_display_name(kind, name)
       use e <- result.map(emit_method_value(e, fun, Some(display_name)))
       let e = emit_op(e, opcode.MakeMethod)
@@ -5543,7 +5560,7 @@ fn emit_class_methods(
           |> emit_op(private_define_op(kind))
       }
     }
-    ast.KeyIdentifier(name:, ..) | ast.KeyString(value: name, ..) -> {
+    ast.IdentifierName(name:, ..) | ast.StringName(value: name, ..) -> {
       let display_name = method_display_name(kind, name)
       use e <- result.map(emit_method_value(e, fun, Some(display_name)))
       case kind {
@@ -5556,7 +5573,7 @@ fn emit_class_methods(
       }
     }
     // function name left None: SetFunctionName from runtime keys not implemented
-    ast.KeyNumber(..) | ast.KeyBigInt(..) | ast.KeyComputed(..) -> {
+    ast.NumberName(..) | ast.BigIntName(..) | ast.ComputedName(..) -> {
       use e <- result.try(emit_class_element_key(e, key, body_index))
       use e <- result.map(emit_method_value(e, fun, None))
       case kind {
@@ -5580,17 +5597,17 @@ fn emit_class_methods(
 // computed keys read back from the stash const, never re-evaluated
 fn emit_class_element_key(
   e: Emitter,
-  key: ast.PropertyKey,
+  key: ast.PropertyName,
   body_index: Int,
 ) -> Result(Emitter, EmitError) {
   case key {
-    ast.KeyComputed(..) ->
+    ast.ComputedName(..) ->
       Ok(emit_var_get(e, ast_util.computed_field_const(body_index)))
-    ast.KeyIdentifier(..)
-    | ast.KeyString(..)
-    | ast.KeyNumber(..)
-    | ast.KeyBigInt(..)
-    | ast.KeyPrivate(..) -> emit_property_key(e, key)
+    ast.IdentifierName(..)
+    | ast.StringName(..)
+    | ast.NumberName(..)
+    | ast.BigIntName(..)
+    | ast.PrivateName(..) -> emit_property_key(e, key)
   }
 }
 
@@ -5613,17 +5630,17 @@ fn private_method_inits(
 ) -> List(FieldInit) {
   use m <- list.filter_map(methods)
   case m.key {
-    ast.KeyPrivate(name:, ..) ->
+    ast.PrivateName(name:, ..) ->
       Ok(PrivateMethodInit(
         name:,
         closure_const: ast_util.private_fn_const(m.kind, name),
         kind: m.kind,
       ))
-    ast.KeyIdentifier(..)
-    | ast.KeyString(..)
-    | ast.KeyNumber(..)
-    | ast.KeyBigInt(..)
-    | ast.KeyComputed(..) -> Error(Nil)
+    ast.IdentifierName(..)
+    | ast.StringName(..)
+    | ast.NumberName(..)
+    | ast.BigIntName(..)
+    | ast.ComputedName(..) -> Error(Nil)
   }
 }
 
@@ -5635,14 +5652,14 @@ fn field_inits(fields: List(ast_util.ClassFieldElement)) -> List(FieldInit) {
 fn field_init_of(field: ast_util.ClassFieldElement) -> FieldInit {
   let ast_util.ClassFieldElement(body_index:, key:, value:) = field
   let init =
-    option.unwrap(value, ast.UndefinedExpression(ast.property_key_span(key)))
+    option.unwrap(value, ast.UndefinedExpression(ast.property_name_span(key)))
   case key {
-    ast.KeyPrivate(name:, ..) -> PrivateFieldInit(name:, init:)
-    ast.KeyIdentifier(name:, ..) | ast.KeyString(value: name, ..) ->
+    ast.PrivateName(name:, ..) -> PrivateFieldInit(name:, init:)
+    ast.IdentifierName(name:, ..) | ast.StringName(value: name, ..) ->
       NamedFieldInit(name:, init:)
-    ast.KeyNumber(value: n, ..) -> NumericFieldInit(value: n, init:)
-    ast.KeyBigInt(value: i, ..) -> BigIntFieldInit(value: i, init:)
-    ast.KeyComputed(..) ->
+    ast.NumberName(value: n, ..) -> NumericFieldInit(value: n, init:)
+    ast.BigIntName(value: i, ..) -> BigIntFieldInit(value: i, init:)
+    ast.ComputedName(..) ->
       ComputedFieldInit(
         key_const: ast_util.computed_field_const(body_index),
         init:,

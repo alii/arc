@@ -21,7 +21,7 @@ fn handle(v: JsVal) -> Handle {
 }
 
 fn promise_state(st: Agent, promise: JsVal) -> PromiseState {
-  rt_async.promise_data(st, handle(promise)).1
+  rt_async.promise_data(st, handle(promise)).state
 }
 
 fn recorder(ctx: host.Context(Nil)) -> #(JsVal, host.Context(Nil)) {

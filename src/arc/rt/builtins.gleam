@@ -136,7 +136,7 @@ pub fn init_realm(st: Agent) -> #(Realm, Agent) {
   let #(#(array_buffer, shared_array_buffer), st) =
     b_array_buffer.init(st, object_proto, fn_proto)
   let #(data_view, st) = b_data_view.init(st, object_proto, fn_proto)
-  let #(#(_ta_base, typed_arrays), st) =
+  let #(#(_typed_array_base, typed_arrays), st) =
     typed_array.init(st, object_proto, fn_proto, array)
   let #(gfns, st) =
     global_fns.init(
@@ -582,7 +582,7 @@ pub fn dispatch_native(
         types.AsyncFromSyncReturn -> async_from_sync.return(st, this, args)
         types.AsyncFromSyncThrow -> async_from_sync.throw(st, this, args)
         types.AsyncFromSyncUnwrap(done:) ->
-          async_from_sync.unwrap(st, args, done)
+          async_from_sync.unwrap(st, args, done:)
         types.AsyncFromSyncClose(sync_iter:) ->
           async_from_sync.close(st, args, sync_iter)
         _ -> b_iterator.dispatch(st, n, this, args)
@@ -600,7 +600,7 @@ pub fn dispatch_native(
     DataViewN(n) -> b_data_view.dispatch(st, n, this, args)
     TypedArrayN(n) -> typed_array.dispatch(st, n, this, args)
     AtomicsN(n) -> b_atomics.dispatch(st, n, this, args)
-    Test262N(n) -> rt_realm.dispatch_262(st, n, this, args, create_realm)
+    Test262N(n) -> rt_realm.dispatch_test262(st, n, this, args, create_realm)
     IntlN(n) -> b_intl.dispatch(st, n, this, args)
     TemporalN(n) -> b_temporal.dispatch(st, n, this, args)
   }
@@ -617,12 +617,12 @@ pub fn dispatch_native_construct(
     ObjectN(n) -> b_object.dispatch_construct(st, n, args, new_target)
     ErrorN(n) -> {
       let #(v, st) = b_error.dispatch(st, n, mk_undefined(), args, new_target)
-      require_handle(st, v)
+      #(require_handle(v), st)
     }
     DomExceptionN(n) -> {
       let #(v, st) =
         b_dom_exception.dispatch(st, n, mk_undefined(), args, new_target)
-      require_handle(st, v)
+      #(require_handle(v), st)
     }
     HostFn(id:) -> construct_host_fn(st, id, args, new_target)
     MapN(n) -> b_map.dispatch_construct(st, n, args, new_target)
@@ -651,7 +651,7 @@ pub fn dispatch_native_construct(
           r.array.prototype
         })
       let #(v, st) = b_array.dispatch(st, n, mk_undefined(), args)
-      let #(h, st) = require_handle(st, v)
+      let h = require_handle(v)
       let #(_res, st) = rt_obj.set_prototype_of(st, h, Some(proto))
       #(h, st)
     }
@@ -695,11 +695,11 @@ pub fn dispatch_native_construct(
     BigIntN(_) -> rt_val.throw_type_error(st, "BigInt is not a constructor")
     FunctionN(n) -> {
       let #(v, st) = b_function.dispatch_construct(st, n, args, new_target)
-      require_handle(st, v)
+      #(require_handle(v), st)
     }
     GeneratorN(n) -> {
       let #(v, st) = generator.dispatch_construct(st, n, args, new_target)
-      require_handle(st, v)
+      #(require_handle(v), st)
     }
     StringN(_) | NumberN(_) | BooleanN(_) | SymbolN(_) ->
       rt_val.throw_type_error(st, "not a constructor")
@@ -720,9 +720,9 @@ pub fn dispatch_native_construct(
   }
 }
 
-fn require_handle(st: Agent, v: JsVal) -> #(Handle, Agent) {
+fn require_handle(v: JsVal) -> Handle {
   case classify(v) {
-    KHandle(h) -> #(h, st)
+    KHandle(h) -> h
     _ ->
       panic as "dispatch_native_construct: native constructor returned non-object"
   }

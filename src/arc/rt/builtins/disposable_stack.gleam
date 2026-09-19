@@ -245,7 +245,7 @@ fn read_stack(
   }
 }
 
-fn stack_type_name(async: Bool) -> String {
+fn stack_type_name(async async: Bool) -> String {
   case async {
     True -> "AsyncDisposableStack"
     False -> "DisposableStack"
@@ -265,7 +265,7 @@ fn require_stack(
       rt_val.throw_type_error(
         st,
         "Method "
-          <> stack_type_name(async)
+          <> stack_type_name(async:)
           <> ".prototype."
           <> method
           <> " called on incompatible receiver",
@@ -539,14 +539,14 @@ fn require_pending(
     Disposed ->
       rt_val.throw_reference_error(
         st,
-        stack_type_name(async) <> " already disposed",
+        stack_type_name(async:) <> " already disposed",
       )
     Pending(capability:) -> cont(capability)
   }
 }
 
 fn dispose_async(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  let #(#(promise_h, resolve_h, reject_h), st) =
+  let #(rt_async.PromiseCapability(promise_h, resolve_h, reject_h), st) =
     rt_async.new_promise_capability(st)
   let promise = mk_object(promise_h)
   let resolve = mk_object(resolve_h)
@@ -558,7 +558,7 @@ fn dispose_async(st: Agent, this: JsVal) -> #(JsVal, Agent) {
           st,
           TypeError,
           "Method "
-            <> stack_type_name(True)
+            <> stack_type_name(async: True)
             <> ".prototype.disposeAsync called on incompatible receiver",
         )
       let st = settle_capability(st, reject, err)

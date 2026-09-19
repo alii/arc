@@ -7,8 +7,6 @@ has_flag(<<C, _/binary>>, <<C>>) -> true;
 has_flag(<<_, R/binary>>, F) -> has_flag(R, F);
 has_flag(<<>>, _) -> false.
 
--define(CS, arc_regex_charset).
-
 %% inclass: false | true | atom (prev item can start a range)
 -define(IN_CLASS(X), (X =:= true orelse X =:= atom)).
 
@@ -173,7 +171,7 @@ tr(<<$\\, $W, R/binary>>, false, MS, {Mode, _, _} = Env, Acc) ->
 tr(<<$\\, $s, R/binary>>, IC, MS, Env, Acc) when ?IN_CLASS(IC) ->
     splice_in_class(?JSS_CHARS, R, MS, Env, Acc);
 tr(<<$\\, $S, R/binary>>, IC, MS, {_, CI, _} = Env, Acc) when ?IN_CLASS(IC) ->
-    splice_in_class(?CS:emit_complement(?CS:vspace(), CI), R, MS, Env, Acc);
+    splice_in_class(arc_regex_charset:emit_complement(arc_regex_charset:vspace(), CI), R, MS, Env, Acc);
 tr(<<$\\, $w, R/binary>>, IC, MS, {Mode, _, _} = Env, Acc) when ?IN_CLASS(IC) ->
     splice_in_class(word_items(Mode), R, MS, Env, Acc);
 tr(<<$\\, $W, R/binary>>, IC, MS, {Mode, CI, _} = Env, Acc) when ?IN_CLASS(IC) ->
@@ -223,10 +221,10 @@ tr(<<$[, R/binary>>, false, MS, {v, CI, _} = Env, Acc) ->
     case arc_regex_vclass:parse(R, CI) of
         {ok, Ranges0, Strings, R2} ->
             Ranges = case CI of
-                         true -> ?CS:vclose(Ranges0);
+                         true -> arc_regex_charset:vclose(Ranges0);
                          false -> Ranges0
                      end,
-            tr(R2, false, MS, Env, [?CS:emit_vclass(Ranges, Strings) | Acc]);
+            tr(R2, false, MS, Env, [arc_regex_charset:emit_vclass(Ranges, Strings) | Acc]);
         error ->
             open_class(R, MS, Env, Acc)
     end;
@@ -390,7 +388,7 @@ word_items(none) -> "\\w";
 word_items(_UOrV) -> ?WORD_BODY.
 
 nword_items(none, _CI) -> "\\W";
-nword_items(_UOrV, CI) -> ?CS:emit_complement(?CS:vword(), CI).
+nword_items(_UOrV, CI) -> arc_regex_charset:emit_complement(arc_regex_charset:vword(), CI).
 
 take_prop(Bin) -> take_prop(Bin, 0, Bin).
 

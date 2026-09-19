@@ -1,5 +1,6 @@
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
+import arc/rt/limits
 import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type Handle, type JsNum, type JsVal, type MathNative, JFloat, JInt,
@@ -112,52 +113,52 @@ fn dispatch_general(
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
   case native {
-    MathPow -> math_pow(args, st)
-    MathAbs -> math_abs(args, st)
-    MathFloor -> rounding_passthrough(args, st, ffi_math_floor)
-    MathCeil -> rounding_passthrough(args, st, ffi_math_ceil)
-    MathRound -> rounding_passthrough(args, st, js_round)
-    MathTrunc -> rounding_passthrough(args, st, js_trunc)
-    MathSqrt -> math_sqrt(args, st)
-    MathMax -> math_max(args, st)
-    MathMin -> math_min(args, st)
-    MathLog -> log_domain(args, st, ffi_math_log)
-    MathSin -> finite_or_nan(args, st, ffi_math_sin)
-    MathCos -> finite_or_nan(args, st, ffi_math_cos)
-    MathTan -> finite_or_nan(args, st, ffi_math_tan)
-    MathAsin -> domain_unit(args, st, ffi_math_asin)
-    MathAcos -> domain_unit(args, st, ffi_math_acos)
-    MathAtan -> math_atan(args, st)
-    MathAtan2 -> math_atan2(args, st)
-    MathExp -> math_exp(args, st)
-    MathLog2 -> log_domain(args, st, ffi_math_log2)
-    MathLog10 -> log_domain(args, st, ffi_math_log10)
+    MathPow -> math_pow(st, args)
+    MathAbs -> math_abs(st, args)
+    MathFloor -> rounding_passthrough(st, args, float_floor)
+    MathCeil -> rounding_passthrough(st, args, float_ceil)
+    MathRound -> rounding_passthrough(st, args, js_round)
+    MathTrunc -> rounding_passthrough(st, args, js_trunc)
+    MathSqrt -> math_sqrt(st, args)
+    MathMax -> math_max(st, args)
+    MathMin -> math_min(st, args)
+    MathLog -> log_domain(st, args, float_log)
+    MathSin -> finite_or_nan(st, args, float_sin)
+    MathCos -> finite_or_nan(st, args, float_cos)
+    MathTan -> finite_or_nan(st, args, float_tan)
+    MathAsin -> domain_unit(st, args, float_asin)
+    MathAcos -> domain_unit(st, args, float_acos)
+    MathAtan -> math_atan(st, args)
+    MathAtan2 -> math_atan2(st, args)
+    MathExp -> math_exp(st, args)
+    MathLog2 -> log_domain(st, args, float_log2)
+    MathLog10 -> log_domain(st, args, float_log10)
     MathRandom -> math_random(st)
-    MathSign -> math_sign(args, st)
-    MathCbrt -> math_cbrt(args, st)
-    MathHypot -> math_hypot(args, st)
-    MathFround -> math_fround(args, st)
-    MathClz32 -> math_clz32(args, st)
-    MathImul -> math_imul(args, st)
-    MathExpm1 -> math_expm1(args, st)
-    MathLog1p -> math_log1p(args, st)
-    MathSinh -> math_sinh(args, st)
-    MathCosh -> math_cosh(args, st)
-    MathTanh -> math_tanh(args, st)
-    MathAsinh -> neg_zero_preserving(args, st, ffi_math_asinh)
-    MathAcosh -> math_acosh(args, st)
-    MathAtanh -> math_atanh(args, st)
+    MathSign -> math_sign(st, args)
+    MathCbrt -> math_cbrt(st, args)
+    MathHypot -> math_hypot(st, args)
+    MathFround -> math_fround(st, args)
+    MathClz32 -> math_clz32(st, args)
+    MathImul -> math_imul(st, args)
+    MathExpm1 -> math_expm1(st, args)
+    MathLog1p -> math_log1p(st, args)
+    MathSinh -> math_sinh(st, args)
+    MathCosh -> math_cosh(st, args)
+    MathTanh -> math_tanh(st, args)
+    MathAsinh -> neg_zero_preserving(st, args, float_asinh)
+    MathAcosh -> math_acosh(st, args)
+    MathAtanh -> math_atanh(st, args)
   }
 }
 
-fn math_pow(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use a, b <- math_binary(args, st)
+fn math_pow(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use a, b <- math_binary(st, args)
   num_exp(a, b)
 }
 
 // float.absolute_value gets -0.0 wrong
-fn math_abs(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+fn math_abs(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use x <- math_unary(st, args)
   case x {
     JInt(n) if n < 0 -> JInt(0 - n)
     JInt(_) -> x
@@ -171,14 +172,14 @@ fn math_abs(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-fn math_sqrt(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+fn math_sqrt(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use x <- math_unary(st, args)
   case x {
     JInt(_) | JFloat(_) -> {
       let n = finite_to_float(x)
       case n <. 0.0 {
         True -> JNan
-        False -> JFloat(ffi_math_sqrt(n))
+        False -> JFloat(float_sqrt(n))
       }
     }
     JNan | JNegInf -> JNan
@@ -191,17 +192,17 @@ type Extremum {
   Min
 }
 
-fn math_max(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  math_extremum(args, st, Max)
+fn math_max(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  math_extremum(st, args, Max)
 }
 
-fn math_min(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  math_extremum(args, st, Min)
+fn math_min(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  math_extremum(st, args, Min)
 }
 
 fn math_extremum(
-  args: List(JsVal),
   st: Agent,
+  args: List(JsVal),
   which: Extremum,
 ) -> #(JsVal, Agent) {
   let #(seed, dominant, keep_acc) = case which {
@@ -213,7 +214,7 @@ fn math_extremum(
     })
   }
   // tonumber every arg before folding, observable
-  let #(nums, st) = coerce_args(args, st)
+  let #(nums, st) = coerce_args(st, args)
   let result =
     list.fold(nums, seed, fn(acc, num) {
       case acc, num {
@@ -249,26 +250,26 @@ fn math_extremum(
   #(mk_number(result), st)
 }
 
-fn math_atan(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+fn math_atan(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use x <- math_unary(st, args)
   case x {
-    JInt(_) | JFloat(_) -> JFloat(ffi_math_atan(finite_to_float(x)))
+    JInt(_) | JFloat(_) -> JFloat(float_atan(finite_to_float(x)))
     JNan -> JNan
-    JPosInf -> JFloat(ffi_math_atan2(1.0, 0.0))
-    JNegInf -> JFloat(ffi_math_atan2(-1.0, 0.0))
+    JPosInf -> JFloat(float_atan2(1.0, 0.0))
+    JNegInf -> JFloat(float_atan2(-1.0, 0.0))
   }
 }
 
-fn math_atan2(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use y, x <- math_binary(args, st)
+fn math_atan2(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use y, x <- math_binary(st, args)
   case y, x {
     JNan, _ | _, JNan -> JNan
-    JPosInf, JPosInf -> JFloat(ffi_math_atan2(1.0, 1.0))
-    JPosInf, JNegInf -> JFloat(ffi_math_atan2(1.0, -1.0))
-    JNegInf, JPosInf -> JFloat(ffi_math_atan2(-1.0, 1.0))
-    JNegInf, JNegInf -> JFloat(ffi_math_atan2(-1.0, -1.0))
-    JPosInf, _ -> JFloat(ffi_math_atan2(1.0, 0.0))
-    JNegInf, _ -> JFloat(ffi_math_atan2(-1.0, 0.0))
+    JPosInf, JPosInf -> JFloat(float_atan2(1.0, 1.0))
+    JPosInf, JNegInf -> JFloat(float_atan2(1.0, -1.0))
+    JNegInf, JPosInf -> JFloat(float_atan2(-1.0, 1.0))
+    JNegInf, JNegInf -> JFloat(float_atan2(-1.0, -1.0))
+    JPosInf, _ -> JFloat(float_atan2(1.0, 0.0))
+    JNegInf, _ -> JFloat(float_atan2(-1.0, 0.0))
     // sign follows y and -0 counts as negative
     _, JPosInf ->
       case is_negative_float(finite_to_float(y)) {
@@ -280,12 +281,12 @@ fn math_atan2(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
         True -> JFloat(-3.141592653589793)
         False -> JFloat(3.141592653589793)
       }
-    _, _ -> JFloat(ffi_math_atan2(finite_to_float(y), finite_to_float(x)))
+    _, _ -> JFloat(float_atan2(finite_to_float(y), finite_to_float(x)))
   }
 }
 
-fn math_exp(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+fn math_exp(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use x <- math_unary(st, args)
   case x {
     JInt(_) | JFloat(_) -> exp_total(finite_to_float(x))
     JNan -> JNan
@@ -298,8 +299,8 @@ fn math_random(st: Agent) -> #(JsVal, Agent) {
   #(mk_number(JFloat(st.hooks.random())), st)
 }
 
-fn math_sign(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+fn math_sign(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use x <- math_unary(st, args)
   case x {
     JInt(n) if n > 0 -> JInt(1)
     JInt(n) if n < 0 -> JInt(-1)
@@ -313,8 +314,8 @@ fn math_sign(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-fn math_cbrt(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+fn math_cbrt(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use x <- math_unary(st, args)
   case x {
     JInt(_) | JFloat(_) -> {
       let n = finite_to_float(x)
@@ -329,8 +330,8 @@ fn math_cbrt(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-fn math_hypot(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  let #(nums, st) = coerce_args(args, st)
+fn math_hypot(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  let #(nums, st) = coerce_args(st, args)
   let #(inf, nan, finites) =
     list.fold(nums, #(False, False, []), fn(acc, n) {
       let #(i, na, vs) = acc
@@ -348,22 +349,22 @@ fn math_hypot(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   #(mk_number(result), st)
 }
 
-fn math_clz32(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+fn math_clz32(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use x <- math_unary(st, args)
   let n = rt_val.num_to_uint32(x)
   JInt(count_leading_zeros_32(n))
 }
 
-fn math_imul(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use a, b <- math_binary(args, st)
+fn math_imul(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use a, b <- math_binary(st, args)
   let a32 = rt_val.num_to_int32(a)
   let b32 = rt_val.num_to_int32(b)
   // stay in ints, a float would drop low bits
   JInt(rt_val.wrap_int32(a32 * b32))
 }
 
-fn math_expm1(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+fn math_expm1(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use x <- math_unary(st, args)
   case x {
     JInt(_) | JFloat(_) -> {
       let n = finite_to_float(x)
@@ -384,7 +385,7 @@ fn expm1_finite(n: Float) -> JsNum {
       case um1 == -1.0 {
         True -> JFloat(-1.0)
         // divide first or expm1(708) overflows
-        False -> JFloat(um1 *. { n /. ffi_math_log(u) })
+        False -> JFloat(um1 *. { n /. float_log(u) })
       }
     }
     JPosInf -> JPosInf
@@ -392,8 +393,8 @@ fn expm1_finite(n: Float) -> JsNum {
   }
 }
 
-fn math_log1p(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+fn math_log1p(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use x <- math_unary(st, args)
   case x {
     JNan | JNegInf -> JNan
     JPosInf -> JPosInf
@@ -412,20 +413,20 @@ fn log1p_finite(n: Float) -> JsNum {
   let u = 1.0 +. n
   case u == 1.0 {
     True -> JFloat(n)
-    False -> JFloat(ffi_math_log(u) *. { n /. { u -. 1.0 } })
+    False -> JFloat(float_log(u) *. { n /. { u -. 1.0 } })
   }
 }
 
-fn math_fround(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+fn math_fround(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use x <- math_unary(st, args)
   case x {
     JInt(_) | JFloat(_) -> to_float32(finite_to_float(x))
     other -> other
   }
 }
 
-fn math_sinh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+fn math_sinh(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use x <- math_unary(st, args)
   case x {
     JInt(_) | JFloat(_) -> {
       let n = finite_to_float(x)
@@ -435,8 +436,8 @@ fn math_sinh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-fn math_cosh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+fn math_cosh(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use x <- math_unary(st, args)
   case x {
     JInt(_) | JFloat(_) -> cosh_total(finite_to_float(x))
     JNan -> JNan
@@ -444,12 +445,12 @@ fn math_cosh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-fn math_tanh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+fn math_tanh(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use x <- math_unary(st, args)
   case x {
     JInt(_) | JFloat(_) -> {
       let n = finite_to_float(x)
-      keep_neg_zero(n, JFloat(ffi_math_tanh(n)))
+      keep_neg_zero(n, JFloat(float_tanh(n)))
     }
     JNan -> JNan
     JPosInf -> JFloat(1.0)
@@ -457,14 +458,14 @@ fn math_tanh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-fn math_acosh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+fn math_acosh(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use x <- math_unary(st, args)
   case x {
     JInt(_) | JFloat(_) -> {
       let n = finite_to_float(x)
       case n <. 1.0 {
         True -> JNan
-        False -> JFloat(ffi_math_acosh(n))
+        False -> JFloat(float_acosh(n))
       }
     }
     JNan | JNegInf -> JNan
@@ -472,8 +473,8 @@ fn math_acosh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
   }
 }
 
-fn math_atanh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+fn math_atanh(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  use x <- math_unary(st, args)
   case x {
     JInt(_) | JFloat(_) -> {
       let n = finite_to_float(x)
@@ -481,7 +482,7 @@ fn math_atanh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
         True, _, _ -> JNan
         _, True, _ -> JNegInf
         _, _, True -> JPosInf
-        _, _, _ -> keep_neg_zero(n, JFloat(ffi_math_atanh(n)))
+        _, _, _ -> keep_neg_zero(n, JFloat(float_atanh(n)))
       }
     }
     _ -> JNan
@@ -489,8 +490,8 @@ fn math_atanh(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
 }
 
 fn math_unary(
-  args: List(JsVal),
   st: Agent,
+  args: List(JsVal),
   apply: fn(JsNum) -> JsNum,
 ) -> #(JsVal, Agent) {
   let #(x, st) = rt_val.to_number(st, helpers.first_arg_or_undefined(args))
@@ -498,8 +499,8 @@ fn math_unary(
 }
 
 fn math_binary(
-  args: List(JsVal),
   st: Agent,
+  args: List(JsVal),
   apply: fn(JsNum, JsNum) -> JsNum,
 ) -> #(JsVal, Agent) {
   let #(a_val, b_val) = helpers.two_args_or_undefined(args)
@@ -508,20 +509,20 @@ fn math_binary(
   #(mk_number(apply(a, b)), st)
 }
 
-fn coerce_args(args: List(JsVal), st: Agent) -> #(List(JsNum), Agent) {
-  coerce_args_loop(args, st, [])
+fn coerce_args(st: Agent, args: List(JsVal)) -> #(List(JsNum), Agent) {
+  coerce_args_loop(st, args, [])
 }
 
 fn coerce_args_loop(
-  args: List(JsVal),
   st: Agent,
+  args: List(JsVal),
   acc: List(JsNum),
 ) -> #(List(JsNum), Agent) {
   case args {
     [] -> #(list.reverse(acc), st)
     [arg, ..rest] -> {
       let #(n, st) = rt_val.to_number(st, arg)
-      coerce_args_loop(rest, st, [n, ..acc])
+      coerce_args_loop(st, rest, [n, ..acc])
     }
   }
 }
@@ -547,11 +548,11 @@ fn keep_neg_zero(n: Float, result: JsNum) -> JsNum {
 }
 
 fn neg_zero_preserving(
-  args: List(JsVal),
   st: Agent,
+  args: List(JsVal),
   f: fn(Float) -> Float,
 ) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+  use x <- math_unary(st, args)
   case x {
     JInt(_) | JFloat(_) -> {
       let n = finite_to_float(x)
@@ -562,11 +563,11 @@ fn neg_zero_preserving(
 }
 
 fn rounding_passthrough(
-  args: List(JsVal),
   st: Agent,
+  args: List(JsVal),
   f: fn(Float) -> Float,
 ) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+  use x <- math_unary(st, args)
   case x {
     JInt(_) -> x
     JFloat(n) -> {
@@ -575,8 +576,8 @@ fn rounding_passthrough(
       case
         int.to_float(i) == r
         && !rt_val.is_neg_zero(r)
-        && i >= 0 - rt_val.max_safe_integer
-        && i <= rt_val.max_safe_integer
+        && i >= 0 - limits.max_safe_integer
+        && i <= limits.max_safe_integer
       {
         True -> JInt(i)
         False -> JFloat(r)
@@ -587,11 +588,11 @@ fn rounding_passthrough(
 }
 
 fn finite_or_nan(
-  args: List(JsVal),
   st: Agent,
+  args: List(JsVal),
   f: fn(Float) -> Float,
 ) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+  use x <- math_unary(st, args)
   case x {
     JInt(_) | JFloat(_) -> JFloat(f(finite_to_float(x)))
     _ -> JNan
@@ -599,11 +600,11 @@ fn finite_or_nan(
 }
 
 fn log_domain(
-  args: List(JsVal),
   st: Agent,
+  args: List(JsVal),
   f: fn(Float) -> Float,
 ) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+  use x <- math_unary(st, args)
   case x {
     JNan | JNegInf -> JNan
     JPosInf -> JPosInf
@@ -620,11 +621,11 @@ fn log_domain(
 }
 
 fn domain_unit(
-  args: List(JsVal),
   st: Agent,
+  args: List(JsVal),
   f: fn(Float) -> Float,
 ) -> #(JsVal, Agent) {
-  use x <- math_unary(args, st)
+  use x <- math_unary(st, args)
   case x {
     JInt(_) | JFloat(_) -> {
       let n = finite_to_float(x)
@@ -638,7 +639,7 @@ fn domain_unit(
 }
 
 fn js_round(n: Float) -> Float {
-  let floored = ffi_math_floor(n)
+  let floored = float_floor(n)
   let rounded = case n -. floored >=. 0.5 {
     True -> floored +. 1.0
     False -> floored
@@ -761,52 +762,52 @@ fn hypot_total(values: List(Float)) -> JsNum
 fn to_float32(x: Float) -> JsNum
 
 @external(erlang, "math", "sqrt")
-fn ffi_math_sqrt(x: Float) -> Float
+fn float_sqrt(x: Float) -> Float
 
 @external(erlang, "math", "log")
-fn ffi_math_log(x: Float) -> Float
+fn float_log(x: Float) -> Float
 
 @external(erlang, "math", "sin")
-fn ffi_math_sin(x: Float) -> Float
+fn float_sin(x: Float) -> Float
 
 @external(erlang, "math", "cos")
-fn ffi_math_cos(x: Float) -> Float
+fn float_cos(x: Float) -> Float
 
 @external(erlang, "math", "floor")
-fn ffi_math_floor(x: Float) -> Float
+fn float_floor(x: Float) -> Float
 
 @external(erlang, "math", "ceil")
-fn ffi_math_ceil(x: Float) -> Float
+fn float_ceil(x: Float) -> Float
 
 @external(erlang, "math", "tan")
-fn ffi_math_tan(x: Float) -> Float
+fn float_tan(x: Float) -> Float
 
 @external(erlang, "math", "asin")
-fn ffi_math_asin(x: Float) -> Float
+fn float_asin(x: Float) -> Float
 
 @external(erlang, "math", "acos")
-fn ffi_math_acos(x: Float) -> Float
+fn float_acos(x: Float) -> Float
 
 @external(erlang, "math", "atan")
-fn ffi_math_atan(x: Float) -> Float
+fn float_atan(x: Float) -> Float
 
 @external(erlang, "math", "atan2")
-fn ffi_math_atan2(y: Float, x: Float) -> Float
+fn float_atan2(y: Float, x: Float) -> Float
 
 @external(erlang, "math", "log2")
-fn ffi_math_log2(x: Float) -> Float
+fn float_log2(x: Float) -> Float
 
 @external(erlang, "math", "log10")
-fn ffi_math_log10(x: Float) -> Float
+fn float_log10(x: Float) -> Float
 
 @external(erlang, "math", "tanh")
-fn ffi_math_tanh(x: Float) -> Float
+fn float_tanh(x: Float) -> Float
 
 @external(erlang, "math", "asinh")
-fn ffi_math_asinh(x: Float) -> Float
+fn float_asinh(x: Float) -> Float
 
 @external(erlang, "math", "acosh")
-fn ffi_math_acosh(x: Float) -> Float
+fn float_acosh(x: Float) -> Float
 
 @external(erlang, "math", "atanh")
-fn ffi_math_atanh(x: Float) -> Float
+fn float_atanh(x: Float) -> Float

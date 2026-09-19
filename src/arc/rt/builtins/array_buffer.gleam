@@ -5,6 +5,7 @@ import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
+import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/sab
 import arc/rt/store as rt_store
@@ -30,9 +31,6 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 
-// 2^31 - 1, matches v8
-const max_buffer_byte_length = 2_147_483_647
-
 const invalid_length_msg = "Invalid array buffer length"
 
 pub fn init(
@@ -40,7 +38,7 @@ pub fn init(
   object_proto: Handle,
   function_proto: Handle,
 ) -> #(#(BuiltinPair, BuiltinPair), Agent) {
-  let #(ab_methods, st) =
+  let #(methods, st) =
     common.alloc_methods(st, function_proto, [
       #("resize", ArrayBufferN(ArrayBufferResize), 1),
       #("slice", ArrayBufferN(ArrayBufferSlice), 2),
@@ -53,7 +51,7 @@ pub fn init(
       ),
       #("transferToImmutable", ArrayBufferN(ArrayBufferTransferToImmutable), 0),
     ])
-  let #(ab_getters, st) =
+  let #(getters, st) =
     common.alloc_getters(st, function_proto, [
       #("byteLength", ArrayBufferN(ArrayBufferGetByteLength)),
       #("detached", ArrayBufferN(ArrayBufferGetDetached)),
@@ -61,62 +59,67 @@ pub fn init(
       #("maxByteLength", ArrayBufferN(ArrayBufferGetMaxByteLength)),
       #("resizable", ArrayBufferN(ArrayBufferGetResizable)),
     ])
-  let #(ab_statics, st) =
+  let #(statics, st) =
     common.alloc_methods(st, function_proto, [
       #("isView", ArrayBufferN(ArrayBufferIsView), 1),
     ])
-  let #(ab_type, st) =
+  let #(array_buffer, st) =
     common.init_type(
       st,
       object_proto,
       function_proto,
-      list.append(ab_getters, ab_methods),
+      list.append(getters, methods),
       fn(proto) { ArrayBufferN(ArrayBufferConstructor(proto:)) },
       "ArrayBuffer",
       1,
-      ab_statics,
+      statics,
     )
-  let st = common.add_string_tag(st, ab_type.prototype, "ArrayBuffer")
+  let st = common.add_string_tag(st, array_buffer.prototype, "ArrayBuffer")
   let st =
     common.add_species_accessor(
       st,
       function_proto,
-      ab_type.constructor,
+      array_buffer.constructor,
       ReturnThis,
     )
 
-  let #(sab_methods, st) =
+  let #(shared_methods, st) =
     common.alloc_methods(st, function_proto, [
       #("grow", ArrayBufferN(SharedArrayBufferGrow), 1),
       #("slice", ArrayBufferN(SharedArrayBufferSlice), 2),
     ])
-  let #(sab_getters, st) =
+  let #(shared_getters, st) =
     common.alloc_getters(st, function_proto, [
       #("byteLength", ArrayBufferN(SharedArrayBufferGetByteLength)),
       #("growable", ArrayBufferN(SharedArrayBufferGetGrowable)),
       #("maxByteLength", ArrayBufferN(SharedArrayBufferGetMaxByteLength)),
     ])
-  let #(sab_type, st) =
+  let #(shared_array_buffer, st) =
     common.init_type(
       st,
       object_proto,
       function_proto,
-      list.append(sab_getters, sab_methods),
+      list.append(shared_getters, shared_methods),
       fn(proto) { ArrayBufferN(SharedArrayBufferConstructor(proto:)) },
       "SharedArrayBuffer",
       1,
       [],
     )
-  let st = common.add_string_tag(st, sab_type.prototype, "SharedArrayBuffer")
+  let st =
+    common.add_string_tag(
+      st,
+      shared_array_buffer.prototype,
+      "SharedArrayBuffer",
+    )
   let st =
     common.add_species_accessor(
       st,
       function_proto,
-      sab_type.constructor,
+      shared_array_buffer.constructor,
       ReturnThis,
     )
 
-  #(#(ab_type, sab_type), st)
+  #(#(array_buffer, shared_array_buffer), st)
 }
 
 pub fn dispatch(
@@ -134,28 +137,27 @@ pub fn dispatch(
         "Constructor SharedArrayBuffer requires 'new'",
       )
     ArrayBufferIsView -> is_view(st, args)
-    ArrayBufferGetByteLength -> ab_get_byte_length(st, this)
-    ArrayBufferGetDetached -> ab_get_detached(st, this)
-    ArrayBufferGetImmutable -> ab_get_immutable(st, this)
-    ArrayBufferGetMaxByteLength -> ab_get_max_byte_length(st, this)
-    ArrayBufferGetResizable -> ab_get_resizable(st, this)
-    ArrayBufferResize -> ab_resize(st, this, args)
+    ArrayBufferGetByteLength -> get_byte_length(st, this)
+    ArrayBufferGetDetached -> get_detached(st, this)
+    ArrayBufferGetImmutable -> get_immutable(st, this)
+    ArrayBufferGetMaxByteLength -> get_max_byte_length(st, this)
+    ArrayBufferGetResizable -> get_resizable(st, this)
+    ArrayBufferResize -> resize(st, this, args)
     ArrayBufferSlice -> buffer_slice(st, this, args, shared: False)
     ArrayBufferSliceToImmutable -> slice_to_immutable(st, this, args)
-    ArrayBufferTransfer -> ab_transfer(st, this, args, PreserveResizability)
-    ArrayBufferTransferToFixedLength ->
-      ab_transfer(st, this, args, ToFixedLength)
-    ArrayBufferTransferToImmutable -> ab_transfer(st, this, args, ToImmutable)
-    SharedArrayBufferGetByteLength -> sab_get_byte_length(st, this)
-    SharedArrayBufferGetGrowable -> sab_get_growable(st, this)
-    SharedArrayBufferGetMaxByteLength -> sab_get_max_byte_length(st, this)
-    SharedArrayBufferGrow -> sab_grow(st, this, args)
+    ArrayBufferTransfer -> transfer(st, this, args, PreserveResizability)
+    ArrayBufferTransferToFixedLength -> transfer(st, this, args, ToFixedLength)
+    ArrayBufferTransferToImmutable -> transfer(st, this, args, ToImmutable)
+    SharedArrayBufferGetByteLength -> shared_get_byte_length(st, this)
+    SharedArrayBufferGetGrowable -> shared_get_growable(st, this)
+    SharedArrayBufferGetMaxByteLength -> shared_get_max_byte_length(st, this)
+    SharedArrayBufferGrow -> shared_grow(st, this, args)
     SharedArrayBufferSlice -> buffer_slice(st, this, args, shared: True)
-    ArrayBufferDetach262 -> detach_262(st, args)
+    ArrayBufferDetach262 -> host_detach(st, args)
   }
 }
 
-fn detach_262(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+fn host_detach(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let method = "detachArrayBuffer"
   let buf = require_buffer(st, helpers.first_arg_or_undefined(args), method)
   let buf = require_unshared(st, buf, method)
@@ -206,7 +208,7 @@ fn allocate(
     Some(m) if byte_length > m ->
       rt_val.throw_range_error(
         st,
-        ctor_name(shared) <> " length exceeds maxByteLength option",
+        ctor_name(shared:) <> " length exceeds maxByteLength option",
       )
     _ -> {
       let #(proto, st) =
@@ -217,10 +219,10 @@ fn allocate(
           }
         })
       let max_ok = case max {
-        Some(m) -> m <= max_buffer_byte_length
+        Some(m) -> m <= limits.max_buffer_byte_length
         None -> True
       }
-      case byte_length <= max_buffer_byte_length && max_ok {
+      case byte_length <= limits.max_buffer_byte_length && max_ok {
         False -> rt_val.throw_range_error(st, "Array buffer allocation failed")
         True -> {
           let storage = case shared {
@@ -284,46 +286,46 @@ fn is_view(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   #(mk_bool(result), st)
 }
 
-fn ab_get_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
+fn get_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "byteLength")
   let buf = require_unshared(st, buf, "byteLength")
   #(mk_int(live_byte_size(buf)), st)
 }
 
-fn ab_get_detached(st: Agent, this: JsVal) -> #(JsVal, Agent) {
+fn get_detached(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "detached")
   let buf = require_unshared(st, buf, "detached")
-  #(mk_bool(buffer.buffer_is_detached(buf.storage)), st)
+  #(mk_bool(buffer.storage_is_detached(buf.storage)), st)
 }
 
-fn ab_get_immutable(st: Agent, this: JsVal) -> #(JsVal, Agent) {
+fn get_immutable(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "immutable")
   let buf = require_unshared(st, buf, "immutable")
-  #(mk_bool(buffer.buffer_is_immutable(buf.storage)), st)
+  #(mk_bool(buffer.storage_is_immutable(buf.storage)), st)
 }
 
-fn ab_get_max_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
+fn get_max_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "maxByteLength")
   let buf = require_unshared(st, buf, "maxByteLength")
   let result = case buf.storage {
     Detached(..) -> 0
     live ->
-      case buffer.buffer_max_byte_length(live) {
+      case buffer.storage_max_byte_length(live) {
         Some(max) -> max
-        None -> buffer.buffer_byte_size(live)
+        None -> buffer.storage_byte_size(live)
       }
   }
   #(mk_int(result), st)
 }
 
-fn ab_get_resizable(st: Agent, this: JsVal) -> #(JsVal, Agent) {
+fn get_resizable(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "resizable")
   let buf = require_unshared(st, buf, "resizable")
   #(mk_bool(max_byte_length(buf) != None), st)
 }
 
 // §25.1.6.6
-fn ab_resize(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
+fn resize(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "resize")
   case max_byte_length(buf) {
     None ->
@@ -370,7 +372,7 @@ fn buffer_slice(
   let buf = require_buffer(st, this, "slice")
   let buf = require_family(st, buf, "slice", shared)
   let storage = require_live(st, buf, "slice")
-  let len = buffer.buffer_byte_size(storage)
+  let len = buffer.storage_byte_size(storage)
   let #(first, st) =
     rt_abstract_ops.relative_index(
       st,
@@ -396,10 +398,10 @@ fn buffer_slice(
     True ->
       rt_val.throw_type_error(
         st,
-        "species constructor returned the same " <> ctor_name(shared),
+        "species constructor returned the same " <> ctor_name(shared:),
       )
     False ->
-      case buffer.buffer_byte_size(new_storage) < new_len {
+      case buffer.storage_byte_size(new_storage) < new_len {
         True ->
           rt_val.throw_type_error(
             st,
@@ -408,7 +410,7 @@ fn buffer_slice(
         False -> {
           let buf = require_buffer(st, mk_object(buf.h), "slice")
           let storage = require_live(st, buf, "slice")
-          let current_len = buffer.buffer_byte_size(storage)
+          let current_len = buffer.storage_byte_size(storage)
           case first < current_len {
             False -> #(new_val, st)
             True -> {
@@ -477,7 +479,7 @@ type TransferMode {
 }
 
 // §25.1.3.4 arraybuffercopyanddetach
-fn ab_transfer(
+fn transfer(
   st: Agent,
   this: JsVal,
   args: List(JsVal),
@@ -498,10 +500,10 @@ fn ab_transfer(
     ToFixedLength | ToImmutable -> None
   }
   let max_ok = case new_max {
-    Some(m) -> new_len <= m && m <= max_buffer_byte_length
+    Some(m) -> new_len <= m && m <= limits.max_buffer_byte_length
     None -> True
   }
-  case new_len <= max_buffer_byte_length && max_ok {
+  case new_len <= limits.max_buffer_byte_length && max_ok {
     False -> rt_val.throw_range_error(st, "Array buffer allocation failed")
     True -> {
       let old_len = bit_array.byte_size(old_bits)
@@ -525,19 +527,19 @@ fn ab_transfer(
   }
 }
 
-fn sab_get_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
+fn shared_get_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "byteLength")
   let _block = require_shared(st, buf, "byteLength")
   #(mk_int(live_byte_size(buf)), st)
 }
 
-fn sab_get_growable(st: Agent, this: JsVal) -> #(JsVal, Agent) {
+fn shared_get_growable(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "growable")
   let _bytes = require_shared(st, buf, "growable")
   #(mk_bool(max_byte_length(buf) != None), st)
 }
 
-fn sab_get_max_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
+fn shared_get_max_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "maxByteLength")
   let _block = require_shared(st, buf, "maxByteLength")
   let max = option.unwrap(max_byte_length(buf), live_byte_size(buf))
@@ -545,7 +547,7 @@ fn sab_get_max_byte_length(st: Agent, this: JsVal) -> #(JsVal, Agent) {
 }
 
 // §25.2.5.3
-fn sab_grow(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
+fn shared_grow(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let buf = require_buffer(st, this, "grow")
   case max_byte_length(buf) {
     None ->
@@ -598,7 +600,7 @@ type LiveBuffer {
   LiveBuffer(h: Handle, storage: BufferStorage)
 }
 
-fn ctor_name(shared: Bool) -> String {
+fn ctor_name(shared shared: Bool) -> String {
   case shared {
     True -> "SharedArrayBuffer"
     False -> "ArrayBuffer"
@@ -606,11 +608,11 @@ fn ctor_name(shared: Bool) -> String {
 }
 
 fn live_byte_size(buf: LiveBuffer) -> Int {
-  buffer.buffer_byte_size(buf.storage)
+  buffer.storage_byte_size(buf.storage)
 }
 
 fn max_byte_length(buf: LiveBuffer) -> Option(Int) {
-  buffer.buffer_max_byte_length(buf.storage)
+  buffer.storage_max_byte_length(buf.storage)
 }
 
 fn detach(st: Agent, buf: LiveBuffer) -> Agent {
@@ -669,7 +671,7 @@ fn require_live(st: Agent, buf: LiveBuffer, method: String) -> BufferStorage {
 }
 
 fn require_live_bits(st: Agent, buf: LiveBuffer, method: String) -> BitArray {
-  case buffer.buffer_bits(buf.storage) {
+  case buffer.storage_bits(buf.storage) {
     Some(bits) -> bits
     None -> detached_error(st, method)
   }

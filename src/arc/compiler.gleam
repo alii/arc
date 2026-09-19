@@ -72,9 +72,14 @@ pub type DirectEvalCaller {
 
 pub fn compile_script(
   body: List(ast.StmtWithLine),
-  sb: scope_builder.ScopeBuilder,
+  scopes: scope_builder.ScopeBuilder,
 ) -> Result(FuncTemplate, CompileError) {
-  compile_top_level(body, sb, scope.LexLocal, deletable_global_vars: False)
+  compile_top_level(
+    body,
+    scopes,
+    scope.LocalLexical,
+    deletable_global_vars: False,
+  )
 }
 
 pub type CompiledModuleBody {
@@ -95,18 +100,18 @@ pub type ExportSeed {
 // imports are boxed captures 0..n-1; exports force-boxed for live bindings
 pub fn compile_module(
   items: List(ast.ModuleItem),
-  sb: scope_builder.ScopeBuilder,
+  scopes: scope_builder.ScopeBuilder,
   summary: summary.ModuleSummary,
 ) -> Result(CompiledModuleBody, CompileError) {
   let opts =
     scope.AnalyzeOpts(
       ..scope.default_analyze_opts(),
-      top_lex: scope.LexLocal,
+      top_lex: scope.LocalLexical,
       strict: True,
       parent_names: indexed_names(summary.binding_local_names(summary.imports)),
       linker_seeded_exports: set.from_list(local_export_names(summary.exports)),
     )
-  let tree = scope_analysis.finalize(sb, opts)
+  let tree = scope_analysis.finalize(scopes, opts)
   use out <- result.map(emit.module(items, tree))
   let template = finish_top_level(out, lexical.ScriptCode, eval_var_env: None)
   let has_tla =
@@ -152,25 +157,35 @@ fn module_export_seeds(
 // top-level lexicals go to the global record to persist
 pub fn compile_repl(
   body: List(ast.StmtWithLine),
-  sb: scope_builder.ScopeBuilder,
+  scopes: scope_builder.ScopeBuilder,
 ) -> Result(FuncTemplate, CompileError) {
-  compile_top_level(body, sb, scope.LexGlobal, deletable_global_vars: False)
+  compile_top_level(
+    body,
+    scopes,
+    scope.GlobalLexical,
+    deletable_global_vars: False,
+  )
 }
 
 // indirect eval; introduced globals are deletable (§19.2.1.3)
 pub fn compile_eval(
   body: List(ast.StmtWithLine),
-  sb: scope_builder.ScopeBuilder,
+  scopes: scope_builder.ScopeBuilder,
 ) -> Result(FuncTemplate, CompileError) {
-  compile_top_level(body, sb, scope.LexLocal, deletable_global_vars: True)
+  compile_top_level(
+    body,
+    scopes,
+    scope.LocalLexical,
+    deletable_global_vars: True,
+  )
 }
 
 pub fn compile_eval_direct(
   body: List(ast.StmtWithLine),
-  sb: scope_builder.ScopeBuilder,
+  scopes: scope_builder.ScopeBuilder,
   caller: DirectEvalCaller,
 ) -> Result(FuncTemplate, CompileError) {
-  let tree = scope_analysis.finalize(sb, direct_eval_opts(caller, body))
+  let tree = scope_analysis.finalize(scopes, direct_eval_opts(caller, body))
   // §14.11.1 with is illegal once the caller makes eval strict
   use <- bool.guard(
     caller.is_strict && contains_with(tree),
@@ -216,7 +231,7 @@ fn direct_eval_opts(
   }
   scope.AnalyzeOpts(
     ..scope.default_analyze_opts(),
-    top_lex: scope.LexLocal,
+    top_lex: scope.LocalLexical,
     fallthrough:,
     strict:,
     parent_names:,
@@ -231,12 +246,12 @@ fn contains_with(tree: scope.ScopeTree) -> Bool {
 
 fn compile_top_level(
   stmts: List(ast.StmtWithLine),
-  sb: scope_builder.ScopeBuilder,
+  scopes: scope_builder.ScopeBuilder,
   top_lex: scope.TopLevelLex,
   deletable_global_vars deletable_global_vars: Bool,
 ) -> Result(FuncTemplate, CompileError) {
   let opts = scope.AnalyzeOpts(..scope.default_analyze_opts(), top_lex:)
-  let tree = scope_analysis.finalize(sb, opts)
+  let tree = scope_analysis.finalize(scopes, opts)
   use out <- result.map(emit.program(stmts, tree, deletable_global_vars:))
   finish_top_level(out, lexical.ScriptCode, eval_var_env: Some(GlobalVarEnv))
 }
@@ -410,8 +425,7 @@ pub type SourceError {
 
 pub fn format_source_error(err: SourceError) -> String {
   case err {
-    Syntax(parse_err) ->
-      "SyntaxError: " <> parser.parse_error_to_string(parse_err)
+    Syntax(parse_err) -> "SyntaxError: " <> parser.error_to_string(parse_err)
     Compile(compile_err) -> "compile error: " <> error_message(compile_err)
   }
 }
@@ -422,23 +436,23 @@ pub fn compile_source(
 ) -> Result(FuncTemplate, SourceError) {
   case kind {
     ScriptSource -> {
-      use #(body, sb) <- result.try(
+      use #(body, scopes) <- result.try(
         parser.parse_script(source) |> result.map_error(Syntax),
       )
-      compile_script(body, sb) |> result.map_error(Compile)
+      compile_script(body, scopes) |> result.map_error(Compile)
     }
     ReplSource -> {
-      use #(body, sb) <- result.try(
+      use #(body, scopes) <- result.try(
         parser.parse_script(source) |> result.map_error(Syntax),
       )
-      compile_repl(body, sb) |> result.map_error(Compile)
+      compile_repl(body, scopes) |> result.map_error(Compile)
     }
     ModuleSource -> {
-      use #(items, sb) <- result.try(
+      use #(items, scopes) <- result.try(
         parser.parse_module(source) |> result.map_error(Syntax),
       )
       use compiled <- result.map(
-        compile_module(items, sb, summary.analyze(items))
+        compile_module(items, scopes, summary.analyze(items))
         |> result.map_error(Compile),
       )
       compiled.template

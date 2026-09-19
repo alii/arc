@@ -30,12 +30,12 @@ import arc/rt/builtins/temporal_plain_time.{
   to_temporal_time,
 }
 import arc/rt/builtins/temporal_rounding.{
-  DayUnit, Hour, Nanosecond, Trunc, apply_since_duration, apply_since_mode,
-  apply_since_ns, as_if_positive_mode, balance_time_ns, check_diff_setup,
-  get_difference_settings, get_fractional_digits, get_rounding_mode_option,
-  get_unit_option, max_rounding_increment, max_unit, require_time_unit,
-  round_options, round_to_increment, seconds_string_precision, time_unit_ns,
-  unit_rank, valid_rounding_increment,
+  DayUnit, Hour, Nanosecond, StringPrecision, Trunc, apply_since_duration,
+  apply_since_mode, apply_since_ns, as_if_positive_mode, balance_time_ns,
+  check_diff_setup, get_difference_settings, get_fractional_digits,
+  get_rounding_mode_option, get_unit_option, max_rounding_increment, max_unit,
+  require_time_unit, round_options, round_to_increment, seconds_string_precision,
+  time_unit_ns, unit_rank, valid_rounding_increment,
 }
 import arc/rt/builtins/temporal_time_zone.{
   InvalidIdentifier, UnknownIdentifier, epoch_ns_to_iso_in, format_offset_full,
@@ -255,7 +255,7 @@ fn require_zoned(
   st: Agent,
   this: JsVal,
   name: String,
-) -> #(Int, TemporalZone, temporal_calendar.Calendar) {
+) -> temporal_common.ZonedSlots {
   require_temporal(st, this, "ZonedDateTime", name, zoned_slot_of)
 }
 
@@ -264,7 +264,8 @@ pub fn getter(
   g: TemporalZonedGetter,
   this: JsVal,
 ) -> #(JsVal, Agent) {
-  let #(ns, tz, zcal) = require_zoned(st, this, zoned_getter_name(g))
+  let temporal_common.ZonedSlots(ns, tz, zcal) =
+    require_zoned(st, this, zoned_getter_name(g))
   let offset = tz_offset_ns_at(tz, ns)
   let #(d, t) = epoch_ns_to_iso(ns, offset)
   case g {
@@ -295,7 +296,8 @@ pub fn method(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let #(ns, tz, zcal) = require_zoned(st, this, method_name(m))
+  let temporal_common.ZonedSlots(ns, tz, zcal) =
+    require_zoned(st, this, method_name(m))
   let off = tz_offset_ns_at(tz, ns)
   let #(d, t) = epoch_ns_to_iso(ns, off)
   case m {
@@ -304,7 +306,7 @@ pub fn method(
       st,
     )
     ZonedDateTimeToString -> {
-      let #(opts, st) = get_options_object(st, helpers.arg_at(args, 0))
+      let opts = get_options_object(st, helpers.arg_at(args, 0))
       let #(cal_name, st) = get_calendar_name_option(st, opts)
       let #(digits, st) = get_fractional_digits(st, opts)
       let #(offset_mode, st) = get_show_offset_option(st, opts)
@@ -312,7 +314,7 @@ pub fn method(
       let #(smallest, st) =
         get_unit_option(st, opts, "smallestUnit", allow_auto: False)
       let #(tz_mode, st) = get_time_zone_name_option(st, opts)
-      let #(precision, smallest_time_unit, inc) =
+      let StringPrecision(precision, smallest_time_unit, inc) =
         rt_val.or_throw(st, seconds_string_precision(digits, smallest))
       let rounded = case smallest_time_unit {
         None -> ns
@@ -449,7 +451,7 @@ pub fn method(
       let #(f, st) =
         read_date_time_fields(st, bag, zcal, read_offset: True, read_tz: False)
       let Nil = require_nonempty_fields(st, date_time_fields_all_none(f))
-      let #(opts, st) = get_options_object(st, helpers.arg_at(args, 1))
+      let opts = get_options_object(st, helpers.arg_at(args, 1))
       let #(dis_opt, st) = get_disambiguation_option(st, opts)
       let #(off_opt, st) = get_offset_option(st, opts, PreferOffset)
       let #(overflow, st) = get_overflow_option(st, opts)

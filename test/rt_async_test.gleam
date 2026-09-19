@@ -142,7 +142,8 @@ pub fn promise_subclass_test() {
       is_async: False,
       is_strict: True,
     )
-  let #(p_ctor_h, st) = rt_call.fn_new(st, ctor_code, flags, "P", 1, None, None)
+  let #(p_ctor_h, st) =
+    rt_call.alloc_compiled_fn(st, ctor_code, flags, "P", 1, None, None)
   let #(p_proto_h, st) = rt_class.setup(st, p_ctor_h, promise)
   let p_ctor = mk_object(p_ctor_h)
   let #(executor, st) =
@@ -167,11 +168,12 @@ pub fn promise_subclass_test() {
 
 pub fn generator_object_is_extensible_with_own_props_test() {
   let st = rt_helpers.agent()
-  let loc = rt_helpers.as_loc(#(mk_string("a"), mk_string("b"), mk_string("d")))
+  let locals =
+    rt_helpers.as_locals(#(mk_string("a"), mk_string("b"), mk_string("d")))
   let #(gen_h, st) =
     rt_async.gen_start(
       st,
-      rt_helpers.counter_sm(),
+      rt_helpers.counter_state_machine(),
       rt_helpers.as_frame(#(
         mk_undefined(),
         mk_undefined(),
@@ -179,7 +181,7 @@ pub fn generator_object_is_extensible_with_own_props_test() {
         mk_undefined(),
       )),
       [],
-      loc,
+      locals,
     )
   let gen = mk_object(gen_h)
   assert rt_obj.get_prototype_of(st, gen_h).0

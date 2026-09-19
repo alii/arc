@@ -3,6 +3,7 @@ import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined, two_args_or_undefined}
 import arc/rt/builtins/iter_protocol
+import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
@@ -34,6 +35,7 @@ import gleam/dict
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/pair
 
 const cannot_convert = "Cannot convert undefined or null to object"
 
@@ -207,7 +209,7 @@ fn object_ctor(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 
 fn get_own_prop_desc(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(target, key_val) = two_args_or_undefined(args)
-  let st = require_object_coercible(st, target)
+  require_object_coercible(st, target)
   let #(key, st) = rt_val.to_property_key(st, key_val)
   case own_property_of(st, target, key) {
     #(Some(prop), st) -> from_property_descriptor(st, prop)
@@ -215,10 +217,10 @@ fn get_own_prop_desc(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
-fn require_object_coercible(st: Agent, v: JsVal) -> Agent {
+fn require_object_coercible(st: Agent, v: JsVal) -> Nil {
   case classify(v) {
     KNull | KUndef -> rt_val.throw_type_error(st, cannot_convert)
-    _ -> st
+    _ -> Nil
   }
 }
 
@@ -359,7 +361,10 @@ fn own_string_keys(
         False -> Miss
       }
       use <- lazy_guard_pairs(plain, fn(pairs) {
-        ok_array(st, list.map(pairs, fn(kv) { mk_string(kv.0) }))
+        realm_ops.new_array(
+          st,
+          list.map(pairs, fn(entry) { mk_string(pair.first(entry)) }),
+        )
       })
       let #(names, st) = case enumerable_only {
         True -> rt_obj.enumerable_own_keys(st, h)
@@ -375,7 +380,10 @@ fn own_string_keys(
           #(names, st)
         }
       }
-      ok_array(st, list.map(names, fn(pk) { mk_string(key.to_text(pk)) }))
+      realm_ops.new_array(
+        st,
+        list.map(names, fn(pk) { mk_string(key.to_text(pk)) }),
+      )
     }
     KNull | KUndef -> rt_val.throw_type_error(st, cannot_convert)
     KStr(s) -> {
@@ -384,9 +392,9 @@ fn own_string_keys(
         True -> index_keys
         False -> list.append(index_keys, [mk_string("length")])
       }
-      ok_array(st, ks)
+      realm_ops.new_array(st, ks)
     }
-    _ -> ok_array(st, [])
+    _ -> realm_ops.new_array(st, [])
   }
 }
 
@@ -412,7 +420,7 @@ fn lazy_guard_pairs(
 
 fn values(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(pairs, st) = own_enumerable_pairs(st, args)
-  ok_array(st, list.map(pairs, fn(kv) { kv.1 }))
+  realm_ops.new_array(st, list.map(pairs, pair.second))
 }
 
 fn entries(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
@@ -425,7 +433,7 @@ fn entries(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
       let #(row_h, st) = common.alloc_array(st, [mk_string(k), v], array_proto)
       #([mk_object(row_h), ..rows], st)
     })
-  ok_array(st, list.reverse(rows))
+  realm_ops.new_array(st, list.reverse(rows))
 }
 
 fn own_enumerable_pairs(
@@ -488,9 +496,9 @@ fn get_own_prop_symbols(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
             StringKey(_) -> Error(Nil)
           }
         })
-      ok_array(st, syms)
+      realm_ops.new_array(st, syms)
     }
-    _ -> ok_array(st, [])
+    _ -> realm_ops.new_array(st, [])
   }
 }
 
@@ -643,7 +651,7 @@ fn object_is(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 
 fn has_own(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(target, key_val) = two_args_or_undefined(args)
-  let st = require_object_coercible(st, target)
+  require_object_coercible(st, target)
   let #(key, st) = rt_val.to_property_key(st, key_val)
   let #(desc, st) = own_property_of(st, target, key)
   #(mk_bool(option.is_some(desc)), st)
@@ -1011,7 +1019,7 @@ fn group_by(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 
 fn group_by_loop(
   st: Agent,
-  rec: iter_protocol.IteratorRecord,
+  rec: types.IteratorRecord,
   callback: JsVal,
   index: Int,
   groups: dict.Dict(ObjectKey, List(JsVal)),
@@ -1167,11 +1175,6 @@ fn string_index_object_keys(i: Int, len: Int) -> List(ObjectKey) {
     True -> []
     False -> [StringKey(Index(i)), ..string_index_object_keys(i + 1, len)]
   }
-}
-
-fn ok_array(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
-  let #(h, st) = common.alloc_array(st, values, st.realm.array.prototype)
-  #(mk_object(h), st)
 }
 
 fn key_text(key: ObjectKey) -> String {

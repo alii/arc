@@ -11,20 +11,20 @@ import arc/rt/store as rt_store
 import arc/rt/types.{
   type Agent, type AsyncGenRequest, type AsyncGenResumeKind, type AsyncGenState,
   type AsyncWaiter, type Cell, type GeneratorCompletion, type Handle, type Job,
-  type JsVal, type Loc, type NativeToken, type PromiseReaction,
-  type PromiseState, type ReactionHandler, type Resume, type SabOwner, type SmFn,
-  type Step, type WaiterRef, Agent, AsyncGenAwaitingReturn, AsyncGenCompleted,
-  AsyncGenExecuting, AsyncGenRequest, AsyncGenResume, AsyncGenSuspendedStart,
-  AsyncGenSuspendedYield, AsyncGeneratorObj, AsyncWaiter, AwaitingReturnKind,
-  DataProperty, GenCompleted, GenExecuting, GenNext, GenReturn,
-  GenSuspendedStart, GenSuspendedYield, GenThrow, GeneratorObj, Handle, Handler,
-  HostJob, IdentityPassThrough, KHandle, NoElements, Ordinary, PromiseFulfilled,
-  PromiseObj, PromisePending, PromiseReaction, PromiseRejectFn, PromiseRejected,
-  PromiseResolveFn, ReactionJob, ResolveThenableJob, ResumeCompiled, ResumeFrame,
-  ReturnUnwindKind, SAsyncContext, SAsyncGen, SBox, SGenerator, SObject,
-  SPromiseData, StepAwait, StepReturn, StepThrow, StepYield, Store, StoreMeta,
-  StringKey, ThrowerPassThrough, classify, job_queue_pop, job_queue_push,
-  mk_bool, mk_object, mk_string, mk_undefined,
+  type JsVal, type Locals, type NativeToken, type PromiseReaction,
+  type PromiseState, type ReactionHandler, type Resume, type SabOwner,
+  type StateMachine, type Step, type WaiterRef, Agent, AsyncGenAwaitingReturn,
+  AsyncGenCompleted, AsyncGenExecuting, AsyncGenRequest, AsyncGenResume,
+  AsyncGenSuspendedStart, AsyncGenSuspendedYield, AsyncGeneratorObj, AsyncWaiter,
+  AwaitingReturnKind, DataProperty, GenCompleted, GenExecuting, GenNext,
+  GenReturn, GenSuspendedStart, GenSuspendedYield, GenThrow, GeneratorObj,
+  Handle, Handler, HostJob, IdentityPassThrough, KHandle, Ordinary,
+  PromiseFulfilled, PromiseObj, PromisePending, PromiseReaction, PromiseRejectFn,
+  PromiseRejected, PromiseResolveFn, ReactionJob, ResolveThenableJob,
+  ResumeCompiled, ResumeFrame, ReturnUnwindKind, SAsyncContext, SAsyncGen, SBox,
+  SGenerator, SObject, SPromiseData, StepAwait, StepReturn, StepThrow, StepYield,
+  Store, StoreMeta, StringKey, ThrowerPassThrough, classify, job_queue_pop,
+  job_queue_push, mk_bool, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val.{is_callable} as rt_val
 import gleam/dict
@@ -43,13 +43,13 @@ pub fn sent_start() -> #(Int, JsVal) {
   #(sent_next, mk_undefined())
 }
 
-@external(erlang, "arc_rt_async_ffi", "apply_sm")
-pub fn apply_sm(
+@external(erlang, "arc_rt_async_ffi", "apply_state_machine")
+pub fn apply_state_machine(
   st: Agent,
-  sm: SmFn,
-  rs: Int,
+  machine: StateMachine,
+  resume_point: Int,
   sent: #(Int, JsVal),
-  loc: Loc,
+  locals: Locals,
 ) -> #(Step, Agent)
 
 pub fn apply_resume(
@@ -58,7 +58,8 @@ pub fn apply_resume(
   sent: #(Int, JsVal),
 ) -> #(Step, Agent) {
   case resume {
-    ResumeCompiled(sm:, rs:, loc:) -> apply_sm(st, sm, rs, sent, loc)
+    ResumeCompiled(machine:, resume_point:, locals:) ->
+      apply_state_machine(st, machine, resume_point, sent, locals)
     ResumeFrame(frame:) -> st.store.ops.resume_frame(st, frame, sent)
   }
 }
@@ -79,16 +80,20 @@ fn alloc_native_fn(
   )
 }
 
+pub type ResolvingFunctions {
+  ResolvingFunctions(resolve: Handle, reject: Handle)
+}
+
 pub fn alloc_resolving_fns(
   st: Agent,
   promise_h: Handle,
-) -> #(#(Handle, Handle), Agent) {
-  let #(already_resolved, st) = rt_store.cell_new(st, SBox(mk_bool(False)))
+) -> #(ResolvingFunctions, Agent) {
+  let #(already_resolved, st) = rt_store.box_new(st, mk_bool(False))
   let #(resolve_h, st) =
     alloc_native_fn(st, PromiseResolveFn(promise_h, already_resolved), "", 1)
   let #(reject_h, st) =
     alloc_native_fn(st, PromiseRejectFn(promise_h, already_resolved), "", 1)
-  #(#(resolve_h, reject_h), st)
+  #(ResolvingFunctions(resolve: resolve_h, reject: reject_h), st)
 }
 
 fn alloc_asyncgen_resume(
@@ -379,23 +384,21 @@ pub fn alloc_iter_result(
 ) -> #(Handle, Agent) {
   let object_proto = st.realm.object.prototype
   use seq <- rt_store.cell_new_with(st, 2)
-  SObject(
-    kind: Ordinary,
-    proto: Some(object_proto),
-    props: dict.from_list([
+  let props =
+    dict.from_list([
       #(
         Named("value"),
-        DataProperty(
-          value:,
+        types.DataProperty(
+          value: value,
           writable: True,
           enumerable: True,
           configurable: True,
-          seq:,
+          seq: seq,
         ),
       ),
       #(
         Named("done"),
-        DataProperty(
+        types.DataProperty(
           value: mk_bool(done),
           writable: True,
           enumerable: True,
@@ -403,9 +406,13 @@ pub fn alloc_iter_result(
           seq: seq + 1,
         ),
       ),
-    ]),
+    ])
+  types.SObject(
+    kind: Ordinary,
+    proto: Some(object_proto),
+    props: props,
     symbol_props: [],
-    elements: NoElements,
+    elements: types.NoElements,
     extensible: True,
   )
 }
@@ -417,12 +424,12 @@ fn alloc_shell(
 ) -> #(Handle, Agent) {
   rt_store.cell_new(
     st,
-    SObject(
-      kind:,
-      proto:,
+    types.SObject(
+      kind: kind,
+      proto: proto,
       props: dict.new(),
       symbol_props: [],
-      elements: NoElements,
+      elements: types.NoElements,
       extensible: True,
     ),
   )
@@ -468,15 +475,15 @@ fn set_gen_state(
 // §27.5.1.2 generatorstart
 pub fn gen_start(
   st: Agent,
-  sm: SmFn,
+  machine: StateMachine,
   frame: Frame,
   _args: List(JsVal),
-  loc0: Loc,
+  locals: Locals,
 ) -> #(Handle, Agent) {
   gen_new(
     st,
     rt_call.frame_active_func(frame),
-    ResumeCompiled(sm:, rs: 0, loc: loc0),
+    ResumeCompiled(machine:, resume_point: 0, locals:),
   )
 }
 
@@ -609,14 +616,16 @@ pub fn as_promise(st: Agent, v: JsVal) -> Option(Handle) {
   }
 }
 
-pub fn promise_data(
-  st: Agent,
-  promise_h: Handle,
-) -> #(Handle, PromiseState, Bool) {
+pub type PromiseRecord {
+  PromiseRecord(data: Handle, state: PromiseState, is_handled: Bool)
+}
+
+pub fn promise_data(st: Agent, promise_h: Handle) -> PromiseRecord {
   case rt_store.cell_get(st, promise_h) {
     SObject(kind: PromiseObj(data:), ..) ->
       case rt_store.cell_get(st, data) {
-        SPromiseData(state:, is_handled:) -> #(data, state, is_handled)
+        SPromiseData(state:, is_handled:) ->
+          PromiseRecord(data:, state:, is_handled:)
         _ ->
           panic as "rt_async: PromiseObj data is not SPromiseData (engine invariant)"
       }
@@ -637,19 +646,22 @@ pub fn new_promise(st: Agent) -> #(Handle, Agent) {
   new_promise_with_proto(st, Some(st.realm.promise.prototype))
 }
 
+pub type PromiseCapability {
+  PromiseCapability(promise: Handle, resolve: Handle, reject: Handle)
+}
+
 // §27.2.1.5 newpromisecapability
-pub fn new_promise_capability(
-  st: Agent,
-) -> #(#(Handle, Handle, Handle), Agent) {
-  let #(promise_h, st) = new_promise(st)
-  let #(#(resolve_h, reject_h), st) = alloc_resolving_fns(st, promise_h)
-  #(#(promise_h, resolve_h, reject_h), st)
+pub fn new_promise_capability(st: Agent) -> #(PromiseCapability, Agent) {
+  let #(promise, st) = new_promise(st)
+  let #(ResolvingFunctions(resolve:, reject:), st) =
+    alloc_resolving_fns(st, promise)
+  #(PromiseCapability(promise:, resolve:, reject:), st)
 }
 
 // §27.2.1.4 fulfillpromise
 fn fulfill_promise(st: Agent, promise_h: Handle, value: JsVal) -> Agent {
   case promise_data(st, promise_h) {
-    #(data, PromisePending(reactions), is_handled) -> {
+    PromiseRecord(data:, state: PromisePending(reactions), is_handled:) -> {
       let st =
         rt_store.cell_set(
           st,
@@ -665,7 +677,7 @@ fn fulfill_promise(st: Agent, promise_h: Handle, value: JsVal) -> Agent {
 // §27.2.1.7 rejectpromise
 pub fn promise_reject(st: Agent, promise_h: Handle, reason: JsVal) -> Agent {
   case promise_data(st, promise_h) {
-    #(data, PromisePending(reactions), is_handled) -> {
+    PromiseRecord(data:, state: PromisePending(reactions), is_handled:) -> {
       let st =
         rt_store.cell_set(
           st,
@@ -757,7 +769,7 @@ fn resolve_with_handle(
           case is_callable(st, then_val) {
             False -> fulfill_promise(st, promise_h, resolution)
             True -> {
-              let #(#(resolve_h, reject_h), st) =
+              let #(ResolvingFunctions(resolve_h, reject_h), st) =
                 alloc_resolving_fns(st, promise_h)
               enqueue_job(
                 st,
@@ -845,7 +857,7 @@ fn perform_then_handlers(
   reject: JsVal,
 ) -> Agent {
   case promise_data(st, promise_h) {
-    #(data, PromisePending(reactions), _) ->
+    PromiseRecord(data:, state: PromisePending(reactions), ..) ->
       rt_store.cell_set(
         st,
         data,
@@ -862,7 +874,7 @@ fn perform_then_handlers(
           is_handled: True,
         ),
       )
-    #(data, PromiseFulfilled(value) as state, _) -> {
+    PromiseRecord(data:, state: PromiseFulfilled(value) as state, ..) -> {
       let st =
         rt_store.cell_set(st, data, SPromiseData(state, is_handled: True))
       enqueue_job(
@@ -870,7 +882,7 @@ fn perform_then_handlers(
         ReactionJob(handler: fulfill_handler, arg: value, resolve:, reject:),
       )
     }
-    #(data, PromiseRejected(reason) as state, is_handled) -> {
+    PromiseRecord(data:, state: PromiseRejected(reason) as state, is_handled:) -> {
       let st =
         rt_store.cell_set(st, data, SPromiseData(state, is_handled: True))
       let st = case is_handled {
@@ -916,15 +928,15 @@ fn untrack_rejection(st: Agent, data: Handle) -> Agent {
 // §27.6.3.1 asyncgeneratorstart
 pub fn asyncgen_start(
   st: Agent,
-  sm: SmFn,
+  machine: StateMachine,
   frame: Frame,
   _args: List(JsVal),
-  loc0: Loc,
+  locals: Locals,
 ) -> #(Handle, Agent) {
   asyncgen_new(
     st,
     rt_call.frame_active_func(frame),
-    ResumeCompiled(sm:, rs: 0, loc: loc0),
+    ResumeCompiled(machine:, resume_point: 0, locals:),
   )
 }
 
@@ -936,7 +948,7 @@ pub fn asyncgen_new(
   let #(data, st) =
     rt_store.cell_new(
       st,
-      SAsyncGen(state: AsyncGenSuspendedStart, resume:, queue: #([], [])),
+      SAsyncGen(state: AsyncGenSuspendedStart, resume:, front: [], back: []),
     )
   let proto = generator_prototype(st, callee, fn(r) { r.async_gen.prototype })
   alloc_shell(st, AsyncGeneratorObj(data:), Some(proto))
@@ -971,7 +983,7 @@ fn asyncgen_method(
 ) -> #(Handle, Agent) {
   let #(promise_h, st) = new_promise(st)
   case asyncgen_data_of(st, this) {
-    Error(Nil) -> {
+    None -> {
       let #(e, st) =
         rt_val.new_error(
           st,
@@ -980,11 +992,11 @@ fn asyncgen_method(
         )
       #(promise_h, promise_reject(st, promise_h, e))
     }
-    Ok(#(gen_h, ag)) -> {
+    Some(#(gen_h, ag)) -> {
       let promise = mk_object(promise_h)
       let req =
         AsyncGenRequest(completion:, value:, resolve: promise, reject: promise)
-      let st = put_asyncgen(st, gen_h, ag_enqueue(ag, req))
+      let st = put_asyncgen(st, gen_h, enqueue_request(ag, req))
       let st = case ag.state {
         AsyncGenExecuting | AsyncGenAwaitingReturn -> st
         _ -> drain_queue(st, gen_h)
@@ -994,24 +1006,21 @@ fn asyncgen_method(
   }
 }
 
-fn asyncgen_data_of(
-  st: Agent,
-  this: JsVal,
-) -> Result(#(Handle, AsyncGenLive), Nil) {
+fn asyncgen_data_of(st: Agent, this: JsVal) -> Option(#(Handle, AsyncGenLive)) {
   case classify(this) {
     KHandle(h) ->
       case rt_store.cell_get(st, h) {
         SObject(kind: AsyncGeneratorObj(data:), ..) ->
-          Ok(#(data, read_asyncgen(st, data)))
-        _ -> Error(Nil)
+          Some(#(data, read_asyncgen(st, data)))
+        _ -> None
       }
-    _ -> Error(Nil)
+    _ -> None
   }
 }
 
 // §27.6.3.5 asyncgeneratorresumenext
 fn drain_queue(st: Agent, gen_h: Handle) -> Agent {
-  let ag = ag_normalize(read_asyncgen(st, gen_h))
+  let ag = normalize_queue(read_asyncgen(st, gen_h))
   case ag.front {
     [] -> st
     [req, ..] ->
@@ -1020,22 +1029,18 @@ fn drain_queue(st: Agent, gen_h: Handle) -> Agent {
         AsyncGenCompleted ->
           case req.completion {
             GenNext -> {
-              let st = put_asyncgen(st, gen_h, ag_drop_head(ag))
+              let st = put_asyncgen(st, gen_h, drop_head(ag))
               let st = fulfill_iter(st, req.resolve, mk_undefined(), done: True)
               drain_queue(st, gen_h)
             }
             GenThrow -> {
-              let st = put_asyncgen(st, gen_h, ag_drop_head(ag))
+              let st = put_asyncgen(st, gen_h, drop_head(ag))
               let st = settle(st, req.reject, Reject, req.value)
               drain_queue(st, gen_h)
             }
             GenReturn -> {
               let st =
-                put_asyncgen(
-                  st,
-                  gen_h,
-                  ag_set_state(ag, AsyncGenAwaitingReturn),
-                )
+                put_asyncgen(st, gen_h, with_state(ag, AsyncGenAwaitingReturn))
               setup_return_await(st, gen_h, req.value, AwaitingReturnKind)
             }
           }
@@ -1043,7 +1048,7 @@ fn drain_queue(st: Agent, gen_h: Handle) -> Agent {
           case req.completion {
             GenReturn | GenThrow -> {
               let st =
-                put_asyncgen(st, gen_h, ag_set_state(ag, AsyncGenCompleted))
+                put_asyncgen(st, gen_h, with_state(ag, AsyncGenCompleted))
               drain_queue(st, gen_h)
             }
             GenNext -> run_asyncgen_body(st, gen_h, ag, req, sent_start())
@@ -1056,7 +1061,7 @@ fn drain_queue(st: Agent, gen_h: Handle) -> Agent {
               run_asyncgen_body(st, gen_h, ag, req, #(sent_throw, req.value))
             GenReturn -> {
               let st =
-                put_asyncgen(st, gen_h, ag_set_state(ag, AsyncGenExecuting))
+                put_asyncgen(st, gen_h, with_state(ag, AsyncGenExecuting))
               setup_return_await(st, gen_h, req.value, ReturnUnwindKind)
             }
           }
@@ -1072,7 +1077,7 @@ fn run_asyncgen_body(
   req: AsyncGenRequest,
   sent: #(Int, JsVal),
 ) -> Agent {
-  let st = put_asyncgen(st, gen_h, ag_set_state(ag, AsyncGenExecuting))
+  let st = put_asyncgen(st, gen_h, with_state(ag, AsyncGenExecuting))
   let #(step, st) = asyncgen_turn(st, ag.resume, sent)
   drive_asyncgen_step(st, gen_h, req, step)
 }
@@ -1104,12 +1109,12 @@ fn drive_asyncgen_step(
 ) -> Agent {
   case step {
     StepReturn(v) -> {
-      let st = write_asyncgen(st, gen_h, ag_complete_drop_head)
+      let st = write_asyncgen(st, gen_h, complete_and_drop_head)
       let st = fulfill_iter(st, req.resolve, v, done: True)
       drain_queue(st, gen_h)
     }
     StepThrow(e) -> {
-      let st = write_asyncgen(st, gen_h, ag_complete_drop_head)
+      let st = write_asyncgen(st, gen_h, complete_and_drop_head)
       let st = settle(st, req.reject, Reject, e)
       drain_queue(st, gen_h)
     }
@@ -1117,7 +1122,7 @@ fn drive_asyncgen_step(
       let st =
         write_asyncgen(st, gen_h, fn(ag) {
           AsyncGenLive(..ag, resume:, state: AsyncGenSuspendedYield)
-          |> ag_drop_head
+          |> drop_head
         })
       let st = fulfill_iter(st, req.resolve, value, done: False)
       drain_queue(st, gen_h)
@@ -1130,7 +1135,7 @@ fn drive_asyncgen_step(
 }
 
 fn resume_asyncgen(st: Agent, gen_h: Handle, sent: #(Int, JsVal)) -> Agent {
-  let ag = ag_normalize(read_asyncgen(st, gen_h))
+  let ag = normalize_queue(read_asyncgen(st, gen_h))
   case ag.front {
     [] -> st
     [req, ..] -> redrive_asyncgen(st, gen_h, ag, req, sent)
@@ -1155,13 +1160,13 @@ pub fn asyncgen_resume(
   kind kind: AsyncGenResumeKind,
   settled settled: JsVal,
 ) -> Agent {
-  let ag = ag_normalize(read_asyncgen(st, gen_h))
+  let ag = normalize_queue(read_asyncgen(st, gen_h))
   case ag.front {
     [] -> st
     [req, ..] ->
       case kind, is_throw {
         AwaitingReturnKind, _ -> {
-          let st = put_asyncgen(st, gen_h, ag_complete_drop_head(ag))
+          let st = put_asyncgen(st, gen_h, complete_and_drop_head(ag))
           let st = case is_throw {
             False -> fulfill_iter(st, req.resolve, settled, done: True)
             True -> settle(st, req.reject, Reject, settled)
@@ -1217,14 +1222,14 @@ type AsyncGenLive {
 
 fn read_asyncgen(st: Agent, gen_h: Handle) -> AsyncGenLive {
   case rt_store.cell_get(st, gen_h) {
-    SAsyncGen(state:, resume:, queue: #(front, back)) ->
+    SAsyncGen(state:, resume:, front:, back:) ->
       AsyncGenLive(state:, resume:, front:, back:)
     _ -> panic as "rt_async: Handle is not an SAsyncGen cell (engine invariant)"
   }
 }
 
 fn encode_asyncgen(ag: AsyncGenLive) -> Cell {
-  SAsyncGen(state: ag.state, resume: ag.resume, queue: #(ag.front, ag.back))
+  SAsyncGen(state: ag.state, resume: ag.resume, front: ag.front, back: ag.back)
 }
 
 // re-reads the live cell so re-entrant enqueues are not lost
@@ -1240,31 +1245,31 @@ fn put_asyncgen(st: Agent, gen_h: Handle, ag: AsyncGenLive) -> Agent {
   rt_store.cell_set(st, gen_h, encode_asyncgen(ag))
 }
 
-fn ag_normalize(ag: AsyncGenLive) -> AsyncGenLive {
+fn normalize_queue(ag: AsyncGenLive) -> AsyncGenLive {
   case ag.front, ag.back {
     [], [_, ..] -> AsyncGenLive(..ag, front: list.reverse(ag.back), back: [])
     _, _ -> ag
   }
 }
 
-fn ag_enqueue(ag: AsyncGenLive, req: AsyncGenRequest) -> AsyncGenLive {
+fn enqueue_request(ag: AsyncGenLive, req: AsyncGenRequest) -> AsyncGenLive {
   AsyncGenLive(..ag, back: [req, ..ag.back])
 }
 
-fn ag_set_state(ag: AsyncGenLive, s: AsyncGenState) -> AsyncGenLive {
+fn with_state(ag: AsyncGenLive, s: AsyncGenState) -> AsyncGenLive {
   AsyncGenLive(..ag, state: s)
 }
 
-fn ag_drop_head(ag: AsyncGenLive) -> AsyncGenLive {
-  let ag = ag_normalize(ag)
+fn drop_head(ag: AsyncGenLive) -> AsyncGenLive {
+  let ag = normalize_queue(ag)
   case ag.front {
     [_, ..rest] -> AsyncGenLive(..ag, front: rest)
     [] -> ag
   }
 }
 
-fn ag_complete_drop_head(ag: AsyncGenLive) -> AsyncGenLive {
-  ag |> ag_drop_head |> ag_set_state(AsyncGenCompleted)
+fn complete_and_drop_head(ag: AsyncGenLive) -> AsyncGenLive {
+  ag |> drop_head |> with_state(AsyncGenCompleted)
 }
 
 fn first_arg(args: List(JsVal)) -> JsVal {
@@ -1277,12 +1282,12 @@ fn first_arg(args: List(JsVal)) -> JsVal {
 // §27.7.5.1 asyncfunctionstart
 pub fn start(
   st: Agent,
-  sm: SmFn,
+  machine: StateMachine,
   _frame: Frame,
   _args: List(JsVal),
-  loc0: Loc,
+  locals: Locals,
 ) -> #(Handle, Agent) {
-  run(st, ResumeCompiled(sm:, rs: 0, loc: loc0))
+  run(st, ResumeCompiled(machine:, resume_point: 0, locals:))
 }
 
 pub fn reject(st: Agent, reason: JsVal) -> #(Handle, Agent) {
@@ -1356,10 +1361,7 @@ fn check_already_resolved(st: Agent, already_h: Handle) -> #(Bool, Agent) {
     SBox(value: v) ->
       case classify(v) {
         types.KBool(True) -> #(True, st)
-        _ -> #(
-          False,
-          rt_store.cell_set(st, already_h, SBox(value: mk_bool(True))),
-        )
+        _ -> #(False, rt_store.box_set(st, already_h, mk_bool(True)))
       }
     _ ->
       panic as "rt_async: [[AlreadyResolved]] handle is not SBox (engine invariant)"

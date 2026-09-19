@@ -10,9 +10,17 @@ import gleam/set.{type Set}
 
 pub type LinkableModule {
   LinkableModule(
-    import_bindings: List(#(Raw, Resolved, List(summary.ImportBinding))),
+    import_bindings: List(ImportEdge),
     export_entries: List(LinkableExport),
     star_exports: List(Resolved),
+  )
+}
+
+pub type ImportEdge {
+  ImportEdge(
+    raw: Raw,
+    resolved: Resolved,
+    bindings: List(summary.ImportBinding),
   )
 }
 
@@ -43,7 +51,7 @@ pub fn module_of(
     list.try_map(import_bindings, fn(entry) {
       let #(raw_dep, bindings) = entry
       use dep <- result.map(resolve(raw_dep))
-      #(raw_dep, dep, bindings)
+      ImportEdge(raw: raw_dep, resolved: dep, bindings:)
     }),
   )
   use #(exports, stars) <- result.map(
@@ -163,7 +171,7 @@ fn resolve_local_export(
 ) -> ExportResolution {
   let import_binding =
     list.find_map(m.import_bindings, fn(entry) {
-      let #(_raw_dep, dep, bindings) = entry
+      let ImportEdge(resolved: dep, bindings:, ..) = entry
       list.find_map(bindings, fn(binding) {
         case binding {
           summary.NamedImport(local:, ..) if local == local_name ->
@@ -280,7 +288,7 @@ fn check_imports(
   m: LinkableModule,
 ) -> Result(Nil, LinkError) {
   list.try_each(m.import_bindings, fn(entry) {
-    let #(raw_dep, dep, bindings) = entry
+    let ImportEdge(raw: raw_dep, resolved: dep, bindings:) = entry
     list.try_each(bindings, fn(binding) {
       case binding {
         summary.NamespaceImport(..) -> Ok(Nil)

@@ -235,7 +235,7 @@ pub fn execute(command: Command, hooks: HostHooks) -> Result(Nil, CliError) {
 
 pub fn main() -> Nil {
   let command = parse_args(get_script_args())
-  case execute(command, host_hooks.default_host_hooks()) {
+  case execute(command, host_hooks.default()) {
     Ok(Nil) -> Nil
     Error(err) -> {
       io.println_error(format_cli_error(err))

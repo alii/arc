@@ -603,7 +603,7 @@ fn scan_unicode_escape(
   let after_u = backslash_pos + 2
   case drop_start(bytes, after_u) {
     <<0x7B, tail:bytes>> -> {
-      let #(digit_count, code) = hex_run(tail, 0, 0)
+      let HexRun(digit_count:, value: code) = hex_run(tail, 0, 0)
       case drop_start(tail, digit_count) {
         <<0x7D, _:bytes>> if digit_count > 0 ->
           Some(UnicodeEscape(code:, end: after_u + 1 + digit_count + 1))
@@ -629,14 +629,18 @@ fn valid_unicode_escape(
   }
 }
 
-fn hex_run(rest: BitArray, len: Int, value: Int) -> #(Int, Int) {
+type HexRun {
+  HexRun(digit_count: Int, value: Int)
+}
+
+fn hex_run(rest: BitArray, len: Int, value: Int) -> HexRun {
   case rest {
     <<b, tail:bytes>> ->
       case digits.hex_value_code(b) {
         Some(digit) -> hex_run(tail, len + 1, value * 16 + digit)
-        None -> #(len, value)
+        None -> HexRun(len, value)
       }
-    _ -> #(len, value)
+    _ -> HexRun(len, value)
   }
 }
 

@@ -36,7 +36,7 @@ dispatch_kind(St, F = {?HANDLE_TAG, Id}, This, N, A, B, C) ->
                             enter_compiled(St, F, Code, Home, DirectEntry, This, N,
                                            A, B, C);
                         false when This =:= undefined; This =:= null ->
-                            G = element(?REALM_GLOBAL, element(?AGENT_REALM, St)),
+                            G = element(?REALM_GLOBAL_OBJECT, element(?AGENT_REALM, St)),
                             enter_compiled(St, F, Code, Home, DirectEntry, G, N, A,
                                            B, C);
                         false when element(1, This) =:= ?HANDLE_TAG ->
@@ -53,28 +53,28 @@ dispatch_kind(St, F, This, N, A, B, C) -> call_general(St, F, This, N, A, B, C).
 call_general(St, F, This, N, A, B, C) ->
     'arc@rt@call':call(St, F, This, arg_list(N, A, B, C)).
 
-enter_compiled(St, _, _, _, {?SOME, ?DIRECT_ENTRY(CodeS, Arity, TakesThis)},
+enter_compiled(St, _, _, _, {?SOME, ?DIRECT_ENTRY(DirectCode, Arity, TakesThis)},
                ThisR, Args, _, _, _)
   when is_list(Args), length(Args) =:= Arity ->
     case TakesThis of
-        true -> apply_this(CodeS, St, ThisR, Args);
-        false -> erlang:apply(CodeS, [St | Args])
+        true -> apply_this(DirectCode, St, ThisR, Args);
+        false -> erlang:apply(DirectCode, [St | Args])
     end;
-enter_compiled(St, _, _, _, {?SOME, ?DIRECT_ENTRY(CodeS, N, true)}, ThisR, N,
+enter_compiled(St, _, _, _, {?SOME, ?DIRECT_ENTRY(DirectCode, N, true)}, ThisR, N,
                A, B, C) ->
     case N of
-        0 -> CodeS(St, ThisR);
-        1 -> CodeS(St, ThisR, A);
-        2 -> CodeS(St, ThisR, A, B);
-        3 -> CodeS(St, ThisR, A, B, C)
+        0 -> DirectCode(St, ThisR);
+        1 -> DirectCode(St, ThisR, A);
+        2 -> DirectCode(St, ThisR, A, B);
+        3 -> DirectCode(St, ThisR, A, B, C)
     end;
-enter_compiled(St, _, _, _, {?SOME, ?DIRECT_ENTRY(CodeS, N, false)}, _, N, A,
+enter_compiled(St, _, _, _, {?SOME, ?DIRECT_ENTRY(DirectCode, N, false)}, _, N, A,
                B, C) ->
     case N of
-        0 -> CodeS(St);
-        1 -> CodeS(St, A);
-        2 -> CodeS(St, A, B);
-        3 -> CodeS(St, A, B, C)
+        0 -> DirectCode(St);
+        1 -> DirectCode(St, A);
+        2 -> DirectCode(St, A, B);
+        3 -> DirectCode(St, A, B, C)
     end;
 enter_compiled(St, F, Code, Home, _, ThisR, N, A, B, C) ->
     Code(St, ?FRAME(ThisR, F, home_or_undefined(Home), undefined),
@@ -106,7 +106,7 @@ call_via_ic(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Site, RSite, N, A, B, C) ->
           when element(1, RCell) =:= ?SSHAPEDOBJECT_TAG ->
             %% shaped ways nest sid then proto id, no tuple key to build
             case Shaped of
-                #{element(?SSHAPEDOBJECT_SID, RCell) := Protos} ->
+                #{element(?SSHAPEDOBJECT_SHAPE_ID, RCell) := Protos} ->
                     case element(?SSHAPEDOBJECT_PROTO, RCell) of
                         {?SOME, {?HANDLE_TAG, PId}} = Proto ->
                             case Protos of
@@ -164,7 +164,7 @@ call_on_primitive(St, Recv, W, KeyBin, Site, RSite, N, A, B, C) ->
     Store = element(?AGENT_STORE, St),
     Cells = element(?STORE_CELLS, Store),
     Proto = {?SOME, {?HANDLE_TAG, PId}} =
-        {?SOME, element(?BUILTINPAIR_PROTO, element(W, element(?AGENT_REALM, St)))},
+        {?SOME, element(?BUILTINPAIR_PROTOTYPE, element(W, element(?AGENT_REALM, St)))},
     Probe = case element(?STORE_ICS, Store) of
         #{Site := {?IC_CALL, KeyBin, Ways, _}} ->
             case Ways of
@@ -213,19 +213,19 @@ call_kind(St, Kind, Fn, Recv, Args, _, _, _) when is_list(Args) ->
     call_kind_list(St, Kind, Fn, Recv, Args);
 call_kind(St, ?COMPILEDFN(Code, Home, _, _, DirectEntry), Fn, Recv, N, A, B, C) ->
     case DirectEntry of
-        {?SOME, ?DIRECT_ENTRY(CodeT, N, true)} ->
+        {?SOME, ?DIRECT_ENTRY(DirectCode, N, true)} ->
             case N of
-                0 -> CodeT(St, Recv);
-                1 -> CodeT(St, Recv, A);
-                2 -> CodeT(St, Recv, A, B);
-                3 -> CodeT(St, Recv, A, B, C)
+                0 -> DirectCode(St, Recv);
+                1 -> DirectCode(St, Recv, A);
+                2 -> DirectCode(St, Recv, A, B);
+                3 -> DirectCode(St, Recv, A, B, C)
             end;
-        {?SOME, ?DIRECT_ENTRY(CodeS, N, false)} ->
+        {?SOME, ?DIRECT_ENTRY(DirectCode, N, false)} ->
             case N of
-                0 -> CodeS(St);
-                1 -> CodeS(St, A);
-                2 -> CodeS(St, A, B);
-                3 -> CodeS(St, A, B, C)
+                0 -> DirectCode(St);
+                1 -> DirectCode(St, A);
+                2 -> DirectCode(St, A, B);
+                3 -> DirectCode(St, A, B, C)
             end;
         _ ->
             Code(St, ?FRAME(Recv, Fn, home_or_undefined(Home), undefined),
@@ -299,7 +299,7 @@ call_via_walk(St, Recv = {?HANDLE_TAG, RId}, RCell, KeyBin, Args, Site)
             {own_shaped(RCell, KeyBin), none};
         ?SSHAPEDOBJECT_TAG ->
             {own_shaped(RCell, KeyBin),
-             {Site, {ic_shaped, element(?SSHAPEDOBJECT_SID, RCell)}, []}};
+             {Site, {ic_shaped, element(?SSHAPEDOBJECT_SHAPE_ID, RCell)}, []}};
         _ -> {miss, none}
     end,
     case Own of
@@ -437,20 +437,20 @@ plain_callee_kind(Cells, {?HANDLE_TAG, FnId}) ->
 
 call_kind_list(St, ?COMPILEDFN(Code, Home, _, _, DirectEntry), Fn, Recv, Args) ->
     case DirectEntry of
-        {?SOME, ?DIRECT_ENTRY(CodeT, Arity, true)} when length(Args) =:= Arity ->
-            apply_this(CodeT, St, Recv, Args);
-        {?SOME, ?DIRECT_ENTRY(CodeS, Arity, false)} when length(Args) =:= Arity ->
-            erlang:apply(CodeS, [St | Args]);
+        {?SOME, ?DIRECT_ENTRY(DirectCode, Arity, true)} when length(Args) =:= Arity ->
+            apply_this(DirectCode, St, Recv, Args);
+        {?SOME, ?DIRECT_ENTRY(DirectCode, Arity, false)} when length(Args) =:= Arity ->
+            erlang:apply(DirectCode, [St | Args]);
         _ -> Code(St, ?FRAME(Recv, Fn, home_or_undefined(Home), undefined), Args)
     end;
 call_kind_list(St, {?NATIVEFN_TAG, Token, _, _, _}, _, Recv, Args) ->
     'arc@rt@builtins':dispatch_native(St, Token, Recv, Args).
 
-apply_this(CodeT, St, Recv, []) -> CodeT(St, Recv);
-apply_this(CodeT, St, Recv, [A]) -> CodeT(St, Recv, A);
-apply_this(CodeT, St, Recv, [A, B]) -> CodeT(St, Recv, A, B);
-apply_this(CodeT, St, Recv, [A, B, C]) -> CodeT(St, Recv, A, B, C);
-apply_this(CodeT, St, Recv, Args) -> erlang:apply(CodeT, [St, Recv | Args]).
+apply_this(DirectCode, St, Recv, []) -> DirectCode(St, Recv);
+apply_this(DirectCode, St, Recv, [A]) -> DirectCode(St, Recv, A);
+apply_this(DirectCode, St, Recv, [A, B]) -> DirectCode(St, Recv, A, B);
+apply_this(DirectCode, St, Recv, [A, B, C]) -> DirectCode(St, Recv, A, B, C);
+apply_this(DirectCode, St, Recv, Args) -> erlang:apply(DirectCode, [St, Recv | Args]).
 
 new_direct(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
     Store = element(?AGENT_STORE, St),
@@ -459,9 +459,9 @@ new_direct(St, Ctor = {?HANDLE_TAG, CId}, Args) ->
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
             case element(?SOBJECT_KIND, Cell) of
                 Kind = ?COMPILEDFN(_, _, Flags, ?NONE, _)
-                  when element(?FNFLAGS_IS_CTOR, Flags) =:= true,
-                       element(?FNFLAGS_IS_DERIVED, Flags) =:= false,
-                       element(?FNFLAGS_IS_GEN, Flags) =:= false,
+                  when element(?FNFLAGS_IS_CONSTRUCTOR, Flags) =:= true,
+                       element(?FNFLAGS_IS_DERIVED_CONSTRUCTOR, Flags) =:= false,
+                       element(?FNFLAGS_IS_GENERATOR, Flags) =:= false,
                        element(?FNFLAGS_IS_ASYNC, Flags) =:= false ->
                     case element(?SOBJECT_PROPS, Cell) of
                         #{{?KEY_NAMED, <<"prototype">>} := Prop}
@@ -488,10 +488,10 @@ new_direct_apply(St, Store, Cells, Ctor, ?COMPILEDFN(Code, Home, _, _, DirectEnt
     St2 = setelement(?AGENT_STORE, St, ?ALLOC_CELL(Store, Cells, NewId, NewCell)),
     NewThis = {?HANDLE_TAG, NewId},
     {V, St3} = case DirectEntry of
-        {?SOME, ?DIRECT_ENTRY(CodeT, Arity, true)} when length(Args) =:= Arity ->
-            apply_this(CodeT, St2, NewThis, Args);
-        {?SOME, ?DIRECT_ENTRY(CodeS, Arity, false)} when length(Args) =:= Arity ->
-            erlang:apply(CodeS, [St2 | Args]);
+        {?SOME, ?DIRECT_ENTRY(DirectCode, Arity, true)} when length(Args) =:= Arity ->
+            apply_this(DirectCode, St2, NewThis, Args);
+        {?SOME, ?DIRECT_ENTRY(DirectCode, Arity, false)} when length(Args) =:= Arity ->
+            erlang:apply(DirectCode, [St2 | Args]);
         _ -> Code(St2, ?FRAME(NewThis, Ctor, home_or_undefined(Home), Ctor), Args)
     end,
     case V of
@@ -506,7 +506,7 @@ prepare_compiled_call(St, F, ?COMPILEDFN(Code, Home, Flags, _, DirectEntry), Thi
                  orelse element(?FNFLAGS_IS_STRICT, Flags) of
         true -> This;
         false when This =:= undefined; This =:= null ->
-            element(?REALM_GLOBAL, element(?AGENT_REALM, St));
+            element(?REALM_GLOBAL_OBJECT, element(?AGENT_REALM, St));
         false when element(1, This) =:= ?HANDLE_TAG -> This;
         false -> prim
     end,
@@ -519,32 +519,32 @@ prepare_compiled_call(St, F, ?COMPILEDFN(Code, Home, Flags, _, DirectEntry), Thi
     end;
 prepare_compiled_call(_, _, _, _) -> ?NONE.
 
-prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 0, true)}, T, _) ->
-    fun(S, _) -> CodeS(S, T) end;
-prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 1, true)}, T, _) ->
-    fun(S, [A | _]) -> CodeS(S, T, A);
-       (S, []) -> CodeS(S, T, undefined)
+prepared_direct_entry({?SOME, ?DIRECT_ENTRY(DirectCode, 0, true)}, T, _) ->
+    fun(S, _) -> DirectCode(S, T) end;
+prepared_direct_entry({?SOME, ?DIRECT_ENTRY(DirectCode, 1, true)}, T, _) ->
+    fun(S, [A | _]) -> DirectCode(S, T, A);
+       (S, []) -> DirectCode(S, T, undefined)
     end;
-prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 2, true)}, T, General) ->
-    fun(S, [A, B | _]) -> CodeS(S, T, A, B);
+prepared_direct_entry({?SOME, ?DIRECT_ENTRY(DirectCode, 2, true)}, T, General) ->
+    fun(S, [A, B | _]) -> DirectCode(S, T, A, B);
        (S, Args) -> General(S, Args)
     end;
-prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 3, true)}, T, General) ->
-    fun(S, [A, B, C | _]) -> CodeS(S, T, A, B, C);
+prepared_direct_entry({?SOME, ?DIRECT_ENTRY(DirectCode, 3, true)}, T, General) ->
+    fun(S, [A, B, C | _]) -> DirectCode(S, T, A, B, C);
        (S, Args) -> General(S, Args)
     end;
-prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 0, false)}, _, _) ->
-    fun(S, _) -> CodeS(S) end;
-prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 1, false)}, _, _) ->
-    fun(S, [A | _]) -> CodeS(S, A);
-       (S, []) -> CodeS(S, undefined)
+prepared_direct_entry({?SOME, ?DIRECT_ENTRY(DirectCode, 0, false)}, _, _) ->
+    fun(S, _) -> DirectCode(S) end;
+prepared_direct_entry({?SOME, ?DIRECT_ENTRY(DirectCode, 1, false)}, _, _) ->
+    fun(S, [A | _]) -> DirectCode(S, A);
+       (S, []) -> DirectCode(S, undefined)
     end;
-prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 2, false)}, _, General) ->
-    fun(S, [A, B | _]) -> CodeS(S, A, B);
+prepared_direct_entry({?SOME, ?DIRECT_ENTRY(DirectCode, 2, false)}, _, General) ->
+    fun(S, [A, B | _]) -> DirectCode(S, A, B);
        (S, Args) -> General(S, Args)
     end;
-prepared_direct_entry({?SOME, ?DIRECT_ENTRY(CodeS, 3, false)}, _, General) ->
-    fun(S, [A, B, C | _]) -> CodeS(S, A, B, C);
+prepared_direct_entry({?SOME, ?DIRECT_ENTRY(DirectCode, 3, false)}, _, General) ->
+    fun(S, [A, B, C | _]) -> DirectCode(S, A, B, C);
        (S, Args) -> General(S, Args)
     end;
 prepared_direct_entry(_, _, General) -> General.

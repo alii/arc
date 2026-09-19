@@ -121,23 +121,23 @@ pub fn translate_unaryop(op: ast.UnaryOp) -> Option(opcode.UnaryOpKind) {
   }
 }
 
-pub fn compound_to_binop(op: ast.AssignmentOp) -> Result(ClassifiedBinOp, Nil) {
+pub fn compound_to_binop(op: ast.AssignmentOp) -> Option(ClassifiedBinOp) {
   case op {
-    ast.AddAssign -> Ok(AddOp)
-    ast.SubtractAssign -> Ok(PureOp(binop.Arith(binop.Sub)))
-    ast.MultiplyAssign -> Ok(PureOp(binop.Arith(binop.Mul)))
-    ast.DivideAssign -> Ok(PureOp(binop.Arith(binop.Div)))
-    ast.ModuloAssign -> Ok(PureOp(binop.Arith(binop.Mod)))
-    ast.ExponentiationAssign -> Ok(PureOp(binop.Arith(binop.Exp)))
-    ast.LeftShiftAssign -> Ok(PureOp(binop.Bitwise(binop.ShiftLeft)))
-    ast.RightShiftAssign -> Ok(PureOp(binop.Bitwise(binop.ShiftRight)))
+    ast.AddAssign -> Some(AddOp)
+    ast.SubtractAssign -> Some(PureOp(binop.Arith(binop.Sub)))
+    ast.MultiplyAssign -> Some(PureOp(binop.Arith(binop.Mul)))
+    ast.DivideAssign -> Some(PureOp(binop.Arith(binop.Div)))
+    ast.ModuloAssign -> Some(PureOp(binop.Arith(binop.Mod)))
+    ast.ExponentiationAssign -> Some(PureOp(binop.Arith(binop.Exp)))
+    ast.LeftShiftAssign -> Some(PureOp(binop.Bitwise(binop.ShiftLeft)))
+    ast.RightShiftAssign -> Some(PureOp(binop.Bitwise(binop.ShiftRight)))
     ast.UnsignedRightShiftAssign ->
-      Ok(PureOp(binop.Bitwise(binop.ShiftRightUnsigned)))
-    ast.BitwiseAndAssign -> Ok(PureOp(binop.Bitwise(binop.BitAnd)))
-    ast.BitwiseOrAssign -> Ok(PureOp(binop.Bitwise(binop.BitOr)))
-    ast.BitwiseXorAssign -> Ok(PureOp(binop.Bitwise(binop.BitXor)))
-    ast.Assign -> Error(Nil)
+      Some(PureOp(binop.Bitwise(binop.ShiftRightUnsigned)))
+    ast.BitwiseAndAssign -> Some(PureOp(binop.Bitwise(binop.BitAnd)))
+    ast.BitwiseOrAssign -> Some(PureOp(binop.Bitwise(binop.BitOr)))
+    ast.BitwiseXorAssign -> Some(PureOp(binop.Bitwise(binop.BitXor)))
+    ast.Assign -> None
     ast.LogicalAndAssign | ast.LogicalOrAssign | ast.NullishCoalesceAssign ->
-      Error(Nil)
+      None
   }
 }

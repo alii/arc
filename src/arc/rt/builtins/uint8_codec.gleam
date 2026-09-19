@@ -1,17 +1,16 @@
-import arc/bytecode/key.{Named}
 import arc/internal/digits
 import arc/rt/buffer
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
+import arc/rt/builtins/options
 import arc/rt/builtins/realm_ops
 import arc/rt/limits
-import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/typed_array_bytes.{splice_clamped}
 import arc/rt/types.{
   type Agent, type Handle, type JsVal, ArrayBufferObj, Bytes, KHandle, KStr,
-  KUndef, NumKind, SObject, StringKey, TypedArrayObj, Uint8Kind, classify,
-  mk_int, mk_object, mk_string, mk_undefined,
+  KUndef, NumKind, SObject, TypedArrayObj, Uint8Kind, classify, mk_int,
+  mk_object, mk_string,
 }
 import arc/rt/utf8
 import arc/rt/val as rt_val
@@ -22,8 +21,6 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/string
-
-const max_byte_length = 2_147_483_647
 
 type Base64Alphabet {
   Base64
@@ -41,7 +38,7 @@ type Codec {
   HexCodec
 }
 
-fn parse_b64_alphabet(s: String) -> Option(Base64Alphabet) {
+fn base64_alphabet(s: String) -> Option(Base64Alphabet) {
   case s {
     "base64" -> Some(Base64)
     "base64url" -> Some(Base64Url)
@@ -88,14 +85,14 @@ fn uint8_view(st: Agent, v: JsVal) -> Option(Uint8View) {
   }
 }
 
-fn validate_u8(st: Agent, this: JsVal) -> Nil {
+fn validate_uint8_array(st: Agent, this: JsVal) -> Nil {
   case uint8_view(st, this) {
     Some(_) -> Nil
     None -> rt_val.throw_type_error(st, "Method must be called on a Uint8Array")
   }
 }
 
-fn u8_require_mutable(st: Agent, this: JsVal) -> Nil {
+fn require_mutable(st: Agent, this: JsVal) -> Nil {
   let immutable = case uint8_view(st, this) {
     Some(Uint8View(buffer:, ..)) -> buffer.is_immutable(st, buffer)
     None -> False
@@ -115,7 +112,7 @@ type Uint8LiveView {
 }
 
 // length from the same read as data, never re-read
-fn u8_live_view(st: Agent, this: JsVal) -> Uint8LiveView {
+fn live_view(st: Agent, this: JsVal) -> Uint8LiveView {
   case uint8_view(st, this) {
     Some(Uint8View(buffer:, byte_offset:, length:)) ->
       case buffer.bytes(st, buffer) {
@@ -158,25 +155,6 @@ fn u8_live_view(st: Agent, this: JsVal) -> Uint8LiveView {
   }
 }
 
-fn get_opts_object(st: Agent, v: JsVal) -> Option(Handle) {
-  case classify(v) {
-    KUndef -> None
-    KHandle(h) -> Some(h)
-    _ -> rt_val.throw_type_error(st, "options must be an object or undefined")
-  }
-}
-
-fn get_option_value(
-  st: Agent,
-  opts: Option(Handle),
-  key: String,
-) -> #(JsVal, Agent) {
-  case opts {
-    None -> #(mk_undefined(), st)
-    Some(h) -> rt_obj.get_prop(st, mk_object(h), StringKey(Named(key)))
-  }
-}
-
 fn get_enum_option(
   st: Agent,
   opts: Option(Handle),
@@ -184,7 +162,7 @@ fn get_enum_option(
   parse: fn(String) -> Option(a),
   default: a,
 ) -> #(a, Agent) {
-  let #(got, st) = get_option_value(st, opts, key)
+  let #(got, st) = options.get_option(st, opts, key)
   case classify(got) {
     KUndef -> #(default, st)
     KStr(s) ->
@@ -204,13 +182,13 @@ fn get_enum_option(
   }
 }
 
-fn read_b64_options(
+fn read_base64_options(
   st: Agent,
   opt_arg: JsVal,
 ) -> #(Base64Alphabet, LastChunkHandling, Agent) {
-  let opts = get_opts_object(st, opt_arg)
+  let opts = options.get_options_object(st, opt_arg)
   let #(alphabet, st) =
-    get_enum_option(st, opts, "alphabet", parse_b64_alphabet, Base64)
+    get_enum_option(st, opts, "alphabet", base64_alphabet, Base64)
   let #(handling, st) =
     get_enum_option(
       st,
@@ -233,18 +211,15 @@ fn require_string(st: Agent, v: JsVal) -> String {
   }
 }
 
-pub fn u8_to_base64(
-  st: Agent,
-  this: JsVal,
-  args: List(JsVal),
-) -> #(JsVal, Agent) {
-  let Nil = validate_u8(st, this)
-  let opts = get_opts_object(st, helpers.first_arg_or_undefined(args))
+pub fn to_base64(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
+  let Nil = validate_uint8_array(st, this)
+  let opts =
+    options.get_options_object(st, helpers.first_arg_or_undefined(args))
   let #(alphabet, st) =
-    get_enum_option(st, opts, "alphabet", parse_b64_alphabet, Base64)
-  let #(omit_val, st) = get_option_value(st, opts, "omitPadding")
+    get_enum_option(st, opts, "alphabet", base64_alphabet, Base64)
+  let #(omit_val, st) = options.get_option(st, opts, "omitPadding")
   let padding = !rt_val.to_boolean(omit_val)
-  let view = u8_live_view(st, this)
+  let view = live_view(st, this)
   let assert Ok(bytes) =
     bit_array.slice(view.data, view.byte_offset, view.length)
   let out = case alphabet {
@@ -254,52 +229,54 @@ pub fn u8_to_base64(
   #(mk_string(out), st)
 }
 
-pub fn u8_to_hex(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  let Nil = validate_u8(st, this)
-  let view = u8_live_view(st, this)
+pub fn to_hex(st: Agent, this: JsVal) -> #(JsVal, Agent) {
+  let Nil = validate_uint8_array(st, this)
+  let view = live_view(st, this)
   let assert Ok(bytes) =
     bit_array.slice(view.data, view.byte_offset, view.length)
   #(mk_string(string.lowercase(bit_array.base16_encode(bytes))), st)
 }
 
-pub fn u8_set_from_base64(
+pub fn set_from_base64(
   st: Agent,
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let Nil = validate_u8(st, this)
-  let Nil = u8_require_mutable(st, this)
+  let Nil = validate_uint8_array(st, this)
+  let Nil = require_mutable(st, this)
   let s = require_string(st, helpers.first_arg_or_undefined(args))
-  let #(alphabet, handling, st) = read_b64_options(st, helpers.arg_at(args, 1))
-  let view = u8_live_view(st, this)
+  let #(alphabet, handling, st) =
+    read_base64_options(st, helpers.arg_at(args, 1))
+  let view = live_view(st, this)
   let res = from_base64(s, alphabet, handling, view.length)
   decode_into_view(st, view, res, Base64Codec)
 }
 
-pub fn u8_set_from_hex(
+pub fn set_from_hex(
   st: Agent,
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let Nil = validate_u8(st, this)
-  let Nil = u8_require_mutable(st, this)
+  let Nil = validate_uint8_array(st, this)
+  let Nil = require_mutable(st, this)
   let s = require_string(st, helpers.first_arg_or_undefined(args))
-  let view = u8_live_view(st, this)
+  let view = live_view(st, this)
   let res = from_hex(s, view.length)
   decode_into_view(st, view, res, HexCodec)
 }
 
-pub fn u8_from_base64(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+pub fn from_base64_static(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let s = require_string(st, helpers.first_arg_or_undefined(args))
-  let #(alphabet, handling, st) = read_b64_options(st, helpers.arg_at(args, 1))
+  let #(alphabet, handling, st) =
+    read_base64_options(st, helpers.arg_at(args, 1))
   let res = from_base64(s, alphabet, handling, limits.max_safe_integer)
-  decode_to_new_u8(st, res, Base64Codec)
+  decode_to_new(st, res, Base64Codec)
 }
 
-pub fn u8_from_hex(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+pub fn from_hex_static(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let s = require_string(st, helpers.first_arg_or_undefined(args))
   let res = from_hex(s, limits.max_safe_integer)
-  decode_to_new_u8(st, res, HexCodec)
+  decode_to_new(st, res, HexCodec)
 }
 
 fn read_written_result(st: Agent, read: Int, written: Int) -> #(JsVal, Agent) {
@@ -311,7 +288,7 @@ fn read_written_result(st: Agent, read: Int, written: Int) -> #(JsVal, Agent) {
   #(mk_object(h), st)
 }
 
-fn u8_write_bytes(
+fn write_bytes(
   st: Agent,
   buffer: Handle,
   data: BitArray,
@@ -342,28 +319,28 @@ fn decode_into_view(
   let Uint8LiveView(buffer:, data:, byte_offset: off, ..) = view
   case res {
     DecodeFailed(partial:) ->
-      decode_error(u8_write_bytes(st, buffer, data, off, partial), codec)
+      decode_error(write_bytes(st, buffer, data, off, partial), codec)
     Decoded(read:, bytes:) -> {
-      let st = u8_write_bytes(st, buffer, data, off, bytes)
+      let st = write_bytes(st, buffer, data, off, bytes)
       read_written_result(st, read, bit_array.byte_size(bytes))
     }
   }
 }
 
-fn decode_to_new_u8(
+fn decode_to_new(
   st: Agent,
   res: DecodeResult,
   codec: Codec,
 ) -> #(JsVal, Agent) {
   case res {
     DecodeFailed(partial: _) -> decode_error(st, codec)
-    Decoded(read: _, bytes:) -> u8_alloc_from_bytes(st, bytes)
+    Decoded(read: _, bytes:) -> alloc_from_bytes(st, bytes)
   }
 }
 
-fn u8_alloc_from_bytes(st: Agent, bytes: BitArray) -> #(JsVal, Agent) {
+fn alloc_from_bytes(st: Agent, bytes: BitArray) -> #(JsVal, Agent) {
   let len = bit_array.byte_size(bytes)
-  use <- bool.lazy_guard(len > max_byte_length, fn() {
+  use <- bool.lazy_guard(len > limits.max_buffer_byte_length, fn() {
     rt_val.throw_range_error(st, "Invalid typed array length")
   })
   let kind = NumKind(Uint8Kind)
@@ -373,7 +350,7 @@ fn u8_alloc_from_bytes(st: Agent, bytes: BitArray) -> #(JsVal, Agent) {
       ArrayBufferObj(storage: Bytes(bytes:, max_byte_length: None)),
       st.realm.array_buffer.prototype,
     )
-  let #(ta_h, st) =
+  let #(typed_array_h, st) =
     realm_ops.alloc_object(
       st,
       TypedArrayObj(
@@ -382,12 +359,12 @@ fn u8_alloc_from_bytes(st: Agent, bytes: BitArray) -> #(JsVal, Agent) {
         byte_offset: 0,
         length: Some(len),
       ),
-      u8_prototype(st),
+      uint8_array_prototype(st),
     )
-  #(mk_object(ta_h), st)
+  #(mk_object(typed_array_h), st)
 }
 
-fn u8_prototype(st: Agent) -> Handle {
+fn uint8_array_prototype(st: Agent) -> Handle {
   let assert Ok(bt) =
     dict.get(st.realm.typed_arrays.by_kind, NumKind(Uint8Kind))
     as "uint8_codec: Uint8Array missing from realm.typed_arrays"
@@ -425,10 +402,10 @@ fn from_base64(
 }
 
 // tab lf ff cr space
-fn b64_skip_ws(bin: BitArray, index: Int) -> #(BitArray, Int) {
+fn base64_skip_whitespace(bin: BitArray, index: Int) -> #(BitArray, Int) {
   case bin {
     <<c, rest:bits>> if c == 9 || c == 10 || c == 12 || c == 13 || c == 32 ->
-      b64_skip_ws(rest, index + 1)
+      base64_skip_whitespace(rest, index + 1)
     _ -> #(bin, index)
   }
 }
@@ -445,7 +422,7 @@ fn from_base64_loop(
   handling: LastChunkHandling,
   max_len: Int,
 ) -> DecodeResult {
-  let #(bin, index) = b64_skip_ws(bin, index)
+  let #(bin, index) = base64_skip_whitespace(bin, index)
   case bin {
     <<>> ->
       case chunk_len > 0 {
@@ -457,7 +434,7 @@ fn from_base64_loop(
                 True -> DecodeFailed(decode_bytes(acc))
                 False ->
                   case
-                    b64_decode_partial(
+                    base64_decode_partial(
                       chunk,
                       chunk_len,
                       throw_on_extra_bits: False,
@@ -473,9 +450,9 @@ fn from_base64_loop(
       }
     // '='
     <<61, rest:bits>> ->
-      b64_padding(rest, index + 1, read, acc, chunk, chunk_len, handling)
+      base64_padding(rest, index + 1, read, acc, chunk, chunk_len, handling)
     <<c, rest:bits>> ->
-      case b64_value(c, alphabet) {
+      case base64_value(c, alphabet) {
         None -> DecodeFailed(decode_bytes(acc))
         Some(v) -> {
           let remaining = max_len - written
@@ -529,7 +506,7 @@ fn from_base64_loop(
   }
 }
 
-fn b64_padding(
+fn base64_padding(
   bin: BitArray,
   index: Int,
   read: Int,
@@ -539,7 +516,7 @@ fn b64_padding(
   handling: LastChunkHandling,
 ) -> DecodeResult {
   use <- bool.guard(chunk_len < 2, DecodeFailed(decode_bytes(acc)))
-  let #(bin, index) = b64_skip_ws(bin, index)
+  let #(bin, index) = base64_skip_whitespace(bin, index)
   case chunk_len == 2 {
     True ->
       case bin {
@@ -550,16 +527,16 @@ fn b64_padding(
           }
         // second '='
         <<61, rest:bits>> -> {
-          let #(rest, index) = b64_skip_ws(rest, index + 1)
-          b64_finish_padding(rest, index, acc, chunk, chunk_len, handling)
+          let #(rest, index) = base64_skip_whitespace(rest, index + 1)
+          base64_finish_padding(rest, index, acc, chunk, chunk_len, handling)
         }
         _ -> DecodeFailed(decode_bytes(acc))
       }
-    False -> b64_finish_padding(bin, index, acc, chunk, chunk_len, handling)
+    False -> base64_finish_padding(bin, index, acc, chunk, chunk_len, handling)
   }
 }
 
-fn b64_finish_padding(
+fn base64_finish_padding(
   bin: BitArray,
   index: Int,
   acc: List(BitArray),
@@ -569,7 +546,7 @@ fn b64_finish_padding(
 ) -> DecodeResult {
   case bin {
     <<>> ->
-      case b64_decode_partial(chunk, chunk_len, handling == Strict) {
+      case base64_decode_partial(chunk, chunk_len, handling == Strict) {
         Some(tail) -> Decoded(index, decode_bytes([tail, ..acc]))
         None -> DecodeFailed(decode_bytes(acc))
       }
@@ -577,7 +554,7 @@ fn b64_finish_padding(
   }
 }
 
-fn b64_decode_partial(
+fn base64_decode_partial(
   chunk: Int,
   chunk_len: Int,
   throw_on_extra_bits throw_on_extra_bits: Bool,
@@ -602,7 +579,7 @@ fn b64_decode_partial(
   }
 }
 
-fn b64_value(c: Int, alphabet: Base64Alphabet) -> Option(Int) {
+fn base64_value(c: Int, alphabet: Base64Alphabet) -> Option(Int) {
   let url = alphabet == Base64Url
   case c {
     _ if c >= 65 && c <= 90 -> Some(c - 65)

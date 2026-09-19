@@ -669,14 +669,14 @@ fn prop_has_split(p: ast.Property) -> Bool {
   }
 }
 
-fn key_has_split(k: ast.PropertyKey) -> Bool {
+fn key_has_split(k: ast.PropertyName) -> Bool {
   case k {
-    ast.KeyComputed(expression: e) -> expr_has_split(e)
-    ast.KeyIdentifier(..)
-    | ast.KeyString(..)
-    | ast.KeyNumber(..)
-    | ast.KeyBigInt(..)
-    | ast.KeyPrivate(..) -> False
+    ast.ComputedName(expression: e) -> expr_has_split(e)
+    ast.IdentifierName(..)
+    | ast.StringName(..)
+    | ast.NumberName(..)
+    | ast.BigIntName(..)
+    | ast.PrivateName(..) -> False
   }
 }
 
@@ -1101,14 +1101,14 @@ fn plan_expr(p: SplitPlanner, e: ast.Expression) -> SplitPlanner {
   }
 }
 
-fn plan_key(p: SplitPlanner, k: ast.PropertyKey) -> SplitPlanner {
+fn plan_key(p: SplitPlanner, k: ast.PropertyName) -> SplitPlanner {
   case k {
-    ast.KeyComputed(expression: e) -> plan_expr(p, e)
-    ast.KeyIdentifier(..)
-    | ast.KeyString(..)
-    | ast.KeyNumber(..)
-    | ast.KeyBigInt(..)
-    | ast.KeyPrivate(..) -> p
+    ast.ComputedName(expression: e) -> plan_expr(p, e)
+    ast.IdentifierName(..)
+    | ast.StringName(..)
+    | ast.NumberName(..)
+    | ast.BigIntName(..)
+    | ast.PrivateName(..) -> p
   }
 }
 
@@ -2203,7 +2203,7 @@ fn repack_saved_locals_loop(
       case dict.get(overrides, i) {
         Ok(v) -> repack_saved_locals_loop(ctx, overrides, i + 1, [v, ..acc])
         Error(Nil) ->
-          anf.then(anf.bind(anf.tuple_get(ctx.saved_locals, i)), fn(v) {
+          anf.then(anf.let_(anf.tuple_get(ctx.saved_locals, i)), fn(v) {
             repack_saved_locals_loop(ctx, overrides, i + 1, [v, ..acc])
           })
       }
@@ -2212,9 +2212,11 @@ fn repack_saved_locals_loop(
 
 fn machine_default_arm(e: Emitter) -> #(ir.Expr, Emitter) {
   let msg = ir.ConstBinary(bit_array.from_string("invalid gen state"))
-  anf.run_to(anf.host("new_type_error", [msg]), e, fn(err, _e) {
-    step_throw(err)
-  })
+  anf.run_to(
+    anf.host("new_error", [ir.ConstAtom("type_error"), msg]),
+    e,
+    fn(err, _e) { step_throw(err) },
+  )
 }
 
 fn build_machine_params(e: Emitter, i: Int, ncap: Int) -> List(ir.Local) {
@@ -2296,10 +2298,10 @@ fn cap_vars(e: Emitter, i: Int, n: Int) -> List(ir.Value) {
   }
 }
 
-fn atom_bool(rc: state.IrConsts, value b: Bool) -> ir.Value {
+fn atom_bool(consts: state.IrConsts, value b: Bool) -> ir.Value {
   case b {
-    True -> rc.true_
-    False -> rc.false_
+    True -> consts.true_
+    False -> consts.false_
   }
 }
 
@@ -2316,7 +2318,7 @@ fn expected_length(fixed: List(ast.Pattern)) -> Int {
 
 fn start_op(kind: state.CoroutineKind) -> String {
   case kind {
-    state.AsyncFunction -> "async_start"
+    state.AsyncFunction -> "start"
     state.Generator -> "gen_start"
     state.AsyncGenerator -> "asyncgen_start"
   }
@@ -2329,7 +2331,7 @@ fn kind_is_async(kind: state.CoroutineKind) -> Bool {
   }
 }
 
-fn kind_is_gen(kind: state.CoroutineKind) -> Bool {
+fn kind_is_generator(kind: state.CoroutineKind) -> Bool {
   case kind {
     state.Generator | state.AsyncGenerator -> True
     state.AsyncFunction -> False
@@ -2359,30 +2361,30 @@ fn emit_closure_alloc(
   params params: List(ast.Pattern),
   captures captures: List(ir.Value),
 ) -> #(ir.Expr, Emitter) {
-  let rc = e.consts
+  let consts = e.consts
   let flags = [
     // must match arc/rt/types FnFlags field order
     ir.ConstAtom("fn_flags"),
-    rc.false_,
-    rc.false_,
-    rc.false_,
-    atom_bool(rc, func.shape_is_arrow(shape)),
-    atom_bool(rc, func.shape_is_method(shape)),
-    atom_bool(rc, kind_is_gen(kind)),
-    atom_bool(rc, kind_is_async(kind)),
-    atom_bool(rc, is_strict),
+    consts.false_,
+    consts.false_,
+    consts.false_,
+    atom_bool(consts, func.shape_is_arrow(shape)),
+    atom_bool(consts, func.shape_is_method(shape)),
+    atom_bool(consts, kind_is_generator(kind)),
+    atom_bool(consts, kind_is_async(kind)),
+    atom_bool(consts, is_strict),
   ]
   let name_bin = case js_name {
     Some(n) -> ir.ConstBinary(bit_array.from_string(n))
-    None -> rc.empty_bin
+    None -> consts.empty_bin
   }
   let #(fixed, _) = ast_util.split_trailing_rest(params)
   let exp_len = expected_length(fixed)
   anf.run(
     {
-      use fun <- anf.then(anf.bind(ir.MakeClosure(outer_name, captures, 2)))
+      use fun <- anf.then(anf.let_(ir.MakeClosure(outer_name, captures, 2)))
       use flags_t <- anf.then(anf.make_tuple(flags))
-      anf.host("new_function", [
+      anf.host("new_closure", [
         fun,
         flags_t,
         name_bin,
@@ -2571,8 +2573,8 @@ fn if_terminal(
 }
 
 // _rs_i is a term so the state id must be boxed
-fn rs_box(n: Int) -> anf.Build(ir.Value) {
-  anf.bind(ir.Convert(ir.BoxInt(ir.W32), ir.ConstI32(n)))
+fn resume_state_term(n: Int) -> anf.Build(ir.Value) {
+  anf.let_(ir.Convert(ir.BoxInt(ir.W32), ir.ConstI32(n)))
 }
 
 fn key_named(s: String) -> anf.Build(ir.Value) {
@@ -2630,7 +2632,7 @@ fn emit_delegate_setup(
         #(result_idx, ir.ConstAtom(delegate_start)),
       ])
     use loc2 <- anf.then(fn(e, k) { repack_live_locals(e, ctx, ov, k) })
-    use rs <- anf.then(rs_box(delegate_state))
+    use rs <- anf.then(resume_state_term(delegate_state))
     anf.pure(ir.Continue(ctx.resume_loop_label, [rs, loc2]))
   }
   run_terminal(b, e)
@@ -2648,39 +2650,42 @@ fn emit_delegate_arm(
   let undef = ir.ConstAtom("undefined")
   let b = {
     use iterator <- anf.then(
-      anf.bind(anf.tuple_get(ctx.saved_locals, iter_idx)),
+      anf.let_(anf.tuple_get(ctx.saved_locals, iter_idx)),
     )
-    use inner <- anf.then(anf.bind(anf.tuple_get(ctx.saved_locals, inner_idx)))
-    use flag <- anf.then(anf.bind(anf.tuple_get(ctx.saved_locals, result_idx)))
+    use inner <- anf.then(anf.let_(anf.tuple_get(ctx.saved_locals, inner_idx)))
+    use flag <- anf.then(anf.let_(anf.tuple_get(ctx.saved_locals, result_idx)))
     use first <- anf.then(
-      anf.bind(ir.NumTerm(ir.NEq, flag, ir.ConstAtom(delegate_start))),
+      anf.let_(ir.NumTerm(ir.NEq, flag, ir.ConstAtom(delegate_start))),
     )
-    use resume_mode <- anf.then(anf.bind_if(
+    use resume_mode <- anf.then(anf.let_if(
       first,
-      rs_box(resume_next),
+      resume_state_term(resume_next),
       anf.pure(ctx.resume_mode),
     ))
-    use sent_value <- anf.then(anf.bind_if(
+    use sent_value <- anf.then(anf.let_if(
       first,
       anf.pure(undef),
       anf.pure(ctx.sent_value),
     ))
     let ctx = MachineContext(..ctx, resume_mode:, sent_value:)
     use mode_i32 <- anf.then(
-      anf.bind(ir.Convert(ir.UnboxInt(ir.W32), ctx.resume_mode)),
+      anf.let_(ir.Convert(ir.UnboxInt(ir.W32), ctx.resume_mode)),
     )
     use mode_ne0 <- anf.then(
-      anf.bind(ir.Num(ir.INe(ir.W32), [mode_i32, ir.ConstI32(resume_next)])),
+      anf.let_(ir.Num(ir.INe(ir.W32), [mode_i32, ir.ConstI32(resume_next)])),
     )
     let mbin = fn(s) { ir.Values([ir.ConstBinary(bit_array.from_string(s))]) }
-    use meth <- anf.then(anf.bind_if(
+    use meth <- anf.then(anf.let_if(
       mode_ne0,
       {
         use mname <- anf.then(
-          anf.bind(ir.Switch(
+          anf.let_(ir.Switch(
             mode_i32,
             [ir.TTerm],
-            [ir.SwitchArm(1, mbin("throw")), ir.SwitchArm(2, mbin("return"))],
+            [
+              ir.SwitchArm(resume_throw, mbin("throw")),
+              ir.SwitchArm(resume_return, mbin("return")),
+            ],
             mbin("next"),
           )),
         )
@@ -2689,16 +2694,16 @@ fn emit_delegate_arm(
       },
       get_named(iterator, "next"),
     ))
-    use is_undef <- anf.then(anf.bind(ir.NumTerm(ir.NEq, meth, undef)))
+    use is_undef <- anf.then(anf.let_(ir.NumTerm(ir.NEq, meth, undef)))
     use is_null <- anf.then(
-      anf.bind(ir.NumTerm(ir.NEq, meth, ir.ConstAtom("null"))),
+      anf.let_(ir.NumTerm(ir.NEq, meth, ir.ConstAtom("null"))),
     )
-    use is_nullish <- anf.then(anf.bind(ir.NumTerm(ir.NAdd, is_undef, is_null)))
+    use is_nullish <- anf.then(anf.let_(ir.NumTerm(ir.NAdd, is_undef, is_null)))
     use missing <- anf.then(
-      anf.bind(ir.Num(ir.IAnd(ir.W32), [mode_ne0, is_nullish])),
+      anf.let_(ir.Num(ir.IAnd(ir.W32), [mode_ne0, is_nullish])),
     )
     use is_throw <- anf.then(
-      anf.bind(ir.Num(ir.IEq(ir.W32), [mode_i32, ir.ConstI32(resume_throw)])),
+      anf.let_(ir.Num(ir.IEq(ir.W32), [mode_i32, ir.ConstI32(resume_throw)])),
     )
     let on_missing =
       if_terminal(
@@ -2749,10 +2754,10 @@ fn emit_delegate_await_arm(
 ) -> EmitResult {
   let b = {
     use resume_mode <- anf.then(
-      anf.bind(anf.tuple_get(ctx.saved_locals, result_idx)),
+      anf.let_(anf.tuple_get(ctx.saved_locals, result_idx)),
     )
     use mode_i32 <- anf.then(
-      anf.bind(ir.Convert(ir.UnboxInt(ir.W32), resume_mode)),
+      anf.let_(ir.Convert(ir.UnboxInt(ir.W32), resume_mode)),
     )
     delegate_result(
       ctx,
@@ -2776,7 +2781,7 @@ fn delegate_result(
 ) -> anf.Build(ir.Expr) {
   use is_obj <- anf.then(anf.host_bool("is_object", [res]))
   use is_return <- anf.then(
-    anf.bind(ir.Num(ir.IEq(ir.W32), [mode_i32, ir.ConstI32(resume_return)])),
+    anf.let_(ir.Num(ir.IEq(ir.W32), [mode_i32, ir.ConstI32(resume_return)])),
   )
   if_terminal(
     is_obj,
@@ -2794,12 +2799,12 @@ fn delegate_result(
               ctx,
               dict.from_list([#(result_idx, v)]),
             ))
-            use rs <- anf.then(rs_box(delegate_spec.next_state))
+            use rs <- anf.then(resume_state_term(delegate_spec.next_state))
             anf.pure(ir.Continue(ctx.resume_loop_label, [rs, loc2]))
           },
         ),
         {
-          use loc2 <- anf.then(anf.bind_if(
+          use loc2 <- anf.then(anf.let_if(
             first,
             repack_saved_locals(
               ctx,
@@ -3326,7 +3331,7 @@ fn emit_for_of_step(
     let #(dk_n, e) = state.fresh_var(e)
     let #(vk_n, e) = state.fresh_var(e)
     let #(done_branch, e) = jump_state_leaf(e, ctx, after, dict.new())
-    use #(bind_tree, e) <- result.try(bind_for_lhs(e, left, ir.Var(val_n)))
+    use #(bind_tree, e) <- result.try(for_lhs_bind(e, left, ir.Var(val_n)))
     let #(tmp, e) = state.fresh_var(e)
     let #(body_branch, e) = {
       use t <- anf.wrap(jump_state_leaf(e, ctx, body_state, dict.new()))
@@ -3376,7 +3381,7 @@ fn named_key_tuple(s: String) -> ir.Expr {
   )
 }
 
-fn bind_for_lhs(e: Emitter, left: ast.ForInit, v: ir.Value) -> EmitResult {
+fn for_lhs_bind(e: Emitter, left: ast.ForInit, v: ir.Value) -> EmitResult {
   let via = fn(pat, mode) { e.dispatch.emit_destructure(e, pat, v, mode) }
   case left {
     ast.ForInitDeclaration(kind:, declarations: [d]) ->
@@ -3547,8 +3552,8 @@ fn build_switch_arms(
   plan: SplitPlan,
 ) -> Result(#(List(ir.SwitchArm), Emitter), state.EmitError) {
   use #(ctx, e) <- result.try(
-    list.try_fold(plan.arms, #(ctx, e), fn(st, arm) {
-      let #(ctx, e) = st
+    list.try_fold(plan.arms, #(ctx, e), fn(acc, arm) {
+      let #(ctx, e) = acc
       let ctx = with_region(ctx, arm.region)
       let region = current_try(ctx)
       let follow_of =
@@ -3577,8 +3582,8 @@ fn build_switch_arms(
     }),
   )
   use #(ctx, e) <- result.try(
-    list.try_fold(plan.try_entries, #(ctx, e), fn(st, entry) {
-      let #(ctx, e) = st
+    list.try_fold(plan.try_entries, #(ctx, e), fn(acc, entry) {
+      let #(ctx, e) = acc
       let outer_region = find_try(plan.try_entries, entry.outer)
       use #(ctx, e) <- result.try(case entry.catch_state, entry.handler {
         Some(catch_state), Some(h) -> {
@@ -3618,8 +3623,8 @@ fn build_switch_arms(
     }),
   )
   use #(ctx, e) <- result.try(
-    list.try_fold(plan.delegates, #(ctx, e), fn(st, delegate_spec) {
-      let #(ctx, e) = st
+    list.try_fold(plan.delegates, #(ctx, e), fn(acc, delegate_spec) {
+      let #(ctx, e) = acc
       let ctx = with_region(ctx, delegate_spec.region)
       let region = current_try(ctx)
       let iter_idx = extra_idx(ctx.layout, iter_key(delegate_spec.state_id))
@@ -3660,8 +3665,8 @@ fn build_switch_arms(
     }),
   )
   use #(ctx, e) <- result.map(
-    list.try_fold(plan.for_awaits, #(ctx, e), fn(st, spec) {
-      let #(ctx, e) = st
+    list.try_fold(plan.for_awaits, #(ctx, e), fn(acc, spec) {
+      let #(ctx, e) = acc
       let ctx = with_region(ctx, spec.region)
       let region = current_try(ctx)
       let #(head_body, e) = emit_for_await_head(e, ctx, spec)
@@ -3753,7 +3758,7 @@ pub fn emit_coroutine_fn(
             anf.make_tuple(initial_loc_values(e_pro, layout, info.local_count)),
           )
           use machine <- anf.then(
-            anf.bind(ir.MakeClosure(machine_name, cap_vars(e_pro, 0, ncap), 3)),
+            anf.let_(ir.MakeClosure(machine_name, cap_vars(e_pro, 0, ncap), 3)),
           )
           anf.host(start_op(kind), [
             machine,
@@ -3777,7 +3782,7 @@ pub fn emit_coroutine_fn(
           on: ir.OnTag(e_outer.consts.exn_tag),
           payload: [ex],
           exnref: None,
-          handler: ir.CallHost("js", "async_reject", [ir.Var(ex)]),
+          handler: ir.CallHost("js", "reject", [ir.Var(ex)]),
         ),
       ])
     state.Generator | state.AsyncGenerator -> body_expr
@@ -3850,7 +3855,7 @@ fn emit_for_await_head(
   let iter_idx = extra_idx(ctx.layout, for_await_iter_key(spec.head))
   let b = {
     use iterator <- anf.then(
-      anf.bind(anf.tuple_get(ctx.saved_locals, iter_idx)),
+      anf.let_(anf.tuple_get(ctx.saved_locals, iter_idx)),
     )
     use promise <- anf.then(anf.host("async_iter_next", [iterator]))
     use loc2 <- anf.then(repack_saved_locals(ctx, dict.new()))
@@ -3872,7 +3877,7 @@ fn emit_for_await_check(
         ir.Continue(ctx.resume_loop_label, [ir.ConstI32(spec.after), loc2])
       })
     let #(val_name, e) = state.fresh_var(e)
-    use #(bind_tree, e) <- result.try(bind_for_lhs(
+    use #(bind_tree, e) <- result.try(for_lhs_bind(
       e,
       spec.left,
       ir.Var(val_name),
@@ -3912,8 +3917,55 @@ fn fresh_temp(p: SplitPlanner) -> #(String, SplitPlanner) {
   #(temp_name(p.next_temp), SplitPlanner(..p, next_temp: p.next_temp + 1))
 }
 
-type HoistedExpr =
-  #(List(ast.StmtWithLine), ast.Expression, SplitPlanner)
+type HoistedExpr {
+  HoistedExpr(
+    prelude: List(ast.StmtWithLine),
+    expr: ast.Expression,
+    planner: SplitPlanner,
+  )
+}
+
+type HoistedOption {
+  HoistedOption(
+    prelude: List(ast.StmtWithLine),
+    expr: Option(ast.Expression),
+    planner: SplitPlanner,
+  )
+}
+
+type HoistedList {
+  HoistedList(
+    prelude: List(ast.StmtWithLine),
+    exprs: List(ast.Expression),
+    planner: SplitPlanner,
+  )
+}
+
+type HoistedMember {
+  HoistedMember(
+    prelude: List(ast.StmtWithLine),
+    object: ast.Expression,
+    property: ast.MemberProperty,
+    planner: SplitPlanner,
+  )
+}
+
+type HoistedProperty {
+  HoistedProperty(
+    prelude: List(ast.StmtWithLine),
+    property: ast.MemberProperty,
+    planner: SplitPlanner,
+  )
+}
+
+type HoistedClass {
+  HoistedClass(
+    prelude: List(ast.StmtWithLine),
+    super_class: Option(ast.Expression),
+    body: List(ast.ClassElement),
+    planner: SplitPlanner,
+  )
+}
 
 fn ident(span: ast.Span, name: String) -> ast.Expression {
   ast.Identifier(span:, name:)
@@ -3975,8 +4027,8 @@ fn is_trivial(ex: ast.Expression) -> Bool {
 
 fn class_element_has_effects(el: ast.ClassElement) -> Bool {
   case el {
-    ast.ClassMethod(key: ast.KeyComputed(_), ..)
-    | ast.ClassField(key: ast.KeyComputed(_), ..)
+    ast.ClassMethod(key: ast.ComputedName(_), ..)
+    | ast.ClassField(key: ast.ComputedName(_), ..)
     | ast.ClassField(is_static: True, ..)
     | ast.StaticBlock(..) -> True
     ast.ClassMethod(..) | ast.ClassField(..) -> False
@@ -3989,7 +4041,7 @@ fn spill_to_temp(
   ex: ast.Expression,
 ) -> HoistedExpr {
   case is_trivial(ex) {
-    True -> #([], ex, p)
+    True -> HoistedExpr([], ex, p)
     False -> {
       let span = ex.span
       let #(t, p) = fresh_temp(p)
@@ -3997,7 +4049,7 @@ fn spill_to_temp(
         ast.SpreadElement(sspan, arg) -> {
           let arr =
             ast.ArrayExpression(span, [Some(ast.SpreadElement(sspan, arg))])
-          #(
+          HoistedExpr(
             [assign_stmt(line, span, t, arr)],
             ast.SpreadElement(sspan, ident(span, t)),
             p,
@@ -4006,9 +4058,9 @@ fn spill_to_temp(
         ast.ClassExpression(..) -> {
           let zero = ast.NumberLiteral(span, ast.FiniteNumber(0.0))
           let seq = ast.SequenceExpression(span, [zero, ex])
-          #([assign_stmt(line, span, t, seq)], ident(span, t), p)
+          HoistedExpr([assign_stmt(line, span, t, seq)], ident(span, t), p)
         }
-        _ -> #([assign_stmt(line, span, t, ex)], ident(span, t), p)
+        _ -> HoistedExpr([assign_stmt(line, span, t, ex)], ident(span, t), p)
       }
     }
   }
@@ -4030,9 +4082,9 @@ fn hoist_keeping_top_split(
   case split_of(ex) {
     Some(#(kind, Some(op))) ->
       case expr_has_split(op) {
-        False -> #([], ex, p)
+        False -> HoistedExpr([], ex, p)
         True -> {
-          let #(pre, op2, p) = hoist_expr(p, line, op)
+          let HoistedExpr(pre, op2, p) = hoist_expr(p, line, op)
           let span = ex.span
           let rebuilt = case kind {
             AwaitSplit -> ast.AwaitExpression(span, op2)
@@ -4042,17 +4094,17 @@ fn hoist_keeping_top_split(
               ast.YieldExpression(span, Some(op2), is_delegate: True)
             ForAwaitSplit -> ex
           }
-          #(pre, rebuilt, p)
+          HoistedExpr(pre, rebuilt, p)
         }
       }
-    Some(#(_, None)) -> #([], ex, p)
+    Some(#(_, None)) -> HoistedExpr([], ex, p)
     None -> hoist_expr(p, line, ex)
   }
 }
 
 fn hoist_expr(p: SplitPlanner, line: Int, ex: ast.Expression) -> HoistedExpr {
   case expr_has_split(ex) {
-    False -> #([], ex, p)
+    False -> HoistedExpr([], ex, p)
     True -> hoist_subexprs(p, line, ex)
   }
 }
@@ -4061,12 +4113,12 @@ fn hoist_opt(
   p: SplitPlanner,
   line: Int,
   o: Option(ast.Expression),
-) -> #(List(ast.StmtWithLine), Option(ast.Expression), SplitPlanner) {
+) -> HoistedOption {
   case o {
-    None -> #([], None, p)
+    None -> HoistedOption([], None, p)
     Some(ex) -> {
-      let #(pre, ex2, p) = hoist_expr(p, line, ex)
-      #(pre, Some(ex2), p)
+      let HoistedExpr(pre, ex2, p) = hoist_expr(p, line, ex)
+      HoistedOption(pre, Some(ex2), p)
     }
   }
 }
@@ -4078,9 +4130,9 @@ fn hoist_subexprs(
 ) -> HoistedExpr {
   case ex {
     ast.AwaitExpression(span, arg) -> {
-      let #(pre, arg2, p) = hoist_expr(p, line, arg)
+      let HoistedExpr(pre, arg2, p) = hoist_expr(p, line, arg)
       let #(t, p) = fresh_temp(p)
-      #(
+      HoistedExpr(
         list.append(pre, [
           assign_stmt(line, span, t, ast.AwaitExpression(span, arg2)),
         ]),
@@ -4089,9 +4141,9 @@ fn hoist_subexprs(
       )
     }
     ast.YieldExpression(span, arg, del) -> {
-      let #(pre, arg2, p) = hoist_opt(p, line, arg)
+      let HoistedOption(pre, arg2, p) = hoist_opt(p, line, arg)
       let #(t, p) = fresh_temp(p)
-      #(
+      HoistedExpr(
         list.append(pre, [
           assign_stmt(line, span, t, ast.YieldExpression(span, arg2, del)),
         ]),
@@ -4100,30 +4152,30 @@ fn hoist_subexprs(
       )
     }
     ast.ParenthesizedExpression(span, inner) -> {
-      let #(pre, inner2, p) = hoist_expr(p, line, inner)
-      #(pre, ast.ParenthesizedExpression(span, inner2), p)
+      let HoistedExpr(pre, inner2, p) = hoist_expr(p, line, inner)
+      HoistedExpr(pre, ast.ParenthesizedExpression(span, inner2), p)
     }
     ast.SpreadElement(span, arg) -> {
-      let #(pre, arg2, p) = hoist_expr(p, line, arg)
-      #(pre, ast.SpreadElement(span, arg2), p)
+      let HoistedExpr(pre, arg2, p) = hoist_expr(p, line, arg)
+      HoistedExpr(pre, ast.SpreadElement(span, arg2), p)
     }
     ast.BinaryExpression(span, op, l, r) -> {
-      let #(pre, xs, p) = hoist_list(p, line, [l, r])
+      let HoistedList(pre, xs, p) = hoist_list(p, line, [l, r])
       case xs {
-        [l2, r2] -> #(pre, ast.BinaryExpression(span, op, l2, r2), p)
-        _ -> #(pre, ex, p)
+        [l2, r2] -> HoistedExpr(pre, ast.BinaryExpression(span, op, l2, r2), p)
+        _ -> HoistedExpr(pre, ex, p)
       }
     }
     ast.LogicalExpression(span, op, l, r) ->
       case expr_has_split(r) {
         False -> {
-          let #(pre, l2, p) = hoist_expr(p, line, l)
-          #(pre, ast.LogicalExpression(span, op, l2, r), p)
+          let HoistedExpr(pre, l2, p) = hoist_expr(p, line, l)
+          HoistedExpr(pre, ast.LogicalExpression(span, op, l2, r), p)
         }
         True -> {
-          let #(pre_l, l2, p) = hoist_expr(p, line, l)
+          let HoistedExpr(pre_l, l2, p) = hoist_expr(p, line, l)
           let #(t, p) = fresh_temp(p)
-          let #(pre_r, r2, p) = hoist_expr(p, line, r)
+          let HoistedExpr(pre_r, r2, p) = hoist_expr(p, line, r)
           let guard =
             ast.IfStatement(
               logical_test(span, op, t),
@@ -4133,7 +4185,7 @@ fn hoist_subexprs(
               ),
               None,
             )
-          #(
+          HoistedExpr(
             list.append(pre_l, [
               assign_stmt(line, span, t, l2),
               ast.StmtWithLine(line:, statement: guard),
@@ -4146,14 +4198,14 @@ fn hoist_subexprs(
     ast.ConditionalExpression(span, c, x, y) ->
       case expr_has_split(x) || expr_has_split(y) {
         False -> {
-          let #(pre, c2, p) = hoist_expr(p, line, c)
-          #(pre, ast.ConditionalExpression(span, c2, x, y), p)
+          let HoistedExpr(pre, c2, p) = hoist_expr(p, line, c)
+          HoistedExpr(pre, ast.ConditionalExpression(span, c2, x, y), p)
         }
         True -> {
-          let #(pre_c, c2, p) = hoist_expr(p, line, c)
+          let HoistedExpr(pre_c, c2, p) = hoist_expr(p, line, c)
           let #(t, p) = fresh_temp(p)
-          let #(pre_x, x2, p) = hoist_expr(p, line, x)
-          let #(pre_y, y2, p) = hoist_expr(p, line, y)
+          let HoistedExpr(pre_x, x2, p) = hoist_expr(p, line, x)
+          let HoistedExpr(pre_y, y2, p) = hoist_expr(p, line, y)
           let branch =
             ast.IfStatement(
               c2,
@@ -4166,7 +4218,7 @@ fn hoist_subexprs(
                 list.append(pre_y, [assign_stmt(line, span, t, y2)]),
               )),
             )
-          #(
+          HoistedExpr(
             list.append(pre_c, [ast.StmtWithLine(line:, statement: branch)]),
             ident(span, t),
             p,
@@ -4174,15 +4226,15 @@ fn hoist_subexprs(
         }
       }
     ast.UnaryExpression(span, op, arg) -> {
-      let #(pre, arg2, p) = hoist_expr(p, line, arg)
-      #(pre, ast.UnaryExpression(span, op, arg2), p)
+      let HoistedExpr(pre, arg2, p) = hoist_expr(p, line, arg)
+      HoistedExpr(pre, ast.UnaryExpression(span, op, arg2), p)
     }
     ast.UpdateExpression(span, op, prefix, arg) ->
       case arg {
         ast.MemberExpression(mspan, obj, prop) -> {
-          let #(pre, obj2, prop2, p) =
+          let HoistedMember(pre, obj2, prop2, p) =
             hoist_member(p, line, obj, prop, later: False)
-          #(
+          HoistedExpr(
             pre,
             ast.UpdateExpression(
               span,
@@ -4193,36 +4245,40 @@ fn hoist_subexprs(
             p,
           )
         }
-        _ -> #([], ex, p)
+        _ -> HoistedExpr([], ex, p)
       }
     ast.AssignmentExpression(span, op, lhs, rhs) ->
       hoist_assign(p, line, span, op, lhs, rhs)
     ast.CallExpression(span, callee, args) -> {
-      let #(pre_c, callee2, p) = hoist_callee(p, line, callee, args)
-      let #(pre_a, args2, p) = hoist_list(p, line, args)
-      #(list.append(pre_c, pre_a), ast.CallExpression(span, callee2, args2), p)
+      let HoistedExpr(pre_c, callee2, p) = hoist_callee(p, line, callee, args)
+      let HoistedList(pre_a, args2, p) = hoist_list(p, line, args)
+      HoistedExpr(
+        list.append(pre_c, pre_a),
+        ast.CallExpression(span, callee2, args2),
+        p,
+      )
     }
     ast.NewExpression(span, callee, args) -> {
-      let #(pre_c, callee2, p) = hoist_expr(p, line, callee)
-      let #(pre_p, callee3, p) = case list.any(args, expr_has_split) {
+      let HoistedExpr(pre_c, callee2, p) = hoist_expr(p, line, callee)
+      let HoistedExpr(pre_p, callee3, p) = case list.any(args, expr_has_split) {
         True -> spill_to_temp(p, line, callee2)
-        False -> #([], callee2, p)
+        False -> HoistedExpr([], callee2, p)
       }
-      let #(pre_a, args2, p) = hoist_list(p, line, args)
-      #(
+      let HoistedList(pre_a, args2, p) = hoist_list(p, line, args)
+      HoistedExpr(
         list.flatten([pre_c, pre_p, pre_a]),
         ast.NewExpression(span, callee3, args2),
         p,
       )
     }
     ast.MemberExpression(span, obj, prop) -> {
-      let #(pre, obj2, prop2, p) =
+      let HoistedMember(pre, obj2, prop2, p) =
         hoist_member(p, line, obj, prop, later: False)
-      #(pre, ast.MemberExpression(span, obj2, prop2), p)
+      HoistedExpr(pre, ast.MemberExpression(span, obj2, prop2), p)
     }
     ast.ArrayExpression(span, elems) -> {
       let present = list.filter_map(elems, option.to_result(_, Nil))
-      let #(pre, xs, p) = hoist_list(p, line, present)
+      let HoistedList(pre, xs, p) = hoist_list(p, line, present)
       let #(_, elems2) =
         list.map_fold(elems, xs, fn(rest, el) {
           case el, rest {
@@ -4231,36 +4287,36 @@ fn hoist_subexprs(
             Some(orig), [] -> #([], Some(orig))
           }
         })
-      #(pre, ast.ArrayExpression(span, elems2), p)
+      HoistedExpr(pre, ast.ArrayExpression(span, elems2), p)
     }
     ast.ObjectExpression(span, props) -> {
       let items =
         list.flat_map(props, fn(prop) {
           case prop {
-            ast.InitProperty(key: ast.KeyComputed(k), value: v, ..) -> [k, v]
+            ast.InitProperty(key: ast.ComputedName(k), value: v, ..) -> [k, v]
             ast.InitProperty(value: v, ..) -> [v]
-            ast.MethodProperty(key: ast.KeyComputed(k), ..)
-            | ast.AccessorProperty(key: ast.KeyComputed(k), ..) -> [k]
+            ast.MethodProperty(key: ast.ComputedName(k), ..)
+            | ast.AccessorProperty(key: ast.ComputedName(k), ..) -> [k]
             ast.MethodProperty(..) | ast.AccessorProperty(..) -> []
             ast.SpreadProperty(argument: arg) -> [arg]
           }
         })
-      let #(pre, xs, p) = hoist_list(p, line, items)
+      let HoistedList(pre, xs, p) = hoist_list(p, line, items)
       let #(_, props2) =
         list.map_fold(props, xs, fn(rest, prop) {
           case prop, rest {
-            ast.InitProperty(key: ast.KeyComputed(_), value: _, shorthand: sh),
+            ast.InitProperty(key: ast.ComputedName(_), value: _, shorthand: sh),
               [k2, v2, ..more]
-            -> #(more, ast.InitProperty(ast.KeyComputed(k2), v2, sh))
+            -> #(more, ast.InitProperty(ast.ComputedName(k2), v2, sh))
             ast.InitProperty(key: k, value: _, shorthand: sh), [v2, ..more] -> #(
               more,
               ast.InitProperty(k, v2, sh),
             )
-            ast.MethodProperty(key: ast.KeyComputed(_), value: f), [k2, ..more]
-            -> #(more, ast.MethodProperty(ast.KeyComputed(k2), f))
-            ast.AccessorProperty(key: ast.KeyComputed(_), value: f, kind: kd),
+            ast.MethodProperty(key: ast.ComputedName(_), value: f), [k2, ..more]
+            -> #(more, ast.MethodProperty(ast.ComputedName(k2), f))
+            ast.AccessorProperty(key: ast.ComputedName(_), value: f, kind: kd),
               [k2, ..more]
-            -> #(more, ast.AccessorProperty(ast.KeyComputed(k2), f, kd))
+            -> #(more, ast.AccessorProperty(ast.ComputedName(k2), f, kd))
             ast.SpreadProperty(_), [arg2, ..more] -> #(
               more,
               ast.SpreadProperty(arg2),
@@ -4268,22 +4324,26 @@ fn hoist_subexprs(
             _, _ -> #(rest, prop)
           }
         })
-      #(pre, ast.ObjectExpression(span, props2), p)
+      HoistedExpr(pre, ast.ObjectExpression(span, props2), p)
     }
     ast.SequenceExpression(span, parts) -> {
-      let #(pre, parts2, p) = hoist_list(p, line, parts)
-      #(pre, ast.SequenceExpression(span, parts2), p)
+      let HoistedList(pre, parts2, p) = hoist_list(p, line, parts)
+      HoistedExpr(pre, ast.SequenceExpression(span, parts2), p)
     }
     ast.TemplateLiteral(span, parts) -> {
-      let #(pre, exprs2, p) =
+      let HoistedList(pre, exprs2, p) =
         hoist_list(p, line, ast.template_expressions(parts))
-      #(pre, ast.TemplateLiteral(span, rebuild_template(parts, exprs2)), p)
+      HoistedExpr(
+        pre,
+        ast.TemplateLiteral(span, rebuild_template(parts, exprs2)),
+        p,
+      )
     }
     ast.TaggedTemplateExpression(span, tag, parts) -> {
       let exprs = ast.template_expressions(parts)
-      let #(pre_t, tag2, p) = hoist_callee(p, line, tag, exprs)
-      let #(pre_e, exprs2, p) = hoist_list(p, line, exprs)
-      #(
+      let HoistedExpr(pre_t, tag2, p) = hoist_callee(p, line, tag, exprs)
+      let HoistedList(pre_e, exprs2, p) = hoist_list(p, line, exprs)
+      HoistedExpr(
         list.append(pre_t, pre_e),
         ast.TaggedTemplateExpression(
           span,
@@ -4294,10 +4354,11 @@ fn hoist_subexprs(
       )
     }
     ast.ClassExpression(span, name, super_class, body) -> {
-      let #(pre, super2, body2, p) = hoist_class(p, line, super_class, body)
-      #(pre, ast.ClassExpression(span, name, super2, body2), p)
+      let HoistedClass(pre, super2, body2, p) =
+        hoist_class(p, line, super_class, body)
+      HoistedExpr(pre, ast.ClassExpression(span, name, super2, body2), p)
     }
-    _ -> #([], ex, p)
+    _ -> HoistedExpr([], ex, p)
   }
 }
 
@@ -4306,17 +4367,12 @@ fn hoist_class(
   line: Int,
   super_class: Option(ast.Expression),
   body: List(ast.ClassElement),
-) -> #(
-  List(ast.StmtWithLine),
-  Option(ast.Expression),
-  List(ast.ClassElement),
-  SplitPlanner,
-) {
+) -> HoistedClass {
   let keys =
     list.flat_map(body, fn(el) {
       case el {
-        ast.ClassMethod(key: ast.KeyComputed(k), ..)
-        | ast.ClassField(key: ast.KeyComputed(k), ..) -> [k]
+        ast.ClassMethod(key: ast.ComputedName(k), ..)
+        | ast.ClassField(key: ast.ComputedName(k), ..) -> [k]
         _ -> []
       }
     })
@@ -4324,7 +4380,7 @@ fn hoist_class(
     Some(sc) -> [sc, ..keys]
     None -> keys
   }
-  let #(pre, xs, p) = hoist_list(p, line, items)
+  let HoistedList(pre, xs, p) = hoist_list(p, line, items)
   let #(super2, rest) = case super_class, xs {
     Some(_), [sc2, ..rest] -> #(Some(sc2), rest)
     _, _ -> #(super_class, xs)
@@ -4333,20 +4389,20 @@ fn hoist_class(
     list.map_fold(body, rest, fn(rest, el) {
       case el, rest {
         ast.ClassMethod(
-          key: ast.KeyComputed(_),
+          key: ast.ComputedName(_),
           value: v,
           kind: kd,
-          is_static: st,
+          is_static:,
         ),
           [k2, ..more]
-        -> #(more, ast.ClassMethod(ast.KeyComputed(k2), v, kd, st))
-        ast.ClassField(key: ast.KeyComputed(_), value: v, is_static: st),
+        -> #(more, ast.ClassMethod(ast.ComputedName(k2), v, kd, is_static))
+        ast.ClassField(key: ast.ComputedName(_), value: v, is_static:),
           [k2, ..more]
-        -> #(more, ast.ClassField(ast.KeyComputed(k2), v, st))
+        -> #(more, ast.ClassField(ast.ComputedName(k2), v, is_static))
         _, _ -> #(rest, el)
       }
     })
-  #(pre, super2, body2, p)
+  HoistedClass(pre, super2, body2, p)
 }
 
 fn rebuild_template(
@@ -4356,7 +4412,7 @@ fn rebuild_template(
   let #(_, tail) =
     list.map_fold(parts.tail, exprs, fn(rest, part) {
       case rest {
-        [x, ..more] -> #(more, #(x, part.1))
+        [x, ..more] -> #(more, ast.TemplateSpan(x, part.quasi))
         [] -> #([], part)
       }
     })
@@ -4385,7 +4441,7 @@ fn hoist_list(
   p: SplitPlanner,
   line: Int,
   xs: List(ast.Expression),
-) -> #(List(ast.StmtWithLine), List(ast.Expression), SplitPlanner) {
+) -> HoistedList {
   let last_split =
     list.index_fold(xs, -1, fn(acc, x, i) {
       case expr_has_split(x) {
@@ -4395,23 +4451,23 @@ fn hoist_list(
     })
   let #(#(pre_rev, p), xs2) =
     list.index_map(xs, fn(x, i) { #(x, i) })
-    |> list.map_fold(#([], p), fn(st, xi) {
-      let #(pre_rev, p) = st
+    |> list.map_fold(#([], p), fn(acc, xi) {
+      let #(pre_rev, p) = acc
       let #(x, i) = xi
       case i < last_split, i == last_split {
         True, _ -> {
-          let #(pre1, x2, p) = hoist_expr(p, line, x)
-          let #(pre2, x3, p) = spill_to_temp(p, line, x2)
+          let HoistedExpr(pre1, x2, p) = hoist_expr(p, line, x)
+          let HoistedExpr(pre2, x3, p) = spill_to_temp(p, line, x2)
           #(#([pre2, pre1, ..pre_rev], p), x3)
         }
         _, True -> {
-          let #(pre1, x2, p) = hoist_expr(p, line, x)
+          let HoistedExpr(pre1, x2, p) = hoist_expr(p, line, x)
           #(#([pre1, ..pre_rev], p), x2)
         }
-        _, _ -> #(st, x)
+        _, _ -> #(acc, x)
       }
     })
-  #(list.flatten(list.reverse(pre_rev)), xs2, p)
+  HoistedList(list.flatten(list.reverse(pre_rev)), xs2, p)
 }
 
 fn hoist_member(
@@ -4420,20 +4476,22 @@ fn hoist_member(
   obj: ast.Expression,
   prop: ast.MemberProperty,
   later later: Bool,
-) -> #(List(ast.StmtWithLine), ast.Expression, ast.MemberProperty, SplitPlanner) {
+) -> HoistedMember {
   case obj {
     ast.SuperExpression(..) -> {
-      let #(pre, prop2, p) = hoist_prop(p, line, prop, later)
-      #(pre, obj, prop2, p)
+      let HoistedProperty(pre, prop2, p) = hoist_prop(p, line, prop, later)
+      HoistedMember(pre, obj, prop2, p)
     }
     _ -> {
-      let #(pre_o, obj2, p) = hoist_expr(p, line, obj)
-      let #(pre_p, obj3, p) = case later || member_prop_has_split(prop) {
+      let HoistedExpr(pre_o, obj2, p) = hoist_expr(p, line, obj)
+      let HoistedExpr(pre_p, obj3, p) = case
+        later || member_prop_has_split(prop)
+      {
         True -> spill_to_temp(p, line, obj2)
-        False -> #([], obj2, p)
+        False -> HoistedExpr([], obj2, p)
       }
-      let #(pre_k, prop2, p) = hoist_prop(p, line, prop, later)
-      #(list.flatten([pre_o, pre_p, pre_k]), obj3, prop2, p)
+      let HoistedProperty(pre_k, prop2, p) = hoist_prop(p, line, prop, later)
+      HoistedMember(list.flatten([pre_o, pre_p, pre_k]), obj3, prop2, p)
     }
   }
 }
@@ -4443,16 +4501,16 @@ fn hoist_prop(
   line: Int,
   prop: ast.MemberProperty,
   later later: Bool,
-) -> #(List(ast.StmtWithLine), ast.MemberProperty, SplitPlanner) {
+) -> HoistedProperty {
   case prop {
-    ast.Dot(..) -> #([], prop, p)
+    ast.Dot(..) -> HoistedProperty([], prop, p)
     ast.Bracket(k) -> {
-      let #(pre_k, k2, p) = hoist_expr(p, line, k)
-      let #(pre_p, k3, p) = case later {
+      let HoistedExpr(pre_k, k2, p) = hoist_expr(p, line, k)
+      let HoistedExpr(pre_p, k3, p) = case later {
         True -> spill_to_temp(p, line, k2)
-        False -> #([], k2, p)
+        False -> HoistedExpr([], k2, p)
       }
-      #(list.append(pre_k, pre_p), ast.Bracket(k3), p)
+      HoistedProperty(list.append(pre_k, pre_p), ast.Bracket(k3), p)
     }
   }
 }
@@ -4466,18 +4524,19 @@ fn hoist_callee(
   let later = list.any(args, expr_has_split)
   case callee {
     ast.MemberExpression(span, obj, prop) -> {
-      let #(pre, obj2, prop2, p) = hoist_member(p, line, obj, prop, later)
-      #(pre, ast.MemberExpression(span, obj2, prop2), p)
+      let HoistedMember(pre, obj2, prop2, p) =
+        hoist_member(p, line, obj, prop, later)
+      HoistedExpr(pre, ast.MemberExpression(span, obj2, prop2), p)
     }
     ast.ParenthesizedExpression(_, inner) -> hoist_callee(p, line, inner, args)
     _ -> {
-      let #(pre_c, callee2, p) = hoist_expr(p, line, callee)
+      let HoistedExpr(pre_c, callee2, p) = hoist_expr(p, line, callee)
       case later {
         True -> {
-          let #(pre_p, callee3, p) = spill_to_temp(p, line, callee2)
-          #(list.append(pre_c, pre_p), callee3, p)
+          let HoistedExpr(pre_p, callee3, p) = spill_to_temp(p, line, callee2)
+          HoistedExpr(list.append(pre_c, pre_p), callee3, p)
         }
-        False -> #(pre_c, callee2, p)
+        False -> HoistedExpr(pre_c, callee2, p)
       }
     }
   }
@@ -4492,14 +4551,14 @@ fn hoist_assign(
   rhs: ast.Expression,
 ) -> HoistedExpr {
   let target = case lhs {
-    ast.Identifier(..) -> Some(#([], lhs, p))
+    ast.Identifier(..) -> Some(HoistedExpr([], lhs, p))
     ast.MemberExpression(mspan, obj, prop) ->
       case obj {
         ast.SuperExpression(..) -> None
         _ -> {
-          let #(pre, obj2, prop2, p) =
+          let HoistedMember(pre, obj2, prop2, p) =
             hoist_member(p, line, obj, prop, later: True)
-          Some(#(pre, ast.MemberExpression(mspan, obj2, prop2), p))
+          Some(HoistedExpr(pre, ast.MemberExpression(mspan, obj2, prop2), p))
         }
       }
     _ -> None
@@ -4507,37 +4566,37 @@ fn hoist_assign(
   case target, op, expr.compound_binop(op), expr.logical_assign_op(op) {
     None, _, _, _ ->
       case expr_has_split(lhs) {
-        True -> #([], ast.AssignmentExpression(span, op, lhs, rhs), p)
+        True -> HoistedExpr([], ast.AssignmentExpression(span, op, lhs, rhs), p)
         False -> {
-          let #(pre, rhs2, p) = hoist_expr(p, line, rhs)
-          #(pre, ast.AssignmentExpression(span, op, lhs, rhs2), p)
+          let HoistedExpr(pre, rhs2, p) = hoist_expr(p, line, rhs)
+          HoistedExpr(pre, ast.AssignmentExpression(span, op, lhs, rhs2), p)
         }
       }
-    Some(#(pre_t, ref, p)), ast.Assign, _, _ -> {
-      let #(pre_r, rhs2, p) = hoist_expr(p, line, rhs)
-      #(
+    Some(HoistedExpr(pre_t, target, p)), ast.Assign, _, _ -> {
+      let HoistedExpr(pre_r, rhs2, p) = hoist_expr(p, line, rhs)
+      HoistedExpr(
         list.append(pre_t, pre_r),
-        ast.AssignmentExpression(span, ast.Assign, ref, rhs2),
+        ast.AssignmentExpression(span, ast.Assign, target, rhs2),
         p,
       )
     }
-    Some(#(pre_t, ref, p)), _, Some(bop), _ -> {
+    Some(HoistedExpr(pre_t, target, p)), _, Some(bop), _ -> {
       let #(t, p) = fresh_temp(p)
-      let #(pre_r, rhs2, p) = hoist_expr(p, line, rhs)
-      #(
-        list.flatten([pre_t, [assign_stmt(line, span, t, ref)], pre_r]),
+      let HoistedExpr(pre_r, rhs2, p) = hoist_expr(p, line, rhs)
+      HoistedExpr(
+        list.flatten([pre_t, [assign_stmt(line, span, t, target)], pre_r]),
         ast.AssignmentExpression(
           span,
           ast.Assign,
-          ref,
+          target,
           ast.BinaryExpression(span, bop, ident(span, t), rhs2),
         ),
         p,
       )
     }
-    Some(#(pre_t, ref, p)), _, _, Some(lop) -> {
+    Some(HoistedExpr(pre_t, target, p)), _, _, Some(lop) -> {
       let #(t, p) = fresh_temp(p)
-      let #(pre_r, rhs2, p) = hoist_expr(p, line, rhs)
+      let HoistedExpr(pre_r, rhs2, p) = hoist_expr(p, line, rhs)
       let guard =
         ast.IfStatement(
           logical_test(span, lop, t),
@@ -4548,27 +4607,24 @@ fn hoist_assign(
                 line,
                 span,
                 t,
-                ast.AssignmentExpression(span, ast.Assign, ref, rhs2),
+                ast.AssignmentExpression(span, ast.Assign, target, rhs2),
               ),
             ]),
           ),
           None,
         )
-      #(
+      HoistedExpr(
         list.flatten([
           pre_t,
-          [assign_stmt(line, span, t, ref)],
+          [assign_stmt(line, span, t, target)],
           [ast.StmtWithLine(line:, statement: guard)],
         ]),
         ident(span, t),
         p,
       )
     }
-    Some(#(_, _, p)), _, _, _ -> #(
-      [],
-      ast.AssignmentExpression(span, op, lhs, rhs),
-      p,
-    )
+    Some(HoistedExpr(_, _, p)), _, _, _ ->
+      HoistedExpr([], ast.AssignmentExpression(span, op, lhs, rhs), p)
   }
 }
 
@@ -4599,7 +4655,8 @@ fn explode_stmt(
           case needs_explode(rhs) {
             False -> None
             True -> {
-              let #(pre, rhs2, p) = hoist_keeping_top_split(p, line, rhs)
+              let HoistedExpr(pre, rhs2, p) =
+                hoist_keeping_top_split(p, line, rhs)
               done(
                 p,
                 pre,
@@ -4614,7 +4671,8 @@ fn explode_stmt(
           case needs_explode(ex) {
             False -> None
             True -> {
-              let #(pre, ex2, p) = hoist_keeping_top_split(p, line, ex)
+              let HoistedExpr(pre, ex2, p) =
+                hoist_keeping_top_split(p, line, ex)
               done(p, pre, ast.ExpressionStatement(ex2, dir))
             }
           }
@@ -4623,7 +4681,7 @@ fn explode_stmt(
       case needs_explode(ex) {
         False -> None
         True -> {
-          let #(pre, ex2, p) = hoist_keeping_top_split(p, line, ex)
+          let HoistedExpr(pre, ex2, p) = hoist_keeping_top_split(p, line, ex)
           done(p, pre, ast.ReturnStatement(Some(ex2)))
         }
       }
@@ -4631,7 +4689,7 @@ fn explode_stmt(
       case needs_explode(ex) {
         False -> None
         True -> {
-          let #(pre, ex2, p) = hoist_keeping_top_split(p, line, ex)
+          let HoistedExpr(pre, ex2, p) = hoist_keeping_top_split(p, line, ex)
           done(p, pre, ast.ThrowStatement(ex2))
         }
       }
@@ -4639,7 +4697,8 @@ fn explode_stmt(
       case pattern_has_split(pat) || !needs_explode(init) {
         True -> None
         False -> {
-          let #(pre, init2, p) = hoist_keeping_top_split(p, line, init)
+          let HoistedExpr(pre, init2, p) =
+            hoist_keeping_top_split(p, line, init)
           done(
             p,
             pre,
@@ -4675,7 +4734,7 @@ fn explode_stmt(
       case needs_explode(c) {
         False -> None
         True -> {
-          let #(pre, c2, p) = hoist_keeping_top_split(p, line, c)
+          let HoistedExpr(pre, c2, p) = hoist_keeping_top_split(p, line, c)
           done(p, pre, ast.IfStatement(c2, t, f))
         }
       }
@@ -4683,7 +4742,7 @@ fn explode_stmt(
       case needs_explode(c) {
         False -> None
         True -> {
-          let #(pre, c2, p) = hoist_expr(p, line, c)
+          let HoistedExpr(pre, c2, p) = hoist_expr(p, line, c)
           done(p, [], loop_with_test(line, c2, pre, b))
         }
       }
@@ -4726,7 +4785,7 @@ fn explode_stmt(
               }
               case c, cond_split {
                 Some(ce), True -> {
-                  let #(pre_c, c2, p) = hoist_expr(p, line, ce)
+                  let HoistedExpr(pre_c, c2, p) = hoist_expr(p, line, ce)
                   done(
                     p,
                     pre_i,
@@ -4749,7 +4808,7 @@ fn explode_stmt(
       case expr_has_split(r) && !for_init_has_split(l) {
         False -> None
         True -> {
-          let #(pre, r2, p) = hoist_expr(p, line, r)
+          let HoistedExpr(pre, r2, p) = hoist_expr(p, line, r)
           done(p, pre, ast.ForOfStatement(l, r2, b, aw))
         }
       }
@@ -4757,7 +4816,7 @@ fn explode_stmt(
       case expr_has_split(r) && !for_init_has_split(l) {
         False -> None
         True -> {
-          let #(pre, r2, p) = hoist_expr(p, line, r)
+          let HoistedExpr(pre, r2, p) = hoist_expr(p, line, r)
           done(p, pre, ast.ForInStatement(l, r2, b))
         }
       }
@@ -4765,13 +4824,13 @@ fn explode_stmt(
       case needs_explode(discriminant) {
         False -> None
         True -> {
-          let #(pre, discriminant2, p) =
+          let HoistedExpr(pre, discriminant2, p) =
             hoist_keeping_top_split(p, line, discriminant)
           done(p, pre, ast.SwitchStatement(discriminant2, cases))
         }
       }
     ast.ClassDeclaration(name:, super_class: sc, body: b) -> {
-      let #(pre, sc2, b2, p) = hoist_class(p, line, sc, b)
+      let HoistedClass(pre, sc2, b2, p) = hoist_class(p, line, sc, b)
       done(p, pre, ast.ClassDeclaration(name, sc2, b2))
     }
     ast.LabeledStatement(label:, body: b) ->

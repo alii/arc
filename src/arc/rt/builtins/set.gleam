@@ -2,20 +2,20 @@ import arc/bytecode/key.{Named}
 import arc/internal/ordered_entries
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined}
-import arc/rt/builtins/iter_protocol.{type IteratorRecord}
+import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type BuiltinPair, type Handle, type JsVal, type MapKey,
-  type ObjKind, type SetIterKind, type SetNative, JFloat, JNan, KNull, KNum,
-  KUndef, SObject, SetAdd, SetClear, SetConstructor, SetDelete, SetDifference,
-  SetEntries, SetForEach, SetGetSize, SetHas, SetIntersection, SetIsDisjointFrom,
-  SetIsSubsetOf, SetIsSupersetOf, SetIterEntries, SetIterValues, SetIterator,
-  SetN, SetObj, SetSymmetricDifference, SetUnion, SetValues, StringKey, classify,
-  js_to_map_key, mk_bool, mk_int, mk_number, mk_object, mk_undefined,
-  symbol_iterator,
+  type Agent, type BuiltinPair, type Handle, type IteratorRecord, type JsVal,
+  type MapKey, type ObjKind, type SetIterKind, type SetNative, JFloat, JNan,
+  KNull, KNum, KUndef, SObject, SetAdd, SetClear, SetConstructor, SetDelete,
+  SetDifference, SetEntries, SetForEach, SetGetSize, SetHas, SetIntersection,
+  SetIsDisjointFrom, SetIsSubsetOf, SetIsSupersetOf, SetIterEntries,
+  SetIterValues, SetIterator, SetN, SetObj, SetSymmetricDifference, SetUnion,
+  SetValues, StringKey, classify, js_to_map_key, mk_bool, mk_int, mk_number,
+  mk_object, mk_undefined, symbol_iterator,
 }
 import arc/rt/val as rt_val
 import gleam/list
@@ -161,8 +161,8 @@ fn set_delete(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   let store = read_set_store(st, set)
   let key = js_to_map_key(first_arg_or_undefined(args))
   case ordered_entries.delete(store, key) {
-    #(_store, False) -> #(mk_bool(False), st)
-    #(store, True) -> #(mk_bool(True), update_set(st, set, store))
+    #(False, _store) -> #(mk_bool(False), st)
+    #(True, store) -> #(mk_bool(True), update_set(st, set, store))
   }
 }
 
@@ -339,7 +339,7 @@ fn subtract_walking_this(
     [e, ..rest] -> {
       let #(in_other, st) = set_record_has(st, rec, e)
       let result = case in_other {
-        True -> ordered_entries.delete(result, js_to_map_key(e)).0
+        True -> ordered_entries.delete(result, js_to_map_key(e)).1
         False -> result
       }
       subtract_walking_this(st, rec, rest, result)
@@ -356,7 +356,7 @@ fn subtract_walking_other(
   case next {
     None -> alloc_new_set(st, result)
     Some(v) -> {
-      let result = ordered_entries.delete(result, js_to_map_key(v)).0
+      let result = ordered_entries.delete(result, js_to_map_key(v)).1
       subtract_walking_other(st, keys, result)
     }
   }
@@ -387,7 +387,7 @@ fn set_symmetric_difference_loop(
       // spec step 5.b.iii is a live read
       let in_this = ordered_entries.has(read_set_store(st, set), key)
       let result = case in_this {
-        True -> ordered_entries.delete(result, key).0
+        True -> ordered_entries.delete(result, key).1
         False -> set_data_append(result, v)
       }
       set_symmetric_difference_loop(st, set, keys, result)

@@ -126,10 +126,10 @@ pub fn deferred_namespace_of_unknown_specifier_test() {
 
 fn settled(st: Agent, promise: JsVal) -> Result(JsVal, JsVal) {
   let assert Some(h) = rt_async.as_promise(st, promise)
-  case rt_async.promise_data(st, h) {
-    #(_, PromiseFulfilled(v), _) -> Ok(v)
-    #(_, PromiseRejected(e), _) -> Error(e)
-    #(_, _, _) -> panic as "import promise still pending"
+  case rt_async.promise_data(st, h).state {
+    PromiseFulfilled(v) -> Ok(v)
+    PromiseRejected(e) -> Error(e)
+    _ -> panic as "import promise still pending"
   }
 }
 
@@ -168,7 +168,7 @@ pub fn import_through_the_hook_yields_the_registered_namespace_test() {
       _ -> Error(loader.ResolveNotFound)
     }
   }
-  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
+  let st = import_hook.install(agent(), "/main.js", resolve, load)
   let #(p, st) =
     dynamic_import.import_call(st, mk_string("./lib.js"), mk_undefined())
   let st = rt_async.drain(st)
@@ -181,7 +181,7 @@ pub fn import_through_the_hook_yields_the_registered_namespace_test() {
   let assert Some(f) = module.read_export(st, ns, "f")
   let assert types.KHandle(_) = classify(f)
   let st =
-    import_hook.install_import_hook(st, "/main.js", resolve, fn(_) {
+    import_hook.install(st, "/main.js", resolve, fn(_) {
       Error(loader.LoadNotFound)
     })
   let #(p2, st) =
@@ -193,7 +193,7 @@ pub fn import_through_the_hook_yields_the_registered_namespace_test() {
 
 pub fn import_of_an_unresolvable_specifier_rejects_test() {
   let #(resolve, load) = loader.no_imports()
-  let st = import_hook.install_import_hook(agent(), "/main.js", resolve, load)
+  let st = import_hook.install(agent(), "/main.js", resolve, load)
   let #(p, st) =
     dynamic_import.import_call(st, mk_string("./lib.js"), mk_undefined())
   let st = rt_async.drain(st)

@@ -57,7 +57,7 @@ pub fn define_fn_installs_a_callable_global_test() {
   assert c == NormalCompletion(mk_int(42))
   assert str(get(st, f, "name").0) == "twice"
   assert get(st, f, "length").0 == mk_int(1)
-  assert rt_inspect.inspect(st, f) == "[Function: twice]"
+  assert rt_inspect.describe(st, f) == "[Function: twice]"
 }
 
 pub fn error_result_becomes_a_throw_test() {
@@ -151,11 +151,11 @@ pub fn namespace_and_helpers_test() {
   let ctx = host.from_agent(agent(), brand())
   let ctx =
     host.define_namespace(ctx, "util", [
-      #("pair", 2, fn(ctx, args, _) {
+      host.HostMethod("pair", 2, fn(ctx, args, _) {
         let #(arr, ctx) = host.array(ctx, args)
         #(Ok(arr), ctx)
       }),
-      #("point", 2, fn(ctx, args, _) {
+      host.HostMethod("point", 2, fn(ctx, args, _) {
         let #(o, ctx) =
           host.object(ctx, [
             #("x", host.first_arg(args)),
@@ -166,17 +166,18 @@ pub fn namespace_and_helpers_test() {
     ])
   let st = ctx.agent
   let #(util, st) = global(st, "util")
-  assert rt_inspect.inspect(st, util) == "Object [util] {}"
-  assert rt_inspect.inspect(st, get(st, util, "point").0) == "[Function: point]"
+  assert rt_inspect.describe(st, util) == "Object [util] {}"
+  assert rt_inspect.describe(st, get(st, util, "point").0)
+    == "[Function: point]"
   let #(arr, st) =
     rt_helpers.call_method(st, util, "pair", [mk_int(1), mk_int(2)])
-  assert rt_inspect.inspect(st, arr) == "[ 1, 2 ]"
+  assert rt_inspect.describe(st, arr) == "[ 1, 2 ]"
   let #(is_array, st) =
     rt_helpers.call_method(st, global(st, "Array").0, "isArray", [arr])
   assert is_array == types.mk_bool(True)
   let #(p, st) =
     rt_helpers.call_method(st, util, "point", [mk_int(3), mk_int(4)])
-  assert rt_inspect.inspect(st, p) == "{ x: 3, y: 4 }"
+  assert rt_inspect.describe(st, p) == "{ x: 3, y: 4 }"
 }
 
 fn point_ctor(ctx: host.Context(Payload), args, _this) {
@@ -199,9 +200,16 @@ fn point_origin(ctx: host.Context(Payload), _args, this) {
 }
 
 fn point_class(ctx) {
-  host.class(ctx, "Point", 1, point_ctor, [#("getX", 0, point_get_x)], [
-    #("origin", 0, point_origin),
-  ])
+  host.class(
+    ctx,
+    "Point",
+    1,
+    point_ctor,
+    [host.HostMethod("getX", 0, point_get_x)],
+    [
+      host.HostMethod("origin", 0, point_origin),
+    ],
+  )
 }
 
 pub fn class_constructs_and_reprototypes_test() {

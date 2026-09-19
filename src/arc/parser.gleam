@@ -86,11 +86,11 @@ import gleam/set.{type Set}
 import gleam/string
 
 // §12.9.4 cook string escapes
-@external(erlang, "arc_escape_ffi", "decode_string_escapes")
+@external(erlang, "arc_parser_ffi", "decode_string_escapes")
 fn decode_string_escapes(raw: String) -> String
 
 // §12.9.6 template value; Error(Nil) on an invalid escape
-@external(erlang, "arc_escape_ffi", "cook_template_string")
+@external(erlang, "arc_parser_ffi", "cook_template_string")
 fn cook_template_string(raw: String) -> Result(String, Nil)
 
 pub type ParseMode {
@@ -101,7 +101,7 @@ pub type ParseMode {
 pub type ParseError =
   error.ParseError
 
-pub fn parse_error_to_string(err: ParseError) -> String {
+pub fn error_to_string(err: ParseError) -> String {
   error.to_string(err)
 }
 
@@ -363,7 +363,7 @@ fn init_parser(
       export_local_refs: [],
       import_bindings: set.new(),
       last_expr_name: None,
-      scopes: scope_builder.init(code_kind, mode == Module),
+      scopes: scope_builder.init(code_kind, strict: mode == Module),
     )),
   )
 }
@@ -773,7 +773,7 @@ fn parse_block_statement(
 fn parse_block_body(
   p: Parser,
 ) -> Result(#(Parser, List(ast.StmtWithLine)), ParseError) {
-  // fast path: an empty block declares nothing
+  // an empty block declares nothing, so no scope push
   case peek(p), peek_at(p, 1) {
     LeftBrace, RightBrace -> {
       let p2 = advance(advance(p))
@@ -849,7 +849,7 @@ fn parse_variable_declaration_decl(
     parse_variable_declarator_list(p2, kind, []),
   )
   use p4 <- result.try(eat_semicolon(exit_declaration_context(p3, p)))
-  Ok(#(p4, ast.DeclVariable(kind:, declarations:)))
+  Ok(#(p4, ast.DeclareVariable(kind:, declarations:)))
 }
 
 // consumes var, let or const and enters its declaration context
@@ -1455,26 +1455,26 @@ fn string_token_value(
   Ok(decode_string_escapes(peek_value(p)))
 }
 
-fn numeric_property_key(p: Parser) -> Result(ast.PropertyKey, ParseError) {
+fn numeric_property_key(p: Parser) -> Result(ast.PropertyName, ParseError) {
   let span = span_of(p)
   case number.parse_numeric_literal(peek_value(p)) {
-    Ok(number.ParsedNumber(n)) -> Ok(ast.KeyNumber(value: n, span:))
-    Ok(number.ParsedBigInt(i)) -> Ok(ast.KeyBigInt(value: i, span:))
+    Ok(number.ParsedNumber(n)) -> Ok(ast.NumberName(value: n, span:))
+    Ok(number.ParsedBigInt(i)) -> Ok(ast.BigIntName(value: i, span:))
     Error(err) -> Error(MalformedNumericLiteral(pos_of(p), err))
   }
 }
 
 // private names lex as # prefixed identifiers
-fn identifier_property_key(name: String, span: ast.Span) -> ast.PropertyKey {
+fn identifier_property_key(name: String, span: ast.Span) -> ast.PropertyName {
   case name {
-    "#" <> _ -> ast.KeyPrivate(name:, span:)
-    _ -> ast.KeyIdentifier(name:, span:)
+    "#" <> _ -> ast.PrivateName(name:, span:)
+    _ -> ast.IdentifierName(name:, span:)
   }
 }
 
 fn parse_property_name(
   p: Parser,
-) -> Result(#(Parser, ast.PropertyKey), ParseError) {
+) -> Result(#(Parser, ast.PropertyName), ParseError) {
   case peek(p) {
     Identifier ->
       Ok(#(advance(p), identifier_property_key(peek_value(p), span_of(p))))
@@ -1485,7 +1485,7 @@ fn parse_property_name(
     }
     StringLiteral -> {
       use value <- result.map(string_literal_value(p))
-      #(advance(p), ast.KeyString(value:, span: span_of(p)))
+      #(advance(p), ast.StringName(value:, span: span_of(p)))
     }
     LeftBracket -> {
       // computed key is [+In]
@@ -1495,7 +1495,7 @@ fn parse_property_name(
         use p4 <- result.map(expect(p3, RightBracket))
         #(p4, expr)
       })
-      #(p4, ast.KeyComputed(expr))
+      #(p4, ast.ComputedName(expr))
     }
     _ ->
       case is_identifier_or_keyword(peek(p)) {
@@ -2221,7 +2221,7 @@ fn parse_switch_cases(
             p3.scopes,
             switch_id,
             mark,
-            scope_builder.TagSwitchTest,
+            scope_builder.SwitchTestSource,
           ),
         )
       use p4 <- result.try(expect(p3, Colon))
@@ -2324,7 +2324,7 @@ fn parse_function_statement(
     name_required: True,
     is_async:,
   ))
-  #(p2, ast.declaration_to_statement(ast.DeclFunction(function:)))
+  #(p2, ast.declaration_to_statement(ast.DeclareFunction(function:)))
 }
 
 fn parse_function_declaration(
@@ -2353,7 +2353,7 @@ fn parse_function_declaration(
         scopes: scope_builder.set_source_tag(
           p_fn.scopes,
           p_fn.scopes.current,
-          scope_builder.TagFnDecl,
+          scope_builder.FnDeclSource,
         ),
       )
     False -> p_fn
@@ -2787,27 +2787,17 @@ fn parse_class_statement(
 fn parse_class_declaration(
   p: Parser,
 ) -> Result(#(Parser, ast.Declaration), ParseError) {
-  use #(p2, name, super_class, body) <- result.map(parse_class_head_and_tail(
-    p,
-    name_required: True,
-    register_name: True,
-  ))
-  #(p2, ast.DeclClass(name:, super_class:, body:))
+  use #(p2, ClassSyntax(name:, super_class:, body:)) <- result.map(
+    parse_class_head_and_tail(p, name_required: True, register_name: True),
+  )
+  #(p2, ast.DeclareClass(name:, super_class:, body:))
 }
 
 fn parse_class_head_and_tail(
   p: Parser,
   name_required name_required: Bool,
   register_name register_name: Bool,
-) -> Result(
-  #(
-    Parser,
-    Option(ast.NamedBinding),
-    Option(ast.Expression),
-    List(ast.ClassElement),
-  ),
-  ParseError,
-) {
+) -> Result(#(Parser, ClassSyntax), ParseError) {
   let p2 = advance(p)
   case simple_binding_name(p2) {
     Some(name) -> {
@@ -2824,14 +2814,23 @@ fn parse_class_head_and_tail(
         advance(p3),
         Some(name),
       ))
-      #(p4, Some(ast.NamedBinding(name:, span: name_span)), super_class, body)
+      let name = Some(ast.NamedBinding(name:, span: name_span))
+      #(p4, ClassSyntax(name:, super_class:, body:))
     }
     None -> {
       use <- bool.guard(name_required, Error(ExpectedIdentifier(pos_of(p2))))
       use #(p3, super_class, body) <- result.map(parse_class_tail(p2, None))
-      #(p3, None, super_class, body)
+      #(p3, ClassSyntax(name: None, super_class:, body:))
     }
   }
+}
+
+type ClassSyntax {
+  ClassSyntax(
+    name: Option(ast.NamedBinding),
+    super_class: Option(ast.Expression),
+    body: List(ast.ClassElement),
+  )
 }
 
 // private names declared in one class body (§15.7.1)
@@ -2892,7 +2891,7 @@ fn parse_class_tail(
   use p4 <- result.try(resolve_private_refs(p4, outer_depth, declared))
   let parsed = list.reverse(rev_parsed)
   let elements = list.map(parsed, fn(el) { el.element })
-  // child order must match declare_class for emit's cursor
+  // child order must match class_scope_finalize for emit's cursor
   let scopes =
     class_scopes.class_scope_finalize(
       p4.scopes,
@@ -3002,7 +3001,7 @@ fn private_element_name(
   element: ast.ClassElement,
 ) -> Option(#(String, DeclaredPrivateName)) {
   case element {
-    ast.ClassMethod(key: ast.KeyPrivate(name:, ..), kind:, is_static:, ..) -> {
+    ast.ClassMethod(key: ast.PrivateName(name:, ..), kind:, is_static:, ..) -> {
       let kind = case kind {
         ast.GetterMethod -> PrivateGet
         ast.SetterMethod -> PrivateSet
@@ -3010,7 +3009,7 @@ fn private_element_name(
       }
       Some(#(name, DeclaredPrivateName(is_static:, kind:)))
     }
-    ast.ClassField(key: ast.KeyPrivate(name:, ..), is_static:, ..) ->
+    ast.ClassField(key: ast.PrivateName(name:, ..), is_static:, ..) ->
       Some(#(name, DeclaredPrivateName(is_static:, kind: PrivateOther)))
     ast.ClassMethod(..) | ast.ClassField(..) | ast.StaticBlock(..) -> None
   }
@@ -3048,7 +3047,7 @@ fn parse_class_element(
   let key_scopes =
     class_scopes.class_new_children(p4.scopes, ids.class_id, key_before)
   // §15.7.1 checks use the decoded key
-  let static_name = ast.property_key_static_name(key)
+  let static_name = ast.static_name(key)
   use <- bool.guard(
     is_static && static_name == Some("prototype"),
     Error(StaticPrototype(pos_of(p3))),
@@ -3166,10 +3165,10 @@ fn check_constructor_prefix(
 }
 
 // §15.7.1: #constructor is forbidden
-fn is_private_constructor_key(key: ast.PropertyKey) -> Bool {
+fn is_private_constructor_key(key: ast.PropertyName) -> Bool {
   case key {
-    ast.KeyPrivate(name: "#constructor", ..)
-    | ast.KeyString(value: "#constructor", ..) -> True
+    ast.PrivateName(name: "#constructor", ..)
+    | ast.StringName(value: "#constructor", ..) -> True
     _ -> False
   }
 }
@@ -4151,15 +4150,15 @@ fn check_super_private(
 // { #x: 1 } is a syntax error
 fn reject_private_property_key(
   p: Parser,
-  key: ast.PropertyKey,
+  key: ast.PropertyName,
 ) -> Result(Nil, ParseError) {
   case key {
-    ast.KeyPrivate(..) -> Error(PrivateNameAsPropertyKey(pos_of(p)))
-    ast.KeyIdentifier(..)
-    | ast.KeyString(..)
-    | ast.KeyNumber(..)
-    | ast.KeyBigInt(..)
-    | ast.KeyComputed(..) -> Ok(Nil)
+    ast.PrivateName(..) -> Error(PrivateNameAsPropertyKey(pos_of(p)))
+    ast.IdentifierName(..)
+    | ast.StringName(..)
+    | ast.NumberName(..)
+    | ast.BigIntName(..)
+    | ast.ComputedName(..) -> Ok(Nil)
   }
 }
 
@@ -4316,7 +4315,7 @@ fn parse_new_target(
         Error(NewTargetOutsideFunction(start)),
       )
       let p2 = advance(p)
-      let scopes = scope_builder.lexical_ref(p2.scopes, lexical.RefNewTarget)
+      let scopes = scope_builder.lexical_ref(p2.scopes, lexical.NewTargetRef)
       let meta =
         ast.MetaProperty(kind: ast.NewTarget, span: span_from(start, p2))
       Ok(#(Parser(..p2, scopes:), meta))
@@ -4414,8 +4413,8 @@ fn super_property_reference(
   use <- bool.guard(!p.ctx.allow_super_property, Error(not_allowed))
   let scopes =
     p.scopes
-    |> scope_builder.lexical_ref(lexical.RefHomeObject)
-    |> scope_builder.lexical_ref(lexical.RefThis)
+    |> scope_builder.lexical_ref(lexical.HomeObjectRef)
+    |> scope_builder.lexical_ref(lexical.ThisRef)
   Ok(#(Parser(..p, scopes:), ast.SuperExpression(span:)))
 }
 
@@ -4734,8 +4733,8 @@ fn parse_template_spans(
 
 fn parse_template_substitutions(
   p: Parser,
-  rev_tail: List(#(ast.Expression, String)),
-) -> Result(#(Parser, List(#(ast.Expression, String))), ParseError) {
+  rev_tail: List(ast.TemplateSpan(String)),
+) -> Result(#(Parser, List(ast.TemplateSpan(String))), ParseError) {
   use #(p, expr) <- result.try(parse_expression(
     Parser(..p, last_expr_assignable: False, last_expr_is_assignment: False),
   ))
@@ -4745,11 +4744,16 @@ fn parse_template_substitutions(
       case peek(p) {
         TemplateHead ->
           parse_template_substitutions(advance(p), [
-            #(expr, template_span_raw(p, 2)),
+            ast.TemplateSpan(expr, template_span_raw(p, 2)),
             ..rev_tail
           ])
         TemplateLiteral ->
-          Ok(#(advance(p), [#(expr, template_span_raw(p, 1)), ..rev_tail]))
+          Ok(
+            #(advance(p), [
+              ast.TemplateSpan(expr, template_span_raw(p, 1)),
+              ..rev_tail
+            ]),
+          )
         // unterminated template
         _ -> Error(UnterminatedTemplateSubstitution(pos_of(p)))
       }
@@ -4919,7 +4923,7 @@ fn parse_primary_non_identifier(
       accept_literal(
         Parser(
           ..p,
-          scopes: scope_builder.lexical_ref(p.scopes, lexical.RefThis),
+          scopes: scope_builder.lexical_ref(p.scopes, lexical.ThisRef),
         ),
         ast.ThisExpression(span: span_of(p)),
       )
@@ -5140,7 +5144,7 @@ fn parse_object_properties(
       // §13.2.5.1 duplicate __proto__, deferred for patterns
       let is_proto = case prop {
         ast.InitProperty(key:, shorthand: False, ..) ->
-          ast.property_key_static_name(key) == Some("__proto__")
+          ast.static_name(key) == Some("__proto__")
         _ -> False
       }
       let p2 = case is_proto && has_proto, p2.ctx.dup_proto_pos {
@@ -5274,13 +5278,13 @@ fn parse_object_property(
 fn parse_shorthand_property(
   p: Parser,
   name: String,
-  key: ast.PropertyKey,
+  key: ast.PropertyName,
   has_default has_default: Bool,
 ) -> Result(#(Parser, ast.Property), ParseError) {
   // shorthand is an identifier reference (§13.1.1)
   use Nil <- result.try(check_identifier_reference(p, name))
   let p = Parser(..p, scopes: scope_builder.ref(p.scopes, name))
-  let key_span = ast.property_key_span(key)
+  let key_span = ast.property_name_span(key)
   let key_ident = ast.Identifier(name:, span: key_span)
   use #(p2, value) <- result.map(case has_default {
     True -> {
@@ -5348,11 +5352,9 @@ fn parse_class_expression(
   p: Parser,
 ) -> Result(#(Parser, ast.Expression), ParseError) {
   let start = pos_of(p)
-  use #(p2, name, super_class, body) <- result.map(parse_class_head_and_tail(
-    p,
-    name_required: False,
-    register_name: False,
-  ))
+  use #(p2, ClassSyntax(name:, super_class:, body:)) <- result.map(
+    parse_class_head_and_tail(p, name_required: False, register_name: False),
+  )
   #(
     p2,
     ast.ClassExpression(name:, super_class:, body:, span: span_from(start, p2)),
@@ -5401,25 +5403,29 @@ fn rescan_from(p: Parser, pos: Int) -> Parser {
 }
 
 // the "x" after from: its cooked value and end position
+type ModuleSpecifier {
+  ModuleSpecifier(value: String, end: Int)
+}
+
 fn parse_module_specifier(
   p: Parser,
-) -> Result(#(Parser, String, Int), ParseError) {
+) -> Result(#(Parser, ModuleSpecifier), ParseError) {
   use <- bool.guard(
     peek(p) != StringLiteral,
     Error(ExpectedModuleSpecifier(pos_of(p))),
   )
   use value <- result.map(module_specifier_value(p))
-  #(advance(p), value, pos_of(p) + peek_raw_len(p))
+  #(advance(p), ModuleSpecifier(value:, end: pos_of(p) + peek_raw_len(p)))
 }
 
 fn expect_from_module_specifier(
   p: Parser,
-) -> Result(#(Parser, String, Int), ParseError) {
+) -> Result(#(Parser, ModuleSpecifier), ParseError) {
   use p2 <- result.try(expect(p, From))
-  use #(p3, value, spec_end) <- result.try(parse_module_specifier(p2))
+  use #(p3, specifier) <- result.try(parse_module_specifier(p2))
   use p4 <- result.try(skip_import_attributes(p3))
   use p5 <- result.map(eat_semicolon(p4))
-  #(p5, value, spec_end)
+  #(p5, specifier)
 }
 
 // no import attributes supported: only an empty with {} parses
@@ -5439,7 +5445,9 @@ fn finish_import_from(
   phase: ast.ImportPhase,
   specifiers: List(ast.ImportSpecifier),
 ) -> Result(#(Parser, ast.ModuleItem), ParseError) {
-  use #(p2, source, span_end) <- result.map(expect_from_module_specifier(p))
+  use #(p2, ModuleSpecifier(source, span_end)) <- result.map(
+    expect_from_module_specifier(p),
+  )
   #(
     p2,
     ast.ImportDeclaration(
@@ -5497,7 +5505,9 @@ fn parse_import_declaration(
   })
   case peek(p2) {
     StringLiteral -> {
-      use #(p3, value, span_end) <- result.try(parse_module_specifier(p2))
+      use #(p3, ModuleSpecifier(value, span_end)) <- result.try(
+        parse_module_specifier(p2),
+      )
       use p4 <- result.map(eat_semicolon(p3))
       #(
         p4,
@@ -5666,7 +5676,7 @@ fn parse_export_named_function(
     name_required: True,
     is_async:,
   ))
-  #(p3, ast.DeclFunction(function:))
+  #(p3, ast.DeclareFunction(function:))
 }
 
 // the declaration parse that follows reports a missing name
@@ -5717,11 +5727,9 @@ fn parse_default_fn(
 fn parse_default_class(
   p: Parser,
 ) -> Result(#(Parser, DefaultExportDecl), ParseError) {
-  use #(p2, name, super_class, body) <- result.map(parse_class_head_and_tail(
-    p,
-    name_required: False,
-    register_name: True,
-  ))
+  use #(p2, ClassSyntax(name:, super_class:, body:)) <- result.map(
+    parse_class_head_and_tail(p, name_required: False, register_name: True),
+  )
   #(p2, DefaultClass(name:, super_class:, body:))
 }
 
@@ -5782,7 +5790,9 @@ fn finish_export_all(
   span_start: Int,
   exported: Option(String),
 ) -> Result(#(Parser, ast.ModuleItem), ParseError) {
-  use #(p2, value, span_end) <- result.try(parse_module_specifier(p))
+  use #(p2, ModuleSpecifier(value, span_end)) <- result.try(
+    parse_module_specifier(p),
+  )
   use p3 <- result.map(eat_semicolon(p2))
   #(
     p3,
@@ -5879,7 +5889,9 @@ fn parse_export_list(
   }
   case peek(p2) {
     From -> {
-      use #(p3, value, _) <- result.try(parse_module_specifier(advance(p2)))
+      use #(p3, ModuleSpecifier(value:, ..)) <- result.try(
+        parse_module_specifier(advance(p2)),
+      )
       use p4 <- result.map(eat_semicolon(p3))
       let source = Some(value)
       #(p4, ast.ExportNamed(specifiers:, source:, span: span(p4)))

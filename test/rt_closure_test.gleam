@@ -15,8 +15,8 @@ import gleam/option.{None, Some}
 import rt_helpers
 
 fn compile(source: String) -> FuncTemplate {
-  let assert Ok(#(body, sb)) = parser.parse_script(source)
-  let assert Ok(template) = compiler.compile_script(body, sb)
+  let assert Ok(#(body, scopes)) = parser.parse_script(source)
+  let assert Ok(template) = compiler.compile_script(body, scopes)
   template
 }
 

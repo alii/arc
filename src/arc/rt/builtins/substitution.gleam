@@ -6,18 +6,18 @@ import gleam/string
 
 // §22.1.3.19.1 getsubstitution, tokenized once per replace call
 pub type PlainSegment {
-  LiteralSeg(text: String)
-  MatchedSeg
-  BeforeSeg
-  AfterSeg
-  CaptureSeg(idx: Int)
-  TwoDigitSeg(two_idx: Int, one_idx: Int, suffix: String)
-  ZeroDigitSeg(two_idx: Int, literal: String)
+  LiteralSegment(text: String)
+  MatchedSegment
+  BeforeSegment
+  AfterSegment
+  CaptureSegment(idx: Int)
+  TwoDigitSegment(two_idx: Int, one_idx: Int, suffix: String)
+  ZeroDigitSegment(two_idx: Int, literal: String)
 }
 
 pub type NamedSegment {
-  Plain(seg: PlainSegment)
-  NamedSeg(name: String)
+  Plain(segment: PlainSegment)
+  NamedGroupSegment(name: String)
 }
 
 pub type MatchContext {
@@ -25,46 +25,46 @@ pub type MatchContext {
     matched: String,
     before: fn() -> String,
     after: fn() -> String,
-    // 1-based, only called with 1 <= n <= m
+    // 1-based, only called with 1 <= n <= capture_count
     capture: fn(Int) -> String,
-    m: Int,
+    capture_count: Int,
   )
 }
 
 pub type Expanded {
   Text(text: String)
-  NamedRef(name: String)
+  NamedGroup(name: String)
 }
 
-pub fn expand_plain(seg: PlainSegment, ctx: MatchContext) -> String {
-  case seg {
-    LiteralSeg(text) -> text
-    MatchedSeg -> ctx.matched
-    BeforeSeg -> ctx.before()
-    AfterSeg -> ctx.after()
-    CaptureSeg(idx) ->
-      case idx <= ctx.m {
+pub fn expand_plain(segment: PlainSegment, ctx: MatchContext) -> String {
+  case segment {
+    LiteralSegment(text) -> text
+    MatchedSegment -> ctx.matched
+    BeforeSegment -> ctx.before()
+    AfterSegment -> ctx.after()
+    CaptureSegment(idx) ->
+      case idx <= ctx.capture_count {
         True -> ctx.capture(idx)
         False -> "$" <> int.to_string(idx)
       }
-    TwoDigitSeg(two_idx, one_idx, suffix) ->
-      case two_idx <= ctx.m, one_idx <= ctx.m {
+    TwoDigitSegment(two_idx, one_idx, suffix) ->
+      case two_idx <= ctx.capture_count, one_idx <= ctx.capture_count {
         True, _ -> ctx.capture(two_idx)
         False, True -> ctx.capture(one_idx) <> suffix
         False, False -> "$" <> int.to_string(one_idx) <> suffix
       }
-    ZeroDigitSeg(two_idx, literal) ->
-      case two_idx <= ctx.m && two_idx >= 1 {
+    ZeroDigitSegment(two_idx, literal) ->
+      case two_idx <= ctx.capture_count && two_idx >= 1 {
         True -> ctx.capture(two_idx)
         False -> literal
       }
   }
 }
 
-pub fn expand(seg: NamedSegment, ctx: MatchContext) -> Expanded {
-  case seg {
+pub fn expand(segment: NamedSegment, ctx: MatchContext) -> Expanded {
+  case segment {
     Plain(p) -> Text(expand_plain(p, ctx))
-    NamedSeg(name) -> NamedRef(name)
+    NamedGroupSegment(name) -> NamedGroup(name)
   }
 }
 
@@ -84,8 +84,8 @@ pub fn expand_plain_parts(
   list.map(segments, expand_plain(_, ctx))
 }
 
-type Emit(seg) {
-  Emit(plain: fn(PlainSegment) -> seg, named: Option(fn(String) -> seg))
+type Emit(segment) {
+  Emit(plain: fn(PlainSegment) -> segment, named: Option(fn(String) -> segment))
 }
 
 pub fn tokenize_plain(template: String) -> List(PlainSegment) {
@@ -93,12 +93,12 @@ pub fn tokenize_plain(template: String) -> List(PlainSegment) {
 }
 
 pub fn tokenize_named(template: String) -> List(NamedSegment) {
-  tokenize(template, Emit(plain: Plain, named: Some(NamedSeg)))
+  tokenize(template, Emit(plain: Plain, named: Some(NamedGroupSegment)))
 }
 
-fn tokenize(template: String, emit: Emit(seg)) -> List(seg) {
+fn tokenize(template: String, emit: Emit(segment)) -> List(segment) {
   case utf8.has_byte(template, 0x24) {
-    False -> [emit.plain(LiteralSeg(template))]
+    False -> [emit.plain(LiteralSegment(template))]
     True -> tokenize_loop(to_code_points(template), emit, "", [])
   }
 }
@@ -110,35 +110,39 @@ fn to_code_points(s: String) -> List(String) {
   |> list.map(fn(cp) { string.from_utf_codepoints([cp]) })
 }
 
-fn flush_literal(lit: String, emit: Emit(seg), segs: List(seg)) -> List(seg) {
+fn flush_literal(
+  lit: String,
+  emit: Emit(segment),
+  segs: List(segment),
+) -> List(segment) {
   case lit {
     "" -> segs
-    _ -> [emit.plain(LiteralSeg(lit)), ..segs]
+    _ -> [emit.plain(LiteralSegment(lit)), ..segs]
   }
 }
 
 fn tokenize_loop(
   chars: List(String),
-  emit: Emit(seg),
+  emit: Emit(segment),
   lit: String,
-  segs: List(seg),
-) -> List(seg) {
+  segs: List(segment),
+) -> List(segment) {
   case chars {
     [] -> list.reverse(flush_literal(lit, emit, segs))
     ["$", "$", ..rest] -> tokenize_loop(rest, emit, lit <> "$", segs)
     ["$", "&", ..rest] ->
       tokenize_loop(rest, emit, "", [
-        emit.plain(MatchedSeg),
+        emit.plain(MatchedSegment),
         ..flush_literal(lit, emit, segs)
       ])
     ["$", "`", ..rest] ->
       tokenize_loop(rest, emit, "", [
-        emit.plain(BeforeSeg),
+        emit.plain(BeforeSegment),
         ..flush_literal(lit, emit, segs)
       ])
     ["$", "'", ..rest] ->
       tokenize_loop(rest, emit, "", [
-        emit.plain(AfterSeg),
+        emit.plain(AfterSegment),
         ..flush_literal(lit, emit, segs)
       ])
     ["$", "<", ..rest] ->
@@ -183,15 +187,15 @@ fn take_group_name(
 fn tokenize_one_digit(
   d1: String,
   rest: List(String),
-  emit: Emit(seg),
+  emit: Emit(segment),
   lit: String,
-  segs: List(seg),
-) -> List(seg) {
+  segs: List(segment),
+) -> List(segment) {
   case digit_value(d1) {
     0 -> tokenize_loop(rest, emit, lit <> "$0", segs)
     idx ->
       tokenize_loop(rest, emit, "", [
-        emit.plain(CaptureSeg(idx)),
+        emit.plain(CaptureSegment(idx)),
         ..flush_literal(lit, emit, segs)
       ])
   }
@@ -201,21 +205,21 @@ fn tokenize_two_digit(
   d1: String,
   d2: String,
   rest: List(String),
-  emit: Emit(seg),
+  emit: Emit(segment),
   lit: String,
-  segs: List(seg),
-) -> List(seg) {
+  segs: List(segment),
+) -> List(segment) {
   let two_idx = digit_value(d1) * 10 + digit_value(d2)
   case digit_value(d1), two_idx {
     0, 0 -> tokenize_loop(rest, emit, lit <> "$00", segs)
     0, _ ->
       tokenize_loop(rest, emit, "", [
-        emit.plain(ZeroDigitSeg(two_idx, "$0" <> d2)),
+        emit.plain(ZeroDigitSegment(two_idx, "$0" <> d2)),
         ..flush_literal(lit, emit, segs)
       ])
     one_idx, _ ->
       tokenize_loop(rest, emit, "", [
-        emit.plain(TwoDigitSeg(two_idx, one_idx, d2)),
+        emit.plain(TwoDigitSegment(two_idx, one_idx, d2)),
         ..flush_literal(lit, emit, segs)
       ])
   }

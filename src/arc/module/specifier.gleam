@@ -3,12 +3,12 @@ import gleam/list
 import gleam/option.{type Option}
 import gleam/string
 
-/// specifier as written in source; never a graph key
+// specifier as written in source; never a graph key
 pub opaque type Raw {
   Raw(String)
 }
 
-/// canonical module identity from the host resolver
+// canonical module identity from the host resolver
 pub opaque type Resolved {
   Resolved(String)
 }
@@ -35,15 +35,11 @@ pub opaque type SpecifierMap {
   SpecifierMap(entries: Dict(Raw, Resolved))
 }
 
-pub fn new_specifier_map() -> SpecifierMap {
+pub fn new_map() -> SpecifierMap {
   SpecifierMap(dict.new())
 }
 
-pub fn insert_specifier(
-  map: SpecifierMap,
-  from: Raw,
-  to: Resolved,
-) -> SpecifierMap {
+pub fn insert(map: SpecifierMap, from: Raw, to: Resolved) -> SpecifierMap {
   let SpecifierMap(entries) = map
   SpecifierMap(dict.insert(entries, from, to))
 }

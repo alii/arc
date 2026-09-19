@@ -52,13 +52,13 @@ pub fn dispatch(
   _this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  let caller = st.realm.id
+  let caller_realm = st.realm.id
   use st <- rt_realm.with_realm(st, native.realm)
   case native {
-    JsonParse(_) -> json_parse(args, caller, st)
-    JsonStringify(_) -> json_stringify(args, caller, st)
-    JsonRawJson(_) -> json_raw_json(args, st)
-    JsonIsRawJson(_) -> json_is_raw_json(args, st)
+    JsonParse(_) -> json_parse(st, args, caller_realm)
+    JsonStringify(_) -> json_stringify(st, args, caller_realm)
+    JsonRawJson(_) -> json_raw_json(st, args)
+    JsonIsRawJson(_) -> json_is_raw_json(st, args)
   }
 }
 
@@ -74,7 +74,11 @@ fn call_in_caller_realm(
 }
 
 // §25.5.1
-fn json_parse(args: List(JsVal), caller: Int, st: Agent) -> #(JsVal, Agent) {
+fn json_parse(
+  st: Agent,
+  args: List(JsVal),
+  caller_realm: Int,
+) -> #(JsVal, Agent) {
   let #(json_text, st) =
     rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   let bytes = bit_array.from_string(json_text)
@@ -91,7 +95,7 @@ fn json_parse(args: List(JsVal), caller: Int, st: Agent) -> #(JsVal, Agent) {
             True -> {
               let #(record, st) = materialize(st, val)
               let #(root, st) = alloc_holder(st, record_value(record))
-              let ctx = ReviveContext(reviver:, caller:)
+              let ctx = ReviveContext(reviver:, caller: caller_realm)
               internalize_json_property(st, ctx, root, "", Some(record))
             }
           }
@@ -257,14 +261,14 @@ type JsonValue {
 }
 
 type ParseRecord {
-  PrimRecord(value: JsVal, source: BitArray)
+  PrimitiveRecord(value: JsVal, source: BitArray)
   ArrayRecord(value: JsVal, elements: List(ParseRecord))
   ObjectRecord(value: JsVal, entries: List(#(String, ParseRecord)))
 }
 
 fn record_value(record: ParseRecord) -> JsVal {
   case record {
-    PrimRecord(value:, ..)
+    PrimitiveRecord(value:, ..)
     | ArrayRecord(value:, ..)
     | ObjectRecord(value:, ..) -> value
   }
@@ -272,7 +276,7 @@ fn record_value(record: ParseRecord) -> JsVal {
 
 fn record_source(record: Option(ParseRecord)) -> Option(BitArray) {
   case record {
-    Some(PrimRecord(source:, ..)) -> Some(source)
+    Some(PrimitiveRecord(source:, ..)) -> Some(source)
     Some(ArrayRecord(..)) | Some(ObjectRecord(..)) | None -> None
   }
 }
@@ -358,14 +362,17 @@ fn parse_value(
 
 fn materialize(st: Agent, val: JsonValue) -> #(ParseRecord, Agent) {
   case val {
-    JsonNull(source:) -> #(PrimRecord(value: mk_null(), source:), st)
-    JsonBool(value: b, source:) -> #(PrimRecord(value: mk_bool(b), source:), st)
+    JsonNull(source:) -> #(PrimitiveRecord(value: mk_null(), source:), st)
+    JsonBool(value: b, source:) -> #(
+      PrimitiveRecord(value: mk_bool(b), source:),
+      st,
+    )
     JsonNumber(value: n, source:) -> #(
-      PrimRecord(value: mk_number(n), source:),
+      PrimitiveRecord(value: mk_number(n), source:),
       st,
     )
     JsonString(value: s, source:) -> #(
-      PrimRecord(value: mk_string(s), source:),
+      PrimitiveRecord(value: mk_string(s), source:),
       st,
     )
     JsonArray(items) -> {
@@ -513,14 +520,7 @@ fn props_from_entries(
       let value = record_value(record)
       case dict.get(acc, pk) {
         Ok(first) -> {
-          let prop =
-            types.DataProperty(
-              value:,
-              writable: True,
-              enumerable: True,
-              configurable: True,
-              seq: types.prop_seq(first),
-            )
+          let prop = types.plain_property(value, types.prop_seq(first))
           props_from_entries(st, rest, dict.insert(acc, pk, prop))
         }
         Error(Nil) -> {
@@ -532,7 +532,7 @@ fn props_from_entries(
   }
 }
 
-fn json_raw_json(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
+fn json_raw_json(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(json_text, st) =
     rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   case validate_raw_json_text(bit_array.from_string(json_text)) {
@@ -602,7 +602,7 @@ fn last_byte_is_ws(bytes: BitArray) -> Bool {
   }
 }
 
-fn json_is_raw_json(args: List(JsVal), st: Agent) -> #(JsVal, Agent) {
+fn json_is_raw_json(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   #(mk_bool(is_raw_json(st, helpers.arg_at(args, 0))), st)
 }
 
@@ -635,9 +635,9 @@ const circular_msg = "Converting circular structure to JSON"
 
 // §25.5.2
 fn json_stringify(
-  args: List(JsVal),
-  caller: Int,
   st: Agent,
+  args: List(JsVal),
+  caller_realm: Int,
 ) -> #(JsVal, Agent) {
   let val = helpers.first_arg_or_undefined(args)
   let replacer_arg = helpers.arg_at(args, 1)
@@ -659,7 +659,7 @@ fn json_stringify(
     }
   })
   let #(wrapper, st) = alloc_holder(st, val)
-  let ctx = StringifyContext(replacer:, gap:, caller:)
+  let ctx = StringifyContext(replacer:, gap:, caller: caller_realm)
   case serialize_property(st, ctx, [], "", Named(""), wrapper) {
     #(Some(tree), st) ->
       case string_tree.byte_size(tree) > limits.max_string_bytes {
@@ -784,13 +784,13 @@ fn serialize_property(
 ) -> #(Option(StringTree), Agent) {
   // canonical keys, so a named key never spells an index
   let #(val, st) = case pk {
-    Named(name) -> helpers.get_named(st, mk_object(holder), name)
+    Named(name) -> rt_val.get_named(st, mk_object(holder), name, None)
     Index(i) -> rt_abstract_ops.get_index(st, mk_object(holder), i)
     Private(_) -> #(mk_undefined(), st)
   }
   let #(val, st) = case classify(val) {
     KHandle(_) | KBig(_) -> {
-      let #(to_json, st) = helpers.get_named(st, val, "toJSON")
+      let #(to_json, st) = rt_val.get_named(st, val, "toJSON", None)
       case rt_val.is_callable(st, to_json) {
         True ->
           call_in_caller_realm(st, ctx.caller, to_json, val, [

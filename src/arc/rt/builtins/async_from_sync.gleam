@@ -1,19 +1,19 @@
-//// §27.1.6 %AsyncFromSyncIteratorPrototype% methods
+// §27.1.6 %asyncfromsynciteratorprototype% methods
 
 import arc/bytecode/key.{Named}
 import arc/rt/async as rt_async
+import arc/rt/builtins/common
 import arc/rt/builtins/helpers.{first_arg_or_undefined}
 import arc/rt/builtins/iter_protocol
 import arc/rt/call.{NormalCompletion, ThrowCompletion} as rt_call
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
-  type Agent, type Handle, type JsVal, type NativeToken, AsyncFromSyncClose,
-  AsyncFromSyncIterator, AsyncFromSyncUnwrap, IteratorN, KHandle, SObject,
-  StringKey, classify, mk_object, mk_undefined,
+  type Agent, type Handle, type JsVal, AsyncFromSyncClose, AsyncFromSyncIterator,
+  AsyncFromSyncUnwrap, IteratorN, KHandle, SObject, StringKey, classify,
+  mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
-import gleam/option.{Some}
 
 type AsyncFromSyncForward {
   ForwardNext
@@ -33,7 +33,11 @@ pub fn throw(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   async_from_sync(st, this, args, ForwardThrow)
 }
 
-pub fn unwrap(st: Agent, args: List(JsVal), done: Bool) -> #(JsVal, Agent) {
+pub fn unwrap(
+  st: Agent,
+  args: List(JsVal),
+  done done: Bool,
+) -> #(JsVal, Agent) {
   let v = first_arg_or_undefined(args)
   let #(h, st) = rt_async.alloc_iter_result(st, v, done)
   #(mk_object(h), st)
@@ -54,7 +58,7 @@ fn async_from_sync(
   args: List(JsVal),
   kind: AsyncFromSyncForward,
 ) -> #(JsVal, Agent) {
-  let #(#(promise_h, resolve_h, reject_h), st) =
+  let #(rt_async.PromiseCapability(promise_h, resolve_h, reject_h), st) =
     rt_async.new_promise_capability(st)
   let cap_resolve = mk_object(resolve_h)
   let cap_reject = mk_object(reject_h)
@@ -114,7 +118,7 @@ fn forward_to_sync_iterator(
             ForwardReturn -> False
             ForwardNext | ForwardThrow -> True
           }
-          afs_continuation(
+          forward_continuation(
             st,
             result_h,
             sync_rec,
@@ -130,7 +134,7 @@ fn forward_to_sync_iterator(
 }
 
 // §27.1.4.4 asyncfromsynciteratorcontinuation
-fn afs_continuation(
+fn forward_continuation(
   st: Agent,
   result_h: Handle,
   sync_rec: Handle,
@@ -143,11 +147,15 @@ fn afs_continuation(
   let done = rt_val.to_boolean(done_v)
   let #(inner, st) = rt_obj.get_prop(st, result, StringKey(Named("value")))
   let #(on_fulfilled, st) =
-    alloc_closure(st, IteratorN(AsyncFromSyncUnwrap(done:)))
+    common.alloc_native_closure(st, IteratorN(AsyncFromSyncUnwrap(done:)), 1)
   let #(on_rejected, st) = case done || !close_on_rejection {
     True -> #(mk_undefined(), st)
     False ->
-      alloc_closure(st, IteratorN(AsyncFromSyncClose(sync_iter: sync_rec)))
+      common.alloc_native_closure(
+        st,
+        IteratorN(AsyncFromSyncClose(sync_iter: sync_rec)),
+        1,
+      )
   }
   let #(inner_p, st) = rt_async.promise_resolve_static(st, inner)
   let st =
@@ -160,19 +168,6 @@ fn afs_continuation(
       cap_reject,
     )
   #(mk_undefined(), st)
-}
-
-fn alloc_closure(st: Agent, token: NativeToken) -> #(JsVal, Agent) {
-  let #(h, st) =
-    rt_call.native_new(
-      st,
-      Some(st.realm.function.prototype),
-      token,
-      "",
-      1,
-      constructible: False,
-    )
-  #(mk_object(h), st)
 }
 
 fn require_async_from_sync(st: Agent, this: JsVal) -> Handle {

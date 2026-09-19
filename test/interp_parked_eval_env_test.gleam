@@ -10,8 +10,8 @@ import arc/rt/types.{type Agent, type JsVal}
 import rt_helpers
 
 fn run(st: Agent, source: String) -> #(rt_call.Completion(JsVal), Agent) {
-  let assert Ok(#(body, sb)) = parser.parse_script(source)
-  let assert Ok(template) = compiler.compile_script(body, sb)
+  let assert Ok(#(body, scopes)) = parser.parse_script(source)
+  let assert Ok(template) = compiler.compile_script(body, scopes)
   entry.run_script(st, template)
 }
 
@@ -32,7 +32,7 @@ pub fn parked_generator_eval_env_survives_collect_test() {
       ",
     )
   let assert NormalCompletion(v) = first
-  assert rt_inspect.inspect(st, v) == "1"
+  assert rt_inspect.describe(st, v) == "1"
   let st = rt_gc.collect(st, [])
   let st = safepoint.end_turn(st, [])
   let #(_, st) =
@@ -40,5 +40,5 @@ pub fn parked_generator_eval_env_survives_collect_test() {
   let st = rt_gc.collect(st, [])
   let #(second, st) = run(st, "it.next().value")
   let assert NormalCompletion(v) = second
-  assert rt_inspect.inspect(st, v) == "10"
+  assert rt_inspect.describe(st, v) == "10"
 }
