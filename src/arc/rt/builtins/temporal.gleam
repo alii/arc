@@ -51,7 +51,7 @@ pub fn init(
   st: Agent,
   object_proto: Handle,
   function_proto: Handle,
-) -> #(Handle, Agent) {
+) -> #(Handle, TemporalProtos, Agent) {
   let #(pd_proto, st) = common.alloc_proto(st, Some(object_proto), dict.new())
   let #(pt_proto, st) = common.alloc_proto(st, Some(object_proto), dict.new())
   let #(pdt_proto, st) = common.alloc_proto(st, Some(object_proto), dict.new())
@@ -244,17 +244,19 @@ pub fn init(
   let #(ins_prop, st) = rt_store.builtin_property(st, mk_object(ins_ctor))
   let #(zdt_prop, st) = rt_store.builtin_property(st, mk_object(zdt_ctor))
   let #(now_prop, st) = rt_store.builtin_property(st, mk_object(now_h))
-  common.init_namespace(st, object_proto, "Temporal", [
-    #("PlainDate", pd_prop),
-    #("PlainTime", pt_prop),
-    #("PlainDateTime", pdt_prop),
-    #("PlainYearMonth", pym_prop),
-    #("PlainMonthDay", pmd_prop),
-    #("Duration", dur_prop),
-    #("Instant", ins_prop),
-    #("ZonedDateTime", zdt_prop),
-    #("Now", now_prop),
-  ])
+  let #(namespace, st) =
+    common.init_namespace(st, object_proto, "Temporal", [
+      #("PlainDate", pd_prop),
+      #("PlainTime", pt_prop),
+      #("PlainDateTime", pdt_prop),
+      #("PlainYearMonth", pym_prop),
+      #("PlainMonthDay", pmd_prop),
+      #("Duration", dur_prop),
+      #("Instant", ins_prop),
+      #("ZonedDateTime", zdt_prop),
+      #("Now", now_prop),
+    ])
+  #(namespace, protos, st)
 }
 
 fn init_type(

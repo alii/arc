@@ -148,6 +148,8 @@ fn init_realm(st: Agent) -> #(Realm, Agent) {
       is_nan: nb.is_nan,
       is_finite: nb.is_finite,
     )
+  let #(temporal, temporal_protos, st) =
+    b_temporal.init(st, object_proto, fn_proto)
   let #(intl, st) =
     b_intl.init(
       st,
@@ -157,8 +159,8 @@ fn init_realm(st: Agent) -> #(Realm, Agent) {
       bigint.prototype,
       string.prototype,
       date.prototype,
+      temporal_protos,
     )
-  let #(temporal, st) = b_temporal.init(st, object_proto, fn_proto)
   let #(global_object, st) =
     alloc_global_object(
       st,

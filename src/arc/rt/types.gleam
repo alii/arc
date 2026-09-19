@@ -1336,6 +1336,7 @@ pub type IntlHostOverrideName {
   DateToLocaleString
   DateToLocaleDateString
   DateToLocaleTimeString
+  TemporalDurationToLocaleString
 }
 
 pub type LocaleGetterName {

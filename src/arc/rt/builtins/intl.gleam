@@ -20,6 +20,10 @@ import arc/rt/builtins/options.{
   get_num_opt, get_option, get_options_object, get_text_opt,
 }
 import arc/rt/builtins/realm_ops
+import arc/rt/builtins/temporal_common.{
+  duration_sign, duration_slot_of, require_temporal, to_temporal_duration,
+}
+import arc/rt/builtins/temporal_iso.{type Duration}
 import arc/rt/call as rt_call
 import arc/rt/intl_data.{
   type BoundGetterService, type CollatorState, type ConstructibleService,
@@ -82,8 +86,8 @@ import arc/rt/temporal_data.{
 import arc/rt/types.{
   type Agent, type Handle, type IntlHostOverrideName, type IntlMethodName,
   type IntlNative, type JsNum, type JsVal, type LocaleGetterName,
-  type LocaleMethodName, BigIntObj, BigIntToLocaleString, DateObj,
-  DateToLocaleDateString, DateToLocaleString, DateToLocaleTimeString,
+  type LocaleMethodName, type TemporalProtos, BigIntObj, BigIntToLocaleString,
+  DateObj, DateToLocaleDateString, DateToLocaleString, DateToLocaleTimeString,
   IntlBoundGetter, IntlBoundMethod, IntlConstructor, IntlFormat, IntlFormatRange,
   IntlFormatRangeToParts, IntlFormatToParts, IntlGetCanonicalLocales,
   IntlHostOverride, IntlLocaleGetter, IntlLocaleMethod, IntlMethod, IntlN,
@@ -98,12 +102,14 @@ import arc/rt/types.{
   LocaleMaximize, LocaleMinimize, LocaleNumberingSystem, LocaleNumeric,
   LocaleRegion, LocaleScript, LocaleToString, LocaleVariants, NumberObj,
   NumberToLocaleString, SObject, StringKey, StringLocaleCompare,
-  StringToLocaleLowerCase, StringToLocaleUpperCase, SymbolKey, TemporalObj,
-  classify, mk_bool, mk_int, mk_number, mk_object, mk_string, mk_undefined,
+  StringToLocaleLowerCase, StringToLocaleUpperCase, SymbolKey,
+  TemporalDurationToLocaleString, TemporalObj, classify, mk_bool, mk_int,
+  mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/unicode_case
 import arc/rt/val as rt_val
 import arc/time_zone
+import gleam/bool
 import gleam/dict
 import gleam/float
 import gleam/int
@@ -120,6 +126,7 @@ pub fn init(
   bigint_proto: Handle,
   string_proto: Handle,
   date_proto: Handle,
+  temporal_protos: TemporalProtos,
 ) -> #(Handle, Agent) {
   let #(locale_getters, st) =
     common.alloc_getters(
@@ -377,6 +384,16 @@ pub fn init(
       ),
     ])
   let st = common.add_named_properties(st, date_proto, date_methods)
+  let #(duration_methods, st) =
+    common.alloc_methods(st, function_proto, [
+      #(
+        "toLocaleString",
+        IntlN(IntlHostOverride(TemporalDurationToLocaleString)),
+        0,
+      ),
+    ])
+  let st =
+    common.add_named_properties(st, temporal_protos.duration, duration_methods)
 
   #(namespace, st)
 }
@@ -2622,19 +2639,6 @@ type DurationUnit {
   NanosecondsUnit
 }
 
-const duration_units = [
-  YearsUnit,
-  MonthsUnit,
-  WeeksUnit,
-  DaysUnit,
-  HoursUnit,
-  MinutesUnit,
-  SecondsUnit,
-  MillisecondsUnit,
-  MicrosecondsUnit,
-  NanosecondsUnit,
-]
-
 fn duration_unit_js_name(u: DurationUnit) -> String {
   case u {
     YearsUnit -> "years"
@@ -2665,35 +2669,7 @@ fn duration_unit_singular(u: DurationUnit) -> String {
   }
 }
 
-type DurationRecord {
-  DurationRecord(
-    years: Float,
-    months: Float,
-    weeks: Float,
-    days: Float,
-    hours: Float,
-    minutes: Float,
-    seconds: Float,
-    milliseconds: Float,
-    microseconds: Float,
-    nanoseconds: Float,
-  )
-}
-
-const zero_duration = DurationRecord(
-  years: 0.0,
-  months: 0.0,
-  weeks: 0.0,
-  days: 0.0,
-  hours: 0.0,
-  minutes: 0.0,
-  seconds: 0.0,
-  milliseconds: 0.0,
-  microseconds: 0.0,
-  nanoseconds: 0.0,
-)
-
-fn duration_field(d: DurationRecord, u: DurationUnit) -> Float {
+fn duration_field(d: Duration, u: DurationUnit) -> Int {
   case u {
     YearsUnit -> d.years
     MonthsUnit -> d.months
@@ -2706,29 +2682,6 @@ fn duration_field(d: DurationRecord, u: DurationUnit) -> Float {
     MicrosecondsUnit -> d.microseconds
     NanosecondsUnit -> d.nanoseconds
   }
-}
-
-fn set_duration_field(
-  d: DurationRecord,
-  u: DurationUnit,
-  v: Float,
-) -> DurationRecord {
-  case u {
-    YearsUnit -> DurationRecord(..d, years: v)
-    MonthsUnit -> DurationRecord(..d, months: v)
-    WeeksUnit -> DurationRecord(..d, weeks: v)
-    DaysUnit -> DurationRecord(..d, days: v)
-    HoursUnit -> DurationRecord(..d, hours: v)
-    MinutesUnit -> DurationRecord(..d, minutes: v)
-    SecondsUnit -> DurationRecord(..d, seconds: v)
-    MillisecondsUnit -> DurationRecord(..d, milliseconds: v)
-    MicrosecondsUnit -> DurationRecord(..d, microseconds: v)
-    NanosecondsUnit -> DurationRecord(..d, nanoseconds: v)
-  }
-}
-
-fn duration_values(d: DurationRecord) -> List(Float) {
-  list.map(duration_units, duration_field(d, _))
 }
 
 fn duration_format_state(
@@ -4584,6 +4537,8 @@ fn run_host_override(
       host_date_to_locale(st, this, arg0, arg1, DateOnly)
     DateToLocaleTimeString ->
       host_date_to_locale(st, this, arg0, arg1, TimeOnly)
+    TemporalDurationToLocaleString ->
+      host_duration_to_locale_string(st, this, arg0, arg1)
   }
 }
 
@@ -4944,276 +4899,29 @@ fn duration_parts(
   df: DurationFormatState,
   duration_v: JsVal,
 ) -> #(List(intl_format.UnitPart), Agent) {
-  let #(fields, st) = to_duration_record(st, duration_v)
-  let values = duration_values(fields)
-  let has_neg = list.any(values, fn(v) { v <. 0.0 })
-  let has_pos = list.any(values, fn(v) { v >. 0.0 })
-  let st = case has_neg && has_pos {
-    True ->
-      rt_val.throw_range_error(st, "Duration fields must have consistent sign")
-    False -> st
-  }
-  let st = case is_valid_duration(fields) {
-    True -> st
-    False ->
-      rt_val.throw_range_error(st, "Duration field value is out of range")
-  }
-  #(build_duration_parts(df, fields), st)
+  let #(d, st) = to_temporal_duration(st, duration_v)
+  #(build_duration_parts(df, d), st)
 }
 
-fn to_duration_record(
+fn host_duration_to_locale_string(
   st: Agent,
-  duration_v: JsVal,
-) -> #(DurationRecord, Agent) {
-  case classify(duration_v) {
-    KStr(text) ->
-      case parse_iso_duration(text) {
-        Ok(fields) -> #(fields, st)
-        Error(Nil) ->
-          rt_val.throw_range_error(st, "Invalid duration string: " <> text)
-      }
-    KHandle(_) -> {
-      let #(fields, st, any_defined) =
-        list.fold(duration_units, #(zero_duration, st, False), fn(acc, unit) {
-          let #(fields, st, any) = acc
-          let name = duration_unit_js_name(unit)
-          let #(v, st) = rt_obj.get_prop(st, duration_v, StringKey(Named(name)))
-          case classify(v) {
-            KUndef -> #(fields, st, any)
-            _ -> {
-              let #(n, st) = rt_val.to_number(st, v)
-              case n {
-                JInt(i) -> #(
-                  set_duration_field(fields, unit, int.to_float(i)),
-                  st,
-                  True,
-                )
-                JFloat(f) ->
-                  case f == float.floor(f) {
-                    True -> #(set_duration_field(fields, unit, f), st, True)
-                    False ->
-                      rt_val.throw_range_error(
-                        st,
-                        name <> " must be an integral number",
-                      )
-                  }
-                JNan | JPosInf | JNegInf ->
-                  rt_val.throw_range_error(
-                    st,
-                    name <> " must be a finite number",
-                  )
-              }
-            }
-          }
-        })
-      case any_defined {
-        True -> #(fields, st)
-        False -> rt_val.throw_range_error(st, "Invalid duration object")
-      }
-    }
-    _ -> rt_val.throw_type_error(st, "Duration must be an object or string")
-  }
-}
-
-fn is_valid_duration(d: DurationRecord) -> Bool {
-  let cal_ok =
-    list.all([d.years, d.months, d.weeks], fn(v) {
-      float.absolute_value(v) <. 4_294_967_296.0
-    })
-  let total_seconds =
-    d.days
-    *. 86_400.0
-    +. d.hours
-    *. 3600.0
-    +. d.minutes
-    *. 60.0
-    +. d.seconds
-    +. d.milliseconds
-    /. 1000.0
-    +. d.microseconds
-    /. 1_000_000.0
-    +. d.nanoseconds
-    /. 1_000_000_000.0
-  cal_ok && float.absolute_value(total_seconds) <. 9_007_199_254_740_992.0
-}
-
-// [+-]PnYnMnWnDTnHnMnS
-fn parse_iso_duration(text: String) -> Result(DurationRecord, Nil) {
-  let trimmed = string.trim(text)
-  let #(sign, rest) = case string.pop_grapheme(trimmed) {
-    Ok(#("-", r)) -> #(-1.0, r)
-    Ok(#("\u{2212}", r)) -> #(-1.0, r)
-    Ok(#("+", r)) -> #(1.0, r)
-    _ -> #(1.0, trimmed)
-  }
-  use rest <- result.try(case string.pop_grapheme(rest) {
-    Ok(#("P", r)) | Ok(#("p", r)) -> Ok(r)
-    _ -> Error(Nil)
-  })
-  let #(date_part, time_part) = case string.split_once(rest, "T") {
-    Ok(#(d, t)) -> #(d, Some(t))
-    Error(Nil) ->
-      case string.split_once(rest, "t") {
-        Ok(#(d, t)) -> #(d, Some(t))
-        Error(Nil) -> #(rest, None)
-      }
-  }
-  use date_fields <- result.try(parse_duration_section(
-    date_part,
-    [#("Y", YearsUnit), #("M", MonthsUnit), #("W", WeeksUnit), #("D", DaysUnit)],
-    allow_fraction: False,
-  ))
-  use time_fields <- result.try(case time_part {
-    None -> Ok([])
-    Some("") -> Error(Nil)
-    Some(t) ->
-      parse_duration_section(
-        t,
-        [#("H", HoursUnit), #("M", MinutesUnit), #("S", SecondsUnit)],
-        allow_fraction: True,
-      )
-  })
-  let all = list.append(date_fields, time_fields)
-  case all {
-    [] -> Error(Nil)
-    _ -> {
-      let parsed =
-        list.fold(all, zero_duration, fn(acc, kv) {
-          set_duration_field(acc, kv.0, kv.1)
-        })
-      let whole = float.truncate(parsed.seconds) |> int.to_float
-      let frac = parsed.seconds -. whole
-      let ns_total = float.round(frac *. 1_000_000_000.0)
-      let ms = ns_total / 1_000_000
-      let us = { ns_total % 1_000_000 } / 1000
-      let ns = ns_total % 1000
-      let signed = fn(v: Float) { sign *. v }
-      Ok(DurationRecord(
-        years: signed(parsed.years),
-        months: signed(parsed.months),
-        weeks: signed(parsed.weeks),
-        days: signed(parsed.days),
-        hours: signed(parsed.hours),
-        minutes: signed(parsed.minutes),
-        seconds: signed(whole),
-        milliseconds: signed(int.to_float(ms)),
-        microseconds: signed(int.to_float(us)),
-        nanoseconds: signed(int.to_float(ns)),
-      ))
-    }
-  }
-}
-
-fn parse_duration_section(
-  part: String,
-  designators: List(#(String, DurationUnit)),
-  allow_fraction allow_fraction: Bool,
-) -> Result(List(#(DurationUnit, Float)), Nil) {
-  case part {
-    "" -> Ok([])
-    _ ->
-      parse_duration_section_loop(
-        string.to_graphemes(part),
-        designators,
-        allow_fraction,
-        "",
-        [],
-      )
-  }
-}
-
-fn parse_duration_section_loop(
-  gs: List(String),
-  designators: List(#(String, DurationUnit)),
-  allow_fraction allow_fraction: Bool,
-  num_acc num_acc: String,
-  out out: List(#(DurationUnit, Float)),
-) -> Result(List(#(DurationUnit, Float)), Nil) {
-  case gs {
-    [] ->
-      case num_acc {
-        "" -> Ok(list.reverse(out))
-        _ -> Error(Nil)
-      }
-    [g, ..rest] -> {
-      let is_num = case g {
-        "." | "," -> True
-        _ ->
-          case int.parse(g) {
-            Ok(_) -> True
-            Error(Nil) -> False
-          }
-      }
-      case is_num {
-        True ->
-          parse_duration_section_loop(
-            rest,
-            designators,
-            allow_fraction,
-            num_acc <> g,
-            out,
-          )
-        False -> {
-          let upper = string.uppercase(g)
-          use #(field, remaining) <- result.try(take_designator(
-            designators,
-            upper,
-          ))
-          let normalized = string.replace(num_acc, ",", ".")
-          let has_fraction = string.contains(normalized, ".")
-          case num_acc == "" || has_fraction && !allow_fraction {
-            True -> Error(Nil)
-            False -> {
-              use v <- result.try(parse_duration_number(normalized))
-              parse_duration_section_loop(rest, remaining, allow_fraction, "", [
-                #(field, v),
-                ..out
-              ])
-            }
-          }
-        }
-      }
-    }
-  }
-}
-
-fn take_designator(
-  designators: List(#(String, DurationUnit)),
-  d: String,
-) -> Result(#(DurationUnit, List(#(String, DurationUnit))), Nil) {
-  case designators {
-    [] -> Error(Nil)
-    [#(key, field), ..rest] ->
-      case key == d {
-        True -> Ok(#(field, rest))
-        False -> take_designator(rest, d)
-      }
-  }
-}
-
-fn parse_duration_number(s: String) -> Result(Float, Nil) {
-  // int.to_float would badarg on huge ints
-  float.parse(s)
-  |> result.lazy_or(fn() {
-    int.parse(s)
-    |> result.try(fn(n) {
-      case rt_val.num_from_int(n) {
-        JFloat(f) -> Ok(f)
-        JInt(i) -> Ok(int.to_float(i))
-        JNan | JPosInf | JNegInf -> Error(Nil)
-      }
-    })
-  })
+  this: JsVal,
+  locales: JsVal,
+  options: JsVal,
+) -> #(JsVal, Agent) {
+  let d =
+    require_temporal(st, this, "Duration", "toLocaleString", duration_slot_of)
+  let #(df, st) = duration_format_state(st, locales, options)
+  let parts = build_duration_parts(df, d)
+  #(mk_string(intl_format.unit_parts_to_string(parts)), st)
 }
 
 fn build_duration_parts(
   df: DurationFormatState,
-  fields: DurationRecord,
+  d: Duration,
 ) -> List(intl_format.UnitPart) {
-  let nu = df.numbering_system
-  let base_style = df.style
   let frac_digits = df.fractional_digits
-  let overall_negative = list.any(duration_values(fields), fn(v) { v <. 0.0 })
+  let negative = duration_sign(d) < 0
   let next_style_of = fn(unit) {
     case unit {
       SecondsUnit -> Some(df.milliseconds.style)
@@ -5223,150 +4931,98 @@ fn build_duration_parts(
     }
   }
   let init = #([], False, True, False)
-  let #(groups_rev, _need_sep, _display_neg, _done) =
+  let #(groups_rev, _need_sep, _sign_shown, _done) =
     list.fold(duration_unit_list(df), init, fn(acc, entry) {
       let #(unit, unit_opts) = entry
-      let #(groups, need_sep, display_neg, done) = acc
-      case done {
-        True -> acc
-        False -> {
-          let style = unit_opts.style
-          let display = unit_opts.display
-          let raw_value = duration_field(fields, unit) +. 0.0
-          let combine = case next_style_of(unit) {
-            Some(next_style) -> folds_into_fraction(next_style)
-            None -> False
-          }
-          let #(value_repr, is_zero, this_done, frac_precision, trunc_mode) = case
-            combine
-          {
-            True -> {
-              let #(repr, zero) = duration_fractional_value(fields, unit)
-              #(
-                repr,
-                zero,
-                True,
-                intl_format.Precision(
-                  min: option.unwrap(frac_digits, 0),
-                  max: option.unwrap(frac_digits, 9),
-                ),
-                True,
-              )
-            }
-            False -> #(
-              FloatValue(raw_value),
-              raw_value == 0.0,
-              False,
-              intl_format.Precision(min: 0, max: 0),
-              False,
+      let #(groups, need_sep, show_sign, done) = acc
+      use <- bool.guard(done, acc)
+      let style = unit_opts.style
+      let combine =
+        next_style_of(unit)
+        |> option.map(folds_into_fraction)
+        |> option.unwrap(False)
+      let #(value, is_zero, frac_precision) = case combine {
+        True -> {
+          let #(value, is_zero) = duration_fractional_value(d, unit)
+          let precision =
+            intl_format.Precision(
+              min: option.unwrap(frac_digits, 0),
+              max: option.unwrap(frac_digits, 9),
             )
-          }
-          let display_required = case unit == MinutesUnit && need_sep {
-            True ->
-              df.seconds.display == DisplayAlways
-              || duration_field(fields, SecondsUnit) != 0.0
-              || duration_field(fields, MillisecondsUnit) != 0.0
-              || duration_field(fields, MicrosecondsUnit) != 0.0
-              || duration_field(fields, NanosecondsUnit) != 0.0
-            False -> False
-          }
-          let show = !is_zero || display == DisplayAlways || display_required
-          case show {
-            False -> #(groups, need_sep, display_neg, this_done)
-            True -> {
-              let #(sign_display, value_repr, display_neg) = case display_neg {
-                True -> {
-                  let value_repr = case is_zero && overall_negative {
-                    True -> FloatValue(-1.0 *. 0.0)
-                    False -> value_repr
-                  }
-                  #(SignAuto, value_repr, False)
-                }
-                False -> #(SignNever, value_repr, False)
-              }
-              let numeric_style = is_numeric_style(style)
-              let opts =
-                intl_format.NumberFormatOptions(
-                  ..intl_format.default_number_format_options(),
-                  sign_display:,
-                  min_int: case style {
-                    UnitStyleTwoDigit -> 2
-                    UnitStyleLong
-                    | UnitStyleShort
-                    | UnitStyleNarrow
-                    | UnitStyleNumeric
-                    | UnitStyleFractional -> 1
-                  },
-                  use_grouping: case numeric_style {
-                    True -> GroupingNever
-                    False -> GroupingAuto
-                  },
-                  frac: Some(frac_precision),
-                  rounding_mode: case trunc_mode {
-                    True -> RoundTrunc
-                    False -> RoundHalfExpand
-                  },
-                  style: case numeric_style {
-                    True -> StyleDecimal
-                    False ->
-                      StyleUnit(
-                        unit: duration_unit_singular(unit),
-                        display: unit_display_from_duration_style(style),
-                      )
-                  },
-                )
-              let parts = case value_repr {
-                FloatValue(f) -> intl_format.format_number_parts(opts, f)
-                DecimalValue(text) ->
-                  intl_format.format_decimal_string_parts(opts, text)
-              }
-              let unit_tag = duration_unit_singular(unit)
-              let parts =
-                intl_format.apply_numbering_system(
-                  parts,
-                  nu,
-                  intl_format.is_number_digit,
-                )
-                |> list.map(fn(part: intl_format.Part) {
-                  case part.type_ {
-                    PartLiteral ->
-                      intl_format.UnitPart(part.type_, part.value, None)
-                    _ ->
-                      intl_format.UnitPart(
-                        part.type_,
-                        part.value,
-                        Some(unit_tag),
-                      )
-                  }
-                })
-              case need_sep {
-                True ->
-                  case groups {
-                    [last, ..earlier] -> #(
-                      [
-                        list.flatten([
-                          last,
-                          [intl_format.UnitPart(PartLiteral, ":", None)],
-                          parts,
-                        ]),
-                        ..earlier
-                      ],
-                      need_sep,
-                      display_neg,
-                      this_done,
-                    )
-                    [] -> #([parts], need_sep, display_neg, this_done)
-                  }
-                False -> #(
-                  [parts, ..groups],
-                  numeric_style,
-                  display_neg,
-                  this_done,
-                )
-              }
-            }
-          }
+          #(value, is_zero, precision)
         }
+        False -> {
+          let v = duration_field(d, unit)
+          #(int.to_string(v), v == 0, intl_format.Precision(min: 0, max: 0))
+        }
+      }
+      let display_required =
+        unit == MinutesUnit
+        && need_sep
+        && {
+          df.seconds.display == DisplayAlways
+          || d.seconds != 0
+          || d.milliseconds != 0
+          || d.microseconds != 0
+          || d.nanoseconds != 0
+        }
+      let show =
+        !is_zero || unit_opts.display == DisplayAlways || display_required
+      use <- bool.guard(!show, #(groups, need_sep, show_sign, combine))
+      let #(sign_display, value) = case show_sign, is_zero && negative {
+        True, True -> #(SignAuto, "-0")
+        True, False -> #(SignAuto, value)
+        False, _ -> #(SignNever, value)
+      }
+      let numeric_style = is_numeric_style(style)
+      let opts =
+        intl_format.NumberFormatOptions(
+          ..intl_format.default_number_format_options(),
+          locale: intl_format.locale_key(df.locale),
+          sign_display:,
+          min_int: case style {
+            UnitStyleTwoDigit -> 2
+            UnitStyleLong
+            | UnitStyleShort
+            | UnitStyleNarrow
+            | UnitStyleNumeric
+            | UnitStyleFractional -> 1
+          },
+          use_grouping: case numeric_style {
+            True -> GroupingNever
+            False -> GroupingAuto
+          },
+          frac: Some(frac_precision),
+          rounding_mode: case combine {
+            True -> RoundTrunc
+            False -> RoundHalfExpand
+          },
+          style: case numeric_style {
+            True -> StyleDecimal
+            False ->
+              StyleUnit(
+                unit: duration_unit_singular(unit),
+                display: unit_display_from_duration_style(style),
+              )
+          },
+        )
+      let unit_tag = Some(duration_unit_singular(unit))
+      let parts =
+        intl_format.format_decimal_string_parts(opts, value)
+        |> intl_format.apply_numbering_system(
+          df.numbering_system,
+          intl_format.is_number_digit,
+        )
+        |> list.map(fn(part: intl_format.Part) {
+          intl_format.UnitPart(part.type_, part.value, unit_tag)
+        })
+      case need_sep, groups {
+        True, [last, ..earlier] -> {
+          let sep = intl_format.UnitPart(PartLiteral, ":", None)
+          let joined = list.flatten([last, [sep], parts])
+          #([joined, ..earlier], need_sep, False, combine)
+        }
+        _, _ -> #([parts, ..groups], numeric_style, False, combine)
       }
     })
   let groups = list.reverse(groups_rev)
@@ -5374,15 +5030,10 @@ fn build_duration_parts(
   let lf_parts =
     intl_format.list_format_parts(
       UnitList,
-      duration_list_style(base_style),
+      duration_list_style(df.style),
       strings,
     )
   expand_list_elements(lf_parts, groups, [])
-}
-
-type DurationValue {
-  FloatValue(Float)
-  DecimalValue(String)
 }
 
 fn folds_into_fraction(style: DurationUnitStyle) -> Bool {
@@ -5404,46 +5055,40 @@ fn unit_display_from_duration_style(style: DurationUnitStyle) -> UnitDisplay {
   }
 }
 
+// unit plus its fractional sub-units as an exact decimal string
 fn duration_fractional_value(
-  fields: DurationRecord,
+  d: Duration,
   unit: DurationUnit,
-) -> #(DurationValue, Bool) {
-  let get = fn(u) { duration_field(fields, u) |> float.truncate }
+) -> #(String, Bool) {
   let #(exponent, components) = case unit {
     SecondsUnit -> #(9, [
-      #(get(SecondsUnit), 1_000_000_000),
-      #(get(MillisecondsUnit), 1_000_000),
-      #(get(MicrosecondsUnit), 1000),
-      #(get(NanosecondsUnit), 1),
+      #(d.seconds, 1_000_000_000),
+      #(d.milliseconds, 1_000_000),
+      #(d.microseconds, 1000),
+      #(d.nanoseconds, 1),
     ])
     MillisecondsUnit -> #(6, [
-      #(get(MillisecondsUnit), 1_000_000),
-      #(get(MicrosecondsUnit), 1000),
-      #(get(NanosecondsUnit), 1),
+      #(d.milliseconds, 1_000_000),
+      #(d.microseconds, 1000),
+      #(d.nanoseconds, 1),
     ])
-    _other -> #(3, [#(get(MicrosecondsUnit), 1000), #(get(NanosecondsUnit), 1)])
+    _other -> #(3, [#(d.microseconds, 1000), #(d.nanoseconds, 1)])
   }
   let total = list.fold(components, 0, fn(acc, c) { acc + c.0 * c.1 })
   let e = pow10(exponent)
   let q = total / e
   let r = int.absolute_value(total % e)
-  let zero = total == 0
-  case r == 0 {
-    True -> #(FloatValue(int.to_float(q)), zero)
-    False -> {
-      let sign = case total < 0 {
-        True -> "-"
-        False -> ""
-      }
-      let r_text = string.pad_start(int.to_string(r), exponent, "0")
-      #(
-        DecimalValue(
-          sign <> int.to_string(int.absolute_value(q)) <> "." <> r_text,
-        ),
-        zero,
-      )
-    }
+  let sign = case total < 0 {
+    True -> "-"
+    False -> ""
   }
+  let int_text = sign <> int.to_string(int.absolute_value(q))
+  let text = case r == 0 {
+    True -> int_text
+    False ->
+      int_text <> "." <> string.pad_start(int.to_string(r), exponent, "0")
+  }
+  #(text, total == 0)
 }
 
 fn expand_list_elements(
