@@ -23,8 +23,8 @@ import arc/rt/types.{
   PromiseCatch, PromiseConstructor, PromiseFinally, PromiseFinallyFn,
   PromiseFinallyThrower, PromiseFinallyValueThunk, PromiseKeyedElement, PromiseN,
   PromiseRaceStatic, PromiseRejectStatic, PromiseResolveStatic, PromiseThen,
-  SObject, StringKey, SymbolKey, classify, mk_bool, mk_int, mk_object, mk_string,
-  mk_undefined,
+  PromiseTryStatic, PromiseWithResolversStatic, SObject, StringKey, SymbolKey,
+  classify, mk_bool, mk_int, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/val.{is_callable} as rt_val
 import gleam/dict
@@ -51,6 +51,8 @@ pub fn init(
       #("race", PromiseN(PromiseRaceStatic), 1),
       #("allSettled", PromiseN(PromiseAllSettledStatic), 1),
       #("any", PromiseN(PromiseAnyStatic), 1),
+      #("try", PromiseN(PromiseTryStatic), 1),
+      #("withResolvers", PromiseN(PromiseWithResolversStatic), 0),
       #("allKeyed", PromiseN(PromiseAllKeyedStatic), 1),
       #("allSettledKeyed", PromiseN(PromiseAllSettledKeyedStatic), 1),
     ])
@@ -94,6 +96,8 @@ pub fn dispatch(
     PromiseRaceStatic -> combinator(st, this, args, RaceCombinator)
     PromiseAllSettledStatic -> combinator(st, this, args, AllSettledCombinator)
     PromiseAnyStatic -> combinator(st, this, args, AnyCombinator)
+    PromiseTryStatic -> try_static(st, this, args)
+    PromiseWithResolversStatic -> with_resolvers(st, this)
     PromiseAllKeyedStatic -> keyed_combinator(st, this, args, settled: False)
     PromiseAllSettledKeyedStatic ->
       keyed_combinator(st, this, args, settled: True)
@@ -340,18 +344,50 @@ fn resolve_with_constructor(
 }
 
 fn reject_static(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
-  let reason = first_arg_or_undefined(args)
-  case this == mk_object(st.realm.promise.constructor) {
+  promise_reject(st, this, first_arg_or_undefined(args))
+}
+
+fn promise_reject(st: Agent, c: JsVal, reason: JsVal) -> #(JsVal, Agent) {
+  case c == mk_object(st.realm.promise.constructor) {
     True -> {
       let #(h, st) = rt_async.new_promise(st)
       #(mk_object(h), rt_async.promise_reject(st, h, reason))
     }
     False -> {
-      let #(cap, st) = new_capability_from_constructor(st, this)
+      let #(cap, st) = new_capability_from_constructor(st, c)
       let #(_, st) = call(st, cap.reject, mk_undefined(), [reason])
       #(cap.promise, st)
     }
   }
+}
+
+// §27.2.4.8
+fn try_static(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
+  case classify(this) {
+    KHandle(_) -> {
+      let #(callback, rest) = case args {
+        [callback, ..rest] -> #(callback, rest)
+        [] -> #(mk_undefined(), [])
+      }
+      case try_call(st, callback, mk_undefined(), rest) {
+        #(NormalCompletion(v), st) -> promise_resolve(st, this, v)
+        #(ThrowCompletion(e), st) -> promise_reject(st, this, e)
+      }
+    }
+    _ -> rt_val.throw_type_error(st, "Promise.try called on non-object")
+  }
+}
+
+// §27.2.4.9
+fn with_resolvers(st: Agent, this: JsVal) -> #(JsVal, Agent) {
+  let #(cap, st) = new_capability_from_constructor(st, this)
+  let #(obj_h, st) =
+    common.alloc_plain_object(st, st.realm.object.prototype, [
+      #("promise", cap.promise),
+      #("resolve", cap.resolve),
+      #("reject", cap.reject),
+    ])
+  #(mk_object(obj_h), st)
 }
 
 type CombinatorKind {

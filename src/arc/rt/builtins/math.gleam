@@ -1,21 +1,24 @@
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
+import arc/rt/builtins/iter_protocol
 import arc/rt/limits
 import arc/rt/store as rt_store
+import arc/rt/typed_array_bytes
 import arc/rt/types.{
-  type Agent, type Handle, type JsNum, type JsVal, type MathNative, JFloat, JInt,
-  JNan, JNegInf, JPosInf, MathAbs, MathAcos, MathAcosh, MathAsin, MathAsinh,
-  MathAtan, MathAtan2, MathAtanh, MathCbrt, MathCeil, MathClz32, MathCos,
-  MathCosh, MathExp, MathExpm1, MathFloor, MathFround, MathHypot, MathImul,
-  MathLog, MathLog10, MathLog1p, MathLog2, MathMax, MathMin, MathN, MathPow,
-  MathRandom, MathRound, MathSign, MathSin, MathSinh, MathSqrt, MathTan,
-  MathTanh, MathTrunc, mk_number,
+  type Agent, type Handle, type IteratorRecord, type JsNum, type JsVal,
+  type MathNative, JFloat, JInt, JNan, JNegInf, JPosInf, KNum, MathAbs, MathAcos,
+  MathAcosh, MathAsin, MathAsinh, MathAtan, MathAtan2, MathAtanh, MathCbrt,
+  MathCeil, MathClz32, MathCos, MathCosh, MathExp, MathExpm1, MathFloor,
+  MathFround, MathHypot, MathImul, MathLog, MathLog10, MathLog1p, MathLog2,
+  MathMax, MathMin, MathN, MathPow, MathRandom, MathRound, MathSign, MathSin,
+  MathSinh, MathSqrt, MathSumPrecise, MathTan, MathTanh, MathTrunc, classify,
+  mk_number,
 }
 import arc/rt/val as rt_val
 import gleam/float
 import gleam/int
 import gleam/list
-import gleam/option
+import gleam/option.{None, Some}
 
 pub fn init(
   st: Agent,
@@ -80,6 +83,7 @@ pub fn init(
       #("asinh", MathN(MathAsinh), 1),
       #("acosh", MathN(MathAcosh), 1),
       #("atanh", MathN(MathAtanh), 1),
+      #("sumPrecise", MathN(MathSumPrecise), 1),
     ])
 
   common.init_namespace(
@@ -148,6 +152,7 @@ fn dispatch_general(
     MathAsinh -> neg_zero_preserving(st, args, float_asinh)
     MathAcosh -> math_acosh(st, args)
     MathAtanh -> math_atanh(st, args)
+    MathSumPrecise -> math_sum_precise(st, args)
   }
 }
 
@@ -489,6 +494,112 @@ fn math_atanh(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   }
 }
 
+// finite sums are exact integer multiples of 2^-1074
+type PreciseSum {
+  MinusZero
+  Finite(Int)
+  PlusInfinity
+  MinusInfinity
+  NotANumber
+}
+
+fn math_sum_precise(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
+  let items =
+    rt_val.require_object_coercible(st, helpers.first_arg_or_undefined(args))
+  let #(rec, st) = iter_protocol.get_iterator_sync(st, items)
+  sum_precise_loop(st, rec, MinusZero)
+}
+
+fn sum_precise_loop(
+  st: Agent,
+  rec: IteratorRecord,
+  acc: PreciseSum,
+) -> #(JsVal, Agent) {
+  case iter_protocol.iterator_step_value(st, rec) {
+    #(None, st) -> #(mk_number(sum_precise_result(acc)), st)
+    #(Some(v), st) ->
+      case classify(v) {
+        KNum(n) -> sum_precise_loop(st, rec, sum_precise_add(acc, n))
+        _ ->
+          iter_protocol.close_throw_type(
+            st,
+            rec.iterator,
+            "Math.sumPrecise iterable must only contain numbers",
+          )
+      }
+  }
+}
+
+fn sum_precise_add(acc: PreciseSum, n: JsNum) -> PreciseSum {
+  case acc, n {
+    NotANumber, _ | _, JNan -> NotANumber
+    MinusInfinity, JPosInf | PlusInfinity, JNegInf -> NotANumber
+    _, JPosInf -> PlusInfinity
+    _, JNegInf -> MinusInfinity
+    PlusInfinity, _ | MinusInfinity, _ -> acc
+    MinusZero, JFloat(f) ->
+      case rt_val.is_neg_zero(f) {
+        True -> acc
+        False -> Finite(scaled_exact(n))
+      }
+    MinusZero, _ -> Finite(scaled_exact(n))
+    Finite(sum), _ -> Finite(sum + scaled_exact(n))
+  }
+}
+
+const sign_bit = 0x8000000000000000
+
+const inf_bits = 0x7FF0000000000000
+
+// n × 2^1074 exactly
+fn scaled_exact(n: JsNum) -> Int {
+  case n {
+    JInt(i) -> int.bitwise_shift_left(i, 1074)
+    _ -> {
+      let bits = typed_array_bytes.f64_bits(n)
+      let exp = int.bitwise_and(int.bitwise_shift_right(bits, 52), 0x7FF)
+      let frac = int.bitwise_and(bits, rt_val.two_pow_52 - 1)
+      let mag = case exp {
+        0 -> frac
+        _ -> int.bitwise_shift_left(frac + rt_val.two_pow_52, exp - 1)
+      }
+      case bits >= sign_bit {
+        True -> 0 - mag
+        False -> mag
+      }
+    }
+  }
+}
+
+fn sum_precise_result(acc: PreciseSum) -> JsNum {
+  case acc {
+    NotANumber -> JNan
+    PlusInfinity -> JPosInf
+    MinusInfinity -> JNegInf
+    MinusZero -> JFloat(-0.0)
+    Finite(sum) -> {
+      let bits = descaled_bits(int.absolute_value(sum))
+      typed_array_bytes.decode_f64_bits(case sum < 0 {
+        True -> bits + sign_bit
+        False -> bits
+      })
+    }
+  }
+}
+
+// nearest ieee bits for mag × 2^-1074, a carry rolls into the exponent
+fn descaled_bits(mag: Int) -> Int {
+  let shift = rt_val.bit_length(mag) - 53
+  case shift <= 0 {
+    True -> mag
+    False ->
+      int.min(
+        shift * rt_val.two_pow_52 + rt_val.shift_right_half_even(mag, shift),
+        inf_bits,
+      )
+  }
+}
+
 fn math_unary(
   st: Agent,
   args: List(JsVal),
@@ -724,8 +835,8 @@ fn is_odd_integer(n: JsNum) -> Bool {
     JInt(i) -> int.is_odd(i)
     JFloat(f) ->
       case rt_val.integral_int(f) {
-        option.Some(i) -> int.is_odd(i)
-        option.None -> False
+        Some(i) -> int.is_odd(i)
+        None -> False
       }
     _ -> False
   }

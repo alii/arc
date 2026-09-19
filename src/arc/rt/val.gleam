@@ -489,7 +489,7 @@ fn primitive_to_prop_key(st: Agent, v: JsVal) -> #(ObjectKey, Agent) {
 @external(erlang, "arc_rt_val_ffi", "string_to_number")
 pub fn string_to_number(s: String) -> JsNum
 
-const two_pow_52 = 4_503_599_627_370_496
+pub const two_pow_52 = 4_503_599_627_370_496
 
 const two_pow_53 = 9_007_199_254_740_992
 
@@ -507,14 +507,8 @@ pub fn num_from_int(n: Int) -> JsNum {
   case a < two_pow_53 {
     True -> JFloat(int.to_float(n))
     False -> {
-      let s = bit_length(a, 0) - 53
-      let q0 = int.bitwise_shift_right(a, s)
-      let r = a - int.bitwise_shift_left(q0, s)
-      let half = int.bitwise_shift_left(1, s - 1)
-      let q = case r > half || { r == half && q0 % 2 == 1 } {
-        True -> q0 + 1
-        False -> q0
-      }
+      let s = bit_length(a) - 53
+      let q = shift_right_half_even(a, s)
       let #(q, s) = case q == two_pow_53 {
         True -> #(two_pow_52, s + 1)
         False -> #(q, s)
@@ -537,10 +531,25 @@ pub fn num_from_int(n: Int) -> JsNum {
   }
 }
 
-fn bit_length(n: Int, acc: Int) -> Int {
+pub fn bit_length(n: Int) -> Int {
+  bit_length_loop(n, 0)
+}
+
+// s > 0; ties round to even
+pub fn shift_right_half_even(a: Int, s: Int) -> Int {
+  let q = int.bitwise_shift_right(a, s)
+  let r = a - int.bitwise_shift_left(q, s)
+  let half = int.bitwise_shift_left(1, s - 1)
+  case r > half || { r == half && int.is_odd(q) } {
+    True -> q + 1
+    False -> q
+  }
+}
+
+fn bit_length_loop(n: Int, acc: Int) -> Int {
   case n == 0 {
     True -> acc
-    False -> bit_length(int.bitwise_shift_right(n, 1), acc + 1)
+    False -> bit_length_loop(int.bitwise_shift_right(n, 1), acc + 1)
   }
 }
 
