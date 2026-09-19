@@ -11,7 +11,7 @@ import arc/rt/types.{
   IteratorRecord, KHandle, KNull, KStr, KUndef, MapIterEntries, MapIterKeys,
   MapIterValues, MapIterator, MapObj, SObject, SetIterEntries, SetIterValues,
   SetIterator, SetObj, StringIterator, StringKey, SymbolKey, classify,
-  map_key_to_js, mk_int, mk_object, mk_string, mk_undefined, plain_object,
+  map_key_to_js, mk_int, mk_object, mk_string, plain_object,
   symbol_async_iterator, symbol_iterator,
 }
 import arc/rt/utf8
@@ -628,8 +628,8 @@ pub fn iterator_close_normal(st: Agent, obj: JsVal) -> Agent {
 pub fn or_close(
   st: Agent,
   iter: JsVal,
-  body: fn(Agent) -> #(JsVal, Agent),
-  cont: fn(JsVal, Agent) -> #(a, Agent),
+  body: fn(Agent) -> #(b, Agent),
+  cont: fn(b, Agent) -> #(a, Agent),
 ) -> #(a, Agent) {
   case rt_call.try_run(st, body) {
     #(NormalCompletion(v), st) -> cont(v, st)
@@ -671,8 +671,8 @@ fn add_entries_with_sink_loop(
           use v, st <- or_close(st, rec.iterator, fn(st) {
             rt_obj.get_prop(st, entry, StringKey(Index(1)))
           })
-          use _, st <- or_close(st, rec.iterator, fn(st) {
-            #(mk_undefined(), add_entry(st, k, v))
+          use Nil, st <- or_close(st, rec.iterator, fn(st) {
+            #(Nil, add_entry(st, k, v))
           })
           add_entries_with_sink_loop(st, target, rec, add_entry)
         }

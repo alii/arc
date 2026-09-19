@@ -649,6 +649,12 @@ pub type IteratorNative {
   IteratorPrototypeTake
   IteratorPrototypeDrop
   IteratorPrototypeFlatMap
+  IteratorPrototypeChunks
+  IteratorPrototypeWindows
+  IteratorPrototypeIncludes
+  IteratorPrototypeJoin
+  IteratorPrototypeDispose
+  AsyncIteratorPrototypeAsyncDispose
   IteratorHelperNext
   IteratorHelperReturn
   WrapForValidIteratorNext
@@ -1662,6 +1668,13 @@ pub type IteratorHelperKind {
   HelperTake(remaining: Int)
   HelperDrop(remaining: Int)
   HelperFlatMap(func: JsVal, inner: Option(IteratorRecord))
+  HelperChunks(size: Int)
+  HelperWindows(size: Int, undersized: Undersized, buffer: List(JsVal))
+}
+
+pub type Undersized {
+  OnlyFull
+  AllowPartial
 }
 
 pub type ZipMode {

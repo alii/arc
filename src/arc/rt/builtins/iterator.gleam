@@ -18,23 +18,26 @@ import arc/rt/types.{
   type Agent, type ArrayIterKind, type BuiltinPair, type ConcatItem,
   type GeneratorState, type Handle, type HelperBody, type IteratorHelperKind,
   type IteratorNative, type IteratorRecord, type JsVal, type NativeToken,
-  type ObjKind, type ObjectKey, type ZipMember, type ZipMode, ArgumentsObj,
-  ArrayIterEntries, ArrayIterKeys, ArrayIterValues, ArrayIterator, ArrayObj,
-  AsyncFromSyncClose, AsyncFromSyncNext, AsyncFromSyncReturn, AsyncFromSyncThrow,
-  AsyncFromSyncUnwrap, ClassicHelper, ConcatHelper, ConcatItem, GenCompleted,
-  GenExecuting, GenSuspendedStart, GenSuspendedYield, HelperDrop, HelperFilter,
-  HelperFlatMap, HelperMap, HelperTake, IteratorConstructor, IteratorHelperObj,
-  IteratorN, JNan, KHandle, KNull, KStr, KUndef, MapIterator, NoElements,
-  Ordinary, ReturnThis, SObject, SetIterator, StringIterator, StringKey,
+  type ObjKind, type ObjectKey, type Undersized, type ZipMember, type ZipMode,
+  AllowPartial, ArgumentsObj, ArrayIterEntries, ArrayIterKeys, ArrayIterValues,
+  ArrayIterator, ArrayObj, AsyncFromSyncClose, AsyncFromSyncNext,
+  AsyncFromSyncReturn, AsyncFromSyncThrow, AsyncFromSyncUnwrap, ClassicHelper,
+  ConcatHelper, ConcatItem, GenCompleted, GenExecuting, GenSuspendedStart,
+  GenSuspendedYield, HelperChunks, HelperDrop, HelperFilter, HelperFlatMap,
+  HelperMap, HelperTake, HelperWindows, IteratorConstructor, IteratorHelperObj,
+  IteratorN, JFloat, JInt, JNan, JNegInf, JPosInf, KHandle, KNull, KNum, KStr,
+  KUndef, MapIterator, NoElements, OnlyFull, Ordinary, PromiseFinallyValueThunk,
+  PromiseN, ReturnThis, SObject, SetIterator, StringIterator, StringKey,
   SymbolKey, TypedArrayObj, WrapForValidIteratorObj, ZipExhausted, ZipHelper,
   ZipLongest, ZipOpen, ZipShortest, ZipStrict, classify, mk_bool, mk_int,
-  mk_object, mk_string, mk_undefined, symbol_async_iterator, symbol_iterator,
-  symbol_to_string_tag,
+  mk_object, mk_string, mk_undefined, symbol_async_dispose,
+  symbol_async_iterator, symbol_dispose, symbol_iterator, symbol_to_string_tag,
 }
 import arc/rt/val as rt_val
 import gleam/dict
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/string
 
 pub type IteratorProtos {
   IteratorProtos(
@@ -64,8 +67,19 @@ pub fn init(
       "[Symbol.iterator]",
       0,
     )
+  let #(dispose_fn, st) =
+    common.alloc_rooted_native_fn(
+      st,
+      fn_proto,
+      IteratorN(types.IteratorPrototypeDispose),
+      "[Symbol.dispose]",
+      0,
+    )
   let #(iterator_proto, st) =
-    alloc_proto_with_symbol(st, object_proto, symbol_iterator, iter_sym_fn)
+    alloc_proto_with_symbols(st, object_proto, [
+      #(symbol_iterator, iter_sym_fn),
+      #(symbol_dispose, dispose_fn),
+    ])
   let #(array_iter_proto, st) =
     alloc_iter_proto(
       st,
@@ -106,13 +120,19 @@ pub fn init(
       "[Symbol.asyncIterator]",
       0,
     )
-  let #(async_iterator_proto, st) =
-    alloc_proto_with_symbol(
+  let #(async_dispose_fn, st) =
+    common.alloc_rooted_native_fn(
       st,
-      object_proto,
-      symbol_async_iterator,
-      async_sym_fn,
+      fn_proto,
+      IteratorN(types.AsyncIteratorPrototypeAsyncDispose),
+      "[Symbol.asyncDispose]",
+      0,
     )
+  let #(async_iterator_proto, st) =
+    alloc_proto_with_symbols(st, object_proto, [
+      #(symbol_async_iterator, async_sym_fn),
+      #(symbol_async_dispose, async_dispose_fn),
+    ])
   let #(async_from_sync_methods, st) =
     common.alloc_methods(st, fn_proto, [
       #("next", IteratorN(AsyncFromSyncNext), 1),
@@ -132,12 +152,16 @@ pub fn init(
       #("take", IteratorN(types.IteratorPrototypeTake), 1),
       #("drop", IteratorN(types.IteratorPrototypeDrop), 1),
       #("flatMap", IteratorN(types.IteratorPrototypeFlatMap), 1),
+      #("chunks", IteratorN(types.IteratorPrototypeChunks), 1),
+      #("windows", IteratorN(types.IteratorPrototypeWindows), 1),
       #("toArray", IteratorN(types.IteratorPrototypeToArray), 0),
       #("forEach", IteratorN(types.IteratorPrototypeForEach), 1),
       #("reduce", IteratorN(types.IteratorPrototypeReduce), 1),
       #("some", IteratorN(types.IteratorPrototypeSome), 1),
       #("every", IteratorN(types.IteratorPrototypeEvery), 1),
       #("find", IteratorN(types.IteratorPrototypeFind), 1),
+      #("includes", IteratorN(types.IteratorPrototypeIncludes), 1),
+      #("join", IteratorN(types.IteratorPrototypeJoin), 1),
     ])
   let #(ctor_props, st) =
     common.alloc_methods(st, fn_proto, [
@@ -218,13 +242,16 @@ pub fn init(
   )
 }
 
-fn alloc_proto_with_symbol(
+fn alloc_proto_with_symbols(
   st: Agent,
   parent: Handle,
-  sym: types.SymbolId,
-  fn_h: Handle,
+  methods: List(#(types.SymbolId, Handle)),
 ) -> #(Handle, Agent) {
-  let #(prop, st) = rt_store.builtin_property(st, mk_object(fn_h))
+  let #(st, symbol_props) = {
+    use st, #(sym, fn_h) <- list.map_fold(methods, st)
+    let #(prop, st) = rt_store.builtin_property(st, mk_object(fn_h))
+    #(st, #(sym, prop))
+  }
   let #(h, st) =
     rt_store.cell_new(
       st,
@@ -232,7 +259,7 @@ fn alloc_proto_with_symbol(
         kind: Ordinary,
         proto: Some(parent),
         props: dict.new(),
-        symbol_props: [#(sym, prop)],
+        symbol_props:,
         elements: NoElements,
         extensible: True,
       ),
@@ -290,6 +317,12 @@ pub fn dispatch(
       take_or_drop(st, this, args, HelperTake, "take")
     types.IteratorPrototypeDrop ->
       take_or_drop(st, this, args, HelperDrop, "drop")
+    types.IteratorPrototypeChunks -> chunks(st, this, args)
+    types.IteratorPrototypeWindows -> windows(st, this, args)
+    types.IteratorPrototypeIncludes -> includes(st, this, args)
+    types.IteratorPrototypeJoin -> join(st, this, args)
+    types.IteratorPrototypeDispose -> dispose(st, this)
+    types.AsyncIteratorPrototypeAsyncDispose -> async_dispose(st, this)
     types.IteratorPrototypeToArray -> to_array(st, this)
     types.IteratorPrototypeForEach -> for_each(st, this, args)
     types.IteratorPrototypeReduce -> reduce(st, this, args)
@@ -566,11 +599,7 @@ fn take_or_drop(
   make_kind: fn(Int) -> IteratorHelperKind,
   name: String,
 ) -> #(JsVal, Agent) {
-  use _h <- require_object_of(
-    st,
-    this,
-    "Iterator.prototype." <> name <> " called on non-object",
-  )
+  use <- require_iterator_this(st, this, name)
   // §27.1.4.10 tonumber(limit) before getiteratordirect
   let #(remaining, st) = coerce_limit(st, this, args, name)
   let #(rec, st) = get_iterator_direct_for(st, this, name)
@@ -586,9 +615,7 @@ fn coerce_limit(
   let arg = first_arg_or_undefined(args)
   let #(nout, st) = rt_call.try_run(st, fn(st) { rt_val.to_number(st, arg) })
   let range_error = fn(st, problem) {
-    let #(e, st) =
-      rt_val.new_error(st, RangeError, name <> " limit is " <> problem)
-    iter_protocol.close_throw(st, this, e)
+    close_throw_range(st, this, name <> " limit is " <> problem)
   }
   case nout {
     ThrowCompletion(thrown) -> iter_protocol.close_throw(st, this, thrown)
@@ -599,6 +626,60 @@ fn coerce_limit(
         i if i > limits.max_safe_integer -> range_error(st, "too large")
         i -> #(i, st)
       }
+  }
+}
+
+fn close_throw_range(st: Agent, this: JsVal, msg: String) -> a {
+  let #(err, st) = rt_val.new_error(st, RangeError, msg)
+  iter_protocol.close_throw(st, this, err)
+}
+
+fn chunks(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
+  use <- require_iterator_this(st, this, "chunks")
+  let size = chunk_size(st, this, first_arg_or_undefined(args), "chunks")
+  let #(rec, st) = get_iterator_direct_for(st, this, "chunks")
+  alloc_helper(st, HelperChunks(size:), rec)
+}
+
+fn windows(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
+  use <- require_iterator_this(st, this, "windows")
+  let size = chunk_size(st, this, first_arg_or_undefined(args), "windows")
+  let undersized = case classify(arg_at(args, 1)) {
+    KUndef | KStr("only-full") -> OnlyFull
+    KStr("allow-partial") -> AllowPartial
+    _ ->
+      iter_protocol.close_throw_type(
+        st,
+        this,
+        "windows undersized must be \"only-full\" or \"allow-partial\"",
+      )
+  }
+  let #(rec, st) = get_iterator_direct_for(st, this, "windows")
+  alloc_helper(st, HelperWindows(size:, undersized:, buffer: []), rec)
+}
+
+const max_chunk_size = 4_294_967_295
+
+// no coercion, non-numbers are a typeerror
+fn chunk_size(st: Agent, this: JsVal, arg: JsVal, name: String) -> Int {
+  case integral_number(arg) {
+    None ->
+      iter_protocol.close_throw_type(
+        st,
+        this,
+        name <> " size must be an integral number",
+      )
+    Some(size) if size < 1 || size > max_chunk_size ->
+      close_throw_range(st, this, name <> " size must be between 1 and 2^32-1")
+    Some(size) -> size
+  }
+}
+
+fn integral_number(v: JsVal) -> Option(Int) {
+  case classify(v) {
+    KNum(JInt(i)) -> Some(i)
+    KNum(JFloat(f)) -> rt_val.integral_int(f)
+    _ -> None
   }
 }
 
@@ -733,6 +814,11 @@ fn classic_helper_next(
     HelperDrop(remaining:) -> step_drop(st, helper_h, underlying, remaining)
     HelperFlatMap(func:, inner:) ->
       step_flat_map(st, helper_h, underlying, func, inner, counter)
+    HelperChunks(size:) -> step_chunks(st, helper_h, underlying, size, [], 0)
+    HelperWindows(size:, undersized:, buffer:) -> {
+      let filled = list.length(buffer)
+      step_windows(st, helper_h, underlying, size, undersized, buffer, filled)
+    }
   }
 }
 
@@ -761,7 +847,9 @@ fn classic_helper_return(
     | HelperMap(func: _)
     | HelperFilter(func: _)
     | HelperTake(remaining: _)
-    | HelperDrop(remaining: _) -> #(Ok(Nil), st)
+    | HelperDrop(remaining: _)
+    | HelperChunks(size: _)
+    | HelperWindows(..) -> #(Ok(Nil), st)
   }
   let #(outer_res, st) = close_normal_catch(st, underlying.iterator)
   let st = mark_done(st, helper_h)
@@ -936,6 +1024,68 @@ fn step_flat_map(
   }
 }
 
+// a trailing partial chunk is the last yield, so complete early
+fn step_chunks(
+  st: Agent,
+  helper_h: Handle,
+  underlying: IteratorRecord,
+  size: Int,
+  buffer: List(JsVal),
+  filled: Int,
+) -> #(JsVal, Agent) {
+  use step, st <- after_step(st, helper_h, underlying)
+  case step, buffer {
+    None, [] -> finish(st, helper_h)
+    None, _ -> yield_list(mark_done(st, helper_h), list.reverse(buffer))
+    Some(v), _ if filled + 1 >= size ->
+      yield_list(st, list.reverse([v, ..buffer]))
+    Some(v), _ ->
+      step_chunks(st, helper_h, underlying, size, [v, ..buffer], filled + 1)
+  }
+}
+
+fn step_windows(
+  st: Agent,
+  helper_h: Handle,
+  underlying: IteratorRecord,
+  size: Int,
+  undersized: Undersized,
+  buffer: List(JsVal),
+  filled: Int,
+) -> #(JsVal, Agent) {
+  use step, st <- after_step(st, helper_h, underlying)
+  case step, undersized {
+    None, AllowPartial if 0 < filled && filled < size ->
+      yield_list(mark_done(st, helper_h), buffer)
+    None, _ -> finish(st, helper_h)
+    Some(v), _ if filled + 1 < size ->
+      step_windows(
+        st,
+        helper_h,
+        underlying,
+        size,
+        undersized,
+        list.append(buffer, [v]),
+        filled + 1,
+      )
+    Some(v), _ -> {
+      let window = list.append(list.drop(buffer, filled + 1 - size), [v])
+      let st =
+        write_kind(
+          st,
+          helper_h,
+          HelperWindows(size:, undersized:, buffer: window),
+        )
+      yield_list(st, window)
+    }
+  }
+}
+
+fn yield_list(st: Agent, values: List(JsVal)) -> #(JsVal, Agent) {
+  let #(arr, st) = realm_ops.alloc_array(st, values)
+  iter_yield(st, mk_object(arr))
+}
+
 fn wrap_next(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   use rec <- require_wrap(st, this)
   rt_call.call(st, rec.next_method, rec.iterator, [])
@@ -1089,6 +1239,150 @@ fn find(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
   #(option.unwrap(matched, mk_undefined()), st)
 }
 
+type Skip {
+  Skip(remaining: Int)
+  SkipAll
+}
+
+fn includes(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
+  use <- require_iterator_this(st, this, "includes")
+  let skip = skipped_elements(st, this, arg_at(args, 1))
+  let #(rec, st) = get_iterator_direct_for(st, this, "includes")
+  includes_loop(st, rec, first_arg_or_undefined(args), skip)
+}
+
+// no coercion, only integral numbers and infinities pass
+fn skipped_elements(st: Agent, this: JsVal, arg: JsVal) -> Skip {
+  let negative = fn() {
+    close_throw_range(st, this, "includes skippedElements is negative")
+  }
+  case classify(arg), integral_number(arg) {
+    KUndef, _ -> Skip(0)
+    KNum(JPosInf), _ -> SkipAll
+    KNum(JNegInf), _ -> negative()
+    _, None ->
+      iter_protocol.close_throw_type(
+        st,
+        this,
+        "includes skippedElements must be an integral number",
+      )
+    _, Some(n) if n < 0 -> negative()
+    _, Some(n) if n > limits.max_safe_integer ->
+      close_throw_range(st, this, "includes skippedElements is too large")
+    _, Some(n) -> Skip(n)
+  }
+}
+
+fn includes_loop(
+  st: Agent,
+  rec: IteratorRecord,
+  search: JsVal,
+  skip: Skip,
+) -> #(JsVal, Agent) {
+  case iter_protocol.iterator_step_value(st, rec), skip {
+    #(None, st), _ -> #(mk_bool(False), st)
+    #(Some(_skipped), st), SkipAll -> includes_loop(st, rec, search, skip)
+    #(Some(_skipped), st), Skip(n) if n > 0 ->
+      includes_loop(st, rec, search, Skip(n - 1))
+    #(Some(v), st), Skip(_) ->
+      case rt_val.same_value_zero(v, search) {
+        True -> {
+          let st = iter_protocol.iterator_close_normal(st, rec.iterator)
+          #(mk_bool(True), st)
+        }
+        False -> includes_loop(st, rec, search, skip)
+      }
+  }
+}
+
+fn join(st: Agent, this: JsVal, args: List(JsVal)) -> #(JsVal, Agent) {
+  use <- require_iterator_this(st, this, "join")
+  let separator = first_arg_or_undefined(args)
+  // step 4: only undefined defaults, null joins as "null"
+  use sep, st <- iter_protocol.or_close(st, this, fn(st) {
+    case classify(separator) {
+      KUndef -> #(",", st)
+      _ -> rt_val.to_string(st, separator)
+    }
+  })
+  let #(rec, st) = get_iterator_direct_for(st, this, "join")
+  join_loop(st, rec, sep, [], 0)
+}
+
+fn join_loop(
+  st: Agent,
+  rec: IteratorRecord,
+  sep: String,
+  acc: List(String),
+  bytes: Int,
+) -> #(JsVal, Agent) {
+  case iter_protocol.iterator_step_value(st, rec), acc {
+    #(None, st), _ -> #(mk_string(string.join(list.reverse(acc), sep)), st)
+    #(Some(v), st), [] -> join_part(st, rec, sep, acc, bytes, v)
+    #(Some(v), st), _ ->
+      join_part(st, rec, sep, acc, bytes + string.byte_size(sep), v)
+  }
+}
+
+fn join_part(
+  st: Agent,
+  rec: IteratorRecord,
+  sep: String,
+  acc: List(String),
+  bytes: Int,
+  v: JsVal,
+) -> #(JsVal, Agent) {
+  // step 7.d: nullish values join as empty
+  use s, st <- iter_protocol.or_close(st, rec.iterator, fn(st) {
+    case classify(v) {
+      KUndef | KNull -> #("", st)
+      _ -> rt_val.to_string(st, v)
+    }
+  })
+  let bytes = bytes + string.byte_size(s)
+  case bytes > limits.max_string_bytes {
+    True -> close_throw_range(st, rec.iterator, "Invalid string length")
+    False -> join_loop(st, rec, sep, [s, ..acc], bytes)
+  }
+}
+
+// return() result is ignored, a missing return is fine
+fn dispose(st: Agent, this: JsVal) -> #(JsVal, Agent) {
+  case iter_protocol.call_return(st, this) {
+    #(Ok(_returned), st) -> #(mk_undefined(), st)
+    #(Error(thrown), st) -> rt_store.throw(st, thrown)
+  }
+}
+
+fn async_dispose(st: Agent, this: JsVal) -> #(JsVal, Agent) {
+  let #(promise_h, st) = rt_async.new_promise(st)
+  let promise = mk_object(promise_h)
+  let st = case iter_protocol.call_return(st, this) {
+    #(Error(thrown), st) -> rt_async.promise_reject(st, promise_h, thrown)
+    #(Ok(iter_protocol.NoReturnMethod), st) ->
+      rt_async.promise_resolve(st, promise_h, mk_undefined())
+    #(Ok(iter_protocol.Returned(result)), st) -> {
+      let #(wrapper, st) = rt_async.promise_resolve_static(st, result)
+      // the return() result is dropped, the promise settles with undefined
+      let #(unwrap, st) =
+        common.alloc_native_closure(
+          st,
+          PromiseN(PromiseFinallyValueThunk(mk_undefined())),
+          1,
+        )
+      rt_async.perform_then(
+        st,
+        wrapper,
+        unwrap,
+        mk_undefined(),
+        promise,
+        promise,
+      )
+    }
+  }
+  #(promise, st)
+}
+
 type IgnoreSetterKey {
   IgnoreSetCtor
   IgnoreSetTag
@@ -1150,11 +1444,21 @@ fn get_iterator_direct_for(
   this: JsVal,
   name: String,
 ) -> #(IteratorRecord, Agent) {
-  iter_protocol.get_iterator_direct(
-    st,
-    this,
-    "Iterator.prototype." <> name <> " called on non-object",
-  )
+  iter_protocol.get_iterator_direct(st, this, non_object_message(name))
+}
+
+fn non_object_message(name: String) -> String {
+  "Iterator.prototype." <> name <> " called on non-object"
+}
+
+fn require_iterator_this(
+  st: Agent,
+  this: JsVal,
+  name: String,
+  cont: fn() -> #(JsVal, Agent),
+) -> #(JsVal, Agent) {
+  use _h <- require_object_of(st, this, non_object_message(name))
+  cont()
 }
 
 // callback checked before reading .next, §27.1.4.5 step 3
@@ -1165,11 +1469,7 @@ fn consumer_with_callback(
   name: String,
   cont: fn(IteratorRecord, JsVal, Agent) -> #(JsVal, Agent),
 ) -> #(JsVal, Agent) {
-  use _h <- require_object_of(
-    st,
-    this,
-    "Iterator.prototype." <> name <> " called on non-object",
-  )
+  use <- require_iterator_this(st, this, name)
   let func = first_arg_or_undefined(args)
   case rt_val.is_callable(st, func) {
     False ->
