@@ -3482,6 +3482,9 @@ fn hoist_one(located: ast.StmtWithLine) -> List(HoistedItem) {
       }
     ast.VariableDeclaration(kind, [ast.VariableDeclarator(pat, Some(init))]) ->
       hoist_if_split(located, init, ResumeBind(pat, bind_mode_of(kind)))
+    ast.VariableDeclaration(_, [ast.VariableDeclarator(_, None)]) -> [
+      PlainStmt(located),
+    ]
     ast.VariableDeclaration(kind, decls) ->
       list.flat_map(decls, fn(d) {
         hoist_one(ast.StmtWithLine(line, ast.VariableDeclaration(kind, [d])))
