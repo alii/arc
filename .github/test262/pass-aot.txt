@@ -21595,12 +21595,14 @@ built-ins/TypedArray/prototype/filter/BigInt/callbackfn-arguments-with-thisarg.j
 built-ins/TypedArray/prototype/filter/BigInt/callbackfn-arguments-without-thisarg.js
 built-ins/TypedArray/prototype/filter/BigInt/callbackfn-called-before-ctor.js
 built-ins/TypedArray/prototype/filter/BigInt/callbackfn-called-before-species.js
+built-ins/TypedArray/prototype/filter/BigInt/callbackfn-detachbuffer-kept-undefined.js
 built-ins/TypedArray/prototype/filter/BigInt/callbackfn-detachbuffer.js
 built-ins/TypedArray/prototype/filter/BigInt/callbackfn-no-iteration-over-non-integer.js
 built-ins/TypedArray/prototype/filter/BigInt/callbackfn-not-callable-throws.js
 built-ins/TypedArray/prototype/filter/BigInt/callbackfn-not-called-on-empty.js
 built-ins/TypedArray/prototype/filter/BigInt/callbackfn-return-does-not-change-instance.js
 built-ins/TypedArray/prototype/filter/BigInt/callbackfn-returns-abrupt.js
+built-ins/TypedArray/prototype/filter/BigInt/callbackfn-shrink-kept-undefined.js
 built-ins/TypedArray/prototype/filter/BigInt/callbackfn-this.js
 built-ins/TypedArray/prototype/filter/BigInt/detached-buffer.js
 built-ins/TypedArray/prototype/filter/BigInt/result-does-not-share-buffer.js
@@ -22705,6 +22707,7 @@ built-ins/TypedArray/prototype/values/return-itor.js
 built-ins/TypedArray/prototype/values/this-is-not-object.js
 built-ins/TypedArray/prototype/values/this-is-not-typedarray-instance.js
 built-ins/TypedArray/prototype/with/BigInt/early-type-coercion-bigint.js
+built-ins/TypedArray/prototype/with/BigInt/negative-index-resize-to-out-of-bounds.js
 built-ins/TypedArray/prototype/with/early-type-coercion.js
 built-ins/TypedArray/prototype/with/ignores-species.js
 built-ins/TypedArray/prototype/with/immutable.js
