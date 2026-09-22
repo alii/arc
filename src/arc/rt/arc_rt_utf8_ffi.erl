@@ -9,7 +9,7 @@
 -export([slice/3, drop_start/2, explode/1]).
 -export([split/3, repeat/2, replace_literal/4]).
 -export([ascii_upper/1, ascii_lower/1, case_map/2, has_surrogate/1]).
--export([to_graphemes/1, first_unit/1]).
+-export([to_graphemes/1, first_unit/1, host_safe/1, escape_inspect/1]).
 -export([trim_js_ws/1, trim_leading_js_ws/1, trim_trailing_js_ws/1]).
 
 char_at(Bin, Idx) -> arc_rt_js_string_ffi:raw_char_at(Bin, Idx).
@@ -107,6 +107,39 @@ first_unit(Bin) ->
         none -> none;
         U -> {some, U}
     end.
+
+%% replace lone surrogates so a host can print the result
+host_safe(Bin) ->
+    case has_surrogate(Bin) of
+        false -> Bin;
+        true -> iolist_to_binary(host_safe_loop(Bin, []))
+    end.
+
+host_safe_loop(<<>>, Acc) -> lists:reverse(Acc);
+host_safe_loop(<<16#ED, B, _C, R/binary>>, Acc) when B >= 16#A0, B =< 16#BF ->
+    host_safe_loop(R, [<<16#EF, 16#BF, 16#BD>> | Acc]);
+host_safe_loop(<<H, R/binary>>, Acc) -> host_safe_loop(R, [H | Acc]).
+
+%% escape for inspect: backslash, quote, control, lone surrogates as \udXXX
+escape_inspect(Bin) -> iolist_to_binary(escape_inspect_loop(Bin, [])).
+
+escape_inspect_loop(<<>>, Acc) -> lists:reverse(Acc);
+escape_inspect_loop(<<$\\, R/binary>>, Acc) -> escape_inspect_loop(R, [<<"\\\\">> | Acc]);
+escape_inspect_loop(<<$', R/binary>>, Acc) -> escape_inspect_loop(R, [<<"\\'">> | Acc]);
+escape_inspect_loop(<<$\n, R/binary>>, Acc) -> escape_inspect_loop(R, [<<"\\n">> | Acc]);
+escape_inspect_loop(<<$\r, R/binary>>, Acc) -> escape_inspect_loop(R, [<<"\\r">> | Acc]);
+escape_inspect_loop(<<$\t, R/binary>>, Acc) -> escape_inspect_loop(R, [<<"\\t">> | Acc]);
+escape_inspect_loop(<<16#ED, B, C, R/binary>>, Acc) when B >= 16#A0, B =< 16#BF ->
+    Unit = 16#D000 bor ((B band 16#3F) bsl 6) bor (C band 16#3F),
+    escape_inspect_loop(R, [[<<"\\u">>, hex4(Unit)] | Acc]);
+escape_inspect_loop(<<H, R/binary>>, Acc) -> escape_inspect_loop(R, [H | Acc]).
+
+hex4(N) ->
+    [hexd((N bsr 12) band 15), hexd((N bsr 8) band 15),
+     hexd((N bsr 4) band 15), hexd(N band 15)].
+
+hexd(D) when D < 10 -> $0 + D;
+hexd(D) -> $a + D - 10.
 
 ascii_map(<<W:56, Rest/binary>>, Lo, Hi, Acc) when W band 16#80808080808080 =:= 0 ->
     M = ((W + Lo) band (bnot (W + Hi))) band 16#80808080808080,

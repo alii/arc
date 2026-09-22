@@ -22,6 +22,7 @@ import arc/rt/types.{
   StringObj, SymbolObj, TemporalObj, TypedArrayObj, WeakMapObj, WeakSetObj,
   WrapForValidIteratorObj, classify,
 }
+import arc/rt/utf8
 import arc/rt/val as rt_val
 import gleam/bool
 import gleam/dict.{type Dict}
@@ -64,12 +65,7 @@ fn inspect_at_depth(
 }
 
 fn escape_string(s: String) -> String {
-  s
-  |> string.replace("\\", "\\\\")
-  |> string.replace("'", "\\'")
-  |> string.replace("\n", "\\n")
-  |> string.replace("\r", "\\r")
-  |> string.replace("\t", "\\t")
+  utf8.escape_inspect(s)
 }
 
 fn inspect_object(
@@ -302,11 +298,12 @@ fn ordered_property_pairs(
 }
 
 pub fn format_error(st: Agent, val: JsVal) -> String {
-  case classify(val) {
+  let text = case classify(val) {
     KStr(s) -> s
     KHandle(h) -> error_display(st, h) |> option.unwrap(describe(st, val))
     _ -> describe(st, val)
   }
+  utf8.host_safe(text)
 }
 
 fn temporal_label(data: TemporalData) -> String {

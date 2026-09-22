@@ -73,6 +73,12 @@ pub fn to_graphemes(s: String) -> List(String)
 @external(erlang, "arc_rt_utf8_ffi", "first_unit")
 pub fn first_unit(s: String) -> Option(Int)
 
+@external(erlang, "arc_rt_utf8_ffi", "host_safe")
+pub fn host_safe(s: String) -> String
+
+@external(erlang, "arc_rt_utf8_ffi", "escape_inspect")
+pub fn escape_inspect(s: String) -> String
+
 // js whitespace and line terminators, not just ascii
 @external(erlang, "arc_rt_utf8_ffi", "trim_js_ws")
 pub fn trim_js_ws(s: String) -> String

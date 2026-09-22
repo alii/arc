@@ -1,4 +1,5 @@
 import arc/internal/clock
+import arc/rt/utf8
 import arc/time_zone.{type Rules, type TimeZone, type TzError}
 import arc/zoneinfo
 import gleam/float
@@ -34,6 +35,7 @@ pub type HostHooks {
 }
 
 fn default_print(level: ConsoleLevel, line: String) -> Nil {
+  let line = utf8.host_safe(line)
   case level {
     LogLevel | InfoLevel | DebugLevel -> io.println(line)
     WarnLevel | ErrorLevel -> io.println_error(line)
@@ -45,7 +47,7 @@ pub fn default() -> HostHooks {
     can_block: False,
     monotonic_now: clock.monotonic_now,
     sleep_ms: clock.sleep_ms,
-    report_uncaught: io.println_error,
+    report_uncaught: fn(msg) { io.println_error(utf8.host_safe(msg)) },
     wall_clock_ms: clock.now_ms,
     time_zone: zoneinfo.system_time_zone(),
     load_time_zone: zoneinfo.load,
