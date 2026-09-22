@@ -9,6 +9,7 @@ import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/call as rt_call
 import arc/rt/elements
+import arc/rt/js_string
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -27,6 +28,7 @@ import arc/rt/types.{
   RegExpSymbolSplit, SObject, StickyFlag, UnicodeFlag, UnicodeSetsFlag, classify,
   mk_bool, mk_int, mk_null, mk_object, mk_string, mk_undefined, plain_object,
 }
+import arc/rt/utf8
 import arc/rt/val as rt_val
 import gleam/bit_array
 import gleam/bool
@@ -504,40 +506,13 @@ fn get_source(st: Agent, this: JsVal) -> #(JsVal, Agent) {
   }
 }
 
+@external(erlang, "arc_regexp_ffi", "escape_pattern")
+fn ffi_escape_pattern(pattern: String) -> String
+
 fn source_string(pattern: String) -> String {
   case pattern {
     "" -> "(?:)"
-    p -> escape_pattern(bit_array.from_string(p), False, "")
-  }
-}
-
-fn escape_pattern(chars: BitArray, in_class: Bool, acc: String) -> String {
-  case chars {
-    <<"\\":utf8, next:utf8_codepoint, rest:bits>> ->
-      escape_pattern(rest, in_class, acc <> "\\" <> escape_terminator(next))
-    <<"/":utf8, rest:bits>> if !in_class ->
-      escape_pattern(rest, in_class, acc <> "\\/")
-    <<"[":utf8, rest:bits>> -> escape_pattern(rest, True, acc <> "[")
-    <<"]":utf8, rest:bits>> -> escape_pattern(rest, False, acc <> "]")
-    <<"\n":utf8, rest:bits>> -> escape_pattern(rest, in_class, acc <> "\\n")
-    <<"\r":utf8, rest:bits>> -> escape_pattern(rest, in_class, acc <> "\\r")
-    <<"\u{2028}":utf8, rest:bits>> ->
-      escape_pattern(rest, in_class, acc <> "\\u2028")
-    <<"\u{2029}":utf8, rest:bits>> ->
-      escape_pattern(rest, in_class, acc <> "\\u2029")
-    <<ch:utf8_codepoint, rest:bits>> ->
-      escape_pattern(rest, in_class, acc <> string.from_utf_codepoints([ch]))
-    _ -> acc
-  }
-}
-
-fn escape_terminator(cp: UtfCodepoint) -> String {
-  case string.utf_codepoint_to_int(cp) {
-    0x0A -> "n"
-    0x0D -> "r"
-    0x2028 -> "u2028"
-    0x2029 -> "u2029"
-    _ -> string.from_utf_codepoints([cp])
+    p -> ffi_escape_pattern(p)
   }
 }
 
@@ -919,7 +894,14 @@ pub fn builtin_exec_ranges(
     True -> last_index
     False -> 0
   }
-  case regexp_exec_compiled(compiled, s, last_index, sticky) {
+  case
+    regexp_exec_compiled(
+      compiled,
+      s,
+      js_string.byte_offset(s, last_index),
+      sticky,
+    )
+  {
     Error(NoMatch) | Error(OffsetOutOfRange) | Error(PatternCompileFailed(_)) -> {
       let st = case global || sticky {
         True -> set_last_index(st, h, mk_int(0))
@@ -929,8 +911,10 @@ pub fn builtin_exec_ranges(
     }
     Ok(#(whole, groups, _gc, names)) -> {
       let #(match_start, match_len) = whole
+      let unit_start = js_string.unit_index(s, match_start)
+      let unit_len = utf8.length(bytes.unsafe_slice(s, match_start, match_len))
       let st = case global || sticky {
-        True -> set_last_index(st, h, mk_int(match_start + match_len))
+        True -> set_last_index(st, h, mk_int(unit_start + unit_len))
         False -> st
       }
       // unconditional like v8, gating would leave stale statics
@@ -1018,7 +1002,7 @@ fn build_exec_result(
   let #(groups_val, st) = groups_object(st, s, groups, names)
   let #(indices_val, st) = case has_indices {
     False -> #(mk_undefined(), st)
-    True -> make_indices(st, whole, groups, names)
+    True -> make_indices(st, s, whole, groups, names)
   }
   let extra = case classify(indices_val) {
     KUndef -> []
@@ -1026,7 +1010,7 @@ fn build_exec_result(
   }
   let #(arr_h, st) =
     alloc_array_with_props(st, match_values, [
-      #("index", mk_int(match_start)),
+      #("index", mk_int(js_string.unit_index(s, match_start))),
       #("input", mk_string(s)),
       #("groups", groups_val),
       ..extra
@@ -1059,6 +1043,7 @@ pub fn groups_object(
 
 fn make_indices(
   st: Agent,
+  s: String,
   whole: #(Int, Int),
   groups: List(#(Int, Int)),
   names: List(#(String, Int)),
@@ -1070,10 +1055,12 @@ fn make_indices(
       let #(start, len) = cap
       case start >= 0 {
         True -> {
+          let unit_start = js_string.unit_index(s, start)
+          let unit_len = utf8.length(bytes.unsafe_slice(s, start, len))
           let #(pair_h, st) =
             common.alloc_array(
               st,
-              [mk_int(start), mk_int(start + len)],
+              [mk_int(unit_start), mk_int(unit_start + unit_len)],
               realm.array.prototype,
             )
           #([mk_object(pair_h), ..vals], st)

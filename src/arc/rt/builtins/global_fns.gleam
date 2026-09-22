@@ -1,4 +1,5 @@
 import arc/bytecode/error_kind.{JsError, UriError}
+import arc/internal/unsafe
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
 import arc/rt/realm as rt_realm
@@ -391,7 +392,7 @@ fn percent_encode_bytes(bytes: BitArray, acc: String) -> String {
 }
 
 fn uri_decode(text: String, kind: UriKind) -> Result(String, Int) {
-  uri_decode_loop(<<text:utf8>>, kind, 0, "")
+  uri_decode_loop(bit_array.from_string(text), kind, 0, "")
 }
 
 fn uri_decode_loop(
@@ -425,6 +426,14 @@ fn uri_decode_loop(
       let ch = string.from_utf_codepoints([cp])
       uri_decode_loop(rest, kind, offset + string.byte_size(ch), acc <> ch)
     }
+    <<0xED, b, c, rest:bytes>> if b >= 0xA0 && b <= 0xBF ->
+      // lone surrogate passes through decode
+      uri_decode_loop(
+        rest,
+        kind,
+        offset + 3,
+        acc <> unsafe.coerce(<<0xED, b, c>>),
+      )
     _ -> Error(offset)
   }
 }

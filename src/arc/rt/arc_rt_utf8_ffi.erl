@@ -1,5 +1,5 @@
-%% indexes by codepoint; invalid utf-8 crashes on purpose, no fallback clauses
-%% TODO(Deviation): js indexes by utf-16 code unit
+%% code-unit ops on a WTF-8 binary; index work is delegated to
+%% arc_rt_js_string_ffi so both files share one UTF-16 model
 -module(arc_rt_utf8_ffi).
 -compile({no_auto_import, [length/1]}).
 -export([char_at/2, length/1,
@@ -8,58 +8,32 @@
          has_byte/2, last_index_of_all/2]).
 -export([slice/3, drop_start/2, explode/1]).
 -export([split/3, repeat/2, replace_literal/4]).
--export([ascii_upper/1, ascii_lower/1]).
+-export([ascii_upper/1, ascii_lower/1, case_map/2, has_surrogate/1]).
+-export([to_graphemes/1, first_unit/1]).
 -export([trim_js_ws/1, trim_leading_js_ws/1, trim_trailing_js_ws/1]).
 
-%% match window bytes per backward step
--define(LAST_INDEX_CHUNK, 65536).
+char_at(Bin, Idx) -> arc_rt_js_string_ffi:raw_char_at(Bin, Idx).
 
-char_at(Bin, Idx) ->
-    case string_codepoint_at(Bin, Idx) of
-        {some, C} -> {some, <<C/utf8>>};
-        none -> none
-    end.
+length(Bin) -> arc_rt_js_string_ffi:unit_length(Bin).
 
-string_codepoint_at(Bin, Idx) when Idx >= 0 ->
-    Off = cp_off(Bin, Idx),
-    case Bin of
-        <<_:Off/binary, C/utf8, _/binary>> -> {some, C};
-        _ -> none
-    end;
-string_codepoint_at(_, _) -> none.
-
-char_at_offset(Bin, Off) when Off >= 0, Off < byte_size(Bin) ->
-    <<_:Off/binary, C/utf8, _/binary>> = Bin,
-    Ch = <<C/utf8>>,
-    {some, {Ch, Off + byte_size(Ch)}};
-char_at_offset(_, _) -> none.
+char_at_offset(Bin, Off) -> arc_rt_js_string_ffi:raw_char_at_offset(Bin, Off).
 
 replacement_codepoint() -> 16#FFFD.
 
-length(Bin) -> cp_length(Bin, 0).
-%% 56 bits = 7 ascii bytes, still a small int
-cp_length(<<W1:56, W2:56, W3:56, W4:56, W5:56, W6:56, W7:56, W8:56,
-            Rest/binary>>, N)
-    when (W1 bor W2 bor W3 bor W4 bor W5 bor W6 bor W7 bor W8)
-         band 16#80808080808080 =:= 0 ->
-    cp_length(Rest, N + 56);
-cp_length(<<W1:56, W2:56, Rest/binary>>, N)
-    when (W1 bor W2) band 16#80808080808080 =:= 0 ->
-    cp_length(Rest, N + 14);
-cp_length(<<C, Rest/binary>>, N) when C < 16#80 -> cp_length(Rest, N + 1);
-cp_length(<<>>, N) -> N;
-cp_length(Bin, N) -> cp_length_mb(Bin, N).
+index_of(Hay, Needle, From) ->
+    arc_rt_js_string_ffi:raw_index_of(Hay, Needle, From).
 
-%% runs of non-ascii, by lead byte
-cp_length_mb(<<C, _, _, Rest/binary>>, N) when C >= 16#E0, C < 16#F0 ->
-    cp_length_mb(Rest, N + 1);
-cp_length_mb(<<C, _, Rest/binary>>, N) when C >= 16#C0, C < 16#E0 ->
-    cp_length_mb(Rest, N + 1);
-cp_length_mb(<<C, _, _, _, Rest/binary>>, N) when C >= 16#F0 ->
-    cp_length_mb(Rest, N + 1);
-cp_length_mb(<<C, _/binary>> = Bin, N) when C < 16#80 -> cp_length(Bin, N);
-cp_length_mb(<<>>, N) -> N;
-cp_length_mb(Bin, _) -> erlang:error({invalid_utf8, Bin}).
+last_index_of_all(Hay, Needle) ->
+    arc_rt_js_string_ffi:raw_last_index_of_all(Hay, Needle).
+
+last_index_of(Hay, Needle, From) ->
+    arc_rt_js_string_ffi:raw_last_index_of(Hay, Needle, From).
+
+slice(Bin, Start, Len) -> arc_rt_js_string_ffi:raw_slice(Bin, Start, Len).
+
+drop_start(Bin, N) -> arc_rt_js_string_ffi:raw_drop(Bin, N).
+
+explode(Bin) -> arc_rt_js_string_ffi:raw_explode(Bin).
 
 has_byte(<<C, _/binary>>, C) -> true;
 has_byte(<<_, R/binary>>, C) -> has_byte(R, C);
@@ -67,70 +41,6 @@ has_byte(<<>>, _) -> false.
 
 contains(_Hay, <<>>) -> true;
 contains(Hay, Needle) -> binary:match(Hay, Needle) =/= nomatch.
-
-index_of(Hay, <<>>, From) ->
-    {some, clamp_cp(Hay, From)};
-index_of(Hay, Needle, From) ->
-    Start = cp_off(Hay, max(From, 0)),
-    case binary:match(Hay, Needle, [{scope, {Start, byte_size(Hay) - Start}}]) of
-        nomatch -> none;
-        {BytePos, _} -> {some, cp_length(binary:part(Hay, 0, BytePos), 0)}
-    end.
-
-last_index_of_all(Hay, <<>>) ->
-    {some, length(Hay)};
-last_index_of_all(Hay, Needle) ->
-    last_index_before(Hay, Needle, byte_size(Hay)).
-
-last_index_of(Hay, <<>>, From) ->
-    {some, clamp_cp(Hay, From)};
-last_index_of(Hay, Needle, From) ->
-    Limit = cp_off(Hay, max(From, 0)),
-    last_index_before(Hay, Needle, min(Limit + byte_size(Needle), byte_size(Hay))).
-
-%% end is a byte offset
-last_index_before(_Hay, Needle, End) when End < byte_size(Needle) -> none;
-last_index_before(Hay, Needle, End) ->
-    HighestStart = End - byte_size(Needle),
-    Chunk = max(?LAST_INDEX_CHUNK, 2 * byte_size(Needle)),
-    case scan_back(Hay, Needle, max(0, HighestStart - Chunk + 1), HighestStart, Chunk) of
-        none -> none;
-        {some, BytePos} -> {some, cp_length(binary:part(Hay, 0, BytePos), 0)}
-    end.
-
-scan_back(Hay, Needle, Lo, Hi, Chunk) ->
-    M = byte_size(Needle),
-    case binary:matches(Hay, Needle, [{scope, {Lo, Hi + M - Lo}}]) of
-        [] when Lo =:= 0 -> none;
-        [] -> scan_back(Hay, Needle, max(0, Lo - Chunk), Lo - 1, Chunk);
-        Matches ->
-            {L, _} = lists:last(Matches),
-            {some, latest_overlap(Hay, Needle, L, min(L + M - 1, Hi))}
-    end.
-
-latest_overlap(_Hay, _Needle, L, Pos) when Pos =< L -> L;
-latest_overlap(Hay, Needle, L, Pos) ->
-    case binary:part(Hay, Pos, byte_size(Needle)) of
-        Needle -> Pos;
-        _Other -> latest_overlap(Hay, Needle, L, Pos - 1)
-    end.
-
-clamp_cp(Hay, From) -> min(max(From, 0), length(Hay)).
-
-slice(Bin, Start, Len) when Start >= 0, Len > 0 ->
-    Off = cp_off(Bin, Start),
-    <<_:Off/binary, Rest/binary>> = Bin,
-    binary:part(Bin, Off, cp_off(Rest, Len));
-slice(_, _, _) -> <<>>.
-
-drop_start(Bin, N) when N > 0 ->
-    Off = cp_off(Bin, N),
-    binary:part(Bin, Off, byte_size(Bin) - Off);
-drop_start(Bin, _) -> Bin.
-
-explode(Bin) -> cp_explode(Bin, []).
-cp_explode(<<>>, Acc) -> lists:reverse(Acc);
-cp_explode(<<C/utf8, Rest/binary>>, Acc) -> cp_explode(Rest, [<<C/utf8>> | Acc]).
 
 split(Hay, Sep, Lim) ->
     Parts = binary:split(Hay, Sep, [global]),
@@ -153,29 +63,50 @@ repeat(Bin, N) when N > 1024, byte_size(Bin) < 1024 ->
 repeat(Bin, N) when N > 0 -> binary:copy(Bin, N);
 repeat(_, _) -> <<>>.
 
-cp_off(Bin, N) -> cp_off(Bin, N, 0).
-
-cp_off(<<W1:56, W2:56, W3:56, W4:56, R/binary>>, N, Off)
-    when N >= 28, (W1 bor W2 bor W3 bor W4) band 16#80808080808080 =:= 0 ->
-    cp_off(R, N - 28, Off + 28);
-cp_off(<<W:56, R/binary>>, N, Off)
-    when N >= 7, W band 16#80808080808080 =:= 0 ->
-    cp_off(R, N - 7, Off + 7);
-cp_off(<<C, R/binary>>, N, Off) when N >= 1, C < 16#80 ->
-    cp_off(R, N - 1, Off + 1);
-cp_off(<<C, _, R/binary>>, N, Off) when N >= 1, C >= 16#C0, C < 16#E0 ->
-    cp_off(R, N - 1, Off + 2);
-cp_off(<<C, _, _, R/binary>>, N, Off) when N >= 1, C >= 16#E0, C < 16#F0 ->
-    cp_off(R, N - 1, Off + 3);
-cp_off(<<C, _, _, _, R/binary>>, N, Off) when N >= 1, C >= 16#F0 ->
-    cp_off(R, N - 1, Off + 4);
-cp_off(<<>>, _N, Off) -> Off;
-cp_off(_Bin, 0, Off) -> Off.
-
 ascii_upper(Bin) ->
     ascii_map(Bin, 16#1F1F1F1F1F1F1F, 16#05050505050505, <<>>).
 ascii_lower(Bin) ->
     ascii_map(Bin, 16#3F3F3F3F3F3F3F, 16#25252525252525, <<>>).
+
+%% case mapping that leaves lone surrogates alone
+case_map(Bin, Upper) -> iolist_to_binary(cm(Bin, Upper, [])).
+
+cm(<<>>, Upper, Acc) -> [flush_run(Acc, Upper)];
+cm(<<16#ED, B, C, R/binary>>, Upper, Acc) when B >= 16#A0, B =< 16#BF ->
+    [flush_run(Acc, Upper), <<16#ED, B, C>> | cm(R, Upper, [])];
+cm(<<H, R/binary>>, Upper, Acc) -> cm(R, Upper, [H | Acc]).
+
+flush_run([], _Upper) -> [];
+flush_run(Acc, true) -> string:uppercase(list_to_binary(lists:reverse(Acc)));
+flush_run(Acc, false) -> string:lowercase(list_to_binary(lists:reverse(Acc))).
+
+has_surrogate(Bin) -> hs(Bin).
+
+hs(<<16#ED, B, _C, _/binary>>) when B >= 16#A0, B =< 16#BF -> true;
+hs(<<_, R/binary>>) -> hs(R);
+hs(<<>>) -> false.
+
+%% lone surrogates each become their own grapheme
+to_graphemes(Bin) -> lists:reverse(tg(Bin, <<>>, [])).
+
+tg(<<>>, Run, Acc) ->
+    lists:reverse(grapheme_bins(Run)) ++ Acc;
+tg(<<16#ED, B, C, R/binary>>, Run, Acc) when B >= 16#A0, B =< 16#BF ->
+    tg(R, <<>>, [<<16#ED, B, C>> | lists:reverse(grapheme_bins(Run)) ++ Acc]);
+tg(<<H, R/binary>>, Run, Acc) -> tg(R, <<Run/binary, H>>, Acc).
+
+grapheme_bins(Run) ->
+    [grapheme_bin(G) || G <- string:to_graphemes(Run)].
+
+%% a lone codepoint comes as an int, a cluster as a codepoint list
+grapheme_bin(G) when is_integer(G) -> <<G/utf8>>;
+grapheme_bin(G) -> unicode:characters_to_binary(G).
+
+first_unit(Bin) ->
+    case arc_rt_js_string_ffi:raw_unit_at(Bin, 0) of
+        none -> none;
+        U -> {some, U}
+    end.
 
 ascii_map(<<W:56, Rest/binary>>, Lo, Hi, Acc) when W band 16#80808080808080 =:= 0 ->
     M = ((W + Lo) band (bnot (W + Hi))) band 16#80808080808080,

@@ -34,7 +34,7 @@ quote_tree(Bin) ->
         P -> [$", binary:part(Bin, 0, P) | quote_esc(Bin, P)]
     end.
 
--define(SAFE(C), (C =/= $" andalso C =/= $\\ andalso C >= 16#20)).
+-define(SAFE(C), (C =/= $" andalso C =/= $\\ andalso C >= 16#20 andalso C =/= 16#ED)).
 
 clean(Bin, P) ->
     case Bin of
@@ -52,21 +52,41 @@ clean(Bin, P) ->
 
 %% p sits on a byte that needs escaping
 quote_esc(Bin, P) ->
-    <<_:P/binary, C, _/binary>> = Bin,
-    Esc = case C of
-        $" -> <<"\\\"">>;
-        $\\ -> <<"\\\\">>;
-        $\b -> <<"\\b">>;
-        $\t -> <<"\\t">>;
-        $\n -> <<"\\n">>;
-        $\f -> <<"\\f">>;
-        $\r -> <<"\\r">>;
-        _ -> [<<"\\u00">>, hexc(C bsr 4), hexc(C band 15)]
-    end,
-    P1 = P + 1,
-    case clean(Bin, P1) of
-        true -> [Esc, binary:part(Bin, P1, byte_size(Bin) - P1), $"];
-        P2 -> [Esc, binary:part(Bin, P1, P2 - P1) | quote_esc(Bin, P2)]
+    case Bin of
+        <<_:P/binary, 16#ED, B, C, _/binary>> ->
+            P1 = P + 3,
+            Seg = case B >= 16#A0 andalso B =< 16#BF of
+                true ->
+                    %% lone surrogate: escape as \udXXX
+                    Unit = 16#D000 bor ((B band 16#3F) bsl 6) bor (C band 16#3F),
+                    [<<"\\u">>, hexc((Unit bsr 12) band 15),
+                     hexc((Unit bsr 8) band 15), hexc((Unit bsr 4) band 15),
+                     hexc(Unit band 15)];
+                false ->
+                    %% valid U+D000..D7FF, emit raw
+                    binary:part(Bin, P, 3)
+            end,
+            case clean(Bin, P1) of
+                true -> [Seg, binary:part(Bin, P1, byte_size(Bin) - P1), $"];
+                P2 -> [Seg, binary:part(Bin, P1, P2 - P1) | quote_esc(Bin, P2)]
+            end;
+        _ ->
+            <<_:P/binary, C, _/binary>> = Bin,
+            Esc = case C of
+                $" -> <<"\\\"">>;
+                $\\ -> <<"\\\\">>;
+                $\b -> <<"\\b">>;
+                $\t -> <<"\\t">>;
+                $\n -> <<"\\n">>;
+                $\f -> <<"\\f">>;
+                $\r -> <<"\\r">>;
+                _ -> [<<"\\u00">>, hexc(C bsr 4), hexc(C band 15)]
+            end,
+            P1 = P + 1,
+            case clean(Bin, P1) of
+                true -> [Esc, binary:part(Bin, P1, byte_size(Bin) - P1), $"];
+                P2 -> [Esc, binary:part(Bin, P1, P2 - P1) | quote_esc(Bin, P2)]
+            end
     end.
 
 hexc(N) when N < 10 -> $0 + N;
@@ -193,16 +213,21 @@ unicode_escape(Bin, P) ->
             case Bin of
                 <<_:P1/binary, $\\, $u, _/binary>> ->
                     case low_surrogate(Bin, P1 + 2) of
-                        none -> {<<16#FFFD/utf8>>, P1};
+                        none -> {wtf8_unit(Cp), P1};
                         Low ->
                             U = 16#10000 + (Cp - 16#D800) * 1024 + (Low - 16#DC00),
                             {<<U/utf8>>, P1 + 6}
                     end;
-                _ -> {<<16#FFFD/utf8>>, P1}
+                _ -> {wtf8_unit(Cp), P1}
             end;
-        Cp >= 16#DC00, Cp =< 16#DFFF -> {<<16#FFFD/utf8>>, P1};
+        Cp >= 16#DC00, Cp =< 16#DFFF -> {wtf8_unit(Cp), P1};
         true -> {<<Cp/utf8>>, P1}
     end.
+
+%% a lone surrogate survives in WTF-8
+wtf8_unit(U) ->
+    <<(16#E0 bor (U bsr 12)), (16#80 bor ((U bsr 6) band 16#3F)),
+      (16#80 bor (U band 16#3F))>>.
 
 low_surrogate(Bin, P) ->
     case Bin of

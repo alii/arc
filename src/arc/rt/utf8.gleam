@@ -61,6 +61,18 @@ pub fn ascii_upper(s: String) -> Option(String)
 @external(erlang, "arc_rt_utf8_ffi", "ascii_lower")
 pub fn ascii_lower(s: String) -> Option(String)
 
+@external(erlang, "arc_rt_utf8_ffi", "case_map")
+pub fn case_map(s: String, upper: Bool) -> String
+
+@external(erlang, "arc_rt_utf8_ffi", "has_surrogate")
+pub fn has_surrogate(s: String) -> Bool
+
+@external(erlang, "arc_rt_utf8_ffi", "to_graphemes")
+pub fn to_graphemes(s: String) -> List(String)
+
+@external(erlang, "arc_rt_utf8_ffi", "first_unit")
+pub fn first_unit(s: String) -> Option(Int)
+
 // js whitespace and line terminators, not just ascii
 @external(erlang, "arc_rt_utf8_ffi", "trim_js_ws")
 pub fn trim_js_ws(s: String) -> String

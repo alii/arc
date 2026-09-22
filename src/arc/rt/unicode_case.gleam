@@ -6,19 +6,23 @@ import gleam/string
 // final sigma rule, which string.lowercase lacks
 pub fn to_lower_case(s: String) -> String {
   use <- option.lazy_unwrap(utf8.ascii_lower(s))
-  case utf8.index_of(s, "\u{03A3}", 0) {
-    None -> string.lowercase(s)
-    Some(_) -> {
-      let cps =
-        string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
-      sigma_assemble(split_cps_on_sigma(cps, [], []), is_first: True)
-    }
+  case utf8.has_surrogate(s) {
+    True -> utf8.case_map(s, False)
+    False ->
+      case utf8.index_of(s, "\u{03A3}", 0) {
+        None -> string.lowercase(s)
+        Some(_) -> {
+          let cps =
+            string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
+          sigma_assemble(split_cps_on_sigma(cps, [], []), is_first: True)
+        }
+      }
   }
 }
 
 pub fn to_upper_case(s: String) -> String {
   use <- option.lazy_unwrap(utf8.ascii_upper(s))
-  string.uppercase(s)
+  utf8.case_map(s, True)
 }
 
 fn split_cps_on_sigma(

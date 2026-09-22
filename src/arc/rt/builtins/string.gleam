@@ -186,7 +186,8 @@ pub fn dispatch(
     StringPrototypeLocaleCompare -> string_locale_compare(st, this, args)
     StringPrototypeMatchAll -> string_match_all(st, this, args)
     StringPrototypeIsWellFormed -> string_is_well_formed(st, this)
-    StringPrototypeToWellFormed -> string_transform(st, this, fn(s) { s })
+    StringPrototypeToWellFormed ->
+      string_transform(st, this, js_string.to_well_formed)
     StringPrototypeAnchor -> html_wrap_attr(st, this, args, "a", "name")
     StringPrototypeBig -> html_wrap(st, this, "big")
     StringPrototypeBlink -> html_wrap(st, this, "blink")
@@ -258,7 +259,7 @@ fn string_char_code_at(
   let #(s, st) = with_this_str(st, this)
   let #(idx, st) =
     rt_val.to_integer_or_infinity(st, helpers.first_arg_or_undefined(args))
-  case js_string.codepoint_at(s, idx) {
+  case js_string.code_unit_at(s, idx) {
     Some(cp) -> #(mk_int(cp), st)
     None -> #(mk_number(JNan), st)
   }
@@ -302,7 +303,28 @@ fn string_includes(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  string_search_bool(st, this, args, "includes", utf8.contains)
+  string_search_bool(st, this, args, "includes", unit_contains)
+}
+
+fn unit_contains(hay: String, needle: String) -> Bool {
+  option.is_some(utf8.index_of(hay, needle, 0))
+}
+
+fn unit_starts_with(hay: String, needle: String) -> Bool {
+  let n = utf8.length(needle)
+  case n > utf8.length(hay) {
+    True -> False
+    False -> utf8.slice(hay, 0, n) == needle
+  }
+}
+
+fn unit_ends_with(hay: String, needle: String) -> Bool {
+  let h = utf8.length(hay)
+  let n = utf8.length(needle)
+  case n > h {
+    True -> False
+    False -> utf8.slice(hay, h - n, n) == needle
+  }
 }
 
 fn string_starts_with(
@@ -310,7 +332,7 @@ fn string_starts_with(
   this: JsVal,
   args: List(JsVal),
 ) -> #(JsVal, Agent) {
-  string_search_bool(st, this, args, "startsWith", string.starts_with)
+  string_search_bool(st, this, args, "startsWith", unit_starts_with)
 }
 
 fn string_search_bool(
@@ -372,7 +394,7 @@ fn string_ends_with(
         True -> s
         False -> js_string.text(js_string.substring(v, 0, end_pos))
       }
-      #(mk_bool(string.ends_with(sub, search)), st)
+      #(mk_bool(unit_ends_with(sub, search)), st)
     }
   }
 }
@@ -593,8 +615,8 @@ fn string_locale_compare(
 }
 
 fn string_is_well_formed(st: Agent, this: JsVal) -> #(JsVal, Agent) {
-  let #(_s, st) = with_this_text(st, this)
-  #(mk_bool(True), st)
+  let #(s, st) = with_this_text(st, this)
+  #(mk_bool(js_string.is_well_formed(s)), st)
 }
 
 fn string_this_value(
@@ -1029,7 +1051,7 @@ fn string_raw_loop(
 
 fn string_from_char_code(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(codes, st) = from_char_code_coerce(st, args, [])
-  #(mk_string(char_codes_to_string(list.reverse(codes), [])), st)
+  #(js_string.from_units(char_codes_to_units(list.reverse(codes))), st)
 }
 
 fn from_char_code_coerce(
@@ -1052,19 +1074,26 @@ fn from_char_code_coerce(
   }
 }
 
-fn char_codes_to_string(codes: List(Int), acc: List(UtfCodepoint)) -> String {
+fn char_codes_to_units(codes: List(Int)) -> List(Int) {
   case codes {
-    [] -> string.from_utf_codepoints(list.reverse(acc))
+    [] -> []
     [code, ..rest] -> {
-      let #(cp, remaining) = case utf16.is_high(code), rest {
-        True, [low, ..after] ->
-          case utf16.is_low(low) {
-            True -> #(utf16.combine(code, low), after)
-            False -> #(code, rest)
+      case utf16.is_high(code) {
+        False -> [code, ..char_codes_to_units(rest)]
+        True ->
+          case rest {
+            [low, ..after] ->
+              case utf16.is_low(low) {
+                True ->
+                  list.append(
+                    utf16.from_code_point(utf16.combine(code, low)),
+                    char_codes_to_units(after),
+                  )
+                False -> [code, ..char_codes_to_units(rest)]
+              }
+            [] -> [code]
           }
-        _, _ -> #(code, rest)
       }
-      char_codes_to_string(remaining, [codepoint_or_replacement(cp), ..acc])
     }
   }
 }
@@ -1076,25 +1105,25 @@ fn string_from_code_point(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
 fn string_from_code_point_loop(
   st: Agent,
   args: List(JsVal),
-  acc: List(UtfCodepoint),
+  acc: List(Int),
 ) -> #(JsVal, Agent) {
   case args {
-    [] -> #(mk_string(string.from_utf_codepoints(list.reverse(acc))), st)
+    [] -> #(
+      js_string.from_units(list.flat_map(
+        list.reverse(acc),
+        utf16.from_code_point,
+      )),
+      st,
+    )
     [arg, ..rest] -> {
       let #(num, st) = rt_val.to_number(st, arg)
       case num {
         JInt(i) if i >= 0 && i <= 0x10FFFF ->
-          string_from_code_point_loop(st, rest, [
-            codepoint_or_replacement(i),
-            ..acc
-          ])
+          string_from_code_point_loop(st, rest, [i, ..acc])
         JFloat(f) ->
           case rt_val.integral_int(f) {
             Some(i) if i >= 0 && i <= 0x10FFFF ->
-              string_from_code_point_loop(st, rest, [
-                codepoint_or_replacement(i),
-                ..acc
-              ])
+              string_from_code_point_loop(st, rest, [i, ..acc])
             _ ->
               rt_val.throw_range_error(
                 st,
@@ -1256,13 +1285,6 @@ fn modulo_uint16(n: Int) -> Int {
   case m < 0 {
     True -> m + 65_536
     False -> m
-  }
-}
-
-fn codepoint_or_replacement(i: Int) -> UtfCodepoint {
-  case string.utf_codepoint(i) {
-    Ok(cp) -> cp
-    Error(Nil) -> utf8.replacement_codepoint()
   }
 }
 

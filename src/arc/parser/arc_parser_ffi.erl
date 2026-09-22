@@ -155,9 +155,10 @@ classify_low_surrogate(_, _) ->
 
 encode_codepoint(CP) when CP =< 16#7F ->
     <<CP>>;
-%% lone surrogate has no utf-8 encoding, becomes u+fffd
+%% WTF-8: a lone surrogate keeps its 3-byte encoding
 encode_codepoint(CP) when CP >= 16#D800, CP =< 16#DFFF ->
-    <<16#EF, 16#BF, 16#BD>>;
+    <<(16#E0 bor (CP bsr 12)), (16#80 bor ((CP bsr 6) band 16#3F)),
+      (16#80 bor (CP band 16#3F))>>;
 encode_codepoint(CP) when CP =< 16#10FFFF ->
     <<CP/utf8>>;
 encode_codepoint(_) ->

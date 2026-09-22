@@ -3,9 +3,9 @@ import arc/rt/intl_data.{
   type Granularity, type Segment, GraphemeGranularity, Segment,
   SentenceGranularity, WordGranularity,
 }
+import arc/rt/utf8
 import gleam/list
 import gleam/option.{type Option, None, Some}
-import gleam/string
 
 // approximate root rules, indices in utf-16 code units
 pub fn segment_string(s: String, granularity: Granularity) -> List(Segment) {
@@ -18,7 +18,7 @@ pub fn segment_string(s: String, granularity: Granularity) -> List(Segment) {
 
 fn segment_graphemes(s: String) -> List(Segment) {
   let #(segments, _) =
-    list.fold(string.to_graphemes(s), #([], 0), fn(acc, g) {
+    list.fold(utf8.to_graphemes(s), #([], 0), fn(acc, g) {
       let #(segments, idx) = acc
       let segment = Segment(text: g, index: idx, word_like: False)
       #([segment, ..segments], idx + utf16_len(g))
@@ -27,27 +27,18 @@ fn segment_graphemes(s: String) -> List(Segment) {
 }
 
 pub fn utf16_len(s: String) -> Int {
-  string.to_utf_codepoints(s)
-  |> list.fold(0, fn(n, cp) {
-    case string.utf_codepoint_to_int(cp) > 0xffff {
-      True -> n + 2
-      False -> n + 1
-    }
-  })
+  utf8.length(s)
 }
 
 fn is_word_char(g: String) -> Bool {
-  case string.to_utf_codepoints(g) {
-    [cp, ..] -> {
-      let c = string.utf_codepoint_to_int(cp)
-      digits.is_ascii_alnum_code(c) || c == 0x27 || c > 0x7f
-    }
-    [] -> False
+  case utf8.first_unit(g) {
+    Some(c) -> digits.is_ascii_alnum_code(c) || c == 0x27 || c > 0x7f
+    None -> False
   }
 }
 
 fn segment_words(s: String) -> List(Segment) {
-  let graphemes = string.to_graphemes(s)
+  let graphemes = utf8.to_graphemes(s)
   segment_words_loop(graphemes, 0, [], "", 0, None)
 }
 
@@ -106,7 +97,7 @@ fn segment_sentences(s: String) -> List(Segment) {
     "" -> []
     _ ->
       segment_sentences_loop(
-        string.to_graphemes(s),
+        utf8.to_graphemes(s),
         0,
         [],
         "",

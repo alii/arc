@@ -1,6 +1,6 @@
 -module(arc_regexp_ffi).
 -export([regexp_compile/2, is_compiled/1, regexp_exec_compiled/4]).
--export([pair_trail/1, has_flag/2, take_hex/1]).
+-export([pair_trail/1, has_flag/2, take_hex/1, escape_pattern/1]).
 
 has_flag(<<C, _/binary>>, <<C>>) -> true;
 has_flag(<<_, R/binary>>, F) -> has_flag(R, F);
@@ -476,7 +476,58 @@ pair_trail(<<$\\, $u, E, F, G, H, Rest/binary>>) ->
 pair_trail(_) -> none.
 
 regexp_compile(Pattern, Flags) ->
-    get_compiled(Pattern, Flags).
+    get_compiled(sanitize(Pattern), Flags).
+
+%% replace lone surrogates with U+FFFD; same byte and unit length, so match
+%% offsets stay valid for the original string
+sanitize(Bin) ->
+    case binary:match(Bin, <<16#ED>>) of
+        nomatch -> Bin;
+        _ -> sanitize_loop(Bin, [])
+    end.
+
+sanitize_loop(<<>>, Acc) -> iolist_to_binary(lists:reverse(Acc));
+sanitize_loop(<<16#ED, B, _C, R/binary>>, Acc) when B >= 16#A0, B =< 16#BF ->
+    sanitize_loop(R, [<<16#EF, 16#BF, 16#BD>> | Acc]);
+sanitize_loop(<<H, R/binary>>, Acc) -> sanitize_loop(R, [H | Acc]).
+
+%% EscapeRegExpPattern over a WTF-8 pattern, keeping lone surrogate bytes
+escape_pattern(Bin) -> escape_pattern(Bin, false, []).
+
+escape_pattern(<<>>, _InClass, Acc) -> iolist_to_binary(lists:reverse(Acc));
+escape_pattern(<<$\\, R/binary>>, InClass, Acc) ->
+    {Esc, R2} = esc_next(R),
+    escape_pattern(R2, InClass, [Esc | Acc]);
+escape_pattern(<<$/, R/binary>>, false, Acc) ->
+    escape_pattern(R, false, [<<"\\/">> | Acc]);
+escape_pattern(<<$[, R/binary>>, _InClass, Acc) ->
+    escape_pattern(R, true, [<<"[">> | Acc]);
+escape_pattern(<<$], R/binary>>, _InClass, Acc) ->
+    escape_pattern(R, false, [<<"]">> | Acc]);
+escape_pattern(<<$\n, R/binary>>, InClass, Acc) ->
+    escape_pattern(R, InClass, [<<"\\n">> | Acc]);
+escape_pattern(<<$\r, R/binary>>, InClass, Acc) ->
+    escape_pattern(R, InClass, [<<"\\r">> | Acc]);
+escape_pattern(<<16#E2, 16#80, 16#A8, R/binary>>, InClass, Acc) ->
+    escape_pattern(R, InClass, [<<"\\u2028">> | Acc]);
+escape_pattern(<<16#E2, 16#80, 16#A9, R/binary>>, InClass, Acc) ->
+    escape_pattern(R, InClass, [<<"\\u2029">> | Acc]);
+escape_pattern(<<H, R/binary>>, InClass, Acc) ->
+    escape_pattern(R, InClass, [H | Acc]).
+
+esc_next(<<>>) -> {<<"\\">>, <<>>};
+esc_next(<<$\n, R/binary>>) -> {<<"\\n">>, R};
+esc_next(<<$\r, R/binary>>) -> {<<"\\r">>, R};
+esc_next(<<16#E2, 16#80, 16#A8, R/binary>>) -> {<<"\\u2028">>, R};
+esc_next(<<16#E2, 16#80, 16#A9, R/binary>>) -> {<<"\\u2029">>, R};
+esc_next(<<C, R/binary>>) when C < 16#80 -> {<<$\\, C>>, R};
+esc_next(<<C1, C2, R/binary>>) when C1 >= 16#C0, C1 < 16#E0 ->
+    {<<$\\, C1, C2>>, R};
+esc_next(<<C1, C2, C3, R/binary>>) when C1 >= 16#E0, C1 < 16#F0 ->
+    {<<$\\, C1, C2, C3>>, R};
+esc_next(<<C1, C2, C3, C4, R/binary>>) when C1 >= 16#F0 ->
+    {<<$\\, C1, C2, C3, C4>>, R};
+esc_next(Bin) -> {<<"\\">>, Bin}.
 
 is_compiled({ok, {_MP, _GroupCount, _Names}}) -> true;
 is_compiled({error, {pattern_compile_failed, _Reason}}) -> true;
@@ -509,7 +560,7 @@ run_compiled({ok, {MP, GroupCount, Names}}, String, Offset, Sticky) ->
                true -> [anchored | Opts0];
                false -> Opts0
            end,
-    case re:run(String, MP, Opts) of
+    case re:run(sanitize(String), MP, Opts) of
         {match, [Whole | Groups]} ->
             Padded = pad_captures(Groups, GroupCount),
             {ok, {Whole, Padded, GroupCount, Names}};

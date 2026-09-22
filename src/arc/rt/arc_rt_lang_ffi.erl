@@ -135,13 +135,12 @@ array_iter_next(Store, {?ARC_ITER, {?HANDLE_TAG, T}, I, _} = R) ->
         _ -> iter_miss
     end;
 array_iter_next(_, {?ARC_ITER, S, Off, _} = R) when ?IS_STR(S) ->
-    case arc_rt_js_string_ffi:text(S) of
-        <<_:Off/binary, C/utf8, _/binary>> ->
-            Ch = <<C/utf8>>,
-            {iter_step, false,
-             case C < 16#80 of true -> Ch; false -> arc_rt_js_string_ffi:from_text(Ch) end,
-             setelement(3, R, Off + byte_size(Ch))};
-        _ -> {iter_step, true, undefined, undefined}
+    case arc_rt_js_string_ffi:raw_char_at_offset(
+             arc_rt_js_string_ffi:text(S), Off) of
+        {some, {Ch, Next}} ->
+            {iter_step, false, arc_rt_js_string_ffi:from_text(Ch),
+             setelement(3, R, Next)};
+        none -> {iter_step, true, undefined, undefined}
     end;
 array_iter_next(_, _) -> iter_miss.
 
