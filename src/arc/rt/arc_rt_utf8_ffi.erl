@@ -10,6 +10,7 @@
 -export([split/3, repeat/2, replace_literal/4]).
 -export([ascii_upper/1, ascii_lower/1, case_map/2, has_surrogate/1]).
 -export([to_graphemes/1, first_unit/1, host_safe/1, escape_inspect/1]).
+-export([nfc/1, nfd/1, nfkc/1, nfkd/1]).
 -export([trim_js_ws/1, trim_leading_js_ws/1, trim_trailing_js_ws/1]).
 
 char_at(Bin, Idx) -> arc_rt_js_string_ffi:raw_char_at(Bin, Idx).
@@ -140,6 +141,30 @@ hex4(N) ->
 
 hexd(D) when D < 10 -> $0 + D;
 hexd(D) -> $a + D - 10.
+
+%% unicode normalizers that pass lone surrogates through
+nfc(Bin) -> normalize(Bin, fun unicode:characters_to_nfc_binary/1).
+nfd(Bin) -> normalize(Bin, fun unicode:characters_to_nfd_binary/1).
+nfkc(Bin) -> normalize(Bin, fun unicode:characters_to_nfkc_binary/1).
+nfkd(Bin) -> normalize(Bin, fun unicode:characters_to_nfkd_binary/1).
+
+normalize(Bin, F) ->
+    case has_surrogate(Bin) of
+        false -> F(Bin);
+        true -> iolist_to_binary(normalize_loop(Bin, F, []))
+    end.
+
+normalize_loop(<<>>, _F, Acc) -> lists:reverse(Acc);
+normalize_loop(<<16#ED, B, C, R/binary>>, F, Acc) when B >= 16#A0, B =< 16#BF ->
+    normalize_loop(R, F, [<<16#ED, B, C>> | Acc]);
+normalize_loop(Bin, F, Acc) ->
+    {Run, Rest} = take_run(Bin, <<>>),
+    normalize_loop(Rest, F, [F(Run) | Acc]).
+
+take_run(<<16#ED, B, _C, _/binary>> = Bin, Run) when B >= 16#A0, B =< 16#BF ->
+    {Run, Bin};
+take_run(<<H, R/binary>>, Run) -> take_run(R, <<Run/binary, H>>);
+take_run(<<>>, Run) -> {Run, <<>>}.
 
 ascii_map(<<W:56, Rest/binary>>, Lo, Hi, Acc) when W band 16#80808080808080 =:= 0 ->
     M = ((W + Lo) band (bnot (W + Hi))) band 16#80808080808080,

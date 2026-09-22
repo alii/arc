@@ -1288,14 +1288,14 @@ fn modulo_uint16(n: Int) -> Int {
   }
 }
 
-@external(erlang, "unicode", "characters_to_nfc_binary")
+@external(erlang, "arc_rt_utf8_ffi", "nfc")
 fn nfc(s: String) -> String
 
-@external(erlang, "unicode", "characters_to_nfd_binary")
+@external(erlang, "arc_rt_utf8_ffi", "nfd")
 fn nfd(s: String) -> String
 
-@external(erlang, "unicode", "characters_to_nfkc_binary")
+@external(erlang, "arc_rt_utf8_ffi", "nfkc")
 fn nfkc(s: String) -> String
 
-@external(erlang, "unicode", "characters_to_nfkd_binary")
+@external(erlang, "arc_rt_utf8_ffi", "nfkd")
 fn nfkd(s: String) -> String
