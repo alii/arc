@@ -9,7 +9,8 @@
          raw_char_at/2, raw_char_at_offset/2, raw_slice/3, raw_drop/2,
          raw_explode/1, raw_index_of/3, raw_last_index_of/3,
          raw_last_index_of_all/2, raw_compare/2, raw_byte_offset/2,
-         raw_unit_index/2, raw_is_well_formed/1, raw_to_well_formed/1]).
+         raw_unit_index/2, raw_is_well_formed/1, raw_to_well_formed/1,
+         raw_decode/1, raw_encode_cp/1]).
 -compile({no_auto_import, [length/1]}).
 
 -include("arc_rt_layout.hrl").
@@ -51,6 +52,10 @@ units_of(Cp, 2) ->
     [?HI_START + (N bsr 10), ?LO_START + (N band 16#3FF)];
 units_of(Cp, 1) ->
     [Cp].
+
+raw_decode(Bin) -> decode(Bin).
+
+raw_encode_cp(Cp) -> encode_cp(Cp).
 
 from_text(Bin) when is_binary(Bin) ->
     case is_ascii(Bin) of

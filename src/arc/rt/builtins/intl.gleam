@@ -107,6 +107,7 @@ import arc/rt/types.{
   mk_number, mk_object, mk_string, mk_undefined,
 }
 import arc/rt/unicode_case
+import arc/rt/utf8
 import arc/rt/val as rt_val
 import arc/time_zone
 import gleam/bool
@@ -3371,28 +3372,33 @@ fn number_format_parts(
 }
 
 fn is_plain_decimal(s: String) -> Bool {
-  let s = case string.pop_grapheme(s) {
-    Ok(#("-", rest)) | Ok(#("+", rest)) -> rest
-    _ -> s
-  }
-  s != ""
-  && s != "."
-  && !string.starts_with(string.lowercase(s), "infinity")
-  && !string.starts_with(string.lowercase(s), "0x")
-  && !string.starts_with(string.lowercase(s), "0o")
-  && !string.starts_with(string.lowercase(s), "0b")
-  && string.to_graphemes(s)
-  |> list.all(fn(c) {
-    c == "."
-    || c == "e"
-    || c == "E"
-    || c == "+"
-    || c == "-"
-    || case int.parse(c) {
-      Ok(_) -> True
-      Error(Nil) -> False
+  case utf8.has_surrogate(s) {
+    True -> False
+    False -> {
+      let s = case string.pop_grapheme(s) {
+        Ok(#("-", rest)) | Ok(#("+", rest)) -> rest
+        _ -> s
+      }
+      s != ""
+      && s != "."
+      && !string.starts_with(string.lowercase(s), "infinity")
+      && !string.starts_with(string.lowercase(s), "0x")
+      && !string.starts_with(string.lowercase(s), "0o")
+      && !string.starts_with(string.lowercase(s), "0b")
+      && utf8.to_graphemes(s)
+      |> list.all(fn(c) {
+        c == "."
+        || c == "e"
+        || c == "E"
+        || c == "+"
+        || c == "-"
+        || case int.parse(c) {
+          Ok(_) -> True
+          Error(Nil) -> False
+        }
+      })
     }
-  })
+  }
 }
 
 fn number_format_number(
@@ -4755,9 +4761,7 @@ fn string_list_from_iterable(
   case classify(iterable) {
     KUndef -> #([], st)
     KStr(text) -> {
-      let items =
-        string.to_utf_codepoints(text)
-        |> list.map(fn(cp) { string.from_utf_codepoints([cp]) })
+      let items = utf8.to_codepoint_strings(text)
       #(items, st)
     }
     _ -> {

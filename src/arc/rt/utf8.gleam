@@ -79,6 +79,15 @@ pub fn host_safe(s: String) -> String
 @external(erlang, "arc_rt_utf8_ffi", "escape_inspect")
 pub fn escape_inspect(s: String) -> String
 
+@external(erlang, "arc_rt_utf8_ffi", "to_codepoints")
+pub fn to_codepoints(s: String) -> List(Int)
+
+@external(erlang, "arc_rt_utf8_ffi", "to_codepoint_strings")
+pub fn to_codepoint_strings(s: String) -> List(String)
+
+@external(erlang, "arc_rt_utf8_ffi", "encode_cp")
+pub fn encode_cp(cp: Int) -> String
+
 // js whitespace and line terminators, not just ascii
 @external(erlang, "arc_rt_utf8_ffi", "trim_js_ws")
 pub fn trim_js_ws(s: String) -> String

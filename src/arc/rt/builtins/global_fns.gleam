@@ -314,7 +314,10 @@ fn uri_encode_dispatch(
   kind: UriKind,
 ) -> #(JsVal, Agent) {
   let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
-  #(mk_string(uri_encode(s, kind)), st)
+  case utf8.has_surrogate(s) {
+    True -> rt_val.throw(st, JsError(UriError, "URI malformed"))
+    False -> #(mk_string(uri_encode(s, kind)), st)
+  }
 }
 
 fn uri_decode_dispatch(
@@ -334,11 +337,10 @@ fn uri_decode_dispatch(
 }
 
 fn uri_encode(text: String, kind: UriKind) -> String {
-  string.to_utf_codepoints(text)
-  |> list.map(fn(cp) {
-    let c = string.utf_codepoint_to_int(cp)
+  utf8.to_codepoints(text)
+  |> list.map(fn(c) {
     case is_uri_unescaped(c, kind) {
-      True -> string.from_utf_codepoints([cp])
+      True -> utf8.encode_cp(c)
       False -> percent_encode_utf8(c)
     }
   })
@@ -541,11 +543,10 @@ fn is_uri_reserved_byte(c: Int) -> Bool {
 }
 
 fn js_escape(input: String) -> String {
-  string.to_utf_codepoints(input)
-  |> list.map(fn(cp) {
-    let code = string.utf_codepoint_to_int(cp)
+  utf8.to_codepoints(input)
+  |> list.map(fn(code) {
     case is_escape_safe(code) {
-      True -> string.from_utf_codepoints([cp])
+      True -> utf8.encode_cp(code)
       False -> escape_code_point(code)
     }
   })
@@ -579,16 +580,12 @@ fn escape_code_point(code: Int) -> String {
 }
 
 fn js_unescape(input: String) -> String {
-  string.to_utf_codepoints(input)
-  |> list.map(string.utf_codepoint_to_int)
+  utf8.to_codepoints(input)
   |> js_unescape_loop([])
-  |> string.from_utf_codepoints
+  |> string.concat
 }
 
-fn js_unescape_loop(
-  codes: List(Int),
-  acc: List(UtfCodepoint),
-) -> List(UtfCodepoint) {
+fn js_unescape_loop(codes: List(Int), acc: List(String)) -> List(String) {
   case codes {
     [] -> list.reverse(acc)
     [0x25, ..after_percent] -> {
@@ -598,12 +595,11 @@ fn js_unescape_loop(
         })
       case escape {
         Some(#(code, rest)) ->
-          js_unescape_loop(rest, [scalar_to_codepoint(code), ..acc])
-        None ->
-          js_unescape_loop(after_percent, [scalar_to_codepoint(0x25), ..acc])
+          js_unescape_loop(rest, [utf8.encode_cp(code), ..acc])
+        None -> js_unescape_loop(after_percent, [utf8.encode_cp(0x25), ..acc])
       }
     }
-    [code, ..rest] -> js_unescape_loop(rest, [scalar_to_codepoint(code), ..acc])
+    [code, ..rest] -> js_unescape_loop(rest, [utf8.encode_cp(code), ..acc])
   }
 }
 
@@ -618,13 +614,9 @@ fn take_unicode_escape(after_percent: List(Int)) -> Option(#(Int, List(Int))) {
               0x10000 + { unit - 0xd800 } * 1024 + { low - 0xdc00 },
               after_pair,
             )
-            None -> #(0xfffd, rest)
+            None -> #(unit, rest)
           }
-        False ->
-          case unit >= 0xdc00 && unit <= 0xdfff {
-            True -> #(0xfffd, rest)
-            False -> #(unit, rest)
-          }
+        False -> #(unit, rest)
       }
     }
     _ -> None
@@ -652,11 +644,6 @@ fn take_hex_escape(after_percent: List(Int)) -> Option(#(Int, List(Int))) {
     }
     _ -> None
   }
-}
-
-fn scalar_to_codepoint(code: Int) -> UtfCodepoint {
-  let assert Ok(cp) = string.utf_codepoint(code)
-  cp
 }
 
 fn to_hex_upper(n: Int, width: Int) -> String {

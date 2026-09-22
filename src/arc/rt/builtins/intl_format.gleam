@@ -19,6 +19,7 @@ import arc/rt/intl_data.{
   TrailingZeroStripIfInteger, UnitList, UnitLong, UnitNarrow, UnitShort,
   WidthLong, WidthNarrow, WidthShort,
 }
+import arc/rt/utf8
 import arc/rt/val as rt_val
 import gleam/bool
 import gleam/float
@@ -759,7 +760,7 @@ fn is_one_parts(parts: List(Part)) -> Bool {
 fn is_zero_parts(parts: List(Part)) -> Bool {
   let #(int_digits, frac_digits) = plural_operands(parts)
   let digits = int_digits <> frac_digits
-  digits != "" && string.to_graphemes(digits) |> list.all(fn(c) { c == "0" })
+  digits != "" && utf8.to_graphemes(digits) |> list.all(fn(c) { c == "0" })
 }
 
 fn currency_text(
@@ -1093,7 +1094,7 @@ fn rounds_up(
 }
 
 fn has_nonzero_digit(digits: String) -> Bool {
-  string.to_graphemes(digits) |> list.any(fn(c) { c != "0" })
+  utf8.to_graphemes(digits) |> list.any(fn(c) { c != "0" })
 }
 
 // compares 0.{lead_zeros zeros}{dropped} against one half
@@ -1245,7 +1246,7 @@ fn format_digits(
   }
   let frac_text = case opts.trailing_zero_display {
     TrailingZeroStripIfInteger ->
-      case string.to_graphemes(frac_text) |> list.all(fn(c) { c == "0" }) {
+      case utf8.to_graphemes(frac_text) |> list.all(fn(c) { c == "0" }) {
         True -> ""
         False -> frac_text
       }
@@ -1847,7 +1848,7 @@ pub fn apply_numbering_system(
 fn translit_digits(s: String, nu: String) -> String {
   case nu {
     "hanidec" ->
-      string.to_graphemes(s)
+      utf8.to_graphemes(s)
       |> list.map(fn(c) {
         case c {
           "0" -> "〇"
@@ -1868,7 +1869,7 @@ fn translit_digits(s: String, nu: String) -> String {
       case numbering_base(nu) {
         None -> s
         Some(base) ->
-          string.to_graphemes(s)
+          utf8.to_graphemes(s)
           |> list.map(fn(c) {
             case int.parse(c) {
               Ok(d) ->

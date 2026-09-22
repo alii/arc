@@ -1,4 +1,5 @@
 import arc/internal/digits
+import arc/rt/utf8
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -22,8 +23,7 @@ pub type Extension {
 }
 
 fn all_codepoints(s: String, pred: fn(Int) -> Bool) -> Bool {
-  string.to_utf_codepoints(s)
-  |> list.all(fn(cp) { pred(string.utf_codepoint_to_int(cp)) })
+  utf8.to_codepoints(s) |> list.all(pred)
 }
 
 pub fn is_alpha(s: String) -> Bool {
@@ -70,20 +70,16 @@ pub fn is_variant(s: String) -> Bool {
 
 fn is_ukey(s: String) -> Bool {
   string.length(s) == 2
-  && case string.to_utf_codepoints(s) {
-    [a, b] ->
-      digits.is_ascii_alnum_code(string.utf_codepoint_to_int(a))
-      && digits.is_ascii_alpha_code(string.utf_codepoint_to_int(b))
+  && case utf8.to_codepoints(s) {
+    [a, b] -> digits.is_ascii_alnum_code(a) && digits.is_ascii_alpha_code(b)
     _ -> False
   }
 }
 
 fn is_tkey(s: String) -> Bool {
   string.length(s) == 2
-  && case string.to_utf_codepoints(s) {
-    [a, b] ->
-      digits.is_ascii_alpha_code(string.utf_codepoint_to_int(a))
-      && digits.is_decimal_code(string.utf_codepoint_to_int(b))
+  && case utf8.to_codepoints(s) {
+    [a, b] -> digits.is_ascii_alpha_code(a) && digits.is_decimal_code(b)
     _ -> False
   }
 }
@@ -104,10 +100,10 @@ fn is_singleton(s: String) -> Bool {
 }
 
 pub fn parse(tag: String) -> Result(LocaleId, Nil) {
-  let lowered = string.lowercase(tag)
   case is_tag_charset(tag) {
     False -> Error(Nil)
     True -> {
+      let lowered = string.lowercase(tag)
       let parts = string.split(lowered, "-")
       case list.any(parts, fn(p) { p == "" }) {
         True -> Error(Nil)

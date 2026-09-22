@@ -105,9 +105,7 @@ fn tokenize(template: String, emit: Emit(segment)) -> List(segment) {
 
 // code points not graphemes, so "$&" + combining mark still splits
 fn to_code_points(s: String) -> List(String) {
-  s
-  |> string.to_utf_codepoints
-  |> list.map(fn(cp) { string.from_utf_codepoints([cp]) })
+  utf8.to_codepoint_strings(s)
 }
 
 fn flush_literal(

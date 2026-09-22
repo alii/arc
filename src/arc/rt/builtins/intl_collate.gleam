@@ -2,6 +2,7 @@ import arc/rt/intl_data.{
   type CaseFirst, type CollatorSensitivity, type CollatorState, CaseFirstFalse,
   CaseFirstLower, CaseFirstUpper, SensAccent, SensBase, SensCase, SensVariant,
 }
+import arc/rt/utf8
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -27,7 +28,7 @@ pub fn collator_compare(c: CollatorState, a: String, b: String) -> Int {
   let levels = fn() { collator_levels(sensitivity, c.case_first, a, b) }
   case numeric {
     True ->
-      case numeric_compare(string.to_graphemes(pa), string.to_graphemes(pb)) {
+      case numeric_compare(utf8.to_graphemes(pa), utf8.to_graphemes(pb)) {
         0 -> levels()
         n -> n
       }
@@ -47,8 +48,8 @@ fn collator_levels(
 ) -> Int {
   let secondary = fn() {
     simple_compare(
-      string.lowercase(fold_combining(a)),
-      string.lowercase(fold_combining(b)),
+      utf8.case_map(fold_combining(a), False),
+      utf8.case_map(fold_combining(b), False),
     )
   }
   let tertiary = fn() {
@@ -74,9 +75,8 @@ fn collator_levels(
 }
 
 fn strip_punctuation(s: String) -> String {
-  string.to_utf_codepoints(s)
-  |> list.filter(fn(cp) {
-    let c = string.utf_codepoint_to_int(cp)
+  utf8.to_codepoints(s)
+  |> list.filter(fn(c) {
     !{
       c == 0x20
       || { c >= 0x21 && c <= 0x2f }
@@ -85,29 +85,27 @@ fn strip_punctuation(s: String) -> String {
       || { c >= 0x7b && c <= 0x7e }
     }
   })
-  |> string.from_utf_codepoints
+  |> list.map(utf8.encode_cp)
+  |> string.join("")
 }
 
 fn collation_primary(s: String) -> String {
-  string.lowercase(s)
-  |> string.to_graphemes
+  utf8.case_map(s, False)
+  |> utf8.to_graphemes
   |> list.map(deaccent)
   |> string.join("")
 }
 
 fn fold_combining(s: String) -> String {
-  string.to_graphemes(s)
+  utf8.to_graphemes(s)
   |> list.map(compose_grapheme)
   |> string.join("")
 }
 
 fn compose_grapheme(g: String) -> String {
-  case string.to_utf_codepoints(g) {
+  case utf8.to_codepoints(g) {
     [base, mark] ->
-      precomposed(
-        string.from_utf_codepoints([base]),
-        string.utf_codepoint_to_int(mark),
-      )
+      precomposed(utf8.encode_cp(base), mark)
       |> option.unwrap(g)
     _ -> g
   }
@@ -163,12 +161,9 @@ fn precomposed(base: String, mark: Int) -> Option(String) {
 
 fn deaccent(g: String) -> String {
   let cps =
-    string.to_utf_codepoints(g)
-    |> list.filter(fn(cp) {
-      let c = string.utf_codepoint_to_int(cp)
-      !{ c >= 0x300 && c <= 0x36f }
-    })
-  let base = string.from_utf_codepoints(cps)
+    utf8.to_codepoints(g)
+    |> list.filter(fn(c) { !{ c >= 0x300 && c <= 0x36f } })
+  let base = list.map(cps, utf8.encode_cp) |> string.join("")
   case base {
     "à" | "á" | "â" | "ã" | "ä" | "å" | "ā" -> "a"
     "è" | "é" | "ê" | "ë" | "ē" -> "e"
@@ -186,20 +181,16 @@ fn deaccent(g: String) -> String {
 }
 
 fn swap_case(s: String) -> String {
-  string.to_utf_codepoints(s)
-  |> list.map(fn(cp) {
-    let c = string.utf_codepoint_to_int(cp)
+  utf8.to_codepoints(s)
+  |> list.map(fn(c) {
     let swapped = case c {
       _ if c >= 0x41 && c <= 0x5a -> c + 32
       _ if c >= 0x61 && c <= 0x7a -> c - 32
       _ -> c
     }
-    case string.utf_codepoint(swapped) {
-      Ok(v) -> v
-      Error(Nil) -> cp
-    }
+    utf8.encode_cp(swapped)
   })
-  |> string.from_utf_codepoints
+  |> string.join("")
 }
 
 fn simple_compare(a: String, b: String) -> Int {
@@ -248,9 +239,6 @@ fn take_digits(gs: List(String), acc: String) -> #(String, List(String)) {
 
 fn is_digit_text(s: String) -> Bool {
   s != ""
-  && string.to_utf_codepoints(s)
-  |> list.all(fn(cp) {
-    let c = string.utf_codepoint_to_int(cp)
-    c >= 0x30 && c <= 0x39
-  })
+  && utf8.to_codepoints(s)
+  |> list.all(fn(c) { c >= 0x30 && c <= 0x39 })
 }

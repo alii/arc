@@ -11,6 +11,7 @@
 -export([ascii_upper/1, ascii_lower/1, case_map/2, has_surrogate/1]).
 -export([to_graphemes/1, first_unit/1, host_safe/1, escape_inspect/1]).
 -export([nfc/1, nfd/1, nfkc/1, nfkd/1]).
+-export([to_codepoints/1, to_codepoint_strings/1, encode_cp/1]).
 -export([trim_js_ws/1, trim_leading_js_ws/1, trim_trailing_js_ws/1]).
 
 char_at(Bin, Idx) -> arc_rt_js_string_ffi:raw_char_at(Bin, Idx).
@@ -165,6 +166,27 @@ take_run(<<16#ED, B, _C, _/binary>> = Bin, Run) when B >= 16#A0, B =< 16#BF ->
     {Run, Bin};
 take_run(<<H, R/binary>>, Run) -> take_run(R, <<Run/binary, H>>);
 take_run(<<>>, Run) -> {Run, <<>>}.
+
+%% code points as ints, lone surrogates included
+to_codepoints(Bin) -> to_cps(Bin, []).
+
+to_cps(<<>>, Acc) -> lists:reverse(Acc);
+to_cps(Bin, Acc) ->
+    {Cp, _Units, BLen} = arc_rt_js_string_ffi:raw_decode(Bin),
+    <<_:BLen/binary, Rest/binary>> = Bin,
+    to_cps(Rest, [Cp | Acc]).
+
+%% each code point as its own string, one unit for a lone surrogate
+to_codepoint_strings(Bin) -> to_cp_strings(Bin, 0, []).
+
+to_cp_strings(Bin, Off, Acc) when Off >= byte_size(Bin) ->
+    lists:reverse(Acc);
+to_cp_strings(Bin, Off, Acc) ->
+    {some, {Ch, Next}} = arc_rt_js_string_ffi:raw_char_at_offset(Bin, Off),
+    to_cp_strings(Bin, Next, [Ch | Acc]).
+
+%% one code point as a string, valid for astral and lone surrogates
+encode_cp(Cp) -> arc_rt_js_string_ffi:raw_encode_cp(Cp).
 
 ascii_map(<<W:56, Rest/binary>>, Lo, Hi, Acc) when W band 16#80808080808080 =:= 0 ->
     M = ((W + Lo) band (bnot (W + Hi))) band 16#80808080808080,

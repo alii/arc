@@ -1,5 +1,6 @@
 // language-sensitive case mappings specialcasing.txt tailors
 
+import arc/rt/utf8
 import gleam/list
 import gleam/string
 
@@ -7,7 +8,7 @@ pub fn turkic_case(s: String, upper upper: Bool) -> String {
   case upper {
     True ->
       // i → İ (U+0130)
-      string.to_graphemes(s)
+      utf8.to_graphemes(s)
       |> list.map(fn(g) {
         case g {
           "i" -> "İ"
@@ -17,18 +18,14 @@ pub fn turkic_case(s: String, upper upper: Bool) -> String {
       |> string.join("")
     False -> {
       // İ → i, I → ı (U+0131), I + U+0307 → i
-      let cps =
-        string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
+      let cps = utf8.to_codepoints(s)
       lower_turkic_cps(cps, [])
     }
   }
 }
 
 fn codepoint_text(c: Int) -> String {
-  case string.utf_codepoint(c) {
-    Ok(cp) -> string.from_utf_codepoints([cp])
-    Error(Nil) -> ""
-  }
+  utf8.encode_cp(c)
 }
 
 fn lower_turkic_cps(cps: List(Int), acc: List(String)) -> String {
@@ -42,7 +39,7 @@ fn lower_turkic_cps(cps: List(Int), acc: List(String)) -> String {
 }
 
 pub fn lithuanian_case(s: String, upper upper: Bool) -> String {
-  let cps = string.to_utf_codepoints(s) |> list.map(string.utf_codepoint_to_int)
+  let cps = utf8.to_codepoints(s)
   case upper {
     // uppercasing drops U+0307 after i/j
     True -> upper_lt_cps(cps, [])

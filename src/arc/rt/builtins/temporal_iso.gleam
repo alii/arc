@@ -6,6 +6,7 @@ import arc/internal/gregorian.{
 }
 import arc/internal/int_math.{floor_div, pow10}
 import arc/internal/temporal_calendar
+import arc/rt/utf8
 import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
@@ -544,7 +545,7 @@ fn split_bracket(s: String, acc: String) -> Option(#(String, String)) {
 
 fn is_annotation_key(s: String) -> Bool {
   s != ""
-  && list.all(string.to_graphemes(s), fn(c) {
+  && list.all(utf8.to_graphemes(s), fn(c) {
     is_lower_alpha(c) || c == "-" || c == "_" || digits.digit_value(c) != None
   })
 }
@@ -563,7 +564,7 @@ pub fn is_tz_annotation(s: String) -> Bool {
           Error(Nil) -> False
           Ok(#(first, rest)) ->
             is_tz_leading_char(first)
-            && list.all(string.to_graphemes(rest), is_tz_char)
+            && list.all(utf8.to_graphemes(rest), is_tz_char)
         }
       })
   }

@@ -30,6 +30,7 @@ import arc/rt/types.{
   type Agent, type Handle, type JsVal, HintString, KHandle, KStr, KUndef,
   classify, mk_int, mk_object, mk_string, mk_undefined,
 }
+import arc/rt/utf8
 import arc/rt/val as rt_val
 import gleam/int
 import gleam/option.{type Option, None, Some}
@@ -214,7 +215,7 @@ fn parse_month_code_grammar(
 
 // digit check first, int.parse would accept signs
 fn two_decimal_digits(s: String) -> Result(Int, Nil) {
-  case string.to_graphemes(s) {
+  case utf8.to_graphemes(s) {
     [a, b] ->
       case is_ascii_digit(a) && is_ascii_digit(b) {
         True -> int.parse(s)
