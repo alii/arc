@@ -4,9 +4,14 @@
 forms_to_erl(Forms) when is_list(Forms) ->
     Parts = pmap(Forms, fun(F) ->
                      unicode:characters_to_binary(
-                       [erl_pp:form(F, [{encoding, unicode}]), $\n])
+                       [erl_pp:form(F, pp_opts()), $\n])
                  end),
     erlang:iolist_to_binary(Parts).
+
+%% generated code nests deep; at erl_pp's default 4/72 over half the output
+%% is leading spaces and every call wraps one argument per line
+pp_opts() ->
+    [{encoding, unicode}, {indent, 2}, {linewidth, 120}].
 
 %% fresh process per item keeps atomvm gc cheap
 pmap(Items, F) when is_function(F, 1), is_list(Items) ->
