@@ -3,6 +3,7 @@ import arc/compiler/scope.{type ScopeId, type ScopeTree}
 import arc/parser/ast
 import arc_aot/emit/split
 import carder/ir
+import gleam/bit_array
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
@@ -581,13 +582,27 @@ pub fn lookup_invariant_callee(
   option.from_result(dict.get(e.invariant_callees, callee))
 }
 
-// one ic map per agent, so each module numbers sites from a name-derived base
+// one ic map per agent, so each module numbers sites from a name-derived base.
+// fnv-1a rather than erlang:phash2, which the atomvm playground lacks
 fn site_base(module_name: String) -> Int {
-  phash2(module_name, 1_073_741_824) * 16_777_216
+  fnv1a(bit_array.from_string(module_name), 2_166_136_261)
+  % 1_073_741_824
+  * 16_777_216
 }
 
-@external(erlang, "erlang", "phash2")
-fn phash2(term: String, range: Int) -> Int
+fn fnv1a(bytes: BitArray, hash: Int) -> Int {
+  case bytes {
+    <<byte, rest:bytes>> ->
+      fnv1a(
+        rest,
+        int.bitwise_and(
+          int.bitwise_exclusive_or(hash, byte) * 16_777_619,
+          0xFFFFFFFF,
+        ),
+      )
+    _ -> hash
+  }
+}
 
 pub fn push_frame(e: Emitter, frame: Frame) -> Emitter {
   Emitter(..e, frame_stack: [frame, ..e.frame_stack], pending_label: None)
