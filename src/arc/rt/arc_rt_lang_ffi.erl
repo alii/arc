@@ -119,7 +119,7 @@ iter_step_with(?TOKEN_MAP_ITER_NEXT,
                Store, Cells, IterId, IterCell) ->
     case arc_rt_arena_ffi:get(T, Cells) of
         {?SOBJECT_TAG, {?MAPOBJ_TAG, Entries}, _, _, _, _, _} ->
-            case 'arc@internal@ordered_entries':next_from(Entries, Index) of
+            case arc_ordered_entries_ffi:next_from(Entries, Index) of
                 ?NONE -> ?ADVANCE(-1, true, undefined);
                 {?SOME, {Next, _, V}} when Kind =:= ?MAPITER_VALUES ->
                     ?ADVANCE(Next, false, V);
@@ -135,7 +135,7 @@ iter_step_with(?TOKEN_SET_ITER_NEXT,
                Store, Cells, IterId, IterCell) ->
     case arc_rt_arena_ffi:get(T, Cells) of
         {?SOBJECT_TAG, {?SETOBJ_TAG, Entries}, _, _, _, _, _} ->
-            case 'arc@internal@ordered_entries':next_from(Entries, Index) of
+            case arc_ordered_entries_ffi:next_from(Entries, Index) of
                 ?NONE -> ?ADVANCE(-1, true, undefined);
                 {?SOME, {Next, _, V}} when Kind =:= ?SETITER_VALUES ->
                     ?ADVANCE(Next, false, V);
@@ -211,7 +211,7 @@ array_iter_next(Store, {?ARC_ITER, {?HANDLE_TAG, T}, I, _} = R) ->
             {iter_step, true, undefined, undefined};
         {?SOBJECT_TAG, {Tag, Entries}, _, _, _, _, _}
           when Tag =:= ?MAPOBJ_TAG; Tag =:= ?SETOBJ_TAG ->
-            case 'arc@internal@ordered_entries':next_from(Entries, I) of
+            case arc_ordered_entries_ffi:next_from(Entries, I) of
                 ?NONE -> {iter_step, true, undefined, undefined};
                 {?SOME, {Next, _, V}} when Tag =:= ?SETOBJ_TAG ->
                     {iter_step, false, V, setelement(3, R, Next)};

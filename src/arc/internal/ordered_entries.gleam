@@ -3,7 +3,7 @@
 import gleam/dict.{type Dict}
 import gleam/int
 import gleam/list
-import gleam/option.{type Option, None, Some}
+import gleam/option.{type Option}
 import gleam/result
 
 pub opaque type OrderedEntries(k, v) {
@@ -91,21 +91,8 @@ pub fn live_values(table: OrderedEntries(k, v)) -> List(v) {
   |> list.map(fn(p) { p.1 })
 }
 
-// called by name from arc_rt_lang_ffi
+@external(erlang, "arc_ordered_entries_ffi", "next_from")
 pub fn next_from(
   table: OrderedEntries(k, v),
   cursor: Int,
-) -> Option(#(Int, k, v)) {
-  case cursor >= table.next_seq {
-    True -> None
-    False ->
-      case dict.get(table.order, cursor) {
-        Ok(k) -> {
-          let assert Ok(#(_seq, v)) = dict.get(table.entries, k)
-            as "ordered_entries: order/entries desync"
-          Some(#(cursor + 1, k, v))
-        }
-        Error(Nil) -> next_from(table, cursor + 1)
-      }
-  }
-}
+) -> Option(#(Int, k, v))
