@@ -80,6 +80,12 @@ pub fn table() -> DirectHost {
       #("set_named_ic", HostOp(obj_ic_ffi, "set_named_ic", MutUnit)),
       #("set_named_init_ic", HostOp(obj_ic_ffi, "set_named_init_ic", MutUnit)),
       #("get_elem", HostOp(obj_ffi, "get_elem", Read)),
+      #("get_elem_general", HostOp(obj_ffi, "get_elem_general", Mut)),
+      #("set_elem_general", HostOp(obj_ffi, "set_elem_general", Mut)),
+      #(
+        "set_elem_general_strict",
+        HostOp(obj_ffi, "set_elem_general_strict", Mut),
+      ),
       #("set_elem", HostOp(obj_ffi, "set_elem", MutMiss)),
       #("create_data_prop", HostOp(obj, "create_data_prop", Mut)),
       #("delete_prop", HostOp(obj, "delete_prop", Mut)),

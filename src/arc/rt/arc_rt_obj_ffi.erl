@@ -6,7 +6,9 @@
          get_named/4,
          get_named_site/4,
          instanceof_i32/3, instanceof_i32_general/3,
-         get_elem/3, set_elem/4, array_lit/2,
+         get_elem/3, set_elem/4, get_elem_general/3, set_elem_general/4,
+         set_elem_general_strict/4,
+         array_lit/2,
          array_lit_packed/2,
          global_peek/2, global_get/2,
          named_write_walk/5, chain_takes_named_write/4, named_plain/2,
@@ -428,6 +430,39 @@ get_elem(St, {?HANDLE_TAG, Id}, Key) when ?IS_STR(Key) ->
         _ -> miss
     end;
 get_elem(_, _, _) -> miss.
+
+%% the general half of obj[idx], called when get_elem answers miss: key
+%% coercion (toobject(obj) first, then topropertykey(idx)) and a full get.
+%% the key step is written out in each of these, not shared, to keep the
+%% general path at one extra call over the inline code it replaces
+get_elem_general(St, Obj, Idx) ->
+    case arc_rt_val_ffi:property_key_of(Idx) of
+        Miss when is_atom(Miss) ->
+            {Key, St1} = 'arc@rt@val':to_property_key_of(St, Obj, Idx),
+            'arc@rt@obj':get_prop_untyped_key(St1, Obj, Key);
+        Key ->
+            'arc@rt@obj':get_prop_untyped_key(St, Obj, Key)
+    end.
+
+%% the general half of obj[idx] = v, called when set_elem answers miss
+set_elem_general(St, Obj, Idx, V) ->
+    case arc_rt_val_ffi:property_key_of(Idx) of
+        Miss when is_atom(Miss) ->
+            {Key, St1} = 'arc@rt@val':to_property_key_of(St, Obj, Idx),
+            'arc@rt@obj':set_prop_untyped_key(St1, Obj, Key, V);
+        Key ->
+            'arc@rt@obj':set_prop_untyped_key(St, Obj, Key, V)
+    end.
+
+%% the same in strict code, where a failed set throws
+set_elem_general_strict(St, Obj, Idx, V) ->
+    case arc_rt_val_ffi:property_key_of(Idx) of
+        Miss when is_atom(Miss) ->
+            {Key, St1} = 'arc@rt@val':to_property_key_of(St, Obj, Idx),
+            'arc@rt@obj':set_prop_strict_untyped_key(St1, Obj, Key, V);
+        Key ->
+            'arc@rt@obj':set_prop_strict_untyped_key(St, Obj, Key, V)
+    end.
 
 index_read(Cell, Idx) when element(1, Cell) =:= ?SOBJECT_TAG ->
     case element(?SOBJECT_KIND, Cell) of
