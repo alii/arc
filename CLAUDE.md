@@ -1,5 +1,7 @@
 # Arc — JavaScript Runtime
 
+Read [CONTRIBUTING.md](CONTRIBUTING.md) before doing anything else, especially before opening a pull request.
+
 ## Prior Art — ALWAYS research first
 
 When implementing any JS runtime feature, study prior art before writing code. Do NOT implement from memory — JS semantics are full of subtle edge cases.
