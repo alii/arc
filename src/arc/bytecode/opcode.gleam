@@ -149,6 +149,8 @@ pub type Op {
   JumpIfTrue(target: Pc)
   JumpIfNullish(target: Pc)
   JumpIfNotNullish(target: Pc)
+  // [array] -> [el0, .., el(count-1)] when iterating it observes nothing, else jump
+  UnpackArray(count: Int, miss: Pc)
   // push pc+1 as return address, jump (finally entry)
   Gosub(target: Pc)
   Ret
@@ -332,6 +334,7 @@ pub type IrOp {
   IrJumpIfTrue(label: LabelId)
   IrJumpIfNullish(label: LabelId)
   IrJumpIfNotNullish(label: LabelId)
+  IrUnpackArray(count: Int, miss: LabelId)
   IrPushTry(catch_label: LabelId, kind: TryKind(LabelId))
   IrGosub(label: LabelId)
   IrAsyncYieldStarResume(next_label: LabelId)

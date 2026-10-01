@@ -2,7 +2,9 @@
 -module(arc_rt_lang_ffi).
 -export([plain_iter_record/2, array_iter_start/2, array_iter_next/2, is_array_iter/1,
          array_iter_parts/1, array_iter_record/3, array_iter_proto/2,
-         array_spread/2, iter_step/2, for_of_next/2]).
+         array_spread/2, iter_step/2, for_of_next/2, unpack_array/3,
+         unpack_array/4]).
+
 
 -include("arc_rt_layout.hrl").
 
@@ -288,6 +290,48 @@ iter_proto_ix(St, {?ARC_ITER, {?HANDLE_TAG, T}, _, _}) ->
 array_iter_parts({?ARC_ITER, T, I, N}) -> {T, I, N}.
 
 array_iter_record(T, I, N) -> {?ARC_ITER, T, I, N}.
+
+unpack_array(St, V, N) ->
+    case unpack_array(St, V, N, []) of
+        miss -> miss;
+        L -> list_to_tuple(L)
+    end.
+
+%% the first N elements pushed onto Tail, when destructuring observes nothing
+unpack_array(St, {?HANDLE_TAG, Id} = V, N, Tail) ->
+    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
+    case arc_rt_arena_ffi:get(Id, Cells) of
+        {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, Props, _, Els, _}
+          when map_size(Props) =:= 0 ->
+            case array_iter_start(St, V) =/= miss
+                 andalso lacks_return(
+                           Cells,
+                           {?SOME, element(?REALM_ARRAY_ITER_PROTO,
+                                           element(?AGENT_REALM, St))}) of
+                true -> unpack(Els, Len, N - 1, Tail);
+                false -> miss
+            end;
+        _ -> miss
+    end;
+unpack_array(_, _, _, _) -> miss.
+
+unpack(_, _, I, Acc) when I < 0 -> Acc;
+unpack(Els, Len, I, Acc) when I >= Len -> unpack(Els, Len, I - 1, [undefined | Acc]);
+unpack(Els, Len, I, Acc) ->
+    case elem_at(Els, I) of
+        ?ELEMS_HOLE -> miss;
+        V -> unpack(Els, Len, I - 1, [V | Acc])
+    end.
+
+%% §7.4.11 has no return method to call
+lacks_return(_, ?NONE) -> true;
+lacks_return(Cells, {?SOME, {?HANDLE_TAG, Id}}) ->
+    case arc_rt_arena_ffi:get(Id, Cells) of
+        {?SOBJECT_TAG, ?ORDINARY, Proto, Props, _, _, _}
+          when not is_map_key(?NAMED_KEY("return"), Props) ->
+            lacks_return(Cells, Proto);
+        _ -> false
+    end.
 
 %% every element of a plain hole-free array, when iterating it observes nothing
 array_spread(St, V) ->

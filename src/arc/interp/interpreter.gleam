@@ -31,8 +31,8 @@ import arc/bytecode/opcode.{
   PutPrivateFieldDyn, PutSuperValue, Ret, Return, Rot3, Safepoint, SetProto,
   SetupDerivedClass, Swap, Throw, ThrowConstAssign, ThrowReferenceError,
   ToObject, ToPropertyKey, ToStringVal, TypeOf, TypeofEvalVar, TypeofGlobal,
-  UnaryOp, Unrot4, WithDeleteVar, WithGetRefValue, WithGetVar, WithGetVarThis,
-  WithMakeRef, WithPutRefValue, WithPutVar, Yield, YieldStar,
+  UnaryOp, UnpackArray, Unrot4, WithDeleteVar, WithGetRefValue, WithGetVar,
+  WithGetVarThis, WithMakeRef, WithPutRefValue, WithPutVar, Yield, YieldStar,
 }
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/call.{type Drive}
@@ -651,6 +651,42 @@ fn loop(
                   }
               }
           }
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    UnpackArray(count, Pc(miss)) ->
+      case stack {
+        [array, ..rest] -> {
+          let unpacked = kernel.unpack_array(agent, array, count, rest)
+          case kernel.is(unpacked, kernel.Miss) {
+            True ->
+              loop(
+                state,
+                drive,
+                miss,
+                stack,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+            False ->
+              loop(
+                state,
+                drive,
+                pc + 1,
+                unpacked,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+          }
+        }
         [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
@@ -4632,6 +4668,18 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           }
       }
     }
+
+    UnpackArray(count, Pc(miss)) ->
+      case state.stack {
+        [array, ..rest] -> {
+          let unpacked = kernel.unpack_array(state.agent, array, count, rest)
+          case kernel.is(unpacked, kernel.Miss) {
+            True -> Ok(State(..state, pc: miss))
+            False -> Ok(State(..state, stack: unpacked, pc: state.pc + 1))
+          }
+        }
+        [] -> underflow(state, "UnpackArray")
+      }
 
     JumpIfNullish(Pc(target)) ->
       conditional_jump(state, target, rt_val.is_nullish)

@@ -6,8 +6,8 @@ import arc/bytecode/opcode.{
   IrGetField, IrGetFieldKeep, IrGosub, IrIncLocalCmpConstJump,
   IrIncLocalCmpLocalJump, IrIncLocalJump, IrJump, IrJumpIfFalse, IrJumpIfLocal,
   IrJumpIfNotNullish, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrLine, IrPushTry,
-  IrPutField, IrWithDeleteVar, IrWithGetRefValue, IrWithGetVar, IrWithGetVarThis,
-  IrWithMakeRef, IrWithPutRefValue, IrWithPutVar, Pc,
+  IrPutField, IrUnpackArray, IrWithDeleteVar, IrWithGetRefValue, IrWithGetVar,
+  IrWithGetVarThis, IrWithMakeRef, IrWithPutRefValue, IrWithPutVar, Pc,
 }
 import arc/compiler/peephole
 import arc/internal/tuple_array
@@ -234,6 +234,7 @@ fn may_allocate(op: IrOp) -> Bool {
         | opcode.JumpIfTrue(_)
         | opcode.JumpIfNullish(_)
         | opcode.JumpIfNotNullish(_)
+        | opcode.UnpackArray(..)
         | opcode.Gosub(_)
         | opcode.Ret
         | opcode.Throw
@@ -294,6 +295,7 @@ fn may_allocate(op: IrOp) -> Bool {
     | IrJumpIfTrue(_)
     | IrJumpIfNullish(_)
     | IrJumpIfNotNullish(_)
+    | IrUnpackArray(..)
     | IrPushTry(..)
     | IrGosub(_)
     | IrGetField(_)
@@ -338,6 +340,7 @@ fn label_refs(op: IrOp) -> List(LabelId) {
     | IrJumpIfTrue(l)
     | IrJumpIfNullish(l)
     | IrJumpIfNotNullish(l)
+    | IrUnpackArray(_, l)
     | IrGosub(l)
     | IrAsyncYieldStarResume(l)
     | IrWithGetVar(_, l)
@@ -447,6 +450,7 @@ fn assemble_op(op: IrOp, labels: Dict(LabelId, Pc)) -> Op {
     IrJumpIfTrue(l) -> opcode.JumpIfTrue(label_pc(labels, l))
     IrJumpIfNullish(l) -> opcode.JumpIfNullish(label_pc(labels, l))
     IrJumpIfNotNullish(l) -> opcode.JumpIfNotNullish(label_pc(labels, l))
+    IrUnpackArray(count, l) -> opcode.UnpackArray(count, label_pc(labels, l))
     IrPushTry(l, kind) ->
       opcode.PushTry(label_pc(labels, l), assemble_try_kind(labels, kind))
     IrGosub(l) -> opcode.Gosub(label_pc(labels, l))

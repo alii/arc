@@ -221,6 +221,15 @@ pub type IterPlan {
   IterMiss
 }
 
+// the first count elements onto the stack; miss if destructuring could be observed
+@external(erlang, "arc_rt_lang_ffi", "unpack_array")
+pub fn unpack_array(
+  agent: Agent,
+  array: JsVal,
+  count: Int,
+  onto: List(JsVal),
+) -> List(JsVal)
+
 // in the kernel only when the step observes nothing
 @external(erlang, "arc_rt_lang_ffi", "iter_step")
 pub fn iter_step(store: Store, rec: JsVal) -> IterPlan
