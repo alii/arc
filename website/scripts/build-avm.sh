@@ -93,6 +93,18 @@ without(Ks, M) -> lists:foldl(fun maps:remove/2, M, Ks).
 update_with(K, F, Init, M) ->
     case maps:find(K, M) of {ok, V} -> M#{K => F(V)}; error -> M#{K => Init} end.
 EOF
+  # BIFs AtomVM lacks that arc's runtime and erl_pp call. A module importing
+  # one fails to load in full, so a missing BIF breaks everything in it.
+  patch_mod "$src/erlang.erl" "append_element/2, make_tuple/3, binary_to_list/3, bitstring_to_list/1" <<'EOF'
+append_element(Tuple, Elem) ->
+    erlang:list_to_tuple(erlang:tuple_to_list(Tuple) ++ [Elem]).
+make_tuple(Arity, Default, Init) ->
+    lists:foldl(fun({I, V}, T) -> erlang:setelement(I, T, V) end,
+                erlang:make_tuple(Arity, Default), Init).
+binary_to_list(Bin, Start, Stop) ->
+    erlang:binary_to_list(binary:part(Bin, Start - 1, Stop - Start + 1)).
+bitstring_to_list(Bin) when erlang:is_binary(Bin) -> erlang:binary_to_list(Bin).
+EOF
 }
 
 patch_mod() {
