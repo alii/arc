@@ -4,9 +4,9 @@ import arc/bytecode/lexical
 import arc/bytecode/opcode.{
   type IrOp, type LabelId, CatchOnly, Finally, IrAsyncYieldStarResume, IrBinOp,
   IrDefineAccessor, IrDefineField, IrDefineMethod, IrDeleteField, IrFinal,
-  IrGetField, IrGetFieldKeep, IrGosub, IrJump, IrJumpIfFalse, IrJumpIfNotNullish,
-  IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrPushTry, IrPutField, IrUnpackArray,
-  IterCloseGuard,
+  IrGetField, IrGetFieldKeep, IrGosub, IrIterateView, IrJump, IrJumpIfFalse,
+  IrJumpIfNotNullish, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrPushTry,
+  IrPutField, IrUnpackArray, IterCloseGuard,
 }
 import arc/compiler/ast_util
 import arc/compiler/const_fold
@@ -4265,16 +4265,20 @@ fn emit_for_of_common(
   let #(end, e) = fresh_label(e)
   let has_lex = ast_util.for_classic_init_is_lex(Some(left))
   let #(save, e) = enter_for_scope(e, has_lex)
-  use e <- result.try(emit_expr(e, right))
   // for await uses CatchOnly: its close needs an await the unwinder cannot do
-  let #(get_iter, body_kind) = case iterator {
-    AsyncIter -> #(opcode.GetAsyncIterator, CatchOnly)
-    SyncIter | NoIter -> #(opcode.GetIterator, IterCloseGuard)
-  }
+  use #(e, body_kind) <- result.try(case iterator {
+    AsyncIter -> {
+      use e <- result.map(emit_expr(e, right))
+      #(emit_op(e, opcode.GetAsyncIterator), CatchOnly)
+    }
+    SyncIter | NoIter -> {
+      use e <- result.map(emit_sync_iterator(e, right))
+      #(e, IterCloseGuard)
+    }
+  })
   // loop frame pushed after F_body so crossing jumps pop it and close iter
   let e =
     e
-    |> emit_op(get_iter)
     |> emit_ir(IrPushTry(body_threw, body_kind))
     |> push_loop(break_target, loop_continue, iterator)
     |> emit_ir(IrLabel(loop_start))
@@ -4282,6 +4286,26 @@ fn emit_for_of_common(
     ForOfLabels(loop_start:, loop_continue:, break_target:, body_threw:, end:)
   use e <- result.map(emit_loop_body(e, labels))
   e |> emit_ir(IrLabel(end)) |> pop_frame |> leave_for_scope(save)
+}
+
+// leaves the record; m.values() and friends skip the call when nothing can tell
+fn emit_sync_iterator(
+  e: Emitter,
+  iterable: ast.Expression,
+) -> Result(Emitter, EmitError) {
+  case ast_util.collection_view(iterable) {
+    Some(#(object, ast.Dot(name:, ..), view)) -> {
+      let #(hit, e) = fresh_label(e)
+      use e <- result.map(emit_expr(e, object))
+      e
+      |> emit_ir(IrIterateView(view, hit))
+      |> emit_get_field_keep(name)
+      |> emit_op(opcode.CallMethod(0))
+      |> emit_op(opcode.GetIterator)
+      |> emit_ir(IrLabel(hit))
+    }
+    _ -> result.map(emit_expr(e, iterable), emit_op(_, opcode.GetIterator))
+  }
 }
 
 // close on abrupt body exit only; IteratorNext undefs the slot on done or throw

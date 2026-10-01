@@ -1,7 +1,8 @@
 %% iterator kernels for aot and the interpreter; exports may answer miss
 -module(arc_rt_lang_ffi).
 -export([plain_iter_record/2, array_iter_start/2, array_iter_next/2, is_array_iter/1,
-         array_iter_parts/1, array_iter_record/3, array_iter_proto/2,
+         array_iter_parts/1, array_iter_record/4, array_iter_proto/2,
+         view_iter_start/3,
          stack_record/1, array_spread/2, iter_step/2, for_of_next/2, unpack_array/3,
          unpack_array/4]).
 
@@ -154,20 +155,20 @@ iter_step_with(?TOKEN_SET_ITER_NEXT,
     end;
 iter_step_with(_, _, _, _, _, _) -> iter_miss.
 
-%% unobserved for-of state {arc_iter, Target, Index, NextFn}; strings index by byte
+%% unobserved for-of state {arc_iter, Target, Index, NextFn, View}; strings index by byte
 array_iter_start(St, {?HANDLE_TAG, Id} = V) ->
     Realm = element(?AGENT_REALM, St),
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     case arc_rt_arena_ffi:get(Id, Cells) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, _}, Proto, _, [], _, _} ->
             pristine(Realm, Cells, V, Proto, ?REALM_ARRAY, ?REALM_ARRAY_ITER_PROTO,
-                     ?TOKEN_ARRAY_VALUES, ?TOKEN_ARRAY_ITER_NEXT);
+                     ?TOKEN_ARRAY_VALUES, ?TOKEN_ARRAY_ITER_NEXT, ?VIEW_VALUES);
         {?SOBJECT_TAG, {?MAPOBJ_TAG, _}, Proto, _, [], _, _} ->
             pristine(Realm, Cells, V, Proto, ?REALM_MAP, ?REALM_MAP_ITER_PROTO,
-                     ?TOKEN_MAP_ENTRIES, ?TOKEN_MAP_ITER_NEXT);
+                     ?TOKEN_MAP_ENTRIES, ?TOKEN_MAP_ITER_NEXT, ?VIEW_ENTRIES);
         {?SOBJECT_TAG, {?SETOBJ_TAG, _}, Proto, _, [], _, _} ->
             pristine(Realm, Cells, V, Proto, ?REALM_SET, ?REALM_SET_ITER_PROTO,
-                     ?TOKEN_SET_VALUES, ?TOKEN_SET_ITER_NEXT);
+                     ?TOKEN_SET_VALUES, ?TOKEN_SET_ITER_NEXT, ?VIEW_VALUES);
         _ -> miss
     end;
 array_iter_start(St, S) when ?IS_STR(S) ->
@@ -175,11 +176,11 @@ array_iter_start(St, S) when ?IS_STR(S) ->
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     Proto = {?SOME, element(?BUILTINPAIR_PROTOTYPE, element(?REALM_STRING, Realm))},
     pristine(Realm, Cells, S, Proto, ?REALM_STRING, ?REALM_STRING_ITER_PROTO,
-             ?TOKEN_STRING_ITER, ?TOKEN_STRING_ITER_NEXT);
+             ?TOKEN_STRING_ITER, ?TOKEN_STRING_ITER_NEXT, ?VIEW_VALUES);
 array_iter_start(_, _) -> miss.
 
 %% V's @@iterator and the iterator prototype's next are still the intrinsics
-pristine(Realm, Cells, V, Proto, Class, IterProto, IterTok, NextTok) ->
+pristine(Realm, Cells, V, Proto, Class, IterProto, IterTok, NextTok, View) ->
     {?HANDLE_TAG, CP} = element(?BUILTINPAIR_PROTOTYPE, element(Class, Realm)),
     {?HANDLE_TAG, IP} = element(IterProto, Realm),
     case Proto =:= {?SOME, {?HANDLE_TAG, CP}} of
@@ -194,7 +195,86 @@ pristine(Realm, Cells, V, Proto, Class, IterProto, IterTok, NextTok) ->
                         {_, VP} when element(1, VP) =:= ?DATAPROPERTY_TAG ->
                             case token_of(Cells, element(?DATAPROPERTY_VALUE, VP)) =:= IterTok
                                  andalso token_of(Cells, N) =:= NextTok of
-                                true -> {?ARC_ITER, V, 0, N};
+                                true -> {?ARC_ITER, V, 0, N, View};
+                                false -> miss
+                            end;
+                        _ -> miss
+                    end;
+                _ -> miss
+            end
+    end.
+
+%% the record for V.keys(), V.values() or V.entries(), when the call and
+%% GetIterator on its result observe nothing
+view_iter_start(St, {?HANDLE_TAG, Id} = V, View) ->
+    Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
+    Key = view_key(View),
+    case arc_rt_arena_ffi:get(Id, Cells) of
+        {?SOBJECT_TAG, {Tag, _}, Proto, Props, _, _, _} when not is_map_key(Key, Props) ->
+            case view_class(Tag, View) of
+                {Class, IterProto, ViewTok, NextTok, As} ->
+                    view_pristine(element(?AGENT_REALM, St), Cells, V, Proto, Class,
+                                  IterProto, Key, ViewTok, NextTok, As);
+                miss -> miss
+            end;
+        _ -> miss
+    end;
+view_iter_start(_, _, _) -> miss.
+
+view_key(?VIEW_KEYS) -> ?NAMED_KEY("keys");
+view_key(?VIEW_VALUES) -> ?NAMED_KEY("values");
+view_key(?VIEW_ENTRIES) -> ?NAMED_KEY("entries").
+
+%% Set.prototype.keys is the values function
+view_class(?ARRAYOBJ_TAG, View) ->
+    {?REALM_ARRAY, ?REALM_ARRAY_ITER_PROTO,
+     case View of
+         ?VIEW_KEYS -> ?TOKEN_ARRAY_KEYS;
+         ?VIEW_VALUES -> ?TOKEN_ARRAY_VALUES;
+         ?VIEW_ENTRIES -> ?TOKEN_ARRAY_ENTRIES
+     end,
+     ?TOKEN_ARRAY_ITER_NEXT, View};
+view_class(?MAPOBJ_TAG, View) ->
+    {?REALM_MAP, ?REALM_MAP_ITER_PROTO,
+     case View of
+         ?VIEW_KEYS -> ?TOKEN_MAP_KEYS;
+         ?VIEW_VALUES -> ?TOKEN_MAP_VALUES;
+         ?VIEW_ENTRIES -> ?TOKEN_MAP_ENTRIES
+     end,
+     ?TOKEN_MAP_ITER_NEXT, View};
+view_class(?SETOBJ_TAG, ?VIEW_ENTRIES) ->
+    {?REALM_SET, ?REALM_SET_ITER_PROTO, ?TOKEN_SET_ENTRIES, ?TOKEN_SET_ITER_NEXT,
+     ?VIEW_ENTRIES};
+view_class(?SETOBJ_TAG, _) ->
+    {?REALM_SET, ?REALM_SET_ITER_PROTO, ?TOKEN_SET_VALUES, ?TOKEN_SET_ITER_NEXT,
+     ?VIEW_VALUES};
+view_class(_, _) -> miss.
+
+%% the view method, the iterator's inherited @@iterator and its next are the intrinsics
+view_pristine(Realm, Cells, V, Proto, Class, IterProto, Key, ViewTok, NextTok, View) ->
+    {?HANDLE_TAG, CP} = element(?BUILTINPAIR_PROTOTYPE, element(Class, Realm)),
+    {?HANDLE_TAG, IP} = element(IterProto, Realm),
+    {?HANDLE_TAG, Base} = BaseH = element(?REALM_ITERATOR_PROTO, Realm),
+    case Proto =:= {?SOME, {?HANDLE_TAG, CP}} of
+        false -> miss;
+        true ->
+            case {arc_rt_arena_ffi:get(CP, Cells), arc_rt_arena_ffi:get(IP, Cells),
+                  arc_rt_arena_ffi:get(Base, Cells)} of
+                {{?SOBJECT_TAG, _, _, #{Key := MP}, _, _, _},
+                 {?SOBJECT_TAG, _, {?SOME, BaseH}, #{?NAMED_KEY("next") := NP}, IterSyms, _, _},
+                 {?SOBJECT_TAG, _, _, _, BaseSyms, _, _}}
+                  when element(1, MP) =:= ?DATAPROPERTY_TAG,
+                       element(1, NP) =:= ?DATAPROPERTY_TAG ->
+                    N = element(?DATAPROPERTY_VALUE, NP),
+                    case lists:keyfind(?SYMBOL_ITERATOR, 1, BaseSyms) of
+                        {_, SP} when element(1, SP) =:= ?DATAPROPERTY_TAG ->
+                            case (not lists:keymember(?SYMBOL_ITERATOR, 1, IterSyms))
+                                 andalso token_of(Cells, element(?DATAPROPERTY_VALUE, SP))
+                                         =:= ?TOKEN_RETURN_THIS
+                                 andalso token_of(Cells, element(?DATAPROPERTY_VALUE, MP))
+                                         =:= ViewTok
+                                 andalso token_of(Cells, N) =:= NextTok of
+                                true -> {?ARC_ITER, V, 0, N, View};
                                 false -> miss
                             end;
                         _ -> miss
@@ -213,11 +293,11 @@ elem_at(Els, Idx) -> ?ELEM_AT(Els, Idx).
 stack_record({?ITERATORRECORD_TAG, _, _} = R) -> {?SOME, R};
 stack_record(_) -> ?NONE.
 
-is_array_iter({?ARC_ITER, _, _, _}) -> true;
+is_array_iter({?ARC_ITER, _, _, _, _}) -> true;
 is_array_iter(_) -> false.
 
 %% holes and index props go the long way
-array_iter_next(Store, {?ARC_ITER, {?HANDLE_TAG, T}, I, _} = R) ->
+array_iter_next(Store, {?ARC_ITER, {?HANDLE_TAG, T}, I, _, View} = R) ->
     case arc_rt_arena_ffi:get(T, element(?STORE_CELLS, Store)) of
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, _, _, _, _} when I >= Len ->
             {iter_step, true, undefined, undefined};
@@ -225,12 +305,19 @@ array_iter_next(Store, {?ARC_ITER, {?HANDLE_TAG, T}, I, _} = R) ->
           when Tag =:= ?MAPOBJ_TAG; Tag =:= ?SETOBJ_TAG ->
             case arc_ordered_entries_ffi:next_from(Entries, I) of
                 ?NONE -> {iter_step, true, undefined, undefined};
-                {?SOME, {Next, _, V}} when Tag =:= ?SETOBJ_TAG ->
+                {?SOME, {Next, _, V}} when View =:= ?VIEW_VALUES ->
                     {iter_step, false, V, setelement(3, R, Next)};
+                {?SOME, {Next, _, V}} when Tag =:= ?SETOBJ_TAG ->
+                    {iter_pair, V, V, setelement(3, R, Next)};
+                {?SOME, {Next, MK, _}} when View =:= ?VIEW_KEYS ->
+                    {iter_step, false, 'arc@rt@types':map_key_to_js(MK),
+                     setelement(3, R, Next)};
                 {?SOME, {Next, MK, V}} ->
                     {iter_pair, 'arc@rt@types':map_key_to_js(MK), V,
                      setelement(3, R, Next)}
             end;
+        {?SOBJECT_TAG, {?ARRAYOBJ_TAG, _}, _, _, _, _, _} when View =:= ?VIEW_KEYS ->
+            {iter_step, false, I, setelement(3, R, I + 1)};
         {?SOBJECT_TAG, {?ARRAYOBJ_TAG, _}, _, Props, _, Els, _} ->
             case map_size(Props) =/= 0
                  andalso is_map_key({?KEY_INDEX, I}, Props) of
@@ -238,12 +325,14 @@ array_iter_next(Store, {?ARC_ITER, {?HANDLE_TAG, T}, I, _} = R) ->
                 false ->
                     case elem_at(Els, I) of
                         ?ELEMS_HOLE -> iter_miss;
-                        V -> {iter_step, false, V, setelement(3, R, I + 1)}
+                        V when View =:= ?VIEW_VALUES ->
+                            {iter_step, false, V, setelement(3, R, I + 1)};
+                        V -> {iter_pair, I, V, setelement(3, R, I + 1)}
                     end
             end;
         _ -> iter_miss
     end;
-array_iter_next(_, {?ARC_ITER, S, Off, _} = R) when ?IS_STR(S) ->
+array_iter_next(_, {?ARC_ITER, S, Off, _, _} = R) when ?IS_STR(S) ->
     case arc_rt_js_string_ffi:text(S) of
         <<_:Off/binary, C/utf8, _/binary>> ->
             Ch = <<C/utf8>>,
@@ -254,7 +343,7 @@ array_iter_next(_, {?ARC_ITER, S, Off, _} = R) when ?IS_STR(S) ->
     end;
 array_iter_next(_, _) -> iter_miss.
 
-for_of_next(St, {?ARC_ITER, _, _, _} = R) ->
+for_of_next(St, {?ARC_ITER, _, _, _, _} = R) ->
     case array_iter_next(element(?AGENT_STORE, St), R) of
         {iter_step, Done, V, R2} -> {{Done, V, R2}, St};
         {iter_pair, K, V, R2} ->
@@ -287,8 +376,8 @@ for_of_next(St, R) ->
 array_iter_proto(St, R) ->
     element(iter_proto_ix(St, R), element(?AGENT_REALM, St)).
 
-iter_proto_ix(_, {?ARC_ITER, S, _, _}) when ?IS_STR(S) -> ?REALM_STRING_ITER_PROTO;
-iter_proto_ix(St, {?ARC_ITER, {?HANDLE_TAG, T}, _, _}) ->
+iter_proto_ix(_, {?ARC_ITER, S, _, _, _}) when ?IS_STR(S) -> ?REALM_STRING_ITER_PROTO;
+iter_proto_ix(St, {?ARC_ITER, {?HANDLE_TAG, T}, _, _, _}) ->
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     case element(?SOBJECT_KIND, arc_rt_arena_ffi:get(T, Cells)) of
         {?MAPOBJ_TAG, _} -> ?REALM_MAP_ITER_PROTO;
@@ -297,9 +386,9 @@ iter_proto_ix(St, {?ARC_ITER, {?HANDLE_TAG, T}, _, _}) ->
     end.
 
 
-array_iter_parts({?ARC_ITER, T, I, N}) -> {T, I, N}.
+array_iter_parts({?ARC_ITER, T, I, N, View}) -> {T, I, N, View}.
 
-array_iter_record(T, I, N) -> {?ARC_ITER, T, I, N}.
+array_iter_record(T, I, N, View) -> {?ARC_ITER, T, I, N, View}.
 
 unpack_array(St, V, N) ->
     case unpack_array(St, V, N, []) of
@@ -346,7 +435,7 @@ lacks_return(Cells, {?SOME, {?HANDLE_TAG, Id}}) ->
 %% every element of a plain hole-free array, when iterating it observes nothing
 array_spread(St, V) ->
     case array_iter_start(St, V) of
-        {?ARC_ITER, {?HANDLE_TAG, T}, _, _} ->
+        {?ARC_ITER, {?HANDLE_TAG, T}, _, _, _} ->
             Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
             case arc_rt_arena_ffi:get(T, Cells) of
                 {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, Props, _, Els, _}

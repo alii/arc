@@ -20,9 +20,9 @@ import arc/bytecode/opcode.{
   GetLocalFieldCall, GetLocalFieldKeep, GetPrivateFieldDyn,
   GetPrivateFieldDynKeep, GetPrototypeOf, GetSuperValue, GetSuperValueKeep,
   GetTemplateObject, Gosub, IncLocal, IncLocalCmpConstJump, IncLocalCmpLocalJump,
-  IncLocalJump, InitGlobalLex, InitialYield, IteratorCheckObject, IteratorClose,
-  IteratorCloseThrow, IteratorNext, IteratorRecord, IteratorRest, Jump,
-  JumpIfFalse, JumpIfLocal, JumpIfNotNullish, JumpIfNullish, JumpIfTrue,
+  IncLocalJump, InitGlobalLex, InitialYield, IterateView, IteratorCheckObject,
+  IteratorClose, IteratorCloseThrow, IteratorNext, IteratorRecord, IteratorRest,
+  Jump, JumpIfFalse, JumpIfLocal, JumpIfNotNullish, JumpIfNullish, JumpIfTrue,
   MakeClosure, MakeMethod, MakeSuppressed, NewObject, NewObjectWith,
   NewPrivateName, NewRegExp, ObjectRestCopy, ObjectSpread, Pc, Pop, PopTry,
   PostDecLocal, PostIncLocal, PrivateInDyn, PushConst, PushTry, PutBoxed,
@@ -651,6 +651,42 @@ fn loop(
                   }
               }
           }
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    IterateView(view, Pc(hit)) ->
+      case stack {
+        [receiver, ..rest] -> {
+          let rec = rt_lang.view_iter_start(agent, receiver, view)
+          case kernel.is(rec, kernel.Miss) {
+            True ->
+              loop(
+                state,
+                drive,
+                pc + 1,
+                stack,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+            False ->
+              loop(
+                state,
+                drive,
+                hit,
+                [rec, ..rest],
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+          }
+        }
         [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
@@ -4668,6 +4704,18 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           }
       }
     }
+
+    IterateView(view, Pc(hit)) ->
+      case state.stack {
+        [receiver, ..rest] -> {
+          let rec = rt_lang.view_iter_start(state.agent, receiver, view)
+          case kernel.is(rec, kernel.Miss) {
+            True -> Ok(State(..state, pc: state.pc + 1))
+            False -> Ok(State(..state, stack: [rec, ..rest], pc: hit))
+          }
+        }
+        [] -> underflow(state, "IterateView")
+      }
 
     UnpackArray(count, Pc(miss)) ->
       case state.stack {

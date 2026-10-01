@@ -2,6 +2,7 @@
 
 import arc/bytecode/binop
 import arc/bytecode/key.{Index, Named, Private, max_array_index}
+import arc/bytecode/opcode
 import arc/internal/ordered_entries
 import arc/internal/tree_array
 import arc/internal/unsafe
@@ -216,6 +217,7 @@ pub fn realm_test() {
   assert at(realm, "REALM_ARRAY") == dyn(realm.array)
   assert at(realm, "REALM_STRING") == dyn(realm.string)
   assert at(realm, "REALM_NUMBER") == dyn(realm.number)
+  assert at(realm, "REALM_ITERATOR_PROTO") == dyn(realm.iterator_proto)
   assert at(realm, "REALM_ARRAY_ITER_PROTO") == dyn(realm.array_iter_proto)
   assert at(realm, "REALM_STRING_ITER_PROTO") == dyn(realm.string_iter_proto)
   assert at(realm, "REALM_MAP") == dyn(realm.map)
@@ -912,6 +914,15 @@ pub fn iterator_kinds_test() {
     == tag("TOKEN_ARRAY_ITER_NEXT")
   assert dyn(types.GeneratorN(types.GeneratorNext))
     == tag("TOKEN_GENERATOR_NEXT")
+  assert dyn(types.ArrayN(types.ArrayPrototypeKeys)) == tag("TOKEN_ARRAY_KEYS")
+  assert dyn(types.ArrayN(types.ArrayPrototypeEntries))
+    == tag("TOKEN_ARRAY_ENTRIES")
+  assert dyn(types.MapN(types.MapKeys)) == tag("TOKEN_MAP_KEYS")
+  assert dyn(types.MapN(types.MapValues)) == tag("TOKEN_MAP_VALUES")
+  assert dyn(types.SetN(types.SetEntries)) == tag("TOKEN_SET_ENTRIES")
+  assert dyn(opcode.KeysView) == tag("VIEW_KEYS")
+  assert dyn(opcode.ValuesView) == tag("VIEW_VALUES")
+  assert dyn(opcode.EntriesView) == tag("VIEW_ENTRIES")
   assert tag_of(types.IteratorN(types.ArrayIteratorNext))
     == tag("ITERATORN_TAG")
   assert dyn(types.ArrayN(types.ArrayPrototypeValues))

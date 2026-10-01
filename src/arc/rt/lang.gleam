@@ -1,4 +1,5 @@
 import arc/bytecode/key.{type PropertyKey, Named}
+import arc/bytecode/opcode.{type IterView, EntriesView, KeysView, ValuesView}
 import arc/internal/unsafe
 import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
@@ -456,14 +457,23 @@ pub fn array_iter_next(store: Store, rec: JsVal) -> ArrayIterStep
 @external(erlang, "arc_rt_lang_ffi", "is_array_iter")
 pub fn is_array_iter(v: JsVal) -> Bool
 
+// miss unless calling the view method and iterating its result observes nothing
+@external(erlang, "arc_rt_lang_ffi", "view_iter_start")
+pub fn view_iter_start(st: Agent, receiver: JsVal, view: IterView) -> JsVal
+
 @external(erlang, "arc_rt_lang_ffi", "array_iter_parts")
-pub fn array_iter_parts(rec: JsVal) -> #(JsVal, Int, JsVal)
+fn array_iter_parts(rec: JsVal) -> #(JsVal, Int, JsVal, IterView)
 
 @external(erlang, "arc_rt_lang_ffi", "array_iter_proto")
 pub fn array_iter_proto(st: Agent, rec: JsVal) -> Handle
 
 @external(erlang, "arc_rt_lang_ffi", "array_iter_record")
-pub fn array_iter_record(target: JsVal, index: Int, next_fn: JsVal) -> JsVal
+fn array_iter_record(
+  target: JsVal,
+  index: Int,
+  next_fn: JsVal,
+  view: IterView,
+) -> JsVal
 
 // §7.4.3 for a holder that drops the record once done; nothing goes on the heap
 pub fn for_of_start(st: Agent, iterable: JsVal) -> #(JsVal, Agent) {
@@ -486,7 +496,7 @@ pub fn array_iter_next_general(
   st: Agent,
   rec: JsVal,
 ) -> #(#(Bool, JsVal, JsVal), Agent) {
-  let #(target, index, next_fn) = array_iter_parts(rec)
+  let #(target, index, next_fn, view) = array_iter_parts(rec)
   let len = case classify(target) {
     KHandle(h) ->
       case rt_store.cell_get(st, h) {
@@ -498,8 +508,16 @@ pub fn array_iter_next_general(
   case index >= len {
     True -> #(#(True, mk_undefined(), mk_undefined()), st)
     False -> {
-      let #(v, st) = rt_obj.get_prop(st, target, StringKey(key.Index(index)))
-      #(#(False, v, array_iter_record(target, index + 1, next_fn)), st)
+      let #(v, st) = case view {
+        KeysView -> #(types.mk_int(index), st)
+        ValuesView -> rt_obj.get_prop(st, target, StringKey(key.Index(index)))
+        EntriesView -> {
+          let #(v, st) =
+            rt_obj.get_prop(st, target, StringKey(key.Index(index)))
+          rt_obj.new_array(st, [types.mk_int(index), v])
+        }
+      }
+      #(#(False, v, array_iter_record(target, index + 1, next_fn, view)), st)
     }
   }
 }
@@ -507,15 +525,26 @@ pub fn array_iter_next_general(
 // gives the record real iterator objects once something may observe them
 pub fn materialize_record(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
   use <- bool.guard(!is_array_iter(rec), #(rec, st))
-  let #(target, index, next_fn) = array_iter_parts(rec)
+  let #(target, index, next_fn, view) = array_iter_parts(rec)
   let kind = case classify(target) {
     KHandle(h) ->
-      case rt_store.cell_get(st, h) {
-        SObject(kind: types.MapObj(_), ..) ->
+      case rt_store.cell_get(st, h), view {
+        SObject(kind: types.MapObj(_), ..), KeysView ->
+          types.MapIterator(target: h, index:, kind: types.MapIterKeys)
+        SObject(kind: types.MapObj(_), ..), ValuesView ->
+          types.MapIterator(target: h, index:, kind: types.MapIterValues)
+        SObject(kind: types.MapObj(_), ..), EntriesView ->
           types.MapIterator(target: h, index:, kind: types.MapIterEntries)
-        SObject(kind: types.SetObj(_), ..) ->
+        SObject(kind: types.SetObj(_), ..), EntriesView ->
+          types.SetIterator(target: h, index:, kind: types.SetIterEntries)
+        SObject(kind: types.SetObj(_), ..), _ ->
           types.SetIterator(target: h, index:, kind: types.SetIterValues)
-        _ -> types.ArrayIterator(target: h, index:, kind: types.ArrayIterValues)
+        _, KeysView ->
+          types.ArrayIterator(target: h, index:, kind: types.ArrayIterKeys)
+        _, ValuesView ->
+          types.ArrayIterator(target: h, index:, kind: types.ArrayIterValues)
+        _, EntriesView ->
+          types.ArrayIterator(target: h, index:, kind: types.ArrayIterEntries)
       }
     _ -> types.StringIterator(source: js_string.text(target), index:)
   }
