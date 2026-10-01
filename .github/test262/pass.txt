@@ -25587,6 +25587,7 @@ intl402/NumberFormat/prototype/format/format-rounding-priority-auto.js
 intl402/NumberFormat/prototype/format/format-rounding-priority-less-precision.js
 intl402/NumberFormat/prototype/format/format-rounding-priority-more-precision.js
 intl402/NumberFormat/prototype/format/format-significant-digits-precision.js
+intl402/NumberFormat/prototype/format/format-significant-digits-rounding-magnitude.js
 intl402/NumberFormat/prototype/format/format-significant-digits.js
 intl402/NumberFormat/prototype/format/length.js
 intl402/NumberFormat/prototype/format/name.js
@@ -25694,6 +25695,7 @@ intl402/NumberFormat/prototype/formatToParts/signDisplay-negative-ja-JP.js
 intl402/NumberFormat/prototype/formatToParts/signDisplay-negative-ko-KR.js
 intl402/NumberFormat/prototype/formatToParts/signDisplay-negative-zh-TW.js
 intl402/NumberFormat/prototype/formatToParts/signDisplay-zh-TW.js
+intl402/NumberFormat/prototype/formatToParts/significant-digits-rounding-magnitude-en-US.js
 intl402/NumberFormat/prototype/formatToParts/this-value-not-numberformat.js
 intl402/NumberFormat/prototype/formatToParts/unit-de-DE.js
 intl402/NumberFormat/prototype/formatToParts/unit-en-US.js
