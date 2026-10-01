@@ -1665,10 +1665,7 @@ fn emit_member_get(obj: ir.Value, prop: ast.MemberProperty) -> Build(ir.Value) {
       case prop {
         ast.Bracket(expression:) -> {
           use idx <- anf.then(expr(expression))
-          get_elem(obj, idx, {
-            use k <- anf.then(to_property_key_of(obj, idx))
-            anf.host("get_prop_untyped_key", [obj, k])
-          })
+          get_elem(obj, idx, anf.host("get_elem_general", [obj, idx]))
         }
         _ -> {
           use k <- anf.then(emit_key_from_prop(prop))
@@ -2509,26 +2506,15 @@ fn settle_assign_target(lhs: AssignTarget) -> Build(AssignTarget) {
   }
 }
 
-fn elem_key(
-  obj: ir.Value,
-  idx: ir.Value,
-  key: Option(ir.Value),
-) -> Build(ir.Value) {
-  case key {
-    None -> to_property_key_of(obj, idx)
-    Some(key) -> anf.pure(key)
-  }
-}
-
 fn target_get(lhs: AssignTarget) -> Build(ir.Value) {
   case lhs {
     IdentTarget(name:, target:) -> emit_target_get(target, name)
     PrivateTarget(obj:, key:) -> anf.host("private_get", [obj, key])
     NamedTarget(obj:, key_bytes:) -> get_named("get_named_ic", obj, key_bytes)
     IndexedTarget(obj:, idx:, key:) ->
-      get_elem(obj, idx, {
-        use k <- anf.then(elem_key(obj, idx, key))
-        anf.host("get_prop_untyped_key", [obj, k])
+      get_elem(obj, idx, case key {
+        None -> anf.host("get_elem_general", [obj, idx])
+        Some(k) -> anf.host("get_prop_untyped_key", [obj, k])
       })
     SuperTarget(home:, this:, key:) -> anf.host("super_get", [home, this, key])
   }
@@ -2543,10 +2529,19 @@ fn target_put(lhs: AssignTarget, v: ir.Value) -> Build(ir.Value) {
     }
     NamedTarget(obj:, key_bytes:) -> set_named_ic(obj, key_bytes, v)
     IndexedTarget(obj:, idx:, key:) ->
-      set_elem(obj, idx, v, {
-        use k <- anf.then(elem_key(obj, idx, key))
-        use op <- anf.then(set_prop_op())
-        anf.host(op, [obj, k, v])
+      set_elem(obj, idx, v, case key {
+        None -> {
+          use e <- anf.then(ask)
+          let op = case e.strict {
+            True -> "set_elem_general_strict"
+            False -> "set_elem_general"
+          }
+          anf.host(op, [obj, idx, v])
+        }
+        Some(k) -> {
+          use op <- anf.then(set_prop_op())
+          anf.host(op, [obj, k, v])
+        }
       })
     SuperTarget(home:, this:, key:) -> {
       use e <- anf.then(ask)
