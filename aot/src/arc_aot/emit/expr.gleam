@@ -1,5 +1,6 @@
 import arc/bytecode/key
 import arc/bytecode/lexical
+import arc/bytecode/opcode
 import arc/compiler/ast_util
 import arc/compiler/scope
 import arc/parser/ast
@@ -3136,6 +3137,28 @@ pub fn emit_destructuring_assign(
         "Invalid destructuring assignment target",
       ))
       anf.pure(Nil)
+    }
+  }
+}
+
+// m.values() and friends skip the call when nothing can tell
+pub fn for_of_record(iterable: ast.Expression) -> Build(ir.Value) {
+  case ast_util.collection_view(iterable) {
+    Some(#(object, property, view)) -> {
+      use receiver <- anf.then(expr(object))
+      let view = case view {
+        opcode.KeysView -> "keys_view"
+        opcode.ValuesView -> "values_view"
+        opcode.EntriesView -> "entries_view"
+      }
+      anf.miss_or(anf.host("view_iter_start", [receiver, ir.ConstAtom(view)]), {
+        use called <- anf.then(emit_member_call(receiver, property, []))
+        anf.host("for_of_start", [called])
+      })
+    }
+    None -> {
+      use v <- anf.then(expr(iterable))
+      anf.host("for_of_start", [v])
     }
   }
 }

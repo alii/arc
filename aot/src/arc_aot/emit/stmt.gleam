@@ -1480,7 +1480,7 @@ fn emit_for_of(
   }
   use e <- seed_head(e)
   let head_scope = e.cur_scope
-  use iterable, e <- expr_(e, right)
+  let #(start_tree, e) = anf.run(expr.for_of_record(right), e)
   let #(start, e) = state.fresh_var(e)
   let #(before, e) = state.fresh_var(e)
   let #(it, e) = state.fresh_var(e)
@@ -1584,7 +1584,7 @@ fn emit_for_of(
     rebind_after_block(e, carried, outer, next)
   }
   use body_tree <- state.map_tree(after_iter(e))
-  ir.Let([start], ir.CallHost("js", "for_of_start", [iterable]), body_tree)
+  ir.Let([start], start_tree, body_tree)
 }
 
 fn emit_try(
