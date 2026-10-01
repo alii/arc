@@ -175,7 +175,8 @@ fn native_iter(st: Agent, record: IteratorRecord) -> NativeIter {
   }
 }
 
-fn generator_step(
+// called by name from arc_rt_lang_ffi
+pub fn generator_step(
   st: Agent,
   rec: JsVal,
   data: Handle,

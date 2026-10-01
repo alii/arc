@@ -259,7 +259,12 @@ for_of_next(St, R) ->
         {pair_advanced, K, V, Store} ->
             {Pair, St2} = 'arc@rt@obj':new_array(setelement(?AGENT_STORE, St, Store), [K, V]),
             {{false, Pair, R}, St2};
-        _ ->
+        {resume_generator, DataH} ->
+            case 'arc@rt@lang':generator_step(St, R, DataH) of
+                {{?SOME, V}, St2} -> {{false, V, R}, St2};
+                {?NONE, St2} -> {{true, undefined, undefined}, St2}
+            end;
+        iter_miss ->
             case 'arc@rt@lang':iter_next(St, R) of
                 {{true, V}, St2} -> {{true, V, undefined}, St2};
                 {{false, V}, St2} -> {{false, V, R}, St2}
