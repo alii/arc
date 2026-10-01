@@ -9,8 +9,8 @@
          send_report/2, take_report/0]).
 
 init_stats() ->
-    catch ets:delete(test262_stats),
-    catch ets:delete(test262_passes),
+    drop_table(test262_stats),
+    drop_table(test262_passes),
     ets:new(test262_stats, [named_table, public, set]),
     ets:insert(test262_stats, [{pass, 0}, {fail, 0}]),
     ets:new(test262_passes, [named_table, public, bag]),
@@ -47,8 +47,14 @@ get_fail_log() ->
     [{config, _, _, FailLog}] = ets:lookup(test262_stats, config),
     FailLog.
 
+drop_table(Name) ->
+    case ets:whereis(Name) of
+        undefined -> ok;
+        _ -> ets:delete(Name)
+    end.
+
 init_snapshot_set(Paths) ->
-    catch ets:delete(test262_snapshot_set),
+    drop_table(test262_snapshot_set),
     ets:new(test262_snapshot_set, [named_table, public, set]),
     lists:foreach(fun(P) -> ets:insert(test262_snapshot_set, {P}) end, Paths),
     nil.
