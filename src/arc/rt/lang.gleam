@@ -1,4 +1,5 @@
 import arc/bytecode/key.{type PropertyKey, Named}
+import arc/internal/unsafe
 import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as b_object
@@ -22,7 +23,8 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
-// iterator record is a null-proto object: iterator, next, done
+// a record is a bare IteratorRecord where its holder tracks done itself,
+// else a null-proto object: iterator, next, done
 pub type IterHint {
   Sync
   Async
@@ -87,7 +89,15 @@ pub fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
 }
 
 pub fn record_parts(st: Agent, rec: JsVal) -> Option(IteratorRecord) {
-  record_props(st, rec) |> option.then(parts_of)
+  stack_record(rec)
+  |> option.lazy_or(fn() { record_props(st, rec) |> option.then(parts_of) })
+}
+
+@external(erlang, "arc_rt_lang_ffi", "stack_record")
+fn stack_record(rec: JsVal) -> Option(IteratorRecord)
+
+fn as_stack_record(rec: IteratorRecord) -> JsVal {
+  unsafe.coerce(rec)
 }
 
 fn record_props(
@@ -124,6 +134,9 @@ type PlainRecord {
 fn plain_iter_record(st: Agent, rec: JsVal) -> PlainRecord
 
 fn read_record(st: Agent, rec: JsVal) -> #(Bool, IteratorRecord, Agent) {
+  use <- option.lazy_unwrap(
+    stack_record(rec) |> option.map(fn(record) { #(False, record, st) }),
+  )
   case record_fields(st, rec) {
     Some(#(done, record)) -> #(done, record, st)
     None -> {
@@ -148,6 +161,7 @@ fn record_fields(st: Agent, rec: JsVal) -> Option(#(Bool, IteratorRecord)) {
 }
 
 fn mark_done(st: Agent, rec: JsVal) -> Agent {
+  use <- bool.guard(option.is_some(stack_record(rec)), st)
   let #(_, st) = rt_obj.set_prop(st, rec, done_key, mk_bool(True))
   st
 }
@@ -259,7 +273,7 @@ pub fn iter_close(st: Agent, rec: JsVal, abrupt abrupt: Bool) -> Agent {
 }
 
 fn close_record(st: Agent, rec: JsVal, abrupt: Bool) -> Agent {
-  use <- bool.guard(classify(rec) == KUndef, st)
+  use <- bool.guard(rec == mk_undefined(), st)
   let #(done, record, st) = read_record(st, rec)
   case done {
     True -> st
@@ -451,12 +465,15 @@ pub fn array_iter_proto(st: Agent, rec: JsVal) -> Handle
 @external(erlang, "arc_rt_lang_ffi", "array_iter_record")
 pub fn array_iter_record(target: JsVal, index: Int, next_fn: JsVal) -> JsVal
 
-// a stack record when nothing can observe the iterator, else get_iterator's
+// §7.4.3 for a holder that drops the record once done; nothing goes on the heap
 pub fn for_of_start(st: Agent, iterable: JsVal) -> #(JsVal, Agent) {
   let rec = array_iter_start(st, iterable)
   case is_array_iter(rec) {
     True -> #(rec, st)
-    False -> get_iterator(st, iterable, Sync)
+    False -> {
+      let #(record, st) = iter_protocol.get_iterator_sync(st, iterable)
+      #(as_stack_record(record), st)
+    }
   }
 }
 
@@ -514,9 +531,12 @@ pub fn materialize_record(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
         extensible: True,
       ),
     )
-  alloc_record(
+  #(
+    as_stack_record(IteratorRecord(
+      iterator: mk_object(iter),
+      next_method: next_fn,
+    )),
     st,
-    IteratorRecord(iterator: mk_object(iter), next_method: next_fn),
   )
 }
 

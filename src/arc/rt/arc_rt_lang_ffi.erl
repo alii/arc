@@ -2,7 +2,7 @@
 -module(arc_rt_lang_ffi).
 -export([plain_iter_record/2, array_iter_start/2, array_iter_next/2, is_array_iter/1,
          array_iter_parts/1, array_iter_record/3, array_iter_proto/2,
-         array_spread/2, iter_step/2, for_of_next/2, unpack_array/3,
+         stack_record/1, array_spread/2, iter_step/2, for_of_next/2, unpack_array/3,
          unpack_array/4]).
 
 
@@ -10,6 +10,9 @@
 
 -define(NAMED_KEY(Name), {?KEY_NAMED, <<Name>>}).
 
+plain_iter_record(St, {?ITERATORRECORD_TAG, Iter, Next} = R) ->
+    {plain_record, false, R,
+     native(element(?STORE_CELLS, element(?AGENT_STORE, St)), Iter, Next)};
 plain_iter_record(St, {?HANDLE_TAG, Id}) ->
     Cells = element(?STORE_CELLS, element(?AGENT_STORE, St)),
     case arc_rt_arena_ffi:get(Id, Cells) of
@@ -61,6 +64,8 @@ native(_, _, _) -> native_miss.
 -define(ADVANCE_PAIR(Index, K, V), {pair_advanced, K, V, ?AT_INDEX(Index)}).
 
 %% steps a native iterator object in place when that observes nothing; -1 is done
+iter_step(Store, {?ITERATORRECORD_TAG, {?HANDLE_TAG, IterId}, {?HANDLE_TAG, NextId}}) ->
+    iter_step_ids(Store, element(?STORE_CELLS, Store), IterId, NextId);
 iter_step(Store, {?HANDLE_TAG, RecId}) ->
     Cells = element(?STORE_CELLS, Store),
     case arc_rt_arena_ffi:get(RecId, Cells) of
@@ -70,19 +75,21 @@ iter_step(Store, {?HANDLE_TAG, RecId}) ->
                element(1, NP) =:= ?DATAPROPERTY_TAG ->
             case {element(?DATAPROPERTY_VALUE, NP), element(?DATAPROPERTY_VALUE, IP)} of
                 {{?HANDLE_TAG, NextId}, {?HANDLE_TAG, IterId}} ->
-                    case arc_rt_arena_ffi:get(IterId, Cells) of
-                        IterCell when element(1, IterCell) =:= ?SOBJECT_TAG ->
-                            iter_step_with(
-                              native_token(arc_rt_arena_ffi:get(NextId, Cells)),
-                              element(?SOBJECT_KIND, IterCell),
-                              Store, Cells, IterId, IterCell);
-                        _ -> iter_miss
-                    end;
+                    iter_step_ids(Store, Cells, IterId, NextId);
                 _ -> iter_miss
             end;
         _ -> iter_miss
     end;
 iter_step(_, _) -> iter_miss.
+
+iter_step_ids(Store, Cells, IterId, NextId) ->
+    case arc_rt_arena_ffi:get(IterId, Cells) of
+        IterCell when element(1, IterCell) =:= ?SOBJECT_TAG ->
+            iter_step_with(native_token(arc_rt_arena_ffi:get(NextId, Cells)),
+                           element(?SOBJECT_KIND, IterCell),
+                           Store, Cells, IterId, IterCell);
+        _ -> iter_miss
+    end.
 
 iter_step_with(?TOKEN_GENERATOR_NEXT, {?GENERATOROBJ_TAG, DataH}, _, _, _, _) ->
     {resume_generator, DataH};
@@ -202,6 +209,9 @@ token_of(_, _) -> none.
 native_token(Cell) -> ?NATIVE_TOKEN(Cell).
 
 elem_at(Els, Idx) -> ?ELEM_AT(Els, Idx).
+
+stack_record({?ITERATORRECORD_TAG, _, _} = R) -> {?SOME, R};
+stack_record(_) -> ?NONE.
 
 is_array_iter({?ARC_ITER, _, _, _}) -> true;
 is_array_iter(_) -> false.

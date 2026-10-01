@@ -24,9 +24,9 @@ import arc/rt/limits
 import arc/rt/obj as rt_obj
 import arc/rt/realm as rt_realm
 import arc/rt/types.{
-  type Agent, type IteratorRecord, type JsVal, type Step, Agent, KHandle, KNull,
-  KUndef, ResumeFrame, StepAwait, StepReturn, StepThrow, StepYield, StringKey,
-  classify, mk_int, mk_object, mk_undefined,
+  type Agent, type IteratorRecord, type JsVal, type Step, Agent, KNull, KUndef,
+  ResumeFrame, StepAwait, StepReturn, StepThrow, StepYield, StringKey, classify,
+  mk_int, mk_object, mk_undefined,
 }
 import arc/rt/val as rt_val
 import gleam/option.{type Option, None, Some}
@@ -500,9 +500,9 @@ fn return_into(state: State, value: JsVal) -> Executed {
           let state = State(..state, try_stack: rest, stack: base)
           case interpreter.closable_record(state, iter) {
             Ok(#(iter, state)) ->
-              case classify(iter) {
-                KHandle(_) -> close_for_return(state, iter, value)
-                _ -> return_into(state, value)
+              case iter == mk_undefined() {
+                False -> close_for_return(state, iter, value)
+                True -> return_into(state, value)
               }
             Error(exit) -> exit_executed(exit, "return_into")
           }

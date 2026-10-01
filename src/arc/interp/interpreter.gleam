@@ -5714,19 +5714,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     GetIterator ->
       case state.stack {
         [iterable, ..rest] -> {
-          let rec = rt_lang.array_iter_start(state.agent, iterable)
-          case kernel.is(rec, kernel.Miss) {
-            False -> Ok(State(..state, stack: [rec, ..rest], pc: state.pc + 1))
-            True -> {
-              use #(rec, state) <- result.map(guarded3(
-                state,
-                rt_lang.get_iterator,
-                iterable,
-                rt_lang.Sync,
-              ))
-              State(..state, stack: [rec, ..rest], pc: state.pc + 1)
-            }
-          }
+          use #(rec, state) <- result.map(guarded2(
+            state,
+            rt_lang.for_of_start,
+            iterable,
+          ))
+          State(..state, stack: [rec, ..rest], pc: state.pc + 1)
         }
         _ -> underflow(state, "GetIterator")
       }
