@@ -48,9 +48,8 @@ get_fail_log() ->
     FailLog.
 
 drop_table(Name) ->
-    case ets:whereis(Name) of
-        undefined -> ok;
-        _ -> ets:delete(Name)
+    try ets:delete(Name)
+    catch error:badarg -> ok
     end.
 
 init_snapshot_set(Paths) ->
