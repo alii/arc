@@ -153,7 +153,14 @@
 -define(ARRAYITERATOR_INDEX, 3).
 -define(ARRAYITERATOR_KIND, 4).
 -define(ARRAYITERATOR_SIZE, 4).
+-define(ARRAYITER_KEYS, array_iter_keys).
 -define(ARRAYITER_VALUES, array_iter_values).
+
+-define(MAPITERATOR_TAG, map_iterator).
+-define(MAPITER_KEYS, map_iter_keys).
+-define(MAPITER_VALUES, map_iter_values).
+-define(SETITERATOR_TAG, set_iterator).
+-define(SETITER_VALUES, set_iter_values).
 
 -define(GENERATOROBJ_TAG, generator_obj).
 -define(GENERATOROBJ_DATA, 2).

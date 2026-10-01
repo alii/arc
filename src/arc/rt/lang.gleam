@@ -3,6 +3,7 @@ import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as b_object
 import arc/rt/call.{NormalCompletion, ThrowCompletion, call} as rt_call
+import arc/rt/js_string
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -242,6 +243,22 @@ fn protocol_step(
 
 // §7.4.11 iteratorclose; abrupt swallows what return() does
 pub fn iter_close(st: Agent, rec: JsVal, abrupt abrupt: Bool) -> Agent {
+  case is_array_iter(rec), abrupt {
+    False, _ -> close_record(st, rec, abrupt)
+    True, False -> {
+      let #(rec, st) = closable_record(st, rec)
+      close_record(st, rec, abrupt)
+    }
+    True, True ->
+      case rt_call.try_run(st, closable_record(_, rec)) {
+        #(NormalCompletion(rec), st) -> close_record(st, rec, abrupt)
+        #(ThrowCompletion(_original_wins), st) -> st
+      }
+  }
+}
+
+fn close_record(st: Agent, rec: JsVal, abrupt: Bool) -> Agent {
+  use <- bool.guard(classify(rec) == KUndef, st)
   let #(done, record, st) = read_record(st, rec)
   case done {
     True -> st
@@ -432,6 +449,90 @@ pub fn array_iter_proto(st: Agent, rec: JsVal) -> Handle
 
 @external(erlang, "arc_rt_lang_ffi", "array_iter_record")
 pub fn array_iter_record(target: JsVal, index: Int, next_fn: JsVal) -> JsVal
+
+// a stack record when nothing can observe the iterator, else get_iterator's
+pub fn for_of_start(st: Agent, iterable: JsVal) -> #(JsVal, Agent) {
+  let rec = array_iter_start(st, iterable)
+  case is_array_iter(rec) {
+    True -> #(rec, st)
+    False -> get_iterator(st, iterable, Sync)
+  }
+}
+
+// done, value, next record; the record is undefined once done
+@external(erlang, "arc_rt_lang_ffi", "for_of_next")
+pub fn for_of_next(st: Agent, rec: JsVal) -> #(#(Bool, JsVal, JsVal), Agent)
+
+// the stack record spelled out with full get semantics; called by name from arc_rt_lang_ffi
+pub fn array_iter_next_general(
+  st: Agent,
+  rec: JsVal,
+) -> #(#(Bool, JsVal, JsVal), Agent) {
+  let #(target, index, next_fn) = array_iter_parts(rec)
+  let len = case classify(target) {
+    KHandle(h) ->
+      case rt_store.cell_get(st, h) {
+        SObject(kind: types.ArrayObj(length:), ..) -> length
+        _ -> 0
+      }
+    _ -> 0
+  }
+  case index >= len {
+    True -> #(#(True, mk_undefined(), mk_undefined()), st)
+    False -> {
+      let #(v, st) = rt_obj.get_prop(st, target, StringKey(key.Index(index)))
+      #(#(False, v, array_iter_record(target, index + 1, next_fn)), st)
+    }
+  }
+}
+
+// gives the record real iterator objects once something may observe them
+pub fn materialize_record(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
+  use <- bool.guard(!is_array_iter(rec), #(rec, st))
+  let #(target, index, next_fn) = array_iter_parts(rec)
+  let kind = case classify(target) {
+    KHandle(h) ->
+      case rt_store.cell_get(st, h) {
+        SObject(kind: types.MapObj(_), ..) ->
+          types.MapIterator(target: h, index:, kind: types.MapIterEntries)
+        SObject(kind: types.SetObj(_), ..) ->
+          types.SetIterator(target: h, index:, kind: types.SetIterValues)
+        _ -> types.ArrayIterator(target: h, index:, kind: types.ArrayIterValues)
+      }
+    _ -> types.StringIterator(source: js_string.text(target), index:)
+  }
+  let #(iter, st) =
+    rt_store.cell_new(
+      st,
+      types.SObject(
+        kind:,
+        proto: Some(array_iter_proto(st, rec)),
+        props: dict.new(),
+        symbol_props: [],
+        elements: types.NoElements,
+        extensible: True,
+      ),
+    )
+  alloc_record(
+    st,
+    IteratorRecord(iterator: mk_object(iter), next_method: next_fn),
+  )
+}
+
+// §7.4.11 only needs the objects when a return method exists; undefined if not
+pub fn closable_record(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
+  use <- bool.guard(!is_array_iter(rec), #(rec, st))
+  let #(ret, st) =
+    rt_obj.get_prop(
+      st,
+      mk_object(array_iter_proto(st, rec)),
+      StringKey(Named("return")),
+    )
+  case classify(ret) {
+    KUndef | KNull -> #(mk_undefined(), st)
+    _ -> materialize_record(st, rec)
+  }
+}
 
 // absent name throws referenceerror; called by name from arc_rt_obj_ffi
 pub fn global_get(st: Agent, name: BitArray) -> #(JsVal, Agent) {
