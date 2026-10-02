@@ -727,9 +727,9 @@ index_writes_pass(Kind) ->
 
 %% filling a hole creates a property, which is the general path's to decide
 elem_write({?ELEMS_DENSE, A}, Idx, V) ->
-    case arc_tree_array_ffi:get_or_hole(Idx, A) of
-        ?ELEMS_HOLE -> miss;
-        _ -> {?ELEMS_DENSE, arc_tree_array_ffi:set(Idx, V, A)}
+    case arc_tree_array_ffi:overwrite(Idx, V, A) of
+        hole -> miss;
+        A1 -> {?ELEMS_DENSE, A1}
     end;
 elem_write({?ELEMS_SPARSE, M}, Idx, V) ->
     case M of

@@ -3,7 +3,7 @@
 %% trie invariant: every leaf below size except the hot one is in the trie
 -module(arc_tree_array_ffi).
 -compile({no_auto_import, [size/1]}).
--export([new/0, from_list/1, get_or_hole/2, get/2, set/3, size/1, resize/2,
+-export([new/0, from_list/1, get_or_hole/2, get/2, set/3, overwrite/3, size/1, resize/2,
          reset/2, sparse_fold/3, to_list/1, dense_list/2, append_list/2,
          range_list/3]).
 
@@ -82,6 +82,24 @@ set(I, V, T) when I < ?FLAT_MAX ->
     erlang:make_tuple(I + 1, ?HOLE, [{I + 1, V} | indexed(tuple_to_list(T), 1)]);
 set(I, V, T) when I >= 0 ->
     set(I, V, promote(T)).
+
+%% set where a value already sits, else hole
+overwrite(I, V, {?VEC_TAG, Size, S, N, HotIx, Hot}) when I bsr ?LEVEL_BITS =:= HotIx ->
+    case element((I band ?MASK) + 1, Hot) of
+        ?HOLE -> hole;
+        _ -> {?VEC_TAG, Size, S, N, HotIx, setelement((I band ?MASK) + 1, Hot, V)}
+    end;
+overwrite(I, V, {?VEC_TAG, _, _, _, _, _} = A) ->
+    case get_or_hole(I, A) of
+        ?HOLE -> hole;
+        _ -> set(I, V, A)
+    end;
+overwrite(I, V, T) when I < tuple_size(T), I >= 0 ->
+    case element(I + 1, T) of
+        ?HOLE -> hole;
+        _ -> setelement(I + 1, T, V)
+    end;
+overwrite(_, _, _) -> hole.
 
 indexed([X | Xs], K) -> [{K, X} | indexed(Xs, K + 1)];
 indexed([], _) -> [].
