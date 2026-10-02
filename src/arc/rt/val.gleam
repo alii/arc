@@ -154,7 +154,11 @@ fn handle_is_callable(st: Agent, h: Handle) -> Bool {
 }
 
 // §13.5.3 typeof
-pub fn type_of(st: Agent, v: JsVal) -> String {
+@external(erlang, "arc_rt_val_ffi", "type_of")
+pub fn type_of(st: Agent, v: JsVal) -> String
+
+// every case spelled out; called by name from arc_rt_val_ffi for proxies
+pub fn type_of_general(st: Agent, v: JsVal) -> String {
   case classify(v) {
     KUndef -> "undefined"
     KNull -> "object"
