@@ -1378,6 +1378,19 @@ pub fn emit_key(pk: ast.PropertyName) -> Build(ir.Value) {
   }
 }
 
+// a pattern's read of key off source; a plain name is cached like source.name
+pub fn get_pattern_prop(
+  source: ir.Value,
+  key: ast.PropertyName,
+  emitted_key: ir.Value,
+) -> Build(ir.Value) {
+  case key {
+    ast.IdentifierName(name:, ..) ->
+      get_named("get_named_ic", source, bit_array.from_string(name))
+    _ -> anf.host("get_prop_untyped_key", [source, emitted_key])
+  }
+}
+
 fn emit_key_from_prop(prop: ast.MemberProperty) -> Build(ir.Value) {
   case prop {
     ast.Dot(name: "#" <> _ as name, ..) -> emit_identifier(name)
@@ -3304,12 +3317,12 @@ fn emit_object_assign_props(
         // §13.15.5.6 step 1a lref before getv
         True -> {
           use lhs <- anf.then(emit_assign_target(value))
-          use v <- anf.then(anf.host("get_prop_untyped_key", [src, k]))
+          use v <- anf.then(get_pattern_prop(src, key, k))
           use _ <- anf.then(target_put(lhs, v))
           emit_object_assign_props(tail, src, [k, ..seen])
         }
         False -> {
-          use v <- anf.then(anf.host("get_prop_untyped_key", [src, k]))
+          use v <- anf.then(get_pattern_prop(src, key, k))
           use _ <- anf.then(emit_destructuring_assign(value, v))
           emit_object_assign_props(tail, src, [k, ..seen])
         }
