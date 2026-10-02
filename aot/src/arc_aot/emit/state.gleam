@@ -99,6 +99,7 @@ pub type FnSave {
     invariant_callees: Dict(InvariantCallee, ir.Value),
     machine_abrupt: Option(MachineAbrupt),
     raw_args_var: Option(String),
+    region_boxed: Set(Int),
   )
 }
 
@@ -269,6 +270,7 @@ pub type Emitter {
     slotted_globals: Dict(String, Int),
     machine_abrupt: Option(MachineAbrupt),
     raw_args_var: Option(String),
+    region_boxed: Set(Int),
     dispatch: EmitDispatch,
     consts: IrConsts,
   )
@@ -858,6 +860,7 @@ pub fn new_emitter(
     slotted_globals: dict.new(),
     machine_abrupt: None,
     raw_args_var: None,
+    region_boxed: set.new(),
     dispatch:,
     consts: ir_consts(),
   )
@@ -877,7 +880,16 @@ pub fn lexical_is_boxed(
 }
 
 pub fn resolve(e: Emitter, name: String) -> scope.Resolution {
-  scope.lookup(e.scope_tree, e.cur_scope, name)
+  case scope.lookup(e.scope_tree, e.cur_scope, name) {
+    scope.Plain(scope.Local(slot:, boxed: False, ..) as local) ->
+      scope.Plain(scope.Local(..local, boxed: in_region_box(e, slot)))
+    other -> other
+  }
+}
+
+// held in a box only while a try statement that writes it runs
+pub fn in_region_box(e: Emitter, slot: Int) -> Bool {
+  set.contains(e.region_boxed, slot)
 }
 
 pub fn arguments_is_implicit(e: Emitter) -> Bool {
@@ -1018,6 +1030,7 @@ pub fn enter_function(
       invariant_callees: e.invariant_callees,
       machine_abrupt: e.machine_abrupt,
       raw_args_var: e.raw_args_var,
+      region_boxed: e.region_boxed,
     )
   let child =
     Emitter(
@@ -1041,6 +1054,7 @@ pub fn enter_function(
       invariant_callees: dict.new(),
       machine_abrupt: None,
       raw_args_var: None,
+      region_boxed: set.new(),
     )
   #(save, child)
 }
@@ -1067,6 +1081,7 @@ pub fn leave_function(e: Emitter, save: FnSave) -> Emitter {
     invariant_callees: save.invariant_callees,
     machine_abrupt: save.machine_abrupt,
     raw_args_var: save.raw_args_var,
+    region_boxed: save.region_boxed,
   )
 }
 

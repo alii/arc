@@ -2054,18 +2054,23 @@ fn parse_try_statement(
 ) -> Result(#(Parser, ast.Statement), ParseError) {
   let p2 = advance(p)
   let try_scope = p2.scopes.current
-  let p2 = Parser(..p2, scopes: scope_builder.enter_try(p2.scopes))
+  // only a body that can suspend needs its guarded writes known up front
+  let tracking = fn(p: Parser, f) {
+    case p2.ctx.in_generator || p2.ctx.in_async {
+      True -> Parser(..p, scopes: f(p.scopes))
+      False -> p
+    }
+  }
+  let p2 = tracking(p2, scope_builder.enter_try)
   use #(p3, block) <- result.try(parse_block_body(p2))
   // what a catch clause throws is not caught by its own try
-  let p3 = Parser(..p3, scopes: scope_builder.leave_try(p3.scopes))
+  let p3 = tracking(p3, scope_builder.leave_try)
   use #(p4, handler) <- result.try(parse_catch_clause(p3))
   use #(p5, finalizer) <- result.try(case peek(p4) {
     Finally -> {
-      let scopes = scope_builder.reenter_try(p4.scopes, try_scope, p3.scopes)
-      use #(p, b) <- result.map(
-        parse_block_body(advance(Parser(..p4, scopes:))),
-      )
-      #(Parser(..p, scopes: scope_builder.leave_try(p.scopes)), Some(b))
+      let p4 = tracking(p4, scope_builder.reenter_try(_, try_scope, p3.scopes))
+      use #(p, b) <- result.map(parse_block_body(advance(p4)))
+      #(tracking(p, scope_builder.leave_try), Some(b))
     }
     _ -> Ok(#(p4, None))
   })
