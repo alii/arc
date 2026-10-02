@@ -1059,17 +1059,26 @@ fn stmt_assigned_names(s: ast.Statement, acc: List(String)) -> List(String) {
     ast.TryStatement(block:, tail:) -> {
       let acc = stmts_assigned_names(block, acc)
       case tail {
-        ast.TryCatch(ast.CatchClause(body:, ..)) ->
-          stmts_assigned_names(body, acc)
+        ast.TryCatch(handler) -> catch_assigned_names(handler, acc)
         ast.TryFinally(finalizer:) -> stmts_assigned_names(finalizer, acc)
-        ast.TryCatchFinally(ast.CatchClause(body:, ..), finalizer:) ->
-          stmts_assigned_names(finalizer, stmts_assigned_names(body, acc))
+        ast.TryCatchFinally(handler, finalizer:) ->
+          stmts_assigned_names(finalizer, catch_assigned_names(handler, acc))
       }
     }
     ast.LabeledStatement(body:, ..) -> stmt_assigned_names(body, acc)
     ast.WithStatement(object:, body:) ->
       stmt_assigned_names(body, expr_assigned_names(object, acc))
   }
+}
+
+// a default in the parameter pattern can assign too
+fn catch_assigned_names(
+  handler: ast.CatchClause,
+  acc: List(String),
+) -> List(String) {
+  option.map(handler.param, pattern_expr_assigned_names(_, acc))
+  |> option.unwrap(acc)
+  |> stmts_assigned_names(handler.body, _)
 }
 
 fn stmts_assigned_names(
@@ -1719,11 +1728,7 @@ fn emit_try(
 ) -> EmitResult {
   case tail {
     ast.TryCatch(ast.CatchClause(param, catch_body)) -> {
-      let carried =
-        assigned_unboxed_slots_all(e, [
-          ast.BlockStatement(block),
-          ast.BlockStatement(catch_body),
-        ])
+      let carried = assigned_unboxed_slots(e, ast.TryStatement(block:, tail:))
       let branch_slots = e.slot_vars
       use #(try_body, e) <- result.try(
         cps.with_done(e, fn(done, e) {

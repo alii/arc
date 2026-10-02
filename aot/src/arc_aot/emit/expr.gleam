@@ -59,7 +59,7 @@ pub fn bridge(call: Next) -> Build(ir.Value) {
 }
 
 // named is the namedevaluation hint for anonymous fn/class
-fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
+pub fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
   case ex {
     ast.NumberLiteral(_, value) -> number_literal(value)
     ast.BigIntLiteral(_, n) -> {

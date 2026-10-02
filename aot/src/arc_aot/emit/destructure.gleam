@@ -43,9 +43,7 @@ fn build_pattern(
       )
       use v <- anf.then(anf.let_if(
         is_undef,
-        expr.bridge(fn(e: Emitter) {
-          e.dispatch.emit_expr_named(e, default_expr, named)
-        }),
+        expr.emit(default_expr, named),
         anf.pure(source),
       ))
       build_pattern(left, v, mode)
