@@ -214,11 +214,22 @@ pub fn for_in_list(keys: List(JsVal)) -> JsVal
 pub fn for_in_next(iter: JsVal) -> ForInStep
 
 pub type IterPlan {
-  ArrayAdvanced(done: Bool, value: JsVal, store: Store)
+  Advanced(done: Bool, value: JsVal, store: Store)
+  // an entry that still needs its pair array
+  PairAdvanced(key: JsVal, value: JsVal, store: Store)
   ResumeGenerator(gen_h: Handle)
   IterMiss
 }
 
-// §23.1.5.2.1 in the kernel only when the read observes nothing
-@external(erlang, "arc_interp_ffi", "iter_step")
+// the first count elements onto the stack; miss if destructuring could be observed
+@external(erlang, "arc_rt_lang_ffi", "unpack_array")
+pub fn unpack_array(
+  agent: Agent,
+  array: JsVal,
+  count: Int,
+  onto: List(JsVal),
+) -> List(JsVal)
+
+// in the kernel only when the step observes nothing
+@external(erlang, "arc_rt_lang_ffi", "iter_step")
 pub fn iter_step(store: Store, rec: JsVal) -> IterPlan

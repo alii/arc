@@ -1,3 +1,4 @@
+import arc/bytecode/opcode.{type IterView, EntriesView, KeysView, ValuesView}
 import arc/compiler/scope.{type BindingKind}
 import arc/module/summary
 import arc/parser/ast
@@ -359,6 +360,35 @@ pub fn chain_has_optional(expr: ast.Expression) -> Bool {
     ast.CallExpression(callee:, ..) -> chain_has_optional(callee)
     ast.TaggedTemplateExpression(tag:, ..) -> chain_has_optional(tag)
     _ -> False
+  }
+}
+
+// object.keys(), object.values() or object.entries(), spelled exactly so
+pub fn collection_view(
+  expr: ast.Expression,
+) -> Option(#(ast.Expression, ast.MemberProperty, IterView)) {
+  case expr {
+    ast.CallExpression(
+      callee: ast.MemberExpression(
+        object:,
+        property: ast.Dot(name:, ..) as property,
+        ..,
+      ),
+      arguments: [],
+      ..,
+    ) -> {
+      let view = case name {
+        "keys" -> Some(KeysView)
+        "values" -> Some(ValuesView)
+        "entries" -> Some(EntriesView)
+        _ -> None
+      }
+      case object, chain_has_optional(object) {
+        ast.SuperExpression(..), _ | _, True -> None
+        _, False -> option.map(view, fn(view) { #(object, property, view) })
+      }
+    }
+    _ -> None
   }
 }
 

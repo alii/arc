@@ -20,9 +20,9 @@ import arc/bytecode/opcode.{
   GetLocalFieldCall, GetLocalFieldKeep, GetPrivateFieldDyn,
   GetPrivateFieldDynKeep, GetPrototypeOf, GetSuperValue, GetSuperValueKeep,
   GetTemplateObject, Gosub, IncLocal, IncLocalCmpConstJump, IncLocalCmpLocalJump,
-  IncLocalJump, InitGlobalLex, InitialYield, IteratorCheckObject, IteratorClose,
-  IteratorCloseThrow, IteratorNext, IteratorRecord, IteratorRest, Jump,
-  JumpIfFalse, JumpIfLocal, JumpIfNotNullish, JumpIfNullish, JumpIfTrue,
+  IncLocalJump, InitGlobalLex, InitialYield, IterateView, IteratorCheckObject,
+  IteratorClose, IteratorCloseThrow, IteratorNext, IteratorRecord, IteratorRest,
+  Jump, JumpIfFalse, JumpIfLocal, JumpIfNotNullish, JumpIfNullish, JumpIfTrue,
   MakeClosure, MakeMethod, MakeSuppressed, NewObject, NewObjectWith,
   NewPrivateName, NewRegExp, ObjectRestCopy, ObjectSpread, Pc, Pop, PopTry,
   PostDecLocal, PostIncLocal, PrivateInDyn, PushConst, PushTry, PutBoxed,
@@ -31,8 +31,8 @@ import arc/bytecode/opcode.{
   PutPrivateFieldDyn, PutSuperValue, Ret, Return, Rot3, Safepoint, SetProto,
   SetupDerivedClass, Swap, Throw, ThrowConstAssign, ThrowReferenceError,
   ToObject, ToPropertyKey, ToStringVal, TypeOf, TypeofEvalVar, TypeofGlobal,
-  UnaryOp, Unrot4, WithDeleteVar, WithGetRefValue, WithGetVar, WithGetVarThis,
-  WithMakeRef, WithPutRefValue, WithPutVar, Yield, YieldStar,
+  UnaryOp, UnpackArray, Unrot4, WithDeleteVar, WithGetRefValue, WithGetVar,
+  WithGetVarThis, WithMakeRef, WithPutRefValue, WithPutVar, Yield, YieldStar,
 }
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/call.{type Drive}
@@ -66,7 +66,6 @@ import arc/rt/closure as rt_closure
 import arc/rt/elements
 import arc/rt/env as rt_env
 import arc/rt/inspect as rt_inspect
-import arc/rt/js_string
 import arc/rt/lang as rt_lang
 import arc/rt/limits
 import arc/rt/obj as rt_obj
@@ -652,6 +651,78 @@ fn loop(
                   }
               }
           }
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    IterateView(view, Pc(hit)) ->
+      case stack {
+        [receiver, ..rest] -> {
+          let rec = rt_lang.view_iter_start(agent, receiver, view)
+          case kernel.is(rec, kernel.Miss) {
+            True ->
+              loop(
+                state,
+                drive,
+                pc + 1,
+                stack,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+            False ->
+              loop(
+                state,
+                drive,
+                hit,
+                [rec, ..rest],
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+          }
+        }
+        [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
+      }
+
+    UnpackArray(count, Pc(miss)) ->
+      case stack {
+        [array, ..rest] -> {
+          let unpacked = kernel.unpack_array(agent, array, count, rest)
+          case kernel.is(unpacked, kernel.Miss) {
+            True ->
+              loop(
+                state,
+                drive,
+                miss,
+                stack,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+            False ->
+              loop(
+                state,
+                drive,
+                pc + 1,
+                unpacked,
+                locals,
+                agent,
+                code,
+                constants,
+                r0,
+                r1,
+              )
+          }
+        }
         [] -> via_step(state, drive, pc, stack, locals, agent, r0, r1)
       }
 
@@ -2536,7 +2607,7 @@ fn loop(
                   }
                 False ->
                   case kernel.iter_step(agent.store, rec) {
-                    kernel.ArrayAdvanced(done, val, store) -> {
+                    kernel.Advanced(done, val, store) -> {
                       let agent = Agent(..agent, store:)
                       let record = case done {
                         True -> mk_undefined()
@@ -2547,6 +2618,22 @@ fn loop(
                         drive,
                         pc + 1,
                         [mk_bool(done), val, record, ..rest],
+                        locals,
+                        agent,
+                        code,
+                        constants,
+                        r0,
+                        r1,
+                      )
+                    }
+                    kernel.PairAdvanced(key, value, store) -> {
+                      let #(pair, agent) =
+                        rt_obj.new_array(Agent(..agent, store:), [key, value])
+                      loop(
+                        state,
+                        drive,
+                        pc + 1,
+                        [mk_bool(False), pair, rec, ..rest],
                         locals,
                         agent,
                         code,
@@ -3601,150 +3688,31 @@ fn instance_of_kernel(agent: Agent, left: JsVal, right: JsVal) -> JsVal {
   kernel.instance_of(agent, left, right, types.symbol_has_instance)
 }
 
-// the stack-only array record, spelled out with full get semantics
 fn array_iter_next_general(
   state: State,
   rec: JsVal,
   rest: List(JsVal),
 ) -> Result(State, StepExit) {
-  use <- iter_next_kernel(state, rec, rest)
-  let #(target, index, next_fn) = rt_lang.array_iter_parts(rec)
-  let len = case classify(target) {
-    KHandle(h) ->
-      case rt_store.cell_get(state.agent, h) {
-        SObject(kind: types.ArrayObj(length:), ..) -> length
-        _ -> 0
-      }
-    _ -> 0
-  }
-  case index >= len {
-    True ->
-      Ok(
-        State(
-          ..state,
-          stack: [mk_bool(True), mk_undefined(), mk_undefined(), ..rest],
-          pc: state.pc + 1,
-        ),
-      )
-    False -> {
-      use #(v, state) <- result.map(guarded3(
-        state,
-        rt_obj.get_prop,
-        target,
-        StringKey(Index(index)),
-      ))
-      let rec = rt_lang.array_iter_record(target, index + 1, next_fn)
-      State(..state, stack: [mk_bool(False), v, rec, ..rest], pc: state.pc + 1)
-    }
-  }
+  use #(#(done, value, rec), state) <- result.map(guarded2(
+    state,
+    rt_lang.for_of_next,
+    rec,
+  ))
+  State(..state, stack: [mk_bool(done), value, rec, ..rest], pc: state.pc + 1)
 }
 
-// what the loop does, before the array hole path
-fn iter_next_kernel(
-  state: State,
-  rec: JsVal,
-  rest: List(JsVal),
-  otherwise: fn() -> Result(State, StepExit),
-) -> Result(State, StepExit) {
-  case rt_lang.array_iter_next(state.agent.store, rec) {
-    rt_lang.IterStep(done:, value:, rec:) ->
-      Ok(
-        State(
-          ..state,
-          stack: [mk_bool(done), value, rec, ..rest],
-          pc: state.pc + 1,
-        ),
-      )
-    rt_lang.IterPair(key:, value:, rec:) -> {
-      let #(pair, agent) = rt_obj.new_array(state.agent, [key, value])
-      Ok(
-        State(
-          ..state,
-          agent:,
-          stack: [mk_bool(False), pair, rec, ..rest],
-          pc: state.pc + 1,
-        ),
-      )
-    }
-    rt_lang.IterMiss -> otherwise()
-  }
-}
-
-// gives the record real iterator objects once something may observe them
 fn materialize_record(
   state: State,
   rec: JsVal,
 ) -> Result(#(JsVal, State), StepExit) {
-  case rt_lang.is_array_iter(rec) {
-    False -> Ok(#(rec, state))
-    True -> {
-      let #(target, index, next_fn) = rt_lang.array_iter_parts(rec)
-      let kind = case classify(target) {
-        KHandle(h) ->
-          case rt_store.cell_get(state.agent, h) {
-            SObject(kind: types.MapObj(_), ..) ->
-              types.MapIterator(target: h, index:, kind: types.MapIterEntries)
-            SObject(kind: types.SetObj(_), ..) ->
-              types.SetIterator(target: h, index:, kind: types.SetIterValues)
-            _ ->
-              types.ArrayIterator(
-                target: h,
-                index:,
-                kind: types.ArrayIterValues,
-              )
-          }
-        _ -> types.StringIterator(source: js_string.text(target), index:)
-      }
-      guarded2(
-        state,
-        fn(agent, _) {
-          let proto = Some(rt_lang.array_iter_proto(agent, rec))
-          let #(iter, agent) =
-            rt_store.cell_new(
-              agent,
-              types.SObject(
-                kind: kind,
-                proto: proto,
-                props: dict.new(),
-                symbol_props: [],
-                elements: types.NoElements,
-                extensible: True,
-              ),
-            )
-          rt_lang.alloc_record(
-            agent,
-            types.IteratorRecord(
-              iterator: mk_object(iter),
-              next_method: next_fn,
-            ),
-          )
-        },
-        Nil,
-      )
-    }
-  }
+  guarded2(state, rt_lang.materialize_record, rec)
 }
 
-// §7.4.11 only needs the objects when a return method exists
 pub fn closable_record(
   state: State,
   rec: JsVal,
 ) -> Result(#(JsVal, State), StepExit) {
-  case rt_lang.is_array_iter(rec) {
-    False -> Ok(#(rec, state))
-    True -> {
-      use #(ret, state) <- result.try(guarded3(
-        state,
-        rt_obj.get_prop,
-        mk_object(rt_lang.array_iter_proto(state.agent, rec)),
-        StringKey(Named("return")),
-      ))
-      case classify(ret) {
-        KUndef | KNull -> Ok(#(mk_undefined(), state))
-        _ -> materialize_record(state, rec)
-      }
-    }
-  }
+  guarded2(state, rt_lang.closable_record, rec)
 }
 
 fn top_or_undefined(stack: List(JsVal)) -> #(JsVal, List(JsVal)) {
@@ -4736,6 +4704,30 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
           }
       }
     }
+
+    IterateView(view, Pc(hit)) ->
+      case state.stack {
+        [receiver, ..rest] -> {
+          let rec = rt_lang.view_iter_start(state.agent, receiver, view)
+          case kernel.is(rec, kernel.Miss) {
+            True -> Ok(State(..state, pc: state.pc + 1))
+            False -> Ok(State(..state, stack: [rec, ..rest], pc: hit))
+          }
+        }
+        [] -> underflow(state, "IterateView")
+      }
+
+    UnpackArray(count, Pc(miss)) ->
+      case state.stack {
+        [array, ..rest] -> {
+          let unpacked = kernel.unpack_array(state.agent, array, count, rest)
+          case kernel.is(unpacked, kernel.Miss) {
+            True -> Ok(State(..state, pc: miss))
+            False -> Ok(State(..state, stack: unpacked, pc: state.pc + 1))
+          }
+        }
+        [] -> underflow(state, "UnpackArray")
+      }
 
     JumpIfNullish(Pc(target)) ->
       conditional_jump(state, target, rt_val.is_nullish)
@@ -5770,19 +5762,12 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     GetIterator ->
       case state.stack {
         [iterable, ..rest] -> {
-          let rec = rt_lang.array_iter_start(state.agent, iterable)
-          case kernel.is(rec, kernel.Miss) {
-            False -> Ok(State(..state, stack: [rec, ..rest], pc: state.pc + 1))
-            True -> {
-              use #(rec, state) <- result.map(guarded3(
-                state,
-                rt_lang.get_iterator,
-                iterable,
-                rt_lang.Sync,
-              ))
-              State(..state, stack: [rec, ..rest], pc: state.pc + 1)
-            }
-          }
+          use #(rec, state) <- result.map(guarded2(
+            state,
+            rt_lang.for_of_start,
+            iterable,
+          ))
+          State(..state, stack: [rec, ..rest], pc: state.pc + 1)
         }
         _ -> underflow(state, "GetIterator")
       }
@@ -5847,7 +5832,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                 array_iter_next_general(state, rec, rest)
               })
               case kernel.iter_step(state.agent.store, rec) {
-                kernel.ArrayAdvanced(done, val, store) -> {
+                kernel.Advanced(done, val, store) -> {
                   let agent = Agent(..state.agent, store:)
                   let record = case done {
                     True -> mk_undefined()
@@ -5858,6 +5843,18 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
                       ..state,
                       agent:,
                       stack: [mk_bool(done), val, record, ..rest],
+                      pc: state.pc + 1,
+                    ),
+                  )
+                }
+                kernel.PairAdvanced(key, value, store) -> {
+                  let #(pair, agent) =
+                    rt_obj.new_array(Agent(..state.agent, store:), [key, value])
+                  Ok(
+                    State(
+                      ..state,
+                      agent:,
+                      stack: [mk_bool(False), pair, rec, ..rest],
                       pc: state.pc + 1,
                     ),
                   )
@@ -6750,7 +6747,7 @@ fn next_by_plan(
   case plan {
     kernel.ResumeGenerator(gen_h) ->
       gen_step(state, drive, gen_h, mk_undefined())
-    kernel.ArrayAdvanced(..) | kernel.IterMiss ->
+    kernel.Advanced(..) | kernel.PairAdvanced(..) | kernel.IterMiss ->
       guarded2(state, rt_lang.iter_next, rec)
   }
 }

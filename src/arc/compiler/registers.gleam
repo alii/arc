@@ -14,7 +14,8 @@ pub fn assign_regs(
   pinned: Set(Int),
 ) -> #(tuple_array.TupleArray(Op), bytecode.Regs) {
   let ops = tuple_array.to_list(code)
-  let #(scores, pinned) = score_slots(ops, loop_depths(ops), dict.new(), pinned)
+  let #(scores, pinned) =
+    score_slots(ops, loop_depths(ops), 0, cold_pcs(code), dict.new(), pinned)
   let picked =
     dict.to_list(scores)
     |> list.filter(fn(e) {
@@ -70,6 +71,20 @@ fn loop_depths(ops: List(Op)) -> List(Int) {
   list.reverse(rev)
 }
 
+// the general arm behind an UnpackArray, up to where its fast arm jumps
+fn cold_pcs(code: tuple_array.TupleArray(Op)) -> Set(Int) {
+  use cold, op <- list.fold(tuple_array.to_list(code), set.new())
+  case op {
+    opcode.UnpackArray(miss: opcode.Pc(miss), ..) ->
+      case tuple_array.element(miss, code) {
+        opcode.Jump(opcode.Pc(done)) if done > miss ->
+          int.range(from: miss, to: done, with: cold, run: set.insert)
+        _ -> cold
+      }
+    _ -> cold
+  }
+}
+
 type SlotScore {
   SlotScore(score: Int, written_in_loop: Bool)
 }
@@ -77,6 +92,8 @@ type SlotScore {
 fn score_slots(
   ops: List(Op),
   depths: List(Int),
+  pc: Int,
+  cold: Set(Int),
   scores: Dict(Int, SlotScore),
   pinned: Set(Int),
 ) -> #(Dict(Int, SlotScore), Set(Int)) {
@@ -88,8 +105,12 @@ fn score_slots(
         2 -> 256
         _ -> 4096
       }
+      let uses = case set.contains(cold, pc) {
+        True -> []
+        False -> opcode.slot_uses(op)
+      }
       let scores =
-        list.fold(opcode.slot_uses(op), scores, fn(scores, used) {
+        list.fold(uses, scores, fn(scores, used) {
           let #(slot, is_write) = used
           let SlotScore(score:, written_in_loop: hot) =
             dict.get(scores, slot)
@@ -105,7 +126,7 @@ fn score_slots(
           )
         })
       let pinned = list.fold(opcode.pinned_slots(op), pinned, set.insert)
-      score_slots(ops, depths, scores, pinned)
+      score_slots(ops, depths, pc + 1, cold, scores, pinned)
     }
     _, _ -> #(scores, pinned)
   }

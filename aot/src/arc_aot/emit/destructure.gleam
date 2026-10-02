@@ -119,6 +119,9 @@ fn emit_array_pattern(
   source: ir.Value,
   mode: BindMode,
 ) -> Build(Nil) {
+  use <- expr.unpacking_plain_array(elements, source, binds_silently, fn(p, v) {
+    build_pattern(p, v, mode)
+  })
   use consts <- anf.then(expr.consts())
   use iter <- anf.then(anf.host("get_iterator", [source, ir.ConstAtom("sync")]))
   let drained =
@@ -137,6 +140,14 @@ fn emit_array_pattern(
   case drained {
     True -> anf.pure(Nil)
     False -> anf.host_unit("iter_close", [iter, consts.false_])
+  }
+}
+
+// no user code can run while this target is bound
+fn binds_silently(e: Emitter, pattern: ast.Pattern) -> Bool {
+  case pattern {
+    ast.IdentifierPattern(name:, ..) -> expr.is_plain_local(e, name)
+    _ -> False
   }
 }
 

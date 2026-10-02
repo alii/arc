@@ -42,6 +42,7 @@
 -define(REALM_NUMBER, 6).
 -define(REALM_MAP, 18).
 -define(REALM_SET, 19).
+-define(REALM_ITERATOR_PROTO, 36).
 -define(REALM_ARRAY_ITER_PROTO, 37).
 -define(REALM_STRING_ITER_PROTO, 38).
 -define(REALM_MAP_ITER_PROTO, 39).
@@ -153,7 +154,14 @@
 -define(ARRAYITERATOR_INDEX, 3).
 -define(ARRAYITERATOR_KIND, 4).
 -define(ARRAYITERATOR_SIZE, 4).
+-define(ARRAYITER_KEYS, array_iter_keys).
 -define(ARRAYITER_VALUES, array_iter_values).
+
+-define(MAPITERATOR_TAG, map_iterator).
+-define(MAPITER_KEYS, map_iter_keys).
+-define(MAPITER_VALUES, map_iter_values).
+-define(SETITERATOR_TAG, set_iterator).
+-define(SETITER_VALUES, set_iter_values).
 
 -define(GENERATOROBJ_TAG, generator_obj).
 -define(GENERATOROBJ_DATA, 2).
@@ -187,12 +195,17 @@
 -define(TOKEN_RETURN_THIS, return_this).
 -define(TOKEN_ARRAY_ITER_NEXT, {?ITERATORN_TAG, array_iterator_next}).
 -define(TOKEN_GENERATOR_NEXT, {generator_n, generator_next}).
+-define(TOKEN_ARRAY_KEYS, {array_n, array_prototype_keys}).
 -define(TOKEN_ARRAY_VALUES, {array_n, array_prototype_values}).
+-define(TOKEN_ARRAY_ENTRIES, {array_n, array_prototype_entries}).
 -define(TOKEN_STRING_ITER, {string_n, string_prototype_symbol_iterator}).
 -define(TOKEN_STRING_ITER_NEXT, {?ITERATORN_TAG, string_iterator_next}).
+-define(TOKEN_MAP_KEYS, {map_n, map_keys}).
+-define(TOKEN_MAP_VALUES, {map_n, map_values}).
 -define(TOKEN_MAP_ENTRIES, {map_n, map_entries}).
 -define(TOKEN_MAP_ITER_NEXT, {?ITERATORN_TAG, map_iterator_next}).
 -define(TOKEN_SET_VALUES, {set_n, set_values}).
+-define(TOKEN_SET_ENTRIES, {set_n, set_entries}).
 -define(TOKEN_SET_ITER_NEXT, {?ITERATORN_TAG, set_iterator_next}).
 
 %% Property
@@ -238,6 +251,10 @@
 -define(RESUMEFRAME_TAG, resume_frame).
 -define(ITERATORRECORD_TAG, iterator_record).
 -define(ARC_ITER, arc_iter).
+%% IterView
+-define(VIEW_KEYS, keys_view).
+-define(VIEW_VALUES, values_view).
+-define(VIEW_ENTRIES, entries_view).
 
 %% shapes shared with emitted code
 %% the js exception as raised and caught, fixed by carder rt_exn

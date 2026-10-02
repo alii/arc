@@ -3,7 +3,7 @@
 -export([for_in_list/1, for_in_next/1,
          type_of/2,
          box_get/2, cell_of/2, list_from_array_like/2, instance_of/4,
-         capture_env/2, iter_step/2]).
+         capture_env/2]).
 
 -include("../rt/arc_rt_layout.hrl").
 
@@ -183,71 +183,6 @@ chain_reaches(Cells, VId, PId, Fuel) ->
             end;
         _ -> miss
     end.
-
-%% §23.1.5.2.1 array iterator or generator resume, else iter_miss; -1 is done
--define(ITERATOR_KEY, {?KEY_NAMED, <<"iterator">>}).
--define(NEXT_KEY, {?KEY_NAMED, <<"next">>}).
-iter_step(Store, {?HANDLE_TAG, RecId}) ->
-    Cells = element(?STORE_CELLS, Store),
-    case arc_rt_arena_ffi:get(RecId, Cells) of
-        {?SOBJECT_TAG, ?ORDINARY, _, #{?ITERATOR_KEY := IP, ?NEXT_KEY := NP},
-         _, _, _}
-          when element(1, IP) =:= ?DATAPROPERTY_TAG,
-               element(1, NP) =:= ?DATAPROPERTY_TAG ->
-            case {element(?DATAPROPERTY_VALUE, NP), element(?DATAPROPERTY_VALUE, IP)} of
-                {{?HANDLE_TAG, NextId}, {?HANDLE_TAG, IterId}} ->
-                    iter_step_with(Store, Cells, native_token(arc_rt_arena_ffi:get(NextId, Cells)),
-                                   IterId, arc_rt_arena_ffi:get(IterId, Cells));
-                _ -> iter_miss
-            end;
-        _ -> iter_miss
-    end;
-iter_step(_, _) -> iter_miss.
-
-
-native_token(Cell) -> ?NATIVE_TOKEN(Cell).
-
-iter_step_with(Store, Cells, ?TOKEN_ARRAY_ITER_NEXT, IterId, IterCell)
-  when element(1, IterCell) =:= ?SOBJECT_TAG ->
-    case element(?SOBJECT_KIND, IterCell) of
-        {?ARRAYITERATOR_TAG, _, Index, ?ARRAYITER_VALUES} when Index < 0 ->
-            {array_advanced, true, undefined, Store};
-        {?ARRAYITERATOR_TAG, {?HANDLE_TAG, T} = Target, Index, ?ARRAYITER_VALUES} ->
-            case arc_rt_arena_ffi:get(T, Cells) of
-                {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Len}, _, _, _, _, _} when Index >= Len ->
-                    array_iter_advance(Store, Cells, IterId, IterCell, Target, -1,
-                                       true, undefined);
-                {?SOBJECT_TAG, {?ARRAYOBJ_TAG, _}, _, Props, _, Els, _} ->
-                    case map_size(Props) =/= 0
-                         andalso is_map_key({?KEY_INDEX, Index}, Props) of
-                        true -> iter_miss;
-                        false ->
-                            case elem_at(Els, Index) of
-                                ?ELEMS_HOLE -> iter_miss;
-                                V ->
-                                    array_iter_advance(Store, Cells, IterId, IterCell,
-                                                       Target, Index + 1, false, V)
-                            end
-                    end;
-                _ -> iter_miss
-            end;
-        _ -> iter_miss
-    end;
-iter_step_with(_, _, ?TOKEN_GENERATOR_NEXT, _, IterCell)
-  when element(1, IterCell) =:= ?SOBJECT_TAG ->
-    case element(?SOBJECT_KIND, IterCell) of
-        {?GENERATOROBJ_TAG, DataH} -> {resume_generator, DataH};
-        _ -> iter_miss
-    end;
-iter_step_with(_, _, _, _, _) -> iter_miss.
-
-array_iter_advance(Store, Cells, IterId, IterCell, Target, Index, Done, V) ->
-    NewCell = setelement(?SOBJECT_KIND, IterCell,
-                         {?ARRAYITERATOR_TAG, Target, Index, ?ARRAYITER_VALUES}),
-    {array_advanced, Done, V,
-     setelement(?STORE_CELLS, Store, arc_rt_arena_ffi:set(IterId, NewCell, Cells))}.
-
-elem_at(Els, Idx) -> ?ELEM_AT(Els, Idx).
 
 for_in_list(Keys) -> {for_in, Keys}.
 

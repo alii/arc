@@ -13,6 +13,7 @@ pub fn table() -> DirectHost {
   let obj_ffi = "arc_rt_obj_ffi"
   let obj_ic_ffi = "arc_rt_obj_ic_ffi"
   let lang = "arc@rt@lang"
+  let lang_ffi = "arc_rt_lang_ffi"
   let env = "arc@rt@env"
   let erl = "erlang"
   let ops = "arc@rt@ops"
@@ -94,6 +95,10 @@ pub fn table() -> DirectHost {
       #("object_rest", HostOp(lang, "object_rest", Mut)),
       #("get_iterator", HostOp(lang, "get_iterator", Mut)),
       #("iter_next", HostOp(lang, "iter_next", Mut)),
+      #("for_of_start", HostOp(lang, "for_of_start", Mut)),
+      #("unpack_array", HostOp(lang_ffi, "unpack_array", ReadMiss)),
+      #("view_iter_start", HostOp(lang_ffi, "view_iter_start", ReadMiss)),
+      #("for_of_next", HostOp(lang_ffi, "for_of_next", Mut)),
       #("iter_close", HostOp(lang, "iter_close", MutUnit)),
       #("iter_rest", HostOp(lang, "iter_rest", Mut)),
       #("spread_into_list", HostOp(lang, "spread_into_list", Mut)),

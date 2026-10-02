@@ -4,8 +4,9 @@ import arc/bytecode/lexical
 import arc/bytecode/opcode.{
   type IrOp, type LabelId, CatchOnly, Finally, IrAsyncYieldStarResume, IrBinOp,
   IrDefineAccessor, IrDefineField, IrDefineMethod, IrDeleteField, IrFinal,
-  IrGetField, IrGetFieldKeep, IrGosub, IrJump, IrJumpIfFalse, IrJumpIfNotNullish,
-  IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrPushTry, IrPutField, IterCloseGuard,
+  IrGetField, IrGetFieldKeep, IrGosub, IrIterateView, IrJump, IrJumpIfFalse,
+  IrJumpIfNotNullish, IrJumpIfNullish, IrJumpIfTrue, IrLabel, IrPushTry,
+  IrPutField, IrUnpackArray, IterCloseGuard,
 }
 import arc/compiler/ast_util
 import arc/compiler/const_fold
@@ -4264,16 +4265,20 @@ fn emit_for_of_common(
   let #(end, e) = fresh_label(e)
   let has_lex = ast_util.for_classic_init_is_lex(Some(left))
   let #(save, e) = enter_for_scope(e, has_lex)
-  use e <- result.try(emit_expr(e, right))
   // for await uses CatchOnly: its close needs an await the unwinder cannot do
-  let #(get_iter, body_kind) = case iterator {
-    AsyncIter -> #(opcode.GetAsyncIterator, CatchOnly)
-    SyncIter | NoIter -> #(opcode.GetIterator, IterCloseGuard)
-  }
+  use #(e, body_kind) <- result.try(case iterator {
+    AsyncIter -> {
+      use e <- result.map(emit_expr(e, right))
+      #(emit_op(e, opcode.GetAsyncIterator), CatchOnly)
+    }
+    SyncIter | NoIter -> {
+      use e <- result.map(emit_sync_iterator(e, right))
+      #(e, IterCloseGuard)
+    }
+  })
   // loop frame pushed after F_body so crossing jumps pop it and close iter
   let e =
     e
-    |> emit_op(get_iter)
     |> emit_ir(IrPushTry(body_threw, body_kind))
     |> push_loop(break_target, loop_continue, iterator)
     |> emit_ir(IrLabel(loop_start))
@@ -4281,6 +4286,26 @@ fn emit_for_of_common(
     ForOfLabels(loop_start:, loop_continue:, break_target:, body_threw:, end:)
   use e <- result.map(emit_loop_body(e, labels))
   e |> emit_ir(IrLabel(end)) |> pop_frame |> leave_for_scope(save)
+}
+
+// leaves the record; m.values() and friends skip the call when nothing can tell
+fn emit_sync_iterator(
+  e: Emitter,
+  iterable: ast.Expression,
+) -> Result(Emitter, EmitError) {
+  case ast_util.collection_view(iterable) {
+    Some(#(object, ast.Dot(name:, ..), view)) -> {
+      let #(hit, e) = fresh_label(e)
+      use e <- result.map(emit_expr(e, object))
+      e
+      |> emit_ir(IrIterateView(view, hit))
+      |> emit_get_field_keep(name)
+      |> emit_op(opcode.CallMethod(0))
+      |> emit_op(opcode.GetIterator)
+      |> emit_ir(IrLabel(hit))
+    }
+    _ -> result.map(emit_expr(e, iterable), emit_op(_, opcode.GetIterator))
+  }
 }
 
 // close on abrupt body exit only; IteratorNext undefs the slot on done or throw
@@ -4468,6 +4493,12 @@ fn emit_destructuring_bind(
     }
 
     ast.ArrayPattern(elements) -> {
+      use e <- unpacking_plain_array(
+        e,
+        elements,
+        binds_silently(e, _, binding_kind),
+        fn(e, el) { emit_destructuring_bind(e, el, binding_kind) },
+      )
       use e, _close_throw <- with_iterator_scaffold(e)
       emit_array_elements(e, elements, binding_kind)
     }
@@ -4687,6 +4718,12 @@ fn emit_destructuring_assign(
         }
 
         ast.ArrayExpression(_, elements) -> {
+          use e <- unpacking_plain_array(
+            e,
+            elements,
+            assigns_silently(e, _),
+            emit_destructuring_assign,
+          )
           use e, close_throw <- with_iterator_scaffold(e)
           emit_array_assign_elements(e, elements, close_throw)
         }
@@ -5016,6 +5053,62 @@ fn object_prop_key_name(key: ast.PropertyName) -> Option(String) {
     ast.NumberName(value: ast.InfiniteNumber, ..) -> Some("Infinity")
     ast.BigIntName(..) | ast.ComputedName(..) -> None
   }
+}
+
+// no user code can run while this target is bound
+fn binds_silently(
+  e: Emitter,
+  pattern: ast.Pattern,
+  binding_kind: BindingKind,
+) -> Bool {
+  case pattern, binding_kind {
+    ast.IdentifierPattern(..), LetBinding
+    | ast.IdentifierPattern(..), ConstBinding
+    -> True
+    ast.IdentifierPattern(name, ..), _ -> is_plain_local(e, name)
+    _, _ -> False
+  }
+}
+
+fn assigns_silently(e: Emitter, target: ast.Expression) -> Bool {
+  case target {
+    ast.Identifier(name:, ..) -> is_plain_local(e, name)
+    _ -> False
+  }
+}
+
+fn is_plain_local(e: Emitter, name: String) -> Bool {
+  case resolve(e, name) {
+    scope.Plain(scope.Local(..)) -> True
+    _ -> False
+  }
+}
+
+// silent targets read a plain array's elements up front; general runs otherwise
+fn unpacking_plain_array(
+  e: Emitter,
+  elements: List(Option(el)),
+  silent: fn(el) -> Bool,
+  emit_one: fn(Emitter, el) -> Result(Emitter, EmitError),
+  general: fn(Emitter) -> Result(Emitter, EmitError),
+) -> Result(Emitter, EmitError) {
+  let all_silent =
+    list.all(elements, fn(el) { option.map(el, silent) |> option.unwrap(True) })
+  use <- bool.lazy_guard(!all_silent || elements == [], fn() { general(e) })
+  let #(miss, e) = fresh_label(e)
+  let #(done, e) = fresh_label(e)
+  let e = emit_ir(e, IrUnpackArray(list.length(elements), miss))
+  use e <- result.try(
+    list.try_fold(elements, e, fn(e, el) {
+      case el {
+        Some(el) -> emit_one(e, el)
+        None -> Ok(emit_op(e, opcode.Pop))
+      }
+    }),
+  )
+  let e = e |> emit_ir(IrJump(done)) |> emit_ir(IrLabel(miss))
+  use e <- result.map(general(e))
+  emit_ir(e, IrLabel(done))
 }
 
 // GetIterator, run elements under a close-on-throw guard, close unless rest drained

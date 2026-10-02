@@ -1,5 +1,6 @@
 import arc/bytecode/key
 import arc/bytecode/lexical
+import arc/bytecode/opcode
 import arc/compiler/ast_util
 import arc/compiler/scope
 import arc/parser/ast
@@ -3089,6 +3090,12 @@ pub fn emit_destructuring_assign(
       emit_destructuring_assign(inner_left, v)
     }
     ast.ArrayExpression(_, elements) -> {
+      use <- unpacking_plain_array(
+        elements,
+        src,
+        assigns_silently,
+        emit_destructuring_assign,
+      )
       use consts <- anf.then(consts())
       use iter <- anf.then(
         anf.host("get_iterator", [src, ir.ConstAtom("sync")]),
@@ -3130,6 +3137,88 @@ pub fn emit_destructuring_assign(
         "Invalid destructuring assignment target",
       ))
       anf.pure(Nil)
+    }
+  }
+}
+
+// m.values() and friends skip the call when nothing can tell
+pub fn for_of_record(iterable: ast.Expression) -> Build(ir.Value) {
+  case ast_util.collection_view(iterable) {
+    Some(#(object, property, view)) -> {
+      use receiver <- anf.then(expr(object))
+      let view = case view {
+        opcode.KeysView -> "keys_view"
+        opcode.ValuesView -> "values_view"
+        opcode.EntriesView -> "entries_view"
+      }
+      anf.miss_or(anf.host("view_iter_start", [receiver, ir.ConstAtom(view)]), {
+        use called <- anf.then(emit_member_call(receiver, property, []))
+        anf.host("for_of_start", [called])
+      })
+    }
+    None -> {
+      use v <- anf.then(expr(iterable))
+      anf.host("for_of_start", [v])
+    }
+  }
+}
+
+fn assigns_silently(e: Emitter, target: ast.Expression) -> Bool {
+  case target {
+    ast.Identifier(name:, ..) -> is_plain_local(e, name)
+    _ -> False
+  }
+}
+
+pub fn is_plain_local(e: Emitter, name: String) -> Bool {
+  case state.resolve(e, name) {
+    scope.Plain(scope.Local(..)) -> True
+    _ -> False
+  }
+}
+
+// silent targets read a plain array's elements up front; general runs otherwise
+pub fn unpacking_plain_array(
+  elements: List(Option(el)),
+  source: ir.Value,
+  silent: fn(Emitter, el) -> Bool,
+  bind_one: fn(el, ir.Value) -> Build(Nil),
+  general: fn() -> Build(Nil),
+) -> Build(Nil) {
+  use e <- anf.then(ask)
+  let all_silent =
+    list.all(elements, fn(el) {
+      option.map(el, silent(e, _)) |> option.unwrap(True)
+    })
+  use <- bool.lazy_guard(!all_silent || elements == [], general)
+  use unpacked <- anf.then(
+    anf.host("unpack_array", [source, ir.ConstI32(list.length(elements))]),
+  )
+  use missed <- anf.then(
+    anf.let_(ir.NumTerm(ir.NEq, unpacked, ir.ConstAtom("miss"))),
+  )
+  let done = fn(_) { anf.pure(e.consts.undef) }
+  use _ <- anf.then(anf.let_if(
+    missed,
+    anf.then(general(), done),
+    anf.then(bind_unpacked(elements, unpacked, 0, bind_one), done),
+  ))
+  anf.pure(Nil)
+}
+
+fn bind_unpacked(
+  elements: List(Option(el)),
+  unpacked: ir.Value,
+  index: Int,
+  bind_one: fn(el, ir.Value) -> Build(Nil),
+) -> Build(Nil) {
+  case elements {
+    [] -> anf.pure(Nil)
+    [None, ..rest] -> bind_unpacked(rest, unpacked, index + 1, bind_one)
+    [Some(el), ..rest] -> {
+      use v <- anf.then(anf.let_(anf.tuple_get(unpacked, index)))
+      use _ <- anf.then(bind_one(el, v))
+      bind_unpacked(rest, unpacked, index + 1, bind_one)
     }
   }
 }

@@ -1480,25 +1480,32 @@ fn emit_for_of(
   }
   use e <- seed_head(e)
   let head_scope = e.cur_scope
-  use iterable, e <- expr_(e, right)
+  let #(start_tree, e) = anf.run(expr.for_of_record(right), e)
+  let #(start, e) = state.fresh_var(e)
+  let #(before, e) = state.fresh_var(e)
   let #(it, e) = state.fresh_var(e)
   let after_iter = fn(e: Emitter) -> EmitResult {
     let carried = for_in_of_carried(e, left, body)
     let result_tys = carried_types(carried)
+    let #(exit, e) = state.fresh_label(e)
     let #(brk, e) = state.fresh_label(e)
     let #(cont, e) = state.fresh_label(e)
     let #(head, e) = state.fresh_label(e)
     let #(exn, e) = state.fresh_var(e)
     let #(user_params, e) = carried_params(e, carried)
+    let loop_params = [
+      ir.LoopParam(name: before, ty: ir.TTerm, init: ir.Var(start)),
+      ..user_params
+    ]
     let #(esc, e) = state.fresh_escape(e, 0)
     let e = state.push_loop(e, brk, cont, carried, Some(#(it, esc)))
     use #(loop_body, e) <- result.try(
       cps.with_done(e, fn(done, e) {
         let e = enter_loop_body(e, carried, user_params)
-        use step, e <- cps.host(e, "iter_next", [ir.Var(it)])
+        use step, e <- cps.host(e, "for_of_next", [ir.Var(before)])
         use done_value, e <- cps.let_(e, ir.TermOp(ir.TupleGet(0), [step]))
         use done_i, e <- cps.let_(e, anf.is_true_expr(done_value))
-        let brk_payload = carried_values(e, carried)
+        let exit_payload = carried_values(e, carried)
         use #(not_done, e) <- result.try(
           cps.with_done(e, fn(done_nd, e) {
             use val, e <- cps.let_(e, ir.TermOp(ir.TupleGet(1), [step]))
@@ -1517,7 +1524,10 @@ fn emit_for_of(
                   carried,
                   ir.Block(cont, result_tys, cont_body),
                 )
-                done_tb(ir.Continue(head, carried_values(e, carried)), e)
+                done_tb(
+                  ir.Continue(head, [ir.Var(it), ..carried_values(e, carried)]),
+                  e,
+                )
               }),
             )
             use #(handler, e) <- result.try(
@@ -1542,26 +1552,39 @@ fn emit_for_of(
                   ),
                 ]),
               )
-            done_nd(region, e)
+            // a break lands here, where this turn's record is in scope
+            use #(broke, e) <- result.try(
+              rebind_after_block(
+                e,
+                carried,
+                ir.Block(
+                  brk,
+                  result_tys,
+                  ir.Let([], region, ir.Values(exit_payload)),
+                ),
+                fn(e) {
+                  use e <- cps.host_unit(e, "iter_close", [
+                    ir.Var(it),
+                    e.consts.false_,
+                  ])
+                  Ok(#(ir.Break(exit, carried_values(e, carried)), e))
+                },
+              ),
+            )
+            done_nd(ir.Let([it], ir.TermOp(ir.TupleGet(2), [step]), broke), e)
           }),
         )
-        done(ir.If(done_i, [], ir.Break(brk, brk_payload), not_done), e)
+        done(ir.If(done_i, [], ir.Break(exit, exit_payload), not_done), e)
       }),
     )
     let e = state.pop_frame(e)
     let outer =
-      ir.Block(brk, result_tys, ir.Loop(head, user_params, [], loop_body))
+      ir.Block(exit, result_tys, ir.Loop(head, loop_params, [], loop_body))
     let e = state.leave_for_scope(e, save)
-    rebind_after_block(e, carried, outer, fn(e) {
-      cps.host_unit(e, "iter_close", [ir.Var(it), e.consts.false_], next)
-    })
+    rebind_after_block(e, carried, outer, next)
   }
   use body_tree <- state.map_tree(after_iter(e))
-  ir.Let(
-    [it],
-    ir.CallHost("js", "get_iterator", [iterable, ir.ConstAtom("sync")]),
-    body_tree,
-  )
+  ir.Let([start], start_tree, body_tree)
 }
 
 fn emit_try(

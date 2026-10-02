@@ -1,8 +1,11 @@
 import arc/bytecode/key.{type PropertyKey, Named}
+import arc/bytecode/opcode.{type IterView, EntriesView, KeysView, ValuesView}
+import arc/internal/unsafe
 import arc/rt/async as rt_async
 import arc/rt/builtins/iter_protocol
 import arc/rt/builtins/object as b_object
 import arc/rt/call.{NormalCompletion, ThrowCompletion, call} as rt_call
+import arc/rt/js_string
 import arc/rt/obj as rt_obj
 import arc/rt/store as rt_store
 import arc/rt/types.{
@@ -21,7 +24,8 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 
-// iterator record is a null-proto object: iterator, next, done
+// a record is a bare IteratorRecord where its holder tracks done itself,
+// else a null-proto object: iterator, next, done
 pub type IterHint {
   Sync
   Async
@@ -86,7 +90,15 @@ pub fn alloc_record(st: Agent, rec: IteratorRecord) -> #(JsVal, Agent) {
 }
 
 pub fn record_parts(st: Agent, rec: JsVal) -> Option(IteratorRecord) {
-  record_props(st, rec) |> option.then(parts_of)
+  stack_record(rec)
+  |> option.lazy_or(fn() { record_props(st, rec) |> option.then(parts_of) })
+}
+
+@external(erlang, "arc_rt_lang_ffi", "stack_record")
+fn stack_record(rec: JsVal) -> Option(IteratorRecord)
+
+fn as_stack_record(rec: IteratorRecord) -> JsVal {
+  unsafe.coerce(rec)
 }
 
 fn record_props(
@@ -123,6 +135,9 @@ type PlainRecord {
 fn plain_iter_record(st: Agent, rec: JsVal) -> PlainRecord
 
 fn read_record(st: Agent, rec: JsVal) -> #(Bool, IteratorRecord, Agent) {
+  use <- option.lazy_unwrap(
+    stack_record(rec) |> option.map(fn(record) { #(False, record, st) }),
+  )
   case record_fields(st, rec) {
     Some(#(done, record)) -> #(done, record, st)
     None -> {
@@ -147,6 +162,7 @@ fn record_fields(st: Agent, rec: JsVal) -> Option(#(Bool, IteratorRecord)) {
 }
 
 fn mark_done(st: Agent, rec: JsVal) -> Agent {
+  use <- bool.guard(option.is_some(stack_record(rec)), st)
   let #(_, st) = rt_obj.set_prop(st, rec, done_key, mk_bool(True))
   st
 }
@@ -174,7 +190,8 @@ fn native_iter(st: Agent, record: IteratorRecord) -> NativeIter {
   }
 }
 
-fn generator_step(
+// called by name from arc_rt_lang_ffi
+pub fn generator_step(
   st: Agent,
   rec: JsVal,
   data: Handle,
@@ -242,6 +259,22 @@ fn protocol_step(
 
 // §7.4.11 iteratorclose; abrupt swallows what return() does
 pub fn iter_close(st: Agent, rec: JsVal, abrupt abrupt: Bool) -> Agent {
+  case is_array_iter(rec), abrupt {
+    False, _ -> close_record(st, rec, abrupt)
+    True, False -> {
+      let #(rec, st) = closable_record(st, rec)
+      close_record(st, rec, abrupt)
+    }
+    True, True ->
+      case rt_call.try_run(st, closable_record(_, rec)) {
+        #(NormalCompletion(rec), st) -> close_record(st, rec, abrupt)
+        #(ThrowCompletion(_original_wins), st) -> st
+      }
+  }
+}
+
+fn close_record(st: Agent, rec: JsVal, abrupt: Bool) -> Agent {
+  use <- bool.guard(rec == mk_undefined(), st)
   let #(done, record, st) = read_record(st, rec)
   case done {
     True -> st
@@ -424,14 +457,132 @@ pub fn array_iter_next(store: Store, rec: JsVal) -> ArrayIterStep
 @external(erlang, "arc_rt_lang_ffi", "is_array_iter")
 pub fn is_array_iter(v: JsVal) -> Bool
 
+// miss unless calling the view method and iterating its result observes nothing
+@external(erlang, "arc_rt_lang_ffi", "view_iter_start")
+pub fn view_iter_start(st: Agent, receiver: JsVal, view: IterView) -> JsVal
+
 @external(erlang, "arc_rt_lang_ffi", "array_iter_parts")
-pub fn array_iter_parts(rec: JsVal) -> #(JsVal, Int, JsVal)
+fn array_iter_parts(rec: JsVal) -> #(JsVal, Int, JsVal, IterView)
 
 @external(erlang, "arc_rt_lang_ffi", "array_iter_proto")
 pub fn array_iter_proto(st: Agent, rec: JsVal) -> Handle
 
 @external(erlang, "arc_rt_lang_ffi", "array_iter_record")
-pub fn array_iter_record(target: JsVal, index: Int, next_fn: JsVal) -> JsVal
+fn array_iter_record(
+  target: JsVal,
+  index: Int,
+  next_fn: JsVal,
+  view: IterView,
+) -> JsVal
+
+// §7.4.3 for a holder that drops the record once done; nothing goes on the heap
+pub fn for_of_start(st: Agent, iterable: JsVal) -> #(JsVal, Agent) {
+  let rec = array_iter_start(st, iterable)
+  case is_array_iter(rec) {
+    True -> #(rec, st)
+    False -> {
+      let #(record, st) = iter_protocol.get_iterator_sync(st, iterable)
+      #(as_stack_record(record), st)
+    }
+  }
+}
+
+// done, value, next record; the record is undefined once done
+@external(erlang, "arc_rt_lang_ffi", "for_of_next")
+pub fn for_of_next(st: Agent, rec: JsVal) -> #(#(Bool, JsVal, JsVal), Agent)
+
+// the stack record spelled out with full get semantics; called by name from arc_rt_lang_ffi
+pub fn array_iter_next_general(
+  st: Agent,
+  rec: JsVal,
+) -> #(#(Bool, JsVal, JsVal), Agent) {
+  let #(target, index, next_fn, view) = array_iter_parts(rec)
+  let len = case classify(target) {
+    KHandle(h) ->
+      case rt_store.cell_get(st, h) {
+        SObject(kind: types.ArrayObj(length:), ..) -> length
+        _ -> 0
+      }
+    _ -> 0
+  }
+  case index >= len {
+    True -> #(#(True, mk_undefined(), mk_undefined()), st)
+    False -> {
+      let #(v, st) = case view {
+        KeysView -> #(types.mk_int(index), st)
+        ValuesView -> rt_obj.get_prop(st, target, StringKey(key.Index(index)))
+        EntriesView -> {
+          let #(v, st) =
+            rt_obj.get_prop(st, target, StringKey(key.Index(index)))
+          rt_obj.new_array(st, [types.mk_int(index), v])
+        }
+      }
+      #(#(False, v, array_iter_record(target, index + 1, next_fn, view)), st)
+    }
+  }
+}
+
+// gives the record real iterator objects once something may observe them
+pub fn materialize_record(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
+  use <- bool.guard(!is_array_iter(rec), #(rec, st))
+  let #(target, index, next_fn, view) = array_iter_parts(rec)
+  let kind = case classify(target) {
+    KHandle(h) ->
+      case rt_store.cell_get(st, h), view {
+        SObject(kind: types.MapObj(_), ..), KeysView ->
+          types.MapIterator(target: h, index:, kind: types.MapIterKeys)
+        SObject(kind: types.MapObj(_), ..), ValuesView ->
+          types.MapIterator(target: h, index:, kind: types.MapIterValues)
+        SObject(kind: types.MapObj(_), ..), EntriesView ->
+          types.MapIterator(target: h, index:, kind: types.MapIterEntries)
+        SObject(kind: types.SetObj(_), ..), EntriesView ->
+          types.SetIterator(target: h, index:, kind: types.SetIterEntries)
+        SObject(kind: types.SetObj(_), ..), _ ->
+          types.SetIterator(target: h, index:, kind: types.SetIterValues)
+        _, KeysView ->
+          types.ArrayIterator(target: h, index:, kind: types.ArrayIterKeys)
+        _, ValuesView ->
+          types.ArrayIterator(target: h, index:, kind: types.ArrayIterValues)
+        _, EntriesView ->
+          types.ArrayIterator(target: h, index:, kind: types.ArrayIterEntries)
+      }
+    _ -> types.StringIterator(source: js_string.text(target), index:)
+  }
+  let #(iter, st) =
+    rt_store.cell_new(
+      st,
+      types.SObject(
+        kind:,
+        proto: Some(array_iter_proto(st, rec)),
+        props: dict.new(),
+        symbol_props: [],
+        elements: types.NoElements,
+        extensible: True,
+      ),
+    )
+  #(
+    as_stack_record(IteratorRecord(
+      iterator: mk_object(iter),
+      next_method: next_fn,
+    )),
+    st,
+  )
+}
+
+// §7.4.11 only needs the objects when a return method exists; undefined if not
+pub fn closable_record(st: Agent, rec: JsVal) -> #(JsVal, Agent) {
+  use <- bool.guard(!is_array_iter(rec), #(rec, st))
+  let #(ret, st) =
+    rt_obj.get_prop(
+      st,
+      mk_object(array_iter_proto(st, rec)),
+      StringKey(Named("return")),
+    )
+  case classify(ret) {
+    KUndef | KNull -> #(mk_undefined(), st)
+    _ -> materialize_record(st, rec)
+  }
+}
 
 // absent name throws referenceerror; called by name from arc_rt_obj_ffi
 pub fn global_get(st: Agent, name: BitArray) -> #(JsVal, Agent) {
