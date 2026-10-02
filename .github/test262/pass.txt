@@ -5781,6 +5781,7 @@ built-ins/Date/parse/prop-desc.js
 built-ins/Date/parse/time-value-maximum-range.js
 built-ins/Date/parse/without-utc-offset.js
 built-ins/Date/parse/year-zero.js
+built-ins/Date/parse/zero.js
 built-ins/Date/prop-desc.js
 built-ins/Date/proto-from-ctor-realm-one.js
 built-ins/Date/proto-from-ctor-realm-two.js
@@ -51592,6 +51593,7 @@ staging/sm/Date/dst-offset-caching-8-of-8.js
 staging/sm/Date/equality-to-boolean.js
 staging/sm/Date/fractions.js
 staging/sm/Date/makeday-year-month-is-infinity.js
+staging/sm/Date/non-iso.js
 staging/sm/Date/prototype-is-not-a-date.js
 staging/sm/Date/setTime-argument-shortcircuiting.js
 staging/sm/Date/time-components-negative-zero.js
