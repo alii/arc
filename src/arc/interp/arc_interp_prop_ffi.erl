@@ -1,7 +1,7 @@
 %% property kernels for the interpreter; exports may answer miss, never raise
 -module(arc_interp_prop_ffi).
 -export([get_field/3, find_accessor/3, own_data/2, get_elem/3, get_elem_keep/3, put_field/5, put_elem/4,
-         define_field/4, new_object/5, new_receiver/2, get_global/3,
+         define_field/4, new_object/5, new_object_shaped/5, new_receiver/2, get_global/3,
          put_global/6]).
 
 -include("../rt/arc_rt_layout.hrl").
@@ -344,6 +344,14 @@ new_object(Store, Proto, Keys, N, Stack) when tuple_size(Store) =:= ?STORE_SIZE 
     Id = element(?STORE_NEXT_ID, Store),
     Store2 = ?ALLOC_CELL(Store, element(?STORE_CELLS, Store), Id, Cell),
     {{?HANDLE_TAG, Id}, Stack2, setelement(?STORE_PROP_SEQ, Store2, Seq + N)}.
+
+new_object_shaped(St, Keys, N, Stack, Site) ->
+    {Vals, Stack2} = popped(N, Stack, []),
+    {Obj, St2} = arc_rt_obj_ic_ffi:new_object_shaped(St, Keys, Vals, Site),
+    {Obj, Stack2, St2}.
+
+popped(0, Stack, Acc) -> {Acc, Stack};
+popped(N, [V | Stack], Acc) -> popped(N - 1, Stack, [V | Acc]).
 
 %% §10.1.13 once prototype has been read
 new_receiver(St, {?HANDLE_TAG, _} = Proto)

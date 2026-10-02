@@ -17,11 +17,13 @@ import arc/compiler/scope.{
 }
 import arc/module/summary
 import arc/parser/ast
+import arc/rt/limits
 import arc/rt/types.{
   type JsVal, mk_bigint, mk_bool, mk_int, mk_null, mk_string, mk_tdz,
   mk_undefined,
 }
 import arc/rt/val as rt_val
+import gleam/bit_array
 import gleam/bool
 import gleam/dict.{type Dict}
 import gleam/int
@@ -3175,7 +3177,7 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
     ast.SequenceExpression(_, exprs) -> emit_sequence(e, exprs)
 
     // leading static-key data props go into one NewObjectWith
-    ast.ObjectExpression(_, properties) -> {
+    ast.ObjectExpression(span, properties) -> {
       let LiteralHead(keys:, members:, rest:) =
         literal_head(properties, [], [], set.new())
       case members {
@@ -3189,8 +3191,18 @@ fn emit_expr(e: Emitter, expr: ast.Expression) -> Result(Emitter, EmitError) {
               emit_named_expr(e, member.value, member.name)
             }),
           )
-          let e = emit_op(e, opcode.NewObjectWith(keys, list.length(keys)))
-          list.try_fold(rest, e, emit_object_property)
+          let count = list.length(keys)
+          case rest, count <= limits.max_shape_slots {
+            [], True -> {
+              let names =
+                list.map(members, fn(m) { bit_array.from_string(m.name) })
+              Ok(emit_op(e, opcode.NewObjectShaped(names, count, span.start)))
+            }
+            // what follows would only take the shape apart again
+            _, _ ->
+              emit_op(e, opcode.NewObjectWith(keys, count))
+              |> list.try_fold(rest, _, emit_object_property)
+          }
         }
       }
     }

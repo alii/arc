@@ -94,6 +94,8 @@ pub type Op {
   NewObject
   // keys stored last key first, the order values pop
   NewObjectWith(keys: List(PropertyKey), count: Int)
+  // the whole literal, keys first key first; site is unique within its unit
+  NewObjectShaped(keys: List(BitArray), count: Int, site: Int)
   DefineField(key: PropertyKey)
   DefineFieldComputed
   ToPropertyKey
