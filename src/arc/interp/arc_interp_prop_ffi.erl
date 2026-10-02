@@ -385,8 +385,8 @@ chain_takes_write(Store, _, {?SOME, {?HANDLE_TAG, PId}}, {?KEY_NAMED, KB})
     true;
 chain_takes_write(Store, Cells, Proto, {?KEY_NAMED, _} = K) ->
     arc_rt_obj_ffi:chain_takes_named_write(Store, Cells, Proto, K);
-chain_takes_write(_, Cells, Proto, {?KEY_INDEX, Idx}) ->
-    chain_lacks_index(Cells, Proto, Idx, ?MAX_PROTO_HOPS).
+chain_takes_write(Store, Cells, Proto, {?KEY_INDEX, Idx}) ->
+    arc_rt_obj_ffi:chain_takes_index_write(Store, Cells, Proto, Idx).
 
 %% creating an element needs free proto chain, writable length
 put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
@@ -397,34 +397,37 @@ put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
           when Props =:= #{}; not is_map_key({?KEY_INDEX, Idx}, Props) ->
             if
                 Idx < Length ->
-                    NewE = case elem_overwrite(Elems, Idx, V) of
+                    {NewE, Store1} = case elem_overwrite(Elems, Idx, V) of
                         hole ->
-                            case chain_lacks_index(Cells, Proto, Idx,
-                                                   ?MAX_PROTO_HOPS) of
-                                true -> elem_write_grow(Elems, Idx, V);
-                                false -> miss
+                            case arc_rt_obj_ffi:chain_takes_index_write(
+                                   Store, Cells, Proto, Idx) of
+                                false -> {miss, Store};
+                                Free ->
+                                    {elem_write_grow(Elems, Idx, V),
+                                     arc_rt_obj_ffi:remembering(Free, Store)}
                             end;
-                        E -> E
+                        E -> {E, Store}
                     end,
                     case NewE of
                         miss -> miss;
                         _ ->
                             NewCell = {?SOBJECT_TAG, Kind, Proto, Props, Sym, NewE, true},
-                            setelement(?STORE_CELLS, Store,
+                            setelement(?STORE_CELLS, Store1,
                                        arc_rt_arena_ffi:set(Id, NewCell, Cells))
                     end;
                 Idx =:= Length, Idx =< ?MAX_ARRAY_INDEX ->
                     case length_writable(Props)
-                         andalso chain_lacks_index(Cells, Proto, Idx,
-                                                   ?MAX_PROTO_HOPS) of
+                         andalso arc_rt_obj_ffi:chain_takes_index_write(
+                                   Store, Cells, Proto, Idx) of
                         false -> miss;
-                        true ->
+                        Free ->
                             case elem_write_grow(Elems, Idx, V) of
                                 miss -> miss;
                                 NewE ->
                                     NewCell = {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Idx + 1},
                                                Proto, Props, Sym, NewE, true},
-                                    setelement(?STORE_CELLS, Store,
+                                    setelement(?STORE_CELLS,
+                                               arc_rt_obj_ffi:remembering(Free, Store),
                                                arc_rt_arena_ffi:set(Id, NewCell, Cells))
                             end
                     end;
