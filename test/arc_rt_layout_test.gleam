@@ -949,6 +949,7 @@ pub fn ic_entry_tags_test() {
   assert tag_of(types.IcCall(key, dict.new(), dict.new())) == tag("IC_CALL")
   let blank = SBox(types.mk_undefined())
   assert tag_of(types.IcInit(0, 1, blank, [])) == tag("IC_INIT")
+  assert tag_of(types.IcLiteral(blank)) == tag("IC_LITERAL")
   assert tag_of(types.IcGlobal(key, 0, types.mk_undefined(), 0))
     == tag("IC_GLOBAL")
   assert dyn(types.IcOff) == tag("IC_OFF")

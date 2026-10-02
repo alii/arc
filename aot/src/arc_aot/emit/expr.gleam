@@ -4,6 +4,7 @@ import arc/bytecode/opcode
 import arc/compiler/ast_util
 import arc/compiler/scope
 import arc/parser/ast
+import arc/rt/limits
 import arc/rt/types
 import arc/rt/val as rt_val
 import arc_aot/emit/anf.{type Build}
@@ -2733,7 +2734,14 @@ fn emit_object(properties: List(ast.Property)) -> Build(ir.Value) {
         ),
       )
       use vals <- anf.then(anf.cons_list(vs))
-      anf.host("new_object_props", [keys, vals])
+      case rest, list.length(lead) <= limits.max_shape_slots {
+        [], True -> {
+          use site <- anf.then(next_ic_site())
+          anf.host("new_object_shaped", [keys, vals, ir.ConstI32(site)])
+        }
+        // what follows would only take the shape apart again
+        _, _ -> anf.host("new_object_props", [keys, vals])
+      }
     }
   })
   fold_build(rest, obj, emit_object_property)

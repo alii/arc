@@ -1848,6 +1848,8 @@ pub type IcEntry {
     shaped: Dict(Int, Dict(Int, IcCallWay)),
   )
   IcInit(from: Int, to: Int, blank: Cell, chain: List(#(Int, Cell)))
+  // the shaped cell an object literal fills its slots into
+  IcLiteral(blank: Cell)
   IcGlobal(key: BitArray, epoch: Int, value: JsVal, refills: Int)
   IcOff
 }

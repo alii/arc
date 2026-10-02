@@ -367,6 +367,7 @@
 -define(IC_READ, ic_read).
 -define(IC_CALL, ic_call).
 -define(IC_INIT, ic_init).
+-define(IC_LITERAL, ic_literal).
 -define(IC_GLOBAL, ic_global).
 -define(IC_OFF, ic_off).
 %% IcCallMatch tags

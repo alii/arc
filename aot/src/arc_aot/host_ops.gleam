@@ -55,6 +55,7 @@ pub fn table() -> DirectHost {
       #("tdz_check", HostOp(val, "tdz_check", MutUnit)),
       #("check_this", HostOp(val, "check_this", MutUnit)),
       #("new_object_literal", HostOp(obj, "new_object_literal", Mut)),
+      #("new_object_shaped", HostOp(obj_ic_ffi, "new_object_shaped", Mut)),
       #("new_object_props", HostOp(obj_ic_ffi, "new_object_props", Mut)),
       #("new_array", HostOp(obj, "new_array", Mut)),
       #("array_lit", HostOp(obj_ffi, "array_lit", Mut)),

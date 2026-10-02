@@ -1,6 +1,6 @@
 %% site ic kernels called only by aot emitted code; exports may answer miss
 -module(arc_rt_obj_ic_ffi).
--export([set_named_init_ic/6, new_object_props/3,
+-export([set_named_init_ic/6, new_object_props/3, new_object_shaped/4,
          set_named_ic/6, get_named_ic/4, get_named_ic_shaped/4,
          global_get_ic/3, global_get_ic_fill/3]).
 
@@ -359,6 +359,39 @@ each_named(St, Obj, [K | Ks], [V | Vs], Strict) ->
     each_named(arc_rt_obj_ffi:set_named(St, Obj, K, V, Strict), Obj,
                Ks, Vs, Strict);
 each_named(St, _, _, _, _) -> St.
+
+%% a literal of distinct plain named keys: one shaped cell, its shape cached by site
+new_object_shaped(St, Keys, Vals, Site) when tuple_size(St) =:= ?AGENT_SIZE ->
+    Store = element(?AGENT_STORE, St),
+    Proto = {?SOME, element(?BUILTINPAIR_PROTOTYPE,
+                            element(?REALM_OBJECT, element(?AGENT_REALM, St)))},
+    case element(?STORE_ICS, Store) of
+        #{Site := {?IC_LITERAL, Blank}}
+          when element(?SSHAPEDOBJECT_PROTO, Blank) =:= Proto ->
+            alloc_shaped(St, Store, Blank, Vals);
+        _ ->
+            {Sid, Offs, St1} = literal_shape(St, 0, #{}, Keys),
+            Blank = {?SSHAPEDOBJECT_TAG, Sid, Proto, {}, Offs},
+            Store1 = element(?AGENT_STORE, St1),
+            Ics = element(?STORE_ICS, Store1),
+            alloc_shaped(St1,
+                         setelement(?STORE_ICS, Store1,
+                                    Ics#{Site => {?IC_LITERAL, Blank}}),
+                         Blank, Vals)
+    end.
+
+literal_shape(St, Sid, Offs, []) -> {Sid, Offs, St};
+literal_shape(St, Sid, _, [K | Ks]) ->
+    {?SOME, {To, Offs, St1}} = 'arc@rt@obj':shape_after(St, Sid, K),
+    literal_shape(St1, To, Offs, Ks).
+
+alloc_shaped(St, Store, Blank, Vals)
+  when tuple_size(Store) =:= ?STORE_SIZE, tuple_size(Blank) =:= ?SSHAPEDOBJECT_SIZE ->
+    Id = element(?STORE_NEXT_ID, Store),
+    Cell = setelement(?SSHAPEDOBJECT_SLOTS, Blank, list_to_tuple(Vals)),
+    {{?HANDLE_TAG, Id},
+     setelement(?AGENT_STORE, St,
+                ?ALLOC_CELL(Store, element(?STORE_CELLS, Store), Id, Cell))}.
 
 new_object_props(St, Keys, Vals) ->
     Store = element(?AGENT_STORE, St),

@@ -198,6 +198,7 @@ tag(<<"SYMBOL_ITERATOR">>) -> ?SYMBOL_ITERATOR;
 tag(<<"IC_READ">>) -> ?IC_READ;
 tag(<<"IC_CALL">>) -> ?IC_CALL;
 tag(<<"IC_INIT">>) -> ?IC_INIT;
+tag(<<"IC_LITERAL">>) -> ?IC_LITERAL;
 tag(<<"IC_GLOBAL">>) -> ?IC_GLOBAL;
 tag(<<"IC_OFF">>) -> ?IC_OFF;
 tag(<<"ICPLAIN_TAG">>) -> ?ICPLAIN_TAG;
