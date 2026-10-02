@@ -324,11 +324,7 @@ fn uri_decode_dispatch(
   let #(s, st) = rt_val.to_string(st, helpers.first_arg_or_undefined(args))
   case uri_decode(s, kind) {
     Ok(decoded) -> #(mk_string(decoded), st)
-    Error(offset) ->
-      rt_val.throw(
-        st,
-        JsError(UriError, "URI malformed at position " <> int.to_string(offset)),
-      )
+    Error(Nil) -> rt_val.throw(st, JsError(UriError, "URI malformed"))
   }
 }
 
@@ -390,22 +386,21 @@ fn percent_encode_bytes(bytes: BitArray, acc: String) -> String {
   }
 }
 
-fn uri_decode(text: String, kind: UriKind) -> Result(String, Int) {
-  uri_decode_loop(<<text:utf8>>, kind, 0, "")
+fn uri_decode(text: String, kind: UriKind) -> Result(String, Nil) {
+  uri_decode_loop(<<text:utf8>>, kind, "")
 }
 
 fn uri_decode_loop(
   bytes: BitArray,
   kind: UriKind,
-  offset: Int,
   acc: String,
-) -> Result(String, Int) {
+) -> Result(String, Nil) {
   case bytes {
     <<>> -> Ok(acc)
     <<0x25, _:bytes>> ->
-      case decode_utf8_escape(bytes, offset) {
-        Error(e) -> Error(e)
-        Ok(#(cp, consumed, rest)) -> {
+      case decode_utf8_escape(bytes) {
+        Error(Nil) -> Error(Nil)
+        Ok(#(cp, rest)) -> {
           let reserved =
             kind == WholeUri && cp < 128 && is_uri_reserved_byte(cp)
           let sub = case reserved, bytes {
@@ -418,42 +413,38 @@ fn uri_decode_loop(
               string.from_utf_codepoints([ucp])
             }
           }
-          uri_decode_loop(rest, kind, offset + consumed, acc <> sub)
+          uri_decode_loop(rest, kind, acc <> sub)
         }
       }
     <<cp:utf8_codepoint, rest:bytes>> -> {
       let ch = string.from_utf_codepoints([cp])
-      uri_decode_loop(rest, kind, offset + string.byte_size(ch), acc <> ch)
+      uri_decode_loop(rest, kind, acc <> ch)
     }
-    _ -> Error(offset)
+    _ -> Error(Nil)
   }
 }
 
-fn decode_utf8_escape(
-  bytes: BitArray,
-  offset: Int,
-) -> Result(#(Int, Int, BitArray), Int) {
+fn decode_utf8_escape(bytes: BitArray) -> Result(#(Int, BitArray), Nil) {
   case take_percent_byte(bytes) {
-    None -> Error(offset)
+    None -> Error(Nil)
     Some(#(b0, rest)) ->
       case b0 {
-        _ if b0 < 0x80 -> Ok(#(b0, 3, rest))
+        _ if b0 < 0x80 -> Ok(#(b0, rest))
         _ if b0 >= 0xc2 && b0 <= 0xdf ->
           case take_percent_cont(rest) {
             Some(#(b1, rest)) ->
               Ok(#(
                 int.bitwise_and(b0, 0x1f) * 64 + int.bitwise_and(b1, 0x3f),
-                6,
                 rest,
               ))
-            None -> Error(offset)
+            None -> Error(Nil)
           }
         _ if b0 >= 0xe0 && b0 <= 0xef ->
           case take_percent_cont(rest) {
-            None -> Error(offset)
+            None -> Error(Nil)
             Some(#(b1, rest)) ->
               case take_percent_cont(rest) {
-                None -> Error(offset)
+                None -> Error(Nil)
                 Some(#(b2, rest)) -> {
                   let cp =
                     int.bitwise_and(b0, 0x0f)
@@ -462,21 +453,21 @@ fn decode_utf8_escape(
                     * 64
                     + int.bitwise_and(b2, 0x3f)
                   case cp >= 0x800 && { cp < 0xd800 || cp > 0xdfff } {
-                    True -> Ok(#(cp, 9, rest))
-                    False -> Error(offset)
+                    True -> Ok(#(cp, rest))
+                    False -> Error(Nil)
                   }
                 }
               }
           }
         _ if b0 >= 0xf0 && b0 <= 0xf4 ->
           case take_percent_cont(rest) {
-            None -> Error(offset)
+            None -> Error(Nil)
             Some(#(b1, rest)) ->
               case take_percent_cont(rest) {
-                None -> Error(offset)
+                None -> Error(Nil)
                 Some(#(b2, rest)) ->
                   case take_percent_cont(rest) {
-                    None -> Error(offset)
+                    None -> Error(Nil)
                     Some(#(b3, rest)) -> {
                       let cp =
                         int.bitwise_and(b0, 0x07)
@@ -487,14 +478,14 @@ fn decode_utf8_escape(
                         * 64
                         + int.bitwise_and(b3, 0x3f)
                       case cp >= 0x10000 && cp <= 0x10ffff {
-                        True -> Ok(#(cp, 12, rest))
-                        False -> Error(offset)
+                        True -> Ok(#(cp, rest))
+                        False -> Error(Nil)
                       }
                     }
                   }
               }
           }
-        _ -> Error(offset)
+        _ -> Error(Nil)
       }
   }
 }

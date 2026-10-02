@@ -131,12 +131,24 @@ value(Bin, P, Src) ->
         <<_:P/binary, "false", _/binary>> ->
             {{json_bool, false, <<"false">>}, P + 5};
         <<_:P/binary, C, _/binary>> when C =:= $-; ?DIGIT(C) -> number(Bin, P, Src);
-        <<_:P/binary>> -> fail(unexpected_end);
-        <<_:P/binary, C/utf8, _/binary>> -> fail({unexpected_token, <<C/utf8>>});
-        _ -> fail(invalid_utf8)
+        <<_:P/binary, $n, _/binary>> -> literal(Bin, P + 1, <<"ull">>);
+        <<_:P/binary, $t, _/binary>> -> literal(Bin, P + 1, <<"rue">>);
+        <<_:P/binary, $f, _/binary>> -> literal(Bin, P + 1, <<"alse">>);
+        <<_:P/binary>> -> fail(unexpected_end, P);
+        <<_:P/binary, _/utf8, _/binary>> -> fail(unexpected_character, P);
+        _ -> fail(invalid_utf8, P)
     end.
 
-fail(Reason) -> throw({json, Reason}).
+%% a literal that went wrong, fails at the first byte that differs
+literal(Bin, P, <<C, Rest/binary>>) ->
+    case Bin of
+        <<_:P/binary, C, _/binary>> -> literal(Bin, P + 1, Rest);
+        <<_:P/binary>> -> fail(unexpected_end, P);
+        _ -> fail(unexpected_character, P)
+    end.
+
+%% p is a byte offset into the text
+fail(Kind, P) -> throw({json, {parse_failure, Kind, P}}).
 
 %% p is past the opening quote, start marks the pending literal run
 str(Bin, Start, P) ->
@@ -150,9 +162,9 @@ str(Bin, Start, P) ->
         <<_:P/binary, $\\, _/binary>> ->
             escape(Bin, P + 1, binary:part(Bin, Start, P - Start));
         <<_:P/binary, C, _/binary>> when C < 16#20 ->
-            fail(control_char_in_string);
+            fail(bad_control_character, P);
         <<_:P/binary, _, _/binary>> -> str(Bin, Start, P + 1);
-        _ -> fail(unterminated_string)
+        _ -> fail(unterminated_string, P)
     end.
 
 str_acc(Bin, Start, P, Acc) ->
@@ -163,9 +175,9 @@ str_acc(Bin, Start, P, Acc) ->
         <<_:P/binary, $\\, _/binary>> ->
             escape(Bin, P + 1, [Acc | binary:part(Bin, Start, P - Start)]);
         <<_:P/binary, C, _/binary>> when C < 16#20 ->
-            fail(control_char_in_string);
+            fail(bad_control_character, P);
         <<_:P/binary, _, _/binary>> -> str_acc(Bin, Start, P + 1, Acc);
-        _ -> fail(unterminated_string)
+        _ -> fail(unterminated_string, P)
     end.
 
 escape(Bin, P, Acc) ->
@@ -180,9 +192,10 @@ escape(Bin, P, Acc) ->
         <<_:P/binary, $u, _/binary>> ->
             {Utf8, P1} = unicode_escape(Bin, P + 1),
             str_acc(Bin, P1, P1, [Acc | Utf8]);
-        <<_:P/binary>> -> fail(unterminated_escape);
-        <<_:P/binary, C/utf8, _/binary>> -> fail({invalid_escape, <<C/utf8>>});
-        _ -> fail(unterminated_escape)
+        <<_:P/binary>> -> fail(unexpected_end, P);
+        <<_:P/binary, C/utf8, _/binary>> when C > 16#FF ->
+            fail(unexpected_character, P);
+        _ -> fail(bad_escaped_character, P)
     end.
 
 unicode_escape(Bin, P) ->
@@ -224,12 +237,22 @@ hex4(Bin, P) ->
     case Bin of
         <<_:P/binary, A, B, C, D, _/binary>> ->
             case hex(A) bor hex(B) bor hex(C) bor hex(D) of
-                Bad when Bad > 15 -> fail(invalid_unicode_escape);
+                Bad when Bad > 15 -> fail(bad_unicode_escape, not_hex(Bin, P));
                 _ ->
                     (hex(A) bsl 12) bor (hex(B) bsl 8) bor (hex(C) bsl 4)
                         bor hex(D)
             end;
-        _ -> fail(invalid_unicode_escape)
+        _ -> fail(bad_unicode_escape, not_hex(Bin, P))
+    end.
+
+not_hex(Bin, P) ->
+    case Bin of
+        <<_:P/binary, C, _/binary>> ->
+            case hex(C) of
+                16 -> P;
+                _ -> not_hex(Bin, P + 1)
+            end;
+        _ -> P
     end.
 
 hex(C) when C >= $0, C =< $9 -> C - $0;
@@ -243,15 +266,16 @@ number(Bin, P, Src) ->
         _ -> P
     end,
     {P2, Int} = case Bin of
-        <<_:P1/binary, $0, D, _/binary>> when ?DIGIT(D) -> bad_number(Bin, P);
+        <<_:P1/binary, $0, D, _/binary>> when ?DIGIT(D) ->
+            fail(unexpected_character, P1 + 1);
         <<_:P1/binary, $0, _/binary>> -> {P1 + 1, 0};
         <<_:P1/binary, D1, _/binary>> when ?DIGIT(D1) ->
             int_digits(Bin, P1 + 1, D1 - $0);
-        _ -> bad_number(Bin, P)
+        _ -> fail(no_number_after_minus, P1)
     end,
     P3 = case Bin of
         <<_:P2/binary, $., D2, _/binary>> when ?DIGIT(D2) -> digits(Bin, P2 + 2);
-        <<_:P2/binary, $., _/binary>> -> bad_number(Bin, P);
+        <<_:P2/binary, $., _/binary>> -> fail(unterminated_fraction, P2 + 1);
         _ -> P2
     end,
     P4 = case Bin of
@@ -262,8 +286,11 @@ number(Bin, P, Src) ->
         <<_:P3/binary, E, D3, _/binary>>
           when (E =:= $e orelse E =:= $E), ?DIGIT(D3) ->
             digits(Bin, P3 + 2);
+        <<_:P3/binary, E, S, _/binary>>
+          when (E =:= $e orelse E =:= $E), (S =:= $+ orelse S =:= $-) ->
+            fail(exponent_missing_number, P3 + 2);
         <<_:P3/binary, E, _/binary>> when E =:= $e; E =:= $E ->
-            bad_number(Bin, P);
+            fail(exponent_missing_number, P3 + 1);
         _ -> P3
     end,
     Num = case P4 =:= P2 andalso P2 - P1 =< 15 of
@@ -291,28 +318,16 @@ digits(Bin, P) ->
         _ -> P
     end.
 
-bad_number(Bin, P) ->
-    fail({invalid_number, binary:part(Bin, P, number_ish(Bin, P) - P)}).
-
-number_ish(Bin, P) ->
-    case Bin of
-        <<_:P/binary, C, _/binary>>
-          when C =:= $-; C =:= $+; C =:= $.; C =:= $e; C =:= $E; ?DIGIT(C) ->
-            number_ish(Bin, P + 1);
-        _ -> P
-    end.
-
 array(Bin, P, Src, Acc) ->
     case Bin of
         <<_:P/binary, $], _/binary>> -> {{json_array, lists:reverse(Acc)}, P + 1};
-        <<_:P/binary>> -> fail(unterminated_array);
         _ ->
             P1 = case Acc of
                 [] -> P;
                 _ ->
                     case Bin of
                         <<_:P/binary, $,, _/binary>> -> ws(Bin, P + 1);
-                        _ -> fail({expected, <<"',' or ']'">>, <<"array">>})
+                        _ -> fail(expected_comma_or_bracket, P)
                     end
             end,
             {V, P2} = value(Bin, P1, Src),
@@ -323,24 +338,24 @@ object(Bin, P, Src, Acc) ->
     case Bin of
         <<_:P/binary, $}, _/binary>> ->
             {{json_object, lists:reverse(Acc)}, P + 1};
-        <<_:P/binary>> -> fail(unterminated_object);
         _ ->
             P1 = case Acc of
                 [] -> P;
                 _ ->
                     case Bin of
                         <<_:P/binary, $,, _/binary>> -> ws(Bin, P + 1);
-                        _ -> fail({expected, <<"',' or '}'">>, <<"object">>})
+                        _ -> fail(expected_comma_or_brace, P)
                     end
             end,
-            {Key, P2} = case Bin of
-                <<_:P1/binary, $", _/binary>> -> str(Bin, P1 + 1, P1 + 1);
-                _ -> fail({expected, <<"string key">>, <<"object">>})
+            {Key, P2} = case {Bin, Acc} of
+                {<<_:P1/binary, $", _/binary>>, _} -> str(Bin, P1 + 1, P1 + 1);
+                {_, []} -> fail(expected_property_name_or_brace, P1);
+                _ -> fail(expected_property_name, P1)
             end,
             Colon = ws(Bin, P2),
             P3 = case Bin of
                 <<_:Colon/binary, $:, _/binary>> -> ws(Bin, Colon + 1);
-                _ -> fail({expected, <<"':' after key">>, <<"object">>})
+                _ -> fail(expected_colon, Colon)
             end,
             {V, P4} = value(Bin, P3, Src),
             object(Bin, ws(Bin, P4), Src, [{Key, V} | Acc])

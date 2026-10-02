@@ -130,6 +130,35 @@ pub fn parse_formats_test() {
   assert parse(st, "nonsense") == JNan
 }
 
+pub fn parse_own_output_test() {
+  let st = new_york()
+  let t = date_utc(st, [2021, 0, 15, 17, 5, 9])
+  let #(d, st) = new_date(st, ints([t]))
+  assert parse(st, str(st, d, "toString")) == JInt(t)
+  assert parse(st, str(st, d, "toUTCString")) == JInt(t)
+  assert parse(st, str(st, d, "toISOString")) == JInt(t)
+}
+
+pub fn parse_other_formats_test() {
+  let st = new_york()
+  let noon = JInt(date_utc(st, [2021, 0, 15, 17, 0]))
+  assert parse(st, "Jan 15 2021 12:00:00") == noon
+  assert parse(st, "15 January 2021 12:00 pm") == noon
+  assert parse(st, "1/15/2021 12:00") == noon
+  assert parse(st, "2021/01/15 12:00") == noon
+  assert parse(st, "2021-01-15 12:00:00") == noon
+  assert parse(st, "Fri, 15 Jan 2021 17:00:00 GMT") == noon
+  assert parse(st, "Fri Jan 15 2021 09:00:00 GMT-0800 (Pacific Standard Time)")
+    == noon
+  assert parse(st, "2021-01-15 12:00 EST") == noon
+  assert parse(st, "2021-01-15T17:00:00.000123Z") == noon
+  assert parse(st, "0") == JInt(date_utc(st, [2000, 0, 1, 5]))
+  assert parse(st, "2021-02-30") == JInt(date_utc(st, [2021, 2, 2]))
+  assert parse(st, "12:00") == JNan
+  assert parse(st, "Jan 15 2021 12:00pm") == JNan
+  assert parse(st, "Jan 32 2021") == JNan
+}
+
 pub fn to_locale_fallbacks_test() {
   let st = new_york()
   let t = date_utc(st, [2021, 0, 15, 17, 5, 9])

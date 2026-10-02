@@ -3,6 +3,7 @@ import arc/internal/digits
 import arc/internal/gregorian.{civil_from_days, days_from_year}
 import arc/internal/int_math.{floor_div, floor_mod}
 import arc/rt/builtins/common
+import arc/rt/builtins/date_parse.{ParsedDate}
 import arc/rt/builtins/helpers
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
@@ -960,140 +961,24 @@ fn format_tz(tz: Int) -> String {
 }
 
 fn parse_date_string(s: String, basis: TimeBasis) -> JsNum {
-  let s = string.trim(s)
-  parse_iso(s, basis) |> option.unwrap(JNan)
-}
-
-type IsoTime {
-  IsoTime(hours: Int, minutes: Int, seconds: Int, ms: Int)
-}
-
-fn parse_iso(s: String, basis: TimeBasis) -> Option(JsNum) {
-  use #(year, rest) <- option.then(parse_year(s))
-  let #(mon, rest) = parse_dash_int(rest) |> option.unwrap(#(1, rest))
-  let #(day, rest) = parse_dash_int(rest) |> option.unwrap(#(1, rest))
-  use #(time, rest) <- option.then(case rest {
-    "T" <> t -> parse_time(t) |> option.map(fn(p) { #(Some(p.0), p.1) })
-    _ -> Some(#(None, rest))
-  })
-  let IsoTime(h, mi, sec, ms) = option.unwrap(time, IsoTime(0, 0, 0, 0))
-  use #(zone, rest) <- option.then(parse_zone(rest, option.is_some(time)))
-  use Nil <- option.then(validate_iso(year, mon, day, h, mi, sec, ms))
-  case rest {
-    "" ->
-      Some(case zone {
-        LocalZone -> make_date(year, mon - 1, day, h, mi, sec, ms, basis)
-        FixedOffset(minutes) ->
-          make_date(year, mon - 1, day, h, mi, sec, ms, UtcTime)
-          |> jsnum_add_minutes(minutes)
-      })
-    _ -> None
-  }
-}
-
-// parse rejects out-of-range parts, never rolls over
-fn validate_iso(
-  year: Int,
-  mon: Int,
-  day: Int,
-  h: Int,
-  mi: Int,
-  sec: Int,
-  ms: Int,
-) -> Option(Nil) {
-  let hours_ok = case h {
-    24 -> mi == 0 && sec == 0 && ms == 0
-    _ -> h <= 23
-  }
-  case
-    mon >= 1
-    && mon <= 12
-    && day >= 1
-    && day <= days_in_month(year, mon - 1)
-    && hours_ok
-    && mi <= 59
-    && sec <= 59
-  {
-    True -> Some(Nil)
-    False -> None
-  }
-}
-
-fn parse_year(s: String) -> Option(#(Int, String)) {
-  case s {
-    "+" <> rest -> digits.take(rest, 6)
-    // -000000 is invalid, year zero is positive
-    "-" <> rest ->
-      digits.take(rest, 6)
-      |> option.then(fn(p) {
-        case p.0 {
-          0 -> None
-          y -> Some(#(0 - y, p.1))
-        }
-      })
-    _ -> digits.take(s, 4)
-  }
-}
-
-fn parse_dash_int(s: String) -> Option(#(Int, String)) {
-  case s {
-    "-" <> rest -> digits.take(rest, 2)
-    _ -> None
-  }
-}
-
-fn parse_time(s: String) -> Option(#(IsoTime, String)) {
-  use #(h, rest) <- option.then(digits.take(s, 2))
-  use #(mi, rest) <- option.then(case rest {
-    ":" <> r -> digits.take(r, 2)
-    _ -> None
-  })
-  use #(sec, rest) <- option.then(case rest {
-    ":" <> r -> digits.take(r, 2)
-    _ -> Some(#(0, rest))
-  })
-  use #(ms, rest) <- option.then(case rest {
-    "." <> r -> digits.take(r, 3)
-    _ -> Some(#(0, rest))
-  })
-  Some(#(IsoTime(h, mi, sec, ms), rest))
-}
-
-type Zone {
-  // utc minus local, added after reading fields as utc
-  FixedOffset(minutes: Int)
-  LocalZone
-}
-
-// no designator: date-only is utc, date-time is local
-fn parse_zone(s: String, has_time has_time: Bool) -> Option(#(Zone, String)) {
-  case s {
-    "Z" <> rest -> Some(#(FixedOffset(0), rest))
-    "+" <> rest ->
-      parse_hhmm(rest) |> option.map(fn(p) { #(FixedOffset(0 - p.0), p.1) })
-    "-" <> rest ->
-      parse_hhmm(rest) |> option.map(fn(p) { #(FixedOffset(p.0), p.1) })
-    "" ->
-      Some(#(
-        case has_time {
-          True -> LocalZone
-          False -> FixedOffset(0)
-        },
-        "",
-      ))
-    _ -> None
-  }
-}
-
-fn parse_hhmm(s: String) -> Option(#(Int, String)) {
-  use #(h, rest) <- option.then(digits.take(s, 2))
-  use #(m, rest) <- option.then(case rest {
-    ":" <> r -> digits.take(r, 2)
-    _ -> digits.take(rest, 2)
-  })
-  case h <= 23 && m <= 59 {
-    True -> Some(#(h * 60 + m, rest))
-    False -> None
+  case date_parse.parse(s) {
+    None -> JNan
+    Some(ParsedDate(
+      year:,
+      month:,
+      day:,
+      hours:,
+      minutes:,
+      seconds:,
+      ms:,
+      offset_minutes:,
+    )) ->
+      case offset_minutes {
+        None -> make_date(year, month, day, hours, minutes, seconds, ms, basis)
+        Some(offset) ->
+          make_date(year, month, day, hours, minutes, seconds, ms, UtcTime)
+          |> jsnum_add_minutes(0 - offset)
+      }
   }
 }
 

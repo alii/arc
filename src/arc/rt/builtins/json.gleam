@@ -2,6 +2,10 @@ import arc/bytecode/key.{type PropertyKey, Index, Named, Private}
 import arc/rt/abstract_ops as rt_abstract_ops
 import arc/rt/builtins/common
 import arc/rt/builtins/helpers
+import arc/rt/builtins/json_error.{
+  type JsonParseError, ParseFailure, RawJsonEmpty, RawJsonNotPrimitive,
+  RawJsonSurroundingWhitespace, TrailingContent,
+}
 import arc/rt/builtins/realm_ops
 import arc/rt/call as rt_call
 import arc/rt/limits
@@ -86,7 +90,7 @@ fn json_parse(
   // iscallable has no side effects, so it can run before the parse
   let revive = rt_val.is_callable(st, reviver)
   case parse_text(bytes, revive), revive {
-    Error(e), _ -> rt_val.throw_syntax_error(st, json_error_message(e))
+    Error(e), _ -> rt_val.throw_syntax_error(st, json_error.message(e, bytes))
     Ok(val), False -> materialize_plain(st, val)
     Ok(val), True -> {
       let #(record, st) = materialize(st, val)
@@ -103,16 +107,29 @@ fn parse_text(
   with_source with_source: Bool,
 ) -> Result(JsonValue, JsonParseError) {
   use #(val, rest) <- result.try(parse_value(bytes, with_source))
+  use Nil <- result.map(only_whitespace(bytes, rest))
+  val
+}
+
+fn only_whitespace(
+  bytes: BitArray,
+  rest: BitArray,
+) -> Result(Nil, JsonParseError) {
   case skip_whitespace(rest) {
-    <<>> -> Ok(val)
-    _ -> Error(TrailingContent)
+    <<>> -> Ok(Nil)
+    extra ->
+      Error(ParseFailure(
+        kind: TrailingContent,
+        at: bit_array.byte_size(bytes) - bit_array.byte_size(extra),
+      ))
   }
 }
 
 // parsejsonmodule step 1, ahead of any realm
 pub fn parse_module_source(source: String) -> Result(JsonValue, String) {
-  parse_text(bit_array.from_string(source), False)
-  |> result.map_error(json_error_message)
+  let bytes = bit_array.from_string(source)
+  parse_text(bytes, False)
+  |> result.map_error(json_error.message(_, bytes))
 }
 
 // the default export of a json module, plain objects in st's realm
@@ -315,48 +332,6 @@ fn record_members(
   }
 }
 
-type JsonParseError {
-  UnexpectedEnd
-  UnexpectedToken(found: String)
-  UnterminatedString
-  UnterminatedEscape
-  UnterminatedArray
-  UnterminatedObject
-  ControlCharInString
-  InvalidEscape(escape: String)
-  InvalidUnicodeEscape
-  InvalidNumber(raw: String)
-  Expected(what: String, in_: String)
-  InvalidUtf8
-  TrailingContent
-  RawJsonEmpty
-  RawJsonSurroundingWhitespace
-  RawJsonNotPrimitive
-}
-
-fn json_error_message(e: JsonParseError) -> String {
-  case e {
-    UnexpectedEnd -> "Unexpected end of JSON input"
-    UnexpectedToken(found:) -> "Unexpected token '" <> found <> "' in JSON"
-    UnterminatedString -> "Unterminated string in JSON"
-    UnterminatedEscape -> "Unterminated string escape in JSON"
-    UnterminatedArray -> "Unterminated array in JSON"
-    UnterminatedObject -> "Unterminated object in JSON"
-    ControlCharInString -> "Unexpected control character in JSON string"
-    InvalidEscape(escape:) ->
-      "Invalid escape character '\\" <> escape <> "' in JSON"
-    InvalidUnicodeEscape -> "Invalid Unicode escape in JSON"
-    InvalidNumber(raw:) -> "Invalid number '" <> raw <> "' in JSON"
-    Expected(what:, in_:) -> "Expected " <> what <> " in " <> in_
-    InvalidUtf8 -> "Invalid UTF-8 in JSON input"
-    TrailingContent -> "Unexpected non-whitespace character after JSON"
-    RawJsonEmpty -> "JSON.rawJSON text must not be empty"
-    RawJsonSurroundingWhitespace ->
-      "JSON.rawJSON text must not start or end with whitespace"
-    RawJsonNotPrimitive -> "JSON.rawJSON text must not be an object or an array"
-  }
-}
-
 fn skip_whitespace(bytes: BitArray) -> BitArray {
   case bytes {
     <<0x20, rest:bytes>>
@@ -548,8 +523,9 @@ fn props_from_entries(
 fn json_raw_json(st: Agent, args: List(JsVal)) -> #(JsVal, Agent) {
   let #(json_text, st) =
     rt_val.to_string(st, helpers.first_arg_or_undefined(args))
-  case validate_raw_json_text(bit_array.from_string(json_text)) {
-    Error(e) -> rt_val.throw_syntax_error(st, json_error_message(e))
+  let bytes = bit_array.from_string(json_text)
+  case validate_raw_json_text(bytes) {
+    Error(e) -> rt_val.throw_syntax_error(st, json_error.message(e, bytes))
     Ok(Nil) -> {
       let #(seq, st) = rt_store.next_prop_seq(st)
       let prop =
@@ -587,10 +563,7 @@ fn validate_raw_json_text(bytes: BitArray) -> Result(Nil, JsonParseError) {
       }
   })
   use #(parsed, rest) <- result.try(parse_value(bytes, with_source: False))
-  use Nil <- result.try(case skip_whitespace(rest) {
-    <<>> -> Ok(Nil)
-    _ -> Error(TrailingContent)
-  })
+  use Nil <- result.try(only_whitespace(bytes, rest))
   case parsed {
     JsonArray(_) | JsonObject(_) -> Error(RawJsonNotPrimitive)
     _ -> Ok(Nil)
@@ -644,7 +617,95 @@ type StringifyContext {
   StringifyContext(replacer: Replacer, gap: String, caller: Int)
 }
 
-const circular_msg = "Converting circular structure to JSON"
+// an object being written, and the key that led to it
+type Visit {
+  Visit(key: PropertyKey, object: Handle)
+}
+
+const circle_lines_before_gap = 2
+
+// the long form names the objects on the circle, as v8 does
+fn throw_circular(
+  st: Agent,
+  stack: List(Visit),
+  closing_key: PropertyKey,
+  h: Handle,
+) -> #(a, Agent) {
+  let circle =
+    list.reverse(stack) |> list.drop_while(fn(v) { v.object.id != h.id })
+  let holders = list.map(circle, fn(v) { v.object })
+  let steps =
+    list.zip(holders, list.drop(circle, 1))
+    |> list.map(fn(step) {
+      let #(holder, Visit(key:, object:)) = step
+      "\n    |     "
+      <> describe_key(st, holder, key)
+      <> " -> object with constructor '"
+      <> constructor_name(st, object)
+      <> "'"
+    })
+  let shown = case list.split(steps, circle_lines_before_gap) {
+    #(first, [_, _, ..] as rest) ->
+      list.flatten([
+        first,
+        ["\n    |     ..."],
+        list.drop(rest, list.length(rest) - 1),
+      ])
+    #(_, _) -> steps
+  }
+  let closing_holder = list.last(holders) |> result.unwrap(h)
+  rt_val.throw_type_error(
+    st,
+    "Converting circular structure to JSON\n    --> starting at object with constructor '"
+      <> constructor_name(st, h)
+      <> "'"
+      <> string.concat(shown)
+      <> "\n    --- "
+      <> describe_key(st, closing_holder, closing_key)
+      <> " closes the circle",
+  )
+}
+
+fn describe_key(st: Agent, holder: Handle, pk: PropertyKey) -> String {
+  case pk, rt_abstract_ops.is_array_handle(st, holder) {
+    Index(i), True -> "index " <> int.to_string(i)
+    Named(""), _ -> "<anonymous>"
+    _, _ -> "property '" <> key.to_text(pk) <> "'"
+  }
+}
+
+// reads data properties only, so nothing can observe it
+fn constructor_name(st: Agent, h: Handle) -> String {
+  let name = {
+    use ctor <- option.then(inherited_data(st, Some(h), "constructor"))
+    case classify(ctor) {
+      KHandle(c) -> inherited_data(st, Some(c), "name")
+      _ -> None
+    }
+  }
+  case option.map(name, classify) {
+    Some(KStr("")) | None -> "Object"
+    Some(KStr(s)) -> s
+    Some(_) -> "Object"
+  }
+}
+
+fn inherited_data(
+  st: Agent,
+  from: Option(Handle),
+  name: String,
+) -> Option(JsVal) {
+  use h <- option.then(from)
+  case
+    rt_obj.ordinary_own_property(st, h, StringKey(Named(name))),
+    rt_obj.as_sobject(rt_store.cell_get(st, h))
+  {
+    Some(types.DataProperty(value:, ..)), _ -> Some(value)
+    Some(_), _ -> None
+    None, SObject(proto:, ..) -> inherited_data(st, proto, name)
+    None, _ -> None
+  }
+}
 
 // §25.5.2
 fn json_stringify(
@@ -790,7 +851,7 @@ fn compute_gap(st: Agent, space: JsVal) -> #(String, Agent) {
 fn serialize_property(
   st: Agent,
   ctx: StringifyContext,
-  stack: List(Int),
+  stack: List(Visit),
   indent: String,
   pk: PropertyKey,
   holder: Handle,
@@ -822,14 +883,15 @@ fn serialize_property(
       ])
     NoReplacer | PropertyList(_) -> #(val, st)
   }
-  serialize_value(st, ctx, stack, indent, val)
+  serialize_value(st, ctx, stack, indent, pk, val)
 }
 
 fn serialize_value(
   st: Agent,
   ctx: StringifyContext,
-  stack: List(Int),
+  stack: List(Visit),
   indent: String,
+  pk: PropertyKey,
   val: JsVal,
 ) -> #(Option(StringTree), Agent) {
   case classify(val) {
@@ -845,7 +907,7 @@ fn serialize_value(
     KNull -> #(Some(string_tree.from_string("null")), st)
     KBool(True) -> #(Some(string_tree.from_string("true")), st)
     KBool(False) -> #(Some(string_tree.from_string("false")), st)
-    KHandle(h) -> serialize_handle(st, ctx, stack, indent, val, h)
+    KHandle(h) -> serialize_handle(st, ctx, stack, indent, pk, val, h)
     KBig(_) ->
       rt_val.throw_type_error(st, "Do not know how to serialize a BigInt")
     KUndef | KSym(_) | types.KTdz -> #(None, st)
@@ -855,8 +917,9 @@ fn serialize_value(
 fn serialize_handle(
   st: Agent,
   ctx: StringifyContext,
-  stack: List(Int),
+  stack: List(Visit),
   indent: String,
+  pk: PropertyKey,
   val: JsVal,
   h: Handle,
 ) -> #(Option(StringTree), Agent) {
@@ -864,13 +927,14 @@ fn serialize_handle(
     Some(RawJsonObj(raw:)) -> #(Some(string_tree.from_string(raw)), st)
     Some(NumberObj(_)) -> {
       let #(n, st) = rt_val.to_number(st, val)
-      serialize_value(st, ctx, stack, indent, mk_number(n))
+      serialize_value(st, ctx, stack, indent, pk, mk_number(n))
     }
     Some(StringObj(_)) -> {
       let #(s, st) = rt_val.to_string(st, val)
       #(Some(quote_tree(s)), st)
     }
-    Some(BooleanObj(b)) -> serialize_value(st, ctx, stack, indent, mk_bool(b))
+    Some(BooleanObj(b)) ->
+      serialize_value(st, ctx, stack, indent, pk, mk_bool(b))
     Some(BigIntObj(_)) ->
       rt_val.throw_type_error(st, "Do not know how to serialize a BigInt")
     _ ->
@@ -878,8 +942,8 @@ fn serialize_handle(
         True -> #(None, st)
         False -> {
           let #(tree, st) = case rt_abstract_ops.is_array_handle(st, h) {
-            True -> serialize_array(st, ctx, stack, indent, h)
-            False -> serialize_object(st, ctx, stack, indent, h)
+            True -> serialize_array(st, ctx, stack, indent, pk, h)
+            False -> serialize_object(st, ctx, stack, indent, pk, h)
           }
           #(Some(tree), st)
         }
@@ -890,14 +954,15 @@ fn serialize_handle(
 fn serialize_object(
   st: Agent,
   ctx: StringifyContext,
-  stack: List(Int),
+  stack: List(Visit),
   indent: String,
+  pk: PropertyKey,
   h: Handle,
 ) -> #(StringTree, Agent) {
-  case list.contains(stack, h.id) {
-    True -> rt_val.throw_type_error(st, circular_msg)
+  case list.any(stack, fn(v) { v.object.id == h.id }) {
+    True -> throw_circular(st, stack, pk, h)
     False -> {
-      let stack = [h.id, ..stack]
+      let stack = [Visit(key: pk, object: h), ..stack]
       let step_indent = indent <> ctx.gap
       let #(keys, st) = case ctx.replacer {
         PropertyList(names) -> #(list.map(names, key.canonical), st)
@@ -913,7 +978,7 @@ fn serialize_object(
 fn serialize_members(
   st: Agent,
   ctx: StringifyContext,
-  stack: List(Int),
+  stack: List(Visit),
   step_indent: String,
   h: Handle,
   keys: List(PropertyKey),
@@ -947,14 +1012,15 @@ fn serialize_members(
 fn serialize_array(
   st: Agent,
   ctx: StringifyContext,
-  stack: List(Int),
+  stack: List(Visit),
   indent: String,
+  pk: PropertyKey,
   h: Handle,
 ) -> #(StringTree, Agent) {
-  case list.contains(stack, h.id) {
-    True -> rt_val.throw_type_error(st, circular_msg)
+  case list.any(stack, fn(v) { v.object.id == h.id }) {
+    True -> throw_circular(st, stack, pk, h)
     False -> {
-      let stack = [h.id, ..stack]
+      let stack = [Visit(key: pk, object: h), ..stack]
       let step_indent = indent <> ctx.gap
       let #(len, st) = rt_abstract_ops.length_of_array_like(st, mk_object(h))
       let #(partial, st) =
@@ -967,7 +1033,7 @@ fn serialize_array(
 fn serialize_elements(
   st: Agent,
   ctx: StringifyContext,
-  stack: List(Int),
+  stack: List(Visit),
   step_indent: String,
   h: Handle,
   i: Int,

@@ -4123,23 +4123,33 @@ fn build_date_time_parts(
     [], [intl_format.Part(PartLiteral, _), ..rest] -> rest
     _, _ -> list.append(time_parts, tz_parts)
   }
-  let all = case weekday_parts, date_parts, time_parts {
+  // english puts "at" before the time once the month is spelled out
+  let #(before_time, after_weekday) = case
+    intl_locale.language_of(d.locale),
+    month
+  {
+    "en", Some(MonthName(WidthLong)) -> #(" at ", ", ")
+    "en", _ -> #(", ", ", ")
+    _, _ -> #(", ", " ")
+  }
+  case weekday_parts, date_parts, time_parts {
     [], [], t -> t
     w, [], [] -> w
     [], d, [] -> d
     w, d, [] -> list.flatten([w, [intl_format.Part(PartLiteral, ", ")], d])
-    [], d, t -> list.flatten([d, [intl_format.Part(PartLiteral, ", ")], t])
-    w, [], t -> list.flatten([w, [intl_format.Part(PartLiteral, " ")], t])
+    [], d, t ->
+      list.flatten([d, [intl_format.Part(PartLiteral, before_time)], t])
+    w, [], t ->
+      list.flatten([w, [intl_format.Part(PartLiteral, after_weekday)], t])
     w, d, t ->
       list.flatten([
         w,
         [intl_format.Part(PartLiteral, ", ")],
         d,
-        [intl_format.Part(PartLiteral, ", ")],
+        [intl_format.Part(PartLiteral, before_time)],
         t,
       ])
   }
-  all
 }
 
 fn am_pm(hour: Int) -> String {
