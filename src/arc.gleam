@@ -189,7 +189,7 @@ fn repl_loop(repl: Repl(host)) -> Nil {
       Nil
     }
 
-    ReadError(reason) -> {
+    ReadError(reason:) -> {
       io.println_error("Error reading stdin: " <> string.inspect(reason))
       Nil
     }
