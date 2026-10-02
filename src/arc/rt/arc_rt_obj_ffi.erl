@@ -845,10 +845,10 @@ for_in_add(Cells, Proto, Enum, Hidden, Seen, Acc, Fuel) ->
     Acc1 = lists:foldl(fun(K, A) ->
                case is_map_key(K, Seen) of true -> A; false -> [K | A] end
            end, Acc, Enum),
-    Seen1 = lists:foldl(fun(K, S) -> S#{K => []} end, Seen, Enum ++ Hidden),
     case Proto of
         ?NONE -> {plain_keys, [arc_rt_js_string_ffi:from_text(K) || K <- lists:reverse(Acc1)]};
         {?SOME, {?HANDLE_TAG, P}} ->
+            Seen1 = lists:foldl(fun(K, S) -> S#{K => []} end, Seen, Enum ++ Hidden),
             for_in_chain(Cells, arc_rt_arena_ffi:get(P, Cells), Seen1, Acc1, Fuel - 1)
     end.
 
