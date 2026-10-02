@@ -98,9 +98,9 @@ push(St, {?HANDLE_TAG, Id}, Args) ->
             N = length(Args),
             NewLen = Len + N,
             case NewLen =< ?MAX_DENSE_INDEX
-                 andalso chain_index_range_plain(Cells, Proto, Len, N) of
+                 andalso chain_free(Store, Cells, Proto, Len, N) of
                 false -> push_miss;
-                true ->
+                Free ->
                     case append(Els, Len, Args) of
                         miss -> push_miss;
                         NewEls ->
@@ -108,13 +108,21 @@ push(St, {?HANDLE_TAG, Id}, Args) ->
                                     Sym, NewEls, true},
                             {pushed, NewLen,
                              setelement(?AGENT_STORE, St,
-                                        setelement(?STORE_CELLS, Store,
+                                        setelement(?STORE_CELLS,
+                                                   arc_rt_obj_ffi:remembering(Free, Store),
                                                    arc_rt_arena_ffi:set(Id, Cell, Cells)))}
                     end
             end;
         _ -> push_miss
     end;
 push(_, _, _) -> push_miss.
+
+%% true | false | {true, Store1}
+chain_free(Store, Cells, Proto, Start, Count) ->
+    case arc_rt_obj_ffi:index_chain_plain(Store, Cells, Proto) of
+        false -> chain_index_range_plain(Cells, Proto, Start, Count);
+        Plain -> Plain
+    end.
 
 append(?ELEMS_NONE, 0, Args) -> {?ELEMS_DENSE, arc_tree_array_ffi:from_list(Args)};
 append(?ELEMS_NONE, Len, Args) when Len =< ?MAX_GAP ->
