@@ -6,6 +6,7 @@ import gleam/dict
 
 pub fn table() -> DirectHost {
   let store = "arc@rt@store"
+  let store_ffi = "arc_rt_store_ffi"
   let val = "arc@rt@val"
   let val_ffi = "arc_rt_val_ffi"
   let js_string_ffi = "arc_rt_js_string_ffi"
@@ -29,8 +30,8 @@ pub fn table() -> DirectHost {
     capability: "js",
     ops: dict.from_list([
       #("box_new", HostOp(store, "box_new", Mut)),
-      #("box_get", HostOp(store, "box_get", Read)),
-      #("box_set", HostOp(store, "box_set", MutUnit)),
+      #("box_get", HostOp(store_ffi, "box_get", Read)),
+      #("box_set", HostOp(store_ffi, "box_set", MutUnit)),
       #("to_string", HostOp(val, "to_string", Mut)),
       #("to_property_key", HostOp(val, "to_property_key", Mut)),
       #("to_property_key_of", HostOp(val, "to_property_key_of", Mut)),
