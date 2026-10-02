@@ -1845,7 +1845,7 @@ pub type IcEntry {
   IcCall(
     key: BitArray,
     ways: Dict(IcCallMatch, IcCallWay),
-    shaped: Dict(Int, Dict(Int, IcCallWay)),
+    shaped: Dict(Int, IcShapedWays),
   )
   IcInit(from: Int, to: Int, blank: Cell, chain: List(#(Int, Cell)))
   // the shaped cell an object literal fills its slots into
@@ -1857,6 +1857,10 @@ pub type IcEntry {
 // bare {chain, callee, kind} tuple as arc_rt_call_ic_ffi ic_fill builds it
 type IcCallWay =
   #(List(#(Int, Cell)), Handle, ObjKind)
+
+// bare: a map of proto id to IcCallWay, or {offset, callee, kind} when the
+// shape holds the key itself
+pub type IcShapedWays
 
 // shaped receivers key by shape id then proto id in IcCall.shaped
 pub type IcCallMatch {

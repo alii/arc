@@ -105,6 +105,7 @@ call_via_ic(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Site, RSite, N, A, B, C) ->
         #{Site := {?IC_CALL, KeyBin, _, Shaped}}
           when element(1, RCell) =:= ?SSHAPEDOBJECT_TAG ->
             %% shaped ways nest sid then proto id, no tuple key to build
+            %% a sid that holds the key itself maps to {offset, callee, kind}
             case Shaped of
                 #{element(?SSHAPEDOBJECT_SHAPE_ID, RCell) := Protos} ->
                     case element(?SSHAPEDOBJECT_PROTO, RCell) of
@@ -119,11 +120,17 @@ call_via_ic(St, Recv = {?HANDLE_TAG, RId}, KeyBin, Site, RSite, N, A, B, C) ->
                                             ic_miss(St, Recv, RCell, KeyBin,
                                                     Site, RSite, N, A, B, C)
                                     end;
+                                Own when is_tuple(Own) ->
+                                    call_own_slot(St, Cells, RCell, Own, Recv,
+                                                  KeyBin, RSite, N, A, B, C);
                                 _ ->
                                     ic_miss(St, Recv, RCell, KeyBin,
                                             ways_room(Protos, Site), RSite,
                                             N, A, B, C)
                             end;
+                        _ when is_tuple(Protos) ->
+                            call_own_slot(St, Cells, RCell, Protos, Recv,
+                                          KeyBin, RSite, N, A, B, C);
                         _ ->
                             ic_miss(St, Recv, RCell, KeyBin, none, RSite, N,
                                     A, B, C)
@@ -187,6 +194,20 @@ call_on_primitive(St, Recv, W, KeyBin, Site, RSite, N, A, B, C) ->
                                     arg_list(N, A, B, C), ?WALK_MAX_HOPS,
                                     {Probe, {?ICPRIM_TAG, W}, []}),
                          Recv, KeyBin, RSite, N, A, B, C)
+    end.
+
+%% another object of the shape may hold another callee
+call_own_slot(St, Cells, RCell, {Off, Fn0, Kind0}, Recv, KeyBin, RSite, N, A,
+              B, C) ->
+    case ?SLOT_AT(element(?SSHAPEDOBJECT_SLOTS, RCell), Off) of
+        Fn0 -> call_kind(St, Kind0, Fn0, Recv, N, A, B, C);
+        Fn = {?HANDLE_TAG, _} ->
+            case plain_callee_kind(Cells, Fn) of
+                miss ->
+                    after_lookup({miss, St}, Recv, KeyBin, RSite, N, A, B, C);
+                Kind -> call_kind(St, Kind, Fn, Recv, N, A, B, C)
+            end;
+        _ -> after_lookup({miss, St}, Recv, KeyBin, RSite, N, A, B, C)
     end.
 
 ways_room(Ways, Site) when map_size(Ways) < ?IC_CALL_WAYS -> Site;
@@ -304,6 +325,13 @@ call_via_walk(St, Recv = {?HANDLE_TAG, RId}, RCell, KeyBin, Args, Site)
         V when Ic =/= none, element(1, RCell) =:= ?SOBJECT_TAG ->
             call_found_fill(St, Cells, V, KeyBin, Recv, Args,
                             {Site, {?ICOWN_TAG, RId, RCell}, []});
+        V when Ic =/= none ->
+            #{KeyBin := Off} = element(?SSHAPEDOBJECT_OFFSETS, RCell),
+            call_found_fill(St, Cells, V, KeyBin, Recv, Args,
+                            {Site,
+                             {ic_shaped_own,
+                              element(?SSHAPEDOBJECT_SHAPE_ID, RCell), Off},
+                             []});
         V -> call_found(St, Cells, V, Recv, Args)
     end;
 call_via_walk(St, _, _, _, _, _) -> {miss, St}.
@@ -374,6 +402,10 @@ ic_fill(St, {Site, Match0, RevChain}, Fn, Kind, KeyBin)
                     {?IC_CALL, KeyBin, Ways, Shaped#{Sid => #{PId => Way}}};
                 _ -> full
             end;
+        {{ic_shaped_own, Sid, Off}, []}
+          when is_map_key(Sid, Shaped); map_size(Shaped) < ?IC_CALL_WAYS ->
+            {?IC_CALL, KeyBin, Ways, Shaped#{Sid => {Off, Fn, Kind}}};
+        {{ic_shaped_own, _, _}, []} -> full;
         {?ICPLAIN_TAG, [{PId, _} | _]} ->
             ways_put(KeyBin, Ways, Shaped, {?ICPLAIN_TAG, PId}, Way);
         {{?ICOWN_TAG, RId, RCell}, []} ->
