@@ -138,9 +138,8 @@ pub fn box_new(st: Agent, value: JsVal) -> #(Handle, Agent) {
 @external(erlang, "arc_rt_store_ffi", "box_get")
 pub fn box_get(st: Agent, h: Handle) -> JsVal
 
-pub fn box_set(st: Agent, h: Handle, value: JsVal) -> Agent {
-  cell_set(st, h, SBox(value))
-}
+@external(erlang, "arc_rt_store_ffi", "box_set")
+pub fn box_set(st: Agent, h: Handle, value: JsVal) -> Agent
 
 pub fn cell_update(st: Agent, h: Handle, f: fn(Cell) -> Cell) -> Agent {
   cell_set(st, h, f(cell_get(st, h)))

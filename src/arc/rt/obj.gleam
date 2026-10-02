@@ -1010,7 +1010,6 @@ fn set_own_shaped(
   name: String,
   v: JsVal,
 ) -> #(Bool, Agent) {
-  let store = st.store
   let key_bin = bit_array.from_string(name)
   case dict.get(offsets, key_bin) {
     Ok(off) -> {
@@ -1024,45 +1023,18 @@ fn set_own_shaped(
         ),
       )
     }
-    Error(Nil) ->
-      case dict.get(store.shapes, shape_id) {
-        Error(Nil) -> #(False, st)
-        Ok(ShapeDesc(slot_count:, transitions:, ..) as from) -> {
-          let known =
-            dict.get(transitions, key_bin)
-            |> result.try(fn(to) {
-              dict.get(store.shapes, to)
-              |> result.map(fn(desc) { #(to, desc.offsets, st) })
-            })
-          let #(to, offsets, st) = case known {
-            Ok(hit) -> hit
-            Error(Nil) -> {
-              let to = store.next_shape
-              let offsets = dict.insert(offsets, key_bin, slot_count)
-              let shapes =
-                store.shapes
-                |> dict.insert(
-                  shape_id,
-                  ShapeDesc(
-                    ..from,
-                    transitions: dict.insert(transitions, key_bin, to),
-                  ),
-                )
-                |> dict.insert(
-                  to,
-                  ShapeDesc(
-                    slot_count: slot_count + 1,
-                    offsets:,
-                    transitions: dict.new(),
-                  ),
-                )
-              #(
-                to,
-                offsets,
-                Agent(..st, store: Store(..store, shapes:, next_shape: to + 1)),
-              )
-            }
-          }
+    Error(Nil) -> {
+      use <- bool.lazy_guard(dict.size(offsets) >= limits.max_shape_slots, fn() {
+        set_on_receiver(
+          devolve(st, h),
+          types.mk_object(h),
+          StringKey(Named(name)),
+          v,
+        )
+      })
+      case shape_after(st, shape_id, key_bin) {
+        None -> #(False, st)
+        Some(#(to, offsets, st)) -> {
           let slots = shape_slots_append(slots, v)
           #(
             True,
@@ -1074,7 +1046,45 @@ fn set_own_shaped(
           )
         }
       }
+    }
   }
+}
+
+// the shape one appended key away, made on first use; also called by name
+// from arc_rt_obj_ic_ffi
+pub fn shape_after(
+  st: Agent,
+  shape_id: Int,
+  key_bin: BitArray,
+) -> Option(#(Int, Dict(BitArray, Int), Agent)) {
+  let store = st.store
+  use ShapeDesc(slot_count:, offsets:, transitions:) as from <- option.map(
+    dict.get(store.shapes, shape_id) |> option.from_result,
+  )
+  let known =
+    dict.get(transitions, key_bin)
+    |> result.try(fn(to) {
+      dict.get(store.shapes, to)
+      |> result.map(fn(desc) { #(to, desc.offsets, st) })
+    })
+  use <- result.lazy_unwrap(known)
+  let to = store.next_shape
+  let offsets = dict.insert(offsets, key_bin, slot_count)
+  let shapes =
+    store.shapes
+    |> dict.insert(
+      shape_id,
+      ShapeDesc(..from, transitions: dict.insert(transitions, key_bin, to)),
+    )
+    |> dict.insert(
+      to,
+      ShapeDesc(slot_count: slot_count + 1, offsets:, transitions: dict.new()),
+    )
+  #(
+    to,
+    offsets,
+    Agent(..st, store: Store(..store, shapes:, next_shape: to + 1)),
+  )
 }
 
 fn set_own_string(

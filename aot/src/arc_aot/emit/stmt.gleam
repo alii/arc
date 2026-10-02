@@ -15,6 +15,7 @@ import arc_aot/emit/state.{
 import arc_aot/emit/try_finally
 import carder/ir
 import gleam/bit_array
+import gleam/bool
 import gleam/dict
 import gleam/int
 import gleam/list
@@ -49,6 +50,28 @@ fn frame_carried_walk(
 
 fn carried_values(e: Emitter, slots: List(Int)) -> List(ir.Value) {
   list.map(slots, fn(slot) { ir.Var(state.get_slot_var(e, slot)) })
+}
+
+// carried_values for a jump, which may leave statements that hold slots in boxes
+fn leaving_values(
+  e: Emitter,
+  slots: List(Int),
+  done: List(ir.Value),
+  k: NextWith(List(ir.Value)),
+) -> EmitResult {
+  case slots {
+    [] -> k(list.reverse(done), e)
+    [slot, ..rest] -> {
+      let held = ir.Var(state.get_slot_var(e, slot))
+      case state.in_region_box(e, slot) {
+        False -> leaving_values(e, rest, [held, ..done], k)
+        True -> {
+          use v, e <- cps.host(e, "box_get", [held])
+          leaving_values(e, rest, [v, ..done], k)
+        }
+      }
+    }
+  }
 }
 
 // leave_scope drops inner slot_vars; re-apply the carried names
@@ -123,8 +146,8 @@ fn emit_jump(
   case machine_goto(e, ir_label) {
     Some(r) -> r
     None -> {
-      let carried = find_frame_carried(e, ir_label)
-      Ok(#(ir.Break(ir_label, carried_values(e, carried)), e))
+      use values, e <- leaving_values(e, find_frame_carried(e, ir_label), [])
+      Ok(#(ir.Break(ir_label, values), e))
     }
   }
   |> keep_frames(frames)
@@ -202,6 +225,7 @@ pub fn emit_stmts(
 }
 
 fn emit_stmt(e: Emitter, s: ast.Statement, k: Next) -> EmitResult {
+  use e, k <- boxing_guarded_writes(e, s, k)
   case s {
     ast.EmptyStatement | ast.DebuggerStatement -> k(e)
     ast.ExpressionStatement(expression:, ..) ->
@@ -258,6 +282,97 @@ fn emit_stmt(e: Emitter, s: ast.Statement, k: Next) -> EmitResult {
     ast.TryStatement(block:, tail:) -> emit_try(e, block, tail, k)
     ast.ClassDeclaration(name:, super_class:, body:) ->
       emit_class_decl(e, name, super_class, body, k)
+  }
+}
+
+// a handler must see what its try wrote before throwing, which plain rebinding
+// cannot show it, so those locals sit in boxes for the statement; a loop takes
+// them for all its turns at once
+fn boxing_guarded_writes(
+  e: Emitter,
+  s: ast.Statement,
+  k: Next,
+  emit: fn(Emitter, Next) -> EmitResult,
+) -> EmitResult {
+  let names = case s {
+    ast.TryStatement(..)
+    | ast.WhileStatement(..)
+    | ast.DoWhileStatement(..)
+    | ast.ForStatement(..)
+    | ast.ForInStatement(..)
+    | ast.ForOfStatement(..) -> guarded_names(s, [])
+    _ -> []
+  }
+  case unboxed_slots_named(e, names) {
+    [] -> emit(e, k)
+    slots -> {
+      use e <- cps.each(e, slots, _, box_slot)
+      use e <- emit(e)
+      cps.each(e, slots, k, unbox_slot)
+    }
+  }
+}
+
+fn box_slot(e: Emitter, slot: Int, k: Next) -> EmitResult {
+  let held = ir.Var(state.get_slot_var(e, slot))
+  let #(name, e) = state.fresh_slot_var(e, slot)
+  let e =
+    state.Emitter(
+      ..state.set_slot_var(e, slot, name),
+      region_boxed: set.insert(e.region_boxed, slot),
+    )
+  use body <- state.map_tree(k(e))
+  ir.Let([name], ir.CallHost("js", "box_new", [held]), body)
+}
+
+fn unbox_slot(e: Emitter, slot: Int, k: Next) -> EmitResult {
+  let box = ir.Var(state.get_slot_var(e, slot))
+  let #(name, e) = state.fresh_slot_var(e, slot)
+  let e =
+    state.Emitter(
+      ..state.set_slot_var(e, slot, name),
+      region_boxed: set.delete(e.region_boxed, slot),
+    )
+  use body <- state.map_tree(k(e))
+  ir.Let([name], ir.CallHost("js", "box_get", [box]), body)
+}
+
+// names written where a handler of the same statement could still observe them
+fn guarded_names(s: ast.Statement, acc: List(String)) -> List(String) {
+  let all = fn(ss: List(ast.StmtWithLine), acc) {
+    list.fold(ss, acc, fn(acc, located) {
+      guarded_names(located.statement, acc)
+    })
+  }
+  case s {
+    // what the catch clause writes flows on as usual
+    ast.TryStatement(block:, tail: ast.TryCatch(handler:)) ->
+      stmt_assigned_names(ast.BlockStatement(block), all(handler.body, acc))
+    ast.TryStatement(..) -> stmt_assigned_names(s, acc)
+    ast.BlockStatement(body:) -> all(body, acc)
+    ast.IfStatement(consequent:, alternate:, ..) ->
+      option.map(alternate, guarded_names(_, acc))
+      |> option.unwrap(acc)
+      |> guarded_names(consequent, _)
+    ast.WhileStatement(body:, ..)
+    | ast.DoWhileStatement(body:, ..)
+    | ast.ForStatement(body:, ..)
+    | ast.ForInStatement(body:, ..)
+    | ast.ForOfStatement(body:, ..)
+    | ast.LabeledStatement(body:, ..)
+    | ast.WithStatement(body:, ..) -> guarded_names(body, acc)
+    ast.SwitchStatement(cases:, ..) ->
+      list.fold(cases, acc, fn(acc, c) { all(c.consequent, acc) })
+    ast.EmptyStatement
+    | ast.DebuggerStatement
+    | ast.ExpressionStatement(..)
+    | ast.VariableDeclaration(..)
+    | ast.ReturnStatement(..)
+    | ast.ThrowStatement(..)
+    | ast.BreakStatement(..)
+    | ast.ContinueStatement(..)
+    | ast.FunctionDeclaration(..)
+    | ast.ClassDeclaration(..) -> acc
   }
 }
 
@@ -330,7 +445,12 @@ fn annexb_promote(e: Emitter, name: String, k: Next) -> EmitResult {
         | Some(scope.Binding(kind: ConstBinding, ..))
         | Some(scope.Binding(kind: FnNameBinding, ..)) -> None
         Some(scope.Binding(slot:, kind:, boxed:, declared_kind:)) ->
-          Some(scope.Local(slot:, boxed:, kind:, declared_kind:))
+          Some(scope.Local(
+            slot:,
+            boxed: boxed || state.in_region_box(e, slot),
+            kind:,
+            declared_kind:,
+          ))
       }
       case target {
         None -> k(e)
@@ -559,6 +679,11 @@ fn rebind_after_block(
 }
 
 fn assigned_unboxed_slots(e: Emitter, s: ast.Statement) -> List(Int) {
+  unboxed_slots_named(e, stmt_assigned_names(s, []))
+}
+
+fn unboxed_slots_named(e: Emitter, names: List(String)) -> List(Int) {
+  use <- bool.guard(names == [], [])
   let bound_unboxed = fn(slot, boxed) {
     case boxed, dict.has_key(e.slot_vars, slot) {
       False, True -> Ok(slot)
@@ -569,8 +694,7 @@ fn assigned_unboxed_slots(e: Emitter, s: ast.Statement) -> List(Int) {
     True -> []
     False -> state.fn_info(e).annexb_candidates
   }
-  stmt_assigned_names(s, [])
-  |> list.unique
+  list.unique(names)
   |> list.flat_map(fn(name) {
     let plain = case state.resolve(e, name) {
       scope.Plain(scope.Local(slot:, boxed:, ..)) -> bound_unboxed(slot, boxed)
@@ -581,7 +705,7 @@ fn assigned_unboxed_slots(e: Emitter, s: ast.Statement) -> List(Int) {
       True ->
         case annexb_find_target(e, Some(e.cur_scope), name) {
           Some(scope.Binding(kind: VarBinding, slot:, boxed:, ..)) ->
-            bound_unboxed(slot, boxed)
+            bound_unboxed(slot, boxed || state.in_region_box(e, slot))
           _ -> Error(Nil)
         }
     }
@@ -935,17 +1059,26 @@ fn stmt_assigned_names(s: ast.Statement, acc: List(String)) -> List(String) {
     ast.TryStatement(block:, tail:) -> {
       let acc = stmts_assigned_names(block, acc)
       case tail {
-        ast.TryCatch(ast.CatchClause(body:, ..)) ->
-          stmts_assigned_names(body, acc)
+        ast.TryCatch(handler) -> catch_assigned_names(handler, acc)
         ast.TryFinally(finalizer:) -> stmts_assigned_names(finalizer, acc)
-        ast.TryCatchFinally(ast.CatchClause(body:, ..), finalizer:) ->
-          stmts_assigned_names(finalizer, stmts_assigned_names(body, acc))
+        ast.TryCatchFinally(handler, finalizer:) ->
+          stmts_assigned_names(finalizer, catch_assigned_names(handler, acc))
       }
     }
     ast.LabeledStatement(body:, ..) -> stmt_assigned_names(body, acc)
     ast.WithStatement(object:, body:) ->
       stmt_assigned_names(body, expr_assigned_names(object, acc))
   }
+}
+
+// a default in the parameter pattern can assign too
+fn catch_assigned_names(
+  handler: ast.CatchClause,
+  acc: List(String),
+) -> List(String) {
+  option.map(handler.param, pattern_expr_assigned_names(_, acc))
+  |> option.unwrap(acc)
+  |> stmts_assigned_names(handler.body, _)
 }
 
 fn stmts_assigned_names(
@@ -1595,11 +1728,7 @@ fn emit_try(
 ) -> EmitResult {
   case tail {
     ast.TryCatch(ast.CatchClause(param, catch_body)) -> {
-      let carried =
-        assigned_unboxed_slots_all(e, [
-          ast.BlockStatement(block),
-          ast.BlockStatement(catch_body),
-        ])
+      let carried = assigned_unboxed_slots(e, ast.TryStatement(block:, tail:))
       let branch_slots = e.slot_vars
       use #(try_body, e) <- result.try(
         cps.with_done(e, fn(done, e) {

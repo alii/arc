@@ -1,6 +1,6 @@
 -module(arc_rt_store_ffi).
 -export([throw/2, is_handle/1, as_object_key/1,
-         cell_get/2, box_get/2]).
+         cell_get/2, box_get/2, box_set/3]).
 
 -include("arc_rt_layout.hrl").
 
@@ -30,3 +30,12 @@ is_handle(_) -> false.
 as_object_key({?STRINGKEY_TAG, _} = K) -> K;
 as_object_key({?SYMBOLKEY_TAG, _} = K) -> K;
 as_object_key(K) -> {?STRINGKEY_TAG, K}.
+
+%% a box is never a prototype or a global object, so nothing watches this write
+box_set(St, {?HANDLE_TAG, Id}, V) when tuple_size(St) =:= ?AGENT_SIZE ->
+    Store = element(?AGENT_STORE, St),
+    Cells = arc_rt_arena_ffi:set(Id, {?SBOX_TAG, V}, element(?STORE_CELLS, Store)),
+    setelement(?AGENT_STORE, St, with_cells(Store, Cells)).
+
+with_cells(Store, Cells) when tuple_size(Store) =:= ?STORE_SIZE ->
+    setelement(?STORE_CELLS, Store, Cells).

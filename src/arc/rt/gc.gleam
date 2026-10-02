@@ -12,16 +12,16 @@ import arc/rt/types.{
   ArrayObj, AsyncFromSyncIterator, AsyncGenRequest, AsyncGeneratorObj, BigIntObj,
   BooleanObj, BoundFn, BytecodeFn, CompiledFn, DataViewObj, DateObj, Dense,
   DisposableStackObj, ErrorObj, FinalizationRegistryObj, GeneratorObj, Handle,
-  Handler, HostObj, IcCall, IcGlobal, IcInit, IcOff, IcRead, IdentityPassThrough,
-  IntlObj, IteratorHelperObj, KHandle, MapIterator, MapObj, ModuleNamespace,
-  NativeFn, NoElements, NumberObj, Ordinary, PromiseFulfilled, PromiseObj,
-  PromisePending, PromiseReaction, PromiseRejected, ProxyObj, RawJsonObj,
-  RegExpObj, Registration, ResumeCompiled, ResumeFrame, SAsyncContext, SAsyncGen,
-  SBox, SDisposeCapability, SGenerator, SObject, SPromiseData, SShapedObject,
-  SetIterator, SetObj, Sparse, Store, StringIterator, StringObj, SymbolObj,
-  TemporalObj, ThrowerPassThrough, TypedArrayObj, WeakMapObj, WeakObjKey,
-  WeakRefObj, WeakSetObj, WeakSymKey, WrapForValidIteratorObj, classify,
-  job_queue_to_list,
+  Handler, HostObj, IcCall, IcGlobal, IcInit, IcLiteral, IcOff, IcRead,
+  IdentityPassThrough, IntlObj, IteratorHelperObj, KHandle, MapIterator, MapObj,
+  ModuleNamespace, NativeFn, NoElements, NumberObj, Ordinary, PromiseFulfilled,
+  PromiseObj, PromisePending, PromiseReaction, PromiseRejected, ProxyObj,
+  RawJsonObj, RegExpObj, Registration, ResumeCompiled, ResumeFrame,
+  SAsyncContext, SAsyncGen, SBox, SDisposeCapability, SGenerator, SObject,
+  SPromiseData, SShapedObject, SetIterator, SetObj, Sparse, Store,
+  StringIterator, StringObj, SymbolObj, TemporalObj, ThrowerPassThrough,
+  TypedArrayObj, WeakMapObj, WeakObjKey, WeakRefObj, WeakSetObj, WeakSymKey,
+  WrapForValidIteratorObj, classify, job_queue_to_list,
 }
 import gleam/dict.{type Dict}
 import gleam/int
@@ -529,6 +529,8 @@ fn is_weak_cell(cell: Cell) -> Bool {
 fn is_read_ic(entry: IcEntry) -> Bool {
   case entry {
     IcRead(..) | IcOff -> True
+    // evaluated code mints literal sites without end, and a refill is cheap
+    IcLiteral(..) -> False
     IcCall(..) | IcInit(..) | IcGlobal(..) -> False
   }
 }

@@ -775,19 +775,18 @@ fn js_trunc(n: Float) -> Float {
 }
 
 fn count_leading_zeros_32(n: Int) -> Int {
-  count_leading_zeros_32_loop(n, 31, 0)
+  case n {
+    0 -> 32
+    _ -> count_leading_zeros_32_loop(n, 16, 0)
+  }
 }
 
-fn count_leading_zeros_32_loop(n: Int, bit: Int, count: Int) -> Int {
-  case bit < 0 {
-    True -> count
-    False -> {
-      let mask = int.bitwise_shift_left(1, bit)
-      case int.bitwise_and(n, mask) != 0 {
-        True -> count
-        False -> count_leading_zeros_32_loop(n, bit - 1, count + 1)
-      }
-    }
+// keeps whichever half holds the top set bit, halving the window each step
+fn count_leading_zeros_32_loop(n: Int, width: Int, count: Int) -> Int {
+  case width, int.bitwise_shift_right(n, width) {
+    0, _ -> count
+    _, 0 -> count_leading_zeros_32_loop(n, width / 2, count + width)
+    _, high -> count_leading_zeros_32_loop(high, width / 2, count)
   }
 }
 

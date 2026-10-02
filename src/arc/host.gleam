@@ -391,6 +391,9 @@ pub fn read_host(ctx: Context(host), val: JsVal) -> Option(host) {
 }
 
 /// mint a rooted native function without installing it
+///
+/// host functions are never freed, nor is anything their closures hold, so
+/// make them once at startup; one made per request or per message is a leak
 pub fn function(
   ctx: Context(host),
   name: String,
@@ -452,6 +455,8 @@ pub fn define_namespace(
 }
 
 /// constructible and extendable; instance is re-prototyped to new_target
+///
+/// never freed, like every host function; make it once at startup
 pub fn class(
   ctx: Context(host),
   name: String,

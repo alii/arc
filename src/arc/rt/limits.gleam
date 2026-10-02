@@ -22,6 +22,9 @@ pub const max_string_bytes = 268_435_456
 
 pub const max_call_depth = 10_000
 
+// an object growing past this many slots is being used as a table
+pub const max_shape_slots = 64
+
 // bounds proto walks against trap loops
 pub const max_prototype_depth = 1000
 

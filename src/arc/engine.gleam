@@ -107,6 +107,8 @@ pub fn define_global(
 }
 
 /// mint a native function without installing it as a global
+///
+/// host functions are never freed, so make them once at startup
 pub fn host_fn(
   engine: Engine(host),
   name: String,
@@ -118,6 +120,8 @@ pub fn host_fn(
 }
 
 /// build a constructible class; nothing is installed
+///
+/// never freed, like every host function; make it once at startup
 pub fn host_class(
   engine: Engine(host),
   name: String,

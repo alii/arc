@@ -143,6 +143,16 @@ pub fn new_object(
   stack: List(JsVal),
 ) -> #(JsVal, List(JsVal), Store)
 
+// values on top of stack, last value first
+@external(erlang, "arc_interp_prop_ffi", "new_object_shaped")
+pub fn new_object_shaped(
+  agent: Agent,
+  keys: List(BitArray),
+  count: Int,
+  stack: List(JsVal),
+  site: #(Int, Int),
+) -> #(JsVal, List(JsVal), Agent)
+
 @external(erlang, "arc_interp_prop_ffi", "new_receiver")
 pub fn new_receiver(st: Agent, proto: JsVal) -> #(JsVal, Agent)
 

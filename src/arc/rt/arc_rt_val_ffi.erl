@@ -3,7 +3,7 @@
 -include("arc_rt_layout.hrl").
 
 -export([
-    classify/1,
+    classify/1, type_of/2,
     mk_undefined/0, mk_hole/0, mk_array_lit/1, mk_null/0, mk_bool/1, mk_number/1, mk_int/1,
     mk_string/1, mk_bigint/1, mk_symbol/1, mk_object/1, mk_tdz/0,
     to_boolean_i32/1, to_boolean/1, logical_not/1, is_nullish/1,
@@ -33,6 +33,28 @@ classify({js_bigint, N}) -> {k_big, N};
 classify({js_sym, S}) -> {k_sym, S};
 classify({?HANDLE_TAG, _} = H) -> {k_handle, H};
 classify(js_tdz) -> k_tdz.
+
+type_of(_, undefined) -> <<"undefined">>;
+type_of(_, null) -> <<"object">>;
+type_of(_, B) when is_boolean(B) -> <<"boolean">>;
+type_of(_, N) when is_number(N) -> <<"number">>;
+type_of(_, B) when is_binary(B) -> <<"string">>;
+type_of(St, {?HANDLE_TAG, Id} = V) ->
+    case arc_rt_arena_ffi:get(Id, element(?STORE_CELLS, element(?AGENT_STORE, St))) of
+        {?SSHAPEDOBJECT_TAG, _, _, _, _} -> <<"object">>;
+        {?SOBJECT_TAG, Kind, _, _, _, _, _} when is_atom(Kind) -> <<"object">>;
+        {?SOBJECT_TAG, Kind, _, _, _, _, _} ->
+            case element(1, Kind) of
+                ?COMPILEDFN_TAG -> <<"function">>;
+                ?BYTECODEFN_TAG -> <<"function">>;
+                ?NATIVEFN_TAG -> <<"function">>;
+                ?BOUNDFN_TAG -> <<"function">>;
+                ?PROXYOBJ_TAG -> 'arc@rt@val':type_of_general(St, V);
+                _ -> <<"object">>
+            end;
+        _ -> 'arc@rt@val':type_of_general(St, V)
+    end;
+type_of(St, V) -> 'arc@rt@val':type_of_general(St, V).
 
 to_boolean_i32(undefined) -> 0;
 to_boolean_i32(null) -> 0;

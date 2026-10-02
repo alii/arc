@@ -4,6 +4,7 @@ import arc/bytecode/opcode
 import arc/compiler/ast_util
 import arc/compiler/scope
 import arc/parser/ast
+import arc/rt/limits
 import arc/rt/types
 import arc/rt/val as rt_val
 import arc_aot/emit/anf.{type Build}
@@ -59,7 +60,7 @@ pub fn bridge(call: Next) -> Build(ir.Value) {
 }
 
 // named is the namedevaluation hint for anonymous fn/class
-fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
+pub fn emit(ex: ast.Expression, named: Option(String)) -> Build(ir.Value) {
   case ex {
     ast.NumberLiteral(_, value) -> number_literal(value)
     ast.BigIntLiteral(_, n) -> {
@@ -1375,6 +1376,19 @@ pub fn emit_key(pk: ast.PropertyName) -> Build(ir.Value) {
       use v <- anf.then(expr(expression))
       to_property_key(v)
     }
+  }
+}
+
+// a pattern's read of key off source; a plain name is cached like source.name
+pub fn get_pattern_prop(
+  source: ir.Value,
+  key: ast.PropertyName,
+  emitted_key: ir.Value,
+) -> Build(ir.Value) {
+  case key {
+    ast.IdentifierName(name:, ..) ->
+      get_named("get_named_ic", source, bit_array.from_string(name))
+    _ -> anf.host("get_prop_untyped_key", [source, emitted_key])
   }
 }
 
@@ -2720,7 +2734,14 @@ fn emit_object(properties: List(ast.Property)) -> Build(ir.Value) {
         ),
       )
       use vals <- anf.then(anf.cons_list(vs))
-      anf.host("new_object_props", [keys, vals])
+      case rest, list.length(lead) <= limits.max_shape_slots {
+        [], True -> {
+          use site <- anf.then(next_ic_site())
+          anf.host("new_object_shaped", [keys, vals, ir.ConstI32(site)])
+        }
+        // what follows would only take the shape apart again
+        _, _ -> anf.host("new_object_props", [keys, vals])
+      }
     }
   })
   fold_build(rest, obj, emit_object_property)
@@ -3304,12 +3325,12 @@ fn emit_object_assign_props(
         // §13.15.5.6 step 1a lref before getv
         True -> {
           use lhs <- anf.then(emit_assign_target(value))
-          use v <- anf.then(anf.host("get_prop_untyped_key", [src, k]))
+          use v <- anf.then(get_pattern_prop(src, key, k))
           use _ <- anf.then(target_put(lhs, v))
           emit_object_assign_props(tail, src, [k, ..seen])
         }
         False -> {
-          use v <- anf.then(anf.host("get_prop_untyped_key", [src, k]))
+          use v <- anf.then(get_pattern_prop(src, key, k))
           use _ <- anf.then(emit_destructuring_assign(value, v))
           emit_object_assign_props(tail, src, [k, ..seen])
         }

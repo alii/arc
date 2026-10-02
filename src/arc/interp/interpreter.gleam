@@ -23,16 +23,17 @@ import arc/bytecode/opcode.{
   IncLocalJump, InitGlobalLex, InitialYield, IterateView, IteratorCheckObject,
   IteratorClose, IteratorCloseThrow, IteratorNext, IteratorRecord, IteratorRest,
   Jump, JumpIfFalse, JumpIfLocal, JumpIfNotNullish, JumpIfNullish, JumpIfTrue,
-  MakeClosure, MakeMethod, MakeSuppressed, NewObject, NewObjectWith,
-  NewPrivateName, NewRegExp, ObjectRestCopy, ObjectSpread, Pc, Pop, PopTry,
-  PostDecLocal, PostIncLocal, PrivateInDyn, PushConst, PushTry, PutBoxed,
-  PutBoxedCheckInit, PutElem, PutElemPop, PutEvalVar, PutField, PutFieldPop,
-  PutGlobal, PutLocal, PutLocalCheckInit, PutLocalConstField, PutLocalLocalField,
-  PutPrivateFieldDyn, PutSuperValue, Ret, Return, Rot3, Safepoint, SetProto,
-  SetupDerivedClass, Swap, Throw, ThrowConstAssign, ThrowReferenceError,
-  ToObject, ToPropertyKey, ToStringVal, TypeOf, TypeofEvalVar, TypeofGlobal,
-  UnaryOp, UnpackArray, Unrot4, WithDeleteVar, WithGetRefValue, WithGetVar,
-  WithGetVarThis, WithMakeRef, WithPutRefValue, WithPutVar, Yield, YieldStar,
+  MakeClosure, MakeMethod, MakeSuppressed, NewObject, NewObjectShaped,
+  NewObjectWith, NewPrivateName, NewRegExp, ObjectRestCopy, ObjectSpread, Pc,
+  Pop, PopTry, PostDecLocal, PostIncLocal, PrivateInDyn, PushConst, PushTry,
+  PutBoxed, PutBoxedCheckInit, PutElem, PutElemPop, PutEvalVar, PutField,
+  PutFieldPop, PutGlobal, PutLocal, PutLocalCheckInit, PutLocalConstField,
+  PutLocalLocalField, PutPrivateFieldDyn, PutSuperValue, Ret, Return, Rot3,
+  Safepoint, SetProto, SetupDerivedClass, Swap, Throw, ThrowConstAssign,
+  ThrowReferenceError, ToObject, ToPropertyKey, ToStringVal, TypeOf,
+  TypeofEvalVar, TypeofGlobal, UnaryOp, UnpackArray, Unrot4, WithDeleteVar,
+  WithGetRefValue, WithGetVar, WithGetVarThis, WithMakeRef, WithPutRefValue,
+  WithPutVar, Yield, YieldStar,
 }
 import arc/internal/tuple_array.{type TupleArray}
 import arc/interp/call.{type Drive}
@@ -2366,6 +2367,26 @@ fn loop(
       )
     }
 
+    NewObjectShaped(keys, count, site) -> {
+      let #(obj, stack, agent) =
+        kernel.new_object_shaped(agent, keys, count, stack, #(
+          state.unit_id,
+          site,
+        ))
+      loop(
+        state,
+        drive,
+        pc + 1,
+        [obj, ..stack],
+        locals,
+        agent,
+        code,
+        constants,
+        r0,
+        r1,
+      )
+    }
+
     NewObjectWith(keys, count) -> {
       let #(obj, stack, store) =
         kernel.new_object(
@@ -3848,6 +3869,7 @@ fn step(state: State, drive: Drive, op: Op) -> Result(State, StepExit) {
     | PushTry(..)
     | NewObject
     | NewObjectWith(..)
+    | NewObjectShaped(..)
     | MakeClosure(_)
     | InitialYield
     | Yield
