@@ -29,7 +29,10 @@
 -define(STORE_PLAIN_WRITE_PROTOS, 10).
 -define(STORE_GLOBAL_EPOCH, 11).
 -define(STORE_PINNED_ROOTS, 14).
+-define(STORE_META, 15).
 -define(STORE_SIZE, 15).
+-define(STOREMETA_PLAIN_INDEX_PROTOS, 12).
+-define(STOREMETA_SIZE, 12).
 %% arena marker for a freed cell id
 -define(STORE_FREE_CELL, js_free).
 

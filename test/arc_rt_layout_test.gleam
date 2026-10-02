@@ -192,6 +192,11 @@ pub fn store_test() {
       ics: dict.from_list([
         #(1, types.IcRead(<<"k":utf8>>, dict.from_list([#(7, 0)]))),
       ]),
+      plain_write_protos: dict.from_list([#(17, Nil)]),
+      meta: types.StoreMeta(
+        ..rt_store.new().meta,
+        plain_index_protos: dict.from_list([#(18, Nil)]),
+      ),
     )
   assert tag_of(store) == tag("STORE_TAG")
   assert size_of(store) == idx("STORE_SIZE")
@@ -204,6 +209,10 @@ pub fn store_test() {
   assert at(store, "STORE_NEXT_SHAPE") == dyn(15)
   assert at(store, "STORE_ICS") == dyn(store.ics)
   assert at(store, "STORE_PLAIN_WRITE_PROTOS") == dyn(store.plain_write_protos)
+  assert at(store, "STORE_META") == dyn(store.meta)
+  assert size_of(store.meta) == idx("STOREMETA_SIZE")
+  assert at(store.meta, "STOREMETA_PLAIN_INDEX_PROTOS")
+    == dyn(store.meta.plain_index_protos)
   assert at(store, "STORE_GLOBAL_EPOCH") == dyn(store.global_epoch)
   assert dyn(arena.get(3, arena.free(3, store.cells))) == tag("STORE_FREE_CELL")
 }

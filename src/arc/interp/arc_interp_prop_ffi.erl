@@ -385,46 +385,39 @@ chain_takes_write(Store, _, {?SOME, {?HANDLE_TAG, PId}}, {?KEY_NAMED, KB})
     true;
 chain_takes_write(Store, Cells, Proto, {?KEY_NAMED, _} = K) ->
     arc_rt_obj_ffi:chain_takes_named_write(Store, Cells, Proto, K);
-chain_takes_write(_, Cells, Proto, {?KEY_INDEX, Idx}) ->
-    chain_lacks_index(Cells, Proto, Idx, ?MAX_PROTO_HOPS).
+chain_takes_write(Store, Cells, Proto, {?KEY_INDEX, Idx}) ->
+    arc_rt_obj_ffi:chain_takes_index_write(Store, Cells, Proto, Idx).
 
 %% creating an element needs free proto chain, writable length
 put_elem(Store, {?HANDLE_TAG, Id}, Idx, V)
   when is_integer(Idx), Idx >= 0, tuple_size(Store) =:= ?STORE_SIZE ->
     Cells = element(?STORE_CELLS, Store),
     case arc_rt_arena_ffi:get(Id, Cells) of
-        {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Length} = Kind, Proto, Props, Sym, Elems, true}
+        {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Length} = Kind, Proto, Props, Sym, Elems, true} = Cell
           when Props =:= #{}; not is_map_key({?KEY_INDEX, Idx}, Props) ->
             if
                 Idx < Length ->
-                    NewE = case elem_overwrite(Elems, Idx, V) of
+                    case elem_overwrite(Elems, Idx, V) of
                         hole ->
-                            case chain_lacks_index(Cells, Proto, Idx,
-                                                   ?MAX_PROTO_HOPS) of
-                                true -> elem_write_grow(Elems, Idx, V);
-                                false -> miss
-                            end;
-                        E -> E
-                    end,
-                    case NewE of
-                        miss -> miss;
-                        _ ->
+                            fill_hole(Store, Cells, Id, Cell, Proto, Elems, Idx, V);
+                        NewE ->
                             NewCell = {?SOBJECT_TAG, Kind, Proto, Props, Sym, NewE, true},
                             setelement(?STORE_CELLS, Store,
                                        arc_rt_arena_ffi:set(Id, NewCell, Cells))
                     end;
                 Idx =:= Length, Idx =< ?MAX_ARRAY_INDEX ->
                     case length_writable(Props)
-                         andalso chain_lacks_index(Cells, Proto, Idx,
-                                                   ?MAX_PROTO_HOPS) of
+                         andalso arc_rt_obj_ffi:chain_takes_index_write(
+                                   Store, Cells, Proto, Idx) of
                         false -> miss;
-                        true ->
+                        Free ->
                             case elem_write_grow(Elems, Idx, V) of
                                 miss -> miss;
                                 NewE ->
                                     NewCell = {?SOBJECT_TAG, {?ARRAYOBJ_TAG, Idx + 1},
                                                Proto, Props, Sym, NewE, true},
-                                    setelement(?STORE_CELLS, Store,
+                                    setelement(?STORE_CELLS,
+                                               arc_rt_obj_ffi:remembering(Free, Store),
                                                arc_rt_arena_ffi:set(Id, NewCell, Cells))
                             end
                     end;
@@ -442,6 +435,20 @@ put_elem(Store, {?HANDLE_TAG, _} = Obj, Key, V) when ?IS_STR(Key) ->
         _ -> miss
     end;
 put_elem(_, _, _, _) -> miss.
+
+%% a hole is a missing property, so the protos get a say
+fill_hole(Store, Cells, Id, Cell, Proto, Elems, Idx, V) ->
+    case arc_rt_obj_ffi:chain_takes_index_write(Store, Cells, Proto, Idx) of
+        false -> miss;
+        Free ->
+            case elem_write_grow(Elems, Idx, V) of
+                miss -> miss;
+                NewE ->
+                    setelement(?STORE_CELLS, arc_rt_obj_ffi:remembering(Free, Store),
+                               arc_rt_arena_ffi:set(
+                                 Id, setelement(?SOBJECT_ELEMENTS, Cell, NewE), Cells))
+            end
+    end.
 
 length_writable(#{?LENGTH_KEY := Prop})
   when element(1, Prop) =:= ?DATAPROPERTY_TAG ->
@@ -483,15 +490,10 @@ elem_has({?ELEMS_DENSE, A}, Idx) -> arc_tree_array_ffi:get_or_hole(Idx, A) =/= ?
 elem_has({?ELEMS_SPARSE, M}, Idx) -> is_map_key(Idx, M);
 elem_has(_, _) -> false.
 
-elem_overwrite({?ELEMS_DENSE, {?VEC_TAG, _, _, _, _, _} = A}, Idx, V) ->
-    case arc_tree_array_ffi:get_or_hole(Idx, A) of
-        ?ELEMS_HOLE -> hole;
-        _ -> {?ELEMS_DENSE, arc_tree_array_ffi:set(Idx, V, A)}
-    end;
-elem_overwrite({?ELEMS_DENSE, T}, Idx, V) when Idx < tuple_size(T) ->
-    case element(Idx + 1, T) of
-        ?ELEMS_HOLE -> hole;
-        _ -> {?ELEMS_DENSE, setelement(Idx + 1, T, V)}
+elem_overwrite({?ELEMS_DENSE, A}, Idx, V) ->
+    case arc_tree_array_ffi:overwrite(Idx, V, A) of
+        hole -> hole;
+        A1 -> {?ELEMS_DENSE, A1}
     end;
 elem_overwrite({?ELEMS_SPARSE, M}, Idx, V) ->
     case M of
