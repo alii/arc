@@ -2053,17 +2053,22 @@ fn parse_try_statement(
   p: Parser,
 ) -> Result(#(Parser, ast.Statement), ParseError) {
   let p2 = advance(p)
+  let try_scope = p2.scopes.current
   let p2 = Parser(..p2, scopes: scope_builder.enter_try(p2.scopes))
   use #(p3, block) <- result.try(parse_block_body(p2))
+  // what a catch clause throws is not caught by its own try
+  let p3 = Parser(..p3, scopes: scope_builder.leave_try(p3.scopes))
   use #(p4, handler) <- result.try(parse_catch_clause(p3))
   use #(p5, finalizer) <- result.try(case peek(p4) {
     Finally -> {
-      use #(p, b) <- result.map(parse_block_body(advance(p4)))
-      #(p, Some(b))
+      let scopes = scope_builder.reenter_try(p4.scopes, try_scope, p3.scopes)
+      use #(p, b) <- result.map(
+        parse_block_body(advance(Parser(..p4, scopes:))),
+      )
+      #(Parser(..p, scopes: scope_builder.leave_try(p.scopes)), Some(b))
     }
     _ -> Ok(#(p4, None))
   })
-  let p5 = Parser(..p5, scopes: scope_builder.leave_try(p5.scopes))
   use tail <- result.map(case handler, finalizer {
     None, None -> Error(MissingCatchOrFinally(pos_of(p5)))
     Some(handler), None -> Ok(ast.TryCatch(handler:))

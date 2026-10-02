@@ -311,6 +311,24 @@ pub fn leave_try(sb: ScopeBuilder) -> ScopeBuilder {
   ScopeBuilder(..sb, try_scopes: list.drop(sb.try_scopes, 1))
 }
 
+// a finally guards its catch clause too: count the writes made since before_catch
+pub fn reenter_try(
+  sb: ScopeBuilder,
+  try_scope: ScopeId,
+  before_catch: ScopeBuilder,
+) -> ScopeBuilder {
+  let in_catch =
+    list.take(
+      sb.assign_refs,
+      list.length(sb.assign_refs) - list.length(before_catch.assign_refs),
+    )
+  let try_assign_refs =
+    list.fold(in_catch, sb.try_assign_refs, fn(refs, write) {
+      [TryAssignRef(scope: write.scope, name: write.name, try_scope:), ..refs]
+    })
+  ScopeBuilder(..sb, try_scopes: [try_scope, ..sb.try_scopes], try_assign_refs:)
+}
+
 pub fn lexical_ref(sb: ScopeBuilder, ref: LexicalRef) -> ScopeBuilder {
   let own_lexical_refs =
     dict.upsert(sb.own_lexical_refs, sb.current_fn, fn(prev) {
