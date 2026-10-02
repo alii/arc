@@ -13,8 +13,7 @@ import { useAtomVM } from './use-atomvm';
 
 const HELLO_EXAMPLE = {
 	name: 'hello',
-	code: `// Real JavaScript, running as WebAssembly via AtomVM.
-const greet = (name) => \`Hello, \${name}!\`;
+	code: `const greet = (name) => \`Hello, \${name}!\`;
 
 console.log(greet('world'));
 console.log([1, 2, 3].map((n) => n * n));`,
