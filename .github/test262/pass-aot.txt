@@ -47528,6 +47528,7 @@ language/statements/try/S12.14_A12_T4.js
 language/statements/try/S12.14_A13_T1.js
 language/statements/try/S12.14_A13_T2.js
 language/statements/try/S12.14_A13_T3.js
+language/statements/try/S12.14_A15.js
 language/statements/try/S12.14_A16_T1.js
 language/statements/try/S12.14_A16_T10.js
 language/statements/try/S12.14_A16_T11.js
@@ -48933,6 +48934,7 @@ staging/sm/expressions/primitive-this-boxing-behavior.js
 staging/sm/expressions/short-circuit-compound-assignment-anon-fns.js
 staging/sm/expressions/short-circuit-compound-assignment-const.js
 staging/sm/expressions/short-circuit-compound-assignment-property-key-evaluation.js
+staging/sm/expressions/short-circuit-compound-assignment-tdz.js
 staging/sm/expressions/tagged-template-constant-folding.js
 staging/sm/extensions/8.12.5-01.js
 staging/sm/extensions/ArrayBuffer-slice-arguments-detaching.js
