@@ -336,6 +336,27 @@ pub fn generator_and_collection_iteration_diff_test() {
   )
 }
 
+pub fn index_store_asks_the_prototypes_diff_test() {
+  diff(
+    "var l='';function st(a,i,v){a[i]=v;l+=a.length}function set(o,k){Object.defineProperty(o,k,{set:function(v){l+='<'+k+'='+v+'>'},configurable:true})}for(var w=0;w<3;w++)st([],0,w);set(Array.prototype,'0');st([],0,1);delete Array.prototype[0];st([],0,1);set(Object.prototype,'1');st([9],1,2);delete Object.prototype[1];st([9],1,2);Object.defineProperty(Array.prototype,'2',{value:7,writable:false,configurable:true});st([1,2],2,3);delete Array.prototype[2];Array.prototype[3]='p';st([1,2,3],3,4);delete Array.prototype[3];console.log(l)",
+    "111<0=1>01<1=2>1224\n",
+  )
+}
+
+pub fn index_store_holes_and_fixed_lengths_diff_test() {
+  diff(
+    "var l='';function st(a,i,v){a[i]=v;l+=a.length+'['+a.join()+']'}function set(o,k){Object.defineProperty(o,k,{set:function(v){l+='<'+k+'='+v+'>'},get:function(){return 'G'},configurable:true})}st([1,,3],1,2);set(Array.prototype,'1');st([1,,3],1,2);delete Array.prototype[1];var s=[];s[5000]=1;set(Object.prototype,'77');s[77]=2;l+=Object.keys(s).length;delete Object.prototype[77];var f=[1];Object.defineProperty(f,'length',{writable:false});st(f,1,2);st(Object.freeze([1]),1,2);st(Object.preventExtensions([1]),1,2);var n=[1];n.x=1;st(n,1,2);console.log(l)",
+    "3[1,2,3]<1=2>3[1,G,3]<77=2>11[1]1[1]1[1]2[1,2]\n",
+  )
+}
+
+pub fn appends_notice_a_prototype_changing_diff_test() {
+  diff(
+    "var l='';function pu(a,v){a.push(v);l+=a.length}function st(a,i,v){a[i]=v;l+=a.length}function set(o,k){Object.defineProperty(o,k,{set:function(v){l+='<'+k+'='+v+'>'},configurable:true})}for(var w=0;w<3;w++)pu([],w);set(Array.prototype,'0');pu([],1);delete Array.prototype[0];pu([],1);set(Object.prototype,'1');pu([9],2);delete Object.prototype[1];pu([9],2);var mid=Object.create(Array.prototype),a=[];Object.setPrototypeOf(a,mid);st(a,0,1);st(a,1,2);var evil={};set(evil,'2');Object.setPrototypeOf(mid,evil);st(a,2,3);var p=[];Object.setPrototypeOf(p,new Proxy(Array.prototype,{set:function(t,k,v){l+='<trap'+k+'>';return true}}));st(p,0,1);var t=[];Object.setPrototypeOf(t,new Uint8Array(2));st(t,0,1);st(t,5,1);console.log(l)",
+    "111<0=1>11<1=2>2212<2=3>2<trap0>011\n",
+  )
+}
+
 pub fn typed_array_index_exotic_diff_test() {
   diff(
     "var a=new Uint8Array([1,2,300]);a[1]=7;a[9]=5;a['1.5']=5;var o={};console.log(a[0],a[1],a[2],a[9],a.length,Object.keys(a).join(),'1' in a,'3' in a,'-0' in a,delete a[0],delete a[9],JSON.stringify(Object.getOwnPropertyDescriptor(a,'0')),Reflect.set(a,0,4,o),o[0],a[0],JSON.stringify({...a}))",

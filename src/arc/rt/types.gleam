@@ -2177,6 +2177,8 @@ pub type StoreMeta {
     // live_count right after the last major gc
     major_live: Int,
     minors_since_major: Int,
+    // proto id to whether its chain takes plain index writes
+    plain_index_protos: Dict(Int, Nil),
   )
 }
 

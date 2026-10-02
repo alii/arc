@@ -74,6 +74,7 @@ pub fn agent_roots(st: Agent) -> List(Int) {
       old_weak_ids: _,
       major_live: _,
       minors_since_major: _,
+      plain_index_protos: _,
     ),
   ) = st.store
   let acc = set.to_list(pinned_roots)
@@ -407,6 +408,7 @@ pub fn collect(st: Agent, extra_roots: List(Handle)) -> Agent {
         old_weak_ids: weak,
         major_live: live_count,
         minors_since_major: 0,
+        plain_index_protos: dict.new(),
       ),
     ),
   )

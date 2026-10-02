@@ -12,6 +12,7 @@
          array_lit_packed/2,
          global_peek/2, global_get/2,
          named_write_walk/5, chain_takes_named_write/4, named_plain/2,
+         chain_takes_index_write/4, index_chain_plain/3, remembering/2,
          shape_slots_new/0, shape_slots_get/2, shape_slots_set/3,
          shape_slots_append/2, get_symbol_data/3]).
 
@@ -263,6 +264,56 @@ chain_takes_named_write(Store, Cells, {?SOME, {?HANDLE_TAG, PId}} = Proto,
 chain_takes_named_write(Store, Cells, Proto, K) ->
     named_write_walk(Cells, element(?STORE_SHAPES, Store), Proto, K, ?MAX_PROTO_HOPS).
 
+%% true | false | {true, Store1}, as chain_takes_named_write but for an index
+chain_takes_index_write(Store, Cells, Proto, Idx) ->
+    case index_chain_plain(Store, Cells, Proto) of
+        false -> index_write_walk(Cells, Proto, Idx, ?MAX_PROTO_HOPS);
+        Plain -> Plain
+    end.
+
+%% true | false | {true, Store1}: no proto can intercept a plain write at any
+%% index, memo in plain_index_protos; writable data on a proto intercepts nothing
+index_chain_plain(_, _, ?NONE) -> true;
+index_chain_plain(Store, Cells, {?SOME, {?HANDLE_TAG, PId}} = Proto) ->
+    Meta = element(?STORE_META, Store),
+    Memo = element(?STOREMETA_PLAIN_INDEX_PROTOS, Meta),
+    case is_map_key(PId, Memo) of
+        true -> true;
+        false ->
+            case index_chain_ids(Cells, Proto, ?MAX_PROTO_HOPS, []) of
+                false -> false;
+                Ids ->
+                    Memo1 = lists:foldl(fun(Id, M) -> M#{Id => nil} end, Memo, Ids),
+                    {true,
+                     setelement(?STORE_META, Store,
+                                setelement(?STOREMETA_PLAIN_INDEX_PROTOS, Meta,
+                                           Memo1))}
+            end
+    end.
+
+index_chain_ids(_, ?NONE, _, Ids) -> Ids;
+index_chain_ids(Cells, {?SOME, {?HANDLE_TAG, PId}}, Fuel, Ids) when Fuel > 0 ->
+    case arc_rt_arena_ffi:get(PId, Cells) of
+        {?SSHAPEDOBJECT_TAG, _, P2, _, _} ->
+            index_chain_ids(Cells, P2, Fuel - 1, [PId | Ids]);
+        {?SOBJECT_TAG, Kind, P2, Props, _, _, _} ->
+            index_writes_pass(Kind)
+                andalso index_props_writable(maps:next(maps:iterator(Props)))
+                andalso index_chain_ids(Cells, P2, Fuel - 1, [PId | Ids]);
+        _ -> false
+    end;
+index_chain_ids(_, _, _, _) -> false.
+
+index_props_writable(none) -> true;
+index_props_writable({{?KEY_INDEX, _}, Prop, I}) ->
+    case Prop of
+        {?DATAPROPERTY_TAG, _, true, _, _, _} ->
+            index_props_writable(maps:next(I));
+        _ -> false
+    end;
+index_props_writable({_, _, I}) -> index_props_writable(maps:next(I)).
+
+%% the store a true | {true, Store1} answer leaves
 store_put_seq(Store, Cells, Seq) when tuple_size(Store) =:= ?STORE_SIZE ->
     setelement(?STORE_PROP_SEQ, setelement(?STORE_CELLS, Store, Cells), Seq).
 
@@ -567,8 +618,12 @@ index_write(St, Id, Idx, V) ->
                             end
                     end;
                 {?ARRAYOBJ_TAG, Length} when Idx =:= Length ->
-                    case element(?SOBJECT_PROPS, Cell) of
-                        #{{?KEY_INDEX, Idx} := _} -> miss;
+                    Props = element(?SOBJECT_PROPS, Cell),
+                    Free = (Props =:= #{} orelse may_append(Props, Idx))
+                        andalso chain_takes_index_write(
+                                  Store, Cells, element(?SOBJECT_PROTO, Cell), Idx),
+                    case Free of
+                        false -> miss;
                         _ ->
                             case elem_append(element(?SOBJECT_ELEMENTS, Cell), Idx, V) of
                                 miss -> miss;
@@ -578,7 +633,7 @@ index_write(St, Id, Idx, V) ->
                                             {?ARRAYOBJ_TAG, Length + 1}),
                                         NewE),
                                     with_store(St,
-                                        with_cells(Store,
+                                        with_cells(remembering(Free, Store),
                                             arc_rt_arena_ffi:set(Id, NewCell, Cells)))
                             end
                     end;
@@ -602,6 +657,16 @@ index_write(St, Id, Idx, V) ->
         _ -> miss
     end.
 
+%% no own property in the way, and a length that may grow
+may_append(Props, Idx) ->
+    (not is_map_key({?KEY_INDEX, Idx}, Props))
+        andalso case Props of
+            #{?LENGTH_KEY := Prop} ->
+                element(1, Prop) =:= ?DATAPROPERTY_TAG andalso
+                    element(?DATAPROPERTY_WRITABLE, Prop) =:= true;
+            _ -> true
+        end.
+
 index_prop_write(St, Store, Cells, Id, Cell, Idx, V) ->
     Props = element(?SOBJECT_PROPS, Cell),
     K = {?KEY_INDEX, Idx},
@@ -615,14 +680,14 @@ index_prop_write(St, Store, Cells, Id, Cell, Idx, V) ->
             with_store(St, bump_epoch_if_global(Store1, Cell));
         #{K := _} -> miss;
         _ when element(?SOBJECT_EXTENSIBLE, Cell) =:= true ->
-            case chain_takes_index_write(Cells, element(?SOBJECT_PROTO, Cell), Idx,
-                                         ?MAX_PROTO_HOPS) of
+            case chain_takes_index_write(Store, Cells,
+                                         element(?SOBJECT_PROTO, Cell), Idx) of
                 false -> miss;
-                true ->
+                Free ->
                     Seq = element(?STORE_PROP_SEQ, Store),
                     Prop = ?PLAIN_PROPERTY(V, Seq),
                     NewCell = with_props(Cell, Props#{K => Prop}),
-                    Store1 = store_put_seq(Store,
+                    Store1 = store_put_seq(remembering(Free, Store),
                                            arc_rt_arena_ffi:set(Id, NewCell, Cells),
                                            Seq + 1),
                     with_store(St, bump_epoch_if_global(Store1, Cell))
@@ -630,18 +695,15 @@ index_prop_write(St, Store, Cells, Id, Cell, Idx, V) ->
         _ -> miss
     end.
 
-chain_takes_index_write(_, ?NONE, _, _) -> true;
-chain_takes_index_write(_, _, _, 0) -> false;
-chain_takes_index_write(Cells, {?SOME, {?HANDLE_TAG, PId}}, Idx, Fuel) ->
+%% uncached walk behind chain_takes_index_write
+index_write_walk(_, ?NONE, _, _) -> true;
+index_write_walk(_, _, _, 0) -> false;
+index_write_walk(Cells, {?SOME, {?HANDLE_TAG, PId}}, Idx, Fuel) ->
     case arc_rt_arena_ffi:get(PId, Cells) of
         {?SSHAPEDOBJECT_TAG, _, P2, _, _} ->
-            chain_takes_index_write(Cells, P2, Idx, Fuel - 1);
+            index_write_walk(Cells, P2, Idx, Fuel - 1);
         Cell when element(1, Cell) =:= ?SOBJECT_TAG ->
-            Kind = element(?SOBJECT_KIND, Cell),
-            Walk = index_keys_in_props(Kind) orelse element(1, Kind) =:= ?ARRAYOBJ_TAG
-                orelse (element(1, Kind) =:= ?ARGUMENTSOBJ_TAG
-                        andalso element(?ARGUMENTSOBJ_MAPPED, Kind) =:= ?NONE),
-            case Walk of
+            case index_writes_pass(element(?SOBJECT_KIND, Cell)) of
                 false -> false;
                 true ->
                     case element(?SOBJECT_PROPS, Cell) of
@@ -649,23 +711,35 @@ chain_takes_index_write(Cells, {?SOME, {?HANDLE_TAG, PId}}, Idx, Fuel) ->
                             element(1, Prop) =:= ?DATAPROPERTY_TAG andalso
                                 element(?DATAPROPERTY_WRITABLE, Prop) =:= true;
                         _ ->
-                            chain_takes_index_write(Cells,
-                                                    element(?SOBJECT_PROTO, Cell),
-                                                    Idx, Fuel - 1)
+                            index_write_walk(Cells, element(?SOBJECT_PROTO, Cell),
+                                             Idx, Fuel - 1)
                     end
             end;
         _ -> false
     end;
-chain_takes_index_write(_, _, _, _) -> false.
+index_write_walk(_, _, _, _) -> false.
 
+%% kinds whose index keys are all in props or plain elements
+index_writes_pass(Kind) ->
+    index_keys_in_props(Kind) orelse element(1, Kind) =:= ?ARRAYOBJ_TAG
+        orelse (element(1, Kind) =:= ?ARGUMENTSOBJ_TAG
+                andalso element(?ARGUMENTSOBJ_MAPPED, Kind) =:= ?NONE).
+
+%% filling a hole creates a property, which is the general path's to decide
 elem_write({?ELEMS_DENSE, A}, Idx, V) ->
-    case Idx < arc_tree_array_ffi:size(A) of
-        true -> {?ELEMS_DENSE, arc_tree_array_ffi:set(Idx, V, A)};
-        false -> miss
+    case arc_tree_array_ffi:get_or_hole(Idx, A) of
+        ?ELEMS_HOLE -> miss;
+        _ -> {?ELEMS_DENSE, arc_tree_array_ffi:set(Idx, V, A)}
     end;
 elem_write({?ELEMS_SPARSE, M}, Idx, V) ->
-    {?ELEMS_SPARSE, M#{Idx => V}};
+    case M of
+        #{Idx := _} -> {?ELEMS_SPARSE, M#{Idx := V}};
+        _ -> miss
+    end;
 elem_write(_, _, _) -> miss.
+
+remembering(true, Store) -> Store;
+remembering({true, Store}, _) -> Store.
 
 elem_append({?ELEMS_DENSE, A}, Idx, V) ->
     {?ELEMS_DENSE, arc_tree_array_ffi:set(Idx, V, A)};

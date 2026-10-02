@@ -39,6 +39,7 @@ pub fn new() -> Store {
       old_weak_ids: [],
       major_live: 0,
       minors_since_major: 0,
+      plain_index_protos: dict.new(),
     ),
   )
 }
@@ -127,7 +128,14 @@ pub fn cell_set(st: Agent, h: Handle, cell: Cell) -> Agent {
     True -> dict.new()
     False -> store.plain_write_protos
   }
-  Agent(..st, store: Store(..store, cells:, plain_write_protos:, global_epoch:))
+  let meta = case dict.has_key(store.meta.plain_index_protos, id) {
+    True -> StoreMeta(..store.meta, plain_index_protos: dict.new())
+    False -> store.meta
+  }
+  Agent(
+    ..st,
+    store: Store(..store, cells:, plain_write_protos:, global_epoch:, meta:),
+  )
 }
 
 // boxes must be sbox so gc traces them

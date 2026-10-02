@@ -108,6 +108,7 @@ pub fn serialize(st: Agent) -> Result(BitArray, SnapshotError) {
       old_weak_ids: _,
       major_live: _,
       minors_since_major: _,
+      plain_index_protos: _,
     ),
   ) = store
   let microtasks = types.job_queue_to_list(microtasks)
