@@ -1,5 +1,4 @@
 // Microbenchmark harness for the arc VM.
-// Run: gleam run -- bench/bench.js
 // Prints "BENCH <name> <ms>" per section so runs can be diffed.
 
 function bench(name, n, f) {

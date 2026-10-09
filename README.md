@@ -27,7 +27,6 @@ Tested against [test262](https://github.com/tc39/test262) on every commit:
 ---
 
 ```sh
-gleam run -- file.js       # run a script
 gleam test                 # unit tests
 TEST262_EXEC=1 gleam test  # full test262 suite
 TEST262=1 gleam test       # parser-only test262
