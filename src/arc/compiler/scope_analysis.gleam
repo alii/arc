@@ -472,12 +472,10 @@ type SubtreeFacts {
 
 type ParentView {
   ParentView(
-    slot_by_name: Dict(String, Int),
-    name_set: Set(String),
-    consts: Set(String),
-    fn_names: Set(String),
-    lets: Set(String),
-    boxed: Set(String),
+    // bindings of the parent's scopes open at the creation site, innermost first
+    visible: List(Dict(String, Binding)),
+    capture_slots: Dict(String, Int),
+    inherited: NameCaptures,
     lexical_available: LexicalRefs,
     lexical_boxed: LexicalRefs,
   )
@@ -566,12 +564,14 @@ fn analyze_captures(
     )
   let root_parent =
     ParentView(
-      slot_by_name: dict.new(),
-      name_set: set.new(),
-      consts: set.new(),
-      fn_names: set.new(),
-      lets: set.new(),
-      boxed: set.new(),
+      visible: [],
+      capture_slots: dict.new(),
+      inherited: NameCaptures(
+        ordered: [],
+        consts: set.new(),
+        fn_names: set.new(),
+        lets: set.new(),
+      ),
       lexical_available: lexical.no_lexical_refs,
       lexical_boxed: lexical.every_lexical_ref,
     )
@@ -663,16 +663,14 @@ fn collect_subtree_facts(
   let declared = declared_in(own_scopes)
   // a child's free name declared where the child opens is not free here
   let free_in_children = {
-    use free, child_id, visible_names <- fold_child_functions(
+    use free, child_id, visible <- fold_child_functions(
       tree,
       children,
       init: set.new(),
-      per_site: fn(_free, child_id) {
-        visible_at_creation(tree, child_id) |> dict.keys |> set.from_list
-      },
+      per_site: fn(_free, child_id) { visible_at_creation(tree, child_id) },
     )
     subtree_facts(acc, child_id).transitive_free
-    |> set.difference(visible_names)
+    |> set.filter(fn(name) { option.is_none(visible_binding(visible, name)) })
     |> set.union(free, _)
   }
   let transitive_free =
@@ -717,17 +715,20 @@ fn assign_captures(
 ) -> ScopeTree {
   let plan = plan_captures(tree, analysis, fn_id, parent)
   let tree = write_captures(tree, analysis, fn_id, parent, plan)
+  let capture_slots =
+    list.index_map(plan.name_captures.ordered, fn(c, i) { #(c.name, i) })
+    |> dict.from_list
   use tree, child_id, view <- fold_child_functions(
     tree,
     child_function_scopes(tree, fn_id),
     init: tree,
     per_site: fn(tree, child_id) {
-      child_parent_view(
-        tree,
-        child_id,
-        plan.name_captures,
-        plan.layout.available,
-        plan.layout.lexical_boxed,
+      ParentView(
+        visible: visible_at_creation(tree, child_id),
+        capture_slots:,
+        inherited: plan.name_captures,
+        lexical_available: plan.layout.available,
+        lexical_boxed: plan.layout.lexical_boxed,
       )
     },
   )
@@ -781,7 +782,7 @@ fn write_captures(
         own_scope_ids,
         layout.capture_slot_count,
         name_captures,
-        parent.boxed,
+        parent,
       )
   }
   let tree = apply_boxing(tree, own_scope_ids, vars_to_box)
@@ -808,23 +809,74 @@ fn derive_name_captures(
   parent: ParentView,
 ) -> NameCaptures {
   let captured_names = case subtree.eval_in_subtree {
-    True -> parent.name_set
-    False -> set.intersection(subtree.transitive_free, parent.name_set)
+    True -> parent_names(parent)
+    False ->
+      set.filter(subtree.transitive_free, fn(name) {
+        option.is_some(parent_slot(parent, name))
+      })
   }
   let ordered = {
     use name <- list.map(
       set.to_list(captured_names) |> list.sort(string.compare),
     )
-    let assert Ok(parent_slot) = dict.get(parent.slot_by_name, name)
+    let assert Some(parent_slot) = parent_slot(parent, name)
       as "scope_analysis.captures: captured name absent from parent view"
     NameCapture(name:, parent_slot:)
   }
+  // by declared kind, not kind, so a captured const stays const
+  let declared_as = fn(kind) {
+    set.filter(captured_names, fn(name) {
+      parent_declared_kind(parent, name) == kind
+    })
+  }
   NameCaptures(
     ordered:,
-    consts: set.intersection(parent.consts, captured_names),
-    fn_names: set.intersection(parent.fn_names, captured_names),
-    lets: set.intersection(parent.lets, captured_names),
+    consts: declared_as(ConstBinding),
+    fn_names: declared_as(FnNameBinding),
+    lets: declared_as(LetBinding),
   )
+}
+
+fn visible_binding(
+  visible: List(Dict(String, Binding)),
+  name: String,
+) -> Option(Binding) {
+  case visible {
+    [] -> None
+    [bindings, ..outer] ->
+      case dict.get(bindings, name) {
+        Ok(b) -> Some(b)
+        Error(Nil) -> visible_binding(outer, name)
+      }
+  }
+}
+
+fn parent_slot(parent: ParentView, name: String) -> Option(Int) {
+  case visible_binding(parent.visible, name) {
+    Some(b) -> Some(b.slot)
+    None -> dict.get(parent.capture_slots, name) |> option.from_result
+  }
+}
+
+fn parent_declared_kind(parent: ParentView, name: String) -> BindingKind {
+  case visible_binding(parent.visible, name) {
+    Some(b) -> b.declared_kind
+    None -> captured_declared_kind(parent.inherited, name)
+  }
+}
+
+fn parent_boxes(parent: ParentView, name: String) -> Bool {
+  visible_binding(parent.visible, name)
+  |> option.map(fn(b) { b.boxed })
+  |> option.unwrap(False)
+}
+
+fn parent_names(parent: ParentView) -> Set(String) {
+  use names, bindings <- list.fold(
+    parent.visible,
+    set.from_list(dict.keys(parent.capture_slots)),
+  )
+  dict.fold(bindings, names, fn(names, name, _b) { set.insert(names, name) })
 }
 
 fn derive_lexical_layout(
@@ -983,18 +1035,34 @@ fn never_box_names(
   // sloppy + arguments referenced: arguments[i]=v may write params
   let may_map_args =
     !own.is_strict && set.contains(analysis.refs_arguments, fn_id)
+  let #(hoisted_free, first_capturer) = {
+    use #(hoisted, first), child_id <- list.fold(children, #(
+      set.new(),
+      dict.new(),
+    ))
+    let free = subtree_facts(analysis.subtree_by_fn, child_id).transitive_free
+    case set.contains(analysis.fn_decls, child_id) {
+      True -> #(set.union(hoisted, free), first)
+      False -> {
+        let first = {
+          use first, name <- set.fold(free, first)
+          use <- bool.guard(!dict.has_key(assigned_here, name), first)
+          use prev <- dict.upsert(first, name)
+          option.map(prev, int.min(_, child_id)) |> option.unwrap(child_id)
+        }
+        #(hoisted, first)
+      }
+    }
+  }
   // const by value only if every capturer opens after its write
   let const_settled = fn(name) {
     case dict.get(assigned_here, name) {
       Error(Nil) -> False
       Ok(last_write) ->
-        list.all(children, fn(child_id) {
-          let child = subtree_facts(analysis.subtree_by_fn, child_id)
-          !set.contains(child.transitive_free, name)
-          || {
-            child_id >= last_write && !set.contains(analysis.fn_decls, child_id)
-          }
-        })
+        !set.contains(hoisted_free, name)
+        && dict.get(first_capturer, name)
+        |> result.map(fn(first) { first >= last_write })
+        |> result.unwrap(True)
     }
   }
   let classified = {
@@ -1052,7 +1120,7 @@ fn insert_captures(
   own_scope_ids: List(ScopeId),
   capture_slot_count: Int,
   name_captures: NameCaptures,
-  parent_boxed: Set(String),
+  parent: ParentView,
 ) -> ScopeTree {
   let scopes =
     list.fold(own_scope_ids, tree.scopes, fn(scopes, sid) {
@@ -1089,7 +1157,7 @@ fn insert_captures(
         Binding(
           slot: i,
           kind: CaptureBinding,
-          boxed: set.contains(parent_boxed, name),
+          boxed: parent_boxes(parent, name),
           declared_kind: captured_declared_kind(name_captures, name),
         ),
       )
@@ -1132,51 +1200,6 @@ fn captured_declared_kind(
     True -> LetBinding
     False -> CaptureBinding
   }
-}
-
-fn child_parent_view(
-  tree: ScopeTree,
-  child_fn_id: ScopeId,
-  ours: NameCaptures,
-  lexical_available: LexicalRefs,
-  lexical_boxed: LexicalRefs,
-) -> ParentView {
-  let capture_slots =
-    list.index_map(ours.ordered, fn(c, i) { #(c.name, i) }) |> dict.from_list
-  let own_visible = visible_at_creation(tree, child_fn_id)
-  let slot_by_name =
-    dict.fold(own_visible, capture_slots, fn(d, name, b) {
-      dict.insert(d, name, b.slot)
-    })
-  let own_names = set.from_list(dict.keys(own_visible))
-  // by declared kind, not kind, so a captured const stays const
-  let declared_as = fn(kind, inherited) {
-    let own =
-      dict.fold(own_visible, set.new(), fn(s, name, b) {
-        case b.declared_kind == kind {
-          True -> set.insert(s, name)
-          False -> s
-        }
-      })
-    set.union(own, set.difference(inherited, own_names))
-  }
-  let boxed =
-    dict.fold(own_visible, set.new(), fn(s, name, b) {
-      case b.boxed {
-        True -> set.insert(s, name)
-        False -> s
-      }
-    })
-  ParentView(
-    slot_by_name:,
-    name_set: set.from_list(dict.keys(slot_by_name)),
-    consts: declared_as(ConstBinding, ours.consts),
-    fn_names: declared_as(FnNameBinding, ours.fn_names),
-    lets: declared_as(LetBinding, ours.lets),
-    boxed:,
-    lexical_available:,
-    lexical_boxed:,
-  )
 }
 
 fn apply_boxing(
@@ -1252,13 +1275,11 @@ fn fn_with_stack_free(
 fn visible_at_creation(
   tree: ScopeTree,
   child_fn_id: ScopeId,
-) -> Dict(String, Binding) {
+) -> List(Dict(String, Binding)) {
   case get(tree, child_fn_id).parent {
-    None -> dict.new()
-    Some(parent_id) -> {
-      let parent_fn = get(tree, parent_id).function_scope
-      collect_visible(tree, parent_id, parent_fn, dict.new())
-    }
+    None -> []
+    Some(parent_id) ->
+      collect_visible(tree, parent_id, get(tree, parent_id).function_scope)
   }
 }
 
@@ -1266,22 +1287,15 @@ fn collect_visible(
   tree: ScopeTree,
   scope_id: ScopeId,
   stop_at_fn: ScopeId,
-  acc: Dict(String, Binding),
-) -> Dict(String, Binding) {
+) -> List(Dict(String, Binding)) {
   let scope = get(tree, scope_id)
-  let acc =
-    dict.fold(scope.bindings, acc, fn(d, name, b) {
-      case dict.has_key(d, name) {
-        True -> d
-        False -> dict.insert(d, name, b)
-      }
-    })
-  case scope_id == stop_at_fn, scope.parent {
-    True, _ | False, None -> acc
+  let outer = case scope_id == stop_at_fn, scope.parent {
+    True, _ | False, None -> []
     False, Some(p) ->
       case get(tree, p).function_scope == stop_at_fn {
-        True -> collect_visible(tree, p, stop_at_fn, acc)
-        False -> acc
+        True -> collect_visible(tree, p, stop_at_fn)
+        False -> []
       }
   }
+  [scope.bindings, ..outer]
 }
