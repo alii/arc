@@ -20,7 +20,9 @@ import spark/io.{
   type Answer, type Failure, type Io, type ReplySlip, type Stream, type Want,
   Access, Io, Realpath, Stderr, Stdout, Write,
 } as _
+import spark/net
 import spark/os.{type Os, BigEndian, LittleEndian, Os}
+import spark/path
 import spark/perf_hooks
 import spark/platform.{type Platform}
 import spark/process.{type Process, Process}
@@ -67,6 +69,10 @@ fn builtins(
     domexception.builtin(),
     dom_events.builtin(),
     buffer.builtin(),
+    path.builtin(),
+    path.posix_builtin(),
+    path.win32_builtin(),
+    net.builtin(),
   ]
 }
 

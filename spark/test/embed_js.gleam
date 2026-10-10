@@ -19,6 +19,10 @@ const names = [
   "domexception",
   "dom_events",
   "buffer",
+  "path",
+  "path_posix",
+  "path_win32",
+  "net",
 ]
 
 const target = "src/spark/js.gleam"

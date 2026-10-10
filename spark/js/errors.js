@@ -315,6 +315,7 @@ module.exports = {
   invalidArgType,
   invalidArgValue,
   outOfRange,
+  determineSpecificType,
   systemError,
   validateArray,
   validateBuffer,

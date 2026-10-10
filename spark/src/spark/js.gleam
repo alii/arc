@@ -477,6 +477,7 @@ module.exports = {
   invalidArgType,
   invalidArgValue,
   outOfRange,
+  determineSpecificType,
   systemError,
   validateArray,
   validateBuffer,
@@ -5905,4 +5906,2072 @@ Object.defineProperties(module.exports, {
     },
   },
 });
+"
+
+pub const path = "\"use strict\";
+
+// node's lib/path.js. matchesGlob is not here yet
+
+const { error, validateObject, validateString } = require(\"spark:errors\");
+const process = require(\"node:process\");
+
+const CHAR_UPPERCASE_A = 65;
+const CHAR_LOWERCASE_A = 97;
+const CHAR_UPPERCASE_Z = 90;
+const CHAR_LOWERCASE_Z = 122;
+const CHAR_DOT = 46;
+const CHAR_FORWARD_SLASH = 47;
+const CHAR_BACKWARD_SLASH = 92;
+const CHAR_COLON = 58;
+const CHAR_QUESTION_MARK = 63;
+
+const isWindows = process.platform === \"win32\";
+
+function matchesGlobMissing() {
+  return error(
+    \"ERR_METHOD_NOT_IMPLEMENTED\",
+    \"The matchesGlob() method is not implemented\",
+  );
+}
+
+function isPathSeparator(code) {
+  return code === CHAR_FORWARD_SLASH || code === CHAR_BACKWARD_SLASH;
+}
+
+function isPosixPathSeparator(code) {
+  return code === CHAR_FORWARD_SLASH;
+}
+
+const WINDOWS_RESERVED_NAMES = [
+  \"CON\", \"PRN\", \"AUX\", \"NUL\",
+  \"COM1\", \"COM2\", \"COM3\", \"COM4\", \"COM5\", \"COM6\", \"COM7\", \"COM8\", \"COM9\",
+  \"LPT1\", \"LPT2\", \"LPT3\", \"LPT4\", \"LPT5\", \"LPT6\", \"LPT7\", \"LPT8\", \"LPT9\",
+  \"COM\\xb9\", \"COM\\xb2\", \"COM\\xb3\",
+  \"LPT\\xb9\", \"LPT\\xb2\", \"LPT\\xb3\",
+];
+
+function isWindowsReservedName(path, colonIndex) {
+  const devicePart = path.slice(0, colonIndex).toUpperCase();
+  return WINDOWS_RESERVED_NAMES.includes(devicePart);
+}
+
+function isWindowsDeviceRoot(code) {
+  return (code >= CHAR_UPPERCASE_A && code <= CHAR_UPPERCASE_Z) ||
+         (code >= CHAR_LOWERCASE_A && code <= CHAR_LOWERCASE_Z);
+}
+
+function normalizeString(path, allowAboveRoot, separator, isPathSeparator) {
+  let res = \"\";
+  let lastSegmentLength = 0;
+  let lastSlash = -1;
+  let dots = 0;
+  let code = 0;
+  for (let i = 0; i <= path.length; ++i) {
+    if (i < path.length)
+      code = path.charCodeAt(i);
+    else if (isPathSeparator(code))
+      break;
+    else
+      code = CHAR_FORWARD_SLASH;
+
+    if (isPathSeparator(code)) {
+      if (lastSlash === i - 1 || dots === 1) {
+      } else if (dots === 2) {
+        if (res.length < 2 || lastSegmentLength !== 2 ||
+            res.charCodeAt(res.length - 1) !== CHAR_DOT ||
+            res.charCodeAt(res.length - 2) !== CHAR_DOT) {
+          if (res.length > 2) {
+            const lastSlashIndex = res.length - lastSegmentLength - 1;
+            if (lastSlashIndex === -1) {
+              res = \"\";
+              lastSegmentLength = 0;
+            } else {
+              res = res.slice(0, lastSlashIndex);
+              lastSegmentLength =
+                res.length - 1 - res.lastIndexOf(separator);
+            }
+            lastSlash = i;
+            dots = 0;
+            continue;
+          } else if (res.length !== 0) {
+            res = \"\";
+            lastSegmentLength = 0;
+            lastSlash = i;
+            dots = 0;
+            continue;
+          }
+        }
+        if (allowAboveRoot) {
+          res += res.length > 0 ? `${separator}..` : \"..\";
+          lastSegmentLength = 2;
+        }
+      } else {
+        if (res.length > 0)
+          res += `${separator}${path.slice(lastSlash + 1, i)}`;
+        else
+          res = path.slice(lastSlash + 1, i);
+        lastSegmentLength = i - lastSlash - 1;
+      }
+      lastSlash = i;
+      dots = 0;
+    } else if (code === CHAR_DOT && dots !== -1) {
+      ++dots;
+    } else {
+      dots = -1;
+    }
+  }
+  return res;
+}
+
+function formatExt(ext) {
+  return ext ? `${ext[0] === \".\" ? \"\" : \".\"}${ext}` : \"\";
+}
+
+function _format(sep, pathObject) {
+  validateObject(pathObject, \"pathObject\");
+  const dir = pathObject.dir || pathObject.root;
+  const base = pathObject.base ||
+    `${pathObject.name || \"\"}${formatExt(pathObject.ext)}`;
+  if (!dir) {
+    return base;
+  }
+  return dir === pathObject.root ? `${dir}${base}` : `${dir}${sep}${base}`;
+}
+
+const forwardSlashRegExp = /\\//g;
+
+const win32 = {
+    resolve(...args) {
+    let resolvedDevice = \"\";
+    let resolvedTail = \"\";
+    let resolvedAbsolute = false;
+
+    for (let i = args.length - 1; i >= -1; i--) {
+      let path;
+      if (i >= 0) {
+        path = args[i];
+        validateString(path, `paths[${i}]`);
+
+        if (path.length === 0) {
+          continue;
+        }
+      } else if (resolvedDevice.length === 0) {
+        path = process.cwd();
+        if (args.length === 0 || ((args.length === 1 && (args[0] === \"\" || args[0] === \".\")) &&
+            isPathSeparator(path.charCodeAt(0)))) {
+          if (!isWindows) {
+            path = path.replace(forwardSlashRegExp, \"\\\\\");
+          }
+          return path;
+        }
+      } else {
+        path = process.env[`=${resolvedDevice}`] || process.cwd();
+
+        if (path === undefined ||
+            (path.slice(0, 2).toLowerCase() !==
+            resolvedDevice.toLowerCase() &&
+            path.charCodeAt(2) === CHAR_BACKWARD_SLASH)) {
+          path = `${resolvedDevice}\\\\`;
+        }
+      }
+
+      const len = path.length;
+      let rootEnd = 0;
+      let device = \"\";
+      let isAbsolute = false;
+      const code = path.charCodeAt(0);
+
+      if (len === 1) {
+        if (isPathSeparator(code)) {
+          rootEnd = 1;
+          isAbsolute = true;
+        }
+      } else if (isPathSeparator(code)) {
+
+        isAbsolute = true;
+
+        if (isPathSeparator(path.charCodeAt(1))) {
+          let j = 2;
+          let last = j;
+          while (j < len &&
+                 !isPathSeparator(path.charCodeAt(j))) {
+            j++;
+          }
+          if (j < len && j !== last) {
+            const firstPart = path.slice(last, j);
+            last = j;
+            while (j < len &&
+                   isPathSeparator(path.charCodeAt(j))) {
+              j++;
+            }
+            if (j < len && j !== last) {
+              last = j;
+              while (j < len &&
+                     !isPathSeparator(path.charCodeAt(j))) {
+                j++;
+              }
+              if (j === len || j !== last) {
+                if (firstPart !== \".\" && firstPart !== \"?\") {
+                  device =
+                    `\\\\\\\\${firstPart}\\\\${path.slice(last, j)}`;
+                  rootEnd = j;
+                } else {
+                  device = `\\\\\\\\${firstPart}`;
+                  rootEnd = 4;
+                }
+              }
+            }
+          }
+        } else {
+          rootEnd = 1;
+        }
+      } else if (isWindowsDeviceRoot(code) &&
+                  path.charCodeAt(1) === CHAR_COLON) {
+        device = path.slice(0, 2);
+        rootEnd = 2;
+        if (len > 2 && isPathSeparator(path.charCodeAt(2))) {
+          isAbsolute = true;
+          rootEnd = 3;
+        }
+      }
+
+      if (device.length > 0) {
+        if (resolvedDevice.length > 0) {
+          if (device.toLowerCase() !==
+              resolvedDevice.toLowerCase())
+            continue;
+        } else {
+          resolvedDevice = device;
+        }
+      }
+
+      if (resolvedAbsolute) {
+        if (resolvedDevice.length > 0)
+          break;
+      } else {
+        resolvedTail =
+          `${path.slice(rootEnd)}\\\\${resolvedTail}`;
+        resolvedAbsolute = isAbsolute;
+        if (isAbsolute && resolvedDevice.length > 0) {
+          break;
+        }
+      }
+    }
+
+    resolvedTail = normalizeString(resolvedTail, !resolvedAbsolute, \"\\\\\",
+                                   isPathSeparator);
+
+    return resolvedAbsolute ?
+      `${resolvedDevice}\\\\${resolvedTail}` :
+      `${resolvedDevice}${resolvedTail}` || \".\";
+  },
+
+    normalize(path) {
+    validateString(path, \"path\");
+    const len = path.length;
+    if (len === 0)
+      return \".\";
+    let rootEnd = 0;
+    let device;
+    let isAbsolute = false;
+    const code = path.charCodeAt(0);
+
+    if (len === 1) {
+      return isPosixPathSeparator(code) ? \"\\\\\" : path;
+    }
+    if (isPathSeparator(code)) {
+
+      isAbsolute = true;
+
+      if (isPathSeparator(path.charCodeAt(1))) {
+        let j = 2;
+        let last = j;
+        while (j < len &&
+               !isPathSeparator(path.charCodeAt(j))) {
+          j++;
+        }
+        if (j < len && j !== last) {
+          const firstPart = path.slice(last, j);
+          last = j;
+          while (j < len &&
+                 isPathSeparator(path.charCodeAt(j))) {
+            j++;
+          }
+          if (j < len && j !== last) {
+            last = j;
+            while (j < len &&
+                   !isPathSeparator(path.charCodeAt(j))) {
+              j++;
+            }
+            if (j === len || j !== last) {
+              if (firstPart === \".\" || firstPart === \"?\") {
+                device = `\\\\\\\\${firstPart}`;
+                rootEnd = 4;
+                const colonIndex = path.indexOf(\":\");
+                const possibleDevice = path.slice(4, colonIndex + 1);
+                if (isWindowsReservedName(possibleDevice, possibleDevice.length - 1)) {
+                  device = `\\\\\\\\?\\\\${possibleDevice}`;
+                  rootEnd = 4 + possibleDevice.length;
+                }
+              } else if (j === len) {
+                return `\\\\\\\\${firstPart}\\\\${path.slice(last)}\\\\`;
+              } else {
+                device =
+                  `\\\\\\\\${firstPart}\\\\${path.slice(last, j)}`;
+                rootEnd = j;
+              }
+            }
+          }
+        }
+      } else {
+        rootEnd = 1;
+      }
+    } else {
+      const colonIndex = path.indexOf(\":\");
+      if (colonIndex > 0) {
+        if (isWindowsDeviceRoot(code) && colonIndex === 1) {
+          device = path.slice(0, 2);
+          rootEnd = 2;
+          if (len > 2 && isPathSeparator(path.charCodeAt(2))) {
+            isAbsolute = true;
+            rootEnd = 3;
+          }
+        } else if (isWindowsReservedName(path, colonIndex)) {
+          device = path.slice(0, colonIndex + 1);
+          rootEnd = colonIndex + 1;
+
+        }
+      }
+    }
+
+    let tail = rootEnd < len ?
+      normalizeString(path.slice(rootEnd),
+                      !isAbsolute, \"\\\\\", isPathSeparator) :
+      \"\";
+    if (tail.length === 0 && !isAbsolute)
+      tail = \".\";
+    if (tail.length > 0 &&
+        isPathSeparator(path.charCodeAt(len - 1)))
+      tail += \"\\\\\";
+    if (!isAbsolute && device === undefined && path.includes(\":\")) {
+      if (tail.length >= 2 &&
+          isWindowsDeviceRoot(tail.charCodeAt(0)) &&
+          tail.charCodeAt(1) === CHAR_COLON) {
+        return `.\\\\${tail}`;
+      }
+      let index = path.indexOf(\":\");
+
+      do {
+        if (index === len - 1 || isPathSeparator(path.charCodeAt(index + 1))) {
+          return `.\\\\${tail}`;
+        }
+      } while ((index = path.indexOf(\":\", index + 1)) !== -1);
+    }
+    const colonIndex = path.indexOf(\":\");
+    if (isWindowsReservedName(path, colonIndex)) {
+      return `.\\\\${device ?? \"\"}${tail}`;
+    }
+    if (device === undefined) {
+      return isAbsolute ? `\\\\${tail}` : tail;
+    }
+    return isAbsolute ? `${device}\\\\${tail}` : `${device}${tail}`;
+  },
+
+    isAbsolute(path) {
+    validateString(path, \"path\");
+    const len = path.length;
+    if (len === 0)
+      return false;
+
+    const code = path.charCodeAt(0);
+    return isPathSeparator(code) ||
+      (len > 2 &&
+      isWindowsDeviceRoot(code) &&
+      path.charCodeAt(1) === CHAR_COLON &&
+      isPathSeparator(path.charCodeAt(2)));
+  },
+
+    join(...args) {
+    if (args.length === 0)
+      return \".\";
+
+    const path = [];
+    for (let i = 0; i < args.length; ++i) {
+      const arg = args[i];
+      validateString(arg, \"path\");
+      if (arg.length > 0) {
+        path.push(arg);
+      }
+    }
+
+    if (path.length === 0)
+      return \".\";
+
+    const firstPart = path[0];
+    let joined = path.join(\"\\\\\");
+
+    let needsReplace = true;
+    let slashCount = 0;
+    if (isPathSeparator(firstPart.charCodeAt(0))) {
+      ++slashCount;
+      const firstLen = firstPart.length;
+      if (firstLen > 1 &&
+          isPathSeparator(firstPart.charCodeAt(1))) {
+        ++slashCount;
+        if (firstLen > 2) {
+          if (isPathSeparator(firstPart.charCodeAt(2)))
+            ++slashCount;
+          else {
+            needsReplace = false;
+          }
+        }
+      }
+    }
+    if (needsReplace) {
+      while (slashCount < joined.length &&
+             isPathSeparator(joined.charCodeAt(slashCount))) {
+        slashCount++;
+      }
+
+      if (slashCount >= 2)
+        joined = `\\\\${joined.slice(slashCount)}`;
+    }
+
+    const parts = [];
+    let part = \"\";
+
+    for (let i = 0; i < joined.length; i++) {
+      if (joined[i] === \"\\\\\") {
+        if (part) parts.push(part);
+        part = \"\";
+        while (i + 1 < joined.length && joined[i + 1] === \"\\\\\") i++;
+      } else {
+        part += joined[i];
+      }
+    }
+    if (part) parts.push(part);
+
+    if (parts.some((p) => {
+      const colonIndex = p.indexOf(\":\");
+      return colonIndex !== -1 && isWindowsReservedName(p, colonIndex);
+    })) {
+      let result = \"\";
+      for (let i = 0; i < joined.length; i++) {
+        result += joined[i] === \"/\" ? \"\\\\\" : joined[i];
+      }
+      return result;
+    }
+
+    return win32.normalize(joined);
+  },
+
+    relative(from, to) {
+    validateString(from, \"from\");
+    validateString(to, \"to\");
+
+    if (from === to)
+      return \"\";
+
+    const fromOrig = win32.resolve(from);
+    const toOrig = win32.resolve(to);
+
+    if (fromOrig === toOrig)
+      return \"\";
+
+    from = fromOrig.toLowerCase();
+    to = toOrig.toLowerCase();
+
+    if (from === to)
+      return \"\";
+
+    if (fromOrig.length !== from.length || toOrig.length !== to.length) {
+      const fromSplit = fromOrig.split(\"\\\\\");
+      const toSplit = toOrig.split(\"\\\\\");
+      if (fromSplit[fromSplit.length - 1] === \"\") {
+        fromSplit.pop();
+      }
+      if (toSplit[toSplit.length - 1] === \"\") {
+        toSplit.pop();
+      }
+
+      const fromLen = fromSplit.length;
+      const toLen = toSplit.length;
+      const length = fromLen < toLen ? fromLen : toLen;
+
+      let i;
+      for (i = 0; i < length; i++) {
+        if (fromSplit[i].toLowerCase() !== toSplit[i].toLowerCase()) {
+          break;
+        }
+      }
+
+      if (i === 0) {
+        return toOrig;
+      } else if (i === length) {
+        if (toLen > length) {
+          return toSplit.slice(i).join(\"\\\\\");
+        }
+        if (fromLen > length) {
+          return \"..\\\\\".repeat(fromLen - 1 - i) + \"..\";
+        }
+        return \"\";
+      }
+
+      return \"..\\\\\".repeat(fromLen - i) + toSplit.slice(i).join(\"\\\\\");
+    }
+
+    let fromStart = 0;
+    while (fromStart < from.length &&
+           from.charCodeAt(fromStart) === CHAR_BACKWARD_SLASH) {
+      fromStart++;
+    }
+    let fromEnd = from.length;
+    while (
+      fromEnd - 1 > fromStart &&
+      from.charCodeAt(fromEnd - 1) === CHAR_BACKWARD_SLASH
+    ) {
+      fromEnd--;
+    }
+    const fromLen = fromEnd - fromStart;
+
+    let toStart = 0;
+    while (toStart < to.length &&
+           to.charCodeAt(toStart) === CHAR_BACKWARD_SLASH) {
+      toStart++;
+    }
+    let toEnd = to.length;
+    while (toEnd - 1 > toStart &&
+           to.charCodeAt(toEnd - 1) === CHAR_BACKWARD_SLASH) {
+      toEnd--;
+    }
+    const toLen = toEnd - toStart;
+
+    const length = fromLen < toLen ? fromLen : toLen;
+    let lastCommonSep = -1;
+    let i = 0;
+    for (; i < length; i++) {
+      const fromCode = from.charCodeAt(fromStart + i);
+      if (fromCode !== to.charCodeAt(toStart + i))
+        break;
+      else if (fromCode === CHAR_BACKWARD_SLASH)
+        lastCommonSep = i;
+    }
+
+    if (i !== length) {
+      if (lastCommonSep === -1)
+        return toOrig;
+    } else {
+      if (toLen > length) {
+        if (to.charCodeAt(toStart + i) ===
+            CHAR_BACKWARD_SLASH) {
+          return toOrig.slice(toStart + i + 1);
+        }
+        if (i === 2) {
+          return toOrig.slice(toStart + i);
+        }
+      }
+      if (fromLen > length) {
+        if (from.charCodeAt(fromStart + i) ===
+            CHAR_BACKWARD_SLASH) {
+          lastCommonSep = i;
+        } else if (i === 2) {
+          lastCommonSep = 3;
+        }
+      }
+      if (lastCommonSep === -1)
+        lastCommonSep = 0;
+    }
+
+    let out = \"\";
+    for (i = fromStart + lastCommonSep + 1; i <= fromEnd; ++i) {
+      if (i === fromEnd ||
+          from.charCodeAt(i) === CHAR_BACKWARD_SLASH) {
+        out += out.length === 0 ? \"..\" : \"\\\\..\";
+      }
+    }
+
+    toStart += lastCommonSep;
+
+    if (out.length > 0)
+      return `${out}${toOrig.slice(toStart, toEnd)}`;
+
+    if (toOrig.charCodeAt(toStart) === CHAR_BACKWARD_SLASH)
+      ++toStart;
+    return toOrig.slice(toStart, toEnd);
+  },
+
+    toNamespacedPath(path) {
+    if (typeof path !== \"string\" || path.length === 0)
+      return path;
+
+    const resolvedPath = win32.resolve(path);
+
+    if (resolvedPath.length <= 2)
+      return path;
+
+    if (resolvedPath.charCodeAt(0) === CHAR_BACKWARD_SLASH) {
+      if (resolvedPath.charCodeAt(1) === CHAR_BACKWARD_SLASH) {
+        const code = resolvedPath.charCodeAt(2);
+        if (code !== CHAR_QUESTION_MARK && code !== CHAR_DOT) {
+          return `\\\\\\\\?\\\\UNC\\\\${resolvedPath.slice(2)}`;
+        }
+      }
+    } else if (
+      isWindowsDeviceRoot(resolvedPath.charCodeAt(0)) &&
+      resolvedPath.charCodeAt(1) === CHAR_COLON &&
+      resolvedPath.charCodeAt(2) === CHAR_BACKWARD_SLASH
+    ) {
+      return `\\\\\\\\?\\\\${resolvedPath}`;
+    }
+
+    return resolvedPath;
+  },
+
+    dirname(path) {
+    validateString(path, \"path\");
+    const len = path.length;
+    if (len === 0)
+      return \".\";
+    let rootEnd = -1;
+    let offset = 0;
+    const code = path.charCodeAt(0);
+
+    if (len === 1) {
+      return isPathSeparator(code) ? path : \".\";
+    }
+
+    if (isPathSeparator(code)) {
+
+      rootEnd = offset = 1;
+
+      if (isPathSeparator(path.charCodeAt(1))) {
+        let j = 2;
+        let last = j;
+        while (j < len &&
+               !isPathSeparator(path.charCodeAt(j))) {
+          j++;
+        }
+        if (j < len && j !== last) {
+          last = j;
+          while (j < len &&
+                 isPathSeparator(path.charCodeAt(j))) {
+            j++;
+          }
+          if (j < len && j !== last) {
+            last = j;
+            while (j < len &&
+                   !isPathSeparator(path.charCodeAt(j))) {
+              j++;
+            }
+            if (j === len) {
+              return path;
+            }
+            if (j !== last) {
+
+              rootEnd = offset = j + 1;
+            }
+          }
+        }
+      }
+    } else if (isWindowsDeviceRoot(code) &&
+               path.charCodeAt(1) === CHAR_COLON) {
+      rootEnd =
+        len > 2 && isPathSeparator(path.charCodeAt(2)) ? 3 : 2;
+      offset = rootEnd;
+    }
+
+    let end = -1;
+    let matchedSlash = true;
+    for (let i = len - 1; i >= offset; --i) {
+      if (isPathSeparator(path.charCodeAt(i))) {
+        if (!matchedSlash) {
+          end = i;
+          break;
+        }
+      } else {
+        matchedSlash = false;
+      }
+    }
+
+    if (end === -1) {
+      if (rootEnd === -1)
+        return \".\";
+
+      end = rootEnd;
+    }
+    return path.slice(0, end);
+  },
+
+    basename(path, suffix) {
+    if (suffix !== undefined)
+      validateString(suffix, \"suffix\");
+    validateString(path, \"path\");
+    let start = 0;
+    let end = -1;
+    let matchedSlash = true;
+
+    if (path.length >= 2 &&
+        isWindowsDeviceRoot(path.charCodeAt(0)) &&
+        path.charCodeAt(1) === CHAR_COLON) {
+      start = 2;
+    }
+
+    if (suffix !== undefined && suffix.length > 0 && suffix.length <= path.length) {
+      if (suffix === path)
+        return \"\";
+      let extIdx = suffix.length - 1;
+      let firstNonSlashEnd = -1;
+      for (let i = path.length - 1; i >= start; --i) {
+        const code = path.charCodeAt(i);
+        if (isPathSeparator(code)) {
+          if (!matchedSlash) {
+            start = i + 1;
+            break;
+          }
+        } else {
+          if (firstNonSlashEnd === -1) {
+            matchedSlash = false;
+            firstNonSlashEnd = i + 1;
+          }
+          if (extIdx >= 0) {
+            if (code === suffix.charCodeAt(extIdx)) {
+              if (--extIdx === -1) {
+                end = i;
+              }
+            } else {
+              extIdx = -1;
+              end = firstNonSlashEnd;
+            }
+          }
+        }
+      }
+
+      if (start === end)
+        end = firstNonSlashEnd;
+      else if (end === -1)
+        end = path.length;
+      return path.slice(start, end);
+    }
+    for (let i = path.length - 1; i >= start; --i) {
+      if (isPathSeparator(path.charCodeAt(i))) {
+        if (!matchedSlash) {
+          start = i + 1;
+          break;
+        }
+      } else if (end === -1) {
+        matchedSlash = false;
+        end = i + 1;
+      }
+    }
+
+    if (end === -1)
+      return \"\";
+    return path.slice(start, end);
+  },
+
+    extname(path) {
+    validateString(path, \"path\");
+    let start = 0;
+    let startDot = -1;
+    let startPart = 0;
+    let end = -1;
+    let matchedSlash = true;
+    let preDotState = 0;
+
+    if (path.length >= 2 &&
+        path.charCodeAt(1) === CHAR_COLON &&
+        isWindowsDeviceRoot(path.charCodeAt(0))) {
+      start = startPart = 2;
+    }
+
+    for (let i = path.length - 1; i >= start; --i) {
+      const code = path.charCodeAt(i);
+      if (isPathSeparator(code)) {
+        if (!matchedSlash) {
+          startPart = i + 1;
+          break;
+        }
+        continue;
+      }
+      if (end === -1) {
+        matchedSlash = false;
+        end = i + 1;
+      }
+      if (code === CHAR_DOT) {
+        if (startDot === -1)
+          startDot = i;
+        else if (preDotState !== 1)
+          preDotState = 1;
+      } else if (startDot !== -1) {
+        preDotState = -1;
+      }
+    }
+
+    if (startDot === -1 ||
+        end === -1 ||
+        preDotState === 0 ||
+        (preDotState === 1 &&
+         startDot === end - 1 &&
+         startDot === startPart + 1)) {
+      return \"\";
+    }
+    return path.slice(startDot, end);
+  },
+
+  format: _format.bind(null, \"\\\\\"),
+
+    parse(path) {
+    validateString(path, \"path\");
+
+    const ret = { root: \"\", dir: \"\", base: \"\", ext: \"\", name: \"\" };
+    if (path.length === 0)
+      return ret;
+
+    const len = path.length;
+    let rootEnd = 0;
+    let code = path.charCodeAt(0);
+
+    if (len === 1) {
+      if (isPathSeparator(code)) {
+        ret.root = ret.dir = path;
+        return ret;
+      }
+      ret.base = ret.name = path;
+      return ret;
+    }
+    if (isPathSeparator(code)) {
+
+      rootEnd = 1;
+      if (isPathSeparator(path.charCodeAt(1))) {
+        let j = 2;
+        let last = j;
+        while (j < len &&
+               !isPathSeparator(path.charCodeAt(j))) {
+          j++;
+        }
+        if (j < len && j !== last) {
+          last = j;
+          while (j < len &&
+                 isPathSeparator(path.charCodeAt(j))) {
+            j++;
+          }
+          if (j < len && j !== last) {
+            last = j;
+            while (j < len &&
+                   !isPathSeparator(path.charCodeAt(j))) {
+              j++;
+            }
+            if (j === len) {
+              rootEnd = j;
+            } else if (j !== last) {
+              rootEnd = j + 1;
+            }
+          }
+        }
+      }
+    } else if (isWindowsDeviceRoot(code) &&
+               path.charCodeAt(1) === CHAR_COLON) {
+      if (len <= 2) {
+        ret.root = ret.dir = path;
+        return ret;
+      }
+      rootEnd = 2;
+      if (isPathSeparator(path.charCodeAt(2))) {
+        if (len === 3) {
+          ret.root = ret.dir = path;
+          return ret;
+        }
+        rootEnd = 3;
+      }
+    }
+    if (rootEnd > 0)
+      ret.root = path.slice(0, rootEnd);
+
+    let startDot = -1;
+    let startPart = rootEnd;
+    let end = -1;
+    let matchedSlash = true;
+    let i = path.length - 1;
+
+    let preDotState = 0;
+
+    for (; i >= rootEnd; --i) {
+      code = path.charCodeAt(i);
+      if (isPathSeparator(code)) {
+        if (!matchedSlash) {
+          startPart = i + 1;
+          break;
+        }
+        continue;
+      }
+      if (end === -1) {
+        matchedSlash = false;
+        end = i + 1;
+      }
+      if (code === CHAR_DOT) {
+        if (startDot === -1)
+          startDot = i;
+        else if (preDotState !== 1)
+          preDotState = 1;
+      } else if (startDot !== -1) {
+        preDotState = -1;
+      }
+    }
+
+    if (end !== -1) {
+      if (startDot === -1 ||
+          preDotState === 0 ||
+          (preDotState === 1 &&
+           startDot === end - 1 &&
+           startDot === startPart + 1)) {
+        ret.base = ret.name = path.slice(startPart, end);
+      } else {
+        ret.name = path.slice(startPart, startDot);
+        ret.base = path.slice(startPart, end);
+        ret.ext = path.slice(startDot, end);
+      }
+    }
+
+    if (startPart > 0 && startPart !== rootEnd)
+      ret.dir = path.slice(0, startPart - 1);
+    else
+      ret.dir = ret.root;
+
+    return ret;
+  },
+
+  matchesGlob(path, pattern) {
+    throw matchesGlobMissing();
+  },
+
+  sep: \"\\\\\",
+  delimiter: \";\",
+  win32: null,
+  posix: null,
+};
+
+const posixCwd = (() => {
+  if (isWindows) {
+    const regexp = /\\\\/g;
+    return () => {
+      const cwd = process.cwd().replace(regexp, \"/\");
+      return cwd.slice(cwd.indexOf(\"/\"));
+    };
+  }
+
+  return () => process.cwd();
+})();
+
+const posix = {
+    resolve(...args) {
+    if (args.length === 0 || (args.length === 1 && (args[0] === \"\" || args[0] === \".\"))) {
+      const cwd = posixCwd();
+      if (cwd.charCodeAt(0) === CHAR_FORWARD_SLASH) {
+        return cwd;
+      }
+    }
+    let resolvedPath = \"\";
+    let resolvedAbsolute = false;
+
+    for (let i = args.length - 1; i >= 0 && !resolvedAbsolute; i--) {
+      const path = args[i];
+      validateString(path, `paths[${i}]`);
+
+      if (path.length === 0) {
+        continue;
+      }
+
+      resolvedPath = `${path}/${resolvedPath}`;
+      resolvedAbsolute = path[0] === \"/\";
+    }
+
+    if (!resolvedAbsolute) {
+      const cwd = posixCwd();
+      resolvedPath = `${cwd}/${resolvedPath}`;
+      resolvedAbsolute =
+        cwd.charCodeAt(0) === CHAR_FORWARD_SLASH;
+    }
+
+    resolvedPath = normalizeString(resolvedPath, !resolvedAbsolute, \"/\",
+                                   isPosixPathSeparator);
+
+    if (resolvedAbsolute) {
+      return `/${resolvedPath}`;
+    }
+    return resolvedPath.length > 0 ? resolvedPath : \".\";
+  },
+
+    normalize(path) {
+    validateString(path, \"path\");
+
+    if (path.length === 0)
+      return \".\";
+
+    const isAbsolute = path[0] === \"/\";
+    const trailingSeparator = path[path.length - 1] === \"/\";
+
+    path = normalizeString(path, !isAbsolute, \"/\", isPosixPathSeparator);
+
+    if (path.length === 0) {
+      if (isAbsolute)
+        return \"/\";
+      return trailingSeparator ? \"./\" : \".\";
+    }
+    if (trailingSeparator)
+      path += \"/\";
+
+    return isAbsolute ? `/${path}` : path;
+  },
+
+    isAbsolute(path) {
+    validateString(path, \"path\");
+    return path.length > 0 &&
+           path.charCodeAt(0) === CHAR_FORWARD_SLASH;
+  },
+
+    join(...args) {
+    if (args.length === 0)
+      return \".\";
+
+    const path = [];
+    for (let i = 0; i < args.length; ++i) {
+      const arg = args[i];
+      validateString(arg, \"path\");
+      if (arg.length > 0) {
+        path.push(arg);
+      }
+    }
+
+    if (path.length === 0)
+      return \".\";
+
+    return posix.normalize(path.join(\"/\"));
+  },
+
+    relative(from, to) {
+    validateString(from, \"from\");
+    validateString(to, \"to\");
+
+    if (from === to)
+      return \"\";
+
+    from = posix.resolve(from);
+    to = posix.resolve(to);
+
+    if (from === to)
+      return \"\";
+
+    const fromStart = 1;
+    const fromEnd = from.length;
+    const fromLen = fromEnd - fromStart;
+    const toStart = 1;
+    const toLen = to.length - toStart;
+
+    const length = (fromLen < toLen ? fromLen : toLen);
+    let lastCommonSep = -1;
+    let i = 0;
+    for (; i < length; i++) {
+      const fromCode = from.charCodeAt(fromStart + i);
+      if (fromCode !== to.charCodeAt(toStart + i))
+        break;
+      else if (fromCode === CHAR_FORWARD_SLASH)
+        lastCommonSep = i;
+    }
+    if (i === length) {
+      if (toLen > length) {
+        if (to.charCodeAt(toStart + i) === CHAR_FORWARD_SLASH) {
+          return to.slice(toStart + i + 1);
+        }
+        if (i === 0) {
+          return to.slice(toStart + i);
+        }
+      } else if (fromLen > length) {
+        if (from.charCodeAt(fromStart + i) ===
+            CHAR_FORWARD_SLASH) {
+          lastCommonSep = i;
+        } else if (i === 0) {
+          lastCommonSep = 0;
+        }
+      }
+    }
+
+    let out = \"\";
+    for (i = fromStart + lastCommonSep + 1; i <= fromEnd; ++i) {
+      if (i === fromEnd ||
+          from.charCodeAt(i) === CHAR_FORWARD_SLASH) {
+        out += out.length === 0 ? \"..\" : \"/..\";
+      }
+    }
+
+    return `${out}${to.slice(toStart + lastCommonSep)}`;
+  },
+
+    toNamespacedPath(path) {
+    return path;
+  },
+
+    dirname(path) {
+    validateString(path, \"path\");
+    if (path.length === 0)
+      return \".\";
+    const hasRoot = path.charCodeAt(0) === CHAR_FORWARD_SLASH;
+    let end = -1;
+    let matchedSlash = true;
+    for (let i = path.length - 1; i >= 1; --i) {
+      if (path.charCodeAt(i) === CHAR_FORWARD_SLASH) {
+        if (!matchedSlash) {
+          end = i;
+          break;
+        }
+      } else {
+        matchedSlash = false;
+      }
+    }
+
+    if (end === -1)
+      return hasRoot ? \"/\" : \".\";
+    if (hasRoot && end === 1)
+      return \"//\";
+    return path.slice(0, end);
+  },
+
+    basename(path, suffix) {
+    if (suffix !== undefined)
+      validateString(suffix, \"suffix\");
+    validateString(path, \"path\");
+
+    let start = 0;
+    let end = -1;
+    let matchedSlash = true;
+
+    if (suffix !== undefined && suffix.length > 0 && suffix.length <= path.length) {
+      if (suffix === path)
+        return \"\";
+      let extIdx = suffix.length - 1;
+      let firstNonSlashEnd = -1;
+      for (let i = path.length - 1; i >= 0; --i) {
+        const code = path.charCodeAt(i);
+        if (code === CHAR_FORWARD_SLASH) {
+          if (!matchedSlash) {
+            start = i + 1;
+            break;
+          }
+        } else {
+          if (firstNonSlashEnd === -1) {
+            matchedSlash = false;
+            firstNonSlashEnd = i + 1;
+          }
+          if (extIdx >= 0) {
+            if (code === suffix.charCodeAt(extIdx)) {
+              if (--extIdx === -1) {
+                end = i;
+              }
+            } else {
+              extIdx = -1;
+              end = firstNonSlashEnd;
+            }
+          }
+        }
+      }
+
+      if (start === end)
+        end = firstNonSlashEnd;
+      else if (end === -1)
+        end = path.length;
+      return path.slice(start, end);
+    }
+    for (let i = path.length - 1; i >= 0; --i) {
+      if (path.charCodeAt(i) === CHAR_FORWARD_SLASH) {
+        if (!matchedSlash) {
+          start = i + 1;
+          break;
+        }
+      } else if (end === -1) {
+        matchedSlash = false;
+        end = i + 1;
+      }
+    }
+
+    if (end === -1)
+      return \"\";
+    return path.slice(start, end);
+  },
+
+    extname(path) {
+    validateString(path, \"path\");
+    let startDot = -1;
+    let startPart = 0;
+    let end = -1;
+    let matchedSlash = true;
+    let preDotState = 0;
+    for (let i = path.length - 1; i >= 0; --i) {
+      const char = path[i];
+      if (char === \"/\") {
+        if (!matchedSlash) {
+          startPart = i + 1;
+          break;
+        }
+        continue;
+      }
+      if (end === -1) {
+        matchedSlash = false;
+        end = i + 1;
+      }
+      if (char === \".\") {
+        if (startDot === -1)
+          startDot = i;
+        else if (preDotState !== 1)
+          preDotState = 1;
+      } else if (startDot !== -1) {
+        preDotState = -1;
+      }
+    }
+
+    if (startDot === -1 ||
+        end === -1 ||
+        preDotState === 0 ||
+        (preDotState === 1 &&
+         startDot === end - 1 &&
+         startDot === startPart + 1)) {
+      return \"\";
+    }
+    return path.slice(startDot, end);
+  },
+
+  format: _format.bind(null, \"/\"),
+
+    parse(path) {
+    validateString(path, \"path\");
+
+    const ret = { root: \"\", dir: \"\", base: \"\", ext: \"\", name: \"\" };
+    if (path.length === 0)
+      return ret;
+    const isAbsolute =
+      path.charCodeAt(0) === CHAR_FORWARD_SLASH;
+    let start;
+    if (isAbsolute) {
+      ret.root = \"/\";
+      start = 1;
+    } else {
+      start = 0;
+    }
+    let startDot = -1;
+    let startPart = 0;
+    let end = -1;
+    let matchedSlash = true;
+    let i = path.length - 1;
+
+    let preDotState = 0;
+
+    for (; i >= start; --i) {
+      const char = path[i];
+      if (char === \"/\") {
+        if (!matchedSlash) {
+          startPart = i + 1;
+          break;
+        }
+        continue;
+      }
+      if (end === -1) {
+        matchedSlash = false;
+        end = i + 1;
+      }
+      if (char === \".\") {
+        if (startDot === -1)
+          startDot = i;
+        else if (preDotState !== 1)
+          preDotState = 1;
+      } else if (startDot !== -1) {
+        preDotState = -1;
+      }
+    }
+
+    if (end !== -1) {
+      const start = startPart === 0 && isAbsolute ? 1 : startPart;
+      if (startDot === -1 ||
+          preDotState === 0 ||
+          (preDotState === 1 &&
+          startDot === end - 1 &&
+          startDot === startPart + 1)) {
+        ret.base = ret.name = path.slice(start, end);
+      } else {
+        ret.name = path.slice(start, startDot);
+        ret.base = path.slice(start, end);
+        ret.ext = path.slice(startDot, end);
+      }
+    }
+
+    if (startPart > 0)
+      ret.dir = path.slice(0, startPart - 1);
+    else if (isAbsolute)
+      ret.dir = \"/\";
+
+    return ret;
+  },
+
+  matchesGlob(path, pattern) {
+    throw matchesGlobMissing();
+  },
+
+  sep: \"/\",
+  delimiter: \":\",
+  win32: null,
+  posix: null,
+};
+
+posix.win32 = win32.win32 = win32;
+posix.posix = win32.posix = posix;
+
+win32._makeLong = win32.toNamespacedPath;
+posix._makeLong = posix.toNamespacedPath;
+
+module.exports = isWindows ? win32 : posix;
+"
+
+pub const path_posix = "\"use strict\";
+
+module.exports = require(\"node:path\").posix;
+"
+
+pub const path_win32 = "\"use strict\";
+
+module.exports = require(\"node:path\").win32;
+"
+
+pub const net = "\"use strict\";
+
+// the parts of node's net module that open nothing: isIP and friends,
+// SocketAddress and BlockList. The address parsing and printing is libuv's
+// inet_pton and inet_ntop; the matching rules are node's own
+
+const {
+  error,
+  rangeError,
+  invalidArgType,
+  invalidArgValue,
+  outOfRange,
+  determineSpecificType,
+  validateArray,
+  validateObject,
+  validateString,
+} = require(\"spark:errors\");
+
+const v4Seg = \"(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\";
+const v4Str = `(?:${v4Seg}\\\\.){3}${v4Seg}`;
+const IPv4Reg = new RegExp(`^${v4Str}$`);
+
+const v6Seg = \"(?:[0-9a-fA-F]{1,4})\";
+const IPv6Reg = new RegExp(
+  \"^(?:\" +
+    `(?:${v6Seg}:){7}(?:${v6Seg}|:)|` +
+    `(?:${v6Seg}:){6}(?:${v4Str}|:${v6Seg}|:)|` +
+    `(?:${v6Seg}:){5}(?::${v4Str}|(?::${v6Seg}){1,2}|:)|` +
+    `(?:${v6Seg}:){4}(?:(?::${v6Seg}){0,1}:${v4Str}|(?::${v6Seg}){1,3}|:)|` +
+    `(?:${v6Seg}:){3}(?:(?::${v6Seg}){0,2}:${v4Str}|(?::${v6Seg}){1,4}|:)|` +
+    `(?:${v6Seg}:){2}(?:(?::${v6Seg}){0,3}:${v4Str}|(?::${v6Seg}){1,5}|:)|` +
+    `(?:${v6Seg}:){1}(?:(?::${v6Seg}){0,4}:${v4Str}|(?::${v6Seg}){1,6}|:)|` +
+    `(?::(?:(?::${v6Seg}){0,5}:${v4Str}|(?::${v6Seg}){1,7}|:))` +
+    \")(?:%[0-9a-zA-Z-.:]{1,})?$\",
+);
+
+function isIPv4(s) {
+  return IPv4Reg.test(s);
+}
+
+function isIPv6(s) {
+  if (typeof s === \"string\") {
+    if (s.length < 2 || s.indexOf(\":\") === -1) return false;
+  }
+  return IPv6Reg.test(s);
+}
+
+function isIP(s) {
+  if (isIPv4(s)) return 4;
+  if (isIPv6(s)) return 6;
+  return 0;
+}
+
+const AF_INET = 4;
+const AF_INET6 = 6;
+
+// four bytes, or undefined: no leading zeros, exactly four parts
+function parseIPv4(text) {
+  const bytes = [0];
+  let sawDigit = false;
+  let octets = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text.charCodeAt(i);
+    if (ch >= 48 && ch <= 57) {
+      const at = bytes.length - 1;
+      const value = bytes[at] * 10 + (ch - 48);
+      if (sawDigit && bytes[at] === 0) return undefined;
+      if (value > 255) return undefined;
+      bytes[at] = value;
+      if (!sawDigit) {
+        if (++octets > 4) return undefined;
+        sawDigit = true;
+      }
+    } else if (ch === 46 && sawDigit) {
+      if (octets === 4) return undefined;
+      bytes.push(0);
+      sawDigit = false;
+    } else {
+      return undefined;
+    }
+  }
+  if (octets < 4) return undefined;
+  return bytes;
+}
+
+function hexValue(ch) {
+  if (ch >= 48 && ch <= 57) return ch - 48;
+  if (ch >= 97 && ch <= 102) return ch - 87;
+  if (ch >= 65 && ch <= 70) return ch - 55;
+  return -1;
+}
+
+// sixteen bytes, or undefined; anything from a '%' on is a zone and ignored
+function parseIPv6(text) {
+  const zone = text.indexOf(\"%\");
+  if (zone !== -1) text = text.slice(0, zone);
+  const bytes = [];
+  let gap = -1;
+  let i = 0;
+  if (text.charCodeAt(0) === 58) {
+    if (text.charCodeAt(1) !== 58) return undefined;
+    i = 1;
+  }
+  let token = i;
+  let digits = 0;
+  let value = 0;
+  let endedByQuad = false;
+  while (i < text.length) {
+    const ch = text.charCodeAt(i++);
+    const digit = hexValue(ch);
+    if (digit !== -1) {
+      value = (value << 4) | digit;
+      if (++digits > 4) return undefined;
+      continue;
+    }
+    if (ch === 58) {
+      token = i;
+      if (digits === 0) {
+        if (gap !== -1) return undefined;
+        gap = bytes.length;
+        continue;
+      }
+      if (i === text.length) return undefined;
+      if (bytes.length + 2 > 16) return undefined;
+      bytes.push((value >> 8) & 0xff, value & 0xff);
+      digits = 0;
+      value = 0;
+      continue;
+    }
+    if (ch === 46 && bytes.length + 4 <= 16) {
+      const quad = parseIPv4(text.slice(token));
+      if (quad !== undefined) {
+        bytes.push(...quad);
+        digits = 0;
+        endedByQuad = true;
+        break;
+      }
+    }
+    return undefined;
+  }
+  if (!endedByQuad && digits !== 0) {
+    if (bytes.length + 2 > 16) return undefined;
+    bytes.push((value >> 8) & 0xff, value & 0xff);
+  }
+  if (gap !== -1) {
+    if (bytes.length === 16) return undefined;
+    const tail = bytes.splice(gap);
+    while (bytes.length + tail.length < 16) bytes.push(0);
+    bytes.push(...tail);
+  }
+  if (bytes.length !== 16) return undefined;
+  return bytes;
+}
+
+function formatIPv6(bytes) {
+  const words = [];
+  for (let i = 0; i < 16; i += 2) words.push((bytes[i] << 8) | bytes[i + 1]);
+  // the longest run of zero words becomes \"::\"
+  let bestBase = -1;
+  let bestLen = 0;
+  let curBase = -1;
+  let curLen = 0;
+  for (let i = 0; i < 8; i++) {
+    if (words[i] === 0) {
+      if (curBase === -1) {
+        curBase = i;
+        curLen = 1;
+      } else {
+        curLen++;
+      }
+    } else if (curBase !== -1) {
+      if (bestBase === -1 || curLen > bestLen) {
+        bestBase = curBase;
+        bestLen = curLen;
+      }
+      curBase = -1;
+    }
+  }
+  if (curBase !== -1 && (bestBase === -1 || curLen > bestLen)) {
+    bestBase = curBase;
+    bestLen = curLen;
+  }
+  if (bestBase !== -1 && bestLen < 2) bestBase = -1;
+
+  let text = \"\";
+  for (let i = 0; i < 8; i++) {
+    if (bestBase !== -1 && i >= bestBase && i < bestBase + bestLen) {
+      if (i === bestBase) text += \":\";
+      continue;
+    }
+    if (i !== 0) text += \":\";
+    // an address that wraps an ipv4 one ends in dotted form
+    if (
+      i === 6 &&
+      bestBase === 0 &&
+      (bestLen === 6 ||
+        (bestLen === 7 && words[7] !== 0x0001) ||
+        (bestLen === 5 && words[5] === 0xffff))
+    ) {
+      return text + bytes.slice(12).join(\".\");
+    }
+    text += words[i].toString(16);
+  }
+  if (bestBase !== -1 && bestBase + bestLen === 8) text += \":\";
+  return text;
+}
+
+function parseAddress(text, family) {
+  return family === AF_INET ? parseIPv4(text) : parseIPv6(text);
+}
+
+function formatAddress(handle) {
+  return handle.family === AF_INET
+    ? handle.bytes.join(\".\")
+    : formatIPv6(handle.bytes);
+}
+
+function familyName(handle) {
+  return handle.family === AF_INET ? \"IPv4\" : \"IPv6\";
+}
+
+function sameBytes(a, b, count, aFrom = 0, bFrom = 0) {
+  for (let i = 0; i < count; i++) {
+    if (a[aFrom + i] !== b[bFrom + i]) return false;
+  }
+  return true;
+}
+
+// -1, 0 or 1 over `count` bytes
+function orderBytes(a, b, count, aFrom = 0, bFrom = 0) {
+  for (let i = 0; i < count; i++) {
+    const d = a[aFrom + i] - b[bFrom + i];
+    if (d !== 0) return d < 0 ? -1 : 1;
+  }
+  return 0;
+}
+
+const mappedPrefix = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff];
+
+function isMapped(v6) {
+  return sameBytes(v6, mappedPrefix, 12);
+}
+
+function isMatch(a, b) {
+  if (a.family === b.family) {
+    return sameBytes(a.bytes, b.bytes, a.bytes.length);
+  }
+  const v4 = a.family === AF_INET ? a : b;
+  const v6 = a.family === AF_INET ? b : a;
+  return isMapped(v6.bytes) && sameBytes(v6.bytes, v4.bytes, 4, 12, 0);
+}
+
+// undefined when an ipv4 address meets an ipv6 one that does not wrap one
+function compare(a, b) {
+  if (a.family === b.family) {
+    return orderBytes(a.bytes, b.bytes, a.bytes.length);
+  }
+  if (a.family === AF_INET) {
+    if (!isMapped(b.bytes)) return undefined;
+    return orderBytes(a.bytes, b.bytes, 4, 0, 12);
+  }
+  if (!isMapped(a.bytes)) return undefined;
+  return orderBytes(a.bytes, b.bytes, 4, 12, 0);
+}
+
+function prefixMatches(a, b, prefix) {
+  const whole = prefix >> 3;
+  const rest = prefix & 7;
+  if (!sameBytes(a, b, whole)) return false;
+  if (rest === 0) return true;
+  const mask = (0xff << (8 - rest)) & 0xff;
+  return (a[whole] & mask) === (b[whole] & mask);
+}
+
+function inNetwork(address, network, prefix) {
+  if (address.family === network.family) {
+    return prefixMatches(address.bytes, network.bytes, prefix);
+  }
+  if (address.family === AF_INET) {
+    return prefixMatches(
+      [...mappedPrefix, ...address.bytes],
+      network.bytes,
+      prefix,
+    );
+  }
+  if (!isMapped(address.bytes)) return false;
+  return prefixMatches(address.bytes.slice(12), network.bytes, prefix);
+}
+
+function invalidAddress() {
+  return error(\"ERR_INVALID_ADDRESS\", \"Invalid socket address\");
+}
+
+function validatePort(port, name = \"Port\", allowZero = true) {
+  if (
+    (typeof port !== \"number\" && typeof port !== \"string\") ||
+    (typeof port === \"string\" && port.trim().length === 0) ||
+    +port !== +port >>> 0 ||
+    port > 0xffff ||
+    (port === 0 && !allowZero)
+  ) {
+    const operator = allowZero ? \">=\" : \">\";
+    throw rangeError(
+      \"ERR_SOCKET_BAD_PORT\",
+      `${name} should be ${operator} 0 and < 65536. Received ${determineSpecificType(port)}.`,
+    );
+  }
+  return port | 0;
+}
+
+function validateUint32(value, name, positive = false) {
+  if (typeof value !== \"number\") throw invalidArgType(name, \"number\", value);
+  if (!Number.isInteger(value)) throw outOfRange(name, \"an integer\", value);
+  const min = positive ? 1 : 0;
+  const max = 4294967295;
+  if (value < min || value > max) {
+    throw outOfRange(name, `>= ${min} && <= ${max}`, value);
+  }
+}
+
+function validateInt32(value, name, min = -2147483648, max = 2147483647) {
+  if (typeof value !== \"number\") throw invalidArgType(name, \"number\", value);
+  if (!Number.isInteger(value)) throw outOfRange(name, \"an integer\", value);
+  if (value < min || value > max) {
+    throw outOfRange(name, `>= ${min} && <= ${max}`, value);
+  }
+}
+
+const kSocketAddressHandle = Symbol(\"kHandle\");
+
+class SocketAddress {
+  static isSocketAddress(value) {
+    return value?.[kSocketAddressHandle] !== undefined;
+  }
+
+  constructor(options = {}) {
+    validateObject(options, \"options\");
+    let { family = \"ipv4\" } = options;
+    const {
+      address = family === \"ipv4\" ? \"127.0.0.1\" : \"::\",
+      port = 0,
+      flowlabel = 0,
+    } = options;
+
+    let type;
+    if (typeof family?.toLowerCase === \"function\") {
+      family = family.toLowerCase();
+    }
+    switch (family) {
+      case \"ipv4\":
+        type = AF_INET;
+        break;
+      case \"ipv6\":
+        type = AF_INET6;
+        break;
+      default:
+        throw invalidArgValue(\"options.family\", options.family);
+    }
+
+    validateString(address, \"options.address\");
+    validatePort(port, \"options.port\");
+    validateUint32(flowlabel, \"options.flowlabel\", false);
+
+    const bytes = parseAddress(address, type);
+    if (bytes === undefined) throw invalidAddress();
+    this[kSocketAddressHandle] = {
+      family: type,
+      bytes,
+      port: port | 0,
+      flowlabel: type === AF_INET6 ? flowlabel | 0 : 0,
+    };
+  }
+
+  get address() {
+    return formatAddress(this[kSocketAddressHandle]);
+  }
+
+  get port() {
+    return this[kSocketAddressHandle].port;
+  }
+
+  get family() {
+    return this[kSocketAddressHandle].family === AF_INET ? \"ipv4\" : \"ipv6\";
+  }
+
+  get flowlabel() {
+    return this[kSocketAddressHandle].flowlabel;
+  }
+
+  toJSON() {
+    return {
+      address: this.address,
+      port: this.port,
+      family: this.family,
+      flowlabel: this.flowlabel,
+    };
+  }
+
+  // node reads the input as a url, which is not here yet
+  static parse(input) {
+    validateString(input, \"input\");
+    throw error(
+      \"ERR_METHOD_NOT_IMPLEMENTED\",
+      \"The parse() method is not implemented\",
+    );
+  }
+}
+
+function parseCIDR(cidr) {
+  validateString(cidr, \"cidr\");
+  const slash = cidr.lastIndexOf(\"/\");
+  if (slash === -1) {
+    throw invalidArgValue(
+      \"cidr\",
+      cidr,
+      'must contain a prefix length (e.g. \"10.0.0.0/8\")',
+    );
+  }
+  const address = cidr.slice(0, slash);
+  const prefixStr = cidr.slice(slash + 1);
+  const prefix = Number.parseInt(prefixStr, 10);
+  if (Number.isNaN(prefix) || `${prefix}` !== prefixStr) {
+    throw invalidArgValue(
+      \"cidr\",
+      cidr,
+      \"prefix length must be a valid integer\",
+    );
+  }
+  const family = address.includes(\":\") ? \"ipv6\" : \"ipv4\";
+  return { address, prefix, family };
+}
+
+function addressKey(handle) {
+  return `${handle.family} ${handle.bytes.join(\".\")}`;
+}
+
+function toHandle(value, name, family) {
+  if (SocketAddress.isSocketAddress(value)) return value;
+  validateString(value, name);
+  validateString(family, \"family\");
+  return new SocketAddress({ address: value, family });
+}
+
+function validatePrefix(network, prefix) {
+  switch (network.family) {
+    case \"ipv4\":
+      validateInt32(prefix, \"prefix\", 0, 32);
+      break;
+    case \"ipv6\":
+      validateInt32(prefix, \"prefix\", 0, 128);
+      break;
+  }
+}
+
+const kHandle = Symbol(\"kHandle\");
+
+class BlockList {
+  constructor() {
+    // newest first in each: addresses by key, then subnets, then ranges
+    this[kHandle] = { addresses: new Map(), subnets: [], ranges: [] };
+  }
+
+  static isBlockList(value) {
+    return value?.[kHandle] !== undefined;
+  }
+
+  static PRIVATE_RANGES = Object.freeze([
+    \"10.0.0.0/8\",
+    \"172.16.0.0/12\",
+    \"192.168.0.0/16\",
+    \"127.0.0.0/8\",
+    \"::1/128\",
+    \"169.254.0.0/16\",
+    \"fe80::/10\",
+    \"fc00::/7\",
+  ]);
+
+  addAddress(address, family = \"ipv4\") {
+    address = toHandle(address, \"address\", family);
+    const handle = address[kSocketAddressHandle];
+    const { addresses } = this[kHandle];
+    const key = addressKey(handle);
+    addresses.delete(key);
+    addresses.set(key, handle);
+  }
+
+  addAddresses(addresses, family = \"ipv4\") {
+    validateArray(addresses, \"addresses\");
+    validateString(family, \"family\");
+    const handles = [];
+    for (let i = 0; i < addresses.length; i++) {
+      let address = addresses[i];
+      if (!SocketAddress.isSocketAddress(address)) {
+        validateString(address, `addresses[${i}]`);
+        address = new SocketAddress({ address, family });
+      }
+      handles.push(address[kSocketAddressHandle]);
+    }
+    for (const handle of handles) {
+      const key = addressKey(handle);
+      this[kHandle].addresses.delete(key);
+      this[kHandle].addresses.set(key, handle);
+    }
+  }
+
+  addRange(start, end, family = \"ipv4\") {
+    start = toHandle(start, \"start\", family);
+    end = toHandle(end, \"end\", family);
+    const from = start[kSocketAddressHandle];
+    const to = end[kSocketAddressHandle];
+    if (compare(from, to) === 1) {
+      throw invalidArgValue(\"start\", start, \"must come before end\");
+    }
+    this[kHandle].ranges.unshift({ start: from, end: to });
+  }
+
+  addSubnet(network, prefix, family = \"ipv4\") {
+    network = toHandle(network, \"network\", family);
+    validatePrefix(network, prefix);
+    prefix += 0;
+    this[kHandle].subnets.unshift({
+      network: network[kSocketAddressHandle],
+      prefix,
+    });
+  }
+
+  addCIDR(cidr) {
+    const { address, prefix, family } = parseCIDR(cidr);
+    this.addSubnet(address, prefix, family);
+  }
+
+  addCIDRs(cidrs) {
+    validateArray(cidrs, \"cidrs\");
+    const parsed = [];
+    for (let i = 0; i < cidrs.length; i++) {
+      validateString(cidrs[i], `cidrs[${i}]`);
+      parsed.push(parseCIDR(cidrs[i]));
+    }
+    for (let i = 0; i < parsed.length; i++) {
+      const { address, prefix, family } = parsed[i];
+      this.addSubnet(address, prefix, family);
+    }
+  }
+
+  removeAddress(address, family = \"ipv4\") {
+    address = toHandle(address, \"address\", family);
+    this[kHandle].addresses.delete(addressKey(address[kSocketAddressHandle]));
+  }
+
+  removeRange(start, end, family = \"ipv4\") {
+    start = toHandle(start, \"start\", family);
+    end = toHandle(end, \"end\", family);
+    const from = addressKey(start[kSocketAddressHandle]);
+    const to = addressKey(end[kSocketAddressHandle]);
+    const { ranges } = this[kHandle];
+    const at = ranges.findIndex(
+      (range) => addressKey(range.start) === from && addressKey(range.end) === to,
+    );
+    if (at !== -1) ranges.splice(at, 1);
+  }
+
+  removeSubnet(network, prefix, family = \"ipv4\") {
+    network = toHandle(network, \"network\", family);
+    validatePrefix(network, prefix);
+    prefix += 0;
+    const key = addressKey(network[kSocketAddressHandle]);
+    const { subnets } = this[kHandle];
+    const at = subnets.findIndex(
+      (subnet) => addressKey(subnet.network) === key && subnet.prefix === prefix,
+    );
+    if (at !== -1) subnets.splice(at, 1);
+  }
+
+  removeCIDR(cidr) {
+    const { address, prefix, family } = parseCIDR(cidr);
+    this.removeSubnet(address, prefix, family);
+  }
+
+  check(address, family = \"ipv4\") {
+    let handle;
+    if (!SocketAddress.isSocketAddress(address)) {
+      validateString(address, \"address\");
+      validateString(family, \"family\");
+      let af;
+      if (family === \"ipv4\" || family === \"IPv4\") {
+        af = AF_INET;
+      } else if (family === \"ipv6\" || family === \"IPv6\") {
+        af = AF_INET6;
+      } else {
+        af = family.toLowerCase() === \"ipv4\" ? AF_INET : AF_INET6;
+      }
+      const bytes = parseAddress(address, af);
+      if (bytes === undefined) return false;
+      handle = { family: af, bytes };
+    } else {
+      handle = address[kSocketAddressHandle];
+    }
+    const { addresses, subnets, ranges } = this[kHandle];
+    for (const rule of addresses.values()) {
+      if (isMatch(rule, handle)) return true;
+    }
+    for (const { network, prefix } of subnets) {
+      if (inNetwork(handle, network, prefix)) return true;
+    }
+    for (const { start, end } of ranges) {
+      const low = compare(handle, start);
+      const high = compare(handle, end);
+      if (low !== undefined && high !== undefined && low >= 0 && high <= 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  clear() {
+    this[kHandle] = { addresses: new Map(), subnets: [], ranges: [] };
+  }
+
+  #parseIPInfo(data) {
+    for (const item of data) {
+      if (item.includes(\"IPv4\")) {
+        const subnetMatch = item.match(
+          /Subnet: IPv4 (\\d{1,3}(?:\\.\\d{1,3}){3})\\/(\\d{1,2})/,
+        );
+        if (subnetMatch) {
+          const { 1: network, 2: prefix } = subnetMatch;
+          this.addSubnet(network, Number.parseInt(prefix));
+          continue;
+        }
+        const addressMatch = item.match(
+          /Address: IPv4 (\\d{1,3}(?:\\.\\d{1,3}){3})/,
+        );
+        if (addressMatch) {
+          const { 1: address } = addressMatch;
+          this.addAddress(address);
+          continue;
+        }
+
+        const rangeMatch = item.match(
+          /Range: IPv4 (\\d{1,3}(?:\\.\\d{1,3}){3})-(\\d{1,3}(?:\\.\\d{1,3}){3})/,
+        );
+        if (rangeMatch) {
+          const { 1: start, 2: end } = rangeMatch;
+          this.addRange(start, end);
+          continue;
+        }
+      }
+      // IPv6 parsing with support for compressed addresses
+      if (item.includes(\"IPv6\")) {
+        // IPv6 subnet pattern: supports both full and compressed formats
+        const ipv6SubnetMatch = item.match(
+          /Subnet: IPv6 ([0-9a-fA-F:.]{1,45})\\/([0-9]{1,3})/i,
+        );
+        if (ipv6SubnetMatch) {
+          const { 1: network, 2: prefix } = ipv6SubnetMatch;
+          this.addSubnet(network, Number.parseInt(prefix), \"ipv6\");
+          continue;
+        }
+
+        const ipv6AddressMatch = item.match(
+          /Address: IPv6 ([0-9a-fA-F:.]{1,45})/i,
+        );
+        if (ipv6AddressMatch) {
+          const { 1: address } = ipv6AddressMatch;
+          this.addAddress(address, \"ipv6\");
+          continue;
+        }
+
+        const ipv6RangeMatch = item.match(
+          /Range: IPv6 ([0-9a-fA-F:.]{1,45})-([0-9a-fA-F:.]{1,45})/i,
+        );
+        if (ipv6RangeMatch) {
+          const { 1: start, 2: end } = ipv6RangeMatch;
+          this.addRange(start, end, \"ipv6\");
+          continue;
+        }
+      }
+    }
+  }
+
+  toJSON() {
+    return this.rules;
+  }
+
+  fromJSON(data) {
+    // The data argument must be a string, or an array of strings that
+    // is JSON parseable.
+    if (Array.isArray(data)) {
+      for (const n of data) {
+        if (typeof n !== \"string\") {
+          throw invalidArgType(\"data\", [\"string\", \"string[]\"], data);
+        }
+      }
+    } else if (typeof data !== \"string\") {
+      throw invalidArgType(\"data\", [\"string\", \"string[]\"], data);
+    } else {
+      data = JSON.parse(data);
+      if (!Array.isArray(data)) {
+        throw invalidArgType(\"data\", [\"string\", \"string[]\"], data);
+      }
+      for (const n of data) {
+        if (typeof n !== \"string\") {
+          throw invalidArgType(\"data\", [\"string\", \"string[]\"], data);
+        }
+      }
+    }
+
+    this.#parseIPInfo(data);
+  }
+
+  get rules() {
+    const { addresses, subnets, ranges } = this[kHandle];
+    const rules = [];
+    for (const handle of [...addresses.values()].reverse()) {
+      rules.push(`Address: ${familyName(handle)} ${formatAddress(handle)}`);
+    }
+    for (const { network, prefix } of subnets) {
+      rules.push(
+        `Subnet: ${familyName(network)} ${formatAddress(network)}/${prefix}`,
+      );
+    }
+    for (const { start, end } of ranges) {
+      rules.push(
+        `Range: ${familyName(start)} ${formatAddress(start)}-${formatAddress(end)}`,
+      );
+    }
+    return rules;
+  }
+
+  get size() {
+    const { addresses, subnets, ranges } = this[kHandle];
+    return addresses.size + subnets.length + ranges.length;
+  }
+}
+
+module.exports = { BlockList, SocketAddress, isIP, isIPv4, isIPv6 };
 "

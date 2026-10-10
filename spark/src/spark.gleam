@@ -96,6 +96,10 @@ const shipped_sources = [
   js.domexception,
   js.dom_events,
   js.buffer,
+  js.path,
+  js.path_posix,
+  js.path_win32,
+  js.net,
 ]
 
 /// compiles the js of every builtin spark ships; installs and runs nothing

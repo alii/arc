@@ -22,7 +22,9 @@ import spark/io.{
   type Io, type ReplySlip, type Want, Access, Done, Failure, Io, Realpath,
   Stderr, Stdout, Text, Write,
 }
+import spark/net
 import spark/os.{BigEndian, Os}
+import spark/path
 import spark/perf_hooks
 import spark/platform.{type Platform, Darwin, Linux}
 import spark/process.{Process}
@@ -56,6 +58,10 @@ fn builtins() -> List(Builtin(Nil)) {
     domexception.builtin(),
     dom_events.builtin(),
     buffer.builtin(),
+    path.builtin(),
+    path.posix_builtin(),
+    path.win32_builtin(),
+    net.builtin(),
   ]
 }
 
@@ -1901,4 +1907,222 @@ pub fn buffer_globals_exist_only_when_asked_for_test() {
       "[typeof Buffer, typeof atob, typeof btoa].join()",
     ).0
     == "'undefined,undefined,undefined'"
+}
+
+const path_generated_script = "
+const path = require(\"path\");
+let seed = 4242;
+const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+const lines = [];
+const call = (f) => { try { const v = f(); return typeof v === \"string\" ? JSON.stringify(v) : JSON.stringify(v); } catch (e) { return e.name + \" \" + e.code + \" \" + e.message; } };
+const posixParts = [\"\", \".\", \"..\", \"a\", \"b.txt\", \"c.tar.gz\", \".hidden\", \"dir\", \"/\", \"//\", \"a/b\", \"/abs\", \"x y\", \"\\u00e9\\u4e2d\", \"a.\", \"..b\", \"...\", \"/a/b/c/\", \"./x\", \"../y\", \"a//b\", \"trailing/\"];
+const winParts = [\"\", \".\", \"..\", \"a\", \"b.txt\", \"C:\", \"C:\\\\\", \"c:/\", \"\\\\\\\\server\\\\share\", \"\\\\\\\\?\\\\C:\\\\x\", \"\\\\\", \"/\", \"dir\\\\sub\", \"a/b\", \"D:rel\", \"C:\\\\a\\\\..\\\\b\", \"\\\\\\\\.\\\\COM1\", \"con\", \"x.\", \"..\\\\y\", \"\\\\\\\\\", \"C:\\\\a\\\\b\\\\\", \"file.TXT\", \"\\\\\\\\?\\\\UNC\\\\s\\\\h\"];
+const make = (parts, seps) => { const n = 1 + rnd(4); let s = \"\"; for (let i = 0; i < n; i++) s += (i && rnd(3) ? seps[rnd(seps.length)] : \"\") + parts[rnd(parts.length)]; return s; };
+for (const [name, flavour, parts, seps] of [[\"posix\", path.posix, posixParts, [\"/\"]], [\"win32\", path.win32, winParts, [\"\\\\\", \"/\"]]]) {
+  for (let i = 0; i < 120; i++) {
+    const p = make(parts, seps), q = make(parts, seps), r = make(parts, seps);
+    lines.push(name + \" normalize \" + JSON.stringify(p) + \" \" + call(() => flavour.normalize(p)));
+    lines.push(name + \" dirname \" + call(() => flavour.dirname(p)) + \" basename \" + call(() => flavour.basename(p)) + \" ext \" + call(() => flavour.extname(p)) + \" abs \" + call(() => flavour.isAbsolute(p)));
+    lines.push(name + \" basename-ext \" + JSON.stringify(q) + \" \" + call(() => flavour.basename(p, flavour.extname(p))) + \" \" + call(() => flavour.basename(p, q)));
+    lines.push(name + \" parse \" + call(() => flavour.parse(p)) + \" format \" + call(() => flavour.format(flavour.parse(p))));
+    lines.push(name + \" join \" + JSON.stringify([p, q, r]) + \" \" + call(() => flavour.join(p, q, r)) + \" \" + call(() => flavour.join(p)) + \" \" + call(() => flavour.join()));
+    lines.push(name + \" resolve \" + call(() => flavour.resolve(p, q)) + \" \" + call(() => flavour.resolve(\"/base/dir\", p)) + \" \" + call(() => flavour.resolve(p)));
+    lines.push(name + \" relative \" + call(() => flavour.relative(p, q)) + \" \" + call(() => flavour.relative(\"/a/b/c\", p)) + \" \" + call(() => flavour.relative(p, p)));
+    lines.push(name + \" namespaced \" + call(() => flavour.toNamespacedPath(p)));
+  }
+  lines.push(name + \" consts \" + JSON.stringify([flavour.sep, flavour.delimiter, flavour.posix === path.posix, flavour.win32 === path.win32, flavour._makeLong === flavour.toNamespacedPath]));
+  lines.push(name + \" keys \" + Object.keys(flavour).sort().join(\" \"));
+  for (const fn of [\"normalize\", \"dirname\", \"basename\", \"extname\", \"isAbsolute\", \"parse\", \"join\", \"resolve\", \"relative\", \"toNamespacedPath\", \"format\"]) {
+    for (const bad of [undefined, null, 5, {}, [], true]) lines.push(name + \" \" + fn + \" bad \" + String(bad) + \" \" + call(() => flavour[fn](bad)) + (fn === \"relative\" ? \" \" + call(() => flavour.relative(\"a\", bad)) : \"\") + (fn === \"basename\" ? \" \" + call(() => flavour.basename(\"a\", bad)) : \"\"));
+  }
+  lines.push(name + \" format forms \" + [{ dir: \"/d\", base: \"b.x\" }, { root: \"/\", name: \"n\", ext: \".e\" }, { root: \"/\", name: \"n\", ext: \"e\" }, { dir: \"/\", base: \"b\" }, { name: \"n\" }, {}, { root: \"C:\\\\\", dir: \"C:\\\\d\", base: \"f\" }, { dir: \"d\", root: \"d\", base: \"f\" }].map((o) => call(() => flavour.format(o))).join(\" \"));
+}
+lines.push(\"default is posix \" + (path === path.posix) + \" \" + (require(\"node:path\") === path) + \" \" + (require(\"path/posix\") === path.posix) + \" \" + (require(\"node:path/win32\") === path.win32) + \" \" + path.resolve(\"x\") + \" \" + path.resolve(\"\"));
+lines.push(\"matchesGlob \" + typeof path.matchesGlob);
+const groups = new Map();
+for (const line of lines) {
+  const kind = line.split(\" \").slice(0, 2).join(\" \");
+  const group = groups.get(kind) ?? { count: 0, hash: 2166136261 };
+  const bytes = new TextEncoder().encode(line);
+  let hash = group.hash;
+  for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 16777619) >>> 0;
+  groups.set(kind, { count: group.count + 1, hash });
+}
+for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
+"
+
+// generated paths through every function of both flavours; each line is a
+// kind of case, how many there were and a hash of what they printed, all
+// taken from node 26.11.1
+pub fn path_generated_cases_match_node_test() {
+  let rt = run_commonjs(node_runtime(), path_generated_script)
+  assert out_lines(rt)
+    == [
+      "posix normalize 126 2169166483",
+      "posix dirname 126 952955543",
+      "posix basename-ext 120 3923222838",
+      "posix parse 126 3711254769",
+      "posix join 126 2034907829",
+      "posix resolve 126 669827026",
+      "posix relative 126 35337823",
+      "posix namespaced 120 2936134743",
+      "posix consts 1 602227949",
+      "posix keys 1 630039296",
+      "posix basename 6 3128654275",
+      "posix extname 6 1339339214",
+      "posix isAbsolute 6 68224172",
+      "posix toNamespacedPath 6 2890361265",
+      "posix format 7 3935465123",
+      "win32 normalize 126 3985398056",
+      "win32 dirname 126 680378116",
+      "win32 basename-ext 120 1264056395",
+      "win32 parse 126 1924822768",
+      "win32 join 126 3147555912",
+      "win32 resolve 126 144449529",
+      "win32 relative 126 2102951060",
+      "win32 namespaced 120 4109347973",
+      "win32 consts 1 2455246637",
+      "win32 keys 1 1126941460",
+      "win32 basename 6 3222937739",
+      "win32 extname 6 3781504598",
+      "win32 isAbsolute 6 3323894116",
+      "win32 toNamespacedPath 6 2379973345",
+      "win32 format 7 249379150",
+      "default is 1 3459091138",
+      "matchesGlob function 1 3450377924",
+    ]
+}
+
+pub fn path_matches_glob_is_not_there_yet_test() {
+  let rt =
+    run_commonjs(
+      node_runtime(),
+      "try { require('path').matchesGlob('a', '*'); } catch (error) { out.push(error.code); }",
+    )
+  assert out_lines(rt) == ["ERR_METHOD_NOT_IMPLEMENTED"]
+}
+
+const net_generated_script = "
+const net = require(\"net\");
+let seed = 9001;
+const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+const pick = (list) => list[rnd(list.length)];
+const lines = [];
+const call = (f) => { try { const v = f(); return v === undefined ? \"undefined\" : JSON.stringify(v); } catch (e) { return e.name + \" \" + e.code + \" \" + e.message.replace(/ Received (SocketAddress )?\\{[\\s\\S]*$/, \"\"); } };
+// node keeps address rules in a hash table, so their order means nothing
+const ordered = (rules) => rules.filter((r) => r.startsWith(\"Address\")).sort().concat(rules.filter((r) => !r.startsWith(\"Address\")));
+const v4 = () => pick([\"1.2.3.4\", \"10.0.0.1\", \"10.0.0.9\", \"10.1.2.3\", \"192.168.1.1\", \"127.0.0.1\", \"0.0.0.0\", \"255.255.255.255\", \"8.8.8.8\", \"172.16.5.4\", \"01.2.3.4\", \"1.2.3\", \"1.2.3.4.5\", \"256.1.1.1\", \"1.2.3.4 \", \"\", \"a.b.c.d\", \"1..2.3\", String(rnd(256)) + \".\" + rnd(256) + \".\" + rnd(256) + \".\" + rnd(256)]);
+const v6 = () => pick([\"::\", \"::1\", \"fe80::1\", \"FE80::A:b\", \"::ffff:1.2.3.4\", \"::ffff:10.0.0.5\", \"::1.2.3.4\", \"2001:db8::\", \"2001:db8:0:0:1:0:0:1\", \"1:2:3:4:5:6:7:8\", \"1:2:3:4:5:6:7::\", \"::2:3:4:5:6:7:8\", \"1::8\", \"1:0:0:2:0:0:0:3\", \"0:0:1:0:0:1:0:0\", \"fc00::1\", \"fe80::1%eth0\", \"::ffff:0:1\", \"1:2:3:4:5:6:1.2.3.4\", \"1:2:3:4:5:6:7\", \"1:2:3:4:5:6:7:8:9\", \":::\", \"1::2::3\", \"12345::\", \"g::1\", \"::1.2.3\", \"1:2:3:4:5:6:7:1.2.3.4\", \":1\", \"1:\", \"\", rnd(65536).toString(16) + \"::\" + rnd(65536).toString(16)]);
+const any = () => (rnd(2) ? v4() : v6());
+for (let i = 0; i < 200; i++) { const a = any(); lines.push(\"isIP \" + JSON.stringify(a) + \" \" + net.isIP(a) + \" \" + net.isIPv4(a) + \" \" + net.isIPv6(a)); }
+for (const odd of [undefined, null, 5, {}, [], true, { toString() { return \"::1\"; } }, [\"1.2.3.4\"]]) lines.push(\"isIP odd \" + net.isIP(odd) + \" \" + net.isIPv4(odd) + \" \" + net.isIPv6(odd));
+for (let i = 0; i < 200; i++) {
+  const family = pick([\"ipv4\", \"ipv6\", \"IPv4\", \"IPV6\", undefined, \"ipv5\", 4]);
+  const address = rnd(8) === 0 ? undefined : any();
+  const port = pick([undefined, 0, 80, 65535, 65536, -1, \"443\", \"\", \"x\", 1.5, null]);
+  const flowlabel = pick([undefined, 0, 7, 4294967295, 4294967296, -1, 1.5, \"1\"]);
+  const options = {};
+  if (family !== undefined) options.family = family;
+  if (address !== undefined) options.address = address;
+  if (port !== undefined) options.port = port;
+  if (flowlabel !== undefined) options.flowlabel = flowlabel;
+  lines.push(\"address \" + JSON.stringify(options) + \" \" + call(() => { const s = new net.SocketAddress(options); return [s.address, s.port, s.family, s.flowlabel, s.toJSON()]; }));
+}
+for (let round = 0; round < 40; round++) {
+  const list = new net.BlockList();
+  const log = [];
+  const steps = 3 + rnd(10);
+  for (let i = 0; i < steps; i++) {
+    const fam = pick([\"ipv4\", \"ipv6\", undefined]);
+    const addr = () => (fam === \"ipv6\" ? v6() : fam === \"ipv4\" ? v4() : any());
+    const args = (list) => (fam === undefined ? list : [...list, fam]);
+    const prefix = pick([0, 1, 7, 8, 12, 16, 24, 31, 32, 33, 64, 96, 100, 127, 128, 129, -1, 1.5, \"8\"]);
+    switch (rnd(11)) {
+      case 0: { const a = addr(); log.push(\"addAddress \" + a + \" \" + call(() => list.addAddress(...args([a])))); break; }
+      case 1: { const a = addr(), b = addr(); log.push(\"addRange \" + a + \" \" + b + \" \" + call(() => list.addRange(...args([a, b])))); break; }
+      case 2: { const a = addr(); log.push(\"addSubnet \" + a + \"/\" + prefix + \" \" + call(() => list.addSubnet(...args([a, prefix])))); break; }
+      case 3: { const a = any() + pick([\"/8\", \"/24\", \"/64\", \"/128\", \"/129\", \"\", \"/x\", \"/08\", \"/ 8\"]); log.push(\"addCIDR \" + a + \" \" + call(() => list.addCIDR(a))); break; }
+      case 4: { const a = addr(); log.push(\"removeAddress \" + a + \" \" + call(() => list.removeAddress(...args([a])))); break; }
+      case 5: { const a = addr(), b = addr(); log.push(\"removeRange \" + a + \" \" + b + \" \" + call(() => list.removeRange(...args([a, b])))); break; }
+      case 6: { const a = addr(); log.push(\"removeSubnet \" + a + \"/\" + prefix + \" \" + call(() => list.removeSubnet(...args([a, prefix])))); break; }
+      case 7: { const a = [addr(), addr()]; log.push(\"addAddresses \" + a + \" \" + call(() => list.addAddresses(...args([a])))); break; }
+      case 8: { const a = [any() + \"/16\", any() + \"/64\"]; log.push(\"addCIDRs \" + a + \" \" + call(() => list.addCIDRs(a))); break; }
+      case 9: { const a = new net.SocketAddress(rnd(2) ? { address: \"10.0.0.5\" } : { address: \"::ffff:10.0.0.5\", family: \"ipv6\" }); log.push(\"addAddress object \" + call(() => list.addAddress(a))); break; }
+      default: { const a = \"10.0.0.\" + rnd(12); log.push(\"addAddress dup \" + call(() => list.addAddress(a))); }
+    }
+  }
+  lines.push(\"list \" + round + \" \" + log.join(\" | \"));
+  lines.push(\"rules \" + round + \" \" + list.size + \" \" + JSON.stringify(ordered(list.rules)));
+  const checks = [];
+  for (let i = 0; i < 40; i++) {
+    const a = any();
+    const fam = pick([\"ipv4\", \"ipv6\", undefined, \"IPv6\", \"banana\"]);
+    checks.push(call(() => (fam === undefined ? list.check(a) : list.check(a, fam))));
+  }
+  checks.push(call(() => list.check(new net.SocketAddress({ address: \"10.0.0.5\" }))), call(() => list.check(new net.SocketAddress({ address: \"::ffff:10.0.0.5\", family: \"ipv6\" }))));
+  lines.push(\"check \" + round + \" \" + checks.join(\"\"));
+  const copy = new net.BlockList();
+  lines.push(\"json \" + round + \" \" + call(() => { copy.fromJSON(JSON.stringify(ordered(list.toJSON()))); return ordered(copy.rules); }));
+  list.clear();
+  lines.push(\"clear \" + round + \" \" + list.size + JSON.stringify(list.rules));
+}
+const t = (label, f) => lines.push(label + \" \" + call(f));
+t(\"check bad address type\", () => new net.BlockList().check(5));
+t(\"check bad family type\", () => new net.BlockList().check(\"1.1.1.1\", 5));
+t(\"addAddress bad type\", () => new net.BlockList().addAddress(5));
+t(\"addAddresses bad\", () => new net.BlockList().addAddresses(\"1.1.1.1\"));
+t(\"addAddresses bad item\", () => new net.BlockList().addAddresses([\"1.1.1.1\", 5]));
+t(\"addCIDRs bad item\", () => new net.BlockList().addCIDRs([\"1.1.1.1/8\", 5]));
+t(\"addCIDR bad type\", () => new net.BlockList().addCIDR(5));
+t(\"fromJSON bad\", () => new net.BlockList().fromJSON(5));
+t(\"fromJSON bad item\", () => new net.BlockList().fromJSON([\"a\", 5]));
+t(\"fromJSON not array\", () => new net.BlockList().fromJSON(\"{}\"));
+t(\"fromJSON not json\", () => { try { new net.BlockList().fromJSON(\"nope\"); } catch (e) { return e.name; } });
+t(\"statics\", () => [net.BlockList.PRIVATE_RANGES, Object.isFrozen(net.BlockList.PRIVATE_RANGES), net.BlockList.isBlockList(new net.BlockList()), net.BlockList.isBlockList({}), net.BlockList.isBlockList(null), net.SocketAddress.isSocketAddress(new net.SocketAddress()), net.SocketAddress.isSocketAddress(undefined)]);
+t(\"private ranges work\", () => { const b = new net.BlockList(); b.addCIDRs(net.BlockList.PRIVATE_RANGES); return [\"10.1.1.1\", \"172.20.0.1\", \"192.168.0.9\", \"127.0.0.1\", \"169.254.1.1\", \"8.8.8.8\", \"172.32.0.1\"].map((a) => b.check(a)).concat([\"::1\", \"fe80::5\", \"fd00::1\", \"2001:db8::1\", \"::ffff:10.1.1.1\"].map((a) => b.check(a, \"ipv6\"))); });
+t(\"shape\", () => [Object.getOwnPropertyNames(net.BlockList.prototype).join(\" \"), Object.getOwnPropertyNames(net.SocketAddress.prototype).join(\" \"), net.BlockList.name, net.BlockList.length, net.SocketAddress.length]);
+const groups = new Map();
+for (const line of lines) {
+  const kind = line.split(\" \")[0];
+  const group = groups.get(kind) ?? { count: 0, hash: 2166136261 };
+  const bytes = new TextEncoder().encode(line);
+  let hash = group.hash;
+  for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 16777619) >>> 0;
+  groups.set(kind, { count: group.count + 1, hash });
+}
+for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
+"
+
+// generated addresses and block lists; each line is a kind of case, how many
+// there were and a hash of what they printed, all taken from node 26.11.1.
+// Address rules are sorted first: node lists them in hash table order
+pub fn net_generated_cases_match_node_test() {
+  let rt = run_commonjs(node_runtime(), net_generated_script)
+  assert out_lines(rt)
+    == [
+      "isIP 208 1649224602",
+      "address 200 811629502",
+      "list 40 3434433788",
+      "rules 40 3816565543",
+      "check 42 711282156",
+      "json 40 4001462177",
+      "clear 40 3996444319",
+      "addAddress 1 2138075090",
+      "addAddresses 2 235182210",
+      "addCIDRs 1 2696499320",
+      "addCIDR 1 113014980",
+      "fromJSON 4 3436466889",
+      "statics 1 2762736012",
+      "private 1 3877025246",
+      "shape 1 676877096",
+    ]
+}
+
+pub fn net_opens_nothing_test() {
+  let rt =
+    run_commonjs(
+      node_runtime(),
+      "out.push(Object.keys(require('net')).sort().join(' '))",
+    )
+  assert out_lines(rt) == ["BlockList SocketAddress isIP isIPv4 isIPv6"]
 }
