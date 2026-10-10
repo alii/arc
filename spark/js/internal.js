@@ -7124,6 +7124,7 @@ function load(name) {
 
 module.exports = {
   load,
+  find: loadAnywhere,
   addLoader,
   primordials,
   internalBinding,

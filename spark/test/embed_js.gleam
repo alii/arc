@@ -30,6 +30,9 @@ const names = [
   "events",
   "string_decoder",
   "util",
+  "stream",
+  "stream_promises",
+  "stream_consumers",
 ]
 
 const target = "src/spark/js.gleam"

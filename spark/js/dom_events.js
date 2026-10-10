@@ -1098,6 +1098,7 @@ Object.defineProperty(module.exports, "internals", {
     kIsBeingDispatched,
     kResistStopPropagation,
     kTarget,
+    kWeakHandler,
     kTrustEvent,
   },
 });

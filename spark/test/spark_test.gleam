@@ -30,6 +30,7 @@ import spark/perf_hooks
 import spark/platform.{type Platform, Darwin, Linux}
 import spark/process.{Process}
 import spark/querystring
+import spark/stream
 import spark/string_decoder
 import spark/timers
 import spark/url
@@ -73,6 +74,9 @@ fn builtins() -> List(Builtin(Nil)) {
     events.builtin(),
     string_decoder.builtin(),
     util.builtin(),
+    stream.builtin(),
+    stream.promises_builtin(),
+    stream.consumers_builtin(),
   ]
 }
 
@@ -2944,4 +2948,248 @@ pub fn error_messages_show_values_as_node_does_test() {
       "Invalid URL",
       "Unhandled error. ({ why: Set(1) { 1 } })",
     ]
+}
+
+const stream_script = "
+const stream = require(\"stream\");
+const process = require(\"process\");
+const { Readable, Writable, Duplex, Transform, PassThrough, pipeline, finished } = stream;
+let seed = 4242;
+const rnd = (n) => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return seed % n; };
+const pick = (l) => l[rnd(l.length)];
+const lines = [];
+const pending = [];
+const show = (v) => { if (Buffer.isBuffer(v)) return \"buf:\" + v.toString(\"hex\"); if (v instanceof Error) return v.name + \":\" + v.code + \":\" + v.message; try { return JSON.stringify(v) ?? String(v); } catch { return String(v); } };
+const call = (f) => { try { const v = f(); return show(v); } catch (e) { return \"threw \" + e.name + \" \" + e.code + \" \" + e.message; } };
+// a way to call back later that the scenario picks
+const laters = [(f) => f(), (f) => process.nextTick(f), (f) => Promise.resolve().then(f), (f) => setImmediate(f)];
+function scenario(label, run) {
+  pending.push(() => new Promise((resolve) => {
+    const log = [];
+    let done = false;
+    const guard = setTimeout(() => finish(\"timeout\"), 5000);
+    const finish = (why) => { if (done) return; done = true; clearTimeout(guard); lines.push(label + \" \" + log.join(\" \") + \" => \" + why); resolve(); };
+    try { run((...parts) => log.push(parts.map((p) => (typeof p === \"string\" ? p : show(p))).join(\":\")), finish); } catch (e) { log.push(\"threw \" + e.name + \" \" + e.code + \" \" + e.message); finish(\"threw\"); }
+  }));
+}
+// lets everything queued so far run: ticks, promise jobs, and several turns of the loop
+const settle = (then) => { let turns = 6; const turn = () => (turns-- > 0 ? setImmediate(turn) : then()); turn(); };
+// ---- generated pipelines: source -> transforms -> sink, with generated sizes, modes, timing and failures
+for (let i = 0; i < 220; i++) {
+  const objectMode = rnd(4) === 0;
+  const count = rnd(9);
+  const items = Array.from({ length: count }, (_, k) => (objectMode ? { k } : \"c\" + k + \"x\".repeat(rnd(6))));
+  const rhwm = pick([undefined, 1, 4, 16]), whwm = pick([undefined, 1, 3, 20]);
+  const rlater = pick(laters), wlater = pick(laters), tlater = pick(laters);
+  const failAt = rnd(5) === 0 ? pick([\"read\", \"write\", \"transform\", \"destroy\"]) : \"none\";
+  const stages = rnd(3);
+  const useEncoding = !objectMode && rnd(4) === 0;
+  scenario(\"P \" + i + \" \" + [objectMode, count, rhwm, whwm, laters.indexOf(rlater), laters.indexOf(wlater), laters.indexOf(tlater), failAt, stages, useEncoding].join(\",\"), (log, finish) => {
+    let n = 0;
+    const source = new Readable({ objectMode, highWaterMark: rhwm, read() { rlater(() => { if (failAt === \"read\" && n === 2) return this.destroy(new Error(\"read failed\")); log(\"push\", this.push(n < items.length ? items[n++] : null)); }); } });
+    if (useEncoding) source.setEncoding(\"utf8\");
+    const transforms = Array.from({ length: stages }, (_, s) => new Transform({ objectMode, highWaterMark: pick([undefined, 2]), transform(chunk, enc, cb) { tlater(() => { if (failAt === \"transform\" && s === 0 && String(objectMode ? chunk.k : chunk).includes(\"1\")) return cb(new RangeError(\"transform failed\")); cb(null, objectMode ? { ...chunk, [\"t\" + s]: true } : String(chunk).toUpperCase() + s); }); }, flush(cb) { log(\"flush\" + s); cb(null, objectMode ? { flushed: s } : \"F\" + s); } }));
+    const seen = [];
+    const sink = new Writable({ objectMode, highWaterMark: whwm, decodeStrings: rnd(2) === 0, write(chunk, enc, cb) { wlater(() => { if (failAt === \"write\" && seen.length === 1) return cb(new TypeError(\"write failed\")); if (failAt === \"destroy\" && seen.length === 1) (count % 2 ? source : sink).destroy(new Error(\"destroyed\")); seen.push(objectMode ? JSON.stringify(chunk) : String(chunk)); cb(); }); }, final(cb) { log(\"final\"); wlater(cb); } });
+    for (const [name, s] of [[\"src\", source], [\"sink\", sink]]) for (const ev of [\"close\", \"end\", \"finish\", \"error\", \"drain\", \"pipe\", \"unpipe\"]) s.on(ev, (arg) => log(name + \".\" + ev, arg instanceof Error ? arg.message : arg === undefined || typeof arg === \"object\" ? \"\" : arg));
+    pipeline(source, ...transforms, sink, (err) => { log(\"done\", err ? err.name + \":\" + err.code + \":\" + err.message : \"ok\", seen.join(\"|\")); log(\"state\", source.destroyed, sink.destroyed, sink.writableFinished, source.readableEnded, sink.writableLength, source.readableLength); settle(() => finish(\"finished\")); });
+  });
+}
+// ---- generated paused-mode reads
+for (let i = 0; i < 80; i++) {
+  const text = \"\\u00e9\\u20ac\\ud83d\\ude00abc\".repeat(1 + rnd(3)) + \"end\";
+  const bytes = Buffer.from(text);
+  const enc = pick([undefined, \"utf8\", \"hex\", \"base64\", \"latin1\", \"utf16le\"]);
+  const sizes = Array.from({ length: 8 }, () => pick([undefined, 0, 1, 2, 3, 5, 50]));
+  const piece = 1 + rnd(5);
+  scenario(\"R \" + i + \" \" + [enc, piece, sizes.join(\"/\")].join(\",\"), (log, finish) => {
+    let at = 0;
+    const r = new Readable({ highWaterMark: pick([2, 8, 64]), read() { if (at >= bytes.length) return this.push(null); const c = bytes.subarray(at, at + piece); at += piece; this.push(c); } });
+    if (enc) r.setEncoding(enc);
+    let k = 0;
+    let activity = 0, ended = false;
+    // a read size that never takes the last bytes leaves the stream waiting for good
+    const watch = () => { const mine = ++activity; settle(() => settle(() => { if (mine === activity && !ended) finish(\"stalled\"); })); };
+    r.on(\"readable\", () => { let c; let guard = 0; while (guard++ < 50 && (c = r.read(sizes[k++ % sizes.length])) !== null) log(\"read\", typeof c === \"string\" ? Buffer.from(c).toString(\"hex\") : c, r.readableLength, r.readableFlowing); log(\"null\", r.readableLength); watch(); });
+    r.on(\"end\", () => { ended = true; log(\"end\", r.readableEnded, r.readable); finish(\"ended\"); });
+  });
+}
+// ---- generated writes with backpressure, cork and end
+for (let i = 0; i < 80; i++) {
+  const hwm = pick([1, 5, 16, undefined]);
+  const later = pick(laters);
+  const ops = Array.from({ length: 2 + rnd(8) }, () => pick([\"write\", \"write\", \"write\", \"cork\", \"uncork\", \"end\", \"writev?\", \"destroy\", \"setenc\"]));
+  const withWritev = rnd(3) === 0;
+  scenario(\"W \" + i + \" \" + [hwm, laters.indexOf(later), withWritev, ops.join(\"/\")].join(\",\"), (log, finish) => {
+    const options = { highWaterMark: hwm, write(chunk, enc, cb) { log(\"_write\", chunk, enc); later(cb); }, final(cb) { log(\"_final\"); later(cb); }, destroy(err, cb) { log(\"_destroy\", err ? err.message : null); cb(err); } };
+    if (withWritev) options.writev = (chunks, cb) => { log(\"_writev\", chunks.map((c) => c.chunk.toString()).join(\"+\")); later(cb); };
+    const w = new Writable(options);
+    for (const ev of [\"drain\", \"finish\", \"close\", \"error\"]) w.on(ev, (e) => log(\"on.\" + ev, e ? e.code + \":\" + e.message : \"\"));
+    let n = 0;
+    for (const op of ops) {
+      log(op, call(() => { switch (op) { case \"write\": return w.write(\"d\" + n++, pick([undefined, \"utf8\", \"hex\", \"latin1\"]), (err) => log(\"cb\", err ? err.code : \"ok\")); case \"cork\": return w.cork(); case \"uncork\": return w.uncork(); case \"end\": return w.end(rnd(2) ? \"last\" : undefined) === w; case \"destroy\": return w.destroy(rnd(2) ? new Error(\"bye\") : undefined) === w; case \"setenc\": return w.setDefaultEncoding(pick([\"hex\", \"utf8\", \"nope\"])) === w; default: return [w.writableLength, w.writableNeedDrain, w.writableCorked, w.writableEnded, w.writableFinished, w.writable, w.writableHighWaterMark, w.writableObjectMode]; } }));
+    }
+    settle(() => settle(() => { log(\"final state\", w.writableLength, w.writableEnded, w.writableFinished, w.destroyed, w.errored ? w.errored.message : null, w.closed); finish(\"observed\"); }));
+  });
+}
+// ---- api, one case each
+const t = (label, f) => lines.push(label + \" \" + call(f));
+t(\"keys\", () => Object.keys(stream).sort());
+t(\"identity\", () => [stream === stream.Stream, typeof stream, stream.promises === require(\"stream/promises\"), Object.keys(require(\"stream/consumers\")).sort(), stream.Readable.prototype instanceof stream.Stream, stream.Duplex.prototype instanceof stream.Readable, new stream.Duplex() instanceof stream.Writable, stream.Transform.prototype instanceof stream.Duplex, new stream.PassThrough() instanceof stream.Transform, stream.Stream.prototype instanceof require(\"events\")]);
+t(\"proto keys readable\", () => Object.getOwnPropertyNames(Readable.prototype).sort());
+t(\"proto keys writable\", () => Object.getOwnPropertyNames(Writable.prototype).sort());
+t(\"proto keys duplex\", () => Object.getOwnPropertyNames(Duplex.prototype).sort());
+t(\"static readable\", () => Object.getOwnPropertyNames(Readable).sort());
+t(\"defaults\", () => { const r = new Readable(), w = new Writable(), o = new Readable({ objectMode: true }); return [r.readableHighWaterMark, w.writableHighWaterMark, o.readableHighWaterMark, stream.getDefaultHighWaterMark(false), stream.getDefaultHighWaterMark(true), r.readableFlowing, r.readable, w.writable, r.readableEncoding, r.readableObjectMode, r.destroyed, r.closed, r.errored, r.readableAborted, r.readableDidRead]; });
+t(\"setDefaultHighWaterMark\", () => { const old = stream.getDefaultHighWaterMark(false); stream.setDefaultHighWaterMark(false, 1024); const now = [stream.getDefaultHighWaterMark(false), new Readable().readableHighWaterMark]; stream.setDefaultHighWaterMark(false, old); return now; });
+t(\"setDefaultHighWaterMark bad\", () => stream.setDefaultHighWaterMark(false, -1));
+t(\"bad hwm\", () => new Readable({ highWaterMark: -1 }));
+t(\"bad hwm type\", () => new Writable({ highWaterMark: \"x\" }));
+t(\"read not implemented\", () => { const r = new Readable(); let got; r.on(\"error\", (e) => (got = e.code)); r.read(); return got ?? \"later\"; });
+t(\"write not implemented\", () => { const w = new Writable(); let got; w.on(\"error\", (e) => (got = e.code)); w.write(\"x\"); return got ?? \"later\"; });
+t(\"write null\", () => new Writable({ write() {} }).write(null));
+t(\"write bad type\", () => new Writable({ write() {} }).write(5));
+t(\"write bad encoding\", () => new Writable({ write() {} }).write(\"x\", \"nope\"));
+t(\"push bad type\", () => { const r = new Readable({ read() {} }); let got; r.on(\"error\", (e) => (got = e.code)); r.push(5); return got ?? \"later\"; });
+t(\"unshift after end\", () => { const r = new Readable({ read() {} }); r.push(null); let got; r.on(\"error\", (e) => (got = e.code)); r.read(); r.unshift(\"x\"); return got ?? \"later\"; });
+t(\"setEncoding bad\", () => new Readable().setEncoding(\"nope\"));
+t(\"pipe to non-writable\", () => { const r = Readable.from([\"a\"]); return typeof r.pipe(new PassThrough()).on; });
+t(\"Readable.from kinds\", () => [Readable.from(\"str\").readableObjectMode, Readable.from(Buffer.from(\"b\")).readableObjectMode, Readable.from([1]).readableObjectMode, Readable.from(new Set([1])).readableHighWaterMark]);
+t(\"Readable.from bad\", () => Readable.from(5));
+t(\"isReadable etc\", () => { const r = new Readable({ read() {} }), w = new Writable({ write() {} }); const before = [stream.isReadable(r), stream.isWritable(w), stream.isErrored(r), stream.isDisturbed(r), stream.isDestroyed(r)]; r.destroy(new Error(\"x\")); r.on(\"error\", () => {}); return [before, stream.isReadable(r), stream.isErrored(r), stream.isDestroyed(r), stream.isReadable({}), stream.isDestroyed({})]; });
+t(\"_uint8ArrayToBuffer\", () => { const b = stream._uint8ArrayToBuffer(new Uint8Array([104, 105])); return [Buffer.isBuffer(b), b.toString(), stream._isUint8Array(b), stream._isArrayBufferView(new DataView(new ArrayBuffer(1)))]; });
+t(\"pipeline no streams\", () => pipeline());
+t(\"pipeline one stream\", () => pipeline(new PassThrough(), () => {}) instanceof PassThrough);
+t(\"pipeline bad callback\", () => pipeline(new PassThrough(), new PassThrough()));
+t(\"finished bad\", () => finished({}, () => {}));
+t(\"finished bad callback\", () => finished(new PassThrough()));
+t(\"addAbortSignal bad\", () => stream.addAbortSignal({}, new PassThrough()));
+t(\"addAbortSignal bad stream\", () => stream.addAbortSignal(new AbortController().signal, {}));
+t(\"duplexPair\", () => { const [a, b] = stream.duplexPair(); return [a instanceof Duplex, b instanceof Duplex, a !== b]; });
+t(\"compose bad\", () => stream.compose());
+t(\"destroy helper\", () => { const r = new Readable({ read() {} }); r.on(\"error\", () => {}); stream.destroy(r, new Error(\"x\")); return r.destroyed; });
+t(\"Symbol.asyncIterator\", () => typeof Readable.prototype[Symbol.asyncIterator]);
+t(\"Symbol.asyncDispose\", () => [typeof Readable.prototype[Symbol.asyncDispose], typeof Writable.prototype[Symbol.asyncDispose]]);
+t(\"inspect a stream\", () => { const s = require(\"util\").inspect(new PassThrough(), { depth: 0 }); return [s.startsWith(\"PassThrough {\"), s.includes(\"_readableState: [ReadableState]\"), s.includes(\"_writableState: [WritableState]\")]; });
+t(\"legacy Stream pipe\", () => { const s = new stream.Stream(); return [typeof s.pipe, s instanceof require(\"events\"), Object.keys(s).sort()]; });
+t(\"subclass old style\", () => { function Old(o) { Readable.call(this, o); } require(\"util\").inherits(Old, Readable); Old.prototype._read = function () { this.push(\"x\"); this.push(null); }; return new Old().read().toString(); });
+t(\"construct option names\", () => { const calls = []; const d = new Duplex({ read() { calls.push(\"read\"); this.push(null); }, write(c, e, cb) { calls.push(\"write\"); cb(); }, allowHalfOpen: false, readableObjectMode: true, writableHighWaterMark: 7 }); return [d.readableObjectMode, d.writableObjectMode, d.writableHighWaterMark, d.allowHalfOpen]; });
+// ---- behaviours that take time
+const sc = (label, run) => scenario(\"S \" + label, run);
+sc(\"flowing data events\", (log, finish) => { const r = Readable.from([\"a\", \"b\"]); r.on(\"data\", (c) => log(\"data\", c)); r.on(\"end\", () => finish(\"end\")); });
+sc(\"pause resume\", (log, finish) => { const r = Readable.from([1, 2, 3]); r.on(\"data\", (c) => { log(\"data\", c, r.isPaused()); r.pause(); log(\"paused\", r.isPaused(), r.readableFlowing); setTimeout(() => r.resume(), 1); }); r.on(\"end\", () => finish(\"end\")); });
+sc(\"async iterator break destroys\", (log, finish) => { (async () => { const r = Readable.from([1, 2, 3]); r.on(\"close\", () => log(\"close\")); for await (const c of r) { log(\"got\", c); break; } log(\"destroyed\", r.destroyed); settle(() => finish(\"ok\")); })(); });
+sc(\"iterator with destroyOnReturn false\", (log, finish) => { (async () => { const r = Readable.from([1, 2, 3]); for await (const c of r.iterator({ destroyOnReturn: false })) { log(\"got\", c); break; } log(\"destroyed\", r.destroyed); for await (const c of r) log(\"rest\", c); finish(\"ok\"); })(); });
+sc(\"operators\", (log, finish) => { (async () => { const src = () => Readable.from([1, 2, 3, 4, 5, 6]); log(\"map\", await src().map((x) => x * 2).toArray()); log(\"filter\", await src().filter((x) => x % 2).toArray()); log(\"take\", await src().take(2).toArray()); log(\"drop\", await src().drop(4).toArray()); log(\"flatMap\", await src().flatMap((x) => [x, x]).take(5).toArray()); log(\"reduce\", await src().reduce((a, b) => a + b, 0)); log(\"some\", await src().some((x) => x > 5)); log(\"every\", await src().every((x) => x > 5)); log(\"find\", await src().find((x) => x > 3)); const seen = []; await src().forEach((x) => seen.push(x)); log(\"forEach\", seen); log(\"async map concurrency\", await src().map(async (x) => x + 1, { concurrency: 2 }).toArray()); log(\"chained\", await src().filter((x) => x > 2).map((x) => \"v\" + x).take(2).toArray()); finish(\"ok\"); })().catch((e) => finish(\"failed \" + e.message)); });
+sc(\"operator errors\", (log, finish) => { (async () => { for (const f of [() => Readable.from([1]).map(5), () => Readable.from([1]).take(-1), () => Readable.from([1]).map((x) => x, { concurrency: 0 }), () => Readable.from([1]).reduce(5)]) { try { const r = f(); await (r && r.toArray ? r.toArray() : r); log(\"no error\"); } catch (e) { log(e.name, e.code); } } finish(\"ok\"); })(); });
+sc(\"operator abort\", (log, finish) => { (async () => { const c = new AbortController(); const p = Readable.from([1, 2, 3]).map(async (x, { signal }) => { await new Promise((r) => setTimeout(r, 5)); return x; }, { signal: c.signal }).toArray(); c.abort(); try { await p; log(\"no error\"); } catch (e) { log(e.name, e.code); } finish(\"ok\"); })(); });
+sc(\"finished on readable\", (log, finish) => { const r = Readable.from([\"a\"]); finished(r, (err) => { log(\"finished\", err); finish(\"ok\"); }); r.resume(); });
+sc(\"finished premature close\", (log, finish) => { const r = new Readable({ read() {} }); finished(r, (err) => { log(\"finished\", err); finish(\"ok\"); }); r.destroy(); });
+sc(\"finished cleanup fn\", (log, finish) => { const r = new Readable({ read() {} }); const cleanup = finished(r, () => log(\"should not run\")); log(typeof cleanup); cleanup(); r.destroy(); settle(() => finish(\"ok\")); });
+sc(\"finished promise with signal\", (log, finish) => { const c = new AbortController(); require(\"stream/promises\").finished(new Readable({ read() {} }), { signal: c.signal }).then(() => log(\"resolved\"), (e) => { log(e.name, e.code); finish(\"ok\"); }); c.abort(); });
+sc(\"promises pipeline error\", (log, finish) => { require(\"stream/promises\").pipeline(Readable.from([\"a\"]), new Transform({ transform(c, e, cb) { cb(new Error(\"mid\")); } }), new PassThrough()).then(() => log(\"resolved\"), (e) => { log(e.message); finish(\"ok\"); }); });
+sc(\"pipeline with generators\", (log, finish) => { pipeline(async function* () { yield \"a\"; yield \"b\"; }, async function* (source) { for await (const c of source) yield String(c).toUpperCase(); }, async function (source) { let s = \"\"; for await (const c of source) s += c; log(\"collected\", s); return s; }, (err, value) => { log(\"done\", err, value); finish(\"ok\"); }); });
+sc(\"pipeline with signal\", (log, finish) => { const c = new AbortController(); pipeline(new Readable({ read() {} }), new PassThrough(), { signal: c.signal }, (err) => { log(err.name, err.code); finish(\"ok\"); }); c.abort(); });
+sc(\"addAbortSignal\", (log, finish) => { const c = new AbortController(); const r = stream.addAbortSignal(c.signal, new Readable({ read() {} })); r.on(\"error\", (e) => { log(e.name, e.code); }); r.on(\"close\", () => finish(\"closed\")); c.abort(); });
+sc(\"compose\", (log, finish) => { const composed = stream.compose(new Transform({ transform(c, e, cb) { cb(null, String(c) + \"1\"); } }), async function* (source) { for await (const c of source) yield String(c) + \"2\"; }); const got = []; composed.on(\"data\", (c) => got.push(String(c))); composed.on(\"end\", () => { log(got); finish(\"ok\"); }); composed.write(\"a\"); composed.end(\"b\"); });
+sc(\"duplexPair talk\", (log, finish) => { const [a, b] = stream.duplexPair(); b.on(\"data\", (c) => { log(\"b got\", String(c)); b.write(\"pong\"); }); a.on(\"data\", (c) => { log(\"a got\", String(c)); finish(\"ok\"); }); a.write(\"ping\"); });
+sc(\"Duplex.from\", (log, finish) => { (async () => { log(await Duplex.from([\"x\", \"y\"]).toArray()); log(await Duplex.from(async function* () { yield 1; }).toArray()); log(await Duplex.from(Promise.resolve(\"p\")).toArray()); const d = Duplex.from({ readable: Readable.from([\"r\"]), writable: new Writable({ write(c, e, cb) { log(\"w\", String(c)); cb(); } }) }); d.write(\"in\"); log(await d.toArray()); try { Duplex.from(5); } catch (e) { log(e.code); } finish(\"ok\"); })().catch((e) => finish(\"failed \" + e.message)); });
+sc(\"transform errors\", (log, finish) => { const tr = new Transform({ transform(c, e, cb) { cb(); cb(); } }); tr.on(\"error\", (e) => { log(e.code); finish(\"ok\"); }); tr.write(\"x\"); });
+sc(\"transform without transform\", (log, finish) => { const tr = new Transform(); tr.on(\"error\", (e) => { log(e.code, e.message); finish(\"ok\"); }); tr.write(\"x\"); });
+sc(\"write after end\", (log, finish) => { const w = new Writable({ write(c, e, cb) { cb(); } }); w.on(\"error\", (e) => { log(\"event\", e.code); finish(\"ok\"); }); w.end(); w.write(\"late\", (e) => log(\"cb\", e.code)); });
+sc(\"end with callback and chunk\", (log, finish) => { const got = []; const w = new Writable({ write(c, e, cb) { got.push(String(c)); cb(); } }); w.end(\"only\", \"utf8\", () => { log(\"end cb\", got, w.writableFinished); finish(\"ok\"); }); });
+sc(\"push after eof\", (log, finish) => { const r = new Readable({ read() {} }); r.on(\"error\", (e) => { log(e.code); finish(\"ok\"); }); r.push(null); r.push(\"late\"); });
+sc(\"destroy twice and events\", (log, finish) => { const r = new Readable({ read() {} }); r.on(\"error\", (e) => log(\"error\", e.message)); r.on(\"close\", () => { log(\"close\", r.destroyed, r.errored.message); finish(\"ok\"); }); r.destroy(new Error(\"first\")); r.destroy(new Error(\"second\")); });
+sc(\"emitClose false\", (log, finish) => { const w = new Writable({ emitClose: false, write(c, e, cb) { cb(); } }); w.on(\"close\", () => log(\"close\")); w.on(\"finish\", () => { log(\"finish\"); settle(() => finish(\"ok\")); }); w.end(); });
+sc(\"autoDestroy false\", (log, finish) => { const r = new Readable({ autoDestroy: false, read() { this.push(null); } }); r.on(\"end\", () => setTimeout(() => { log(\"destroyed\", r.destroyed); finish(\"ok\"); }, 2)); r.resume(); });
+sc(\"construct hook\", (log, finish) => { const w = new Writable({ construct(cb) { log(\"construct\"); setTimeout(cb, 2); }, write(c, e, cb) { log(\"write\", String(c)); cb(); } }); w.write(\"early\"); w.end(() => finish(\"ok\")); });
+sc(\"construct fails\", (log, finish) => { const r = new Readable({ construct(cb) { cb(new Error(\"no\")); }, read() {} }); r.on(\"error\", (e) => { log(e.message); finish(\"ok\"); }); });
+sc(\"objectMode falsy values\", (log, finish) => { const r = new Readable({ objectMode: true, read() {} }); const got = []; r.on(\"data\", (c) => got.push(c)); r.on(\"end\", () => { log(got); finish(\"ok\"); }); r.push(0); r.push(\"\"); r.push(false); r.push(null); });
+sc(\"readable event and read sizes\", (log, finish) => { const r = new Readable({ read() {} }); r.push(\"abcdef\"); r.push(null); r.once(\"readable\", () => { log(String(r.read(2)), String(r.read(10)), String(r.read()), r.read()); finish(\"ok\"); }); });
+sc(\"unshift\", (log, finish) => { const r = Readable.from([\"bc\"], { objectMode: false }); r.once(\"readable\", () => { const c = r.read(); r.unshift(c); r.unshift(\"a\"); log(String(r.read())); finish(\"ok\"); }); });
+sc(\"wrap old stream\", (log, finish) => { const old = new (require(\"events\"))(); old.pause = () => log(\"old.pause\"); old.resume = () => log(\"old.resume\"); const r = new Readable().wrap(old); const got = []; r.on(\"data\", (c) => got.push(String(c))); r.on(\"end\", () => { log(got); finish(\"ok\"); }); old.emit(\"data\", \"a\"); old.emit(\"data\", \"b\"); old.emit(\"end\"); });
+sc(\"pipe unpipe events\", (log, finish) => { const r = new Readable({ read() {} }); const w = new PassThrough(); w.on(\"pipe\", (src) => log(\"pipe\", src === r)); w.on(\"unpipe\", (src) => log(\"unpipe\", src === r)); r.pipe(w); r.unpipe(w); r.pipe(w, { end: false }); r.push(\"x\"); r.push(null); r.on(\"end\", () => setTimeout(() => { log(\"writableEnded\", w.writableEnded); finish(\"ok\"); }, 2)); });
+sc(\"multiple pipes\", (log, finish) => { const r = Readable.from([\"a\", \"b\"], { objectMode: false }); const got = [[], []]; const mk = (i) => new Writable({ write(c, e, cb) { got[i].push(String(c)); cb(); } }); r.pipe(mk(0)); r.pipe(mk(1)).on(\"finish\", () => { log(got); finish(\"ok\"); }); });
+sc(\"consumers\", (log, finish) => { (async () => { const c = require(\"stream/consumers\"); log(await c.text(Readable.from([\"h\\u00e9\", \"llo\"]))); log(await c.json(Readable.from(['{\"a\":', \"1}\"]))); log(await c.buffer(Readable.from([Buffer.from(\"ab\"), Buffer.from(\"c\")]))); log(new Uint8Array(await c.arrayBuffer(Readable.from([Buffer.from(\"xy\")]))).join()); try { await c.json(Readable.from([\"{\"])); } catch (e) { log(e.name); } finish(\"ok\"); })().catch((e) => finish(\"failed \" + e.message)); });
+sc(\"events EventEmitter.on over a stream\", (log, finish) => { (async () => { const r = Readable.from([\"a\", \"b\"]); const got = []; for await (const [c] of require(\"events\").on(r, \"data\", { close: [\"end\"] })) got.push(c); log(got); finish(\"ok\"); })(); });
+sc(\"highWaterMark backpressure numbers\", (log, finish) => { const w = new Writable({ highWaterMark: 3, write(c, e, cb) { setTimeout(cb, 1); } }); log(w.write(\"a\"), w.write(\"b\"), w.write(\"c\"), w.writableLength, w.writableNeedDrain); w.on(\"drain\", () => { log(\"drain\", w.writableLength); finish(\"ok\"); }); });
+sc(\"decodeStrings false\", (log, finish) => { const w = new Writable({ decodeStrings: false, write(c, e, cb) { log(typeof c, e); cb(); } }); w.write(\"s\", \"latin1\"); w.write(Buffer.from(\"b\")); w.end(() => finish(\"ok\")); });
+sc(\"defaultEncoding\", (log, finish) => { const w = new Writable({ defaultEncoding: \"hex\", write(c, e, cb) { log(c, e); cb(); } }); w.write(\"6869\"); w.end(() => finish(\"ok\")); });
+sc(\"readable encoding option\", (log, finish) => { const r = new Readable({ encoding: \"hex\", read() { this.push(Buffer.from([1, 255])); this.push(null); } }); r.on(\"data\", (c) => log(c, r.readableEncoding)); r.on(\"end\", () => finish(\"ok\")); });
+sc(\"signal option\", (log, finish) => { const c = new AbortController(); const r = new Readable({ signal: c.signal, read() {} }); r.on(\"error\", (e) => { log(e.name); finish(\"ok\"); }); c.abort(); });
+sc(\"error in data handler order\", (log, finish) => { const r = Readable.from([1, 2]); r.on(\"data\", (c) => log(\"data\", c)); r.on(\"error\", (e) => log(\"error\", e.message)); r.on(\"close\", () => finish(\"close\")); r.destroy(new Error(\"stop\")); });
+(async () => {
+for (const start of pending) await start();
+const groups = new Map();
+for (const line of lines) {
+  const kind = line.startsWith(\"P \") ? \"pipelines generated\" : line.startsWith(\"R \") ? \"paused reads generated\" : line.startsWith(\"W \") ? \"writes generated\" : line.startsWith(\"S \") ? \"behaviours\" : line.split(\" \")[0];
+  const group = groups.get(kind) ?? { count: 0, hash: 2166136261 };
+  const bytes = new TextEncoder().encode(line);
+  let hash = group.hash;
+  for (let i = 0; i < bytes.length; i++) hash = Math.imul(hash ^ bytes[i], 16777619) >>> 0;
+  groups.set(kind, { count: group.count + 1, hash });
+}
+for (const [kind, group] of groups) globalThis.out.push(kind + \" \" + group.count + \" \" + group.hash);
+globalThis.out.push(\"finished\");
+})();
+
+"
+
+// 220 generated pipelines (sizes, object mode, encodings, when each callback
+// fires, where it fails), 80 generated paused reads, 80 generated runs of
+// write, cork, end and destroy, and about 90 api and behaviour cases, run one
+// at a time. Each line is a kind of case, how many, and a hash of the events
+// and state they logged in node 26.11.1
+pub fn streams_match_node_test() {
+  let rt = run_to_end(run_commonjs(node_runtime(), stream_script))
+  assert out_lines(rt)
+    == [
+      "keys 1 118087534",
+      "identity 1 3419998701",
+      "proto 3 1917534173",
+      "static 1 3252094429",
+      "defaults 1 388984814",
+      "setDefaultHighWaterMark 2 2237790337",
+      "bad 2 2591978027",
+      "read 1 2912733598",
+      "write 4 1152775990",
+      "push 1 3952561952",
+      "unshift 1 2839061847",
+      "setEncoding 1 1269605874",
+      "pipe 1 2514346320",
+      "Readable.from 2 2529752064",
+      "isReadable 1 1652705040",
+      "_uint8ArrayToBuffer 1 3170151865",
+      "pipeline 3 3718402949",
+      "finished 2 3836949470",
+      "addAbortSignal 2 2762018776",
+      "duplexPair 1 1048101853",
+      "compose 1 1932482287",
+      "destroy 1 1712805417",
+      "Symbol.asyncIterator 1 918519703",
+      "Symbol.asyncDispose 1 680708370",
+      "inspect 1 760238340",
+      "legacy 1 1615191197",
+      "subclass 1 637345559",
+      "construct 1 3561837470",
+      "pipelines generated 220 263944527",
+      "paused reads generated 80 226554210",
+      "writes generated 80 3350482710",
+      "behaviours 42 4067627832",
+      "finished",
+    ]
+}
+
+pub fn stream_modules_share_one_stream_test() {
+  let rt =
+    run_to_end(run_commonjs(
+      node_runtime(),
+      "const stream = require('stream');
+      const promises = require('stream/promises');
+      const consumers = require('stream/consumers');
+      out.push(String(stream.promises === promises));
+      consumers.text(stream.Readable.from(['a', 'b'])).then((text) => out.push(text));
+      consumers.blob(stream.Readable.from([])).catch((error) => out.push(error.code));",
+    ))
+  assert out_lines(rt) == ["true", "ERR_METHOD_NOT_IMPLEMENTED", "ab"]
 }

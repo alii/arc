@@ -28,6 +28,7 @@ import spark/perf_hooks
 import spark/platform.{type Platform}
 import spark/process.{type Process, Process}
 import spark/querystring
+import spark/stream
 import spark/string_decoder
 import spark/timers
 import spark/url
@@ -84,6 +85,9 @@ fn builtins(
     events.builtin(),
     string_decoder.builtin(),
     util.builtin(),
+    stream.builtin(),
+    stream.promises_builtin(),
+    stream.consumers_builtin(),
   ]
 }
 
